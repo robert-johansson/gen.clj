@@ -459,6 +459,31 @@
 
 (defn- guard-body [forms locals] (map #(guard-branches % locals) forms))
 
+(def ^:private lazy-fns
+  '#{clojure.core/map clojure.core/map-indexed clojure.core/mapcat clojure.core/keep
+     clojure.core/keep-indexed clojure.core/filter clojure.core/remove clojure.core/for})
+
+(defn- discarded-lazy-trace?
+  "Is form a lazy call (map, for, keep, …) whose trace or splice calls would
+   never run because its value is discarded?"
+  [form locals]
+  (and (seq? form)
+       (let [head (first form)]
+         (and (symbol? head) (not (contains? locals head))
+              (when-let [v (resolve head)] (lazy-fns (symbol v)))
+              (some #{'trace 'splice} (tree-seq coll? seq (rest form)))))))
+
+(defn- guard-statements
+  "A body's forms, guarded; every form but the last is a statement, whose
+   value is discarded, so a lazy call there with trace calls is an error."
+  [forms locals]
+  (doseq [f (butlast forms)]
+    (when (discarded-lazy-trace? f locals)
+      (throw (ex-info (str "In gen: " (pr-str (first f)) " here is lazy and its value is discarded,"
+                           " so its trace calls would never run. Use doseq, run! or mapv.")
+                      {:form f}))))
+  (guard-body forms locals))
+
 (defn- guard-bindings
   "[bindings' locals'] for a let*/loop* binding vector."
   [bindings locals]
@@ -472,7 +497,7 @@
         arities (if (vector? (first more)) [more] more)]
     (list* 'fn* (concat (when fname [fname])
                         (for [[params & body] arities]
-                          (list* params (guard-body body (into locals (remove #{'&} params)))))))))
+                          (list* params (guard-statements body (into locals (remove #{'&} params)))))))))
 
 (defn- guard-special [form locals]
   (case (first form)
@@ -483,7 +508,8 @@
                 (when (= 4 (count form)) [(guard-branches else locals)])))
     (let* loop*) (let [[op bindings & body] form
                        [bindings locals] (guard-bindings bindings locals)]
-                   (list* op bindings (guard-body body locals)))
+                   (list* op bindings (guard-statements body locals)))
+    do (list* 'do (guard-statements (rest form) locals))
     fn* (guard-fn form locals)
     letfn* (let [[_ bindings & body] form
                  locals (into locals (take-nth 2 bindings))]

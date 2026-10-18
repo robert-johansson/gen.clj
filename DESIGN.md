@@ -307,7 +307,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
 - **Bodies run to completion:** lazy sequences in a body's return value are
   realized during the run, and a `trace` or `splice` after the run is a loud
   error. Before this, `(map … (trace …))` at the end of a body gave a trace
-  without its choices, silently.
+  without its choices, silently. A lazy call with `trace` in a discarded
+  position (e.g. `(map …)` followed by more forms) is a compile error in `gen`.
 - **Arrays are values:** JVM arrays compare by dtype, shape and (bitwise)
   elements, so traces and choice maps holding them compare with `=`.
 - **Testing:** reference values come from scipy and JAX, generated once into

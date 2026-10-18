@@ -302,3 +302,15 @@
           m (gen [] (reset! escaped (map (fn [i] (trace [:x i] (d/normal 0 1))) (range 3))) nil)]
       (gfi/simulate m [] (rng/key 2))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"after the generative function returned" (doall @escaped))))))
+
+(deftest discarded-lazy-trace-calls-are-compile-errors
+  (let [compile-error (fn [form] (try (eval form) nil
+                                      (catch Throwable e (.getMessage ^Throwable (or (.getCause e) e)))))]
+    (is (re-find #"lazy and its value is discarded"
+                 (str (compile-error '(gen.dynamic/gen [xs] (map (fn [x] (trace [:y x] (gen.dist/normal x 1))) xs) nil)))))
+    (is (re-find #"lazy and its value is discarded"
+                 (str (compile-error '(gen.dynamic/gen [xs] (let [n 1] (for [x xs] (trace [:y x] (gen.dist/normal x n))) n))))))
+    (testing "mapv, a lazy tail value and lazy calls without trace are fine"
+      (is (nil? (compile-error '(gen.dynamic/gen [xs] (mapv (fn [x] (trace [:y x] (gen.dist/normal x 1))) xs) nil))))
+      (is (nil? (compile-error '(gen.dynamic/gen [xs] (map (fn [x] (trace [:y x] (gen.dist/normal x 1))) xs)))))
+      (is (nil? (compile-error '(gen.dynamic/gen [xs] (map inc xs) nil)))))))
