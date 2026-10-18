@@ -11,7 +11,9 @@
      which is what lets reshape share data."
   (:require [gen.array.dtype :as dt]
             [gen.array.protocols :as p]
-            [gen.array.shape :as sh]))
+            [gen.array.shape :as sh]
+            [gen.array.special :as special]
+            [gen.random.threefry :as threefry]))
 
 (set! *warn-on-reflection* true)
 (set! *unchecked-math* :warn-on-boxed)
@@ -111,6 +113,8 @@
 (defunary u-cos [x] (Math/cos x))
 (defunary u-tan [x] (Math/tan x))
 (defunary u-tanh [x] (Math/tanh x))
+(defunary u-erf [x] (special/erf x))
+(defunary u-erfinv [x] (special/erfinv x))
 (defunary u-floor [x] (Math/floor x))
 (defunary u-ceil [x] (Math/ceil x))
 (defunary u-round [x] (Math/rint x))
@@ -123,6 +127,7 @@
     :negative (u-negative a) :abs (u-abs a) :sign (u-sign a) :sqrt (u-sqrt a)
     :exp (u-exp a) :log (u-log a) :expm1 (u-expm1 a) :log1p (u-log1p a)
     :sin (u-sin a) :cos (u-cos a) :tan (u-tan a) :tanh (u-tanh a)
+    :erf (u-erf a) :erfinv (u-erfinv a)
     :floor (u-floor a) :ceil (u-ceil a) :round (u-round a)
     :isnan (u-isnan a) :isinf (u-isinf a) :logical-not (u-not a)))
 
@@ -516,6 +521,197 @@
           (dtype-of x))))
 
 ;; ---------------------------------------------------------------------------
+;; Linear algebra: per-matrix loops over the batch axes
+;; ---------------------------------------------------------------------------
+
+(defmacro ^:private fold-range
+  "Fold expr over k in [start, end) into the double acc (initially init),
+   returning a primitive double. The loop runs in statement position: Clojure
+   compiles a loop used as a value into a closure, which would box."
+  [[k start end] [acc init] expr]
+  `(let [cell# (double-array 1)]
+     (aset cell# 0 (double ~init))
+     (loop [~k (long ~start)]
+       (when (< ~k (long ~end))
+         (let [~acc (aget cell# 0)] (aset cell# 0 (double ~expr)))
+         (recur (inc ~k))))
+     (aget cell# 0)))
+
+(defn- check-square ^long [shape op]
+  (let [r (count shape)]
+    (when (or (< r 2) (not= (nth shape (- r 1)) (nth shape (- r 2))))
+      (throw (ex-info (str (name op) " needs square matrices, got shape " shape)
+                      {:op op :shape shape})))
+    (long (peek shape))))
+
+(defn- cholesky-into!
+  "Lower Cholesky factor of the n×n matrix at offset off of a into out (NaN
+   everywhere for a matrix that is not positive definite)."
+  [^doubles a ^doubles out ^long off ^long n]
+  (loop [j 0]
+    (when (< j n)
+      (let [rj (+ off (* j n))
+            s (fold-range [k 0 j] [s (aget a (+ rj j))] (- s (* (aget out (+ rj k)) (aget out (+ rj k)))))]
+        (if (not (> s 0.0))
+          (java.util.Arrays/fill out (int off) (int (+ off (* n n))) Double/NaN)
+          (let [d (Math/sqrt s)]
+            (aset out (+ rj j) d)
+            (loop [i (inc j)]
+              (when (< i n)
+                (let [ri (+ off (* i n))]
+                  (aset out (+ ri j)
+                        (/ (fold-range [k 0 j] [s (aget a (+ ri j))]
+                             (- s (* (aget out (+ ri k)) (aget out (+ rj k)))))
+                           d)))
+                (recur (inc i))))
+            (recur (inc j))))))))
+
+(defn- cholesky [x]
+  (let [shape (shape-of x)
+        n (check-square shape :cholesky)
+        ^doubles a (data-of x)
+        out (double-array (alength a))]
+    (dotimes [q (quot (alength a) (max 1 (* n n)))]
+      (cholesky-into! a out (* q n n) n))
+    (make out shape (dtype-of x))))
+
+(defn- batch-pairs
+  "Matrix batch layout for a [.. n n] against b [.. n k], broadcasting the
+   batch axes: [batch-shape a-offsets b-offsets] (offsets in matrices)."
+  [sa sb]
+  (let [ba (subvec sa 0 (- (count sa) 2))
+        bb (subvec sb 0 (- (count sb) 2))
+        batch (sh/broadcast ba bb)]
+    [batch (sh/broadcast-offsets ba batch) (sh/broadcast-offsets bb batch)]))
+
+(defn- solve-triangular [a b lower? transpose?]
+  (let [sa (shape-of a) sb (shape-of b)
+        n (check-square sa :solve-triangular)
+        k (long (peek sb))
+        _ (when-not (== n (long (nth sb (- (count sb) 2))))
+            (throw (ex-info "solve-triangular: matrix and right-hand side do not match"
+                            {:shapes [sa sb]})))
+        [batch ao bo] (batch-pairs sa sb)
+        ^longs ao ao ^longs bo bo
+        ^doubles ad (data-of a) ^doubles bd (data-of b)
+        nb (sh/size batch)
+        out (double-array (* nb n k))
+        tr? (boolean transpose?)
+        ;; solving L x = b (or Uᵀ x = b) runs forward; U x = b (or Lᵀ x = b) backward
+        forward? (not= (boolean lower?) tr?)]
+    (dotimes [q nb]
+      (let [aoff (* (aget ao q) n n) boff (* (aget bo q) n k) ooff (* q n k)]
+        (dotimes [c k]
+          (dotimes [t n]
+            (let [i (if forward? t (- n 1 t))
+                  s (fold-range [j (if forward? 0 (inc i)) (if forward? i n)]
+                                [s (aget bd (+ boff (* i k) c))]
+                      (- s (* (aget ad (+ aoff (if tr? (+ (* j n) i) (+ (* i n) j))))
+                              (aget out (+ ooff (* j k) c)))))]
+              (aset out (+ ooff (* i k) c) (/ s (aget ad (+ aoff (* i n) i)))))))))
+    (make out (into batch [n k]) (dtype-of a))))
+
+(defmacro ^:private at [i j] `(+ ~'off (* ~i ~'n) ~j))
+
+(defn- lu-into!
+  "LU-decompose (with partial pivoting) the n×n matrix at offset off of m, in
+   place. Fills perm with the row permutation; returns the permutation's sign."
+  ^double [^doubles m ^long off ^long n ^longs perm]
+  (do
+    (dotimes [i n] (aset perm i i))
+    (loop [col 0 sign 1.0]
+      (if (== col n)
+        sign
+        (let [p (long (fold-range [r (inc col) n] [best col]
+                        (if (> (Math/abs (aget m (at r col))) (Math/abs (aget m (at (long best) col)))) r best)))
+              sign (if (== p col)
+                     sign
+                     (do (dotimes [j n]
+                           (let [t (aget m (at col j))]
+                             (aset m (at col j) (aget m (at p j)))
+                             (aset m (at p j) t)))
+                         (let [t (aget perm col)] (aset perm col (aget perm p)) (aset perm p t))
+                         (- sign)))
+              pivot (aget m (at col col))]
+          (when-not (== pivot 0.0)
+            (loop [r (inc col)]
+              (when (< r n)
+                (let [f (/ (aget m (at r col)) pivot)]
+                  (aset m (at r col) f)
+                  (loop [j (inc col)]
+                    (when (< j n)
+                      (aset m (at r j) (- (aget m (at r j)) (* f (aget m (at col j)))))
+                      (recur (inc j)))))
+                (recur (inc r)))))
+          (recur (inc col) sign))))))
+
+(defn- solve [a b]
+  (let [sa (shape-of a) sb (shape-of b)
+        n (check-square sa :solve)
+        k (long (peek sb))
+        [batch ao bo] (batch-pairs sa sb)
+        ^longs ao ao ^longs bo bo
+        ^doubles ad (data-of a) ^doubles bd (data-of b)
+        nb (sh/size batch)
+        out (double-array (* nb n k))
+        lu (double-array (* n n))
+        perm (long-array n)]
+    (dotimes [q nb]
+      (System/arraycopy ad (* (aget ao q) n n) lu 0 (* n n))
+      (lu-into! lu 0 n perm)
+      (let [boff (* (aget bo q) n k) ooff (* q n k)]
+        (dotimes [c k]
+          ;; forward substitution with the unit lower factor, on the permuted rhs
+          (dotimes [i n]
+            (aset out (+ ooff (* i k) c)
+                  (fold-range [j 0 i] [s (aget bd (+ boff (* (aget perm i) k) c))]
+                    (- s (* (aget lu (+ (* i n) j)) (aget out (+ ooff (* j k) c)))))))
+          ;; back substitution with the upper factor
+          (dotimes [t n]
+            (let [i (- n 1 t)
+                  s (fold-range [j (inc i) n] [s (aget out (+ ooff (* i k) c))]
+                      (- s (* (aget lu (+ (* i n) j)) (aget out (+ ooff (* j k) c)))))]
+              (aset out (+ ooff (* i k) c) (/ s (aget lu (+ (* i n) i)))))))))
+    (make out (into batch [n k]) (dtype-of a))))
+
+(defn- slogdet [x]
+  (let [shape (shape-of x)
+        n (check-square shape :slogdet)
+        ^doubles a (data-of x)
+        nb (sh/size (subvec shape 0 (- (count shape) 2)))
+        signs (double-array nb)
+        logs (double-array nb)
+        lu (double-array (* n n))
+        perm (long-array n)]
+    (dotimes [q nb]
+      (System/arraycopy a (* q n n) lu 0 (* n n))
+      (loop [i 0 sign (lu-into! lu 0 n perm) acc 0.0]
+        (if (< i n)
+          (let [d (aget lu (+ (* i n) i))]
+            (recur (inc i) (* sign (Math/signum d)) (+ acc (Math/log (Math/abs d)))))
+          (let [singular? (== sign 0.0)]
+            (aset signs q (if singular? 0.0 sign))
+            (aset logs q (if singular? Double/NEGATIVE_INFINITY acc))))))
+    (let [batch (subvec shape 0 (- (count shape) 2))]
+      [(make signs batch (dtype-of x)) (make logs batch (dtype-of x))])))
+
+(defn- linalg [op args]
+  (case op
+    :cholesky (cholesky (nth args 0))
+    :solve-triangular (let [[a b {:keys [lower? transpose?]}] args]
+                        (solve-triangular a b lower? transpose?))
+    :solve (solve (nth args 0) (nth args 1))
+    :slogdet (slogdet (nth args 0))))
+
+(defn- random-uniform [key shape dtype]
+  (let [n (sh/size shape)
+        data (case dtype
+               :float64 (threefry/uniform-doubles key n)
+               :float32 (threefry/uniform-floats key n)
+               (throw (ex-info (str "random-uniform needs a float dtype, got " dtype) {:dtype dtype})))]
+    (make data shape dtype)))
+
+;; ---------------------------------------------------------------------------
 ;; Host boundary
 ;; ---------------------------------------------------------------------------
 
@@ -649,8 +845,8 @@
   (-take-along-axis [_ x indices axis] (take-along-axis x indices axis))
 
   (-matmul [_ x y] (matmul x y))
-  (-linalg [_ op _] (not-yet (str "linalg " op) "genclj-ai7h"))
-  (-random-uniform [_ _ _ _] (not-yet "random sampling" "genclj-ldpy"))
+  (-linalg [_ op args] (linalg op args))
+  (-random-uniform [_ key shape dtype] (random-uniform key shape dtype))
   (-value-and-grad [_ _ _ _] (not-yet "differentiation" "genclj-1d6z")))
 
 (def backend (JvmBackend.))

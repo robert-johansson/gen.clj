@@ -84,8 +84,11 @@
   ;; --- linear algebra --------------------------------------------------------
   (-matmul [b x y] "Matrix product with NumPy batching rules.")
   (-linalg [b op args]
-    "Decompositions and solves. op is one of :cholesky, :solve-triangular
-     (args [a rhs {:lower? bool}]), :solve, :inv, :slogdet.")
+    "Decompositions and solves over the last two axes, batched over the rest:
+       :cholesky [a]                 lower factor (NaN where a is not positive definite)
+       :solve-triangular [a rhs {:lower? :transpose?}]   rhs is [.. n k]
+       :solve [a rhs]                rhs is [.. n k]
+       :slogdet [a]                  returns [sign log|det|] (sign 0, -Inf if singular)")
 
   ;; --- randomness and differentiation ---------------------------------------
   (-random-uniform [b key shape dtype]

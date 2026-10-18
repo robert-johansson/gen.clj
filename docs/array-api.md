@@ -158,7 +158,7 @@ needs, taken from GenMLX's measured call counts
 | exp/log | `exp` `log` `expm1` `log1p` `sqrt` `square` `logaddexp` `xlogy` | `:exp :log :expm1 :log1p :sqrt` | `square`, `logaddexp`, `xlogy` |
 | trig | `sin` `cos` `tan` `tanh` `sigmoid` `softplus` | `:sin :cos :tan :tanh` | `sigmoid`, `softplus` |
 | rounding | `floor` `ceil` `round` `clip` | `:floor :ceil :round` | `clip` |
-| special | `erf` `erfinv` `lgamma` `digamma` `log-beta` | — | all (JVM may go native: bean genclj-bx37) |
+| special | `erf` `erfinv` `lgamma` `digamma` `log-beta` | `:erf :erfinv` (native in MLX; closed-form derivatives) | `lgamma`, `digamma`, `log-beta` |
 | predicates | `isnan` `isinf` `isfinite` | `:isnan :isinf` | `isfinite` |
 | comparison | `< <= > >= == !=` | `:less :less-equal :greater :greater-equal :equal :not-equal` | — |
 | logic | `logical-and` `logical-or` `logical-not` `where` | `:logical-and :logical-or :logical-not :where` | — |
@@ -190,6 +190,13 @@ needs, taken from GenMLX's measured call counts
 
 ## 7. Randomness (`gen.random`)
 
+- **The scheme is JAX's default ("partitionable") Threefry** (decided
+  2026-10-18), verified bit-for-bit against JAX 0.9.1 and Random123's
+  known-answer vectors:
+  - `split(k, n)[i] = threefry(k, [hi32(i) lo32(i)])` and `fold-in(k, d) = threefry(k, [0 d])`.
+  - Element i of any draw depends only on the key and i.
+  - MLX uses the older, non-partitionable layout, so the MLX backend will
+    implement this scheme itself; it is only uint32 arithmetic.
 - **Keys are backend-neutral values.**
   - A key is an immutable pair of uint32 words (a small deftype), not an array.
   - `rng/key`, `rng/split` and `(rng/split k n)` are pure Clojure Threefry2x32,

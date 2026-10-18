@@ -15,6 +15,7 @@
             [gen.array.dtype :as dt]
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]
+            [gen.array.special :as special]
             [gen.backend.jvm :as jvm]))
 
 (set! *warn-on-reflection* true)
@@ -165,6 +166,7 @@
                  :sqrt (Math/sqrt v) :exp (Math/exp v) :log (Math/log v)
                  :expm1 (Math/expm1 v) :log1p (Math/log1p v)
                  :sin (Math/sin v) :cos (Math/cos v) :tan (Math/tan v) :tanh (Math/tanh v)
+                 :erf (special/erf v) :erfinv (special/erfinv v)
                  :floor (Math/floor v) :ceil (Math/ceil v) :round (Math/rint v)
                  :isnan (Double/isNaN v) :isinf (Double/isInfinite v)))
       :int (let [v (dt/host-long x)]
@@ -257,6 +259,8 @@
 (defunary cos :cos "Elementwise cosine.")
 (defunary tan :tan "Elementwise tangent.")
 (defunary tanh :tanh "Elementwise hyperbolic tangent.")
+(defunary erf :erf "Elementwise error function.")
+(defunary erfinv :erfinv "Elementwise inverse error function (±Inf at ±1, NaN outside [-1, 1]).")
 (defunary floor :floor "Elementwise floor.")
 (defunary ceil :ceil "Elementwise ceiling.")
 (defunary round :round "Elementwise rounding to nearest, ties to even.")
@@ -335,6 +339,70 @@
   (cond-> x
     (some? lo) (maximum lo)
     (some? hi) (minimum hi)))
+
+;; --- special functions (composites: differentiable and identical everywhere) ---
+;; Both use the "double where" trick: the branch a `where` discards is computed
+;; on a safe stand-in input, so it never produces infinities that autodiff would
+;; turn into NaN gradients.
+
+(def ^:private lanczos-coefficients
+  "Lanczos approximation, g = 7, n = 9 (relative error ~1e-15 for x >= 0.5)."
+  [0.99999999999980993 676.5203681218851 -1259.1392167224028 771.32342877765313
+   -176.61502916214059 12.507343278686905 -0.13857109526572012
+   9.9843695780195716e-6 1.5056327351493116e-7])
+
+(def ^:private half-log-2pi 0.9189385332046728)
+
+(defn- lgamma-lanczos
+  "log Γ(z) for z >= 0.5."
+  [z]
+  (let [z (- z 1)
+        [c0 & cs] lanczos-coefficients
+        series (reduce + c0 (map-indexed (fn [i c] (/ c (+ z (inc i)))) cs))
+        t (+ z 7.5)]
+    (+ half-log-2pi (- (* (+ z 0.5) (log t)) t) (log series))))
+
+(defn lgamma
+  "Elementwise log |Γ(x)| (+Inf at the poles 0, -1, -2, …, as SciPy): Lanczos
+   for x >= 0.5, the reflection formula below."
+  [x]
+  (let [reflect? (< x 0.5)
+        lg (lgamma-lanczos (where reflect? (- 1 x) x))
+        xs (where reflect? x 0.25)
+        pole? (logical-and (<= x 0) (== x (floor x)))]
+    (where pole?
+           ##Inf
+           (where reflect?
+                  (- (Math/log Math/PI) (log (abs (sin (* Math/PI xs)))) lg)
+                  lg))))
+
+(defn digamma
+  "Elementwise digamma ψ(x) = d/dx log Γ(x): ten recurrence steps
+   ψ(x) = ψ(x+1) - 1/x, then the asymptotic series (to x^-12), with the
+   reflection formula for x < 0. As SciPy: -Inf at 0, NaN at negative integers."
+  [x]
+  (let [reflect? (< x 0)
+        z (where reflect? (- 1 x) x)
+        shift (reduce + (map #(/ (+ z %)) (range 10)))
+        w (+ z 10)
+        w2 (/ (square w))
+        series (* w2 (+ (/ 12.0)
+                        (* w2 (+ (/ -120.0)
+                                 (* w2 (+ (/ 252.0)
+                                          (* w2 (+ (/ -240.0)
+                                                   (* w2 (+ (/ 132.0)
+                                                            (* w2 (/ -691.0 32760.0))))))))))))
+        psi (- (log w) (/ 0.5 w) series shift)
+        xs (where reflect? x -0.25)
+        pole? (logical-and (< x 0) (== x (floor x)))]
+    (where pole?
+           ##NaN
+           (where reflect? (- psi (/ Math/PI (tan (* Math/PI xs)))) psi))))
+
+(defn log-beta
+  "Elementwise log B(a, b) = log Γ(a) + log Γ(b) - log Γ(a + b)."
+  [a b]
+  (- (+ (lgamma a) (lgamma b)) (lgamma (+ a b))))
 
 ;; ---------------------------------------------------------------------------
 ;; Creation and conversion
