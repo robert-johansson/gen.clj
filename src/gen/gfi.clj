@@ -4,8 +4,10 @@
    Every operation is a pure function of its arguments and an explicit PRNG
    key: the same key gives the same result. The public functions take the key
    as an optional last argument. Omitting it draws a key from the implicit key
-   source, the single impure point in gen.clj: a root key (seed 0 unless
-   seed! is called) folded with a call counter.
+   source, the single impure point in gen.clj: a root key folded with a call
+   counter. The root seed is random for each JVM (so separate processes are
+   independent); implicit-seed reads it back, and seed! fixes it, so any run can
+   be reproduced.
 
      (simulate gf args)                          → trace
      (generate gf args constraints)              → {:trace :weight}
@@ -41,13 +43,23 @@
 ;; The implicit key source
 ;; ---------------------------------------------------------------------------
 
-(defonce ^:private root-key (atom (rng/key 0)))
+(defonce ^:private implicit
+  (atom (let [seed (.nextLong (java.security.SecureRandom.))]
+          {:seed seed :key (rng/key seed)})))
+
 (defonce ^:private counter (java.util.concurrent.atomic.AtomicLong.))
 
+(defn implicit-seed
+  "The seed of the implicit key source: random for each JVM unless seed! set
+   it. Record it to reproduce a run."
+  []
+  (:seed @implicit))
+
 (defn seed!
-  "Reset the implicit key source: later calls without a key draw from seed."
+  "Reset the implicit key source to seed: later calls without a key repeat
+   exactly."
   [seed]
-  (reset! root-key (rng/key seed))
+  (reset! implicit {:seed (long seed) :key (rng/key seed)})
   (.set ^java.util.concurrent.atomic.AtomicLong counter 0)
   nil)
 
@@ -55,7 +67,7 @@
   "A fresh key from the implicit key source (deterministic given the seed and
    the order of calls)."
   []
-  (rng/fold-in @root-key (.getAndIncrement ^java.util.concurrent.atomic.AtomicLong counter)))
+  (rng/fold-in (:key @implicit) (.getAndIncrement ^java.util.concurrent.atomic.AtomicLong counter)))
 
 ;; ---------------------------------------------------------------------------
 ;; Operations

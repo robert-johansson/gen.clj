@@ -225,5 +225,16 @@
          (ex-data (try (dyn/run branching :simulate [] {:key (rng/key 1) :batch-shape [4]})
                        (catch clojure.lang.ExceptionInfo e e)))))))
 
+(deftest the-implicit-key-source
+  (let [model (gen [] (trace :x (d/normal 0 1)))
+        before (gfi/implicit-seed)]
+    (gfi/seed! 123)
+    (let [a [(model) (model)]]
+      (gfi/seed! 123)
+      (is (= a [(model) (model)]) "seed! makes calls without a key repeat exactly")
+      (is (not= (first a) (second a)) "successive calls draw fresh keys")
+      (is (= 123 (gfi/implicit-seed))))
+    (gfi/seed! before)))
+
 (deftest untraced-calls
   (is (number? (linreg [1.0 2.0])) "calling a generative function runs it, like Gen.jl"))
