@@ -15,6 +15,11 @@ Clojure on the JVM. In order:
    the *same* Clojure code.
 3. **M3 — local LLMs as generative functions** (what mlx-node gives GenMLX today).
 4. **M4 — Gen.jl parity.** The long-term bar: gen.clj is exactly as capable as Gen.jl.
+   Its exit criterion includes **complete GFI law coverage**: every law the
+   Cusumano-Towner thesis states for the features gen.clj has is a test
+   (decided with the owner 2026-10-18). Each milestone tests the laws of the
+   features it builds; a coverage matrix in `docs/research/genjl-parity.md` §3
+   tracks every law.
 
 Only the beautiful core is ported first. Everything else in GenMLX that *could*
 be ported is tracked as a deferred bean with a note on how to port it cleanly
