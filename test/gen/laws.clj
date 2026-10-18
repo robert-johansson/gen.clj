@@ -27,9 +27,11 @@
 (defn close? [x y] (a/allclose? x y {:rtol 1e-12 :atol 1e-12}))
 
 (defn cases
-  "Cases [[label gf args alt-args] seed picks alt?] over models."
+  "Cases [[label gf args alt-args] seed picks alt?] over models: a vector of
+   model entries, or a generator of them (e.g. random models)."
   [models]
-  (gen/tuple (gen/elements models) gen/nat (gen/vector gen/boolean 8) gen/boolean))
+  (gen/tuple (if (gen/generator? models) models (gen/elements models))
+             gen/nat (gen/vector gen/boolean 8) gen/boolean))
 
 ;; ---------------------------------------------------------------------------
 ;; Helpers
@@ -52,6 +54,8 @@
   (if (and alt? (seq alt)) (nth alt (mod seed (count alt))) args))
 
 (defn- unknown-diffs [args] (vec (repeat (count args) diff/unknown-change)))
+
+(defn- in-support? [tr] (a/truthy? (a/all (a/isfinite (:score tr)))))
 
 (defn- consistent?
   "Trace consistency (Def 2.1.16): the score is the assessed density of the
@@ -201,7 +205,9 @@
             fresh-lp (lp t2 (remove #(or (was %) (constrained %)) (addrs t2)))
             {w3 :weight} (gfi/update t2 (:args tr) (unknown-diffs (:args tr)) disc (rng/key seed))]
         (and (close? w (a/- (a/- (:score t2) (:score tr)) fresh-lp))
-             (close? (a/+ w w3) (a/negate fresh-lp))))
+             ;; the reverse weight is defined only inside the support (Def
+             ;; 4.1.1): a move to density 0 has w = -Inf and no finite reverse
+             (or (not (in-support? t2)) (close? (a/+ w w3) (a/negate fresh-lp)))))
       true)))
 
 (defn regenerate-weight-is-the-retained-density-ratio [cases]
