@@ -20,8 +20,13 @@
      (project trace selection)                   → weight
 
    update and regenerate without arguments keep the trace's own arguments,
-   with no-change argdiffs. Weights follow Gen.jl and the Cusumano-Towner
-   thesis (docs/research/genjl-parity.md §3)."
+   with no-change argdiffs; with arguments they take one argdiff per
+   argument. Weights follow Gen.jl and the Cusumano-Towner thesis
+   (docs/research/genjl-parity.md §3).
+
+   A trace is called on an address or path for its choice there, like
+   Gen.jl's trace[addr]: (tr :slope), (tr [:y 0]); :choices, :retval, :score
+   and :args are its fields."
   (:refer-clojure :exclude [update])
   (:require [gen.array.batch :as batch]
             [gen.diff :as diff]
@@ -109,6 +114,13 @@
   ([gf args constraints] (generate gf args constraints (next-key)))
   ([gf args constraints key] (-generate gf (vec args) constraints key)))
 
+(defn check-argdiffs
+  "One argdiff per argument: a missing one would silently mean no-change."
+  [op args argdiffs]
+  (when-not (= (count args) (count argdiffs))
+    (throw (ex-info (str (name op) ": " (count args) " arguments but " (count argdiffs) " argdiffs")
+                    {:args (count args) :argdiffs (count argdiffs)}))))
+
 (defn update
   "The trace with new arguments and constrained choices. Returns the new trace,
    the log weight, the retdiff, and the discarded choices (overwritten or no
@@ -119,6 +131,7 @@
      (update trace args (diff/no-changes (count args)) constraints key)))
   ([trace args argdiffs constraints] (update trace args argdiffs constraints (next-key)))
   ([trace args argdiffs constraints key]
+   (check-argdiffs :update args argdiffs)
    (-update (:gen-fn trace) trace (vec args) (vec argdiffs) constraints key)))
 
 (defn regenerate
@@ -130,6 +143,7 @@
      (regenerate trace args (diff/no-changes (count args)) selection key)))
   ([trace args argdiffs selection] (regenerate trace args argdiffs selection (next-key)))
   ([trace args argdiffs selection key]
+   (check-argdiffs :regenerate args argdiffs)
    (-regenerate (:gen-fn trace) trace (vec args) (vec argdiffs) selection key)))
 
 (defn assess

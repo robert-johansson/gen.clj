@@ -333,3 +333,60 @@
           taken (b/take ps [3 3 1])]
       (is (= (mapv (vec (b/traces ps)) [3 3 1]) (b/traces taken)))
       (is (every? #(close? (:score %) (:weight (gfi/assess linreg [[1.0 2.0]] (:choices %)))) (b/traces taken))))))
+
+;; ---------------------------------------------------------------------------
+;; Spot checks against the scalar handler
+;; ---------------------------------------------------------------------------
+
+(defn- drift
+  "A raw if on an array comparison, in a helper outside gen: under the
+   tracer the comparison is a batch, which is truthy, so every particle would
+   take the first branch."
+  [x]
+  (if (a/> x 0) 1.0 -1.0))
+
+(def hidden-branch (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (drift x) 1)))))
+
+(defn- scores-exact?
+  "Are the collection's scores (batched ones as the batched run made them)
+   the assessed densities of its particles' choices?"
+  [gf args ps]
+  (every? true? (map #(close? %1 (:weight (gfi/assess gf args (:choices %2)))) (a/->clj (b/scores ps)) (b/traces ps))))
+
+(deftest spot-checks-catch-what-the-tracer-cannot-see
+  (testing "simulate and generate fall back, and say why"
+    (let [ps (b/simulate hidden-branch [] 50 (rng/key 50))
+          {gs :particles} (b/generate hidden-branch [] (cm/choicemap :y 0.5) 50 (rng/key 51))]
+      (is (not (b/batched? ps)))
+      (is (not (b/batched? gs)))
+      (is (re-find #"disagrees with the scalar handler" (:message (b/fallback-reason ps))))
+      (is (scores-exact? hidden-branch [] ps))))
+  (testing "without spot checks the hole shows: the documented limit"
+    (binding [b/*spot-checks* 0]
+      (let [ps (b/simulate hidden-branch [] 50 (rng/key 50))]
+        (is (b/batched? ps))
+        (is (not (scores-exact? hidden-branch [] ps))))))
+  (testing "batched importance sampling then reaches the scalar answer"
+    (let [obs (cm/choicemap :y 0.5)
+          exact (Math/log (+ (* 0.5 (Math/exp (dc/log-prob (d/normal 1 1) 0.5)))
+                             (* 0.5 (Math/exp (dc/log-prob (d/normal -1 1) 0.5)))))
+          {:keys [log-ml-estimate]} (imp/importance-sampling hidden-branch [] obs 4000 {:batched? true :key (rng/key 52)})]
+      (is (< (Math/abs (- log-ml-estimate exact)) 0.05))))
+  (testing "a branch that first runs in an update is caught there"
+    (let [m (gen [t] (let [x (trace :x (d/normal 0 1))]
+                       (when (pos? t) (trace :y (d/normal (drift x) 1)))
+                       x))
+          ps (b/simulate m [0] 20 (rng/key 53))
+          obs (cm/choicemap :y 0.5)
+          {ps' :particles ws :weights} (b/update ps [1] [diff/unknown-change] obs (rng/key 54))]
+      (is (b/batched? ps))
+      (is (not (b/batched? ps')))
+      (is (every? true? (map (fn [tr w] (close? w (:weight (gfi/update tr [1] [diff/unknown-change] obs (rng/key 0)))))
+                             (b/traces ps) (a/->clj ws))))))
+  (testing "a batched-branch fallback records the error's data"
+    (is (:gen.array/batched-branch (:data (b/fallback-reason (b/simulate branching [] 8 (rng/key 55)))))))
+  (testing "well-behaved models stay batched, also when every particle is checked"
+    (binding [b/*spot-checks* :all]
+      (let [ps (b/simulate linreg [[1.0 2.0]] 16 (rng/key 56))]
+        (is (b/batched? ps))
+        (is (nil? (b/fallback-reason ps)))))))

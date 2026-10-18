@@ -308,8 +308,12 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   particles differently (branches, host predicates, host math) fails batched
   and falls back to one scalar trace per particle. The limits are raw
   `if`/`case` in helper functions outside `gen`, and vector lookups with
-  batched keys (docs/array-api.md §8a). Measured: 9–41× faster importance sampling
-  on the JVM backend (100–10,000 particles; docs/benchmarks.md).
+  batched keys (docs/array-api.md §8a). Spot checks cover them (added
+  2026-10-19 after the acceptance test). A few particles of each batched
+  simulate and generate, and of the first updates, are re-run through the
+  scalar handler, the ground truth; a mismatch falls back (§8b). Measured:
+  9–41× faster importance sampling on the JVM backend (100–10,000 particles;
+  docs/benchmarks.md).
 - **Bodies run to completion:** lazy sequences in a body's return value are
   realized during the run, and a `trace` or `splice` after the run is a loud
   error. Before this, `(map … (trace …))` at the end of a body gave a trace

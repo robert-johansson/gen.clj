@@ -41,6 +41,18 @@ at a time (both paths after the fixes below):
 
 At 10,000 particles a particle costs about 0.43 µs.
 
+**Spot checks** (2026-10-19) re-run 8 particles of each batched run through
+the scalar handler (`gen.batched/*spot-checks*`). On linreg with 20
+observations, after 50 warm-up runs and averaged over 100:
+
+| particles | one at a time | batched, no checks | batched, checked | speedup (checked) |
+|---|---|---|---|---|
+| 100 | 5.10 ms | 0.57 ms | 0.83 ms | 6.1× |
+| 1,000 | 33.0 ms | 0.47 ms | 0.79 ms | 41.8× |
+| 10,000 | 338 ms | 3.13 ms | 3.50 ms | 96.6× |
+
+The checks cost a fixed 0.3 ms or so: it matters only for small collections.
+
 ## Fixed
 
 - `choicemap?` and `generative-function?` used `satisfies?`. It is slow when

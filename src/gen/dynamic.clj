@@ -82,6 +82,7 @@
   [state dist c]
   (let [v (cm/get-value c)
         expected (dc/value-shape dist)]
+    (dc/check-not-nan (:mode state) v)
     ;; a value of another shape would be scored as several draws, silently
     (when (and expected (not= expected (a/shape v)))
       (throw (ex-info (str (name (:mode state)) ": the value at this site has shape " (a/shape v)

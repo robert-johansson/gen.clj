@@ -48,7 +48,11 @@
 (defn choicemap
   "A choice map from address-value pairs. An address may be a path vector;
    a value that is a plain map becomes a nested choice map.
-   (choicemap :slope 2.0 [:y 0] 1.5 :params {:a 1 :b 2})"
+   (choicemap :slope 2.0 [:y 0] 1.5 :params {:a 1 :b 2})
+
+   A value that is a Clojure vector is a product value (one value of a
+   product distribution, one element per factor). An array-valued choice,
+   such as an mvnormal's, is given as an array: (gen.array/array [0.0 1.0])."
   [& kvs]
   (when (odd? (count kvs))
     (throw (ex-info "choicemap takes address-value pairs (use from-map for a single map)"

@@ -10,6 +10,7 @@
    shape broadcast against batch-shape. [] is one draw; [N] is one draw per
    particle. log-prob broadcasts the same way."
   (:require [gen.array :as a]
+            [gen.array.dtype :as dt]
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]
             [gen.choicemap :as cm]
@@ -65,6 +66,13 @@
                            expected)
                       {:value-shape (a/shape v) :expected expected :distribution (:type d)})))))
 
+(defn check-not-nan
+  "Throw if v, a given value, has a NaN element: it would make every weight
+   NaN rather than fail. (Read only when concrete.)"
+  [op v]
+  (when (and (a/array? v) (a/concrete? v) (= :float (dt/kind (a/dtype v))) (a/any-true? (a/isnan v)))
+    (throw (ex-info (str (name op) ": a constrained value is NaN") {:op op :value v}))))
+
 (defn- total
   "A log-prob summed to a scalar (a distribution's trace has one choice)."
   [lp]
@@ -96,17 +104,31 @@
     (throw (ex-info (str dist-name ": " message) (assoc data :distribution dist-name)))))
 
 (defn check-positive
-  "Host parameters must be positive. (Array parameters are not checked: on a
-   lazy backend reading them would force evaluation.)"
+  "Parameters must be positive: host values, and the elements of concrete
+   arrays (every particle of a batched one). Arrays on a lazy backend are not
+   read, since that would force evaluation."
   [dist-name param-name v]
-  (when (a/host? v)
-    (check (pos? (double v)) dist-name (str param-name " must be positive, got " v) {:param param-name :value v})))
+  (cond (a/host? v)
+        (check (pos? (double v)) dist-name (str param-name " must be positive, got " v) {:param param-name :value v})
+        (and (some? v) (a/concrete? v))
+        (check (a/all-true? (a/> v 0)) dist-name (str param-name " must be positive") {:param param-name})))
 
 (defn check-probability
+  "Parameters must be probabilities in [0, 1], as check-positive."
   [dist-name param-name v]
+  (cond (a/host? v)
+        (check (<= 0.0 (double v) 1.0) dist-name (str param-name " must be in [0, 1], got " v)
+               {:param param-name :value v})
+        (and (some? v) (a/concrete? v))
+        (check (a/all-true? (a/logical-and (a/>= v 0) (a/<= v 1))) dist-name (str param-name " must be in [0, 1]")
+               {:param param-name})))
+
+(defn check-integer
+  "Host parameters that count (trials, bounds) must be integers, at least min."
+  [dist-name param-name v min]
   (when (a/host? v)
-    (check (<= 0.0 (double v) 1.0) dist-name (str param-name " must be in [0, 1], got " v)
-           {:param param-name :value v})))
+    (check (and (== v (Math/rint (double v))) (>= (double v) (double min))) dist-name
+           (str param-name " must be an integer of at least " min ", got " v) {:param param-name :value v})))
 
 (defn check-probabilities
   "Concrete probability vectors (the last axis) must be non-negative and sum to
@@ -205,7 +227,7 @@
   (-generate [d _ constraints key]
     (check-leaf-constraint :generate constraints)
     (if (cm/has-value? constraints)
-      (let [v (doto (cm/get-value constraints) (->> (check-value-shape d)))
+      (let [v (doto (cm/get-value constraints) (->> (check-not-nan :generate)) (->> (check-value-shape d)))
             lp (total (log-prob d v))]
         {:trace (dist-trace d v lp) :weight lp})
       {:trace (simulate* d key) :weight 0.0}))
@@ -213,7 +235,7 @@
   (-update [d tr _ _ constraints _]
     (check-leaf-constraint :update constraints)
     (if (cm/has-value? constraints)
-      (let [v (doto (cm/get-value constraints) (->> (check-value-shape d)))
+      (let [v (doto (cm/get-value constraints) (->> (check-not-nan :update)) (->> (check-value-shape d)))
             lp (total (log-prob d v))]
         {:trace (dist-trace d v lp) :weight (a/- lp (:score tr))
          :retdiff diff/unknown-change :discard (:choices tr)})
@@ -234,6 +256,7 @@
     (when-not (cm/has-value? choices)
       (throw (ex-info "assess: a distribution needs its value" {:type type})))
     (let [v (cm/get-value choices)]
+      (check-not-nan :assess v)
       (check-value-shape d v)
       {:weight (total (log-prob d v)) :retval v}))
 

@@ -14,9 +14,10 @@
    leaves out are sampled by the model's internal proposal, whose weight
    generate accounts for. q must not propose an observed address.
 
-   With {:batched? true} (and the internal proposal), the n samples run as
-   one batched execution (gen.batched), and the result holds :particles, a
-   particle collection, in place of :traces.
+   With {:batched? true}, the n samples run as one batched execution
+   (gen.batched), and the result holds :particles, a particle collection, in
+   place of :traces; (traces result) gives the scalar traces either way. A
+   custom proposal runs one sample at a time, ignoring :batched?.
 
    The options map also takes :key; omitting it draws one from the implicit
    key source."
@@ -36,6 +37,11 @@
   (if proposal
     (let [[k-propose k-generate] (rng/split key)
           {:keys [choices weight]} (gfi/propose proposal (vec proposal-args) k-propose)
+          overlap (filter (set (cm/addresses observations)) (cm/addresses choices))
+          _ (when (seq overlap)
+              (throw (ex-info (str "The proposal's choices overlap the observations at " (vec overlap)
+                                   ": a proposal must leave the observations alone")
+                              {:addresses (vec overlap)})))
           result (gfi/generate model args (cm/merge observations choices) k-generate)]
       (update result :weight - weight))
     (gfi/generate model args observations key)))
@@ -47,19 +53,22 @@
   ([model args observations n] (importance-sampling model args observations n {}))
   ([model args observations n opts]
    (let [key (or (:key opts) (gfi/next-key))]
-     (if (:batched? opts)
-       (do (when (:proposal opts)
-             (throw (ex-info "Batched importance sampling uses the internal proposal" {})))
-           (let [{ps :particles ws :weights} (batched/generate model args observations n key)
-                 log-weights (a/->clj ws)]
-             {:particles ps
-              :log-normalized-weights (:log-weights (w/normalize log-weights))
-              :log-ml-estimate (w/log-mean-exp log-weights)}))
+     (if (and (:batched? opts) (not (:proposal opts)))
+       (let [{ps :particles ws :weights} (batched/generate model args observations n key)
+             log-weights (a/->clj ws)]
+         {:particles ps
+          :log-normalized-weights (:log-weights (w/normalize log-weights))
+          :log-ml-estimate (w/log-mean-exp log-weights)})
        (let [results (mapv #(weighted-sample model args observations opts %) (rng/split key n))
              log-weights (mapv :weight results)]
          {:traces (mapv :trace results)
           :log-normalized-weights (:log-weights (w/normalize log-weights))
           :log-ml-estimate (w/log-mean-exp log-weights)})))))
+
+(defn traces
+  "The scalar traces of an importance-sampling result, batched or not."
+  [result]
+  (if-let [ps (:particles result)] (batched/traces ps) (:traces result)))
 
 (defn importance-resampling
   "One trace drawn in proportion to the weights of n importance samples

@@ -49,6 +49,7 @@ Next come an MLX backend for the GPU (M2), local LLMs as generative functions
                 (mcmc/hmc (sel/select :slope) {:L 5 :eps 0.05} k2) :trace)))
         (:trace (gfi/generate line [xs] ys (rng/key 2)))
         (rng/split (rng/key 3) 500))
+;; → a trace; (tr :slope) is its choice at :slope, (tr [:y 0]) at a path
 ```
 
 ## What is there

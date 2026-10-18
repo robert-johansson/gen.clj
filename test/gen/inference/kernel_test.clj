@@ -50,7 +50,15 @@
     (is (= {:traces [5 8 11 14] :acceptance-rate nil}
            (k/run count-up 0 {:samples 4 :burn 2 :thin 3 :key (rng/key 1)})))
     (is (= {:traces [] :acceptance-rate nil} (k/run count-up 0 {:samples 0})))
-    (is (thrown? clojure.lang.ExceptionInfo (k/run count-up 0 {:samples 3 :thin 0})))))
+    (is (thrown? clojure.lang.ExceptionInfo (k/run count-up 0 {:samples 3 :thin 0}))))
+  (testing "combinators report their moves' accept decisions, and run counts every move"
+    (let [accept (fn [t _] {:trace t :accepted? true})
+          reject (fn [t _] {:trace t :accepted? false})]
+      (is (= [true false false] (:accepted ((k/chain accept reject reject) 0 (rng/key 2)))))
+      (is (= [true false true false] (:accepted ((k/cycle 4 [accept reject]) 0 (rng/key 2)))))
+      (is (= [true false true false] (:accepted ((k/repeat 2 (k/chain accept reject)) 0 (rng/key 2)))) "nested")
+      (is (nil? (:accepted ((k/chain accept (fn [t _] {:trace t})) 0 (rng/key 2)))) "unless a move reports none")
+      (is (= 0.25 (:acceptance-rate (k/run (k/chain accept reject reject reject) 0 {:samples 5 :key (rng/key 3)})))))))
 
 (def model
   (gen []

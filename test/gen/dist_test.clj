@@ -5,6 +5,7 @@
             [gen.choicemap :as cm]
             [gen.dist :as d]
             [gen.dist.core :as dc]
+            [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
             [gen.random :as rng]
             [gen.selection :as sel]))
@@ -45,7 +46,17 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"categorical-logits"
                           (d/categorical [-1.2 -0.4 -2.0])))
     (is (thrown? clojure.lang.ExceptionInfo (d/categorical [0.5 0.6])))
-    (is (some? (d/categorical-logits [-1.2 -0.4 -2.0])))))
+    (is (some? (d/categorical-logits [-1.2 -0.4 -2.0]))))
+  (testing "array parameters are validated too"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"std must be positive" (d/normal 0 [1.0 -1.0])))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"in \[0, 1\]" (d/bernoulli [0.5 1.5])))
+    (is (some? (d/normal [0 0] [1.0 2.0]))))
+  (testing "counts and integer bounds must be integers"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"n must be an integer" (d/binom 2.5 0.3)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"n must be an integer" (d/binom -1 0.3)))
+    (is (some? (d/binom 3.0 0.3)) "an integral float counts")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"low must be an integer" (d/uniform-discrete 0.5 3)))
+    (is (some? (d/uniform-discrete -2 3)))))
 
 (deftest supports
   (is (= [false true] (dc/support (d/bernoulli 0.3))))
@@ -171,5 +182,5 @@
 (deftest user-distributions-without-a-value-shape-are-not-rejected
   ;; third review B13: the default value shape (the parameters' broadcast
   ;; shape, [3] here) rejected the valid constraint 1
-  (let [m (gen.dynamic/gen [] (trace :k (softmax-categorical [0.0 1.0 2.0])))]
+  (let [m (gen [] (trace :k (softmax-categorical [0.0 1.0 2.0])))]
     (is (map? (gfi/generate m [] (cm/choicemap :k 1) (rng/key 1))))))

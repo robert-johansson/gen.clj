@@ -127,3 +127,17 @@
         state' (pf/step state [2 0.0] [diff/unknown-change diff/no-change] (observation 1) {:key (rng/key 21)})]
     (is (every? true? (map (fn [w w' tr] (< (Math/abs (- (- w' w) (gfi/project tr (sel/select [1 :y])))) 1e-12))
                            (:log-weights state) (:log-weights state') (:traces state'))))))
+
+(deftest a-custom-proposal-in-a-batched-filter-runs-per-particle
+  (let [state (pf/initialize model [1 0.0] (observation 0) 30 {:batched? true :key (rng/key 30)})
+        state' (pf/step state [2 0.0] [diff/unknown-change diff/no-change] (observation 1)
+                        {:proposal optimal-proposal :proposal-args [1 (ys 1)] :key (rng/key 31)})]
+    (is (contains? state :particles))
+    (is (not (contains? state' :particles)) "the batched state became per-particle traces")
+    (is (= 30 (count (pf/traces state'))))
+    (is (every? #(= (ys 1) (% [1 :y])) (pf/traces state')))
+    (is (every? #(Double/isFinite %) (pf/log-weights state')))
+    (testing "and initialize with a proposal ignores :batched?"
+      (is (contains? (pf/initialize model [1 0.0] (observation 0) 5
+                                    {:batched? true :proposal initial-proposal :proposal-args [(ys 0)] :key (rng/key 32)})
+                     :traces)))))

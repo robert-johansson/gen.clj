@@ -333,25 +333,29 @@
 
 (defn truthy?
   "The Clojure truthiness of x, for branching, the same on every backend:
-   a boolean (host or a one-element bool array) by its value, any number
-   (host or a one-element numeric array) true, as in Clojure, and any other
-   value by Clojure's rules. An array with more than one element throws
-   ex-info with :gen.array/batched-branch true: one branch cannot serve every
-   particle of a batch, so batched code must use `where` (or a switch
-   combinator) instead."
+   a boolean (host or a one-element bool array) by its value; any number,
+   and any numeric array, true, as in Clojure; a bool array of several
+   elements is ambiguous (an error: use all, any or where); any other value
+   by Clojure's rules. A batched bool (gen.array.batch) throws ex-info with
+   :gen.array/batched-branch true: one branch cannot serve every particle,
+   so batched code must use `where` (or a switch combinator) instead."
   [x]
   (cond (instance? Boolean x) (.booleanValue ^Boolean x)
         (host? x) true
+        (instance? gen.array.protocols.IBatchedValue x)
+        ;; a batch: numbers are truthy in every particle; booleans may differ
+        (if (= :bool (p/-dtype (p/-backend x) x))
+          (throw (ex-info "Cannot branch on a batched value: it differs across particles"
+                          {::batched-branch true}))
+          true)
         (backend-array? x)
         (let [b (p/-backend x)
               s (p/-shape b x)]
-          (if (== 1 (sh/size s))
-            (if (= :bool (p/-dtype b x))
-              (dt/truthy? (loop [v (p/-to-host b x)] (if (sequential? v) (recur (first v)) v)))
-              true)
-            (throw (ex-info (str "Cannot branch on an array of shape " s
-                                 ": use gen.array/where (or a switch combinator) for batched values")
-                            {::batched-branch true :shape s}))))
+          (cond (not= :bool (p/-dtype b x)) true
+                (== 1 (sh/size s)) (dt/truthy? (loop [v (p/-to-host b x)] (if (sequential? v) (recur (first v)) v)))
+                :else (throw (ex-info (str "The truth value of a bool array of shape " s
+                                           " is ambiguous: use gen.array/all, any or where")
+                                      {:shape s}))))
         :else (boolean x)))
 
 ;; --- composites -----------------------------------------------------------------

@@ -205,9 +205,9 @@
   (is (false? (a/truthy? false)))
   (is (true? (a/truthy? (a/array [[true]]))))
   (is (false? (a/truthy? nil)))
-  (is (= {:gen.array/batched-branch true :shape [2]}
-         (thrown-data #(a/truthy? (a/array [true false]))))
-      "branching on a batch throws a recognizable error"))
+  (is (true? (a/truthy? (a/array [0.0 0.0]))) "a numeric array is truthy, as any Clojure value")
+  (is (= {:shape [2]} (thrown-data #(a/truthy? (a/array [true false]))))
+      "a bool array of several elements is ambiguous: an error, not a batch"))
 
 (deftest comparison-helpers
   (is (a/equal? (a/array [1 2]) (a/array [1.0 2.0])))

@@ -251,7 +251,9 @@
 (defdist uniform-discrete
   "uniform_discrete(low, high): an integer uniform on low..high inclusive."
   [low high]
-  (validate (when (and (a/host? low) (a/host? high))
+  (validate (dc/check-integer "uniform-discrete" "low" low Long/MIN_VALUE)
+            (dc/check-integer "uniform-discrete" "high" high Long/MIN_VALUE)
+            (when (and (a/host? low) (a/host? high))
               (dc/check (<= low high) "uniform-discrete" "low must not exceed high" {:low low :high high})))
   (sample [key shape] (rng/randint key low (+ high 1) (dc/elementwise-shape shape low high) (opts low high)))
   (log-prob [v]
@@ -362,7 +364,8 @@
 (defdist binom
   "binom(n, p): the number of successes in n trials with success probability p."
   [n p]
-  (validate (dc/check-probability "binom" "p" p))
+  (validate (dc/check-probability "binom" "p" p)
+            (dc/check-integer "binom" "n" n 0))
   (sample [key shape] (binomial-sample key n p (dc/elementwise-shape shape n p)))
   (log-prob [v]
     (guard (logical-and (logical-and (>= v 0) (<= v n)) (integral? v))

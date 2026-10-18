@@ -15,6 +15,10 @@
      (mix [k1 k2] [w1 w2]) one of the kernels, chosen with probability ∝ w
      (checked k observations)  k, then check that it left the observations alone
 
+   A combinator's result reports the accept decisions of the MH moves it
+   made, in order, as :accepted (a vector of booleans) when they all report
+   one.
+
    (run kernel trace opts) runs a chain and collects samples."
   (:refer-clojure :exclude [repeat cycle reversible?])
   (:require [gen.array :as a]
@@ -63,11 +67,21 @@
             (when (every? reversible? ks)
               (combine (mapv (comp step-fn reversal) (reverse-order ks))))))
 
+(defn- accepted-moves
+  "The accept decisions a kernel result reports: one for an MH step, a
+   combinator's sequence, or nil when it reports none."
+  [r]
+  (cond (contains? r :accepted) (:accepted r)
+        (contains? r :accepted?) [(:accepted? r)]))
+
 (defn- sequence-fn [fs]
   (fn [trace key]
-    {:trace (reduce (fn [t [f k]] (:trace (f t k)))
-                    trace
-                    (map vector fs (rng/split key (count fs))))}))
+    (let [[t moves] (reduce (fn [[t moves] [f k]]
+                              (let [r (f t k)]
+                                [(:trace r) (when moves (some->> (accepted-moves r) (into moves)))]))
+                            [trace []]
+                            (map vector fs (rng/split key (count fs))))]
+      (cond-> {:trace t} moves (assoc :accepted moves)))))
 
 (defn chain
   "The kernels applied in sequence."
@@ -141,22 +155,25 @@
 (defn run
   "Apply the kernel repeatedly from trace and collect samples. opts:
    :samples (required), :burn (steps discarded first, 0), :thin (steps per
-   sample, 1), :key. Returns {:traces [...] :acceptance-rate r}, the rate
-   over every step, or nil when the kernel does not report :accepted?."
+   sample, 1), :key. Returns {:traces [...] :acceptance-rate r}: the rate
+   over every MH move of every step (a combinator's steps make several), or
+   nil when the kernel does not report its accept decisions."
   [kernel trace {:keys [samples burn thin key] :or {burn 0 thin 1}}]
   (when-not (and (nat-int? samples) (nat-int? burn) (pos-int? thin))
     (throw (ex-info "run needs :samples ≥ 0, :burn ≥ 0 and :thin ≥ 1" {:samples samples :burn burn :thin thin})))
   (let [f (step-fn kernel)
         steps (+ burn (* samples thin))
         keys (if (pos? steps) (rng/split (or key (gfi/next-key)) steps) [])]
-    (loop [i 0 t trace traces (transient []) accepted 0 reported? true]
+    (loop [i 0 t trace traces (transient []) accepted 0 moves 0 reported? true]
       (if (< i steps)
         (let [r (f t (keys i))
               i' (inc i)
               t' (:trace r)
-              keep? (and (> i' burn) (zero? (mod (- i' burn) thin)))]
+              keep? (and (> i' burn) (zero? (mod (- i' burn) thin)))
+              ms (accepted-moves r)]
           (recur i' t' (if keep? (conj! traces t') traces)
-                 (if (:accepted? r) (inc accepted) accepted)
-                 (and reported? (contains? r :accepted?))))
+                 (+ accepted (count (filter true? ms)))
+                 (+ moves (count ms))
+                 (and reported? (some? ms))))
         {:traces (persistent! traces)
-         :acceptance-rate (when (and reported? (pos? steps)) (/ (double accepted) steps))}))))
+         :acceptance-rate (when (and reported? (pos? moves)) (/ (double accepted) moves))}))))

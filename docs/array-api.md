@@ -285,6 +285,13 @@ Two layers make this safe:
      `case` on an array is not guarded: branch with `a/truthy?` there. (`=`,
      `not=` and `condp =` reach a batched value anywhere, through `=`;
      vector `get`/`contains?` with a batched key cannot be intercepted.)
+     Batched runs are spot-checked against the scalar handler for this
+     (§8b), so such code falls back rather than giving wrong answers.
+   - A bool array of several elements, unbatched, is ambiguous (as in NumPy):
+     `truthy?` throws, without the batched-branch flag, and names `all`,
+     `any` and `where`. A numeric array is true, as any Clojure value.
+     *Revised 2026-10-19 after the acceptance test:* it raised the
+     batched-branch error, a leftover of shape-based batching.
 
 ## 8b. Batching by tracing (vmap semantics)
 
@@ -314,7 +321,20 @@ batched (`gfi/run-op` with `:batch-shape`). Every generative function
 therefore has a batched form. It has the same meaning for code inside `gen`
 bodies that works through gen.array. The limits are a raw `if` or `case` in
 a helper function outside `gen`, and a vector lookup with a batched key
-(§8a). Any batched run that fails falls back to one particle at a time.
+(§8a). Any batched run that fails falls back to one particle at a time,
+and `gen.batched/fallback-reason` says why.
+
+**Spot checks** (*added 2026-10-19 after the acceptance test*) cover those
+limits. After a batched simulate or generate, and the first two updates or
+regenerates of a collection (`*verified-updates*`), 8 evenly spaced
+particles (`*spot-checks*`: a number, `:all` or 0) are re-run through the
+scalar handler from their choices. A score or array return value that
+differs from the batched one is an error, and the run falls back. A helper's
+raw `if` on a batched comparison is truthy for every particle, so particles
+on the other branch score differently and the check finds them. The cost is
+a few scalar runs per batched run. Later updates are not checked, since each
+check costs a whole particle's run: for a particle filter that grows with
+the step. The code they run is the code already verified.
 *Hardened 2026-10-19 after a third review* (docs/research/review-2026-10-19.md):
 - `=` reaches the batch in either order;
 - validation reads every particle;
@@ -399,4 +419,9 @@ How to read these numbers:
    values with the wrapped backend's arrays runs on the tape.
 9. **Batching by tracing (vmap semantics)**, §8b (agent, for the owner's
    review), replacing shape-based batching.
-10. **`truthy?` follows Clojure for numbers** (any number is true), §8a.
+10. **`truthy?` follows Clojure for numbers** (any number is true), §8a. A
+    bool array of several elements is ambiguous, an error (2026-10-19).
+11. **Batched runs are spot-checked against the scalar handler** (§8b;
+    2026-10-19, agent, for the owner's review): a few scalar runs per batched
+    run, so the tracer's documented blind spots fall back rather than give
+    wrong answers.

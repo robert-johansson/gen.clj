@@ -204,7 +204,24 @@
         "a constraint of another shape is not scored as several draws")
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"nested choices"
                           (gfi/generate (gen [] (splice :x (d/normal 0 1))) [] (cm/choicemap [:x :y] 3.0) k))
-        "constraints under a spliced distribution are not ignored")))
+        "constraints under a spliced distribution are not ignored")
+    (testing "a NaN observation is an error, not a NaN weight"
+      (let [m (gen [] (trace :y (d/normal 0 1)))
+            nan (cm/choicemap :y ##NaN)]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"generate: a constrained value is NaN" (gfi/generate m [] nan k)))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"update: a constrained value is NaN"
+                              (gfi/update (gfi/simulate m [] k) nan k)))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"is NaN" (gfi/assess m [] nan)))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"is NaN"
+                              (gfi/generate (gen [] (trace :v (d/mvnormal [0 0] (a/eye 2)))) []
+                                            (cm/choicemap :v (a/array [0.0 ##NaN])) k)))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"is NaN" (gfi/generate (d/normal 0 1) [] (cm/->Value ##NaN) k)))))
+    (testing "update and regenerate take one argdiff per argument"
+      (let [tr (gfi/simulate linreg [[1.0]] k)]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"1 arguments but 0 argdiffs"
+                              (gfi/update tr [[2.0]] [] cm/EMPTY k)))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"1 arguments but 2 argdiffs"
+                              (gfi/regenerate tr [[2.0]] [diff/unknown-change diff/unknown-change] (sel/select :slope) k)))))))
 
 (deftest conditionals-branch-on-values
   (let [model (gen [c] (if c (trace :a (d/normal 0 1)) (trace :b (d/normal 0 1))))]

@@ -8,11 +8,18 @@
    When the code cannot treat the particles alike (it branches on a value
    that differs across them, compares or reads one on the host, or does host
    math on it), the batched run fails and the collection falls back to one
-   scalar trace per particle, which gives the scalar semantics. Batching is an
-   optimization. It does not change meaning for code inside gen bodies that
-   works through gen.array. The limits are a raw if or case on a batched
-   value in a helper function outside gen, which no macro guards, and a
-   vector get or contains? with a batched key (docs/array-api.md §8a).
+   scalar trace per particle, which gives the scalar semantics; fallback-reason
+   says why. Batching is an optimization. It does not change meaning for code
+   inside gen bodies that works through gen.array.
+
+   What the tracer cannot see is a raw if or case on a batched value in a
+   helper function outside gen, which no macro guards, and a vector get or
+   contains? with a batched key (docs/array-api.md §8a): these pick one
+   branch for every particle. Spot checks catch them. After a batched
+   simulate or generate, and the first updates or regenerates of a
+   collection, *spot-checks* evenly spaced particles are re-run through the
+   scalar handler (the ground truth) from their choices, and a different
+   score or array return value means the fallback.
 
      (simulate gf args n key)                    → particles
      (generate gf args constraints n key)        → {:particles :weights}
@@ -47,15 +54,42 @@
 
 (defn size [ps] (:n ps))
 
+(def ^:dynamic *spot-checks*
+  "How many evenly spaced particles of a batched run are verified against
+   the scalar handler: a number (8), :all, or 0 for none."
+  8)
+
+(def ^:dynamic *verified-updates*
+  "How many updates or regenerates of a collection are spot-checked (2).
+   Each check re-runs whole particles, which for a growing trace (a particle
+   filter) costs the trace's size, so later steps are not checked: the code
+   they run is the code already verified."
+  2)
+
+(defn fallback-reason
+  "Why ps fell back to per-particle traces: {:message :data} of the failure
+   of the batched run, or nil."
+  [ps]
+  (:fallback-reason ps))
+
+(defn- fallen-back
+  "The fallback result r (particles, or a map holding them) marked with the
+   failure e of the batched run."
+  [r ^Exception e]
+  (let [reason {:message (.getMessage e) :data (ex-data e)}]
+    (if (particles? r)
+      (assoc r :fallback-reason reason)
+      (clojure.core/update r :particles assoc :fallback-reason reason))))
+
 (defmacro ^:private batched-or
   "batched, or fallback if the batched run fails. The usual cause is code
    that cannot treat the particles alike (the batched-branch error, host
-   math or a host collection lookup on a batched value); whatever the cause,
-   the per-particle run gives the scalar semantics, and a genuine error
-   surfaces there."
+   math or a host collection lookup on a batched value, a failed spot
+   check); whatever the cause, the per-particle run gives the scalar
+   semantics, and a genuine error surfaces there."
   [batched fallback]
   `(try ~batched
-        (catch Exception _# ~fallback)))
+        (catch Exception e# (fallen-back ~fallback e#))))
 
 (defn- run [gf op args n opts] (gfi/run-op gf op args (assoc opts :batch-shape [n])))
 
@@ -90,6 +124,52 @@
 (defn- unbatched [ps] (if (batched? ps) (per-particle ps (traces ps)) ps))
 
 ;; ---------------------------------------------------------------------------
+;; Spot checks against the scalar handler
+;; ---------------------------------------------------------------------------
+
+(defn- particle-value
+  "Particle i's value of x (a shared value is every particle's)."
+  [x i]
+  (if (batch/batched? x) (a/take (batch/value x) i 0) x))
+
+(defn- spot-indices [n]
+  (let [m *spot-checks*]
+    (cond (= :all m) (range n)
+          (>= m n) (range n)
+          :else (map #(quot (* % n) m) (range m)))))
+
+(defn- same-value?
+  "Do a scalar run's value x and a batched run's particle value y agree?
+   Only arrays are compared."
+  [x y]
+  (or (not (a/array? x))
+      (and (a/array? y)
+           (= (a/shape x) (a/shape y))
+           (a/allclose? (a/astype x :float64) (a/astype y :float64) {:rtol 1e-8 :atol 1e-8 :equal-nan? true}))))
+
+(defn- spot-check!
+  "Throw unless the batched trace t of gf on args agrees with the scalar
+   handler re-run on each spot-checked particle's choices."
+  [gf args n t]
+  (doseq [i (spot-indices n)]
+    (let [{st :trace} (gfi/generate gf args (map-leaves #(particle-value % i) (:choices t)) (rng/key 0))
+          score (particle-value (:score t) i)
+          retval (particle-value (:retval t) i)]
+      (when-not (and (same-value? (:score st) score) (same-value? (:retval st) retval))
+        (throw (ex-info (str "The batched run disagrees with the scalar handler at particle " i
+                             ": the code branches on a batched value where the tracer cannot see it")
+                        {:particle i :scalar-score (:score st) :batched-score score})))))
+  t)
+
+(defn- spot-check-update!
+  "spot-check! for the first *verified-updates* updates of ps; the result
+   counts them."
+  [ps args t]
+  (let [k (:updates ps 0)]
+    (when (< k *verified-updates*) (spot-check! (:gen-fn ps) args (:n ps) t))
+    (assoc ps :trace t :args (vec args) :updates (inc k))))
+
+;; ---------------------------------------------------------------------------
 ;; GFI operations
 ;; ---------------------------------------------------------------------------
 
@@ -98,7 +178,7 @@
   [gf args n key]
   (let [ps (->Particles n gf (vec args) nil nil)]
     (batched-or
-     (assoc ps :trace (:trace (run gf :simulate args n {:key key})))
+     (assoc ps :trace (spot-check! gf args n (:trace (run gf :simulate args n {:key key}))))
      (per-particle ps (mapv #(gfi/simulate gf args %) (rng/split key n))))))
 
 (defn generate
@@ -107,13 +187,14 @@
   (let [ps (->Particles n gf (vec args) nil nil)]
     (batched-or
      (let [{t :trace w :weight} (run gf :generate args n {:key key :constraints constraints})]
-       {:particles (assoc ps :trace t) :weights (plain w n)})
+       {:particles (assoc ps :trace (spot-check! gf args n t)) :weights (plain w n)})
      (let [rs (mapv #(gfi/generate gf args constraints %) (rng/split key n))]
        {:particles (per-particle ps (map :trace rs)) :weights (stack-weights (map :weight rs) n)}))))
 
 (defn update
   "Every particle updated to args with the shared constraints."
   [ps args argdiffs constraints key]
+  (gfi/check-argdiffs :update args argdiffs)
   (let [{:keys [n gen-fn]} ps
         fallback (fn [ps]
                    (let [rs (mapv #(gfi/update %1 args argdiffs constraints %2) (traces ps) (rng/split key n))]
@@ -124,7 +205,7 @@
       (batched-or
        (let [{t :trace w :weight d :discard}
              (run gen-fn :update args n {:prev (:trace ps) :argdiffs argdiffs :constraints constraints :key key})]
-         {:particles (assoc ps :trace t :args (vec args))
+         {:particles (spot-check-update! ps args t)
           :weights (plain w n)
           :discards (if (cm/empty? d) (vec (repeat n cm/EMPTY)) (cm/unstack (plain-choices d n) n))})
        (fallback (unbatched ps)))
@@ -133,6 +214,7 @@
 (defn regenerate
   "Every particle with the selection regenerated, at args."
   [ps args argdiffs selection key]
+  (gfi/check-argdiffs :regenerate args argdiffs)
   (let [{:keys [n gen-fn]} ps
         fallback (fn [ps]
                    (let [rs (mapv #(gfi/regenerate %1 args argdiffs selection %2) (traces ps) (rng/split key n))]
@@ -142,7 +224,7 @@
       (batched-or
        (let [{t :trace w :weight}
              (run gen-fn :regenerate args n {:prev (:trace ps) :argdiffs argdiffs :selection selection :key key})]
-         {:particles (assoc ps :trace t :args (vec args)) :weights (plain w n)})
+         {:particles (spot-check-update! ps args t) :weights (plain w n)})
        (fallback (unbatched ps)))
       (fallback ps))))
 

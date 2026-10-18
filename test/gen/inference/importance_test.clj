@@ -69,10 +69,22 @@
     (is (= (imp/importance-sampling model [] observations 5 {:key (rng/key 5)})
            (imp/importance-sampling model [] observations 5 {:key (rng/key 5)}))))
   (testing "a proposal may not propose an observed address"
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"overlap"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"overlap the observations at \[\[:y\]\]"
                           (imp/importance-sampling model [] observations 3
                                                   {:proposal (gen [] (trace :y (d/normal 0 1)))
-                                                   :proposal-args []})))))
+                                                   :proposal-args []}))
+        "and the error names the address")))
+
+(deftest traces-of-either-mode
+  (let [proposal (gen [] (trace :x (d/normal 0 2)))]
+    (doseq [opts [{} {:batched? true} {:batched? true :proposal proposal :proposal-args []}]]
+      (let [result (imp/importance-sampling model [] observations 6 (assoc opts :key (rng/key 7)))
+            trs (imp/traces result)]
+        (is (= 6 (count trs)) (str opts))
+        (is (every? #(= y (% :y)) trs) (str opts))))
+    (testing "a custom proposal runs one sample at a time, even when batched? is asked for"
+      (is (contains? (imp/importance-sampling model [] observations 3 {:batched? true :proposal proposal :proposal-args []})
+                     :traces)))))
 
 ;; ---------------------------------------------------------------------------
 ;; A proposal for only some of the latents (Alg 14, p. 147)
