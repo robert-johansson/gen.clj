@@ -98,7 +98,7 @@
        (let [[t _] (move-to trace proto (+ v (* step g)) (rng/key 0))]
          (cond (>= (double (a/item (:score t))) score) t
                (< step (double min-step-size)) trace
-               :else (recur (* step (double tau)))))))))
+               :else (recur (clojure.core/* step (double tau)))))))))
 
 (defn elliptical-slice
   "Elliptical slice sampling (Murray, Adams and MacKay 2010) of the choice at

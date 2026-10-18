@@ -1,0 +1,102 @@
+# gen.clj
+
+Probabilistic programming in Clojure on the JVM: a port of GenMLX
+(ClojureScript on MLX), shaped by [Gen.jl](https://www.gen.dev) and Marco
+Cusumano-Towner's 2020 thesis.
+
+Models are generative functions written as Clojure code. Inference uses the
+Generative Function Interface (GFI): `simulate`, `generate`, `update`,
+`regenerate`, `assess`, `propose` and `project`, each a pure function of its
+arguments and an explicit random key.
+
+**Status: M1 is complete.** The core runs on the JVM, CPU-only, with
+nothing but a JDK: a pure-Clojure array backend with reverse-mode autodiff.
+Next come an MLX backend for the GPU (M2), local LLMs as generative functions
+(M3), and Gen.jl parity (M4). See `DESIGN.md`.
+
+## A model and two kinds of inference
+
+```clojure
+(require '[gen.dynamic :refer [gen]]
+         '[gen.dist :as d]
+         '[gen.array :as a]
+         '[gen.choicemap :as cm]
+         '[gen.selection :as sel]
+         '[gen.gfi :as gfi]
+         '[gen.inference.importance :as is]
+         '[gen.inference.mh :as mh]
+         '[gen.inference.mcmc :as mcmc]
+         '[gen.random :as rng])
+
+(def line
+  (gen [xs]
+    (let [slope (trace :slope (d/normal 0 2))
+          intercept (trace :intercept (d/normal 0 2))]
+      (doseq [[i x] (map-indexed vector xs)]
+        (trace [:y i] (d/normal (a/+ (a/* slope x) intercept) 0.5)))
+      slope)))
+
+(def xs [-2.0 -1.0 0.0 1.0 2.0])
+(def ys (cm/choicemap [:y 0] -3.1 [:y 1] -1.0 [:y 2] 0.9 [:y 3] 3.2 [:y 4] 4.8))
+
+;; importance sampling, the 10,000 particles run as one batched execution
+(:log-ml-estimate (is/importance-sampling line [xs] ys 10000 {:batched? true :key (rng/key 1)}))
+
+;; MCMC: MH on the intercept, HMC on the slope
+(reduce (fn [tr k]
+          (let [[k1 k2] (rng/split k)]
+            (-> tr (mh/mh (sel/select :intercept) k1) :trace
+                (mcmc/hmc (sel/select :slope) {:L 5 :eps 0.05} k2) :trace)))
+        (:trace (gfi/generate line [xs] ys (rng/key 2)))
+        (rng/split (rng/key 3) 500))
+```
+
+## What is there
+
+- **Arrays** (`gen.array`). One backend-neutral API. Clojure numbers are 0-d
+  arrays, and the operators are meant to be referred.
+  - Broadcasting, reductions, indexing and linear algebra.
+  - Special functions that match scipy to about 1e-15.
+  - Reverse-mode autodiff (`a/grad`, `a/value-and-grad`).
+  - Splittable Threefry keys, bit-identical to JAX.
+- **The modeling language** (`gen.dynamic`). `gen` with `trace`, addressed
+  and shared-namespace `splice`, trainable `param`s, and conditionals on
+  values. Plus handler middleware and a dispatch seam.
+- **Distributions** (`gen.dist`). Gen.jl's built-ins with Gen.jl's names and
+  parameterizations, plus mixtures and products.
+- **Combinators** (`gen.combinators`). `map`, `unfold` and `switch`, with
+  incremental updates driven by change hints.
+- **Batching** (`gen.batched`). N particles in one execution, falling back to
+  one particle at a time when a model branches on particle values. It is
+  14–26× faster for importance sampling on the CPU.
+- **Inference** (`gen.inference.*`):
+  - importance sampling and resampling;
+  - MH (selection, custom proposals, involutive with AD Jacobians);
+  - kernel combinators with reversals;
+  - particle filtering;
+  - HMC, MALA, MAP and elliptical slice;
+  - choice and parameter gradients (`gen.gradients`) and optimizers
+    (`gen.learning`).
+
+## Tests
+
+```
+clojure -X:test          # everything, ~90 s
+clojure -X:test:fast     # without the slow statistical tests, ~25 s
+```
+
+The GFI's laws are test.check properties, audited against the thesis
+(`docs/research/law-audit.md`). They run over hand-written models and over
+random generated programs. Inference is checked against exact answers:
+- enumerated posteriors;
+- conjugate models;
+- the Kalman filter;
+- estimators unbiased in exp space.
+
+Every VJP is checked against finite differences. `docs/research/genjl-parity.md`
+§3 maps each law to its tests.
+
+## Requirements
+
+A JDK (developed on Oracle GraalVM 25) and the Clojure CLI. The core
+depends on Clojure alone.

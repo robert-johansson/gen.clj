@@ -21,6 +21,13 @@ Clojure on the JVM. In order:
    features it builds; a coverage matrix in `docs/research/genjl-parity.md` §3
    tracks every law.
 
+**Status (2026-10-18): M1 is complete.** The pure-JVM backend runs every
+layer: arrays with reverse-mode AD, the data algebra, the GFI and dynamic
+language, the distributions, Map/Unfold/Switch, batched execution and the
+inference library. It is checked by the law suite (audited against the
+thesis, and fuzzed over random programs), by exact-answer statistical tests
+and by reference values. Benchmarks are in `docs/benchmarks.md`.
+
 Only the beautiful core is ported first. Everything else in GenMLX that *could*
 be ported is tracked as a deferred bean with a note on how to port it cleanly
 (`beans list --tag deferred-port`).
