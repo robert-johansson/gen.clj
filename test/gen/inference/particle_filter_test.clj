@@ -9,8 +9,10 @@
             [gen.dist :as d]
             [gen.dist.core :as dc]
             [gen.dynamic :refer [gen]]
+            [gen.gfi :as gfi]
             [gen.inference.particle-filter :as pf]
-            [gen.random :as rng]))
+            [gen.random :as rng]
+            [gen.selection :as sel]))
 
 (def a-coef 0.8)
 (def q 1.0)
@@ -118,3 +120,10 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"changed or removed"
                           (pf/step state [2 0.0] [diff/unknown-change diff/no-change]
                                    (cm/choicemap [0 :y] 5.0 [1 :y] 1.0) {:key (rng/key 10)})))))
+
+(deftest the-incremental-weight-is-the-update-weight
+  ;; law 20: with the internal proposal, a step adds log p(y_t | x_t)
+  (let [state (pf/initialize model [1 0.0] (observation 0) 20 {:key (rng/key 20)})
+        state' (pf/step state [2 0.0] [diff/unknown-change diff/no-change] (observation 1) {:key (rng/key 21)})]
+    (is (every? true? (map (fn [w w' tr] (< (Math/abs (- (- w' w) (gfi/project tr (sel/select [1 :y])))) 1e-12))
+                           (:log-weights state) (:log-weights state') (:traces state'))))))

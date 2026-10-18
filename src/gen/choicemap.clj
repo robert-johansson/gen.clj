@@ -37,7 +37,11 @@
 
 (def EMPTY (->Node {}))
 
-(defn choicemap? [x] (satisfies? IChoiceMap x))
+(defn choicemap?
+  "Is x a choice map (a Value or a Node)? An instance check: satisfies? is
+   slow when the answer is no, which it is for every leaf value."
+  [x]
+  (instance? gen.choicemap.IChoiceMap x))
 
 (declare from-map set-choice)
 

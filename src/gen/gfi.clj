@@ -37,7 +37,13 @@
   (-propose [gf args key])
   (-project [gf trace selection]))
 
-(defn generative-function? [x] (satisfies? IGenerativeFunction x))
+(defn generative-function?
+  "Does x implement the GFI? Inline implementations answer by an instance
+   check; satisfies? (slow when the answer is no) only covers extensions."
+  [x]
+  (or (instance? gen.gfi.IGenerativeFunction x)
+      (and (some? x) (not (keyword? x)) (not (vector? x)) (not (number? x))
+           (satisfies? IGenerativeFunction x))))
 
 (defprotocol IBatchedGenerativeFunction
   "A generative function that can run N particles at once (gen.batched): its

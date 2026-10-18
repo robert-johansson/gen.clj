@@ -27,9 +27,22 @@ All work is tracked in beans (`.beans/`, a private git repo synced by hooks; see
 ## Running
 
 ```
-clojure -X:test                       # all tests (clojure.test + test.check)
+clojure -X:test                       # every test (clojure.test + test.check), ~90 s
+clojure -X:test:fast                  # without the ^:slow statistical tests, ~25 s
+clojure -X:test:conformance           # the backend conformance suite (array level)
+clojure -J-Dgen.backend=mlx -X:test   # any suite on another backend (M2)
 clojure -M:bench -m gen.array-bench   # per-op costs; add :c2 to compare C2 with Graal's JIT
+clojure -M:bench -m gen.model-bench   # model-level costs (GFI ops, batching, gradients)
 ```
+
+**Test conventions.**
+- **Determinism.** Statistical tests use fixed keys, so they are deterministic. Their
+  bands come from the estimator's variance (5 standard errors, or a
+  measured spread), never from a tolerance that happens to pass.
+- **Power.** A new test must be able to fail. Check a statistical or law test
+  against a planted bug (a mutation) before trusting it, as the suites
+  document in place.
+- **Tiers.** Tag tests that run more than a few seconds `^:slow`.
 
 **Fixtures.** Reference values in `test/fixtures/*.edn` come from scipy and JAX
 via `test/fixtures/generate.py`. Python is needed only to regenerate them:

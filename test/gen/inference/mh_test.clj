@@ -103,7 +103,7 @@
   (doseq [[label step] [[:gibbs-like gibbs-like] [:joint joint] [:custom custom] [:involutive involutive]]]
     (is (< (stationary? main step) (threshold main)) (str label " is not stationary"))))
 
-(deftest kernels-converge-to-the-posterior
+(deftest ^:slow kernels-converge-to-the-posterior
   (doseq [[label step] [[:gibbs-like gibbs-like] [:joint joint] [:custom custom] [:involutive involutive]]]
     (is (< (converged? main step (cm/choicemap :a true :b 0)) (threshold main)) (str label " does not converge"))))
 
@@ -173,7 +173,7 @@
 (deftest the-thesis-posterior
   (is (every? true? (map #(< (Math/abs (- %1 %2)) 1e-12) (:posterior p-mh-target) [(/ 1 6.0) (/ 1 12.0) 0.75]))))
 
-(deftest structure-changing-moves-target-the-posterior
+(deftest ^:slow structure-changing-moves-target-the-posterior
   (doseq [[label step] [[:selection-a (fn [tr key] (:trace (mh/mh tr (sel/select :a) key)))]
                         [:q4-mh (fn [tr key] (:trace (mh/mh tr q4-mh [] key)))]]]
     (is (< (stationary? p-mh-target step) (threshold p-mh-target)) (str label " is not stationary"))

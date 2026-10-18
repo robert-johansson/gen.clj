@@ -22,7 +22,7 @@
   (selected? [_ _] false)
   (get-subselection [this _] this))
 
-(defn selection? [x] (satisfies? ISelection x))
+(defn selection? [x] (instance? gen.selection.ISelection x))
 
 (def all "Selects every address." (->All))
 (def none "Selects no address." (->None))

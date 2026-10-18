@@ -80,7 +80,7 @@
 
 (def x-sel (sel/select :x))
 
-(deftest hmc-targets-the-posterior
+(deftest ^:slow hmc-targets-the-posterior
   (let [step (fn [tr key] (:trace (mcmc/hmc tr x-sel {:L 5 :eps 0.3} key)))]
     (is (scalar-stationary? step))
     (is (scalar-converges? step)))
@@ -89,7 +89,7 @@
                            #(% [:latent :z])
                            (fn [tr key] (:trace (mcmc/hmc tr (sel/select [:latent :z]) {:L 5 :eps 0.25} key)))))))
 
-(deftest mala-targets-the-posterior
+(deftest ^:slow mala-targets-the-posterior
   (let [step (fn [tr key] (:trace (mcmc/mala tr x-sel 0.3 key)))]
     (is (scalar-stationary? step))
     (is (scalar-converges? step)))
@@ -116,7 +116,7 @@
                      (range 300))]
       (is (a/allclose? (tr [:latent :z]) posterior-mean {:atol 1e-6})))))
 
-(deftest elliptical-slice-targets-the-posterior
+(deftest ^:slow elliptical-slice-targets-the-posterior
   (is (vector-converges? flat-vector-model (cm/choicemap :z (a/array [2.0 2.0]) :y y2)
                          #(% :z)
                          (fn [tr key] (mcmc/elliptical-slice tr :z (a/array [0.0 0.0]) prior-cov key)))))
@@ -140,7 +140,7 @@
     {:trace t :bwd-choices (cm/choicemap :u (- u))
      :weight (a/+ w (grad/log-abs-det-jacobian h (a/array [x u])))}))
 
-(deftest a-volume-changing-involution-targets-the-posterior
+(deftest ^:slow a-volume-changing-involution-targets-the-posterior
   (let [step (fn [tr key] (:trace (mh/involutive-mh tr log-scale [] scale-move key)))
         start (start-at positive (cm/choicemap :x 1.0))
         ends (map (fn [key] ((reduce step start (rng/split key 80)) :x)) (rng/split (rng/key 31) 1000))]
@@ -152,3 +152,60 @@
           start (start-at positive (cm/choicemap :x 1.0))
           ends (map (fn [key] ((reduce step start (rng/split key 80)) :x)) (rng/split (rng/key 31) 1000))]
       (is (not (matches? ends 3.0 3.0))))))
+
+;; ---------------------------------------------------------------------------
+;; Reversible jump: a split/merge move between dimensions (law 17)
+;; ---------------------------------------------------------------------------
+
+(def one-or-two
+  "k = 1: one mean m ~ N(0,1); k = 2: two means m1, m2 ~ N(0,1). y ~ N(the
+   average mean, 1), so P(k = 1 | y) ∝ N(y; 0, √2) and P(k = 2 | y) ∝
+   N(y; 0, √1.5)."
+  (gen []
+    (let [mean (if (trace :two? (d/bernoulli 0.5))
+                 (a/* 0.5 (a/+ (trace :m1 (d/normal 0 1)) (trace :m2 (d/normal 0 1))))
+                 (trace :m (d/normal 0 1)))]
+      (trace :y (d/normal mean 1)))))
+
+(def split-merge-proposal
+  "Split with an auxiliary u ~ N(0, 1); merging needs no auxiliary choice."
+  (gen [tr] (when-not (tr :two?) (trace :u (d/normal 0 1)))))
+
+(defn- split-merge
+  "The involution (m, u) ↔ (m1, m2) = (m - u, m + u), with the dimension
+   change and its Jacobian (computed by autodiff: |det| = 2 for a split)."
+  [tr fwd _ _]
+  (if (tr :two?)
+    (let [m1 (tr :m1) m2 (tr :m2)
+          h (fn [v] (let [a (a/take v 0) b (a/take v 1)] (a/stack [(a/* 0.5 (a/+ a b)) (a/* 0.5 (a/- b a))])))
+          {t :trace w :weight} (gfi/update tr (cm/choicemap :two? false :m (* 0.5 (+ m1 m2))))]
+      {:trace t :bwd-choices (cm/choicemap :u (* 0.5 (- m2 m1)))
+       :weight (a/+ w (grad/log-abs-det-jacobian h (a/array [m1 m2])))})
+    (let [m (tr :m) u (cm/get-choice fwd :u)
+          h (fn [v] (let [a (a/take v 0) b (a/take v 1)] (a/stack [(a/- a b) (a/+ a b)])))
+          {t :trace w :weight} (gfi/update tr (cm/choicemap :two? true :m1 (- m u) :m2 (+ m u)))]
+      {:trace t :bwd-choices cm/EMPTY
+       :weight (a/+ w (grad/log-abs-det-jacobian h (a/array [m u])))})))
+
+(deftest ^:slow a-split-merge-move-targets-the-posterior
+  (let [y 1.7
+        p1 (Math/exp (dc/log-prob (d/normal 0 (Math/sqrt 2.0)) y))
+        p2 (Math/exp (dc/log-prob (d/normal 0 (Math/sqrt 1.5)) y))
+        exact-two (/ p2 (+ p1 p2))
+        step (fn [tr key]
+               (let [[k1 k2 k3] (rng/split key 3)
+                     tr (:trace (mh/involutive-mh tr split-merge-proposal [] split-merge k1))
+                     ;; within-model moves on the means
+                     s (if (tr :two?) (sel/select :m1 :m2) (sel/select :m))]
+                 (:trace (mh/mh (:trace (mh/mh tr s k2)) s k3))))
+        start (start-at one-or-two (cm/choicemap :two? false :m 0.0 :y y))
+        ends (map (fn [key] (reduce step start (rng/split key 60))) (rng/split (rng/key 41) 2000))
+        frac (/ (count (filter #(% :two?) ends)) 2000.0)]
+    (is (< (Math/abs (- frac exact-two)) (* 5 (Math/sqrt (/ (* exact-two (- 1 exact-two)) 2000)))))
+    (testing "the involution is an involution, with opposite weights"
+      (let [tr start fwd (cm/choicemap :u 0.4)
+            {t1 :trace u1 :bwd-choices w1 :weight} (split-merge tr fwd nil nil)
+            {t2 :trace u2 :bwd-choices w2 :weight} (split-merge t1 u1 nil nil)]
+        (is (= (:choices tr) (:choices t2)))
+        (is (= fwd u2))
+        (is (< (Math/abs (+ w1 w2)) 1e-12))))))

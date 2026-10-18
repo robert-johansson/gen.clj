@@ -86,6 +86,19 @@
       (+ x (* (- (erfc-nonneg x) q) scale))
       (- x (* (- (erf x) ay) scale)))))
 
+(defn- refine-erfinv
+  "Newton's method from Giles' guess to convergence, for 0 < ay < 1. (A
+   function of its own, so the loop is in statement position: a loop bound as
+   a value would be compiled into a boxing closure.)"
+  ^double [^double ay]
+  (let [tail? (> ay 0.5)
+        q (- 1.0 ay)]
+    (loop [x (double (erfinv-guess ay)) i 0]
+      (let [x' (double (newton-step x tail? ay q))]
+        (if (or (== i 8) (<= (Math/abs (- x' x)) (* 1e-16 (Math/abs x'))))
+          x'
+          (recur x' (inc i)))))))
+
 (defn erfinv
   "The inverse error function on [-1, 1] (±Inf at ±1, NaN outside): Giles'
    approximation refined by Newton's method to convergence, using erfc in the
@@ -96,11 +109,4 @@
           (== ay 1.0) (Math/copySign Double/POSITIVE_INFINITY y)
           (== ay 0.0) y
           :else
-          (let [tail? (> ay 0.5)
-                q (- 1.0 ay)
-                x (loop [x (erfinv-guess ay) i 0]
-                    (let [x' (newton-step x tail? ay q)]
-                      (if (or (== i 8) (<= (Math/abs (- x' x)) (* 1e-16 (Math/abs x'))))
-                        x'
-                        (recur x' (inc i)))))]
-            (Math/copySign (double x) y)))))
+          (Math/copySign (refine-erfinv ay) y))))

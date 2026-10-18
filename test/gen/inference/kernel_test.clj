@@ -88,3 +88,13 @@
         bad (k/checked (k/mh writes-obs []) observations)]
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"changed the observation"
                           (dotimes [i 20] (bad start (rng/key i)))))))
+
+(deftest a-mixture-of-kernels-targets-the-posterior
+  (let [start (:trace (gfi/generate model [] (cm/choicemap :a true :b 0 :obs true) (rng/key 0)))
+        kernel (k/mix [(k/mh (sel/select :a)) (k/mh (sel/select :b)) (k/mh (sel/select :a :b))] [0.3 0.3 0.4])
+        ends (map #(peek (:traces (k/run kernel start {:samples 1 :burn 60 :key %}))) (rng/split (rng/key 5) 2000))
+        p-a (/ (count (filter #(% :a) ends)) 2000.0)
+        joint (fn [a] (reduce + (for [b [0 1 2]]
+                                  (Math/exp (:weight (gfi/assess model [] (cm/choicemap :a a :b b :obs true)))))))
+        exact (/ (joint true) (+ (joint true) (joint false)))]
+    (is (< (Math/abs (- p-a exact)) (* 5 (Math/sqrt (/ (* exact (- 1 exact)) 2000)))))))

@@ -20,9 +20,20 @@
 
 (set! *warn-on-reflection* true)
 
+(defn backend-named
+  "The backend called k: :jvm (pure Clojure, always available) or :mlx (M2,
+   loaded on demand)."
+  [k]
+  (case k
+    :jvm jvm/backend
+    :mlx @(requiring-resolve 'gen.backend.mlx/backend)
+    (throw (ex-info (str "Unknown backend " k) {:backend k :known #{:jvm :mlx}}))))
+
 (def ^:dynamic *backend*
-  "The backend for operations without array operands (creation functions)."
-  jvm/backend)
+  "The backend for operations without array operands (creation functions).
+   The JVM backend, unless the system property gen.backend names another
+   (e.g. -Dgen.backend=mlx)."
+  (backend-named (keyword (System/getProperty "gen.backend" "jvm"))))
 
 (defmacro with-backend
   "Evaluate body with b as the backend for creation functions."
