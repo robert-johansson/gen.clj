@@ -19,9 +19,16 @@
    generative function called on (trace, proposal-args...) for steps (and on
    proposal-args alone for initialize), and :key. maybe-resample takes
    :ess-threshold (n/2 by default), :method (:multinomial, as Gen.jl, or
-   :systematic, :stratified or :residual) and :key."
+   :systematic, :stratified or :residual) and :key.
+
+   With {:batched? true} at initialize (and the internal proposal), the
+   particles run as one batched execution (gen.batched): the state holds
+   :particles, a particle collection, in place of :traces, and every later
+   step stays batched (falling back to one particle at a time if the model
+   branches on particle values). traces returns the scalar traces either way."
   (:refer-clojure :exclude [+ -])
   (:require [gen.array :as a :refer [+ -]]
+            [gen.batched :as batched]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
             [gen.inference.weights :as w]
@@ -35,7 +42,11 @@
   "n particles of model on args, generated with the observations (from the
    internal proposal, or from :proposal)."
   ([model args observations n] (initialize model args observations n {}))
-  ([model args observations n {:keys [proposal proposal-args] :as opts}]
+  ([model args observations n {:keys [proposal proposal-args batched?] :as opts}]
+   (if batched?
+     (do (when proposal (throw (ex-info "A batched particle filter uses the internal proposal" {})))
+         (let [{ps :particles ws :weights} (batched/generate model args observations n (or (:key opts) (gfi/next-key)))]
+           {:particles ps :log-weights (vec (a/->clj ws)) :log-ml 0.0}))
    (let [particle (fn [key]
                     (if proposal
                       (let [[k-propose k-generate] (rng/split key)
@@ -46,7 +57,7 @@
          results (mapv particle (particle-keys opts n))]
      {:traces (mapv :trace results)
       :log-weights (mapv :weight results)
-      :log-ml 0.0})))
+      :log-ml 0.0}))))
 
 (defn- check-discard [discard i]
   (when-not (cm/empty? discard)
@@ -59,6 +70,12 @@
    from :proposal), each log weight increased by its incremental weight."
   ([state args argdiffs observations] (step state args argdiffs observations {}))
   ([state args argdiffs observations {:keys [proposal proposal-args] :as opts}]
+   (if-let [ps (:particles state)]
+     (do (when proposal (throw (ex-info "A batched particle filter uses the internal proposal" {})))
+         (let [{ps' :particles ws :weights ds :discards}
+               (batched/update ps args argdiffs observations (or (:key opts) (gfi/next-key)))]
+           (doseq [[i d] (map-indexed vector ds)] (check-discard d i))
+           (assoc state :particles ps' :log-weights (mapv + (:log-weights state) (a/->clj ws)))))
    (let [n (count (:traces state))
          move (fn [i tr key]
                 (if proposal
@@ -73,7 +90,7 @@
          results (mapv move (range n) (:traces state) (particle-keys opts n))]
      (assoc state
             :traces (mapv :trace results)
-            :log-weights (mapv + (:log-weights state) (mapv :weight results))))))
+            :log-weights (mapv + (:log-weights state) (mapv :weight results)))))))
 
 (defn ess
   "The effective sample size of the particles' weights."
@@ -85,11 +102,12 @@
    equal, and the log marginal likelihood so far moves into :log-ml."
   ([state] (resample state {}))
   ([state {:keys [method key] :or {method :multinomial}}]
-   (let [n (count (:traces state))
+   (let [n (count (:log-weights state))
          {:keys [log-total]} (w/normalize (:log-weights state))
          parents (w/resample method (:log-weights state) n (or key (gfi/next-key)))]
-     (assoc state
-            :traces (mapv (:traces state) parents)
+     (assoc (if-let [ps (:particles state)]
+              (assoc state :particles (batched/take ps parents))
+              (assoc state :traces (mapv (:traces state) parents)))
             :log-weights (vec (repeat n 0.0))
             :log-ml (+ (:log-ml state) (- log-total (Math/log n)))
             :parents parents))))
@@ -99,7 +117,7 @@
    default). The returned state's :resampled? says whether it did."
   ([state] (maybe-resample state {}))
   ([state {:keys [ess-threshold] :as opts}]
-   (let [n (count (:traces state))
+   (let [n (count (:log-weights state))
          threshold (or ess-threshold (/ n 2.0))]
      (if (< (ess state) threshold)
        (assoc (resample state opts) :resampled? true)
@@ -110,7 +128,10 @@
   [state]
   (+ (:log-ml state) (w/log-mean-exp (:log-weights state))))
 
-(defn traces [state] (:traces state))
+(defn traces
+  "The particles' traces (scalar traces, also for a batched filter)."
+  [state]
+  (if-let [ps (:particles state)] (batched/traces ps) (:traces state)))
 
 (defn log-weights [state] (:log-weights state))
 
@@ -118,4 +139,7 @@
   "n traces drawn in proportion to the particles' weights."
   ([state n] (sample-unweighted-traces state n (gfi/next-key)))
   ([state n key]
-   (mapv (:traces state) (w/multinomial (:log-weights state) n key))))
+   (let [idx (w/multinomial (:log-weights state) n key)]
+     (if-let [ps (:particles state)]
+       (batched/traces (batched/take ps idx))
+       (mapv (:traces state) idx)))))

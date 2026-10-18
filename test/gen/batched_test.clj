@@ -1,0 +1,229 @@
+(ns gen.batched-test
+  "Batched execution against scalar execution: each particle of a batched run
+   is exactly the scalar trace of its choices, batched weights are the scalar
+   weights particle by particle, the per-particle fallback carries on, and
+   batched inference reaches the exact answers."
+  (:require [clojure.test :refer [deftest is testing]]
+            [clojure.test.check.clojure-test :refer [defspec]]
+            [clojure.test.check.generators :as gen]
+            [clojure.test.check.properties :as prop]
+            [gen.array :as a]
+            [gen.batched :as b]
+            [gen.choicemap :as cm]
+            [gen.combinators :as comb]
+            [gen.diff :as diff]
+            [gen.dist :as d]
+            [gen.dist.core :as dc]
+            [gen.dynamic :refer [gen]]
+            [gen.gfi :as gfi]
+            [gen.inference.importance :as imp]
+            [gen.inference.mh :as mh]
+            [gen.inference.particle-filter :as pf]
+            [gen.laws :refer [close?]]
+            [gen.random :as rng]
+            [gen.selection :as sel]))
+
+;; ---------------------------------------------------------------------------
+;; Models
+;; ---------------------------------------------------------------------------
+
+(def linreg
+  (gen [xs]
+    (let [slope (trace :slope (d/normal 0 10))
+          intercept (trace :intercept (d/normal 0 10))]
+      (doseq [[i x] (map-indexed vector xs)]
+        (trace [:y i] (d/normal (a/+ (a/* slope x) intercept) 1)))
+      slope)))
+
+(def observation (gen [mu] (trace :x (d/normal mu 1))))
+
+(def hierarchical
+  (gen [n]
+    (let [mu (trace :mu (d/normal 0 1))]
+      (mapv #(splice [:obs %] observation mu) (range n)))))
+
+(def step
+  (gen [t state]
+    (let [s (trace :s (d/normal (a/* 0.8 state) 1))]
+      (trace :obs (d/normal s 0.5))
+      s)))
+
+(def unfolded (comb/unfold step))
+
+(def spliced
+  (gen [n]
+    (let [mu (trace :mu (d/normal 0 1))
+          xs (splice :xs (comb/map observation) (vec (repeat n mu)))]
+      (splice :path unfolded n mu)
+      (splice :pick (comb/switch (gen [m] (trace :a (d/normal m 1))) (gen [m] (trace :b (d/gamma 2 1)))) 1 mu)
+      xs)))
+
+(def vector-latent
+  (gen [] (let [z (trace :z (d/mvnormal [0.0 1.0] [[2.0 0.3] [0.3 1.0]]))] (trace :y (d/normal (a/sum z {:axis -1}) 1)))))
+
+(def models
+  [[:linreg linreg [[1.0 2.0 3.0]]]
+   [:hierarchical hierarchical [3]]
+   [:unfold unfolded [3 0.0]]
+   [:spliced spliced [2]]
+   [:vector-latent vector-latent []]])
+
+(def gen-case (gen/tuple (gen/elements models) gen/nat (gen/choose 1 6)))
+
+(defn- consistent? [tr]
+  (close? (:score tr) (:weight (gfi/assess (:gen-fn tr) (:args tr) (:choices tr)))))
+
+;; ---------------------------------------------------------------------------
+;; Path equivalence
+;; ---------------------------------------------------------------------------
+
+(defspec every-particle-is-the-scalar-trace-of-its-choices 60
+  (prop/for-all [[[_ gf args] seed n] gen-case]
+    (let [ps (b/simulate gf args n (rng/key seed))
+          trs (b/traces ps)]
+      (and (b/batched? ps)
+           (= n (count trs))
+           (every? consistent? trs)
+           (every? true? (map #(close? (:score %1) %2) trs (a/->clj (b/scores ps))))))))
+
+(defspec batched-generate-weights-are-the-observations-densities 60
+  (prop/for-all [[[_ gf args] seed n] gen-case]
+    ;; observe the leaf choices of a scalar run that every particle visits
+    (let [probe (gfi/simulate gf args (rng/key (inc seed)))
+          obs-paths (filter #(#{:obs :y :x} (peek %)) (cm/addresses (:choices probe)))
+          obs (sel/get-selected (:choices probe) (sel/from-paths obs-paths))
+          {ps :particles ws :weights} (b/generate gf args obs n (rng/key seed))]
+      (every? true? (map (fn [tr w] (and (consistent? tr)
+                                         (close? w (gfi/project tr (sel/from-paths obs-paths)))
+                                         (every? #(= (cm/get-choice obs %) (tr %)) obs-paths)))
+                         (b/traces ps) (a/->clj ws))))))
+
+(defspec batched-updates-are-the-scalar-updates 60
+  (prop/for-all [[[_ gf args] seed n] gen-case]
+    (let [ps (b/simulate gf args n (rng/key seed))
+          probe (gfi/simulate gf args (rng/key (inc seed)))
+          p (first (cm/addresses (:choices probe)))
+          sigma (cm/choicemap p (cm/get-choice (:choices probe) p))
+          {ps' :particles ws :weights ds :discards} (b/update ps args (vec (repeat (count args) diff/no-change)) sigma (rng/key 2))
+          scalar (map #(gfi/update % sigma (rng/key 0)) (b/traces ps))]
+      (and (every? true? (map #(close? (:weight %1) %2) scalar (a/->clj ws)))
+           (= (map :discard scalar) ds)
+           (= (map (comp :choices :trace) scalar) (map :choices (b/traces ps')))))))
+
+(defspec batched-regenerate-weights-are-retained-density-ratios 60
+  (prop/for-all [[[_ gf args] seed n] gen-case]
+    (let [ps (b/simulate gf args n (rng/key seed))
+          s (sel/from-paths (take 1 (cm/addresses (:choices (first (b/traces ps))))))
+          {ps' :particles ws :weights} (b/regenerate ps args (vec (repeat (count args) diff/no-change)) s (rng/key 3))]
+      (every? true?
+              (map (fn [old new w]
+                     (let [retained (sel/from-paths (remove (set (cm/addresses (sel/get-selected (:choices old) s)))
+                                                            (cm/addresses (:choices new))))]
+                       (and (consistent? new)
+                            (close? w (a/- (gfi/project new retained) (gfi/project old retained))))))
+                   (b/traces ps) (b/traces ps') (a/->clj ws))))))
+
+(deftest batched-statistics
+  (let [ps (b/simulate linreg [[1.0]] 20000 (rng/key 1))
+        xs (a/->clj (b/choice ps :slope))
+        m (/ (reduce + xs) 20000)
+        v (/ (reduce + (map #(* (- % m) (- % m)) xs)) 19999)]
+    (is (< (Math/abs m) (* 5 (/ 10 (Math/sqrt 20000)))))
+    (is (< (Math/abs (- v 100.0)) 5.0))))
+
+;; ---------------------------------------------------------------------------
+;; Population operations and the fallback
+;; ---------------------------------------------------------------------------
+
+(deftest take-and-select
+  (let [ps (b/simulate linreg [[1.0 2.0]] 5 (rng/key 4))
+        slopes (a/->clj (b/choice ps :slope))]
+    (is (= (mapv slopes [4 4 0]) (a/->clj (b/choice (b/take ps [4 4 0]) :slope))))
+    (is (b/batched? (b/take ps [1 2])))
+    (let [qs (b/simulate linreg [[1.0 2.0]] 5 (rng/key 5))
+          mixed (b/select [true false true false true] ps qs)]
+      (is (= (mapv (fn [keep? p q] (if keep? p q)) [true false true false true] slopes (a/->clj (b/choice qs :slope)))
+             (a/->clj (b/choice mixed :slope))))
+      (is (every? consistent? (b/traces mixed))))))
+
+(def branching
+  (gen []
+    (if (trace :switch (d/bernoulli 0.4))
+      (trace :a (d/normal 0 1))
+      (trace :b (d/gamma 2 1)))))
+
+(deftest models-that-branch-on-particles-fall-back
+  (let [{ps :particles ws :weights} (b/generate branching [] cm/EMPTY 8 (rng/key 6))]
+    (is (not (b/batched? ps)))
+    (is (= 8 (count (b/traces ps))))
+    (is (= (vec (repeat 8 0.0)) (a/->clj ws)))
+    (testing "and later operations carry on per particle"
+      (let [{ws :weights} (b/update ps [] [] (cm/choicemap :switch true) (rng/key 7))
+            scalar (map #(:weight (gfi/update % (cm/choicemap :switch true) (rng/key 0))) (b/traces ps))]
+        (is (= 8 (count (a/->clj ws))))
+        (is (every? true? (map #(and (Double/isFinite %1) (Double/isFinite %2)) (a/->clj ws) scalar))))))
+  (testing "a Switch whose index differs across particles falls back"
+    (let [sw (gen [] (splice :s (comb/switch observation observation)
+                             (if (trace :c (d/bernoulli 0.5)) 0 1) 0.0))]
+      (is (not (b/batched? (b/simulate sw [] 6 (rng/key 8)))))))
+  (testing "while a shared index stays batched"
+    (is (b/batched? (b/simulate (gen [] (splice :s (comb/switch observation observation) 1 0.0)) [] 6 (rng/key 9))))))
+
+;; ---------------------------------------------------------------------------
+;; Batched inference
+;; ---------------------------------------------------------------------------
+
+(def conjugate (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal x 1)))))
+(def y 1.3)
+(def evidence (dc/log-prob (d/normal 0 (Math/sqrt 2)) y))
+
+(deftest batched-importance-sampling
+  (let [{:keys [particles log-ml-estimate log-normalized-weights]}
+        (imp/importance-sampling conjugate [] (cm/choicemap :y y) 20000 {:batched? true :key (rng/key 10)})]
+    (is (b/batched? particles))
+    (is (= 20000 (count log-normalized-weights)))
+    (is (< (Math/abs (- log-ml-estimate evidence)) 0.03))
+    (let [xs (a/->clj (b/choice particles :x))
+          mean (reduce + (map #(* (Math/exp %1) %2) log-normalized-weights xs))]
+      (is (< (Math/abs (- mean 0.65)) 0.03) "the weighted posterior mean")))
+  (testing "resampling one trace"
+    (is (number? ((:trace (imp/importance-resampling conjugate [] (cm/choicemap :y y) 100 {:batched? true :key (rng/key 11)})) :x)))))
+
+(deftest a-batched-particle-filter-matches-the-kalman-filter
+  (let [ys [0.3 1.1 0.4 -0.6 0.2]
+        obs (fn [t] (cm/choicemap [t :obs] (ys t)))
+        ;; Kalman filter for step: x_t ~ N(0.8 x_{t-1}, 1), obs ~ N(x_t, 0.5)
+        exact (first (reduce (fn [[lml m p] yv]
+                               (let [m- (* 0.8 m) p- (+ (* 0.64 p) 1.0) s (+ p- 0.25) k (/ p- s)]
+                                 [(+ lml (dc/log-prob (d/normal m- (Math/sqrt s)) yv)) (+ m- (* k (- yv m-))) (* (- 1 k) p-)]))
+                             [0.0 0.0 0.0] ys))
+        run (fn [n key]
+              (let [ks (rng/split key 10)
+                    init (pf/initialize unfolded [1 0.0] (obs 0) n {:batched? true :key (ks 0)})]
+                (reduce (fn [s t] (-> s (pf/maybe-resample {:key (ks (dec (* 2 t)))})
+                                      (pf/step [(inc t) 0.0] [diff/unknown-change diff/no-change] (obs t) {:key (ks (* 2 t))})))
+                        init (range 1 (count ys)))))
+        state (run 40000 (rng/key 12))]
+    (is (b/batched? (:particles state)) "the filter stays batched")
+    ;; the estimate's sd is about sqrt(12.6/n) here (measured on runs of 20
+    ;; particles): four of them at n = 40000 is 0.07
+    (is (< (Math/abs (- (pf/log-ml-estimate state) exact)) 0.07))
+    (is (= 40000 (count (:log-weights state))))
+    (testing "unbiased in exp space (law 20)"
+      (let [runs 400
+            ratios (map #(Math/exp (- (pf/log-ml-estimate (run 20 %)) exact)) (rng/split (rng/key 14) runs))
+            mean (/ (reduce + ratios) runs)
+            sd (Math/sqrt (/ (reduce + (map #(* (- % mean) (- % mean)) ratios)) (dec runs)))]
+        (is (< (Math/abs (- mean 1.0)) (* 5 (/ sd (Math/sqrt runs)))))))))
+
+(deftest parallel-mh-chains
+  (let [n 4000
+        start (fn [xs] (b/take (:particles (b/generate conjugate [] (cm/choicemap :y y) 1 (rng/key 0))) (repeat n 0)))
+        moments (fn [ps] (let [xs (a/->clj (b/choice ps :x)) m (/ (reduce + xs) n)]
+                           [m (/ (reduce + (map #(* (- % m) (- % m)) xs)) (dec n))]))
+        chains (reduce (fn [ps k] (:particles (mh/mh-particles ps (sel/select :x) k)))
+                       (start nil) (rng/split (rng/key 13) 60))
+        [m v] (moments chains)]
+    (is (b/batched? chains))
+    (is (< (Math/abs (- m 0.65)) (* 5 (Math/sqrt (/ 0.5 n)))))
+    (is (< (Math/abs (- v 0.5)) 0.06))))

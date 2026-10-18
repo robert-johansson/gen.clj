@@ -74,6 +74,20 @@
         n (a/ndim lp)]
     (if (> n r) (a/sum lp {:axis (vec (range r n))}) lp)))
 
+(defn- given-value
+  "[v lp] of the value in the constraint c at a site. In a batched run whose
+   constraints are shared by every particle (:shared-constraints?, e.g.
+   observations), the value is broadcast to the batch, so that every choice
+   of a batched trace has the leading batch axes; otherwise a batched run's
+   constraints already have them."
+  [state dist c]
+  (let [bs (:batch-shape state)
+        v (cm/get-value c)
+        lp (site-log-prob dist v bs)]
+    (if (and (seq bs) (:shared-constraints? state))
+      [(a/broadcast-to v (into bs (a/shape v))) (a/broadcast-to lp bs)]
+      [v lp])))
+
 (defn- draw [state dist k]
   (dc/sample dist k (:batch-shape state)))
 
@@ -112,8 +126,7 @@
 
 (defn- generate-site [state p dist k]
   (if-let [c (constraint-at state p :generate)]
-    (let [v (cm/get-value c)
-          lp (site-log-prob dist v (:batch-shape state))]
+    (let [[v lp] (given-value state dist c)]
       [v (-> state (record p v lp) (add-weight lp))])
     (simulate-site state p dist k)))
 
@@ -121,8 +134,7 @@
   (let [c (constraint-at state p :assess)]
     (when-not c
       (throw (ex-info (str "assess: no value for the choice at " p) {:path p})))
-    (let [v (cm/get-value c)
-          lp (site-log-prob dist v (:batch-shape state))]
+    (let [[v lp] (given-value state dist c)]
       [v (-> state (record p v lp) (add-weight lp))])))
 
 (defn- update-site [state p dist k]
@@ -130,8 +142,7 @@
         prev (prev-choice state p)
         bs (:batch-shape state)]
     (cond
-      c (let [v (cm/get-value c)
-              lp (site-log-prob dist v bs)]
+      c (let [[v lp] (given-value state dist c)]
           [v (cond-> (-> state (record p v lp) (add-weight lp))
                prev (-> (add-weight (a/negate (second prev)))
                         (update :discard cm/set-choice p (first prev))))])
@@ -160,7 +171,6 @@
 ;; Splices: calling another generative function at an address
 ;; ---------------------------------------------------------------------------
 
-(declare run dynamic-gf?)
 
 (defn- sub-key [state]
   (let [[k-next k-sub] (rng/split (:key state))]
@@ -181,57 +191,35 @@
               (update :score a/+ (:score tr)))
     (not (cm/empty? (:choices tr))) (update :choices cm/set-choice p (:choices tr))))
 
-(defn- batched-call
-  "A splice in batched mode: dynamic generative functions run on the same
-   transitions with the same batch shape."
-  [state p gf args op extra]
-  (when-not (dynamic-gf? gf)
-    (throw (ex-info "Batched execution of a splice needs a dynamic generative function (other kinds come with batched combinators)"
-                    {:path p :gen-fn (type gf)})))
-  (let [[k state] (sub-key state)]
-    [state (run gf op args (merge extra {:key k :batch-shape (:batch-shape state)}))]))
-
-(defn- splice-call [state p gf args]
+(defn- splice-call
+  "Call gf at path p under the run's operation, scalar or batched (through
+   gfi/run-op), nesting its choices and recording its sub-trace."
+  [state p gf args]
   (let [mode (:mode state)
-        batched? (seq (:batch-shape state))
         cons (cm/get-submap (:constraints state) p)
-        prev-sub (get (::subtraces (:prev state)) p)]
-    (case mode
-      :simulate
-      (let [[state tr] (if batched?
-                         (update (batched-call state p gf args :simulate nil) 1 :trace)
-                         (let [[k state] (sub-key state)] [state (gfi/-simulate gf args k)]))]
-        [(:retval tr) (record-call state p tr)])
-
-      :generate
-      (let [[state {tr :trace w :weight}]
-            (if batched?
-              (batched-call state p gf args :generate {:constraints cons})
-              (let [[k state] (sub-key state)] [state (gfi/-generate gf args cons k)]))]
-        [(:retval tr) (-> state (record-call p tr) (add-weight w))])
-
-      :assess
-      (let [{w :weight rv :retval} (gfi/-assess gf args cons)]
+        prev-sub (get (::subtraces (:prev state)) p)
+        base {:batch-shape (:batch-shape state) :shared-constraints? (:shared-constraints? state)}]
+    (if (= mode :assess)
+      (let [{w :weight rv :retval} (gfi/run-op gf :assess args (assoc base :constraints cons :key (rng/key 0)))]
         [rv (cond-> (-> state (update :score a/+ w) (add-weight w))
               (not (cm/empty? cons)) (update :choices cm/set-choice p cons))])
-
-      :update
-      (let [[k state] (sub-key state)]
-        (if prev-sub
-          (let [{tr :trace w :weight d :discard} (gfi/-update gf prev-sub args (arg-diffs (:args prev-sub) args) cons k)]
-            [(:retval tr) (cond-> (-> state (record-call p tr) (add-weight w))
-                            (not (cm/empty? d)) (update :discard cm/set-choice p d))])
-          (let [{tr :trace w :weight} (gfi/-generate gf args cons k)]
-            [(:retval tr) (-> state (record-call p tr) (add-weight w))])))
-
-      :regenerate
-      (let [[k state] (sub-key state)]
-        (if prev-sub
-          (let [{tr :trace w :weight} (gfi/-regenerate gf prev-sub args (arg-diffs (:args prev-sub) args)
-                                                       (subselection-at (:selection state) p) k)]
-            [(:retval tr) (-> state (record-call p tr) (add-weight w))])
-          (let [tr (gfi/-simulate gf args k)]
-            [(:retval tr) (record-call state p tr)]))))))
+      (let [[k state] (sub-key state)
+            opts (assoc base :key k)
+            r (cond
+                (= mode :simulate) (gfi/run-op gf :simulate args opts)
+                (= mode :generate) (gfi/run-op gf :generate args (assoc opts :constraints cons))
+                (nil? prev-sub) (if (= mode :update)
+                                  (gfi/run-op gf :generate args (assoc opts :constraints cons))
+                                  (gfi/run-op gf :simulate args opts))
+                (= mode :update) (gfi/run-op gf :update args (assoc opts :prev prev-sub :constraints cons
+                                                                    :argdiffs (arg-diffs (:args prev-sub) args)))
+                :else (gfi/run-op gf :regenerate args (assoc opts :prev prev-sub
+                                                             :argdiffs (arg-diffs (:args prev-sub) args)
+                                                             :selection (subselection-at (:selection state) p))))
+            {tr :trace w :weight d :discard} r]
+        [(:retval tr) (cond-> (record-call state p tr)
+                        w (add-weight w)
+                        (and d (not (cm/empty? d))) (update :discard cm/set-choice p d))]))))
 
 ;; ---------------------------------------------------------------------------
 ;; Running a body
@@ -271,8 +259,8 @@
       ;; regenerate: choices no longer visited cancel against the reverse move
       state)))
 
-(defn- initial-state [mode {:keys [key batch-shape constraints prev selection]}]
-  {:mode mode :key key :batch-shape (vec (or batch-shape []))
+(defn- initial-state [mode {:keys [key batch-shape shared-constraints? constraints prev selection]}]
+  {:mode mode :key key :batch-shape (vec (or batch-shape [])) :shared-constraints? (boolean shared-constraints?)
    :choices cm/EMPTY :scores {} :subtraces {} :score 0.0 :weight 0.0
    :constraints (or constraints cm/EMPTY) :prev prev :selection (or selection sel/none)
    :discard cm/EMPTY :visited #{}})
@@ -375,6 +363,9 @@
     (let [tr (:trace (run gf :simulate args {:key key}))]
       {:choices (:choices tr) :weight (:score tr) :retval (:retval tr)}))
   (-project [_ tr selection] (project* tr selection))
+
+  gfi/IBatchedGenerativeFunction
+  (-batched [gf op args opts] (run gf op args (update opts :key #(or % (rng/key 0)))))
 
   ;; an untraced call, as in Gen.jl: (gf a b) is the return value of a simulated run
   clojure.lang.IFn

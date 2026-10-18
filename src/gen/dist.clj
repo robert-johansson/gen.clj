@@ -173,7 +173,13 @@
   (log-prob [v]
     (let [d (peek (a/shape mu))
           l (la/cholesky cov)
-          z (la/solve-triangular l (- v mu))]
+          diff (- v mu)
+          ;; one column right-hand side per batch element: the batch of the
+          ;; value and of the factor broadcast together
+          batch (sh/broadcast (pop (a/shape diff)) (pop (pop (a/shape l))))
+          z (a/squeeze (la/solve-triangular (a/broadcast-to l (into batch [d d]))
+                                            (a/broadcast-to (a/expand-dims diff -1) (into batch [d 1])))
+                       -1)]
       (- (* -0.5 (a/sum (square z) {:axis -1}))
          (* 0.5 (la/cholesky-logdet l))
          (* d half-log-2pi)))))

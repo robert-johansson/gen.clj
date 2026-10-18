@@ -14,6 +14,8 @@
    started at an impossible trace) is a loud error."
   (:refer-clojure :exclude [+ -])
   (:require [gen.array :as a :refer [+ -]]
+            [gen.batched :as batched]
+            [gen.diff :as diff]
             [gen.gfi :as gfi]
             [gen.random :as rng]
             [gen.selection :as sel]))
@@ -83,3 +85,19 @@
          {proposed :trace bwd :bwd-choices weight :weight} (involution trace fwd fwd-retval proposal-args)
          {bwd-weight :weight} (gfi/assess proposal (into [proposed] proposal-args) bwd)]
      (accept trace proposed (+ (- weight fwd-weight) bwd-weight) k-accept))))
+
+(defn mh-particles
+  "One selection-MH move for each of n particles (n independent chains,
+   gen.batched), accepted or rejected per particle. Returns {:particles
+   :accepted? (n booleans) :log-alpha (an [n] array)}."
+  ([ps selection] (mh-particles ps selection (gfi/next-key)))
+  ([ps selection key]
+   (let [[k-move k-accept] (rng/split key)
+         {proposed :particles la :weights}
+         (batched/regenerate ps (:args ps) (vec (repeat (count (:args ps)) diff/no-change)) selection k-move)
+         las (mapv double (a/->clj la))
+         _ (when (some #(Double/isNaN %) las)
+             (throw (ex-info "An MH acceptance ratio is NaN" {:log-alpha las})))
+         us (a/->clj (rng/uniform k-accept [(batched/size ps)]))
+         accepted (mapv (fn [l u] (or (>= l 0.0) (< (Math/log u) l))) las us)]
+     {:particles (batched/select accepted proposed ps) :accepted? accepted :log-alpha la})))

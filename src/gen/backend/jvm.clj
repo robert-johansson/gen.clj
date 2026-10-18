@@ -22,7 +22,21 @@
 
 (deftype JvmArray [^doubles data shape dtype]
   p/IArray
-  (-backend [_] backend))
+  (-backend [_] backend)
+
+  ;; immutable values with value equality: the same dtype, shape and
+  ;; (bitwise) elements
+  Object
+  (equals [this o]
+    (or (identical? this o)
+        (and (instance? JvmArray o)
+             (= dtype (.-dtype ^JvmArray o))
+             (= shape (.-shape ^JvmArray o))
+             (java.util.Arrays/equals data ^doubles (.-data ^JvmArray o)))))
+  (hashCode [_] (hash-combine (hash shape) (java.util.Arrays/hashCode data)))
+
+  clojure.lang.IHashEq
+  (hasheq [this] (.hashCode this)))
 
 (def supported-dtypes #{:bool :int32 :int64 :float32 :float64})
 

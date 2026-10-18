@@ -39,6 +39,34 @@
 
 (defn generative-function? [x] (satisfies? IGenerativeFunction x))
 
+(defprotocol IBatchedGenerativeFunction
+  "A generative function that can run N particles at once (gen.batched): its
+   choices and weights gain a leading batch axis."
+  (-batched [gf op args opts]
+    "Run op (:simulate :generate :assess :update :regenerate) on args for the
+     batch in opts :batch-shape, with :key and, per op, :constraints, :prev
+     (a batched trace), :argdiffs and :selection. Returns the op's result map
+     ({:trace} for simulate)."))
+
+(defn run-op
+  "Run a GFI op on gf from a map of its inputs (:key :constraints :prev
+   :argdiffs :selection), batched when :batch-shape is non-empty. Returns the
+   op's result map ({:trace} for simulate). The one dispatch point for
+   generative functions that call others (splices, combinators)."
+  [gf op args {:keys [key constraints prev argdiffs selection batch-shape] :as opts}]
+  (if (seq batch-shape)
+    (if (satisfies? IBatchedGenerativeFunction gf)
+      (-batched gf op args opts)
+      (throw (ex-info (str "Batched execution needs generative functions that support batching"
+                           " (dynamic generative functions and the combinators do), not " (type gf))
+                      {:gen-fn (type gf)})))
+    (case op
+      :simulate {:trace (-simulate gf args key)}
+      :generate (-generate gf args constraints key)
+      :assess (-assess gf args constraints)
+      :update (-update gf prev args argdiffs constraints key)
+      :regenerate (-regenerate gf prev args argdiffs selection key))))
+
 ;; ---------------------------------------------------------------------------
 ;; The implicit key source
 ;; ---------------------------------------------------------------------------

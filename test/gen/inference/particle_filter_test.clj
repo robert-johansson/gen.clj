@@ -75,7 +75,9 @@
 
 (deftest the-estimate-approaches-the-exact-marginal-likelihood
   (let [state (run-filter 2000 (rng/key 1))]
-    (is (< (Math/abs (- (pf/log-ml-estimate state) (exact-lml))) 0.05))
+    ;; the estimate's sd is about sqrt(12.6/n) for this model and filter (from
+    ;; the variance of runs of 20 particles): four of them at n = 2000 is 0.32
+    (is (< (Math/abs (- (pf/log-ml-estimate state) (exact-lml))) 0.32))
     (testing "the filtering mean"
       (let [xs (map #(% [(dec (count ys)) :x]) (pf/sample-unweighted-traces state 2000 (rng/key 2)))]
         (is (< (Math/abs (- (/ (reduce + xs) 2000) (second (last kalman)))) 0.1))))))
