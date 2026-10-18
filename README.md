@@ -66,9 +66,10 @@ Next come an MLX backend for the GPU (M2), local LLMs as generative functions
   parameterizations, plus mixtures and products.
 - **Combinators** (`gen.combinators`). `map`, `unfold` and `switch`, with
   incremental updates driven by change hints.
-- **Batching** (`gen.batched`). N particles in one execution, falling back to
-  one particle at a time when a model branches on particle values. It is
-  10–41× faster for importance sampling on the CPU (100–10,000 particles).
+- **Batching** (`gen.batched`). N particles in one execution, by a batch
+  tracer with vmap semantics. It falls back to one particle at a time when a
+  model branches on particle values. It is
+  9–41× faster for importance sampling on the CPU (100–10,000 particles).
 - **Inference** (`gen.inference.*`):
   - importance sampling and resampling;
   - MH (selection, custom proposals, involutive with AD Jacobians);

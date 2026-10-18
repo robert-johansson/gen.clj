@@ -312,7 +312,7 @@ tested, ◐ partly, — not yet (the feature does not exist yet).
 | 4 Support condition | ◐ generate weights never NaN (`generated-traces-are-consistent`) |
 | 5 Update weight and discard | ✓ `updates-are-reversible-with-exact-discards` (exact Def 2.3.1 discard), `update-weight-is-the-score-change-less-fresh-choices`, `identity-update-changes-nothing` |
 | 6 Update is reversible | ✓ the same, with changed args and random constraint subsets; `update-without-fresh-choices-is-exactly-reversible`; `a-choice-that-becomes-a-call-is-discarded` |
-| 7 Compositionality | ✓ `splicing-is-compositional`; combinator laws over a model splicing Map/Unfold/Switch |
+| 7 Compositionality | ✓ `splicing-is-compositional`; `switch-branches-share-addresses` (Switch against the equivalent `if`); combinator laws over a model splicing Map/Unfold/Switch; `a-different-callee-at-an-address-is-a-new-call` |
 | 8 Change hints | ✓ `map-/unfold-precise-hints-match-unknown-change`; retdiff soundness inside the update/regenerate laws |
 | 9 Regenerate | ✓ `regenerate-weight-is-the-retained-density-ratio`, `regenerate-keeps-unselected-choices`, `regenerating-nothing-changes-nothing`, `regenerating-everything-has-weight-zero` (random selections, changed args) |
 | 10 Selection MH stationary | ✓ `kernels-leave-the-posterior-invariant`, `structure-changing-moves-target-the-posterior` (thesis p_mh) |
@@ -325,7 +325,14 @@ tested, ◐ partly, — not yet (the feature does not exist yet).
 | 17 Involutive MCMC | ◐ discrete: stationarity and `the-involution-is-an-involution`; Jacobians with genclj-ynwh |
 | 18 Kernel reversal | ✓ `reversals` (chain, cycle, repeat, mix) |
 | 19 Internal-proposal override | — (M4) |
-| 20 Estimators | ✓ IS and particle-filter log-ML unbiased in exp space (internal, custom, partial and optimal proposals) |
+| 20 Estimators | ✓ IS and particle-filter log-ML unbiased in exp space (internal, custom, partial and optimal proposals; batched); the PF incremental weight |
+
+Batched execution has no thesis law of its own; its law is vmap's
+definition. `gen.array.batch-test` checks it per op family:
+batched ops equal per-particle ops, stacked. `gen.batched-test` and
+`gen.fuzz-test` check it per model: every batched particle is the scalar trace
+of its choices, batched weights are the scalar ones, and batched updates obey
+the update law, also over random programs.
 
 ## 4. Hazards found while mapping
 
