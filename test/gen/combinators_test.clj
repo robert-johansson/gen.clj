@@ -60,7 +60,7 @@
    [:keyed-switch keyed [:a 0.5]]
    [:spliced spliced [3]]])
 
-(laws/deflaws combinators (laws/cases models) 100)
+(laws/deflaws combinators models 100)
 
 ;; ---------------------------------------------------------------------------
 ;; Map

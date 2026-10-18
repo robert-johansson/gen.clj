@@ -80,3 +80,11 @@
         bad (k/checked (k/mh (sel/select :obs)) observations)]
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"changed the observation"
                           (dotimes [i 20] (bad start (rng/key i)))))))
+
+(deftest checked-kernels-catch-a-proposal-that-writes-an-observation
+  ;; the custom-proposal requirement of Alg 5 (p. 92): never propose an observed address
+  (let [start (:trace (gfi/generate model [] (cm/choicemap :obs true) (rng/key 0)))
+        writes-obs (gen [tr] (trace :obs (d/bernoulli 0.5)))
+        bad (k/checked (k/mh writes-obs []) observations)]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"changed the observation"
+                          (dotimes [i 20] (bad start (rng/key i)))))))

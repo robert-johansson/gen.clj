@@ -86,7 +86,8 @@
 (deftest resamplers-are-unbiased
   ;; fixed keys, so deterministic; band: five multinomial standard errors,
   ;; an upper bound for the lower-variance schemes
-  (let [ps [0.1 0.2 0.3 0.4 0.0]
+  ;; fractional n·p_i, so that no scheme is deterministic
+  (let [ps [0.13 0.27 0.05 0.55 0.0]
         lws (mapv #(Math/log %) ps)
         n 10 runs 4000]
     (doseq [method [:multinomial :systematic :stratified :residual]]

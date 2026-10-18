@@ -19,42 +19,50 @@
 
 (def observations (cm/choicemap :obs true))
 
-(def states (vec (for [a [false true] b [0 1 2]] [a b])))
+(defn- enumerated
+  "An exactly enumerable target: the latent states (choice maps) of a model
+   given observations, with their posterior probabilities."
+  [model observations states]
+  (let [lps (mapv #(:weight (gfi/assess model [] (cm/merge observations %))) states)]
+    {:model model :observations observations :states states
+     :posterior (mapv #(Math/exp %) (:log-weights (w/normalize lps)))}))
 
-(defn- constraints [[a b]] (cm/merge observations (cm/choicemap :a a :b b)))
+(def main (enumerated model observations (vec (for [a [false true] b [0 1 2]] (cm/choicemap :a a :b b)))))
 
-(def posterior
-  (let [lps (mapv #(:weight (gfi/assess model [] (constraints %))) states)]
-    (mapv #(Math/exp %) (:log-weights (w/normalize lps)))))
+(defn- latent [{:keys [observations]} tr]
+  (sel/get-selected (:choices tr) (sel/complement (sel/from-choicemap observations))))
 
 (defn- state [tr] [(tr :a) (tr :b)])
 
-(defn- trace-at [s] (:trace (gfi/generate model [] (constraints s) (rng/key 0))))
+(defn- trace-at [{:keys [model observations]} s]
+  (:trace (gfi/generate model [] (cm/merge observations s) (rng/key 0))))
 
 (defn- chi-square
-  "Pearson's statistic of traces' states against the posterior."
-  [traces]
+  "Pearson's statistic of traces' latent states against the posterior."
+  [{:keys [states posterior] :as target} traces]
   (let [n (count traces)
-        observed (frequencies (map state traces))]
+        observed (frequencies (map #(latent target %) traces))]
     (reduce + (map (fn [s p] (let [e (* n p) o (get observed s 0)] (/ (* (- o e) (- o e)) e)))
                    states posterior))))
 
-;; five degrees of freedom: P(χ² > 30) ≈ 1.5e-5 (the keys are fixed, so each
-;; test is deterministic)
-(def threshold 30.0)
+(defn- threshold
+  "P(χ² > threshold) ≈ 1e-5 or less for the target's degrees of freedom (the
+   keys are fixed, so each test is deterministic)."
+  [{:keys [states]}]
+  (case (dec (count states)) 2 25.0 5 30.0))
 
-(defn- stationary? [step]
+(defn- stationary? [{:keys [states posterior] :as target} step]
   (let [n 10000
         [k-init k-step] (rng/split (rng/key 11))
-        starts (map #(trace-at (states %)) (w/multinomial (map #(Math/log %) posterior) n k-init))
+        starts (map #(trace-at target (states %)) (w/multinomial (map #(Math/log %) posterior) n k-init))
         moved (map step starts (rng/split k-step n))]
-    (chi-square moved)))
+    (chi-square target moved)))
 
-(defn- converged? [step]
+(defn- converged? [target step start]
   (let [chains 1000 steps 40
-        start (trace-at [true 0])
+        start (trace-at target start)
         run (fn [key] (reduce step start (rng/split key steps)))]
-    (chi-square (map run (rng/split (rng/key 12) chains)))))
+    (chi-square target (map run (rng/split (rng/key 12) chains)))))
 
 ;; ---------------------------------------------------------------------------
 ;; The moves
@@ -93,11 +101,11 @@
 
 (deftest kernels-leave-the-posterior-invariant
   (doseq [[label step] [[:gibbs-like gibbs-like] [:joint joint] [:custom custom] [:involutive involutive]]]
-    (is (< (stationary? step) threshold) (str label " is not stationary"))))
+    (is (< (stationary? main step) (threshold main)) (str label " is not stationary"))))
 
 (deftest kernels-converge-to-the-posterior
   (doseq [[label step] [[:gibbs-like gibbs-like] [:joint joint] [:custom custom] [:involutive involutive]]]
-    (is (< (converged? step) threshold) (str label " does not converge"))))
+    (is (< (converged? main step (cm/choicemap :a true :b 0)) (threshold main)) (str label " does not converge"))))
 
 (deftest a-proposal-that-ignores-the-backward-move-is-caught
   ;; the same custom move, but accepting with the update weight alone: the
@@ -107,23 +115,67 @@
                       {fwd :choices} (gfi/propose b-proposal [tr] k1)
                       {t :trace weight :weight} (gfi/update tr fwd k2)]
                   (if (< (Math/log (rng/uniform k3)) weight) t tr)))]
-    (is (> (stationary? wrong) threshold))))
+    (is (> (stationary? main wrong) (threshold main)))))
 
 (deftest results-and-errors
-  (let [tr (trace-at [true 0])
+  (let [tr (trace-at main (cm/choicemap :a true :b 0))
         r (mh/mh tr (sel/select :a) (rng/key 3))]
     (is (= #{:trace :accepted? :log-alpha} (set (keys r))))
     (is (= r (mh/mh tr (sel/select :a) (rng/key 3))) "the same key gives the same move")
     (is (or (:accepted? r) (identical? tr (:trace r)))))
   (testing "a rejected move returns the old trace"
     ;; from the most likely state, so that some moves are rejected
-    (let [tr (trace-at [true 2])
+    (let [tr (trace-at main (cm/choicemap :a true :b 2))
           rs (map #(mh/mh tr b-proposal [] %) (rng/split (rng/key 4) 50))]
       (is (every? #(or (:accepted? %) (identical? tr (:trace %))) rs))
       (is (some (complement :accepted?) rs))))
   (testing "proposal arguments must be a vector"
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"vector" (mh/mh (trace-at [true 0]) b-proposal (rng/key 1)))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"vector" (mh/mh (trace-at main (cm/choicemap :a true :b 0)) b-proposal (rng/key 1)))))
   (testing "a NaN acceptance ratio is a loud error"
     (let [impossible (gen [] (trace :x (d/normal 0 1)) (trace :obs (d/bernoulli 0.0)))
           tr (:trace (gfi/generate impossible [] (cm/choicemap :obs true) (rng/key 0)))]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"NaN" (mh/mh tr (sel/select :x) (rng/key 1)))))))
+
+(deftest the-involution-is-an-involution
+  ;; law 17: applying it twice gives back the trace and the auxiliary choices
+  (let [tr (trace-at main (cm/choicemap :a true :b 0))]
+    (doseq [up? [true false]]
+      (let [fwd (cm/choicemap :up up?)
+            {t1 :trace u1 :bwd-choices} (step-b tr fwd nil [])
+            {t2 :trace u2 :bwd-choices w2 :weight} (step-b t1 u1 nil [])]
+        (is (= (:choices tr) (:choices t2)))
+        (is (= fwd u2))
+        (is (< (Math/abs (+ w2 (:weight (step-b tr fwd nil [])))) 1e-12) "the weights are opposite")))))
+
+;; ---------------------------------------------------------------------------
+;; A stochastic-structure target: the thesis's p_mh (pp. 92-93)
+;; ---------------------------------------------------------------------------
+
+(def p-mh
+  (gen []
+    (let [z (trace :a (d/bernoulli 0.5))
+          z (and z (trace :b (d/bernoulli 0.5)))]
+      (trace :c (d/bernoulli (if z 0.9 0.1))))))
+
+(def p-mh-target
+  (enumerated p-mh (cm/choicemap :c true)
+              [(cm/choicemap :a false) (cm/choicemap :a true :b false) (cm/choicemap :a true :b true)]))
+
+(def q4-mh
+  "The thesis's valid proposal: switch branches with probability 0.9; on
+   switching to a = T, sample b afresh."
+  (gen [t]
+    (if (t :a)
+      (trace :a (d/bernoulli 0.1))
+      (when (trace :a (d/bernoulli 0.9))
+        (trace :b (d/bernoulli 0.5))))))
+
+(deftest the-thesis-posterior
+  (is (every? true? (map #(< (Math/abs (- %1 %2)) 1e-12) (:posterior p-mh-target) [(/ 1 6.0) (/ 1 12.0) 0.75]))))
+
+(deftest structure-changing-moves-target-the-posterior
+  (doseq [[label step] [[:selection-a (fn [tr key] (:trace (mh/mh tr (sel/select :a) key)))]
+                        [:q4-mh (fn [tr key] (:trace (mh/mh tr q4-mh [] key)))]]]
+    (is (< (stationary? p-mh-target step) (threshold p-mh-target)) (str label " is not stationary"))
+    (is (< (converged? p-mh-target step (cm/choicemap :a false)) (threshold p-mh-target))
+        (str label " does not converge"))))

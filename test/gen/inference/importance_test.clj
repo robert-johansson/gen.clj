@@ -73,3 +73,37 @@
                           (imp/importance-sampling model [] observations 3
                                                   {:proposal (gen [] (trace :y (d/normal 0 1)))
                                                    :proposal-args []})))))
+
+;; ---------------------------------------------------------------------------
+;; A proposal for only some of the latents (Alg 14, p. 147)
+;; ---------------------------------------------------------------------------
+
+(def chain-model
+  "x ~ N(0, 1), z ~ N(x, 1), y ~ N(z, 1): p(y) = N(y; 0, √3)."
+  (gen []
+    (let [x (trace :x (d/normal 0 1))
+          z (trace :z (d/normal x 1))]
+      (trace :y (d/normal z 1)))))
+
+(def x-proposal (gen [] (trace :x (d/normal 0.5 1.5))))
+
+(deftest a-partial-proposal-leaves-the-rest-to-the-internal-proposal
+  (let [n 20
+        {:keys [traces log-normalized-weights log-ml-estimate]}
+        (imp/importance-sampling chain-model [] observations n {:proposal x-proposal :proposal-args [] :key (rng/key 6)})
+        log-total (+ log-ml-estimate (Math/log n))]
+    (testing "log w = log p(τ) - log q_ext(x) - log q_int(z | x)"
+      (doseq [[tr lnw] (map vector traces log-normalized-weights)]
+        (let [expected (- (+ (dc/log-prob (d/normal 0 1) (tr :x)) (dc/log-prob (d/normal (tr :z) 1) y))
+                          (dc/log-prob (d/normal 0.5 1.5) (tr :x)))]
+          (is (< (Math/abs (- (+ lnw log-total) expected)) 1e-12)))))
+    (testing "and the estimate is unbiased in exp space"
+      (let [runs 4000
+            evidence (Math/exp (dc/log-prob (d/normal 0 (Math/sqrt 3)) y))
+            ratios (map #(/ (Math/exp (:log-ml-estimate (imp/importance-sampling chain-model [] observations 5
+                                                                                 {:proposal x-proposal :proposal-args [] :key %})))
+                            evidence)
+                        (rng/split (rng/key 7) runs))
+            mean (/ (reduce + ratios) runs)
+            sd (Math/sqrt (/ (reduce + (map #(* (- % mean) (- % mean)) ratios)) (dec runs)))]
+        (is (< (Math/abs (- mean 1.0)) (* 5 (/ sd (Math/sqrt runs)))))))))

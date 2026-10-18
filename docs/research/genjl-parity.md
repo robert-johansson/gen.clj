@@ -195,22 +195,29 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
   - Agents (MDP/POMDP, inverse planning).
   - Structural inference over programs, metareasoning control, NN layers.
 
-## 3. GFI invariants for gen.clj's property tests (from the thesis)
+## 3. GFI invariants for gen.clj's property tests
 
-GenMLX's `gfi.cljs` law vector is a ready-made list to port. Notation:
-t = (P, x, τ); σ = constraints; q = internal proposal.
+Most laws are the thesis's (Cusumano-Towner 2020; printed page = PDF page);
+laws 11, 12 and 18 are Gen.jl's, not the thesis's. The list was audited
+against the thesis on 2026-10-18 (`docs/research/law-audit.md`); the
+corrections are folded in below, and the coverage matrix at the end of this
+section maps each law to its tests. Notation: t = (P, x, τ); σ = constraints;
+q = internal proposal.
 
 1. **Structured density / addresses** (Def 2.1.3, p. 49).
    - Distinct traces in the support disagree on some shared address. In
      practice: no address is a prefix of another, and leaf addresses are unique.
    - Choices are sufficient: the same (P, x, τ) always gives the same retval and
      score.
+   - The dynamic language requires unique addresses (DML restriction 2, p. 63).
 2. **Score = density.** `get_score(simulate(x)) = log p(τ;x) = assess(x,τ).weight`,
    and the retvals agree (pp. 68–69; Def 2.1.16, p. 56).
 3. **Generate.**
    - Empty constraints: weight 0, and the trace is distributed as `simulate`.
    - Full constraints: the trace is deterministic and the weight equals the score
-     (§2.3.1, p. 68).
+     (extended generate, p. 143; the generate of p. 68 has no weight).
+   - The thesis ignores constraints the run does not visit (p. 69; σ|_B,
+     p. 143). gen.clj throws instead, as Gen.jl does: a deliberate departure.
    - General case: log w = log p(τ;x) − log q(υ;x,σ) (§4.1.1, p. 143).
    - Forward-sampling q: the weight is the sum of the constrained addresses'
      log-densities as they are visited (p. 145).
@@ -219,12 +226,16 @@ t = (P, x, τ); σ = constraints; q = internal proposal.
    Generate weights are never NaN, and −∞ only off-support.
 5. **Update weight and discard** (Def 2.3.1, p. 69; p. 71; Gen docs).
    - log w = log p(τ';x') − log q(τ'_fresh; x', τ+σ) − log p(τ;x); fresh terms
-     cancel.
+     cancel. The q(fresh) term is Gen.jl's extension: in the thesis an
+     unconstrained new address makes update undefined (Def 2.3.1; Alg 17,
+     p. 168, raises an error).
    - The discard contains the overwritten old values **and** the old addresses
      that are no longer visited.
    - An identity update (x'=x, σ={}) has weight 0.
 6. **Update is reversible** (Prop. 2.3.1, p. 70). update(t', x, ·, discard) gives
-   back t with weight −w, including for structure-changing updates.
+   back t, including for structure-changing updates and changed arguments. Its
+   weight is −w only without fresh choices; in general it is −w − log q(fresh).
+   The reverse discard is σ (σ ⊕ the fresh choices, with Gen.jl's extension).
 7. **Compositionality** (Prop. 2.3.2, p. 73). For sequencing or splicing,
    log w₃ = log w₁ + log w₂ and discards merge. Combinator updates match the
    equivalent inlined loop in the dynamic modeling language.
@@ -236,16 +247,22 @@ t = (P, x, τ); σ = constraints; q = internal proposal.
    - log w = log [p(τ';x') q(υ';x,σ') / (p(τ;x) q(υ;x',σ))].
    - Unselected addresses keep their values.
    - With the same args, selecting nothing gives weight 0 and an unchanged trace,
-     and selecting everything gives weight 0.
-   - Requires a supportive density, i.e. fixed support per address (Def 2.1.7,
-     p. 52; §5.1, pp. 169–170).
+     and selecting everything gives weight 0 (this needs q(·;x,{}) = p(·;x), as
+     with forward sampling or the optimal proposal).
+   - Requires a supportive density (Def 2.1.7, p. 52); a fixed support per
+     address is sufficient, not equivalent (pp. 148, 169). The forward-sampling
+     weight is Alg 18 (p. 170).
 10. **Selection MH is stationary** (Alg. 15, p. 148). Test against exact
     enumeration or a conjugate posterior. With the optimal internal proposal,
-    regenerate is Gibbs (pp. 145–146).
+    regenerate is Gibbs (pp. 145–146). *Errata:* the acceptance probability 0.6
+    in the example of pp. 148–149 contradicts Eq 4.1 and Alg 18 (the correct
+    value is 1); in Alg 15, "r ≤ log w" means log r ≤ log w.
 11. **Project.**
     - The all-selection gives the score; the empty selection gives 0.
     - For fixed-structure forward sampling, project(S) + project(Sᶜ) = score.
-    - project(t, A) equals the weight of generate constrained on t restricted to A.
+    - project(t, A) = log p(τ) − log q(τ|_Aᶜ; x, τ|_A), which equals the weight of
+      generate constrained on t|_A when that generate reproduces t (in gen.clj,
+      with t's key).
 12. **Propose.** The weight equals `assess(choices).weight`, and the choices are
     distributed as `simulate`.
 13. **Gradients** (Eqs. 2.10–2.12, p. 72).
@@ -255,11 +272,15 @@ t = (P, x, τ); σ = constraints; q = internal proposal.
     - `accumulate_param_gradients!` scales by its scale factor.
 14. **Encapsulated randomness** (Def 4.5.1, p. 155; Eqs. 4.2–4.3, p. 156).
     - E_{q̊}[ξ] = p(τ;x).
-    - Identity update and project cost 0.
+    - project costs 0. An identity update does not have weight 0: it resamples
+      ω' (p. 157), so log w = log ξ(x,τ,ω')/ξ(x,τ,ω).
     - Pseudo-marginal MH targets the exact posterior.
 15. **Custom-proposal MH requirements** (Alg. 5 and requirements, p. 92). The
     proposal never samples an observed address, and every move is reversible:
-    q(σ';t') > 0.
+    q(σ';t') > 0. *Erratum:* Alg 5 and Eq 4.15 print exp(log w − s'.logpdf() +
+    s.logpdf()), which swaps the forward and backward terms; the correct ratio
+    is log w + log q(σ';t') − log q(σ;t), as in Algs 6, 9 and 11 (and
+    `gen.inference.mh`).
 16. **Trace translators** (Def 3.6.1 and Eq. 3.13, p. 110; Alg. 9, p. 111).
     - w = p₂q₂ / (p₁q₁) · |J_h|.
     - Round trip h(h⁻¹(z)) = z.
@@ -268,7 +289,7 @@ t = (P, x, τ); σ = constraints; q = internal proposal.
     - h∘h = id.
     - Acceptance: min{1, p(υ')q(σ';υ') / (p(υ)q(σ;υ)) · |J|}.
     - Detailed balance holds on a split/merge example.
-18. **Kernel DSL.**
+18. **Kernel DSL** (Gen.jl; compare the thesis's §3.4.4, pp. 98–100, Prop 3.4.1).
     - The reversal of a composite kernel is the reversed sequence of reversed
       kernels.
     - With `check`, observed choices are unchanged after each kernel.
@@ -276,6 +297,35 @@ t = (P, x, τ); σ = constraints; q = internal proposal.
     Generate under R stays unbiased, and regenerate/MH under R stays stationary.
 20. **Estimators.** IS and particle-filter log-ML estimates are unbiased in exp
     space, and the PF incremental weight equals the update weight.
+
+### Coverage matrix
+
+`gen.laws` holds the general and forward-sampling laws as properties over
+any models; each feature's suite instantiates them (`deflaws`). Status: ✓
+tested, ◐ partly, — not yet (the feature does not exist yet).
+
+| Law | Tests |
+|---|---|
+| 1 Structured density, unique addresses | ✓ `errors-are-loud` (repeated and nested addresses); `runs-are-pure-functions-of-the-key` |
+| 2 Score = density | ✓ `score-is-the-assessed-density`, and trace consistency inside every generate/update/regenerate law |
+| 3 Generate | ✓ `generate-with-every-choice-is-deterministic`, `generate-without-constraints-has-weight-zero`, `generate-weight-is-the-constrained-density`, `generated-traces-are-consistent`; E[w] = p̄(σ): `the-estimate-is-unbiased-in-exp-space` |
+| 4 Support condition | ◐ generate weights never NaN (`generated-traces-are-consistent`) |
+| 5 Update weight and discard | ✓ `updates-are-reversible-with-exact-discards` (exact Def 2.3.1 discard), `update-weight-is-the-score-change-less-fresh-choices`, `identity-update-changes-nothing` |
+| 6 Update is reversible | ✓ the same, with changed args and random constraint subsets; `update-without-fresh-choices-is-exactly-reversible`; `a-choice-that-becomes-a-call-is-discarded` |
+| 7 Compositionality | ✓ `splicing-is-compositional`; combinator laws over a model splicing Map/Unfold/Switch |
+| 8 Change hints | ✓ `map-/unfold-precise-hints-match-unknown-change`; retdiff soundness inside the update/regenerate laws |
+| 9 Regenerate | ✓ `regenerate-weight-is-the-retained-density-ratio`, `regenerate-keeps-unselected-choices`, `regenerating-nothing-changes-nothing`, `regenerating-everything-has-weight-zero` (random selections, changed args) |
+| 10 Selection MH stationary | ✓ `kernels-leave-the-posterior-invariant`, `structure-changing-moves-target-the-posterior` (thesis p_mh) |
+| 11 Project | ✓ `project-of-everything-is-the-score`, `project-splits-the-score` |
+| 12 Propose | ✓ `propose-weight-is-the-assessed-density` |
+| 13 Gradients | ◐ every VJP against finite differences (`gen.array.tape-test`); choice and argument gradients come with genclj-96om |
+| 14 Encapsulated randomness | — (M4) |
+| 15 Custom-proposal MH | ✓ custom-proposal and q4_mh stationarity; `a-proposal-that-ignores-the-backward-move-is-caught`; `checked-kernels-catch-a-proposal-that-writes-an-observation` |
+| 16 Trace translators | — (genclj-lfjt, M4) |
+| 17 Involutive MCMC | ◐ discrete: stationarity and `the-involution-is-an-involution`; Jacobians with genclj-ynwh |
+| 18 Kernel reversal | ✓ `reversals` (chain, cycle, repeat, mix) |
+| 19 Internal-proposal override | — (M4) |
+| 20 Estimators | ✓ IS and particle-filter log-ML unbiased in exp space (internal, custom, partial and optimal proposals) |
 
 ## 4. Hazards found while mapping
 

@@ -19,9 +19,9 @@
      (propose gf args)                           → {:choices :weight :retval}
      (project trace selection)                   → weight
 
-   update and regenerate with the trace's own arguments assert that no
-   argument changed. Weights follow Gen.jl and the Cusumano-Towner thesis
-   (docs/research/genjl-parity.md §3)."
+   update and regenerate without arguments keep the trace's own arguments,
+   with no-change argdiffs. Weights follow Gen.jl and the Cusumano-Towner
+   thesis (docs/research/genjl-parity.md §3)."
   (:refer-clojure :exclude [update])
   (:require [gen.diff :as diff]
             [gen.random :as rng]))
@@ -80,7 +80,8 @@
 
 (defn generate
   "A trace of gf on args consistent with constraints (a choice map), and the
-   log weight log p(τ; x) - log q(τ; x, constraints) of the internal proposal."
+   log weight log p(τ; x) - log q(υ; x, σ), where υ are the choices the
+   internal proposal sampled and σ the constraints."
   ([gf args constraints] (generate gf args constraints (next-key)))
   ([gf args constraints key] (-generate gf (vec args) constraints key)))
 

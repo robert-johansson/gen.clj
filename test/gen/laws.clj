@@ -1,11 +1,19 @@
 (ns gen.laws
-  "The GFI's laws (Cusumano-Towner's thesis; docs/research/genjl-parity.md
-   §3) as test.check properties over any generative function. Each law takes
-   a generator of cases [[label gf args] seed], so every feature's suite can
-   check them on its own models:
+  "The GFI's laws (Cusumano-Towner 2020; docs/research/genjl-parity.md §3,
+   audited in docs/research/law-audit.md) as test.check properties over any
+   generative functions, in two sets:
 
-     (defspec map-score-is-the-assessed-density 100
-       (laws/score-is-the-assessed-density gen-case))"
+   - general: the thesis's definitions, true of every generative function
+     (Def 2.1.16, Def 2.3.1, Prop 2.3.1, Def 2.3.2, Eq 4.1's retention);
+   - forward-sampling: true when the internal proposal samples unconstrained
+     choices from the prior, each site from its own key, as every gen.clj
+     generative function does so far. A generative function with an optimal
+     or overridden internal proposal (thesis pp. 145-152) need satisfy only
+     the general set.
+
+   Models are [label gf args alt-args]: alt-args is a vector of other
+   argument vectors, so that update and regenerate are also checked with
+   changed arguments. (deflaws prefix models n) defines a defspec per law."
   (:require [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
             [gen.array :as a]
@@ -18,19 +26,76 @@
 (defn close? [x y] (a/allclose? x y {:rtol 1e-12 :atol 1e-12}))
 
 (defn cases
-  "A generator of [[label gf args] seed] over models, a vector of
-   [label gf args]."
+  "Cases [[label gf args alt-args] seed picks alt?] over models."
   [models]
-  (gen/tuple (gen/elements models) gen/nat))
+  (gen/tuple (gen/elements models) gen/nat (gen/vector gen/boolean 8) gen/boolean))
 
-(defn- pick-paths [addrs picks]
-  (keep (fn [[p pick?]] (when pick? p)) (map vector addrs (cycle picks))))
+;; ---------------------------------------------------------------------------
+;; Helpers
+;; ---------------------------------------------------------------------------
+
+(defn- addrs [tr] (cm/addresses (:choices tr)))
+
+(defn- picked [paths picks] (vec (keep (fn [[p pick?]] (when pick? p)) (map vector paths (cycle picks)))))
+
+(defn- restrict [choices paths] (sel/get-selected choices (sel/from-paths paths)))
+
+(defn- lp
+  "The log density of the choices at paths in tr."
+  [tr paths]
+  (gfi/project tr (sel/from-paths paths)))
+
+(defn- next-args
+  "The arguments to update or regenerate with: an alternative, or the same."
+  [[_ _ args alt] seed alt?]
+  (if (and alt? (seq alt)) (nth alt (mod seed (count alt))) args))
+
+(defn- unknown-diffs [args] (vec (repeat (count args) diff/unknown-change)))
+
+(defn- consistent?
+  "Trace consistency (Def 2.1.16): the score is the assessed density of the
+   choices, and the return value is the one they determine."
+  [tr]
+  (let [{w :weight rv :retval} (gfi/assess (:gen-fn tr) (:args tr) (:choices tr))]
+    (and (close? (:score tr) w) (= (:retval tr) rv))))
+
+(defn- sound-retdiff?
+  "Def 2.3.2: no-change promises an equal return value."
+  [old {tr :trace rd :retdiff}]
+  (or (not (diff/no-change? rd)) (= (:retval old) (:retval tr))))
+
+(defn- unvisitable?
+  "Constraints drawn from another run that this run cannot visit (a
+   structural mismatch the GFI correctly rejects): the case is vacuous."
+  [^Throwable e]
+  (boolean (re-find #"not visited|nested choice map|single value" (or (.getMessage e) ""))))
+
+(defmacro ^:private vacuous-on-unvisitable [& body]
+  `(try ~@body
+        (catch clojure.lang.ExceptionInfo e#
+          (if (unvisitable? e#) ::vacuous (throw e#)))))
+
+(defn- update-case
+  "A random update: constraints are a random subset of another run's choices
+   (with the new arguments), so they may change values, add addresses and
+   change structure. nil when the update rejects them as unvisitable."
+  [[_ gf args :as model] seed picks alt?]
+  (let [k (rng/key seed)
+        tr (gfi/simulate gf args k)
+        args' (next-args model seed alt?)
+        other (gfi/simulate gf args' (rng/fold-in k 1))
+        sigma (restrict (:choices other) (picked (addrs other) picks))
+        r (vacuous-on-unvisitable (gfi/update tr args' (unknown-diffs args') sigma (rng/fold-in k 2)))]
+    (when-not (= ::vacuous r)
+      {:tr tr :args' args' :sigma sigma :result r})))
+
+;; ---------------------------------------------------------------------------
+;; General laws
+;; ---------------------------------------------------------------------------
 
 (defn score-is-the-assessed-density [cases]
   (prop/for-all [[[_ gf args] seed] cases]
-    (let [tr (gfi/simulate gf args (rng/key seed))
-          {w :weight rv :retval} (gfi/assess gf args (:choices tr))]
-      (and (close? (:score tr) w) (= (:retval tr) rv)))))
+    (consistent? (gfi/simulate gf args (rng/key seed)))))
 
 (defn generate-with-every-choice-is-deterministic [cases]
   (prop/for-all [[[_ gf args] seed] cases]
@@ -38,48 +103,60 @@
           {g :trace w :weight} (gfi/generate gf args (:choices tr) (rng/key (inc seed)))]
       (and (= (:choices tr) (:choices g)) (close? w (:score tr))))))
 
-(defn generate-without-constraints-has-weight-zero [cases]
-  (prop/for-all [[[_ gf args] seed] cases]
-    (zero? (:weight (gfi/generate gf args cm/EMPTY (rng/key seed))))))
+(defn generated-traces-are-consistent [cases]
+  (prop/for-all [[[_ gf args] seed picks] cases]
+    (let [tr (gfi/simulate gf args (rng/key seed))
+          sigma (restrict (:choices tr) (picked (addrs tr) picks))
+          ;; another key may take another branch, leaving a constraint unvisited
+          r (vacuous-on-unvisitable (gfi/generate gf args sigma (rng/key (inc seed))))]
+      (or (= ::vacuous r)
+          (let [{g :trace w :weight} r]
+            (and (consistent? g)
+                 (not (a/truthy? (a/isnan w)))
+                 (every? #(= (cm/get-choice sigma %) (cm/get-choice (:choices g) %)) (cm/addresses sigma))))))))
 
-(defn generate-with-part-of-a-trace-and-its-key-reproduces-it [cases]
-  (prop/for-all [[[_ gf args] seed] cases
-                 picks (gen/vector gen/boolean 8)]
-    (let [k (rng/key seed)
-          tr (gfi/simulate gf args k)
-          s (sel/from-paths (pick-paths (cm/addresses (:choices tr)) picks))
-          constraints (sel/get-selected (:choices tr) s)
-          {g :trace w :weight} (gfi/generate gf args constraints k)]
-      ;; every site consumes one key, so the unconstrained draws are the same,
-      ;; and the weight is the log density of the constrained choices
-      (and (= (:choices tr) (:choices g))
-           (close? w (gfi/project g (sel/from-choicemap constraints)))))))
-
-(defn identity-update-has-weight-zero [cases]
+(defn identity-update-changes-nothing [cases]
   (prop/for-all [[[_ gf args] seed] cases]
     (let [tr (gfi/simulate gf args (rng/key seed))
-          {t2 :trace w :weight disc :discard rd :retdiff} (gfi/update tr cm/EMPTY (rng/key (inc seed)))]
-      (and (zero? w) (= (:choices tr) (:choices t2)) (cm/empty? disc) (diff/no-change? rd)))))
+          {t2 :trace w :weight disc :discard :as r} (gfi/update tr cm/EMPTY (rng/key (inc seed)))]
+      (and (zero? w) (= (:choices tr) (:choices t2)) (cm/empty? disc) (sound-retdiff? tr r)))))
 
-(defn updates-are-reversible [cases]
-  (prop/for-all [[[_ gf args] seed] cases]
+(defn updates-are-reversible-with-exact-discards [cases]
+  (prop/for-all [[model seed picks alt?] cases]
+    (if-let [{:keys [tr sigma] {t2 :trace disc :discard :as r} :result} (update-case model seed picks alt?)]
+      (let [was (set (addrs tr))
+            now (set (addrs t2))
+            constrained (set (cm/addresses sigma))
+            ;; Def 2.3.1: the discard is τ restricted to (A_τ ∩ A_σ) ∪ (A_τ ∖ A_τ')
+            expected-discard (restrict (:choices tr) (filter #(or (constrained %) (not (now %))) (addrs tr)))
+            fresh (remove #(or (was %) (constrained %)) (addrs t2))
+            {t3 :trace disc3 :discard} (gfi/update t2 (:args tr) (unknown-diffs (:args tr)) disc (rng/key seed))]
+        (and (consistent? t2)
+             (sound-retdiff? tr r)
+             (every? #(= (cm/get-choice sigma %) (cm/get-choice (:choices t2) %)) constrained)
+             ;; unconstrained choices that remain keep their values
+             (every? #(= (cm/get-choice (:choices tr) %) (cm/get-choice (:choices t2) %))
+                     (remove constrained (filter now (addrs tr))))
+             (= expected-discard disc)
+             ;; Prop 2.3.1: updating back with the discard restores the trace,
+             ;; and discards σ with the freshly proposed choices
+             (= (:choices tr) (:choices t3))
+             (= (cm/merge sigma (restrict (:choices t2) fresh)) disc3)))
+      true)))
+
+(defn regenerate-keeps-unselected-choices [cases]
+  (prop/for-all [[[_ gf args :as model] seed picks alt?] cases]
     (let [k (rng/key seed)
           tr (gfi/simulate gf args k)
-          ;; constrain one existing address to a value from a second run
-          other (gfi/simulate gf args (rng/fold-in k 1))
-          ;; an address both runs visited
-          p (first (filter (set (cm/addresses (:choices other))) (cm/addresses (:choices tr))))
-          v (cm/get-choice (:choices other) p)
-          {t2 :trace w :weight disc :discard} (gfi/update tr (cm/choicemap p v) (rng/fold-in k 2))
-          fresh (remove (set (cm/addresses (:choices tr))) (cm/addresses (:choices t2)))
-          fresh-lp (reduce a/+ 0.0 (map #(gfi/project t2 (sel/select %)) fresh))
-          {t3 :trace w3 :weight} (gfi/update t2 disc (rng/fold-in k 3))]
-      (and
-       ;; the weight is the new score minus the old, less the freshly proposed choices
-       (close? w (a/- (a/- (:score t2) (:score tr)) fresh-lp))
-       ;; updating back with the discard restores the trace
-       (= (:choices tr) (:choices t3))
-       (close? (a/+ w w3) (a/negate fresh-lp))))))
+          args' (next-args model seed alt?)
+          s (sel/from-paths (picked (addrs tr) picks))
+          {t2 :trace :as r} (gfi/regenerate tr args' (unknown-diffs args') s (rng/fold-in k 1))
+          selected (set (cm/addresses (sel/get-selected (:choices tr) s)))
+          now (set (addrs t2))]
+      (and (consistent? t2)
+           (sound-retdiff? tr r)
+           (every? #(= (cm/get-choice (:choices tr) %) (cm/get-choice (:choices t2) %))
+                   (remove selected (filter now (addrs tr))))))))
 
 (defn regenerating-nothing-changes-nothing [cases]
   (prop/for-all [[[_ gf args] seed] cases]
@@ -87,54 +164,113 @@
           {t2 :trace w :weight} (gfi/regenerate tr sel/none (rng/key (inc seed)))]
       (and (zero? w) (= (:choices tr) (:choices t2))))))
 
-(defn regenerate-weight-is-the-retained-density-ratio [cases]
+(defn project-of-everything-is-the-score [cases]
   (prop/for-all [[[_ gf args] seed] cases]
-    (let [k (rng/key seed)
-          tr (gfi/simulate gf args k)
-          s (sel/from-paths (take 1 (cm/addresses (:choices tr))))
-          {t2 :trace w :weight} (gfi/regenerate tr s (rng/fold-in k 1))
-          retained (sel/from-paths (filter (set (cm/addresses (:choices tr)))
-                                           (cm/addresses (sel/get-selected (:choices t2) (sel/complement s)))))]
-      ;; Σ over retained choices of log p_new - log p_old: selected, fresh and
-      ;; removed choices cancel against the proposal
-      (close? w (a/- (gfi/project t2 retained) (gfi/project tr retained))))))
-
-(defn project-splits-the-score [cases]
-  (prop/for-all [[[_ gf args] seed] cases
-                 picks (gen/vector gen/boolean 8)]
-    (let [tr (gfi/simulate gf args (rng/key seed))
-          s (sel/from-paths (pick-paths (cm/addresses (:choices tr)) picks))]
-      (and (close? (gfi/project tr sel/all) (:score tr))
-           (zero? (gfi/project tr sel/none))
-           (close? (a/+ (gfi/project tr s) (gfi/project tr (sel/complement s))) (:score tr))))))
+    (let [tr (gfi/simulate gf args (rng/key seed))]
+      (close? (gfi/project tr sel/all) (:score tr)))))
 
 (defn propose-weight-is-the-assessed-density [cases]
   (prop/for-all [[[_ gf args] seed] cases]
     (let [{c :choices w :weight} (gfi/propose gf args (rng/key seed))]
       (close? w (:weight (gfi/assess gf args c))))))
 
+;; ---------------------------------------------------------------------------
+;; Forward-sampling laws
+;; ---------------------------------------------------------------------------
+
+(defn generate-without-constraints-has-weight-zero [cases]
+  (prop/for-all [[[_ gf args] seed] cases]
+    (zero? (:weight (gfi/generate gf args cm/EMPTY (rng/key seed))))))
+
+(defn generate-weight-is-the-constrained-density [cases]
+  (prop/for-all [[[_ gf args] seed picks] cases]
+    (let [k (rng/key seed)
+          tr (gfi/simulate gf args k)
+          sigma (restrict (:choices tr) (picked (addrs tr) picks))
+          {g :trace w :weight} (gfi/generate gf args sigma k)]
+      ;; one key per site: the unconstrained draws are the same as tr's
+      (and (= (:choices tr) (:choices g))
+           (close? w (lp g (cm/addresses sigma)))))))
+
+(defn update-weight-is-the-score-change-less-fresh-choices [cases]
+  (prop/for-all [[model seed picks alt?] cases]
+    (if-let [{:keys [tr sigma] {t2 :trace w :weight disc :discard} :result} (update-case model seed picks alt?)]
+      (let [was (set (addrs tr))
+            constrained (set (cm/addresses sigma))
+            fresh-lp (lp t2 (remove #(or (was %) (constrained %)) (addrs t2)))
+            {w3 :weight} (gfi/update t2 (:args tr) (unknown-diffs (:args tr)) disc (rng/key seed))]
+        (and (close? w (a/- (a/- (:score t2) (:score tr)) fresh-lp))
+             (close? (a/+ w w3) (a/negate fresh-lp))))
+      true)))
+
+(defn regenerate-weight-is-the-retained-density-ratio [cases]
+  (prop/for-all [[[_ gf args :as model] seed picks alt?] cases]
+    (let [k (rng/key seed)
+          tr (gfi/simulate gf args k)
+          args' (next-args model seed alt?)
+          s (sel/from-paths (picked (addrs tr) picks))
+          {t2 :trace w :weight} (gfi/regenerate tr args' (unknown-diffs args') s (rng/fold-in k 1))
+          selected (set (cm/addresses (sel/get-selected (:choices tr) s)))
+          now (set (addrs t2))
+          ;; Eq 4.1, Alg 18: selected, fresh and removed choices cancel
+          retained (remove selected (filter now (addrs tr)))]
+      (close? w (a/- (lp t2 retained) (lp tr retained))))))
+
+(defn regenerating-everything-has-weight-zero [cases]
+  (prop/for-all [[[_ gf args] seed] cases]
+    (let [tr (gfi/simulate gf args (rng/key seed))]
+      (zero? (:weight (gfi/regenerate tr sel/all (rng/key (inc seed))))))))
+
+(defn project-splits-the-score [cases]
+  (prop/for-all [[[_ gf args] seed picks] cases]
+    (let [tr (gfi/simulate gf args (rng/key seed))
+          s (sel/from-paths (picked (addrs tr) picks))]
+      (and (zero? (gfi/project tr sel/none))
+           (close? (a/+ (gfi/project tr s) (gfi/project tr (sel/complement s))) (:score tr))))))
+
 (defn runs-are-pure-functions-of-the-key [cases]
   (prop/for-all [[[_ gf args] seed] cases]
     (= (:choices (gfi/simulate gf args (rng/key seed)))
        (:choices (gfi/simulate gf args (rng/key seed))))))
 
-(def all
-  "Every law above, by name."
+(defn identity-update-reports-no-change
+  "An implementation property, not a thesis law (Def 2.3.2 allows
+   unknown-change)."
+  [cases]
+  (prop/for-all [[[_ gf args] seed] cases]
+    (diff/no-change? (:retdiff (gfi/update (gfi/simulate gf args (rng/key seed)) cm/EMPTY (rng/key (inc seed)))))))
+
+(def general
   {:score-is-the-assessed-density score-is-the-assessed-density
    :generate-with-every-choice-is-deterministic generate-with-every-choice-is-deterministic
-   :generate-without-constraints-has-weight-zero generate-without-constraints-has-weight-zero
-   :generate-with-part-of-a-trace-and-its-key-reproduces-it generate-with-part-of-a-trace-and-its-key-reproduces-it
-   :identity-update-has-weight-zero identity-update-has-weight-zero
-   :updates-are-reversible updates-are-reversible
+   :generated-traces-are-consistent generated-traces-are-consistent
+   :identity-update-changes-nothing identity-update-changes-nothing
+   :updates-are-reversible-with-exact-discards updates-are-reversible-with-exact-discards
+   :regenerate-keeps-unselected-choices regenerate-keeps-unselected-choices
    :regenerating-nothing-changes-nothing regenerating-nothing-changes-nothing
+   :project-of-everything-is-the-score project-of-everything-is-the-score
+   :propose-weight-is-the-assessed-density propose-weight-is-the-assessed-density})
+
+(def forward-sampling
+  {:generate-without-constraints-has-weight-zero generate-without-constraints-has-weight-zero
+   :generate-weight-is-the-constrained-density generate-weight-is-the-constrained-density
+   :update-weight-is-the-score-change-less-fresh-choices update-weight-is-the-score-change-less-fresh-choices
    :regenerate-weight-is-the-retained-density-ratio regenerate-weight-is-the-retained-density-ratio
+   :regenerating-everything-has-weight-zero regenerating-everything-has-weight-zero
    :project-splits-the-score project-splits-the-score
-   :propose-weight-is-the-assessed-density propose-weight-is-the-assessed-density
-   :runs-are-pure-functions-of-the-key runs-are-pure-functions-of-the-key})
+   :runs-are-pure-functions-of-the-key runs-are-pure-functions-of-the-key
+   :identity-update-reports-no-change identity-update-reports-no-change})
+
+(def all (merge general forward-sampling))
 
 (defmacro deflaws
-  "A defspec per law in gen.laws/all, named prefix-law, each over cases."
-  [prefix cases num-tests]
-  `(do ~@(for [law (keys all)]
-           `(clojure.test.check.clojure-test/defspec ~(symbol (str prefix "-" (name law))) ~num-tests
-              ((get all ~law) ~cases)))))
+  "A defspec per law (from gen.laws/all, or the given law map), named
+   prefix-law, each over cases of models."
+  ([prefix models num-tests] `(deflaws ~prefix ~models ~num-tests all))
+  ([prefix models num-tests laws]
+   (let [laws-map @(resolve laws)
+         cs (gensym "cases")]
+     `(let [~cs (cases ~models)]
+        ~@(for [law (keys laws-map)]
+            `(clojure.test.check.clojure-test/defspec ~(symbol (str prefix "-" (name law))) ~num-tests
+               ((get ~laws ~law) ~cs)))))))

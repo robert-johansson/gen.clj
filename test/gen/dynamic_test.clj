@@ -3,15 +3,13 @@
    thesis; docs/research/genjl-parity.md §3), on fixed-structure,
    structure-changing, spliced and discrete models."
   (:require [clojure.test :refer [deftest is testing]]
-            [clojure.test.check.clojure-test :refer [defspec]]
-            [clojure.test.check.generators :as gen]
-            [clojure.test.check.properties :as prop]
             [gen.array :as a]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.dist :as d]
             [gen.dynamic :as dyn :refer [gen]]
             [gen.gfi :as gfi]
+            [gen.laws :as laws]
             [gen.random :as rng]
             [gen.selection :as sel]))
 
@@ -46,113 +44,88 @@
           n (trace :n (d/poisson (a/+ 1.0 k)))]
       (trace :flip (d/bernoulli (a// 1.0 (a/+ 2.0 n)))))))
 
-(def models
-  [[:linreg linreg [[1.0 2.0 3.0]]]
-   [:branching branching []]
-   [:hierarchical hierarchical [3]]
-   [:discrete discrete []]])
+(def sub-x (gen [] (trace :y (d/normal 0 1))))
 
-(def gen-case (gen/tuple (gen/elements models) gen/nat))
+(def kind-changing
+  "An address that holds a choice in one branch and a splice in the other."
+  (gen []
+    (if (trace :s (d/bernoulli 0.5))
+      (trace :x (d/normal 0 1))
+      (splice :x sub-x))))
+
+(def spliced-distribution
+  "A distribution called through the GFI, its parameter an argument."
+  (gen [mu]
+    (splice :x (d/normal mu 1))
+    (trace :y (d/normal 0 1))))
+
+(def p-mh
+  "The thesis's p_mh (p. 92): b exists only when a is true."
+  (gen []
+    (let [z (trace :a (d/bernoulli 0.5))
+          z (and z (trace :b (d/bernoulli 0.5)))]
+      (trace :c (d/bernoulli (if z 0.9 0.1))))))
+
+(def models
+  [[:linreg linreg [[1.0 2.0 3.0]] [[[1.0 2.5]] [[0.5 1.0 1.5 2.0]]]]
+   [:branching branching []]
+   [:hierarchical hierarchical [3] [[1] [5]]]
+   [:discrete discrete []]
+   [:kind-changing kind-changing []]
+   [:spliced-distribution spliced-distribution [0.0] [[2.0] [-1.5]]]
+   [:p-mh p-mh []]])
 
 (defn- close? [x y] (a/allclose? x y {:rtol 1e-12 :atol 1e-12}))
 
 ;; ---------------------------------------------------------------------------
-;; Laws
+;; Laws (gen.laws), and their checks on structure changes
 ;; ---------------------------------------------------------------------------
 
-(defspec score-is-the-assessed-density 100
-  (prop/for-all [[[_ gf args] seed] gen-case]
-    (let [tr (gfi/simulate gf args (rng/key seed))
-          {w :weight rv :retval} (gfi/assess gf args (:choices tr))]
-      (and (close? (:score tr) w) (= (:retval tr) rv)))))
+(laws/deflaws dynamic models 100)
 
-(defspec generate-with-every-choice-is-deterministic 100
-  (prop/for-all [[[_ gf args] seed] gen-case]
-    (let [tr (gfi/simulate gf args (rng/key seed))
-          {g :trace w :weight} (gfi/generate gf args (:choices tr) (rng/key (inc seed)))]
-      (and (= (:choices tr) (:choices g)) (close? w (:score tr))))))
+(deftest update-without-fresh-choices-is-exactly-reversible
+  ;; constraints covering the new branch: w = Δscore, the reverse weight is
+  ;; -w and the reverse discard is σ (Prop 2.3.1, Def 2.3.1)
+  (let [tr (first (filter #(true? (% :switch)) (map #(gfi/simulate branching [] (rng/key %)) (range 50))))
+        sigma (cm/choicemap :switch false :b 2.0 :c 3)
+        {t2 :trace w :weight disc :discard} (gfi/update tr sigma (rng/key 1))
+        {t3 :trace w3 :weight disc3 :discard} (gfi/update t2 disc (rng/key 2))]
+    (is (close? w (a/- (:score t2) (:score tr))))
+    (is (= (cm/choicemap :switch true :a (tr :a)) disc))
+    (is (= (:choices tr) (:choices t3)))
+    (is (close? w3 (a/negate w)))
+    (is (= sigma disc3))))
 
-(defspec generate-without-constraints-has-weight-zero 100
-  (prop/for-all [[[_ gf args] seed] gen-case]
-    (zero? (:weight (gfi/generate gf args cm/EMPTY (rng/key seed))))))
+(deftest a-choice-that-becomes-a-call-is-discarded
+  ;; regression for the audit's E1
+  (let [tr (first (filter #(true? (% :s)) (map #(gfi/simulate kind-changing [] (rng/key %)) (range 50))))
+        {t2 :trace w :weight disc :discard} (gfi/update tr (cm/choicemap :s false) (rng/key 1))]
+    (is (= (cm/choicemap :s true :x (tr :x)) disc))
+    (is (close? w (a/- (a/- (:score t2) (:score tr)) (gfi/project t2 (sel/select [:x :y])))))
+    (is (= (:choices tr) (:choices (:trace (gfi/update t2 disc (rng/key 2))))))))
 
-(defspec generate-with-part-of-a-trace-and-its-key-reproduces-it 150
-  (prop/for-all [[[_ gf args] seed] gen-case
-                 picks (gen/vector gen/boolean 8)]
-    (let [k (rng/key seed)
-          tr (gfi/simulate gf args k)
-          s (sel/from-paths (keep (fn [[p pick?]] (when pick? p))
-                                  (map vector (cm/addresses (:choices tr)) (cycle picks))))
-          constraints (sel/get-selected (:choices tr) s)
-          {g :trace w :weight} (gfi/generate gf args constraints k)]
-      ;; every site consumes one key, so the unconstrained draws are the same,
-      ;; and the weight is the log density of the constrained choices
-      (and (= (:choices tr) (:choices g))
-           (close? w (gfi/project g (sel/from-choicemap constraints)))))))
+(def inlined
+  "hierarchical with its spliced calls written inline."
+  (gen [n]
+    (let [mu (trace :mu (d/normal 0 1))]
+      (mapv #(trace [:obs % :x] (d/normal mu 1)) (range n)))))
 
-(defspec identity-update-has-weight-zero 100
-  (prop/for-all [[[_ gf args] seed] gen-case]
-    (let [tr (gfi/simulate gf args (rng/key seed))
-          {t2 :trace w :weight disc :discard rd :retdiff} (gfi/update tr cm/EMPTY (rng/key (inc seed)))]
-      (and (zero? w) (= (:choices tr) (:choices t2)) (cm/empty? disc) (diff/no-change? rd)))))
-
-(defspec updates-are-reversible 150
-  (prop/for-all [[[_ gf args] seed] gen-case]
-    (let [k (rng/key seed)
-          tr (gfi/simulate gf args k)
-          ;; constrain one existing address to a value from a second run
-          other (gfi/simulate gf args (rng/fold-in k 1))
-          ;; an address both runs visited
-          p (first (filter (set (cm/addresses (:choices other))) (cm/addresses (:choices tr))))
-          v (cm/get-choice (:choices other) p)
-          {t2 :trace w :weight disc :discard} (gfi/update tr (cm/choicemap p v) (rng/fold-in k 2))
-          fresh (remove (set (cm/addresses (:choices tr))) (cm/addresses (:choices t2)))
-          fresh-lp (reduce a/+ 0.0 (map #(gfi/project t2 (sel/select %)) fresh))
-          {t3 :trace w3 :weight} (gfi/update t2 disc (rng/fold-in k 3))]
-      (and
-       ;; the weight is the new score minus the old, less the freshly proposed choices
-       (close? w (a/- (a/- (:score t2) (:score tr)) fresh-lp))
-       ;; updating back with the discard restores the trace
-       (= (:choices tr) (:choices t3))
-       (close? (a/+ w w3) (a/negate fresh-lp))))))
-
-(defspec regenerating-nothing-changes-nothing 100
-  (prop/for-all [[[_ gf args] seed] gen-case]
-    (let [tr (gfi/simulate gf args (rng/key seed))
-          {t2 :trace w :weight} (gfi/regenerate tr sel/none (rng/key (inc seed)))]
-      (and (zero? w) (= (:choices tr) (:choices t2))))))
-
-(defspec regenerate-weight-is-the-retained-density-ratio 150
-  (prop/for-all [[[_ gf args] seed] gen-case]
-    (let [k (rng/key seed)
-          tr (gfi/simulate gf args k)
-          s (sel/from-paths (take 1 (cm/addresses (:choices tr))))
-          {t2 :trace w :weight} (gfi/regenerate tr s (rng/fold-in k 1))
-          retained (sel/from-paths (filter (set (cm/addresses (:choices tr)))
-                                           (cm/addresses (sel/get-selected (:choices t2) (sel/complement s)))))]
-      ;; Σ over retained choices of log p_new - log p_old: selected, fresh and
-      ;; removed choices cancel against the proposal
-      (close? w (a/- (gfi/project t2 retained) (gfi/project tr retained))))))
-
-(defspec project-splits-the-score 100
-  (prop/for-all [[[_ gf args] seed] gen-case
-                 picks (gen/vector gen/boolean 8)]
-    (let [tr (gfi/simulate gf args (rng/key seed))
-          addrs (cm/addresses (:choices tr))
-          s (sel/from-paths (keep (fn [[p pick?]] (when pick? p)) (map vector addrs (cycle picks))))]
-      (and (close? (gfi/project tr sel/all) (:score tr))
-           (zero? (gfi/project tr sel/none))
-           (close? (a/+ (gfi/project tr s) (gfi/project tr (sel/complement s))) (:score tr))))))
-
-(defspec propose-weight-is-the-assessed-density 100
-  (prop/for-all [[[_ gf args] seed] gen-case]
-    (let [{c :choices w :weight} (gfi/propose gf args (rng/key seed))]
-      (close? w (:weight (gfi/assess gf args c))))))
-
-(defspec runs-are-pure-functions-of-the-key 50
-  (prop/for-all [[[_ gf args] seed] gen-case]
-    (= (:choices (gfi/simulate gf args (rng/key seed)))
-       (:choices (gfi/simulate gf args (rng/key seed))))))
+(deftest splicing-is-compositional
+  ;; Prop 2.3.2: a splice updates as its body written inline would
+  (let [tr (gfi/simulate hierarchical [3] (rng/key 3))
+        tr-inline (:trace (gfi/generate inlined [3] (:choices tr) (rng/key 4)))]
+    (is (close? (:score tr) (:score tr-inline)))
+    (doseq [sigma [(cm/choicemap :mu 0.7) (cm/choicemap [:obs 1 :x] -2.0) (cm/choicemap :mu -0.3 [:obs 0 :x] 1.0)]]
+      (let [r (gfi/update tr sigma (rng/key 5))
+            ri (gfi/update tr-inline sigma (rng/key 5))]
+        (is (close? (:weight r) (:weight ri)))
+        (is (= (:discard r) (:discard ri)))
+        (is (= (:choices (:trace r)) (:choices (:trace ri))))))
+    (testing "and with changed arguments that remove calls"
+      (let [r (gfi/update tr [1] [diff/unknown-change] cm/EMPTY (rng/key 6))
+            ri (gfi/update tr-inline [1] [diff/unknown-change] cm/EMPTY (rng/key 6))]
+        (is (close? (:weight r) (:weight ri)))
+        (is (= (:discard r) (:discard ri)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Structure, splices, errors

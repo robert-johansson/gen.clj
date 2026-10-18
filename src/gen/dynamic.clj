@@ -249,14 +249,15 @@
   "Account for the choices and calls of the previous trace that this run no
    longer visits, and check the constraints."
   [state]
-  (let [mode (:mode state)
-        visited (:visited state)]
+  (let [mode (:mode state)]
     (when (#{:generate :update :assess} mode)
       (check-constraints-visited! state mode))
     (if (= mode :update)
+      ;; gone by kind: a path that held a choice and now holds a call (or the
+      ;; reverse) is visited, but its old record is still gone
       (let [prev (:prev state)
-            gone-choices (remove visited (keys (::scores prev)))
-            gone-calls (remove visited (keys (::subtraces prev)))]
+            gone-choices (remove #(contains? (:scores state) %) (keys (::scores prev)))
+            gone-calls (remove #(contains? (:subtraces state) %) (keys (::subtraces prev)))]
         (as-> state s
           (reduce (fn [s p] (-> s (add-weight (a/negate (get (::scores prev) p)))
                                 (update :discard cm/set-choice p (cm/get-choice (:choices prev) p))))
