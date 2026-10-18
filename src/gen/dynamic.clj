@@ -163,7 +163,9 @@
 ;; Every site consumes one key from the sequence, whether it samples or not, so
 ;; constraining or retaining a choice never shifts another site's randomness:
 ;; generate with part of a trace's choices and that trace's key reproduces it.
-(def ^:private site-transitions
+(def site-transitions
+  "The standard handler transitions, one per operation: (fn [state path dist
+   key] → [value state']). Middleware (with-transitions) wraps them."
   {:simulate simulate-site :generate generate-site :assess assess-site
    :update update-site :regenerate regenerate-site})
 
@@ -280,11 +282,13 @@
                       {:param name :available (keys *params*)}))
       v)))
 
+(declare dynamic-gf? run-handler)
+
 (defn- execute
   "Run gf's body on args under the transitions of mode; the final state with
    :retval."
   [gf mode args opts]
-  (let [transition (site-transitions mode)
+  (let [transition (or (get (:transitions gf) mode) (site-transitions mode))
         vol (volatile! (initial-state mode opts))
         trace-fn (fn [addr dist]
                    (let [p (path addr)
@@ -297,16 +301,27 @@
                            [v state] (transition (assoc state :key k-next) p dist k-site)]
                        (vreset! vol (update state :visited conj p))
                        v)))
-        splice-fn (fn [& xs]
-                    (let [[addr gf & args] xs
-                          p (path addr)
-                          state @vol]
-                      (when-not (gfi/generative-function? gf)
-                        (throw (ex-info (str "splice at " p " needs a generative function") {:path p :value gf})))
-                      (check-address! state p)
-                      (let [[v state] (splice-call state p gf (vec args))]
-                        (vreset! vol (update state :visited conj p))
-                        v)))
+        splice-fn (fn splice-fn [& xs]
+                    (if (gfi/generative-function? (first xs))
+                      ;; (splice gf & args): Gen.jl's {*} ~ gf(args), the callee's choices in
+                      ;; this namespace. Its body runs under this handler, so constraints,
+                      ;; previous choices, selections and address checks apply unchanged.
+                      (let [[sub & args] xs]
+                        (when-not (dynamic-gf? sub)
+                          (throw (ex-info "A splice without an address needs a dynamic generative function (others take an address)"
+                                          {:gen-fn (type sub)})))
+                        (if-let [ps (:params sub)]
+                          (binding [*params* (merge *params* ps)] (apply (:body-fn sub) trace-fn splice-fn read-param args))
+                          (apply (:body-fn sub) trace-fn splice-fn read-param args)))
+                      (let [[addr gf & args] xs
+                            p (path addr)
+                            state @vol]
+                        (when-not (gfi/generative-function? gf)
+                          (throw (ex-info (str "splice at " p " needs a generative function") {:path p :value gf})))
+                        (check-address! state p)
+                        (let [[v state] (splice-call state p gf (vec args))]
+                          (vreset! vol (update state :visited conj p))
+                          v))))
         retval (apply (:body-fn gf) trace-fn splice-fn read-param args)]
     (assoc (finish @vol) :retval retval)))
 
@@ -328,6 +343,10 @@
    operation :constraints, :prev (the previous trace) and :selection. Returns
    the operation's result map."
   [gf op args opts]
+  (or (when-let [dispatch (:dispatch gf)] (dispatch gf op args opts))
+      (run-handler gf op args opts)))
+
+(defn- run-handler [gf op args opts]
   (let [state (if-let [ps (:params gf)]
                 (binding [*params* (merge *params* ps)] (execute gf op args opts))
                 (execute gf op args opts))]
@@ -350,7 +369,7 @@
 ;; DynamicGF
 ;; ---------------------------------------------------------------------------
 
-(defrecord DynamicGF [body-fn source params]
+(defrecord DynamicGF [body-fn source params transitions dispatch]
   gfi/IGenerativeFunction
   (-simulate [gf args key] (:trace (run gf :simulate args {:key key})))
   (-generate [gf args constraints key] (run gf :generate args {:key key :constraints constraints}))
@@ -384,13 +403,31 @@
   "A dynamic generative function from a body fn of (trace splice & args) and
    its source form."
   [body-fn source]
-  (->DynamicGF body-fn source nil))
+  (->DynamicGF body-fn source nil nil nil))
 
 (defn with-params
   "gf with the trainable-parameter store params, a map of name to value read
    by (param name) in gf's body and in every generative function it calls."
   [gf params]
   (assoc gf :params params))
+
+(defn with-transitions
+  "gf with handler middleware: a map from operation (:simulate :generate
+   :assess :update :regenerate) to a transition (fn [state path dist key] →
+   [value state']) used in place of the standard one (site-transitions),
+   typically by wrapping it. Middleware may change the model (e.g. masking
+   a distribution); an optimization must not (see with-dispatch)."
+  [gf transitions]
+  (assoc gf :transitions transitions))
+
+(defn with-dispatch
+  "gf with an execution seam: (dispatch gf op args opts) runs before the
+   handler and returns the operation's result map, or nil to leave it to the
+   handler (opts as for run). A dispatcher is an optimization: it must be
+   observationally equivalent to the handler, which gen.laws checks
+   (dispatch-matches-handler)."
+  [gf dispatch]
+  (assoc gf :dispatch dispatch))
 
 (defmethod print-method DynamicGF [gf ^java.io.Writer w]
   (.write w (str "#gen/fn" (pr-str (first (:source gf))))))

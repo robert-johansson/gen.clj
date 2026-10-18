@@ -371,3 +371,75 @@
     (guard (logical-and (>= v 0) (integral? v))
            (+ (- (lgamma (+ v r)) (lgamma r) (lgamma (+ v 1)))
               (* r (log p)) (xlog1py v (- p))))))
+
+;; ---------------------------------------------------------------------------
+;; Mixtures and products: Gen.jl's HomogeneousMixture, HeterogeneousMixture
+;; and ProductDistribution. Each is a family: a function of the component
+;; parameters returning a distribution, called at the trace site like any
+;; distribution constructor.
+;; ---------------------------------------------------------------------------
+
+(defn homogeneous-mixture
+  "A family of mixtures of one distribution family (Gen.jl's
+   HomogeneousMixture, for families with scalar values):
+   ((homogeneous-mixture normal) weights mus stds) has components
+   (normal (mus k) (stds k)). The last axis of each parameter indexes the
+   components; weights are the components' probabilities."
+  [family]
+  (fn [weights & params]
+    (let [w (dc/->array weights)
+          params (mapv dc/->array params)]
+      (dc/check-probabilities "homogeneous-mixture" "weights" w)
+      (dc/->Distribution ::homogeneous-mixture {:family family :weights w :params params}))))
+
+(defmethod dc/-sample ::homogeneous-mixture [{{:keys [family weights params]} :params} key shape]
+  (let [[k-pick k-draw] (rng/split key)
+        k (rng/categorical k-pick (log weights) (sh/broadcast shape (pop (a/shape weights))) (opts weights))]
+    (dc/sample (apply family (mapv #(a/pick % k) params)) k-draw shape)))
+
+(defmethod dc/-log-prob ::homogeneous-mixture [{{:keys [family weights params]} :params} v]
+  ;; every component at once: the value against the component axis
+  (a/logsumexp (+ (log weights) (dc/log-prob (apply family params) (a/expand-dims v -1))) {:axis -1}))
+
+(defn heterogeneous-mixture
+  "A family of mixtures of different distribution families (Gen.jl's
+   HeterogeneousMixture): ((heterogeneous-mixture [normal uniform]) weights
+   [mu std] [low high]) mixes (normal mu std) and (uniform low high).
+   Components must have values of one shape."
+  [families]
+  (let [families (vec families)]
+    (fn [weights & component-params]
+      (let [w (dc/->array weights)]
+        (dc/check (= (count families) (count component-params) (peek (a/shape w)))
+                  "heterogeneous-mixture" "needs one weight and one parameter vector per component"
+                  {:families (count families) :params (count component-params)})
+        (dc/check-probabilities "heterogeneous-mixture" "weights" w)
+        (dc/->Distribution ::heterogeneous-mixture
+                           {:weights w :components (mapv #(apply %1 %2) families component-params)})))))
+
+(defmethod dc/-sample ::heterogeneous-mixture [{{:keys [weights components]} :params} key shape]
+  (let [[k-pick k-draw] (rng/split key)
+        k (rng/categorical k-pick (log weights) (sh/broadcast shape (pop (a/shape weights))) (opts weights))
+        draws (mapv #(dc/sample %1 %2 shape) components (rng/split k-draw (count components)))]
+    ;; draw every component, keep the picked one (branch-free, so it batches)
+    (a/pick (a/stack (mapv #(a/astype % (a/dtype (first draws))) draws) -1) (a/broadcast-to k (a/shape (first draws))))))
+
+(defmethod dc/-log-prob ::heterogeneous-mixture [{{:keys [weights components]} :params} v]
+  (a/logsumexp (+ (log weights) (a/stack (mapv #(dc/log-prob % v) components) -1)) {:axis -1}))
+
+(defn product
+  "A family of products of independent distributions (Gen.jl's
+   ProductDistribution): ((product normal bernoulli) [mu std] [p]) has values
+   [x b], a vector with one value per factor."
+  [& families]
+  (let [families (vec families)]
+    (fn [& factor-params]
+      (dc/check (= (count families) (count factor-params)) "product" "needs one parameter vector per factor"
+                {:factors (count families) :params (count factor-params)})
+      (dc/->Distribution ::product {:factors (mapv #(apply %1 %2) families factor-params)}))))
+
+(defmethod dc/-sample ::product [{{:keys [factors]} :params} key shape]
+  (mapv #(dc/sample %1 %2 shape) factors (rng/split key (count factors))))
+
+(defmethod dc/-log-prob ::product [{{:keys [factors]} :params} v]
+  (reduce + (map dc/log-prob factors v)))

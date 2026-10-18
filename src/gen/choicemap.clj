@@ -221,6 +221,14 @@
              [EMPTY 0]
              (map vector paths shapes sizes)))))
 
+(defn- stack-values
+  "Values stacked along a new leading axis; a vector value (a product
+   distribution's) is stacked element by element."
+  [vs]
+  (if (vector? (first vs))
+    (apply mapv (fn [& xs] (stack-values (vec xs))) vs)
+    (a/stack vs)))
+
 (defn stack
   "Stack choice maps with identical addresses into one whose leaves have a new
    leading axis (the batch of particles)."
@@ -230,7 +238,7 @@
       (when-not (= paths (addresses cm))
         (throw (ex-info "stack: the choice maps have different addresses"
                         {:expected paths :got (addresses cm)}))))
-    (reduce (fn [acc p] (set-choice acc p (a/stack (mapv #(get-choice % p) cms))))
+    (reduce (fn [acc p] (set-choice acc p (stack-values (mapv #(get-choice % p) cms))))
             EMPTY
             paths)))
 
@@ -239,7 +247,7 @@
    choice maps (the inverse of stack)."
   [cm n]
   (mapv (fn [i]
-          (reduce (fn [acc p] (set-choice acc p (a/take (get-choice cm p) i)))
+          (reduce (fn [acc p] (set-choice acc p (a/tree-map #(a/take % i) (get-choice cm p))))
                   EMPTY
                   (addresses cm)))
         (range n)))

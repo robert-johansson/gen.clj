@@ -3,6 +3,7 @@
    thesis; docs/research/genjl-parity.md §3), on fixed-structure,
    structure-changing, spliced and discrete models."
   (:require [clojure.test :refer [deftest is testing]]
+            [clojure.test.check]
             [gen.array :as a]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
@@ -66,8 +67,32 @@
           z (and z (trace :b (d/bernoulli 0.5)))]
       (trace :c (d/bernoulli (if z 0.9 0.1))))))
 
+(def shared-body
+  "A dynamic generative function spliced without an address."
+  (gen [mu]
+    (let [z (trace :z (d/normal mu 1))]
+      (when (trace :more (d/bernoulli 0.5))
+        (trace :w (d/normal z 1)))
+      z)))
+
+(def shared-namespace
+  (gen []
+    (let [mu (trace :mu (d/normal 0 1))
+          z (splice shared-body mu)]
+      (trace :obs (d/normal z 0.5)))))
+
+(def mixtures
+  "Mixture and product distributions at trace sites."
+  (gen []
+    (let [x (trace :x ((d/homogeneous-mixture d/normal) [0.3 0.7] [-2.0 1.0] [0.5 1.0]))
+          [u b] (trace :pair ((d/product d/normal d/bernoulli) [x 1.0] [0.4]))]
+      (trace :h ((d/heterogeneous-mixture [d/normal d/uniform]) [0.5 0.5] [u 1.0] [-1.0 1.0]))
+      b)))
+
 (def models
   [[:linreg linreg [[1.0 2.0 3.0]] [[[1.0 2.5]] [[0.5 1.0 1.5 2.0]]]]
+   [:shared-namespace shared-namespace []]
+   [:mixtures mixtures []]
    [:branching branching []]
    [:hierarchical hierarchical [3] [[1] [5]]]
    [:discrete discrete []]
@@ -211,3 +236,57 @@
 
 (deftest untraced-calls
   (is (number? (linreg [1.0 2.0])) "calling a generative function runs it, like Gen.jl"))
+
+;; ---------------------------------------------------------------------------
+;; Splices without an address; middleware and dispatch
+;; ---------------------------------------------------------------------------
+
+(deftest splices-without-an-address-share-the-namespace
+  (let [tr (gfi/simulate shared-namespace [] (rng/key 1))]
+    (is (every? #{[:mu] [:z] [:more] [:w] [:obs]} (cm/addresses (:choices tr))) "the callee's choices join the caller's")
+    (is (= 2.5 ((:trace (gfi/generate shared-namespace [] (cm/choicemap :z 2.5) (rng/key 2))) :z)) "constraints reach them")
+    (let [{t2 :trace} (gfi/update tr (cm/choicemap :z -1.0) (rng/key 3))]
+      (is (= -1.0 (t2 :z)))
+      (is (= (tr :mu) (t2 :mu))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"used twice"
+                          (gfi/simulate (gen [] (trace :z (d/normal 0 1)) (splice shared-body 0.0)) [] (rng/key 4)))
+        "addresses still may not collide")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"without an address needs a dynamic"
+                          (gfi/simulate (gen [] (splice (d/normal 0 1))) [] (rng/key 5))))))
+
+(def doubled-site
+  "Middleware for simulate: every value drawn at :x is doubled (a different
+   model, as middleware may be)."
+  (fn [state p dist k]
+    (let [[v s] ((dyn/site-transitions :simulate) state p dist k)]
+      (if (= p [:x])
+        [(a/* 2.0 v) (assoc-in s [:choices] (cm/set-choice (:choices s) p (a/* 2.0 v)))]
+        [v s]))))
+
+(deftest middleware-replaces-a-transition-for-one-operation
+  (let [m (gen [] (trace :x (d/normal 0 1)))
+        k (rng/key 6)
+        mw (dyn/with-transitions m {:simulate doubled-site})]
+    (is (= (* 2.0 ((gfi/simulate m [] k) :x)) ((gfi/simulate mw [] k) :x)))
+    (is (= ((:trace (gfi/generate m [] cm/EMPTY k)) :x) ((:trace (gfi/generate mw [] cm/EMPTY k)) :x))
+        "the other operations keep the standard transitions")))
+
+(def closed-form-assess
+  "A dispatcher computing linreg's assess in closed form; everything else
+   is left to the handler."
+  (fn [gf op [xs] {:keys [constraints batch-shape]}]
+    (when (and (= op :assess) (empty? batch-shape))
+      (let [c #(cm/get-choice constraints %)
+            slope (c :slope) intercept (c :intercept)
+            lp (fn [v mu sd] (- (- (Math/log sd)) 0.9189385332046728 (* 0.5 (Math/pow (/ (- v mu) sd) 2))))]
+        {:weight (+ (lp slope 0.0 10.0) (lp intercept 0.0 10.0)
+                    (reduce + (map-indexed (fn [i x] (lp (c [:y i]) (+ (* slope x) intercept) 1.0)) xs)))
+         :retval slope}))))
+
+(laws/deflaws dispatched [[:linreg (dyn/with-dispatch linreg closed-form-assess) [[1.0 2.0 3.0]]]] 100
+  {:dispatch-matches-handler laws/dispatch-matches-handler})
+
+(deftest a-wrong-dispatcher-is-caught
+  (let [wrong (fn [gf op args opts] (when (= op :assess) (update (closed-form-assess gf op args opts) :weight + 0.1)))
+        cases (laws/cases [[:linreg (dyn/with-dispatch linreg wrong) [[1.0 2.0 3.0]]]])]
+    (is (false? (:pass? (clojure.test.check/quick-check 20 (laws/dispatch-matches-handler cases)))))))

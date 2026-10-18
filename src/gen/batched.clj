@@ -159,7 +159,10 @@
         m (a/array (vec (if (a/array? mask) (a/->clj mask) mask)))]
     (if (and (batched? ps) (batched? qs)
              (= (cm/addresses (:choices (:trace ps))) (cm/addresses (:choices (:trace qs)))))
-      (let [pick (fn [p q] (a/where (a/reshape m (into [n] (repeat (dec (a/ndim p)) 1))) p q))
+      (let [pick (fn pick [p q]
+                   (if (vector? p)
+                     (mapv pick p q)
+                     (a/where (a/reshape m (into [n] (repeat (dec (a/ndim p)) 1))) p q)))
             paths (cm/addresses (:choices (:trace ps)))
             merged (reduce (fn [c path] (cm/set-choice c path (pick (cm/get-choice (:choices (:trace ps)) path)
                                                                      (cm/get-choice (:choices (:trace qs)) path))))

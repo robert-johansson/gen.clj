@@ -108,3 +108,41 @@
     (check (d/uniform-discrete 2 5) 3.5 1.25)
     (check (d/categorical [0.2 0.5 0.3]) 1.1 0.49)
     (check (d/piecewise-uniform [0.0 1.0 3.0 4.0] [0.5 0.2 0.3]) 1.7 (- (+ (/ 0.5 3) (* 0.2 (/ 13.0 3)) (* 0.3 (/ 37.0 3))) 2.89))))
+
+;; ---------------------------------------------------------------------------
+;; Mixtures and products
+;; ---------------------------------------------------------------------------
+
+(def normal-mixture (d/homogeneous-mixture d/normal))
+(def normal-uniform (d/heterogeneous-mixture [d/normal d/uniform]))
+(def normal-bernoulli (d/product d/normal d/bernoulli))
+
+(defn- density [dist v] (Math/exp (a/item (dc/log-prob dist v))))
+
+(deftest mixture-and-product-densities
+  (let [m (normal-mixture [0.3 0.7] [-2.0 1.0] [0.5 1.0])]
+    (doseq [v [-2.5 0.0 1.7]]
+      (is (close? (a/item (dc/log-prob m v))
+                  (Math/log (+ (* 0.3 (density (d/normal -2.0 0.5) v)) (* 0.7 (density (d/normal 1.0 1.0) v))))
+                  1e-12))))
+  (let [h (normal-uniform [0.4 0.6] [0.0 1.0] [-1.0 1.0])]
+    (is (close? (a/item (dc/log-prob h 0.5)) (Math/log (+ (* 0.4 (density (d/normal 0 1) 0.5)) (* 0.6 0.5))) 1e-12))
+    (is (close? (a/item (dc/log-prob h 3.0)) (Math/log (* 0.4 (density (d/normal 0 1) 3.0))) 1e-12)
+        "outside one component's support"))
+  (let [p (normal-bernoulli [0.5 2.0] [0.3])]
+    (is (close? (a/item (dc/log-prob p [1.0 true])) (+ (a/item (dc/log-prob (d/normal 0.5 2.0) 1.0)) (Math/log 0.3)) 1e-12))
+    (is (vector? (dc/sample p (rng/key 1))))))
+
+(deftest mixture-moments
+  (let [k (rng/key 98) n 100000
+        check (fn [dist mean var]
+                (let [x (dc/sample dist k [n])]
+                  (is (close? (a/mean x) mean (* 5 (Math/sqrt (/ var n)))) "mean")
+                  (is (close? (a/variance x) var (* 0.05 var)) "variance")))]
+    ;; mean Σ wμ, variance Σ w(σ² + μ²) - mean²
+    (check (normal-mixture [0.3 0.7] [-2.0 1.0] [0.5 1.0]) 0.1 (- (+ (* 0.3 4.25) (* 0.7 2.0)) 0.01))
+    (check (normal-uniform [0.5 0.5] [3.0 1.0] [-1.0 1.0]) 1.5 (- (+ (* 0.5 10.0) (* 0.5 (/ 1.0 3))) 2.25))))
+
+(deftest mixtures-validate-their-weights
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"probabilities" (normal-mixture [0.5 0.6] [0.0 1.0] [1.0 1.0])))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"one weight" (normal-uniform [1.0] [0.0 1.0] [0.0 1.0]))))

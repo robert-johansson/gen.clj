@@ -177,7 +177,11 @@
            [:bernoulli-p #(dc/log-prob (d/bernoulli %1) true) 0.3]
            [:categorical #(dc/log-prob (d/categorical-logits %1) 1) (a/array [0.2 -0.5 1.0])]
            [:mvnormal #(dc/log-prob (d/mvnormal %1 %2) %3) (a/array [0.1 -0.3]) (a/array [[2.0 0.3] [0.3 1.0]]) (a/array [0.5 0.2])]
-           [:dirichlet #(dc/log-prob (d/dirichlet %1) %2) (a/array [1.5 2.0 0.7]) (a/array [0.2 0.5 0.3])]]]
+           [:dirichlet #(dc/log-prob (d/dirichlet %1) %2) (a/array [1.5 2.0 0.7]) (a/array [0.2 0.5 0.3])]
+           [:normal-mixture #(dc/log-prob ((d/homogeneous-mixture d/normal) [0.3 0.7] %1 %2) %3)
+            (a/array [-1.0 1.5]) (a/array [0.6 1.2]) 0.4]
+           [:heterogeneous-mixture #(dc/log-prob ((d/heterogeneous-mixture [d/normal d/gamma]) [0.4 0.6] [%1 1.0] [%2 1.0]) %3)
+            0.2 2.0 1.3]]]
     (is (apply grad-matches? f xs) (str label))))
 
 ;; ---------------------------------------------------------------------------

@@ -14,7 +14,8 @@
    Models are [label gf args alt-args]: alt-args is a vector of other
    argument vectors, so that update and regenerate are also checked with
    changed arguments. (deflaws prefix models n) defines a defspec per law."
-  (:require [clojure.test.check.generators :as gen]
+  (:require [clojure.test.check.clojure-test]
+            [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
             [gen.array :as a]
             [gen.choicemap :as cm]
@@ -240,6 +241,27 @@
   (prop/for-all [[[_ gf args] seed] cases]
     (diff/no-change? (:retdiff (gfi/update (gfi/simulate gf args (rng/key seed)) cm/EMPTY (rng/key (inc seed)))))))
 
+(defn dispatch-matches-handler
+  "A dispatcher (gen.dynamic/with-dispatch) is observationally equivalent to
+   the handler: each operation gives the same choices, weights and return
+   values with the same key. Over cases of models whose gf has a dispatcher."
+  [cases]
+  (prop/for-all [[[_ gf args] seed picks] cases]
+    (let [plain (assoc gf :dispatch nil)
+          k (rng/key seed)
+          same? (fn [r1 r2] (and (= (:choices (:trace r1)) (:choices (:trace r2)))
+                                 (= (:retval (:trace r1)) (:retval (:trace r2)))
+                                 (close? (or (:weight r1) 0.0) (or (:weight r2) 0.0))
+                                 (= (:discard r1) (:discard r2))))
+          tr (gfi/simulate plain args k)
+          sigma (restrict (:choices tr) (picked (addrs tr) picks))
+          s (sel/from-paths (picked (addrs tr) picks))]
+      (and (= (:choices (gfi/simulate gf args k)) (:choices tr))
+           (same? (gfi/generate gf args sigma k) (gfi/generate plain args sigma k))
+           (close? (:weight (gfi/assess gf args (:choices tr))) (:weight (gfi/assess plain args (:choices tr))))
+           (same? (gfi/update (assoc tr :gen-fn gf) sigma k) (gfi/update tr sigma k))
+           (same? (gfi/regenerate (assoc tr :gen-fn gf) s k) (gfi/regenerate tr s k))))))
+
 (def general
   {:score-is-the-assessed-density score-is-the-assessed-density
    :generate-with-every-choice-is-deterministic generate-with-every-choice-is-deterministic
@@ -264,11 +286,11 @@
 (def all (merge general forward-sampling))
 
 (defmacro deflaws
-  "A defspec per law (from gen.laws/all, or the given law map), named
-   prefix-law, each over cases of models."
+  "A defspec per law (from gen.laws/all, or the given law map: a var's
+   symbol or a literal map), named prefix-law, each over cases of models."
   ([prefix models num-tests] `(deflaws ~prefix ~models ~num-tests all))
   ([prefix models num-tests laws]
-   (let [laws-map @(resolve laws)
+   (let [laws-map (if (symbol? laws) @(resolve laws) laws)
          cs (gensym "cases")]
      `(let [~cs (cases ~models)]
         ~@(for [law (keys laws-map)]
