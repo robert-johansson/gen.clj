@@ -24,6 +24,12 @@
 (defprotocol IArray
   (-backend [x] "The IBackend this array belongs to."))
 
+(defprotocol IWrappingBackend
+  "A backend whose arrays build on another backend's, such as the tape of
+   reverse-mode autodiff: an op mixing its arrays with the inner backend's
+   runs on the wrapping backend."
+  (-inner [b] "The backend this one wraps."))
+
 (defprotocol IBackend
   (-name [b]
     "Keyword naming the backend, e.g. :jvm or :mlx.")
@@ -83,6 +89,10 @@
     "Gather: the result's axis is replaced by the shape of indices (an int array).")
   (-take-along-axis [b x indices axis]
     "Gather with indices broadcast against x on every other axis.")
+  (-scatter-add [b x indices updates axis]
+    "x with updates added at indices along axis, accumulating repeats: the
+     transpose of take-along-axis. indices (an int array) and updates have one
+     shape, equal to x's on every axis but axis.")
 
   ;; --- linear algebra --------------------------------------------------------
   (-matmul [b x y] "Matrix product with NumPy batching rules.")

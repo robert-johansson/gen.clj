@@ -15,11 +15,7 @@
   (let [x (if (= :float (dt/kind (a/dtype x))) x (a/astype x (:float (p/-defaults b))))]
     (if (a/host? x) (a/with-backend b (a/array x)) x)))
 
-(defn- backend-of [& xs]
-  (let [bs (distinct (keep #(when-not (a/host? %) (a/backend %)) xs))]
-    (when (next bs)
-      (throw (ex-info "linalg: arrays from different backends" {:backends (map p/-name bs)})))
-    (or (first bs) a/*backend*)))
+(defn- backend-of [& xs] (a/common-backend xs))
 
 (defn- with-matrix-rhs
   "Call (f a rhs) with rhs as [.. n k], restoring a vector right-hand side. A

@@ -485,6 +485,25 @@
         (aset out i (aget src (+ (aget xo i) (* k axis-stride))))))
     (make out out-shape (dtype-of x))))
 
+(defn- scatter-add [x indices updates ^long axis]
+  (let [sx (shape-of x)
+        su (shape-of updates)
+        _ (when-not (and (= su (shape-of indices)) (= (count sx) (count su))
+                         (every? true? (map (fn [k a b] (or (= k axis) (= a b))) (range) sx su)))
+            (throw (ex-info "scatter-add needs indices and updates of one shape, equal to the array's but on axis"
+                            {:shape sx :indices-shape (shape-of indices) :updates-shape su :axis axis})))
+        d (long (nth sx axis))
+        st (sh/strides sx)
+        axis-stride (aget st axis)
+        ^longs xo (sh/strided-offsets su (long-array (map-indexed (fn [k s] (if (= k axis) 0 s)) st)) 0)
+        ^doubles src (data-of updates)
+        ^doubles ix (data-of indices)
+        out (aclone (data-of x))]
+    (dotimes [i (alength xo)]
+      (let [o (+ (aget xo i) (* (index-value (aget ix i) d) axis-stride))]
+        (aset out o (+ (aget out o) (aget src i)))))
+    (make out sx (dtype-of x))))
+
 (defn- matmul [x y]
   (let [sx (shape-of x) sy (shape-of y)
         _ (when (or (zero? (count sx)) (zero? (count sy)))
@@ -797,10 +816,6 @@
             :bool (dotimes [i n] (aset out i (if (== (aget src i) 0.0) 0.0 1.0))))
           (make out (shape-of x) dtype))))
 
-(defn- not-yet [what bean]
-  (throw (ex-info (str "The JVM backend does not implement " what " yet (bean " bean ")")
-                  {:missing what :bean bean})))
-
 ;; ---------------------------------------------------------------------------
 ;; The backend
 ;; ---------------------------------------------------------------------------
@@ -844,11 +859,14 @@
 
   (-take [_ x indices axis] (take-op x indices axis))
   (-take-along-axis [_ x indices axis] (take-along-axis x indices axis))
+  (-scatter-add [_ x indices updates axis] (scatter-add x indices updates axis))
 
   (-matmul [_ x y] (matmul x y))
   (-linalg [_ op args] (linalg op args))
   (-random-uniform [_ key shape dtype] (random-uniform key shape dtype))
-  (-value-and-grad [_ _ _ _] (not-yet "differentiation" "genclj-1d6z")))
+  ;; reverse mode by the backend-generic tape (loaded on first use, since it
+  ;; is written against gen.array, which requires this namespace)
+  (-value-and-grad [b f args argnums] ((requiring-resolve 'gen.array.tape/value-and-grad) b f args argnums)))
 
 (def backend (JvmBackend.))
 

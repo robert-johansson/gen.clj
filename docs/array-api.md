@@ -166,7 +166,7 @@ needs, taken from GenMLX's measured call counts
 | normalization | `softmax` `log-softmax` | — | both |
 | scans | `cumsum` `cumprod` `logcumsumexp` | `-scan` with `:cumsum :cumprod :cummax :cummin` | `logcumsumexp` |
 | shape | `reshape` `transpose` `squeeze` `expand-dims` `broadcast-to` `stack` `concatenate` `flatten` `tile` | `-reshape` `-transpose` `-broadcast-to` `-concatenate` | `squeeze`, `expand-dims`, `stack`, `flatten`, `tile` |
-| indexing | `slice` `take` `take-along-axis` `pick` | `-slice` `-take` `-take-along-axis` | `pick` |
+| indexing | `slice` `take` `take-along-axis` `pick` `scatter-add` | `-slice` `-take` `-take-along-axis` `-scatter-add` | `pick` |
 | linear algebra | `matmul` `outer` `diag` · `la/cholesky` `la/solve-triangular` `la/solve` `la/inv` `la/slogdet` | `-matmul` `-linalg` | `outer`, `diag` |
 | gradients | `grad` `value-and-grad` `stop-gradient` | `-value-and-grad`, `:stop-gradient` | — |
 | trees | `tree-map` `tree-leaves` | — | both |
@@ -184,7 +184,9 @@ needs, taken from GenMLX's measured call counts
 
 **Deliberately absent from v1:**
 - the LLM ops (sdpa, rope, rms-norm, quantized matmul): M3;
-- scatter, sort and top-k: added when a ported module needs them;
+- sort, top-k and general scatter: added when a ported module needs them
+  (`scatter-add` along an axis, the transpose of `take-along-axis`, came with
+  autodiff: §12.8);
 - `vmap` and `compile`: §8;
 - devices and streams: backend options in M2.
 
@@ -343,3 +345,10 @@ How to read these numbers:
 6. **Generic tape AD written against the public API** (§8), instead of a
    JVM-specific AD.
 7. **JVM storage is `double[]` for all dtypes** (int64 exact to 2^53) (§5).
+8. **`scatter-add` along an axis is a primitive** (added 2026-10-18 with the
+   tape, for the owner's review). The VJPs of `slice`, `take` and
+   `take-along-axis` are scatter-adds, and no composite of the v1 primitives
+   computes them in linear time. It is the exact transpose of
+   `take-along-axis` and maps onto MLX's `scatter_add` in M2. Tape backends
+   are found by a marker protocol, `IWrappingBackend`: an op mixing tracked
+   values with the wrapped backend's arrays runs on the tape.

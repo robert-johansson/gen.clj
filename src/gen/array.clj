@@ -58,10 +58,17 @@
         (backend-array? x) (p/-backend x)
         :else (not-an-array op x)))
 
+(defn- wraps?
+  "Does backend b wrap inner (so that mixed operands run on b)?"
+  [b inner]
+  (and (instance? gen.array.protocols.IWrappingBackend b) (identical? (p/-inner b) inner)))
+
 (defn- join-backends [op b1 b2]
   (cond (nil? b1) b2
         (nil? b2) b1
         (identical? b1 b2) b1
+        (wraps? b1 b2) b1
+        (wraps? b2 b1) b2
         :else (throw (ex-info (str (name op) ": arrays from different backends ("
                                    (p/-name b1) " and " (p/-name b2) ")")
                               {:op op :backends [(p/-name b1) (p/-name b2)]}))))
@@ -76,6 +83,12 @@
   "The backend of x (*backend* for host scalars)."
   [x]
   (or (operand-backend :backend x) *backend*))
+
+(defn common-backend
+  "The backend an op on all of xs runs on (*backend* when all are host
+   scalars); throws when they come from unrelated backends."
+  [xs]
+  (backend-of :common-backend xs))
 
 (defn dtype
   "The dtype keyword of x."
@@ -336,11 +349,17 @@
   (let [m (maximum x y)]
     (where (isinf m) m (+ m (log1p (exp (negate (abs (- x y)))))))))
 
+;; Only the 0·log 0 point is special-cased, and with a safe stand-in input
+;; ("double where"): the derivative in x at x = 0 stays log y, and the discarded
+;; branch cannot turn into a NaN cotangent.
+
 (defn xlogy "Elementwise x·log(y), with 0·log(y) = 0 (also for y = 0)." [x y]
-  (where (== x 0) 0.0 (* x (log y))))
+  (let [zero? (logical-and (== x 0) (== y 0))]
+    (where zero? 0.0 (* x (log (where zero? 1.0 y))))))
 
 (defn xlog1py "Elementwise x·log1p(y), with 0·log1p(y) = 0 (also for y = -1)." [x y]
-  (where (== x 0) 0.0 (* x (log1p y))))
+  (let [zero? (logical-and (== x 0) (== y -1))]
+    (where zero? 0.0 (* x (log1p (where zero? 0.0 y))))))
 
 (defn clip
   "Elementwise clamp of x to [lo, hi]; either bound may be nil."
@@ -762,6 +781,16 @@
   (let [b (backend-of :take-along-axis [x indices])]
     (p/-take-along-axis b x indices (sh/axis (long axis) (ndim x)))))
 
+(defn scatter-add
+  "x with updates added at indices along axis, accumulating repeated indices:
+   the transpose of take-along-axis. indices (an int array) and updates have
+   one shape, equal to x's on every axis but axis."
+  [x indices updates axis]
+  (check-indices :scatter-add indices)
+  (let [b (backend-of :scatter-add [x updates indices])
+        d (common-dtype b [x updates])]
+    (p/-scatter-add b (cast-to b x d) indices (cast-to b updates d) (sh/axis (long axis) (ndim x)))))
+
 (defn pick
   "Index the last axis of x by the int array idx, broadcasting the remaining
    (batch) axes of x against idx. With log-probabilities x, (pick x v) is the
@@ -813,6 +842,32 @@
                                   1)
                  [k]))
     (throw (ex-info "diag needs a 1-d or 2-d array" {:shape (shape x)}))))
+
+;; ---------------------------------------------------------------------------
+;; Differentiation (docs/array-api.md §8)
+;; ---------------------------------------------------------------------------
+
+(defn value-and-grad
+  "A function of the same arguments as f returning [value gradient]: f's
+   value (a 0-d array) and its gradient with respect to the argument at
+   :argnums (default 0), or a vector of gradients when :argnums is a vector.
+   An argument may be a tree of maps and vectors of float arrays and numbers;
+   its gradient has the same structure. stop-gradient blocks differentiation.
+   First order only: f may not itself differentiate."
+  ([f] (value-and-grad f nil))
+  ([f {:keys [argnums] :or {argnums 0}}]
+   (fn [& args]
+     (let [args (vec args)
+           positions (if (sequential? argnums) (vec argnums) [argnums])
+           b (backend-of :value-and-grad (mapcat #(tree-leaves (nth args %)) positions))
+           [v grads] (p/-value-and-grad b f args positions)]
+       [v (if (sequential? argnums) grads (first grads))]))))
+
+(defn grad
+  "A function of the same arguments as f returning its gradient (see
+   value-and-grad)."
+  ([f] (grad f nil))
+  ([f opts] (comp second (value-and-grad f opts))))
 
 ;; ---------------------------------------------------------------------------
 ;; Comparison helpers (for tests and assertions)

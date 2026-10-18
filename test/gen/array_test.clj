@@ -114,7 +114,7 @@
     (is (a/allclose? (a/log (a/softmax (a/array [1.0 2.0 3.0])))
                      (a/log-softmax (a/array [1.0 2.0 3.0]))))))
 
-(deftest reductions
+(deftest reduction-ops
   (let [x (a/array [[1 2 3] [4 5 6]])]
     (is (= 21 (a/sum x)))
     (is (= [5 7 9] (a/->clj (a/sum x {:axis 0}))))
