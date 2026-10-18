@@ -8,7 +8,9 @@
             [gen.array.batch :as batch]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
+            [gen.combinators :as comb]
             [gen.dist :as d]
+            [gen.dist.core :as dc]
             [gen.dynamic :as dyn :refer [gen]]
             [gen.gfi :as gfi]
             [gen.laws :as laws]
@@ -344,3 +346,37 @@
     (is (close? w (a/- (a/- (:score t) (:score tr)) (gfi/project t (sel/select :s)))))
     (is (= (cm/choicemap :c true [:s :x] 0.5) disc))
     (is (= (:choices tr) (:choices (:trace (gfi/update t disc (rng/key 3))))) "and the update reverses")))
+
+(deftest third-review-regressions
+  (testing "B2: a splice whose dynamic callee changes keeps shared addresses"
+    (let [ma (gen [] (trace :obs (d/normal 0 1)))
+          mb (gen [] (trace :obs (d/normal 2 1)))
+          m (gen [] (splice :s (if (trace :i (d/bernoulli 0.5)) ma mb)))
+          tr (:trace (gfi/generate m [] (cm/choicemap :i true [:s :obs] 1.5) (rng/key 1)))
+          {t :trace w :weight} (gfi/regenerate tr (sel/select :i) (rng/key 2))]
+      (is (= 1.5 (t [:s :obs])) "the unselected observation keeps its value")
+      (when-not (t :i)
+        (is (close? w (- (dc/log-prob (d/normal 2 1) 1.5) (dc/log-prob (d/normal 0 1) 1.5)))))))
+  (testing "B5: values of the wrong shape are errors everywhere"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"shape"
+                          (gfi/generate (gen [] (splice :x (d/normal 0 1))) [] (cm/choicemap :x (a/array [1.0 2.0 3.0])) (rng/key 1))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"shape" (gfi/assess (d/normal 0 1) [] (cm/->Value (a/array [1.0 2.0])))))
+    (let [m (gen [d] (trace :v (d/normal (a/zeros [d]) 1)))
+          tr (gfi/simulate m [1] (rng/key 2))]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"shape" (gfi/update tr [3] [diff/unknown-change] cm/EMPTY (rng/key 3)))
+          "a retained value whose parameters change shape"))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"shape"
+                          (dc/log-prob ((d/product d/normal d/bernoulli) [0 1] [0.3]) [(a/array [1.0 2.0 3.0]) true]))))
+  (testing "B6: trace calls in lazy splice arguments are recorded"
+    (let [m (gen [] (splice :m (comb/map observation) (vec (map #(trace [:x %] (d/normal 0 1)) (range 3)))))
+          tr (gfi/simulate m [] (rng/key 4))]
+      (is (= 3 (count (filter #(= :x (first %)) (cm/addresses (:choices tr))))))
+      (is (close? (:score tr) (:weight (gfi/assess m [] (:choices tr))))))
+    (is (re-find #"lazy and its value is discarded"
+                 (str (try (eval '(gen.dynamic/gen [xs] (->> xs (map-indexed (fn [i x] (trace [:y i] (gen.dist/normal x 1))))) nil))
+                           nil (catch Throwable e (.getMessage ^Throwable (or (.getCause e) e))))))))
+  (testing "B7: an infinite lazy return value costs little"
+    (let [m (gen [] (let [s (trace :s (d/normal 0 1))] (map #(* s %) (range))))
+          t0 (System/nanoTime)]
+      (dotimes [i 20] (gfi/simulate m [] (rng/key i)))
+      (is (< (/ (- (System/nanoTime) t0) 1e6) 400.0) "under 20 ms a run"))))

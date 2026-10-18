@@ -6,10 +6,13 @@
    handler cost is paid once rather than n times.
 
    When the code cannot treat the particles alike (it branches on a value
-   that differs across them, reads one on the host, or does host math on it:
-   the gen.array/batched-branch error), the collection falls back to one
-   scalar trace per particle and carries on. Batching is an optimization:
-   it never changes meaning.
+   that differs across them, compares or reads one on the host, or does host
+   math on it), the batched run fails and the collection falls back to one
+   scalar trace per particle, which gives the scalar semantics. Batching is an
+   optimization. It does not change meaning for code inside gen bodies that
+   works through gen.array. The limits are a raw if or case on a batched
+   value in a helper function outside gen, which no macro guards, and a
+   vector get or contains? with a batched key (docs/array-api.md §8a).
 
      (simulate gf args n key)                    → particles
      (generate gf args constraints n key)        → {:particles :weights}
@@ -44,21 +47,15 @@
 
 (defn size [ps] (:n ps))
 
-(defn- branch-error?
-  "Did a batched run find particles it cannot treat alike? The
-   batched-branch error, or host math on a batched value (whose class the
-   ClassCastException names)."
-  [^Throwable e]
-  (boolean (or (:gen.array/batched-branch (ex-data e))
-               (and (instance? ClassCastException e)
-                    (some-> (.getMessage e) (.contains "gen.array.batch.Batched"))))))
-
 (defmacro ^:private batched-or
-  "batched, or fallback if it finds particles it cannot treat alike."
+  "batched, or fallback if the batched run fails. The usual cause is code
+   that cannot treat the particles alike (the batched-branch error, host
+   math or a host collection lookup on a batched value); whatever the cause,
+   the per-particle run gives the scalar semantics, and a genuine error
+   surfaces there."
   [batched fallback]
   `(try ~batched
-        (catch Exception e#
-          (if (branch-error? e#) ~fallback (throw e#)))))
+        (catch Exception _# ~fallback)))
 
 (defn- run [gf op args n opts] (gfi/run-op gf op args (assoc opts :batch-shape [n])))
 
@@ -153,19 +150,25 @@
 ;; Particles as a population
 ;; ---------------------------------------------------------------------------
 
+(defn- gather
+  "x with every batched value's particles gathered at idx, as a new batch of
+   n' particles: through traces, choice maps, records, maps and vectors, so
+   a resampled trace is made without re-running the model."
+  [x idx n']
+  (cond (batch/batched? x) (batch/gather x idx [n'])
+        (record? x) (reduce-kv (fn [m k v] (assoc m k (gather v idx n'))) x x)
+        (map? x) (into (empty x) (map (fn [[k v]] [k (gather v idx n')])) x)
+        (vector? x) (mapv #(gather % idx n') x)
+        :else x))
+
 (defn take
   "The particles at indices (a seq of n' integers), e.g. after resampling."
   [ps indices]
   (let [indices (vec indices)
-        n' (count indices)
-        fallback #(assoc ps :n n' :trace nil :traces (mapv (traces ps) indices))]
+        n' (count indices)]
     (if (batched? ps)
-      (let [idx (a/array indices {:dtype :int64})]
-        (batched-or
-         (assoc ps :n n' :trace (rebuild (:gen-fn ps) (:args ps) n'
-                                         (map-leaves #(a/take % idx 0) (plain-choices (:choices (:trace ps)) (:n ps)))))
-         (fallback)))
-      (fallback))))
+      (assoc ps :n n' :trace (gather (:trace ps) (a/array indices {:dtype :int64}) n'))
+      (assoc ps :n n' :traces (mapv (:traces ps) indices)))))
 
 (defn select
   "ps's particle where mask (n booleans, or a bool array) is true and qs's

@@ -281,8 +281,10 @@ Two layers make this safe:
      compare or hash it; see §8b). The error tells the batched executor to fall
      back to running particles one at a time. That is correct, just slower.
      Batching is an optimization, and the handler is ground truth.
-   - Outside `gen` bodies (helper functions a model calls), a raw `if` on an
-     array is not guarded: branch with `a/truthy?` there.
+   - Outside `gen` bodies (helper functions a model calls), a raw `if` or
+     `case` on an array is not guarded: branch with `a/truthy?` there. (`=`,
+     `not=` and `condp =` reach a batched value anywhere, through `=`;
+     vector `get`/`contains?` with a batched key cannot be intercepted.)
 
 ## 8b. Batching by tracing (vmap semantics)
 
@@ -309,8 +311,15 @@ like the AD tape:
 
 Running a generative function's scalar code under the batch backend runs it
 batched (`gfi/run-op` with `:batch-shape`). Every generative function
-therefore has a batched form with the same meaning, so batching cannot change
-meaning by construction. Measured: 9–41× faster importance sampling on the
+therefore has a batched form. It has the same meaning for code inside `gen`
+bodies that works through gen.array. The limits are a raw `if` or `case` in
+a helper function outside `gen`, and a vector lookup with a batched key
+(§8a). Any batched run that fails falls back to one particle at a time.
+*Hardened 2026-10-19 after a third review* (docs/research/review-2026-10-19.md):
+- `=` reaches the batch in either order;
+- validation reads every particle;
+- linear algebra aligns per-particle ranks;
+- resampling gathers lazily rather than re-running the model. Measured: 9–41× faster importance sampling on the
 JVM backend (`docs/benchmarks.md`).
 
 ## 9. Evaluation and memory

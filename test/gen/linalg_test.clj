@@ -63,3 +63,8 @@
   (is (= [0.0 ##-Inf] (la/slogdet (a/array [[1.0 2.0] [2.0 4.0]]))) "singular")
   (is (= [1.0 2.0] (a/->clj (la/diagonal (a/array [[1.0 9.0] [9.0 2.0]])))))
   (is (thrown? clojure.lang.ExceptionInfo (la/cholesky (a/ones [2 3])))))
+
+(deftest solve-checks-its-right-hand-side
+  ;; third review B12
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"do not match"
+                        (la/solve (a/eye 3) (a/ones [4 2])))))

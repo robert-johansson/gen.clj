@@ -13,9 +13,12 @@
    (a/with-backend (batch/backend inner batch-shape) …) runs it batched:
    creation functions and constants stay unbatched (shared), draws are
    batched. Reading a batched value on the host (a/item, a/->clj, truthy? of
-   a boolean, =, hash) cannot give one answer for every particle: it throws
-   ex-info with :gen.array/batched-branch true, the signal to fall back to
-   one particle at a time."
+   a boolean, = in either order, condp, hashing, counting) cannot give one
+   answer for every particle: it throws ex-info with
+   :gen.array/batched-branch true, the signal to fall back to one particle at
+   a time. What cannot be intercepted: a raw if or case on a batched value
+   outside a gen body, and a vector get or contains? with a batched key
+   (docs/array-api.md §8a)."
   (:require [gen.array :as a]
             [gen.array.dtype :as dt]
             [gen.array.protocols :as p]))
@@ -28,24 +31,44 @@
   (throw (ex-info (str "Cannot " what " a batched value: it differs across particles")
                   {:gen.array/batched-branch true})))
 
-(deftype Batched [value backend]
+(declare value)
+
+;; v is the wrapped array, or a delay of it (a lazily gathered value: see
+;; gather); value derefs it once and caches it
+(deftype Batched [v backend]
   p/IArray
   (-backend [_] backend)
 
-  ;; a batch of values equals no single value, and hashing it would pick one
+  p/IBatchedValue
+  (-all-particles [this] (value this))
+
+  ;; A batch of values equals no single value, and hashing it would pick one.
+  ;; As a persistent collection, it is also what Clojure's = consults when the
+  ;; batch is on the right, (= 0 x), and what condp, case and = inside vectors
+  ;; reach: every one of them raises the batched-branch error.
   Object
   (equals [this o] (or (identical? this o) (branch! "compare")))
-  (hashCode [_] (branch! "hash")))
+  (hashCode [_] (branch! "hash"))
+
+  clojure.lang.IHashEq
+  (hasheq [_] (branch! "hash"))
+
+  clojure.lang.IPersistentCollection
+  (count [_] (branch! "count"))
+  (cons [_ _] (branch! "extend"))
+  (empty [_] (branch! "empty"))
+  (equiv [this o] (or (identical? this o) (branch! "compare")))
+  (seq [_] (branch! "iterate")))
 
 (defmethod print-method Batched [x ^java.io.Writer w]
-  (.write w "#gen/batched[") (print-method (.-value ^Batched x) w) (.write w "]"))
+  (.write w "#gen/batched[") (print-method (value x) w) (.write w "]"))
 
 (defn batched? [x] (instance? Batched x))
 
 (defn value
   "The wrapped array of a batched value (leading batch axes)."
   [^Batched x]
-  (.-value x))
+  (let [v (.-v x)] (if (delay? v) @v v)))
 
 (declare backend lift full-batch)
 
@@ -56,9 +79,9 @@
   p/IBackend
   (-name [_] :batch)
   (-defaults [_] (p/-defaults inner))
-  ;; values are not readable on the host: validation that reads parameters
-  ;; (a/concrete?) skips batched ones
-  (-lazy? [_] true)
+  ;; batched values are as concrete as the wrapped backend's: validation reads
+  ;; every particle (gen.array/all-true?)
+  (-lazy? [_] (p/-lazy? inner))
   (-native-ops [_] #{})
 
   (-from-host [_ data dtype] (p/-from-host inner data dtype))
@@ -70,7 +93,13 @@
                   (a/shape x)))
   (-dtype [_ x] (if (batched? x) (p/-dtype inner (value x)) (a/dtype x)))
 
-  (-full [_ shape v dtype] (p/-full inner shape v dtype))
+  (-full [b shape v dtype]
+    (if (batched? v)
+      ;; a per-particle fill value: each particle's array is filled with its own
+      (->Batched (p/-broadcast-to inner (lift b (->Batched (p/-astype inner (value v) dtype) b) (count shape))
+                                  (into batch-shape shape))
+                 b)
+      (p/-full inner shape v dtype)))
   (-arange [_ start stop step dtype] (p/-arange inner start stop step dtype))
   (-astype [b x dtype]
     (if (batched? x)
@@ -177,8 +206,10 @@
     (let [arrays (vec (remove map? args))
           opts (first (filter map? args))]
       (if (some batched? arrays)
-        (let [vs (mapv #(full-batch b %) arrays)
-              ;; broadcast the per-particle batch dimensions of the operands
+        (let [r (reduce max 0 (map #(count (p/-shape b %)) arrays))
+              ;; the operands aligned on their per-particle axes; the wrapped
+              ;; backend broadcasts the batch axes
+              vs (mapv #(lift b % r) arrays)
               out (p/-linalg inner op (cond-> vs opts (conj opts)))]
           (if (= op :slogdet) (mapv #(->Batched % b) out) (->Batched out b)))
         (p/-linalg inner op args))))
@@ -186,8 +217,12 @@
   (-random-uniform [b key shape dtype]
     (->Batched (p/-random-uniform inner key (into batch-shape shape) dtype) b))
 
-  (-value-and-grad [_ _ _ _]
-    (throw (ex-info "Differentiating inside a batched run is not supported" {:gen.array/batched-branch true}))))
+  (-value-and-grad [_ f args argnums]
+    (if (some batched? (mapcat #(a/tree-leaves (nth args %)) argnums))
+      (throw (ex-info "Differentiating with respect to batched values is not supported"
+                      {:gen.array/batched-branch true}))
+      ;; unbatched leaves: an ordinary gradient on the wrapped backend
+      (p/-value-and-grad inner f args argnums))))
 
 (defn- lift
   "x as an array of the wrapped backend (or a host scalar) ready to
@@ -236,9 +271,10 @@
   (let [b a/*backend*
         bs (vec batch-shape)]
     (if (instance? BatchBackend b)
-      (if (= bs (.-batch-shape ^BatchBackend b))
-        b
-        (throw (ex-info "A batched run inside a batched run of another batch shape" {:outer (.-batch-shape ^BatchBackend b) :inner bs})))
+      ;; a batched collection inside a batched run would tie its particles to
+      ;; the outer ones: run the outer one per particle instead
+      (throw (ex-info "A batched run inside a batched run" {:gen.array/batched-branch true
+                                                            :outer (.-batch-shape ^BatchBackend b) :inner bs}))
       (backend b bs))))
 
 (defmacro batched
@@ -251,6 +287,14 @@
    are batch-shape."
   [x batch-shape]
   (->Batched x (backend (a/backend x) batch-shape)))
+
+(defn gather
+  "x's particles at the indices idx (an int array), as a batch of
+   batch-shape, lazily: the gather runs the first time the value is read, so
+   gathering a whole trace (resampling) costs nothing for the values that are
+   never read again."
+  [x idx batch-shape]
+  (->Batched (delay (a/take (value x) idx 0)) (backend (.-inner ^BatchBackend (.-backend ^Batched x)) batch-shape)))
 
 (defn unwrap
   "x as an array of the wrapped backend with the leading batch axes of

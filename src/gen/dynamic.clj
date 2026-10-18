@@ -147,6 +147,7 @@
                prev (-> (add-weight (a/negate (second prev)))
                         (update :discard cm/set-choice p (first prev))))])
       prev (let [[v prev-lp] prev
+                 _ (dc/check-value-shape dist v)
                  lp (site-log-prob dist v)]
              [v (-> state (record p v lp) (add-weight (a/- lp prev-lp)))])
       :else (simulate-site state p dist k))))
@@ -155,6 +156,7 @@
   (let [prev (prev-choice state p)]
     (if (and prev (not (path-selected? (:selection state) p)))
       (let [[v prev-lp] prev
+            _ (dc/check-value-shape dist v)
             lp (site-log-prob dist v)]
         [v (-> state (record p v lp) (add-weight (a/- lp prev-lp)))])
       ;; selected, or a new address: a fresh draw from the prior, which cancels
@@ -195,24 +197,22 @@
 
 (declare dynamic-gf?)
 
-(defn- same-callee?
-  "Can the previous call's sub-trace be updated by gf? The same code: the
-   same distribution family, a dynamic body of the same compiled function
-   (a gen written inside a body is a new closure on every run, of one class),
-   or a generative function of the same type whose parts are the same in this
-   sense (combinators and their kernels)."
+(defn compatible-callee?
+  "Can gf update (or regenerate) old's sub-trace? A sub-trace holds choices
+   by address, so any dynamic generative function can run against another's
+   (the addresses they share keep their values, as with if), and any
+   distribution against another's single value; a combinator needs one of its
+   own type, with compatible kernels."
   [old gf]
-  (letfn [(same? [x y]
-            (cond (identical? x y) true
-                  (and (instance? gen.dist.core.Distribution x) (instance? gen.dist.core.Distribution y))
-                  (= (:type x) (:type y))
-                  (and (dynamic-gf? x) (dynamic-gf? y)) (= (class (:body-fn x)) (class (:body-fn y)))
-                  (and (record? x) (gfi/generative-function? x))
-                  (and (= (class x) (class y)) (every? #(same? (get x %) (get y %)) (keys x)))
-                  (and (vector? x) (vector? y)) (and (= (count x) (count y)) (every? true? (map same? x y)))
-                  (and (map? x) (map? y)) (and (= (set (keys x)) (set (keys y))) (every? #(same? (x %) (y %)) (keys x)))
-                  :else (= x y)))]
-    (same? old gf)))
+  (cond (identical? old gf) true
+        (and (instance? gen.dist.core.Distribution old) (instance? gen.dist.core.Distribution gf)) true
+        (and (dynamic-gf? old) (dynamic-gf? gf)) true
+        (and (record? old) (gfi/generative-function? old))
+        (and (= (class old) (class gf))
+             (every? (fn [k] (let [x (get old k)]
+                               (or (not (gfi/generative-function? x)) (compatible-callee? x (get gf k)))))
+                     (keys old)))
+        :else (= old gf)))
 
 (defn- replace-call
   "state without the previous call at p (its choices discarded and, in
@@ -231,7 +231,7 @@
   (let [mode (:mode state)
         cons (cm/get-submap (:constraints state) p)
         old-sub (get (::subtraces (:prev state)) p)
-        replaced? (and old-sub (not (same-callee? (:gen-fn old-sub) gf)))
+        replaced? (and old-sub (not (compatible-callee? (:gen-fn old-sub) gf)))
         prev-sub (when-not replaced? old-sub)
         state (if replaced? (replace-call state p old-sub) state)
         ;; a batched run's callees run batched too: they inherit the batch tracer
@@ -319,15 +319,15 @@
 
 (declare run-handler)
 
-(def ^:private realize-limit 1000000)
+(def ^:private realize-limit 10000)
 
 (defn- realize!
   "Force the lazy sequences in a body's return value (and in the vectors,
    lists and maps holding them), so that trace calls in them happen during
    the run. Lazy sequences cache their elements, so this changes no value.
-   Only lazy sequences proper are forced, and only to realize-limit elements:
-   an infinite (repeat x), (range) or (map f (range)) is left as it is, and
-   a trace call that escapes this way is a loud error (check-running!)."
+   Only lazy sequences proper are forced, and only their first realize-limit
+   elements: the rest of a longer (or infinite) one stays lazy, and a trace
+   call in it is a loud error after the run (check-running!)."
   [x]
   (cond (instance? clojure.lang.LazySeq x) (run! realize! (take realize-limit x))
         (or (vector? x) (list? x)) (run! realize! x)
@@ -365,27 +365,34 @@
                       ;; (splice gf & args): Gen.jl's {*} ~ gf(args), the callee's choices in
                       ;; this namespace. Its body runs under this handler, so constraints,
                       ;; previous choices, selections and address checks apply unchanged.
-                      (let [[sub & args] xs]
+                      (let [[sub & args] xs
+                            args (realize! (vec args))]
                         (when-not (dynamic-gf? sub)
                           (throw (ex-info "A splice without an address needs a dynamic generative function (others take an address)"
                                           {:gen-fn (type sub)})))
                         (let [outer @transition
                               run-body #(apply (:body-fn sub) trace-fn splice-fn read-param args)]
-                          (when-let [t (get (:transitions sub) mode)] (vreset! transition t))
+                          (vreset! transition (or (get (:transitions sub) mode) (site-transitions mode)))
                           (try
                             (if-let [ps (:params sub)]
                               (binding [*params* (merge *params* ps)] (run-body))
                               (run-body))
                             (finally (vreset! transition outer)))))
                       (let [[addr gf & args] xs
+                            ;; trace calls in lazy arguments happen now, in this body
+                            args (realize! (vec args))
                             p (path addr)
                             state @vol]
                         (check-running! state p)
                         (when-not (gfi/generative-function? gf)
                           (throw (ex-info (str "splice at " p " needs a generative function") {:path p :value gf})))
                         (check-address! state p)
-                        (let [[v state] (splice-call state p gf (vec args))]
-                          (vreset! vol (update state :visited conj p))
+                        (let [[v state'] (splice-call state p gf args)]
+                          (when-not (identical? state @vol)
+                            (throw (ex-info (str "The caller's trace was used during the splice at " p
+                                                 ": a function passed to the callee calls trace")
+                                            {:path p})))
+                          (vreset! vol (update state' :visited conj p))
                           v))))
         retval (realize! (apply (:body-fn gf) trace-fn splice-fn read-param args))]
     (vswap! vol assoc ::finished true)
@@ -493,7 +500,9 @@
 (defn with-dispatch
   "gf with an execution seam: (dispatch gf op args opts) runs before the
    handler and returns the operation's result map, or nil to leave it to the
-   handler (opts as for run). A dispatcher is an optimization: it must be
+   handler (opts as for run, without :batch-shape: a batched run calls the
+   dispatcher under the batch tracer, where (gen.array.batch/batch-backend?
+   gen.array/*backend*) holds). A dispatcher is an optimization: it must be
    observationally equivalent to the handler, which gen.laws checks
    (dispatch-matches-handler)."
   [gf dispatch]
@@ -505,6 +514,15 @@
 ;; ---------------------------------------------------------------------------
 ;; The gen macro: conditionals branch on values
 ;; ---------------------------------------------------------------------------
+
+(defn case-key
+  "case's dispatch value, checked: a value that differs across the particles
+   of a batch cannot pick one clause (gen.array.batch), so it raises the
+   batched-branch error rather than falling to the default clause."
+  [x]
+  (if (instance? gen.array.protocols.IBatchedValue x)
+    (throw (ex-info "case on a batched value: it differs across particles" {:gen.array/batched-branch true}))
+    x))
 
 (declare guard-branches)
 
@@ -528,8 +546,10 @@
   "A body's forms, guarded; every form but the last is a statement, whose
    value is discarded, so a lazy call there with trace calls is an error."
   [forms locals]
-  (doseq [f (butlast forms)]
-    (when (discarded-lazy-trace? f locals)
+  (doseq [f (butlast forms)
+          ;; as written ((for …)) and macroexpanded ((->> xs (map …)))
+          :let [expanded (if (and (seq? f) (symbol? (first f)) (not (contains? locals (first f)))) (macroexpand f) f)]]
+    (when (or (discarded-lazy-trace? f locals) (discarded-lazy-trace? expanded locals))
       (throw (ex-info (str "In gen: " (pr-str (first f)) " here is lazy and its value is discarded,"
                            " so its trace calls would never run. Use doseq, run! or mapv.")
                       {:form f}))))
@@ -573,10 +593,12 @@
                             (and (seq? f) (= 'finally (first f)))
                             (list* 'finally (guard-body (rest f) locals))
                             :else (guard-branches f locals))))
+    ;; case*'s dispatch value is a local symbol (case binds it): check it first
     case* (let [[_ ge shift mask default imap & more] form]
-            (list* 'case* (guard-branches ge locals) shift mask (guard-branches default locals)
+            (list 'do (list `case-key ge)
+                  (list* 'case* (guard-branches ge locals) shift mask (guard-branches default locals)
                    (into (empty imap) (map (fn [[k [test then]]] [k [test (guard-branches then locals)]])) imap)
-                   more))
+                   more)))
     (apply list (guard-body form locals))))
 
 (defn- guard-branches

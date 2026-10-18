@@ -303,16 +303,21 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   - draws gain the batch axis;
   - reading a batched value on the host raises the fallback.
 
-  Every generative function thus runs batched with the same meaning, and
-  batching cannot change meaning by construction. A model whose code treats
-  particles differently (branches, host predicates, host math) falls back to
-  one scalar trace per particle. Measured: 9–41× faster importance sampling
+  Every generative function thus runs batched with the same meaning for code
+  in `gen` bodies that works through gen.array. A model whose code treats
+  particles differently (branches, host predicates, host math) fails batched
+  and falls back to one scalar trace per particle. The limits are raw
+  `if`/`case` in helper functions outside `gen`, and vector lookups with
+  batched keys (docs/array-api.md §8a). Measured: 9–41× faster importance sampling
   on the JVM backend (100–10,000 particles; docs/benchmarks.md).
 - **Bodies run to completion:** lazy sequences in a body's return value are
   realized during the run, and a `trace` or `splice` after the run is a loud
   error. Before this, `(map … (trace …))` at the end of a body gave a trace
-  without its choices, silently. A lazy call with `trace` in a discarded
-  position (e.g. `(map …)` followed by more forms) is a compile error in `gen`.
+  without its choices, silently. Lazy splice arguments are realized before
+  the call. A lazy call with `trace` in a discarded position (e.g. `(map …)`
+  followed by more forms, also through `->>`) is a compile error in `gen`.
+  Realization stops after 10,000 elements of a return value, and later trace
+  calls are loud.
 - **Arrays are values:** JVM arrays compare by dtype, shape and (bitwise)
   elements, so traces and choice maps holding them compare with `=`.
 - **Testing:** reference values come from scipy and JAX, generated once into

@@ -42,15 +42,28 @@
 (defn support [d] (-support d))
 
 (defmulti -value-shape
-  "The shape of one value of the distribution, or nil for a value that is not
-   an array (a product's vector). The default suits elementwise families:
-   the broadcast shape of the parameters."
+  "The shape of one value of the distribution, or nil when it is not
+   checked (a product's vector value, or a family that declares none). Values
+   of another shape given to the distribution are errors, not several draws."
   (fn [d] (:type d)))
 
-(defmethod -value-shape :default [d]
-  (reduce sh/broadcast [] (keep #(when (a/array? %) (a/shape %)) (vals (:params d)))))
+(defmethod -value-shape :default [_] nil)
 
 (defn value-shape [d] (-value-shape d))
+
+(defn elementwise-value-shape
+  "The value shape of an elementwise family: its parameters' broadcast shape."
+  [d]
+  (reduce sh/broadcast [] (keep #(when (a/array? %) (a/shape %)) (vals (:params d)))))
+
+(defn check-value-shape
+  "Throw unless v has the distribution's value shape (when it declares one)."
+  [d v]
+  (let [expected (value-shape d)]
+    (when (and expected (not= expected (a/shape v)))
+      (throw (ex-info (str "A value of shape " (a/shape v) " for a distribution whose values have shape "
+                           expected)
+                      {:value-shape (a/shape v) :expected expected :distribution (:type d)})))))
 
 (defn- total
   "A log-prob summed to a scalar (a distribution's trace has one choice)."
@@ -100,8 +113,8 @@
    1. This catches logits passed where probabilities are expected."
   [dist-name param-name ps]
   (when (a/concrete? ps)
-    (let [ok? (and (a/truthy? (a/all (a/>= ps 0)))
-                   (a/truthy? (a/all (a/<= (a/abs (a/- (a/sum ps {:axis -1}) 1.0)) 1e-6))))]
+    (let [ok? (and (a/all-true? (a/>= ps 0))
+                   (a/all-true? (a/<= (a/abs (a/- (a/sum ps {:axis -1}) 1.0)) 1e-6)))]
       (check ok? dist-name
              (str param-name " must be probabilities (non-negative, summing to 1)"
                   " — for log-probabilities or logits use categorical-logits")
@@ -111,14 +124,14 @@
   "Every element of a concrete array parameter must be positive."
   [dist-name param-name v]
   (when (and (some? v) (a/concrete? v))
-    (check (a/truthy? (a/all (a/> v 0))) dist-name (str param-name " must be positive") {:param param-name})))
+    (check (a/all-true? (a/> v 0)) dist-name (str param-name " must be positive") {:param param-name})))
 
 (defn check-increasing
   "A concrete array parameter must increase along its last axis."
   [dist-name param-name v]
   (when (and (some? v) (a/concrete? v) (> (peek (a/shape v)) 1))
     (let [n (peek (a/shape v))]
-      (check (a/truthy? (a/all (a/> (a/slice v -1 1 n) (a/slice v -1 0 (dec n)))))
+      (check (a/all-true? (a/> (a/slice v -1 1 n) (a/slice v -1 0 (dec n))))
              dist-name (str param-name " must be increasing") {:param param-name}))))
 
 (defn ->array
@@ -135,7 +148,12 @@
      (validate (check-positive \"normal\" \"std\" std))
      (sample [key batch-shape] ...)
      (log-prob [v] ...)
-     (support [] ...))
+     (support [] ...)
+     (value-shape [] ...))
+
+   value-shape gives the shape of one value (from the parameters, bound by
+   name). Values of another shape are then errors rather than several draws;
+   without it, value shapes are not checked.
 
    Parameters given as Clojure vectors become arrays. The type keyword is
    namespace-qualified, so definitions from different namespaces never collide."
@@ -157,6 +175,8 @@
           `(defmethod -log-prob ~type-kw [~d ~v] (let ~bind-params ~@lp-body)))
        ~(when-let [[_ & support-body] (get clauses 'support)]
           `(defmethod -support ~type-kw [~d] (let ~bind-params ~@support-body)))
+       ~(when-let [[_ & shape-body] (get clauses 'value-shape)]
+          `(defmethod -value-shape ~type-kw [~d] (let ~bind-params ~@shape-body)))
        (var ~dist-name))))
 
 ;; ---------------------------------------------------------------------------
@@ -185,7 +205,7 @@
   (-generate [d _ constraints key]
     (check-leaf-constraint :generate constraints)
     (if (cm/has-value? constraints)
-      (let [v (cm/get-value constraints)
+      (let [v (doto (cm/get-value constraints) (->> (check-value-shape d)))
             lp (total (log-prob d v))]
         {:trace (dist-trace d v lp) :weight lp})
       {:trace (simulate* d key) :weight 0.0}))
@@ -193,12 +213,12 @@
   (-update [d tr _ _ constraints _]
     (check-leaf-constraint :update constraints)
     (if (cm/has-value? constraints)
-      (let [v (cm/get-value constraints)
+      (let [v (doto (cm/get-value constraints) (->> (check-value-shape d)))
             lp (total (log-prob d v))]
         {:trace (dist-trace d v lp) :weight (a/- lp (:score tr))
          :retdiff diff/unknown-change :discard (:choices tr)})
       ;; the value is kept and rescored: the parameters may have changed
-      (let [v (:retval tr)
+      (let [v (doto (:retval tr) (->> (check-value-shape d)))
             lp (total (log-prob d v))]
         {:trace (dist-trace d v lp) :weight (a/- lp (:score tr))
          :retdiff diff/no-change :discard cm/EMPTY})))
@@ -206,7 +226,7 @@
   (-regenerate [d tr _ _ selection key]
     (if (sel/root-selected? selection)
       {:trace (simulate* d key) :weight 0.0 :retdiff diff/unknown-change}
-      (let [v (:retval tr)
+      (let [v (doto (:retval tr) (->> (check-value-shape d)))
             lp (total (log-prob d v))]
         {:trace (dist-trace d v lp) :weight (a/- lp (:score tr)) :retdiff diff/no-change})))
 
@@ -214,6 +234,7 @@
     (when-not (cm/has-value? choices)
       (throw (ex-info "assess: a distribution needs its value" {:type type})))
     (let [v (cm/get-value choices)]
+      (check-value-shape d v)
       {:weight (total (log-prob d v)) :retval v}))
 
   (-propose [d _ key]

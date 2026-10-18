@@ -273,3 +273,20 @@
       (let [{t :trace w :weight} (gfi/regenerate tr [1] [diff/unknown-change] sel/none (rng/key 3))]
         (is (= 0.3 (t :x)))
         (is (close? w (- (dc/log-prob (d/normal 5 1) 0.3) (dc/log-prob (d/normal 0 1) 0.3))))))))
+
+(deftest switches-of-compatible-branches-keep-shared-addresses
+  ;; third review B2: a Switch of two Maps (or two distributions) regenerated
+  ;; at its index alone resampled every unselected choice, with weight 0
+  (let [ys (gen [mu] (trace :y (d/normal mu 1)))
+        sw (comb/switch (comb/map ys) (comb/map (gen [mu] (trace :y (d/normal (a/+ mu 1.0) 1)))))
+        m (gen [] (splice :s sw (trace :i (d/categorical [0.5 0.5])) [0.0 0.0 0.0]))
+        obs (cm/choicemap :i 0 [:s 0 :y] 1.5 [:s 1 :y] 1.7 [:s 2 :y] 2.2)
+        tr (:trace (gfi/generate m [] obs (rng/key 1)))
+        {t :trace w :weight} (gfi/update tr (cm/choicemap :i 1) (rng/key 2))]
+    (is (= [1.5 1.7 2.2] (mapv #(t [:s % :y]) (range 3))) "the observations stay")
+    (is (close? w (reduce + (map #(- (dc/log-prob (d/normal 1 1) %) (dc/log-prob (d/normal 0 1) %)) [1.5 1.7 2.2])))))
+  (let [sw (comb/switch (d/normal 0 1) (d/normal 5 1))
+        tr (:trace (gfi/generate sw [0] (cm/->Value 0.3) (rng/key 3)))
+        {t :trace w :weight} (gfi/regenerate tr [1] [diff/unknown-change] sel/none (rng/key 4))]
+    (is (= 0.3 (:retval t)) "two distributions: the value stays")
+    (is (close? w (- (dc/log-prob (d/normal 5 1) 0.3) (dc/log-prob (d/normal 0 1) 0.3))))))

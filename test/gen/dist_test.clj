@@ -161,3 +161,15 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"symmetric" (d/mvnormal [0.0 0.0] [[1.0 0.5] [0.3 1.0]])))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"positive" (d/dirichlet [-1.0 2.0])))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"increasing" (d/piecewise-uniform [0 2 1] [0.5 0.5])))))
+
+(dc/defdist softmax-categorical
+  "A user-defined distribution without a value-shape clause."
+  [logits]
+  (sample [key shape] (rng/categorical key logits shape))
+  (log-prob [v] (a/pick (a/log-softmax logits) v)))
+
+(deftest user-distributions-without-a-value-shape-are-not-rejected
+  ;; third review B13: the default value shape (the parameters' broadcast
+  ;; shape, [3] here) rejected the valid constraint 1
+  (let [m (gen.dynamic/gen [] (trace :k (softmax-categorical [0.0 1.0 2.0])))]
+    (is (map? (gfi/generate m [] (cm/choicemap :k 1) (rng/key 1))))))

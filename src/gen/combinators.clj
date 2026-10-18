@@ -22,10 +22,11 @@
    - Elements and steps beyond a changed length are generated, or discarded.
    - The retdiff is a vector-diff of the returned vector.
    A Switch whose index changes runs the new branch against the old branch's
-   choices when both branches are dynamic generative functions, so the
-   addresses they share keep their values (as an if would, and as Gen.jl
-   does); for other branches it generates the new branch from the
-   constraints and discards every old choice.
+   choices when the branches are compatible (two dynamic generative
+   functions, two distributions, or two combinators of one type), so the
+   addresses they share keep their values, as an if would and as Gen.jl does.
+   Branches of different kinds share no addresses: the new one is generated
+   from the constraints and every old choice is discarded.
 
    Element or step i draws from (fold-in key i), so changing the length never
    shifts another element's randomness."
@@ -272,7 +273,17 @@
 ;; Unfold
 ;; ---------------------------------------------------------------------------
 
-(defn- check-steps [n]
+(declare check-steps*)
+
+(defn- check-steps
+  "The number of steps as a host integer (a one-element array is read; a
+   number that differs across a batch's particles raises the batched-branch
+   error, so batched inference falls back)."
+  [n]
+  (let [n (if (and (a/array? n) (not (a/host? n))) (a/item n) n)]
+    (check-steps* n)))
+
+(defn- check-steps* [n]
   (when-not (nat-int? n)
     (throw (ex-info "Unfold's first argument, the number of steps, must be a non-negative integer" {:n n})))
   n)
@@ -280,7 +291,7 @@
 (defn- step-args [t state params] (into [t state] params))
 
 (defn- unfold-generate [gf [n init & params :as args] constraints key]
-  (check-steps n)
+  (let [n (check-steps n)]
   (when constraints (indices :generate constraints n))
   (let [kernel (:kernel gf)
         acc (loop [t 0 state init acc empty-acc]
@@ -292,7 +303,7 @@
                                 [(simulate-at kernel sa k) 0.0])]
                   (recur (inc t) (:retval sub) (put-element acc t sub nil w)))
                 acc))]
-    {:trace (elements-trace gf (vec args) acc) :weight (:weight acc)}))
+    {:trace (elements-trace gf (vec args) acc) :weight (:weight acc)})))
 
 (defn- unfold-revise
   "update or regenerate of an Unfold trace. Walks the retained steps,
@@ -300,8 +311,8 @@
    its selection may have changed, and skipping straight to the next
    targeted step otherwise; then extends or truncates."
   [gf tr [n init & params :as args] argdiffs op cs key]
-  (check-steps n)
-  (let [kernel (:kernel gf)
+  (let [n (check-steps n)
+        kernel (:kernel gf)
         [_ dinit & dparams] argdiffs
         params-changed? (some diff/changed? dparams)
         old-subs (::subtraces tr)
@@ -341,14 +352,14 @@
     (incremental-result gf (vec args) acc op n prev-n)))
 
 (defn- unfold-assess [gf [n init & params] choices]
-  (check-steps n)
+  (let [n (check-steps n)]
   (indices :assess choices n)
   ;; weight starts boxed: it accumulates arrays on array backends
   (loop [t 0 state init weight (Double/valueOf 0.0) retval []]
     (if (< t n)
       (let [r (assess-at (:kernel gf) (step-args t state params) (cm/get-submap choices t))]
         (recur (inc t) (:retval r) (+ weight (:weight r)) (conj retval (:retval r))))
-      {:weight weight :retval retval})))
+      {:weight weight :retval retval}))))
 
 (defcombinator UnfoldGF [kernel]
   gfi/IGenerativeFunction
@@ -397,10 +408,11 @@
   (let [args (vec args)
         bargs (vec bargs)]
     (if (or (= (branch-index idx) (::branch tr))
-            ;; two dynamic branches: the new one runs against the old one's
+            ;; compatible branches (two dynamic GFs, two distributions, two
+            ;; combinators of one type): the new one runs against the old one's
             ;; choices, so the addresses they share keep their values (Def
             ;; 2.3.1), as the equivalent if would and as Gen.jl does
-            (and (dyn/dynamic-gf? (branch gf idx)) (dyn/dynamic-gf? (:gen-fn (::subtrace tr)))))
+            (dyn/compatible-callee? (:gen-fn (::subtrace tr)) (branch gf idx)))
       (let [b (branch gf idx)
             sub (::subtrace tr)
             bdiffs (if (= (branch-index idx) (::branch tr)) (vec (rest argdiffs)) (unknown-diffs bargs))

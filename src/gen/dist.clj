@@ -171,10 +171,12 @@
    symmetric and positive definite."
   [mu cov]
   (validate (when (a/concrete? cov)
-              (dc/check (a/allclose? cov (a/transpose cov (-> (vec (range (a/ndim cov))) (assoc (- (a/ndim cov) 2) (dec (a/ndim cov))) (assoc (dec (a/ndim cov)) (- (a/ndim cov) 2)))))
-                        "mvnormal" "cov must be symmetric" {})
-              (dc/check (not (a/truthy? (a/any (a/isnan (la/cholesky cov))))) "mvnormal"
-                        "cov must be positive definite" {})))
+              (let [r (a/ndim cov)
+                    cov-t (a/transpose cov (-> (vec (range r)) (assoc (- r 2) (dec r)) (assoc (dec r) (- r 2))))]
+                (dc/check (a/all-true? (<= (a/abs (- cov cov-t)) (+ 1e-8 (* 1e-5 (a/abs cov-t)))))
+                          "mvnormal" "cov must be symmetric" {})
+                (dc/check (not (a/any-true? (a/isnan (la/cholesky cov)))) "mvnormal"
+                          "cov must be positive definite" {}))))
   (sample [key shape]
     (let [d (peek (a/shape mu))
           batch (sh/broadcast (sh/broadcast shape (pop (a/shape mu))) (pop (pop (a/shape cov))))
@@ -459,12 +461,20 @@
 (defmethod dc/-log-prob ::product [{{:keys [factors]} :params} v]
   (dc/check (and (sequential? v) (= (count v) (count factors))) "product"
             (str "a value needs one element per factor (" (count factors) ")") {:value v})
-  ;; each factor's log density summed over its own value's axes
-  (reduce + (map (fn [f x] (a/sum (dc/log-prob f x))) factors v)))
+  ;; each factor's log density summed over its own value's axes; a value of
+  ;; another shape than its factor's is an error, not several draws
+  (reduce + (map (fn [f x] (dc/check-value-shape f x) (a/sum (dc/log-prob f x))) factors v)))
 
 ;; ---------------------------------------------------------------------------
-;; Value shapes of the families whose values are not elementwise
+;; Value shapes: the elementwise families take their parameters' broadcast
+;; shape; the others declare theirs
 ;; ---------------------------------------------------------------------------
+
+(doseq [t [::normal ::uniform ::beta ::gamma ::inv-gamma ::exponential ::laplace ::cauchy ::beta-uniform
+           ::bernoulli ::uniform-discrete ::geometric ::poisson ::binom ::neg-binom]]
+  (defmethod dc/-value-shape t [d] (dc/elementwise-value-shape d)))
+
+(defmethod dc/-value-shape ::dirichlet [{{:keys [alpha]} :params}] (a/shape alpha))
 
 (defmethod dc/-value-shape ::mvnormal [{{:keys [mu cov]} :params}]
   (conj (sh/broadcast (pop (a/shape mu)) (pop (pop (a/shape cov)))) (peek (a/shape mu))))

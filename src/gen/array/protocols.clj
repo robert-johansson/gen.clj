@@ -24,6 +24,10 @@
 (defprotocol IArray
   (-backend [x] "The IBackend this array belongs to."))
 
+(defprotocol IBatchedValue
+  "A value that holds one value per particle of a batch (gen.array.batch)."
+  (-all-particles [x] "The array of every particle's value, batch axes first."))
+
 (defprotocol IWrappingBackend
   "A backend whose arrays build on another backend's, such as the tape of
    reverse-mode autodiff: an op mixing its arrays with the inner backend's

@@ -262,11 +262,14 @@
   "Split a choice map whose leaves have a leading batch axis of size n into n
    choice maps (the inverse of stack)."
   [cm n]
-  (mapv (fn [i]
-          (reduce (fn [acc p] (set-choice acc p (a/tree-map #(a/take % i) (get-choice cm p))))
-                  EMPTY
-                  (addresses cm)))
-        (range n)))
+  (if (has-value? cm)
+    ;; a value at the root (a distribution's choice map)
+    (mapv #(->Value (a/tree-map (fn [v] (a/take v %)) (get-value cm))) (range n))
+    (mapv (fn [i]
+            (reduce (fn [acc p] (set-choice acc p (a/tree-map #(a/take % i) (get-choice cm p))))
+                    EMPTY
+                    (addresses cm)))
+          (range n))))
 
 ;; ---------------------------------------------------------------------------
 ;; Printing

@@ -93,3 +93,16 @@
       (is (:gen.array/batched-branch (ex-data (try (batch/batched [n] (f)) nil (catch clojure.lang.ExceptionInfo e e))))
           (str label)))
     (is (true? (batch/batched [n] (a/truthy? x))) "a batch of numbers is truthy, as each number is")))
+
+(deftest third-review-ops
+  (testing "B4: linear algebra with different per-particle batch ranks"
+    (let [b233 (a/+ (a/* 3.0 (a/eye 3)) (a/* 0.1 (rand-array 6 [n 2 3 3])))]
+      (is (vmap-matches? #(la/solve %1 %2) [b233 s3] #{0}) "per-particle [2 3 3] against a shared [3]")
+      (is (vmap-matches? #(la/solve %1 %2) [b233 b3] #{0 1}) "against a per-particle [3]")))
+  (testing "B9: scans and arg-reductions of per-particle scalars"
+    (is (vmap-matches? a/cumsum [bs] #{0}))
+    (is (vmap-matches? #(a/astype (a/argmax %) :float64) [bs] #{0})))
+  (testing "a per-particle fill value"
+    (is (vmap-matches? #(a/full [2] %) [bs] #{0})))
+  (testing "a gradient of unbatched leaves inside a batched run"
+    (is (= 6.0 (batch/batched [n] ((a/grad (fn [x] (a/* x x))) 3.0))))))

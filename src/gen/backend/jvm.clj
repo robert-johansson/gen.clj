@@ -682,6 +682,8 @@
   (let [sa (shape-of a) sb (shape-of b)
         n (check-square sa :solve)
         k (long (peek sb))
+        _ (when-not (and (>= (count sb) 2) (== n (long (nth sb (- (count sb) 2)))))
+            (throw (ex-info "solve: matrix and right-hand side do not match" {:shapes [sa sb]})))
         [batch ao bo] (batch-pairs sa sb)
         ^longs ao ao ^longs bo bo
         ^doubles ad (data-of a) ^doubles bd (data-of b)

@@ -469,10 +469,14 @@
   "An array of the given shape filled with value. Options: :dtype (default: the
    backend's default dtype for the kind of value)."
   ([shape value] (full shape value nil))
-  ([shape value {:keys [dtype]}]
+  ([shape value {dt :dtype}]
    (let [b *backend*]
      (p/-full b (vec shape) value
-              (or dtype (dt/with-weak nil #{(dt/kind (dt/host-dtype value))} (defaults b)))))))
+              (or dt
+                  (if (host? value)
+                    (dt/with-weak nil #{(dt/kind (dt/host-dtype value))} (defaults b))
+                    ;; a (per-particle) array fill value keeps its dtype
+                    (dtype value)))))))
 
 (defn zeros
   ([shape] (zeros shape nil))
@@ -599,9 +603,12 @@
 (declare flatten reshape squeeze)
 
 (defn- arg-reduce [op x {:keys [axis] :as opts}]
-  (if (and (nil? axis) (c/> (ndim x) 1))
-    (reduce* op (flatten x) (assoc opts :axis 0))
-    (reduce* op x (assoc opts :axis (if (nil? axis) (if (host? x) nil 0) axis)))))
+  (cond
+    ;; a 0-d value (a host scalar, or a per-particle scalar of a batch) is its
+    ;; own extremum
+    (zero? (ndim x)) (do (sh/axes axis 0) (full-like x 0 {:dtype (:int (defaults (backend x)))}))
+    (and (nil? axis) (c/> (ndim x) 1)) (reduce* op (flatten x) (assoc opts :axis 0))
+    :else (reduce* op x (assoc opts :axis (if (nil? axis) 0 axis)))))
 
 (defn argmax "Index of the maximum along :axis (of the flattened array by default); the first NaN wins."
   ([x] (arg-reduce :argmax x nil)) ([x opts] (arg-reduce :argmax x opts)))
@@ -657,7 +664,7 @@
 
 (defn- scan* [op x {:keys [axis reverse?] :or {axis -1}}]
   (let [b (backend-of op [x])
-        x (if (host? x) (p/-reshape b x [1]) x)
+        x (if (zero? (count (p/-shape b x))) (p/-reshape b x [1]) x)
         d (dt/reduce-input-dtype (if (#{:cumsum :cumprod} op) :sum :max) (p/-dtype b x) (defaults b))]
     (p/-scan b op (cast-to b x d) (sh/axis axis (count (p/-shape b x))) (boolean reverse?))))
 
@@ -894,6 +901,18 @@
 ;; ---------------------------------------------------------------------------
 ;; Comparison helpers (for tests and assertions)
 ;; ---------------------------------------------------------------------------
+
+(defn all-true?
+  "Is every element of the bool array x true, across every particle of a
+   batched value (gen.array.batch)? For validation, which must hold for all
+   particles; branching uses truthy?, which a batch cannot answer."
+  [x]
+  (truthy? (all (if (instance? gen.array.protocols.IBatchedValue x) (p/-all-particles x) x))))
+
+(defn any-true?
+  "Is some element of the bool array x true, across every particle?"
+  [x]
+  (truthy? (any (if (instance? gen.array.protocols.IBatchedValue x) (p/-all-particles x) x))))
 
 (defn equal?
   "Do x and y have the same shape and numerically equal elements? (NaN is

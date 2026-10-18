@@ -288,3 +288,48 @@
             ps (b/simulate m [0.5] 4 (rng/key 38))]
         (is (b/batched? ps))
         (is (every? #(close? (:score %) (:weight (gfi/assess m [0.5] (:choices %)))) (b/traces ps)))))))
+
+;; ---------------------------------------------------------------------------
+;; Regressions from the third review (docs/research/review-2026-10-19.md)
+;; ---------------------------------------------------------------------------
+
+(deftest host-predicates-in-either-order-fall-back
+  ;; B1: (= 0 k), condp, case with integer keys and a default, vector lookups
+  (let [obs (cm/choicemap :y -3.0)
+        exact (Math/log (+ (* 0.5 (Math/exp (dc/log-prob (d/normal -3 1) -3.0))) (* 0.5 (Math/exp (dc/log-prob (d/normal 3 1) -3.0)))))]
+    ;; =, not= and condp reach the batch through = even in helper functions;
+    ;; case (and if) only inside gen bodies, which guard them
+    (doseq [[label mu-of] [[:=-on-the-right (fn [k] (if (= 0 k) -3.0 3.0))]
+                           [:not= (fn [k] (if (not= 0 k) 3.0 -3.0))]
+                           [:condp (fn [k] (condp = k 0 -3.0 3.0))]
+                           [:vector-lookup (fn [k] ([-3.0 3.0] k))]]]
+      (let [m (gen [] (let [k (trace :k (d/categorical [0.5 0.5]))] (trace :y (d/normal (mu-of k) 1))))
+            {:keys [log-ml-estimate]} (imp/importance-sampling m [] obs 4000 {:batched? true :key (rng/key 40)})]
+        (is (< (Math/abs (- log-ml-estimate exact)) 0.1) (str label))))
+    (let [m (gen [] (let [k (trace :k (d/categorical [0.5 0.5]))] (trace :y (d/normal (case k 0 -3.0 3.0) 1))))
+          {:keys [log-ml-estimate]} (imp/importance-sampling m [] obs 4000 {:batched? true :key (rng/key 40)})]
+      (is (< (Math/abs (- log-ml-estimate exact)) 0.1) "case with a default, in a gen body"))))
+
+(deftest batched-runs-validate-parameters
+  ;; B3: a batched run threw nothing where a scalar run throws
+  (let [m (gen [] (let [x (trace :x (d/uniform 0 1))] (trace :k (d/categorical (a/stack [x x])))))]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"probabilities" (gfi/simulate m [] (rng/key 1))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"probabilities" (b/simulate m [] 4 (rng/key 1))))))
+
+(deftest more-batched-forms
+  (testing "B9: scans and arg-reductions of a per-particle scalar"
+    (let [m (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (a/sum (a/cumsum x)) 1))))]
+      (is (b/batched? (b/simulate m [] 3 (rng/key 41))))))
+  (testing "B10: an Unfold whose length is a choice falls back"
+    (let [m (gen [] (splice :u unfolded (trace :n (d/uniform-discrete 1 3)) 0.0))]
+      (is (every? #(close? (:score %) (:weight (gfi/assess m [] (:choices %)))) (b/traces (b/simulate m [] 4 (rng/key 42)))))))
+  (testing "B11: a collection of a distribution's particles"
+    (is (= 3 (count (b/traces (b/simulate (d/normal 0 1) [] 3 (rng/key 43)))))))
+  (testing "a per-particle fill value stays batched"
+    (let [m (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (a/full [2] x) 1))))]
+      (is (b/batched? (b/simulate m [] 3 (rng/key 44))))))
+  (testing "B8: resampled particles are the chosen ones, exactly"
+    (let [ps (b/simulate linreg [[1.0 2.0]] 5 (rng/key 45))
+          taken (b/take ps [3 3 1])]
+      (is (= (mapv (vec (b/traces ps)) [3 3 1]) (b/traces taken)))
+      (is (every? #(close? (:score %) (:weight (gfi/assess linreg [[1.0 2.0]] (:choices %)))) (b/traces taken))))))
