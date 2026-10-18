@@ -93,6 +93,12 @@
 
 (defn ndim [x] (count (shape x)))
 
+(defn concrete?
+  "Can x's values be read without forcing a lazy computation? (Host scalars
+   and eager backends: yes.) Validation that reads values checks this first."
+  [x]
+  (or (host? x) (not (p/-lazy? (backend x)))))
+
 (defn size [x] (sh/size (shape x)))
 
 (defn- defaults [b] (p/-defaults b))
@@ -332,6 +338,9 @@
 
 (defn xlogy "Elementwise x·log(y), with 0·log(y) = 0 (also for y = 0)." [x y]
   (where (== x 0) 0.0 (* x (log y))))
+
+(defn xlog1py "Elementwise x·log1p(y), with 0·log1p(y) = 0 (also for y = -1)." [x y]
+  (where (== x 0) 0.0 (* x (log1p y))))
 
 (defn clip
   "Elementwise clamp of x to [lo, hi]; either bound may be nil."

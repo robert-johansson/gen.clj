@@ -156,6 +156,8 @@
    Descending through an existing leaf throws rather than discarding it."
   [cm addr v]
   (let [[a & more] (path addr)]
+    (when (nil? v)
+      (throw (ex-info (str "A choice value cannot be nil (at " (path addr) ")") {:path (path addr)})))
     (when (has-value? cm)
       (throw (ex-info "set-choice: the path descends through a leaf value"
                       {:path (path addr) :leaf (get-value cm)})))

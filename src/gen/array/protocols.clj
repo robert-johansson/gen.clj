@@ -29,6 +29,9 @@
     "Keyword naming the backend, e.g. :jvm or :mlx.")
   (-defaults [b]
     "Map of default dtypes: {:float :float64 :int :int64}.")
+  (-lazy? [b]
+    "Does this backend defer computation, so that reading a value forces
+     evaluation? (The JVM backend is eager; MLX is lazy.)")
   (-native-ops [b]
     "Set of composite op keywords this backend implements natively (e.g.
      #{:logsumexp :lgamma}). gen.array uses the native version when present and

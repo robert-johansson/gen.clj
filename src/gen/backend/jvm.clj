@@ -809,6 +809,7 @@
   p/IBackend
   (-name [_] :jvm)
   (-defaults [_] {:float :float64 :int :int64})
+  (-lazy? [_] false)
   (-native-ops [_] #{})
 
   (-from-host [_ data dtype] (from-host data dtype))

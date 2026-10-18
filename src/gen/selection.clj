@@ -74,12 +74,20 @@
   [choices]
   (from-paths (cm/addresses choices)))
 
+(defn root-selected?
+  "Does s select the root of a trace whose choices are a single value (a
+   distribution's trace)? Only all-selecting selections do."
+  [s]
+  (cond (instance? All s) true
+        (instance? Complement s) (not (root-selected? (:inner s)))
+        :else false))
+
 (defn get-selected
   "The part of a choice map that s selects (Gen.jl's get_selected)."
   [choices s]
   (cond (instance? All s) choices
         (instance? None s) cm/EMPTY
-        (cm/has-value? choices) (if (selected? s []) choices cm/EMPTY)
+        (cm/has-value? choices) (if (root-selected? s) choices cm/EMPTY)
         :else (reduce (fn [acc [addr sub]]
                         (let [kept (if (cm/has-value? sub)
                                      (when (selected? s addr) sub)
