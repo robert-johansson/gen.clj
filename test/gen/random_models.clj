@@ -13,7 +13,9 @@
      [:splice addr spec]         a sub-model at addr
      [:inline spec]              a sub-model spliced without an address
      [:map addr n]               a Map of a one-site kernel over n inputs
-     [:unfold addr n]            an Unfold of a random walk for n steps"
+     [:unfold addr n]            an Unfold of a random walk for n steps
+     [:switch addr]              a Switch between two small models, its index
+                                 a categorical choice at [addr :i]"
   (:require [clojure.test.check.generators :as gen]
             [gen.array :as a]
             [gen.combinators :as comb]
@@ -43,6 +45,11 @@
 (def ^:private walk
   (dyn/make-gen-fn (fn [trace _ _ _t s] (trace :s (d/normal (a/* 0.9 s) 1.0))) '([t s])))
 
+(def ^:private switched
+  "A Switch of a one-site model and a two-site model with a dependency."
+  (comb/switch (dyn/make-gen-fn (fn [trace _ _ m] (trace :a (d/normal m 1.0))) '([m]))
+               (dyn/make-gen-fn (fn [trace _ _ m] (trace :c (d/normal (trace :b (d/gamma 2.0 1.0)) 1.0))) '([m]))))
+
 (declare build)
 
 (defn- run-statements
@@ -63,7 +70,9 @@
               :splice (let [[spec] more] (splice addr (build spec)) env)
               :inline (let [[spec] st] (splice (build (second st))) env)
               :map (let [[n] more] (assoc env addr (reduce a/+ 0.0 (splice addr (comb/map map-kernel) (vec (repeat n 0.5))))))
-              :unfold (let [[n] more] (splice addr (comb/unfold walk) n 0.0) env)))
+              :unfold (let [[n] more] (splice addr (comb/unfold walk) n 0.0) env)
+              :switch (let [i (trace [addr :i] (d/categorical [0.5 0.5]))]
+                        (assoc env addr (splice [addr :s] switched i 0.5)))))
           env
           statements))
 
@@ -85,7 +94,8 @@
                [:site nil family dep?])
         leaf (gen/frequency [[6 site]
                              [1 (gen/let [n (gen/choose 0 3)] [:map nil n])]
-                             [1 (gen/let [n (gen/choose 0 3)] [:unfold nil n])]])]
+                             [1 (gen/let [n (gen/choose 0 3)] [:unfold nil n])]
+                             [1 (gen/return [:switch nil])]])]
     (if (zero? depth)
       (gen/vector leaf 1 3)
       (gen/vector (gen/frequency [[5 leaf]
@@ -112,7 +122,8 @@
                 ;; an inline sub-model shares this namespace: give it addresses from this counter
                 :inline (let [[s'] [(first (assign (second st) counter []))]] [(conj out [:inline s']) earlier])
                 :map [(conj out [:map addr (first more)]) (conj earlier addr)]
-                :unfold [(conj out [:unfold addr (first more)]) earlier])))
+                :unfold [(conj out [:unfold addr (first more)]) earlier]
+                :switch [(conj out [:switch addr]) (conj earlier addr)])))
           [[] earlier]
           stmts))
 
