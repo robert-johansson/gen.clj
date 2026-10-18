@@ -1,0 +1,30 @@
+# Clojure / JVM
+.cpcache/
+.nrepl-port
+.lsp/
+.clj-kondo/.cache/
+target/
+classes/
+
+# Native build outputs
+native/build/
+
+# Papers and other binaries kept locally
+*.pdf
+
+# Environment / secrets
+.env
+
+# Claude Code (local agent config + hooks)
+.claude/
+.mcp.json
+
+# Local scratch
+tmp/
+
+# OS
+.DS_Store
+
+# beans: kept in a separate private repo (see .beans/hooks/)
+.beans/
+.beans.yml

@@ -1,0 +1,299 @@
+# Gen.jl parity checklist and GenMLX mapping
+
+*Research notes, 2026-10-18. The baseline is Gen.jl **0.4.8**, the latest
+release: 0.4.8 added enumerative inference, 0.4.7 added `ProductDistribution`,
+and 0.4.6 removed the need for `@load_generated_functions`
+(https://github.com/probcomp/Gen.jl/releases).*
+
+*Sources:*
+- *Gen.jl reference pages under https://www.gen.dev/docs/stable/ref/:
+  `core/{gfi,choice_maps,selections,change_hints}`,
+  `modeling/{dml,sml,distributions,combinators,custom_gen_fns}`,
+  `inference/{enumerative,importance,mcmc,pf,trace_translators,parameter_optimization,map,vi,wake_sleep}`.*
+- *The Gen.jl `src/` tree.*
+- *The ecosystem pages: https://www.gen.dev/ecosystem/ and
+  https://probcomp.github.io/GenParticleFilters.jl/stable/.*
+- *Thesis: `Marco Cusumano-Towner 2020 PhD thesis.pdf` in this repo. Printed page
+  numbers equal PDF page numbers.*
+
+*Prior art: `probcomp/Gen.clj` (https://github.com/probcomp/Gen.clj) is an
+experimental Apache-2.0 Clojure port by Zane Shelby that covers a subset of Gen.
+GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
+**The name "gen.clj" collides with it.***
+
+*Status: **Y**es / **P**artial / **N**o. Paths are relative to
+`~/code/genmlx/src/genmlx/`. Priority for gen.clj:*
+- ***core**: needed for parity, M1 or M4;*
+- ***soon**;*
+- ***later**.*
+
+## 1. Parity checklist
+
+### 1a. The Generative Function Interface (Gen.jl core)
+| Capability | GenMLX status + file | gen.clj |
+|---|---|---|
+| `simulate(gf,args)` → trace | Y: `protocols.cljs` IGenerativeFunction; `dynamic.cljs` DynamicGF | core |
+| `generate(gf,args[,constraints])` → (trace, w) | Y: IGenerate. **Caveat:** in the L3 conjugate case it returns the posterior-mean latent with the marginal weight, tagged `:marginal` | core |
+| `propose` → (choices, w, retval) | Y: IPropose | core |
+| `assess` → (w, retval) | Y: IAssess | core |
+| `update(trace,args,argdiffs,constraints)` → (trace, w, **retdiff**, discard) | P: split into `update` (constraints only), `update-with-args` and `update-with-diffs`; **no retdiff is returned** | core |
+| `regenerate(trace,args,argdiffs,selection)` → (trace, w, retdiff) | P: `regenerate [gf trace sel]` has no args/argdiffs and no retdiff; `edit.cljs` CompositeEdit can emulate it | core |
+| `project(trace, selection)` | Y: IProject | core |
+| `get_args/get_retval/get_choices/get_score/get_gen_fn`, `trace[addr]`, `trace[]` | Y: `trace.cljs` | core |
+| `has_argument_grads` | P: the protocol exists, but DynamicGF returns nil | core |
+| `accepts_output_grad` | N | core |
+| `choice_gradients(trace, sel, retgrad)` → (arg_grads, values, grads) | P: `gradients.cljs` `choice-gradients` takes an address vector; no retgrad, no arg grads | core |
+| `accumulate_param_gradients!(trace, retgrad, scale)` | P: functional gradients via `mx/grad` (`learning.cljs make-param-loss-fn`); no stateful accumulator | core |
+| `get_params(gf)` | P: a name-keyed store in `learning.cljs`; no per-GF registry | core |
+| Non-addressable randomness r: `get_score = log p(r,t)/q(r;x,t)` | Y: `encapsulated.cljs`, `Trace.omega` | soon |
+
+### 1b. Change hints and incremental computation (Gen.jl core)
+| Capability | GenMLX | gen.clj |
+|---|---|---|
+| `NoChange`, `UnknownChange` | Y: `diff.cljs` | core |
+| `VectorDiff` | Y: `vector-diff` with a `:changed` set | core |
+| `IntDiff`/`SetDiff`/`DictDiff`, and `Diffed{V,DV}` propagating through plain code | N | soon (needed for the static DSL) |
+| Retdiffs, consumed by Unfold/Map/Recurse to skip work | N | core |
+
+### 1c. Dynamic modeling language (Gen.jl core)
+| Capability | GenMLX | gen.clj |
+|---|---|---|
+| `@gen`, `@trace(dist, addr)` / `~` | Y: `gen.cljc`, `(trace :a dist)` | core |
+| Pair addresses `:a => :b` | Y: vector paths `[:a :b]` | core |
+| Nested call `@trace(gf(args), :ns)` | Y: `(splice :ns gf args)` | core |
+| Shared-namespace call `@trace(gf(args))` / `{*} ~` | N: splice always nests | core |
+| Untraced call `gf(args)` | Y: `dyn/call` | core |
+| `@param` with `init_param!`, `get_param`, `set_param!`, `get_param_grad`, `set_param_grad!`, `zero_param_grad!` | P: `(param :name default)` plus a functional `::param-store`; no gradient accumulators | core |
+| `(grad)` arg annotations, `@gen (grad)` | n/a (MLX AD covers all args). **gen.clj needs a JVM AD substrate** | core |
+| Address discipline (no prefix collisions, fixed support per address) | Y: laws `:address-uniqueness`, `:no-mutation`, `:no-external-randomness`; `verify.cljs` | core |
+
+### 1d. Static modeling language (Gen.jl core)
+| Capability | GenMLX | gen.clj |
+|---|---|---|
+| `@gen (static)`: a DAG IR where update skips unchanged nodes; cached Julia calls, `nojuliacache`, `draw_graph`, typed traces | P, different mechanism: implicit schema extraction (`schema.cljs`), compiled paths (L1), `dep_graph.cljs`. No explicit static DSL and no IR rendering | soon |
+| `@load_generated_functions` | n/a (unneeded since 0.4.6) | skip |
+
+### 1e. Distributions (Gen.jl core)
+| Capability | GenMLX | gen.clj |
+|---|---|---|
+| The 20 built-ins: `bernoulli, beta, beta_uniform, binom, categorical, cauchy, dirichlet, exponential, gamma, geometric, inv_gamma, laplace, mvnormal, neg_binom, normal, piecewise_uniform, poisson, uniform, uniform_discrete, broadcasted_normal` | Y: `dist.cljs`. Parameterizations differ: Gen `gamma(shape, scale)` vs GenMLX `gamma-dist(shape, rate)`; Gen `categorical(probs)` vs GenMLX logits; Gen's `bernoulli` returns Bool | core |
+| Distribution API: `random, logpdf, logpdf_grad, has_output_grad, has_argument_grads, is_discrete` | P: `defdist` plus multimethods; gradients via AD; `support` | core |
+| `HomogeneousMixture`, `HeterogeneousMixture` | P: `dist/core.cljs mixture` takes instantiated components and log-weights | core |
+| `ProductDistribution` | Y: `product` | core |
+| `@dist` DSL (CONST→ARG→RND typing, exactly one random draw, pushforward) | N: `map->dist` is manual | soon |
+
+### 1f. Custom generative functions (Gen.jl core)
+| Capability | GenMLX | gen.clj |
+|---|---|---|
+| `CustomGradientGF` (`apply`, `gradient`) | Y: `custom_gradient.cljs` (scalar output only) | soon |
+| `CustomDetermGF` / `CustomUpdateGF` (`apply_with_state`, `update_with_state` → retdiff, `num_args`) | N (closest is `nn.cljs nn->gen-fn`) | soon |
+| Hand-written GFI implementations | Y: implement the protocols | core |
+
+### 1g. Combinators (Gen.jl core)
+| Capability | GenMLX | gen.clj |
+|---|---|---|
+| `Map`, VectorDiff-driven (revisits only changed or constrained elements) | Y: `combinators.cljs` MapCombinator. Keys are **0-based**; Gen.jl's are 1-based | core |
+| `Unfold(kernel)` with args `(N, init, extras...)`; retdiff-driven skipping; changing N | Y: UnfoldCombinator, `unfold-extend`, structure-changing `update-with-args` | core |
+| `Switch(gfs...)` / `Switch(dict, gfs...)`; a branch change gives a fresh subtrace plus a discard | Y (integer index) / P (no dict-keyed constructor) | core |
+| `Recurse(production, aggregation, max_branch, U,V,W)` (PCFG trees) | P: `recurse` is a fixed-point "maker" combinator, not the production/reduction tree; `update-with-args` throws | core |
+| `call_at(gf, K)` / `choice_at` | N | soon |
+| Internal-proposal override (thesis §4.4, Alg. 16, p. 152; not found in the 0.4.8 modeling library) | P: via `dispatch/with-dispatch` | soon |
+
+### 1h. Choice maps, selections, traces (Gen.jl core)
+| Capability | GenMLX | gen.clj |
+|---|---|---|
+| Dynamic/Static/Empty choicemap; `choicemap(...)`, `has_value`, `get_value`, `has_submap`, `get_submap`, `get_values_shallow`, `get_submaps_shallow` | Y: `choicemap.cljs` | core |
+| `set_value!`, `set_submap!`, `merge`, `isempty`, `==` | Y: persistent `set-value`, `set-submap`, `merge-cm` | core |
+| `to_array(cm, T)`, `from_array(proto, arr)` | N | core |
+| `get_selected(cm, sel)` | N | core |
+| `pair`/`unpair`, `nested_view` | N | later |
+| `select`, `selectall`, `complement`, Empty/All/Hierarchical/Dynamic/Static/Complement selections, `push!`, `set_subselection!` | Y: `selection.cljs` | core |
+
+### 1i. Parameters, optimizers, learning (Gen.jl core)
+| Capability | GenMLX | gen.clj |
+|---|---|---|
+| `ParamUpdate(conf, gf=>params)`, `apply!`, `FixedStepGradientDescent`, `GradientDescent(init, beta)`, `ADAM`, `init_update_state`/`apply_update!` | P: `learning.cljs` sgd/adam/train; `nn/optimizer`; no decaying GD; no per-GF ParamUpdate | core |
+| `train!(gf, data_gen, update, epochs, ...)` | P: `learning/train`, `amortized.cljs train-proposal` | core |
+| `lecture!`, `lecture_batched!` (sleep phase); wake phase via `train!` | Y: `learning.cljs` wake-sleep | soon |
+
+### 1j. Inference library (Gen.jl core)
+| Capability | GenMLX | gen.clj |
+|---|---|---|
+| `importance_sampling` / `importance_resampling` with the internal proposal | Y: `inference/importance.cljs` | core |
+| …with a custom proposal GF | **N** in importance.cljs (only `amortized.cljs` and `smcp3-init`) | core |
+| `mh(trace, selection)` | Y: `mcmc.cljs mh`, `kernel.cljs mh-kernel` | core |
+| `mh(trace, proposal, args)` | Y: `mh-custom` | core |
+| `mh(trace, proposal, args, involution)` / `involutive_mcmc` | Y/P: `involutive-mh` (no Jacobian); `translator.cljs` (AD Jacobian, `reversible-jump-mh`) | core |
+| `check=`, `observations=` stationarity checks | N | soon |
+| `mala(trace, sel, tau)` | Y | core |
+| `hmc(trace, sel; L, eps)` | Y (with dual-averaging adaptation) | core |
+| `elliptical_slice(trace, addr, mu, cov)` | Y | core |
+| `@kern` (`for`/`if`/`let`, auto reversal), `@pkern`, `@rkern`, `reversal` | P: kernel.cljs combinators, `with-reversal`; no macro DSL, no check | core |
+| `map_optimize(trace, sel; ...)` (backtracking line search) | Y: `map-optimize` (Adam/SGD instead) | core |
+| `enumerative_inference` + `choice_vol_grid` (including continuous grid volumes) | P: `enumerate.cljs`, `exact.cljs`; discrete only | core |
+| `initialize_particle_filter` / `particle_filter_step!` (default or custom proposal), `maybe_resample!`, `log_ml_estimate`, `get_traces`, `get_log_weights`, `sample_unweighted_traces` | P: `smc.cljs` functional whole-sequence API; default proposal only (custom via `smcp3.cljs`); `steppable.cljs` | core |
+| Trace transform DSL: `@transform`, `@read`/`@write` with `:discrete`/`:continuous`, `@copy`, `@tcall`, `pair_bijections!`, `is_involution!`, `inverse` | P: translator.cljs read/write/copy-choice, `jacobian-logdet`, `sparse-jacobian-logdet`; no macro DSL, no discrete/continuous tagging, no inverse pairing check | core |
+| `Deterministic`/`General`/`SimpleExtending`/`Symmetric` TraceTranslator | P: `trace-translator`/`apply-translator`, `coarse-to-fine-smc` | core |
+| `black_box_vi!` (score-function estimator; variational model is a GF with `@param`) | P: `vi.cljs` (mean-field ADVI, programmable VI over raw log-density + flat params); `adev.cljs` | core |
+| `black_box_vimco!` | Y: `vimco` | core |
+
+### 1k. Ecosystem packages
+| Package | What it adds | GenMLX | gen.clj |
+|---|---|---|---|
+| GenParticleFilters | `pf_initialize` (custom proposal, stratified), `pf_update!` (fwd/bwd proposals + transform, translator, stratified), `pf_resample!` (multinomial/residual/stratified, `priority_fn`), `pf_rejuvenate!`/`pf_move_accept!`/`pf_move_reweight!`, `pf_resize!` (multinomial/residual/optimal), `pf_replicate!`/`pf_dereplicate!`/`pf_coalesce!`/`pf_introduce!`, mean/var/proportionmap, ESS, log-ML, substate views; `UpdatingTraceTranslator`/`ExtendingTraceTranslator` | P: systematic/residual/stratified resampling, ESS threshold, MH move-accept rejuvenation, csmc, vsmc. Missing: priority weights, move-reweight, resize, stratified init, statistics helpers | soon |
+| GenSMCP3 | `SMCP3Update(fwd, bwd, ...)` with automatic sparse Jacobian correction | P: `smcp3.cljs` via edit ProposalEdit; no auto-Jacobian | soon |
+| GenTraceKernelDSL | `@kernel` mixing sampling and deterministic code; MH/SMC kernels returning (forward, reverse) choicemaps | N (closest: `edit.cljs`) | soon |
+| GenPseudoMarginal / "GenSMC" | `selection_sir_gf`, `selection_sir_mh`, `sir_pgibbs`, `ais`, `ais_gf`, `selection_ais_mh` | P: `encapsulated.cljs` pseudo-marginal-mh, `pmcmc.cljs`; AIS only in laws | later |
+| GenVariableElimination | Factor graphs from traces, variable elimination, exact backward samplers | P, different: `exact.cljs` tensor enumeration, `hmm_forward.cljs` | later |
+| GenDirectionalStats | Distributions on orientations and rotations (SO(3)), involutive kernels | P: von-mises, wrapped-cauchy, wrapped-normal; no SO(3) | later |
+| GenTF / GenPyTorch | TF/PyTorch graphs as GFs | analog: `nn.cljs nn->gen-fn` | later |
+| GenFluxOptimizers | Flux optimizers for Gen params | analog: `nn/optimizer` | later |
+| GenDistributions | Distributions.jl wrapped via `DistributionsBacked` | n/a | soon (Commons Math / fastmath) |
+| Gen2DAgentMotion, GenRedner | Agent-motion and renderer domain libraries | agents/* is an analog of the first | later / skip |
+
+## 2. What GenMLX has that Gen.jl does not
+
+- **Vectorized/batched GFI.**
+  - `vsimulate`/`vgenerate`/`vupdate`/`vregenerate`/`vproject`, `VectorizedTrace`,
+    `IBatchedSplice`, `vmap-gf`/`repeat-gf`, `vectorized-switch`.
+  - Vectorized MH, MALA, HMC, MAP, IS, SMC, SMCP3 and ADEV.
+- **Compilation ladder L0–L4.**
+  - Schema extraction and compiled simulate/generate/update/regenerate.
+  - Fused whole-chain MCMC and captured-graph replay; `vgenerate-compiled`.
+  - Compiled SMC, VI and Adam.
+  - `fit` / `method_selection`.
+- **Automatic analytical elimination (L3).**
+  - Conjugacy detection across 7 families, affine analysis, and joint
+    linear-Gaussian elimination.
+  - Rao-Blackwellization.
+  - Kalman, EKF, N-d EKF and HMM-forward handlers.
+- **A GenJAX-style edit interface:** typed EditRequests that return backward
+  requests.
+- **Extra combinators:** Scan, Mask, Mix, Contramap/MapRetval/Dimap.
+- **Extra inference.**
+  - NUTS, enumerative Gibbs, PMMH and particle Gibbs, conditional SMC.
+  - Differentiable resampling and IS.
+  - ADEV with REINFORCE and baselines.
+  - Programmable VI objectives (IWELBO, PWake, QWake).
+  - Amortized neural IS.
+  - Fisher/Laplace, steppable/budgeted inference with a cost meter.
+  - Diagnostics (bulk/tail ESS, R-hat).
+  - Exact enumeration with the full GFI and entropy/mutual-information queries.
+- **16 extra distributions:** student-t, log-normal, delta, truncated-normal,
+  wishart, inv-wishart, von-mises, wrapped-cauchy, wrapped-normal, gaussian-vec,
+  iid, iid-gaussian, weighted, categorical-weights, …
+- **Verification infrastructure.**
+  - `gfi.cljs`: about 85 executable laws.
+  - `pef.cljs`: path-equivalence fuzzing.
+  - `verify.cljs`: a static validator.
+  - Malli dev-mode validation and score-type tags.
+- **Architecture:** pure handler transitions plus a data-driven dispatcher stack;
+  functional PRNG key threading.
+- **Infrastructure and domains.**
+  - JSON serialization; sqlite persistence.
+  - LLMs as GFs: grammar-constrained decoding, token-SMC, byte marginalization.
+  - Agents (MDP/POMDP, inverse planning).
+  - Structural inference over programs, metareasoning control, NN layers.
+
+## 3. GFI invariants for gen.clj's property tests (from the thesis)
+
+GenMLX's `gfi.cljs` law vector is a ready-made list to port. Notation:
+t = (P, x, τ); σ = constraints; q = internal proposal.
+
+1. **Structured density / addresses** (Def 2.1.3, p. 49).
+   - Distinct traces in the support disagree on some shared address. In
+     practice: no address is a prefix of another, and leaf addresses are unique.
+   - Choices are sufficient: the same (P, x, τ) always gives the same retval and
+     score.
+2. **Score = density.** `get_score(simulate(x)) = log p(τ;x) = assess(x,τ).weight`,
+   and the retvals agree (pp. 68–69; Def 2.1.16, p. 56).
+3. **Generate.**
+   - Empty constraints: weight 0, and the trace is distributed as `simulate`.
+   - Full constraints: the trace is deterministic and the weight equals the score
+     (§2.3.1, p. 68).
+   - General case: log w = log p(τ;x) − log q(υ;x,σ) (§4.1.1, p. 143).
+   - Forward-sampling q: the weight is the sum of the constrained addresses'
+     log-densities as they are visited (p. 145).
+   - Statistical check: E_q[w] = p̄(σ;x) against a closed-form marginal likelihood.
+4. **Support condition.** q(υ;x,σ) > 0 ⇔ p(υ|σ;x) > 0 (Def 4.1.1, p. 142).
+   Generate weights are never NaN, and −∞ only off-support.
+5. **Update weight and discard** (Def 2.3.1, p. 69; p. 71; Gen docs).
+   - log w = log p(τ';x') − log q(τ'_fresh; x', τ+σ) − log p(τ;x); fresh terms
+     cancel.
+   - The discard contains the overwritten old values **and** the old addresses
+     that are no longer visited.
+   - An identity update (x'=x, σ={}) has weight 0.
+6. **Update is reversible** (Prop. 2.3.1, p. 70). update(t', x, ·, discard) gives
+   back t with weight −w, including for structure-changing updates.
+7. **Compositionality** (Prop. 2.3.2, p. 73). For sequencing or splicing,
+   log w₃ = log w₁ + log w₂ and discards merge. Combinator updates match the
+   equivalent inlined loop in the dynamic modeling language.
+8. **Change hints are sound** (Def 2.3.2, pp. 70–71; §5.3, pp. 176–177).
+   - Results under `UnknownChange` equal those under precise hints.
+   - Retdiffs over-approximate: f(x',τ') ∈ f(x,τ) ⊙ δY.
+   - Map and Unfold skip only elements whose hint says unchanged.
+9. **Regenerate** (Eq. 4.1, p. 144).
+   - log w = log [p(τ';x') q(υ';x,σ') / (p(τ;x) q(υ;x',σ))].
+   - Unselected addresses keep their values.
+   - With the same args, selecting nothing gives weight 0 and an unchanged trace,
+     and selecting everything gives weight 0.
+   - Requires a supportive density, i.e. fixed support per address (Def 2.1.7,
+     p. 52; §5.1, pp. 169–170).
+10. **Selection MH is stationary** (Alg. 15, p. 148). Test against exact
+    enumeration or a conjugate posterior. With the optimal internal proposal,
+    regenerate is Gibbs (pp. 145–146).
+11. **Project.**
+    - The all-selection gives the score; the empty selection gives 0.
+    - For fixed-structure forward sampling, project(S) + project(Sᶜ) = score.
+    - project(t, A) equals the weight of generate constrained on t restricted to A.
+12. **Propose.** The weight equals `assess(choices).weight`, and the choices are
+    distributed as `simulate`.
+13. **Gradients** (Eqs. 2.10–2.12, p. 72).
+    - Argument gradients: ∇ₓ log p + J·v.
+    - Choice gradients: ∂log p/∂τ[a] + Σᵢ ∂fᵢ/∂τ[a]·vᵢ, where v is the retgrad.
+    - Check against finite differences, including a nonzero retgrad.
+    - `accumulate_param_gradients!` scales by its scale factor.
+14. **Encapsulated randomness** (Def 4.5.1, p. 155; Eqs. 4.2–4.3, p. 156).
+    - E_{q̊}[ξ] = p(τ;x).
+    - Identity update and project cost 0.
+    - Pseudo-marginal MH targets the exact posterior.
+15. **Custom-proposal MH requirements** (Alg. 5 and requirements, p. 92). The
+    proposal never samples an observed address, and every move is reversible:
+    q(σ';t') > 0.
+16. **Trace translators** (Def 3.6.1 and Eq. 3.13, p. 110; Alg. 9, p. 111).
+    - w = p₂q₂ / (p₁q₁) · |J_h|.
+    - Round trip h(h⁻¹(z)) = z.
+    - The sparse Jacobian equals the dense one (§3.6.2, pp. 111–112).
+17. **Involutive MCMC** (Def 3.7.1, Eq. 3.15, p. 121; Eq. 3.17, p. 123).
+    - h∘h = id.
+    - Acceptance: min{1, p(υ')q(σ';υ') / (p(υ)q(σ;υ)) · |J|}.
+    - Detailed balance holds on a split/merge example.
+18. **Kernel DSL.**
+    - The reversal of a composite kernel is the reversed sequence of reversed
+      kernels.
+    - With `check`, observed choices are unchanged after each kernel.
+19. **Internal-proposal override** (Alg. 16, p. 152). R keeps p and changes q.
+    Generate under R stays unbiased, and regenerate/MH under R stays stationary.
+20. **Estimators.** IS and particle-filter log-ML estimates are unbiased in exp
+    space, and the PF incremental weight equals the update weight.
+
+## 4. Hazards found while mapping
+
+- **GenMLX's L3 generate departs from the thesis semantics.** It returns a
+  deterministic posterior-mean latent with the marginal weight. That is not a
+  sample from any q in the sense of Def 4.1.1, so it breaks regenerate/MH, which
+  is why GenMLX strips it inside inference.
+  → gen.clj implements conjugacy as the **optimal internal proposal** (sample
+  the latent from its exact conditional, weight log p̄(σ); pp. 145–146), which is
+  thesis-legal and composes with regenerate.
+- **GFI gaps that block parity:** retdiffs, regenerate with new args,
+  shared-namespace splice, Gen.jl-style Recurse, `call_at`,
+  `to_array`/`from_array`/`get_selected`, IS with a custom proposal, a stateful
+  `particle_filter_step!` with a proposal, `@dist`, the `@transform` and `@kern`
+  macros, and `check=`.
+- **Conventions to decide early:**
+  - Index base for Map/Unfold/Switch: Gen.jl is 1-based, GenMLX 0-based.
+  - Distribution parameterizations: gamma by scale, categorical by probs.
+  - Whether generate errors on unused constraints.
+- **AD is a prerequisite on the JVM.** It must exist before choice gradients,
+  HMC, MALA, MAP, VI and translator Jacobians.
