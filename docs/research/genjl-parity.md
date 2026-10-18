@@ -329,6 +329,16 @@ tested, ◐ partly, — not yet (the feature does not exist yet).
 
 ## 4. Hazards found while mapping
 
+- **Gen.jl's `elliptical_slice` appears to target the wrong distribution.**
+  Its source (`src/inference/elliptical_slice.jl`, checked 2026-10-18)
+  compares `update`'s weight with log u. For a model whose address has the
+  N(μ, Σ) prior the method assumes, that weight includes the prior's own
+  density ratio, which the ellipse already accounts for: the prior is counted
+  twice. On the 2-d Gaussian test target of `gen.inference.mcmc-test`, the
+  Gen.jl form gives a posterior mean of 0.381 and a variance of 0.220, against
+  the exact 0.5625 and 0.3125. gen.clj subtracts the prior ratio and matches.
+  Worth reporting upstream (owner's call).
+
 - **GenMLX's L3 generate departs from the thesis semantics.** It returns a
   deterministic posterior-mean latent with the marginal weight. That is not a
   sample from any q in the sense of Def 4.1.1, so it breaks regenerate/MH, which

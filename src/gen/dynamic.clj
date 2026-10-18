@@ -10,8 +10,9 @@
 
    Inside a body, (trace addr dist) makes a random choice at an address (or a
    vector path), and (splice addr gf & args) calls another generative
-   function, its choices nested under addr. Conditionals branch on the values
-   of 0-d arrays (docs/array-api.md §8a).
+   function, its choices nested under addr. (param name) reads a trainable
+   parameter from the store in effect (with-params). Conditionals branch on
+   the values of 0-d arrays (docs/array-api.md §8a).
 
    Every GFI operation runs the body under a handler: a pure transition from
    (state, address, distribution) to [value state'], one per operation,
@@ -276,6 +277,21 @@
    :constraints (or constraints cm/EMPTY) :prev prev :selection (or selection sel/none)
    :discard cm/EMPTY :visited #{}})
 
+(def ^:dynamic *params*
+  "The trainable parameters in effect: the store of the outermost generative
+   function that has one, merged with any inner one's (with-params)."
+  nil)
+
+(defn- read-param
+  "(param name) in a body: the parameter's value in the store in effect."
+  [name]
+  (let [v (get *params* name ::missing)]
+    (if (= ::missing v)
+      (throw (ex-info (str "The parameter " (pr-str name) " has no value: give the generative function a store"
+                           " with gen.dynamic/with-params")
+                      {:param name :available (keys *params*)}))
+      v)))
+
 (defn- execute
   "Run gf's body on args under the transitions of mode; the final state with
    :retval."
@@ -303,7 +319,7 @@
                       (let [[v state] (splice-call state p gf (vec args))]
                         (vreset! vol (update state :visited conj p))
                         v)))
-        retval (apply (:body-fn gf) trace-fn splice-fn args)]
+        retval (apply (:body-fn gf) trace-fn splice-fn read-param args)]
     (assoc (finish @vol) :retval retval)))
 
 (defn- make-trace [gf args state]
@@ -324,7 +340,9 @@
    operation :constraints, :prev (the previous trace) and :selection. Returns
    the operation's result map."
   [gf op args opts]
-  (let [state (execute gf op args opts)]
+  (let [state (if-let [ps (:params gf)]
+                (binding [*params* (merge *params* ps)] (execute gf op args opts))
+                (execute gf op args opts))]
     (case op
       :simulate {:trace (make-trace gf args state)}
       :generate {:trace (make-trace gf args state) :weight (:weight state)}
@@ -344,7 +362,7 @@
 ;; DynamicGF
 ;; ---------------------------------------------------------------------------
 
-(defrecord DynamicGF [body-fn source]
+(defrecord DynamicGF [body-fn source params]
   gfi/IGenerativeFunction
   (-simulate [gf args key] (:trace (run gf :simulate args {:key key})))
   (-generate [gf args constraints key] (run gf :generate args {:key key :constraints constraints}))
@@ -375,7 +393,13 @@
   "A dynamic generative function from a body fn of (trace splice & args) and
    its source form."
   [body-fn source]
-  (->DynamicGF body-fn source))
+  (->DynamicGF body-fn source nil))
+
+(defn with-params
+  "gf with the trainable-parameter store params, a map of name to value read
+   by (param name) in gf's body and in every generative function it calls."
+  [gf params]
+  (assoc gf :params params))
 
 (defmethod print-method DynamicGF [gf ^java.io.Writer w]
   (.write w (str "#gen/fn" (pr-str (first (:source gf))))))
@@ -449,7 +473,8 @@
 (defmacro gen
   "A generative function. params are the arguments (destructuring allowed);
    in body, (trace addr dist) and (splice addr gf & args) make random choices
-   and calls, and conditionals branch on the values of 0-d arrays."
+   and calls, (param name) reads a trainable parameter (with-params), and
+   conditionals branch on the values of 0-d arrays."
   [params & body]
-  (let [body-fn (guard-branches `(fn [~'trace ~'splice ~@params] ~@body) (set (keys &env)))]
+  (let [body-fn (guard-branches `(fn [~'trace ~'splice ~'param ~@params] ~@body) (set (keys &env)))]
     `(make-gen-fn ~body-fn '~(cons params body))))

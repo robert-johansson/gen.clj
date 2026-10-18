@@ -280,6 +280,14 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
 - **Traces store each choice's log-probability** (as Gen.jl does), so update
   and regenerate weights use the true old values and `project` never re-runs
   the model.
+- **Trainable parameters are an explicit store** (decided 2026-10-18 by the
+  agent, for the owner's review): a map of name → value, attached with
+  `(dyn/with-params gf store)` as a record field. `(param :w)` in a body reads
+  the store in effect, which reaches every nested splice and combinator kernel
+  (one namespace per model, like Pyro's store). A missing parameter is a loud
+  error. Gradients are values: `gen.gradients/param-gradients` returns a map,
+  and optimizers return a new store. This is Gen.jl's `@param`,
+  `init_param!` and `accumulate_param_gradients!`/`apply!`, but functional.
 - **Testing:** reference values come from scipy and JAX, generated once into
   committed EDN fixtures (`test/fixtures/`); the tests never need Python.
   Against GenMLX, deterministic quantities (log-densities, weights given fixed

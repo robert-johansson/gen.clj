@@ -40,10 +40,12 @@ Python.
 
 | Layer | Namespaces |
 |---|---|
-| L0 arrays | `gen.array` (public API), `.dtype`, `.shape`, `.special`, `.linalg`, `.protocols`; `gen.backend.jvm`; `gen.random`, `gen.random.threefry` |
+| L0 arrays | `gen.array` (public API), `.dtype`, `.shape`, `.special`, `.linalg`, `.tape` (autodiff), `.protocols`; `gen.backend.jvm`; `gen.random`, `gen.random.threefry` |
 | L1 data | `gen.choicemap`, `gen.selection`, `gen.trace`, `gen.diff` |
 | L2 GFI | `gen.gfi` (protocol + API), `gen.dynamic` (handler, DynamicGF, `gen`) |
 | L3 distributions | `gen.dist.core` (record, `defdist`), `gen.dist` |
+| L4 combinators | `gen.combinators` (map, unfold, switch) |
+| L5 inference | `gen.inference.weights`, `.importance`, `.mh`, `.kernel`, `.particle-filter`, `.mcmc` (HMC, MALA, MAP, elliptical slice); `gen.gradients`, `gen.learning` |
 
 ## Rules
 
@@ -68,9 +70,10 @@ Python.
 6. **Errors are loud.** Shape mismatches, unvisited constraints, repeated
    addresses and the like throw `ex-info` with data. Never let one degrade into
    NaN or a silent default.
-7. **Laws are tests.**
-   - Every GFI feature gets test.check properties for the thesis laws (see
-     `test/gen/dynamic_test.clj`).
+7. **Laws are tests.** The GFI laws live in `test/gen/laws.clj` (general and
+   forward-sampling sets); every new generative function kind instantiates them
+   with `(laws/deflaws prefix models n)`. Coverage is tracked in
+   `docs/research/genjl-parity.md` §3.
    - Numerics are checked against fixtures.
    - Sampled quantities use fixed keys and variance-derived bands.
    - Against GenMLX, compare statistics, never exact samples.
