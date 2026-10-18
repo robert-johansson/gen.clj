@@ -111,9 +111,14 @@ GenMLX's `mx/` contract, so GenMLX code ports with renames:
   core never relies on laziness.
 
 The surface starts from the ops the core actually uses, not GenMLX's full
-245-function membrane. Dispatch works by protocol on the array type; Clojure
-numbers coerce to the other operand's backend; a default backend handles
-creation functions. The design is its own bean, reviewed before implementation.
+245-function membrane. The full specification is in **`docs/array-api.md`**:
+- Clojure numbers are backend-neutral 0-d arrays (host math).
+- Ops are keywords.
+- Composite ops are defined once over primitives.
+- Keys are values.
+- Gradients come from a generic tape.
+
+The backend contract is `src/gen/array/protocols.clj`.
 
 ### 5.2 JVM backend (M1): pure Clojure, CPU-only, no native dependencies
 
