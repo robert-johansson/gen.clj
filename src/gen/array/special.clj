@@ -59,7 +59,7 @@
 
 (defn- erfinv-guess
   "Giles' single-precision approximation of erfinv (|x| < 1), the starting
-   point for Newton's method."
+   point for Halley's method."
   ^double [^double x]
   (let [w (- (Math/log (* (- 1.0 x) (+ 1.0 x))))]
     (* x
@@ -77,32 +77,33 @@
                (* w) (+ -0.0076224613) (* w) (+ 0.00943887047)
                (* w) (+ 1.00167406) (* w) (+ 2.83297682)))))))
 
-(defn- newton-step
-  "One Newton step for erfinv: on erfc(x) = q in the tail, on erf(x) = ay
-   otherwise."
-  ^double [^double x tail? ^double ay ^double q]
-  (let [scale (* sqrt-pi-over-two (Math/exp (* x x)))]
-    (if tail?
-      (+ x (* (- (erfc-nonneg x) q) scale))
-      (- x (* (- (erf x) ay) scale)))))
+(defn- halley-step
+  "x - d/(1 + x·d), with d the Newton correction (erf(x) - ay)/erf'(x), since
+   erf''/erf' = -2x. In the tail the residual uses erfc(x) - q, so that
+   1 - |y| is never lost to cancellation."
+  ^double [^double x ^double ay]
+  (let [scale (* sqrt-pi-over-two (Math/exp (* x x)))
+        d (if (> ay 0.5)
+            (* (- (- 1.0 ay) (erfc-nonneg x)) scale)
+            (* (- (erf x) ay) scale))]
+    (- x (/ d (+ 1.0 (* x d))))))
 
 (defn- refine-erfinv
-  "Newton's method from Giles' guess to convergence, for 0 < ay < 1. (A
-   function of its own, so the loop is in statement position: a loop bound as
-   a value would be compiled into a boxing closure.)"
+  "Halley's method from Giles' guess, for 0 < ay < 1. Convergence is cubic:
+   once a step's correction is below 1e-6 relative, the result's error is
+   below ~1e-18, so the usual cost is a single erf evaluation; poor guesses
+   (far tails) take more steps."
   ^double [^double ay]
-  (let [tail? (> ay 0.5)
-        q (- 1.0 ay)]
-    (loop [x (double (erfinv-guess ay)) i 0]
-      (let [x' (double (newton-step x tail? ay q))]
-        (if (or (== i 8) (<= (Math/abs (- x' x)) (* 1e-16 (Math/abs x'))))
-          x'
-          (recur x' (inc i)))))))
+  (loop [x (double (erfinv-guess ay)) i 0]
+    (let [x' (halley-step x ay)]
+      (if (or (== i 6) (<= (Math/abs (- x' x)) (* 1e-6 (Math/abs x'))))
+        x'
+        (recur x' (inc i))))))
 
 (defn erfinv
   "The inverse error function on [-1, 1] (±Inf at ±1, NaN outside): Giles'
-   approximation refined by Newton's method to convergence, using erfc in the
-   tails so that 1 - |y| is never lost to cancellation."
+   approximation refined by one Halley step, using erfc in the tails so that
+   1 - |y| is never lost to cancellation."
   ^double [^double y]
   (let [ay (Math/abs y)]
     (cond (or (Double/isNaN y) (> ay 1.0)) Double/NaN

@@ -9,18 +9,18 @@ criterium's quick-benchmark (mean time per call). Reproduce with
 
 | Operation | Graal JIT | C2 |
 |---|---|---|
-| linreg (12 sites): simulate | 20.8 µs | — |
+| linreg (12 sites): simulate | 17.0 µs | — |
 | linreg: generate with 10 observations | 16.4 µs | — |
 | linreg: assess | 14.4 µs | — |
 | linreg: update one choice | 13.9 µs | — |
 | linreg: regenerate `:slope` | 13.7 µs | — |
 | linreg: choice gradients (slope, intercept) | 92.0 µs | — |
-| hierarchical (10 splices): simulate | 32.8 µs | — |
-| hierarchical: update `:mu` | 32.3 µs | — |
-| Unfold (50 steps): extend by one step | 5.3 µs | — |
-| linreg × 1000 particles, one at a time: generate | 17.2 ms | — |
-| linreg × 1000 particles, batched: generate | 1.12 ms | — |
-| linreg × 1000 particles, batched: regenerate `:slope` | 0.59 ms | — |
+| hierarchical (10 splices): simulate | 31.0 µs | — |
+| hierarchical: update `:mu` | 33.7 µs | — |
+| Unfold (50 steps): extend by one step | 5.2 µs | — |
+| linreg × 1000 particles, one at a time: generate | 16.6 ms | — |
+| linreg × 1000 particles, batched: generate | 0.29 ms | — |
+| linreg × 1000 particles, batched: regenerate `:slope` | 0.18 ms | — |
 
 An earlier run, before the type-predicate fix below, compared the JITs.
 Graal's JIT was about 30% faster on the scalar, allocation-heavy handler
@@ -41,10 +41,12 @@ At 10,000 particles a particle costs about 1.3 µs.
   made scalar models about 2× faster, and spliced models 3.7×
   (hierarchical simulate: 120 µs → 33 µs).
 - `erfinv` bound a `loop` as a value, which compiles to a boxing closure.
+- `erfinv` now refines Giles' guess with Halley's method (cubic convergence),
+  usually in one erf evaluation instead of three Newton steps. Normal draws
+  went from 1.6 µs to 0.49 µs, and batched generate over 1000 particles from
+  1.12 ms to 0.29 ms, 56× faster than one particle at a time. The scipy and
+  JAX fixtures still hold to 1e-15.
 
 ## Known hotspots (beans)
 
-- **Scalar normal draws cost about 1.6 µs,** mostly erfinv's Newton
-  refinement to full float64 accuracy. The refinement keeps draws exact
-  against JAX. A double-precision initial approximation would need one step.
 - **Choice gradients cost about 6× an assess** (tape allocation per op).
