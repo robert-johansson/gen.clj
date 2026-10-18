@@ -284,6 +284,22 @@
 
 (declare dynamic-gf? run-handler)
 
+(defn- realize!
+  "Force every lazy sequence in a body's return value (inside sequences,
+   vectors and maps), so that trace calls in them happen during the run.
+   Lazy sequences cache their elements, so this changes no value."
+  [x]
+  (cond (instance? clojure.lang.LazySeq x) (run! realize! x)
+        (or (vector? x) (seq? x)) (run! realize! x)
+        (map? x) (run! realize! (vals x)))
+  x)
+
+(defn- check-running! [state p]
+  (when (::finished state)
+    (throw (ex-info (str "trace or splice at " p " after the generative function returned: a lazy"
+                         " sequence escaped the body (realize it in the body, e.g. with mapv or doall)")
+                    {:path p}))))
+
 (defn- execute
   "Run gf's body on args under the transitions of mode; the final state with
    :retval."
@@ -293,6 +309,7 @@
         trace-fn (fn [addr dist]
                    (let [p (path addr)
                          state @vol]
+                     (check-running! state p)
                      (when-not (instance? gen.dist.core.Distribution dist)
                        (throw (ex-info (str "trace at " p " needs a distribution; call generative functions with splice")
                                        {:path p :value dist})))
@@ -316,13 +333,15 @@
                       (let [[addr gf & args] xs
                             p (path addr)
                             state @vol]
+                        (check-running! state p)
                         (when-not (gfi/generative-function? gf)
                           (throw (ex-info (str "splice at " p " needs a generative function") {:path p :value gf})))
                         (check-address! state p)
                         (let [[v state] (splice-call state p gf (vec args))]
                           (vreset! vol (update state :visited conj p))
                           v))))
-        retval (apply (:body-fn gf) trace-fn splice-fn read-param args)]
+        retval (realize! (apply (:body-fn gf) trace-fn splice-fn read-param args))]
+    (vswap! vol assoc ::finished true)
     (assoc (finish @vol) :retval retval)))
 
 (defn- make-trace [gf args state]

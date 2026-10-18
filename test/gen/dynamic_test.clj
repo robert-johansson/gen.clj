@@ -290,3 +290,15 @@
   (let [wrong (fn [gf op args opts] (when (= op :assess) (update (closed-form-assess gf op args opts) :weight + 0.1)))
         cases (laws/cases [[:linreg (dyn/with-dispatch linreg wrong) [[1.0 2.0 3.0]]]])]
     (is (false? (:pass? (clojure.test.check/quick-check 20 (laws/dispatch-matches-handler cases)))))))
+
+(deftest lazy-bodies-are-run-to-completion
+  ;; trace calls inside a returned lazy sequence happen during the run
+  (let [m (gen [] (map (fn [i] (trace [:x i] (d/normal 0 1))) (range 3)))
+        tr (gfi/simulate m [] (rng/key 1))]
+    (is (= [[:x 0] [:x 1] [:x 2]] (cm/addresses (:choices tr))))
+    (is (close? (:score tr) (:weight (gfi/assess m [] (:choices tr))))))
+  (testing "and laziness that escapes otherwise is loud"
+    (let [escaped (atom nil)
+          m (gen [] (reset! escaped (map (fn [i] (trace [:x i] (d/normal 0 1))) (range 3))) nil)]
+      (gfi/simulate m [] (rng/key 2))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"after the generative function returned" (doall @escaped))))))
