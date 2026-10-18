@@ -302,8 +302,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   `gen.batched` are shared by every particle (`:shared-constraints?`): shape
   alone cannot tell a shared value from a per-particle one. A model that
   branches on per-particle values falls back to one scalar trace per particle,
-  so batching never changes meaning. Measured: 14–26× faster importance
-  sampling on the JVM backend (100–10,000 particles).
+  so batching never changes meaning. Measured: 10–41× faster importance
+  sampling on the JVM backend (100–10,000 particles; docs/benchmarks.md).
 - **Bodies run to completion:** lazy sequences in a body's return value are
   realized during the run, and a `trace` or `splice` after the run is a loud
   error. Before this, `(map … (trace …))` at the end of a body gave a trace

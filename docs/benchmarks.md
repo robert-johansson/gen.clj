@@ -31,8 +31,15 @@ generate. Graal is the default.
 ## What batching buys
 
 Batched importance sampling on linreg (10 observations), against one particle
-at a time: 13.8× faster at 100 particles, 23.3× at 1000, and 25.6× at 10,000.
-At 10,000 particles a particle costs about 1.3 µs.
+at a time (both paths after the fixes below):
+
+| particles | one at a time | batched | speedup |
+|---|---|---|---|
+| 100 | 9.96 ms | 1.03 ms | 9.7× |
+| 1,000 | 39.0 ms | 1.53 ms | 25.5× |
+| 10,000 | 176 ms | 4.27 ms | 41.1× |
+
+At 10,000 particles a particle costs about 0.43 µs.
 
 ## Fixed
 
