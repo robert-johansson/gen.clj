@@ -57,19 +57,24 @@ be ported is tracked as a deferred bean with a note on how to port it cleanly
    `regenerate(trace, args, argdiffs, selection) → {:trace :weight :retdiff}`.
    Retdiffs drive incremental computation in Map and Unfold. GenMLX's three
    update protocols collapse into one.
-3. **One implementation per semantic.** Batched execution comes later, as the *same*
-   transitions parameterized by a sampler, never as copies.
-4. **Mutation is confined to two places**: the single `volatile!` in `run-handler`,
-   and native handles inside the membrane. Hot paths have no atoms, production
-   dispatch has no test hooks, and the semantics layer makes no
-   memory-management calls (eval and cleanup happen only at inference-loop
-   boundaries).
+3. **One implementation per semantic.** Batched execution is part of M1 (decided):
+   the *same* handler transitions, parameterized by `:batch-shape` (`[]` for one
+   trace, `[N]` for N particles), never as copies (GenMLX has six).
+4. **Mutation is confined to three places**: the single `volatile!` that
+   `gen.dynamic/execute` threads through one model run, the implicit key
+   source in `gen.gfi`, and native handles inside the membrane. Hot paths have
+   no atoms, production dispatch has no test hooks, and the semantics layer
+   makes no memory-management calls (eval and cleanup happen only at
+   inference-loop boundaries).
 5. **Randomness is purely functional** (decided). Every GFI op is a pure
    function of its inputs plus an explicit PRNG key: the same key gives the same
    result. Keys are threaded through handler state, never stored in metadata,
    and never silently replaced by fresh keys. The only impure point is the
-   outermost API: omitting the key draws one from a documented, seedable
-   default source.
+   outermost API: omitting the key draws one from the implicit key source,
+   whose root seed is random for each JVM (`gfi/implicit-seed` reads it,
+   `gfi/seed!` fixes it). Every trace site consumes one key whether it samples
+   or is constrained, so constraining a choice never shifts the randomness of
+   another site.
 6. **Minimal dependencies.** The core depends on Clojure plus the native
    membrane, nothing else (see §8).
 7. **Laws are tests.** The thesis's GFI invariants become test.check properties,
@@ -255,7 +260,27 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   1-based; document this in a migration note.
 - **Distributions use Gen.jl names and parameterizations** (`normal(mu, std)`,
   `gamma(shape, scale)`, `categorical(probs)`), plus explicitly named variants
-  where they matter numerically (e.g. `categorical-logits`).
+  where they matter numerically (e.g. `categorical-logits`). Each GenMLX name
+  whose meaning changed has a safeguard that makes a naive port fail loudly
+  (`docs/porting-genmlx.md`).
+- **House style: gen.array's operators are referred** in place of
+  `clojure.core`'s (`(+ a b)`, not `(a/add a b)`); `max`, `min`, `take` and
+  `flatten` are never referred (`docs/array-api.md` §2, §12).
+- **Branching on array values:** the `gen` macro wraps every `if` test in
+  `a/truthy?`, so a one-element array branches on its value and a batched
+  array throws instead of silently taking one branch (`docs/array-api.md` §8a).
+- **Randomness:** JAX's partitionable Threefry-2x32-20 in pure Clojure,
+  bit-identical to JAX. Every trace site consumes one key. The implicit key
+  source has a random root seed for each JVM (`gfi/seed!` fixes it). See §3.5.
+- **Traces store each choice's log-probability** (as Gen.jl does), so update
+  and regenerate weights use the true old values and `project` never re-runs
+  the model.
+- **Testing:** reference values come from scipy and JAX, generated once into
+  committed EDN fixtures (`test/fixtures/`); the tests never need Python.
+  Against GenMLX, deterministic quantities (log-densities, weights given fixed
+  choices) must match exactly, and sampled quantities are compared
+  statistically: the same seed cannot reproduce GenMLX's samples, because
+  draws also depend on how keys are threaded through a run.
 - **GFI signatures are Gen.jl-shaped** (§3.2). `generate` throws on
   constraints at unvisited addresses.
 - **Dtypes:** the JVM backend is float64 (the reference); MLX is float32. Core
