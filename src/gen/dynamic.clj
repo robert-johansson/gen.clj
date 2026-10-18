@@ -165,7 +165,12 @@
   (let [[k-next k-sub] (rng/split (:key state))]
     [k-sub (assoc state :key k-next)]))
 
-(defn- unknown-diffs [args] (vec (repeat (count args) diff/unknown-change)))
+(defn- arg-diffs
+  "Argdiffs for a splice's new args against its previous call's: no-change
+   for an identical argument (sound, and O(1)), unknown-change otherwise."
+  [prev-args args]
+  (mapv #(if (identical? %1 %2) diff/no-change diff/unknown-change)
+        args (concat prev-args (repeat nil))))
 
 (defn- record-call
   "state with the sub-trace tr at path p (score sc)."
@@ -212,7 +217,7 @@
       :update
       (let [[k state] (sub-key state)]
         (if prev-sub
-          (let [{tr :trace w :weight d :discard} (gfi/-update gf prev-sub args (unknown-diffs args) cons k)]
+          (let [{tr :trace w :weight d :discard} (gfi/-update gf prev-sub args (arg-diffs (:args prev-sub) args) cons k)]
             [(:retval tr) (cond-> (-> state (record-call p tr) (add-weight w))
                             (not (cm/empty? d)) (update :discard cm/set-choice p d))])
           (let [{tr :trace w :weight} (gfi/-generate gf args cons k)]
@@ -221,7 +226,7 @@
       :regenerate
       (let [[k state] (sub-key state)]
         (if prev-sub
-          (let [{tr :trace w :weight} (gfi/-regenerate gf prev-sub args (unknown-diffs args)
+          (let [{tr :trace w :weight} (gfi/-regenerate gf prev-sub args (arg-diffs (:args prev-sub) args)
                                                        (subselection-at (:selection state) p) k)]
             [(:retval tr) (-> state (record-call p tr) (add-weight w))])
           (let [tr (gfi/-simulate gf args k)]

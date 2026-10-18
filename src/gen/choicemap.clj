@@ -151,6 +151,11 @@
   [cm addr sub]
   (->Node (assoc (:m (or cm EMPTY)) addr sub)))
 
+(defn remove-submap
+  "cm without anything at a single address."
+  [cm addr]
+  (if (instance? Node cm) (->Node (dissoc (:m cm) addr)) cm))
+
 (defn set-choice
   "cm with value v (a leaf value or a choice map) at an address or path.
    Descending through an existing leaf throws rather than discarding it."

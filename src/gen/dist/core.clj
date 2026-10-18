@@ -161,12 +161,18 @@
             lp (total (log-prob d v))]
         {:trace (dist-trace d v lp) :weight (a/- lp (:score tr))
          :retdiff diff/unknown-change :discard (:choices tr)})
-      {:trace tr :weight 0.0 :retdiff diff/no-change :discard cm/EMPTY}))
+      ;; the value is kept and rescored: the parameters may have changed
+      (let [v (:retval tr)
+            lp (total (log-prob d v))]
+        {:trace (dist-trace d v lp) :weight (a/- lp (:score tr))
+         :retdiff diff/no-change :discard cm/EMPTY})))
 
   (-regenerate [d tr _ _ selection key]
     (if (sel/root-selected? selection)
       {:trace (simulate* d key) :weight 0.0 :retdiff diff/unknown-change}
-      {:trace tr :weight 0.0 :retdiff diff/no-change}))
+      (let [v (:retval tr)
+            lp (total (log-prob d v))]
+        {:trace (dist-trace d v lp) :weight (a/- lp (:score tr)) :retdiff diff/no-change})))
 
   (-assess [d _ choices]
     (when-not (cm/has-value? choices)
