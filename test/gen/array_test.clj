@@ -199,7 +199,10 @@
 
 (deftest branching
   (is (true? (a/truthy? (a/< 1.0 2.0))))
-  (is (false? (a/truthy? 0)))
+  (is (true? (a/truthy? 0)) "any number is truthy, as in Clojure")
+  (is (true? (a/truthy? (a/array [0]))) "also a one-element numeric array")
+  (is (false? (a/truthy? (a/array [false]))) "booleans branch by their value")
+  (is (false? (a/truthy? false)))
   (is (true? (a/truthy? (a/array [[true]]))))
   (is (false? (a/truthy? nil)))
   (is (= {:gen.array/batched-branch true :shape [2]}

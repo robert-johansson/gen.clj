@@ -227,3 +227,64 @@
     (is (b/batched? chains))
     (is (< (Math/abs (- m 0.65)) (* 5 (Math/sqrt (/ 0.5 n)))))
     (is (< (Math/abs (- v 0.5)) 0.06))))
+
+;; ---------------------------------------------------------------------------
+;; Regressions from the M1 review (docs/research/review-2026-10-18.md)
+;; ---------------------------------------------------------------------------
+
+(defn- batched-matches-scalar?
+  "Do batched importance weights equal the scalar generate weights of the
+   same particles? (Per particle, from the batched particles' own choices.)"
+  [model args obs n key]
+  (let [{ps :particles ws :weights} (b/generate model args obs n key)]
+    (every? true? (map (fn [tr w] (close? w (gfi/project tr (sel/from-choicemap obs))))
+                       (b/traces ps) (a/->clj ws)))))
+
+(deftest host-predicates-on-particles-fall-back
+  ;; review 1: (= k 0) on a batch was silently false for every particle
+  (let [m (gen [] (let [k (trace :k (d/categorical [0.5 0.5]))
+                        mu (if (= k 0) 0.0 3.0)]
+                    (trace :y (d/normal mu 1))))
+        obs (cm/choicemap :y 0.0)
+        exact (Math/log (+ (* 0.5 (Math/exp (dc/log-prob (d/normal 0 1) 0.0))) (* 0.5 (Math/exp (dc/log-prob (d/normal 3 1) 0.0)))))
+        {:keys [particles log-ml-estimate]} (imp/importance-sampling m [] obs 4000 {:batched? true :key (rng/key 30)})]
+    (is (not (b/batched? particles)) "the batch falls back to one particle at a time")
+    (is (< (Math/abs (- log-ml-estimate exact)) 0.05))
+    (testing "and case too"
+      (let [m (gen [] (let [k (trace :k (d/categorical [0.5 0.5]))]
+                        (trace :y (d/normal (case k 0 0.0 1 3.0) 1))))]
+        (is (batched-matches-scalar? m [] obs 6 (rng/key 31)))))))
+
+(deftest vector-sites-are-per-particle
+  ;; review 2: an [N] per-particle parameter met a [3] value element by element
+  (let [ys (a/array [0.5 1.0 1.5])
+        ;; three i.i.d. observations: vector parameters (Gen.jl's broadcasted_normal)
+        m (gen [] (let [mu (trace :mu (d/normal 0 1))] (trace :ys (d/normal (a/+ mu (a/zeros [3])) 1))))]
+    (doseq [n [3 4]]
+      (let [{ps :particles ws :weights} (b/generate m [] (cm/choicemap :ys ys) n (rng/key 32))]
+        (is (b/batched? ps))
+        (is (every? true? (map (fn [mu w] (close? w (a/sum (dc/log-prob (d/normal mu 1) ys))))
+                               (a/->clj (b/choice ps :mu)) (a/->clj ws))))))
+    (testing "a vector site's draws have the batch axis in front"
+      (let [v (gen [] (trace :z (d/normal (a/zeros [3]) 1)))]
+        (is (= [5 3] (a/shape (b/choice (b/simulate v [] 5 (rng/key 33)) :z))))
+        (is (batched-matches-scalar? v [] (cm/choicemap :z (a/array [0.1 0.2 0.3])) 3 (rng/key 34)))))
+    (testing "a per-particle scalar meets a shared vector in model arithmetic"
+      (let [m (gen [] (let [x (trace :x (d/normal 0 1))]
+                        (trace :y (d/normal (a/sum (a/* x (a/array [1.0 2.0 3.0]))) 1))))]
+        (is (batched-matches-scalar? m [] (cm/choicemap :y 0.7) 3 (rng/key 35)))
+        (is (every? true? (map (fn [tr] (close? (:score tr) (:weight (gfi/assess m [] (:choices tr)))))
+                               (b/traces (:particles (b/generate m [] (cm/choicemap :y 0.7) 3 (rng/key 35)))))))))))
+
+(deftest switches-take-and-spliced-distributions-in-batches
+  (let [sw (gen [] (splice :s (comb/switch observation observation) (trace :i (d/categorical [0.5 0.5])) 0.0))]
+    (testing "review 11: a Switch whose index is a choice, N = 1"
+      (is (= 1 (count (b/traces (b/simulate sw [] 1 (rng/key 36)))))))
+    (testing "review 12: take of a branching model's particles"
+      (let [ps (:particles (b/generate branching [] cm/EMPTY 1 (rng/key 37)))]
+        (is (= 3 (count (b/traces (b/take ps [0 0 0])))))))
+    (testing "review 13: a spliced distribution runs batched"
+      (let [m (gen [mu] (splice :x (d/normal mu 1)) (trace :y (d/normal 0 1)))
+            ps (b/simulate m [0.5] 4 (rng/key 38))]
+        (is (b/batched? ps))
+        (is (every? #(close? (:score %) (:weight (gfi/assess m [0.5] (:choices %)))) (b/traces ps)))))))

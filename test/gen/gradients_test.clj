@@ -78,12 +78,18 @@
 
 (deftest argument-gradients
   (let [tr (sim linreg [[1.0 2.0 3.0]] 8)
-        {[xs-grad] :arg-grads} (g/choice-gradients tr sel/none)
+        {[xs-grad] :arg-grads} (g/choice-gradients tr sel/none nil {:argnums [0]})
         fd (fn [i] (let [at (fn [d] (objective linreg [(update [1.0 2.0 3.0] i + d)] (:choices tr) nil))]
                      (/ (- (at h) (at (- h))) (* 2 h))))]
     (is (every? true? (map #(< (Math/abs (- %1 (fd %2))) 1e-5) xs-grad (range 3)))))
-  (is (= [nil] (:arg-grads (g/choice-gradients (sim hierarchical [2] 9) (sel/select :mu))))
-      "an integer argument has no gradient"))
+  (is (= [nil] (:arg-grads (g/choice-gradients (sim linreg [[1.0 2.0]] 9) (sel/select :slope))))
+      "arguments are not differentiated unless asked")
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not a tree of floats"
+                        (g/choice-gradients (sim hierarchical [2] 9) (sel/select :mu) nil {:argnums [0]})))
+  (testing "host math on an argument is fine when it is not differentiated"
+    (let [m (gen [n] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (a/* x (clojure.core/* 2.0 n)) 1))))
+          tr (sim m [1.5] 10)]
+      (is (map? (g/choice-gradients tr (sel/select :x)))))))
 
 (deftest discrete-choices-are-rejected
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not continuous"

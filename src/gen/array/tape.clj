@@ -73,9 +73,9 @@
         (a/reshape g shape)))))
 
 (defn- kept-shape
-  "shape with the reduced axes (all, when axes is empty) set to 1."
+  "shape with the reduced axes set to 1 (an empty axes vector reduces none)."
   [shape axes]
-  (let [ax (if (empty? axes) (set (range (count shape))) (set axes))]
+  (let [ax (set axes)]
     (vec (map-indexed (fn [i d] (if (ax i) 1 d)) shape))))
 
 (defn- spread
@@ -104,7 +104,7 @@
    reduction group over axes, computed without division (exact at zeros)."
   [x axes]
   (let [r (a/ndim x)
-        axes (if (empty? axes) (vec (range r)) (vec (sort axes)))
+        axes (vec (sort axes))
         keep (vec (remove (set axes) (range r)))
         perm (into keep axes)
         xt (a/transpose x perm)
@@ -251,7 +251,7 @@
         (:max :min) (record t out [x]
                             (fn [g _]
                               (let [hit (a/astype (== v (spread out s axes)) (a/dtype v))
-                                    ties (a/sum hit {:axis (when (seq axes) axes) :keep-dims? true})]
+                                    ties (a/sum hit {:axis axes :keep-dims? true})]
                                 [(* (spread g s axes) (/ hit ties))])))
         :prod (record t out [x] (fn [g _] [(* (spread g s axes) (product-of-others v axes))]))
         out)))

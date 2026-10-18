@@ -260,22 +260,58 @@ arrays returns an array: a bool array when batched, an MLX 0-d array on MLX. So
 `(if (< x 0) …)` would silently take the first branch there for every particle.
 Two layers make this safe:
 
-1. **`truthy?`** gives the Clojure truthiness of a 0-d value. On MLX it reads
-   the value. A batched array throws `ex-info` with
-   `{:gen.array/batched-branch true}`, because one branch cannot serve every
-   particle. Batched code uses `where` (values) or a switch combinator
-   (structure) instead.
+1. **`truthy?`** gives a value's Clojure truthiness, the same on every
+   backend:
+   - A boolean, host or a one-element bool array, counts by its value.
+   - Any number, host or a one-element numeric array, is true, as in Clojure.
+   - A value that differs across the particles of a batch throws `ex-info`
+     with `{:gen.array/batched-branch true}`: one branch cannot serve every
+     particle. Batched code uses `where` (values) or a switch combinator
+     (structure) instead. *Revised 2026-10-18:* numbers were falsy at 0,
+     which broke `(or 0 5)` and `(when-let [i 0] …)` inside `gen`.
 2. **Inside `gen` bodies, conditionals branch on values** (bean genclj-pa7x).
    - The `gen` macro macroexpands the body and wraps every `if` test in
      `truthy?`. That also covers `when`, `cond`, `and`, `or` and `if-let`, which
      expand to `if`.
-   - Non-array tests behave exactly as before.
-   - The result: a model written with plain Clojure conditionals is correct on
-     every backend in scalar mode.
-   - In batched mode the guard's exception tells the batched executor to fall
-     back to running particles one at a time (bean genclj-ffxh). That is
-     correct, just slower. Batching is an optimization, and the handler is
-     ground truth.
+   - Non-array tests behave exactly as in Clojure.
+   - A model written with plain Clojure conditionals is correct on every
+     backend in scalar mode.
+   - In batched mode, branching on a batched value raises the batched-branch
+     error. So does any host predicate on one (`=`, `case`, map keys, which
+     compare or hash it; see §8b). The error tells the batched executor to fall
+     back to running particles one at a time. That is correct, just slower.
+     Batching is an optimization, and the handler is ground truth.
+   - Outside `gen` bodies (helper functions a model calls), a raw `if` on an
+     array is not guarded: branch with `a/truthy?` there.
+
+## 8b. Batching by tracing (vmap semantics)
+
+*Decided 2026-10-18 by the agent, for the owner's review; it replaces
+shape-based batching after the M1 review (docs/research/review-2026-10-18.md).*
+
+Shape-based batching (prefix a batch axis, let broadcasting do the rest) is
+ambiguous: it cannot tell a per-particle scalar of shape [N] from a shared
+vector of length N. An [N] parameter therefore met a [3] observation element
+by element. `gen.array.batch` is a batch tracer instead, a wrapping backend
+like the AD tape:
+- **Batched values.** A batched value wraps an array whose leading axes are
+  the batch. To the code it flows through, it has its per-particle shape
+  (`a/shape`), and every op acts per particle: batched and unbatched operands
+  align by their per-particle axes, as with JAX's `vmap`.
+- **Draws.** Under the batch backend, draws gain the batch axes, one
+  independent draw per particle, even when every parameter is unbatched
+  (`a/effective-backend`).
+- **Shared values.** Creation functions and constants stay unbatched, shared
+  by every particle.
+- **Reading on the host.** Reading a batched value on the host (`a/item`,
+  `a/->clj`, `truthy?` of a boolean, `=`, hashing) raises the batched-branch
+  error. So does host math on one, a `ClassCastException` naming `Batched`.
+
+Running a generative function's scalar code under the batch backend runs it
+batched (`gfi/run-op` with `:batch-shape`). Every generative function
+therefore has a batched form with the same meaning, so batching cannot change
+meaning by construction. Measured: 9–41× faster importance sampling on the
+JVM backend (`docs/benchmarks.md`).
 
 ## 9. Evaluation and memory
 
@@ -352,3 +388,6 @@ How to read these numbers:
    `take-along-axis` and maps onto MLX's `scatter_add` in M2. Tape backends
    are found by a marker protocol, `IWrappingBackend`: an op mixing tracked
    values with the wrapped backend's arrays runs on the tape.
+9. **Batching by tracing (vmap semantics)**, §8b (agent, for the owner's
+   review), replacing shape-based batching.
+10. **`truthy?` follows Clojure for numbers** (any number is true), §8a.

@@ -18,12 +18,14 @@
    (state, address, distribution) to [value state'], one per operation,
    threaded through a single volatile! for the duration of one call. Each site
    consumes one key from a sequence split off the operation's key. The same
-   transitions serve one execution or a batch of particles: they sample with
-   the state's :batch-shape ([] or [N]). A trace records every choice's log
+   transitions serve one execution or a batch of particles: a batched run is
+   the same code under the batch tracer (gen.array.batch), whose values have
+   per-particle shapes and draws a batch axis. A trace records every choice's log
    probability and every spliced sub-trace, so regenerate weights use the old
    log probabilities exactly and project reads the trace without re-running
    the model."
   (:require [gen.array :as a]
+            [gen.array.batch :as batch]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.dist.core :as dc]
@@ -66,30 +68,29 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- site-log-prob
-  "A site's log probability: the distribution's log-prob summed over every
-   axis beyond the batch axes (a site with array parameters is one choice)."
-  [dist v batch-shape]
-  (let [lp (dc/log-prob dist v)
-        r (count batch-shape)
-        n (a/ndim lp)]
-    (if (> n r) (a/sum lp {:axis (vec (range r n))}) lp)))
+  "A site's log probability: the distribution's log-prob summed over all its
+   axes (a site with array parameters is one choice). Under the batch tracer
+   the axes are per particle, so a batched site sums per particle."
+  [dist v]
+  (let [lp (dc/log-prob dist v)]
+    (if (pos? (a/ndim lp)) (a/sum lp) lp)))
 
 (defn- given-value
-  "[v lp] of the value in the constraint c at a site. In a batched run whose
-   constraints are shared by every particle (:shared-constraints?, e.g.
-   observations), the value is broadcast to the batch, so that every choice
-   of a batched trace has the leading batch axes; otherwise a batched run's
-   constraints already have them."
+  "[v lp] of the value in the constraint c at a site. (Under the batch tracer
+   an unbatched value is shared by every particle, and a batched one is per
+   particle.)"
   [state dist c]
-  (let [bs (:batch-shape state)
-        v (cm/get-value c)
-        lp (site-log-prob dist v bs)]
-    (if (and (seq bs) (:shared-constraints? state))
-      [(a/broadcast-to v (into bs (a/shape v))) (a/broadcast-to lp bs)]
-      [v lp])))
+  (let [v (cm/get-value c)
+        expected (dc/value-shape dist)]
+    ;; a value of another shape would be scored as several draws, silently
+    (when (and expected (not= expected (a/shape v)))
+      (throw (ex-info (str (name (:mode state)) ": the value at this site has shape " (a/shape v)
+                           ", but the distribution's values have shape " expected)
+                      {:value-shape (a/shape v) :expected expected})))
+    [v (site-log-prob dist v)]))
 
-(defn- draw [state dist k]
-  (dc/sample dist k (:batch-shape state)))
+(defn- draw [_state dist k]
+  (dc/sample dist k []))
 
 (defn- record
   "state with the choice v (log probability lp) at path p."
@@ -122,7 +123,7 @@
 
 (defn- simulate-site [state p dist k]
   (let [v (draw state dist k)]
-    [v (record state p v (site-log-prob dist v (:batch-shape state)))]))
+    [v (record state p v (site-log-prob dist v))]))
 
 (defn- generate-site [state p dist k]
   (if-let [c (constraint-at state p :generate)]
@@ -139,15 +140,14 @@
 
 (defn- update-site [state p dist k]
   (let [c (constraint-at state p :update)
-        prev (prev-choice state p)
-        bs (:batch-shape state)]
+        prev (prev-choice state p)]
     (cond
       c (let [[v lp] (given-value state dist c)]
           [v (cond-> (-> state (record p v lp) (add-weight lp))
                prev (-> (add-weight (a/negate (second prev)))
                         (update :discard cm/set-choice p (first prev))))])
       prev (let [[v prev-lp] prev
-                 lp (site-log-prob dist v bs)]
+                 lp (site-log-prob dist v)]
              [v (-> state (record p v lp) (add-weight (a/- lp prev-lp)))])
       :else (simulate-site state p dist k))))
 
@@ -155,7 +155,7 @@
   (let [prev (prev-choice state p)]
     (if (and prev (not (path-selected? (:selection state) p)))
       (let [[v prev-lp] prev
-            lp (site-log-prob dist v (:batch-shape state))]
+            lp (site-log-prob dist v)]
         [v (-> state (record p v lp) (add-weight (a/- lp prev-lp)))])
       ;; selected, or a new address: a fresh draw from the prior, which cancels
       (simulate-site state p dist k))))
@@ -193,14 +193,49 @@
               (update :score a/+ (:score tr)))
     (not (cm/empty? (:choices tr))) (update :choices cm/set-choice p (:choices tr))))
 
+(declare dynamic-gf?)
+
+(defn- same-callee?
+  "Can the previous call's sub-trace be updated by gf? The same code: the
+   same distribution family, a dynamic body of the same compiled function
+   (a gen written inside a body is a new closure on every run, of one class),
+   or a generative function of the same type whose parts are the same in this
+   sense (combinators and their kernels)."
+  [old gf]
+  (letfn [(same? [x y]
+            (cond (identical? x y) true
+                  (and (instance? gen.dist.core.Distribution x) (instance? gen.dist.core.Distribution y))
+                  (= (:type x) (:type y))
+                  (and (dynamic-gf? x) (dynamic-gf? y)) (= (class (:body-fn x)) (class (:body-fn y)))
+                  (and (record? x) (gfi/generative-function? x))
+                  (and (= (class x) (class y)) (every? #(same? (get x %) (get y %)) (keys x)))
+                  (and (vector? x) (vector? y)) (and (= (count x) (count y)) (every? true? (map same? x y)))
+                  (and (map? x) (map? y)) (and (= (set (keys x)) (set (keys y))) (every? #(same? (x %) (y %)) (keys x)))
+                  :else (= x y)))]
+    (same? old gf)))
+
+(defn- replace-call
+  "state without the previous call at p (its choices discarded and, in
+   update, its score subtracted): a different generative function now sits
+   at p, so the old call is gone and the new one is new."
+  [state p old]
+  (if (= (:mode state) :update)
+    (cond-> (add-weight state (a/negate (:score old)))
+      (not (cm/empty? (:choices old))) (update :discard cm/set-choice p (:choices old)))
+    state))
+
 (defn- splice-call
   "Call gf at path p under the run's operation, scalar or batched (through
    gfi/run-op), nesting its choices and recording its sub-trace."
   [state p gf args]
   (let [mode (:mode state)
         cons (cm/get-submap (:constraints state) p)
-        prev-sub (get (::subtraces (:prev state)) p)
-        base {:batch-shape (:batch-shape state) :shared-constraints? (:shared-constraints? state)}]
+        old-sub (get (::subtraces (:prev state)) p)
+        replaced? (and old-sub (not (same-callee? (:gen-fn old-sub) gf)))
+        prev-sub (when-not replaced? old-sub)
+        state (if replaced? (replace-call state p old-sub) state)
+        ;; a batched run's callees run batched too: they inherit the batch tracer
+        base {}]
     (if (= mode :assess)
       (let [{w :weight rv :retval} (gfi/run-op gf :assess args (assoc base :constraints cons :key (rng/key 0)))]
         [rv (cond-> (-> state (update :score a/+ w) (add-weight w))
@@ -261,8 +296,8 @@
       ;; regenerate: choices no longer visited cancel against the reverse move
       state)))
 
-(defn- initial-state [mode {:keys [key batch-shape shared-constraints? constraints prev selection]}]
-  {:mode mode :key key :batch-shape (vec (or batch-shape [])) :shared-constraints? (boolean shared-constraints?)
+(defn- initial-state [mode {:keys [key constraints prev selection]}]
+  {:mode mode :key key
    :choices cm/EMPTY :scores {} :subtraces {} :score 0.0 :weight 0.0
    :constraints (or constraints cm/EMPTY) :prev prev :selection (or selection sel/none)
    :discard cm/EMPTY :visited #{}})
@@ -282,15 +317,20 @@
                       {:param name :available (keys *params*)}))
       v)))
 
-(declare dynamic-gf? run-handler)
+(declare run-handler)
+
+(def ^:private realize-limit 1000000)
 
 (defn- realize!
-  "Force every lazy sequence in a body's return value (inside sequences,
-   vectors and maps), so that trace calls in them happen during the run.
-   Lazy sequences cache their elements, so this changes no value."
+  "Force the lazy sequences in a body's return value (and in the vectors,
+   lists and maps holding them), so that trace calls in them happen during
+   the run. Lazy sequences cache their elements, so this changes no value.
+   Only lazy sequences proper are forced, and only to realize-limit elements:
+   an infinite (repeat x), (range) or (map f (range)) is left as it is, and
+   a trace call that escapes this way is a loud error (check-running!)."
   [x]
-  (cond (instance? clojure.lang.LazySeq x) (run! realize! x)
-        (or (vector? x) (seq? x)) (run! realize! x)
+  (cond (instance? clojure.lang.LazySeq x) (run! realize! (take realize-limit x))
+        (or (vector? x) (list? x)) (run! realize! x)
         (map? x) (run! realize! (vals x)))
   x)
 
@@ -304,7 +344,9 @@
   "Run gf's body on args under the transitions of mode; the final state with
    :retval."
   [gf mode args opts]
-  (let [transition (or (get (:transitions gf) mode) (site-transitions mode))
+  (let [;; the transition in effect: a splice without an address swaps in its
+        ;; callee's middleware for the callee's body
+        transition (volatile! (or (get (:transitions gf) mode) (site-transitions mode)))
         vol (volatile! (initial-state mode opts))
         trace-fn (fn [addr dist]
                    (let [p (path addr)
@@ -315,7 +357,7 @@
                                        {:path p :value dist})))
                      (check-address! state p)
                      (let [[k-next k-site] (rng/split (:key state))
-                           [v state] (transition (assoc state :key k-next) p dist k-site)]
+                           [v state] (@transition (assoc state :key k-next) p dist k-site)]
                        (vreset! vol (update state :visited conj p))
                        v)))
         splice-fn (fn splice-fn [& xs]
@@ -327,9 +369,14 @@
                         (when-not (dynamic-gf? sub)
                           (throw (ex-info "A splice without an address needs a dynamic generative function (others take an address)"
                                           {:gen-fn (type sub)})))
-                        (if-let [ps (:params sub)]
-                          (binding [*params* (merge *params* ps)] (apply (:body-fn sub) trace-fn splice-fn read-param args))
-                          (apply (:body-fn sub) trace-fn splice-fn read-param args)))
+                        (let [outer @transition
+                              run-body #(apply (:body-fn sub) trace-fn splice-fn read-param args)]
+                          (when-let [t (get (:transitions sub) mode)] (vreset! transition t))
+                          (try
+                            (if-let [ps (:params sub)]
+                              (binding [*params* (merge *params* ps)] (run-body))
+                              (run-body))
+                            (finally (vreset! transition outer)))))
                       (let [[addr gf & args] xs
                             p (path addr)
                             state @vol]
@@ -354,7 +401,12 @@
   "no-change when the return value is equal to the previous one (sound: equal
    values cannot differ), unknown-change otherwise."
   [prev-trace state]
-  (if (= (:retval prev-trace) (:retval state)) diff/no-change diff/unknown-change))
+  ;; batched return values cannot be compared (gen.array.batch): unknown
+  (if (try (= (:retval prev-trace) (:retval state))
+           (catch clojure.lang.ExceptionInfo e
+             (if (:gen.array/batched-branch (ex-data e)) false (throw e))))
+    diff/no-change
+    diff/unknown-change))
 
 (defn run
   "Run a GFI operation on a dynamic generative function. opts: :key,
@@ -362,8 +414,10 @@
    operation :constraints, :prev (the previous trace) and :selection. Returns
    the operation's result map."
   [gf op args opts]
-  (or (when-let [dispatch (:dispatch gf)] (dispatch gf op args opts))
-      (run-handler gf op args opts)))
+  (if (seq (:batch-shape opts))
+    (batch/batched (:batch-shape opts) (run gf op args (dissoc opts :batch-shape)))
+    (or (when-let [dispatch (:dispatch gf)] (dispatch gf op args opts))
+        (run-handler gf op args opts))))
 
 (defn- run-handler [gf op args opts]
   (let [state (if-let [ps (:params gf)]
@@ -401,9 +455,6 @@
     (let [tr (:trace (run gf :simulate args {:key key}))]
       {:choices (:choices tr) :weight (:score tr) :retval (:retval tr)}))
   (-project [_ tr selection] (project* tr selection))
-
-  gfi/IBatchedGenerativeFunction
-  (-batched [gf op args opts] (run gf op args (update opts :key #(or % (rng/key 0)))))
 
   ;; an untraced call, as in Gen.jl: (gf a b) is the return value of a simulated run
   clojure.lang.IFn

@@ -101,6 +101,13 @@
   [xs]
   (backend-of :common-backend xs))
 
+(defn effective-backend
+  "b, or *backend* when *backend* wraps b: under a batch tracer
+   (gen.array.batch), draws and other new values must be made on the
+   wrapping backend even when every operand is unbatched."
+  [b]
+  (if (wraps? *backend* b) *backend* b))
+
 (defn dtype
   "The dtype keyword of x."
   [x]
@@ -325,19 +332,23 @@
   (if (host? x) x (ew1 :stop-gradient x)))
 
 (defn truthy?
-  "The Clojure truthiness of x, for branching. A 0-d array (or host scalar)
-   gives its value's truthiness; any other non-array value its own Clojure
-   truthiness. An array with more than one element throws ex-info with
-   :gen.array/batched-branch true: one branch cannot serve every particle of a
-   batch, so batched code must use `where` (or a switch combinator) instead."
+  "The Clojure truthiness of x, for branching, the same on every backend:
+   a boolean (host or a one-element bool array) by its value, any number
+   (host or a one-element numeric array) true, as in Clojure, and any other
+   value by Clojure's rules. An array with more than one element throws
+   ex-info with :gen.array/batched-branch true: one branch cannot serve every
+   particle of a batch, so batched code must use `where` (or a switch
+   combinator) instead."
   [x]
   (cond (instance? Boolean x) (.booleanValue ^Boolean x)
-        (host? x) (dt/truthy? x)
+        (host? x) true
         (backend-array? x)
         (let [b (p/-backend x)
               s (p/-shape b x)]
           (if (== 1 (sh/size s))
-            (dt/truthy? (loop [v (p/-to-host b x)] (if (sequential? v) (recur (first v)) v)))
+            (if (= :bool (p/-dtype b x))
+              (dt/truthy? (loop [v (p/-to-host b x)] (if (sequential? v) (recur (first v)) v)))
+              true)
             (throw (ex-info (str "Cannot branch on an array of shape " s
                                  ": use gen.array/where (or a switch combinator) for batched values")
                             {::batched-branch true :shape s}))))

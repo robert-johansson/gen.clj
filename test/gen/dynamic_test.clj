@@ -5,6 +5,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.test.check]
             [gen.array :as a]
+            [gen.array.batch :as batch]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.dist :as d]
@@ -195,7 +196,13 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no value"
                           (gfi/assess linreg [[1.0]] (cm/choicemap :slope 1.0))))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"needs a distribution"
-                          (gfi/simulate (gen [] (trace :x 3.0)) [] k)))))
+                          (gfi/simulate (gen [] (trace :x 3.0)) [] k)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"has shape \[3\], but the distribution's values have shape \[\]"
+                          (gfi/generate (gen [] (trace :y (d/normal 0 1))) [] (cm/choicemap :y (a/array [1.0 2.0 3.0])) k))
+        "a constraint of another shape is not scored as several draws")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"nested choices"
+                          (gfi/generate (gen [] (splice :x (d/normal 0 1))) [] (cm/choicemap [:x :y] 3.0) k))
+        "constraints under a spliced distribution are not ignored")))
 
 (deftest conditionals-branch-on-values
   (let [model (gen [c] (if c (trace :a (d/normal 0 1)) (trace :b (d/normal 0 1))))]
@@ -210,14 +217,14 @@
         (is (= 42 (m)))))))
 
 (deftest batched-handler
-  (testing "the same transitions run N particles at once"
+  (testing "the same transitions run N particles at once, under the batch tracer"
     (let [k (rng/key 7)
           {tr :trace} (dyn/run linreg :simulate [[1.0 2.0]] {:key k :batch-shape [5]})]
-      (is (= [5] (a/shape (tr :slope))))
-      (is (= [5] (a/shape (:score tr))))
+      (is (= [] (a/shape (tr :slope))) "inside the trace, values have their per-particle shapes")
+      (is (= [5] (a/shape (batch/unwrap (tr :slope) [5]))) "with a leading batch axis underneath")
       (testing "each particle's score is its own assessed density"
-        (doseq [[i c] (map-indexed vector (cm/unstack (:choices tr) 5))]
-          (is (close? (a/take (:score tr) i) (:weight (gfi/assess linreg [[1.0 2.0]] c))))))))
+        (doseq [[i c] (map-indexed vector (cm/unstack (cm/from-map (a/tree-map #(batch/unwrap % [5]) (cm/to-map (:choices tr)))) 5))]
+          (is (close? (a/take (batch/unwrap (:score tr) [5]) i) (:weight (gfi/assess linreg [[1.0 2.0]] c))))))))
   (testing "branching on a batch of values is loud, not silently wrong"
     (is (:gen.array/batched-branch
          (ex-data (try (dyn/run branching :simulate [] {:key (rng/key 1) :batch-shape [4]})
@@ -263,6 +270,15 @@
         [(a/* 2.0 v) (assoc-in s [:choices] (cm/set-choice (:choices s) p (a/* 2.0 v)))]
         [v s]))))
 
+(deftest middleware-of-a-callee-spliced-without-an-address-applies-to-its-body
+  (let [inner (dyn/with-transitions (gen [] (trace :x (d/normal 0 1))) {:simulate doubled-site})
+        outer (gen [] (splice inner) (trace :z (d/normal 0 1)))
+        k (rng/key 7)
+        tr (gfi/simulate outer [] k)
+        plain (gfi/simulate (gen [] (splice (gen [] (trace :x (d/normal 0 1)))) (trace :z (d/normal 0 1))) [] k)]
+    (is (= (* 2.0 (plain :x)) (tr :x)) "the callee's middleware doubles its :x")
+    (is (= (plain :z) (tr :z)) "and the caller's own sites are unaffected")))
+
 (deftest middleware-replaces-a-transition-for-one-operation
   (let [m (gen [] (trace :x (d/normal 0 1)))
         k (rng/key 6)
@@ -297,6 +313,8 @@
         tr (gfi/simulate m [] (rng/key 1))]
     (is (= [[:x 0] [:x 1] [:x 2]] (cm/addresses (:choices tr))))
     (is (close? (:score tr) (:weight (gfi/assess m [] (:choices tr))))))
+  (testing "an infinite return value does not hang"
+    (is (= [1.0 1.0] (vec (take 2 (:retval (gfi/simulate (gen [] (repeat 1.0)) [] (rng/key 3))))))))
   (testing "and laziness that escapes otherwise is loud"
     (let [escaped (atom nil)
           m (gen [] (reset! escaped (map (fn [i] (trace [:x i] (d/normal 0 1))) (range 3))) nil)]
@@ -314,3 +332,15 @@
       (is (nil? (compile-error '(gen.dynamic/gen [xs] (mapv (fn [x] (trace [:y x] (gen.dist/normal x 1))) xs) nil))))
       (is (nil? (compile-error '(gen.dynamic/gen [xs] (map (fn [x] (trace [:y x] (gen.dist/normal x 1))) xs)))))
       (is (nil? (compile-error '(gen.dynamic/gen [xs] (map inc xs) nil)))))))
+
+(def returns-seven (gen [] (trace :x (d/normal 0 1)) 7.0))
+
+(deftest a-different-callee-at-an-address-is-a-new-call
+  ;; review 3: the old sub-trace was handed to the new generative function
+  (let [m (gen [] (if (trace :c (d/bernoulli 0.5)) (splice :s returns-seven) (splice :s (d/normal 0 1))))
+        tr (:trace (gfi/generate m [] (cm/choicemap :c true [:s :x] 0.5) (rng/key 1)))
+        {t :trace w :weight disc :discard} (gfi/update tr (cm/choicemap :c false) (rng/key 2))]
+    (is (not= 7.0 (t :s)) "the new distribution draws its own value")
+    (is (close? w (a/- (a/- (:score t) (:score tr)) (gfi/project t (sel/select :s)))))
+    (is (= (cm/choicemap :c true [:s :x] 0.5) disc))
+    (is (= (:choices tr) (:choices (:trace (gfi/update t disc (rng/key 3))))) "and the update reverses")))

@@ -54,9 +54,10 @@
   "The backend a sampler draws on: :backend in opts, else that of the first
    backend-array parameter, else gen.array/*backend*."
   [opts & params]
-  (or (:backend opts)
-      (some #(when (and (some? %) (not (a/host? %))) (a/backend %)) params)
-      a/*backend*))
+  (a/effective-backend
+   (or (:backend opts)
+       (some #(when (and (some? %) (not (a/host? %))) (a/backend %)) params)
+       a/*backend*)))
 
 (defn- float-dtype
   "The float dtype for a draw: :dtype in opts, else that of a float array

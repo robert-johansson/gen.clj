@@ -21,8 +21,11 @@
      changed.
    - Elements and steps beyond a changed length are generated, or discarded.
    - The retdiff is a vector-diff of the returned vector.
-   A Switch whose index changes generates the new branch from the
-   constraints and discards every old choice, as in Gen.jl.
+   A Switch whose index changes runs the new branch against the old branch's
+   choices when both branches are dynamic generative functions, so the
+   addresses they share keep their values (as an if would, and as Gen.jl
+   does); for other branches it generates the new branch from the
+   constraints and discards every old choice.
 
    Element or step i draws from (fold-in key i), so changing the length never
    shifts another element's randomness."
@@ -30,6 +33,7 @@
   (:require [gen.array :as a :refer [+ -]]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
+            [gen.dynamic :as dyn]
             [gen.gfi :as gfi]
             [gen.random :as rng]
             [gen.selection :as sel]
@@ -55,17 +59,12 @@
 
 (defn- element-key [key i] (rng/fold-in key i))
 
-;; Kernel calls, scalar or batched. bs is nil for a scalar run, and for a
-;; batched one the batch options {:batch-shape :shared-constraints?}.
-(defn- simulate-at [gf args key bs] (:trace (gfi/run-op gf :simulate args (merge {:key key} bs))))
-(defn- generate-at [gf args cs key bs] (gfi/run-op gf :generate args (merge {:constraints cs :key key} bs)))
-(defn- assess-at [gf args choices bs] (gfi/run-op gf :assess args (merge {:constraints choices :key (rng/key 0)} bs)))
-(defn- update-at [gf old args argdiffs cs key bs]
-  (gfi/run-op gf :update args (merge {:prev old :argdiffs argdiffs :constraints cs :key key} bs)))
-(defn- regenerate-at [gf old args argdiffs s key bs]
-  (gfi/run-op gf :regenerate args (merge {:prev old :argdiffs argdiffs :selection s :key key} bs)))
-
-(defn- batch-opts [opts] (select-keys opts [:batch-shape :shared-constraints?]))
+;; Kernel calls. (A batched run is this same code under the batch tracer.)
+(defn- simulate-at [gf args key] (gfi/-simulate gf args key))
+(defn- generate-at [gf args cs key] (gfi/-generate gf args cs key))
+(defn- assess-at [gf args choices] (gfi/-assess gf args choices))
+(defn- update-at [gf old args argdiffs cs key] (gfi/-update gf old args argdiffs cs key))
+(defn- regenerate-at [gf old args argdiffs s key] (gfi/-regenerate gf old args argdiffs s key))
 
 (defn- assoc-element [choices i sub]
   (if (cm/empty? sub) (cm/remove-submap choices i) (cm/set-submap choices i sub)))
@@ -193,7 +192,7 @@
   [xs ys kept]
   (if (or (= :all xs) (= :all ys)) (range kept) (subseq (into xs ys) < kept)))
 
-(defn- map-generate [gf args constraints key bs]
+(defn- map-generate [gf args constraints key]
   (let [args (mapv vec args)
         n (map-length args)
         kernel (:kernel gf)]
@@ -202,9 +201,9 @@
                         (let [ea (element-args args i)
                               k (element-key key i)]
                           (if constraints
-                            (let [{sub :trace w :weight} (generate-at kernel ea (cm/get-submap constraints i) k bs)]
+                            (let [{sub :trace w :weight} (generate-at kernel ea (cm/get-submap constraints i) k)]
                               (put-element acc i sub nil w))
-                            (put-element acc i (simulate-at kernel ea k bs) nil 0.0))))
+                            (put-element acc i (simulate-at kernel ea k) nil 0.0))))
                       empty-acc
                       (range n))]
       {:trace (elements-trace gf args acc) :weight (:weight acc)})))
@@ -212,7 +211,7 @@
 (defn- map-revise
   "update (op :update, with constraints) or regenerate (op :regenerate, with
    a selection) of a Map trace."
-  [gf tr args argdiffs op cs key bs]
+  [gf tr args argdiffs op cs key]
   (let [args (mapv vec args)
         n (map-length args)
         kernel (:kernel gf)
@@ -227,8 +226,8 @@
                             k (element-key key i)]
                         (put-update acc i old
                                     (if (= op :update)
-                                      (update-at kernel old ea ead (cm/get-submap cs i) k bs)
-                                      (regenerate-at kernel old ea ead (sel/get-subselection cs i) k bs)))))
+                                      (update-at kernel old ea ead (cm/get-submap cs i) k)
+                                      (regenerate-at kernel old ea ead (sel/get-subselection cs i) k)))))
                     (trace-acc tr)
                     (visits (changed-elements argdiffs) targets kept))
         acc (drop-elements acc kept op)
@@ -236,43 +235,32 @@
                       (let [ea (element-args args i)
                             k (element-key key i)]
                         (if (= op :update)
-                          (let [{sub :trace w :weight} (generate-at kernel ea (cm/get-submap cs i) k bs)]
+                          (let [{sub :trace w :weight} (generate-at kernel ea (cm/get-submap cs i) k)]
                             (put-element acc i sub nil w))
-                          (put-element acc i (simulate-at kernel ea k bs) nil 0.0))))
+                          (put-element acc i (simulate-at kernel ea k) nil 0.0))))
                     acc
                     (range kept n))]
     (incremental-result gf args acc op n prev-n)))
 
-(defn- map-assess [gf args choices bs]
+(defn- map-assess [gf args choices]
   (let [args (mapv vec args)
         n (map-length args)]
     (indices :assess choices n)
     (reduce (fn [{:keys [weight retval]} i]
-              (let [r (assess-at (:kernel gf) (element-args args i) (cm/get-submap choices i) bs)]
+              (let [r (assess-at (:kernel gf) (element-args args i) (cm/get-submap choices i))]
                 {:weight (+ weight (:weight r)) :retval (conj retval (:retval r))}))
             {:weight 0.0 :retval []}
             (range n))))
 
 (defcombinator MapGF [kernel]
   gfi/IGenerativeFunction
-  (-simulate [gf args key] (:trace (map-generate gf args nil key nil)))
-  (-generate [gf args constraints key] (map-generate gf args constraints key nil))
-  (-update [gf tr args argdiffs constraints key] (map-revise gf tr args argdiffs :update constraints key nil))
-  (-regenerate [gf tr args argdiffs selection key] (map-revise gf tr args argdiffs :regenerate selection key nil))
-  (-assess [gf args choices] (map-assess gf args choices nil))
-  (-propose [gf args key] (propose-from-trace (:trace (map-generate gf args nil key nil))))
-  (-project [_ tr selection] (project-elements tr selection))
-
-  gfi/IBatchedGenerativeFunction
-  (-batched [gf op args {:keys [key constraints prev argdiffs selection] :as opts}]
-    (let [argdiffs (or argdiffs (unknown-diffs args))
-          batch-shape (batch-opts opts)]
-      (case op
-        :simulate (select-keys (map-generate gf args nil key batch-shape) [:trace])
-        :generate (map-generate gf args constraints key batch-shape)
-        :assess (map-assess gf args constraints batch-shape)
-        :update (map-revise gf prev args argdiffs :update constraints key batch-shape)
-        :regenerate (map-revise gf prev args argdiffs :regenerate selection key batch-shape)))))
+  (-simulate [gf args key] (:trace (map-generate gf args nil key)))
+  (-generate [gf args constraints key] (map-generate gf args constraints key))
+  (-update [gf tr args argdiffs constraints key] (map-revise gf tr args argdiffs :update constraints key))
+  (-regenerate [gf tr args argdiffs selection key] (map-revise gf tr args argdiffs :regenerate selection key))
+  (-assess [gf args choices] (map-assess gf args choices))
+  (-propose [gf args key] (propose-from-trace (:trace (map-generate gf args nil key))))
+  (-project [_ tr selection] (project-elements tr selection)))
 
 (defn map
   "Gen.jl's Map combinator: the kernel applied independently to each element
@@ -291,7 +279,7 @@
 
 (defn- step-args [t state params] (into [t state] params))
 
-(defn- unfold-generate [gf [n init & params :as args] constraints key bs]
+(defn- unfold-generate [gf [n init & params :as args] constraints key]
   (check-steps n)
   (when constraints (indices :generate constraints n))
   (let [kernel (:kernel gf)
@@ -300,8 +288,8 @@
                 (let [sa (step-args t state params)
                       k (element-key key t)
                       [sub w] (if constraints
-                                (let [r (generate-at kernel sa (cm/get-submap constraints t) k bs)] [(:trace r) (:weight r)])
-                                [(simulate-at kernel sa k bs) 0.0])]
+                                (let [r (generate-at kernel sa (cm/get-submap constraints t) k)] [(:trace r) (:weight r)])
+                                [(simulate-at kernel sa k) 0.0])]
                   (recur (inc t) (:retval sub) (put-element acc t sub nil w)))
                 acc))]
     {:trace (elements-trace gf (vec args) acc) :weight (:weight acc)}))
@@ -311,7 +299,7 @@
    revisiting a step when its state input, the parameters, its constraints or
    its selection may have changed, and skipping straight to the next
    targeted step otherwise; then extends or truncates."
-  [gf tr [n init & params :as args] argdiffs op cs key bs]
+  [gf tr [n init & params :as args] argdiffs op cs key]
   (check-steps n)
   (let [kernel (:kernel gf)
         [_ dinit & dparams] argdiffs
@@ -333,8 +321,8 @@
                   sad (into [diff/no-change sdiff] dparams)
                   k (element-key key t)
                   r (if (= op :update)
-                      (update-at kernel old sa sad (cm/get-submap cs t) k bs)
-                      (regenerate-at kernel old sa sad (sel/get-subselection cs t) k bs))]
+                      (update-at kernel old sa sad (cm/get-submap cs t) k)
+                      (regenerate-at kernel old sa sad (sel/get-subselection cs t) k))]
               (recur (inc t) (:retval (:trace r)) (:retdiff r) (put-update acc t old r)))
 
             :else
@@ -346,42 +334,31 @@
                 (let [sa (step-args t state params)
                       k (element-key key t)
                       [sub w] (if (= op :update)
-                                (let [r (generate-at kernel sa (cm/get-submap cs t) k bs)] [(:trace r) (:weight r)])
-                                [(simulate-at kernel sa k bs) 0.0])]
+                                (let [r (generate-at kernel sa (cm/get-submap cs t) k)] [(:trace r) (:weight r)])
+                                [(simulate-at kernel sa k) 0.0])]
                   (recur (inc t) (:retval sub) (put-element acc t sub nil w)))
                 acc))]
     (incremental-result gf (vec args) acc op n prev-n)))
 
-(defn- unfold-assess [gf [n init & params] choices bs]
+(defn- unfold-assess [gf [n init & params] choices]
   (check-steps n)
   (indices :assess choices n)
   ;; weight starts boxed: it accumulates arrays on array backends
   (loop [t 0 state init weight (Double/valueOf 0.0) retval []]
     (if (< t n)
-      (let [r (assess-at (:kernel gf) (step-args t state params) (cm/get-submap choices t) bs)]
+      (let [r (assess-at (:kernel gf) (step-args t state params) (cm/get-submap choices t))]
         (recur (inc t) (:retval r) (+ weight (:weight r)) (conj retval (:retval r))))
       {:weight weight :retval retval})))
 
 (defcombinator UnfoldGF [kernel]
   gfi/IGenerativeFunction
-  (-simulate [gf args key] (:trace (unfold-generate gf args nil key nil)))
-  (-generate [gf args constraints key] (unfold-generate gf args constraints key nil))
-  (-update [gf tr args argdiffs constraints key] (unfold-revise gf tr args argdiffs :update constraints key nil))
-  (-regenerate [gf tr args argdiffs selection key] (unfold-revise gf tr args argdiffs :regenerate selection key nil))
-  (-assess [gf args choices] (unfold-assess gf args choices nil))
-  (-propose [gf args key] (propose-from-trace (:trace (unfold-generate gf args nil key nil))))
-  (-project [_ tr selection] (project-elements tr selection))
-
-  gfi/IBatchedGenerativeFunction
-  (-batched [gf op args {:keys [key constraints prev argdiffs selection] :as opts}]
-    (let [argdiffs (or argdiffs (unknown-diffs args))
-          batch-shape (batch-opts opts)]
-      (case op
-        :simulate (select-keys (unfold-generate gf args nil key batch-shape) [:trace])
-        :generate (unfold-generate gf args constraints key batch-shape)
-        :assess (unfold-assess gf args constraints batch-shape)
-        :update (unfold-revise gf prev args argdiffs :update constraints key batch-shape)
-        :regenerate (unfold-revise gf prev args argdiffs :regenerate selection key batch-shape)))))
+  (-simulate [gf args key] (:trace (unfold-generate gf args nil key)))
+  (-generate [gf args constraints key] (unfold-generate gf args constraints key))
+  (-update [gf tr args argdiffs constraints key] (unfold-revise gf tr args argdiffs :update constraints key))
+  (-regenerate [gf tr args argdiffs selection key] (unfold-revise gf tr args argdiffs :regenerate selection key))
+  (-assess [gf args choices] (unfold-assess gf args choices))
+  (-propose [gf args key] (propose-from-trace (:trace (unfold-generate gf args nil key))))
+  (-project [_ tr selection] (project-elements tr selection)))
 
 (defn unfold
   "Gen.jl's Unfold combinator: a state-space chain of n kernel steps."
@@ -392,70 +369,60 @@
 ;; Switch
 ;; ---------------------------------------------------------------------------
 
+(defn- branch-index
+  "The branch index as a host value: a one-element array is read; an index
+   that differs across the particles of a batch cannot pick one branch for
+   all, and a/item raises the batched-branch error (gen.array.batch), so
+   batched inference falls back to one particle at a time."
+  [idx]
+  (if (or (a/host? idx) (not (a/array? idx))) idx (a/item idx)))
+
 (defn- branch [gf idx]
-  (or (get (:branches gf) idx)
+  (or (get (:branches gf) (branch-index idx))
       (throw (ex-info (str "Switch has no branch " (pr-str idx)) {:index idx :branches (count (:branches gf))}))))
 
 (defn- switch-trace [gf args idx sub]
   (assoc (trace/make-trace {:gen-fn gf :args args :choices (:choices sub) :retval (:retval sub) :score (:score sub)})
-         ::branch idx
+         ::branch (branch-index idx)
          ::subtrace sub))
 
-(defn- check-shared-index
-  "In a batched run every particle must take the same branch: an index that
-   differs across particles is the batched-branch error, so that batched
-   inference falls back to one particle at a time (docs/array-api.md §8a)."
-  [idx bs]
-  (when (and (seq (:batch-shape bs)) (a/array? idx) (not (a/host? idx)) (> (a/size idx) 1))
-    (throw (ex-info "Switch's branch index differs across the particles of a batch"
-                    {:gen.array/batched-branch true :shape (a/shape idx)}))))
-
-(defn- switch-generate [gf [idx & bargs :as args] constraints key bs]
-  (check-shared-index idx bs)
+(defn- switch-generate [gf [idx & bargs :as args] constraints key]
   (let [b (branch gf idx)]
     (if constraints
-      (let [{sub :trace w :weight} (generate-at b (vec bargs) constraints key bs)]
+      (let [{sub :trace w :weight} (generate-at b (vec bargs) constraints key)]
         {:trace (switch-trace gf (vec args) idx sub) :weight w})
-      {:trace (switch-trace gf (vec args) idx (simulate-at b (vec bargs) key bs)) :weight 0.0})))
+      {:trace (switch-trace gf (vec args) idx (simulate-at b (vec bargs) key)) :weight 0.0})))
 
-(defn- switch-revise [gf tr [idx & bargs :as args] argdiffs op cs key bs]
-  (check-shared-index idx bs)
+(defn- switch-revise [gf tr [idx & bargs :as args] argdiffs op cs key]
   (let [args (vec args)
         bargs (vec bargs)]
-    (if (= idx (::branch tr))
+    (if (or (= (branch-index idx) (::branch tr))
+            ;; two dynamic branches: the new one runs against the old one's
+            ;; choices, so the addresses they share keep their values (Def
+            ;; 2.3.1), as the equivalent if would and as Gen.jl does
+            (and (dyn/dynamic-gf? (branch gf idx)) (dyn/dynamic-gf? (:gen-fn (::subtrace tr)))))
       (let [b (branch gf idx)
             sub (::subtrace tr)
-            bdiffs (vec (rest argdiffs))
+            bdiffs (if (= (branch-index idx) (::branch tr)) (vec (rest argdiffs)) (unknown-diffs bargs))
             r (if (= op :update)
-                (update-at b sub bargs bdiffs cs key bs)
-                (regenerate-at b sub bargs bdiffs cs key bs))]
+                (update-at b sub bargs bdiffs cs key)
+                (regenerate-at b sub bargs bdiffs cs key))]
         (assoc r :trace (switch-trace gf args idx (:trace r))))
       ;; a new branch: generated afresh; the old choices are discarded
-      (let [{t :trace w :weight} (switch-generate gf args (when (= op :update) cs) key bs)]
+      (let [{t :trace w :weight} (switch-generate gf args (when (= op :update) cs) key)]
         (cond-> {:trace t :retdiff diff/unknown-change}
           (= op :update) (assoc :weight (- w (:score tr)) :discard (:choices tr))
           (= op :regenerate) (assoc :weight 0.0))))))
 
 (defcombinator SwitchGF [branches]
   gfi/IGenerativeFunction
-  (-simulate [gf args key] (:trace (switch-generate gf args nil key nil)))
-  (-generate [gf args constraints key] (switch-generate gf args constraints key nil))
-  (-update [gf tr args argdiffs constraints key] (switch-revise gf tr args argdiffs :update constraints key nil))
-  (-regenerate [gf tr args argdiffs selection key] (switch-revise gf tr args argdiffs :regenerate selection key nil))
+  (-simulate [gf args key] (:trace (switch-generate gf args nil key)))
+  (-generate [gf args constraints key] (switch-generate gf args constraints key))
+  (-update [gf tr args argdiffs constraints key] (switch-revise gf tr args argdiffs :update constraints key))
+  (-regenerate [gf tr args argdiffs selection key] (switch-revise gf tr args argdiffs :regenerate selection key))
   (-assess [gf [idx & bargs] choices] (gfi/-assess (branch gf idx) (vec bargs) choices))
-  (-propose [gf args key] (propose-from-trace (:trace (switch-generate gf args nil key nil))))
-  (-project [_ tr selection] (let [sub (::subtrace tr)] (gfi/-project (:gen-fn sub) sub selection)))
-
-  gfi/IBatchedGenerativeFunction
-  (-batched [gf op [idx & bargs :as args] {:keys [key constraints prev argdiffs selection] :as opts}]
-    (let [argdiffs (or argdiffs (unknown-diffs args))
-          batch-shape (batch-opts opts)]
-      (case op
-        :simulate (select-keys (switch-generate gf args nil key batch-shape) [:trace])
-        :generate (switch-generate gf args constraints key batch-shape)
-        :assess (do (check-shared-index idx batch-shape) (assess-at (branch gf idx) (vec bargs) constraints batch-shape))
-        :update (switch-revise gf prev args argdiffs :update constraints key batch-shape)
-        :regenerate (switch-revise gf prev args argdiffs :regenerate selection key batch-shape)))))
+  (-propose [gf args key] (propose-from-trace (:trace (switch-generate gf args nil key))))
+  (-project [_ tr selection] (let [sub (::subtrace tr)] (gfi/-project (:gen-fn sub) sub selection))))
 
 (defn switch
   "Gen.jl's Switch combinator: (switch gf0 gf1 …) is called with a branch

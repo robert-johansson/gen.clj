@@ -90,6 +90,8 @@
   [kernels weights]
   (when-not (= (count kernels) (count weights))
     (throw (ex-info "mix needs one weight per kernel" {:kernels (count kernels) :weights (count weights)})))
+  (when-not (and (every? #(and (number? %) (>= % 0)) weights) (some pos? weights))
+    (throw (ex-info "mix needs non-negative weights, not all zero" {:weights weights})))
   (let [logits (a/log (a/array (mapv double weights)))]
     (with-reversals (fn [fs]
                       (fn [trace key]

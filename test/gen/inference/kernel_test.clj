@@ -98,3 +98,6 @@
                                   (Math/exp (:weight (gfi/assess model [] (cm/choicemap :a a :b b :obs true)))))))
         exact (/ (joint true) (+ (joint true) (joint false)))]
     (is (< (Math/abs (- p-a exact)) (* 5 (Math/sqrt (/ (* exact (- 1 exact)) 2000)))))))
+
+(deftest mixture-weights-are-validated
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"non-negative" (k/mix [a b] [-1 1]))))

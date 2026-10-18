@@ -23,7 +23,8 @@
    with no-change argdiffs. Weights follow Gen.jl and the Cusumano-Towner
    thesis (docs/research/genjl-parity.md §3)."
   (:refer-clojure :exclude [update])
-  (:require [gen.diff :as diff]
+  (:require [gen.array.batch :as batch]
+            [gen.diff :as diff]
             [gen.random :as rng]))
 
 (set! *warn-on-reflection* true)
@@ -45,27 +46,16 @@
       (and (some? x) (not (keyword? x)) (not (vector? x)) (not (number? x))
            (satisfies? IGenerativeFunction x))))
 
-(defprotocol IBatchedGenerativeFunction
-  "A generative function that can run N particles at once (gen.batched): its
-   choices and weights gain a leading batch axis."
-  (-batched [gf op args opts]
-    "Run op (:simulate :generate :assess :update :regenerate) on args for the
-     batch in opts :batch-shape, with :key and, per op, :constraints, :prev
-     (a batched trace), :argdiffs and :selection. Returns the op's result map
-     ({:trace} for simulate)."))
-
 (defn run-op
   "Run a GFI op on gf from a map of its inputs (:key :constraints :prev
-   :argdiffs :selection), batched when :batch-shape is non-empty. Returns the
-   op's result map ({:trace} for simulate). The one dispatch point for
+   :argdiffs :selection). With a non-empty :batch-shape the op runs batched:
+   its scalar code under the batch tracer (gen.array.batch), which gives
+   every generative function a batched form with the same meaning. Returns
+   the op's result map ({:trace} for simulate). The one dispatch point for
    generative functions that call others (splices, combinators)."
   [gf op args {:keys [key constraints prev argdiffs selection batch-shape] :as opts}]
   (if (seq batch-shape)
-    (if (satisfies? IBatchedGenerativeFunction gf)
-      (-batched gf op args opts)
-      (throw (ex-info (str "Batched execution needs generative functions that support batching"
-                           " (dynamic generative functions and the combinators do), not " (type gf))
-                      {:gen-fn (type gf)})))
+    (batch/batched batch-shape (run-op gf op args (dissoc opts :batch-shape)))
     (case op
       :simulate {:trace (-simulate gf args key)}
       :generate (-generate gf args constraints key)

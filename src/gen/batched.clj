@@ -1,14 +1,15 @@
 (ns gen.batched
   "N particles of a generative function at once. A particle collection runs
-   the model's body once for all n particles, through the same handler
-   transitions with a batch shape [n] (DESIGN.md §3.3): every choice, score
-   and weight gains a leading axis of size n, and the per-site handler cost is
-   paid once rather than n times.
+   the model's code once for all n particles, under the batch tracer
+   (gen.array.batch): the code sees per-particle values, every op acts per
+   particle and every draw is independent per particle, so the per-site
+   handler cost is paid once rather than n times.
 
-   When the model branches on a value that differs across particles (the
-   gen.array/batched-branch error, docs/array-api.md §8a), the collection falls
-   back to one scalar trace per particle and carries on: batching is an
-   optimization, never a change of meaning.
+   When the code cannot treat the particles alike (it branches on a value
+   that differs across them, reads one on the host, or does host math on it:
+   the gen.array/batched-branch error), the collection falls back to one
+   scalar trace per particle and carries on. Batching is an optimization:
+   it never changes meaning.
 
      (simulate gf args n key)                    → particles
      (generate gf args constraints n key)        → {:particles :weights}
@@ -17,13 +18,14 @@
      (take ps indices)        → particles: the given ones (resampling)
      (select mask ps qs)      → particles: ps's where mask is true, qs's elsewhere
      (traces ps)              → the n scalar traces
-     (choice ps addr)         → an [n] array of the choice across particles
+     (choice ps addr)         → an [n …] array of the choice across particles
      (scores ps)              → an [n] array
 
    Constraints are shared by every particle (observations). Weights are [n]
    arrays; :discards is a vector of n choice maps."
   (:refer-clojure :exclude [take update])
   (:require [gen.array :as a]
+            [gen.array.batch :as batch]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
             [gen.random :as rng]))
@@ -42,38 +44,50 @@
 
 (defn size [ps] (:n ps))
 
-(defn- branch-error? [e] (boolean (:gen.array/batched-branch (ex-data e))))
+(defn- branch-error?
+  "Did a batched run find particles it cannot treat alike? The
+   batched-branch error, or host math on a batched value (whose class the
+   ClassCastException names)."
+  [^Throwable e]
+  (boolean (or (:gen.array/batched-branch (ex-data e))
+               (and (instance? ClassCastException e)
+                    (some-> (.getMessage e) (.contains "gen.array.batch.Batched"))))))
 
 (defmacro ^:private batched-or
-  "batched, or fallback if it throws the batched-branch error."
+  "batched, or fallback if it finds particles it cannot treat alike."
   [batched fallback]
   `(try ~batched
-        (catch clojure.lang.ExceptionInfo e#
+        (catch Exception e#
           (if (branch-error? e#) ~fallback (throw e#)))))
 
-(defn- run
-  "A batched op; constraints are shared by every particle unless :shared? is
-   false (per-particle choices with a leading batch axis)."
-  ([gf op args n opts] (run gf op args n opts true))
-  ([gf op args n opts shared?]
-   (gfi/run-op gf op args (assoc opts :batch-shape [n] :shared-constraints? shared?))))
+(defn- run [gf op args n opts] (gfi/run-op gf op args (assoc opts :batch-shape [n])))
 
 (defn- per-particle [ps traces] (assoc ps :trace nil :traces (vec traces)))
 
 (defn- stack-weights [ws n] (if (empty? ws) (a/zeros [0]) (a/broadcast-to (a/stack (vec ws)) [n])))
 
-(defn- full-weights [w n] (a/broadcast-to w [n]))
+(defn- plain
+  "A batched run's value as an array with the leading particle axis (a
+   shared, unbatched value broadcast to every particle)."
+  [x n]
+  (batch/unwrap x [n]))
+
+(defn- map-leaves [f choices] (cm/from-map (a/tree-map f (cm/to-map choices))))
+
+(defn- plain-choices [choices n] (map-leaves #(plain % n) choices))
 
 (defn- rebuild
-  "The batched trace of gf on args holding exactly the given batched choices."
+  "The batched trace of gf on args holding exactly the given per-particle
+   choices (arrays with the leading particle axis)."
   [gf args n choices]
-  (:trace (run gf :generate args n {:constraints choices :key (rng/key 0)} false)))
+  (:trace (run gf :generate args n {:constraints (map-leaves #(batch/wrap % [n]) choices) :key (rng/key 0)})))
 
 (defn traces
   "The n scalar traces, each rebuilt exactly from its particle's choices."
   [ps]
   (if-let [t (:trace ps)]
-    (mapv #(:trace (gfi/generate (:gen-fn ps) (:args ps) % (rng/key 0))) (cm/unstack (:choices t) (:n ps)))
+    (mapv #(:trace (gfi/generate (:gen-fn ps) (:args ps) % (rng/key 0)))
+          (cm/unstack (plain-choices (:choices t) (:n ps)) (:n ps)))
     (:traces ps)))
 
 (defn- unbatched [ps] (if (batched? ps) (per-particle ps (traces ps)) ps))
@@ -96,7 +110,7 @@
   (let [ps (->Particles n gf (vec args) nil nil)]
     (batched-or
      (let [{t :trace w :weight} (run gf :generate args n {:key key :constraints constraints})]
-       {:particles (assoc ps :trace t) :weights (full-weights w n)})
+       {:particles (assoc ps :trace t) :weights (plain w n)})
      (let [rs (mapv #(gfi/generate gf args constraints %) (rng/split key n))]
        {:particles (per-particle ps (map :trace rs)) :weights (stack-weights (map :weight rs) n)}))))
 
@@ -114,8 +128,8 @@
        (let [{t :trace w :weight d :discard}
              (run gen-fn :update args n {:prev (:trace ps) :argdiffs argdiffs :constraints constraints :key key})]
          {:particles (assoc ps :trace t :args (vec args))
-          :weights (full-weights w n)
-          :discards (if (cm/empty? d) (vec (repeat n cm/EMPTY)) (cm/unstack d n))})
+          :weights (plain w n)
+          :discards (if (cm/empty? d) (vec (repeat n cm/EMPTY)) (cm/unstack (plain-choices d n) n))})
        (fallback (unbatched ps)))
       (fallback ps))))
 
@@ -131,7 +145,7 @@
       (batched-or
        (let [{t :trace w :weight}
              (run gen-fn :regenerate args n {:prev (:trace ps) :argdiffs argdiffs :selection selection :key key})]
-         {:particles (assoc ps :trace t :args (vec args)) :weights (full-weights w n)})
+         {:particles (assoc ps :trace t :args (vec args)) :weights (plain w n)})
        (fallback (unbatched ps)))
       (fallback ps))))
 
@@ -139,47 +153,52 @@
 ;; Particles as a population
 ;; ---------------------------------------------------------------------------
 
-(defn- map-leaves [f choices] (cm/from-map (a/tree-map f (cm/to-map choices))))
-
 (defn take
   "The particles at indices (a seq of n' integers), e.g. after resampling."
   [ps indices]
   (let [indices (vec indices)
-        n' (count indices)]
+        n' (count indices)
+        fallback #(assoc ps :n n' :trace nil :traces (mapv (traces ps) indices))]
     (if (batched? ps)
       (let [idx (a/array indices {:dtype :int64})]
-        (assoc ps :n n' :trace (rebuild (:gen-fn ps) (:args ps) n' (map-leaves #(a/take % idx 0) (:choices (:trace ps))))))
-      (assoc ps :n n' :traces (mapv (:traces ps) indices)))))
+        (batched-or
+         (assoc ps :n n' :trace (rebuild (:gen-fn ps) (:args ps) n'
+                                         (map-leaves #(a/take % idx 0) (plain-choices (:choices (:trace ps)) (:n ps)))))
+         (fallback)))
+      (fallback))))
 
 (defn select
   "ps's particle where mask (n booleans, or a bool array) is true and qs's
    elsewhere: the per-particle accept step of n MH chains."
   [mask ps qs]
   (let [n (:n ps)
-        m (a/array (vec (if (a/array? mask) (a/->clj mask) mask)))]
+        keep (vec (if (a/array? mask) (a/->clj mask) mask))
+        fallback #(per-particle ps (mapv (fn [keep? p q] (if keep? p q)) keep (traces ps) (traces qs)))]
     (if (and (batched? ps) (batched? qs)
              (= (cm/addresses (:choices (:trace ps))) (cm/addresses (:choices (:trace qs)))))
-      (let [pick (fn pick [p q]
+      (let [m (a/array keep)
+            cp (:choices (:trace ps))
+            cq (:choices (:trace qs))
+            pick (fn pick [p q]
                    (if (vector? p)
                      (mapv pick p q)
                      (a/where (a/reshape m (into [n] (repeat (dec (a/ndim p)) 1))) p q)))
-            paths (cm/addresses (:choices (:trace ps)))
-            merged (reduce (fn [c path] (cm/set-choice c path (pick (cm/get-choice (:choices (:trace ps)) path)
-                                                                     (cm/get-choice (:choices (:trace qs)) path))))
-                           cm/EMPTY paths)]
-        (assoc ps :trace (rebuild (:gen-fn ps) (:args ps) n merged)))
-      (per-particle ps (mapv (fn [keep? p q] (if keep? p q)) (a/->clj m) (traces ps) (traces qs))))))
+            merged (reduce (fn [c path] (cm/set-choice c path (pick (a/tree-map #(plain % n) (cm/get-choice cp path))
+                                                                     (a/tree-map #(plain % n) (cm/get-choice cq path)))))
+                           cm/EMPTY (cm/addresses cp))]
+        (batched-or (assoc ps :trace (rebuild (:gen-fn ps) (:args ps) n merged)) (fallback)))
+      (fallback))))
 
 (defn choice
-  "The choice at addr across the particles, as an [n] (or [n …]) array."
+  "The choice at addr across the particles, as an [n …] array."
   [ps addr]
   (if (batched? ps)
-    ((:trace ps) addr)
+    (a/tree-map #(plain % (:n ps)) ((:trace ps) addr))
     (a/stack (mapv #(% addr) (:traces ps)))))
 
 (defn scores
   "The particles' log densities, an [n] array."
   [ps]
   (if (batched? ps)
-    (full-weights (:score (:trace ps)) (:n ps))
+    (plain (:score (:trace ps)) (:n ps))
     (stack-weights (map :score (:traces ps)) (:n ps))))

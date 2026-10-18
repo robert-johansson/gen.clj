@@ -41,6 +41,17 @@
 
 (defn support [d] (-support d))
 
+(defmulti -value-shape
+  "The shape of one value of the distribution, or nil for a value that is not
+   an array (a product's vector). The default suits elementwise families:
+   the broadcast shape of the parameters."
+  (fn [d] (:type d)))
+
+(defmethod -value-shape :default [d]
+  (reduce sh/broadcast [] (keep #(when (a/array? %) (a/shape %)) (vals (:params d)))))
+
+(defn value-shape [d] (-value-shape d))
+
 (defn- total
   "A log-prob summed to a scalar (a distribution's trace has one choice)."
   [lp]
@@ -53,8 +64,9 @@
 (defn backend-of
   "The backend of the first backend-array parameter (else gen.array/*backend*)."
   [& params]
-  (or (some #(when (and (some? %) (not (a/host? %))) (a/backend %)) params)
-      a/*backend*))
+  (a/effective-backend
+   (or (some #(when (and (some? %) (not (a/host? %))) (a/backend %)) params)
+       a/*backend*)))
 
 (defn elementwise-shape
   "The shape of a draw from an elementwise distribution: batch-shape broadcast
@@ -94,6 +106,20 @@
              (str param-name " must be probabilities (non-negative, summing to 1)"
                   " — for log-probabilities or logits use categorical-logits")
              {:param param-name}))))
+
+(defn check-all-positive
+  "Every element of a concrete array parameter must be positive."
+  [dist-name param-name v]
+  (when (and (some? v) (a/concrete? v))
+    (check (a/truthy? (a/all (a/> v 0))) dist-name (str param-name " must be positive") {:param param-name})))
+
+(defn check-increasing
+  "A concrete array parameter must increase along its last axis."
+  [dist-name param-name v]
+  (when (and (some? v) (a/concrete? v) (> (peek (a/shape v)) 1))
+    (let [n (peek (a/shape v))]
+      (check (a/truthy? (a/all (a/> (a/slice v -1 1 n) (a/slice v -1 0 (dec n)))))
+             dist-name (str param-name " must be increasing") {:param param-name}))))
 
 (defn ->array
   "A parameter given as Clojure data (a vector of numbers) as an array."
@@ -144,11 +170,20 @@
   (let [v (sample d key)]
     (dist-trace d v (total (log-prob d v)))))
 
+(defn- check-leaf-constraint
+  "A distribution's trace is a single choice: constraints under it are
+   errors, not silently ignored."
+  [op constraints]
+  (when-not (or (cm/has-value? constraints) (cm/empty? constraints))
+    (throw (ex-info (str (name op) ": a distribution's choice is a single value, not nested choices")
+                    {:op op :constraints (cm/to-map constraints)}))))
+
 (defrecord Distribution [type params]
   gfi/IGenerativeFunction
   (-simulate [d _ key] (simulate* d key))
 
   (-generate [d _ constraints key]
+    (check-leaf-constraint :generate constraints)
     (if (cm/has-value? constraints)
       (let [v (cm/get-value constraints)
             lp (total (log-prob d v))]
@@ -156,6 +191,7 @@
       {:trace (simulate* d key) :weight 0.0}))
 
   (-update [d tr _ _ constraints _]
+    (check-leaf-constraint :update constraints)
     (if (cm/has-value? constraints)
       (let [v (cm/get-value constraints)
             lp (total (log-prob d v))]

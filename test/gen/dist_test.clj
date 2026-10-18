@@ -146,3 +146,18 @@
 (deftest mixtures-validate-their-weights
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"probabilities" (normal-mixture [0.5 0.6] [0.0 1.0] [1.0 1.0])))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"one weight" (normal-uniform [1.0] [0.0 1.0] [0.0 1.0]))))
+
+(deftest review-regressions
+  (testing "product sums each factor over its own value (review 4)"
+    (let [p ((d/product d/normal d/bernoulli) [(a/zeros [3]) 1.0] [0.3])]
+      (is (close? (a/item (dc/log-prob p [(a/zeros [3]) true]))
+                  (+ (* 3 (a/item (dc/log-prob (d/normal 0 1) 0.0))) (Math/log 0.3)) 1e-12))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"one element per factor" (dc/log-prob p [(a/zeros [3])])))))
+  (testing "heterogeneous mixtures keep each component's values (review 14)"
+    (let [x (dc/sample ((d/heterogeneous-mixture [d/poisson d/normal]) [0.01 0.99] [3.0] [0.5 1.0]) (rng/key 1) [200])]
+      (is (some #(not= % (Math/floor %)) (a/->clj x)) "normal draws are not truncated to integers")))
+  (testing "bad parameters are errors, not NaN (review 15)"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"positive definite" (d/mvnormal [0.0 0.0] [[1.0 2.0] [2.0 1.0]])))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"symmetric" (d/mvnormal [0.0 0.0] [[1.0 0.5] [0.3 1.0]])))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"positive" (d/dirichlet [-1.0 2.0])))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"increasing" (d/piecewise-uniform [0 2 1] [0.5 0.5])))))

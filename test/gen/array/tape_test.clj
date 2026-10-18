@@ -119,6 +119,9 @@
     (is (grad-matches? (projected f) m23) (str label)))
   (testing "a product with a zero has the exact gradient (no division)"
     (is (= [0.0 0.0 6.0] (a/->clj ((a/grad a/prod) (a/array [2.0 3.0 0.0]))))))
+  (testing "a reduction over no axes is the identity, also backwards (review 16)"
+    (is (= [1.0 1.0 1.0] (a/->clj ((a/grad #(a/sum (a/sum % {:axis []}))) (a/array [1.0 2.0 3.0])))))
+    (is (= [2.0 3.0 4.0] (a/->clj ((a/grad #(a/sum (a/* % (a/prod % {:axis []})))) (a/array [1.0 1.5 2.0]))))))
   (testing "ties in max split the gradient"
     (is (= [0.5 0.5 0.0] (a/->clj ((a/grad a/max) (a/array [2.0 2.0 1.0])))))))
 

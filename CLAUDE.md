@@ -53,7 +53,7 @@ Python.
 
 | Layer | Namespaces |
 |---|---|
-| L0 arrays | `gen.array` (public API), `.dtype`, `.shape`, `.special`, `.linalg`, `.tape` (autodiff), `.protocols`; `gen.backend.jvm`; `gen.random`, `gen.random.threefry` |
+| L0 arrays | `gen.array` (public API), `.dtype`, `.shape`, `.special`, `.linalg`, `.tape` (autodiff), `.batch` (batching tracer), `.protocols`; `gen.backend.jvm`; `gen.random`, `gen.random.threefry` |
 | L1 data | `gen.choicemap`, `gen.selection`, `gen.trace`, `gen.diff` |
 | L2 GFI | `gen.gfi` (protocol + API), `gen.dynamic` (handler, DynamicGF, `gen`) |
 | L3 distributions | `gen.dist.core` (record, `defdist`), `gen.dist` |
@@ -64,8 +64,9 @@ Python.
 
 1. **The handler is the semantics.** Optimizations are later plug-ins that must
    be observationally equivalent and must never change what a GFI operation
-   means. There is one set of handler transitions, parameterized by
-   `:batch-shape`; never write batched copies.
+   means. There is one set of handler transitions; batched execution is the
+   same code under the batch tracer (`gen.array.batch`), so never write
+   batched copies.
 2. **Randomness is purely functional.** Every operation takes a key, and every
    site consumes one key. The implicit key source (`gfi/seed!`,
    `gfi/implicit-seed`) is the only impure point. Keys never go in metadata.

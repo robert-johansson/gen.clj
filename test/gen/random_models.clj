@@ -15,7 +15,9 @@
      [:map addr n]               a Map of a one-site kernel over n inputs
      [:unfold addr n]            an Unfold of a random walk for n steps
      [:switch addr]              a Switch between two small models, its index
-                                 a categorical choice at [addr :i]"
+                                 a categorical choice at [addr :i]
+     [:select addr]              a categorical choice compared with = to pick a
+                                 mean (a host predicate on the choice)"
   (:require [clojure.test.check.generators :as gen]
             [gen.array :as a]
             [gen.combinators :as comb]
@@ -36,7 +38,9 @@
    :uniform (fn [x] (d/uniform x (a/+ x (positive x))))
    :poisson (fn [x] (d/poisson (positive x)))
    :categorical (fn [_] (d/categorical [0.2 0.5 0.3]))
-   :mixture (fn [x] ((d/homogeneous-mixture d/normal) [0.4 0.6] (a/stack [x (a/+ x 2.0)] -1) [1.0 0.5]))})
+   :mixture (fn [x] ((d/homogeneous-mixture d/normal) [0.4 0.6] (a/stack [x (a/+ x 2.0)] -1) [1.0 0.5]))
+   ;; a vector site whose mean is a per-particle scalar plus a shared vector
+   :vector (fn [x] (d/normal (a/+ x (a/array [0.0 1.0 -1.0])) 1.0))})
 
 (def numeric-families (vec (keys families)))
 
@@ -61,7 +65,10 @@
               :site (let [[family dep] more
                           x (if dep (a/astype (get env dep 0.0) :float64) 0.0)
                           v (trace addr ((families family) x))]
-                      (assoc env addr v))
+                      ;; a vector value enters later parameters as its sum
+                      (assoc env addr (if (= family :vector) (a/sum v) v)))
+              :select (let [k (trace [addr :k] (d/categorical [0.3 0.7]))]
+                        (assoc env addr (trace [addr :v] (d/normal (if (= k 0) -2.0 2.0) 1.0))))
               :branch (let [[then else] more]
                         ;; truthy? as the gen macro would insert: a batch of values is loud
                         (if (a/truthy? (trace addr (d/bernoulli 0.5)))
@@ -95,7 +102,8 @@
         leaf (gen/frequency [[6 site]
                              [1 (gen/let [n (gen/choose 0 3)] [:map nil n])]
                              [1 (gen/let [n (gen/choose 0 3)] [:unfold nil n])]
-                             [1 (gen/return [:switch nil])]])]
+                             [1 (gen/return [:switch nil])]
+                             [1 (gen/return [:select nil])]])]
     (if (zero? depth)
       (gen/vector leaf 1 3)
       (gen/vector (gen/frequency [[5 leaf]
@@ -123,7 +131,8 @@
                 :inline (let [[s'] [(first (assign (second st) counter []))]] [(conj out [:inline s']) earlier])
                 :map [(conj out [:map addr (first more)]) (conj earlier addr)]
                 :unfold [(conj out [:unfold addr (first more)]) earlier]
-                :switch [(conj out [:switch addr]) (conj earlier addr)])))
+                :switch [(conj out [:switch addr]) (conj earlier addr)]
+                :select [(conj out [:select addr]) (conj earlier addr)])))
           [[] earlier]
           stmts))
 

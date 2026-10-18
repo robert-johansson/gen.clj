@@ -11,6 +11,7 @@
   (:refer-clojure :exclude [+ - * / < > <= >= ==])
   (:require [gen.array :as a :refer [+ - * / < > <= >= == log log1p exp sqrt square where
                                      lgamma log-beta xlogy xlog1py logical-and logical-or]]
+            [gen.array.dtype :as dt]
             [gen.array.linalg :as la]
             [gen.array.shape :as sh]
             [gen.dist.core :as dc :refer [defdist]]
@@ -147,7 +148,10 @@
   "piecewise_uniform(bounds, probs): bin i, chosen with probability probs[i],
    is [bounds[i], bounds[i+1]], uniform within the bin."
   [bounds probs]
-  (validate (dc/check-probabilities "piecewise-uniform" "probs" probs))
+  (validate (dc/check-probabilities "piecewise-uniform" "probs" probs)
+            (dc/check-increasing "piecewise-uniform" "bounds" bounds)
+            (dc/check (= (peek (a/shape bounds)) (inc (peek (a/shape probs)))) "piecewise-uniform"
+                      "needs one more bound than probabilities" {:bounds (a/shape bounds) :probs (a/shape probs)}))
   (sample [key shape]
     (let [[k1 k2] (rng/split key)
           i (rng/categorical k1 (log probs) shape (opts bounds probs))
@@ -163,8 +167,14 @@
 
 (defdist mvnormal
   "mvnormal(mu, cov): the multivariate normal with mean vector mu and
-   covariance matrix cov (batched over leading axes)."
+   covariance matrix cov (batched over leading axes). A concrete cov must be
+   symmetric and positive definite."
   [mu cov]
+  (validate (when (a/concrete? cov)
+              (dc/check (a/allclose? cov (a/transpose cov (-> (vec (range (a/ndim cov))) (assoc (- (a/ndim cov) 2) (dec (a/ndim cov))) (assoc (dec (a/ndim cov)) (- (a/ndim cov) 2)))))
+                        "mvnormal" "cov must be symmetric" {})
+              (dc/check (not (a/truthy? (a/any (a/isnan (la/cholesky cov))))) "mvnormal"
+                        "cov must be positive definite" {})))
   (sample [key shape]
     (let [d (peek (a/shape mu))
           batch (sh/broadcast (sh/broadcast shape (pop (a/shape mu))) (pop (pop (a/shape cov))))
@@ -188,6 +198,7 @@
   "dirichlet(alpha): the Dirichlet distribution over the simplex of the last
    axis of alpha."
   [alpha]
+  (validate (dc/check-all-positive "dirichlet" "alpha" alpha))
   (sample [key shape]
     (let [k (peek (a/shape alpha))
           g (rng/gamma key alpha (sh/broadcast (conj shape k) (a/shape alpha)) (opts alpha))]
@@ -381,7 +392,8 @@
 
 (defn homogeneous-mixture
   "A family of mixtures of one distribution family (Gen.jl's
-   HomogeneousMixture, for families with scalar values):
+   HomogeneousMixture, for families with scalar values and scalar
+   parameters per component):
    ((homogeneous-mixture normal) weights mus stds) has components
    (normal (mus k) (stds k)). The last axis of each parameter indexes the
    components; weights are the components' probabilities."
@@ -420,9 +432,11 @@
 (defmethod dc/-sample ::heterogeneous-mixture [{{:keys [weights components]} :params} key shape]
   (let [[k-pick k-draw] (rng/split key)
         k (rng/categorical k-pick (log weights) (sh/broadcast shape (pop (a/shape weights))) (opts weights))
-        draws (mapv #(dc/sample %1 %2 shape) components (rng/split k-draw (count components)))]
-    ;; draw every component, keep the picked one (branch-free, so it batches)
-    (a/pick (a/stack (mapv #(a/astype % (a/dtype (first draws))) draws) -1) (a/broadcast-to k (a/shape (first draws))))))
+        draws (mapv #(dc/sample %1 %2 shape) components (rng/split k-draw (count components)))
+        dtype (reduce dt/promote (map a/dtype draws))]
+    ;; draw every component, keep the picked one (branch-free, so it batches);
+    ;; the draws share their promoted dtype, so no component is truncated
+    (a/pick (a/stack (mapv #(a/astype % dtype) draws) -1) (a/broadcast-to k (a/shape (first draws))))))
 
 (defmethod dc/-log-prob ::heterogeneous-mixture [{{:keys [weights components]} :params} v]
   (a/logsumexp (+ (log weights) (a/stack (mapv #(dc/log-prob % v) components) -1)) {:axis -1}))
@@ -430,7 +444,8 @@
 (defn product
   "A family of products of independent distributions (Gen.jl's
    ProductDistribution): ((product normal bernoulli) [mu std] [p]) has values
-   [x b], a vector with one value per factor."
+   [x b], a vector with one value per factor (each of its factor's shape). The
+   log density sums each factor's, over that factor's value."
   [& families]
   (let [families (vec families)]
     (fn [& factor-params]
@@ -442,4 +457,28 @@
   (mapv #(dc/sample %1 %2 shape) factors (rng/split key (count factors))))
 
 (defmethod dc/-log-prob ::product [{{:keys [factors]} :params} v]
-  (reduce + (map dc/log-prob factors v)))
+  (dc/check (and (sequential? v) (= (count v) (count factors))) "product"
+            (str "a value needs one element per factor (" (count factors) ")") {:value v})
+  ;; each factor's log density summed over its own value's axes
+  (reduce + (map (fn [f x] (a/sum (dc/log-prob f x))) factors v)))
+
+;; ---------------------------------------------------------------------------
+;; Value shapes of the families whose values are not elementwise
+;; ---------------------------------------------------------------------------
+
+(defmethod dc/-value-shape ::mvnormal [{{:keys [mu cov]} :params}]
+  (conj (sh/broadcast (pop (a/shape mu)) (pop (pop (a/shape cov)))) (peek (a/shape mu))))
+
+(defmethod dc/-value-shape ::categorical [{{:keys [probs]} :params}] (pop (a/shape probs)))
+(defmethod dc/-value-shape ::categorical-logits [{{:keys [logits]} :params}] (pop (a/shape logits)))
+
+(defmethod dc/-value-shape ::piecewise-uniform [{{:keys [bounds probs]} :params}]
+  (sh/broadcast (pop (a/shape bounds)) (pop (a/shape probs))))
+
+(defmethod dc/-value-shape ::homogeneous-mixture [{{:keys [weights params]} :params}]
+  (pop (reduce sh/broadcast (a/shape weights) (map a/shape params))))
+
+(defmethod dc/-value-shape ::heterogeneous-mixture [{{:keys [components]} :params}]
+  (dc/value-shape (first components)))
+
+(defmethod dc/-value-shape ::product [_] nil)

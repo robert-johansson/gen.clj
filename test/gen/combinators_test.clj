@@ -11,6 +11,7 @@
             [gen.combinators :as comb]
             [gen.diff :as diff]
             [gen.dist :as d]
+            [gen.dist.core :as dc]
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
             [gen.laws :as laws :refer [close?]]
@@ -213,13 +214,12 @@
 (deftest switch-basics
   (let [tr (gfi/simulate switched [0 0.5] (rng/key 1))]
     (is (= [[:a]] (cm/addresses (:choices tr))) "the branch's choices, with no extra address level")
-    (testing "changing the branch generates it afresh and discards every old choice"
-      (let [{t2 :trace w :weight disc :discard rd :retdiff}
+    (testing "changing the branch: the new branch's choices are generated, the old ones discarded"
+      (let [{t2 :trace w :weight disc :discard}
             (gfi/update tr [1 0.5] [diff/unknown-change diff/no-change] (cm/choicemap :b 1.5) (rng/key 2))]
         (is (= 1.5 (t2 :b)))
         (is (= (:choices tr) disc))
-        (is (close? w (a/- (gfi/project t2 (sel/select :b)) (:score tr))))
-        (is (diff/unknown-change? rd))
+        (is (close? w (a/- (a/- (:score t2) (:score tr)) (gfi/project t2 (sel/select :c)))))
         (testing "and updating back with the discard restores the trace"
           (let [{t3 :trace w3 :weight} (gfi/update t2 [0 0.5] [diff/unknown-change diff/no-change] disc (rng/key 3))]
             (is (= (:choices tr) (:choices t3)))
@@ -255,3 +255,21 @@
     (is (close? w (a/- (:score t2) (:score tr))))
     (is (close? w3 w))
     (is (not (zero? w)))))
+
+(deftest switch-branches-share-addresses
+  ;; Def 2.3.1: a choice both branches make keeps its value across an index
+  ;; change, exactly as with the equivalent if
+  (let [sw (comb/switch (gen [] (trace :x (d/normal 0 1))) (gen [] (trace :x (d/normal 5 1))))
+        as-if (gen [i] (if (zero? i) (trace :x (d/normal 0 1)) (trace :x (d/normal 5 1))))
+        tr (:trace (gfi/generate sw [0] (cm/choicemap :x 0.3) (rng/key 1)))
+        tr-if (:trace (gfi/generate as-if [0] (cm/choicemap :x 0.3) (rng/key 1)))
+        r (gfi/update tr [1] [diff/unknown-change] cm/EMPTY (rng/key 2))
+        r-if (gfi/update tr-if [1] [diff/unknown-change] cm/EMPTY (rng/key 2))]
+    (is (= 0.3 ((:trace r) :x)))
+    (is (close? (:weight r) (:weight r-if)))
+    (is (close? (:weight r) (- (dc/log-prob (d/normal 5 1) 0.3) (dc/log-prob (d/normal 0 1) 0.3))))
+    (is (= (:discard r) (:discard r-if)))
+    (testing "and regenerate keeps it unless selected"
+      (let [{t :trace w :weight} (gfi/regenerate tr [1] [diff/unknown-change] sel/none (rng/key 3))]
+        (is (= 0.3 (t :x)))
+        (is (close? w (- (dc/log-prob (d/normal 5 1) 0.3) (dc/log-prob (d/normal 0 1) 0.3))))))))

@@ -70,8 +70,8 @@ be ported is tracked as a deferred bean with a note on how to port it cleanly
    Retdiffs drive incremental computation in Map and Unfold. GenMLX's three
    update protocols collapse into one.
 3. **One implementation per semantic.** Batched execution is part of M1 (decided):
-   the *same* handler transitions, parameterized by `:batch-shape` (`[]` for one
-   trace, `[N]` for N particles), never as copies (GenMLX has six).
+   the *same* code, run under the batch tracer (`gen.array.batch`, vmap
+   semantics: docs/array-api.md §8b), never as copies (GenMLX has six).
 4. **Mutation is confined to three places**: the single `volatile!` that
    `gen.dynamic/execute` threads through one model run, the implicit key
    source in `gen.gfi`, and native handles inside the membrane. Hot paths have
@@ -296,14 +296,18 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   and optimizers return a new store. This is Gen.jl's `@param`,
   `init_param!` and `accumulate_param_gradients!`/`apply!`, but functional.
 - **Batched execution** (decided 2026-10-18 by the agent, for the owner's
-  review): `gen.batched` holds N particles as one batched trace, run through
-  the same transitions with `:batch-shape [N]`; generative functions that call
-  others go through one dispatch, `gfi/run-op`. Constraints given to
-  `gen.batched` are shared by every particle (`:shared-constraints?`): shape
-  alone cannot tell a shared value from a per-particle one. A model that
-  branches on per-particle values falls back to one scalar trace per particle,
-  so batching never changes meaning. Measured: 10–41× faster importance
-  sampling on the JVM backend (100–10,000 particles; docs/benchmarks.md).
+  review; revised the same night after the M1 review): `gen.batched` holds N
+  particles as one batched trace. A batched run is the model's scalar code
+  under the batch tracer `gen.array.batch`, with vmap semantics:
+  - values have per-particle shapes, and each op acts per particle;
+  - draws gain the batch axis;
+  - reading a batched value on the host raises the fallback.
+
+  Every generative function thus runs batched with the same meaning, and
+  batching cannot change meaning by construction. A model whose code treats
+  particles differently (branches, host predicates, host math) falls back to
+  one scalar trace per particle. Measured: 9–41× faster importance sampling
+  on the JVM backend (100–10,000 particles; docs/benchmarks.md).
 - **Bodies run to completion:** lazy sequences in a body's return value are
   realized during the run, and a `trace` or `splice` after the run is a loud
   error. Before this, `(map … (trace …))` at the end of a body gave a trace

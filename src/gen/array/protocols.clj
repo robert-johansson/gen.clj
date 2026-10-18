@@ -70,7 +70,8 @@
      (gen.array.dtype/result-dtype op dtype). Covers unary math, binary
      arithmetic, comparisons, logical ops and :where (args [condition x y]).")
   (-reduce [b op x axes keep-dims?]
-    "Reduce x over axes (a vector of axes; all axes when empty). op is one of
+    "Reduce x over axes (a vector of distinct axes; empty reduces over no axis,
+     the identity, as NumPy's axis=()). op is one of
      :sum :prod :max :min :argmax :argmin :all :any. :argmax and :argmin take a
      single axis.")
   (-scan [b op x axis reverse?]
