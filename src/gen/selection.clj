@@ -22,6 +22,8 @@
   (selected? [_ _] false)
   (get-subselection [this _] this))
 
+(defn selection? [x] (satisfies? ISelection x))
+
 (def all "Selects every address." (->All))
 (def none "Selects no address." (->None))
 

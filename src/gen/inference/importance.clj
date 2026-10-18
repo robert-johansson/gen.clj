@@ -1,0 +1,61 @@
+(ns gen.inference.importance
+  "Importance sampling and importance resampling, as Gen.jl's
+   importance_sampling and importance_resampling.
+
+     (importance-sampling model args observations n)
+       → {:traces :log-normalized-weights :log-ml-estimate}
+     (importance-resampling model args observations n)
+       → {:trace :log-ml-estimate}
+
+   The proposal is the model's internal proposal by default. With
+   {:proposal q :proposal-args xs} each sample instead draws choices from q,
+   generates the model constrained by them and the observations, and is
+   weighted log p(t) - log q(choices) - log q_internal(the rest): choices q
+   leaves out are sampled by the model's internal proposal, whose weight
+   generate accounts for. q must not propose an observed address.
+
+   The options map also takes :key; omitting it draws one from the implicit
+   key source."
+  (:refer-clojure :exclude [-])
+  (:require [gen.array :refer [-]]
+            [gen.choicemap :as cm]
+            [gen.gfi :as gfi]
+            [gen.inference.weights :as w]
+            [gen.random :as rng]))
+
+(set! *warn-on-reflection* true)
+
+(defn- weighted-sample
+  "One trace with its log importance weight."
+  [model args observations {:keys [proposal proposal-args]} key]
+  (if proposal
+    (let [[k-propose k-generate] (rng/split key)
+          {:keys [choices weight]} (gfi/propose proposal (vec proposal-args) k-propose)
+          result (gfi/generate model args (cm/merge observations choices) k-generate)]
+      (update result :weight - weight))
+    (gfi/generate model args observations key)))
+
+(defn importance-sampling
+  "n traces of model on args, constrained by observations, with their
+   normalized log weights and the log marginal likelihood estimate: the log
+   of the mean importance weight, unbiased for p(observations) in exp space."
+  ([model args observations n] (importance-sampling model args observations n {}))
+  ([model args observations n opts]
+   (let [results (mapv #(weighted-sample model args observations opts %)
+                       (rng/split (or (:key opts) (gfi/next-key)) n))
+         log-weights (mapv :weight results)]
+     {:traces (mapv :trace results)
+      :log-normalized-weights (:log-weights (w/normalize log-weights))
+      :log-ml-estimate (w/log-mean-exp log-weights)})))
+
+(defn importance-resampling
+  "One trace drawn in proportion to the weights of n importance samples
+   (sampling importance resampling), with the log marginal likelihood
+   estimate. As n grows, the trace's distribution approaches the posterior."
+  ([model args observations n] (importance-resampling model args observations n {}))
+  ([model args observations n opts]
+   (let [[k-samples k-resample] (rng/split (or (:key opts) (gfi/next-key)))
+         {:keys [traces log-normalized-weights log-ml-estimate]}
+         (importance-sampling model args observations n (assoc opts :key k-samples))]
+     {:trace (traces (first (w/multinomial log-normalized-weights 1 k-resample)))
+      :log-ml-estimate log-ml-estimate})))
