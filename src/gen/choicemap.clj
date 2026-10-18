@@ -119,6 +119,18 @@
   [cm]
   (if (has-value? cm) [] (sort-by first address-order (-submaps cm))))
 
+(defn values-shallow
+  "The [address value] pairs directly at the top of a node (Gen.jl's
+   get_values_shallow), in canonical order."
+  [cm]
+  (keep (fn [[addr sub]] (when (has-value? sub) [addr (get-value sub)])) (submaps cm)))
+
+(defn submaps-shallow
+  "The [address choice-map] pairs of the nodes directly under the top of cm
+   (Gen.jl's get_submaps_shallow), in canonical order."
+  [cm]
+  (remove (fn [[_ sub]] (has-value? sub)) (submaps cm)))
+
 (defn addresses
   "Every leaf path, in canonical order."
   [cm]

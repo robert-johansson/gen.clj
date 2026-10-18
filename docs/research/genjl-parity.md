@@ -40,8 +40,8 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 | `regenerate(trace,args,argdiffs,selection)` → (trace, w, retdiff) | P: `regenerate [gf trace sel]` has no args/argdiffs and no retdiff; `edit.cljs` CompositeEdit can emulate it | core |
 | `project(trace, selection)` | Y: IProject | core |
 | `get_args/get_retval/get_choices/get_score/get_gen_fn`, `trace[addr]`, `trace[]` | Y: `trace.cljs` | core |
-| `has_argument_grads` | P: the protocol exists, but DynamicGF returns nil | core |
-| `accepts_output_grad` | N | core |
+| `has_argument_grads` | P: the protocol exists, but DynamicGF returns nil | core. *gen.clj (M1):* moot under full AD. `choice-gradients` differentiates every argument that is a tree of floats (nil for the others) |
+| `accepts_output_grad` | N | core. *gen.clj (M1):* every generative function takes a retgrad (`choice-gradients`, `param-gradients`) |
 | `choice_gradients(trace, sel, retgrad)` → (arg_grads, values, grads) | P: `gradients.cljs` `choice-gradients` takes an address vector; no retgrad, no arg grads | core |
 | `accumulate_param_gradients!(trace, retgrad, scale)` | P: functional gradients via `mx/grad` (`learning.cljs make-param-loss-fn`); no stateful accumulator | core |
 | `get_params(gf)` | P: a name-keyed store in `learning.cljs`; no per-GF registry | core |

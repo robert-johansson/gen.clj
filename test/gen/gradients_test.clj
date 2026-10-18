@@ -145,3 +145,18 @@
       (let [store (fit opt steps)]
         (is (< (Math/abs (- (:w store) w)) 1e-3) (str label " w"))
         (is (< (Math/abs (- (:b store) b)) 1e-3) (str label " b"))))))
+
+(deftest training-on-generated-data
+  ;; Gen.jl's train!: data drawn from a generator, averaged parameter
+  ;; gradients, a decaying-step optimizer
+  (let [data-fn (fn [_] [[xs] data])
+        {:keys [store history]} (learn/train regression {:w 0.0 :b 0.0}
+                                             (learn/gradient-descent {:step-size-init 0.05 :step-size-beta 1000})
+                                             data-fn g/param-gradients
+                                             {:epochs 20 :batches-per-epoch 20 :batch-size 2 :key (rng/key 9)})
+        mx (/ (reduce + xs) 4) my (/ (reduce + ys) 4)
+        w (/ (reduce + (map #(* (- %1 mx) (- %2 my)) xs ys)) (reduce + (map #(* (- % mx) (- % mx)) xs)))]
+    (is (= 20 (count history)))
+    (is (< (first history) (last history)) "the log density rises")
+    (is (< (Math/abs (- (:w store) w)) 1e-3))
+    (is (< (Math/abs (- (:b store) (- my (* w mx)))) 1e-3))))
