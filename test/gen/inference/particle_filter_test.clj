@@ -14,6 +14,7 @@
             [gen.gfi :as gfi]
             [gen.inference.kernel :as k]
             [gen.inference.particle-filter :as pf]
+            [gen.inference.transform :as tf]
             [gen.random :as rng]
             [gen.selection :as sel]))
 
@@ -370,3 +371,105 @@
                           (pf/step state [2 0.0] [diff/unknown-change diff/no-change] (observation 1)
                                    {:proposal re-propose :proposal-args [1] :key (rng/key 72)}))
         "without a backward proposal, still loud")))
+
+;; ---------------------------------------------------------------------------
+;; SMC samplers and SMCP3: updating translators as move-reweight kernels
+;; ---------------------------------------------------------------------------
+
+(defn- step-args [t] {:p-new-args [(inc t) 0.0] :p-argdiffs [diff/unknown-change diff/no-change]
+                      :new-observations (observation t)})
+
+(deftest an-updating-translator-without-a-transform-is-a-proposal-step
+  (let [state (pf/initialize model [1 0.0] (observation 0) 8 {:key (rng/key 80)})
+        stepped (pf/step state [2 0.0] [diff/unknown-change diff/no-change] (observation 1)
+                         {:proposal optimal-proposal :proposal-args [1 (ys 1)] :key (rng/key 81)})
+        translated (pf/move-reweight state (tf/updating-translator (assoc (step-args 1) :q-forward optimal-proposal
+                                                                          :q-forward-args [1 (ys 1)]))
+                                     (rng/key 81))]
+    (is (= (map :choices (:traces stepped)) (map :choices (:traces translated))))
+    (is (every? true? (map #(ts/close? %1 %2) (:log-weights stepped) (:log-weights translated))))))
+
+(def standard-normal (gen [_] (trace :z (d/normal 0 1))))
+
+(defn- optimal-moments
+  "The mean and sd of p(x_t | x_{t-1}, y_t)."
+  [prev y]
+  (let [v (/ 1.0 (+ (/ 1.0 (* q q)) (/ 1.0 (* r r))))]
+    [(* v (+ (/ (* a-coef prev) (* q q)) (/ y (* r r)))) (Math/sqrt v)]))
+
+(defn- reparameterized
+  "x_t = m + s·z from z ~ N(0, 1), m and s the optimal proposal's; x_{t-1}
+   is read and kept, so it is an unchanged output."
+  [t]
+  (tf/pair (tf/transform [model-in aux-in model-out aux-out]
+             (let [[m s] (optimal-moments (tf/read model-in [(dec t) :x] :continuous) (ys t))]
+               (tf/write model-out [t :x] (+ m (* s (tf/read aux-in :z :continuous))) :continuous)))
+           (tf/transform [model-in aux-in model-out aux-out]
+             (let [[m s] (optimal-moments (tf/read model-in [(dec t) :x] :continuous) (ys t))]
+               (tf/write aux-out :z (/ (- (tf/read model-in [t :x] :continuous) m) s) :continuous)))))
+
+(deftest smcp3-a-reparameterized-proposal-weighs-as-the-optimal-one
+  (let [state (pf/initialize model [1 0.0] (observation 0) 8 {:key (rng/key 82)})
+        [forward _] (reparameterized 1)
+        moved (pf/move-reweight state (tf/updating-translator (assoc (step-args 1) :q-forward standard-normal
+                                                                     :transform forward :check? true))
+                                (rng/key 83))]
+    ;; z ~ N(0, 1) mapped by x = m + s·z has density N(x; m, s): the weight
+    ;; is the score change less log N(x_1; m, s)
+    (doseq [[tr tr' w w'] (map vector (:traces state) (:traces moved) (:log-weights state) (:log-weights moved))]
+      (let [[m s] (optimal-moments (tr [0 :x]) (ys 1))]
+        (is (= (tr [0 :x]) (tr' [0 :x])))
+        (is (ts/close? (- w' w) (- (- (:score tr') (:score tr)) (ts/number (dc/log-prob (d/normal m s) (tr' [1 :x]))))))))
+    (testing "the round trip catches a wrong inverse"
+      (let [[f _] (tf/pair (first (reparameterized 1))
+                           (tf/transform [model-in aux-in model-out aux-out]
+                             (tf/read model-in [0 :x] :continuous)
+                             (tf/write aux-out :z (tf/read model-in [1 :x] :continuous) :continuous)))]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"does not give back the forward"
+                              (pf/move-reweight state (tf/updating-translator (assoc (step-args 1) :q-forward standard-normal
+                                                                                     :transform f :check? true))
+                                                (rng/key 84))))))))
+
+(defn- run-smc-samplers
+  "The filter with each step an SMC-samplers move: x_{t-1} moved by a random
+   walk and x_t proposed, the old x_{t-1} weighed back by the walk."
+  [n key]
+  (let [ks (rng/split key (* 2 (count ys)))
+        init (pf/initialize model [1 0.0] (observation 0) n {:key (ks 0)})]
+    (reduce (fn [state t]
+              (-> state
+                  (pf/maybe-resample {:key (ks (dec (* 2 t)))})
+                  (pf/move-reweight (tf/updating-translator (assoc (step-args t) :q-forward re-propose :q-forward-args [t]
+                                                                   :q-backward move-back :q-backward-args [t]))
+                                    (ks (* 2 t)))))
+            init
+            (range 1 (count ys)))))
+
+(deftest ^:slow ^:heavy smc-samplers-with-a-backward-kernel-stay-unbiased
+  (let [runs 400
+        ratios (map #(lml-ratio (run-smc-samplers 20 %)) (rng/split (rng/key 85) runs))
+        mean (/ (reduce + ratios) runs)
+        sd (Math/sqrt (/ (reduce + (map #(* (- % mean) (- % mean)) ratios)) (dec runs)))]
+    (is (< (ts/abs (- mean 1.0)) (* 5 (/ sd (Math/sqrt runs)))) (str mean " ± " (/ sd (Math/sqrt runs))))))
+
+(deftest an-extending-translator-with-a-transform
+  ;; x_1 = 2z, z ~ N(0, 1): the weight is the score change less log N(x_1; 0, 2)
+  (let [state (pf/initialize model [1 0.0] (observation 0) 6 {:key (rng/key 86)})
+        doubled (tf/transform [model-in aux-in model-out aux-out]
+                  (tf/write model-out [1 :x] (* 2.0 (tf/read model-in :z :continuous)) :continuous))
+        moved (pf/move-reweight state (tf/extending-translator (assoc (step-args 1) :q-forward standard-normal :transform doubled))
+                                (rng/key 87))]
+    (doseq [[tr tr' w w'] (map vector (:traces state) (:traces moved) (:log-weights state) (:log-weights moved))]
+      (is (ts/close? (- w' w) (- (- (:score tr') (:score tr)) (ts/number (dc/log-prob (d/normal 0 2) (tr' [1 :x])))))))))
+
+(deftest an-smc-samplers-step-weighs-the-way-back
+  ;; the increment: score change - log q(x_0', x_1; x_0) + log L(x_0; x_0')
+  (let [state (pf/initialize model [1 0.0] (observation 0) 6 {:key (rng/key 88)})
+        moved (pf/move-reweight state (tf/updating-translator (assoc (step-args 1) :q-forward re-propose :q-forward-args [1]
+                                                                     :q-backward move-back :q-backward-args [1]))
+                                (rng/key 89))]
+    (doseq [[tr tr' w w'] (map vector (:traces state) (:traces moved) (:log-weights state) (:log-weights moved))]
+      (let [fwd (:weight (gfi/assess re-propose [tr 1] (cm/choicemap [0 :x] (tr' [0 :x]) [1 :x] (tr' [1 :x]))))
+            bwd (:weight (gfi/assess move-back [tr' 1] (cm/choicemap [0 :x] (tr [0 :x]))))]
+        (is (not= (tr [0 :x]) (tr' [0 :x])))
+        (is (ts/close? (- w' w) (+ (- (:score tr') (:score tr)) (- bwd fwd))))))))

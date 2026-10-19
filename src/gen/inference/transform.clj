@@ -37,7 +37,11 @@
      GeneralTraceTranslator, and DeterministicTraceTranslator without the
      proposals (deterministic-translator);
    - (extending-translator {:p-new-args :p-argdiffs :new-observations
-     :q-forward :q-forward-args}): SimpleExtendingTraceTranslator;
+     :q-forward :q-forward-args :transform}): SimpleExtendingTraceTranslator
+     (GenParticleFilters' ExtendingTraceTranslator with a :transform);
+   - (updating-translator {… :q-backward :q-backward-args :transform}):
+     GenParticleFilters' UpdatingTraceTranslator, an SMC-samplers step
+     (Del Moral) without a transform and SMCP3's (Lew et al. 2023) with one;
    - (involution t): Gen.jl's SymmetricTraceTranslator, as the involution
      that gen.inference.mh/involutive-mh and gen.inference.kernel/involutive-mh
      take (and gen.inference.particle-filter/reweighting's :involution).
@@ -52,6 +56,7 @@
   (:require [gen.array :as array :refer [+ - * /]]
             [gen.array.linalg :as la]
             [gen.choicemap :as cm]
+            [gen.diff :as diff]
             [gen.gfi :as gfi]
             [gen.random :as rng]))
 
@@ -357,21 +362,71 @@
   ([p-new p-new-args new-observations t opts]
    (translator (merge opts {:p-new p-new :p-new-args p-new-args :new-observations new-observations :transform t}))))
 
+(defn- new-args [trace p-new-args p-argdiffs]
+  (let [args (if p-new-args (vec p-new-args) (:args trace))]
+    [args (if p-argdiffs (vec p-argdiffs) (vec (repeat (count args) diff/unknown-change)))]))
+
 (defn extending-translator
   "Gen.jl's SimpleExtendingTraceTranslator: the trace updated to
-   p-new-args (with p-argdiffs) with :new-observations and the choices of
-   (q-forward trace q-forward-args…); the weight is the update's minus the
-   proposal's. The update may only add choices."
-  [{:keys [p-new-args p-argdiffs new-observations q-forward q-forward-args]}]
+   p-new-args (with p-argdiffs, unknown changes by default) with
+   :new-observations and the choices of (q-forward trace q-forward-args…),
+   mapped by :transform first when given (its model-in is the proposal's
+   choices, as GenParticleFilters' ExtendingTraceTranslator); the weight is
+   the update's minus the proposal's, plus log |det J|. The update may only
+   add choices."
+  [{:keys [p-new-args p-argdiffs new-observations q-forward q-forward-args] t :transform}]
   (fn [trace key]
     (let [[k-propose k-update] (rng/split key)
           {u :choices fwd :weight} (propose q-forward q-forward-args trace k-propose)
+          s (when t (execute t u nil nil))
+          [args argdiffs] (new-args trace p-new-args p-argdiffs)
           {t' :trace w :weight discard :discard}
-          (gfi/update trace (vec p-new-args) (vec p-argdiffs) (cm/merge (or new-observations cm/EMPTY) u) k-update)]
+          (gfi/update trace args argdiffs
+                      (cm/merge (or new-observations cm/EMPTY) (if t (get-in s [:outputs :model-out]) u)) k-update)]
       (when-not (cm/empty? discard)
         (throw (ex-info "extending-translator: the update changed or removed choices; it may only add them"
                         {:discard (cm/to-map discard)})))
-      {:trace t' :weight (- w fwd)})))
+      {:trace t' :weight (+ (- w fwd) (if t (log-abs-det t u nil s (constantly false)) 0.0))})))
+
+(defn updating-translator
+  "GenParticleFilters' UpdatingTraceTranslator. Forward choices u come from
+   (q-forward trace q-forward-args…). Without a transform, the trace is
+   updated to p-new-args (unknown changes unless :p-argdiffs) with u and
+   :new-observations, and the backward choices are the discard: Del Moral's
+   SMC samplers. With :transform (SMCP3), the transform maps (trace, u) to
+   the update's constraints and the backward choices u'. Either way the
+   weight is the update's + log q-backward(u'; t', args…) - log q-forward(u)
+   + log |det J| (the continuous reads the update keeps count as unchanged
+   outputs). :check? runs the inverse (the transform's inverse, the
+   proposals swapped, back to the trace's arguments with
+   :prev-observations) and throws unless it gives back the trace and u."
+  [{:keys [p-new-args p-argdiffs new-observations q-forward q-forward-args q-backward q-backward-args
+           check? prev-observations]
+    t :transform}]
+  (fn [trace key]
+    (let [[k-propose k-update] (rng/split key)
+          {u :choices fwd :weight} (propose q-forward q-forward-args trace k-propose)
+          [args argdiffs] (new-args trace p-new-args p-argdiffs)
+          obs (or new-observations cm/EMPTY)
+          s (when t (execute t trace u nil))
+          {t' :trace w :weight discard :discard}
+          (gfi/update trace args argdiffs (cm/merge (if t (get-in s [:outputs :model-out]) u) obs) k-update)
+          ldj (if t (log-abs-det t trace u s (fn [p] (not (cm/has-value? (cm/get-submap discard p))))) 0.0)
+          u' (if t (get-in s [:outputs :aux-out]) discard)
+          bwd (cond q-backward (:weight (gfi/assess q-backward (into [t'] q-backward-args) u'))
+                    (cm/empty? u') 0.0
+                    :else (throw (ex-info "updating-translator: there are backward choices but no :q-backward"
+                                          {:backward (cm/to-map u')})))]
+      (when check?
+        (let [s-back (when t (execute (inverse t) t' u' nil))
+              back-args (:args trace)
+              {t'' :trace} (gfi/update t' back-args (vec (repeat (count back-args) diff/unknown-change))
+                                     (cm/merge (if t (get-in s-back [:outputs :model-out]) u')
+                                               (or prev-observations cm/EMPTY))
+                                     k-update)]
+          (check-round-trip! "trace" (:choices trace) (:choices t''))
+          (when t (check-round-trip! "forward choices" u (get-in s-back [:outputs :aux-out])))))
+      {:trace t' :weight (+ w (- bwd fwd) ldj)})))
 
 (defn involution
   "Transform t as the involution of involutive MCMC (Gen.jl's

@@ -496,7 +496,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   :weight})`, so a particle filter takes one as a move-reweight kernel;
   the symmetric translator is `involution`, the function
   `mh/involutive-mh` already took. An involution must write every new
-  choice: its update samples nothing, a loud error otherwise.
+  choice: its update samples nothing, a loud error otherwise. SMCP3 is
+  GenParticleFilters' UpdatingTraceTranslator with a transform
+  (`updating-translator`), applied to a filter by `pf/move-reweight`;
+  without a transform it is Del Moral's SMC samplers.
 - **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
   `(array/item x)`, the namespace's last segment, as the Clojure style guide
   has it. It replaced `a`, which the owner found ugly (2026-10-18). The
