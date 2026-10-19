@@ -111,6 +111,21 @@
       (or (and (#{:maximum :minimum} label) (array/truthy? (array/any (array/< (array/abs (array/- x y)) 1e-3))))
           (grad-matches? (projected f) x y)))))
 
+(deftest taped-host-scalars-stay-on-the-host
+  ;; Under the tape an op on host scalars computes as it does untaped, on the
+  ;; host. On MLX the tape once made them float32 arrays, so x and y below
+  ;; (4.5e-8 apart) were equal to some ops and not to others, and
+  ;; logaddexp's gradient went entirely to x (found by the property above,
+  ;; seed 1792437764135, on Metal)
+  (let [x (+ -3.0 (* 6 1.4901161193847656E-8))
+        y (+ -3.0 (* 6 7.450580596923828E-9))
+        f (fn [x y] (array/logaddexp x y))
+        [v [gx gy]] ((array/value-and-grad f {:argnums [0 1]}) x y)]
+    (is (ts/close? gx 0.5 {:rtol 1e-6 :atol 1e-6}) "half the gradient to each")
+    (is (ts/close? gy 0.5 {:rtol 1e-6 :atol 1e-6}))
+    (when-not (ts/native-grad?)
+      (is (= (f x y) v) "the taped value is the value"))))
+
 (deftest where-and-remainder
   (is (grad-matches? (projected (fn [x y] (array/where (array/> x 0) (array/* x y) (array/exp y))))
                      (array/array [-1.0 0.5 2.0]) (array/array [0.3 -0.2 1.1])))

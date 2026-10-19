@@ -274,7 +274,11 @@
 
   (-elementwise [t op args dtype]
     (let [ps (mapv primal args)
-          out (p/-elementwise inner op ps dtype)]
+          ;; host scalars stay on the host, as untaped (a lazy inner backend
+          ;; would make them float32 arrays, and the taped values would differ)
+          out (if (every? array/host? ps)
+                (array/host-elementwise op ps)
+                (p/-elementwise inner op ps dtype))]
       (if-let [rule (elementwise-rules op)]
         (record t out args (fn [g need]
                              (mapv (fn [ct x] (when ct (unbroadcast ct (array/shape x)))) (rule g ps out need) ps)))
@@ -283,7 +287,7 @@
   (-reduce [t op x axes keep-dims?]
     (let [v (primal x)
           s (array/shape v)
-          out (p/-reduce inner op v axes keep-dims?)]
+          out (if (array/host? v) (array/host-reduce op v) (p/-reduce inner op v axes keep-dims?))]
       (case op
         :sum (record t out [x] (fn [g _] [(spread g s axes)]))
         (:max :min) (record t out [x]

@@ -241,6 +241,12 @@ needs, taken from GenMLX's measured call counts
   - Ops on tracked values compute the primal through the normal API and record
     the VJP. The backward pass is a topological sweep with a local transient
     accumulator.
+  - An op whose operands are all host scalars computes on the host, as it
+    does untaped (`array/host-elementwise`, `array/host-reduce`), so a
+    function's taped values are its values on every backend. On MLX the tape
+    once made them float32 arrays: two scalars 4.5e-8 apart were equal to
+    some ops and not to others, and `logaddexp`'s gradient went entirely to
+    one argument (found by the tape's property test, 2026-10-19).
   - VJP rules form a table keyed by the primitive op keywords of §6, and are
     written against the public API. Composites therefore need no rules, and the
     same tape works on any backend; it could even test MLX's native AD.

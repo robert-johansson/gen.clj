@@ -216,6 +216,22 @@
                 :logical-not (not v)
                 (:isnan :isinf) false)))))
 
+(defn- host-where [c x y]
+  (dt/host-cast (if (dt/truthy? c) x y) (dt/promote (dt/host-dtype x) (dt/host-dtype y))))
+
+(defn host-elementwise
+  "The elementwise op on host scalar operands as gen.array computes it for
+   them: on the host, whatever the backend. For backends that wrap others
+   (the tape), so that a computation on host scalars gives the same values
+   wrapped as unwrapped."
+  [op args]
+  (case op
+    :where (apply host-where args)
+    :stop-gradient (first args)
+    (case (count args)
+      1 (host-unary op (first args))
+      2 (host-binary op (first args) (second args)))))
+
 ;; ---------------------------------------------------------------------------
 ;; Elementwise dispatch
 ;; ---------------------------------------------------------------------------
@@ -320,8 +336,7 @@
   "Elementwise choice: x where condition c is true, y elsewhere, broadcasting."
   [c x y]
   (if (and (host? c) (host? x) (host? y))
-    (dt/host-cast (if (dt/truthy? c) x y)
-                  (dt/promote (dt/host-dtype x) (dt/host-dtype y)))
+    (host-where c x y)
     (let [b (backend-of :where [c x y])
           d (common-dtype b [x y])]
       (p/-elementwise b :where [(cast-to b c :bool) (cast-to b x d) (cast-to b y d)] d))))
@@ -630,14 +645,20 @@
 ;; Reductions and scans
 ;; ---------------------------------------------------------------------------
 
+(defn host-reduce
+  "The reduction op of a host scalar as gen.array computes it (see
+   host-elementwise)."
+  [op x]
+  (case op
+    (:sum :prod) (if (instance? Boolean x) (if x 1 0) x)
+    (:max :min) x
+    (:argmax :argmin) 0
+    (:all :any) (dt/truthy? x)))
+
 (defn- reduce* [op x {:keys [axis keep-dims?]}]
   (if (host? x)
     (do (sh/axes axis 0)
-        (case op
-          (:sum :prod) (if (instance? Boolean x) (if x 1 0) x)
-          (:max :min) x
-          (:argmax :argmin) 0
-          (:all :any) (dt/truthy? x)))
+        (host-reduce op x))
     (let [b (operand-backend op x)
           axes (sh/axes axis (count (p/-shape b x)))
           d (dt/reduce-input-dtype op (p/-dtype b x) (defaults b))]
