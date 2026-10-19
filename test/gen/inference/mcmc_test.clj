@@ -2,8 +2,10 @@
   "HMC, MALA, MAP optimization and elliptical slice sampling on Gaussian
    targets with exact posteriors, including an array-valued latent behind a
    splice; and involutive MH with an AD Jacobian (thesis Eq 3.15)."
+  (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
-            [gen.array :as a]
+            [gen.test-support :as ts]
+            [gen.array :as a :refer [+ - * /]]
             [gen.array.linalg :as la]
             [gen.choicemap :as cm]
             [gen.dist :as d]
@@ -48,8 +50,8 @@
 
 (defn- matches? [xs mean var]
   (let [[m v] (moments xs)]
-    (and (< (Math/abs (- m mean)) (* 5 (Math/sqrt (/ var (count xs)))))
-         (< (Math/abs (- v var)) (* 0.12 var)))))
+    (and (< (ts/abs (- m mean)) (* 5 (Math/sqrt (/ var (count xs)))))
+         (< (ts/abs (- v var)) (* 0.12 var)))))
 
 (defn- scalar-stationary? [step]
   (let [n 4000
@@ -127,7 +129,7 @@
 
 (deftest map-optimization-finds-the-mode
   (let [tr (reduce (fn [tr _] (mcmc/map-optimize tr x-sel)) (start-at scalar (cm/choicemap :x -2.0 :y 1.3)) (range 200))]
-    (is (< (Math/abs (- (tr :x) 0.65)) 1e-6)))
+    (is (< (ts/abs (- (tr :x) 0.65)) 1e-6)))
   (testing "a vector mode behind a splice"
     (let [tr (reduce (fn [tr _] (mcmc/map-optimize tr (sel/select [:latent :z]) {:max-step-size 0.3}))
                      (start-at vector-model (cm/choicemap [:latent :z] (a/array [2.0 2.0]) :y y2))
@@ -219,11 +221,11 @@
         start (start-at one-or-two (cm/choicemap :two? false :m 0.0 :y y))
         ends (map (fn [key] (reduce step start (rng/split key 60))) (rng/split (rng/key 41) 2000))
         frac (/ (count (filter #(% :two?) ends)) 2000.0)]
-    (is (< (Math/abs (- frac exact-two)) (* 5 (Math/sqrt (/ (* exact-two (- 1 exact-two)) 2000)))))
+    (is (< (ts/abs (- frac exact-two)) (* 5 (Math/sqrt (/ (* exact-two (- 1 exact-two)) 2000)))))
     (testing "the involution is an involution, with opposite weights"
       (let [tr start fwd (cm/choicemap :u 0.4)
             {t1 :trace u1 :bwd-choices w1 :weight} (split-merge tr fwd nil nil)
             {t2 :trace u2 :bwd-choices w2 :weight} (split-merge t1 u1 nil nil)]
         (is (= (:choices tr) (:choices t2)))
         (is (= fwd u2))
-        (is (< (Math/abs (+ w1 w2)) 1e-12))))))
+        (is (< (ts/abs (+ w1 w2)) 1e-12))))))

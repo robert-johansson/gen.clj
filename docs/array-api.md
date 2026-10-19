@@ -288,6 +288,19 @@ Two layers make this safe:
    - Representation tests (`class`, `instance?`, `number?`, `coll?`, …, and
      gen.array's `host?` and `array?`) answer for a particle's value, whose
      type the batch's dtype and per-particle shape determine.
+   - A 0-d backend array counts as its host value wherever a body branches,
+     compares or looks up on it (MLX's 0-d arrays are MLX arrays; the JVM
+     backend's are host scalars already): `case`, `=`, `not=`, `true?`,
+     `false?`, `identical?`, the lookups, `nth`, and the representation
+     tests, which see a 0-d value as a host scalar of its kind. As with
+     `truthy?`, reading the value evaluates it. So a body written in plain
+     Clojure behaves alike on every backend. *Added 2026-10-19 with the MLX
+     backend:* on MLX, a body's `(case k 0 …)` took the default clause and
+     `(= k 0)` was false.
+   - **Plain helper functions** outside `gen` get none of this. On MLX they
+     see arrays, not numbers: clojure.core's `=` with a number is false and
+     its arithmetic throws. A helper should use gen.array's operators or
+     `a/item`, or be `defn-guarded`.
    - A `catch` clause in a body raises the fallback first in a batched run:
      a caught exception may be thrown for some particles only. And a
      batched-branch error is logged when raised, so a run in which code
@@ -501,9 +514,10 @@ How to read these numbers:
     (`mlx_stream_new_thread_unsafe`), with evaluation serialized by one
     lock. This replaces "one platform thread per MLX context", which would
     cost a thread handoff per op or per read.
-16. **MLX frees on the Cleaner's thread** (§13, §9; agent, for the owner's
-    review). A free only drops a reference, and MLX's allocators lock, so
-    the planned queue drained by an owning thread is not needed.
+16. **MLX arrays are freed through phantom references,** drained by the
+    threads that make arrays, with pressure-driven collections (§13, §9;
+    agent, for the owner's review). This revises the first version, which
+    freed on a `Cleaner`'s thread and did not keep up under load.
 17. **MLX 0-d arrays stay MLX arrays,** and out-of-range array indices are
     clamped (§13; agent, for the owner's review). Both keep the backend
     lazy. Host indices are still checked.
@@ -511,6 +525,13 @@ How to read these numbers:
     table; agent, for the owner's review): NaN in `sign` and `argmax`,
     integer floor division, and float64 accuracy on the CPU. Metal's
     flushing of subnormals is documented instead.
+19. **In `gen` bodies, a 0-d backend array counts as its host value** for
+    `case`, `=`, lookups and type tests (§8a; 2026-10-19, agent, for the
+    owner's review). It extends what `truthy?` already did for `if`, so
+    that a body in plain Clojure means the same on MLX as on the JVM.
+20. **Distribution parameters given as host data are validated on the
+    host** (§13; agent, for the owner's review). This holds on every
+    backend. Lazy arrays are still not read.
 
 ## 13. The MLX backend (M2)
 
@@ -551,9 +572,28 @@ The decisions are §12 items 15–18, for the owner's review.*
 - Ops run on streams made with `mlx_stream_new_thread_unsafe`, which any
   thread can use. One lock serializes evaluation, so arrays move freely
   between threads, futures included.
-- A `Cleaner` frees each handle on its own thread once the value is
-  unreachable. This only drops a reference: MLX's reference counts are
-  atomic and its allocators lock.
+- **Freeing.** Each handle belongs to its `MlxArray`. `MlxRuntime/adopt`
+  gives it a phantom reference, and the threads that make arrays drain
+  the reference queue, so frees happen on MLX-using threads. A free only
+  drops a reference: MLX's reference counts are atomic and its allocators
+  lock. (A `Cleaner` came first. Its thread's timing was not enough under
+  load.)
+- **Collecting under pressure.** The GC does not see MLX's buffers, and
+  Metal allows about 500,000 of them, every array with data holding one,
+  also on the CPU device. So the backend collects (`System.gc`, then
+  drains) when 100,000 arrays are live (`gen.mlx.gc-arrays`) or MLX's
+  active memory passes a quarter of RAM (`gen.mlx.gc-bytes`). The
+  threshold rises to twice what survives a collection, capped at 60% of
+  Metal's limit.
+- **Lazy graphs pin their leaves.** An unevaluated graph keeps its input
+  buffers alive, every host number used as an operand among them. Host
+  scalars are therefore shared constants (4,096 per dtype,
+  `gen.mlx.constants`), and Threefry takes its key as one buffer.
+- **Evaluation at loop boundaries (§9).** Inference loops evaluate once
+  per iteration (`gfi/eval-trace!`): MCMC runs, particle-filter steps,
+  scalar importance sampling, training steps. So a graph stays one
+  iteration deep. Before this, scalar importance sampling with 10,000
+  particles kept 10,000 pending traces, about 250,000 buffers.
 - Decompositions and solves run on the CPU stream, the only one where MLX
   implements them.
 
@@ -583,6 +623,7 @@ conformance suite.
 | a zero diagonal fails the triangular solve (it inverts), reported later | NaN on the diagonal: NaN solutions |
 | `slogdet` throws on a singular matrix | computed from the LU factor: `[0 -Inf]` |
 | solves want equal batch axes | broadcast first |
+| integer `power` gives 0 for a negative exponent, and for every element of an array holding one | the JVM backend's semantics: exact for exponents ≥ 0 (on a stand-in), through floats with Java's cast for negative ones |
 | gathers do not check bounds | array indices: negative from the end, clamped (host indices are checked) |
 
 **A hazard to know.** MLX runs CPU work as asynchronous tasks. An
@@ -593,6 +634,13 @@ kernels fail on. New native ops must keep that rule.
 **Remaining differences, documented rather than hidden:**
 - **Subnormals.** Metal flushes float32 subnormals to zero: `sqrt(5.9e-39)`
   is 0, and the sqrt of a negative subnormal is -0, not NaN.
+- **Validation.** Array parameters and constrained array values are not
+  read on a lazy backend (rule 5), so a NaN or an invalid probability
+  vector in an MLX array is not an error there. Parameters given as host
+  data (numbers, Clojure vectors) are validated on the host before they
+  become arrays, on every backend.
+- **Integer overflow in `power`.** The JVM backend computes through
+  doubles and saturates; MLX multiplies exactly and wraps.
 - **Indices.** An out-of-range array index is clamped, not an error. A lazy
   backend cannot check it without evaluating. The JVM backend is the one
   that checks.

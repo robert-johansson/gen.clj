@@ -1,8 +1,10 @@
 (ns gen.gradients-test
   "Choice, argument and parameter gradients against finite differences of the
    assessed log density (thesis Eqs 2.10-2.12), and parameter learning."
+  (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
-            [gen.array :as a]
+            [gen.test-support :as ts]
+            [gen.array :as a :refer [+ - * /]]
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
             [gen.dist :as d]
@@ -36,7 +38,7 @@
             (for [p (cm/addresses values)
                   :let [gv (cm/get-choice gradients p)]
                   i (range (a/size gv))]
-              (< (Math/abs (- (double (a/item (if (a/host? gv) gv (a/take (a/flatten gv) i))))
+              (< (ts/abs (- (double (a/item (if (a/host? gv) gv (a/take (a/flatten gv) i))))
                               (fd-choice tr p i retgrad)))
                  1e-5)))))
 
@@ -81,7 +83,7 @@
         {[xs-grad] :arg-grads} (g/choice-gradients tr sel/none nil {:argnums [0]})
         fd (fn [i] (let [at (fn [d] (objective linreg [(update [1.0 2.0 3.0] i + d)] (:choices tr) nil))]
                      (/ (- (at h) (at (- h))) (* 2 h))))]
-    (is (every? true? (map #(< (Math/abs (- %1 (fd %2))) 1e-5) xs-grad (range 3)))))
+    (is (every? true? (map #(< (ts/abs (- %1 (fd %2))) 1e-5) xs-grad (range 3)))))
   (is (= [nil] (:arg-grads (g/choice-gradients (sim linreg [[1.0 2.0]] 9) (sel/select :slope))))
       "arguments are not differentiated unless asked")
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not a tree of floats"
@@ -96,9 +98,9 @@
                         (g/choice-gradients (sim (gen [] (trace :b (d/bernoulli 0.5))) [] 1) (sel/select :b)))))
 
 (deftest the-jacobian-log-determinant
-  (is (< (Math/abs (- (g/log-abs-det-jacobian #(a/* % (a/array [2.0 3.0])) (a/array [1.0 1.0])) (Math/log 6.0))) 1e-12))
+  (is (< (ts/abs (- (g/log-abs-det-jacobian #(a/* % (a/array [2.0 3.0])) (a/array [1.0 1.0])) (Math/log 6.0))) 1e-12))
   (testing "a nonlinear map: (x, u) ↦ (x·e^u, -u) has |det J| = e^u"
-    (is (< (Math/abs (- (g/log-abs-det-jacobian (fn [v] (let [x (a/take v 0) u (a/take v 1)]
+    (is (< (ts/abs (- (g/log-abs-det-jacobian (fn [v] (let [x (a/take v 0) u (a/take v 1)]
                                                           (a/stack [(a/* x (a/exp u)) (a/negate u)])))
                                                 (a/array [1.5 0.3]))
                         0.3))
@@ -124,13 +126,13 @@
         grads (g/param-gradients tr)
         fd (fn [k] (let [at (fn [d] (objective (dyn/with-params regression (update store k + d)) [xs] (:choices tr) nil))]
                      (/ (- (at h) (at (- h))) (* 2 h))))]
-    (is (< (Math/abs (- (:w grads) (fd :w))) 1e-5))
-    (is (< (Math/abs (- (:b grads) (fd :b))) 1e-5)))
+    (is (< (ts/abs (- (:w grads) (fd :w))) 1e-5))
+    (is (< (ts/abs (- (:b grads) (fd :b))) 1e-5)))
   (testing "parameters reach nested calls"
     (let [inner (gen [] (trace :x (d/normal (param :mu) 1)))
           outer (dyn/with-params (gen [] (splice :in inner)) {:mu 2.0})
           tr (:trace (gfi/generate outer [] (cm/choicemap [:in :x] 3.0) (rng/key 2)))]
-      (is (< (Math/abs (- 1.0 (:mu (g/param-gradients tr)))) 1e-12))))
+      (is (< (ts/abs (- 1.0 (:mu (g/param-gradients tr)))) 1e-12))))
   (testing "a missing parameter is a loud error"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"has no value" (gfi/simulate regression [xs] (rng/key 3))))))
 
@@ -149,8 +151,8 @@
         b (- my (* w mx))]
     (doseq [[label opt steps] [[:sgd (learn/sgd {:lr 0.05}) 400] [:adam (learn/adam {:lr 0.05}) 1500]]]
       (let [store (fit opt steps)]
-        (is (< (Math/abs (- (:w store) w)) 1e-3) (str label " w"))
-        (is (< (Math/abs (- (:b store) b)) 1e-3) (str label " b"))))))
+        (is (< (ts/abs (- (:w store) w)) 1e-3) (str label " w"))
+        (is (< (ts/abs (- (:b store) b)) 1e-3) (str label " b"))))))
 
 (deftest training-on-generated-data
   ;; Gen.jl's train!: data drawn from a generator, averaged parameter
@@ -164,5 +166,5 @@
         w (/ (reduce + (map #(* (- %1 mx) (- %2 my)) xs ys)) (reduce + (map #(* (- % mx) (- % mx)) xs)))]
     (is (= 20 (count history)))
     (is (< (first history) (last history)) "the log density rises")
-    (is (< (Math/abs (- (:w store) w)) 1e-3))
-    (is (< (Math/abs (- (:b store) (- my (* w mx)))) 1e-3))))
+    (is (< (ts/abs (- (:w store) w)) 1e-3))
+    (is (< (ts/abs (- (:b store) (- my (* w mx)))) 1e-3))))

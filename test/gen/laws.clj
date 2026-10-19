@@ -22,9 +22,16 @@
             [gen.diff :as diff]
             [gen.gfi :as gfi]
             [gen.random :as rng]
-            [gen.selection :as sel]))
+            [gen.selection :as sel]
+            [gen.test-support :as ts]))
 
-(defn close? [x y] (a/allclose? x y {:rtol 1e-12 :atol 1e-12}))
+(defn close? [x y] (ts/close? x y))
+
+(defn- zero-weight?
+  "Is the weight w exactly zero (a host number, or a 0-d array of any
+   backend)?"
+  [w]
+  (== 0.0 (ts/number w)))
 
 (defn cases
   "Cases [[label gf args alt-args] seed picks alt?] over models: a vector of
@@ -124,7 +131,7 @@
   (prop/for-all [[[_ gf args] seed] cases]
     (let [tr (gfi/simulate gf args (rng/key seed))
           {t2 :trace w :weight disc :discard :as r} (gfi/update tr cm/EMPTY (rng/key (inc seed)))]
-      (and (zero? w) (= (:choices tr) (:choices t2)) (cm/empty? disc) (sound-retdiff? tr r)))))
+      (and (zero-weight? w) (= (:choices tr) (:choices t2)) (cm/empty? disc) (sound-retdiff? tr r)))))
 
 (defn updates-are-reversible-with-exact-discards [cases]
   (prop/for-all [[model seed picks alt?] cases]
@@ -167,7 +174,7 @@
   (prop/for-all [[[_ gf args] seed] cases]
     (let [tr (gfi/simulate gf args (rng/key seed))
           {t2 :trace w :weight} (gfi/regenerate tr sel/none (rng/key (inc seed)))]
-      (and (zero? w) (= (:choices tr) (:choices t2))))))
+      (and (zero-weight? w) (= (:choices tr) (:choices t2))))))
 
 (defn project-of-everything-is-the-score [cases]
   (prop/for-all [[[_ gf args] seed] cases]
@@ -185,7 +192,7 @@
 
 (defn generate-without-constraints-has-weight-zero [cases]
   (prop/for-all [[[_ gf args] seed] cases]
-    (zero? (:weight (gfi/generate gf args cm/EMPTY (rng/key seed))))))
+    (zero-weight? (:weight (gfi/generate gf args cm/EMPTY (rng/key seed))))))
 
 (defn generate-weight-is-the-constrained-density [cases]
   (prop/for-all [[[_ gf args] seed picks] cases]
@@ -226,13 +233,13 @@
 (defn regenerating-everything-has-weight-zero [cases]
   (prop/for-all [[[_ gf args] seed] cases]
     (let [tr (gfi/simulate gf args (rng/key seed))]
-      (zero? (:weight (gfi/regenerate tr sel/all (rng/key (inc seed))))))))
+      (zero-weight? (:weight (gfi/regenerate tr sel/all (rng/key (inc seed))))))))
 
 (defn project-splits-the-score [cases]
   (prop/for-all [[[_ gf args] seed picks] cases]
     (let [tr (gfi/simulate gf args (rng/key seed))
           s (sel/from-paths (picked (addrs tr) picks))]
-      (and (zero? (gfi/project tr sel/none))
+      (and (zero-weight? (gfi/project tr sel/none))
            (close? (a/+ (gfi/project tr s) (gfi/project tr (sel/complement s))) (:score tr))))))
 
 (defn runs-are-pure-functions-of-the-key [cases]

@@ -74,8 +74,8 @@
 
 (defn- erfinv
   "As gen.array.special/erfinv: Giles' approximation refined by Halley's
-   method (two steps, cubically convergent from Giles' float32 accuracy),
-   with the residual from erfc in the tails."
+   method, with the residual from erfc in the tails. Branch-free, so a
+   fixed seven steps (the JVM backend's most)."
   [y]
   (let [ay (a/abs y)
         ;; a stand-in away from ±1 and 0 keeps the discarded lanes finite
@@ -94,7 +94,9 @@
                                   (a/* (a/- (a/- 1.0 q) (erfc-nonneg x)) scale)
                                   (a/* (a/- (erf x) q) scale))]
                    (a/- x (a// d (a/+ 1.0 (a/* x d))))))
-        x (halley (halley x0))
+        ;; as many steps as the JVM backend's adaptive loop at most takes,
+        ;; which the far tails (|y| near 1 - 1e-16) need
+        x (nth (iterate halley x0) 7)
         signed (a/where (a/< y 0.0) (a/negate x) x)]
     (a/where (a/logical-or (a/isnan y) (a/> ay 1.0))
              ##NaN

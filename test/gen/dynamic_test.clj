@@ -2,9 +2,10 @@
   "The dynamic modeling language against the GFI's laws (Cusumano-Towner's
    thesis; docs/research/genjl-parity.md §3), on fixed-structure,
    structure-changing, spliced and discrete models."
+  (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.test.check]
-            [gen.array :as a]
+            [gen.array :as a :refer [+ - * /]]
             [gen.array.batch :as batch]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
@@ -15,7 +16,8 @@
             [gen.gfi :as gfi]
             [gen.laws :as laws]
             [gen.random :as rng]
-            [gen.selection :as sel]))
+            [gen.selection :as sel]
+            [gen.test-support :as ts]))
 
 ;; ---------------------------------------------------------------------------
 ;; Models
@@ -114,21 +116,21 @@
 (deftest update-without-fresh-choices-is-exactly-reversible
   ;; constraints covering the new branch: w = Δscore, the reverse weight is
   ;; -w and the reverse discard is σ (Prop 2.3.1, Def 2.3.1)
-  (let [tr (first (filter #(true? (% :switch)) (map #(gfi/simulate branching [] (rng/key %)) (range 50))))
+  (let [tr (first (filter #(true? (ts/host (% :switch))) (map #(gfi/simulate branching [] (rng/key %)) (range 50))))
         sigma (cm/choicemap :switch false :b 2.0 :c 3)
         {t2 :trace w :weight disc :discard} (gfi/update tr sigma (rng/key 1))
         {t3 :trace w3 :weight disc3 :discard} (gfi/update t2 disc (rng/key 2))]
     (is (close? w (a/- (:score t2) (:score tr))))
-    (is (= (cm/choicemap :switch true :a (tr :a)) disc))
+    (is (= (ts/host (cm/choicemap :switch true :a (tr :a))) (ts/host disc)))
     (is (= (:choices tr) (:choices t3)))
     (is (close? w3 (a/negate w)))
     (is (= sigma disc3))))
 
 (deftest a-choice-that-becomes-a-call-is-discarded
   ;; regression for the audit's E1
-  (let [tr (first (filter #(true? (% :s)) (map #(gfi/simulate kind-changing [] (rng/key %)) (range 50))))
+  (let [tr (first (filter #(true? (ts/host (% :s))) (map #(gfi/simulate kind-changing [] (rng/key %)) (range 50))))
         {t2 :trace w :weight disc :discard} (gfi/update tr (cm/choicemap :s false) (rng/key 1))]
-    (is (= (cm/choicemap :s true :x (tr :x)) disc))
+    (is (= (ts/host (cm/choicemap :s true :x (tr :x))) (ts/host disc)))
     (is (close? w (a/- (a/- (:score t2) (:score tr)) (gfi/project t2 (sel/select [:x :y])))))
     (is (= (:choices tr) (:choices (:trace (gfi/update t2 disc (rng/key 2))))))))
 
@@ -161,10 +163,10 @@
 
 (deftest structure-changing-update
   (let [k (rng/key 4)
-        tr (first (filter #(true? (% :switch)) (map #(gfi/simulate branching [] (rng/fold-in k %)) (range 50))))
+        tr (first (filter #(true? (ts/host (% :switch))) (map #(gfi/simulate branching [] (rng/fold-in k %)) (range 50))))
         {t2 :trace w :weight disc :discard} (gfi/update tr (cm/choicemap :switch false) (rng/key 5))]
     (is (= #{[:switch] [:b] [:c]} (set (cm/addresses (:choices t2)))) "the other branch is sampled fresh")
-    (is (= (cm/choicemap :switch true :a (tr :a)) disc) "the old value and the removed choice are discarded")
+    (is (= (ts/host (cm/choicemap :switch true :a (tr :a))) (ts/host disc)) "the old value and the removed choice are discarded")
     (is (close? w (a/- (gfi/project t2 (sel/select :switch)) (:score tr))))
     (is (= (:choices tr) (:choices (:trace (gfi/update t2 disc (rng/key 6))))) "and the update reverses")))
 
@@ -212,9 +214,11 @@
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"update: a constrained value is NaN"
                               (gfi/update (gfi/simulate m [] k) nan k)))
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"is NaN" (gfi/assess m [] nan)))
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"is NaN"
-                              (gfi/generate (gen [] (trace :v (d/mvnormal [0 0] (a/eye 2)))) []
-                                            (cm/choicemap :v (a/array [0.0 ##NaN])) k)))
+        ;; an array value or parameter is read only on an eager backend (rule 5)
+        (when (a/concrete? (a/array [0.0]))
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"is NaN"
+                                (gfi/generate (gen [] (trace :v (d/mvnormal [0 0] (a/eye 2)))) []
+                                              (cm/choicemap :v (a/array [0.0 ##NaN])) k))))
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"is NaN" (gfi/generate (d/normal 0 1) [] (cm/->Value ##NaN) k)))))
     (testing "constraints are choice maps: a plain map would mean no constraints at all"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be a choice map.*from-map"
@@ -235,7 +239,9 @@
                             (gfi/simulate (gen [] (trace [] (d/normal 0 1))) [] k))))
     (testing "NaN parameters"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"normal: mu is NaN" (d/normal ##NaN 1)))
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mu is NaN" (d/normal (a/array [0.0 ##NaN]) 1)))
+      (when (a/concrete? (a/array [0.0]))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mu is NaN" (d/normal (a/array [0.0 ##NaN]) 1))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mu is NaN" (d/normal [0.0 ##NaN] 1)) "host data, on every backend")
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mu is NaN" (d/normal (float Float/NaN) 1)) "a Float too"))
     (testing "update and regenerate take one argdiff per argument"
       (let [tr (gfi/simulate linreg [[1.0]] k)]
@@ -282,7 +288,7 @@
     (gfi/seed! before)))
 
 (deftest untraced-calls
-  (is (number? (linreg [1.0 2.0])) "calling a generative function runs it, like Gen.jl"))
+  (is (number? (ts/host (linreg [1.0 2.0]))) "calling a generative function runs it, like Gen.jl"))
 
 ;; ---------------------------------------------------------------------------
 ;; Splices without an address; middleware and dispatch
@@ -334,7 +340,7 @@
     (when (and (= op :assess) (empty? batch-shape))
       (let [c #(cm/get-choice constraints %)
             slope (c :slope) intercept (c :intercept)
-            lp (fn [v mu sd] (- (- (Math/log sd)) 0.9189385332046728 (* 0.5 (Math/pow (/ (- v mu) sd) 2))))]
+            lp (fn [v mu sd] (- (- (a/log sd)) 0.9189385332046728 (* 0.5 (a/square (/ (- v mu) sd)))))]
         {:weight (+ (lp slope 0.0 10.0) (lp intercept 0.0 10.0)
                     (reduce + (map-indexed (fn [i x] (lp (c [:y i]) (+ (* slope x) intercept) 1.0)) xs)))
          :retval slope}))))

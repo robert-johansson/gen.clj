@@ -486,14 +486,48 @@
         (Mlx/mlx_where z zero q s))
       (finally (doseq [h temps] (MlxRaw/mlx_array_free (long h)))))))
 
+(defn- int-power
+  "x^y of int handles, as the JVM backend (and host math): exact for y >= 0;
+   for y < 0 through floats, cast as Java casts (truncated, saturating at
+   the ±infinities, 0 for NaN): 1 and -1 give ±1, larger |x| give 0, and 0
+   gives the int64 maximum. (MLX's integer power gives 0 for every negative
+   exponent, and for every element of an array with one.)"
+  [b hx hy dtype]
+  (let [hx (long hx) hy (long hy)
+        s (stream b)
+        temps (java.util.ArrayList.)
+        t (fn ^long [^long h] (.add temps h) h)
+        fdt (int (code (:float (defaults b))))
+        i64 (int (code :int64))
+        k (fn ^long [v d] (t (scalar-handle v d)))]
+    (try
+      ;; MLX's integer power gives 0 in every element once any exponent is
+      ;; negative: the exact path sees only non-negative stand-ins
+      (let [neg (t (Mlx/mlx_less hy (k 0 dtype) s))
+            exact (t (Mlx/mlx_power hx (t (Mlx/mlx_where neg (k 0 dtype) hy s)) s))
+            f (t (Mlx/mlx_power (t (Mlx/mlx_astype hx fdt s)) (t (Mlx/mlx_astype hy fdt s)) s))
+            fin (t (Mlx/mlx_isinf f s))
+            finite (t (Mlx/mlx_where (t (Mlx/mlx_logical_or fin (t (Mlx/mlx_isnan f s)) s))
+                                     (k 0.0 (:float (defaults b))) f s))
+            cast (t (Mlx/mlx_astype finite i64 s))
+            pos-inf (t (Mlx/mlx_logical_and fin (t (Mlx/mlx_greater f (k 0.0 (:float (defaults b))) s)) s))
+            neg-inf (t (Mlx/mlx_logical_and fin (t (Mlx/mlx_less f (k 0.0 (:float (defaults b))) s)) s))
+            java (t (Mlx/mlx_where pos-inf (k Long/MAX_VALUE :int64)
+                                   (t (Mlx/mlx_where neg-inf (k Long/MIN_VALUE :int64) cast s)) s))
+            java (if (= dtype :int64) java (t (Mlx/mlx_astype java (int (code dtype)) s)))]
+        (Mlx/mlx_where neg java exact s))
+      (finally (doseq [h temps] (MlxRaw/mlx_array_free (long h)))))))
+
 (defn- binary [b op x y dtype]
   (let [sx (shape-of x) sy (shape-of y)]
     (sh/broadcast sx sy)
     (let [s (stream b)]
       (with-operands b op [hx x dtype hy y dtype]
-        (wrap b (if (and (#{:remainder :floor-divide} op) (= :int (dt/kind dtype)))
-                  (int-division b op hx hy dtype)
-                  ((binary-fns op) hx hy s)))))))
+        (wrap b (cond (and (#{:remainder :floor-divide} op) (= :int (dt/kind dtype)))
+                      (int-division b op hx hy dtype)
+                      (and (= op :power) (= :int (dt/kind dtype)))
+                      (int-power b hx hy dtype)
+                      :else ((binary-fns op) hx hy s)))))))
 
 (defn- where-op [b c x y dtype]
   (sh/broadcast-all [(shape-of c) (shape-of x) (shape-of y)])
@@ -734,6 +768,13 @@
                  t)))]
     [(to ha sa (subvec sa (- (count sa) 2))) (to hr sr (subvec sr (- (count sr) 2)))]))
 
+(defn- check-rhs
+  "rhs [.. n k] must have the matrix's n rows."
+  [op sa sr]
+  (let [n (peek sa)]
+    (when-not (and (>= (count sr) 2) (= n (nth sr (- (count sr) 2))))
+      (throw (ex-info (str (name op) ": matrix and right-hand side do not match") {:shapes [sa sr]})))))
+
 (defn- diag-of-temp
   "The diagonals of the matrices h, [.. n], a handle registered with t."
   ^long [t ^long h s]
@@ -768,6 +809,7 @@
               d (dtype-on b a)
               sa (shape-of a)]
           (check-square sa :solve-triangular)
+          (check-rhs :solve-triangular sa (shape-of rhs))
           (with-operands b :solve-triangular [ha a nil hr rhs nil]
             (let [[ha hr] (batch-broadcast b ha sa hr (shape-of rhs) temps)
                   n (int (peek sa))
@@ -790,6 +832,7 @@
               d (dtype-on b a)
               sa (shape-of a)]
           (check-square sa :solve)
+          (check-rhs :solve sa (shape-of rhs))
           (with-operands b :solve [ha a nil hr rhs nil]
             (let [[ha hr] (batch-broadcast b ha sa hr (shape-of rhs) temps)
                   n (int (peek sa))

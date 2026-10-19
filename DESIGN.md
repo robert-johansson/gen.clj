@@ -386,9 +386,11 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   - Streams any thread can use, with evaluation serialized by one lock, in
     place of one platform thread per MLX context (which would cost a thread
     handoff per op or read).
-  - Arrays are freed on the `Cleaner`'s thread, in place of a queue drained
-    by an owning thread: a free only drops a reference, and MLX's
-    allocators lock.
+  - Arrays are freed through phantom references, drained by the threads
+    that make arrays, so frees run on MLX-using threads, close to the
+    planned design. The backend collects under array or memory pressure,
+    since the GC does not see MLX's buffers (Metal allows about 500,000).
+    Host-scalar constants are shared, so lazy graphs pin few buffers.
   - 0-d results stay lazy MLX arrays.
   - Array indices are clamped, not checked: a lazy backend cannot check
     them without evaluating.
@@ -396,6 +398,12 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     NaN in `sign` and `argmax`, integer floor division, float64 accuracy.
   - Configured by `gen.mlx.device` (`cpu`, `gpu`) and `gen.mlx.dtypes`
     (`32`, `64`).
+  - In `gen` bodies, a 0-d backend array counts as its host value for
+    `case`, `=`, lookups and type tests, as it did for `if`, so plain
+    Clojure in a body means the same on every backend. Helper functions
+    outside `gen` must read values themselves.
+  - Distribution parameters given as host data are validated on the host,
+    so also on MLX.
   - Its Java binding is compiled by `clojure -T:build java` into
     `target/classes`, which is on the classpath. As a git dependency, its
     `:deps/prep-lib` builds it.

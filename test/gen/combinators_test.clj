@@ -2,11 +2,13 @@
   "Map, Unfold and Switch: the GFI laws, incremental updates against full
    recomputation (precise change hints must give the same results as
    unknown-change, thesis law 8), and length and branch changes."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:refer-clojure :exclude [+ - * /])
+  (:require [gen.test-support :as ts]
+            [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [gen.array :as a]
+            [gen.array :as a :refer [+ - * /]]
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
             [gen.diff :as diff]
@@ -225,7 +227,7 @@
             (is (= (:choices tr) (:choices t3)))
             (is (close? w3 (a/- (:score tr) (:score t2))))))))
     (testing "regenerating into a new branch has weight zero"
-      (is (zero? (:weight (gfi/regenerate tr [1 0.5] [diff/unknown-change diff/no-change] sel/none (rng/key 4))))))
+      (is (zero? (ts/number (:weight (gfi/regenerate tr [1 0.5] [diff/unknown-change diff/no-change] sel/none (rng/key 4)))))))
     (testing "the same branch with a new argument re-scores"
       (let [{t2 :trace w :weight} (gfi/update tr [0 2.0] [diff/no-change diff/unknown-change] cm/EMPTY (rng/key 5))]
         (is (= (tr :a) (t2 :a)))
@@ -255,7 +257,7 @@
     (is (= (tr :x) (t2 :x) (t3 :x)))
     (is (close? w (a/- (:score t2) (:score tr))))
     (is (close? w3 w))
-    (is (not (zero? w)))))
+    (is (not (zero? (ts/number w))))))
 
 (deftest switch-branches-share-addresses
   ;; Def 2.3.1: a choice both branches make keeps its value across an index

@@ -1,8 +1,10 @@
 (ns gen.inference.particle-filter-test
   "Particle filtering on a linear-Gaussian state-space model, against the
    exact Kalman filter: x_t ~ N(a·x_{t-1}, q), y_t ~ N(x_t, r), x_{-1} = 0."
+  (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
-            [gen.array :as a]
+            [gen.test-support :as ts]
+            [gen.array :as a :refer [+ - * /]]
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
             [gen.diff :as diff]
@@ -79,10 +81,10 @@
   (let [state (run-filter 2000 (rng/key 1))]
     ;; the estimate's sd is about sqrt(12.6/n) for this model and filter (from
     ;; the variance of runs of 20 particles): four of them at n = 2000 is 0.32
-    (is (< (Math/abs (- (pf/log-ml-estimate state) (exact-lml))) 0.32))
+    (is (< (ts/abs (- (pf/log-ml-estimate state) (exact-lml))) 0.32))
     (testing "the filtering mean"
       (let [xs (map #(% [(dec (count ys)) :x]) (pf/sample-unweighted-traces state 2000 (rng/key 2)))]
-        (is (< (Math/abs (- (/ (reduce + xs) 2000) (second (last kalman)))) 0.1))))))
+        (is (< (ts/abs (- (/ (reduce + xs) 2000) (second (last kalman)))) 0.1))))))
 
 (defn- unbiased? [proposal?]
   ;; law 20: E[exp(estimate)] = p(y), checked against the runs' own spread
@@ -91,7 +93,7 @@
                     (rng/split (rng/key (if proposal? 4 3)) runs))
         mean (/ (reduce + ratios) runs)
         sd (Math/sqrt (/ (reduce + (map #(* (- % mean) (- % mean)) ratios)) (dec runs)))]
-    (< (Math/abs (- mean 1.0)) (* 5 (/ sd (Math/sqrt runs))))))
+    (< (ts/abs (- mean 1.0)) (* 5 (/ sd (Math/sqrt runs))))))
 
 (deftest the-estimate-is-unbiased-in-exp-space
   (is (unbiased? false) "with the internal proposal")
@@ -125,7 +127,7 @@
   ;; law 20: with the internal proposal, a step adds log p(y_t | x_t)
   (let [state (pf/initialize model [1 0.0] (observation 0) 20 {:key (rng/key 20)})
         state' (pf/step state [2 0.0] [diff/unknown-change diff/no-change] (observation 1) {:key (rng/key 21)})]
-    (is (every? true? (map (fn [w w' tr] (< (Math/abs (- (- w' w) (gfi/project tr (sel/select [1 :y])))) 1e-12))
+    (is (every? true? (map (fn [w w' tr] (< (ts/abs (- (- w' w) (gfi/project tr (sel/select [1 :y])))) 1e-12))
                            (:log-weights state) (:log-weights state') (:traces state'))))))
 
 (deftest a-custom-proposal-in-a-batched-filter-runs-per-particle
@@ -136,7 +138,7 @@
     (is (not (contains? state' :particles)) "the batched state became per-particle traces")
     (is (= 30 (count (pf/traces state'))))
     (is (every? #(= (ys 1) (% [1 :y])) (pf/traces state')))
-    (is (every? #(Double/isFinite %) (pf/log-weights state')))
+    (is (every? #(ts/finite? %) (pf/log-weights state')))
     (testing "and initialize with a proposal ignores :batched?"
       (is (contains? (pf/initialize model [1 0.0] (observation 0) 5
                                     {:batched? true :proposal initial-proposal :proposal-args [(ys 0)] :key (rng/key 32)})

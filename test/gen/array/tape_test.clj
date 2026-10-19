@@ -2,6 +2,7 @@
   "Reverse-mode autodiff: every VJP against central finite differences in
    float64, as properties over random inputs (and broadcasting shapes)."
   (:require [clojure.test :refer [deftest is testing]]
+            [gen.test-support :as ts]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
@@ -196,15 +197,15 @@
     (let [g ((a/grad (fn [{:keys [w b]}] (a/sum (a/square (a/+ (a/* w 2.0) b))))) {:w (a/array [1.0 2.0]) :b 0.5})]
       (is (= #{:w :b} (set (keys g))))
       (is (= [10.0 18.0] (a/->clj (:w g))))
-      (is (= 14.0 (:b g)))))
+      (is (= 14.0 (ts/host (:b g))))))
   (testing "value-and-grad, argnums"
-    (is (= [7.0 [3.0 2.0]] ((a/value-and-grad #(a/+ (a/* %1 %2) 1.0) {:argnums [0 1]}) 2.0 3.0))))
+    (is (= [7.0 [3.0 2.0]] (ts/host ((a/value-and-grad #(a/+ (a/* %1 %2) 1.0) {:argnums [0 1]}) 2.0 3.0)))))
   (testing "an argument that does not matter has a zero gradient"
-    (is (= 0.0 ((a/grad (fn [x y] (a/* y 2.0))) 3.0 4.0))))
+    (is (= 0.0 (ts/host ((a/grad (fn [x y] (a/* y 2.0))) 3.0 4.0)))))
   (testing "stop-gradient blocks differentiation"
-    (is (= 3.0 ((a/grad (fn [x] (a/* (a/stop-gradient x) x))) 3.0))))
+    (is (= 3.0 (ts/host ((a/grad (fn [x] (a/* (a/stop-gradient x) x))) 3.0)))))
   (testing "branching on a value differentiates the branch taken"
-    (is (= -1.0 ((a/grad (fn [x] (if (a/truthy? (a/< x 0)) (a/negate x) x))) -2.0))))
+    (is (= -1.0 (ts/host ((a/grad (fn [x] (if (a/truthy? (a/< x 0)) (a/negate x) x))) -2.0)))))
   (testing "a long chain does not overflow the stack"
     (is (a/allclose? 1.0 ((a/grad (fn [x] (reduce (fn [acc _] (a/+ acc 0.0)) x (range 20000)))) 1.0))))
   (testing "errors are loud"

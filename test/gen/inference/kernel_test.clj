@@ -1,5 +1,8 @@
 (ns gen.inference.kernel-test
+  (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
+            [gen.test-support :as ts]
+            [gen.array :as a :refer [+ - * /]]
             [gen.choicemap :as cm]
             [gen.dist :as d]
             [gen.dynamic :refer [gen]]
@@ -73,12 +76,12 @@
         kernel (k/checked (k/cycle [(k/mh (sel/select :a)) (k/mh (sel/select :b))]) observations)
         ends (map #(peek (:traces (k/run kernel start {:samples 1 :burn 30 :key %})))
                   (rng/split (rng/key 2) 2000))
-        p-a (/ (count (filter #(% :a) ends)) 2000.0)
+        p-a (/ (count (filter #(ts/host (% :a)) ends)) 2000.0)
         ;; exact: p(a | obs) by enumeration over b
         joint (fn [a] (reduce + (for [b [0 1 2]]
-                                  (Math/exp (:weight (gfi/assess model [] (cm/choicemap :a a :b b :obs true)))))))
+                                  (Math/exp (ts/number (:weight (gfi/assess model [] (cm/choicemap :a a :b b :obs true))))))))
         exact (/ (joint true) (+ (joint true) (joint false)))]
-    (is (< (Math/abs (- p-a exact)) (* 5 (Math/sqrt (/ (* exact (- 1 exact)) 2000)))))
+    (is (< (ts/abs (- p-a exact)) (* 5 (Math/sqrt (/ (* exact (- 1 exact)) 2000)))))
     (is (k/reversible? kernel))
     (let [{:keys [acceptance-rate]} (k/run (k/mh (sel/select :b)) start {:samples 100 :key (rng/key 3)})]
       (is (< 0.0 acceptance-rate 1.0)))))
@@ -101,11 +104,11 @@
   (let [start (:trace (gfi/generate model [] (cm/choicemap :a true :b 0 :obs true) (rng/key 0)))
         kernel (k/mix [(k/mh (sel/select :a)) (k/mh (sel/select :b)) (k/mh (sel/select :a :b))] [0.3 0.3 0.4])
         ends (map #(peek (:traces (k/run kernel start {:samples 1 :burn 60 :key %}))) (rng/split (rng/key 5) 2000))
-        p-a (/ (count (filter #(% :a) ends)) 2000.0)
+        p-a (/ (count (filter #(ts/host (% :a)) ends)) 2000.0)
         joint (fn [a] (reduce + (for [b [0 1 2]]
-                                  (Math/exp (:weight (gfi/assess model [] (cm/choicemap :a a :b b :obs true)))))))
+                                  (Math/exp (ts/number (:weight (gfi/assess model [] (cm/choicemap :a a :b b :obs true))))))))
         exact (/ (joint true) (+ (joint true) (joint false)))]
-    (is (< (Math/abs (- p-a exact)) (* 5 (Math/sqrt (/ (* exact (- 1 exact)) 2000)))))))
+    (is (< (ts/abs (- p-a exact)) (* 5 (Math/sqrt (/ (* exact (- 1 exact)) 2000)))))))
 
 (deftest mixture-weights-are-validated
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"non-negative" (k/mix [a b] [-1 1]))))

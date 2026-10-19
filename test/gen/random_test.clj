@@ -61,8 +61,8 @@
     (is (a/equal? (rng/normal k [5]) (rng/normal k [5])))
     (let [[k1 k2] (rng/split k)]
       (is (not= (rng/normal k1) (rng/normal k2))))
-    (is (instance? Double (rng/normal k)) "a 0-d draw is a host number on the JVM backend")
-    (is (= (rng/uniform k) (a/item (rng/uniform k [1]))) "element 0 does not depend on the shape")))
+    (when (ts/jvm?) (is (instance? Double (rng/normal k)) "a 0-d draw is a host number on the JVM backend"))
+    (is (= (ts/host (rng/uniform k)) (a/item (rng/uniform k [1]))) "element 0 does not depend on the shape")))
 
 (defspec fold-in-is-split-at-an-index 100
   (prop/for-all [seed gen/nat i (gen/choose 0 50)]
@@ -106,10 +106,10 @@
         (let [x (rng/gamma k (a/full [n] alpha))]
           (is (close? (a/mean x) alpha (* 5 (Math/sqrt (/ alpha n)))) (str "mean, alpha " alpha))
           (is (close? (a/variance x) alpha (* 0.05 alpha 4)) (str "variance, alpha " alpha))
-          (is (pos? (a/min x)) (str "positive, alpha " alpha)))))
+          (is (pos? (ts/number (a/min x))) (str "positive, alpha " alpha)))))
     (testing "randint covers [low, high) uniformly"
       (let [x (rng/randint k 2 5 [n])]
         (is (= :int64 (a/dtype x)))
-        (is (= 2 (a/min x)))
-        (is (= 4 (a/max x)))
+        (is (= 2 (ts/host (a/min x))))
+        (is (= 4 (ts/host (a/max x))))
         (is (close? (a/mean x) 3.0 0.01))))))

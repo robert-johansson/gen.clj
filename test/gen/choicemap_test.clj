@@ -1,5 +1,6 @@
 (ns gen.choicemap-test
   (:require [clojure.test :refer [deftest is testing]]
+            [gen.test-support :as ts]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
@@ -78,13 +79,14 @@
     (testing "leaves come back in the prototype's dtypes"
       (let [mixed (cm/choicemap :b true :k 2 :x 0.5)
             back (cm/from-array mixed (cm/to-array mixed))]
-        (is (= mixed back))
-        (is (instance? Boolean (cm/get-choice back :b)))
-        (is (instance? Long (cm/get-choice back :k))))))
+        (is (= (ts/host mixed) (ts/host back)))
+        (is (instance? Boolean (ts/host (cm/get-choice back :b))))
+        (is (instance? Long (ts/host (cm/get-choice back :k))))
+        (is (= [:bool :int] (map #(gen.array.dtype/kind (a/dtype (cm/get-choice back %))) [:b :k]))))))
   (let [cs [(cm/choicemap :a 1.0 [:b 0] 2.0) (cm/choicemap :a 3.0 [:b 0] 4.0)]
         stacked (cm/stack cs)]
     (is (= [1.0 3.0] (a/->clj (cm/get-choice stacked :a))))
-    (is (= cs (cm/unstack stacked 2)))
+    (is (= (ts/host cs) (ts/host (cm/unstack stacked 2))))
     (is (thrown? clojure.lang.ExceptionInfo (cm/stack [(cm/choicemap :a 1.0) (cm/choicemap :b 1.0)])))))
 
 (defspec to-array-from-array-round-trips 200

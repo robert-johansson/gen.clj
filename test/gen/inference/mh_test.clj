@@ -1,7 +1,10 @@
 (ns gen.inference.mh-test
   "MH moves against an exactly enumerable posterior: each kernel must leave
    the posterior invariant (law 10) and converge to it from a fixed start."
+  (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
+            [gen.test-support :as ts]
+            [gen.array :as a :refer [+ - * /]]
             [gen.choicemap :as cm]
             [gen.dist :as d]
             [gen.dynamic :refer [gen]]
@@ -32,7 +35,7 @@
 (defn- latent [{:keys [observations]} tr]
   (sel/get-selected (:choices tr) (sel/complement (sel/from-choicemap observations))))
 
-(defn- state [tr] [(tr :a) (tr :b)])
+(defn- state [tr] (ts/host [(tr :a) (tr :b)]))
 
 (defn- trace-at [{:keys [model observations]} s]
   (:trace (gfi/generate model [] (cm/merge observations s) (rng/key 0))))
@@ -148,7 +151,7 @@
             {t2 :trace u2 :bwd-choices w2 :weight} (step-b t1 u1 nil [])]
         (is (= (:choices tr) (:choices t2)))
         (is (= fwd u2))
-        (is (< (Math/abs (+ w2 (:weight (step-b tr fwd nil [])))) 1e-12) "the weights are opposite")))))
+        (is (< (ts/abs (+ w2 (:weight (step-b tr fwd nil [])))) 1e-12) "the weights are opposite")))))
 
 ;; ---------------------------------------------------------------------------
 ;; A stochastic-structure target: the thesis's p_mh (pp. 92-93)
@@ -174,7 +177,7 @@
         (trace :b (d/bernoulli 0.5))))))
 
 (deftest the-thesis-posterior
-  (is (every? true? (map #(< (Math/abs (- %1 %2)) 1e-12) (:posterior p-mh-target) [(/ 1 6.0) (/ 1 12.0) 0.75]))))
+  (is (every? true? (map #(< (ts/abs (- %1 %2)) 1e-12) (:posterior p-mh-target) [(/ 1 6.0) (/ 1 12.0) 0.75]))))
 
 (deftest ^:slow structure-changing-moves-target-the-posterior
   (doseq [[label step] [[:selection-a (fn [tr key] (:trace (mh/mh tr (sel/select :a) key)))]

@@ -96,9 +96,9 @@
 
 (defguard boolean clojure.core/boolean [x] (a/truthy? x))
 
-(defguard true? clojure.core/true? [x] (clojure.core/true? (unbatched "true?" x)))
+(defguard true? clojure.core/true? [x] (clojure.core/true? (host-value "true?" x)))
 
-(defguard false? clojure.core/false? [x] (clojure.core/false? (unbatched "false?" x)))
+(defguard false? clojure.core/false? [x] (clojure.core/false? (host-value "false?" x)))
 
 (defguard = clojure.core/=
   ([_] true)
@@ -111,7 +111,7 @@
   ([x y & more] (clojure.core/apply clojure.core/not= (map #(host-value "not=" %) (list* x y more)))))
 
 (defguard identical? clojure.core/identical? [x y]
-  (clojure.core/identical? (unbatched "identical?" x) (unbatched "identical?" y)))
+  (clojure.core/identical? (host-value "identical?" x) (host-value "identical?" y)))
 
 ;; ---------------------------------------------------------------------------
 ;; Representation tests: a particle's value is a host scalar of the batch's

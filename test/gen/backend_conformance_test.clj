@@ -17,6 +17,7 @@
    (with -J-Dgen.mlx.device=cpu -J-Dgen.mlx.dtypes=64 for float64). On the
    JVM backend it compares the backend with itself."
   (:require [clojure.test :refer [deftest is testing]]
+            [gen.test-support :as ts]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
@@ -208,6 +209,17 @@
                           [op x])]
     (conforms? transcendental op x)))
 
+(deftest special-functions-in-the-tails
+  ;; erfinv near ±1 (where a fixed number of refinement steps must still
+  ;; converge), erf beyond the series' range, lgamma and digamma near poles
+  (doseq [[op xs] [[a/erfinv [0.5 -0.9 0.99 0.999999 (- 1.0 1e-12) (- 1.0 1e-14) -0.99999999 1.0 -1.0 0.0 1.5]]
+                   [a/erf [-6.0 -3.0 -0.49 0.0 0.49 0.51 2.0 5.5]]
+                   [a/lgamma [0.001 0.5 1.0 2.0 2.5 -0.5 -1.5 10.0 171.5]]
+                   [a/digamma [0.01 0.5 1.0 1.461632 -0.5 -2.5 20.0]]]]
+    (let [d (if f64? [] (mapv #(double (float %)) xs))]
+      (is (conforms? (if f64? {:rtol 1e-12 :atol 1e-14} loose) op {:data (if f64? xs d) :dtype float-dt})
+          (str op)))))
+
 (defspec binary-exact trials
   (prop/for-all [op (gen/elements [a/+ a/- a/* a/maximum a/minimum a/< a/<= a/> a/>= a/== a/!=
                                    a/logical-and a/logical-or])
@@ -232,7 +244,8 @@
 
 (defspec power trials
   (prop/for-all [[x y] (gen/one-of [(gen-pair gen-positive float-dt)
-                                    (gen-pair (gen/choose 0 6) int-dt)])]
+                                    ;; negative exponents too: MLX's integer power gives 0 for all
+                                    (gen-pair (gen/choose -3 6) int-dt)])]
     (conforms? transcendental a/pow x y)))
 
 (defspec where trials

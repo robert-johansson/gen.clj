@@ -9,7 +9,8 @@
    - jvm?, float-dtype, int-dtype: for the few checks that are about one
      backend's representation."
   (:require [gen.array :as a]
-            [gen.array.protocols :as p]))
+            [gen.array.protocols :as p]
+            [gen.choicemap :as cm]))
 
 (defn backend-name [] (p/-name a/*backend*))
 
@@ -22,10 +23,12 @@
 (defn f32? [] (= :float32 (float-dtype)))
 
 (defn host
-  "x with every backend array in it (nested maps, vectors and seqs) read
-   on the host: numbers, booleans and nested vectors."
+  "x with every backend array in it (nested maps, vectors and seqs, and
+   choice maps, as maps) read on the host: numbers, booleans and nested
+   vectors."
   [x]
   (cond (instance? gen.array.protocols.IArray x) (a/->clj x)
+        (cm/choicemap? x) (host (cm/to-map x))
         (map? x) (if (record? x) x (into (empty x) (map (fn [[k v]] [k (host v)])) x))
         (vector? x) (mapv host x)
         (seq? x) (doall (map host x))
@@ -46,3 +49,13 @@
   "The host double of a 0-d (or one-element) array or number."
   ^double [x]
   (double (a/item x)))
+
+(defn abs
+  "|x| of a 0-d array or number, as a host double."
+  ^double [x]
+  (Math/abs (number x)))
+
+(defn finite?
+  "Is the 0-d array or number x finite?"
+  [x]
+  (Double/isFinite (number x)))

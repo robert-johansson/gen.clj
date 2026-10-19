@@ -3,6 +3,7 @@
    tracer on batched values equals the op run on each particle's values,
    stacked. Shared (unbatched) operands are the same for every particle."
   (:require [clojure.test :refer [deftest is testing]]
+            [gen.test-support :as ts]
             [gen.array :as a]
             [gen.array.batch :as batch]
             [gen.array.linalg :as la]
@@ -105,4 +106,4 @@
   (testing "a per-particle fill value"
     (is (vmap-matches? #(a/full [2] %) [bs] #{0})))
   (testing "a gradient of unbatched leaves inside a batched run"
-    (is (= 6.0 (batch/batched [n] ((a/grad (fn [x] (a/* x x))) 3.0))))))
+    (is (= 6.0 (ts/host (batch/batched [n] ((a/grad (fn [x] (a/* x x))) 3.0)))))))

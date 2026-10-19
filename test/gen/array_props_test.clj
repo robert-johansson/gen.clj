@@ -2,6 +2,7 @@
   "Properties of gen.array, checked against a slow but obviously correct
    reference that works on nested vectors."
   (:require [clojure.test.check.clojure-test :refer [defspec]]
+            [gen.test-support :as ts]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
             [gen.array :as a]))
@@ -50,6 +51,15 @@
         (and (number? x) (number? y))
         (or (= x y) (and (Double/isNaN (double x)) (Double/isNaN (double y))))
         :else (= x y)))
+
+(defn- agrees?
+  "Host result x and array result y agree: exactly on the JVM backend (its
+   arithmetic is the host's); on another, exactly but for float results,
+   within a few ulps of the backend's float."
+  [x y]
+  (or (same-values? x y)
+      (and (not (ts/jvm?)) (number? x) (number? y)
+           (ts/close? (double x) (double y) {:rtol (if (ts/f32?) 1e-6 4e-16) :atol 0.0}))))
 
 (defn- close-values? [x y]
   (cond (and (sequential? x) (sequential? y))
@@ -114,14 +124,16 @@
                  y (gen/one-of [gen-elem (gen/choose -9 9) gen/boolean])
                  op (gen/elements [a/+ a/- a/* a// a/pow a/maximum a/minimum a/mod a/floor-div
                                    a/< a/<= a/== a/!= a/logical-and a/logical-or])]
-    ;; the same op on host scalars and on 1-element arrays must agree exactly
-    (same-values? (op x y) (a/item (op (a/array [x]) (a/array [y]))))))
+    ;; the same op on host scalars and on 1-element arrays must agree:
+    ;; exactly on the JVM backend, within its precision on another (whose
+    ;; arithmetic is not the host's)
+    (agrees? (op x y) (a/item (op (a/array [x]) (a/array [y]))))))
 
 (defspec unary-host-and-array-semantics-agree 300
   (prop/for-all [x (gen/one-of [gen-elem (gen/choose -9 9) gen/boolean])
                  op (gen/elements [a/negate a/abs a/sign a/exp a/log a/sqrt a/log1p a/expm1
                                    a/floor a/ceil a/round a/tanh a/isnan a/logical-not])]
-    (same-values? (op x) (a/item (op (a/array [x]))))))
+    (agrees? (op x) (a/item (op (a/array [x]))))))
 
 (defspec sum-over-an-axis-matches-the-reference 200
   (prop/for-all [shape (gen/vector (gen/choose 1 4) 1 3)
