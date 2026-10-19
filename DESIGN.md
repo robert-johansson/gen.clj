@@ -481,9 +481,13 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   rests Gen.jl's CustomGradientGF: `gen.custom/deterministic` with
   `:gradient` (or CustomDetermGF's `:gradient-with-state`) runs its
   function on the arguments' values, so the function may be host code,
-  and gives the tape the rule. Single outputs, array or number arguments
-  (trees pass through without gradients); in native mode f runs inside
-  MLX's transformation and may not read values on the host.
+  and gives the tape the rule, a tree argument's gradient spread over its
+  leaves. Single outputs; cotangents must have their arguments' shapes;
+  an f that closes over a value being differentiated is an error (its
+  gradient would be lost); in native mode f runs inside MLX's
+  transformation and may not read values on the host, and inside
+  `array/compile` a custom VJP under native gradients is an error (MLX's
+  compiled graphs leave custom VJPs out).
 - **Trace transforms** (M4, 2026-10-20): `gen.inference.transform`, Gen.jl's
   @transform as `(deftransform name [model-in aux-in model-out aux-out]
   body)`, the body calling `read`, `write` and `copy` with Gen.jl's tags

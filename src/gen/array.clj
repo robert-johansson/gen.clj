@@ -991,6 +991,11 @@
                       (throw (ex-info (str "custom-vjp: the VJP returned " (pr-str cts) " for " (count args)
                                            " arguments; it returns one cotangent per argument (nil for none)")
                                       {:cotangents cts :arguments (count args)})))
+                    (doseq [[i ct arg] (map vector (range) cts args)]
+                      (when (and ct (not= (shape ct) (shape arg)))
+                        (throw (ex-info (str "custom-vjp: the cotangent of argument " i " has shape " (shape ct)
+                                             ", its argument " (shape arg))
+                                        {:argument i :cotangent-shape (shape ct) :shape (shape arg)}))))
                     (vec cts)))]
     (fn [& args]
       (let [args (vec args)]

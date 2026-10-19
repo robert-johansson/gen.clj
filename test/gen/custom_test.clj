@@ -133,3 +133,23 @@
                           (custom/deterministic {:apply identity :gradient identity :gradient-with-state identity})))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"returns an array or a number"
                           ((custom/deterministic {:apply (fn [_] [1.0]) :gradient (fn [& _] [nil])}) 1.0)))))
+
+(deftest gradients-of-trees-and-misuse
+  (testing "a gradient for a tree argument reaches its leaves (it was dropped)"
+    (let [f (custom/deterministic {:apply (fn [[[a b]]] (* a b)) :gradient (fn [[[a b]] _ g] [[(* g b) (* g a)]])})]
+      (is (ts/close? 2.0 ((array/grad (fn [x] (f [x 2.0]))) 3.0)))
+      (is (ts/close? 3.0 ((array/grad (fn [x] (f [3.0 x]))) 2.0)))))
+  (testing "a cotangent of the wrong shape"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"cotangent of argument 0 has shape"
+                          ((array/grad (array/custom-vjp array/sum (fn [_ _ g] [g]))) (array/array [1.0 2.0 3.0])))))
+  (testing "f closing over a value being differentiated"
+    (when-not (ts/native-grad?)
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"closes over"
+                            ((array/value-and-grad (fn [y] ((array/custom-vjp (fn [x] (* x y)) (fn [_ _ g] [(* g 10.0)])) y)))
+                             3.0)))))
+  (testing "the specification"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"needs :apply-with-state"
+                          (custom/deterministic {:apply identity :gradient-with-state (fn [& _])})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be a function"
+                          (custom/deterministic {:apply identity :gradient 3})))
+    (is (= 5 ((custom/deterministic {:apply count}) 1 2 3 4 5)) "five arguments")))
