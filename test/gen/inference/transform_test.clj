@@ -392,3 +392,38 @@
                      (rng/split (rng/key 50) runs))
         [m sd] (mean-sd ratios)]
     (is (< (Math/abs (- m 1.0)) (* 5 (/ sd (Math/sqrt runs)))) (str m " ± " (/ sd (Math/sqrt runs))))))
+
+(def merge-or-walk
+  "From two means a fair coin picks a merge or a random walk on mu1; from
+   one, a split always: move probabilities that depend on the state."
+  (gen [tr] (if (tr :two?)
+              (when-not (trace :merge? (d/bernoulli 0.5)) (trace :w (d/normal 0 0.3)))
+              (trace :u (d/normal 0 1)))))
+
+(deftransform one-or-two [model-in aux-in model-out aux-out]
+  (if (read model-in :two? :discrete)
+    (if (read aux-in :merge? :discrete)
+      (let [mu1 (read model-in :mu1 :continuous) mu2 (read model-in :mu2 :continuous)]
+        (write model-out :two? false :discrete)
+        (write model-out :mu (/ (+ mu1 mu2) 2.0) :continuous)
+        (write aux-out :u (/ (- mu2 mu1) 2.0) :continuous))
+      (let [mu1 (read model-in :mu1 :continuous) w (read aux-in :w :continuous)]
+        (write model-out :mu1 (+ mu1 w) :continuous)
+        (write aux-out :merge? false :discrete)
+        (write aux-out :w (array/negate w) :continuous)))
+    (let [mu (read model-in :mu :continuous) u (read aux-in :u :continuous)]
+      (write model-out :two? true :discrete)
+      (write model-out :mu1 (- mu u) :continuous)
+      (write model-out :mu2 (+ mu u) :continuous)
+      (write aux-out :merge? true :discrete))))
+
+(deftest ^:slow state-dependent-move-probabilities-keep-the-posterior
+  ;; §3.7.5, pp. 133-135 (law audit gap I): the coin's 1/2 enters the ratio
+  ;; of a split and a merge, and must not be dropped
+  (let [n 8000
+        move (tf/involution one-or-two {:check? true})
+        after (mapv (fn [key] (let [[k1 k2] (rng/split key)]
+                                (:trace (mh/involutive-mh (exact-posterior-trace k1) merge-or-walk [] move k2))))
+                    (rng/split (rng/key 60) n))
+        frac (/ (count (filter #(% :two?) after)) (double n))]
+    (is (< (Math/abs (- frac p-two)) (* 5 (Math/sqrt (/ (* p-two (- 1 p-two)) n)))) (str frac " against " p-two))))
