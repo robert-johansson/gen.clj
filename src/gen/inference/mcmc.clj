@@ -34,8 +34,11 @@
 (defn- flat-gradient
   "[values-choicemap flat-values flat-gradient] of the selection at trace."
   [trace selection]
-  (let [{:keys [values gradients]} (grad/choice-gradients trace selection)]
-    [values (cm/to-array values) (cm/to-array gradients)]))
+  (let [{:keys [values gradients]} (grad/choice-gradients trace selection)
+        v (cm/to-array values)]
+    (when (zero? (a/size v))
+      (throw (ex-info "The selection selects no choices of the trace" {:selection selection})))
+    [values v (cm/to-array gradients)]))
 
 (defn- move-to
   "trace with the selected choices (shaped like proto) set to the flat array
@@ -69,7 +72,7 @@
   "Hamiltonian Monte Carlo on the selected choices: L leapfrog steps of size
    eps with standard normal momenta. Options: :L (10), :eps (0.1)."
   ([trace selection] (hmc trace selection nil))
-  ([trace selection opts] (hmc trace selection opts (gfi/next-key)))
+  ([trace selection opts] (hmc trace selection opts (or (:key opts) (gfi/next-key))))
   ([trace selection {:keys [L eps] :or {L 10 eps 0.1}} key]
    (let [[k-momenta k-update k-accept] (rng/split key 3)
          [proto v g] (flat-gradient trace selection)
@@ -109,7 +112,8 @@
   ([trace addr mu cov key]
    (let [[k-nu k-u k-theta] (rng/split key 3)
          prior (d/mvnormal mu cov)
-         f0 (trace addr)
+         f0 (or (trace addr)
+                (throw (ex-info (str "elliptical-slice: the trace has no choice at " (pr-str addr)) {:addr addr})))
          x (- f0 mu)
          nu (- (dc/sample prior k-nu) mu)
          log-u (Math/log (double (a/item (rng/uniform k-u))))

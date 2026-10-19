@@ -41,17 +41,22 @@ at a time (both paths after the fixes below):
 
 At 10,000 particles a particle costs about 0.43 µs.
 
-**Spot checks** (2026-10-19) re-run 8 particles of each batched run through
-the scalar handler (`gen.batched/*spot-checks*`). On linreg with 20
-observations, after 50 warm-up runs and averaged over 100:
+**Spot checks and the comparison registry** (2026-10-19) make batched runs
+safe for helper functions. Spot checks re-run 8 particles of each batched run
+through the scalar handler (`gen.batched/*spot-checks*`). The registry tracks
+the batched comparisons nothing read. Linreg with 20 observations, warmed
+up, averaged over 300 runs:
 
-| particles | one at a time | batched, no checks | batched, checked | speedup (checked) |
+| particles | one at a time | batched, unguarded | batched, guarded | speedup (guarded) |
 |---|---|---|---|---|
-| 100 | 5.10 ms | 0.57 ms | 0.83 ms | 6.1× |
-| 1,000 | 33.0 ms | 0.47 ms | 0.79 ms | 41.8× |
-| 10,000 | 338 ms | 3.13 ms | 3.50 ms | 96.6× |
+| 100 | 3.46 ms | 0.17 ms | 0.64 ms | 5.4× |
+| 1,000 | 34.7 ms | 0.44 ms | 0.75 ms | 46× |
+| 10,000 | ≈340 ms | 3.34 ms | 3.65 ms | ≈93× |
 
-The checks cost a fixed 0.3 ms or so: it matters only for small collections.
+The spot checks cost a fixed 0.3–0.4 ms, which matters only for small
+collections. The registry's cost is within noise, and so are the NaN checks
+on distribution parameters (about 2% of a scalar generate or a choice
+gradient).
 
 ## Fixed
 

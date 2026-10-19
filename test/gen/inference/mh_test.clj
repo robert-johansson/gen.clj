@@ -131,6 +131,9 @@
       (is (some (complement :accepted?) rs))))
   (testing "proposal arguments must be a vector"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"vector" (mh/mh (trace-at main (cm/choicemap :a true :b 0)) b-proposal (rng/key 1)))))
+  (testing "a keyword is neither a selection nor a proposal"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"takes a selection"
+                          (mh/mh (trace-at main (cm/choicemap :a true :b 0)) :a (rng/key 1)))))
   (testing "a NaN acceptance ratio is a loud error"
     (let [impossible (gen [] (trace :x (d/normal 0 1)) (trace :obs (d/bernoulli 0.0)))
           tr (:trace (gfi/generate impossible [] (cm/choicemap :obs true) (rng/key 0)))]

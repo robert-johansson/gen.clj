@@ -29,8 +29,10 @@
    and :args are its fields."
   (:refer-clojure :exclude [update])
   (:require [gen.array.batch :as batch]
+            [gen.choicemap :as cm]
             [gen.diff :as diff]
-            [gen.random :as rng]))
+            [gen.random :as rng]
+            [gen.selection :as sel]))
 
 (set! *warn-on-reflection* true)
 
@@ -102,17 +104,46 @@
 ;; Operations
 ;; ---------------------------------------------------------------------------
 
+(defn check-args
+  "The arguments as a vector: they must be a sequential collection (or nil,
+   no arguments)."
+  [op args]
+  (if (or (nil? args) (sequential? args))
+    (vec args)
+    (throw (ex-info (str (name op) ": the arguments must be a vector of arguments, got " (pr-str args))
+                    {:op op :args args}))))
+
+(defn check-choice-map
+  "x, a choice map (nil is the empty one). A plain Clojure map is an error:
+   it would be read as no choices at all."
+  [op what x]
+  (cond (nil? x) cm/EMPTY
+        (cm/choicemap? x) x
+        :else (throw (ex-info (str (name op) ": " what " must be a choice map, not a " (.getName (class x))
+                                   (when (map? x) ": use (gen.choicemap/from-map m)"))
+                              {:op op :value-type (class x)}))))
+
+(defn check-selection
+  "x, a selection."
+  [op x]
+  (if (sel/selection? x)
+    x
+    (throw (ex-info (str (name op) ": the selection must be a selection, such as (gen.selection/select :a), not "
+                         (pr-str x))
+                    {:op op :value x}))))
+
 (defn simulate
   "Sample a trace of gf on args."
   ([gf args] (simulate gf args (next-key)))
-  ([gf args key] (-simulate gf (vec args) key)))
+  ([gf args key] (-simulate gf (check-args :simulate args) key)))
 
 (defn generate
   "A trace of gf on args consistent with constraints (a choice map), and the
    log weight log p(τ; x) - log q(υ; x, σ), where υ are the choices the
    internal proposal sampled and σ the constraints."
   ([gf args constraints] (generate gf args constraints (next-key)))
-  ([gf args constraints key] (-generate gf (vec args) constraints key)))
+  ([gf args constraints key]
+   (-generate gf (check-args :generate args) (check-choice-map :generate "the constraints" constraints) key)))
 
 (defn check-argdiffs
   "One argdiff per argument: a missing one would silently mean no-change."
@@ -131,8 +162,9 @@
      (update trace args (diff/no-changes (count args)) constraints key)))
   ([trace args argdiffs constraints] (update trace args argdiffs constraints (next-key)))
   ([trace args argdiffs constraints key]
-   (check-argdiffs :update args argdiffs)
-   (-update (:gen-fn trace) trace (vec args) (vec argdiffs) constraints key)))
+   (check-argdiffs :update (check-args :update args) argdiffs)
+   (-update (:gen-fn trace) trace (vec args) (vec argdiffs) (check-choice-map :update "the constraints" constraints)
+            key)))
 
 (defn regenerate
   "The trace with new arguments and the selected choices resampled from the
@@ -143,20 +175,20 @@
      (regenerate trace args (diff/no-changes (count args)) selection key)))
   ([trace args argdiffs selection] (regenerate trace args argdiffs selection (next-key)))
   ([trace args argdiffs selection key]
-   (check-argdiffs :regenerate args argdiffs)
-   (-regenerate (:gen-fn trace) trace (vec args) (vec argdiffs) selection key)))
+   (check-argdiffs :regenerate (check-args :regenerate args) argdiffs)
+   (-regenerate (:gen-fn trace) trace (vec args) (vec argdiffs) (check-selection :regenerate selection) key)))
 
 (defn assess
   "The log density of fully specified choices, and the return value."
   [gf args choices]
-  (-assess gf (vec args) choices))
+  (-assess gf (check-args :assess args) (check-choice-map :assess "the choices" choices)))
 
 (defn propose
   "Sample choices from gf, with their log density and the return value."
   ([gf args] (propose gf args (next-key)))
-  ([gf args key] (-propose gf (vec args) key)))
+  ([gf args key] (-propose gf (check-args :propose args) key)))
 
 (defn project
   "The log density of the selected choices of a trace."
   [trace selection]
-  (-project (:gen-fn trace) trace selection))
+  (-project (:gen-fn trace) trace (check-selection :project selection)))

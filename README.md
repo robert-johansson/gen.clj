@@ -69,8 +69,15 @@ Next come an MLX backend for the GPU (M2), local LLMs as generative functions
   incremental updates driven by change hints.
 - **Batching** (`gen.batched`). N particles in one execution, by a batch
   tracer with vmap semantics. It falls back to one particle at a time when a
-  model branches on particle values. It is
-  9–41× faster for importance sampling on the CPU (100–10,000 particles).
+  model branches on particle values. Inside `gen` bodies that is guaranteed:
+  the macro guards `if`, `case` and clojure.core's truthiness tests and
+  lookups. A helper function that branches on a batched comparison is
+  caught too (the comparison is never read); other branches in helper
+  functions are found by spot checks against the scalar handler, with high
+  probability rather than certainty (`gen.batched` docstring;
+  `docs/array-api.md` §8a). Batched importance sampling is 5–90× faster on
+  the CPU (100–10,000 particles). For one key, batched and scalar runs draw
+  different samples, with the same distribution.
 - **Inference** (`gen.inference.*`):
   - importance sampling and resampling;
   - MH (selection, custom proposals, involutive with AD Jacobians);

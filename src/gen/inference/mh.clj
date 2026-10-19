@@ -46,6 +46,10 @@
    q(trace, args...), update the trace with them, and assess the discard
    under q(trace', args...) as the backward move."
   [trace proposal proposal-args key]
+  (when-not (gfi/generative-function? proposal)
+    (throw (ex-info (str "MH takes a selection, such as (gen.selection/select :a), or a proposal generative"
+                         " function, not " (pr-str proposal))
+                    {:value proposal})))
   (check-proposal-args proposal-args)
   (let [[k-propose k-update k-accept] (rng/split key 3)
         {fwd :choices fwd-weight :weight} (gfi/propose proposal (into [trace] proposal-args) k-propose)

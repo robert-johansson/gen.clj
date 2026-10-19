@@ -9,17 +9,26 @@
    that differs across them, compares or reads one on the host, or does host
    math on it), the batched run fails and the collection falls back to one
    scalar trace per particle, which gives the scalar semantics; fallback-reason
-   says why. Batching is an optimization. It does not change meaning for code
-   inside gen bodies that works through gen.array.
+   says why. Three layers raise the fallback:
+   - Inside gen bodies the gen macro guards every if and case, and
+     clojure.core's truthiness tests and lookups (not, filter, every?, get, …;
+     gen.dynamic.core).
+   - Anywhere, the tracer raises it for a host read, comparison or hash of a
+     batched value, and for a batched comparison that nothing read by the end
+     of the run: what a raw if on it in a helper function leaves.
+   - Spot checks. After a batched simulate or generate, and on a schedule of
+     updates and regenerates (*verified-updates*), *spot-checks* evenly spaced
+     particles are re-run through the scalar handler (the ground truth) from
+     their choices, and a different score or array return value means the
+     fallback (or, after unchecked updates, a loud error).
 
-   What the tracer cannot see is a raw if or case on a batched value in a
-   helper function outside gen, which no macro guards, and a vector get or
-   contains? with a batched key (docs/array-api.md §8a): these pick one
-   branch for every particle. Spot checks catch them. After a batched
-   simulate or generate, and the first updates or regenerates of a
-   collection, *spot-checks* evenly spaced particles are re-run through the
-   scalar handler (the ground truth) from their choices, and a different
-   score or array return value means the fallback.
+   What no layer sees for certain is code outside gen bodies that branches on
+   a batched value without making a comparison: a raw if or case on a choice
+   value (say, a bernoulli's), or a vector lookup keyed by one, in a helper
+   function. Spot checks catch it only with high probability, since a branch
+   few particles take can escape them. Bind *spot-checks* to :all to check
+   every particle (a scalar run each) when validating a model's batched form.
+   docs/array-api.md §8a–§8b.
 
      (simulate gf args n key)                    → particles
      (generate gf args constraints n key)        → {:particles :weights}
@@ -60,10 +69,13 @@
   8)
 
 (def ^:dynamic *verified-updates*
-  "How many updates or regenerates of a collection are spot-checked (2).
-   Each check re-runs whole particles, which for a growing trace (a particle
-   filter) costs the trace's size, so later steps are not checked: the code
-   they run is the code already verified."
+  "Updates and regenerates of a collection are spot-checked on a schedule:
+   the first *verified-updates* (2), then the 4th, 8th, 16th and so on. A
+   check re-runs whole particles, which for a growing trace (a particle
+   filter) costs the trace's size, so checking every step would make a long
+   filter quadratic; the doubling schedule costs about two checks of the
+   final trace. A mismatch found after unchecked updates is a loud error, not
+   a fallback: those updates' results may be wrong too."
   2)
 
 (defn fallback-reason
@@ -89,9 +101,32 @@
    semantics, and a genuine error surfaces there."
   [batched fallback]
   `(try ~batched
-        (catch Exception e# (fallen-back ~fallback e#))))
+        (catch Exception e#
+          (if (::diverged (ex-data e#)) (throw e#) (fallen-back ~fallback e#)))))
 
-(defn- run [gf op args n opts] (gfi/run-op gf op args (assoc opts :batch-shape [n])))
+(defn- handed-back
+  "The values a batched run's result hands back (its trace's choices and
+   return value), as an identity set."
+  [r]
+  (let [s (java.util.Collections/newSetFromMap (java.util.IdentityHashMap.))
+        t (:trace r)]
+    (doseq [x (a/tree-leaves [(cm/to-map (:choices t)) (:retval t) (:retval r)])] (.add s x))
+    s))
+
+(defn- run
+  "op on gf batched over n particles. A batched comparison that nothing
+   read, and that the run does not hand back, raises the fallback: it is
+   what a raw if on a comparison in a helper function leaves (a batch is
+   true to Clojure's if, so one branch was taken for every particle)."
+  [gf op args n opts]
+  (let [[r bools] (batch/unread-bools #(gfi/run-op gf op args (assoc opts :batch-shape [n])))]
+    (when (seq bools)
+      (let [kept ^java.util.Set (handed-back r)]
+        (when-not (every? #(.contains kept %) bools)
+          (throw (ex-info (str "A batched comparison was never read: a raw if, when or case on it (in a"
+                               " helper function outside gen) takes one branch for every particle")
+                          {:gen.array/batched-branch true ::unread-comparison true})))))
+    r))
 
 (defn- per-particle [ps traces] (assoc ps :trace nil :traces (vec traces)))
 
@@ -158,16 +193,30 @@
       (when-not (and (same-value? (:score st) score) (same-value? (:retval st) retval))
         (throw (ex-info (str "The batched run disagrees with the scalar handler at particle " i
                              ": the code branches on a batched value where the tracer cannot see it")
-                        {:particle i :scalar-score (:score st) :batched-score score})))))
+                        {:particle i :scalar-score (:score st) :batched-score score ::mismatch true})))))
   t)
 
+(defn- check-update?
+  "Is the update of index k (from 0) on the spot-check schedule?"
+  [k]
+  (or (< k *verified-updates*) (zero? (bit-and (inc k) k))))
+
 (defn- spot-check-update!
-  "spot-check! for the first *verified-updates* updates of ps; the result
-   counts them."
+  "ps holding t, the batched trace of an update or regenerate on args,
+   spot-checked on the schedule (*verified-updates*)."
   [ps args t]
-  (let [k (:updates ps 0)]
-    (when (< k *verified-updates*) (spot-check! (:gen-fn ps) args (:n ps) t))
-    (assoc ps :trace t :args (vec args) :updates (inc k))))
+  (let [k (:updates ps 0)
+        check? (check-update? k)]
+    (when check?
+      (try (spot-check! (:gen-fn ps) args (:n ps) t)
+           (catch clojure.lang.ExceptionInfo e
+             (throw (if (and (::unchecked? ps) (::mismatch (ex-data e)))
+                      (ex-info (str (ex-message e) ". Earlier operations on these particles were not checked,"
+                                    " so their results may be wrong too: branch with gen.array's where or"
+                                    " truthy?, or run unbatched")
+                               (assoc (ex-data e) ::diverged true))
+                      e)))))
+    (assoc ps :trace t :args (vec args) :updates (inc k) ::unchecked? (or (::unchecked? ps) (not check?)))))
 
 ;; ---------------------------------------------------------------------------
 ;; GFI operations
@@ -176,7 +225,7 @@
 (defn simulate
   "n particles of gf on args."
   [gf args n key]
-  (let [ps (->Particles n gf (vec args) nil nil)]
+  (let [ps (->Particles n gf (gfi/check-args :simulate args) nil nil)]
     (batched-or
      (assoc ps :trace (spot-check! gf args n (:trace (run gf :simulate args n {:key key}))))
      (per-particle ps (mapv #(gfi/simulate gf args %) (rng/split key n))))))
@@ -184,7 +233,8 @@
 (defn generate
   "n particles of gf on args with the shared constraints, and their weights."
   [gf args constraints n key]
-  (let [ps (->Particles n gf (vec args) nil nil)]
+  (let [constraints (gfi/check-choice-map :generate "the constraints" constraints)
+        ps (->Particles n gf (gfi/check-args :generate args) nil nil)]
     (batched-or
      (let [{t :trace w :weight} (run gf :generate args n {:key key :constraints constraints})]
        {:particles (assoc ps :trace (spot-check! gf args n t)) :weights (plain w n)})
@@ -194,8 +244,9 @@
 (defn update
   "Every particle updated to args with the shared constraints."
   [ps args argdiffs constraints key]
-  (gfi/check-argdiffs :update args argdiffs)
+  (gfi/check-argdiffs :update (gfi/check-args :update args) argdiffs)
   (let [{:keys [n gen-fn]} ps
+        constraints (gfi/check-choice-map :update "the constraints" constraints)
         fallback (fn [ps]
                    (let [rs (mapv #(gfi/update %1 args argdiffs constraints %2) (traces ps) (rng/split key n))]
                      {:particles (per-particle (assoc ps :args (vec args)) (map :trace rs))
@@ -214,7 +265,8 @@
 (defn regenerate
   "Every particle with the selection regenerated, at args."
   [ps args argdiffs selection key]
-  (gfi/check-argdiffs :regenerate args argdiffs)
+  (gfi/check-argdiffs :regenerate (gfi/check-args :regenerate args) argdiffs)
+  (gfi/check-selection :regenerate selection)
   (let [{:keys [n gen-fn]} ps
         fallback (fn [ps]
                    (let [rs (mapv #(gfi/regenerate %1 args argdiffs selection %2) (traces ps) (rng/split key n))]
@@ -271,7 +323,8 @@
             merged (reduce (fn [c path] (cm/set-choice c path (pick (a/tree-map #(plain % n) (cm/get-choice cp path))
                                                                      (a/tree-map #(plain % n) (cm/get-choice cq path)))))
                            cm/EMPTY (cm/addresses cp))]
-        (batched-or (assoc ps :trace (rebuild (:gen-fn ps) (:args ps) n merged)) (fallback)))
+        ;; the rebuild is not checked
+        (batched-or (assoc ps :trace (rebuild (:gen-fn ps) (:args ps) n merged) ::unchecked? true) (fallback)))
       (fallback))))
 
 (defn choice

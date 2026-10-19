@@ -21,7 +21,7 @@ Clojure on the JVM. In order:
    features it builds; a coverage matrix in `docs/research/genjl-parity.md` §3
    tracks every law.
 
-**Status (2026-10-18): M1 is complete.** The pure-JVM backend runs every
+**Status (2026-10-19): M1 is complete.** The pure-JVM backend runs every
 layer: arrays with reverse-mode AD, the data algebra, the GFI and dynamic
 language, the distributions, Map/Unfold/Switch, batched execution and the
 inference library. It is checked by the law suite (audited against the
@@ -303,17 +303,32 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   - draws gain the batch axis;
   - reading a batched value on the host raises the fallback.
 
-  Every generative function thus runs batched with the same meaning for code
-  in `gen` bodies that works through gen.array. A model whose code treats
+  Every generative function thus runs batched. A model whose code treats
   particles differently (branches, host predicates, host math) fails batched
-  and falls back to one scalar trace per particle. The limits are raw
-  `if`/`case` in helper functions outside `gen`, and vector lookups with
-  batched keys (docs/array-api.md §8a). Spot checks cover them (added
-  2026-10-19 after the acceptance test). A few particles of each batched
-  simulate and generate, and of the first updates, are re-run through the
-  scalar handler, the ground truth; a mismatch falls back (§8b). Measured:
-  9–41× faster importance sampling on the JVM backend (100–10,000 particles;
-  docs/benchmarks.md).
+  and falls back to one scalar trace per particle. Inside `gen` bodies this
+  is guaranteed: the macro guards `if` and `case`, and substitutes guarded
+  versions of clojure.core's truthiness tests and lookups (`not`, `filter`,
+  `get`, …; `gen.dynamic.core`). Clojure has no hook for its own `if`, so
+  helper functions outside `gen` are covered by two later mechanisms (added
+  2026-10-19 after the acceptance tests; docs/array-api.md §8a–§8b):
+  - a batched comparison that nothing read raises the fallback;
+  - spot checks re-run a few particles of each batched simulate and generate,
+    and of a doubling schedule of updates, through the scalar handler, the
+    ground truth. A mismatch falls back, or is a loud error after unchecked
+    updates.
+
+  What remains is probabilistic: a helper's `case` on a choice, or a vector
+  lookup keyed by one, is found by the spot checks with high probability.
+  Measured: 5–90× faster importance sampling on the JVM backend (100–10,000
+  particles; docs/benchmarks.md).
+- **Constraints are choice maps** (2026-10-19, after the second acceptance
+  test): a plain Clojure map given as constraints, observations or choices
+  is an error naming `cm/from-map`, since it would read as no constraints at
+  all. `nil` is the empty choice map. Selections and argument vectors are
+  checked the same way.
+- **Bernoulli values are booleans,** as in Gen.jl: 0/1 (GenMLX's) is an
+  error, since a body's `if` takes 0 as true while the density scores it as
+  false. NaN parameters and NaN constrained values are errors too.
 - **Bodies run to completion:** lazy sequences in a body's return value are
   realized during the run, and a `trace` or `splice` after the run is a loud
   error. Before this, `(map … (trace …))` at the end of a body gave a trace
@@ -321,7 +336,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   the call. A lazy call with `trace` in a discarded position (e.g. `(map …)`
   followed by more forms, also through `->>`) is a compile error in `gen`.
   Realization stops after 10,000 elements of a return value, and later trace
-  calls are loud.
+  calls are loud. So is a `let` binding of such a lazy call that is never
+  used (2026-10-19). Elsewhere a lazy sequence's trace calls run when its
+  elements are realized, Clojure's semantics, chunking included: `mapv`,
+  `doseq` and `run!` are eager.
 - **Arrays are values:** JVM arrays compare by dtype, shape and (bitwise)
   elements, so traces and choice maps holding them compare with `=`.
 - **Testing:** reference values come from scipy and JAX, generated once into

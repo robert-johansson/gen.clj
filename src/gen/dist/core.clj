@@ -73,6 +73,16 @@
   (when (and (a/array? v) (a/concrete? v) (= :float (dt/kind (a/dtype v))) (a/any-true? (a/isnan v)))
     (throw (ex-info (str (name op) ": a constrained value is NaN") {:op op :value v}))))
 
+(defn check-param-not-nan
+  "A parameter must not be NaN (in any element, read when concrete): a NaN
+   would make every log density NaN rather than fail."
+  [dist-name param-name v]
+  (when (if (instance? Double v)
+          (Double/isNaN v)
+          (and (a/array? v) (not (a/host? v)) (a/concrete? v) (= :float (dt/kind (a/dtype v)))
+               (a/any-true? (a/isnan v))))
+    (throw (ex-info (str dist-name ": " param-name " is NaN") {:distribution dist-name :param param-name}))))
+
 (defn- total
   "A log-prob summed to a scalar (a distribution's trace has one choice)."
   [lp]
@@ -189,6 +199,7 @@
     `(do
        (defn ~dist-name ~@(when doc [doc]) ~params
          (let [~@(mapcat (fn [p] [p `(->array ~p)]) params)]
+           ~@(map (fn [p] `(check-param-not-nan ~(name dist-name) ~(name p) ~p)) params)
            ~@(get clauses 'validate)
            (->Distribution ~type-kw ~(into {} (map (fn [p] [(keyword p) p])) params))))
        ~(when-let [[[k s] & sample-body] (get clauses 'sample)]

@@ -55,7 +55,7 @@ Python.
 |---|---|
 | L0 arrays | `gen.array` (public API), `.dtype`, `.shape`, `.special`, `.linalg`, `.tape` (autodiff), `.batch` (batching tracer), `.protocols`; `gen.backend.jvm`; `gen.random`, `gen.random.threefry` |
 | L1 data | `gen.choicemap`, `gen.selection`, `gen.trace`, `gen.diff` |
-| L2 GFI | `gen.gfi` (protocol + API), `gen.dynamic` (handler, DynamicGF, `gen`) |
+| L2 GFI | `gen.gfi` (protocol + API), `gen.dynamic` (handler, DynamicGF, `gen`), `gen.dynamic.core` (guarded clojure.core fns for `gen` bodies) |
 | L3 distributions | `gen.dist.core` (record, `defdist`), `gen.dist` |
 | L4 combinators | `gen.combinators` (map, unfold, switch) |
 | L5 inference | `gen.inference.weights`, `.importance`, `.mh`, `.kernel`, `.particle-filter`, `.mcmc` (HMC, MALA, MAP, elliptical slice); `gen.gradients`, `gen.learning` |

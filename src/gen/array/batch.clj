@@ -16,9 +16,13 @@
    a boolean, = in either order, condp, hashing, counting) cannot give one
    answer for every particle: it throws ex-info with
    :gen.array/batched-branch true, the signal to fall back to one particle at
-   a time. What cannot be intercepted: a raw if or case on a batched value
-   outside a gen body, and a vector get or contains? with a batched key
-   (docs/array-api.md §8a)."
+   a time.
+
+   What cannot be intercepted is a raw if or case on a batched value outside
+   a gen body, or a vector get or contains? with a batched key
+   (docs/array-api.md §8a). For the commonest of these, unread-bools reports
+   the batched comparisons that no op read: every op marks the values it
+   reads, and a raw if reads nothing."
   (:require [gen.array :as a]
             [gen.array.dtype :as dt]
             [gen.array.protocols :as p]))
@@ -33,9 +37,18 @@
 
 (declare value)
 
+(definterface IRead
+  (markRead [])
+  (wasRead []))
+
 ;; v is the wrapped array, or a delay of it (a lazily gathered value: see
-;; gather); value derefs it once and caches it
-(deftype Batched [v backend]
+;; gather); value derefs it once and caches it. read? records whether any op
+;; has read the value (see unread-bools).
+(deftype Batched [v backend ^:unsynchronized-mutable read?]
+  IRead
+  (markRead [_] (set! read? true) nil)
+  (wasRead [_] read?)
+
   p/IArray
   (-backend [_] backend)
 
@@ -66,11 +79,13 @@
 (defn batched? [x] (instance? Batched x))
 
 (defn value
-  "The wrapped array of a batched value (leading batch axes)."
+  "The wrapped array of a batched value (leading batch axes). Every op reads
+   its operands through value, which marks them read."
   [^Batched x]
+  (.markRead x)
   (let [v (.-v x)] (if (delay? v) @v v)))
 
-(declare backend lift full-batch)
+(declare backend lift full-batch made)
 
 (deftype BatchBackend [inner batch-shape]
   p/IWrappingBackend
@@ -96,57 +111,57 @@
   (-full [b shape v dtype]
     (if (batched? v)
       ;; a per-particle fill value: each particle's array is filled with its own
-      (->Batched (p/-broadcast-to inner (lift b (->Batched (p/-astype inner (value v) dtype) b) (count shape))
+      (made (p/-broadcast-to inner (lift b (made (p/-astype inner (value v) dtype) b) (count shape))
                                   (into batch-shape shape))
                  b)
       (p/-full inner shape v dtype)))
   (-arange [_ start stop step dtype] (p/-arange inner start stop step dtype))
   (-astype [b x dtype]
     (if (batched? x)
-      (->Batched (p/-astype inner (value x) dtype) b)
+      (made (p/-astype inner (value x) dtype) b)
       (if (a/host? x) (dt/host-cast x dtype) (p/-astype inner x dtype))))
 
   (-elementwise [b op args dtype]
     (let [r (reduce max 0 (map #(count (p/-shape b %)) args))
           lifted (mapv #(lift b % r) args)
           out (p/-elementwise inner op lifted dtype)]
-      (if (some batched? args) (->Batched out b) out)))
+      (if (some batched? args) (made out b) out)))
 
   (-reduce [b op x axes keep-dims?]
     (if (batched? x)
-      (->Batched (p/-reduce inner op (value x) (mapv #(+ % (count batch-shape)) axes) keep-dims?) b)
+      (made (p/-reduce inner op (value x) (mapv #(+ % (count batch-shape)) axes) keep-dims?) b)
       (p/-reduce inner op x axes keep-dims?)))
 
   (-scan [b op x axis reverse?]
     (if (batched? x)
-      (->Batched (p/-scan inner op (value x) (+ axis (count batch-shape)) reverse?) b)
+      (made (p/-scan inner op (value x) (+ axis (count batch-shape)) reverse?) b)
       (p/-scan inner op x axis reverse?)))
 
   (-reshape [b x shape]
     (if (batched? x)
-      (->Batched (p/-reshape inner (value x) (into batch-shape shape)) b)
+      (made (p/-reshape inner (value x) (into batch-shape shape)) b)
       (p/-reshape inner x shape)))
 
   (-transpose [b x perm]
     (if (batched? x)
       (let [nb (count batch-shape)]
-        (->Batched (p/-transpose inner (value x) (into (vec (range nb)) (map #(+ % nb)) perm)) b))
+        (made (p/-transpose inner (value x) (into (vec (range nb)) (map #(+ % nb)) perm)) b))
       (p/-transpose inner x perm)))
 
   (-broadcast-to [b x shape]
     (if (batched? x)
-      (->Batched (p/-broadcast-to inner (lift b x (count shape)) (into batch-shape shape)) b)
+      (made (p/-broadcast-to inner (lift b x (count shape)) (into batch-shape shape)) b)
       (p/-broadcast-to inner x shape)))
 
   (-concatenate [b xs axis]
     (if (some batched? xs)
-      (->Batched (p/-concatenate inner (mapv #(full-batch b %) xs) (+ axis (count batch-shape))) b)
+      (made (p/-concatenate inner (mapv #(full-batch b %) xs) (+ axis (count batch-shape))) b)
       (p/-concatenate inner xs axis)))
 
   (-slice [b x starts stops steps]
     (if (batched? x)
       (let [nb (count batch-shape)]
-        (->Batched (p/-slice inner (value x) (into (vec (repeat nb 0)) starts)
+        (made (p/-slice inner (value x) (into (vec (repeat nb 0)) starts)
                              (into batch-shape stops) (into (vec (repeat nb 1)) steps))
                    b))
       (p/-slice inner x starts stops steps)))
@@ -163,20 +178,20 @@
             idx (p/-reshape inner (value indices)
                             (-> batch-shape (into (repeat axis 1)) (conj m) (into (repeat (- (count sx) axis 1) 1))))
             out (p/-take-along-axis inner xb idx (+ nb axis))]
-        (->Batched (p/-reshape inner out (-> batch-shape (into (subvec sx 0 axis)) (into si) (into (subvec sx (inc axis)))))
+        (made (p/-reshape inner out (-> batch-shape (into (subvec sx 0 axis)) (into si) (into (subvec sx (inc axis)))))
                    b))
-      (batched? x) (->Batched (p/-take inner (value x) indices (+ axis (count batch-shape))) b)
+      (batched? x) (made (p/-take inner (value x) indices (+ axis (count batch-shape))) b)
       :else (p/-take inner x indices axis)))
 
   (-take-along-axis [b x indices axis]
     (if (or (batched? x) (batched? indices))
       (let [r (count (p/-shape b x))]
-        (->Batched (p/-take-along-axis inner (lift b x r) (lift b indices r) (+ axis (count batch-shape))) b))
+        (made (p/-take-along-axis inner (lift b x r) (lift b indices r) (+ axis (count batch-shape))) b))
       (p/-take-along-axis inner x indices axis)))
 
   (-scatter-add [b x indices updates axis]
     (if (some batched? [x indices updates])
-      (->Batched (p/-scatter-add inner (full-batch b x) (full-batch b indices) (full-batch b updates)
+      (made (p/-scatter-add inner (full-batch b x) (full-batch b indices) (full-batch b updates)
                                  (+ axis (count batch-shape)))
                  b)
       (p/-scatter-add inner x indices updates axis)))
@@ -192,7 +207,7 @@
             x2 (if xv? (p/-reshape b x (into [1] sx)) x)
             y2 (if yv? (p/-reshape b y (conj sy 1)) y)
             r (max (count (p/-shape b x2)) (count (p/-shape b y2)))
-            out (->Batched (p/-matmul inner (lift b x2 r) (lift b y2 r)) b)
+            out (made (p/-matmul inner (lift b x2 r) (lift b y2 r)) b)
             t (p/-shape b out)
             n (count t)
             t' (cond (and xv? yv?) (subvec t 0 (- n 2))
@@ -211,11 +226,11 @@
               ;; backend broadcasts the batch axes
               vs (mapv #(lift b % r) arrays)
               out (p/-linalg inner op (cond-> vs opts (conj opts)))]
-          (if (= op :slogdet) (mapv #(->Batched % b) out) (->Batched out b)))
+          (if (= op :slogdet) (mapv #(made % b) out) (made out b)))
         (p/-linalg inner op args))))
 
   (-random-uniform [b key shape dtype]
-    (->Batched (p/-random-uniform inner key (into batch-shape shape) dtype) b))
+    (made (p/-random-uniform inner key (into batch-shape shape) dtype) b))
 
   (-value-and-grad [_ f args argnums]
     (if (some batched? (mapcat #(a/tree-leaves (nth args %)) argnums))
@@ -223,6 +238,30 @@
                       {:gen.array/batched-branch true}))
       ;; unbatched leaves: an ordinary gradient on the wrapped backend
       (p/-value-and-grad inner f args argnums))))
+
+(def ^:dynamic ^:private *bools*
+  "The batched bool values made in the run in effect (unread-bools), or nil."
+  nil)
+
+(defn- made
+  "The batched value of v, an op's result, registered when it is a bool."
+  [v b]
+  (let [x (Batched. v b false)]
+    (when-let [bools *bools*]
+      (when (= :bool (p/-dtype (.-inner ^gen.array.batch.BatchBackend b) v))
+        (vswap! bools conj x)))
+    x))
+
+(defn unread-bools
+  "[(f) bools]: f's result, and the batched bool values made during the
+   call that no op ever read. Branching on a batched comparison with a raw
+   if (or when, case, …) outside a gen body reads nothing, since Clojure's if
+   tests the object itself, which is true, for every particle. A comparison
+   whose result nothing read is therefore the trace of such a branch."
+  [f]
+  (binding [*bools* (volatile! [])]
+    (let [r (f)]
+      [r (filterv #(not (.wasRead ^Batched %)) @*bools*)])))
 
 (defn- lift
   "x as an array of the wrapped backend (or a host scalar) ready to
@@ -286,7 +325,7 @@
   "The batched value of an array of the wrapped backend whose leading axes
    are batch-shape."
   [x batch-shape]
-  (->Batched x (backend (a/backend x) batch-shape)))
+  (Batched. x (backend (a/backend x) batch-shape) false))
 
 (defn gather
   "x's particles at the indices idx (an int array), as a batch of
@@ -294,7 +333,7 @@
    gathering a whole trace (resampling) costs nothing for the values that are
    never read again."
   [x idx batch-shape]
-  (->Batched (delay (a/take (value x) idx 0)) (backend (.-inner ^BatchBackend (.-backend ^Batched x)) batch-shape)))
+  (Batched. (delay (a/take (value x) idx 0)) (backend (.-inner ^BatchBackend (.-backend ^Batched x)) batch-shape) false))
 
 (defn unwrap
   "x as an array of the wrapped backend with the leading batch axes of

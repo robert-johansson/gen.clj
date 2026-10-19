@@ -235,6 +235,7 @@
 (deftest errors-are-loud
   (let [k (rng/key 0)]
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"one length" (gfi/simulate (comb/map step) [[1] [1 2] [3]] k)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Map's arguments are vectors" (gfi/simulate (comb/map step) [3 1 2] k)))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not visited"
                           (gfi/generate mapped [[1.0]] (cm/choicemap [3 :z] 1.0) k)))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not visited"

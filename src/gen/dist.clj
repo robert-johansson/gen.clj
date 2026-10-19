@@ -170,7 +170,12 @@
    covariance matrix cov (batched over leading axes). A concrete cov must be
    symmetric and positive definite."
   [mu cov]
-  (validate (when (a/concrete? cov)
+  (validate (dc/check (and (<= 1 (a/ndim mu)) (<= 2 (a/ndim cov))
+                           (= (peek (a/shape mu)) (peek (a/shape cov)) (peek (pop (a/shape cov)))))
+                      "mvnormal" (str "mu must be a vector and cov a square matrix of its size, got shapes "
+                                      (a/shape mu) " and " (a/shape cov))
+                      {:mu-shape (a/shape mu) :cov-shape (a/shape cov)})
+            (when (a/concrete? cov)
               (let [r (a/ndim cov)
                     cov-t (a/transpose cov (-> (vec (range r)) (assoc (- r 2) (dec r)) (assoc (dec r) (- r 2))))]
                 (dc/check (a/all-true? (<= (a/abs (- cov cov-t)) (+ 1e-8 (* 1e-5 (a/abs cov-t)))))
@@ -200,7 +205,8 @@
   "dirichlet(alpha): the Dirichlet distribution over the simplex of the last
    axis of alpha."
   [alpha]
-  (validate (dc/check-all-positive "dirichlet" "alpha" alpha))
+  (validate (dc/check (<= 1 (a/ndim alpha)) "dirichlet" "alpha must be a vector" {:alpha-shape (a/shape alpha)})
+            (dc/check-all-positive "dirichlet" "alpha" alpha))
   (sample [key shape]
     (let [k (peek (a/shape alpha))
           g (rng/gamma key alpha (sh/broadcast (conj shape k) (a/shape alpha)) (opts alpha))]
@@ -221,7 +227,12 @@
   (validate (dc/check-probability "bernoulli" "prob" p))
   (sample [key shape] (rng/bernoulli key p (dc/elementwise-shape shape p) (opts p)))
   (log-prob [v]
-    (where (== v 1) (log p) (where (== v 0) (log1p (- p)) ##-Inf)))
+    ;; 0/1 would be scored as false/true while a body's if takes 0 as true
+    (dc/check (= :bool (a/dtype v)) "bernoulli"
+              (str "values are booleans (true or false), not " (pr-str (if (a/host? v) v (a/dtype v)))
+                   " (GenMLX's bernoulli gave 0/1)")
+              {:value-dtype (a/dtype v)})
+    (where v (log p) (log1p (- p))))
   (support [] [false true]))
 
 (defn- pick-guarded

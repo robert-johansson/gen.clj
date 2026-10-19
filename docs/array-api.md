@@ -273,6 +273,15 @@ Two layers make this safe:
    - The `gen` macro macroexpands the body and wraps every `if` test in
      `truthy?`. That also covers `when`, `cond`, `and`, `or` and `if-let`, which
      expand to `if`.
+   - It also substitutes guarded versions (`gen.dynamic.core`) for the
+     clojure.core functions that test truthiness or look up by key with an
+     `if` of their own: `not` (so `if-not`), `boolean`, `true?`, `false?`,
+     the type predicates, `every?`, `some`, `filter`, `remove`, `take-while`,
+     `complement`, `get`, `contains?`, `find`, `get-in` and the like. They
+     behave as clojure.core's on ordinary values and raise the batched-branch
+     error on a batched one. *Added 2026-10-19 after the second acceptance
+     test:* `(if-not b …)` and `(filter pred xs)` in a body took one branch
+     for every particle.
    - Non-array tests behave exactly as in Clojure.
    - A model written with plain Clojure conditionals is correct on every
      backend in scalar mode.
@@ -282,11 +291,14 @@ Two layers make this safe:
      back to running particles one at a time. That is correct, just slower.
      Batching is an optimization, and the handler is ground truth.
    - Outside `gen` bodies (helper functions a model calls), a raw `if` or
-     `case` on an array is not guarded: branch with `a/truthy?` there. (`=`,
-     `not=` and `condp =` reach a batched value anywhere, through `=`;
-     vector `get`/`contains?` with a batched key cannot be intercepted.)
-     Batched runs are spot-checked against the scalar handler for this
-     (§8b), so such code falls back rather than giving wrong answers.
+     `case` on an array is not guarded: branch with `a/truthy?` or `where`
+     there. What still catches it (§8b):
+     - `=`, `not=` and `condp =` reach a batched value anywhere, through `=`.
+     - A batched comparison that nothing reads, the trace a raw `if` on it
+       leaves, raises the fallback when the run ends.
+     - Spot checks against the scalar handler catch the rest (a `case` on a
+       choice, or a vector lookup keyed by one) with high probability, not
+       certainty.
    - A bool array of several elements, unbatched, is ambiguous (as in NumPy):
      `truthy?` throws, without the batched-branch flag, and names `all`,
      `any` and `where`. A numeric array is true, as any Clojure value.
@@ -319,28 +331,42 @@ like the AD tape:
 Running a generative function's scalar code under the batch backend runs it
 batched (`gfi/run-op` with `:batch-shape`). Every generative function
 therefore has a batched form. It has the same meaning for code inside `gen`
-bodies that works through gen.array. The limits are a raw `if` or `case` in
-a helper function outside `gen`, and a vector lookup with a batched key
-(§8a). Any batched run that fails falls back to one particle at a time,
-and `gen.batched/fallback-reason` says why.
+bodies, which the macro guards (§8a). Any batched run that fails falls back
+to one particle at a time, and `gen.batched/fallback-reason` says why. For
+one key, a batched run draws other samples than a scalar run (the draws are
+made per site for all particles at once), with the same distribution.
 
-**Spot checks** (*added 2026-10-19 after the acceptance test*) cover those
-limits. After a batched simulate or generate, and the first two updates or
-regenerates of a collection (`*verified-updates*`), 8 evenly spaced
-particles (`*spot-checks*`: a number, `:all` or 0) are re-run through the
-scalar handler from their choices. A score or array return value that
-differs from the batched one is an error, and the run falls back. A helper's
-raw `if` on a batched comparison is truthy for every particle, so particles
-on the other branch score differently and the check finds them. The cost is
-a few scalar runs per batched run. Later updates are not checked, since each
-check costs a whole particle's run: for a particle filter that grows with
-the step. The code they run is the code already verified.
+Code outside `gen` bodies is not guarded. Two mechanisms cover it
+(*added 2026-10-19 after the acceptance tests*):
+- **Unread comparisons.** Every batched bool an op makes is registered, and
+  every op marks the values it reads. A raw `if` reads nothing (Clojure's
+  `if` tests the object, which is true). So a batched bool that is unread
+  when the run ends, and that the run does not hand back as a choice or
+  return value, is the trace of such a branch. It raises the fallback. This
+  catches the common case deterministically: a helper's
+  `(if (< x c) …)`, however rarely the other branch is taken.
+- **Spot checks.** After a batched simulate or generate, 8 evenly spaced
+  particles (`*spot-checks*`: a number, `:all` or 0) are re-run through the
+  scalar handler from their choices. So are the 1st, 2nd, 4th, 8th, 16th, …
+  update or regenerate of a collection (`*verified-updates*`). A score or
+  array return value that differs from the batched one raises the
+  fallback. One found after unchecked updates is a loud error instead, since
+  their results may be wrong too.
+  - Each check is a scalar run, so the doubling schedule keeps a long
+    particle filter linear, at about two checks of the final trace.
+  - Spot checks are probabilistic. A branch that few particles take can
+    escape 8 checks: a `case` on a choice, or a vector lookup keyed by one,
+    in a helper.
+  - Binding `*spot-checks*` to `:all` checks every particle, at the cost of a
+    scalar run each, to validate a model's batched form.
 *Hardened 2026-10-19 after a third review* (docs/research/review-2026-10-19.md):
 - `=` reaches the batch in either order;
 - validation reads every particle;
 - linear algebra aligns per-particle ranks;
-- resampling gathers lazily rather than re-running the model. Measured: 9–41× faster importance sampling on the
-JVM backend (`docs/benchmarks.md`).
+- resampling gathers lazily rather than re-running the model.
+
+Measured: 5–90× faster importance sampling on the JVM backend, spot checks
+included (`docs/benchmarks.md`).
 
 ## 9. Evaluation and memory
 
@@ -423,5 +449,11 @@ How to read these numbers:
     bool array of several elements is ambiguous, an error (2026-10-19).
 11. **Batched runs are spot-checked against the scalar handler** (§8b;
     2026-10-19, agent, for the owner's review): a few scalar runs per batched
-    run, so the tracer's documented blind spots fall back rather than give
-    wrong answers.
+    run, on a doubling schedule for updates. A mismatch after unchecked
+    updates is a loud error.
+12. **`gen` bodies substitute guarded clojure.core functions** (§8a;
+    2026-10-19, agent, for the owner's review): `gen.dynamic.core`'s `not`,
+    `filter`, `get`, … in place of clojure.core's, inside bodies only.
+13. **An unread batched comparison raises the fallback** (§8b; 2026-10-19,
+    agent, for the owner's review): the tracer marks the values ops read,
+    an implementation detail of the tracer that never changes a value.

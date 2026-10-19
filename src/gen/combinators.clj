@@ -160,6 +160,14 @@
 ;; Map
 ;; ---------------------------------------------------------------------------
 
+(defn- map-args
+  "Map's arguments as vectors: each is a sequential collection, one element
+   per application."
+  [args]
+  (when-let [bad (first (remove sequential? args))]
+    (throw (ex-info (str "Map's arguments are vectors, one element per application, not " (pr-str bad)) {:arg bad})))
+  (mapv vec args))
+
 (defn- map-length [args]
   (when (empty? args)
     (throw (ex-info "Map needs at least one argument vector" {})))
@@ -194,7 +202,7 @@
   (if (or (= :all xs) (= :all ys)) (range kept) (subseq (into xs ys) < kept)))
 
 (defn- map-generate [gf args constraints key]
-  (let [args (mapv vec args)
+  (let [args (map-args args)
         n (map-length args)
         kernel (:kernel gf)]
     (when constraints (indices :generate constraints n))
@@ -213,7 +221,7 @@
   "update (op :update, with constraints) or regenerate (op :regenerate, with
    a selection) of a Map trace."
   [gf tr args argdiffs op cs key]
-  (let [args (mapv vec args)
+  (let [args (map-args args)
         n (map-length args)
         kernel (:kernel gf)
         old-subs (::subtraces tr)
@@ -244,7 +252,7 @@
     (incremental-result gf args acc op n prev-n)))
 
 (defn- map-assess [gf args choices]
-  (let [args (mapv vec args)
+  (let [args (map-args args)
         n (map-length args)]
     (indices :assess choices n)
     (reduce (fn [{:keys [weight retval]} i]

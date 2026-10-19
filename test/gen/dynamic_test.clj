@@ -216,6 +216,26 @@
                               (gfi/generate (gen [] (trace :v (d/mvnormal [0 0] (a/eye 2)))) []
                                             (cm/choicemap :v (a/array [0.0 ##NaN])) k)))
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"is NaN" (gfi/generate (d/normal 0 1) [] (cm/->Value ##NaN) k)))))
+    (testing "constraints are choice maps: a plain map would mean no constraints at all"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be a choice map.*from-map"
+                            (gfi/generate linreg [[1.0]] {:slope 1.0} k)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be a choice map"
+                            (gfi/update (gfi/simulate linreg [[1.0]] k) {:slope 1.0} k)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be a choice map" (gfi/assess linreg [[1.0]] {:slope 1.0})))
+      (is (some? (gfi/generate linreg [[1.0]] nil k)) "nil is the empty choice map"))
+    (testing "selections are selections, arguments are vectors"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be a selection"
+                            (gfi/regenerate (gfi/simulate linreg [[1.0]] k) :slope k)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be a vector of arguments" (gfi/simulate linreg 3 k))))
+    (testing "an arity error names the generative function's parameters"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"\[xs\] takes 1 argument, given 2"
+                            (gfi/simulate linreg [[1.0] 2] k))))
+    (testing "an empty address path"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must not be empty"
+                            (gfi/simulate (gen [] (trace [] (d/normal 0 1))) [] k))))
+    (testing "NaN parameters"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"normal: mu is NaN" (d/normal ##NaN 1)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mu is NaN" (d/normal (a/array [0.0 ##NaN]) 1))))
     (testing "update and regenerate take one argdiff per argument"
       (let [tr (gfi/simulate linreg [[1.0]] k)]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"1 arguments but 0 argdiffs"
@@ -339,6 +359,13 @@
           m (gen [] (reset! escaped (map (fn [i] (trace [:x i] (d/normal 0 1))) (range 3))) nil)]
       (gfi/simulate m [] (rng/key 2))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"after the generative function returned" (doall @escaped))))))
+
+(deftest unused-lazy-bindings-with-trace-calls-are-compile-errors
+  (is (thrown-with-msg? Exception #"ys is bound to a lazy map and never used"
+                        (try (eval '(gen.dynamic/gen [xs] (let [ys (map #(trace [:y %] (gen.dist/normal 0 1)) xs)] 1)))
+                             (catch clojure.lang.Compiler$CompilerException e (throw (ex-cause e))))))
+  (is (some? (eval '(gen.dynamic/gen [xs] (let [ys (map #(trace [:y %] (gen.dist/normal 0 1)) xs)] (vec ys)))))
+      "a used one is fine"))
 
 (deftest discarded-lazy-trace-calls-are-compile-errors
   (let [compile-error (fn [form] (try (eval form) nil

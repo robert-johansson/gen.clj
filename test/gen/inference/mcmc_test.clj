@@ -107,6 +107,21 @@
 ;; MAP and elliptical slice
 ;; ---------------------------------------------------------------------------
 
+(deftest keys-and-errors
+  (let [tr (start-at scalar (cm/choicemap :x 0.2 :y 1.3))]
+    (testing "hmc takes its key in the options map too"
+      (is (= ((:trace (mcmc/hmc tr x-sel {:key (rng/key 5)})) :x) ((:trace (mcmc/hmc tr x-sel {:key (rng/key 5)})) :x))))
+    (testing "a selection of no choices is an error, not a no-op accepted"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"selects no choices" (mcmc/hmc tr (sel/select :nope) {})))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"selects no choices" (mcmc/mala tr (sel/select :nope) 0.1)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"selects no choices" (mcmc/map-optimize tr (sel/select :nope)))))
+    (testing "mvnormal's shapes are checked"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mu must be a vector" (d/mvnormal 0.0 1.0)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"square matrix of its size" (d/mvnormal [0.0 0.0] (a/eye 3)))))
+    (testing "elliptical slice of a missing address"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no choice at :nope"
+                            (mcmc/elliptical-slice tr :nope (a/array [0.0]) (a/eye 1) (rng/key 1)))))))
+
 (deftest map-optimization-finds-the-mode
   (let [tr (reduce (fn [tr _] (mcmc/map-optimize tr x-sel)) (start-at scalar (cm/choicemap :x -2.0 :y 1.3)) (range 200))]
     (is (< (Math/abs (- (tr :x) 0.65)) 1e-6)))

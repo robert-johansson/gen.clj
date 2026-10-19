@@ -29,6 +29,7 @@
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.dist.core :as dc]
+            [gen.dynamic.core]
             [gen.gfi :as gfi]
             [gen.random :as rng]
             [gen.selection :as sel]
@@ -54,6 +55,8 @@
   "A path may be used once, and never under or above another used path."
   [state p]
   (let [visited (:visited state)]
+    (when (empty? p)
+      (throw (ex-info "An address path must not be empty" {:path p})))
     (when (contains? visited p)
       (throw (ex-info (str "Address " p " is used twice") {:path p})))
     (doseq [n (range 1 (count p))]
@@ -341,10 +344,26 @@
                          " sequence escaped the body (realize it in the body, e.g. with mapv or doall)")
                     {:path p}))))
 
+(defn- check-arity!
+  "args must fit gf's parameter vector (the body fn's own arity error would
+   count its hidden parameters and name an anonymous fn)."
+  [gf args]
+  (let [params (first (:source gf))]
+    (when (vector? params)
+      (let [n (count args)
+            i (.indexOf ^java.util.List params '&)
+            fixed (if (neg? i) (count params) i)]
+        (when-not (if (neg? i) (== n fixed) (>= n fixed))
+          (throw (ex-info (str "The generative function " (pr-str params) " takes "
+                               (when-not (neg? i) "at least ") fixed " argument" (when-not (== 1 fixed) "s")
+                               ", given " n)
+                          {:params params :args n})))))))
+
 (defn- execute
   "Run gf's body on args under the transitions of mode; the final state with
    :retval."
   [gf mode args opts]
+  (check-arity! gf args)
   (let [;; the transition in effect: a splice without an address swaps in its
         ;; callee's middleware for the callee's body
         transition (volatile! (or (get (:transitions gf) mode) (site-transitions mode)))
@@ -371,6 +390,7 @@
                         (when-not (dynamic-gf? sub)
                           (throw (ex-info "A splice without an address needs a dynamic generative function (others take an address)"
                                           {:gen-fn (type sub)})))
+                        (check-arity! sub args)
                         (let [outer @transition
                               run-body #(apply (:body-fn sub) trace-fn splice-fn read-param args)]
                           (vreset! transition (or (get (:transitions sub) mode) (site-transitions mode)))
@@ -527,6 +547,21 @@
 
 (declare guard-branches)
 
+(def ^:private guarded-core
+  "clojure.core's functions that test truthiness or look up by key, to their
+   guarded versions in gen.dynamic.core."
+  (into {} (map (fn [s] [(symbol "clojure.core" (name s)) (symbol "gen.dynamic.core" (name s))]))
+        (keys (ns-publics 'gen.dynamic.core))))
+
+(defn- guard-symbol
+  "sym, or its guarded version when it names one of guarded-core's
+   functions (and is not a local)."
+  [sym locals]
+  (if (contains? locals sym)
+    sym
+    (let [v (try (resolve sym) (catch Exception _ nil))]
+      (or (when (var? v) (guarded-core (symbol v))) sym))))
+
 (defn- guard-body [forms locals] (map #(guard-branches % locals) forms))
 
 (def ^:private lazy-fns
@@ -556,6 +591,22 @@
                       {:form f}))))
   (guard-body forms locals))
 
+(defn- check-lazy-bindings
+  "A let binding of a lazy call with trace calls whose symbol is never used:
+   its trace calls would never run, so it is an error, as for a statement."
+  [bindings body locals]
+  (let [pairs (vec (partition 2 bindings))]
+    (doseq [[i [sym init]] (map-indexed vector pairs)
+            :let [expanded (if (and (seq? init) (symbol? (first init)) (not (contains? locals (first init))))
+                             (macroexpand init)
+                             init)]]
+      (when (and (symbol? sym)
+                 (or (discarded-lazy-trace? init locals) (discarded-lazy-trace? expanded locals))
+                 (not (some #{sym} (tree-seq coll? seq (concat (map second (subvec pairs (inc i))) body)))))
+        (throw (ex-info (str "In gen: " sym " is bound to a lazy " (pr-str (first init)) " and never used,"
+                             " so its trace calls would never run. Use doseq, run! or mapv.")
+                        {:form init}))))))
+
 (defn- guard-bindings
   "[bindings' locals'] for a let*/loop* binding vector."
   [bindings locals]
@@ -579,10 +630,19 @@
                 (guard-branches then locals)
                 (when (= 4 (count form)) [(guard-branches else locals)])))
     (let* loop*) (let [[op bindings & body] form
+                       _ (when (= 'let* op) (check-lazy-bindings bindings body locals))
                        [bindings locals] (guard-bindings bindings locals)]
                    (list* op bindings (guard-statements body locals)))
     do (list* 'do (guard-statements (rest form) locals))
     fn* (guard-fn form locals)
+    ;; (. target member args…) or (. target (member args…)): a member name is
+    ;; not a var, even when it is spelled like one (.get)
+    . (let [[_ target member & args] form]
+        (list* '. (guard-branches target locals)
+               (if (seq? member)
+                 (list* (first member) (guard-body (rest member) locals))
+                 member)
+               (guard-body args locals)))
     letfn* (let [[_ bindings & body] form
                  locals (into locals (take-nth 2 bindings))]
              (list* 'letfn*
@@ -603,7 +663,8 @@
     (apply list (guard-body form locals))))
 
 (defn- guard-branches
-  "form, macroexpanded, with every if test wrapped in gen.array/truthy?.
+  "form, macroexpanded, with every if test wrapped in gen.array/truthy?, and
+   clojure.core's truthiness tests and lookups replaced by gen.dynamic.core's.
    locals are the symbols bound around form (never macroexpanded as heads)."
   [form locals]
   (cond
@@ -615,13 +676,25 @@
     (vector? form) (mapv #(guard-branches % locals) form)
     (map? form) (into (empty form) (map (fn [[k v]] [(guard-branches k locals) (guard-branches v locals)])) form)
     (set? form) (into (empty form) (map #(guard-branches % locals)) form)
+    (symbol? form) (guard-symbol form locals)
     :else form))
 
 (defmacro gen
   "A generative function. params are the arguments (destructuring allowed);
    in body, (trace addr dist) and (splice addr gf & args) make random choices
    and calls, (param name) reads a trainable parameter (with-params), and
-   conditionals branch on the values of 0-d arrays."
+   conditionals branch on the values of 0-d arrays.
+
+   Conditionals, and clojure.core's truthiness tests and lookups (not,
+   filter, every?, get, …; gen.dynamic.core), branch per particle in a
+   batched run: on a value that differs across particles they raise the
+   fallback to one particle at a time (gen.batched). Helper functions the
+   body calls are not rewritten.
+
+   Trace calls in a lazy sequence run when it is realized (chunking
+   included); the body's return value is realized during the run. A lazy
+   call with trace calls whose value is discarded, or bound and never used,
+   is a compile error. Prefer mapv, doseq and run!."
   [params & body]
   (let [body-fn (guard-branches `(fn [~'trace ~'splice ~'param ~@params] ~@body) (set (keys &env)))]
     `(make-gen-fn ~body-fn '~(cons params body))))

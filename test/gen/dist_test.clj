@@ -16,7 +16,9 @@
 
 (deftest log-probs-match-scipy
   (doseq [{:keys [dist params value log-prob]} fixtures]
-    (let [got (dc/log-prob (apply (constructor dist) params) (if (vector? value) (a/array value) value))]
+    ;; scipy's bernoulli values are 0/1; gen.clj's are booleans, as Gen.jl's
+    (let [value (if (= :bernoulli dist) (== 1 value) value)
+          got (dc/log-prob (apply (constructor dist) params) (if (vector? value) (a/array value) value))]
       (is (or (= log-prob (a/item got))
               (< (Math/abs (- (double (a/item got)) log-prob)) (* 1e-12 (max 1.0 (Math/abs log-prob)))))
           (str (name dist) " " params " at " value)))))
@@ -71,7 +73,9 @@
   (is (= ##-Inf (dc/log-prob (d/categorical [0.5 0.5]) 2)))
   (is (= ##-Inf (dc/log-prob (d/categorical [0.5 0.5]) 0.5)) "non-integers are outside the support")
   (is (= ##-Inf (dc/log-prob (d/categorical [0.5 0.5]) -1)))
-  (is (= ##-Inf (dc/log-prob (d/bernoulli 0.3) 0.5)))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"booleans" (dc/log-prob (d/bernoulli 0.3) 0.5))
+      "a bernoulli value is a boolean: 0/1 (GenMLX's) would be scored one way and branched on the other")
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"booleans" (dc/log-prob (d/bernoulli 0.3) 0)))
   (is (= ##-Inf (dc/log-prob (d/poisson 2.0) 1.5)))
   (is (= ##-Inf (dc/log-prob (d/dirichlet [1.0 1.0]) (a/array [0.7 0.7])))))
 

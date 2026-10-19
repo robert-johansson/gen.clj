@@ -335,8 +335,52 @@
       (is (every? #(close? (:score %) (:weight (gfi/assess linreg [[1.0 2.0]] (:choices %)))) (b/traces taken))))))
 
 ;; ---------------------------------------------------------------------------
-;; Spot checks against the scalar handler
+;; Branches the tracer alone cannot see
 ;; ---------------------------------------------------------------------------
+
+(defn- scores-exact?
+  "Are the collection's scores (batched ones as the batched run made them)
+   the assessed densities of its particles' choices?"
+  [gf args ps]
+  (every? true? (map #(close? %1 (:weight (gfi/assess gf args (:choices %2)))) (a/->clj (b/scores ps)) (b/traces ps))))
+
+(defn- falls-back-exactly?
+  "Does gf fall back in batched importance sampling, giving the scalar
+   estimate exactly (same key)? Spot checks are off: the guard under test
+   must cause the fallback by itself."
+  [gf args obs]
+  (let [s (imp/importance-sampling gf args obs 200 {:key (rng/key 60)})
+        r (binding [b/*spot-checks* 0]
+            (imp/importance-sampling gf args obs 200 {:key (rng/key 60) :batched? true}))]
+    (and (not (b/batched? (:particles r)))
+         (= (:log-ml-estimate s) (:log-ml-estimate r)))))
+
+(deftest clojure-core-tests-in-gen-bodies-branch-per-particle
+  ;; second acceptance test B1: these test truthiness inside clojure.core,
+  ;; where a batch is one true object; the gen macro substitutes guarded
+  ;; versions (gen.dynamic.core)
+  (let [obs (cm/choicemap :y 4.0)]
+    (doseq [[label m] [[:if-not (gen [] (let [b (trace :b (d/bernoulli 0.9))] (trace :y (d/normal (if-not b 5.0 0.0) 1))))]
+                       [:not (gen [] (let [b (trace :b (d/bernoulli 0.9))] (trace :y (d/normal (if (not b) 5.0 0.0) 1))))]
+                       [:boolean (gen [] (let [b (trace :b (d/bernoulli 0.9))] (trace :y (d/normal (if (boolean b) 0.0 5.0) 1))))]
+                       [:true? (gen [] (let [b (trace :b (d/bernoulli 0.9))] (trace :y (d/normal (if (true? b) 0.0 5.0) 1))))]
+                       [:every? (gen [] (let [b (trace :b (d/bernoulli 0.9))] (trace :y (d/normal (if (every? identity [b]) 0.0 5.0) 1))))]
+                       [:filter (gen [] (let [b (trace :b (d/bernoulli 0.9))] (trace :y (d/normal (if (seq (filter identity [b])) 0.0 5.0) 1))))]
+                       [:some (gen [] (let [b (trace :b (d/bernoulli 0.9))] (trace :y (d/normal (if (some #(when % :yes) [b]) 0.0 5.0) 1))))]
+                       [:complement (gen [] (let [b (trace :b (d/bernoulli 0.9))] (trace :y (d/normal (if ((complement identity) b) 0.0 5.0) 1))))]
+                       [:get (gen [] (let [k (trace :k (d/categorical [0.5 0.5]))] (trace :y (d/normal (get [0.0 5.0] k 2.0) 1))))]
+                       [:contains? (gen [] (let [k (trace :k (d/categorical [0.5 0.5]))] (trace :y (d/normal (if (contains? [0.0] k) 0.0 5.0) 1))))]]]
+      (is (falls-back-exactly? m [] obs) (str label)))
+    (testing "and ordinary values behave as clojure.core's"
+      (let [m (gen [xs] (let [{:keys [a]} {:a 2.0}
+                              ys (filterv #(> % 1) xs)]
+                          (trace :y (d/normal (+ a (count ys) (if (every? pos? xs) 1 0) (get xs 0)) 1))))]
+        (is (close? (dc/log-prob (d/normal (+ 2.0 2 1 1) 1) 4.0)
+                    (:weight (gfi/generate m [[1 2 3]] (cm/choicemap :y 4.0) (rng/key 61)))))
+        (is (b/batched? (b/simulate m [[1 2 3]] 4 (rng/key 62))) "and stay batched")))
+    (testing "interop member names are left alone"
+      (let [m (gen [] (let [x (trace :x (d/normal 0 1))] (.get ^java.util.List [x] 0)))]
+        (is (number? (:retval (gfi/simulate m [] (rng/key 63)))))))))
 
 (defn- drift
   "A raw if on an array comparison, in a helper outside gen: under the
@@ -347,35 +391,52 @@
 
 (def hidden-branch (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (drift x) 1)))))
 
-(defn- scores-exact?
-  "Are the collection's scores (batched ones as the batched run made them)
-   the assessed densities of its particles' choices?"
-  [gf args ps]
-  (every? true? (map #(close? %1 (:weight (gfi/assess gf args (:choices %2)))) (a/->clj (b/scores ps)) (b/traces ps))))
+(deftest a-comparison-nothing-reads-falls-back
+  ;; second acceptance test B3: a comparison that only a raw if consumed
+  (let [ps (b/simulate hidden-branch [] 50 (rng/key 50))]
+    (is (not (b/batched? ps)))
+    (is (re-find #"comparison was never read" (:message (b/fallback-reason ps))))
+    (is (scores-exact? hidden-branch [] ps)))
+  (let [rare (fn [x] (if (a/< x 2.0) 1.0 0.1))
+        m (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal x (rare x)))))]
+    (is (falls-back-exactly? m [] (cm/choicemap :y 2.5)) "however rare the other branch"))
+  (testing "while comparisons that are read, or handed back, stay batched"
+    (is (b/batched? (b/simulate (gen [] (let [x (trace :x (d/normal 0 1))] (a/> x 0))) [] 8 (rng/key 51))))
+    (is (b/batched? (b/simulate (gen [] (let [x (trace :x (d/normal 0 1))]
+                                          (trace :y (d/normal (a/where (a/> x 0) 1.0 -1.0) 1))))
+                                [] 8 (rng/key 52))))))
+
+(defn- level
+  "A vector lookup keyed by a choice, in a helper outside gen: a batched key
+   is no integer to a vector, which silently gives the default."
+  [k]
+  (get [-3.0 3.0] k 0.0))
+
+(def hidden-lookup (gen [] (let [k (trace :k (d/categorical [0.5 0.5]))] (trace :y (d/normal (level k) 1)))))
 
 (deftest spot-checks-catch-what-the-tracer-cannot-see
   (testing "simulate and generate fall back, and say why"
-    (let [ps (b/simulate hidden-branch [] 50 (rng/key 50))
-          {gs :particles} (b/generate hidden-branch [] (cm/choicemap :y 0.5) 50 (rng/key 51))]
+    (let [ps (b/simulate hidden-lookup [] 50 (rng/key 50))
+          {gs :particles} (b/generate hidden-lookup [] (cm/choicemap :y 0.5) 50 (rng/key 51))]
       (is (not (b/batched? ps)))
       (is (not (b/batched? gs)))
       (is (re-find #"disagrees with the scalar handler" (:message (b/fallback-reason ps))))
-      (is (scores-exact? hidden-branch [] ps))))
+      (is (scores-exact? hidden-lookup [] ps))))
   (testing "without spot checks the hole shows: the documented limit"
     (binding [b/*spot-checks* 0]
-      (let [ps (b/simulate hidden-branch [] 50 (rng/key 50))]
+      (let [ps (b/simulate hidden-lookup [] 50 (rng/key 50))]
         (is (b/batched? ps))
-        (is (not (scores-exact? hidden-branch [] ps))))))
+        (is (not (scores-exact? hidden-lookup [] ps))))))
   (testing "batched importance sampling then reaches the scalar answer"
     (let [obs (cm/choicemap :y 0.5)
-          exact (Math/log (+ (* 0.5 (Math/exp (dc/log-prob (d/normal 1 1) 0.5)))
-                             (* 0.5 (Math/exp (dc/log-prob (d/normal -1 1) 0.5)))))
-          {:keys [log-ml-estimate]} (imp/importance-sampling hidden-branch [] obs 4000 {:batched? true :key (rng/key 52)})]
+          exact (Math/log (+ (* 0.5 (Math/exp (dc/log-prob (d/normal 3 1) 0.5)))
+                             (* 0.5 (Math/exp (dc/log-prob (d/normal -3 1) 0.5)))))
+          {:keys [log-ml-estimate]} (imp/importance-sampling hidden-lookup [] obs 4000 {:batched? true :key (rng/key 52)})]
       (is (< (Math/abs (- log-ml-estimate exact)) 0.05))))
-  (testing "a branch that first runs in an update is caught there"
-    (let [m (gen [t] (let [x (trace :x (d/normal 0 1))]
-                       (when (pos? t) (trace :y (d/normal (drift x) 1)))
-                       x))
+  (testing "a branch that first runs in an early update falls back there"
+    (let [m (gen [t] (let [k (trace :k (d/categorical [0.5 0.5]))]
+                       (when (pos? t) (trace :y (d/normal (level k) 1)))
+                       k))
           ps (b/simulate m [0] 20 (rng/key 53))
           obs (cm/choicemap :y 0.5)
           {ps' :particles ws :weights} (b/update ps [1] [diff/unknown-change] obs (rng/key 54))]
@@ -383,10 +444,19 @@
       (is (not (b/batched? ps')))
       (is (every? true? (map (fn [tr w] (close? w (:weight (gfi/update tr [1] [diff/unknown-change] obs (rng/key 0)))))
                              (b/traces ps) (a/->clj ws))))))
+  (testing "one found after unchecked updates is a loud error: their results may be wrong too"
+    (let [m (gen [t] (let [k (trace :k (d/categorical [0.5 0.5]))]
+                       (when (> t 2) (trace :y (d/normal (level k) 1)))
+                       k))
+          step (fn [ps t] (:particles (b/update ps [t] [diff/unknown-change] cm/EMPTY (rng/key t))))
+          ps (reduce step (b/simulate m [0] 20 (rng/key 55)) [1 2 3])]
+      ;; updates 1 and 2 are checked, 3 is not (the branch starts there), 4 is
+      (is (b/batched? ps))
+      (is (:gen.batched/diverged (ex-data (try (step ps 4) nil (catch clojure.lang.ExceptionInfo e e)))))))
   (testing "a batched-branch fallback records the error's data"
-    (is (:gen.array/batched-branch (:data (b/fallback-reason (b/simulate branching [] 8 (rng/key 55)))))))
+    (is (:gen.array/batched-branch (:data (b/fallback-reason (b/simulate branching [] 8 (rng/key 56)))))))
   (testing "well-behaved models stay batched, also when every particle is checked"
     (binding [b/*spot-checks* :all]
-      (let [ps (b/simulate linreg [[1.0 2.0]] 16 (rng/key 56))]
+      (let [ps (b/simulate linreg [[1.0 2.0]] 16 (rng/key 57))]
         (is (b/batched? ps))
         (is (nil? (b/fallback-reason ps)))))))
