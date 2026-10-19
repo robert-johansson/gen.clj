@@ -335,3 +335,19 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"dynamic generative function"
                           (enum/with-exact-proposal (comb/unfold step) [[0 :h]])))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"needs the addresses" (enum/with-exact-proposal model [])))))
+
+(deftest regenerating-a-structure-deciding-choice-keeps-the-rest
+  ;; z decides whether :d exists; the thesis's gap A (law audit 2026-10-20)
+  (let [gated (gen [] (let [z (trace :z (d/bernoulli 0.5))]
+                        (when z (trace :d (d/normal 0 1)))
+                        (trace :y (d/normal 0.3 1))))
+        egf (enum/with-exact-proposal gated [:z])
+        tr (:trace (gfi/generate egf [] (cm/choicemap :z true :d 0.4 :y 1.0) (rng/key 1)))
+        outcomes (map #(try (let [{t' :trace} (gfi/regenerate tr (gen.selection/select :z) %)] [(t' :z) (t' :d)])
+                            (catch clojure.lang.ExceptionInfo e (ex-message e)))
+                      (rng/split (rng/key 2) 12))]
+    ;; enumerating z needs a structure that does not depend on it, and the
+    ;; unselected :d must stay: every outcome is a loud error, none a silent
+    ;; resample of :d
+    (is (empty? (filter vector? outcomes)))
+    (is (every? #(re-find #"leaves an unselected choice unvisited|structure depends on the enumerated" %) outcomes))))

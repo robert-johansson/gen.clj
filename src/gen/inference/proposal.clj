@@ -17,6 +17,10 @@
    proposes every value the posterior allows. The distribution, simulate
    and assess are gf's: only the internal proposal changes.
 
+   regenerate keeps every unselected choice (they are the constraints of
+   both moves, Eq. 4.1): when the selected choices, or new arguments, would
+   leave one unvisited, it throws; select the choices they decide too.
+
    project replays q against a trace: q runs with each choice taken from the
    trace, which gives its log density and the addresses it would propose. A
    q that calls another generative function at an address cannot be
@@ -59,15 +63,15 @@
     (when-not @missing? [(:score tr) @visited])))
 
 (defn choices-of
-  "The choices of choices that q, run on qargs, would make: found by
+  "The part of choices that q, run on qargs, would propose, found by
    replaying q against them. A choice q makes that choices lack is an error
-   (q could not have proposed them)."
+   (q could not have proposed it)."
   [q qargs choices]
   (if-let [[_ paths] (replay q qargs choices)]
     (sel/get-selected choices (sel/from-paths paths))
     (throw (ex-info "choices-of: the proposal makes a choice the given choices lack" {:qargs qargs}))))
 
-(defn- overlap! [sigma paths]
+(defn- check-open [sigma paths]
   (let [given (set (cm/addresses sigma))]
     (when-let [p (some given paths)]
       (throw (ex-info (str "with-internal-proposal: the proposal makes the choice at " p
@@ -80,7 +84,7 @@
   [{:keys [gf q] :as pgf} args sigma key]
   (let [[k-q k-gen] (rng/split key)
         {q-choices :choices q-weight :weight} (gfi/propose q (into [sigma] args) k-q)
-        _ (overlap! sigma (cm/addresses q-choices))
+        _ (check-open sigma (cm/addresses q-choices))
         {tr :trace w :weight} (gfi/generate gf args (cm/merge sigma q-choices) k-gen)]
     {:trace (assoc tr :gen-fn pgf) :weight (- w q-weight)}))
 
@@ -90,11 +94,33 @@
    have proposed tr's choices."
   [{:keys [gf q]} args sigma tr]
   (if-let [[lq q-paths] (replay q (into [sigma] args) (:choices tr))]
-    (do (overlap! sigma q-paths)
+    (do (check-open sigma q-paths)
         (- (gfi/project (assoc tr :gen-fn gf) (sel/from-paths (concat (cm/addresses sigma) q-paths))) lq))
     ##Inf))
 
 (defn- same-addresses? [x y] (= (set (cm/addresses x)) (set (cm/addresses y))))
+
+(defn regenerate-under
+  "regenerate for a generative function with an internal proposal
+   (Eq. 4.1): the unselected choices of tr are the constraints of both
+   moves, the new trace from (generate args sigma key) and the old one
+   weighed by (weight (:args tr) sigma tr), both returning the internal
+   proposal's generate weight. A selection or new arguments that would leave
+   an unselected choice unvisited is a loud error. Shared by
+   with-internal-proposal and gen.inference.enumerative/with-exact-proposal."
+  [generate weight tr args argdiffs selection key]
+  (if (and (cm/empty? (sel/get-selected (:choices tr) selection)) (every? diff/no-change? argdiffs))
+    {:trace tr :weight 0.0 :retdiff diff/no-change}
+    (let [sigma (sel/get-selected (:choices tr) (sel/complement selection))
+          {t2 :trace w :weight}
+          (try (generate args sigma key)
+               (catch clojure.lang.ExceptionInfo e
+                 (if (re-find #"not visited" (ex-message e))
+                   (throw (ex-info (str "regenerate leaves an unselected choice unvisited (" (ex-message e)
+                                        "); select the choices the selection or the new arguments decide")
+                                   {:selection selection} e))
+                   (throw e))))]
+      {:trace t2 :weight (- w (weight (:args tr) sigma tr)) :retdiff diff/unknown-change})))
 
 (defrecord InternalProposalGF [gf q]
   gfi/IGenerativeFunction
@@ -116,17 +142,8 @@
             (throw (ex-info "with-internal-proposal: the fresh choices of this update change the model's structure" {})))
           {:trace t3 :weight (- w (:score tr)) :retdiff diff/unknown-change :discard (:discard r)}))))
   (-regenerate [this tr args argdiffs selection key]
-    (let [selected (set (cm/addresses (sel/get-selected (:choices tr) selection)))]
-      (if (and (empty? selected) (every? diff/no-change? argdiffs))
-        {:trace tr :weight 0.0 :retdiff diff/no-change}
-        ;; Eq 4.1: the retained choices are the constraints of both moves
-        (let [[k-regenerate k-generate] (rng/split key)
-              t1 (:trace (gfi/-regenerate gf (assoc tr :gen-fn gf) args argdiffs selection k-regenerate))
-              now (set (cm/addresses (:choices t1)))
-              retained (filter #(and (now %) (not (selected %))) (cm/addresses (:choices tr)))
-              sigma (sel/get-selected (:choices tr) (sel/from-paths retained))
-              {t2 :trace w :weight} (proposal-generate this args sigma k-generate)]
-          {:trace t2 :weight (- w (proposal-weight this (:args tr) sigma tr)) :retdiff diff/unknown-change}))))
+    (regenerate-under #(proposal-generate this %1 %2 %3) #(proposal-weight this %1 %2 %3)
+                      tr args argdiffs selection key))
   (-assess [_ args choices] (gfi/-assess gf args choices))
   (-propose [_ args key] (gfi/-propose gf args key))
   (-project [this tr selection]

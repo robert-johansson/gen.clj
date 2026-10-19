@@ -95,3 +95,31 @@
   (testing "both are dynamic generative functions"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"dynamic generative function"
                           (prop/with-internal-proposal (d/normal 0 1) normal-normal)))))
+
+(def gated
+  "b decides whether :x exists."
+  (gen [] (let [b (trace :b (d/bernoulli 0.5))]
+            (when b (trace :x (d/normal 0 1)))
+            (trace :y (d/normal 0.3 1)))))
+
+(def propose-b (gen [sigma] (when (open? sigma :b) (trace :b (d/bernoulli 0.5)))))
+
+(deftest regenerating-a-structure-deciding-choice
+  (let [pgf (prop/with-internal-proposal gated propose-b)
+        tr (:trace (gfi/generate pgf [] (cm/choicemap :b true :x 0.4 :y 1.0) (rng/key 1)))
+        outcomes (map #(try (let [{t' :trace w :weight} (gfi/regenerate tr (gen.selection/select :b) %)]
+                              [(t' :b) (t' :x) w])
+                            (catch clojure.lang.ExceptionInfo e (ex-message e)))
+                      (rng/split (rng/key 2) 12))]
+    (testing "a new b that keeps :x keeps its value, with the projection ratio as weight"
+      (is (seq (filter vector? outcomes)))
+      (doseq [[b x w] (filter vector? outcomes)]
+        (is (true? b))
+        (is (= 0.4 x) "the unselected :x is kept")
+        (is (ts/close? 0.0 w) "b's proposal is its prior: the weight is 0")))
+    (testing "a new b that drops :x is a loud error"
+      (is (seq (remove vector? outcomes)))
+      (is (every? #(re-find #"leaves an unselected choice unvisited" %) (remove vector? outcomes))))
+    (testing "selecting what b decides works"
+      (let [{t' :trace} (gfi/regenerate tr (gen.selection/select :b :x) (rng/key 3))]
+        (is (some? (t' :b)))))))
