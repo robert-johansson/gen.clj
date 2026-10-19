@@ -9,10 +9,12 @@ Generative Function Interface (GFI): `simulate`, `generate`, `update`,
 `regenerate`, `assess`, `propose` and `project`, each a pure function of its
 arguments and an explicit random key.
 
-**Status: M1 is complete.** The core runs on the JVM, CPU-only, with
-nothing but a JDK: a pure-Clojure array backend with reverse-mode autodiff.
-Next come an MLX backend for the GPU (M2), local LLMs as generative functions
-(M3), and Gen.jl parity (M4). See `DESIGN.md`.
+**Status: M1 is complete; M2 is under way.** The core runs on the JVM,
+CPU-only, with nothing but a JDK: a pure-Clojure array backend with
+reverse-mode autodiff. An MLX backend (M2) runs the same code on Apple's GPU
+(Metal) and on MLX's CPU backend: it passes the backend conformance suite and
+the test battery there. CUDA on Linux is next. Then come local LLMs as
+generative functions (M3) and Gen.jl parity (M4). See `DESIGN.md`.
 
 ## A model and two kinds of inference
 
@@ -85,7 +87,12 @@ Next come an MLX backend for the GPU (M2), local LLMs as generative functions
   - MH (selection, custom proposals, involutive with AD Jacobians);
   - kernel combinators with reversals;
   - particle filtering;
-  - HMC, MALA, MAP and elliptical slice;
+  - HMC, MALA (both optionally compiled into one MLX graph per step), MAP
+    and elliptical slice;
+  - exact enumeration: Gen.jl's enumerative inference over grids, and
+    models whose finite latents are drawn from their exact conditional
+    (exact likelihoods with those latents summed out, also step by step in
+    an Unfold whose state does not depend on them);
   - choice and parameter gradients (`gen.gradients`) and optimizers
     (`gen.learning`).
 
@@ -111,3 +118,20 @@ Every VJP is checked against finite differences. `docs/research/genjl-parity.md`
 
 A JDK (developed on Oracle GraalVM 25) and the Clojure CLI. The core
 depends on Clojure alone.
+
+## The MLX backend (optional)
+
+`native/build-mlx.sh` fetches the official MLX 0.32.2 wheel (no Metal
+compiler needed), builds mlx-c v0.7.0 against it, and puts the libraries in
+`native/build/`; `clojure -T:build java` compiles the Java binding. Then
+any program or test runs on MLX with system properties:
+
+```
+clojure -J-Dgen.backend=mlx -X:test:light                         # Metal (the GPU)
+clojure -J-Dgen.backend=mlx -J-Dgen.mlx.device=cpu -X:test:light  # MLX's CPU backend
+clojure -J-Dgen.backend=mlx -J-Dgen.mlx.device=cpu -J-Dgen.mlx.dtypes=64 -X:test:light
+```
+
+MLX is float32 by default (float64 only on its CPU backend). Arrays are lazy:
+inference loops evaluate once per iteration. `docs/array-api.md` §13
+describes the backend and the few ways it differs from the JVM backend.

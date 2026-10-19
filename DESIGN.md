@@ -394,6 +394,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   - 0-d results stay lazy MLX arrays.
   - Array indices are clamped, not checked: a lazy backend cannot check
     them without evaluating.
+  - Memory is bounded by default (2026-10-19, after a kernel panic from
+    memory exhaustion by two test JVMs): MLX's buffer cache to a sixteenth
+    of RAM, its memory limit to half, and the backend collects past an
+    eighth of RAM of active memory. MLX's own defaults are all of RAM.
   - Where MLX's semantics differ from NumPy's, the backend follows NumPy's:
     NaN in `sign` and `argmax`, integer floor division, float64 accuracy.
   - Configured by `gen.mlx.device` (`cpu`, `gpu`) and `gen.mlx.dtypes`
@@ -416,8 +420,13 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     density. `with-exact-proposal` keeps a model's distribution and traces
     and draws the named finite choices from their exact conditional (thesis
     pp. 145–146, the route §2 intends for L3). Generate's weight is then
-    log p(observations) exactly when the other choices are observed, so
-    also per step of an Unfold, and regenerate on those choices is Gibbs.
+    log p(observations) exactly when the other choices are observed, and
+    regenerate on those choices is Gibbs. In an Unfold each step's weight
+    is exact given its state, so the total is exact only when the next
+    state does not depend on the enumerated choices; otherwise it is an
+    unbiased estimate that changes with the key (caught by a side agent's
+    review, 2026-10-19). `{:check-retval? true}` makes that case an error,
+    for uses that need a known answer.
   - Not GenMLX's `exact.cljs`: a second handler transition, "collapsed"
     traces (no choices, a probability table as return value) and the memo
     API.

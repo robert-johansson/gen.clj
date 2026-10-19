@@ -118,6 +118,38 @@
                       um1
                       (a// (a/* (a/- safe 1.0) x) (a/log safe))))))
 
+(defn logaddexp
+  "gen.array's composite logaddexp of float64 MLX arrays, with the exact exp."
+  [x y]
+  (let [m (a/maximum x y)]
+    (a/where (a/isinf m) m (a/+ m (a/log1p (exp (a/negate (a/abs (a/- x y)))))))))
+
+(declare float64-unary)
+
+(defn route
+  "op of the MLX arrays xs by its exact composite."
+  [op xs]
+  (case op
+    (:exp :sin :cos :erf :erfinv) (float64-unary op (first xs))
+    :expm1 (expm1 (first xs))
+    :logaddexp (logaddexp (first xs) (second xs))))
+
+(defn vjp
+  "The cotangents of a route's arguments xs from the cotangent g of its
+   result out: the functions' derivatives, which MLX's autodiff takes for
+   these composites in native mode."
+  [op xs g out]
+  (let [[x y] xs]
+    (case op
+      :exp [(a/* g out)]
+      :sin [(a/* g (a/cos x))]
+      :cos [(a/negate (a/* g (a/sin x)))]
+      :erf [(a/* g (a/* (/ 2.0 (Math/sqrt Math/PI)) (a/exp (a/negate (a/* x x)))))]
+      :erfinv [(a/* g (a/* (/ (Math/sqrt Math/PI) 2.0) (a/exp (a/* out out))))]
+      :expm1 [(a/* g (a/+ out 1.0))]
+      ;; ∂/∂x log(eˣ + eʸ) = eˣ⁻ᵒᵘᵗ, exact at ties
+      :logaddexp [(a/* g (a/exp (a/- x out))) (a/* g (a/exp (a/- y out)))])))
+
 (defn float64-unary
   "op (:exp :sin :cos :erf or :erfinv) of the float64 MLX array x."
   [op x]

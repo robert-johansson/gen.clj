@@ -10,7 +10,12 @@
      any graph that still needs an array alive. The GC does not see MLX's
      memory, so the backend collects under pressure: when 100,000 arrays are
      live (gen.mlx.gc-arrays; Metal allows about 500,000 buffers) or MLX's
-     active memory passes a quarter of RAM (gen.mlx.gc-bytes).
+     active memory passes an eighth of RAM (gen.mlx.gc-bytes).
+   - MLX's own limits are bounded too: its buffer cache (freed buffers kept
+     for reuse) to a sixteenth of RAM, and its memory limit, past which it
+     frees the cache and waits for running work before allocating, to half
+     of RAM. MLX's defaults are all of RAM for both, which let one JVM take
+     the whole machine (2026-10-19: a kernel panic from memory exhaustion).
    - 0-d arrays are MLX arrays too (the JVM backend's are host values), so
      scalar code stays lazy. Reading one on the host (item, truthy?) evaluates.
    - Ops run on the backend's stream, a stream MLX lets any thread use. One
@@ -26,7 +31,10 @@
      gen.mlx.device  cpu or gpu (default gpu when MLX has one)
      gen.mlx.dtypes  32 (default) or 64: the default dtypes, float32/int32 or
                      float64/int64 (64 needs the CPU device; MLX's GPUs have no
-                     float64)"
+                     float64)
+     gen.mlx.cache-bytes   MLX's buffer cache (default a sixteenth of RAM)
+     gen.mlx.memory-bytes  MLX's memory limit (default half of RAM)
+     gen.mlx.gc-bytes, gen.mlx.gc-arrays  when the backend collects (above)"
   (:require [gen.array.dtype :as dt]
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]
@@ -436,17 +444,19 @@
    :minimum (mlx-fn minimum 2) :remainder (mlx-fn remainder 2) :floor-divide (mlx-fn floor_divide 2)
    :less (mlx-fn less 2) :less-equal (mlx-fn less_equal 2) :greater (mlx-fn greater 2)
    :greater-equal (mlx-fn greater_equal 2) :equal (mlx-fn equal 2) :not-equal (mlx-fn not_equal 2)
-   :logical-and (mlx-fn logical_and 2) :logical-or (mlx-fn logical_or 2)})
+   :logical-and (mlx-fn logical_and 2) :logical-or (mlx-fn logical_or 2) :logaddexp (mlx-fn logaddexp 2)})
+
+(declare exact-route broadcast-to)
 
 (defn- unary [b op x dtype]
   (cond
     ;; MLX's kernels that are not exact take exact routes (gen.backend.mlx.exact,
     ;; loaded on first use: it is written in gen.array, which loads this namespace)
     (and (= dtype :float64) (#{:exp :sin :cos :erf :erfinv} op))
-    ((requiring-resolve 'gen.backend.mlx.exact/float64-unary) op (as-array b x dtype))
+    (exact-route b op [(as-array b x dtype)])
 
     (and (= op :expm1) (= :gpu (:device (config b))) (#{:float32 :float16 :bfloat16} dtype))
-    ((requiring-resolve 'gen.backend.mlx.exact/expm1) (as-array b x dtype))
+    (exact-route b :expm1 [(as-array b x dtype)])
 
     (and (#{:floor :ceil :round} op) (not= :float (dt/kind dtype)))
     ;; rounding an int is the identity
@@ -521,13 +531,18 @@
 (defn- binary [b op x y dtype]
   (let [sx (shape-of x) sy (shape-of y)]
     (sh/broadcast sx sy)
+    (if (and (= op :logaddexp) (= dtype :float64))
+      ;; MLX's float64 exp is not exact (see unary)
+      ;; broadcast first: a custom VJP's cotangents have its inputs' shapes
+      (let [shape (sh/broadcast sx sy)]
+        (exact-route b :logaddexp [(broadcast-to b (as-array b x dtype) shape) (broadcast-to b (as-array b y dtype) shape)]))
     (let [s (stream b)]
       (with-operands b op [hx x dtype hy y dtype]
         (wrap b (cond (and (#{:remainder :floor-divide} op) (= :int (dt/kind dtype)))
                       (int-division b op hx hy dtype)
                       (and (= op :power) (= :int (dt/kind dtype)))
                       (int-power b hx hy dtype)
-                      :else ((binary-fns op) hx hy s)))))))
+                      :else ((binary-fns op) hx hy s))))))))
 
 (defn- where-op [b c x y dtype]
   (sh/broadcast-all [(shape-of c) (shape-of x) (shape-of y)])
@@ -780,7 +795,7 @@
   ^long [t ^long h s]
   (long (t (Mlx/mlx_diagonal h (int 0) (int -2) (int -1) (long s)))))
 
-(defn- linalg [b op args]
+(defn- linalg* [b op args]
   (let [cpu (cpu-stream b)
         temps (java.util.ArrayList.)
         t (fn ^long [^long h] (.add temps h) h)
@@ -869,6 +884,78 @@
                   sign (Mlx/mlx_multiply (t (Mlx/mlx_prod_axis (t (Mlx/mlx_sign u cpu)) (int -1) false cpu)) perm cpu)]
               [(wrap b sign) (wrap b logabs)]))))
       (finally (doseq [h temps] (MlxRaw/mlx_array_free (long h)))))))
+
+;; MLX has no VJP for its Cholesky, LU or inverse (GenMLX's fork patched
+;; some), so in native mode each linear-algebra op is one mlx_custom_vjp
+;; whose VJP is the tape's rule (gen.array.tape/linalg-vjp): no MLX patch
+(declare grad-mode with-default-stream)
+
+(def ^:private ^:dynamic *tracing-compile*
+  "True while mlx_compile traces a function (compile-fn). Custom VJPs stay
+   out of compiled graphs: MLX keeps those in a thread-local cache, and its
+   destruction at a thread's exit releases the custom functions' Java
+   closures by an upcall from the exiting thread, which crashes the JVM
+   (2026-10-19, SIGILL at exit)."
+  false)
+
+(defn- custom-vjps? [] (and (= grad-mode :native) (not *tracing-compile*)))
+
+(defn- custom-vjp
+  "The outputs of (forward ins), with MLX's gradient through them given by
+   (vjp primals cotangents outputs); ins and every result are vectors of
+   MlxArrays."
+  [b forward vjp ins]
+  (let [arrays (fn [^longs hs] (mapv #(wrap b %) hs))
+        handles (fn [xs] (long-array (map #(MlxRuntime/retain (.-h ^MlxArray (as-array b % nil))) xs)))
+        fun (MlxRuntime/closure (reify gen.mlx.MlxRuntime$Closure
+                                  (apply [_ hs] (handles (forward (arrays hs))))))
+        bwd (MlxRuntime/customVjp (reify gen.mlx.MlxRuntime$CustomVjp
+                                    (apply [_ ps cs os] (handles (vjp (arrays ps) (arrays cs) (arrays os))))))
+        temps (java.util.ArrayList.)]
+    (try
+      (let [cv (Mlx/mlx_custom_vjp fun bwd)
+            _ (.add temps [:closure cv])
+            in (MlxRuntime/vectorOf (long-array (map #(.-h ^MlxArray %) ins)))
+            _ (.add temps [:vec in])
+            ;; MLX makes the custom function's node on the default device
+            out (with-default-stream b #(Mlx/mlx_closure_apply cv in))
+            _ (.add temps [:vec out])]
+        (arrays (MlxRuntime/vectorArrays out)))
+      (finally
+        (fence ins)
+        (doseq [[kind h] temps]
+          (case kind
+            :closure (MlxRaw/mlx_closure_free (long h))
+            :vec (MlxRaw/mlx_vector_array_free (long h))))
+        (MlxRaw/mlx_closure_free fun)
+        (MlxRaw/mlx_closure_custom_free bwd)))))
+
+(defn- exact-route
+  "op of the MlxArrays xs by its exact composite (gen.backend.mlx.exact).
+   In native mode it is one custom VJP with the function's derivative, not
+   the composite's graph (branches and Newton steps) differentiated."
+  [b op xs]
+  (let [route (requiring-resolve 'gen.backend.mlx.exact/route)]
+    (if-not (custom-vjps?)
+      (route op xs)
+      (first (custom-vjp b
+                         (fn [ys] [(route op ys)])
+                         (fn [ps cs os] ((requiring-resolve 'gen.backend.mlx.exact/vjp) op ps (first cs) (first os)))
+                         xs)))))
+
+(defn- linalg [b op args]
+  (if-not (custom-vjps?)
+    (linalg* b op args)
+    (let [n-arrays (if (#{:cholesky :slogdet} op) 1 2)
+          opts (drop n-arrays args)
+          rule (requiring-resolve 'gen.array.tape/linalg-vjp)
+          outs (custom-vjp b
+                           (fn [xs] (let [r (linalg* b op (into xs opts))] (if (vector? r) r [r])))
+                           (fn [ps cs os]
+                             (let [[out g] (if (= op :slogdet) [(second os) (second cs)] [(first os) (first cs)])]
+                               (rule b op (into ps opts) out g (vec (repeat n-arrays true)))))
+                           (mapv #(as-array b % nil) (take n-arrays args)))]
+      (if (= op :slogdet) outs (first outs)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Randomness: JAX's partitionable Threefry-2x32 (gen.random.threefry) in
@@ -1018,8 +1105,12 @@
                                   {:shape (shape-of out) :value out})))
                 (let [out (as-array b out nil)]
                   (long-array [(MlxRuntime/retain (.-h ^MlxArray out))]))))
-        cl (MlxRuntime/closure (reify gen.mlx.MlxRuntime$Closure (apply [_ ins] (run ins))))
+        cl (when (seq xs) (MlxRuntime/closure (reify gen.mlx.MlxRuntime$Closure (apply [_ ins] (run ins)))))
         temps (java.util.ArrayList.)]
+    (if (empty? xs)
+      ;; nothing to differentiate (MLX's grad needs an argument): the value,
+      ;; with the (leafless) trees as gradients, as the tape gives
+      [(apply f args) trees]
     (try
       (let [vag (Mlx/mlx_value_and_grad cl (int-array (range (count xs))))
             _ (.add temps [:vag vag])
@@ -1037,7 +1128,7 @@
           (case kind
             :vag (MlxRaw/mlx_closure_value_and_grad_free (long h))
             :vec (MlxRaw/mlx_vector_array_free (long h))))
-        (MlxRaw/mlx_closure_free cl)))))
+        (MlxRaw/mlx_closure_free cl))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The backend
@@ -1048,7 +1139,7 @@
    MLX closure, compiled with mlx_compile; the returned fn applies it."
   [b f {:keys [shapeless?]}]
   (let [run (fn [^longs ins]
-              (let [outs (try (f (mapv #(wrap b %) ins))
+              (let [outs (try (binding [*tracing-compile* true] (f (mapv #(wrap b %) ins)))
                               (catch clojure.lang.ExceptionInfo e
                                 (if (re-find #"function transformations" (str (ex-message e)))
                                   (throw (ex-info (str "compile: the function reads an array's value on the host"
@@ -1088,7 +1179,7 @@
   (-name [_] :mlx)
   (-defaults [_] (.-defaults config))
   (-lazy? [_] true)
-  (-native-ops [_] #{})
+  (-native-ops [_] #{:logaddexp})
 
   (-from-host [b data dtype] (from-host b data dtype))
   (-to-host [_ x] (to-host x))
@@ -1159,6 +1250,18 @@
                (case (long dtypes)
                  32 {:float :float32 :int :int32}
                  64 {:float :float64 :int :int64})))))
+
+(defn- physical-memory ^long []
+  (.getTotalMemorySize ^com.sun.management.OperatingSystemMXBean
+                       (java.lang.management.ManagementFactory/getOperatingSystemMXBean)))
+
+(defonce ^:private memory-bounds
+  ;; once per process, before any array: set-cache-limit! and
+  ;; set-memory-limit! change them later
+  (let [ram (physical-memory)]
+    (Mlx/mlx_set_cache_limit (long (Long/getLong "gen.mlx.cache-bytes" (quot ram 16))))
+    (Mlx/mlx_set_memory_limit (long (Long/getLong "gen.mlx.memory-bytes" (quot ram 2))))
+    true))
 
 (def backend
   "The MLX backend configured by the system properties gen.mlx.device and

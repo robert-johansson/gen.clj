@@ -211,6 +211,36 @@
         s (swap-last-two (p/-linalg inner :solve-triangular [l (swap-last-two x) {:lower? true :transpose? true}]))]
     (- (tril (+ s (swap-last-two s)) false) (* s eye))))
 
+(defn linalg-vjp
+  "The cotangents of a linear-algebra op's array arguments (where need, a
+   vector of booleans, says) from the cotangent g of its result out (of
+   logabs, for :slogdet), by inner's ops, args being the op's arguments as
+   values. The tape's rules; the MLX backend gives them to MLX as custom
+   VJPs in its native mode."
+  [inner op args out g need]
+  (case op
+    :cholesky (grads need (cholesky-vjp inner out g))
+    ;; x = A⁻¹ rhs with A = m or mᵀ: rhs̄ = A⁻ᵀ ḡ, Ā = -rhs̄ xᵀ
+    :solve-triangular
+    (let [[m rhs {:keys [lower? transpose?]}] args
+          rhs-bar (p/-linalg inner :solve-triangular [m g {:lower? lower? :transpose? (not transpose?)}])
+          a-bar (a/negate (a/matmul rhs-bar (swap-last-two out)))]
+      (grads need
+             (unbroadcast (tril (if transpose? (swap-last-two a-bar) a-bar) (not lower?)) (a/shape m))
+             (unbroadcast rhs-bar (a/shape rhs))))
+    :solve
+    (let [[m rhs] args
+          rhs-bar (p/-linalg inner :solve [(swap-last-two m) g])]
+      (grads need
+             (unbroadcast (a/negate (a/matmul rhs-bar (swap-last-two out))) (a/shape m))
+             (unbroadcast rhs-bar (a/shape rhs))))
+    ;; d log|det m| = tr(m⁻¹ dm): m̄ = ḡ m⁻ᵀ
+    :slogdet
+    (let [[m] args
+          n (peek (a/shape m))
+          inv (p/-linalg inner :solve [m (a/broadcast-to (a/eye n) (a/shape m))])]
+      (grads need (* (a/expand-dims (a/expand-dims g -1) -1) (swap-last-two inv))))))
+
 ;; ---------------------------------------------------------------------------
 ;; The tape backend
 ;; ---------------------------------------------------------------------------
@@ -334,42 +364,27 @@
     (case op
       :cholesky
       (let [[m] args
-            l (p/-linalg inner :cholesky [(primal m)])]
-        (record t l [m] (fn [g _] [(cholesky-vjp inner l g)])))
+            pm (primal m)
+            l (p/-linalg inner :cholesky [pm])]
+        (record t l [m] (fn [g need] (linalg-vjp inner :cholesky [pm] l g need))))
 
       :solve-triangular
-      (let [[m rhs {:keys [lower? transpose?] :as opts}] args
-            pm (primal m)
-            x (p/-linalg inner :solve-triangular [pm (primal rhs) opts])]
-        (record t x [m rhs]
-                (fn [g need]
-                  ;; x = A⁻¹ rhs with A = m or mᵀ: rhs̄ = A⁻ᵀ ḡ, Ā = -rhs̄ xᵀ
-                  (let [rhs-bar (p/-linalg inner :solve-triangular [pm g {:lower? lower? :transpose? (not transpose?)}])
-                        a-bar (a/negate (a/matmul rhs-bar (swap-last-two x)))]
-                    (grads need
-                           (unbroadcast (tril (if transpose? (swap-last-two a-bar) a-bar) (not lower?)) (a/shape pm))
-                           (unbroadcast rhs-bar (a/shape (primal rhs))))))))
+      (let [[m rhs opts] args
+            ps [(primal m) (primal rhs) opts]
+            x (p/-linalg inner :solve-triangular ps)]
+        (record t x [m rhs] (fn [g need] (linalg-vjp inner :solve-triangular ps x g need))))
 
       :solve
       (let [[m rhs] args
-            pm (primal m)
-            x (p/-linalg inner :solve [pm (primal rhs)])]
-        (record t x [m rhs]
-                (fn [g need]
-                  (let [rhs-bar (p/-linalg inner :solve [(swap-last-two pm) g])]
-                    (grads need
-                           (unbroadcast (a/negate (a/matmul rhs-bar (swap-last-two x))) (a/shape pm))
-                           (unbroadcast rhs-bar (a/shape (primal rhs))))))))
+            ps [(primal m) (primal rhs)]
+            x (p/-linalg inner :solve ps)]
+        (record t x [m rhs] (fn [g need] (linalg-vjp inner :solve ps x g need))))
 
       :slogdet
       (let [[m] args
             pm (primal m)
             [sign logabs] (p/-linalg inner :slogdet [pm])]
-        [sign (record t logabs [m]
-                      (fn [g _]
-                        (let [n (peek (a/shape pm))
-                              inv (p/-linalg inner :solve [pm (a/broadcast-to (a/eye n) (a/shape pm))])]
-                          [(* (a/expand-dims (a/expand-dims g -1) -1) (swap-last-two inv))])))])))
+        [sign (record t logabs [m] (fn [g need] (linalg-vjp inner :slogdet [pm] logabs g need)))])))
 
   (-random-uniform [_ key shape dtype] (p/-random-uniform inner key shape dtype))
   (-value-and-grad [_ _ _ _] (nested!)))

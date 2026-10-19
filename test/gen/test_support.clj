@@ -23,6 +23,12 @@
 
 (defn f32? [] (= :float32 (float-dtype)))
 
+(defn native-grad?
+  "Does the backend differentiate natively (MLX with -Dgen.mlx.grad=native),
+   not with gen.array.tape?"
+  []
+  (and (not (jvm?)) (= "native" (System/getProperty "gen.mlx.grad"))))
+
 (defn flushes-subnormals?
   "Does the backend flush float32 subnormals to zero (Metal does)?"
   []

@@ -155,7 +155,7 @@ needs, taken from GenMLX's measured call counts
 | creation | `array` `scalar` `zeros` `ones` `full` `eye` `arange` `linspace` `*-like` | `-from-host` `-full` `-arange` | `eye`, `linspace` |
 | conversion | `astype` `item` `->clj` `eval!` `array?` `shape` `ndim` `size` `dtype` | `-astype` `-to-host` `-eval!` `-shape` `-dtype` | `ndim`, `size` |
 | arithmetic | `+ - * /` (variadic), `negate`, `pow`, `maximum` `minimum`, `mod` `floor-div`, `abs` `sign` | `:add :subtract :multiply :divide :power :maximum :minimum :remainder :floor-divide :negative :abs :sign` | — |
-| exp/log | `exp` `log` `expm1` `log1p` `sqrt` `square` `logaddexp` `xlogy` | `:exp :log :expm1 :log1p :sqrt` | `square`, `logaddexp`, `xlogy` |
+| exp/log | `exp` `log` `expm1` `log1p` `sqrt` `square` `logaddexp` `xlogy` | `:exp :log :expm1 :log1p :sqrt` | `square`, `logaddexp` (native in MLX: one op, and its gradient is exact at ties under MLX's autodiff), `xlogy` |
 | trig | `sin` `cos` `tan` `tanh` `sigmoid` `softplus` | `:sin :cos :tan :tanh` | `sigmoid`, `softplus` |
 | rounding | `floor` `ceil` `round` `clip` | `:floor :ceil :round` | `clip` |
 | special | `erf` `erfinv` `lgamma` `digamma` `log-beta` | `:erf :erfinv` (native in MLX; closed-form derivatives) | `lgamma`, `digamma`, `log-beta` |
@@ -247,8 +247,28 @@ needs, taken from GenMLX's measured call counts
   - `a/item` on a tracked value returns its primal. Data-dependent control flow
     is fine (non-differentiable branches, as in Gen.jl).
   - Scope for M1 is first order. Nested AD (Hessians) is bean genclj-hors.
-- **MLX backend:** the same tape for now (§13). `mlx_value_and_grad`, which
-  the binding already supports, is bean genclj-fuvr.
+- **MLX backend:** the same tape by default (§13). With
+  `-Dgen.mlx.grad=native`, `a/grad` and `a/value-and-grad` use
+  `mlx_value_and_grad` instead (bean genclj-fuvr), which also nests:
+  - MLX differentiates the graph the function builds, so its VJPs apply.
+    MLX has none for its Cholesky, LU or inverse, so each linear-algebra op
+    is one `mlx_custom_vjp` whose VJP is the tape's rule
+    (`gen.array.tape/linalg-vjp`, one definition for both); MLX is not
+    patched.
+  - The exact float64 composites (exp, sin, cos, erf, erfinv, expm1,
+    logaddexp) are custom VJPs too, with the functions' derivatives, so
+    MLX does not differentiate their Newton steps and branches.
+  - MLX's `maximum` gives a tie's gradient to its second argument (the
+    tape splits it). So composites avoid it where they are smooth:
+    `softplus` uses a double `where`, and `logaddexp` is MLX's own op.
+  - Inside `a/compile` the custom VJPs are left out, and MLX
+    differentiates the composites' own graphs (it has no VJP for linear
+    algebra there). MLX keeps compiled graphs in a thread-local cache, and
+    destroying it at the main thread's exit released the custom functions'
+    Java closures by an upcall into a JVM shutting down: a crash, and then a
+    JVM error reporter that spun instead of exiting (test
+    `compiled-native-gradients-survive-the-exit`).
+  - It is opt-in until the whole battery passes in native mode.
 - **Reserved names:** `vjp`, `jvp`, `custom-vjp`, `vmap`.
 - **`a/compile`** (2026-10-19, bean genclj-8b88):
   - **On MLX.** `(a/compile f)` traces f once per input structure, shapes
@@ -618,9 +638,26 @@ The decisions are §12 items 15–18, for the owner's review.*
   Metal allows about 500,000 of them, every array with data holding one,
   also on the CPU device. So the backend collects (`System.gc`, then
   drains) when 100,000 arrays are live (`gen.mlx.gc-arrays`) or MLX's
-  active memory passes a quarter of RAM (`gen.mlx.gc-bytes`). The
+  active memory passes an eighth of RAM (`gen.mlx.gc-bytes`). The
   threshold rises to twice what survives a collection, capped at 60% of
   Metal's limit.
+- **Collecting by new bytes.** It also collects once the arrays made since
+  the last collection hold a sixteenth of RAM (`gen.mlx.gc-new-bytes`),
+  counting their sizes before they are evaluated. A dead intermediate holds
+  its buffer until the GC finds its `MlxArray`, and while that lives MLX
+  cannot free the buffer during evaluation either. Without this trigger a
+  chain of large ops kept every intermediate: 100,000 float64 beta draws
+  (exact float64 composites inside rejection rounds) took over 11 GB, and
+  with it about 1.7 GB. A collection costs about 25 ms.
+- **MLX's own limits are bounded** when the namespace loads (2026-10-19).
+  MLX defaults both to all of RAM: its buffer cache (freed buffers kept for
+  reuse) and its memory limit (past which it frees the cache and waits for
+  running work before allocating). With those defaults one test JVM grew
+  to 40 GB on a 32 GB machine, and two together exhausted memory and
+  caused a kernel panic (watchdog timeout, compressor and swap full). The
+  cache is now a sixteenth of RAM (`gen.mlx.cache-bytes`) and the memory
+  limit half of RAM (`gen.mlx.memory-bytes`); `set-cache-limit!` and
+  `set-memory-limit!` change them at run time.
 - **Lazy graphs pin their leaves.** An unevaluated graph keeps its input
   buffers alive, every host number used as an operand among them. Host
   scalars are therefore shared constants (4,096 per dtype,

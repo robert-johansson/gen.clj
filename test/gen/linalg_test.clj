@@ -42,7 +42,9 @@
     (let [m (spd (rng/key seed) [] n)
           [sign logabs] (la/slogdet m)]
       (and (= 1.0 (ts/host sign))
-           (a/allclose? logabs (la/cholesky-logdet (la/cholesky m)) {:rtol (ts/tol 1e-10)})))))
+           ;; with an absolute band too: log-determinants near 0 (det near 1)
+           ;; carry the absolute error of a log near 1
+           (a/allclose? logabs (la/cholesky-logdet (la/cholesky m)) {:rtol (ts/tol 1e-10) :atol (ts/tol 1e-10)})))))
 
 (deftest batched-matches-one-at-a-time
   (let [ms (spd (rng/key 5) [3] 4)

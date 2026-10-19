@@ -228,8 +228,17 @@ public final class MlxRuntime {
    *  collect on every array. */
   private static final long BASE_ARRAYS = Long.getLong("gen.mlx.gc-arrays", 100_000L);
   /** Collect when MLX's active memory exceeds this many bytes: gen.mlx.gc-bytes,
-   *  default a quarter of the physical memory. */
-  private static final long BASE_BYTES = Long.getLong("gen.mlx.gc-bytes", physicalMemory() / 4);
+   *  default an eighth of the physical memory. */
+  private static final long BASE_BYTES = Long.getLong("gen.mlx.gc-bytes", physicalMemory() / 8);
+  /** Collect when the arrays made since the last collection hold this many
+   *  bytes (their sizes, known before they are evaluated): gen.mlx.gc-new-bytes,
+   *  default a sixteenth of the physical memory. A dead intermediate keeps
+   *  its buffer until the GC finds its owner, and while the owner lives MLX
+   *  cannot free the buffer during evaluation either, so without this a
+   *  chain of large ops kept every intermediate: 2026-10-19, 11 GB for
+   *  100,000 float64 beta draws, and a kernel panic from two test JVMs. */
+  private static final long NEW_BYTES = Long.getLong("gen.mlx.gc-new-bytes", physicalMemory() / 16);
+  private static final AtomicLong FRESH = new AtomicLong();
   private static volatile long arrayThreshold = BASE_ARRAYS;
   private static volatile long byteThreshold = BASE_BYTES;
   private static final AtomicLong COLLECTIONS = new AtomicLong();
@@ -258,8 +267,9 @@ public final class MlxRuntime {
     }
     long live = LIVE.incrementAndGet();
     long n = ADOPTED.incrementAndGet();
+    long fresh = FRESH.addAndGet(MlxRaw.mlx_array_nbytes(handle));
     if ((n & 255) == 0) drain();
-    if (live > arrayThreshold || ((n & 4095) == 0 && activeMemory() > byteThreshold)) collect();
+    if (live > arrayThreshold || fresh > NEW_BYTES || ((n & 4095) == 0 && activeMemory() > byteThreshold)) collect();
   }
 
   /** Make owner own the mlx_closure handle (a compiled function): freed,
@@ -302,8 +312,9 @@ public final class MlxRuntime {
   /** Run the GC and free what it found unreachable, then reset the
    *  thresholds above what is still live (but below Metal's limit). */
   public static synchronized void collect() {
-    if (LIVE.get() <= arrayThreshold && activeMemory() <= byteThreshold) return;
+    if (LIVE.get() <= arrayThreshold && FRESH.get() <= NEW_BYTES && activeMemory() <= byteThreshold) return;
     COLLECTIONS.incrementAndGet();
+    FRESH.set(0);
     System.gc();
     // the reference handler enqueues what the GC found after the GC returns:
     // free until the queue stays empty for a moment

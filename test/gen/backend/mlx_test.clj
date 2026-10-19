@@ -173,3 +173,31 @@
           (is (thrown-with-msg? clojure.lang.ExceptionInfo #"reads an array's value on the host"
                                 ((a/compile (fn [x] (if (a/truthy? (a/> (a/sum x) 0)) x (a/negate x)))) x))
               "a host read inside is loud"))))))
+
+;; held until the JVM exits, as gen.inference.mcmc's compiled steps are: a
+;; compiled function erases its cache entries when it is freed
+(def ^:private compiled-at-exit (atom nil))
+
+(deftest compiled-native-gradients-survive-the-exit
+  ;; MLX keeps compiled graphs in a thread-local cache. Custom VJPs inside
+  ;; one were released, when the main thread's cache was destroyed at the
+  ;; JVM's exit, by an upcall into a JVM shutting down: SIGILL (exit 132)
+  ;; after every test had passed. This compiles native gradients through
+  ;; float64 exact routes and a solve on the test runner's own thread, and
+  ;; keeps it: with the bug the JVM crashes at exit, after the summary
+  ;; (and its error reporter may then spin instead of exiting)
+  (when-mlx
+    (when (= "native" (System/getProperty "gen.mlx.grad"))
+      (let [b ((requiring-resolve 'gen.backend.mlx/make-backend) {:device :cpu :dtypes 64})
+            solve @(requiring-resolve 'gen.array.linalg/solve)]
+        (a/with-backend b
+          (let [m (a/array [[2.0 0.5] [0.5 1.0]])
+                f (a/compile (fn [x] ((a/grad (fn [y] (a/+ (a/sum (a/erf y)) (a/sum (solve m y))))) x)))
+                g (a/->clj (f (a/array [0.1 0.5])))
+                _ (reset! compiled-at-exit f)
+                ;; d/dy: 2/√π e^(-y²) plus the row sums of m⁻ᵀ
+                minv-t-sums [(/ (- 1.0 0.5) 1.75) (/ (- 2.0 0.5) 1.75)]]
+            ;; the compiled gradient differentiates the composites' own
+            ;; graphs, accurate to their approximations
+            (is (every? true? (map #(< (Math/abs (- (double %1) (+ (* (/ 2.0 (Math/sqrt Math/PI)) (Math/exp (- (* %2 %2)))) %3))) 1e-9)
+                                   g [0.1 0.5] minv-t-sums)))))))))

@@ -389,15 +389,31 @@
 (defn isfinite "Elementwise test for a finite value (bool)." [x]
   (logical-not (logical-or (isnan x) (isinf x))))
 
-(defn softplus "Elementwise log(1 + e^x), stable for large |x|." [x]
-  (+ (log1p (exp (negate (abs x)))) (maximum x 0)))
+(defn softplus
+  "Elementwise log(1 + e^x), stable for large |x|: x + log1p(e^-x) above 0,
+   log1p(e^x) elsewhere, each branch given a safe input (so that the other's
+   cotangent is not NaN). No maximum: its gradient at the tie with 0 would
+   be one-sided under MLX's autodiff, where softplus' is σ(0) = 1/2."
+  [x]
+  (let [pos (> x 0)
+        xp (where pos x 0.0)
+        xn (where pos 0.0 x)]
+    (where pos (+ xp (log1p (exp (negate xp)))) (log1p (exp xn)))))
 
 (defn sigmoid "Elementwise logistic function, stable for large |x|." [x]
   (exp (negate (softplus (negate x)))))
 
-(defn logaddexp "Elementwise log(e^x + e^y), stable and exact at infinities." [x y]
-  (let [m (maximum x y)]
-    (where (isinf m) m (+ m (log1p (exp (negate (abs (- x y)))))))))
+(defn logaddexp
+  "Elementwise log(e^x + e^y), stable and exact at infinities: the
+   backend's own op where it has one (MLX's, whose gradient is exact at
+   ties under its autodiff), this composite otherwise."
+  [x y]
+  (let [b (when-not (and (host? x) (host? y))
+            (join-backends :logaddexp (operand-backend :logaddexp x) (operand-backend :logaddexp y)))]
+    (if (and b (contains? (p/-native-ops b) :logaddexp))
+      (ew2 :logaddexp x y)
+      (let [m (maximum x y)]
+        (where (isinf m) m (+ m (log1p (exp (negate (abs (- x y)))))))))))
 
 ;; Only the 0·log 0 point is special-cased, and with a safe stand-in input
 ;; ("double where"): the derivative in x at x = 0 stays log y, and the discarded

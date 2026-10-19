@@ -225,5 +225,8 @@
   (testing "errors are loud"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"scalar" ((a/grad (fn [x] (a/* x (a/array [1.0 2.0])))) 1.0)))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Cannot differentiate" ((a/grad (fn [x] (a/* x 2))) 3)))
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"inside a differentiated"
-                          ((a/grad (fn [x] ((a/grad (fn [y] (a/* x y))) x))) 1.0)))))
+    (if (ts/native-grad?)
+      ;; MLX nests gradients: d/dx (d/dy x·y) = d/dx x = 1
+      (is (= 1.0 (ts/host ((a/grad (fn [x] ((a/grad (fn [y] (a/* x y))) x))) 1.0))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"inside a differentiated"
+                            ((a/grad (fn [x] ((a/grad (fn [y] (a/* x y))) x))) 1.0))))))
