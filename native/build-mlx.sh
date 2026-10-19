@@ -10,12 +10,18 @@
 # PyPI (checked against its sha256). Building MLX itself is not needed, so no
 # Metal compiler is either.
 #
-# Usage: native/build-mlx.sh [cpu|cuda13]
+# Usage: native/build-mlx.sh [cpu|cuda13|cuda13-source]
 #   macOS arm64: the mlx-metal wheel (CPU and Metal); the argument is ignored.
 #   Linux x86_64 / aarch64: cpu (default) uses the mlx-cpu wheel; cuda13 the
 #     mlx-cuda-13 wheel, with the system's CUDA libraries where it has them
 #     and the missing ones fetched from PyPI (below). Tested on aarch64 (the
 #     Jetson AGX Thor, Ubuntu 24.04, CUDA 13.2, 2026-10-19); x86_64 not yet.
+#     cuda13-source builds MLX itself from its pinned source, for this
+#     machine's GPU (nvidia-smi's compute capability, or MLX_CUDA_ARCHITECTURES):
+#     the wheel's kernels cover sm_75 to sm_121 but not every GPU, and the
+#     Thor's sm_110 has neither code nor compatible PTX in it. About six
+#     minutes on the Thor; needs the CUDA toolkit, cuDNN, BLAS and LAPACK.
+#     The JVM finds it with -Dgen.mlx.lib=native/build/linux-<arch>-<variant>/lib.
 #
 # Requires: curl, unzip, cmake (≥ 3.16), a C++20 compiler, shasum or sha256sum.
 set -euo pipefail
@@ -23,6 +29,7 @@ set -euo pipefail
 MLX_VERSION=0.32.2
 MLX_C_TAG=v0.7.0
 MLX_C_COMMIT=a341b4925024b88b2c593468f16e12f5e17315da
+MLX_COMMIT=1f8e74e3f12f31365464a6867c6579f0e9b29d85
 
 here="$(cd "$(dirname "$0")" && pwd)"
 os="$(uname -s)"
@@ -51,7 +58,8 @@ case "$os-$arch" in
     case "$variant" in
       cpu) package=mlx-cpu ;;
       cuda13) package=mlx-cuda-13 ;;
-      *) echo "unknown variant: $variant (cpu or cuda13)" >&2; exit 1 ;;
+      cuda13-source) package="" ;;
+      *) echo "unknown variant: $variant (cpu, cuda13 or cuda13-source)" >&2; exit 1 ;;
     esac
     platform=$platform-$variant
     wheel="" # looked up below: Linux wheel names carry a manylinux tag
@@ -71,7 +79,24 @@ sha256() {
   if command -v shasum >/dev/null; then shasum -a 256 "$1" | cut -d' ' -f1; else sha256sum "$1" | cut -d' ' -f1; fi
 }
 
-# --- the MLX wheel ------------------------------------------------------------
+# --- MLX: built from source, or the wheel ---------------------------------------
+if [ "$variant" = cuda13-source ]; then
+  msrc="$build/src/mlx"
+  if [ ! -d "$msrc/.git" ]; then
+    git clone -q --depth 1 --branch "v$MLX_VERSION" https://github.com/ml-explore/mlx "$msrc"
+  fi
+  [ "$(git -C "$msrc" rev-parse HEAD)" = "$MLX_COMMIT" ] ||
+    { echo "mlx at $(git -C "$msrc" rev-parse HEAD), expected $MLX_COMMIT (v$MLX_VERSION)" >&2; exit 1; }
+  archs="${MLX_CUDA_ARCHITECTURES:-$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '. ')}"
+  [ -n "$archs" ] || { echo "no GPU found: set MLX_CUDA_ARCHITECTURES" >&2; exit 1; }
+  echo "building MLX v$MLX_VERSION for CUDA architecture $archs"
+  cmake -S "$msrc" -B "$build/cmake-mlx-$platform" -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+    -DMLX_BUILD_CUDA=ON -DMLX_CUDA_ARCHITECTURES="$archs" -DMLX_BUILD_TESTS=OFF -DMLX_BUILD_EXAMPLES=OFF \
+    -DMLX_BUILD_BENCHMARKS=OFF -DMLX_BUILD_PYTHON_BINDINGS=OFF -DCMAKE_INSTALL_PREFIX="$build/mlx-$platform"
+  cmake --build "$build/cmake-mlx-$platform"
+  cmake --install "$build/cmake-mlx-$platform"
+  mlx_root="$build/mlx-$platform"
+else
 if [ -z "$wheel" ]; then
   # Linux: find the wheel for this architecture in PyPI's JSON, with its sha256
   read -r wheel sha url < <(curl -sSf "https://pypi.org/pypi/$package/$MLX_VERSION/json" |
@@ -105,6 +130,7 @@ rm -rf "$build/wheel-$platform"
 mkdir -p "$build/wheel-$platform"
 unzip -q "$build/dl/$wheel" -d "$build/wheel-$platform"
 mlx_root="$build/wheel-$platform/mlx"
+fi
 
 # --- mlx-c --------------------------------------------------------------------
 src="$build/src/mlx-c"
@@ -134,6 +160,12 @@ cmake --install "$build/cmake-$platform"
 for f in "$mlx_root"/lib/*; do
   [ -f "$f" ] && cp -f "$f" "$out/lib/"
 done
+# CUDA: MLX compiles some kernels at run time with NVRTC, from headers it looks
+# for at $ORIGIN/../include (its own and CCCL's, in include/cccl): copy them
+# next to libmlxc's own
+if [ "$variant" = cuda13 ] || [ "$variant" = cuda13-source ]; then
+  [ -d "$mlx_root/include" ] && cp -R "$mlx_root/include/." "$out/include/"
+fi
 # Linux wheels bundle their own dependencies (BLAS, LAPACK, CUDA support) in
 # <package>.libs, which libmlx's RPATH finds at $ORIGIN/../../<package>.libs:
 # keep that layout relative to $out/lib, rather than editing the binary
@@ -164,7 +196,7 @@ print(fs[0]['filename'], fs[0]['digests']['sha256'], fs[0]['url']) if fs else No
   [ "$(sha256 "$build/dl/$w")" = "$s" ] || { echo "sha256 mismatch for $w" >&2; exit 1; }
   unzip -q -o "$build/dl/$w" 'nvidia/*' -d "$build"
 }
-if [ "$variant" = cuda13 ]; then
+if [ "$variant" = cuda13 ] || [ "$variant" = cuda13-source ]; then
   for lib in $(ldd "$out/lib/libmlx.so" | awk '/not found/ {print $1}'); do
     case "$lib" in
       libnccl.so.*) fetch_nvidia nvidia-nccl-cu13 2.32.3 ;;

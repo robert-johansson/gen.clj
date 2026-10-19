@@ -256,8 +256,9 @@
       (is (ts/close? ((array/grad #(array/sum (array/square %))) x) ((array/compile (array/grad #(array/sum (array/square %)))) x))))
     (testing "results that are not arrays are loud"
       ;; a nil or keyword leaf gave an NPE or ClassCastException on MLX (an
-      ;; independent review); the JVM backend's compile is f itself
-      (when-not (ts/jvm?)
+      ;; independent review); the JVM backend's compile is f itself, as MLX's
+      ;; is where it cannot build CPU kernels (GCC 13 on Linux)
+      (when (and (not (ts/jvm?)) ((requiring-resolve 'gen.backend.mlx/compiles?) array/*backend*))
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"results must be arrays"
                               ((array/compile (fn [x] {:s (array/sum x) :tag :done})) x)))))
     (testing "keys are not arguments: the trace would replay their draws"
