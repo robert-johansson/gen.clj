@@ -650,38 +650,115 @@
       (throw (ex-info (str (name op) " needs square matrices, got shape " shape)
                       {:op op :shape shape})))))
 
+(defn- batch-broadcast
+  "Handles of a [.. n n] and rhs [.. n k] broadcast to one batch shape (MLX's
+   solves want equal batch axes; gen.array's broadcast them)."
+  [b ha sa hr sr temps]
+  (let [ha (long ha) hr (long hr)
+        ba (subvec sa 0 (- (count sa) 2))
+        br (subvec sr 0 (- (count sr) 2))
+        batch (sh/broadcast ba br)
+        s (cpu-stream b)
+        to (fn [^long h shape tail]
+             (if (= shape (into batch tail))
+               h
+               (let [t (Mlx/mlx_broadcast_to h (int-array (map int (into batch tail))) s)]
+                 (.add ^java.util.ArrayList temps t)
+                 t)))]
+    [(to ha sa (subvec sa (- (count sa) 2))) (to hr sr (subvec sr (- (count sr) 2)))]))
+
+(defn- diag-of-temp
+  "The diagonals of the matrices h, [.. n], a handle registered with t."
+  ^long [t ^long h s]
+  (long (t (Mlx/mlx_diagonal h (int 0) (int -2) (int -1) (long s)))))
+
 (defn- linalg [b op args]
-  (let [cpu (cpu-stream b)]
-    (case op
-      :cholesky
-      (let [[a] args]
-        (check-square (shape-of a) :cholesky)
-        (with-operands b :cholesky [h a nil]
-          (wrap b (Mlx/mlx_linalg_cholesky h false cpu))))
+  (let [cpu (cpu-stream b)
+        temps (java.util.ArrayList.)
+        t (fn ^long [^long h] (.add temps h) h)
+        nan (fn ^long [dtype] (t (scalar-handle ##NaN dtype)))]
+    (try
+      (case op
+        ;; MLX returns a partial factor for a matrix that is not positive
+        ;; definite; LAPACK leaves the failing pivot non-positive there, so the
+        ;; contract's NaN is where a diagonal entry is not positive
+        :cholesky
+        (let [[a] args
+              d (dtype-on b a)]
+          (check-square (shape-of a) :cholesky)
+          (with-operands b :cholesky [h a nil]
+            (let [l (t (Mlx/mlx_linalg_cholesky h false cpu))
+                  pd (t (Mlx/mlx_all_axis (t (Mlx/mlx_greater (diag-of-temp t l cpu) (t (scalar-handle 0 d)) cpu))
+                                          (int -1) true cpu))]
+              (wrap b (Mlx/mlx_where (t (Mlx/mlx_expand_dims pd (int -1) cpu)) l (nan d) cpu)))))
 
-      :solve-triangular
-      (let [[a rhs {:keys [lower? transpose?]}] args]
-        (check-square (shape-of a) :solve-triangular)
-        (with-operands b :solve-triangular [ha a nil hr rhs nil]
-          ;; Lᵀx = b is solving with the upper triangle of Lᵀ
-          (if transpose?
-            (let [t (Mlx/mlx_swapaxes ha (int -1) (int -2) cpu)]
-              (try (wrap b (Mlx/mlx_linalg_solve_triangular t hr (boolean lower?) cpu))
-                   (finally (MlxRaw/mlx_array_free t))))
-            (wrap b (Mlx/mlx_linalg_solve_triangular ha hr (not lower?) cpu)))))
+        ;; MLX's triangular solve inverts the matrix, which fails on a zero
+        ;; diagonal entry (reported at a later evaluation, as for :solve): a NaN
+        ;; there instead gives NaN solutions, as a degenerate solve gives
+        ;; non-finite ones on the JVM backend (not an error)
+        :solve-triangular
+        (let [[a rhs {:keys [lower? transpose?]}] args
+              d (dtype-on b a)
+              sa (shape-of a)]
+          (check-square sa :solve-triangular)
+          (with-operands b :solve-triangular [ha a nil hr rhs nil]
+            (let [[ha hr] (batch-broadcast b ha sa hr (shape-of rhs) temps)
+                  n (int (peek sa))
+                  eye (t (Mlx/mlx_eye n n (int 0) (int (code :bool)) cpu))
+                  zero-diag (t (Mlx/mlx_expand_dims (t (Mlx/mlx_equal (diag-of-temp t ha cpu) (t (scalar-handle 0 d)) cpu))
+                                                    (int -2) cpu))
+                  safe (t (Mlx/mlx_where (t (Mlx/mlx_logical_and eye zero-diag cpu)) (nan d) ha cpu))]
+              ;; Lᵀx = b is solving with the upper triangle of Lᵀ
+              (wrap b (if transpose?
+                        (Mlx/mlx_linalg_solve_triangular (t (Mlx/mlx_swapaxes safe (int -1) (int -2) cpu)) hr
+                                                         (boolean lower?) cpu)
+                        (Mlx/mlx_linalg_solve_triangular safe hr (not lower?) cpu))))))
 
-      :solve
-      (let [[a rhs] args]
-        (check-square (shape-of a) :solve)
-        (with-operands b :solve [ha a nil hr rhs nil]
-          (wrap b (Mlx/mlx_linalg_solve ha hr cpu))))
+        ;; A singular system fails inside MLX's solve, and MLX reports a CPU
+        ;; task's failure at a later evaluation, of other arrays. So singular
+        ;; matrices (a zero pivot of the LU factor) are never given to it: the
+        ;; identity stands in, and their solutions are NaN
+        :solve
+        (let [[a rhs] args
+              d (dtype-on b a)
+              sa (shape-of a)]
+          (check-square sa :solve)
+          (with-operands b :solve [ha a nil hr rhs nil]
+            (let [[ha hr] (batch-broadcast b ha sa hr (shape-of rhs) temps)
+                  n (int (peek sa))
+                  [lu _] (map t (Mlx/mlx_linalg_lu_factor ha cpu))
+                  singular (t (Mlx/mlx_expand_dims
+                               (t (Mlx/mlx_any_axis (t (Mlx/mlx_equal (diag-of-temp t lu cpu) (t (scalar-handle 0 d)) cpu))
+                                                    (int -1) true cpu))
+                               (int -1) cpu))
+                  eye (t (Mlx/mlx_eye n n (int 0) (int (code d)) cpu))
+                  safe (t (Mlx/mlx_where singular eye ha cpu))
+                  x (t (Mlx/mlx_linalg_solve safe hr cpu))]
+              (wrap b (Mlx/mlx_where singular (nan d) x cpu)))))
 
-      :slogdet
-      (let [[a] args]
-        (check-square (shape-of a) :slogdet)
-        (with-operands b :slogdet [h a nil]
-          (let [[sign logabs] (Mlx/mlx_linalg_slogdet h cpu)]
-            [(wrap b sign) (wrap b logabs)]))))))
+        ;; from the LU factor (MLX's slogdet throws on a singular matrix):
+        ;; sign · Π sign(u_ii) · (-1)^swaps and Σ log |u_ii|, so a singular
+        ;; matrix gives [0 -Inf], as on the JVM backend
+        :slogdet
+        (let [[a] args
+              d (dtype-on b a)
+              sa (shape-of a)]
+          (check-square sa :slogdet)
+          (with-operands b :slogdet [h a nil]
+            (let [[lu piv] (map t (Mlx/mlx_linalg_lu_factor h cpu))
+                  u (diag-of-temp t lu cpu)
+                  n (peek sa)
+                  logabs (Mlx/mlx_sum_axis (t (Mlx/mlx_log (t (Mlx/mlx_abs u cpu)) cpu)) (int -1) false cpu)
+                  idx (t (Mlx/mlx_arange 0.0 (double n) 1.0 (int (code :uint32)) cpu))
+                  swaps (t (Mlx/mlx_sum_axis (t (Mlx/mlx_astype (t (Mlx/mlx_not_equal piv idx cpu)) (int (code :int32)) cpu))
+                                             (int -1) false cpu))
+                  odd (t (Mlx/mlx_remainder swaps (t (scalar-handle 2 :int32)) cpu))
+                  perm (t (Mlx/mlx_subtract (t (scalar-handle 1 d))
+                                            (t (Mlx/mlx_multiply (t (scalar-handle 2 d)) (t (Mlx/mlx_astype odd (int (code d)) cpu)) cpu))
+                                            cpu))
+                  sign (Mlx/mlx_multiply (t (Mlx/mlx_prod_axis (t (Mlx/mlx_sign u cpu)) (int -1) false cpu)) perm cpu)]
+              [(wrap b sign) (wrap b logabs)]))))
+      (finally (doseq [h temps] (MlxRaw/mlx_array_free (long h)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Randomness: JAX's partitionable Threefry-2x32 (gen.random.threefry) in

@@ -374,6 +374,13 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   constraints at unvisited addresses.
 - **Dtypes:** the JVM backend is float64 (the reference); MLX is float32. Core
   code never assumes a dtype. Bool vs 0/1 is settled in the array-API design.
+- **MLX is upstream, patched as little as possible** (owner, 2026-10-19).
+  CPU and Metal use the official MLX wheel, unpatched. If a fix is ever
+  needed, for CUDA first, it comes as a clean patch series on a pinned
+  upstream tag (`native/patches/`): one concern per patch, rebased at each
+  MLX bump, dropped once upstream has it. Never a long-lived fork.
+  GenMLX's fork was audited (`docs/research/mlx-fork-audit.md`): none of its
+  41 patches is needed for CPU or Metal.
 - **The MLX backend** (2026-10-19, agent, for the owner's review;
   `docs/array-api.md` §12 items 15–18 and §13):
   - Streams any thread can use, with evaluation serialized by one lock, in

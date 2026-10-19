@@ -578,7 +578,17 @@ conformance suite.
 | float64 `exp`, `sin`, `cos`, `erf`, `erfinv` on the CPU are float32 approximations (up to 1e-4 relative) | exact routes via `expm1`, `tan`, `log` (`gen.backend.mlx.exact`), within a few ulps |
 | Metal's float32 `expm1` is off by up to 660 ulps | Kahan's formula from `exp` and `log`, 3 ulps |
 | empty arrays have no data pointer | read as empty |
+| Cholesky of a matrix that is not positive definite returns a partial factor | NaN where a diagonal entry is not positive (LAPACK's failing pivot) |
+| a singular `solve` fails inside a CPU task, reported at a later evaluation of other arrays | the identity stands in for matrices with a zero LU pivot; their solutions are NaN |
+| a zero diagonal fails the triangular solve (it inverts), reported later | NaN on the diagonal: NaN solutions |
+| `slogdet` throws on a singular matrix | computed from the LU factor: `[0 -Inf]` |
+| solves want equal batch axes | broadcast first |
 | gathers do not check bounds | array indices: negative from the end, clamped (host indices are checked) |
+
+**A hazard to know.** MLX runs CPU work as asynchronous tasks. An
+exception inside one is raised at a later synchronization, against whatever
+arrays are evaluated then. The backend therefore never gives MLX inputs its
+kernels fail on. New native ops must keep that rule.
 
 **Remaining differences, documented rather than hidden:**
 - **Subnormals.** Metal flushes float32 subnormals to zero: `sqrt(5.9e-39)`
@@ -586,6 +596,9 @@ conformance suite.
 - **Indices.** An out-of-range array index is clamped, not an error. A lazy
   backend cannot check it without evaluating. The JVM backend is the one
   that checks.
+- **Degenerate linear algebra** gives non-finite values on both backends,
+  but not always the same ones: NaN on MLX where the JVM's substitutions
+  give ±Inf.
 - **Accuracy.** Float32 results measured against the JVM backend's
   correctly rounded ones, in ulps:
   - Metal: at most 3, except `erf` (12).

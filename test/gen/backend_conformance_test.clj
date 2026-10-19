@@ -108,7 +108,8 @@
     (cond (and (:ok t) (:ok r)) (or (agree? tol (:ok t) (:ok r))
                                     (do (println "disagree:" {:tested (:ok t) :reference (:ok r) :specs specs}) false))
           (and (:error t) (:error r)) (or (not (contains? (:error r) :shapes))
-                                          (= (:shapes (:error r)) (:shapes (:error t))))
+                                          (= (:shapes (:error r)) (:shapes (:error t)))
+                                          (do (println "errors differ:" {:tested t :reference r :specs specs}) false))
           :else (do (println "one failed:" {:tested t :reference r :specs specs}) false))))
 
 ;; tolerances
@@ -387,6 +388,46 @@
            (conforms? tol la/solve a rhs)
            (conforms? tol la/slogdet a)
            (conforms? tol la/inv a)))))
+
+;; batched matrices against one right-hand side, and the reverse
+(defspec batched-solves 30
+  (prop/for-all [n (gen/choose 1 3)
+                 seed gen/nat]
+    (let [ms (gen/generate (gen/vector (gen/vector (gen/vector gen-finite n) n) 2) 10 seed)
+          as {:data (mapv #(spd % n) ms) :dtype float-dt}
+          ;; [1 n 2]: a matrix right-hand side broadcast over the batch ([n 2]
+          ;; would be a batch of vectors, gen.array.linalg's rule)
+          rhs (gen/generate (gen-spec [1 n 2] gen-finite float-dt) 10 seed)
+          rhss (gen/generate (gen-spec [2 n 2] gen-finite float-dt) 10 seed)
+          tol (if f64? {:rtol 1e-9 :atol 1e-9} {:rtol 2e-3 :atol 2e-3})]
+      (and (conforms? tol la/solve as rhs)
+           (conforms? tol #(la/solve (a/take %1 0) %2) as rhss)
+           (conforms? tol #(la/solve-triangular (la/cholesky %1) %2) as rhs)
+           (conforms? tol #(la/solve-triangular (la/cholesky (a/take %1 0)) %2 {:transpose? true}) as rhss)))))
+
+(defn- non-finite? [v]
+  (if (sequential? v) (every? non-finite? v) (not (Double/isFinite (double v)))))
+
+(deftest degenerate-linear-algebra
+  ;; NaN or ±Inf, never an error and never finite garbage (MLX's own kernels
+  ;; return a partial Cholesky factor and finite solutions of singular
+  ;; systems, and fail on others at a later evaluation)
+  (let [not-pd {:data [[1.0 2.0] [2.0 1.0]] :dtype float-dt}
+        singular {:data [[1.0 2.0] [2.0 4.0]] :dtype float-dt}
+        zero-diag {:data [[0.0 0.0] [1.0 1.0]] :dtype float-dt}
+        v {:data [1.0 1.0] :dtype float-dt}
+        batch {:data [[[2.0 0.0] [0.0 2.0]] [[1.0 2.0] [2.0 1.0]]] :dtype float-dt}]
+    (is (conforms? exact la/cholesky not-pd) "not positive definite: NaN")
+    (is (conforms? transcendental la/cholesky batch) "only the failing matrix of a batch is NaN")
+    (is (conforms? exact la/slogdet singular) "singular: sign 0, log -Inf")
+    (doseq [[label f specs] [["solve" la/solve [singular v]]
+                             ["inv" la/inv [singular]]
+                             ["solve-triangular" la/solve-triangular [zero-diag v]]]]
+      (testing label
+        (doseq [b [tested reference]]
+          (is (non-finite? (:value (run-on b f specs)))))))
+    (testing "and later evaluations are unaffected"
+      (is (conforms? exact #(a/+ % 1.0) v)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Randomness: the same key draws the same uniforms
