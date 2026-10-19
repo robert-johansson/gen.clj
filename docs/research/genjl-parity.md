@@ -106,7 +106,7 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 | `set_value!`, `set_submap!`, `merge`, `isempty`, `==` | Y: persistent `set-value`, `set-submap`, `merge-cm` | core |
 | `to_array(cm, T)`, `from_array(proto, arr)` | N | core |
 | `get_selected(cm, sel)` | N | core |
-| `pair`/`unpair`, `nested_view` | N | later |
+| `pair`/`unpair`, `nested_view` | N | later. *gen.clj (M4, 2026-10-19):* `cm/pair`, `cm/unpair` (loud when other keys are present); `nested_view` is `cm/to-map` |
 | `select`, `selectall`, `complement`, Empty/All/Hierarchical/Dynamic/Static/Complement selections, `push!`, `set_subselection!` | Y: `selection.cljs` | core |
 
 ### 1i. Parameters, optimizers, learning (Gen.jl core)

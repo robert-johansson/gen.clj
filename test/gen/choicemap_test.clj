@@ -162,3 +162,12 @@
     (is (diff/element-changed? d 1))
     (is (diff/element-changed? d 3) "new elements count as changed")
     (is (diff/element-changed? diff/unknown-change 0))))
+
+(deftest pair-and-unpair
+  (let [a (cm/choicemap :x 1.0 [:y 0] 2.0)
+        b (cm/choicemap :z 3.0)
+        c (cm/pair a b :left :right)]
+    (is (= #{[:left :x] [:left :y 0] [:right :z]} (set (cm/addresses c))))
+    (is (= [(cm/to-map a) (cm/to-map b)] (mapv cm/to-map (cm/unpair c :left :right))) "unpair undoes pair")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"more than" (cm/unpair (cm/set-choice c :extra 1.0) :left :right)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must differ" (cm/pair a b :k :k)))))
