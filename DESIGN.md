@@ -505,11 +505,17 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   whose return value is `[update backward]`; its choices are the auxiliary
   randomness, so propose and assess give the forward and backward scores.
   log |det J| reruns the kernel's assess with the trace's and the kernel's
-  continuous choices substituted by tracked values, under `array/grad`,
-  and trims as GenTraceKernelDSL does; unlike it, a continuous choice the
-  update keeps but an output depends on counts as an unchanged output, so
-  such moves are not rejected as non-square. Calls of other generative
-  functions return their values (GenTraceKernelDSL returns their traces).
+  continuous choices substituted by tracked values, under `array/grad`.
+  It leaves out only the trace's choices no output depends on:
+  GenTraceKernelDSL also drops constant outputs and kernel choices no
+  output uses, which hides moves that are not bijections (found by the law
+  audit, 2026-10-20), so here they make the matrix non-square or singular,
+  a loud error. A continuous choice the update keeps but an output depends
+  on counts as an unchanged output. Calls of other generative functions
+  return their values (GenTraceKernelDSL returns their traces).
+- **Transform bodies are eager** (2026-10-20): a lazy call (for, map, …)
+  holding a write, copy or tcall is an error when the transform is
+  defined (use doseq, run! or mapv), as `gen` bodies run to completion.
 - **Recurse** (M4, 2026-10-20): `(comb/recurse production aggregation
   max-branch)` as Gen.jl's, with 0-based nodes (root 0, child j of node i
   at i·max-branch + j + 1), choices at `[i :production]` and

@@ -144,6 +144,12 @@
                                                     [(cm/choicemap :x (array/negate (tr :x)) :y (+ (tr :y) u)) (cm/choicemap)])
                                                   [(cm/choicemap :x (array/negate (tr :x))) (cm/choicemap)]))
                                    [] (rng/key 16)))))
+    (testing "a constant output and randomness thrown away: (x, u) to (x' = 0, u' = x) (law audit)"
+      (let [one (:trace (gfi/generate tt/two-latents [] (cm/choicemap :x 1.5 :y 2.0) (rng/key 21)))]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"singular|dimensions"
+                              (tk/mh one (gen [tr] (trace :u (d/normal 0 1))
+                                           [(cm/choicemap :x 0.0) (cm/choicemap :u (tr :x))])
+                                     [] (rng/key 22))))))
     (testing "a kernel that is not its own reverse fails on the way back"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no value for the choice"
                             (tk/mh tr (gen [tr] (let [u (trace :u (d/normal 0 1))]

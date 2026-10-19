@@ -28,14 +28,16 @@
    gen.inference.particle-filter/move-reweight.
 
    Weights include log |det J|, by automatic differentiation: the inputs are
-   the continuous choices of the model's trace and of the kernel, the
-   outputs the continuous values of update and backward. Inputs that no
-   output depends on, and outputs that depend on no input, are left out (as
-   GenTraceKernelDSL); a continuous choice of the trace that the update
-   keeps and no output rewrites, but that an output depends on, is an
-   unchanged output (GenTraceKernelDSL would find the matrix not square)."
-  (:refer-clojure :exclude [+ - *])
-  (:require [gen.array :as array :refer [+ - *]]
+   the kernel's continuous choices and the trace's continuous choices that
+   an output depends on, the outputs every continuous value of update and
+   backward, and a continuous choice of the trace that the update keeps
+   and no output rewrites, but that an output depends on, is an unchanged
+   output. GenTraceKernelDSL also drops outputs that depend on no input and
+   kernel choices no output depends on, which hides moves that are not
+   bijections (a constant output, randomness thrown away); here they make
+   the matrix non-square or singular, a loud error."
+  (:refer-clojure :exclude [+ -])
+  (:require [gen.array :as array :refer [+ -]]
             [gen.array.dtype :as dt]
             [gen.array.linalg :as la]
             [gen.choicemap :as cm]
@@ -54,12 +56,10 @@
 (defn- continuous-addresses [choices]
   (filterv #(continuous? (cm/get-choice choices %)) (cm/addresses choices)))
 
-(defn- size-of [v] (if (array/host? v) 1 (array/size v)))
-
 (defn- columns
   "[space path] of each flattened element of the values at addrs."
   [space choices addrs]
-  (vec (mapcat (fn [p] (repeat (size-of (cm/get-choice choices p)) [space p])) addrs)))
+  (vec (mapcat (fn [p] (repeat (array/size (cm/get-choice choices p)) [space p])) addrs)))
 
 (defn log-abs-det
   "log |det J| of kernel's move from trace (see the namespace doc): kc are
@@ -75,11 +75,11 @@
       0.0
       (let [source (fn [sp] (if (= sp :model) mc kc))
             in-values (mapv (fn [[sp p]] (cm/get-choice (source sp) p)) ins)
-            shapes (mapv #(if (array/host? %) [] (array/shape %)) in-values)
-            offsets (vec (reductions clojure.core/+ 0 (map size-of in-values)))
+            offsets (vec (reductions clojure.core/+ 0 (map array/size in-values)))
             substituted (fn [x]
                           (reduce (fn [[mc kc] [i [sp p]]]
-                                    (let [v (array/reshape (array/slice x 0 (offsets i) (offsets (inc i))) (shapes i))]
+                                    (let [v (array/reshape (array/slice x 0 (offsets i) (offsets (inc i)))
+                                                           (array/shape (in-values i)))]
                                       (if (= sp :model) [(cm/set-choice mc p v) kc] [mc (cm/set-choice kc p v)])))
                                   [mc kc] (map-indexed vector ins)))
             outputs (fn [x]
@@ -88,13 +88,17 @@
                         (array/concatenate (mapv (fn [[sp p]] (array/flatten (cm/get-choice (if (= sp :update) u b) p)))
                                                  outs))))
             x (array/concatenate (mapv array/flatten in-values))
-            m (reduce clojure.core/+ 0 (map (fn [[sp p]] (size-of (cm/get-choice (if (= sp :update) update backward) p))) outs))
-            eye (array/eye m)
-            jacobian (mapv (fn [j] (vec (array/->clj ((array/grad #(array/sum (* (outputs %) (array/take eye j)))) x))))
-                           (range m))
+            m (reduce clojure.core/+ 0 (map (fn [[sp p]] (array/size (cm/get-choice (if (= sp :update) update backward) p)))
+                                            outs))
+            jacobian (mapv (fn [j] (vec (array/->clj ((array/grad #(array/take (outputs %) j)) x)))) (range m))
             cols (into (columns :model mc (continuous-addresses mc)) (columns :kernel kc (continuous-addresses kc)))
-            rows (filterv #(some (complement zero?) %) jacobian)
-            used (filterv (fn [c] (some #(not (zero? (% c))) rows)) (range (count cols)))
+            ;; every output and every kernel choice counts: a constant output,
+            ;; or randomness no output keeps, is not a bijection (the thesis
+            ;; leaves out only what is copied); trace choices no output
+            ;; depends on are left alone
+            rows jacobian
+            used (filterv (fn [c] (or (= :kernel (first (cols c))) (some #(not (zero? (% c))) rows)))
+                          (range (count cols)))
             rewritten (set (continuous-addresses update))
             kept (filterv (fn [c] (let [[sp p] (cols c)] (and (= sp :model) (not (rewritten p)) (retained? p)))) used)
             square (into (mapv (fn [row] (mapv row used)) rows)
@@ -108,12 +112,6 @@
             (throw (ex-info "The trace kernel's Jacobian is singular here: its move is not a bijection" {})))
           logabs)))))
 
-(defn- unconstrained-additions [old-choices update discard new-choices]
-  (remove (fn [p] (or (cm/has-value? (cm/get-submap update p))
-                      (and (cm/has-value? (cm/get-submap old-choices p))
-                           (not (cm/has-value? (cm/get-submap discard p))))))
-          (cm/addresses new-choices)))
-
 (defn- kept-by [discard] (fn [p] (not (cm/has-value? (cm/get-submap discard p)))))
 
 (defn mh
@@ -125,7 +123,7 @@
    (let [[k-propose k-update k-accept] (rng/split key 3)
          {kc :choices fwd :weight [update backward :as ret] :retval} (gfi/propose kernel (into [trace] args) k-propose)
          {t' :trace w :weight discard :discard} (gfi/update trace update k-update)
-         _ (when-let [extra (seq (unconstrained-additions (:choices trace) update discard (:choices t')))]
+         _ (when-let [extra (seq (tf/unconstrained-additions (:choices trace) update discard (:choices t')))]
              (throw (ex-info (str "trace-kernel/mh: the kernel's update leaves new choices unwritten: " (vec extra))
                              {:addresses (vec extra)})))
          {bwd :weight} (gfi/assess kernel (into [t'] args) backward)]
@@ -147,16 +145,14 @@
    are k's and l's update restores the trace (with :prev-observations)."
   [{:keys [p-new-args p-argdiffs new-observations k k-args l l-args check? prev-observations]}]
   (fn [trace key]
-    (let [[k-propose k-update] (rng/split key)
+    (let [[k-propose k-update k-check] (rng/split key 3)
           {kc :choices fwd :weight [update backward :as ret] :retval} (gfi/propose k (into [trace] k-args) k-propose)
-          args (if p-new-args (vec p-new-args) (:args trace))
-          argdiffs (if p-argdiffs (vec p-argdiffs) (vec (repeat (count args) diff/unknown-change)))
-          {t' :trace w :weight discard :discard}
-          (gfi/update trace args argdiffs (cm/merge update (or new-observations cm/EMPTY)) k-update)
+          [args argdiffs] (tf/new-arguments trace p-new-args p-argdiffs)
+          {t' :trace w :weight discard :discard} (gfi/update trace args argdiffs (cm/merge update new-observations) k-update)
           {bwd :weight [l-update l-backward] :retval} (gfi/assess l (into [t'] l-args) backward)]
       (when check?
         (let [{t'' :trace} (gfi/update t' (:args trace) (vec (repeat (count (:args trace)) diff/unknown-change))
-                                       (cm/merge l-update (or prev-observations cm/EMPTY)) k-update)]
+                                       (cm/merge l-update prev-observations) k-check)]
           (when-not (tf/same-choices? kc l-backward)
             (throw (ex-info "smcp3: the backward kernel does not give back the forward kernel's choices"
                             {:forward (cm/to-map kc) :given-back (cm/to-map l-backward)})))

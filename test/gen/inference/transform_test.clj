@@ -95,6 +95,12 @@
       (write model-out :s (+ a b) :continuous)
       (write aux-out :d (- a b) :continuous))))
 
+(deftest pairing-is-symmetric
+  (let [[f g] (tf/pair to-pair to-sum)]
+    (is (= (:body to-sum) (:body (tf/inverse f))))
+    (is (= (:body to-pair) (:body (tf/inverse (tf/inverse f)))) "the inverse's inverse")
+    (is (= (:body to-pair) (:body (tf/inverse g))))))
+
 (deftest a-change-of-variables-translates-with-weight-zero
   ;; a, b iid N(0, 1) is s = a + b and d = a - b iid N(0, 2), Jacobian 1/2
   (let [[to-pair to-sum] (tf/pair to-pair to-sum)
@@ -279,7 +285,6 @@
 (deftest misuse-is-loud
   (let [x1 (cm/choicemap :x 1.0)]
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"maps 2 dimensions to 1"
-                          (tf/run scale-move x1 (cm/choicemap :u 0.1 :v 0.2))
                           (tf/run (tf/transform [mi ai mo ao]
                                     (let [x (read mi :x :continuous) u (read ai :u :continuous)]
                                       (write mo :x (+ x u) :continuous)))
@@ -296,6 +301,33 @@
                           (tf/run (tf/transform [mi ai mo ao] (read mi :x :real)) x1 nil)))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"inside a transform" (read :model-in :x :discrete)))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no inverse" (tf/inverse scale-move)))
+    (testing "a lazy loop that writes is an error at definition"
+      (is (re-find #"is lazy"
+                   (try (eval '(gen.inference.transform/transform [mi ai mo ao]
+                                   (for [i (range 2)] (gen.inference.transform/write mo [:x i] 1.0 :discrete))))
+                        ""
+                        (catch Exception e (ex-message (or (ex-cause e) e))))))
+      (let [t (tf/transform [mi ai mo ao] (doseq [i (range 2)] (write mo [:x i] (* 2.0 (read mi [:x i] :continuous)) :continuous)))]
+        (is (ts/close? (Math/log 4.0) (:log-abs-det (tf/run t (cm/choicemap [:x 0] 1.0 [:x 1] 2.0) nil))) "doseq runs")))
+    (testing "copying a subtree copies the reads under it: (x) to (2x, x) is no bijection"
+      (let [t (tf/transform [mi ai mo ao]
+                (write mo :y (* 2.0 (read mi [:a :x] :continuous)) :continuous)
+                (copy mi :a mo :a))]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"maps 1 dimensions to 2"
+                              (tf/run t (cm/choicemap [:a :x] 1.0) nil)))))
+    (testing "an extending transform may not write auxiliary choices"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"writes auxiliary choices"
+                            ((tf/extending-translator
+                              {:p-new-args [] :q-forward (gen [_] (trace :z (d/normal 0 1)))
+                               :transform (tf/transform [mi ai mo ao]
+                                            (write mo :x (read mi :z :continuous) :continuous)
+                                            (write ao :d 1.0 :continuous))})
+                             (gfi/simulate p-normal [] (rng/key 30)) (rng/key 31)))))
+    (testing "inputs are traces or choice maps"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"from-map" (tf/run scale-move {:x 1.0} nil))))
+    (testing "every translator checks its transform"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"needs a transform" (tf/involution :nope)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"needs a transform" (tf/updating-translator {:transform :nope}))))
     (testing "an involution must write every new choice"
       (let [half (tf/transform [model-in aux-in model-out aux-out]
                    (read model-in :mu :continuous) (read aux-in :u :continuous)

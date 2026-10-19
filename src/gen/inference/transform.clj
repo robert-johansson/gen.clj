@@ -55,10 +55,10 @@
   (:refer-clojure :exclude [read + - * /])
   (:require [gen.array :as array :refer [+ - * /]]
             [gen.array.dtype :as dt]
-            [gen.array.linalg :as la]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.gfi :as gfi]
+            [gen.gradients :as grad]
             [gen.random :as rng]))
 
 (set! *warn-on-reflection* true)
@@ -145,20 +145,45 @@
                     (update :written-set conj [to-space tp])))
     nil))
 
+(declare check-transform)
+
 (defn tcall
   "Run transform t's body on the current spaces (Gen.jl's @tcall)."
   [t]
   (state! :tcall)
+  (check-transform :tcall t)
   ((:body t)))
+
+(def ^:private lazy-fns
+  '#{clojure.core/map clojure.core/map-indexed clojure.core/mapcat clojure.core/keep
+     clojure.core/keep-indexed clojure.core/filter clojure.core/remove clojure.core/for})
+
+(defn- var-name [env sym]
+  (when (symbol? sym)
+    (let [v (try (resolve env sym) (catch Exception _ nil))]
+      (when (var? v) (symbol v)))))
+
+(defn- check-eager
+  "A lazy call (for, map, …) holding a write, copy or tcall might never run:
+   a loud error when the transform is defined (Gen.jl's loops are eager)."
+  [env body]
+  (doseq [form (tree-seq coll? seq body)
+          :when (and (seq? form) (lazy-fns (var-name env (first form)))
+                     (some #(#{`write `copy `tcall} (var-name env %)) (tree-seq coll? seq (rest form))))]
+    (throw (ex-info (str "transform: " (pr-str (first form)) " is lazy, so the writes in it might never run;"
+                         " use doseq, run! or mapv")
+                    {:form form}))))
 
 (defmacro transform
   "A transform: (transform [model-in aux-in model-out aux-out] body …), the
    four names bound to the spaces read, write and copy take (see the
-   namespace doc)."
+   namespace doc). Loops that write are doseq, run! or mapv: a lazy one is
+   an error."
   [spaces & body]
   (when-not (and (vector? spaces) (= 4 (count spaces)) (every? symbol? spaces))
     (throw (ex-info "transform: the spaces are a vector of four names, [model-in aux-in model-out aux-out]"
                     {:spaces spaces})))
+  (check-eager &env body)
   (let [[mi ai mo ao] spaces]
     `(->Transform nil (fn [] (let [~mi :model-in ~ai :aux-in ~mo :model-out ~ao :aux-out] ~@body nil)) nil)))
 
@@ -169,26 +194,33 @@
     `(def ~(cond-> tname doc (vary-meta assoc :doc doc))
        (assoc (transform ~@more) :name '~tname))))
 
+(defn- check-transform [op t]
+  (when-not (transform? t)
+    (throw (ex-info (str (name op) " needs a transform (gen.inference.transform/transform), not " (pr-str t))
+                    {:op op}))))
+
 (defn pair
-  "[f' g']: transforms f and g, each with the other as its inverse (Gen.jl's
-   pair_bijections!)."
+  "[f' g']: transforms f and g, each with the other as its inverse, both
+   ways (Gen.jl's pair_bijections!)."
   [f g]
-  (let [f' (assoc f :inverse g)]
-    [f' (assoc g :inverse f')]))
+  (check-transform :pair f)
+  (check-transform :pair g)
+  [(assoc f :inverse (:body g)) (assoc g :inverse (:body f))])
 
 (defn involutive
   "Transform t as its own inverse (Gen.jl's is_involution!)."
   [t]
-  (assoc t :inverse ::self))
+  (check-transform :involutive t)
+  (assoc t :inverse (:body t)))
 
 (defn inverse
-  "t's inverse, as pair or involutive set it."
+  "t's inverse, as pair or involutive set it; the inverse's inverse is t."
   [t]
-  (case (:inverse t)
-    nil (throw (ex-info (str "The transform " (:name t) " has no inverse: pair it, or mark it involutive")
-                        {:transform (:name t)}))
-    ::self t
-    (:inverse t)))
+  (check-transform :inverse t)
+  (if-let [body (:inverse t)]
+    (assoc t :body body :inverse (:body t))
+    (throw (ex-info (str "The transform " (:name t) " has no inverse: pair it, or mark it involutive")
+                    {:transform (:name t)}))))
 
 ;; ---------------------------------------------------------------------------
 ;; Running a transform, and its Jacobian
@@ -197,7 +229,10 @@
 (defn- choices-of [x]
   (cond (nil? x) cm/EMPTY
         (cm/choicemap? x) x
-        (map? x) (:choices x)))
+        (contains? x :choices) (:choices x)
+        :else (throw (ex-info (str "A transform reads a trace or a choice map, not " (pr-str x)
+                                   " (convert data with gen.choicemap/from-map)")
+                              {:value x}))))
 
 (defn- execute
   "One run of t's body on the inputs, the continuous reads replaced by subst
@@ -210,19 +245,21 @@
     (binding [*run* st] ((:body t)))
     @st))
 
+(defn- under? [prefix p]
+  (and (<= (count prefix) (count p)) (= prefix (subvec p 0 (count prefix)))))
+
 (defn- output-specs
-  "The continuous outputs of run s, in order: the writes, the copies of
-   continuous reads, and the continuous model-in reads that retained? keeps
-   and nothing overwrites."
+  "The continuous outputs of run s, in order: the writes, the continuous
+   reads at or under a copied path (copied unchanged), and the continuous
+   model-in reads that retained? keeps and nothing overwrites."
   [s retained?]
-  (let [continuous-reads (set (for [[sp p tag] (:reads s) :when (= tag :continuous)] [sp p]))
-        copied (set (for [[fs fp] (:copies s)] [fs fp]))
+  (let [continuous-reads (for [[sp p tag] (:reads s) :when (= tag :continuous)] [sp p])
+        copied? (fn [[sp p]] (some (fn [[fs fp]] (and (= fs sp) (under? fp p))) (:copies s)))
         written-model (set (for [[sp p] (:written-set s) :when (= sp :model-out)] p))]
     (vec (concat (for [[sp p tag] (:writes s) :when (= tag :continuous)] [:write sp p])
-                 (for [[fs fp ts tp] (:copies s) :when (continuous-reads [fs fp])] [:copy fs fp])
-                 (for [[sp p tag] (:reads s)
-                       :when (and (= tag :continuous) (= sp :model-in) (not (written-model p))
-                                  (not (copied [sp p])) (retained? p))]
+                 (for [r continuous-reads :when (copied? r)] (into [:copy] r))
+                 (for [[sp p :as r] continuous-reads
+                       :when (and (= sp :model-in) (not (written-model p)) (not (copied? r)) (retained? p))]
                    [:retain sp p])))))
 
 (defn- output-value [s [kind sp p]]
@@ -230,9 +267,7 @@
     :write (cm/get-choice (get-in s [:outputs sp]) p)
     (:copy :retain) (get (:subst s) [sp p] (cm/get-choice (get-in s [:inputs sp]) p))))
 
-(defn- size-of [v] (if (array/host? v) 1 (array/size v)))
-
-(defn log-abs-det
+(defn- log-abs-det
   "log |det J| of the continuous part of run s of t on model-in and aux-in
    (see the namespace doc): retained? says which model-in addresses the
    result keeps unwritten."
@@ -240,28 +275,24 @@
   (let [ins (filterv #(= :continuous (nth % 2)) (:reads s))
         in-values (mapv (fn [[sp p]] (cm/get-choice (get-in s [:inputs sp]) p)) ins)
         outs (output-specs s retained?)
-        n (reduce clojure.core/+ 0 (map size-of in-values))
-        m (reduce clojure.core/+ 0 (map #(size-of (output-value s %)) outs))]
+        offsets (vec (reductions clojure.core/+ 0 (map array/size in-values)))
+        n (peek offsets)
+        m (reduce clojure.core/+ 0 (map #(array/size (output-value s %)) outs))]
     (when-not (= n m)
-      (throw (ex-info (str "The transform's continuous part maps " n " dimensions to " m
-                           "; a bijection keeps them equal (inputs " (mapv #(vec (take 2 %)) ins)
-                           ", outputs " (mapv #(vec (rest %)) outs) ")")
-                      {:inputs (mapv #(vec (take 2 %)) ins) :outputs (mapv #(vec (rest %)) outs)})))
+      (let [inputs (mapv #(vec (take 2 %)) ins) outputs (mapv #(vec (rest %)) outs)]
+        (throw (ex-info (str "The transform's continuous part maps " n " dimensions to " m
+                             "; a bijection keeps them equal (inputs " inputs ", outputs " outputs ")")
+                        {:inputs inputs :outputs outputs}))))
     (if (zero? n)
       0.0
-      (let [shapes (mapv #(if (array/host? %) [] (array/shape %)) in-values)
-            offsets (vec (reductions clojure.core/+ 0 (map size-of in-values)))
-            unflatten (fn [x] (into {} (map-indexed (fn [i [sp p]]
-                                                      (let [v (array/slice x 0 (offsets i) (offsets (inc i)))]
-                                                        [[sp p] (array/reshape v (shapes i))]))
+      (let [unflatten (fn [x] (into {} (map-indexed (fn [i [sp p]]
+                                                      [[sp p] (array/reshape (array/slice x 0 (offsets i) (offsets (inc i)))
+                                                                             (array/shape (in-values i)))])
                                                     ins)))
             g (fn [x] (let [run (execute t model-in aux-in (unflatten x))]
                         (array/concatenate (mapv #(array/flatten (output-value run %)) outs))))
-            x (array/concatenate (mapv array/flatten in-values))
-            eye (array/eye n)
-            jacobian (array/stack (mapv (fn [j] ((array/grad #(array/sum (* (g %) (array/take eye j)))) x)) (range n)))
-            [sign logabs] (la/slogdet jacobian)]
-        (when (zero? (double (array/item sign)))
+            logabs (grad/log-abs-det-jacobian g (array/concatenate (mapv array/flatten in-values)))]
+        (when (== ##-Inf (double (array/item logabs)))
           (throw (ex-info "The transform's Jacobian is singular here: its continuous part is not a bijection"
                           {:transform (:name t)})))
         logabs))))
@@ -283,7 +314,9 @@
 (defn- same-value? [x y]
   (cond (not (and (array/array? x) (array/array? y))) (= x y)
         (not= (array/shape x) (array/shape y)) false
-        (every? #(= :float (dt/kind (array/dtype %))) [x y]) (array/allclose? x y {:rtol 1e-6 :atol 1e-9})
+        (every? #(= :float (dt/kind (array/dtype %))) [x y])
+        ;; about √eps of the dtype: a round trip loses a few ulps
+        (array/allclose? x y (if (some #(= :float32 (array/dtype %)) [x y]) {:rtol 3e-4 :atol 1e-5} {:rtol 1e-7 :atol 1e-9}))
         :else (= (array/->clj x) (array/->clj y))))
 
 (defn same-choices?
@@ -299,9 +332,10 @@
     (throw (ex-info (str "The inverse transform does not give back the " what)
                     {:before (cm/to-map before) :after (cm/to-map after)}))))
 
-(defn- unconstrained-additions
-  "The addresses of new-trace's choices that neither the constraints nor
-   the old trace's retained choices account for."
+(defn unconstrained-additions
+  "The addresses of new-choices (an updated trace's) that neither the
+   constraints nor the old trace's choices that the update kept (not in
+   discard) account for: choices the update sampled."
   [old-choices constraints discard new-choices]
   (remove (fn [p] (or (cm/has-value? (cm/get-submap constraints p))
                       (and (cm/has-value? (cm/get-submap old-choices p))
@@ -330,15 +364,14 @@
   [{:keys [p-new p-new-args new-observations q-forward q-forward-args q-backward q-backward-args check?
            prev-observations]
     t :transform}]
-  (when-not (transform? t)
-    (throw (ex-info "translator needs :transform, a transform (gen.inference.transform/transform)" {})))
+  (check-transform :translator t)
   (fn [trace key]
     (let [[k-propose k-generate] (rng/split key)
           {u :choices fwd :weight} (propose q-forward q-forward-args trace k-propose)
           s (execute t trace u nil)
           model-out (get-in s [:outputs :model-out])
           aux-out (get-in s [:outputs :aux-out])
-          constraints (cm/merge model-out (or new-observations cm/EMPTY))
+          constraints (cm/merge model-out new-observations)
           {t' :trace} (gfi/generate p-new (vec p-new-args) constraints k-generate)
           _ (when-let [extra (seq (unconstrained-additions cm/EMPTY constraints cm/EMPTY (:choices t')))]
               (throw (ex-info (str "translator: the new trace has choices the transform did not write: " (vec extra))
@@ -353,7 +386,7 @@
       (when check?
         (let [back (execute (inverse t) t' aux-out nil)]
           (check-round-trip! "model choices" (:choices trace)
-                             (cm/merge (get-in back [:outputs :model-out]) (or prev-observations cm/EMPTY)))
+                             (cm/merge (get-in back [:outputs :model-out]) prev-observations))
           (check-round-trip! "auxiliary choices" u (get-in back [:outputs :aux-out]))))
       {:trace t' :weight (+ (- (:score t') (:score trace)) (- bwd fwd) ldj)})))
 
@@ -364,7 +397,10 @@
   ([p-new p-new-args new-observations t opts]
    (translator (merge opts {:p-new p-new :p-new-args p-new-args :new-observations new-observations :transform t}))))
 
-(defn- new-args [trace p-new-args p-argdiffs]
+(defn new-arguments
+  "[args argdiffs] for a translator's update: p-new-args (the trace's own
+   by default) and p-argdiffs (unknown changes by default)."
+  [trace p-new-args p-argdiffs]
   (let [args (if p-new-args (vec p-new-args) (:args trace))]
     [args (if p-argdiffs (vec p-argdiffs) (vec (repeat (count args) diff/unknown-change)))]))
 
@@ -375,16 +411,20 @@
    mapped by :transform first when given (its model-in is the proposal's
    choices, as GenParticleFilters' ExtendingTraceTranslator); the weight is
    the update's minus the proposal's, plus log |det J|. The update may only
-   add choices."
+   add choices, and the transform may write no auxiliary choices (there is
+   no backward proposal to weigh them)."
   [{:keys [p-new-args p-argdiffs new-observations q-forward q-forward-args] t :transform}]
+  (some->> t (check-transform :extending-translator))
   (fn [trace key]
     (let [[k-propose k-update] (rng/split key)
           {u :choices fwd :weight} (propose q-forward q-forward-args trace k-propose)
           s (when t (execute t u nil nil))
-          [args argdiffs] (new-args trace p-new-args p-argdiffs)
+          _ (when (and s (not (cm/empty? (get-in s [:outputs :aux-out]))))
+              (throw (ex-info "extending-translator: the transform writes auxiliary choices, which nothing weighs"
+                              {:aux (cm/to-map (get-in s [:outputs :aux-out]))})))
+          [args argdiffs] (new-arguments trace p-new-args p-argdiffs)
           {t' :trace w :weight discard :discard}
-          (gfi/update trace args argdiffs
-                      (cm/merge (or new-observations cm/EMPTY) (if t (get-in s [:outputs :model-out]) u)) k-update)]
+          (gfi/update trace args argdiffs (cm/merge new-observations (if t (get-in s [:outputs :model-out]) u)) k-update)]
       (when-not (cm/empty? discard)
         (throw (ex-info "extending-translator: the update changed or removed choices; it may only add them"
                         {:discard (cm/to-map discard)})))
@@ -405,14 +445,14 @@
   [{:keys [p-new-args p-argdiffs new-observations q-forward q-forward-args q-backward q-backward-args
            check? prev-observations]
     t :transform}]
+  (some->> t (check-transform :updating-translator))
   (fn [trace key]
-    (let [[k-propose k-update] (rng/split key)
+    (let [[k-propose k-update k-check] (rng/split key 3)
           {u :choices fwd :weight} (propose q-forward q-forward-args trace k-propose)
-          [args argdiffs] (new-args trace p-new-args p-argdiffs)
-          obs (or new-observations cm/EMPTY)
+          [args argdiffs] (new-arguments trace p-new-args p-argdiffs)
           s (when t (execute t trace u nil))
           {t' :trace w :weight discard :discard}
-          (gfi/update trace args argdiffs (cm/merge (if t (get-in s [:outputs :model-out]) u) obs) k-update)
+          (gfi/update trace args argdiffs (cm/merge (if t (get-in s [:outputs :model-out]) u) new-observations) k-update)
           ldj (if t (log-abs-det t trace u s (fn [p] (not (cm/has-value? (cm/get-submap discard p))))) 0.0)
           u' (if t (get-in s [:outputs :aux-out]) discard)
           bwd (cond q-backward (:weight (gfi/assess q-backward (into [t'] q-backward-args) u'))
@@ -423,9 +463,8 @@
         (let [s-back (when t (execute (inverse t) t' u' nil))
               back-args (:args trace)
               {t'' :trace} (gfi/update t' back-args (vec (repeat (count back-args) diff/unknown-change))
-                                     (cm/merge (if t (get-in s-back [:outputs :model-out]) u')
-                                               (or prev-observations cm/EMPTY))
-                                     k-update)]
+                                     (cm/merge (if t (get-in s-back [:outputs :model-out]) u') prev-observations)
+                                     k-check)]
           (check-round-trip! "trace" (:choices trace) (:choices t''))
           (when t (check-round-trip! "forward choices" u (get-in s-back [:outputs :aux-out])))))
       {:trace t' :weight (+ w (- bwd fwd) ldj)})))
@@ -442,6 +481,7 @@
    give back the trace and the forward choices."
   ([t] (involution t {}))
   ([t {:keys [check?]}]
+   (check-transform :involution t)
    (fn [trace fwd-choices _ _]
      (let [s (execute t trace fwd-choices nil)
            model-out (get-in s [:outputs :model-out])

@@ -473,3 +473,28 @@
             bwd (:weight (gfi/assess move-back [tr' 1] (cm/choicemap [0 :x] (tr [0 :x]))))]
         (is (not= (tr [0 :x]) (tr' [0 :x])))
         (is (ts/close? (- w' w) (+ (- (:score tr') (:score tr)) (- bwd fwd))))))))
+
+(def walk-and-standard (gen [tr] (trace :w (d/normal (tr [0 :x]) 0.3)) (trace :z (d/normal 0 1))))
+(def walk-back (gen [tr] (trace :back (d/normal (tr [0 :x]) 0.3))))
+
+(def move-and-propose
+  "x_0 moved to w, x_1 = m(w) + s·z from the optimal moments given w, the old
+   x_0 handed back: |det J| = s."
+  (tf/transform [model-in aux-in model-out aux-out]
+    (let [x0 (tf/read model-in [0 :x] :continuous)
+          w (tf/read aux-in :w :continuous)
+          [m s] (optimal-moments w (ys 1))]
+      (tf/write model-out [0 :x] w :continuous)
+      (tf/write model-out [1 :x] (+ m (* s (tf/read aux-in :z :continuous))) :continuous)
+      (tf/write aux-out :back x0 :continuous))))
+
+(deftest smcp3-with-backward-choices
+  ;; the walk is symmetric, so the weight is the score change less log N(x_1; m(x_0'), s)
+  (let [state (pf/initialize model [1 0.0] (observation 0) 6 {:key (rng/key 90)})
+        moved (pf/move-reweight state (tf/updating-translator (assoc (step-args 1) :q-forward walk-and-standard
+                                                                     :q-backward walk-back :transform move-and-propose))
+                                (rng/key 91))]
+    (doseq [[tr tr' w w'] (map vector (:traces state) (:traces moved) (:log-weights state) (:log-weights moved))]
+      (let [[m s] (optimal-moments (tr' [0 :x]) (ys 1))]
+        (is (not= (tr [0 :x]) (tr' [0 :x])))
+        (is (ts/close? (- w' w) (- (- (:score tr') (:score tr)) (ts/number (dc/log-prob (d/normal m s) (tr' [1 :x]))))))))))
