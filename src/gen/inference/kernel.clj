@@ -168,7 +168,8 @@
       (if (< i steps)
         (let [r (f t (keys i))
               i' (inc i)
-              t' (:trace r)
+              ;; one iteration's graph at a time on a lazy backend
+              t' (gfi/eval-trace! (:trace r))
               keep? (and (> i' burn) (zero? (mod (- i' burn) thin)))
               ms (accepted-moves r)]
           (recur i' t' (if keep? (conj! traces t') traces)

@@ -415,9 +415,9 @@
    components; weights are the components' probabilities."
   [family]
   (fn [weights & params]
-    (let [w (dc/->array weights)
+    (let [_ (dc/check-probabilities "homogeneous-mixture" "weights" (dc/->checkable weights))
+          w (dc/->array weights)
           params (mapv dc/->array params)]
-      (dc/check-probabilities "homogeneous-mixture" "weights" w)
       (dc/->Distribution ::homogeneous-mixture {:family family :weights w :params params}))))
 
 (defmethod dc/-sample ::homogeneous-mixture [{{:keys [family weights params]} :params} key shape]
@@ -441,7 +441,7 @@
         (dc/check (= (count families) (count component-params) (peek (a/shape w)))
                   "heterogeneous-mixture" "needs one weight and one parameter vector per component"
                   {:families (count families) :params (count component-params)})
-        (dc/check-probabilities "heterogeneous-mixture" "weights" w)
+        (dc/check-probabilities "heterogeneous-mixture" "weights" (dc/->checkable weights))
         (dc/->Distribution ::heterogeneous-mixture
                            {:weights w :components (mapv #(apply %1 %2) families component-params)})))))
 

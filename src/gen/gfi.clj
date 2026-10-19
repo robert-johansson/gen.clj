@@ -28,7 +28,8 @@
    Gen.jl's trace[addr]: (tr :slope), (tr [:y 0]); :choices, :retval, :score
    and :args are its fields."
   (:refer-clojure :exclude [update])
-  (:require [gen.array.batch :as batch]
+  (:require [gen.array :as a]
+            [gen.array.batch :as batch]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.random :as rng]
@@ -131,6 +132,18 @@
     (throw (ex-info (str (name op) ": the selection must be a selection, such as (gen.selection/select :a), not "
                          (pr-str x))
                     {:op op :value x}))))
+
+(defn eval-trace!
+  "Force the evaluation of tr's arrays (choices, return value and score) on
+   a lazy backend, and return tr. Inference loops call it once per
+   iteration (docs/array-api.md §9), so that a lazy backend's graph stays
+   one iteration deep. With also, a tree of other arrays (a weight, say) is
+   evaluated with it. A no-op on eager backends."
+  ([tr] (eval-trace! tr nil))
+  ([tr also]
+   ;; one evaluation for the trace and also (e.g. a weight)
+   (a/eval! [(:choices tr) (:retval tr) (:score tr) also])
+   tr))
 
 (defn simulate
   "Sample a trace of gf on args."

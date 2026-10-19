@@ -594,8 +594,10 @@
   "Force evaluation of every backend array in the tree t (a hint on eager
    backends: a no-op). Returns t."
   [t]
-  (doseq [[b xs] (group-by p/-backend (filter backend-array? (tree-leaves t)))]
-    (p/-eval! b xs))
+  ;; no tree walk where only eager backends exist
+  (when @p/lazy-backends?
+    (doseq [[b xs] (group-by p/-backend (filter backend-array? (tree-leaves t)))]
+      (p/-eval! b xs)))
   t)
 
 ;; ---------------------------------------------------------------------------

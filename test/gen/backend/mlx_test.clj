@@ -139,9 +139,22 @@
   (when-mlx
     (let [b (mlx)
           memory (requiring-resolve 'gen.backend.mlx/memory)
-          live (fn [] (System/gc) (Thread/sleep 50) (System/gc) (Thread/sleep 50) (:active (memory)))
+          live (fn [] (System/gc) (Thread/sleep 50) (gen.mlx.MlxRuntime/drain) (:active (memory)))
           base (live)]
       ;; 200 evaluated [100000] float32 arrays: 80 MB if none were freed
       (dotimes [_ 200]
         (a/eval! (a/with-backend b (a/+ (a/zeros [100000]) 1.0))))
-      (is (< (- (live) base) 8e6) "the Cleaner frees what nothing references"))))
+      (is (< (- (live) base) 8e6) "unreachable arrays are freed"))))
+
+(deftest array-pressure-collects
+  (when-mlx
+    (let [b (mlx)
+          [live0 collections0] (vec (gen.mlx.MlxRuntime/lifetimeStats))]
+      ;; 300,000 unevaluated scalars, kept unreachable: more than the
+      ;; collection threshold, and close to Metal's buffer limit if none
+      ;; were freed
+      (dotimes [_ 300000]
+        (a/with-backend b (a/+ (a/array 1.0) 1.0)))
+      (let [[live collections] (vec (gen.mlx.MlxRuntime/lifetimeStats))]
+        (is (< live 250000) "live arrays stay below the threshold's reach")
+        (is (> collections collections0) "pressure collected")))))

@@ -1,5 +1,6 @@
 (ns gen.dist-test
-  (:require [clojure.edn :as edn]
+  (:require [gen.test-support :as ts]
+            [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
             [gen.array :as a]
             [gen.choicemap :as cm]
@@ -25,11 +26,13 @@
 
 (deftest values-and-shapes
   (let [k (rng/key 3)]
-    (testing "scalar draws are host values"
-      (is (instance? Double (dc/sample (d/normal 0 1) k)))
-      (is (instance? Boolean (dc/sample (d/bernoulli 0.5) k)) "bernoulli gives booleans, as Gen.jl")
-      (is (instance? Long (dc/sample (d/categorical [0.5 0.5]) k)) "categorical gives 0-based integers")
-      (is (instance? Long (dc/sample (d/poisson 3.0) k))))
+    (testing "scalar draws: host values on the JVM backend, 0-d arrays on others"
+      (is (instance? Double (ts/host (dc/sample (d/normal 0 1) k))))
+      (is (instance? Boolean (ts/host (dc/sample (d/bernoulli 0.5) k))) "bernoulli gives booleans, as Gen.jl")
+      (is (instance? Long (ts/host (dc/sample (d/categorical [0.5 0.5]) k))) "categorical gives 0-based integers")
+      (is (instance? Long (ts/host (dc/sample (d/poisson 3.0) k))))
+      (when (ts/jvm?)
+        (is (instance? Double (dc/sample (d/normal 0 1) k)))))
     (testing "batch shapes broadcast with parameter shapes"
       (is (= [5] (a/shape (dc/sample (d/normal 0 1) k [5]))))
       (is (= [5 3] (a/shape (dc/sample (d/normal (a/zeros [3]) 1) k [5 1]))))
@@ -70,14 +73,14 @@
       (is (a/allclose? 1.0 (reduce + (map #(Math/exp (a/item (dc/log-prob dist %))) (dc/support dist))))))))
 
 (deftest outside-the-support
-  (is (= ##-Inf (dc/log-prob (d/categorical [0.5 0.5]) 2)))
-  (is (= ##-Inf (dc/log-prob (d/categorical [0.5 0.5]) 0.5)) "non-integers are outside the support")
-  (is (= ##-Inf (dc/log-prob (d/categorical [0.5 0.5]) -1)))
+  (is (= ##-Inf (ts/host (dc/log-prob (d/categorical [0.5 0.5]) 2))))
+  (is (= ##-Inf (ts/host (dc/log-prob (d/categorical [0.5 0.5]) 0.5))) "non-integers are outside the support")
+  (is (= ##-Inf (ts/host (dc/log-prob (d/categorical [0.5 0.5]) -1))))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"booleans" (dc/log-prob (d/bernoulli 0.3) 0.5))
       "a bernoulli value is a boolean: 0/1 (GenMLX's) would be scored one way and branched on the other")
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"booleans" (dc/log-prob (d/bernoulli 0.3) 0)))
   (is (= ##-Inf (dc/log-prob (d/poisson 2.0) 1.5)))
-  (is (= ##-Inf (dc/log-prob (d/dirichlet [1.0 1.0]) (a/array [0.7 0.7])))))
+  (is (= ##-Inf (ts/host (dc/log-prob (d/dirichlet [1.0 1.0]) (a/array [0.7 0.7]))))))
 
 (deftest distributions-are-generative-functions
   (let [dist (d/normal 1.0 2.0)
@@ -91,14 +94,14 @@
       (is (= w (dc/log-prob dist 3.0))))
     (let [{t2 :trace w :weight disc :discard} (gfi/update tr (cm/->Value 0.0))]
       (is (= 0.0 (:retval t2)))
-      (is (a/allclose? w (- (dc/log-prob dist 0.0) (:score tr))))
+      (is (a/allclose? w (a/- (dc/log-prob dist 0.0) (:score tr))))
       (is (= (:choices tr) disc)))
     (is (= (:score tr) (gfi/project tr sel/all)))
     (is (= 0.0 (gfi/project tr (sel/select :x))))
     (is (= tr (:trace (gfi/regenerate tr sel/none k))))
     (is (= 0.0 (:weight (gfi/regenerate tr sel/all k))))))
 
-(defn- close? [actual expected band] (< (Math/abs (- (double actual) (double expected))) band))
+(defn- close? [actual expected band] (< (Math/abs (- (ts/number actual) (ts/number expected))) band))
 
 (deftest sampler-moments
   ;; fixed key, so deterministic; bands about five standard errors

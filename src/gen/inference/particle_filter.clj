@@ -75,6 +75,7 @@
      (let [{ps' :particles ws :weights ds :discards}
            (batched/update ps args argdiffs observations (or (:key opts) (gfi/next-key)))]
        (doseq [[i d] (map-indexed vector ds)] (check-discard d i))
+       (a/eval! (:trace ps'))
        (assoc state :particles ps' :log-weights (mapv + (:log-weights state) (a/->clj ws))))
    (let [state (if-let [ps (:particles state)]
                  (-> state (dissoc :particles) (assoc :traces (batched/traces ps)))
@@ -90,10 +91,13 @@
                   (let [r (gfi/update tr args argdiffs observations key)]
                     (check-discard (:discard r) i)
                     r)))
-         results (mapv move (range n) (:traces state) (particle-keys opts n))]
+         results (mapv move (range n) (:traces state) (particle-keys opts n))
+         log-weights (mapv + (:log-weights state) (mapv :weight results))]
+     ;; one step's graph at a time on a lazy backend
+     (a/eval! [(mapv (comp gfi/eval-trace! :trace) results) log-weights])
      (assoc state
             :traces (mapv :trace results)
-            :log-weights (mapv + (:log-weights state) (mapv :weight results)))))))
+            :log-weights log-weights)))))
 
 (defn ess
   "The effective sample size of the particles' weights."

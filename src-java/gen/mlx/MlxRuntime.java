@@ -10,9 +10,13 @@ import java.lang.foreign.SymbolLookup;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.lang.ref.PhantomReference;
+import java.lang.ref.Reference;
+import java.lang.ref.ReferenceQueue;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import static java.lang.foreign.ValueLayout.*;
@@ -189,6 +193,131 @@ public final class MlxRuntime {
 
   public static Scratch scratch() {
     return SCRATCH.get().reset();
+  }
+
+  // ---- array lifetime --------------------------------------------------------------
+
+  /** A phantom reference to a Java value owning an MLX array handle. */
+  private static final class Owned extends PhantomReference<Object> {
+    final long handle;
+
+    Owned(Object owner, long handle) {
+      super(owner, OWNED_QUEUE);
+      this.handle = handle;
+    }
+  }
+
+  private static final ReferenceQueue<Object> OWNED_QUEUE = new ReferenceQueue<>();
+  private static final Set<Owned> OWNED = ConcurrentHashMap.newKeySet();
+  private static final AtomicLong LIVE = new AtomicLong();
+  private static final AtomicLong ADOPTED = new AtomicLong();
+
+  /** Collect when this many arrays are live (Metal allows about 500,000
+   *  buffers in all; each array with data holds one): the system property
+   *  gen.mlx.gc-arrays, default 100,000. The threshold rises to twice the
+   *  arrays still live after a collection, so a large working set does not
+   *  collect on every array. */
+  private static final long BASE_ARRAYS = Long.getLong("gen.mlx.gc-arrays", 100_000L);
+  /** Collect when MLX's active memory exceeds this many bytes: gen.mlx.gc-bytes,
+   *  default a quarter of the physical memory. */
+  private static final long BASE_BYTES = Long.getLong("gen.mlx.gc-bytes", physicalMemory() / 4);
+  private static volatile long arrayThreshold = BASE_ARRAYS;
+  private static volatile long byteThreshold = BASE_BYTES;
+  private static final AtomicLong COLLECTIONS = new AtomicLong();
+
+  private static long physicalMemory() {
+    try {
+      return ((com.sun.management.OperatingSystemMXBean)
+          java.lang.management.ManagementFactory.getOperatingSystemMXBean()).getTotalMemorySize();
+    } catch (Throwable t) {
+      return 8L << 30;
+    }
+  }
+
+  /** Make owner (a Java value) own the array handle: it is freed once owner
+   *  is unreachable, by whichever thread next makes an array or collects.
+   *  Frees only drop a reference: a graph that still needs the array keeps
+   *  it. Collects (System.gc) under array or memory pressure, since the GC
+   *  does not see MLX's native memory. */
+  public static void adopt(Object owner, long handle) {
+    OWNED.add(new Owned(owner, handle));
+    long live = LIVE.incrementAndGet();
+    long n = ADOPTED.incrementAndGet();
+    if ((n & 255) == 0) drain();
+    if (live > arrayThreshold || ((n & 4095) == 0 && activeMemory() > byteThreshold)) collect();
+  }
+
+  /** Free the handles of owners found unreachable; returns how many. */
+  public static int drain() {
+    int freed = 0;
+    Reference<?> r;
+    while ((r = OWNED_QUEUE.poll()) != null) freed += release((Owned) r);
+    return freed;
+  }
+
+  private static int release(Owned o) {
+    if (!OWNED.remove(o)) return 0;
+    MlxRaw.mlx_array_free(o.handle);
+    LIVE.decrementAndGet();
+    return 1;
+  }
+
+  /** Run the GC and free what it found unreachable, then reset the
+   *  thresholds above what is still live (but below Metal's limit). */
+  public static synchronized void collect() {
+    if (LIVE.get() <= arrayThreshold && activeMemory() <= byteThreshold) return;
+    COLLECTIONS.incrementAndGet();
+    System.gc();
+    // the reference handler enqueues what the GC found after the GC returns:
+    // free until the queue stays empty for a moment
+    try {
+      Reference<?> r;
+      while ((r = OWNED_QUEUE.remove(10)) != null) {
+        release((Owned) r);
+        drain();
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
+    arrayThreshold = Math.min(MAX_ARRAYS, Math.max(BASE_ARRAYS, 2 * LIVE.get()));
+    byteThreshold = Math.max(BASE_BYTES, 2 * activeMemory());
+  }
+
+  /** The highest array threshold: 60% of Metal's buffer limit (the device's
+   *  resource_limit; MLX on macOS allocates every buffer through Metal, also
+   *  on the CPU device), or 300,000 where there is none. */
+  private static final long MAX_ARRAYS = maxArrays();
+
+  private static long maxArrays() {
+    try {
+      Scratch s = scratch();
+      long dev = MlxRaw.mlx_device_new_type(1, 0);
+      MemorySegment info = s.out(1);
+      if (MlxRaw.mlx_device_info_get(info, dev) == 0) {
+        long handle = info.get(JAVA_LONG, 0);
+        MemorySegment key = s.string("resource_limit");
+        MemorySegment has = s.out(1);
+        if (MlxRaw.mlx_device_info_has_key(has, handle, key) == 0 && has.get(JAVA_BOOLEAN, 0)) {
+          MemorySegment v = s.out(1);
+          if (MlxRaw.mlx_device_info_get_size(v, handle, key) == 0) {
+            return Math.max(BASE_ARRAYS, (long) (0.6 * v.get(JAVA_LONG, 0)));
+          }
+        }
+      }
+    } catch (Throwable t) {
+      // no GPU device: no Metal limit
+    }
+    return Math.max(BASE_ARRAYS, 300_000L);
+  }
+
+  private static long activeMemory() {
+    MemorySegment o = scratch().out(1);
+    return MlxRaw.mlx_get_active_memory(o) == 0 ? o.get(JAVA_LONG, 0) : 0;
+  }
+
+  /** {live arrays, collections so far}, for tests and diagnostics. */
+  public static long[] lifetimeStats() {
+    return new long[] {LIVE.get(), COLLECTIONS.get()};
   }
 
   // ---- closures: Java functions MLX calls --------------------------------------------

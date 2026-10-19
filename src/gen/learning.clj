@@ -91,7 +91,7 @@
                               traces (vec results)
                               grads (reduce #(tree-map2 + %1 %2) (map gradients-fn traces))
                               mean (fn [g] (a/tree-map #(/ % (double batch-size)) g))
-                              [store state] (step optimizer state store (mean grads))]
+                              [store state] (a/eval! (step optimizer state store (mean grads)))]
                           [store state (/ (reduce + (map #(double (a/item (:score %))) traces)) batch-size)]))
                       [store state nil]
                       (split k-epoch batches-per-epoch))]

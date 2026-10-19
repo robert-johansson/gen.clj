@@ -1,5 +1,6 @@
 (ns gen.array-test
-  (:require [clojure.test :refer [deftest is testing are]]
+  (:require [gen.test-support :as ts]
+            [clojure.test :refer [deftest is testing are]]
             [gen.array :as a]))
 
 (defn- thrown-data
@@ -40,7 +41,10 @@
   (is (= :bool (a/dtype (a/array [true false]))))
   (is (= :float64 (a/dtype (a/array []))))
   (is (= [0] (a/shape (a/array []))))
-  (is (= 3.0 (a/array 3.0)) "0-d arrays are host values on the JVM backend")
+  (is (= 3.0 (ts/host (a/array 3.0))))
+  (if (ts/jvm?)
+    (is (= 3.0 (a/array 3.0)) "0-d arrays are host values on the JVM backend")
+    (is (= [] (a/shape (a/array 3.0))) "and backend arrays on lazy backends"))
   (is (= [1.0 2.0] (a/->clj (a/array [1 2] {:dtype :float64}))))
   (is (thrown-data #(a/array [[1 2] [3]])) "ragged data is rejected")
   (is (thrown-data #(a/array [[1 2] [3 [4]]])) "deeply ragged data is rejected")
@@ -113,7 +117,7 @@
     (is (= 0.0 (a/xlogy 0.0 0.0))))
   (testing "logsumexp and softmax"
     (is (a/allclose? 1000.6931471805599 (a/logsumexp (a/array [1000.0 1000.0]))))
-    (is (= ##-Inf (a/logsumexp (a/array [##-Inf ##-Inf]))))
+    (is (= ##-Inf (ts/host (a/logsumexp (a/array [##-Inf ##-Inf])))))
     (is (a/allclose? (a/array [[0.6931471805599453] [2.0]])
                      (a/logsumexp (a/array [[0.0 0.0] [2.0 ##-Inf]]) {:axis 1 :keep-dims? true})))
     (is (a/allclose? 1.0 (a/sum (a/softmax (a/array [1.0 2.0 3.0])))))
@@ -122,23 +126,23 @@
 
 (deftest reduction-ops
   (let [x (a/array [[1 2 3] [4 5 6]])]
-    (is (= 21 (a/sum x)))
+    (is (= 21 (ts/host (a/sum x))))
     (is (= [5 7 9] (a/->clj (a/sum x {:axis 0}))))
     (is (= [[6] [15]] (a/->clj (a/sum x {:axis 1 :keep-dims? true}))))
-    (is (= 720 (a/prod x)))
-    (is (= 6 (a/max x)))
+    (is (= 720 (ts/host (a/prod x))))
+    (is (= 6 (ts/host (a/max x))))
     (is (= [1 4] (a/->clj (a/min x {:axis -1}))))
-    (is (= 5 (a/argmax x)))
+    (is (= 5 (ts/host (a/argmax x))))
     (is (= [2 2] (a/->clj (a/argmax x {:axis 1}))))
-    (is (= 3.5 (a/mean x)))
+    (is (= 3.5 (ts/host (a/mean x))))
     (is (= [2.5 3.5 4.5] (a/->clj (a/mean x {:axis 0})))))
-  (is (= 2 (a/sum (a/array [true true false]))) "summing bools counts")
-  (is (= true (a/any (a/array [false true]))))
-  (is (= false (a/all (a/array [1 0]))))
-  (is (Double/isNaN (a/max (a/array [1.0 ##NaN 3.0]))) "NaN propagates")
-  (is (= 1 (a/argmax (a/array [1.0 ##NaN 3.0]))) "the first NaN wins")
-  (is (= 0 (a/argmax (a/array [##-Inf ##-Inf]))))
-  (is (= 1.25 (a/variance (a/array [1.0 2.0 3.0 4.0]))))
+  (is (= 2 (ts/host (a/sum (a/array [true true false])))) "summing bools counts")
+  (is (= true (ts/host (a/any (a/array [false true])))))
+  (is (= false (ts/host (a/all (a/array [1 0])))))
+  (is (Double/isNaN (ts/number (a/max (a/array [1.0 ##NaN 3.0])))) "NaN propagates")
+  (is (= 1 (ts/host (a/argmax (a/array [1.0 ##NaN 3.0])))) "the first NaN wins")
+  (is (= 0 (ts/host (a/argmax (a/array [##-Inf ##-Inf])))))
+  (is (= 1.25 (ts/host (a/variance (a/array [1.0 2.0 3.0 4.0])))))
   (is (a/allclose? (/ 5.0 3.0) (a/variance (a/array [1.0 2.0 3.0 4.0]) {:ddof 1})))
   (is (= 7 (a/sum 7)) "reducing a 0-d array is the identity"))
 
@@ -181,7 +185,7 @@
     (is (= [5 6] (a/->clj (a/take x -1))))
     (is (= [[5 6] [1 2]] (a/->clj (a/take x (a/array [2 0])))))
     (is (= [2 4 6] (a/->clj (a/take x 1 1))))
-    (is (= 4 (a/take (a/array [3 4]) 1)) "a 0-d result is a host value")
+    (is (= 4 (ts/host (a/take (a/array [3 4]) 1))) "a 0-d result is a host value")
     (is (thrown-data #(a/take x 3)) "out-of-range indices throw")
     (is (thrown-data #(a/take x 1.0)) "indices must be integers")
     (is (= [[2] [3] [6]] (a/->clj (a/take-along-axis x (a/array [[1] [0] [1]]) 1)))))
@@ -190,12 +194,12 @@
       (is (= [0.9 0.6 0.5] (a/->clj (a/pick lp (a/array [1 0 1])))) "per-row index")
       (is (= [0.9 0.4 0.5] (a/->clj (a/pick lp 1))) "one shared index")
       (is (= [0.1 0.9 0.9] (a/->clj (a/pick (a/array [0.1 0.9]) (a/array [0 1 1])))) "batched index, shared logits")
-      (is (= 0.9 (a/pick (a/array [0.1 0.9]) 1)) "scalar case"))))
+      (is (= 0.9 (ts/host (a/pick (a/array [0.1 0.9]) 1))) "scalar case"))))
 
 (deftest matmul
   (is (= [[19 22] [43 50]] (a/->clj (a/matmul (a/array [[1 2] [3 4]]) (a/array [[5 6] [7 8]])))))
   (is (= [1 2] (a/->clj (a/matmul (a/array [1 2]) (a/array [[1 0] [0 1]])))))
-  (is (= 11 (a/matmul (a/array [1 2]) (a/array [3 4]))))
+  (is (= 11 (ts/host (a/matmul (a/array [1 2]) (a/array [3 4])))))
   (is (= [2 2 2] (a/shape (a/matmul (a/ones [2 2 3]) (a/ones [3 2])))) "batched")
   (is (= [[3 4] [6 8]] (a/->clj (a/outer (a/array [1 2]) (a/array [3 4])))))
   (is (= [[1.0 0.0] [0.0 1.0]] (a/->clj (a/eye 2))))

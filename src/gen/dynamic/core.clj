@@ -19,8 +19,14 @@
      determine.
 
    Predicates passed to the higher-order functions are tested with truthy?,
-   which is also how gen bodies' if tests branch."
-  (:refer-clojure :exclude [not boolean true? false? identical?
+   which is also how gen bodies' if tests branch.
+
+   A 0-d backend array (MLX's scalars; the JVM backend's are host values
+   already) counts as its host value wherever these branch, compare or look
+   up on it: = and not=, case (gen.dynamic/case-key), the lookups, nth and
+   the representation tests. So a body written with plain Clojure behaves
+   alike on every backend. Reading the value evaluates it, as truthy? does."
+  (:refer-clojure :exclude [not boolean true? false? identical? = not= nth
                             class type instance? number? integer? int? float? double? boolean? nat-int? pos-int?
                             neg-int? rational? ratio? decimal? coll? seqable? sequential? seq? map? vector? list?
                             set? string? keyword? symbol? fn? ifn? char? counted? indexed? associative?
@@ -50,10 +56,20 @@
   [what x]
   (if (batched? x) (throw (branch-error what)) x))
 
-(defn ^:no-doc lookup-error
-  "The batched-branch error of a lookup (used by get's inline expansion)."
-  []
-  (throw (branch-error "A lookup")))
+(defn- scalar-array?
+  "Is x a 0-d backend array (not a host scalar, not a batch)?"
+  [x]
+  (and (clojure.core/instance? gen.array.protocols.IArray x) (clojure.core/not (batched? x))
+       (clojure.core/= [] (a/shape x))))
+
+(defn ^:no-doc host-value
+  "x as Clojure code branching, comparing or looking up on it sees it: a 0-d
+   backend array as its host value (read), a batched value an error (it
+   differs across particles), anything else itself."
+  [what x]
+  (cond (batched? x) (throw (branch-error what))
+        (scalar-array? x) (a/item x)
+        :else x))
 
 (defn- tested
   "A predicate's result v as clojure.core's own if will see it, decided by
@@ -84,6 +100,16 @@
 
 (defguard false? clojure.core/false? [x] (clojure.core/false? (unbatched "false?" x)))
 
+(defguard = clojure.core/=
+  ([_] true)
+  ([x y] (clojure.core/= (host-value "=" x) (host-value "=" y)))
+  ([x y & more] (clojure.core/apply clojure.core/= (map #(host-value "=" %) (list* x y more)))))
+
+(defguard not= clojure.core/not=
+  ([_] false)
+  ([x y] (clojure.core/not= (host-value "not=" x) (host-value "not=" y)))
+  ([x y & more] (clojure.core/apply clojure.core/not= (map #(host-value "not=" %) (list* x y more)))))
+
 (defguard identical? clojure.core/identical? [x y]
   (clojure.core/identical? (unbatched "identical?" x) (unbatched "identical?" y)))
 
@@ -93,14 +119,23 @@
 ;; else an array of the wrapped backend
 ;; ---------------------------------------------------------------------------
 
+(defn- host-prototype
+  "A host scalar of dtype's kind (the JVM backend's 0-d arrays)."
+  [dtype]
+  (case (dt/kind dtype) :bool false :int 0 :float 0.0))
+
 (defn- particle
-  "x, or for a batched x a value of the same type as each particle's."
+  "x, or for a batched x a value of the same type as each particle's; a 0-d
+   value (a particle's, or a 0-d backend array) as a host scalar, as on the
+   JVM backend."
   [x]
-  (if (batched? x)
-    (let [dtype (a/dtype x)]
-      (p/-full (p/-inner (p/-backend x)) (if (= [] (a/shape x)) [] [1])
-               (if (= :bool (dt/kind dtype)) false 0) dtype))
-    x))
+  (cond (batched? x)
+        (let [dtype (a/dtype x)]
+          (if (clojure.core/= [] (a/shape x))
+            (host-prototype dtype)
+            (p/-full (p/-inner (p/-backend x)) [1] (if (clojure.core/= :bool (dt/kind dtype)) false 0) dtype)))
+        (scalar-array? x) (host-prototype (a/dtype x))
+        :else x))
 
 (defmacro ^:private def-representation-tests [& fnames]
   `(do ~@(for [n fnames
@@ -122,10 +157,10 @@
 (defn- int-sign-test [what core-pred x]
   (if (batched? x)
     ;; an integer particle's sign differs across particles
-    (if (= :int (dt/kind (a/dtype x)))
-      (if (= [] (a/shape x)) (throw (branch-error what)) false)
+    (if (clojure.core/= :int (dt/kind (a/dtype x)))
+      (if (clojure.core/= [] (a/shape x)) (throw (branch-error what)) false)
       false)
-    (core-pred x)))
+    (core-pred (host-value what x))))
 
 (defguard nat-int? clojure.core/nat-int? [x] (int-sign-test "nat-int?" clojure.core/nat-int? x))
 (defguard pos-int? clojure.core/pos-int? [x] (int-sign-test "pos-int?" clojure.core/pos-int? x))
@@ -173,30 +208,32 @@
 ;; Lookups: a vector finds no batched key, silently
 ;; ---------------------------------------------------------------------------
 
+(defn ^:no-doc lookup-key
+  "A lookup's collection or key k, as host-value (used by get's inline
+   expansion)."
+  [k]
+  (host-value "A lookup" k))
+
 (defguard get clojure.core/get
   {:inline (fn
-             ([m k] `(let [m# ~m k# ~k]
-                       (when (or (clojure.core/instance? gen.array.protocols.IBatchedValue m#)
-                                 (clojure.core/instance? gen.array.protocols.IBatchedValue k#))
-                         (lookup-error))
-                       (clojure.lang.RT/get m# k#)))
-             ([m k not-found] `(let [m# ~m k# ~k]
-                                 (when (or (clojure.core/instance? gen.array.protocols.IBatchedValue m#)
-                                           (clojure.core/instance? gen.array.protocols.IBatchedValue k#))
-                                   (lookup-error))
-                                 (clojure.lang.RT/get m# k# ~not-found))))
+             ([m k] `(clojure.lang.RT/get (lookup-key ~m) (lookup-key ~k)))
+             ([m k not-found] `(clojure.lang.RT/get (lookup-key ~m) (lookup-key ~k) ~not-found)))
    :inline-arities #{2 3}}
-  ([m k] (clojure.core/get (unbatched "get" m) (unbatched "A lookup" k)))
-  ([m k not-found] (clojure.core/get (unbatched "get" m) (unbatched "A lookup" k) not-found)))
+  ([m k] (clojure.core/get (lookup-key m) (lookup-key k)))
+  ([m k not-found] (clojure.core/get (lookup-key m) (lookup-key k) not-found)))
 
 (defguard contains? clojure.core/contains? [coll k]
-  (clojure.core/contains? (unbatched "contains?" coll) (unbatched "A lookup" k)))
+  (clojure.core/contains? (unbatched "contains?" coll) (lookup-key k)))
 
-(defguard find clojure.core/find [m k] (clojure.core/find (unbatched "find" m) (unbatched "A lookup" k)))
+(defguard find clojure.core/find [m k] (clojure.core/find (unbatched "find" m) (lookup-key k)))
 
 (defguard get-in clojure.core/get-in
-  ([m ks] (clojure.core/get-in (unbatched "get-in" m) (mapv #(unbatched "A lookup" %) ks)))
-  ([m ks not-found] (clojure.core/get-in (unbatched "get-in" m) (mapv #(unbatched "A lookup" %) ks) not-found)))
+  ([m ks] (clojure.core/get-in (unbatched "get-in" m) (mapv lookup-key ks)))
+  ([m ks not-found] (clojure.core/get-in (unbatched "get-in" m) (mapv lookup-key ks) not-found)))
+
+(defguard nth clojure.core/nth
+  ([coll i] (clojure.core/nth (unbatched "nth" coll) (host-value "An index" i)))
+  ([coll i not-found] (clojure.core/nth (unbatched "nth" coll) (host-value "An index" i) not-found)))
 
 ;; ---------------------------------------------------------------------------
 ;; Exceptions: whether one is thrown may differ across particles

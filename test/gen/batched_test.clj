@@ -3,7 +3,8 @@
    is exactly the scalar trace of its choices, batched weights are the scalar
    weights particle by particle, the per-particle fallback carries on, and
    batched inference reaches the exact answers."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [gen.test-support :as ts]
+            [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
@@ -161,7 +162,7 @@
       (let [{ws :weights} (b/update ps [] [] (cm/choicemap :switch true) (rng/key 7))
             scalar (map #(:weight (gfi/update % (cm/choicemap :switch true) (rng/key 0))) (b/traces ps))]
         (is (= 8 (count (a/->clj ws))))
-        (is (every? true? (map #(and (Double/isFinite %1) (Double/isFinite %2)) (a/->clj ws) scalar))))))
+        (is (every? true? (map #(and (Double/isFinite %1) (Double/isFinite %2)) (a/->clj ws) (map ts/number scalar)))))))
   (testing "a Switch whose index differs across particles falls back"
     (let [sw (gen [] (splice :s (comb/switch observation observation)
                              (if (trace :c (d/bernoulli 0.5)) 0 1) 0.0))]
@@ -187,7 +188,7 @@
           mean (reduce + (map #(* (Math/exp %1) %2) log-normalized-weights xs))]
       (is (< (Math/abs (- mean 0.65)) 0.03) "the weighted posterior mean")))
   (testing "resampling one trace"
-    (is (number? ((:trace (imp/importance-resampling conjugate [] (cm/choicemap :y y) 100 {:batched? true :key (rng/key 11)})) :x)))))
+    (is (number? (ts/host ((:trace (imp/importance-resampling conjugate [] (cm/choicemap :y y) 100 {:batched? true :key (rng/key 11)})) :x))))))
 
 (deftest a-batched-particle-filter-matches-the-kalman-filter
   (let [ys [0.3 1.1 0.4 -0.6 0.2]
@@ -298,11 +299,13 @@
   (let [obs (cm/choicemap :y -3.0)
         exact (Math/log (+ (* 0.5 (Math/exp (dc/log-prob (d/normal -3 1) -3.0))) (* 0.5 (Math/exp (dc/log-prob (d/normal 3 1) -3.0)))))]
     ;; =, not= and condp reach the batch through = even in helper functions;
-    ;; case (and if) only inside gen bodies, which guard them
-    (doseq [[label mu-of] [[:=-on-the-right (fn [k] (if (= 0 k) -3.0 3.0))]
+    ;; case (and if) only inside gen bodies, which guard them. The helpers
+    ;; test host numbers: what the JVM backend's 0-d values are, and MLX's
+    ;; are not (on MLX a helper must read a value with a/item)
+    (doseq [[label mu-of] (if (ts/jvm?) [[:=-on-the-right (fn [k] (if (= 0 k) -3.0 3.0))]
                            [:not= (fn [k] (if (not= 0 k) 3.0 -3.0))]
                            [:condp (fn [k] (condp = k 0 -3.0 3.0))]
-                           [:vector-lookup (fn [k] ([-3.0 3.0] k))]]]
+                           [:vector-lookup (fn [k] ([-3.0 3.0] k))]] [])]
       (let [m (gen [] (let [k (trace :k (d/categorical [0.5 0.5]))] (trace :y (d/normal (mu-of k) 1))))
             {:keys [log-ml-estimate]} (imp/importance-sampling m [] obs 4000 {:batched? true :key (rng/key 40)})]
         (is (< (Math/abs (- log-ml-estimate exact)) 0.1) (str label))))
@@ -312,9 +315,11 @@
 
 (deftest batched-runs-validate-parameters
   ;; B3: a batched run threw nothing where a scalar run throws
+  ;; (on eager backends: a lazy one does not read array parameters, rule 5)
   (let [m (gen [] (let [x (trace :x (d/uniform 0 1))] (trace :k (d/categorical (a/stack [x x])))))]
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"probabilities" (gfi/simulate m [] (rng/key 1))))
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"probabilities" (b/simulate m [] 4 (rng/key 1))))))
+    (when (a/concrete? (a/zeros [1]))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"probabilities" (gfi/simulate m [] (rng/key 1))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"probabilities" (b/simulate m [] 4 (rng/key 1)))))))
 
 (deftest more-batched-forms
   (testing "B9: scans and arg-reductions of a per-particle scalar"
@@ -380,7 +385,7 @@
         (is (b/batched? (b/simulate m [[1 2 3]] 4 (rng/key 62))) "and stay batched")))
     (testing "interop member names are left alone"
       (let [m (gen [] (let [x (trace :x (d/normal 0 1))] (.get ^java.util.List [x] 0)))]
-        (is (number? (:retval (gfi/simulate m [] (rng/key 63)))))))))
+        (is (number? (ts/host (:retval (gfi/simulate m [] (rng/key 63))))))))))
 
 (defn- drift
   "A raw if on an array comparison, in a helper outside gen: under the
@@ -480,6 +485,11 @@
     (is (b/batched? (b/simulate m [] 8 (rng/key 71))) "type predicates answer from the dtype")))
 
 (deftest spot-checks-catch-what-the-tracer-cannot-see
+  ;; The planted helpers branch on host numbers (case, vector lookups), which
+  ;; only the JVM backend's 0-d values are; on MLX such a helper branches
+  ;; alike in batched and scalar runs (it never matches), so there is nothing
+  ;; for a spot check to find
+  (when (ts/jvm?)
   (testing "simulate and generate fall back, and say why"
     (let [ps (b/simulate hidden-lookup [] 50 (rng/key 50))
           {gs :particles} (b/generate hidden-lookup [] (cm/choicemap :y 0.5) 50 (rng/key 51))]
@@ -551,4 +561,4 @@
     (binding [b/*spot-checks* :all]
       (let [ps (b/simulate linreg [[1.0 2.0]] 16 (rng/key 57))]
         (is (b/batched? ps))
-        (is (nil? (b/fallback-reason ps)))))))
+        (is (nil? (b/fallback-reason ps))))))))

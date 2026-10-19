@@ -4,11 +4,13 @@
    binding (src-java/gen/mlx, generated from mlx-c's headers) is compiled with
    `clojure -T:build java`; the native libraries come from native/build-mlx.sh.
 
-   - Arrays are MlxArray values owning an MLX handle (a long). A Cleaner frees
-     the handle when the value becomes unreachable; MLX's reference counting
-     keeps any graph that still needs it alive. Freeing from the Cleaner's
-     thread is safe: it only drops a reference (atomically), and MLX's
-     allocators lock.
+   - Arrays are MlxArray values owning an MLX handle (a long), freed once the
+     value is unreachable (gen.mlx.MlxRuntime/adopt: phantom references
+     drained by the threads making arrays). MLX's reference counting keeps
+     any graph that still needs an array alive. The GC does not see MLX's
+     memory, so the backend collects under pressure: when 100,000 arrays are
+     live (gen.mlx.gc-arrays; Metal allows about 500,000 buffers) or MLX's
+     active memory passes a quarter of RAM (gen.mlx.gc-bytes).
    - 0-d arrays are MLX arrays too (the JVM backend's are host values), so
      scalar code stays lazy. Reading one on the host (item, truthy?) evaluates.
    - Ops run on the backend's stream, a stream MLX lets any thread use. One
@@ -32,7 +34,7 @@
   (:import [gen.mlx Mlx MlxRaw MlxRuntime MlxException]
            [gen.random.threefry Key]
            [java.lang.foreign Arena MemorySegment ValueLayout]
-           [java.lang.ref Cleaner Reference]))
+           [java.lang.ref Reference]))
 
 (set! *warn-on-reflection* true)
 
@@ -59,8 +61,6 @@
 ;; ---------------------------------------------------------------------------
 ;; Arrays
 ;; ---------------------------------------------------------------------------
-
-(defonce ^:private ^Cleaner cleaner (Cleaner/create))
 
 (declare to-host)
 
@@ -92,10 +92,11 @@
         (mapv long (.toArray seg ValueLayout/JAVA_INT))))))
 
 (defn- wrap
-  "The MlxArray owning the new handle h (freed when it becomes unreachable)."
+  "The MlxArray owning the new handle h (freed once it is unreachable:
+   MlxRuntime/adopt)."
   [b ^long h]
   (let [x (MlxArray. h b (read-shape h) (dtype-of-code (Mlx/mlx_array_dtype h)))]
-    (.register cleaner x (reify Runnable (run [_] (MlxRaw/mlx_array_free h))))
+    (MlxRuntime/adopt x h)
     x))
 
 (defn- fence
@@ -137,8 +138,22 @@
     (try (Mlx/mlx_astype f (int (code dtype)) (long aux-stream))
          (finally (MlxRaw/mlx_array_free f)))))
 
+(defn- made
+  "h, the handle an mlx-c constructor returned: those report a failure (out
+   of memory, say) only by returning an empty handle."
+  ^long [^long h what]
+  (if (zero? h)
+    (throw (MlxRuntime/error what))
+    h))
+
+(declare scalar-handle*)
+
 (defn- scalar-handle
   "A new handle for the host scalar x as dtype."
+  ^long [x dtype]
+  (made (scalar-handle* x dtype) "mlx_array_new"))
+
+(defn- scalar-handle*
   ^long [x dtype]
   (case dtype
     :float32 (MlxRaw/mlx_array_new_float32 (unchecked-float (dt/host-double x)))
@@ -157,18 +172,64 @@
   [b x]
   (dt/with-weak nil #{(dt/kind (dt/host-dtype x))} (defaults b)))
 
+(def ^:private max-constants
+  "How many host-scalar constants the backend keeps per dtype
+   (gen.mlx.constants; each holds one of Metal's ~500,000 buffers)."
+  (Long/parseLong (System/getProperty "gen.mlx.constants" "4096")))
+
+(defonce ^:private constants
+  ;; dtype → (value bits → handle). The handles are never freed: graphs
+  ;; share them, so a lazy graph pins one buffer per distinct constant
+  ;; rather than one per use (Metal allows about 500,000 buffers)
+  (java.util.concurrent.ConcurrentHashMap.))
+
+(defn- constant-bits ^long [x dtype]
+  (case (dt/kind dtype)
+    :float (Double/doubleToRawLongBits (dt/host-double (dt/host-cast x dtype)))
+    :int (dt/host-long (dt/host-cast x dtype))
+    :bool (if (dt/truthy? x) 1 0)))
+
+(defn- constant
+  "The shared handle of the host scalar x as dtype, or nil when the cache is
+   full."
+  [x dtype]
+  (let [^java.util.concurrent.ConcurrentHashMap by-value
+        (.computeIfAbsent ^java.util.concurrent.ConcurrentHashMap constants dtype
+                          (reify java.util.function.Function
+                            (apply [_ _] (java.util.concurrent.ConcurrentHashMap.))))
+        k (constant-bits x dtype)]
+    (or (.get by-value k)
+        (when (< (.size by-value) max-constants)
+          (let [h (scalar-handle x dtype)
+                prev (.putIfAbsent by-value k h)]
+            (if prev
+              (do (MlxRaw/mlx_array_free h) prev)
+              h))))))
+
 (defn- operand
-  "The handle of operand x: x's own, or a new one for a host scalar (as
-   dtype, or b's default for it)."
+  "The handle of operand x: x's own, or the shared constant for a host scalar
+   (as dtype, or b's default for it). When the constant cache is full, a new
+   handle, returned negated: release frees it. (Handles are user-space
+   addresses, positive as longs.)"
   ^long [b x dtype]
   (if (mlx-array? x)
     (.-h ^MlxArray x)
-    (scalar-handle x (or dtype (host-dtype-on b x)))))
+    (let [d (or dtype (host-dtype-on b x))]
+      (if-let [h (constant x d)]
+        (long h)
+        (- (scalar-handle x d))))))
+
+(defn- handle-of ^long [^long raw] (Math/abs raw))
 
 (defn- release
-  "Free the handle h of operand x if operand made it for a host scalar."
-  [x ^long h]
-  (when-not (mlx-array? x) (MlxRaw/mlx_array_free h)))
+  "Free the handle operand made, if it made a new one."
+  [^long raw]
+  (when (neg? raw) (MlxRaw/mlx_array_free (- raw))))
+
+(defn- as-array
+  "x as an MlxArray of b (a host scalar as dtype, or b's default)."
+  [b x dtype]
+  (if (mlx-array? x) x (wrap b (scalar-handle x (or dtype (host-dtype-on b x))))))
 
 (defn- shape-of [x] (if (mlx-array? x) (.-shape ^MlxArray x) []))
 
@@ -188,13 +249,15 @@
   [b op bindings & body]
   (let [triples (partition 3 bindings)
         hs (map first triples)
+        raws (map #(gensym (str (name %) "-raw")) hs)
         xs (map second triples)]
-    `(let [~@(mapcat (fn [[h x d]] [h `(operand ~b ~x ~d)]) triples)]
+    `(let [~@(mapcat (fn [[_ x d] raw] [raw `(operand ~b ~x ~d)]) triples raws)
+           ~@(mapcat (fn [h raw] [h `(handle-of ~raw)]) hs raws)]
        (try
          ~@body
          (catch MlxException e# (throw (mlx-error ~op [~@xs] e#)))
          (finally
-           ~@(map (fn [h x] `(release ~x ~h)) hs xs)
+           ~@(map (fn [raw] `(release ~raw)) raws)
            ~@(map (fn [x] `(fence ~x)) xs))))))
 
 ;; ---------------------------------------------------------------------------
@@ -251,7 +314,8 @@
     (with-open [arena (Arena/ofConfined)]
       (let [data (segment-of arena values dtype)
             shp (.allocateFrom arena ValueLayout/JAVA_INT (int-array (map int shape)))]
-        (wrap b (MlxRaw/mlx_array_new_data data shp (int (count shape)) (int (code dtype))))))))
+        (wrap b (made (MlxRaw/mlx_array_new_data data shp (int (count shape)) (int (code dtype)))
+                      "mlx_array_new_data"))))))
 
 (defn- from-host [b data dtype]
   (cond
@@ -334,6 +398,8 @@
           (fence x))))))
 
 (defn- eval-arrays! [xs]
+  ;; an evaluation boundary is a good moment to free what became unreachable
+  (MlxRuntime/drain)
   (let [hs (long-array (map #(.-h ^MlxArray %) xs))
         v (MlxRuntime/vectorOf hs)]
     (try
@@ -377,14 +443,14 @@
     ;; MLX's kernels that are not exact take exact routes (gen.backend.mlx.exact,
     ;; loaded on first use: it is written in gen.array, which loads this namespace)
     (and (= dtype :float64) (#{:exp :sin :cos :erf :erfinv} op))
-    ((requiring-resolve 'gen.backend.mlx.exact/float64-unary) op (if (mlx-array? x) x (wrap b (operand b x dtype))))
+    ((requiring-resolve 'gen.backend.mlx.exact/float64-unary) op (as-array b x dtype))
 
     (and (= op :expm1) (= :gpu (:device (config b))) (#{:float32 :float16 :bfloat16} dtype))
-    ((requiring-resolve 'gen.backend.mlx.exact/expm1) (if (mlx-array? x) x (wrap b (operand b x dtype))))
+    ((requiring-resolve 'gen.backend.mlx.exact/expm1) (as-array b x dtype))
 
     (and (#{:floor :ceil :round} op) (not= :float (dt/kind dtype)))
     ;; rounding an int is the identity
-    (if (mlx-array? x) x (wrap b (operand b x dtype)))
+    (as-array b x dtype)
 
     :else
     (let [f (unary-fns op)
@@ -474,7 +540,7 @@
         dtype (dtype-on b x)]
     (if (empty? axes)
       ;; over no axis: the identity (argmax/argmin always name one axis)
-      (if (mlx-array? x) x (wrap b (operand b x dtype)))
+      (as-array b x dtype)
       (let [ax (int-array axes)
             kd (boolean keep-dims?)]
         (with-operands b op [h x dtype]
@@ -527,14 +593,15 @@
         (throw (ex-info "Arrays must agree on every axis but the concatenation axis"
                         {:shapes shapes :axis axis}))))
     (let [d (dtype-on b (first xs))
-          hs (mapv #(operand b % d) xs)
+          raws (mapv #(operand b % d) xs)
+          hs (mapv handle-of raws)
           v (MlxRuntime/vectorOf (long-array hs))]
       (try
         (wrap b (Mlx/mlx_concatenate_axis v (int axis) (stream b)))
         (catch MlxException e (throw (mlx-error :concatenate xs e)))
         (finally
           (Mlx/mlx_vector_array_free v)
-          (doseq [[x h] (map vector xs hs)] (release x h))
+          (run! release raws)
           (fence xs))))))
 
 (defn- slice [b x starts stops steps]
@@ -766,22 +833,21 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- threefry-words
-  "[w0 w1] handles of Threefry-2x32-20 under key [k0 k1] of the counters
-   [c0 c1] (uint32 handles), as gen.random.threefry/hash2x32."
-  [b k0 k1 c0 c1]
+  "[w0 w1] handles of Threefry-2x32-20 of the counters [c0 c1] (uint32
+   handles) under the key words k0 and k1 (uint32 handles of shape [1]), as
+   gen.random.threefry/hash2x32. Everything else is a shared constant, so a
+   pending draw pins only its key's buffer. temp registers each handle made."
+  [b k0 k1 c0 c1 temp konst]
   (let [s (stream b)
-        temps (java.util.ArrayList.)
-        t (fn ^long [^long h] (.add temps h) h)
-        u (fn ^long [v] (t (scalar-handle v :uint32)))
+        t temp
+        u (fn ^long [v] (long (konst v :uint32)))
         add (fn ^long [^long x ^long y] (t (Mlx/mlx_add x y s)))
         rotl (fn ^long [^long x r]
                (t (Mlx/mlx_bitwise_or (t (Mlx/mlx_left_shift x (u r) s))
                                       (t (Mlx/mlx_right_shift x (u (- 32 (long r))) s))
                                       s)))
-        hk0 (u k0) hk1 (u k1)
-        k2 (bit-xor (long k0) (long k1) 0x1BD11BDA)
-        hk2 (u k2)
-        ks [hk0 hk1 hk2]
+        k2 (t (Mlx/mlx_bitwise_xor (t (Mlx/mlx_bitwise_xor k0 k1 s)) (u 0x1BD11BDA) s))
+        ks [k0 k1 k2]
         rounds (fn [[x0 x1] rs]
                  (reduce (fn [[x0 x1] r]
                            (let [x0 (add x0 x1)]
@@ -790,22 +856,15 @@
         inject (fn [[x0 x1] i]
                  ;; after round group i: x0 += ks[i mod 3], x1 += ks[i+1 mod 3] + i
                  [(add x0 (nth ks (mod i 3)))
-                  (add x1 (u (bit-and (+ (long (nth [k0 k1 k2] (mod (inc i) 3))) i) 0xFFFFFFFF)))])
+                  (add x1 (add (nth ks (mod (inc i) 3)) (u i)))])
         rs-a [13 15 26 6]
-        rs-b [17 29 16 24]
-        start [(add c0 hk0) (add c1 hk1)]]
-    (try
-      (let [[w0 w1] (-> start
-                        (rounds rs-a) (inject 1)
-                        (rounds rs-b) (inject 2)
-                        (rounds rs-a) (inject 3)
-                        (rounds rs-b) (inject 4)
-                        (rounds rs-a) (inject 5))]
-        ;; keep the two outputs
-        (.remove temps (Long/valueOf (long w0)))
-        (.remove temps (Long/valueOf (long w1)))
-        [w0 w1])
-      (finally (doseq [h temps] (MlxRaw/mlx_array_free (long h)))))))
+        rs-b [17 29 16 24]]
+    (-> [(add c0 k0) (add c1 k1)]
+        (rounds rs-a) (inject 1)
+        (rounds rs-b) (inject 2)
+        (rounds rs-a) (inject 3)
+        (rounds rs-b) (inject 4)
+        (rounds rs-a) (inject 5))))
 
 (defn- random-uniform [b ^Key key shape dtype]
   (when-not (#{:float32 :float64} dtype)
@@ -816,29 +875,40 @@
             (throw (ex-info "random-uniform: more than 2^32 elements" {:shape shape})))
         temps (java.util.ArrayList.)
         t (fn ^long [^long h] (.add temps h) h)
+        ;; a shared constant, or a new handle (freed below) when the cache is full
+        konst (fn ^long [v dtype] (if-let [h (constant v dtype)] (long h) (t (scalar-handle v dtype))))
+        ;; the key's two words, one buffer
+        kw (t (with-open [arena (Arena/ofConfined)]
+                (made (MlxRaw/mlx_array_new_data
+                       (.allocateFrom arena ValueLayout/JAVA_INT (int-array [(unchecked-int (.-k0 key)) (unchecked-int (.-k1 key))]))
+                       (.allocateFrom arena ValueLayout/JAVA_INT (int-array [2]))
+                       (int 1) (int (code :uint32)))
+                      "mlx_array_new_data")))
+        k0 (t (Mlx/mlx_slice kw (int-array [0]) (int-array [1]) (int-array [1]) s))
+        k1 (t (Mlx/mlx_slice kw (int-array [1]) (int-array [2]) (int-array [1]) s))
         ;; counters [hi32(i) lo32(i)] = [0 i]
         c1 (t (Mlx/mlx_arange 0.0 (double n) 1.0 (int (code :uint32)) s))
         c0 (t (Mlx/mlx_zeros (int-array [n]) (int (code :uint32)) s))]
     (try
-      (let [[w0 w1] (mapv t (threefry-words b (.-k0 key) (.-k1 key) c0 c1))
+      (let [[w0 w1] (threefry-words b k0 k1 c0 c1 t konst)
             u (case dtype
                 ;; 23 mantissa bits of w0 ^ w1, as gen.random.threefry/uniform-floats
                 :float32 (let [bits (t (Mlx/mlx_bitwise_xor w0 w1 s))
-                               m (t (Mlx/mlx_bitwise_or (t (Mlx/mlx_right_shift bits (t (scalar-handle 9 :uint32)) s))
-                                                        (t (scalar-handle 0x3F800000 :uint32)) s))
+                               m (t (Mlx/mlx_bitwise_or (t (Mlx/mlx_right_shift bits (konst 9 :uint32) s))
+                                                        (konst 0x3F800000 :uint32) s))
                                f (t (Mlx/mlx_view m (int (code :float32)) s))]
-                           (t (Mlx/mlx_subtract f (t (scalar-handle 1.0 :float32)) s)))
+                           (t (Mlx/mlx_subtract f (konst 1.0 :float32) s)))
                 ;; 52 mantissa bits of w0 << 32 | w1, as uniform-doubles
                 :float64 (let [u64 (int 4)
                                hi (t (Mlx/mlx_astype w0 u64 s))
                                lo (t (Mlx/mlx_astype w1 u64 s))
-                               c (fn ^long [v] (t (Mlx/mlx_astype (t (scalar-handle v :int64)) u64 s)))
+                               c (fn ^long [v] (t (Mlx/mlx_astype (konst v :int64) u64 s)))
                                m (t (Mlx/mlx_bitwise_or
                                      (t (Mlx/mlx_bitwise_or (t (Mlx/mlx_left_shift hi (c 20) s))
                                                             (t (Mlx/mlx_right_shift lo (c 12) s)) s))
                                      (c 0x3FF0000000000000) s))
                                f (t (Mlx/mlx_view m (int (code :float64)) s))]
-                           (t (Mlx/mlx_subtract f (t (scalar-handle 1.0 :float64)) s))))]
+                           (t (Mlx/mlx_subtract f (konst 1.0 :float64) s))))]
         (wrap b (Mlx/mlx_reshape u (int-array (map int shape)) s)))
       (finally (doseq [h temps] (MlxRaw/mlx_array_free (long h)))))))
 
@@ -917,6 +987,7 @@
       (throw (ex-info "MLX has no GPU here" {:device device})))
     (when (and (= device :gpu) (= 64 dtypes))
       (throw (ex-info "MLX's GPUs have no float64: use :dtypes 64 with :device :cpu" {:device device :dtypes dtypes})))
+    (vreset! p/lazy-backends? true)
     (MlxBackend.
      (->Config device
                (Mlx/mlx_stream_new_thread_unsafe (device-handle device))

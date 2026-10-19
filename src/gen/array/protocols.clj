@@ -21,6 +21,11 @@
        condition of :where and the index arguments of gathers,
      - axes are non-negative and in range; shapes are vectors of longs.")
 
+(defonce ^{:doc "true once a lazy backend (-lazy? true) has been made: a backend
+   sets it, so that gen.array/eval! walks nothing where all are eager."}
+  lazy-backends?
+  (volatile! false))
+
 (defprotocol IArray
   (-backend [x] "The IBackend this array belongs to."))
 

@@ -171,6 +171,13 @@
   [p]
   (if (or (a/array? p) (nil? p)) p (a/array p)))
 
+(defn ->checkable
+  "A parameter as validation sees it: Clojure data as a JVM backend array,
+   which is always concrete (so host data is checked on every backend, also
+   a lazy one); arrays as they are."
+  [p]
+  (if (or (a/array? p) (nil? p)) p (a/with-backend (a/backend-named :jvm) (a/array p))))
+
 (defmacro defdist
   "Define a distribution: a constructor and its methods.
 
@@ -187,7 +194,8 @@
    name). Values of another shape are then errors rather than several draws;
    without it, value shapes are not checked.
 
-   Parameters given as Clojure vectors become arrays. The type keyword is
+   Parameters given as Clojure vectors become arrays, after validation, which
+   checks them on the host (so also on a lazy backend). The type keyword is
    namespace-qualified, so definitions from different namespaces never collide."
   [dist-name & body]
   (let [[doc body] (if (string? (first body)) [(first body) (rest body)] [nil body])
@@ -198,9 +206,11 @@
         bind-params (vec (mapcat (fn [p] [p `(get (:params ~d) ~(keyword p))]) params))]
     `(do
        (defn ~dist-name ~@(when doc [doc]) ~params
-         (let [~@(mapcat (fn [p] [p `(->array ~p)]) params)]
+         ;; validated as given (host data on the host), then made arrays
+         (let [~@(mapcat (fn [p] [p `(->checkable ~p)]) params)]
            ~@(map (fn [p] `(check-param-not-nan ~(name dist-name) ~(name p) ~p)) params)
-           ~@(get clauses 'validate)
+           ~@(get clauses 'validate))
+         (let [~@(mapcat (fn [p] [p `(->array ~p)]) params)]
            (->Distribution ~type-kw ~(into {} (map (fn [p] [(keyword p) p])) params))))
        ~(when-let [[[k s] & sample-body] (get clauses 'sample)]
           `(defmethod -sample ~type-kw [~d ~k ~s] (let ~bind-params ~@sample-body)))

@@ -565,11 +565,13 @@
 (defn case-key
   "case's dispatch value, checked: a value that differs across the particles
    of a batch cannot pick one clause (gen.array.batch), so it raises the
-   batched-branch error rather than falling to the default clause."
+   batched-branch error rather than falling to the default clause; a 0-d
+   backend array (an MLX scalar) dispatches on its host value, as on the JVM
+   backend."
   [x]
   (if (instance? gen.array.protocols.IBatchedValue x)
     (throw (a/batched-branch "case on a batched value: it differs across particles" {}))
-    x))
+    (gen.dynamic.core/host-value "case on" x)))
 
 (declare guard-branches)
 
@@ -718,9 +720,10 @@
                             (list* 'finally (guard-body (rest f) locals))
                             :else (guard-branches f locals))))
     ;; case*'s dispatch value is a local symbol (case binds it): check it first
+    ;; dispatching on case-key's value (case* needs a local: rebind it)
     case* (let [[_ ge shift mask default imap & more] form]
-            (list 'do (list `case-key ge)
-                  (list* 'case* (guard-branches ge locals) shift mask (guard-branches default locals)
+            (list 'let* [ge (list `case-key ge)]
+                  (list* 'case* ge shift mask (guard-branches default locals)
                    (into (empty imap) (map (fn [[k [test then]]] [k [test (guard-branches then locals)]])) imap)
                    more)))
     (apply list (guard-body form locals))))

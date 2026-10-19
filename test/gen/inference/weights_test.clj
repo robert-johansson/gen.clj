@@ -1,5 +1,6 @@
 (ns gen.inference.weights-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [gen.test-support :as ts]
+            [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
@@ -7,7 +8,7 @@
             [gen.inference.weights :as w]
             [gen.random :as rng]))
 
-(defn- close? [x y] (< (Math/abs (- (double x) (double y))) 1e-12))
+(defn- close? [x y] (< (Math/abs (- (ts/number x) (ts/number y))) 1e-12))
 
 (defn- reason [f]
   (try (f) nil (catch clojure.lang.ExceptionInfo e (::w/invalid-weights (ex-data e)))))

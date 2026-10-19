@@ -59,7 +59,12 @@
          {:particles ps
           :log-normalized-weights (:log-weights (w/normalize log-weights))
           :log-ml-estimate (w/log-mean-exp log-weights)})
-       (let [results (mapv #(weighted-sample model args observations opts %) (rng/split key n))
+       (let [results (mapv (fn [k]
+                             ;; one particle's graph at a time on a lazy backend
+                             (let [r (weighted-sample model args observations opts k)]
+                               (gfi/eval-trace! (:trace r) (:weight r))
+                               r))
+                           (rng/split key n))
              log-weights (mapv :weight results)]
          {:traces (mapv :trace results)
           :log-normalized-weights (:log-weights (w/normalize log-weights))
