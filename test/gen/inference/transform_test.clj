@@ -13,6 +13,7 @@
             [gen.dist.dsl :refer [dist]]
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
+            [gen.inference.kernel :as k]
             [gen.inference.mh :as mh]
             [gen.inference.particle-filter :as pf]
             [gen.inference.transform :as tf :refer [deftransform read write copy]]
@@ -335,3 +336,36 @@
             tr (:trace (gfi/generate two-means [] (cm/choicemap :two? false :mu 0.1 :y1 y1 :y2 y2) (rng/key 19)))]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"did not write"
                               ((tf/involution half) tr (cm/choicemap :u 0.2) nil nil)))))))
+
+(def walk-u (gen [tr] (trace :u (d/normal (tr :x) 0.5))))
+
+(def swap
+  "x and the proposed u exchanged: |det J| = 1."
+  (tf/transform [model-in aux-in model-out aux-out]
+    (write model-out :x (read aux-in :u :continuous) :continuous)
+    (write aux-out :u (read model-in :x :continuous) :continuous)))
+
+(deftest a-swap-involution-is-plain-mh
+  ;; Eq. 3.16 (law audit gap J): involutive MH with a swap is MH with the
+  ;; proposal: log α = log p(x') - log p(x) - log q(x'; x) + log q(x; x')
+  (doseq [key (rng/split (rng/key 40) 6)]
+    (let [tr (:trace (gfi/generate scaled [] (cm/choicemap :x 0.3 :y 0.8) (rng/key 41)))
+          {t' :trace la :log-alpha} (mh/involutive-mh tr walk-u [] (tf/involution swap) key)
+          [k-propose] (rng/split key)
+          x' (cm/get-choice (:choices (gfi/propose walk-u [tr] k-propose)) :u)
+          moved (:trace (gfi/update tr (cm/choicemap :x x') (rng/key 0)))]
+      (is (ts/close? (+ (- (:score moved) (:score tr)) (- (lp (d/normal 0.3 0.5) x')) (lp (d/normal x' 0.5) 0.3)) la)))))
+
+(deftest a-checked-involutive-kernel-catches-a-write-to-an-observation
+  ;; Alg. 11 (law audit gap J): an involution that moves y, a bijection, so
+  ;; only the check stops it once a move is accepted
+  (let [writes-y (tf/transform [model-in aux-in model-out aux-out]
+                   (write model-out :x (read aux-in :u :continuous) :continuous)
+                   (write model-out :y (+ (read model-in :y :continuous) 0.1) :continuous)
+                   (write aux-out :u (read model-in :x :continuous) :continuous))
+        tr (:trace (gfi/generate scaled [] (cm/choicemap :x 0.3 :y 0.8) (rng/key 42)))
+        kernel (k/checked (k/involutive-mh walk-u [] (tf/involution writes-y)) (cm/choicemap :y 0.8))
+        outcomes (map #(try ((:trace (kernel tr %)) :y) (catch clojure.lang.ExceptionInfo e (ex-message e)))
+                      (rng/split (rng/key 43) 10))]
+    (is (some string? outcomes))
+    (is (every? #(or (= 0.8 %) (re-find #"observ" %)) outcomes) (str outcomes))))
