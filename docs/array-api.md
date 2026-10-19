@@ -278,12 +278,20 @@ Two layers make this safe:
    - It also substitutes guarded versions (`gen.dynamic.core`) for the
      clojure.core functions that test truthiness or look up by key with an
      `if` of their own: `not` (so `if-not`), `boolean`, `true?`, `false?`,
-     the type predicates, `every?`, `some`, `filter`, `remove`, `take-while`,
-     `complement`, `get`, `contains?`, `find`, `get-in` and the like. They
-     behave as clojure.core's on ordinary values and raise the batched-branch
-     error on a batched one. *Added 2026-10-19 after the second acceptance
-     test:* `(if-not b …)` and `(filter pred xs)` in a body took one branch
-     for every particle.
+     `every?`, `some`, `filter`, `remove`, `take-while`, `complement`, `get`,
+     `contains?`, `find`, `get-in` and the like. They behave as
+     clojure.core's on ordinary values and raise the batched-branch error
+     on a batched one. *Added 2026-10-19 after the second acceptance test:*
+     `(if-not b …)` and `(filter pred xs)` in a body took one branch for
+     every particle.
+   - Representation tests (`class`, `instance?`, `number?`, `coll?`, …, and
+     gen.array's `host?` and `array?`) answer for a particle's value, whose
+     type the batch's dtype and per-particle shape determine.
+   - A `catch` clause in a body raises the fallback first in a batched run:
+     a caught exception may be thrown for some particles only. And a
+     batched-branch error is logged when raised, so a run in which code
+     caught one falls back anyway, also in a plain helper. *Added after the
+     fourth acceptance test.*
    - Non-array tests behave exactly as in Clojure.
    - A model written with plain Clojure conditionals is correct on every
      backend in scalar mode.
@@ -312,6 +320,9 @@ Two layers make this safe:
      (`(= not clojure.core/not)` is false in a body); and macros used in a
      body are expanded before the body compiles, so a macro that reads
      `&env` does not see the body's own locals.
+   - What a body cannot guard is Java interop on a batched value, which sees
+     the batch object: `(.equals Boolean/TRUE b)` is false, and `pr-str`
+     prints the whole batch.
    - A bool array of several elements, unbatched, is ambiguous (as in NumPy):
      `truthy?` throws, without the batched-branch flag, and names `all`,
      `any` and `where`. A numeric array is true, as any Clojure value.
@@ -370,6 +381,12 @@ Code outside `gen` bodies is not guarded. Two mechanisms cover it
   their results may be wrong too.
   - Each check is a scalar run, so the doubling schedule keeps a long
     particle filter linear, at about two checks of the final trace.
+  - Results are checked when read. The accessors (`traces`, `scores`,
+    `choice`), the particle filter's estimate and a fallback all spot-check
+    a collection whose last operations went unchecked
+    (`gen.batched/check`). A mismatch there is the loud error too.
+  - A scalar re-run of a particle's choices that fails (it visits other
+    addresses: a structural divergence) counts as a mismatch.
   - Spot checks are probabilistic. A branch that few particles take can
     escape 8 checks: a `case` on a choice, or a vector lookup keyed by one,
     in a helper.

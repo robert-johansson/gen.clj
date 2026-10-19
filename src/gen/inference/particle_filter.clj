@@ -127,8 +127,10 @@
        (assoc state :resampled? false)))))
 
 (defn log-ml-estimate
-  "The estimate of log p(observations so far): unbiased in exp space."
+  "The estimate of log p(observations so far): unbiased in exp space. (A
+   batched state is spot-checked first: gen.batched/check.)"
   [state]
+  (some-> (:particles state) batched/check)
   (+ (:log-ml state) (w/log-mean-exp (:log-weights state))))
 
 (defn traces

@@ -425,14 +425,24 @@
          ::scores (:scores state)
          ::subtraces (:subtraces state)))
 
+(defn- holds-batch?
+  "Does x hold a batched value (in its maps, vectors and realized seqs)?"
+  [x]
+  (cond (batch/batched? x) true
+        (a/array? x) false
+        (map? x) (boolean (some holds-batch? (vals x)))
+        (seq? x) (boolean (some holds-batch? (take realize-limit x)))
+        (coll? x) (boolean (some holds-batch? x))
+        :else false))
+
 (defn- retdiff
   "no-change when the return value is equal to the previous one (sound: equal
    values cannot differ), unknown-change otherwise."
   [prev-trace state]
   ;; batched return values cannot be compared (gen.array.batch): unknown
-  (if (try (= (:retval prev-trace) (:retval state))
-           (catch clojure.lang.ExceptionInfo e
-             (if (:gen.array/batched-branch (ex-data e)) false (throw e))))
+  (if (and (not (holds-batch? (:retval prev-trace)))
+           (not (holds-batch? (:retval state)))
+           (= (:retval prev-trace) (:retval state)))
     diff/no-change
     diff/unknown-change))
 
@@ -493,6 +503,22 @@
   (invoke [this a b c d] (:retval (gfi/simulate this [a b c d])))
   (invoke [this a b c d e] (:retval (gfi/simulate this [a b c d e])))
   (invoke [this a b c d e f] (:retval (gfi/simulate this [a b c d e f])))
+  (invoke [this a1 a2 a3 a4 a5 a6 a7] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7])))
+  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8])))
+  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9])))
+  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10])))
+  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11])))
+  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12])))
+  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13])))
+  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14])))
+  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15])))
+  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16])))
+  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17])))
+  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18])))
+  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19])))
+  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20])))
+  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20 more]
+    (:retval (gfi/simulate this (into [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20] more))))
   (applyTo [this args] (:retval (gfi/simulate this (vec args)))))
 
 (defn dynamic-gf? [x] (instance? DynamicGF x))
@@ -542,17 +568,17 @@
    batched-branch error rather than falling to the default clause."
   [x]
   (if (instance? gen.array.protocols.IBatchedValue x)
-    (throw (ex-info "case on a batched value: it differs across particles" {:gen.array/batched-branch true}))
+    (throw (a/batched-branch "case on a batched value: it differs across particles" {}))
     x))
 
 (declare guard-branches)
 
 (def ^:private guarded-core
-  "clojure.core's functions that test truthiness or look up by key, to their
-   guarded versions in gen.dynamic.core."
-  (into {} (comp (filter #(ns-resolve 'clojure.core %))
-                 (map (fn [s] [(symbol "clojure.core" (name s)) (symbol "gen.dynamic.core" (name s))])))
-        (keys (ns-publics 'gen.dynamic.core))))
+  "The functions that test truthiness, look up by key or test
+   representation, to their guarded versions in gen.dynamic.core (each names
+   the function it guards in its :guards metadata)."
+  (into {} (keep (fn [[s v]] (when-let [g (:guards (meta v))] [g (symbol "gen.dynamic.core" (name s))])))
+        (ns-publics 'gen.dynamic.core)))
 
 (def ^:dynamic ^:private *outer-locals*
   "The locals of the gen body being guarded, while forms inside it are
@@ -681,9 +707,13 @@
              (list* 'letfn*
                     (vec (mapcat (fn [[n f]] [n (guard-branches f locals)]) (partition 2 bindings)))
                     (guard-body body locals)))
+    ;; a caught exception may be thrown for some particles only: in a batched
+    ;; run, a catch clause raises the fallback first (gen.dynamic.core/caught)
     try (list* 'try (for [f (rest form)]
                       (cond (and (seq? f) (= 'catch (first f)))
-                            (let [[_ cls sym & body] f] (list* 'catch cls sym (guard-body body (conj locals sym))))
+                            (let [[_ cls sym & body] f]
+                              (list* 'catch cls sym (list `gen.dynamic.core/caught sym)
+                                     (guard-body body (conj locals sym))))
                             (and (seq? f) (= 'finally (first f)))
                             (list* 'finally (guard-body (rest f) locals))
                             :else (guard-branches f locals))))
@@ -695,22 +725,36 @@
                    more)))
     (apply list (guard-body form locals))))
 
+(defn- keep-meta
+  "guarded, with the metadata of the form it came from (type hints, lines)."
+  [form guarded]
+  (if-let [m (meta form)]
+    (if (instance? clojure.lang.IObj guarded) (with-meta guarded (merge (meta guarded) m)) guarded)
+    guarded))
+
 (defn- guard-branches
   "form, macroexpanded, with every if test wrapped in gen.array/truthy?, and
-   clojure.core's truthiness tests and lookups replaced by gen.dynamic.core's.
-   locals are the symbols bound around form (never macroexpanded as heads)."
+   the truthiness tests, lookups and representation tests of
+   gen.dynamic.core in place of the functions they guard. locals are the
+   symbols bound around form (never macroexpanded as heads)."
   [form locals]
   (cond
     (seq? form) (let [head (first form)]
                   (if (and (symbol? head) (contains? locals head))
-                    (apply list (guard-body form locals))
+                    (keep-meta form (apply list (guard-body form locals)))
                     (let [expanded (expand form locals)]
-                      (if (seq? expanded) (guard-special expanded locals) (guard-branches expanded locals)))))
-    (vector? form) (mapv #(guard-branches % locals) form)
+                      (if (seq? expanded)
+                        (keep-meta expanded (guard-special expanded locals))
+                        (guard-branches expanded locals)))))
+    (vector? form) (keep-meta form (mapv #(guard-branches % locals) form))
     (map? form) (into (empty form) (map (fn [[k v]] [(guard-branches k locals) (guard-branches v locals)])) form)
     (set? form) (into (empty form) (map #(guard-branches % locals)) form)
     (symbol? form) (guard-symbol form locals)
     :else form))
+
+(def ^:private primitive-coercions
+  '{double clojure.core/double long clojure.core/long float clojure.core/float int clojure.core/int
+    short clojure.core/short byte clojure.core/byte char clojure.core/char boolean clojure.core/boolean})
 
 (defmacro gen
   "A generative function. params are the arguments (destructuring allowed);
@@ -718,10 +762,11 @@
    and calls, (param name) reads a trainable parameter (with-params), and
    conditionals branch on the values of 0-d arrays.
 
-   Conditionals, and clojure.core's truthiness tests and lookups (not,
-   filter, every?, get, …; gen.dynamic.core), branch per particle in a
-   batched run: on a value that differs across particles they raise the
-   fallback to one particle at a time (gen.batched).
+   Conditionals, catch clauses, and clojure.core's truthiness tests and
+   lookups (not, filter, every?, get, …; gen.dynamic.core), branch per
+   particle in a batched run: on a value that differs across particles they
+   raise the fallback to one particle at a time (gen.batched). Type tests
+   (class, instance?, number?, …) answer for a particle's value.
 
    Helper functions the body calls are not rewritten: define one that
    branches on values with defn-guarded (or guarded-fn).
@@ -732,15 +777,24 @@
    when, if, let or do in statement position), or bound and never used, is
    a compile error. Prefer mapv, doseq and run!."
   [params & body]
-  (let [body-fn (guard-branches `(fn [~'trace ~'splice ~'param ~@params] ~@body)
+  (let [;; the body fn has three hidden parameters, and a fn with primitive
+        ;; parameters takes at most four: coerce them in the body instead
+        prim (filter #(and (symbol? %) (primitive-coercions (:tag (meta %)))) params)
+        plain (mapv #(if (some #{%} prim) (vary-meta % dissoc :tag) %) params)
+        body (if (seq prim)
+               [`(let [~@(mapcat (fn [p] [(vary-meta p dissoc :tag) (list (primitive-coercions (:tag (meta p))) (vary-meta p dissoc :tag))]) prim)]
+                   ~@body)]
+               body)
+        body-fn (guard-branches `(fn [~'trace ~'splice ~'param ~@plain] ~@body)
                                 (into (set (keys &env)) *outer-locals*))]
     `(make-gen-fn ~body-fn '~(cons params body))))
 
 (defmacro guarded-fn
   "fn, with a gen body's guards: if and case tests branch through truthy?,
-   and clojure.core's truthiness tests and lookups are gen.dynamic.core's. A
-   helper function that branches on values, defined so, raises the fallback
-   in a batched run (gen.batched) where a plain fn would take one branch for
+   catch clauses raise the fallback in a batched run, and clojure.core's
+   truthiness, lookup and type tests are gen.dynamic.core's. A helper
+   function that branches on values, defined so, raises the fallback in a
+   batched run (gen.batched) where a plain fn would take one branch for
    every particle."
   [& fn-tail]
   (guard-branches `(fn ~@fn-tail) (into (set (keys &env)) *outer-locals*)))

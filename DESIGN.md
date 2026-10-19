@@ -306,16 +306,18 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   Every generative function thus runs batched. A model whose code treats
   particles differently (branches, host predicates, host math) fails batched
   and falls back to one scalar trace per particle. Inside `gen` bodies this
-  is guaranteed: the macro guards `if` and `case`, and substitutes guarded
-  versions of clojure.core's truthiness tests and lookups (`not`, `filter`,
-  `get`, …; `gen.dynamic.core`). Clojure has no hook for its own `if`, so
+  is guaranteed: the macro guards `if`, `case` and `catch`, and substitutes
+  guarded versions of clojure.core's truthiness, lookup and type tests
+  (`not`, `filter`, `get`, `instance?`, …; `gen.dynamic.core`). Only Java
+  interop on a choice value sees the batch. Clojure has no hook for its own `if`, so
   helper functions outside `gen` are covered by two later mechanisms (added
   2026-10-19 after the acceptance tests; docs/array-api.md §8a–§8b):
   - a batched comparison that nothing read raises the fallback;
   - spot checks re-run a few particles of each batched simulate and generate,
     and of a doubling schedule of updates, through the scalar handler, the
     ground truth. A mismatch falls back, or is a loud error after unchecked
-    updates.
+    updates. Results read from a collection (its accessors, a particle
+    filter's estimate) are checked first.
 
   What remains is probabilistic: in a plain helper, a `case` on a choice, a
   vector lookup keyed by one, or a raw `if` on a comparison also used

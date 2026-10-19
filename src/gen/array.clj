@@ -331,6 +331,30 @@
   [x]
   (if (host? x) x (ew1 :stop-gradient x)))
 
+(def ^:dynamic ^:private *branch-log*
+  "A volatile holding the last batched-branch error raised in the call in
+   effect (logging-branches), or nil."
+  nil)
+
+(defn batched-branch
+  "The batched-branch error, ex-info with ::batched-branch true: one answer
+   cannot serve every particle of a batch (gen.array.batch). It is also
+   logged for the call in effect (logging-branches), so that code catching
+   it cannot hide that the particles differ."
+  ([message data] (batched-branch message data nil))
+  ([message data cause]
+   (let [e (ex-info message (assoc data ::batched-branch true) cause)]
+     (when-let [log *branch-log*] (vreset! log e))
+     e)))
+
+(defn logging-branches
+  "[(f) e]: f's result, and the last batched-branch error raised during the
+   call, caught or not (nil if none)."
+  [f]
+  (binding [*branch-log* (volatile! nil)]
+    (let [r (f)]
+      [r @*branch-log*])))
+
 (defn truthy?
   "The Clojure truthiness of x, for branching, the same on every backend:
    a boolean (host or a one-element bool array) by its value; any number,
@@ -346,8 +370,7 @@
         (instance? gen.array.protocols.IBatchedValue x)
         ;; a batch: numbers are truthy in every particle; booleans may differ
         (if (= :bool (p/-dtype (p/-backend x) x))
-          (throw (ex-info "Cannot branch on a batched value: it differs across particles"
-                          {::batched-branch true}))
+          (throw (batched-branch "Cannot branch on a batched value: it differs across particles" {}))
           true)
         (backend-array? x)
         (let [b (p/-backend x)

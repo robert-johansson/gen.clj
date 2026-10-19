@@ -412,6 +412,12 @@
   [k]
   (get [-3.0 3.0] k 0.0))
 
+(defn- address-of
+  "A case on a choice, in a helper outside gen: a batched key matches no
+   clause, silently."
+  [k]
+  (case k 1 :rare :common))
+
 (def hidden-lookup (gen [] (let [k (trace :k (d/categorical [0.5 0.5]))] (trace :y (d/normal (level k) 1)))))
 
 (dyn/defn-guarded guarded-level
@@ -426,6 +432,39 @@
   (let [sgn (dyn/guarded-fn [x] (if (a/> x 0) 1.0 -1.0))
         m (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (sgn x) 1))))]
     (is (falls-back-exactly? m [] (cm/choicemap :y 0.5)))))
+
+(defn- safe-item
+  "A plain helper that catches what a batched value raises."
+  [x]
+  (try (a/item x) (catch Exception _ 0.0)))
+
+(deftest caught-exceptions-are-branches
+  ;; fourth acceptance test B1: a caught batched-branch error, or any
+  ;; exception caught in a body, may be thrown for some particles only
+  (let [obs (cm/choicemap :y 3.0)]
+    (is (falls-back-exactly? (gen [] (let [x (trace :x (d/normal 0 1))]
+                                       (trace :y (d/normal (try (if (a/> x 2.0) 3.0 0.0) (catch Exception _ 0.0)) 1))))
+                             [] obs)
+        "a try in a body")
+    (is (falls-back-exactly? (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (safe-item x) 1))))
+                             [] obs)
+        "a plain helper catching the batched-branch error")
+    (is (b/batched? (b/simulate (gen [] (let [x (trace :x (d/normal 0 1))] (try x (finally nil)))) [] 8 (rng/key 72)))
+        "a try that catches nothing stays batched")))
+
+(deftest representation-tests-answer-for-the-particles
+  ;; fourth acceptance test B2
+  (doseq [[label m] [[:instance? (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (if (instance? Double x) 3.0 0.0) 1))))]
+                     [:host? (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (if (a/host? x) 3.0 0.0) 1))))]
+                     [:coll? (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (if (coll? x) 0.0 3.0) 1))))]
+                     [:class (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (if (= Double (class x)) 3.0 0.0) 1))))]]]
+    (let [obs (cm/choicemap :y 3.0)
+          s (imp/importance-sampling m [] obs 200 {:key (rng/key 73)})
+          r (binding [b/*spot-checks* 0] (imp/importance-sampling m [] obs 200 {:key (rng/key 73) :batched? true}))]
+      ;; every particle takes the 3.0 branch, so both estimates are exact
+      (is (b/batched? (:particles r)) (str label " answers without falling back"))
+      (is (close? (dc/log-prob (d/normal 3.0 1) 3.0) (:log-ml-estimate s)) (str label))
+      (is (close? (dc/log-prob (d/normal 3.0 1) 3.0) (:log-ml-estimate r)) (str label)))))
 
 (deftest values-the-trace-holds-are-handed-back
   ;; third acceptance test: needless fallbacks
@@ -484,6 +523,23 @@
       ;; update 3 is unchecked and wrong; update 4 falls back on the body's if
       (is (b/batched? ps))
       (is (:gen.batched/diverged (ex-data (try (step ps 4) nil (catch clojure.lang.ExceptionInfo e e)))))))
+  (testing "results read after unchecked updates are checked"
+    (let [m (gen [t] (let [k (trace :k (d/categorical [0.5 0.5]))]
+                       (when (> t 2) (trace :y (d/normal (level k) 1)))
+                       k))
+          step (fn [ps t] (:particles (b/update ps [t] [diff/unknown-change] cm/EMPTY (rng/key t))))
+          ps (reduce step (b/simulate m [0] 20 (rng/key 55)) [1 2 3])]
+      ;; update 3 is unchecked and wrong, and no later update checks it
+      (is (b/batched? ps))
+      (doseq [read [b/scores b/traces #(b/choice % :k)]]
+        (is (:gen.batched/diverged (ex-data (try (read ps) nil (catch clojure.lang.ExceptionInfo e e))))))))
+  (testing "and a divergence in structure is one too"
+    (let [m (gen [t] (let [k (trace :k (d/categorical [0.5 0.5]))]
+                       (when (> t 2) (trace (address-of k) (d/normal 0 1)))
+                       k))
+          step (fn [ps t] (:particles (b/update ps [t] [diff/unknown-change] cm/EMPTY (rng/key t))))
+          ps (reduce step (b/simulate m [0] 20 (rng/key 56)) [1 2 3])]
+      (is (:gen.batched/diverged (ex-data (try (b/scores ps) nil (catch clojure.lang.ExceptionInfo e e)))))))
   (testing "a batched-branch fallback records the error's data"
     (is (:gen.array/batched-branch (:data (b/fallback-reason (b/simulate branching [] 8 (rng/key 56)))))))
   (testing "well-behaved models stay batched, also when every particle is checked"

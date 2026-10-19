@@ -70,9 +70,9 @@ Next come an MLX backend for the GPU (M2), local LLMs as generative functions
 - **Batching** (`gen.batched`). N particles in one execution, by a batch
   tracer with vmap semantics. It falls back to one particle at a time when a
   model branches on particle values. Inside `gen` bodies that is guaranteed:
-  the macro guards `if`, `case` and clojure.core's truthiness tests and
-  lookups, and `gen.dynamic/defn-guarded` gives helper functions the same
-  guards. In a plain helper, a raw `if` on a comparison used for nothing
+  the macro guards `if`, `case`, `catch`, and clojure.core's truthiness,
+  lookup and type tests. `gen.dynamic/defn-guarded` gives helper functions
+  the same guards (Java interop on a choice value still sees the batch). In a plain helper, a raw `if` on a comparison used for nothing
   else is caught (the comparison is never read). Other branches in plain
   helpers are found by spot checks against the scalar handler, with high
   probability rather than certainty (`gen.batched` docstring;

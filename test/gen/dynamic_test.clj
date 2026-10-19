@@ -376,6 +376,16 @@
     (is (true? (ret (gen [] (let [x (trace :x (d/normal 0 1))] (and (number? x) (float? x) (not (integer? x))))))))
     (is (= [:a 3 nil] (ret (gen [] [(get {:k :a} :k) (get [1 2 3] 2) (get "s" 5)]))))))
 
+(deftest bodies-keep-clojure-s-forms
+  ;; fourth acceptance test B5
+  (let [k (rng/key 0)
+        ret (fn [gf & args] (:retval (gfi/simulate gf (vec args) k)))]
+    (is (= {:foo 1} (ret (gen [] (meta ^{:foo 1} [1 2])))) "form metadata, type hints included")
+    (is (= 3 (ret (gen [m] (.length ^String (get m :s))) {:s "abc"})))
+    (is (= 3.0 ((gen [^double x ^double y] (+ x y)) 1 2)) "primitive-hinted parameters")
+    (is (= 9 ((gen [a b c d e f g h] (+ a h)) 1 2 3 4 5 6 7 8)) "untraced calls of any arity")
+    (is (= 1 (ret (gen [] (try (throw (ex-info "x" {})) (catch Exception _ 1))))) "try in scalar mode")))
+
 (deftest discarded-lazy-calls-inside-wrappers-are-compile-errors
   (is (thrown-with-msg? Exception #"map here is lazy and its value is discarded"
                         (try (eval '(gen.dynamic/gen [xs] (when true (map #(trace [:y %] (gen.dist/normal 0 1)) xs)) 1))

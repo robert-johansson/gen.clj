@@ -32,8 +32,7 @@
 (defn- branch!
   "The batched-branch error: one answer cannot serve every particle."
   [what]
-  (throw (ex-info (str "Cannot " what " a batched value: it differs across particles")
-                  {:gen.array/batched-branch true})))
+  (throw (a/batched-branch (str "Cannot " what " a batched value: it differs across particles") {})))
 
 (declare value)
 
@@ -234,8 +233,7 @@
 
   (-value-and-grad [_ f args argnums]
     (if (some batched? (mapcat #(a/tree-leaves (nth args %)) argnums))
-      (throw (ex-info "Differentiating with respect to batched values is not supported"
-                      {:gen.array/batched-branch true}))
+      (throw (a/batched-branch "Differentiating with respect to batched values is not supported" {}))
       ;; unbatched leaves: an ordinary gradient on the wrapped backend
       (p/-value-and-grad inner f args argnums))))
 
@@ -312,8 +310,7 @@
     (if (instance? BatchBackend b)
       ;; a batched collection inside a batched run would tie its particles to
       ;; the outer ones: run the outer one per particle instead
-      (throw (ex-info "A batched run inside a batched run" {:gen.array/batched-branch true
-                                                            :outer (.-batch-shape ^BatchBackend b) :inner bs}))
+      (throw (a/batched-branch "A batched run inside a batched run" {:outer (.-batch-shape ^BatchBackend b) :inner bs}))
       (backend b bs))))
 
 (defmacro batched

@@ -20,8 +20,11 @@
    - Spot checks. After a batched simulate or generate, and on a schedule of
      updates and regenerates (*verified-updates*), *spot-checks* evenly spaced
      particles are re-run through the scalar handler (the ground truth) from
-     their choices, and a different score or array return value means the
-     fallback (or, after unchecked updates, a loud error).
+     their choices, and a different score or array return value, or a
+     re-run that fails, means the fallback (or, after unchecked updates, a
+     loud error). Results are checked when read (check): the accessors
+     below, and a fallback, check a collection whose last operations went
+     unchecked.
 
    What no layer sees for certain is a plain helper function (outside gen
    bodies) that branches on a batched value in other ways: a raw if or case
@@ -130,7 +133,10 @@
    what a raw if on a comparison in a helper function leaves (a batch is
    true to Clojure's if, so one branch was taken for every particle)."
   [gf op args n opts]
-  (let [[r bools] (batch/unread-bools #(gfi/run-op gf op args (assoc opts :batch-shape [n])))]
+  (let [[[r bools] branch] (a/logging-branches
+                            #(batch/unread-bools (fn [] (gfi/run-op gf op args (assoc opts :batch-shape [n])))))]
+    ;; a batched-branch error the code caught still means the particles differ
+    (when branch (throw branch))
     (when (seq bools)
       (let [kept ^java.util.Set (handed-back r)]
         (when-not (every? #(.contains kept %) bools)
@@ -160,10 +166,13 @@
   [gf args n choices]
   (:trace (run gf :generate args n {:constraints (map-leaves #(batch/wrap % [n]) choices) :key (rng/key 0)})))
 
+(declare check)
+
 (defn traces
-  "The n scalar traces, each rebuilt exactly from its particle's choices."
+  "The n scalar traces, each rebuilt exactly from its particle's choices
+   (after check)."
   [ps]
-  (if-let [t (:trace ps)]
+  (if-let [t (:trace (check ps))]
     (mapv #(:trace (gfi/generate (:gen-fn ps) (:args ps) % (rng/key 0)))
           (cm/unstack (plain-choices (:choices t) (:n ps)) (:n ps)))
     (:traces ps)))
@@ -199,7 +208,12 @@
    handler re-run on each spot-checked particle's choices."
   [gf args n t]
   (doseq [i (spot-indices n)]
-    (let [{st :trace} (gfi/generate gf args (map-leaves #(particle-value % i) (:choices t)) (rng/key 0))
+    (let [st (try (:trace (gfi/generate gf args (map-leaves #(particle-value % i) (:choices t)) (rng/key 0)))
+                  (catch Exception e
+                    ;; the scalar run of the particle's choices takes another path
+                    (throw (ex-info (str "The batched run disagrees with the scalar handler at particle " i
+                                         ": the scalar run of its choices fails (" (ex-message e) ")")
+                                    {:particle i ::mismatch true} e))))
           score (particle-value (:score t) i)
           retval (particle-value (:retval t) i)]
       (when-not (and (same-value? (:score st) score) (same-value? (:retval st) retval))
@@ -216,10 +230,13 @@
                 " (or define the helper with gen.dynamic/defn-guarded), or run unbatched")
            (assoc (ex-data e) ::diverged true)))
 
-(defn- checked-before-fallback
-  "ps, about to fall back to per-particle traces rebuilt from its choices.
-   When operations since its last check went unchecked, the trace they left
-   is checked now: those choices and weights are where the fallback starts."
+(defn check
+  "ps, verified: when operations since its last spot check went unchecked
+   (*verified-updates*), the trace they left is spot-checked now, and a
+   mismatch is the loud divergence error. The accessors (traces, scores,
+   choice) and the particle filter's results call it, so results are not
+   read from unchecked particles; so does a fallback, which starts from
+   them."
   [ps]
   (when (and (batched? ps) (::unchecked? ps))
     (try (spot-check! (:gen-fn ps) (:args ps) (:n ps) (:trace ps))
@@ -285,7 +302,7 @@
          {:particles (spot-check-update! ps args t)
           :weights (plain w n)
           :discards (if (cm/empty? d) (vec (repeat n cm/EMPTY)) (cm/unstack (plain-choices d n) n))})
-       (fallback (unbatched (checked-before-fallback ps))))
+       (fallback (unbatched (check ps))))
       (fallback ps))))
 
 (defn regenerate
@@ -303,7 +320,7 @@
        (let [{t :trace w :weight}
              (run gen-fn :regenerate args n {:prev (:trace ps) :argdiffs argdiffs :selection selection :key key})]
          {:particles (spot-check-update! ps args t) :weights (plain w n)})
-       (fallback (unbatched (checked-before-fallback ps))))
+       (fallback (unbatched (check ps))))
       (fallback ps))))
 
 ;; ---------------------------------------------------------------------------
@@ -357,12 +374,12 @@
   "The choice at addr across the particles, as an [n …] array."
   [ps addr]
   (if (batched? ps)
-    (a/tree-map #(plain % (:n ps)) ((:trace ps) addr))
+    (a/tree-map #(plain % (:n ps)) ((:trace (check ps)) addr))
     (a/stack (mapv #(% addr) (:traces ps)))))
 
 (defn scores
   "The particles' log densities, an [n] array."
   [ps]
   (if (batched? ps)
-    (plain (:score (:trace ps)) (:n ps))
+    (plain (:score (:trace (check ps))) (:n ps))
     (stack-weights (map :score (:traces ps)) (:n ps))))
