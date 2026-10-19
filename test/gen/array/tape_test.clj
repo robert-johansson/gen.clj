@@ -20,30 +20,43 @@
 (defn- from-flat [xs shape]
   (if (empty? shape) (first xs) (a/reshape (a/array (vec xs)) shape)))
 
+;; Finite differences run on the JVM backend in float64 whatever the backend
+;; under test, since a float32 backend's differences would be noise
+(def ^:private reference (a/backend-named :jvm))
+
+(defn- on-reference
+  "x as a float64 array of the reference backend (host scalars as they are)."
+  [x]
+  (if (a/host? x) (double x) (a/with-backend reference (a/array (a/->clj x) {:dtype :float64}))))
+
 (defn- fd-grad
-  "The central-difference gradient of the scalar function f at x."
+  "The central-difference gradient of the scalar function f at x, in float64
+   on the reference backend (x on it)."
   [f x]
-  (let [xs (flat x)
-        s (a/shape x)
-        h 1e-6]
-    (from-flat (for [i (range (count xs))]
-                 (let [at (fn [d] (double (a/item (f (from-flat (update xs i + d) s)))))]
-                   (/ (- (at h) (at (- h))) (* 2 h))))
-               s)))
+  (a/with-backend reference
+    (let [xs (flat x)
+          s (a/shape x)
+          h 1e-6]
+      (from-flat (for [i (range (count xs))]
+                   (let [at (fn [d] (double (a/item (f (from-flat (update xs i + d) s)))))]
+                     (/ (- (at h) (at (- h))) (* 2 h))))
+                 s))))
 
 (defn- close-grads? [g fd]
-  (and (= (a/shape g) (a/shape fd))
-       (a/allclose? g fd {:rtol 1e-5 :atol 1e-6})))
+  (let [g (on-reference g)]
+    (and (= (a/shape g) (a/shape fd))
+         (a/allclose? g fd (if (ts/f32?) {:rtol 2e-3 :atol 2e-4} {:rtol 1e-5 :atol 1e-6})))))
 
 (defn- grad-matches?
   "Does f's gradient with respect to each argument match finite differences?"
   [f & xs]
   (let [xs (vec xs)
-        grads (apply (a/grad f {:argnums (vec (range (count xs)))}) xs)]
+        grads (apply (a/grad f {:argnums (vec (range (count xs)))}) xs)
+        ref-xs (mapv on-reference xs)]
     (every? true?
             (for [i (range (count xs))]
               (close-grads? (nth grads i)
-                            (fd-grad #(apply f (assoc xs i %)) (nth xs i)))))))
+                            (fd-grad #(apply f (assoc ref-xs i %)) (nth ref-xs i)))))))
 
 (defn- projected
   "A scalar function of f's arguments: f's output weighted by fixed
@@ -127,11 +140,12 @@
     (is (= [0.5 0.5 0.0] (a/->clj ((a/grad a/max) (a/array [2.0 2.0 1.0])))))))
 
 (deftest shapes-and-indexing
-  (let [i (a/array [2 0 2] {:dtype :int64})]
+  ;; index arrays are made inside the functions, on the backend they run on
+  (let [i #(a/array [2 0 2] {:dtype :int64})]
     (doseq [[label f] [[:reshape #(a/reshape % [3 2])] [:transpose a/transpose] [:flatten a/flatten]
                        [:broadcast #(a/broadcast-to % [4 2 3])] [:concatenate #(a/concatenate [% (a/* 2.0 %)] 1)]
                        [:stack #(a/stack [% %])] [:slice #(a/slice % 1 1 3)] [:slice-step #(a/slice % 1 0 nil 2)]
-                       [:slice-neg #(a/slice % 1 nil nil -1)] [:take #(a/take % i 1)] [:take-scalar #(a/take % 1 0)]
+                       [:slice-neg #(a/slice % 1 nil nil -1)] [:take #(a/take % (i) 1)] [:take-scalar #(a/take % 1 0)]
                        [:take-along #(a/take-along-axis % (a/array [[2 0] [1 1]] {:dtype :int64}) 1)]
                        [:pick #(a/pick % (a/array [1 2] {:dtype :int64}))] [:squeeze #(a/squeeze (a/expand-dims % 0))]
                        [:diag #(a/diag (a/slice % 1 0 2))]

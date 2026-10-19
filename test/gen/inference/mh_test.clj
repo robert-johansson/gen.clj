@@ -35,7 +35,7 @@
 (defn- latent [{:keys [observations]} tr]
   (sel/get-selected (:choices tr) (sel/complement (sel/from-choicemap observations))))
 
-(defn- state [tr] (ts/host [(tr :a) (tr :b)]))
+(defn- state [tr] [(tr :a) (tr :b)])
 
 (defn- trace-at [{:keys [model observations]} s]
   (:trace (gfi/generate model [] (cm/merge observations s) (rng/key 0))))
@@ -44,8 +44,9 @@
   "Pearson's statistic of traces' latent states against the posterior."
   [{:keys [states posterior] :as target} traces]
   (let [n (count traces)
-        observed (frequencies (map #(latent target %) traces))]
-    (reduce + (map (fn [s p] (let [e (* n p) o (get observed s 0)] (/ (* (- o e) (- o e)) e)))
+        ;; states as host values (MLX's are arrays)
+        observed (frequencies (map #(ts/host (latent target %)) traces))]
+    (reduce + (map (fn [s p] (let [e (* n p) o (get observed (ts/host s) 0)] (/ (* (- o e) (- o e)) e)))
                    states posterior))))
 
 (defn- threshold
@@ -94,8 +95,9 @@
   "An involution on (b, up): move b one step around the circle in the
    direction up, and reverse the direction."
   [tr fwd _ _]
-  (let [up? (cm/get-choice fwd :up)
-        {t :trace weight :weight} (gfi/update tr (cm/choicemap :b (mod (+ (tr :b) (if up? 1 -1)) 3)))]
+  ;; a plain function (not a gen body): it reads the values it branches on
+  (let [up? (ts/host (cm/get-choice fwd :up))
+        {t :trace weight :weight} (gfi/update tr (cm/choicemap :b (mod (+ (ts/host (tr :b)) (if up? 1 -1)) 3)))]
     {:trace t :bwd-choices (cm/choicemap :up (not up?)) :weight weight}))
 
 (defn- involutive [tr key]
@@ -117,7 +119,7 @@
                 (let [[k1 k2 k3] (rng/split key 3)
                       {fwd :choices} (gfi/propose b-proposal [tr] k1)
                       {t :trace weight :weight} (gfi/update tr fwd k2)]
-                  (if (< (Math/log (rng/uniform k3)) weight) t tr)))]
+                  (if (< (Math/log (ts/number (rng/uniform k3))) (ts/number weight)) t tr)))]
     (is (> (stationary? main wrong) (threshold main)))))
 
 (deftest results-and-errors

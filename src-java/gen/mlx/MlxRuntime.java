@@ -16,7 +16,6 @@ import java.lang.ref.ReferenceQueue;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import static java.lang.foreign.ValueLayout.*;
@@ -197,9 +196,12 @@ public final class MlxRuntime {
 
   // ---- array lifetime --------------------------------------------------------------
 
-  /** A phantom reference to a Java value owning an MLX array handle. */
+  /** A phantom reference to a Java value owning an MLX array handle, kept
+   *  reachable in an intrusive doubly-linked list (as the JDK's Cleaner
+   *  does: no hashing, O(1) insert and remove). */
   private static final class Owned extends PhantomReference<Object> {
     final long handle;
+    Owned prev, next;
 
     Owned(Object owner, long handle) {
       super(owner, OWNED_QUEUE);
@@ -208,7 +210,12 @@ public final class MlxRuntime {
   }
 
   private static final ReferenceQueue<Object> OWNED_QUEUE = new ReferenceQueue<>();
-  private static final Set<Owned> OWNED = ConcurrentHashMap.newKeySet();
+  private static final Object OWNED_LOCK = new Object();
+  private static final Owned OWNED_HEAD = new Owned(null, 0);
+  static {
+    OWNED_HEAD.prev = OWNED_HEAD;
+    OWNED_HEAD.next = OWNED_HEAD;
+  }
   private static final AtomicLong LIVE = new AtomicLong();
   private static final AtomicLong ADOPTED = new AtomicLong();
 
@@ -240,7 +247,13 @@ public final class MlxRuntime {
    *  it. Collects (System.gc) under array or memory pressure, since the GC
    *  does not see MLX's native memory. */
   public static void adopt(Object owner, long handle) {
-    OWNED.add(new Owned(owner, handle));
+    Owned o = new Owned(owner, handle);
+    synchronized (OWNED_LOCK) {
+      o.next = OWNED_HEAD.next;
+      o.prev = OWNED_HEAD;
+      OWNED_HEAD.next.prev = o;
+      OWNED_HEAD.next = o;
+    }
     long live = LIVE.incrementAndGet();
     long n = ADOPTED.incrementAndGet();
     if ((n & 255) == 0) drain();
@@ -256,7 +269,13 @@ public final class MlxRuntime {
   }
 
   private static int release(Owned o) {
-    if (!OWNED.remove(o)) return 0;
+    synchronized (OWNED_LOCK) {
+      if (o.next == null) return 0;
+      o.prev.next = o.next;
+      o.next.prev = o.prev;
+      o.next = null;
+      o.prev = null;
+    }
     MlxRaw.mlx_array_free(o.handle);
     LIVE.decrementAndGet();
     return 1;

@@ -23,7 +23,7 @@
         expected (a/stack (mapv (fn [p] (apply f (map-indexed (fn [i x] (if (batched-args i) (particle x p) x)) args)))
                                 (range n)))]
     (and (= (a/shape expected) (a/shape got))
-         (a/allclose? got expected {:rtol 1e-12 :atol 1e-12}))))
+         (ts/close? got expected))))
 
 (defn- rand-array [seed shape] (rng/normal (rng/key seed) shape))
 
