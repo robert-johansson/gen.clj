@@ -224,10 +224,12 @@
       (a/concatenate (mapv a/flatten leaves)))))
 
 (defn from-array
-  "A choice map with the addresses and leaf shapes of proto, filled in order
-   from the 1-d array arr (the inverse of to-array)."
+  "A choice map with the addresses, leaf shapes and leaf dtypes of proto,
+   filled in order from the 1-d array arr (the inverse of to-array, which
+   concatenates into one dtype: a bool choice comes back a bool)."
   [proto arr]
   (let [paths (addresses proto)
+        dtypes (mapv #(a/dtype (get-choice proto %)) paths)
         shapes (map #(a/shape (get-choice proto %)) paths)
         sizes (map #(reduce * 1 %) shapes)
         needed (reduce + sizes)]
@@ -235,11 +237,12 @@
       (throw (ex-info (str "from-array: proto has " needed " elements, the array " (a/size arr))
                       {:expected needed :got (a/size arr)})))
     (first
-     (reduce (fn [[cm offset] [p shape n]]
-               [(set-choice cm p (a/reshape (a/slice arr 0 offset (+ offset n)) shape))
-                (+ offset n)])
+     (reduce (fn [[cm offset] [p shape n dtype]]
+               (let [v (a/reshape (a/slice arr 0 offset (+ offset n)) shape)]
+                 [(set-choice cm p (if (= dtype (a/dtype v)) v (a/astype v dtype)))
+                  (+ offset n)]))
              [EMPTY 0]
-             (map vector paths shapes sizes)))))
+             (map vector paths shapes sizes dtypes)))))
 
 (defn- stack-values
   "Values stacked along a new leading axis; a vector value (a product

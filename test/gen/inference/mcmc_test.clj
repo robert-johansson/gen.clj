@@ -118,6 +118,9 @@
     (testing "mvnormal's shapes are checked"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mu must be a vector" (d/mvnormal 0.0 1.0)))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"square matrix of its size" (d/mvnormal [0.0 0.0] (a/eye 3)))))
+    (testing "elliptical slice takes Clojure vectors, as distributions do"
+      (let [tr (start-at flat-vector-model (cm/choicemap :z (a/array [0.5 0.5]) :y y2))]
+        (is (= [2] (a/shape ((mcmc/elliptical-slice tr :z [0.0 0.0] [[1.0 0.5] [0.5 1.0]] (rng/key 2)) :z))))))
     (testing "elliptical slice of a missing address"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no choice at :nope"
                             (mcmc/elliptical-slice tr :nope (a/array [0.0]) (a/eye 1) (rng/key 1)))))))

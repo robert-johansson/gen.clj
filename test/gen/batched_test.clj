@@ -14,7 +14,7 @@
             [gen.diff :as diff]
             [gen.dist :as d]
             [gen.dist.core :as dc]
-            [gen.dynamic :refer [gen]]
+            [gen.dynamic :as dyn :refer [gen]]
             [gen.gfi :as gfi]
             [gen.inference.importance :as imp]
             [gen.inference.mh :as mh]
@@ -414,6 +414,27 @@
 
 (def hidden-lookup (gen [] (let [k (trace :k (d/categorical [0.5 0.5]))] (trace :y (d/normal (level k) 1)))))
 
+(dyn/defn-guarded guarded-level
+  "level, defined with a body's guards."
+  [k]
+  (get [-3.0 3.0] k 0.0))
+
+(deftest helpers-defined-with-guards-branch-per-particle
+  (let [m (gen [] (let [k (trace :k (d/categorical [0.5 0.5]))] (trace :y (d/normal (guarded-level k) 1))))]
+    (is (falls-back-exactly? m [] (cm/choicemap :y 0.5)))
+    (is (= 3.0 (guarded-level 1)) "and are ordinary functions otherwise"))
+  (let [sgn (dyn/guarded-fn [x] (if (a/> x 0) 1.0 -1.0))
+        m (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (sgn x) 1))))]
+    (is (falls-back-exactly? m [] (cm/choicemap :y 0.5)))))
+
+(deftest values-the-trace-holds-are-handed-back
+  ;; third acceptance test: needless fallbacks
+  (let [callee (gen [] (let [x (trace :x (d/normal 0 1))] {:x x :big? (a/> x 0)}))
+        m (gen [] (let [{:keys [x]} (splice :c callee)] (trace :y (d/normal x 1))))]
+    (is (b/batched? (b/simulate m [] 8 (rng/key 70))) "a sub-trace's return value"))
+  (let [m (gen [] (let [x (trace :x (d/normal 0 1))] (assert (number? x)) (trace :y (d/normal x 1))))]
+    (is (b/batched? (b/simulate m [] 8 (rng/key 71))) "type predicates answer from the dtype")))
+
 (deftest spot-checks-catch-what-the-tracer-cannot-see
   (testing "simulate and generate fall back, and say why"
     (let [ps (b/simulate hidden-lookup [] 50 (rng/key 50))
@@ -451,6 +472,16 @@
           step (fn [ps t] (:particles (b/update ps [t] [diff/unknown-change] cm/EMPTY (rng/key t))))
           ps (reduce step (b/simulate m [0] 20 (rng/key 55)) [1 2 3])]
       ;; updates 1 and 2 are checked, 3 is not (the branch starts there), 4 is
+      (is (b/batched? ps))
+      (is (:gen.batched/diverged (ex-data (try (step ps 4) nil (catch clojure.lang.ExceptionInfo e e)))))))
+  (testing "so is a fallback after unchecked updates, which starts from their results"
+    (let [m (gen [t] (let [k (trace :k (d/categorical [0.5 0.5]))]
+                       (when (> t 2) (trace :y (d/normal (level k) 1)))
+                       (when (> t 3) (when (trace :b (d/bernoulli 0.5)) (trace :z (d/normal 0 1))))
+                       k))
+          step (fn [ps t] (:particles (b/update ps [t] [diff/unknown-change] cm/EMPTY (rng/key t))))
+          ps (reduce step (b/simulate m [0] 20 (rng/key 55)) [1 2 3])]
+      ;; update 3 is unchecked and wrong; update 4 falls back on the body's if
       (is (b/batched? ps))
       (is (:gen.batched/diverged (ex-data (try (step ps 4) nil (catch clojure.lang.ExceptionInfo e e)))))))
   (testing "a batched-branch fallback records the error's data"

@@ -337,8 +337,9 @@
    and any numeric array, true, as in Clojure; a bool array of several
    elements is ambiguous (an error: use all, any or where); any other value
    by Clojure's rules. A batched bool (gen.array.batch) throws ex-info with
-   :gen.array/batched-branch true: one branch cannot serve every particle,
-   so batched code must use `where` (or a switch combinator) instead."
+   :gen.array/batched-branch true: one branch cannot serve every particle.
+   Code that should stay batched computes both values and picks with `where`;
+   a branch in structure (different choices) runs one particle at a time."
   [x]
   (cond (instance? Boolean x) (.booleanValue ^Boolean x)
         (host? x) true

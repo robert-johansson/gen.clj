@@ -266,9 +266,11 @@ Two layers make this safe:
    - Any number, host or a one-element numeric array, is true, as in Clojure.
    - A value that differs across the particles of a batch throws `ex-info`
      with `{:gen.array/batched-branch true}`: one branch cannot serve every
-     particle. Batched code uses `where` (values) or a switch combinator
-     (structure) instead. *Revised 2026-10-18:* numbers were falsy at 0,
-     which broke `(or 0 5)` and `(when-let [i 0] …)` inside `gen`.
+     particle. Code that should stay batched computes both values and picks
+     with `where`. A branch in structure (different choices, or a switch
+     combinator on a per-particle index) runs one particle at a time.
+     *Revised 2026-10-18:* numbers were falsy at 0, which broke `(or 0 5)`
+     and `(when-let [i 0] …)` inside `gen`.
 2. **Inside `gen` bodies, conditionals branch on values** (bean genclj-pa7x).
    - The `gen` macro macroexpands the body and wraps every `if` test in
      `truthy?`. That also covers `when`, `cond`, `and`, `or` and `if-let`, which
@@ -291,14 +293,25 @@ Two layers make this safe:
      back to running particles one at a time. That is correct, just slower.
      Batching is an optimization, and the handler is ground truth.
    - Outside `gen` bodies (helper functions a model calls), a raw `if` or
-     `case` on an array is not guarded: branch with `a/truthy?` or `where`
-     there. What still catches it (§8b):
+     `case` on an array is not guarded. Define a helper that branches on
+     values with `gen.dynamic/defn-guarded` (or `guarded-fn`), which applies
+     a body's guards to it, or branch with `a/truthy?` or `where` there. For
+     a plain helper, what still catches a branch (§8b):
      - `=`, `not=` and `condp =` reach a batched value anywhere, through `=`.
-     - A batched comparison that nothing reads, the trace a raw `if` on it
-       leaves, raises the fallback when the run ends.
+     - A batched comparison that nothing else reads, the trace a raw `if` on
+       it leaves, raises the fallback when the run ends. One that is also
+       read (by `where`, `or`'s value, or as a return value) is not caught
+       this way.
      - Spot checks against the scalar handler catch the rest (a `case` on a
-       choice, or a vector lookup keyed by one) with high probability, not
-       certainty.
+       choice, a raw `if` on a bernoulli's value, a vector lookup keyed by a
+       choice) with high probability, not certainty. A branch that few
+       particles take can escape them.
+   - Known differences from plain Clojure inside bodies, all deliberate: a
+     non-canonical `(Boolean. false)` is false to a body's `if` (as
+     `truthy?` reads it); a guarded function is not `=` to clojure.core's
+     (`(= not clojure.core/not)` is false in a body); and macros used in a
+     body are expanded before the body compiles, so a macro that reads
+     `&env` does not see the body's own locals.
    - A bool array of several elements, unbatched, is ambiguous (as in NumPy):
      `truthy?` throws, without the batched-branch flag, and names `all`,
      `any` and `where`. A numeric array is true, as any Clojure value.
@@ -341,10 +354,13 @@ Code outside `gen` bodies is not guarded. Two mechanisms cover it
 - **Unread comparisons.** Every batched bool an op makes is registered, and
   every op marks the values it reads. A raw `if` reads nothing (Clojure's
   `if` tests the object, which is true). So a batched bool that is unread
-  when the run ends, and that the run does not hand back as a choice or
-  return value, is the trace of such a branch. It raises the fallback. This
-  catches the common case deterministically: a helper's
-  `(if (< x c) …)`, however rarely the other branch is taken.
+  when the run ends, and that the run does not hand back anywhere in its
+  trace (choices, return values, sub-traces), is the trace of such a
+  branch. It raises the fallback. This catches the common case
+  deterministically: a helper's `(if (< x c) …)` on a comparison used for
+  nothing else, however rarely the other branch is taken. A comparison
+  that is never used at all raises it too (needlessly); one that something
+  else also reads is not caught this way.
 - **Spot checks.** After a batched simulate or generate, 8 evenly spaced
   particles (`*spot-checks*`: a number, `:all` or 0) are re-run through the
   scalar handler from their choices. So are the 1st, 2nd, 4th, 8th, 16th, …
@@ -457,3 +473,6 @@ How to read these numbers:
 13. **An unread batched comparison raises the fallback** (§8b; 2026-10-19,
     agent, for the owner's review): the tracer marks the values ops read,
     an implementation detail of the tracer that never changes a value.
+14. **`gen.dynamic/defn-guarded` and `guarded-fn`** (§8a; 2026-10-19,
+    agent, for the owner's review): a helper function with a body's guards,
+    the deterministic way to branch on values outside `gen`.

@@ -74,7 +74,13 @@
   (let [c (cm/choicemap :x (a/array [[1.0 2.0] [3.0 4.0]]) :y 5.0)]
     (is (= [1.0 2.0 3.0 4.0 5.0] (a/->clj (cm/to-array c))))
     (is (same-leaves? c (cm/from-array c (cm/to-array c))))
-    (is (thrown? clojure.lang.ExceptionInfo (cm/from-array c (a/zeros [3])))))
+    (is (thrown? clojure.lang.ExceptionInfo (cm/from-array c (a/zeros [3]))))
+    (testing "leaves come back in the prototype's dtypes"
+      (let [mixed (cm/choicemap :b true :k 2 :x 0.5)
+            back (cm/from-array mixed (cm/to-array mixed))]
+        (is (= mixed back))
+        (is (instance? Boolean (cm/get-choice back :b)))
+        (is (instance? Long (cm/get-choice back :k))))))
   (let [cs [(cm/choicemap :a 1.0 [:b 0] 2.0) (cm/choicemap :a 3.0 [:b 0] 4.0)]
         stacked (cm/stack cs)]
     (is (= [1.0 3.0] (a/->clj (cm/get-choice stacked :a))))

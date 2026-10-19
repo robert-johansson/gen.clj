@@ -317,8 +317,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     ground truth. A mismatch falls back, or is a loud error after unchecked
     updates.
 
-  What remains is probabilistic: a helper's `case` on a choice, or a vector
-  lookup keyed by one, is found by the spot checks with high probability.
+  What remains is probabilistic: in a plain helper, a `case` on a choice, a
+  vector lookup keyed by one, or a raw `if` on a comparison also used
+  elsewhere is found by the spot checks with high probability.
+  `gen.dynamic/defn-guarded` gives helpers a body's guards, deterministically.
   Measured: 5–90× faster importance sampling on the JVM backend (100–10,000
   particles; docs/benchmarks.md).
 - **Constraints are choice maps** (2026-10-19, after the second acceptance

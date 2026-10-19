@@ -550,8 +550,19 @@
 (def ^:private guarded-core
   "clojure.core's functions that test truthiness or look up by key, to their
    guarded versions in gen.dynamic.core."
-  (into {} (map (fn [s] [(symbol "clojure.core" (name s)) (symbol "gen.dynamic.core" (name s))]))
+  (into {} (comp (filter #(ns-resolve 'clojure.core %))
+                 (map (fn [s] [(symbol "clojure.core" (name s)) (symbol "gen.dynamic.core" (name s))])))
         (keys (ns-publics 'gen.dynamic.core))))
+
+(def ^:dynamic ^:private *outer-locals*
+  "The locals of the gen body being guarded, while forms inside it are
+   macroexpanded: a gen (or guarded-fn) nested in it sees them."
+  #{})
+
+(defn- expand
+  "form macroexpanded, with the locals around it visible to nested gens."
+  [form locals]
+  (binding [*outer-locals* locals] (macroexpand form)))
 
 (defn- guard-symbol
   "sym, or its guarded version when it names one of guarded-core's
@@ -566,7 +577,8 @@
 
 (def ^:private lazy-fns
   '#{clojure.core/map clojure.core/map-indexed clojure.core/mapcat clojure.core/keep
-     clojure.core/keep-indexed clojure.core/filter clojure.core/remove clojure.core/for})
+     clojure.core/keep-indexed clojure.core/filter clojure.core/remove clojure.core/for
+     gen.dynamic.core/filter gen.dynamic.core/remove})
 
 (defn- discarded-lazy-trace?
   "Is form a lazy call (map, for, keep, …) whose trace or splice calls would
@@ -578,15 +590,31 @@
               (when-let [v (resolve head)] (lazy-fns (symbol v)))
               (some #{'trace 'splice} (tree-seq coll? seq (rest form)))))))
 
+(defn- discarded-lazy-call
+  "The lazy call with trace calls that would be discarded with form's value:
+   form itself (as written, (for …), or macroexpanded, (->> xs (map …))), or
+   the value of an if, do, let or letfn it expands to (when, cond, …)."
+  [form locals]
+  (let [expanded (if (and (seq? form) (symbol? (first form)) (not (contains? locals (first form))))
+                   (expand form locals)
+                   form)]
+    (cond (or (discarded-lazy-trace? form locals) (discarded-lazy-trace? expanded locals)) form
+          (not (seq? expanded)) nil
+          :else (case (first expanded)
+                  if (some #(discarded-lazy-call % locals) (drop 2 expanded))
+                  do (some-> (last (rest expanded)) (discarded-lazy-call locals))
+                  (let* loop* letfn*) (let [[_ bindings & body] expanded]
+                                        (some-> (last body)
+                                                (discarded-lazy-call (into locals (take-nth 2 bindings)))))
+                  nil))))
+
 (defn- guard-statements
   "A body's forms, guarded; every form but the last is a statement, whose
    value is discarded, so a lazy call there with trace calls is an error."
   [forms locals]
-  (doseq [f (butlast forms)
-          ;; as written ((for …)) and macroexpanded ((->> xs (map …)))
-          :let [expanded (if (and (seq? f) (symbol? (first f)) (not (contains? locals (first f)))) (macroexpand f) f)]]
-    (when (or (discarded-lazy-trace? f locals) (discarded-lazy-trace? expanded locals))
-      (throw (ex-info (str "In gen: " (pr-str (first f)) " here is lazy and its value is discarded,"
+  (doseq [f (butlast forms)]
+    (when-let [lazy (discarded-lazy-call f locals)]
+      (throw (ex-info (str "In gen: " (pr-str (first lazy)) " here is lazy and its value is discarded,"
                            " so its trace calls would never run. Use doseq, run! or mapv.")
                       {:form f}))))
   (guard-body forms locals))
@@ -598,7 +626,7 @@
   (let [pairs (vec (partition 2 bindings))]
     (doseq [[i [sym init]] (map-indexed vector pairs)
             :let [expanded (if (and (seq? init) (symbol? (first init)) (not (contains? locals (first init))))
-                             (macroexpand init)
+                             (expand init locals)
                              init)]]
       (when (and (symbol? sym)
                  (or (discarded-lazy-trace? init locals) (discarded-lazy-trace? expanded locals))
@@ -635,6 +663,11 @@
                    (list* op bindings (guard-statements body locals)))
     do (list* 'do (guard-statements (rest form) locals))
     fn* (guard-fn form locals)
+    ;; (reify* [interfaces] (method [this params…] body…) …): the parameters are locals
+    reify* (let [[_ interfaces & methods] form]
+             (list* 'reify* interfaces
+                    (for [[mname params & body] methods]
+                      (list* mname params (guard-statements body (into locals params))))))
     ;; (. target member args…) or (. target (member args…)): a member name is
     ;; not a var, even when it is spelled like one (.get)
     . (let [[_ target member & args] form]
@@ -671,7 +704,7 @@
     (seq? form) (let [head (first form)]
                   (if (and (symbol? head) (contains? locals head))
                     (apply list (guard-body form locals))
-                    (let [expanded (macroexpand form)]
+                    (let [expanded (expand form locals)]
                       (if (seq? expanded) (guard-special expanded locals) (guard-branches expanded locals)))))
     (vector? form) (mapv #(guard-branches % locals) form)
     (map? form) (into (empty form) (map (fn [[k v]] [(guard-branches k locals) (guard-branches v locals)])) form)
@@ -688,13 +721,34 @@
    Conditionals, and clojure.core's truthiness tests and lookups (not,
    filter, every?, get, …; gen.dynamic.core), branch per particle in a
    batched run: on a value that differs across particles they raise the
-   fallback to one particle at a time (gen.batched). Helper functions the
-   body calls are not rewritten.
+   fallback to one particle at a time (gen.batched).
+
+   Helper functions the body calls are not rewritten: define one that
+   branches on values with defn-guarded (or guarded-fn).
 
    Trace calls in a lazy sequence run when it is realized (chunking
    included); the body's return value is realized during the run. A lazy
-   call with trace calls whose value is discarded, or bound and never used,
-   is a compile error. Prefer mapv, doseq and run!."
+   call with trace calls whose value is discarded (also as the value of a
+   when, if, let or do in statement position), or bound and never used, is
+   a compile error. Prefer mapv, doseq and run!."
   [params & body]
-  (let [body-fn (guard-branches `(fn [~'trace ~'splice ~'param ~@params] ~@body) (set (keys &env)))]
+  (let [body-fn (guard-branches `(fn [~'trace ~'splice ~'param ~@params] ~@body)
+                                (into (set (keys &env)) *outer-locals*))]
     `(make-gen-fn ~body-fn '~(cons params body))))
+
+(defmacro guarded-fn
+  "fn, with a gen body's guards: if and case tests branch through truthy?,
+   and clojure.core's truthiness tests and lookups are gen.dynamic.core's. A
+   helper function that branches on values, defined so, raises the fallback
+   in a batched run (gen.batched) where a plain fn would take one branch for
+   every particle."
+  [& fn-tail]
+  (guard-branches `(fn ~@fn-tail) (into (set (keys &env)) *outer-locals*)))
+
+(defmacro defn-guarded
+  "defn with guarded-fn's guards: (defn-guarded name doc? [params] body…)."
+  [fname & more]
+  (let [[doc more] (if (string? (first more)) [(first more) (rest more)] [nil more])
+        arglists (if (vector? (first more)) (list (first more)) (map first more))]
+    `(def ~(vary-meta fname assoc :doc doc :arglists (list 'quote arglists))
+       (guarded-fn ~fname ~@more))))

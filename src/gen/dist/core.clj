@@ -77,8 +77,8 @@
   "A parameter must not be NaN (in any element, read when concrete): a NaN
    would make every log density NaN rather than fail."
   [dist-name param-name v]
-  (when (if (instance? Double v)
-          (Double/isNaN v)
+  (when (if (a/host? v)
+          (and (float? v) (Double/isNaN (double v)))
           (and (a/array? v) (not (a/host? v)) (a/concrete? v) (= :float (dt/kind (a/dtype v)))
                (a/any-true? (a/isnan v))))
     (throw (ex-info (str dist-name ": " param-name " is NaN") {:distribution dist-name :param param-name}))))

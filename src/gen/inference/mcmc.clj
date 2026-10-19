@@ -110,7 +110,9 @@
    update weight less the prior's own ratio, which the ellipse accounts for)."
   ([trace addr mu cov] (elliptical-slice trace addr mu cov (gfi/next-key)))
   ([trace addr mu cov key]
-   (let [[k-nu k-u k-theta] (rng/split key 3)
+   (let [mu (dc/->array mu)
+         cov (dc/->array cov)
+         [k-nu k-u k-theta] (rng/split key 3)
          prior (d/mvnormal mu cov)
          f0 (or (trace addr)
                 (throw (ex-info (str "elliptical-slice: the trace has no choice at " (pr-str addr)) {:addr addr})))

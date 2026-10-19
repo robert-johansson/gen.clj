@@ -1,14 +1,16 @@
 (ns gen.dynamic.core
   "Guarded versions of the clojure.core functions that test truthiness or
-   look up by key. Inside gen bodies the gen macro uses these in place of
-   clojure.core's (as it wraps if tests in gen.array/truthy?).
+   look up by key. Inside gen bodies (and guarded-fn helpers) the gen macro
+   uses these in place of clojure.core's, as it wraps if tests in
+   gen.array/truthy?.
 
    On ordinary values each behaves as clojure.core's. A batched value
    (gen.array.batch) is an object, and clojure.core's own test would count it
    as true, or find no key, for every particle at once. The guarded versions
    raise the batched-branch error instead, so the batched run falls back to
    one particle at a time. This is what makes (not b), if-not, (filter pred
-   xs) or (get v k) inside a body branch per particle.
+   xs) or (get v k) inside a body branch per particle. The type predicates
+   answer exactly, from the batch's dtype and per-particle shape.
 
    Predicates passed to the higher-order functions are tested with truthy?,
    which is also how gen bodies' if tests branch."
@@ -18,7 +20,9 @@
                             every? some not-any? not-every? filter filterv remove take-while drop-while
                             split-with complement every-pred some-fn
                             get contains? find get-in])
-  (:require [gen.array :as a]))
+  (:require [gen.array :as a]
+            [gen.array.dtype :as dt]
+            [gen.array.protocols :as p]))
 
 (set! *warn-on-reflection* true)
 
@@ -32,10 +36,27 @@
   [what x]
   (if (batched? x) (throw (branch-error what)) x))
 
+(defn ^:no-doc lookup-error
+  "The batched-branch error of a lookup (used by get's inline expansion)."
+  []
+  (throw (branch-error "A lookup")))
+
+(defn- tested
+  "A predicate's result v as clojure.core's own if will see it, decided by
+   truthy?: booleans and nil as they are, other values when truthy? holds,
+   false when it does not (a one-element false array)."
+  [v]
+  (cond (instance? Boolean v) v
+        (nil? v) v
+        (a/truthy? v) v
+        :else false))
+
 (defn- guard-pred
-  "pred, its result tested with truthy? (returned when true, else nil)."
+  "pred, its result tested with truthy?."
   [pred]
-  (fn [& xs] (let [v (apply pred xs)] (when (a/truthy? v) v))))
+  (fn ([x] (tested (pred x)))
+      ([x y] (tested (pred x y)))
+      ([x y & more] (tested (apply pred x y more)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Truthiness
@@ -51,13 +72,50 @@
 
 (defn identical? [x y] (clojure.core/identical? (unbatched "identical?" x) (unbatched "identical?" y)))
 
-(defmacro ^:private def-type-predicates [& names]
-  `(do ~@(for [n names]
-           `(defn ~n [~'x] (~(symbol "clojure.core" (name n)) (unbatched ~(str n) ~'x))))))
+;; ---------------------------------------------------------------------------
+;; Type predicates: a batch's particles are host scalars of its dtype's kind
+;; when their shape is [] (on a backend whose 0-d arrays are host values),
+;; else arrays
+;; ---------------------------------------------------------------------------
 
-;; a particle's value is a host number or an array: the batch cannot say which
-(def-type-predicates number? integer? int? float? double? boolean? nat-int? pos-int? neg-int?
-  rational? ratio? decimal?)
+(defn- particle-kind
+  "The kind (:bool :int :float) of a batched x's particle values when they
+   are host scalars, else nil."
+  [x]
+  (when (= [] (a/shape x))
+    (let [dtype (a/dtype x)
+          kind (dt/kind dtype)]
+      (when (a/host? (p/-full (p/-inner (p/-backend x)) [] (if (= :bool kind) false 0) dtype))
+        kind))))
+
+(defmacro ^:private def-type-predicate
+  "A type predicate: clojure.core's on ordinary values, (answer kind) on a
+   batched one."
+  [pred-name answer]
+  `(defn ~pred-name [~'x]
+     (if (batched? ~'x)
+       (~answer (particle-kind ~'x))
+       (~(symbol "clojure.core" (name pred-name)) ~'x))))
+
+(def-type-predicate number? #{:int :float})
+(def-type-predicate integer? #{:int})
+(def-type-predicate int? #{:int})
+(def-type-predicate float? #{:float})
+(def-type-predicate double? #{:float})
+(def-type-predicate boolean? #{:bool})
+(def-type-predicate rational? #{:int})
+(def-type-predicate ratio? (constantly false))
+(def-type-predicate decimal? (constantly false))
+
+(defn- int-sign-predicate [what core-pred x]
+  (if (batched? x)
+    ;; an integer particle's sign differs across particles
+    (if (= :int (particle-kind x)) (throw (branch-error what)) false)
+    (core-pred x)))
+
+(defn nat-int? [x] (int-sign-predicate "nat-int?" clojure.core/nat-int? x))
+(defn pos-int? [x] (int-sign-predicate "pos-int?" clojure.core/pos-int? x))
+(defn neg-int? [x] (int-sign-predicate "neg-int?" clojure.core/neg-int? x))
 
 ;; ---------------------------------------------------------------------------
 ;; Predicates of higher-order functions
@@ -102,6 +160,18 @@
 ;; ---------------------------------------------------------------------------
 
 (defn get
+  {:inline (fn
+             ([m k] `(let [m# ~m k# ~k]
+                       (when (or (instance? gen.array.protocols.IBatchedValue m#)
+                                 (instance? gen.array.protocols.IBatchedValue k#))
+                         (lookup-error))
+                       (clojure.lang.RT/get m# k#)))
+             ([m k not-found] `(let [m# ~m k# ~k]
+                                 (when (or (instance? gen.array.protocols.IBatchedValue m#)
+                                           (instance? gen.array.protocols.IBatchedValue k#))
+                                   (lookup-error))
+                                 (clojure.lang.RT/get m# k# ~not-found))))
+   :inline-arities #{2 3}}
   ([m k] (clojure.core/get (unbatched "get" m) (unbatched "A lookup" k)))
   ([m k not-found] (clojure.core/get (unbatched "get" m) (unbatched "A lookup" k) not-found)))
 

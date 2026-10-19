@@ -235,7 +235,8 @@
                             (gfi/simulate (gen [] (trace [] (d/normal 0 1))) [] k))))
     (testing "NaN parameters"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"normal: mu is NaN" (d/normal ##NaN 1)))
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mu is NaN" (d/normal (a/array [0.0 ##NaN]) 1))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mu is NaN" (d/normal (a/array [0.0 ##NaN]) 1)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mu is NaN" (d/normal (float Float/NaN) 1)) "a Float too"))
     (testing "update and regenerate take one argdiff per argument"
       (let [tr (gfi/simulate linreg [[1.0]] k)]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"1 arguments but 0 argdiffs"
@@ -359,6 +360,26 @@
           m (gen [] (reset! escaped (map (fn [i] (trace [:x i] (d/normal 0 1))) (range 3))) nil)]
       (gfi/simulate m [] (rng/key 2))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"after the generative function returned" (doall @escaped))))))
+
+(deftest guarded-clojure-core-matches-clojure-core
+  ;; third acceptance test: the substitution must not change ordinary code
+  (let [k (rng/key 0)
+        ret (fn [gf & args] (:retval (gfi/simulate gf (vec args) k)))]
+    (is (false? (ret (gen [] ((some-fn neg? zero?) 5)))) "some-fn keeps false, not nil")
+    (is (nil? (ret (gen [] (some #{:a} [:b :c])))))
+    (is (= [1 3] (ret (gen [] (filterv odd? [1 2 3])))))
+    (is (= 2 (ret (gen [filter] (splice :g (gen [x] (trace :x (d/normal 0 1)) (filter x)) 1)) inc))
+        "a gen nested in a body sees the body's locals")
+    (is (= 2 (ret (gen [] (.apply ^java.util.function.Function
+                                  (reify java.util.function.Function (apply [_ some] (inc some))) 1))))
+        "reify parameters are locals")
+    (is (true? (ret (gen [] (let [x (trace :x (d/normal 0 1))] (and (number? x) (float? x) (not (integer? x))))))))
+    (is (= [:a 3 nil] (ret (gen [] [(get {:k :a} :k) (get [1 2 3] 2) (get "s" 5)]))))))
+
+(deftest discarded-lazy-calls-inside-wrappers-are-compile-errors
+  (is (thrown-with-msg? Exception #"map here is lazy and its value is discarded"
+                        (try (eval '(gen.dynamic/gen [xs] (when true (map #(trace [:y %] (gen.dist/normal 0 1)) xs)) 1))
+                             (catch clojure.lang.Compiler$CompilerException e (throw (ex-cause e)))))))
 
 (deftest unused-lazy-bindings-with-trace-calls-are-compile-errors
   (is (thrown-with-msg? Exception #"ys is bound to a lazy map and never used"
