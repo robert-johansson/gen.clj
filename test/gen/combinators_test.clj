@@ -55,8 +55,22 @@
       (splice :pick switched (if (trace :which (d/bernoulli 0.5)) 0 1) (peek path))
       xs)))
 
+(def grow
+  "A random binary tree two levels deep at most, a value at each node."
+  (gen [depth]
+    (let [split? (trace :split (d/bernoulli (if (< depth 2) 0.6 0.0)))]
+      {:value (trace :v (d/normal depth 1)) :children (if split? [(inc depth) (inc depth)] [])})))
+
+(def fold
+  "A node's sum, observed with noise."
+  (gen [v ws] (let [s (reduce + v ws)] (trace :obs (d/normal s 1)) s)))
+
+(def tree (comb/recurse grow fold 2))
+
 (def models
   [[:map mapped [[1.0 2.0 3.0]]]
+   [:recurse tree [0] [[1]]]
+   [:recurse-spliced (gen [d] (let [s (splice :t tree d)] (trace :y (d/normal s 1)))) [0] [[1]]]
    [:map-2-args (comb/map (gen [x y] (trace :z (d/normal x y)))) [[0.0 1.0] [1.0 2.0]]]
    [:unfold unfolded [4 0.0 0.1]]
    [:switch switched [1 0.5]]
@@ -67,6 +81,9 @@
    [:choice-at (comb/choice-at d/normal) [0.0 1.0 :x] [[0.5 2.0 :x]]]])
 
 (laws/deflaws combinators models 100)
+
+;; Recurse alone too: its trees change shape under update and regenerate
+(laws/deflaws recurse (filterv #(#{:recurse :recurse-spliced} (first %)) models) 100)
 
 ;; ---------------------------------------------------------------------------
 ;; Map
@@ -310,3 +327,51 @@
         {t :trace w :weight} (gfi/regenerate tr [1] [diff/unknown-change] sel/none (rng/key 4))]
     (is (= 0.3 (:retval t)) "two distributions: the value stays")
     (is (close? w (- (dc/log-prob (d/normal 5 1) 0.3) (dc/log-prob (d/normal 0 1) 0.3))))))
+
+;; ---------------------------------------------------------------------------
+;; Recurse
+;; ---------------------------------------------------------------------------
+
+(deftest recurse-builds-and-folds-the-tree
+  (let [counted (comb/recurse (gen [n] {:value n :children (if (< n 2) [(inc n) (inc n)] [])})
+                              (gen [v ws] (reduce + v ws))
+                              2)]
+    (is (= 10 (:retval (gfi/assess counted [0] cm/EMPTY)) (:retval (gfi/simulate counted [0] (rng/key 1)))) "0 + 2·1 + 4·2")
+    (is (= 10 (counted 0)) "an untraced call"))
+  (testing "node indices: the root 0, child j of node i at i·max-branch + j + 1"
+    (let [tr (:trace (gfi/generate tree [0] (cm/choicemap [0 :production :split] true [1 :production :split] true
+                                                           [2 :production :split] false)
+                                   (rng/key 2)))
+          nodes (set (keys (cm/to-map (:choices tr))))]
+      (is (= #{0 1 2 3 4} nodes))
+      (is (ts/close? (:retval tr) (reduce + (map #(tr [% :production :v]) nodes))))
+      (is (ts/close? (tr [1 :aggregation :obs]) (tr [1 :aggregation :obs])))))
+  (testing "max-branch is enforced"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"more than max-branch"
+                          (gfi/simulate (comb/recurse (gen [_] {:value 0 :children [1 2 3]}) fold 2) [0] (rng/key 3))))))
+
+(deftest recurse-updates-only-the-changed-path
+  (let [tr (:trace (gfi/generate tree [0] (cm/choicemap [0 :production :split] true [1 :production :split] true
+                                                         [2 :production :split] true)
+                                 (rng/key 4)))
+        {t' :trace w :weight d :discard} (gfi/update tr [0] [diff/no-change] (cm/choicemap [3 :production :v] 0.25) (rng/key 5))
+        prods (fn [t] (:gen.combinators/productions t))
+        aggs (fn [t] (:gen.combinators/aggregations t))]
+    (is (ts/close? 0.25 (t' [3 :production :v])))
+    (is (= {3 {:production {:v (tr [3 :production :v])}}} (cm/to-map d)))
+    (is (ts/close? (- (:score t') (:score tr)) w))
+    (testing "nodes off the path from 3 to the root keep their subtraces"
+      (doseq [n [0 1 2 4 5 6]] (is (identical? ((prods tr) n) ((prods t') n)) (str "production " n)))
+      (doseq [n [2 4 5 6]] (is (identical? ((aggs tr) n) ((aggs t') n)) (str "aggregation " n)))
+      (doseq [n [0 1 3]] (is (not (identical? ((aggs tr) n) ((aggs t') n))) (str "aggregation " n " revisited"))))
+    (testing "pruning a subtree discards it"
+      (let [{t'' :trace w :weight d :discard} (gfi/update tr [0] [diff/no-change] (cm/choicemap [1 :production :split] false)
+                                                          (rng/key 6))]
+        (is (= #{0 1 2 5 6} (set (keys (cm/to-map (:choices t''))))))
+        (is (= #{1 3 4} (set (keys (cm/to-map d)))))
+        (is (ts/close? (- (:score t'') (:score tr)) w) "the update samples nothing")))
+    (testing "constraints off the tree are loud"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not visited"
+                            (gfi/update tr [0] [diff/no-change] (cm/choicemap [9 :production :v] 1.0) (rng/key 7))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not visited"
+                            (gfi/generate tree [0] (cm/choicemap [0 :elsewhere] 1.0) (rng/key 8)))))))

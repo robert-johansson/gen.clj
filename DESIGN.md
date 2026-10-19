@@ -500,6 +500,14 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   GenParticleFilters' UpdatingTraceTranslator with a transform
   (`updating-translator`), applied to a filter by `pf/move-reweight`;
   without a transform it is Del Moral's SMC samplers.
+- **Recurse** (M4, 2026-10-20): `(comb/recurse production aggregation
+  max-branch)` as Gen.jl's, with 0-based nodes (root 0, child j of node i
+  at i·max-branch + j + 1), choices at `[i :production]` and
+  `[i :aggregation]`, the production kernel returning `{:value v :children
+  [inputs]}`, and one argument (no `root_idx`). An update's new nodes add
+  their generate weights, where Gen.jl's code adds their scores, which is
+  the same only when every new choice is constrained; regenerate is
+  implemented too (Gen.jl has none).
 - **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
   `(array/item x)`, the namespace's last segment, as the Clojure style guide
   has it. It replaced `a`, which the owner found ugly (2026-10-18). The

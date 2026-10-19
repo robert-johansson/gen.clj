@@ -10,6 +10,15 @@
                         vector of the n states after each step.
      (switch & gfs)     Switch: args (index & args) call branch index.
      (switch {k gf …})  keyed Switch: args (k & args).
+     (recurse production aggregation max-branch)
+                        Recurse: a tree. Node i's production kernel, on
+                        its input, returns {:value v :children [inputs …]}
+                        (at most max-branch); its aggregation kernel, on
+                        (v [the children's aggregations]), returns the
+                        node's value. Args (input), the root's; node i's
+                        choices are at [i :production] and [i :aggregation],
+                        the root 0 and child j of node i at
+                        i·max-branch + j + 1. Returns the root's aggregation.
      (call-at gf)       Gen.jl's call_at: args (& args k) call gf on args,
                         its choices under address k.
      (choice-at dist)   Gen.jl's choice_at: args (& args k), one choice at
@@ -459,6 +468,209 @@
 ;; ---------------------------------------------------------------------------
 ;; Printing
 ;; ---------------------------------------------------------------------------
+
+;; ---------------------------------------------------------------------------
+;; Recurse
+;; ---------------------------------------------------------------------------
+
+(defn- child-of [max-branch node j] (+ (clojure.core/* node max-branch) j 1))
+
+(defn- production-output
+  "The production kernel's return value at node, checked."
+  [gf node {out :retval}]
+  (when-not (and (map? out) (contains? out :value) (sequential? (:children out)))
+    (throw (ex-info (str "Recurse's production kernel returns {:value v :children [inputs …]}, not " (pr-str out)
+                         " (node " node ")")
+                    {:node node :retval out})))
+  (when (> (count (:children out)) (:max-branch gf))
+    (throw (ex-info (str "Recurse: node " node " has " (count (:children out)) " children, more than max-branch "
+                         (:max-branch gf))
+                    {:node node :children (count (:children out)) :max-branch (:max-branch gf)})))
+  out)
+
+(defn- recurse-targets
+  "The nodes the constraints (update, generate) or the selection
+   (regenerate) reach: {node #{:production :aggregation}}, or :all."
+  [op cs]
+  (cond
+    (nil? cs) {}
+    (= op :regenerate)
+    (let [is (selected-indices cs)]
+      (if (= :all is) :all (into {} (clojure.core/map (fn [i] [i #{:production :aggregation}])) is)))
+    :else
+    (do (when (cm/has-value? cs)
+          (throw (ex-info (str (name op) ": a single value was given where Recurse's nodes belong") {:op op})))
+        (into {} (clojure.core/map (fn [[i sub]]
+                                     (when-not (nat-int? i)
+                                       (throw (ex-info (str (name op) ": the constraint at " i " was not visited"
+                                                            " (Recurse's addresses are node indices)")
+                                                       {:op op :address i})))
+                                     (let [parts (set (clojure.core/map first (cm/submaps sub)))]
+                                       (when-let [bad (first (remove #{:production :aggregation} parts))]
+                                         (throw (ex-info (str (name op) ": the constraint at [" i " " bad
+                                                              "] was not visited (a node has :production and"
+                                                              " :aggregation)")
+                                                         {:op op :address [i bad]})))
+                                       [i parts])))
+              (cm/submaps cs)))))
+
+(defn- targeted? [targets node part]
+  (or (= :all targets) (contains? (get targets node) part)))
+
+(defn- node-cs [op cs node part]
+  (when cs (if (= op :regenerate) (sel/get-subselection (sel/get-subselection cs node) part) (cm/get-submap cs [node part]))))
+
+(defn- run-node
+  "One kernel run at node: revised from old when given (update or
+   regenerate), else new (generate, or simulate for regenerate and
+   unconstrained runs). {:trace :weight :retdiff :discard}."
+  [op kernel old args argdiffs cs key]
+  (cond
+    old (if (= op :regenerate)
+          (regenerate-at kernel old args argdiffs cs key)
+          (update-at kernel old args argdiffs cs key))
+    (and cs (not= op :regenerate)) (assoc (generate-at kernel args cs key) :retdiff diff/unknown-change)
+    :else {:trace (simulate-at kernel args key) :weight 0.0 :retdiff diff/unknown-change}))
+
+(defn- recurse-run
+  "generate (tr nil), update or regenerate of a Recurse trace: the
+   production phase from the root, revisiting a retained node only when its
+   input may have changed or it is targeted, then the aggregation phase from
+   the leaves, revisiting a node when its value, its children or its
+   target may have changed. Nodes no longer reached are dropped: update
+   discards them and subtracts their scores; in regenerate they cancel
+   against the reverse move."
+  [gf tr [input] [input-diff] op cs key]
+  (let [{:keys [production aggregation max-branch]} gf
+        old-p (::productions tr {})
+        old-a (::aggregations tr {})
+        targets (recurse-targets op cs)
+        node-key (fn [node part] (element-key (element-key key node) (if (= part :production) 0 1)))
+        ;; production phase, in node order: parents before children
+        [prods p-diffs weight discard]
+        ;; weight starts boxed: it accumulates arrays on array backends
+        (loop [todo (sorted-map 0 [input input-diff]) prods {} p-diffs {} weight (Double/valueOf 0.0) discard cm/EMPTY]
+          (if-let [[node [in d]] (first todo)]
+            (let [old (old-p node)
+                  revisit? (or (nil? old) (diff/changed? d) (targeted? targets node :production))
+                  r (if revisit?
+                      (run-node op production old [in] [d] (node-cs op cs node :production) (node-key node :production))
+                      {:trace old :weight 0.0 :retdiff diff/no-change})
+                  out (production-output gf node (:trace r))
+                  child-diff (if (diff/changed? (:retdiff r)) diff/unknown-change diff/no-change)
+                  todo (into (dissoc todo node)
+                             (map-indexed (fn [j c] [(child-of max-branch node j) [c child-diff]]) (:children out)))]
+              (recur todo (assoc prods node (:trace r)) (assoc p-diffs node (:retdiff r)) (+ weight (:weight r))
+                     (cond-> discard (and (:discard r) (not (cm/empty? (:discard r))))
+                       (cm/set-choice [node :production] (:discard r)))))
+            [prods p-diffs weight discard]))
+        _ (when (and cs (not= op :regenerate))
+            (doseq [node (keys targets)]
+              (when-not (contains? prods node)
+                (throw (ex-info (str (name op) ": the constraint at node " node " was not visited (the tree has nodes "
+                                     (vec (sort (keys prods))) ")")
+                                {:op op :address node})))))
+        ;; aggregation phase, children before parents
+        [aggs a-diffs weight discard]
+        (reduce (fn [[aggs a-diffs weight discard] node]
+                  (let [{v :value children :children} (:retval (prods node))
+                        kids (clojure.core/map #(child-of max-branch node %) (range (count children)))
+                        old (old-a node)
+                        v-diff (p-diffs node)
+                        ws-changed? (or (nil? old) (not= (count children) (count (second (:args old))))
+                                        (some #(diff/changed? (a-diffs %)) kids))
+                        revisit? (or (nil? old) (diff/changed? v-diff) ws-changed? (targeted? targets node :aggregation))
+                        args [v (mapv #(:retval (aggs %)) kids)]
+                        r (if revisit?
+                            (run-node op aggregation old args [(if (diff/changed? v-diff) diff/unknown-change diff/no-change)
+                                                               (if ws-changed? diff/unknown-change diff/no-change)]
+                                      (node-cs op cs node :aggregation) (node-key node :aggregation))
+                            {:trace old :weight 0.0 :retdiff diff/no-change})]
+                    [(assoc aggs node (:trace r)) (assoc a-diffs node (:retdiff r)) (+ weight (:weight r))
+                     (cond-> discard (and (:discard r) (not (cm/empty? (:discard r))))
+                       (cm/set-choice [node :aggregation] (:discard r)))]))
+                [{} {} weight discard]
+                (sort > (keys prods)))
+        gone (remove prods (keys old-p))
+        weight (if (= op :update)
+                 (reduce (fn [w node] (- w (+ (:score (old-p node)) (:score (old-a node))))) weight gone)
+                 weight)
+        discard (if (= op :update)
+                  (reduce (fn [d node]
+                            (let [pc (:choices (old-p node)) ac (:choices (old-a node))]
+                              (cond-> d
+                                (not (cm/empty? pc)) (cm/set-choice [node :production] pc)
+                                (not (cm/empty? ac)) (cm/set-choice [node :aggregation] ac))))
+                          discard gone)
+                  discard)
+        choices (reduce (fn [c node]
+                          (let [pc (:choices (prods node)) ac (:choices (aggs node))]
+                            (cond-> c
+                              (not (cm/empty? pc)) (cm/set-choice [node :production] pc)
+                              (not (cm/empty? ac)) (cm/set-choice [node :aggregation] ac))))
+                        cm/EMPTY (sort (keys prods)))
+        score (reduce + 0.0 (concat (clojure.core/map :score (vals prods)) (clojure.core/map :score (vals aggs))))
+        t (assoc (trace/make-trace {:gen-fn gf :args [input] :choices choices :retval (:retval (aggs 0)) :score score})
+                 ::productions prods ::aggregations aggs)]
+    (cond-> {:trace t :weight weight}
+      (not= op :generate) (assoc :retdiff (if tr (a-diffs 0) diff/unknown-change))
+      (= op :update) (assoc :discard discard))))
+
+(defn- recurse-args [args]
+  (when-not (= 1 (count args))
+    (throw (ex-info (str "Recurse takes one argument, the root's input; given " (count args)) {:args args})))
+  (vec args))
+
+(defn- recurse-assess [gf [input] choices]
+  (let [{:keys [production aggregation max-branch]} gf
+        targets (recurse-targets :assess choices)
+        [ps weight] (loop [todo (sorted-map 0 input) ps {} weight (Double/valueOf 0.0)]
+                      (if-let [[node in] (first todo)]
+                        (let [r (assess-at production [in] (cm/get-submap choices [node :production]))
+                              out (production-output gf node r)]
+                          (recur (into (dissoc todo node)
+                                       (map-indexed (fn [j c] [(child-of max-branch node j) c]) (:children out)))
+                                 (assoc ps node out) (+ weight (:weight r))))
+                        [ps weight]))
+        _ (doseq [node (keys targets)]
+            (when-not (contains? ps node)
+              (throw (ex-info (str "assess: the choices at node " node " were not visited") {:address node}))))
+        [as weight] (reduce (fn [[as weight] node]
+                              (let [{v :value children :children} (ps node)
+                                    ws (mapv #(as (child-of max-branch node %)) (range (count children)))
+                                    r (assess-at aggregation [v ws] (cm/get-submap choices [node :aggregation]))]
+                                [(assoc as node (:retval r)) (+ weight (:weight r))]))
+                            [{} weight] (sort > (keys ps)))]
+    {:weight weight :retval (as 0)}))
+
+(defn- recurse-project [tr s]
+  (let [part (fn [subs part]
+               (reduce (fn [w [node sub]]
+                         (+ w (gfi/-project (:gen-fn sub) sub (sel/get-subselection (sel/get-subselection s node) part))))
+                       0.0 subs))]
+    (+ (part (::productions tr) :production) (part (::aggregations tr) :aggregation))))
+
+(defcombinator RecurseGF [production aggregation max-branch]
+  gfi/IGenerativeFunction
+  (-simulate [gf args key] (:trace (recurse-run gf nil (recurse-args args) [diff/unknown-change] :generate nil key)))
+  (-generate [gf args constraints key] (recurse-run gf nil (recurse-args args) [diff/unknown-change] :generate constraints key))
+  (-update [gf tr args argdiffs constraints key] (recurse-run gf tr (recurse-args args) argdiffs :update constraints key))
+  (-regenerate [gf tr args argdiffs selection key] (recurse-run gf tr (recurse-args args) argdiffs :regenerate selection key))
+  (-assess [gf args choices] (recurse-assess gf (recurse-args args) choices))
+  (-propose [gf args key] (propose-from-trace (gfi/-simulate gf args key)))
+  (-project [_ tr selection] (recurse-project tr selection)))
+
+(defn recurse
+  "Gen.jl's Recurse combinator (see the namespace doc): a tree grown by the
+   production kernel and folded by the aggregation kernel, each node with at
+   most max-branch children."
+  [production aggregation max-branch]
+  (when-not (pos-int? max-branch)
+    (throw (ex-info "Recurse's max-branch is a positive integer" {:max-branch max-branch})))
+  (->RecurseGF production aggregation max-branch))
+
+(defmethod print-method RecurseGF [_ ^java.io.Writer w]
+  (.write w "#gen/recurse"))
 
 (defmethod print-method MapGF [gf ^java.io.Writer w]
   (.write w "#gen/map[") (print-method (:kernel gf) w) (.write w "]"))
