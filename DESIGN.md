@@ -34,8 +34,8 @@ are fixed (`docs/research/acceptance-2026-10-19.md`). Benchmarks are in
 **M2 (2026-10-19): the MLX backend runs on Metal and on MLX's CPU backend.**
 It passes the backend conformance suite against the JVM reference, and the
 full test battery on Metal (294 tests, the slow and heavy ones included).
-On MLX's CPU backend in float64 the light battery passes (277 tests); of the
-full battery, the first 16 namespaces pass and the rest are being run.
+On MLX's CPU backend in float64 the full battery passes too (all 24
+namespaces, the heavy tests included: about 100 minutes, in two runs).
 Benchmarks against GenMLX on the same machine are in `docs/benchmarks.md`.
 Memory is bounded by default after a kernel panic from test JVMs (§9).
 CUDA on Linux remains (beans genclj-v3el, genclj-0kge), as does making
