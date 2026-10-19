@@ -38,7 +38,7 @@
 
 (set! *warn-on-reflection* true)
 
-(declare backend config)
+(declare backend config device-handle)
 
 ;; ---------------------------------------------------------------------------
 ;; Dtypes
@@ -974,6 +974,27 @@
   (let [it (volatile! (seq xs))]
     (mapv (fn [t] (tree-map (fn [_] (let [x (first @it)] (vswap! it next) x)) t)) trees)))
 
+(defn- with-default-stream
+  "(f) with MLX's default device and the thread's default stream set to b's:
+   MLX builds a gradient's backward pass there, not on the streams the
+   backend passes its ops. The default device is global, so this holds the
+   evaluation lock (reentrant: f may read values)."
+  [b f]
+  (evaluating
+    (let [dev (device-handle (:device (config b)))
+          prev-dev (Mlx/mlx_get_default_device)
+          prev-stream (Mlx/mlx_get_default_stream dev)]
+      (try
+        (Mlx/mlx_set_default_device dev)
+        (Mlx/mlx_set_default_stream (stream b))
+        (f)
+        (finally
+          (Mlx/mlx_set_default_stream prev-stream)
+          (Mlx/mlx_set_default_device prev-dev)
+          (Mlx/mlx_stream_free prev-stream)
+          (Mlx/mlx_device_free prev-dev)
+          (Mlx/mlx_device_free dev))))))
+
 (defn- native-value-and-grad
   "[value grads] of f on args with respect to the positions argnums, by
    mlx_value_and_grad: MLX calls f back with its own arrays for the
@@ -1004,7 +1025,7 @@
             _ (.add temps [:vag vag])
             in (MlxRuntime/vectorOf (long-array (map #(.-h ^MlxArray %) xs)))
             _ (.add temps [:vec in])
-            [vs gs] (vec (Mlx/mlx_closure_value_and_grad_apply vag in))
+            [vs gs] (vec (with-default-stream b #(Mlx/mlx_closure_value_and_grad_apply vag in)))
             _ (.add temps [:vec vs])
             _ (.add temps [:vec gs])
             v (wrap b (first (MlxRuntime/vectorArrays vs)))

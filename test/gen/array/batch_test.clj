@@ -46,9 +46,9 @@
 
 (deftest reductions-and-scans
   (doseq [[label f] [[:sum a/sum] [:sum-0 #(a/sum % {:axis 0})] [:sum-keep #(a/sum % {:axis 1 :keep-dims? true})]
-                     [:max #(a/max % {:axis -1})] [:argmax #(a/astype (a/argmax % {:axis 1}) :float64)]
+                     [:max #(a/max % {:axis -1})] [:argmax #(a/astype (a/argmax % {:axis 1}) (ts/float-dtype))]
                      [:prod a/prod] [:mean a/mean] [:logsumexp #(a/logsumexp % {:axis -1})]
-                     [:softmax a/softmax] [:cumsum #(a/cumsum % {:axis 0})] [:any #(a/astype (a/any (a/> % 0)) :float64)]]]
+                     [:softmax a/softmax] [:cumsum #(a/cumsum % {:axis 0})] [:any #(a/astype (a/any (a/> % 0)) (ts/float-dtype))]]]
     (is (vmap-matches? f [b23] #{0}) (str label))))
 
 (deftest shapes
@@ -102,7 +102,7 @@
       (is (vmap-matches? #(la/solve %1 %2) [b233 b3] #{0 1}) "against a per-particle [3]")))
   (testing "B9: scans and arg-reductions of per-particle scalars"
     (is (vmap-matches? a/cumsum [bs] #{0}))
-    (is (vmap-matches? #(a/astype (a/argmax %) :float64) [bs] #{0})))
+    (is (vmap-matches? #(a/astype (a/argmax %) (ts/float-dtype)) [bs] #{0})))
   (testing "a per-particle fill value"
     (is (vmap-matches? #(a/full [2] %) [bs] #{0})))
   (testing "a gradient of unbatched leaves inside a batched run"

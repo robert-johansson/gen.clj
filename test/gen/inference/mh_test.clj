@@ -104,7 +104,7 @@
   (let [[k1 k2] (rng/split key)]
     (-> tr (mh/mh (sel/select :a) k1) :trace (mh/involutive-mh direction [] step-b k2) :trace)))
 
-(deftest kernels-leave-the-posterior-invariant
+(deftest ^:heavy kernels-leave-the-posterior-invariant
   (doseq [[label step] [[:gibbs-like gibbs-like] [:joint joint] [:custom custom] [:involutive involutive]]]
     (is (< (stationary? main step) (threshold main)) (str label " is not stationary"))))
 

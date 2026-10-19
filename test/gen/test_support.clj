@@ -8,6 +8,7 @@
      (float64: 1e-12; float32: a few ulps, relative and absolute).
    - jvm?, float-dtype, int-dtype: for the few checks that are about one
      backend's representation."
+  (:refer-clojure :exclude [abs])
   (:require [gen.array :as a]
             [gen.array.protocols :as p]
             [gen.choicemap :as cm]))
@@ -21,6 +22,11 @@
 (defn int-dtype [] (:int (p/-defaults a/*backend*)))
 
 (defn f32? [] (= :float32 (float-dtype)))
+
+(defn flushes-subnormals?
+  "Does the backend flush float32 subnormals to zero (Metal does)?"
+  []
+  (and (not (jvm?)) (= :gpu ((requiring-resolve 'gen.backend.mlx/device) a/*backend*))))
 
 (defn float64?
   "Does the backend have float64 (MLX's GPUs do not)?"

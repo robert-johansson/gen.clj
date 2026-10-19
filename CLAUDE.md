@@ -50,7 +50,13 @@ without the native libraries the MLX tests skip.
 - **Power.** A new test must be able to fail. Check a statistical or law test
   against a planted bug (a mutation) before trusting it, as the suites
   document in place.
-- **Tiers.** Tag tests that run more than a few seconds `^:slow`.
+- **Tiers.** Tag tests that run more than a few seconds `^:slow`. Tag
+  scalar statistical tests that take minutes on MLX (one evaluation per read
+  value) `^:heavy`; `-X:test:light` skips both, for quick MLX runs.
+- **Backends.** Tests run on every backend: read results with
+  `gen.test-support/host`, compare with `close?` or `tol` (float32 aware),
+  write models with gen.array's operators, and keep host-number assumptions
+  behind `ts/jvm?`.
 
 **Fixtures.** Reference values in `test/fixtures/*.edn` come from scipy and JAX
 via `test/fixtures/generate.py`. Python is needed only to regenerate them:

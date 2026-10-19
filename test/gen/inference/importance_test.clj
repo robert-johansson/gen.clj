@@ -50,7 +50,7 @@
     (is (= n (count log-normalized-weights)))
     (is (< (ts/abs (- log-ml-estimate log-evidence)) (* 5 (Math/sqrt (/ relative-variance n)))))))
 
-(deftest the-estimate-is-unbiased-in-exp-space
+(deftest ^:heavy the-estimate-is-unbiased-in-exp-space
   ;; law 20: E[exp(log-ml-estimate)] = p(y), even for few samples, where the
   ;; log of the estimate is biased low by about relative-variance / (2n)
   (let [n 5 runs 4000
@@ -60,7 +60,7 @@
     (is (< (ts/abs (- (/ mean (Math/exp log-evidence)) 1))
            (* 5 (Math/sqrt (/ relative-variance (* n runs))))))))
 
-(deftest resampling-approaches-the-posterior
+(deftest ^:heavy resampling-approaches-the-posterior
   (let [runs 2000
         xs (map #((:trace (imp/importance-resampling model [] observations 100 {:key %})) :x)
                 (rng/split (rng/key 4) runs))
@@ -102,7 +102,7 @@
 
 (def x-proposal (gen [] (trace :x (d/normal 0.5 1.5))))
 
-(deftest a-partial-proposal-leaves-the-rest-to-the-internal-proposal
+(deftest ^:heavy a-partial-proposal-leaves-the-rest-to-the-internal-proposal
   (let [n 20
         {:keys [traces log-normalized-weights log-ml-estimate]}
         (imp/importance-sampling chain-model [] observations n {:proposal x-proposal :proposal-args [] :key (rng/key 6)})

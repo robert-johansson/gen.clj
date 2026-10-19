@@ -45,7 +45,7 @@
   (if (ts/jvm?)
     (is (= 3.0 (a/array 3.0)) "0-d arrays are host values on the JVM backend")
     (is (= [] (a/shape (a/array 3.0))) "and backend arrays on lazy backends"))
-  (is (= [1.0 2.0] (a/->clj (a/array [1 2] {:dtype :float64}))))
+  (is (= [1.0 2.0] (a/->clj (a/array [1 2] {:dtype (ts/float-dtype)}))))
   (is (thrown-data #(a/array [[1 2] [3]])) "ragged data is rejected")
   (is (thrown-data #(a/array [[1 2] [3 [4]]])) "deeply ragged data is rejected")
   (is (thrown-data #(a/+ [1 2] 1)) "Clojure vectors are not arrays")
@@ -151,8 +151,8 @@
   (is (= [6 5 3] (a/->clj (a/cumsum (a/array [1 2 3]) {:reverse? true}))))
   (is (= [[1 2] [4 6]] (a/->clj (a/cumsum (a/array [[1 2] [3 4]]) {:axis 0}))))
   (is (= [1 2 6] (a/->clj (a/cumprod (a/array [1 2 3])))))
-  (is (a/allclose? (a/log (a/cumsum (a/exp (a/array [0.0 1.0 2.0]))))
-                   (a/logcumsumexp (a/array [0.0 1.0 2.0])))))
+  (is (ts/close? (a/log (a/cumsum (a/exp (a/array [0.0 1.0 2.0]))))
+                 (a/logcumsumexp (a/array [0.0 1.0 2.0])))))
 
 (deftest shape-ops
   (let [x (a/array [[1 2 3] [4 5 6]])]

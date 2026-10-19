@@ -71,7 +71,7 @@
 
 (def observations (cm/choicemap :obs true))
 
-(deftest an-mh-cycle-targets-the-posterior
+(deftest ^:heavy an-mh-cycle-targets-the-posterior
   (let [start (:trace (gfi/generate model [] (cm/choicemap :a true :b 0 :obs true) (rng/key 0)))
         kernel (k/checked (k/cycle [(k/mh (sel/select :a)) (k/mh (sel/select :b))]) observations)
         ends (map #(peek (:traces (k/run kernel start {:samples 1 :burn 30 :key %})))
@@ -100,7 +100,7 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"changed the observation"
                           (dotimes [i 20] (bad start (rng/key i)))))))
 
-(deftest a-mixture-of-kernels-targets-the-posterior
+(deftest ^:heavy a-mixture-of-kernels-targets-the-posterior
   (let [start (:trace (gfi/generate model [] (cm/choicemap :a true :b 0 :obs true) (rng/key 0)))
         kernel (k/mix [(k/mh (sel/select :a)) (k/mh (sel/select :b)) (k/mh (sel/select :a :b))] [0.3 0.3 0.4])
         ends (map #(peek (:traces (k/run kernel start {:samples 1 :burn 60 :key %}))) (rng/split (rng/key 5) 2000))

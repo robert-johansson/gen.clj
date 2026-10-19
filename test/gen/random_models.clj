@@ -20,6 +20,7 @@
                                  mean (a host predicate on the choice)"
   (:require [clojure.test.check.generators :as gen]
             [gen.array :as a]
+            [gen.array.protocols]
             [gen.combinators :as comb]
             [gen.dist :as d]
             [gen.dynamic :as dyn]))
@@ -63,7 +64,7 @@
   (reduce (fn [env [kind addr & more :as st]]
             (case kind
               :site (let [[family dep] more
-                          x (if dep (a/astype (get env dep 0.0) :float64) 0.0)
+                          x (if dep (a/astype (get env dep 0.0) (:float (gen.array.protocols/-defaults a/*backend*))) 0.0)
                           v (trace addr ((families family) x))]
                       ;; a vector value enters later parameters as its sum
                       (assoc env addr (if (= family :vector) (a/sum v) v)))

@@ -229,7 +229,8 @@
    concatenates into one dtype: a bool choice comes back a bool)."
   [proto arr]
   (let [paths (addresses proto)
-        dtypes (mapv #(a/dtype (get-choice proto %)) paths)
+        ;; a host value's dtype is weak: its kind's default on arr's backend
+        dtypes (mapv #(a/weak-dtype (get-choice proto %) (a/backend arr)) paths)
         shapes (map #(a/shape (get-choice proto %)) paths)
         sizes (map #(reduce * 1 %) shapes)
         needed (reduce + sizes)]

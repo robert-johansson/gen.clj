@@ -19,6 +19,9 @@
                       io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
          :exec-fn cognitect.test-runner.api/test}
   :fast {:exec-args {:excludes [:slow]}}
+  ;; also without the ^:heavy tests: scalar statistical tests that take
+  ;; minutes on a lazy backend (every value read is an MLX evaluation)
+  :light {:exec-args {:excludes [:slow :heavy]}}
   :conformance {:exec-args {:nses [gen.array-test gen.array-props-test gen.special-test gen.linalg-test
                                    gen.random-test gen.array.tape-test gen.array.batch-test gen.dist-test gen.reference-test]}}
 

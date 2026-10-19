@@ -95,7 +95,7 @@
         sd (Math/sqrt (/ (reduce + (map #(* (- % mean) (- % mean)) ratios)) (dec runs)))]
     (< (ts/abs (- mean 1.0)) (* 5 (/ sd (Math/sqrt runs))))))
 
-(deftest the-estimate-is-unbiased-in-exp-space
+(deftest ^:heavy the-estimate-is-unbiased-in-exp-space
   (is (unbiased? false) "with the internal proposal")
   (is (unbiased? true) "with the locally optimal custom proposal"))
 

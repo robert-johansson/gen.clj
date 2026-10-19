@@ -103,7 +103,11 @@
   "x as the backend's float stores it: rounded to float32 on a float32
    backend, so the double-precision reference sees the same inputs."
   [x]
-  (if (and (ts/f32?) (instance? Double x)) (double (unchecked-float x)) x))
+  (if (and (ts/f32?) (instance? Double x))
+    (let [f (double (unchecked-float x))]
+      ;; Metal flushes subnormals to zero (docs/array-api.md §13)
+      (if (and (ts/flushes-subnormals?) (< 0.0 (Math/abs f) Float/MIN_NORMAL)) 0.0 f))
+    x))
 
 (defn- gen-data [shape]
   (gen/fmap #(reshape-flat (mapv storable %) shape)
