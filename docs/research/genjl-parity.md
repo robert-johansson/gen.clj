@@ -97,7 +97,7 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 | `Switch(gfs...)` / `Switch(dict, gfs...)`; a branch change gives a fresh subtrace plus a discard | Y (integer index) / P (no dict-keyed constructor) | core |
 | `Recurse(production, aggregation, max_branch, U,V,W)` (PCFG trees) | P: `recurse` is a fixed-point "maker" combinator, not the production/reduction tree; `update-with-args` throws | core |
 | `call_at(gf, K)` / `choice_at` | N | soon. *gen.clj (M4, 2026-10-19):* `comb/call-at` and `comb/choice-at`, the address as the last argument as in Gen.jl; dynamic generative functions over `splice` and `trace`, so their GFI is the handler's (laws in `combinators-test`) |
-| Internal-proposal override (thesis §4.4, Alg. 16, p. 152; not found in the 0.4.8 modeling library) | P: via `dispatch/with-dispatch` | soon |
+| Internal-proposal override (thesis §4.4, Alg. 16, p. 152; not found in the 0.4.8 modeling library) | P: via `dispatch/with-dispatch` | soon. *gen.clj (M4, 2026-10-19):* `gen.inference.proposal/with-internal-proposal`: q, called as `(q constraints & args)`, proposes some open choices and forward sampling the rest; project replays q against a trace |
 
 ### 1h. Choice maps, selections, traces (Gen.jl core)
 | Capability | GenMLX | gen.clj |
@@ -308,13 +308,13 @@ tested, ◐ partly, — not yet (the feature does not exist yet).
 |---|---|
 | 1 Structured density, unique addresses | ✓ `errors-are-loud` (repeated and nested addresses); `runs-are-pure-functions-of-the-key` |
 | 2 Score = density | ✓ `score-is-the-assessed-density`, and trace consistency inside every generate/update/regenerate law |
-| 3 Generate | ✓ `generate-with-every-choice-is-deterministic`, `generate-without-constraints-has-weight-zero`, `generate-weight-is-the-constrained-density`, `generated-traces-are-consistent`; E[w] = p̄(σ): `the-estimate-is-unbiased-in-exp-space` |
+| 3 Generate | ✓ `generate-with-every-choice-is-deterministic`, `generate-without-constraints-has-weight-zero`, `generate-weight-is-the-constrained-density`, `generated-traces-are-consistent`; for any internal proposal, `generate-weight-is-the-projection` (M4); E[w] = p̄(σ): `the-estimate-is-unbiased-in-exp-space` |
 | 4 Support condition | ◐ generate weights never NaN (`generated-traces-are-consistent`) |
 | 5 Update weight and discard | ✓ `updates-are-reversible-with-exact-discards` (exact Def 2.3.1 discard), `update-weight-is-the-score-change-less-fresh-choices`, `identity-update-changes-nothing` |
 | 6 Update is reversible | ✓ the same, with changed args and random constraint subsets; `update-without-fresh-choices-is-exactly-reversible`; `a-choice-that-becomes-a-call-is-discarded` |
 | 7 Compositionality | ✓ `splicing-is-compositional`; `switch-branches-share-addresses` (Switch against the equivalent `if`); combinator laws over a model splicing Map/Unfold/Switch; `a-different-callee-at-an-address-is-a-new-call` |
 | 8 Change hints | ✓ `map-/unfold-precise-hints-match-unknown-change`; retdiff soundness inside the update/regenerate laws |
-| 9 Regenerate | ✓ `regenerate-weight-is-the-retained-density-ratio`, `regenerate-keeps-unselected-choices`, `regenerating-nothing-changes-nothing`, `regenerating-everything-has-weight-zero` (random selections, changed args) |
+| 9 Regenerate | ✓ `regenerate-weight-is-the-retained-density-ratio`, `regenerate-keeps-unselected-choices`, `regenerating-nothing-changes-nothing`, `regenerating-everything-has-weight-zero` (random selections, changed args); for any internal proposal, `regenerate-weight-is-the-projection-ratio` (Eq. 4.1, M4) |
 | 10 Selection MH stationary | ✓ `kernels-leave-the-posterior-invariant`, `structure-changing-moves-target-the-posterior` (thesis p_mh); with the optimal internal proposal, regenerate is Gibbs: `regenerating-the-enumerated-choices-is-gibbs` (weight 0, posterior frequencies) |
 | 11 Project | ✓ `project-of-everything-is-the-score`, `project-splits-the-score` |
 | 12 Propose | ✓ `propose-weight-is-the-assessed-density` |
@@ -324,7 +324,7 @@ tested, ◐ partly, — not yet (the feature does not exist yet).
 | 16 Trace translators | — (genclj-lfjt, M4) |
 | 17 Involutive MCMC | ◐ discrete: stationarity and `the-involution-is-an-involution`; Jacobians with genclj-ynwh |
 | 18 Kernel reversal | ✓ `reversals` (chain, cycle, repeat, mix) |
-| 19 Internal-proposal override | — (M4) |
+| 19 Internal-proposal override | ✓ `gen.inference.proposal/with-internal-proposal`: the general laws over proposals of some, all and a structure-deciding part of the open choices, with arguments; `the-exact-posterior-as-proposal-gives-the-evidence` (every key's weight is log p(y)) |
 | 20 Estimators | ✓ IS and particle-filter log-ML unbiased in exp space (internal, custom, partial and optimal proposals; batched); the PF incremental weight |
 
 Batched execution has no thesis law of its own; its law is vmap's

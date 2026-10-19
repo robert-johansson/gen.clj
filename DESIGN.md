@@ -452,6 +452,19 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   rejects the header MLX's wheel ships). Probed once, with a warning; values
   are unchanged, only unfused. Not patched in MLX, and no g++ wrapper: a
   watch bean (genclj-hjzh) revisits it with newer wheels.
+- **The internal-proposal override** (thesis Alg. 16; M4, 2026-10-19):
+  `(gen.inference.proposal/with-internal-proposal gf q)`. q is a dynamic
+  generative function called as `(q constraints & args)`; it proposes some
+  of the open choices at gf's addresses, and gf's forward sampling makes the
+  rest, so generate's weight is log p(τ) − log q(τ_q | σ) − log f(τ_f | σ, τ_q).
+  project replays q against a trace (its choices taken from the trace, as
+  constraints are) for its density and its addresses; a q that calls another
+  generative function at an address cannot be replayed, a loud error. Two
+  general laws came with it, holding for every internal proposal:
+  generate's weight is the projection on the constraints, and regenerate's
+  is the ratio of projections on the retained choices (Eq. 4.1). Before
+  them the general set checked project only on everything, which missed a
+  planted bug.
 - **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
   `(array/item x)`, the namespace's last segment, as the Clojure style guide
   has it. It replaced `a`, which the owner found ugly (2026-10-18). The

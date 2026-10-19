@@ -187,6 +187,37 @@
     (let [tr (gfi/simulate gf args (rng/key seed))]
       (close? (gfi/project tr sel/all) (:score tr)))))
 
+(defn generate-weight-is-the-projection
+  "generate's weight given sigma is the projection of its trace on sigma's
+   addresses: both are log p(τ)/q(τ∖σ | σ), q the internal proposal,
+   whatever it is (forward sampling, an exact or a custom proposal)."
+  [cases]
+  (prop/for-all [[[_ gf args] seed picks] cases]
+    (let [k (rng/key seed)
+          tr0 (gfi/simulate gf args k)
+          sigma (restrict (:choices tr0) (picked (addrs tr0) picks))]
+      ;; the same key, so forward sampling takes tr0's branches; a custom
+      ;; proposal may take others, under which some of sigma is unused: the
+      ;; law says nothing about such a case
+      (if-let [{tr :trace w :weight} (try (gfi/generate gf args sigma k)
+                                          (catch clojure.lang.ExceptionInfo e
+                                            (when-not (re-find #"was not visited" (ex-message e)) (throw e))))]
+        (close? w (gfi/project tr (sel/from-paths (cm/addresses sigma))))
+        true))))
+
+(defn regenerate-weight-is-the-projection-ratio
+  "regenerate's weight is the ratio of the projections of the new and the
+   old trace on the retained choices (Eq. 4.1): with forward sampling, the
+   retained density ratio; for any internal proposal, its correction."
+  [cases]
+  (prop/for-all [[[_ gf args] seed picks] cases]
+    (let [tr (gfi/simulate gf args (rng/key seed))
+          chosen (set (picked (addrs tr) picks))
+          {t2 :trace w :weight} (gfi/regenerate tr (sel/from-paths chosen) (rng/key (inc seed)))
+          now (set (addrs t2))
+          retained (sel/from-paths (filter #(and (now %) (not (chosen %))) (addrs tr)))]
+      (close? w (- (gfi/project t2 retained) (gfi/project tr retained))))))
+
 (defn propose-weight-is-the-assessed-density [cases]
   (prop/for-all [[[_ gf args] seed] cases]
     (let [{c :choices w :weight} (gfi/propose gf args (rng/key seed))]
@@ -290,6 +321,8 @@
    :regenerate-keeps-unselected-choices regenerate-keeps-unselected-choices
    :regenerating-nothing-changes-nothing regenerating-nothing-changes-nothing
    :project-of-everything-is-the-score project-of-everything-is-the-score
+   :generate-weight-is-the-projection generate-weight-is-the-projection
+   :regenerate-weight-is-the-projection-ratio regenerate-weight-is-the-projection-ratio
    :propose-weight-is-the-assessed-density propose-weight-is-the-assessed-density})
 
 (def forward-sampling
