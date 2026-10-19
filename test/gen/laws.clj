@@ -78,9 +78,17 @@
     (and (close? (:score tr) w) (= (:retval tr) rv))))
 
 (defn- sound-retdiff?
-  "Def 2.3.2: no-change promises an equal return value."
+  "Def 2.3.2: no-change promises an equal return value; a vector-diff, the
+   two lengths and equal elements below both outside :updated (law audit
+   gap F: only no-change was checked)."
   [old {tr :trace rd :retdiff}]
-  (or (not (diff/no-change? rd)) (= (:retval old) (:retval tr))))
+  (cond (diff/no-change? rd) (= (:retval old) (:retval tr))
+        (diff/vector-diff? rd)
+        (let [a (:retval old) b (:retval tr)]
+          (and (= (:prev-length rd) (count a)) (= (:new-length rd) (count b))
+               (every? #(or (contains? (:updated rd) %) (= (nth a %) (nth b %)))
+                       (range (min (count a) (count b))))))
+        :else true))
 
 (defn- unvisitable?
   "Constraints drawn from another run that this run cannot visit (a
@@ -234,6 +242,25 @@
         (close? w (- (gfi/project t2 (sel/from-paths kept)) (:score tr))))
       true)))
 
+(defn regenerate-weight-with-new-arguments-is-the-projection-ratio
+  "Eq. 4.1 with new arguments (p. 144): the projection of the new trace, on
+   the new arguments, on the retained choices, less the old trace's on its
+   own arguments (the reverse move generates at the old arguments: the
+   thesis's Alg. 16 reads x' there, an erratum). A move whose new arguments
+   leave an unselected choice unvisited is loud and the case vacuous."
+  [cases]
+  (prop/for-all [[[_ gf args :as model] seed picks] cases]
+    (let [tr (gfi/simulate gf args (rng/key seed))
+          args' (next-args model seed true)
+          chosen (set (picked (addrs tr) picks))
+          r (vacuous-on-unvisitable
+             (gfi/regenerate tr args' (unknown-diffs args') (sel/from-paths chosen) (rng/key (inc seed))))]
+      (or (= ::vacuous r)
+          (let [{t2 :trace w :weight} r
+                now (set (addrs t2))
+                retained (sel/from-paths (filter #(and (now %) (not (chosen %))) (addrs tr)))]
+            (close? w (- (gfi/project t2 retained) (gfi/project tr retained))))))))
+
 (defn propose-weight-is-the-assessed-density [cases]
   (prop/for-all [[[_ gf args] seed] cases]
     (let [{c :choices w :weight} (gfi/propose gf args (rng/key seed))]
@@ -340,6 +367,7 @@
    :generate-weight-is-the-projection generate-weight-is-the-projection
    :regenerate-weight-is-the-projection-ratio regenerate-weight-is-the-projection-ratio
    :update-weight-is-the-projection-change update-weight-is-the-projection-change
+   :regenerate-weight-with-new-arguments-is-the-projection-ratio regenerate-weight-with-new-arguments-is-the-projection-ratio
    :propose-weight-is-the-assessed-density propose-weight-is-the-assessed-density})
 
 (def forward-sampling
