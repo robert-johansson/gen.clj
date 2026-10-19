@@ -28,8 +28,8 @@
    values). A custom proposal runs one particle at a time: at initialize it
    ignores :batched?, and a step with one turns a batched state into
    per-particle traces. traces returns the scalar traces either way."
-  (:refer-clojure :exclude [+ -])
-  (:require [gen.array :as array :refer [+ -]]
+  (:refer-clojure :exclude [+ - *])
+  (:require [gen.array :as array :refer [+ - *]]
             [gen.batched :as batched]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
@@ -105,19 +105,72 @@
   (w/ess (:log-weights state)))
 
 (defn resample
-  "n particles drawn in proportion to their weights; the weights become
-   equal, and the log marginal likelihood so far moves into :log-ml."
+  "Particles drawn in proportion to their weights; the weights become
+   equal, and the log marginal likelihood so far moves into :log-ml.
+   Options: :method (:multinomial, :systematic, :stratified or :residual),
+   :key, and from GenParticleFilters:
+   - :priority, (fn [log-weights] → log priorities): draw in proportion to
+     these instead (e.g. tempered weights, #(map (partial * 0.5) %)); each
+     copy of particle a then keeps the weight w_a/π_a (π the normalized
+     priorities), so the log marginal likelihood estimate stays unbiased;
+   - :n, a new number of particles (as resize)."
   ([state] (resample state {}))
-  ([state {:keys [method key] :or {method :multinomial}}]
-   (let [n (count (:log-weights state))
-         {:keys [log-total]} (w/normalize (:log-weights state))
-         parents (w/resample method (:log-weights state) n (or key (gfi/next-key)))]
+  ([state {:keys [method key priority n] :or {method :multinomial}}]
+   (let [lw (mapv double (:log-weights state))
+         n-old (count lw)
+         n (or n n-old)
+         lp (if priority (mapv double (priority lw)) lw)
+         {:keys [log-total]} (w/normalize lw)
+         {lp-total :log-total} (w/normalize lp)
+         parents (w/resample method lp n (or key (gfi/next-key)))]
      (assoc (if-let [ps (:particles state)]
               (assoc state :particles (batched/take ps parents))
               (assoc state :traces (mapv (:traces state) parents)))
-            :log-weights (vec (repeat n 0.0))
-            :log-ml (+ (:log-ml state) (- log-total (Math/log n)))
+            ;; log w_a - log π_a - log W: 0 when π are the weights themselves
+            :log-weights (if priority
+                           (mapv #(- (lw %) (- (lp %) lp-total) log-total) parents)
+                           (vec (repeat n 0.0)))
+            :log-ml (+ (:log-ml state) (- log-total (Math/log n-old)))
             :parents parents))))
+
+(declare traces)
+
+(defn resize
+  "The state with n particles, resampled (GenParticleFilters' pf_resize!);
+   options as for resample."
+  ([state n] (resize state n {}))
+  ([state n opts] (resample state (assoc opts :n n))))
+
+(defn rejuvenate
+  "Each particle's trace moved by kernel, an MCMC kernel ((fn [trace key] →
+   {:trace …}), gen.inference.kernel) that leaves the posterior invariant,
+   so the weights stay as they are (GenParticleFilters' pf_move_accept!).
+   A batched state becomes one of scalar traces."
+  ([state kernel] (rejuvenate state kernel (gfi/next-key)))
+  ([state kernel key]
+   (let [trs (traces state)
+         moved (mapv (fn [tr k] (:trace (kernel tr k))) trs (rng/split key (count trs)))]
+     (-> state (dissoc :particles) (assoc :traces moved)))))
+
+(defn- probabilities [state] (mapv #(Math/exp %) (:log-weights (w/normalize (:log-weights state)))))
+
+(defn mean
+  "The weighted mean of (f trace) over the particles."
+  [state f]
+  (reduce + (map #(* %1 (f %2)) (probabilities state) (traces state))))
+
+(defn variance
+  "The weighted variance of (f trace) over the particles."
+  [state f]
+  (let [m (mean state f)]
+    (reduce + (map #(* %1 (array/square (- (f %2) m))) (probabilities state) (traces state)))))
+
+(defn proportions
+  "The total weight of each value of (f trace) (GenParticleFilters'
+   proportionmap): a map of host values to probabilities."
+  [state f]
+  (reduce (fn [m [p tr]] (update m (array/->clj (f tr)) (fnil + 0.0) p))
+          {} (map vector (probabilities state) (traces state))))
 
 (defn maybe-resample
   "Resample when the effective sample size is below :ess-threshold (n/2 by

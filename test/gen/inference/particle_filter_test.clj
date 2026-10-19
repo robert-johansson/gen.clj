@@ -12,6 +12,7 @@
             [gen.dist.core :as dc]
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
+            [gen.inference.kernel :as k]
             [gen.inference.particle-filter :as pf]
             [gen.random :as rng]
             [gen.selection :as sel]))
@@ -143,3 +144,46 @@
       (is (contains? (pf/initialize model [1 0.0] (observation 0) 5
                                     {:batched? true :proposal initial-proposal :proposal-args [(ys 0)] :key (rng/key 32)})
                      :traces)))))
+
+;; ---------------------------------------------------------------------------
+;; GenParticleFilters: priority resampling, resize, rejuvenation, statistics
+;; ---------------------------------------------------------------------------
+
+(defn- unbiased-resampling?
+  "Over many resamplings of one state, the mean of exp(log-ML estimate)
+   equals its value before, within five standard errors."
+  [state opts]
+  (let [before (pf/log-ml-estimate state)
+        ratios (map #(Math/exp (- (pf/log-ml-estimate (pf/resample state (assoc opts :key %))) before))
+                    (rng/split (rng/key 11) 4000))
+        n (count ratios)
+        m (/ (reduce + ratios) n)
+        sd (Math/sqrt (/ (reduce + (map #(* (- % m) (- % m)) ratios)) (dec n)))]
+    (< (ts/abs (- m 1.0)) (+ 1e-9 (* 5 (/ sd (Math/sqrt n)))))))
+
+(deftest priority-resampling-and-resizing-stay-unbiased
+  (let [state (run-filter 30 (rng/key 10))]
+    (is (unbiased-resampling? state {:priority (fn [lw] (map #(* 0.5 %) lw))}) "tempered priorities")
+    (is (unbiased-resampling? state {:priority (fn [lw] (map (constantly 0.0) lw))}) "uniform priorities")
+    (is (unbiased-resampling? state {:n 50}) "more particles")
+    (is (unbiased-resampling? state {:n 12 :method :stratified}) "fewer, stratified"))
+  (testing "plain resampling leaves equal weights, as before"
+    (is (every? zero? (:log-weights (pf/resample (run-filter 30 (rng/key 10)) {:key (rng/key 12)})))))
+  (testing "resize"
+    (is (= 50 (count (pf/traces (pf/resize (run-filter 30 (rng/key 10)) 50 {:key (rng/key 13)})))))))
+
+(deftest rejuvenation-moves-particles-and-keeps-weights
+  (let [state (run-filter 40 (rng/key 14))
+        t (dec (count ys))
+        kernel (k/mh (sel/select [t :x]))
+        moved (pf/rejuvenate state kernel (rng/key 15))]
+    (is (= (:log-weights state) (:log-weights moved)))
+    (is (== (pf/log-ml-estimate state) (pf/log-ml-estimate moved)))
+    (is (some true? (map #(not= (% [t :x]) (%2 [t :x])) (pf/traces state) (pf/traces moved))) "some particles moved")))
+
+(deftest weighted-statistics
+  (let [state {:traces [{:x 1.0} {:x 3.0}] :log-weights [(Math/log 0.25) (Math/log 0.75)] :log-ml 0.0}
+        f :x]
+    (is (ts/close? 2.5 (pf/mean state f)))
+    (is (ts/close? 0.75 (pf/variance state f)) "0.25·1.5² + 0.75·0.5²")
+    (is (= {1.0 0.25 3.0 0.75} (update-vals (pf/proportions state f) #(/ (Math/round (* % 100.0)) 100.0))))))
