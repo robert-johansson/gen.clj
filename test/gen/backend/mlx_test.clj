@@ -126,7 +126,13 @@
           registered #(gen.mlx.MlxRuntime/registeredClosures)
           before (registered)]
       (testing "value_and_grad of a Java function"
-        (let [f (closure (fn [^longs ins]
+        ;; MLX builds the backward pass on its default device: the CPU here,
+        ;; since these raw calls evaluate on this thread, and MLX's CUDA
+        ;; streams fail (and then hang) when another thread evaluated them
+        ;; before (the backend's own evaluations run on one thread there)
+        (let [prev (gen.mlx.Mlx/mlx_get_default_device)
+              _ (gen.mlx.Mlx/mlx_set_default_device (gen.mlx.Mlx/mlx_device_new_type (int 0) (int 0)))
+              f (closure (fn [^longs ins]
                            (let [x (aget ins 0)]
                              (long-array [(gen.mlx.Mlx/mlx_sum (gen.mlx.Mlx/mlx_multiply x x cpu) false cpu)]))))
               vag (gen.mlx.Mlx/mlx_value_and_grad f (int-array [0]))
@@ -138,6 +144,7 @@
           (is (= (inc before) (registered)))
           (gen.mlx.MlxRaw/mlx_closure_value_and_grad_free vag)
           (gen.mlx.MlxRaw/mlx_closure_free f)
+          (gen.mlx.Mlx/mlx_set_default_device prev)
           (is (= before (registered)) "MLX releases the function with the closure")))
       (testing "an exception in the function comes back as itself"
         (let [f (closure (fn [_] (throw (ex-info "from the closure" {:k 1}))))
