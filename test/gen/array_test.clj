@@ -245,6 +245,10 @@
       (is (ts/close? (f x {:mu 0.5 :sd 2.0}) (cf x {:mu 0.5 :sd 2.0})) "replayed")
       (is (ts/close? (f (array/array [1.0 2.0]) {:mu 0.0 :sd 1.0}) (cf (array/array [1.0 2.0]) {:mu 0.0 :sd 1.0}))
           "another shape")
+      ;; equal maps may list their keys in another order: the cached trace
+      ;; once took the arguments in the call's order (an independent
+      ;; review's finding), swapping mu and sd here
+      (is (ts/close? (f x {:mu 0.5 :sd 2.0}) (cf x {:sd 2.0 :mu 0.5})) "map key order")
       (let [g (array/compile (fn [x] {:s (array/sum x) :m (array/max x)}))]
         (is (= #{:s :m} (set (keys (g x)))))
         (is (ts/close? (array/max x) (:m (g x))))))

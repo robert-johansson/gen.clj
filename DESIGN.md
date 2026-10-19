@@ -214,9 +214,11 @@ linalg and quantized matmul.
   - Measured costs, on Graal and C2 alike: a downcall 2.4–3.8 ns, an op
     about 170 ns, evaluation about 11 µs (CPU) and 115 µs (GPU). The binding
     is not the cost.
-  - Streams are shareable, with one evaluation lock, and the `Cleaner` frees
-    on its own thread. These replace the planned thread per context and
-    queued frees (§9).
+  - Streams are shareable, with one evaluation lock, and arrays are freed
+    through phantom references that the threads making arrays drain
+    (`MlxRuntime/adopt`; a `Cleaner` came first and did not keep up under
+    load). These replace the planned thread per context and queued frees
+    (§9).
   - Uniform draws are bit-identical to the JVM backend's for a key.
   - Where MLX's semantics differ from NumPy's, the backend follows NumPy's.
     The exceptions are documented: Metal flushes subnormals to zero, and

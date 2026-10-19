@@ -58,6 +58,30 @@
 ;; Errors: MLX's are exceptions, and the JVM keeps running
 ;; ---------------------------------------------------------------------------
 
+(deftest native-linalg-gradients-need-no-default-backend
+  ;; in native mode MLX calls a linear-algebra VJP back with whatever
+  ;; *backend* its caller had, and the rules make eye and arange, which once
+  ;; landed there: "arrays from different backends" (an independent review)
+  (when-mlx
+    (when (= "native" (System/getProperty "gen.mlx.grad"))
+      (let [b (mlx)
+            cholesky @(requiring-resolve 'gen.array.linalg/cholesky)
+            m (array/with-backend b (array/array [[2.0 0.5] [0.5 1.0]]))
+            g (array/with-backend (array/backend-named :jvm)
+                ((array/grad (fn [x] (array/sum (cholesky x)))) m))]
+        (is (= [2 2] (array/shape g)))))))
+
+(deftest large-argument-blocks-reuse-scratch
+  ;; an argument block over half the scratch buffer (more than 64 handles,
+  ;; as eval! of a large trace passes) was allocated afresh on every call
+  ;; from the thread's arena, which frees only with the thread: a leak per
+  ;; call (an independent review's finding)
+  (when-mlx
+    (let [address #(.address ^java.lang.foreign.MemorySegment
+                             (.longs (gen.mlx.MlxRuntime/scratch) (long-array 200)))]
+      (address)
+      (is (= (address) (address)) "the same memory, call after call"))))
+
 (deftest mlx-errors-are-exceptions
   (when-mlx
     (let [cpu (gen.mlx.Mlx/mlx_default_cpu_stream_new)

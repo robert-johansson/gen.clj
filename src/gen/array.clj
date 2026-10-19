@@ -987,6 +987,15 @@
   (let [it (volatile! (seq xs))]
     (tree-map (fn [_] (let [x (first @it)] (vswap! it next) x)) skel)))
 
+(defn- leaves-in
+  "t's leaves in the order of skel, a skeleton equal to t's. Equal maps may
+   list their keys in different orders, so a cached trace's arguments
+   follow its own skeleton, not the call's."
+  [skel t]
+  (cond (map? skel) (mapcat (fn [k] (leaves-in (get skel k) (get t k))) (keys skel))
+        (or (vector? skel) (seq? skel)) (mapcat leaves-in skel t)
+        :else [t]))
+
 (defn compile
   "f compiled where the backend can: a function of the same arguments
    (arrays, or trees of them) returning what f returns (an array or a tree
@@ -1025,10 +1034,11 @@
                                                        (reset! out-skel (skeleton out))
                                                        (vec (tree-leaves out))))
                                                  opts)
-                                   e {:g g :out out-skel}]
+                                   e {:g g :out out-skel :in skel}]
                                (swap! compiled assoc [b skel] e)
                                e))
-                   ins (with-backend b (mapv #(if (host? %) (array % {:dtype (weak-dtype % b)}) %) leaves))]
+                   ins (with-backend b (mapv #(if (host? %) (array % {:dtype (weak-dtype % b)}) %)
+                                             (leaves-in (:in entry) args)))]
                ;; apply first: the first call traces f, which records the output's structure
                (let [outs ((:g entry) ins)]
                  (refill @(:out entry) outs))))))))))

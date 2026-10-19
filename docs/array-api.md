@@ -286,6 +286,11 @@ needs, taken from GenMLX's measured call counts
 - **`array/compile`** (2026-10-19, bean genclj-8b88):
   - **On MLX.** `(array/compile f)` traces f once per input structure, shapes
     and dtypes into one MLX graph, which `mlx_compile` fuses and replays.
+    Maps in the arguments match whatever order they list their keys in (an
+    independent review found arguments swapped when they did not, fixed
+    2026-10-19). MLX keeps its compiled graphs per thread, so a compiled
+    function called from another thread traces there again (bean
+    genclj-hfwo).
   - **On the JVM backend**, it is f itself.
   - **Arguments** are arrays or trees of them, and so are results.
   - **f must not read a value on the host** (`truthy?`, `item`): that is a
@@ -494,9 +499,10 @@ included (`docs/benchmarks.md`).
 - Core code calls `eval!` only at inference-loop boundaries (e.g. once per MCMC
   iteration). Never inside handlers, transitions or distributions, which is the
   GenMLX smell this rule avoids.
-- The API exposes **no memory management.** On MLX, a `Cleaner` frees each
-  array once it is unreachable, on the Cleaner's own thread (§13; the plan
-  of queuing frees to an owning thread proved unnecessary). If that proves
+- The API exposes **no memory management.** On MLX, each array is freed
+  once it is unreachable, through phantom references that the threads
+  making arrays drain (§13; the plan of queuing frees to an owning thread
+  proved unnecessary). If that proves
   insufficient under native-memory pressure, a scoping construct is added to
   the MLX backend, not to the core API (bean genclj-gip5).
 
@@ -702,7 +708,8 @@ the JVM backend, in float32 and float64 alike. Since every sampler is a
 composite over this primitive, the two backends sample identically up to
 the rounding of each op (bean genclj-ldpy's stretch goal).
 
-**Gradients.** For now, the backend-generic tape (`gen.array.tape`).
+**Gradients.** The backend-generic tape (`gen.array.tape`) by default;
+MLX's own with `-Dgen.mlx.grad=native` (§8).
 
 **Where MLX's semantics differ, and what the backend does.** Found by the
 conformance suite.
@@ -724,6 +731,8 @@ conformance suite.
 | solves want equal batch axes | broadcast first |
 | integer `power` gives 0 for a negative exponent, and for every element of an array holding one | the JVM backend's semantics: exact for exponents ≥ 0 (on a stand-in), through floats with Java's cast for negative ones |
 | gathers do not check bounds | array indices: negative from the end, clamped (host indices are checked) |
+| `matmul` multiplies floats only | integers through the widest float the device has: exact while products stay below 2^24 (float32) or 2^53 (float64) |
+| `remainder` of an exact negative multiple, `(mod -4.0 2.0)`, is -0.0 | kept (NumPy and the JVM backend give 0.0; the two are `==`) |
 
 **A hazard to know.** MLX runs CPU work as asynchronous tasks. An
 exception inside one is raised at a later synchronization, against whatever

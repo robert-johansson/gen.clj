@@ -25,16 +25,26 @@
      there).
    - Keys are gen.random's (JAX's partitionable Threefry), computed with MLX's
      uint32 ops, so a key draws the same uniforms as on the JVM backend.
-   - Gradients use the backend-generic tape (gen.array.tape).
+   - Gradients use the backend-generic tape (gen.array.tape), or MLX's own
+     with gen.mlx.grad=native (docs/array-api.md §8).
 
    Configuration (system properties, read when the namespace loads):
      gen.mlx.device  cpu or gpu (default gpu when MLX has one)
      gen.mlx.dtypes  32 (default) or 64: the default dtypes, float32/int32 or
                      float64/int64 (64 needs the CPU device; MLX's GPUs have no
                      float64)
+     gen.mlx.grad    tape (default) or native
      gen.mlx.cache-bytes   MLX's buffer cache (default a sixteenth of RAM)
      gen.mlx.memory-bytes  MLX's memory limit (default half of RAM)
-     gen.mlx.gc-bytes, gen.mlx.gc-arrays  when the backend collects (above)"
+     gen.mlx.gc-bytes, gen.mlx.gc-arrays  when the backend collects (above)
+     gen.mlx.gc-new-bytes  collect after this many bytes of new arrays
+                           (default a sixteenth of RAM)
+     gen.mlx.constants     host-scalar constants kept per dtype (default
+                           4096; each holds one buffer)
+     gen.mlx.cpu-compile   true or false: skip the probe of compile on the
+                           CPU device (cpu-compiles?)
+     gen.mlx.lib           the directory of libmlxc (default
+                           native/build/<platform>/lib; MlxRuntime)"
   (:require [gen.array.dtype :as dt]
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]
@@ -919,17 +929,22 @@
 
 (defn- custom-vjps? [] (and (= grad-mode :native) (not *tracing-compile*)))
 
+(def ^:private default-backend-var (delay (requiring-resolve 'gen.array/*backend*)))
+
 (defn- custom-vjp
   "The outputs of (forward ins), with MLX's gradient through them given by
    (vjp primals cotangents outputs); ins and every result are vectors of
-   MlxArrays."
+   MlxArrays. Both run with b as gen.array's default backend, as the tape's
+   backward pass does: MLX calls them back with whatever its caller had, and
+   the rules make arrays (eye, arange)."
   [b forward vjp ins]
   (let [arrays (fn [^longs hs] (mapv #(wrap b %) hs))
         handles (fn [xs] (long-array (map #(MlxRuntime/retain (.-h ^MlxArray (as-array b % nil))) xs)))
+        on-b (fn [f] (with-bindings {@default-backend-var b} (f)))
         fun (MlxRuntime/closure (reify gen.mlx.MlxRuntime$Closure
-                                  (apply [_ hs] (handles (forward (arrays hs))))))
+                                  (apply [_ hs] (handles (on-b #(forward (arrays hs)))))))
         bwd (MlxRuntime/customVjp (reify gen.mlx.MlxRuntime$CustomVjp
-                                    (apply [_ ps cs os] (handles (vjp (arrays ps) (arrays cs) (arrays os))))))
+                                    (apply [_ ps cs os] (handles (on-b #(vjp (arrays ps) (arrays cs) (arrays os)))))))
         temps (java.util.ArrayList.)]
     (try
       (let [cv (Mlx/mlx_custom_vjp fun bwd)

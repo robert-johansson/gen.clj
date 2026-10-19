@@ -144,8 +144,14 @@ public final class MlxRuntime {
     private MemorySegment bump(long bytes) {
       long aligned = (bytes + 7) & ~7L;
       if (pos + aligned > buf.byteSize()) {
-        if (aligned > buf.byteSize() / 2) return arena.allocate(aligned, 8);
-        buf = arena.allocate(buf.byteSize() * 2, 8);
+        // A bigger buffer, for the rest of this call and every later one:
+        // the arena frees only with its thread, so a block allocated per call
+        // (as large ones once were) leaked on every call. This call's earlier
+        // slices stay valid in the old buffer, and sizes double, so what
+        // growth leaves behind is bounded by twice the largest call.
+        long size = buf.byteSize() * 2;
+        while (size < aligned) size *= 2;
+        buf = arena.allocate(size, 8);
         pos = 0;
       }
       MemorySegment s = buf.asSlice(pos, aligned);
