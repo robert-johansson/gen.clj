@@ -489,6 +489,13 @@
            ::bernoulli ::uniform-discrete ::geometric ::poisson ::binom ::neg-binom]]
   (defmethod dc/-value-shape t [d] (dc/elementwise-value-shape d)))
 
+(doseq [t [::bernoulli ::uniform-discrete ::geometric ::poisson ::binom ::neg-binom ::categorical ::categorical-logits]]
+  (defmethod dc/-discrete? t [_] true))
+
+(defmethod dc/-discrete? ::homogeneous-mixture [{{:keys [family params]} :params}] (dc/discrete? (apply family params)))
+(defmethod dc/-discrete? ::product [{{:keys [factors]} :params}] (every? dc/discrete? factors))
+(defmethod dc/-discrete? ::heterogeneous-mixture [{{:keys [components]} :params}] (every? dc/discrete? components))
+
 (defmethod dc/-value-shape ::dirichlet [{{:keys [alpha]} :params}] (array/shape alpha))
 
 (defmethod dc/-value-shape ::mvnormal [{{:keys [mu cov]} :params}]

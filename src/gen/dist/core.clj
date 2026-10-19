@@ -26,6 +26,14 @@
 (defmulti -log-prob "The log density (or mass) of value v: (-log-prob d v)." (fn [d _v] (:type d)))
 (defmulti -support "The values of a discrete distribution, in order." (fn [d] (:type d)))
 
+(defmulti -discrete?
+  "Does the distribution have discrete values (Gen.jl's is_discrete)?"
+  (fn [d] (:type d)))
+
+(defmethod -discrete? :default [_] false)
+
+(defn discrete? [d] (boolean (-discrete? d)))
+
 (defmethod -support :default [d]
   (throw (ex-info (str "Distribution " (:type d) " has no enumerable support") {:type (:type d)})))
 
@@ -202,6 +210,7 @@
      (sample [key batch-shape] ...)
      (log-prob [v] ...)
      (support [] ...)
+     (discrete? [] ...)
      (value-shape [] ...))
 
    value-shape gives the shape of one value (from the parameters, bound by
@@ -210,7 +219,8 @@
 
    Parameters given as Clojure vectors become arrays, after validation, which
    checks them on the host (so also on a lazy backend). The type keyword is
-   namespace-qualified, so definitions from different namespaces never collide."
+   namespace-qualified, so definitions from different namespaces never collide.
+   discrete? says whether its values are discrete (false by default)."
   [dist-name & body]
   (let [[doc body] (if (string? (first body)) [(first body) (rest body)] [nil body])
         params (first body)
@@ -233,6 +243,8 @@
           `(defmethod -log-prob ~type-kw [~d ~v] (let ~bind-params ~@lp-body)))
        ~(when-let [[_ & support-body] (get clauses 'support)]
           `(defmethod -support ~type-kw [~d] (let ~bind-params ~@support-body)))
+       ~(when-let [[_ & discrete-body] (get clauses 'discrete?)]
+          `(defmethod -discrete? ~type-kw [~d] (let ~bind-params ~@discrete-body)))
        ~(when-let [[_ & shape-body] (get clauses 'value-shape)]
           `(defmethod -value-shape ~type-kw [~d] (let ~bind-params ~@shape-body)))
        (var ~dist-name))))

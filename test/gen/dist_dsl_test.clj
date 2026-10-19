@@ -19,7 +19,19 @@
 (dist chained [mu sd] (* 2.0 (array/exp (+ (d/normal mu sd) 1.0))))
 (dist labeled [probs labels] (array/take labels (d/categorical probs)))
 
+(dist doubled-poisson [rate] (* 2.0 (d/poisson rate)))
+(dist exp-geometric [p] (array/exp (d/geometric p)))
+
 (defn- lp [d v] (ts/number (dc/log-prob d v)))
+
+(deftest discrete-draws-without-a-support-invert-without-jacobians
+  ;; the review's finding: a discrete draw is no longer taken for continuous
+  (is (ts/close? (lp (d/poisson 3.0) 2) (lp (doubled-poisson 3.0) 4.0)))
+  (is (= ##-Inf (lp (doubled-poisson 3.0) 3.0)) "an odd value is no image")
+  (is (ts/close? (lp (d/geometric 0.5) 2) (lp (exp-geometric 0.5) (Math/exp 2.0))))
+  (is (ts/close? 1.0 (reduce + (map #(Math/exp (lp (doubled-poisson 3.0) (* 2.0 %))) (range 60)))) "normalized")
+  (is (dc/discrete? (doubled-poisson 3.0)))
+  (is (not (dc/discrete? (log-normal 0.2 0.7)))))
 (defn- normal-lp [x mu sd] (- (- (* 0.5 (Math/pow (/ (- x mu) sd) 2))) (Math/log (* sd (Math/sqrt (* 2 Math/PI))))))
 
 (deftest densities-match-the-closed-forms
@@ -57,8 +69,11 @@
     (is (ts/close? (Math/log 0.5) (lp d 20)))
     (is (= ##-Inf (lp d 25)) "not a label")
     (is (= [10.0 20.0 30.0] (mapv ts/number (dc/support d)))))
-  (testing "repeated labels add up"
-    (is (ts/close? (Math/log 0.7) (lp (labeled [0.2 0.5 0.3] [10 10 30]) 10))))
+  (testing "repeated labels add up, and the support lists each once"
+    (let [d (labeled [0.2 0.5 0.3] [10 10 30])]
+      (is (ts/close? (Math/log 0.7) (lp d 10)))
+      (is (= [10.0 30.0] (mapv double (dc/support d))))
+      (is (ts/close? 1.0 (reduce + (map #(Math/exp (lp d %)) (dc/support d)))))))
   (testing "samples are labels"
     (is (every? #{10.0 20.0 30.0} (map double (ts/host (dc/sample (labeled [0.2 0.5 0.3] [10 20 30]) (rng/key 1) [50])))))))
 
@@ -87,10 +102,12 @@
     (is (re-find #"exactly one random draw, it makes 0"
                  (definition-error '(gen.dist.dsl/dist no-draw [a] (gen.array/+ a 1.0)))))
     (is (re-find #"exactly one random draw, it makes 2"
-                 (definition-error '(gen.dist.dsl/dist two-draws [] (gen.array/+ (gen.dist/normal 0 1) (gen.dist/normal 0 1)))))))
+                 (definition-error '(gen.dist.dsl/dist two-draws [] (gen.array/+ (gen.dist/normal 0 1) (gen.dist/normal 0 1))))))
+    (is (re-find #"the body is one expression"
+                 (definition-error '(gen.dist.dsl/dist two-forms [] (gen.dist/normal 0 1) 2.0)))))
   (testing "a continuous draw through a step that cannot be inverted"
     (dist through-sin [] (array/sin (d/normal 0 1)))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not an invertible step"
                           (dc/log-prob (through-sin) 0.5))))
-  (testing "the draw's own checks"
-    (is (thrown? clojure.lang.ExceptionInfo (dc/log-prob (shifted-exponential -1.0 0.0) 1.0)))))
+  (testing "the draw's own checks, at construction"
+    (is (thrown? clojure.lang.ExceptionInfo (shifted-exponential -1.0 0.0)))))
