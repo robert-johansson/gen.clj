@@ -124,11 +124,11 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 | `mh(trace, selection)` | Y: `mcmc.cljs mh`, `kernel.cljs mh-kernel` | core |
 | `mh(trace, proposal, args)` | Y: `mh-custom` | core |
 | `mh(trace, proposal, args, involution)` / `involutive_mcmc` | Y/P: `involutive-mh` (no Jacobian); `translator.cljs` (AD Jacobian, `reversible-jump-mh`) | core |
-| `check=`, `observations=` stationarity checks | N | soon |
+| `check=`, `observations=` stationarity checks | N | soon. *gen.clj (M1):* `(k/checked kernel observations)` checks after every application, forward and reversed |
 | `mala(trace, sel, tau)` | Y | core |
 | `hmc(trace, sel; L, eps)` | Y (with dual-averaging adaptation) | core |
 | `elliptical_slice(trace, addr, mu, cov)` | Y | core |
-| `@kern` (`for`/`if`/`let`, auto reversal), `@pkern`, `@rkern`, `reversal` | P: kernel.cljs combinators, `with-reversal`; no macro DSL, no check | core |
+| `@kern` (`for`/`if`/`let`, auto reversal), `@pkern`, `@rkern`, `reversal` | P: kernel.cljs combinators, `with-reversal`; no macro DSL, no check | core. *gen.clj (M4, 2026-10-19):* `(k/kern [args] stmt …)`, with doseq/for, if/when and let over the arguments: one chain, reversed automatically; `@pkern` is `k/kernel`, `@rkern` `(k/kernel f reverse-f)`, `reversal` `k/reversal` |
 | `map_optimize(trace, sel; ...)` (backtracking line search) | Y: `map-optimize` (Adam/SGD instead) | core |
 | `enumerative_inference` + `choice_vol_grid` (including continuous grid volumes) | P: `enumerate.cljs`, `exact.cljs`; discrete only | core. *gen.clj (2026-10-19):* `gen.inference.enumerative`, discrete and continuous (N-d) grids; plus `with-exact-proposal`, the exact conditional as a model's internal proposal for its finite choices (Gibbs regenerate; exact likelihoods inside Unfold when the state does not depend on those choices, checked by `:check-retval?`) |
 | `initialize_particle_filter` / `particle_filter_step!` (default or custom proposal), `maybe_resample!`, `log_ml_estimate`, `get_traces`, `get_log_weights`, `sample_unweighted_traces` | P: `smc.cljs` functional whole-sequence API; default proposal only (custom via `smcp3.cljs`); `steppable.cljs` | core |

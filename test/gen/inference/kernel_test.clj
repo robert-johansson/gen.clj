@@ -112,3 +112,39 @@
 
 (deftest mixture-weights-are-validated
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"non-negative" (k/mix [a b] [-1 1]))))
+
+;; ---------------------------------------------------------------------------
+;; kern
+;; ---------------------------------------------------------------------------
+
+(defn- recording
+  "A kernel that leaves the trace alone and logs label."
+  [log label]
+  (k/symmetric (fn [tr _key] (swap! log conj label) {:trace tr})))
+
+(deftest kern-builds-a-chain-and-its-reversal
+  (let [log (atom [])
+        kernel (k/kern [n extra?]
+                 (recording log :first)
+                 (doseq [i (range n)] (recording log [:loop i]))
+                 (when extra? (recording log :extra))
+                 (let [label :last] (recording log label)))
+        tr (gfi/simulate model [] (rng/key 1))]
+    (testing "the statements in order"
+      ((kernel 2 true) tr (rng/key 2))
+      (is (= [:first [:loop 0] [:loop 1] :extra :last] @log)))
+    (testing "the reversal: every statement reversed, in reverse order"
+      (reset! log [])
+      ((k/reversal (kernel 2 true)) tr (rng/key 3))
+      (is (= [:last :extra [:loop 1] [:loop 0] :first] @log)))
+    (testing "branches and loops follow the arguments"
+      (reset! log [])
+      ((kernel 0 false) tr (rng/key 4))
+      (is (= [:first :last] @log))))
+  (testing "a kern of MH steps moves as the chain written by hand"
+    ;; a loop is a chain of its iterations, each a chain of its statements
+    (let [step #(k/chain (k/mh (sel/select :a)) (k/mh (sel/select :b)))
+          by-hand (k/chain (step) (step))
+          kerned ((k/kern [] (doseq [_ (range 2)] (k/mh (sel/select :a)) (k/mh (sel/select :b)))))
+          tr (:trace (gfi/generate model [] observations (rng/key 5)))]
+      (is (= (:choices (:trace (by-hand tr (rng/key 6)))) (:choices (:trace (kerned tr (rng/key 6)))))))))
