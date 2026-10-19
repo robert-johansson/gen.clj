@@ -54,6 +54,7 @@
    result and throws unless it gives back the input."
   (:refer-clojure :exclude [read + - * /])
   (:require [gen.array :as array :refer [+ - * /]]
+            [gen.array.dtype :as dt]
             [gen.array.linalg :as la]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
@@ -279,18 +280,19 @@
 ;; Checks
 ;; ---------------------------------------------------------------------------
 
+(defn- same-value? [x y]
+  (cond (not (and (array/array? x) (array/array? y))) (= x y)
+        (not= (array/shape x) (array/shape y)) false
+        (every? #(= :float (dt/kind (array/dtype %))) [x y]) (array/allclose? x y {:rtol 1e-6 :atol 1e-9})
+        :else (= (array/->clj x) (array/->clj y))))
+
 (defn same-choices?
   "Do two choice maps hold the same addresses and (within float tolerance)
    the same values?"
   [a b]
   (let [as (cm/addresses a)]
     (and (= (set as) (set (cm/addresses b)))
-         (every? (fn [p] (let [x (cm/get-choice a p) y (cm/get-choice b p)]
-                           (if (and (array/array? x) (array/array? y) (not (boolean? x))
-                                    (= (array/shape x) (array/shape y)))
-                             (array/allclose? x y {:rtol 1e-6 :atol 1e-9})
-                             (= x y))))
-                 as))))
+         (every? #(same-value? (cm/get-choice a %) (cm/get-choice b %)) as))))
 
 (defn- check-round-trip! [what before after]
   (when-not (same-choices? before after)
