@@ -1043,6 +1043,36 @@
 ;; The backend
 ;; ---------------------------------------------------------------------------
 
+(defn- compile-fn
+  "p/-compile: f (a fn of a vector of MlxArrays to a vector of arrays) as an
+   MLX closure, compiled with mlx_compile; the returned fn applies it."
+  [b f {:keys [shapeless?]}]
+  (let [run (fn [^longs ins]
+              (let [outs (try (f (mapv #(wrap b %) ins))
+                              (catch clojure.lang.ExceptionInfo e
+                                (if (re-find #"function transformations" (str (ex-message e)))
+                                  (throw (ex-info (str "compile: the function reads an array's value on the host"
+                                                       " (truthy?, item, ->clj), which a compiled function cannot:"
+                                                       " branch with where, or do not compile it")
+                                                  {:op :compile} e))
+                                  (throw e))))]
+                (long-array (map #(MlxRuntime/retain (.-h ^MlxArray (as-array b % nil))) outs))))
+        cl (MlxRuntime/closure (reify gen.mlx.MlxRuntime$Closure (apply [_ ins] (run ins))))
+        compiled (try (Mlx/mlx_compile cl (boolean shapeless?))
+                      ;; the compiled closure holds the function for retracing
+                      (finally (MlxRaw/mlx_closure_free cl)))
+        g (fn [xs]
+            (let [in (MlxRuntime/vectorOf (long-array (map #(.-h ^MlxArray %) xs)))]
+              (try
+                (let [out (Mlx/mlx_closure_apply compiled in)]
+                  (try (mapv #(wrap b %) (MlxRuntime/vectorArrays out))
+                       (finally (MlxRaw/mlx_vector_array_free out))))
+                (finally
+                  (MlxRaw/mlx_vector_array_free in)
+                  (fence xs)))))]
+    (MlxRuntime/adoptClosure g compiled)
+    g))
+
 (defmacro ^:private guarded
   "body, with an MLX error raised outside an op's own handling as ex-info
    naming op (gen.array's contract: errors are ex-info with data)."
@@ -1051,6 +1081,9 @@
         (catch MlxException e# (throw (mlx-error ~op [] e#)))))
 
 (deftype MlxBackend [^Config config]
+  p/ICompiling
+  (-compile [b f opts] (guarded :compile (compile-fn b f opts)))
+
   p/IBackend
   (-name [_] :mlx)
   (-defaults [_] (.-defaults config))
@@ -1139,11 +1172,42 @@
   (:device (config b)))
 
 (defn memory
-  "MLX's memory use in bytes: :active, :peak and :cache."
+  "MLX's memory use in bytes (:active, :peak, :cache), its :limit, and the
+   backend's :live-arrays and :collections (MlxRuntime/adopt)."
   []
-  {:active (Mlx/mlx_get_active_memory)
-   :peak (Mlx/mlx_get_peak_memory)
-   :cache (Mlx/mlx_get_cache_memory)})
+  (let [[live collections] (vec (MlxRuntime/lifetimeStats))]
+    {:active (Mlx/mlx_get_active_memory)
+     :peak (Mlx/mlx_get_peak_memory)
+     :cache (Mlx/mlx_get_cache_memory)
+     :limit (Mlx/mlx_get_memory_limit)
+     :live-arrays live
+     :collections collections}))
+
+(defn set-memory-limit!
+  "Set MLX's memory limit in bytes (beyond it MLX waits for memory to be
+   freed, then errors); returns the previous limit."
+  [bytes]
+  (Mlx/mlx_set_memory_limit (long bytes)))
+
+(defn set-cache-limit!
+  "Set the size of MLX's buffer cache in bytes (0 disables caching); returns
+   the previous limit."
+  [bytes]
+  (Mlx/mlx_set_cache_limit (long bytes)))
+
+(defn clear-cache!
+  "Free MLX's cached buffers."
+  []
+  (Mlx/mlx_clear_cache))
+
+(defn collect!
+  "Free every MLX array that is unreachable now (a GC and a drain), and
+   return memory."
+  []
+  (System/gc)
+  (Thread/sleep 20)
+  (MlxRuntime/drain)
+  (memory))
 
 (defmethod print-method MlxArray [^MlxArray x ^java.io.Writer w]
   (.write w "#gen/array[")

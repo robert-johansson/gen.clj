@@ -201,17 +201,19 @@ public final class MlxRuntime {
    *  does: no hashing, O(1) insert and remove). */
   private static final class Owned extends PhantomReference<Object> {
     final long handle;
+    final boolean closure;
     Owned prev, next;
 
-    Owned(Object owner, long handle) {
+    Owned(Object owner, long handle, boolean closure) {
       super(owner, OWNED_QUEUE);
       this.handle = handle;
+      this.closure = closure;
     }
   }
 
   private static final ReferenceQueue<Object> OWNED_QUEUE = new ReferenceQueue<>();
   private static final Object OWNED_LOCK = new Object();
-  private static final Owned OWNED_HEAD = new Owned(null, 0);
+  private static final Owned OWNED_HEAD = new Owned(null, 0, false);
   static {
     OWNED_HEAD.prev = OWNED_HEAD;
     OWNED_HEAD.next = OWNED_HEAD;
@@ -247,7 +249,7 @@ public final class MlxRuntime {
    *  it. Collects (System.gc) under array or memory pressure, since the GC
    *  does not see MLX's native memory. */
   public static void adopt(Object owner, long handle) {
-    Owned o = new Owned(owner, handle);
+    Owned o = new Owned(owner, handle, false);
     synchronized (OWNED_LOCK) {
       o.next = OWNED_HEAD.next;
       o.prev = OWNED_HEAD;
@@ -258,6 +260,18 @@ public final class MlxRuntime {
     long n = ADOPTED.incrementAndGet();
     if ((n & 255) == 0) drain();
     if (live > arrayThreshold || ((n & 4095) == 0 && activeMemory() > byteThreshold)) collect();
+  }
+
+  /** Make owner own the mlx_closure handle (a compiled function): freed,
+   *  with mlx_closure_free, once owner is unreachable. */
+  public static void adoptClosure(Object owner, long handle) {
+    Owned o = new Owned(owner, handle, true);
+    synchronized (OWNED_LOCK) {
+      o.next = OWNED_HEAD.next;
+      o.prev = OWNED_HEAD;
+      OWNED_HEAD.next.prev = o;
+      OWNED_HEAD.next = o;
+    }
   }
 
   /** Free the handles of owners found unreachable; returns how many. */
@@ -275,6 +289,10 @@ public final class MlxRuntime {
       o.next.prev = o.prev;
       o.next = null;
       o.prev = null;
+    }
+    if (o.closure) {
+      MlxRaw.mlx_closure_free(o.handle);
+      return 0;
     }
     MlxRaw.mlx_array_free(o.handle);
     LIVE.decrementAndGet();

@@ -158,3 +158,18 @@
       (let [[live collections] (vec (gen.mlx.MlxRuntime/lifetimeStats))]
         (is (< live 250000) "live arrays stay below the threshold's reach")
         (is (> collections collections0) "pressure collected")))))
+
+(deftest compile-traces-once
+  (when-mlx
+    (let [b (mlx)
+          traces (atom 0)
+          f (a/compile (fn [x] (swap! traces inc) (a/sum (a/exp x))))]
+      (a/with-backend b
+        (let [x (a/array [0.0 1.0 2.0])]
+          (dotimes [_ 5] (a/->clj (f x)))
+          (is (= 1 @traces) "traced on the first call, replayed after")
+          (f (a/array [1.0 2.0]))
+          (is (= 2 @traces) "a new shape traces again")
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"reads an array's value on the host"
+                                ((a/compile (fn [x] (if (a/truthy? (a/> (a/sum x) 0)) x (a/negate x)))) x))
+              "a host read inside is loud"))))))

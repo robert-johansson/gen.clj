@@ -249,9 +249,21 @@ needs, taken from GenMLX's measured call counts
   - Scope for M1 is first order. Nested AD (Hessians) is bean genclj-hors.
 - **MLX backend:** the same tape for now (§13). `mlx_value_and_grad`, which
   the binding already supports, is bean genclj-fuvr.
-- **Reserved names:** `vjp`, `jvp`, `custom-vjp`, `vmap`, `compile`.
-  - `compile` will be the identity on the JVM backend, and `mlx_compile` on MLX
-    (M2).
+- **Reserved names:** `vjp`, `jvp`, `custom-vjp`, `vmap`.
+- **`a/compile`** (2026-10-19, bean genclj-8b88):
+  - **On MLX.** `(a/compile f)` traces f once per input structure, shapes
+    and dtypes into one MLX graph, which `mlx_compile` fuses and replays.
+  - **On the JVM backend**, it is f itself.
+  - **Arguments** are arrays or trees of them, and so are results.
+  - **f must not read a value on the host** (`truthy?`, `item`): that is a
+    loud error, since the trace is not run again.
+  - **Key arguments are errors,** since the trace would replay their draws.
+  - **Measured** for value and gradient, and 10 leapfrog steps, of a
+    log-density:
+    - Metal, 10,000 elements: 0.63 → 0.26 ms and 3.9 → 0.63 ms.
+    - Metal, a million: 9.8 → 0.97 ms and 229 → 21 ms (the JVM backend
+      takes 256 ms).
+    - The MLX CPU: 2–8×.
   - `vmap` is not needed by the core: batching is shape-based, as in GenMLX.
 
 ## 8a. Branching on values

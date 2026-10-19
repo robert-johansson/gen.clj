@@ -39,6 +39,13 @@
    runs on the wrapping backend."
   (-inner [b] "The backend this one wraps."))
 
+(defprotocol ICompiling
+  "A backend that compiles functions of its arrays (MLX: mlx_compile)."
+  (-compile [b f opts]
+    "A function of a vector of leaf arrays (b's) returning a vector of leaf
+     arrays: f, which takes and returns such vectors, traced once per input
+     signature and replayed. opts: :shapeless?."))
+
 (defprotocol IBackend
   (-name [b]
     "Keyword naming the backend, e.g. :jvm or :mlx.")

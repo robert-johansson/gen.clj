@@ -1,7 +1,8 @@
 (ns gen.array-test
   (:require [gen.test-support :as ts]
             [clojure.test :refer [deftest is testing are]]
-            [gen.array :as a]))
+            [gen.array :as a]
+            [gen.random]))
 
 (defn- thrown-data
   "ex-data of the exception thrown by (f), or nil."
@@ -233,3 +234,22 @@
     (is (= {:a [2 4] :b [6.0 {:c [8]}]}
            (a/tree-map #(a/->clj (a/* 2 %)) t)))
     (is (identical? t (a/eval! t)))))
+
+(deftest compiled-functions
+  ;; on the JVM backend compile is the identity; on MLX, mlx_compile
+  (let [f (fn [x {:keys [mu sd]}] (a/sum (a/- (a/negate (a/log sd)) (a/* 0.5 (a/square (a// (a/- x mu) sd))))))
+        cf (a/compile f)
+        x (a/array [0.5 -1.0 2.0 0.25])]
+    (testing "the same values as the function, for trees in and out"
+      (is (ts/close? (f x {:mu 0.5 :sd 2.0}) (cf x {:mu 0.5 :sd 2.0})))
+      (is (ts/close? (f x {:mu 0.5 :sd 2.0}) (cf x {:mu 0.5 :sd 2.0})) "replayed")
+      (is (ts/close? (f (a/array [1.0 2.0]) {:mu 0.0 :sd 1.0}) (cf (a/array [1.0 2.0]) {:mu 0.0 :sd 1.0}))
+          "another shape")
+      (let [g (a/compile (fn [x] {:s (a/sum x) :m (a/max x)}))]
+        (is (= #{:s :m} (set (keys (g x)))))
+        (is (ts/close? (a/max x) (:m (g x))))))
+    (testing "gradients compile too"
+      (is (ts/close? ((a/grad #(a/sum (a/square %))) x) ((a/compile (a/grad #(a/sum (a/square %)))) x))))
+    (testing "keys are not arguments: the trace would replay their draws"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"key's draws"
+                            ((a/compile (fn [k x] x)) (gen.random/key 1) x))))))

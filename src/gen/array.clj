@@ -10,7 +10,7 @@
    The arithmetic operators extend Clojure's to arrays and are meant to be
    referred (excluding clojure.core's): on numbers they agree with Clojure math,
    except that / never returns a Ratio and integer overflow wraps."
-  (:refer-clojure :exclude [+ - * / < > <= >= == max min mod abs take flatten])
+  (:refer-clojure :exclude [+ - * / < > <= >= == max min mod abs take flatten compile])
   (:require [clojure.core :as c]
             [gen.array.dtype :as dt]
             [gen.array.protocols :as p]
@@ -937,6 +937,64 @@
    value-and-grad)."
   ([f] (grad f nil))
   ([f opts] (comp second (value-and-grad f opts))))
+
+;; ---------------------------------------------------------------------------
+;; Compilation (docs/array-api.md §8)
+;; ---------------------------------------------------------------------------
+
+(defn- skeleton [t] (tree-map (fn [_] nil) t))
+
+(defn- refill
+  "The tree skeleton with its leaves, in tree-leaves order, replaced by xs."
+  [skel xs]
+  (let [it (volatile! (seq xs))]
+    (tree-map (fn [_] (let [x (first @it)] (vswap! it next) x)) skel)))
+
+(defn compile
+  "f compiled where the backend can: a function of the same arguments
+   (arrays, or trees of them) returning what f returns (an array or a tree
+   of arrays).
+   - On MLX, f is traced once per input structure, shapes and dtypes into
+     one MLX graph that MLX fuses and replays (mlx_compile), so a fixed
+     step (a leapfrog, a weight update) costs one call instead of an op
+     per node. f must be a pure function of its arguments' values: it may
+     not read one on the host (truthy?, item, ->clj), since the trace is
+     not run again. Randomness comes from keys closed over or drawn outside:
+     a key argument is an error, as the trace would replay its draws.
+   - On the JVM backend (and wherever the backend does not compile), f
+     itself.
+   Options: :shapeless? (MLX: one trace for every shape)."
+  ([f] (compile f nil))
+  ([f opts]
+   (let [compiled (atom {})]
+     (fn [& args]
+       (let [args (vec args)
+             leaves (vec (tree-leaves args))]
+         (doseq [l leaves]
+           (when-not (array? l)
+             (throw (ex-info (str "compile: the arguments must be arrays (or trees of them), not "
+                                  (pr-str l)
+                                  (when (instance? gen.random.threefry.Key l)
+                                    ": a key's draws would be replayed by every call; draw outside, or close over the key"))
+                             {:value l}))))
+         (let [b (backend-of :compile leaves)]
+           (if-not (satisfies? p/ICompiling b)
+             (apply f args)
+             (let [skel (skeleton args)
+                   entry (or (get @compiled [b skel])
+                             (let [out-skel (atom nil)
+                                   g (p/-compile b (fn [ins]
+                                                     (let [out (apply f (refill skel ins))]
+                                                       (reset! out-skel (skeleton out))
+                                                       (vec (tree-leaves out))))
+                                                 opts)
+                                   e {:g g :out out-skel}]
+                               (swap! compiled assoc [b skel] e)
+                               e))
+                   ins (with-backend b (mapv #(if (host? %) (array % {:dtype (weak-dtype % b)}) %) leaves))]
+               ;; apply first: the first call traces f, which records the output's structure
+               (let [outs ((:g entry) ins)]
+                 (refill @(:out entry) outs))))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Comparison helpers (for tests and assertions)
