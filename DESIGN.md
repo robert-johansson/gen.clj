@@ -197,6 +197,20 @@ linalg and quantized matmul.
   - Babylon HAT: not shipped.
 - **Both backends pass one shared conformance suite.** In it, the float64 JVM
   backend is the reference for the float32 MLX backend.
+- **As built (2026-10-19; `docs/array-api.md` §13):**
+  - The binding is generated from the mlx-c headers (`native/bindgen.clj`)
+    over a hand-written runtime, and libmlxc is built against the official
+    MLX wheel (`native/build-mlx.sh`).
+  - Measured costs, on Graal and C2 alike: a downcall 2.4–3.8 ns, an op
+    about 170 ns, evaluation about 11 µs (CPU) and 115 µs (GPU). The binding
+    is not the cost.
+  - Streams are shareable, with one evaluation lock, and the `Cleaner` frees
+    on its own thread. These replace the planned thread per context and
+    queued frees (§9).
+  - Uniform draws are bit-identical to the JVM backend's for a key.
+  - Where MLX's semantics differ from NumPy's, the backend follows NumPy's.
+    The exceptions are documented: Metal flushes subnormals to zero, and
+    array indices are clamped.
 
 ## 6. Local LLMs: a protocol stack, llama.cpp first
 
@@ -360,6 +374,24 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   constraints at unvisited addresses.
 - **Dtypes:** the JVM backend is float64 (the reference); MLX is float32. Core
   code never assumes a dtype. Bool vs 0/1 is settled in the array-API design.
+- **The MLX backend** (2026-10-19, agent, for the owner's review;
+  `docs/array-api.md` §12 items 15–18 and §13):
+  - Streams any thread can use, with evaluation serialized by one lock, in
+    place of one platform thread per MLX context (which would cost a thread
+    handoff per op or read).
+  - Arrays are freed on the `Cleaner`'s thread, in place of a queue drained
+    by an owning thread: a free only drops a reference, and MLX's
+    allocators lock.
+  - 0-d results stay lazy MLX arrays.
+  - Array indices are clamped, not checked: a lazy backend cannot check
+    them without evaluating.
+  - Where MLX's semantics differ from NumPy's, the backend follows NumPy's:
+    NaN in `sign` and `argmax`, integer floor division, float64 accuracy.
+  - Configured by `gen.mlx.device` (`cpu`, `gpu`) and `gen.mlx.dtypes`
+    (`32`, `64`).
+  - Its Java binding is compiled by `clojure -T:build java` into
+    `target/classes`, which is on the classpath. As a git dependency, its
+    `:deps/prep-lib` builds it.
 - **Git:** the main repo is public-ready, with `.beans/`, `.beans.yml`,
   `.claude/` and `*.pdf` gitignored. `.beans/` is its own private repo
   (`robert-johansson/gen.clj-beans`), synced by SessionStart/PreCompact/Stop

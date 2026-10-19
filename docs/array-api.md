@@ -188,7 +188,7 @@ needs, taken from GenMLX's measured call counts
   (`scatter-add` along an axis, the transpose of `take-along-axis`, came with
   autodiff: §12.8);
 - `vmap` and `compile`: §8;
-- devices and streams: backend options in M2.
+- devices and streams: backend options (§13).
 
 ## 7. Randomness (`gen.random`)
 
@@ -247,7 +247,8 @@ needs, taken from GenMLX's measured call counts
   - `a/item` on a tracked value returns its primal. Data-dependent control flow
     is fine (non-differentiable branches, as in Gen.jl).
   - Scope for M1 is first order. Nested AD (Hessians) is bean genclj-hors.
-- **MLX backend:** `-value-and-grad` maps to `mlx_value_and_grad` (M2).
+- **MLX backend:** the same tape for now (§13). `mlx_value_and_grad`, which
+  the binding already supports, is bean genclj-fuvr.
 - **Reserved names:** `vjp`, `jvp`, `custom-vjp`, `vmap`, `compile`.
   - `compile` will be the identity on the JVM backend, and `mlx_compile` on MLX
     (M2).
@@ -411,11 +412,11 @@ included (`docs/benchmarks.md`).
 - Core code calls `eval!` only at inference-loop boundaries (e.g. once per MCMC
   iteration). Never inside handlers, transitions or distributions, which is the
   GenMLX smell this rule avoids.
-- The API exposes **no memory management.** For MLX (M2), arrays are freed by a
-  `Cleaner` whose frees are queued to the owning thread and drained at `eval!`
-  boundaries. Native-memory pressure triggers collection. If that proves
-  insufficient, a scoping construct is added to the MLX backend, not to the
-  core API. The open design work is in bean genclj-gip5.
+- The API exposes **no memory management.** On MLX, a `Cleaner` frees each
+  array once it is unreachable, on the Cleaner's own thread (§13; the plan
+  of queuing frees to an owning thread proved unnecessary). If that proves
+  insufficient under native-memory pressure, a scoping construct is added to
+  the MLX backend, not to the core API (bean genclj-gip5).
 
 ## 10. Errors
 
@@ -495,3 +496,116 @@ How to read these numbers:
 14. **`gen.dynamic/defn-guarded` and `guarded-fn`** (§8a; 2026-10-19,
     agent, for the owner's review): a helper function with a body's guards,
     the deterministic way to branch on values outside `gen`.
+15. **MLX threads: shared streams and an evaluation lock** (§13;
+    2026-10-19, agent, for the owner's review). Streams any thread can use
+    (`mlx_stream_new_thread_unsafe`), with evaluation serialized by one
+    lock. This replaces "one platform thread per MLX context", which would
+    cost a thread handoff per op or per read.
+16. **MLX frees on the Cleaner's thread** (§13, §9; agent, for the owner's
+    review). A free only drops a reference, and MLX's allocators lock, so
+    the planned queue drained by an owning thread is not needed.
+17. **MLX 0-d arrays stay MLX arrays,** and out-of-range array indices are
+    clamped (§13; agent, for the owner's review). Both keep the backend
+    lazy. Host indices are still checked.
+18. **The MLX backend follows NumPy's semantics where MLX's differ** (§13's
+    table; agent, for the owner's review): NaN in `sign` and `argmax`,
+    integer floor division, and float64 accuracy on the CPU. Metal's
+    flushing of subnormals is documented instead.
+
+## 13. The MLX backend (M2)
+
+*Added 2026-10-19 with the backend (`gen.backend.mlx`, bean genclj-kgvx).
+The decisions are §12 items 15–18, for the owner's review.*
+
+**The binding.** mlx-c over FFM (DESIGN.md §5.3):
+- `native/build-mlx.sh` builds libmlxc v0.7.0 against the official MLX
+  0.32.2 wheel, which mlx-c pins (checked by sha256). No Metal compiler is
+  needed.
+- `native/bindgen.clj` generates the Java layer from the mlx-c headers:
+  - `MlxRaw` has one `invokeExact` static per C function (665 of 674);
+  - `Mlx` wraps 558 of them with checked statuses and out-parameters as
+    return values.
+- `MlxRuntime` is hand-written. It loads the library, installs the error
+  handler and holds the per-thread scratch and the closures.
+- `clojure -T:build java` compiles it into `target/classes`.
+- Measured costs, M4, Graal and C2 alike:
+  - an FFM downcall, 2.4–3.8 ns;
+  - an op as a graph node, about 170 ns;
+  - evaluation, about 11 µs on the CPU and about 115 µs on the GPU.
+
+**Values.**
+- MLX arrays are lazy. Reading one on the host evaluates it: `item`,
+  `->clj`, `truthy?`, printing, `=`.
+- 0-d results are MLX arrays, not host scalars as on the JVM backend, so
+  scalar code stays lazy.
+- Host scalar operands are converted to the operand dtype per op.
+- `concrete?` is false, so distributions validate host parameters only.
+
+**Configuration.** System properties, read when the namespace loads; or
+`(mlx/make-backend {:device :cpu :dtypes 64})`.
+- `gen.mlx.device`: `cpu` or `gpu` (default `gpu` when there is one).
+- `gen.mlx.dtypes`: `32` (float32/int32) or `64` (float64/int64, CPU only).
+- `-Dgen.backend=mlx` makes it the default backend.
+
+**Threads and memory.**
+- Ops run on streams made with `mlx_stream_new_thread_unsafe`, which any
+  thread can use. One lock serializes evaluation, so arrays move freely
+  between threads, futures included.
+- A `Cleaner` frees each handle on its own thread once the value is
+  unreachable. This only drops a reference: MLX's reference counts are
+  atomic and its allocators lock.
+- Decompositions and solves run on the CPU stream, the only one where MLX
+  implements them.
+
+**Randomness.** `-random-uniform` computes JAX's partitionable Threefry with
+MLX's uint32 ops. The same key draws bit-identical uniforms on MLX and on
+the JVM backend, in float32 and float64 alike. Since every sampler is a
+composite over this primitive, the two backends sample identically up to
+the rounding of each op (bean genclj-ldpy's stretch goal).
+
+**Gradients.** For now, the backend-generic tape (`gen.array.tape`).
+
+**Where MLX's semantics differ, and what the backend does.** Found by the
+conformance suite.
+
+| MLX | The backend |
+|---|---|
+| `sign(NaN)` is 0 | NaN, as NumPy |
+| `argmax`/`argmin` skip NaN; indices are uint32 | the first NaN wins; the default int dtype |
+| integer `floor_divide` truncates toward 0 | floors: `(x - x mod y) / y` |
+| integer division by 0 is undefined (a trap on x86) | 0, as the JVM backend |
+| negative-step slices read a stop of -1 from the end | NumPy's bounds |
+| float64 `exp`, `sin`, `cos`, `erf`, `erfinv` on the CPU are float32 approximations (up to 1e-4 relative) | exact routes via `expm1`, `tan`, `log` (`gen.backend.mlx.exact`), within a few ulps |
+| Metal's float32 `expm1` is off by up to 660 ulps | Kahan's formula from `exp` and `log`, 3 ulps |
+| empty arrays have no data pointer | read as empty |
+| gathers do not check bounds | array indices: negative from the end, clamped (host indices are checked) |
+
+**Remaining differences, documented rather than hidden:**
+- **Subnormals.** Metal flushes float32 subnormals to zero: `sqrt(5.9e-39)`
+  is 0, and the sqrt of a negative subnormal is -0, not NaN.
+- **Indices.** An out-of-range array index is clamped, not an error. A lazy
+  backend cannot check it without evaluating. The JVM backend is the one
+  that checks.
+- **Accuracy.** Float32 results measured against the JVM backend's
+  correctly rounded ones, in ulps:
+  - Metal: at most 3, except `erf` (12).
+  - The CPU: at most 2, except `exp` (14) and `erf` (about 24).
+  - float64 on the CPU: within a few ulps everywhere, `cos` within 1e-13
+    relative near its zeros.
+
+**Conformance** (`test/gen/backend_conformance_test.clj`). Every op of the
+contract, and the composites built on them, is a test.check property. Each
+runs on the tested backend and on the JVM backend, the reference, with the
+same data and dtypes:
+- **Dtypes.** Where the JVM backend's 64-bit defaults gave a result's dtype,
+  its value is rounded to the tested backend's 32-bit defaults, as if
+  computed in float64 and stored as float32.
+- **Tolerances**, by op class:
+  - exact: ints, bools, comparisons, selections, shapes, indexing and the
+    IEEE-exact `+ - * / sqrt`;
+  - transcendental: 1e-5 relative in float32, 1e-13 in float64;
+  - accumulating: relative to the terms.
+- **Errors.** They must agree: `ex-info` on both, with the same `:shapes`.
+- **Results.** It passes on Metal, on the CPU in float32 and on the CPU in
+  float64, at 400 trials per property. Two planted bugs were caught: a
+  swapped `<`/`<=`, and a reversed `cumsum` direction.

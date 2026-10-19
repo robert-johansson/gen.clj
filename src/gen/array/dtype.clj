@@ -174,7 +174,8 @@
   [x dtype]
   (case dtype
     :float64 (host-double x)
-    (:float32 :float16 :bfloat16) (double (float (host-double x)))
+    ;; unchecked: a double beyond float32's range rounds to an infinity
+    (:float32 :float16 :bfloat16) (double (unchecked-float (host-double x)))
     :int64 (host-long x)
     :int32 (long (unchecked-int (host-long x)))
     :uint32 (bit-and (host-long x) 0xFFFFFFFF)

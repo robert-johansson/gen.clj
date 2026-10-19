@@ -315,13 +315,60 @@ flagged. Summarized in DESIGN.md §5.*
   - Use Neanderthal or LAPACK via FFM for its Cholesky and triangular solves.
   - It must not block the MLX path.
 
+## Spike findings (2026-10-19, bean genclj-w3uf)
+
+Measured on the M4 (Oracle GraalVM 25, criterium), with mlx-c v0.7.0 built
+against the MLX 0.32.2 wheel (`native/build-mlx.sh`):
+
+| | Graal JIT | C2 |
+|---|---|---|
+| FFM downcall, `invokeExact`, handle as long (`mlx_array_size`) | 3.5 ns | 2.7 ns |
+| `mlx_array_dtype` | 2.4 ns | 3.8 ns |
+| an op as a graph node, then freed (`mlx_add`) | 167 ns | 171 ns |
+| a scalar made and freed | 110 ns | 110 ns |
+| add + eval + item, CPU scalar | 11.4 µs | 11.4 µs |
+| add + eval + item, GPU scalar | 115 µs | 116 µs |
+| 10 chained adds + eval, CPU / GPU | 20 µs / 166 µs | 20 µs / 156 µs |
+| add of [100000] + eval, CPU / GPU | 16 µs / 128 µs | 17 µs / 132 µs |
+| `value_and_grad` through a Java upcall + eval, CPU [3] | 46 µs | 43 µs |
+
+- **The binding is not the cost.** A downcall costs 3 ns, well below the
+  10–30 ns estimate. Graal and C2 are alike for FFM.
+- **MLX's costs.** An op is about 170 ns as a graph node. The evaluation
+  floor is about 11 µs on the CPU and about 115 µs on the GPU (one command
+  buffer round trip). GenMLX measured ~67 µs.
+- **Consequences.** For scalar models every host read is an evaluation, so
+  the JVM backend (nanoseconds per op) stays the right backend for them. MLX
+  earns its place on large batched work, where the floor is amortized.
+- **Verified:** one-pointer structs lower to longs (an ABI test compares
+  with FFM's own struct calls); the error-handler upcall turns MLX errors
+  into exceptions, with no `exit(-1)`; one global closure stub plus a
+  registry works for `value_and_grad`, released by MLX's dtor; an exception
+  thrown inside an upcall comes back to the caller as itself.
+- **Pitfalls found.** mlx-c assigns into a non-null out-handle, so out-params
+  are zeroed, and calls made inside an upcall get their own scratch. A
+  closure's result vector arrives empty (`{nullptr}`), so results are set
+  with `mlx_vector_array_set_data`, not appended. A use-after-free (in a
+  benchmark's own bookkeeping) crashed the JVM, which is why handles belong
+  to Java values with a `Cleaner`.
+- **Cleaner-thread frees are safe** (from MLX 0.32.2's source):
+  - a free drops one `shared_ptr` reference;
+  - `~ArrayDesc` only touches descriptors nobody else holds;
+  - `MetalAllocator::free` locks.
+- **Threads.** MLX 0.32 streams are thread-affine: the default streams are
+  thread-local, and GPU command encoders are registered per thread.
+  `mlx_stream_new_thread_unsafe` registers them globally. The backend uses
+  those, with one evaluation lock.
+- **MLX semantics and accuracy** (from the conformance suite): see
+  `docs/array-api.md` §13. MLX's CPU float64 `exp`, `sin`, `cos`, `erf` and
+  `erfinv` are float32 approximations, its SIMD code being generic in T, and
+  Metal flushes float32 subnormals to zero.
+
 ## Could not verify
-- Actual FFM downcall cost on M4; Graal vs C2 for FFM and the Vector API.
+- Graal vs C2 for the Vector API.
 - NAPI per-call cost (the 100–300 ns figure is a rule of thumb).
-- The ~1 µs MLX node-construction figure (estimate).
 - Whether the mlx-cpu wheel's BLAS is reference netlib (inferred from size and
   symbols).
-- Whether Cleaner-thread frees are safe.
 - TornadoVM on Oracle GraalVM 25.
 - Ollama's Linux MLX/CUDA production status.
 - jax-metal being abandoned (forum report).

@@ -30,10 +30,18 @@ All work is tracked in beans (`.beans/`, a private git repo synced by hooks; see
 clojure -X:test                       # every test (clojure.test + test.check), ~90 s
 clojure -X:test:fast                  # without the ^:slow statistical tests, ~25 s
 clojure -X:test:conformance           # the backend conformance suite (array level)
-clojure -J-Dgen.backend=mlx -X:test   # any suite on another backend (M2)
+clojure -J-Dgen.backend=mlx -X:test   # any suite on the MLX backend (add -J-Dgen.mlx.device=cpu|gpu, -J-Dgen.mlx.dtypes=64)
 clojure -M:bench -m gen.array-bench   # per-op costs; add :c2 to compare C2 with Graal's JIT
 clojure -M:bench -m gen.model-bench   # model-level costs (GFI ops, batching, gradients)
 ```
+
+**The MLX backend** needs its native libraries and Java binding, built once:
+`native/build-mlx.sh` (libmlxc against the pinned MLX wheel), then
+`clojure -T:build java` (compiles `src-java/` into `target/classes`). After
+changing mlx-c's version, regenerate the binding with `clojure -M
+native/bindgen.clj`. The backend conformance suite
+(`gen.backend-conformance-test`) compares a backend with the JVM backend;
+without the native libraries the MLX tests skip.
 
 **Test conventions.**
 - **Determinism.** Statistical tests use fixed keys, so they are deterministic. Their
@@ -53,7 +61,7 @@ Python.
 
 | Layer | Namespaces |
 |---|---|
-| L0 arrays | `gen.array` (public API), `.dtype`, `.shape`, `.special`, `.linalg`, `.tape` (autodiff), `.batch` (batching tracer), `.protocols`; `gen.backend.jvm`; `gen.random`, `gen.random.threefry` |
+| L0 arrays | `gen.array` (public API), `.dtype`, `.shape`, `.special`, `.linalg`, `.tape` (autodiff), `.batch` (batching tracer), `.protocols`; `gen.backend.jvm`; `gen.backend.mlx` (+ `.exact`; Java binding in `src-java/gen/mlx`); `gen.random`, `gen.random.threefry` |
 | L1 data | `gen.choicemap`, `gen.selection`, `gen.trace`, `gen.diff` |
 | L2 GFI | `gen.gfi` (protocol + API), `gen.dynamic` (handler, DynamicGF, `gen`), `gen.dynamic.core` (guarded clojure.core fns for `gen` bodies) |
 | L3 distributions | `gen.dist.core` (record, `defdist`), `gen.dist` |

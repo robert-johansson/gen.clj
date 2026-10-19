@@ -1,0 +1,437 @@
+(ns gen.backend-conformance-test
+  "The backend conformance suite: the backend contract's ops, and the
+   composites gen.array builds on them, on the backend under test
+   (gen.array/*backend*, chosen with -Dgen.backend) against the JVM backend,
+   the reference, on the same data with the same dtypes.
+
+   The JVM backend computes in float64 and rounds float32 results, so it is
+   the correctly rounded answer. Tolerances, by op class:
+   - exact: integer and boolean results, comparisons, selections, shape and
+     indexing ops, rounding, extrema, and the IEEE-exact float ops (+ - * /
+     sqrt are correctly rounded in both).
+   - transcendental (exp, log, sin, …): a few float32 ulps.
+   - accumulating (sums, products, matrix products, solves): relative to the
+     magnitude of the terms, since the order of summation differs.
+
+   Run on MLX: clojure -J-Dgen.backend=mlx -X:test :nses '[gen.backend-conformance-test]'
+   (with -J-Dgen.mlx.device=cpu -J-Dgen.mlx.dtypes=64 for float64). On the
+   JVM backend it compares the backend with itself."
+  (:require [clojure.test :refer [deftest is testing]]
+            [clojure.test.check.clojure-test :refer [defspec]]
+            [clojure.test.check.generators :as gen]
+            [clojure.test.check.properties :as prop]
+            [gen.array :as a]
+            [gen.array.linalg :as la]
+            [gen.array.protocols :as p]
+            [gen.backend.jvm :as jvm]
+            [gen.random :as rng]))
+
+(def tested a/*backend*)
+(def reference jvm/backend)
+(def float-dt (:float (p/-defaults tested)))
+(def int-dt (:int (p/-defaults tested)))
+(def f64? (= :float64 float-dt))
+
+;; ---------------------------------------------------------------------------
+;; Running one computation on both backends
+;; ---------------------------------------------------------------------------
+
+(defn- host-result
+  "The host view of a result: {:shape :dtype :value} per array (the dtype of
+   a 0-d result only when the backend keeps one: the JVM backend's 0-d
+   arrays are host scalars), recursively for vectors of results."
+  [r]
+  (if (vector? r)
+    (mapv host-result r)
+    {:shape (a/shape r)
+     :dtype (when (seq (a/shape r)) (a/dtype r))
+     :value (a/->clj r)}))
+
+(defn- run-on
+  "(f & arrays) on backend b, the arrays made from the specs {:data :dtype}."
+  [b f specs]
+  (a/with-backend b
+    (host-result (apply f (map (fn [{:keys [data dtype]}] (a/array data {:dtype dtype})) specs)))))
+
+(defn- as-tested-defaults
+  "A reference result in the tested backend's default dtypes: where the JVM
+   backend's defaults (float64, int64) gave a result's dtype and the tested
+   backend's are 32-bit, the value rounded (or wrapped) to them, as if
+   computed in float64 and stored as float32."
+  [r]
+  (cond (vector? r) (mapv as-tested-defaults r)
+        (= float-dt :float64) r
+        :else
+        (let [round (fn round [v] (cond (sequential? v) (mapv round v)
+                                        (instance? Double v) (double (unchecked-float v))
+                                        (integer? v) (long (unchecked-int (long v)))
+                                        :else v))]
+          (case (:dtype r)
+            :float64 (-> r (assoc :dtype float-dt) (update :value round))
+            :int64 (-> r (assoc :dtype int-dt) (update :value round))
+            ;; 0-d results of the JVM backend are host scalars without a dtype
+            nil (update r :value round)
+            r))))
+
+(defn- close?
+  "x and y equal within atol + rtol·|y| (NaN equal to NaN, infinities exact)."
+  [rtol atol x y]
+  (cond (and (sequential? x) (sequential? y))
+        (and (= (count x) (count y)) (every? true? (map #(close? rtol atol %1 %2) x y)))
+        (and (boolean? x) (boolean? y)) (= x y)
+        (and (number? x) (number? y))
+        (let [x (double x) y (double y)]
+          (or (= x y)
+              (and (Double/isNaN x) (Double/isNaN y))
+              (and (Double/isFinite x) (Double/isFinite y)
+                   (<= (Math/abs (- x y)) (+ atol (* rtol (Math/abs y)))))))
+        :else false))
+
+(defn- agree?
+  "Do the results agree: same shapes and dtypes, values within the tolerance."
+  [{:keys [rtol atol] :or {rtol 0.0 atol 0.0} :as tol} r1 r2]
+  (if (vector? r1)
+    (and (vector? r2) (= (count r1) (count r2)) (every? true? (map #(agree? tol %1 %2) r1 r2)))
+    (and (= (:shape r1) (:shape r2))
+         (or (nil? (:dtype r1)) (nil? (:dtype r2)) (= (:dtype r1) (:dtype r2)))
+         (close? rtol atol (:value r1) (:value r2)))))
+
+(defn- conforms?
+  "Does (f & arrays) agree on the tested and reference backends? Errors
+   must agree too: an ex-info on both (with the same :shapes when the
+   reference names them), never anything else."
+  [tol f & specs]
+  (let [attempt (fn [b] (try {:ok (run-on b f specs)}
+                             (catch clojure.lang.ExceptionInfo e {:error (ex-data e)})))
+        t (attempt tested)
+        r (update (attempt reference) :ok #(some-> % as-tested-defaults))]
+    (cond (and (:ok t) (:ok r)) (or (agree? tol (:ok t) (:ok r))
+                                    (do (println "disagree:" {:tested (:ok t) :reference (:ok r) :specs specs}) false))
+          (and (:error t) (:error r)) (or (not (contains? (:error r) :shapes))
+                                          (= (:shapes (:error r)) (:shapes (:error t))))
+          :else (do (println "one failed:" {:tested t :reference r :specs specs}) false))))
+
+;; tolerances
+(def exact {})
+(def ieee exact)
+(def transcendental (if f64? {:rtol 1e-13 :atol 1e-14} {:rtol 1e-5 :atol 1e-6}))
+(def loose (if f64? {:rtol 1e-9 :atol 1e-10} {:rtol 2e-4 :atol 2e-5}))
+
+;; ---------------------------------------------------------------------------
+;; Generators
+;; ---------------------------------------------------------------------------
+
+(defn- reshape-flat [flat shape]
+  (if (empty? shape)
+    (first flat)
+    (let [step (reduce * (rest shape))]
+      (mapv #(reshape-flat (subvec flat (* % step) (* (inc %) step)) (vec (rest shape)))
+            (range (first shape))))))
+
+(def gen-shape (gen/vector (gen/frequency [[9 (gen/choose 1 4)] [1 (gen/return 0)]]) 0 3))
+(def gen-nonempty-shape (gen/vector (gen/choose 1 4) 1 3))
+
+(defn- gen-operand-shape
+  "A shape that broadcasts to out-shape: a suffix of it with some dims 1."
+  [out-shape]
+  (gen/let [k (gen/choose 0 (count out-shape))
+            ones (gen/vector gen/boolean (- (count out-shape) k))]
+    (mapv (fn [d one?] (if one? 1 d)) (drop k out-shape) ones)))
+
+(defn- no-subnormal
+  "x, or 0.0 for a float32 subnormal: MLX's Metal kernels flush them to zero
+   (docs/array-api.md §13)."
+  [x]
+  (if (and (not f64?) (< 0.0 (Math/abs (double x)) Float/MIN_NORMAL)) 0.0 x))
+
+(def gen-float
+  (gen/fmap no-subnormal
+            (gen/frequency [[8 (gen/double* {:infinite? false :NaN? false :min -100.0 :max 100.0})]
+                            [3 (gen/fmap double (gen/choose -4 4))]
+                            [1 (gen/elements [##NaN ##Inf ##-Inf 0.5 -0.5 1.5 2.5])]])))
+
+(def gen-finite (gen/fmap no-subnormal (gen/double* {:infinite? false :NaN? false :min -10.0 :max 10.0})))
+(def gen-positive (gen/double* {:infinite? false :NaN? false :min 0.01 :max 50.0}))
+(def gen-int (gen/choose -20 20))
+
+(defn- gen-spec
+  "{:data :dtype} of shape with elements from gen-elem."
+  [shape gen-elem dtype]
+  (gen/fmap (fn [xs] {:data (reshape-flat (vec xs) shape) :dtype dtype})
+            (gen/vector gen-elem (reduce * shape))))
+
+(defn- gen-floats [gen-elem] (gen/bind gen-shape #(gen-spec % gen-elem float-dt)))
+
+(def gen-any-spec
+  "An operand of any dtype the backend defaults to."
+  (gen/bind (gen/tuple gen-shape (gen/elements [:float :int :bool]))
+            (fn [[shape kind]]
+              (case kind
+                :float (gen-spec shape gen-float float-dt)
+                :int (gen-spec shape gen-int int-dt)
+                :bool (gen-spec shape gen/boolean :bool)))))
+
+(defn- gen-pair
+  "Two operands that broadcast together, elements from gen-elem as dtype."
+  [gen-elem dtype]
+  (gen/let [out gen-shape
+            sx (gen-operand-shape out)
+            sy (gen-operand-shape out)
+            x (gen-spec sx gen-elem dtype)
+            y (gen-spec sy gen-elem dtype)]
+    [x y]))
+
+;; ---------------------------------------------------------------------------
+;; Elementwise ops
+;; ---------------------------------------------------------------------------
+
+(def ^:private trials
+  "Trials per property (-Dgen.conformance.trials, default 60)."
+  (Long/parseLong (System/getProperty "gen.conformance.trials" "60")))
+
+(defspec unary-exact trials
+  (prop/for-all [op (gen/elements [a/negate a/abs a/sign a/floor a/ceil a/round a/isnan a/isinf a/logical-not a/square])
+                 x gen-any-spec]
+    (conforms? exact op x)))
+
+(defspec unary-ieee trials
+  (prop/for-all [x (gen-floats gen-float)]
+    (conforms? ieee a/sqrt x)))
+
+(defspec unary-transcendental trials
+  (prop/for-all [[op x] (gen/let [[op elem] (gen/elements [[a/exp gen-finite] [a/expm1 gen-finite] [a/tanh gen-finite]
+                                                           [a/sin gen-finite] [a/cos gen-finite] [a/erf gen-finite]
+                                                           [a/log gen-positive] [a/log1p gen-positive]
+                                                           [a/erfinv (gen/double* {:NaN? false :min -0.999 :max 0.999})]])
+                                  x (gen/bind gen-shape #(gen-spec % elem float-dt))]
+                          [op x])]
+    (conforms? transcendental op x)))
+
+(defspec binary-exact trials
+  (prop/for-all [op (gen/elements [a/+ a/- a/* a/maximum a/minimum a/< a/<= a/> a/>= a/== a/!=
+                                   a/logical-and a/logical-or])
+                 [x y] (gen/one-of [(gen-pair gen-float float-dt) (gen-pair gen-int int-dt)
+                                    (gen-pair gen/boolean :bool)])]
+    (conforms? exact op x y)))
+
+(defspec binary-division trials
+  (prop/for-all [op (gen/elements [a// a/mod a/floor-div])
+                 [x y] (gen/one-of [(gen-pair gen-float float-dt) (gen-pair gen-int int-dt)])]
+    ;; float mod and floor-div by MLX's kernels: within an ulp of the quotient
+    (conforms? (if (= op a//) ieee transcendental) op x y)))
+
+(defspec mixed-dtypes-promote trials
+  (prop/for-all [op (gen/elements [a/+ a/* a/maximum a/<])
+                 x gen-any-spec
+                 y gen-any-spec
+                 c (gen/elements [2 2.5 true])]
+    ;; operands that do not broadcast must fail alike
+    (and (conforms? exact op x y)
+         (conforms? exact #(op % c) x))))
+
+(defspec power trials
+  (prop/for-all [[x y] (gen/one-of [(gen-pair gen-positive float-dt)
+                                    (gen-pair (gen/choose 0 6) int-dt)])]
+    (conforms? transcendental a/pow x y)))
+
+(defspec where trials
+  (prop/for-all [[c x y] (gen/let [out gen-shape
+                                   [sc sx sy] (gen/vector (gen-operand-shape out) 3)
+                                   c (gen-spec sc gen/boolean :bool)
+                                   x (gen-spec sx gen-float float-dt)
+                                   y (gen-spec sy gen-float float-dt)]
+                           [c x y])]
+    (conforms? exact a/where c x y)))
+
+(defspec composites trials
+  (prop/for-all [[op tol x] (gen/let [[op elem tol] (gen/elements [[a/sigmoid gen-finite transcendental]
+                                                                   [a/softplus gen-finite transcendental]
+                                                                   [a/lgamma gen-positive loose]
+                                                                   [a/digamma gen-positive loose]
+                                                                   [#(a/logaddexp % 1.5) gen-finite transcendental]
+                                                                   [#(a/xlogy % 2.0) gen-finite transcendental]
+                                                                   [a/isfinite gen-float exact]])
+                                      x (gen/bind gen-shape #(gen-spec % elem float-dt))]
+                              [op tol x])]
+    (conforms? tol op x)))
+
+;; ---------------------------------------------------------------------------
+;; Reductions and scans
+;; ---------------------------------------------------------------------------
+
+(defn- gen-axes
+  "nil (all), one axis or a set of axes of a rank-r array, possibly negative."
+  [r]
+  (if (zero? r)
+    (gen/return nil)
+    (gen/one-of [(gen/return nil)
+                 (gen/choose (- r) (dec r))
+                 (gen/fmap #(vec (distinct %)) (gen/vector (gen/choose 0 (dec r)) 0 r))])))
+
+(defspec reductions trials
+  (prop/for-all [[op tol kinds] (gen/elements [[a/sum loose [:float :int :bool]] [a/prod loose [:float :int]]
+                                               [a/max exact [:float :int]] [a/min exact [:float :int]]
+                                               [a/all exact [:bool :float]] [a/any exact [:bool :int]]
+                                               [a/mean loose [:float]] [a/logsumexp loose [:float]]])
+                 shape gen-nonempty-shape
+                 keep? gen/boolean
+                 seed gen/nat]
+    (let [kind (gen/generate (gen/elements kinds) 1 seed)
+          x (gen/generate (case kind
+                            :float (gen-spec shape gen-finite float-dt)
+                            :int (gen-spec shape (gen/choose -3 3) int-dt)
+                            :bool (gen-spec shape gen/boolean :bool))
+                          10 seed)
+          axes (gen/generate (gen-axes (count shape)) 10 seed)]
+      (conforms? tol #(op % {:axis axes :keep-dims? keep?}) x))))
+
+(defspec arg-reductions trials
+  (prop/for-all [op (gen/elements [a/argmax a/argmin])
+                 shape gen-nonempty-shape
+                 seed gen/nat]
+    (let [x (gen/generate (gen-spec shape (gen/one-of [gen-float (gen/fmap double (gen/choose -2 2))]) float-dt) 10 seed)
+          ax (gen/generate (gen/one-of [(gen/return nil) (gen/choose 0 (dec (count shape)))]) 10 seed)]
+      (conforms? exact #(op % {:axis ax}) x))))
+
+(defspec scans trials
+  (prop/for-all [[op tol] (gen/elements [[a/cumsum loose] [a/cumprod loose] [a/logcumsumexp loose]])
+                 shape gen-nonempty-shape
+                 reverse? gen/boolean
+                 seed gen/nat]
+    (let [x (gen/generate (gen-spec shape (gen/double* {:NaN? false :infinite? false :min -2.0 :max 2.0}) float-dt) 10 seed)
+          ax (gen/generate (gen/choose (- (count shape)) (dec (count shape))) 10 seed)]
+      (conforms? tol #(op % {:axis ax :reverse? reverse?}) x))))
+
+;; ---------------------------------------------------------------------------
+;; Shape and indexing
+;; ---------------------------------------------------------------------------
+
+(defspec shape-ops trials
+  (prop/for-all [shape gen-nonempty-shape
+                 seed gen/nat]
+    (let [x (gen/generate (gen-spec shape gen-int int-dt) 10 seed)
+          r (count shape)
+          perm (vec (shuffle (range r)))]
+      (and (conforms? exact #(a/reshape % [-1]) x)
+           (conforms? exact #(a/transpose % perm) x)
+           (conforms? exact a/transpose x)
+           (conforms? exact #(a/expand-dims % 0) x)
+           (conforms? exact #(a/broadcast-to % (into [2] shape)) x)
+           (conforms? exact #(a/concatenate [% %] (dec r)) x)
+           (conforms? exact #(a/stack [% % %] 0) x)
+           (conforms? exact a/squeeze x)))))
+
+(defspec slices trials
+  (prop/for-all [shape gen-nonempty-shape
+                 seed gen/nat]
+    (let [x (gen/generate (gen-spec shape gen-int int-dt) 10 seed)
+          r (count shape)
+          [ax start stop step] (gen/generate (gen/tuple (gen/choose 0 (dec r))
+                                                        (gen/one-of [(gen/return nil) (gen/choose -6 6)])
+                                                        (gen/one-of [(gen/return nil) (gen/choose -6 6)])
+                                                        (gen/elements [1 2 3 -1 -2]))
+                                             10 seed)]
+      (conforms? exact #(a/slice % ax start stop step) x))))
+
+(defspec gathers trials
+  (prop/for-all [shape gen-nonempty-shape
+                 seed gen/nat]
+    (let [x (gen/generate (gen-spec shape gen-finite float-dt) 10 seed)
+          r (count shape)
+          ax (gen/generate (gen/choose 0 (dec r)) 10 seed)
+          d (nth shape ax)
+          idx (gen/generate (gen-spec [3] (gen/choose (- d) (dec d)) int-dt) 10 seed)
+          along (gen/generate (gen-spec (assoc shape ax 2) (gen/choose 0 (dec d)) int-dt) 10 seed)
+          updates (gen/generate (gen-spec (assoc shape ax 2) gen-finite float-dt) 10 (inc seed))]
+      (and (conforms? exact #(a/take %1 %2 ax) x idx)
+           (conforms? exact #(a/take % (dec d) ax) x)
+           (conforms? exact #(a/take-along-axis %1 %2 ax) x along)
+           (conforms? loose #(a/scatter-add %1 %2 %3 ax) x along updates)
+           (conforms? exact #(a/pick %1 %2) x (gen/generate (gen-spec (pop shape) (gen/choose 0 (dec (peek shape))) int-dt) 10 seed))))))
+
+;; ---------------------------------------------------------------------------
+;; Linear algebra
+;; ---------------------------------------------------------------------------
+
+(defn- spd
+  "A well-conditioned symmetric positive-definite n×n matrix from m."
+  [m n]
+  (mapv (fn [i] (mapv (fn [j] (+ (reduce + (map #(* (nth (nth m i) %) (nth (nth m j) %)) (range n)))
+                                 (if (= i j) (double n) 0.0)))
+                      (range n)))
+        (range n)))
+
+(defspec matmuls trials
+  (prop/for-all [[n k m] (gen/vector (gen/choose 1 4) 3)
+                 batch (gen/vector (gen/choose 1 3) 0 2)
+                 seed gen/nat]
+    (let [x (gen/generate (gen-spec (into batch [n k]) gen-finite float-dt) 10 seed)
+          y (gen/generate (gen-spec [k m] gen-finite float-dt) 10 (inc seed))
+          v (gen/generate (gen-spec [k] gen-finite float-dt) 10 (+ 2 seed))
+          i (gen/generate (gen-spec [n k] gen-int int-dt) 10 seed)
+          j (gen/generate (gen-spec [k m] gen-int int-dt) 10 seed)]
+      (and (conforms? loose a/matmul x y)
+           (conforms? loose a/matmul x v)
+           (conforms? exact a/matmul i j)))))
+
+(defspec decompositions 40
+  (prop/for-all [n (gen/choose 1 4)
+                 seed gen/nat]
+    (let [m (gen/generate (gen/vector (gen/vector gen-finite n) n) 10 seed)
+          a {:data (spd m n) :dtype float-dt}
+          rhs (gen/generate (gen-spec [n 2] gen-finite float-dt) 10 seed)
+          tol (if f64? {:rtol 1e-9 :atol 1e-9} {:rtol 2e-3 :atol 2e-3})]
+      (and (conforms? tol la/cholesky a)
+           (conforms? tol #(la/solve-triangular (la/cholesky %1) %2) a rhs)
+           (conforms? tol #(la/solve-triangular (la/cholesky %1) %2 {:transpose? true}) a rhs)
+           (conforms? tol la/solve a rhs)
+           (conforms? tol la/slogdet a)
+           (conforms? tol la/inv a)))))
+
+;; ---------------------------------------------------------------------------
+;; Randomness: the same key draws the same uniforms
+;; ---------------------------------------------------------------------------
+
+(defspec uniforms-are-identical trials
+  (prop/for-all [seed gen/large-integer
+                 shape gen-shape]
+    (let [key (rng/key seed)]
+      (agree? exact
+              (a/with-backend tested (host-result (rng/uniform key shape {:dtype float-dt})))
+              (a/with-backend reference (host-result (rng/uniform key shape {:dtype float-dt})))))))
+
+(deftest samplers-agree
+  (let [key (rng/key 7)
+        draw (fn [b f] (a/with-backend b (host-result (f))))]
+    (doseq [[label f tol] [["normal" #(rng/normal key [50] {:dtype float-dt}) transcendental]
+                           ["split keys" #(rng/uniform (second (rng/split key 3)) [4] {:dtype float-dt}) exact]]]
+      (testing label
+        (is (agree? tol (draw tested f) (draw reference f)))))))
+
+;; ---------------------------------------------------------------------------
+;; Gradients
+;; ---------------------------------------------------------------------------
+
+(defspec gradients trials
+  (prop/for-all [shape gen-nonempty-shape
+                 seed gen/nat]
+    (let [x (gen/generate (gen-spec shape (gen/double* {:NaN? false :infinite? false :min -2.0 :max 2.0}) float-dt) 10 seed)
+          f (fn [x] (a/sum (a/+ (a/* (a/sin x) (a/exp x)) (a/logsumexp x {:axis -1 :keep-dims? true}))))]
+      (conforms? loose #(second ((a/value-and-grad f) %)) x))))
+
+;; ---------------------------------------------------------------------------
+;; Errors are loud and alike
+;; ---------------------------------------------------------------------------
+
+(deftest errors
+  (let [fails-alike (fn [f & specs] (apply conforms? exact f specs))
+        v3 {:data [1.0 2.0 3.0] :dtype float-dt}
+        v2 {:data [1.0 2.0] :dtype float-dt}]
+    (is (fails-alike a/+ v3 v2) "broadcasting")
+    (is (fails-alike a/matmul v3 v2) "matmul inner dimensions")
+    (is (fails-alike #(a/reshape % [2 2]) v3) "reshape size")
+    (is (fails-alike #(a/concatenate [% (a/reshape %2 [2 1])] 0) v3 v2) "concatenate ranks")
+    (is (fails-alike #(a/take % 5) v3) "a host index out of range")
+    (testing "MLX errors become ex-info, and the JVM keeps running"
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (a/with-backend tested (a/->clj (la/cholesky (a/array [[1.0 2.0 3.0]] {:dtype float-dt})))))))))

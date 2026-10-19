@@ -80,6 +80,12 @@
     (is (= [(double (float 0.3))] (a/->clj (a/+ (a/array [0.1] {:dtype :float32}) 0.2))))
     (is (= [(double (float (+ (double (float 0.1)) (double (float 0.2)))))]
            (a/->clj (a/+ (a/array [0.1] {:dtype :float32}) (a/array [0.2] {:dtype :float32}))))))
+  (testing "host infinities and large doubles meet float32 arrays (Clojure's float cast would throw)"
+    (is (= [##Inf ##-Inf] (a/->clj (a/* (a/array [1.0 -1.0] {:dtype :float32}) ##Inf))))
+    (is (= [##Inf] (a/->clj (a/+ (a/array [1.0] {:dtype :float32}) 1e300))))
+    (let [[pole one] (a/->clj (a/lgamma (a/array [0.0 1.0] {:dtype :float32})))]
+      (is (= ##Inf pole) "lgamma's poles, a where on a host ##Inf")
+      (is (< (abs one) 1e-6) "log Γ(1) = 0, to float32 rounding")))
   (testing "int32 wraps"
     (is (= [Integer/MIN_VALUE] (a/->clj (a/+ (a/array [Integer/MAX_VALUE] {:dtype :int32}) 1))))))
 
