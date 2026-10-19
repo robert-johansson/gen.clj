@@ -291,11 +291,11 @@ needs, taken from GenMLX's measured call counts
     proposal and its densities. A model that reads a value on the host falls
     back to the plain kernel, which makes the same moves. It is opt-in
     because the first call per structure pays for the trace and compile.
-    Measured on Metal, per step:
-    - HMC, a million-element latent: 31.6 → 7.1 ms (the JVM backend takes
-      150 ms).
-    - MALA, regression on a million observations: 8.9 → 4.2 ms; with 100,
-      5.7 → 2.3 ms.
+    Measured on Metal, per step, on a regression over N observations with
+    two latents (`gen.mcmc-bench`, `docs/benchmarks.md`):
+    - HMC, N = 1M: 34.9 → 5.9 ms (the JVM backend: 168 → 126 ms); N = 100:
+      12.2 → 1.5 ms.
+    - MALA, N = 1M: 6.1 → 4.6 ms; N = 100: 1.6 → 1.3 ms.
   - **Not compiled: steps that draw inside the model** (MH's regenerate,
     particle-filter extensions). Keys are host values, split on the host, so
     a compiled trace would replay its draws. GenMLX's fused chains and
@@ -648,7 +648,11 @@ The decisions are §12 items 15–18, for the owner's review.*
   cannot free the buffer during evaluation either. Without this trigger a
   chain of large ops kept every intermediate: 100,000 float64 beta draws
   (exact float64 composites inside rejection rounds) took over 11 GB, and
-  with it about 1.7 GB. A collection costs about 25 ms.
+  with it about 1.7 GB. A collection costs 10–25 ms. Uncompiled steps on
+  large arrays notice: plain HMC at a million observations collects every
+  second step, 29.7 → 34.9 ms per step, while its compiled steps make few
+  new arrays and do not (`docs/benchmarks.md`). A larger
+  `gen.mlx.gc-new-bytes` trades memory for fewer pauses.
 - **MLX's own limits are bounded** when the namespace loads (2026-10-19).
   MLX defaults both to all of RAM: its buffer cache (freed buffers kept for
   reuse) and its memory limit (past which it frees the cache and waits for

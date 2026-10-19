@@ -31,6 +31,16 @@ passes found the remaining bugs, nearly all in batched execution, and they
 are fixed (`docs/research/acceptance-2026-10-19.md`). Benchmarks are in
 `docs/benchmarks.md`.
 
+**M2 (2026-10-19): the MLX backend runs on Metal and on MLX's CPU backend.**
+It passes the backend conformance suite against the JVM reference, and the
+full test battery on Metal (294 tests, the slow and heavy ones included).
+On MLX's CPU backend in float64 the light battery passes (277 tests); of the
+full battery, the first 16 namespaces pass and the rest are being run.
+Benchmarks against GenMLX on the same machine are in `docs/benchmarks.md`.
+Memory is bounded by default after a kernel panic from test JVMs (§9).
+CUDA on Linux remains (beans genclj-v3el, genclj-0kge), as does making
+native autodiff the default (genclj-fuvr).
+
 Only the beautiful core is ported first. Everything else in GenMLX that *could*
 be ported is tracked as a deferred bean with a note on how to port it cleanly
 (`beans list --tag deferred-port`).

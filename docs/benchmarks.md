@@ -88,39 +88,82 @@ result. Reproduce with:
 - `bun run --bun nbb bench/cost_per_particle.cljs` in `~/code/genmlx`;
 - `clojure [-J-Dgen.backend=mlx] [-J-Dgen.bench.spot-checks=0] -M:bench -m gen.genmlx-bench`.
 
+GenMLX's figures are from one run on the morning of 2026-10-19 and were not
+re-measured. gen.clj's were re-measured in the evening, after the memory
+bounds (§13 of `docs/array-api.md`) and the spot-check fix below.
+
 **Per particle (or per step), the scalar paths:**
 
 | | GenMLX (Metal) | gen.clj, MLX on Metal | gen.clj, JVM |
 |---|---|---|---|
-| generate, one particle at a time (N = 1000) | 0.93 ms | 0.46 ms | 0.020 ms |
+| generate, one particle at a time (N = 1000) | 0.93 ms | 0.48 ms | 0.018 ms |
 | importance sampling (N = 1000) | 1.85 ms | 0.49 ms | 0.010 ms |
-| MH, one step | 4.2 ms | 1.1 ms | 0.014 ms |
-| particle filter, one particle-step (N = 500) | 1.76 ms | 0.28 ms | 0.007 ms |
+| MH, one step | 4.2 ms | 1.15 ms | 0.014 ms |
+| particle filter, one particle-step (N = 500) | 1.76 ms | 0.29 ms | 0.007 ms |
 
 **Total, the batched paths (N = 3000):**
 
 | | GenMLX (Metal) | gen.clj, Metal, spot checks off | gen.clj, Metal, spot checks on | gen.clj, JVM (spot checks on) |
 |---|---|---|---|---|
-| generate | 1.4 ms | 0.8 ms | 1.4 ms | 1.2 ms |
-| importance sampling | 1.4 ms | 0.7 ms | 1.4 ms | 0.9 ms |
-| particle filter, 5 steps | 9.2 ms | 3.8 ms | 5.9 ms | 2.4 ms |
-| generate, N = 10,000 | — | 1.1 ms | 2.1 ms | 1.8 ms |
+| generate | 1.4 ms | 0.8 ms | 1.5 ms | 1.0 ms |
+| importance sampling | 1.4 ms | 0.7 ms | 1.3 ms | 1.0 ms |
+| particle filter, 5 steps | 9.2 ms | 4.0 ms | 5.4 ms | 2.3 ms |
+| generate, N = 10,000 | — | 0.9 ms | 2.1 ms | 1.9 ms |
 
 How to read these:
 - **Scalar paths.** gen.clj on MLX is 2–6× faster than GenMLX through the
-  same library. The JVM backend is 50–300× faster again, at nanoseconds per
+  same library. The JVM backend is 25–80× faster again, at nanoseconds per
   op where MLX evaluates for microseconds. Scalar models belong on the JVM
   backend.
 - **Batched paths.** gen.clj on Metal is about twice as fast as GenMLX
   without spot checks. With them (8 particles re-run through the scalar
-  handler), it matches GenMLX, which has no such checks. On MLX the re-runs
-  are on the JVM backend: the batched trace is read once, and each re-run
-  takes microseconds (bean genclj-w5y0). On MLX itself, they cost 0.5 ms
-  each, 4–5 ms per operation: the first measurement (8.3 ms for generate at
-  3000).
+  handler), it matches GenMLX, which has no such checks, and the filter
+  stays ahead. On MLX the re-runs are on the JVM backend: the batched trace
+  is read once, and each re-run takes microseconds (bean genclj-w5y0). On
+  MLX itself, they cost 0.5 ms each, 4–5 ms per operation: the first
+  measurement (8.3 ms for generate at 3000).
 - **Small models.** At these sizes the JVM backend's batched path matches
   Metal's. The GPU earns its place on larger arrays and models.
 - **The first MLX measurement** found batched runs falling back to one
   particle at a time on Metal: the spot check compared values in float64,
   which Metal lacks. It now compares on the host, at the precision of the
   narrower float.
+- **The evening re-measurement** found the runs without spot checks as slow
+  as those with them (1.4, 1.3 and 5.3 ms). Bisected to 968580a: the checks
+  read every particle on the host even with no particle to check. They now
+  read nothing then. The memory bounds were ruled out first: turning off the
+  collection trigger, or the cache and memory limits, changed nothing.
+
+## MCMC steps, plain and compiled (2026-10-19)
+
+`bench/gen/mcmc_bench.clj`: Bayesian linear regression with N observations
+held as one array and two latents, `w` and `b`. HMC takes 10 leapfrog steps.
+Mean per step over 20 steps after warm-up, each forcing its score; every
+line also checks that the plain and compiled kernels make the same move.
+Reproduce with `clojure [-J-Dgen.backend=mlx] -M:bench -m gen.mcmc-bench`.
+
+| Per step | Metal, plain | Metal, compiled | JVM, plain | JVM, compiled |
+|---|---|---|---|---|
+| HMC, N = 100 | 12.2 ms | 1.5 ms | 5.0 ms | 2.7 ms |
+| HMC, N = 10,000 | 9.0 ms | 1.6 ms | 3.7 ms | 3.2 ms |
+| HMC, N = 1,000,000 | 34.9 ms | 5.9 ms | 168 ms | 126 ms |
+| MALA, N = 100 | 1.6 ms | 1.3 ms | 0.42 ms | 0.45 ms |
+| MALA, N = 10,000 | 2.2 ms | 1.3 ms | 0.61 ms | 0.57 ms |
+| MALA, N = 1,000,000 | 6.1 ms | 4.6 ms | 27 ms | 26 ms |
+
+- **Compile on the GPU.** It pays off for HMC at every size (6–8×), and
+  MALA gains 1.2–1.7×.
+- **The compiled kernel also does less work.** At each leapfrog step the
+  plain kernel updates the trace and takes its choice gradients; the
+  compiled one differentiates the model's `assess` as a function of the
+  values. So it is faster on the JVM backend too, where compile is the
+  identity.
+- **The memory trigger's cost.** MLX collects after every sixteenth of RAM
+  of new arrays (`gen.mlx.gc-new-bytes`, 2 GB here). Plain HMC at a million
+  observations makes enough for a collection every second step, about 13 ms
+  each: 29.7 ms per step with the trigger off, 34.9 ms with it (18%).
+  Compiled steps make few new arrays and do not notice (5.8 against
+  5.9 ms). Raising `gen.mlx.gc-new-bytes` trades memory for fewer pauses.
+- **Before the memory bounds** (5 steps each, same model): HMC at a million,
+  31.6 → 7.1 ms; MALA, 8.9 → 4.2 ms. Other changes since have made most
+  paths faster, so the trigger's cost shows only in the comparison above.

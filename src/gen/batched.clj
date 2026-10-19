@@ -301,10 +301,13 @@
 (defn- spot-check!
   "Throw unless the batched trace t of gf on args agrees with the scalar
    handler re-run on each spot-checked particle's choices. On a lazy
-   backend the re-runs are on the JVM backend when the model allows it."
+   backend the re-runs are on the JVM backend when the model allows it.
+   With no particles to check (*spot-checks* 0) it reads nothing."
   [gf args n t]
-  (or (when (lazy-batch? t) (reference-spot-check! gf args n t))
-      (spot-check-here! gf args n t)))
+  (if (empty? (spot-indices n))
+    t
+    (or (when (lazy-batch? t) (reference-spot-check! gf args n t))
+        (spot-check-here! gf args n t))))
 
 (defn- spot-check-here!
   "spot-check! on the batched trace's own backend."
