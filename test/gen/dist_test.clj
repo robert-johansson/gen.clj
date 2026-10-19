@@ -1,8 +1,9 @@
 (ns gen.dist-test
+  (:refer-clojure :exclude [-])
   (:require [gen.test-support :as ts]
             [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
-            [gen.array :as array]
+            [gen.array :as array :refer [-]]
             [gen.choicemap :as cm]
             [gen.dist :as d]
             [gen.dist.core :as dc]
@@ -94,7 +95,7 @@
       (is (= w (dc/log-prob dist 3.0))))
     (let [{t2 :trace w :weight disc :discard} (gfi/update tr (cm/->Value 0.0))]
       (is (= 0.0 (:retval t2)))
-      (is (array/allclose? w (array/- (dc/log-prob dist 0.0) (:score tr))))
+      (is (array/allclose? w (- (dc/log-prob dist 0.0) (:score tr))))
       (is (= (:choices tr) disc)))
     (is (= (:score tr) (gfi/project tr sel/all)))
     (is (= 0.0 (gfi/project tr (sel/select :x))))

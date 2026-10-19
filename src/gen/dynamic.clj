@@ -24,7 +24,8 @@
    probability and every spliced sub-trace, so regenerate weights use the old
    log probabilities exactly and project reads the trace without re-running
    the model."
-  (:require [gen.array :as array]
+  (:refer-clojure :exclude [+ -])
+  (:require [gen.array :as array :refer [+ -]]
             [gen.array.batch :as batch]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
@@ -102,9 +103,9 @@
   (-> state
       (update :choices cm/set-choice p v)
       (update :scores assoc p lp)
-      (update :score array/+ lp)))
+      (update :score + lp)))
 
-(defn- add-weight [state w] (update state :weight array/+ w))
+(defn- add-weight [state w] (update state :weight + w))
 
 (defn- constraint-at
   "The constraint value at a primitive site, or nil. A nested choice map there
@@ -153,7 +154,7 @@
       prev (let [[v prev-lp] prev
                  _ (dc/check-value-shape dist v)
                  lp (site-log-prob dist v)]
-             [v (-> state (record p v lp) (add-weight (array/- lp prev-lp)))])
+             [v (-> state (record p v lp) (add-weight (- lp prev-lp)))])
       :else (simulate-site state p dist k))))
 
 (defn- regenerate-site [state p dist k]
@@ -162,7 +163,7 @@
       (let [[v prev-lp] prev
             _ (dc/check-value-shape dist v)
             lp (site-log-prob dist v)]
-        [v (-> state (record p v lp) (add-weight (array/- lp prev-lp)))])
+        [v (-> state (record p v lp) (add-weight (- lp prev-lp)))])
       ;; selected, or a new address: a fresh draw from the prior, which cancels
       (simulate-site state p dist k))))
 
@@ -196,7 +197,7 @@
   [state p tr]
   (cond-> (-> state
               (update :subtraces assoc p tr)
-              (update :score array/+ (:score tr)))
+              (update :score + (:score tr)))
     (not (cm/empty? (:choices tr))) (update :choices cm/set-choice p (:choices tr))))
 
 (declare dynamic-gf?)
@@ -242,7 +243,7 @@
         base {}]
     (if (= mode :assess)
       (let [{w :weight rv :retval} (gfi/run-op gf :assess args (assoc base :constraints cons :key (rng/key 0)))]
-        [rv (cond-> (-> state (update :score array/+ w) (add-weight w))
+        [rv (cond-> (-> state (update :score + w) (add-weight w))
               (not (cm/empty? cons)) (update :choices cm/set-choice p cons))])
       (let [[k state] (sub-key state)
             opts (assoc base :key k)
@@ -471,9 +472,9 @@
                    :retdiff (retdiff (:prev opts) state)})))
 
 (defn- project* [tr s]
-  (let [from-choices (reduce (fn [acc [p lp]] (if (path-selected? s p) (array/+ acc lp) acc))
+  (let [from-choices (reduce (fn [acc [p lp]] (if (path-selected? s p) (+ acc lp) acc))
                              0.0 (::scores tr))]
-    (reduce (fn [acc [p sub]] (array/+ acc (gfi/-project (:gen-fn sub) sub (subselection-at s p))))
+    (reduce (fn [acc [p sub]] (+ acc (gfi/-project (:gen-fn sub) sub (subselection-at s p))))
             from-choices (::subtraces tr))))
 
 ;; ---------------------------------------------------------------------------

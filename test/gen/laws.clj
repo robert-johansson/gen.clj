@@ -14,10 +14,11 @@
    Models are [label gf args alt-args]: alt-args is a vector of other
    argument vectors, so that update and regenerate are also checked with
    changed arguments. (deflaws prefix models n) defines a defspec per law."
+  (:refer-clojure :exclude [+ -])
   (:require [clojure.test.check.clojure-test]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [gen.array :as array]
+            [gen.array :as array :refer [+ -]]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.gfi :as gfi]
@@ -216,10 +217,10 @@
             constrained (set (cm/addresses sigma))
             fresh-lp (lp t2 (remove #(or (was %) (constrained %)) (addrs t2)))
             {w3 :weight} (gfi/update t2 (:args tr) (unknown-diffs (:args tr)) disc (rng/key seed))]
-        (and (close? w (array/- (array/- (:score t2) (:score tr)) fresh-lp))
+        (and (close? w (- (- (:score t2) (:score tr)) fresh-lp))
              ;; the reverse weight is defined only inside the support (Def
              ;; 4.1.1): a move to density 0 has w = -Inf and no finite reverse
-             (or (not (in-support? t2)) (close? (array/+ w w3) (array/negate fresh-lp)))))
+             (or (not (in-support? t2)) (close? (+ w w3) (array/negate fresh-lp)))))
       true)))
 
 (defn regenerate-weight-is-the-retained-density-ratio [cases]
@@ -233,7 +234,7 @@
           now (set (addrs t2))
           ;; Eq 4.1, Alg 18: selected, fresh and removed choices cancel
           retained (remove selected (filter now (addrs tr)))]
-      (close? w (array/- (lp t2 retained) (lp tr retained))))))
+      (close? w (- (lp t2 retained) (lp tr retained))))))
 
 (defn regenerating-everything-has-weight-zero [cases]
   (prop/for-all [[[_ gf args] seed] cases]
@@ -245,7 +246,7 @@
     (let [tr (gfi/simulate gf args (rng/key seed))
           s (sel/from-paths (picked (addrs tr) picks))]
       (and (zero-weight? (gfi/project tr sel/none))
-           (close? (array/+ (gfi/project tr s) (gfi/project tr (sel/complement s))) (:score tr))))))
+           (close? (+ (gfi/project tr s) (gfi/project tr (sel/complement s))) (:score tr))))))
 
 (defn runs-are-pure-functions-of-the-key [cases]
   (prop/for-all [[[_ gf args] seed] cases]

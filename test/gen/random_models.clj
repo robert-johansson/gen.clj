@@ -18,8 +18,9 @@
                                  a categorical choice at [addr :i]
      [:select addr]              a categorical choice compared with = to pick a
                                  mean (a host predicate on the choice)"
+  (:refer-clojure :exclude [+ *])
   (:require [clojure.test.check.generators :as gen]
-            [gen.array :as array]
+            [gen.array :as array :refer [+ *]]
             [gen.array.protocols]
             [gen.combinators :as comb]
             [gen.dist :as d]
@@ -27,8 +28,8 @@
 
 ;; Parameters are transformed from a dependency's value into each family's
 ;; domain, so any value yields a valid distribution.
-(defn- positive [x] (array/+ 0.5 (array/softplus x)))
-(defn- probability [x] (array/+ 0.05 (array/* 0.9 (array/sigmoid x))))
+(defn- positive [x] (+ 0.5 (array/softplus x)))
+(defn- probability [x] (+ 0.05 (* 0.9 (array/sigmoid x))))
 
 (def ^:private families
   {:normal (fn [x] (d/normal x 1.0))
@@ -36,19 +37,19 @@
    :beta (fn [x] (d/beta (positive x) 2.0))
    :exponential (fn [x] (d/exponential (positive x)))
    :laplace (fn [x] (d/laplace x 0.7))
-   :uniform (fn [x] (d/uniform x (array/+ x (positive x))))
+   :uniform (fn [x] (d/uniform x (+ x (positive x))))
    :poisson (fn [x] (d/poisson (positive x)))
    :categorical (fn [_] (d/categorical [0.2 0.5 0.3]))
-   :mixture (fn [x] ((d/homogeneous-mixture d/normal) [0.4 0.6] (array/stack [x (array/+ x 2.0)] -1) [1.0 0.5]))
+   :mixture (fn [x] ((d/homogeneous-mixture d/normal) [0.4 0.6] (array/stack [x (+ x 2.0)] -1) [1.0 0.5]))
    ;; a vector site whose mean is a per-particle scalar plus a shared vector
-   :vector (fn [x] (d/normal (array/+ x (array/array [0.0 1.0 -1.0])) 1.0))})
+   :vector (fn [x] (d/normal (+ x (array/array [0.0 1.0 -1.0])) 1.0))})
 
 (def numeric-families (vec (keys families)))
 
 (def ^:private map-kernel (dyn/make-gen-fn (fn [trace _ _ x] (trace :v (d/normal x 1.0))) '([x])))
 
 (def ^:private walk
-  (dyn/make-gen-fn (fn [trace _ _ _t s] (trace :s (d/normal (array/* 0.9 s) 1.0))) '([t s])))
+  (dyn/make-gen-fn (fn [trace _ _ _t s] (trace :s (d/normal (* 0.9 s) 1.0))) '([t s])))
 
 (def ^:private switched
   "A Switch of a one-site model and a two-site model with a dependency."
@@ -77,7 +78,7 @@
                           (run-statements else trace splice env)))
               :splice (let [[spec] more] (splice addr (build spec)) env)
               :inline (let [[spec] st] (splice (build (second st))) env)
-              :map (let [[n] more] (assoc env addr (reduce array/+ 0.0 (splice addr (comb/map map-kernel) (vec (repeat n 0.5))))))
+              :map (let [[n] more] (assoc env addr (reduce + 0.0 (splice addr (comb/map map-kernel) (vec (repeat n 0.5))))))
               :unfold (let [[n] more] (splice addr (comb/unfold walk) n 0.0) env)
               :switch (let [i (trace [addr :i] (d/categorical [0.5 0.5]))]
                         (assoc env addr (splice [addr :s] switched i 0.5)))))

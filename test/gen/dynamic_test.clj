@@ -28,7 +28,7 @@
     (let [slope (trace :slope (d/normal 0 10))
           intercept (trace :intercept (d/normal 0 10))]
       (doseq [[i x] (map-indexed vector xs)]
-        (trace [:y i] (d/normal (array/+ (array/* slope x) intercept) 1)))
+        (trace [:y i] (d/normal (+ (* slope x) intercept) 1)))
       slope)))
 
 (def branching
@@ -47,8 +47,8 @@
 (def discrete
   (gen []
     (let [k (trace :k (d/categorical [0.2 0.5 0.3]))
-          n (trace :n (d/poisson (array/+ 1.0 k)))]
-      (trace :flip (d/bernoulli (array// 1.0 (array/+ 2.0 n)))))))
+          n (trace :n (d/poisson (+ 1.0 k)))]
+      (trace :flip (d/bernoulli (/ 1.0 (+ 2.0 n)))))))
 
 (def sub-x (gen [] (trace :y (d/normal 0 1))))
 
@@ -120,7 +120,7 @@
         sigma (cm/choicemap :switch false :b 2.0 :c 3)
         {t2 :trace w :weight disc :discard} (gfi/update tr sigma (rng/key 1))
         {t3 :trace w3 :weight disc3 :discard} (gfi/update t2 disc (rng/key 2))]
-    (is (close? w (array/- (:score t2) (:score tr))))
+    (is (close? w (- (:score t2) (:score tr))))
     (is (= (ts/host (cm/choicemap :switch true :a (tr :a))) (ts/host disc)))
     (is (= (:choices tr) (:choices t3)))
     (is (close? w3 (array/negate w)))
@@ -131,7 +131,7 @@
   (let [tr (first (filter #(true? (ts/host (% :s))) (map #(gfi/simulate kind-changing [] (rng/key %)) (range 50))))
         {t2 :trace w :weight disc :discard} (gfi/update tr (cm/choicemap :s false) (rng/key 1))]
     (is (= (ts/host (cm/choicemap :s true :x (tr :x))) (ts/host disc)))
-    (is (close? w (array/- (array/- (:score t2) (:score tr)) (gfi/project t2 (sel/select [:x :y])))))
+    (is (close? w (- (- (:score t2) (:score tr)) (gfi/project t2 (sel/select [:x :y])))))
     (is (= (:choices tr) (:choices (:trace (gfi/update t2 disc (rng/key 2))))))))
 
 (def inlined
@@ -167,7 +167,7 @@
         {t2 :trace w :weight disc :discard} (gfi/update tr (cm/choicemap :switch false) (rng/key 5))]
     (is (= #{[:switch] [:b] [:c]} (set (cm/addresses (:choices t2)))) "the other branch is sampled fresh")
     (is (= (ts/host (cm/choicemap :switch true :a (tr :a))) (ts/host disc)) "the old value and the removed choice are discarded")
-    (is (close? w (array/- (gfi/project t2 (sel/select :switch)) (:score tr))))
+    (is (close? w (- (gfi/project t2 (sel/select :switch)) (:score tr))))
     (is (= (:choices tr) (:choices (:trace (gfi/update t2 disc (rng/key 6))))) "and the update reverses")))
 
 (deftest splices-nest-choices
@@ -313,7 +313,7 @@
   (fn [state p dist k]
     (let [[v s] ((dyn/site-transitions :simulate) state p dist k)]
       (if (= p [:x])
-        [(array/* 2.0 v) (assoc-in s [:choices] (cm/set-choice (:choices s) p (array/* 2.0 v)))]
+        [(* 2.0 v) (assoc-in s [:choices] (cm/set-choice (:choices s) p (* 2.0 v)))]
         [v s]))))
 
 (deftest middleware-of-a-callee-spliced-without-an-address-applies-to-its-body
@@ -424,7 +424,7 @@
         tr (:trace (gfi/generate m [] (cm/choicemap :c true [:s :x] 0.5) (rng/key 1)))
         {t :trace w :weight disc :discard} (gfi/update tr (cm/choicemap :c false) (rng/key 2))]
     (is (not= 7.0 (t :s)) "the new distribution draws its own value")
-    (is (close? w (array/- (array/- (:score t) (:score tr)) (gfi/project t (sel/select :s)))))
+    (is (close? w (- (- (:score t) (:score tr)) (gfi/project t (sel/select :s)))))
     (is (= (cm/choicemap :c true [:s :x] 0.5) disc))
     (is (= (:choices tr) (:choices (:trace (gfi/update t disc (rng/key 3))))) "and the update reverses")))
 

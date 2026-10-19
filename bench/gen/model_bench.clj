@@ -4,8 +4,9 @@
    baseline the MLX backend must beat for small models (its eval floor is
    tens of µs).
    Run: clojure -M:bench -m gen.model-bench   (add :c2 to compare with C2)"
+  (:refer-clojure :exclude [+ *])
   (:require [criterium.core :as crit]
-            [gen.array :as array]
+            [gen.array :as array :refer [+ *]]
             [gen.batched :as b]
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
@@ -22,7 +23,7 @@
     (let [slope (trace :slope (d/normal 0 10))
           intercept (trace :intercept (d/normal 0 10))]
       (doseq [[i x] (map-indexed vector xs)]
-        (trace [:y i] (d/normal (array/+ (array/* slope x) intercept) 1)))
+        (trace [:y i] (d/normal (+ (* slope x) intercept) 1)))
       slope)))
 
 (def observation (gen [mu] (trace :x (d/normal mu 1))))
@@ -32,7 +33,7 @@
     (let [mu (trace :mu (d/normal 0 1))]
       (mapv #(splice [:obs %] observation mu) (range n)))))
 
-(def step (gen [t s] (let [x (trace :x (d/normal (array/* 0.9 s) 1))] (trace :y (d/normal x 0.5)) x)))
+(def step (gen [t s] (let [x (trace :x (d/normal (* 0.9 s) 1))] (trace :y (d/normal x 0.5)) x)))
 (def unfolded (comb/unfold step))
 
 (defn- us-per-call [f] (* 1e6 (first (:mean (crit/quick-benchmark* f {})))))

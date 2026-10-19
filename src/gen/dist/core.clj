@@ -9,7 +9,8 @@
    Shapes: (sample d key batch-shape) draws a value of the distribution's
    shape broadcast against batch-shape. [] is one draw; [N] is one draw per
    particle. log-prob broadcasts the same way."
-  (:require [gen.array :as array]
+  (:refer-clojure :exclude [-])
+  (:require [gen.array :as array :refer [-]]
             [gen.array.dtype :as dt]
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]
@@ -159,7 +160,7 @@
   [dist-name param-name ps]
   (when (array/concrete? ps)
     (let [ok? (and (array/all-true? (array/>= ps 0))
-                   (array/all-true? (array/<= (array/abs (array/- (array/sum ps {:axis -1}) 1.0)) 1e-6)))]
+                   (array/all-true? (array/<= (array/abs (- (array/sum ps {:axis -1}) 1.0)) 1e-6)))]
       (check ok? dist-name
              (str param-name " must be probabilities (non-negative, summing to 1)"
                   " — for log-probabilities or logits use categorical-logits")
@@ -271,12 +272,12 @@
     (if (cm/has-value? constraints)
       (let [v (doto (cm/get-value constraints) (->> (check-not-nan :update)) (->> (check-value-shape d)))
             lp (total (log-prob d v))]
-        {:trace (dist-trace d v lp) :weight (array/- lp (:score tr))
+        {:trace (dist-trace d v lp) :weight (- lp (:score tr))
          :retdiff diff/unknown-change :discard (:choices tr)})
       ;; the value is kept and rescored: the parameters may have changed
       (let [v (doto (:retval tr) (->> (check-value-shape d)))
             lp (total (log-prob d v))]
-        {:trace (dist-trace d v lp) :weight (array/- lp (:score tr))
+        {:trace (dist-trace d v lp) :weight (- lp (:score tr))
          :retdiff diff/no-change :discard cm/EMPTY})))
 
   (-regenerate [d tr _ _ selection key]
@@ -284,7 +285,7 @@
       {:trace (simulate* d key) :weight 0.0 :retdiff diff/unknown-change}
       (let [v (doto (:retval tr) (->> (check-value-shape d)))
             lp (total (log-prob d v))]
-        {:trace (dist-trace d v lp) :weight (array/- lp (:score tr)) :retdiff diff/no-change})))
+        {:trace (dist-trace d v lp) :weight (- lp (:score tr)) :retdiff diff/no-change})))
 
   (-assess [d _ choices]
     (when-not (cm/has-value? choices)

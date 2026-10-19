@@ -1,10 +1,11 @@
 (ns gen.linalg-test
+  (:refer-clojure :exclude [+ * >=])
   (:require [clojure.test :refer [deftest is testing]]
             [gen.test-support :as ts]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [gen.array :as array]
+            [gen.array :as array :refer [+ * >=]]
             [gen.array.linalg :as la]
             [gen.random :as rng]))
 
@@ -12,9 +13,9 @@
   "A random symmetric positive-definite n×n matrix (batched by batch-shape)."
   [key batch-shape n]
   (let [m (rng/normal key (into (vec batch-shape) [n n]))]
-    (array/+ (array/matmul m (array/transpose m (into (vec (range (count batch-shape)))
-                                                      [(inc (count batch-shape)) (count batch-shape)])))
-             (array/* n (array/eye n)))))
+    (+ (array/matmul m (array/transpose m (into (vec (range (count batch-shape)))
+                                                [(inc (count batch-shape)) (count batch-shape)])))
+       (* n (array/eye n)))))
 
 (def gen-case (gen/tuple gen/nat (gen/choose 1 6)))
 
@@ -23,7 +24,7 @@
     (let [m (spd (rng/key seed) [] n)
           l (la/cholesky m)]
       (and (array/allclose? (array/matmul l (array/transpose l)) m {:rtol (ts/tol 1e-10) :atol (ts/tol 1e-10)})
-           (array/allclose? l (array/* l (array/>= (array/expand-dims (array/arange n) -1) (array/arange n))))))))
+           (array/allclose? l (* l (>= (array/expand-dims (array/arange n) -1) (array/arange n))))))))
 
 (defspec solves-solve 100
   (prop/for-all [[seed n] gen-case]

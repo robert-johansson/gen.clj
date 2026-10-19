@@ -2,10 +2,10 @@
   "HMC, MALA, MAP optimization and elliptical slice sampling on Gaussian
    targets with exact posteriors, including an array-valued latent behind a
    splice; and involutive MH with an AD Jacobian (thesis Eq 3.15)."
-  (:refer-clojure :exclude [+ - * /])
+  (:refer-clojure :exclude [+ - * / >])
   (:require [clojure.test :refer [deftest is testing]]
             [gen.test-support :as ts]
-            [gen.array :as array :refer [+ - * /]]
+            [gen.array :as array :refer [+ - * / >]]
             [gen.array.linalg :as la]
             [gen.choicemap :as cm]
             [gen.dist :as d]
@@ -39,7 +39,7 @@
 (def flat-vector-model
   (gen [] (let [z (trace :z (d/mvnormal [0.0 0.0] prior-cov))] (trace :y (d/mvnormal z noise-cov)))))
 
-(def posterior-cov (la/inv (array/+ (la/inv prior-cov) (la/inv noise-cov))))
+(def posterior-cov (la/inv (+ (la/inv prior-cov) (la/inv noise-cov))))
 (def posterior-mean (array/matmul posterior-cov (array/matmul (la/inv noise-cov) y2)))
 
 (defn- start-at [model choices] (:trace (gfi/generate model [] choices (rng/key 0))))
@@ -57,7 +57,7 @@
   (let [n 4000
         [k1 k2] (rng/split (rng/key 21))
         starts (map #(start-at scalar (cm/choicemap :x % :y 1.3))
-                    (array/->clj (array/+ 0.65 (array/* (Math/sqrt 0.5) (rng/normal k1 [n])))))]
+                    (array/->clj (+ 0.65 (* (Math/sqrt 0.5) (rng/normal k1 [n])))))]
     (matches? (map #((step %1 %2) :x) starts (rng/split k2 n)) 0.65 0.5)))
 
 (defn- scalar-converges? [step]
@@ -155,10 +155,10 @@
   [tr fwd _ _]
   (let [x (tr :x)
         u (cm/get-choice fwd :u)
-        h (fn [v] (let [x (array/take v 0) u (array/take v 1)] (array/stack [(array/* x (array/exp u)) (array/negate u)])))
+        h (fn [v] (let [x (array/take v 0) u (array/take v 1)] (array/stack [(* x (array/exp u)) (array/negate u)])))
         {t :trace w :weight} (gfi/update tr (cm/choicemap :x (* x (array/exp u))))]
     {:trace t :bwd-choices (cm/choicemap :u (- u))
-     :weight (array/+ w (grad/log-abs-det-jacobian h (array/stack [x u])))}))
+     :weight (+ w (grad/log-abs-det-jacobian h (array/stack [x u])))}))
 
 (deftest ^:slow a-volume-changing-involution-targets-the-posterior
   (let [step (fn [tr key] (:trace (mh/involutive-mh tr log-scale [] scale-move key)))
@@ -183,7 +183,7 @@
    N(y; 0, √1.5)."
   (gen []
     (let [mean (if (trace :two? (d/bernoulli 0.5))
-                 (array/* 0.5 (array/+ (trace :m1 (d/normal 0 1)) (trace :m2 (d/normal 0 1))))
+                 (* 0.5 (+ (trace :m1 (d/normal 0 1)) (trace :m2 (d/normal 0 1))))
                  (trace :m (d/normal 0 1)))]
       (trace :y (d/normal mean 1)))))
 
@@ -197,15 +197,15 @@
   [tr fwd _ _]
   (if (tr :two?)
     (let [m1 (tr :m1) m2 (tr :m2)
-          h (fn [v] (let [a (array/take v 0) b (array/take v 1)] (array/stack [(array/* 0.5 (array/+ a b)) (array/* 0.5 (array/- b a))])))
+          h (fn [v] (let [a (array/take v 0) b (array/take v 1)] (array/stack [(* 0.5 (+ a b)) (* 0.5 (- b a))])))
           {t :trace w :weight} (gfi/update tr (cm/choicemap :two? false :m (* 0.5 (+ m1 m2))))]
       {:trace t :bwd-choices (cm/choicemap :u (* 0.5 (- m2 m1)))
-       :weight (array/+ w (grad/log-abs-det-jacobian h (array/stack [m1 m2])))})
+       :weight (+ w (grad/log-abs-det-jacobian h (array/stack [m1 m2])))})
     (let [m (tr :m) u (cm/get-choice fwd :u)
-          h (fn [v] (let [a (array/take v 0) b (array/take v 1)] (array/stack [(array/- a b) (array/+ a b)])))
+          h (fn [v] (let [a (array/take v 0) b (array/take v 1)] (array/stack [(- a b) (+ a b)])))
           {t :trace w :weight} (gfi/update tr (cm/choicemap :two? true :m1 (- m u) :m2 (+ m u)))]
       {:trace t :bwd-choices cm/EMPTY
-       :weight (array/+ w (grad/log-abs-det-jacobian h (array/stack [m u])))})))
+       :weight (+ w (grad/log-abs-det-jacobian h (array/stack [m u])))})))
 
 (deftest ^:slow a-split-merge-move-targets-the-posterior
   (let [y 1.7
@@ -236,7 +236,7 @@
   ;; plain kernel does
   (let [obs (cm/choicemap :y 1.3)
         branching (gen [] (let [x (trace :x (d/normal 0 1))]
-                            (trace :y (d/normal (if (array/truthy? (array/> x 0)) x (array/negate x)) 1))))]
+                            (trace :y (d/normal (if (array/truthy? (> x 0)) x (array/negate x)) 1))))]
     (doseq [[label gf observations selection] [["scalar" scalar obs (sel/select :x)]
                                                ["an array-valued latent in a splice" vector-model (cm/choicemap :y y2)
                                                 (sel/select [:latent :z])]

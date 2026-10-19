@@ -23,7 +23,7 @@
 
 (def kernel
   (gen [t prev]
-    (let [x (trace :x (d/normal (array/* a-coef prev) q))]
+    (let [x (trace :x (d/normal (* a-coef prev) q))]
       (trace :y (d/normal x r))
       x)))
 

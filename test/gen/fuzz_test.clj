@@ -2,11 +2,12 @@
   "The GFI laws, and batched path equivalence, over random generative
    functions (gen.random-models): random families, dependencies, branches,
    splices, shared-namespace splices, Map and Unfold."
+  (:refer-clojure :exclude [-])
   (:require [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
             [gen.batched :as b]
-            [gen.array :as array]
+            [gen.array :as array :refer [-]]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.selection :as sel]
@@ -52,6 +53,6 @@
                                    fresh-lp (if (seq fresh) (gfi/project new (sel/from-paths fresh)) 0.0)
                                    expected-d (sel/get-selected (:choices old)
                                                                 (sel/from-paths (filter #(or (constrained %) (not (now %))) was)))]
-                               (and (laws/close? w (array/- (array/- (:score new) (:score old)) fresh-lp))
+                               (and (laws/close? w (- (- (:score new) (:score old)) fresh-lp))
                                     (= expected-d d))))
                            olds (b/traces ps') (array/->clj ws) ds))))))))

@@ -18,8 +18,8 @@
    floor-divide, …) and stop-gradient give untracked values. cumprod's VJP
    divides by the input (NaN at zeros). First order only: differentiating
    inside a differentiated function is an error (bean genclj-hors)."
-  (:refer-clojure :exclude [+ - * / < > ==])
-  (:require [gen.array :as array :refer [+ - * / < > ==]]
+  (:refer-clojure :exclude [+ - * / < > <= >= ==])
+  (:require [gen.array :as array :refer [+ - * / < > <= >= ==]]
             [gen.array.dtype :as dt]
             [gen.array.protocols :as p]))
 
@@ -105,7 +105,7 @@
   (let [n (peek (array/shape x))
         i (array/reshape (array/arange n) [-1 1])
         j (array/reshape (array/arange n) [1 -1])]
-    (array/where (if upper? (array/<= i j) (array/>= i j)) x 0.0)))
+    (array/where (if upper? (<= i j) (>= i j)) x 0.0)))
 
 (defn- product-of-others
   "For each element of x, the product of the other elements in its

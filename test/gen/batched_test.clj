@@ -3,12 +3,13 @@
    is exactly the scalar trace of its choices, batched weights are the scalar
    weights particle by particle, the per-particle fallback carries on, and
    batched inference reaches the exact answers."
+  (:refer-clojure :exclude [+ - *])
   (:require [gen.test-support :as ts]
             [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [gen.array :as array]
+            [gen.array :as array :refer [+ - *]]
             [gen.batched :as b]
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
@@ -33,7 +34,7 @@
     (let [slope (trace :slope (d/normal 0 10))
           intercept (trace :intercept (d/normal 0 10))]
       (doseq [[i x] (map-indexed vector xs)]
-        (trace [:y i] (d/normal (array/+ (array/* slope x) intercept) 1)))
+        (trace [:y i] (d/normal (+ (* slope x) intercept) 1)))
       slope)))
 
 (def observation (gen [mu] (trace :x (d/normal mu 1))))
@@ -45,7 +46,7 @@
 
 (def step
   (gen [t state]
-    (let [s (trace :s (d/normal (array/* 0.8 state) 1))]
+    (let [s (trace :s (d/normal (* 0.8 state) 1))]
       (trace :obs (d/normal s 0.5))
       s)))
 
@@ -121,7 +122,7 @@
                      (let [retained (sel/from-paths (remove (set (cm/addresses (sel/get-selected (:choices old) s)))
                                                             (cm/addresses (:choices new))))]
                        (and (consistent? new)
-                            (close? w (array/- (gfi/project new retained) (gfi/project old retained))))))
+                            (close? w (- (gfi/project new retained) (gfi/project old retained))))))
                    (b/traces ps) (b/traces ps') (array/->clj ws))))))
 
 (deftest batched-statistics
@@ -260,7 +261,7 @@
   ;; review 2: an [N] per-particle parameter met a [3] value element by element
   (let [ys (array/array [0.5 1.0 1.5])
         ;; three i.i.d. observations: vector parameters (Gen.jl's broadcasted_normal)
-        m (gen [] (let [mu (trace :mu (d/normal 0 1))] (trace :ys (d/normal (array/+ mu (array/zeros [3])) 1))))]
+        m (gen [] (let [mu (trace :mu (d/normal 0 1))] (trace :ys (d/normal (+ mu (array/zeros [3])) 1))))]
     (doseq [n [3 4]]
       (let [{ps :particles ws :weights} (b/generate m [] (cm/choicemap :ys ys) n (rng/key 32))]
         (is (b/batched? ps))
@@ -272,7 +273,7 @@
         (is (batched-matches-scalar? v [] (cm/choicemap :z (array/array [0.1 0.2 0.3])) 3 (rng/key 34)))))
     (testing "a per-particle scalar meets a shared vector in model arithmetic"
       (let [m (gen [] (let [x (trace :x (d/normal 0 1))]
-                        (trace :y (d/normal (array/sum (array/* x (array/array [1.0 2.0 3.0]))) 1))))]
+                        (trace :y (d/normal (array/sum (* x (array/array [1.0 2.0 3.0]))) 1))))]
         (is (batched-matches-scalar? m [] (cm/choicemap :y 0.7) 3 (rng/key 35)))
         (is (every? true? (map (fn [tr] (close? (:score tr) (:weight (gfi/assess m [] (:choices tr)))))
                                (b/traces (:particles (b/generate m [] (cm/choicemap :y 0.7) 3 (rng/key 35)))))))))))

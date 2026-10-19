@@ -31,7 +31,7 @@
   (array/with-backend reference
     (let [{w :weight rv :retval} (gfi/assess gf args (reference-choices choices))]
       (+ (double (array/item w))
-         (if retgrad (reduce + (map #(double (array/item (array/sum (array/* %1 %2)))) (array/tree-leaves retgrad) (array/tree-leaves rv))) 0.0)))))
+         (if retgrad (reduce + (map #(double (array/item (array/sum (* %1 %2)))) (array/tree-leaves retgrad) (array/tree-leaves rv))) 0.0)))))
 
 (defn- grad-close?
   "A gradient (of the backend under test) and a float64 finite difference."
@@ -63,7 +63,7 @@
     (let [slope (trace :slope (d/normal 0 10))
           intercept (trace :intercept (d/normal 0 10))]
       (doseq [[i x] (map-indexed vector xs)]
-        (trace [:y i] (d/normal (array/+ (array/* slope x) intercept) 1)))
+        (trace [:y i] (d/normal (+ (* slope x) intercept) 1)))
       slope)))
 
 (def observation (gen [mu] (trace :x (d/normal mu 1))))
@@ -75,7 +75,7 @@
 
 (def step
   (gen [t state]
-    (let [s (trace :s (d/normal (array/* 0.8 state) 1))]
+    (let [s (trace :s (d/normal (* 0.8 state) 1))]
       (trace :obs (d/normal s 0.5))
       s)))
 
@@ -105,7 +105,7 @@
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not a tree of floats"
                         (g/choice-gradients (sim hierarchical [2] 9) (sel/select :mu) nil {:argnums [0]})))
   (testing "host math on an argument is fine when it is not differentiated"
-    (let [m (gen [n] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (array/* x (clojure.core/* 2.0 n)) 1))))
+    (let [m (gen [n] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (* x (clojure.core/* 2.0 n)) 1))))
           tr (sim m [1.5] 10)]
       (is (map? (g/choice-gradients tr (sel/select :x)))))))
 
@@ -114,10 +114,10 @@
                         (g/choice-gradients (sim (gen [] (trace :b (d/bernoulli 0.5))) [] 1) (sel/select :b)))))
 
 (deftest the-jacobian-log-determinant
-  (is (< (ts/abs (- (g/log-abs-det-jacobian #(array/* % (array/array [2.0 3.0])) (array/array [1.0 1.0])) (Math/log 6.0))) (ts/tol 1e-12)))
+  (is (< (ts/abs (- (g/log-abs-det-jacobian #(* % (array/array [2.0 3.0])) (array/array [1.0 1.0])) (Math/log 6.0))) (ts/tol 1e-12)))
   (testing "a nonlinear map: (x, u) ↦ (x·e^u, -u) has |det J| = e^u"
     (is (< (ts/abs (- (g/log-abs-det-jacobian (fn [v] (let [x (array/take v 0) u (array/take v 1)]
-                                                          (array/stack [(array/* x (array/exp u)) (array/negate u)])))
+                                                          (array/stack [(* x (array/exp u)) (array/negate u)])))
                                                 (array/array [1.5 0.3]))
                         0.3))
            (ts/tol 1e-12)))))
@@ -130,7 +130,7 @@
   "y_i ~ N(w·x_i + b, 1), with trainable w and b."
   (gen [xs]
     (doseq [[i x] (map-indexed vector xs)]
-      (trace [:y i] (d/normal (array/+ (array/* (param :w) x) (param :b)) 1)))))
+      (trace [:y i] (d/normal (+ (* (param :w) x) (param :b)) 1)))))
 
 (def xs [-1.0 0.0 1.0 2.0])
 (def ys [-1.1 0.9 3.2 4.8])
