@@ -26,7 +26,10 @@ layer: arrays with reverse-mode AD, the data algebra, the GFI and dynamic
 language, the distributions, Map/Unfold/Switch, batched execution and the
 inference library. It is checked by the law suite (audited against the
 thesis, and fuzzed over random programs), by exact-answer statistical tests
-and by reference values. Benchmarks are in `docs/benchmarks.md`.
+and by reference values. Three code reviews and four black-box acceptance
+passes found the remaining bugs, nearly all in batched execution, and they
+are fixed (`docs/research/acceptance-2026-10-19.md`). Benchmarks are in
+`docs/benchmarks.md`.
 
 Only the beautiful core is ported first. Everything else in GenMLX that *could*
 be ported is tracked as a deferred bean with a note on how to port it cleanly
