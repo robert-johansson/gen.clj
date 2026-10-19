@@ -1,4 +1,4 @@
-# Benchmarks (JVM backend)
+# Benchmarks
 
 Measured 2026-10-18 on an Apple M4 (32 GB), Oracle GraalVM 25.0.4, with
 criterium's quick-benchmark (mean time per call). Reproduce with
@@ -74,3 +74,52 @@ gradient).
 ## Known hotspots (beans)
 
 - **Choice gradients cost about 6× an assess** (tape allocation per op).
+
+## Against GenMLX, same hardware (2026-10-19, bean genclj-ls29)
+
+GenMLX's `bench/cost_per_particle.cljs` and gen.clj's port of it,
+`bench/gen/genmlx_bench.clj`, both on the M4:
+- GenMLX: nbb on Bun, MLX through mlx-node, Metal.
+- gen.clj: Oracle GraalVM 25.
+
+The model is a normal-normal: `mu ~ N(0, 10)` and five observations
+`y_i ~ N(mu, 1)`. Each point is a median after warm-up and forces its
+result. Reproduce with:
+- `bun run --bun nbb bench/cost_per_particle.cljs` in `~/code/genmlx`;
+- `clojure [-J-Dgen.backend=mlx] [-J-Dgen.bench.spot-checks=0] -M:bench -m gen.genmlx-bench`.
+
+**Per particle (or per step), the scalar paths:**
+
+| | GenMLX (Metal) | gen.clj, MLX on Metal | gen.clj, JVM |
+|---|---|---|---|
+| generate, one particle at a time (N = 1000) | 0.93 ms | 0.46 ms | 0.020 ms |
+| importance sampling (N = 1000) | 1.85 ms | 0.49 ms | 0.010 ms |
+| MH, one step | 4.2 ms | 1.1 ms | 0.014 ms |
+| particle filter, one particle-step (N = 500) | 1.76 ms | 0.28 ms | 0.007 ms |
+
+**Total, the batched paths (N = 3000):**
+
+| | GenMLX (Metal) | gen.clj, Metal, spot checks off | gen.clj, Metal, spot checks on | gen.clj, JVM (spot checks on) |
+|---|---|---|---|---|
+| generate | 1.4 ms | 0.8 ms | 8.3 ms | 1.2 ms |
+| importance sampling | 1.4 ms | 0.7 ms | 5.7 ms | 0.9 ms |
+| particle filter, 5 steps | 9.2 ms | 3.8 ms | 27 ms | 2.4 ms |
+| generate, N = 10,000 | — | 1.1 ms | 6.2 ms | 1.8 ms |
+
+How to read these:
+- **Scalar paths.** gen.clj on MLX is 2–6× faster than GenMLX through the
+  same library. The JVM backend is 50–300× faster again, at nanoseconds per
+  op where MLX evaluates for microseconds. Scalar models belong on the JVM
+  backend.
+- **Batched paths.** gen.clj on Metal is about twice as fast as GenMLX
+  without spot checks. With them, each batched operation also re-runs 8
+  particles through the scalar handler. That costs about 0.5 ms each on
+  MLX, so 4–5 ms per operation, which dominates at these sizes (on the JVM
+  it is 0.3 ms). Running the spot checks on the JVM backend is bean
+  genclj-w5y0.
+- **Small models.** At these sizes the JVM backend's batched path matches
+  Metal's. The GPU earns its place on larger arrays and models.
+- **The first MLX measurement** found batched runs falling back to one
+  particle at a time on Metal: the spot check compared values in float64,
+  which Metal lacks. It now compares on the host, at the precision of the
+  narrower float.

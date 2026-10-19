@@ -194,14 +194,36 @@
           (>= m n) (range n)
           :else (map #(quot (* % n) m) (range m)))))
 
+(defn- tolerance-of
+  "The relative tolerance for comparing a value of x's dtype: its float
+   precision (a scalar run of host parameters computes in float64 on the
+   host, a batched run in the backend's float)."
+  [x]
+  (case (a/dtype x) (:float16 :bfloat16) 1e-2 :float32 1e-5 1e-8))
+
+(defn- close-host-values?
+  "Are the host values u and v (numbers, booleans, nested vectors) equal
+   within rtol (and as much absolutely), NaN equal to NaN?"
+  [u v rtol]
+  (cond (and (sequential? u) (sequential? v))
+        (and (= (count u) (count v)) (every? true? (map #(close-host-values? %1 %2 rtol) u v)))
+        (and (number? u) (number? v))
+        (let [u (double u) v (double v)]
+          (or (== u v)
+              (and (Double/isNaN u) (Double/isNaN v))
+              (<= (Math/abs (- u v)) (* rtol (max 1.0 (Math/abs u) (Math/abs v))))))
+        :else (= u v)))
+
 (defn- same-value?
   "Do a scalar run's value x and a batched run's particle value y agree?
-   Only arrays are compared."
+   Only arrays are compared, on the host (no dtype need exist on the
+   backend: Metal has no float64), within the precision of the narrower
+   float."
   [x y]
   (or (not (a/array? x))
       (and (a/array? y)
            (= (a/shape x) (a/shape y))
-           (a/allclose? (a/astype x :float64) (a/astype y :float64) {:rtol 1e-8 :atol 1e-8 :equal-nan? true}))))
+           (close-host-values? (a/->clj x) (a/->clj y) (max (tolerance-of x) (tolerance-of y))))))
 
 (defn- spot-check!
   "Throw unless the batched trace t of gf on args agrees with the scalar

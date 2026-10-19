@@ -358,7 +358,12 @@
         r (binding [b/*spot-checks* 0]
             (imp/importance-sampling gf args obs 200 {:key (rng/key 60) :batched? true}))]
     (and (not (b/batched? (:particles r)))
-         (= (:log-ml-estimate s) (:log-ml-estimate r)))))
+         ;; exactly, but for float32 storage: a scalar run of host parameters
+         ;; computes on the host in float64, the fallback stores its weights
+         ;; as an array of the backend's float
+         (if (ts/f32?)
+           (ts/close? (:log-ml-estimate s) (:log-ml-estimate r))
+           (= (:log-ml-estimate s) (:log-ml-estimate r))))))
 
 (deftest clojure-core-tests-in-gen-bodies-branch-per-particle
   ;; second acceptance test B1: these test truthiness inside clojure.core,
