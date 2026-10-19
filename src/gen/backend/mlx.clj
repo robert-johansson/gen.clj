@@ -1210,7 +1210,8 @@
   (let [run (fn [^longs ins]
               (let [outs (try (binding [*tracing-compile* true] (f (mapv #(wrap b %) ins)))
                               (catch clojure.lang.ExceptionInfo e
-                                (if (re-find #"function transformations" (str (ex-message e)))
+                                ;; MLX's words for it: Metal's and the CPU's, then CUDA's
+                                (if (re-find #"function transformations|If you are compiling a function" (str (ex-message e)))
                                   (throw (ex-info (str "compile: the function reads an array's value on the host"
                                                        " (truthy?, item, ->clj), which a compiled function cannot:"
                                                        " branch with where, or do not compile it")
