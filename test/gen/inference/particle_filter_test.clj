@@ -166,7 +166,21 @@
     (is (unbiased-resampling? state {:priority (fn [lw] (map #(* 0.5 %) lw))}) "tempered priorities")
     (is (unbiased-resampling? state {:priority (fn [lw] (map (constantly 0.0) lw))}) "uniform priorities")
     (is (unbiased-resampling? state {:n 50}) "more particles")
-    (is (unbiased-resampling? state {:n 12 :method :stratified}) "fewer, stratified"))
+    (is (unbiased-resampling? state {:n 12 :method :stratified}) "fewer, stratified")
+    (is (unbiased-resampling? state {:n 12 :method :optimal}) "fewer, optimal"))
+  (testing "optimal resampling keeps each particle at most once"
+    (let [state (run-filter 30 (rng/key 10))]
+      (doseq [n [1 5 12 29]]
+        (let [parents (:parents (pf/resample state {:n n :method :optimal :key (rng/key 16)}))]
+          (is (= n (count parents) (count (distinct parents))) (str n))))
+      (is (= (range 30) (sort (:parents (pf/resample state {:method :optimal :key (rng/key 16)})))) "all of them at the same size")
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"cannot add" (pf/resample state {:n 31 :method :optimal}))))
+    (testing "the threshold: W = [0.1 0.2 0.7] to two keeps 0.7 and draws one of the others with weight 1/c = 0.3"
+      (let [state {:traces [:a :b :c] :log-weights (mapv #(Math/log %) [0.1 0.2 0.7]) :log-ml 0.0}
+            r (pf/resample state {:n 2 :method :optimal :key (rng/key 17)})]
+        (is (= :c (first (:traces r))))
+        (is (every? true? (map ts/close? [(Math/log 1.4) (Math/log 0.6)] (:log-weights r))) (str (:log-weights r)))
+        (is (ts/close? (pf/log-ml-estimate state) (pf/log-ml-estimate r))))))
   (testing "plain resampling leaves equal weights, as before"
     (is (every? zero? (:log-weights (pf/resample (run-filter 30 (rng/key 10)) {:key (rng/key 12)})))))
   (testing "resize"
@@ -187,3 +201,147 @@
     (is (ts/close? 2.5 (pf/mean state f)))
     (is (ts/close? 0.75 (pf/variance state f)) "0.25·1.5² + 0.75·0.5²")
     (is (= {1.0 0.25 3.0 0.75} (update-vals (pf/proportions state f) #(/ (Math/round (* % 100.0)) 100.0))))))
+
+;; ---------------------------------------------------------------------------
+;; GenParticleFilters: stratification, move-reweight, replicate, coalesce,
+;; introduce
+;; ---------------------------------------------------------------------------
+
+(defn- lml-ratio [state] (Math/exp (- (pf/log-ml-estimate state) (exact-lml))))
+
+(defn- unbiased-runs?
+  "Law 20 after f: over runs filters of 20 particles, the mean of
+   exp(estimate - exact) is 1 within five standard errors."
+  [f seed]
+  (let [runs 400
+        ratios (map #(let [[k1 k2] (rng/split %)] (lml-ratio (f (run-filter 20 k1) k2)))
+                    (rng/split (rng/key seed) runs))
+        mean (/ (reduce + ratios) runs)
+        sd (Math/sqrt (/ (reduce + (map #(* (- % mean) (- % mean)) ratios)) (dec runs)))]
+    (< (ts/abs (- mean 1.0)) (* 5 (/ sd (Math/sqrt runs))))))
+
+(def last-x [(dec (count ys)) :x])
+
+(def random-walk
+  "A move of the last state by a symmetric random walk."
+  (gen [tr] (trace last-x (d/normal (tr last-x) 0.5))))
+
+(def wide-walk (gen [tr] (trace last-x (d/normal (tr last-x) 0.8))))
+
+(deftest move-reweight-adds-the-moves-weights
+  (let [state (run-filter 30 (rng/key 40))
+        moved (pf/move-reweight state (pf/reweighting (sel/select last-x)) (rng/key 41))]
+    (testing "regenerating: the weight is regenerate's"
+      (is (every? true? (map (fn [tr w w' key]
+                               (ts/close? (- w' w) (:weight (gfi/regenerate tr (sel/select last-x) key)) {:atol (ts/tol 1e-9)}))
+                             (pf/traces state) (:log-weights state) (:log-weights moved) (rng/split (rng/key 41) 30))))
+      (is (some true? (map #(not= (% last-x) (%2 last-x)) (pf/traces state) (pf/traces moved)))))
+    (testing "a symmetric proposal: the weight is the model's ratio"
+      (let [moved (pf/move-reweight state (pf/reweighting random-walk []) (rng/key 42))]
+        (is (every? true? (map (fn [tr tr' w w'] (ts/close? (- w' w) (- (:score tr') (:score tr)) {:atol (ts/tol 1e-9)}))
+                               (pf/traces state) (pf/traces moved) (:log-weights state) (:log-weights moved))))))
+    (testing "a separate backward proposal scores the way back"
+      (let [moved (pf/move-reweight state (pf/reweighting random-walk [] {:backward wide-walk :backward-args []}) (rng/key 42))
+            lp (fn [x mu sd] (ts/number (dc/log-prob (d/normal mu sd) x)))]
+        (is (every? true? (map (fn [tr tr' w w']
+                                 (ts/close? (- w' w) (+ (- (:score tr') (:score tr))
+                                                    (- (lp (tr' last-x) (tr last-x) 0.5))
+                                                    (lp (tr last-x) (tr' last-x) 0.8))
+                                            {:atol (ts/tol 1e-9)}))
+                               (pf/traces state) (pf/traces moved) (:log-weights state) (:log-weights moved))))))))
+
+(deftest ^:slow ^:heavy move-reweight-keeps-the-estimate-unbiased
+  (is (unbiased-runs? #(pf/move-reweight %1 (pf/reweighting (sel/select last-x)) %2) 43) "regenerating")
+  (is (unbiased-runs? #(pf/move-reweight %1 (pf/reweighting random-walk []) %2) 44) "a random walk")
+  (is (unbiased-runs? #(pf/move-reweight %1 (pf/reweighting random-walk [] {:backward wide-walk :backward-args []}) %2) 45)
+      "a separate backward proposal"))
+
+(deftest replicate-and-dereplicate
+  (let [state (pf/initialize model [1 0.0] (observation 0) 4 {:key (rng/key 50)})]
+    (doseq [[layout parents] [[:contiguous [0 0 0 1 1 1 2 2 2 3 3 3]] [:interleaved [0 1 2 3 0 1 2 3 0 1 2 3]]]]
+      (let [replicated (pf/replicate state 3 {:layout layout})]
+        (is (= parents (:parents replicated)) (str layout))
+        (is (ts/close? (pf/log-ml-estimate state) (pf/log-ml-estimate replicated)))
+        (let [back (pf/dereplicate replicated 3 {:layout layout})]
+          (is (= (:traces state) (:traces back)) "keepfirst undoes replicate")
+          (is (= (:log-weights state) (:log-weights back))))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not groups of 3" (pf/dereplicate state 3))))
+  (testing "a batched state stays batched"
+    (let [state (pf/initialize model [1 0.0] (observation 0) 4 {:batched? true :key (rng/key 50)})
+          replicated (pf/replicate state 2 {:layout :interleaved})]
+      (is (contains? replicated :particles))
+      (is (= (concat (pf/traces state) (pf/traces state)) (pf/traces replicated)))
+      (is (= (pf/traces state) (pf/traces (pf/dereplicate replicated 2 {:layout :interleaved}))))
+      (is (= 8 (count (pf/traces (pf/move-reweight replicated (pf/reweighting (sel/select [0 :x])) (rng/key 51)))))))))
+
+(deftest dereplicating-by-sampling
+  ;; replicas moved apart, then one of each group drawn: the group's mean
+  ;; weight keeps the estimate exactly; draws follow the weights in a group
+  (let [state (-> (pf/initialize model [1 0.0] (observation 0) 4 {:key (rng/key 51)})
+                  (pf/replicate 3)
+                  (pf/move-reweight (pf/reweighting (sel/select [0 :x])) (rng/key 52)))
+        lw (:log-weights state)]
+    (is (ts/close? (pf/log-ml-estimate state)
+                   (pf/log-ml-estimate (pf/dereplicate state 3 {:method :sample :key (rng/key 53)}))
+                   {:atol (ts/tol 1e-12)}))
+    (let [n 4000
+          picks (map #(first (:parents (pf/dereplicate state 3 {:method :sample :key %}))) (rng/split (rng/key 54) n))
+          p (mapv #(Math/exp %) (:log-weights (gen.inference.weights/normalize (subvec lw 0 3))))]
+      (doseq [i (range 3)]
+        (let [freq (/ (count (filter #{i} picks)) (double n))]
+          (is (< (ts/abs (- freq (p i))) (* 5 (Math/sqrt (/ (* (p i) (- 1 (p i))) n)))) (str i ": " freq " against " (p i))))))))
+
+(deftest coalescing
+  (let [state (pf/initialize model [1 0.0] (observation 0) 12 {:key (rng/key 55)})
+        resampled (pf/resample state {:priority (fn [lw] (map #(* 0.5 %) lw)) :key (rng/key 56)})
+        coalesced (pf/coalesce resampled)
+        distinct-parents (distinct (:parents resampled))]
+    (is (= (count distinct-parents) (count (pf/traces coalesced))) "one particle per distinct trace")
+    (is (= (set (map #(% [0 :x]) (pf/traces resampled))) (set (map #(% [0 :x]) (pf/traces coalesced)))))
+    (is (ts/close? (pf/log-ml-estimate resampled) (pf/log-ml-estimate coalesced) {:atol (ts/tol 1e-12)}))
+    (testing "the weights add up within a group"
+      (let [x (fn [tr] (tr [0 :x]))
+            total (fn [st v] (reduce + (keep (fn [[tr w]] (when (= v (x tr)) (Math/exp w)))
+                                              (map vector (pf/traces st) (:log-weights st)))))
+            ratio (/ (count (pf/traces coalesced)) 12.0)]
+        (doseq [v (map x (pf/traces coalesced))]
+          (is (ts/close? (* ratio (total resampled v)) (total coalesced v))))))
+    (testing ":by"
+      (is (= 1 (count (pf/traces (pf/coalesce state {:by (constantly :same)}))))))))
+
+(deftest introducing-particles
+  (let [state (pf/resample (pf/initialize model [1 0.0] (observation 0) 10 {:key (rng/key 57)}) {:key (rng/key 58)})
+        grown (pf/introduce state (observation 0) 5 {:key (rng/key 59)})]
+    (is (= 15 (count (pf/traces grown))))
+    (is (zero? (:log-ml grown)))
+    (is (every? #(ts/close? (:log-ml state) %) (take 10 (:log-weights grown))) "the old particles carry the estimate")
+    (is (= (:log-weights (pf/initialize model [1 0.0] (observation 0) 5 {:key (rng/key 59)})) (drop 10 (:log-weights grown))))
+    (testing "with a proposal"
+      (let [grown (pf/introduce state (observation 0) 5 {:proposal initial-proposal :proposal-args [(ys 0)] :key (rng/key 60)})]
+        (is (= 15 (count (pf/log-weights grown))))))))
+
+(def discrete-model
+  (gen [] (let [k (trace :k (d/categorical [0.2 0.5 0.3]))] (trace :y (d/normal k 1)) k)))
+
+(def discrete-evidence
+  (Math/log (reduce + (map-indexed #(* %2 (Math/exp (ts/number (dc/log-prob (d/normal %1 1) 1.7)))) [0.2 0.5 0.3]))))
+
+(deftest stratified-initialization
+  (let [strata (pf/choice-product [[:k [0 1 2]]])
+        obs (cm/choicemap :y 1.7)]
+    (is (= [{:k 0} {:k 1} {:k 2}] (map cm/to-map strata)))
+    (testing "a stratum for every particle: the estimate is exact"
+      (doseq [layout [:contiguous :interleaved]]
+        (let [state (pf/initialize discrete-model [] obs 6 {:strata strata :layout layout :key (rng/key 61)})]
+          (is (ts/close? discrete-evidence (pf/log-ml-estimate state) {:atol (ts/tol 1e-12)}))
+          (is (= (if (= layout :contiguous) [0 0 1 1 2 2] [0 1 2 0 1 2])
+                 (mapv #(long (% :k)) (pf/traces state)))))))
+    (testing "the remainder goes to random strata, unbiased"
+      (let [n 4000
+            ratios (map #(Math/exp (- (pf/log-ml-estimate (pf/initialize discrete-model [] obs 4 {:strata strata :key %})) discrete-evidence))
+                        (rng/split (rng/key 62) n))
+            mean (/ (reduce + ratios) n)
+            sd (Math/sqrt (/ (reduce + (map #(* (- % mean) (- % mean)) ratios)) (dec n)))]
+        (is (pos? sd))
+        (is (< (ts/abs (- mean 1.0)) (* 5 (/ sd (Math/sqrt n)))))))
+    (is (= 4 (count (pf/choice-product {:a [1 2] :b [true false]}))))))
