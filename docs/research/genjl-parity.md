@@ -80,7 +80,7 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 | Distribution API: `random, logpdf, logpdf_grad, has_output_grad, has_argument_grads, is_discrete` | P: `defdist` plus multimethods; gradients via AD; `support` | core |
 | `HomogeneousMixture`, `HeterogeneousMixture` | P: `dist/core.cljs mixture` takes instantiated components and log-weights | core |
 | `ProductDistribution` | Y: `product` | core |
-| `@dist` DSL (CONST→ARG→RND typing, exactly one random draw, pushforward) | N: `map->dist` is manual | soon |
+| `@dist` DSL (CONST→ARG→RND typing, exactly one random draw, pushforward) | N: `map->dist` is manual | soon. *gen.clj (M4, 2026-10-19):* `gen.dist.dsl/dist`, exactly one draw; discrete draws sum the mass mapped to a value (any function, repeated labels), continuous ones invert +, −, ×, ÷, negate, exp and log with their Jacobians; closed forms, normalization and laws checked |
 
 ### 1f. Custom generative functions (Gen.jl core)
 | Capability | GenMLX | gen.clj |

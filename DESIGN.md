@@ -452,6 +452,14 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   rejects the header MLX's wheel ships). Probed once, with a warning; values
   are unchanged, only unfused. Not patched in MLX, and no g++ wrapper: a
   watch bean (genclj-hjzh) revisits it with newer wheels.
+- **Pushforward distributions, Gen.jl's `@dist`** (M4, 2026-10-19):
+  `(gen.dist.dsl/dist name [params] body)` expands into a `defdist`. The body
+  makes exactly one draw (a call of a `defdist` constructor, which the macro
+  finds by var metadata). A discrete draw's density sums the mass of the
+  support values mapped to v, so any function works; a continuous draw's
+  inverts the path to it through +, −, ×, ÷, negate, exp and log, with the
+  log-Jacobians. Non-numeric labels wait for parameters that are not arrays.
+  The name `dist` follows Gen.jl's macro; open for the owner.
 - **The internal-proposal override** (thesis Alg. 16; M4, 2026-10-19):
   `(gen.inference.proposal/with-internal-proposal gf q)`. q is a dynamic
   generative function called as `(q constraints & args)`; it proposes some

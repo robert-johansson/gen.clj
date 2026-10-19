@@ -219,7 +219,8 @@
         d (gensym "d")
         bind-params (vec (mapcat (fn [p] [p `(get (:params ~d) ~(keyword p))]) params))]
     `(do
-       (defn ~dist-name ~@(when doc [doc]) ~params
+       ;; marked, so a pushforward's body can find its one random draw (gen.dist.dsl)
+       (defn ~(vary-meta dist-name assoc ::constructor true) ~@(when doc [doc]) ~params
          ;; validated as given (host data on the host), then made arrays
          (let [~@(mapcat (fn [p] [p `(->checkable ~p)]) params)]
            ~@(map (fn [p] `(check-param-not-nan ~(name dist-name) ~(name p) ~p)) params)
