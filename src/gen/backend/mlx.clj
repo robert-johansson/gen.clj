@@ -325,21 +325,33 @@
         (wrap b (made (MlxRaw/mlx_array_new_data data shp (int (count shape)) (int (code dtype)))
                       "mlx_array_new_data"))))))
 
+(declare device)
+
+(defn- gpu-dtype!
+  "dtype, unless it is float64 on the GPU device, which MLX's GPUs do not
+   have: an array made there from host data would read back but fail at its
+   first op, so it fails here."
+  [b dtype]
+  (when (and (= :float64 dtype) (= :gpu (device b)))
+    (throw (ex-info "MLX's GPUs have no float64: make float64 arrays on a CPU-device backend (:dtypes 64)"
+                    {:dtype dtype :device :gpu})))
+  dtype)
+
 (defn- from-host [b data dtype]
   (cond
     (host? data)
-    (let [d (or dtype (host-dtype-on b data))]
+    (let [d (gpu-dtype! b (or dtype (host-dtype-on b data)))]
       (code d)
       (wrap b (scalar-handle data d)))
 
     (instance? (Class/forName "[D") data)
     (let [^doubles d data]
-      (from-values b (vec d) [(alength d)] (or dtype (:float (defaults b)))))
+      (from-values b (vec d) [(alength d)] (gpu-dtype! b (or dtype (:float (defaults b))))))
 
     (sequential? data)
     (let [shape (host-shape data)
           leaves (host-leaves data shape)
-          dtype (or dtype (infer-dtype b leaves))]
+          dtype (gpu-dtype! b (or dtype (infer-dtype b leaves)))]
       (code dtype)
       (from-values b leaves shape dtype))
 
@@ -393,12 +405,19 @@
       (try
         (let [h (.-h x)
               h (if (= read-as dtype) h (let [c (Mlx/mlx_astype h (int (code read-as)) s)] (.add temps c) c))
-              ;; data pointers address the buffer as laid out: copy views first
-              c (Mlx/mlx_contiguous (long h) false s)
-              _ (.add temps c)
               vs (evaluating
-                   (Mlx/mlx_array_eval c)
-                   (read-values c n read-as))]
+                   (Mlx/mlx_array_eval h)
+                   ;; data pointers address the buffer as laid out: a
+                   ;; row-contiguous array is read in place (its flags are set
+                   ;; once evaluated), a view is copied first. Copying every
+                   ;; array cost a device round trip per read, evaluated or not
+                   (let [c (if (Mlx/_mlx_array_is_row_contiguous h)
+                             h
+                             (let [c (Mlx/mlx_contiguous (long h) false s)]
+                               (.add temps c)
+                               (Mlx/mlx_array_eval c)
+                               c))]
+                     (read-values c n read-as)))]
           (if (empty? shape) (first vs) (nest vs shape)))
         (catch MlxException e (throw (mlx-error :->clj [x] e)))
         (finally
@@ -1163,8 +1182,6 @@
                   (fence xs)))))]
     (MlxRuntime/adoptClosure g compiled)
     g))
-
-(declare device)
 
 (def ^:private cpu-compile
   "Whether mlx_compile works on the CPU device: nil until the first compile
