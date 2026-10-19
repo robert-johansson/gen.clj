@@ -168,9 +168,17 @@ narrowest direction. Reproduce with
 
 Accuracy, the mean over three keys (JVM; MLX draws other random numbers,
 with errors of the same order):
-- linreg: random-walk MH (GenMLX's step of 0.5, acceptance 0.14) ends
-  3.2 posterior sds from the slope; HMC 0.27 sd at acceptance 0.92;
-  batched IS 2.5 sd at N = 1000 (ESS 1.0) and 0.21 at 10,000 (ESS 3.6).
+- linreg, at GenMLX's sample counts: MH with its step of 0.5 (acceptance
+  0.14) ends 3.2 posterior sds from the slope, HMC 0.27 sd (acceptance
+  0.92). That gap is tuning and budget, not the algorithms (a side agent's
+  review, 2026-10-19): HMC's step came from the exact posterior, and an MH
+  step costs about a twentieth of an HMC step. Given HMC's time (4000
+  samples after 2000), MH comes within 0.07 sd with GenMLX's step and
+  0.18 sd with a step tuned like HMC's, 2.38/√2 times the posterior's
+  narrowest sd (acceptance 0.04 and 0.54). A tuned MH chain at GenMLX's
+  200 samples never reaches the posterior from a prior draw (155 sd off):
+  its small steps need the longer burn-in.
+- linreg, batched IS: 2.5 sd at N = 1000 (ESS 1.0), 0.21 at 10,000 (ESS 3.6).
 - HMM: IS collapses (ESS 1–1.6; log-ML off by 53 at N = 100 and 32 at
   1000). The particle filter is within 0.25–0.4.
 - GMM: IS collapses too (ESS 1.2–1.4; log-ML off by 28, 12 and 4.0 at

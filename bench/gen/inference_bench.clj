@@ -16,8 +16,15 @@
      clojure -J-Dgen.backend=mlx [-J-Dgen.mlx.device=cpu] -M:bench -m gen.inference-bench
 
    Left out of GenMLX's: NUTS (bean genclj-tvc0) and HMC's step-size
-   adaptation. HMC takes a fixed step: half the stability limit of the
-   posterior's narrowest direction."
+   adaptation. The linear regression's chains:
+   - GenMLX's: MH with a step of 0.5 for 200 samples, HMC for 100.
+   - The same tuning information for both algorithms, the sd of the
+     posterior's narrowest direction: HMC's step is that sd (half the
+     leapfrog integrator's stability limit there), the tuned MH step 2.38/√2
+     times it (Roberts, Gelman and Gilks' scaling for a Gaussian target).
+   - The same time: MH steps cost about a twentieth of HMC's on the JVM
+     backend, so the MH chains also run 20 times as many steps (4000
+     samples after 2000), about HMC's time there."
   (:require [gen.array :as a]
             [gen.array.protocols :as p]
             [gen.batched :as b]
@@ -120,13 +127,23 @@
   [slope]
   (/ (Math/abs (- slope slope-mean)) slope-sd))
 
-(def ^:private hmc-eps
-  "The sd of the posterior's narrowest direction: half the leapfrog
-   integrator's stability limit there."
+(def ^:private narrowest-sd
+  "The sd of the posterior's narrowest direction (its smallest eigenvalue's
+   square root): what limits both HMC's and a random walk's step."
   (let [[[s00 s01] [_ s11]] (:cov posterior)
         tr (+ s00 s11)
         det (- (* s00 s11) (* s01 s01))]
     (Math/sqrt (/ (- tr (Math/sqrt (- (* tr tr) (* 4 det)))) 2))))
+
+(def ^:private hmc-eps
+  "Half the leapfrog integrator's stability limit (2 sd) in the narrowest
+   direction."
+  narrowest-sd)
+
+(def ^:private mh-step
+  "Roberts, Gelman and Gilks' random-walk scale for a d = 2 Gaussian target,
+   2.38/√d, in the narrowest direction."
+  (* (/ 2.38 (Math/sqrt 2)) narrowest-sd))
 
 (def linreg
   (gen [xs]
@@ -140,10 +157,10 @@
   (apply cm/choicemap (mapcat (fn [j y] [[:y j] y]) (range) linreg-ys)))
 
 (def random-walk
-  "GenMLX's compiled MH proposal: a Gaussian step of 0.5 on both latents."
-  (gen [tr]
-    (trace :slope (d/normal (tr :slope) 0.5))
-    (trace :intercept (d/normal (tr :intercept) 0.5))))
+  "GenMLX's compiled MH proposal: a Gaussian step on both latents."
+  (gen [tr step]
+    (trace :slope (d/normal (tr :slope) step))
+    (trace :intercept (d/normal (tr :intercept) step))))
 
 (defn- chain
   "A run of kernel from a trace generated with the observations."
@@ -163,9 +180,12 @@
   (k/kernel (fn [tr key] (mcmc/hmc tr (sel/select :slope :intercept) opts key))))
 
 (defn- linreg-section []
-  (println (format "\n== Linear regression: 20 observations; posterior slope %.4f ± %.4f; HMC eps %.4f =="
-                   slope-mean slope-sd hmc-eps))
-  (row "MH, random walk (200, burn 100)" #(chain (k/mh random-walk []) 200 100 %) measure-chain describe-chain)
+  (println (format "\n== Linear regression: 20 observations; posterior slope %.4f ± %.4f; HMC eps %.4f, MH step %.4f =="
+                   slope-mean slope-sd hmc-eps mh-step))
+  (row "MH, step 0.5 (200, burn 100)" #(chain (k/mh random-walk [0.5]) 200 100 %) measure-chain describe-chain)
+  (row "MH, step 0.5 (4000, burn 2000)" #(chain (k/mh random-walk [0.5]) 4000 2000 %) measure-chain describe-chain)
+  (row "MH, tuned step (4000, burn 2000)" #(chain (k/mh random-walk [mh-step]) 4000 2000 %)
+       measure-chain describe-chain)
   (row "HMC, L = 10 (100, burn 50)" #(chain (hmc {:L 10 :eps hmc-eps}) 100 50 %) measure-chain describe-chain)
   (row "HMC compiled (100, burn 50)" #(chain (hmc {:L 10 :eps hmc-eps :compile? true}) 100 50 %)
        measure-chain describe-chain)
