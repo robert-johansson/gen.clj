@@ -130,3 +130,13 @@
   (let [model' (gen [] (let [mu (trace :mu (d/normal 0 1))] (trace :nuisance (d/normal 0 1)) (trace :y (d/normal mu 1)) mu))]
     (is (ts/close? evidence (:objective (vi/elbo-gradient model' [] observations family [] posterior 8 {:key (rng/key 9)}))
                    {:rtol 1e-6 :atol 1e-6}))))
+
+(deftest estimates-need-enough-samples
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"at least 2"
+                        (vi/elbo-gradient model [] observations family [] start 1 {:baseline :leave-one-out :key (rng/key 10)})))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"at least 2"
+                        (vi/vimco-gradient model [] observations family [] start 1 {:key (rng/key 11)})))
+  (testing "several K-sample estimates per iteration"
+    (let [{:keys [history]} (vi/black-box-vimco model [] observations family [] start (learn/adam {:lr 0.01})
+                                                {:iters 3 :samples 4 :estimates 5 :key (rng/key 12)})]
+      (is (= 3 (count history))))))

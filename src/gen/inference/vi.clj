@@ -16,7 +16,8 @@
    variance. black-box-vimco ascends the K-sample bound
    E[log (1/K) Σ w_k] with VIMCO's leave-one-out control variates (Mnih and
    Rezende 2016). Both return {:store :history}, the history holding each
-   iteration's objective estimate."
+   iteration's objective estimate. Only q's parameters are trained (Gen.jl's
+   optional model_update, training the model's at once, is not here)."
   (:refer-clojure :exclude [+ - * /])
   (:require [gen.array :as array :refer [+ - * /]]
             [gen.choicemap :as cm]
@@ -32,9 +33,7 @@
 (defn- scaled-sum
   "Σ_i c_i · g_i over gradient trees gs (maps of name to arrays or numbers)."
   [cs gs]
-  (reduce (fn [acc [c g]] (merge-with + acc (array/tree-map #(* c %) g)))
-          (array/tree-map array/zeros-like (first gs))
-          (map vector cs gs)))
+  (apply merge-with + (map (fn [c g] (array/tree-map #(* c %) g)) cs gs)))
 
 (defn- draw
   "A trace of q and its log weight: [q-trace log-w]. The model generates
@@ -51,6 +50,8 @@
    :grads its score-function gradient with respect to q's store} from n
    draws (see the namespace doc for :baseline)."
   [model model-args observations q q-args store n {:keys [baseline key]}]
+  (when (and (= baseline :leave-one-out) (< n 2))
+    (throw (ex-info (str "A leave-one-out baseline needs at least 2 samples, given " n) {:samples n})))
   (let [q (dyn/with-params q store)
         runs (mapv #(draw model model-args observations q q-args %) (rng/split (or key (gfi/next-key)) n))
         lws (mapv second runs)
@@ -68,6 +69,8 @@
    others' (:baseline :geometric, the default) or their arithmetic mean
    (:arithmetic), as Gen.jl's geometric keyword."
   [model model-args observations q q-args store k {:keys [baseline key] :or {baseline :geometric}}]
+  (when (< k 2)
+    (throw (ex-info (str "VIMCO's leave-one-out control variates need K of at least 2, given " k) {:samples k})))
   (let [q (dyn/with-params q store)
         runs (mapv #(draw model model-args observations q q-args %) (rng/split (or key (gfi/next-key)) k))
         lws (mapv second runs)
@@ -103,7 +106,13 @@
 (defn black-box-vimco
   "Fit q's store by ascending the K-sample bound with VIMCO's control
    variates (Gen.jl's black_box_vimco!). Options: :iters (1000), :samples K
-   per iteration (10), :baseline (:geometric or :arithmetic), :key."
-  [model model-args observations q q-args store optimizer {:keys [samples] :or {samples 10} :as opts}]
-  (fit #(vimco-gradient model model-args observations q q-args %1 samples (assoc opts :key %2))
+   (10), :estimates, the independent K-sample estimates averaged per
+   iteration (1; Gen.jl's samples_per_iter), :baseline (:geometric or
+   :arithmetic), :key."
+  [model model-args observations q q-args store optimizer {:keys [samples estimates] :or {samples 10 estimates 1} :as opts}]
+  (fit (fn [store key]
+         (let [runs (mapv #(vimco-gradient model model-args observations q q-args store samples (assoc opts :key %))
+                          (rng/split key estimates))]
+           {:objective (/ (reduce clojure.core/+ (map :objective runs)) estimates)
+            :grads (scaled-sum (repeat estimates (/ 1.0 estimates)) (map :grads runs))}))
        store optimizer opts))
