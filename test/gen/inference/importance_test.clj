@@ -123,3 +123,23 @@
             mean (/ (reduce + ratios) runs)
             sd (Math/sqrt (/ (reduce + (map #(* (- % mean) (- % mean)) ratios)) (dec runs)))]
         (is (< (ts/abs (- mean 1.0)) (* 5 (/ sd (Math/sqrt runs)))))))))
+
+(def varying-count
+  "k ~ categorical(0.2, 0.5, 0.3) decides how many latents there are: k + 1
+   draws x_i ~ N(0, 1), then y ~ N(Σ x_i, 1), so y ~ N(0, √(k + 2)) given k."
+  (gen [] (let [k (trace :k (d/categorical [0.2 0.5 0.3]))
+                xs (mapv #(trace [:x %] (d/normal 0 1)) (range (inc (ts/number k))))]
+            (trace :y (d/normal (reduce + xs) 1)))))
+
+(deftest ^:slow ^:heavy importance-sampling-with-stochastic-structure-is-unbiased
+  ;; Eq. 3.2, Alg. 2 (law audit gap L): the estimate is unbiased in exp space
+  ;; though each sample's structure differs
+  (let [evidence (Math/log (reduce + (map (fn [p k] (* p (Math/exp (ts/number (dc/log-prob (d/normal 0 (Math/sqrt (+ k 2.0))) 0.7)))))
+                                          [0.2 0.5 0.3] (range 3))))
+        runs 400
+        ratios (mapv #(Math/exp (- (:log-ml-estimate (imp/importance-sampling varying-count [] (cm/choicemap :y 0.7) 10 {:key %}))
+                                   evidence))
+                     (rng/split (rng/key 70) runs))
+        m (/ (reduce + ratios) runs)
+        sd (Math/sqrt (/ (reduce + (map #(Math/pow (- % m) 2) ratios)) (dec runs)))]
+    (is (< (Math/abs (- m 1.0)) (* 5 (/ sd (Math/sqrt runs)))) (str m " ± " (/ sd (Math/sqrt runs))))))
