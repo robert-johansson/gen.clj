@@ -380,3 +380,48 @@
                             (gfi/update tr [0] [diff/no-change] (cm/choicemap [9 :production :v] 1.0) (rng/key 7))))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not visited"
                             (gfi/generate tree [0] (cm/choicemap [0 :elsewhere] 1.0) (rng/key 8)))))))
+
+;; ---------------------------------------------------------------------------
+;; Combinators against their bodies written inline (Prop. 2.3.2; §5.3,
+;; pp. 176-177; law audit gap G)
+;; ---------------------------------------------------------------------------
+
+(def inline-map (gen [xs] (mapv (fn [i x] (splice i element x)) (range (count xs)) xs)))
+
+(def inline-unfold
+  (gen [n init drift]
+    (loop [t 0 state init acc []]
+      (if (< t n)
+        (let [s (splice t step t state drift)] (recur (inc t) s (conj acc s)))
+        acc))))
+
+(def inline-node
+  "Recurse's node as the thesis's recursive function (p. 177), its choices
+   at Recurse's addresses."
+  (gen [input node]
+    (let [{:keys [value children]} (splice [node :production] grow input)
+          ws (mapv (fn [j c] (splice inline-node c (+ (* node 2) j 1))) (range (count children)) children)]
+      (splice [node :aggregation] fold value ws))))
+
+(deftest combinators-match-their-bodies-inlined
+  (doseq [[label gf args inline inline-args moves]
+          [[:map mapped [[1.0 2.0 3.0]] inline-map [[1.0 2.0 3.0]]
+            [[[[1.0 2.0 3.0]] (cm/choicemap [1 :z] 0.4)] [[[1.0 2.0]] cm/EMPTY] [[[1.0 5.0 3.0]] (cm/choicemap [0 :z] -1.0)]]]
+           [:unfold unfolded [4 0.0 0.1] inline-unfold [4 0.0 0.1]
+            [[[4 0.0 0.1] (cm/choicemap [1 :s] 0.3)] [[2 0.0 0.1] cm/EMPTY] [[4 0.5 0.2] (cm/choicemap [3 :obs] 1.0)]]]
+           [:recurse tree [0] inline-node [0 0]
+            [[[0] (cm/choicemap [0 :production :v] 0.25)] [[1] cm/EMPTY] [[0] (cm/choicemap [0 :production :split] false)]]]]]
+    (testing (name label)
+      (doseq [seed (range 4)]
+        (let [tr (gfi/simulate gf args (rng/key seed))
+              ti (:trace (gfi/generate inline inline-args (:choices tr) (rng/key 99)))]
+          (is (= (:choices tr) (:choices ti)))
+          (is (close? (:score tr) (:score ti)) "the same density")
+          (doseq [[args' sigma] moves]
+            (let [inline-args' (if (= label :recurse) (conj (vec args') 0) args')
+                  r (gfi/update tr args' (vec (repeat (count args') diff/unknown-change)) sigma (rng/key 5))
+                  ri (gfi/update ti inline-args' (vec (repeat (count inline-args') diff/unknown-change)) sigma (rng/key 5))]
+              (when (= (set (cm/addresses (:choices (:trace r)))) (set (cm/addresses (:choices (:trace ri)))))
+                ;; the same structure: no fresh choices drawn differently
+                (is (close? (:weight r) (:weight ri)) (str label " " args'))
+                (is (= (:discard r) (:discard ri)))))))))))
