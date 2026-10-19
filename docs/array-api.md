@@ -672,6 +672,15 @@ The decisions are §12 items 15–18, for the owner's review.*
   second step, 29.7 → 34.9 ms per step, while its compiled steps make few
   new arrays and do not (`docs/benchmarks.md`). A larger
   `gen.mlx.gc-new-bytes` trades memory for fewer pauses.
+- **CUDA (Linux)** (2026-10-19, the Jetson Thor). Every evaluation runs on
+  one thread, with the caller's bindings: MLX's CUDA backend fails when a
+  stream is evaluated from another thread than before, and the stream then
+  stays broken. Metal and the CPU devices let any thread evaluate, under the
+  evaluation lock. MLX's prebuilt wheel has no code for every GPU (none for
+  the Thor's sm_110); `native/build-mlx.sh cuda13-source` builds MLX for the
+  machine's own. A host read inside a compiled function reads differently
+  under CUDA ("eval an array without a primitive"), and is the same loud
+  ex-info.
 - **Compile on MLX's CPU device needs a compatible g++** (2026-10-19). MLX
   builds each fused CPU kernel at run time with the system's g++, from a
   header the wheel ships, and GCC 13 on Linux rejects that header (it

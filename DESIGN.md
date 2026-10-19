@@ -447,6 +447,18 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     depends on the enumerated choices is a loud error, as is a choice made
     by a callee at an address (wrap the callee instead). Batched, it is the
     same code under the batch tracer.
+- **CUDA on the Jetson AGX Thor (sm_110): MLX built from its source**
+  (2026-10-19). The `mlx-cuda-13` wheel has code for sm_75 to sm_121 and
+  PTX only for compute_120, so nothing in it runs on compute capability 11.0
+  ("invalid resource handle" at the first kernel). `native/build-mlx.sh
+  cuda13-source` builds upstream v0.32.2, unpatched, for the machine's own
+  architecture (six minutes on the Thor); the owner's GenMLX fork carries
+  further Thor patches (a full-pool allocator, graph limits, an NVRTC cache),
+  for capacity and speed, not needed for correctness. MLX compiles some
+  kernels at run time with NVRTC from headers beside its library, which the
+  script copies. On CUDA every evaluation runs on one thread, since MLX's
+  CUDA encoders are per thread (a cross-thread evaluation failed, and then
+  left the stream broken).
 - **MLX's CPU compile, where the system's g++ cannot build MLX's kernels,
   falls back to the identity** (2026-10-19, found on the Jetson Thor: GCC 13
   rejects the header MLX's wheel ships). Probed once, with a warning; values
