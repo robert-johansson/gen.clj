@@ -236,12 +236,20 @@
   ;; plain kernel does
   (let [obs (cm/choicemap :y 1.3)
         branching (gen [] (let [x (trace :x (d/normal 0 1))]
-                            (trace :y (d/normal (if (array/truthy? (> x 0)) x (array/negate x)) 1))))]
+                            (trace :y (d/normal (if (array/truthy? (> x 0)) x (array/negate x)) 1))))
+        ;; in a compiled trace the observed count is an MLX array, which
+        ;; dotimes cannot take: the step once threw instead of falling back
+        ;; (an independent review)
+        counted (gen [] (let [n (trace :n (d/poisson 3))
+                              x (trace :x (d/normal 0 1))]
+                          (dotimes [i n] (trace [:y i] (d/normal x 1)))))]
     (doseq [[label gf observations selection] [["scalar" scalar obs (sel/select :x)]
                                                ["an array-valued latent in a splice" vector-model (cm/choicemap :y y2)
                                                 (sel/select [:latent :z])]
                                                ["a model that branches on a value (falls back)" branching obs
-                                                (sel/select :x)]]]
+                                                (sel/select :x)]
+                                               ["a model that loops over an observed count (falls back)" counted
+                                                (cm/choicemap :n 2 [:y 0] 0.5 [:y 1] 1.0) (sel/select :x)]]]
       (testing label
         (let [tr (:trace (gfi/generate gf [] observations (rng/key 1)))]
           (doseq [[kernel move] [[:hmc (fn [opts key] (mcmc/hmc tr selection (merge {:L 5 :eps 0.2} opts) key))]

@@ -333,13 +333,32 @@ public final class MlxRuntime {
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
     }
-    arrayThreshold = Math.min(MAX_ARRAYS, Math.max(BASE_ARRAYS, 2 * LIVE.get()));
+    long live = LIVE.get();
+    arrayThreshold = nextArrayThreshold(live, BASE_ARRAYS, MAX_ARRAYS);
+    if (live > MAX_ARRAYS && !warnedNearLimit) {
+      warnedNearLimit = true;
+      System.err.println("gen.mlx: " + live + " MLX arrays are live, near Metal's buffer limit"
+          + " (about " + (long) (MAX_ARRAYS / 0.6) + "); hold fewer arrays, or eval! and drop graphs");
+    }
     byteThreshold = Math.max(BASE_BYTES, 2 * activeMemory());
+  }
+
+  private static volatile boolean warnedNearLimit;
+
+  /** The live-array count that triggers the next collection, given what is
+   *  live after one: twice that (at least base), capped at max. Past the cap
+   *  the next collection comes after another tenth of it, not at the next
+   *  array: a threshold below the live count ran a full collection per op,
+   *  which looked like a hang (an independent review, 2026-10-19). */
+  public static long nextArrayThreshold(long live, long base, long max) {
+    long next = Math.max(base, 2 * live);
+    return next <= max ? next : Math.max(max, live + max / 10);
   }
 
   /** The highest array threshold: 60% of Metal's buffer limit (the device's
    *  resource_limit; MLX on macOS allocates every buffer through Metal, also
-   *  on the CPU device), or 300,000 where there is none. */
+   *  on the CPU device), or none where the device has no such limit (CUDA,
+   *  the CPU on Linux). */
   private static final long MAX_ARRAYS = maxArrays();
 
   private static long maxArrays() {
@@ -361,7 +380,7 @@ public final class MlxRuntime {
     } catch (Throwable t) {
       // no GPU device: no Metal limit
     }
-    return Math.max(BASE_ARRAYS, 300_000L);
+    return Long.MAX_VALUE / 4;
   }
 
   private static long activeMemory() {

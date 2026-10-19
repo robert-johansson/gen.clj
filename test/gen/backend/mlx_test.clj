@@ -71,6 +71,19 @@
                 ((array/grad (fn [x] (array/sum (cholesky x)))) m))]
         (is (= [2 2] (array/shape g)))))))
 
+(deftest the-array-threshold-stays-above-the-live-count
+  ;; with more arrays live than the cap, the threshold was set below the
+  ;; live count, so every new array ran a full collection (an independent
+  ;; review): past the cap it is now another tenth of the cap away
+  (when-mlx
+    (let [next-threshold #(gen.mlx.MlxRuntime/nextArrayThreshold %1 100000 300000)]
+      (is (= 100000 (next-threshold 10000)) "at least the base")
+      (is (= 240000 (next-threshold 120000)) "twice what is live")
+      (is (= 300000 (next-threshold 160000)) "the cap")
+      (is (= 380000 (next-threshold 350000)) "past the cap, a tenth of it later")
+      (is (every? #(> (next-threshold %) %) [10000 160000 299999 350000 1000000])
+          "always above what is live"))))
+
 (deftest large-argument-blocks-reuse-scratch
   ;; an argument block over half the scratch buffer (more than 64 handles,
   ;; as eval! of a large trace passes) was allocated afresh on every call

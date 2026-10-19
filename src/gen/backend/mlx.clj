@@ -138,10 +138,45 @@
 
 (def ^:private eval-lock (Object.))
 
+(def ^:private one-eval-thread?
+  "Do evaluations need one thread? MLX's CUDA backend fails when a stream
+   first evaluated on one thread is evaluated on another (\"invalid resource
+   handle\" in cudaGraphAddKernelNode, and the stream stays broken: the
+   Jetson Thor, 2026-10-19), so where MLX has a CUDA GPU (Linux with a
+   GPU), every evaluation runs on one thread. Metal and the CPU device let
+   any thread evaluate (the CPU device on Linux too)."
+  (delay (and (not (.contains (.toLowerCase (System/getProperty "os.name")) "mac"))
+              (Mlx/mlx_device_is_available (Mlx/mlx_device_new_type (int 1) (int 0))))))
+
+(defonce ^:private eval-thread
+  (delay
+    (let [t (promise)
+          ex (java.util.concurrent.Executors/newSingleThreadExecutor
+              (reify java.util.concurrent.ThreadFactory
+                (newThread [_ r]
+                  (doto (Thread. ^Runnable r "gen.mlx evaluation")
+                    (.setDaemon true)
+                    (->> (deliver t))))))]
+      ;; start it, so its identity is known
+      (.get (.submit ex ^Runnable (fn [])))
+      {:executor ex :thread @t})))
+
+(defn- evaluating*
+  "(f) holding the evaluation lock; where evaluations need one thread
+   (one-eval-thread?), on that thread, with the caller's bindings."
+  [f]
+  (if (or (not @one-eval-thread?) (identical? (Thread/currentThread) (:thread @eval-thread)))
+    (locking eval-lock (f))
+    (let [task (.submit ^java.util.concurrent.ExecutorService (:executor @eval-thread)
+                        ^java.util.concurrent.Callable (bound-fn* #(locking eval-lock (f))))]
+      (try (.get task)
+           (catch java.util.concurrent.ExecutionException e (throw (.getCause e)))))))
+
 (defmacro ^:private evaluating
-  "Run body (which evaluates MLX arrays) holding the evaluation lock."
+  "Run body (which evaluates MLX arrays) holding the evaluation lock, on the
+   evaluation thread where there is one (evaluating*)."
   [& body]
-  `(locking eval-lock ~@body))
+  `(evaluating* (fn [] ~@body)))
 
 ;; ---------------------------------------------------------------------------
 ;; Operands: MLX arrays and host scalars
@@ -1181,6 +1216,11 @@
                                                        " branch with where, or do not compile it")
                                                   {:op :compile} e))
                                   (throw e))))]
+                (doseq [o outs]
+                  (when-not (or (mlx-array? o) (host? o))
+                    (throw (ex-info (str "compile: the function's results must be arrays (or trees of them), not "
+                                         (pr-str o))
+                                    {:op :compile :value o}))))
                 (long-array (map #(MlxRuntime/retain (.-h ^MlxArray (as-array b % nil))) outs))))
         cl (MlxRuntime/closure (reify gen.mlx.MlxRuntime$Closure (apply [_ ins] (run ins))))
         compiled (try (Mlx/mlx_compile cl (boolean shapeless?))
@@ -1189,7 +1229,8 @@
         g (fn [xs]
             (let [in (MlxRuntime/vectorOf (long-array (map #(.-h ^MlxArray %) xs)))]
               (try
-                (let [out (Mlx/mlx_closure_apply compiled in)]
+                (let [out (try (Mlx/mlx_closure_apply compiled in)
+                               (catch MlxException e (throw (mlx-error :compile xs e))))]
                   (try (mapv #(wrap b %) (MlxRuntime/vectorArrays out))
                        (finally (MlxRaw/mlx_vector_array_free out))))
                 (finally

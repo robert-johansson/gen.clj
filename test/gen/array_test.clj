@@ -254,6 +254,12 @@
         (is (ts/close? (array/max x) (:m (g x))))))
     (testing "gradients compile too"
       (is (ts/close? ((array/grad #(array/sum (array/square %))) x) ((array/compile (array/grad #(array/sum (array/square %)))) x))))
+    (testing "results that are not arrays are loud"
+      ;; a nil or keyword leaf gave an NPE or ClassCastException on MLX (an
+      ;; independent review); the JVM backend's compile is f itself
+      (when-not (ts/jvm?)
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"results must be arrays"
+                              ((array/compile (fn [x] {:s (array/sum x) :tag :done})) x)))))
     (testing "keys are not arguments: the trace would replay their draws"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"key's draws"
                             ((array/compile (fn [k x] x)) (gen.random/key 1) x))))))

@@ -76,14 +76,18 @@
   [trace proto others settings build & args]
   (let [structure (fn [m] (array/tree-map (fn [x] [(array/shape x) (array/dtype x)]) m))
         k [settings (:gen-fn trace) (:args trace) (structure others) (structure (cm/to-map proto))]
-        f (get @compiled-steps k)]
-    (when-not (= f ::plain)
-      (let [f (or f (let [f (array/compile (build))]
-                      (swap! compiled-steps (fn [m] (assoc (if (>= (count m) 16) {} m) k f)))
-                      f))]
+        cached (get @compiled-steps k)]
+    (when-not (= cached ::plain)
+      (let [f (or cached (let [f (array/compile (build))]
+                           (swap! compiled-steps (fn [m] (assoc (if (>= (count m) 16) {} m) k f)))
+                           f))]
         (try (apply f args)
-             (catch clojure.lang.ExceptionInfo e
-               (if (= :compile (:op (ex-data e)))
+             (catch Exception e
+               ;; the first call traces the step: whatever fails there (a host
+               ;; read, a value the trace holds as an array that the model
+               ;; needs on the host) makes the step plain from now on, and the
+               ;; plain kernel raises it again if it is the model's own error
+               (if (or (nil? cached) (= :compile (:op (ex-data e))))
                  (do (swap! compiled-steps assoc k ::plain) nil)
                  (throw e))))))))
 
