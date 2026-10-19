@@ -680,7 +680,11 @@ The decisions are §12 items 15–18, for the owner's review.*
   the Thor's sm_110); `native/build-mlx.sh cuda13-source` builds MLX for the
   machine's own. A host read inside a compiled function reads differently
   under CUDA ("eval an array without a primitive"), and is the same loud
-  ex-info.
+  ex-info. MLX's CUDA graphs are off unless `MLX_USE_CUDA_GRAPHS` is set:
+  MLX 0.32 counts graph-cache misses from the start and throws ("Cache
+  thrashing is happening") once they pass twice the cache's capacity, so a
+  long run of varied shapes always failed (the battery, after a minute).
+  Kernels then launch one by one: the same values, slower launches.
 - **Compile on MLX's CPU device needs a compatible g++** (2026-10-19). MLX
   builds each fused CPU kernel at run time with the system's g++, from a
   header the wheel ships, and GCC 13 on Linux rejects that header (it

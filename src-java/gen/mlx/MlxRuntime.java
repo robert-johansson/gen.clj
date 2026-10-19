@@ -29,7 +29,29 @@ public final class MlxRuntime {
   // ---- the library ------------------------------------------------------------
 
   static final Linker LINKER = Linker.nativeLinker();
+  static { cudaDefaults(); }
   static final SymbolLookup LIB = load();
+
+  /** On Linux, MLX's CUDA graphs off unless the environment says otherwise
+   *  (MLX_USE_CUDA_GRAPHS, read once when the CUDA backend starts): MLX 0.32
+   *  counts graph-cache misses since the process began and throws "Cache
+   *  thrashing is happening" once they pass twice the cache's capacity (400
+   *  by default), so a long run of varied shapes always failed in the end,
+   *  whatever MLX_CUDA_GRAPH_CACHE_SIZE (the Jetson Thor, 2026-10-19).
+   *  Without graphs every kernel is launched on its own: slower launches,
+   *  the same values. Set MLX_USE_CUDA_GRAPHS=1 (and a cache size) to opt
+   *  in. Set through libc's setenv, before MLX is loaded, never overwriting. */
+  private static void cudaDefaults() {
+    if (System.getProperty("os.name").toLowerCase().contains("mac")) return;
+    try (Arena a = Arena.ofConfined()) {
+      MethodHandle setenv = LINKER.downcallHandle(
+          LINKER.defaultLookup().find("setenv").orElseThrow(),
+          FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, JAVA_INT));
+      int ignored = (int) setenv.invokeExact(a.allocateFrom("MLX_USE_CUDA_GRAPHS"), a.allocateFrom("0"), 0);
+    } catch (Throwable t) {
+      throw new ExceptionInInitializerError(t);
+    }
+  }
 
   /** The directory holding libmlxc: the system property gen.mlx.lib, the
    *  environment variable GEN_MLX_LIB, or native/build/<platform>/lib under
