@@ -61,13 +61,30 @@
    [:unfold unfolded [4 0.0 0.1]]
    [:switch switched [1 0.5]]
    [:keyed-switch keyed [:a 0.5]]
-   [:spliced spliced [3]]])
+   [:spliced spliced [3]]
+   [:call-at (comb/call-at element) [1.0 :here] [[2.5 :here]]]
+   [:call-at-a-path (comb/call-at unfolded) [3 0.0 0.1 [:walk 1]] [[4 0.0 0.1 [:walk 1]]]]
+   [:choice-at (comb/choice-at d/normal) [0.0 1.0 :x] [[0.5 2.0 :x]]]])
 
 (laws/deflaws combinators models 100)
 
 ;; ---------------------------------------------------------------------------
 ;; Map
 ;; ---------------------------------------------------------------------------
+
+(deftest call-at-and-choice-at
+  (testing "call-at puts the callee's choices under its last argument"
+    (let [tr (gfi/simulate (comb/call-at element) [1.0 [:at 3]] (rng/key 1))]
+      (is (every? #(= [:at 3] (subvec % 0 2)) (cm/addresses (:choices tr))))
+      (is (close? (:score tr) (:weight (gfi/assess element [1.0] (cm/get-submap (cm/get-submap (:choices tr) :at) 3)))))
+      (is (= (:retval tr) (tr [:at 3 :z])) "the callee's return value")))
+  (testing "choice-at makes one choice at its last argument"
+    (let [tr (gfi/simulate (comb/choice-at d/normal) [0.0 1.0 :x] (rng/key 2))]
+      (is (= [[:x]] (cm/addresses (:choices tr))))
+      (is (= (:retval tr) (tr :x)))))
+  (testing "loud errors"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"distribution constructor" (comb/choice-at (d/normal 0 1))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"generative function" (comb/call-at 3)))))
 
 (defn- subtraces [tr] (:gen.combinators/subtraces tr))
 

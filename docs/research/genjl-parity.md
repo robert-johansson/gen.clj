@@ -96,7 +96,7 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 | `Unfold(kernel)` with args `(N, init, extras...)`; retdiff-driven skipping; changing N | Y: UnfoldCombinator, `unfold-extend`, structure-changing `update-with-args` | core |
 | `Switch(gfs...)` / `Switch(dict, gfs...)`; a branch change gives a fresh subtrace plus a discard | Y (integer index) / P (no dict-keyed constructor) | core |
 | `Recurse(production, aggregation, max_branch, U,V,W)` (PCFG trees) | P: `recurse` is a fixed-point "maker" combinator, not the production/reduction tree; `update-with-args` throws | core |
-| `call_at(gf, K)` / `choice_at` | N | soon |
+| `call_at(gf, K)` / `choice_at` | N | soon. *gen.clj (M4, 2026-10-19):* `comb/call-at` and `comb/choice-at`, the address as the last argument as in Gen.jl; dynamic generative functions over `splice` and `trace`, so their GFI is the handler's (laws in `combinators-test`) |
 | Internal-proposal override (thesis §4.4, Alg. 16, p. 152; not found in the 0.4.8 modeling library) | P: via `dispatch/with-dispatch` | soon |
 
 ### 1h. Choice maps, selections, traces (Gen.jl core)

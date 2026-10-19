@@ -10,6 +10,10 @@
                         vector of the n states after each step.
      (switch & gfs)     Switch: args (index & args) call branch index.
      (switch {k gf …})  keyed Switch: args (k & args).
+     (call-at gf)       Gen.jl's call_at: args (& args k) call gf on args,
+                        its choices under address k.
+     (choice-at dist)   Gen.jl's choice_at: args (& args k), one choice at
+                        address k from (dist & args).
 
    Addresses and indices are 0-based (DESIGN.md §9). A trace keeps each
    element's or step's subtrace, so update and regenerate are incremental, as
@@ -464,3 +468,28 @@
 
 (defmethod print-method SwitchGF [gf ^java.io.Writer w]
   (.write w "#gen/switch") (print-method (:branches gf) w))
+
+;; ---------------------------------------------------------------------------
+;; call-at, choice-at
+;; ---------------------------------------------------------------------------
+
+(defn call-at
+  "Gen.jl's call_at: gf with an address as its last argument, gf's choices
+   under it. ((call-at gf) a b k) calls (gf a b), its choices at k. A dynamic
+   generative function splicing gf, so update, regenerate and project are
+   the handler's own."
+  [gf]
+  (when-not (gfi/generative-function? gf)
+    (throw (ex-info "call-at needs a generative function" {:value gf})))
+  (dyn/gen [& args]
+    (apply splice (last args) gf (butlast args))))
+
+(defn choice-at
+  "Gen.jl's choice_at: a distribution constructor with an address as its
+   last argument, one choice there. ((choice-at d/normal) 0 1 :x) is the
+   value of (trace :x (d/normal 0 1))."
+  [dist]
+  (when-not (fn? dist)
+    (throw (ex-info "choice-at needs a distribution constructor (d/normal, not (d/normal 0 1))" {:value dist})))
+  (dyn/gen [& args]
+    (trace (last args) (apply dist (butlast args)))))
