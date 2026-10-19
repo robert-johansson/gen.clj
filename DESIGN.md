@@ -407,6 +407,25 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   - Its Java binding is compiled by `clojure -T:build java` into
     `target/classes`, which is on the classpath. As a git dependency, its
     `:deps/prep-lib` builds it.
+- **Exact enumeration** (2026-10-19, moved early at the owner's request, for
+  GenGDT; bean genclj-3jp2): `gen.inference.enumerative`.
+  - Gen.jl's `enumerative_inference` and `choice_vol_grid`, as in 0.4.8,
+    with the grid in row-major order: the last spec varies fastest, where
+    Julia's iterator varies the first.
+  - Exact latents inside a model are an internal proposal, not a new
+    density. `with-exact-proposal` keeps a model's distribution and traces
+    and draws the named finite choices from their exact conditional (thesis
+    pp. 145–146, the route §2 intends for L3). Generate's weight is then
+    log p(observations) exactly when the other choices are observed, so
+    also per step of an Unfold, and regenerate on those choices is Gibbs.
+  - Not GenMLX's `exact.cljs`: a second handler transition, "collapsed"
+    traces (no choices, a probability table as return value) and the memo
+    API.
+  - It satisfies the general GFI laws, not the forward-sampling ones.
+    Supports come from the distributions. A structure or support that
+    depends on the enumerated choices is a loud error, as is a choice made
+    by a callee at an address (wrap the callee instead). Batched, it is the
+    same code under the batch tracer.
 - **Git:** the main repo is public-ready, with `.beans/`, `.beans.yml`,
   `.claude/` and `*.pdf` gitignored. `.beans/` is its own private repo
   (`robert-johansson/gen.clj-beans`), synced by SessionStart/PreCompact/Stop

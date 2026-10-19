@@ -140,6 +140,19 @@
     (check (and (== v (Math/rint (double v))) (>= (double v) (double min))) dist-name
            (str param-name " must be an integer of at least " min ", got " v) {:param param-name :value v})))
 
+(defn support-bound
+  "An integer parameter bounding an enumerable support (a count, a bound),
+   on the host. Supports are host data for enumeration
+   (gen.inference.enumerative), so a one-element array is read, also on a
+   lazy backend, as a Switch reads its branch index; a batched one (whose
+   particles may differ) is the batched-branch error."
+  ^long [dist-name param-name v]
+  (cond (a/host? v) (long v)
+        (and (a/array? v) (= 1 (a/size v))) (long (a/item v))
+        :else (throw (ex-info (str dist-name ": an enumerable support needs one " param-name ", not an array of shape "
+                                   (a/shape v))
+                              {:distribution dist-name :param param-name}))))
+
 (defn check-probabilities
   "Concrete probability vectors (the last axis) must be non-negative and sum to
    1. This catches logits passed where probabilities are expected."

@@ -130,7 +130,7 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 | `elliptical_slice(trace, addr, mu, cov)` | Y | core |
 | `@kern` (`for`/`if`/`let`, auto reversal), `@pkern`, `@rkern`, `reversal` | P: kernel.cljs combinators, `with-reversal`; no macro DSL, no check | core |
 | `map_optimize(trace, sel; ...)` (backtracking line search) | Y: `map-optimize` (Adam/SGD instead) | core |
-| `enumerative_inference` + `choice_vol_grid` (including continuous grid volumes) | P: `enumerate.cljs`, `exact.cljs`; discrete only | core |
+| `enumerative_inference` + `choice_vol_grid` (including continuous grid volumes) | P: `enumerate.cljs`, `exact.cljs`; discrete only | core. *gen.clj (2026-10-19):* `gen.inference.enumerative`, discrete and continuous (N-d) grids; plus `with-exact-proposal`, the exact conditional as a model's internal proposal for its finite choices (exact likelihoods inside Unfold, Gibbs regenerate) |
 | `initialize_particle_filter` / `particle_filter_step!` (default or custom proposal), `maybe_resample!`, `log_ml_estimate`, `get_traces`, `get_log_weights`, `sample_unweighted_traces` | P: `smc.cljs` functional whole-sequence API; default proposal only (custom via `smcp3.cljs`); `steppable.cljs` | core |
 | Trace transform DSL: `@transform`, `@read`/`@write` with `:discrete`/`:continuous`, `@copy`, `@tcall`, `pair_bijections!`, `is_involution!`, `inverse` | P: translator.cljs read/write/copy-choice, `jacobian-logdet`, `sparse-jacobian-logdet`; no macro DSL, no discrete/continuous tagging, no inverse pairing check | core |
 | `Deterministic`/`General`/`SimpleExtending`/`Symmetric` TraceTranslator | P: `trace-translator`/`apply-translator`, `coarse-to-fine-smc` | core |
@@ -315,7 +315,7 @@ tested, ◐ partly, — not yet (the feature does not exist yet).
 | 7 Compositionality | ✓ `splicing-is-compositional`; `switch-branches-share-addresses` (Switch against the equivalent `if`); combinator laws over a model splicing Map/Unfold/Switch; `a-different-callee-at-an-address-is-a-new-call` |
 | 8 Change hints | ✓ `map-/unfold-precise-hints-match-unknown-change`; retdiff soundness inside the update/regenerate laws |
 | 9 Regenerate | ✓ `regenerate-weight-is-the-retained-density-ratio`, `regenerate-keeps-unselected-choices`, `regenerating-nothing-changes-nothing`, `regenerating-everything-has-weight-zero` (random selections, changed args) |
-| 10 Selection MH stationary | ✓ `kernels-leave-the-posterior-invariant`, `structure-changing-moves-target-the-posterior` (thesis p_mh) |
+| 10 Selection MH stationary | ✓ `kernels-leave-the-posterior-invariant`, `structure-changing-moves-target-the-posterior` (thesis p_mh); with the optimal internal proposal, regenerate is Gibbs: `regenerating-the-enumerated-choices-is-gibbs` (weight 0, posterior frequencies) |
 | 11 Project | ✓ `project-of-everything-is-the-score`, `project-splits-the-score` |
 | 12 Propose | ✓ `propose-weight-is-the-assessed-density` |
 | 13 Gradients | ◐ every VJP against finite differences (`gen.array.tape-test`); choice and argument gradients come with genclj-96om |
