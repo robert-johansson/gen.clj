@@ -69,8 +69,7 @@
 
 (def models
   [[:map mapped [[1.0 2.0 3.0]]]
-   [:recurse tree [0] [[1]]]
-   [:recurse-spliced (gen [d] (let [s (splice :t tree d)] (trace :y (d/normal s 1)))) [0] [[1]]]
+
    [:map-2-args (comb/map (gen [x y] (trace :z (d/normal x y)))) [[0.0 1.0] [1.0 2.0]]]
    [:unfold unfolded [4 0.0 0.1]]
    [:switch switched [1 0.5]]
@@ -82,8 +81,10 @@
 
 (laws/deflaws combinators models 100)
 
-;; Recurse alone too: its trees change shape under update and regenerate
-(laws/deflaws recurse (filterv #(#{:recurse :recurse-spliced} (first %)) models) 100)
+;; Recurse's own set: its trees change shape under update and regenerate
+(laws/deflaws recurse [[:recurse tree [0] [[1]]]
+                       [:recurse-spliced (gen [d] (let [s (splice :t tree d)] (trace :y (d/normal s 1)))) [0] [[1]]]]
+  100)
 
 ;; ---------------------------------------------------------------------------
 ;; Map
@@ -345,7 +346,9 @@
           nodes (set (keys (cm/to-map (:choices tr))))]
       (is (= #{0 1 2 3 4} nodes))
       (is (ts/close? (:retval tr) (reduce + (map #(tr [% :production :v]) nodes))))
-      (is (ts/close? (tr [1 :aggregation :obs]) (tr [1 :aggregation :obs])))))
+      (is (ts/close? (+ (tr [1 :production :v]) (tr [3 :production :v]) (tr [4 :production :v]))
+                     (:retval ((:gen.combinators/aggregations tr) 1)))
+          "node 1 folds its value and its children's")))
   (testing "max-branch is enforced"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"more than max-branch"
                           (gfi/simulate (comb/recurse (gen [_] {:value 0 :children [1 2 3]}) fold 2) [0] (rng/key 3))))))
@@ -371,6 +374,8 @@
         (is (= #{1 3 4} (set (keys (cm/to-map d)))))
         (is (ts/close? (- (:score t'') (:score tr)) w) "the update samples nothing")))
     (testing "constraints off the tree are loud"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"a value at node 0"
+                            (gfi/generate tree [0] (cm/choicemap 0 1.0) (rng/key 9))))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not visited"
                             (gfi/update tr [0] [diff/no-change] (cm/choicemap [9 :production :v] 1.0) (rng/key 7))))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not visited"

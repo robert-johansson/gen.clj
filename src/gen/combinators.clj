@@ -466,14 +466,15 @@
     (->SwitchGF (vec gfs))))
 
 ;; ---------------------------------------------------------------------------
-;; Printing
-;; ---------------------------------------------------------------------------
-
-;; ---------------------------------------------------------------------------
 ;; Recurse
 ;; ---------------------------------------------------------------------------
 
-(defn- child-of [max-branch node j] (+ (clojure.core/* node max-branch) j 1))
+(defn- child-of [max-branch node j] (+ (* node max-branch) j 1))
+
+(defn- put-part
+  "choices with sub at [node part], unless sub is empty."
+  [choices node part sub]
+  (if (cm/empty? sub) choices (cm/set-choice choices [node part] sub)))
 
 (defn- production-output
   "The production kernel's return value at node, checked."
@@ -504,6 +505,10 @@
                                      (when-not (nat-int? i)
                                        (throw (ex-info (str (name op) ": the constraint at " i " was not visited"
                                                             " (Recurse's addresses are node indices)")
+                                                       {:op op :address i})))
+                                     (when (cm/has-value? sub)
+                                       (throw (ex-info (str (name op) ": a value at node " i
+                                                            " was not visited (a node has :production and :aggregation)")
                                                        {:op op :address i})))
                                      (let [parts (set (clojure.core/map first (cm/submaps sub)))]
                                        (when-let [bad (first (remove #{:production :aggregation} parts))]
@@ -561,8 +566,7 @@
                   todo (into (dissoc todo node)
                              (map-indexed (fn [j c] [(child-of max-branch node j) [c child-diff]]) (:children out)))]
               (recur todo (assoc prods node (:trace r)) (assoc p-diffs node (:retdiff r)) (+ weight (:weight r))
-                     (cond-> discard (and (:discard r) (not (cm/empty? (:discard r))))
-                       (cm/set-choice [node :production] (:discard r)))))
+                     (put-part discard node :production (:discard r))))
             [prods p-diffs weight discard]))
         _ (when (and cs (not= op :regenerate))
             (doseq [node (keys targets)]
@@ -587,8 +591,7 @@
                                       (node-cs op cs node :aggregation) (node-key node :aggregation))
                             {:trace old :weight 0.0 :retdiff diff/no-change})]
                     [(assoc aggs node (:trace r)) (assoc a-diffs node (:retdiff r)) (+ weight (:weight r))
-                     (cond-> discard (and (:discard r) (not (cm/empty? (:discard r))))
-                       (cm/set-choice [node :aggregation] (:discard r)))]))
+                     (put-part discard node :aggregation (:discard r))]))
                 [{} {} weight discard]
                 (sort > (keys prods)))
         gone (remove prods (keys old-p))
@@ -597,17 +600,15 @@
                  weight)
         discard (if (= op :update)
                   (reduce (fn [d node]
-                            (let [pc (:choices (old-p node)) ac (:choices (old-a node))]
-                              (cond-> d
-                                (not (cm/empty? pc)) (cm/set-choice [node :production] pc)
-                                (not (cm/empty? ac)) (cm/set-choice [node :aggregation] ac))))
+                            (-> d
+                                (put-part node :production (:choices (old-p node)))
+                                (put-part node :aggregation (:choices (old-a node)))))
                           discard gone)
                   discard)
         choices (reduce (fn [c node]
-                          (let [pc (:choices (prods node)) ac (:choices (aggs node))]
-                            (cond-> c
-                              (not (cm/empty? pc)) (cm/set-choice [node :production] pc)
-                              (not (cm/empty? ac)) (cm/set-choice [node :aggregation] ac))))
+                          (-> c
+                              (put-part node :production (:choices (prods node)))
+                              (put-part node :aggregation (:choices (aggs node)))))
                         cm/EMPTY (sort (keys prods)))
         score (reduce + 0.0 (concat (clojure.core/map :score (vals prods)) (clojure.core/map :score (vals aggs))))
         t (assoc (trace/make-trace {:gen-fn gf :args [input] :choices choices :retval (:retval (aggs 0)) :score score})
@@ -668,6 +669,10 @@
   (when-not (pos-int? max-branch)
     (throw (ex-info "Recurse's max-branch is a positive integer" {:max-branch max-branch})))
   (->RecurseGF production aggregation max-branch))
+
+;; ---------------------------------------------------------------------------
+;; Printing
+;; ---------------------------------------------------------------------------
 
 (defmethod print-method RecurseGF [_ ^java.io.Writer w]
   (.write w "#gen/recurse"))
