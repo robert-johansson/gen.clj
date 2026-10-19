@@ -345,3 +345,28 @@
         (is (pos? sd))
         (is (< (ts/abs (- mean 1.0)) (* 5 (/ sd (Math/sqrt n)))))))
     (is (= 4 (count (pf/choice-product {:a [1 2] :b [true false]}))))))
+
+(def re-propose
+  "A step's proposal that also moves the previous state."
+  (gen [tr t] (trace [(dec t) :x] (d/normal (tr [(dec t) :x]) 0.3)) (trace [t :x] (d/normal 0 1))))
+
+(def move-back (gen [tr t] (trace [(dec t) :x] (d/normal (tr [(dec t) :x]) 0.3))))
+
+(deftest a-step-with-a-backward-proposal
+  (let [state (pf/initialize model [1 0.0] (observation 0) 5 {:key (rng/key 70)})
+        state' (pf/step state [2 0.0] [diff/unknown-change diff/no-change] (observation 1)
+                        {:proposal re-propose :proposal-args [1] :backward move-back :backward-args [1] :key (rng/key 71)})]
+    ;; the weight: update weight - log q(forward choices) + log q_bwd(discard)
+    (doseq [[tr tr' w w' key] (map vector (:traces state) (:traces state') (:log-weights state) (:log-weights state')
+                                   (rng/split (rng/key 71) 5))]
+      (let [[k-propose k-update] (rng/split key)
+            {:keys [choices weight]} (gfi/propose re-propose [tr 1] k-propose)
+            {up :weight discard :discard t2 :trace} (gfi/update tr [2 0.0] [diff/unknown-change diff/no-change]
+                                                                (cm/merge (observation 1) choices) k-update)]
+        (is (= (tr' [0 :x]) (t2 [0 :x])))
+        (is (not= (tr [0 :x]) (tr' [0 :x])) "the old state moved")
+        (is (ts/close? (- w' w) (+ (- up weight) (:weight (gfi/assess move-back [t2 1] discard)))))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"changed or removed"
+                          (pf/step state [2 0.0] [diff/unknown-change diff/no-change] (observation 1)
+                                   {:proposal re-propose :proposal-args [1] :key (rng/key 72)}))
+        "without a backward proposal, still loud")))

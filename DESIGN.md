@@ -484,6 +484,19 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   and gives the tape the rule. Single outputs, array or number arguments
   (trees pass through without gradients); in native mode f runs inside
   MLX's transformation and may not read values on the host.
+- **Trace transforms** (M4, 2026-10-20): `gen.inference.transform`, Gen.jl's
+  @transform as `(deftransform name [model-in aux-in model-out aux-out]
+  body)`, the body calling `read`, `write` and `copy` with Gen.jl's tags
+  (the four names are bound to the spaces, as in Gen.jl's header). The
+  body is run once for its outputs and again under `array/grad` for the
+  Jacobian of its continuous part, the continuous reads substituted;
+  outputs are the continuous writes, copies of continuous reads, and the
+  continuous reads an update keeps unwritten (so an involution may read a
+  choice it leaves alone). Translators are `(fn [trace key] → {:trace
+  :weight})`, so a particle filter takes one as a move-reweight kernel;
+  the symmetric translator is `involution`, the function
+  `mh/involutive-mh` already took. An involution must write every new
+  choice: its update samples nothing, a loud error otherwise.
 - **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
   `(array/item x)`, the namespace's last segment, as the Clojure style guide
   has it. It replaced `a`, which the owner found ugly (2026-10-18). The
