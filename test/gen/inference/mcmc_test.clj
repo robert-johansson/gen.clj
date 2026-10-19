@@ -156,9 +156,9 @@
   (let [x (tr :x)
         u (cm/get-choice fwd :u)
         h (fn [v] (let [x (a/take v 0) u (a/take v 1)] (a/stack [(a/* x (a/exp u)) (a/negate u)])))
-        {t :trace w :weight} (gfi/update tr (cm/choicemap :x (* x (Math/exp u))))]
+        {t :trace w :weight} (gfi/update tr (cm/choicemap :x (* x (a/exp u))))]
     {:trace t :bwd-choices (cm/choicemap :u (- u))
-     :weight (a/+ w (grad/log-abs-det-jacobian h (a/array [x u])))}))
+     :weight (a/+ w (grad/log-abs-det-jacobian h (a/stack [x u])))}))
 
 (deftest ^:slow a-volume-changing-involution-targets-the-posterior
   (let [step (fn [tr key] (:trace (mh/involutive-mh tr log-scale [] scale-move key)))
@@ -167,7 +167,7 @@
     (is (matches? ends 3.0 3.0) "Gamma(3, 1): mean 3, variance 3"))
   (testing "without the Jacobian the chain is biased, so the test can tell"
     (let [wrong (fn [tr fwd r args] (assoc (scale-move tr fwd r args) :weight
-                                           (:weight (gfi/update tr (cm/choicemap :x (* (tr :x) (Math/exp (cm/get-choice fwd :u))))))))
+                                           (:weight (gfi/update tr (cm/choicemap :x (* (tr :x) (a/exp (cm/get-choice fwd :u))))))))
           step (fn [tr key] (:trace (mh/involutive-mh tr log-scale [] wrong key)))
           start (start-at positive (cm/choicemap :x 1.0))
           ends (map (fn [key] ((reduce step start (rng/split key 80)) :x)) (rng/split (rng/key 31) 1000))]
@@ -200,12 +200,12 @@
           h (fn [v] (let [a (a/take v 0) b (a/take v 1)] (a/stack [(a/* 0.5 (a/+ a b)) (a/* 0.5 (a/- b a))])))
           {t :trace w :weight} (gfi/update tr (cm/choicemap :two? false :m (* 0.5 (+ m1 m2))))]
       {:trace t :bwd-choices (cm/choicemap :u (* 0.5 (- m2 m1)))
-       :weight (a/+ w (grad/log-abs-det-jacobian h (a/array [m1 m2])))})
+       :weight (a/+ w (grad/log-abs-det-jacobian h (a/stack [m1 m2])))})
     (let [m (tr :m) u (cm/get-choice fwd :u)
           h (fn [v] (let [a (a/take v 0) b (a/take v 1)] (a/stack [(a/- a b) (a/+ a b)])))
           {t :trace w :weight} (gfi/update tr (cm/choicemap :two? true :m1 (- m u) :m2 (+ m u)))]
       {:trace t :bwd-choices cm/EMPTY
-       :weight (a/+ w (grad/log-abs-det-jacobian h (a/array [m u])))})))
+       :weight (a/+ w (grad/log-abs-det-jacobian h (a/stack [m u])))})))
 
 (deftest ^:slow a-split-merge-move-targets-the-posterior
   (let [y 1.7
