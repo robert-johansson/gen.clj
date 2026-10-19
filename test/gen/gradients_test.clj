@@ -8,6 +8,7 @@
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
             [gen.dist :as d]
+            [gen.dist.core :as dc]
             [gen.dynamic :as dyn :refer [gen]]
             [gen.gfi :as gfi]
             [gen.gradients :as g]
@@ -239,3 +240,18 @@
     (is (ts/close? 2.54 xg {:rtol (ts/tol 1e-9) :atol (ts/tol 1e-9)}))
     (when (ts/jvm?)
       (is (ts/close? (/ (- (f (+ 0.7 h)) (f (- 0.7 h))) (* 2 h)) xg {:rtol 1e-6 :atol 1e-6}) "and the finite difference"))))
+
+(deftest lecture-is-exact
+  ;; Eqs. 3.8-3.9 (law audit gap M): the score is log q(mu; w·y, e^log-s) of
+  ;; the model's own mu, the gradient its closed form
+  (let [model (gen [] (let [mu (trace :mu (d/normal 0 1))] (trace :y (d/normal mu 1))))
+        proposal (gen [y] (trace :mu (d/normal (* (param :w) y) (array/exp (param :log-s)))))
+        store {:w 0.3 :log-s 0.1}
+        key (rng/key 21)
+        {:keys [score grads]} (learn/lecture model [] proposal store (fn [tr] [(tr :y)]) key)
+        tr (gfi/simulate model [] (first (rng/split key)))
+        mu (ts/number (tr :mu)) y (ts/number (tr :y))
+        s (Math/exp 0.1) z (/ (- mu (* 0.3 y)) s)]
+    (is (ts/close? (ts/number (dc/log-prob (d/normal (* 0.3 y) s) mu)) score))
+    (is (ts/close? (* (/ z s) y) (:w grads)))
+    (is (ts/close? (- (* z z) 1.0) (:log-s grads)))))

@@ -369,3 +369,26 @@
                       (rng/split (rng/key 43) 10))]
     (is (some string? outcomes))
     (is (every? #(or (= 0.8 %) (re-find #"observ" %)) outcomes) (str outcomes))))
+
+(def p-sum-observed (gen [] (let [s (trace :s (d/normal 0 (Math/sqrt 2)))] (trace :o (d/normal s 1)))))
+(def p-pair-observed
+  (gen [] (let [a (trace :a (d/normal 0 1)) b (trace :b (d/normal 0 1))]
+            (trace :o (d/normal (+ a b) 1))
+            (trace :r (d/normal (- a b) 1)))))
+
+(deftest ^:slow ^:heavy translating-particles-between-models-keeps-the-estimate-unbiased
+  ;; Eq. 3.13, Alg. 9 (law audit gap H): particles of P1 given o = 0.5,
+  ;; translated to P2 given o and r = 0.3; a + b and a - b are independent
+  ;; N(0, 2), so p2(o, r) = N(.5; 0, √3) N(.3; 0, √3)
+  (let [[forward _] (tf/pair to-pair to-sum)
+        translate (tf/translator {:p-new p-pair-observed :q-forward difference :transform forward
+                                  :new-observations (cm/choicemap :o 0.5 :r 0.3)})
+        evidence (+ (lp (d/normal 0 (Math/sqrt 3)) 0.5) (lp (d/normal 0 (Math/sqrt 3)) 0.3))
+        runs 400
+        ratios (mapv (fn [key]
+                       (let [[k1 k2] (rng/split key)
+                             state (pf/initialize p-sum-observed [] (cm/choicemap :o 0.5) 20 {:key k1})]
+                         (Math/exp (- (pf/log-ml-estimate (pf/move-reweight state translate k2)) evidence))))
+                     (rng/split (rng/key 50) runs))
+        [m sd] (mean-sd ratios)]
+    (is (< (Math/abs (- m 1.0)) (* 5 (/ sd (Math/sqrt runs)))) (str m " ± " (/ sd (Math/sqrt runs))))))
