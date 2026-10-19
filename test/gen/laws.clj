@@ -25,7 +25,12 @@
             [gen.selection :as sel]
             [gen.test-support :as ts]))
 
-(defn close? [x y] (ts/close? x y))
+(defn close?
+  "Weights within the backend's precision. On a float32 backend a weight is a
+   difference of scores, so its error scales with the scores rather than
+   with it: a few ulps of scores of up to ~100."
+  [x y]
+  (if (ts/f32?) (ts/close? x y {:rtol 1e-4 :atol 1e-3}) (ts/close? x y)))
 
 (defn- zero-weight?
   "Is the weight w exactly zero (a host number, or a 0-d array of any

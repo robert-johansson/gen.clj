@@ -22,7 +22,7 @@
   (prop/for-all [[seed n] gen-case]
     (let [m (spd (rng/key seed) [] n)
           l (la/cholesky m)]
-      (and (a/allclose? (a/matmul l (a/transpose l)) m {:rtol 1e-10 :atol 1e-10})
+      (and (a/allclose? (a/matmul l (a/transpose l)) m {:rtol (ts/tol 1e-10) :atol (ts/tol 1e-10)})
            (a/allclose? l (a/* l (a/>= (a/expand-dims (a/arange n) -1) (a/arange n))))))))
 
 (defspec solves-solve 100
@@ -31,18 +31,18 @@
           m (spd k1 [] n)
           b (rng/normal k2 [n])
           l (la/cholesky m)]
-      (and (a/allclose? (a/matmul m (la/solve m b)) b {:rtol 1e-9 :atol 1e-9})
-           (a/allclose? (a/matmul l (la/solve-triangular l b)) b {:rtol 1e-9 :atol 1e-9})
+      (and (a/allclose? (a/matmul m (la/solve m b)) b {:rtol (ts/tol 1e-9) :atol (ts/tol 1e-9)})
+           (a/allclose? (a/matmul l (la/solve-triangular l b)) b {:rtol (ts/tol 1e-9) :atol (ts/tol 1e-9)})
            (a/allclose? (a/matmul (a/transpose l) (la/solve-triangular l b {:transpose? true})) b
-                        {:rtol 1e-9 :atol 1e-9})
-           (a/allclose? (a/matmul m (la/inv m)) (a/eye n) {:rtol 1e-9 :atol 1e-9})))))
+                        {:rtol (ts/tol 1e-9) :atol (ts/tol 1e-9)})
+           (a/allclose? (a/matmul m (la/inv m)) (a/eye n) {:rtol (ts/tol 1e-9) :atol (ts/tol 1e-9)})))))
 
 (defspec logdets-agree 100
   (prop/for-all [[seed n] gen-case]
     (let [m (spd (rng/key seed) [] n)
           [sign logabs] (la/slogdet m)]
       (and (= 1.0 (ts/host sign))
-           (a/allclose? logabs (la/cholesky-logdet (la/cholesky m)) {:rtol 1e-10})))))
+           (a/allclose? logabs (la/cholesky-logdet (la/cholesky m)) {:rtol (ts/tol 1e-10)})))))
 
 (deftest batched-matches-one-at-a-time
   (let [ms (spd (rng/key 5) [3] 4)

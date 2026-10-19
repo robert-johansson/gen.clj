@@ -127,7 +127,7 @@
   ;; law 20: with the internal proposal, a step adds log p(y_t | x_t)
   (let [state (pf/initialize model [1 0.0] (observation 0) 20 {:key (rng/key 20)})
         state' (pf/step state [2 0.0] [diff/unknown-change diff/no-change] (observation 1) {:key (rng/key 21)})]
-    (is (every? true? (map (fn [w w' tr] (< (ts/abs (- (- w' w) (gfi/project tr (sel/select [1 :y])))) 1e-12))
+    (is (every? true? (map (fn [w w' tr] (< (ts/abs (- (- w' w) (gfi/project tr (sel/select [1 :y])))) (ts/tol 1e-12)))
                            (:log-weights state) (:log-weights state') (:traces state'))))))
 
 (deftest a-custom-proposal-in-a-batched-filter-runs-per-particle

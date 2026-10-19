@@ -31,7 +31,10 @@
   "Same addresses, and numerically equal leaves."
   [x y]
   (and (= (cm/addresses x) (cm/addresses y))
-       (every? (fn [p] (a/equal? (cm/get-choice x p) (cm/get-choice y p))) (cm/addresses x))))
+       ;; equal, or on a float32 backend (where arrays round host doubles) close
+       (every? (fn [p] (let [u (cm/get-choice x p) v (cm/get-choice y p)]
+                         (if (ts/f32?) (ts/close? u v) (a/equal? u v))))
+               (cm/addresses x))))
 
 ;; ---------------------------------------------------------------------------
 ;; Choice maps

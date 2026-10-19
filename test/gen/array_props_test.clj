@@ -55,11 +55,26 @@
 (defn- agrees?
   "Host result x and array result y agree: exactly on the JVM backend (its
    arithmetic is the host's); on another, exactly but for float results,
-   within a few ulps of the backend's float."
+   within a few ulps of the backend's float (on float32, of the host result
+   rounded to float32, which over- and underflows as the array does)."
   [x y]
   (or (same-values? x y)
       (and (not (ts/jvm?)) (number? x) (number? y)
-           (ts/close? (double x) (double y) {:rtol (if (ts/f32?) 1e-6 4e-16) :atol 0.0}))))
+           (let [x (cond (and (ts/f32?) (float? x)) (double (unchecked-float x))
+                         ;; host ints are int64; an int32 backend's wrap
+                         (and (integer? x) (= :int32 (ts/int-dtype))) (long (unchecked-int (long x)))
+                         :else x)]
+             (or (same-values? x y)
+                 ;; float32: the transcendental kernels err by up to ~15 ulps
+                 (ts/close? (double x) (double y) {:rtol (if (ts/f32?) 2e-6 4e-16)
+                                                  :atol (if (ts/f32?) 1e-37 0.0)}))))))
+
+(defn- all-agree?
+  "agrees? elementwise over nested vectors."
+  [x y]
+  (if (and (sequential? x) (sequential? y))
+    (and (= (count x) (count y)) (every? true? (map all-agree? x y)))
+    (agrees? x y)))
 
 (defn- close-values? [x y]
   (cond (and (sequential? x) (sequential? y))
@@ -84,8 +99,14 @@
   (gen/one-of [(gen/double* {:infinite? false :NaN? false :min -1e6 :max 1e6})
                (gen/fmap double (gen/choose -5 5))]))
 
+(defn- storable
+  "x as the backend's float stores it: rounded to float32 on a float32
+   backend, so the double-precision reference sees the same inputs."
+  [x]
+  (if (and (ts/f32?) (instance? Double x)) (double (unchecked-float x)) x))
+
 (defn- gen-data [shape]
-  (gen/fmap #(reshape-flat (vec %) shape)
+  (gen/fmap #(reshape-flat (mapv storable %) shape)
             (gen/vector gen-elem (reduce * shape))))
 
 (def gen-broadcast-pair
@@ -117,11 +138,11 @@
                  [op ref-op] (gen/elements (seq binary-ops))]
     (let [out (ref-broadcast-shape sx sy)
           expected (build out #(ref-op (broadcast-get x sx %) (broadcast-get y sy %)))]
-      (same-values? expected (a/->clj (op (a/array x) (a/array y)))))))
+      (all-agree? expected (a/->clj (op (a/array x) (a/array y)))))))
 
 (defspec host-and-array-semantics-agree 500
-  (prop/for-all [x (gen/one-of [gen-elem (gen/choose -9 9) gen/boolean])
-                 y (gen/one-of [gen-elem (gen/choose -9 9) gen/boolean])
+  (prop/for-all [x (gen/one-of [(gen/fmap storable gen-elem) (gen/choose -9 9) gen/boolean])
+                 y (gen/one-of [(gen/fmap storable gen-elem) (gen/choose -9 9) gen/boolean])
                  op (gen/elements [a/+ a/- a/* a// a/pow a/maximum a/minimum a/mod a/floor-div
                                    a/< a/<= a/== a/!= a/logical-and a/logical-or])]
     ;; the same op on host scalars and on 1-element arrays must agree:
@@ -130,7 +151,7 @@
     (agrees? (op x y) (a/item (op (a/array [x]) (a/array [y]))))))
 
 (defspec unary-host-and-array-semantics-agree 300
-  (prop/for-all [x (gen/one-of [gen-elem (gen/choose -9 9) gen/boolean])
+  (prop/for-all [x (gen/one-of [(gen/fmap storable gen-elem) (gen/choose -9 9) gen/boolean])
                  op (gen/elements [a/negate a/abs a/sign a/exp a/log a/sqrt a/log1p a/expm1
                                    a/floor a/ceil a/round a/tanh a/isnan a/logical-not])]
     (agrees? (op x) (a/item (op (a/array [x]))))))
@@ -149,7 +170,7 @@
 
 (defspec transpose-is-an-involution-and-moves-elements 200
   (prop/for-all [shape (gen/vector (gen/choose 1 4) 1 3)]
-    (let [x (build shape #(double (hash %)))
+    (let [x (build shape #(double (mod (hash %) 1000000)))
           arr (a/array x)
           t (a/transpose arr)]
       (and (a/equal? arr (a/transpose t))

@@ -36,10 +36,10 @@
 
 (deftest creation-and-conversion
   (is (= [[1 2] [3 4]] (a/->clj (a/array [[1 2] [3 4]]))))
-  (is (= :int64 (a/dtype (a/array [1 2]))))
-  (is (= :float64 (a/dtype (a/array [1.0 2]))))
+  (is (= (ts/int-dtype) (a/dtype (a/array [1 2]))) "the backend's default dtypes")
+  (is (= (ts/float-dtype) (a/dtype (a/array [1.0 2]))))
   (is (= :bool (a/dtype (a/array [true false]))))
-  (is (= :float64 (a/dtype (a/array []))))
+  (is (= (ts/float-dtype) (a/dtype (a/array []))))
   (is (= [0] (a/shape (a/array []))))
   (is (= 3.0 (ts/host (a/array 3.0))))
   (if (ts/jvm?)
@@ -67,16 +67,16 @@
 (deftest dtype-promotion
   (testing "host numbers are weakly typed"
     (is (= :float32 (a/dtype (a/+ (a/array [1.5] {:dtype :float32}) 2.5))))
-    (is (= :float64 (a/dtype (a/+ (a/array [1 2]) 2.5))))
-    (is (= :int64 (a/dtype (a/+ (a/array [1 2]) 2))))
-    (is (= :int64 (a/dtype (a/+ (a/array [true]) 1)))))
+    (is (= (ts/float-dtype) (a/dtype (a/+ (a/array [1 2]) 2.5))))
+    (is (= (ts/int-dtype) (a/dtype (a/+ (a/array [1 2]) 2))))
+    (is (= (ts/int-dtype) (a/dtype (a/+ (a/array [true]) 1)))))
   (testing "strong dtypes promote"
-    (is (= :float64 (a/dtype (a/+ (a/array [1] {:dtype :int32}) (a/array [1.0])))))
+    (is (= (ts/float-dtype) (a/dtype (a/+ (a/array [1] {:dtype :int32}) (a/array [1.0])))))
     (is (= :float32 (a/dtype (a/+ (a/array [1] {:dtype :int64}) (a/array [1.0] {:dtype :float32})))))
-    (is (= :int64 (a/dtype (a/+ (a/array [1] {:dtype :int32}) (a/array [1]))))))
+    (is (= (ts/int-dtype) (a/dtype (a/+ (a/array [1] {:dtype :int32}) (a/array [1]))))))
   (testing "division and float functions produce floats"
     (is (= [0.5 1.0] (a/->clj (a// (a/array [1 2]) 2))))
-    (is (= :float64 (a/dtype (a/exp (a/array [0 1]))))))
+    (is (= (ts/float-dtype) (a/dtype (a/exp (a/array [0 1]))))))
   (testing "comparisons and logic produce bools"
     (is (= [true false] (a/->clj (a/< (a/array [1 3]) 2))))
     (is (= [false true] (a/->clj (a/logical-not (a/array [1.0 0.0]))))))
@@ -191,10 +191,11 @@
     (is (= [[2] [3] [6]] (a/->clj (a/take-along-axis x (a/array [[1] [0] [1]]) 1)))))
   (testing "pick covers every batch-shape case of a categorical log-prob"
     (let [lp (a/array [[0.1 0.9] [0.6 0.4] [0.5 0.5]])]
-      (is (= [0.9 0.6 0.5] (a/->clj (a/pick lp (a/array [1 0 1])))) "per-row index")
-      (is (= [0.9 0.4 0.5] (a/->clj (a/pick lp 1))) "one shared index")
-      (is (= [0.1 0.9 0.9] (a/->clj (a/pick (a/array [0.1 0.9]) (a/array [0 1 1])))) "batched index, shared logits")
-      (is (= 0.9 (ts/host (a/pick (a/array [0.1 0.9]) 1))) "scalar case"))))
+      ;; the picked elements exactly (as stored in the backend's float)
+      (is (a/equal? (a/array [0.9 0.6 0.5]) (a/pick lp (a/array [1 0 1]))) "per-row index")
+      (is (a/equal? (a/array [0.9 0.4 0.5]) (a/pick lp 1)) "one shared index")
+      (is (a/equal? (a/array [0.1 0.9 0.9]) (a/pick (a/array [0.1 0.9]) (a/array [0 1 1]))) "batched index, shared logits")
+      (is (a/equal? (a/array 0.9) (a/pick (a/array [0.1 0.9]) 1)) "scalar case"))))
 
 (deftest matmul
   (is (= [[19 22] [43 50]] (a/->clj (a/matmul (a/array [[1 2] [3 4]]) (a/array [[5 6] [7 8]])))))

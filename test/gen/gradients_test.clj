@@ -17,18 +17,35 @@
 
 (def h 1e-6)
 
+;; Finite differences run on the JVM backend in float64 whatever the backend
+;; under test (a float32 backend's would be noise)
+(def ^:private reference (a/backend-named :jvm))
+
+(defn- on-reference [v]
+  (if (a/host? v) v (a/with-backend reference (a/array (a/->clj v)))))
+
+(defn- reference-choices [choices]
+  (reduce (fn [c p] (cm/set-choice c p (on-reference (cm/get-choice choices p)))) choices (cm/addresses choices)))
+
 (defn- objective [gf args choices retgrad]
-  (let [{w :weight rv :retval} (gfi/assess gf args choices)]
-    (+ (double (a/item w))
-       (if retgrad (reduce + (map #(double (a/item (a/sum (a/* %1 %2)))) (a/tree-leaves retgrad) (a/tree-leaves rv))) 0.0))))
+  (a/with-backend reference
+    (let [{w :weight rv :retval} (gfi/assess gf args (reference-choices choices))]
+      (+ (double (a/item w))
+         (if retgrad (reduce + (map #(double (a/item (a/sum (a/* %1 %2)))) (a/tree-leaves retgrad) (a/tree-leaves rv))) 0.0)))))
+
+(defn- grad-close?
+  "A gradient (of the backend under test) and a float64 finite difference."
+  [g fd]
+  (< (ts/abs (- (ts/number g) fd)) (if (ts/f32?) (* 1e-3 (max 1.0 (Math/abs (double fd)))) 1e-5)))
 
 (defn- fd-choice
   "The central difference of the objective in element i of the choice at p."
   [{gf :gen-fn args :args choices :choices} p i retgrad]
-  (let [v (cm/get-choice choices p)
+  (let [v (on-reference (cm/get-choice choices p))
         bump (fn [d] (if (a/host? v)
                        (+ v d)
-                       (a/reshape (a/array (update (vec (flatten (vector (a/->clj v)))) i + d)) (a/shape v))))
+                       (a/with-backend reference
+                         (a/reshape (a/array (update (vec (flatten (vector (a/->clj v)))) i + d)) (a/shape v)))))
         at (fn [d] (objective gf args (cm/set-choice choices p (bump d)) retgrad))]
     (/ (- (at h) (at (- h))) (* 2 h))))
 
@@ -38,9 +55,8 @@
             (for [p (cm/addresses values)
                   :let [gv (cm/get-choice gradients p)]
                   i (range (a/size gv))]
-              (< (ts/abs (- (double (a/item (if (a/host? gv) gv (a/take (a/flatten gv) i))))
-                              (fd-choice tr p i retgrad)))
-                 1e-5)))))
+              (grad-close? (a/item (if (a/host? gv) gv (a/take (a/flatten gv) i)))
+                           (fd-choice tr p i retgrad))))))
 
 (def linreg
   (gen [xs]
@@ -83,7 +99,7 @@
         {[xs-grad] :arg-grads} (g/choice-gradients tr sel/none nil {:argnums [0]})
         fd (fn [i] (let [at (fn [d] (objective linreg [(update [1.0 2.0 3.0] i + d)] (:choices tr) nil))]
                      (/ (- (at h) (at (- h))) (* 2 h))))]
-    (is (every? true? (map #(< (ts/abs (- %1 (fd %2))) 1e-5) xs-grad (range 3)))))
+    (is (every? true? (map #(grad-close? %1 (fd %2)) (ts/host xs-grad) (range 3)))))
   (is (= [nil] (:arg-grads (g/choice-gradients (sim linreg [[1.0 2.0]] 9) (sel/select :slope))))
       "arguments are not differentiated unless asked")
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not a tree of floats"
@@ -98,13 +114,13 @@
                         (g/choice-gradients (sim (gen [] (trace :b (d/bernoulli 0.5))) [] 1) (sel/select :b)))))
 
 (deftest the-jacobian-log-determinant
-  (is (< (ts/abs (- (g/log-abs-det-jacobian #(a/* % (a/array [2.0 3.0])) (a/array [1.0 1.0])) (Math/log 6.0))) 1e-12))
+  (is (< (ts/abs (- (g/log-abs-det-jacobian #(a/* % (a/array [2.0 3.0])) (a/array [1.0 1.0])) (Math/log 6.0))) (ts/tol 1e-12)))
   (testing "a nonlinear map: (x, u) ↦ (x·e^u, -u) has |det J| = e^u"
     (is (< (ts/abs (- (g/log-abs-det-jacobian (fn [v] (let [x (a/take v 0) u (a/take v 1)]
                                                           (a/stack [(a/* x (a/exp u)) (a/negate u)])))
                                                 (a/array [1.5 0.3]))
                         0.3))
-           1e-12))))
+           (ts/tol 1e-12)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Parameters
@@ -126,13 +142,13 @@
         grads (g/param-gradients tr)
         fd (fn [k] (let [at (fn [d] (objective (dyn/with-params regression (update store k + d)) [xs] (:choices tr) nil))]
                      (/ (- (at h) (at (- h))) (* 2 h))))]
-    (is (< (ts/abs (- (:w grads) (fd :w))) 1e-5))
-    (is (< (ts/abs (- (:b grads) (fd :b))) 1e-5)))
+    (is (grad-close? (:w grads) (fd :w)))
+    (is (grad-close? (:b grads) (fd :b))))
   (testing "parameters reach nested calls"
     (let [inner (gen [] (trace :x (d/normal (param :mu) 1)))
           outer (dyn/with-params (gen [] (splice :in inner)) {:mu 2.0})
           tr (:trace (gfi/generate outer [] (cm/choicemap [:in :x] 3.0) (rng/key 2)))]
-      (is (< (ts/abs (- 1.0 (:mu (g/param-gradients tr)))) 1e-12))))
+      (is (< (ts/abs (- 1.0 (:mu (g/param-gradients tr)))) (ts/tol 1e-12)))))
   (testing "a missing parameter is a loud error"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"has no value" (gfi/simulate regression [xs] (rng/key 3))))))
 

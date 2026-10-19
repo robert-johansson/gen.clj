@@ -22,6 +22,11 @@
 
 (defn f32? [] (= :float32 (float-dtype)))
 
+(defn float64?
+  "Does the backend have float64 (MLX's GPUs do not)?"
+  []
+  (or (jvm?) (not= :gpu ((requiring-resolve 'gen.backend.mlx/device) a/*backend*))))
+
 (defn host
   "x with every backend array in it (nested maps, vectors and seqs, and
    choice maps, as maps) read on the host: numbers, booleans and nested
@@ -39,6 +44,12 @@
    values compared, or float64 round-off."
   []
   (if (f32?) {:rtol 2e-5 :atol 2e-5} {:rtol 1e-12 :atol 1e-12}))
+
+(defn tol
+  "A tolerance band b, stated for float64: as it is on a float64 backend,
+   at least float32's precision (2e-5) on a float32 one."
+  ^double [b]
+  (if (f32?) (max (double b) 2e-5) (double b)))
 
 (defn close?
   "x and y elementwise within the backend's tolerance (or rtol/atol given)."

@@ -21,7 +21,7 @@
     (let [value (if (= :bernoulli dist) (== 1 value) value)
           got (dc/log-prob (apply (constructor dist) params) (if (vector? value) (a/array value) value))]
       (is (or (= log-prob (a/item got))
-              (< (Math/abs (- (double (a/item got)) log-prob)) (* 1e-12 (max 1.0 (Math/abs log-prob)))))
+              (< (Math/abs (- (double (a/item got)) log-prob)) (* (ts/tol 1e-12) (max 1.0 (Math/abs log-prob)))))
           (str (name dist) " " params " at " value)))))
 
 (deftest values-and-shapes
@@ -142,13 +142,13 @@
     (doseq [v [-2.5 0.0 1.7]]
       (is (close? (a/item (dc/log-prob m v))
                   (Math/log (+ (* 0.3 (density (d/normal -2.0 0.5) v)) (* 0.7 (density (d/normal 1.0 1.0) v))))
-                  1e-12))))
+                  (ts/tol 1e-12)))))
   (let [h (normal-uniform [0.4 0.6] [0.0 1.0] [-1.0 1.0])]
-    (is (close? (a/item (dc/log-prob h 0.5)) (Math/log (+ (* 0.4 (density (d/normal 0 1) 0.5)) (* 0.6 0.5))) 1e-12))
-    (is (close? (a/item (dc/log-prob h 3.0)) (Math/log (* 0.4 (density (d/normal 0 1) 3.0))) 1e-12)
+    (is (close? (a/item (dc/log-prob h 0.5)) (Math/log (+ (* 0.4 (density (d/normal 0 1) 0.5)) (* 0.6 0.5))) (ts/tol 1e-12)))
+    (is (close? (a/item (dc/log-prob h 3.0)) (Math/log (* 0.4 (density (d/normal 0 1) 3.0))) (ts/tol 1e-12))
         "outside one component's support"))
   (let [p (normal-bernoulli [0.5 2.0] [0.3])]
-    (is (close? (a/item (dc/log-prob p [1.0 true])) (+ (a/item (dc/log-prob (d/normal 0.5 2.0) 1.0)) (Math/log 0.3)) 1e-12))
+    (is (close? (a/item (dc/log-prob p [1.0 true])) (+ (a/item (dc/log-prob (d/normal 0.5 2.0) 1.0)) (Math/log 0.3)) (ts/tol 1e-12)))
     (is (vector? (dc/sample p (rng/key 1))))))
 
 (deftest mixture-moments
@@ -169,7 +169,7 @@
   (testing "product sums each factor over its own value (review 4)"
     (let [p ((d/product d/normal d/bernoulli) [(a/zeros [3]) 1.0] [0.3])]
       (is (close? (a/item (dc/log-prob p [(a/zeros [3]) true]))
-                  (+ (* 3 (a/item (dc/log-prob (d/normal 0 1) 0.0))) (Math/log 0.3)) 1e-12))
+                  (+ (* 3 (a/item (dc/log-prob (d/normal 0 1) 0.0))) (Math/log 0.3)) (ts/tol 1e-12)))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"one element per factor" (dc/log-prob p [(a/zeros [3])])))))
   (testing "heterogeneous mixtures keep each component's values (review 14)"
     (let [x (dc/sample ((d/heterogeneous-mixture [d/poisson d/normal]) [0.01 0.99] [3.0] [0.5 1.0]) (rng/key 1) [200])]

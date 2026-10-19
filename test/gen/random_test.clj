@@ -40,14 +40,16 @@
     (is (= (mapv #(unchecked-long (biginteger %)) out) (vec (threefry/bits64 (->key key) n)))))
   (let [{:keys [key out]} (:uniform-f32 fixtures)]
     (is (= out (a/->clj (rng/uniform (->key key) [6] {:dtype :float32})))))
-  (testing "float64 draws (bit-identical uniforms; the rest to rounding)"
-    (doseq [[k f tolerance] [[:uniform-f64 rng/uniform 0.0]
-                             [:exponential-f64 rng/exponential 1e-15]
-                             [:gumbel-f64 rng/gumbel 1e-15]
-                             [:normal-f64 rng/normal 1e-15]]]
-      (let [{:keys [key out]} (fixtures k)]
-        (is (a/allclose? (a/array out) (f (->key key) [6]) {:rtol tolerance :atol tolerance})
-            (name k))))))
+  (when (ts/float64?)
+    (testing "float64 draws (bit-identical uniforms; the rest to rounding)"
+      (doseq [[k f tolerance] [[:uniform-f64 rng/uniform 0.0]
+                               [:exponential-f64 rng/exponential 1e-15]
+                               [:gumbel-f64 rng/gumbel 1e-15]
+                               [:normal-f64 rng/normal 1e-15]]]
+        (let [{:keys [key out]} (fixtures k)]
+          (is (a/allclose? (a/array out {:dtype :float64}) (f (->key key) [6] {:dtype :float64})
+                           {:rtol tolerance :atol tolerance})
+              (name k)))))))
 
 (deftest keys-are-values
   (is (= (rng/key 3) (rng/key 3)))
@@ -109,7 +111,7 @@
           (is (pos? (ts/number (a/min x))) (str "positive, alpha " alpha)))))
     (testing "randint covers [low, high) uniformly"
       (let [x (rng/randint k 2 5 [n])]
-        (is (= :int64 (a/dtype x)))
+        (is (= (ts/int-dtype) (a/dtype x)))
         (is (= 2 (ts/host (a/min x))))
         (is (= 4 (ts/host (a/max x))))
         (is (close? (a/mean x) 3.0 0.01))))))

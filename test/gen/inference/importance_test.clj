@@ -40,8 +40,8 @@
                                 {:proposal posterior-proposal :proposal-args [y] :key (rng/key 1)})]
     (is (= n (count traces)))
     (is (every? #(= y (% :y)) traces))
-    (is (every? #(< (ts/abs (- % (- (Math/log n)))) 1e-12) log-normalized-weights))
-    (is (< (ts/abs (- log-ml-estimate log-evidence)) 1e-12))))
+    (is (every? #(< (ts/abs (- % (- (Math/log n)))) (ts/tol 1e-12)) log-normalized-weights))
+    (is (< (ts/abs (- log-ml-estimate log-evidence)) (ts/tol 1e-12)))))
 
 (deftest the-prior-proposal-estimates-the-evidence
   (let [n 10000
@@ -111,7 +111,7 @@
       (doseq [[tr lnw] (map vector traces log-normalized-weights)]
         (let [expected (- (+ (dc/log-prob (d/normal 0 1) (tr :x)) (dc/log-prob (d/normal (tr :z) 1) y))
                           (dc/log-prob (d/normal 0.5 1.5) (tr :x)))]
-          (is (< (ts/abs (- (+ lnw log-total) expected)) 1e-12)))))
+          (is (< (ts/abs (- (+ lnw log-total) expected)) (ts/tol 1e-12))))))
     (testing "and the estimate is unbiased in exp space"
       (let [runs 4000
             evidence (Math/exp (dc/log-prob (d/normal 0 (Math/sqrt 3)) y))

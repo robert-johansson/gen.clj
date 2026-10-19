@@ -6,6 +6,7 @@
    to 1e-9. Plus normalization: continuous densities integrate to 1 and
    discrete ones sum to 1."
   (:require [clojure.test :refer [deftest is testing]]
+            [gen.test-support :as ts]
             [gen.array :as a]
             [gen.dist :as d]
             [gen.dist.core :as dc]))
@@ -14,7 +15,7 @@
 
 (defn- close? [expected actual]
   (or (= expected actual)
-      (< (Math/abs (- expected actual)) (* 1e-9 (max 1.0 (Math/abs expected))))))
+      (< (Math/abs (- expected actual)) (* (ts/tol (ts/tol 1e-9)) (max 1.0 (Math/abs expected))))))
 
 (def ^:private reference
   "[label distribution value expected-log-density]"
@@ -150,4 +151,4 @@
           [["poisson" (d/poisson 3.5) (range 60)] ["binom" (d/binom 12 0.35) (range 13)]
            ["geometric" (d/geometric 0.3) (range 200)] ["neg-binom" (d/neg-binom 2.5 0.4) (range 300)]
            ["uniform-discrete" (d/uniform-discrete -2 4) (range -2 5)] ["categorical" (d/categorical [0.2 0.5 0.3]) (range 3)]]]
-    (is (< (Math/abs (- 1.0 (reduce + (map #(Math/exp (lp dist %)) support)))) 1e-9) label)))
+    (is (< (Math/abs (- 1.0 (reduce + (map #(Math/exp (lp dist %)) support)))) (ts/tol 1e-9)) label)))

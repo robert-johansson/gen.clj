@@ -105,7 +105,7 @@
    [:spliced-distribution spliced-distribution [0.0] [[2.0] [-1.5]]]
    [:p-mh p-mh []]])
 
-(defn- close? [x y] (a/allclose? x y {:rtol 1e-12 :atol 1e-12}))
+(defn- close? [x y] (ts/close? x y))
 
 ;; ---------------------------------------------------------------------------
 ;; Laws (gen.laws), and their checks on structure changes
