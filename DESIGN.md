@@ -500,7 +500,11 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   :weight})`, so a particle filter takes one as a move-reweight kernel;
   the symmetric translator is `involution`, the function
   `mh/involutive-mh` already took. An involution must write every new
-  choice: its update samples nothing, a loud error otherwise. SMCP3 is
+  choice: its update samples nothing, a loud error otherwise. The general
+  translator subtracts the forward proposal's score (Eq. 3.12); Gen.jl's
+  GeneralTraceTranslator adds it (src/inference/trace_translators.jl on
+  master, while its SymmetricTraceTranslator subtracts), a sign bug the
+  change-of-variables test, whose weight is exactly 0, would catch. SMCP3 is
   GenParticleFilters' UpdatingTraceTranslator with a transform
   (`updating-translator`), applied to a filter by `pf/move-reweight`;
   without a transform it is Del Moral's SMC samplers.
