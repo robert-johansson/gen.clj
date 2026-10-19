@@ -92,7 +92,17 @@
 
 (declare kern-form)
 
-(defn- statements [forms] `(chain ~@(map kern-form forms)))
+(defn- statements
+  "A body's statements as one kernel: the lone statement's, or their chain."
+  [forms]
+  (if (= 1 (count forms)) (kern-form (first forms)) `(chain ~@(map kern-form forms))))
+
+(defn checked-kernel
+  "k, when it is a kernel (a function); a loud error naming form otherwise."
+  [k form]
+  (if (ifn? k)
+    k
+    (throw (ex-info (str "kern: " (pr-str form) " gave " (pr-str k) ", not a kernel") {:form form}))))
 
 (defn- kern-form
   "A kern statement as a kernel expression: a loop is the chain of its
@@ -105,7 +115,7 @@
       "when" (let [[_ c & body] form] `(if ~c ~(statements body) (chain)))
       "if" (let [[_ c a b] form] `(if ~c ~(kern-form a) ~(if (some? b) (kern-form b) `(chain))))
       "let" (let [[_ bindings & body] form] `(let ~bindings ~(statements body)))
-      form)))
+      `(checked-kernel ~form '~form))))
 
 (defmacro kern
   "Gen.jl's @kern: (kern [args] statement …) is a function of args returning

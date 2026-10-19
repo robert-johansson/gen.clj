@@ -218,3 +218,12 @@
         [stores _] (learn/step opt nil {:model {:w 1.0} :proposal {:a 2.0}} {:model {:w 0.5} :proposal {:a -1.0}})]
     (is (ts/close? 1.05 (get-in stores [:model :w])))
     (is (ts/close? 1.9 (get-in stores [:proposal :a])))))
+
+(deftest a-step-updates-the-parameters-it-is-given
+  (doseq [opt [(learn/sgd {:lr 0.1}) (learn/adam {:lr 0.1}) (learn/gradient-descent {:step-size-init 0.1 :step-size-beta 1.0})]]
+    (let [store {:w 1.0 :b 2.0}
+          [store' _] (learn/step opt (learn/init opt store) store {:w 0.5})]
+      (is (= 2.0 (:b store')) (str (:kind opt) ": :b has no gradient and stays"))
+      (is (< 1.0 (ts/number (:w store'))) (str (:kind opt) ": :w ascends"))))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"does not have"
+                        (learn/step (learn/sgd {:lr 0.1}) nil {:w 1.0} {:v 0.5}))))

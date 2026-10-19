@@ -219,12 +219,16 @@
   [a b key-a key-b]
   (when (= key-a key-b)
     (throw (ex-info "pair: the two keys must differ" {:key key-a})))
+  (when (some vector? [key-a key-b])
+    (throw (ex-info "pair takes two single addresses, not paths" {:keys [key-a key-b]})))
   (-> EMPTY (set-submap key-a a) (set-submap key-b b)))
 
 (defn unpair
   "Gen.jl's unpair: [the submap at key-a, the submap at key-b] of c, which
    must hold nothing else."
   [c key-a key-b]
+  (when (some vector? [key-a key-b])
+    (throw (ex-info "unpair takes two single addresses, not paths" {:keys [key-a key-b]})))
   (let [others (remove #{key-a key-b} (map first (submaps c)))]
     (when (seq others)
       (throw (ex-info (str "unpair: the choice map holds more than " (pr-str key-a) " and " (pr-str key-b))

@@ -147,4 +147,10 @@
           by-hand (k/chain (step) (step))
           kerned ((k/kern [] (doseq [_ (range 2)] (k/mh (sel/select :a)) (k/mh (sel/select :b)))))
           tr (:trace (gfi/generate model [] observations (rng/key 5)))]
-      (is (= (:choices (:trace (by-hand tr (rng/key 6)))) (:choices (:trace (kerned tr (rng/key 6)))))))))
+      (doseq [key (rng/split (rng/key 6) 6)]
+        (let [a (by-hand tr key) b (kerned tr key)]
+          (is (= (:choices (:trace a)) (:choices (:trace b))))
+          (is (= (:accepted a) (:accepted b)) "the same decisions, so the same keys")))))
+  (testing "a statement that is not a kernel is loud"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not a kernel"
+                          ((k/kern [] (k/mh (sel/select :a)) (when-not true (k/mh (sel/select :b)))))))))

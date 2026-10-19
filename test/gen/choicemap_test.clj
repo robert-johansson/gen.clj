@@ -171,3 +171,7 @@
     (is (= [(cm/to-map a) (cm/to-map b)] (mapv cm/to-map (cm/unpair c :left :right))) "unpair undoes pair")
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"more than" (cm/unpair (cm/set-choice c :extra 1.0) :left :right)))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must differ" (cm/pair a b :k :k)))))
+
+(deftest pair-takes-single-addresses
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not paths" (cm/pair (cm/choicemap :x 1.0) cm/EMPTY [:a 0] :b)))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not paths" (cm/unpair cm/EMPTY [:a 0] :b))))
