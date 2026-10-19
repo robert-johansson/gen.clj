@@ -143,10 +143,12 @@
                {:axis 0})
               ~(or not-invertible
                    (let [[bindings x-of-v] inverted]
-                     ;; the inverse rounded to the draw's integers, kept when it maps back to v
+                     ;; the inverse rounded to the draw's integers, kept when it maps back
+                     ;; to v (within float32's precision: images of distinct integers
+                     ;; lie much further apart)
                      `(let [~@bindings
                             ~x (array/round ~x-of-v)]
-                        (array/where (array/<= (array/abs (- ~f-body ~v)) (* 1e-9 (+ 1.0 (array/abs ~v))))
+                        (array/where (array/<= (array/abs (- ~f-body ~v)) (* 1e-5 (+ 1.0 (array/abs ~v))))
                                      (dc/log-prob ~dd ~x)
                                      ##-Inf)))))
             ~(or not-invertible
