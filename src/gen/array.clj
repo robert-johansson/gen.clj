@@ -975,6 +975,31 @@
   ([f] (grad f nil))
   ([f opts] (comp second (value-and-grad f opts))))
 
+(defn custom-vjp
+  "f with its gradient given by vjp: for code differentiation cannot see
+   through (host arithmetic, a solver's iterations) or should not (a
+   cheaper or steadier rule). The result is a function of the same
+   arguments, arrays or host numbers, returning (apply f args), a float
+   array or number. Under value-and-grad its gradient is
+   (vjp args out g): a vector of one cotangent per argument, each of its
+   argument's shape (nil for none), from the arguments' values, f's value
+   and the cotangent g of the result. Elsewhere it is f."
+  [f vjp]
+  (let [checked (fn [args out g]
+                  (let [cts (vjp args out g)]
+                    (when-not (and (sequential? cts) (= (count cts) (count args)))
+                      (throw (ex-info (str "custom-vjp: the VJP returned " (pr-str cts) " for " (count args)
+                                           " arguments; it returns one cotangent per argument (nil for none)")
+                                      {:cotangents cts :arguments (count args)})))
+                    (vec cts)))]
+    (fn [& args]
+      (let [args (vec args)]
+        (doseq [x args] (when-not (array? x) (not-an-array :custom-vjp x)))
+        (let [b (backend-of :custom-vjp args)]
+          (if (instance? gen.array.protocols.ICustomVjp b)
+            (p/-custom-vjp b f checked args)
+            (apply f args)))))))
+
 ;; ---------------------------------------------------------------------------
 ;; Compilation (docs/array-api.md §8)
 ;; ---------------------------------------------------------------------------

@@ -252,6 +252,13 @@
   p/IWrappingBackend
   (-inner [_] inner)
 
+  p/ICustomVjp
+  (-custom-vjp [t f vjp args]
+    (let [ps (mapv primal args)
+          out (apply f ps)]
+      (record t out args
+              (fn [g need] (mapv #(when %2 %1) (vjp ps out g) need)))))
+
   p/IBackend
   (-name [_] :tape)
   (-defaults [_] (p/-defaults inner))

@@ -473,6 +473,17 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   is the ratio of projections on the retained choices (Eq. 4.1). Before
   them the general set checked project only on everything, which missed a
   planted bug.
+- **Custom gradients, `array/custom-vjp`** (M4, 2026-10-20; one of §8's
+  reserved names): `(array/custom-vjp f vjp)` is f, differentiated through
+  by `(vjp args out g)`, one cotangent per argument. It is an optional
+  backend protocol (`ICustomVjp`): the tape records it as one node, MLX's
+  native mode makes it one `mlx_custom_vjp`, and elsewhere it is f. On it
+  rests Gen.jl's CustomGradientGF: `gen.custom/deterministic` with
+  `:gradient` (or CustomDetermGF's `:gradient-with-state`) runs its
+  function on the arguments' values, so the function may be host code,
+  and gives the tape the rule. Single outputs, array or number arguments
+  (trees pass through without gradients); in native mode f runs inside
+  MLX's transformation and may not read values on the host.
 - **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
   `(array/item x)`, the namespace's last segment, as the Clojure style guide
   has it. It replaced `a`, which the owner found ugly (2026-10-18). The

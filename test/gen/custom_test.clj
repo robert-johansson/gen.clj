@@ -5,14 +5,17 @@
   (:refer-clojure :exclude [+ *])
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array :refer [+ *]]
+            [gen.array.tape]
             [gen.choicemap :as cm]
             [gen.custom :as custom]
             [gen.diff :as diff]
             [gen.dist :as d]
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
+            [gen.gradients :as grad]
             [gen.laws :as laws]
             [gen.random :as rng]
+            [gen.selection :as sel]
             [gen.test-support :as ts]))
 
 (def ^:private squared
@@ -83,3 +86,50 @@
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"apply-with-state" (custom/deterministic {})))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"update-with-state"
                         (custom/deterministic {:apply-with-state (fn [_] [0 nil]) :update-with-state 3}))))
+
+;; ---------------------------------------------------------------------------
+;; Gradients (CustomGradientGF, and CustomDetermGF's gradient_with_state)
+;; ---------------------------------------------------------------------------
+
+(def host-tanh
+  "tanh by host arithmetic, which the tape cannot differentiate, with its
+   gradient given."
+  (custom/deterministic {:apply (fn [[x]] (Math/tanh (array/item x)))
+                         :gradient (fn [_ retval retgrad] [(* retgrad (- 1.0 (* retval retval)))])}))
+
+(def squashed
+  (gen [] (let [x (trace :x (d/normal 0 1))
+                y (splice :t host-tanh x)]
+            (trace :y (d/normal y 0.5)))))
+
+(def norm
+  "The Euclidean norm, kept as the state its gradient uses."
+  (custom/deterministic {:apply-with-state (fn [[v]] (let [n (array/sqrt (array/sum (* v v)))] [n n]))
+                         :gradient-with-state (fn [n [v] g] [(* g (array// v n))])}))
+
+(deftest gradients-pass-through
+  (testing "a given gradient, through code the tape cannot see"
+    (let [x 0.4 y 0.9
+          tr (:trace (gfi/generate squashed [] (cm/choicemap :x x :y y) (rng/key 7)))
+          {:keys [gradients]} (grad/choice-gradients tr (sel/select :x))
+          th (Math/tanh x)]
+      (is (ts/close? (+ (- x) (* (/ (- y th) 0.25) (- 1 (* th th)))) (cm/get-choice gradients :x)))))
+  (testing "with a gradient, the function sees the arguments' values, not the tape's"
+    (let [seen (atom nil)
+          f (custom/deterministic {:apply (fn [[x]] (reset! seen (gen.array.tape/tracked? x)) (* x x))
+                                   :gradient (fn [[x] _ g] [(* 2.0 (* g x))])})]
+      (is (ts/close? 6.0 ((array/grad f) 3.0)))
+      (is (false? @seen))))
+  (testing "a gradient with state"
+    (is (ts/close? (array/array [0.6 0.8]) ((array/grad norm) (array/array [3.0 4.0]))))
+    (is (ts/close? 5.0 (norm (array/array [3.0 4.0])))))
+  (testing "without one, through the function's own code"
+    (let [tr (:trace (gfi/generate spliced [2] (cm/choicemap [:x 0] 0.5 [:x 1] -1.0 :y 2.0) (rng/key 8)))
+          {:keys [gradients]} (grad/choice-gradients tr (sel/select [:x 0]))]
+      ;; d/dx0 of log N(x0) + log N(x1) + log N(y; x0² + x1², 1)
+      (is (ts/close? (+ -0.5 (* (- 2.0 1.25) 2 0.5)) (cm/get-choice gradients [:x 0])))))
+  (testing "misuse"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not both"
+                          (custom/deterministic {:apply identity :gradient identity :gradient-with-state identity})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"returns an array or a number"
+                          ((custom/deterministic {:apply (fn [_] [1.0]) :gradient (fn [& _] [nil])}) 1.0)))))

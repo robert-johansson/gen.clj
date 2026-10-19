@@ -282,7 +282,16 @@ needs, taken from GenMLX's measured call counts
     backend, where native ones depend on MLX's VJPs (ties, the linear algebra
     it cannot differentiate, the compile cache at exit). Native mode is the
     choice for nested gradients, which the tape does not do.
-- **Reserved names:** `vjp`, `jvp`, `custom-vjp`, `vmap`.
+- **Custom VJPs** (2026-10-20): `(array/custom-vjp f vjp)` returns f with
+  its gradient given: under `value-and-grad`, `(vjp args out g)` gives one
+  cotangent per argument, each of its argument's shape (nil for none). The
+  arguments are arrays or host numbers, the result one float array or
+  number. A backend implements the optional protocol `ICustomVjp`: the tape
+  records one node whose VJP is the rule; MLX in native mode makes one
+  `mlx_custom_vjp` (where f runs inside the transformation, so it may not
+  read values on the host); every other backend calls f. A rule with the
+  wrong number of cotangents is a loud error.
+- **Reserved names:** `vjp`, `jvp`, `vmap`.
 - **`array/compile`** (2026-10-19, bean genclj-8b88):
   - **On MLX.** `(array/compile f)` traces f once per input structure, shapes
     and dtypes into one MLX graph, which `mlx_compile` fuses and replays.

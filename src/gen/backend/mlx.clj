@@ -1284,6 +1284,17 @@
         (catch MlxException e# (throw (mlx-error ~op [] e#)))))
 
 (deftype MlxBackend [^Config config]
+  p/ICustomVjp
+  (-custom-vjp [b f vjp args]
+    (if-not (custom-vjps?)
+      (apply f args)
+      (first (custom-vjp b
+                         (fn [xs] [(apply f xs)])
+                         (fn [ps cs os]
+                           (mapv (fn [ct p] (as-array b (or ct (p/-full b (p/-shape b p) 0 (p/-dtype b p))) nil))
+                                 (vjp ps (first os) (first cs)) ps))
+                         (mapv #(as-array b % nil) args)))))
+
   p/ICompiling
   (-compile [b f opts] (if (compiles? b) (guarded :compile (compile-fn b f opts)) f))
 
