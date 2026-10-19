@@ -26,7 +26,7 @@ specification, implemented by the JVM backend in M1 (bean genclj-a0qg).*
 
 | Namespace | Alias | Who uses it | Contents |
 |---|---|---|---|
-| `gen.array` | referred (see below), or `a` | everyone | values, creation, math, reductions, shape, indexing, eval, `grad` |
+| `gen.array` | referred (see below), or `array` | everyone | values, creation, math, reductions, shape, indexing, eval, `grad` |
 | `gen.array.linalg` | `la` | distributions, inference | cholesky, triangular solve, solve, inv, slogdet |
 | `gen.random` | `rng` | handler, distributions | keys (pure Clojure) and samplers built on one backend primitive |
 | `gen.array.protocols` | `p` | backend implementers | `IArray`, `IBackend` |
@@ -34,7 +34,7 @@ specification, implemented by the JVM backend in M1 (bean genclj-a0qg).*
 | `gen.backend.jvm` | — | — | M1 backend |
 | `gen.backend.mlx` | — | — | M2 backend |
 
-**House style: refer the math.** gen.array's operators extend Clojure's to
+**House style: refer the math, alias the rest `array`.** gen.array's operators extend Clojure's to
 arrays, and on numbers they give Clojure's results: `/` never returns a
 `Ratio` (it divides as floats), and integer overflow wraps instead of throwing.
 So a namespace refers them in place of `clojure.core`'s, the convention
@@ -75,8 +75,8 @@ A distribution body, compared with GenMLX:
     `maximum`/`minimum` elementwise.
   - `take` and `flatten`: they gather and reshape.
 
-  Call these qualified (`a/max`, `a/take`), so `(max a b)` keeps meaning what it
-  means in Clojure.
+  Call these qualified (`array/max`, `array/take`), so `(max a b)` keeps
+  meaning what it means in Clojure.
 - Names with no `clojure.core` counterpart (`exp`, `log`, `sum`, `where`,
   `reshape`, …) can be referred freely.
 - Code that needs ordinary integer arithmetic in a hot loop (an index counter)
@@ -94,14 +94,14 @@ A distribution body, compared with GenMLX:
   host and returns a number or boolean. There is no backend involvement and no
   allocation (3.8 ns per `add`, measured, §11).
   - Host math follows the API's semantics, not `clojure.core`'s:
-    `(a// 1 2)` is `0.5`, never a `Ratio`.
+    `(array// 1 2)` is `0.5`, never a `Ratio`.
 - **Weak typing for numbers (the JAX rule).** When a number meets a backend
   array, it is coerced to that array's dtype and never promotes it:
   - float32 array + `2.5` → float32;
   - int32 array + `2.5` → the backend's default float dtype.
 - **One backend per op.** Mixing arrays from two backends throws. (Explicit
-  transfer, `(a/to-backend x b)`, comes with M2.)
-- **No `=` on arrays.** Compare with `a/equal?` (exact) or `a/allclose?`.
+  transfer, `(array/to-backend x b)`, comes with M2.)
+- **No `=` on arrays.** Compare with `array/equal?` (exact) or `array/allclose?`.
   Numbers still compare with `=`, but core code doesn't rely on that.
 - **Trees.** Nested maps and vectors whose leaves are arrays are first-class
   inputs to `eval!`, `grad` and `tree-map`. Traces and choicemaps are trees in
@@ -111,10 +111,10 @@ A distribution body, compared with GenMLX:
 
 - **Ops on arrays** find their backend from their operands (§3). A tracked value
   (§8) takes precedence, so differentiation composes with any backend.
-- **Ops without array operands** use `a/*backend*`. These are the creation
+- **Ops without array operands** use `array/*backend*`. These are the creation
   functions (`array`, `zeros`, `ones`, `full`, `arange`, `eye`, `linspace`) and
   samplers given only a shape.
-  - Its root value is the JVM backend. Use `(a/with-backend b ...)` locally, or
+  - Its root value is the JVM backend. Use `(array/with-backend b ...)` locally, or
     set it once at application start.
   - It's a dynamic var, consulted only by creation functions. It is
     configuration, not state that computation depends on.
@@ -134,7 +134,7 @@ A distribution body, compared with GenMLX:
   that already share a dtype.
 - **Comparisons return `:bool`,** and so do `bernoulli` samples. That matches
   Gen.jl's `Bool`. GenMLX returned 0/1 floats, which `where`-based code then had
-  to compare against `ONE`. Bool arrays work in `a/where` and promote to int or
+  to compare against `ONE`. Bool arrays work in `array/where` and promote to int or
   float in arithmetic, exactly as in NumPy.
 - **JVM storage:** every dtype is stored in a `double[]`. int64 values are exact
   up to 2^53, which is ample for counts and indices; bool is 0/1. One storage
@@ -150,7 +150,7 @@ faster or more accurate version. The table is the v1 scope: what the M1 core
 needs, taken from GenMLX's measured call counts
 (docs/research/genmlx-porting-surface.md §(d)).
 
-| Group | Public functions (`a/…`) | Primitive op keywords → `IBackend` method | Composite |
+| Group | Public functions (`array/…`) | Primitive op keywords → `IBackend` method | Composite |
 |---|---|---|---|
 | creation | `array` `scalar` `zeros` `ones` `full` `eye` `arange` `linspace` `*-like` | `-from-host` `-full` `-arange` | `eye`, `linspace` |
 | conversion | `astype` `item` `->clj` `eval!` `array?` `shape` `ndim` `size` `dtype` | `-astype` `-to-host` `-eval!` `-shape` `-dtype` | `ndim`, `size` |
@@ -173,12 +173,12 @@ needs, taken from GenMLX's measured call counts
 
 **Naming conventions:**
 - Arithmetic uses Clojure's symbols (`+`, `<`, `==`, `!=`), referred per §2.
-- Following NumPy and MLX, `a/maximum` is elementwise and `a/max` is a
+- Following NumPy and MLX, `array/maximum` is elementwise and `array/max` is a
   reduction.
-- Reductions take an options map: `(a/sum x {:axis -1 :keep-dims? true})`.
-- **`a/pick`** is the one new op. It indexes the last axis of `x` by an int
+- Reductions take an options map: `(array/sum x {:axis -1 :keep-dims? true})`.
+- **`array/pick`** is the one new op. It indexes the last axis of `x` by an int
   array, broadcasting batch dimensions:
-  - `(a/pick log-probs v)` *is* a categorical log-prob;
+  - `(array/pick log-probs v)` *is* a categorical log-prob;
   - it replaces the three shape branches GenMLX's `categorical` needed
     (dist.cljs:590-660; bug genmlx-ql6a).
 
@@ -228,12 +228,12 @@ needs, taken from GenMLX's measured call counts
 ## 8. Differentiation
 
 - **API.**
-  - `(a/grad f)` differentiates with respect to argument 0;
-    `(a/grad f {:argnums [0 2]})` with respect to several arguments.
-  - `(a/value-and-grad f opts)` returns `[value grads]`.
+  - `(array/grad f)` differentiates with respect to argument 0;
+    `(array/grad f {:argnums [0 2]})` with respect to several arguments.
+  - `(array/value-and-grad f opts)` returns `[value grads]`.
   - Arguments may be trees; each gradient has the same structure as its
     argument.
-  - `a/stop-gradient` blocks differentiation.
+  - `array/stop-gradient` blocks differentiation.
 - **JVM backend: `gen.array.tape`, a generic reverse-mode AD.**
   - `grad` wraps the inputs as *tracked* values. A tracked value is immutable:
     it carries its primal value, its parents and a VJP closure. There is no
@@ -244,11 +244,11 @@ needs, taken from GenMLX's measured call counts
   - VJP rules form a table keyed by the primitive op keywords of §6, and are
     written against the public API. Composites therefore need no rules, and the
     same tape works on any backend; it could even test MLX's native AD.
-  - `a/item` on a tracked value returns its primal. Data-dependent control flow
+  - `array/item` on a tracked value returns its primal. Data-dependent control flow
     is fine (non-differentiable branches, as in Gen.jl).
   - Scope for M1 is first order. Nested AD (Hessians) is bean genclj-hors.
 - **MLX backend:** the same tape by default (§13). With
-  `-Dgen.mlx.grad=native`, `a/grad` and `a/value-and-grad` use
+  `-Dgen.mlx.grad=native`, `array/grad` and `array/value-and-grad` use
   `mlx_value_and_grad` instead (bean genclj-fuvr), which also nests:
   - MLX differentiates the graph the function builds, so its VJPs apply.
     MLX has none for its Cholesky, LU or inverse, so each linear-algebra op
@@ -261,7 +261,7 @@ needs, taken from GenMLX's measured call counts
   - MLX's `maximum` gives a tie's gradient to its second argument (the
     tape splits it). So composites avoid it where they are smooth:
     `softplus` uses a double `where`, and `logaddexp` is MLX's own op.
-  - Inside `a/compile` the custom VJPs are left out, and MLX
+  - Inside `array/compile` the custom VJPs are left out, and MLX
     differentiates the composites' own graphs (it has no VJP for linear
     algebra there). MLX keeps compiled graphs in a thread-local cache, and
     destroying it at the main thread's exit released the custom functions'
@@ -270,8 +270,8 @@ needs, taken from GenMLX's measured call counts
     `compiled-native-gradients-survive-the-exit`).
   - It is opt-in until the whole battery passes in native mode.
 - **Reserved names:** `vjp`, `jvp`, `custom-vjp`, `vmap`.
-- **`a/compile`** (2026-10-19, bean genclj-8b88):
-  - **On MLX.** `(a/compile f)` traces f once per input structure, shapes
+- **`array/compile`** (2026-10-19, bean genclj-8b88):
+  - **On MLX.** `(array/compile f)` traces f once per input structure, shapes
     and dtypes into one MLX graph, which `mlx_compile` fuses and replays.
   - **On the JVM backend**, it is f itself.
   - **Arguments** are arrays or trees of them, and so are results.
@@ -349,7 +349,7 @@ Two layers make this safe:
    - **Plain helper functions** outside `gen` get none of this. On MLX they
      see arrays, not numbers: clojure.core's `=` with a number is false and
      its arithmetic throws. A helper should use gen.array's operators or
-     `a/item`, or be `defn-guarded`.
+     `array/item`, or be `defn-guarded`.
    - A `catch` clause in a body raises the fallback first in a batched run:
      a caught exception may be thrown for some particles only. And a
      batched-branch error is logged when raised, so a run in which code
@@ -366,7 +366,7 @@ Two layers make this safe:
    - Outside `gen` bodies (helper functions a model calls), a raw `if` or
      `case` on an array is not guarded. Define a helper that branches on
      values with `gen.dynamic/defn-guarded` (or `guarded-fn`), which applies
-     a body's guards to it, or branch with `a/truthy?` or `where` there. For
+     a body's guards to it, or branch with `array/truthy?` or `where` there. For
      a plain helper, what still catches a branch (§8b):
      - `=`, `not=` and `condp =` reach a batched value anywhere, through `=`.
      - A batched comparison that nothing else reads, the trace a raw `if` on
@@ -406,15 +406,15 @@ by element. `gen.array.batch` is a batch tracer instead, a wrapping backend
 like the AD tape:
 - **Batched values.** A batched value wraps an array whose leading axes are
   the batch. To the code it flows through, it has its per-particle shape
-  (`a/shape`), and every op acts per particle: batched and unbatched operands
+  (`array/shape`), and every op acts per particle: batched and unbatched operands
   align by their per-particle axes, as with JAX's `vmap`.
 - **Draws.** Under the batch backend, draws gain the batch axes, one
   independent draw per particle, even when every parameter is unbatched
-  (`a/effective-backend`).
+  (`array/effective-backend`).
 - **Shared values.** Creation functions and constants stay unbatched, shared
   by every particle.
-- **Reading on the host.** Reading a batched value on the host (`a/item`,
-  `a/->clj`, `truthy?` of a boolean, `=`, hashing) raises the batched-branch
+- **Reading on the host.** Reading a batched value on the host (`array/item`,
+  `array/->clj`, `truthy?` of a boolean, `=`, hashing) raises the batched-branch
   error. So does host math on one, a `ClassCastException` naming `Batched`.
 
 Running a generative function's scalar code under the batch backend runs it
@@ -475,9 +475,9 @@ included (`docs/benchmarks.md`).
 
 ## 9. Evaluation and memory
 
-- `(a/eval! tree)` returns its argument and is a no-op on eager backends.
-- `(a/item x)` returns a 0-d array's host number or boolean.
-- `(a/->clj x)` returns nested vectors.
+- `(array/eval! tree)` returns its argument and is a no-op on eager backends.
+- `(array/item x)` returns a 0-d array's host number or boolean.
+- `(array/->clj x)` returns nested vectors.
 - Core code calls `eval!` only at inference-loop boundaries (e.g. once per MCMC
   iteration). Never inside handlers, transitions or distributions, which is the
   GenMLX smell this rule avoids.
@@ -528,7 +528,7 @@ How to read these numbers:
 
 1. **Operator names:** Clojure's symbols (`+ - * / < <= > >= == !=`), with
    `maximum` (elementwise) vs `max` (reduction). *Revised 2026-10-18:* the
-   house style refers the operators instead of writing `a/+` (§2).
+   house style refers the operators instead of writing `array/+` (§2).
 2. **Numbers and booleans are 0-d arrays,** with number-only ops computed on the
    host and returning numbers (§3). On the JVM backend this makes trace values
    plain `Double`s, so ordinary Clojure control flow works on them.

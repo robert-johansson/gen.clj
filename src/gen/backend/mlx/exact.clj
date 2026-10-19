@@ -9,7 +9,7 @@
      division).
    - expm1 on the GPU: Metal's is off by up to ~660 float32 ulps (4e-5
      relative); Kahan's formula from exp and log is within a few."
-  (:require [gen.array :as a]))
+  (:require [gen.array :as array]))
 
 (set! *warn-on-reflection* true)
 
@@ -17,22 +17,22 @@
   "e^x from expm1, exact to an ulp: 1/(expm1(-x) + 1) below 0, where
    expm1(x) + 1 would cancel."
   [x]
-  (a/where (a/< x 0.0)
-           (a// 1.0 (a/+ (a/expm1 (a/negate x)) 1.0))
-           (a/+ (a/expm1 x) 1.0)))
+  (array/where (array/< x 0.0)
+               (array// 1.0 (array/+ (array/expm1 (array/negate x)) 1.0))
+               (array/+ (array/expm1 x) 1.0)))
 
 (defn- sin
   "sin x = 2t/(1 + t²), t = tan(x/2)."
   [x]
-  (let [t (a/tan (a/* x 0.5))]
-    (a// (a/* 2.0 t) (a/+ 1.0 (a/* t t)))))
+  (let [t (array/tan (array/* x 0.5))]
+    (array// (array/* 2.0 t) (array/+ 1.0 (array/* t t)))))
 
 (defn- cos
   "cos x = (1 - t)(1 + t)/(1 + t²), t = tan(x/2), exact near the zeros of
    cos (where 1 - t² would cancel)."
   [x]
-  (let [t (a/tan (a/* x 0.5))]
-    (a// (a/* (a/- 1.0 t) (a/+ 1.0 t)) (a/+ 1.0 (a/* t t)))))
+  (let [t (array/tan (array/* x 0.5))]
+    (array// (array/* (array/- 1.0 t) (array/+ 1.0 t)) (array/+ 1.0 (array/* t t)))))
 
 (def ^:private two-over-sqrt-pi 1.1283791670955126)
 (def ^:private sqrt-pi-over-two 0.8862269254527579)
@@ -50,79 +50,79 @@
 (defn- erfc-nonneg
   "erfc(z) for z >= 0, as gen.array.special (Clenshaw's recurrence)."
   [z]
-  (let [t (a// 2.0 (a/+ 2.0 z))
-        ty (a/- (a/* 4.0 t) 2.0)
-        [d dd] (reduce (fn [[d dd] c] [(a/+ (a/- (a/* ty d) dd) c) d])
+  (let [t (array// 2.0 (array/+ 2.0 z))
+        ty (array/- (array/* 4.0 t) 2.0)
+        [d dd] (reduce (fn [[d dd] c] [(array/+ (array/- (array/* ty d) dd) c) d])
                        [0.0 0.0]
                        (rseq (subvec erfc-cof 1)))]
-    (a/* t (exp (a/- (a/+ (a/negate (a/* z z)) (a/* 0.5 (a/+ (first erfc-cof) (a/* ty d)))) dd)))))
+    (array/* t (exp (array/- (array/+ (array/negate (array/* z z)) (array/* 0.5 (array/+ (first erfc-cof) (array/* ty d)))) dd)))))
 
 (defn- erf-series
   "erf(x) by its Maclaurin series (for |x| < 0.5)."
   [x]
-  (let [x2 (a/negate (a/* x x))]
+  (let [x2 (array/negate (array/* x x))]
     (loop [n 1 term x sum x]
       (if (< n 16)
-        (let [term (a// (a/* term x2) n)]
-          (recur (inc n) term (a/+ sum (a// term (inc (* 2 n))))))
-        (a/* two-over-sqrt-pi sum)))))
+        (let [term (array// (array/* term x2) n)]
+          (recur (inc n) term (array/+ sum (array// term (inc (* 2 n))))))
+        (array/* two-over-sqrt-pi sum)))))
 
 (defn- erf [x]
-  (let [ax (a/abs x)
-        tail (a/- 1.0 (erfc-nonneg ax))]
-    (a/where (a/< ax 0.5) (erf-series x) (a/where (a/< x 0.0) (a/negate tail) tail))))
+  (let [ax (array/abs x)
+        tail (array/- 1.0 (erfc-nonneg ax))]
+    (array/where (array/< ax 0.5) (erf-series x) (array/where (array/< x 0.0) (array/negate tail) tail))))
 
 (defn- erfinv
   "As gen.array.special/erfinv: Giles' approximation refined by Halley's
    method, with the residual from erfc in the tails. Branch-free, so a
    fixed seven steps (the JVM backend's most)."
   [y]
-  (let [ay (a/abs y)
+  (let [ay (array/abs y)
         ;; a stand-in away from ±1 and 0 keeps the discarded lanes finite
-        special? (a/logical-or (a/logical-or (a/isnan y) (a/>= ay 1.0)) (a/== ay 0.0))
-        q (a/where special? 0.5 ay)
-        w (a/negate (a/log (a/* (a/- 1.0 q) (a/+ 1.0 q))))
-        horner (fn [v cs] (reduce (fn [acc c] (a/+ (a/* acc v) c)) (first cs) (rest cs)))
-        central (horner (a/- w 2.5) [2.81022636e-08 3.43273939e-07 -3.5233877e-06 -4.39150654e-06
-                                     0.00021858087 -0.00125372503 -0.00417768164 0.246640727 1.50140941])
-        tail (horner (a/- (a/sqrt w) 3.0) [-0.000200214257 0.000100950558 0.00134934322 -0.00367342844
-                                           0.00573950773 -0.0076224613 0.00943887047 1.00167406 2.83297682])
-        x0 (a/* q (a/where (a/< w 5.0) central tail))
+        special? (array/logical-or (array/logical-or (array/isnan y) (array/>= ay 1.0)) (array/== ay 0.0))
+        q (array/where special? 0.5 ay)
+        w (array/negate (array/log (array/* (array/- 1.0 q) (array/+ 1.0 q))))
+        horner (fn [v cs] (reduce (fn [acc c] (array/+ (array/* acc v) c)) (first cs) (rest cs)))
+        central (horner (array/- w 2.5) [2.81022636e-08 3.43273939e-07 -3.5233877e-06 -4.39150654e-06
+                                         0.00021858087 -0.00125372503 -0.00417768164 0.246640727 1.50140941])
+        tail (horner (array/- (array/sqrt w) 3.0) [-0.000200214257 0.000100950558 0.00134934322 -0.00367342844
+                                                   0.00573950773 -0.0076224613 0.00943887047 1.00167406 2.83297682])
+        x0 (array/* q (array/where (array/< w 5.0) central tail))
         halley (fn [x]
-                 (let [scale (a/* sqrt-pi-over-two (exp (a/* x x)))
-                       d (a/where (a/> q 0.5)
-                                  (a/* (a/- (a/- 1.0 q) (erfc-nonneg x)) scale)
-                                  (a/* (a/- (erf x) q) scale))]
-                   (a/- x (a// d (a/+ 1.0 (a/* x d))))))
+                 (let [scale (array/* sqrt-pi-over-two (exp (array/* x x)))
+                       d (array/where (array/> q 0.5)
+                                      (array/* (array/- (array/- 1.0 q) (erfc-nonneg x)) scale)
+                                      (array/* (array/- (erf x) q) scale))]
+                   (array/- x (array// d (array/+ 1.0 (array/* x d))))))
         ;; as many steps as the JVM backend's adaptive loop at most takes,
         ;; which the far tails (|y| near 1 - 1e-16) need
         x (nth (iterate halley x0) 7)
-        signed (a/where (a/< y 0.0) (a/negate x) x)]
-    (a/where (a/logical-or (a/isnan y) (a/> ay 1.0))
-             ##NaN
-             (a/where (a/== ay 1.0)
-                      (a/where (a/< y 0.0) ##-Inf ##Inf)
-                      (a/where (a/== ay 0.0) y signed)))))
+        signed (array/where (array/< y 0.0) (array/negate x) x)]
+    (array/where (array/logical-or (array/isnan y) (array/> ay 1.0))
+                 ##NaN
+                 (array/where (array/== ay 1.0)
+                              (array/where (array/< y 0.0) ##-Inf ##Inf)
+                              (array/where (array/== ay 0.0) y signed)))))
 
 (defn expm1
   "e^x - 1 by Kahan's formula: (u - 1)·x/log u for u = e^x, exact to a few
    ulps where exp and log are, also near 0 (where u - 1 alone would cancel)."
   [x]
-  (let [u (a/exp x)
-        um1 (a/- u 1.0)
+  (let [u (array/exp x)
+        um1 (array/- u 1.0)
         ;; a stand-in keeps the discarded lanes finite
-        safe (a/where (a/logical-or (a/== um1 0.0) (a/isinf u)) 2.0 u)]
-    (a/where (a/== um1 0.0)
-             x
-             (a/where (a/logical-or (a/isinf u) (a/== um1 -1.0))
-                      um1
-                      (a// (a/* (a/- safe 1.0) x) (a/log safe))))))
+        safe (array/where (array/logical-or (array/== um1 0.0) (array/isinf u)) 2.0 u)]
+    (array/where (array/== um1 0.0)
+                 x
+                 (array/where (array/logical-or (array/isinf u) (array/== um1 -1.0))
+                              um1
+                              (array// (array/* (array/- safe 1.0) x) (array/log safe))))))
 
 (defn logaddexp
   "gen.array's composite logaddexp of float64 MLX arrays, with the exact exp."
   [x y]
-  (let [m (a/maximum x y)]
-    (a/where (a/isinf m) m (a/+ m (a/log1p (exp (a/negate (a/abs (a/- x y)))))))))
+  (let [m (array/maximum x y)]
+    (array/where (array/isinf m) m (array/+ m (array/log1p (exp (array/negate (array/abs (array/- x y)))))))))
 
 (declare float64-unary)
 
@@ -141,14 +141,14 @@
   [op xs g out]
   (let [[x y] xs]
     (case op
-      :exp [(a/* g out)]
-      :sin [(a/* g (a/cos x))]
-      :cos [(a/negate (a/* g (a/sin x)))]
-      :erf [(a/* g (a/* (/ 2.0 (Math/sqrt Math/PI)) (a/exp (a/negate (a/* x x)))))]
-      :erfinv [(a/* g (a/* (/ (Math/sqrt Math/PI) 2.0) (a/exp (a/* out out))))]
-      :expm1 [(a/* g (a/+ out 1.0))]
+      :exp [(array/* g out)]
+      :sin [(array/* g (array/cos x))]
+      :cos [(array/negate (array/* g (array/sin x)))]
+      :erf [(array/* g (array/* (/ 2.0 (Math/sqrt Math/PI)) (array/exp (array/negate (array/* x x)))))]
+      :erfinv [(array/* g (array/* (/ (Math/sqrt Math/PI) 2.0) (array/exp (array/* out out))))]
+      :expm1 [(array/* g (array/+ out 1.0))]
       ;; ∂/∂x log(eˣ + eʸ) = eˣ⁻ᵒᵘᵗ, exact at ties
-      :logaddexp [(a/* g (a/exp (a/- x out))) (a/* g (a/exp (a/- y out)))])))
+      :logaddexp [(array/* g (array/exp (array/- x out))) (array/* g (array/exp (array/- y out)))])))
 
 (defn float64-unary
   "op (:exp :sin :cos :erf or :erfinv) of the float64 MLX array x."

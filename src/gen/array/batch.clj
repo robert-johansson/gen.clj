@@ -10,9 +10,9 @@
 
    A batch backend wraps a real one for a batch shape (one instance per pair,
    so that values of one batched run join). Running scalar code under
-   (a/with-backend (batch/backend inner batch-shape) …) runs it batched:
+   (array/with-backend (batch/backend inner batch-shape) …) runs it batched:
    creation functions and constants stay unbatched (shared), draws are
-   batched. Reading a batched value on the host (a/item, a/->clj, truthy? of
+   batched. Reading a batched value on the host (array/item, array/->clj, truthy? of
    a boolean, = in either order, condp, hashing, counting) cannot give one
    answer for every particle: it throws ex-info with
    :gen.array/batched-branch true, the signal to fall back to one particle at
@@ -23,7 +23,7 @@
    (docs/array-api.md §8a). For the commonest of these, unread-bools reports
    the batched comparisons that no op read: every op marks the values it
    reads, and a raw if reads nothing."
-  (:require [gen.array :as a]
+  (:require [gen.array :as array]
             [gen.array.dtype :as dt]
             [gen.array.protocols :as p]))
 
@@ -32,7 +32,7 @@
 (defn- branch!
   "The batched-branch error: one answer cannot serve every particle."
   [what]
-  (throw (a/batched-branch (str "Cannot " what " a batched value: it differs across particles") {})))
+  (throw (array/batched-branch (str "Cannot " what " a batched value: it differs across particles") {})))
 
 (declare value)
 
@@ -100,12 +100,12 @@
 
   (-from-host [_ data dtype] (p/-from-host inner data dtype))
   (-to-host [_ x] (if (batched? x) (branch! "read on the host") (p/-to-host inner x)))
-  (-eval! [_ xs] (p/-eval! inner (keep #(if (batched? %) (value %) (when-not (a/host? %) %)) xs)))
+  (-eval! [_ xs] (p/-eval! inner (keep #(if (batched? %) (value %) (when-not (array/host? %) %)) xs)))
 
   (-shape [_ x] (if (batched? x)
                   (subvec (p/-shape inner (value x)) (count batch-shape))
-                  (a/shape x)))
-  (-dtype [_ x] (if (batched? x) (p/-dtype inner (value x)) (a/dtype x)))
+                  (array/shape x)))
+  (-dtype [_ x] (if (batched? x) (p/-dtype inner (value x)) (array/dtype x)))
 
   (-full [b shape v dtype]
     (if (batched? v)
@@ -118,7 +118,7 @@
   (-astype [b x dtype]
     (if (batched? x)
       (made (p/-astype inner (value x) dtype) b)
-      (if (a/host? x) (dt/host-cast x dtype) (p/-astype inner x dtype))))
+      (if (array/host? x) (dt/host-cast x dtype) (p/-astype inner x dtype))))
 
   (-elementwise [b op args dtype]
     (let [r (reduce max 0 (map #(count (p/-shape b %)) args))
@@ -232,8 +232,8 @@
     (made (p/-random-uniform inner key (into batch-shape shape) dtype) b))
 
   (-value-and-grad [_ f args argnums]
-    (if (some batched? (mapcat #(a/tree-leaves (nth args %)) argnums))
-      (throw (a/batched-branch "Differentiating with respect to batched values is not supported" {}))
+    (if (some batched? (mapcat #(array/tree-leaves (nth args %)) argnums))
+      (throw (array/batched-branch "Differentiating with respect to batched values is not supported" {}))
       ;; unbatched leaves: an ordinary gradient on the wrapped backend
       (p/-value-and-grad inner f args argnums))))
 
@@ -273,7 +273,7 @@
       (batched? x) (let [v (value x)
                          s (subvec (p/-shape inner v) (count bs))]
                      (if (== (count s) r) v (p/-reshape inner v (-> bs (into (repeat (- r (count s)) 1)) (into s)))))
-      (a/host? x) x
+      (array/host? x) x
       :else (let [s (p/-shape inner x)]
               (p/-reshape inner x (-> [] (into (repeat (+ (count bs) (- r (count s))) 1)) (into s)))))))
 
@@ -285,8 +285,8 @@
         inner (.-inner b)]
     (if (batched? x)
       (value x)
-      (let [s (a/shape x)
-            v (if (a/host? x) (p/-full inner [] x (a/dtype x)) x)]
+      (let [s (array/shape x)
+            v (if (array/host? x) (p/-full inner [] x (array/dtype x)) x)]
         (p/-broadcast-to inner (p/-reshape inner v (into (vec (repeat (count bs) 1)) s)) (into bs s))))))
 
 (def ^:private backends (atom {}))
@@ -305,24 +305,24 @@
   "The batch backend for batch-shape over the backend in effect (which may
    already be that batch backend, in a nested call)."
   [batch-shape]
-  (let [b a/*backend*
+  (let [b array/*backend*
         bs (vec batch-shape)]
     (if (instance? BatchBackend b)
       ;; a batched collection inside a batched run would tie its particles to
       ;; the outer ones: run the outer one per particle instead
-      (throw (a/batched-branch "A batched run inside a batched run" {:outer (.-batch-shape ^BatchBackend b) :inner bs}))
+      (throw (array/batched-branch "A batched run inside a batched run" {:outer (.-batch-shape ^BatchBackend b) :inner bs}))
       (backend b bs))))
 
 (defmacro batched
   "Run body batched over batch-shape: under the batch backend."
   [batch-shape & body]
-  `(a/with-backend (backend-for ~batch-shape) ~@body))
+  `(array/with-backend (backend-for ~batch-shape) ~@body))
 
 (defn wrap
   "The batched value of an array of the wrapped backend whose leading axes
    are batch-shape."
   [x batch-shape]
-  (Batched. x (backend (a/backend x) batch-shape) false))
+  (Batched. x (backend (array/backend x) batch-shape) false))
 
 (defn gather
   "x's particles at the indices idx (an int array), as a batch of
@@ -330,7 +330,7 @@
    gathering a whole trace (resampling) costs nothing for the values that are
    never read again."
   [x idx batch-shape]
-  (Batched. (delay (a/take (value x) idx 0)) (backend (.-inner ^BatchBackend (.-backend ^Batched x)) batch-shape) false))
+  (Batched. (delay (array/take (value x) idx 0)) (backend (.-inner ^BatchBackend (.-backend ^Batched x)) batch-shape) false))
 
 (defn unwrap
   "x as an array of the wrapped backend with the leading batch axes of
@@ -339,6 +339,6 @@
   [x batch-shape]
   (if (batched? x)
     (value x)
-    (let [s (a/shape x)
-          v (if (a/host? x) (a/array x) x)]
-      (a/broadcast-to (a/reshape v (into (vec (repeat (count batch-shape) 1)) s)) (into (vec batch-shape) s)))))
+    (let [s (array/shape x)
+          v (if (array/host? x) (array/array x) x)]
+      (array/broadcast-to (array/reshape v (into (vec (repeat (count batch-shape) 1)) s)) (into (vec batch-shape) s)))))

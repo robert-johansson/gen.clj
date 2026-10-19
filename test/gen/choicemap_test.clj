@@ -4,7 +4,7 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [gen.array :as a]
+            [gen.array :as array]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.selection :as sel]
@@ -18,7 +18,7 @@
 
 (def gen-leaf
   (gen/one-of [(gen/double* {:NaN? false :infinite? false})
-               (gen/fmap a/array (gen/vector (gen/double* {:NaN? false :infinite? false}) 1 3))]))
+               (gen/fmap array/array (gen/vector (gen/double* {:NaN? false :infinite? false}) 1 3))]))
 
 (def gen-tree
   (gen/recursive-gen (fn [inner] (gen/map gen-addr inner {:min-elements 1 :max-elements 3}))
@@ -33,7 +33,7 @@
   (and (= (cm/addresses x) (cm/addresses y))
        ;; equal, or on a float32 backend (where arrays round host doubles) close
        (every? (fn [p] (let [u (cm/get-choice x p) v (cm/get-choice y p)]
-                         (if (ts/f32?) (ts/close? u v) (a/equal? u v))))
+                         (if (ts/f32?) (ts/close? u v) (array/equal? u v))))
                (cm/addresses x))))
 
 ;; ---------------------------------------------------------------------------
@@ -75,20 +75,20 @@
            (cm/override (cm/choicemap :a 1.0 :b 3.0) (cm/choicemap :a 2.0))))))
 
 (deftest arrays-and-batches
-  (let [c (cm/choicemap :x (a/array [[1.0 2.0] [3.0 4.0]]) :y 5.0)]
-    (is (= [1.0 2.0 3.0 4.0 5.0] (a/->clj (cm/to-array c))))
+  (let [c (cm/choicemap :x (array/array [[1.0 2.0] [3.0 4.0]]) :y 5.0)]
+    (is (= [1.0 2.0 3.0 4.0 5.0] (array/->clj (cm/to-array c))))
     (is (same-leaves? c (cm/from-array c (cm/to-array c))))
-    (is (thrown? clojure.lang.ExceptionInfo (cm/from-array c (a/zeros [3]))))
+    (is (thrown? clojure.lang.ExceptionInfo (cm/from-array c (array/zeros [3]))))
     (testing "leaves come back in the prototype's dtypes"
       (let [mixed (cm/choicemap :b true :k 2 :x 0.5)
             back (cm/from-array mixed (cm/to-array mixed))]
         (is (= (ts/host mixed) (ts/host back)))
         (is (instance? Boolean (ts/host (cm/get-choice back :b))))
         (is (instance? Long (ts/host (cm/get-choice back :k))))
-        (is (= [:bool :int] (map #(gen.array.dtype/kind (a/dtype (cm/get-choice back %))) [:b :k]))))))
+        (is (= [:bool :int] (map #(gen.array.dtype/kind (array/dtype (cm/get-choice back %))) [:b :k]))))))
   (let [cs [(cm/choicemap :a 1.0 [:b 0] 2.0) (cm/choicemap :a 3.0 [:b 0] 4.0)]
         stacked (cm/stack cs)]
-    (is (= [1.0 3.0] (a/->clj (cm/get-choice stacked :a))))
+    (is (= [1.0 3.0] (array/->clj (cm/get-choice stacked :a))))
     (is (= (ts/host cs) (ts/host (cm/unstack stacked 2))))
     (is (thrown? clojure.lang.ExceptionInfo (cm/stack [(cm/choicemap :a 1.0) (cm/choicemap :b 1.0)])))))
 

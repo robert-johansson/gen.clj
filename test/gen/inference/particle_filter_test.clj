@@ -4,7 +4,7 @@
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
             [gen.test-support :as ts]
-            [gen.array :as a :refer [+ - * /]]
+            [gen.array :as array :refer [+ - * /]]
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
             [gen.diff :as diff]
@@ -23,7 +23,7 @@
 
 (def kernel
   (gen [t prev]
-    (let [x (trace :x (d/normal (a/* a-coef prev) q))]
+    (let [x (trace :x (d/normal (array/* a-coef prev) q))]
       (trace :y (d/normal x r))
       x)))
 
@@ -111,7 +111,7 @@
   (let [state (pf/initialize model [1 0.0] (observation 0) 100 {:key (rng/key 6)})
         resampled (pf/resample state {:key (rng/key 7)})]
     (is (= (vec (repeat 100 0.0)) (:log-weights resampled)))
-    (is (a/allclose? (pf/log-ml-estimate state) (pf/log-ml-estimate resampled))
+    (is (array/allclose? (pf/log-ml-estimate state) (pf/log-ml-estimate resampled))
         "resampling moves the estimate into :log-ml and leaves it unchanged")
     (is (every? (set (:traces state)) (:traces resampled)))
     (is (false? (:resampled? (pf/maybe-resample resampled {:key (rng/key 8)}))) "equal weights: no resampling")

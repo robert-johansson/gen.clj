@@ -29,7 +29,7 @@
    ignores :batched?, and a step with one turns a batched state into
    per-particle traces. traces returns the scalar traces either way."
   (:refer-clojure :exclude [+ -])
-  (:require [gen.array :as a :refer [+ -]]
+  (:require [gen.array :as array :refer [+ -]]
             [gen.batched :as batched]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
@@ -47,7 +47,7 @@
   ([model args observations n {:keys [proposal proposal-args batched?] :as opts}]
    (if (and batched? (not proposal))
      (let [{ps :particles ws :weights} (batched/generate model args observations n (or (:key opts) (gfi/next-key)))]
-       {:particles ps :log-weights (vec (a/->clj ws)) :log-ml 0.0})
+       {:particles ps :log-weights (vec (array/->clj ws)) :log-ml 0.0})
    (let [particle (fn [key]
                     (if proposal
                       (let [[k-propose k-generate] (rng/split key)
@@ -75,8 +75,8 @@
      (let [{ps' :particles ws :weights ds :discards}
            (batched/update ps args argdiffs observations (or (:key opts) (gfi/next-key)))]
        (doseq [[i d] (map-indexed vector ds)] (check-discard d i))
-       (a/eval! (:trace ps'))
-       (assoc state :particles ps' :log-weights (mapv + (:log-weights state) (a/->clj ws))))
+       (array/eval! (:trace ps'))
+       (assoc state :particles ps' :log-weights (mapv + (:log-weights state) (array/->clj ws))))
    (let [state (if-let [ps (:particles state)]
                  (-> state (dissoc :particles) (assoc :traces (batched/traces ps)))
                  state)
@@ -94,7 +94,7 @@
          results (mapv move (range n) (:traces state) (particle-keys opts n))
          log-weights (mapv + (:log-weights state) (mapv :weight results))]
      ;; one step's graph at a time on a lazy backend
-     (a/eval! [(mapv (comp gfi/eval-trace! :trace) results) log-weights])
+     (array/eval! [(mapv (comp gfi/eval-trace! :trace) results) log-weights])
      (assoc state
             :traces (mapv :trace results)
             :log-weights log-weights)))))

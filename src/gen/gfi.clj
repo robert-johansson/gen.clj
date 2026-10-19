@@ -28,7 +28,7 @@
    Gen.jl's trace[addr]: (tr :slope), (tr [:y 0]); :choices, :retval, :score
    and :args are its fields."
   (:refer-clojure :exclude [update])
-  (:require [gen.array :as a]
+  (:require [gen.array :as array]
             [gen.array.batch :as batch]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
@@ -142,7 +142,7 @@
   ([tr] (eval-trace! tr nil))
   ([tr also]
    ;; one evaluation for the trace and also (e.g. a weight)
-   (a/eval! [(:choices tr) (:retval tr) (:score tr) also])
+   (array/eval! [(:choices tr) (:retval tr) (:score tr) also])
    tr))
 
 (defn simulate

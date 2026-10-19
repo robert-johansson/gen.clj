@@ -14,7 +14,7 @@
    cotangent of the return value, of the same tree shape) is given, as in
    Gen.jl. Selected choices must be continuous."
   (:refer-clojure :exclude [+ *])
-  (:require [gen.array :as a :refer [+ *]]
+  (:require [gen.array :as array :refer [+ *]]
             [gen.array.dtype :as dt]
             [gen.array.linalg :as la]
             [gen.choicemap :as cm]
@@ -28,8 +28,8 @@
   "Is every leaf of x a float array or floating-point number (and there is
    at least one)?"
   [x]
-  (let [leaves (a/tree-leaves x)]
-    (and (seq leaves) (every? #(and (a/array? %) (= :float (dt/kind (a/dtype %)))) leaves))))
+  (let [leaves (array/tree-leaves x)]
+    (and (seq leaves) (every? #(and (array/array? %) (= :float (dt/kind (array/dtype %)))) leaves))))
 
 (defn- objective
   "assess's weight of gf on args and choices, plus ⟨retgrad, retval⟩."
@@ -37,7 +37,7 @@
   (let [{w :weight rv :retval} (gfi/assess gf args choices)]
     (if (nil? retgrad)
       w
-      (reduce + w (map (fn [g v] (a/sum (* g v))) (a/tree-leaves retgrad) (a/tree-leaves rv))))))
+      (reduce + w (map (fn [g v] (array/sum (* g v))) (array/tree-leaves retgrad) (array/tree-leaves rv))))))
 
 (defn continuous-selection
   "The trace's choices at selection, which must be continuous (loudly): the
@@ -71,7 +71,7 @@
            f (fn [values & dargs]
                (let [args' (reduce (fn [as [i v]] (assoc as i v)) (vec args) (map vector arg-positions dargs))]
                  (objective gf args' (cm/merge others (cm/from-map values)) retgrad)))
-           [_ [g & arg-gs]] (apply (a/value-and-grad f {:argnums (vec (range (inc (count arg-positions))))})
+           [_ [g & arg-gs]] (apply (array/value-and-grad f {:argnums (vec (range (inc (count arg-positions))))})
                                    (cm/to-map selected) (map #(nth args %) arg-positions))]
        {:values selected
         :gradients (if (cm/empty? selected) cm/EMPTY (cm/from-map g))
@@ -89,13 +89,13 @@
          store (:params gf)]
      (when (empty? store)
        (throw (ex-info "param-gradients: the trace's generative function has no parameter store" {})))
-     ((a/grad (fn [ps] (objective (dyn/with-params gf ps) args choices retgrad))) store))))
+     ((array/grad (fn [ps] (objective (dyn/with-params gf ps) args choices retgrad))) store))))
 
 (defn log-abs-det-jacobian
   "log |det J| of f: a 1-d float array → a 1-d array of the same size, at x,
    by one reverse pass per output (for the volume change of an involution,
    thesis Eq 3.15)."
   [f x]
-  (let [n (a/size x)
-        rows (mapv (fn [i] ((a/grad (fn [v] (a/take (f v) i))) x)) (range n))]
-    (second (la/slogdet (a/stack rows)))))
+  (let [n (array/size x)
+        rows (mapv (fn [i] ((array/grad (fn [v] (array/take (f v) i))) x)) (range n))]
+    (second (la/slogdet (array/stack rows)))))

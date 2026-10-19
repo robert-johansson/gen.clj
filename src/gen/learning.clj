@@ -12,7 +12,7 @@
    Stores and gradients are trees (maps of names to arrays or numbers) of
    the same shape."
   (:refer-clojure :exclude [+ - * /])
-  (:require [gen.array :as a :refer [+ - * /]]
+  (:require [gen.array :as array :refer [+ - * /]]
             [gen.dynamic :as dyn]
             [gen.gfi :as gfi]
             [gen.random :as rng]))
@@ -48,7 +48,7 @@
   (case kind
     :sgd nil
     :gradient-descent {:t 0}
-    :adam {:t 0 :m (a/tree-map a/zeros-like store) :v (a/tree-map a/zeros-like store)}))
+    :adam {:t 0 :m (array/tree-map array/zeros-like store) :v (array/tree-map array/zeros-like store)}))
 
 (defn step
   "[store' state']: one ascent step from store along the gradients."
@@ -64,7 +64,7 @@
                 v (tree-map2 #(+ (* beta2 %1) (* (- 1.0 beta2) (* %2 %2))) (:v state) grads)
                 c1 (- 1.0 (Math/pow beta1 t))
                 c2 (- 1.0 (Math/pow beta2 t))
-                delta (tree-map2 (fn [mi vi] (/ (/ mi c1) (+ (a/sqrt (/ vi c2)) eps))) m v)]
+                delta (tree-map2 (fn [mi vi] (/ (/ mi c1) (+ (array/sqrt (/ vi c2)) eps))) m v)]
             [(tree-map2 #(+ %1 (* lr %2)) store delta) {:t t :m m :v v}])))
 
 (defn train
@@ -90,9 +90,9 @@
                                            (split k-batch batch-size))
                               traces (vec results)
                               grads (reduce #(tree-map2 + %1 %2) (map gradients-fn traces))
-                              mean (fn [g] (a/tree-map #(/ % (double batch-size)) g))
-                              [store state] (a/eval! (step optimizer state store (mean grads)))]
-                          [store state (/ (reduce + (map #(double (a/item (:score %))) traces)) batch-size)]))
+                              mean (fn [g] (array/tree-map #(/ % (double batch-size)) g))
+                              [store state] (array/eval! (step optimizer state store (mean grads)))]
+                          [store state (/ (reduce + (map #(double (array/item (:score %))) traces)) batch-size)]))
                       [store state nil]
                       (split k-epoch batches-per-epoch))]
           (recur (inc epoch) store state (conj history score) k-next))

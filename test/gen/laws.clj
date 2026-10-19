@@ -17,7 +17,7 @@
   (:require [clojure.test.check.clojure-test]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [gen.array :as a]
+            [gen.array :as array]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.gfi :as gfi]
@@ -67,7 +67,7 @@
 
 (defn- unknown-diffs [args] (vec (repeat (count args) diff/unknown-change)))
 
-(defn- in-support? [tr] (a/truthy? (a/all (a/isfinite (:score tr)))))
+(defn- in-support? [tr] (array/truthy? (array/all (array/isfinite (:score tr)))))
 
 (defn- consistent?
   "Trace consistency (Def 2.1.16): the score is the assessed density of the
@@ -129,7 +129,7 @@
       (or (= ::vacuous r)
           (let [{g :trace w :weight} r]
             (and (consistent? g)
-                 (not (a/truthy? (a/isnan w)))
+                 (not (array/truthy? (array/isnan w)))
                  (every? #(= (cm/get-choice sigma %) (cm/get-choice (:choices g) %)) (cm/addresses sigma))))))))
 
 (defn identity-update-changes-nothing [cases]
@@ -216,10 +216,10 @@
             constrained (set (cm/addresses sigma))
             fresh-lp (lp t2 (remove #(or (was %) (constrained %)) (addrs t2)))
             {w3 :weight} (gfi/update t2 (:args tr) (unknown-diffs (:args tr)) disc (rng/key seed))]
-        (and (close? w (a/- (a/- (:score t2) (:score tr)) fresh-lp))
+        (and (close? w (array/- (array/- (:score t2) (:score tr)) fresh-lp))
              ;; the reverse weight is defined only inside the support (Def
              ;; 4.1.1): a move to density 0 has w = -Inf and no finite reverse
-             (or (not (in-support? t2)) (close? (a/+ w w3) (a/negate fresh-lp)))))
+             (or (not (in-support? t2)) (close? (array/+ w w3) (array/negate fresh-lp)))))
       true)))
 
 (defn regenerate-weight-is-the-retained-density-ratio [cases]
@@ -233,7 +233,7 @@
           now (set (addrs t2))
           ;; Eq 4.1, Alg 18: selected, fresh and removed choices cancel
           retained (remove selected (filter now (addrs tr)))]
-      (close? w (a/- (lp t2 retained) (lp tr retained))))))
+      (close? w (array/- (lp t2 retained) (lp tr retained))))))
 
 (defn regenerating-everything-has-weight-zero [cases]
   (prop/for-all [[[_ gf args] seed] cases]
@@ -245,7 +245,7 @@
     (let [tr (gfi/simulate gf args (rng/key seed))
           s (sel/from-paths (picked (addrs tr) picks))]
       (and (zero-weight? (gfi/project tr sel/none))
-           (close? (a/+ (gfi/project tr s) (gfi/project tr (sel/complement s))) (:score tr))))))
+           (close? (array/+ (gfi/project tr s) (gfi/project tr (sel/complement s))) (:score tr))))))
 
 (defn runs-are-pure-functions-of-the-key [cases]
   (prop/for-all [[[_ gf args] seed] cases]

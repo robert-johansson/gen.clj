@@ -26,7 +26,7 @@
      backend, so the MH chains also run 20 times as many steps (4000
      samples after 2000), about HMC's time there."
   (:refer-clojure :exclude [+ - * /])
-  (:require [gen.array :as a :refer [+ - * /]]
+  (:require [gen.array :as array :refer [+ - * /]]
             [gen.array.protocols :as p]
             [gen.batched :as b]
             [gen.choicemap :as cm]
@@ -171,7 +171,7 @@
            {:samples samples :burn burn :key k-run})))
 
 (defn- measure-chain [{:keys [traces acceptance-rate]}]
-  {:slope-error (slope-error (mean (map #(a/item (% :slope)) traces)))
+  {:slope-error (slope-error (mean (map #(array/item (% :slope)) traces)))
    :acceptance (or acceptance-rate Double/NaN)})
 
 (defn- describe-chain [{:keys [slope-error acceptance]}]
@@ -194,7 +194,7 @@
     (row (str "importance, batched, N = " n)
          #(imp/importance-sampling linreg [linreg-xs] linreg-obs n {:key % :batched? true})
          (fn [{ps :particles lw :log-normalized-weights}]
-           {:slope-error (slope-error (reduce + (map #(* (Math/exp %1) %2) lw (a/->clj (b/choice ps :slope)))))
+           {:slope-error (slope-error (reduce + (map #(* (Math/exp %1) %2) lw (array/->clj (b/choice ps :slope)))))
             :ess (w/ess lw)})
          #(format "slope off by %.2f sd, ESS %.1f" (:slope-error %) (:ess %)))))
 
@@ -216,15 +216,15 @@
 (def ^:private hmm-transition [[0.9 0.1] [0.1 0.9]])
 (def ^:private hmm-means [-2.0 2.0])
 
-(def ^:private transition (a/array hmm-transition))
-(def ^:private initial (a/array [0.5 0.5]))
-(def ^:private means (a/array hmm-means))
+(def ^:private transition (array/array hmm-transition))
+(def ^:private initial (array/array [0.5 0.5]))
+(def ^:private means (array/array hmm-means))
 
 (def hmm-step
   "One step: z_t ~ categorical(row z_{t-1} of the transitions), y_t ~ N(mu_z, 1)."
   (gen [t z-prev]
-    (let [z (trace :z (d/categorical (if (zero? t) initial (a/take transition z-prev 0))))]
-      (trace :y (d/normal (a/take means z) 1))
+    (let [z (trace :z (d/categorical (if (zero? t) initial (array/take transition z-prev 0))))]
+      (trace :y (d/normal (array/take means z) 1))
       z)))
 
 (def hmm (comb/unfold hmm-step))
@@ -282,14 +282,14 @@
 
 (def ^:private gmm-ys [-3.5 -4.1 0.3 -0.2 3.8 4.2 0.1 3.6])
 (def ^:private gmm-weights [0.3 0.5 0.2])
-(def ^:private mixture (a/array gmm-weights))
+(def ^:private mixture (array/array gmm-weights))
 
 (def gmm
   (gen [ys]
-    (let [mus (a/stack [(trace :mu0 (d/normal 0 10)) (trace :mu1 (d/normal 0 10)) (trace :mu2 (d/normal 0 10))])]
+    (let [mus (array/stack [(trace :mu0 (d/normal 0 10)) (trace :mu1 (d/normal 0 10)) (trace :mu2 (d/normal 0 10))])]
       (doseq [i (range (count ys))]
         (let [z (trace [:z i] (d/categorical mixture))]
-          (trace [:y i] (d/normal (a/take mus z) 1))))
+          (trace [:y i] (d/normal (array/take mus z) 1))))
       mus)))
 
 (def ^:private gmm-obs
@@ -354,7 +354,7 @@
 
 (defn -main [& _]
   (binding [b/*spot-checks* (or spot-checks b/*spot-checks*)]
-    (let [backend a/*backend*]
+    (let [backend array/*backend*]
       (println "backend:" (p/-name backend)
                (if (= :mlx (p/-name backend))
                  (str ((requiring-resolve 'gen.backend.mlx/device) backend) " " (:float (p/-defaults backend)))

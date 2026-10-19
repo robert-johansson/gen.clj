@@ -10,7 +10,7 @@
      clojure -J-Dgen.backend=mlx -M:bench -m gen.genmlx-bench              MLX, GPU
      clojure -J-Dgen.backend=mlx -J-Dgen.mlx.device=cpu -M:bench -m gen.genmlx-bench"
   (:refer-clojure :exclude [+ - * /])
-  (:require [gen.array :as a :refer [+ - * /]]
+  (:require [gen.array :as array :refer [+ - * /]]
             [gen.array.protocols :as p]
             [gen.batched :as b]
             [gen.choicemap :as cm]
@@ -78,7 +78,7 @@
   (shutdown-agents))
 
 (defn run []
-  (let [backend a/*backend*]
+  (let [backend array/*backend*]
     (println "backend:" (p/-name backend)
              (if (= :mlx (p/-name backend))
                (str ((requiring-resolve 'gen.backend.mlx/device) backend) " " (:float (p/-defaults backend)))
@@ -87,18 +87,18 @@
              "|" (System/getProperty "java.vm.name") (System/getProperty "java.version"))
 
     (println "\n== Anchor: tiny graph + host read ==")
-    (let [x (a/array 1.5)]
-      (row "eval-loop" 200 200 (bench 7 #(dotimes [_ 200] (a/item (+ x 0.5))))))
+    (let [x (array/array 1.5)]
+      (row "eval-loop" 200 200 (bench 7 #(dotimes [_ 200] (array/item (+ x 0.5))))))
 
     (println "\n== Pair 1: generate — scalar loop vs batched ==")
     (doseq [n [1 10 100 1000 3000]]
       (row "scalar  generate" n n
            (bench (reps-for true n)
                   #(doseq [key (rng/split (rng/key 7) n)]
-                     (a/item (:weight (gfi/generate model [ys] obs key)))))))
+                     (array/item (:weight (gfi/generate model [ys] obs key)))))))
     (doseq [n [1 10 100 1000 3000 10000]]
       (row "batched generate" n n
-           (bench 7 #(a/->clj (:weights (b/generate model [ys] obs n (rng/key 7)))))))
+           (bench 7 #(array/->clj (:weights (b/generate model [ys] obs n (rng/key 7)))))))
 
     (println "\n== Pair 2: importance sampling — scalar vs batched ==")
     (doseq [n [1 10 100 1000]]
@@ -115,7 +115,7 @@
         (row "scalar  mh chains" c (clojure.core/* c 10)
              (bench (reps-for true (clojure.core/* c 100))
                     #(dotimes [i c]
-                       (a/item (:score (peek (:traces (k/run kernel (start i) {:samples 10 :key (rng/key i)}))))))))))
+                       (array/item (:score (peek (:traces (k/run kernel (start i) {:samples 10 :key (rng/key i)}))))))))))
 
     (println "\n== Pair 4: particle filter (5 steps) — scalar vs batched ==")
     (let [run (fn [n batched?]

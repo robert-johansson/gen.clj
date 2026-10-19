@@ -22,7 +22,7 @@
    The options map also takes :key; omitting it draws one from the implicit
    key source."
   (:refer-clojure :exclude [-])
-  (:require [gen.array :as a :refer [-]]
+  (:require [gen.array :as array :refer [-]]
             [gen.batched :as batched]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
@@ -55,7 +55,7 @@
    (let [key (or (:key opts) (gfi/next-key))]
      (if (and (:batched? opts) (not (:proposal opts)))
        (let [{ps :particles ws :weights} (batched/generate model args observations n key)
-             log-weights (a/->clj ws)]
+             log-weights (array/->clj ws)]
          {:particles ps
           :log-normalized-weights (:log-weights (w/normalize log-weights))
           :log-ml-estimate (w/log-mean-exp log-weights)})

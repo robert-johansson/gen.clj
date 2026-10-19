@@ -303,10 +303,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   whose meaning changed has a safeguard that makes a naive port fail loudly
   (`docs/porting-genmlx.md`).
 - **House style: gen.array's operators are referred** in place of
-  `clojure.core`'s (`(+ a b)`, not `(a/add a b)`); `max`, `min`, `take` and
+  `clojure.core`'s (`(+ a b)`, not `(array/add a b)`); `max`, `min`, `take` and
   `flatten` are never referred (`docs/array-api.md` §2, §12).
 - **Branching on array values:** the `gen` macro wraps every `if` test in
-  `a/truthy?`, so a one-element array branches on its value and a batched
+  `array/truthy?`, so a one-element array branches on its value and a batched
   array throws instead of silently taking one branch (`docs/array-api.md` §8a).
 - **Randomness:** JAX's partitionable Threefry-2x32-20 in pure Clojure,
   bit-identical to JAX. Every trace site consumes one key. The implicit key
@@ -445,11 +445,18 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     depends on the enumerated choices is a loud error, as is a choice made
     by a callee at an address (wrap the callee instead). Batched, it is the
     same code under the batch tracer.
+- **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
+  `(array/item x)`, the namespace's last segment, as the Clojure style guide
+  has it. It replaced `a`, which the owner found ugly (2026-10-18). The
+  operators and math stay referred in place of `clojure.core`'s, the
+  convention of Clojure's numeric libraries (`clojure.core.matrix.operators`,
+  fastmath's `use-primitive-operators`), so a model reads
+  `(+ (* slope x) intercept)`, never `(array/+ (array/* slope x) intercept)`.
 - **Three ways to run, all first-class (owner, 2026-10-19).** The pure-JVM
   backend (always available, no native dependency), MLX on the CPU, and MLX
   on the GPU (Metal, CUDA). Each passes the conformance suite and the test
   battery, a user picks per model (`-Dgen.backend`, `-Dgen.mlx.device`, or
-  `a/with-backend` for a region), and the core assumes none of them.
+  `array/with-backend` for a region), and the core assumes none of them.
   - The pure-JVM backend gets CPU speed work on its own terms (bean
     genclj-exha). MLX's CPU device is an alternative and a yardstick for it,
     never a requirement.

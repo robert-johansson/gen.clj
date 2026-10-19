@@ -5,7 +5,7 @@
             [gen.test-support :as ts]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [gen.array :as a]))
+            [gen.array :as array]))
 
 ;; ---------------------------------------------------------------------------
 ;; Reference implementation over nested vectors
@@ -122,9 +122,9 @@
     {:out out :sx sx :sy sy :x x :y y}))
 
 (def binary-ops
-  {a/+ +, a/- -, a/* *, a/maximum #(Math/max (double %1) (double %2))
-   a/minimum #(Math/min (double %1) (double %2))
-   a/< <, a/>= >=, a/== ==})
+  {array/+ +, array/- -, array/* *, array/maximum #(Math/max (double %1) (double %2))
+   array/minimum #(Math/min (double %1) (double %2))
+   array/< <, array/>= >=, array/== ==})
 
 ;; ---------------------------------------------------------------------------
 ;; Properties
@@ -142,23 +142,23 @@
                  [op ref-op] (gen/elements (seq binary-ops))]
     (let [out (ref-broadcast-shape sx sy)
           expected (build out #(ref-op (broadcast-get x sx %) (broadcast-get y sy %)))]
-      (all-agree? expected (a/->clj (op (a/array x) (a/array y)))))))
+      (all-agree? expected (array/->clj (op (array/array x) (array/array y)))))))
 
 (defspec host-and-array-semantics-agree 500
   (prop/for-all [x (gen/one-of [(gen/fmap storable gen-elem) (gen/choose -9 9) gen/boolean])
                  y (gen/one-of [(gen/fmap storable gen-elem) (gen/choose -9 9) gen/boolean])
-                 op (gen/elements [a/+ a/- a/* a// a/pow a/maximum a/minimum a/mod a/floor-div
-                                   a/< a/<= a/== a/!= a/logical-and a/logical-or])]
+                 op (gen/elements [array/+ array/- array/* array// array/pow array/maximum array/minimum array/mod array/floor-div
+                                   array/< array/<= array/== array/!= array/logical-and array/logical-or])]
     ;; the same op on host scalars and on 1-element arrays must agree:
     ;; exactly on the JVM backend, within its precision on another (whose
     ;; arithmetic is not the host's)
-    (agrees? (op x y) (a/item (op (a/array [x]) (a/array [y]))))))
+    (agrees? (op x y) (array/item (op (array/array [x]) (array/array [y]))))))
 
 (defspec unary-host-and-array-semantics-agree 300
   (prop/for-all [x (gen/one-of [(gen/fmap storable gen-elem) (gen/choose -9 9) gen/boolean])
-                 op (gen/elements [a/negate a/abs a/sign a/exp a/log a/sqrt a/log1p a/expm1
-                                   a/floor a/ceil a/round a/tanh a/isnan a/logical-not])]
-    (agrees? (op x) (a/item (op (a/array [x]))))))
+                 op (gen/elements [array/negate array/abs array/sign array/exp array/log array/sqrt array/log1p array/expm1
+                                   array/floor array/ceil array/round array/tanh array/isnan array/logical-not])]
+    (agrees? (op x) (array/item (op (array/array [x]))))))
 
 (defspec sum-over-an-axis-matches-the-reference 200
   (prop/for-all [shape (gen/vector (gen/choose 1 4) 1 3)
@@ -170,21 +170,21 @@
                           (fn [idx]
                             (reduce + (for [k (range (nth shape axis))]
                                         (ref-get x (concat (take axis idx) [k] (drop axis idx)))))))]
-      (close-values? expected (a/->clj (a/sum (a/array x) {:axis axis}))))))
+      (close-values? expected (array/->clj (array/sum (array/array x) {:axis axis}))))))
 
 (defspec transpose-is-an-involution-and-moves-elements 200
   (prop/for-all [shape (gen/vector (gen/choose 1 4) 1 3)]
     (let [x (build shape #(double (mod (hash %) 1000000)))
-          arr (a/array x)
-          t (a/transpose arr)]
-      (and (a/equal? arr (a/transpose t))
-           (every? #(= (ref-get x %) (ref-get (a/->clj t) (reverse %))) (indices shape))))))
+          arr (array/array x)
+          t (array/transpose arr)]
+      (and (array/equal? arr (array/transpose t))
+           (every? #(= (ref-get x %) (ref-get (array/->clj t) (reverse %))) (indices shape))))))
 
 (defspec reshape-preserves-row-major-order 200
   (prop/for-all [shape (gen/vector (gen/choose 1 4) 1 3)]
     (let [n (reduce * shape)
-          x (a/arange n)]
-      (= (vec (range n)) (a/->clj (a/flatten (a/reshape x shape)))))))
+          x (array/arange n)]
+      (= (vec (range n)) (array/->clj (array/flatten (array/reshape x shape)))))))
 
 (defspec concatenate-then-slice-recovers-the-parts 200
   (prop/for-all [shape (gen/vector (gen/choose 1 3) 1 3)
@@ -192,18 +192,18 @@
                  axis-seed gen/nat]
     (let [axis (mod axis-seed (count shape))
           s2 (assoc shape axis extra)
-          x (a/reshape (a/arange (reduce * shape)) shape)
-          y (a/+ 100 (a/reshape (a/arange (reduce * s2)) s2))
-          c (a/concatenate [x y] axis)
+          x (array/reshape (array/arange (reduce * shape)) shape)
+          y (array/+ 100 (array/reshape (array/arange (reduce * s2)) s2))
+          c (array/concatenate [x y] axis)
           d (nth shape axis)]
-      (and (a/equal? x (a/slice c axis 0 d))
-           (a/equal? y (a/slice c axis d nil))))))
+      (and (array/equal? x (array/slice c axis 0 d))
+           (array/equal? y (array/slice c axis d nil))))))
 
 (defspec pick-matches-elementwise-indexing 200
   (prop/for-all [batch (gen/choose 1 4)
                  k (gen/choose 1 4)
                  seed gen/nat]
-    (let [x (a/reshape (a/arange (* batch k)) [batch k])
+    (let [x (array/reshape (array/arange (* batch k)) [batch k])
           idx (mapv #(mod (+ seed (* 7 %)) k) (range batch))]
       (= (mapv (fn [b i] (+ (* b k) i)) (range batch) idx)
-         (a/->clj (a/pick x (a/array idx)))))))
+         (array/->clj (array/pick x (array/array idx)))))))

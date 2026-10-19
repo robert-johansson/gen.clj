@@ -7,7 +7,7 @@
    transforms. On the float64 JVM backend, uniform draws are bit-identical to
    JAX's, and normal, gumbel and exponential draws match JAX to rounding."
   (:refer-clojure :exclude [key + - * / < > <= >= ==])
-  (:require [gen.array :as a :refer [+ - * / < > <= >= ==]]
+  (:require [gen.array :as array :refer [+ - * / < > <= >= ==]]
             [gen.array.dtype :as dt]
             [gen.array.protocols :as p]
             [gen.random.threefry :as threefry]))
@@ -54,18 +54,18 @@
   "The backend a sampler draws on: :backend in opts, else that of the first
    backend-array parameter, else gen.array/*backend*."
   [opts & params]
-  (a/effective-backend
+  (array/effective-backend
    (or (:backend opts)
-       (some #(when (and (some? %) (not (a/host? %))) (a/backend %)) params)
-       a/*backend*)))
+       (some #(when (and (some? %) (not (array/host? %))) (array/backend %)) params)
+       array/*backend*)))
 
 (defn- float-dtype
   "The float dtype for a draw: :dtype in opts, else that of a float array
    parameter, else the backend's default float."
   [opts b param]
   (or (:dtype opts)
-      (when (and (some? param) (not (a/host? param)) (= :float (dt/kind (a/dtype param))))
-        (a/dtype param))
+      (when (and (some? param) (not (array/host? param)) (= :float (dt/kind (array/dtype param))))
+        (array/dtype param))
       (:float (p/-defaults b))))
 
 (defn uniform
@@ -79,7 +79,7 @@
      (if (and (nil? low) (nil? high))
        u
        (let [low (or low 0.0) high (or high 1.0)]
-         (a/maximum low (+ (* u (- high low)) low)))))))
+         (array/maximum low (+ (* u (- high low)) low)))))))
 
 (def ^:private sqrt-2 (Math/sqrt 2.0))
 
@@ -94,7 +94,7 @@
          lo (if (= dtype :float32)
               (double (Math/nextAfter (float -1.0) 0.0))
               (Math/nextAfter -1.0 0.0))]
-     (* sqrt-2 (a/erfinv (uniform key shape {:low lo :high 1.0 :dtype dtype :backend b}))))))
+     (* sqrt-2 (array/erfinv (uniform key shape {:low lo :high 1.0 :dtype dtype :backend b}))))))
 
 (defn gumbel
   "Standard Gumbel values of shape: -log(-log u), u uniform on [tiny, 1) (as
@@ -105,7 +105,7 @@
    (let [b (backend-for opts)
          dtype (float-dtype opts b nil)
          tiny (if (= dtype :float32) (double Float/MIN_NORMAL) Double/MIN_NORMAL)]
-     (- (a/log (- (a/log (uniform key shape {:low tiny :high 1.0 :dtype dtype :backend b}))))))))
+     (- (array/log (- (array/log (uniform key shape {:low tiny :high 1.0 :dtype dtype :backend b}))))))))
 
 (defn exponential
   "Standard exponential values of shape: -log1p(-u) (as JAX). Options: :dtype,
@@ -113,7 +113,7 @@
   ([key] (exponential key [] nil))
   ([key shape] (exponential key shape nil))
   ([key shape opts]
-   (- (a/log1p (- (uniform key shape opts))))))
+   (- (array/log1p (- (uniform key shape opts))))))
 
 (defn bernoulli
   "Bool values, true with probability p (an array or number). shape defaults
@@ -122,7 +122,7 @@
   ([key p shape] (bernoulli key p shape nil))
   ([key p shape opts]
    (let [b (backend-for opts p)]
-     (< (uniform key (or shape (a/shape p)) {:dtype (float-dtype opts b p) :backend b}) p))))
+     (< (uniform key (or shape (array/shape p)) {:dtype (float-dtype opts b p) :backend b}) p))))
 
 (defn categorical
   "Index values drawn from the unnormalized log-probabilities along the last
@@ -132,12 +132,12 @@
   ([key logits] (categorical key logits nil nil))
   ([key logits shape] (categorical key logits shape nil))
   ([key logits shape opts]
-   (let [ls (a/shape logits)
+   (let [ls (array/shape logits)
          _ (when (empty? ls) (throw (ex-info "categorical needs logits of rank >= 1" {:shape ls})))
          b (backend-for opts logits)
          g (gumbel key (conj (vec (or shape (pop ls))) (peek ls))
                    {:dtype (float-dtype opts b logits) :backend b})]
-     (a/argmax (+ g logits) {:axis -1}))))
+     (array/argmax (+ g logits) {:axis -1}))))
 
 (def ^:private gamma-rounds
   "Proposal rounds per gamma draw. Marsaglia–Tsang accepts with probability
@@ -152,26 +152,26 @@
   ([key alpha] (gamma key alpha nil nil))
   ([key alpha shape] (gamma key alpha shape nil))
   ([key alpha shape opts]
-   (let [shape (vec (or shape (a/shape alpha)))
+   (let [shape (vec (or shape (array/shape alpha)))
          b (backend-for opts alpha)
          o {:dtype (float-dtype opts b alpha) :backend b}
          boost? (< alpha 1)
-         a1 (a/where boost? (+ alpha 1) alpha)
+         a1 (array/where boost? (+ alpha 1) alpha)
          d (- a1 (/ 1.0 3.0))
-         c (/ 1.0 (a/sqrt (* 9.0 d)))
+         c (/ 1.0 (array/sqrt (* 9.0 d)))
          ks (split key (inc (* 2 gamma-rounds)))
          proposal (fn [r]
                     (let [x (normal (ks (+ 1 (* 2 r))) shape o)
                           u (uniform (ks (+ 2 (* 2 r))) shape o)
-                          v (a/pow (+ 1.0 (* c x)) 3)
-                          ok (a/logical-and (> v 0)
-                                            (< (a/log u) (+ (* 0.5 x x) d (- (* d v)) (* d (a/log v)))))]
+                          v (array/pow (+ 1.0 (* c x)) 3)
+                          ok (array/logical-and (> v 0)
+                                                (< (array/log u) (+ (* 0.5 x x) d (- (* d v)) (* d (array/log v)))))]
                       [ok (* d v)]))
          ;; the first accepted proposal wins: fold from the last round to the first
-         g (reduce (fn [acc [ok value]] (a/where ok value acc))
+         g (reduce (fn [acc [ok value]] (array/where ok value acc))
                    d
                    (map proposal (reverse (range gamma-rounds))))]
-     (a/where boost? (* g (a/pow (uniform (ks 0) shape o) (/ 1.0 alpha))) g))))
+     (array/where boost? (* g (array/pow (uniform (ks 0) shape o) (/ 1.0 alpha))) g))))
 
 (defn randint
   "Integers uniform in [low, high) of shape (default []). Options: :backend."
@@ -180,4 +180,4 @@
   ([key low high shape opts]
    (let [b (backend-for opts low high)
          u (uniform key shape {:backend b :dtype (:float (p/-defaults b))})]
-     (a/astype (a/floor (+ low (* u (- high low)))) (:int (p/-defaults b))))))
+     (array/astype (array/floor (+ low (* u (- high low)))) (:int (p/-defaults b))))))

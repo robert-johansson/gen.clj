@@ -19,7 +19,7 @@
      [:select addr]              a categorical choice compared with = to pick a
                                  mean (a host predicate on the choice)"
   (:require [clojure.test.check.generators :as gen]
-            [gen.array :as a]
+            [gen.array :as array]
             [gen.array.protocols]
             [gen.combinators :as comb]
             [gen.dist :as d]
@@ -27,8 +27,8 @@
 
 ;; Parameters are transformed from a dependency's value into each family's
 ;; domain, so any value yields a valid distribution.
-(defn- positive [x] (a/+ 0.5 (a/softplus x)))
-(defn- probability [x] (a/+ 0.05 (a/* 0.9 (a/sigmoid x))))
+(defn- positive [x] (array/+ 0.5 (array/softplus x)))
+(defn- probability [x] (array/+ 0.05 (array/* 0.9 (array/sigmoid x))))
 
 (def ^:private families
   {:normal (fn [x] (d/normal x 1.0))
@@ -36,19 +36,19 @@
    :beta (fn [x] (d/beta (positive x) 2.0))
    :exponential (fn [x] (d/exponential (positive x)))
    :laplace (fn [x] (d/laplace x 0.7))
-   :uniform (fn [x] (d/uniform x (a/+ x (positive x))))
+   :uniform (fn [x] (d/uniform x (array/+ x (positive x))))
    :poisson (fn [x] (d/poisson (positive x)))
    :categorical (fn [_] (d/categorical [0.2 0.5 0.3]))
-   :mixture (fn [x] ((d/homogeneous-mixture d/normal) [0.4 0.6] (a/stack [x (a/+ x 2.0)] -1) [1.0 0.5]))
+   :mixture (fn [x] ((d/homogeneous-mixture d/normal) [0.4 0.6] (array/stack [x (array/+ x 2.0)] -1) [1.0 0.5]))
    ;; a vector site whose mean is a per-particle scalar plus a shared vector
-   :vector (fn [x] (d/normal (a/+ x (a/array [0.0 1.0 -1.0])) 1.0))})
+   :vector (fn [x] (d/normal (array/+ x (array/array [0.0 1.0 -1.0])) 1.0))})
 
 (def numeric-families (vec (keys families)))
 
 (def ^:private map-kernel (dyn/make-gen-fn (fn [trace _ _ x] (trace :v (d/normal x 1.0))) '([x])))
 
 (def ^:private walk
-  (dyn/make-gen-fn (fn [trace _ _ _t s] (trace :s (d/normal (a/* 0.9 s) 1.0))) '([t s])))
+  (dyn/make-gen-fn (fn [trace _ _ _t s] (trace :s (d/normal (array/* 0.9 s) 1.0))) '([t s])))
 
 (def ^:private switched
   "A Switch of a one-site model and a two-site model with a dependency."
@@ -64,20 +64,20 @@
   (reduce (fn [env [kind addr & more :as st]]
             (case kind
               :site (let [[family dep] more
-                          x (if dep (a/astype (get env dep 0.0) (:float (gen.array.protocols/-defaults a/*backend*))) 0.0)
+                          x (if dep (array/astype (get env dep 0.0) (:float (gen.array.protocols/-defaults array/*backend*))) 0.0)
                           v (trace addr ((families family) x))]
                       ;; a vector value enters later parameters as its sum
-                      (assoc env addr (if (= family :vector) (a/sum v) v)))
+                      (assoc env addr (if (= family :vector) (array/sum v) v)))
               :select (let [k (trace [addr :k] (d/categorical [0.3 0.7]))]
                         (assoc env addr (trace [addr :v] (d/normal (if (= k 0) -2.0 2.0) 1.0))))
               :branch (let [[then else] more]
                         ;; truthy? as the gen macro would insert: a batch of values is loud
-                        (if (a/truthy? (trace addr (d/bernoulli 0.5)))
+                        (if (array/truthy? (trace addr (d/bernoulli 0.5)))
                           (run-statements then trace splice env)
                           (run-statements else trace splice env)))
               :splice (let [[spec] more] (splice addr (build spec)) env)
               :inline (let [[spec] st] (splice (build (second st))) env)
-              :map (let [[n] more] (assoc env addr (reduce a/+ 0.0 (splice addr (comb/map map-kernel) (vec (repeat n 0.5))))))
+              :map (let [[n] more] (assoc env addr (reduce array/+ 0.0 (splice addr (comb/map map-kernel) (vec (repeat n 0.5))))))
               :unfold (let [[n] more] (splice addr (comb/unfold walk) n 0.0) env)
               :switch (let [i (trace [addr :i] (d/categorical [0.5 0.5]))]
                         (assoc env addr (splice [addr :s] switched i 0.5)))))

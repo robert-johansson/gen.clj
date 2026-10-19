@@ -4,7 +4,7 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [gen.array :as a]
+            [gen.array :as array]
             [gen.inference.weights :as w]
             [gen.random :as rng]))
 
@@ -24,7 +24,7 @@
       (is (every? true? (map close? (:log-weights (w/normalize ws)) (:log-weights (w/normalize shifted)))))
       (is (close? (+ 1000.0 (:log-total (w/normalize ws))) (:log-total (w/normalize shifted))))))
   (testing "arrays and seqs give the same result"
-    (is (= (w/normalize [0.5 -0.5 ##-Inf]) (w/normalize (a/array [0.5 -0.5 ##-Inf]))))))
+    (is (= (w/normalize [0.5 -0.5 ##-Inf]) (w/normalize (array/array [0.5 -0.5 ##-Inf]))))))
 
 (deftest log-mean-exp-and-ess
   (is (close? 0.0 (w/log-mean-exp [0 0 0])))

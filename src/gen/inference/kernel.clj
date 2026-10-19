@@ -21,7 +21,7 @@
 
    (run kernel trace opts) runs a chain and collects samples."
   (:refer-clojure :exclude [repeat cycle reversible?])
-  (:require [gen.array :as a]
+  (:require [gen.array :as array]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
             [gen.inference.mh :as mh]
@@ -106,11 +106,11 @@
     (throw (ex-info "mix needs one weight per kernel" {:kernels (count kernels) :weights (count weights)})))
   (when-not (and (every? #(and (number? %) (>= % 0)) weights) (some pos? weights))
     (throw (ex-info "mix needs non-negative weights, not all zero" {:weights weights})))
-  (let [logits (a/log (a/array (mapv double weights)))]
+  (let [logits (array/log (array/array (mapv double weights)))]
     (with-reversals (fn [fs]
                       (fn [trace key]
                         (let [[k-choose k-step] (rng/split key)]
-                          ((fs (a/item (rng/categorical k-choose logits))) trace k-step))))
+                          ((fs (array/item (rng/categorical k-choose logits))) trace k-step))))
                     (vec kernels)
                     identity)))
 
@@ -118,7 +118,7 @@
   (doseq [addr (cm/addresses observations)]
     (let [observed (cm/get-choice observations addr)
           actual (cm/get-choice (:choices trace) addr)]
-      (when-not (and (some? actual) (a/equal? observed actual))
+      (when-not (and (some? actual) (array/equal? observed actual))
         (throw (ex-info (str "The kernel changed the observation at " addr)
                         {:path addr :observed observed :actual actual}))))))
 

@@ -8,7 +8,7 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [gen.array :as a]
+            [gen.array :as array]
             [gen.batched :as b]
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
@@ -33,7 +33,7 @@
     (let [slope (trace :slope (d/normal 0 10))
           intercept (trace :intercept (d/normal 0 10))]
       (doseq [[i x] (map-indexed vector xs)]
-        (trace [:y i] (d/normal (a/+ (a/* slope x) intercept) 1)))
+        (trace [:y i] (d/normal (array/+ (array/* slope x) intercept) 1)))
       slope)))
 
 (def observation (gen [mu] (trace :x (d/normal mu 1))))
@@ -45,7 +45,7 @@
 
 (def step
   (gen [t state]
-    (let [s (trace :s (d/normal (a/* 0.8 state) 1))]
+    (let [s (trace :s (d/normal (array/* 0.8 state) 1))]
       (trace :obs (d/normal s 0.5))
       s)))
 
@@ -60,7 +60,7 @@
       xs)))
 
 (def vector-latent
-  (gen [] (let [z (trace :z (d/mvnormal [0.0 1.0] [[2.0 0.3] [0.3 1.0]]))] (trace :y (d/normal (a/sum z {:axis -1}) 1)))))
+  (gen [] (let [z (trace :z (d/mvnormal [0.0 1.0] [[2.0 0.3] [0.3 1.0]]))] (trace :y (d/normal (array/sum z {:axis -1}) 1)))))
 
 (def models
   [[:linreg linreg [[1.0 2.0 3.0]]]
@@ -85,7 +85,7 @@
       (and (b/batched? ps)
            (= n (count trs))
            (every? consistent? trs)
-           (every? true? (map #(close? (:score %1) %2) trs (a/->clj (b/scores ps))))))))
+           (every? true? (map #(close? (:score %1) %2) trs (array/->clj (b/scores ps))))))))
 
 (defspec batched-generate-weights-are-the-observations-densities 60
   (prop/for-all [[[_ gf args] seed n] gen-case]
@@ -97,7 +97,7 @@
       (every? true? (map (fn [tr w] (and (consistent? tr)
                                          (close? w (gfi/project tr (sel/from-paths obs-paths)))
                                          (every? #(= (cm/get-choice obs %) (tr %)) obs-paths)))
-                         (b/traces ps) (a/->clj ws))))))
+                         (b/traces ps) (array/->clj ws))))))
 
 (defspec batched-updates-are-the-scalar-updates 60
   (prop/for-all [[[_ gf args] seed n] gen-case]
@@ -107,7 +107,7 @@
           sigma (cm/choicemap p (cm/get-choice (:choices probe) p))
           {ps' :particles ws :weights ds :discards} (b/update ps args (vec (repeat (count args) diff/no-change)) sigma (rng/key 2))
           scalar (map #(gfi/update % sigma (rng/key 0)) (b/traces ps))]
-      (and (every? true? (map #(close? (:weight %1) %2) scalar (a/->clj ws)))
+      (and (every? true? (map #(close? (:weight %1) %2) scalar (array/->clj ws)))
            (= (map :discard scalar) ds)
            (= (map (comp :choices :trace) scalar) (map :choices (b/traces ps')))))))
 
@@ -121,12 +121,12 @@
                      (let [retained (sel/from-paths (remove (set (cm/addresses (sel/get-selected (:choices old) s)))
                                                             (cm/addresses (:choices new))))]
                        (and (consistent? new)
-                            (close? w (a/- (gfi/project new retained) (gfi/project old retained))))))
-                   (b/traces ps) (b/traces ps') (a/->clj ws))))))
+                            (close? w (array/- (gfi/project new retained) (gfi/project old retained))))))
+                   (b/traces ps) (b/traces ps') (array/->clj ws))))))
 
 (deftest batched-statistics
   (let [ps (b/simulate linreg [[1.0]] 20000 (rng/key 1))
-        xs (a/->clj (b/choice ps :slope))
+        xs (array/->clj (b/choice ps :slope))
         m (/ (reduce + xs) 20000)
         v (/ (reduce + (map #(* (- % m) (- % m)) xs)) 19999)]
     (is (< (Math/abs m) (* 5 (/ 10 (Math/sqrt 20000)))))
@@ -138,13 +138,13 @@
 
 (deftest take-and-select
   (let [ps (b/simulate linreg [[1.0 2.0]] 5 (rng/key 4))
-        slopes (a/->clj (b/choice ps :slope))]
-    (is (= (mapv slopes [4 4 0]) (a/->clj (b/choice (b/take ps [4 4 0]) :slope))))
+        slopes (array/->clj (b/choice ps :slope))]
+    (is (= (mapv slopes [4 4 0]) (array/->clj (b/choice (b/take ps [4 4 0]) :slope))))
     (is (b/batched? (b/take ps [1 2])))
     (let [qs (b/simulate linreg [[1.0 2.0]] 5 (rng/key 5))
           mixed (b/select [true false true false true] ps qs)]
-      (is (= (mapv (fn [keep? p q] (if keep? p q)) [true false true false true] slopes (a/->clj (b/choice qs :slope)))
-             (a/->clj (b/choice mixed :slope))))
+      (is (= (mapv (fn [keep? p q] (if keep? p q)) [true false true false true] slopes (array/->clj (b/choice qs :slope)))
+             (array/->clj (b/choice mixed :slope))))
       (is (every? consistent? (b/traces mixed))))))
 
 (def branching
@@ -157,12 +157,12 @@
   (let [{ps :particles ws :weights} (b/generate branching [] cm/EMPTY 8 (rng/key 6))]
     (is (not (b/batched? ps)))
     (is (= 8 (count (b/traces ps))))
-    (is (= (vec (repeat 8 0.0)) (a/->clj ws)))
+    (is (= (vec (repeat 8 0.0)) (array/->clj ws)))
     (testing "and later operations carry on per particle"
       (let [{ws :weights} (b/update ps [] [] (cm/choicemap :switch true) (rng/key 7))
             scalar (map #(:weight (gfi/update % (cm/choicemap :switch true) (rng/key 0))) (b/traces ps))]
-        (is (= 8 (count (a/->clj ws))))
-        (is (every? true? (map #(and (Double/isFinite %1) (Double/isFinite %2)) (a/->clj ws) (map ts/number scalar)))))))
+        (is (= 8 (count (array/->clj ws))))
+        (is (every? true? (map #(and (Double/isFinite %1) (Double/isFinite %2)) (array/->clj ws) (map ts/number scalar)))))))
   (testing "a Switch whose index differs across particles falls back"
     (let [sw (gen [] (splice :s (comb/switch observation observation)
                              (if (trace :c (d/bernoulli 0.5)) 0 1) 0.0))]
@@ -184,7 +184,7 @@
     (is (b/batched? particles))
     (is (= 20000 (count log-normalized-weights)))
     (is (< (Math/abs (- log-ml-estimate evidence)) 0.03))
-    (let [xs (a/->clj (b/choice particles :x))
+    (let [xs (array/->clj (b/choice particles :x))
           mean (reduce + (map #(* (Math/exp %1) %2) log-normalized-weights xs))]
       (is (< (Math/abs (- mean 0.65)) 0.03) "the weighted posterior mean")))
   (testing "resampling one trace"
@@ -220,7 +220,7 @@
 (deftest parallel-mh-chains
   (let [n 4000
         start (fn [xs] (b/take (:particles (b/generate conjugate [] (cm/choicemap :y y) 1 (rng/key 0))) (repeat n 0)))
-        moments (fn [ps] (let [xs (a/->clj (b/choice ps :x)) m (/ (reduce + xs) n)]
+        moments (fn [ps] (let [xs (array/->clj (b/choice ps :x)) m (/ (reduce + xs) n)]
                            [m (/ (reduce + (map #(* (- % m) (- % m)) xs)) (dec n))]))
         chains (reduce (fn [ps k] (:particles (mh/mh-particles ps (sel/select :x) k)))
                        (start nil) (rng/split (rng/key 13) 60))
@@ -239,7 +239,7 @@
   [model args obs n key]
   (let [{ps :particles ws :weights} (b/generate model args obs n key)]
     (every? true? (map (fn [tr w] (close? w (gfi/project tr (sel/from-choicemap obs))))
-                       (b/traces ps) (a/->clj ws)))))
+                       (b/traces ps) (array/->clj ws)))))
 
 (deftest host-predicates-on-particles-fall-back
   ;; review 1: (= k 0) on a batch was silently false for every particle
@@ -258,21 +258,21 @@
 
 (deftest vector-sites-are-per-particle
   ;; review 2: an [N] per-particle parameter met a [3] value element by element
-  (let [ys (a/array [0.5 1.0 1.5])
+  (let [ys (array/array [0.5 1.0 1.5])
         ;; three i.i.d. observations: vector parameters (Gen.jl's broadcasted_normal)
-        m (gen [] (let [mu (trace :mu (d/normal 0 1))] (trace :ys (d/normal (a/+ mu (a/zeros [3])) 1))))]
+        m (gen [] (let [mu (trace :mu (d/normal 0 1))] (trace :ys (d/normal (array/+ mu (array/zeros [3])) 1))))]
     (doseq [n [3 4]]
       (let [{ps :particles ws :weights} (b/generate m [] (cm/choicemap :ys ys) n (rng/key 32))]
         (is (b/batched? ps))
-        (is (every? true? (map (fn [mu w] (close? w (a/sum (dc/log-prob (d/normal mu 1) ys))))
-                               (a/->clj (b/choice ps :mu)) (a/->clj ws))))))
+        (is (every? true? (map (fn [mu w] (close? w (array/sum (dc/log-prob (d/normal mu 1) ys))))
+                               (array/->clj (b/choice ps :mu)) (array/->clj ws))))))
     (testing "a vector site's draws have the batch axis in front"
-      (let [v (gen [] (trace :z (d/normal (a/zeros [3]) 1)))]
-        (is (= [5 3] (a/shape (b/choice (b/simulate v [] 5 (rng/key 33)) :z))))
-        (is (batched-matches-scalar? v [] (cm/choicemap :z (a/array [0.1 0.2 0.3])) 3 (rng/key 34)))))
+      (let [v (gen [] (trace :z (d/normal (array/zeros [3]) 1)))]
+        (is (= [5 3] (array/shape (b/choice (b/simulate v [] 5 (rng/key 33)) :z))))
+        (is (batched-matches-scalar? v [] (cm/choicemap :z (array/array [0.1 0.2 0.3])) 3 (rng/key 34)))))
     (testing "a per-particle scalar meets a shared vector in model arithmetic"
       (let [m (gen [] (let [x (trace :x (d/normal 0 1))]
-                        (trace :y (d/normal (a/sum (a/* x (a/array [1.0 2.0 3.0]))) 1))))]
+                        (trace :y (d/normal (array/sum (array/* x (array/array [1.0 2.0 3.0]))) 1))))]
         (is (batched-matches-scalar? m [] (cm/choicemap :y 0.7) 3 (rng/key 35)))
         (is (every? true? (map (fn [tr] (close? (:score tr) (:weight (gfi/assess m [] (:choices tr)))))
                                (b/traces (:particles (b/generate m [] (cm/choicemap :y 0.7) 3 (rng/key 35)))))))))))
@@ -301,7 +301,7 @@
     ;; =, not= and condp reach the batch through = even in helper functions;
     ;; case (and if) only inside gen bodies, which guard them. The helpers
     ;; test host numbers: what the JVM backend's 0-d values are, and MLX's
-    ;; are not (on MLX a helper must read a value with a/item)
+    ;; are not (on MLX a helper must read a value with array/item)
     (doseq [[label mu-of] (if (ts/jvm?) [[:=-on-the-right (fn [k] (if (= 0 k) -3.0 3.0))]
                            [:not= (fn [k] (if (not= 0 k) 3.0 -3.0))]
                            [:condp (fn [k] (condp = k 0 -3.0 3.0))]
@@ -316,14 +316,14 @@
 (deftest batched-runs-validate-parameters
   ;; B3: a batched run threw nothing where a scalar run throws
   ;; (on eager backends: a lazy one does not read array parameters, rule 5)
-  (let [m (gen [] (let [x (trace :x (d/uniform 0 1))] (trace :k (d/categorical (a/stack [x x])))))]
-    (when (a/concrete? (a/zeros [1]))
+  (let [m (gen [] (let [x (trace :x (d/uniform 0 1))] (trace :k (d/categorical (array/stack [x x])))))]
+    (when (array/concrete? (array/zeros [1]))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"probabilities" (gfi/simulate m [] (rng/key 1))))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"probabilities" (b/simulate m [] 4 (rng/key 1)))))))
 
 (deftest more-batched-forms
   (testing "B9: scans and arg-reductions of a per-particle scalar"
-    (let [m (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (a/sum (a/cumsum x)) 1))))]
+    (let [m (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (array/sum (array/cumsum x)) 1))))]
       (is (b/batched? (b/simulate m [] 3 (rng/key 41))))))
   (testing "B10: an Unfold whose length is a choice falls back"
     (let [m (gen [] (splice :u unfolded (trace :n (d/uniform-discrete 1 3)) 0.0))]
@@ -331,7 +331,7 @@
   (testing "B11: a collection of a distribution's particles"
     (is (= 3 (count (b/traces (b/simulate (d/normal 0 1) [] 3 (rng/key 43)))))))
   (testing "a per-particle fill value stays batched"
-    (let [m (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (a/full [2] x) 1))))]
+    (let [m (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (array/full [2] x) 1))))]
       (is (b/batched? (b/simulate m [] 3 (rng/key 44))))))
   (testing "B8: resampled particles are the chosen ones, exactly"
     (let [ps (b/simulate linreg [[1.0 2.0]] 5 (rng/key 45))
@@ -347,7 +347,7 @@
   "Are the collection's scores (batched ones as the batched run made them)
    the assessed densities of its particles' choices?"
   [gf args ps]
-  (every? true? (map #(close? %1 (:weight (gfi/assess gf args (:choices %2)))) (a/->clj (b/scores ps)) (b/traces ps))))
+  (every? true? (map #(close? %1 (:weight (gfi/assess gf args (:choices %2)))) (array/->clj (b/scores ps)) (b/traces ps))))
 
 (defn- falls-back-exactly?
   "Does gf fall back in batched importance sampling, giving the scalar
@@ -397,7 +397,7 @@
    tracer the comparison is a batch, which is truthy, so every particle would
    take the first branch."
   [x]
-  (if (a/> x 0) 1.0 -1.0))
+  (if (array/> x 0) 1.0 -1.0))
 
 (def hidden-branch (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (drift x) 1)))))
 
@@ -407,13 +407,13 @@
     (is (not (b/batched? ps)))
     (is (re-find #"comparison was never read" (:message (b/fallback-reason ps))))
     (is (scores-exact? hidden-branch [] ps)))
-  (let [rare (fn [x] (if (a/< x 2.0) 1.0 0.1))
+  (let [rare (fn [x] (if (array/< x 2.0) 1.0 0.1))
         m (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal x (rare x)))))]
     (is (falls-back-exactly? m [] (cm/choicemap :y 2.5)) "however rare the other branch"))
   (testing "while comparisons that are read, or handed back, stay batched"
-    (is (b/batched? (b/simulate (gen [] (let [x (trace :x (d/normal 0 1))] (a/> x 0))) [] 8 (rng/key 51))))
+    (is (b/batched? (b/simulate (gen [] (let [x (trace :x (d/normal 0 1))] (array/> x 0))) [] 8 (rng/key 51))))
     (is (b/batched? (b/simulate (gen [] (let [x (trace :x (d/normal 0 1))]
-                                          (trace :y (d/normal (a/where (a/> x 0) 1.0 -1.0) 1))))
+                                          (trace :y (d/normal (array/where (array/> x 0) 1.0 -1.0) 1))))
                                 [] 8 (rng/key 52))))))
 
 (defn- level
@@ -439,21 +439,21 @@
   (let [m (gen [] (let [k (trace :k (d/categorical [0.5 0.5]))] (trace :y (d/normal (guarded-level k) 1))))]
     (is (falls-back-exactly? m [] (cm/choicemap :y 0.5)))
     (is (= 3.0 (guarded-level 1)) "and are ordinary functions otherwise"))
-  (let [sgn (dyn/guarded-fn [x] (if (a/> x 0) 1.0 -1.0))
+  (let [sgn (dyn/guarded-fn [x] (if (array/> x 0) 1.0 -1.0))
         m (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (sgn x) 1))))]
     (is (falls-back-exactly? m [] (cm/choicemap :y 0.5)))))
 
 (defn- safe-item
   "A plain helper that catches what a batched value raises."
   [x]
-  (try (a/item x) (catch Exception _ 0.0)))
+  (try (array/item x) (catch Exception _ 0.0)))
 
 (deftest caught-exceptions-are-branches
   ;; fourth acceptance test B1: a caught batched-branch error, or any
   ;; exception caught in a body, may be thrown for some particles only
   (let [obs (cm/choicemap :y 3.0)]
     (is (falls-back-exactly? (gen [] (let [x (trace :x (d/normal 0 1))]
-                                       (trace :y (d/normal (try (if (a/> x 2.0) 3.0 0.0) (catch Exception _ 0.0)) 1))))
+                                       (trace :y (d/normal (try (if (array/> x 2.0) 3.0 0.0) (catch Exception _ 0.0)) 1))))
                              [] obs)
         "a try in a body")
     (is (falls-back-exactly? (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (safe-item x) 1))))
@@ -468,7 +468,7 @@
 (deftest representation-tests-answer-for-the-particles
   ;; fourth acceptance test B2
   (doseq [[label m] [[:instance? (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (if (instance? Double x) 3.0 0.0) 1))))]
-                     [:host? (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (if (a/host? x) 3.0 0.0) 1))))]
+                     [:host? (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (if (array/host? x) 3.0 0.0) 1))))]
                      [:coll? (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (if (coll? x) 0.0 3.0) 1))))]
                      [:class (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (if (= Double (class x)) 3.0 0.0) 1))))]
                      [:satisfies? (gen [] (let [x (trace :x (d/normal 0 1))]
@@ -483,7 +483,7 @@
 
 (deftest values-the-trace-holds-are-handed-back
   ;; third acceptance test: needless fallbacks
-  (let [callee (gen [] (let [x (trace :x (d/normal 0 1))] {:x x :big? (a/> x 0)}))
+  (let [callee (gen [] (let [x (trace :x (d/normal 0 1))] {:x x :big? (array/> x 0)}))
         m (gen [] (let [{:keys [x]} (splice :c callee)] (trace :y (d/normal x 1))))]
     (is (b/batched? (b/simulate m [] 8 (rng/key 70))) "a sub-trace's return value"))
   (let [m (gen [] (let [x (trace :x (d/normal 0 1))] (assert (number? x)) (trace :y (d/normal x 1))))]
@@ -523,7 +523,7 @@
       (is (b/batched? ps))
       (is (not (b/batched? ps')))
       (is (every? true? (map (fn [tr w] (close? w (:weight (gfi/update tr [1] [diff/unknown-change] obs (rng/key 0)))))
-                             (b/traces ps) (a/->clj ws))))))
+                             (b/traces ps) (array/->clj ws))))))
   (testing "one found after unchecked updates is a loud error: their results may be wrong too"
     (let [m (gen [t] (let [k (trace :k (d/categorical [0.5 0.5]))]
                        (when (> t 2) (trace :y (d/normal (level k) 1)))

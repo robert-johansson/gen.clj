@@ -13,7 +13,7 @@
    the implicit key source. A NaN acceptance ratio (for example from a chain
    started at an impossible trace) is a loud error."
   (:refer-clojure :exclude [+ -])
-  (:require [gen.array :as a :refer [+ -]]
+  (:require [gen.array :as array :refer [+ -]]
             [gen.batched :as batched]
             [gen.diff :as diff]
             [gen.gfi :as gfi]
@@ -25,10 +25,10 @@
 (defn- accept
   "Accept proposed with probability min(1, exp(log-alpha))."
   [trace proposed log-alpha key]
-  (let [la (double (a/item log-alpha))]
+  (let [la (double (array/item log-alpha))]
     (when (Double/isNaN la)
       (throw (ex-info "The MH acceptance ratio is NaN" {:log-alpha la :score (:score trace)})))
-    (let [accepted? (or (>= la 0.0) (< (Math/log (double (a/item (rng/uniform key)))) la))]
+    (let [accepted? (or (>= la 0.0) (< (Math/log (double (array/item (rng/uniform key)))) la))]
       {:trace (if accepted? proposed trace) :accepted? accepted? :log-alpha la})))
 
 (defn- selection-mh [trace selection key]
@@ -99,9 +99,9 @@
    (let [[k-move k-accept] (rng/split key)
          {proposed :particles la :weights}
          (batched/regenerate ps (:args ps) (vec (repeat (count (:args ps)) diff/no-change)) selection k-move)
-         las (mapv double (a/->clj la))
+         las (mapv double (array/->clj la))
          _ (when (some #(Double/isNaN %) las)
              (throw (ex-info "An MH acceptance ratio is NaN" {:log-alpha las})))
-         us (a/->clj (rng/uniform k-accept [(batched/size ps)]))
+         us (array/->clj (rng/uniform k-accept [(batched/size ps)]))
          accepted (mapv (fn [l u] (or (>= l 0.0) (< (Math/log u) l))) las us)]
      {:particles (batched/select accepted proposed ps) :accepted? accepted :log-alpha la})))

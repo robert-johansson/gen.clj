@@ -24,7 +24,7 @@
    probability and every spliced sub-trace, so regenerate weights use the old
    log probabilities exactly and project reads the trace without re-running
    the model."
-  (:require [gen.array :as a]
+  (:require [gen.array :as array]
             [gen.array.batch :as batch]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
@@ -76,7 +76,7 @@
    the axes are per particle, so a batched site sums per particle."
   [dist v]
   (let [lp (dc/log-prob dist v)]
-    (if (pos? (a/ndim lp)) (a/sum lp) lp)))
+    (if (pos? (array/ndim lp)) (array/sum lp) lp)))
 
 (defn- given-value
   "[v lp] of the value in the constraint c at a site. (Under the batch tracer
@@ -87,10 +87,10 @@
         expected (dc/value-shape dist)]
     (dc/check-not-nan (:mode state) v)
     ;; a value of another shape would be scored as several draws, silently
-    (when (and expected (not= expected (a/shape v)))
-      (throw (ex-info (str (name (:mode state)) ": the value at this site has shape " (a/shape v)
+    (when (and expected (not= expected (array/shape v)))
+      (throw (ex-info (str (name (:mode state)) ": the value at this site has shape " (array/shape v)
                            ", but the distribution's values have shape " expected)
-                      {:value-shape (a/shape v) :expected expected})))
+                      {:value-shape (array/shape v) :expected expected})))
     [v (site-log-prob dist v)]))
 
 (defn- draw [_state dist k]
@@ -102,9 +102,9 @@
   (-> state
       (update :choices cm/set-choice p v)
       (update :scores assoc p lp)
-      (update :score a/+ lp)))
+      (update :score array/+ lp)))
 
-(defn- add-weight [state w] (update state :weight a/+ w))
+(defn- add-weight [state w] (update state :weight array/+ w))
 
 (defn- constraint-at
   "The constraint value at a primitive site, or nil. A nested choice map there
@@ -148,12 +148,12 @@
     (cond
       c (let [[v lp] (given-value state dist c)]
           [v (cond-> (-> state (record p v lp) (add-weight lp))
-               prev (-> (add-weight (a/negate (second prev)))
+               prev (-> (add-weight (array/negate (second prev)))
                         (update :discard cm/set-choice p (first prev))))])
       prev (let [[v prev-lp] prev
                  _ (dc/check-value-shape dist v)
                  lp (site-log-prob dist v)]
-             [v (-> state (record p v lp) (add-weight (a/- lp prev-lp)))])
+             [v (-> state (record p v lp) (add-weight (array/- lp prev-lp)))])
       :else (simulate-site state p dist k))))
 
 (defn- regenerate-site [state p dist k]
@@ -162,7 +162,7 @@
       (let [[v prev-lp] prev
             _ (dc/check-value-shape dist v)
             lp (site-log-prob dist v)]
-        [v (-> state (record p v lp) (add-weight (a/- lp prev-lp)))])
+        [v (-> state (record p v lp) (add-weight (array/- lp prev-lp)))])
       ;; selected, or a new address: a fresh draw from the prior, which cancels
       (simulate-site state p dist k))))
 
@@ -196,7 +196,7 @@
   [state p tr]
   (cond-> (-> state
               (update :subtraces assoc p tr)
-              (update :score a/+ (:score tr)))
+              (update :score array/+ (:score tr)))
     (not (cm/empty? (:choices tr))) (update :choices cm/set-choice p (:choices tr))))
 
 (declare dynamic-gf?)
@@ -224,7 +224,7 @@
    at p, so the old call is gone and the new one is new."
   [state p old]
   (if (= (:mode state) :update)
-    (cond-> (add-weight state (a/negate (:score old)))
+    (cond-> (add-weight state (array/negate (:score old)))
       (not (cm/empty? (:choices old))) (update :discard cm/set-choice p (:choices old)))
     state))
 
@@ -242,7 +242,7 @@
         base {}]
     (if (= mode :assess)
       (let [{w :weight rv :retval} (gfi/run-op gf :assess args (assoc base :constraints cons :key (rng/key 0)))]
-        [rv (cond-> (-> state (update :score a/+ w) (add-weight w))
+        [rv (cond-> (-> state (update :score array/+ w) (add-weight w))
               (not (cm/empty? cons)) (update :choices cm/set-choice p cons))])
       (let [[k state] (sub-key state)
             opts (assoc base :key k)
@@ -289,11 +289,11 @@
             gone-choices (remove #(contains? (:scores state) %) (keys (::scores prev)))
             gone-calls (remove #(contains? (:subtraces state) %) (keys (::subtraces prev)))]
         (as-> state s
-          (reduce (fn [s p] (-> s (add-weight (a/negate (get (::scores prev) p)))
+          (reduce (fn [s p] (-> s (add-weight (array/negate (get (::scores prev) p)))
                                 (update :discard cm/set-choice p (cm/get-choice (:choices prev) p))))
                   s gone-choices)
           (reduce (fn [s p] (let [sub (get (::subtraces prev) p)]
-                              (cond-> (add-weight s (a/negate (:score sub)))
+                              (cond-> (add-weight s (array/negate (:score sub)))
                                 (not (cm/empty? (:choices sub)))
                                 (update :discard cm/set-choice p (:choices sub)))))
                   s gone-calls)))
@@ -429,7 +429,7 @@
   "Does x hold a batched value (in its maps, vectors and realized seqs)?"
   [x]
   (cond (batch/batched? x) true
-        (a/array? x) false
+        (array/array? x) false
         (map? x) (boolean (some holds-batch? (vals x)))
         (seq? x) (boolean (some holds-batch? (take realize-limit x)))
         (coll? x) (boolean (some holds-batch? x))
@@ -471,9 +471,9 @@
                    :retdiff (retdiff (:prev opts) state)})))
 
 (defn- project* [tr s]
-  (let [from-choices (reduce (fn [acc [p lp]] (if (path-selected? s p) (a/+ acc lp) acc))
+  (let [from-choices (reduce (fn [acc [p lp]] (if (path-selected? s p) (array/+ acc lp) acc))
                              0.0 (::scores tr))]
-    (reduce (fn [acc [p sub]] (a/+ acc (gfi/-project (:gen-fn sub) sub (subselection-at s p))))
+    (reduce (fn [acc [p sub]] (array/+ acc (gfi/-project (:gen-fn sub) sub (subselection-at s p))))
             from-choices (::subtraces tr))))
 
 ;; ---------------------------------------------------------------------------
@@ -570,7 +570,7 @@
    backend."
   [x]
   (if (instance? gen.array.protocols.IBatchedValue x)
-    (throw (a/batched-branch "case on a batched value: it differs across particles" {}))
+    (throw (array/batched-branch "case on a batched value: it differs across particles" {}))
     (gen.dynamic.core/host-value "case on" x)))
 
 (declare guard-branches)
@@ -682,7 +682,7 @@
   (case (first form)
     (quote var) form
     if (let [[_ test then else] form]
-         (list* 'if (list `a/truthy? (guard-branches test locals))
+         (list* 'if (list `array/truthy? (guard-branches test locals))
                 (guard-branches then locals)
                 (when (= 4 (count form)) [(guard-branches else locals)])))
     (let* loop*) (let [[op bindings & body] form

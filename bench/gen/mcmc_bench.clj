@@ -7,7 +7,7 @@
    gen.mlx.gc-new-bytes of new arrays).
    Run: clojure [-J-Dgen.backend=mlx] [-J-Dgen.mlx.gc-new-bytes=…] -M:bench -m gen.mcmc-bench"
   (:refer-clojure :exclude [+ - * /])
-  (:require [gen.array :as a :refer [+ - * /]]
+  (:require [gen.array :as array :refer [+ - * /]]
             [gen.array.protocols :as p]
             [gen.choicemap :as cm]
             [gen.dist :as d]
@@ -38,7 +38,7 @@
     [(/ (- (System/nanoTime) t0) 1e6 n) (- (collections) g0)]))
 
 (defn -main [& _]
-  (println "backend" (p/-name a/*backend*)
+  (println "backend" (p/-name array/*backend*)
            "gc-new-bytes" (System/getProperty "gen.mlx.gc-new-bytes" "default"))
   (doseq [n [100 10000 1000000]]
     (let [xs (rng/normal (rng/key 1) [n])
@@ -52,9 +52,9 @@
       (doseq [[label plain compiled] kernels]
         (let [r1 (plain) r2 (compiled)
               same? (and (= (:accepted? r1) (:accepted? r2))
-                         (= (a/item ((:trace r1) :w)) (a/item ((:trace r2) :w))))
-              [tp gp] (per-step #(a/eval! (:score (:trace (plain)))) 20)
-              [tc gc] (per-step #(a/eval! (:score (:trace (compiled)))) 20)]
+                         (= (array/item ((:trace r1) :w)) (array/item ((:trace r2) :w))))
+              [tp gp] (per-step #(array/eval! (:score (:trace (plain)))) 20)
+              [tc gc] (per-step #(array/eval! (:score (:trace (compiled)))) 20)]
           (printf "N=%-8d %s same move: %-5s | per step: plain %7.2f ms (%2d gcs)  compiled %7.2f ms (%2d gcs)%n"
                   n label same? tp gp tc gc)
           (flush)))))

@@ -14,7 +14,7 @@
    argument (or :key in an options map); omitting one draws from the implicit
    key source."
   (:refer-clojure :exclude [+ - * /])
-  (:require [gen.array :as a :refer [+ - * /]]
+  (:require [gen.array :as array :refer [+ - * /]]
             [gen.choicemap :as cm]
             [gen.dist :as d]
             [gen.dist.core :as dc]
@@ -26,14 +26,14 @@
 (set! *warn-on-reflection* true)
 
 (defn- accept [trace proposed log-alpha key]
-  (let [la (double (a/item log-alpha))]
+  (let [la (double (array/item log-alpha))]
     (when (Double/isNaN la)
       (throw (ex-info "The acceptance ratio is NaN" {:log-alpha la})))
-    (let [accepted? (or (>= la 0.0) (< (Math/log (double (a/item (rng/uniform key)))) la))]
+    (let [accepted? (or (>= la 0.0) (< (Math/log (double (array/item (rng/uniform key)))) la))]
       {:trace (if accepted? proposed trace) :accepted? accepted? :log-alpha la})))
 
 (defn- nonempty! [v selection]
-  (when (zero? (a/size v))
+  (when (zero? (array/size v))
     (throw (ex-info "The selection selects no choices of the trace" {:selection selection})))
   v)
 
@@ -61,7 +61,7 @@
 (defn- normal-lp
   "log N(x; mu, sd) summed over elements."
   [x mu sd]
-  (a/sum (dc/log-prob (d/normal mu sd) x)))
+  (array/sum (dc/log-prob (d/normal mu sd) x)))
 
 (def ^:private compiled-steps
   "Compiled kernel steps by kernel and settings, model, arguments and choice
@@ -74,11 +74,11 @@
    the model cannot be compiled (it reads a value on the host), which is
    remembered."
   [trace proto others settings build & args]
-  (let [structure (fn [m] (a/tree-map (fn [x] [(a/shape x) (a/dtype x)]) m))
+  (let [structure (fn [m] (array/tree-map (fn [x] [(array/shape x) (array/dtype x)]) m))
         k [settings (:gen-fn trace) (:args trace) (structure others) (structure (cm/to-map proto))]
         f (get @compiled-steps k)]
     (when-not (= f ::plain)
-      (let [f (or f (let [f (a/compile (build))]
+      (let [f (or f (let [f (array/compile (build))]
                       (swap! compiled-steps (fn [m] (assoc (if (>= (count m) 16) {} m) k f)))
                       f))]
         (try (apply f args)
@@ -89,7 +89,7 @@
 
 (defn- log-density
   "The log density of gf on args as a function of arrays only (for
-   a/compile): [v others] → log p, with v the flat selected values (shaped
+   array/compile): [v others] → log p, with v the flat selected values (shaped
    by proto) and others the other choices as a map."
   [gf args proto]
   (fn [v others] (:weight (gfi/assess gf args (cm/merge (cm/from-map others) (cm/from-array proto v))))))
@@ -98,7 +98,7 @@
   "MALA's proposal as a function of arrays only: [v noise others] →
    [v' log q(v | v') - log q(v' | v)]."
   [gf args proto tau]
-  (let [grad-v (a/grad (log-density gf args proto))
+  (let [grad-v (array/grad (log-density gf args proto))
         sd (Math/sqrt (* 2.0 (double tau)))]
     (fn [v noise others]
       (let [fwd-mu (+ v (* tau (grad-v v others)))
@@ -125,7 +125,7 @@
          [k-propose k-update k-accept] (rng/split key 3)]
      (or (when compile?
            (let [[proto v others] (flat-values trace selection)
-                 noise (rng/normal k-propose (a/shape v))]
+                 noise (rng/normal k-propose (array/shape v))]
              (when-let [[v' log-q] (compiled-step trace proto others [:mala tau]
                                                   #(mala-proposal (:gen-fn trace) (:args trace) proto tau)
                                                   v noise others)]
@@ -134,7 +134,7 @@
          (let [sd (Math/sqrt (* 2.0 (double tau)))
                [proto v g] (flat-gradient trace selection)
                fwd-mu (+ v (* tau g))
-               v' (+ fwd-mu (* sd (rng/normal k-propose (a/shape v))))
+               v' (+ fwd-mu (* sd (rng/normal k-propose (array/shape v))))
                [t' weight] (move-to trace proto v' k-update)
                [_ _ g'] (flat-gradient t' selection)
                bwd-mu (+ v' (* tau g'))]
@@ -143,7 +143,7 @@
 (defn- leapfrogs
   "L leapfrog steps as a function of arrays only: [v p others] → [v' p']."
   [gf args proto L eps]
-  (let [grad-v (a/grad (log-density gf args proto))
+  (let [grad-v (array/grad (log-density gf args proto))
         half (/ eps 2.0)]
     (fn [v p others]
       (loop [i 0 v v p p g (grad-v v others)]
@@ -157,7 +157,7 @@
 (defn hmc
   "Hamiltonian Monte Carlo on the selected choices: L leapfrog steps of size
    eps with standard normal momenta. Options: :L (10), :eps (0.1),
-   :compile? (false): run the L steps as one compiled function (a/compile:
+   :compile? (false): run the L steps as one compiled function (array/compile:
    one MLX graph on the MLX backend, the same steps on the JVM backend), a
    function of the selected values and the other choices, cached per model,
    arguments and structure. A model that reads a value on the host cannot
@@ -171,13 +171,13 @@
                   (accept trace t' (+ (- (:score t') (:score trace)) (- (kinetic p) (kinetic p0))) k-accept))]
      (or (when compile?
            (let [[proto v others] (flat-values trace selection)
-                 p0 (rng/normal k-momenta (a/shape v))]
+                 p0 (rng/normal k-momenta (array/shape v))]
              (when-let [[v' p] (compiled-step trace proto others [:hmc L eps]
                                               #(leapfrogs (:gen-fn trace) (:args trace) proto L eps)
                                               v p0 others)]
                (finish (first (move-to trace proto v' k-update)) p0 p))))
          (let [[proto v g] (flat-gradient trace selection)
-               p0 (rng/normal k-momenta (a/shape v))
+               p0 (rng/normal k-momenta (array/shape v))
                [t' p] (loop [i 0 t trace v v g g p p0]
                         (if (< i (long L))
                           (let [p (+ p (* (/ eps 2.0) g))
@@ -196,10 +196,10 @@
   ([trace selection] (map-optimize trace selection nil))
   ([trace selection {:keys [max-step-size tau min-step-size] :or {max-step-size 0.1 tau 0.5 min-step-size 1e-16}}]
    (let [[proto v g] (flat-gradient trace selection)
-         score (double (a/item (:score trace)))]
+         score (double (array/item (:score trace)))]
      (loop [step (double max-step-size)]
        (let [[t _] (move-to trace proto (+ v (* step g)) (rng/key 0))]
-         (cond (>= (double (a/item (:score t))) score) t
+         (cond (>= (double (array/item (:score t))) score) t
                (< step (double min-step-size)) trace
                :else (recur (clojure.core/* step (double tau)))))))))
 
@@ -218,19 +218,19 @@
                 (throw (ex-info (str "elliptical-slice: the trace has no choice at " (pr-str addr)) {:addr addr})))
          x (- f0 mu)
          nu (- (dc/sample prior k-nu) mu)
-         log-u (Math/log (double (a/item (rng/uniform k-u))))
+         log-u (Math/log (double (array/item (rng/uniform k-u))))
          lp0 (dc/log-prob prior f0)
          at (fn [theta]
               (let [f (+ mu (+ (* x (Math/cos theta)) (* nu (Math/sin theta))))
                     {t :trace w :weight} (gfi/update trace (cm/choicemap addr f) (rng/key 0))]
-                [t (double (a/item (- w (- (dc/log-prob prior f) lp0))))]))]
+                [t (double (array/item (- w (- (dc/log-prob prior f) lp0))))]))]
      (loop [i 0
-            theta (* 2.0 Math/PI (double (a/item (rng/uniform (rng/fold-in k-theta 0)))))
+            theta (* 2.0 Math/PI (double (array/item (rng/uniform (rng/fold-in k-theta 0)))))
             lo (- theta (* 2.0 Math/PI))
             hi theta]
        (let [[t log-lik-ratio] (at theta)]
          (if (> log-lik-ratio log-u)
            t
            (let [[lo hi] (if (neg? theta) [theta hi] [lo theta])
-                 u (double (a/item (rng/uniform (rng/fold-in k-theta (inc i)))))]
+                 u (double (array/item (rng/uniform (rng/fold-in k-theta (inc i)))))]
              (recur (inc i) (+ lo (* u (- hi lo))) lo hi))))))))

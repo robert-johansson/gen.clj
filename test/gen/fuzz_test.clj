@@ -6,7 +6,7 @@
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
             [gen.batched :as b]
-            [gen.array :as a]
+            [gen.array :as array]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.selection :as sel]
@@ -25,7 +25,7 @@
     (binding [b/*spot-checks* 0]
       (let [ps (b/simulate gf args 3 (rng/key seed))]
         (every? true? (map #(laws/close? %1 (:weight (gfi/assess gf args (:choices %2))))
-                           (a/->clj (b/scores ps)) (b/traces ps)))))))
+                           (array/->clj (b/scores ps)) (b/traces ps)))))))
 
 (defspec batched-updates-of-random-models-obey-the-update-law 100
   ;; per particle: w = score' - score - log p(fresh), and the discard is
@@ -52,6 +52,6 @@
                                    fresh-lp (if (seq fresh) (gfi/project new (sel/from-paths fresh)) 0.0)
                                    expected-d (sel/get-selected (:choices old)
                                                                 (sel/from-paths (filter #(or (constrained %) (not (now %))) was)))]
-                               (and (laws/close? w (a/- (a/- (:score new) (:score old)) fresh-lp))
+                               (and (laws/close? w (array/- (array/- (:score new) (:score old)) fresh-lp))
                                     (= expected-d d))))
-                           olds (b/traces ps') (a/->clj ws) ds))))))))
+                           olds (b/traces ps') (array/->clj ws) ds))))))))

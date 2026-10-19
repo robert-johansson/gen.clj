@@ -4,7 +4,7 @@
   (:require [clojure.edn :as edn]
             [gen.test-support :as ts]
             [clojure.test :refer [deftest is testing]]
-            [gen.array :as a]))
+            [gen.array :as array]))
 
 (def ^:private fixtures (edn/read-string (slurp "test/fixtures/special.edn")))
 
@@ -21,43 +21,43 @@
 
 (deftest against-scipy
   (testing "host scalars"
-    (check :erf a/erf 1e-15)
-    (check :erfinv a/erfinv 1e-15)
-    (check :lgamma a/lgamma 1e-14)
-    (check :digamma a/digamma 1e-14))
+    (check :erf array/erf 1e-15)
+    (check :erfinv array/erfinv 1e-15)
+    (check :lgamma array/lgamma 1e-14)
+    (check :digamma array/digamma 1e-14))
   (testing "arrays give the host values: exactly on the JVM backend, within a few ulps on others"
-    (doseq [[k f] [[:erf a/erf] [:erfinv a/erfinv] [:lgamma a/lgamma] [:digamma a/digamma]]]
+    (doseq [[k f] [[:erf array/erf] [:erfinv array/erfinv] [:lgamma array/lgamma] [:digamma array/digamma]]]
       (let [xs (mapv first (fixtures k))]
         (if (ts/jvm?)
-          (is (= (mapv f xs) (a/->clj (f (a/array xs)))) (name k))
+          (is (= (mapv f xs) (array/->clj (f (array/array xs)))) (name k))
           ;; on float32, against the host at the rounded inputs (near ±1 and
           ;; the poles, the rounding of the input alone moves the value)
           (let [xs32 (if (ts/f32?) (mapv #(double (float %)) xs) xs)]
-            (is (ts/close? (a/array (mapv f xs32) {:dtype (ts/float-dtype)}) (f (a/array xs))
+            (is (ts/close? (array/array (mapv f xs32) {:dtype (ts/float-dtype)}) (f (array/array xs))
                            (if (ts/f32?) {:rtol 1e-4 :atol 1e-5} {:rtol 1e-13 :atol 1e-13}))
                 (name k))))))))
 
 (deftest edge-cases
-  (is (= ##Inf (a/erfinv 1.0)))
-  (is (= ##-Inf (a/erfinv -1.0)))
-  (is (Double/isNaN (a/erfinv 1.5)))
-  (is (= 0.0 (a/erfinv 0.0)))
-  (is (= 1.0 (a/erf ##Inf)))
-  (is (= -1.0 (a/erf ##-Inf)))
-  (is (= ##Inf (a/lgamma 0.0)) "lgamma has poles at the non-positive integers")
-  (is (= ##Inf (a/lgamma -3.0)))
-  (is (= ##-Inf (a/digamma 0.0)))
-  (is (Double/isNaN (a/digamma -2.0)))
-  (is (< (Math/abs (a/lgamma 1.0)) 1e-15))
-  (is (< (Math/abs (a/lgamma 2.0)) 1e-15)))
+  (is (= ##Inf (array/erfinv 1.0)))
+  (is (= ##-Inf (array/erfinv -1.0)))
+  (is (Double/isNaN (array/erfinv 1.5)))
+  (is (= 0.0 (array/erfinv 0.0)))
+  (is (= 1.0 (array/erf ##Inf)))
+  (is (= -1.0 (array/erf ##-Inf)))
+  (is (= ##Inf (array/lgamma 0.0)) "lgamma has poles at the non-positive integers")
+  (is (= ##Inf (array/lgamma -3.0)))
+  (is (= ##-Inf (array/digamma 0.0)))
+  (is (Double/isNaN (array/digamma -2.0)))
+  (is (< (Math/abs (array/lgamma 1.0)) 1e-15))
+  (is (< (Math/abs (array/lgamma 2.0)) 1e-15)))
 
 (deftest identities
   (testing "erf inverts erfinv (the well-conditioned direction)"
     (doseq [y [-0.999999 -0.5 1e-12 0.1 0.9 0.99999999]]
-      (is (< (error (a/erf (a/erfinv y)) y) 1e-15))))
+      (is (< (error (array/erf (array/erfinv y)) y) 1e-15))))
   (testing "log B(a, b) = log Γ(a) + log Γ(b) - log Γ(a + b), and B(1, 1) = 1"
-    (is (< (Math/abs (a/log-beta 1.0 1.0)) 1e-15))
-    (is (< (error (a/log-beta 2.5 4.0) (- (+ (a/lgamma 2.5) (a/lgamma 4.0)) (a/lgamma 6.5))) 1e-15)))
+    (is (< (Math/abs (array/log-beta 1.0 1.0)) 1e-15))
+    (is (< (error (array/log-beta 2.5 4.0) (- (+ (array/lgamma 2.5) (array/lgamma 4.0)) (array/lgamma 6.5))) 1e-15)))
   (testing "ψ(x + 1) = ψ(x) + 1/x"
     (doseq [x [0.3 1.7 12.5]]
-      (is (< (error (a/digamma (+ x 1)) (+ (a/digamma x) (/ 1.0 x))) 1e-13)))))
+      (is (< (error (array/digamma (+ x 1)) (+ (array/digamma x) (/ 1.0 x))) 1e-13)))))

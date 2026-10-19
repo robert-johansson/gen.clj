@@ -31,7 +31,7 @@
    Element or step i draws from (fold-in key i), so changing the length never
    shifts another element's randomness."
   (:refer-clojure :exclude [map + -])
-  (:require [gen.array :as a :refer [+ -]]
+  (:require [gen.array :as array :refer [+ -]]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.dynamic :as dyn]
@@ -288,7 +288,7 @@
    number that differs across a batch's particles raises the batched-branch
    error, so batched inference falls back)."
   [n]
-  (let [n (if (and (a/array? n) (not (a/host? n))) (a/item n) n)]
+  (let [n (if (and (array/array? n) (not (array/host? n))) (array/item n) n)]
     (check-steps* n)))
 
 (defn- check-steps* [n]
@@ -391,10 +391,10 @@
 (defn- branch-index
   "The branch index as a host value: a one-element array is read; an index
    that differs across the particles of a batch cannot pick one branch for
-   all, and a/item raises the batched-branch error (gen.array.batch), so
+   all, and array/item raises the batched-branch error (gen.array.batch), so
    batched inference falls back to one particle at a time."
   [idx]
-  (if (or (a/host? idx) (not (a/array? idx))) idx (a/item idx)))
+  (if (or (array/host? idx) (not (array/array? idx))) idx (array/item idx)))
 
 (defn- branch [gf idx]
   (or (get (:branches gf) (branch-index idx))

@@ -2,7 +2,7 @@
   (:require [gen.test-support :as ts]
             [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
-            [gen.array :as a]
+            [gen.array :as array]
             [gen.choicemap :as cm]
             [gen.dist :as d]
             [gen.dist.core :as dc]
@@ -19,9 +19,9 @@
   (doseq [{:keys [dist params value log-prob]} fixtures]
     ;; scipy's bernoulli values are 0/1; gen.clj's are booleans, as Gen.jl's
     (let [value (if (= :bernoulli dist) (== 1 value) value)
-          got (dc/log-prob (apply (constructor dist) params) (if (vector? value) (a/array value) value))]
-      (is (or (= log-prob (a/item got))
-              (< (Math/abs (- (double (a/item got)) log-prob)) (* (ts/tol 1e-12) (max 1.0 (Math/abs log-prob)))))
+          got (dc/log-prob (apply (constructor dist) params) (if (vector? value) (array/array value) value))]
+      (is (or (= log-prob (array/item got))
+              (< (Math/abs (- (double (array/item got)) log-prob)) (* (ts/tol 1e-12) (max 1.0 (Math/abs log-prob)))))
           (str (name dist) " " params " at " value)))))
 
 (deftest values-and-shapes
@@ -34,13 +34,13 @@
       (when (ts/jvm?)
         (is (instance? Double (dc/sample (d/normal 0 1) k)))))
     (testing "batch shapes broadcast with parameter shapes"
-      (is (= [5] (a/shape (dc/sample (d/normal 0 1) k [5]))))
-      (is (= [5 3] (a/shape (dc/sample (d/normal (a/zeros [3]) 1) k [5 1]))))
-      (is (= [4] (a/shape (dc/sample (d/categorical-logits (a/zeros [4 6])) k))) "one draw per row of logits")
-      (is (= [2 3] (a/shape (dc/sample (d/dirichlet [1.0 2.0 3.0]) k [2]))))
-      (is (= [7 2] (a/shape (dc/sample (d/mvnormal [0.0 0.0] [[1.0 0.0] [0.0 1.0]]) k [7])))))
+      (is (= [5] (array/shape (dc/sample (d/normal 0 1) k [5]))))
+      (is (= [5 3] (array/shape (dc/sample (d/normal (array/zeros [3]) 1) k [5 1]))))
+      (is (= [4] (array/shape (dc/sample (d/categorical-logits (array/zeros [4 6])) k))) "one draw per row of logits")
+      (is (= [2 3] (array/shape (dc/sample (d/dirichlet [1.0 2.0 3.0]) k [2]))))
+      (is (= [7 2] (array/shape (dc/sample (d/mvnormal [0.0 0.0] [[1.0 0.0] [0.0 1.0]]) k [7])))))
     (testing "array parameters given as Clojure vectors"
-      (is (a/allclose? (a/array [0.9 0.1]) (:probs (:params (d/categorical [0.9 0.1]))))))))
+      (is (array/allclose? (array/array [0.9 0.1]) (:probs (:params (d/categorical [0.9 0.1]))))))))
 
 (deftest validation
   (is (thrown? clojure.lang.ExceptionInfo (d/normal 0 -1)))
@@ -70,7 +70,7 @@
   (is (= [0 1 2 3] (dc/support (d/binom 3 0.5))))
   (testing "probabilities over the support sum to 1"
     (doseq [dist [(d/bernoulli 0.3) (d/categorical [0.2 0.3 0.5]) (d/binom 6 0.35)]]
-      (is (a/allclose? 1.0 (reduce + (map #(Math/exp (a/item (dc/log-prob dist %))) (dc/support dist))))))))
+      (is (array/allclose? 1.0 (reduce + (map #(Math/exp (array/item (dc/log-prob dist %))) (dc/support dist))))))))
 
 (deftest outside-the-support
   (is (= ##-Inf (ts/host (dc/log-prob (d/categorical [0.5 0.5]) 2))))
@@ -80,7 +80,7 @@
       "a bernoulli value is a boolean: 0/1 (GenMLX's) would be scored one way and branched on the other")
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"booleans" (dc/log-prob (d/bernoulli 0.3) 0)))
   (is (= ##-Inf (dc/log-prob (d/poisson 2.0) 1.5)))
-  (is (= ##-Inf (ts/host (dc/log-prob (d/dirichlet [1.0 1.0]) (a/array [0.7 0.7]))))))
+  (is (= ##-Inf (ts/host (dc/log-prob (d/dirichlet [1.0 1.0]) (array/array [0.7 0.7]))))))
 
 (deftest distributions-are-generative-functions
   (let [dist (d/normal 1.0 2.0)
@@ -94,7 +94,7 @@
       (is (= w (dc/log-prob dist 3.0))))
     (let [{t2 :trace w :weight disc :discard} (gfi/update tr (cm/->Value 0.0))]
       (is (= 0.0 (:retval t2)))
-      (is (a/allclose? w (a/- (dc/log-prob dist 0.0) (:score tr))))
+      (is (array/allclose? w (array/- (dc/log-prob dist 0.0) (:score tr))))
       (is (= (:choices tr) disc)))
     (is (= (:score tr) (gfi/project tr sel/all)))
     (is (= 0.0 (gfi/project tr (sel/select :x))))
@@ -108,8 +108,8 @@
   (let [k (rng/key 99) n 100000
         check (fn [dist mean var]
                 (let [x (dc/sample dist k [n])]
-                  (is (close? (a/mean x) mean (* 5 (Math/sqrt (/ var n)))) (str dist " mean"))
-                  (is (close? (a/variance x) var (* 0.05 var)) (str dist " variance"))))]
+                  (is (close? (array/mean x) mean (* 5 (Math/sqrt (/ var n)))) (str dist " mean"))
+                  (is (close? (array/variance x) var (* 0.05 var)) (str dist " variance"))))]
     (check (d/normal 0.5 2.0) 0.5 4.0)
     (check (d/uniform -1.0 3.0) 1.0 (/ 16.0 12))
     (check (d/beta 2.5 0.7) (/ 2.5 3.2) (/ (* 2.5 0.7) (* 3.2 3.2 4.2)))
@@ -135,28 +135,28 @@
 (def normal-uniform (d/heterogeneous-mixture [d/normal d/uniform]))
 (def normal-bernoulli (d/product d/normal d/bernoulli))
 
-(defn- density [dist v] (Math/exp (a/item (dc/log-prob dist v))))
+(defn- density [dist v] (Math/exp (array/item (dc/log-prob dist v))))
 
 (deftest mixture-and-product-densities
   (let [m (normal-mixture [0.3 0.7] [-2.0 1.0] [0.5 1.0])]
     (doseq [v [-2.5 0.0 1.7]]
-      (is (close? (a/item (dc/log-prob m v))
+      (is (close? (array/item (dc/log-prob m v))
                   (Math/log (+ (* 0.3 (density (d/normal -2.0 0.5) v)) (* 0.7 (density (d/normal 1.0 1.0) v))))
                   (ts/tol 1e-12)))))
   (let [h (normal-uniform [0.4 0.6] [0.0 1.0] [-1.0 1.0])]
-    (is (close? (a/item (dc/log-prob h 0.5)) (Math/log (+ (* 0.4 (density (d/normal 0 1) 0.5)) (* 0.6 0.5))) (ts/tol 1e-12)))
-    (is (close? (a/item (dc/log-prob h 3.0)) (Math/log (* 0.4 (density (d/normal 0 1) 3.0))) (ts/tol 1e-12))
+    (is (close? (array/item (dc/log-prob h 0.5)) (Math/log (+ (* 0.4 (density (d/normal 0 1) 0.5)) (* 0.6 0.5))) (ts/tol 1e-12)))
+    (is (close? (array/item (dc/log-prob h 3.0)) (Math/log (* 0.4 (density (d/normal 0 1) 3.0))) (ts/tol 1e-12))
         "outside one component's support"))
   (let [p (normal-bernoulli [0.5 2.0] [0.3])]
-    (is (close? (a/item (dc/log-prob p [1.0 true])) (+ (a/item (dc/log-prob (d/normal 0.5 2.0) 1.0)) (Math/log 0.3)) (ts/tol 1e-12)))
+    (is (close? (array/item (dc/log-prob p [1.0 true])) (+ (array/item (dc/log-prob (d/normal 0.5 2.0) 1.0)) (Math/log 0.3)) (ts/tol 1e-12)))
     (is (vector? (dc/sample p (rng/key 1))))))
 
 (deftest mixture-moments
   (let [k (rng/key 98) n 100000
         check (fn [dist mean var]
                 (let [x (dc/sample dist k [n])]
-                  (is (close? (a/mean x) mean (* 5 (Math/sqrt (/ var n)))) "mean")
-                  (is (close? (a/variance x) var (* 0.05 var)) "variance")))]
+                  (is (close? (array/mean x) mean (* 5 (Math/sqrt (/ var n)))) "mean")
+                  (is (close? (array/variance x) var (* 0.05 var)) "variance")))]
     ;; mean Σ wμ, variance Σ w(σ² + μ²) - mean²
     (check (normal-mixture [0.3 0.7] [-2.0 1.0] [0.5 1.0]) 0.1 (- (+ (* 0.3 4.25) (* 0.7 2.0)) 0.01))
     (check (normal-uniform [0.5 0.5] [3.0 1.0] [-1.0 1.0]) 1.5 (- (+ (* 0.5 10.0) (* 0.5 (/ 1.0 3))) 2.25))))
@@ -167,13 +167,13 @@
 
 (deftest review-regressions
   (testing "product sums each factor over its own value (review 4)"
-    (let [p ((d/product d/normal d/bernoulli) [(a/zeros [3]) 1.0] [0.3])]
-      (is (close? (a/item (dc/log-prob p [(a/zeros [3]) true]))
-                  (+ (* 3 (a/item (dc/log-prob (d/normal 0 1) 0.0))) (Math/log 0.3)) (ts/tol 1e-12)))
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"one element per factor" (dc/log-prob p [(a/zeros [3])])))))
+    (let [p ((d/product d/normal d/bernoulli) [(array/zeros [3]) 1.0] [0.3])]
+      (is (close? (array/item (dc/log-prob p [(array/zeros [3]) true]))
+                  (+ (* 3 (array/item (dc/log-prob (d/normal 0 1) 0.0))) (Math/log 0.3)) (ts/tol 1e-12)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"one element per factor" (dc/log-prob p [(array/zeros [3])])))))
   (testing "heterogeneous mixtures keep each component's values (review 14)"
     (let [x (dc/sample ((d/heterogeneous-mixture [d/poisson d/normal]) [0.01 0.99] [3.0] [0.5 1.0]) (rng/key 1) [200])]
-      (is (some #(not= % (Math/floor %)) (a/->clj x)) "normal draws are not truncated to integers")))
+      (is (some #(not= % (Math/floor %)) (array/->clj x)) "normal draws are not truncated to integers")))
   (testing "bad parameters are errors, not NaN (review 15)"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"positive definite" (d/mvnormal [0.0 0.0] [[1.0 2.0] [2.0 1.0]])))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"symmetric" (d/mvnormal [0.0 0.0] [[1.0 0.5] [0.3 1.0]])))
@@ -184,7 +184,7 @@
   "A user-defined distribution without a value-shape clause."
   [logits]
   (sample [key shape] (rng/categorical key logits shape))
-  (log-prob [v] (a/pick (a/log-softmax logits) v)))
+  (log-prob [v] (array/pick (array/log-softmax logits) v)))
 
 (deftest user-distributions-without-a-value-shape-are-not-rejected
   ;; third review B13: the default value shape (the parameters' broadcast

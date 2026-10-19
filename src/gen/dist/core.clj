@@ -9,7 +9,7 @@
    Shapes: (sample d key batch-shape) draws a value of the distribution's
    shape broadcast against batch-shape. [] is one draw; [N] is one draw per
    particle. log-prob broadcasts the same way."
-  (:require [gen.array :as a]
+  (:require [gen.array :as array]
             [gen.array.dtype :as dt]
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]
@@ -55,38 +55,38 @@
 (defn elementwise-value-shape
   "The value shape of an elementwise family: its parameters' broadcast shape."
   [d]
-  (reduce sh/broadcast [] (keep #(when (a/array? %) (a/shape %)) (vals (:params d)))))
+  (reduce sh/broadcast [] (keep #(when (array/array? %) (array/shape %)) (vals (:params d)))))
 
 (defn check-value-shape
   "Throw unless v has the distribution's value shape (when it declares one)."
   [d v]
   (let [expected (value-shape d)]
-    (when (and expected (not= expected (a/shape v)))
-      (throw (ex-info (str "A value of shape " (a/shape v) " for a distribution whose values have shape "
+    (when (and expected (not= expected (array/shape v)))
+      (throw (ex-info (str "A value of shape " (array/shape v) " for a distribution whose values have shape "
                            expected)
-                      {:value-shape (a/shape v) :expected expected :distribution (:type d)})))))
+                      {:value-shape (array/shape v) :expected expected :distribution (:type d)})))))
 
 (defn check-not-nan
   "Throw if v, a given value, has a NaN element: it would make every weight
    NaN rather than fail. (Read only when concrete.)"
   [op v]
-  (when (and (a/array? v) (a/concrete? v) (= :float (dt/kind (a/dtype v))) (a/any-true? (a/isnan v)))
+  (when (and (array/array? v) (array/concrete? v) (= :float (dt/kind (array/dtype v))) (array/any-true? (array/isnan v)))
     (throw (ex-info (str (name op) ": a constrained value is NaN") {:op op :value v}))))
 
 (defn check-param-not-nan
   "A parameter must not be NaN (in any element, read when concrete): a NaN
    would make every log density NaN rather than fail."
   [dist-name param-name v]
-  (when (if (a/host? v)
+  (when (if (array/host? v)
           (and (float? v) (Double/isNaN (double v)))
-          (and (a/array? v) (not (a/host? v)) (a/concrete? v) (= :float (dt/kind (a/dtype v)))
-               (a/any-true? (a/isnan v))))
+          (and (array/array? v) (not (array/host? v)) (array/concrete? v) (= :float (dt/kind (array/dtype v)))
+               (array/any-true? (array/isnan v))))
     (throw (ex-info (str dist-name ": " param-name " is NaN") {:distribution dist-name :param param-name}))))
 
 (defn- total
   "A log-prob summed to a scalar (a distribution's trace has one choice)."
   [lp]
-  (if (zero? (a/ndim lp)) lp (a/sum lp)))
+  (if (zero? (array/ndim lp)) lp (array/sum lp)))
 
 ;; ---------------------------------------------------------------------------
 ;; Helpers for distribution definitions
@@ -95,15 +95,15 @@
 (defn backend-of
   "The backend of the first backend-array parameter (else gen.array/*backend*)."
   [& params]
-  (a/effective-backend
-   (or (some #(when (and (some? %) (not (a/host? %))) (a/backend %)) params)
-       a/*backend*)))
+  (array/effective-backend
+   (or (some #(when (and (some? %) (not (array/host? %))) (array/backend %)) params)
+       array/*backend*)))
 
 (defn elementwise-shape
   "The shape of a draw from an elementwise distribution: batch-shape broadcast
    against the shapes of its parameters."
   [batch-shape & params]
-  (reduce sh/broadcast (vec batch-shape) (map a/shape params)))
+  (reduce sh/broadcast (vec batch-shape) (map array/shape params)))
 
 (defn int-dtype [b] (:int (p/-defaults b)))
 
@@ -118,25 +118,25 @@
    arrays (every particle of a batched one). Arrays on a lazy backend are not
    read, since that would force evaluation."
   [dist-name param-name v]
-  (cond (a/host? v)
+  (cond (array/host? v)
         (check (pos? (double v)) dist-name (str param-name " must be positive, got " v) {:param param-name :value v})
-        (and (some? v) (a/concrete? v))
-        (check (a/all-true? (a/> v 0)) dist-name (str param-name " must be positive") {:param param-name})))
+        (and (some? v) (array/concrete? v))
+        (check (array/all-true? (array/> v 0)) dist-name (str param-name " must be positive") {:param param-name})))
 
 (defn check-probability
   "Parameters must be probabilities in [0, 1], as check-positive."
   [dist-name param-name v]
-  (cond (a/host? v)
+  (cond (array/host? v)
         (check (<= 0.0 (double v) 1.0) dist-name (str param-name " must be in [0, 1], got " v)
                {:param param-name :value v})
-        (and (some? v) (a/concrete? v))
-        (check (a/all-true? (a/logical-and (a/>= v 0) (a/<= v 1))) dist-name (str param-name " must be in [0, 1]")
+        (and (some? v) (array/concrete? v))
+        (check (array/all-true? (array/logical-and (array/>= v 0) (array/<= v 1))) dist-name (str param-name " must be in [0, 1]")
                {:param param-name})))
 
 (defn check-integer
   "Host parameters that count (trials, bounds) must be integers, at least min."
   [dist-name param-name v min]
-  (when (a/host? v)
+  (when (array/host? v)
     (check (and (== v (Math/rint (double v))) (>= (double v) (double min))) dist-name
            (str param-name " must be an integer of at least " min ", got " v) {:param param-name :value v})))
 
@@ -147,19 +147,19 @@
    lazy backend, as a Switch reads its branch index; a batched one (whose
    particles may differ) is the batched-branch error."
   ^long [dist-name param-name v]
-  (cond (a/host? v) (long v)
-        (and (a/array? v) (= 1 (a/size v))) (long (a/item v))
+  (cond (array/host? v) (long v)
+        (and (array/array? v) (= 1 (array/size v))) (long (array/item v))
         :else (throw (ex-info (str dist-name ": an enumerable support needs one " param-name ", not an array of shape "
-                                   (a/shape v))
+                                   (array/shape v))
                               {:distribution dist-name :param param-name}))))
 
 (defn check-probabilities
   "Concrete probability vectors (the last axis) must be non-negative and sum to
    1. This catches logits passed where probabilities are expected."
   [dist-name param-name ps]
-  (when (a/concrete? ps)
-    (let [ok? (and (a/all-true? (a/>= ps 0))
-                   (a/all-true? (a/<= (a/abs (a/- (a/sum ps {:axis -1}) 1.0)) 1e-6)))]
+  (when (array/concrete? ps)
+    (let [ok? (and (array/all-true? (array/>= ps 0))
+                   (array/all-true? (array/<= (array/abs (array/- (array/sum ps {:axis -1}) 1.0)) 1e-6)))]
       (check ok? dist-name
              (str param-name " must be probabilities (non-negative, summing to 1)"
                   " — for log-probabilities or logits use categorical-logits")
@@ -168,28 +168,28 @@
 (defn check-all-positive
   "Every element of a concrete array parameter must be positive."
   [dist-name param-name v]
-  (when (and (some? v) (a/concrete? v))
-    (check (a/all-true? (a/> v 0)) dist-name (str param-name " must be positive") {:param param-name})))
+  (when (and (some? v) (array/concrete? v))
+    (check (array/all-true? (array/> v 0)) dist-name (str param-name " must be positive") {:param param-name})))
 
 (defn check-increasing
   "A concrete array parameter must increase along its last axis."
   [dist-name param-name v]
-  (when (and (some? v) (a/concrete? v) (> (peek (a/shape v)) 1))
-    (let [n (peek (a/shape v))]
-      (check (a/all-true? (a/> (a/slice v -1 1 n) (a/slice v -1 0 (dec n))))
+  (when (and (some? v) (array/concrete? v) (> (peek (array/shape v)) 1))
+    (let [n (peek (array/shape v))]
+      (check (array/all-true? (array/> (array/slice v -1 1 n) (array/slice v -1 0 (dec n))))
              dist-name (str param-name " must be increasing") {:param param-name}))))
 
 (defn ->array
   "A parameter given as Clojure data (a vector of numbers) as an array."
   [p]
-  (if (or (a/array? p) (nil? p)) p (a/array p)))
+  (if (or (array/array? p) (nil? p)) p (array/array p)))
 
 (defn ->checkable
   "A parameter as validation sees it: Clojure data as a JVM backend array,
    which is always concrete (so host data is checked on every backend, also
    a lazy one); arrays as they are."
   [p]
-  (if (or (a/array? p) (nil? p)) p (a/with-backend (a/backend-named :jvm) (a/array p))))
+  (if (or (array/array? p) (nil? p)) p (array/with-backend (array/backend-named :jvm) (array/array p))))
 
 (defmacro defdist
   "Define a distribution: a constructor and its methods.
@@ -271,12 +271,12 @@
     (if (cm/has-value? constraints)
       (let [v (doto (cm/get-value constraints) (->> (check-not-nan :update)) (->> (check-value-shape d)))
             lp (total (log-prob d v))]
-        {:trace (dist-trace d v lp) :weight (a/- lp (:score tr))
+        {:trace (dist-trace d v lp) :weight (array/- lp (:score tr))
          :retdiff diff/unknown-change :discard (:choices tr)})
       ;; the value is kept and rescored: the parameters may have changed
       (let [v (doto (:retval tr) (->> (check-value-shape d)))
             lp (total (log-prob d v))]
-        {:trace (dist-trace d v lp) :weight (a/- lp (:score tr))
+        {:trace (dist-trace d v lp) :weight (array/- lp (:score tr))
          :retdiff diff/no-change :discard cm/EMPTY})))
 
   (-regenerate [d tr _ _ selection key]
@@ -284,7 +284,7 @@
       {:trace (simulate* d key) :weight 0.0 :retdiff diff/unknown-change}
       (let [v (doto (:retval tr) (->> (check-value-shape d)))
             lp (total (log-prob d v))]
-        {:trace (dist-trace d v lp) :weight (a/- lp (:score tr)) :retdiff diff/no-change})))
+        {:trace (dist-trace d v lp) :weight (array/- lp (:score tr)) :retdiff diff/no-change})))
 
   (-assess [d _ choices]
     (when-not (cm/has-value? choices)
@@ -303,5 +303,5 @@
 
 (defmethod print-method Distribution [d ^java.io.Writer w]
   (.write w (str "#gen/dist[" (name (:type d)) " "))
-  (print-method (into {} (map (fn [[k v]] [k (if (a/host? v) v (a/->clj v))])) (:params d)) w)
+  (print-method (into {} (map (fn [[k v]] [k (if (array/host? v) v (array/->clj v))])) (:params d)) w)
   (.write w "]"))

@@ -11,7 +11,7 @@
    canonical (addresses sorted), so to-array and from-array agree for any two
    choice maps with the same addresses."
   (:refer-clojure :exclude [empty? merge to-array])
-  (:require [gen.array :as a]))
+  (:require [gen.array :as array]))
 
 (defprotocol IChoiceMap
   (-has-value? [cm])
@@ -220,8 +220,8 @@
   [cm]
   (let [leaves (values cm)]
     (if (clojure.core/empty? leaves)
-      (a/zeros [0])
-      (a/concatenate (mapv a/flatten leaves)))))
+      (array/zeros [0])
+      (array/concatenate (mapv array/flatten leaves)))))
 
 (defn from-array
   "A choice map with the addresses, leaf shapes and leaf dtypes of proto,
@@ -230,17 +230,17 @@
   [proto arr]
   (let [paths (addresses proto)
         ;; a host value's dtype is weak: its kind's default on arr's backend
-        dtypes (mapv #(a/weak-dtype (get-choice proto %) (a/backend arr)) paths)
-        shapes (map #(a/shape (get-choice proto %)) paths)
+        dtypes (mapv #(array/weak-dtype (get-choice proto %) (array/backend arr)) paths)
+        shapes (map #(array/shape (get-choice proto %)) paths)
         sizes (map #(reduce * 1 %) shapes)
         needed (reduce + sizes)]
-    (when-not (== needed (a/size arr))
-      (throw (ex-info (str "from-array: proto has " needed " elements, the array " (a/size arr))
-                      {:expected needed :got (a/size arr)})))
+    (when-not (== needed (array/size arr))
+      (throw (ex-info (str "from-array: proto has " needed " elements, the array " (array/size arr))
+                      {:expected needed :got (array/size arr)})))
     (first
      (reduce (fn [[cm offset] [p shape n dtype]]
-               (let [v (a/reshape (a/slice arr 0 offset (+ offset n)) shape)]
-                 [(set-choice cm p (if (= dtype (a/dtype v)) v (a/astype v dtype)))
+               (let [v (array/reshape (array/slice arr 0 offset (+ offset n)) shape)]
+                 [(set-choice cm p (if (= dtype (array/dtype v)) v (array/astype v dtype)))
                   (+ offset n)]))
              [EMPTY 0]
              (map vector paths shapes sizes dtypes)))))
@@ -251,7 +251,7 @@
   [vs]
   (if (vector? (first vs))
     (apply mapv (fn [& xs] (stack-values (vec xs))) vs)
-    (a/stack vs)))
+    (array/stack vs)))
 
 (defn stack
   "Stack choice maps with identical addresses into one whose leaves have a new
@@ -272,9 +272,9 @@
   [cm n]
   (if (has-value? cm)
     ;; a value at the root (a distribution's choice map)
-    (mapv #(->Value (a/tree-map (fn [v] (a/take v %)) (get-value cm))) (range n))
+    (mapv #(->Value (array/tree-map (fn [v] (array/take v %)) (get-value cm))) (range n))
     (mapv (fn [i]
-            (reduce (fn [acc p] (set-choice acc p (a/tree-map #(a/take % i) (get-choice cm p))))
+            (reduce (fn [acc p] (set-choice acc p (array/tree-map #(array/take % i) (get-choice cm p))))
                     EMPTY
                     (addresses cm)))
           (range n))))

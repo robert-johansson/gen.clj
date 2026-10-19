@@ -5,7 +5,7 @@
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.test.check]
-            [gen.array :as a :refer [+ - * /]]
+            [gen.array :as array :refer [+ - * /]]
             [gen.array.batch :as batch]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
@@ -28,7 +28,7 @@
     (let [slope (trace :slope (d/normal 0 10))
           intercept (trace :intercept (d/normal 0 10))]
       (doseq [[i x] (map-indexed vector xs)]
-        (trace [:y i] (d/normal (a/+ (a/* slope x) intercept) 1)))
+        (trace [:y i] (d/normal (array/+ (array/* slope x) intercept) 1)))
       slope)))
 
 (def branching
@@ -47,8 +47,8 @@
 (def discrete
   (gen []
     (let [k (trace :k (d/categorical [0.2 0.5 0.3]))
-          n (trace :n (d/poisson (a/+ 1.0 k)))]
-      (trace :flip (d/bernoulli (a// 1.0 (a/+ 2.0 n)))))))
+          n (trace :n (d/poisson (array/+ 1.0 k)))]
+      (trace :flip (d/bernoulli (array// 1.0 (array/+ 2.0 n)))))))
 
 (def sub-x (gen [] (trace :y (d/normal 0 1))))
 
@@ -120,10 +120,10 @@
         sigma (cm/choicemap :switch false :b 2.0 :c 3)
         {t2 :trace w :weight disc :discard} (gfi/update tr sigma (rng/key 1))
         {t3 :trace w3 :weight disc3 :discard} (gfi/update t2 disc (rng/key 2))]
-    (is (close? w (a/- (:score t2) (:score tr))))
+    (is (close? w (array/- (:score t2) (:score tr))))
     (is (= (ts/host (cm/choicemap :switch true :a (tr :a))) (ts/host disc)))
     (is (= (:choices tr) (:choices t3)))
-    (is (close? w3 (a/negate w)))
+    (is (close? w3 (array/negate w)))
     (is (= sigma disc3))))
 
 (deftest a-choice-that-becomes-a-call-is-discarded
@@ -131,7 +131,7 @@
   (let [tr (first (filter #(true? (ts/host (% :s))) (map #(gfi/simulate kind-changing [] (rng/key %)) (range 50))))
         {t2 :trace w :weight disc :discard} (gfi/update tr (cm/choicemap :s false) (rng/key 1))]
     (is (= (ts/host (cm/choicemap :s true :x (tr :x))) (ts/host disc)))
-    (is (close? w (a/- (a/- (:score t2) (:score tr)) (gfi/project t2 (sel/select [:x :y])))))
+    (is (close? w (array/- (array/- (:score t2) (:score tr)) (gfi/project t2 (sel/select [:x :y])))))
     (is (= (:choices tr) (:choices (:trace (gfi/update t2 disc (rng/key 2))))))))
 
 (def inlined
@@ -167,7 +167,7 @@
         {t2 :trace w :weight disc :discard} (gfi/update tr (cm/choicemap :switch false) (rng/key 5))]
     (is (= #{[:switch] [:b] [:c]} (set (cm/addresses (:choices t2)))) "the other branch is sampled fresh")
     (is (= (ts/host (cm/choicemap :switch true :a (tr :a))) (ts/host disc)) "the old value and the removed choice are discarded")
-    (is (close? w (a/- (gfi/project t2 (sel/select :switch)) (:score tr))))
+    (is (close? w (array/- (gfi/project t2 (sel/select :switch)) (:score tr))))
     (is (= (:choices tr) (:choices (:trace (gfi/update t2 disc (rng/key 6))))) "and the update reverses")))
 
 (deftest splices-nest-choices
@@ -202,7 +202,7 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"needs a distribution"
                           (gfi/simulate (gen [] (trace :x 3.0)) [] k)))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"has shape \[3\], but the distribution's values have shape \[\]"
-                          (gfi/generate (gen [] (trace :y (d/normal 0 1))) [] (cm/choicemap :y (a/array [1.0 2.0 3.0])) k))
+                          (gfi/generate (gen [] (trace :y (d/normal 0 1))) [] (cm/choicemap :y (array/array [1.0 2.0 3.0])) k))
         "a constraint of another shape is not scored as several draws")
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"nested choices"
                           (gfi/generate (gen [] (splice :x (d/normal 0 1))) [] (cm/choicemap [:x :y] 3.0) k))
@@ -215,10 +215,10 @@
                               (gfi/update (gfi/simulate m [] k) nan k)))
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"is NaN" (gfi/assess m [] nan)))
         ;; an array value or parameter is read only on an eager backend (rule 5)
-        (when (a/concrete? (a/array [0.0]))
+        (when (array/concrete? (array/array [0.0]))
           (is (thrown-with-msg? clojure.lang.ExceptionInfo #"is NaN"
-                                (gfi/generate (gen [] (trace :v (d/mvnormal [0 0] (a/eye 2)))) []
-                                              (cm/choicemap :v (a/array [0.0 ##NaN])) k))))
+                                (gfi/generate (gen [] (trace :v (d/mvnormal [0 0] (array/eye 2)))) []
+                                              (cm/choicemap :v (array/array [0.0 ##NaN])) k))))
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"is NaN" (gfi/generate (d/normal 0 1) [] (cm/->Value ##NaN) k)))))
     (testing "constraints are choice maps: a plain map would mean no constraints at all"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be a choice map.*from-map"
@@ -239,8 +239,8 @@
                             (gfi/simulate (gen [] (trace [] (d/normal 0 1))) [] k))))
     (testing "NaN parameters"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"normal: mu is NaN" (d/normal ##NaN 1)))
-      (when (a/concrete? (a/array [0.0]))
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mu is NaN" (d/normal (a/array [0.0 ##NaN]) 1))))
+      (when (array/concrete? (array/array [0.0]))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mu is NaN" (d/normal (array/array [0.0 ##NaN]) 1))))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mu is NaN" (d/normal [0.0 ##NaN] 1)) "host data, on every backend")
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mu is NaN" (d/normal (float Float/NaN) 1)) "a Float too"))
     (testing "update and regenerate take one argdiff per argument"
@@ -253,11 +253,11 @@
 (deftest conditionals-branch-on-values
   (let [model (gen [c] (if c (trace :a (d/normal 0 1)) (trace :b (d/normal 0 1))))]
     (testing "a 1-element array that holds false takes the else branch (plain if would not)"
-      (is (= [[:b]] (cm/addresses (:choices (gfi/simulate model [(a/array [false])] (rng/key 1)))))))
+      (is (= [[:b]] (cm/addresses (:choices (gfi/simulate model [(array/array [false])] (rng/key 1)))))))
     (is (= [[:a]] (cm/addresses (:choices (gfi/simulate model [true] (rng/key 1))))))
     (testing "when, cond, and and or expand to if, so they are guarded too"
       (let [m (gen [c] (when c (trace :a (d/normal 0 1))) (cond (and c true) 1 :else 2))]
-        (is (cm/empty? (:choices (gfi/simulate m [(a/array [false])] (rng/key 1)))))))
+        (is (cm/empty? (:choices (gfi/simulate m [(array/array [false])] (rng/key 1)))))))
     (testing "local functions shadowing macro names are not expanded"
       (let [m (gen [] (let [when (fn [x] (* 2 x))] (when 21)))]
         (is (= 42 (m)))))))
@@ -266,11 +266,11 @@
   (testing "the same transitions run N particles at once, under the batch tracer"
     (let [k (rng/key 7)
           {tr :trace} (dyn/run linreg :simulate [[1.0 2.0]] {:key k :batch-shape [5]})]
-      (is (= [] (a/shape (tr :slope))) "inside the trace, values have their per-particle shapes")
-      (is (= [5] (a/shape (batch/unwrap (tr :slope) [5]))) "with a leading batch axis underneath")
+      (is (= [] (array/shape (tr :slope))) "inside the trace, values have their per-particle shapes")
+      (is (= [5] (array/shape (batch/unwrap (tr :slope) [5]))) "with a leading batch axis underneath")
       (testing "each particle's score is its own assessed density"
-        (doseq [[i c] (map-indexed vector (cm/unstack (cm/from-map (a/tree-map #(batch/unwrap % [5]) (cm/to-map (:choices tr)))) 5))]
-          (is (close? (a/take (batch/unwrap (:score tr) [5]) i) (:weight (gfi/assess linreg [[1.0 2.0]] c))))))))
+        (doseq [[i c] (map-indexed vector (cm/unstack (cm/from-map (array/tree-map #(batch/unwrap % [5]) (cm/to-map (:choices tr)))) 5))]
+          (is (close? (array/take (batch/unwrap (:score tr) [5]) i) (:weight (gfi/assess linreg [[1.0 2.0]] c))))))))
   (testing "branching on a batch of values is loud, not silently wrong"
     (is (:gen.array/batched-branch
          (ex-data (try (dyn/run branching :simulate [] {:key (rng/key 1) :batch-shape [4]})
@@ -313,7 +313,7 @@
   (fn [state p dist k]
     (let [[v s] ((dyn/site-transitions :simulate) state p dist k)]
       (if (= p [:x])
-        [(a/* 2.0 v) (assoc-in s [:choices] (cm/set-choice (:choices s) p (a/* 2.0 v)))]
+        [(array/* 2.0 v) (assoc-in s [:choices] (cm/set-choice (:choices s) p (array/* 2.0 v)))]
         [v s]))))
 
 (deftest middleware-of-a-callee-spliced-without-an-address-applies-to-its-body
@@ -340,7 +340,7 @@
     (when (and (= op :assess) (empty? batch-shape))
       (let [c #(cm/get-choice constraints %)
             slope (c :slope) intercept (c :intercept)
-            lp (fn [v mu sd] (- (- (a/log sd)) 0.9189385332046728 (* 0.5 (a/square (/ (- v mu) sd)))))]
+            lp (fn [v mu sd] (- (- (array/log sd)) 0.9189385332046728 (* 0.5 (array/square (/ (- v mu) sd)))))]
         {:weight (+ (lp slope 0.0 10.0) (lp intercept 0.0 10.0)
                     (reduce + (map-indexed (fn [i x] (lp (c [:y i]) (+ (* slope x) intercept) 1.0)) xs)))
          :retval slope}))))
@@ -424,7 +424,7 @@
         tr (:trace (gfi/generate m [] (cm/choicemap :c true [:s :x] 0.5) (rng/key 1)))
         {t :trace w :weight disc :discard} (gfi/update tr (cm/choicemap :c false) (rng/key 2))]
     (is (not= 7.0 (t :s)) "the new distribution draws its own value")
-    (is (close? w (a/- (a/- (:score t) (:score tr)) (gfi/project t (sel/select :s)))))
+    (is (close? w (array/- (array/- (:score t) (:score tr)) (gfi/project t (sel/select :s)))))
     (is (= (cm/choicemap :c true [:s :x] 0.5) disc))
     (is (= (:choices tr) (:choices (:trace (gfi/update t disc (rng/key 3))))) "and the update reverses")))
 
@@ -440,14 +440,14 @@
         (is (close? w (- (dc/log-prob (d/normal 2 1) 1.5) (dc/log-prob (d/normal 0 1) 1.5)))))))
   (testing "B5: values of the wrong shape are errors everywhere"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"shape"
-                          (gfi/generate (gen [] (splice :x (d/normal 0 1))) [] (cm/choicemap :x (a/array [1.0 2.0 3.0])) (rng/key 1))))
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"shape" (gfi/assess (d/normal 0 1) [] (cm/->Value (a/array [1.0 2.0])))))
-    (let [m (gen [d] (trace :v (d/normal (a/zeros [d]) 1)))
+                          (gfi/generate (gen [] (splice :x (d/normal 0 1))) [] (cm/choicemap :x (array/array [1.0 2.0 3.0])) (rng/key 1))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"shape" (gfi/assess (d/normal 0 1) [] (cm/->Value (array/array [1.0 2.0])))))
+    (let [m (gen [d] (trace :v (d/normal (array/zeros [d]) 1)))
           tr (gfi/simulate m [1] (rng/key 2))]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"shape" (gfi/update tr [3] [diff/unknown-change] cm/EMPTY (rng/key 3)))
           "a retained value whose parameters change shape"))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"shape"
-                          (dc/log-prob ((d/product d/normal d/bernoulli) [0 1] [0.3]) [(a/array [1.0 2.0 3.0]) true]))))
+                          (dc/log-prob ((d/product d/normal d/bernoulli) [0 1] [0.3]) [(array/array [1.0 2.0 3.0]) true]))))
   (testing "B6: trace calls in lazy splice arguments are recorded"
     (let [m (gen [] (splice :m (comb/map observation) (vec (map #(trace [:x %] (d/normal 0 1)) (range 3)))))
           tr (gfi/simulate m [] (rng/key 4))]

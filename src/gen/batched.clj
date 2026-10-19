@@ -49,7 +49,7 @@
    Constraints are shared by every particle (observations). Weights are [n]
    arrays; :discards is a vector of n choice maps."
   (:refer-clojure :exclude [take update])
-  (:require [gen.array :as a]
+  (:require [gen.array :as array]
             [gen.array.batch :as batch]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
@@ -118,7 +118,7 @@
   (let [s (java.util.Collections/newSetFromMap (java.util.IdentityHashMap.))
         walk (fn walk [x]
                (cond (batch/batched? x) (.add s x)
-                     (a/array? x) nil
+                     (array/array? x) nil
                      (cm/choicemap? x) (walk (cm/to-map x))
                      (map? x) (run! walk (vals x))
                      ;; a realized prefix of a lazy return value, as realize! forced it
@@ -133,7 +133,7 @@
    what a raw if on a comparison in a helper function leaves (a batch is
    true to Clojure's if, so one branch was taken for every particle)."
   [gf op args n opts]
-  (let [[[r bools] branch] (a/logging-branches
+  (let [[[r bools] branch] (array/logging-branches
                             #(batch/unread-bools (fn [] (gfi/run-op gf op args (assoc opts :batch-shape [n])))))]
     ;; a batched-branch error the code caught still means the particles differ
     (when branch (throw branch))
@@ -148,7 +148,7 @@
 
 (defn- per-particle [ps traces] (assoc ps :trace nil :traces (vec traces)))
 
-(defn- stack-weights [ws n] (if (empty? ws) (a/zeros [0]) (a/broadcast-to (a/stack (vec ws)) [n])))
+(defn- stack-weights [ws n] (if (empty? ws) (array/zeros [0]) (array/broadcast-to (array/stack (vec ws)) [n])))
 
 (defn- plain
   "A batched run's value as an array with the leading particle axis (a
@@ -156,7 +156,7 @@
   [x n]
   (batch/unwrap x [n]))
 
-(defn- map-leaves [f choices] (cm/from-map (a/tree-map f (cm/to-map choices))))
+(defn- map-leaves [f choices] (cm/from-map (array/tree-map f (cm/to-map choices))))
 
 (defn- plain-choices [choices n] (map-leaves #(plain % n) choices))
 
@@ -186,7 +186,7 @@
 (defn- particle-value
   "Particle i's value of x (a shared value is every particle's)."
   [x i]
-  (if (batch/batched? x) (a/take (batch/value x) i 0) x))
+  (if (batch/batched? x) (array/take (batch/value x) i 0) x))
 
 (defn- spot-indices [n]
   (let [m *spot-checks*]
@@ -199,7 +199,7 @@
    precision (a scalar run of host parameters computes in float64 on the
    host, a batched run in the backend's float)."
   [x]
-  (case (a/dtype x) (:float16 :bfloat16) 1e-2 :float32 1e-5 1e-8))
+  (case (array/dtype x) (:float16 :bfloat16) 1e-2 :float32 1e-5 1e-8))
 
 (defn- close-host-values?
   "Are the host values u and v (numbers, booleans, nested vectors) equal
@@ -220,10 +220,10 @@
    backend: Metal has no float64), within the precision of the narrower
    float."
   [x y]
-  (or (not (a/array? x))
-      (and (a/array? y)
-           (= (a/shape x) (a/shape y))
-           (close-host-values? (a/->clj x) (a/->clj y) (max (tolerance-of x) (tolerance-of y))))))
+  (or (not (array/array? x))
+      (and (array/array? y)
+           (= (array/shape x) (array/shape y))
+           (close-host-values? (array/->clj x) (array/->clj y) (max (tolerance-of x) (tolerance-of y))))))
 
 (declare spot-check-here!)
 
@@ -232,7 +232,7 @@
 (defn- read-all
   "x's host values: for a batched x every particle's (one read), else x's."
   [x]
-  (if (batch/batched? x) (Read. true (a/->clj (batch/value x))) (Read. false (a/->clj x))))
+  (if (batch/batched? x) (Read. true (array/->clj (batch/value x))) (Read. false (array/->clj x))))
 
 (defn- particle-host
   "Particle i's host value of a read."
@@ -244,16 +244,16 @@
    cost evaluations)?"
   [t]
   (let [s (:score t)]
-    (and (batch/batched? s) (not (a/concrete? (batch/value s))))))
+    (and (batch/batched? s) (not (array/concrete? (batch/value s))))))
 
-(def ^:private reference (delay (a/backend-named :jvm)))
+(def ^:private reference (delay (array/backend-named :jvm)))
 
 (defn- on-reference
   "x as the JVM backend holds it: a backend array read on the host and made
    there; anything else as it is."
   [x]
   (if (and (instance? gen.array.protocols.IArray x) (not (batch/batched? x)))
-    (a/with-backend @reference (a/array (a/->clj x)))
+    (array/with-backend @reference (array/array (array/->clj x)))
     x))
 
 (defn- mixed-backends? [^Throwable e]
@@ -272,13 +272,13 @@
   [gf args n t]
   (let [choices (map-leaves read-all (:choices t))
         ^Read score (read-all (:score t))
-        retval (when (a/array? (:retval t)) (read-all (:retval t)))
+        retval (when (array/array? (:retval t)) (read-all (:retval t)))
         rtol (max (tolerance-of (:score t)) 1e-8)
-        args' (a/tree-map on-reference args)]
+        args' (array/tree-map on-reference args)]
     (try
-      (a/with-backend @reference
+      (array/with-backend @reference
         (doseq [i (spot-indices n)]
-          (let [cs (map-leaves #(let [v (particle-host % i)] (if (sequential? v) (a/array v) v)) choices)
+          (let [cs (map-leaves #(let [v (particle-host % i)] (if (sequential? v) (array/array v) v)) choices)
                 st (try (:trace (gfi/generate gf args' cs (rng/key 0)))
                         (catch Exception e
                           (if (mixed-backends? e)
@@ -286,9 +286,9 @@
                             (throw (ex-info (str "The batched run disagrees with the scalar handler at particle " i
                                                  ": the scalar run of its choices fails (" (ex-message e) ")")
                                             {:particle i ::mismatch true} e)))))]
-            (when-not (and (close-host-values? (a/->clj (:score st)) (particle-host score i) rtol)
-                           (or (nil? retval) (not (a/array? (:retval st)))
-                               (close-host-values? (a/->clj (:retval st)) (particle-host retval i)
+            (when-not (and (close-host-values? (array/->clj (:score st)) (particle-host score i) rtol)
+                           (or (nil? retval) (not (array/array? (:retval st)))
+                               (close-host-values? (array/->clj (:retval st)) (particle-host retval i)
                                                    (max rtol (tolerance-of (:retval t))))))
               (throw (ex-info (str "The batched run disagrees with the scalar handler at particle " i
                                    ": the code branches on a batched value where the tracer cannot see it")
@@ -449,7 +449,7 @@
   (let [indices (vec indices)
         n' (count indices)]
     (if (batched? ps)
-      (assoc ps :n n' :trace (gather (:trace ps) (a/array indices {:dtype :int64}) n'))
+      (assoc ps :n n' :trace (gather (:trace ps) (array/array indices {:dtype :int64}) n'))
       (assoc ps :n n' :traces (mapv (:traces ps) indices)))))
 
 (defn select
@@ -457,19 +457,19 @@
    elsewhere: the per-particle accept step of n MH chains."
   [mask ps qs]
   (let [n (:n ps)
-        keep (vec (if (a/array? mask) (a/->clj mask) mask))
+        keep (vec (if (array/array? mask) (array/->clj mask) mask))
         fallback #(per-particle ps (mapv (fn [keep? p q] (if keep? p q)) keep (traces ps) (traces qs)))]
     (if (and (batched? ps) (batched? qs)
              (= (cm/addresses (:choices (:trace ps))) (cm/addresses (:choices (:trace qs)))))
-      (let [m (a/array keep)
+      (let [m (array/array keep)
             cp (:choices (:trace ps))
             cq (:choices (:trace qs))
             pick (fn pick [p q]
                    (if (vector? p)
                      (mapv pick p q)
-                     (a/where (a/reshape m (into [n] (repeat (dec (a/ndim p)) 1))) p q)))
-            merged (reduce (fn [c path] (cm/set-choice c path (pick (a/tree-map #(plain % n) (cm/get-choice cp path))
-                                                                     (a/tree-map #(plain % n) (cm/get-choice cq path)))))
+                     (array/where (array/reshape m (into [n] (repeat (dec (array/ndim p)) 1))) p q)))
+            merged (reduce (fn [c path] (cm/set-choice c path (pick (array/tree-map #(plain % n) (cm/get-choice cp path))
+                                                                     (array/tree-map #(plain % n) (cm/get-choice cq path)))))
                            cm/EMPTY (cm/addresses cp))]
         ;; the rebuild is not checked
         (batched-or (assoc ps :trace (rebuild (:gen-fn ps) (:args ps) n merged) ::unchecked? true) (fallback)))
@@ -479,8 +479,8 @@
   "The choice at addr across the particles, as an [n …] array."
   [ps addr]
   (if (batched? ps)
-    (a/tree-map #(plain % (:n ps)) ((:trace (check ps)) addr))
-    (a/stack (mapv #(% addr) (:traces ps)))))
+    (array/tree-map #(plain % (:n ps)) ((:trace (check ps)) addr))
+    (array/stack (mapv #(% addr) (:traces ps)))))
 
 (defn scores
   "The particles' log densities, an [n] array."

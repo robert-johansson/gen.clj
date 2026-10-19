@@ -90,11 +90,14 @@ Python.
    - No hidden mutable state, and no memory management in semantics code.
 4. **House style.** Refer gen.array's operators in place of `clojure.core`'s:
    `(:refer-clojure :exclude [+ - * / < > <= >= ==])`. Never refer `max`, `min`,
-   `take` or `flatten`, which are reductions or gathers there.
+   `take` or `flatten`, which are reductions or gathers there. Call the rest
+   through the alias `array`, the namespace's last segment: `(array/shape x)`.
+   Tests of the array API itself may qualify the operators, to name the
+   function under test.
 5. **Distributions follow Gen.jl's names and parameterizations.**
    `categorical` takes probabilities; `categorical-logits` takes logits.
    Validate host parameters, and read array values only when
-   `a/concrete?` says so.
+   `array/concrete?` says so.
 6. **Errors are loud.** Shape mismatches, unvisited constraints, repeated
    addresses and the like throw `ex-info` with data. Never let one degrade into
    NaN or a silent default.

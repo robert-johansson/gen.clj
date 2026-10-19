@@ -19,23 +19,25 @@ generative functions (M3) and Gen.jl parity (M4). See `DESIGN.md`.
 ## A model and two kinds of inference
 
 ```clojure
-(require '[gen.dynamic :refer [gen]]
-         '[gen.dist :as d]
-         '[gen.array :as a]
-         '[gen.choicemap :as cm]
-         '[gen.selection :as sel]
-         '[gen.gfi :as gfi]
-         '[gen.inference.importance :as is]
-         '[gen.inference.mh :as mh]
-         '[gen.inference.mcmc :as mcmc]
-         '[gen.random :as rng])
+(ns example
+  (:refer-clojure :exclude [+ *])
+  (:require [gen.array :refer [+ *]]
+            [gen.choicemap :as cm]
+            [gen.dist :as d]
+            [gen.dynamic :refer [gen]]
+            [gen.gfi :as gfi]
+            [gen.inference.importance :as is]
+            [gen.inference.mcmc :as mcmc]
+            [gen.inference.mh :as mh]
+            [gen.random :as rng]
+            [gen.selection :as sel]))
 
 (def line
   (gen [xs]
     (let [slope (trace :slope (d/normal 0 2))
           intercept (trace :intercept (d/normal 0 2))]
       (doseq [[i x] (map-indexed vector xs)]
-        (trace [:y i] (d/normal (a/+ (a/* slope x) intercept) 0.5)))
+        (trace [:y i] (d/normal (+ (* slope x) intercept) 0.5)))
       slope)))
 
 (def xs [-2.0 -1.0 0.0 1.0 2.0])
@@ -60,7 +62,7 @@ generative functions (M3) and Gen.jl parity (M4). See `DESIGN.md`.
   arrays, and the operators are meant to be referred.
   - Broadcasting, reductions, indexing and linear algebra.
   - Special functions that match scipy to about 1e-15.
-  - Reverse-mode autodiff (`a/grad`, `a/value-and-grad`).
+  - Reverse-mode autodiff (`array/grad`, `array/value-and-grad`).
   - Splittable Threefry keys, bit-identical to JAX.
 - **The modeling language** (`gen.dynamic`). `gen` with `trace`, addressed
   and shared-namespace `splice`, trainable `param`s, and conditionals on

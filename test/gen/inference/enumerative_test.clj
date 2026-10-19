@@ -6,7 +6,7 @@
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
             [gen.test-support :as ts]
-            [gen.array :as a :refer [+ - * /]]
+            [gen.array :as array :refer [+ - * /]]
             [gen.batched :as b]
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
@@ -170,10 +170,10 @@
 
 (deftest batched-runs-are-the-same-proposal
   ;; the same code under the batch tracer: each particle's weight is exact
-  (let [ws (a/->clj (:weights (b/generate exact [] observations 50 (rng/key 12))))]
+  (let [ws (array/->clj (:weights (b/generate exact [] observations 50 (rng/key 12))))]
     (is (every? #(close-to % (log evidence)) ws)))
   (let [m (gen [] (let [z (trace :z (d/bernoulli 0.3))
-                        x (trace :x (d/normal (a/where z 1.0 -1.0) 1.0))]
+                        x (trace :x (d/normal (array/where z 1.0 -1.0) 1.0))]
                     (trace :y (d/normal x 0.5))))
         n 2000
         {ps :particles ws :weights} (b/generate (enum/with-exact-proposal m [:z]) [] (cm/choicemap :y 0.4) n (rng/key 13))
@@ -185,7 +185,7 @@
                     (/ l1 (+ l1 l0)))
                  trs)
         excess (reduce + (map #(- (if (ts/host (%1 :z)) 1.0 0.0) %2) trs pz))]
-    (is (every? true? (map #(close-to %2 (dc/log-prob (d/normal (%1 :x) 0.5) 0.4)) trs (a/->clj ws))))
+    (is (every? true? (map #(close-to %2 (dc/log-prob (d/normal (%1 :x) 0.5) 0.4)) trs (array/->clj ws))))
     (is (< (ts/abs excess) (* 5 (Math/sqrt (reduce + (map #(* % (- 1.0 %)) pz)))))
         "z is drawn from its exact conditional, within 5 standard errors")))
 

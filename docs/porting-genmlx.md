@@ -12,10 +12,10 @@ instead.
 | `(mx/add a b)`, `(mx/multiply a b)`, `(mx/subtract a b)`, `(mx/divide a b)` | `(+ a b)`, `(* a b)`, `(- a b)`, `(/ a b)` with gen.array's operators referred (docs/array-api.md §2) |
 | `(mx/scalar 2.0)`, `ZERO`, `ONE` | plain numbers: `2.0`, `0.0`, `1.0` (host numbers are 0-d arrays) |
 | `(mx/item x)` before branching | not needed: `if` in a `gen` body branches on the value of a 0-d array |
-| `(mx/eval! x)` inside models or distributions | never; only at inference-loop boundaries (`a/eval!`) |
-| `mx/amax`, `mx/amin` (reductions) | `a/max`, `a/min`; elementwise is `maximum`/`minimum` |
-| `(mx/take-idx x i)` | `(a/take x i)` (axis 0 by default) |
-| a categorical log-prob gather in three shape cases | `(a/pick log-probs v)` |
+| `(mx/eval! x)` inside models or distributions | never; only at inference-loop boundaries (`array/eval!`) |
+| `mx/amax`, `mx/amin` (reductions) | `array/max`, `array/min`; elementwise is `maximum`/`minimum` |
+| `(mx/take-idx x i)` | `(array/take x i)` (axis 0 by default) |
+| a categorical log-prob gather in three shape cases | `(array/pick log-probs v)` |
 
 ## Generative functions
 

@@ -3,7 +3,7 @@
    leading axes. A right-hand side that is 1-d, or has one axis fewer than the
    matrix, is a vector (batch); otherwise it is [.. n k]."
   (:refer-clojure :exclude [+ *])
-  (:require [gen.array :as a :refer [+ * log sum]]
+  (:require [gen.array :as array :refer [+ * log sum]]
             [gen.array.dtype :as dt]
             [gen.array.protocols :as p]))
 
@@ -12,18 +12,18 @@
 (defn- float-array-of
   "x as a float backend array on b (ints and bools converted)."
   [b x]
-  (let [x (if (= :float (dt/kind (a/dtype x))) x (a/astype x (:float (p/-defaults b))))]
-    (if (a/host? x) (a/with-backend b (a/array x)) x)))
+  (let [x (if (= :float (dt/kind (array/dtype x))) x (array/astype x (:float (p/-defaults b))))]
+    (if (array/host? x) (array/with-backend b (array/array x)) x)))
 
-(defn- backend-of [& xs] (a/common-backend xs))
+(defn- backend-of [& xs] (array/common-backend xs))
 
 (defn- with-matrix-rhs
   "Call (f a rhs) with rhs as [.. n k], restoring a vector right-hand side. A
    right-hand side is a (batch of) vector(s) when it is 1-d or has one axis
    fewer than the matrix."
   [a rhs f]
-  (if (or (== 1 (a/ndim rhs)) (== (a/ndim rhs) (dec (a/ndim a))))
-    (a/squeeze (f a (a/expand-dims rhs -1)) -1)
+  (if (or (== 1 (array/ndim rhs)) (== (array/ndim rhs) (dec (array/ndim a))))
+    (array/squeeze (f a (array/expand-dims rhs -1)) -1)
     (f a rhs)))
 
 (defn cholesky
@@ -54,8 +54,8 @@
   "The inverse of a square matrix."
   [m]
   (let [b (backend-of m)
-        n (peek (a/shape m))]
-    (solve m (a/with-backend b (a/eye n)))))
+        n (peek (array/shape m))]
+    (solve m (array/with-backend b (array/eye n)))))
 
 (defn slogdet
   "[sign log|det m|] (sign 0 and -Inf for a singular matrix)."
@@ -67,13 +67,13 @@
   "The determinant."
   [m]
   (let [[sign logabs] (slogdet m)]
-    (* sign (a/exp logabs))))
+    (* sign (array/exp logabs))))
 
 (defn diagonal
   "The main diagonals of [.. n n] matrices, as [.. n]."
   [m]
-  (let [n (peek (a/shape m))]
-    (sum (* m (a/with-backend (backend-of m) (a/eye n))) {:axis -1})))
+  (let [n (peek (array/shape m))]
+    (sum (* m (array/with-backend (backend-of m) (array/eye n))) {:axis -1})))
 
 (defn cholesky-logdet
   "log det of a = L·Lᵀ from its Cholesky factor L: 2·Σ log diag(L)."

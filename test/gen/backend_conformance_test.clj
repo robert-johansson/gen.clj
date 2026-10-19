@@ -21,13 +21,13 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [gen.array :as a]
+            [gen.array :as array]
             [gen.array.linalg :as la]
             [gen.array.protocols :as p]
             [gen.backend.jvm :as jvm]
             [gen.random :as rng]))
 
-(def tested a/*backend*)
+(def tested array/*backend*)
 (def reference jvm/backend)
 (def float-dt (:float (p/-defaults tested)))
 (def int-dt (:int (p/-defaults tested)))
@@ -44,15 +44,15 @@
   [r]
   (if (vector? r)
     (mapv host-result r)
-    {:shape (a/shape r)
-     :dtype (when (seq (a/shape r)) (a/dtype r))
-     :value (a/->clj r)}))
+    {:shape (array/shape r)
+     :dtype (when (seq (array/shape r)) (array/dtype r))
+     :value (array/->clj r)}))
 
 (defn- run-on
   "(f & arrays) on backend b, the arrays made from the specs {:data :dtype}."
   [b f specs]
-  (a/with-backend b
-    (host-result (apply f (map (fn [{:keys [data dtype]}] (a/array data {:dtype dtype})) specs)))))
+  (array/with-backend b
+    (host-result (apply f (map (fn [{:keys [data dtype]}] (array/array data {:dtype dtype})) specs)))))
 
 (defn- as-tested-defaults
   "A reference result in the tested backend's default dtypes: where the JVM
@@ -192,19 +192,19 @@
   (Long/parseLong (System/getProperty "gen.conformance.trials" "60")))
 
 (defspec unary-exact trials
-  (prop/for-all [op (gen/elements [a/negate a/abs a/sign a/floor a/ceil a/round a/isnan a/isinf a/logical-not a/square])
+  (prop/for-all [op (gen/elements [array/negate array/abs array/sign array/floor array/ceil array/round array/isnan array/isinf array/logical-not array/square])
                  x gen-any-spec]
     (conforms? exact op x)))
 
 (defspec unary-ieee trials
   (prop/for-all [x (gen-floats gen-float)]
-    (conforms? ieee a/sqrt x)))
+    (conforms? ieee array/sqrt x)))
 
 (defspec unary-transcendental trials
-  (prop/for-all [[op x] (gen/let [[op elem] (gen/elements [[a/exp gen-finite] [a/expm1 gen-finite] [a/tanh gen-finite]
-                                                           [a/sin gen-finite] [a/cos gen-finite] [a/erf gen-finite]
-                                                           [a/log gen-positive] [a/log1p gen-positive]
-                                                           [a/erfinv (gen/double* {:NaN? false :min -0.999 :max 0.999})]])
+  (prop/for-all [[op x] (gen/let [[op elem] (gen/elements [[array/exp gen-finite] [array/expm1 gen-finite] [array/tanh gen-finite]
+                                                           [array/sin gen-finite] [array/cos gen-finite] [array/erf gen-finite]
+                                                           [array/log gen-positive] [array/log1p gen-positive]
+                                                           [array/erfinv (gen/double* {:NaN? false :min -0.999 :max 0.999})]])
                                   x (gen/bind gen-shape #(gen-spec % elem float-dt))]
                           [op x])]
     (conforms? transcendental op x)))
@@ -212,29 +212,29 @@
 (deftest special-functions-in-the-tails
   ;; erfinv near ±1 (where a fixed number of refinement steps must still
   ;; converge), erf beyond the series' range, lgamma and digamma near poles
-  (doseq [[op xs] [[a/erfinv [0.5 -0.9 0.99 0.999999 (- 1.0 1e-12) (- 1.0 1e-14) -0.99999999 1.0 -1.0 0.0 1.5]]
-                   [a/erf [-6.0 -3.0 -0.49 0.0 0.49 0.51 2.0 5.5]]
-                   [a/lgamma [0.001 0.5 1.0 2.0 2.5 -0.5 -1.5 10.0 171.5]]
-                   [a/digamma [0.01 0.5 1.0 1.461632 -0.5 -2.5 20.0]]]]
+  (doseq [[op xs] [[array/erfinv [0.5 -0.9 0.99 0.999999 (- 1.0 1e-12) (- 1.0 1e-14) -0.99999999 1.0 -1.0 0.0 1.5]]
+                   [array/erf [-6.0 -3.0 -0.49 0.0 0.49 0.51 2.0 5.5]]
+                   [array/lgamma [0.001 0.5 1.0 2.0 2.5 -0.5 -1.5 10.0 171.5]]
+                   [array/digamma [0.01 0.5 1.0 1.461632 -0.5 -2.5 20.0]]]]
     (let [d (if f64? [] (mapv #(double (float %)) xs))]
       (is (conforms? (if f64? {:rtol 1e-12 :atol 1e-14} loose) op {:data (if f64? xs d) :dtype float-dt})
           (str op)))))
 
 (defspec binary-exact trials
-  (prop/for-all [op (gen/elements [a/+ a/- a/* a/maximum a/minimum a/< a/<= a/> a/>= a/== a/!=
-                                   a/logical-and a/logical-or])
+  (prop/for-all [op (gen/elements [array/+ array/- array/* array/maximum array/minimum array/< array/<= array/> array/>= array/== array/!=
+                                   array/logical-and array/logical-or])
                  [x y] (gen/one-of [(gen-pair gen-float float-dt) (gen-pair gen-int int-dt)
                                     (gen-pair gen/boolean :bool)])]
     (conforms? exact op x y)))
 
 (defspec binary-division trials
-  (prop/for-all [op (gen/elements [a// a/mod a/floor-div])
+  (prop/for-all [op (gen/elements [array// array/mod array/floor-div])
                  [x y] (gen/one-of [(gen-pair gen-float float-dt) (gen-pair gen-int int-dt)])]
     ;; float mod and floor-div by MLX's kernels: within an ulp of the quotient
-    (conforms? (if (= op a//) ieee transcendental) op x y)))
+    (conforms? (if (= op array//) ieee transcendental) op x y)))
 
 (defspec mixed-dtypes-promote trials
-  (prop/for-all [op (gen/elements [a/+ a/* a/maximum a/<])
+  (prop/for-all [op (gen/elements [array/+ array/* array/maximum array/<])
                  x gen-any-spec
                  y gen-any-spec
                  c (gen/elements [2 2.5 true])]
@@ -246,7 +246,7 @@
   (prop/for-all [[x y] (gen/one-of [(gen-pair gen-positive float-dt)
                                     ;; negative exponents too: MLX's integer power gives 0 for all
                                     (gen-pair (gen/choose -3 6) int-dt)])]
-    (conforms? transcendental a/pow x y)))
+    (conforms? transcendental array/pow x y)))
 
 (defspec where trials
   (prop/for-all [[c x y] (gen/let [out gen-shape
@@ -255,16 +255,16 @@
                                    x (gen-spec sx gen-float float-dt)
                                    y (gen-spec sy gen-float float-dt)]
                            [c x y])]
-    (conforms? exact a/where c x y)))
+    (conforms? exact array/where c x y)))
 
 (defspec composites trials
-  (prop/for-all [[op tol x] (gen/let [[op elem tol] (gen/elements [[a/sigmoid gen-finite transcendental]
-                                                                   [a/softplus gen-finite transcendental]
-                                                                   [a/lgamma gen-positive loose]
-                                                                   [a/digamma gen-positive loose]
-                                                                   [#(a/logaddexp % 1.5) gen-finite transcendental]
-                                                                   [#(a/xlogy % 2.0) gen-finite transcendental]
-                                                                   [a/isfinite gen-float exact]])
+  (prop/for-all [[op tol x] (gen/let [[op elem tol] (gen/elements [[array/sigmoid gen-finite transcendental]
+                                                                   [array/softplus gen-finite transcendental]
+                                                                   [array/lgamma gen-positive loose]
+                                                                   [array/digamma gen-positive loose]
+                                                                   [#(array/logaddexp % 1.5) gen-finite transcendental]
+                                                                   [#(array/xlogy % 2.0) gen-finite transcendental]
+                                                                   [array/isfinite gen-float exact]])
                                       x (gen/bind gen-shape #(gen-spec % elem float-dt))]
                               [op tol x])]
     (conforms? tol op x)))
@@ -283,10 +283,10 @@
                  (gen/fmap #(vec (distinct %)) (gen/vector (gen/choose 0 (dec r)) 0 r))])))
 
 (defspec reductions trials
-  (prop/for-all [[op tol kinds] (gen/elements [[a/sum loose [:float :int :bool]] [a/prod loose [:float :int]]
-                                               [a/max exact [:float :int]] [a/min exact [:float :int]]
-                                               [a/all exact [:bool :float]] [a/any exact [:bool :int]]
-                                               [a/mean loose [:float]] [a/logsumexp loose [:float]]])
+  (prop/for-all [[op tol kinds] (gen/elements [[array/sum loose [:float :int :bool]] [array/prod loose [:float :int]]
+                                               [array/max exact [:float :int]] [array/min exact [:float :int]]
+                                               [array/all exact [:bool :float]] [array/any exact [:bool :int]]
+                                               [array/mean loose [:float]] [array/logsumexp loose [:float]]])
                  shape gen-nonempty-shape
                  keep? gen/boolean
                  seed gen/nat]
@@ -300,7 +300,7 @@
       (conforms? tol #(op % {:axis axes :keep-dims? keep?}) x))))
 
 (defspec arg-reductions trials
-  (prop/for-all [op (gen/elements [a/argmax a/argmin])
+  (prop/for-all [op (gen/elements [array/argmax array/argmin])
                  shape gen-nonempty-shape
                  seed gen/nat]
     (let [x (gen/generate (gen-spec shape (gen/one-of [gen-float (gen/fmap double (gen/choose -2 2))]) float-dt) 10 seed)
@@ -308,7 +308,7 @@
       (conforms? exact #(op % {:axis ax}) x))))
 
 (defspec scans trials
-  (prop/for-all [[op tol] (gen/elements [[a/cumsum loose] [a/cumprod loose] [a/logcumsumexp loose]])
+  (prop/for-all [[op tol] (gen/elements [[array/cumsum loose] [array/cumprod loose] [array/logcumsumexp loose]])
                  shape gen-nonempty-shape
                  reverse? gen/boolean
                  seed gen/nat]
@@ -326,14 +326,14 @@
     (let [x (gen/generate (gen-spec shape gen-int int-dt) 10 seed)
           r (count shape)
           perm (vec (shuffle (range r)))]
-      (and (conforms? exact #(a/reshape % [-1]) x)
-           (conforms? exact #(a/transpose % perm) x)
-           (conforms? exact a/transpose x)
-           (conforms? exact #(a/expand-dims % 0) x)
-           (conforms? exact #(a/broadcast-to % (into [2] shape)) x)
-           (conforms? exact #(a/concatenate [% %] (dec r)) x)
-           (conforms? exact #(a/stack [% % %] 0) x)
-           (conforms? exact a/squeeze x)))))
+      (and (conforms? exact #(array/reshape % [-1]) x)
+           (conforms? exact #(array/transpose % perm) x)
+           (conforms? exact array/transpose x)
+           (conforms? exact #(array/expand-dims % 0) x)
+           (conforms? exact #(array/broadcast-to % (into [2] shape)) x)
+           (conforms? exact #(array/concatenate [% %] (dec r)) x)
+           (conforms? exact #(array/stack [% % %] 0) x)
+           (conforms? exact array/squeeze x)))))
 
 (defspec slices trials
   (prop/for-all [shape gen-nonempty-shape
@@ -345,7 +345,7 @@
                                                         (gen/one-of [(gen/return nil) (gen/choose -6 6)])
                                                         (gen/elements [1 2 3 -1 -2]))
                                              10 seed)]
-      (conforms? exact #(a/slice % ax start stop step) x))))
+      (conforms? exact #(array/slice % ax start stop step) x))))
 
 (defspec gathers trials
   (prop/for-all [shape gen-nonempty-shape
@@ -357,11 +357,11 @@
           idx (gen/generate (gen-spec [3] (gen/choose (- d) (dec d)) int-dt) 10 seed)
           along (gen/generate (gen-spec (assoc shape ax 2) (gen/choose 0 (dec d)) int-dt) 10 seed)
           updates (gen/generate (gen-spec (assoc shape ax 2) gen-finite float-dt) 10 (inc seed))]
-      (and (conforms? exact #(a/take %1 %2 ax) x idx)
-           (conforms? exact #(a/take % (dec d) ax) x)
-           (conforms? exact #(a/take-along-axis %1 %2 ax) x along)
-           (conforms? loose #(a/scatter-add %1 %2 %3 ax) x along updates)
-           (conforms? exact #(a/pick %1 %2) x (gen/generate (gen-spec (pop shape) (gen/choose 0 (dec (peek shape))) int-dt) 10 seed))))))
+      (and (conforms? exact #(array/take %1 %2 ax) x idx)
+           (conforms? exact #(array/take % (dec d) ax) x)
+           (conforms? exact #(array/take-along-axis %1 %2 ax) x along)
+           (conforms? loose #(array/scatter-add %1 %2 %3 ax) x along updates)
+           (conforms? exact #(array/pick %1 %2) x (gen/generate (gen-spec (pop shape) (gen/choose 0 (dec (peek shape))) int-dt) 10 seed))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Linear algebra
@@ -384,9 +384,9 @@
           v (gen/generate (gen-spec [k] gen-finite float-dt) 10 (+ 2 seed))
           i (gen/generate (gen-spec [n k] gen-int int-dt) 10 seed)
           j (gen/generate (gen-spec [k m] gen-int int-dt) 10 seed)]
-      (and (conforms? loose a/matmul x y)
-           (conforms? loose a/matmul x v)
-           (conforms? exact a/matmul i j)))))
+      (and (conforms? loose array/matmul x y)
+           (conforms? loose array/matmul x v)
+           (conforms? exact array/matmul i j)))))
 
 (defspec decompositions 40
   (prop/for-all [n (gen/choose 1 4)
@@ -414,9 +414,9 @@
           rhss (gen/generate (gen-spec [2 n 2] gen-finite float-dt) 10 seed)
           tol (if f64? {:rtol 1e-9 :atol 1e-9} {:rtol 2e-3 :atol 2e-3})]
       (and (conforms? tol la/solve as rhs)
-           (conforms? tol #(la/solve (a/take %1 0) %2) as rhss)
+           (conforms? tol #(la/solve (array/take %1 0) %2) as rhss)
            (conforms? tol #(la/solve-triangular (la/cholesky %1) %2) as rhs)
-           (conforms? tol #(la/solve-triangular (la/cholesky (a/take %1 0)) %2 {:transpose? true}) as rhss)))))
+           (conforms? tol #(la/solve-triangular (la/cholesky (array/take %1 0)) %2 {:transpose? true}) as rhss)))))
 
 (defn- non-finite? [v]
   (if (sequential? v) (every? non-finite? v) (not (Double/isFinite (double v)))))
@@ -440,7 +440,7 @@
         (doseq [b [tested reference]]
           (is (non-finite? (:value (run-on b f specs)))))))
     (testing "and later evaluations are unaffected"
-      (is (conforms? exact #(a/+ % 1.0) v)))))
+      (is (conforms? exact #(array/+ % 1.0) v)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Randomness: the same key draws the same uniforms
@@ -451,12 +451,12 @@
                  shape gen-shape]
     (let [key (rng/key seed)]
       (agree? exact
-              (a/with-backend tested (host-result (rng/uniform key shape {:dtype float-dt})))
-              (a/with-backend reference (host-result (rng/uniform key shape {:dtype float-dt})))))))
+              (array/with-backend tested (host-result (rng/uniform key shape {:dtype float-dt})))
+              (array/with-backend reference (host-result (rng/uniform key shape {:dtype float-dt})))))))
 
 (deftest samplers-agree
   (let [key (rng/key 7)
-        draw (fn [b f] (a/with-backend b (host-result (f))))]
+        draw (fn [b f] (array/with-backend b (host-result (f))))]
     (doseq [[label f tol] [["normal" #(rng/normal key [50] {:dtype float-dt}) transcendental]
                            ["split keys" #(rng/uniform (second (rng/split key 3)) [4] {:dtype float-dt}) exact]]]
       (testing label
@@ -470,8 +470,8 @@
   (prop/for-all [shape gen-nonempty-shape
                  seed gen/nat]
     (let [x (gen/generate (gen-spec shape (gen/double* {:NaN? false :infinite? false :min -2.0 :max 2.0}) float-dt) 10 seed)
-          f (fn [x] (a/sum (a/+ (a/* (a/sin x) (a/exp x)) (a/logsumexp x {:axis -1 :keep-dims? true}))))]
-      (conforms? loose #(second ((a/value-and-grad f) %)) x))))
+          f (fn [x] (array/sum (array/+ (array/* (array/sin x) (array/exp x)) (array/logsumexp x {:axis -1 :keep-dims? true}))))]
+      (conforms? loose #(second ((array/value-and-grad f) %)) x))))
 
 ;; ---------------------------------------------------------------------------
 ;; Errors are loud and alike
@@ -481,11 +481,11 @@
   (let [fails-alike (fn [f & specs] (apply conforms? exact f specs))
         v3 {:data [1.0 2.0 3.0] :dtype float-dt}
         v2 {:data [1.0 2.0] :dtype float-dt}]
-    (is (fails-alike a/+ v3 v2) "broadcasting")
-    (is (fails-alike a/matmul v3 v2) "matmul inner dimensions")
-    (is (fails-alike #(a/reshape % [2 2]) v3) "reshape size")
-    (is (fails-alike #(a/concatenate [% (a/reshape %2 [2 1])] 0) v3 v2) "concatenate ranks")
-    (is (fails-alike #(a/take % 5) v3) "a host index out of range")
+    (is (fails-alike array/+ v3 v2) "broadcasting")
+    (is (fails-alike array/matmul v3 v2) "matmul inner dimensions")
+    (is (fails-alike #(array/reshape % [2 2]) v3) "reshape size")
+    (is (fails-alike #(array/concatenate [% (array/reshape %2 [2 1])] 0) v3 v2) "concatenate ranks")
+    (is (fails-alike #(array/take % 5) v3) "a host index out of range")
     (testing "MLX errors become ex-info, and the JVM keeps running"
       (is (thrown? clojure.lang.ExceptionInfo
-                   (a/with-backend tested (a/->clj (la/cholesky (a/array [[1.0 2.0 3.0]] {:dtype float-dt})))))))))
+                   (array/with-backend tested (array/->clj (la/cholesky (array/array [[1.0 2.0 3.0]] {:dtype float-dt})))))))))

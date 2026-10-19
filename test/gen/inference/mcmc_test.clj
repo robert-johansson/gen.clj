@@ -5,7 +5,7 @@
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
             [gen.test-support :as ts]
-            [gen.array :as a :refer [+ - * /]]
+            [gen.array :as array :refer [+ - * /]]
             [gen.array.linalg :as la]
             [gen.choicemap :as cm]
             [gen.dist :as d]
@@ -26,9 +26,9 @@
   "x ~ N(0, 1), y ~ N(x, 1); y = 1.3 gives x | y ~ N(0.65, √½)."
   (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal x 1)))))
 
-(def prior-cov (a/array [[1.0 0.5] [0.5 1.0]]))
-(def noise-cov (a/array [[0.5 0.0] [0.0 0.5]]))
-(def y2 (a/array [1.0 -0.5]))
+(def prior-cov (array/array [[1.0 0.5] [0.5 1.0]]))
+(def noise-cov (array/array [[0.5 0.0] [0.0 0.5]]))
+(def y2 (array/array [1.0 -0.5]))
 
 (def latent (gen [] (trace :z (d/mvnormal [0.0 0.0] prior-cov))))
 
@@ -39,8 +39,8 @@
 (def flat-vector-model
   (gen [] (let [z (trace :z (d/mvnormal [0.0 0.0] prior-cov))] (trace :y (d/mvnormal z noise-cov)))))
 
-(def posterior-cov (la/inv (a/+ (la/inv prior-cov) (la/inv noise-cov))))
-(def posterior-mean (a/matmul posterior-cov (a/matmul (la/inv noise-cov) y2)))
+(def posterior-cov (la/inv (array/+ (la/inv prior-cov) (la/inv noise-cov))))
+(def posterior-mean (array/matmul posterior-cov (array/matmul (la/inv noise-cov) y2)))
 
 (defn- start-at [model choices] (:trace (gfi/generate model [] choices (rng/key 0))))
 
@@ -57,7 +57,7 @@
   (let [n 4000
         [k1 k2] (rng/split (rng/key 21))
         starts (map #(start-at scalar (cm/choicemap :x % :y 1.3))
-                    (a/->clj (a/+ 0.65 (a/* (Math/sqrt 0.5) (rng/normal k1 [n])))))]
+                    (array/->clj (array/+ 0.65 (array/* (Math/sqrt 0.5) (rng/normal k1 [n])))))]
     (matches? (map #((step %1 %2) :x) starts (rng/split k2 n)) 0.65 0.5)))
 
 (defn- scalar-converges? [step]
@@ -70,11 +70,11 @@
    z-of) in both coordinates?"
   [model choices z-of step]
   (let [start (start-at model choices)
-        ends (map (fn [key] (a/->clj (z-of (reduce step start (rng/split key 60))))) (rng/split (rng/key 23) 1000))]
+        ends (map (fn [key] (array/->clj (z-of (reduce step start (rng/split key 60))))) (rng/split (rng/key 23) 1000))]
     (every? true? (for [i [0 1]]
                     (matches? (map #(nth % i) ends)
-                              (a/item (a/take posterior-mean i))
-                              (a/item (a/take (a/take posterior-cov i) i)))))))
+                              (array/item (array/take posterior-mean i))
+                              (array/item (array/take (array/take posterior-cov i) i)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; HMC and MALA
@@ -87,7 +87,7 @@
     (is (scalar-stationary? step))
     (is (scalar-converges? step)))
   (testing "a vector latent behind a splice (a nested address)"
-    (is (vector-converges? vector-model (cm/choicemap [:latent :z] (a/array [2.0 2.0]) :y y2)
+    (is (vector-converges? vector-model (cm/choicemap [:latent :z] (array/array [2.0 2.0]) :y y2)
                            #(% [:latent :z])
                            (fn [tr key] (:trace (mcmc/hmc tr (sel/select [:latent :z]) {:L 5 :eps 0.25} key)))))))
 
@@ -95,7 +95,7 @@
   (let [step (fn [tr key] (:trace (mcmc/mala tr x-sel 0.3 key)))]
     (is (scalar-stationary? step))
     (is (scalar-converges? step)))
-  (is (vector-converges? vector-model (cm/choicemap [:latent :z] (a/array [2.0 2.0]) :y y2)
+  (is (vector-converges? vector-model (cm/choicemap [:latent :z] (array/array [2.0 2.0]) :y y2)
                          #(% [:latent :z])
                          (fn [tr key] (:trace (mcmc/mala tr (sel/select [:latent :z]) 0.15 key))))))
 
@@ -119,27 +119,27 @@
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"selects no choices" (mcmc/map-optimize tr (sel/select :nope)))))
     (testing "mvnormal's shapes are checked"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mu must be a vector" (d/mvnormal 0.0 1.0)))
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"square matrix of its size" (d/mvnormal [0.0 0.0] (a/eye 3)))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"square matrix of its size" (d/mvnormal [0.0 0.0] (array/eye 3)))))
     (testing "elliptical slice takes Clojure vectors, as distributions do"
-      (let [tr (start-at flat-vector-model (cm/choicemap :z (a/array [0.5 0.5]) :y y2))]
-        (is (= [2] (a/shape ((mcmc/elliptical-slice tr :z [0.0 0.0] [[1.0 0.5] [0.5 1.0]] (rng/key 2)) :z))))))
+      (let [tr (start-at flat-vector-model (cm/choicemap :z (array/array [0.5 0.5]) :y y2))]
+        (is (= [2] (array/shape ((mcmc/elliptical-slice tr :z [0.0 0.0] [[1.0 0.5] [0.5 1.0]] (rng/key 2)) :z))))))
     (testing "elliptical slice of a missing address"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no choice at :nope"
-                            (mcmc/elliptical-slice tr :nope (a/array [0.0]) (a/eye 1) (rng/key 1)))))))
+                            (mcmc/elliptical-slice tr :nope (array/array [0.0]) (array/eye 1) (rng/key 1)))))))
 
 (deftest map-optimization-finds-the-mode
   (let [tr (reduce (fn [tr _] (mcmc/map-optimize tr x-sel)) (start-at scalar (cm/choicemap :x -2.0 :y 1.3)) (range 200))]
     (is (< (ts/abs (- (tr :x) 0.65)) 1e-6)))
   (testing "a vector mode behind a splice"
     (let [tr (reduce (fn [tr _] (mcmc/map-optimize tr (sel/select [:latent :z]) {:max-step-size 0.3}))
-                     (start-at vector-model (cm/choicemap [:latent :z] (a/array [2.0 2.0]) :y y2))
+                     (start-at vector-model (cm/choicemap [:latent :z] (array/array [2.0 2.0]) :y y2))
                      (range 300))]
-      (is (a/allclose? (tr [:latent :z]) posterior-mean {:atol 1e-6})))))
+      (is (array/allclose? (tr [:latent :z]) posterior-mean {:atol 1e-6})))))
 
 (deftest ^:slow elliptical-slice-targets-the-posterior
-  (is (vector-converges? flat-vector-model (cm/choicemap :z (a/array [2.0 2.0]) :y y2)
+  (is (vector-converges? flat-vector-model (cm/choicemap :z (array/array [2.0 2.0]) :y y2)
                          #(% :z)
-                         (fn [tr key] (mcmc/elliptical-slice tr :z (a/array [0.0 0.0]) prior-cov key)))))
+                         (fn [tr key] (mcmc/elliptical-slice tr :z (array/array [0.0 0.0]) prior-cov key)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Involutive MH with a Jacobian
@@ -155,10 +155,10 @@
   [tr fwd _ _]
   (let [x (tr :x)
         u (cm/get-choice fwd :u)
-        h (fn [v] (let [x (a/take v 0) u (a/take v 1)] (a/stack [(a/* x (a/exp u)) (a/negate u)])))
-        {t :trace w :weight} (gfi/update tr (cm/choicemap :x (* x (a/exp u))))]
+        h (fn [v] (let [x (array/take v 0) u (array/take v 1)] (array/stack [(array/* x (array/exp u)) (array/negate u)])))
+        {t :trace w :weight} (gfi/update tr (cm/choicemap :x (* x (array/exp u))))]
     {:trace t :bwd-choices (cm/choicemap :u (- u))
-     :weight (a/+ w (grad/log-abs-det-jacobian h (a/stack [x u])))}))
+     :weight (array/+ w (grad/log-abs-det-jacobian h (array/stack [x u])))}))
 
 (deftest ^:slow a-volume-changing-involution-targets-the-posterior
   (let [step (fn [tr key] (:trace (mh/involutive-mh tr log-scale [] scale-move key)))
@@ -167,7 +167,7 @@
     (is (matches? ends 3.0 3.0) "Gamma(3, 1): mean 3, variance 3"))
   (testing "without the Jacobian the chain is biased, so the test can tell"
     (let [wrong (fn [tr fwd r args] (assoc (scale-move tr fwd r args) :weight
-                                           (:weight (gfi/update tr (cm/choicemap :x (* (tr :x) (a/exp (cm/get-choice fwd :u))))))))
+                                           (:weight (gfi/update tr (cm/choicemap :x (* (tr :x) (array/exp (cm/get-choice fwd :u))))))))
           step (fn [tr key] (:trace (mh/involutive-mh tr log-scale [] wrong key)))
           start (start-at positive (cm/choicemap :x 1.0))
           ends (map (fn [key] ((reduce step start (rng/split key 80)) :x)) (rng/split (rng/key 31) 1000))]
@@ -183,7 +183,7 @@
    N(y; 0, √1.5)."
   (gen []
     (let [mean (if (trace :two? (d/bernoulli 0.5))
-                 (a/* 0.5 (a/+ (trace :m1 (d/normal 0 1)) (trace :m2 (d/normal 0 1))))
+                 (array/* 0.5 (array/+ (trace :m1 (d/normal 0 1)) (trace :m2 (d/normal 0 1))))
                  (trace :m (d/normal 0 1)))]
       (trace :y (d/normal mean 1)))))
 
@@ -197,15 +197,15 @@
   [tr fwd _ _]
   (if (tr :two?)
     (let [m1 (tr :m1) m2 (tr :m2)
-          h (fn [v] (let [a (a/take v 0) b (a/take v 1)] (a/stack [(a/* 0.5 (a/+ a b)) (a/* 0.5 (a/- b a))])))
+          h (fn [v] (let [a (array/take v 0) b (array/take v 1)] (array/stack [(array/* 0.5 (array/+ a b)) (array/* 0.5 (array/- b a))])))
           {t :trace w :weight} (gfi/update tr (cm/choicemap :two? false :m (* 0.5 (+ m1 m2))))]
       {:trace t :bwd-choices (cm/choicemap :u (* 0.5 (- m2 m1)))
-       :weight (a/+ w (grad/log-abs-det-jacobian h (a/stack [m1 m2])))})
+       :weight (array/+ w (grad/log-abs-det-jacobian h (array/stack [m1 m2])))})
     (let [m (tr :m) u (cm/get-choice fwd :u)
-          h (fn [v] (let [a (a/take v 0) b (a/take v 1)] (a/stack [(a/- a b) (a/+ a b)])))
+          h (fn [v] (let [a (array/take v 0) b (array/take v 1)] (array/stack [(array/- a b) (array/+ a b)])))
           {t :trace w :weight} (gfi/update tr (cm/choicemap :two? true :m1 (- m u) :m2 (+ m u)))]
       {:trace t :bwd-choices cm/EMPTY
-       :weight (a/+ w (grad/log-abs-det-jacobian h (a/stack [m u])))})))
+       :weight (array/+ w (grad/log-abs-det-jacobian h (array/stack [m u])))})))
 
 (deftest ^:slow a-split-merge-move-targets-the-posterior
   (let [y 1.7
@@ -236,7 +236,7 @@
   ;; plain kernel does
   (let [obs (cm/choicemap :y 1.3)
         branching (gen [] (let [x (trace :x (d/normal 0 1))]
-                            (trace :y (d/normal (if (a/truthy? (a/> x 0)) x (a/negate x)) 1))))]
+                            (trace :y (d/normal (if (array/truthy? (array/> x 0)) x (array/negate x)) 1))))]
     (doseq [[label gf observations selection] [["scalar" scalar obs (sel/select :x)]
                                                ["an array-valued latent in a splice" vector-model (cm/choicemap :y y2)
                                                 (sel/select [:latent :z])]

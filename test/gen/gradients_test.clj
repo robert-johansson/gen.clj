@@ -4,7 +4,7 @@
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
             [gen.test-support :as ts]
-            [gen.array :as a :refer [+ - * /]]
+            [gen.array :as array :refer [+ - * /]]
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
             [gen.dist :as d]
@@ -19,19 +19,19 @@
 
 ;; Finite differences run on the JVM backend in float64 whatever the backend
 ;; under test (a float32 backend's would be noise)
-(def ^:private reference (a/backend-named :jvm))
+(def ^:private reference (array/backend-named :jvm))
 
 (defn- on-reference [v]
-  (if (a/host? v) v (a/with-backend reference (a/array (a/->clj v)))))
+  (if (array/host? v) v (array/with-backend reference (array/array (array/->clj v)))))
 
 (defn- reference-choices [choices]
   (reduce (fn [c p] (cm/set-choice c p (on-reference (cm/get-choice choices p)))) choices (cm/addresses choices)))
 
 (defn- objective [gf args choices retgrad]
-  (a/with-backend reference
+  (array/with-backend reference
     (let [{w :weight rv :retval} (gfi/assess gf args (reference-choices choices))]
-      (+ (double (a/item w))
-         (if retgrad (reduce + (map #(double (a/item (a/sum (a/* %1 %2)))) (a/tree-leaves retgrad) (a/tree-leaves rv))) 0.0)))))
+      (+ (double (array/item w))
+         (if retgrad (reduce + (map #(double (array/item (array/sum (array/* %1 %2)))) (array/tree-leaves retgrad) (array/tree-leaves rv))) 0.0)))))
 
 (defn- grad-close?
   "A gradient (of the backend under test) and a float64 finite difference."
@@ -42,10 +42,10 @@
   "The central difference of the objective in element i of the choice at p."
   [{gf :gen-fn args :args choices :choices} p i retgrad]
   (let [v (on-reference (cm/get-choice choices p))
-        bump (fn [d] (if (a/host? v)
+        bump (fn [d] (if (array/host? v)
                        (+ v d)
-                       (a/with-backend reference
-                         (a/reshape (a/array (update (vec (flatten (vector (a/->clj v)))) i + d)) (a/shape v)))))
+                       (array/with-backend reference
+                         (array/reshape (array/array (update (vec (flatten (vector (array/->clj v)))) i + d)) (array/shape v)))))
         at (fn [d] (objective gf args (cm/set-choice choices p (bump d)) retgrad))]
     (/ (- (at h) (at (- h))) (* 2 h))))
 
@@ -54,8 +54,8 @@
     (every? true?
             (for [p (cm/addresses values)
                   :let [gv (cm/get-choice gradients p)]
-                  i (range (a/size gv))]
-              (grad-close? (a/item (if (a/host? gv) gv (a/take (a/flatten gv) i)))
+                  i (range (array/size gv))]
+              (grad-close? (array/item (if (array/host? gv) gv (array/take (array/flatten gv) i)))
                            (fd-choice tr p i retgrad))))))
 
 (def linreg
@@ -63,7 +63,7 @@
     (let [slope (trace :slope (d/normal 0 10))
           intercept (trace :intercept (d/normal 0 10))]
       (doseq [[i x] (map-indexed vector xs)]
-        (trace [:y i] (d/normal (a/+ (a/* slope x) intercept) 1)))
+        (trace [:y i] (d/normal (array/+ (array/* slope x) intercept) 1)))
       slope)))
 
 (def observation (gen [mu] (trace :x (d/normal mu 1))))
@@ -75,11 +75,11 @@
 
 (def step
   (gen [t state]
-    (let [s (trace :s (d/normal (a/* 0.8 state) 1))]
+    (let [s (trace :s (d/normal (array/* 0.8 state) 1))]
       (trace :obs (d/normal s 0.5))
       s)))
 
-(def mv (gen [] (let [z (trace :z (d/mvnormal [0.0 1.0] [[2.0 0.3] [0.3 1.0]]))] (trace :y (d/normal (a/sum z) 1)))))
+(def mv (gen [] (let [z (trace :z (d/mvnormal [0.0 1.0] [[2.0 0.3] [0.3 1.0]]))] (trace :y (d/normal (array/sum z) 1)))))
 
 (defn- sim [gf args seed] (gfi/simulate gf args (rng/key seed)))
 
@@ -105,7 +105,7 @@
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not a tree of floats"
                         (g/choice-gradients (sim hierarchical [2] 9) (sel/select :mu) nil {:argnums [0]})))
   (testing "host math on an argument is fine when it is not differentiated"
-    (let [m (gen [n] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (a/* x (clojure.core/* 2.0 n)) 1))))
+    (let [m (gen [n] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (array/* x (clojure.core/* 2.0 n)) 1))))
           tr (sim m [1.5] 10)]
       (is (map? (g/choice-gradients tr (sel/select :x)))))))
 
@@ -114,11 +114,11 @@
                         (g/choice-gradients (sim (gen [] (trace :b (d/bernoulli 0.5))) [] 1) (sel/select :b)))))
 
 (deftest the-jacobian-log-determinant
-  (is (< (ts/abs (- (g/log-abs-det-jacobian #(a/* % (a/array [2.0 3.0])) (a/array [1.0 1.0])) (Math/log 6.0))) (ts/tol 1e-12)))
+  (is (< (ts/abs (- (g/log-abs-det-jacobian #(array/* % (array/array [2.0 3.0])) (array/array [1.0 1.0])) (Math/log 6.0))) (ts/tol 1e-12)))
   (testing "a nonlinear map: (x, u) ↦ (x·e^u, -u) has |det J| = e^u"
-    (is (< (ts/abs (- (g/log-abs-det-jacobian (fn [v] (let [x (a/take v 0) u (a/take v 1)]
-                                                          (a/stack [(a/* x (a/exp u)) (a/negate u)])))
-                                                (a/array [1.5 0.3]))
+    (is (< (ts/abs (- (g/log-abs-det-jacobian (fn [v] (let [x (array/take v 0) u (array/take v 1)]
+                                                          (array/stack [(array/* x (array/exp u)) (array/negate u)])))
+                                                (array/array [1.5 0.3]))
                         0.3))
            (ts/tol 1e-12)))))
 
@@ -130,7 +130,7 @@
   "y_i ~ N(w·x_i + b, 1), with trainable w and b."
   (gen [xs]
     (doseq [[i x] (map-indexed vector xs)]
-      (trace [:y i] (d/normal (a/+ (a/* (param :w) x) (param :b)) 1)))))
+      (trace [:y i] (d/normal (array/+ (array/* (param :w) x) (param :b)) 1)))))
 
 (def xs [-1.0 0.0 1.0 2.0])
 (def ys [-1.1 0.9 3.2 4.8])

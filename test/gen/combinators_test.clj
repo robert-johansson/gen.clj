@@ -8,7 +8,7 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [gen.array :as a :refer [+ - * /]]
+            [gen.array :as array :refer [+ - * /]]
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
             [gen.diff :as diff]
@@ -34,7 +34,7 @@
 (def step
   "A random walk with drift and a noisy observation."
   (gen [t state drift]
-    (let [s (trace :s (d/normal (a/+ state drift) 1))]
+    (let [s (trace :s (d/normal (array/+ state drift) 1))]
       (trace :obs (d/normal s 0.5))
       s)))
 
@@ -82,7 +82,7 @@
         (is (identical? ((subtraces tr) 0) ((subtraces t2) 0)))
         (is (identical? ((subtraces tr) 2) ((subtraces t2) 2)))
         (is (= (tr [1 :z]) (t2 [1 :z])) "the choice is kept, and rescored")
-        (is (close? w (a/- (:score t2) (:score tr))))
+        (is (close? w (array/- (:score t2) (:score tr))))
         (is (close? (:score t2) (:weight (gfi/assess mapped [[1.0 5.0 3.0]] (:choices t2)))))
         (is (diff/no-change? rd) "the return values did not change")))
     (testing "shrinking discards the removed elements"
@@ -90,7 +90,7 @@
             (gfi/update tr [[1.0]] [diff/unknown-change] cm/EMPTY (rng/key 3))]
         (is (= [[0 :z]] (filter #(= :z (peek %)) (cm/addresses (:choices t2)))))
         (is (= (cm/get-submap (:choices tr) 1) (cm/get-submap disc 1)))
-        (is (close? w (a/- (:score t2) (:score tr))))
+        (is (close? w (array/- (:score t2) (:score tr))))
         (is (= (diff/vector-diff 1 3 {}) rd))))
     (testing "growing generates new elements, constrained where asked"
       (let [{t2 :trace w :weight} (gfi/update tr [[1.0 2.0 3.0 4.0]] [diff/unknown-change]
@@ -119,26 +119,26 @@
         (is (identical? ((subtraces tr) 0) ((subtraces t2) 0)) "earlier steps are untouched")
         (is (= (tr [4 :s]) (t2 [4 :s])))
         (is (= (cm/choicemap [1 :s] (tr [1 :s])) disc))
-        (is (close? w (a/- (:score t2) (:score tr))))
+        (is (close? w (array/- (:score t2) (:score tr))))
         (is (close? (:score t2) (:weight (gfi/assess unfolded [5 0.0 0.1] (:choices t2)))))
         (is (= #{1} (set (keys (:updated rd)))) "only the changed state is reported")))
     (testing "a parameter change revisits every step"
       (let [{t2 :trace w :weight} (gfi/update tr [5 0.0 0.7] [diff/no-change diff/no-change diff/unknown-change]
                                               cm/EMPTY (rng/key 4))]
         (is (not-any? true? (map identical? (subtraces tr) (subtraces t2))))
-        (is (close? w (a/- (:score t2) (:score tr))))))
+        (is (close? w (array/- (:score t2) (:score tr))))))
     (testing "regenerating one step resamples it and re-scores the rest"
       (let [{t2 :trace w :weight} (gfi/regenerate tr (sel/select [2 :s]) (rng/key 5))
             later (sel/select [2 :obs] [3 :s] [3 :obs] [4 :s] [4 :obs])]
         (is (not= (tr [2 :s]) (t2 [2 :s])))
         (is (= (tr [3 :s]) (t2 [3 :s])))
-        (is (close? w (a/- (gfi/project t2 later) (gfi/project tr later))))))
+        (is (close? w (array/- (gfi/project t2 later) (gfi/project tr later))))))
     (testing "shrinking"
       (let [{t2 :trace w :weight disc :discard} (gfi/update tr [2 0.0 0.1] [diff/unknown-change diff/no-change diff/no-change]
                                                             cm/EMPTY (rng/key 6))]
         (is (= 2 (count (:retval t2))))
         (is (= #{2 3 4} (set (map first (cm/addresses disc)))))
-        (is (close? w (a/- (:score t2) (:score tr))))))))
+        (is (close? w (array/- (:score t2) (:score tr))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Precise change hints give the same results as unknown-change (law 8)
@@ -165,7 +165,7 @@
    choices). Removed elements' scores leave with the old score."
   [tr {t2 :trace w :weight} n n']
   (let [fresh (gfi/project t2 (apply sel/select (range n n')))]
-    (close? w (a/- (a/- (:score t2) (:score tr)) fresh))))
+    (close? w (array/- (array/- (:score t2) (:score tr)) fresh))))
 
 (defn- same-result? [r1 r2]
   (and (= (:choices (:trace r1)) (:choices (:trace r2)))
@@ -221,17 +221,17 @@
             (gfi/update tr [1 0.5] [diff/unknown-change diff/no-change] (cm/choicemap :b 1.5) (rng/key 2))]
         (is (= 1.5 (t2 :b)))
         (is (= (:choices tr) disc))
-        (is (close? w (a/- (a/- (:score t2) (:score tr)) (gfi/project t2 (sel/select :c)))))
+        (is (close? w (array/- (array/- (:score t2) (:score tr)) (gfi/project t2 (sel/select :c)))))
         (testing "and updating back with the discard restores the trace"
           (let [{t3 :trace w3 :weight} (gfi/update t2 [0 0.5] [diff/unknown-change diff/no-change] disc (rng/key 3))]
             (is (= (:choices tr) (:choices t3)))
-            (is (close? w3 (a/- (:score tr) (:score t2))))))))
+            (is (close? w3 (array/- (:score tr) (:score t2))))))))
     (testing "regenerating into a new branch has weight zero"
       (is (zero? (ts/number (:weight (gfi/regenerate tr [1 0.5] [diff/unknown-change diff/no-change] sel/none (rng/key 4)))))))
     (testing "the same branch with a new argument re-scores"
       (let [{t2 :trace w :weight} (gfi/update tr [0 2.0] [diff/no-change diff/unknown-change] cm/EMPTY (rng/key 5))]
         (is (= (tr :a) (t2 :a)))
-        (is (close? w (a/- (:score t2) (:score tr))))))
+        (is (close? w (array/- (:score t2) (:score tr))))))
     (is (= [[:b] [:c]] (cm/addresses (:choices (gfi/simulate keyed [:b 0.0] (rng/key 6))))))))
 
 (deftest errors-are-loud
@@ -255,7 +255,7 @@
         {t2 :trace w :weight} (gfi/update tr [2.0] [diff/unknown-change] cm/EMPTY (rng/key 2))
         {t3 :trace w3 :weight} (gfi/regenerate tr [2.0] [diff/unknown-change] sel/none (rng/key 3))]
     (is (= (tr :x) (t2 :x) (t3 :x)))
-    (is (close? w (a/- (:score t2) (:score tr))))
+    (is (close? w (array/- (:score t2) (:score tr))))
     (is (close? w3 w))
     (is (not (zero? (ts/number w))))))
 
@@ -281,7 +281,7 @@
   ;; third review B2: a Switch of two Maps (or two distributions) regenerated
   ;; at its index alone resampled every unselected choice, with weight 0
   (let [ys (gen [mu] (trace :y (d/normal mu 1)))
-        sw (comb/switch (comb/map ys) (comb/map (gen [mu] (trace :y (d/normal (a/+ mu 1.0) 1)))))
+        sw (comb/switch (comb/map ys) (comb/map (gen [mu] (trace :y (d/normal (array/+ mu 1.0) 1)))))
         m (gen [] (splice :s sw (trace :i (d/categorical [0.5 0.5])) [0.0 0.0 0.0]))
         obs (cm/choicemap :i 0 [:s 0 :y] 1.5 [:s 1 :y] 1.7 [:s 2 :y] 2.2)
         tr (:trace (gfi/generate m [] obs (rng/key 1)))

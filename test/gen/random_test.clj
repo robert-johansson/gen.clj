@@ -8,7 +8,7 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
-            [gen.array :as a]
+            [gen.array :as array]
             [gen.random :as rng]
             [gen.random.threefry :as threefry]))
 
@@ -39,7 +39,7 @@
   (let [{:keys [key n out]} (:bits64 fixtures)]
     (is (= (mapv #(unchecked-long (biginteger %)) out) (vec (threefry/bits64 (->key key) n)))))
   (let [{:keys [key out]} (:uniform-f32 fixtures)]
-    (is (= out (a/->clj (rng/uniform (->key key) [6] {:dtype :float32})))))
+    (is (= out (array/->clj (rng/uniform (->key key) [6] {:dtype :float32})))))
   (when (ts/float64?)
     (testing "float64 draws (bit-identical uniforms; the rest to rounding)"
       (doseq [[k f tolerance] [[:uniform-f64 rng/uniform 0.0]
@@ -47,8 +47,8 @@
                                [:gumbel-f64 rng/gumbel 1e-15]
                                [:normal-f64 rng/normal 1e-15]]]
         (let [{:keys [key out]} (fixtures k)]
-          (is (a/allclose? (a/array out {:dtype :float64}) (f (->key key) [6] {:dtype :float64})
-                           {:rtol tolerance :atol tolerance})
+          (is (array/allclose? (array/array out {:dtype :float64}) (f (->key key) [6] {:dtype :float64})
+                               {:rtol tolerance :atol tolerance})
               (name k)))))))
 
 (deftest keys-are-values
@@ -60,11 +60,11 @@
 (deftest draws-are-pure-functions-of-the-key
   (let [k (rng/key 11)]
     (is (= (rng/normal k) (rng/normal k)))
-    (is (a/equal? (rng/normal k [5]) (rng/normal k [5])))
+    (is (array/equal? (rng/normal k [5]) (rng/normal k [5])))
     (let [[k1 k2] (rng/split k)]
       (is (not= (rng/normal k1) (rng/normal k2))))
     (when (ts/jvm?) (is (instance? Double (rng/normal k)) "a 0-d draw is a host number on the JVM backend"))
-    (is (= (ts/host (rng/uniform k)) (a/item (rng/uniform k [1]))) "element 0 does not depend on the shape")))
+    (is (= (ts/host (rng/uniform k)) (array/item (rng/uniform k [1]))) "element 0 does not depend on the shape")))
 
 (defspec fold-in-is-split-at-an-index 100
   (prop/for-all [seed gen/nat i (gen/choose 0 50)]
@@ -80,38 +80,38 @@
   (let [k (rng/key 2026) n 200000]
     (testing "normal"
       (let [x (rng/normal k [n])]
-        (is (close? (a/mean x) 0.0 0.012))
-        (is (close? (a/variance x) 1.0 0.016))))
+        (is (close? (array/mean x) 0.0 0.012))
+        (is (close? (array/variance x) 1.0 0.016))))
     (testing "exponential: mean 1, variance 1"
       (let [x (rng/exponential k [n])]
-        (is (close? (a/mean x) 1.0 0.012))
-        (is (close? (a/variance x) 1.0 0.04))))
+        (is (close? (array/mean x) 1.0 0.012))
+        (is (close? (array/variance x) 1.0 0.04))))
     (testing "gumbel: mean γ, variance π²/6"
       (let [x (rng/gumbel k [n])]
-        (is (close? (a/mean x) 0.5772156649 0.015))
-        (is (close? (a/variance x) (/ (* Math/PI Math/PI) 6) 0.05))))
+        (is (close? (array/mean x) 0.5772156649 0.015))
+        (is (close? (array/variance x) (/ (* Math/PI Math/PI) 6) 0.05))))
     (testing "bernoulli and its bool dtype"
       (let [x (rng/bernoulli k 0.3 [n])]
-        (is (= :bool (a/dtype x)))
-        (is (close? (a/mean x) 0.3 0.006))))
+        (is (= :bool (array/dtype x)))
+        (is (close? (array/mean x) 0.3 0.006))))
     (testing "categorical frequencies"
-      (let [x (rng/categorical k (a/log (a/array [0.2 0.5 0.3])) [n])
-            freqs (a/->clj (a/mean (a/== (a/expand-dims x -1) (a/arange 3)) {:axis 0}))]
+      (let [x (rng/categorical k (array/log (array/array [0.2 0.5 0.3])) [n])
+            freqs (array/->clj (array/mean (array/== (array/expand-dims x -1) (array/arange 3)) {:axis 0}))]
         (is (every? true? (map #(close? %1 %2 0.006) freqs [0.2 0.5 0.3])))))
     (testing "categorical with batched logits draws per row"
-      (let [logits (a/log (a/array [[0.999 0.001] [0.001 0.999]]))
+      (let [logits (array/log (array/array [[0.999 0.001] [0.001 0.999]]))
             x (rng/categorical k logits)]
-        (is (= [2] (a/shape x)))
-        (is (= [0 1] (a/->clj x)))))
+        (is (= [2] (array/shape x)))
+        (is (= [0 1] (array/->clj x)))))
     (testing "gamma: mean α, variance α (with the α < 1 boost)"
       (doseq [alpha [0.3 1.0 2.5 9.0]]
-        (let [x (rng/gamma k (a/full [n] alpha))]
-          (is (close? (a/mean x) alpha (* 5 (Math/sqrt (/ alpha n)))) (str "mean, alpha " alpha))
-          (is (close? (a/variance x) alpha (* 0.05 alpha 4)) (str "variance, alpha " alpha))
-          (is (pos? (ts/number (a/min x))) (str "positive, alpha " alpha)))))
+        (let [x (rng/gamma k (array/full [n] alpha))]
+          (is (close? (array/mean x) alpha (* 5 (Math/sqrt (/ alpha n)))) (str "mean, alpha " alpha))
+          (is (close? (array/variance x) alpha (* 0.05 alpha 4)) (str "variance, alpha " alpha))
+          (is (pos? (ts/number (array/min x))) (str "positive, alpha " alpha)))))
     (testing "randint covers [low, high) uniformly"
       (let [x (rng/randint k 2 5 [n])]
-        (is (= (ts/int-dtype) (a/dtype x)))
-        (is (= 2 (ts/host (a/min x))))
-        (is (= 4 (ts/host (a/max x))))
-        (is (close? (a/mean x) 3.0 0.01))))))
+        (is (= (ts/int-dtype) (array/dtype x)))
+        (is (= 2 (ts/host (array/min x))))
+        (is (= 4 (ts/host (array/max x))))
+        (is (close? (array/mean x) 3.0 0.01))))))

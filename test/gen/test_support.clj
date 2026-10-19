@@ -9,17 +9,17 @@
    - jvm?, float-dtype, int-dtype: for the few checks that are about one
      backend's representation."
   (:refer-clojure :exclude [abs])
-  (:require [gen.array :as a]
+  (:require [gen.array :as array]
             [gen.array.protocols :as p]
             [gen.choicemap :as cm]))
 
-(defn backend-name [] (p/-name a/*backend*))
+(defn backend-name [] (p/-name array/*backend*))
 
 (defn jvm? [] (= :jvm (backend-name)))
 
-(defn float-dtype [] (:float (p/-defaults a/*backend*)))
+(defn float-dtype [] (:float (p/-defaults array/*backend*)))
 
-(defn int-dtype [] (:int (p/-defaults a/*backend*)))
+(defn int-dtype [] (:int (p/-defaults array/*backend*)))
 
 (defn f32? [] (= :float32 (float-dtype)))
 
@@ -32,19 +32,19 @@
 (defn flushes-subnormals?
   "Does the backend flush float32 subnormals to zero (Metal does)?"
   []
-  (and (not (jvm?)) (= :gpu ((requiring-resolve 'gen.backend.mlx/device) a/*backend*))))
+  (and (not (jvm?)) (= :gpu ((requiring-resolve 'gen.backend.mlx/device) array/*backend*))))
 
 (defn float64?
   "Does the backend have float64 (MLX's GPUs do not)?"
   []
-  (or (jvm?) (not= :gpu ((requiring-resolve 'gen.backend.mlx/device) a/*backend*))))
+  (or (jvm?) (not= :gpu ((requiring-resolve 'gen.backend.mlx/device) array/*backend*))))
 
 (defn host
   "x with every backend array in it (nested maps, vectors and seqs, and
    choice maps, as maps) read on the host: numbers, booleans and nested
    vectors."
   [x]
-  (cond (instance? gen.array.protocols.IArray x) (a/->clj x)
+  (cond (instance? gen.array.protocols.IArray x) (array/->clj x)
         (cm/choicemap? x) (host (cm/to-map x))
         (map? x) (if (record? x) x (into (empty x) (map (fn [[k v]] [k (host v)])) x))
         (vector? x) (mapv host x)
@@ -65,13 +65,13 @@
 
 (defn close?
   "x and y elementwise within the backend's tolerance (or rtol/atol given)."
-  ([x y] (a/allclose? x y (tolerance)))
-  ([x y tol] (a/allclose? x y (merge (tolerance) tol))))
+  ([x y] (array/allclose? x y (tolerance)))
+  ([x y tol] (array/allclose? x y (merge (tolerance) tol))))
 
 (defn number
   "The host double of a 0-d (or one-element) array or number."
   ^double [x]
-  (double (a/item x)))
+  (double (array/item x)))
 
 (defn abs
   "|x| of a 0-d array or number, as a host double."

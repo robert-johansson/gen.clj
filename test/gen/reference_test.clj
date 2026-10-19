@@ -7,11 +7,11 @@
    discrete ones sum to 1."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.test-support :as ts]
-            [gen.array :as a]
+            [gen.array :as array]
             [gen.dist :as d]
             [gen.dist.core :as dc]))
 
-(defn- lp [dist v] (double (a/item (dc/log-prob dist (if (vector? v) (a/array v) v)))))
+(defn- lp [dist v] (double (array/item (dc/log-prob dist (if (vector? v) (array/array v) v)))))
 
 (defn- close? [expected actual]
   (or (= expected actual)
@@ -96,7 +96,7 @@
 (deftest reference-log-densities
   (doseq [[label dist v expected] reference]
     (let [v (if (and (vector? v) (some boolean? v)) (vec v) v)
-          got (if (= ::d/product (:type dist)) (double (a/item (dc/log-prob dist v))) (lp dist v))]
+          got (if (= ::d/product (:type dist)) (double (array/item (dc/log-prob dist v))) (lp dist v))]
       (is (close? expected got) (str label ": expected " expected ", got " got)))))
 
 (deftest symmetries-and-identities

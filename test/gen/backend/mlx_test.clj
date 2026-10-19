@@ -3,7 +3,7 @@
    errors, closures, threads and memory. Skipped (with a note) where the
    native library or the compiled binding is missing."
   (:require [clojure.test :refer [deftest is testing]]
-            [gen.array :as a]))
+            [gen.array :as array]))
 
 (def available?
   (delay
@@ -70,10 +70,10 @@
     (testing "through the backend, as ex-info naming the op"
       (let [b (mlx)]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"do not broadcast"
-                              (a/with-backend b (a/+ (a/array [1.0 2.0]) (a/array [1.0 2.0 3.0])))))
+                              (array/with-backend b (array/+ (array/array [1.0 2.0]) (array/array [1.0 2.0 3.0])))))
         (when (= :gpu ((requiring-resolve 'gen.backend.mlx/device) b))
           (is (thrown? clojure.lang.ExceptionInfo
-                       (a/with-backend b (a/->clj (a/array [1.0] {:dtype :float64}))))
+                       (array/with-backend b (array/->clj (array/array [1.0] {:dtype :float64}))))
               "float64 on the GPU"))))))
 
 ;; ---------------------------------------------------------------------------
@@ -127,13 +127,13 @@
 (deftest arrays-cross-threads
   (when-mlx
     (let [b (mlx)
-          x (a/with-backend b (a/+ (a/array [1.0 2.0]) 1.0))]
+          x (array/with-backend b (array/+ (array/array [1.0 2.0]) 1.0))]
       (testing "an array made on one thread is evaluated on another"
-        (is (= [2.0 3.0] @(future (a/->clj x)))))
+        (is (= [2.0 3.0] @(future (array/->clj x)))))
       (testing "concurrent evaluation"
         (is (= (repeat 8 6.0)
                (map deref (doall (for [_ (range 8)]
-                                   (future (a/item (a/with-backend b (a/sum (a/* (a/array [1.0 2.0 3.0]) 1.0))))))))))))))
+                                   (future (array/item (array/with-backend b (array/sum (array/* (array/array [1.0 2.0 3.0]) 1.0))))))))))))))
 
 (deftest unreachable-arrays-are-freed
   (when-mlx
@@ -143,7 +143,7 @@
           base (live)]
       ;; 200 evaluated [100000] float32 arrays: 80 MB if none were freed
       (dotimes [_ 200]
-        (a/eval! (a/with-backend b (a/+ (a/zeros [100000]) 1.0))))
+        (array/eval! (array/with-backend b (array/+ (array/zeros [100000]) 1.0))))
       (is (< (- (live) base) 8e6) "unreachable arrays are freed"))))
 
 (deftest array-pressure-collects
@@ -154,7 +154,7 @@
       ;; collection threshold, and close to Metal's buffer limit if none
       ;; were freed
       (dotimes [_ 300000]
-        (a/with-backend b (a/+ (a/array 1.0) 1.0)))
+        (array/with-backend b (array/+ (array/array 1.0) 1.0)))
       (let [[live collections] (vec (gen.mlx.MlxRuntime/lifetimeStats))]
         (is (< live 250000) "live arrays stay below the threshold's reach")
         (is (> collections collections0) "pressure collected")))))
@@ -163,15 +163,15 @@
   (when-mlx
     (let [b (mlx)
           traces (atom 0)
-          f (a/compile (fn [x] (swap! traces inc) (a/sum (a/exp x))))]
-      (a/with-backend b
-        (let [x (a/array [0.0 1.0 2.0])]
-          (dotimes [_ 5] (a/->clj (f x)))
+          f (array/compile (fn [x] (swap! traces inc) (array/sum (array/exp x))))]
+      (array/with-backend b
+        (let [x (array/array [0.0 1.0 2.0])]
+          (dotimes [_ 5] (array/->clj (f x)))
           (is (= 1 @traces) "traced on the first call, replayed after")
-          (f (a/array [1.0 2.0]))
+          (f (array/array [1.0 2.0]))
           (is (= 2 @traces) "a new shape traces again")
           (is (thrown-with-msg? clojure.lang.ExceptionInfo #"reads an array's value on the host"
-                                ((a/compile (fn [x] (if (a/truthy? (a/> (a/sum x) 0)) x (a/negate x)))) x))
+                                ((array/compile (fn [x] (if (array/truthy? (array/> (array/sum x) 0)) x (array/negate x)))) x))
               "a host read inside is loud"))))))
 
 ;; held until the JVM exits, as gen.inference.mcmc's compiled steps are: a
@@ -190,10 +190,10 @@
     (when (= "native" (System/getProperty "gen.mlx.grad"))
       (let [b ((requiring-resolve 'gen.backend.mlx/make-backend) {:device :cpu :dtypes 64})
             solve @(requiring-resolve 'gen.array.linalg/solve)]
-        (a/with-backend b
-          (let [m (a/array [[2.0 0.5] [0.5 1.0]])
-                f (a/compile (fn [x] ((a/grad (fn [y] (a/+ (a/sum (a/erf y)) (a/sum (solve m y))))) x)))
-                g (a/->clj (f (a/array [0.1 0.5])))
+        (array/with-backend b
+          (let [m (array/array [[2.0 0.5] [0.5 1.0]])
+                f (array/compile (fn [x] ((array/grad (fn [y] (array/+ (array/sum (array/erf y)) (array/sum (solve m y))))) x)))
+                g (array/->clj (f (array/array [0.1 0.5])))
                 _ (reset! compiled-at-exit f)
                 ;; d/dy: 2/√π e^(-y²) plus the row sums of m⁻ᵀ
                 minv-t-sums [(/ (- 1.0 0.5) 1.75) (/ (- 2.0 0.5) 1.75)]]

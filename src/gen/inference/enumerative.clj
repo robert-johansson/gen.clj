@@ -38,7 +38,7 @@
 
    Keys are an optional last argument (or :key in an options map)."
   (:refer-clojure :exclude [-])
-  (:require [gen.array :as a :refer [-]]
+  (:require [gen.array :as array :refer [-]]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.dist.core :as dc]
@@ -88,7 +88,7 @@
                     (do (when-not (= dims (count vals))
                           (throw (ex-info (str "choice-vol-grid: " dims " dimensions need " dims " endpoint vectors")
                                           {:spec spec})))
-                        (mapv (fn [corner] [(a/array (mapv first corner)) (reduce + (map second corner))])
+                        (mapv (fn [corner] [(array/array (mapv first corner)) (reduce + (map second corner))])
                               (product (mapv #(intervals % anchor) vals)))))
       (throw (ex-info "choice-vol-grid: the support must be :discrete or :continuous" {:spec spec})))))
 
@@ -145,7 +145,7 @@
                                              {:path p})))
                            (let [{:keys [trace weight]} (gfi/generate model args (cm/merge observations choices) k)]
                              (gfi/eval-trace! trace weight)
-                             [trace (+ (double (a/item weight)) (double log-volume))]))
+                             [trace (+ (double (array/item weight)) (double log-volume))]))
                          points (rng/split (or key (gfi/next-key)) (count points)))
            {:keys [log-total log-weights]} (w/normalize (mapv second results))]
        {:traces (mapv first results) :log-normalized-weights log-weights :log-ml-estimate log-total}))))
@@ -155,7 +155,7 @@
    enumerative-inference result (or any {:traces :log-normalized-weights}):
    a map from the value (on the host) to its probability."
   [{:keys [traces log-normalized-weights]} addr]
-  (reduce (fn [m [tr lw]] (update m (a/->clj (cm/get-choice (:choices tr) addr)) (fnil + 0.0) (Math/exp lw)))
+  (reduce (fn [m [tr lw]] (update m (array/->clj (cm/get-choice (:choices tr) addr)) (fnil + 0.0) (Math/exp lw)))
           {} (map vector traces log-normalized-weights)))
 
 ;; ---------------------------------------------------------------------------
@@ -232,14 +232,14 @@
                          (throw (structure-error nil)))
                        [(:score tr) (gfi/project tr unconstrained) (:retval tr)]))
                    cs)]
-    {:assignments cs :s (a/stack (mapv first runs)) :r (a/stack (mapv second runs))
+    {:assignments cs :s (array/stack (mapv first runs)) :r (array/stack (mapv second runs))
      :retvals (mapv #(nth % 2) runs)}))
 
 (defn- check-retval!
   "Throw unless the return value is the same under every assignment with
    positive probability (an opt-in check: it reads values on the host)."
   [cs s retvals]
-  (let [possible (keep-indexed (fn [i ok] (when ok i)) (a/->clj (a/isfinite s)))]
+  (let [possible (keep-indexed (fn [i ok] (when ok i)) (array/->clj (array/isfinite s)))]
     (when-let [i (some #(when (not= (retvals (first possible)) (retvals %)) %) (rest possible))]
       (throw (ex-info (str "with-exact-proposal: the return value depends on the enumerated choices ("
                            (pr-str (cs (first possible))) " and " (pr-str (cs i)) " give different ones)."
@@ -273,10 +273,10 @@
         {cs :assignments s :s r :r rvs :retvals} (enumerated g args sigma others free seen limit)
         _ (when check-retval? (check-retval! cs s rvs))
         idx (rng/categorical k-pick s)
-        chosen (reduce (fn [m p] (cm/set-choice m p (a/take (a/array (mapv #(get % p) cs)) idx)))
+        chosen (reduce (fn [m p] (cm/set-choice m p (array/take (array/array (mapv #(get % p) cs)) idx)))
                        (cm/merge sigma others) free)
         tr (:trace (gfi/generate gf args chosen k-final))]
-    {:trace (assoc tr :gen-fn egf) :weight (- (a/logsumexp s) (a/logsumexp r))}))
+    {:trace (assoc tr :gen-fn egf) :weight (- (array/logsumexp s) (array/logsumexp r))}))
 
 (defn- exact-weight
   "The weight exact-generate gives for producing the trace tr of gf on args
@@ -289,7 +289,7 @@
         free (free-paths paths sigma)
         _ (check-visited! free seen (:choices tr))
         {s :s r :r} (enumerated g args sigma (others-of (:choices tr) sigma free) free seen limit)]
-    (- (a/logsumexp s) (a/logsumexp r))))
+    (- (array/logsumexp s) (array/logsumexp r))))
 
 (defn- same-addresses? [x y] (= (set (cm/addresses x)) (set (cm/addresses y))))
 

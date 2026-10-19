@@ -34,7 +34,7 @@
                             every? some not-any? not-every? filter filterv remove take-while drop-while
                             split-with complement every-pred some-fn
                             get contains? find get-in])
-  (:require [gen.array :as a]
+  (:require [gen.array :as array]
             [gen.array.batch :as batch]
             [gen.array.dtype :as dt]
             [gen.array.protocols :as p]))
@@ -49,7 +49,7 @@
 (defn- batched? [x] (clojure.core/instance? gen.array.protocols.IBatchedValue x))
 
 (defn- branch-error [what]
-  (a/batched-branch (str what " of a batched value: it differs across particles") {}))
+  (array/batched-branch (str what " of a batched value: it differs across particles") {}))
 
 (defn- unbatched
   "x, or the batched-branch error when it is batched."
@@ -60,7 +60,7 @@
   "Is x a 0-d backend array (not a host scalar, not a batch)?"
   [x]
   (and (clojure.core/instance? gen.array.protocols.IArray x) (clojure.core/not (batched? x))
-       (clojure.core/= [] (a/shape x))))
+       (clojure.core/= [] (array/shape x))))
 
 (defn ^:no-doc host-value
   "x as Clojure code branching, comparing or looking up on it sees it: a 0-d
@@ -68,7 +68,7 @@
    differs across particles), anything else itself."
   [what x]
   (cond (batched? x) (throw (branch-error what))
-        (scalar-array? x) (a/item x)
+        (scalar-array? x) (array/item x)
         :else x))
 
 (defn- tested
@@ -78,7 +78,7 @@
   [v]
   (cond (clojure.core/instance? Boolean v) v
         (nil? v) v
-        (a/truthy? v) v
+        (array/truthy? v) v
         :else false))
 
 (defn- guard-pred
@@ -92,9 +92,9 @@
 ;; Truthiness
 ;; ---------------------------------------------------------------------------
 
-(defguard not clojure.core/not [x] (clojure.core/not (a/truthy? x)))
+(defguard not clojure.core/not [x] (clojure.core/not (array/truthy? x)))
 
-(defguard boolean clojure.core/boolean [x] (a/truthy? x))
+(defguard boolean clojure.core/boolean [x] (array/truthy? x))
 
 (defguard true? clojure.core/true? [x] (clojure.core/true? (host-value "true?" x)))
 
@@ -130,11 +130,11 @@
    JVM backend."
   [x]
   (cond (batched? x)
-        (let [dtype (a/dtype x)]
-          (if (clojure.core/= [] (a/shape x))
+        (let [dtype (array/dtype x)]
+          (if (clojure.core/= [] (array/shape x))
             (host-prototype dtype)
             (p/-full (p/-inner (p/-backend x)) [1] (if (clojure.core/= :bool (dt/kind dtype)) false 0) dtype)))
-        (scalar-array? x) (host-prototype (a/dtype x))
+        (scalar-array? x) (host-prototype (array/dtype x))
         :else x))
 
 (defmacro ^:private def-representation-tests [& fnames]
@@ -150,15 +150,15 @@
 
 (defguard satisfies? clojure.core/satisfies? [protocol x] (clojure.core/satisfies? protocol (particle x)))
 
-(defguard host? gen.array/host? [x] (a/host? (particle x)))
+(defguard host? gen.array/host? [x] (array/host? (particle x)))
 
-(defguard array? gen.array/array? [x] (a/array? (particle x)))
+(defguard array? gen.array/array? [x] (array/array? (particle x)))
 
 (defn- int-sign-test [what core-pred x]
   (if (batched? x)
     ;; an integer particle's sign differs across particles
-    (if (clojure.core/= :int (dt/kind (a/dtype x)))
-      (if (clojure.core/= [] (a/shape x)) (throw (branch-error what)) false)
+    (if (clojure.core/= :int (dt/kind (array/dtype x)))
+      (if (clojure.core/= [] (array/shape x)) (throw (branch-error what)) false)
       false)
     (core-pred (host-value what x))))
 
@@ -244,7 +244,7 @@
    caught exception is a branch that may differ across particles, so it
    raises the batched-branch error (and the fallback) instead."
   [^Throwable e]
-  (when (batch/batch-backend? a/*backend*)
-    (throw (a/batched-branch (str "An exception was caught in a batched run, where it may be thrown for some"
-                                  " particles only: " (.getMessage e))
-                             {} e))))
+  (when (batch/batch-backend? array/*backend*)
+    (throw (array/batched-branch (str "An exception was caught in a batched run, where it may be thrown for some"
+                                      " particles only: " (.getMessage e))
+                                 {} e))))

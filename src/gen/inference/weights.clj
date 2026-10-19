@@ -18,7 +18,7 @@
 
    Resamplers return a vector of n indices. They take the key as an optional
    last argument; omitting it draws one from the implicit key source."
-  (:require [gen.array :as a]
+  (:require [gen.array :as array]
             [gen.gfi :as gfi]
             [gen.random :as rng]))
 
@@ -29,14 +29,14 @@
   ^doubles [log-weights]
   (cond
     (sequential? log-weights)
-    (if (every? a/host? log-weights)
+    (if (every? array/host? log-weights)
       (double-array log-weights)
-      (double-array (a/->clj (a/stack (vec log-weights)))))
+      (double-array (array/->clj (array/stack (vec log-weights)))))
 
-    (= 1 (a/ndim log-weights)) (double-array (a/->clj log-weights))
+    (= 1 (array/ndim log-weights)) (double-array (array/->clj log-weights))
 
     :else (throw (ex-info "Log weights must be a seq of numbers or a 1-d array"
-                          {:shape (a/shape log-weights)}))))
+                          {:shape (array/shape log-weights)}))))
 
 (defn- invalid! [reason ^doubles w]
   (throw (ex-info (case reason
@@ -133,7 +133,7 @@
 (defn- uniforms
   "n uniforms in [0, 1) as a vector."
   [key n]
-  (if (zero? n) [] (a/->clj (rng/uniform key [n]))))
+  (if (zero? n) [] (array/->clj (rng/uniform key [n]))))
 
 (defn multinomial
   "n indices drawn independently in proportion to the weights."
@@ -146,7 +146,7 @@
    Each sample i appears floor(n·p_i) or ceil(n·p_i) times."
   ([log-weights n] (systematic log-weights n (gfi/next-key)))
   ([log-weights n key]
-   (let [u (double (a/item (rng/uniform key)))
+   (let [u (double (array/item (rng/uniform key)))
          n (long n)]
      (draw (probabilities log-weights) (map #(/ (+ (double %) u) n) (range n))))))
 
