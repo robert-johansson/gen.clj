@@ -6,7 +6,8 @@
    the JVM collections in them (MLX collects after every
    gen.mlx.gc-new-bytes of new arrays).
    Run: clojure [-J-Dgen.backend=mlx] [-J-Dgen.mlx.gc-new-bytes=…] -M:bench -m gen.mcmc-bench"
-  (:require [gen.array :as a]
+  (:refer-clojure :exclude [+ - * /])
+  (:require [gen.array :as a :refer [+ - * /]]
             [gen.array.protocols :as p]
             [gen.choicemap :as cm]
             [gen.dist :as d]
@@ -21,7 +22,7 @@
   (gen [xs]
     (let [w (trace :w (d/normal 0 10))
           b (trace :b (d/normal 0 10))]
-      (trace :y (d/normal (a/+ (a/* w xs) b) 1.0))
+      (trace :y (d/normal (+ (* w xs) b) 1.0))
       w)))
 
 (defn- collections []
@@ -41,7 +42,7 @@
            "gc-new-bytes" (System/getProperty "gen.mlx.gc-new-bytes" "default"))
   (doseq [n [100 10000 1000000]]
     (let [xs (rng/normal (rng/key 1) [n])
-          ys (a/+ (a/* 2.0 xs) 0.5 (rng/normal (rng/key 2) [n]))
+          ys (+ (* 2.0 xs) 0.5 (rng/normal (rng/key 2) [n]))
           tr (:trace (gfi/generate regression [xs] (cm/choicemap :y ys) (rng/key 3)))
           s (sel/select :w :b)
           kernels [["HMC " #(mcmc/hmc tr s {:L 10 :eps 0.001} (rng/key 4))

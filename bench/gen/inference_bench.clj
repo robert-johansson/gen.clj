@@ -25,7 +25,8 @@
    - The same time: MH steps cost about a twentieth of HMC's on the JVM
      backend, so the MH chains also run 20 times as many steps (4000
      samples after 2000), about HMC's time there."
-  (:require [gen.array :as a]
+  (:refer-clojure :exclude [+ - * /])
+  (:require [gen.array :as a :refer [+ - * /]]
             [gen.array.protocols :as p]
             [gen.batched :as b]
             [gen.choicemap :as cm]
@@ -150,7 +151,7 @@
     (let [slope (trace :slope (d/normal 0 10))
           intercept (trace :intercept (d/normal 0 10))]
       (doseq [[j x] (map-indexed vector xs)]
-        (trace [:y j] (d/normal (a/+ (a/* slope x) intercept) 1)))
+        (trace [:y j] (d/normal (+ (* slope x) intercept) 1)))
       slope)))
 
 (def ^:private linreg-obs
