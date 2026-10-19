@@ -22,8 +22,9 @@
 
 (set! *warn-on-reflection* true)
 
-(defn- accept
-  "Accept proposed with probability min(1, exp(log-alpha))."
+(defn accept
+  "Accept proposed with probability min(1, exp(log-alpha)): {:trace
+   :accepted? :log-alpha}."
   [trace proposed log-alpha key]
   (let [la (double (array/item log-alpha))]
     (when (Double/isNaN la)

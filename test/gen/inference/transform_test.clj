@@ -147,9 +147,9 @@
 ;; Involutive MCMC
 ;; ---------------------------------------------------------------------------
 
-(defn- normals [key n mu sd] (mapv #(+ mu (* sd %)) (ts/host (dc/sample (d/normal 0 1) key [n]))))
+(defn normals [key n mu sd] (mapv #(+ mu (* sd %)) (ts/host (dc/sample (d/normal 0 1) key [n]))))
 
-(defn- mean-sd [xs]
+(defn mean-sd [xs]
   (let [n (count xs) m (/ (reduce clojure.core/+ xs) n)]
     [m (Math/sqrt (/ (reduce clojure.core/+ (map #(Math/pow (- % m) 2) xs)) (dec n)))]))
 
@@ -208,7 +208,7 @@
         two (+ (lp (d/normal 0 (Math/sqrt 2)) y1) (lp (d/normal 0 (Math/sqrt 2)) y2))]
     (/ 1.0 (+ 1.0 (Math/exp (- one two))))))
 
-(defn- exact-posterior-trace
+(defn exact-posterior-trace
   "A trace drawn from the exact posterior: two? by p-two, then the means from
    their Gaussian conditionals (precision 3 for the shared one, 2 for each)."
   [key]

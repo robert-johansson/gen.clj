@@ -500,6 +500,16 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   GenParticleFilters' UpdatingTraceTranslator with a transform
   (`updating-translator`), applied to a filter by `pf/move-reweight`;
   without a transform it is Del Moral's SMC samplers.
+- **Trace kernels, GenTraceKernelDSL** (M4, 2026-10-20): no new macro. A
+  kernel is a `gen` function whose first argument is the model trace and
+  whose return value is `[update backward]`; its choices are the auxiliary
+  randomness, so propose and assess give the forward and backward scores.
+  log |det J| reruns the kernel's assess with the trace's and the kernel's
+  continuous choices substituted by tracked values, under `array/grad`,
+  and trims as GenTraceKernelDSL does; unlike it, a continuous choice the
+  update keeps but an output depends on counts as an unchanged output, so
+  such moves are not rejected as non-square. Calls of other generative
+  functions return their values (GenTraceKernelDSL returns their traces).
 - **Recurse** (M4, 2026-10-20): `(comb/recurse production aggregation
   max-branch)` as Gen.jl's, with 0-based nodes (root 0, child j of node i
   at i·max-branch + j + 1), choices at `[i :production]` and

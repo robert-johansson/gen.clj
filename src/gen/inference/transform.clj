@@ -279,7 +279,7 @@
 ;; Checks
 ;; ---------------------------------------------------------------------------
 
-(defn- same-choices?
+(defn same-choices?
   "Do two choice maps hold the same addresses and (within float tolerance)
    the same values?"
   [a b]
