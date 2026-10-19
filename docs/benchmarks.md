@@ -101,10 +101,10 @@ result. Reproduce with:
 
 | | GenMLX (Metal) | gen.clj, Metal, spot checks off | gen.clj, Metal, spot checks on | gen.clj, JVM (spot checks on) |
 |---|---|---|---|---|
-| generate | 1.4 ms | 0.8 ms | 8.3 ms | 1.2 ms |
-| importance sampling | 1.4 ms | 0.7 ms | 5.7 ms | 0.9 ms |
-| particle filter, 5 steps | 9.2 ms | 3.8 ms | 27 ms | 2.4 ms |
-| generate, N = 10,000 | — | 1.1 ms | 6.2 ms | 1.8 ms |
+| generate | 1.4 ms | 0.8 ms | 1.4 ms | 1.2 ms |
+| importance sampling | 1.4 ms | 0.7 ms | 1.4 ms | 0.9 ms |
+| particle filter, 5 steps | 9.2 ms | 3.8 ms | 5.9 ms | 2.4 ms |
+| generate, N = 10,000 | — | 1.1 ms | 2.1 ms | 1.8 ms |
 
 How to read these:
 - **Scalar paths.** gen.clj on MLX is 2–6× faster than GenMLX through the
@@ -112,11 +112,12 @@ How to read these:
   op where MLX evaluates for microseconds. Scalar models belong on the JVM
   backend.
 - **Batched paths.** gen.clj on Metal is about twice as fast as GenMLX
-  without spot checks. With them, each batched operation also re-runs 8
-  particles through the scalar handler. That costs about 0.5 ms each on
-  MLX, so 4–5 ms per operation, which dominates at these sizes (on the JVM
-  it is 0.3 ms). Running the spot checks on the JVM backend is bean
-  genclj-w5y0.
+  without spot checks. With them (8 particles re-run through the scalar
+  handler), it matches GenMLX, which has no such checks. On MLX the re-runs
+  are on the JVM backend: the batched trace is read once, and each re-run
+  takes microseconds (bean genclj-w5y0). On MLX itself, they cost 0.5 ms
+  each, 4–5 ms per operation: the first measurement (8.3 ms for generate at
+  3000).
 - **Small models.** At these sizes the JVM backend's batched path matches
   Metal's. The GPU earns its place on larger arrays and models.
 - **The first MLX measurement** found batched runs falling back to one

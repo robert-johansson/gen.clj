@@ -84,7 +84,8 @@
       (let [result (imp/importance-sampling model [] observations 6 (assoc opts :key (rng/key 7)))
             trs (imp/traces result)]
         (is (= 6 (count trs)) (str opts))
-        (is (every? #(= y (ts/host (% :y))) trs) (str opts))))
+        ;; the observation, as the backend's float holds it
+        (is (every? #(ts/close? y (% :y)) trs) (str opts))))
     (testing "a custom proposal runs one sample at a time, even when batched? is asked for"
       (is (contains? (imp/importance-sampling model [] observations 3 {:batched? true :proposal proposal :proposal-args []})
                      :traces)))))

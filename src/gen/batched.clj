@@ -225,9 +225,89 @@
            (= (a/shape x) (a/shape y))
            (close-host-values? (a/->clj x) (a/->clj y) (max (tolerance-of x) (tolerance-of y))))))
 
+(declare spot-check-here!)
+
+(deftype ^:private Read [batched? v])
+
+(defn- read-all
+  "x's host values: for a batched x every particle's (one read), else x's."
+  [x]
+  (if (batch/batched? x) (Read. true (a/->clj (batch/value x))) (Read. false (a/->clj x))))
+
+(defn- particle-host
+  "Particle i's host value of a read."
+  [^Read r i]
+  (if (.-batched? r) (nth (.-v r) i) (.-v r)))
+
+(defn- lazy-batch?
+  "Is t, a batched trace, on a lazy backend (where each scalar re-run would
+   cost evaluations)?"
+  [t]
+  (let [s (:score t)]
+    (and (batch/batched? s) (not (a/concrete? (batch/value s))))))
+
+(def ^:private reference (delay (a/backend-named :jvm)))
+
+(defn- on-reference
+  "x as the JVM backend holds it: a backend array read on the host and made
+   there; anything else as it is."
+  [x]
+  (if (and (instance? gen.array.protocols.IArray x) (not (batch/batched? x)))
+    (a/with-backend @reference (a/array (a/->clj x)))
+    x))
+
+(defn- mixed-backends? [^Throwable e]
+  (loop [e e]
+    (cond (nil? e) false
+          (and (instance? clojure.lang.ExceptionInfo e) (:backends (ex-data e))) true
+          :else (recur (.getCause e)))))
+
+(defn- reference-spot-check!
+  "spot-check! for a lazy backend's batched trace: the choices, scores and
+   return values are read on the host once, and each spot-checked particle
+   is re-run on the JVM backend (microseconds, where a scalar run on the
+   lazy backend costs evaluations). Returns nil when the model reaches
+   arrays of the lazy backend the JVM run cannot mix with (it closes over
+   them), so the caller checks on the lazy backend instead."
+  [gf args n t]
+  (let [choices (map-leaves read-all (:choices t))
+        ^Read score (read-all (:score t))
+        retval (when (a/array? (:retval t)) (read-all (:retval t)))
+        rtol (max (tolerance-of (:score t)) 1e-8)
+        args' (a/tree-map on-reference args)]
+    (try
+      (a/with-backend @reference
+        (doseq [i (spot-indices n)]
+          (let [cs (map-leaves #(let [v (particle-host % i)] (if (sequential? v) (a/array v) v)) choices)
+                st (try (:trace (gfi/generate gf args' cs (rng/key 0)))
+                        (catch Exception e
+                          (if (mixed-backends? e)
+                            (throw e)
+                            (throw (ex-info (str "The batched run disagrees with the scalar handler at particle " i
+                                                 ": the scalar run of its choices fails (" (ex-message e) ")")
+                                            {:particle i ::mismatch true} e)))))]
+            (when-not (and (close-host-values? (a/->clj (:score st)) (particle-host score i) rtol)
+                           (or (nil? retval) (not (a/array? (:retval st)))
+                               (close-host-values? (a/->clj (:retval st)) (particle-host retval i)
+                                                   (max rtol (tolerance-of (:retval t))))))
+              (throw (ex-info (str "The batched run disagrees with the scalar handler at particle " i
+                                   ": the code branches on a batched value where the tracer cannot see it")
+                              {:particle i :scalar-score (:score st) :batched-score (particle-host score i)
+                               ::mismatch true})))))
+        t)
+      (catch Exception e
+        (if (mixed-backends? e) nil (throw e))))))
+
 (defn- spot-check!
   "Throw unless the batched trace t of gf on args agrees with the scalar
-   handler re-run on each spot-checked particle's choices."
+   handler re-run on each spot-checked particle's choices. On a lazy
+   backend the re-runs are on the JVM backend when the model allows it."
+  [gf args n t]
+  (or (when (lazy-batch? t) (reference-spot-check! gf args n t))
+      (spot-check-here! gf args n t)))
+
+(defn- spot-check-here!
+  "spot-check! on the batched trace's own backend."
   [gf args n t]
   (doseq [i (spot-indices n)]
     (let [st (try (:trace (gfi/generate gf args (map-leaves #(particle-value % i) (:choices t)) (rng/key 0)))

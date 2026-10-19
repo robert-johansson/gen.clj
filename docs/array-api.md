@@ -397,6 +397,13 @@ Code outside `gen` bodies is not guarded. Two mechanisms cover it
   their results may be wrong too.
   - Each check is a scalar run, so the doubling schedule keeps a long
     particle filter linear, at about two checks of the final trace.
+  - On a lazy backend (MLX) the batched trace is read on the host once,
+    and the checked particles are re-run on the JVM backend, the
+    reference: microseconds each, where a scalar MLX run costs
+    evaluations. The comparison is at the precision of the batched float.
+    A model that closes over the lazy backend's arrays cannot run on the
+    JVM, so it is checked on its own backend. *Added 2026-10-19, bean
+    genclj-w5y0.*
   - Results are checked when read. The accessors (`traces`, `scores`,
     `choice`), the particle filter's estimate and a fallback all spot-check
     a collection whose last operations went unchecked
