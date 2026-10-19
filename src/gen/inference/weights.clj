@@ -60,6 +60,15 @@
       (== m Double/NEGATIVE_INFINITY) (invalid! :impossible w)
       :else (+ m (Math/log (areduce w i s 0.0 (+ s (Math/exp (- (aget w i) m)))))))))
 
+(defn log-sum-exp
+  "log Σ exp(w) of the log weights: -Inf when they are all -Inf (a total
+   of 0), and a loud error for NaN or +Inf."
+  ^double [log-weights]
+  (let [w (host-weights log-weights)]
+    (if (and (pos? (alength w)) (every? #(== ##-Inf %) w))
+      ##-Inf
+      (log-total w))))
+
 (defn normalize
   "Gen.jl's normalize_weights: {:log-total log Σ exp(w),
    :log-weights the normalized log weights, a vector}."

@@ -39,6 +39,7 @@
             [gen.batched :as batched]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
+            [gen.inference.mh :as mh]
             [gen.inference.weights :as w]
             [gen.random :as rng]))
 
@@ -187,10 +188,6 @@
   (let [lw (vec (:log-weights state))]
     (mapv double (if (every? array/host? lw) lw (array/->clj (array/stack lw))))))
 
-(defn- log-sum-exp [xs]
-  (let [m (reduce max ##-Inf xs)]
-    (if (== m ##-Inf) m (+ m (Math/log (reduce + (map #(Math/exp (- % m)) xs)))))))
-
 (defn- optimal-parents
   "Fearnhead and Clifford's (2003) resampling to n particles, at most the
    current number, each kept at most once: with c solving
@@ -304,19 +301,10 @@
   ([selection]
    (fn [trace key] (select-keys (gfi/regenerate trace selection key) [:trace :weight])))
   ([proposal proposal-args] (reweighting proposal proposal-args {}))
-  ([proposal proposal-args {:keys [backward backward-args involution]}]
+  ([proposal proposal-args opts]
    (fn [trace key]
-     (let [[k-propose k-update] (rng/split key)
-           {fwd :choices fwd-weight :weight fwd-retval :retval} (gfi/propose proposal (into [trace] proposal-args) k-propose)
-           [moved weight bwd] (if involution
-                                (let [r (involution trace fwd fwd-retval proposal-args)]
-                                  [(:trace r) (:weight r) (:bwd-choices r)])
-                                (let [r (gfi/update trace fwd k-update)]
-                                  [(:trace r) (:weight r) (:discard r)]))
-           {bwd-weight :weight} (gfi/assess (or backward proposal)
-                                            (into [moved] (if backward backward-args proposal-args))
-                                            bwd)]
-       {:trace moved :weight (+ (- weight fwd-weight) bwd-weight)}))))
+     (let [[k-propose k-update] (rng/split key)]
+       (mh/move trace proposal proposal-args opts k-propose k-update)))))
 
 (defn move-reweight
   "Each particle's trace moved by a reweighting kernel (see reweighting),
@@ -360,11 +348,11 @@
                     (select-particles state idx (mapv (vec (:log-weights state)) idx)))
        :sample (let [lw (host-log-weights state)
                      ;; a group of weight 0 keeps its first particle, at weight 0
-                     pick (fn [group key] (if (== ##-Inf (log-sum-exp (mapv lw group)))
+                     pick (fn [group key] (if (== ##-Inf (w/log-sum-exp (mapv lw group)))
                                             (first group)
                                             (group (first (w/multinomial (mapv lw group) 1 key)))))
                      idx (mapv pick groups (rng/split (or key (gfi/next-key)) n))]
-                 (select-particles state idx (mapv (fn [group] (- (log-sum-exp (mapv lw group)) (Math/log k))) groups)))))))
+                 (select-particles state idx (mapv (fn [group] (- (w/log-sum-exp (mapv lw group)) (Math/log k))) groups)))))))
 
 (defn- host-choices [trace]
   (let [c (:choices trace)]
@@ -384,7 +372,7 @@
          members (->> (range (count trs)) (group-by #(by (trs %))) vals (sort-by first))
          log-ratio (- (Math/log (count members)) (Math/log (count lw)))]
      (select-particles state (mapv first members)
-                       (mapv (fn [is] (+ (log-sum-exp (mapv lw is)) log-ratio)) members)))))
+                       (mapv (fn [is] (+ (w/log-sum-exp (mapv lw is)) log-ratio)) members)))))
 
 (defn introduce
   "The state with n new particles generated with the observations
