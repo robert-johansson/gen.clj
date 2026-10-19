@@ -22,12 +22,21 @@
    its internal proposal (thesis pp. 145-146): generate draws the finite
    choices at addrs from their exact conditional given everything else, by
    enumerating them. Its weight is log p(observations) exactly when every
-   other choice is observed, so inside an Unfold or a Map it is the exact
-   likelihood, with the enumerated choices summed out step by step, and a
-   particle filter's incremental weights are exact. regenerate on those
-   choices is a Gibbs move (weight 0). It satisfies the general GFI laws
-   (gen.laws), not the forward-sampling ones. Keys are an optional last
-   argument (or :key in an options map)."
+   other choice is observed. regenerate on those choices is a Gibbs move
+   (weight 0). It satisfies the general GFI laws (gen.laws), not the
+   forward-sampling ones.
+
+   Inside an Unfold or a Map, each step's weight is exact given the step's
+   arguments. So the total is the exact likelihood, with the enumerated
+   choices summed out step by step (and a particle filter's increments are
+   exact), only when no step's return value depends on its enumerated
+   choices: an Unfold's next state must come from observed choices alone.
+   Otherwise later steps condition on the choices drawn, and the total is a
+   sequential importance weight, unbiased in exp space (the locally optimal
+   proposal) but not exact: it changes with the key. {:check-retval? true}
+   makes that case an error.
+
+   Keys are an optional last argument (or :key in an options map)."
   (:refer-clojure :exclude [-])
   (:require [gen.array :as a :refer [-]]
             [gen.choicemap :as cm]
@@ -202,7 +211,8 @@
    the log density of gf's forward proposal for others and c given sigma
    (project on the unconstrained addresses; finite where s_c is -Inf
    because sigma is impossible under c). Every choice is given, so the
-   runs are deterministic. {:assignments :s :r}, with s and r stacked."
+   runs are deterministic. {:assignments :s :r :retvals}, with s and r
+   stacked."
   [g args sigma others free seen limit]
   (let [base (cm/merge sigma others)
         cs (assignments free seen limit)
@@ -220,9 +230,22 @@
                                      (throw (if (re-find #"was not visited" (ex-message e)) (structure-error e) e))))]
                        (when-not (= (+ n-choices (count c)) (count (cm/addresses (:choices tr))))
                          (throw (structure-error nil)))
-                       [(:score tr) (gfi/project tr unconstrained)]))
+                       [(:score tr) (gfi/project tr unconstrained) (:retval tr)]))
                    cs)]
-    {:assignments cs :s (a/stack (mapv first runs)) :r (a/stack (mapv second runs))}))
+    {:assignments cs :s (a/stack (mapv first runs)) :r (a/stack (mapv second runs))
+     :retvals (mapv #(nth % 2) runs)}))
+
+(defn- check-retval!
+  "Throw unless the return value is the same under every assignment with
+   positive probability (an opt-in check: it reads values on the host)."
+  [cs s retvals]
+  (let [possible (keep-indexed (fn [i ok] (when ok i)) (a/->clj (a/isfinite s)))]
+    (when-let [i (some #(when (not= (retvals (first possible)) (retvals %)) %) (rest possible))]
+      (throw (ex-info (str "with-exact-proposal: the return value depends on the enumerated choices ("
+                           (pr-str (cs (first possible))) " and " (pr-str (cs i)) " give different ones)."
+                           " A combinator passing it on (an Unfold's next state) conditions on the choices drawn,"
+                           " so its weight is an unbiased estimate, not exact")
+                      {:assignments [(cs (first possible)) (cs i)]})))))
 
 (defn- others-of
   "The choices other than sigma's and the free paths'."
@@ -239,7 +262,7 @@
    conditional. The weight, log p(τ) - log q(τ ∖ σ | σ), is
    logsumexp(s) - logsumexp(r) (enumerated); it does not depend on the
    enumerated values drawn."
-  [{:keys [gf paths limit] :as egf} args sigma key]
+  [{:keys [gf paths limit check-retval?] :as egf} args sigma key]
   (let [[k-forward k-pick k-final] (rng/split key 3)
         seen (volatile! {})
         g (watching gf (set paths) seen)
@@ -247,7 +270,8 @@
         free (free-paths paths sigma)
         _ (check-visited! free seen (:choices t0))
         others (others-of (:choices t0) sigma free)
-        {cs :assignments s :s r :r} (enumerated g args sigma others free seen limit)
+        {cs :assignments s :s r :r rvs :retvals} (enumerated g args sigma others free seen limit)
+        _ (when check-retval? (check-retval! cs s rvs))
         idx (rng/categorical k-pick s)
         chosen (reduce (fn [m p] (cm/set-choice m p (a/take (a/array (mapv #(get % p) cs)) idx)))
                        (cm/merge sigma others) free)
@@ -269,7 +293,7 @@
 
 (defn- same-addresses? [x y] (= (set (cm/addresses x)) (set (cm/addresses y))))
 
-(defrecord ExactProposalGF [gf paths limit]
+(defrecord ExactProposalGF [gf paths limit check-retval?]
   gfi/IGenerativeFunction
   (-simulate [this args key] (assoc (gfi/-simulate gf args key) :gen-fn this))
   (-generate [this args constraints key] (exact-generate this args constraints key))
@@ -311,12 +335,18 @@
    distribution and traces, but generate draws those choices given every
    other choice, enumerating their supports (from the distributions). Its
    weight is then log p(observations) exactly when the other choices are
-   all observed. gf is a dynamic generative function whose internal
-   proposal is forward sampling (every one is, except this wrapper's). The
-   enumerated choices may not change the model's structure or each other's
-   supports, which is a loud error. Options: :max-assignments (100000)."
+   all observed; in an Unfold or a Map, only if gf's return value does not
+   depend on those choices (see the namespace doc). gf is a dynamic
+   generative function whose internal proposal is forward sampling (every
+   one is, except this wrapper's). The enumerated choices may not change
+   the model's structure or each other's supports, which is a loud error.
+   Options:
+   - :check-retval? (false): throw from generate when the return value
+     depends on the enumerated choices, for uses that need the weight to be
+     exact (a known answer), not an estimate;
+   - :max-assignments (100000)."
   ([gf addrs] (with-exact-proposal gf addrs nil))
-  ([gf addrs {:keys [max-assignments] :or {max-assignments 100000}}]
+  ([gf addrs {:keys [max-assignments check-retval?] :or {max-assignments 100000}}]
    (when-not (dyn/dynamic-gf? gf)
      (throw (ex-info "with-exact-proposal needs a dynamic generative function" {:gen-fn (type gf)})))
    (when (empty? addrs)
@@ -324,7 +354,7 @@
    (let [paths (mapv #(if (vector? %) % [%]) addrs)]
      (when-not (apply distinct? paths)
        (throw (ex-info "with-exact-proposal: an address appears twice" {:addresses addrs})))
-     (->ExactProposalGF gf paths max-assignments))))
+     (->ExactProposalGF gf paths max-assignments (boolean check-retval?)))))
 
 (defmethod print-method ExactProposalGF [g ^java.io.Writer wr]
   (.write wr (str "#gen/with-exact-proposal[" (pr-str (:gf g)) " " (pr-str (:paths g)) "]")))

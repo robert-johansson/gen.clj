@@ -255,6 +255,34 @@
       (doseq [q' [0.2 0.9]]
         (is (close-to (:weight (gfi/generate chain [n 0.0 q'] obs (rng/key 8))) (exact-log-likelihood tr n q')))))))
 
+(def learning-step
+  "step, but the state moves only when the option came to mind: the next
+   state depends on the enumerated choice."
+  (gen [t s q]
+    (let [h (trace :h (d/bernoulli q))
+          act (trace :a (d/categorical (if h [0.4 0.6] [1.0 0.0])))]
+      (trace :y (d/normal (+ act (* 0.3 s)) 1.0))
+      (if h (+ s 1.0) s))))
+
+(deftest an-unfold-is-exact-only-when-the-state-is-free-of-the-latents
+  (let [n 12 q 0.6
+        tr (gfi/simulate (comb/unfold learning-step) [n 0.0 q] (rng/key 5))
+        obs (step-observations tr n)
+        weights (fn [gf] (set (map #(ts/number (:weight (gfi/generate gf [n 0.0 q] obs (rng/key %)))) (range 4))))]
+    (testing "when the state depends on h, later steps condition on the h drawn: an estimate, which varies with the key"
+      (is (< 1 (count (weights (comb/unfold (enum/with-exact-proposal learning-step [:h])))))))
+    (testing ":check-retval? makes that an error"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"return value depends on the enumerated choices"
+                            (gfi/generate (comb/unfold (enum/with-exact-proposal learning-step [:h] {:check-retval? true}))
+                                          [n 0.0 q] obs (rng/key 1)))))
+    (testing "and passes a state built from observed choices, whose weight is exact under every key"
+      (let [tr (gfi/simulate (comb/unfold step) [n 0.0 q] (rng/key 5))
+            ws (set (map #(ts/number (:weight (gfi/generate (comb/unfold (enum/with-exact-proposal step [:h] {:check-retval? true}))
+                                                             [n 0.0 q] (step-observations tr n) (rng/key %))))
+                         (range 4)))]
+        (is (= 1 (count ws)))
+        (is (close-to (first ws) (exact-log-likelihood tr n q)))))))
+
 ;; ---------------------------------------------------------------------------
 ;; The GFI laws (the general set: the internal proposal is not forward sampling)
 ;; ---------------------------------------------------------------------------
