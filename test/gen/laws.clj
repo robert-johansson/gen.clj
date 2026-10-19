@@ -218,6 +218,22 @@
           retained (sel/from-paths (filter #(and (now %) (not (chosen %))) (addrs tr)))]
       (close? w (- (gfi/project t2 retained) (gfi/project tr retained))))))
 
+(defn update-weight-is-the-projection-change
+  "update's weight is the projection of the new trace on its choices that
+   are not fresh (kept from the old trace or constrained), less the old
+   score: log p(τ')/q(fresh | the rest) - log p(τ) (Def. 2.3.1, p. 69,
+   with an internal proposal), whatever the proposal. Before this law the
+   general set left update's weight unchecked: a planted +1 passed all of
+   it (law audit, 2026-10-20)."
+  [cases]
+  (prop/for-all [[model seed picks alt?] cases]
+    (if-let [{:keys [tr sigma] {t2 :trace w :weight} :result} (update-case model seed picks alt?)]
+      (let [was (set (addrs tr))
+            constrained (set (cm/addresses sigma))
+            kept (filter #(or (was %) (constrained %)) (addrs t2))]
+        (close? w (- (gfi/project t2 (sel/from-paths kept)) (:score tr))))
+      true)))
+
 (defn propose-weight-is-the-assessed-density [cases]
   (prop/for-all [[[_ gf args] seed] cases]
     (let [{c :choices w :weight} (gfi/propose gf args (rng/key seed))]
@@ -323,6 +339,7 @@
    :project-of-everything-is-the-score project-of-everything-is-the-score
    :generate-weight-is-the-projection generate-weight-is-the-projection
    :regenerate-weight-is-the-projection-ratio regenerate-weight-is-the-projection-ratio
+   :update-weight-is-the-projection-change update-weight-is-the-projection-change
    :propose-weight-is-the-assessed-density propose-weight-is-the-assessed-density})
 
 (def forward-sampling
