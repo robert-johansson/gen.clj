@@ -321,8 +321,8 @@ tested, ◐ partly, — not yet (the feature does not exist yet).
 | 13 Gradients | ◐ every VJP against finite differences (`gen.array.tape-test`); choice and argument gradients come with genclj-96om |
 | 14 Encapsulated randomness | — (M4) |
 | 15 Custom-proposal MH | ✓ custom-proposal and q4_mh stationarity; `a-proposal-that-ignores-the-backward-move-is-caught`; `checked-kernels-catch-a-proposal-that-writes-an-observation` |
-| 16 Trace translators | — (genclj-lfjt, M4) |
-| 17 Involutive MCMC | ◐ discrete: stationarity and `the-involution-is-an-involution`; Jacobians with genclj-ynwh |
+| 16 Trace translators | ✓ (M4) `a-pushforward-translates-with-weight-zero` (deterministic: p(z)·\|dz/dx\| = p(x)), `a-change-of-variables-translates-with-weight-zero` (general, both directions, with q-forward and q-backward), `extending-by-the-conditional-weighs-the-evidence`, `the-round-trip-check-catches-a-wrong-inverse`; Jacobians against closed forms (`jacobians-match-the-closed-forms`) |
+| 17 Involutive MCMC | ✓ discrete: stationarity and `the-involution-is-an-involution`; continuous, with transforms (M4): `involutive-mh-with-a-transform-keeps-the-posterior` (a multiplicative move, Jacobian e^u), `a-reversible-jump-keeps-the-posterior` (split/merge between dimensions, ±log 2), `a-read-the-update-keeps-is-an-output`, `the-involution-check` |
 | 18 Kernel reversal | ✓ `reversals` (chain, cycle, repeat, mix) |
 | 19 Internal-proposal override | ✓ `gen.inference.proposal/with-internal-proposal`: the general laws over proposals of some, all and a structure-deciding part of the open choices, with arguments; `the-exact-posterior-as-proposal-gives-the-evidence` (every key's weight is log p(y)) |
 | 20 Estimators | ✓ IS and particle-filter log-ML unbiased in exp space (internal, custom, partial and optimal proposals; batched); the PF incremental weight |
