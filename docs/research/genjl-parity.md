@@ -134,8 +134,8 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 | `initialize_particle_filter` / `particle_filter_step!` (default or custom proposal), `maybe_resample!`, `log_ml_estimate`, `get_traces`, `get_log_weights`, `sample_unweighted_traces` | P: `smc.cljs` functional whole-sequence API; default proposal only (custom via `smcp3.cljs`); `steppable.cljs` | core |
 | Trace transform DSL: `@transform`, `@read`/`@write` with `:discrete`/`:continuous`, `@copy`, `@tcall`, `pair_bijections!`, `is_involution!`, `inverse` | P: translator.cljs read/write/copy-choice, `jacobian-logdet`, `sparse-jacobian-logdet`; no macro DSL, no discrete/continuous tagging, no inverse pairing check | core |
 | `Deterministic`/`General`/`SimpleExtending`/`Symmetric` TraceTranslator | P: `trace-translator`/`apply-translator`, `coarse-to-fine-smc` | core |
-| `black_box_vi!` (score-function estimator; variational model is a GF with `@param`) | P: `vi.cljs` (mean-field ADVI, programmable VI over raw log-density + flat params); `adev.cljs` | core |
-| `black_box_vimco!` | Y: `vimco` | core |
+| `black_box_vi!` (score-function estimator; variational model is a GF with `@param`) | P: `vi.cljs` (mean-field ADVI, programmable VI over raw log-density + flat params); `adev.cljs` | core. *gen.clj (M4, 2026-10-19):* `(vi/black-box-vi model args observations q q-args store optimizer opts)`, q a generative function over a parameter store; Gen.jl's estimator, or with `:baseline :leave-one-out` (unbiased, and exactly zero at the posterior); `vi/elbo-gradient` is one iteration |
+| `black_box_vimco!` | Y: `vimco` | core. *gen.clj (M4, 2026-10-19):* `vi/black-box-vimco`, VIMCO's leave-one-out control variates with the geometric (default) or arithmetic baseline, as Gen.jl's `geometric` keyword; `vi/vimco-gradient` is one iteration |
 
 ### 1k. Ecosystem packages
 | Package | What it adds | GenMLX | gen.clj |
