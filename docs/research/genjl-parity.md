@@ -86,7 +86,7 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 | Capability | GenMLX | gen.clj |
 |---|---|---|
 | `CustomGradientGF` (`apply`, `gradient`) | Y: `custom_gradient.cljs` (scalar output only) | soon |
-| `CustomDetermGF` / `CustomUpdateGF` (`apply_with_state`, `update_with_state` → retdiff, `num_args`) | N (closest is `nn.cljs nn->gen-fn`) | soon |
+| `CustomDetermGF` / `CustomUpdateGF` (`apply_with_state`, `update_with_state` → retdiff, `num_args`) | N (closest is `nn.cljs nn->gen-fn`) | soon. *gen.clj (M4, 2026-10-19):* `gen.custom/deterministic` with `:apply-with-state` and `:update-with-state` (laws alone and spliced; incremental updates checked); custom gradients in genclj-8cp8 |
 | Hand-written GFI implementations | Y: implement the protocols | core |
 
 ### 1g. Combinators (Gen.jl core)
