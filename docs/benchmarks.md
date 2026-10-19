@@ -134,6 +134,63 @@ How to read these:
   read nothing then. The memory bounds were ruled out first: turning off the
   collection trigger, or the cache and memory limits, changed nothing.
 
+## GenMLX's inference benchmarks, within gen.clj (2026-10-19)
+
+`bench/gen/inference_bench.clj` ports GenMLX's `bench/linreg.cljs`,
+`hmm.cljs`, `gmm.cljs` and `particle_scaling.cljs`. Each algorithm is timed
+(median after warm-up, forcing its result), and its accuracy is measured
+against an exact answer:
+- linear regression: the analytic posterior;
+- the HMM: the forward algorithm;
+- the mixture: the means integrated out, all 3⁸ assignments enumerated.
+
+GenMLX's own runs only measure ESS. Compared within gen.clj (GenMLX was not
+re-run). Left out: NUTS (bean genclj-tvc0) and HMC's step-size adaptation;
+HMC takes a fixed step at half the stability limit of the posterior's
+narrowest direction. Reproduce with
+`clojure [-J-Dgen.backend=mlx] [-J-Dgen.mlx.device=cpu] [-J-Dgen.bench.spot-checks=0] -M:bench -m gen.inference-bench`.
+
+| Median time | JVM | Metal, spot checks on | Metal, checks off | MLX CPU, float32 |
+|---|---|---|---|---|
+| linreg (22 sites): MH, random walk, 300 steps | 47 ms | 546 ms | 536 ms | 349 ms |
+| linreg: HMC, L = 10, 150 steps | 431 ms | 2226 ms | 2201 ms | 1690 ms |
+| linreg: HMC compiled, 150 steps | 345 ms | 340 ms | 332 ms | 231 ms |
+| linreg: batched IS, N = 10,000 | 4.4 ms | 5.7 ms | 2.4 ms | 4.9 ms |
+| HMM (50 steps): scalar IS, N = 100 | 77 ms | 2241 ms | 2208 ms | 1697 ms |
+| HMM: batched IS, N = 1000 | 13.2 ms | 72 ms | 21 ms | 51 ms |
+| HMM: particle filter, scalar, N = 100 | 66 ms | 5024 ms | 4866 ms | 4073 ms |
+| HMM: particle filter, batched, N = 100 | 12.2 ms | 162 ms | 98 ms | 127 ms |
+| HMM: particle filter, batched, N = 250 | 14.1 ms | 165 ms | 97 ms | 117 ms |
+| GMM (8 points): scalar IS, N = 200 | 13.7 ms | 851 ms | 819 ms | 639 ms |
+| GMM: batched IS, N = 10,000 | 13.3 ms | 15.7 ms | 6.3 ms | 13.7 ms |
+| scaling: batched IS, N = 100 | 0.18 ms | 1.49 ms | 0.80 ms | 0.82 ms |
+| scaling: batched IS, N = 10,000 | 3.0 ms | 3.2 ms | 1.5 ms | 2.5 ms |
+
+Accuracy, the mean over three keys (JVM; MLX draws other random numbers,
+with errors of the same order):
+- linreg: random-walk MH (GenMLX's step of 0.5, acceptance 0.14) ends
+  3.2 posterior sds from the slope; HMC 0.27 sd at acceptance 0.92;
+  batched IS 2.5 sd at N = 1000 (ESS 1.0) and 0.21 at 10,000 (ESS 3.6).
+- HMM: IS collapses (ESS 1–1.6; log-ML off by 53 at N = 100 and 32 at
+  1000). The particle filter is within 0.25–0.4.
+- GMM: IS collapses too (ESS 1.2–1.4; log-ML off by 28, 12 and 4.0 at
+  N = 200, 1000 and 10,000).
+
+How to read these:
+- **At GenMLX's model sizes the JVM backend is fastest or level almost
+  everywhere.** MLX wins only with compile (HMC on MLX's CPU: 231 ms
+  against 345) and on the largest batched runs with spot checks off
+  (about 2× at N = 10,000; with them, the default, the JVM is level).
+- **Scalar paths on MLX cost 12–76× the JVM's** (MH 12×, the particle
+  filter 76×), from MLX's per-op and per-evaluation costs.
+- **Particle scaling.** From 100 to 10,000 particles the time grows 2×
+  on Metal, 3× on MLX's CPU and 17× on the JVM backend.
+- **The batched particle filter on MLX takes 7–13× the JVM's,** 2–3 ms
+  per step on a two-state model (bean genclj-j1le).
+- **Spot checks cost by the choice.** With 100 choices (the HMM) they add
+  51 ms to a batched IS on Metal; with 6 (the cost-per-particle model),
+  0.7 ms (bean genclj-n9ow).
+
 ## MCMC steps, plain and compiled (2026-10-19)
 
 `bench/gen/mcmc_bench.clj`: Bayesian linear regression with N observations
