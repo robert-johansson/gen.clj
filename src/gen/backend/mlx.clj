@@ -956,6 +956,69 @@
       (finally (doseq [h temps] (MlxRaw/mlx_array_free (long h)))))))
 
 ;; ---------------------------------------------------------------------------
+;; Gradients: MLX's own (mlx_value_and_grad), with f as an MLX closure of
+;; the differentiated leaves
+;; ---------------------------------------------------------------------------
+
+(def ^:private grad-mode
+  "How the backend differentiates: :tape (gen.array.tape, the default) or
+   :native (mlx_value_and_grad); the system property gen.mlx.grad."
+  (keyword (System/getProperty "gen.mlx.grad" "tape")))
+
+(defn- tree-leaves [t] ((requiring-resolve 'gen.array/tree-leaves) t))
+(defn- tree-map [f t] ((requiring-resolve 'gen.array/tree-map) f t))
+
+(defn- refill
+  "The trees with their leaves, in tree-leaves order, replaced by xs."
+  [trees xs]
+  (let [it (volatile! (seq xs))]
+    (mapv (fn [t] (tree-map (fn [_] (let [x (first @it)] (vswap! it next) x)) t)) trees)))
+
+(defn- native-value-and-grad
+  "[value grads] of f on args with respect to the positions argnums, by
+   mlx_value_and_grad: MLX calls f back with its own arrays for the
+   differentiated leaves, and differentiates the graph f builds."
+  [b f args argnums]
+  (let [args (vec args)
+        trees (mapv #(nth args %) argnums)
+        leaves (vec (mapcat tree-leaves trees))
+        _ (doseq [l leaves]
+            (when-not (and (or (host? l) (mlx-array? l)) (= :float (dt/kind (dtype-on b l))))
+              (throw (ex-info (str "Cannot differentiate with respect to " (pr-str l)
+                                   " (only float arrays and floating-point numbers)")
+                              {:leaf l}))))
+        xs (mapv #(as-array b % nil) leaves)
+        run (fn [^longs ins]
+              (let [ys (mapv #(wrap b %) ins)
+                    args' (reduce (fn [as [i t]] (assoc as i t)) args (map vector argnums (refill trees ys)))
+                    out (apply f args')]
+                (when-not (and (or (host? out) (mlx-array? out)) (= [] (shape-of out)))
+                  (throw (ex-info "value-and-grad needs a function returning a scalar"
+                                  {:shape (shape-of out) :value out})))
+                (let [out (as-array b out nil)]
+                  (long-array [(MlxRuntime/retain (.-h ^MlxArray out))]))))
+        cl (MlxRuntime/closure (reify gen.mlx.MlxRuntime$Closure (apply [_ ins] (run ins))))
+        temps (java.util.ArrayList.)]
+    (try
+      (let [vag (Mlx/mlx_value_and_grad cl (int-array (range (count xs))))
+            _ (.add temps [:vag vag])
+            in (MlxRuntime/vectorOf (long-array (map #(.-h ^MlxArray %) xs)))
+            _ (.add temps [:vec in])
+            [vs gs] (vec (Mlx/mlx_closure_value_and_grad_apply vag in))
+            _ (.add temps [:vec vs])
+            _ (.add temps [:vec gs])
+            v (wrap b (first (MlxRuntime/vectorArrays vs)))
+            gs (mapv #(wrap b %) (MlxRuntime/vectorArrays gs))]
+        [v (refill trees gs)])
+      (finally
+        (fence xs)
+        (doseq [[kind h] temps]
+          (case kind
+            :vag (MlxRaw/mlx_closure_value_and_grad_free (long h))
+            :vec (MlxRaw/mlx_vector_array_free (long h))))
+        (MlxRaw/mlx_closure_free cl)))))
+
+;; ---------------------------------------------------------------------------
 ;; The backend
 ;; ---------------------------------------------------------------------------
 
@@ -1008,7 +1071,11 @@
   (-matmul [b x y] (guarded :matmul (matmul b x y)))
   (-linalg [b op args] (guarded op (linalg b op args)))
   (-random-uniform [b key shape dtype] (guarded :random-uniform (random-uniform b key shape dtype)))
-  (-value-and-grad [b f args argnums] ((requiring-resolve 'gen.array.tape/value-and-grad) b f args argnums)))
+  (-value-and-grad [b f args argnums]
+    (guarded :value-and-grad
+      (if (= grad-mode :native)
+        (native-value-and-grad b f args argnums)
+        ((requiring-resolve 'gen.array.tape/value-and-grad) b f args argnums)))))
 
 (defn- config ^Config [b] (.-config ^MlxBackend b))
 

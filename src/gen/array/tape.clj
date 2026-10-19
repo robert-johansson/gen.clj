@@ -38,6 +38,14 @@
 
 (defn- primal [x] (if (tracked? x) (.-primal ^Tracked x) x))
 
+(defn- primal-dtype
+  "The dtype of a primal on backend inner: a host scalar's is weak, its
+   kind's default there (float64 only where that is the default)."
+  [inner v]
+  (if (a/host? v)
+    (dt/with-weak nil #{(dt/kind (dt/host-dtype v))} (p/-defaults inner))
+    (p/-dtype inner v)))
+
 (defn- differentiable? [x] (= :float (dt/kind (a/dtype x))))
 
 (defn- record
@@ -225,14 +233,14 @@
   (-eval! [_ xs] (p/-eval! inner (remove a/host? (map primal xs))))
 
   (-shape [_ x] (let [v (primal x)] (if (a/host? v) [] (p/-shape inner v))))
-  (-dtype [_ x] (let [v (primal x)] (if (a/host? v) (dt/host-dtype v) (p/-dtype inner v))))
+  (-dtype [_ x] (primal-dtype inner (primal x)))
 
   (-full [_ shape value dtype] (p/-full inner shape value dtype))
   (-arange [_ start stop step dtype] (p/-arange inner start stop step dtype))
   (-astype [t x dtype]
     (let [v (primal x)
           out (if (a/host? v) (dt/host-cast v dtype) (p/-astype inner v dtype))]
-      (record t out [x] (fn [g _] [(a/astype g (a/dtype v))]))))
+      (record t out [x] (fn [g _] [(a/astype g (primal-dtype inner v))]))))
 
   (-elementwise [t op args dtype]
     (let [ps (mapv primal args)
@@ -430,5 +438,5 @@
             grad-of (fn [leaf]
                       (let [v (primal leaf)
                             ct (.get cts leaf)]
-                        (if ct (a/astype ct (a/dtype v)) (a/zeros-like v))))]
+                        (if ct (a/astype ct (primal-dtype inner v)) (a/zeros-like v))))]
         [(primal out) (mapv #(a/tree-map grad-of (nth args %)) argnums)]))))

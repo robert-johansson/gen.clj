@@ -341,14 +341,17 @@ public final class MlxRuntime {
 
   // ---- closures: Java functions MLX calls --------------------------------------------
 
-  /** A function of arrays to arrays (handles), for mlx_closure. */
+  /** A function of arrays to arrays (handles), for mlx_closure. The input
+   *  handles are new references the function owns; the output handles are
+   *  new references the runtime frees once MLX has its own. */
   @FunctionalInterface
   public interface Closure {
     long[] apply(long[] inputs) throws Throwable;
   }
 
   /** A custom VJP, for mlx_closure_custom: cotangents of the primals from
-   *  the primals, the output cotangents and the outputs. */
+   *  the primals, the output cotangents and the outputs (handles owned as
+   *  for Closure). */
   @FunctionalInterface
   public interface CustomVjp {
     long[] apply(long[] primals, long[] cotangents, long[] outputs) throws Throwable;
@@ -363,6 +366,14 @@ public final class MlxRuntime {
     long[] r = new long[n];
     for (int i = 0; i < n; i++) r[i] = Mlx.mlx_vector_array_get(vec, (long) i);
     return r;
+  }
+
+  /** A new reference to the array h (an independent handle). */
+  public static long retain(long h) {
+    MemorySegment o = scratch().out(1);
+    int status = MlxRaw.mlx_array_set(o, h);
+    if (status != 0) throw error("mlx_array_set");
+    return o.get(JAVA_LONG, 0);
   }
 
   /** A new mlx_vector_array of the arrays (MLX takes its own references). */
@@ -383,7 +394,12 @@ public final class MlxRuntime {
     SCRATCH.set(outer.child());
     try {
       Closure f = (Closure) REGISTRY.get(payload.address());
-      setResult(res.reinterpret(8), f.apply(vectorArrays(input)));
+      long[] outs = f.apply(vectorArrays(input));
+      try {
+        setResult(res.reinterpret(8), outs);
+      } finally {
+        for (long h : outs) MlxRaw.mlx_array_free(h);
+      }
       return 0;
     } catch (Throwable t) {
       UPCALL_ERROR.set(t);
@@ -399,7 +415,12 @@ public final class MlxRuntime {
     SCRATCH.set(outer.child());
     try {
       CustomVjp f = (CustomVjp) REGISTRY.get(payload.address());
-      setResult(res.reinterpret(8), f.apply(vectorArrays(primals), vectorArrays(cotangents), vectorArrays(outputs)));
+      long[] outs = f.apply(vectorArrays(primals), vectorArrays(cotangents), vectorArrays(outputs));
+      try {
+        setResult(res.reinterpret(8), outs);
+      } finally {
+        for (long h : outs) MlxRaw.mlx_array_free(h);
+      }
       return 0;
     } catch (Throwable t) {
       UPCALL_ERROR.set(t);

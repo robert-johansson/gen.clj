@@ -515,10 +515,14 @@
   ([shape {:keys [dtype]}] (full shape 1.0 {:dtype (or dtype (:float (defaults *backend*)))})))
 
 (defn full-like
-  "An array with x's shape, backend and (unless given) dtype, filled with value."
+  "An array with x's shape, backend and (unless given) dtype, filled with
+   value. A host scalar x is weakly typed: its kind's default dtype on the
+   backend (so float64 only where that is the default)."
   ([x value] (full-like x value nil))
   ([x value {dt :dtype}]
-   (p/-full (backend x) (shape x) value (or dt (dtype x)))))
+   (let [b (backend x)]
+     (p/-full b (shape x) value
+              (or dt (if (host? x) (dt/with-weak nil #{(dt/kind (dt/host-dtype x))} (defaults b)) (dtype x)))))))
 
 (defn zeros-like [x] (full-like x 0))
 (defn ones-like [x] (full-like x 1))
