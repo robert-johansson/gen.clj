@@ -227,3 +227,15 @@
       (is (< 1.0 (ts/number (:w store'))) (str (:kind opt) ": :w ascends"))))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"does not have"
                         (learn/step (learn/sgd {:lr 0.1}) nil {:w 1.0} {:v 0.5}))))
+
+(deftest argument-gradients-with-a-return-value-gradient
+  ;; Eq. 2.11 (law audit gap K): log N(z; x, 1) + retgrad·(x·z) has
+  ;; ∂/∂x = (z - x) + retgrad·z = 0.5 + 1.7·1.2 = 2.54 at x = 0.7, z = 1.2
+  (let [model (gen [x] (let [z (trace :z (d/normal x 1))] (* x z)))
+        tr (:trace (gfi/generate model [0.7] (cm/choicemap :z 1.2) (rng/key 1)))
+        {[xg] :arg-grads} (g/choice-gradients tr sel/none 1.7 {:argnums [0]})
+        f (fn [x] (+ (ts/number (:weight (gfi/assess model [x] (cm/choicemap :z 1.2)))) (* 1.7 x 1.2)))
+        h 1e-5]
+    (is (ts/close? 2.54 xg {:rtol (ts/tol 1e-9) :atol (ts/tol 1e-9)}))
+    (when (ts/jvm?)
+      (is (ts/close? (/ (- (f (+ 0.7 h)) (f (- 0.7 h))) (* 2 h)) xg {:rtol 1e-6 :atol 1e-6}) "and the finite difference"))))

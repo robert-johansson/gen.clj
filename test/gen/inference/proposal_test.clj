@@ -123,3 +123,16 @@
     (testing "selecting what b decides works"
       (let [{t' :trace} (gfi/regenerate tr (gen.selection/select :b :x) (rng/key 3))]
         (is (some? (t' :b)))))))
+
+(deftest ^:slow generate-under-an-override-is-unbiased
+  ;; Alg. 16 (law audit gap D): with q proposing the branch z ~ Bern(0.7)
+  ;; and y = 0.5, E[exp(w)] = p(y) = 0.3 N(.5; 2, √2) + 0.7 N(.5; -2, √2)
+  (let [pgf (prop/with-internal-proposal branching (gen [sigma] (when (open? sigma :z) (trace :z (d/bernoulli 0.7)))))
+        evidence (Math/log (+ (* 0.3 (Math/exp (ts/number (dc/log-prob (d/normal 2.0 (Math/sqrt 2)) 0.5))))
+                              (* 0.7 (Math/exp (ts/number (dc/log-prob (d/normal -2.0 (Math/sqrt 2)) 0.5))))))
+        n 4000
+        ratios (mapv #(Math/exp (- (ts/number (:weight (gfi/generate pgf [] (cm/choicemap :y 0.5) %))) evidence))
+                     (rng/split (rng/key 7) n))
+        m (/ (reduce clojure.core/+ ratios) n)
+        sd (Math/sqrt (/ (reduce clojure.core/+ (map #(Math/pow (clojure.core/- % m) 2) ratios)) (dec n)))]
+    (is (< (Math/abs (clojure.core/- m 1.0)) (* 5 (/ sd (Math/sqrt n)))) (str m " ± " (/ sd (Math/sqrt n))))))
