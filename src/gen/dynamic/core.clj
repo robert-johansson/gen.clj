@@ -24,7 +24,7 @@
                             class type instance? number? integer? int? float? double? boolean? nat-int? pos-int?
                             neg-int? rational? ratio? decimal? coll? seqable? sequential? seq? map? vector? list?
                             set? string? keyword? symbol? fn? ifn? char? counted? indexed? associative?
-                            reversible? sorted? record?
+                            reversible? sorted? record? satisfies?
                             every? some not-any? not-every? filter filterv remove take-while drop-while
                             split-with complement every-pred some-fn
                             get contains? find get-in])
@@ -112,6 +112,8 @@
   counted? indexed? associative? reversible? sorted? record?)
 
 (defguard instance? clojure.core/instance? [c x] (clojure.core/instance? c (particle x)))
+
+(defguard satisfies? clojure.core/satisfies? [protocol x] (clojure.core/satisfies? protocol (particle x)))
 
 (defguard host? gen.array/host? [x] (a/host? (particle x)))
 

@@ -320,9 +320,11 @@ Two layers make this safe:
      (`(= not clojure.core/not)` is false in a body); and macros used in a
      body are expanded before the body compiles, so a macro that reads
      `&env` does not see the body's own locals.
-   - What a body cannot guard is Java interop on a batched value, which sees
-     the batch object: `(.equals Boolean/TRUE b)` is false, and `pr-str`
-     prints the whole batch.
+   - What a body cannot guard is code it calls that looks at a batched
+     value's object: Java interop (`(.equals Boolean/TRUE b)` is false), a
+     multimethod dispatching on `class` or `type`, or a protocol extended to
+     `Object`, which dispatch on the batch rather than a particle; and
+     `pr-str`, which prints the whole batch.
    - A bool array of several elements, unbatched, is ambiguous (as in NumPy):
      `truthy?` throws, without the batched-branch flag, and names `all`,
      `any` and `where`. A numeric array is true, as any Clojure value.

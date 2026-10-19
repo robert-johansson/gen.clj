@@ -309,7 +309,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   is guaranteed: the macro guards `if`, `case` and `catch`, and substitutes
   guarded versions of clojure.core's truthiness, lookup and type tests
   (`not`, `filter`, `get`, `instance?`, …; `gen.dynamic.core`). Only Java
-  interop on a choice value sees the batch. Clojure has no hook for its own `if`, so
+  interop on a choice value, and dispatch on its class (multimethods,
+  protocols extended to `Object`), see the batch. Clojure has no hook for its own `if`, so
   helper functions outside `gen` are covered by two later mechanisms (added
   2026-10-19 after the acceptance tests; docs/array-api.md §8a–§8b):
   - a batched comparison that nothing read raises the fallback;

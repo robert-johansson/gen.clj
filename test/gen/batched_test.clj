@@ -452,12 +452,17 @@
     (is (b/batched? (b/simulate (gen [] (let [x (trace :x (d/normal 0 1))] (try x (finally nil)))) [] 8 (rng/key 72)))
         "a try that catches nothing stays batched")))
 
+(defprotocol ^:private Scalar (scalar-kind [x]))
+(extend-protocol Scalar Double (scalar-kind [_] :double))
+
 (deftest representation-tests-answer-for-the-particles
   ;; fourth acceptance test B2
   (doseq [[label m] [[:instance? (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (if (instance? Double x) 3.0 0.0) 1))))]
                      [:host? (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (if (a/host? x) 3.0 0.0) 1))))]
                      [:coll? (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (if (coll? x) 0.0 3.0) 1))))]
-                     [:class (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (if (= Double (class x)) 3.0 0.0) 1))))]]]
+                     [:class (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (if (= Double (class x)) 3.0 0.0) 1))))]
+                     [:satisfies? (gen [] (let [x (trace :x (d/normal 0 1))]
+                                            (trace :y (d/normal (if (satisfies? Scalar x) 3.0 0.0) 1))))]]]
     (let [obs (cm/choicemap :y 3.0)
           s (imp/importance-sampling m [] obs 200 {:key (rng/key 73)})
           r (binding [b/*spot-checks* 0] (imp/importance-sampling m [] obs 200 {:key (rng/key 73) :batched? true}))]
