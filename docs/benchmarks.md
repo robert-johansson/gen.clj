@@ -151,6 +151,27 @@ Reproduce with `clojure [-J-Dgen.backend=mlx] -M:bench -m gen.mcmc-bench`.
 | MALA, N = 10,000 | 2.2 ms | 1.3 ms | 0.61 ms | 0.57 ms |
 | MALA, N = 1,000,000 | 6.1 ms | 4.6 ms | 27 ms | 26 ms |
 
+**On MLX's CPU device** (same benchmark, `-J-Dgen.mlx.device=cpu`, with
+`-J-Dgen.mlx.dtypes=64` for float64), plain → compiled:
+
+| Per step | MLX CPU, float32 | MLX CPU, float64 |
+|---|---|---|
+| HMC, N = 100 | 9.3 → 1.1 ms | 19.6 → 17.4 ms |
+| HMC, N = 10,000 | 6.2 → 1.0 ms | 8.6 → 5.5 ms |
+| HMC, N = 1,000,000 | 34.9 → 7.5 ms | 69.6 → 17.2 ms |
+| MALA, N = 100 | 1.7 → 0.7 ms | 6.2 → 4.2 ms |
+| MALA, N = 10,000 | 1.5 → 0.8 ms | 4.8 → 12.6 ms |
+| MALA, N = 1,000,000 | 6.6 → 5.3 ms | 17.2 → 11.1 ms |
+
+- **MLX's CPU device in float32 is about as fast as Metal** at these sizes,
+  and faster at N = 100, where there is no GPU dispatch.
+- **Against the JVM backend, in float64:** MLX's CPU device is 2.4–7×
+  faster at a million observations, the yardstick for the JVM backend's
+  large-array kernels (bean genclj-exha). For small models the JVM backend
+  wins: plain MALA at N = 100 takes 0.42 ms against 6.2 ms.
+- **Unexplained:** some compiled float64 steps are slower than expected
+  (MALA at N = 10,000: 12.6 ms compiled against 4.8 ms plain; HMC at
+  N = 100 barely gains). Bean genclj-h6uu.
 - **Compile on the GPU.** It pays off for HMC at every size (6–8×), and
   MALA gains 1.2–1.7×.
 - **The compiled kernel also does less work.** At each leapfrog step the

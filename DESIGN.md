@@ -445,6 +445,17 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     depends on the enumerated choices is a loud error, as is a choice made
     by a callee at an address (wrap the callee instead). Batched, it is the
     same code under the batch tracer.
+- **Three ways to run, all first-class (owner, 2026-10-19).** The pure-JVM
+  backend (always available, no native dependency), MLX on the CPU, and MLX
+  on the GPU (Metal, CUDA). Each passes the conformance suite and the test
+  battery, a user picks per model (`-Dgen.backend`, `-Dgen.mlx.device`, or
+  `a/with-backend` for a region), and the core assumes none of them.
+  - The pure-JVM backend gets CPU speed work on its own terms (bean
+    genclj-exha). MLX's CPU device is an alternative and a yardstick for it,
+    never a requirement.
+  - Native performance libraries (BLAS/LAPACK through Accelerate or
+    OpenBLAS, and others) are welcome later as optional plug-ins where they
+    give real speedups (bean genclj-w4kw), never needed to run.
 - **Git:** the main repo is public-ready, with `.beans/`, `.beans.yml`,
   `.claude/` and `*.pdf` gitignored. `.beans/` is its own private repo
   (`robert-johansson/gen.clj-beans`), synced by SessionStart/PreCompact/Stop
