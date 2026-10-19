@@ -537,81 +537,85 @@
     (and cs (not= op :regenerate)) (assoc (generate-at kernel args cs key) :retdiff diff/unknown-change)
     :else {:trace (simulate-at kernel args key) :weight 0.0 :retdiff diff/unknown-change}))
 
+(defn- production-phase
+  "The productions from the root, in node order (parents before children):
+   a retained node is revisited only when its input may have changed or it
+   is targeted. {:prods :p-diffs :weight :discard}."
+  [{:keys [gf old-p targets op cs node-key]} input input-diff]
+  (let [{:keys [production max-branch]} gf]
+    ;; weight starts boxed: it accumulates arrays on array backends
+    (loop [todo (sorted-map 0 [input input-diff]) prods {} p-diffs {} weight (Double/valueOf 0.0) discard cm/EMPTY]
+      (if-let [[node [in d]] (first todo)]
+        (let [old (old-p node)
+              revisit? (or (nil? old) (diff/changed? d) (targeted? targets node :production))
+              r (if revisit?
+                  (run-node op production old [in] [d] (node-cs op cs node :production) (node-key node :production))
+                  {:trace old :weight 0.0 :retdiff diff/no-change})
+              out (production-output gf node (:trace r))
+              child-diff (if (diff/changed? (:retdiff r)) diff/unknown-change diff/no-change)]
+          (recur (into (dissoc todo node)
+                       (map-indexed (fn [j c] [(child-of max-branch node j) [c child-diff]]) (:children out)))
+                 (assoc prods node (:trace r)) (assoc p-diffs node (:retdiff r)) (+ weight (:weight r))
+                 (put-part discard node :production (:discard r))))
+        {:prods prods :p-diffs p-diffs :weight weight :discard discard}))))
+
+(defn- aggregation-phase
+  "The aggregations from the leaves (children before parents): a retained
+   node is revisited when its value, its children or its target may have
+   changed. {:aggs :a-diffs :weight :discard}, the weight and discard
+   continuing the production phase's."
+  [{:keys [gf old-a targets op cs node-key]} {:keys [prods p-diffs weight discard]}]
+  (let [{:keys [aggregation max-branch]} gf]
+    (reduce (fn [{:keys [aggs a-diffs weight discard]} node]
+              (let [{v :value children :children} (:retval (prods node))
+                    kids (clojure.core/map #(child-of max-branch node %) (range (count children)))
+                    old (old-a node)
+                    v-changed? (diff/changed? (p-diffs node))
+                    ws-changed? (or (nil? old) (not= (count children) (count (second (:args old))))
+                                    (some #(diff/changed? (a-diffs %)) kids))
+                    r (if (or (nil? old) v-changed? ws-changed? (targeted? targets node :aggregation))
+                        (run-node op aggregation old [v (mapv #(:retval (aggs %)) kids)]
+                                  [(if v-changed? diff/unknown-change diff/no-change)
+                                   (if ws-changed? diff/unknown-change diff/no-change)]
+                                  (node-cs op cs node :aggregation) (node-key node :aggregation))
+                        {:trace old :weight 0.0 :retdiff diff/no-change})]
+                {:aggs (assoc aggs node (:trace r)) :a-diffs (assoc a-diffs node (:retdiff r))
+                 :weight (+ weight (:weight r)) :discard (put-part discard node :aggregation (:discard r))}))
+            {:aggs {} :a-diffs {} :weight weight :discard discard}
+            (sort > (keys prods)))))
+
+(defn- node-choices [choices node p a]
+  (-> choices (put-part node :production (:choices p)) (put-part node :aggregation (:choices a))))
+
 (defn- recurse-run
   "generate (tr nil), update or regenerate of a Recurse trace: the
-   production phase from the root, revisiting a retained node only when its
-   input may have changed or it is targeted, then the aggregation phase from
-   the leaves, revisiting a node when its value, its children or its
-   target may have changed. Nodes no longer reached are dropped: update
-   discards them and subtracts their scores; in regenerate they cancel
-   against the reverse move."
+   production phase, then the aggregation phase. Nodes no longer reached
+   are dropped: update discards them and subtracts their scores; in
+   regenerate they cancel against the reverse move."
   [gf tr [input] [input-diff] op cs key]
-  (let [{:keys [production aggregation max-branch]} gf
-        old-p (::productions tr {})
-        old-a (::aggregations tr {})
-        targets (recurse-targets op cs)
-        node-key (fn [node part] (element-key (element-key key node) (if (= part :production) 0 1)))
-        ;; production phase, in node order: parents before children
-        [prods p-diffs weight discard]
-        ;; weight starts boxed: it accumulates arrays on array backends
-        (loop [todo (sorted-map 0 [input input-diff]) prods {} p-diffs {} weight (Double/valueOf 0.0) discard cm/EMPTY]
-          (if-let [[node [in d]] (first todo)]
-            (let [old (old-p node)
-                  revisit? (or (nil? old) (diff/changed? d) (targeted? targets node :production))
-                  r (if revisit?
-                      (run-node op production old [in] [d] (node-cs op cs node :production) (node-key node :production))
-                      {:trace old :weight 0.0 :retdiff diff/no-change})
-                  out (production-output gf node (:trace r))
-                  child-diff (if (diff/changed? (:retdiff r)) diff/unknown-change diff/no-change)
-                  todo (into (dissoc todo node)
-                             (map-indexed (fn [j c] [(child-of max-branch node j) [c child-diff]]) (:children out)))]
-              (recur todo (assoc prods node (:trace r)) (assoc p-diffs node (:retdiff r)) (+ weight (:weight r))
-                     (put-part discard node :production (:discard r))))
-            [prods p-diffs weight discard]))
+  (let [ctx {:gf gf :old-p (::productions tr {}) :old-a (::aggregations tr {}) :targets (recurse-targets op cs)
+             :op op :cs cs
+             :node-key (fn [node part] (element-key (element-key key node) (if (= part :production) 0 1)))}
+        {:keys [prods] :as produced} (production-phase ctx input input-diff)
         _ (when (and cs (not= op :regenerate))
-            (doseq [node (keys targets)]
+            (doseq [node (keys (:targets ctx))]
               (when-not (contains? prods node)
                 (throw (ex-info (str (name op) ": the constraint at node " node " was not visited (the tree has nodes "
                                      (vec (sort (keys prods))) ")")
                                 {:op op :address node})))))
-        ;; aggregation phase, children before parents
-        [aggs a-diffs weight discard]
-        (reduce (fn [[aggs a-diffs weight discard] node]
-                  (let [{v :value children :children} (:retval (prods node))
-                        kids (clojure.core/map #(child-of max-branch node %) (range (count children)))
-                        old (old-a node)
-                        v-diff (p-diffs node)
-                        ws-changed? (or (nil? old) (not= (count children) (count (second (:args old))))
-                                        (some #(diff/changed? (a-diffs %)) kids))
-                        revisit? (or (nil? old) (diff/changed? v-diff) ws-changed? (targeted? targets node :aggregation))
-                        args [v (mapv #(:retval (aggs %)) kids)]
-                        r (if revisit?
-                            (run-node op aggregation old args [(if (diff/changed? v-diff) diff/unknown-change diff/no-change)
-                                                               (if ws-changed? diff/unknown-change diff/no-change)]
-                                      (node-cs op cs node :aggregation) (node-key node :aggregation))
-                            {:trace old :weight 0.0 :retdiff diff/no-change})]
-                    [(assoc aggs node (:trace r)) (assoc a-diffs node (:retdiff r)) (+ weight (:weight r))
-                     (put-part discard node :aggregation (:discard r))]))
-                [{} {} weight discard]
-                (sort > (keys prods)))
+        {:keys [aggs a-diffs weight discard]} (aggregation-phase ctx produced)
+        {:keys [old-p old-a]} ctx
         gone (remove prods (keys old-p))
-        weight (if (= op :update)
-                 (reduce (fn [w node] (- w (+ (:score (old-p node)) (:score (old-a node))))) weight gone)
-                 weight)
-        discard (if (= op :update)
-                  (reduce (fn [d node]
-                            (-> d
-                                (put-part node :production (:choices (old-p node)))
-                                (put-part node :aggregation (:choices (old-a node)))))
-                          discard gone)
-                  discard)
-        choices (reduce (fn [c node]
-                          (-> c
-                              (put-part node :production (:choices (prods node)))
-                              (put-part node :aggregation (:choices (aggs node)))))
-                        cm/EMPTY (sort (keys prods)))
-        score (reduce + 0.0 (concat (clojure.core/map :score (vals prods)) (clojure.core/map :score (vals aggs))))
-        t (assoc (trace/make-trace {:gen-fn gf :args [input] :choices choices :retval (:retval (aggs 0)) :score score})
+        [weight discard] (if (= op :update)
+                           [(reduce (fn [w node] (- w (+ (:score (old-p node)) (:score (old-a node))))) weight gone)
+                            (reduce #(node-choices %1 %2 (old-p %2) (old-a %2)) discard gone)]
+                           [weight discard])
+        nodes (sort (keys prods))
+        t (assoc (trace/make-trace {:gen-fn gf :args [input]
+                                    :choices (reduce #(node-choices %1 %2 (prods %2) (aggs %2)) cm/EMPTY nodes)
+                                    :retval (:retval (aggs 0))
+                                    :score (reduce + 0.0 (concat (clojure.core/map :score (vals prods))
+                                                                 (clojure.core/map :score (vals aggs))))})
                  ::productions prods ::aggregations aggs)]
     (cond-> {:trace t :weight weight}
       (not= op :generate) (assoc :retdiff (if tr (a-diffs 0) diff/unknown-change))
