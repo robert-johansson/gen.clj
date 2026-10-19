@@ -498,3 +498,28 @@
       (let [[m s] (optimal-moments (tr' [0 :x]) (ys 1))]
         (is (not= (tr [0 :x]) (tr' [0 :x])))
         (is (ts/close? (- w' w) (- (- (:score tr') (:score tr)) (ts/number (dc/log-prob (d/normal m s) (tr' [1 :x]))))))))))
+
+(deftest edge-cases-of-the-genparticlefilters-operations
+  (testing "optimal resampling skips particles of weight 0"
+    (let [state {:traces [:a :b :c :d] :log-weights [0.0 ##-Inf 1.0 2.0] :log-ml 0.0}
+          r (pf/resample state {:n 3 :method :optimal :key (rng/key 100)})]
+      (is (= #{:a :c :d} (set (:traces r))))
+      (is (ts/close? (pf/log-ml-estimate state) (pf/log-ml-estimate r)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"positive weight"
+                            (pf/resample (assoc state :log-weights [0.0 ##-Inf ##-Inf 2.0]) {:n 3 :method :optimal})))))
+  (testing "a group of weight 0 dereplicates to its first particle"
+    (let [r (pf/dereplicate (pf/replicate {:traces [:a :b] :log-weights [0.0 ##-Inf] :log-ml 0.0} 2) 2
+                            {:method :sample :key (rng/key 101)})]
+      (is (= [:a :b] (:traces r)))
+      (is (= ##-Inf (second (:log-weights r))))))
+  (testing "a priority of 0 where the weight is not is loud"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"bias"
+                          (pf/resample {:traces [:a :b] :log-weights [0.0 0.0] :log-ml 0.0}
+                                       {:priority (fn [_] [0.0 ##-Inf]) :key (rng/key 102)}))))
+  (testing "misuse"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"layout" (pf/replicate {:traces [:a] :log-weights [0.0]} 2 {:layout :diagonal})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"at least one stratum"
+                          (pf/initialize model [1 0.0] (observation 0) 4 {:strata [] :key (rng/key 103)})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no :proposal"
+                          (pf/step (pf/initialize model [1 0.0] (observation 0) 2 {:key (rng/key 104)})
+                                   [2 0.0] [diff/unknown-change diff/no-change] (observation 1) {:backward move-back})))))

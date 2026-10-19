@@ -46,14 +46,27 @@
 
 (defn- particle-keys [opts n] (rng/split (or (:key opts) (gfi/next-key)) n))
 
+(defn- slots
+  "The group of each of groups × size slots: in contiguous blocks (group g
+   at g·size … g·size + size - 1) or interleaved (group g at g, g + groups,
+   …)."
+  [layout groups size]
+  (let [group-of (case layout
+                   :contiguous #(quot % size)
+                   :interleaved #(mod % groups)
+                   (throw (ex-info (str "The layout is :contiguous or :interleaved, not " (pr-str layout))
+                                   {:layout layout})))]
+    (mapv group-of (range (* groups size)))))
+
 (defn- strata-of
   "The stratum of each of n particles over k strata (GenParticleFilters'
    stratified_map!): ⌊n/k⌋ particles each, in contiguous blocks or
    interleaved, then the remaining particles' strata drawn uniformly."
   [n k layout key]
+  (when-not (pos? k)
+    (throw (ex-info "Stratified initialization needs at least one stratum" {:strata k})))
   (let [b (quot n k)]
-    (into (mapv #(case layout :contiguous (quot % b) :interleaved (mod % k)) (range (* b k)))
-          (w/multinomial (repeat k 0.0) (- n (* b k)) key))))
+    (into (slots layout k b) (w/multinomial (repeat k 0.0) (- n (* b k)) key))))
 
 (defn initialize
   "n particles of model on args, generated with the observations (from the
@@ -61,7 +74,9 @@
    (e.g. from choice-product), the initialization is stratified: each
    particle is constrained to its stratum as well, ⌊n/k⌋ particles to each
    of the k strata (:layout :contiguous, the default, or :interleaved), the
-   rest to strata drawn uniformly, and every weight gains log k."
+   rest to strata drawn uniformly, and every weight gains log k. As with a
+   proposal, a stratified initialization runs one particle at a time and
+   ignores :batched?."
   ([model args observations n] (initialize model args observations n {}))
   ([model args observations n {:keys [proposal proposal-args batched? strata layout] :or {layout :contiguous} :as opts}]
    (if (and batched? (not proposal) (not strata))
@@ -87,13 +102,13 @@
 
 (defn choice-product
   "A choice map for every combination of values (GenParticleFilters'
-   choiceproduct), the first address varying slowest:
-   (choice-product [[:a [1 2]] [:b [true false]]]) gives four choice maps.
-   A map of addresses to values works too."
+   choiceproduct): (choice-product [[:a [1 2]] [:b [true false]]]) gives
+   four choice maps, the first address varying slowest. A map of addresses
+   to values works too, in the map's own order."
   [address-values]
   (reduce (fn [cms [addr vs]] (for [c cms v vs] (cm/set-choice c addr v)))
           [(cm/choicemap)]
-          (seq address-values)))
+          address-values))
 
 (defn- check-discard [discard i]
   (when-not (cm/empty? discard)
@@ -107,6 +122,11 @@
   (if-let [ps (:particles state)]
     (-> state (dissoc :particles) (assoc :traces (batched/traces ps)))
     state))
+
+(defn traces
+  "The particles' traces (scalar traces, also for a batched filter)."
+  [state]
+  (if-let [ps (:particles state)] (batched/traces ps) (:traces state)))
 
 (defn- select-particles
   "The state's particles at the indices idx (batched or not), with the log
@@ -127,6 +147,8 @@
    density added to the weight."
   ([state args argdiffs observations] (step state args argdiffs observations {}))
   ([state args argdiffs observations {:keys [proposal proposal-args backward backward-args] :as opts}]
+   (when (and backward (not proposal))
+     (throw (ex-info "A step's :backward proposal weighs a forward :proposal's changes; there is no :proposal" {})))
    (if-let [ps (and (not proposal) (:particles state))]
      (let [{ps' :particles ws :weights ds :discards}
            (batched/update ps args argdiffs observations (or (:key opts) (gfi/next-key)))]
@@ -191,7 +213,13 @@
                             {:n n :particles n-old})))
         lw-normal (:log-weights (w/normalize lw))
         p (mapv #(Math/exp %) lw-normal)
-        order (vec (sort-by p (range n-old)))
+        ;; a particle of weight 0 is never kept nor drawn
+        order (vec (sort-by p (filter #(pos? (p %)) (range n-old))))
+        n-old (count order)
+        _ (when (> n n-old)
+            (throw (ex-info (str "Optimal resampling to " n " particles needs that many of positive weight; there are "
+                                 n-old)
+                            {:n n :positive n-old})))
         below (vec (reductions clojure.core/+ (map p order)))
         i (or (first (filter (fn [i] (let [reach (+ (/ (below i) (p (order i))) (- n-old i 1))]
                                        (<= reach (+ n (Math/ulp (double reach))))))
@@ -224,24 +252,21 @@
          n-old (count lw)
          n (or n n-old)
          key (or key (gfi/next-key))
-         {:keys [log-total]} (w/normalize lw)
+         {lw-n :log-weights log-total :log-total} (w/normalize lw)
          [parents log-weights]
          (if (= method :optimal)
            (if priority
              (throw (ex-info "Optimal resampling takes no :priority" {:method method}))
              (optimal-parents lw n key))
-           (let [lp (if priority (mapv double (priority lw)) lw)
-                 {lp-total :log-total} (w/normalize lp)
-                 parents (w/resample method lp n key)]
-             [parents
-              ;; log w_a - log π_a - log W: 0 when π are the weights themselves
-              (if priority
-                (mapv #(- (lw %) (- (lp %) lp-total) log-total) parents)
-                (vec (repeat n 0.0)))]))]
+           (let [lp-n (if priority (:log-weights (w/normalize (mapv double (priority lw)))) lw-n)
+                 _ (when (some (fn [i] (and (== ##-Inf (lp-n i)) (> (lw i) ##-Inf))) (range n-old))
+                     (throw (ex-info "A priority of 0 for a particle of positive weight would bias the estimate"
+                                     {:log-weights lw})))
+                 parents (w/resample method lp-n n key)]
+             ;; log W_a - log π_a, normalized: 0 when π are the weights themselves
+             [parents (mapv #(- (lw-n %) (lp-n %)) parents)]))]
      (assoc (select-particles state parents log-weights)
             :log-ml (+ (:log-ml state) (- log-total (Math/log n-old)))))))
-
-(declare traces)
 
 (defn resize
   "The state with n particles, resampled (GenParticleFilters' pf_resize!);
@@ -256,15 +281,15 @@
    A batched state becomes one of scalar traces."
   ([state kernel] (rejuvenate state kernel (gfi/next-key)))
   ([state kernel key]
-   (let [trs (traces state)
-         moved (mapv (fn [tr k] (:trace (kernel tr k))) trs (rng/split key (count trs)))]
-     (-> state (dissoc :particles) (assoc :traces moved)))))
+   (let [state (unbatched state)
+         moved (mapv (fn [tr k] (:trace (kernel tr k))) (:traces state) (rng/split key (count (:traces state))))]
+     (array/eval! (mapv gfi/eval-trace! moved))
+     (assoc state :traces moved))))
 
 (defn reweighting
   "A move-reweight kernel (GenParticleFilters' move_reweight): (fn [trace
-   key] → {:trace trace' :weight w}), w the relative log importance weight
-   of the move, which then weighs it backwards by the same (or another)
-   proposal.
+   key] → {:trace trace' :weight w}), w the move's log importance weight,
+   log p(t')/p(t) - log q_fwd(u; t) + log q_bwd(u'; t').
    - (reweighting selection): regenerate the selection from the internal
      proposal; w is regenerate's weight.
    - (reweighting proposal proposal-args): propose choices from
@@ -313,8 +338,7 @@
    copies are 0 … k-1) or interleaved (:interleaved; they are 0, n, 2n, …)."
   ([state k] (replicate state k {}))
   ([state k {:keys [layout] :or {layout :contiguous}}]
-   (let [n (count (:log-weights state))
-         idx (mapv #(case layout :contiguous (quot % k) :interleaved (mod % n)) (range (* n k)))]
+   (let [idx (slots layout (count (:log-weights state)) k)]
      (select-particles state idx (mapv (vec (:log-weights state)) idx)))))
 
 (defn dereplicate
@@ -330,16 +354,16 @@
          _ (when-not (zero? (rem n-old k))
              (throw (ex-info (str "dereplicate: " n-old " particles are not groups of " k)
                              {:particles n-old :k k})))
-         groups (mapv (fn [g] (case layout
-                                :contiguous (vec (range (* g k) (* (inc g) k)))
-                                :interleaved (vec (range g n-old n))))
-                      (range n))]
+         groups (let [g (slots layout n k)] (mapv (group-by g (range n-old)) (range n)))]
      (case method
        :keepfirst (let [idx (mapv first groups)]
                     (select-particles state idx (mapv (vec (:log-weights state)) idx)))
        :sample (let [lw (host-log-weights state)
-                     idx (mapv (fn [group key] (group (first (w/multinomial (mapv lw group) 1 key))))
-                               groups (rng/split (or key (gfi/next-key)) n))]
+                     ;; a group of weight 0 keeps its first particle, at weight 0
+                     pick (fn [group key] (if (== ##-Inf (log-sum-exp (mapv lw group)))
+                                            (first group)
+                                            (group (first (w/multinomial (mapv lw group) 1 key)))))
+                     idx (mapv pick groups (rng/split (or key (gfi/next-key)) n))]
                  (select-particles state idx (mapv (fn [group] (- (log-sum-exp (mapv lw group)) (Math/log k))) groups)))))))
 
 (defn- host-choices [trace]
@@ -355,10 +379,9 @@
   ([state] (coalesce state {}))
   ([state {:keys [by] :or {by host-choices}}]
    (let [lw (host-log-weights state)
-         groups (reduce (fn [groups [i v]] (update groups v (fnil conj []) i))
-                        {} (map-indexed vector (map by (traces state))))
+         trs (traces state)
          ;; in order of first appearance
-         members (sort-by first (vals groups))
+         members (->> (range (count trs)) (group-by #(by (trs %))) vals (sort-by first))
          log-ratio (- (Math/log (count members)) (Math/log (count lw)))]
      (select-particles state (mapv first members)
                        (mapv (fn [is] (+ (log-sum-exp (mapv lw is)) log-ratio)) members)))))
@@ -418,11 +441,6 @@
   [state]
   (some-> (:particles state) batched/check)
   (+ (:log-ml state) (w/log-mean-exp (:log-weights state))))
-
-(defn traces
-  "The particles' traces (scalar traces, also for a batched filter)."
-  [state]
-  (if-let [ps (:particles state)] (batched/traces ps) (:traces state)))
 
 (defn log-weights [state] (:log-weights state))
 
