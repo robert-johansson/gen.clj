@@ -1164,6 +1164,45 @@
     (MlxRuntime/adoptClosure g compiled)
     g))
 
+(declare device)
+
+(def ^:private cpu-compile
+  "Whether mlx_compile works on the CPU device: nil until the first compile
+   there probes it (cpu-compiles?), or -Dgen.mlx.cpu-compile=true|false."
+  (atom (some-> (System/getProperty "gen.mlx.cpu-compile") Boolean/parseBoolean)))
+
+(defn- cpu-compiles?
+  "Does mlx_compile work on the CPU device here? MLX's CPU compile builds each
+   fused kernel at run time with the system's g++, from a header the wheel
+   ships, and GCC 13 on Linux rejects that header (it redeclares the built-in
+   _Float128: the Jetson Thor, 2026-10-19). The first compile on the CPU
+   device compiles and runs a two-op function; where MLX cannot build it,
+   compile is the identity on the CPU device (the same values, unfused), and
+   a warning says so once."
+  [b]
+  (or @cpu-compile
+      (locking cpu-compile
+        (if (some? @cpu-compile)
+          @cpu-compile
+          (let [probe (compile-fn b (fn [[x]] [(elementwise b :exp [(elementwise b :negative [x] :float32)] :float32)]) nil)
+                works? (try (to-host (first (probe [(from-host b [0.5 1.5] :float32)])))
+                            true
+                            (catch Exception e
+                              (if (re-find #"Failed to compile function" (str (ex-message e) " " (some-> (ex-cause e) ex-message)))
+                                false
+                                (throw e))))]
+            (when-not works?
+              (binding [*out* *err*]
+                (println "gen.backend.mlx: MLX's CPU compile cannot build kernels with this system's g++;"
+                         "array/compile runs functions unfused on the CPU device (docs/array-api.md §13)")))
+            (reset! cpu-compile works?))))))
+
+(defn compiles?
+  "Does array/compile compile on MLX backend b: always on the GPU, and on the
+   CPU device where MLX can build its kernels (see cpu-compiles?)?"
+  [b]
+  (or (not= :cpu (device b)) (cpu-compiles? b)))
+
 (defmacro ^:private guarded
   "body, with an MLX error raised outside an op's own handling as ex-info
    naming op (gen.array's contract: errors are ex-info with data)."
@@ -1173,7 +1212,7 @@
 
 (deftype MlxBackend [^Config config]
   p/ICompiling
-  (-compile [b f opts] (guarded :compile (compile-fn b f opts)))
+  (-compile [b f opts] (if (compiles? b) (guarded :compile (compile-fn b f opts)) f))
 
   p/IBackend
   (-name [_] :mlx)

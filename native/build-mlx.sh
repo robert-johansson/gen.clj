@@ -13,8 +13,9 @@
 # Usage: native/build-mlx.sh [cpu|cuda13]
 #   macOS arm64: the mlx-metal wheel (CPU and Metal); the argument is ignored.
 #   Linux x86_64 / aarch64: cpu (default) uses the mlx-cpu wheel; cuda13 the
-#     mlx-cuda-13 wheel (needs its CUDA runtime libraries; see
-#     docs/research/numerics-backends.md). Untested so far.
+#     mlx-cuda-13 wheel, with the system's CUDA libraries where it has them
+#     and the missing ones fetched from PyPI (below). Tested on aarch64 (the
+#     Jetson AGX Thor, Ubuntu 24.04, CUDA 13.2, 2026-10-19); x86_64 not yet.
 #
 # Requires: curl, unzip, cmake (≥ 3.16), a C++20 compiler, shasum or sha256sum.
 set -euo pipefail
@@ -133,5 +134,51 @@ cmake --install "$build/cmake-$platform"
 for f in "$mlx_root"/lib/*; do
   [ -f "$f" ] && cp -f "$f" "$out/lib/"
 done
+# Linux wheels bundle their own dependencies (BLAS, LAPACK, CUDA support) in
+# <package>.libs, which libmlx's RPATH finds at $ORIGIN/../../<package>.libs:
+# keep that layout relative to $out/lib, rather than editing the binary
+for d in "$build/wheel-$platform"/*.libs; do
+  [ -d "$d" ] || continue
+  rm -rf "$build/$(basename "$d")"
+  cp -R "$d" "$build/"
+done
+
+# CUDA: libmlx links NVIDIA's libraries, which its RPATH finds at
+# $ORIGIN/../../nvidia/<name>/lib (pip's layout). The system's are used
+# where it has them (a CUDA or JetPack install matches its driver); only the
+# missing ones are fetched, from their PyPI wheels at pinned versions (those
+# current with MLX 0.32.2's requirements, 2026-10-19).
+fetch_nvidia() {
+  local pkg=$1 ver=$2 w s u
+  read -r w s u < <(curl -sSf "https://pypi.org/pypi/$pkg/$ver/json" |
+    python3 -I -c "
+import json, sys
+fs = [f for f in json.load(sys.stdin)['urls'] if f['filename'].endswith('.whl') and '$arch' in f['filename']]
+print(fs[0]['filename'], fs[0]['digests']['sha256'], fs[0]['url']) if fs else None
+")
+  [ -n "${w:-}" ] || { echo "no $pkg $ver wheel for $arch" >&2; exit 1; }
+  if [ ! -f "$build/dl/$w" ]; then
+    echo "downloading $w"
+    curl -sSfL -o "$build/dl/$w.part" "$u" && mv "$build/dl/$w.part" "$build/dl/$w"
+  fi
+  [ "$(sha256 "$build/dl/$w")" = "$s" ] || { echo "sha256 mismatch for $w" >&2; exit 1; }
+  unzip -q -o "$build/dl/$w" 'nvidia/*' -d "$build"
+}
+if [ "$variant" = cuda13 ]; then
+  for lib in $(ldd "$out/lib/libmlx.so" | awk '/not found/ {print $1}'); do
+    case "$lib" in
+      libnccl.so.*) fetch_nvidia nvidia-nccl-cu13 2.32.3 ;;
+      libcudnn*) fetch_nvidia nvidia-cudnn-cu13 9.27.0.42 ;;
+      libcublas*) fetch_nvidia nvidia-cublas 13.8.1.7 ;;
+      libcufft*) fetch_nvidia nvidia-cufft 12.4.0.43 ;;
+      libnvrtc*) fetch_nvidia nvidia-cuda-nvrtc 13.4.92 ;;
+      libcudart*) fetch_nvidia nvidia-cuda-runtime 13.4.92 ;;
+      libcuda.so.*) echo "libcuda.so.1 not found: the NVIDIA driver is missing" >&2; exit 1 ;;
+      *) echo "libmlx needs $lib, which this script does not know how to fetch" >&2; exit 1 ;;
+    esac
+  done
+  missing="$(ldd "$out/lib/libmlx.so" | awk '/not found/ {print $1}')"
+  [ -z "$missing" ] || { echo "still missing: $missing" >&2; exit 1; }
+fi
 echo "built $out/lib:"
 ls "$out/lib"

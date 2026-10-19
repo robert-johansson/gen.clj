@@ -237,6 +237,20 @@ Reproduce with `clojure [-J-Dgen.backend=mlx] -M:bench -m gen.mcmc-bench`.
 - **Unexplained:** some compiled float64 steps are slower than expected
   (MALA at N = 10,000: 12.6 ms compiled against 4.8 ms plain; HMC at
   N = 100 barely gains). Bean genclj-h6uu.
+**Native gradients against the tape** (`-J-Dgen.mlx.grad=native`, the same
+benchmark, one run each), per step at a million observations, plain →
+compiled:
+
+| | Metal, tape | Metal, native | MLX CPU, tape | MLX CPU, native |
+|---|---|---|---|---|
+| HMC | 35.3 → 5.9 ms | 25.5 → 7.6 ms | 34.2 → 7.2 ms | 26.5 → 9.0 ms |
+| MALA | 5.8 → 4.7 ms | 6.0 → 2.8 ms | 5.9 → 5.6 ms | 7.4 → 3.1 ms |
+
+At N = 10,000 native is a little faster nearly everywhere; on the scalar
+linear regression of the inference benchmark (22 sites), plain HMC takes
+1918 ms native against 2201 ms with the tape, compiled 317 against 335 ms.
+Mixed, so the tape stays the default (docs/array-api.md §8).
+
 - **Compile on the GPU.** It pays off for HMC at every size (6–8×), and
   MALA gains 1.2–1.7×.
 - **The compiled kernel also does less work.** At each leapfrog step the

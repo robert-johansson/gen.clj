@@ -457,7 +457,10 @@
                  (str (try (eval '(gen.dynamic/gen [xs] (->> xs (map-indexed (fn [i x] (trace [:y i] (gen.dist/normal x 1))))) nil))
                            nil (catch Throwable e (.getMessage ^Throwable (or (.getCause e) e))))))))
   (testing "B7: an infinite lazy return value costs little"
-    (let [m (gen [] (let [s (trace :s (d/normal 0 1))] (map #(* s %) (range))))
+    ;; the handler forces only the first 10,000 elements; they are host
+    ;; numbers, so the cost is the walk's, not 10,000 backend ops' (which
+    ;; on MLX would measure the machine: 50 ms a run on the Jetson's cores)
+    (let [m (gen [] (let [s (trace :s (d/normal 0 1))] (map #(if (zero? %) s (inc %)) (range))))
           t0 (System/nanoTime)]
       (dotimes [i 20] (gfi/simulate m [] (rng/key i)))
       (is (< (/ (- (System/nanoTime) t0) 1e6) 400.0) "under 20 ms a run"))))

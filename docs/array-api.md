@@ -274,7 +274,14 @@ needs, taken from GenMLX's measured call counts
     Java closures by an upcall into a JVM shutting down: a crash, and then a
     JVM error reporter that spun instead of exiting (test
     `compiled-native-gradients-survive-the-exit`).
-  - It is opt-in until the whole battery passes in native mode.
+  - **Opt-in, measured (2026-10-19).** The whole battery passes in native
+    mode on Metal (294 tests). Against the tape (`docs/benchmarks.md`):
+    faster for plain HMC (about 25% at a million observations) and compiled
+    MALA (1.7×), slower for compiled HMC (25–30%), level or close elsewhere.
+    The tape stays the default: its gradients are the same rules on every
+    backend, where native ones depend on MLX's VJPs (ties, the linear algebra
+    it cannot differentiate, the compile cache at exit). Native mode is the
+    choice for nested gradients, which the tape does not do.
 - **Reserved names:** `vjp`, `jvp`, `custom-vjp`, `vmap`.
 - **`array/compile`** (2026-10-19, bean genclj-8b88):
   - **On MLX.** `(array/compile f)` traces f once per input structure, shapes
@@ -659,6 +666,15 @@ The decisions are §12 items 15–18, for the owner's review.*
   second step, 29.7 → 34.9 ms per step, while its compiled steps make few
   new arrays and do not (`docs/benchmarks.md`). A larger
   `gen.mlx.gc-new-bytes` trades memory for fewer pauses.
+- **Compile on MLX's CPU device needs a compatible g++** (2026-10-19). MLX
+  builds each fused CPU kernel at run time with the system's g++, from a
+  header the wheel ships, and GCC 13 on Linux rejects that header (it
+  redeclares the built-in `_Float128`). The first compile on the CPU device
+  probes this with a two-op function; where MLX cannot build it,
+  `array/compile` is the identity on the CPU device (the same values,
+  unfused) and a warning says so once. `gen.backend.mlx/compiles?` tells;
+  `-Dgen.mlx.cpu-compile=true|false` skips the probe. Metal and CUDA are
+  unaffected (bean genclj-hjzh).
 - **MLX's own limits are bounded** when the namespace loads (2026-10-19).
   MLX defaults both to all of RAM: its buffer cache (freed buffers kept for
   reuse) and its memory limit (past which it frees the cache and waits for

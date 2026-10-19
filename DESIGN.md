@@ -445,6 +445,11 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     depends on the enumerated choices is a loud error, as is a choice made
     by a callee at an address (wrap the callee instead). Batched, it is the
     same code under the batch tracer.
+- **MLX's CPU compile, where the system's g++ cannot build MLX's kernels,
+  falls back to the identity** (2026-10-19, found on the Jetson Thor: GCC 13
+  rejects the header MLX's wheel ships). Probed once, with a warning; values
+  are unchanged, only unfused. Not patched in MLX, and no g++ wrapper: a
+  watch bean (genclj-hjzh) revisits it with newer wheels.
 - **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
   `(array/item x)`, the namespace's last segment, as the Clojure style guide
   has it. It replaced `a`, which the owner found ugly (2026-10-18). The

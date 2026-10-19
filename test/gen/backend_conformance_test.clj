@@ -32,6 +32,7 @@
 (def float-dt (:float (p/-defaults tested)))
 (def int-dt (:int (p/-defaults tested)))
 (def f64? (= :float64 float-dt))
+(def flushes? (ts/flushes-subnormals?))
 
 ;; ---------------------------------------------------------------------------
 ;; Running one computation on both backends
@@ -74,6 +75,20 @@
             nil (update r :value round)
             r))))
 
+(defn- flushed
+  "A reference result with its float32 subnormals flushed to zero (keeping
+   their sign) where the tested backend flushes them (Metal): the square of
+   5.4e-20 is one, and the generators keep only subnormal inputs out."
+  [r]
+  (cond (vector? r) (mapv flushed r)
+        (and flushes? (#{:float32 nil} (:dtype r)))
+        (update r :value (fn flush [v]
+                           (cond (sequential? v) (mapv flush v)
+                                 (and (instance? Double v) (< 0.0 (Math/abs (double v)) Float/MIN_NORMAL))
+                                 (* 0.0 (Math/signum (double v)))
+                                 :else v)))
+        :else r))
+
 (defn- close?
   "x and y equal within atol + rtol·|y| (NaN equal to NaN, infinities exact)."
   [rtol atol x y]
@@ -105,7 +120,7 @@
   (let [attempt (fn [b] (try {:ok (run-on b f specs)}
                              (catch clojure.lang.ExceptionInfo e {:error (ex-data e)})))
         t (attempt tested)
-        r (update (attempt reference) :ok #(some-> % as-tested-defaults))]
+        r (update (attempt reference) :ok #(some-> % as-tested-defaults flushed))]
     (cond (and (:ok t) (:ok r)) (or (agree? tol (:ok t) (:ok r))
                                     (do (println "disagree:" {:tested (:ok t) :reference (:ok r) :specs specs}) false))
           (and (:error t) (:error r)) (or (not (contains? (:error r) :shapes))

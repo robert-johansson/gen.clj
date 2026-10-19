@@ -166,13 +166,20 @@
           f (array/compile (fn [x] (swap! traces inc) (array/sum (array/exp x))))]
       (array/with-backend b
         (let [x (array/array [0.0 1.0 2.0])]
-          (dotimes [_ 5] (array/->clj (f x)))
-          (is (= 1 @traces) "traced on the first call, replayed after")
-          (f (array/array [1.0 2.0]))
-          (is (= 2 @traces) "a new shape traces again")
-          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"reads an array's value on the host"
-                                ((array/compile (fn [x] (if (array/truthy? (array/> (array/sum x) 0)) x (array/negate x)))) x))
-              "a host read inside is loud"))))))
+          (if ((requiring-resolve 'gen.backend.mlx/compiles?) b)
+            (do
+              (dotimes [_ 5] (array/->clj (f x)))
+              (is (= 1 @traces) "traced on the first call, replayed after")
+              (f (array/array [1.0 2.0]))
+              (is (= 2 @traces) "a new shape traces again")
+              (is (thrown-with-msg? clojure.lang.ExceptionInfo #"reads an array's value on the host"
+                                    ((array/compile (fn [x] (if (array/truthy? (array/> (array/sum x) 0)) x (array/negate x)))) x))
+                  "a host read inside is loud"))
+            ;; where MLX cannot build CPU kernels (GCC 13 on Linux), compile
+            ;; runs the function itself
+            (do
+              (is (array/allclose? (array/sum (array/exp x)) (f x)))
+              (is (= 1 @traces) "called, not traced"))))))))
 
 ;; held until the JVM exits, as gen.inference.mcmc's compiled steps are: a
 ;; compiled function erases its cache entries when it is freed
