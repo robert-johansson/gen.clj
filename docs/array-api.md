@@ -264,6 +264,14 @@ needs, taken from GenMLX's measured call counts
     - Metal, a million: 9.8 → 0.97 ms and 229 → 21 ms (the JVM backend
       takes 256 ms).
     - The MLX CPU: 2–8×.
+  - **In inference:** `(mcmc/hmc tr sel {:compile? true})` runs its L
+    leapfrog steps as one compiled function of the selected values and the
+    other choices, cached per model, arguments, structure, L and eps. A model
+    that reads a value on the host falls back to the step-at-a-time kernel,
+    which makes the same moves. Measured on Metal, a million-element latent:
+    31.6 → 7.1 ms per HMC step (the JVM backend takes 150 ms). It is opt-in
+    because the first call per structure pays for the trace and compile. MALA,
+    MH and the particle filter's steps remain (bean genclj-8b88).
   - `vmap` is not needed by the core: batching is shape-based, as in GenMLX.
 
 ## 8a. Branching on values

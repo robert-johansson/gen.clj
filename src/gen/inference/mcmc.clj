@@ -20,7 +20,8 @@
             [gen.dist.core :as dc]
             [gen.gfi :as gfi]
             [gen.gradients :as grad]
-            [gen.random :as rng]))
+            [gen.random :as rng]
+            [gen.selection :as sel]))
 
 (set! *warn-on-reflection* true)
 
@@ -68,12 +69,84 @@
          bwd-mu (+ v' (* tau g'))]
      (accept trace t' (+ (- weight (normal-lp v' fwd-mu sd)) (normal-lp v bwd-mu sd)) k-accept))))
 
+(declare hmc*)
+
+(defn- leapfrog-fn
+  "L leapfrog steps of the log density of gf on args in the selected values,
+   as a function of arrays only (for a/compile): [v p others] → [v' p'],
+   with v the flat selected values (shaped by proto), p the momenta and
+   others the other choices as a map."
+  [gf args proto L eps]
+  (let [lp (fn [v others] (:weight (gfi/assess gf args (cm/merge (cm/from-map others) (cm/from-array proto v)))))
+        grad-v (a/grad lp)
+        half (/ eps 2.0)]
+    (fn [v p others]
+      (loop [i 0 v v p p g (grad-v v others)]
+        (if (< i (long L))
+          (let [p (+ p (* half g))
+                v (+ v (* eps p))
+                g (grad-v v others)]
+            (recur (inc i) v (+ p (* half g)) g))
+          [v p])))))
+
+(def ^:private leapfrogs
+  "Compiled leapfrog integrators by model, arguments, structure and step
+   settings (the most recent few), or ::plain where compiling failed."
+  (atom {}))
+
+(defn- leapfrog-key [trace proto others L eps]
+  (let [structure (fn [c] (a/tree-map (fn [x] [(a/shape x) (a/dtype x)]) (cm/to-map c)))]
+    [(:gen-fn trace) (:args trace) (structure others) (structure proto) L eps]))
+
+(defn- compiled-leapfrog
+  "The compiled leapfrog-fn for this trace's model, arguments and choice
+   structure, or nil when the model cannot be compiled (it reads values on
+   the host)."
+  [trace proto others L eps]
+  (let [k (leapfrog-key trace proto others L eps)
+        f (get @leapfrogs k)]
+    (cond (= f ::plain) nil
+          f f
+          :else (let [f (a/compile (leapfrog-fn (:gen-fn trace) (:args trace) proto L eps))]
+                  (swap! leapfrogs (fn [m] (assoc (if (>= (count m) 16) {} m) k f)))
+                  f))))
+
+(defn- forget-leapfrog! [trace proto others L eps]
+  (swap! leapfrogs assoc (leapfrog-key trace proto others L eps) ::plain))
+
 (defn hmc
   "Hamiltonian Monte Carlo on the selected choices: L leapfrog steps of size
-   eps with standard normal momenta. Options: :L (10), :eps (0.1)."
+   eps with standard normal momenta. Options: :L (10), :eps (0.1),
+   :compile? (false): run the L steps as one compiled function (a/compile:
+   one MLX graph on the MLX backend, the same steps on the JVM backend), a
+   function of the selected values and the other choices, cached per model,
+   arguments and structure. A model that reads a value on the host cannot
+   be compiled and runs the steps one at a time."
   ([trace selection] (hmc trace selection nil))
   ([trace selection opts] (hmc trace selection opts (or (:key opts) (gfi/next-key))))
-  ([trace selection {:keys [L eps] :or {L 10 eps 0.1}} key]
+  ([trace selection {:keys [L eps compile?] :or {L 10 eps 0.1}} key]
+   (if compile?
+     (let [[k-momenta k-update k-accept] (rng/split key 3)
+           [proto v _] (flat-gradient trace selection)
+           others (sel/get-selected (:choices trace) (sel/complement selection))
+           p0 (rng/normal k-momenta (a/shape v))
+           f (compiled-leapfrog trace proto others L eps)
+           result (when f
+                    (try (f v p0 (cm/to-map others))
+                         (catch clojure.lang.ExceptionInfo e
+                           (if (= :compile (:op (ex-data e)))
+                             (do (forget-leapfrog! trace proto others L eps) nil)
+                             (throw e)))))]
+       (if-let [[v' p] result]
+         (let [[t' _] (move-to trace proto v' k-update)
+               kinetic (fn [p] (normal-lp p 0.0 1.0))]
+           (accept trace t' (+ (- (:score t') (:score trace)) (- (kinetic p) (kinetic p0))) k-accept))
+         (hmc trace selection {:L L :eps eps} key)))
+     (hmc* trace selection L eps key))))
+
+(defn- hmc*
+  "hmc, one leapfrog step at a time through the trace."
+  [trace selection L eps key]
    (let [[k-momenta k-update k-accept] (rng/split key 3)
          [proto v g] (flat-gradient trace selection)
          p0 (rng/normal k-momenta (a/shape v))
@@ -86,7 +159,7 @@
                       (recur (inc i) t v g (+ p (* (/ eps 2.0) g))))
                     [t p]))
          kinetic (fn [p] (normal-lp p 0.0 1.0))]
-     (accept trace t' (+ (- (:score t') (:score trace)) (- (kinetic p) (kinetic p0))) k-accept))))
+     (accept trace t' (+ (- (:score t') (:score trace)) (- (kinetic p) (kinetic p0))) k-accept)))
 
 (defn map-optimize
   "One step of gradient ascent on the log density of the selected choices,
