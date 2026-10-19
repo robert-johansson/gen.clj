@@ -184,3 +184,37 @@
     (is (< (first history) (last history)) "the log density rises")
     (is (< (ts/abs (- (:w store) w)) 1e-3))
     (is (< (ts/abs (- (:b store) (- my (* w mx)))) 1e-3))))
+
+(def ^:private conjugate
+  (gen [] (let [mu (trace :mu (d/normal 0 1))] (trace :y (d/normal mu 1)) mu)))
+
+(def ^:private amortized
+  "A proposal for mu given y: N(a·y + b, exp(log-s))."
+  (gen [y] (trace :mu (d/normal (+ (* (param :a) y) (param :b)) (array/exp (param :log-s))))))
+
+(deftest lecture-trains-a-proposal-toward-the-posterior
+  ;; mu | y ~ N(y/2, √½): the sleep phase's optimum is a = 1/2, b = 0,
+  ;; log-s = log √½
+  (let [opt (learn/adam {:lr 0.02})
+        y-of (fn [tr] [(tr :y)])
+        store (loop [i 0 store {:a 0.0 :b 0.3 :log-s 0.5} state (learn/init opt {:a 0.0 :b 0.3 :log-s 0.5}) key (rng/key 21)]
+                (if (< i 1500)
+                  (let [[k k-next] (rng/split key)
+                        {:keys [grads]} (learn/lecture-batched conjugate [] amortized store y-of 16 k)
+                        [store state] (learn/step opt state store grads)]
+                    (recur (inc i) store state k-next))
+                  store))]
+    (is (< (ts/abs (- (:a store) 0.5)) 0.05) (str store))
+    (is (< (ts/abs (:b store)) 0.05) (str store))
+    (is (< (ts/abs (- (:log-s store) (Math/log (Math/sqrt 0.5)))) 0.05) (str store)))
+  (testing "one lecture: the proposal's score on the model's own latent choice"
+    (let [{:keys [score grads]} (learn/lecture conjugate [] amortized {:a 0.5 :b 0.0 :log-s 0.0} (fn [tr] [(tr :y)]) (rng/key 3))]
+      (is (ts/finite? score))
+      (is (= #{:a :b :log-s} (set (keys grads)))))))
+
+(deftest one-step-updates-several-stores
+  ;; Gen.jl's ParamUpdate over gf => params pairs: stores nested in a map
+  (let [opt (learn/sgd {:lr 0.1})
+        [stores _] (learn/step opt nil {:model {:w 1.0} :proposal {:a 2.0}} {:model {:w 0.5} :proposal {:a -1.0}})]
+    (is (ts/close? 1.05 (get-in stores [:model :w])))
+    (is (ts/close? 1.9 (get-in stores [:proposal :a])))))

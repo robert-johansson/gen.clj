@@ -10,11 +10,21 @@
        (let [[store state] (step opt state store grads)] …))
 
    Stores and gradients are trees (maps of names to arrays or numbers) of
-   the same shape."
+   the same shape. So one step updates several generative functions' stores
+   together (Gen.jl's ParamUpdate with gf => params pairs) when they are
+   nested in a map, {:model store :proposal store}, and a subset of a
+   store's parameters when only those are given.
+
+   lecture and lecture-batched are the sleep phase of wake-sleep (Gen.jl's
+   lecture! and lecture_batched!): the proposal's log density of the
+   latent choices of the model's own traces, with its gradient, to train a
+   proposal toward the model's posterior."
   (:refer-clojure :exclude [+ - * /])
   (:require [gen.array :as array :refer [+ - * /]]
             [gen.dynamic :as dyn]
             [gen.gfi :as gfi]
+            [gen.gradients :as grad]
+            [gen.inference.proposal :as proposal]
             [gen.random :as rng]))
 
 (set! *warn-on-reflection* true)
@@ -97,3 +107,27 @@
                       (split k-epoch batches-per-epoch))]
           (recur (inc epoch) store state (conj history score) k-next))
         {:store store :history history}))))
+
+(defn lecture
+  "The sleep phase of wake-sleep (Gen.jl's lecture!): a trace of model on
+   model-args, and the proposal, with its parameter store, scored on the
+   choices of that trace it makes given (q-args-fn trace). {:score log q of
+   those choices, :grads its gradient with respect to the store}. Ascending
+   it trains the proposal toward the model's posterior given what q reads."
+  [model model-args proposal store q-args-fn key]
+  (let [[k-simulate k-generate] (rng/split key)
+        tr (gfi/simulate model model-args k-simulate)
+        q (dyn/with-params proposal store)
+        q-args (q-args-fn tr)
+        choices (proposal/choices-of q q-args (:choices tr))
+        q-trace (:trace (gfi/generate q q-args choices k-generate))]
+    {:score (:score q-trace) :grads (grad/param-gradients q-trace)}))
+
+(defn lecture-batched
+  "lecture over n of the model's traces: the mean score and gradient
+   (Gen.jl's lecture_batched!)."
+  [model model-args proposal store q-args-fn n key]
+  (let [runs (mapv #(lecture model model-args proposal store q-args-fn %) (rng/split key n))
+        mean (fn [g] (array/tree-map #(/ % (double n)) g))]
+    {:score (/ (reduce + (map #(double (array/item (:score %))) runs)) n)
+     :grads (mean (reduce #(tree-map2 + %1 %2) (map :grads runs)))}))

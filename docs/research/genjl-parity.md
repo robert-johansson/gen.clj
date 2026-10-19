@@ -112,9 +112,9 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 ### 1i. Parameters, optimizers, learning (Gen.jl core)
 | Capability | GenMLX | gen.clj |
 |---|---|---|
-| `ParamUpdate(conf, gf=>params)`, `apply!`, `FixedStepGradientDescent`, `GradientDescent(init, beta)`, `ADAM`, `init_update_state`/`apply_update!` | P: `learning.cljs` sgd/adam/train; `nn/optimizer`; no decaying GD; no per-GF ParamUpdate | core |
+| `ParamUpdate(conf, gf=>params)`, `apply!`, `FixedStepGradientDescent`, `GradientDescent(init, beta)`, `ADAM`, `init_update_state`/`apply_update!` | P: `learning.cljs` sgd/adam/train; `nn/optimizer`; no decaying GD; no per-GF ParamUpdate | core. *gen.clj:* `gen.learning` sgd, gradient-descent, adam, `init`/`step` (M1); several generative functions' stores step together nested in a map, a subset when only it is given (M4, tested) |
 | `train!(gf, data_gen, update, epochs, ...)` | P: `learning/train`, `amortized.cljs train-proposal` | core |
-| `lecture!`, `lecture_batched!` (sleep phase); wake phase via `train!` | Y: `learning.cljs` wake-sleep | soon |
+| `lecture!`, `lecture_batched!` (sleep phase); wake phase via `train!` | Y: `learning.cljs` wake-sleep | soon. *gen.clj (M4, 2026-10-19):* `learning/lecture`, `lecture-batched`: the proposal scored on the latent choices of the model's own traces (found by replaying it), with its parameter gradients; trains a proposal to the conjugate posterior |
 
 ### 1j. Inference library (Gen.jl core)
 | Capability | GenMLX | gen.clj |

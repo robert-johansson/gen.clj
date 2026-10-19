@@ -58,6 +58,15 @@
                       {:visited @visited})))
     (when-not @missing? [(:score tr) @visited])))
 
+(defn choices-of
+  "The choices of choices that q, run on qargs, would make: found by
+   replaying q against them. A choice q makes that choices lack is an error
+   (q could not have proposed them)."
+  [q qargs choices]
+  (if-let [[_ paths] (replay q qargs choices)]
+    (sel/get-selected choices (sel/from-paths paths))
+    (throw (ex-info "choices-of: the proposal makes a choice the given choices lack" {:qargs qargs}))))
+
 (defn- overlap! [sigma paths]
   (let [given (set (cm/addresses sigma))]
     (when-let [p (some given paths)]
