@@ -230,9 +230,10 @@
         (is (= fwd u2))
         (is (< (ts/abs (+ w1 w2)) 1e-12))))))
 
-(deftest compiled-hmc-makes-the-same-moves
-  ;; :compile? runs the L steps as one compiled function (one MLX graph on
-  ;; MLX); it must move as the step-at-a-time integrator does
+(deftest compiled-kernels-make-the-same-moves
+  ;; :compile? runs HMC's L steps, or MALA's proposal and its densities, as
+  ;; one compiled function (one MLX graph on MLX); each must move as the
+  ;; plain kernel does
   (let [obs (cm/choicemap :y 1.3)
         branching (gen [] (let [x (trace :x (d/normal 0 1))]
                             (trace :y (d/normal (if (a/truthy? (a/> x 0)) x (a/negate x)) 1))))]
@@ -243,8 +244,11 @@
                                                 (sel/select :x)]]]
       (testing label
         (let [tr (:trace (gfi/generate gf [] observations (rng/key 1)))]
-          (doseq [k (range 5)]
-            (let [plain (mcmc/hmc tr selection {:L 5 :eps 0.2} (rng/key k))
-                  compiled (mcmc/hmc tr selection {:L 5 :eps 0.2 :compile? true} (rng/key k))]
-              (is (= (:accepted? plain) (:accepted? compiled)))
-              (is (ts/close? (:score (:trace plain)) (:score (:trace compiled)))))))))))
+          (doseq [[kernel move] [[:hmc (fn [opts key] (mcmc/hmc tr selection (merge {:L 5 :eps 0.2} opts) key))]
+                                 [:mala (fn [opts key] (mcmc/mala tr selection 0.3 (assoc opts :key key)))]]
+                  k (range 5)]
+            (let [plain (move nil (rng/key k))
+                  compiled (move {:compile? true} (rng/key k))]
+              (is (= (:accepted? plain) (:accepted? compiled)) (str kernel))
+              (is (ts/close? (:log-alpha plain) (:log-alpha compiled)) (str kernel))
+              (is (ts/close? (:score (:trace plain)) (:score (:trace compiled))) (str kernel)))))))))

@@ -39,6 +39,17 @@
       w
       (reduce + w (map (fn [g v] (a/sum (* g v))) (a/tree-leaves retgrad) (a/tree-leaves rv))))))
 
+(defn continuous-selection
+  "The trace's choices at selection, which must be continuous (loudly): the
+   values choice-gradients differentiates."
+  [trace selection]
+  (let [selected (sel/get-selected (:choices trace) selection)]
+    (doseq [p (cm/addresses selected)]
+      (when-not (float-tree? (cm/get-choice selected p))
+        (throw (ex-info (str "choice-gradients: the choice at " p " is not continuous")
+                        {:path p :value (cm/get-choice selected p)}))))
+    selected))
+
 (defn choice-gradients
   "The gradient of the trace's log density (plus ⟨retgrad, retval⟩) with
    respect to the selected choices, and to the arguments at :argnums (none
@@ -51,12 +62,8 @@
   ([trace selection retgrad] (choice-gradients trace selection retgrad nil))
   ([trace selection retgrad {:keys [argnums]}]
    (let [{gf :gen-fn args :args choices :choices} trace
-         selected (sel/get-selected choices selection)
+         selected (continuous-selection trace selection)
          others (sel/get-selected choices (sel/complement selection))]
-     (doseq [p (cm/addresses selected)]
-       (when-not (float-tree? (cm/get-choice selected p))
-         (throw (ex-info (str "choice-gradients: the choice at " p " is not continuous")
-                         {:path p :value (cm/get-choice selected p)}))))
      (doseq [i argnums]
        (when-not (float-tree? (nth args i))
          (throw (ex-info (str "choice-gradients: argument " i " is not a tree of floats") {:argnum i}))))
