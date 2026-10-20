@@ -585,10 +585,16 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   thesis redraws ω at every update (§4.5.1), so its identity updates need
   not weigh 0. Both are exact: keeping ω is the null move on (τ, ω),
   redrawing it the pseudo-marginal refresh. This rule, GenMLX's
-  (`encapsulated.cljs`), keeps one set of laws for every generative
+  (`encapsulated.cljs`), keeps the identity laws (an identity update
+  weighs 0, regenerating nothing changes nothing) for every generative
   function, lets Map, Unfold and the static language skip unchanged calls,
-  and reruns an estimator only when its inputs change. The thesis's
-  Eqs. 4.3–4.16 are laws.
+  and reruns an estimator only when its inputs change. Laws that compare
+  separate runs (assess against a trace's score, generate with every
+  choice against it, propose against assess, an update and its reverse)
+  hold only in expectation for a function with ω, under either rule, since
+  each run draws its own ω. Such functions get their own law set: the
+  pointwise laws without those, and the thesis's Eqs. 4.3–4.16 as
+  statistical laws.
 - **The static modeling language** (Gen.jl's `@gen (static)`; owner,
   2026-10-20): a flag on `gen`, `(gen ^:static [args] (let [...] ret))`,
   not a second macro or a second semantics. The body is an ordinary `gen`
