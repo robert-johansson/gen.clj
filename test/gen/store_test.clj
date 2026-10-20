@@ -274,19 +274,56 @@
 (deftest a-batched-trace-given-another-gen-fn-is-revised
   ;; batched, per-particle from the start, and batched then falling back
   ;; (review 6, R6-2: the last two ran the old gen-fn, or rebuilt the old
-  ;; traces under the new one, with weight 0)
+  ;; traces under the new one, with weight 0); from fresh particles, and
+  ;; from particles a select or a third update left unchecked (review 7,
+  ;; R7-3: their spot check ran the old trace under the new gen-fn, a false
+  ;; divergence error from scores, traces and the fallback)
   (doseq [[label before after batched-update?]
           [["batched" (dyn/with-params static-model {:w 1.0}) (dyn/with-params static-model {:w 5.0}) true]
            ["per-particle" (dyn/with-params untraced-model {:w 1.0}) (dyn/with-params untraced-model {:w 5.0}) false]
-           ["batched, then falling back" (dyn/with-params static-model {:w 1.0}) (dyn/with-params untraced-model {:w 5.0}) false]]]
-    (testing label
-      (let [ps (batched/simulate before [] 4 (rng/key 1))
-            {ps2 :particles ws :weights} (batched/update (assoc ps :gen-fn after) [] [] cm/EMPTY (rng/key 2))]
+           ["batched, then falling back" (dyn/with-params static-model {:w 1.0}) (dyn/with-params untraced-model {:w 5.0}) false]]
+          [made particles]
+          [["fresh" identity]
+           ["after a select" #(batched/select [true false true false]
+                                              (:particles (batched/update % [] [] (cm/choicemap :x 0.5) (rng/key 3))) %)]
+           ["after three updates" (fn [ps] (reduce #(:particles (batched/update %1 [] [] (cm/choicemap :x %2) (rng/key 4)))
+                                                   ps [0.1 0.2 0.3]))]]]
+    (testing [label made]
+      (let [ps (particles (batched/simulate before [] 4 (rng/key 1)))
+            swapped (assoc ps :gen-fn after)
+            {ps2 :particles ws :weights} (batched/update swapped [] [] cm/EMPTY (rng/key 2))]
         (is (= batched-update? (batched/batched? ps2)))
+        (is (= (ts/host (batched/scores ps)) (ts/host (batched/scores swapped))) "the swapped particles' scores are their makers'")
         (doseq [[t0 t1 w] (map vector (batched/traces ps) (batched/traces ps2) (ts/host ws))]
           (is (identical? after (:gen-fn t1)))
           (is (consistent? after t1))
-          (is (ts/close? (- (assessed after t1) (ts/number (:score t0))) w)))))))
+          (is (ts/close? (- (assessed after t1) (ts/number (:score t0))) w)))
+        (testing "and their traces, given the new gen-fn, update by it (review 7, G57: batched ones claimed the old)"
+          (doseq [t (batched/traces swapped)]
+            (let [{u :trace w :weight} (gfi/update t cm/EMPTY (rng/key 5))]
+              (is (identical? after (:gen-fn t)))
+              (is (ts/close? (- (assessed after u) (ts/number (:score t))) w)))))))))
+
+(deftest a-select-keeps-each-particles-maker
+  ;; select keeps each particle's trace, by its maker, as the per-particle
+  ;; path does (review 7, R7-5: the batched path rebuilt them by ps's
+  ;; gen-fn, so particles of a swap, never updated, then weighed 0)
+  (doseq [[label before after] [["batched" (dyn/with-params static-model {:w 1.0}) (dyn/with-params static-model {:w 5.0})]
+                                ["per-particle" (dyn/with-params untraced-model {:w 1.0}) (dyn/with-params untraced-model {:w 5.0})]]
+          :let [swapped (assoc (batched/simulate before [] 4 (rng/key 1)) :gen-fn after)
+                mask [true false true false]]
+          [made where-true elsewhere]
+          [;; an MH step on swapped particles: proposed ones (made by after), and swapped ones (by before)
+           ["of two makers" (:particles (batched/update swapped [] [] cm/EMPTY (rng/key 2))) swapped]
+           ;; two populations swapped alike: one maker, which the batched path rebuilds by
+           ["of one maker" swapped (assoc (batched/simulate before [] 4 (rng/key 6)) :gen-fn after)]]]
+    (testing [label made]
+      (let [kept (batched/select mask where-true elsewhere)
+            olds (mapv #(ts/number (:score (if %1 %2 %3))) mask (batched/traces where-true) (batched/traces elsewhere))
+            {ws :weights u :particles} (batched/update kept [] [] cm/EMPTY (rng/key 3))]
+        (is (ts/close? (array/array olds) (batched/scores kept)) "each particle's score by its maker")
+        (doseq [[old t w] (map vector olds (batched/traces u) (ts/host ws))]
+          (is (ts/close? (- (assessed after t) old) w)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; A store that decides a callee's structure (review 5, R5-2, mutation M7b)
