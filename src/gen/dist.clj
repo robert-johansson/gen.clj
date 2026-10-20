@@ -16,9 +16,11 @@
                                      lgamma log-beta xlogy xlog1py logical-and logical-or]]
             [gen.array.dtype :as dt]
             [gen.array.linalg :as la]
+            [gen.array.protocols :as p]
             [gen.array.shape :as sh]
             [gen.dist.core :as dc :refer [defdist]]
-            [gen.random :as rng]))
+            [gen.random :as rng])
+  (:import [gen.array.protocols IBatchedValue]))
 
 (set! *warn-on-reflection* true)
 
@@ -168,10 +170,57 @@
       (guard (logical-and (>= v (array/take bounds 0)) (<= v (array/take bounds n)))
              (- (log (array/take probs i)) (log (- (array/take bounds (+ i 1)) (array/take bounds i))))))))
 
+(def ^:private machine-epsilon {:float32 (double (Math/ulp (float 1.0))) :float64 (Math/ulp 1.0)})
+
+(defn- factored-dtype
+  "The precision cov is factored in: float32 when it or the default
+   backend's floats are (host data become the default backend's arrays),
+   else float64."
+  [cov]
+  (if (some #{:float32} [(array/dtype cov) (dc/float-dtype (dc/backend-of))]) :float32 :float64))
+
+(defn- positive-definite?
+  "Is the symmetric a (each matrix of a batch) positive definite, as far as
+   dtype's rounding can tell? A Cholesky factor L does not show it alone: a
+   singular matrix can have one through rounding (2·ones(2, 2)'s last pivot
+   is 4e-16, not 0). So the correlation matrix H of L·Lᵀ must also have no
+   eigenvalue within the rounding error of an n-term sum, n·ε: trace(H⁻¹),
+   between 1/λmin and n/λmin, is below 1/(n·ε)."
+  [a dtype]
+  (let [n (peek (array/shape a))
+        eye (array/with-backend (array/backend a) (array/eye n))
+        ;; H⁻¹ = MᵀM for M = L⁻¹·diag(√aⱼⱼ); a NaN factor fails the comparison
+        m (la/solve-triangular (la/cholesky a) (* eye (array/expand-dims (sqrt (la/diagonal a)) -2)))]
+    (array/all-true? (< (* n (machine-epsilon dtype) (array/sum (square m) {:axis [-2 -1]})) 1.0))))
+
+(defn- host-max
+  "The largest element of x on the host, across every particle of a batched
+   value (as array/all-true? reads one)."
+  ^double [x]
+  (double (array/item (array/max (if (instance? IBatchedValue x) (p/-all-particles x) x)))))
+
+(defn- suggested-jitter
+  "The smallest jitter, 1, 2 or 5 times a power of ten from ε times a's
+   largest diagonal entry up to that entry, that lets positive-definite?
+   pass once added to a's diagonal; nil when a's factor fails (no jitter at
+   the dtype's scale mends an indefinite matrix) or none does."
+  [a dtype]
+  (when-not (array/any-true? (array/isnan (la/cholesky a)))
+    (let [eye (array/with-backend (array/backend a) (array/eye (peek (array/shape a)) {:dtype (array/dtype a)}))
+          top (host-max (la/diagonal a))
+          lo (* (machine-epsilon dtype) top)]
+      (->> (for [e (iterate inc (long (Math/floor (Math/log10 lo)))) m [1 2 5]] (Double/parseDouble (str m "e" e)))
+           (drop-while #(< % lo))
+           (take-while #(<= % top))
+           (filter #(positive-definite? (+ a (* % eye)) dtype))
+           first))))
+
 (defdist mvnormal
   "mvnormal(mu, cov): the multivariate normal with mean vector mu and
    covariance matrix cov (batched over leading axes). A concrete cov must be
-   symmetric and positive definite."
+   symmetric and positive definite, also to the precision it is factored in;
+   when its factor exists but is too ill-conditioned, the error suggests a
+   jitter for its diagonal."
   [mu cov]
   (validate (dc/check (and (<= 1 (array/ndim mu)) (<= 2 (array/ndim cov))
                            (= (peek (array/shape mu)) (peek (array/shape cov)) (peek (pop (array/shape cov)))))
@@ -183,8 +232,14 @@
                     cov-t (array/transpose cov (-> (vec (range r)) (assoc (- r 2) (dec r)) (assoc (dec r) (- r 2))))]
                 (dc/check (array/all-true? (<= (array/abs (- cov cov-t)) (+ 1e-8 (* 1e-5 (array/abs cov-t)))))
                           "mvnormal" "cov must be symmetric" {})
-                (dc/check (not (array/any-true? (array/isnan (la/cholesky cov)))) "mvnormal"
-                          "cov must be positive definite" {}))))
+                (let [dtype (factored-dtype cov)]
+                  (when-not (positive-definite? cov dtype)
+                    (let [jitter (suggested-jitter cov dtype)]
+                      (throw (ex-info (cond-> (str "mvnormal: cov must be positive definite, and not singular at "
+                                                   (name dtype) " precision")
+                                        jitter (str "; adding a jitter of " jitter " to its diagonal passes"))
+                                      (cond-> {:distribution "mvnormal" :param "cov" :dtype dtype}
+                                        jitter (assoc :suggested-jitter jitter))))))))))
   (sample [key shape]
     (let [d (peek (array/shape mu))
           batch (sh/broadcast (sh/broadcast shape (pop (array/shape mu))) (pop (pop (array/shape cov))))
@@ -590,28 +645,51 @@
 ;; distribution constructor.
 ;; ---------------------------------------------------------------------------
 
+(defn- mixture-weights
+  "A mixture's weights as an array, checked as the components'
+   probabilities (on the last axis)."
+  [family-name weights]
+  (dc/check-probabilities family-name "weights" (dc/->checkable weights))
+  (dc/->array weights))
+
+(defn- component
+  "Component k's part of a homogeneous mixture's parameter p, of rank dim in
+   one component: its slice on the axis before those, or all of p when it
+   has no such axis or one of size 1 (one value for every component)."
+  [p dim k n]
+  (let [s (array/shape p)
+        axis (- (count s) dim 1)]
+    (if (neg? axis)
+      p
+      (do (dc/check (#{1 n} (nth s axis)) "homogeneous-mixture"
+                    (str "a parameter of shape " s " has " (nth s axis) " components (axis " axis "), not " n)
+                    {:shape s :dim dim :components n})
+          (array/take p (if (= 1 (nth s axis)) 0 k) axis)))))
+
 (defn homogeneous-mixture
   "A family of mixtures of one distribution family (Gen.jl's
-   HomogeneousMixture, for families with scalar values and scalar
-   parameters per component):
-   ((homogeneous-mixture normal) weights mus stds) has components
-   (normal (mus k) (stds k)). The last axis of each parameter indexes the
-   components; weights are the components' probabilities."
-  [family]
-  (fn [weights & params]
-    (let [_ (dc/check-probabilities "homogeneous-mixture" "weights" (dc/->checkable weights))
-          w (dc/->array weights)
-          params (mapv dc/->array params)]
-      (dc/->Distribution ::homogeneous-mixture {:family family :weights w :params params}))))
-
-(defmethod dc/-sample ::homogeneous-mixture [{{:keys [family weights params]} :params} key shape]
-  (let [[k-pick k-draw] (rng/split key)
-        k (rng/categorical k-pick (log weights) (sh/broadcast shape (pop (array/shape weights))) (opts weights))]
-    (dc/sample (apply family (mapv #(array/pick % k) params)) k-draw shape)))
-
-(defmethod dc/-log-prob ::homogeneous-mixture [{{:keys [family weights params]} :params} v]
-  ;; every component at once: the value against the component axis
-  (array/logsumexp (+ (log weights) (dc/log-prob (apply family params) (array/expand-dims v -1))) {:axis -1}))
+   HomogeneousMixture): ((homogeneous-mixture normal) weights mus stds)
+   mixes (normal (mus k) (stds k)). dims, as Gen.jl's, gives each
+   parameter's rank in one component (0 by default); the axis before those
+   indexes the components, so ((homogeneous-mixture mvnormal [1 2]) weights
+   mus covs) takes mus of shape [K d] and covs of shape [K d d]. A parameter
+   without that axis is every component's. Weights are the components'
+   probabilities."
+  ([family] (homogeneous-mixture family nil))
+  ([family dims]
+   (fn [weights & params]
+     (let [w (mixture-weights "homogeneous-mixture" weights)
+           n (peek (array/shape w))
+           params (mapv dc/->array params)
+           dims (or dims (repeat (count params) 0))]
+       (dc/check (= (count dims) (count params)) "homogeneous-mixture" "needs one dim per parameter"
+                 {:dims (vec dims) :params (count params)})
+       ;; the mixture of its K components, as Gen.jl's logpdf loops over
+       ;; them (all at once, the value would need the component axis before
+       ;; its own axes, whose number a family does not declare)
+       (dc/->Distribution ::mixture
+                          {:weights w
+                           :components (mapv (fn [k] (apply family (map #(component %1 %2 k n) params dims))) (range n))})))))
 
 (defn heterogeneous-mixture
   "A family of mixtures of different distribution families (Gen.jl's
@@ -621,24 +699,30 @@
   [families]
   (let [families (vec families)]
     (fn [weights & component-params]
-      (let [w (dc/->array weights)]
+      (let [w (mixture-weights "heterogeneous-mixture" weights)]
         (dc/check (= (count families) (count component-params) (peek (array/shape w)))
                   "heterogeneous-mixture" "needs one weight and one parameter vector per component"
                   {:families (count families) :params (count component-params)})
-        (dc/check-probabilities "heterogeneous-mixture" "weights" (dc/->checkable weights))
-        (dc/->Distribution ::heterogeneous-mixture
-                           {:weights w :components (mapv #(apply %1 %2) families component-params)})))))
+        (dc/->Distribution ::mixture {:weights w :components (mapv #(apply %1 %2) families component-params)})))))
 
-(defmethod dc/-sample ::heterogeneous-mixture [{{:keys [weights components]} :params} key shape]
+(defmethod dc/-sample ::mixture [{{:keys [weights components]} :params} key shape]
   (let [[k-pick k-draw] (rng/split key)
-        k (rng/categorical k-pick (log weights) (sh/broadcast shape (pop (array/shape weights))) (opts weights))
+        ;; the weights' batch axes are independent draws too
+        shape (sh/broadcast shape (pop (array/shape weights)))
         draws (mapv #(dc/sample %1 %2 shape) components (rng/split k-draw (count components)))
-        dtype (reduce dt/promote (map array/dtype draws))]
+        dtype (reduce dt/promote (map array/dtype draws))
+        ;; one pick per element of the log density, whose axes lead a draw's;
+        ;; the rest are the draw's own (a vector's, for mvnormal)
+        elements (array/shape (dc/log-prob (first components) (first draws)))
+        k (rng/categorical k-pick (log weights) elements (opts weights))
+        own (- (array/ndim (first draws)) (count elements))]
     ;; draw every component, keep the picked one (branch-free, so it batches);
     ;; the draws share their promoted dtype, so no component is truncated
-    (array/pick (array/stack (mapv #(array/astype % dtype) draws) -1) (array/broadcast-to k (array/shape (first draws))))))
+    (array/pick (array/stack (mapv #(array/astype % dtype) draws) -1)
+                (array/reshape k (into (array/shape k) (repeat own 1))))))
 
-(defmethod dc/-log-prob ::heterogeneous-mixture [{{:keys [weights components]} :params} v]
+(defmethod dc/-log-prob ::mixture [{{:keys [weights components]} :params} v]
+  ;; each component's log density of the whole value, mixed per element
   (array/logsumexp (+ (log weights) (array/stack (mapv #(dc/log-prob % v) components) -1)) {:axis -1}))
 
 (defn product
@@ -677,9 +761,8 @@
 (doseq [t [::bernoulli ::uniform-discrete ::geometric ::poisson ::binom ::neg-binom ::categorical ::categorical-logits]]
   (defmethod dc/-discrete? t [_] true))
 
-(defmethod dc/-discrete? ::homogeneous-mixture [{{:keys [family params]} :params}] (dc/discrete? (apply family params)))
+(defmethod dc/-discrete? ::mixture [{{:keys [components]} :params}] (every? dc/discrete? components))
 (defmethod dc/-discrete? ::product [{{:keys [factors]} :params}] (every? dc/discrete? factors))
-(defmethod dc/-discrete? ::heterogeneous-mixture [{{:keys [components]} :params}] (every? dc/discrete? components))
 
 (defmethod dc/-value-shape ::dirichlet [{{:keys [alpha]} :params}] (array/shape alpha))
 
@@ -692,10 +775,7 @@
 (defmethod dc/-value-shape ::piecewise-uniform [{{:keys [bounds probs]} :params}]
   (sh/broadcast (pop (array/shape bounds)) (pop (array/shape probs))))
 
-(defmethod dc/-value-shape ::homogeneous-mixture [{{:keys [weights params]} :params}]
-  (pop (reduce sh/broadcast (array/shape weights) (map array/shape params))))
-
-(defmethod dc/-value-shape ::heterogeneous-mixture [{{:keys [components]} :params}]
-  (dc/value-shape (first components)))
+(defmethod dc/-value-shape ::mixture [{{:keys [weights components]} :params}]
+  (some->> (dc/value-shape (first components)) (sh/broadcast (pop (array/shape weights)))))
 
 (defmethod dc/-value-shape ::product [_] nil)

@@ -116,6 +116,8 @@
 
 (defn int-dtype [b] (:int (p/-defaults b)))
 
+(defn float-dtype [b] (:float (p/-defaults b)))
+
 (defn check
   "Throw unless ok, naming the distribution and parameter."
   [ok dist-name message data]

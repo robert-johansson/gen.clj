@@ -7,7 +7,8 @@ was then run once on this Mac, with the owner's go-ahead, for its own suite
 and the upstream findings (§4.3). gen.clj is m4-more at 12e788d. Each
 mapping was checked in gen.clj's code; where a mapping was not clear from
 the code, a short REPL run on the pure-JVM backend checked it ("checked"
-below, listed in §7).*
+below, listed in §7). F1, F2 and G6 were updated after their fixes on
+m4-f12 (2beab42, b9eb9d2, 7e85fb3; F1 by the owner's decision, D15).*
 
 ## 0. Summary
 
@@ -23,7 +24,7 @@ below, listed in §7).*
 
   | port | oracle | statistical | n/a | gap |
   |---:|---:|---:|---:|---:|
-  | 1,252 (73.7 %) | 6 | 33 | 110 | 298 (17.5 %) |
+  | 1,262 (74.3 %) | 6 | 33 | 110 | 288 (17.0 %) |
 
 - **The gaps are mostly small.** By assertions: optional arguments (G3, 60),
   Recurse's node-numbering helpers (G13, 54, three one-line functions), the
@@ -47,12 +48,14 @@ below, listed in §7).*
   - U2 confirmed: `enumerative.jl` is never included; run, it passes (31 of 31).
   - U3 refuted: the singular covariance does not error. Cholesky succeeds
     with a pivot of 2.1e-8, and both sides of the assertion give 15.24.
+    gen.clj rejects it, by the owner's decision (D15).
   - U4 confirmed: the batched `lecture!` test's assertion passes with
     q_batched never trained (−0.2250), and q_batched's own training does not
     converge (θ −5.70 for −2, its score −2.73 for −0.215).
-- **gen.clj findings** (§4.4): five loud-error gaps, among them a silently
-  wrong `dc/log-prob` for a homogeneous mixture of mvnormals and an
-  `mvnormal` that accepts the singular 2·ones(2, 2) (as Gen.jl's does, U3).
+- **gen.clj findings** (§4.4): five loud-error gaps. Two are fixed: a
+  silently wrong `dc/log-prob` for a homogeneous mixture of mvnormals (F2,
+  with G6), and an `mvnormal` that accepted the singular 2·ones(2, 2), as
+  Gen.jl's does (F1: an error now, D15).
 
 ## 1. Method
 
@@ -65,7 +68,7 @@ below, listed in §7).*
   categories, so each row gives the split.
   - **port**: the expected value is in the test or follows from the model, so
     the assertion ports without Julia. A port may rely on a documented
-    difference (D2, D3, D5, D7–D9, D11–D14 in §4.1). A testset without
+    difference (D2, D3, D5, D7–D9, D11–D15 in §4.1). A testset without
     assertions (a smoke test) ports as a run without error.
   - **oracle**: needs a value Gen.jl computes.
   - **statistical**: seeded sampling, compared by statistics with a
@@ -432,7 +435,7 @@ groups.
 
 | Line | Testset | Asserts | What it checks | gen.clj counterpart | Category | Notes |
 |---:|---|---:|---|---|---|---|
-| 1 | dist DSL (untyped) | 29 | pushforwards (exp, + 1, broadcast parameters, mvnormal), labels from an Array, a Dict and an enum, 1 - uniform | `gen.dist.dsl/dist`; `dist-dsl-test/*` | port 17 · gap 12 | G7 (labels, checked); line 29's covariance 2·ones(2,2) is singular, and Gen.jl and gen.clj both give 15.24 (U3) |
+| 1 | dist DSL (untyped) | 29 | pushforwards (exp, + 1, broadcast parameters, mvnormal), labels from an Array, a Dict and an enum, 1 - uniform | `gen.dist.dsl/dist`; `dist-dsl-test/*` | port 17 · gap 12 | G7 (labels, checked); line 29's covariance 2·ones(2,2) is singular: Gen.jl gives 15.24 (U3), gen.clj rejects it (D15), so line 29's 4 assertions port as the error |
 | 72 | dist DSL (typed) | 8 + 6 throws | typed @dist parameters: labels of a type, MethodErrors for wrong types | `dist` (untyped) | port 3 · n/a 6 · gap 5 | G7; N: Julia type dispatch (MethodError) |
 
 #### `test/modeling_library/mixture.jl` (52 assertions)
@@ -442,7 +445,7 @@ groups.
 | 3 | fixed mixture of different distributions | 11 | HeterogeneousMixture of uniform and beta: logpdf, gradients | `dist/heterogeneous-mixture` (checked) | port 9 · n/a 2 | N: has_output_grad, has_argument_grads |
 | 44 | mixture of normals | 20 | HomogeneousMixture of normals: logpdf, gradients, through the tape | `dist/homogeneous-mixture`; `tape-test/log-density-gradients` | port 18 · n/a 2 | D3 (component axis last in both) |
 | 104 | mixture of binomial | 9 | HomogeneousMixture of binomials | as above (checked) | port 6 · n/a 3 | N: grad flags and `nothing` |
-| 138 | mixture of multivariate normals | 12 | HomogeneousMixture(mvnormal, [1, 2]): logpdf, gradients, a rotated covariance | multivariate families unsupported (checked) | n/a 2 · gap 10 | G6 |
+| 138 | mixture of multivariate normals | 12 | HomogeneousMixture(mvnormal, [1, 2]): logpdf, gradients, a rotated covariance | `(dist/homogeneous-mixture mvnormal [1 2])`; `dist-test/mixtures-of-multivariate-families` (checked) | port 10 · n/a 2 | D3 (means [K d], covariances [K d d]); N: has_output_grad, has_argument_grads |
 
 #### `test/modeling_library/product.jl` (14 assertions)
 
@@ -490,19 +493,19 @@ groups.
 | `modeling_library/recurse.jl` | 2 | 122 | 48 | 0 | 20 | 0 | 54 |
 | `modeling_library/switch.jl` | 24 | 51 | 42 | 6 | 0 | 3 | 0 |
 | `modeling_library/dist_dsl.jl` | 2 | 43 | 20 | 0 | 0 | 6 | 17 |
-| `modeling_library/mixture.jl` | 4 | 52 | 33 | 0 | 0 | 9 | 10 |
+| `modeling_library/mixture.jl` | 4 | 52 | 43 | 0 | 0 | 9 | 0 |
 | `modeling_library/product.jl` | 3 | 14 | 11 | 0 | 0 | 3 | 0 |
-| **all** | **195** | **1699** | **1252** | **6** | **33** | **110** | **298** |
+| **all** | **195** | **1699** | **1262** | **6** | **33** | **110** | **288** |
 
 ### Totals per category
 
 | Category | Assertions | Share | Testsets wholly in it |
 |---|---:|---:|---:|
-| port | 1252 | 73.7 % | 107 |
+| port | 1262 | 74.3 % | 107 |
 | oracle | 6 | 0.4 % | 1 |
 | statistical | 33 | 1.9 % | 2 |
 | n/a | 110 | 6.5 % | 12 |
-| gap | 298 | 17.5 % | 12 |
+| gap | 288 | 17.0 % | 12 |
 
 Mixed testsets: 54. Testsets without assertions: 7 (smoke tests and empty testsets).
 
@@ -541,6 +544,7 @@ Mixed testsets: 54. Testsets without assertions: 7 (smoke tests and empty testse
 | D12 | An enumeration grid is a flat vector in row-major order, without an N-d shape. | §9 (the order) | 4 n/a | — |
 | D13 | Recurse takes one argument (no `root_idx`). | §9 | (port) | — |
 | D14 | `to-array`'s order: every leaf path sorted, where Gen.jl puts a node's values before its submaps, each group sorted. The suite's cases give the same order (checked on one that differs). | `gen.choicemap`'s namespace doc ("Leaf order is canonical") | (port) | — |
+| D15 | **A covariance singular in floating point is an error.** `mvnormal` rejects a covariance whose Cholesky factorization fails, or whose condition leaves the density no correct digits: trace(H⁻¹) ≥ 1/(n·ε), with H the correlation matrix of L·Lᵀ and ε that of the dtype the density is computed in (float32 on MLX, host data included). Gen.jl, through LAPACK's potrf, rejects only a failed factorization, so it accepts `dist_dsl.jl:29`'s 2·ones(2, 2) (U3). The bound holds at every precision, so in float32 a Gaussian-process kernel needs a jitter at float32's scale: a 50-point squared-exponential kernel (length scale 0.1) with 1e-6 on its diagonal passes in float64 and fails in float32, where the smallest jitter of the form 1, 2 or 5 × 10ᵏ that passes is 2e-4. When the factor exists, the error suggests that jitter (`:suggested-jitter`). | §9 (the owner's decisions, F1 and float32) | (port) | The port asserts the error |
 
 ### 4.2 Gaps
 
@@ -551,7 +555,7 @@ Mixed testsets: 54. Testsets without assertions: 7 (smoke tests and empty testse
 | G3 | Optional positional arguments with defaults (`@gen function foo(x, y=2)`), in the trace's args too | One parameter vector per `gen`; a rest parameter `[x & [y z]]` covers calls, update and regenerate with any number of arguments (checked), but the trace's args stay as given | medium | 60 | No; could become one (Clojure has no default arguments) |
 | G4 | `black_box_vi!`/`black_box_vimco!` with `model_update`, training the model's parameters with q's (the minimal VAE) | Only q's store is trained (`gen.inference.vi`'s docstring says so) | medium | 3 | No |
 | G5 | A custom deterministic function's own trainable parameters (`accumulate_param_gradients_determ!`, the scale factor) | Argument gradients only (`:gradient-with-state`) | small–medium | 1 | No |
-| G6 | `HomogeneousMixture` of a multivariate family (`HomogeneousMixture(mvnormal, [1, 2])`, dims per argument) | `homogeneous-mixture` takes scalar families; with mvnormal, a trace site throws a shape error but `dc/log-prob` returns a wrong number (F2). `(heterogeneous-mixture [mvnormal mvnormal])` gives the right density (checked) | small–medium | 10 | No |
+| G6 | `HomogeneousMixture` of a multivariate family (`HomogeneousMixture(mvnormal, [1, 2])`, dims per argument) | Closed (b9eb9d2): `(homogeneous-mixture family dims)` takes Gen.jl's dims, slices each parameter on the axis before its own (means [K d], covariances [K d d]) and mixes the K components' densities of the whole value. Before, it took scalar families, and with mvnormal `dc/log-prob` returned a wrong number (F2) | — | — (its 10 port now) | — |
 | G7 | `@dist` with non-numeric labels (`labels[categorical(p)]` over symbols, a Dict of labels, enums, user types) | Numeric labels through `array/take` work (checked); keywords fail ("equal: not an array: :a"). §9: "Non-numeric labels wait for parameters that are not arrays" | medium | 17 | Noted in §9 as pending |
 | G8 | `atan2` (and `asin`, `acos`, `atan`, `sinh`, `cosh`) in gen.array, differentiable and on MLX | None of them (checked); `trace_translators.jl`'s polar transform needs `atan(y, x)` under the Jacobian's `grad` | small | 2 | No |
 | G9 | Paths in selections: `(:x => :u) in s`, `s[:y => :z]`, `set_subselection!` | `sel/selected?` and `get-subselection` take one address, and a vector path silently answers false and None (checked); reducing `get-subselection` over the path gives Gen.jl's answers (checked). No `set-subselection` | small | 18 | No |
@@ -658,9 +662,10 @@ issue 168's regression test ran without error. `recurse.jl:223`, marked
   Distributions.jl's checked Cholesky succeeds: rounding leaves a positive
   pivot, the factor's diagonal is [1.414, 2.1e-8], and the log density is
   15.240802 on both sides of the `==` (15.490802 at [1, 1], on the line the
-  matrix spans; −4.5e15 at [2, 0], off it). gen.clj gives the same 15.24
-  (F1). The assertion holds but compares a density that has no meaning; the
-  port uses a positive-definite matrix.
+  matrix spans; −4.5e15 at [2, 0], off it). gen.clj gave the same 15.24
+  (F1). The assertion holds but compares a density that has no meaning, so
+  gen.clj now rejects the matrix, by the owner's decision (D15), and the
+  port asserts the error on both sides.
 - **U4: confirmed, by reading and by a run.** `train.jl:176`, after training
   `q_batched` with `lecture_batched!`, scores `q`, the first part's proposal.
   `u4.jl` runs the testset's code with its seed. Line 155's score is −0.2165
@@ -678,8 +683,8 @@ issue 168's regression test ran without error. `recurse.jl:223`, marked
 
 | ID | Finding | Checked |
 |---|---|---|
-| F1 | `dist/mvnormal`'s positive-definiteness check looks for NaN in the Cholesky factor, so the singular `2·ones(2, 2)` passes and `log-prob` returns 15.24. Gen.jl computes the same 15.240802 (U3), so this matches upstream; a stricter check is the owner's call | yes |
-| F2 | `dc/log-prob` of `(homogeneous-mixture mvnormal)` returns −4.135 where the density is −4.754: nothing rejects a multivariate family outside a trace site | yes |
+| F1 | `dist/mvnormal`'s positive-definiteness check looked for NaN in the Cholesky factor, so the singular `2·ones(2, 2)` passed and `log-prob` returned 15.24, as Gen.jl's 15.240802 (U3). Fixed in 2beab42 by the owner's decision (D15): a covariance singular in floating point is an error, at every precision, so in float32 a GP kernel needs a jitter at float32's scale; the error suggests one (7e85fb3) | yes |
+| F2 | `dc/log-prob` of `(homogeneous-mixture mvnormal)` returned −4.135 where the density is −4.754: nothing rejected a multivariate family outside a trace site. Fixed in b9eb9d2 with G6, as were the mixtures' samplers, whose component pick met a vector draw's own axis | yes |
 | F3 | `sel/selected?`, `sel/get-subselection` and `cm/set-submap` take a vector path as one (absent) address, silently; `cm/set-submap` then holds a vector key | yes |
 | F4 | `array/full` of a tape value throws ClassCastException | yes |
 | F5 | A quoted `(trace …)` in a static body is a compile error (G12) | yes |
@@ -795,7 +800,7 @@ agent time, medium a day or two.
 | 3 | Port: the static language | `dsl/static_dsl.jl`, `static_ir/static_ir.jl` (its StaticIRBuilder functions written as the bodies in its comments), `dsl/macros.jl` (static) | 181 port | medium | — |
 | 4 | Port: call_at, choice_at, Map | `call_at.jl`, `choice_at.jl`, `map.jl` | 274 port | medium | — |
 | 5 | Port: Unfold, Switch, Recurse | `unfold.jl`, `switch.jl`, `recurse.jl` | 271 port | medium | — |
-| 6 | Port: distributions | `distributions.jl` (dirichlet's reference values added to `generate.py`), `mixture.jl`, `product.jl`, `dist_dsl.jl` | 190 port | medium | — |
+| 6 | Port: distributions | `distributions.jl` (dirichlet's reference values added to `generate.py`), `mixture.jl`, `product.jl`, `dist_dsl.jl` | 200 port | medium | — |
 | 7 | Port: custom functions and inference | `custom_determ.jl`, `importance_sampling.jl`, `mh.jl`, `trace_translators.jl`, `kernel_dsl.jl`, `enumerative.jl`, `particle_filter.jl`, `train.jl`'s gradient check, the four smoke tests | 91 port | small | — |
 | 8 | Port: the statistical testsets | `train.jl` (SGD, lecture), `variational.jl` (BBVI), `particle_filter.jl` (two log-MLs), `recurse.jl` (the pcfg's strings); `^:slow`, bands from the estimators' variance | 33 statistical | medium | 5, 7 |
 | 9 | Decisions (owner) | D1 (document precise retdiffs), D4 (loud accessors or a documented idiom), D6 (beta's endpoints), G3 (default arguments or a difference), G15 (IR shape n/a or extended), D2 (categorical and Switch in §9) | (up to 129 gap) | — | — |
@@ -804,10 +809,10 @@ agent time, medium a day or two.
 | 12 | Static analyzer | G11 (macroexpand a binding's head), G12 (quoted data, F5) | 2 gap | small | — |
 | 13 | Static rewrites | G2 (computed addresses into `call-at`/`choice-at` nodes, nested traces hoisted into bindings), the static law over the rewritten bodies | 49 gap | medium | 12 |
 | 14 | VI with the model's parameters | G4 (`model_update`), the minimal VAE | 3 gap | medium | 8 |
-| 15 | Mixtures of multivariate families | G6, F2 | 10 gap | small–medium | — |
+| 15 | Mixtures of multivariate families | Done (b9eb9d2): G6, F2; its 10 assertions are in 6 | — | — | — |
 | 16 | `dist` with non-numeric labels | G7 (parameters that are not arrays) | 17 gap | medium | — |
 | 17 | Custom functions' parameters | G5 | 1 gap | small | — |
-| 18 | mvnormal's check | F1: a positive-definiteness check that rejects singular matrices | — | small | — |
+| 18 | mvnormal's check | Done (2beab42): F1, D15 | — | — | — |
 | 19 | The oracle | `test/fixtures/genjl/generate.jl` and its three fixtures (switch-regenerate, beta-endpoints, statistics), run locally as the upstream run was; the upstream record is done (§4.3) | — | small–medium | — |
 | 20 | Switch's regenerate upstream | U1, confirmed: the 6 assertions against the fixture, a §9 note; report upstream (owner's call) | 6 oracle | small | 19 |
 
@@ -840,7 +845,8 @@ Gen.jl test expects.
 | normal at 1e13: log-prob and gradients | −5e25; (−1e13, 1e13, 1e26) | the same, exactly |
 | shapes [1 3] and [2 1 1] broadcast | (Julia) (2, 3, 1) | [2 1 3], Julia's reversed; shape errors through `assess` |
 | keyword labels in `dist`; numeric labels; 1 − uniform | work | error (G7); work; 0.0 |
-| homogeneous mixture of mvnormals | −4.754 | −4.135 from `dc/log-prob` (F2), a shape error at a trace site; heterogeneous: −4.754 |
+| homogeneous mixture of mvnormals | −4.754 | −4.135 from `dc/log-prob` (F2), a shape error at a trace site; heterogeneous: −4.754. Since b9eb9d2, with dims [1 2]: −4.754 |
+| `mixture.jl:138` at b9eb9d2: is_discrete; the weights' gradient; the means' and covariances' gradient shapes; the rotated covariance's gradient at θ = π/2 | false; exp(logpdfₖ − logpdf); (2, 2), (2, 2, 2); the central difference | false; [2.29050 0.13967], the same; [2 2], [2 2 2]; 0.120832588 against 0.120832588 |
 | Switch regenerate, bare, same branch, select z | old = new − w | w = 0 (U1) |
 | Switch, nested, branch 2 → 1 with select() | old = new − w | old −4.73, new − w −2.28: the dropped call cancels (U1) |
 | bare Switch update with `:x => :z` constrained | ignored | unvisited error (D11) |
@@ -860,4 +866,5 @@ Gen.jl test expects.
 | a rest parameter for optional arguments | — | calls and updates with 1 or 3 arguments work |
 | `gen` with two arities | — | compile error |
 | `mh` with a selection on a static model (Gen issue 168) | runs | runs |
-| mvnormal with 2·ones(2, 2) | (Gen.jl, run: 15.240802, U3) | 15.24 (F1) |
+| mvnormal with 2·ones(2, 2) | (Gen.jl, run: 15.240802, U3) | 15.24 (F1); since 2beab42, an error (D15) |
+| the 50-point squared-exponential kernel with 1e-6 on its diagonal, in float32, at 7e85fb3 | (float64 only: accepted) | an error suggesting a jitter of 2e-4; with it, accepted; with 8e-5, an error (D15) |
