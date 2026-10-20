@@ -80,6 +80,11 @@
         (is (ts/close? (array/exp (tr :x)) (t' :z)))
         (is (ts/close? 0.0 w {:atol (ts/tol 1e-9)}))))))
 
+(deftest a-deterministic-translator-has-no-proposals
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no auxiliary choices"
+                        (tf/deterministic-translator {:p-new p-log-normal :p-new-args [] :transform exp-of-x
+                                                      :q-forward p-normal}))))
+
 (def p-sum (gen [] (trace :s (d/normal 0 (Math/sqrt 2)))))
 (def p-pair (gen [] (trace :a (d/normal 0 1)) (trace :b (d/normal 0 1))))
 (def difference (gen [_] (trace :d (d/normal 0 (Math/sqrt 2)))))

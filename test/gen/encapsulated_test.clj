@@ -169,6 +169,12 @@
       (let [tr (gfi/simulate with-simulator [0.4] (rng/key 5))
             {t :trace} (gfi/update tr [0.7] [gen.diff/unknown-change] cm/EMPTY (rng/key 6))]
         (is (not= (omega tr) (omega t))))))
+  (testing "also under a parameter store (review 3: nothing tested a store's skipping)"
+    (let [gf (gen.dynamic/with-params (gen [] (let [e (untraced (d/normal 0 1))] (trace :a (d/normal (+ e (param :w)) 1)))) {:w 1.0})
+          tr (gfi/simulate gf [] (rng/key 9))
+          r (gfi/update tr cm/EMPTY (rng/key 10))]
+      (is (= (omega tr) (omega (:trace r))))
+      (is (== 0.0 (ts/number (:weight r))))))
   (testing "a Map's unchanged elements keep theirs"
     (let [m (comb/map noisy-kernel)
           tr (gfi/simulate m [[0.1 0.2 0.3]] (rng/key 7))
@@ -424,7 +430,13 @@
                           (gen.dynamic/make-gen-fn (fn [_trace _splice _param & args] (count args)) '([& args]))))
     (testing "and a fixed arity one (review, 2026-10-20)"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"takes trace, splice, param and untraced"
-                            (gen.dynamic/make-gen-fn (fn [_trace _splice _param x y] [x y]) '([x y])))))))
+                            (gen.dynamic/make-gen-fn (fn [_trace _splice _param x y] [x y]) '([x y])))))
+    (testing "and the old variadic one for named arguments, which would shift them (review 3)"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"takes trace, splice, param and untraced"
+                            (gen.dynamic/make-gen-fn (fn [_trace _splice _param & args] args) '([x]))))))
+  (testing "a variadic body fn of the four hidden parameters fits named arguments (review 3)"
+    (let [gf (gen.dynamic/make-gen-fn (fn [_trace _splice _param _untraced & args] (vec args)) '([x y]))]
+      (is (= [1 2] (:retval (gfi/simulate gf [1 2] (rng/key 0))))))))
 
 (deftest operations-that-need-exact-densities-are-loud
   ;; each would otherwise fix one draw of ω, silently: a gradient of the

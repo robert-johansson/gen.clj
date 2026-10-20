@@ -96,8 +96,16 @@
    array/compile): [v others] → log p, with v the flat selected values (shaped
    by proto) and others the other choices as a map."
   [gf args proto]
-  (fn [v others] (gfi/with-exact-density "A gradient-based move (HMC, MALA)"
-                   (:weight (gfi/assess gf args (cm/merge (cm/from-map others) (cm/from-array proto v)) (rng/key 0))))))
+  (fn [v others]
+    (try
+      (gfi/with-exact-density "A gradient-based move (HMC, MALA)"
+        (:weight (gfi/assess gf args (cm/merge (cm/from-map others) (cm/from-array proto v)) (rng/key 0))))
+      (catch clojure.lang.ExceptionInfo e
+        (if-let [p (when (:missing-choice (ex-data e)) (:path (ex-data e)))]
+          (throw (ex-info (str "HMC and MALA move the selected choices within the trace's structure: at the values"
+                               " tried the model visits " p ", which the trace does not hold (" (ex-message e) ")")
+                          {:path p} e))
+          (throw e))))))
 
 (defn- mala-proposal
   "MALA's proposal as a function of arrays only: [v noise others] →

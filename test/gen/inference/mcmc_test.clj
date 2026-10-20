@@ -230,6 +230,57 @@
         (is (= fwd u2))
         (is (< (ts/abs (+ w1 w2)) 1e-12))))))
 
+(defn- host-normal-lp [x mu sd]
+  (clojure.core/- (clojure.core/- (Math/log (clojure.core/* sd (Math/sqrt (clojure.core/* 2 Math/PI)))))
+                  (clojure.core// (Math/pow (clojure.core/- x mu) 2) (clojure.core/* 2 sd sd))))
+
+(deftest one-step-by-hand
+  ;; plain and compiled kernels run one function (review 3: the comparison
+  ;; below cannot see a kernel bug), so a fast test checks a step against
+  ;; arithmetic: on scalar with y = 1.3, log p = log N(x; 0, 1) + log N(y; x, 1)
+  ;; and ∇x log p = y - 2x, with the kernels' own momentum and noise draws
+  (let [y 1.3 x0 0.4
+        tr (:trace (gfi/generate scalar [] (cm/choicemap :x x0 :y y) (rng/key 0)))
+        grad-x (fn [x] (clojure.core/- y (clojure.core/* 2.0 x)))
+        lp (fn [x] (clojure.core/+ (host-normal-lp x 0.0 1.0) (host-normal-lp y x 1.0)))
+        draw (fn [key] (ts/number (array/take (rng/normal key [1]) 0)))
+        moved (fn [r] (ts/number ((:trace r) :x)))]
+    (testing "HMC: two leapfrog steps and the Hamiltonian's change"
+      (let [key (rng/key 70) eps 0.3 half (clojure.core// eps 2)
+            p0 (draw (first (rng/split key 3)))
+            [x p] (loop [i 0 x x0 p p0]
+                    (if (clojure.core/< i 2)
+                      (let [p (clojure.core/+ p (clojure.core/* half (grad-x x)))
+                            x (clojure.core/+ x (clojure.core/* eps p))]
+                        (recur (inc i) x (clojure.core/+ p (clojure.core/* half (grad-x x)))))
+                      [x p]))
+            log-alpha (clojure.core/+ (clojure.core/- (lp x) (lp x0)) (clojure.core/- (host-normal-lp p 0.0 1.0) (host-normal-lp p0 0.0 1.0)))
+            r (mcmc/hmc tr (sel/select :x) {:L 2 :eps eps} key)]
+        (is (ts/close? log-alpha (:log-alpha r) {:atol (ts/tol 1e-9)}))
+        (is (ts/close? (if (:accepted? r) x x0) (moved r)))))
+    (testing "MALA: the Langevin proposal and both directions' densities"
+      (let [key (rng/key 71) tau 0.2 sd (Math/sqrt (clojure.core/* 2 tau))
+            z (draw (first (rng/split key 3)))
+            fwd (clojure.core/+ x0 (clojure.core/* tau (grad-x x0)))
+            x (clojure.core/+ fwd (clojure.core/* sd z))
+            bwd (clojure.core/+ x (clojure.core/* tau (grad-x x)))
+            log-alpha (clojure.core/+ (clojure.core/- (lp x) (lp x0)) (clojure.core/- (host-normal-lp x0 bwd sd) (host-normal-lp x fwd sd)))
+            r (mcmc/mala tr (sel/select :x) tau key)]
+        (is (ts/close? log-alpha (:log-alpha r) {:atol (ts/tol 1e-9)}))
+        (is (ts/close? (if (:accepted? r) x x0) (moved r)))))))
+
+(deftest a-move-that-changes-the-structure-is-named
+  ;; :extra exists only for x > 0, and the moves carry x across 0 (review 3:
+  ;; the error named assess, not the kernel's requirement)
+  (let [model (gen [] (let [x (trace :x (d/normal 0 1))]
+                        (when (array/truthy? (> x 0)) (trace :extra (d/normal 0 1)))
+                        (trace :y (d/normal x 0.3))))
+        tr (:trace (gfi/generate model [] (cm/choicemap :x -0.05 :y 3.0) (rng/key 0)))]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"within the trace's structure.*\[:extra\]"
+                          (mcmc/hmc tr (sel/select :x) {:L 3 :eps 0.5} (rng/key 72))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"within the trace's structure"
+                          (mcmc/mala tr (sel/select :x) 0.5 (rng/key 73))))))
+
 (deftest compiled-kernels-make-the-same-moves
   ;; :compile? runs HMC's L steps, or MALA's proposal and its densities, as
   ;; one compiled function (one MLX graph on MLX); each must move as the

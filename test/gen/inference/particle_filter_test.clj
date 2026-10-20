@@ -87,12 +87,13 @@
     (is (< (ts/abs (- (pf/log-ml-estimate state) (exact-lml))) 0.40))
     (testing "the filtering mean of 2000 resampled draws, against the Kalman posterior's"
       ;; the draws come from the filter's approximation, so its own error
-      ;; adds to theirs: the statistic's sd over 300 filters is 0.020, twice
-      ;; the √(v/2000) = 0.010 of independent draws (the confirmation
-      ;; review: a band of 5·0.010 failed 4 of 40 keys); five of them
+      ;; adds to theirs: the statistic's sd is 0.020 over 300 filters and
+      ;; 0.0225 over 200 others, twice the √(v/2000) = 0.010 of independent
+      ;; draws (the confirmation review: a band of 5·0.010 failed 4 of 40
+      ;; keys); five of the larger
       (let [xs (map #(% [(dec (count ys)) :x]) (pf/sample-unweighted-traces state 2000 (rng/key 2)))
             [_ m _] (last kalman)]
-        (is (< (ts/abs (- (/ (reduce + xs) 2000) m)) (* 5 0.020)))))))
+        (is (< (ts/abs (- (/ (reduce + xs) 2000) m)) (* 5 0.0225)))))))
 
 (defn- unbiased? [proposal?]
   ;; law 20: E[exp(estimate)] = p(y), checked against the runs' own spread
@@ -621,6 +622,14 @@
     (is (unbiased-moves? state #(pf/update-view %1 view-idx pf/resample {:key %2 :method :optimal :n 5})) "optimal")
     (is (sum-unbiased? {}) "a weighted sum")
     (is (sum-unbiased? {:priority (fn [lw] (map (constantly 0.0) lw))}) "a weighted sum, uniform priorities")))
+
+(deftest a-view-keeps-f-s-resampled-flag
+  ;; maybe-resample on a view of equal weights does not resample (review 3:
+  ;; the state kept its earlier :resampled? true)
+  (let [state (pf/maybe-resample (run-filter 30 (rng/key 40)) {:ess-threshold 31 :key (rng/key 41)})
+        r (pf/update-view state [0 1 2] pf/maybe-resample {:key (rng/key 42)})]
+    (is (true? (:resampled? state)))
+    (is (false? (:resampled? r)))))
 
 (deftest a-view-s-misuse-is-loud
   (let [state (run-filter 6 (rng/key 38))]

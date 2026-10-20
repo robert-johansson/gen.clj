@@ -98,6 +98,13 @@
           out3 (splice :u (comb/map point) us (vec (repeat k 1.0)) (vec (repeat k 0.0)))]
       [out out2 out3 c1 c2 c3])))
 
+(def rebound
+  "A parameter name bound twice: the last binding is the value, as in let
+   (review 3, F3: the slots shifted every later argument)."
+  (gen ^:static [w w {:keys [z]} z2]
+    (let [y (trace :y (d/normal (+ z z2) 0.5))]
+      [w z y])))
+
 (def double-index
   "nth truncates a number index: a changed element reached by 1.0
    (confirmation review N1: the rule called it unchanged)."
@@ -147,6 +154,7 @@
     [[[0.1 0.9 0.3] 2 {:p 0.0 :r 1.0}] [[0.1 0.2] 2 {:p 0.0 :r 1.0}] [[0.1 0.2 0.3 0.4] 1 {:p 0.0 :r 1.0}]
      [[0.1 0.2 0.3] 5 {:p 0.0}]]]
    [:double-index double-index [[0.0 0.0] 1.0] [[[0.0 0.5] 1.0]]]
+   [:rebound rebound [1.0 2.0 {:z 30.0} 0.5] [[1.0 3.0 {:z 31.0} 0.5]]]
    [:callee-store callee-store [0.0] [[1.0]]]
    [:dict-rules dict-rules [{:j 0.5 :x 1.0}] [[{:j 0.7 :x 1.0}] [{:x 1.0}] [{:j 0.5 :x 1.0 :z 2.0}]]]])
 
@@ -211,6 +219,24 @@
             tp (gfi/simulate plain [0.5] (rng/key 1))]
         (is (= {:compute 1 :callee 1} (counted #(gfi/update tp [0.5] [diff/no-change] (cm/choicemap :b 0.3) (rng/key 2)))))))))
 
+(deftest a-store-keeps-its-identity-and-its-skipping
+  ;; with no outer store a gf's own is not copied, so the next update finds
+  ;; it unchanged at once; and a gf with a store skips as one without
+  ;; (review 3: nothing tested it)
+  (let [store {:w 1.0}
+        runs (atom 0)
+        model (dyn/with-params (gen ^:static [] (let [a (trace :a (d/normal (param :w) 1))
+                                                      a2 (do (swap! runs inc) (* a a))
+                                                      b (trace :b (d/normal 0 1))
+                                                      y (trace :y (d/normal a2 1))]
+                                                  [b y]))
+                               store)
+        tr (gfi/simulate model [] (rng/key 67))]
+    (is (identical? store (:gen.dynamic/params tr)))
+    (reset! runs 0)
+    (gfi/update tr (cm/choicemap :b 0.3) (rng/key 68))
+    (is (= 0 @runs))))
+
 (deftest parameters-are-read-again-at-every-update
   ;; a store may change between runs (training), so a node reading one reruns
   (let [model (gen ^:static [] (let [w (param :w) y (trace :y (d/normal w 1))] [w y]))
@@ -268,6 +294,50 @@
 ;; The review's cases (2026-10-20), each wrong or silent before its fix
 ;; ---------------------------------------------------------------------------
 
+(def ar-step
+  "An AR(1) step whose coefficient is a parameter: it returns its choice, so
+   a kept choice is an unchanged state."
+  (gen [_t x] (trace :x (d/normal (* (param :w) x) 1))))
+
+(def chain-production
+  (gen [x] (let [v (trace :v (d/normal (* (param :w) x) 1))]
+             {:value v :children (if (clojure.core/< x 2) [(clojure.core/+ x 1)] [])})))
+
+(def chain-aggregation (gen [v ws] (+ v (reduce + 0.0 ws))))
+
+(defn- consistent-trace? [gf tr]
+  (ts/close? (:score tr) (:weight (gfi/assess gf (:args tr) (:choices tr) (rng/key 0)))))
+
+(deftest a-store-from-a-choice-reaches-the-callee
+  ;; an ordinary update or regenerate: a choice is the callee's store (review 3)
+  (let [chain (gen [] (splice :u (comb/unfold ar-step) 3 1.0))
+        model (gen [] (let [a (trace :a (d/uniform 0 1))] (splice :c (dyn/with-params chain {:w a}))))
+        tr (gfi/simulate model [] (rng/key 60))
+        {u :trace w :weight} (gfi/update tr (cm/choicemap :a 0.9) (rng/key 61))]
+    (is (consistent-trace? model u))
+    (is (ts/close? (- (:score u) (:score tr)) w))
+    (is (consistent-trace? model (:trace (gfi/regenerate tr (sel/select :a) (rng/key 62)))))))
+
+(deftest a-splice-without-an-address-brings-its-own-store
+  ;; inline, the callee's own store is in effect for its calls (review 3, F2)
+  (let [inner (gen [xs] (splice :m (comb/map (gen [x] (trace :y (d/normal (+ x (param :w)) 1)))) xs))
+        outer (dyn/with-params (gen [g xs] (splice g xs)) {:w 0.5})
+        xs [1.0 1.0]
+        tr (gfi/simulate outer [(dyn/with-params inner {:w 5.0}) xs] (rng/key 63))
+        {u :trace w :weight} (gfi/update tr [inner xs] [diff/unknown-change diff/no-change] cm/EMPTY (rng/key 64))]
+    (is (not (ts/close? 0.0 w)))
+    (is (consistent-trace? outer u))))
+
+(deftest a-combinator-given-another-kernel-reruns-it
+  ;; a trace given a gen-fn whose kernel is another object (here with
+  ;; another store) keeps no step (review 3)
+  (let [k1 (dyn/with-params ar-step {:w 0.5})
+        k2 (dyn/with-params ar-step {:w 2.0})
+        tr (gfi/simulate (comb/unfold k1) [3 1.0] (rng/key 65))
+        {u :trace w :weight} (gfi/update (assoc tr :gen-fn (comb/unfold k2)) cm/EMPTY (rng/key 66))]
+    (is (ts/close? (- (:weight (gfi/assess (comb/unfold k2) [3 1.0] (:choices tr) (rng/key 0))) (:score tr)) w))
+    (is (consistent-trace? (comb/unfold k2) u))))
+
 (deftest a-changed-store-reruns-what-reads-it
   ;; a callee's param read, a param in a splice argument, an aliased param,
   ;; a combinator's kernel reading one (under a static or a dynamic parent,
@@ -282,7 +352,15 @@
                :aliased (gen ^:static [] (let [p param y (trace :y (d/normal (p :w) 1))] y))
                :in-a-map-s-kernel (gen ^:static [] (let [ys (splice :ys (comb/map reading-kernel) [0.0 0.0])] ys))
                :in-a-map-s-kernel-dynamic (gen [] (splice :ys (comb/map reading-kernel) [0.0 0.0]))
-               :in-a-nested-map (gen [] (splice :ys (comb/map (comb/map reading-kernel)) [[0.0 0.0] [0.0]]))}
+               :in-a-nested-map (gen [] (splice :ys (comb/map (comb/map reading-kernel)) [[0.0 0.0] [0.0]]))
+               ;; (review 3, F1: these kept steps and nodes, under either parent)
+               :in-an-unfold-without-parameters (gen [] (splice :u (comb/unfold ar-step) 3 1.0))
+               :in-a-static-unfold (gen ^:static [] (let [u (splice :u (comb/unfold ar-step) 3 1.0)] u))
+               :in-a-switch-over-an-unfold (gen [] (splice :s (comb/switch (comb/unfold ar-step)) 0 3 1.0))
+               :in-a-call-at-of-an-unfold (gen [] (splice :c (comb/call-at (comb/unfold ar-step)) 3 1.0 :k))
+               :in-a-map-of-unfolds (gen [] (splice :m (comb/map (comb/unfold ar-step)) [3 3] [1.0 1.0]))
+               :in-a-recurse (gen [] (splice :r (comb/recurse chain-production chain-aggregation 1) 1))
+               :in-a-static-recurse (gen ^:static [] (let [r (splice :r (comb/recurse chain-production chain-aggregation 1) 1)] r))}
         before {:w 0.0 :xs [0.0 0.0]}
         after {:w 3.0 :xs [3.0 3.0]}]
     (doseq [[label model] cases]
@@ -347,12 +425,15 @@
                                      y (trace :y (d/normal a2 1))
                                      z (trace :z (d/normal 0 1))]
                                  [y z]))
-        ps (batched/simulate model [] 4 (rng/key 48))
         ;; (no spot checks, which rerun particles alone)
         reruns (fn [ps] (binding [batched/*spot-checks* 0]
                           (reset! runs 0) (batched/update ps [] [] (cm/choicemap :z 0.5) (rng/key 49)) @runs))]
-    (is (= 0 (reruns ps)))
-    (is (= 0 (reruns (batched/take ps [3 2 1 0]))))))
+    ;; with a store of collections too, which take once rebuilt (review 3)
+    (doseq [[label gf] [["no store" model] ["a vector" (dyn/with-params model {:xs [1.0 2.0]})]
+                        ["a nested map" (dyn/with-params model {:layer {:b 1.0}})]]]
+      (let [ps (batched/simulate gf [] 4 (rng/key 48))]
+        (is (= 0 (reruns ps)) label)
+        (is (= 0 (reruns (batched/take ps [3 2 1 0]))) label)))))
 
 (deftest a-resampled-seq-is-gathered-lazily
   ;; a node value may be an infinite seq (confirmation review N4: take

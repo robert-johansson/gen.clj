@@ -105,9 +105,21 @@
         (instance? gen.selection.Hierarchical s) (into (sorted-set) (filter integer?) (keys (:m s)))
         :else :all))
 
-(defn- elements-trace [gf args {:keys [subs choices retval score]}]
-  (assoc (trace/make-trace {:gen-fn gf :args args :choices choices :retval retval :score score})
-         ::subtraces subs))
+(defn- rerun-all?
+  "Must every kernel call of tr run again? When the store in effect is
+   another (a kernel may read it), or a kernel is not the one that made
+   the calls' traces (a trace given another gen-fn): neither shows in the
+   arguments. pairs: [kernel, a trace it made or nil]."
+  [tr pairs]
+  (boolean (or (dyn/store-changed? tr)
+               (some (fn [[kernel sub]] (and sub (not (identical? kernel (:gen-fn sub))))) pairs))))
+
+(defn- elements-trace
+  "A Map's or Unfold's trace, with the parameter store in effect (a kernel
+   may read it: under another, update revisits every element)."
+  [gf args {:keys [subs choices retval score]}]
+  (dyn/record-store (assoc (trace/make-trace {:gen-fn gf :args args :choices choices :retval retval :score score})
+                           ::subtraces subs)))
 
 (def ^:private empty-acc
   {:subs [] :choices cm/EMPTY :retval [] :score 0.0 :weight 0.0 :discard cm/EMPTY :retdiffs {}})
@@ -251,7 +263,7 @@
                                       (update-at kernel old ea ead (cm/get-submap cs i) k)
                                       (regenerate-at kernel old ea ead (sel/get-subselection cs i) k)))))
                     (trace-acc tr)
-                    (visits (changed-elements argdiffs) targets kept))
+                    (visits (if (rerun-all? tr [[kernel (first old-subs)]]) :all (changed-elements argdiffs)) targets kept))
         acc (drop-elements acc kept op)
         acc (reduce (fn [acc i]
                       (let [ea (element-args args i)
@@ -335,7 +347,8 @@
   (let [n (check-steps n)
         kernel (:kernel gf)
         [_ dinit & dparams] argdiffs
-        params-changed? (some diff/changed? dparams)
+        ;; a changed store or kernel changes every step, as a parameter does
+        params-changed? (or (some diff/changed? dparams) (rerun-all? tr [[kernel (first (::subtraces tr))]]))
         old-subs (::subtraces tr)
         prev-n (count old-subs)
         kept (min n prev-n)
@@ -541,13 +554,13 @@
   "The productions from the root, in node order (parents before children):
    a retained node is revisited only when its input may have changed or it
    is targeted. {:prods :p-diffs :weight :discard}."
-  [{:keys [gf old-p targets op cs node-key]} input input-diff]
+  [{:keys [gf old-p targets op cs node-key rerun?]} input input-diff]
   (let [{:keys [production max-branch]} gf]
     ;; weight starts boxed: it accumulates arrays on array backends
     (loop [todo (sorted-map 0 [input input-diff]) prods {} p-diffs {} weight (Double/valueOf 0.0) discard cm/EMPTY]
       (if-let [[node [in d]] (first todo)]
         (let [old (old-p node)
-              revisit? (or (nil? old) (diff/changed? d) (targeted? targets node :production))
+              revisit? (or rerun? (nil? old) (diff/changed? d) (targeted? targets node :production))
               r (if revisit?
                   (run-node op production old [in] [d] (node-cs op cs node :production) (node-key node :production))
                   {:trace old :weight 0.0 :retdiff diff/no-change})
@@ -564,7 +577,7 @@
    node is revisited when its value, its children or its target may have
    changed. {:aggs :a-diffs :weight :discard}, the weight and discard
    continuing the production phase's."
-  [{:keys [gf old-a targets op cs node-key]} {:keys [prods p-diffs weight discard]}]
+  [{:keys [gf old-a targets op cs node-key rerun?]} {:keys [prods p-diffs weight discard]}]
   (let [{:keys [aggregation max-branch]} gf]
     (reduce (fn [{:keys [aggs a-diffs weight discard]} node]
               (let [{v :value children :children} (:retval (prods node))
@@ -573,7 +586,7 @@
                     v-changed? (diff/changed? (p-diffs node))
                     ws-changed? (or (nil? old) (not= (count children) (count (second (:args old))))
                                     (some #(diff/changed? (a-diffs %)) kids))
-                    r (if (or (nil? old) v-changed? ws-changed? (targeted? targets node :aggregation))
+                    r (if (or rerun? (nil? old) v-changed? ws-changed? (targeted? targets node :aggregation))
                         (run-node op aggregation old [v (mapv #(:retval (aggs %)) kids)]
                                   [(if v-changed? diff/unknown-change diff/no-change)
                                    (if ws-changed? diff/unknown-change diff/no-change)]
@@ -597,7 +610,10 @@
   [gf tr [input] [input-diff] op cs key]
   (let [ctx {:gf gf :old-p (::productions tr {}) :old-a (::aggregations tr {}) :targets (recurse-targets op cs)
              :op op :cs cs
-             :node-key (partial node-key key)}
+             :node-key (partial node-key key)
+             ;; under another store or kernel, every node runs again
+             :rerun? (and tr (rerun-all? tr [[(:production gf) (get (::productions tr) 0)]
+                                             [(:aggregation gf) (get (::aggregations tr) 0)]]))}
         {:keys [prods] :as produced} (production-phase ctx input input-diff)
         _ (when (and cs (not= op :regenerate))
             (doseq [node (keys (:targets ctx))]
@@ -613,12 +629,13 @@
                             (reduce #(node-choices %1 %2 (old-p %2) (old-a %2)) discard gone)]
                            [weight discard])
         nodes (sort (keys prods))
-        t (assoc (trace/make-trace {:gen-fn gf :args [input]
+        t (dyn/record-store
+           (assoc (trace/make-trace {:gen-fn gf :args [input]
                                     :choices (reduce #(node-choices %1 %2 (prods %2) (aggs %2)) cm/EMPTY nodes)
                                     :retval (:retval (aggs 0))
                                     :score (reduce + 0.0 (concat (clojure.core/map :score (vals prods))
                                                                  (clojure.core/map :score (vals aggs))))})
-                 ::productions prods ::aggregations aggs)]
+                  ::productions prods ::aggregations aggs))]
     (cond-> {:trace t :weight weight}
       (not= op :generate) (assoc :retdiff (if tr (a-diffs 0) diff/unknown-change))
       (= op :update) (assoc :discard discard))))

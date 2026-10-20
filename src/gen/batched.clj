@@ -456,19 +456,20 @@
   "x with every batched value's particles gathered at idx, as a new batch of
    n' particles: through traces, choice maps, records, maps, vectors, sets,
    lists and seqs (a static trace's node values among them), so a
-   resampled trace is made without re-running the model. Generative
-   functions are kept as they are (their identity is what a static update
-   checks), and a seq is gathered lazily, as it may be infinite."
+   resampled trace is made without re-running the model. What holds no
+   batched value is kept as it is, its identity too (a static update checks
+   its generative function's, and its store's), and a seq is gathered
+   lazily, as it may be infinite."
   [x idx n']
-  (cond (batch/batched? x) (batch/gather x idx [n'])
-        (gfi/generative-function? x) x
-        (record? x) (reduce-kv (fn [m k v] (assoc m k (gather v idx n'))) x x)
-        (map? x) (into (empty x) (map (fn [[k v]] [k (gather v idx n')])) x)
-        (vector? x) (mapv #(gather % idx n') x)
-        (set? x) (into (empty x) (map #(gather % idx n')) x)
-        (list? x) (apply list (map #(gather % idx n') x))
-        (seq? x) (map #(gather % idx n') x)
-        :else x))
+  (let [same? (fn [xs ys] (every? true? (map identical? xs ys)))]
+    (cond (batch/batched? x) (batch/gather x idx [n'])
+          (gfi/generative-function? x) x
+          (map? x) (reduce-kv (fn [m k v] (let [v' (gather v idx n')] (if (identical? v v') m (assoc m k v')))) x x)
+          (vector? x) (let [v (mapv #(gather % idx n') x)] (if (same? v x) x v))
+          (set? x) (let [v (map #(gather % idx n') x)] (if (same? v x) x (into (empty x) v)))
+          (list? x) (let [v (map #(gather % idx n') x)] (if (same? v x) x (apply list v)))
+          (seq? x) (map #(gather % idx n') x)
+          :else x)))
 
 (defn take
   "The particles at indices (a seq of n' integers), e.g. after resampling."

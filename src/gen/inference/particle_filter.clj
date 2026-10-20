@@ -469,8 +469,9 @@
    back into the particles' weights, so a plain resampling keeps the view's
    total weight and the estimate of the marginal likelihood stays as
    unbiased as f leaves it. When f resamples, :parents gives every
-   particle's source index (its own outside the view). A batched state
-   becomes one of scalar traces."
+   particle's source index (its own outside the view), and f's :resampled?
+   (maybe-resample's) is the state's. A batched state becomes one of scalar
+   traces."
   [state idx f & args]
   (let [state (unbatched state)
         idx (vec idx)
@@ -486,4 +487,5 @@
                    :traces (put (:traces state) (:traces sub'))
                    :log-weights (put (:log-weights state)
                                      (cond->> (:log-weights sub') (not (== 0.0 shift)) (map #(+ % shift)))))
-      (:parents sub') (assoc :parents (put (range (count (:log-weights state))) (map idx (:parents sub')))))))
+      (:parents sub') (assoc :parents (put (range (count (:log-weights state))) (map idx (:parents sub'))))
+      (contains? sub' :resampled?) (assoc :resampled? (:resampled? sub')))))

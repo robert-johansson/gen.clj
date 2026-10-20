@@ -344,12 +344,18 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   `(dyn/with-params gf store)` as a record field. `(param :w)` in a body reads
   the store in effect, which reaches every nested splice and combinator kernel
   (one namespace per model, like Pyro's store). A missing parameter is a loud
-  error. A trace records the store it ran under, and an update under another
-  (a name added or removed, or a value that is not the same object or an
-  equal host value: stores are compared without reading an array) gives
-  every callee unknown-change argdiffs, since no argument shows what a
-  kernel reads from the store (the confirmation review, 2026-10-20: a Map
-  kept its elements). Gradients are values: `gen.gradients/param-gradients` returns a map,
+  error. A trace records the store it ran under, and every generative
+  function that may read the store reruns what may read it when the store
+  in effect is another (a name added or removed, or a value that is not the
+  same object or an equal host value: stores are compared without reading
+  an array): a dynamic body reruns anyway, a static one compares, and Map,
+  Unfold and Recurse, whose kernels may read it, revisit every call. No
+  argument shows what a kernel reads from the store, so each kind checks
+  for itself, also under a non-dynamic parent or an address-less splice
+  with its own store (the confirmation review and review 3, 2026-10-20:
+  a Map, then an Unfold and a Recurse, kept stale calls). A combinator also
+  revisits every call when its kernel is not the one that made its calls'
+  traces (a trace given another gen-fn). Gradients are values: `gen.gradients/param-gradients` returns a map,
   and optimizers return a new store. This is Gen.jl's `@param`,
   `init_param!` and `accumulate_param_gradients!`/`apply!`, but functional.
 - **Batched execution** (decided 2026-10-18 by the agent, for the owner's
@@ -659,10 +665,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   branch at the top level, a computed address, `trace` or `splice` passed
   as a value). The check is sound, since `trace` and `splice` are the
   macro's own locals, unlike GenMLX's schema extraction over quoted source
-  by symbol name. simulate, generate and assess run the handler; update and
-  regenerate walk the graph and rerun a node only when a parent changed or
-  it is constrained or selected, through the handler's own site
-  transitions. A law requires the static and the dynamic function of the
+  by symbol name. simulate, generate, update and regenerate walk the graph
+  with the handler's own trace and splice (simulate and generate run every
+  node; update and regenerate rerun a node only when a parent changed or
+  it is constrained or selected), and assess runs the generated score fn. A law requires the static and the dynamic function of the
   same body to give identical traces, weights and discards under the same
   keys, and a sound retdiff (the static one may be more precise). The
   graph is also the way

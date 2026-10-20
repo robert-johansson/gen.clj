@@ -140,7 +140,7 @@
 (defn- assess-site [state p dist _k]
   (let [c (constraint-at state p :assess)]
     (when-not c
-      (throw (ex-info (str "assess: no value for the choice at " p) {:path p})))
+      (throw (ex-info (str "assess: no value for the choice at " p) {:path p :missing-choice true})))
     (let [[v lp] (given-value state dist c)]
       [v (-> state (record p v lp) (add-weight lp))])))
 
@@ -194,6 +194,13 @@
    function that has one, merged with any inner one's (with-params)."
   nil)
 
+(defn- with-store
+  "The store in effect within a generative function with its own store ps:
+   ps over the outer one (not a copy when there is none, so a store keeps
+   its identity from run to run)."
+  [ps]
+  (if *params* (merge *params* ps) ps))
+
 (defn- same-store?
   "Are stores a and b the same, judged without reading an array (a host
    read inside the handler): the same names, each value identical or an
@@ -204,6 +211,19 @@
            (every? (fn [[k v]] (let [w (get b k ::missing)]
                                  (or (identical? v w) (and (array/host? v) (array/host? w) (= v w)))))
                    a))))
+
+(defn ^:no-doc record-store
+  "tr with the store in effect, which its update compares with its own
+   (store-changed?): a combinator's kernels may read it, and no argument
+   shows that it changed."
+  [tr]
+  (if *params* (assoc tr ::params *params*) tr))
+
+(defn ^:no-doc store-changed?
+  "Does the store in effect differ from the one the trace prev ran under?
+   Then everything that may read it must run again."
+  [prev]
+  (not (same-store? *params* (::params prev))))
 
 (defn- arg-diffs
   "Argdiffs for a splice's new args against its previous call's: no-change
@@ -262,12 +282,7 @@
         old-sub (get (::subtraces (:prev state)) p)
         replaced? (and old-sub (not (compatible-callee? (:gen-fn old-sub) gf)))
         prev-sub (when-not replaced? old-sub)
-        ;; a callee (a Map's kernel) may read the store, which identical
-        ;; arguments do not show: under a changed one every argument changed
-        argdiffs (when prev-sub
-                   (if (same-store? *params* (::params (:prev state)))
-                     (arg-diffs (:args prev-sub) args hints)
-                     (vec (repeat (count args) diff/unknown-change))))
+        argdiffs (when prev-sub (arg-diffs (:args prev-sub) args hints))
         state (if replaced? (replace-call state p old-sub) state)
         ;; a batched run's callees run batched too: they inherit the batch tracer
         base {}
@@ -591,7 +606,7 @@
                           (vreset! transition (or (get (:transitions sub) mode) (site-transitions mode)))
                           (try
                             (if-let [ps (:params sub)]
-                              (binding [*params* (merge *params* ps)] (run-body))
+                              (binding [*params* (with-store ps)] (run-body))
                               (run-body))
                             (finally (vreset! transition outer)))))
                       ;; trace calls in lazy arguments happen now, in this body (splice-at)
@@ -650,7 +665,7 @@
 
 (defn- run-handler [gf op args opts]
   (let [state (if-let [ps (:params gf)]
-                (binding [*params* (merge *params* ps)] (execute gf op args opts))
+                (binding [*params* (with-store ps)] (execute gf op args opts))
                 (execute gf op args opts))]
     (case op
       :simulate {:trace (make-trace gf args state)}
@@ -673,7 +688,7 @@
   [dist choices p]
   (let [c (cm/get-submap choices p)]
     (when-not (cm/has-value? c)
-      (throw (ex-info (str "assess: no value for the choice at " p) {:path p})))
+      (throw (ex-info (str "assess: no value for the choice at " p) {:path p :missing-choice true})))
     (given-value {:mode :assess} dist c)))
 
 (defn ^:no-doc static-call
@@ -713,7 +728,7 @@
         run #(do (check-static-choices! st choices)
                  (let [[w rv] ((:score st) read-param (vec args) choices (when-not gfi/*exact-density* key))]
                    [w (realize! rv)]))]
-    (if-let [ps (:params gf)] (binding [*params* (merge *params* ps)] (run)) (run))))
+    (if-let [ps (:params gf)] (binding [*params* (with-store ps)] (run)) (run))))
 
 (defn- static-scored?
   "Is gf a static function whose assess runs its score fn? Not with
@@ -793,10 +808,11 @@
                              (alength (.getParameterTypes ^java.lang.reflect.Method %)))
                           (.getDeclaredMethods (class body-fn))))
          fits? (if (vector? params)
-                 (let [i (.indexOf ^java.util.List params '&)]
-                   (if (neg? i)
-                     (contains? fixed (+ 4 (count params)))
-                     (and variadic? (= required (+ 4 i)))))
+                 (let [i (.indexOf ^java.util.List params '&)
+                       n (if (neg? i) (count params) i)]
+                   ;; a variadic fn needs the four, and may name some arguments
+                   (or (and (neg? i) (contains? fixed (+ 4 n)))
+                       (and variadic? (<= 4 required (+ 4 n)))))
                  (or (not variadic?) (>= required 4)))]
      (when-not fits?
        (throw (ex-info "make-gen-fn: the body fn takes trace, splice, param and untraced before the arguments its source names"
@@ -1076,7 +1092,8 @@
    from its value, and how its diff is found (a rule, an alias, argument
    specs)."
   [st params coercions locals]
-  (let [arg-names (vec (concat (apply concat (:fixed (:args st))) (:rest (:args st))))
+  (let [;; each name once: a name bound twice ([w w z]) holds its last binding, as let's
+        arg-names (vec (distinct (concat (apply concat (:fixed (:args st))) (:rest (:args st)))))
         names (vec (distinct (concat arg-names (mapcat :names (:nodes st)))))
         slots (zipmap names (range))
         env (gensym "env")
@@ -1170,7 +1187,9 @@
         body-fn (guard-branches `(fn [~'trace ~'splice ~'param ~'untraced ~@plain]
                                    (let [~'untraced-key (fn [] (~'untraced))] ~@body))
                                 locals)]
-    `(make-gen-fn ~body-fn '~(cons params body) ~(when st (static-form st plain coercions locals)))))
+    ;; the body fn takes the four hidden parameters: no check (make-gen-fn's
+    ;; reflects, and an inline gen is built on every run of its body)
+    `(->DynamicGF ~body-fn '~(cons params body) nil nil nil ~(when st (static-form st plain coercions locals)))))
 
 (defmacro guarded-fn
   "fn, with a gen body's guards: if and case tests branch through truthy?,
