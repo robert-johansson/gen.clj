@@ -12,13 +12,13 @@ engine layer. Summarized in DESIGN.md §6 and §9.*
 | Piece | Where |
 |---|---|
 | llama.cpp's libraries, v0.7.0 (commit 620d222, checked), Metal on macOS; Linux `cpu` and `cuda` written, untested | `native/build-llama.sh` → `native/build/llama/<platform>/{lib,include}` |
-| The binding: jextract 25 over `llama.h`, filtered to 47 functions, 3 structs, 4 typedefs; generated sources committed | `native/jextract-llama.sh` → `src-java/gen/llama/ffi` |
-| Library loading (`gen.llama.lib`), version check, log routing (`gen.llama.log`), per-decode loops | `src-java/gen/llama/LlamaRuntime.java` |
+| The binding: jextract 25 over `llama.h`, filtered to the 43 functions called, 3 structs, 4 typedefs (a function jextract leaves out fails the recipe); generated sources committed | `native/jextract-llama.sh` → `src-java/gen/llama/ffi` |
+| Library loading (`gen.llama.lib`), version check, log routing (`gen.llama.log`, an unknown level an error), the batch (`Batch`, its views made once), the loops over a row of logits | `src-java/gen/llama/LlamaRuntime.java` |
 | The Branching protocol, the Branch value, the checked operations | `gen.llm.branching` |
 | An engine over numbered sequence slots: threading, lifetimes, capacity | `gen.llm.slots` |
 | The llama.cpp engine | `gen.llm.llama` |
 | The contract as engine-agnostic checks; a pure-JVM toy engine; tests | `test/gen/llm/` |
-| Float-noise and cost measurement | `bench/gen/llama_noise.clj` |
+| Float-noise and cost measurement, for short prompts and for branches past a sliding window (the contract's own statistic) | `bench/gen/llama_noise.clj`, `bench/gen/llama_long_noise.clj` |
 
 The core stays Clojure-only (CLAUDE.md rule 8): the binding is Java source
 compiled by `clojure -T:build java`, like MLX's, and loads libllama only when
@@ -50,6 +50,8 @@ an engine is made. Nothing in L0–L5 requires `gen.llm.*`.
 | `(resample branches ancestors)` | child j gets `(branches (ancestors j))`'s state; all inputs consumed, the dead freed; a state is copied only for its second and later children |
 | `(dispose! b-or-bs)` | free now; each must be live |
 | `(live? b)`, `(info engine)` | liveness; sizes and counts (`:n-vocab :max-branches :n-ctx :live :free :closed?`, and llama.cpp's `:eog :bos :eos :model …`) |
+| `(check-tokens engine tokens what)` | tokens as longs of the engine's vocabulary, or `:invalid-token` (a big integer too), for engine-specific functions |
+| `slots/slot-of` | diagnostics: the slot holding a live branch's state (a Branch carries no slot: the engine's books do) |
 | `(tokens b)`, `(position b)`, `(logprobs b)`, `(logprob b t)` | the branch's value |
 | `llama/tokenize`, `llama/token-bytes`, `llama/detokenize`, `llama/kv-positions`, `llama/system-info` | the engine's own: the GGUF's tokenizer, raw byte pieces, diagnostics |
 
@@ -145,10 +147,17 @@ directly (resampling as one lane gather).
 - **Recurrent and hybrid models** (Mamba, Qwen3.5's GatedDeltaNet) cannot
   remove a sequence's end past `n_rs_seq` checkpoints. This engine never
   needs to: `score` reads into a scratch copy (a copy shares the recurrent
-  state until written), and branches only grow. After a failed decode the
-  engine removes what the decode added (`seq_rm` from the run's start); for
-  a recurrent model that fails, and the slot is freed with its branch, a loud
-  error naming it (`:lost-slots`). `n_rs_seq` stays 0. Tested with
+  state until written), and branches only grow. After a failed read the
+  engine removes what it may have added (`seq_rm` from the read's start),
+  whatever the failure: when nothing was added this removes nothing, and
+  for recurrent memory too v0.7.0 counts that a success (its `seq_rm`
+  refuses only a range starting inside the state, `0 < p0 <= cell.pos`,
+  and a removal from pos leaves the state at pos - 1 alone; tested on
+  Qwen3.5: a read whose first decode finds the cache full leaves its
+  branch live and unchanged). Where something was added, a recurrent
+  model's removal fails, and the slot is freed with its branch, a loud
+  error naming it (`:lost-slots`), never read again: a full cache retries
+  after a collection only when no slot was lost. `n_rs_seq` stays 0. Tested with
   Qwen3.5-0.8B (`qwen35`, hybrid): the whole contract passes, so forks,
   resampled children and scratch scores of the shared recurrent state are
   right, and advancing a fork leaves its parent's state alone. A hybrid
@@ -158,15 +167,48 @@ directly (resampling as one lane gather).
   fork whose extension finds the cache full after two of its decodes cannot
   be rolled back (v0.7.0's recurrent `seq_rm` refuses), so it is freed,
   loudly; on an attention model the same failure leaves the fork as it
-  was.
+  was. So is a real fatal decode (below).
 - **Sliding-window models** (Gemma): `swa_full` by default, so a branch
   keeps every token a fork may need. Tested with Gemma-3-270M (window 512;
-  llama.cpp logs "using full-size SWA cache"): the contract passes. No test
-  has branches longer than the window yet.
+  llama.cpp logs "using full-size SWA cache"): the contract passes, and
+  so it does past the window (genclj-vdxm): forks taken at 600 and 1,000
+  tokens, a resample there, and scores of a continuation from 472 across
+  512 give fresh reads' distributions, within a band measured for long
+  branches (0.6 nats, Numerics). A planted copy keeping only the window's
+  positions, as if a sliding-window model needed no more, fails it by 4
+  to 39 nats: Gemma 3's full-attention layers need the whole history.
+  - *Without `swa_full`* (measured, not a test: it is llama.cpp's
+    behaviour), the window cache has pad(n_swa · n_seq_max + n_ubatch,
+    256) cells, so a branch longer than that keeps only its latest
+    positions there (positions 840 to 2,599 of 2,600, in 1,792 cells), and
+    llama.cpp reuses a cell only when its one sequence has moved past it.
+    Below that size nothing changes: forks, resamples and scores at 600 and
+    1,000 tokens give the same values bit for bit. Above it, a fork pins the
+    window cache: the copy shares every cell, none is reusable, and the
+    next decode of the fork finds no room (`:kv-full`; on Metal at 4,000
+    tokens in 3,072 cells, on the CPU at 2,600 in 1,792). Forks thus break
+    loudly, not silently. A read that fails after overwriting cells still
+    inside the window could not be undone; the one probed (a read of 48
+    aborted after its first decode, at 2,600 tokens) found free cells and
+    was undone exactly, as with `swa_full`.
 - **Refused:** encoder-decoder, diffusion and memoryless (embedding) models.
 - **Decode failures** are ex-infos (`:kv-full`, `:aborted`,
   `:invalid-batch`, `:decode-failed`) carrying llama.cpp's last logged
-  error, and a row of NaN or infinite logits is one too.
+  error, and a row of NaN or infinite logits is one too. A fatal one is
+  tested through llama.cpp's abort callback (genclj-vdxm), set by the
+  test alone through `llama_set_abort_callback` (found in libllama; the
+  binding leaves it out): status 2, after which llama.cpp keeps the
+  ubatches it finished and removes the aborted one. Only the CPU backend
+  checks the callback (once before each graph node; ggml-metal enqueues
+  its first two command buffers regardless, and checks only when
+  capturing), so the test's engine is CPU-only with 16-token decodes
+  (below the 32 at which llama.cpp hands a CPU model's work to the GPU),
+  and the abort lands at a counted check: the first, or the first of a
+  read's second decode, counted on a decode of the same size (537 checks
+  for Qwen3-0.6B, 785 for Qwen3.5, the same every time). An attention
+  model's branch is restored exactly (its next step equals, bit for bit, a
+  fork's taken before); a hybrid one's is lost, named and freed, even when aborted at
+  once, since llama.cpp moves the recurrent state before it computes.
 - **Version pinning:** the binding passes `llama_model_params` and
   `llama_context_params` by value, whose layouts change between releases, so
   `LlamaRuntime` refuses a libllama whose `llama_version()` is not "0.7.0".
@@ -207,17 +249,67 @@ stay inside it, with the same determinism:
 | Qwen3.5-0.8B Q8_0 (hybrid) | 1.6e-2 | 1.0e-3 | 1.6e-2 | 0 |
 | Gemma-3-270M Q8_0 (SWA) | 2.3e-2 | 4.7e-3 | 3.0e-2 | 0 |
 
-CPU and CUDA builds
-have other kernels: measure them with the bench before using the band there.
+Branches past a sliding window (`bench/gen/llama_long_noise.clj`: the
+contract's own comparisons, for four long texts at 600, 800, 1,000 and
+1,400 tokens and a continuation across 512; the engine of the long-branch
+test) are noisier for Gemma:
+
+| Model | fork vs fresh, max | child vs fresh, max | overall max (n 2,200) |
+|---|---|---|---|
+| Gemma-3-270M Q8_0 | 0.28 | 5.0e-2 | 0.28 |
+| Qwen3-0.6B Q8_0 | 1.6e-2 | 3.0e-2 | 3.0e-2 |
+| Qwen3.5-0.8B Q8_0 | 8.3e-3 | 8.9e-3 | 8.9e-3 |
+
+Gemma's 0.28 is one comparison (the next largest is 5.0e-2): a fork at
+1,000 tokens of a code text, after a newline whose successor has log p of
+-6e-6, in the deep tail of the reference's 64 tokens (log p of -10 to
+-22), where a fresh read's prefill and a one-token step round
+differently; the fork and the branch advanced alone agree there to 1e-3.
+The long-branch test's band is twice it, 0.6 nats; the short-prompt band
+of 0.1 does not hold for Gemma's long branches.
+
+The engine's paths agree exactly with same-shape paths: a resampled
+child equals the same steps without resample bit for bit (from 600
+tokens on; at 100, 1e-4 to 2e-3 from the cache's layout), and `score`
+equals `extend` to 1e-8 (the float rounding of the last score). The
+differences above are kernel noise between shapes.
+
+**CPU builds are far noisier across shapes.** On the M2 Max's CPU backend
+(16-token decodes, Q8_0's repacked matrix kernels), a fresh read and the
+same tokens stepped differ by up to 0.46 nats (Gemma at 600 tokens; Qwen3
+0.17), while same shapes agree exactly. CPU and CUDA builds need bands
+of their own: measure them with the benches before using these.
 
 ## Costs (M2 Max, Metal, Qwen3-0.6B Q8_0, means)
 
-| Operation | ms |
-|---|---|
-| open (8-token prefill) | 5.9 |
-| fork + dispose | 0.03–0.04 |
-| advance, 1 / 4 / 8 / 15 branches (one decode, every row log-softmaxed) | 5.4 / 9.6 / 15.1 / 27.6 |
-| score, 16 tokens | 25.7 |
+Normalizing a row of logits on the host (a log-sum-exp in double over the
+vocabulary, then the log-softmax) takes 1.25 ms: for 15 rows, most of what
+an advance cost. Since the quality review (N1) each engine normalizes a
+decode's rows on a pool of its own (four platform threads on this 8+4-core
+machine, half the cores up to four), its thread waiting; the rows'
+pointers are still taken on the engine's thread (a native call), and stay
+valid until the next decode, which the pool's end precedes. Measured old
+and new in one session, two rounds each:
+
+| Operation | before (ms) | with the pool (ms) |
+|---|---|---|
+| advance, 1 branch | 7.4–9.5 | 5.8–5.9 |
+| advance, 4 / 8 / 15 branches (one decode) | 10.4 / 16.1 / 27.9–28.5 | 7.2–7.7 / 8.1–8.5 / 13.4–13.5 |
+| score, 16 tokens | 25.5–25.9 | 13.5–13.6 |
+| host normalization of one row (one thread) | 1.25–1.28 | 1.25–1.28 |
+
+An open (an 8-token prefill) takes 7 to 10 ms and a fork with its dispose
+0.07 ms, either way (separate sessions; a session's state moves the
+one-branch numbers by a few ms, hence the alternation above).
+
+**The heap.** A branch's log-probabilities are one float array: 607,760
+bytes for Qwen3's vocabulary of 151,936, 1,048,592 for Gemma 3's 262,144.
+G1 makes an object over half a region humongous: with a 2 GB heap (1 MB
+regions) every row is (the bench, under `-Xlog:gc+humongous`, logged 903
+humongous rows, all reclaimed eagerly as reclaim candidates, at no
+measurable cost: 13.8 ms for an advance of 15); with the default heap of a
+64 GB machine (16 GB, 8 MB regions) none is, and with 4 GB (2 MB regions)
+Gemma's are. Forks and resampled children share their parent's array.
 
 ## For the next beans
 
@@ -244,7 +336,9 @@ have other kernels: measure them with the bench before using the band there.
   line `llama_kv_cache: size = … MiB (… cells, … layers, …)` (and its
   per-buffer "KV buffer size" lines) through the log callback.
 - **Not done here:** Linux CUDA and CPU builds (written, not run), MLX and
-  llama.cpp in one test JVM (the spike showed it), the 8B and 30B models.
+  llama.cpp in one test JVM (the spike showed it), the 8B and 30B models,
+  and a fatal decode on Metal (only the CPU backend honours an abort, and
+  no other deterministic way exists without a `GGML_ASSERT`).
 
 ## The review
 
@@ -274,6 +368,33 @@ without the fix:
    in `token-bytes`/`detokenize` was an `IndexOutOfBoundsException`;
    `:max-branches` is checked against `llama_max_parallel_sequences`; two
    contract checks compared an array with itself and are gone.
+
+## The quality review
+
+A second review (an agent, 2026-10-20, against the owner's bar: beautiful,
+idiomatic Clojure and steady JVM performance) found nine things that had
+to change and twelve that would be nicer, all applied:
+- **Bugs.** A read that lost its slot was retried after a collection,
+  leaving a live branch whose state was not its value (M1: now only a
+  read whose slots were restored is retried); a construction interrupted
+  while the model loaded leaked it (M2: it waits as every call does); two
+  error paths had no test (M3: the toy's `:lossy` mode, and resample past
+  capacity in the misuse cases); token checks coerced to long, so a big
+  integer was an `IllegalArgumentException` (M6); and error data without
+  or with a borrowed `:reason` (M9).
+- **Structure.** A Branch carries no slot (M4: the engine's books hold it,
+  `slots/slot-of` shows it); the books' transitions are pure functions
+  with one effectful `forget!` (M5); the construction is named steps
+  (M7); a read is one loop that always restores (M8, above); resample's
+  placement is a pure, tested function (N5); one close path through the
+  `Cleanable` (N4); `CompletableFuture/join` for the uninterruptible wait
+  (N3); the batch's views made once (N2).
+- **Performance.** Rows normalized on the engine's pool (N1, above); the
+  contract's `top-tokens` one packed sort, 7 ms rather than 50 (N8).
+- **Loudness.** Unknown engine options and `gen.llama.log` levels are
+  errors (N10); llama.cpp's functions refuse another engine
+  (`:not-a-llama-engine`, N12); the jextract recipe checks every function
+  was emitted (N9).
 
 ## Models tested
 

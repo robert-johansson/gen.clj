@@ -635,66 +635,6 @@ public class Llama extends Llama$shared {
         }
     }
 
-    private static class llama_n_ctx {
-        public static final FunctionDescriptor DESC = FunctionDescriptor.of(
-            Llama.C_INT,
-            Llama.C_POINTER
-        );
-
-        public static final MemorySegment ADDR = SYMBOL_LOOKUP.findOrThrow("llama_n_ctx");
-
-        public static final MethodHandle HANDLE = Linker.nativeLinker().downcallHandle(ADDR, DESC);
-    }
-
-    /**
-     * Function descriptor for:
-     * {@snippet lang=c :
-     * uint32_t llama_n_ctx(const struct llama_context *ctx)
-     * }
-     */
-    public static FunctionDescriptor llama_n_ctx$descriptor() {
-        return llama_n_ctx.DESC;
-    }
-
-    /**
-     * Downcall method handle for:
-     * {@snippet lang=c :
-     * uint32_t llama_n_ctx(const struct llama_context *ctx)
-     * }
-     */
-    public static MethodHandle llama_n_ctx$handle() {
-        return llama_n_ctx.HANDLE;
-    }
-
-    /**
-     * Address for:
-     * {@snippet lang=c :
-     * uint32_t llama_n_ctx(const struct llama_context *ctx)
-     * }
-     */
-    public static MemorySegment llama_n_ctx$address() {
-        return llama_n_ctx.ADDR;
-    }
-
-    /**
-     * {@snippet lang=c :
-     * uint32_t llama_n_ctx(const struct llama_context *ctx)
-     * }
-     */
-    public static int llama_n_ctx(MemorySegment ctx) {
-        var mh$ = llama_n_ctx.HANDLE;
-        try {
-            if (TRACE_DOWNCALLS) {
-                traceDowncall("llama_n_ctx", ctx);
-            }
-            return (int)mh$.invokeExact(ctx);
-        } catch (Error | RuntimeException ex) {
-           throw ex;
-        } catch (Throwable ex$) {
-           throw new AssertionError("should not reach here", ex$);
-        }
-    }
-
     private static class llama_n_ctx_seq {
         public static final FunctionDescriptor DESC = FunctionDescriptor.of(
             Llama.C_INT,
@@ -806,66 +746,6 @@ public class Llama extends Llama$shared {
         try {
             if (TRACE_DOWNCALLS) {
                 traceDowncall("llama_n_batch", ctx);
-            }
-            return (int)mh$.invokeExact(ctx);
-        } catch (Error | RuntimeException ex) {
-           throw ex;
-        } catch (Throwable ex$) {
-           throw new AssertionError("should not reach here", ex$);
-        }
-    }
-
-    private static class llama_n_ubatch {
-        public static final FunctionDescriptor DESC = FunctionDescriptor.of(
-            Llama.C_INT,
-            Llama.C_POINTER
-        );
-
-        public static final MemorySegment ADDR = SYMBOL_LOOKUP.findOrThrow("llama_n_ubatch");
-
-        public static final MethodHandle HANDLE = Linker.nativeLinker().downcallHandle(ADDR, DESC);
-    }
-
-    /**
-     * Function descriptor for:
-     * {@snippet lang=c :
-     * uint32_t llama_n_ubatch(const struct llama_context *ctx)
-     * }
-     */
-    public static FunctionDescriptor llama_n_ubatch$descriptor() {
-        return llama_n_ubatch.DESC;
-    }
-
-    /**
-     * Downcall method handle for:
-     * {@snippet lang=c :
-     * uint32_t llama_n_ubatch(const struct llama_context *ctx)
-     * }
-     */
-    public static MethodHandle llama_n_ubatch$handle() {
-        return llama_n_ubatch.HANDLE;
-    }
-
-    /**
-     * Address for:
-     * {@snippet lang=c :
-     * uint32_t llama_n_ubatch(const struct llama_context *ctx)
-     * }
-     */
-    public static MemorySegment llama_n_ubatch$address() {
-        return llama_n_ubatch.ADDR;
-    }
-
-    /**
-     * {@snippet lang=c :
-     * uint32_t llama_n_ubatch(const struct llama_context *ctx)
-     * }
-     */
-    public static int llama_n_ubatch(MemorySegment ctx) {
-        var mh$ = llama_n_ubatch.HANDLE;
-        try {
-            if (TRACE_DOWNCALLS) {
-                traceDowncall("llama_n_ubatch", ctx);
             }
             return (int)mh$.invokeExact(ctx);
         } catch (Error | RuntimeException ex) {
@@ -1717,66 +1597,6 @@ public class Llama extends Llama$shared {
         }
     }
 
-    private static class llama_memory_clear {
-        public static final FunctionDescriptor DESC = FunctionDescriptor.ofVoid(
-            Llama.C_POINTER,
-            Llama.C_BOOL
-        );
-
-        public static final MemorySegment ADDR = SYMBOL_LOOKUP.findOrThrow("llama_memory_clear");
-
-        public static final MethodHandle HANDLE = Linker.nativeLinker().downcallHandle(ADDR, DESC);
-    }
-
-    /**
-     * Function descriptor for:
-     * {@snippet lang=c :
-     * void llama_memory_clear(llama_memory_t mem, bool data)
-     * }
-     */
-    public static FunctionDescriptor llama_memory_clear$descriptor() {
-        return llama_memory_clear.DESC;
-    }
-
-    /**
-     * Downcall method handle for:
-     * {@snippet lang=c :
-     * void llama_memory_clear(llama_memory_t mem, bool data)
-     * }
-     */
-    public static MethodHandle llama_memory_clear$handle() {
-        return llama_memory_clear.HANDLE;
-    }
-
-    /**
-     * Address for:
-     * {@snippet lang=c :
-     * void llama_memory_clear(llama_memory_t mem, bool data)
-     * }
-     */
-    public static MemorySegment llama_memory_clear$address() {
-        return llama_memory_clear.ADDR;
-    }
-
-    /**
-     * {@snippet lang=c :
-     * void llama_memory_clear(llama_memory_t mem, bool data)
-     * }
-     */
-    public static void llama_memory_clear(MemorySegment mem, boolean data) {
-        var mh$ = llama_memory_clear.HANDLE;
-        try {
-            if (TRACE_DOWNCALLS) {
-                traceDowncall("llama_memory_clear", mem, data);
-            }
-            mh$.invokeExact(mem, data);
-        } catch (Error | RuntimeException ex) {
-           throw ex;
-        } catch (Throwable ex$) {
-           throw new AssertionError("should not reach here", ex$);
-        }
-    }
-
     private static class llama_memory_seq_rm {
         public static final FunctionDescriptor DESC = FunctionDescriptor.of(
             Llama.C_BOOL,
@@ -2320,67 +2140,6 @@ public class Llama extends Llama$shared {
         try {
             if (TRACE_DOWNCALLS) {
                 traceDowncall("llama_vocab_is_eog", vocab, token);
-            }
-            return (boolean)mh$.invokeExact(vocab, token);
-        } catch (Error | RuntimeException ex) {
-           throw ex;
-        } catch (Throwable ex$) {
-           throw new AssertionError("should not reach here", ex$);
-        }
-    }
-
-    private static class llama_vocab_is_control {
-        public static final FunctionDescriptor DESC = FunctionDescriptor.of(
-            Llama.C_BOOL,
-            Llama.C_POINTER,
-            Llama.C_INT
-        );
-
-        public static final MemorySegment ADDR = SYMBOL_LOOKUP.findOrThrow("llama_vocab_is_control");
-
-        public static final MethodHandle HANDLE = Linker.nativeLinker().downcallHandle(ADDR, DESC);
-    }
-
-    /**
-     * Function descriptor for:
-     * {@snippet lang=c :
-     * bool llama_vocab_is_control(const struct llama_vocab *vocab, llama_token token)
-     * }
-     */
-    public static FunctionDescriptor llama_vocab_is_control$descriptor() {
-        return llama_vocab_is_control.DESC;
-    }
-
-    /**
-     * Downcall method handle for:
-     * {@snippet lang=c :
-     * bool llama_vocab_is_control(const struct llama_vocab *vocab, llama_token token)
-     * }
-     */
-    public static MethodHandle llama_vocab_is_control$handle() {
-        return llama_vocab_is_control.HANDLE;
-    }
-
-    /**
-     * Address for:
-     * {@snippet lang=c :
-     * bool llama_vocab_is_control(const struct llama_vocab *vocab, llama_token token)
-     * }
-     */
-    public static MemorySegment llama_vocab_is_control$address() {
-        return llama_vocab_is_control.ADDR;
-    }
-
-    /**
-     * {@snippet lang=c :
-     * bool llama_vocab_is_control(const struct llama_vocab *vocab, llama_token token)
-     * }
-     */
-    public static boolean llama_vocab_is_control(MemorySegment vocab, int token) {
-        var mh$ = llama_vocab_is_control.HANDLE;
-        try {
-            if (TRACE_DOWNCALLS) {
-                traceDowncall("llama_vocab_is_control", vocab, token);
             }
             return (boolean)mh$.invokeExact(vocab, token);
         } catch (Error | RuntimeException ex) {

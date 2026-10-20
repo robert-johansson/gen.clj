@@ -22,16 +22,29 @@
       [(str "threw " (.getName (class t)) ": " (ex-message t) " " (pr-str (ex-data t)))])))
 
 (defn top-tokens
-  "The k most likely tokens of a log-probability array, most likely first."
+  "The k most likely tokens of a log-probability array (log p <= 0), most
+   likely first, ties by token: one sort of (|log p|, token) packed in
+   longs, whose order is the floats' for non-negative floats."
   [^floats lp k]
-  (->> (range (alength lp)) (sort-by #(- (aget lp (int %)))) (take k) vec))
+  (let [n (alength lp)
+        packed (long-array n)]
+    (dotimes [j n]
+      (aset packed j (bit-or (bit-shift-left (long (Float/floatToIntBits (Math/abs (aget lp j)))) 32) j)))
+    (java.util.Arrays/sort packed)
+    (mapv #(bit-and (aget packed (int %)) 0xffffffff) (range (min (long k) n)))))
 
 (defn max-diff
   "max |ref_j - got_j| over the top most likely tokens j of ref."
   ^double [^floats ref ^floats got top]
   (reduce max 0.0 (map #(Math/abs (- (aget ref (int %)) (aget got (int %)))) (top-tokens ref top))))
 
+(def ^:dynamic *observe*
+  "When bound, called with (what, |Δ|) for every comparison a check makes
+   against its band: how bands are measured (gen.llm.llama-test)."
+  nil)
+
 (defn- within [failures what d band]
+  (when *observe* (*observe* what d))
   (cond-> failures
     (not (<= d band)) (conj (format "%s: |Δ log p| = %.3g > band %.3g" what d (double band)))))
 
@@ -149,12 +162,12 @@
         kids (br/resample parents anc)
         t (first (top-tokens (br/logprobs root) 1))
         stepped (br/advance kids (repeat (count kids) t))
-        failures (reduce (fn [fs [j i ^gen.llm.branching.Branch kid s]]
-                           (let [^gen.llm.branching.Branch p (nth parents i)]
+        failures (reduce (fn [fs [j i kid s]]
+                           (let [p (nth parents i)]
                              (cond-> (within fs (str "child " j " (of " i ") advanced vs fresh")
                                              (max-diff (fresh engine (conj (br/tokens p) t)) (br/logprobs s) top) band)
                                (not= (br/tokens p) (br/tokens kid)) (conj (str "child " j "'s tokens"))
-                               (not (same-floats? (.-logprobs p) (.-logprobs kid)))
+                               (not (same-floats? (br/logprobs p) (br/logprobs kid)))
                                (conj (str "child " j "'s distribution")))))
                          [] (map vector (range) anc kids stepped))
         failures (cond-> failures
@@ -171,8 +184,9 @@
     (br/dispose! root)
     failures))
 
-(defn- reason
-  "The :reason of the ex-info (f) throws, or what happened instead."
+(defn reason
+  "The :reason of the ex-info (f) throws, or what happened instead: for
+   tests of loud errors, (is (= :closed (reason #(br/fork b))))."
   [f]
   (try
     (f)
@@ -200,10 +214,12 @@
                :disposed [:not-live #(br/score g [t])]
                :disposed-twice [:not-live #(br/dispose! g)]
                :fork-past-capacity [:no-free-branches #(br/fork b 2)]
+               :resample-past-capacity [:no-free-branches #(br/resample [f2] [0 0])]
                :open-past-capacity [:no-free-branches #(br/open engine prompt)]
                :token-past-vocabulary [:invalid-token #(br/advance [f2] [n-vocab])]
                :negative-token [:invalid-token #(br/score f2 [-1])]
                :non-integer-token [:invalid-token #(br/open engine [1.0])]
+               :big-integer-token [:invalid-token #(br/open engine [100000000000000000000N])]
                :repeated-branch [:repeated-branch #(br/advance [f2 f2] [t t])]
                :count-mismatch [:count-mismatch #(br/advance [f2] [t t])]
                :context-full [:context-full #(br/extend f2 (vec (repeat n-ctx t)))]
@@ -226,7 +242,7 @@
   [engine {:keys [prompt]}]
   (let [b (br/open engine prompt)
         room (- (:max-branches (br/info engine)) (:live (br/info engine)))
-        _ (dotimes [_ 3] (count (br/fork b room)))
+        _ (dotimes [_ 3] (br/fork b room))
         again (br/fork b room)
         failures (cond-> []
                    (not= room (count again)) (conj "the dropped branches' sequences were not freed"))]

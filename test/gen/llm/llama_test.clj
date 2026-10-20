@@ -28,14 +28,30 @@
      fork-matches-fresh, batch-matches-single, resample;
    - a run scoring each target with the row after the right one:
      score-matches-steps;
-   - no removal after a read that fails midway (Qwen3), and a removal that
-     never reports its slot lost (Qwen3.5, hybrid):
-     a-read-that-fails-midway-is-undone.
+   - no removal after a read that fails (Qwen3), and a removal that never
+     reports its slot lost (Qwen3.5, hybrid):
+     a-read-that-fails-midway-is-undone and an-aborted-decode-is-undone-or-loud;
+   - a copy keeping only positions from 512 (Gemma-3-270M):
+     branches-longer-than-a-sliding-window (4 to 39 nats), and most others.
+   (Rerun after the quality review's rewrite of the reads, 2026-10-20: a
+   failed read now always removes from its start, which on recurrent
+   memory too is a removal of nothing when nothing was added: the third
+   case of a-read-that-fails-midway-is-undone, on Qwen3.5.)
+   Branches past a sliding window have a band of their own, measured for
+   them (long-band, below).
    CPU and CUDA builds have other kernels: measure their noise with the
    bench before trusting this band there."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gen.llm.branching :as br]
-            [gen.llm.branching-contract :as contract]))
+            [gen.llm.branching-contract :as contract :refer [reason]]
+            [gen.llm.long-texts :as long-texts]
+            [gen.llm.slots :as slots]
+            [gen.llm.toy-engine :as toy])
+  (:import [java.lang.foreign Arena FunctionDescriptor Linker Linker$Option MemoryLayout MemorySegment
+            SymbolLookup ValueLayout]
+           [java.lang.invoke MethodHandles MethodType]
+           [java.util.concurrent.atomic AtomicLong]
+           [java.util.function Predicate]))
 
 (def ^:private model-path
   (or (System/getProperty "gen.llama.test-model") (System/getenv "GEN_LLAMA_TEST_MODEL")))
@@ -116,7 +132,8 @@
       (is (seq toks))
       (is (= (seq (.getBytes text "UTF-8")) (seq bytes)) "the tokens' bytes are the text's")
       (is (= text ((llama 'detokenize) e toks)))
-      (is (= :invalid-token (:reason (ex-data (try ((llama 'token-bytes) e -1) (catch Exception x x)))))))))
+      (is (= :invalid-token (reason #((llama 'token-bytes) e -1))))
+      (is (= :invalid-token (reason #((llama 'detokenize) e [1 100000000000000000000N])))))))
 
 (deftest the-cache-holds-exactly-the-live-branches
   ;; each live branch's sequence holds positions 0 to its position - 1 (a
@@ -133,7 +150,7 @@
           gone (br/fork root)
           _ (br/dispose! gone)
           positions ((llama 'kv-positions) e)
-          live (into {} (map (fn [b] [(.-slot ^gen.llm.branching.Branch b) b])) (cons root kids))]
+          live (into {} (map (fn [b] [(slots/slot-of e b) b])) (cons root kids))]
       (is (= 3 (count scored)))
       (doseq [[slot [lo hi]] (map-indexed vector positions)]
         (if-let [b (live slot)]
@@ -166,14 +183,17 @@
       (.close ^java.io.Closeable e)
       (is (:closed? (br/info e)))
       (is (not (br/live? b)))
-      (is (= :closed (:reason (ex-data (try (br/fork b) (catch Exception x x))))))
-      (is (= :closed (:reason (ex-data (try ((llama 'tokenize) e "x") (catch Exception x x)))))))))
+      (is (= :closed (reason #(br/fork b))))
+      (is (= :closed (reason #((llama 'tokenize) e "x")))))))
 
 (deftest bad-engine-options-are-loud
   (when-llama
-    (is (= :no-model (:reason (ex-data (try ((llama 'engine) {:model "/no/such.gguf"}) (catch Exception x x))))))
-    (is (= :invalid-option
-           (:reason (ex-data (try ((llama 'engine) {:model model-path :max-branches 256}) (catch Exception x x))))))
+    (is (= :no-model (reason #((llama 'engine) {:model "/no/such.gguf"}))))
+    (doseq [bad [{:max-branches 256} {:max-branches 0} {:n-ctx -1} {:swa-full 1} {:nctx 8192}]]
+      (testing bad
+        (is (= :invalid-option (reason #((llama 'engine) (assoc bad :model model-path)))))))
+    (with-open [toy (toy/engine {})]
+      (is (= :not-a-llama-engine (reason #((llama 'tokenize) toy "x"))) "llama.cpp's functions want its engine"))
     (let [junk (java.io.File/createTempFile "not-a-model" ".gguf")]
       (try
         (spit junk "not a GGUF file")
@@ -209,30 +229,46 @@
   ;; fork of the first needs. The third finds the cache full; what the
   ;; first two added is removed, so the fork is as it was, or (a recurrent
   ;; or hybrid model, which cannot remove the end of its state) freed,
-  ;; loudly. An open that fails midway leaves no branch.
+  ;; loudly. A read whose first decode finds no room added nothing: its
+  ;; branch stays as it was on every model, since removing nothing
+  ;; succeeds, for recurrent memory too (llama.cpp v0.7.0). An open that
+  ;; fails midway leaves no branch.
   (when-llama
-    (with-open [e ((llama 'engine) {:model model-path :max-branches 3 :n-ctx 256 :n-batch 16})]
+    (with-open [e ((llama 'engine) {:model model-path :max-branches 4 :n-ctx 256 :n-batch 16})]
       (let [{:keys [recurrent? hybrid?]} (:model (br/info e))
-            slot-of #(.-slot ^gen.llm.branching.Branch %)
+            positions #(((llama 'kv-positions) e) %)
+            ends (fn [b] [(if (or recurrent? hybrid?) (dec (br/position b)) 0) (dec (br/position b))])
             a (br/open e (vec (repeat 150 1000)))
-            b (br/open e (vec (repeat 60 2000)))
-            f (br/fork a)
-            x (try (br/extend f (vec (repeat 100 3000))) (catch Exception x x))
-            positions ((llama 'kv-positions) e)]
-        (is (= :kv-full (:reason (ex-data x))) (pr-str x))
-        (if (or recurrent? hybrid?)
-          (do (is (= [(slot-of f)] (:lost-slots (ex-data x))))
-              (is (not (br/live? f)))
-              (is (= [-1 -1] (positions (slot-of f)))))
-          (do (is (nil? (:lost-slots (ex-data x))))
-              (is (br/live? f))
-              (is (= [0 149] (positions (slot-of f))) "the two decodes' tokens are gone")
-              (br/dispose! f)))
-        (let [y (try (br/open e (vec (repeat 100 4000))) (catch Exception x x))]
-          (is (= :kv-full (:reason (ex-data y))) (pr-str y)))
-        (is (= 2 (:live (br/info e))) "the refused open left no branch")
-        (is (= 1 (count (filter #(= [-1 -1] %) (butlast ((llama 'kv-positions) e)))))
-            "its slot is empty")
+            b (br/open e (vec (repeat 60 2000)))]
+        (testing "a read that fails after two decodes"
+          (let [f (br/fork a)
+                slot (slots/slot-of e f)
+                x (try (br/extend f (vec (repeat 100 3000))) (catch Exception x x))]
+            (is (= :kv-full (:reason (ex-data x))) (pr-str x))
+            (if (or recurrent? hybrid?)
+              (do (is (= [slot] (:lost-slots (ex-data x))))
+                  (is (not (br/live? f)))
+                  (is (= [-1 -1] (positions slot))))
+              (do (is (nil? (:lost-slots (ex-data x))))
+                  (is (br/live? f))
+                  (is (= (ends a) (positions slot)) "the two decodes' tokens are gone")
+                  (br/dispose! f)))))
+        (testing "an open that fails midway"
+          (is (= :kv-full (reason #(br/open e (vec (repeat 100 4000))))))
+          (is (= 2 (:live (br/info e))) "leaves no branch"))
+        (testing "a read whose first decode finds no room"
+          (let [c (br/open e (vec (repeat 40 5000)))
+                g (br/fork a)
+                x (try (br/extend g (vec (repeat 20 3000))) (catch Exception x x))]
+            (is (= :kv-full (:reason (ex-data x))) (pr-str x))
+            (is (nil? (:lost-slots (ex-data x))))
+            (is (br/live? g) "leaves its branch")
+            (is (= (ends a) (positions (slots/slot-of e g))) "as it was")
+            (let [[g2] (br/advance [g] [1000])]
+              (is (= 151 (br/position g2)) "and it advances")
+              (br/dispose! [g2 c]))))
+        (is (= 2 (count (remove #(= [-1 -1] %) (butlast ((llama 'kv-positions) e)))))
+            "only the two branches' slots hold anything")
         (let [[a2 b2] (br/advance [a b] [1000 2000])]
           (is (= [151 61] (map br/position [a2 b2])) "the others still advance")
           (br/dispose! [a2 b2]))))))
@@ -243,8 +279,142 @@
   (when-llama
     (with-open [e ((llama 'engine) {:model model-path :max-branches 3 :n-ctx 256})]
       (let [a (br/open e (vec (repeat 100 1000)))]
-        (count (br/tokens (br/open e (vec (repeat 100 2000)))))
+        (br/open e (vec (repeat 100 2000)))
         (let [c (br/open e (vec (repeat 100 3000)))]
           (is (= 100 (br/position c)))
           (is (= 2 (:live (br/info e))))
           (br/dispose! [a c]))))))
+
+;; ---------------------------------------------------------------------------
+;; Branches longer than a sliding window
+;; ---------------------------------------------------------------------------
+
+(def ^:private long-band
+  ;; 0.6 nats: twice the largest |Δ log p| bench/gen/llama_long_noise.clj
+  ;; measured for these very comparisons (the engine below, the long texts,
+  ;; positions 600 and 1000 and a continuation from 472 across 512) on
+  ;; Metal (2026-10-20): 0.28 with Gemma-3-270M (a fork at 1000 tokens of
+  ;; the code text, in the deep tail of a peaked distribution: log p of -10
+  ;; to -22 after a newline whose successor has log p -6e-6; the fork
+  ;; batched and the branch advanced alone agree there to 1e-3), median
+  ;; 1e-2; Qwen3-0.6B at most 2.9e-2, Qwen3.5-0.8B 8.9e-3. A copy that keeps
+  ;; only the window's positions moves them by 4 to 5 nats (median, up to
+  ;; 39).
+  0.6)
+
+(deftest branches-longer-than-a-sliding-window
+  ;; Gemma 3's layers mix a sliding window of 512 tokens with full
+  ;; attention, so a branch past the window needs its whole history in the
+  ;; cache (swa_full): a fork taken past it, a resample there and scores
+  ;; reaching across it give the distributions of fresh reads. Other models
+  ;; take 512 as the window: then these are simply long branches.
+  (when-llama
+    (with-open [e ((llama 'engine) {:model model-path :max-branches 8 :n-ctx 4096})]
+      (let [window (let [w (:n-swa (:model (br/info e)))] (if (pos? w) w 512))]
+        (doseq [text [:list :code]
+                :let [all ((llama 'tokenize) e (long-texts/texts text))]
+                [len n] [[(+ window 88) 40] [(+ window 488) 40] [(- window 40) 80]]
+                [k check] (select-keys contract/checks [:fork-matches-fresh :score-matches-steps :resample])]
+          (testing [text len k]
+            (is (= [] (contract/run-check check e {:prompt (subvec all 0 len) :continuation (subvec all len (+ len n))
+                                                   :k 4 :band long-band})))))
+        (is (zero? (:live (br/info e))))))))
+
+;; ---------------------------------------------------------------------------
+;; A decode llama.cpp aborts
+;; ---------------------------------------------------------------------------
+
+(defn- abort-switch
+  "Make llama.cpp abort engine e's decode at the n-th time its CPU backend
+   checks (once before each graph node): {:arm! (fn [n]) to abort at check
+   n counted from now (nil: never), :checks (fn []) the checks since}.
+   Test-only: llama_set_abort_callback is found in libllama itself (the
+   binding leaves it out), and the callback's stub lives in arena."
+  [e ^Arena arena]
+  (let [checks (AtomicLong.)
+        at (AtomicLong. -1)
+        abort? (reify Predicate
+                 (test [_ _] (== (.incrementAndGet checks) (.get at))))
+        target (-> (MethodHandles/lookup)
+                   (.findVirtual Predicate "test" (MethodType/methodType Boolean/TYPE Object))
+                   (.bindTo abort?)
+                   (.asType (MethodType/methodType Boolean/TYPE MemorySegment)))
+        linker (Linker/nativeLinker)
+        stub (.upcallStub linker target
+                          (FunctionDescriptor/of ValueLayout/JAVA_BOOLEAN (into-array MemoryLayout [ValueLayout/ADDRESS]))
+                          arena (make-array Linker$Option 0))
+        lib (.resolve ^java.nio.file.Path (clojure.lang.Reflector/invokeStaticMethod
+                                           "gen.llama.LlamaRuntime" "libraryDirectory" (object-array 0))
+                      (if (.contains (System/getProperty "os.name") "Mac") "libllama.dylib" "libllama.so"))
+        set-callback (.downcallHandle linker
+                                      (.orElseThrow (.find (SymbolLookup/libraryLookup lib arena) "llama_set_abort_callback"))
+                                      (FunctionDescriptor/ofVoid (into-array MemoryLayout (repeat 3 ValueLayout/ADDRESS)))
+                                      (make-array Linker$Option 0))]
+    (slots/call
+     e (fn [s] (.invokeWithArguments set-callback (object-array [(.-ctx s) stub MemorySegment/NULL]))))
+    {:arm! (fn [n] (.set checks 0) (.set at (if n (long n) -1)))
+     :checks #(.get checks)}))
+
+(deftest an-aborted-decode-is-undone-or-loud
+  ;; A decode llama.cpp aborts (status 2) keeps the ubatches it finished;
+  ;; the engine removes them, or, for a recurrent or hybrid model, which
+  ;; cannot remove the end of its state, frees the branch and names its
+  ;; slot (:lost-slots), loudly either way. llama.cpp's abort callback is
+  ;; checked only by its CPU backend (once per graph node), so the engine is
+  ;; CPU-only, with 16-token decodes (below the size at which llama.cpp
+  ;; hands a CPU model's work to the GPU), and the abort lands at a counted
+  ;; check: the first, or the first of the second decode of a read.
+  (when-llama
+    (with-open [arena (Arena/ofShared)
+                e ((llama 'engine) {:model model-path :max-branches 4 :n-ctx 512 :n-batch 16 :gpu-layers 0})]
+      (let [{:keys [arm! checks]} (abort-switch e arena)
+            {:keys [recurrent? hybrid?]} (:model (br/info e))
+            stateful? (or recurrent? hybrid?)
+            all ((llama 'tokenize) e (long-texts/texts :prose))
+            prompt (subvec all 0 20)
+            continuation (subvec all 20 60)
+            t (first continuation)
+            b (br/open e prompt)
+            ;; what a branch in b's state gives after t: a one-token step,
+            ;; as the checks below take, so equal bit for bit (the CPU
+            ;; backend's results depend on shapes, not on the cache's layout)
+            ref (let [[x] (br/advance [(br/fork b)] [t])] (br/logprobs (doto x br/dispose!)))
+            same? #(java.util.Arrays/equals ^floats ref ^floats (br/logprobs %))
+            per-decode (fn [] (arm! nil) (br/dispose! (:branch (br/extend (br/fork b) (subvec continuation 0 16))))
+                         (checks))
+            per (per-decode)
+            ;; the branches a failure left (on their slots, read before):
+            ;; lost (named, freed, empty) or live and as they were
+            undone-or-lost (fn [x bs held]
+                             (is (= :aborted (:reason (ex-data x))) (pr-str x))
+                             (is (= 2 (:code (ex-data x))))
+                             (if stateful?
+                               (do (is (= held (:lost-slots (ex-data x))))
+                                   (is (not-any? br/live? bs))
+                                   (is (every? #(= [-1 -1] (((llama 'kv-positions) e) %)) held)))
+                               (do (is (nil? (:lost-slots (ex-data x))))
+                                   (doseq [[y slot] (map vector bs held)]
+                                     (is (= [0 19] (((llama 'kv-positions) e) slot)) "what the decode added is gone")
+                                     (let [[y2] (br/advance [y] [t])]
+                                       (is (same? y2) "and the state is intact")
+                                       (br/dispose! y2))))))]
+        (is (= per (per-decode)) "every 16-token decode makes the same checks")
+        (testing "a read aborted at once"
+          (let [f (br/fork b)
+                held [(slots/slot-of e f)]]
+            (arm! 1)
+            (undone-or-lost (try (br/extend f continuation) (catch Exception x x)) [f] held)))
+        (testing "a read aborted after its first decode, which llama.cpp keeps"
+          (let [f (br/fork b)
+                held [(slots/slot-of e f)]]
+            (arm! (inc per))
+            (undone-or-lost (try (br/extend f continuation) (catch Exception x x)) [f] held)))
+        (testing "a step aborted"
+          (let [fs (br/fork b 2)
+                held (mapv #(slots/slot-of e %) fs)]
+            (arm! 1)
+            (undone-or-lost (try (br/advance fs [t t]) (catch Exception x x)) fs held)))
+        (arm! nil)
+        (is (= 1 (:live (br/info e))) "only the untouched branch is left")
+        (let [[b2] (br/advance [b] [t])]
+          (is (same? b2) "and it is as it was"))))))
