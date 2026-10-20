@@ -177,8 +177,11 @@
 
 (defn info
   "The LM's sizes and counts: for an LM over an engine, :live branches,
-   :cells, :tokens in its trie, :max-branches, :max-cells, :closed?, and
-   since it was made :requests (contexts asked for), :hits (answered with
-   no read), :reads (engine reads), :read-tokens, :forks, :evictions."
+   :cells, :tokens in its trie, :max-branches, :max-cells, :limit (the
+   most tokens a context, or a context and the continuation scored after
+   it, may hold: the engine's :n-ctx or :max-cells, the lesser), :closed?,
+   and since it was made :requests (contexts asked for), :hits (answered
+   with no read), :reads (engine reads), :read-tokens, :forks,
+   :evictions."
   [m]
   (-info m))
