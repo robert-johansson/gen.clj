@@ -356,6 +356,24 @@
                             [n ^MemorySegment buf] (sized "detokenize" go (* 8 (inc (alength toks))))]
                         (String. ^bytes (.toArray (.asSlice buf 0 (long n)) ValueLayout/JAVA_BYTE) "UTF-8")))))))
 
+(defn tokenizer
+  "The model's vocabulary and tokenizer, as the LM protocol takes them
+   (gen.llm.lm): the size and special tokens (:bos and :eos nil when the
+   model has none), every token's bytes, read once in one engine call, and
+   tokenize and detokenize."
+  [e]
+  (let [{:keys [n-vocab bos eos eog add-bos?]} (br/info e)
+        pieces (slots/call e (fn [_] (mapv #(token-bytes e %) (range n-vocab))))
+        special (fn [t] (when-not (neg? (long t)) t))]
+    {:n-vocab n-vocab
+     :bos (special bos)
+     :eos (special eos)
+     :eog eog
+     :add-bos? add-bos?
+     :token-bytes (fn [t] (aclone ^bytes (pieces t)))
+     :encode (fn [text opts] (tokenize e text opts))
+     :decode (fn [tokens] (detokenize e tokens))}))
+
 (defn kv-positions
   "Diagnostics: [min max] of the positions each slot holds in the KV cache
    ([-1 -1] when empty), by slot (the last is the scratch slot). A
