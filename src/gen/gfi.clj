@@ -246,12 +246,11 @@
    are constraints of the revise, never dropped, so one the run leaves is
    the unvisited error, as outside a revise (review 7, R7-1)."
   [choices f]
-  (let [{:keys [constraints prefix]} *revising*]
-    (if (and *revising* (not (cm/empty? choices)))
-      (binding [*revising* (assoc *revising* :constraints
-                                  (cm/override constraints (if (seq prefix) (cm/set-choice cm/EMPTY prefix choices) choices)))]
-        (f))
-      (f))))
+  (if (and *revising* (not (cm/empty? choices)))
+    (let [{:keys [constraints prefix]} *revising*
+          at-prefix (if (seq prefix) (cm/set-choice cm/EMPTY prefix choices) choices)]
+      (binding [*revising* (assoc *revising* :constraints (cm/override constraints at-prefix))] (f)))
+    (f)))
 
 (defn ^:no-doc generate-dropping
   "(generate sigma)'s result and the sigma it ran with, in a revise

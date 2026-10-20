@@ -546,16 +546,22 @@
                                   (gfi/update (assoc tr :gen-fn deep) (cm/choicemap [0 :c :p :x] 1.0) (rng/key (+ 20 k))))))))))
   (testing "a proposal's own choice that the model's new structure leaves (review 7, R7-1: dropped as an old choice, its log q kept in the weight)"
     ;; q is written for w > 5, where sub makes :x; the store moves w to 1.
-    ;; sub stops a revise that runs on (a drop that removes nothing)
+    ;; The override is revised itself, or runs in a Map's kernel the revise
+    ;; reaches (q's choices are constraints at the call's path). sub stops a
+    ;; revise that runs on (a drop that removes nothing)
     (let [runs (atom 0)
           sub (gen [] (when (< 50 (swap! runs inc)) (throw (ex-info "the revise runs on" {})))
                 (if (> (param :w) 5.0) (trace :x (d/normal 0 1)) (trace :y (d/normal 0 1))))
           q (gen [cs] (when-not (cm/has-value? (cm/get-submap cs [:s :x])) (trace [:s :x] (d/normal 3 1))))
-          model (given-a-store (gen [] (splice :p (prop/with-internal-proposal (gen [] (splice :s sub)) q))))]
-      (doseq [k (range 4)]
-        (let [tr (:trace (gfi/generate model [] (cm/choicemap :a 0.9) (rng/key (+ 1 k))))]
+          pgf (prop/with-internal-proposal (gen [] (splice :s sub)) q)]
+      (doseq [[callee p] [[(gen [] (splice :p pgf)) "[:c :p :s :x]"]
+                          [(gen [] (splice :m (comb/map (gen [_i] (splice :p pgf))) [0])) "[:c :m 0 :p :s :x]"]]
+              k (range 4)]
+        (let [model (given-a-store callee)
+              tr (:trace (gfi/generate model [] (cm/choicemap :a 0.9) (rng/key (+ 1 k))))]
           (reset! runs 0)
-          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"the constraint at \[:c :p :s :x\] was not visited"
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                                (re-pattern (java.util.regex.Pattern/quote (str "the constraint at " p " was not visited")))
                                 (gfi/update tr (cm/choicemap :a 0.1) (rng/key (+ 20 k))))))))))
 
 (deftest user-code-in-a-revised-call-keeps-its-errors
