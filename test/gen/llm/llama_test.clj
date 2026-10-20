@@ -6,7 +6,9 @@
    Needs llama.cpp's libraries (native/build-llama.sh), the compiled binding
    (clojure -T:build java) and a model, given as
    -J-Dgen.llama.test-model=<a GGUF file> (or GEN_LLAMA_TEST_MODEL); a small
-   one is enough (Qwen3-0.6B-Q8_0). Skipped with a note otherwise.
+   one is enough (Qwen3-0.6B-Q8_0). Skipped with a note otherwise. Run on
+   Metal (2026-10-20) with Qwen3-0.6B, Qwen3.5-0.8B (hybrid) and
+   Gemma-3-270M (sliding window), all Q8_0: every model inside the band.
 
    The band, 0.1 nats: twice the largest |Δ log p| (over the reference's 64
    most likely tokens) that bench/gen/llama_noise.clj measured between two
@@ -114,10 +116,12 @@
       (is (= :invalid-token (:reason (ex-data (try ((llama 'token-bytes) e -1) (catch Exception x x)))))))))
 
 (deftest the-cache-holds-exactly-the-live-branches
-  ;; each live branch's sequence holds positions 0 to its position - 1;
-  ;; every free slot, and the scratch slot, is empty
+  ;; each live branch's sequence holds positions 0 to its position - 1 (a
+  ;; recurrent or hybrid model's state only its last); every free slot, and
+  ;; the scratch slot, is empty
   (when-llama
     (let [e (engine)
+          {:keys [recurrent? hybrid?]} (:model (br/info e))
           {:keys [prompt]} (opts e)
           root (br/open e prompt)
           kids (br/advance (br/fork root 3) [10 20 30])
@@ -130,7 +134,8 @@
       (is (= 3 (count scored)))
       (doseq [[slot [lo hi]] (map-indexed vector positions)]
         (if-let [b (live slot)]
-          (is (= [0 (dec (br/position b))] [lo hi]) (str "slot " slot))
+          (is (= [(if (or recurrent? hybrid?) (dec (br/position b)) 0) (dec (br/position b))] [lo hi])
+              (str "slot " slot))
           (is (= [-1 -1] [lo hi]) (str "free slot " slot))))
       (br/dispose! (cons root kids))
       (is (every? #(= [-1 -1] %) ((llama 'kv-positions) e))))))

@@ -133,10 +133,17 @@ directly (resampling as one lane gather).
   state until written), and branches only grow. After a failed decode the
   engine removes what the decode added (`seq_rm` from the run's start); for
   a recurrent model that fails, and the slot is freed with its branch, a loud
-  error naming it (`:lost-slots`). `n_rs_seq` stays 0. **Untested**: no such
-  model was on the MacBook.
+  error naming it (`:lost-slots`). `n_rs_seq` stays 0. Tested with
+  Qwen3.5-0.8B (`qwen35`, hybrid): the whole contract passes, so forks,
+  resampled children and scratch scores of the shared recurrent state are
+  right, and advancing a fork leaves its parent's state alone. A hybrid
+  slot's `seq_pos_min` is its recurrent state's, the last position. The
+  `:lost-slots` path (a fatal decode error on a recurrent model) is not
+  provoked by any test.
 - **Sliding-window models** (Gemma): `swa_full` by default, so a branch
-  keeps every token a fork may need. **Untested** (no SWA model at hand).
+  keeps every token a fork may need. Tested with Gemma-3-270M (window 512;
+  llama.cpp logs "using full-size SWA cache"): the contract passes. No test
+  has branches longer than the window yet.
 - **Refused:** encoder-decoder, diffusion and memoryless (embedding) models.
 - **Decode failures** are ex-infos (`:kv-full`, `:aborted`,
   `:invalid-batch`, `:decode-failed`) carrying llama.cpp's last logged
@@ -154,8 +161,9 @@ directly (resampling as one lane gather).
 Log-probabilities are normalized in double and stored as floats (their sum
 is 1 within 1e-6, a derived band); scores are doubles.
 `bench/gen/llama_noise.clj` compared every pair of computations the contract
-compares, over 20 prompts and batches of 1 to 13 (M2 Max, Metal, Qwen3-0.6B
-Q8_0; |Δ log p| over the reference's 64 most likely tokens):
+compares, over 20 prompts and batches of 1 to 13 (M2 Max, Metal; |Δ log p|
+over the reference's 64 most likely tokens). Qwen3-0.6B Q8_0, on which the
+band was set:
 
 | Comparison | n | median | p99 | max |
 |---|---|---|---|---|
@@ -172,7 +180,15 @@ matrix-matrix kernels (prefills, larger batches) round activations to half
 precision, the single-token decode's matrix-vector kernel does not. The
 worst prompt was a chat-formatted one (5.2e-2); ordinary text stayed under
 1.8e-2. The tests' band is **0.1 nats**, twice the measured maximum; three
-mutations of the engine failed it by 3.8 to 18 nats. CPU and CUDA builds
+mutations of the engine failed it by 3.8 to 18 nats. The two other models
+stay inside it, with the same determinism:
+
+| Model | fork vs fresh, max | batched vs alone, max | overall max | same state |
+|---|---|---|---|---|
+| Qwen3.5-0.8B Q8_0 (hybrid) | 1.6e-2 | 1.0e-3 | 1.6e-2 | 0 |
+| Gemma-3-270M Q8_0 (SWA) | 2.3e-2 | 4.7e-3 | 3.0e-2 | 0 |
+
+CPU and CUDA builds
 have other kernels: measure them with the bench before using the band there.
 
 ## Costs (M2 Max, Metal, Qwen3-0.6B Q8_0, means)
@@ -208,6 +224,23 @@ have other kernels: measure them with the bench before using the band there.
   bytes for f16, for plain attention), or read llama.cpp's info-level log
   line `llama_kv_cache: size = … MiB (… cells, … layers, …)` (and its
   per-buffer "KV buffer size" lines) through the log callback.
-- **Not done here:** Linux CUDA and CPU builds (written, not run), a hybrid
-  and an SWA model (awaiting the owner's go-ahead for a download), MLX and
+- **Not done here:** Linux CUDA and CPU builds (written, not run), MLX and
   llama.cpp in one test JVM (the spike showed it), the 8B and 30B models.
+
+## Models tested
+
+All on the owner's MacBook Pro (M2 Max, 64 GB, macOS 27, Metal, Oracle
+GraalVM 25.0.4), under `~/gen-clj-spikes/mguard.sh`, one model-holding JVM
+at a time; `gen.llm.branching-test` and `gen.llm.llama-test` pass with each
+(14 tests, 94 assertions). Each sha256 below is Hugging Face's, checked on
+download.
+
+| Model | Repository / file | sha256 | Kind |
+|---|---|---|---|
+| Qwen3-0.6B Q8_0 | `Qwen/Qwen3-0.6B-GGUF` / `Qwen3-0.6B-Q8_0.gguf` (the spike's download) | `9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031` | attention (`qwen3`) |
+| Qwen3.5-0.8B Q8_0 | `ggml-org/Qwen3.5-0.8B-GGUF` / `Qwen3.5-0.8B-Q8_0.gguf` (Qwen publishes no GGUF of it) | `37ae482d336108d23516fa35e8e0c4126688d81018b87178a18d752a1357814f` | hybrid GatedDeltaNet (`qwen35`) |
+| Gemma-3-270M Q8_0 | `ggml-org/gemma-3-270m-GGUF` / `gemma-3-270m-Q8_0.gguf` | `e00cf79514204dfe2f4d6943f277ffea7fd8a4c8e955b4b7a869cfc157694881` | sliding window 512 (`gemma3`) |
+
+Both new models load with llama.cpp v0.7.0. Qwen3.5's GGUF carries an MTP
+head that llama.cpp does not load into a default context (it logs the
+unused `blk.24.*` tensors as warnings).

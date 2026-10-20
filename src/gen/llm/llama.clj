@@ -20,8 +20,8 @@
      branch keeps every token a fork may need.
    - Recurrent and hybrid models (Mamba, GatedDeltaNet) cannot remove the
      end of a sequence past their checkpoints; this engine never does
-     (score reads into a scratch copy), so they need none. Untested: no
-     such model was at hand.
+     (score reads into a scratch copy), so they need none (tested with
+     Qwen3.5's hybrid; Gemma 3 for the sliding window).
    - Encoder-decoder, diffusion and embedding models are refused.
 
    llama.cpp's log goes to System.err from warnings up (gen.llama.log:
@@ -346,7 +346,8 @@
 
 (defn kv-positions
   "Diagnostics: [min max] of the positions each slot holds in the KV cache
-   ([-1 -1] when empty), by slot (the last is the scratch slot)."
+   ([-1 -1] when empty), by slot (the last is the scratch slot). A
+   recurrent or hybrid model's min is its state's, the last position."
   [e]
   (slots/call e (fn [^LlamaSlots s]
                   (mapv (fn [slot] [(long (Llama/llama_memory_seq_pos_min (.-mem s) (int slot)))
