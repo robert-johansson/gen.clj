@@ -213,6 +213,31 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"positive" (d/dirichlet [-1.0 2.0])))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"increasing" (d/piecewise-uniform [0 2 1] [0.5 0.5])))))
 
+(deftest mvnormal-rejects-singular-covariances
+  ;; F1 (M5 inventory): a singular matrix can have a Cholesky factor through
+  ;; rounding, which the old check (no NaN in the factor) passed: Gen.jl's
+  ;; 2·ones(2, 2) (dist_dsl.jl:29; log-prob 15.24). The last pivot of rows
+  ;; u, v and u + v is 2.2 times n·ε·aⱼⱼ, so no bound on the pivots sees it.
+  (doseq [cov [[[2.0 2.0] [2.0 2.0]] [[8.0 -6.0 2.0] [-6.0 5.0 -1.0] [2.0 -1.0 1.0]]]]
+    (let [e (try (d/mvnormal (vec (repeat (count cov) 0.0)) cov) nil (catch clojure.lang.ExceptionInfo e e))]
+      (is (re-find #"positive definite" (str (ex-message e))) (str cov))
+      (is (= {:distribution "mvnormal" :param "cov" :dtype (ts/float-dtype)} (ex-data e)) (str cov))))
+  (testing "covariances singular at float32 precision only"
+    ;; 1 - 2⁻²⁶ is 1 in float32 (a zero pivot); 1 - 2⁻²³ is a float32 whose
+    ;; κ·ε is 2. In float64 both give the closed form, within κ·ε.
+    (doseq [rho [(- 1.0 (Math/pow 2 -26)) (- 1.0 (Math/pow 2 -23))]]
+      (let [cov [[1.0 rho] [rho 1.0]]]
+        (if (ts/f32?)
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"float32" (d/mvnormal [0.0 0.0] cov)) (str rho))
+          (is (close? (dc/log-prob (d/mvnormal [0.0 0.0] cov) (array/array [1.0 1.0]))
+                      (- (- (Math/log (* 2 Math/PI))) (* 0.5 (Math/log (* (- 1 rho) (+ 1 rho)))) (/ 1 (+ 1 rho)))
+                      (* (/ (+ 1 rho) (- 1 rho)) (Math/ulp 1.0)))
+              (str rho)))
+        (when (ts/jvm?)
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"float32"
+                                (d/mvnormal [0.0 0.0] (array/astype (array/array cov) :float32)))
+              (str rho)))))))
+
 (dc/defdist softmax-categorical
   "A user-defined distribution without a value-shape clause."
   [logits]

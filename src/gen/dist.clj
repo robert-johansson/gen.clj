@@ -168,10 +168,33 @@
       (guard (logical-and (>= v (array/take bounds 0)) (<= v (array/take bounds n)))
              (- (log (array/take probs i)) (log (- (array/take bounds (+ i 1)) (array/take bounds i))))))))
 
+(def ^:private machine-epsilon {:float32 (double (Math/ulp (float 1.0))) :float64 (Math/ulp 1.0)})
+
+(defn- factored-dtype
+  "The precision cov is factored in: float32 when it or the default
+   backend's floats are (host data become the default backend's arrays),
+   else float64."
+  [cov]
+  (if (some #{:float32} [(array/dtype cov) (dc/float-dtype (dc/backend-of))]) :float32 :float64))
+
+(defn- positive-definite?
+  "Is the symmetric a (each matrix of a batch) positive definite, as far as
+   dtype's rounding can tell? A Cholesky factor L does not show it alone: a
+   singular matrix can have one through rounding (2·ones(2, 2)'s last pivot
+   is 4e-16, not 0). So the correlation matrix H of L·Lᵀ must also have no
+   eigenvalue within the rounding error of an n-term sum, n·ε: trace(H⁻¹),
+   between 1/λmin and n/λmin, is below 1/(n·ε)."
+  [a dtype]
+  (let [n (peek (array/shape a))
+        eye (array/with-backend (array/backend a) (array/eye n))
+        ;; H⁻¹ = MᵀM for M = L⁻¹·diag(√aⱼⱼ); a NaN factor fails the comparison
+        m (la/solve-triangular (la/cholesky a) (* eye (array/expand-dims (sqrt (la/diagonal a)) -2)))]
+    (array/all-true? (< (* n (machine-epsilon dtype) (array/sum (square m) {:axis [-2 -1]})) 1.0))))
+
 (defdist mvnormal
   "mvnormal(mu, cov): the multivariate normal with mean vector mu and
    covariance matrix cov (batched over leading axes). A concrete cov must be
-   symmetric and positive definite."
+   symmetric and positive definite, also to the precision it is factored in."
   [mu cov]
   (validate (dc/check (and (<= 1 (array/ndim mu)) (<= 2 (array/ndim cov))
                            (= (peek (array/shape mu)) (peek (array/shape cov)) (peek (pop (array/shape cov)))))
@@ -183,8 +206,10 @@
                     cov-t (array/transpose cov (-> (vec (range r)) (assoc (- r 2) (dec r)) (assoc (dec r) (- r 2))))]
                 (dc/check (array/all-true? (<= (array/abs (- cov cov-t)) (+ 1e-8 (* 1e-5 (array/abs cov-t)))))
                           "mvnormal" "cov must be symmetric" {})
-                (dc/check (not (array/any-true? (array/isnan (la/cholesky cov)))) "mvnormal"
-                          "cov must be positive definite" {}))))
+                (let [dtype (factored-dtype cov)]
+                  (dc/check (positive-definite? cov dtype) "mvnormal"
+                            (str "cov must be positive definite, and not singular at " (name dtype) " precision")
+                            {:param "cov" :dtype dtype})))))
   (sample [key shape]
     (let [d (peek (array/shape mu))
           batch (sh/broadcast (sh/broadcast shape (pop (array/shape mu))) (pop (pop (array/shape cov))))
