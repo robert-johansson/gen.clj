@@ -83,6 +83,18 @@ weighs new nodes by their scores, GenParticleFilters' optimal resize
 biases the estimate, and GenTraceKernelDSL's Jacobian trimming hides
 non-bijections (§9).
 
+**M4 is complete (2026-10-21).** Every feature of Gen.jl's checklist that
+gen.clj targets is in (`docs/research/genjl-parity.md` §1), and every law the
+thesis states for them is a test (§3, after a final law audit and a
+confirmation read of the new tests). It was verified on the JVM (main: 818
+tests, 4,016 assertions), on Metal (the full battery, 790 tests, and every
+namespace changed after it), and on MLX's CPU in float32 and float64 (751
+tests each). Reviews 5 to 7 and the confirmation read found the last bugs
+(fixed, each with a test). Benchmarks of the static language's compiled
+scores are in `docs/benchmarks.md`. The night's owner decisions are in §9.
+Next: M5 (Gen.jl's own suite; its coverage table is
+`docs/research/genjl-test-suite.md`) and M3's remainder.
+
 Only the beautiful core is ported first. Everything else in GenMLX that *could*
 be ported is tracked as a deferred bean with a note on how to port it cleanly
 (`beans list --tag deferred-port`).
@@ -980,7 +992,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     OpenBLAS, and others) are welcome later as optional plug-ins where they
     give real speedups (bean genclj-w4kw), never needed to run.
 - **Git:** the main repo is public-ready, with `.beans/`, `.beans.yml`,
-  `.claude/` and `*.pdf` gitignored. `.beans/` is its own private repo
+  `.claude/` and `*.pdf` gitignored. Its remote is the private
+  `robert-johansson/gen.clj` (the owner, 2026-10-21, at M4's close: private
+  until gen.clj has a license); main is pushed at a milestone's close or with
+  the owner's go-ahead. `.beans/` is its own private repo
   (`robert-johansson/gen.clj-beans`), synced by SessionStart/PreCompact/Stop
   hooks (see `.beans/hooks/README.txt`).
 
