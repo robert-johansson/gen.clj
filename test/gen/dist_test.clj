@@ -303,17 +303,19 @@
 (deftest mvnormal-rejects-singular-covariances
   ;; F1 (M5 inventory): a singular matrix can have a Cholesky factor through
   ;; rounding, which the old check (no NaN in the factor) passed: Gen.jl's
-  ;; 2·ones(2, 2) (dist_dsl.jl:29; log-prob 15.24). The last pivot of rows
-  ;; u, v and u + v is 2.2 times n·ε·aⱼⱼ, so no bound on the pivots sees it.
+  ;; 2·ones(2, 2) (dist_dsl.jl:29; log-prob 15.24). Rows u, v and u + v
+  ;; have a last pivot 2.2 times n·ε·aⱼⱼ, which no bound on the pivots alone
+  ;; sees. Both stay rejected at the bound 1/ε: their trace(H⁻¹) is 2.0/ε
+  ;; and 2.15/ε, as rounding leaves a singular matrix.
   (doseq [cov [[[2.0 2.0] [2.0 2.0]] [[8.0 -6.0 2.0] [-6.0 5.0 -1.0] [2.0 -1.0 1.0]]]]
     (let [e (try (d/mvnormal (vec (repeat (count cov) 0.0)) cov) nil (catch clojure.lang.ExceptionInfo e e))]
       (is (re-find #"positive definite" (str (ex-message e))) (str cov))
       (is (= {:distribution "mvnormal" :param "cov" :dtype (ts/float-dtype)} (dissoc (ex-data e) :suggested-jitter))
           (str cov))))
   (testing "covariances singular at float32 precision only"
-    ;; 1 - 2⁻²⁶ is 1 in float32 (a zero pivot); 1 - 2⁻²³ is a float32 whose
-    ;; κ·ε is 2. In float64 both give the closed form, within κ·ε.
-    (doseq [rho [(- 1.0 (Math/pow 2 -26)) (- 1.0 (Math/pow 2 -23))]]
+    ;; 1 - 2⁻²⁶ is 1 in float32 (a zero pivot); 1 - 2⁻²⁴ is a float32 whose
+    ;; trace(H⁻¹)·ε is 2. In float64 both give the closed form, within κ·ε.
+    (doseq [rho [(- 1.0 (Math/pow 2 -26)) (- 1.0 (Math/pow 2 -24))]]
       (let [cov [[1.0 rho] [rho 1.0]]]
         (if (ts/f32?)
           (is (thrown-with-msg? clojure.lang.ExceptionInfo #"float32" (d/mvnormal [0.0 0.0] cov)) (str rho))
@@ -327,7 +329,7 @@
               (str rho)))))))
 
 (deftest mvnormal-suggests-a-jitter
-  ;; the owner's decision: the threshold holds at every precision, so in
+  ;; the owner's decision: the bound holds at every precision, so in
   ;; float32 a Gaussian-process kernel needs a jitter at float32's scale.
   ;; When the factor exists, the error names the smallest 1, 2 or 5 × 10ᵏ
   ;; that passes once added to the diagonal.
@@ -355,6 +357,40 @@
   (testing "none for a factor that fails, also when a jitter would mend it"
     (let [e (try (d/mvnormal [0.0 0.0] [[1.0 1.0001] [1.0001 1.0]]) nil (catch clojure.lang.ExceptionInfo e e))]
       (is (= {:distribution "mvnormal" :param "cov" :dtype (ts/float-dtype)} (ex-data e))))))
+
+(deftest ^:slow mvnormal-takes-a-1000-point-kernel-at-float32-accuracy
+  ;; the bound's calibration (docs/research/covariance/f32_gp.py: a float32
+  ;; log density's error is (0.05–0.4)·ε·trace(H⁻¹)). The squared-exponential
+  ;; kernel of 1,000 points (variance 1, length scale 0.1 on [0, 1]) passes
+  ;; in float32 with a jitter of 1e-3 (ε·trace(H⁻¹) = 0.12) and fails with
+  ;; 1e-5 (11.7); in float64, 1e-10 passes (0.002)
+  (let [n 1000
+        jvm (array/backend-named :jvm)
+        kernel (fn [jitter]
+                 (array/with-backend jvm
+                   (let [x (array/linspace 0.0 1.0 n)
+                         d (array/- (array/expand-dims x -1) (array/expand-dims x 0))]
+                     (array/+ (array/exp (array/* -0.5 (array/square (array/* 10.0 d)))) (array/* jitter (array/eye n))))))
+        mu (vec (repeat n 0.0))
+        ;; float32: host data on a float32 backend, a float32 array on the JVM's
+        float32 (fn [k] (if (ts/f32?) (array/->clj k) (array/astype k :float32)))]
+    (when-not (ts/f32?)
+      (is (some? (d/mvnormal mu (array/->clj (kernel 1e-10)))) "1e-10 passes in float64"))
+    (when (or (ts/f32?) (ts/jvm?))
+      (is (some? (d/mvnormal mu (float32 (kernel 1e-3)))) "1e-3 passes in float32")
+      (let [e (try (d/mvnormal mu (float32 (kernel 1e-5))) nil (catch clojure.lang.ExceptionInfo e e))
+            jitter (:suggested-jitter (ex-data e))]
+        (is (= :float32 (:dtype (ex-data e))) "1e-5 does not")
+        (is (<= 1e-4 jitter 1e-3) "the suggested jitter is near 1e-3")
+        (is (some? (d/mvnormal mu (float32 (kernel (+ 1e-5 jitter))))) "and adding it passes")))
+    (when (ts/f32?)
+      ;; what the bound stands for: within 0.1 nats of float64. Here
+      ;; ε·trace(H⁻¹) = 0.12, so the script's largest ratio, 0.4, predicts at
+      ;; most 0.05 nats (it measured 0.009)
+      (let [k (kernel 1e-3)
+            exact (fn [y] (array/with-backend jvm (dc/log-prob (d/mvnormal (array/zeros [n]) k) y)))
+            y (array/with-backend jvm (dc/sample (d/mvnormal (array/zeros [n]) k) (rng/key 41)))]
+        (is (close? (dc/log-prob (d/mvnormal mu (array/->clj k)) (array/array (array/->clj y))) (exact y) 0.1))))))
 
 (dc/defdist softmax-categorical
   "A user-defined distribution without a value-shape clause."
