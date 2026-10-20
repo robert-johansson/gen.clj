@@ -15,6 +15,7 @@
             [gen.inference.kernel :as k]
             [gen.inference.particle-filter :as pf]
             [gen.inference.transform :as tf]
+            [gen.inference.weights :as w]
             [gen.random :as rng]
             [gen.selection :as sel]))
 
@@ -151,17 +152,20 @@
 ;; GenParticleFilters: priority resampling, resize, rejuvenation, statistics
 ;; ---------------------------------------------------------------------------
 
-(defn- unbiased-resampling?
-  "Over many resamplings of one state, the mean of exp(log-ML estimate)
+(defn- unbiased-moves?
+  "Over many runs of (move state key), the mean of exp(log-ML estimate)
    equals its value before, within five standard errors."
-  [state opts]
+  [state move]
   (let [before (pf/log-ml-estimate state)
-        ratios (map #(Math/exp (- (pf/log-ml-estimate (pf/resample state (assoc opts :key %))) before))
+        ratios (map #(Math/exp (- (pf/log-ml-estimate (move state %)) before))
                     (rng/split (rng/key 11) 4000))
         n (count ratios)
         m (/ (reduce + ratios) n)
         sd (Math/sqrt (/ (reduce + (map #(* (- % m) (- % m)) ratios)) (dec n)))]
     (< (ts/abs (- m 1.0)) (+ 1e-9 (* 5 (/ sd (Math/sqrt n)))))))
+
+(defn- unbiased-resampling? [state opts]
+  (unbiased-moves? state #(pf/resample %1 (assoc opts :key %2))))
 
 (deftest priority-resampling-and-resizing-stay-unbiased
   (let [state (run-filter 30 (rng/key 10))]
@@ -288,7 +292,7 @@
                    {:atol (ts/tol 1e-12)}))
     (let [n 4000
           picks (map #(first (:parents (pf/dereplicate state 3 {:method :sample :key %}))) (rng/split (rng/key 54) n))
-          p (mapv #(Math/exp %) (:log-weights (gen.inference.weights/normalize (subvec lw 0 3))))]
+          p (mapv #(Math/exp %) (:log-weights (w/normalize (subvec lw 0 3))))]
       (doseq [i (range 3)]
         (let [freq (/ (count (filter #{i} picks)) (double n))]
           (is (< (ts/abs (- freq (p i))) (* 5 (Math/sqrt (/ (* (p i) (- 1 (p i))) n)))) (str i ": " freq " against " (p i))))))))
@@ -524,3 +528,101 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no :proposal"
                           (pf/step (pf/initialize model [1 0.0] (observation 0) 2 {:key (rng/key 104)})
                                    [2 0.0] [diff/unknown-change diff/no-change] (observation 1) {:backward move-back})))))
+
+;; ---------------------------------------------------------------------------
+;; GenParticleFilters: substate views
+;; ---------------------------------------------------------------------------
+
+(def view-idx [2 7 8 19 25])
+
+(deftest a-view-is-a-state-of-its-particles
+  (let [state (run-filter 30 (rng/key 30))
+        v (pf/view state view-idx)
+        lw (mapv (:log-weights state) view-idx)
+        xs (mapv #(ts/number (% last-x)) (pf/traces v))]
+    (is (not (zero? (:log-ml state))) "the filter resampled, so the source's estimate so far counts")
+    (is (= (mapv (pf/traces state) view-idx) (pf/traces v)))
+    (is (ts/close? (w/ess lw) (pf/ess v)))
+    (testing "the estimate: the source's so far plus the log mean of the view's weights (GenParticleFilters)"
+      (is (ts/close? (+ (:log-ml state) (- (w/log-sum-exp lw) (Math/log (count view-idx)))) (pf/log-ml-estimate v)))
+      (is (ts/close? (pf/log-ml-estimate state) (pf/log-ml-estimate (pf/view state (range 30)))) "every particle"))
+    (is (ts/close? (reduce + (map #(* (Math/exp (- (ts/number %1) (w/log-sum-exp lw))) %2) lw xs))
+                   (pf/mean v #(% last-x))))
+    (testing "of a batched filter"
+      (let [batched (pf/initialize model [1 0.0] (observation 0) 12 {:batched? true :key (rng/key 31)})]
+        (is (ts/close? (array/array (mapv #(ts/number (% [0 :x])) (mapv (pf/traces batched) [1 4 5])))
+                       (array/array (mapv #(ts/number (% [0 :x])) (pf/traces (pf/view batched [1 4 5]))))))))))
+
+(defn- outside-unchanged? [state state' idx]
+  (let [in (set idx)]
+    (every? (fn [i] (or (in i) (and (identical? ((:traces state) i) ((:traces state') i))
+                                    (identical? ((:log-weights state) i) ((:log-weights state') i)))))
+            (range (count (:traces state))))))
+
+(deftest an-operation-on-a-view-moves-its-particles-alone
+  (let [state (run-filter 30 (rng/key 32))]
+    (testing "resampling keeps the view's total weight, each particle at the mean (GenParticleFilters)"
+      (let [r (pf/update-view state view-idx pf/resample {:key (rng/key 33)})
+            lw (mapv (:log-weights state) view-idx)
+            mean-weight (- (w/log-sum-exp lw) (Math/log (count view-idx)))]
+        (is (outside-unchanged? state r view-idx))
+        (is (every? #(ts/close? mean-weight ((:log-weights r) %)) view-idx))
+        (is (ts/close? (pf/log-ml-estimate state) (pf/log-ml-estimate r)))
+        (is (= (:log-ml state) (:log-ml r)))
+        (testing "and :parents gives each particle's source"
+          (is (every? (fn [i] (if (some #{i} view-idx)
+                                (and (some #{((:parents r) i)} view-idx)
+                                     (identical? ((:traces r) i) ((:traces state) ((:parents r) i))))
+                                (= i ((:parents r) i))))
+                      (range 30))))))
+    (testing "a step on a view is the view's step"
+      (let [args [7 0.0] argdiffs [diff/unknown-change diff/no-change] obs (cm/choicemap [6 :y] 0.5)
+            stepped (pf/update-view state view-idx pf/step args argdiffs obs {:key (rng/key 34)})
+            alone (pf/step (pf/view state view-idx) args argdiffs obs {:key (rng/key 34)})]
+        (is (outside-unchanged? state stepped view-idx))
+        (is (= (ts/host (mapv :choices (:traces alone))) (ts/host (mapv #(:choices ((:traces stepped) %)) view-idx))))
+        (is (ts/close? (array/array (mapv ts/number (:log-weights alone)))
+                       (array/array (mapv #(ts/number ((:log-weights stepped) %)) view-idx))))
+        (is (= 7 (count (:retval ((:traces stepped) 2)))))
+        (is (= 6 (count (:retval ((:traces stepped) 3)))))))
+    (testing "rejuvenation"
+      (let [moved (pf/update-view state view-idx pf/rejuvenate (k/mh (sel/select last-x)) (rng/key 35))]
+        (is (outside-unchanged? state moved view-idx))
+        (is (= (:log-weights state) (:log-weights moved)))))))
+
+(defn- one-step-filter
+  "30 particles resampled once, then stepped: an estimate so far, and
+   weights of a moderate spread (a view's resampling draws several)."
+  [key]
+  (let [[k1 k2 k3] (rng/split key 3)]
+    (-> (pf/initialize model [1 0.0] (observation 0) 30 {:key k1})
+        (pf/resample {:key k2})
+        (pf/step [2 0.0] [diff/unknown-change diff/no-change] (observation 1) {:key k3}))))
+
+(deftest resampling-a-view-keeps-the-estimate-unbiased
+  (let [state (one-step-filter (rng/key 36))
+        weighted-sum (fn [st] (reduce + (map #(* (Math/exp (ts/number %1)) (ts/number (%2 [1 :x]))) (:log-weights st) (:traces st))))
+        sum-unbiased? (fn [opts]
+                        ;; E[Σ w'·x'] = Σ w·x over many resamplings of the view, within five standard errors
+                        (let [before (weighted-sum state)
+                              sums (map #(weighted-sum (pf/update-view state view-idx pf/resample (assoc opts :key %)))
+                                        (rng/split (rng/key 37) 4000))
+                              n (count sums)
+                              m (/ (reduce + sums) n)
+                              sd (Math/sqrt (/ (reduce + (map #(* (- % m) (- % m)) sums)) (dec n)))]
+                          (< (ts/abs (- m before)) (+ 1e-9 (* 5 (/ sd (Math/sqrt n)))))))]
+    (is (< 2.0 (w/ess (mapv (:log-weights state) view-idx))) "the view's weights are spread")
+    (is (unbiased-moves? state #(pf/update-view %1 view-idx pf/resample {:key %2 :priority (fn [lw] (map (partial * 0.5) lw))}))
+        "tempered priorities")
+    (is (unbiased-moves? state #(pf/update-view %1 view-idx pf/resample {:key %2 :method :optimal :n 5})) "optimal")
+    (is (sum-unbiased? {}) "a weighted sum")
+    (is (sum-unbiased? {:priority (fn [lw] (map (constantly 0.0) lw))}) "a weighted sum, uniform priorities")))
+
+(deftest a-view-s-misuse-is-loud
+  (let [state (run-filter 6 (rng/key 38))]
+    (doseq [idx [[] [1 1] [6] [-1] [0.5]]]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"distinct particle indices" (pf/view state idx)) (pr-str idx)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"keeps their number"
+                          (pf/update-view state [0 1 2] pf/resize 4 {:key (rng/key 39)})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"keeps their number"
+                          (pf/update-view state [0 1 2] pf/dereplicate 3)))))

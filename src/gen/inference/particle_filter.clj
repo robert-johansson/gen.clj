@@ -33,7 +33,8 @@
    choice-product), priority resampling and resize, rejuvenation by
    move-accept (rejuvenate) and move-reweight (move-reweight, with the
    kernels of reweighting), replicate and dereplicate, coalesce, introduce,
-   and the weighted statistics mean, variance and proportions."
+   the weighted statistics mean, variance and proportions, and substate
+   views (view, and update-view to run any of these on some particles)."
   (:refer-clojure :exclude [+ - * replicate])
   (:require [gen.array :as array :refer [+ - *]]
             [gen.batched :as batched]
@@ -440,3 +441,49 @@
      (if-let [ps (:particles state)]
        (batched/traces (batched/take ps idx))
        (mapv (:traces state) idx)))))
+
+(defn- check-view! [state idx]
+  (let [n (count (:log-weights state))]
+    (when-not (and (seq idx) (every? #(and (integer? %) (< -1 % n)) idx) (apply distinct? idx))
+      (throw (ex-info (str "A view takes distinct particle indices in [0, " n "), at least one: " (pr-str idx))
+                      {:indices idx :particles n})))))
+
+(defn view
+  "The particles at the indices idx as a state of their own
+   (GenParticleFilters' state[idxs], a ParticleFilterSubState): its traces,
+   ess, statistics and samples are those of the subset, and its estimate of
+   the log marginal likelihood is the source's so far plus the log mean of
+   the view's weights. update-view runs an operation on one."
+  [state idx]
+  (let [idx (vec idx)]
+    (check-view! state idx)
+    (dissoc (select-particles state idx (mapv (vec (:log-weights state)) idx)) :parents :resampled?)))
+
+(defn update-view
+  "state with the particles at the indices idx replaced by those of
+   (f view args…), the operation on GenParticleFilters' substate:
+   (update-view state idx resample {:key k}) resamples those particles
+   alone, (update-view state idx step args argdiffs observations) steps
+   them alone. f keeps the number of particles. It runs on the view with a
+   :log-ml of 0, and what it moves there (a resampling's mean weight) goes
+   back into the particles' weights, so a plain resampling keeps the view's
+   total weight and the estimate of the marginal likelihood stays as
+   unbiased as f leaves it. When f resamples, :parents gives every
+   particle's source index (its own outside the view). A batched state
+   becomes one of scalar traces."
+  [state idx f & args]
+  (let [state (unbatched state)
+        idx (vec idx)
+        sub' (unbatched (apply f (assoc (view state idx) :log-ml 0.0) args))
+        m (count (:log-weights sub'))
+        shift (:log-ml sub')
+        put (fn [v xs] (reduce (fn [v [i x]] (assoc v i x)) (vec v) (map vector idx xs)))]
+    (when-not (= (count idx) m (count (:traces sub')))
+      (throw (ex-info (str "update-view: f returned " m " particles for a view of " (count idx)
+                           "; an operation on a view keeps their number")
+                      {:indices idx :particles m})))
+    (cond-> (assoc state
+                   :traces (put (:traces state) (:traces sub'))
+                   :log-weights (put (:log-weights state)
+                                     (cond->> (:log-weights sub') (not (== 0.0 shift)) (map #(+ % shift)))))
+      (:parents sub') (assoc :parents (put (range (count (:log-weights state))) (map idx (:parents sub')))))))
