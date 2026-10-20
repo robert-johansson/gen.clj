@@ -315,3 +315,20 @@ Mixed, so the tape stays the default (docs/array-api.md §8).
 - **Before the memory bounds** (5 steps each, same model): HMC at a million,
   31.6 → 7.1 ms; MALA, 8.9 → 4.2 ms. Other changes since have made most
   paths faster, so the trigger's cost shows only in the comparison above.
+
+## The static language's skipping (2026-10-20, bean genclj-0q3a)
+
+An update on the JVM backend (this Mac, a Metal test run beside it) of
+`(gen ^:static [xs] (let [mu (trace :mu …) noise (trace :noise …) _ (splice
+:ys (comb/map point) xs (repeat mu)) _ (trace :extra (d/normal 0 noise))]
+mu))` against the same body without the flag, per update:
+
+| Observations | update :noise (the Map skipped), static / dynamic | update :mu (the Map reruns), static / dynamic |
+|---|---|---|
+| 10 | 62 / 153 µs | 105 / 84 µs |
+| 100 | 28 / 450 µs | 347 / 377 µs |
+| 1000 | 23 / 2974 µs (130×) | 2934 / 2932 µs |
+
+What is skipped costs nothing; when everything reruns, the walk of the
+graph costs about 20 µs over the plain body at this size (its env maps),
+lost in the work beyond about 100 observations.
