@@ -40,14 +40,15 @@
 
 (def ^:private gen-byte-term
   "Terms over the bytes 0 to 3."
-  (gen/recursive-gen
-   (fn [inner]
-     (gen/one-of [(gen/fmap #(apply regex/cat %) (gen/vector inner 2))
-                  (gen/fmap #(apply regex/alt %) (gen/vector inner 2))
-                  (gen/fmap regex/star inner)
-                  (gen/fmap regex/opt inner)
-                  (gen/fmap #(apply regex/intersect %) (gen/vector inner 2))]))
-   (gen/fmap regex/bytes-of (gen/set (gen/choose 0 3) {:min-elements 1 :max-elements 2}))))
+  (gen/scale #(min % 50)
+   (gen/recursive-gen
+    (fn [inner]
+      (gen/one-of [(gen/fmap #(apply regex/cat %) (gen/vector inner 2))
+                   (gen/fmap #(apply regex/alt %) (gen/vector inner 2))
+                   (gen/fmap regex/star inner)
+                   (gen/fmap regex/opt inner)
+                   (gen/fmap #(apply regex/intersect %) (gen/vector inner 2))]))
+    (gen/fmap regex/bytes-of (gen/set (gen/choose 0 3) {:min-elements 1 :max-elements 2})))))
 
 (def ^:private gen-byte-vocab
   "Tokens of up to four bytes 0 to 4, an empty one now and then."
@@ -58,15 +59,16 @@
 
 (def ^:private gen-char-term
   "Terms over a, b, é (two bytes) and € (three)."
-  (gen/recursive-gen
-   (fn [inner]
-     (gen/one-of [(gen/fmap #(apply regex/cat %) (gen/vector inner 2 3))
-                  (gen/fmap #(apply regex/alt %) (gen/vector inner 2))
-                  (gen/fmap regex/star inner)
-                  (gen/fmap regex/opt inner)
-                  (gen/let [r inner lo (gen/choose 0 2) n (gen/choose 0 2)] (regex/repeat r lo (+ lo n)))]))
-   (gen/one-of [(gen/fmap regex/chars (gen/elements text-chars))
-                (gen/fmap #(apply regex/chars %) (gen/set (gen/elements text-chars) {:min-elements 1}))])))
+  (gen/scale #(min % 50)
+   (gen/recursive-gen
+    (fn [inner]
+      (gen/one-of [(gen/fmap #(apply regex/cat %) (gen/vector inner 2 3))
+                   (gen/fmap #(apply regex/alt %) (gen/vector inner 2))
+                   (gen/fmap regex/star inner)
+                   (gen/fmap regex/opt inner)
+                   (gen/let [r inner lo (gen/choose 0 2) n (gen/choose 0 2)] (regex/repeat r lo (+ lo n)))]))
+    (gen/one-of [(gen/fmap regex/chars (gen/elements text-chars))
+                 (gen/fmap #(apply regex/chars %) (gen/set (gen/elements text-chars) {:min-elements 1}))]))))
 
 (defn- distinct-by-content [arrays]
   (vals (into (sorted-map) (map (fn [^bytes a] [(vec a) a])) arrays)))

@@ -73,6 +73,19 @@
     (throw (ex-info (str what ": not a regular expression term: " (pr-str r)) {:reason :invalid-term :term r})))
   r)
 
+(defn- nullable?
+  "Does r's language hold the empty string?"
+  [r]
+  (case (tag r)
+    :epsilon true
+    (:nothing :bytes) false
+    :cat (every? nullable? (subvec r 1))
+    :or (boolean (some nullable? (nth r 1)))
+    :and (every? nullable? (nth r 1))
+    :not (not (nullable? (nth r 1)))
+    :star true
+    :repeat (or (zero? (long (nth r 2))) (nullable? (nth r 1)))))
+
 (defn bytes-of
   "One byte of bs, a collection of integers 0 to 255."
   [bs]
@@ -106,7 +119,11 @@
                                 (remove #{:nothing}))
                       rs)
         {singles true others false} (group-by #(= :bytes (tag %)) members)
-        members (cond-> (set others) (seq singles) (conj [:bytes (into #{} (mapcat second) singles)]))]
+        members (cond-> (set others) (seq singles) (conj [:bytes (into #{} (mapcat second) singles)]))
+        ;; the empty string beside a nullable alternative adds nothing
+        members (if (and (contains? members :epsilon) (some nullable? (disj members :epsilon)))
+                  (disj members :epsilon)
+                  members)]
     (cond (contains? members universe) universe
           (empty? members) nothing
           (= 1 (count members)) (first members)
@@ -142,13 +159,21 @@
   (when-not (and (nat-int? lo) (or (nil? hi) (and (nat-int? hi) (<= (long lo) (long hi)))))
     (throw (ex-info (str "repeat: the bounds are 0 <= lo <= hi (hi nil for none), not " lo " and " (pr-str hi))
                     {:reason :invalid-term :lo lo :hi hi})))
-  (cond (= hi 0) epsilon
-        (= :epsilon r) epsilon
-        (= :nothing r) (if (zero? (long lo)) epsilon nothing)
-        (and (= lo 1) (= hi 1)) r
-        (and (zero? (long lo)) (nil? hi)) (star r)
-        (and (= :star (tag r)) (nil? hi)) r
-        :else [:repeat r (long lo) (some-> hi long)]))
+  ;; normal forms: with the empty string in r, fewer copies pad with it, so
+  ;; the lower bound is 0; then (x | ε){0,d} is x{0,d}, (x*){0,d} is x*,
+  ;; (x{0,b}){0,d} is x{0,bd}
+  (let [lo (if (nullable? r) 0 (long lo))]
+    (cond (and (zero? lo) (= :or (tag r)) (contains? (nth r 1) :epsilon))
+          (repeat (apply alt (disj (nth r 1) :epsilon)) 0 hi)
+          (= hi 0) epsilon
+          (= :epsilon r) epsilon
+          (= :nothing r) (if (zero? lo) epsilon nothing)
+          (and (== lo 1) (= hi 1)) r
+          (and (zero? lo) (nil? hi)) (star r)
+          (= :star (tag r)) r
+          (and (= :repeat (tag r)) (zero? lo) (zero? (long (nth r 2))))
+          (repeat (nth r 1) 0 (when (and hi (nth r 3)) (* (long hi) (long (nth r 3)))))
+          :else [:repeat r lo (some-> hi long)])))
 
 (defn star
   "Any number of r's strings."
@@ -157,6 +182,9 @@
   (case (tag r)
     (:nothing :epsilon) epsilon
     :star r
+    ;; (x | ε)* and (x{0,b})* or (x{1,b})* are x*
+    :or (if (contains? (nth r 1) :epsilon) (star (apply alt (disj (nth r 1) :epsilon))) [:star r])
+    :repeat (if (<= (long (nth r 2)) 1) (star (nth r 1)) [:star r])
     [:star r]))
 (defn plus "One or more of r's strings." [r] (repeat r 1 nil))
 (defn opt "r's strings or the empty string." [r] (alt r epsilon))
@@ -271,35 +299,29 @@
 ;; Derivatives
 ;; ---------------------------------------------------------------------------
 
-(defn- nullable?
-  "Does r's language hold the empty string?"
-  [r]
-  (case (tag r)
-    :epsilon true
-    (:nothing :bytes) false
-    :cat (every? nullable? (subvec r 1))
-    :or (boolean (some nullable? (nth r 1)))
-    :and (every? nullable? (nth r 1))
-    :not (not (nullable? (nth r 1)))
-    :star true
-    :repeat (or (zero? (long (nth r 2))) (nullable? (nth r 1)))))
-
 (defn- derivative
-  "The strings s for which b s is in r's language, as a term."
-  [r ^long b]
-  (case (tag r)
-    (:nothing :epsilon) nothing
-    :bytes (if (contains? (nth r 1) b) epsilon nothing)
-    :cat (let [head (nth r 1)
-               tail (apply cat (subvec r 2))
-               d (cat (derivative head b) tail)]
-           (if (nullable? head) (alt d (derivative tail b)) d))
-    :or (apply alt (map #(derivative % b) (nth r 1)))
-    :and (apply intersect (map #(derivative % b) (nth r 1)))
-    :not (complement (derivative (nth r 1) b))
-    :star (cat (derivative (nth r 1) b) r)
-    :repeat (let [[_ x lo hi] r]
-              (cat (derivative x b) (repeat x (max 0 (dec (long lo))) (when hi (dec (long hi))))))))
+  "The strings s for which b s is in r's language, as a term. memo (a map
+   local to one construction, of [term byte] to derivative) shares the
+   derivatives of subterms that recur across states: the tails of
+   concatenations, the bodies of repeats."
+  [^java.util.Map memo r ^long b]
+  (let [k [r b]]
+    (or (.get memo k)
+        (let [d (case (tag r)
+                  (:nothing :epsilon) nothing
+                  :bytes (if (contains? (nth r 1) b) epsilon nothing)
+                  :cat (let [head (nth r 1)
+                             tail (apply cat (subvec r 2))
+                             d (cat (derivative memo head b) tail)]
+                         (if (nullable? head) (alt d (derivative memo tail b)) d))
+                  :or (apply alt (map #(derivative memo % b) (nth r 1)))
+                  :and (apply intersect (map #(derivative memo % b) (nth r 1)))
+                  :not (complement (derivative memo (nth r 1) b))
+                  :star (cat (derivative memo (nth r 1) b) r)
+                  :repeat (let [[_ x lo hi] r]
+                            (cat (derivative memo x b) (repeat x (max 0 (dec (long lo))) (when hi (dec (long hi)))))))]
+          (.put memo k d)
+          d))))
 
 (defn- byte-sets [r]
   (case (tag r)
@@ -510,11 +532,14 @@
 
 (defn dfa
   "The minimal DFA (gen.llm.dfa) of r, a term or a regex, by derivatives:
-   each state a derivative of r. opts: :max-states (default 100,000), past
-   which construction is a loud error."
+   each state a derivative of r. opts: :max-states (default 20,000), past
+   which construction is a loud error. (A DFA can be exponentially larger
+   than its regex: nested counted repeats of alternatives that overlap,
+   such as ((a|b)*a(a|b)){2,4}, make it track sets of positions.)"
   ([r] (dfa r {}))
-  ([r {:keys [max-states] :or {max-states 100000}}]
+  ([r {:keys [max-states] :or {max-states 20000}}]
    (let [r (term-of "dfa" r)
+         memo (java.util.HashMap.)
          classes (byte-classes r)
          reps (mapv first classes)
          class-of (reduce (fn [m [i bs]] (reduce #(assoc %1 %2 i) m bs)) {} (map-indexed vector classes))]
@@ -526,7 +551,7 @@
              (doseq [s (range n), ^long b (range 256)]
                (aset table (+ (* (long s) 256) b) (int ((rows s) (class-of b)))))
              (dfa/from-table 0 table (boolean-array (map nullable? terms))))
-           (let [succ (mapv #(derivative (terms i) %) reps)
+           (let [succ (mapv #(derivative memo (terms i) %) reps)
                  [ids terms] (reduce (fn [[ids terms] d]
                                        (cond (or (= :nothing d) (contains? ids d)) [ids terms]
                                              (<= (long max-states) (count terms))

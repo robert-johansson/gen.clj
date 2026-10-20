@@ -62,20 +62,21 @@
     [:class negated? items]))
 
 (def ^:private gen-tree
-  (gen/recursive-gen
-   (fn [inner]
-     (gen/one-of [(gen/fmap #(into [:cat] %) (gen/vector inner 2 3))
-                  (gen/fmap #(into [:alt] %) (gen/vector inner 2 3))
-                  (gen/fmap (fn [t] [:star t]) inner)
-                  (gen/fmap (fn [t] [:plus t]) inner)
-                  (gen/fmap (fn [t] [:opt t]) inner)
-                  (gen/let [t inner lo (gen/choose 0 2) extra (gen/elements [0 1 2 nil])]
-                    [:repeat t lo (some->> extra (+ lo))])]))
-   (gen/frequency [[6 (gen/fmap (fn [c] [:char c]) gen-char)]
-                   [2 gen-char-class]
-                   [1 (gen/return [:dot])]
-                   [1 (gen/fmap (fn [e] [:escape e]) (gen/elements [\d \w \s \D]))]
-                   [1 (gen/return [:empty])]])))
+  (gen/scale #(min % 50)
+   (gen/recursive-gen
+    (fn [inner]
+      (gen/one-of [(gen/fmap #(into [:cat] %) (gen/vector inner 2 3))
+                   (gen/fmap #(into [:alt] %) (gen/vector inner 2 3))
+                   (gen/fmap (fn [t] [:star t]) inner)
+                   (gen/fmap (fn [t] [:plus t]) inner)
+                   (gen/fmap (fn [t] [:opt t]) inner)
+                   (gen/let [t inner lo (gen/choose 0 2) extra (gen/elements [0 1 2 nil])]
+                     [:repeat t lo (some->> extra (+ lo))])]))
+    (gen/frequency [[6 (gen/fmap (fn [c] [:char c]) gen-char)]
+                    [2 gen-char-class]
+                    [1 (gen/return [:dot])]
+                    [1 (gen/fmap (fn [e] [:escape e]) (gen/elements [\d \w \s \D]))]
+                    [1 (gen/return [:empty])]]))))
 
 (defn- render-char [c in-class?]
   (cond (= c 10) "\\n"
@@ -251,14 +252,15 @@
 ;; ---------------------------------------------------------------------------
 
 (def ^:private gen-byte-term
-  (gen/recursive-gen
-   (fn [inner]
-     (gen/one-of [(gen/fmap #(apply regex/cat %) (gen/vector inner 2))
-                  (gen/fmap #(apply regex/alt %) (gen/vector inner 2))
-                  (gen/fmap #(apply regex/intersect %) (gen/vector inner 2))
-                  (gen/fmap regex/complement inner)
-                  (gen/fmap regex/star inner)]))
-   (gen/fmap regex/bytes-of (gen/set (gen/choose 0 3) {:min-elements 1}))))
+  (gen/scale #(min % 50)
+   (gen/recursive-gen
+    (fn [inner]
+      (gen/one-of [(gen/fmap #(apply regex/cat %) (gen/vector inner 2))
+                   (gen/fmap #(apply regex/alt %) (gen/vector inner 2))
+                   (gen/fmap #(apply regex/intersect %) (gen/vector inner 2))
+                   (gen/fmap regex/complement inner)
+                   (gen/fmap regex/star inner)]))
+    (gen/fmap regex/bytes-of (gen/set (gen/choose 0 3) {:min-elements 1})))))
 
 (defspec intersect-and-complement-are-boolean 200
   (prop/for-all [r gen-byte-term
@@ -365,6 +367,21 @@
     (is (= :invalid-term (bc/reason f)) what))
   (doseq [bad [{:start 0 :accept #{} :transitions {0 {256 0}}} {:start 0 :accept [1] :transitions {}} 3]]
     (is (= :invalid-dfa (bc/reason #(dfa/dfa bad))) (pr-str bad))))
+
+(deftest a-dfa-past-its-states-is-loud-not-slow
+  ;; a regex whose DFA tracks sets of positions across counted copies (found
+  ;; by the random tests: 3,000 states and terms of 40,000 nodes)
+  (let [t0 (System/nanoTime)]
+    (is (= :too-many-states (bc/reason #(regex/dfa "(?:\\s+(?:a|\"|€)\\d{1,}|(?:.{2,4}){1}){2,4}(?:[^céc-€](?:é+){2,4})?"
+                                                   {:max-states 200}))))
+    (is (< (- (System/nanoTime) t0) 5e9) "within seconds")))
+
+(deftest nullable-repeats-normalize
+  (is (= (regex/repeat (regex/opt (regex/text "ab")) 2 3) (regex/repeat (regex/text "ab") 0 3)))
+  (is (= (regex/repeat (regex/repeat (regex/text "a") 0 2) 1 3) (regex/repeat (regex/text "a") 0 6)))
+  (is (= (regex/star (regex/opt (regex/text "a"))) (regex/star (regex/text "a"))))
+  (is (= (regex/opt (regex/star (regex/text "a"))) (regex/star (regex/text "a"))))
+  (is (= (regex/dfa "(?:(?:ab)?){2,3}") (regex/dfa "(?:ab){0,3}"))))
 
 (deftest lazy-quantifiers-are-the-same-language
   (is (= (regex/dfa "a*?b+?c??d{1,2}?") (regex/dfa "a*b+c?d{1,2}"))))
