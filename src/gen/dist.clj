@@ -389,7 +389,8 @@
 
 (defdist weibull
   "weibull(alpha, theta): the Weibull distribution, shape alpha and scale
-   theta (Weibull)."
+   theta (Weibull). For a small alpha some draws lie beyond the float range
+   (in float32, for alpha below about 0.03): +Inf, of log density -Inf."
   [alpha theta]
   (validate (dc/check-positive "weibull" "alpha" alpha) (dc/check-positive "weibull" "theta" theta))
   (sample [key shape]

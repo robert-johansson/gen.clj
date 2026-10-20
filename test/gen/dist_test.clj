@@ -298,10 +298,23 @@
         (is (finite? (host (dc/log-prob f x))))
         (is (= ##-Inf (ts/number (dc/log-prob f ##Inf))))))
     (testing "small shapes: no zero draws, finite densities"
-      (doseq [dist [(d/chi-squared 0.02) (d/weibull 0.01 1.0) (d/nakagami 0.01 1.0)]]
-        (let [x (dc/sample dist (rng/key 91) [n])]
-          (is (every? pos? (host x)) (str dist))
-          (is (finite? (host (dc/log-prob dist x))) (str dist)))))
+      ;; except a float32 Weibull's draws beyond the float range (E^100 for
+      ;; E > Float/MAX_VALUE^0.01): +Inf, of log density -Inf, as Pareto's,
+      ;; at the rate exp(-Float/MAX_VALUE^0.01) ≈ 0.088, within five
+      ;; standard errors
+      (doseq [[label dist] {"chi-squared 0.02" (d/chi-squared 0.02) "weibull 0.01" (d/weibull 0.01 1.0)
+                            "nakagami 0.01" (d/nakagami 0.01 1.0)}]
+        (let [x (dc/sample dist (rng/key 91) [n])
+              xs (host x)
+              lps (host (dc/log-prob dist x))
+              overflow? (and (= label "weibull 0.01") (= :float32 (array/dtype x)))]
+          (is (every? pos? xs) label)
+          (is (every? (fn [[v lp]] (if (Double/isInfinite v) (= ##-Inf lp) (Double/isFinite lp))) (map vector xs lps)) label)
+          (if overflow?
+            (let [p (Math/exp (- (Math/pow Float/MAX_VALUE 0.01)))
+                  k (count (filter #(Double/isInfinite %) xs))]
+              (is (< (Math/abs (- k (* n p))) (* 5 (Math/sqrt (* n p (- 1 p))))) (str label ": " k " +Inf draws")))
+            (is (finite? xs) label)))))
     (testing "Student's t at nu = 0.1: P(|T| > 1e16), within five standard errors"
       ;; P(|T| > t) ≈ 2 c ν^((ν-1)/2) t^(-ν), c = Γ((ν+1)/2)/(√(νπ) Γ(ν/2)), for large t
       (let [nu 0.1 t 1e16
