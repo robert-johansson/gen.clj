@@ -532,6 +532,11 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     factorization, so it accepts `2·ones(2, 2)` (a pivot positive by
     rounding) and gives 15.24. dist_dsl.jl:29's case is ported as the
     error. The check runs on host values and concrete arrays only (rule 5).
+    The same rule holds at every precision (the owner, the same night): in
+    float32 it also rejects matrices that are positive definite but whose
+    float32 density is off by nats, such as a 50-point GP kernel with a
+    jitter of 1e-6. The error names the dtype and suggests a jitter at its
+    scale.
 - **Bodies run to completion:** lazy sequences in a body's return value are
   realized during the run, and a `trace` or `splice` after the run is a loud
   error. Before this, `(map … (trace …))` at the end of a body gave a trace
