@@ -19,6 +19,7 @@
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
             [gen.custom :as custom]
+            [gen.diff :as diff]
             [gen.dist :as d]
             [gen.dynamic :as dyn :refer [gen]]
             [gen.gfi :as gfi]
@@ -274,19 +275,56 @@
 (deftest a-batched-trace-given-another-gen-fn-is-revised
   ;; batched, per-particle from the start, and batched then falling back
   ;; (review 6, R6-2: the last two ran the old gen-fn, or rebuilt the old
-  ;; traces under the new one, with weight 0)
+  ;; traces under the new one, with weight 0); from fresh particles, and
+  ;; from particles a select or a third update left unchecked (review 7,
+  ;; R7-3: their spot check ran the old trace under the new gen-fn, a false
+  ;; divergence error from scores, traces and the fallback)
   (doseq [[label before after batched-update?]
           [["batched" (dyn/with-params static-model {:w 1.0}) (dyn/with-params static-model {:w 5.0}) true]
            ["per-particle" (dyn/with-params untraced-model {:w 1.0}) (dyn/with-params untraced-model {:w 5.0}) false]
-           ["batched, then falling back" (dyn/with-params static-model {:w 1.0}) (dyn/with-params untraced-model {:w 5.0}) false]]]
-    (testing label
-      (let [ps (batched/simulate before [] 4 (rng/key 1))
-            {ps2 :particles ws :weights} (batched/update (assoc ps :gen-fn after) [] [] cm/EMPTY (rng/key 2))]
+           ["batched, then falling back" (dyn/with-params static-model {:w 1.0}) (dyn/with-params untraced-model {:w 5.0}) false]]
+          [made particles]
+          [["fresh" identity]
+           ["after a select" #(batched/select [true false true false]
+                                              (:particles (batched/update % [] [] (cm/choicemap :x 0.5) (rng/key 3))) %)]
+           ["after three updates" (fn [ps] (reduce #(:particles (batched/update %1 [] [] (cm/choicemap :x %2) (rng/key 4)))
+                                                   ps [0.1 0.2 0.3]))]]]
+    (testing [label made]
+      (let [ps (particles (batched/simulate before [] 4 (rng/key 1)))
+            swapped (assoc ps :gen-fn after)
+            {ps2 :particles ws :weights} (batched/update swapped [] [] cm/EMPTY (rng/key 2))]
         (is (= batched-update? (batched/batched? ps2)))
+        (is (= (ts/host (batched/scores ps)) (ts/host (batched/scores swapped))) "the swapped particles' scores are their makers'")
         (doseq [[t0 t1 w] (map vector (batched/traces ps) (batched/traces ps2) (ts/host ws))]
           (is (identical? after (:gen-fn t1)))
           (is (consistent? after t1))
-          (is (ts/close? (- (assessed after t1) (ts/number (:score t0))) w)))))))
+          (is (ts/close? (- (assessed after t1) (ts/number (:score t0))) w)))
+        (testing "and their traces, given the new gen-fn, update by it (review 7, G57: batched ones claimed the old)"
+          (doseq [t (batched/traces swapped)]
+            (let [{u :trace w :weight} (gfi/update t cm/EMPTY (rng/key 5))]
+              (is (identical? after (:gen-fn t)))
+              (is (ts/close? (- (assessed after u) (ts/number (:score t))) w)))))))))
+
+(deftest a-select-keeps-each-particles-maker
+  ;; select keeps each particle's trace, by its maker, as the per-particle
+  ;; path does (review 7, R7-5: the batched path rebuilt them by ps's
+  ;; gen-fn, so particles of a swap, never updated, then weighed 0)
+  (doseq [[label before after] [["batched" (dyn/with-params static-model {:w 1.0}) (dyn/with-params static-model {:w 5.0})]
+                                ["per-particle" (dyn/with-params untraced-model {:w 1.0}) (dyn/with-params untraced-model {:w 5.0})]]
+          :let [swapped (assoc (batched/simulate before [] 4 (rng/key 1)) :gen-fn after)
+                mask [true false true false]]
+          [made where-true elsewhere]
+          [;; an MH step on swapped particles: proposed ones (made by after), and swapped ones (by before)
+           ["of two makers" (:particles (batched/update swapped [] [] cm/EMPTY (rng/key 2))) swapped]
+           ;; two populations swapped alike: one maker, which the batched path rebuilds by
+           ["of one maker" swapped (assoc (batched/simulate before [] 4 (rng/key 6)) :gen-fn after)]]]
+    (testing [label made]
+      (let [kept (batched/select mask where-true elsewhere)
+            olds (mapv #(ts/number (:score (if %1 %2 %3))) mask (batched/traces where-true) (batched/traces elsewhere))
+            {ws :weights u :particles} (batched/update kept [] [] cm/EMPTY (rng/key 3))]
+        (is (ts/close? (array/array olds) (batched/scores kept)) "each particle's score by its maker")
+        (doseq [[old t w] (map vector olds (batched/traces u) (ts/host ws))]
+          (is (ts/close? (- (assessed after t) old) w)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; A store that decides a callee's structure (review 5, R5-2, mutation M7b)
@@ -323,11 +361,20 @@
       (is (not (same? 0.0 -0.0)))
       (is (not (same? (float 1.5) 1.5)))
       (is (not (same? 1 1.0))))
+    (testing "different: sorted collections of other comparators, which conj tells apart (review 7, R7-6)"
+      (is (not (same? (sorted-set-by clojure.core/< 5) (sorted-set-by clojure.core/> 5))))
+      (is (not (same? (sorted-set-by clojure.core/<) (sorted-set-by clojure.core/>))))
+      (is (not (same? (sorted-map-by clojure.core/< 5 :a) (sorted-map-by clojure.core/> 5 :a)))))
     (testing "the same: equal values built again, NaN, a set of paths (an estimated density's addresses)"
       (is (same? (array-map :p 0.0 :q 10.0) (array-map :p 0.0 :q 10.0)))
       (is (same? {:w [1.0 2.0]} {:w (vector 1.0 (+ 1.0 1.0))}))
       (is (same? ##NaN ##NaN))
-      (is (same? #{[:y] [:z 0]} (set [[:y] [:z 0]]))))
+      (is (same? #{[:y] [:z 0]} (set [[:y] [:z 0]])))
+      (is (same? (sorted-map :a 1 :b 2) (sorted-map :a 1 :b 2))))
+    (testing "the same: maps of 300 entries built again from identical keys and values, which spend no budget (review 7, R7-2: an entry spent one)"
+      (let [ks (mapv #(keyword (str "p" %)) (range 300))
+            vs (mapv double (range 300))]
+        (is (same? (zipmap ks vs) (zipmap ks vs)))))
     (testing "arrays: by identity, also as map keys (no hashing, which reads them on MLX)"
       (let [x (array/array [1.0 2.0])]
         (is (same? {x 1} {x 1}))
@@ -354,7 +401,15 @@
                       (splice :m (comb/map (gen [i] (trace :y (d/normal (+ i (first (vals m))) 1)))) [0.0 1.0])))]
            ["a Map kernel over a vector or a list"
             (gen [] (let [b (trace :b (d/bernoulli 0.5)) xs (if b [0.0 10.0] (list 0.0 10.0))]
-                      (splice :m (comb/map (gen [i] (trace :y (d/normal (+ i (first (conj xs 5.0))) 1)))) [0.0 1.0])))]]]
+                      (splice :m (comb/map (gen [i] (trace :y (d/normal (+ i (first (conj xs 5.0))) 1)))) [0.0 1.0])))]
+           ;; one element, so only the comparator differs (review 7, R7-6)
+           ["a Map kernel over a sorted set of either order"
+            (gen [] (let [b (trace :b (d/bernoulli 0.5)) s (sorted-set-by (if b clojure.core/< clojure.core/>) 5.0)]
+                      (splice :m (comb/map (gen [i] (trace :y (d/normal (+ i (first (conj s 9.0))) 1)))) [0.0 1.0])))]
+           ["a deterministic callee over a sorted set of either order"
+            (gen [] (let [b (trace :b (d/bernoulli 0.5)) s (sorted-set-by (if b clojure.core/< clojure.core/>) 5.0)
+                          v (splice :d (custom/deterministic {:apply (fn [[x]] (+ x (first (conj s 9.0))))}) 0.0)]
+                      (trace :z (d/normal v 1))))]]]
     (testing label
       (let [tr (:trace (gfi/generate model [] (cm/choicemap :b true) (rng/key 1)))
             {u :trace w :weight} (gfi/update tr (cm/choicemap :b false) (rng/key 2))]
@@ -443,12 +498,14 @@
           model (given-a-store (gen [] (splice :p (enum/with-exact-proposal
                                                      (gen [] (let [b (trace :b (d/bernoulli 0.5))] (splice :m (comb/map k) (vec (range 20))) b))
                                                      [:b]))))
-          tr (:trace (gfi/generate model [] (cm/choicemap :a 0.1) (rng/key 1)))]
+          tr (:trace (gfi/generate model [] (cm/choicemap :a 0.1) (rng/key 1)))
+          cs (cm/choicemap :a 0.9)]
       (reset! runs 0)
-      (let [{u :trace} (gfi/update tr (cm/choicemap :a 0.9) (rng/key 2))]
+      (let [{u :trace w :weight} (gfi/update tr cs (rng/key 2))]
         (is (moved? u))
         (is (= 100 @runs))
-        (is (consistent? model u))))))
+        (is (consistent? model u))
+        (is (ts/close? (update-truth model tr u cs) w))))))
 
 (deftest a-constraint-the-revised-run-leaves-is-loud
   ;; a revise drops old choices, never constraints: in a dynamic callee's
@@ -479,7 +536,33 @@
         (let [tr (gfi/simulate (comb/map other) [[0]] (rng/key 1))]
           (doseq [k (range 4)]
             (is (thrown-with-msg? clojure.lang.ExceptionInfo #"the constraint at \[0 :x\] was not visited"
-                                  (gfi/update (assoc tr :gen-fn (comb/map after)) (cm/choicemap [0 :x] 1.0) (rng/key (+ 20 k)))))))))))
+                                  (gfi/update (assoc tr :gen-fn (comb/map after)) (cm/choicemap [0 :x] 1.0) (rng/key (+ 20 k))))))))
+      (testing "two calls deep in a Map's kernel, where only the prefix of every call names it (review 7: a reversed or unextended prefix, G1 and G2, replaced it for 3 of 4 keys)"
+        (let [two-deep (fn [g] (comb/map (gen [i] (splice :c (gen [] (splice :p g i))))))
+              tr (gfi/simulate (two-deep other) [[0]] (rng/key 1))
+              deep (two-deep after)]
+          (doseq [k (range 4)]
+            (is (thrown-with-msg? clojure.lang.ExceptionInfo #"the constraint at \[0 :c :p :x\] was not visited"
+                                  (gfi/update (assoc tr :gen-fn deep) (cm/choicemap [0 :c :p :x] 1.0) (rng/key (+ 20 k))))))))))
+  (testing "a proposal's own choice that the model's new structure leaves (review 7, R7-1: dropped as an old choice, its log q kept in the weight)"
+    ;; q is written for w > 5, where sub makes :x; the store moves w to 1.
+    ;; The override is revised itself, or runs in a Map's kernel the revise
+    ;; reaches (q's choices are constraints at the call's path). sub stops a
+    ;; revise that runs on (a drop that removes nothing)
+    (let [runs (atom 0)
+          sub (gen [] (when (< 50 (swap! runs inc)) (throw (ex-info "the revise runs on" {})))
+                (if (> (param :w) 5.0) (trace :x (d/normal 0 1)) (trace :y (d/normal 0 1))))
+          q (gen [cs] (when-not (cm/has-value? (cm/get-submap cs [:s :x])) (trace [:s :x] (d/normal 3 1))))
+          pgf (prop/with-internal-proposal (gen [] (splice :s sub)) q)]
+      (doseq [[callee p] [[(gen [] (splice :p pgf)) "[:c :p :s :x]"]
+                          [(gen [] (splice :m (comb/map (gen [_i] (splice :p pgf))) [0])) "[:c :m 0 :p :s :x]"]]
+              k (range 4)]
+        (let [model (given-a-store callee)
+              tr (:trace (gfi/generate model [] (cm/choicemap :a 0.9) (rng/key (+ 1 k))))]
+          (reset! runs 0)
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                                (re-pattern (java.util.regex.Pattern/quote (str "the constraint at " p " was not visited")))
+                                (gfi/update tr (cm/choicemap :a 0.1) (rng/key (+ 20 k))))))))))
 
 (deftest user-code-in-a-revised-call-keeps-its-errors
   ;; an estimator runs generate itself (or gen.batched's), with a constraint
@@ -497,7 +580,18 @@
               model (given-a-store (gen [] (splice :p est)))
               tr (gfi/simulate model [] (rng/key 1))]
           (is (thrown-with-msg? clojure.lang.ExceptionInfo #"the constraint at \[:c :typo\] was not visited"
-                                (gfi/update tr (cm/choicemap :a 0.9) (rng/key 2)))))))))
+                                (gfi/update tr (cm/choicemap :a 0.9) (rng/key 2))))))))
+  (testing "a kernel's own generate, in a Map's revise: loud after one run (review 7, G3: an old? that did not ask sigma dropped the path, which removed nothing, forever; the kernel stops a revise that runs on)"
+    (let [runs (atom 0)
+          other (gen [] (trace :x (d/normal 0 1)))
+          before (comb/map (gen [_i] (trace :x (d/normal 0 1))))
+          after (comb/map (gen [_i] (when (< 10 (swap! runs inc)) (throw (ex-info "the revise runs on" {})))
+                            (gfi/generate other [] (cm/choicemap :typo 1.0) (rng/key 9))
+                            (trace :x (d/normal 0 1))))
+          tr (gfi/simulate before [[0]] (rng/key 1))
+          e (try (gfi/update (assoc tr :gen-fn after) cm/EMPTY (rng/key 2)) nil (catch clojure.lang.ExceptionInfo e e))]
+      (is (= [0 :typo] (:path (ex-data e))))
+      (is (= 1 @runs)))))
 
 ;; ---------------------------------------------------------------------------
 ;; The discard of a value replaced by nested choices (review 5, R5-4)
@@ -542,6 +636,7 @@
         mk (gen [x] (swap! runs inc) (trace :y (d/normal x 1)))
         xs (vec (repeat 8 0.0))
         holds-map (gen [] (splice :m (comb/map mk) xs))
+        store-255 (zipmap (map #(keyword (str "p" %)) (range 255)) (repeatedly #(array/array [1.0 2.0])))
         count-update (fn [model cs]
                        (let [tr (gfi/simulate model [] (rng/key 1))]
                          (reset! runs 0)
@@ -569,6 +664,8 @@
               (cm/choicemap [:c :m 3 :y] 1.0)]
              ["an outer store merged with an inner one (M11)"
               (dyn/with-params (gen [] (splice :c (dyn/with-params holds-map {:v 1.0}))) {:w 2.0}) (cm/choicemap [:c :m 3 :y] 1.0)]
+             ["an outer store of 255 arrays merged with an inner one (review 7, R7-2: each entry spent the budget, so the merge was never the same)"
+              (dyn/with-params (gen [] (splice :c (dyn/with-params holds-map {:v 1.0}))) store-255) (cm/choicemap [:c :m 3 :y] 1.0)]
              ["a Map simulated under a store, then updated (M14)" (dyn/with-params holds-map {:w 2.0}) (cm/choicemap [:m 3 :y] 1.0)]]]
       (testing label
         (is (= 1 (count-update model cs)))))
@@ -616,6 +713,13 @@
         (is (== 0.0 (ts/number (:weight (gfi/update tr cm/EMPTY (rng/key 2))))))
         (gfi/update tr (cm/choicemap :z 0.1) (rng/key 3))
         (is (= 0 @estimates))))
+    (testing "a callee given an equal store computed in the body keeps its untraced draw: an update that reruns the body weighs 0 (review 7, G9: a store compared by identity revised it, redrawing ω)"
+      (let [with-omega (gen [] (let [u (untraced (d/normal 0 1))] (trace :x (d/normal (+ u (param :w)) 1))))
+            model (gen [] (let [z (trace :z (d/normal 0 1))]
+                            (splice :c (dyn/with-params with-omega {:w (clojure.core/+ 1.0 1.0)}))
+                            z))
+            tr (gfi/simulate model [] (rng/key 1))]
+        (is (== 0.0 (ts/number (:weight (gfi/update tr (cm/choicemap :z (tr :z)) (rng/key 2))))))))
     (testing "an internal proposal built in the body, an unrelated choice: its proposal does not run"
       (let [q-runs (atom 0)
             kq' (gen [cs x] (swap! q-runs inc) (when-not (cm/has-value? (cm/get-submap cs :y)) (trace :y (d/normal x 2))))
@@ -650,12 +754,32 @@
           e (try (gfi/generate model [] (cm/choicemap [:c :y1] 1.0 [:c :y2] 2.0) (rng/key 1)) nil
                  (catch clojure.lang.ExceptionInfo e e))]
       (is (= #{[:c :y1] [:c :y2]} (set (:paths (ex-data e)))))))
-  (testing "a user function's own error keeps its own path"
+  (testing "assess names a bad leaf in an Unfold's step and in a Recurse's aggregation by its full path (review 7: G16 and G17 named [:c :z] and [:c 0 :production :z])"
+    (let [step (gen [_t s] (trace :y (d/normal s 1)))
+          production (gen [x] {:value (trace :v (d/normal x 1)) :children []})
+          aggregation (gen [v _ws] (+ v (trace :a (d/normal 0 1))))]
+      (doseq [[model p] [[(gen [] (splice :c (comb/unfold step) 2 0.0)) [:c 1 :z]]
+                         [(gen [] (splice :c (comb/recurse production aggregation 1) 0.0)) [:c 0 :aggregation :z]]]]
+        (let [tr (gfi/simulate model [] (rng/key 1))
+              e (try (gfi/assess model [] (cm/merge (:choices tr) (cm/choicemap p 1.0)) (rng/key 2)) nil
+                     (catch clojure.lang.ExceptionInfo e e))]
+          (is (= p (:path (ex-data e))))))))
+  (testing "a user function's own error keeps its own path, in :apply, :update-with-state and an estimated's :retval (review 7: G14, G15 named it under the call)"
     (let [inner (gen [] (trace :x (d/normal 0 1)))
-          model (gen [] (splice :d (custom/deterministic {:apply (fn [_] (:weight (gfi/generate inner [] (cm/choicemap :typo 1.0) (rng/key 2))))})))
-          e (try (gfi/simulate model [] (rng/key 1)) nil (catch clojure.lang.ExceptionInfo e e))]
-      (is (= [:typo] (:path (ex-data e))))
-      (is (not (:unvisited (ex-data e)))))))
+          typo (fn [& _] (:weight (gfi/generate inner [] (cm/choicemap :typo 1.0) (rng/key 2))))
+          error-of (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e e)))]
+      (doseq [[label e]
+              {":apply" (error-of #(gfi/simulate (gen [] (splice :d (custom/deterministic {:apply typo}))) [] (rng/key 1)))
+               ":update-with-state"
+               (error-of #(let [model (gen [x] (splice :d (custom/deterministic {:apply (fn [[x]] x) :update-with-state typo}) x))]
+                            (gfi/update (gfi/simulate model [1.0] (rng/key 1)) [2.0] [diff/unknown-change] cm/EMPTY (rng/key 3))))
+               "an estimated's :retval"
+               (error-of #(let [est (custom/estimated {:addresses [:y] :retval typo
+                                                       :estimate (fn [_ cs k] (:weight (gfi/assess (d/normal 0 1) [] (cm/get-submap cs :y) k)))})]
+                            (gfi/generate (gen [] (splice :e est)) [] (cm/choicemap [:e :y] 0.5) (rng/key 1))))}]
+        (testing label
+          (is (= [:typo] (:path (ex-data e))))
+          (is (not (:unvisited (ex-data e)))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Probes of the mutations review 6 found surviving (R6-6)

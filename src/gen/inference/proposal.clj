@@ -82,14 +82,16 @@
 (defn- proposal-generate
   "generate under q: q's choices given the constraints sigma, then gf's
    forward sampling for the rest. In a revise, gf's calls drop the old
-   choices they leave, and the whole run repeats without them, so that q
-   proposes given the final constraints (gfi/rerun-without-drops)."
+   choices they leave, never q's (gfi/constraining), and the whole run
+   repeats without them, so that q proposes given the final constraints
+   (gfi/rerun-without-drops)."
   [{:keys [gf q] :as pgf} args sigma key]
   (let [[k-q k-gen] (rng/split key)
         attempt (fn [sigma]
                   (let [{q-choices :choices q-weight :weight} (gfi/propose q (into [sigma] args) k-q)
                         _ (check-open sigma (cm/addresses q-choices))
-                        {tr :trace w :weight} (gfi/-generate gf args (cm/merge sigma q-choices) k-gen)]
+                        {tr :trace w :weight} (gfi/constraining q-choices
+                                                                #(gfi/-generate gf args (cm/merge sigma q-choices) k-gen))]
                     {:trace (trace/as-made-by tr pgf) :weight (- w q-weight)}))]
     (if gfi/*revising* (first (gfi/rerun-without-drops attempt sigma)) (attempt sigma))))
 
