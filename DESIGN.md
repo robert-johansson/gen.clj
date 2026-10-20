@@ -254,7 +254,7 @@ linalg and quantized matmul.
 ```
 LLM generative functions   token GF · grammar middleware · token SMC · structured output
 LM protocol                vocab/encode/decode · next-logprobs · batch-next-logprobs · score   (genlm-shaped,
-                           content-addressed, with a token-prefix trie + autobatcher)
+                           content-addressed, with a token-prefix trie; batching explicit)
 Branching protocol         open · fork · advance · extend · score · resample · dispose!
 engines                    llama.cpp (llama.h via our own filtered jextract FFM)  |  MLX-native forwards (later)
 ```
@@ -769,16 +769,28 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     Map's and Unfold's elements are; a spliced completion's tokens are
     `[:story 0]`, `[:story 1]`, …
   - An end token is a choice: drawn, scored, kept, and it ends the
-    completion. The end tokens default to the LM's `:eog`; `:eos` replaces
-    them, `#{}` gives exactly max-tokens. The return value is the token
-    vector, the end token included.
+    completion. The end tokens default to the LM's `:eog`; `:end-tokens`
+    replaces them, `#{}` gives exactly max-tokens. The return value is the
+    token vector, the end token included.
+  - **PROVISIONAL (owner to confirm), 2026-10-21:** the option is
+    `:end-tokens`, not `:eos` as first built. It is a set, while
+    `(lm/vocab m)`'s `:eos` is a single token, so
+    `{:eos #{(:eos (lm/vocab m))}}` read as a pun (review-lm's
+    recommendation). Alternatives: `:eog`, the vocabulary's name for its
+    set; `:eos` as before.
   - Scores are the LM's ledger's (`lm/score`), never the drawn row's; a
-    trace keeps them, and update and regenerate rescore only the tokens
-    after the first change, a run of them in one LM call. So the laws hold
-    exactly within one LM, and an identity update weighs 0 after any
-    eviction.
+    trace keeps them, and update and regenerate keep them for every token
+    whose context is unchanged (a constraint equal to the token there, or a
+    redraw equal to it, changes nothing) and rescore the tokens after the
+    first change, a run of them in one LM call. So the laws hold exactly
+    within one LM while it holds its rows, and a revision that changes no
+    token weighs exactly 0 after any eviction (corrected 2026-10-21: the
+    first build kept scores only before the first constraint or selection,
+    so a constraint equal to its token rescored the rest, review-lm M1).
   - `token/dist` is the host distribution (usable at any site); token i is
-    drawn from `(fold-in key i)`. Under a batch tracer the operations raise
+    drawn from `(fold-in key i)`. A draw is loud when it finds its row's
+    probabilities not summing to 1 (within 1e-4), at no cost: the walk
+    holds the total. Under a batch tracer the operations raise
     the batched-branch error: gen.batched falls back to one particle at a
     time. Native batching belongs to token SMC (one
     `lm/batch-next-logprobs` per step), since batched traces cannot hold

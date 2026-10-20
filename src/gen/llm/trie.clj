@@ -3,21 +3,20 @@
    what its engine has read (gen.llm.cache). Each token on a path carries
    its score, the log-probability it was read with given the tokens before
    it (NaN for a sequence's first token, which has none). A node may hold
-   an entry, a value for its context (for the cache, the context itself,
-   the key of its live branch).
+   an entry, a value for its context (for the cache, the id of the live
+   branch at that context).
 
      (match trie tokens)                    → {:depth :entry :entry-depth}
      (scores trie tokens from)              → the scores of tokens from position from on, or nil
      (insert trie tokens from scores entry) → trie with tokens's path and an entry at its end
-     (update-entry trie tokens f)           → trie with f applied to the entry at tokens
      (remove-entry trie tokens)             → trie without the entry at tokens
      (entries trie), (size trie)
 
    Paths are compressed: a node stands at each entry and at each token
    where paths part. A path stays only while it leads to an entry, so the
    trie holds no more tokens than its entries' contexts. Tokens compare with
-   =, so a context may hold longs or integers. update-entry and remove-entry
-   take the tokens of an entry the trie holds.")
+   =, so a context may hold longs or integers. remove-entry takes the
+   tokens of an entry the trie holds.")
 
 (set! *warn-on-reflection* true)
 (set! *unchecked-math* :warn-on-boxed)
@@ -126,18 +125,6 @@
    a path keep the scores they have."
   [trie tokens from scores entry]
   (insert* trie tokens 0 from scores entry))
-
-(defn- update* [node tokens ^long depth f]
-  (if (== depth (count tokens))
-    (update node :entry f)
-    (let [t (nth tokens depth)
-          child (get (:children node) t)]
-      (assoc-in node [:children t] (update* child tokens (+ depth (count (:tokens child))) f)))))
-
-(defn update-entry
-  "trie with the entry at tokens replaced by (f entry)."
-  [trie tokens f]
-  (update* trie tokens 0 f))
 
 (defn- tidy
   "A node below the root, after a removal at or under it: nil if it leads
