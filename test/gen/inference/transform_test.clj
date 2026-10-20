@@ -1,7 +1,8 @@
 (ns gen.inference.transform-test
-  "Trace transforms and translators: Jacobians against closed forms;
-   translators whose weights are exactly 0 (a pushforward, a change of
-   variables) or exactly the evidence (an extension by the conditional);
+  "Trace transforms and translators: Jacobians against closed forms; tcall
+   against the bodies inline; translators whose weights are exactly 0 (a
+   pushforward, a change of variables) or exactly the evidence (an
+   extension by the conditional); the symmetric translators of p. 121;
    involutive MCMC, a reversible jump included, one step from the exact
    posterior leaves it as it was; the round-trip checks; loud misuse."
   (:refer-clojure :exclude [read + - * /])
@@ -58,6 +59,36 @@
               (write mo :k (inc (read mi :k :discrete)) :discrete)
               (write mo :x (* 0.5 (read mi :x :continuous)) :continuous))]
       (is (ts/close? (Math/log 0.5) (:log-abs-det (tf/run t (cm/choicemap :k 1 :x 1.0) nil)))))))
+
+;; tcall (Gen.jl's @tcall, law audit finding 4): scale-move as one transform
+;; tcalled by another, which then writes the auxiliary choice
+
+(deftransform scale-x [model-in aux-in model-out aux-out]
+  (write model-out :x (* (read model-in :x :continuous) (array/exp (read aux-in :u :continuous))) :continuous))
+
+(deftransform scale-x-then-negate-u [model-in aux-in model-out aux-out]
+  (tf/tcall scale-x)
+  (write aux-out :u (array/negate (read aux-in :u :continuous)) :continuous))
+
+(deftest a-tcall-runs-the-other-body-on-the-same-spaces
+  ;; the same outputs and log |det J| as the two bodies inline. Planted bug
+  ;; (2026-10-20): tcall running the body on a copy of the run's state (its
+  ;; reads and writes lost) fails the model choices, log |det J| and the
+  ;; involution's weight
+  (doseq [[x u] [[2.0 0.3] [-0.7 -1.2]]]
+    (let [inline (tf/run scale-move (cm/choicemap :x x) (cm/choicemap :u u))
+          called (tf/run scale-x-then-negate-u (cm/choicemap :x x) (cm/choicemap :u u))]
+      (is (tf/same-choices? (:model inline) (:model called)))
+      (is (tf/same-choices? (:aux inline) (:aux called)))
+      (is (ts/close? (:log-abs-det inline) (:log-abs-det called)))))
+  (testing "as an involution"
+    (let [tr (:trace (gfi/generate (gen [] (trace :x (d/normal 0.3 0.8))) [] (cm/choicemap :x 0.4) (rng/key 21)))
+          weigh (fn [t] (:weight ((tf/involution (tf/involutive t) {:check? true}) tr (cm/choicemap :u 0.5) nil nil (rng/key 0))))]
+      (is (ts/close? (weigh scale-move) (weigh scale-x-then-negate-u)))))
+  (testing "misuse"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"runs inside a transform" (tf/tcall scale-x)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"needs a transform"
+                          (tf/run (tf/transform [mi ai mo ao] (tf/tcall :nope)) (cm/choicemap :x 1.0) nil)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Translators
@@ -360,6 +391,38 @@
           x' (cm/get-choice (:choices (gfi/propose walk-u [tr] k-propose)) :u)
           moved (:trace (gfi/update tr (cm/choicemap :x x') (rng/key 0)))]
       (is (ts/close? (+ (- (:score moved) (:score tr)) (- (lp (d/normal 0.3 0.5) x')) (lp (d/normal x' 0.5) 0.3)) la)))))
+
+(def gamma-a (gen [] (trace :a (d/gamma 1 1))))
+
+(deftransform reciprocal [model-in aux-in model-out aux-out]
+  (write model-out :a (/ 1.0 (read model-in :a :continuous)) :continuous))
+
+(deftest the-thesis-s-symmetric-translators
+  ;; p. 121's examples of Def. 3.7.1 (law audit, finding 9), each weight
+  ;; (Eq. 3.15) as involutive MH's log acceptance ratio; the fourth, propose
+  ;; and swap (Eq. 3.16), is a-swap-involution-is-plain-mh. Planted bugs
+  ;; (2026-10-20): the involution's weight without log |det J| fails the
+  ;; reciprocal; Alg. 5's printed sign in the move's proposal terms fails the
+  ;; conditional swap
+  (let [nothing (gen [_] nil)]
+    (testing "the identity, with a proposal of no choices: weight 1"
+      (let [identity-t (tf/involutive (tf/transform [mi ai mo ao] (write mo :x (read mi :x :continuous) :continuous)))]
+        (doseq [[x key] (map vector [0.3 -1.1] (rng/split (rng/key 44) 2))]
+          (let [tr (:trace (gfi/generate scaled [] (cm/choicemap :x x :y 0.8) (rng/key 0)))]
+            (is (ts/close? 0.0 (:log-alpha (mh/involutive-mh tr nothing [] (tf/involution identity-t {:check? true}) key))))))))
+    (testing "a ↦ 1/a under Gamma(1, 1), no proposal: p(1/x)/p(x) · 1/x²"
+      (doseq [[x key] (map vector [2.0 0.3] (rng/split (rng/key 45) 2))]
+        (let [tr (:trace (gfi/generate gamma-a [] (cm/choicemap :a x) (rng/key 0)))
+              {la :log-alpha t' :trace accepted? :accepted?}
+              (mh/involutive-mh tr nothing [] (tf/involution (tf/involutive reciprocal) {:check? true}) key)]
+          (is (ts/close? (- (- (lp (d/gamma 1 1) (/ 1.0 x)) (lp (d/gamma 1 1) x)) (* 2.0 (Math/log x))) la))
+          (is (ts/close? (if accepted? (/ 1.0 x) x) (t' :a))))))
+    (testing "a sample from the conditional, swapped in: weight 1"
+      ;; scaled given y = 0.8: x | y ~ N(0.64, √0.2)
+      (let [conditional (gen [_] (trace :u (d/normal 0.64 (Math/sqrt 0.2))))]
+        (doseq [[x key] (map vector [0.3 1.4 -0.2] (rng/split (rng/key 46) 3))]
+          (let [tr (:trace (gfi/generate scaled [] (cm/choicemap :x x :y 0.8) (rng/key 0)))]
+            (is (ts/close? 0.0 (:log-alpha (mh/involutive-mh tr conditional [] (tf/involution swap) key))))))))))
 
 (deftest a-checked-involutive-kernel-catches-a-write-to-an-observation
   ;; Alg. 11 (law audit gap J): an involution that moves y, a bijection, so
