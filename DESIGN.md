@@ -499,6 +499,30 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   read of each draw on a lazy backend, or a threshold on the parameters.
   The other edge stays as it is: a draw that underflows to 0, where a
   density can be +Inf, is floored at the dtype's smallest normal number.
+- **Differences from Gen.jl's test suite** (owner, 2026-10-20, after the
+  M5 inventory, `docs/research/genjl-test-suite.md` §4):
+  - *Retdiffs are more precise (D1).* A dynamic function's retdiff is
+    no-change when its return value is the previous one, where Gen.jl's
+    dynamic language always says UnknownChange. So an unchanged Map or
+    Unfold element is absent from a VectorDiff, and a splice turns an
+    argdiff into no-change for an argument identical to the previous call's.
+    This is sound, since a diff claims only what holds. The ports assert
+    gen.clj's diffs, and that they are consistent (`diff/consistent?`).
+  - *Lookups are loud (D4).* `cm/get-choice`, `cm/get-value` and
+    `(tr addr)` at a missing or node address throw ex-info, as Gen.jl
+    throws KeyError, where they returned nil (rule 6). Clojure's `get` on a
+    choice map stays the nil-returning lookup. To be done in M5.
+  - *Beta is exact at 0 and 1 (D6):* +Inf when α < 1 (or β < 1), where
+    Gen.jl substitutes a finite value. As with draws beyond the float
+    range, gen.clj keeps the exact value.
+  - *No default positional arguments (G3).* Clojure has none. A rest
+    parameter (`[x & [y z]]`) covers calls, update and regenerate with any
+    number of arguments, and a trace's args are the ones given. A
+    multi-arity `gen` stays possible if parity is wanted later.
+  - *The static IR's internal shape is not ported (G15).* Gen.jl's node
+    kinds (argument, parameter and per-expression nodes) are its Julia
+    representation. `static/ir` has one node per binding by design, and the
+    ported tests check behavior, not the IR's form.
 - **Bodies run to completion:** lazy sequences in a body's return value are
   realized during the run, and a `trace` or `splice` after the run is a loud
   error. Before this, `(map … (trace …))` at the end of a body gave a trace
