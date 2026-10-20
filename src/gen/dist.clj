@@ -183,15 +183,18 @@
   "Is the symmetric a (each matrix of a batch) positive definite, as far as
    dtype's rounding can tell? A Cholesky factor L does not show it alone: a
    singular matrix can have one through rounding (2·ones(2, 2)'s last pivot
-   is 4e-16, not 0). So the correlation matrix H of L·Lᵀ must also have no
-   eigenvalue within the rounding error of an n-term sum, n·ε: trace(H⁻¹),
-   between 1/λmin and n/λmin, is below 1/(n·ε)."
+   is 4e-16, not 0). So the correlation matrix H of L·Lᵀ must also be
+   conditioned for the dtype: trace(H⁻¹), between 1/λmin and n/λmin, below
+   1/ε. The bound is the measured one: a float32 log density's error tracks
+   (0.05–0.4)·ε·trace(H⁻¹) on squared-exponential kernels
+   (docs/research/covariance/f32_gp.py), so it rejects where the error nears
+   0.1 nats; the worst case's 1/(n·ε) was n times too strict."
   [a dtype]
   (let [n (peek (array/shape a))
         eye (array/with-backend (array/backend a) (array/eye n))
         ;; H⁻¹ = MᵀM for M = L⁻¹·diag(√aⱼⱼ); a NaN factor fails the comparison
         m (la/solve-triangular (la/cholesky a) (* eye (array/expand-dims (sqrt (la/diagonal a)) -2)))]
-    (array/all-true? (< (* n (machine-epsilon dtype) (array/sum (square m) {:axis [-2 -1]})) 1.0))))
+    (array/all-true? (< (* (machine-epsilon dtype) (array/sum (square m) {:axis [-2 -1]})) 1.0))))
 
 (defn- host-max
   "The largest element of x on the host, across every particle of a batched
@@ -199,21 +202,33 @@
   ^double [x]
   (double (array/item (array/max (if (instance? IBatchedValue x) (p/-all-particles x) x)))))
 
+(defn- rung
+  "The i-th readable jitter: 1, 2 or 5 times 10^⌊i/3⌋."
+  ^double [^long i]
+  (Double/parseDouble (str ([1 2 5] (mod i 3)) "e" (Math/floorDiv i 3))))
+
 (defn- suggested-jitter
-  "The smallest jitter, 1, 2 or 5 times a power of ten from ε times a's
-   largest diagonal entry up to that entry, that lets positive-definite?
-   pass once added to a's diagonal; nil when a's factor fails (no jitter at
-   the dtype's scale mends an indefinite matrix) or none does."
+  "The smallest readable jitter (1, 2 or 5 times a power of ten) that lets
+   positive-definite? pass once added to a's diagonal. The search starts at
+   the rung that passes for every positive semidefinite a: a jitter δ above
+   n·ε·max aⱼⱼ/(1 - n·ε) makes λmin(H) at least δ/(max aⱼⱼ + δ), so
+   trace(H⁻¹) ≤ n/λmin(H) is below 1/ε. It goes up from there (to max aⱼⱼ)
+   while rounding leaves a short of passing, then down while smaller rungs
+   pass (to ε·max aⱼⱼ's decade, below which a jitter is lost to rounding).
+   nil when a's factor fails (no jitter at the dtype's scale mends an
+   indefinite matrix) or none passes."
   [a dtype]
   (when-not (array/any-true? (array/isnan (la/cholesky a)))
-    (let [eye (array/with-backend (array/backend a) (array/eye (peek (array/shape a)) {:dtype (array/dtype a)}))
+    (let [n (peek (array/shape a))
+          eps (machine-epsilon dtype)
           top (host-max (la/diagonal a))
-          lo (* (machine-epsilon dtype) top)]
-      (->> (for [e (iterate inc (long (Math/floor (Math/log10 lo)))) m [1 2 5]] (Double/parseDouble (str m "e" e)))
-           (drop-while #(< % lo))
-           (take-while #(<= % top))
-           (filter #(positive-definite? (+ a (* % eye)) dtype))
-           first))))
+          eye (array/with-backend (array/backend a) (array/eye n {:dtype (array/dtype a)}))
+          passes? #(positive-definite? (+ a (* (rung %) eye)) dtype)
+          lowest (* 3 (long (Math/floor (Math/log10 (* eps top)))))
+          guarantee (/ (* n eps top) (- 1 (* n eps)))
+          start (first (drop-while #(< (rung %) (min guarantee top)) (iterate inc lowest)))]
+      (when-let [i (first (filter passes? (take-while #(<= (rung %) top) (iterate inc start))))]
+        (rung (last (take-while passes? (range i (dec lowest) -1))))))))
 
 (defdist mvnormal
   "mvnormal(mu, cov): the multivariate normal with mean vector mu and
