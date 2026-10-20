@@ -73,6 +73,12 @@ kept) or max-tokens of them; its return value is the vector of tokens.
   tokens whose distributions depend on token k. The weight is the retained
   tokens' score ratio (Eq. 4.1), 0 for a suffix with unchanged arguments.
 - **project** sums the selected tokens' scores; **propose** is a simulate.
+- **Change hints:** the retdiff of update and regenerate is a vector-diff
+  of the token vector (both lengths and the positions whose tokens
+  changed), or no-change, so code downstream (a Map over the tokens, say)
+  revisits only those. An update or regenerate that changes nothing (the
+  same arguments, no constraint, nothing selected) returns the trace as it
+  is, after the same checks.
 - **Choice gradients** over tokens are a loud error (`gen.gradients`: the
   choices are not continuous).
 
@@ -191,6 +197,10 @@ engine (`gen.llm.cell-engine`):
   update of a token mid-sequence (the suffix rescored, the discard), of the
   prompt, of max-tokens, of an end token both ways, regenerate from a
   boundary (weight 0, the suffix resampled) and of one token, project.
+- **Selection MH is stationary** (law 10): 300 chains of 30 moves (the
+  whole completion, then its second token) end distributed as the exact
+  posterior of P(a token in {3, 4, 5} | liked), by enumeration, within 5
+  standard errors.
 - **Inference:** importance sampling (2,000 samples) and 20 particle filters
   of 100 particles over two steps estimate the exact marginal likelihood
   (by enumeration over 97² token pairs) within 5 standard errors; MH over
@@ -201,7 +211,7 @@ engine (`gen.llm.cell-engine`):
   maximum, at keywords, not tokens, nested), bad positions and end sets.
 
 Mutations of `gen.llm.token` checked (2026-10-21, each applied, the suite
-run, reverted), all caught:
+run, reverted), eighteen, all caught:
 
 | Mutation | Caught by |
 |---|---|
@@ -215,10 +225,13 @@ run, reverted), all caught:
 | update weighing fresh tokens | the update weight laws, a-particle-filter… (6) |
 | update not discarding truncated tokens | updates-are-reversible…, update-weight… (6) |
 | regenerate weighing selected tokens | the regenerate weight laws (10) |
-| regenerate keeping selected tokens | regenerate-from-a-boundary…, mh-moves… (2) |
+| regenerate keeping selected tokens | regenerate-from-a-boundary…, mh-moves…, mh-over-tokens-targets-the-posterior (3) |
 | generate weighing unconstrained tokens | the generate weight laws, a-particle-filter… (9) |
 | project ignoring the selection | the projection laws (19) |
-| the retdiff always no-change | the laws' retdiff soundness (5) |
+| the retdiff missing the changed positions | the laws' retdiff soundness (5) |
+| the retdiff's lengths swapped | the laws' retdiff soundness (5) |
+| update's no-change shortcut taken with constraints | the update laws, on both engines (12) |
+| regenerate's no-change shortcut taken with a selection | mh-moves…, mh-over-tokens-targets-the-posterior, regenerate-from-a-boundary… (3) |
 | no batched-branch check | batched-runs-fall-back… (1) |
 
 ## Measurements (toy engine, this Mac, pure JVM)

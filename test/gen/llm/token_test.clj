@@ -235,14 +235,15 @@
         (is (= (exact-scores prompt new) (::token/scores t2)) "the suffix rescored")
         (is (= (- (exact-score prompt new) (exact-score prompt old)) w))
         (is (= (cm/choicemap 2 (old 2)) disc))
-        (is (diff/unknown-change? rd))))
+        (is (= (diff/vector-diff 5 5 {2 diff/unknown-change}) rd) "the retdiff names the changed position")))
     (testing "a new prompt rescores every token"
       (let [{t2 :trace w :weight} (gfi/update tr [[95 41] 5] [diff/unknown-change diff/no-change] cm/EMPTY (rng/key 2))]
         (is (= old (:retval t2)))
         (is (= (- (exact-score [95 41] old) (exact-score prompt old)) w))))
     (testing "a shorter max-tokens discards the rest"
-      (let [{t2 :trace disc :discard} (gfi/update tr [prompt 3] [diff/no-change diff/unknown-change] cm/EMPTY (rng/key 2))]
+      (let [{t2 :trace disc :discard rd :retdiff} (gfi/update tr [prompt 3] [diff/no-change diff/unknown-change] cm/EMPTY (rng/key 2))]
         (is (= (subvec old 0 3) (:retval t2)))
+        (is (= (diff/vector-diff 3 5 {}) rd))
         (is (= (cm/from-map {3 (old 3) 4 (old 4)}) disc)))))
   (testing "an end token made a common one draws fresh tokens, outside the weight"
     (let [{tr :trace} (gfi/generate stops [prompt 6] (token/forced [50 5]) (rng/key 4))
@@ -362,6 +363,23 @@
     (is (every? #(laws/close? (:score %) (:weight (gfi/assess composed [4] (:choices %)))) (take-nth 20 chain)))
     (is (zero? (:collections (br/info engine))))
     (is (<= (:live (lm/info m)) (:max-branches (lm/info m))))))
+
+(deftest mh-over-tokens-targets-the-posterior
+  ;; law 10 for completions: 300 chains of 30 moves (the whole completion,
+  ;; then its second token, in turn) end distributed as the exact posterior:
+  ;; P(a token in #{3 4 5} | liked), by enumeration, within 5 standard errors
+  (let [hit? #(some #{3 4 5} %)
+        exact (/ (* 0.9 (exact-marginal (fn [t0 t1] (if (hit? [t0 t1]) 1.0 0.0))))
+                 (exact-marginal (fn [t0 t1] (if (hit? [t0 t1]) 0.9 0.2))))
+        moves [(sel/hierarchical :story (token/from 0)) (sel/hierarchical :story (token/from 1))]
+        chain (fn [seed]
+                (let [k (rng/key seed)]
+                  (reduce (fn [tr i] (:trace (mh/mh tr (moves (mod i 2)) (rng/fold-in k (inc i)))))
+                          (:trace (gfi/generate liked [] (cm/choicemap :liked true) (rng/fold-in k 0)))
+                          (range 30))))
+        n 300
+        p (/ (count (filter #(hit? (:retval %)) (map chain (range n)))) (double n))]
+    (is (<= (Math/abs (- p exact)) (* 5 (Math/sqrt (/ (* exact (- 1 exact)) n)))))))
 
 (deftest batched-runs-fall-back-to-one-particle-at-a-time
   (let [ps (batched/simulate fixed [prompt 3] 8 (rng/key 1))]
