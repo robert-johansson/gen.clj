@@ -8,10 +8,14 @@
    are distinct; at most n-batch tokens a decode), so the bookkeeping of
    gen.llm.slots is tested on every call.
 
-   (engine {:n-vocab :max-branches :n-ctx :n-batch :max-cells :on-close :bug})
+   (engine {:n-vocab :max-branches :n-ctx :n-batch :max-cells :lossy :on-close :bug})
+   (toy-slots opts), the Slots alone, for slots/engine.
    :max-cells bounds the tokens held in all slots together, as llama.cpp's
    KV cells (but copies count again: the toy shares nothing): a run or step
    past it throws {:reason :kv-full :exhausted? true}, changing nothing.
+   :lossy, with :max-cells, makes a run longer than n-batch that finds no
+   room after its first n-batch tokens keep them and throw with :lost-slots
+   [slot], as a recurrent model that cannot remove what it read.
    :on-close is called when the engine closes.
    :bug plants one mutation of a Slots operation, for the power tests:
      :copy-perturbs  a copy changes the last token of its destination
@@ -56,14 +60,22 @@
 (defn- fail [msg data]
   (throw (ex-info (str "toy engine: " msg) data)))
 
-(defn- check-cells [^objects contents max-cells more]
+(defn- room
+  "The cells left under max-cells (nil: no bound)."
+  [^objects contents max-cells]
   (when max-cells
-    (let [held (areduce contents i n 0 (+ n (count (aget contents i))))]
-      (when (< (long max-cells) (+ held (long more)))
-        (throw (ex-info "toy engine: no room for the tokens" {:reason :kv-full :exhausted? true}))))))
+    (- (long max-cells) (areduce contents i n 0 (+ n (count (aget contents i)))))))
 
-(deftype ToySlots [^long n-vocab ^long n-slots ^long n-ctx ^long n-batch ^objects contents bug max-cells on-close
-                   copies]
+(defn- no-room []
+  (ex-info "toy engine: no room for the tokens" {:reason :kv-full :exhausted? true}))
+
+(defn- check-cells [contents max-cells more]
+  (when-let [left (room contents max-cells)]
+    (when (< (long left) (long more))
+      (throw (no-room)))))
+
+(deftype ToySlots [^long n-vocab ^long n-slots ^long n-ctx ^long n-batch ^objects contents bug max-cells lossy
+                   on-close copies]
   slots/Slots
   (slots-info [_] {:n-vocab n-vocab :n-slots n-slots :n-ctx n-ctx :n-batch n-batch :engine :toy})
 
@@ -73,7 +85,13 @@
         (fail "a run starts away from the end of its slot" {:slot slot :pos pos :have (count have)}))
       (when (and targets (not= (count targets) (dec (count tokens))))
         (fail "a run's targets are one fewer than its tokens" {:tokens (count tokens) :targets (count targets)}))
-      (check-cells contents max-cells (count tokens))
+      (when-let [left (room contents max-cells)]
+        (when (< (long left) (count tokens))
+          (if (and lossy (< n-batch (count tokens)) (<= n-batch (long left)))
+            (do (aset contents slot (into have (take n-batch tokens)))
+                (throw (ex-info "toy engine: no room after the first decode, which stays"
+                                {:reason :kv-full :exhausted? true :lost-slots [slot]})))
+            (throw (no-room)))))
       (let [all (into have tokens)
             scores (when targets
                      (double-array
@@ -112,10 +130,14 @@
 
   (slots-close [_] (when on-close (on-close))))
 
-(defn engine
-  [{:keys [n-vocab max-branches n-ctx n-batch bug max-cells on-close]
+(defn toy-slots
+  "The toy Slots for opts (engine's)."
+  [{:keys [n-vocab max-branches n-ctx n-batch bug max-cells lossy on-close]
     :or {n-vocab 97 max-branches 8 n-ctx 256 n-batch 64}}]
   (let [n-slots (inc max-branches)]
-    (slots/engine #(ToySlots. n-vocab n-slots n-ctx n-batch (object-array (repeat n-slots [])) bug max-cells on-close
-                              (volatile! 0))
-                  "toy")))
+    (ToySlots. n-vocab n-slots n-ctx n-batch (object-array (repeat n-slots [])) bug max-cells lossy on-close
+               (volatile! 0))))
+
+(defn engine
+  ^java.io.Closeable [opts]
+  (slots/engine #(toy-slots opts) "toy"))

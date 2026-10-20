@@ -39,16 +39,16 @@ functions="
   llama_supports_gpu_offload llama_max_parallel_sequences
   llama_model_default_params llama_context_default_params
   llama_model_load_from_file llama_model_free llama_init_from_model llama_free
-  llama_n_ctx llama_n_ctx_seq llama_n_batch llama_n_ubatch llama_n_seq_max
+  llama_n_ctx_seq llama_n_batch llama_n_seq_max
   llama_get_memory llama_model_get_vocab llama_model_desc llama_model_size
   llama_model_n_params llama_model_n_ctx_train llama_model_n_swa
   llama_model_has_encoder llama_model_has_decoder llama_model_is_recurrent
   llama_model_is_hybrid llama_model_is_diffusion
   llama_vocab_n_tokens llama_vocab_bos llama_vocab_eos llama_vocab_is_eog
-  llama_vocab_is_control llama_vocab_get_add_bos
+  llama_vocab_get_add_bos
   llama_tokenize llama_token_to_piece llama_detokenize
   llama_batch_init llama_batch_free llama_decode llama_get_logits_ith
-  llama_memory_clear llama_memory_seq_rm llama_memory_seq_cp
+  llama_memory_seq_rm llama_memory_seq_cp
   llama_memory_seq_pos_min llama_memory_seq_pos_max"
 structs="llama_model_params llama_context_params llama_batch"
 typedefs="llama_token llama_pos llama_seq_id llama_memory_t"
@@ -64,5 +64,11 @@ rm -rf "$out/gen/llama/ffi"
 "$jextract" --target-package gen.llama.ffi --header-class-name Llama \
   -I "$include" --output "$out" "${args[@]}" "$include/llama.h" 2>&1 |
   { grep -v -e 'nullability type specifier' -e '^WARNING: Skipping' || true; }
+# a function jextract left out would surface only when gen.llm.llama loads:
+# make it loud here
+for f in $functions; do
+  grep -q "public static .* $f(" "$out/gen/llama/ffi/Llama.java" ||
+    { echo "jextract did not emit $f" >&2; exit 1; }
+done
 echo "generated $(find "$out/gen/llama/ffi" -name '*.java' | wc -l | tr -d ' ') files in src-java/gen/llama/ffi" \
   "($(echo $functions | wc -w | tr -d ' ') functions)"

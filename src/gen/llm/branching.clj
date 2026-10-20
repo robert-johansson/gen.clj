@@ -53,7 +53,7 @@
   (-dispose [engine branches])
   (-live? [engine branch]))
 
-(deftype Branch [engine ^long id tokens ^floats logprobs ^long slot]
+(deftype Branch [engine ^long id tokens ^floats logprobs]
   Object
   (toString [_] (str "#<Branch " id ", " (count tokens) " tokens>")))
 
@@ -64,10 +64,22 @@
   [x]
   (instance? Branch x))
 
-(defn- ->branch ^Branch [b]
+(defn- as-branch
+  "b, checked to be a branch."
+  ^Branch [b]
   (if (instance? Branch b)
     b
     (throw (ex-info (str "Not a branch: " (pr-str b)) {:reason :not-a-branch :value b}))))
+
+(defn- index?
+  "Is x an integer in [0, n)? (Generic comparison: a big integer is out of
+   range, not an error.)"
+  [x n]
+  (and (integer? x) (<= 0 x) (< x n)))
+
+(defn- invalid-token [what t n-vocab]
+  (ex-info (str what ": not a token of the vocabulary (0 to " (dec (long n-vocab)) "): " (pr-str t))
+           {:reason :invalid-token :token t :n-vocab n-vocab}))
 
 ;; ---------------------------------------------------------------------------
 ;; A branch's value
@@ -76,33 +88,32 @@
 (defn tokens
   "The tokens the branch has read, a vector."
   [b]
-  (.-tokens (->branch b)))
+  (.-tokens (as-branch b)))
 
 (defn position
   "The number of tokens the branch has read (the position of its next token)."
   ^long [b]
-  (count (.-tokens (->branch b))))
+  (count (.-tokens (as-branch b))))
 
 (defn logprobs
   "The log-probabilities of the branch's next token, a new float array (one
    entry per token of the vocabulary)."
   ^floats [b]
-  (aclone ^floats (.-logprobs (->branch b))))
+  (aclone ^floats (.-logprobs (as-branch b))))
 
 (defn logprob
   "The log-probability of token as the branch's next token."
   ^double [b token]
-  (let [b (->branch b)
+  (let [b (as-branch b)
         ^floats lp (.-logprobs b)]
-    (when-not (and (integer? token) (< -1 (long token) (alength lp)))
-      (throw (ex-info (str "Not a token of the vocabulary (0 to " (dec (alength lp)) "): " (pr-str token))
-                      {:reason :invalid-token :token token :n-vocab (alength lp)})))
+    (when-not (index? token (alength lp))
+      (throw (invalid-token "logprob" token (alength lp))))
     (double (aget lp (int token)))))
 
 (defn engine
   "The engine holding the branch's state."
   [b]
-  (.-engine (->branch b)))
+  (.-engine (as-branch b)))
 
 ;; ---------------------------------------------------------------------------
 ;; Checks that need no engine state
@@ -115,18 +126,18 @@
   [engine]
   (-info engine))
 
-(defn- token-vector
-  "tokens as a vector of longs, each checked against the vocabulary."
+(defn check-tokens
+  "tokens as a vector of longs, each a token of engine's vocabulary, or a
+   loud error (:invalid-token) naming what was given them."
   [engine tokens what]
-  (let [n-vocab (long (:n-vocab (-info engine)))]
+  (let [n-vocab (:n-vocab (-info engine))]
     (when-not (sequential? tokens)
       (throw (ex-info (str what ": the tokens are a sequence of integers, not " (pr-str tokens))
                       {:reason :invalid-token :tokens tokens})))
     (mapv (fn [t]
-            (if (and (integer? t) (< -1 (long t) n-vocab))
+            (if (index? t n-vocab)
               (long t)
-              (throw (ex-info (str what ": not a token of the vocabulary (0 to " (dec n-vocab) "): " (pr-str t))
-                              {:reason :invalid-token :token t :n-vocab n-vocab}))))
+              (throw (invalid-token what t n-vocab))))
           tokens)))
 
 (defn- non-empty [ts what]
@@ -140,7 +151,7 @@
   (when-not (and (sequential? branches) (seq branches))
     (throw (ex-info (str what " takes a non-empty sequence of branches, not " (pr-str branches))
                     {:reason :not-a-branch :value branches})))
-  (let [bs (mapv ->branch branches)
+  (let [bs (mapv as-branch branches)
         e (.-engine ^Branch (first bs))]
     (when-not (every? #(identical? e (.-engine ^Branch %)) bs)
       (throw (ex-info (str what ": the branches belong to different engines") {:reason :engines-differ})))
@@ -157,7 +168,7 @@
   "A new branch that has read tokens (at least one: a BOS token for an
    unconditional start)."
   [engine tokens]
-  (-open engine (non-empty (token-vector engine tokens "open") "open")))
+  (-open engine (non-empty (check-tokens engine tokens "open") "open")))
 
 (defn fork
   "A new branch with branch's state ((fork b)), or a vector of n of them.
@@ -165,8 +176,8 @@
    (with llama.cpp's unified KV cache, sharing the prefix's cells)."
   ([branch] (first (fork branch 1)))
   ([branch n]
-   (let [b (->branch branch)]
-     (when-not (and (integer? n) (<= 0 (long n)))
+   (let [b (as-branch branch)]
+     (when-not (index? n (inc Integer/MAX_VALUE))
        (throw (ex-info (str "fork: n is a non-negative integer, not " (pr-str n)) {:reason :invalid-count :n n})))
      (-fork (.-engine b) b (long n)))))
 
@@ -176,7 +187,7 @@
   [branches tokens]
   (let [bs (branch-vector branches "advance")
         e (.-engine ^Branch (first bs))
-        ts (token-vector e tokens "advance")]
+        ts (check-tokens e tokens "advance")]
     (when-not (= (count bs) (count ts))
       (throw (ex-info (str "advance: " (count bs) " branches but " (count ts) " tokens (one each)")
                       {:reason :count-mismatch :branches (count bs) :tokens (count ts)})))
@@ -187,18 +198,18 @@
    batch of tokens): {:branch the new branch, :scores the log-probability
    of each token given those before it}. branch is consumed."
   [branch tokens]
-  (let [b (->branch branch)
+  (let [b (as-branch branch)
         e (.-engine b)]
-    (-extend e b (non-empty (token-vector e tokens "extend") "extend"))))
+    (-extend e b (non-empty (check-tokens e tokens "extend") "extend"))))
 
 (defn score
   "The log-probability of each token of a continuation given branch and the
    tokens before it, teacher-forced: a vector of doubles (their sum is the
    continuation's log-probability). branch stays live and unchanged."
   [branch tokens]
-  (let [b (->branch branch)
+  (let [b (as-branch branch)
         e (.-engine b)]
-    (-score e b (non-empty (token-vector e tokens "score") "score"))))
+    (-score e b (non-empty (check-tokens e tokens "score") "score"))))
 
 (defn resample
   "The branches' states, one for each ancestor index (into branches): a
@@ -208,8 +219,7 @@
   [branches ancestors]
   (let [bs (branch-vector branches "resample")
         n (count bs)]
-    (when-not (and (sequential? ancestors)
-                   (every? #(and (integer? %) (< -1 (long %) n)) ancestors))
+    (when-not (and (sequential? ancestors) (every? #(index? % n) ancestors))
       (throw (ex-info (str "resample: the ancestors are indices of the " n " branches, not " (pr-str ancestors))
                       {:reason :invalid-ancestors :ancestors ancestors :branches n})))
     (-resample (.-engine ^Branch (first bs)) bs (mapv long ancestors))))
@@ -227,5 +237,5 @@
   "Does the branch still hold its state (not consumed, disposed or freed,
    its engine open)?"
   [branch]
-  (let [b (->branch branch)]
+  (let [b (as-branch branch)]
     (boolean (-live? (.-engine b) b))))
