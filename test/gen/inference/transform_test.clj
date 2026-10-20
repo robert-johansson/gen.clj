@@ -73,7 +73,7 @@
 
 (deftest a-pushforward-translates-with-weight-zero
   ;; z = e^x is exactly the log-normal: p(z)·|dz/dx| = p(x)
-  (let [translate (tf/deterministic-translator p-log-normal [] nil exp-of-x)]
+  (let [translate (tf/deterministic-translator {:p-new p-log-normal :p-new-args [] :transform exp-of-x})]
     (doseq [key (rng/split (rng/key 1) 5)]
       (let [tr (gfi/simulate p-normal [] key)
             {t' :trace w :weight} (translate tr (rng/key 2))]
@@ -146,7 +146,7 @@
 
 (deftest a-translator-reweighs-particles
   (let [state (pf/initialize p-normal [] cm/EMPTY 10 {:key (rng/key 11)})
-        moved (pf/move-reweight state (tf/deterministic-translator p-log-normal [] nil exp-of-x) (rng/key 12))]
+        moved (pf/move-reweight state (tf/deterministic-translator {:p-new p-log-normal :p-new-args [] :transform exp-of-x}) (rng/key 12))]
     (is (every? #(contains? (set (cm/addresses (:choices %))) [:z]) (pf/traces moved)))
     (is (every? true? (map #(ts/close? %1 %2 {:atol (ts/tol 1e-9)}) (:log-weights state) (:log-weights moved))))))
 

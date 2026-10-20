@@ -94,6 +94,26 @@
        (throw (ex-info "param-gradients: the trace's generative function has no parameter store" {})))
      ((array/grad (fn [ps] (objective (dyn/with-params gf ps) args choices retgrad))) store))))
 
+(defn- tree-add
+  "x + y over gradient trees, leaf by leaf; a name in one tree only keeps
+   its gradient (a run that did not read a parameter has none for it)."
+  [x y]
+  (cond (map? x) (merge-with tree-add x y)
+        (vector? x) (mapv tree-add x y)
+        :else (+ x y)))
+
+(defn weighted-sum
+  "Σ_i c_i·g_i over gradient trees gs (maps of names to arrays, numbers or
+   nested trees, as param-gradients gives)."
+  [cs gs]
+  (reduce tree-add (map (fn [c g] (array/tree-map #(* c %) g)) cs gs)))
+
+(defn mean
+  "The mean of gradient trees gs."
+  [gs]
+  (let [n (count gs)]
+    (weighted-sum (repeat n (/ 1.0 n)) gs)))
+
 (defn log-abs-det-jacobian
   "log |det J| of f: a 1-d float array → a 1-d array of the same size, at x,
    by one reverse pass per output (for the volume change of an involution,

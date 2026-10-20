@@ -35,7 +35,8 @@
    - (translator {:p-new :p-new-args :new-observations :q-forward
      :q-forward-args :q-backward :q-backward-args :transform}): Gen.jl's
      GeneralTraceTranslator, and DeterministicTraceTranslator without the
-     proposals (deterministic-translator);
+     proposals ((deterministic-translator {:p-new :p-new-args
+     :new-observations :transform}));
    - (extending-translator {:p-new-args :p-argdiffs :new-observations
      :q-forward :q-forward-args :transform}): SimpleExtendingTraceTranslator
      (GenParticleFilters' ExtendingTraceTranslator with a :transform);
@@ -393,11 +394,15 @@
       {:trace t' :weight (+ (- (:score t') (:score trace)) (- bwd fwd) ldj)})))
 
 (defn deterministic-translator
-  "Gen.jl's DeterministicTraceTranslator: the transform maps the trace's
-   choices to p-new's, with no auxiliary choices."
-  ([p-new p-new-args new-observations t] (deterministic-translator p-new p-new-args new-observations t {}))
-  ([p-new p-new-args new-observations t opts]
-   (translator (merge opts {:p-new p-new :p-new-args p-new-args :new-observations new-observations :transform t}))))
+  "Gen.jl's DeterministicTraceTranslator: a translator whose transform maps
+   the trace's choices to p-new's with no auxiliary choices. Options as for
+   translator, without the proposals: {:p-new :p-new-args :new-observations
+   :transform}, and :check? with :prev-observations."
+  [{:keys [q-forward q-backward] :as opts}]
+  (when (or q-forward q-backward)
+    (throw (ex-info "A deterministic translator has no auxiliary choices; translator takes :q-forward and :q-backward"
+                    {:q-forward q-forward :q-backward q-backward})))
+  (translator opts))
 
 (defn new-arguments
   "[args argdiffs] for a translator's update: p-new-args (the trace's own
