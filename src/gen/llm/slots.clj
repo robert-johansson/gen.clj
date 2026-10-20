@@ -105,7 +105,7 @@
 ;;   :live  {id {:slot s :ref phantom}}   the live branches
 ;;   :refs  {phantom id}                  every phantom not yet cleared
 ;;   :free  sorted set of free slots (never the scratch slot)
-;;   :next-id, :closed?
+;;   :next-id, :collections (GC backstops run), :closed?
 
 (declare engine-info open* fork* advance* extend* score* resample* dispose* close*)
 
@@ -136,6 +136,7 @@
     (assoc (.-info e)
            :live (count (:live st))
            :free (count (:free st))
+           :collections (:collections st)
            :closed? (boolean (:closed? st)))))
 
 (defn- spi [^SlotEngine e] (.-spi e))
@@ -169,8 +170,9 @@
 
 (defn- collect!
   "Run the GC and free the slots of the unreachable branches it finds: how
-   many."
+   many. Counted in (info engine) as :collections."
   ^long [^SlotEngine e]
+  (vswap! (state e) update :collections inc)
   (System/gc)
   ;; the reference handler enqueues what the GC found after the GC returns
   (loop [wait 100 freed 0]
@@ -442,7 +444,7 @@
       (.shutdown exec)
       (throw (ex-info "An engine needs at least two slots (one for scoring)" {:n-slots n-slots})))
     (let [state (volatile! {:live {} :refs {} :free (into (sorted-set) (range (dec n-slots)))
-                            :next-id 0 :closed? false})
+                            :next-id 0 :collections 0 :closed? false})
           e (SlotEngine. spi
                          (assoc info :max-branches (dec n-slots) :scratch-slot (dec n-slots))
                          exec @thread (ReferenceQueue.) state)]
