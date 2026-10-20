@@ -8,12 +8,22 @@
    byte-level BPE (151,936 tokens) and Gemma 3's SentencePiece (262,144).
    Without the files, a synthetic vocabulary of 151,936 tokens stands in.
 
+   Decoding under a grammar runs on the toy engine at a vocabulary's size,
+   its tokens' bytes the GGUF's: what a constraint adds to a token.
+
    Run: clojure -M:bench -m gen.grammar-bench [dir-of-gguf-files]"
   (:require [criterium.core :as crit]
+            [gen.gfi :as gfi]
             [gen.llm.bytes :as bytes]
+            [gen.llm.constrained :as constrained]
             [gen.llm.dfa :as dfa]
             [gen.llm.grammar :as grammar]
-            [gen.llm.regex :as regex])
+            [gen.llm.lm :as lm]
+            [gen.llm.potential :as potential]
+            [gen.llm.regex :as regex]
+            [gen.llm.token :as token]
+            [gen.llm.toy-engine :as toy]
+            [gen.random :as rng])
   (:import (java.io File RandomAccessFile)
            (java.nio ByteBuffer ByteOrder)
            (java.nio.channels FileChannel$MapMode)
@@ -150,13 +160,53 @@
           s (grammar/state g (subvec ctx 0 1))
           t (first (grammar/allowed g s))]
       (println (format "advance by a token: %.3f µs; the state of a 12-token context: %.2f µs; logw-next (a dense row): %.0f µs"
-                       (us #(grammar/advance g s t)) (us #(grammar/state g ctx)) (us #(grammar/logw-next g []))))))
+                       (us #(grammar/advance g s t)) (us #(grammar/state g ctx)) (us #(potential/logw-next g []))))))
   nil)
 
+(defn- tokenizer
+  "A tokenizer (gen.llm.lm's map) of a byte vocabulary, its last token the
+   end, its first BOS."
+  [vocab]
+  (let [n (count vocab)]
+    {:n-vocab n :bos 0 :eos (dec n) :eog #{(dec n)} :add-bos? true
+     :token-bytes (fn [t] (aclone ^bytes (vocab t)))
+     :encode (fn [_ _] (throw (ex-info "the bench tokenizer does not encode" {})))
+     :decode (fn [tokens] (String. (byte-array (mapcat #(seq ^bytes (vocab %)) tokens)) StandardCharsets/UTF_8))}))
+
+(defn- decoding [name vocab]
+  (println (str "\n## Decoding under a grammar, toy engine at " name "'s " (count vocab) " tokens, µs"))
+  (with-open [^java.io.Closeable e (toy/engine {:n-vocab (count vocab) :max-branches 64 :n-ctx 1024})
+              m (lm/lm e (tokenizer vocab))]
+    (doseq [[lname re] [["string content, [^\"]*" "[^\"]*"] ["digits, [0-9]*" "[0-9]*"]]]
+      (let [g (grammar/grammar m re)
+            plain (token/completion m {:eos #{}})
+            under (token/completion m {:eos #{} :potential g})
+            prompt [0]
+            seed (volatile! 0)
+            row (lm/next-logprobs m prompt)
+            ws (potential/logw-next g [])
+            n 16
+            sim-plain (us #(gfi/simulate plain [prompt n] (rng/key (vswap! seed inc))))
+            sim-under (us #(gfi/simulate under [prompt n] (rng/key (vswap! seed inc))))]
+        (println (str "\n" lname ": " (count (grammar/allowed g 0)) " tokens allowed at the start\n"))
+        (println "| | µs |")
+        (println "|---|---|")
+        (println (format "| the site's distribution (constrained/weighted: row times weights, renormalized) | %.0f |"
+                         (us #(constrained/weighted #{} row ws))))
+        (println (format "| the grammar's weights (potential/logw-next, a dense row) | %.0f |" (us #(potential/logw-next g []))))
+        (println (format "| simulate, per token, unconstrained (the toy's row is most of it) | %.0f |" (/ sim-plain n)))
+        (println (format "| simulate, per token, under the grammar | %.0f |" (/ sim-under n)))
+        (println (format "| what the grammar adds to a token | %.0f |" (/ (- sim-under sim-plain) n)))))))
+
 (defn -main [& [dir]]
-  (let [dir (File. ^String (or dir "/Users/robert/gen-clj-models"))
+  (let [dir (File. (str (or dir "/Users/robert/gen-clj-models")))
         files (filter #(.endsWith (.getName ^File %) ".gguf") (or (seq (.listFiles dir)) []))]
     (if (seq files)
-      (doseq [f (sort files)] (report (.getName ^File f) (gguf-vocab f)))
-      (report "synthetic" (synthetic-vocab)))
+      (doseq [f (sort files)]
+        (let [vocab (gguf-vocab f)]
+          (report (.getName ^File f) vocab)
+          (decoding (.getName ^File f) vocab)))
+      (let [vocab (synthetic-vocab)]
+        (report "synthetic" vocab)
+        (decoding "synthetic" vocab)))
     (shutdown-agents)))

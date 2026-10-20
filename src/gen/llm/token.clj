@@ -4,6 +4,8 @@
 
      (completion lm)                → a generative function of [prompt max-tokens]
      (completion lm {:eos tokens})  → one that ends on these tokens (default: the LM's :eog)
+     (completion lm {:potential p}) → one under a potential: each token's distribution
+                                      the LM's times p's next-token weights, renormalized
      (dist row)                     → the distribution of one token, given its log-probabilities
      (forced tokens)                → constraints: tokens at the positions 0, 1, …
      (forced at tokens)             → at the positions at, at + 1, …
@@ -40,7 +42,17 @@
    (fold-in key i), so runs are pure functions of their keys. Under a batch
    tracer (gen.batched) the operations raise the batched-branch error, and
    a batched run falls back to one particle at a time. Tokens are discrete:
-   choice-gradients over them is a loud error (gen.gradients)."
+   choice-gradients over them is a loud error (gen.gradients).
+
+   Under a potential (gen.llm.potential; a grammar, gen.llm.grammar), the
+   same operations with each token's distribution reweighed at its site
+   (gen.llm.constrained): a completion masked by a grammar and
+   renormalized, token by token, as GenMLX's grammar-masked decoder. Its
+   GFI weights are that local distribution's, q, not the LM conditioned on
+   the potential: gen.llm.constrained/conditional-weight is a trace's
+   importance weight for that. Its scores are its sites' log q, from the
+   LM's rows at their contexts (one read for each, as the normalizer needs
+   every token's)."
   (:refer-clojure :exclude [-])
   (:require [gen.array :as array :refer [-]]
             [gen.array.batch :as batch]
@@ -48,6 +60,7 @@
             [gen.diff :as diff]
             [gen.dist.core :as dc]
             [gen.gfi :as gfi]
+            [gen.llm.constrained :as constrained]
             [gen.llm.lm :as lm]
             [gen.random :as rng]
             [gen.selection :as sel]
@@ -196,12 +209,30 @@
       (update :tokens into tokens)
       (update :scores into scores)))
 
+(defn- run-scores
+  "The scores of run, known tokens after state: the LM's, in one call (or,
+   under a potential, its sites')."
+  [gf state run]
+  (if (:potential gf)
+    (constrained/run-scores gf state run)
+    (lm/score (:lm gf) (:ctx state) run)))
+
+(defn- draw-next
+  "The next token after state, drawn with key, and its score: from the LM's
+   row, scored by the LM (or, under a potential, from its site's
+   distribution, scored by it)."
+  [gf state key]
+  (if (:potential gf)
+    (constrained/draw-next gf state #(draw % key))
+    (let [t (draw (lm/next-logprobs (:lm gf) (:ctx state)) key)]
+      [t (lm/score (:lm gf) (:ctx state) [t])])))
+
 (defn- grow
   "state continued until it ends: the tokens known (known: position → token
    or nil) are scored by the LM, a run of them in one call; the others are
    drawn from the LM's row with their site keys, (fold-in key i), and scored
    by the LM (the score it keeps, which is the row's entry unless it read the
-   token before)."
+   token before). Under a potential, by the sites' distributions."
   [gf state known max key]
   (let [m (:lm gf)]
     (loop [state state]
@@ -211,9 +242,9 @@
               run (run-of gf known i max)]
           (recur
            (if (seq run)
-             (append state run (lm/score m (:ctx state) run))
-             (let [t (draw (lm/next-logprobs m (:ctx state)) (rng/fold-in key i))]
-               (-> (append state [t] (lm/score m (:ctx state) [t]))
+             (append state run (run-scores gf state run))
+             (let [[t score] (draw-next gf state (rng/fold-in key i))]
+               (-> (append state [t] score)
                    (update :fresh conj i))))))))))
 
 (defn- start
@@ -323,7 +354,7 @@
       (throw (ex-info (str "assess: the tokens end at " n ", before an end token or max-tokens (" max
                            "): position " n " is unconstrained")
                       {:length n :max-tokens max})))
-    {:weight (if (zero? n) 0.0 (sum (lm/score (:lm gf) prompt tokens)))
+    {:weight (if (zero? n) 0.0 (sum (run-scores gf (start prompt [] [] 0) tokens)))
      :retval tokens}))
 
 (defn- retdiff
@@ -396,7 +427,7 @@
            `(~'invoke [this# ~@as] (:retval (gfi/simulate this# ~as)))))
      (~'applyTo [this# args#] (:retval (gfi/simulate this# (vec args#))))))
 
-(defgf Completion [lm eos n-vocab]
+(defgf Completion [lm eos n-vocab potential]
   gfi/IGenerativeFunction
   (-simulate [gf args key] (simulate* gf args key))
   (-generate [gf args constraints key] (generate* gf args constraints key))
@@ -409,7 +440,7 @@
   (-project [_ tr selection] (project* tr selection)))
 
 (defmethod print-method Completion [gf ^java.io.Writer w]
-  (.write w (str "#gen/completion[" (:lm gf) "]")))
+  (.write w (str "#gen/completion[" (:lm gf) (when (:potential gf) (str " under " (:potential gf))) "]")))
 
 (defn completion
   "The generative function of lm's completions of a prompt: its arguments
@@ -417,12 +448,15 @@
    its trace holds the tokens drawn after the prompt at the positions 0, 1,
    … (see the namespace's docstring). opts: :eos, the tokens that end a
    completion (a set; default the LM's end-of-generation tokens, :eog; #{}
-   for completions of exactly max-tokens)."
+   for completions of exactly max-tokens); :potential, a potential over
+   the LM's vocabulary (gen.llm.potential) that reweighs each token's
+   distribution (gen.llm.constrained)."
   ([lm] (completion lm {}))
-  ([lm {:keys [eos] :as opts}]
+  ([lm {:keys [eos potential] :as opts}]
    (let [{:keys [n-vocab eog]} (lm/vocab lm)
          eos (if (contains? opts :eos) eos eog)]
      (when-not (and (set? eos) (every? #(index? % n-vocab) eos))
        (throw (ex-info (str "token/completion: :eos is a set of tokens of the vocabulary, not " (pr-str eos))
                        {:eos eos})))
-     (->Completion lm (into #{} (map long) eos) (long n-vocab)))))
+     (->Completion lm (into #{} (map long) eos) (long n-vocab)
+                   (some-> potential (constrained/check-potential n-vocab))))))

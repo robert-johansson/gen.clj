@@ -12,9 +12,10 @@
      (accepting? g state)       → are the bytes so far a string of the language?
      (allowed? g state t), (allowed g state)
                                 → may token t come next; the tokens that may
-     (prefix g tokens), (complete g tokens), (logw-next g tokens)
-                                → the potential's weights (log 0 or -Inf)
      (automaton g), (info g)    → its DFA; its sizes
+
+   A grammar is a potential (gen.llm.potential): (potential/prefix g
+   tokens), complete and logw-next weigh token sequences by it.
 
    A token sequence's text is its tokens' bytes, concatenated (an LM's
    decode); the grammar holds the text, read byte by byte, so a token may
@@ -27,14 +28,17 @@
    An empty language, or one no sequence of the vocabulary's tokens spells,
    is a loud error.
 
-   As a potential (genlm-control's Potential: prefix, complete, logw-next),
-   a grammar weighs a context 1 (log 0) as a prefix when its state is live,
-   as a complete sequence when it accepts, and 0 (log -Inf) otherwise;
-   logw-next is the mask, a float row of n-vocab + 1 entries, 0 for each
-   allowed token and, last, for the end when the context accepts."
+   As a potential (genlm-control's Potential, a BoolFSA read through the
+   tokens), a grammar weighs a context 1 (log 0) as a prefix when its state
+   is live, as a complete sequence when it accepts, and 0 (log -Inf)
+   otherwise; logw-next is the mask, a new float row of n-vocab + 1
+   entries, 0 for each allowed token and, last, for the end when the
+   context accepts. A context that is no prefix has no next weights
+   (:zero-prefix, as gen.llm.potential's dense ones)."
   (:require [gen.llm.bytes :as bytes]
             [gen.llm.dfa :as dfa]
             [gen.llm.lm :as lm]
+            [gen.llm.potential :as potential]
             [gen.llm.regex :as regex])
   (:import (gen.llm.bytes ByteTrie)))
 
@@ -174,21 +178,21 @@
     []))
 
 ;; ---------------------------------------------------------------------------
-;; The potential's weights
+;; The potential
 ;; ---------------------------------------------------------------------------
 
-(defn prefix
+(defn- prefix
   "log 1 when tokens can be continued to a string of the language, else
    -Inf."
   ^double [^Grammar g tokens]
   (if (live? g (state g tokens)) 0.0 Double/NEGATIVE_INFINITY))
 
-(defn complete
+(defn- complete
   "log 1 when the bytes of tokens are a string of the language, else -Inf."
   ^double [^Grammar g tokens]
   (if (accepting? g (state g tokens)) 0.0 Double/NEGATIVE_INFINITY))
 
-(defn logw-next
+(defn- logw-next
   "The weights of the next token after tokens: a new float array of
    n-vocab + 1 entries, 0 for an allowed token and -Inf for the others,
    the last 0 when tokens are complete (the end), else -Inf. Loud when
@@ -208,3 +212,9 @@
             (recur (bit-and bits (dec bits)))))))
     (when (accepting? g s) (aset out n (float 0.0)))
     out))
+
+(extend-type Grammar
+  potential/Potential
+  (-prefix [g context] (prefix g context))
+  (-complete [g context] (complete g context))
+  (-logw-next [g context] (logw-next g context)))

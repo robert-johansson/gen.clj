@@ -24,6 +24,8 @@
             [gen.llm.bytes :as bytes]
             [gen.llm.dfa :as dfa]
             [gen.llm.grammar :as grammar]
+            [gen.llm.potential :as potential]
+            [gen.llm.potential-contract :as contract]
             [gen.llm.regex :as regex])
   (:import (java.nio.charset StandardCharsets)))
 
@@ -164,9 +166,9 @@
   (let [vocab (mapv utf8 ["a" "b" "x"])
         g (grammar/grammar vocab "ab|ac|xc")]
     (is (= [0] (grammar/allowed g 0)) "x leads to a byte-live state no token completes")
-    (is (= 0.0 (grammar/prefix g [0])))
-    (is (= Double/NEGATIVE_INFINITY (grammar/prefix g [2])))
-    (is (= 0.0 (grammar/complete g [0 1])))))
+    (is (= 0.0 (potential/prefix g [0])))
+    (is (= Double/NEGATIVE_INFINITY (potential/prefix g [2])))
+    (is (= 0.0 (potential/complete g [0 1])))))
 
 ;; ---------------------------------------------------------------------------
 ;; The potential's weights
@@ -187,26 +189,38 @@
 (defspec the-weights-are-consistent 200
   (prop/for-all [r gen-char-term vocab gen-text-vocab seed gen/nat]
     (let [d (regex/dfa r)
-          g (try (grammar/grammar vocab d) (catch clojure.lang.ExceptionInfo _ nil))]
+          g (try (grammar/grammar vocab d) (catch clojure.lang.ExceptionInfo _ nil))
+          contexts (when g (map #(walk-allowed g % (+ seed %)) (range 6)))]
       (or (nil? g)
-          (every? (fn [ctx]
-                    (let [p (grammar/prefix g ctx)
-                          ^floats row (grammar/logw-next g ctx)
+          (and
+           ;; the potential contract's check, exact (the weights are 0 and -Inf)
+           (empty? (contract/check-consistent g (count vocab) contexts 0.0))
+           ;; and the autoregressive factorization: complete(x) - prefix([]) is
+           ;; the sum of the next-token weights along x and the end's
+           (every? (fn [ctx]
+                     (= (- (potential/complete g ctx) (potential/prefix g []))
+                        (+ (reduce + (map-indexed (fn [i t] (double (aget ^floats (potential/logw-next g (subvec ctx 0 i)) (int t))))
+                                                  ctx))
+                           (double (aget ^floats (potential/logw-next g ctx) (count vocab))))))
+                   contexts)
+           (every? (fn [ctx]
+                    (let [p (potential/prefix g ctx)
+                          ^floats row (potential/logw-next g ctx)
                           n (count vocab)]
                       (and (= 0.0 p)
-                           (= (grammar/complete g ctx) (if (dfa/matches? d (concat-bytes vocab ctx)) 0.0 Double/NEGATIVE_INFINITY))
+                           (= (potential/complete g ctx) (if (dfa/matches? d (concat-bytes vocab ctx)) 0.0 Double/NEGATIVE_INFINITY))
                            (= (inc n) (alength row))
-                           (every? #(= (double (aget row %)) (- (grammar/prefix g (conj ctx %)) p)) (range n))
-                           (= (double (aget row n)) (- (grammar/complete g ctx) p))
+                           (every? #(= (double (aget row %)) (- (potential/prefix g (conj ctx %)) p)) (range n))
+                           (= (double (aget row n)) (- (potential/complete g ctx) p))
                            (= (grammar/state g ctx) (dfa/walk d (dfa/start d) (concat-bytes vocab ctx))))))
-                  (map #(walk-allowed g % (+ seed %)) (range 6)))))))
+                   contexts))))))
 
 (deftest a-dead-context-has-no-next-weights
   (let [g (grammar/grammar (mapv utf8 ["a" "b"]) "a+")]
-    (is (= Double/NEGATIVE_INFINITY (grammar/prefix g [0 1])))
-    (is (= Double/NEGATIVE_INFINITY (grammar/complete g [1])))
+    (is (= Double/NEGATIVE_INFINITY (potential/prefix g [0 1])))
+    (is (= Double/NEGATIVE_INFINITY (potential/complete g [1])))
     (is (= -1 (grammar/state g [1 0])))
-    (is (= :zero-prefix (bc/reason #(grammar/logw-next g [1]))))
+    (is (= :zero-prefix (bc/reason #(potential/logw-next g [1]))))
     (is (not (grammar/allowed? g -1 0)))
     (is (= [] (grammar/allowed g -1)))))
 
