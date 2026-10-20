@@ -1,0 +1,1933 @@
+;; Gen.jl 0.4.8's own test suite, run once on 2026-10-20 (docs/research/genjl-test-suite.md §4.3):
+;; runtests.jl, then inference/enumerative.jl, which runtests.jl never includes, from the installed
+;; Gen 0.4.8 (its test/ equals the tag's), on Julia 1.12.6, arm64-apple-darwin25.4.0, Apple M4.
+;; Totals: 1863 pass, 0 fail, 0 error, 0 broken, in 214 testsets, 169 s.
+;; Each row is a testset's own results (its children are rows of their own): :path from the
+;; top, :files and :lines of its assertions (relative to Gen's test/), :problems for each
+;; failure or error (none).
+[{:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 169.1
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 166.72
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "autodiff"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 0.34
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "autodiff" "fill"]
+ :pass 2
+ :files ["autodiff.jl"]
+ :error 0
+ :lines [10 18]
+ :seconds 0.33
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "diff arithmetic"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "diff arithmetic" "+"]
+ :pass 12
+ :files ["diff.jl"]
+ :error 0
+ :lines [6 32]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "diff vectors"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 0.06
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "diff vectors" "length"]
+ :pass 6
+ :files ["diff.jl"]
+ :error 0
+ :lines [43 52]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "diff vectors" "getindex"]
+ :pass 14
+ :files ["diff.jl"]
+ :error 0
+ :lines [60 90]
+ :seconds 0.05
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "diff dictionaries"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 0.0
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "diff sets"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 0.0
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "dynamic selection"]
+ :pass 18
+ :files ["selection.jl"]
+ :error 0
+ :lines [6 33]
+ :seconds 0.07
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "all selection"]
+ :pass 4
+ :files ["selection.jl"]
+ :error 0
+ :lines [41 46]
+ :seconds 0.0
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "complement selection"]
+ :pass 13
+ :files ["selection.jl"]
+ :error 0
+ :lines [51 68]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static assignment to/from array"]
+ :pass 12
+ :files ["assignment.jl"]
+ :error 0
+ :lines [6 21]
+ :seconds 0.11
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "dynamic assignment to/from array"]
+ :pass 12
+ :files ["assignment.jl"]
+ :error 0
+ :lines [34 49]
+ :seconds 0.18
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "dynamic assignment copy constructor"]
+ :pass 4
+ :files ["assignment.jl"]
+ :error 0
+ :lines [61 64]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "internal vector assignment to/from array"]
+ :pass 8
+ :files ["assignment.jl"]
+ :error 0
+ :lines [74 83]
+ :seconds 0.07
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "dynamic assignment merge"]
+ :pass 10
+ :files ["assignment.jl"]
+ :error 0
+ :lines [102 111]
+ :seconds 0.06
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "dynamic assignment variadic merge"]
+ :pass 2
+ :files ["assignment.jl"]
+ :error 0
+ :lines [119 120]
+ :seconds 0.06
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static assignment merge"]
+ :pass 10
+ :files ["assignment.jl"]
+ :error 0
+ :lines [131 140]
+ :seconds 0.16
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static assignment variadic merge"]
+ :pass 2
+ :files ["assignment.jl"]
+ :error 0
+ :lines [148 149]
+ :seconds 0.1
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static assignment errors"]
+ :pass 12
+ :files ["assignment.jl"]
+ :error 0
+ :lines [158 218]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "dynamic assignment errors"]
+ :pass 7
+ :files ["assignment.jl"]
+ :error 0
+ :lines [228 256]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "dynamic assignment overwrite"]
+ :pass 16
+ :files ["assignment.jl"]
+ :error 0
+ :lines [265 312]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "dynamic assignment constructor"]
+ :pass 2
+ :files ["assignment.jl"]
+ :error 0
+ :lines [318 319]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "choice map equality"]
+ :pass 6
+ :files ["assignment.jl"]
+ :error 0
+ :lines [328 333]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "choice map nested view"]
+ :pass 8
+ :files ["assignment.jl"]
+ :error 0
+ :lines [341 355]
+ :seconds 0.13
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "filtering choicemaps with selections"]
+ :pass 6
+ :files ["assignment.jl"]
+ :error 0
+ :lines [363 374]
+ :seconds 0.05
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "invalid choice map constructor"]
+ :pass 1
+ :files ["assignment.jl"]
+ :error 0
+ :lines [380 380]
+ :seconds 0.0
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "choicemap hashing"]
+ :pass 25
+ :files ["assignment.jl"]
+ :error 0
+ :lines [390 417]
+ :seconds 0.17
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "update(...) shorthand assuming unchanged args (dynamic modeling lang)"]
+ :pass 3
+ :files ["gen_fn_interface.jl"]
+ :error 0
+ :lines [20 22]
+ :seconds 0.31
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "regenerate(...) shorthand assuming unchanged args (dynamic modeling lang)"]
+ :pass 2
+ :files ["gen_fn_interface.jl"]
+ :error 0
+ :lines [31 32]
+ :seconds 0.07
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "update(...) shorthand assuming unchanged args (static modeling lang)"]
+ :pass 3
+ :files ["gen_fn_interface.jl"]
+ :error 0
+ :lines [20 22]
+ :seconds 0.61
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "regenerate(...) shorthand assuming unchanged args (static modeling lang)"]
+ :pass 2
+ :files ["gen_fn_interface.jl"]
+ :error 0
+ :lines [31 32]
+ :seconds 0.17
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "macros in dynamic DSL"]
+ :pass 7
+ :files ["dsl/macros.jl"]
+ :error 0
+ :lines [44 86]
+ :seconds 0.07
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "macros in static DSL"]
+ :pass 7
+ :files ["dsl/macros.jl"]
+ :error 0
+ :lines [124 142]
+ :seconds 0.19
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "Dynamic DSL"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 2.25
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "Dynamic DSL" "Julia call syntax"]
+ :pass 5
+ :files ["dsl/dynamic_dsl.jl"]
+ :error 0
+ :lines [14 35]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "Dynamic DSL" "return type"]
+ :pass 1
+ :files ["dsl/dynamic_dsl.jl"]
+ :error 0
+ :lines [44 44]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "Dynamic DSL" "address visitor"]
+ :pass 4
+ :files ["dsl/dynamic_dsl.jl"]
+ :error 0
+ :lines [57 70]
+ :seconds 0.04
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "Dynamic DSL" "simulate"]
+ :pass 3
+ :files ["dsl/dynamic_dsl.jl"]
+ :error 0
+ :lines [81 83]
+ :seconds 0.06
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "Dynamic DSL" "update"]
+ :pass 19
+ :files ["dsl/dynamic_dsl.jl"]
+ :error 0
+ :lines [123 196]
+ :seconds 0.56
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "Dynamic DSL" "regenerate"]
+ :pass 70
+ :files ["dsl/dynamic_dsl.jl"]
+ :error 0
+ :lines [252 288]
+ :seconds 0.08
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "Dynamic DSL" "choice_gradients and accumulate_param_gradients!"]
+ :pass 15
+ :files ["dsl/dynamic_dsl.jl"]
+ :error 0
+ :lines [346 377]
+ :seconds 0.97
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "Dynamic DSL" "backprop params with splice"]
+ :pass 1
+ :files ["dsl/dynamic_dsl.jl"]
+ :error 0
+ :lines [397 397]
+ :seconds 0.1
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "Dynamic DSL" "gradient descent with fixed step size"]
+ :pass 2
+ :files ["dsl/dynamic_dsl.jl"]
+ :error 0
+ :lines [411 412]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "Dynamic DSL" "gradient descent with shrinking step size"]
+ :pass 2
+ :files ["dsl/dynamic_dsl.jl"]
+ :error 0
+ :lines [426 427]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "Dynamic DSL" "multi-component addresses"]
+ :pass 14
+ :files ["dsl/dynamic_dsl.jl"]
+ :error 0
+ :lines [443 462]
+ :seconds 0.23
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "Dynamic DSL" "project"]
+ :pass 4
+ :files ["dsl/dynamic_dsl.jl"]
+ :error 0
+ :lines [480 483]
+ :seconds 0.05
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "Dynamic DSL" "getindex(trace)"]
+ :pass 9
+ :files ["dsl/dynamic_dsl.jl"]
+ :error 0
+ :lines [509 529]
+ :seconds 0.1
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "Dynamic DSL" "docstrings"]
+ :pass 1
+ :files ["dsl/dynamic_dsl.jl"]
+ :error 0
+ :lines [554 554]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static DSL"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 1.47
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static DSL" "check IR"]
+ :pass 77
+ :files ["dsl/static_dsl.jl"]
+ :error 0
+ :lines [127 263]
+ :seconds 0.07
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static DSL" "at_choice"]
+ :pass 16
+ :files ["dsl/static_dsl.jl"]
+ :error 0
+ :lines [272 295]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static DSL" "at_call"]
+ :pass 17
+ :files ["dsl/static_dsl.jl"]
+ :error 0
+ :lines [305 329]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static DSL" "tracked diff annotation"]
+ :pass 2
+ :files ["dsl/static_dsl.jl"]
+ :error 0
+ :lines [339 345]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static DSL" "no julia cache annotation"]
+ :pass 2
+ :files ["dsl/static_dsl.jl"]
+ :error 0
+ :lines [355 361]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static DSL" "trainable parameters"]
+ :pass 2
+ :files ["dsl/static_dsl.jl"]
+ :error 0
+ :lines [376 377]
+ :seconds 0.06
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static DSL" "returning a trace directly"]
+ :pass 7
+ :files ["dsl/static_dsl.jl"]
+ :error 0
+ :lines [396 406]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static DSL" "@trace within Julia expressions"]
+ :pass 5
+ :files ["dsl/static_dsl.jl"]
+ :error 0
+ :lines [422 431]
+ :seconds 0.33
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static DSL" "repeated assignments"]
+ :pass 8
+ :files ["dsl/static_dsl.jl"]
+ :error 0
+ :lines [451 462]
+ :seconds 0.06
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static DSL" "tuple assignments"]
+ :pass 11
+ :files ["dsl/static_dsl.jl"]
+ :error 0
+ :lines [479 497]
+ :seconds 0.09
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static DSL" "use of 'end'"]
+ :pass 1
+ :files ["dsl/static_dsl.jl"]
+ :error 0
+ :lines [509 509]
+ :seconds 0.03
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static DSL" "'return nothing'"]
+ :pass 1
+ :files ["dsl/static_dsl.jl"]
+ :error 0
+ :lines [519 519]
+ :seconds 0.03
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static DSL" "getindex(trace)"]
+ :pass 7
+ :files ["dsl/static_dsl.jl"]
+ :error 0
+ :lines [546 556]
+ :seconds 0.32
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static DSL" "docstrings"]
+ :pass 1
+ :files ["dsl/static_dsl.jl"]
+ :error 0
+ :lines [570 570]
+ :seconds 0.0
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static DSL" "one-line definitions"]
+ :pass 2
+ :files ["dsl/static_dsl.jl"]
+ :error 0
+ :lines [579 580]
+ :seconds 0.05
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static DSL" "module-defined static functions"]
+ :pass 4
+ :files ["dsl/static_dsl.jl"]
+ :error 0
+ :lines [587 592]
+ :seconds 0.07
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static DSL" "static gen function choicemaps"]
+ :pass 10
+ :files ["dsl/static_dsl.jl"]
+ :error 0
+ :lines [611 629]
+ :seconds 0.24
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static DSL" "returning a SML function from macro"]
+ :pass 1
+ :files ["dsl/static_dsl.jl"]
+ :error 0
+ :lines [636 636]
+ :seconds 0.03
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static DSL" "global variables"]
+ :pass 1
+ :files ["dsl/static_dsl.jl"]
+ :error 0
+ :lines [642 642]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "optional positional args (calling + GFI)"]
+ :pass 42
+ :files ["optional_args.jl"]
+ :error 0
+ :lines [16 127]
+ :seconds 0.65
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "optional positional args (combinators)"]
+ :pass 16
+ :files ["optional_args.jl"]
+ :error 0
+ :lines [141 216]
+ :seconds 102.78
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static IR"]
+ :pass 3
+ :files ["static_ir/static_ir.jl"]
+ :error 0
+ :lines [25 63]
+ :seconds 3.24
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static IR" "Julia call"]
+ :pass 1
+ :files ["static_ir/static_ir.jl"]
+ :error 0
+ :lines [66 66]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static IR" "simulate"]
+ :pass 2
+ :files ["static_ir/static_ir.jl"]
+ :error 0
+ :lines [83 86]
+ :seconds 0.11
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static IR" "generate"]
+ :pass 4
+ :files ["static_ir/static_ir.jl"]
+ :error 0
+ :lines [98 105]
+ :seconds 0.15
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static IR" "project"]
+ :pass 1
+ :files ["static_ir/static_ir.jl"]
+ :error 0
+ :lines [117 117]
+ :seconds 0.13
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static IR" "update without tracked diffs"]
+ :pass 45
+ :files ["static_ir/static_ir.jl"]
+ :error 0
+ :lines [134 197]
+ :seconds 0.39
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static IR" "regenerate without tracked diffs"]
+ :pass 40
+ :files ["static_ir/static_ir.jl"]
+ :error 0
+ :lines [214 273]
+ :seconds 0.21
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static IR" "backprop"]
+ :pass 19
+ :files ["static_ir/static_ir.jl"]
+ :error 0
+ :lines [339 388]
+ :seconds 1.03
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static IR" "update with tracked diffs"]
+ :pass 8
+ :files ["static_ir/static_ir.jl"]
+ :error 0
+ :lines [441 464]
+ :seconds 0.24
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static IR" "regenerate with tracked diffs"]
+ :pass 8
+ :files ["static_ir/static_ir.jl"]
+ :error 0
+ :lines [477 500]
+ :seconds 0.12
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static IR" "cached julia nodes"]
+ :pass 7
+ :files ["static_ir/static_ir.jl"]
+ :error 0
+ :lines [525 549]
+ :seconds 0.15
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "static IR" "regression test for https://github.com/probcomp/Gen/issues/168"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 0.11
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "tilde syntax"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 0.34
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "tilde syntax" "tilde syntax smoke test (dynamic)"]
+ :pass 2
+ :files ["tilde_sugar.jl"]
+ :error 0
+ :lines [15 16]
+ :seconds 0.08
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "tilde syntax" "tilde syntax smoke test (static)"]
+ :pass 7
+ :files ["tilde_sugar.jl"]
+ :error 0
+ :lines [37 47]
+ :seconds 0.21
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "tilde syntax" "tilde syntax desugars as expected (static)"]
+ :pass 1
+ :files ["tilde_sugar.jl"]
+ :error 0
+ :lines [63 63]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "tilde syntax" "tilde syntax preserved in quoted expressions"]
+ :pass 2
+ :files ["tilde_sugar.jl"]
+ :error 0
+ :lines [70 75]
+ :seconds 0.03
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "importance sampling"]
+ :pass 22
+ :files ["inference/importance_sampling.jl"]
+ :error 0
+ :lines [19 44]
+ :seconds 0.14
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "SGD training"]
+ :pass 10
+ :files ["inference/train.jl"]
+ :error 0
+ :lines [104 122]
+ :seconds 1.55
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "lecture!"]
+ :pass 2
+ :files ["inference/train.jl"]
+ :error 0
+ :lines [155 177]
+ :seconds 1.47
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "black box variational inference"]
+ :pass 4
+ :files ["inference/variational.jl"]
+ :error 0
+ :lines [34 37]
+ :seconds 2.72
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "minimal vae"]
+ :pass 3
+ :files ["inference/variational.jl"]
+ :error 0
+ :lines [117 134]
+ :seconds 10.62
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "hmm forward alg"]
+ :pass 1
+ :files ["inference/particle_filter.jl"]
+ :error 0
+ :lines [46 46]
+ :seconds 0.15
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "particle filtering"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 2.7
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "particle filtering" "custom proposal"]
+ :pass 4
+ :files ["inference/particle_filter.jl"]
+ :error 0
+ :lines [137 143]
+ :seconds 2.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "particle filtering" "default proposal"]
+ :pass 4
+ :files ["inference/particle_filter.jl"]
+ :error 0
+ :lines [163 169]
+ :seconds 0.53
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "particle filtering" "PF state"]
+ :pass 8
+ :files ["inference/particle_filter.jl"]
+ :error 0
+ :lines [184 197]
+ :seconds 0.13
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "mala"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 0.08
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "hmc"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 0.05
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "map_optimize"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 0.03
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "elliptical slice"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 0.37
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "Involutive MCMC"]
+ :pass 6
+ :files ["inference/mh.jl"]
+ :error 0
+ :lines [43 45]
+ :seconds 1.17
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "trace translators"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 1.51
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "trace translators" "DeterministicTraceTranslator"]
+ :pass 2
+ :files ["inference/trace_translators.jl"]
+ :error 0
+ :lines [35 40]
+ :seconds 0.56
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "trace translators" "SimpleExtendingTraceTranslator"]
+ :pass 1
+ :files ["inference/trace_translators.jl"]
+ :error 0
+ :lines [69 69]
+ :seconds 0.13
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "trace translators" "SymmetricTraceTranslator"]
+ :pass 1
+ :files ["inference/trace_translators.jl"]
+ :error 0
+ :lines [112 112]
+ :seconds 0.3
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "trace translators" "GeneralTraceTranslator"]
+ :pass 1
+ :files ["inference/trace_translators.jl"]
+ :error 0
+ :lines [167 167]
+ :seconds 0.52
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "Kernel DSL"]
+ :pass 1
+ :files ["inference/kernel_dsl.jl"]
+ :error 0
+ :lines [33 33]
+ :seconds 0.11
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "custom deterministic generative function with custom update and gradient"]
+ :pass 23
+ :files ["modeling_library/custom_determ.jl"]
+ :error 0
+ :lines [75 122]
+ :seconds 0.16
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "custom gradient GF"]
+ :pass 2
+ :files ["modeling_library/custom_determ.jl"]
+ :error 0
+ :lines [137 141]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "custom update GF"]
+ :pass 12
+ :files ["modeling_library/custom_determ.jl"]
+ :error 0
+ :lines [184 202]
+ :seconds 0.08
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "bernoulli"]
+ :pass 2
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [13 16]
+ :seconds 0.04
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "beta"]
+ :pass 9
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [23 40]
+ :seconds 0.06
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "categorical"]
+ :pass 7
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [47 63]
+ :seconds 0.11
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "gamma"]
+ :pass 5
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [71 82]
+ :seconds 0.04
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "inv_gamma"]
+ :pass 5
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [89 100]
+ :seconds 0.03
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "normal"]
+ :pass 5
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [109 118]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "zero-dimensional broadcasted normal"]
+ :pass 6
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [131 137]
+ :seconds 0.13
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "array normal (trivially broadcasted: all args have same shape)"]
+ :pass 6
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [157 163]
+ :seconds 0.74
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "broadcasted normal"]
+ :pass 14
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [169 213]
+ :seconds 1.4
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "multivariate normal"]
+ :pass 9
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [221 234]
+ :seconds 0.34
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "dirichlet"]
+ :pass 20
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [239 289]
+ :seconds 0.55
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "uniform"]
+ :pass 5
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [296 307]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "uniform_discrete"]
+ :pass 3
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [314 322]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "piecewise_uniform"]
+ :pass 8
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [329 343]
+ :seconds 0.1
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "beta uniform mixture"]
+ :pass 6
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [350 362]
+ :seconds 0.03
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "geometric"]
+ :pass 4
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [368 378]
+ :seconds 0.04
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "binom"]
+ :pass 5
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [384 395]
+ :seconds 0.07
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "neg_binom"]
+ :pass 5
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [401 412]
+ :seconds 0.07
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "exponential"]
+ :pass 4
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [418 428]
+ :seconds 0.03
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "poisson"]
+ :pass 4
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [434 444]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "laplace"]
+ :pass 3
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [456 458]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "cauchy"]
+ :pass 3
+ :files ["modeling_library/distributions.jl"]
+ :error 0
+ :lines [470 472]
+ :seconds 0.03
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "choice_at combinator"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 0.18
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "choice_at combinator" "assess"]
+ :pass 2
+ :files ["modeling_library/choice_at.jl"]
+ :error 0
+ :lines [9 10]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "choice_at combinator" "propose"]
+ :pass 4
+ :files ["modeling_library/choice_at.jl"]
+ :error 0
+ :lines [15 18]
+ :seconds 0.03
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "choice_at combinator" "generate"]
+ :pass 9
+ :files ["modeling_library/choice_at.jl"]
+ :error 0
+ :lines [25 42]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "choice_at combinator" "project"]
+ :pass 2
+ :files ["modeling_library/choice_at.jl"]
+ :error 0
+ :lines [54 56]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "choice_at combinator" "update"]
+ :pass 22
+ :files ["modeling_library/choice_at.jl"]
+ :error 0
+ :lines [66 101]
+ :seconds 0.03
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "choice_at combinator" "regenerate"]
+ :pass 16
+ :files ["modeling_library/choice_at.jl"]
+ :error 0
+ :lines [111 139]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "choice_at combinator" "choice_gradients"]
+ :pass 16
+ :files ["modeling_library/choice_at.jl"]
+ :error 0
+ :lines [151 172]
+ :seconds 0.05
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "choice_at combinator" "accumulate_param_gradients!"]
+ :pass 3
+ :files ["modeling_library/choice_at.jl"]
+ :error 0
+ :lines [178 180]
+ :seconds 0.0
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "call_at combinator"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 0.25
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "call_at combinator" "assess"]
+ :pass 2
+ :files ["modeling_library/call_at.jl"]
+ :error 0
+ :lines [14 15]
+ :seconds 0.03
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "call_at combinator" "propose"]
+ :pass 3
+ :files ["modeling_library/call_at.jl"]
+ :error 0
+ :lines [21 23]
+ :seconds 0.03
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "call_at combinator" "generate"]
+ :pass 9
+ :files ["modeling_library/call_at.jl"]
+ :error 0
+ :lines [31 47]
+ :seconds 0.03
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "call_at combinator" "project"]
+ :pass 2
+ :files ["modeling_library/call_at.jl"]
+ :error 0
+ :lines [60 62]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "call_at combinator" "force update"]
+ :pass 25
+ :files ["modeling_library/call_at.jl"]
+ :error 0
+ :lines [72 112]
+ :seconds 0.06
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "call_at combinator" "free update"]
+ :pass 16
+ :files ["modeling_library/call_at.jl"]
+ :error 0
+ :lines [122 150]
+ :seconds 0.03
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "call_at combinator" "choice_gradients"]
+ :pass 14
+ :files ["modeling_library/call_at.jl"]
+ :error 0
+ :lines [160 179]
+ :seconds 0.04
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "call_at combinator" "accumulate_param_gradients!"]
+ :pass 3
+ :files ["modeling_library/call_at.jl"]
+ :error 0
+ :lines [186 188]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "map combinator"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 1.39
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "map combinator" "Julia call"]
+ :pass 1
+ :files ["modeling_library/map.jl"]
+ :error 0
+ :lines [16 16]
+ :seconds 0.04
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "map combinator" "simulate"]
+ :pass 5
+ :files ["modeling_library/map.jl"]
+ :error 0
+ :lines [24 27]
+ :seconds 0.05
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "map combinator" "generate"]
+ :pass 2
+ :files ["modeling_library/map.jl"]
+ :error 0
+ :lines [36 38]
+ :seconds 0.05
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "map combinator" "propose"]
+ :pass 1
+ :files ["modeling_library/map.jl"]
+ :error 0
+ :lines [46 46]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "map combinator" "assess"]
+ :pass 2
+ :files ["modeling_library/map.jl"]
+ :error 0
+ :lines [55 57]
+ :seconds 0.03
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "map combinator" "update"]
+ :pass 74
+ :files ["modeling_library/map.jl"]
+ :error 0
+ :lines [81 229]
+ :seconds 0.44
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "map combinator" "regenerate"]
+ :pass 45
+ :files ["modeling_library/map.jl"]
+ :error 0
+ :lines [249 342]
+ :seconds 0.24
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "map combinator" "choice_gradients"]
+ :pass 6
+ :files ["modeling_library/map.jl"]
+ :error 0
+ :lines [368 373]
+ :seconds 0.47
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "map combinator" "accumulate_param_gradients!"]
+ :pass 3
+ :files ["modeling_library/map.jl"]
+ :error 0
+ :lines [398 402]
+ :seconds 0.08
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "unfold combinator"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 2.35
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "unfold combinator" "Julia call"]
+ :pass 1
+ :files ["modeling_library/unfold.jl"]
+ :error 0
+ :lines [13 13]
+ :seconds 0.14
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "unfold combinator" "simulate"]
+ :pass 7
+ :files ["modeling_library/unfold.jl"]
+ :error 0
+ :lines [28 38]
+ :seconds 0.22
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "unfold combinator" "generate"]
+ :pass 10
+ :files ["modeling_library/unfold.jl"]
+ :error 0
+ :lines [53 69]
+ :seconds 0.09
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "unfold combinator" "propose"]
+ :pass 7
+ :files ["modeling_library/unfold.jl"]
+ :error 0
+ :lines [77 89]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "unfold combinator" "assess"]
+ :pass 5
+ :files ["modeling_library/unfold.jl"]
+ :error 0
+ :lines [107 111]
+ :seconds 0.03
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "unfold combinator" "update"]
+ :pass 84
+ :files ["modeling_library/unfold.jl"]
+ :error 0
+ :lines [141 324]
+ :seconds 0.64
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "unfold combinator" "regenerate"]
+ :pass 59
+ :files ["modeling_library/unfold.jl"]
+ :error 0
+ :lines [350 478]
+ :seconds 0.32
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "unfold combinator" "test 1 - accumulate_param_gradients!"]
+ :pass 5
+ :files ["modeling_library/unfold.jl"]
+ :error 0
+ :lines [510 516]
+ :seconds 0.39
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "unfold combinator" "test 2 - accumulate_param_gradients!"]
+ :pass 1
+ :files ["modeling_library/unfold.jl"]
+ :error 0
+ :lines [527 527]
+ :seconds 0.27
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "unfold combinator" "choice gradients"]
+ :pass 20
+ :files ["modeling_library/unfold.jl"]
+ :error 0
+ :lines [554 565]
+ :seconds 0.24
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "recurse node numbering"]
+ :pass 54
+ :files ["modeling_library/recurse.jl"]
+ :error 0
+ :lines [6 63]
+ :seconds 0.0
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "simple pcfg"]
+ :pass 88
+ :files ["modeling_library/recurse.jl"]
+ :error 0
+ :lines [110 229]
+ :seconds 0.96
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 1.17
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "switch trace"]
+ :pass 3
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [13 15]
+ :seconds 0.03
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "simulate"]
+ :pass 2
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [37 39]
+ :seconds 0.03
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "generate"]
+ :pass 2
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [47 48]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "assess"]
+ :pass 1
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [55 55]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "propose"]
+ :pass 1
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [60 60]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "update"]
+ :pass 2
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [70 75]
+ :seconds 0.23
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "regenerate"]
+ :pass 3
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [85 94]
+ :seconds 0.09
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "choice gradients"]
+ :pass 8
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [104 108]
+ :seconds 0.04
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "simulate"]
+ :pass 1
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [136 136]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "generate"]
+ :pass 2
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [144 145]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "assess"]
+ :pass 1
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [152 152]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "propose"]
+ :pass 1
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [157 157]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "update"]
+ :pass 2
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [165 168]
+ :seconds 0.04
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "regenerate"]
+ :pass 3
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [175 179]
+ :seconds 0.03
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "choice gradients"]
+ :pass 8
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [189 195]
+ :seconds 0.27
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "accumulate parameter gradients"]
+ :pass 8
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [206 211]
+ :seconds 0.06
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "simulate"]
+ :pass 2
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [238 240]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "generate"]
+ :pass 4
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [248 253]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "assess"]
+ :pass 2
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [260 263]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "propose"]
+ :pass 2
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [268 270]
+ :seconds 0.02
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "update"]
+ :pass 2
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [278 281]
+ :seconds 0.08
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "regenerate"]
+ :pass 4
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [288 294]
+ :seconds 0.0
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "choice gradients"]
+ :pass 4
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [304 304]
+ :seconds 0.01
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "switch combinator" "update"]
+ :pass 4
+ :files ["modeling_library/switch.jl"]
+ :error 0
+ :lines [337 343]
+ :seconds 0.06
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "dist DSL (untyped)"]
+ :pass 29
+ :files ["modeling_library/dist_dsl.jl"]
+ :error 0
+ :lines [4 64]
+ :seconds 3.09
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "dist DSL (typed)"]
+ :pass 14
+ :files ["modeling_library/dist_dsl.jl"]
+ :error 0
+ :lines [75 94]
+ :seconds 0.37
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "fixed mixture of different distributions"]
+ :pass 11
+ :files ["modeling_library/mixture.jl"]
+ :error 0
+ :lines [5 37]
+ :seconds 0.33
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "mixture of normals"]
+ :pass 20
+ :files ["modeling_library/mixture.jl"]
+ :error 0
+ :lines [46 101]
+ :seconds 0.87
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "mixture of binomial"]
+ :pass 9
+ :files ["modeling_library/mixture.jl"]
+ :error 0
+ :lines [106 135]
+ :seconds 0.44
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "mixture of multivariate normals"]
+ :pass 15
+ :files ["modeling_library/mixture.jl"]
+ :error 0
+ :lines [140 196]
+ :seconds 1.54
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "product of discrete distributions"]
+ :pass 5
+ :files ["modeling_library/product.jl"]
+ :error 0
+ :lines [4 26]
+ :seconds 0.29
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "product of continuous distributions"]
+ :pass 9
+ :files ["modeling_library/product.jl"]
+ :error 0
+ :lines [33 58]
+ :seconds 0.26
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "runtests.jl" "product of dissimilarly-typed distributions"]
+ :pass 6
+ :files ["modeling_library/product.jl"]
+ :error 0
+ :lines [65 87]
+ :seconds 0.22
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "inference/enumerative.jl (not included by runtests.jl)"]
+ :pass 0
+ :files []
+ :error 0
+ :lines nil
+ :seconds 2.37
+ :broken 0}
+ {:fail 0
+ :problems []
+ :path ["Gen.jl 0.4.8" "inference/enumerative.jl (not included by runtests.jl)" "enumerative inference"]
+ :pass 31
+ :files ["inference/enumerative.jl"]
+ :error 0
+ :lines [38 134]
+ :seconds 2.3
+ :broken 0}]
