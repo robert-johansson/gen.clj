@@ -24,11 +24,21 @@ Clojure on the JVM. In order:
    closes). Gen.jl 0.4.8's tests (38 files, about 1,900 assertions) are
    ported file by file to gen.clj tests, each citing its source. A table
    marks each as ported or not applicable, with a reason (Julia-only
-   machinery). Gen.jl itself, run on a host that has it (fenrir), is the
-   oracle for expected values, written as EDN fixtures as scipy's and
+   machinery). Gen.jl itself, installed on this Mac (Gen 0.4.8 on Julia
+   1.12.6; its suite passes here, `docs/research/genjl-test-suite.md`), is
+   the oracle for expected values, written as EDN fixtures as scipy's and
    JAX's are, so the tests never need Julia. Its seeded statistical tests
    are compared by their statistics, as for GenMLX. A port that fails is a
    gap to fix, or a documented difference.
+6. **M6 — gen.clj inside kmet** and **7. M7 — inference over agents**
+   (drafts, the owner, 2026-10-20; `docs/research/kmet-integration.md`).
+   kmet is a Clojure port of the pi coding agent, which the owner's fork
+   brings to the JVM. M6 serves kmet from a local model through gen.clj,
+   with sessions as traces (scored and edited) and tool-call grammars. M7
+   treats the agent as a generative function: SMC over trajectories with
+   verifiers, inverse planning, and the LLM proposing programs through
+   `run_code`. Both come after M3's token generative function. Neither core
+   depends on the other; the integration is a third artifact.
 
 **Status (2026-10-19): M1 is complete.** The pure-JVM backend runs every
 layer: arrays with reverse-mode AD, the data algebra, the GFI and dynamic
