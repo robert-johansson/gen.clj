@@ -323,11 +323,20 @@
       (is (not (same? 0.0 -0.0)))
       (is (not (same? (float 1.5) 1.5)))
       (is (not (same? 1 1.0))))
+    (testing "different: sorted collections of other comparators, which conj tells apart (review 7, R7-6)"
+      (is (not (same? (sorted-set-by clojure.core/< 5) (sorted-set-by clojure.core/> 5))))
+      (is (not (same? (sorted-set-by clojure.core/<) (sorted-set-by clojure.core/>))))
+      (is (not (same? (sorted-map-by clojure.core/< 5 :a) (sorted-map-by clojure.core/> 5 :a)))))
     (testing "the same: equal values built again, NaN, a set of paths (an estimated density's addresses)"
       (is (same? (array-map :p 0.0 :q 10.0) (array-map :p 0.0 :q 10.0)))
       (is (same? {:w [1.0 2.0]} {:w (vector 1.0 (+ 1.0 1.0))}))
       (is (same? ##NaN ##NaN))
-      (is (same? #{[:y] [:z 0]} (set [[:y] [:z 0]]))))
+      (is (same? #{[:y] [:z 0]} (set [[:y] [:z 0]])))
+      (is (same? (sorted-map :a 1 :b 2) (sorted-map :a 1 :b 2))))
+    (testing "the same: maps of 300 entries built again from identical keys and values, which spend no budget (review 7, R7-2: an entry spent one)"
+      (let [ks (mapv #(keyword (str "p" %)) (range 300))
+            vs (mapv double (range 300))]
+        (is (same? (zipmap ks vs) (zipmap ks vs)))))
     (testing "arrays: by identity, also as map keys (no hashing, which reads them on MLX)"
       (let [x (array/array [1.0 2.0])]
         (is (same? {x 1} {x 1}))
@@ -354,7 +363,15 @@
                       (splice :m (comb/map (gen [i] (trace :y (d/normal (+ i (first (vals m))) 1)))) [0.0 1.0])))]
            ["a Map kernel over a vector or a list"
             (gen [] (let [b (trace :b (d/bernoulli 0.5)) xs (if b [0.0 10.0] (list 0.0 10.0))]
-                      (splice :m (comb/map (gen [i] (trace :y (d/normal (+ i (first (conj xs 5.0))) 1)))) [0.0 1.0])))]]]
+                      (splice :m (comb/map (gen [i] (trace :y (d/normal (+ i (first (conj xs 5.0))) 1)))) [0.0 1.0])))]
+           ;; one element, so only the comparator differs (review 7, R7-6)
+           ["a Map kernel over a sorted set of either order"
+            (gen [] (let [b (trace :b (d/bernoulli 0.5)) s (sorted-set-by (if b clojure.core/< clojure.core/>) 5.0)]
+                      (splice :m (comb/map (gen [i] (trace :y (d/normal (+ i (first (conj s 9.0))) 1)))) [0.0 1.0])))]
+           ["a deterministic callee over a sorted set of either order"
+            (gen [] (let [b (trace :b (d/bernoulli 0.5)) s (sorted-set-by (if b clojure.core/< clojure.core/>) 5.0)
+                          v (splice :d (custom/deterministic {:apply (fn [[x]] (+ x (first (conj s 9.0))))}) 0.0)]
+                      (trace :z (d/normal v 1))))]]]
     (testing label
       (let [tr (:trace (gfi/generate model [] (cm/choicemap :b true) (rng/key 1)))
             {u :trace w :weight} (gfi/update tr (cm/choicemap :b false) (rng/key 2))]
@@ -479,7 +496,27 @@
         (let [tr (gfi/simulate (comb/map other) [[0]] (rng/key 1))]
           (doseq [k (range 4)]
             (is (thrown-with-msg? clojure.lang.ExceptionInfo #"the constraint at \[0 :x\] was not visited"
-                                  (gfi/update (assoc tr :gen-fn (comb/map after)) (cm/choicemap [0 :x] 1.0) (rng/key (+ 20 k)))))))))))
+                                  (gfi/update (assoc tr :gen-fn (comb/map after)) (cm/choicemap [0 :x] 1.0) (rng/key (+ 20 k))))))))
+      (testing "two calls deep in a Map's kernel, where only the prefix of every call names it (review 7: a reversed or unextended prefix, G1 and G2, replaced it for 3 of 4 keys)"
+        (let [two-deep (fn [g] (comb/map (gen [i] (splice :c (gen [] (splice :p g i))))))
+              tr (gfi/simulate (two-deep other) [[0]] (rng/key 1))
+              deep (two-deep after)]
+          (doseq [k (range 4)]
+            (is (thrown-with-msg? clojure.lang.ExceptionInfo #"the constraint at \[0 :c :p :x\] was not visited"
+                                  (gfi/update (assoc tr :gen-fn deep) (cm/choicemap [0 :c :p :x] 1.0) (rng/key (+ 20 k))))))))))
+  (testing "a proposal's own choice that the model's new structure leaves (review 7, R7-1: dropped as an old choice, its log q kept in the weight)"
+    ;; q is written for w > 5, where sub makes :x; the store moves w to 1.
+    ;; sub stops a revise that runs on (a drop that removes nothing)
+    (let [runs (atom 0)
+          sub (gen [] (when (< 50 (swap! runs inc)) (throw (ex-info "the revise runs on" {})))
+                (if (> (param :w) 5.0) (trace :x (d/normal 0 1)) (trace :y (d/normal 0 1))))
+          q (gen [cs] (when-not (cm/has-value? (cm/get-submap cs [:s :x])) (trace [:s :x] (d/normal 3 1))))
+          model (given-a-store (gen [] (splice :p (prop/with-internal-proposal (gen [] (splice :s sub)) q))))]
+      (doseq [k (range 4)]
+        (let [tr (:trace (gfi/generate model [] (cm/choicemap :a 0.9) (rng/key (+ 1 k))))]
+          (reset! runs 0)
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"the constraint at \[:c :p :s :x\] was not visited"
+                                (gfi/update tr (cm/choicemap :a 0.1) (rng/key (+ 20 k))))))))))
 
 (deftest user-code-in-a-revised-call-keeps-its-errors
   ;; an estimator runs generate itself (or gen.batched's), with a constraint
@@ -542,6 +579,7 @@
         mk (gen [x] (swap! runs inc) (trace :y (d/normal x 1)))
         xs (vec (repeat 8 0.0))
         holds-map (gen [] (splice :m (comb/map mk) xs))
+        store-255 (zipmap (map #(keyword (str "p" %)) (range 255)) (repeatedly #(array/array [1.0 2.0])))
         count-update (fn [model cs]
                        (let [tr (gfi/simulate model [] (rng/key 1))]
                          (reset! runs 0)
@@ -569,6 +607,8 @@
               (cm/choicemap [:c :m 3 :y] 1.0)]
              ["an outer store merged with an inner one (M11)"
               (dyn/with-params (gen [] (splice :c (dyn/with-params holds-map {:v 1.0}))) {:w 2.0}) (cm/choicemap [:c :m 3 :y] 1.0)]
+             ["an outer store of 255 arrays merged with an inner one (review 7, R7-2: each entry spent the budget, so the merge was never the same)"
+              (dyn/with-params (gen [] (splice :c (dyn/with-params holds-map {:v 1.0}))) store-255) (cm/choicemap [:c :m 3 :y] 1.0)]
              ["a Map simulated under a store, then updated (M14)" (dyn/with-params holds-map {:w 2.0}) (cm/choicemap [:m 3 :y] 1.0)]]]
       (testing label
         (is (= 1 (count-update model cs)))))
