@@ -919,9 +919,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       (HMC, MALA, MAP, choice gradients, MH's backward densities) uses it.
       Keys are split as the handler's assess splits them, so a callee's
       encapsulated randomness draws the same; under `with-exact-density`,
-      where a draw is an error anyway, none is split. On the JVM backend
-      assess is 1.8–2.8× faster (10 and 100 observations); gradients and
-      HMC gain about 1.25×, their cost being autodiff's, and on MLX a
+      where a draw is an error anyway, none is split. On the JVM backend,
+      idle, assess is 1.9× faster at 10 observations and 2.6× at 100;
+      gradients, HMC and MALA gain 1.15–1.3×, their cost being autodiff's
+      (`docs/benchmarks.md`), and on MLX a
       compiled step was one fused graph already (`array/compile` traced the
       handler), so there the gain is the trace, not the step.
     - *The lint:* `(static/could-be-static gf)` runs the flag's analysis
