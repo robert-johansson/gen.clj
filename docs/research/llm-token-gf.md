@@ -46,7 +46,11 @@ PROVISIONAL in DESIGN.md §9.*
 
 A completion's trace holds token i at address i, drawn from the LM given
 the prompt and the tokens before it, until an end token (drawn, scored and
-kept) or max-tokens of them; its return value is the vector of tokens.
+kept) or max-tokens of them; its return value is the vector of tokens. The
+prompt and max-tokens together must fit the LM's `:limit` (`lm/info`),
+checked before any read, so whether they are valid never depends on the
+draws (review-lm, D-M2: before, a completion that ended early passed and
+one that did not failed in the LM, deep into a run).
 
 ## The operations
 
@@ -77,8 +81,11 @@ kept) or max-tokens of them; its return value is the vector of tokens.
 - **project** sums the selected tokens' scores; **propose** is a simulate.
 - **Change hints:** the retdiff of update and regenerate is a vector-diff
   of the token vector (both lengths and the positions whose tokens
-  changed), or no-change, so code downstream (a Map over the tokens, say)
-  revisits only those. An update or regenerate that changes nothing (the
+  changed), or no-change. A Map of completions reads it through its
+  elements' retdiffs, as does any caller of update; inside a `gen` body,
+  gen.dynamic marks every argument that is not identical unknown-change, so
+  a Map over the tokens there revisits them all until gen.dynamic
+  propagates diffs (DESIGN §9, the static language). An update or regenerate that changes nothing (the
   same arguments, no constraint, nothing selected) returns the trace as it
   is, after the same checks.
 - **Choice gradients** over tokens are a loud error (`gen.gradients`: the
@@ -228,9 +235,19 @@ engine (`gen.llm.cell-engine`):
   prompt, of max-tokens, of an end token both ways, regenerate from a
   boundary (weight 0, the suffix resampled) and of one token, project.
 - **Selection MH is stationary** (law 10): 300 chains of 30 moves (the
-  whole completion, then its second token) end distributed as the exact
-  posterior of P(a token in {3, 4, 5} | liked), by enumeration, within 5
-  standard errors.
+  whole completion, its second token, its first token alone) end
+  distributed as the exact posterior given liked, by enumeration over 97²
+  pairs: P(a token in {3, 4, 5}) within 5 standard errors, and the mean of
+  log p(t1 | t0) within 5 standard errors of the chains' mean. The
+  first-token move keeps t1 with its context changed, so the completion's
+  regenerate weight enters the acceptance ratio; with suffix moves alone it
+  is always 0, and the test could not see it (review-lm, D-M3).
+- **The laws check a revised trace's arguments** (gen.laws, for every
+  generative function): the update and regenerate laws require the
+  revised trace to hold the new arguments, so a revision that drops them
+  fails (review-lm, D-M1; main's 13 law suites, 818 tests, pass with it).
+  And a regenerate with nothing selected and a new max-tokens extends or
+  truncates the completion.
 - **Inference:** importance sampling's estimate (2,000 samples, within 5
   standard errors of the mean importance weight) and 20 particle filters
   of 100 particles over two steps estimate the exact marginal likelihood
@@ -241,10 +258,11 @@ engine (`gen.llm.cell-engine`):
 - **Misuse** is loud, each error with a `:reason`: arity, prompts,
   max-tokens, constraints (past the maximum, at keywords, not tokens,
   nested), bad positions and end sets, a completion over something not an
-  LM, a completion past the LM's context.
+  LM, a completion past the LM's limit (before any read, for a completion
+  that would end early too; one of exactly the limit is drawn).
 
 Mutations of `gen.llm.token` checked (2026-10-21, each applied, the suite
-run, reverted; again after review-lm's fixes, the set below), twenty-three,
+run, reverted; again after review-lm's fixes, the set below), twenty-nine,
 all caught:
 
 | Mutation | Caught by |
@@ -266,6 +284,12 @@ all caught:
 | update's no-change shortcut taken with constraints | the update laws, on both engines; update-rescores… (12) |
 | regenerate's no-change shortcut taken with a selection | mh-moves…, mh-over-tokens-targets-the-posterior, regenerate-from-a-boundary… (3) |
 | no batched-branch check | batched-runs-fall-back… (1) |
+| update's shortcut keyed on the prompt alone (review-lm's D1) | update-rescores…, the update laws on both engines, a-particle-filter… (6) |
+| regenerate's shortcut keyed on the prompt alone (D2, which the suite missed before) | regenerating-nothing-with-new-arguments-revises, the regenerate laws with the arguments check (7) |
+| regenerate's weight negated (D3) | the regenerate weight laws, regenerate-from-a-boundary…, and law 10's log p(t1 \| t0) (8) |
+| regenerate's weight 0 (D4, which law 10 missed before) | the same (8) |
+| the limit check one token short | a-completion-past-the-lms-limit-is-loud-before-any-read (2) |
+| no limit check | the same (2) |
 | no reuse of the trace's scores (review-lm's T2 and T3, which the suite missed before) | unchanged-tokens-keep-their-scores-after-eviction (5) |
 | reuse across a new prompt | update-rescores-after-a-change, the update and regenerate laws, mh-moves… (6) |
 | reuse of the first changed token's score | update-rescores…, regenerate-from-a-boundary…, the update and regenerate laws on both engines, mh-moves… (9) |

@@ -7,8 +7,10 @@
    (clojure -T:build java) and a model, given as
    -J-Dgen.llama.test-model=<a GGUF file> (or GEN_LLAMA_TEST_MODEL); a small
    one is enough (Qwen3-0.6B-Q8_0). Skipped with a note otherwise. Run on
-   Metal (2026-10-20) with Qwen3-0.6B, Qwen3.5-0.8B (hybrid) and
-   Gemma-3-270M (sliding window), all Q8_0: every model inside the band.
+   Metal with Qwen3-0.6B, Qwen3.5-0.8B (hybrid) and Gemma-3-270M (sliding
+   window), all Q8_0, on the M2 Max (2026-10-20) and the Mac mini M4
+   (2026-10-21): every model inside the bands, which the benches re-measured
+   on the M4 (docs/research/llm-branching.md, Numerics).
 
    The band, 0.1 nats: twice the largest |Δ log p| (over the reference's 64
    most likely tokens) that bench/gen/llama_noise.clj measured between two

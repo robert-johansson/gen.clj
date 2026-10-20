@@ -337,6 +337,36 @@
       (is (= [50 5] (:retval t2)))
       (is (= (cm/from-map (zipmap (range 1 (count (:retval tr))) (subvec (:retval tr) 1))) disc)))))
 
+(deftest regenerating-nothing-with-new-arguments-revises
+  ;; the no-change shortcut is for unchanged arguments only: with nothing
+  ;; selected, a larger max-tokens extends a completion that stopped at the
+  ;; maximum, a smaller one truncates it
+  (let [tr (gfi/simulate fixed [prompt 3] (rng/key 1))
+        longer (gfi/regenerate tr [prompt 6] [diff/no-change diff/unknown-change] sel/none (rng/key 2))
+        shorter (gfi/regenerate tr [prompt 2] [diff/no-change diff/unknown-change] sel/none (rng/key 2))]
+    (is (= [prompt 6] (:args (:trace longer))))
+    (is (= (:retval tr) (subvec (:retval (:trace longer)) 0 3)))
+    (is (= 6 (count (:retval (:trace longer)))))
+    (is (= 0.0 (:weight longer)) "the fresh tokens stay out of the weight")
+    (is (= (diff/vector-diff 6 3 {}) (:retdiff longer)))
+    (is (= [prompt 2] (:args (:trace shorter))))
+    (is (= (subvec (:retval tr) 0 2) (:retval (:trace shorter))))
+    (is (= 0.0 (:weight shorter)) "the dropped token, no longer visited, stays out of the weight")))
+
+(deftest a-completion-past-the-lms-limit-is-loud-before-any-read
+  ;; the prompt and max-tokens against the LM's :limit, up front, so that
+  ;; their validity never depends on the draws: a completion that would end
+  ;; early is refused all the same
+  (let [limit (long (:limit (lm/info m)))
+        room (- limit (count prompt))
+        reads #(:reads (lm/info m))
+        before (reads)]
+    (doseq [gf [fixed stops]]
+      (is (= :context-full (bc/reason #(gfi/simulate gf [prompt (inc room)] (rng/key 1))))))
+    (is (= before (reads)) "refused before any read")
+    (is (= room (count (:retval (gfi/simulate fixed [prompt room] (rng/key 1)))))
+        "a completion of every token the LM holds")))
+
 (deftest regenerate-from-a-boundary-resamples-the-suffix
   (let [tr (gfi/simulate fixed [prompt 6] (rng/key 1))
         old (:retval tr)
@@ -451,20 +481,33 @@
 
 (deftest mh-over-tokens-targets-the-posterior
   ;; law 10 for completions: 300 chains of 30 moves (the whole completion,
-  ;; then its second token, in turn) end distributed as the exact posterior:
-  ;; P(a token in #{3 4 5} | liked), by enumeration, within 5 standard errors
+  ;; its second token, its first token alone, in turn) end distributed as
+  ;; the exact posterior given liked, by enumeration over the 97² pairs:
+  ;; P(a token in #{3 4 5}) within 5 standard errors, and the mean of
+  ;; log p(t1 | t0) within 5 standard errors of the chains' mean. The
+  ;; first-token move keeps t1 with its context changed, so the
+  ;; completion's regenerate weight is in the acceptance ratio, and the
+  ;; second statistic sees the pair's joint.
   (let [hit? #(some #{3 4 5} %)
-        exact (/ (* 0.9 (exact-marginal (fn [t0 t1] (if (hit? [t0 t1]) 1.0 0.0))))
-                 (exact-marginal (fn [t0 t1] (if (hit? [t0 t1]) 0.9 0.2))))
-        moves [(sel/hierarchical :story (token/from 0)) (sel/hierarchical :story (token/from 1))]
+        lik (fn [t0 t1] (if (hit? [t0 t1]) 0.9 0.2))
+        row1 (memoize #(row (conj prompt %)))
+        log-p1 (fn [[t0 t1]] (double (aget ^floats (row1 t0) (int t1))))
+        z (exact-marginal lik)
+        exact-hit (/ (* 0.9 (exact-marginal (fn [t0 t1] (if (hit? [t0 t1]) 1.0 0.0)))) z)
+        exact-log-p1 (/ (exact-marginal (fn [t0 t1] (* (lik t0 t1) (log-p1 [t0 t1])))) z)
+        moves [(sel/hierarchical :story (token/from 0)) (sel/hierarchical :story (token/from 1))
+               (sel/hierarchical :story (sel/select 0))]
         chain (fn [seed]
                 (let [k (rng/key seed)]
-                  (reduce (fn [tr i] (:trace (mh/mh tr (moves (mod i 2)) (rng/fold-in k (inc i)))))
+                  (reduce (fn [tr i] (:trace (mh/mh tr (moves (mod i 3)) (rng/fold-in k (inc i)))))
                           (:trace (gfi/generate liked [] (cm/choicemap :liked true) (rng/fold-in k 0)))
                           (range 30))))
         n 300
-        p (/ (count (filter #(hit? (:retval %)) (map chain (range n)))) (double n))]
-    (is (<= (Math/abs (- p exact)) (* 5 (Math/sqrt (/ (* exact (- 1 exact)) n)))))))
+        ends (mapv #(:retval (chain %)) (range n))
+        p (/ (count (filter hit? ends)) (double n))
+        xs (mapv log-p1 ends)]
+    (is (<= (Math/abs (- p exact-hit)) (* 5 (Math/sqrt (/ (* exact-hit (- 1 exact-hit)) n)))))
+    (is (<= (Math/abs (- (mean xs) exact-log-p1)) (* 5 (/ (sd xs) (Math/sqrt n)))))))
 
 (deftest batched-runs-fall-back-to-one-particle-at-a-time
   (let [ps (batched/simulate fixed [prompt 3] 8 (rng/key 1))]
