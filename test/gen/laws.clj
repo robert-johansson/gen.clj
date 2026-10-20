@@ -48,10 +48,14 @@
 
 (defn cases
   "Cases [[label gf args alt-args] seed picks alt?] over models: a vector of
-   model entries, or a generator of them (e.g. random models)."
+   model entries, or a generator of them (e.g. random models). picks says
+   for each address, in order, whether a law constrains or selects it,
+   cycled after 32: with 8, addresses 8 apart were always picked together,
+   and a rule bug whose case needs one picked and the other not passed
+   (the confirmation review, 2026-10-20)."
   [models]
   (gen/tuple (if (gen/generator? models) models (gen/elements models))
-             gen/nat (gen/vector gen/boolean 8) gen/boolean))
+             gen/nat (gen/vector gen/boolean 32) gen/boolean))
 
 ;; ---------------------------------------------------------------------------
 ;; Helpers

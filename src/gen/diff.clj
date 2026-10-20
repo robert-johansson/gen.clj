@@ -157,14 +157,24 @@
                              (dict-diff? d) (int-diff (- (count (:added d)) (count (:deleted d))))
                              :else unknown-change)))
 
+(defn- backend-key?
+  "Is k a backend array? The guarded lookups read such a key on the host,
+   which a rule cannot (and a fresh array is another map key each run)."
+  [k]
+  (and (array/array? k) (not (array/host? k))))
+
 (defn- element-diff
   "The diff of coll's element at key k (unchanged), coll's diff being d: a
-   vector-diff on a vector (a key that is not an index finds nothing both
-   times), a dict-diff on a map, a set-diff on a set; anything else
-   unknown-change."
+   vector-diff on a vector, a dict-diff on a map, a set-diff on a set;
+   anything else, and a backend array as the key, unknown-change. On a
+   vector a number that is not an integer may find an element too (nth
+   truncates it); any other key finds nothing both times."
   [coll d k]
-  (cond (and (vector-diff? d) (vector? coll)) (cond (not (integer? k)) no-change
-                                                    (element-changed? d k) (get (:updated d) k unknown-change)
+  (cond (backend-key? k) unknown-change
+        (and (vector-diff? d) (vector? coll)) (cond (integer? k) (if (element-changed? d k)
+                                                                   (get (:updated d) k unknown-change)
+                                                                   no-change)
+                                                    (number? k) unknown-change
                                                     :else no-change)
         (and (dict-diff? d) (map? coll)) (cond (or (contains? (:added d) k) (contains? (:deleted d) k)) unknown-change
                                                :else (get (:updated d) k no-change))
@@ -194,6 +204,7 @@
 (defmethod propagate #'clojure.core/assoc [_ [coll k x :as args] [d dk dx :as diffs]]
   ;; with coll and k unchanged, both results hold k: only its value changed
   (unchanged-or diffs #(cond (not (and (= 3 (count args)) (no-change? d) (no-change? dk))) unknown-change
+                             (backend-key? k) unknown-change
                              (vector? coll) (let [n (count coll)]
                                               (if (< k n) (vector-diff n n {k dx}) (vector-diff (inc n) (inc n) {n dx})))
                              (map? coll) (dict-diff {} #{} {k dx})

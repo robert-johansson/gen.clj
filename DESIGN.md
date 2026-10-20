@@ -344,7 +344,12 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   `(dyn/with-params gf store)` as a record field. `(param :w)` in a body reads
   the store in effect, which reaches every nested splice and combinator kernel
   (one namespace per model, like Pyro's store). A missing parameter is a loud
-  error. Gradients are values: `gen.gradients/param-gradients` returns a map,
+  error. A trace records the store it ran under, and an update under another
+  (a name added or removed, or a value that is not the same object or an
+  equal host value: stores are compared without reading an array) gives
+  every callee unknown-change argdiffs, since no argument shows what a
+  kernel reads from the store (the confirmation review, 2026-10-20: a Map
+  kept its elements). Gradients are values: `gen.gradients/param-gradients` returns a map,
   and optimizers return a new store. This is Gen.jl's `@param`,
   `init_param!` and `accumulate_param_gradients!`/`apply!`, but functional.
 - **Batched execution** (decided 2026-10-18 by the agent, for the owner's
@@ -672,7 +677,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     the trace keeps every node's value for the next update, with the
     parameter store in effect. A node is skipped only when the previous
     trace is this graph's (not another static function's at the address, a
-    Switch's other branch) and the store is equal (a callee reads it, an
+    Switch's other branch) and the store is the same (a callee reads it, an
     argument may), conditions the review of the same day found missing.
     Every value comes from the node's guarded fn, as the body computes it.
     A gf with middleware (`with-transitions`) reruns every node, so its
@@ -683,8 +688,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     the local.
   - **Not static:** a body that is not one `let`, an address computed
     from a value, a `trace` or `splice` inside an expression (a branch on
-    a choice included), a splice without an address, an untraced draw: each
-    a compile error that names the form.
+    a choice included), a splice without an address, an untraced draw, an
+    address used twice or one under another: each a compile error that
+    names the form.
   - **Compiled scores and a lint, in M4 (owner, 2026-10-20).** A static
     function's graph gives its log density as a pure function of its
     choices, which HMC, MALA, MAP and gradients use for static models, so
@@ -697,7 +703,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       `(fn [param args choices key] → [weight retval])`, the bindings as
       locals: a trace node's value read from the choices with its log
       density, a splice's callee assessed (a static callee by its own score
-      fn). A static gf's `assess` is that fn, so everything built on assess
+      fn, under its own store, with the handler's checks of its choices and
+      arguments). A static gf's `assess` is that fn, so everything built on assess
       (HMC, MALA, MAP, choice gradients, MH's backward densities) uses it.
       Keys are split as the handler's assess splits them, so a callee's
       encapsulated randomness draws the same; under `with-exact-density`,
@@ -729,14 +736,19 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   no-change), so a Map reruns only the elements a vector-diff names, and
   the function's retdiff is its return expression's. A rule gives the diff
   from the previous call's result to this one's, for its own arity only,
-  and an element's diff only for a collection of its diff's kind; the
+  and an element's diff only for a collection of its diff's kind, with a
+  key of a kind the rule can compare (a backend array, which the guarded
+  lookups read on the host, and a number that is not an integer, which
+  `nth` truncates, give unknown-change); the
   first rules gave the diff from the argument to the result, so a changed
   conj or assoc value went unseen (the review, the same day).
   `(diff/compute prev now)` gives the precise diff of two host values.
   Every rule is checked at every argument position against random edits
   (a changed element, key or default, an append or a shrink, a new or
-  removed key, a fresh value), and the static law runs with computed
-  argdiffs.
+  removed key, a fresh value). The static law runs with computed argdiffs
+  on a model where each rule's result is read by a choice or a Map, so a
+  rule that understates a change alters a weight; one that overstates it
+  costs only a rerun, which the diff tests catch.
 - **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
   `(array/item x)`, the namespace's last segment, as the Clojure style guide
   has it. It replaced `a`, which the owner found ugly (2026-10-18). The

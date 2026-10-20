@@ -7,6 +7,7 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as tgen]
             [clojure.test.check.properties :as prop]
+            [gen.array :as array]
             [gen.diff :as diff]))
 
 (deftest the-diff-kinds
@@ -34,7 +35,7 @@
 ;; it passed.)
 
 (def ^:private small tgen/small-integer)
-(def ^:private a-key (tgen/one-of [(tgen/choose 0 4) (tgen/elements [:a :b :c])]))
+(def ^:private a-key (tgen/one-of [(tgen/choose 0 4) (tgen/elements [:a :b :c]) (tgen/elements [0.0 1.0 1.5])]))
 (def ^:private a-coll
   (tgen/one-of [(tgen/vector small 0 4) (tgen/map (tgen/elements [:a :b :c 0 1]) small) (tgen/set small)]))
 
@@ -60,7 +61,7 @@
 
 (def ^:private calls
   (tgen/one-of [(call #'clojure.core/count a-coll)
-                (call #'clojure.core/nth (tgen/vector small 0 4) (tgen/choose 0 4))
+                (call #'clojure.core/nth (tgen/vector small 0 4) (tgen/one-of [(tgen/choose 0 4) (tgen/elements [0.0 1.0 1.7])]))
                 (call #'clojure.core/get a-coll a-key)
                 (call #'clojure.core/get a-coll a-key small)
                 (call #'clojure.core/conj (tgen/vector small 0 4) small)
@@ -97,6 +98,12 @@
     (testing "get past a shrunk end, and a key that is not an index"
       (is (diff/unknown-change? (d #'clojure.core/get [[1 2] 2 0] [(diff/vector-diff 2 3 {}) nc nc])))
       (is (diff/no-change? (d #'clojure.core/get [[1 2] :k 0] [(diff/vector-diff 2 3 {}) nc nc]))))
+    (testing "nth truncates a number, and the guarded lookups read an array key (confirmation review N1)"
+      (is (diff/unknown-change? (d #'clojure.core/nth [[1 2] 1.0] [(diff/vector-diff 2 2 {1 uc}) nc])))
+      (let [k (array/array [1])]
+        (is (diff/unknown-change? (d #'clojure.core/nth [[1 2] k] [(diff/vector-diff 2 2 {1 uc}) nc])))
+        (is (diff/unknown-change? (d #'clojure.core/get [{1 2} k] [(diff/dict-diff {} #{} {1 uc}) nc])))
+        (is (diff/unknown-change? (d #'clojure.core/assoc [{} k 1] [nc nc uc])))))
     (testing "vec, inc and dec pass on only the diffs of their kind"
       (is (diff/unknown-change? (d #'clojure.core/vec [{:a 1}] [(diff/dict-diff {} #{} {:a uc})])))
       (is (diff/unknown-change? (d #'clojure.core/inc [1] [(diff/vector-diff 1 1 {})]))))

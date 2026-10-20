@@ -65,18 +65,55 @@
       z)))
 
 (def rules
-  "One-call bindings of every propagate rule on a vector argument, into a
-   Map: the law's precise argdiffs exercise each (review, 2026-10-20)."
+  "One-call bindings of the propagate rules, each read by a choice or a Map,
+   so that a rule's wrong diff changes a weight under the law's computed
+   argdiffs: conj (also of two) and an appending assoc give the vectors Maps
+   run over, the variadic assoc of a map a choice reads, get past a shrunk
+   end, nth, count, inc, dec, + and -. (The first version led every chain
+   through an assoc of a changed vector, whose unknown-change erased a
+   wrong diff upstream: the confirmation review's eight rule mutations
+   passed it. Those that only overstate a change, which costs a rerun and
+   no weight, are the diff tests' to catch.)"
+  (gen ^:static [xs i m]
+    (let [a (trace :a (d/normal 0 1))
+          b (trace :b (d/normal 0 1))
+          n (count xs)
+          ys (conj xs a)
+          zs (conj xs a b)
+          us (assoc xs n a)
+          m2 (assoc m :p a :q b)
+          q (get m2 :q 0.0)
+          xi (get xs i 0.0)
+          w (nth ys 1)
+          k (inc n)
+          j (dec n)
+          s (+ n i)
+          t (- n i)
+          v (vec ys)
+          c1 (trace :c1 (d/normal (+ q xi) 1))
+          c2 (trace :c2 (d/normal w 1))
+          c3 (trace :c3 (d/normal (* 0.1 (+ k j s t)) 1))
+          out (splice :m (comb/map point) v (vec (repeat k w)) (vec (repeat k xi)))
+          out2 (splice :z (comb/map point) zs (vec (repeat (+ n 2) 1.0)) (vec (repeat (+ n 2) 0.0)))
+          out3 (splice :u (comb/map point) us (vec (repeat k 1.0)) (vec (repeat k 0.0)))]
+      [out out2 out3 c1 c2 c3])))
+
+(def double-index
+  "nth truncates a number index: a changed element reached by 1.0
+   (confirmation review N1: the rule called it unchanged)."
   (gen ^:static [xs i]
     (let [a (trace :a (d/normal 0 1))
-          ys (conj xs a)
-          zs (assoc ys 0 1.5)
-          n (count zs)
-          x1 (get xs i 0.0)
-          w (nth zs 1)
-          v (vec zs)
-          out (splice :m (comb/map point) v (vec (repeat n w)) (vec (repeat n x1)))]
-      out)))
+          ys (assoc xs 1 a)
+          w (nth ys i)
+          y (trace :y (d/normal w 1))]
+      y)))
+
+(def reads-w (gen ^:static [m] (let [y (trace :y (d/normal (+ m (param :w)) 1))] y)))
+
+(def callee-store
+  "A static callee with its own store under a parent with another: the
+   score fn must assess it under its own (confirmation review N2)."
+  (dyn/with-params (gen ^:static [m] (let [c (splice :c (dyn/with-params reads-w {:w 3.0}) m)] c)) {:w 0.0}))
 
 (def dict-rules
   "The rules on a map argument."
@@ -106,7 +143,11 @@
    [:hierarchical hierarchical [3] [[2] [4]]]
    [:destructured destructured [{:mu 0.0 :sd 1.0}] [[{:mu 1.0 :sd 1.0}]]]
    [:nested nested [0.0] [[1.5]]]
-   [:rules rules [[0.1 0.2 0.3] 1] [[[0.1 0.9 0.3] 1] [[0.1 0.2] 1] [[0.1 0.2 0.3 0.4] 2] [[0.1 0.2 0.3] 5]]]
+   [:rules rules [[0.1 0.2 0.3] 2 {:p 0.0 :r 1.0}]
+    [[[0.1 0.9 0.3] 2 {:p 0.0 :r 1.0}] [[0.1 0.2] 2 {:p 0.0 :r 1.0}] [[0.1 0.2 0.3 0.4] 1 {:p 0.0 :r 1.0}]
+     [[0.1 0.2 0.3] 5 {:p 0.0}]]]
+   [:double-index double-index [[0.0 0.0] 1.0] [[[0.0 0.5] 1.0]]]
+   [:callee-store callee-store [0.0] [[1.0]]]
    [:dict-rules dict-rules [{:j 0.5 :x 1.0}] [[{:j 0.7 :x 1.0}] [{:x 1.0}] [{:j 0.5 :x 1.0 :z 2.0}]]]])
 
 ;; dynamic parents of static functions: the general laws (a static callee's
@@ -117,8 +158,12 @@
 
 (laws/deflaws static models 100)
 (laws/deflaws static models 100 laws/static)
+;; the rules model alone, often enough that a case with unchanged arguments,
+;; one choice constrained and the element it moves unconstrained comes up
+(laws/deflaws static-rules (filterv (comp #{:rules} first) models) 300 laws/static)
 ;; every model but :destructured (a uniform between chosen bounds) has fixed supports
-(laws/deflaws static (filterv (comp #{:linreg :hierarchical :nested :rules :dict-rules} first) models) 100 laws/fixed-support)
+(laws/deflaws static (filterv (comp #{:linreg :hierarchical :nested :rules :dict-rules :double-index :callee-store} first) models)
+  100 laws/fixed-support)
 
 ;; a static body over a callee with encapsulated randomness: its score fn
 ;; must split keys as the handler's assess does (assess = generate on the
@@ -224,27 +269,55 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest a-changed-store-reruns-what-reads-it
-  ;; a callee's param read, a param in a splice argument, an aliased param:
-  ;; the walk cannot see them, so it skips nothing under a changed store
+  ;; a callee's param read, a param in a splice argument, an aliased param,
+  ;; a combinator's kernel reading one (under a static or a dynamic parent,
+  ;; nested too; the confirmation review's N8): no argument shows the
+  ;; change, so nothing that may read the store is skipped. The weight of an
+  ;; update that keeps every choice is the change in their density.
   (let [reader (gen [] (trace :y (d/normal (param :w) 1)))
         kernel (gen [x] (trace :y (d/normal x 1)))
+        reading-kernel (gen [x] (trace :y (d/normal (+ x (param :w)) 1)))
         cases {:in-a-callee (gen ^:static [] (let [c (splice :c reader)] c))
                :in-an-argument (gen ^:static [] (let [ys (splice :ys (comb/map kernel) (param :xs))] ys))
-               :aliased (gen ^:static [] (let [p param y (trace :y (d/normal (p :w) 1))] y))}
+               :aliased (gen ^:static [] (let [p param y (trace :y (d/normal (p :w) 1))] y))
+               :in-a-map-s-kernel (gen ^:static [] (let [ys (splice :ys (comb/map reading-kernel) [0.0 0.0])] ys))
+               :in-a-map-s-kernel-dynamic (gen [] (splice :ys (comb/map reading-kernel) [0.0 0.0]))
+               :in-a-nested-map (gen [] (splice :ys (comb/map (comb/map reading-kernel)) [[0.0 0.0] [0.0]]))}
         before {:w 0.0 :xs [0.0 0.0]}
         after {:w 3.0 :xs [3.0 3.0]}]
     (doseq [[label model] cases]
       (testing label
-        (let [weight (fn [gf] (let [tr (gfi/simulate (dyn/with-params gf before) [] (rng/key 40))]
-                                (:weight (gfi/update (assoc tr :gen-fn (dyn/with-params gf after)) cm/EMPTY (rng/key 41)))))]
-          (is (ts/close? (weight (assoc model :static nil)) (weight model)))
-          (is (not (ts/close? 0.0 (weight model)))))))))
+        (let [tr (fn [gf] (gfi/simulate (dyn/with-params gf before) [] (rng/key 40)))
+              weight (fn [gf] (:weight (gfi/update (assoc (tr gf) :gen-fn (dyn/with-params gf after)) cm/EMPTY (rng/key 41))))
+              truth (- (:weight (gfi/assess (dyn/with-params model after) [] (:choices (tr model)) (rng/key 42)))
+                       (:score (tr model)))]
+          (is (not (ts/close? 0.0 truth)))
+          (is (ts/close? truth (weight model)))
+          (is (ts/close? truth (weight (assoc model :static nil)))))))))
+
+(deftest stores-are-compared-without-reading-arrays
+  ;; an array that is not the same object counts as changed (confirmation
+  ;; review N9: = read both on the host, inside the handler)
+  (let [same? #'gen.dynamic/same-store? x (array/array [1.0 2.0])]
+    (is (same? {:w x :n 2.0} {:w x :n 2.0}))
+    (is (not (same? {:w x} {:w (array/array [1.0 2.0])})))
+    (is (not (same? {:w x} {:w x :v 1.0})))
+    (is (same? nil {}))))
 
 (deftest a-local-is-not-the-var-it-shadows
-  ;; inside a gen body the enclosing locals are not in &env
-  (let [count (fn [_] 42)
-        outer (gen [xs] (let [g (gen ^:static [ys] (let [n (count ys)] n))] (splice :g g xs)))]
-    (is (= 42 (ts/host (:retval (gfi/simulate outer [[1 2]] (rng/key 42))))))))
+  ;; a local bound inside a gen body is not in the inner gen's &env: count
+  ;; here is the local, so its binding has no rule, and an update with a
+  ;; vector-diff reruns what reads it. (The first version bound the local
+  ;; outside both gens, where &env had it before the fix; the confirmation
+  ;; review found it could not fail.)
+  (let [outer (gen [] (let [count (fn [v] (reduce clojure.core/+ v))]
+                        (gen ^:static [ys] (let [n (count ys) y (trace :y (d/normal n 1))] y))))
+        g (:retval (gfi/simulate outer [] (rng/key 42)))
+        update-weight (fn [gf] (let [tr (gfi/simulate gf [[1.0 2.0]] (rng/key 2))]
+                                 (:weight (gfi/update tr [[1.0 5.0]] [(diff/vector-diff 2 2 {1 diff/unknown-change})] cm/EMPTY (rng/key 3)))))]
+    (is (nil? (:rule (first (:nodes (:static g))))))
+    (is (not (ts/close? 0.0 (update-weight g))))
+    (is (ts/close? (update-weight (assoc g :static nil)) (update-weight g)))))
 
 (deftest destructuring-binds-what-clojure-binds
   (let [gf (gen ^:static [m] (let [{:keys [a/b c]} m y (trace :y (d/normal (+ b c) 1))] y))]
@@ -263,6 +336,58 @@
           ps (batched/take (batched/simulate model [] 4 (rng/key 45)) [3 2 1 0])
           {ws :weights} (batched/update ps [] [] (cm/choicemap :y 0.5) (rng/key 46))]
       (is (ts/close? (array/array (mapv #(ts/number (:weight (gfi/update % (cm/choicemap :y 0.5) (rng/key 46)))) (batched/traces ps))) ws)))))
+
+(deftest a-resampled-batched-trace-still-skips
+  ;; batched/take keeps the trace's generative function, whose identity a
+  ;; static update checks (confirmation review N3: it rebuilt it, and every
+  ;; update after a resampling reran every node)
+  (let [runs (atom 0)
+        model (gen ^:static [] (let [a (trace :a (d/normal 0 1))
+                                     a2 (do (swap! runs inc) (* a a))
+                                     y (trace :y (d/normal a2 1))
+                                     z (trace :z (d/normal 0 1))]
+                                 [y z]))
+        ps (batched/simulate model [] 4 (rng/key 48))
+        ;; (no spot checks, which rerun particles alone)
+        reruns (fn [ps] (binding [batched/*spot-checks* 0]
+                          (reset! runs 0) (batched/update ps [] [] (cm/choicemap :z 0.5) (rng/key 49)) @runs))]
+    (is (= 0 (reruns ps)))
+    (is (= 0 (reruns (batched/take ps [3 2 1 0]))))))
+
+(deftest a-resampled-seq-is-gathered-lazily
+  ;; a node value may be an infinite seq (confirmation review N4: take
+  ;; forced it, and hung)
+  (let [model (gen ^:static [] (let [a (trace :a (d/normal 0 1)) ones (map inc (range 5)) y (trace :y (d/normal (+ a (first ones)) 1))] y))
+        taken (batched/take (batched/simulate model [] 4 (rng/key 50)) [1 0 3 2])
+        ones (get-in taken [:trace :gen.dynamic/node-values 1])]
+    (is (seq? ones))
+    (is (not (realized? ones)))
+    (is (= [1 2 3 4 5] ones))))
+
+(deftest the-score-fn-checks-what-the-handler-checks
+  ;; assess by the score fn and by the handler (the same body without the
+  ;; flag) agree on every misuse (confirmation review: check-static-choices!
+  ;; had no test; N2 a static callee's checks, N6 the address false, N7 a
+  ;; splice of a value)
+  (let [inner (gen ^:static [m] (let [y (trace :y (d/normal m 1))] y))
+        outer (gen ^:static [] (let [c (splice :c inner 0.0)] c))
+        paths (gen ^:static [] (let [a (trace [:p :a] (d/normal 0 1))] a))
+        both-throw (fn [re gf args choices]
+                     (doseq [g [gf (assoc gf :static nil)]]
+                       (is (thrown-with-msg? clojure.lang.ExceptionInfo re (gfi/assess g args choices (rng/key 51)))
+                           (if (:static g) "score fn" "handler"))))]
+    (testing "a choice no node has"
+      (both-throw #"not visited" outer [] (cm/choicemap [:c :y] 0.5 :bogus 1.0))
+      (both-throw #"not visited" paths [] (cm/choicemap [:p :a] 0.5 [:p :b] 1.0))
+      (both-throw #"not visited" outer [] (cm/choicemap [:c :y] 0.5 [:c :bogus] 1.0)))
+    (testing "a static callee given the wrong arguments"
+      (both-throw #"takes 1 argument" (gen ^:static [] (let [c (splice :c inner 0.0 1.0)] c)) [] (cm/choicemap [:c :y] 0.5)))
+    (testing "a splice of a value"
+      (both-throw #"needs a generative function" (gen ^:static [g] (let [c (splice :c g 1.0)] c)) [5] (cm/choicemap [:c :y] 0.5)))
+    (testing "the address false"
+      (let [gf (gen ^:static [] (let [a (trace false (d/normal 0 1)) b (trace :b (d/normal a 1))] b))
+            tr (gfi/simulate gf [] (rng/key 52))]
+        (is (ts/close? (:score tr) (:weight (gfi/assess gf [] (:choices tr) (rng/key 53)))))))))
 
 (deftest an-inline-gen-is-a-pure-binding
   (let [gf (gen ^:static [] (let [k (gen [m] (trace :z (d/normal m 1))) z (splice :k k 0.0)] z))]
@@ -318,7 +443,9 @@
                                                                          a (if b (trace :x (d/normal 0 1)) 0.0)] a))]
                         ["a splice without an address" '(gen ^:static [g] (let [a (splice g)] a))]
                         ["an untraced draw" '(gen ^:static [] (let [a (untraced (d/normal 0 1))] a))]
-                        ["a trace inside the return expression" '(gen ^:static [] (let [a 1] (+ 1 (trace :a (d/normal a 1)))))]]]
+                        ["a trace inside the return expression" '(gen ^:static [] (let [a 1] (+ 1 (trace :a (d/normal a 1)))))]
+                        ["a repeated address" '(gen ^:static [] (let [a (trace :a (d/normal 0 1)) b (trace :a (d/normal a 1))] b))]
+                        ["an address under another" '(gen ^:static [g] (let [a (trace :a (d/normal 0 1)) b (splice [:a :b] g)] b))]]]
       (testing why
         (is (re-find #"gen \^:static" (str (static-error form))))))))
 

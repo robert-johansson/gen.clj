@@ -189,6 +189,22 @@
   (let [[k-next k-site] (rng/split (:key state))]
     [k-site (assoc state :key k-next)]))
 
+(def ^:dynamic *params*
+  "The trainable parameters in effect: the store of the outermost generative
+   function that has one, merged with any inner one's (with-params)."
+  nil)
+
+(defn- same-store?
+  "Are stores a and b the same, judged without reading an array (a host
+   read inside the handler): the same names, each value identical or an
+   equal host value. A value that is not counts as changed, which is sound."
+  [a b]
+  (or (identical? a b)
+      (and (= (count a) (count b))
+           (every? (fn [[k v]] (let [w (get b k ::missing)]
+                                 (or (identical? v w) (and (array/host? v) (array/host? w) (= v w)))))
+                   a))))
+
 (defn- arg-diffs
   "Argdiffs for a splice's new args against its previous call's: no-change
    for an identical argument (sound, and O(1)), else the hint given (the
@@ -246,6 +262,12 @@
         old-sub (get (::subtraces (:prev state)) p)
         replaced? (and old-sub (not (compatible-callee? (:gen-fn old-sub) gf)))
         prev-sub (when-not replaced? old-sub)
+        ;; a callee (a Map's kernel) may read the store, which identical
+        ;; arguments do not show: under a changed one every argument changed
+        argdiffs (when prev-sub
+                   (if (same-store? *params* (::params (:prev state)))
+                     (arg-diffs (:args prev-sub) args hints)
+                     (vec (repeat (count args) diff/unknown-change))))
         state (if replaced? (replace-call state p old-sub) state)
         ;; a batched run's callees run batched too: they inherit the batch tracer
         base {}
@@ -263,10 +285,8 @@
                 (nil? prev-sub) (if (= mode :update)
                                   (gfi/run-op gf :generate args (assoc opts :constraints cons))
                                   (gfi/run-op gf :simulate args opts))
-                (= mode :update) (gfi/run-op gf :update args (assoc opts :prev prev-sub :constraints cons
-                                                                    :argdiffs (arg-diffs (:args prev-sub) args hints)))
-                :else (gfi/run-op gf :regenerate args (assoc opts :prev prev-sub
-                                                             :argdiffs (arg-diffs (:args prev-sub) args hints)
+                (= mode :update) (gfi/run-op gf :update args (assoc opts :prev prev-sub :constraints cons :argdiffs argdiffs))
+                :else (gfi/run-op gf :regenerate args (assoc opts :prev prev-sub :argdiffs argdiffs
                                                              :selection (subselection-at (:selection state) p))))
             {tr :trace w :weight d :discard rd :retdiff} r]
         [(:retval tr) (cond-> (record-call state p tr)
@@ -341,11 +361,6 @@
    ;; ω: the previous trace's when kept, else folded from the key at the first
    ;; untraced draw
    :omega (when (keeps-omega? mode opts) (::trace/omega prev)) :omega-key key :omega-count 0})
-
-(def ^:dynamic *params*
-  "The trainable parameters in effect: the store of the outermost generative
-   function that has one, merged with any inner one's (with-params)."
-  nil)
 
 (defn- read-param
   "(param name) in a body: the parameter's value in the store in effect."
@@ -470,7 +485,7 @@
         ;; callee's param reads, a param in an argument)
         skip? (boolean (and values (#{:update :regenerate} mode) (nil? (:transitions gf))
                             (identical? st (:static (:gen-fn prev)))
-                            (= *params* (::params prev))))
+                            (same-store? *params* (::params prev))))
         reached? (fn [{:keys [kind addr]}]
                    (let [p (path addr)]
                      (cond (= mode :update) (not (cm/empty? (cm/get-submap constraints p)))
@@ -498,8 +513,7 @@
                             (if skip? (arg-name-diffs (:args st) params argdiffs) {}))
                  []]
                 (map-indexed vector nodes))]
-    ;; the store in effect, which the next update's skipping requires
-    (vswap! vol assoc ::node-values vals ::params *params*)
+    (vswap! vol assoc ::node-values vals)
     (if (and skip? (unchanged? diffs (:in ret)))
       (do (vswap! vol assoc ::retdiff diff/no-change) (:retval prev))
       (let [[v d] (computed ret env diffs (:retval prev) skip?)]
@@ -585,7 +599,8 @@
         retval (realize! (if-let [st (:static gf)]
                            (run-static st gf vol trace-fn splice-at args)
                            (apply (:body-fn gf) trace-fn splice-fn read-param untraced-fn args)))]
-    (vswap! vol assoc ::finished true)
+    ;; the store in effect, which the next update compares with its own
+    (vswap! vol assoc ::finished true ::params *params*)
     (assoc (finish @vol) :retval retval)))
 
 (defn- make-trace [gf args state]
@@ -594,7 +609,8 @@
                  ::scores (:scores state)
                  ::subtraces (:subtraces state))
     (pos? (long (:omega-count state))) (assoc ::trace/omega (:omega state))
-    (::node-values state) (assoc ::node-values (::node-values state) ::params (::params state))))
+    (::node-values state) (assoc ::node-values (::node-values state))
+    (::params state) (assoc ::params (::params state))))
 
 (defn- holds-batch?
   "Does x hold a batched value (in its maps, vectors and realized seqs)?"
@@ -649,7 +665,7 @@
 ;; A static function's score: one generated function of its choices
 ;; ---------------------------------------------------------------------------
 
-(declare static-scored?)
+(declare static-scored? static-score)
 
 (defn ^:no-doc static-site
   "[value log-density] of a static body's trace node at path p of choices,
@@ -661,13 +677,15 @@
     (given-value {:mode :assess} dist c)))
 
 (defn ^:no-doc static-call
-  "[weight retval] of a static body's splice: the callee's assess on args
-   with sub, under key k (nil under an exact-density operation, where no
-   draw may happen)."
-  [g args sub k]
+  "[weight retval] of a static body's splice at path p: the callee's assess
+   on args with sub, under key k (nil under an exact-density operation,
+   where no draw may happen), with the handler's checks."
+  [p g args sub k]
+  (when-not (gfi/generative-function? g)
+    (throw (ex-info (str "splice at " p " needs a generative function") {:path p :value g})))
   (let [args (realize! (vec args))]
     (if (static-scored? g)
-      ((:score (:static g)) read-param args sub k)
+      (static-score g args sub k)
       (let [r (gfi/run-op g :assess args {:key (or k (rng/key 0)) :constraints sub})] [(:weight r) (:retval r)]))))
 
 (defn- check-static-choices!
@@ -1038,7 +1056,7 @@
                               :terms (conj terms lp) :k k'})
                     :splice (let [[g as] expr w (gensym "w") rv (gensym "rv") k' (gensym "k") ks (gensym "ks")]
                               {:bindings (into bindings [[k' ks] `(if ~k (rng/split ~k) [nil nil])
-                                                         [w rv] `(static-call ~g ~as (cm/get-submap ~choices ~(path addr)) ~ks)
+                                                         [w rv] `(static-call ~(path addr) ~g ~as (cm/get-submap ~choices ~(path addr)) ~ks)
                                                          binding rv])
                                :terms (conj terms w) :k k'})
                     {:bindings (into bindings [binding expr]) :terms terms :k k}))
@@ -1094,9 +1112,9 @@
                     :param? (param? (:expr (:ret st))) :f (node-fn (:ret st))}
                    (call (:ret st)))
       :score ~(score-form st params coercions locals)
-      :roots ~(set (keep #(when-let [a (:addr %)] (first (path a))) (:nodes st)))
+      :roots ~(set (keep #(when-some [a (:addr %)] (first (path a))) (:nodes st)))
       :paths ~(when (some #(vector? (:addr %)) (:nodes st))
-                (vec (keep #(when-let [a (:addr %)] [(:kind %) (path a)]) (:nodes st))))}))
+                (vec (keep #(when-some [a (:addr %)] [(:kind %) (path a)]) (:nodes st))))}))
 
 (defmacro gen
   "A generative function. params are the arguments (destructuring allowed);

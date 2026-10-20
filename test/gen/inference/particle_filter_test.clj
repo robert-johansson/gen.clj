@@ -85,10 +85,14 @@
     ;; the estimate's sd is about sqrt(12.6/n) for this model and filter (from
     ;; the variance of runs of 20 particles): five of them at n = 2000 is 0.40
     (is (< (ts/abs (- (pf/log-ml-estimate state) (exact-lml))) 0.40))
-    (testing "the filtering mean, within 5 standard errors of 2000 draws from the Kalman posterior"
+    (testing "the filtering mean of 2000 resampled draws, against the Kalman posterior's"
+      ;; the draws come from the filter's approximation, so its own error
+      ;; adds to theirs: the statistic's sd over 300 filters is 0.020, twice
+      ;; the √(v/2000) = 0.010 of independent draws (the confirmation
+      ;; review: a band of 5·0.010 failed 4 of 40 keys); five of them
       (let [xs (map #(% [(dec (count ys)) :x]) (pf/sample-unweighted-traces state 2000 (rng/key 2)))
-            [_ m v] (last kalman)]
-        (is (< (ts/abs (- (/ (reduce + xs) 2000) m)) (* 5 (Math/sqrt (/ v 2000)))))))))
+            [_ m _] (last kalman)]
+        (is (< (ts/abs (- (/ (reduce + xs) 2000) m)) (* 5 0.020)))))))
 
 (defn- unbiased? [proposal?]
   ;; law 20: E[exp(estimate)] = p(y), checked against the runs' own spread

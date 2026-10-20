@@ -186,9 +186,15 @@
     (is (nil? (omega (gfi/simulate plain [] k))))))
 
 (deftest an-estimated-density-falls-back-to-particles
-  ;; for the reason it has (review, 2026-10-20: the stated one was a spot check's)
-  (is (= "An estimated density in a batched run"
-         (:message (batched/fallback-reason (batched/simulate likelihood [0.4] 4 (rng/key 50)))))))
+  ;; for the reason it has (review, 2026-10-20: the stated one was a spot
+  ;; check's), through simulate and through generate, which estimates (the
+  ;; confirmation review: it had no test)
+  (let [reason #(:message (batched/fallback-reason %))
+        constraints (cm/choicemap [:y :y] 1.5)]
+    (binding [batched/*spot-checks* 0]
+      (is (= "An estimated density in a batched run" (reason (batched/simulate likelihood [0.4] 4 (rng/key 50)))))
+      (is (= "An estimated density in a batched run"
+             (reason (:particles (batched/generate pm-model [] constraints 4 (rng/key 51)))))))))
 
 (def noisy-normal (gen [] (let [mu (trace :mu (d/normal 0 1)) e (untraced (d/normal 0 0.3))] (trace :y (d/normal (+ mu e) 1)) mu)))
 
@@ -224,9 +230,12 @@
 
 (deftest ^:slow ^:heavy eq-4-4-simulate-draws-omega-given-the-choices
   ;; E[g(τ)/ξ] = ∫ g = 1 under simulate's (τ, ω) ~ p(τ) p̊(ω; τ). For the
-  ;; mixture, g is narrower than every component, so g/ξ is bounded (≤ 3.9);
-  ;; for the estimator it is not, and its variance is finite through the
-  ;; prior samples among the five. Planted bug (2026-10-20): a joint
+  ;; overlapping mixture ξ is N(a; μ_i, 1) for the drawn i, and g is
+  ;; narrower than every component, so g/ξ is bounded (≤ 2·e^(2/3) ≈ 3.9).
+  ;; For the estimator ξ is the mean of five likelihood terms, one at the
+  ;; latent that produced y and four at prior draws: g/ξ is unbounded, and
+  ;; its second moment is finite only through the four prior terms (the
+  ;; latent's term alone gives 1/ξ an infinite one). Planted bug (2026-10-20): a joint
   ;; sampler drawing ω apart from τ moves the mixture's mean by about 0.2,
   ;; against a band of about 0.07
   (testing "untraced draws: overlapping components"

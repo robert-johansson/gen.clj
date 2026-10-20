@@ -127,6 +127,20 @@
     {:fixed (mapv bound-names fixed)
      :rest (when-not (neg? i) (bound-names (nth params (inc i))))}))
 
+(defn- check-addresses!
+  "Every trace and splice address once, none under another, as the handler
+   checks at run time (a repeated address would otherwise count twice in
+   the score fn's assess)."
+  [nodes]
+  (let [paths (for [{:keys [kind addr form]} nodes :when (not= kind :compute)]
+                [(if (vector? addr) addr [addr]) form])]
+    (doseq [[i [p _]] (map-indexed vector paths)
+            [q form] (drop (inc i) paths)
+            :let [n (min (count p) (count q))]
+            :when (= (subvec p 0 n) (subvec q 0 n))]
+      (not-static (if (= p q) (str "the address " p " is used twice") (str "the addresses " p " and " q " overlap"))
+                  form))))
+
 (defn analyze
   "The graph of a static body (a body of one let), or a loud error: {:args
    (arg-names), :nodes [{:kind :addr :binding :names :inputs :expr :form,
@@ -154,6 +168,7 @@
                               (let [n (node env binding init known)]
                                 [(conj nodes n) (into known (:names n))]))
                             [[] known] pairs)
+          _ (check-addresses! nodes)
           names (into known (mapcat :names nodes))]
       {:args args
        :nodes nodes
