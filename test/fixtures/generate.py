@@ -147,6 +147,7 @@ def distributions():
     add("triangular", [0.0, 2.0, 0.5], [-0.1, 0.0, 0.2, 0.5, 1.4, 2.0, 2.1],
         lambda v: st.triang.logpdf(v, 0.25, loc=0.0, scale=2.0))
     add("triangular", [0.0, 1.0, 0.0], [0.0, 0.5, 1.0], lambda v: st.triang.logpdf(v, 0.0, loc=0.0, scale=1.0))
+    add("triangular", [0.0, 1.0, 1.0], [0.0, 0.5, 1.0], lambda v: st.triang.logpdf(v, 1.0, loc=0.0, scale=1.0))
     add("weibull", [1.5, 2.0], [-1.0, 0.0, 0.4, 1.5, 4.0], lambda v: st.weibull_min.logpdf(v, 1.5, scale=2.0))
     add("weibull", [1.0, 2.0], [0.0, 1.0], lambda v: st.weibull_min.logpdf(v, 1.0, scale=2.0))
     return cases

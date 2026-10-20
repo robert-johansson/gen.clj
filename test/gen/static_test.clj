@@ -105,6 +105,11 @@
     (let [y (trace :y (d/normal (+ z z2) 0.5))]
       [w z y])))
 
+(def rest-rebound
+  "A rest parameter rebinding a fixed one: the rest is the value, and its
+   diff (review 4, R10: the fixed one's diff won)."
+  (gen ^:static [a & a] (let [y (trace :y (d/normal (count a) 0.5))] [a y])))
+
 (def double-index
   "nth truncates a number index: a changed element reached by 1.0
    (confirmation review N1: the rule called it unchanged)."
@@ -155,6 +160,7 @@
      [[0.1 0.2 0.3] 5 {:p 0.0}]]]
    [:double-index double-index [[0.0 0.0] 1.0] [[[0.0 0.5] 1.0]]]
    [:rebound rebound [1.0 2.0 {:z 30.0} 0.5] [[1.0 3.0 {:z 31.0} 0.5]]]
+   [:rest-rebound rest-rebound [1.0 2.0] [[1.0 5.0]]]
    [:callee-store callee-store [0.0] [[1.0]]]
    [:dict-rules dict-rules [{:j 0.5 :x 1.0}] [[{:j 0.7 :x 1.0}] [{:x 1.0}] [{:j 0.5 :x 1.0 :z 2.0}]]]])
 
@@ -319,8 +325,11 @@
     (is (consistent-trace? model (:trace (gfi/regenerate tr (sel/select :a) (rng/key 62)))))))
 
 (deftest a-splice-without-an-address-brings-its-own-store
-  ;; inline, the callee's own store is in effect for its calls (review 3, F2)
-  (let [inner (gen [xs] (splice :m (comb/map (gen [x] (trace :y (d/normal (+ x (param :w)) 1)))) xs))
+  ;; inline, the callee's own store is in effect for its calls (review 3,
+  ;; F2; the kernel defined once, so the store rule alone must see it: an
+  ;; inline one is another object on every run, review 4)
+  (let [k (gen [x] (trace :y (d/normal (+ x (param :w)) 1)))
+        inner (gen [xs] (splice :m (comb/map k) xs))
         outer (dyn/with-params (gen [g xs] (splice g xs)) {:w 0.5})
         xs [1.0 1.0]
         tr (gfi/simulate outer [(dyn/with-params inner {:w 5.0}) xs] (rng/key 63))

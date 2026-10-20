@@ -108,17 +108,24 @@
 (defn- close? [actual expected band] (< (Math/abs (- (ts/number actual) (ts/number expected))) band))
 
 (deftest sampler-moments
-  ;; fixed key, so deterministic; bands about five standard errors
+  ;; fixed key, so deterministic; bands of five standard errors: the mean's
+  ;; from the true variance, the sample variance's from the sample's own
+  ;; fourth central moment, sd ≈ √((m4 - s⁴)/n) (review 4: a 5% band was
+  ;; 1.9 sd for a Pareto; families whose eighth moment is infinite have no
+  ;; estimable band, so their parameters keep it finite)
   (let [k (rng/key 99) n 100000
         check (fn [dist mean var]
-                (let [x (dc/sample dist k [n])]
+                (let [x (dc/sample dist k [n])
+                      c (array/- x (array/mean x))
+                      s2 (ts/number (array/mean (array/square c)))
+                      m4 (ts/number (array/mean (array/square (array/square c))))]
                   (is (close? (array/mean x) mean (* 5 (Math/sqrt (/ var n)))) (str dist " mean"))
-                  (is (close? (array/variance x) var (* 0.05 var)) (str dist " variance"))))]
+                  (is (close? (array/variance x) var (* 5 (Math/sqrt (/ (max 0.0 (- m4 (* s2 s2))) n)))) (str dist " variance"))))]
     (check (d/normal 0.5 2.0) 0.5 4.0)
     (check (d/uniform -1.0 3.0) 1.0 (/ 16.0 12))
     (check (d/beta 2.5 0.7) (/ 2.5 3.2) (/ (* 2.5 0.7) (* 3.2 3.2 4.2)))
     (check (d/gamma 2.5 1.5) 3.75 5.625)
-    (check (d/inv-gamma 4.0 2.0) (/ 2.0 3) (/ 4.0 18))
+    (check (d/inv-gamma 10.0 2.0) (/ 2.0 9) (/ 4.0 (* 81 8)))
     (check (d/exponential 1.5) (/ 1 1.5) (/ 1 2.25))
     (check (d/laplace 1.0 0.5) 1.0 0.5)
     (check (d/poisson 3.5) 3.5 3.5)
@@ -134,14 +141,14 @@
     ;; moment: Pareto's shape above 4, Student's nu above 4)
     (let [g #(Math/exp (array/item (array/lgamma (double %))))]
       (check (d/chi-squared 3.0) 3.0 6.0)
-      (check (d/f-dist 3.0 12.0) (/ 12.0 10) (/ (* 2 144.0 13) (* 3 100 8)))
+      (check (d/f-dist 3.0 20.0) (/ 20.0 18) (/ (* 2 400.0 21) (* 3 324 16)))
       (check (d/gumbel 1.0 2.0) (+ 1.0 (* 2.0 0.5772156649015329)) (/ (* Math/PI Math/PI 4.0) 6))
       (check (d/log-normal 0.2 0.5) (Math/exp 0.325) (* (- (Math/exp 0.25) 1) (Math/exp 0.65)))
       (check (d/logistic 0.5 1.5) 0.5 (/ (* Math/PI Math/PI 2.25) 3))
       (check (d/nakagami 1.5 2.0) (* (/ (g 2.0) (g 1.5)) (Math/sqrt (/ 2.0 1.5)))
              (* 2.0 (- 1 (* (/ 1 1.5) (Math/pow (/ (g 2.0) (g 1.5)) 2)))))
-      (check (d/pareto 5.0 1.5) (/ (* 5.0 1.5) 4.0) (/ (* 1.5 1.5 5.0) (* 16.0 3.0)))
-      (check (d/student-t 6.0) 0.0 1.5)
+      (check (d/pareto 9.0 1.5) (/ (* 9.0 1.5) 8.0) (/ (* 1.5 1.5 9.0) (* 64.0 7.0)))
+      (check (d/student-t 10.0) 0.0 1.25)
       (check (d/triangular 0.0 2.0 0.5) (/ 2.5 3) (/ 3.25 18))
       (check (d/weibull 1.5 2.0) (* 2.0 (g (+ 1 (/ 1 1.5)))) (* 4.0 (- (g (+ 1 (/ 2 1.5))) (Math/pow (g (+ 1 (/ 1 1.5))) 2)))))))
 
@@ -231,12 +238,16 @@
 
 (deftest gradients-of-the-further-families
   ;; with respect to the value and each parameter, against central finite
-  ;; differences of the log density (float64 on the JVM, a band on float32)
+  ;; differences of the log density, which run on the JVM backend in
+  ;; float64 whatever the backend under test (a float32 one's would be
+  ;; noise: review 4)
   (let [h 1e-6
+        jvm (array/backend-named :jvm)
         fd (fn [f x] (/ (- (f (+ x h)) (f (- x h))) (* 2 h)))]
     (doseq [[label make params v] further
             i (range -1 (count params))]
-      (let [lp (fn [x] (ts/number (dc/log-prob (apply make (if (neg? i) params (assoc params i x))) (if (neg? i) x v))))
+      (let [lp (fn [x] (array/with-backend jvm
+                         (ts/number (dc/log-prob (apply make (if (neg? i) params (assoc params i x))) (if (neg? i) x v)))))
             at (if (neg? i) v (params i))
             ;; the parameter as an array, so the tape differentiates it
             g (if (neg? i)
@@ -259,3 +270,48 @@
 (deftest the-further-families-batch
   (let [ps (batched/simulate further-model [] 8 (rng/key 97))]
     (is (nil? (batched/fallback-reason ps)))))
+
+(deftest the-further-families-validate-their-parameters
+  ;; host values and the elements of concrete arrays (review 4: Nakagami
+  ;; and the triangular checked host values only)
+  (doseq [[label f] {"chi-squared" #(d/chi-squared -1.0) "chi-squared array" #(d/chi-squared [1.0 -1.0])
+                     "f-dist" #(d/f-dist 3.0 0.0) "gumbel" #(d/gumbel 0.0 -1.0) "levy" #(d/levy 0.0 0.0)
+                     "log-normal" #(d/log-normal 0.0 -0.5) "logistic" #(d/logistic 0.0 0.0)
+                     "nakagami" #(d/nakagami -1.0 1.0) "nakagami array" #(d/nakagami [-1.0 2.0] 1.0)
+                     "nakagami omega" #(d/nakagami 1.0 [1.0 0.0]) "pareto" #(d/pareto -1.0 1.0)
+                     "student-t" #(d/student-t 0.0) "weibull" #(d/weibull 1.0 -2.0)
+                     "triangular" #(d/triangular 1.0 0.0 0.5) "triangular mode" #(d/triangular 0.0 1.0 2.0)
+                     "triangular arrays" #(d/triangular [0.0 1.0] [1.0 0.0] [0.5 0.5])
+                     "triangular array mode" #(d/triangular [0.0] [1.0] [1.5])}]
+    (is (thrown? clojure.lang.ExceptionInfo (f)) label)))
+
+(deftest the-further-families-at-their-edges
+  ;; review 4: draws that underflowed to 0 (an infinite density) or made a
+  ;; quotient infinite, the F density at infinity, the t's far tail
+  (let [n 100000
+        host (fn [x] (map ts/number (array/->clj x)))
+        finite? (fn [xs] (every? #(Double/isFinite %) xs))]
+    (testing "f-dist with a small denominator: finite draws, finite densities, -Inf at Inf"
+      (let [f (d/f-dist 4.0 0.02)
+            x (dc/sample f (rng/key 90) [n])]
+        (is (finite? (host x)))
+        (is (finite? (host (dc/log-prob f x))))
+        (is (= ##-Inf (ts/number (dc/log-prob f ##Inf))))))
+    (testing "small shapes: no zero draws, finite densities"
+      (doseq [dist [(d/chi-squared 0.02) (d/weibull 0.01 1.0) (d/nakagami 0.01 1.0)]]
+        (let [x (dc/sample dist (rng/key 91) [n])]
+          (is (every? pos? (host x)) (str dist))
+          (is (finite? (host (dc/log-prob dist x))) (str dist)))))
+    (testing "Student's t at nu = 0.1: P(|T| > 1e16), within five standard errors"
+      ;; P(|T| > t) ≈ 2 c ν^((ν-1)/2) t^(-ν), c = Γ((ν+1)/2)/(√(νπ) Γ(ν/2)), for large t
+      (let [nu 0.1 t 1e16
+            g #(Math/exp (ts/number (array/lgamma (double %))))
+            p (* 2 (/ (g (/ (+ nu 1) 2)) (* (Math/sqrt (* nu Math/PI)) (g (/ nu 2)))) (Math/pow nu (/ (- nu 1) 2)) (Math/pow t (- nu)))
+            f (/ (count (filter #(> (Math/abs (double %)) t) (host (dc/sample (d/student-t nu) (rng/key 92) [n])))) (double n))]
+        (is (< (Math/abs (- f p)) (* 5 (Math/sqrt (/ (* p (- 1 p)) n)))) (str f " against " p))))
+    (testing "the triangular at its mode, also when the mode is a bound"
+      (is (ts/close? (Math/log 2.0) (dc/log-prob (d/triangular 0.0 1.0 1.0) 1.0)))
+      (is (ts/close? (Math/log 2.0) (dc/log-prob (d/triangular 0.0 1.0 0.0) 0.0))))
+    (testing "a gradient outside the support is finite"
+      (is (finite? [(ts/number ((array/grad #(dc/log-prob (d/weibull % 2.0) -1.0)) 1.5))
+                    (ts/number ((array/grad #(dc/log-prob (d/weibull 1.5 %) -1.0)) 2.0))])))))

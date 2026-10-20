@@ -95,6 +95,17 @@
     (is (= (mapv #(ts/host (% :t)) (batched/traces ps))
            (mapv #(ts/host ((gfi/simulate model [] %) :t)) (rng/split k 5))))))
 
+(deftest a-draw-in-a-batched-run-falls-back
+  ;; constant parameters: the one host draw would be every particle's (review 4, R1)
+  (let [model (gen [] (trace :t (expo 2.0)))
+        k (rng/key 18)
+        ps (batched/simulate model [] 6 k)]
+    (is (re-find #"host library" (:message (batched/fallback-reason ps))))
+    (is (= 6 (count (distinct (map #(ts/host (% :t)) (batched/traces ps))))))))
+
+(deftest a-host-distribution-prints-its-family
+  (is (= "#gen/dist[host [expo 2.0]]" (pr-str (expo 2.0)))))
+
 (deftest a-gradient-through-a-host-library-is-loud
   (let [tr (gfi/simulate model [] (rng/key 9))]
     (testing "of its value, or of a choice its parameters read"

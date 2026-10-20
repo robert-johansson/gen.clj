@@ -50,7 +50,9 @@ gen.clj uses Gen.jl's names and parameterizations (DESIGN.md §9):
 | `piecewise-uniform [bounds probs]` (unnormalized probs) | `piecewise-uniform [bounds probs]` (probabilities) | normalization | non-probabilities throw |
 | `broadcasted-normal [mu sigma]` | `normal` (or its alias `broadcasted-normal`) | no | — |
 | `uniform`, `exponential`, `poisson`, `laplace`, `cauchy`, `inv-gamma`, `dirichlet` | the same names and parameters | no | — |
-| student-t, log-normal, delta, truncated-normal, wishart, von-mises, wrapped-*, iid, … | not yet ported | — | bean genclj-z2gh |
+| `log-normal [mu sigma]` | `log-normal [mu sigma]` (Distributions.jl's LogNormal) | no | — |
+| `student-t [df loc scale]` | `student-t [nu]`, Distributions.jl's TDist; `loc + scale·T` for the rest | **yes** | three parameters are an arity error |
+| delta, truncated-normal, wishart, von-mises, wrapped-*, iid, … | not yet ported | — | bean genclj-z2gh |
 
 Every gen.clj log-prob is checked against scipy.stats in these
 parameterizations (`test/fixtures/distributions.edn`).

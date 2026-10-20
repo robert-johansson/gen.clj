@@ -320,7 +320,7 @@
     (doseq [p (cm/addresses (:constraints state))]
       (when-not (some #(contains? visited (subvec p 0 %)) (range 1 (inc (count p))))
         (throw (ex-info (str (name op) ": the constraint at " p " was not visited")
-                        {:path p :op op}))))))
+                        {:path p :op op :unvisited true}))))))
 
 (defn- finish
   "Account for the choices and calls of the previous trace that this run no
@@ -381,7 +381,7 @@
   "(param name) in a body: the parameter's value in the store in effect."
   [name]
   (let [v (get *params* name ::missing)]
-    (if (= ::missing v)
+    (if (identical? ::missing v)
       (throw (ex-info (str "The parameter " (pr-str name) " has no value: give the generative function a store"
                            " with gen.dynamic/with-params")
                       {:param name :available (keys *params*)}))
@@ -440,7 +440,9 @@
                             (if (symbol? form) {form d} (zipmap names (repeat (d-of d))))))
                         fixed params (range))
         rest-d (if (and argdiffs (every? diff/no-change? (drop (count fixed) argdiffs))) diff/no-change diff/unknown-change)]
-    (apply merge (zipmap rest (repeat rest-d)) positional)))
+    ;; in binding order: a name bound again (by a later parameter, or the
+    ;; rest parameter) holds its last binding, as in let
+    (apply merge (concat positional [(zipmap rest (repeat rest-d))]))))
 
 (defn- spec-diff
   "An argument's diff from its spec: its slot's, none for a constant, or
@@ -711,10 +713,10 @@
   (if paths
     (doseq [p (cm/addresses choices)]
       (when-not (some (fn [[kind q]] (if (= kind :trace) (= p q) (= q (subvec p 0 (min (count p) (count q)))))) paths)
-        (throw (ex-info (str "assess: the constraint at " p " was not visited") {:path p :op :assess}))))
+        (throw (ex-info (str "assess: the constraint at " p " was not visited") {:path p :op :assess :unvisited true}))))
     (doseq [[k _] (cm/submaps choices)]
       (when-not (contains? roots k)
-        (throw (ex-info (str "assess: the constraint at " [k] " was not visited") {:path [k] :op :assess}))))))
+        (throw (ex-info (str "assess: the constraint at " [k] " was not visited") {:path [k] :op :assess :unvisited true}))))))
 
 (defn- static-score
   "assess of a static gf by its generated score fn, without the handler:
@@ -792,6 +794,52 @@
   (applyTo [this args] (:retval (gfi/simulate this (vec args)))))
 
 (defn dynamic-gf? [x] (instance? DynamicGF x))
+
+(def ^:private closure-fields
+  "The instance fields of a fn class: the values it closes over."
+  (memoize (fn [^Class c]
+             (vec (for [^java.lang.reflect.Field f (.getDeclaredFields c)
+                        :when (not (java.lang.reflect.Modifier/isStatic (.getModifiers f)))]
+                    (doto f (.setAccessible true)))))))
+
+(defn- same-closure?
+  "Are fns a and b one code over the same closed-over values (a fn built
+   again from the same expression and locals)?"
+  [a b]
+  (or (identical? a b)
+      (and (identical? (class a) (class b))
+           (every? (fn [^java.lang.reflect.Field f]
+                     (let [x (.get f a) y (.get f b)]
+                       (if (.isPrimitive (.getType f)) (= x y) (identical? x y))))
+                   (closure-fields (class a))))))
+
+(defn ^:no-doc same-gen-fn?
+  "Do generative functions a and b compute the same: identical, or dynamic
+   ones of the same body (one fn class over identical closed-over values),
+   store and middleware, or records of one class whose fields are so (a
+   combinator built again around the same kernel). A gf a body builds
+   again on every run is then the same gf, and one that closes over
+   another value is not."
+  [a b]
+  (or (identical? a b)
+      (and (dynamic-gf? a) (dynamic-gf? b)
+           (same-closure? (:body-fn a) (:body-fn b))
+           (same-store? (:params a) (:params b))
+           (identical? (:transitions a) (:transitions b))
+           (identical? (:dispatch a) (:dispatch b)))
+      (and (record? a) (not (dynamic-gf? a)) (identical? (class a) (class b))
+           (every? (fn [[k x]] (let [y (get b k)]
+                                 (cond (gfi/generative-function? x) (same-gen-fn? x y)
+                                       (fn? x) (same-closure? x y)
+                                       :else (or (identical? x y) (and (array/host? x) (= x y))))))
+                   a))))
+
+(defn ^:no-doc kept?
+  "May gf keep tr, its previous trace, when no argument changed? Only when
+   gf computes as the one that made tr (same-gen-fn?) and under the store
+   tr ran under: neither shows in the arguments."
+  [gf tr]
+  (and (same-gen-fn? gf (:gen-fn tr)) (not (store-changed? tr))))
 
 (defn make-gen-fn
   "A dynamic generative function from a body fn of (trace splice param

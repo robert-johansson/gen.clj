@@ -347,18 +347,23 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   `(dyn/with-params gf store)` as a record field. `(param :w)` in a body reads
   the store in effect, which reaches every nested splice and combinator kernel
   (one namespace per model, like Pyro's store). A missing parameter is a loud
-  error. A trace records the store it ran under, and every generative
-  function that may read the store reruns what may read it when the store
-  in effect is another (a name added or removed, or a value that is not the
-  same object or an equal host value: stores are compared without reading
-  an array): a dynamic body reruns anyway, a static one compares, and Map,
-  Unfold and Recurse, whose kernels may read it, revisit every call. No
-  argument shows what a kernel reads from the store, so each kind checks
-  for itself, also under a non-dynamic parent or an address-less splice
-  with its own store (the confirmation review and review 3, 2026-10-20:
-  a Map, then an Unfold and a Recurse, kept stale calls). A combinator also
-  revisits every call when its kernel is not the one that made its calls'
-  traces (a trace given another gen-fn). Gradients are values: `gen.gradients/param-gradients` returns a map,
+  error. A trace records the store it ran under. A generative function
+  keeps a previous trace (or a call of it) on no-change argdiffs only when
+  it computes as the one that made it and under the same store
+  (`dyn/kept?`): a dynamic body reruns anyway, a static one compares, Map,
+  Unfold and Recurse revisit every call of a kernel under another store or
+  of another kernel, and deterministic and estimated functions and the
+  internal and exact proposal overrides run again. Stores are compared
+  without reading an array (a name added or removed, or a value that is not
+  the same object or an equal host value), and generative functions by
+  `dyn/same-gen-fn?`: the same object, or the same body (one compiled fn
+  over identical closed-over values) with the same store and middleware,
+  so a kernel a body builds again on every run is the same kernel, and one
+  that closes over another value is not. No argument shows any of this, so
+  each kind checks for itself, under any parent (the confirmation review,
+  reviews 3 and 4, 2026-10-20: a Map, an Unfold and a Recurse kept stale
+  calls; then estimated densities, the overrides' regenerate, and a
+  deterministic callee picked by a choice). Gradients are values: `gen.gradients/param-gradients` returns a map,
   and optimizers return a new store. This is Gen.jl's `@param`,
   `init_param!` and `accumulate_param_gradients!`/`apply!`, but functional.
 - **Batched execution** (decided 2026-10-18 by the agent, for the owner's
@@ -518,7 +523,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   Threefry uniform in (0, 1), so it is a pure function of the key (rule 2)
   and the same on every backend; a library's own random generator is never
   used. Parameters and values are read on the host, as the guarded
-  lookups read them: a batched one raises the batched fallback, one being
+  lookups read them: a batched one raises the batched fallback, as does a
+  draw in a batched run (it would be every particle's), one being
   differentiated is a loud error (the library has no gradient), and a lazy
   backend evaluates an array to read it, the cost of a host library.
   Apache Commons Math 3 is the JVM's Distributions.jl: `gen.dist.commons-math`

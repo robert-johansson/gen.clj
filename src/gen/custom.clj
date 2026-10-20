@@ -59,6 +59,7 @@
             [gen.array.batch :as batch]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
+            [gen.dynamic :as dyn]
             [gen.gfi :as gfi]
             [gen.selection :as sel]
             [gen.trace :as trace]))
@@ -112,17 +113,22 @@
         plain (if gradient (mapv detached args) args)
         [retval state] ((:apply-with-state gf) plain)
         retval (if gradient (with-gradient retval state args plain gradient) retval)]
-    (trace/make-trace {:gen-fn gf :args args :choices cm/EMPTY :retval retval :score 0.0 ::state state})))
+    (dyn/record-store (trace/make-trace {:gen-fn gf :args args :choices cm/EMPTY :retval retval :score 0.0 ::state state}))))
 
 (defn- updated
   "tr moved to args (argdiffs), with update-with-state, or kept when nothing
-   changed: [trace retdiff]."
+   changed (no argument, and gf is the one that made tr: dyn/kept?), run
+   again when gf is another: [trace retdiff]."
   [gf tr args argdiffs]
   (let [args (vec args)]
-    (if (and (every? diff/no-change? argdiffs) (= (count args) (count (:args tr))))
+    (cond
+      (and (every? diff/no-change? argdiffs) (= (count args) (count (:args tr))) (dyn/kept? gf tr))
       [tr diff/no-change]
+      (not (dyn/same-gen-fn? gf (:gen-fn tr)))
+      [(run gf args) diff/unknown-change]
+      :else
       (let [[state retval retdiff] ((:update-with-state gf) (::state tr) args (vec argdiffs))]
-        [(assoc tr :args args :retval retval ::state state) retdiff]))))
+        [(dyn/record-store (assoc tr :args args :retval retval ::state state)) retdiff]))))
 
 (defrecord DeterministicGF [apply-with-state update-with-state gradient]
   gfi/IGenerativeFunction
@@ -188,9 +194,12 @@
 ;; Estimated densities (encapsulated randomness, thesis §4.5)
 ;; ---------------------------------------------------------------------------
 
-(defn- estimated-trace [gf args choices log-estimate omega]
-  (trace/make-trace {:gen-fn gf :args (vec args) :choices choices :score log-estimate
-                     :retval ((:retval gf) args choices) ::trace/omega omega}))
+(defn- estimated-trace
+  "With the store in effect: an estimator may run a model that reads it."
+  [gf args choices log-estimate omega]
+  (dyn/record-store
+   (trace/make-trace {:gen-fn gf :args (vec args) :choices choices :score log-estimate
+                      :retval ((:retval gf) args choices) ::trace/omega omega})))
 
 (defn- check-unbatched!
   "An estimate in a batched run raises the fallback: a particle's ω must
@@ -242,7 +251,7 @@
       {:trace (simulated this args key) :weight 0.0}
       (let [t (estimate-at this :generate args constraints key)] {:trace t :weight (:score t)})))
   (-update [this tr args argdiffs constraints key]
-    (if (and (unchanged? argdiffs) (cm/empty? constraints))
+    (if (and (unchanged? argdiffs) (cm/empty? constraints) (dyn/kept? this tr))
       {:trace tr :weight 0.0 :retdiff diff/no-change :discard cm/EMPTY}
       (let [t (estimate-at this :update args (cm/override (:choices tr) constraints) key)]
         {:trace t :weight (- (:score t) (:score tr)) :retdiff diff/unknown-change
@@ -252,7 +261,7 @@
       (throw (ex-info (str "estimated: regenerate cannot resample a selected choice, since an estimator has no"
                            " proposal density to weigh it by; update it with a proposal instead")
                       {:selected (vec (cm/addresses (sel/get-selected (:choices tr) selection)))})))
-    (if (unchanged? argdiffs)
+    (if (and (unchanged? argdiffs) (dyn/kept? this tr))
       {:trace tr :weight 0.0 :retdiff diff/no-change}
       (let [t (estimate-at this :regenerate args (:choices tr) key)]
         {:trace t :weight (- (:score t) (:score tr)) :retdiff diff/unknown-change})))

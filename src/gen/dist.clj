@@ -235,11 +235,19 @@
   [in-support v s]
   (where in-support v s))
 
+(defn- floored
+  "x at least the smallest normal number of its dtype. A gamma draw of a
+   small shape (its boost U^(1/α)) or a power of one underflows to 0, where
+   a density may be infinite or a quotient infinite; the floor changes only
+   values below it."
+  [x]
+  (array/maximum x (if (= :float32 (array/dtype x)) (double Float/MIN_NORMAL) Double/MIN_NORMAL)))
+
 (defdist chi-squared
   "chi-squared(nu): the χ² distribution with nu degrees of freedom (Chisq)."
   [nu]
   (validate (dc/check-positive "chi-squared" "nu" nu))
-  (sample [key shape] (* 2.0 (rng/gamma key (/ nu 2.0) (dc/elementwise-shape shape nu) (opts nu))))
+  (sample [key shape] (* 2.0 (floored (rng/gamma key (/ nu 2.0) (dc/elementwise-shape shape nu) (opts nu)))))
   (log-prob [v]
     (let [k (/ nu 2.0)]
       (guard (>= v 0) (- (xlogy (- k 1) v) (/ v 2.0) (lgamma k) (* k log-2))))))
@@ -252,12 +260,19 @@
   (sample [key shape]
     (let [s (dc/elementwise-shape shape nu1 nu2)
           [k1 k2] (rng/split key)]
-      (/ (* nu2 (rng/gamma k1 (/ nu1 2.0) s (opts nu1 nu2))) (* nu1 (rng/gamma k2 (/ nu2 2.0) s (opts nu1 nu2))))))
+      (/ (* nu2 (floored (rng/gamma k1 (/ nu1 2.0) s (opts nu1 nu2))))
+         (* nu1 (floored (rng/gamma k2 (/ nu2 2.0) s (opts nu1 nu2)))))))
   (log-prob [v]
+    ;; above 1, (nu1/2 - 1) log x - (nu1+nu2)/2 log(nu2 + nu1 x) as
+    ;; -(nu2/2 + 1) log x - (nu1+nu2)/2 log(nu1 + nu2/x): -Inf at Inf, not Inf - Inf
     (let [in (>= v 0)
-          x (stand-in in v 1.0)]
-      (guard in (- (+ (* 0.5 (+ (* nu1 (log nu1)) (* nu2 (log nu2)))) (xlogy (- (/ nu1 2.0) 1) x))
-                   (* (/ (+ nu1 nu2) 2.0) (log (+ nu2 (* nu1 x))))
+          x (stand-in in v 1.0)
+          big (> x 1.0)
+          xb (stand-in big x 2.0)
+          kernel (where big
+                        (- (- (* (+ (/ nu2 2.0) 1) (log xb))) (* (/ (+ nu1 nu2) 2.0) (log (+ nu1 (/ nu2 xb)))))
+                        (- (xlogy (- (/ nu1 2.0) 1) x) (* (/ (+ nu1 nu2) 2.0) (log (+ nu2 (* nu1 x))))))]
+      (guard in (- (+ (* 0.5 (+ (* nu1 (log nu1)) (* nu2 (log nu2)))) kernel)
                    (log-beta (/ nu1 2.0) (/ nu2 2.0)))))))
 
 (defdist gumbel
@@ -270,11 +285,6 @@
     (let [z (/ (- v mu) theta)]
       (- (+ (log theta) z (exp (- z)))))))
 
-(def ^:private levy-floor
-  "A floor under a normal draw's square: an exactly-zero draw would be an
-   infinite Lévy value."
-  1e-30)
-
 (defdist levy
   "levy(mu, sigma): the Lévy distribution, location mu and scale sigma,
    mu + sigma/Z² for a standard normal Z (Levy)."
@@ -282,7 +292,7 @@
   (validate (dc/check-positive "levy" "sigma" sigma))
   (sample [key shape]
     (let [z (rng/normal key (dc/elementwise-shape shape mu sigma) (opts mu sigma))]
-      (+ mu (/ sigma (array/maximum (square z) levy-floor)))))
+      (+ mu (/ sigma (floored (square z))))))
   (log-prob [v]
     (let [in (> v mu)
           d (stand-in in (- v mu) 1.0)]
@@ -314,20 +324,21 @@
       (- (+ z (log theta) (* 2.0 (array/logaddexp 0.0 (- z))))))))
 
 (defdist nakagami
-  "nakagami(m, omega): the Nakagami distribution, shape m (at least 1/2)
-   and spread omega, the root of a gamma(m, omega/m) draw (Nakagami)."
+  "nakagami(m, omega): the Nakagami distribution, shape m and spread omega,
+   the root of a gamma(m, omega/m) draw (Nakagami; m > 0, as
+   Distributions.jl's, where Commons Math asks m >= 1/2)."
   [m omega]
-  (validate (dc/check-positive "nakagami" "omega" omega)
-            (when (array/host? m) (dc/check (>= m 0.5) "nakagami" "m must be at least 1/2" {:m m})))
+  (validate (dc/check-positive "nakagami" "m" m) (dc/check-positive "nakagami" "omega" omega))
   (sample [key shape]
-    (sqrt (* (/ omega m) (rng/gamma key m (dc/elementwise-shape shape m omega) (opts m omega)))))
+    (sqrt (* (/ omega m) (floored (rng/gamma key m (dc/elementwise-shape shape m omega) (opts m omega))))))
   (log-prob [v]
     (guard (>= v 0) (- (+ log-2 (* m (log m)) (xlogy (- (* 2.0 m) 1) v))
                        (lgamma m) (* m (log omega)) (/ (* m (square v)) omega)))))
 
 (defdist pareto
   "pareto(alpha, theta): the Pareto distribution, shape alpha and scale
-   (minimum) theta (Pareto)."
+   (minimum) theta (Pareto). For a small alpha some draws lie beyond the
+   float range: +Inf, of log density -Inf."
   [alpha theta]
   (validate (dc/check-positive "pareto" "alpha" alpha) (dc/check-positive "pareto" "theta" theta))
   (sample [key shape]
@@ -345,7 +356,7 @@
     (let [s (dc/elementwise-shape shape nu)
           [k1 k2] (rng/split key)
           g (rng/gamma k2 (/ nu 2.0) s (opts nu))]
-      (* (rng/normal k1 s (opts nu)) (sqrt (/ nu (* 2.0 (array/maximum g levy-floor)))))))
+      (* (rng/normal k1 s (opts nu)) (sqrt (/ nu (* 2.0 (floored g)))))))
   (log-prob [v]
     (- (lgamma (/ (+ nu 1) 2.0)) (lgamma (/ nu 2.0)) (* 0.5 (log (* nu Math/PI)))
        (* (/ (+ nu 1) 2.0) (log1p (/ (square v) nu))))))
@@ -354,8 +365,9 @@
   "triangular(a, b, c): the triangular distribution on [a, b] with mode c
    (TriangularDist)."
   [a b c]
-  (validate (when (every? array/host? [a b c])
-              (dc/check (and (< a b) (<= a c) (<= c b)) "triangular" "needs a < b and a <= c <= b" {:a a :b b :c c})))
+  (validate (when (every? #(and (some? %) (array/concrete? %)) [a b c])
+              (dc/check (array/all-true? (logical-and (< a b) (logical-and (<= a c) (<= c b))))
+                        "triangular" "needs a < b and a <= c <= b" {:a a :b b :c c})))
   (sample [key shape]
     (let [u (rng/uniform key (dc/elementwise-shape shape a b c) (opts a b c))
           w (- b a)]
@@ -366,11 +378,14 @@
     (let [w (- b a)
           left (> (- c a) 0)
           right (> (- b c) 0)]
-      (where (logical-and (>= v a) (< v c))
-             (log (/ (* 2.0 (- v a)) (* w (stand-in left (- c a) 1.0))))
-             (where (logical-and (>= v c) (<= v b))
-                    (log (/ (* 2.0 (- b v)) (* w (stand-in right (- b c) 1.0))))
-                    ##-Inf)))))
+      ;; the mode separately: at c = b (or c = a) one side has no width
+      (where (== v c)
+             (log (/ 2.0 w))
+             (where (logical-and (>= v a) (< v c))
+                    (log (/ (* 2.0 (- v a)) (* w (stand-in left (- c a) 1.0))))
+                    (where (logical-and (> v c) (<= v b))
+                           (log (/ (* 2.0 (- b v)) (* w (stand-in right (- b c) 1.0))))
+                           ##-Inf))))))
 
 (defdist weibull
   "weibull(alpha, theta): the Weibull distribution, shape alpha and scale
@@ -378,10 +393,10 @@
   [alpha theta]
   (validate (dc/check-positive "weibull" "alpha" alpha) (dc/check-positive "weibull" "theta" theta))
   (sample [key shape]
-    (* theta (array/pow (rng/exponential key (dc/elementwise-shape shape alpha theta) (opts alpha theta)) (/ 1.0 alpha))))
+    (* theta (floored (array/pow (rng/exponential key (dc/elementwise-shape shape alpha theta) (opts alpha theta)) (/ 1.0 alpha)))))
   (log-prob [v]
     (let [in (>= v 0)
-          x (/ (stand-in in v 0.0) theta)]
+          x (/ (stand-in in v theta) theta)]
       (guard in (- (+ (log (/ alpha theta)) (xlogy (- alpha 1) x)) (array/pow x alpha))))))
 
 ;; ---------------------------------------------------------------------------

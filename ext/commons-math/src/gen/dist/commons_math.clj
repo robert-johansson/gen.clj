@@ -13,7 +13,8 @@
 
    The library computes some quantiles by a solver, to an absolute accuracy
    of about 1e-9 (its default), so such draws are that close to exact."
-  (:require [gen.dist.host :as host])
+  (:require [gen.dist.core :as dc]
+            [gen.dist.host :as host])
   (:import [org.apache.commons.math3.distribution
             AbstractIntegerDistribution AbstractRealDistribution HypergeometricDistribution
             IntegerDistribution RealDistribution ZipfDistribution]
@@ -54,8 +55,12 @@
 (def hypergeometric
   "hypergeometric(s, f, n): the successes among n draws without replacement
    from s successes and f failures (Hypergeometric)."
-  (integer "hypergeometric" (fn [s f n] (HypergeometricDistribution. no-rng (int (+ s f)) (int s) (int n)))))
+  (integer "hypergeometric" (fn [s f n]
+                              (doseq [[p v] {"s" s "f" f "n" n}] (dc/check-integer "hypergeometric" p v 0))
+                              (HypergeometricDistribution. no-rng (int (+ s f)) (int s) (int n)))))
 
 (def zipf
   "zipf(n, s): Zipf's law on 1…n with exponent s."
-  (integer "zipf" (fn [n s] (ZipfDistribution. no-rng (int n) (double s)))))
+  (integer "zipf" (fn [n s]
+                    (dc/check-integer "zipf" "n" n 1)
+                    (ZipfDistribution. no-rng (int n) (double s)))))

@@ -107,12 +107,13 @@
 
 (defn- rerun-all?
   "Must every kernel call of tr run again? When the store in effect is
-   another (a kernel may read it), or a kernel is not the one that made
-   the calls' traces (a trace given another gen-fn): neither shows in the
-   arguments. pairs: [kernel, a trace it made or nil]."
+   another (a kernel may read it), or a kernel does not compute as the one
+   that made the calls' traces (dyn/same-gen-fn?: a trace given another
+   gen-fn, a closure over another value): neither shows in the arguments.
+   pairs: [kernel, a trace it made or nil]."
   [tr pairs]
   (boolean (or (dyn/store-changed? tr)
-               (some (fn [[kernel sub]] (and sub (not (identical? kernel (:gen-fn sub))))) pairs))))
+               (some (fn [[kernel sub]] (and sub (not (dyn/same-gen-fn? kernel (:gen-fn sub))))) pairs))))
 
 (defn- elements-trace
   "A Map's or Unfold's trace, with the parameter store in effect (a kernel

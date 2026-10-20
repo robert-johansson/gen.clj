@@ -106,10 +106,13 @@
    moves, the new trace from (generate args sigma key) and the old one
    weighed by (weight (:args tr) sigma tr), both returning the internal
    proposal's generate weight. A selection or new arguments that would leave
-   an unselected choice unvisited is a loud error. Shared by
-   with-internal-proposal and gen.inference.enumerative/with-exact-proposal."
-  [generate weight tr args argdiffs selection key]
-  (if (and (cm/empty? (sel/get-selected (:choices tr) selection)) (every? diff/no-change? argdiffs))
+   an unselected choice unvisited is a loud error. tr is kept when nothing
+   is selected, no argument changed and gf may keep it (dyn/kept?: another
+   gf or store changes what it computes); the old trace is weighed under
+   the store it ran under. Shared by with-internal-proposal and
+   gen.inference.enumerative/with-exact-proposal."
+  [gf generate weight tr args argdiffs selection key]
+  (if (and (cm/empty? (sel/get-selected (:choices tr) selection)) (every? diff/no-change? argdiffs) (dyn/kept? gf tr))
     {:trace tr :weight 0.0 :retdiff diff/no-change}
     (let [sigma (sel/get-selected (:choices tr) (sel/complement selection))
           {t2 :trace w :weight}
@@ -120,7 +123,8 @@
                                         "); select the choices the selection or the new arguments decide")
                                    {:selection selection} e))
                    (throw e))))]
-      {:trace t2 :weight (- w (weight (:args tr) sigma tr)) :retdiff diff/unknown-change})))
+      {:trace t2 :weight (- w (binding [dyn/*params* (::dyn/params tr)] (weight (:args tr) sigma tr)))
+       :retdiff diff/unknown-change})))
 
 (defrecord InternalProposalGF [gf q]
   gfi/IGenerativeFunction
@@ -142,7 +146,7 @@
             (throw (ex-info "with-internal-proposal: the fresh choices of this update change the model's structure" {})))
           {:trace t3 :weight (- w (:score tr)) :retdiff diff/unknown-change :discard (:discard r)}))))
   (-regenerate [this tr args argdiffs selection key]
-    (regenerate-under #(proposal-generate this %1 %2 %3) #(proposal-weight this %1 %2 %3)
+    (regenerate-under this #(proposal-generate this %1 %2 %3) #(proposal-weight this %1 %2 %3)
                       tr args argdiffs selection key))
   ;; generate gives the model the second of its key's split: assess, the same
   (-assess [_ args choices key] (gfi/-assess gf args choices (second (rng/split key))))

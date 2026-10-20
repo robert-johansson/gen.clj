@@ -20,7 +20,8 @@
    bits (gen.random.threefry), so it is a pure function of the key and the
    same on every backend. Parameters and values are read on the host, as
    Clojure code branching on a value reads it: a batched one raises the
-   batched fallback (the run continues one particle at a time), one being
+   batched fallback (the run continues one particle at a time), as does a
+   draw in a batched run (it would be every particle's), one being
    differentiated is an error (the library gives no gradient), and a lazy
    backend's array is evaluated to be read.
 
@@ -78,6 +79,10 @@
     (if (:discrete? family) (long x) (double x))))
 
 (defmethod dc/-sample ::host [d key batch-shape]
+  ;; a host draw is one value for the run: in a batched run every particle
+  ;; would share it, so the run falls back to one particle at a time
+  (when (batch/batch-backend? array/*backend*)
+    (throw (array/batched-branch (str "A " (:name (:family (:params d))) " (host library) draw in a batched run") {})))
   (let [p (:params d)
         ^doubles us (threefry/uniform-doubles key (sh/size batch-shape))]
     (if (= [] batch-shape)
@@ -106,3 +111,6 @@
         (throw (ex-info (str (:name family) " has no enumerable support") {:family (:name family)})))))
 
 (defmethod dc/-value-shape ::host [_] [])
+
+(defmethod dc/-printed-params ::host [{{:keys [family params]} :params}]
+  (into [(symbol (:name family))] params))

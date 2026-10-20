@@ -279,7 +279,11 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"within the trace's structure.*\[:extra\]"
                           (mcmc/hmc tr (sel/select :x) {:L 3 :eps 0.5} (rng/key 72))))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"within the trace's structure"
-                          (mcmc/mala tr (sel/select :x) 0.5 (rng/key 73))))))
+                          (mcmc/mala tr (sel/select :x) 0.5 (rng/key 73))))
+    (testing "and the other way: leaving :extra behind (review 4)"
+      (let [tr (:trace (gfi/generate model [] (cm/choicemap :x 0.05 :extra 0.0 :y -3.0) (rng/key 0)))]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no longer visits \[:extra\]"
+                              (mcmc/hmc tr (sel/select :x) {:L 3 :eps 0.5} (rng/key 74))))))))
 
 (deftest compiled-kernels-make-the-same-moves
   ;; :compile? runs HMC's L steps, or MALA's proposal and its densities, as

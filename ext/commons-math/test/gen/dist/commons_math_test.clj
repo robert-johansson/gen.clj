@@ -47,7 +47,10 @@
   (is (= (range 1 11) (dc/support (cm/zipf 10 1.2))))
   (is (= ##-Inf (dc/log-prob (cm/zipf 10 1.2) 11)))
   (is (= ##-Inf (dc/log-prob (cm/zipf 10 1.2) 1e12)) "beyond an int")
-  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"invalid parameters" (cm/zipf -1 1.2))))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be an integer" (cm/zipf -1 1.2)))
+  (testing "counts that are not integers (review 4: truncated)"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be an integer" (cm/hypergeometric 2.5 7 4)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be an integer" (cm/zipf 10.7 1.2)))))
 
 (def ^:private ^RandomGenerator no-rng nil)
 

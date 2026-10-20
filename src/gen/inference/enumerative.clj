@@ -316,7 +316,7 @@
             (throw (ex-info "with-exact-proposal: the fresh choices of this update change the model's structure" {})))
           {:trace t3 :weight (- w (:score tr)) :retdiff diff/unknown-change :discard (:discard r)}))))
   (-regenerate [this tr args argdiffs selection key]
-    (proposal/regenerate-under #(exact-generate this %1 %2 %3) #(exact-weight this %1 %2 %3)
+    (proposal/regenerate-under this #(exact-generate this %1 %2 %3) #(exact-weight this %1 %2 %3)
                                tr args argdiffs selection key))
   ;; as its generate, it needs exact densities
   (-assess [_ args choices key] (gfi/with-exact-density "with-exact-proposal" (gfi/-assess gf args choices key)))
