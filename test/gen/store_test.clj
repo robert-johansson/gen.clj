@@ -470,17 +470,22 @@
                                   (gfi/update (assoc tr :gen-fn (comb/map after)) (cm/choicemap [0 :x] 1.0) (rng/key (+ 20 k)))))))))))
 
 (deftest user-code-in-a-revised-call-keeps-its-errors
-  ;; an estimator runs generate itself, with a constraint its model leaves
-  ;; unvisited: loud, though the call around it is being revised (a revise
-  ;; drops old choices only in its own run, gfi/outside-revise)
+  ;; an estimator runs generate itself (or gen.batched's), with a constraint
+  ;; its model leaves unvisited: loud, though the call around it is being
+  ;; revised (a revise drops old choices only in its own run,
+  ;; gfi/outside-revise)
   (let [sub (dyn/with-params (gen [] (splice :c (gen [] (trace :x (d/normal (param :w) 1))))) {:w 1.0})
-        est (custom/estimated {:addresses [:o]
-                               :estimate (fn [_ _cs k] (:weight (gfi/generate sub [] (cm/choicemap [:c :x] 0.0 [:c :typo] 1.0) k)))
-                               :simulate (fn [_ _k] {:choices (cm/choicemap :o 0.0) :log-estimate 0.0})})
-        model (given-a-store (gen [] (splice :p est)))
-        tr (gfi/simulate model [] (rng/key 1))]
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"the constraint at \[:c :typo\] was not visited"
-                          (gfi/update tr (cm/choicemap :a 0.9) (rng/key 2))))))
+        cs (cm/choicemap [:c :x] 0.0 [:c :typo] 1.0)]
+    (doseq [[label estimate] {"generate" (fn [_ _cs k] (:weight (gfi/generate sub [] cs k)))
+                              "gen.batched's generate" (fn [_ _cs k] (ts/number (array/sum (:weights (batched/generate sub [] cs 2 k)))))}]
+      (testing label
+        (let [est (custom/estimated {:addresses [:o]
+                                     :estimate estimate
+                                     :simulate (fn [_ _k] {:choices (cm/choicemap :o 0.0) :log-estimate 0.0})})
+              model (given-a-store (gen [] (splice :p est)))
+              tr (gfi/simulate model [] (rng/key 1))]
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"the constraint at \[:c :typo\] was not visited"
+                                (gfi/update tr (cm/choicemap :a 0.9) (rng/key 2)))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The discard of a value replaced by nested choices (review 5, R5-4)
