@@ -278,7 +278,8 @@ needs, taken from GenMLX's measured call counts
     mode on Metal (294 tests). Against the tape (`docs/benchmarks.md`):
     faster for plain HMC (about 25% at a million observations) and compiled
     MALA (1.7×), slower for compiled HMC (25–30%), level or close elsewhere.
-    The tape stays the default: its gradients are the same rules on every
+    The tape stays the default (confirmed by the owner, 2026-10-20): its
+    gradients are the same rules on every
     backend, where native ones depend on MLX's VJPs (ties, the linear algebra
     it cannot differentiate, the compile cache at exit). Native mode is the
     choice for nested gradients, which the tape does not do.

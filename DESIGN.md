@@ -48,8 +48,9 @@ sm_120) comes later (genclj-kw88); native autodiff stays opt-in
 (genclj-fuvr).
 
 **M4 (2026-10-20): Gen.jl parity, but for the static modeling language and
-encapsulated randomness,** which wait for the owner's decisions (a
-proposal is in genclj-0q3a; the semantics question in genclj-1ogo).
+encapsulated randomness,** decided by the owner on 2026-10-20 (§9) and
+under way (genclj-1ogo, then genclj-0q3a and the change hints of
+genclj-vghe).
 Added: call_at and choice_at, the internal-proposal override, custom
 deterministic generative functions with custom gradients
 (`array/custom-vjp`), `@dist`, `@kern`, wake-sleep's lecture, pair and
@@ -493,7 +494,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   support values mapped to v, so any function works; a continuous draw's
   inverts the path to it through +, −, ×, ÷, negate, exp and log, with the
   log-Jacobians. Non-numeric labels wait for parameters that are not arrays.
-  The name `dist` follows Gen.jl's macro; open for the owner.
+  The name `dist` follows Gen.jl's macro (owner, 2026-10-20).
 - **The internal-proposal override** (thesis Alg. 16; M4, 2026-10-19):
   `(gen.inference.proposal/with-internal-proposal gf q)`. q is a dynamic
   generative function called as `(q constraints & args)`; it proposes some
@@ -506,7 +507,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   generate's weight is the projection on the constraints, and regenerate's
   is the ratio of projections on the retained choices (Eq. 4.1). Before
   them the general set checked project only on everything, which missed a
-  planted bug.
+  planted bug. Regenerate keeps every unselected choice of the trace, so a
+  selected choice that decides structure cannot drop one: such a move is a
+  loud error, as with `with-exact-proposal` (the review, 2026-10-20; kept
+  by the owner the same day).
 - **Custom gradients, `array/custom-vjp`** (M4, 2026-10-20; one of §8's
   reserved names): `(array/custom-vjp f vjp)` is f, differentiated through
   by `(vjp args out g)`, one cotangent per argument. It is an optional
@@ -570,6 +574,42 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   their generate weights, where Gen.jl's code adds their scores, which is
   the same only when every new choice is constrained; regenerate is
   implemented too (Gen.jl has none).
+- **Encapsulated randomness** (thesis §4.5; owner, 2026-10-20): a
+  generative function may own randomness ω outside its choice map, its
+  score an unbiased estimate ξ of its density (Eq. 4.3), and the trace
+  keeps ω. An update or regenerate keeps ω when the change hints say
+  nothing it depends on changed (no-change argdiffs, no constraint or
+  selection under it), so an identity update weighs exactly 0 and a call
+  that is skipped keeps its ω; otherwise it draws ω′ with the operation's
+  key and weighs log ξ′ − log ξ (regenerate less its proposal ratio). The
+  thesis redraws ω at every update (§4.5.1), so its identity updates need
+  not weigh 0. Both are exact: keeping ω is the null move on (τ, ω),
+  redrawing it the pseudo-marginal refresh. This rule, GenMLX's
+  (`encapsulated.cljs`), keeps one set of laws for every generative
+  function, lets Map, Unfold and the static language skip unchanged calls,
+  and reruns an estimator only when its inputs change. The thesis's
+  Eqs. 4.3–4.16 are laws.
+- **The static modeling language** (Gen.jl's `@gen (static)`; owner,
+  2026-10-20): a flag on `gen`, `(gen ^:static [args] (let [...] ret))`,
+  not a second macro or a second semantics. The body is an ordinary `gen`
+  body: one `let` whose bindings are calls at constant addresses (`trace`,
+  `splice`) or pure expressions of the arguments and earlier bindings (any
+  pure Clojure, as Gen.jl allows any Julia), then the return expression;
+  branching happens only inside called generative functions. The flag
+  makes the macro build the model's graph (as data, for inspection and a
+  DOT rendering) and throw at macroexpansion when the body is not static (a
+  branch at the top level, a computed address, `trace` or `splice` passed
+  as a value). The check is sound, since `trace` and `splice` are the
+  macro's own locals, unlike GenMLX's schema extraction over quoted source
+  by symbol name. simulate, generate and assess run the handler; update and
+  regenerate walk the graph and rerun a node only when a parent changed or
+  it is constrained or selected, through the handler's own site
+  transitions. A law requires the static and the dynamic function of the
+  same body to give identical traces, weights, discards and retdiffs under
+  the same keys. Change hints beyond VectorDiff (IntDiff, SetDiff, DictDiff,
+  Diffed propagation) come after, on the graph. The graph is also the way
+  to compiled scores, batching without the tracer, and CUDA graphs: a fixed
+  structure runs the same kernels every time.
 - **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
   `(array/item x)`, the namespace's last segment, as the Clojure style guide
   has it. It replaced `a`, which the owner found ugly (2026-10-18). The
