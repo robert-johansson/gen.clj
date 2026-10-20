@@ -20,6 +20,15 @@ Clojure on the JVM. In order:
    (decided with the owner 2026-10-18). Each milestone tests the laws of the
    features it builds; a coverage matrix in `docs/research/genjl-parity.md` §3
    tracks every law.
+5. **M5 — Gen.jl's own test suite passes** (the owner, 2026-10-20: after M4
+   closes). Gen.jl 0.4.8's tests (38 files, about 1,900 assertions) are
+   ported file by file to gen.clj tests, each citing its source. A table
+   marks each as ported or not applicable, with a reason (Julia-only
+   machinery). Gen.jl itself, run on a host that has it (fenrir), is the
+   oracle for expected values, written as EDN fixtures as scipy's and
+   JAX's are, so the tests never need Julia. Its seeded statistical tests
+   are compared by their statistics, as for GenMLX. A port that fails is a
+   gap to fix, or a documented difference.
 
 **Status (2026-10-19): M1 is complete.** The pure-JVM backend runs every
 layer: arrays with reverse-mode AD, the data algebra, the GFI and dynamic
