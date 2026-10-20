@@ -26,6 +26,8 @@
      the first; (from k) resamples the suffix from position k, the tokens
      that depend on it.
    - project sums the selected tokens' scores; propose is a simulate.
+   - The retdiff of update and regenerate is a vector-diff of the token
+     vector (the positions whose tokens changed), or no-change.
 
    Score once (DESIGN §9): a token's score is the LM's, computed once and
    kept by its trie, so every operation reads the same number for the same
@@ -324,44 +326,60 @@
     {:weight (if (zero? n) 0.0 (sum (lm/score (:lm gf) prompt tokens)))
      :retval tokens}))
 
+(defn- retdiff
+  "How the tokens went from before to after: no-change, or a vector-diff
+   naming the retained positions whose tokens differ."
+  [before after]
+  (if (= before after)
+    diff/no-change
+    (diff/vector-diff (count after) (count before)
+                      (into {} (keep #(when (not= (before %) (after %)) [% diff/unknown-change]))
+                            (range (min (count before) (count after)))))))
+
 (defn- revised
   "An update's or regenerate's result: the trace of state, the weight, the
    retdiff."
   [gf args tr state weight]
   {:trace (completion-trace gf args state)
    :weight weight
-   :retdiff (if (= (:tokens state) (:retval tr)) diff/no-change diff/unknown-change)})
+   :retdiff (retdiff (:retval tr) (:tokens state))})
 
 (defn- update* [gf tr args constraints key]
   (one-particle! "update")
-  (let [[prompt max] (check-args :update gf args)
+  (let [[prompt max :as args] (check-args :update gf args)
         old (:retval tr)
         n-old (count old)
-        constrained (positions :update gf constraints max)
-        ;; the tokens before the first change keep their contexts and scores
-        k (min (long (if (= prompt (first (:args tr))) (reduce min n-old (keys constrained)) 0)) (long max))
-        known (fn [i] (or (constrained i) (when (< (long i) n-old) (old i))))
-        state (grow gf (start prompt old (::scores tr) k) known max key)
-        n-new (count (:tokens state))
-        _ (check-visited :update constrained state)
-        discard (choices-at old (into (sorted-set) cat [(filter #(< (long %) n-old) (keys constrained))
-                                                        (range (min n-new n-old) n-old)]))]
-    (assoc (revised gf [prompt max] tr state
-                    (- (- (sum (:scores state)) (:score tr)) (sum (map (:scores state) (:fresh state)))))
-           :discard discard)))
+        constrained (positions :update gf constraints max)]
+    (if (and (= args (:args tr)) (empty? constrained))
+      ;; nothing changes: the trace as it is
+      {:trace tr :weight 0.0 :retdiff diff/no-change :discard cm/EMPTY}
+      (let [;; the tokens before the first change keep their contexts and scores
+            k (min (long (if (= prompt (first (:args tr))) (reduce min n-old (keys constrained)) 0)) (long max))
+            known (fn [i] (or (constrained i) (when (< (long i) n-old) (old i))))
+            state (grow gf (start prompt old (::scores tr) k) known max key)
+            n-new (count (:tokens state))
+            _ (check-visited :update constrained state)
+            discard (choices-at old (into (sorted-set) cat [(filter #(< (long %) n-old) (keys constrained))
+                                                            (range (min n-new n-old) n-old)]))]
+        (assoc (revised gf args tr state
+                        (- (- (sum (:scores state)) (:score tr)) (sum (map (:scores state) (:fresh state)))))
+               :discard discard)))))
 
 (defn- regenerate* [gf tr args selection key]
   (one-particle! "regenerate")
-  (let [[prompt max] (check-args :regenerate gf args)
+  (let [[prompt max :as args] (check-args :regenerate gf args)
         old (:retval tr)
         n-old (count old)
         selected? (fn [i] (sel/selected? selection i))
-        k (min (long (if (= prompt (first (:args tr))) (or (first (filter selected? (range n-old))) n-old) 0)) (long max))
-        known (fn [i] (when (and (< (long i) n-old) (not (selected? i))) (old i)))
-        state (grow gf (start prompt old (::scores tr) k) known max key)
-        retained (filter #(and (< (long %) n-old) (not (selected? %))) (range k (count (:tokens state))))]
-    (revised gf [prompt max] tr state
-             (sum (map #(- (double ((:scores state) %)) (double ((::scores tr) %))) retained)))))
+        k (min (long (if (= prompt (first (:args tr))) (or (first (filter selected? (range n-old))) n-old) 0)) (long max))]
+    (if (and (= args (:args tr)) (== k n-old))
+      ;; nothing selected, nothing changes: the trace as it is
+      {:trace tr :weight 0.0 :retdiff diff/no-change}
+      (let [known (fn [i] (when (and (< (long i) n-old) (not (selected? i))) (old i)))
+            state (grow gf (start prompt old (::scores tr) k) known max key)
+            retained (filter #(and (< (long %) n-old) (not (selected? %))) (range k (count (:tokens state))))]
+        (revised gf args tr state
+                 (sum (map #(- (double ((:scores state) %)) (double ((::scores tr) %))) retained)))))))
 
 (defn- project* [tr selection]
   (sum (keep-indexed (fn [i s] (when (sel/selected? selection i) s)) (::scores tr))))
