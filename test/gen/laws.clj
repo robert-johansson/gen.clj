@@ -1,7 +1,7 @@
 (ns gen.laws
   "The GFI's laws (Cusumano-Towner 2020; docs/research/genjl-parity.md §3,
    audited in docs/research/law-audit.md) as test.check properties over any
-   generative functions, in five sets:
+   generative functions, in six sets:
 
    - general: the thesis's definitions, true of every generative function
      (Def 2.1.16, Def 2.3.1, Prop 2.3.1, Def 2.3.2, Eq 4.1's retention);
@@ -16,7 +16,10 @@
      ^:static;
    - encapsulated: for a generative function with encapsulated randomness
      (§4.5), whose score is an estimate, the laws that hold for one draw of
-     it.
+     it;
+   - across: an update or regenerate of a trace that another generative
+     function made (gf under another store, say), which keeps only its
+     choices (gfi/revise).
 
    Models are [label gf args alt-args]: alt-args is a vector of other
    argument vectors, so that update and regenerate are also checked with
@@ -31,7 +34,8 @@
             [gen.gfi :as gfi]
             [gen.random :as rng]
             [gen.selection :as sel]
-            [gen.test-support :as ts]))
+            [gen.test-support :as ts]
+            [gen.trace :as trace]))
 
 (defn close?
   "Weights within the backend's precision. On a float32 backend a weight is a
@@ -555,6 +559,81 @@
           :update-weight-is-the-score-change-less-fresh update-weight-is-the-score-change-less-fresh
           :identity-update-keeps-omega identity-update-keeps-omega
           :score-is-assessed-on-the-same-key score-is-assessed-on-the-same-key}))
+
+;; ---------------------------------------------------------------------------
+;; Across generative functions (gfi/revise)
+;; ---------------------------------------------------------------------------
+
+(defn- assessed?
+  "Is tr's score gf's assessed density of its choices, and its return value
+   the one they determine?"
+  [gf tr]
+  (let [{w :weight rv :retval} (gfi/assess gf (:args tr) (:choices tr) (rng/key 0))]
+    (and (close? (:score tr) w) (= (:retval tr) rv))))
+
+(defn update-across-generative-functions
+  "An update of a trace that gf made, given gf' (another generative function,
+   such as gf under another store): only its choices are kept (gfi/revise),
+   so Def. 2.3.1 holds against gf': the new trace is gf''s, the weight is
+   log p'(τ') - log q'(fresh | the rest) - log p(τ) (the projection of τ' on
+   its kept choices, less τ's score), the discard is the old choices
+   constrained or gone, and updating back with gf and the discard restores
+   τ, the two weights adding to -log q'(fresh) (law audit F5: store-test had
+   examples only). Models are [label gf args alt-args gf']."
+  [cases]
+  (prop/for-all [[[_ gf args _ gf' :as model] seed picks alt?] cases]
+    (let [k (rng/key seed)
+          tr (gfi/simulate gf args k)
+          args' (next-args model seed alt?)
+          other (gfi/simulate gf' args' (rng/fold-in k 1))
+          sigma (restrict (:choices other) (picked (addrs other) picks))
+          r (vacuous-on-unvisitable (gfi/update (assoc tr :gen-fn gf') args' (unknown-diffs args') sigma (rng/fold-in k 2)))]
+      (or (= ::vacuous r)
+          (let [{t2 :trace w :weight disc :discard} r
+                was (set (addrs tr))
+                now (set (addrs t2))
+                constrained (set (cm/addresses sigma))
+                kept (sel/from-paths (filter #(or (was %) (constrained %)) (addrs t2)))
+                expected-discard (restrict (:choices tr) (filter #(or (constrained %) (not (now %))) (addrs tr)))
+                {t3 :trace w3 :weight} (gfi/update (assoc t2 :gen-fn gf) (:args tr) (unknown-diffs (:args tr)) disc
+                                                   (rng/fold-in k 3))]
+            (and (gfi/same-gen-fn? gf' (trace/maker t2))
+                 (assessed? gf' t2)
+                 (every? #(= (cm/get-choice sigma %) (cm/get-choice (:choices t2) %)) constrained)
+                 (every? #(= (cm/get-choice (:choices tr) %) (cm/get-choice (:choices t2) %))
+                         (remove constrained (filter now (addrs tr))))
+                 (close? w (- (gfi/project t2 kept) (:score tr)))
+                 (= expected-discard disc)
+                 (= (:choices tr) (:choices t3))
+                 (assessed? gf t3)
+                 (or (not (in-support? t2)) (close? (+ w w3) (- (gfi/project t2 kept) (:score t2))))))))))
+
+(defn regenerate-across-generative-functions
+  "A regenerate of a trace that gf made, given gf': the unselected choices
+   are kept, and the weight is Eq. 4.1's with each trace projected by its
+   own generative function, on the retained choices."
+  [cases]
+  (prop/for-all [[[_ gf args _ gf' :as model] seed picks alt?] cases]
+    (let [k (rng/key seed)
+          tr (gfi/simulate gf args k)
+          args' (next-args model seed alt?)
+          chosen (set (picked (addrs tr) picks))
+          r (vacuous-on-unvisitable
+             (gfi/regenerate (assoc tr :gen-fn gf') args' (unknown-diffs args') (sel/from-paths chosen) (rng/fold-in k 1)))]
+      (or (= ::vacuous r)
+          (let [{t2 :trace w :weight} r
+                now (set (addrs t2))
+                retained (filter #(and (now %) (not (chosen %))) (addrs tr))]
+            (and (gfi/same-gen-fn? gf' (trace/maker t2))
+                 (assessed? gf' t2)
+                 (every? #(= (cm/get-choice (:choices tr) %) (cm/get-choice (:choices t2) %)) retained)
+                 (close? w (- (gfi/project t2 (sel/from-paths retained)) (gfi/project tr (sel/from-paths retained))))))))))
+
+(def across
+  "For pairs of generative functions: models [label gf args alt-args gf'],
+   gf' typically gf under another store (gen.dynamic/with-params)."
+  {:update-across-generative-functions update-across-generative-functions
+   :regenerate-across-generative-functions regenerate-across-generative-functions})
 
 (defmacro deflaws
   "A defspec per law (from gen.laws/all, or the given law map: a var's
