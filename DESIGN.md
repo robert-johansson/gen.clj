@@ -664,6 +664,14 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     from a value, a `trace` or `splice` inside an expression (a branch on
     a choice included), a splice without an address, an untraced draw: each
     a compile error that names the form.
+  - **Compiled scores and a lint, in M4 (owner, 2026-10-20).** A static
+    function's graph gives its log density as a pure function of its
+    choices, which HMC, MALA, MAP and gradients use for static models, so
+    `array/compile` can fuse a whole score (genclj-rj78). A lint says which
+    dynamic functions the flag would take, so a model gets the static
+    language's speed where it fits without an implicit switch
+    (genclj-ef7r): GenMLX's automatic analysis of every body is what the
+    triage found least reliable.
 - **Change hints and Diffed propagation** (Gen.jl's IntDiff, SetDiff,
   DictDiff and Diffed; M4, 2026-10-20): `gen.diff` adds `int-diff`,
   `set-diff` and `dict-diff` beside `vector-diff` (each collapsing to
