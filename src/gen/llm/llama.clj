@@ -60,7 +60,10 @@
                         -1 [:invalid-batch "llama.cpp refused the batch"]
                         [:decode-failed "llama.cpp's decode failed"])]
     (ex-info (str what ": " text (when msg (str " (llama.cpp: " msg ")")))
-             {:reason reason :code code :llama-error msg})))
+             (cond-> {:reason reason :code code :llama-error msg}
+               ;; the state restored: gen.llm.slots collects dropped
+               ;; branches, whose cells may be what is missing, and retries
+               (== code 1) (assoc :exhausted? true)))))
 
 (defn- restores?
   "Does a failed decode with this code leave the memory as it was? (Per
@@ -158,25 +161,24 @@
 (defn- restore
   "After a failed decode or read: remove what it added to each slot (its
    positions from pos on), and return the exception to throw. A slot whose
-   removal fails (a recurrent model past its checkpoints) is lost: the
-   exception names it (:lost-slots) for the engine to free."
+   removal fails, or leaves it not ending at pos - 1 (a recurrent model
+   past its checkpoints), is lost: the exception names it (:lost-slots)
+   for the engine to free."
   [^LlamaSlots s ^Throwable t slots positions]
-  (let [lost (vec (keep (fn [[slot pos]]
-                          (when-not (Llama/llama_memory_seq_rm (.-mem s) (int slot) (int pos) (int -1))
+  (let [mem (.-mem s)
+        lost (vec (keep (fn [[slot pos]]
+                          (when-not (and (Llama/llama_memory_seq_rm mem (int slot) (int pos) (int -1))
+                                         (== (dec (long pos)) (Llama/llama_memory_seq_pos_max mem (int slot))))
                             slot))
                         (map vector slots positions)))]
     (if (seq lost)
-      (ex-info (str (ex-message t) "; the branches on slots " lost " could not be restored and are freed")
+      (ex-info (str (ex-message t) "; slots " lost " could not be restored and are freed, with their branches")
                (assoc (ex-data t) :lost-slots lost) t)
       t)))
 
 ;; ---------------------------------------------------------------------------
 ;; Opening
 ;; ---------------------------------------------------------------------------
-
-(def ^:private max-seq
-  ;; LLAMA_MAX_SEQ, llama.cpp's limit on sequences
-  256)
 
 (defn- c-string ^MemorySegment [^Arena a ^String s] (.allocateFrom a s))
 
@@ -192,15 +194,17 @@
     :or {max-branches 8 n-ctx 4096 n-batch 512 gpu-layers -1 swa-full true}}]
   (when-not (and (string? model) (.isFile (java.io.File. ^String model)))
     (throw (ex-info (str "llama/engine: no model file at " (pr-str model)) {:reason :no-model :model model})))
-  (when-not (and (integer? max-branches) (<= 1 max-branches (- max-seq 1)))
-    (throw (ex-info (str "llama/engine: :max-branches is 1 to " (- max-seq 1) " (llama.cpp's " max-seq
-                         " sequences, one kept for scoring), not " (pr-str max-branches))
-                    {:reason :invalid-option :max-branches max-branches})))
+  (LlamaRuntime/load)
+  ;; LLAMA_MAX_SEQ, 256 in v0.7.0
+  (let [max-seq (Llama/llama_max_parallel_sequences)]
+    (when-not (and (integer? max-branches) (<= 1 max-branches (dec max-seq)))
+      (throw (ex-info (str "llama/engine: :max-branches is 1 to " (dec max-seq) " (llama.cpp's " max-seq
+                           " sequences, one kept for scoring), not " (pr-str max-branches))
+                      {:reason :invalid-option :max-branches max-branches}))))
   (doseq [[k v ok?] [[:n-ctx n-ctx pos-int?] [:n-batch n-batch pos-int?] [:gpu-layers gpu-layers int?]
                      [:threads threads #(or (nil? %) (pos-int? %))]]]
     (when-not (ok? v)
       (throw (ex-info (str "llama/engine: bad " k ": " (pr-str v)) {:reason :invalid-option k v}))))
-  (LlamaRuntime/load)
   (LlamaRuntime/clearLastError)
   (let [n-slots (inc (long max-branches))
         n-batch (max (long n-batch) n-slots)
@@ -293,6 +297,18 @@
       (throw (ex-info (str "Not a token of the vocabulary (0 to " (dec (long n)) "): " (pr-str t))
                       {:reason :invalid-token :token t :n-vocab n})))))
 
+(defn- sized
+  "[n buf] of (go capacity), a llama.cpp call that returns the size it
+   wrote, or minus the size it needs: called again with that size once,
+   and a loud error if it still does not fit (or overflows)."
+  [what go ^long capacity]
+  (let [[n :as r] (go capacity)
+        n (long n)
+        [n :as r] (if (and (neg? n) (not= n Integer/MIN_VALUE)) (go (- n)) r)]
+    (when (neg? (long n))
+      (throw (ex-info (str what ": llama.cpp's result does not fit") {:reason :llama-failed :n n})))
+    r))
+
 (defn tokenize
   "The tokens of text, by the model's tokenizer: a vector. opts:
    :add-special? (default true) adds BOS (and EOS) as the model does;
@@ -309,10 +325,7 @@
                                         n (Llama/llama_tokenize (vocab-seg s) src (int (alength bytes)) out (int cap)
                                                                 (boolean add-special?) (boolean parse-special?))]
                                     [n out]))
-                             [n ^MemorySegment out] (let [[n :as r] (go (+ 8 (alength bytes)))]
-                                                      (if (neg? (long n)) (go (- (long n))) r))]
-                         (when (neg? (long n))
-                           (throw (ex-info "tokenize: llama.cpp could not tokenize the text" {:reason :tokenize-failed :n n})))
+                             [n ^MemorySegment out] (sized "tokenize" go (+ 8 (alength bytes)))]
                          (mapv long (.toArray (.asSlice out 0 (* 4 (long n))) ValueLayout/JAVA_INT)))))))))
 
 (defn token-bytes
@@ -325,7 +338,7 @@
                     (let [go (fn [^long cap]
                                (let [buf (.allocate a (max 1 cap))]
                                  [(Llama/llama_token_to_piece (vocab-seg s) (int token) buf (int cap) (int 0) true) buf]))
-                          [n ^MemorySegment buf] (let [[n :as r] (go 64)] (if (neg? (long n)) (go (- (long n))) r))]
+                          [n ^MemorySegment buf] (sized "token-bytes" go 64)]
                       (.toArray (.asSlice buf 0 (long n)) ValueLayout/JAVA_BYTE))))))
 
 (defn detokenize
@@ -340,8 +353,7 @@
                                  (let [buf (.allocate a (max 1 cap))]
                                    [(Llama/llama_detokenize (vocab-seg s) src (int (alength toks)) buf (int cap) false true)
                                     buf]))
-                            [n ^MemorySegment buf] (let [[n :as r] (go (* 8 (inc (alength toks))))]
-                                                     (if (neg? (long n)) (go (- (long n))) r))]
+                            [n ^MemorySegment buf] (sized "detokenize" go (* 8 (inc (alength toks))))]
                         (String. ^bytes (.toArray (.asSlice buf 0 (long n)) ValueLayout/JAVA_BYTE) "UTF-8")))))))
 
 (defn kv-positions

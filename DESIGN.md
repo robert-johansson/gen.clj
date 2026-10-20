@@ -657,8 +657,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     return successors, so a stale branch is a loud error, never another
     state; fork and score leave theirs alone.
   - dispose! frees at once and is loud on a branch that is not live; a
-    live branch dropped unreachable is freed by a phantom reference when
-    the engine needs its sequence (traces will hold branches).
+    live branch dropped unreachable is freed by a phantom reference at the
+    engine's next operation, and a GC runs when sequences or KV cells run
+    short (traces will hold branches). An unreachable engine is closed.
   - One platform thread per engine; the calls are synchronous.
   - score reads into a scratch copy, so no sequence ever loses its end
     (which hybrid models cannot undo); the cache is always unified (forks

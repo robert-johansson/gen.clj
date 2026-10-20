@@ -98,3 +98,74 @@
     (Thread/sleep 50)
     (is (= before (count (filter #(.startsWith (.getName ^Thread %) "gen.llm")
                                  (.keySet (Thread/getAllStackTraces))))))))
+
+(deftest forking-a-dead-branch-is-loud-even-zero-times
+  (with-open [e (toy/engine {})]
+    (let [b (br/open e [1 2])
+          [b2] (br/advance [b] [3])]
+      (is (= :not-live (:reason (ex-data (try (br/fork b 0) (catch Exception x x))))))
+      (is (= [] (br/fork b2 0)))
+      (br/dispose! b2))))
+
+(deftest an-interrupted-caller-still-gets-its-result
+  ;; the operation runs to its end on the engine's thread, consuming its
+  ;; branches: the caller gets the successors, its interrupt flag set again
+  (with-open [e (toy/engine {})]
+    (let [b (br/open e [1 2])
+          _ (.interrupt (Thread/currentThread))
+          [b2] (br/advance [b] [3])]
+      (is (Thread/interrupted) "the flag is set again (and cleared here)")
+      (is (= [1 2 3] (br/tokens b2)))
+      (is (br/live? b2))
+      (br/dispose! b2))))
+
+(deftest a-full-memory-collects-dropped-branches
+  ;; the toy holds 40 tokens: two dropped branches of 10 hold the room a
+  ;; read of 25 needs, and are freed when it finds none
+  (with-open [e (toy/engine {:max-cells 40})]
+    (let [keep (br/open e (vec (range 10)))]
+      (dotimes [i 2] (count (br/tokens (br/open e (vec (range i (+ i 10)))))))
+      (let [b (br/open e (vec (range 25)))]
+        (is (= 25 (br/position b)))
+        (is (= 2 (:live (br/info e))))
+        (is (= :kv-full (:reason (ex-data (try (br/open e (vec (range 10))) (catch Exception x x)))))
+            "with nothing to collect, a loud error")
+        (is (= 2 (:live (br/info e))) "the refused read left nothing")
+        (br/dispose! [keep b])))))
+
+(deftest dropped-branches-are-freed-by-the-next-operation
+  (with-open [e (toy/engine {})]
+    (let [b (br/open e [1 2 3])]
+      (count (br/fork b 5))
+      (is (loop [i 0]
+            (System/gc)
+            (br/score b [4])
+            (cond (= 1 (:live (br/info e))) true
+                  (< i 50) (do (Thread/sleep 20) (recur (inc i)))
+                  :else false))
+          "a score drains them: the live count is 1 again")
+      (br/dispose! b))))
+
+(deftest a-failed-resample-frees-its-branches
+  ;; copies do not fail by the Slots contract; if one does, resample frees
+  ;; every slot it was placing rather than leak them
+  (with-open [e (toy/engine {:bug :copy-fails})]
+    (let [a (br/open e [1]) b (br/open e [2])
+          x (try (br/resample [a b] [0 0 1 1]) (catch Exception x x))]
+      (is (re-find #"resample failed" (ex-message x)))
+      (is (= {:live 0 :free 8} (select-keys (br/info e) [:live :free])))
+      (let [c (br/open e [3])]
+        (is (= [3] (br/tokens c)) "the freed slots are empty and usable")
+        (br/dispose! c)))))
+
+(deftest an-unreachable-engine-is-closed
+  ;; dropped with its branches and never closed, the engine is closed by
+  ;; the GC, freeing its Slots (a model, for llama.cpp)
+  (let [closed (promise)]
+    (let [e (toy/engine {:on-close #(deliver closed true)})]
+      (count (br/tokens (br/open e [1 2]))))
+    (is (loop [i 0]
+          (System/gc)
+          (cond (realized? closed) true
+                (< i 100) (do (Thread/sleep 20) (recur (inc i)))
+                :else false)))))

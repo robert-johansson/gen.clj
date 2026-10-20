@@ -27,7 +27,10 @@
    - a step reading every row from its first token's logits:
      fork-matches-fresh, batch-matches-single, resample;
    - a run scoring each target with the row after the right one:
-     score-matches-steps.
+     score-matches-steps;
+   - no removal after a read that fails midway (Qwen3), and a removal that
+     never reports its slot lost (Qwen3.5, hybrid):
+     a-read-that-fails-midway-is-undone.
    CPU and CUDA builds have other kernels: measure their noise with the
    bench before trusting this band there."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
@@ -178,3 +181,70 @@
           (is (= :model-load-failed (:reason (ex-data x))))
           (is (string? (:llama-error (ex-data x))) "with llama.cpp's own message"))
         (finally (.delete junk))))))
+
+(deftest reads-longer-than-a-batch-agree
+  ;; with 16 tokens a decode, a 25-token prompt and a 40-token continuation
+  ;; are read in several decodes: the chunks' boundaries change nothing
+  (when-llama
+    (with-open [e ((llama 'engine) {:model model-path :max-branches 4 :n-ctx 512 :n-batch 16})]
+      (let [tokenize (llama 'tokenize)
+            prompt (tokenize e (str "Gen is a probabilistic programming system. Its generative functions"
+                                    " have traces, scores and weights, and its"))
+            continuation (tokenize e (str " inference library includes importance sampling, Markov chain"
+                                          " Monte Carlo with Metropolis-Hastings and Hamiltonian moves,"
+                                          " sequential Monte Carlo and particle filters with rejuvenation,"
+                                          " and black-box variational inference, all of them written"
+                                          " against the one generative function interface")
+                                   {:add-special? false})
+            o {:prompt prompt :continuation continuation :k 2 :band band}]
+        (is (< 16 (count prompt)) "the prompt takes more than one decode")
+        (is (< 32 (count continuation)) "the continuation takes three")
+        (doseq [k [:score-matches-steps :fork-matches-fresh]]
+          (testing k
+            (is (= [] (contract/run-check (contract/checks k) e o)))))))))
+
+(deftest a-read-that-fails-midway-is-undone
+  ;; 256 cells, 16 tokens a decode: branches of 150 and 60 tokens leave 46
+  ;; cells, room for two of the seven decodes a 100-token extension of a
+  ;; fork of the first needs. The third finds the cache full; what the
+  ;; first two added is removed, so the fork is as it was, or (a recurrent
+  ;; or hybrid model, which cannot remove the end of its state) freed,
+  ;; loudly. An open that fails midway leaves no branch.
+  (when-llama
+    (with-open [e ((llama 'engine) {:model model-path :max-branches 3 :n-ctx 256 :n-batch 16})]
+      (let [{:keys [recurrent? hybrid?]} (:model (br/info e))
+            slot-of #(.-slot ^gen.llm.branching.Branch %)
+            a (br/open e (vec (repeat 150 1000)))
+            b (br/open e (vec (repeat 60 2000)))
+            f (br/fork a)
+            x (try (br/extend f (vec (repeat 100 3000))) (catch Exception x x))
+            positions ((llama 'kv-positions) e)]
+        (is (= :kv-full (:reason (ex-data x))) (pr-str x))
+        (if (or recurrent? hybrid?)
+          (do (is (= [(slot-of f)] (:lost-slots (ex-data x))))
+              (is (not (br/live? f)))
+              (is (= [-1 -1] (positions (slot-of f)))))
+          (do (is (nil? (:lost-slots (ex-data x))))
+              (is (br/live? f))
+              (is (= [0 149] (positions (slot-of f))) "the two decodes' tokens are gone")
+              (br/dispose! f)))
+        (let [y (try (br/open e (vec (repeat 100 4000))) (catch Exception x x))]
+          (is (= :kv-full (:reason (ex-data y))) (pr-str y)))
+        (is (= 2 (:live (br/info e))) "the refused open left no branch")
+        (is (= 1 (count (filter #(= [-1 -1] %) (butlast ((llama 'kv-positions) e)))))
+            "its slot is empty")
+        (let [[a2 b2] (br/advance [a b] [1000 2000])]
+          (is (= [151 61] (map br/position [a2 b2])) "the others still advance")
+          (br/dispose! [a2 b2]))))))
+
+(deftest a-full-cache-collects-dropped-branches
+  ;; a dropped branch's cells are what a read needs: the engine collects it
+  ;; and reads again
+  (when-llama
+    (with-open [e ((llama 'engine) {:model model-path :max-branches 3 :n-ctx 256})]
+      (let [a (br/open e (vec (repeat 100 1000)))]
+        (count (br/tokens (br/open e (vec (repeat 100 2000)))))
+        (let [c (br/open e (vec (repeat 100 3000)))]
+          (is (= 100 (br/position c)))
+          (is (= 2 (:live (br/info e))))
+          (br/dispose! [a c]))))))

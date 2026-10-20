@@ -8,13 +8,20 @@
    are distinct; at most n-batch tokens a decode), so the bookkeeping of
    gen.llm.slots is tested on every call.
 
-   (engine {:n-vocab :max-branches :n-ctx :n-batch :bug})
+   (engine {:n-vocab :max-branches :n-ctx :n-batch :max-cells :on-close :bug})
+   :max-cells bounds the tokens held in all slots together, as llama.cpp's
+   KV cells (but copies count again: the toy shares nothing): a run or step
+   past it throws {:reason :kv-full :exhausted? true}, changing nothing.
+   :on-close is called when the engine closes.
    :bug plants one mutation of a Slots operation, for the power tests:
      :copy-perturbs  a copy changes the last token of its destination
      :step-rotates   a step returns its rows rotated by one
      :step-ignores   a step reads token 0, not the token given
      :run-shifts     a run's scores read the target after the next token
-     :run-stale      a run returns the distribution before its last token"
+     :run-stale      a run returns the distribution before its last token
+     :copy-fails     every second copy throws (copies must not, by the
+                     Slots contract: for the tests of what the engine does
+                     if one does)"
   (:require [gen.llm.slots :as slots]))
 
 (set! *warn-on-reflection* true)
@@ -49,7 +56,14 @@
 (defn- fail [msg data]
   (throw (ex-info (str "toy engine: " msg) data)))
 
-(deftype ToySlots [^long n-vocab ^long n-slots ^long n-ctx ^long n-batch ^objects contents bug]
+(defn- check-cells [^objects contents max-cells more]
+  (when max-cells
+    (let [held (areduce contents i n 0 (+ n (count (aget contents i))))]
+      (when (< (long max-cells) (+ held (long more)))
+        (throw (ex-info "toy engine: no room for the tokens" {:reason :kv-full :exhausted? true}))))))
+
+(deftype ToySlots [^long n-vocab ^long n-slots ^long n-ctx ^long n-batch ^objects contents bug max-cells on-close
+                   copies]
   slots/Slots
   (slots-info [_] {:n-vocab n-vocab :n-slots n-slots :n-ctx n-ctx :n-batch n-batch :engine :toy})
 
@@ -59,6 +73,7 @@
         (fail "a run starts away from the end of its slot" {:slot slot :pos pos :have (count have)}))
       (when (and targets (not= (count targets) (dec (count tokens))))
         (fail "a run's targets are one fewer than its tokens" {:tokens (count tokens) :targets (count targets)}))
+      (check-cells contents max-cells (count tokens))
       (let [all (into have tokens)
             scores (when targets
                      (double-array
@@ -73,6 +88,7 @@
   (slots-step [_ slots positions tokens]
     (when-not (apply distinct? slots) (fail "a step's slots repeat" {:slots slots}))
     (when (< n-batch (count slots)) (fail "a step over n-batch" {:n (count slots)}))
+    (check-cells contents max-cells (count slots))
     (let [rows (mapv (fn [slot pos t]
                        (let [have (aget contents slot)]
                          (when-not (= pos (count have))
@@ -85,6 +101,8 @@
 
   (slots-copy [_ src dst]
     (when (seq (aget contents dst)) (fail "a copy into a slot that is not empty" {:src src :dst dst}))
+    (when (and (= bug :copy-fails) (odd? (vswap! copies inc)))
+      (fail "a copy failed (planted)" {:src src :dst dst}))
     (let [have (aget contents src)]
       (aset contents dst (if (and (= bug :copy-perturbs) (seq have))
                            (conj (pop have) (mod (inc (long (peek have))) n-vocab))
@@ -92,10 +110,12 @@
 
   (slots-clear [_ slot] (aset contents slot []))
 
-  (slots-close [_] nil))
+  (slots-close [_] (when on-close (on-close))))
 
 (defn engine
-  [{:keys [n-vocab max-branches n-ctx n-batch bug] :or {n-vocab 97 max-branches 8 n-ctx 256 n-batch 64}}]
+  [{:keys [n-vocab max-branches n-ctx n-batch bug max-cells on-close]
+    :or {n-vocab 97 max-branches 8 n-ctx 256 n-batch 64}}]
   (let [n-slots (inc max-branches)]
-    (slots/engine #(ToySlots. n-vocab n-slots n-ctx n-batch (object-array (repeat n-slots [])) bug)
+    (slots/engine #(ToySlots. n-vocab n-slots n-ctx n-batch (object-array (repeat n-slots [])) bug max-cells on-close
+                              (volatile! 0))
                   "toy")))

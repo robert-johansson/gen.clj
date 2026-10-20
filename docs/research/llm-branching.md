@@ -81,10 +81,12 @@ properties are `gen.llama.lib`, `gen.llama.log` and (tests)
   its successor's sequence, and is most likely a bug. **Recommendation.**
 - **Dropped branches are freed (a GC backstop).** A live branch that becomes
   unreachable is freed by the engine: a phantom reference per live branch,
-  drained on the engine thread before each operation; when slots run short
-  the engine runs the GC and drains again before refusing
-  (`:no-free-branches`). A consumed branch's reference is cleared, so
-  collecting it frees nothing. *Why:* the token GF (genclj-0cvv) will keep
+  drained on the engine thread at the start of every operation (so `:live`
+  counts dropped branches until then). When slots run short, or a read
+  finds the KV cache full (a dropped branch's cells may be what is
+  missing), the engine runs the GC, frees what it found, and tries once
+  more before refusing (`:no-free-branches`, `:kv-full`). A consumed
+  branch's reference is cleared, so collecting it frees nothing. *Why:* the token GF (genclj-0cvv) will keep
   branches in traces, which inference drops freely (a rejected MH proposal);
   explicit disposal there would need GenMLX's scopes. This is MLX's array
   lifetime (`MlxRuntime/adopt`) applied to sequences, and like it lives in
@@ -92,15 +94,22 @@ properties are `gen.llama.lib`, `gen.llama.log` and (tests)
   exhaustion an error. **Recommendation.**
 - **Engines are closed explicitly** (`java.io.Closeable`, `with-open`);
   closing frees the model and context, and branches keep their values. An
-  unreachable open engine is not closed by the GC (its thread keeps it).
+  engine that becomes unreachable with all its branches is closed by a
+  `Cleaner`: on JDK 25 its executor would otherwise shut itself down when
+  collected and leave the model and context allocated (found by the
+  review). Relying on that for gigabytes of weights is a last resort;
+  close engines.
 
 ## Threading
 
 One platform thread per engine (`gen.llm.slots`): every native call runs
 there. The operations are synchronous: they submit a task and wait, so
 callers on any thread (virtual threads included) are serialized; a call made
-on the engine's own thread runs at once. No futures in the API (DESIGN.md §8:
-the core is synchronous). An autobatcher (genclj-mse0) coalesces concurrent
+on the engine's own thread runs at once. A caller interrupted while it
+waits still gets the result, its interrupt flag set again: the operation
+runs to its end regardless and has consumed its branches, so throwing would
+lose their successors. No futures in the API (DESIGN.md §8: the core is
+synchronous). An autobatcher (genclj-mse0) coalesces concurrent
 requests above this layer, into `advance` batches.
 
 ## The structure: one engine machinery, small per-engine operations
@@ -137,9 +146,13 @@ directly (resampling as one lane gather).
   Qwen3.5-0.8B (`qwen35`, hybrid): the whole contract passes, so forks,
   resampled children and scratch scores of the shared recurrent state are
   right, and advancing a fork leaves its parent's state alone. A hybrid
-  slot's `seq_pos_min` is its recurrent state's, the last position. The
-  `:lost-slots` path (a fatal decode error on a recurrent model) is not
-  provoked by any test.
+  slot's `seq_pos_min` is its recurrent state's, the last position. A
+  removal is trusted only if the slot then ends where it should
+  (`seq_pos_max` = pos - 1). The `:lost-slots` path is tested: a hybrid
+  fork whose extension finds the cache full after two of its decodes cannot
+  be rolled back (v0.7.0's recurrent `seq_rm` refuses), so it is freed,
+  loudly; on an attention model the same failure leaves the fork as it
+  was.
 - **Sliding-window models** (Gemma): `swa_full` by default, so a branch
   keeps every token a fork may need. Tested with Gemma-3-270M (window 512;
   llama.cpp logs "using full-size SWA cache"): the contract passes. No test
@@ -227,12 +240,41 @@ have other kernels: measure them with the bench before using the band there.
 - **Not done here:** Linux CUDA and CPU builds (written, not run), MLX and
   llama.cpp in one test JVM (the spike showed it), the 8B and 30B models.
 
+## The review
+
+An independent review of the branch (an agent, 2026-10-20: fuzzing the toy
+engine's bookkeeping over random operation sequences, with and without
+injected failures, and reading llama.cpp's source) found no path to a
+`GGML_ASSERT` or an FFM fault, and these, all fixed with a test that fails
+without the fix:
+1. A removal after a failed decode was trusted when `seq_rm` returned true;
+   now the slot must also end at pos - 1 (in v0.7.0 the recurrent `seq_rm`
+   already refuses the removal the review feared; the check guards other
+   versions).
+2. The GC backstop covered slots but not KV cells: a dropped branch's cells
+   could make a read fail `:kv-full` with nothing freed. Now a full cache
+   collects and retries, and every operation drains first.
+3. An unreachable engine leaked its model (JDK 25's self-closing executor).
+   Now a `Cleaner` closes it.
+4. resample leaked slots if a copy threw. Copies do not fail by the
+   `Slots` contract, but resample now frees what it was placing.
+5. No test read more than `n_batch` tokens. Now a 16-token batch reads a
+   25-token prompt and a 40-token continuation against step-by-step scores,
+   and a read fails midway (above).
+6. `(fork b 0)` of a dead branch returned `[]`; now it is loud.
+7. An interrupted caller lost an operation's result; now it waits it out.
+8. Docs said drains ran before every operation; now they do.
+9. Smaller: `slots-info` ran off the engine thread; a second sizing failure
+   in `token-bytes`/`detokenize` was an `IndexOutOfBoundsException`;
+   `:max-branches` is checked against `llama_max_parallel_sequences`; two
+   contract checks compared an array with itself and are gone.
+
 ## Models tested
 
 All on the owner's MacBook Pro (M2 Max, 64 GB, macOS 27, Metal, Oracle
 GraalVM 25.0.4), under `~/gen-clj-spikes/mguard.sh`, one model-holding JVM
 at a time; `gen.llm.branching-test` and `gen.llm.llama-test` pass with each
-(14 tests, 94 assertions). Each sha256 below is Hugging Face's, checked on
+(23 tests, 122 assertions, after the review's fixes). Each sha256 below is Hugging Face's, checked on
 download.
 
 | Model | Repository / file | sha256 | Kind |

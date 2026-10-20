@@ -6,7 +6,9 @@
 
    - One thread per engine. Every Slots call runs on it; the Branching
      operations submit a task and wait (or run at once when called from the
-     engine's thread), so callers on any thread are serialized.
+     engine's thread), so callers on any thread are serialized. A caller
+     interrupted while it waits still gets the result (its interrupt flag
+     set again), since the operation has consumed its branches.
    - Each live branch owns one slot. The engine keeps one more, the scratch
      slot, for score, which copies its branch there and reads the
      continuation without touching the branch: no partial removal, which
@@ -17,18 +19,22 @@
      always empty (cleared when freed), since a copy adds to what its
      destination holds.
    - Lifetime: dispose! frees a slot at once. A live branch that becomes
-     unreachable is freed too (a phantom reference the engine thread
-     drains before each operation); when slots run short the engine runs
-     the GC and drains again before it refuses. A consumed branch owns
-     nothing, so collecting it frees nothing.
+     unreachable is freed too: a phantom reference the engine drains at the
+     start of each operation (so :live counts dropped branches until then).
+     When slots run short, or a read finds the engine's memory full (a full
+     KV cache), the engine runs the GC, frees what it found and tries again
+     before it refuses. A consumed branch owns nothing, so collecting it
+     frees nothing. An engine that becomes unreachable (with its branches)
+     is closed; close it explicitly to free its model when you are done.
    - Every check runs before any Slots call, and a failed call leaves the
-     slots as they were, so an error never leaves a branch half-advanced:
-     llama.cpp aborts the process on some misuse (an out-of-range sequence
-     id, a batch over n_batch), so nothing reaches it unchecked."
+     slots as they were, or frees them and their branches, loudly, so an
+     error never leaves a branch half-advanced: llama.cpp aborts the
+     process on some misuse (an out-of-range sequence id, a batch over
+     n_batch), so nothing reaches it unchecked."
   (:require [gen.llm.branching :as br])
   (:import [gen.llm.branching Branch]
-           [java.lang.ref PhantomReference ReferenceQueue]
-           [java.util.concurrent Callable ExecutionException ExecutorService Executors
+           [java.lang.ref Cleaner PhantomReference ReferenceQueue]
+           [java.util.concurrent Callable ExecutionException ExecutorService Executors Future
             RejectedExecutionException ThreadFactory]))
 
 (set! *warn-on-reflection* true)
@@ -41,7 +47,9 @@
    into decodes as it needs. Log-probabilities are float arrays of n-vocab
    entries.
    A run or step that throws leaves its slots as they were, unless its
-   ex-data names :lost-slots, which the caller then frees."
+   ex-data names :lost-slots, which the caller then frees. One that throws
+   with :exhausted? in its ex-data (a full KV cache) is retried once after
+   the GC has freed dropped branches. copy and clear do not fail."
   (slots-info [s] "{:n-vocab :n-slots :n-ctx …}, fixed for the engine's life")
   (slots-run [s slot pos tokens targets]
     "Read tokens (a vector) into slot, whose contents end at pos:
@@ -62,21 +70,32 @@
 (defn- closed-error [what]
   (ex-info (str what ": the engine is closed") {:reason :closed}))
 
+(defn- await-result
+  "The value of fut, waiting through interrupts (the task runs to its end
+   anyway, and its result must not be lost), with the interrupt flag set
+   again after."
+  [^Future fut]
+  (loop [interrupted? false]
+    (let [r (try
+              [:value (.get fut)]
+              (catch InterruptedException _ ::interrupted)
+              (catch ExecutionException e [:thrown (.getCause e)]))]
+      (if (= r ::interrupted)
+        (recur true)
+        (do (when interrupted? (.interrupt (Thread/currentThread)))
+            (let [[k v] r]
+              (if (= k :thrown) (throw v) v)))))))
+
 (defn- run-on
   "Run (f) on the engine's thread and return its value (or throw what it
    threw), waiting for it."
   [^ExecutorService exec ^Thread thread f what]
   (if (identical? (Thread/currentThread) thread)
     (f)
-    (let [^java.util.concurrent.Future fut
-          (try
-            (.submit exec ^Callable f)
-            (catch RejectedExecutionException _
-              (throw (closed-error what))))]
-      (try
-        (.get fut)
-        (catch ExecutionException e
-          (throw (.getCause e)))))))
+    (await-result (try
+                    (.submit exec ^Callable f)
+                    (catch RejectedExecutionException _
+                      (throw (closed-error what)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The engine's books (engine thread only)
@@ -127,17 +146,21 @@
 
 (defn- release-ref!
   "A phantom reference came off the queue: free its branch's slot if the
-   branch is still live (it was dropped, not consumed)."
-  [e ref]
+   branch is still live (it was dropped, not consumed). Returns 1 if it
+   freed one."
+  ^long [e ref]
   (let [st @(state e)
         id (get (:refs st) ref)
         entry (get (:live st) id)]
     (vswap! (state e) update :refs dissoc ref)
-    (when entry
-      (slots-clear (spi e) (:slot entry))
-      (vswap! (state e) #(-> % (update :live dissoc id) (update :free conj (:slot entry)))))))
+    (if entry
+      (do (slots-clear (spi e) (:slot entry))
+          (vswap! (state e) #(-> % (update :live dissoc id) (update :free conj (:slot entry))))
+          1)
+      0)))
 
 (defn- drain!
+  "Free the slots of the dropped branches the GC has found."
   [^SlotEngine e]
   (loop []
     (when-let [r (.poll ^ReferenceQueue (.-queue e))]
@@ -145,19 +168,37 @@
       (recur))))
 
 (defn- collect!
-  "Run the GC and free the slots of the unreachable branches it finds."
-  [^SlotEngine e]
+  "Run the GC and free the slots of the unreachable branches it finds: how
+   many."
+  ^long [^SlotEngine e]
   (System/gc)
   ;; the reference handler enqueues what the GC found after the GC returns
-  (loop [wait 100]
-    (when-let [r (.remove ^ReferenceQueue (.-queue e) wait)]
-      (release-ref! e r)
-      (recur 10))))
+  (loop [wait 100 freed 0]
+    (if-let [r (.remove ^ReferenceQueue (.-queue e) wait)]
+      (recur 10 (+ freed (release-ref! e r)))
+      freed)))
+
+(defn- begin!
+  "Every operation's start: the engine is open, and dropped branches are
+   freed."
+  [e what]
+  (check-open e what)
+  (drain! e))
+
+(defn- retrying
+  "(f), and once more after a collection if it failed for want of memory
+   (:exhausted?, the slots restored) and the GC freed a dropped branch."
+  [e f]
+  (try
+    (f)
+    (catch clojure.lang.ExceptionInfo x
+      (if (and (:exhausted? (ex-data x)) (pos? (collect! e)))
+        (f)
+        (throw x)))))
 
 (defn- ensure-free!
   "At least n free slots, collecting unreachable branches if need be."
   [e n what]
-  (drain! e)
   (when (< (count (:free @(state e))) n)
     (collect! e)
     (let [free (count (:free @(state e)))]
@@ -237,36 +278,36 @@
   (double (aget ^floats (.-logprobs b) (int t))))
 
 (defn- open* [e tokens]
-  (check-open e "open")
+  (begin! e "open")
   (check-room e 0 (count tokens) "open")
   (ensure-free! e 1 "open")
   (let [[slot] (take-slots! e 1)
         r (try
-            (slots-run (spi e) slot 0 tokens nil)
+            (retrying e #(slots-run (spi e) slot 0 tokens nil))
             (catch Throwable t
               (free-slot! e slot)
               (throw t)))]
     (make-branch! e tokens (:logprobs r) slot)))
 
 (defn- fork* [e ^Branch b n]
-  (check-open e "fork")
+  (begin! e "fork")
   (let [{:keys [slot]} (entry! e b "fork")]
     (ensure-free! e n "fork")
     (let [ss (take-slots! e n)]
       (try
         (doseq [s ss] (slots-copy (spi e) slot s))
         (catch Throwable t
-          (doseq [s ss] (free-slot! e s))
+          (run! #(free-slot! e %) ss)
           (throw t)))
       (mapv #(make-branch! e (.-tokens b) (.-logprobs b) %) ss))))
 
 (defn- advance* [e bs ts]
-  (check-open e "advance")
+  (begin! e "advance")
   (let [slots (mapv #(:slot (entry! e % "advance")) bs)
         positions (mapv br/position bs)]
     (doseq [p positions] (check-room e p 1 "advance"))
     (let [rows (try
-                 (slots-step (spi e) slots positions ts)
+                 (retrying e #(slots-step (spi e) slots positions ts))
                  (catch Throwable t
                    (lose! e t)
                    (throw t)))]
@@ -275,12 +316,12 @@
             bs ts rows slots))))
 
 (defn- extend* [e ^Branch b ts]
-  (check-open e "extend")
+  (begin! e "extend")
   (let [{:keys [slot]} (entry! e b "extend")
         pos (br/position b)]
     (check-room e pos (count ts) "extend")
     (let [r (try
-              (slots-run (spi e) slot pos ts (subvec ts 1))
+              (retrying e #(slots-run (spi e) slot pos ts (subvec ts 1)))
               (catch Throwable t
                 (lose! e t)
                 (throw t)))]
@@ -289,7 +330,7 @@
        :scores (into [(logprob b (first ts))] (:scores r))})))
 
 (defn- score* [e ^Branch b ts]
-  (check-open e "score")
+  (begin! e "score")
   (let [{:keys [slot]} (entry! e b "score")
         m (count ts)
         pos (br/position b)
@@ -302,7 +343,7 @@
         (check-room e pos (dec m) "score")
         (slots-copy (spi e) slot scratch)
         (try
-          (let [r (slots-run (spi e) scratch pos (subvec ts 0 (dec m)) (subvec ts 1 (dec m)))]
+          (let [r (retrying e #(slots-run (spi e) scratch pos (subvec ts 0 (dec m)) (subvec ts 1 (dec m))))]
             (-> [first-lp]
                 (into (:scores r))
                 (conj (double (aget ^floats (:logprobs r) (int (peek ts)))))))
@@ -310,7 +351,7 @@
             (slots-clear (spi e) scratch)))))))
 
 (defn- resample* [e bs ancestors]
-  (check-open e "resample")
+  (begin! e "resample")
   (let [slots (mapv #(:slot (entry! e % "resample")) bs)
         children (frequencies ancestors)
         dead (remove children (range (count bs)))
@@ -319,22 +360,32 @@
     (ensure-free! e (max 0 (- extra (count dead))) "resample")
     (run! #(consume! e %) bs)
     (doseq [i dead] (free-slot! e (slots i)))
-    (let [placed (loop [j 0 used #{} out []]
-                   (if (= j (count ancestors))
-                     out
-                     (let [i (ancestors j)]
-                       (if (used i)
-                         (let [[s] (take-slots! e 1)]
-                           (slots-copy (spi e) (slots i) s)
-                           (recur (inc j) used (conj out [i s])))
-                         (recur (inc j) (conj used i) (conj out [i (slots i)]))))))]
+    ;; the survivors' slots and the copies' are owned by no branch until
+    ;; the children are made: if a copy fails (copies do not, by the Slots
+    ;; contract), free them all rather than leak them
+    (let [held (volatile! (mapv slots (keys children)))
+          placed (try
+                   (loop [j 0 used #{} out []]
+                     (if (= j (count ancestors))
+                       out
+                       (let [i (ancestors j)]
+                         (if (used i)
+                           (let [[s] (take-slots! e 1)]
+                             (vswap! held conj s)
+                             (slots-copy (spi e) (slots i) s)
+                             (recur (inc j) used (conj out [i s])))
+                           (recur (inc j) (conj used i) (conj out [i (slots i)]))))))
+                   (catch Throwable t
+                     (run! #(free-slot! e %) @held)
+                     (throw (ex-info (str "resample failed; its branches are freed: " (ex-message t))
+                                     (assoc (ex-data t) :freed-slots @held) t))))]
       (mapv (fn [[i s]]
               (let [^Branch p (bs i)]
                 (make-branch! e (.-tokens p) (.-logprobs p) s)))
             placed))))
 
 (defn- dispose* [e bs]
-  (check-open e "dispose!")
+  (begin! e "dispose!")
   (let [slots (mapv #(:slot (entry! e % "dispose!")) bs)]
     (run! #(consume! e %) bs)
     (run! #(free-slot! e %) slots)
@@ -350,6 +401,24 @@
 ;; Construction
 ;; ---------------------------------------------------------------------------
 
+(defonce ^:private cleaner (Cleaner/create))
+
+(defn- close-unreachable
+  "The Cleaner's action for an engine no one can reach any more: close it
+   on its thread (holding what it needs, never the engine)."
+  [^ExecutorService exec spi state]
+  (fn []
+    (try
+      (.get (.submit exec ^Callable (fn []
+                                      (when-not (:closed? @state)
+                                        (vswap! state assoc :closed? true)
+                                        (slots-close spi)))))
+      (catch Throwable _
+        ;; closed already (the executor refuses), or the close failed:
+        ;; nothing may escape a Cleaner's action
+        nil)
+      (finally (.shutdown exec)))))
+
 (defn engine
   "A Branching engine (java.io.Closeable) over the Slots made by (make-spi),
    which runs on the engine's new thread, named name. Its last slot is
@@ -362,22 +431,23 @@
                       (deliver thread t)
                       t)))
         exec (Executors/newSingleThreadExecutor factory)
-        spi (try
-              (.get (.submit exec ^Callable make-spi))
-              (catch ExecutionException e
-                (.shutdown exec)
-                (throw (.getCause e))))
-        info (slots-info spi)
+        [spi info] (try
+                     (.get (.submit exec ^Callable #(let [s (make-spi)] [s (slots-info s)])))
+                     (catch ExecutionException e
+                       (.shutdown exec)
+                       (throw (.getCause e))))
         n-slots (long (:n-slots info))]
     (when (< n-slots 2)
       (.get (.submit exec ^Callable #(slots-close spi)))
       (.shutdown exec)
       (throw (ex-info "An engine needs at least two slots (one for scoring)" {:n-slots n-slots})))
-    (SlotEngine. spi
-                 (assoc info :max-branches (dec n-slots) :scratch-slot (dec n-slots))
-                 exec @thread (ReferenceQueue.)
-                 (volatile! {:live {} :refs {} :free (into (sorted-set) (range (dec n-slots)))
-                             :next-id 0 :closed? false}))))
+    (let [state (volatile! {:live {} :refs {} :free (into (sorted-set) (range (dec n-slots)))
+                            :next-id 0 :closed? false})
+          e (SlotEngine. spi
+                         (assoc info :max-branches (dec n-slots) :scratch-slot (dec n-slots))
+                         exec @thread (ReferenceQueue.) state)]
+      (.register ^Cleaner cleaner e (close-unreachable exec spi state))
+      e)))
 
 (defn call
   "(f spi) on the engine's thread, for engine-specific operations

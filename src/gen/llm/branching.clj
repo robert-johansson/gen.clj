@@ -168,7 +168,7 @@
    (let [b (->branch branch)]
      (when-not (and (integer? n) (<= 0 (long n)))
        (throw (ex-info (str "fork: n is a non-negative integer, not " (pr-str n)) {:reason :invalid-count :n n})))
-     (if (zero? (long n)) [] (-fork (.-engine b) b (long n))))))
+     (-fork (.-engine b) b (long n)))))
 
 (defn advance
   "Each branch advanced by its token, all in one decode: a vector of new
