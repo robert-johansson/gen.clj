@@ -1,9 +1,11 @@
 # The Branching protocol and the llama.cpp engine
 
-*2026-10-20, bean genclj-kwxd (M3's first). Built by an agent; **every choice
-below is for the owner's review**, and those that are the owner's to make
-(names, lifetime policy, additions to DESIGN.md §6's list) are marked
-**Recommendation**. Summarized in DESIGN.md §6 and §9.*
+*2026-10-20, bean genclj-kwxd (M3's first). Built by an agent; the choices
+that were the owner's to make (names, lifetime policy, additions to
+DESIGN.md §6's list), marked **Approved**, were approved by the owner the
+same day, as were the smaller ones: the scratch slot for `score`, the
+unified cache, full-size sliding-window layers, and host floats in the
+engine layer. Summarized in DESIGN.md §6 and §9.*
 
 ## What exists
 
@@ -51,7 +53,11 @@ an engine is made. Nothing in L0–L5 requires `gen.llm.*`.
 | `(tokens b)`, `(position b)`, `(logprobs b)`, `(logprob b t)` | the branch's value |
 | `llama/tokenize`, `llama/token-bytes`, `llama/detokenize`, `llama/kv-positions`, `llama/system-info` | the engine's own: the GGUF's tokenizer, raw byte pieces, diagnostics |
 
-**Recommendation (names).** DESIGN.md §6 lists open · fork · advance-batch ·
+Engines never sample: they give log-probabilities only, so a token is drawn
+by gen.random with its site's key (CLAUDE.md rule 2), and no engine adds
+llama.cpp's sampler (owner, 2026-10-20).
+
+**Approved (owner, 2026-10-20): the names.** DESIGN.md §6 listed open · fork · advance-batch ·
 dispose · teacher-forced score · resample. Here `advance` is the batch
 operation (one branch is a batch of one), `dispose!` carries a bang, and
 `extend` is **an addition**: a teacher-forced multi-token advance returning
@@ -75,10 +81,10 @@ properties are `gen.llama.lib`, `gen.llama.log` and (tests)
   *Why:* llama.cpp's state is mutable; with mutable handles (`advance!`), a
   second reference to an advanced branch would silently read the new state.
   Consumption makes that misuse loud at the cost of a fork where an old state
-  must be kept. **Recommendation.**
+  must be kept. **Approved (owner, 2026-10-20).**
 - **dispose! is loud on a non-live branch** (GenMLX's `dispose-branch!` is
   idempotent). A consumed branch owns nothing, so disposing it must not free
-  its successor's sequence, and is most likely a bug. **Recommendation.**
+  its successor's sequence, and is most likely a bug. **Approved (owner, 2026-10-20).**
 - **Dropped branches are freed (a GC backstop).** A live branch that becomes
   unreachable is freed by the engine: a phantom reference per live branch,
   drained on the engine thread at the start of every operation (so `:live`
@@ -91,7 +97,7 @@ properties are `gen.llama.lib`, `gen.llama.log` and (tests)
   explicit disposal there would need GenMLX's scopes. This is MLX's array
   lifetime (`MlxRuntime/adopt`) applied to sequences, and like it lives in
   the native membrane. The alternative is explicit disposal only, with
-  exhaustion an error. **Recommendation.**
+  exhaustion an error. **Approved (owner, 2026-10-20).**
 - **Engines are closed explicitly** (`java.io.Closeable`, `with-open`);
   closing frees the model and context, and branches keep their values. An
   engine that becomes unreachable with all its branches is closed by a

@@ -255,7 +255,7 @@ linalg and quantized matmul.
 LLM generative functions   token GF · grammar middleware · token SMC · structured output
 LM protocol                vocab/encode/decode · next-logprobs · batch-next-logprobs · score   (genlm-shaped,
                            content-addressed, with a token-prefix trie + autobatcher)
-Branching protocol         open · fork · advance-batch · dispose · teacher-forced score · resample
+Branching protocol         open · fork · advance · extend · score · resample · dispose!
 engines                    llama.cpp (llama.h via our own filtered jextract FFM)  |  MLX-native forwards (later)
 ```
 
@@ -286,7 +286,7 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
   - HTTP servers: only top-k logprobs.
 - **Open risk.** Loading llama.cpp's ggml-metal and MLX's Metal backend in one
   process. Spike bean.
-- **As built (2026-10-20, genclj-kwxd; for the owner's review,
+- **As built (2026-10-20, genclj-kwxd; approved by the owner the same day,
   `docs/research/llm-branching.md`).** The binding is jextract's over
   llama.h v0.7.0 (`native/jextract-llama.sh`, sources committed, the
   library's version checked at load), and llama.cpp builds with
@@ -649,8 +649,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   Diffed propagation) come after, on the graph. The graph is also the way
   to compiled scores, batching without the tracer, and CUDA graphs: a fixed
   structure runs the same kernels every time.
-- **The Branching protocol and the llama.cpp engine** (2026-10-20, agent,
-  for the owner's review; `docs/research/llm-branching.md`):
+- **The Branching protocol and the llama.cpp engine** (2026-10-20, agent;
+  approved by the owner the same day; `docs/research/llm-branching.md`):
   - A branch is a value (its tokens and next-token log-probabilities,
     float arrays normalized in double) holding a state, a KV-cache
     sequence. advance, extend and resample consume their branches and
@@ -660,14 +660,26 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     live branch dropped unreachable is freed by a phantom reference at the
     engine's next operation, and a GC runs when sequences or KV cells run
     short (traces will hold branches). An unreachable engine is closed.
+    The GC is a last resort: resample frees the dead itself, and with
+    `-XX:+DisableExplicitGC` an exhausted engine is a loud error. Memory
+    management stays in the native membrane, out of semantics code (rule
+    3), as with MLX's arrays.
   - One platform thread per engine; the calls are synchronous.
   - score reads into a scratch copy, so no sequence ever loses its end
     (which hybrid models cannot undo); the cache is always unified (forks
     copy metadata), sliding-window layers full-size; at most 255 branches.
   - `extend`, a teacher-forced advance with its scores, is added to the
-    list above; the names are the agent's.
+    list above; `advance` is the batch operation, `dispose!` has a bang.
   - The engine layer computes on host floats with clojure.core, not
     gen.array (it sits below the GFI, like a backend).
+  - **Engines never sample.** They give log-probabilities only, so a token
+    is drawn by gen.random with its site's key (rule 2); no engine adds
+    llama.cpp's sampler.
+  - *Open, for genclj-0cvv:* scores depend on batch shape (up to 5e-2
+    nats a token), so law 2 (score = assess's weight) holds exactly only
+    if simulate and assess compute a sequence in the same shapes;
+    otherwise it needs a band. The agent's lean is exact; the owner
+    decides when that bean starts.
 - **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
   `(array/item x)`, the namespace's last segment, as the Clojure style guide
   has it. It replaced `a`, which the owner found ugly (2026-10-18). The
