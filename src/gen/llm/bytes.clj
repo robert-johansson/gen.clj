@@ -14,7 +14,16 @@
    and the tokens under it are one contiguous run: a walk over every token
    from a DFA state (a grammar's mask) visits each shared prefix once and
    skips a dead subtree in one jump, allocating nothing. Tokens with no
-   bytes are kept apart (bare).")
+   bytes are kept apart (bare).
+
+   And a text's probability under an LM, marginalizing over the ways
+   tokens spell it (as GenMLX's bytes.cljs and genlm-bytes):
+
+     (byte-lm lm opts)                    → lm read as bytes (opts :eos, :beam)
+     (prefix-logprob b prompt text)       → log P(the text after prompt begins with text)
+     (text-logprob b prompt text)         → log P(the text is text, then ends)
+     (next-byte-logprobs b prompt text)   → each next byte's, and the end's"
+  (:require [gen.llm.lm :as lm]))
 
 (set! *warn-on-reflection* true)
 (set! *unchecked-math* :warn-on-boxed)
@@ -174,3 +183,144 @@
                           (recur (inc j)))))))
                 (recur (inc i)))))))
     mask))
+
+;; ---------------------------------------------------------------------------
+;; A text's probability, over its tokenizations
+;; ---------------------------------------------------------------------------
+
+(defn log-mass
+  "log Σ exp(row[t]) over the tokens under node (-Inf for none): a
+   contiguous run of the trie's tokens."
+  ^double [^ByteTrie trie ^floats row ^long node]
+  (let [^ints tokens (.-tokens trie)
+        ^ints first (.-first trie)
+        lo (aget first node)
+        hi (aget first (aget ^ints (.-end trie) node))]
+    ;; one pass: the running maximum m, and the sum of exp(x - m)
+    (loop [j lo m Double/NEGATIVE_INFINITY s 0.0]
+      (if (< j hi)
+        (let [x (double (aget row (aget tokens j)))]
+          (cond (Double/isInfinite x) (recur (inc j) m s)
+                (<= x m) (recur (inc j) m (+ s (Math/exp (- x m))))
+                :else (recur (inc j) x (+ (* s (Math/exp (- m x))) 1.0))))
+        (if (Double/isInfinite m) m (+ m (Math/log s)))))))
+
+(defn- log-add ^double [^double a ^double b]
+  (cond (Double/isInfinite a) (if (pos? a) a b)
+        (Double/isInfinite b) (if (pos? b) b a)
+        :else (let [m (Math/max a b)] (+ m (Math/log (+ (Math/exp (- a m)) (Math/exp (- b m))))))))
+
+(defrecord ByteLM [lm trie eos beam])
+
+(defmethod print-method ByteLM [b ^java.io.Writer w]
+  (.write w (str "#<ByteLM " (:lm b) (when (:beam b) (str ", beam " (:beam b))) ">")))
+
+(defn byte-lm
+  "lm's text as bytes, marginalizing over tokenizations: for
+   prefix-logprob, text-logprob and next-byte-logprobs. opts: :eos, the
+   tokens that end a text (default the LM's :eog; gen.llm.token's
+   completion's :eos); :beam, at most this many tokenizations kept at each
+   token boundary, the most probable (default nil: every one, exact).
+   Tokens with no bytes are never in a text (they would let a text have
+   infinitely many tokenizations); with a beam, probabilities are lower
+   bounds."
+  ([lm] (byte-lm lm {}))
+  ([lm {:keys [eos beam] :as opts}]
+   (let [{:keys [n-vocab eog]} (lm/vocab lm)
+         eos (set (if (contains? opts :eos) eos eog))
+         byte-vocab (lm/byte-vocab lm)]
+     (when-not (every? #(and (integer? %) (< -1 (long %) (long n-vocab))) eos)
+       (throw (ex-info (str "byte-lm: :eos is a set of tokens, not " (pr-str eos)) {:reason :invalid-token :eos eos})))
+     (when-not (or (nil? beam) (pos-int? beam))
+       (throw (ex-info (str "byte-lm: :beam is a positive integer or nil, not " (pr-str beam)) {:reason :invalid-option :beam beam})))
+     ;; end tokens are kept out of the trie: they end a text, and hold none of it
+     (->ByteLM lm (byte-trie (vec (map-indexed (fn [t bs] (if (eos t) (byte-array 0) bs)) byte-vocab))) eos beam))))
+
+(defn- text-bytes ^bytes [what text]
+  (cond (string? text) (.getBytes ^String text java.nio.charset.StandardCharsets/UTF_8)
+        (bytes? text) text
+        :else (throw (ex-info (str what ": a text is a string or a byte array, not " (pr-str text))
+                              {:reason :invalid-text :text text}))))
+
+(defn- walk-text
+  "Along b from byte j, from the root: the tokens that end within b, as [k
+   t] with k the boundary after t, and the node at b's end (-1 when b's
+   bytes from j leave the trie)."
+  [^ByteTrie trie ^bytes b ^long j]
+  (let [n (alength b)]
+    (loop [node 0 k j splits []]
+      (if (== k n)
+        [splits node]
+        (let [c (child trie node (aget b k))]
+          (if (neg? c)
+            [splits -1]
+            (recur c (inc k) (into splits (map (fn [t] [(inc k) t])) (tokens-at trie c)))))))))
+
+(defn- log-sum ^double [^floats row ts]
+  (reduce (fn [^double acc t] (log-add acc (double (aget row (int t))))) Double/NEGATIVE_INFINITY ts))
+
+(defn- marginals
+  "For the bytes b after prompt, over every tokenization (or the beam's):
+   {:prefix log P(the text begins with b), :next log P(it begins with b x)
+   by byte x (a double array), :end log P(it is b, ended)}. A tokenization
+   of a text that begins with b is a run of tokens spelling b's first j
+   bytes, j a token boundary inside b, and then a token that begins with
+   the rest of b; the runs are walked boundary by boundary, each
+   boundary's contexts read in one batch."
+  [{:keys [lm trie eos beam]} prompt ^bytes b]
+  (let [n (alength b)
+        next (double-array 256 Double/NEGATIVE_INFINITY)]
+    (loop [j 0 at {0 [[[] 0.0]]} prefix (if (zero? n) 0.0 Double/NEGATIVE_INFINITY) end Double/NEGATIVE_INFINITY]
+      (if (< n j)
+        {:prefix prefix :next next :end end}
+        (let [particles (cond->> (get at j []) beam (sort-by second >) beam (take beam))
+              rows (when (seq particles) (lm/batch-next-logprobs lm (mapv #(into prompt (first %)) particles)))
+              [splits node] (walk-text trie b j)
+              node (long node)
+              [at prefix end]
+              (reduce (fn [[at ^double prefix ^double end] [[ctx ^double lp] ^floats row]]
+                        (when-not (neg? node)
+                          (doseq [[x c] (children trie node)]
+                            (aset next (long x) (log-add (aget next (long x)) (+ lp (log-mass trie row c))))))
+                        [(reduce (fn [at [k t]] (update at k (fnil conj []) [(conj ctx t) (+ lp (aget row (int t)))]))
+                                 at splits)
+                         (if (and (< j n) (<= 0 node)) (log-add prefix (+ lp (log-mass trie row node))) prefix)
+                         (if (== j n) (log-add end (+ lp (log-sum row eos))) end)])
+                      [at prefix end] (map vector particles rows))]
+          (recur (inc j) (dissoc at j) (double prefix) (double end)))))))
+
+(defn- prompt-vector [what prompt]
+  (when-not (and (sequential? prompt) (seq prompt))
+    (throw (ex-info (str what ": the prompt is a non-empty vector of tokens, not " (pr-str prompt))
+                    {:reason :invalid-token :prompt prompt})))
+  (vec prompt))
+
+(defn prefix-logprob
+  "log P(the text after prompt begins with text, a string or byte array),
+   over its tokenizations: the LM's probability that a completion's
+   bytes, before its end token, begin with text's."
+  ^double [bm prompt text]
+  (:prefix (marginals bm (prompt-vector "prefix-logprob" prompt) (text-bytes "prefix-logprob" text))))
+
+(defn text-logprob
+  "log P(the text after prompt is text, then an end token), over its
+   tokenizations."
+  ^double [bm prompt text]
+  (:end (marginals bm (prompt-vector "text-logprob" prompt) (text-bytes "text-logprob" text))))
+
+(defn next-byte-logprobs
+  "The next byte's log-probabilities after prompt and text, over their
+   tokenizations: a double array of 257 entries, byte x at x and the end
+   (the text ends after text) last. They sum to 1 when every token has
+   bytes and every beam is wide enough. Loud when text has probability 0
+   (:zero-prefix)."
+  ^doubles [bm prompt text]
+  (let [{:keys [prefix ^doubles next end]} (marginals bm (prompt-vector "next-byte-logprobs" prompt)
+                                                      (text-bytes "next-byte-logprobs" text))
+        prefix (double prefix)
+        out (double-array 257)]
+    (when (Double/isInfinite prefix)
+      (throw (ex-info "next-byte-logprobs: the text has probability 0" {:reason :zero-prefix :text text})))
+    (dotimes [x 256] (aset out x (- (aget next x) prefix)))
+    (aset out 256 (- (double end) prefix))
+    out))
