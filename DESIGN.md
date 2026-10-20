@@ -633,13 +633,15 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     Each computed its density with a fixed key, so with ω it would fix one
     draw of it and target the wrong distribution, silently (found the same
     day, after an owner's question: all eight ran without error).
-    Involutive MCMC too (the review, the same day): Gen.jl's involution,
-    (fn [trace fwd-choices fwd-retval proposal-args]), has no key, so its
-    update redrew ω from one fixed key and the chain sampled the posterior
-    given one z. With ω it is now a loud error; MH with a proposal is the
-    pseudo-marginal route. The alternative, a key for the involution,
-    would keep split-merge moves on pseudo-marginal models at the cost of
-    Gen.jl's argument shape: for the owner to choose.
+  - **An involution takes a key** (owner, 2026-10-20): `(fn [trace
+    fwd-choices fwd-retval proposal-args key])`, one argument past Gen.jl's
+    shape, as every gen.clj operation takes a key. Without one, the review
+    found, its update redrew ω from a fixed key and the chain sampled the
+    posterior given one z; with the move's key the update is a
+    pseudo-marginal refresh, so split-merge and reversible-jump moves work
+    on models with encapsulated randomness (Gen.jl's global RNG gives it
+    this too). `involutive-mh` splits its key in three (the proposal's,
+    the acceptance's, the involution's), so the first two are unchanged.
 - **The static modeling language** (Gen.jl's `@gen (static)`; owner,
   2026-10-20): a flag on `gen`, `(gen ^:static [args] (let [...] ret))`,
   not a second macro or a second semantics. The body is an ordinary `gen`

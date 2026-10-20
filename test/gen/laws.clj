@@ -81,7 +81,7 @@
   "Trace consistency (Def 2.1.16): the score is the assessed density of the
    choices, and the return value is the one they determine."
   [tr]
-  (let [{w :weight rv :retval} (gfi/assess (:gen-fn tr) (:args tr) (:choices tr))]
+  (let [{w :weight rv :retval} (gfi/assess (:gen-fn tr) (:args tr) (:choices tr) (rng/key 0))]
     (and (close? (:score tr) w) (= (:retval tr) rv))))
 
 (defn- sound-retdiff?

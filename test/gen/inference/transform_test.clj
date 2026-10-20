@@ -232,12 +232,12 @@
 (deftest a-reversible-jump-keeps-the-posterior
   (testing "the jump's weight: the score ratio and log 2 to split, -log 2 to merge"
     (let [one (:trace (gfi/generate two-means [] (cm/choicemap :two? false :mu 0.7 :y1 y1 :y2 y2) (rng/key 15)))
-          {split :trace w :weight bwd :bwd-choices} ((tf/involution split-merge) one (cm/choicemap :u 0.2) nil nil)]
+          {split :trace w :weight bwd :bwd-choices} ((tf/involution split-merge) one (cm/choicemap :u 0.2) nil nil (rng/key 0))]
       (is (ts/close? 0.5 (split :mu1)))
       (is (ts/close? 0.9 (split :mu2)))
       (is (cm/empty? bwd))
       (is (ts/close? (+ (- (:score split) (:score one)) (Math/log 2.0)) w))
-      (let [{merged :trace w' :weight bwd' :bwd-choices} ((tf/involution split-merge) split cm/EMPTY nil nil)]
+      (let [{merged :trace w' :weight bwd' :bwd-choices} ((tf/involution split-merge) split cm/EMPTY nil nil (rng/key 0))]
         (is (ts/close? 0.7 (merged :mu)))
         (is (ts/close? 0.2 (cm/get-choice bwd' :u)))
         (is (ts/close? (- (- (:score merged) (:score split)) (Math/log 2.0)) w')))))
@@ -258,14 +258,14 @@
               (write model-out :y (* y (array/exp (* x u))) :continuous)
               (write aux-out :u (array/negate u) :continuous)))
         tr (:trace (gfi/generate two-latents [] (cm/choicemap :x 0.5 :y 2.0) (rng/key 20)))
-        {t' :trace w :weight} ((tf/involution t) tr (cm/choicemap :u 0.6) nil nil)]
+        {t' :trace w :weight} ((tf/involution t) tr (cm/choicemap :u 0.6) nil nil (rng/key 0))]
     (is (ts/close? 0.5 (t' :x)))
     (is (ts/close? (+ (- (:score t') (:score tr)) (* 0.5 0.6)) w))))
 
 (deftest the-involution-check
   (let [tr (exact-posterior-trace (rng/key 18))
         u (if (tr :two?) cm/EMPTY (cm/choicemap :u 0.4))]
-    (is (map? ((tf/involution split-merge {:check? true}) tr u nil nil)))
+    (is (map? ((tf/involution split-merge {:check? true}) tr u nil nil (rng/key 0))))
     (let [broken (tf/transform [model-in aux-in model-out aux-out]
                    (if (read model-in :two? :discrete)
                      (let [mu1 (read model-in :mu1 :continuous) mu2 (read model-in :mu2 :continuous)]
@@ -277,7 +277,7 @@
                        (write model-out :mu1 (- mu u) :continuous)
                        (write model-out :mu2 (+ mu u) :continuous))))]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"does not give back"
-                            ((tf/involution broken {:check? true}) tr u nil nil))))))
+                            ((tf/involution broken {:check? true}) tr u nil nil (rng/key 0)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Misuse
@@ -335,7 +335,7 @@
                    (write model-out :two? true :discrete))
             tr (:trace (gfi/generate two-means [] (cm/choicemap :two? false :mu 0.1 :y1 y1 :y2 y2) (rng/key 19)))]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"did not write"
-                              ((tf/involution half) tr (cm/choicemap :u 0.2) nil nil)))))))
+                              ((tf/involution half) tr (cm/choicemap :u 0.2) nil nil (rng/key 0))))))))
 
 (def walk-u (gen [tr] (trace :u (d/normal (tr :x) 0.5))))
 

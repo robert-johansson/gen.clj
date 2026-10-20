@@ -94,10 +94,10 @@
 (defn- step-b
   "An involution on (b, up): move b one step around the circle in the
    direction up, and reverse the direction."
-  [tr fwd _ _]
+  [tr fwd _ _ key]
   ;; a plain function (not a gen body): it reads the values it branches on
   (let [up? (ts/host (cm/get-choice fwd :up))
-        {t :trace weight :weight} (gfi/update tr (cm/choicemap :b (mod (+ (ts/host (tr :b)) (if up? 1 -1)) 3)))]
+        {t :trace weight :weight} (gfi/update tr (cm/choicemap :b (mod (+ (ts/host (tr :b)) (if up? 1 -1)) 3)) key)]
     {:trace t :bwd-choices (cm/choicemap :up (not up?)) :weight weight}))
 
 (defn- involutive [tr key]
@@ -149,11 +149,11 @@
   (let [tr (trace-at main (cm/choicemap :a true :b 0))]
     (doseq [up? [true false]]
       (let [fwd (cm/choicemap :up up?)
-            {t1 :trace u1 :bwd-choices} (step-b tr fwd nil [])
-            {t2 :trace u2 :bwd-choices w2 :weight} (step-b t1 u1 nil [])]
+            {t1 :trace u1 :bwd-choices} (step-b tr fwd nil [] (rng/key 0))
+            {t2 :trace u2 :bwd-choices w2 :weight} (step-b t1 u1 nil [] (rng/key 0))]
         (is (= (:choices tr) (:choices t2)))
         (is (= fwd u2))
-        (is (< (ts/abs (+ w2 (:weight (step-b tr fwd nil [])))) 1e-12) "the weights are opposite")))))
+        (is (< (ts/abs (+ w2 (:weight (step-b tr fwd nil [] (rng/key 0))))) 1e-12) "the weights are opposite")))))
 
 ;; ---------------------------------------------------------------------------
 ;; A stochastic-structure target: the thesis's p_mh (pp. 92-93)

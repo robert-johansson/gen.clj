@@ -474,9 +474,10 @@
 (defn involution
   "Transform t as the involution of involutive MCMC (Gen.jl's
    SymmetricTraceTranslator): (fn [trace fwd-choices fwd-retval
-   proposal-args]) → {:trace :bwd-choices :weight}, for
+   proposal-args key]) → {:trace :bwd-choices :weight}, for
    gen.inference.mh/involutive-mh. t's model-out choices update the trace
-   (every new choice must be written, so the update samples nothing), its
+   with key (every new choice must be written, so the update samples none;
+   the key draws a model's encapsulated randomness afresh), its
    aux-out are the backward choices, and the weight is the update's plus
    log |det J|, the trace's unwritten continuous reads that update keeps
    counting as unchanged outputs. With {:check? true}, t applied again must
@@ -484,13 +485,12 @@
   ([t] (involution t {}))
   ([t {:keys [check?]}]
    (check-transform :involution t)
-   (fn [trace fwd-choices _ _]
+   (fn [trace fwd-choices _ _ key]
      (let [s (execute t trace fwd-choices nil)
            model-out (get-in s [:outputs :model-out])
-           ;; every new choice is constrained, so the key goes unused; with
-           ;; encapsulated randomness it would fix one draw of it: refused
-           {t' :trace w :weight discard :discard} (gfi/with-exact-density "An involution's update"
-                                                    (gfi/update trace model-out (rng/key 0)))
+           ;; every new choice is constrained; the key draws a model's
+           ;; encapsulated randomness afresh, a pseudo-marginal refresh
+           {t' :trace w :weight discard :discard} (gfi/update trace model-out key)
            _ (when-let [extra (seq (unconstrained-additions (:choices trace) model-out discard (:choices t')))]
                (throw (ex-info (str "involution: the updated trace has new choices the transform did not write: "
                                     (vec extra))

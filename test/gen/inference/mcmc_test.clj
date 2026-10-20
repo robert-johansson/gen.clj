@@ -152,11 +152,11 @@
 (defn- scale-move
   "(x, u) ↦ (x·e^u, -u), an involution with |det J| = e^u, its log Jacobian
    computed by autodiff."
-  [tr fwd _ _]
+  [tr fwd _ _ key]
   (let [x (tr :x)
         u (cm/get-choice fwd :u)
         h (fn [v] (let [x (array/take v 0) u (array/take v 1)] (array/stack [(* x (array/exp u)) (array/negate u)])))
-        {t :trace w :weight} (gfi/update tr (cm/choicemap :x (* x (array/exp u))))]
+        {t :trace w :weight} (gfi/update tr (cm/choicemap :x (* x (array/exp u))) key)]
     {:trace t :bwd-choices (cm/choicemap :u (- u))
      :weight (+ w (grad/log-abs-det-jacobian h (array/stack [x u])))}))
 
@@ -166,8 +166,8 @@
         ends (map (fn [key] ((reduce step start (rng/split key 80)) :x)) (rng/split (rng/key 31) 1000))]
     (is (matches? ends 3.0 3.0) "Gamma(3, 1): mean 3, variance 3"))
   (testing "without the Jacobian the chain is biased, so the test can tell"
-    (let [wrong (fn [tr fwd r args] (assoc (scale-move tr fwd r args) :weight
-                                           (:weight (gfi/update tr (cm/choicemap :x (* (tr :x) (array/exp (cm/get-choice fwd :u))))))))
+    (let [wrong (fn [tr fwd r args key] (assoc (scale-move tr fwd r args key) :weight
+                                               (:weight (gfi/update tr (cm/choicemap :x (* (tr :x) (array/exp (cm/get-choice fwd :u)))) key))))
           step (fn [tr key] (:trace (mh/involutive-mh tr log-scale [] wrong key)))
           start (start-at positive (cm/choicemap :x 1.0))
           ends (map (fn [key] ((reduce step start (rng/split key 80)) :x)) (rng/split (rng/key 31) 1000))]
@@ -194,16 +194,16 @@
 (defn- split-merge
   "The involution (m, u) ↔ (m1, m2) = (m - u, m + u), with the dimension
    change and its Jacobian (computed by autodiff: |det| = 2 for a split)."
-  [tr fwd _ _]
+  [tr fwd _ _ key]
   (if (tr :two?)
     (let [m1 (tr :m1) m2 (tr :m2)
           h (fn [v] (let [a (array/take v 0) b (array/take v 1)] (array/stack [(* 0.5 (+ a b)) (* 0.5 (- b a))])))
-          {t :trace w :weight} (gfi/update tr (cm/choicemap :two? false :m (* 0.5 (+ m1 m2))))]
+          {t :trace w :weight} (gfi/update tr (cm/choicemap :two? false :m (* 0.5 (+ m1 m2))) key)]
       {:trace t :bwd-choices (cm/choicemap :u (* 0.5 (- m2 m1)))
        :weight (+ w (grad/log-abs-det-jacobian h (array/stack [m1 m2])))})
     (let [m (tr :m) u (cm/get-choice fwd :u)
           h (fn [v] (let [a (array/take v 0) b (array/take v 1)] (array/stack [(- a b) (+ a b)])))
-          {t :trace w :weight} (gfi/update tr (cm/choicemap :two? true :m1 (- m u) :m2 (+ m u)))]
+          {t :trace w :weight} (gfi/update tr (cm/choicemap :two? true :m1 (- m u) :m2 (+ m u)) key)]
       {:trace t :bwd-choices cm/EMPTY
        :weight (+ w (grad/log-abs-det-jacobian h (array/stack [m u])))})))
 
@@ -224,8 +224,8 @@
     (is (< (ts/abs (- frac exact-two)) (* 5 (Math/sqrt (/ (* exact-two (- 1 exact-two)) 2000)))))
     (testing "the involution is an involution, with opposite weights"
       (let [tr start fwd (cm/choicemap :u 0.4)
-            {t1 :trace u1 :bwd-choices w1 :weight} (split-merge tr fwd nil nil)
-            {t2 :trace u2 :bwd-choices w2 :weight} (split-merge t1 u1 nil nil)]
+            {t1 :trace u1 :bwd-choices w1 :weight} (split-merge tr fwd nil nil (rng/key 0))
+            {t2 :trace u2 :bwd-choices w2 :weight} (split-merge t1 u1 nil nil (rng/key 0))]
         (is (= (:choices tr) (:choices t2)))
         (is (= fwd u2))
         (is (< (ts/abs (+ w1 w2)) 1e-12))))))

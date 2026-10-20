@@ -29,6 +29,7 @@
             [gen.inference.importance :as is]
             [gen.inference.mcmc :as mcmc]
             [gen.inference.mh :as mh]
+            [gen.inference.transform :as tf]
             [gen.inference.proposal :as prop]
             [gen.laws :as laws]
             [gen.random :as rng]
@@ -222,10 +223,12 @@
       (is (within? xis (npdf 1.0 0.4 (Math/sqrt 2.0)))))))
 
 (deftest ^:slow ^:heavy eq-4-4-simulate-draws-omega-given-the-choices
-  ;; E[g(τ)/ξ] = ∫ g = 1 under simulate's (τ, ω) ~ p(τ) p̊(ω; τ), for a density
-  ;; g narrower than every component, so that g/ξ is bounded. Planted bug
-  ;; (2026-10-20): a joint sampler drawing ω apart from τ moves the mean by
-  ;; about 0.2 here, against a band of about 0.07
+  ;; E[g(τ)/ξ] = ∫ g = 1 under simulate's (τ, ω) ~ p(τ) p̊(ω; τ). For the
+  ;; mixture, g is narrower than every component, so g/ξ is bounded (≤ 3.9);
+  ;; for the estimator it is not, and its variance is finite through the
+  ;; prior samples among the five. Planted bug (2026-10-20): a joint
+  ;; sampler drawing ω apart from τ moves the mixture's mean by about 0.2,
+  ;; against a band of about 0.07
   (testing "untraced draws: overlapping components"
     (let [rs (mapv (fn [k] (let [tr (gfi/simulate overlapping [] k)]
                              (clojure.core// (npdf (ts/number (tr :a)) 0.0 0.5) (Math/exp (ts/number (:score tr))))))
@@ -322,6 +325,23 @@
                        (rng/split (rng/key 65) 2000))]
       (is (posterior-ok? thetas 1.5)))))
 
+(deftest ^:slow ^:heavy involutive-mcmc-is-pseudo-marginal
+  ;; the involution's update takes the move's key, so it redraws ω, a
+  ;; pseudo-marginal move (review, 2026-10-20: with a fixed key the chain
+  ;; sampled the posterior given one z, mean 1.07 against 0.5). A
+  ;; volume-preserving involution: (θ, u) to (θ + u, -u)
+  (let [shift (tf/involution (tf/involutive (tf/transform [mi ai mo ao]
+                                              (let [u (tf/read ai :u :continuous)]
+                                                (tf/write mo :theta (+ (tf/read mi :theta :continuous) u) :continuous)
+                                                (tf/write ao :u (array/negate u) :continuous)))))
+        q (gen [_] (trace :u (d/normal 0 0.8)))
+        thetas (mapv (fn [k] (let [[k0 & ks] (rng/split k 151)]
+                               (ts/number ((reduce (fn [tr k] (:trace (mh/involutive-mh tr q [] shift k)))
+                                                   (:trace (gfi/generate theta-z-y [] (cm/choicemap :y 1.5) k0)) ks)
+                                           :theta))))
+                     (rng/split (rng/key 68) 2000))]
+    (is (posterior-ok? thetas 1.5))))
+
 (deftest ^:slow ^:heavy mh-with-an-encapsulated-proposal-keeps-the-posterior
   ;; §4.5.4, law audit gap 4b: θ' ~ N(θ ± 0.6, 0.5), the sign an untraced
   ;; coin; from exact posterior draws (θ ~ N(0, 1), y ~ N(θ, 1), y = 1: N(0.5,
@@ -392,7 +412,10 @@
                           (catch clojure.lang.Compiler$CompilerException e (ex-message (ex-cause e)))))))))
   (testing "a hand-made variadic body fn of the old hidden parameters"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"takes trace, splice, param and untraced"
-                          (gen.dynamic/make-gen-fn (fn [_trace _splice _param & args] (count args)) '([& args]))))))
+                          (gen.dynamic/make-gen-fn (fn [_trace _splice _param & args] (count args)) '([& args]))))
+    (testing "and a fixed arity one (review, 2026-10-20)"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"takes trace, splice, param and untraced"
+                            (gen.dynamic/make-gen-fn (fn [_trace _splice _param x y] [x y]) '([x y])))))))
 
 (deftest operations-that-need-exact-densities-are-loud
   ;; each would otherwise fix one draw of ω, silently: a gradient of the
@@ -417,11 +440,7 @@
                                                              (rng/key 30))]
                        ["the exact proposal's assess" #(gfi/assess (enum/with-exact-proposal bern [:b]) []
                                                                    (cm/choicemap :b true :y 0.5) (rng/key 35))]
-                       ;; review, 2026-10-20: its update fixed ω to one draw (key 0)
-                       ["an involution" #(mh/involutive-mh tr (gen [_] nil) []
-                                                           (fn [t _ _ _] {:trace (:trace (gfi/update t (cm/choicemap :theta 0.1) (rng/key 0)))
-                                                                          :weight 0.0 :bwd-choices cm/EMPTY})
-                                                           (rng/key 34))]
+
                        ["an internal proposal's density"
                         #(let [gf (prop/with-internal-proposal model (gen [_] (trace :theta (d/normal (untraced (d/normal 0 1)) 1))))]
                            (gfi/project (:trace (gfi/generate gf [] (cm/choicemap :y 1.5) (rng/key 31))) (sel/select :theta)))]]]

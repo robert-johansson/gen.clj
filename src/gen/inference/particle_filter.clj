@@ -295,7 +295,7 @@
      forward score + the backward one.
    - (reweighting proposal proposal-args opts), with :backward and
      :backward-args, a separate backward proposal with the same support;
-     with :involution, (fn [trace fwd-choices fwd-retval proposal-args]) →
+     with :involution, (fn [trace fwd-choices fwd-retval proposal-args key]) →
      {:trace :bwd-choices :weight} as for involutive MH, in place of the
      update (for moves that add or remove choices)."
   ([selection]

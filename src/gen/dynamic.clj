@@ -182,9 +182,12 @@
 ;; ---------------------------------------------------------------------------
 
 
-(defn- sub-key [state]
-  (let [[k-next k-sub] (rng/split (:key state))]
-    [k-sub (assoc state :key k-next)]))
+(defn- site-key
+  "[the key of the run's next site or call, state with the key after it]:
+   every site and call consumes one, whether it samples or not."
+  [state]
+  (let [[k-next k-site] (rng/split (:key state))]
+    [k-site (assoc state :key k-next)]))
 
 (defn- arg-diffs
   "Argdiffs for a splice's new args against its previous call's: no-change
@@ -248,7 +251,7 @@
         base {}
         ;; the callee's key, the same in every mode: assess draws what
         ;; generate would with the same key
-        [k state] (sub-key state)
+        [k state] (site-key state)
         opts (assoc base :key k)]
     (if (= mode :assess)
       (let [{w :weight rv :retval} (gfi/run-op gf :assess args (assoc opts :constraints cons))]
@@ -444,7 +447,7 @@
           state @vol]
       (check-running! state p)
       (check-address! state p)
-      (let [state (assoc state :key (first (rng/split (:key state))))
+      (let [state (second (site-key state))
             state (if (= kind :trace)
                     (let [[v lp] (prev-choice state p)] (record state p v lp))
                     (record-call state p (get (::subtraces (:prev state)) p)))]
@@ -536,8 +539,8 @@
                        (throw (ex-info (str "trace at " p " needs a distribution; call generative functions with splice")
                                        {:path p :value dist})))
                      (check-address! state p)
-                     (let [[k-next k-site] (rng/split (:key state))
-                           [v state] (@transition (assoc state :key k-next) p dist k-site)]
+                     (let [[k-site state] (site-key state)
+                           [v state] (@transition state p dist k-site)]
                        (vreset! vol (update state :visited conj p))
                        v)))
         ;; a call at an address: [value retdiff], hints the arguments' argdiffs
@@ -761,12 +764,24 @@
    static body (the gen macro's, gen.dynamic.static)."
   ([body-fn source] (make-gen-fn body-fn source nil))
   ([body-fn source static]
-   ;; a variadic body fn of fewer hidden parameters would take the arguments
-   ;; shifted, silently (a fixed arity fails on its own)
-   (when (and (instance? clojure.lang.RestFn body-fn) (< (.getRequiredArity ^clojure.lang.RestFn body-fn) 4))
-     (throw (ex-info "make-gen-fn: the body fn takes trace, splice, param and untraced before the arguments"
-                     {:required-arity (.getRequiredArity ^clojure.lang.RestFn body-fn)})))
-   (->DynamicGF body-fn source nil nil nil static)))
+   ;; a body fn of other hidden parameters would take the arguments shifted,
+   ;; silently: its arities must fit the source's parameters after the four
+   (let [params (first source)
+         variadic? (instance? clojure.lang.RestFn body-fn)
+         required (when variadic? (.getRequiredArity ^clojure.lang.RestFn body-fn))
+         fixed (set (keep #(when (= "invoke" (.getName ^java.lang.reflect.Method %))
+                             (alength (.getParameterTypes ^java.lang.reflect.Method %)))
+                          (.getDeclaredMethods (class body-fn))))
+         fits? (if (vector? params)
+                 (let [i (.indexOf ^java.util.List params '&)]
+                   (if (neg? i)
+                     (contains? fixed (+ 4 (count params)))
+                     (and variadic? (= required (+ 4 i)))))
+                 (or (not variadic?) (>= required 4)))]
+     (when-not fits?
+       (throw (ex-info "make-gen-fn: the body fn takes trace, splice, param and untraced before the arguments its source names"
+                       {:params params :arities fixed :required-arity required})))
+     (->DynamicGF body-fn source nil nil nil static))))
 
 (defn with-params
   "gf with the trainable-parameter store params, a map of name to value read
