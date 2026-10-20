@@ -198,6 +198,93 @@
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"probabilities" (normal-mixture [0.5 0.6] [0.0 1.0] [1.0 1.0])))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"one weight" (normal-uniform [1.0] [0.0 1.0] [0.0 1.0]))))
 
+(def mvnormal-mixture
+  "Gen.jl's mixture_of_mvnormals, HomogeneousMixture(mvnormal, [1, 2]): means
+   of shape [K d], covariances [K d d]."
+  (d/homogeneous-mixture d/mvnormal [1 2]))
+
+(defn- isotropic-log-density
+  "log N(x; mu, s2·I)."
+  [x mu s2]
+  (- (* -0.5 (count x) (Math/log (* 2 Math/PI s2)))
+     (/ (reduce + (map #(Math/pow (- %1 %2) 2) x mu)) (* 2 s2))))
+
+(deftest mixtures-of-multivariate-families
+  ;; F2 (M5 inventory): the family's log density was taken elementwise, the
+  ;; value against a component axis it does not have (-4.135 for -4.754
+  ;; here); Gen.jl's mixture.jl:138
+  (let [w [0.4 0.6] mus [[0.0 0.0] [1.0 1.0]] s2 [2.3 1.0]
+        covs (mapv (fn [s] [[s 0.0] [0.0 s]]) s2)
+        m (mvnormal-mixture w mus covs)
+        ;; log wₖ N(x; μₖ, sₖ²·I) per component, and their log-sum-exp
+        lps (fn [x] (mapv #(+ (Math/log %1) (isotropic-log-density x %2 %3)) w mus s2))
+        lp (fn [x] (Math/log (reduce + (map #(Math/exp %) (lps x)))))
+        x [1.123 -2.123]]
+    (is (close? (dc/log-prob m (array/array x)) (lp x) (ts/tol 1e-12)))
+    (is (ts/close? (dc/log-prob m (array/array [x [0.0 3.0]])) (array/array [(lp x) (lp [0.0 3.0])]))
+        "elementwise over a batch of values")
+    (testing "at a trace site, where a value has one component's shape"
+      (is (= [2] (dc/value-shape m)))
+      (is (close? (:weight (gfi/generate (gen [] (trace :x m)) [] (cm/choicemap :x (array/array x)) (rng/key 1)))
+                  (lp x) (ts/tol 1e-12))))
+    (testing "gradients: Σₖ rₖ (μₖ - x)/sₖ² for the value, rₖ (x - μₖ)/sₖ² for mean k"
+      (let [r (mapv #(Math/exp (- % (lp x))) (lps x))
+            dmus (mapv (fn [rk mu s] (mapv #(* rk (/ (- %1 %2) s)) x mu)) r mus s2)]
+        (is (ts/close? ((array/grad #(dc/log-prob m %)) (array/array x)) (array/array (mapv - (apply mapv + dmus)))))
+        (is (ts/close? ((array/grad #(dc/log-prob (mvnormal-mixture w % covs) (array/array x))) (array/array mus))
+                       (array/array dmus)))))))
+
+(deftest mixture-draws-pick-one-component-per-element
+  ;; one pick per element of the log density: a vector value is one
+  ;; component's whole draw (the pick met the vector's own axis: a shape
+  ;; error, or coordinates of different components), and the elements of a
+  ;; batched parameter or of batched weights pick and draw independently
+  ;; (they shared one pick, or one draw); bands of five standard errors
+  (let [n 4000
+        band (fn [p] (* 5 (Math/sqrt (/ (* p (- 1 p)) n))))
+        frac (fn [pred xs] (/ (count (filter pred xs)) (double n)))]
+    (testing "vector values"
+      (let [far (mvnormal-mixture [0.3 0.7] [[0.0 0.0] [100.0 -100.0]] [[[1.0 0.0] [0.0 1.0]] [[1.0 0.0] [0.0 1.0]]])
+            xs (ts/host (dc/sample far (rng/key 21) [n]))]
+        (is (every? (fn [[a b]] (= (> a 50) (< b -50))) xs) "both coordinates from one component")
+        (is (close? (frac (fn [[a _]] (> a 50)) xs) 0.7 (band 0.7)))))
+    (testing "a batched parameter: eight mixtures, which all agree with probability 2⁻⁷"
+      (let [m (normal-mixture [0.5 0.5] (array/stack [(array/zeros [8]) (array/full [8] 100.0)] -1) [0.1 0.1])
+            xs (ts/host (dc/sample m (rng/key 22) [n 1]))]
+        (is (close? (frac #(apply = (map (fn [v] (> v 50)) %)) xs) (/ 1.0 128) (band (/ 1.0 128))))))
+    (testing "batched weights: three mixtures, the first two of the first component only"
+      (let [m (normal-mixture (array/array [[1.0 0.0] [1.0 0.0] [0.5 0.5]]) [0.0 100.0] [1.0 1.0])
+            xs (ts/host (dc/sample m (rng/key 23) [n 1]))]
+        ;; independent standard normals: E[x y] = 0, with variance 1
+        (is (close? (/ (reduce + (map (fn [[a b]] (* a b)) xs)) n) 0.0 (/ 5 (Math/sqrt n))))
+        (is (close? (frac #(> (nth % 2) 50) xs) 0.5 (band 0.5)))))))
+
+(deftest homogeneous-mixtures-check-their-components
+  (let [covs [[[1.0 0.0] [0.0 1.0]] [[1.0 0.0] [0.0 1.0]]]
+        e (try (mvnormal-mixture [0.5 0.5] [[0.0 0.0] [1.0 1.0] [2.0 2.0]] covs) nil
+               (catch clojure.lang.ExceptionInfo e e))]
+    (is (re-find #"3 components" (str (ex-message e))))
+    (is (= {:distribution "homogeneous-mixture" :shape [3 2] :dim 1 :components 2} (ex-data e)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"one dim per parameter"
+                          ((d/homogeneous-mixture d/mvnormal [1]) [0.5 0.5] [[0.0 0.0] [1.0 1.0]] covs)))
+    (is (ts/close? (dc/log-prob (normal-mixture [0.3 0.7] [-2.0 1.0] [1.0 1.0]) 0.5)
+                   (dc/log-prob (normal-mixture [0.3 0.7] [-2.0 1.0] 1.0) 0.5))
+        "a parameter without a component axis is every component's")))
+
+(def mvnormal-mixture-model
+  "A mixture of mvnormals whose second mean is a choice."
+  (gen []
+    (let [m (trace :m (d/normal 0.0 1.0))]
+      (trace :x (mvnormal-mixture [0.4 0.6] (array/stack [(array/zeros [2]) (array/+ m (array/ones [2]))])
+                                  [[[2.3 0.0] [0.0 2.3]] [[1.0 0.0] [0.0 1.0]]])))))
+
+(laws/deflaws mvnormal-mixture [[:model mvnormal-mixture-model [] []]] 100)
+
+(deftest mixtures-of-multivariate-families-batch
+  ;; one run for every particle, each particle's score its scalar run's
+  (let [ps (binding [batched/*spot-checks* :all] (batched/simulate mvnormal-mixture-model [] 8 (rng/key 31)))]
+    (is (nil? (batched/fallback-reason ps)))))
+
 (deftest review-regressions
   (testing "product sums each factor over its own value (review 4)"
     (let [p ((d/product d/normal d/bernoulli) [(array/zeros [3]) 1.0] [0.3])]
