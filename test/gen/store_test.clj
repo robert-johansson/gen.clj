@@ -436,7 +436,19 @@
         (is (moved? u))
         (is (= 60 @runs))
         (is (consistent? model u))
-        (is (ts/close? (update-truth model tr u cs) w))))))
+        (is (ts/close? (update-truth model tr u cs) w)))))
+  (testing "inside an exact proposal's model: its forward run drops and repeats once (2n + n), then it enumerates :b (2n): 5n, not quadratic"
+    (let [runs (atom 0)
+          k (gen [_i] (swap! runs inc) (if (> (param :w) 5.0) (trace :x (d/normal 0 1)) (trace :y (d/normal 0 1))))
+          model (given-a-store (gen [] (splice :p (enum/with-exact-proposal
+                                                     (gen [] (let [b (trace :b (d/bernoulli 0.5))] (splice :m (comb/map k) (vec (range 20))) b))
+                                                     [:b]))))
+          tr (:trace (gfi/generate model [] (cm/choicemap :a 0.1) (rng/key 1)))]
+      (reset! runs 0)
+      (let [{u :trace} (gfi/update tr (cm/choicemap :a 0.9) (rng/key 2))]
+        (is (moved? u))
+        (is (= 100 @runs))
+        (is (consistent? model u))))))
 
 (deftest a-constraint-the-revised-run-leaves-is-loud
   ;; a revise drops old choices, never constraints: in a dynamic callee's
@@ -633,6 +645,11 @@
         (is (= p (:path (ex-data e))))
         (is (:unvisited (ex-data e)))
         (is (re-find (re-pattern (java.util.regex.Pattern/quote (str p " was not visited"))) (ex-message e))))))
+  (testing "every unvisited path of an error is named, not only the first"
+    (let [model (gen [] (splice :c (gen [] (trace :x (d/normal 0 1)))))
+          e (try (gfi/generate model [] (cm/choicemap [:c :y1] 1.0 [:c :y2] 2.0) (rng/key 1)) nil
+                 (catch clojure.lang.ExceptionInfo e e))]
+      (is (= #{[:c :y1] [:c :y2]} (set (:paths (ex-data e)))))))
   (testing "a user function's own error keeps its own path"
     (let [inner (gen [] (trace :x (d/normal 0 1)))
           model (gen [] (splice :d (custom/deterministic {:apply (fn [_] (:weight (gfi/generate inner [] (cm/choicemap :typo 1.0) (rng/key 2))))})))
