@@ -227,10 +227,20 @@
 ;; Resampling, the estimate, the results
 ;; ---------------------------------------------------------------------------
 
+(defn- possible
+  "The state's log weights, unless every one is -Inf: then loudly, every
+   particle having fallen to weight 0."
+  [state what]
+  (let [lw (:log-weights state)]
+    (when (every? #(== Double/NEGATIVE_INFINITY (double %)) lw)
+      (throw (ex-info (str what ": every particle has weight 0 (the potential allows none of their sequences)")
+                      {:reason :impossible :n (count lw)})))
+    lw))
+
 (defn ess
   "The effective sample size of the particles' weights."
   ^double [state]
-  (w/ess (:log-weights state)))
+  (w/ess (possible state "smc/ess")))
 
 (defn resample
   "The particles drawn in proportion to their weights (:method, default
@@ -238,7 +248,7 @@
    into :log-ml. Resampling copies token vectors."
   ([state] (resample state {}))
   ([state {:keys [method key] :or {method :systematic}}]
-   (let [lw (:log-weights state)
+   (let [lw (possible state "smc/resample")
          n (count lw)
          parents (w/resample method lw n (or key (step-key state 1)))]
      (assoc state
@@ -277,7 +287,7 @@
   "The estimate of log Z, unbiased in exp space: the log marginal
    likelihood of the potential under the completion (0 without one)."
   ^double [state]
-  (+ (double (:log-ml state)) (w/log-mean-exp (:log-weights state))))
+  (+ (double (:log-ml state)) (w/log-mean-exp (possible state "smc/log-ml-estimate"))))
 
 (defn particles
   "The particles' token vectors, in order."

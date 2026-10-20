@@ -22,6 +22,7 @@
             [gen.gfi :as gfi]
             [gen.laws :as laws]
             [gen.llm.branching :as br]
+            [gen.llm.branching-contract :as bc]
             [gen.llm.lm :as lm]
             [gen.llm.potential :as potential]
             [gen.llm.smc :as smc]
@@ -202,4 +203,8 @@
                      #(smc/maybe-resample (smc/step (smc/initialize completion args 4
                                                                     {:potential (potential/potential n-vocab {:prefix (fn [c] (if (seq c) ##-Inf 0.0))
                                                                                                               :complete (constantly ##-Inf)})})))]]]
-    (is (thrown? clojure.lang.ExceptionInfo (f)) what)))
+    (is (thrown? clojure.lang.ExceptionInfo (f)) what))
+  (is (= :impossible (bc/reason #(smc/run completion args 4 {:potential (potential/potential n-vocab {:prefix (fn [c] (if (seq c) ##-Inf 0.0))
+                                                                                                      :complete (constantly ##-Inf)})
+                                                              :key (rng/key 1)})))
+      "every particle at weight 0, named as such"))
