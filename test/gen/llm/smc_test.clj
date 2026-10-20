@@ -180,8 +180,7 @@
     (is (= (smc/particles s) (mapv :retval trs)))
     (is (= (mapv :log-p (:particles s)) (mapv :score trs)) "the particles' log p are the traces' scores")
     (is (every? #(laws/close? (:score %) (:weight (gfi/assess completion args (:choices %)))) trs))
-    (is (= :no-reason (try (smc/traces (smc/step (smc/initialize completion args 3 {:key (rng/key 5)}))) :no-error
-                          (catch clojure.lang.ExceptionInfo _ :no-reason)))
+    (is (= :not-done (bc/reason #(smc/traces (smc/step (smc/initialize completion args 3 {:key (rng/key 5)})))))
         "unfinished particles have no traces yet")))
 
 (deftest runs-are-pure-functions-of-the-key
@@ -199,19 +198,22 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest misuse-is-loud
-  (doseq [[what f] [["no completion" #(smc/initialize m args 4)]
-                    ["no particles" #(smc/initialize completion args 0)]
-                    ["bad arguments" #(smc/initialize completion [prompt] 4)]
-                    ["an empty prompt" #(smc/initialize completion [[] 3] 4)]
-                    ["a masked proposal without a potential" #(smc/initialize completion args 4 {:proposal :masked})]
-                    ["an unknown proposal" #(smc/initialize completion args 4 {:proposal :best})]
-                    ["a potential of another vocabulary"
-                     #(smc/step (smc/initialize completion args 4 {:potential (potential/potential 3 {:prefix (constantly 0.0)
-                                                                                                      :complete (constantly 0.0)})}))]
-                    ["a proposal that returns no row" #(smc/step (smc/initialize completion args 4 {:proposal (constantly [0.0])}))]
-                    ["resampling particles all of weight 0"
-                     #(smc/resample (smc/step (smc/initialize completion args 4 {:potential nothing})))]]]
-    (is (thrown? clojure.lang.ExceptionInfo (f)) what)))
+  (doseq [[what f reason]
+          [["no completion" #(smc/initialize m args 4) :invalid-model]
+           ["no particles" #(smc/initialize completion args 0) :invalid-args]
+           ["bad arguments" #(smc/initialize completion [prompt] 4) :invalid-args]
+           ["an empty prompt" #(smc/initialize completion [[] 3] 4) :no-tokens]
+           ["a masked proposal without a potential" #(smc/initialize completion args 4 {:proposal :masked}) :invalid-option]
+           ["an unknown proposal" #(smc/initialize completion args 4 {:proposal :best}) :invalid-option]
+           ["a potential of another vocabulary"
+            #(smc/step (smc/initialize completion args 4 {:potential (potential/potential 3 {:prefix (constantly 0.0)
+                                                                                             :complete (constantly 0.0)})}))
+            :invalid-potential]
+           ["a proposal that returns no row" #(smc/step (smc/initialize completion args 4 {:proposal (constantly [0.0])}))
+            :invalid-row]
+           ["resampling particles all of weight 0"
+            #(smc/resample (smc/step (smc/initialize completion args 4 {:potential nothing}))) :impossible]]]
+    (is (= reason (bc/reason f)) what)))
 
 (deftest particles-all-of-weight-0-estimate-z-as-0
   ;; the estimator's value, not an error: refusing it would bias Ẑ upwards

@@ -66,25 +66,26 @@
 (defn- step-key [state ^long purpose]
   (rng/fold-in (rng/fold-in (:key state) (:t state)) purpose))
 
-(defn- check-args [completion [prompt max :as args]]
+(defn- check-args [completion [prompt max-tokens :as args]]
   (when-not (instance? gen.llm.token.Completion completion)
     (throw (ex-info (str "smc: a completion (gen.llm.token/completion) is the model, not " (pr-str completion))
-                    {:model completion})))
-  (when-not (and (= 2 (count args)) (sequential? prompt) (seq prompt) (nat-int? max))
+                    {:reason :invalid-model :model completion})))
+  (when-not (and (= 2 (count args)) (sequential? prompt) (seq prompt) (nat-int? max-tokens))
     (throw (ex-info (str "smc: the arguments are [prompt max-tokens], a non-empty token vector and a"
                          " non-negative integer, not " (pr-str args))
-                    {:args args})))
-  [(vec prompt) (long max)])
+                    {:reason (if (and (sequential? prompt) (empty? prompt)) :no-tokens :invalid-args) :args args})))
+  [(vec prompt) (long max-tokens)])
 
 (defn- check-proposal [proposal potential]
   (cond
     (= :lm proposal) proposal
     (= :masked proposal) (if potential
                            proposal
-                           (throw (ex-info "smc: the :masked proposal needs a :potential" {:proposal proposal})))
+                           (throw (ex-info "smc: the :masked proposal needs a :potential"
+                                           {:reason :invalid-option :proposal proposal})))
     (fn? proposal) proposal
     :else (throw (ex-info (str "smc: the proposal is :lm, :masked or a function, not " (pr-str proposal))
-                          {:proposal proposal}))))
+                          {:reason :invalid-option :proposal proposal}))))
 
 (defn initialize
   "n particles of the completion on [prompt max-tokens], none drawn yet,
@@ -95,7 +96,8 @@
   ([completion args n {:keys [potential proposal key] :or {proposal :lm}}]
    (let [args (check-args completion args)]
      (when-not (pos-int? n)
-       (throw (ex-info (str "smc: the number of particles is a positive integer, not " (pr-str n)) {:n n})))
+       (throw (ex-info (str "smc: the number of particles is a positive integer, not " (pr-str n))
+                       {:reason :invalid-args :n n})))
      (let [w0 (if potential (potential/prefix potential []) 0.0)
            done? (zero? (long (second args)))]
        {:completion completion
@@ -117,7 +119,7 @@
   "Where token t's twist is in the potential's next-token weights: the end
    for an end token."
   ^long [completion ^long t]
-  (if (contains? (:eos completion) t) (long (:n-vocab completion)) t))
+  (if (contains? (:end-tokens completion) t) (long (:n-vocab completion)) t))
 
 (defn- twist-row
   "The potential's next-token weights after tokens, checked."
@@ -127,7 +129,7 @@
     (when-not (== n (alength ws))
       (throw (ex-info (str "smc: the potential's next-token weights have " (alength ws) " entries, not " n
                            " (the vocabulary and the end)")
-                      {:entries (alength ws) :expected n})))
+                      {:reason :invalid-potential :entries (alength ws) :expected n})))
     ws))
 
 (defn- max-of ^double [^doubles x]
@@ -151,7 +153,7 @@
     (dotimes [t n]
       (aset x t (+ (aget row t) (aget ws t))))
     ;; an end token's twist is the end's
-    (doseq [t (:eos completion)]
+    (doseq [t (:end-tokens completion)]
       (aset x (int t) (+ (aget row (int t)) (aget ws n))))
     (let [z (log-sum-exp x)]
       (if (Double/isInfinite z)
@@ -169,9 +171,9 @@
       (= :lm proposal) row
       (= :masked proposal) (first (masked (:completion state) row ws))
       :else (let [q (proposal context row)]
-              (when-not (and (instance? (Class/forName "[F") q) (== (alength ^floats q) (alength row)))
+              (when-not (and (instance? float/1 q) (== (alength ^floats q) (alength row)))
                 (throw (ex-info "smc: a proposal function returns a float array of the vocabulary's log-probabilities"
-                                {:value q})))
+                                {:reason :invalid-row :value q})))
               q))))
 
 (defn- advance-particle
@@ -188,7 +190,7 @@
       (let [t (long (dc/sample (token/dist q) key))
             log-p (double (first (lm/score m context [t])))
             tokens (conj (:tokens particle) t)
-            end? (contains? (:eos completion) t)
+            end? (contains? (:end-tokens completion) t)
             capped? (and (not end?) (== (count tokens) (long (second (:args state)))))
             twist (if ws (double (aget ^floats ws (int (end-entry completion t)))) 0.0)
             ;; stopped at max-tokens: the whole sequence's weight replaces the
@@ -309,7 +311,8 @@
   (let [{:keys [completion args]} state]
     (mapv (fn [{:keys [tokens done? dead?]}]
             (when-not done?
-              (throw (ex-info "smc/traces: a particle has not finished: step the state until done?" {:tokens tokens})))
+              (throw (ex-info "smc/traces: a particle has not finished: step the state until done?"
+                              {:reason :not-done :tokens tokens})))
             (when-not dead?
               (:trace (gfi/generate completion args (token/forced tokens) (:key state)))))
           (:particles state))))

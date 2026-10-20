@@ -41,7 +41,7 @@
   (doseq [n [8 32 64]]
     (with-open [^java.io.Closeable e (toy/engine {:n-vocab n-vocab :max-branches 160 :n-ctx 128})
                 m (lm/lm e (tt/tokenizer n-vocab) {:max-cells 1000000})]
-      (let [gf (token/completion m {:eos #{}})
+      (let [gf (token/completion m {:end-tokens #{}})
             prompt [95 40 73]
             seed (volatile! 0)
             run (fn [opts] (fn [] (smc/run gf [prompt 32] n (assoc opts :key (rng/key (vswap! seed inc))))))

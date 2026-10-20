@@ -50,9 +50,10 @@
 (deftest misuse-is-loud
   (is (= :zero-prefix (bc/reason #(potential/logw-next no-repeats [3 3]))))
   (is (= :invalid-token (bc/reason #(potential/prefix no-repeats 3))))
-  (is (thrown? clojure.lang.ExceptionInfo (potential/potential 0 {:prefix identity :complete identity})))
-  (is (thrown? clojure.lang.ExceptionInfo (potential/potential n {:prefix identity})))
-  (is (thrown? clojure.lang.ExceptionInfo (potential/product)))
-  (is (thrown? clojure.lang.ExceptionInfo
-               (potential/logw-next (potential/product by-length (potential/potential 3 {:prefix (constantly 0.0) :complete (constantly 0.0)}))
-                                    [1]))))
+  (is (= :invalid-potential (bc/reason #(potential/potential 0 {:prefix identity :complete identity}))))
+  (is (= :invalid-potential (bc/reason #(potential/potential n {:prefix identity}))))
+  (is (= :invalid-potential (bc/reason #(potential/product))))
+  (is (= :invalid-potential
+         (bc/reason #(potential/logw-next (potential/product by-length (potential/potential 3 {:prefix (constantly 0.0)
+                                                                                             :complete (constantly 0.0)}))
+                                          [1])))))

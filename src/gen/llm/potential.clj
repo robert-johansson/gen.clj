@@ -75,7 +75,7 @@
   [n-vocab {:keys [prefix complete logw-next]}]
   (when-not (and (pos-int? n-vocab) (ifn? prefix) (ifn? complete) (or (nil? logw-next) (ifn? logw-next)))
     (throw (ex-info "potential: a vocabulary size and the functions :prefix and :complete (and :logw-next, optionally)"
-                    {:n-vocab n-vocab})))
+                    {:reason :invalid-potential :n-vocab n-vocab})))
   (let [next (or logw-next #(dense-logw-next n-vocab prefix complete %))]
     (reify Potential
       (-prefix [_ context] (prefix context))
@@ -87,7 +87,7 @@
    a sequence to (as genlm-control's product)."
   [& ps]
   (when (empty? ps)
-    (throw (ex-info "product: at least one potential" {})))
+    (throw (ex-info "product: at least one potential" {:reason :invalid-potential})))
   (reify Potential
     (-prefix [_ context] (reduce + 0.0 (map #(-prefix % context) ps)))
     (-complete [_ context] (reduce + 0.0 (map #(-complete % context) ps)))
@@ -95,7 +95,8 @@
       (let [ws (mapv #(-logw-next % context) ps)
             n (alength ^floats (first ws))]
         (when-not (every? #(= n (alength ^floats %)) ws)
-          (throw (ex-info "product: the potentials' vocabularies differ" {:sizes (mapv #(alength ^floats %) ws)})))
+          (throw (ex-info "product: the potentials' vocabularies differ"
+                          {:reason :invalid-potential :sizes (mapv #(alength ^floats %) ws)})))
         (let [out (float-array n)]
           (doseq [^floats w ws]
             (dotimes [t n] (aset out t (unchecked-float (+ (aget out t) (aget w t))))))
