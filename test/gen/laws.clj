@@ -85,17 +85,12 @@
     (and (close? (:score tr) w) (= (:retval tr) rv))))
 
 (defn- sound-retdiff?
-  "Def 2.3.2: no-change promises an equal return value; a vector-diff, the
-   two lengths and equal elements below both outside :updated (law audit
-   gap F: only no-change was checked)."
+  "Def 2.3.2: the retdiff describes the change of the return value
+   (gen.diff/consistent?): no-change an equal value; a vector-diff the two
+   lengths and equal elements below both outside :updated (law audit gap
+   F: only no-change was checked); an int-, set- or dict-diff its change."
   [old {tr :trace rd :retdiff}]
-  (cond (diff/no-change? rd) (= (:retval old) (:retval tr))
-        (diff/vector-diff? rd)
-        (let [a (:retval old) b (:retval tr)]
-          (and (= (:prev-length rd) (count a)) (= (:new-length rd) (count b))
-               (every? #(or (contains? (:updated rd) %) (= (nth a %) (nth b %)))
-                       (range (min (count a) (count b))))))
-        :else true))
+  (boolean (diff/consistent? (:retval old) (:retval tr) rd)))
 
 (defn- unvisitable?
   "Constraints drawn from another run that this run cannot visit (a
@@ -422,21 +417,23 @@
   "The static language is an optimization of the dynamic one (DESIGN.md
    §9): every operation on a static gf gives what the same body without
    ^:static gives under the same keys (choices, scores, weights, return
-   values, discards and retdiffs), also when an update or regenerate skips
-   nodes (no-change argdiffs for unchanged arguments)."
+   values and discards, and a sound retdiff), also when an update or
+   regenerate skips nodes (no-change argdiffs for unchanged arguments)."
   [cases]
   (prop/for-all [[[_ gf args :as model] seed picks alt?] cases]
     (let [plain (assoc gf :static nil)
           k (rng/key seed)
+          tr (gfi/simulate gf args k)
+          tp (gfi/simulate plain args k)
           host-choices #(ts/host (cm/to-map (:choices %)))
           same-trace? (fn [t1 t2] (and (= (host-choices t1) (host-choices t2)) (close? (:score t1) (:score t2))
                                        (= (ts/host (:retval t1)) (ts/host (:retval t2)))))
+          ;; the static retdiff may be more precise than the dynamic one (a
+          ;; propagated diff), so it need only be sound
           same? (fn [r1 r2] (and (same-trace? (:trace r1) (:trace r2))
                                  (close? (or (:weight r1) 0.0) (or (:weight r2) 0.0))
                                  (= (some-> (:discard r1) cm/to-map ts/host) (some-> (:discard r2) cm/to-map ts/host))
-                                 (= (:retdiff r1) (:retdiff r2))))
-          tr (gfi/simulate gf args k)
-          tp (gfi/simulate plain args k)
+                                 (or (nil? (:retdiff r1)) (sound-retdiff? tr r1))))
           args' (next-args model seed alt?)
           diffs (if (= args' args) (diff/no-changes (count args)) (unknown-diffs args'))
           other (gfi/simulate gf args' (rng/fold-in k 1))

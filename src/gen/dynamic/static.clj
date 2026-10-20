@@ -48,9 +48,38 @@
 
 (defn- inputs [form known] (vec (distinct (filter known (symbols form)))))
 
+(defn- simple-arg? [form] (or (symbol? form) (not (coll? form))))
+
+(defn- call-var
+  "The var form calls, when form is one call of a function var (not a
+   local, a macro or a special form) on symbols and constants: the
+   binding whose diff gen.diff/propagate can give precisely."
+  [env form]
+  (when (and (seq? form) (symbol? (first form)) (not (contains? env (first form))) (every? simple-arg? (rest form)))
+    (let [v (resolve env (first form))]
+      (when (and (var? v) (not (:macro (meta v))))
+        (symbol (str (.-ns ^clojure.lang.Var v)) (str (.-sym ^clojure.lang.Var v)))))))
+
+(defn- arg-spec
+  "How an argument's diff is found: its symbol's, none for a constant, or
+   from the inputs of an expression."
+  [form known]
+  (cond (symbol? form) {:symbol form}
+        (not (coll? form)) {:constant true}
+        :else {:inputs (inputs form known)}))
+
+(defn- compute-node
+  "A binding or return expression: its inputs, and for one call of a var,
+   the var and its arguments (for gen.diff/propagate)."
+  [env form known]
+  (let [v (call-var env form)]
+    (cond-> {:kind :compute :expr (pure! form "a binding") :inputs (inputs form known)}
+      (and (symbol? form) (known form)) (assoc :alias form)
+      v (assoc :call v :args (vec (rest form)) :arg-specs (mapv #(arg-spec % known) (rest form))))))
+
 (defn- node
   "The node of one binding, given the names bound so far."
-  [binding init known]
+  [env binding init known]
   (let [names (bound-names binding)
         head (when (seq? init) (first init))]
     (merge {:binding binding :names names :form init}
@@ -66,10 +95,11 @@
                (when-not (constant-address? addr)
                  (not-static "splice needs a constant address (a splice without one is dynamic)" init))
                (let [expr `[~gf [~@args]]]
-                 {:kind :splice :addr addr :expr (pure! expr "a splice's arguments") :inputs (inputs expr known)}))
+                 {:kind :splice :addr addr :expr (pure! expr "a splice's arguments") :inputs (inputs expr known)
+                  :arg-specs (mapv #(arg-spec % known) args)}))
 
              :else
-             {:kind :compute :expr (pure! init "a binding") :inputs (inputs init known)}))))
+             (compute-node env init known)))))
 
 (defn arg-names
   "[[names…] per argument], the rest parameter's names last, and whether
@@ -82,9 +112,10 @@
 
 (defn analyze
   "The graph of a static body (a body of one let), or a loud error: {:args
-   (arg-names), :nodes [{:kind :addr :binding :names :inputs :expr :form}],
-   :ret {:inputs :expr}}."
-  [params body]
+   (arg-names), :nodes [{:kind :addr :binding :names :inputs :expr :form,
+   and :call :args :arg-specs for one call of a var, :arg-specs for a
+   splice}], :ret (a compute node)}. env is the macro's &env."
+  [params body env]
   (when-not (= 1 (count body)) (not-static "the body is one let form" (vec body)))
   (let [form (first body)]
     (when-not (and (seq? form) (#{'let 'clojure.core/let} (first form)))
@@ -95,13 +126,13 @@
           args (arg-names params)
           known (set (concat (apply concat (:fixed args)) (:rest args)))
           [nodes _] (reduce (fn [[nodes known] [binding init]]
-                              (let [n (node binding init known)]
+                              (let [n (node env binding init known)]
                                 [(conj nodes n) (into known (:names n))]))
                             [[] known] (partition 2 bindings))
           names (into known (mapcat :names nodes))]
       {:args args
        :nodes nodes
-       :ret {:expr (pure! (first ret) "the return expression") :inputs (inputs (first ret) names)}})))
+       :ret (compute-node env (pure! (first ret) "the return expression") names)})))
 
 (defn ir
   "gf's graph as data (see the namespace doc), or nil when gf is not static."

@@ -111,6 +111,52 @@
     (is (== 3.0 (ts/number (first (:retval moved)))))))
 
 ;; ---------------------------------------------------------------------------
+;; Change hints through the graph (gen.diff/propagate)
+;; ---------------------------------------------------------------------------
+
+(deftest change-hints-reach-a-callee
+  (let [runs (atom 0)
+        kernel (gen [x] (swap! runs inc) (trace :y (d/normal x 1)))
+        model (gen ^:static [xs]
+                (let [ys (splice :ys (comb/map kernel) xs)] ys))
+        xs [0.1 0.2 0.3 0.4]
+        xs' (assoc xs 2 0.9)
+        tr (gfi/simulate model [xs] (rng/key 11))
+        runs-of (fn [argdiff] (reset! runs 0)
+                  [(gfi/update tr [xs'] [argdiff] cm/EMPTY (rng/key 12)) @runs])]
+    (testing "a vector-diff argument: the Map reruns the element it names"
+      ;; (its :y is kept, so the return value is unchanged: no-change)
+      (let [[{rd :retdiff} n] (runs-of (diff/vector-diff 4 4 {2 diff/unknown-change}))]
+        (is (= 1 n))
+        (is (diff/no-change? rd))))
+    (testing "a constraint on one element: the function's retdiff is the Map's vector-diff"
+      (let [{rd :retdiff} (gfi/update tr [xs] [diff/no-change] (cm/choicemap [:ys 2 :y] 5.0) (rng/key 15))]
+        (is (diff/vector-diff? rd))
+        (is (= #{2} (set (keys (:updated rd)))))))
+    (testing "unknown-change: every element"
+      (is (= 4 (second (runs-of diff/unknown-change)))))))
+
+(deftest a-one-call-binding-has-a-precise-diff
+  ;; (nth xs 1) is unchanged when another element changes, so what depends
+  ;; on it alone is skipped; (count xs) changes by the elements appended
+  (let [runs (atom {})
+        tick! (fn [k] (swap! runs update k (fnil inc 0)))
+        model (gen ^:static [xs]
+                (let [x1 (nth xs 1)
+                      a (do (tick! :a) (* 2.0 x1))
+                      n (count xs)
+                      b (do (tick! :b) (* 1.0 n))
+                      y (trace :y (d/normal (+ a b) 1))]
+                  y))
+        xs [0.1 0.2 0.3]
+        tr (gfi/simulate model [xs] (rng/key 13))
+        counted (fn [args argdiff] (reset! runs {}) (gfi/update tr args [argdiff] cm/EMPTY (rng/key 14)) @runs)]
+    (is (= {} (counted [[0.1 0.2 0.7]] (diff/vector-diff 3 3 {2 diff/unknown-change}))))
+    (is (= {:a 1} (counted [[0.1 0.5 0.3]] (diff/vector-diff 3 3 {1 diff/unknown-change}))))
+    (is (= {:b 1} (counted [[0.1 0.2 0.3 0.4]] (diff/vector-diff 4 3 {}))))
+    (is (= {:a 1 :b 1} (counted [[0.1 0.2 0.3 0.4]] diff/unknown-change)))))
+
+;; ---------------------------------------------------------------------------
 ;; The graph
 ;; ---------------------------------------------------------------------------
 

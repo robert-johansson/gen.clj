@@ -643,9 +643,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   regenerate walk the graph and rerun a node only when a parent changed or
   it is constrained or selected, through the handler's own site
   transitions. A law requires the static and the dynamic function of the
-  same body to give identical traces, weights, discards and retdiffs under
-  the same keys. Change hints beyond VectorDiff (IntDiff, SetDiff, DictDiff,
-  Diffed propagation) come after, on the graph. The graph is also the way
+  same body to give identical traces, weights and discards under the same
+  keys, and a sound retdiff (the static one may be more precise). The
+  graph is also the way
   to compiled scores, batching without the tracer, and CUDA graphs: a fixed
   structure runs the same kernels every time.
   - **How it runs:** the macro builds one guarded fn per node, of `param`
@@ -664,6 +664,24 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     from a value, a `trace` or `splice` inside an expression (a branch on
     a choice included), a splice without an address, an untraced draw: each
     a compile error that names the form.
+- **Change hints and Diffed propagation** (Gen.jl's IntDiff, SetDiff,
+  DictDiff and Diffed; M4, 2026-10-20): `gen.diff` adds `int-diff`,
+  `set-diff` and `dict-diff` beside `vector-diff` (each collapsing to
+  no-change when empty), and `consistent?`, whether a diff describes the
+  change between two values, which the laws' retdiff soundness now uses
+  for every kind. `(diff/propagate f args diffs)` is an open multimethod on
+  the function's var giving the diff of a call, with rules for `count`,
+  `nth`, `get`, `conj`, `assoc`, `+`, `-` (clojure.core's and gen.array's),
+  `inc`, `dec` and `vec`; Gen.jl dispatches on a Diffed value type, which
+  Clojure's core functions do not take, so here the rule belongs to the
+  call. In a static body every name carries a diff: an argument's from its
+  argdiff, a binding that is one call of a var on symbols and constants
+  from its rule, a bare symbol's from its input, a splice's from its
+  callee's retdiff, anything else no-change or unknown-change. A splice
+  hands its callee its arguments' diffs (an identical argument stays
+  no-change), so a Map reruns only the elements a vector-diff names, and
+  the function's retdiff is its return expression's. Each rule is checked
+  to describe the change it predicts over random vectors, maps and edits.
 - **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
   `(array/item x)`, the namespace's last segment, as the Clojure style guide
   has it. It replaced `a`, which the owner found ugly (2026-10-18). The

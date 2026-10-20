@@ -14,10 +14,9 @@ CPU-only, with nothing but a JDK: a pure-Clojure array backend with
 reverse-mode autodiff. An MLX backend (M2) runs the same code on Apple's GPU
 (Metal), on MLX's CPU backend and on CUDA (verified on a Jetson AGX Thor):
 it passes the backend conformance suite and the test battery on each. Gen.jl
-parity (M4) covers the core, with the static modeling language and
-encapsulated randomness, and GenParticleFilters, GenSMCP3 and
-GenTraceKernelDSL; the change hints beyond VectorDiff are still to come.
-Local LLMs as generative functions (M3) come next. See
+parity (M4) covers the core, with the static modeling language, its change
+hints and encapsulated randomness, and GenParticleFilters, GenSMCP3 and
+GenTraceKernelDSL. Local LLMs as generative functions (M3) come next. See
 `DESIGN.md`.
 
 ## A model and two kinds of inference

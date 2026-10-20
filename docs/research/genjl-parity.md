@@ -52,7 +52,7 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 |---|---|---|
 | `NoChange`, `UnknownChange` | Y: `diff.cljs` | core |
 | `VectorDiff` | Y: `vector-diff` with a `:changed` set | core |
-| `IntDiff`/`SetDiff`/`DictDiff`, and `Diffed{V,DV}` propagating through plain code | N | soon (needed for the static DSL) |
+| `IntDiff`/`SetDiff`/`DictDiff`, and `Diffed{V,DV}` propagating through plain code | N | soon (needed for the static DSL). *gen.clj (M4, 2026-10-20):* `gen.diff/int-diff`, `set-diff`, `dict-diff`, `consistent?`, and `propagate`, an open multimethod per function var, applied in static bodies to one-call bindings; a splice passes its callee precise argdiffs (DESIGN.md §9) |
 | Retdiffs, consumed by Unfold/Map/Recurse to skip work | N | core |
 
 ### 1c. Dynamic modeling language (Gen.jl core)
@@ -315,7 +315,7 @@ tested, ◐ partly, — not yet (the feature does not exist yet).
 | 5 Update weight and discard | ✓ `updates-are-reversible-with-exact-discards` (exact Def 2.3.1 discard), `update-weight-is-the-score-change-less-fresh-choices` (forward sampling), `update-weight-is-the-projection-change` (general, any internal proposal; added 2026-10-20 after the law audit's planted +1 passed every general law), `identity-update-changes-nothing` |
 | 6 Update is reversible | ✓ the same, with changed args and random constraint subsets; `update-without-fresh-choices-is-exactly-reversible`; `a-choice-that-becomes-a-call-is-discarded` |
 | 7 Compositionality | ◐ `splicing-is-compositional`; `switch-branches-share-addresses` (Switch against the equivalent `if`); combinator laws over a model splicing Map/Unfold/Switch; `a-different-callee-at-an-address-is-a-new-call`. Missing (law audit gap G): Map, Unfold and Recurse against an equivalent inlined dynamic function (Prop. 2.3.2, p. 73; §5.3, pp. 176–177) |
-| 8 Change hints | ◐ `map-/unfold-precise-hints-match-unknown-change`; retdiff soundness inside the update/regenerate laws, but only that no-change means an equal value: vector-diffs are not checked (law audit gap F), and Recurse has no precise-against-unknown-hint property |
+| 8 Change hints | ✓ `map-/unfold-precise-hints-match-unknown-change`; retdiff soundness inside the update/regenerate laws for every diff kind (`gen.diff/consistent?`: vector-diffs since gap F, and int-, set- and dict-diffs, M4); propagation rules describe the change they predict (`propagated-diffs-describe-the-change`, `int-diffs-add-up`, `map-diffs-describe-the-change`); static bodies pass precise diffs to callees (`change-hints-reach-a-callee`, `a-one-call-binding-has-a-precise-diff`). Missing: a precise-against-unknown-hint property for Recurse |
 | 9 Regenerate | ✓ `regenerate-weight-is-the-retained-density-ratio`, `regenerate-keeps-unselected-choices`, `regenerating-nothing-changes-nothing`, `regenerating-everything-has-weight-zero` (random selections, changed args); for any internal proposal, `regenerate-weight-is-the-projection-ratio` (Eq. 4.1, M4) |
 | 10 Selection MH stationary | ✓ `kernels-leave-the-posterior-invariant`, `structure-changing-moves-target-the-posterior` (thesis p_mh); with the optimal internal proposal, regenerate is Gibbs: `regenerating-the-enumerated-choices-is-gibbs` (weight 0, posterior frequencies) |
 | 11 Project | ✓ `project-of-everything-is-the-score`, `project-splits-the-score` |
