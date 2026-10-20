@@ -49,7 +49,8 @@
             [gen.inference.proposal :as proposal]
             [gen.inference.weights :as w]
             [gen.random :as rng]
-            [gen.selection :as sel]))
+            [gen.selection :as sel]
+            [gen.trace :as trace]))
 
 (set! *warn-on-reflection* true)
 
@@ -227,10 +228,10 @@
                                              (ex-info (str "with-exact-proposal: the model's structure depends on the"
                                                            " enumerated choices (under " (pr-str c) ")")
                                                       {:assignment c} cause))
-                           tr (try (:trace (gfi/generate g args constraints (rng/key 0)))
+                           tr (try (:trace (gfi/with-exact-density "with-exact-proposal" (gfi/generate g args constraints (rng/key 0))))
                                    (catch clojure.lang.ExceptionInfo e
                                      ;; a choice of the other run goes unused under c
-                                     (throw (if (re-find #"was not visited" (ex-message e)) (structure-error e) e))))]
+                                     (throw (if (:unvisited (ex-data e)) (structure-error e) e))))]
                        (when-not (= (+ n-choices (count c)) (count (cm/addresses (:choices tr))))
                          (throw (structure-error nil)))
                        [(:score tr) (gfi/project tr unconstrained) (:retval tr)]))
@@ -264,12 +265,17 @@
    other than the enumerated ones, then the enumerated ones from their exact
    conditional. The weight, log p(τ) - log q(τ ∖ σ | σ), is
    logsumexp(s) - logsumexp(r) (enumerated); it does not depend on the
-   enumerated values drawn."
+   enumerated values drawn. In a revise, the forward run's calls drop the
+   old choices they leave, and it repeats without them
+   (gfi/rerun-without-drops); the enumeration then runs on the final
+   constraints, outside the revise."
   [{:keys [gf paths limit check-retval?] :as egf} args sigma key]
   (let [[k-forward k-pick k-final] (rng/split key 3)
-        seen (volatile! {})
+        forward (fn [sigma] (let [seen (volatile! {})]
+                              {:trace (:trace (gfi/-generate (watching gf (set paths) seen) args sigma k-forward))
+                               :seen seen}))
+        [{t0 :trace seen :seen} sigma] (if gfi/*revising* (gfi/rerun-without-drops forward sigma) [(forward sigma) sigma])
         g (watching gf (set paths) seen)
-        t0 (:trace (gfi/generate g args sigma k-forward))
         free (free-paths paths sigma)
         _ (check-visited! free seen (:choices t0))
         others (others-of (:choices t0) sigma free)
@@ -279,7 +285,7 @@
         chosen (reduce (fn [m p] (cm/set-choice m p (array/take (array/array (mapv #(get % p) cs)) idx)))
                        (cm/merge sigma others) free)
         tr (:trace (gfi/generate gf args chosen k-final))]
-    {:trace (assoc tr :gen-fn egf) :weight (- (array/logsumexp s) (array/logsumexp r))}))
+    {:trace (trace/as-made-by tr egf) :weight (- (array/logsumexp s) (array/logsumexp r))}))
 
 (defn- exact-weight
   "The weight exact-generate gives for producing the trace tr of gf on args
@@ -288,7 +294,7 @@
   (let [seen (volatile! {})
         g (watching gf (set paths) seen)
         ;; the supports, from a run with every choice given
-        _ (gfi/generate g args (:choices tr) (rng/key 0))
+        _ (gfi/with-exact-density "with-exact-proposal" (gfi/generate g args (:choices tr) (rng/key 0)))
         free (free-paths paths sigma)
         _ (check-visited! free seen (:choices tr))
         {s :s r :r} (enumerated g args sigma (others-of (:choices tr) sigma free) free seen limit)]
@@ -298,18 +304,18 @@
 
 (defrecord ExactProposalGF [gf paths limit check-retval?]
   gfi/IGenerativeFunction
-  (-simulate [this args key] (assoc (gfi/-simulate gf args key) :gen-fn this))
+  (-simulate [this args key] (trace/as-made-by (gfi/-simulate gf args key) this))
   (-generate [this args constraints key] (exact-generate this args constraints key))
   (-update [this tr args argdiffs constraints key]
     ;; gf's update keeps, overwrites and removes choices; fresh ones are
     ;; then drawn by the exact proposal given the kept ones
     (let [[k-update k-fresh] (rng/split key)
-          {t2 :trace :as r} (gfi/-update gf (assoc tr :gen-fn gf) args argdiffs constraints k-update)
+          {t2 :trace :as r} (gfi/-update gf (trace/as-made-by tr gf) args argdiffs constraints k-update)
           before (set (cm/addresses (:choices tr)))
           given (set (cm/addresses constraints))
           fresh (vec (remove #(or (before %) (given %)) (cm/addresses (:choices t2))))]
       (if (empty? fresh)
-        (assoc r :trace (assoc t2 :gen-fn this))
+        (assoc r :trace (trace/as-made-by t2 this))
         (let [kept (sel/get-selected (:choices t2) (sel/complement (sel/from-paths fresh)))
               {t3 :trace w :weight} (exact-generate this args kept k-fresh)]
           (when-not (same-addresses? (:choices t2) (:choices t3))
@@ -318,7 +324,8 @@
   (-regenerate [this tr args argdiffs selection key]
     (proposal/regenerate-under #(exact-generate this %1 %2 %3) #(exact-weight this %1 %2 %3)
                                tr args argdiffs selection key))
-  (-assess [_ args choices] (gfi/-assess gf args choices))
+  ;; as its generate, it needs exact densities
+  (-assess [_ args choices key] (gfi/with-exact-density "with-exact-proposal" (gfi/-assess gf args choices key)))
   (-propose [_ args key] (gfi/-propose gf args key))
   (-project [this tr selection]
     (exact-weight this (:args tr) (sel/get-selected (:choices tr) selection) tr)))

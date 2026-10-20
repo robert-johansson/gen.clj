@@ -259,3 +259,11 @@
     (is (ts/close? (ts/number (dc/log-prob (d/normal (* 0.3 y) s) mu)) score))
     (is (ts/close? (* (/ z s) y) (:w grads)))
     (is (ts/close? (- (* z z) 1.0) (:log-s grads)))))
+
+(deftest gradient-trees-add-leaf-by-leaf
+  ;; the one sum behind train, lecture-batched and VI's estimators: nested
+  ;; trees add leaf by leaf, and a name only some runs read keeps theirs
+  (let [g1 {:w 1.0 :layer {:b [1.0 2.0]}}
+        g2 {:w 3.0 :layer {:b [5.0 6.0]} :only 4.0}]
+    (is (= {:w 7.0 :layer {:b [11.0 14.0]} :only 8.0} (ts/host (g/weighted-sum [1.0 2.0] [g1 g2]))))
+    (is (= {:w 2.0 :layer {:b [3.0 4.0]} :only 2.0} (ts/host (g/mean [g1 g2]))))))

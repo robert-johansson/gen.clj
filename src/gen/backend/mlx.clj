@@ -1455,8 +1455,10 @@
      :collections collections}))
 
 (defn set-memory-limit!
-  "Set MLX's memory limit in bytes (beyond it MLX waits for memory to be
-   freed, then errors); returns the previous limit."
+  "Set MLX's memory limit in bytes; returns the previous limit. It is not a
+   cap: near it MLX frees its buffer cache, and allocations past it still
+   succeed (measured 2026-10-20 on an M2 Max: 8 GB active against a 4 GB
+   limit, no error), so it cannot keep MLX within a memory budget."
   [bytes]
   (Mlx/mlx_set_memory_limit (long bytes)))
 

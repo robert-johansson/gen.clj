@@ -46,21 +46,22 @@
   "A proposed move and its log acceptance ratio, {:trace trace' :weight w}
    (also a move-reweight weight, gen.inference.particle-filter). Forward
    choices u come from (proposal trace args…) drawn with k-propose. With
-   :involution, (involution trace u retval args) gives trace', the
-   backward choices u' and the move's weight; otherwise the trace is updated
-   with u (k-update) and u' is the discard. u' is assessed under
+   :involution, (involution trace u retval args k-update) gives trace', the
+   backward choices u' and the move's weight (k-update for its update,
+   which draws a model's encapsulated randomness afresh); otherwise the
+   trace is updated with u (k-update) and u' is the discard. u' is assessed under
    :backward on (trace', :backward-args…), or under the proposal on
    (trace', args…). w = the move's weight - log q(u) + log q_bwd(u')."
   [trace proposal proposal-args {:keys [involution backward backward-args]} k-propose k-update]
   (let [{fwd :choices fwd-weight :weight fwd-retval :retval} (gfi/propose proposal (into [trace] proposal-args) k-propose)
         [moved weight bwd] (if involution
-                             (let [r (involution trace fwd fwd-retval proposal-args)]
+                             (let [r (involution trace fwd fwd-retval proposal-args k-update)]
                                [(:trace r) (:weight r) (:bwd-choices r)])
                              (let [r (gfi/update trace fwd k-update)]
                                [(:trace r) (:weight r) (:discard r)]))
         {bwd-weight :weight} (gfi/assess (or backward proposal)
                                          (into [moved] (if backward backward-args proposal-args))
-                                         bwd)]
+                                         bwd (gfi/backward-key k-propose))]
     {:trace moved :weight (+ (- weight fwd-weight) bwd-weight)}))
 
 (defn- proposal-mh
@@ -95,16 +96,20 @@
    deterministic involution, and accept with ratio
    p(trace') q(u'; trace') / (p(trace) q(u; trace)) · |J|.
 
-   involution is (fn [trace fwd-choices fwd-retval proposal-args]) and returns
-   {:trace trace' :bwd-choices u' :weight w}, with w = log p(trace') -
-   log p(trace) + log |det J| (the update weight plus the log Jacobian, 0 for
-   discrete moves). Applying it twice must give back (trace, u)."
+   involution is (fn [trace fwd-choices fwd-retval proposal-args key]) and
+   returns {:trace trace' :bwd-choices u' :weight w}, with w = log p(trace')
+   - log p(trace) + log |det J| (the update weight plus the log Jacobian, 0
+   for discrete moves). Applying it twice must give back (trace, u). Gen.jl's
+   involution takes no key; gen.clj's takes one for its update, as every
+   operation does, which draws a model's encapsulated randomness afresh (a
+   pseudo-marginal move)."
   ([trace proposal proposal-args involution]
    (involutive-mh trace proposal proposal-args involution (gfi/next-key)))
   ([trace proposal proposal-args involution key]
    (check-proposal-args proposal-args)
-   (let [[k-propose k-accept] (rng/split key)
-         {proposed :trace w :weight} (move trace proposal proposal-args {:involution involution} k-propose nil)]
+   ;; split's i-th key does not depend on n: the involution's is a third
+   (let [[k-propose k-accept k-update] (rng/split key 3)
+         {proposed :trace w :weight} (move trace proposal proposal-args {:involution involution} k-propose k-update)]
      (accept trace proposed w k-accept))))
 
 (defn mh-particles

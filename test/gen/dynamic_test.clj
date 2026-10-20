@@ -113,6 +113,22 @@
 
 (laws/deflaws dynamic models 100)
 
+;; every address has a fixed support (the mixtures' union is the reals)
+(laws/deflaws dynamic (filterv (comp #{:linreg :shared-namespace :mixtures :spliced-distribution :p-mh} first) models)
+  100 laws/fixed-support)
+
+(deftest selecting-absent-addresses-changes-nothing
+  ;; p. 149: a selection may name addresses the trace does not have (the
+  ;; final law audit, 4.b). A pin of the thesis's statement, which fails a
+  ;; regenerate that throws on an absent address or misreads one. Planted
+  ;; bug (2026-10-20): regenerate checking its selection as update checks
+  ;; its constraints, loud on a selected address it does not visit
+  (let [branch (gen [] (let [a (trace :a (d/bernoulli 0.3))] (when a (trace :b (d/normal 0 1))) (trace :c (d/normal 0 1))))
+        tr (:trace (gfi/generate branch [] (cm/choicemap :a false :c 0.4) (rng/key 1)))
+        {t :trace w :weight} (gfi/regenerate tr (sel/select :b) (rng/key 2))]
+    (is (= (:choices tr) (:choices t)))
+    (is (== 0.0 (ts/number w)))))
+
 (deftest update-without-fresh-choices-is-exactly-reversible
   ;; constraints covering the new branch: w = Δscore, the reverse weight is
   ;; -w and the reverse discard is σ (Prop 2.3.1, Def 2.3.1)

@@ -1,7 +1,10 @@
 (ns gen.dist
   "Gen.jl's built-in distributions, with Gen.jl's names and parameterizations
    (normal by standard deviation, gamma by scale, categorical by
-   probabilities), plus categorical-logits. Discrete values are 0-based
+   probabilities), plus categorical-logits, and further continuous
+   families with Distributions.jl's names and parameters (chi-squared,
+   f-dist, gumbel, levy, log-normal, logistic, nakagami, pareto, student-t,
+   triangular, weibull). Discrete values are 0-based
    integers; bernoulli values are booleans.
 
    Every log-prob is -Inf outside the support. Every sampler is a pure,
@@ -13,9 +16,11 @@
                                      lgamma log-beta xlogy xlog1py logical-and logical-or]]
             [gen.array.dtype :as dt]
             [gen.array.linalg :as la]
+            [gen.array.protocols :as p]
             [gen.array.shape :as sh]
             [gen.dist.core :as dc :refer [defdist]]
-            [gen.random :as rng]))
+            [gen.random :as rng])
+  (:import [gen.array.protocols IBatchedValue]))
 
 (set! *warn-on-reflection* true)
 
@@ -165,10 +170,72 @@
       (guard (logical-and (>= v (array/take bounds 0)) (<= v (array/take bounds n)))
              (- (log (array/take probs i)) (log (- (array/take bounds (+ i 1)) (array/take bounds i))))))))
 
+(def ^:private machine-epsilon {:float32 (double (Math/ulp (float 1.0))) :float64 (Math/ulp 1.0)})
+
+(defn- factored-dtype
+  "The precision cov is factored in: float32 when it or the default
+   backend's floats are (host data become the default backend's arrays),
+   else float64."
+  [cov]
+  (if (some #{:float32} [(array/dtype cov) (dc/float-dtype (dc/backend-of))]) :float32 :float64))
+
+(defn- positive-definite?
+  "Is the symmetric a (each matrix of a batch) positive definite, as far as
+   dtype's rounding can tell? A Cholesky factor L does not show it alone: a
+   singular matrix can have one through rounding (2·ones(2, 2)'s last pivot
+   is 4e-16, not 0). So the correlation matrix H of L·Lᵀ must also be
+   conditioned for the dtype: trace(H⁻¹), between 1/λmin and n/λmin, below
+   1/ε. The bound is the measured one: a float32 log density's error tracks
+   (0.05–0.4)·ε·trace(H⁻¹) on squared-exponential kernels
+   (docs/research/covariance/f32_gp.py), so it rejects where the error nears
+   0.1 nats; the worst case's 1/(n·ε) was n times too strict."
+  [a dtype]
+  (let [n (peek (array/shape a))
+        eye (array/with-backend (array/backend a) (array/eye n))
+        ;; H⁻¹ = MᵀM for M = L⁻¹·diag(√aⱼⱼ); a NaN factor fails the comparison
+        m (la/solve-triangular (la/cholesky a) (* eye (array/expand-dims (sqrt (la/diagonal a)) -2)))]
+    (array/all-true? (< (* (machine-epsilon dtype) (array/sum (square m) {:axis [-2 -1]})) 1.0))))
+
+(defn- host-max
+  "The largest element of x on the host, across every particle of a batched
+   value (as array/all-true? reads one)."
+  ^double [x]
+  (double (array/item (array/max (if (instance? IBatchedValue x) (p/-all-particles x) x)))))
+
+(defn- rung
+  "The i-th readable jitter: 1, 2 or 5 times 10^⌊i/3⌋."
+  ^double [^long i]
+  (Double/parseDouble (str ([1 2 5] (mod i 3)) "e" (Math/floorDiv i 3))))
+
+(defn- suggested-jitter
+  "The smallest readable jitter (1, 2 or 5 times a power of ten) that lets
+   positive-definite? pass once added to a's diagonal. The search starts at
+   the rung that passes for every positive semidefinite a: a jitter δ above
+   n·ε·max aⱼⱼ/(1 - n·ε) makes λmin(H) at least δ/(max aⱼⱼ + δ), so
+   trace(H⁻¹) ≤ n/λmin(H) is below 1/ε. It goes up from there (to max aⱼⱼ)
+   while rounding leaves a short of passing, then down while smaller rungs
+   pass (to ε·max aⱼⱼ's decade, below which a jitter is lost to rounding).
+   nil when a's factor fails (no jitter at the dtype's scale mends an
+   indefinite matrix) or none passes."
+  [a dtype]
+  (when-not (array/any-true? (array/isnan (la/cholesky a)))
+    (let [n (peek (array/shape a))
+          eps (machine-epsilon dtype)
+          top (host-max (la/diagonal a))
+          eye (array/with-backend (array/backend a) (array/eye n {:dtype (array/dtype a)}))
+          passes? #(positive-definite? (+ a (* (rung %) eye)) dtype)
+          lowest (* 3 (long (Math/floor (Math/log10 (* eps top)))))
+          guarantee (/ (* n eps top) (- 1 (* n eps)))
+          start (first (drop-while #(< (rung %) (min guarantee top)) (iterate inc lowest)))]
+      (when-let [i (first (filter passes? (take-while #(<= (rung %) top) (iterate inc start))))]
+        (rung (last (take-while passes? (range i (dec lowest) -1))))))))
+
 (defdist mvnormal
   "mvnormal(mu, cov): the multivariate normal with mean vector mu and
    covariance matrix cov (batched over leading axes). A concrete cov must be
-   symmetric and positive definite."
+   symmetric and positive definite, also to the precision it is factored in;
+   when its factor exists but is too ill-conditioned, the error suggests a
+   jitter for its diagonal."
   [mu cov]
   (validate (dc/check (and (<= 1 (array/ndim mu)) (<= 2 (array/ndim cov))
                            (= (peek (array/shape mu)) (peek (array/shape cov)) (peek (pop (array/shape cov)))))
@@ -180,8 +247,14 @@
                     cov-t (array/transpose cov (-> (vec (range r)) (assoc (- r 2) (dec r)) (assoc (dec r) (- r 2))))]
                 (dc/check (array/all-true? (<= (array/abs (- cov cov-t)) (+ 1e-8 (* 1e-5 (array/abs cov-t)))))
                           "mvnormal" "cov must be symmetric" {})
-                (dc/check (not (array/any-true? (array/isnan (la/cholesky cov)))) "mvnormal"
-                          "cov must be positive definite" {}))))
+                (let [dtype (factored-dtype cov)]
+                  (when-not (positive-definite? cov dtype)
+                    (let [jitter (suggested-jitter cov dtype)]
+                      (throw (ex-info (cond-> (str "mvnormal: cov must be positive definite, and not singular at "
+                                                   (name dtype) " precision")
+                                        jitter (str "; adding a jitter of " jitter " to its diagonal passes"))
+                                      (cond-> {:distribution "mvnormal" :param "cov" :dtype dtype}
+                                        jitter (assoc :suggested-jitter jitter))))))))))
   (sample [key shape]
     (let [d (peek (array/shape mu))
           batch (sh/broadcast (sh/broadcast shape (pop (array/shape mu))) (pop (pop (array/shape cov))))
@@ -216,6 +289,186 @@
                         (<= (array/abs (- (array/sum v {:axis -1}) 1)) 1e-6))
            (- (array/sum (xlogy (- alpha 1) v) {:axis -1})
               (- (array/sum (lgamma alpha) {:axis -1}) (lgamma (array/sum alpha {:axis -1})))))))
+
+;; ---------------------------------------------------------------------------
+;; Beyond Gen.jl's built-ins: Distributions.jl's families with its names and
+;; parameters (what GenDistributions' users write), native, so they batch,
+;; run on every backend and differentiate (gen.dist.commons-math wraps a
+;; host library's for the rest)
+;; ---------------------------------------------------------------------------
+
+(def ^:private log-2 (Math/log 2.0))
+
+(defn- stand-in
+  "v where in-support holds, else s: the other lanes stay finite, so a
+   gradient through the guard is not NaN."
+  [in-support v s]
+  (where in-support v s))
+
+(defn- floored
+  "x at least the smallest normal number of its dtype. A gamma draw of a
+   small shape (its boost U^(1/α)) or a power of one underflows to 0, where
+   a density may be infinite or a quotient infinite; the floor changes only
+   values below it."
+  [x]
+  (array/maximum x (if (= :float32 (array/dtype x)) (double Float/MIN_NORMAL) Double/MIN_NORMAL)))
+
+(defdist chi-squared
+  "chi-squared(nu): the χ² distribution with nu degrees of freedom (Chisq)."
+  [nu]
+  (validate (dc/check-positive "chi-squared" "nu" nu))
+  (sample [key shape] (* 2.0 (floored (rng/gamma key (/ nu 2.0) (dc/elementwise-shape shape nu) (opts nu)))))
+  (log-prob [v]
+    (let [k (/ nu 2.0)]
+      (guard (>= v 0) (- (xlogy (- k 1) v) (/ v 2.0) (lgamma k) (* k log-2))))))
+
+(defdist f-dist
+  "f-dist(nu1, nu2): Fisher's F distribution, the ratio of χ² draws over
+   their degrees of freedom (FDist)."
+  [nu1 nu2]
+  (validate (dc/check-positive "f-dist" "nu1" nu1) (dc/check-positive "f-dist" "nu2" nu2))
+  (sample [key shape]
+    (let [s (dc/elementwise-shape shape nu1 nu2)
+          [k1 k2] (rng/split key)]
+      (/ (* nu2 (floored (rng/gamma k1 (/ nu1 2.0) s (opts nu1 nu2))))
+         (* nu1 (floored (rng/gamma k2 (/ nu2 2.0) s (opts nu1 nu2)))))))
+  (log-prob [v]
+    ;; above 1, (nu1/2 - 1) log x - (nu1+nu2)/2 log(nu2 + nu1 x) as
+    ;; -(nu2/2 + 1) log x - (nu1+nu2)/2 log(nu1 + nu2/x): -Inf at Inf, not Inf - Inf
+    (let [in (>= v 0)
+          x (stand-in in v 1.0)
+          big (> x 1.0)
+          xb (stand-in big x 2.0)
+          kernel (where big
+                        (- (- (* (+ (/ nu2 2.0) 1) (log xb))) (* (/ (+ nu1 nu2) 2.0) (log (+ nu1 (/ nu2 xb)))))
+                        (- (xlogy (- (/ nu1 2.0) 1) x) (* (/ (+ nu1 nu2) 2.0) (log (+ nu2 (* nu1 x))))))]
+      (guard in (- (+ (* 0.5 (+ (* nu1 (log nu1)) (* nu2 (log nu2)))) kernel)
+                   (log-beta (/ nu1 2.0) (/ nu2 2.0)))))))
+
+(defdist gumbel
+  "gumbel(mu, theta): the Gumbel (maximum) distribution, location mu and
+   scale theta (Gumbel)."
+  [mu theta]
+  (validate (dc/check-positive "gumbel" "theta" theta))
+  (sample [key shape] (+ mu (* theta (rng/gumbel key (dc/elementwise-shape shape mu theta) (opts mu theta)))))
+  (log-prob [v]
+    (let [z (/ (- v mu) theta)]
+      (- (+ (log theta) z (exp (- z)))))))
+
+(defdist levy
+  "levy(mu, sigma): the Lévy distribution, location mu and scale sigma,
+   mu + sigma/Z² for a standard normal Z (Levy)."
+  [mu sigma]
+  (validate (dc/check-positive "levy" "sigma" sigma))
+  (sample [key shape]
+    (let [z (rng/normal key (dc/elementwise-shape shape mu sigma) (opts mu sigma))]
+      (+ mu (/ sigma (floored (square z))))))
+  (log-prob [v]
+    (let [in (> v mu)
+          d (stand-in in (- v mu) 1.0)]
+      (guard in (- (* 0.5 (log (/ sigma (* 2.0 Math/PI)))) (* 1.5 (log d)) (/ sigma (* 2.0 d)))))))
+
+(defdist log-normal
+  "log-normal(mu, sigma): e^X for X normal(mu, sigma) (LogNormal)."
+  [mu sigma]
+  (validate (dc/check-positive "log-normal" "sigma" sigma))
+  (sample [key shape]
+    (exp (+ mu (* sigma (rng/normal key (dc/elementwise-shape shape mu sigma) (opts mu sigma))))))
+  (log-prob [v]
+    (let [in (> v 0)
+          lx (log (stand-in in v 1.0))]
+      (guard in (- (+ lx (log sigma) half-log-2pi (* 0.5 (square (/ (- lx mu) sigma)))))))))
+
+(defdist logistic
+  "logistic(mu, theta): the logistic distribution, location mu and scale
+   theta (Logistic)."
+  [mu theta]
+  (validate (dc/check-positive "logistic" "theta" theta))
+  ;; the difference of two standard Gumbel draws is standard logistic
+  (sample [key shape]
+    (let [s (dc/elementwise-shape shape mu theta)
+          [k1 k2] (rng/split key)]
+      (+ mu (* theta (- (rng/gumbel k1 s (opts mu theta)) (rng/gumbel k2 s (opts mu theta)))))))
+  (log-prob [v]
+    (let [z (/ (- v mu) theta)]
+      (- (+ z (log theta) (* 2.0 (array/logaddexp 0.0 (- z))))))))
+
+(defdist nakagami
+  "nakagami(m, omega): the Nakagami distribution, shape m and spread omega,
+   the root of a gamma(m, omega/m) draw (Nakagami; m > 0, as
+   Distributions.jl's, where Commons Math asks m >= 1/2)."
+  [m omega]
+  (validate (dc/check-positive "nakagami" "m" m) (dc/check-positive "nakagami" "omega" omega))
+  (sample [key shape]
+    (sqrt (* (/ omega m) (floored (rng/gamma key m (dc/elementwise-shape shape m omega) (opts m omega))))))
+  (log-prob [v]
+    (guard (>= v 0) (- (+ log-2 (* m (log m)) (xlogy (- (* 2.0 m) 1) v))
+                       (lgamma m) (* m (log omega)) (/ (* m (square v)) omega)))))
+
+(defdist pareto
+  "pareto(alpha, theta): the Pareto distribution, shape alpha and scale
+   (minimum) theta (Pareto). For a small alpha some draws lie beyond the
+   float range: +Inf, of log density -Inf."
+  [alpha theta]
+  (validate (dc/check-positive "pareto" "alpha" alpha) (dc/check-positive "pareto" "theta" theta))
+  (sample [key shape]
+    (* theta (exp (/ (rng/exponential key (dc/elementwise-shape shape alpha theta) (opts alpha theta)) alpha))))
+  (log-prob [v]
+    (let [in (>= v theta)]
+      (guard in (- (+ (log alpha) (* alpha (log theta))) (* (+ alpha 1) (log (stand-in in v theta))))))))
+
+(defdist student-t
+  "student-t(nu): Student's t distribution with nu degrees of freedom, a
+   standard normal over the root of a χ²/nu draw (TDist)."
+  [nu]
+  (validate (dc/check-positive "student-t" "nu" nu))
+  (sample [key shape]
+    (let [s (dc/elementwise-shape shape nu)
+          [k1 k2] (rng/split key)
+          g (rng/gamma k2 (/ nu 2.0) s (opts nu))]
+      (* (rng/normal k1 s (opts nu)) (sqrt (/ nu (* 2.0 (floored g)))))))
+  (log-prob [v]
+    (- (lgamma (/ (+ nu 1) 2.0)) (lgamma (/ nu 2.0)) (* 0.5 (log (* nu Math/PI)))
+       (* (/ (+ nu 1) 2.0) (log1p (/ (square v) nu))))))
+
+(defdist triangular
+  "triangular(a, b, c): the triangular distribution on [a, b] with mode c
+   (TriangularDist)."
+  [a b c]
+  (validate (when (every? #(and (some? %) (array/concrete? %)) [a b c])
+              (dc/check (array/all-true? (logical-and (< a b) (logical-and (<= a c) (<= c b))))
+                        "triangular" "needs a < b and a <= c <= b" {:a a :b b :c c})))
+  (sample [key shape]
+    (let [u (rng/uniform key (dc/elementwise-shape shape a b c) (opts a b c))
+          w (- b a)]
+      (where (< u (/ (- c a) w))
+             (+ a (sqrt (* u w (- c a))))
+             (- b (sqrt (* (- 1.0 u) w (- b c)))))))
+  (log-prob [v]
+    (let [w (- b a)
+          left (> (- c a) 0)
+          right (> (- b c) 0)]
+      ;; the mode separately: at c = b (or c = a) one side has no width
+      (where (== v c)
+             (log (/ 2.0 w))
+             (where (logical-and (>= v a) (< v c))
+                    (log (/ (* 2.0 (- v a)) (* w (stand-in left (- c a) 1.0))))
+                    (where (logical-and (> v c) (<= v b))
+                           (log (/ (* 2.0 (- b v)) (* w (stand-in right (- b c) 1.0))))
+                           ##-Inf))))))
+
+(defdist weibull
+  "weibull(alpha, theta): the Weibull distribution, shape alpha and scale
+   theta (Weibull). For a small alpha some draws lie beyond the float range
+   (in float32, for alpha below about 0.03): +Inf, of log density -Inf."
+  [alpha theta]
+  (validate (dc/check-positive "weibull" "alpha" alpha) (dc/check-positive "weibull" "theta" theta))
+  (sample [key shape]
+    (* theta (floored (array/pow (rng/exponential key (dc/elementwise-shape shape alpha theta) (opts alpha theta)) (/ 1.0 alpha)))))
+  (log-prob [v]
+    (let [in (>= v 0)
+          x (/ (stand-in in v theta) theta)]
+      (guard in (- (+ (log (/ alpha theta)) (xlogy (- alpha 1) x)) (array/pow x alpha))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Discrete distributions
@@ -407,28 +660,51 @@
 ;; distribution constructor.
 ;; ---------------------------------------------------------------------------
 
+(defn- mixture-weights
+  "A mixture's weights as an array, checked as the components'
+   probabilities (on the last axis)."
+  [family-name weights]
+  (dc/check-probabilities family-name "weights" (dc/->checkable weights))
+  (dc/->array weights))
+
+(defn- component
+  "Component k's part of a homogeneous mixture's parameter p, of rank dim in
+   one component: its slice on the axis before those, or all of p when it
+   has no such axis or one of size 1 (one value for every component)."
+  [p dim k n]
+  (let [s (array/shape p)
+        axis (- (count s) dim 1)]
+    (if (neg? axis)
+      p
+      (do (dc/check (#{1 n} (nth s axis)) "homogeneous-mixture"
+                    (str "a parameter of shape " s " has " (nth s axis) " components (axis " axis "), not " n)
+                    {:shape s :dim dim :components n})
+          (array/take p (if (= 1 (nth s axis)) 0 k) axis)))))
+
 (defn homogeneous-mixture
   "A family of mixtures of one distribution family (Gen.jl's
-   HomogeneousMixture, for families with scalar values and scalar
-   parameters per component):
-   ((homogeneous-mixture normal) weights mus stds) has components
-   (normal (mus k) (stds k)). The last axis of each parameter indexes the
-   components; weights are the components' probabilities."
-  [family]
-  (fn [weights & params]
-    (let [_ (dc/check-probabilities "homogeneous-mixture" "weights" (dc/->checkable weights))
-          w (dc/->array weights)
-          params (mapv dc/->array params)]
-      (dc/->Distribution ::homogeneous-mixture {:family family :weights w :params params}))))
-
-(defmethod dc/-sample ::homogeneous-mixture [{{:keys [family weights params]} :params} key shape]
-  (let [[k-pick k-draw] (rng/split key)
-        k (rng/categorical k-pick (log weights) (sh/broadcast shape (pop (array/shape weights))) (opts weights))]
-    (dc/sample (apply family (mapv #(array/pick % k) params)) k-draw shape)))
-
-(defmethod dc/-log-prob ::homogeneous-mixture [{{:keys [family weights params]} :params} v]
-  ;; every component at once: the value against the component axis
-  (array/logsumexp (+ (log weights) (dc/log-prob (apply family params) (array/expand-dims v -1))) {:axis -1}))
+   HomogeneousMixture): ((homogeneous-mixture normal) weights mus stds)
+   mixes (normal (mus k) (stds k)). dims, as Gen.jl's, gives each
+   parameter's rank in one component (0 by default); the axis before those
+   indexes the components, so ((homogeneous-mixture mvnormal [1 2]) weights
+   mus covs) takes mus of shape [K d] and covs of shape [K d d]. A parameter
+   without that axis is every component's. Weights are the components'
+   probabilities."
+  ([family] (homogeneous-mixture family nil))
+  ([family dims]
+   (fn [weights & params]
+     (let [w (mixture-weights "homogeneous-mixture" weights)
+           n (peek (array/shape w))
+           params (mapv dc/->array params)
+           dims (or dims (repeat (count params) 0))]
+       (dc/check (= (count dims) (count params)) "homogeneous-mixture" "needs one dim per parameter"
+                 {:dims (vec dims) :params (count params)})
+       ;; the mixture of its K components, as Gen.jl's logpdf loops over
+       ;; them (all at once, the value would need the component axis before
+       ;; its own axes, whose number a family does not declare)
+       (dc/->Distribution ::mixture
+                          {:weights w
+                           :components (mapv (fn [k] (apply family (map #(component %1 %2 k n) params dims))) (range n))})))))
 
 (defn heterogeneous-mixture
   "A family of mixtures of different distribution families (Gen.jl's
@@ -438,24 +714,30 @@
   [families]
   (let [families (vec families)]
     (fn [weights & component-params]
-      (let [w (dc/->array weights)]
+      (let [w (mixture-weights "heterogeneous-mixture" weights)]
         (dc/check (= (count families) (count component-params) (peek (array/shape w)))
                   "heterogeneous-mixture" "needs one weight and one parameter vector per component"
                   {:families (count families) :params (count component-params)})
-        (dc/check-probabilities "heterogeneous-mixture" "weights" (dc/->checkable weights))
-        (dc/->Distribution ::heterogeneous-mixture
-                           {:weights w :components (mapv #(apply %1 %2) families component-params)})))))
+        (dc/->Distribution ::mixture {:weights w :components (mapv #(apply %1 %2) families component-params)})))))
 
-(defmethod dc/-sample ::heterogeneous-mixture [{{:keys [weights components]} :params} key shape]
+(defmethod dc/-sample ::mixture [{{:keys [weights components]} :params} key shape]
   (let [[k-pick k-draw] (rng/split key)
-        k (rng/categorical k-pick (log weights) (sh/broadcast shape (pop (array/shape weights))) (opts weights))
+        ;; the weights' batch axes are independent draws too
+        shape (sh/broadcast shape (pop (array/shape weights)))
         draws (mapv #(dc/sample %1 %2 shape) components (rng/split k-draw (count components)))
-        dtype (reduce dt/promote (map array/dtype draws))]
+        dtype (reduce dt/promote (map array/dtype draws))
+        ;; one pick per element of the log density, whose axes lead a draw's;
+        ;; the rest are the draw's own (a vector's, for mvnormal)
+        elements (array/shape (dc/log-prob (first components) (first draws)))
+        k (rng/categorical k-pick (log weights) elements (opts weights))
+        own (- (array/ndim (first draws)) (count elements))]
     ;; draw every component, keep the picked one (branch-free, so it batches);
     ;; the draws share their promoted dtype, so no component is truncated
-    (array/pick (array/stack (mapv #(array/astype % dtype) draws) -1) (array/broadcast-to k (array/shape (first draws))))))
+    (array/pick (array/stack (mapv #(array/astype % dtype) draws) -1)
+                (array/reshape k (into (array/shape k) (repeat own 1))))))
 
-(defmethod dc/-log-prob ::heterogeneous-mixture [{{:keys [weights components]} :params} v]
+(defmethod dc/-log-prob ::mixture [{{:keys [weights components]} :params} v]
+  ;; each component's log density of the whole value, mixed per element
   (array/logsumexp (+ (log weights) (array/stack (mapv #(dc/log-prob % v) components) -1)) {:axis -1}))
 
 (defn product
@@ -486,15 +768,16 @@
 ;; ---------------------------------------------------------------------------
 
 (doseq [t [::normal ::uniform ::beta ::gamma ::inv-gamma ::exponential ::laplace ::cauchy ::beta-uniform
+           ::chi-squared ::f-dist ::gumbel ::levy ::log-normal ::logistic ::nakagami ::pareto ::student-t
+           ::triangular ::weibull
            ::bernoulli ::uniform-discrete ::geometric ::poisson ::binom ::neg-binom]]
   (defmethod dc/-value-shape t [d] (dc/elementwise-value-shape d)))
 
 (doseq [t [::bernoulli ::uniform-discrete ::geometric ::poisson ::binom ::neg-binom ::categorical ::categorical-logits]]
   (defmethod dc/-discrete? t [_] true))
 
-(defmethod dc/-discrete? ::homogeneous-mixture [{{:keys [family params]} :params}] (dc/discrete? (apply family params)))
+(defmethod dc/-discrete? ::mixture [{{:keys [components]} :params}] (every? dc/discrete? components))
 (defmethod dc/-discrete? ::product [{{:keys [factors]} :params}] (every? dc/discrete? factors))
-(defmethod dc/-discrete? ::heterogeneous-mixture [{{:keys [components]} :params}] (every? dc/discrete? components))
 
 (defmethod dc/-value-shape ::dirichlet [{{:keys [alpha]} :params}] (array/shape alpha))
 
@@ -507,10 +790,7 @@
 (defmethod dc/-value-shape ::piecewise-uniform [{{:keys [bounds probs]} :params}]
   (sh/broadcast (pop (array/shape bounds)) (pop (array/shape probs))))
 
-(defmethod dc/-value-shape ::homogeneous-mixture [{{:keys [weights params]} :params}]
-  (pop (reduce sh/broadcast (array/shape weights) (map array/shape params))))
-
-(defmethod dc/-value-shape ::heterogeneous-mixture [{{:keys [components]} :params}]
-  (dc/value-shape (first components)))
+(defmethod dc/-value-shape ::mixture [{{:keys [weights components]} :params}]
+  (some->> (dc/value-shape (first components)) (sh/broadcast (pop (array/shape weights)))))
 
 (defmethod dc/-value-shape ::product [_] nil)

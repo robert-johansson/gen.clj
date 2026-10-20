@@ -31,6 +31,7 @@
             [gen.diff :as diff]
             [gen.dist.core :as dc]
             [gen.dynamic.core]
+            [gen.dynamic.static :as static]
             [gen.gfi :as gfi]
             [gen.random :as rng]
             [gen.selection :as sel]
@@ -139,7 +140,7 @@
 (defn- assess-site [state p dist _k]
   (let [c (constraint-at state p :assess)]
     (when-not c
-      (throw (ex-info (str "assess: no value for the choice at " p) {:path p})))
+      (throw (ex-info (str "assess: no value for the choice at " p) {:path p :missing-choice true})))
     (let [[v lp] (given-value state dist c)]
       [v (-> state (record p v lp) (add-weight lp))])))
 
@@ -181,16 +182,33 @@
 ;; ---------------------------------------------------------------------------
 
 
-(defn- sub-key [state]
-  (let [[k-next k-sub] (rng/split (:key state))]
-    [k-sub (assoc state :key k-next)]))
+(defn- site-key
+  "[the key of the run's next site or call, state with the key after it]:
+   every site and call consumes one, whether it samples or not."
+  [state]
+  (let [[k-next k-site] (rng/split (:key state))]
+    [k-site (assoc state :key k-next)]))
+
+(def ^:dynamic *params*
+  "The trainable parameters in effect: the store of the outermost generative
+   function that has one, merged with any inner one's (with-params)."
+  nil)
+
+(defn- with-store
+  "The store in effect within a generative function with its own store ps:
+   ps over the outer one (not a copy when there is none, so a store keeps
+   its identity from run to run)."
+  [ps]
+  (if *params* (merge *params* ps) ps))
 
 (defn- arg-diffs
   "Argdiffs for a splice's new args against its previous call's: no-change
-   for an identical argument (sound, and O(1)), unknown-change otherwise."
-  [prev-args args]
-  (mapv #(if (identical? %1 %2) diff/no-change diff/unknown-change)
-        args (concat prev-args (repeat nil))))
+   for an identical argument (sound, and O(1)), else the hint given (the
+   static language's propagated diffs), else unknown-change."
+  ([prev-args args] (arg-diffs prev-args args nil))
+  ([prev-args args hints]
+   (mapv (fn [a pa h] (cond (identical? a pa) diff/no-change h h :else diff/unknown-change))
+         args (concat prev-args (repeat nil)) (concat hints (repeat nil)))))
 
 (defn- record-call
   "state with the sub-trace tr at path p (score sc)."
@@ -229,39 +247,80 @@
       (not (cm/empty? (:choices old))) (update :discard cm/set-choice p (:choices old)))
     state))
 
+(defn- project-under-its-store
+  "tr's projection by its maker under the store at the call that made it
+   (a callee's project may run its model)."
+  [tr s]
+  (binding [*params* (::site-store tr)] (gfi/project-by-maker tr s)))
+
+(defn ^:no-doc run-call
+  "op on gf at a call site, a splice or a combinator's kernel, through
+   gfi/run-op (opts as there, and :at, the call's address in its caller):
+   the one place a call's context is checked. Each trace a call makes is
+   marked with the store in effect at the call. An update or regenerate
+   under another store than prev's mark keeps nothing of prev but its
+   choices (gfi/revise, prev projected under its own store), whatever
+   kind gf is: no argument shows a store, so no callee's own skipping
+   could see it. (A gf that does not compute as prev's maker is
+   gfi/run-op's to revise.) In a revise's generate (gfi/*revising*), a
+   generate drops the old choices its callee leaves unvisited
+   (gfi/generate-dropping), never the revise's constraints: the call's path
+   extends the revise's prefix. An unvisited-constraint error from the callee
+   is raised with its paths under :at (gfi/under)."
+  [gf op args opts]
+  (let [prev (:prev opts)
+        r (try (cond
+                 (and prev (not (gfi/same-value? *params* (::site-store prev))))
+                 (gfi/revise gf op args opts project-under-its-store)
+                 (and gfi/*revising* (= op :generate))
+                 (let [prefix (into (:prefix gfi/*revising*) (:at opts))]
+                   (binding [gfi/*revising* (assoc gfi/*revising* :prefix prefix)]
+                     (first (gfi/generate-dropping #(gfi/run-op gf op args (assoc opts :constraints %))
+                                                   (or (:constraints opts) cm/EMPTY) prefix))))
+                 :else (gfi/run-op gf op args opts))
+               (catch clojure.lang.ExceptionInfo e (throw (gfi/under e (:at opts)))))
+        t (:trace r)]
+    (cond-> r
+      (and t (not (identical? (::site-store t) *params*))) (assoc :trace (assoc t ::site-store *params*)))))
+
 (defn- splice-call
   "Call gf at path p under the run's operation, scalar or batched (through
-   gfi/run-op), nesting its choices and recording its sub-trace."
-  [state p gf args]
+   run-call), nesting its choices and recording its sub-trace: [retval
+   state' retdiff]. hints are argdiffs for the arguments that are not
+   identical to the previous call's."
+  [state p gf args & [hints]]
   (let [mode (:mode state)
         cons (cm/get-submap (:constraints state) p)
         old-sub (get (::subtraces (:prev state)) p)
         replaced? (and old-sub (not (compatible-callee? (:gen-fn old-sub) gf)))
         prev-sub (when-not replaced? old-sub)
+        argdiffs (when prev-sub (arg-diffs (:args prev-sub) args hints))
         state (if replaced? (replace-call state p old-sub) state)
         ;; a batched run's callees run batched too: they inherit the batch tracer
-        base {}]
+        base {}
+        ;; the callee's key, the same in every mode: assess draws what
+        ;; generate would with the same key
+        [k state] (site-key state)
+        opts (assoc base :key k :at p)]
     (if (= mode :assess)
-      (let [{w :weight rv :retval} (gfi/run-op gf :assess args (assoc base :constraints cons :key (rng/key 0)))]
+      (let [{w :weight rv :retval} (try (gfi/run-op gf :assess args (assoc opts :constraints cons))
+                                        (catch clojure.lang.ExceptionInfo e (throw (gfi/under e p))))]
         [rv (cond-> (-> state (update :score + w) (add-weight w))
               (not (cm/empty? cons)) (update :choices cm/set-choice p cons))])
-      (let [[k state] (sub-key state)
-            opts (assoc base :key k)
-            r (cond
-                (= mode :simulate) (gfi/run-op gf :simulate args opts)
-                (= mode :generate) (gfi/run-op gf :generate args (assoc opts :constraints cons))
+      (let [r (cond
+                (= mode :simulate) (run-call gf :simulate args opts)
+                (= mode :generate) (run-call gf :generate args (assoc opts :constraints cons))
                 (nil? prev-sub) (if (= mode :update)
-                                  (gfi/run-op gf :generate args (assoc opts :constraints cons))
-                                  (gfi/run-op gf :simulate args opts))
-                (= mode :update) (gfi/run-op gf :update args (assoc opts :prev prev-sub :constraints cons
-                                                                    :argdiffs (arg-diffs (:args prev-sub) args)))
-                :else (gfi/run-op gf :regenerate args (assoc opts :prev prev-sub
-                                                             :argdiffs (arg-diffs (:args prev-sub) args)
-                                                             :selection (subselection-at (:selection state) p))))
-            {tr :trace w :weight d :discard} r]
+                                  (run-call gf :generate args (assoc opts :constraints cons))
+                                  (run-call gf :simulate args opts))
+                (= mode :update) (run-call gf :update args (assoc opts :prev prev-sub :constraints cons :argdiffs argdiffs))
+                :else (run-call gf :regenerate args (assoc opts :prev prev-sub :argdiffs argdiffs
+                                                           :selection (subselection-at (:selection state) p))))
+            {tr :trace w :weight d :discard rd :retdiff} r]
         [(:retval tr) (cond-> (record-call state p tr)
                         w (add-weight w)
-                        (and d (not (cm/empty? d))) (update :discard cm/set-choice p d))]))))
+                        (and d (not (cm/empty? d))) (update :discard cm/set-choice p d))
+         (or rd diff/unknown-change)]))))
 
 ;; ---------------------------------------------------------------------------
 ;; Running a body
@@ -270,11 +329,11 @@
 (defn- check-constraints-visited!
   "Every constraint must be consumed by a choice or a splice (as in Gen.jl)."
   [state op]
-  (let [visited (:visited state)]
-    (doseq [p (cm/addresses (:constraints state))]
-      (when-not (some #(contains? visited (subvec p 0 %)) (range 1 (inc (count p))))
-        (throw (ex-info (str (name op) ": the constraint at " p " was not visited")
-                        {:path p :op op}))))))
+  (let [visited (:visited state)
+        missed (remove (fn [p] (some #(contains? visited (subvec p 0 %)) (range 1 (inc (count p)))))
+                       (cm/addresses (:constraints state)))]
+    (when (seq missed)
+      (throw (gfi/unvisited op missed)))))
 
 (defn- finish
   "Account for the choices and calls of the previous trace that this run no
@@ -301,22 +360,43 @@
       ;; regenerate: choices no longer visited cancel against the reverse move
       state)))
 
-(defn- initial-state [mode {:keys [key constraints prev selection]}]
-  {:mode mode :key key
+;; ---------------------------------------------------------------------------
+;; Encapsulated randomness: untraced draws (thesis §4.5)
+;; ---------------------------------------------------------------------------
+
+(def ^:private omega-salt
+  "Folded into an operation's key for its encapsulated randomness ω, apart
+   from the sites' sequence, so untraced draws never shift a site's key."
+  0x6f6d6567)
+
+(defn- keeps-omega?
+  "Does an update or regenerate keep the previous trace's ω? Only when
+   nothing the function depends on changed: no-change argdiffs, no
+   constraint (update) or selection (regenerate) under it, and not a
+   revise (a changed store or generative function at the call, which no
+   hint shows). Otherwise ω is drawn afresh, a pseudo-marginal refresh
+   (DESIGN.md §9)."
+  [mode {:keys [argdiffs constraints selection] :as opts}]
+  (and (not (::revise opts)) (some? argdiffs) (every? diff/no-change? argdiffs)
+       (case mode
+         :update (or (nil? constraints) (cm/empty? constraints))
+         :regenerate (= sel/none selection)
+         false)))
+
+(defn- initial-state [mode {:keys [key constraints prev selection argdiffs] :as opts}]
+  {:mode mode :key key :argdiffs argdiffs
    :choices cm/EMPTY :scores {} :subtraces {} :score 0.0 :weight 0.0
    :constraints (or constraints cm/EMPTY) :prev prev :selection (or selection sel/none)
-   :discard cm/EMPTY :visited #{}})
-
-(def ^:dynamic *params*
-  "The trainable parameters in effect: the store of the outermost generative
-   function that has one, merged with any inner one's (with-params)."
-  nil)
+   :discard cm/EMPTY :visited #{}
+   ;; ω: the previous trace's when kept, else folded from the key at the first
+   ;; untraced draw
+   :omega (when (keeps-omega? mode opts) (::trace/omega prev)) :omega-key key :omega-count 0})
 
 (defn- read-param
   "(param name) in a body: the parameter's value in the store in effect."
   [name]
   (let [v (get *params* name ::missing)]
-    (if (= ::missing v)
+    (if (identical? ::missing v)
       (throw (ex-info (str "The parameter " (pr-str name) " has no value: give the generative function a store"
                            " with gen.dynamic/with-params")
                       {:param name :available (keys *params*)}))
@@ -360,6 +440,120 @@
                                ", given " n)
                           {:params params :args n})))))))
 
+;; ---------------------------------------------------------------------------
+;; The static language: a walk of the graph that skips what did not change
+;; ---------------------------------------------------------------------------
+
+(defn- arg-name-diffs
+  "Each argument name's diff: an argument bound to a symbol takes its
+   argdiff; a destructured one's names no-change or unknown-change. Every
+   name unknown-change without argdiffs."
+  [{:keys [fixed rest]} params argdiffs]
+  (let [d-of (fn [d] (if (diff/no-change? d) diff/no-change diff/unknown-change))
+        positional (map (fn [names form i]
+                          (let [d (if argdiffs (nth argdiffs i diff/unknown-change) diff/unknown-change)]
+                            (if (symbol? form) {form d} (zipmap names (repeat (d-of d))))))
+                        fixed params (range))
+        rest-d (if (and argdiffs (every? diff/no-change? (drop (count fixed) argdiffs))) diff/no-change diff/unknown-change)]
+    ;; in binding order: a name bound again (by a later parameter, or the
+    ;; rest parameter) holds its last binding, as in let
+    (apply merge (concat positional [(zipmap rest (repeat rest-d))]))))
+
+(defn- spec-diff
+  "An argument's diff from its spec: its slot's, none for a constant, or
+   unknown-change unless every slot its expression reads is unchanged."
+  [diffs {:keys [slot constant in]}]
+  (cond slot (nth diffs slot)
+        constant diff/no-change
+        (every? #(diff/no-change? (nth diffs %)) in) diff/no-change
+        :else diff/unknown-change))
+
+(defn- computed
+  "[value diff] of a compute node or the return expression on env: one call
+   of a var gets its diff from gen.diff/propagate."
+  [{:keys [f rule args-f arg-specs alias]} env diffs old skip?]
+  (cond
+    alias [(nth env alias) (if skip? (nth diffs alias) diff/unknown-change)]
+    ;; the value from the node's guarded fn, as the body computes it; the
+    ;; rule sees the arguments only for the diff
+    rule
+    (let [v (f read-param env)]
+      [v (if skip? (diff/propagate rule (args-f read-param env) (mapv #(spec-diff diffs %) arg-specs)) diff/unknown-change)])
+    :else
+    (let [v (f read-param env)]
+      [v (if (and skip? (identical? v old)) diff/no-change diff/unknown-change)])))
+
+(defn- keep-node!
+  "Node n's previous value old, with its site's or call's previous record,
+   as an unchanged rerun would leave them (weight 0), and the same key
+   consumed, so that what follows draws what the dynamic body would."
+  [vol {:keys [kind addr]} old]
+  (when-not (= kind :compute)
+    (let [p (path addr)
+          state @vol]
+      (check-running! state p)
+      (check-address! state p)
+      (let [state (second (site-key state))
+            state (if (= kind :trace)
+                    (let [[v lp] (prev-choice state p)] (record state p v lp))
+                    (record-call state p (get (::subtraces (:prev state)) p)))]
+        (vreset! vol (update state :visited conj p)))))
+  old)
+
+(defn- run-static
+  "A static body (gen.dynamic.static), node by node, with the handler's own
+   trace and splice. In update and regenerate, a node keeps its value,
+   score and sub-trace when its inputs' diffs are all no-change and no
+   constraint or selection reaches it; the trace keeps every node's value
+   for the next update. Diffs come from the argdiffs, from a callee's
+   retdiff, from gen.diff/propagate for a binding that is one call, and a
+   splice hands its callee its arguments' diffs. A gf with middleware
+   (with-transitions) reruns every node, so its transitions see every site."
+  [{:keys [nodes ret args-bind params slots size] :as st} gf vol trace-fn splice-at args]
+  (let [{:keys [mode prev constraints selection argdiffs]} @vol
+        values (::node-values prev)
+        ;; the values are this graph's, made by a gf that computes as this
+        ;; one (not another static gf's at the same address, a Switch's
+        ;; other branch, the same body under other middleware: gfi/revise
+        ;; runs those here too), read under an equal store (a callee's
+        ;; param reads, a param in an argument)
+        skip? (boolean (and values (#{:update :regenerate} mode) (nil? (:transitions gf))
+                            (gfi/same-gen-fn? gf (trace/maker prev))
+                            (gfi/same-value? *params* (::params prev))))
+        reached? (fn [{:keys [kind addr]}]
+                   (let [p (path addr)]
+                     (cond (= mode :update) (not (cm/empty? (cm/get-submap constraints p)))
+                           (= kind :trace) (path-selected? selection p)
+                           :else (not= sel/none (subselection-at selection p)))))
+        unchanged? (fn [diffs in] (every? #(diff/no-change? (nth diffs %)) in))
+        [env diffs vals]
+        (reduce (fn [[env diffs vals] [i {:keys [kind addr in out f bind symbol? arg-specs] :as n}]]
+                  (let [old (when skip? (nth values i))
+                        keep? (and skip? (unchanged? diffs in) (not (reached? n)))
+                        [v d] (cond
+                                keep? [(keep-node! vol n old) diff/no-change]
+                                (= kind :trace) (let [v (trace-fn addr (f read-param env))]
+                                                  [v (if (and skip? (identical? v old)) diff/no-change diff/unknown-change)])
+                                (= kind :splice) (let [[g as] (f read-param env)]
+                                                   (splice-at addr g as (when skip? (mapv #(spec-diff diffs %) arg-specs))))
+                                :else (computed n env diffs old skip?))]
+                    [(bind env v)
+                     (let [d (if (or symbol? (diff/no-change? d)) d diff/unknown-change)]
+                       (reduce #(assoc %1 %2 d) diffs out))
+                     (conj vals v)]))
+                [(args-bind args)
+                 (reduce-kv (fn [ds x d] (assoc ds (slots x) d))
+                            (vec (repeat size diff/no-change))
+                            (if skip? (arg-name-diffs (:args st) params argdiffs) {}))
+                 []]
+                (map-indexed vector nodes))]
+    (vswap! vol assoc ::node-values vals)
+    (if (and skip? (unchanged? diffs (:in ret)))
+      (do (vswap! vol assoc ::retdiff diff/no-change) (:retval prev))
+      (let [[v d] (computed ret env diffs (:retval prev) skip?)]
+        (vswap! vol assoc ::retdiff d)
+        v))))
+
 (defn- execute
   "Run gf's body on args under the transitions of mode; the final state with
    :retval."
@@ -369,6 +563,24 @@
         ;; callee's middleware for the callee's body
         transition (volatile! (or (get (:transitions gf) mode) (site-transitions mode)))
         vol (volatile! (initial-state mode opts))
+        ;; the n-th untraced draw's key is ω folded with n
+        untraced-fn (fn untraced
+                      ([] (let [state @vol]
+                            (when (::finished state)
+                              (throw (ex-info "An untraced draw after the generative function returned: a lazy sequence escaped the body (realize it in the body, e.g. with mapv or doall)" {})))
+                            (gfi/check-exact-density! "an untraced draw")
+                            ;; each particle's ω must reproduce its own draws
+                            (when (batch/batch-backend? array/*backend*)
+                              (throw (array/batched-branch "An untraced draw in a batched run" {})))
+                            (let [omega (or (:omega state) (rng/fold-in (:omega-key state) omega-salt))
+                                  n (long (:omega-count state))]
+                              (vreset! vol (assoc state :omega omega :omega-count (inc n)))
+                              (rng/fold-in omega n))))
+                      ([dist]
+                       (when-not (instance? gen.dist.core.Distribution dist)
+                         (throw (ex-info "untraced draws from a distribution; give other stochastic code a key with (untraced-key)"
+                                         {:value dist})))
+                       (dc/sample dist (untraced) [])))
         trace-fn (fn [addr dist]
                    (let [p (path addr)
                          state @vol]
@@ -377,10 +589,26 @@
                        (throw (ex-info (str "trace at " p " needs a distribution; call generative functions with splice")
                                        {:path p :value dist})))
                      (check-address! state p)
-                     (let [[k-next k-site] (rng/split (:key state))
-                           [v state] (@transition (assoc state :key k-next) p dist k-site)]
+                     (let [[k-site state] (site-key state)
+                           [v state] (@transition state p dist k-site)]
                        (vreset! vol (update state :visited conj p))
                        v)))
+        ;; a call at an address: [value retdiff], hints the arguments' argdiffs
+        splice-at (fn [addr gf args hints]
+                    (let [args (realize! (vec args))
+                          p (path addr)
+                          state @vol]
+                      (check-running! state p)
+                      (when-not (gfi/generative-function? gf)
+                        (throw (ex-info (str "splice at " p " needs a generative function") {:path p :value gf})))
+                      (check-address! state p)
+                      (let [[v state' rd] (splice-call state p gf args hints)]
+                        (when-not (identical? state @vol)
+                          (throw (ex-info (str "The caller's trace was used during the splice at " p
+                                               ": a function passed to the callee calls trace")
+                                          {:path p})))
+                        (vreset! vol (update state' :visited conj p))
+                        [v rd])))
         splice-fn (fn splice-fn [& xs]
                     (if (gfi/generative-function? (first xs))
                       ;; (splice gf & args): Gen.jl's {*} ~ gf(args), the callee's choices in
@@ -393,38 +621,30 @@
                                           {:gen-fn (type sub)})))
                         (check-arity! sub args)
                         (let [outer @transition
-                              run-body #(apply (:body-fn sub) trace-fn splice-fn read-param args)]
+                              run-body #(apply (:body-fn sub) trace-fn splice-fn read-param untraced-fn args)]
                           (vreset! transition (or (get (:transitions sub) mode) (site-transitions mode)))
                           (try
                             (if-let [ps (:params sub)]
-                              (binding [*params* (merge *params* ps)] (run-body))
+                              (binding [*params* (with-store ps)] (run-body))
                               (run-body))
                             (finally (vreset! transition outer)))))
-                      (let [[addr gf & args] xs
-                            ;; trace calls in lazy arguments happen now, in this body
-                            args (realize! (vec args))
-                            p (path addr)
-                            state @vol]
-                        (check-running! state p)
-                        (when-not (gfi/generative-function? gf)
-                          (throw (ex-info (str "splice at " p " needs a generative function") {:path p :value gf})))
-                        (check-address! state p)
-                        (let [[v state'] (splice-call state p gf args)]
-                          (when-not (identical? state @vol)
-                            (throw (ex-info (str "The caller's trace was used during the splice at " p
-                                                 ": a function passed to the callee calls trace")
-                                            {:path p})))
-                          (vreset! vol (update state' :visited conj p))
-                          v))))
-        retval (realize! (apply (:body-fn gf) trace-fn splice-fn read-param args))]
-    (vswap! vol assoc ::finished true)
+                      ;; trace calls in lazy arguments happen now, in this body (splice-at)
+                      (let [[addr gf & args] xs] (first (splice-at addr gf args nil)))))
+        retval (realize! (if-let [st (:static gf)]
+                           (run-static st gf vol trace-fn splice-at args)
+                           (apply (:body-fn gf) trace-fn splice-fn read-param untraced-fn args)))]
+    ;; the store in effect, which the next update compares with its own
+    (vswap! vol assoc ::finished true ::params *params*)
     (assoc (finish @vol) :retval retval)))
 
 (defn- make-trace [gf args state]
-  (assoc (trace/make-trace {:gen-fn gf :args args :choices (:choices state)
-                            :retval (:retval state) :score (:score state)})
-         ::scores (:scores state)
-         ::subtraces (:subtraces state)))
+  (cond-> (assoc (trace/make-trace {:gen-fn gf :args args :choices (:choices state)
+                                    :retval (:retval state) :score (:score state)})
+                 ::scores (:scores state)
+                 ::subtraces (:subtraces state))
+    (pos? (long (:omega-count state))) (assoc ::trace/omega (:omega state))
+    (::node-values state) (assoc ::node-values (::node-values state))
+    (::params state) (assoc ::params (::params state))))
 
 (defn- holds-batch?
   "Does x hold a batched value (in its maps, vectors and realized seqs)?"
@@ -437,15 +657,19 @@
         :else false))
 
 (defn- retdiff
-  "no-change when the return value is equal to the previous one (sound: equal
-   values cannot differ), unknown-change otherwise."
+  "A static body's propagated retdiff when it knows better than
+   unknown-change; otherwise no-change when the return value is equal to
+   the previous one (sound: equal values cannot differ), unknown-change
+   otherwise."
   [prev-trace state]
-  ;; batched return values cannot be compared (gen.array.batch): unknown
-  (if (and (not (holds-batch? (:retval prev-trace)))
-           (not (holds-batch? (:retval state)))
-           (= (:retval prev-trace) (:retval state)))
-    diff/no-change
-    diff/unknown-change))
+  (let [d (::retdiff state)]
+    (cond (and d (not (diff/unknown-change? d))) d
+          ;; batched return values cannot be compared (gen.array.batch): unknown
+          (and (not (holds-batch? (:retval prev-trace)))
+               (not (holds-batch? (:retval state)))
+               (= (:retval prev-trace) (:retval state)))
+          diff/no-change
+          :else diff/unknown-change)))
 
 (defn run
   "Run a GFI operation on a dynamic generative function. opts: :key,
@@ -460,7 +684,7 @@
 
 (defn- run-handler [gf op args opts]
   (let [state (if-let [ps (:params gf)]
-                (binding [*params* (merge *params* ps)] (execute gf op args opts))
+                (binding [*params* (with-store ps)] (execute gf op args opts))
                 (execute gf op args opts))]
     (case op
       :simulate {:trace (make-trace gf args state)}
@@ -470,6 +694,70 @@
                :retdiff (retdiff (:prev opts) state) :discard (:discard state)}
       :regenerate {:trace (make-trace gf args state) :weight (:weight state)
                    :retdiff (retdiff (:prev opts) state)})))
+
+;; ---------------------------------------------------------------------------
+;; A static function's score: one generated function of its choices
+;; ---------------------------------------------------------------------------
+
+(declare static-scored? static-score)
+
+(defn ^:no-doc static-site
+  "[value log-density] of a static body's trace node at path p of choices,
+   with assess's checks."
+  [dist choices p]
+  (let [c (cm/get-submap choices p)]
+    (when-not (cm/has-value? c)
+      (throw (ex-info (str "assess: no value for the choice at " p) {:path p :missing-choice true})))
+    (given-value {:mode :assess} dist c)))
+
+(defn ^:no-doc static-call
+  "[weight retval] of a static body's splice at path p: the callee's assess
+   on args with sub, under key k (nil under an exact-density operation,
+   where no draw may happen), with the handler's checks (an unvisited
+   choice named under p)."
+  [p g args sub k]
+  (when-not (gfi/generative-function? g)
+    (throw (ex-info (str "splice at " p " needs a generative function") {:path p :value g})))
+  (let [args (realize! (vec args))]
+    (try
+      (if (static-scored? g)
+        (static-score g args sub k)
+        (let [r (gfi/run-op g :assess args {:key (or k (rng/key 0)) :constraints sub})] [(:weight r) (:retval r)]))
+      (catch clojure.lang.ExceptionInfo e (throw (gfi/under e p))))))
+
+(defn- check-static-choices!
+  "Every choice must sit at a node's address, as assess checks: the top
+   level here (a callee checks its own), every path when a node's address
+   is a path."
+  [{:keys [roots paths]} choices]
+  (if paths
+    (doseq [p (cm/addresses choices)]
+      (when-not (some (fn [[kind q]] (if (= kind :trace) (= p q) (= q (subvec p 0 (min (count p) (count q)))))) paths)
+        (throw (gfi/unvisited :assess [p]))))
+    (doseq [[k _] (cm/submaps choices)]
+      (when-not (contains? roots k)
+        (throw (gfi/unvisited :assess [[k]]))))))
+
+(defn- static-score
+  "assess of a static gf by its generated score fn, without the handler:
+   [weight retval]. Keys are consumed as the handler's assess consumes
+   them, so a callee's encapsulated randomness draws what it would there;
+   under an operation that needs exact densities (gfi/with-exact-density),
+   where a draw is an error anyway, no key is split."
+  [gf args choices key]
+  (check-arity! gf args)
+  (let [st (:static gf)
+        run #(do (check-static-choices! st choices)
+                 (let [[w rv] ((:score st) read-param (vec args) choices (when-not gfi/*exact-density* key))]
+                   [w (realize! rv)]))]
+    (if-let [ps (:params gf)] (binding [*params* (with-store ps)] (run)) (run))))
+
+(defn- static-scored?
+  "Is gf a static function whose assess runs its score fn? Not with
+   middleware or a dispatcher, which must see the run, nor batched."
+  [gf]
+  (and (dynamic-gf? gf) (:static gf) (nil? (:transitions gf)) (nil? (:dispatch gf))
+       (not (batch/batch-backend? array/*backend*))))
 
 (defn- project* [tr s]
   (let [from-choices (reduce (fn [acc [p lp]] (if (path-selected? s p) (+ acc lp) acc))
@@ -481,19 +769,39 @@
 ;; DynamicGF
 ;; ---------------------------------------------------------------------------
 
-(defrecord DynamicGF [body-fn source params transitions dispatch]
+(defrecord DynamicGF [body-fn source params transitions dispatch static]
   gfi/IGenerativeFunction
   (-simulate [gf args key] (:trace (run gf :simulate args {:key key})))
   (-generate [gf args constraints key] (run gf :generate args {:key key :constraints constraints}))
-  (-update [gf tr args _argdiffs constraints key]
-    (run gf :update args {:key key :prev tr :constraints constraints}))
-  (-regenerate [gf tr args _argdiffs selection key]
-    (run gf :regenerate args {:key key :prev tr :selection selection}))
-  (-assess [gf args choices] (run gf :assess args {:key (rng/key 0) :constraints choices}))
+  (-update [gf tr args argdiffs constraints key]
+    (run gf :update args {:key key :prev tr :argdiffs argdiffs :constraints constraints}))
+  (-regenerate [gf tr args argdiffs selection key]
+    (run gf :regenerate args {:key key :prev tr :argdiffs argdiffs :selection selection}))
+  (-assess [gf args choices key]
+    (if (static-scored? gf)
+      (let [[w rv] (static-score gf args choices key)] {:weight w :retval rv})
+      (run gf :assess args {:key key :constraints choices})))
   (-propose [gf args key]
     (let [tr (:trace (run gf :simulate args {:key key}))]
       {:choices (:choices tr) :weight (:score tr) :retval (:retval tr)}))
-  (-project [_ tr selection] (project* tr selection))
+  ;; under gf's own store, as its run: a callee's project may run its model
+  (-project [gf tr selection]
+    (if-let [ps (:params gf)] (binding [*params* (with-store ps)] (project* tr selection)) (project* tr selection)))
+
+  gfi/IRevisable
+  ;; the source and the static graph follow from the body fn's class
+  (-same-gen-fn? [_ other budget]
+    (and (gfi/same-value? body-fn (:body-fn other) budget) (gfi/same-value? params (:params other) budget)
+         (gfi/same-value? transitions (:transitions other) budget) (gfi/same-value? dispatch (:dispatch other) budget)))
+  ;; a dynamic trace: the handler's own update or regenerate, which reruns
+  ;; every site against it (as an if would; a static body skips nothing,
+  ;; run-static), weighs with its recorded log probabilities, draws ω
+  ;; afresh, as every kind's revise does, and leaves each call to check its
+  ;; own context (run-call); middleware sees the operation asked for
+  (-revise [gf op args opts project-old]
+    (if (contains? (:prev opts) ::scores)
+      (run-handler gf op args (assoc opts ::revise true))
+      (gfi/generate-again gf op args opts project-old)))
 
   ;; an untraced call, as in Gen.jl: (gf a b) is the return value of a simulated run
   clojure.lang.IFn
@@ -525,24 +833,57 @@
 (defn dynamic-gf? [x] (instance? DynamicGF x))
 
 (defn make-gen-fn
-  "A dynamic generative function from a body fn of (trace splice & args) and
-   its source form."
-  [body-fn source]
-  (->DynamicGF body-fn source nil nil nil))
+  "A dynamic generative function from a body fn of (trace splice param
+   untraced & args) and its source form, and optionally the graph of a
+   static body (the gen macro's, gen.dynamic.static)."
+  ([body-fn source] (make-gen-fn body-fn source nil))
+  ([body-fn source static]
+   ;; a body fn of other hidden parameters would take the arguments shifted,
+   ;; silently: its arities must fit the source's parameters after the four
+   (let [params (first source)
+         variadic? (instance? clojure.lang.RestFn body-fn)
+         required (when variadic? (.getRequiredArity ^clojure.lang.RestFn body-fn))
+         fixed (set (keep #(when (= "invoke" (.getName ^java.lang.reflect.Method %))
+                             (alength (.getParameterTypes ^java.lang.reflect.Method %)))
+                          (.getDeclaredMethods (class body-fn))))
+         fits? (if (vector? params)
+                 (let [i (.indexOf ^java.util.List params '&)
+                       n (if (neg? i) (count params) i)]
+                   ;; a variadic fn needs the four, and may name some arguments
+                   (or (and (neg? i) (contains? fixed (+ 4 n)))
+                       (and variadic? (<= 4 required (+ 4 n)))))
+                 (or (not variadic?) (>= required 4)))]
+     (when-not fits?
+       (throw (ex-info "make-gen-fn: the body fn takes trace, splice, param and untraced before the arguments its source names"
+                       {:params params :arities fixed :required-arity required})))
+     (->DynamicGF body-fn source nil nil nil static))))
+
+(defn- check-dynamic! [what gf]
+  (when-not (dynamic-gf? gf)
+    (throw (ex-info (str what " needs a dynamic generative function (gen), not a " (.getName (class gf))
+                         ": wrap it, (gen [& args] (splice :at gf …)), or give it to the model that calls it")
+                    {:gen-fn (type gf)}))))
 
 (defn with-params
   "gf with the trainable-parameter store params, a map of name to value read
-   by (param name) in gf's body and in every generative function it calls."
+   by (param name) in gf's body and in every generative function it calls.
+   gf is a dynamic generative function: the store is the body's (another
+   kind reads the store of the dynamic function that calls it)."
   [gf params]
+  (check-dynamic! "with-params" gf)
   (assoc gf :params params))
 
 (defn with-transitions
-  "gf with handler middleware: a map from operation (:simulate :generate
-   :assess :update :regenerate) to a transition (fn [state path dist key] →
-   [value state']) used in place of the standard one (site-transitions),
-   typically by wrapping it. Middleware may change the model (e.g. masking
-   a distribution); an optimization must not (see with-dispatch)."
+  "gf, a dynamic generative function, with handler middleware: a map from
+   operation (:simulate :generate :assess :update :regenerate) to a
+   transition (fn [state path dist key] → [value state']) used in place of
+   the standard one (site-transitions), typically by wrapping it.
+   Middleware may change the model (e.g. masking a distribution); an
+   optimization must not (see with-dispatch). A call whose store or
+   generative function changed (gfi/revise) still runs the operation asked
+   for, so update middleware sees it."
   [gf transitions]
+  (check-dynamic! "with-transitions" gf)
   (assoc gf :transitions transitions))
 
 (defn with-dispatch
@@ -617,7 +958,7 @@
        (let [head (first form)]
          (and (symbol? head) (not (contains? locals head))
               (when-let [v (resolve head)] (lazy-fns (symbol v)))
-              (some #{'trace 'splice} (tree-seq coll? seq (rest form)))))))
+              (some #{'trace 'splice 'untraced 'untraced-key} (tree-seq coll? seq (rest form)))))))
 
 (defn- discarded-lazy-call
   "The lazy call with trace calls that would be discarded with form's value:
@@ -760,11 +1101,111 @@
   '{double clojure.core/double long clojure.core/long float clojure.core/float int clojure.core/int
     short clojure.core/short byte clojure.core/byte char clojure.core/char boolean clojure.core/boolean})
 
+(defn- names-map
+  "The form of a map from each of names (quoted) to its value."
+  [names]
+  (into {} (map (fn [s] [(list 'quote s) s])) names))
+
+(defn- score-form
+  "The form of a static body's score fn, (fn [param args choices key] →
+   [weight retval]): the body's bindings in order as locals, a trace node's
+   value from choices with its log density, a splice's callee assessed on
+   its sub-map, keys split as the handler's assess splits them (none when
+   key is nil)."
+  [st params coercions locals]
+  (let [args (gensym "args") choices (gensym "choices") key (gensym "key")
+        {:keys [bindings terms]}
+        (reduce (fn [{:keys [bindings terms k]} {:keys [kind addr binding expr]}]
+                  (case kind
+                    :trace (let [v (gensym "v") lp (gensym "lp") k' (gensym "k")]
+                             {:bindings (into bindings [[v lp] `(static-site ~expr ~choices ~(path addr))
+                                                        binding v
+                                                        k' `(when ~k (first (rng/split ~k)))])
+                              :terms (conj terms lp) :k k'})
+                    :splice (let [[g as] expr w (gensym "w") rv (gensym "rv") k' (gensym "k") ks (gensym "ks")]
+                              {:bindings (into bindings [[k' ks] `(if ~k (rng/split ~k) [nil nil])
+                                                         [w rv] `(static-call ~(path addr) ~g ~as (cm/get-submap ~choices ~(path addr)) ~ks)
+                                                         binding rv])
+                               :terms (conj terms w) :k k'})
+                    {:bindings (into bindings [binding expr]) :terms terms :k k}))
+                {:bindings [] :terms [] :k key}
+                (:nodes st))]
+    (guard-branches
+     `(fn [~'param ~args ~choices ~key]
+        (let [~params ~args ~@coercions ~@bindings]
+          [(reduce array/+ 0.0 [~@terms]) ~(:expr (:ret st))]))
+     locals)))
+
+(defn- static-form
+  "The runtime graph of the static body st (gen.dynamic.static/analyze),
+   its names in slots (the arguments' first): per node, its kind, address,
+   names and inputs, the slots it reads and writes, a guarded fn of (param,
+   env) for its distribution, call or value, a fn writing its names' slots
+   from its value, and how its diff is found (a rule, an alias, argument
+   specs)."
+  [st params coercions locals]
+  (let [;; each name once: a name bound twice ([w w z]) holds its last binding, as let's
+        arg-names (vec (distinct (concat (apply concat (:fixed (:args st))) (:rest (:args st)))))
+        names (vec (distinct (concat arg-names (mapcat :names (:nodes st)))))
+        slots (zipmap names (range))
+        env (gensym "env")
+        reads (fn [inputs] (vec (mapcat (fn [x] [x `(nth ~env ~(slots x))]) inputs)))
+        node-fn (fn [{:keys [inputs expr]}]
+                  (guard-branches `(fn [~'param ~env] (let ~(reads inputs) ~expr)) (into locals inputs)))
+        param? (fn [expr] (boolean (some #{'param} (tree-seq coll? seq expr))))
+        spec (fn [{:keys [symbol constant inputs]}]
+               (cond (and symbol (contains? slots symbol)) {:slot (slots symbol)}
+                     (or symbol constant) {:constant true}
+                     :else {:in (mapv slots inputs)}))
+        call (fn [{:keys [call args arg-specs inputs alias]}]
+               (cond call {:rule `(var ~call) :arg-specs (mapv spec arg-specs)
+                           :args-f `(fn [~'param ~env] (let ~(reads inputs) [~@args]))}
+                     alias {:alias (slots alias)}))
+        v (gensym "v")
+        args (gensym "args")]
+    `{:args '~(:args st)
+      :params '~params
+      :slots '~slots
+      :size ~(count names)
+      :args-bind (fn [~args] (let [~params ~args ~@coercions] [~@arg-names ~@(repeat (- (count names) (count arg-names)) nil)]))
+      :nodes [~@(for [n (:nodes st)]
+                  (merge `{:kind ~(:kind n) :addr ~(:addr n) :names '~(:names n) :inputs '~(:inputs n) :form '~(:form n)
+                           :in ~(mapv slots (:inputs n)) :out ~(mapv slots (:names n))
+                           :symbol? ~(symbol? (:binding n))
+                           :param? ~(param? (:expr n))
+                           :f ~(node-fn n)
+                           :bind (fn [~env ~v] (let [~(:binding n) ~v] (-> ~env ~@(map (fn [x] `(assoc ~(slots x) ~x)) (:names n)))))}
+                         (when (= :splice (:kind n)) {:arg-specs (mapv spec (:arg-specs n))})
+                         (call n)))]
+      :ret ~(merge {:inputs `'~(:inputs (:ret st)) :in (mapv slots (:inputs (:ret st)))
+                    :param? (param? (:expr (:ret st))) :f (node-fn (:ret st))}
+                   (call (:ret st)))
+      :score ~(score-form st params coercions locals)
+      :roots ~(set (keep #(when-some [a (:addr %)] (first (path a))) (:nodes st)))
+      :paths ~(when (some #(vector? (:addr %)) (:nodes st))
+                (vec (keep #(when-some [a (:addr %)] [(:kind %) (path a)]) (:nodes st))))}))
+
 (defmacro gen
   "A generative function. params are the arguments (destructuring allowed);
    in body, (trace addr dist) and (splice addr gf & args) make random choices
    and calls, (param name) reads a trainable parameter (with-params), and
    conditionals branch on the values of 0-d arrays.
+
+   (untraced dist) draws from dist without an address, and (untraced-key)
+   gives other stochastic code (a simulator, an inner sampler) a key: the
+   function's encapsulated randomness ω (thesis §4.5.2). Untraced values
+   are not choices and add nothing to the score, so the score is an unbiased
+   estimate of the choices' density given ω. The trace keeps ω, and an
+   update or regenerate keeps it unless the change hints say something
+   changed, or the store or generative function at the call did
+   (gfi/revise): ω is then drawn afresh (DESIGN.md §9). Untraced values
+   must not decide which addresses are visited.
+
+   (gen ^:static [args] (let [bindings…] ret)) is a static body (Gen.jl's
+   @gen (static)): each binding a call at a constant address or a pure
+   expression, so update and regenerate skip the nodes that did not change,
+   with the same results as without the flag (gen.dynamic.static, which
+   also renders the graph). A body that is not static is a compile error.
 
    Conditionals, catch clauses, and clojure.core's truthiness tests and
    lookups (not, filter, every?, get, …; gen.dynamic.core), branch per
@@ -781,17 +1222,27 @@
    when, if, let or do in statement position), or bound and never used, is
    a compile error. Prefer mapv, doseq and run!."
   [params & body]
-  (let [;; the body fn has three hidden parameters, and a fn with primitive
+  ;; the body's untraced and untraced-key would silently shadow a var of
+  ;; that name (an enclosing body's own are locals, and fine)
+  (doseq [s '[untraced untraced-key]]
+    (when (and (some #{s} (tree-seq coll? seq body)) (not (contains? &env s)) (var? (resolve &env s)))
+      (throw (ex-info (str "gen: " s " in a body is gen's own (encapsulated randomness), but it would hide the var "
+                           (resolve &env s) ": rename the var")
+                      {:symbol s :var (resolve &env s)}))))
+  (let [;; the body fn has four hidden parameters, and a fn with primitive
         ;; parameters takes at most four: coerce them in the body instead
         prim (filter #(and (symbol? %) (primitive-coercions (:tag (meta %)))) params)
         plain (mapv #(if (some #{%} prim) (vary-meta % dissoc :tag) %) params)
-        body (if (seq prim)
-               [`(let [~@(mapcat (fn [p] [(vary-meta p dissoc :tag) (list (primitive-coercions (:tag (meta p))) (vary-meta p dissoc :tag))]) prim)]
-                   ~@body)]
-               body)
-        body-fn (guard-branches `(fn [~'trace ~'splice ~'param ~@plain] ~@body)
-                                (into (set (keys &env)) *outer-locals*))]
-    `(make-gen-fn ~body-fn '~(cons params body))))
+        coercions (mapcat (fn [p] [(vary-meta p dissoc :tag) (list (primitive-coercions (:tag (meta p))) (vary-meta p dissoc :tag))]) prim)
+        locals (into (set (keys &env)) *outer-locals*)
+        st (when (:static (meta params)) (static/analyze plain body &env locals))
+        body (if (seq prim) [`(let [~@coercions] ~@body)] body)
+        body-fn (guard-branches `(fn [~'trace ~'splice ~'param ~'untraced ~@plain]
+                                   (let [~'untraced-key (fn [] (~'untraced))] ~@body))
+                                locals)]
+    ;; the body fn takes the four hidden parameters: no check (make-gen-fn's
+    ;; reflects, and an inline gen is built on every run of its body)
+    `(->DynamicGF ~body-fn '~(cons params body) nil nil nil ~(when st (static-form st plain coercions locals)))))
 
 (defmacro guarded-fn
   "fn, with a gen body's guards: if and case tests branch through truthy?,

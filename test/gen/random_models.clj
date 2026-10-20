@@ -46,15 +46,15 @@
 
 (def numeric-families (vec (keys families)))
 
-(def ^:private map-kernel (dyn/make-gen-fn (fn [trace _ _ x] (trace :v (d/normal x 1.0))) '([x])))
+(def ^:private map-kernel (dyn/make-gen-fn (fn [trace _ _ _ x] (trace :v (d/normal x 1.0))) '([x])))
 
 (def ^:private walk
-  (dyn/make-gen-fn (fn [trace _ _ _t s] (trace :s (d/normal (* 0.9 s) 1.0))) '([t s])))
+  (dyn/make-gen-fn (fn [trace _ _ _ _t s] (trace :s (d/normal (* 0.9 s) 1.0))) '([t s])))
 
 (def ^:private switched
   "A Switch of a one-site model and a two-site model with a dependency."
-  (comb/switch (dyn/make-gen-fn (fn [trace _ _ m] (trace :a (d/normal m 1.0))) '([m]))
-               (dyn/make-gen-fn (fn [trace _ _ m] (trace :c (d/normal (trace :b (d/gamma 2.0 1.0)) 1.0))) '([m]))))
+  (comb/switch (dyn/make-gen-fn (fn [trace _ _ _ m] (trace :a (d/normal m 1.0))) '([m]))
+               (dyn/make-gen-fn (fn [trace _ _ _ m] (trace :c (d/normal (trace :b (d/gamma 2.0 1.0)) 1.0))) '([m]))))
 
 (declare build)
 
@@ -88,7 +88,7 @@
 (defn build
   "The dynamic generative function of a spec (no arguments)."
   [spec]
-  (dyn/make-gen-fn (fn [trace splice _param] (count (run-statements spec trace splice {}))) (list [] spec)))
+  (dyn/make-gen-fn (fn [trace splice _param _untraced] (count (run-statements spec trace splice {}))) (list [] spec)))
 
 ;; ---------------------------------------------------------------------------
 ;; The generator

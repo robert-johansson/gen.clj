@@ -16,6 +16,10 @@
      (checked k observations)  k, then check that it left the observations alone
      (kern [args] stmt …)  Gen.jl's @kern: statements, loops and branches over
                            the arguments, as one chain with its reversal
+     (kern ^:trace [tr args] stmt …)
+                           the same, reading the trace in its loops,
+                           branches and lets, with the thesis's invariant
+                           checked after each of their bodies
 
    A combinator's result reports the accept decisions of the MH moves it
    made, in order, as :accepted (a vector of booleans) when they all report
@@ -117,6 +121,114 @@
       "let" (let [[_ bindings & body] form] `(let ~bindings ~(statements body)))
       `(checked-kernel ~form '~form))))
 
+(defn ^:no-doc control-value
+  "A value a (kern ^:trace …) body's control flow read, on the host: an
+   array read at the inference loop's boundary, in collections too."
+  [v]
+  (cond (array/array? v) (array/->clj v)
+        (and (sequential? v) (not (record? v))) (mapv control-value v)
+        (and (map? v) (not (record? v))) (into {} (map (fn [[k x]] [k (control-value x)])) v)
+        :else v))
+
+(defn- noting
+  "[the control values (reads note) passed to note, on the host, and what it
+   returned]."
+  [reads]
+  (let [seen (volatile! [])
+        x (reads (fn [v] (vswap! seen conj v) v))]
+    [(mapv control-value @seen) x]))
+
+(defn- construct-name [form] (str "(" (first form) " " (pr-str (second form)) " …)"))
+
+;; The check is per construct, as in the thesis (Prop. 3.4.1, pp. 99-101) and
+;; Gen.jl. A loop, branch or let is a dependent mixture: its control value
+;; v(t) picks the kernel K_v of its body (a loop's: its iterations in turn),
+;; whose reversal R_v has p(t) K_v(t, t') = p(t') R_v(t', t). The forward run
+;; checks that K_v keeps v(t) = v, the reversal's that R_v keeps v(t') = v,
+;; so [v(t) = v] = [v(t') = v] wherever K_v(t, t') > 0, and term by term
+;; p(t) [v(t) = v] K_v(t, t') = p(t') [v(t') = v] R_v(t', t). Summed over v:
+;; the reversal is the construct over the R_v, reading v from its own input,
+;; which is what backward runs. A chain's reversal is its statements'
+;; reversals in reverse order, which asks nothing across statements: a later
+;; statement may change what an earlier construct read. (The check sees the
+;; runs that happen, as Gen.jl's does, not every run the proposition
+;; quantifies over.)
+(defn ^:no-doc trace-kernel
+  "The kernel of a (kern ^:trace …) body. forward and backward are (fn [t
+   apply! construct]) running the statements (backward: reversed, loops
+   backwards) against the volatile t. apply! applies a kernel to @t, the
+   i-th applied with the key folded with i. (construct form reads run) runs
+   a loop, branch or let: (reads note) reads its control values from @t (a
+   loop's collections and conditions, a condition, a let's values), passing
+   each to note, and returns what run takes; run runs the body. Then reads
+   reads again, and values that differ are a loud error."
+  [forward backward]
+  (letfn [(run [body reversal? trace key]
+            (let [t (volatile! trace)
+                  n (volatile! 0)
+                  moves (volatile! [])
+                  apply! (fn [k]
+                           (let [r ((step-fn (if reversal? (reversal k) k)) @t (rng/fold-in key @n))]
+                             (vswap! n inc)
+                             (vswap! moves #(when % (some->> (accepted-moves r) (into %))))
+                             (vreset! t (:trace r))))
+                  construct (fn [form reads run-body]
+                              (let [[read x] (noting reads)]
+                                (run-body x)
+                                (let [[again _] (noting reads)]
+                                  (when-not (= read again)
+                                    (throw (ex-info (str "kern: the body of " (construct-name form) " changed what it"
+                                                         " reads (a loop's collection, a condition or a let's value),"
+                                                         " so the reversal would not undo the kernel: read "
+                                                         (pr-str read) ", then " (pr-str again))
+                                                    {:form form :read read :again again}))))))]
+              (body t apply! construct)
+              (cond-> {:trace @t} @moves (assoc :accepted @moves))))]
+    (->Kernel (fn [trace key] (run forward false trace key)) (fn [trace key] (run backward true trace key)))))
+
+(declare traced-statements)
+
+(defn- traced-form
+  "A (kern ^:trace …) statement as code against the volatile t, with the
+   trace parameter tr bound to @t wherever an expression is evaluated;
+   apply! and construct as in trace-kernel. reverse? gives the reversal's
+   code: statements reversed, loops backwards, and apply! applies
+   reversals."
+  [form tr t apply! construct reverse?]
+  (let [head (when (and (seq? form) (symbol? (first form))) (name (first form)))
+        at (fn [expr] `(let [~tr (deref ~t)] ~expr))
+        note (gensym "note")
+        noted (fn [expr] `(~note ~(at expr)))
+        body (fn [forms] (traced-statements forms tr t apply! construct reverse?))
+        checked (fn [reads run] `(~construct '~form (fn [~note] ~reads) ~run))]
+    (case head
+      ("doseq" "for")
+      ;; the iterations as thunks, the collections read once at the loop
+      (let [[_ bindings & stmts] form
+            bindings' (vec (mapcat (fn [[b e]]
+                                     (case b
+                                       (:when :while) [b `(control-value ~(noted e))]
+                                       :let [b (vec (mapcat (fn [[x v]] [x (noted v)]) (partition 2 e)))]
+                                       [b (noted `(vec ~e))]))
+                                   (partition 2 bindings)))
+            iterations (gensym "iterations")]
+        (checked `(vec (for ~bindings' (fn [] ~(body stmts))))
+                 `(fn [~iterations] (run! #(%) ~(if reverse? `(rseq ~iterations) iterations)))))
+      "when" (let [[_ c & stmts] form c' (gensym "c")]
+               (checked `(control-value ~(noted c)) `(fn [~c'] (when ~c' ~(body stmts)))))
+      "if" (let [[_ c a b] form c' (gensym "c")]
+             (checked `(control-value ~(noted c)) `(fn [~c'] (if ~c' ~(body [a]) ~(when (some? b) (body [b]))))))
+      "let" (let [[_ bindings & stmts] form
+                  pairs (partition 2 bindings)
+                  vs (vec (repeatedly (count pairs) #(gensym "v")))]
+              ;; each value through a symbol of its own, so a binding may destructure
+              (checked `(let [~@(mapcat (fn [v [x e]] [v (noted e) x v]) vs pairs)] ~vs)
+                       `(fn [~vs] (let [~@(mapcat (fn [v [x _]] [x v]) vs pairs)] ~(body stmts)))))
+      `(~apply! (checked-kernel ~(at form) '~form)))))
+
+(defn- traced-statements [forms tr t apply! construct reverse?]
+  `(do ~@(map #(traced-form % tr t apply! construct reverse?) (if reverse? (reverse forms) forms)) nil))
+
 (defmacro kern
   "Gen.jl's @kern: (kern [args] statement …) is a function of args returning
    one kernel, the statements' kernels in order. A statement is a kernel, or
@@ -125,9 +237,34 @@
    trace, so the result is a chain and its reversal is automatic: every
    statement reversed, in reverse order (loops run backwards).
 
-     (kern [n] (mh (sel/select :mu)) (doseq [i (range n)] (mh (sel/select [:z i]))))"
+     (kern [n] (mh (sel/select :mu)) (doseq [i (range n)] (mh (sel/select [:z i]))))
+
+   (kern ^:trace [tr args] statement …) reads the trace, as Gen.jl's @kern
+   does: tr is the trace as it is when each statement is evaluated (after
+   the kernels before it), in a kernel statement's arguments and in the
+   loops, conditions and lets. Kernels apply in order, the i-th with the
+   key folded with i; the reversal runs the statements reversed, loops
+   backwards, each kernel's reversal (loud for a kernel without one).
+   After the body of each loop, branch and let, what the construct read
+   (its collections, its condition, its values) is read again from the
+   trace, and a body that changed it is a loud error, in the reversal too:
+   the thesis's invariant (pp. 100-101), which Gen.jl checks with
+   check=true and gen.clj always. A later statement may change what an
+   earlier one read, as the thesis's p. 102 kernel does. Conditions are
+   Clojure's truthiness of host values (an array is read on the host).
+
+     (kern ^:trace [tr]
+       (doseq [i (range (inc (array/item (tr :degree))))] (mh (sel/select [:coeff i])))
+       (mh (sel/select :degree))
+       (doseq [i (range (inc (array/item (tr :degree))))] (mh (sel/select [:coeff i]))))"
   [params & body]
-  `(fn ~params ~(statements body)))
+  (if (:trace (meta params))
+    (let [[tr & args] params
+          t (gensym "t") apply! (gensym "apply") construct (gensym "construct")]
+      `(fn [~@args]
+         (trace-kernel (fn [~t ~apply! ~construct] ~(traced-statements body tr t apply! construct false))
+                       (fn [~t ~apply! ~construct] ~(traced-statements body tr t apply! construct true)))))
+    `(fn ~params ~(statements body))))
 
 (defn repeat
   "The kernel applied n times."

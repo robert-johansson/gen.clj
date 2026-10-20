@@ -30,11 +30,6 @@
 
 (set! *warn-on-reflection* true)
 
-(defn- tree-map2 [f x y]
-  (cond (map? x) (reduce-kv (fn [m k v] (assoc m k (tree-map2 f v (get y k)))) x x)
-        (vector? x) (mapv #(tree-map2 f %1 %2) x y)
-        :else (f x y)))
-
 (defn- update-given
   "x with (f x-leaf g-leaf more-leaves…) at every leaf of the gradient tree
    g, the trees in more walked alongside g; x's other entries are kept, so
@@ -116,9 +111,7 @@
                                                (:trace (gfi/generate (dyn/with-params gf store) args constraints k-gen))))
                                            (split k-batch batch-size))
                               traces (vec results)
-                              grads (reduce (partial tree-map2 +) (map gradients-fn traces))
-                              mean (fn [g] (array/tree-map #(/ % (double batch-size)) g))
-                              [store state] (array/eval! (step optimizer state store (mean grads)))]
+                              [store state] (array/eval! (step optimizer state store (grad/mean (map gradients-fn traces))))]
                           [store state (/ (reduce + (map #(double (array/item (:score %))) traces)) batch-size)]))
                       [store state nil]
                       (split k-epoch batches-per-epoch))]
@@ -146,7 +139,6 @@
   [model model-args proposal store q-args-fn n key]
   (when-not (pos-int? n)
     (throw (ex-info (str "lecture-batched needs at least one trace, given " n) {:n n})))
-  (let [runs (mapv #(lecture model model-args proposal store q-args-fn %) (rng/split key n))
-        mean (fn [g] (array/tree-map #(/ % (double n)) g))]
+  (let [runs (mapv #(lecture model model-args proposal store q-args-fn %) (rng/split key n))]
     {:score (/ (reduce + (map #(double (array/item (:score %))) runs)) n)
-     :grads (mean (reduce (partial tree-map2 +) (map :grads runs)))}))
+     :grads (grad/mean (map :grads runs))}))

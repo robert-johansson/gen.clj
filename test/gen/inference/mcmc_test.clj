@@ -152,11 +152,11 @@
 (defn- scale-move
   "(x, u) ↦ (x·e^u, -u), an involution with |det J| = e^u, its log Jacobian
    computed by autodiff."
-  [tr fwd _ _]
+  [tr fwd _ _ key]
   (let [x (tr :x)
         u (cm/get-choice fwd :u)
         h (fn [v] (let [x (array/take v 0) u (array/take v 1)] (array/stack [(* x (array/exp u)) (array/negate u)])))
-        {t :trace w :weight} (gfi/update tr (cm/choicemap :x (* x (array/exp u))))]
+        {t :trace w :weight} (gfi/update tr (cm/choicemap :x (* x (array/exp u))) key)]
     {:trace t :bwd-choices (cm/choicemap :u (- u))
      :weight (+ w (grad/log-abs-det-jacobian h (array/stack [x u])))}))
 
@@ -166,8 +166,8 @@
         ends (map (fn [key] ((reduce step start (rng/split key 80)) :x)) (rng/split (rng/key 31) 1000))]
     (is (matches? ends 3.0 3.0) "Gamma(3, 1): mean 3, variance 3"))
   (testing "without the Jacobian the chain is biased, so the test can tell"
-    (let [wrong (fn [tr fwd r args] (assoc (scale-move tr fwd r args) :weight
-                                           (:weight (gfi/update tr (cm/choicemap :x (* (tr :x) (array/exp (cm/get-choice fwd :u))))))))
+    (let [wrong (fn [tr fwd r args key] (assoc (scale-move tr fwd r args key) :weight
+                                               (:weight (gfi/update tr (cm/choicemap :x (* (tr :x) (array/exp (cm/get-choice fwd :u)))) key))))
           step (fn [tr key] (:trace (mh/involutive-mh tr log-scale [] wrong key)))
           start (start-at positive (cm/choicemap :x 1.0))
           ends (map (fn [key] ((reduce step start (rng/split key 80)) :x)) (rng/split (rng/key 31) 1000))]
@@ -194,16 +194,16 @@
 (defn- split-merge
   "The involution (m, u) ↔ (m1, m2) = (m - u, m + u), with the dimension
    change and its Jacobian (computed by autodiff: |det| = 2 for a split)."
-  [tr fwd _ _]
+  [tr fwd _ _ key]
   (if (tr :two?)
     (let [m1 (tr :m1) m2 (tr :m2)
           h (fn [v] (let [a (array/take v 0) b (array/take v 1)] (array/stack [(* 0.5 (+ a b)) (* 0.5 (- b a))])))
-          {t :trace w :weight} (gfi/update tr (cm/choicemap :two? false :m (* 0.5 (+ m1 m2))))]
+          {t :trace w :weight} (gfi/update tr (cm/choicemap :two? false :m (* 0.5 (+ m1 m2))) key)]
       {:trace t :bwd-choices (cm/choicemap :u (* 0.5 (- m2 m1)))
        :weight (+ w (grad/log-abs-det-jacobian h (array/stack [m1 m2])))})
     (let [m (tr :m) u (cm/get-choice fwd :u)
           h (fn [v] (let [a (array/take v 0) b (array/take v 1)] (array/stack [(- a b) (+ a b)])))
-          {t :trace w :weight} (gfi/update tr (cm/choicemap :two? true :m1 (- m u) :m2 (+ m u)))]
+          {t :trace w :weight} (gfi/update tr (cm/choicemap :two? true :m1 (- m u) :m2 (+ m u)) key)]
       {:trace t :bwd-choices cm/EMPTY
        :weight (+ w (grad/log-abs-det-jacobian h (array/stack [m u])))})))
 
@@ -224,11 +224,66 @@
     (is (< (ts/abs (- frac exact-two)) (* 5 (Math/sqrt (/ (* exact-two (- 1 exact-two)) 2000)))))
     (testing "the involution is an involution, with opposite weights"
       (let [tr start fwd (cm/choicemap :u 0.4)
-            {t1 :trace u1 :bwd-choices w1 :weight} (split-merge tr fwd nil nil)
-            {t2 :trace u2 :bwd-choices w2 :weight} (split-merge t1 u1 nil nil)]
+            {t1 :trace u1 :bwd-choices w1 :weight} (split-merge tr fwd nil nil (rng/key 0))
+            {t2 :trace u2 :bwd-choices w2 :weight} (split-merge t1 u1 nil nil (rng/key 0))]
         (is (= (:choices tr) (:choices t2)))
         (is (= fwd u2))
         (is (< (ts/abs (+ w1 w2)) 1e-12))))))
+
+(defn- host-normal-lp [x mu sd]
+  (clojure.core/- (clojure.core/- (Math/log (clojure.core/* sd (Math/sqrt (clojure.core/* 2 Math/PI)))))
+                  (clojure.core// (Math/pow (clojure.core/- x mu) 2) (clojure.core/* 2 sd sd))))
+
+(deftest one-step-by-hand
+  ;; plain and compiled kernels run one function (review 3: the comparison
+  ;; below cannot see a kernel bug), so a fast test checks a step against
+  ;; arithmetic: on scalar with y = 1.3, log p = log N(x; 0, 1) + log N(y; x, 1)
+  ;; and ∇x log p = y - 2x, with the kernels' own momentum and noise draws
+  (let [y 1.3 x0 0.4
+        tr (:trace (gfi/generate scalar [] (cm/choicemap :x x0 :y y) (rng/key 0)))
+        grad-x (fn [x] (clojure.core/- y (clojure.core/* 2.0 x)))
+        lp (fn [x] (clojure.core/+ (host-normal-lp x 0.0 1.0) (host-normal-lp y x 1.0)))
+        draw (fn [key] (ts/number (array/take (rng/normal key [1]) 0)))
+        moved (fn [r] (ts/number ((:trace r) :x)))]
+    (testing "HMC: two leapfrog steps and the Hamiltonian's change"
+      (let [key (rng/key 70) eps 0.3 half (clojure.core// eps 2)
+            p0 (draw (first (rng/split key 3)))
+            [x p] (loop [i 0 x x0 p p0]
+                    (if (clojure.core/< i 2)
+                      (let [p (clojure.core/+ p (clojure.core/* half (grad-x x)))
+                            x (clojure.core/+ x (clojure.core/* eps p))]
+                        (recur (inc i) x (clojure.core/+ p (clojure.core/* half (grad-x x)))))
+                      [x p]))
+            log-alpha (clojure.core/+ (clojure.core/- (lp x) (lp x0)) (clojure.core/- (host-normal-lp p 0.0 1.0) (host-normal-lp p0 0.0 1.0)))
+            r (mcmc/hmc tr (sel/select :x) {:L 2 :eps eps} key)]
+        (is (ts/close? log-alpha (:log-alpha r) {:atol (ts/tol 1e-9)}))
+        (is (ts/close? (if (:accepted? r) x x0) (moved r)))))
+    (testing "MALA: the Langevin proposal and both directions' densities"
+      (let [key (rng/key 71) tau 0.2 sd (Math/sqrt (clojure.core/* 2 tau))
+            z (draw (first (rng/split key 3)))
+            fwd (clojure.core/+ x0 (clojure.core/* tau (grad-x x0)))
+            x (clojure.core/+ fwd (clojure.core/* sd z))
+            bwd (clojure.core/+ x (clojure.core/* tau (grad-x x)))
+            log-alpha (clojure.core/+ (clojure.core/- (lp x) (lp x0)) (clojure.core/- (host-normal-lp x0 bwd sd) (host-normal-lp x fwd sd)))
+            r (mcmc/mala tr (sel/select :x) tau key)]
+        (is (ts/close? log-alpha (:log-alpha r) {:atol (ts/tol 1e-9)}))
+        (is (ts/close? (if (:accepted? r) x x0) (moved r)))))))
+
+(deftest a-move-that-changes-the-structure-is-named
+  ;; :extra exists only for x > 0, and the moves carry x across 0 (review 3:
+  ;; the error named assess, not the kernel's requirement)
+  (let [model (gen [] (let [x (trace :x (d/normal 0 1))]
+                        (when (array/truthy? (> x 0)) (trace :extra (d/normal 0 1)))
+                        (trace :y (d/normal x 0.3))))
+        tr (:trace (gfi/generate model [] (cm/choicemap :x -0.05 :y 3.0) (rng/key 0)))]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"within the trace's structure.*\[:extra\]"
+                          (mcmc/hmc tr (sel/select :x) {:L 3 :eps 0.5} (rng/key 72))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"within the trace's structure"
+                          (mcmc/mala tr (sel/select :x) 0.5 (rng/key 73))))
+    (testing "and the other way: leaving :extra behind (review 4)"
+      (let [tr (:trace (gfi/generate model [] (cm/choicemap :x 0.05 :extra 0.0 :y -3.0) (rng/key 0)))]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no longer visits \[:extra\]"
+                              (mcmc/hmc tr (sel/select :x) {:L 3 :eps 0.5} (rng/key 74))))))))
 
 (deftest compiled-kernels-make-the-same-moves
   ;; :compile? runs HMC's L steps, or MALA's proposal and its densities, as

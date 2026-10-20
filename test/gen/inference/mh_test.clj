@@ -94,10 +94,10 @@
 (defn- step-b
   "An involution on (b, up): move b one step around the circle in the
    direction up, and reverse the direction."
-  [tr fwd _ _]
+  [tr fwd _ _ key]
   ;; a plain function (not a gen body): it reads the values it branches on
   (let [up? (ts/host (cm/get-choice fwd :up))
-        {t :trace weight :weight} (gfi/update tr (cm/choicemap :b (mod (+ (ts/host (tr :b)) (if up? 1 -1)) 3)))]
+        {t :trace weight :weight} (gfi/update tr (cm/choicemap :b (mod (+ (ts/host (tr :b)) (if up? 1 -1)) 3)) key)]
     {:trace t :bwd-choices (cm/choicemap :up (not up?)) :weight weight}))
 
 (defn- involutive [tr key]
@@ -149,11 +149,11 @@
   (let [tr (trace-at main (cm/choicemap :a true :b 0))]
     (doseq [up? [true false]]
       (let [fwd (cm/choicemap :up up?)
-            {t1 :trace u1 :bwd-choices} (step-b tr fwd nil [])
-            {t2 :trace u2 :bwd-choices w2 :weight} (step-b t1 u1 nil [])]
+            {t1 :trace u1 :bwd-choices} (step-b tr fwd nil [] (rng/key 0))
+            {t2 :trace u2 :bwd-choices w2 :weight} (step-b t1 u1 nil [] (rng/key 0))]
         (is (= (:choices tr) (:choices t2)))
         (is (= fwd u2))
-        (is (< (ts/abs (+ w2 (:weight (step-b tr fwd nil [])))) 1e-12) "the weights are opposite")))))
+        (is (< (ts/abs (+ w2 (:weight (step-b tr fwd nil [] (rng/key 0))))) 1e-12) "the weights are opposite")))))
 
 ;; ---------------------------------------------------------------------------
 ;; A stochastic-structure target: the thesis's p_mh (pp. 92-93)
@@ -202,3 +202,20 @@
                           (rng/split (rng/key 2) 12))]
         (is (not-any? #{:moved} outcomes) (str label " " (frequencies outcomes)))
         (is (some #{:loud} outcomes) (str label " " (frequencies outcomes)))))))
+
+(deftest the-thesis-s-exact-acceptances
+  (testing "p. 148: from {a T b T c T}, regenerating {a} weighs 0 whichever a it draws"
+    (let [model (gen [] (let [a (trace :a (d/bernoulli 0.3))
+                              v (if a (trace :b (d/bernoulli 0.6)) true)]
+                          (trace :c (d/bernoulli (if v 0.9 0.2)))))
+          tr (:trace (gfi/generate model [] (cm/choicemap :a true :b true :c true) (rng/key 0)))
+          rs (map #(gfi/regenerate tr (sel/select :a) %) (rng/split (rng/key 98) 16))]
+      (is (some #(false? (ts/host ((:trace %) :a))) rs) "both outcomes drawn")
+      (is (every? #(ts/close? 0.0 (:weight %)) rs))))
+  (testing "p. 95: MH with the exact conditional as its proposal always accepts (log alpha = 0)"
+    (let [model (gen [] (let [mu (trace :mu (d/normal 0 1))] (trace :y (d/normal mu 1)) mu))
+          exact (gen [_] (trace :mu (d/normal 0.65 (Math/sqrt 0.5))))]
+      (doseq [k (rng/split (rng/key 99) 8)]
+        (let [[k0 k1] (rng/split k)
+              tr (:trace (gfi/generate model [] (cm/choicemap :y 1.3) k0))]
+          (is (ts/close? 0.0 (:log-alpha (mh/mh tr exact [] k1)))))))))

@@ -4,11 +4,14 @@
             [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
             [gen.array :as array :refer [-]]
+            [gen.array.special]
+            [gen.batched :as batched]
             [gen.choicemap :as cm]
             [gen.dist :as d]
             [gen.dist.core :as dc]
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
+            [gen.laws :as laws]
             [gen.random :as rng]
             [gen.selection :as sel]))
 
@@ -105,17 +108,24 @@
 (defn- close? [actual expected band] (< (Math/abs (- (ts/number actual) (ts/number expected))) band))
 
 (deftest sampler-moments
-  ;; fixed key, so deterministic; bands about five standard errors
+  ;; fixed key, so deterministic; bands of five standard errors: the mean's
+  ;; from the true variance, the sample variance's from the sample's own
+  ;; fourth central moment, sd ≈ √((m4 - s⁴)/n) (review 4: a 5% band was
+  ;; 1.9 sd for a Pareto; families whose eighth moment is infinite have no
+  ;; estimable band, so their parameters keep it finite)
   (let [k (rng/key 99) n 100000
         check (fn [dist mean var]
-                (let [x (dc/sample dist k [n])]
+                (let [x (dc/sample dist k [n])
+                      c (array/- x (array/mean x))
+                      s2 (ts/number (array/mean (array/square c)))
+                      m4 (ts/number (array/mean (array/square (array/square c))))]
                   (is (close? (array/mean x) mean (* 5 (Math/sqrt (/ var n)))) (str dist " mean"))
-                  (is (close? (array/variance x) var (* 0.05 var)) (str dist " variance"))))]
+                  (is (close? (array/variance x) var (* 5 (Math/sqrt (/ (max 0.0 (- m4 (* s2 s2))) n)))) (str dist " variance"))))]
     (check (d/normal 0.5 2.0) 0.5 4.0)
     (check (d/uniform -1.0 3.0) 1.0 (/ 16.0 12))
     (check (d/beta 2.5 0.7) (/ 2.5 3.2) (/ (* 2.5 0.7) (* 3.2 3.2 4.2)))
     (check (d/gamma 2.5 1.5) 3.75 5.625)
-    (check (d/inv-gamma 4.0 2.0) (/ 2.0 3) (/ 4.0 18))
+    (check (d/inv-gamma 10.0 2.0) (/ 2.0 9) (/ 4.0 (* 81 8)))
     (check (d/exponential 1.5) (/ 1 1.5) (/ 1 2.25))
     (check (d/laplace 1.0 0.5) 1.0 0.5)
     (check (d/poisson 3.5) 3.5 3.5)
@@ -126,7 +136,29 @@
     (check (d/neg-binom 2.5 0.4) 3.75 9.375)
     (check (d/uniform-discrete 2 5) 3.5 1.25)
     (check (d/categorical [0.2 0.5 0.3]) 1.1 0.49)
-    (check (d/piecewise-uniform [0.0 1.0 3.0 4.0] [0.5 0.2 0.3]) 1.7 (- (+ (/ 0.5 3) (* 0.2 (/ 13.0 3)) (* 0.3 (/ 37.0 3))) 2.89))))
+    (check (d/piecewise-uniform [0.0 1.0 3.0 4.0] [0.5 0.2 0.3]) 1.7 (- (+ (/ 0.5 3) (* 0.2 (/ 13.0 3)) (* 0.3 (/ 37.0 3))) 2.89))
+    ;; Distributions.jl's families (the variance band needs a finite fourth
+    ;; moment: Pareto's shape above 4, Student's nu above 4)
+    (let [g #(Math/exp (array/item (array/lgamma (double %))))]
+      (check (d/chi-squared 3.0) 3.0 6.0)
+      (check (d/f-dist 3.0 20.0) (/ 20.0 18) (/ (* 2 400.0 21) (* 3 324 16)))
+      (check (d/gumbel 1.0 2.0) (+ 1.0 (* 2.0 0.5772156649015329)) (/ (* Math/PI Math/PI 4.0) 6))
+      (check (d/log-normal 0.2 0.5) (Math/exp 0.325) (* (- (Math/exp 0.25) 1) (Math/exp 0.65)))
+      (check (d/logistic 0.5 1.5) 0.5 (/ (* Math/PI Math/PI 2.25) 3))
+      (check (d/nakagami 1.5 2.0) (* (/ (g 2.0) (g 1.5)) (Math/sqrt (/ 2.0 1.5)))
+             (* 2.0 (- 1 (* (/ 1 1.5) (Math/pow (/ (g 2.0) (g 1.5)) 2)))))
+      (check (d/pareto 9.0 1.5) (/ (* 9.0 1.5) 8.0) (/ (* 1.5 1.5 9.0) (* 64.0 7.0)))
+      (check (d/student-t 10.0) 0.0 1.25)
+      (check (d/triangular 0.0 2.0 0.5) (/ 2.5 3) (/ 3.25 18))
+      (check (d/weibull 1.5 2.0) (* 2.0 (g (+ 1 (/ 1 1.5)))) (* 4.0 (- (g (+ 1 (/ 2 1.5))) (Math/pow (g (+ 1 (/ 1 1.5))) 2)))))))
+
+(deftest the-levy-distribution-s-cdf
+  ;; no mean: P(X <= mu + 4 sigma) = erfc(sqrt(1/8)), within five standard errors
+  (let [n 100000
+        x (dc/sample (d/levy 1.0 0.5) (rng/key 98) [n])
+        p (gen.array.special/erfc (Math/sqrt (/ 0.5 (* 2 2.0))))
+        f (/ (ts/number (array/sum (array/astype (array/<= x 3.0) :float32))) n)]
+    (is (< (Math/abs (- f p)) (* 5 (Math/sqrt (/ (* p (- 1 p)) n)))) (str f " against " p))))
 
 ;; ---------------------------------------------------------------------------
 ;; Mixtures and products
@@ -166,6 +198,93 @@
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"probabilities" (normal-mixture [0.5 0.6] [0.0 1.0] [1.0 1.0])))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"one weight" (normal-uniform [1.0] [0.0 1.0] [0.0 1.0]))))
 
+(def mvnormal-mixture
+  "Gen.jl's mixture_of_mvnormals, HomogeneousMixture(mvnormal, [1, 2]): means
+   of shape [K d], covariances [K d d]."
+  (d/homogeneous-mixture d/mvnormal [1 2]))
+
+(defn- isotropic-log-density
+  "log N(x; mu, s2·I)."
+  [x mu s2]
+  (- (* -0.5 (count x) (Math/log (* 2 Math/PI s2)))
+     (/ (reduce + (map #(Math/pow (- %1 %2) 2) x mu)) (* 2 s2))))
+
+(deftest mixtures-of-multivariate-families
+  ;; F2 (M5 inventory): the family's log density was taken elementwise, the
+  ;; value against a component axis it does not have (-4.135 for -4.754
+  ;; here); Gen.jl's mixture.jl:138
+  (let [w [0.4 0.6] mus [[0.0 0.0] [1.0 1.0]] s2 [2.3 1.0]
+        covs (mapv (fn [s] [[s 0.0] [0.0 s]]) s2)
+        m (mvnormal-mixture w mus covs)
+        ;; log wₖ N(x; μₖ, sₖ²·I) per component, and their log-sum-exp
+        lps (fn [x] (mapv #(+ (Math/log %1) (isotropic-log-density x %2 %3)) w mus s2))
+        lp (fn [x] (Math/log (reduce + (map #(Math/exp %) (lps x)))))
+        x [1.123 -2.123]]
+    (is (close? (dc/log-prob m (array/array x)) (lp x) (ts/tol 1e-12)))
+    (is (ts/close? (dc/log-prob m (array/array [x [0.0 3.0]])) (array/array [(lp x) (lp [0.0 3.0])]))
+        "elementwise over a batch of values")
+    (testing "at a trace site, where a value has one component's shape"
+      (is (= [2] (dc/value-shape m)))
+      (is (close? (:weight (gfi/generate (gen [] (trace :x m)) [] (cm/choicemap :x (array/array x)) (rng/key 1)))
+                  (lp x) (ts/tol 1e-12))))
+    (testing "gradients: Σₖ rₖ (μₖ - x)/sₖ² for the value, rₖ (x - μₖ)/sₖ² for mean k"
+      (let [r (mapv #(Math/exp (- % (lp x))) (lps x))
+            dmus (mapv (fn [rk mu s] (mapv #(* rk (/ (- %1 %2) s)) x mu)) r mus s2)]
+        (is (ts/close? ((array/grad #(dc/log-prob m %)) (array/array x)) (array/array (mapv - (apply mapv + dmus)))))
+        (is (ts/close? ((array/grad #(dc/log-prob (mvnormal-mixture w % covs) (array/array x))) (array/array mus))
+                       (array/array dmus)))))))
+
+(deftest mixture-draws-pick-one-component-per-element
+  ;; one pick per element of the log density: a vector value is one
+  ;; component's whole draw (the pick met the vector's own axis: a shape
+  ;; error, or coordinates of different components), and the elements of a
+  ;; batched parameter or of batched weights pick and draw independently
+  ;; (they shared one pick, or one draw); bands of five standard errors
+  (let [n 4000
+        band (fn [p] (* 5 (Math/sqrt (/ (* p (- 1 p)) n))))
+        frac (fn [pred xs] (/ (count (filter pred xs)) (double n)))]
+    (testing "vector values"
+      (let [far (mvnormal-mixture [0.3 0.7] [[0.0 0.0] [100.0 -100.0]] [[[1.0 0.0] [0.0 1.0]] [[1.0 0.0] [0.0 1.0]]])
+            xs (ts/host (dc/sample far (rng/key 21) [n]))]
+        (is (every? (fn [[a b]] (= (> a 50) (< b -50))) xs) "both coordinates from one component")
+        (is (close? (frac (fn [[a _]] (> a 50)) xs) 0.7 (band 0.7)))))
+    (testing "a batched parameter: eight mixtures, which all agree with probability 2⁻⁷"
+      (let [m (normal-mixture [0.5 0.5] (array/stack [(array/zeros [8]) (array/full [8] 100.0)] -1) [0.1 0.1])
+            xs (ts/host (dc/sample m (rng/key 22) [n 1]))]
+        (is (close? (frac #(apply = (map (fn [v] (> v 50)) %)) xs) (/ 1.0 128) (band (/ 1.0 128))))))
+    (testing "batched weights: three mixtures, the first two of the first component only"
+      (let [m (normal-mixture (array/array [[1.0 0.0] [1.0 0.0] [0.5 0.5]]) [0.0 100.0] [1.0 1.0])
+            xs (ts/host (dc/sample m (rng/key 23) [n 1]))]
+        ;; independent standard normals: E[x y] = 0, with variance 1
+        (is (close? (/ (reduce + (map (fn [[a b]] (* a b)) xs)) n) 0.0 (/ 5 (Math/sqrt n))))
+        (is (close? (frac #(> (nth % 2) 50) xs) 0.5 (band 0.5)))))))
+
+(deftest homogeneous-mixtures-check-their-components
+  (let [covs [[[1.0 0.0] [0.0 1.0]] [[1.0 0.0] [0.0 1.0]]]
+        e (try (mvnormal-mixture [0.5 0.5] [[0.0 0.0] [1.0 1.0] [2.0 2.0]] covs) nil
+               (catch clojure.lang.ExceptionInfo e e))]
+    (is (re-find #"3 components" (str (ex-message e))))
+    (is (= {:distribution "homogeneous-mixture" :shape [3 2] :dim 1 :components 2} (ex-data e)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"one dim per parameter"
+                          ((d/homogeneous-mixture d/mvnormal [1]) [0.5 0.5] [[0.0 0.0] [1.0 1.0]] covs)))
+    (is (ts/close? (dc/log-prob (normal-mixture [0.3 0.7] [-2.0 1.0] [1.0 1.0]) 0.5)
+                   (dc/log-prob (normal-mixture [0.3 0.7] [-2.0 1.0] 1.0) 0.5))
+        "a parameter without a component axis is every component's")))
+
+(def mvnormal-mixture-model
+  "A mixture of mvnormals whose second mean is a choice."
+  (gen []
+    (let [m (trace :m (d/normal 0.0 1.0))]
+      (trace :x (mvnormal-mixture [0.4 0.6] (array/stack [(array/zeros [2]) (array/+ m (array/ones [2]))])
+                                  [[[2.3 0.0] [0.0 2.3]] [[1.0 0.0] [0.0 1.0]]])))))
+
+(laws/deflaws mvnormal-mixture [[:model mvnormal-mixture-model [] []]] 100)
+
+(deftest mixtures-of-multivariate-families-batch
+  ;; one run for every particle, each particle's score its scalar run's
+  (let [ps (binding [batched/*spot-checks* :all] (batched/simulate mvnormal-mixture-model [] 8 (rng/key 31)))]
+    (is (nil? (batched/fallback-reason ps)))))
+
 (deftest review-regressions
   (testing "product sums each factor over its own value (review 4)"
     (let [p ((d/product d/normal d/bernoulli) [(array/zeros [3]) 1.0] [0.3])]
@@ -181,6 +300,98 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"positive" (d/dirichlet [-1.0 2.0])))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"increasing" (d/piecewise-uniform [0 2 1] [0.5 0.5])))))
 
+(deftest mvnormal-rejects-singular-covariances
+  ;; F1 (M5 inventory): a singular matrix can have a Cholesky factor through
+  ;; rounding, which the old check (no NaN in the factor) passed: Gen.jl's
+  ;; 2·ones(2, 2) (dist_dsl.jl:29; log-prob 15.24). Rows u, v and u + v
+  ;; have a last pivot 2.2 times n·ε·aⱼⱼ, which no bound on the pivots alone
+  ;; sees. Both stay rejected at the bound 1/ε: their trace(H⁻¹) is 2.0/ε
+  ;; and 2.15/ε, as rounding leaves a singular matrix.
+  (doseq [cov [[[2.0 2.0] [2.0 2.0]] [[8.0 -6.0 2.0] [-6.0 5.0 -1.0] [2.0 -1.0 1.0]]]]
+    (let [e (try (d/mvnormal (vec (repeat (count cov) 0.0)) cov) nil (catch clojure.lang.ExceptionInfo e e))]
+      (is (re-find #"positive definite" (str (ex-message e))) (str cov))
+      (is (= {:distribution "mvnormal" :param "cov" :dtype (ts/float-dtype)} (dissoc (ex-data e) :suggested-jitter))
+          (str cov))))
+  (testing "covariances singular at float32 precision only"
+    ;; 1 - 2⁻²⁶ is 1 in float32 (a zero pivot); 1 - 2⁻²⁴ is a float32 whose
+    ;; trace(H⁻¹)·ε is 2. In float64 both give the closed form, within κ·ε.
+    (doseq [rho [(- 1.0 (Math/pow 2 -26)) (- 1.0 (Math/pow 2 -24))]]
+      (let [cov [[1.0 rho] [rho 1.0]]]
+        (if (ts/f32?)
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"float32" (d/mvnormal [0.0 0.0] cov)) (str rho))
+          (is (close? (dc/log-prob (d/mvnormal [0.0 0.0] cov) (array/array [1.0 1.0]))
+                      (- (- (Math/log (* 2 Math/PI))) (* 0.5 (Math/log (* (- 1 rho) (+ 1 rho)))) (/ 1 (+ 1 rho)))
+                      (* (/ (+ 1 rho) (- 1 rho)) (Math/ulp 1.0)))
+              (str rho)))
+        (when (ts/jvm?)
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"float32"
+                                (d/mvnormal [0.0 0.0] (array/astype (array/array cov) :float32)))
+              (str rho)))))))
+
+(deftest mvnormal-suggests-a-jitter
+  ;; the owner's decision: the bound holds at every precision, so in
+  ;; float32 a Gaussian-process kernel needs a jitter at float32's scale.
+  ;; When the factor exists, the error names the smallest 1, 2 or 5 × 10ᵏ
+  ;; that passes once added to the diagonal.
+  (let [n 50
+        xs (mapv #(/ (double %) (dec n)) (range n))
+        ;; squared exponential, length scale 0.1 on [0, 1], 1e-6 on the diagonal
+        kernel (vec (for [a xs] (vec (for [b xs] (+ (Math/exp (* -50.0 (Math/pow (- a b) 2))) (if (= a b) 1e-6 0.0))))))
+        mu (vec (repeat n 0.0))]
+    (when-not (ts/f32?)
+      (is (some? (d/mvnormal mu kernel)) "the same kernel passes in float64"))
+    ;; float32: host data on a float32 backend, a float32 array on the JVM's
+    (when (or (ts/f32?) (ts/jvm?))
+      (let [cov (if (ts/f32?) kernel (array/astype (array/array kernel) :float32))
+            plus (fn [jitter] (if (ts/f32?)
+                                (vec (map-indexed (fn [i row] (update row i + jitter)) kernel))
+                                (array/+ cov (array/* jitter (array/eye n {:dtype :float32})))))
+            e (try (d/mvnormal mu cov) nil (catch clojure.lang.ExceptionInfo e e))
+            jitter (:suggested-jitter (ex-data e))]
+        (is (= :float32 (:dtype (ex-data e))))
+        (is (number? jitter))
+        (is (re-find (re-pattern (str "jitter of " jitter)) (str (ex-message e))))
+        (is (some? (d/mvnormal mu (plus jitter))) "adding it passes")
+        (is (thrown? clojure.lang.ExceptionInfo (d/mvnormal mu (plus (* 0.4 jitter))))
+            "0.4 times it, at most the next smaller suggestion, does not"))))
+  (testing "none for a factor that fails, also when a jitter would mend it"
+    (let [e (try (d/mvnormal [0.0 0.0] [[1.0 1.0001] [1.0001 1.0]]) nil (catch clojure.lang.ExceptionInfo e e))]
+      (is (= {:distribution "mvnormal" :param "cov" :dtype (ts/float-dtype)} (ex-data e))))))
+
+(deftest ^:slow mvnormal-takes-a-1000-point-kernel-at-float32-accuracy
+  ;; the bound's calibration (docs/research/covariance/f32_gp.py: a float32
+  ;; log density's error is (0.05–0.4)·ε·trace(H⁻¹)). The squared-exponential
+  ;; kernel of 1,000 points (variance 1, length scale 0.1 on [0, 1]) passes
+  ;; in float32 with a jitter of 1e-3 (ε·trace(H⁻¹) = 0.12) and fails with
+  ;; 1e-5 (11.7); in float64, 1e-10 passes (0.002)
+  (let [n 1000
+        jvm (array/backend-named :jvm)
+        kernel (fn [jitter]
+                 (array/with-backend jvm
+                   (let [x (array/linspace 0.0 1.0 n)
+                         d (array/- (array/expand-dims x -1) (array/expand-dims x 0))]
+                     (array/+ (array/exp (array/* -0.5 (array/square (array/* 10.0 d)))) (array/* jitter (array/eye n))))))
+        mu (vec (repeat n 0.0))
+        ;; float32: host data on a float32 backend, a float32 array on the JVM's
+        float32 (fn [k] (if (ts/f32?) (array/->clj k) (array/astype k :float32)))]
+    (when-not (ts/f32?)
+      (is (some? (d/mvnormal mu (array/->clj (kernel 1e-10)))) "1e-10 passes in float64"))
+    (when (or (ts/f32?) (ts/jvm?))
+      (is (some? (d/mvnormal mu (float32 (kernel 1e-3)))) "1e-3 passes in float32")
+      (let [e (try (d/mvnormal mu (float32 (kernel 1e-5))) nil (catch clojure.lang.ExceptionInfo e e))
+            jitter (:suggested-jitter (ex-data e))]
+        (is (= :float32 (:dtype (ex-data e))) "1e-5 does not")
+        (is (<= 1e-4 jitter 1e-3) "the suggested jitter is near 1e-3")
+        (is (some? (d/mvnormal mu (float32 (kernel (+ 1e-5 jitter))))) "and adding it passes")))
+    (when (ts/f32?)
+      ;; what the bound stands for: within 0.1 nats of float64. Here
+      ;; ε·trace(H⁻¹) = 0.12, so the script's largest ratio, 0.4, predicts at
+      ;; most 0.05 nats (it measured 0.009)
+      (let [k (kernel 1e-3)
+            exact (fn [y] (array/with-backend jvm (dc/log-prob (d/mvnormal (array/zeros [n]) k) y)))
+            y (array/with-backend jvm (dc/sample (d/mvnormal (array/zeros [n]) k) (rng/key 41)))]
+        (is (close? (dc/log-prob (d/mvnormal mu (array/->clj k)) (array/array (array/->clj y))) (exact y) 0.1))))))
+
 (dc/defdist softmax-categorical
   "A user-defined distribution without a value-shape clause."
   [logits]
@@ -192,3 +403,107 @@
   ;; shape, [3] here) rejected the valid constraint 1
   (let [m (gen [] (trace :k (softmax-categorical [0.0 1.0 2.0])))]
     (is (map? (gfi/generate m [] (cm/choicemap :k 1) (rng/key 1))))))
+
+;; ---------------------------------------------------------------------------
+;; Distributions.jl's families: native, so they differentiate and batch
+;; ---------------------------------------------------------------------------
+
+(def ^:private further
+  "[name constructor params value]: each family at an interior value."
+  [["chi-squared" d/chi-squared [3.0] 2.0] ["f-dist" d/f-dist [3.0 10.0] 1.2] ["gumbel" d/gumbel [1.0 2.0] 0.5]
+   ["levy" d/levy [1.0 0.5] 3.0] ["log-normal" d/log-normal [0.2 0.5] 1.5] ["logistic" d/logistic [0.5 1.5] 0.3]
+   ["nakagami" d/nakagami [1.5 2.0] 1.2] ["pareto" d/pareto [3.0 1.5] 2.5] ["student-t" d/student-t [5.0] 1.3]
+   ["triangular" d/triangular [0.0 2.0 0.5] 1.4] ["weibull" d/weibull [1.5 2.0] 1.5]])
+
+(deftest gradients-of-the-further-families
+  ;; with respect to the value and each parameter, against central finite
+  ;; differences of the log density, which run on the JVM backend in
+  ;; float64 whatever the backend under test (a float32 one's would be
+  ;; noise: review 4)
+  (let [h 1e-6
+        jvm (array/backend-named :jvm)
+        fd (fn [f x] (/ (- (f (+ x h)) (f (- x h))) (* 2 h)))]
+    (doseq [[label make params v] further
+            i (range -1 (count params))]
+      (let [lp (fn [x] (array/with-backend jvm
+                         (ts/number (dc/log-prob (apply make (if (neg? i) params (assoc params i x))) (if (neg? i) x v)))))
+            at (if (neg? i) v (params i))
+            ;; the parameter as an array, so the tape differentiates it
+            g (if (neg? i)
+                (array/grad #(dc/log-prob (apply make params) %))
+                (array/grad #(dc/log-prob (apply make (assoc params i %)) v)))]
+        (is (ts/close? (fd lp at) (ts/number (g (array/array at))) {:rtol (ts/tol 1e-5) :atol (ts/tol 1e-6)})
+            (str label (if (neg? i) " d/dv" (str " d/dparam" i))))))))
+
+(def further-model
+  (gen []
+    (let [nu (trace :nu (d/gamma 4 1))
+          t (trace :t (d/student-t nu))
+          w (trace :w (d/weibull 1.5 2.0))
+          l (trace :l (d/log-normal 0.0 0.5))
+          tri (trace :tri (d/triangular 0.0 2.0 0.5))]
+      (trace :y (d/logistic (array/+ (array/+ t w) (array/+ l tri)) 1.0)))))
+
+(laws/deflaws further [[:model further-model [] []]] 100)
+
+(deftest the-further-families-batch
+  (let [ps (batched/simulate further-model [] 8 (rng/key 97))]
+    (is (nil? (batched/fallback-reason ps)))))
+
+(deftest the-further-families-validate-their-parameters
+  ;; host values and the elements of concrete arrays (review 4: Nakagami
+  ;; and the triangular checked host values only)
+  (doseq [[label f] {"chi-squared" #(d/chi-squared -1.0) "chi-squared array" #(d/chi-squared [1.0 -1.0])
+                     "f-dist" #(d/f-dist 3.0 0.0) "gumbel" #(d/gumbel 0.0 -1.0) "levy" #(d/levy 0.0 0.0)
+                     "log-normal" #(d/log-normal 0.0 -0.5) "logistic" #(d/logistic 0.0 0.0)
+                     "nakagami" #(d/nakagami -1.0 1.0) "nakagami array" #(d/nakagami [-1.0 2.0] 1.0)
+                     "nakagami omega" #(d/nakagami 1.0 [1.0 0.0]) "pareto" #(d/pareto -1.0 1.0)
+                     "student-t" #(d/student-t 0.0) "weibull" #(d/weibull 1.0 -2.0)
+                     "triangular" #(d/triangular 1.0 0.0 0.5) "triangular mode" #(d/triangular 0.0 1.0 2.0)
+                     "triangular arrays" #(d/triangular [0.0 1.0] [1.0 0.0] [0.5 0.5])
+                     "triangular array mode" #(d/triangular [0.0] [1.0] [1.5])}]
+    (is (thrown? clojure.lang.ExceptionInfo (f)) label)))
+
+(deftest the-further-families-at-their-edges
+  ;; review 4: draws that underflowed to 0 (an infinite density) or made a
+  ;; quotient infinite, the F density at infinity, the t's far tail
+  (let [n 100000
+        host (fn [x] (map ts/number (array/->clj x)))
+        finite? (fn [xs] (every? #(Double/isFinite %) xs))]
+    (testing "f-dist with a small denominator: finite draws, finite densities, -Inf at Inf"
+      (let [f (d/f-dist 4.0 0.02)
+            x (dc/sample f (rng/key 90) [n])]
+        (is (finite? (host x)))
+        (is (finite? (host (dc/log-prob f x))))
+        (is (= ##-Inf (ts/number (dc/log-prob f ##Inf))))))
+    (testing "small shapes: no zero draws, finite densities"
+      ;; except a float32 Weibull's draws beyond the float range (E^100 for
+      ;; E > Float/MAX_VALUE^0.01): +Inf, of log density -Inf, as Pareto's,
+      ;; at the rate exp(-Float/MAX_VALUE^0.01) ≈ 0.088, within five
+      ;; standard errors
+      (doseq [[label dist] {"chi-squared 0.02" (d/chi-squared 0.02) "weibull 0.01" (d/weibull 0.01 1.0)
+                            "nakagami 0.01" (d/nakagami 0.01 1.0)}]
+        (let [x (dc/sample dist (rng/key 91) [n])
+              xs (host x)
+              lps (host (dc/log-prob dist x))
+              overflow? (and (= label "weibull 0.01") (= :float32 (array/dtype x)))]
+          (is (every? pos? xs) label)
+          (is (every? (fn [[v lp]] (if (Double/isInfinite v) (= ##-Inf lp) (Double/isFinite lp))) (map vector xs lps)) label)
+          (if overflow?
+            (let [p (Math/exp (- (Math/pow Float/MAX_VALUE 0.01)))
+                  k (count (filter #(Double/isInfinite %) xs))]
+              (is (< (Math/abs (- k (* n p))) (* 5 (Math/sqrt (* n p (- 1 p))))) (str label ": " k " +Inf draws")))
+            (is (finite? xs) label)))))
+    (testing "Student's t at nu = 0.1: P(|T| > 1e16), within five standard errors"
+      ;; P(|T| > t) ≈ 2 c ν^((ν-1)/2) t^(-ν), c = Γ((ν+1)/2)/(√(νπ) Γ(ν/2)), for large t
+      (let [nu 0.1 t 1e16
+            g #(Math/exp (ts/number (array/lgamma (double %))))
+            p (* 2 (/ (g (/ (+ nu 1) 2)) (* (Math/sqrt (* nu Math/PI)) (g (/ nu 2)))) (Math/pow nu (/ (- nu 1) 2)) (Math/pow t (- nu)))
+            f (/ (count (filter #(> (Math/abs (double %)) t) (host (dc/sample (d/student-t nu) (rng/key 92) [n])))) (double n))]
+        (is (< (Math/abs (- f p)) (* 5 (Math/sqrt (/ (* p (- 1 p)) n)))) (str f " against " p))))
+    (testing "the triangular at its mode, also when the mode is a bound"
+      (is (ts/close? (Math/log 2.0) (dc/log-prob (d/triangular 0.0 1.0 1.0) 1.0)))
+      (is (ts/close? (Math/log 2.0) (dc/log-prob (d/triangular 0.0 1.0 0.0) 0.0))))
+    (testing "a gradient outside the support is finite"
+      (is (finite? [(ts/number ((array/grad #(dc/log-prob (d/weibull % 2.0) -1.0)) 1.5))
+                    (ts/number ((array/grad #(dc/log-prob (d/weibull 1.5 %) -1.0)) 2.0))])))))

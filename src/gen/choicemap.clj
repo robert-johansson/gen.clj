@@ -203,9 +203,10 @@
         :else (->Node (merge-with merge (:m x) (:m y)))))
 
 (defn override
-  "y laid over x: where both have entries, y's replaces x's whole subtree."
+  "y laid over x: where both have entries, y's replaces x's whole subtree;
+   an empty y leaves x (a value too) as it is."
   [x y]
-  (cond (nil? y) x
+  (cond (or (nil? y) (empty? y)) x
         (nil? x) y
         (or (has-value? x) (has-value? y)) y
         :else (->Node (merge-with override (:m x) (:m y)))))
