@@ -12,8 +12,10 @@
    gen.llm.llama-test does; skipped with a note otherwise."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gen.llm.branching :as br]
+            [gen.llm.branching-contract :as bc]
             [gen.llm.lm :as lm]
-            [gen.llm.lm-contract :as contract]))
+            [gen.llm.lm-contract :as contract]
+            [gen.llm.toy-engine :as toy]))
 
 (def ^:private model-path
   (or (System/getProperty "gen.llama.test-model") (System/getenv "GEN_LLAMA_TEST_MODEL")))
@@ -87,4 +89,6 @@
           (is (= (:n-vocab (br/info e)) (count bv)))
           (is (= (seq (.getBytes text "UTF-8")) (seq (byte-array (mapcat bv toks)))) "the tokens' bytes are the text's")
           (is (= text (lm/decode m toks)))
-          (is (contains? (:eog (lm/vocab m)) (:eos (lm/vocab m)))))))))
+          (is (contains? (:eog (lm/vocab m)) (:eos (lm/vocab m))))))
+      (with-open [toy (toy/engine {})]
+        (is (= :not-a-llama-engine (bc/reason #((llama 'tokenizer) toy))))))))

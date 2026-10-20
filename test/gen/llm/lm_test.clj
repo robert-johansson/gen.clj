@@ -48,6 +48,7 @@
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
             [gen.llm.branching :as br]
+            [gen.llm.branching-contract :as bc]
             [gen.llm.cell-engine :as ce]
             [gen.llm.lm :as lm]
             [gen.llm.lm-contract :as contract]
@@ -64,10 +65,6 @@
 
 (defn- same-row? [^floats a ^floats b]
   (java.util.Arrays/equals a b))
-
-(defn- reason [f]
-  (try (f) :no-error
-       (catch clojure.lang.ExceptionInfo x (:reason (ex-data x) :no-reason))))
 
 (defn- run-on
   "(f m e) for a new LM m over a new engine e: the cell engine sized to the
@@ -507,19 +504,19 @@
                                 [:context-full #(lm/score m prompt (vec (repeat 18 1)))]
                                 [:invalid-token #(lm/token-bytes m n-vocab)]
                                 [:invalid-token #(lm/token-bytes m 100000000000000000000N)]]]
-                (is (= want (reason f))))
+                (is (= want (bc/reason f))))
               (is (= before (lm/info m)) "nothing read, nothing counted")
               (is (empty? (books m e {:max-branches 4 :max-cells 20})))))))
 
 (deftest bad-options-and-tokenizers-are-loud
   (with-open [e (ce/engine {:max-branches 4})]
     (let [tok (tt/tokenizer n-vocab)]
-      (is (= :invalid-option (reason #(lm/lm e tok {:max-branches 5}))))
-      (is (= :invalid-option (reason #(lm/lm e tok {:max-branches 0}))))
-      (is (= :invalid-option (reason #(lm/lm e tok {:max-cells 0}))))
-      (is (= :invalid-tokenizer (reason #(lm/lm e (tt/tokenizer 98)))))
-      (is (= :invalid-tokenizer (reason #(lm/lm e (dissoc tok :decode)))))
-      (is (= :invalid-tokenizer (reason #(lm/lm e (assoc tok :eog [96])))))
+      (is (= :invalid-option (bc/reason #(lm/lm e tok {:max-branches 5}))))
+      (is (= :invalid-option (bc/reason #(lm/lm e tok {:max-branches 0}))))
+      (is (= :invalid-option (bc/reason #(lm/lm e tok {:max-cells 0}))))
+      (is (= :invalid-tokenizer (bc/reason #(lm/lm e (tt/tokenizer 98)))))
+      (is (= :invalid-tokenizer (bc/reason #(lm/lm e (dissoc tok :decode)))))
+      (is (= :invalid-tokenizer (bc/reason #(lm/lm e (assoc tok :eog [96])))))
       (let [b (br/open e [1])]
         (with-open [m (lm/lm e tok)]
           (is (= 3 (:max-branches (lm/info m))) "by default, the branches the engine has free"))
@@ -534,15 +531,15 @@
       (.close m)
       (is (= 0 (:live (br/info e))))
       (is (:closed? (lm/info m)))
-      (is (= :closed (reason #(lm/next-logprobs m prompt))))
-      (is (= :closed (reason #(lm/score m prompt [1])))))))
+      (is (= :closed (bc/reason #(lm/next-logprobs m prompt))))
+      (is (= :closed (bc/reason #(lm/score m prompt [1])))))))
 
 (deftest a-closed-engine-is-loud-and-forgotten
   (let [e (ce/engine {:max-branches 4})
         m (lm/lm e (tt/tokenizer n-vocab))]
     (lm/next-logprobs m prompt)
     (.close e)
-    (is (= :closed (reason #(lm/next-logprobs m (conj prompt 1)))))
+    (is (= :closed (bc/reason #(lm/next-logprobs m (conj prompt 1)))))
     (is (= 0 (:live (lm/info m))) "the engine's branches are gone, and so are the entries")
     (.close m)))
 

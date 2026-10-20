@@ -31,8 +31,8 @@
    llama.cpp's log goes to System.err from warnings up (gen.llama.log:
    none, error, warn, info, debug); libllama is found in gen.llama.lib
    (default native/build/llama/<platform>/lib, gen.llama.LlamaRuntime).
-   tokenize, token-bytes and detokenize use the GGUF's own vocabulary; they
-   are the engine's, for the LM protocol to build on."
+   tokenize, token-bytes and detokenize use the GGUF's own vocabulary;
+   tokenizer gathers them as the LM protocol's tokenizer (gen.llm.lm)."
   (:require [gen.llm.branching :as br]
             [gen.llm.slots :as slots])
   (:import [gen.llama LlamaRuntime LlamaRuntime$Batch]
@@ -428,7 +428,8 @@
    tokenize and detokenize."
   [e]
   (let [{:keys [n-vocab bos eos eog add-bos?]} (br/info e)
-        pieces (slots/call e (fn [_] (mapv #(token-bytes e %) (range n-vocab))))
+        ;; on the engine's thread, where each token-bytes runs at once
+        pieces (on-llama e (fn [_] (mapv #(token-bytes e %) (range n-vocab))))
         special (fn [t] (when-not (neg? (long t)) t))]
     {:n-vocab n-vocab
      :bos (special bos)
