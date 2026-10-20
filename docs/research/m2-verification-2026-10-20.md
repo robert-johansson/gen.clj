@@ -9,8 +9,11 @@ M2's done-means (bean genclj-rtif):
 CUDA here is the Jetson AGX Thor (aarch64, sm_110). The RTX PRO 6000
 (x86_64, sm_120) comes later (owner, 2026-10-19; bean genclj-kw88).
 
-Every configuration ran its full battery (slow and heavy tests included)
-and a property soak: every test.check property run once as usual and once
+Metal and CUDA ran their full battery (slow and heavy tests included);
+MLX's CPU ran the light tier, and in float64 on the Thor the full battery
+until its time limit (see the table, and "MLX's CPU: the full battery"
+below for the runs that complete it). Every configuration ran a property
+soak: every test.check property run once as usual and once
 with ten times its cases and fresh seeds (`test/gen/soak.clj`), since one
 passing run shows only the cases it drew. One MLX JVM at a time on the Mac,
 each run under an RSS guard.
@@ -38,13 +41,30 @@ ten times its cases).
 | Thor | CUDA | full battery | 298 tests, 1734 assertions, 0 failures | 8909 s | 13.4 GB |
 | Thor | CUDA | soak | 110 of 111 properties; the failure was the test's assumption below, and the conformance soak rerun with the fix passed all 20 | 5661 s | 13.1 GB |
 | Thor | MLX CPU, float64 | full battery | namespaces 1–15 in full (slow and heavy included) before the 4-hour limit, 0 failures; 16–24 on the light tier: 51 tests, 581 assertions, 0 failures | 14400 s + 1550 s | 13.4 GB |
-| Thor | MLX CPU, float64 | soak | 50 of 111 properties by 05:56, 0 failed (its 3-hour limit ends it at 06:16; the Mac's float64 soak covers all 111) | started 03:16 | |
+| Thor | MLX CPU, float64 | soak | 51 of 111 properties, 0 failed, before its 3-hour limit (the Mac's float64 soak covers all 111) | 10800 s | 9.9 GB |
+| Thor | MLX CPU, float32 | full battery (7751b76 with 00bc330's test-support fix) | 298 tests, 1735 assertions, 0 failures | 9186 s | 5.5 GB |
 
 The light battery skips the ^:slow and ^:heavy tests, which take minutes
 each on MLX's CPU (one evaluation per value read); the full batteries on
 Metal and CUDA include them. The day before, the full battery also passed
 on the Mac's MLX CPU in float64 (all 24 namespaces, slow and heavy, in two
 runs of about 100 minutes; bean genclj-rtif), on an earlier commit.
+
+## MLX's CPU: the full battery (2026-10-20, morning)
+
+M2 was first closed on the light tier for MLX's CPU, which skips the slow
+and heavy tests; it was reopened the same morning, and these runs at
+7751b76 complete the full battery there:
+
+| Machine | Device | Run | Result | Time | Peak RSS |
+|---|---|---|---|---|---|
+| Thor | MLX CPU, float32 | full battery | 298 tests, 1735 assertions, 0 failures | 9186 s | 5.5 GB |
+| Mac | MLX CPU, float32 | full battery | 298 tests, 1737 assertions, 0 failures | 1419 s | 7.6 GB |
+| Mac | MLX CPU, float64 | full battery of the 9 namespaces the Thor's limit cut (kernel through special) | 58 tests, 597 assertions, 0 failures | 4867 s | 6.6 GB |
+
+With the Thor's float64 run of namespaces 1–15, every namespace has
+passed in full in float64 too. (Assertion counts differ by a few between
+machines: some tests assert per platform.)
 
 Benchmarks: on the Mac in `docs/benchmarks.md` (genclj-ls29); CUDA on the Thor in its own section there
 (the GPU is 2.5–6× slower than Metal at these sizes, from per-operation

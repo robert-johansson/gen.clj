@@ -10,7 +10,7 @@
   (try (f) nil (catch clojure.lang.ExceptionInfo e (ex-data e))))
 
 (deftest host-math
-  (testing "number-only ops stay on the host and follow NumPy semantics"
+  (testing "number-only ops stay on the host and follow NumPy semantics, but booleans count in arithmetic, as in Julia (DESIGN.md §9)"
     (are [expected actual] (= expected actual)
       3 (array/+ 1 2)
       3.5 (array/+ 1 2.5)
@@ -34,6 +34,33 @@
     (is (= -5 (array/- 5)))
     (is (= 0.25 (array// 4)))
     (is (= 24 (array/* 1 2 3 4)))))
+
+(deftest booleans-count-in-arithmetic
+  ;; Julia's rule, not NumPy's logical + and * (DESIGN.md §9, genclj-6pnx)
+  (let [a (array/array [true true false])
+        b (array/array [true false false])]
+    (doseq [[label expected actual] [["+" [2 1 0] (array/+ a b)]
+                                     ["*" [1 0 0] (array/* a b)]
+                                     ["-" [0 1 0] (array/- a b)]
+                                     ["negate" [-1 -1 0] (array/negate a)]]]
+      (testing label
+        (is (= expected (ts/host actual)))
+        (is (= (ts/int-dtype) (array/dtype actual)))))
+    (is (= 2 (ts/host (array/sum a))) "as sum counts")))
+
+(deftest casts-to-int-are-javas
+  ;; truncated toward zero, saturating at the range (the infinities too),
+  ;; NaN 0; an int narrowed wraps (DESIGN.md §9: the backends disagreed,
+  ;; genclj-kw88)
+  (let [xs (array/array [##NaN ##Inf ##-Inf 1e20 -1e20 2.7 -2.7 -0.5])]
+    (is (= [0 2147483647 -2147483648 2147483647 -2147483648 2 -2 0] (ts/host (array/astype xs :int32))))
+    (is (= [0 9223372036854775807 -9223372036854775808 9223372036854775807 -9223372036854775808 2 -2 0]
+           (ts/host (array/astype xs :int64))))
+    (when-not (ts/jvm?) ;; the JVM backend has no uint32 arrays
+      (is (= [0 4294967295 0 4294967295 0 2 0 0] (ts/host (array/astype xs :uint32)))))
+    (is (= [-1294967296 -1] (ts/host (array/astype (array/array [3000000000 -1] {:dtype :int64}) :int32))))
+    (is (= 2147483647 (ts/host (array/astype 3e9 :int32))) "a host scalar")
+    (is (= 0 (ts/host (array/astype ##NaN :int64))) "a host scalar")))
 
 (deftest creation-and-conversion
   (is (= [[1 2] [3 4]] (array/->clj (array/array [[1 2] [3 4]]))))

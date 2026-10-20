@@ -167,16 +167,35 @@
     (if (.booleanValue ^Boolean x) 1 0)
     (.longValue ^Number x)))
 
+(defn float->int
+  "x cast to the int dtype as Java casts a double (DESIGN.md §9): truncated
+   toward zero, saturating at the dtype's range (the infinities too), NaN
+   0. :uint32 saturates at 0 and 2^32 - 1."
+  ^long [^double x dtype]
+  (case dtype
+    :int64 (unchecked-long x)
+    :int32 (long (unchecked-int x))
+    :uint32 (cond (Double/isNaN x) 0 (<= x 0.0) 0 (>= x 4294967295.0) 4294967295 :else (unchecked-long x))))
+
+(defn int->int
+  "x wrapped to the int dtype's width, as Java's narrowing casts."
+  ^long [^long x dtype]
+  (case dtype
+    :int64 x
+    :int32 (long (unchecked-int x))
+    :uint32 (bit-and x 0xFFFFFFFF)))
+
 (defn host-cast
   "Convert a host scalar to the host representation of dtype: a Double for
    float dtypes (rounded to float32 precision for :float32), a Long for ints
-   (wrapped for :int32 and :uint32), a Boolean for :bool."
+   (a float cast as Java casts, float->int; an integer wrapped, int->int), a
+   Boolean for :bool."
   [x dtype]
   (case dtype
     :float64 (host-double x)
     ;; unchecked: a double beyond float32's range rounds to an infinity
     (:float32 :float16 :bfloat16) (double (unchecked-float (host-double x)))
-    :int64 (host-long x)
-    :int32 (long (unchecked-int (host-long x)))
-    :uint32 (bit-and (host-long x) 0xFFFFFFFF)
+    (:int64 :int32 :uint32) (if (or (instance? Double x) (instance? Float x))
+                              (float->int (host-double x) dtype)
+                              (int->int (host-long x) dtype))
     :bool (truthy? x)))

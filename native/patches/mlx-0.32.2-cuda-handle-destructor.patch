@@ -1,0 +1,23 @@
+MLX v0.32.3's ~CudaHandle, backported to v0.32.2 (upstream: ml-explore/mlx v0.32.3,
+mlx/backend/cuda/cuda_utils.h): the destructor no longer checks the destroy's
+error, which aborted the process at exit when the CUDA driver was already
+unloading ("Destroy(handle_) failed: driver shutting down"; fenrir, x86_64,
+2026-10-20; genclj-kw88). Applied by native/build-mlx.sh cuda13-source.
+
+--- a/mlx/backend/cuda/cuda_utils.h
++++ b/mlx/backend/cuda/cuda_utils.h
+@@ -26,11 +26,10 @@
+   }
+ 
+   ~CudaHandle() {
+-    // Skip if there was an error to avoid throwing in the destructors
+-    if (cudaPeekAtLastError() != cudaSuccess) {
+-      return;
++    // Skip error check to avoid throwing in destructors.
++    if (handle_ != nullptr) {
++      Destroy(handle_);
+     }
+-    reset();
+   }
+ 
+   CudaHandle(const CudaHandle&) = delete;

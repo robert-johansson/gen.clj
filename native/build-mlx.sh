@@ -16,14 +16,19 @@
 #     mlx-cuda-13 wheel, with the system's CUDA libraries where it has them
 #     and the missing ones fetched from PyPI (below). Tested on aarch64 (the
 #     Jetson AGX Thor, Ubuntu 24.04, CUDA 13.2, 2026-10-19); x86_64 not yet.
-#     cuda13-source builds MLX itself from its pinned source, for this
-#     machine's GPU (nvidia-smi's compute capability, or MLX_CUDA_ARCHITECTURES):
+#     cuda13-source builds MLX itself from its pinned source, with the fixes
+#     in native/patches, for this machine's GPU (nvidia-smi's compute
+#     capability, or MLX_CUDA_ARCHITECTURES):
 #     the wheel's kernels cover sm_75 to sm_121 but not every GPU, and the
 #     Thor's sm_110 has neither code nor compatible PTX in it. About six
 #     minutes on the Thor; needs the CUDA toolkit, cuDNN, BLAS and LAPACK.
 #     The JVM finds it with -Dgen.mlx.lib=native/build/linux-<arch>-<variant>/lib.
+#   Both CUDA variants need a CUDA toolkit for CMake (MLX's package asks for
+#   one): set CUDAToolkit_ROOT when it is not on the PATH (pip's
+#   nvidia-cuda-nvcc layout works).
 #
-# Requires: curl, unzip, cmake (≥ 3.16), a C++20 compiler, shasum or sha256sum.
+# Requires: curl, unzip, cmake (≥ 3.16; Ninja if installed, else make), a C++20
+# compiler, shasum or sha256sum.
 set -euo pipefail
 
 MLX_VERSION=0.32.2
@@ -32,6 +37,9 @@ MLX_C_COMMIT=a341b4925024b88b2c593468f16e12f5e17315da
 MLX_COMMIT=1f8e74e3f12f31365464a6867c6579f0e9b29d85
 
 here="$(cd "$(dirname "$0")" && pwd)"
+# Ninja when it is installed, else CMake's default generator (make; a
+# string, not an array: bash 3.2 rejects an empty array under set -u)
+if command -v ninja >/dev/null 2>&1; then generator="-G Ninja"; else generator=""; fi
 os="$(uname -s)"
 arch="$(uname -m)"
 variant="${1:-cpu}"
@@ -87,12 +95,27 @@ if [ "$variant" = cuda13-source ]; then
   fi
   [ "$(git -C "$msrc" rev-parse HEAD)" = "$MLX_COMMIT" ] ||
     { echo "mlx at $(git -C "$msrc" rev-parse HEAD), expected $MLX_COMMIT (v$MLX_VERSION)" >&2; exit 1; }
+  # fixes backported to the pinned source, native/patches/mlx-<version>-*.patch
+  # (each says why), applied once
+  for patch in "$here"/patches/mlx-$MLX_VERSION-*.patch; do
+    [ -f "$patch" ] || continue
+    if git -C "$msrc" apply --check "$patch" 2>/dev/null; then
+      git -C "$msrc" apply "$patch"
+    elif ! git -C "$msrc" apply --reverse --check "$patch" 2>/dev/null; then
+      echo "cannot apply $(basename "$patch") to mlx v$MLX_VERSION" >&2; exit 1
+    fi
+  done
   archs="${MLX_CUDA_ARCHITECTURES:-$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '. ')}"
   [ -n "$archs" ] || { echo "no GPU found: set MLX_CUDA_ARCHITECTURES" >&2; exit 1; }
   echo "building MLX v$MLX_VERSION for CUDA architecture $archs"
-  cmake -S "$msrc" -B "$build/cmake-mlx-$platform" -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+  # NVIDIA's libraries where the wheel's libmlx finds them (pip's layout,
+  # fetched below when the system lacks them), and MLX_EXTRA_RPATH (a BLAS
+  # outside the system's, say)
+  rpath='$ORIGIN/../../nvidia/cu13/lib:$ORIGIN/../../nvidia/cudnn/lib:$ORIGIN/../../nvidia/nccl/lib'
+  cmake -S "$msrc" -B "$build/cmake-mlx-$platform" $generator -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
     -DMLX_BUILD_CUDA=ON -DMLX_CUDA_ARCHITECTURES="$archs" -DMLX_BUILD_TESTS=OFF -DMLX_BUILD_EXAMPLES=OFF \
-    -DMLX_BUILD_BENCHMARKS=OFF -DMLX_BUILD_PYTHON_BINDINGS=OFF -DCMAKE_INSTALL_PREFIX="$build/mlx-$platform"
+    -DMLX_BUILD_BENCHMARKS=OFF -DMLX_BUILD_PYTHON_BINDINGS=OFF -DCMAKE_INSTALL_PREFIX="$build/mlx-$platform" \
+    -DCMAKE_INSTALL_RPATH="$rpath${MLX_EXTRA_RPATH:+:$MLX_EXTRA_RPATH}"
   cmake --build "$build/cmake-mlx-$platform"
   cmake --install "$build/cmake-mlx-$platform"
   mlx_root="$build/mlx-$platform"
@@ -144,7 +167,7 @@ if [ "$commit" != "$MLX_C_COMMIT" ]; then
 fi
 
 if [ "$os" = Darwin ]; then rpath='@loader_path'; else rpath='$ORIGIN'; fi
-cmake -S "$src" -B "$build/cmake-$platform" -G Ninja \
+cmake -S "$src" -B "$build/cmake-$platform" $generator \
   -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_SHARED_LIBS=ON \
   -DMLX_C_BUILD_EXAMPLES=OFF \
@@ -211,6 +234,15 @@ if [ "$variant" = cuda13 ] || [ "$variant" = cuda13-source ]; then
   done
   missing="$(ldd "$out/lib/libmlx.so" | awk '/not found/ {print $1}')"
   [ -z "$missing" ] || { echo "still missing: $missing" >&2; exit 1; }
+  # NVRTC's CUDA headers: MLX takes them from ../nvidia/cu13/include when it
+  # exists (pip's layout), before CUDA_HOME or /usr/local/cuda. A wheel
+  # fetched above creates that directory with its own headers only, so
+  # complete it with the runtime's (cuda_bf16.h, …) and crt's, which those
+  # include (found on x86_64 without a system CUDA, 2026-10-20)
+  if [ -d "$build/nvidia/cu13/include" ] && [ ! -f "$build/nvidia/cu13/include/cuda_bf16.h" ]; then
+    fetch_nvidia nvidia-cuda-runtime 13.4.92
+    fetch_nvidia nvidia-cuda-crt 13.4.92
+  fi
 fi
 echo "built $out/lib:"
 ls "$out/lib"

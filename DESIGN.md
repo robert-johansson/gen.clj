@@ -20,6 +20,15 @@ Clojure on the JVM. In order:
    (decided with the owner 2026-10-18). Each milestone tests the laws of the
    features it builds; a coverage matrix in `docs/research/genjl-parity.md` §3
    tracks every law.
+5. **M5 — Gen.jl's own test suite passes** (the owner, 2026-10-20: after M4
+   closes). Gen.jl 0.4.8's tests (38 files, about 1,900 assertions) are
+   ported file by file to gen.clj tests, each citing its source. A table
+   marks each as ported or not applicable, with a reason (Julia-only
+   machinery). Gen.jl itself, run on a host that has it (fenrir), is the
+   oracle for expected values, written as EDN fixtures as scipy's and
+   JAX's are, so the tests never need Julia. Its seeded statistical tests
+   are compared by their statistics, as for GenMLX. A port that fails is a
+   gap to fix, or a documented difference.
 
 **Status (2026-10-19): M1 is complete.** The pure-JVM backend runs every
 layer: arrays with reverse-mode AD, the data algebra, the GFI and dynamic
@@ -35,10 +44,10 @@ are fixed (`docs/research/acceptance-2026-10-19.md`). Benchmarks are in
 and on CUDA (the Jetson AGX Thor, sm_110).** It passes the backend
 conformance suite against the JVM reference on every device, and the full
 battery (298 tests, slow and heavy included) on Metal, with the tape and
-with native gradients, and on CUDA. MLX's CPU backend passes the light
-battery in float32 and float64, and the full battery in float64 (on the
-Mac, the day before; on the Thor, the first 15 namespaces in full and the
-rest on the light tier). Every property passed a soak (ten times its
+with native gradients, on CUDA, and on MLX's CPU backend: float32 on the
+Mac and the Thor, float64 split between them (the Thor's first 15
+namespaces, the Mac's other 9). M2 was first closed on MLX's CPU light
+tier and reopened the same morning to finish these. Every property passed a soak (ten times its
 cases, fresh seeds) on each device after the soaks found one wrong test
 assumption (only Metal flushes float32 subnormals). The record is
 `docs/research/m2-verification-2026-10-20.md`. CUDA needs MLX v0.32.2
@@ -458,6 +467,29 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
 - **Bernoulli values are booleans,** as in Gen.jl: 0/1 (GenMLX's) is an
   error, since a body's `if` takes 0 as true while the density scores it as
   false. NaN parameters and NaN constrained values are errors too.
+- **Casts to integers are Java's** (owner, 2026-10-20; genclj-kw88). On
+  every backend, a float cast to an integer dtype truncates toward zero,
+  saturates at the dtype's range (±Inf too) and takes NaN to 0. An integer
+  cast to a narrower one wraps, as Java's `(int)` of a long does. Before
+  this, the backends disagreed on NaN, ±Inf and out-of-range values. The
+  JVM backend threw on ±Inf and did not clamp int32. MLX's GPU saturated
+  but took NaN to MIN for int64. MLX's x86 CPU gave MIN for all of them
+  (the M2 review, finding 11, confirmed on fenrir). A loud error would need
+  a host read of every cast on a lazy backend.
+- **Booleans in arithmetic count, as in Julia** (owner, 2026-10-20;
+  genclj-6pnx): `+`, `-`, `*` and `negate` on booleans give integers,
+  `(+ true true)` is 2, `(negate true)` is -1. With numbers and in
+  reductions, NumPy, JAX and Julia agree. Unlike NumPy and JAX, whose `+`
+  and `*` on two booleans are logical or and and, and `-` an error. The
+  reasons:
+  - Gen.jl models are Julia code.
+  - Code ported from GenMLX counts and gates with arithmetic on bernoulli
+    draws, which were 0/1 there. Under NumPy's rule a count would become a
+    logical or, silently.
+  - Julia's rule agrees with `sum`, where NumPy's `+` does not.
+
+  `(* true true)` is the integer 1 (Julia keeps a Bool), the same value
+  under one rule.
 - **Bodies run to completion:** lazy sequences in a body's return value are
   realized during the run, and a `trace` or `splice` after the run is a loud
   error. Before this, `(map … (trace …))` at the end of a body gave a trace

@@ -348,3 +348,49 @@ same bodies without the flag:
 Autodiff dominates the gradients and HMC; plain HMC still runs an update
 per leapfrog step, which the static runner does more slowly than the
 handler at N = 10 (its env maps).
+
+## MLX's CPU on the Thor against the Mac (2026-10-20, bean genclj-7fzy)
+
+The full battery on MLX's CPU took 9186 s on the Thor and 1419 s on the
+Mac in float32 at 7751b76 (6.5×), and the float64 soak ran 8.9× slower per
+property. Profiled on one combinator law (`combinators-identity-update-changes-nothing`,
+100 cases, float32) and a per-operation microbenchmark, each machine
+running one other test JVM:
+
+| | Mac M4 | Thor | Thor, pinned to 2 cores |
+|---|---|---|---|
+| The law, 100 cases | 0.95 s | 6.8–7.3 s | 3.2–4.0 s |
+| JVM: 1000 assocs on a small map | 37 µs | 78 µs | 81 µs |
+| JVM: thread ping-pong round trip | 4.0 µs | 17.1 µs | 4.0 µs |
+| MLX: one op, built (no evaluation) | 0.20 µs | 0.87 µs | 0.75 µs |
+| MLX: one op inside an evaluated graph | 1.3 µs | 8.1 µs | 4.8 µs |
+| MLX: one value read (evaluation round trip) | 12 µs | 26 µs | 18 µs |
+| MLX: sum(exp(v)), 10⁶ elements | 0.59 ms | 8.7 ms | 9.1 ms |
+| MLX: 256×256 matmul, read | 0.076 ms | 7.6 ms | 7.8 ms |
+
+- **Where the time goes:** 85–90% of the law's time is in MLX's
+  evaluation (JFR: `mlx_array_eval` under `to-host`), of graphs of tiny
+  ops; a case makes about 4000 of them, most from Threefry's random bits
+  (uint32 ops). The JVM's own work is under 3%.
+- **Hand-offs:** MLX 0.32's CPU encoder queues two tasks per op on the
+  stream's worker thread (a mutex and a condition variable): mid-run the
+  worker wakes 37,000 times a second. Linux puts each wake-up on another
+  idle core: unpinned, a JVM thread ping-pong takes 17 µs, pinned to two
+  cores 4 µs, as on the Mac. Pinning (`taskset -c 4,5`) halves the law's
+  time; background activity on other cores does the same. Not the
+  clocks (busy cores at 2601 MHz, MAXN) nor deep idle (cc7 rarely
+  entered).
+- **What remains, pinned (about 3.5×):** a Thor core is about half an M4
+  performance core (OpenSSL RSA-2048 and ECDSA P-256 signing: 2.1× and
+  1.9× on one core; the JVM's map churn 2.1×), and MLX's per-op cost on
+  Linux is higher still (3.7–3.8× per op, built or evaluated). All 14
+  cores beat the M4's 10 by about 15% on the same OpenSSL tests.
+- **Array work:** MLX's CPU SIMD is Accelerate's on macOS only (Linux
+  builds `base_simd` with one lane), and the mlx-cpu wheel bundles netlib's
+  reference BLAS and LAPACK: elementwise math 15× and matmul 100× slower
+  than the Mac's here. These tests do little of either.
+- **float64** is about 8× float32 on both machines, from gen.clj's exact
+  float64 erfinv (about 1900 ops per normal draw; genclj-tftl).
+- **Remedies, by bean:** fewer ops per scalar draw (Threefry on the host
+  for scalar keys, genclj-eof0), on every device; the erfinv route
+  (genclj-tftl). Pinning the JVM to two cores helps runs on the Thor.

@@ -828,7 +828,10 @@
               out (double-array n)]
           (case (dt/kind dtype)
             :float (System/arraycopy src 0 out 0 n)
-            :int (dotimes [i n] (aset out i (double (long (aget src i)))))
+            ;; as Java casts (DESIGN.md §9): a float saturates, an int wraps
+            :int (if (= :float (dt/kind (dtype-of x)))
+                   (dotimes [i n] (aset out i (double (dt/float->int (aget src i) dtype))))
+                   (dotimes [i n] (aset out i (double (dt/int->int (long (aget src i)) dtype)))))
             :bool (dotimes [i n] (aset out i (if (== (aget src i) 0.0) 0.0 1.0))))
           (make out (shape-of x) dtype))))
 
