@@ -3,7 +3,8 @@
    errors, closures, threads and memory. Skipped (with a note) where the
    native library or the compiled binding is missing."
   (:require [clojure.test :refer [deftest is testing]]
-            [gen.array :as array]))
+            [gen.array :as array]
+            [gen.array.memory :as reservations]))
 
 (def available?
   (delay
@@ -252,3 +253,91 @@
             ;; graphs, accurate to their approximations
             (is (every? true? (map #(< (Math/abs (- (double %1) (+ (* (/ 2.0 (Math/sqrt Math/PI)) (Math/exp (- (* %2 %2)))) %3))) 1e-9)
                                    g [0.1 0.5] minv-t-sums)))))))))
+
+;; ---------------------------------------------------------------------------
+;; The budget: past it an evaluation is a loud error, after a collection
+;; ---------------------------------------------------------------------------
+
+(def ^:private mb (* 1024 1024))
+
+(defn- big-array
+  "128 MB of float32 ones on backend b, unevaluated."
+  [b]
+  (array/with-backend b (array/ones [(* 32 mb)])))
+
+(defn- evaluation-error
+  "The ex-info an evaluation of x throws, or nil."
+  [x]
+  (try (array/eval! x) nil (catch clojure.lang.ExceptionInfo e e)))
+
+(defn- with-room*
+  "(f) with MLX's budget what MLX and the reservations hold now plus room
+   bytes (no headroom), restored after."
+  [room f]
+  (let [budget (requiring-resolve 'gen.backend.mlx/budget)
+        set-budget! (requiring-resolve 'gen.backend.mlx/set-budget!)
+        collect! (requiring-resolve 'gen.backend.mlx/collect!)
+        _ (collect!)
+        old (set-budget! {:bytes (+ (:active (budget)) (reservations/reserved) room) :headroom 0})]
+    (try (f)
+         (finally (set-budget! old)
+                  (collect!)))))
+
+(deftest an-evaluation-past-the-budget-is-loud
+  ;; with 64 MB of room, 4 KB fit and 128 MB do not
+  (when-mlx
+    (let [b (mlx)]
+      (with-room* (* 64 mb)
+        (fn []
+          (is (= 1024.0 (array/item (array/with-backend b (array/sum (array/ones [1024]))))))
+          (let [big (big-array b)
+                x (evaluation-error big)]
+            (is (= :mlx-budget-exceeded (:reason (ex-data x))) (pr-str x))
+            (is (< (:mlx (ex-data x)) (:active (ex-data x))) "with the numbers")))))))
+
+(deftest a-collection-comes-before-the-error
+  ;; a dead 128 MB array still holds its memory: the next evaluation finds
+  ;; MLX past its budget of 64 MB of room, collects, and goes on
+  (when-mlx
+    (let [b (mlx)
+          budget (requiring-resolve 'gen.backend.mlx/budget)
+          set-budget! (requiring-resolve 'gen.backend.mlx/set-budget!)]
+      (with-room* (* 64 mb)
+        (fn []
+          (let [tight (set-budget! {:bytes (+ (:bytes (budget)) (* 256 mb))})]
+            (array/eval! (big-array b))
+            (set-budget! tight)
+            (is (< (:mlx (budget)) (:active (budget))) "the dead array still holds its memory")
+            (is (= 1024.0 (array/item (array/with-backend b (array/sum (array/ones [1024])))))
+                "an evaluation collects it, and goes on")
+            (is (<= (:active (budget)) (:mlx (budget))))))))))
+
+(deftest reservations-shrink-the-budget
+  ;; what a native engine reserves is not MLX's: 192 MB reserved of 256 MB
+  ;; of room leave too little for 128 MB, until it is released
+  (when-mlx
+    (let [b (mlx)
+          budget (requiring-resolve 'gen.backend.mlx/budget)]
+      (with-room* (* 256 mb)
+        (fn []
+          (let [before (:mlx (budget))]
+            (reservations/reserve! ::engine (* 192 mb) "a test's engine")
+            (try
+              (is (= (- before (* 192 mb)) (:mlx (budget))))
+              (is (= :mlx-budget-exceeded (:reason (ex-data (evaluation-error (big-array b))))))
+              (finally (reservations/release! ::engine)))
+            (is (= before (:mlx (budget))))
+            (is (nil? (evaluation-error (big-array b))) "released, the same evaluation fits")))))))
+
+(deftest the-default-budget-leaves-room
+  ;; half the RAM, less a sixteenth of headroom, less any reservation, and
+  ;; what the suites hold stays inside it
+  (when-mlx
+    (let [{:keys [mlx bytes headroom reserved active]} ((requiring-resolve 'gen.backend.mlx/budget))
+          ram (.getTotalMemorySize ^com.sun.management.OperatingSystemMXBean
+                                   (java.lang.management.ManagementFactory/getOperatingSystemMXBean))]
+      (when-not (or (System/getProperty "gen.mlx.budget-bytes") (System/getProperty "gen.mlx.budget-headroom-bytes"))
+        (is (= (quot ram 2) bytes))
+        (is (= (quot ram 16) headroom)))
+      (is (= mlx (max 0 (- bytes reserved headroom))))
+      (is (< active mlx)))))

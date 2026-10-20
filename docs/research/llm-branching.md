@@ -348,16 +348,81 @@ Gemma's are. Forks and resampled children share their parent's array.
   so 255 at most for all live traces; resume regenerate from forks at a few
   sites, or re-prefill from the trace's tokens (deterministic for a given
   state). (3) The GC backstop lets traces own branches.
-- **genclj-zztc (shared memory budget).** `(:bytes (:model (info e)))` is the
-  weights' size. llama.h v0.7.0 reports no KV-cache size: compute it from
-  the model's dimensions (cells × layers × KV heads × head size × 2 × 2
-  bytes for f16, for plain attention), or read llama.cpp's info-level log
-  line `llama_kv_cache: size = … MiB (… cells, … layers, …)` (and its
-  per-buffer "KV buffer size" lines) through the log callback.
+- **genclj-zztc (shared memory budget):** built, below (The shared memory
+  budget).
 - **Not done here:** Linux CUDA and CPU builds (written, not run), MLX and
   llama.cpp in one test JVM (the spike showed it), the 8B and 30B models,
   and a fatal decode on Metal (only the CPU backend honours an abort, and
   no other deterministic way exists without a `GGML_ASSERT`).
+
+## The shared memory budget (genclj-zztc)
+
+*2026-10-21, branch m3-budget. The defaults and names marked
+**Recommendation** are the owner's to decide.*
+
+The spike (genclj-zztc) found that MLX's memory limit is no cap (MLX
+allocates past it without an error) and that with a 30B model mapped the
+machine's available memory fell to 9.5 GB at about 10 GB of MLX data, far
+below MLX's limit of half the RAM. gen.clj keeps a budget of its own:
+
+- **Reservations** (`gen.array.memory`): a registry of the memory native
+  engines hold beside the array backends (`reserve!`, `release!`,
+  `reserved`, `reservations-held`). Plain numbers, no native library, so an
+  engine reserves without loading MLX and MLX reads them without knowing
+  the engine.
+- **The budget** (`gen.backend.mlx`, in the membrane): MLX's active memory
+  may reach the budget shared with native engines, less their reservations
+  and a headroom. After every evaluation (`evaluating*`, which every
+  evaluation and host read goes through) the backend reads MLX's active
+  memory; past the budget it collects unreachable arrays (`collect!`) and
+  reads again; still past it, an ex-info (`:reason :mlx-budget-exceeded`)
+  with the active memory, the budget, the reservations and the headroom.
+  No evaluation moves into semantics code (CLAUDE.md rule 3). `budget`
+  reports it; `set-budget! {:bytes :headroom}` sets it.
+- **The engine's footprint** (`:footprint` in a llama.cpp engine's info):
+  its weights (the model's size, `llama_model_size`) and the other buffers
+  llama.cpp reported allocating, read from its info-level log while the
+  model loads and the context is made (`LlamaRuntime/startCapture`,
+  whatever `gen.llama.log` prints): the KV-cache, recurrent-state (RS),
+  output and compute buffers, to 0.01 MiB. The model buffers are listed
+  but not added: a mapped file's are views of one mapping (Metal's maps
+  the whole file, the CPU's the token embeddings again, 165 to 270 MB that
+  would count twice). The engine reserves its footprint when made and
+  releases it when closed (or collected). llama.h's
+  dimensions cannot give the KV cache's size in general: Qwen3's head size
+  is 128, explicit in its GGUF, not its width over its heads (64), and
+  sliding-window caches, recurrent state and compute buffers are not
+  dimensions at all; llama.cpp's own report is exact for every
+  architecture it loads, and the pinned version fixes its format (a
+  footprint without a model buffer is a loud error).
+- **Measured** (the M4, 2026-10-21): Qwen3-0.6B's KV cache is 112.0 MiB
+  at 1,024 cells, exactly 28 layers × 8 KV heads × (128 + 128) × 2 bytes
+  per cell (448 MiB at 4,096). The footprints, at 1,024 and 4,096 cells:
+  Qwen3-0.6B 1.25 and 1.61 GB, Qwen3.5-0.8B 1.67 and 1.72 GB (its
+  recurrent state 61 MB, constant), Gemma-3-270M 1.04 and 1.11 GB (two KV
+  caches, full-size window and global). The Metal compute buffer, which
+  holds a batch's logits (512 × the vocabulary × 4 bytes), is 0.32 to
+  0.55 GB of each: a large share for small models.
+- **Tests** (`gen.backend.mlx-test`, `gen.llm.llama-test`): an evaluation
+  past a small budget is the error, with the numbers; a dead array past
+  the budget is collected first, and the evaluation goes on; a reservation
+  shrinks the budget, and its release gives it back; the default leaves
+  room; an engine reserves exactly its footprint while open, the model
+  buffers read hold its weights, its KV cache doubles with the cells, and
+  with MLX in the same JVM an open engine shrinks MLX's budget by its
+  footprint. Each of six planted bugs fails them: the check left out, no
+  collection before the error, reservations ignored, the KV lines not
+  read, no release at close, the mapped model buffers added up.
+- **Recommendation (defaults):** the shared budget half the physical
+  memory (`gen.mlx.budget-bytes`), the headroom a sixteenth
+  (`gen.mlx.budget-headroom-bytes`): on this 32 GB Mac 16 GB shared, 14 GB
+  for MLX with no engine open; with the 30B-A3B model (17 GB of weights) on
+  the 64 GB MacBook, 32 − 4 − 17.5 = 10.5 GB for MLX, where the spike saw
+  trouble at about 10 GB. The shared budget's default equals MLX's memory
+  limit's (`gen.mlx.memory-bytes`, half the RAM).
+- **Recommendation (names):** the namespace `gen.array.memory` (L0, beside
+  the backends) and `budget` / `set-budget!` in `gen.backend.mlx`, next to
+  `memory`, `set-memory-limit!` and `collect!`.
 
 ## The review
 

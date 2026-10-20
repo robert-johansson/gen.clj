@@ -44,6 +44,7 @@
    CPU and CUDA builds have other kernels: measure their noise with the
    bench before trusting this band there."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
+            [gen.array.memory :as reservations]
             [gen.llm.branching :as br]
             [gen.llm.branching-contract :as contract :refer [reason]]
             [gen.llm.long-texts :as long-texts]
@@ -420,3 +421,49 @@
         (is (= 1 (:live (br/info e))) "only the untouched branch is left")
         (let [[b2] (br/advance [b] [t])]
           (is (same? b2) "and it is as it was"))))))
+
+;; ---------------------------------------------------------------------------
+;; The engine's footprint, reserved for the MLX backend's budget
+;; ---------------------------------------------------------------------------
+
+(defn- buffer-bytes
+  "The bytes of a footprint's buffers of a kind."
+  [footprint kind]
+  (reduce + 0 (map :bytes (filter #(= kind (:kind %)) (:buffers footprint)))))
+
+(deftest the-engine-reserves-its-footprint
+  ;; the weights and what else llama.cpp reported allocating, read from its
+  ;; log as the engine is made, are reserved while the engine is open; the
+  ;; model buffers read hold the weights, and the KV cache doubles with the
+  ;; cells (so the lines read are the ones meant)
+  (when-llama
+    (let [r0 (reservations/reserved)
+          [fp1 fp2] (mapv (fn [n-ctx]
+                            (with-open [e ((llama 'engine) {:model model-path :max-branches 2 :n-ctx n-ctx})]
+                              (let [{:keys [footprint model]} (br/info e)]
+                                (is (= (:bytes footprint) (- (reservations/reserved) r0)) "reserved while open")
+                                (is (<= (:bytes model) (buffer-bytes footprint :model)) "the model's buffers hold its weights")
+                                (is (= (:bytes footprint)
+                                       (+ (:bytes model) (reduce + (map #(buffer-bytes footprint %) [:kv :rs :output :compute]))))
+                                    "which count once, with the other buffers")
+                                footprint)))
+                          [1024 2048])]
+      (is (= r0 (reservations/reserved)) "released when closed")
+      (is (pos? (buffer-bytes fp1 :kv)))
+      (is (= (* 2 (buffer-bytes fp1 :kv)) (buffer-bytes fp2 :kv)) "the KV cache doubles with the cells")
+      (is (= (buffer-bytes fp1 :model) (buffer-bytes fp2 :model)))
+      (is (pos? (buffer-bytes fp1 :compute))))))
+
+(deftest an-engine-shrinks-the-mlx-budget
+  ;; with MLX in the same JVM (when its library is there), an open engine's
+  ;; footprint is not MLX's to use
+  (when-llama
+    (if-let [budget (try (requiring-resolve 'gen.backend.mlx/budget)
+                         (catch Throwable t
+                           (println "Skipping an-engine-shrinks-the-mlx-budget: no MLX (" (ex-message t) ")")
+                           nil))]
+      (let [before (:mlx (budget))]
+        (with-open [e ((llama 'engine) {:model model-path :max-branches 2 :n-ctx 1024})]
+          (is (= (- before (:bytes (:footprint (br/info e)))) (:mlx (budget)))))
+        (is (= before (:mlx (budget))) "and closed, gives it back"))
+      (is true))))
