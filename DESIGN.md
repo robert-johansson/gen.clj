@@ -716,11 +716,19 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   the trace as it is when each statement is evaluated, a kernel statement
   applies its kernel and continues with the result, and the reversal runs
   the statements reversed (loops backwards, each kernel's reversal). The
-  thesis's invariant (pp. 100–101) is checked dynamically after every
-  application: the loop collections, conditions and let values read again
-  from the final trace must be those the run read, or it is a loud error
-  (the reversal would undo another kernel). Values compare on the host
-  (kernels run at the inference loop's boundary).
+  thesis's invariant (pp. 100–101) is checked per construct, as Gen.jl
+  checks it: after the body of each loop, branch and let, what the
+  construct read (its collections, its condition, its values) is read again
+  and must be unchanged, or it is a loud error (the reversal would not undo
+  the kernel), and the reversal checks its constructs the same way. A later
+  statement may change what an earlier construct read: the p. 102 kernel's
+  structure move changes the `:degree` its first loop read. Prop. 3.4.1
+  asks only that each construct's own body keep it (the reversal's argument
+  is at `trace-kernel`). Gen.jl checks only with `check=true`; gen.clj
+  always checks. Values compare on the host (kernels run at the inference
+  loop's boundary). (Corrected after the confirmation read of the M4 tests,
+  C1: the first check compared every construct with the final trace, which
+  rejected the p. 102 kernel in its own order.)
 - **Trace kernels, GenTraceKernelDSL** (M4, 2026-10-20): no new macro. A
   kernel is a `gen` function whose first argument is the model trace and
   whose return value is `[update backward]`; its choices are the auxiliary
