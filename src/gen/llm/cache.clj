@@ -430,8 +430,9 @@
 
 (defn info
   "Sizes and counts: :live branches, :cells, :tokens in the trie, the
-   bounds, and since the cache was made: :requests (contexts asked for),
-   :hits (answered with no read), :reads (engine reads: opens, extends,
+   bounds (:limit, the most tokens a context or a scored sequence holds),
+   and since the cache was made: :requests (contexts asked for), :hits
+   (answered with no read), :reads (engine reads: opens, extends,
    advances), :read-tokens, :forks, :evictions."
   [c]
   (let [s (state c)]
@@ -441,6 +442,7 @@
            :tokens (trie/size (:trie s))
            :max-branches (:max-branches c)
            :max-cells (:max-cells c)
+           :limit (:limit c)
            :closed? (:closed? s))))
 
 (defn close!
