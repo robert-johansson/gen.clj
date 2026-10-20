@@ -145,46 +145,44 @@
 (defn- atomic? [x]
   (or (nil? x) (keyword? x) (symbol? x) (string? x) (array/host? x) (char? x) (class? x) (var? x)))
 
-(declare same-entries?)
+(declare same-value?)
+
+(defn- same-seq?
+  "Are seqs xs and ys of one length and the same values pairwise, in order?"
+  [xs ys budget]
+  (loop [xs (seq xs) ys (seq ys)]
+    (cond (nil? xs) (nil? ys)
+          (nil? ys) false
+          (same-value? (first xs) (first ys) budget) (recur (next xs) (next ys))
+          :else false)))
 
 (defn same-value?
   "Are a and b the same value, judged without reading an array (a host read
-   inside a run)? Identical values are; so are equal host values (numbers,
-   booleans, keywords, strings, nil); generative functions that compute the
-   same (same-gen-fn?); fns of one class over the same closed-over values (a
-   fn built again from the same expression and locals); and maps, sets,
-   vectors and lists of the same values. An array is the same only as
-   itself, and so is anything else. A comparison looks at up to 256 values
-   before it calls the rest different, which is sound: a value called
-   different only makes what holds it run again."
-  ([a b] (same-value? a b (long-array 1 same-limit)))
+   inside a run) and as code holding them could tell (review 6, R6-1)? They
+   must be of one class. Then: atomic values (numbers, booleans, keywords,
+   strings, nil) by .equals, which tells -0.0 from 0.0 and takes NaN for
+   NaN; generative functions by their kind's rule (same-gen-fn?); fns by
+   their closed-over values (a fn built again from the same expression and
+   locals); maps, sets, vectors and lists by their metadata and their
+   elements pairwise in iteration order (an array-map's order, a sorted
+   collection's, a vector against a list all count), never by hashing. An
+   array is the same only as itself, and so is anything else. A comparison
+   looks at up to 256 values before it calls the rest different, which is
+   sound: a value called different only makes what holds it run again."
+  ([a b] (or (identical? a b) (same-value? a b (long-array 1 same-limit))))
   ([a b ^longs budget]
    (cond
      (identical? a b) true
      (neg? (aset budget 0 (dec (aget budget 0)))) false
-     (atomic? a) (and (atomic? b) (= a b))
+     (not (identical? (class a) (class b))) false
+     (atomic? a) (.equals ^Object a b)
      (array/array? a) false
-     (instance? gen.gfi.IGenerativeFunction a) (and (identical? (class a) (class b)) (-same-gen-fn? a b budget))
-     (fn? a) (and (identical? (class a) (class b))
-                  (every? (fn [^java.lang.reflect.Field f]
-                            (let [x (.get f a) y (.get f b)]
-                              (if (.isPrimitive (.getType f)) (= x y) (same-value? x y budget))))
-                          (.get closure-fields (class a))))
-     (map? a) (and (map? b) (if (record? a) (identical? (class a) (class b)) (not (record? b)))
-                   (same-entries? a b budget))
-     (set? a) (and (set? b) (== (count a) (count b)) (every? #(and (atomic? %) (contains? b %)) a))
-     (and (sequential? a) (counted? a)) (and (sequential? b) (counted? b) (== (count a) (count b))
-                                             (loop [xs (seq a) ys (seq b)]
-                                               (cond (nil? xs) true
-                                                     (same-value? (first xs) (first ys) budget) (recur (next xs) (next ys))
-                                                     :else false)))
+     (instance? gen.gfi.IGenerativeFunction a) (-same-gen-fn? a b budget)
+     (fn? a) (every? (fn [^java.lang.reflect.Field f] (same-value? (.get f a) (.get f b) budget))
+                     (.get closure-fields (class a)))
+     (or (map? a) (set? a) (and (sequential? a) (counted? a)))
+     (and (== (count a) (count b)) (same-value? (meta a) (meta b) budget) (same-seq? a b budget))
      :else false)))
-
-(defn- same-entries? [a b budget]
-  (and (== (count a) (count b))
-       (reduce-kv (fn [_ k v] (let [w (get b k ::missing)]
-                                (if (and (not (identical? w ::missing)) (same-value? v w budget)) true (reduced false))))
-                  true a)))
 
 (defn same-gen-fn?
   "Do generative functions a and b compute the same: identical, or of one
@@ -206,33 +204,52 @@
       (if (cm/empty? sub) (cm/remove-submap choices (first p)) (cm/set-submap choices (first p) sub)))))
 
 (def ^:dynamic ^:no-doc *revising*
-  "True while generate-again's generate runs: each call's generate in it
-   (gen.dynamic/run-call) drops the old choices its callee leaves unvisited
-   (generate-dropping), so a structure change costs every call one more
-   run of its own, not the whole revise one per call. Public operations run
-   without it (outside-revise): a caller's own constraints stay checked."
-  false)
+  "While generate-again's generate runs, {:constraints :prefix}: the
+   revise's constraints, and the path of the call running now (a call
+   extends it, gen.dynamic/run-call). Each call's generate in it drops the
+   old choices its callee leaves unvisited (generate-dropping), never a
+   constraint (review 6, R6-3), so a structure change costs every call one
+   more run of its own, not the whole revise one per call. nil otherwise.
+   Public operations run without it (outside-revise): a caller's own
+   constraints stay checked."
+  nil)
 
 (defmacro ^:no-doc outside-revise
   "body, a public operation: out of reach of a revise in progress."
   [& body]
-  `(if *revising* (binding [*revising* false] ~@body) (do ~@body)))
+  `(if *revising* (binding [*revising* nil] ~@body) (do ~@body)))
 
 (defn ^:no-doc generate-dropping
-  "(generate sigma)'s result and the sigma it ran with: sigma less the
-   paths of every unvisited error that sigma holds, each error's paths
-   dropped at once and generate run again. Any other error is raised."
-  [generate sigma]
+  "(generate sigma)'s result and the sigma it ran with, in a revise
+   (*revising*) at the call at path prefix: sigma less the paths of every
+   unvisited error that sigma holds as old choices (not under the revise's
+   constraints), each error's paths dropped at once and generate run again.
+   Any other error is raised."
+  [generate sigma prefix]
+  (let [constraints (:constraints *revising*)
+        old? (fn [p] (and (not (cm/empty? (cm/get-submap sigma p)))
+                          (cm/empty? (cm/get-submap constraints (into prefix p)))))]
+    (loop [sigma sigma]
+      (let [r (try (generate sigma)
+                   (catch clojure.lang.ExceptionInfo e
+                     (let [{flagged :unvisited paths :paths} (ex-data e)]
+                       (if (and flagged (seq paths) (every? old? paths)) {::drop paths} (throw e)))))]
+        (if-let [paths (::drop r)]
+          (recur (reduce without sigma paths))
+          [r sigma])))))
+
+(defn ^:no-doc rerun-without-drops
+  "In a revise: (attempt sigma), whose calls drop the old choices they
+   leave, run again with sigma less every old choice its trace lacks, until
+   it lacks none: [result sigma]. For code that reads its constraints
+   before its model runs (a proposal override's q), which then sees the
+   final ones (review 6, R6-4)."
+  [attempt sigma]
   (loop [sigma sigma]
-    (let [r (try (generate sigma)
-                 (catch clojure.lang.ExceptionInfo e
-                   (let [{flagged :unvisited paths :paths} (ex-data e)]
-                     (if (and flagged (seq paths) (every? #(not (cm/empty? (cm/get-submap sigma %))) paths))
-                       {::drop paths}
-                       (throw e)))))]
-      (if-let [paths (::drop r)]
-        (recur (reduce without sigma paths))
-        [r sigma]))))
+    (let [r (attempt sigma)
+          new (:choices (:trace r))
+          dropped (remove #(cm/has-value? (cm/get-submap new %)) (cm/addresses sigma))]
+      (if (seq dropped) (recur (reduce without sigma dropped)) [r sigma]))))
 
 (defn- survivors
   "The paths of old (choices) that the new choices still hold, less those
@@ -247,7 +264,8 @@
    the constraints) or regenerate's (the unselected ones). An old choice
    the new run leaves unvisited is dropped where it is left, at the call
    (*revising*, generate-dropping), and generate runs that call again; a
-   constraint so left is an unvisited error, as in the update's own run.
+   constraint so left is an unvisited error, as in the update's own run,
+   and is never dropped.
    update's weight is generate's less prev's score, its discard every old
    choice that does not survive unchanged; regenerate's weight is
    generate's less prev's projection on the old choices it kept (Eq. 4.1,
@@ -258,7 +276,8 @@
   (let [constraints (or constraints cm/EMPTY)
         old (:choices prev)
         sigma (if (= op :update) (cm/override old constraints) (sel/get-selected old (sel/complement selection)))
-        [{t :trace w :weight}] (binding [*revising* true] (generate-dropping #(-generate gf args % key) sigma))
+        [{t :trace w :weight}] (binding [*revising* {:constraints constraints :prefix []}]
+                                 (generate-dropping #(-generate gf args % key) sigma []))
         new (:choices t)]
     (when-let [missed (seq (remove #(cm/has-value? (cm/get-submap new %)) (cm/addresses constraints)))]
       (throw (unvisited op missed)))
@@ -278,7 +297,7 @@
 
 (extend-protocol IRevisable
   Object
-  (-same-gen-fn? [gf other budget] (and (record? gf) (same-entries? gf other budget)))
+  (-same-gen-fn? [gf other budget] (and (record? gf) (same-seq? gf other budget)))
   (-revise [gf op args opts project-old] (generate-again gf op args opts project-old)))
 
 (defn project-by-maker

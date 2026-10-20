@@ -264,7 +264,8 @@
    could see it. (A gf that does not compute as prev's maker is
    gfi/run-op's to revise.) In a revise's generate (gfi/*revising*), a
    generate drops the old choices its callee leaves unvisited
-   (gfi/generate-dropping). An unvisited-constraint error from the callee
+   (gfi/generate-dropping), never the revise's constraints: the call's path
+   extends the revise's prefix. An unvisited-constraint error from the callee
    is raised with its paths under :at (gfi/under)."
   [gf op args opts]
   (let [prev (:prev opts)
@@ -272,8 +273,10 @@
                  (and prev (not (gfi/same-value? *params* (::site-store prev))))
                  (gfi/revise gf op args opts project-under-its-store)
                  (and gfi/*revising* (= op :generate))
-                 (first (gfi/generate-dropping #(gfi/run-op gf op args (assoc opts :constraints %))
-                                               (or (:constraints opts) cm/EMPTY)))
+                 (let [prefix (into (:prefix gfi/*revising*) (:at opts))]
+                   (binding [gfi/*revising* (assoc gfi/*revising* :prefix prefix)]
+                     (first (gfi/generate-dropping #(gfi/run-op gf op args (assoc opts :constraints %))
+                                                   (or (:constraints opts) cm/EMPTY) prefix))))
                  :else (gfi/run-op gf op args opts))
                (catch clojure.lang.ExceptionInfo e (throw (gfi/under e (:at opts)))))
         t (:trace r)]
@@ -300,7 +303,8 @@
         [k state] (site-key state)
         opts (assoc base :key k :at p)]
     (if (= mode :assess)
-      (let [{w :weight rv :retval} (gfi/run-op gf :assess args (assoc opts :constraints cons))]
+      (let [{w :weight rv :retval} (try (gfi/run-op gf :assess args (assoc opts :constraints cons))
+                                        (catch clojure.lang.ExceptionInfo e (throw (gfi/under e p))))]
         [rv (cond-> (-> state (update :score + w) (add-weight w))
               (not (cm/empty? cons)) (update :choices cm/set-choice p cons))])
       (let [r (cond
@@ -709,14 +713,17 @@
 (defn ^:no-doc static-call
   "[weight retval] of a static body's splice at path p: the callee's assess
    on args with sub, under key k (nil under an exact-density operation,
-   where no draw may happen), with the handler's checks."
+   where no draw may happen), with the handler's checks (an unvisited
+   choice named under p)."
   [p g args sub k]
   (when-not (gfi/generative-function? g)
     (throw (ex-info (str "splice at " p " needs a generative function") {:path p :value g})))
   (let [args (realize! (vec args))]
-    (if (static-scored? g)
-      (static-score g args sub k)
-      (let [r (gfi/run-op g :assess args {:key (or k (rng/key 0)) :constraints sub})] [(:weight r) (:retval r)]))))
+    (try
+      (if (static-scored? g)
+        (static-score g args sub k)
+        (let [r (gfi/run-op g :assess args {:key (or k (rng/key 0)) :constraints sub})] [(:weight r) (:retval r)]))
+      (catch clojure.lang.ExceptionInfo e (throw (gfi/under e p))))))
 
 (defn- check-static-choices!
   "Every choice must sit at a node's address, as assess checks: the top

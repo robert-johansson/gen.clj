@@ -78,7 +78,9 @@
 ;; the combinator's (nil for a Switch's branch).
 (defn- simulate-at [gf args key] (:trace (dyn/run-call gf :simulate args {:key key})))
 (defn- generate-at [gf args cs key at] (dyn/run-call gf :generate args {:constraints cs :key key :at at}))
-(defn- assess-at [gf args choices key] (gfi/-assess gf args choices key))
+(defn- assess-at [gf args choices key at]
+  (try (gfi/-assess gf args choices key)
+       (catch clojure.lang.ExceptionInfo e (throw (gfi/under e at)))))
 (defn- update-at [gf old args argdiffs cs key at]
   (dyn/run-call gf :update args {:prev old :argdiffs argdiffs :constraints cs :key key :at at}))
 (defn- regenerate-at [gf old args argdiffs s key at]
@@ -270,7 +272,7 @@
         n (map-length args)]
     (indices :assess choices n)
     (reduce (fn [{:keys [weight retval]} i]
-              (let [r (assess-at (:kernel gf) (element-args args i) (cm/get-submap choices i) (element-key key i))]
+              (let [r (assess-at (:kernel gf) (element-args args i) (cm/get-submap choices i) (element-key key i) [i])]
                 {:weight (+ weight (:weight r)) :retval (conj retval (:retval r))}))
             {:weight 0.0 :retval []}
             (range n))))
@@ -379,7 +381,7 @@
   ;; weight starts boxed: it accumulates arrays on array backends
   (loop [t 0 state init weight (Double/valueOf 0.0) retval []]
     (if (< t n)
-      (let [r (assess-at (:kernel gf) (step-args t state params) (cm/get-submap choices t) (element-key key t))]
+      (let [r (assess-at (:kernel gf) (step-args t state params) (cm/get-submap choices t) (element-key key t) [t])]
         (recur (inc t) (:retval r) (+ weight (:weight r)) (conj retval (:retval r))))
       {:weight weight :retval retval}))))
 
@@ -627,7 +629,7 @@
         [ps weight] (loop [todo (sorted-map 0 input) ps {} weight (Double/valueOf 0.0)]
                       (if-let [[node in] (first todo)]
                         (let [r (assess-at production [in] (cm/get-submap choices [node :production])
-                                           (node-key key node :production))
+                                           (node-key key node :production) [node :production])
                               out (production-output gf node r)]
                           (recur (into (dissoc todo node)
                                        (map-indexed (fn [j c] [(child-of max-branch node j) c]) (:children out)))
@@ -640,7 +642,7 @@
                               (let [{v :value children :children} (ps node)
                                     ws (mapv #(as (child-of max-branch node %)) (range (count children)))
                                     r (assess-at aggregation [v ws] (cm/get-submap choices [node :aggregation])
-                                                 (node-key key node :aggregation))]
+                                                 (node-key key node :aggregation) [node :aggregation])]
                                 [(assoc as node (:retval r)) (+ weight (:weight r))]))
                             [{} weight] (sort > (keys ps)))]
     {:weight weight :retval (as 0)}))

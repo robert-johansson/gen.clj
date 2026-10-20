@@ -67,6 +67,16 @@
 
 (set! *warn-on-reflection* true)
 
+(defn- user-call
+  "(f & args), one of the user's functions (:apply, :update-with-state,
+   :estimate, :simulate, :retval): a constraint left unvisited in there is
+   its own error, neither one of this function's choices (which gfi/revise
+   could drop) nor one to name under the call's address."
+  [f & args]
+  (try (apply f args)
+       (catch clojure.lang.ExceptionInfo e
+         (throw (if (:unvisited (ex-data e)) (ex-info (ex-message e) (dissoc (ex-data e) :unvisited) e) e)))))
+
 (defn- no-choices! [op choices]
   (when-not (cm/empty? choices)
     (throw (gfi/unvisited op (vec (cm/addresses choices)) "a deterministic generative function makes no choices"))))
@@ -110,7 +120,7 @@
   (let [args (vec args)
         gradient (:gradient gf)
         plain (if gradient (mapv detached args) args)
-        [retval state] ((:apply-with-state gf) plain)
+        [retval state] (user-call (:apply-with-state gf) plain)
         retval (if gradient (with-gradient retval state args plain gradient) retval)]
     (trace/make-trace {:gen-fn gf :args args :choices cm/EMPTY :retval retval :score 0.0 ::state state})))
 
@@ -122,7 +132,7 @@
   (let [args (vec args)]
     (if (and (every? diff/no-change? argdiffs) (= (count args) (count (:args tr))))
       [tr diff/no-change]
-      (let [[state retval retdiff] ((:update-with-state gf) (::state tr) args (vec argdiffs))]
+      (let [[state retval retdiff] (user-call (:update-with-state gf) (::state tr) args (vec argdiffs))]
         [(assoc tr :args args :retval retval ::state state) retdiff]))))
 
 (defrecord DeterministicGF [apply-with-state update-with-state gradient]
@@ -191,7 +201,7 @@
 
 (defn- estimated-trace [gf args choices log-estimate omega]
   (trace/make-trace {:gen-fn gf :args (vec args) :choices choices :score log-estimate
-                     :retval ((:retval gf) args choices) ::trace/omega omega}))
+                     :retval (user-call (:retval gf) args choices) ::trace/omega omega}))
 
 (defn- check-unbatched!
   "An estimate in a batched run raises the fallback: a particle's ω must
@@ -212,28 +222,19 @@
                            ", given " (vec (sort-by str given)))
                       {:op op :addresses (:addresses gf) :given given})))))
 
-(defn- estimator
-  "(f & args), the user's :estimate or :simulate: a constraint left
-   unvisited in there is its own error, not one of the estimated
-   function's choices (which gfi/revise could drop)."
-  [f & args]
-  (try (apply f args)
-       (catch clojure.lang.ExceptionInfo e
-         (throw (if (:unvisited (ex-data e)) (ex-info (ex-message e) (dissoc (ex-data e) :unvisited) e) e)))))
-
 (defn- estimate-at
   "The trace of gf on args with choices, ω drawn from key."
   [gf op args choices key]
   (gfi/check-exact-density! "an estimated density")
   (check-unbatched!)
   (check-addresses! gf op choices)
-  (estimated-trace gf args choices (estimator (:estimate gf) (vec args) choices key) key))
+  (estimated-trace gf args choices (user-call (:estimate gf) (vec args) choices key) key))
 
 (defn- simulated [gf args key]
   (gfi/check-exact-density! "an estimated density")
   (check-unbatched!)
   (if-let [simulate (:simulate gf)]
-    (let [{:keys [choices log-estimate] :as r} (estimator simulate (vec args) key)]
+    (let [{:keys [choices log-estimate] :as r} (user-call simulate (vec args) key)]
       (when-not (and (cm/choicemap? choices) (some? log-estimate))
         (throw (ex-info "estimated: :simulate returns {:choices (a choice map) :log-estimate}"
                         {:returned (keys r)})))

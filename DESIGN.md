@@ -349,7 +349,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   (one namespace per model, like Pyro's store). A missing parameter is a loud
   error. **What an update or regenerate may keep of a trace is decided in
   two places, for every kind of generative function** (revised 2026-10-20
-  after review 5; reviews 3 and 4 had found one kind after another that
+  after reviews 5 and 6; reviews 3 and 4 had found one kind after another that
   kept a stale call while each kind checked for itself: Map, Unfold,
   Recurse, estimated densities, the proposal overrides, a deterministic
   callee picked by a choice). No argument shows a store or a function, so
@@ -359,14 +359,21 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     trace of its model is the wrapper's, `trace/as-made-by`). `gfi/run-op`,
     the dispatch of every nested call and of `gfi/update`,
     `gfi/regenerate` and gen.batched, revises (`gfi/revise`) a trace whose
-    maker the generative function does not compute as. That is
+    maker the generative function does not compute as. Particles given
+    another gen-fn are revised per particle as when batched (their
+    per-particle traces are rebuilt by their maker and given the new
+    gen-fn). That is
     `gfi/same-gen-fn?`: identical, or of one class and the same by its
     kind's rule (`gfi/IRevisable`). A record's fields must be the same
-    values (`gfi/same-value?`: host values and collections by value, fns
-    by class and closed-over values, generative functions recursively,
-    arrays by identity, never reading one, at most 256 values a
-    comparison). A DynamicGF compares its body fn, store, middleware and
-    dispatcher. So a Switch, a closure or a combinator a body builds again
+    values (`gfi/same-value?`), as code holding them could tell (review
+    6). Values must be of one class. Scalars compare by `.equals`, which
+    tells −0.0 from 0.0. Maps, sets and sequential collections compare by
+    metadata and element by element in iteration order, so an array-map's
+    order or a vector against a list counts, and nothing is hashed. Fns
+    compare by their closed-over values, and generative functions
+    recursively. Arrays compare by identity, never read, and a comparison
+    looks at most 256 values. A DynamicGF compares its body fn, store,
+    middleware and dispatcher. So a Switch, a closure or a combinator a body builds again
     is the same one, and its calls stay incremental. (On MLX a computed
     scalar is an array, so a closure over one is another gen-fn on every
     run there: still correct, but its calls run again.)
@@ -385,21 +392,25 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     choice that did not survive unchanged. Regenerate's weight is
     generate's less the old trace's projection on the old choices it kept
     (Eq. 4.1). An old choice the new run leaves unvisited is dropped where
-    it is left: each call in the revise's generate (`gfi/*revising*`) runs
-    its callee once more without it. A structure change thus costs each
-    call one more run (2n kernel runs for an n-element Map, not n²/2). A
-    dropped choice cancels against the reverse move in regenerate. A
-    constraint the new run leaves is the usual unvisited error, and
-    public operations run outside the revise (`gfi/outside-revise`), so a
+    it is left. Each call in the revise's generate runs its callee once
+    more without it: `gfi/*revising*` carries the revise's constraints and
+    the call's path, so only old choices are dropped, never a constraint.
+    A structure change thus costs each call one more run: 2n kernel runs
+    for an n-element Map, not n²/2. A proposal override reruns once more,
+    without the drops, so that its proposal sees the final constraints
+    (3n). A dropped choice cancels against the reverse move in regenerate.
+    A constraint the new run leaves is the usual unvisited error. Public
+    operations run outside the revise (`gfi/outside-revise`), so a
     constraint user code gives stays checked. The retdiff is
     unknown-change, and ω is drawn afresh in every kind: a changed store
     or gen-fn is a change of what the function depends on, though no hint
     shows it.
   - **Unvisited constraints** are one error kind (`gfi/unvisited`:
     `:unvisited`, `:paths`), raised by every kind and named under each
-    call's address on the way up (`gfi/under`). An estimator's or other
-    user function's own unvisited error is not one of the function's
-    choices, so a revise does not drop it.
+    call's address on the way up (`gfi/under`), in assess too. A user
+    function's own unvisited error (any of gen.custom's functions) is
+    neither one of the function's choices nor named under its call, so a
+    revise does not drop it.
   - **Local checks** remain where no call shows the change: the static
     walk's skip, for a node reading `(param :w)`, which has no inputs.
     `with-params` and `with-transitions` take only dynamic generative

@@ -265,12 +265,17 @@
    other than the enumerated ones, then the enumerated ones from their exact
    conditional. The weight, log p(τ) - log q(τ ∖ σ | σ), is
    logsumexp(s) - logsumexp(r) (enumerated); it does not depend on the
-   enumerated values drawn."
+   enumerated values drawn. In a revise, the forward run's calls drop the
+   old choices they leave, and it repeats without them
+   (gfi/rerun-without-drops); the enumeration then runs on the final
+   constraints, outside the revise."
   [{:keys [gf paths limit check-retval?] :as egf} args sigma key]
   (let [[k-forward k-pick k-final] (rng/split key 3)
-        seen (volatile! {})
+        forward (fn [sigma] (let [seen (volatile! {})]
+                              {:trace (:trace (gfi/-generate (watching gf (set paths) seen) args sigma k-forward))
+                               :seen seen}))
+        [{t0 :trace seen :seen} sigma] (if gfi/*revising* (gfi/rerun-without-drops forward sigma) [(forward sigma) sigma])
         g (watching gf (set paths) seen)
-        t0 (:trace (gfi/generate g args sigma k-forward))
         free (free-paths paths sigma)
         _ (check-visited! free seen (:choices t0))
         others (others-of (:choices t0) sigma free)

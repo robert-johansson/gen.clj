@@ -53,7 +53,8 @@
             [gen.array.batch :as batch]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
-            [gen.random :as rng]))
+            [gen.random :as rng]
+            [gen.trace :as trace]))
 
 (set! *warn-on-reflection* true)
 
@@ -170,12 +171,17 @@
 
 (defn traces
   "The n scalar traces, each rebuilt exactly from its particle's choices
-   (after check)."
+   (after check) by the generative function that made them, and given the
+   particles' :gen-fn: particles given another gen-fn, (assoc ps :gen-fn g),
+   hold traces given g, which an update or regenerate revises (gfi/revise),
+   per particle as when batched (review 6, R6-2)."
   [ps]
-  (if-let [t (:trace (check ps))]
-    (mapv #(:trace (gfi/generate (:gen-fn ps) (:args ps) % (rng/key 0)))
-          (cm/unstack (plain-choices (:choices t) (:n ps)) (:n ps)))
-    (:traces ps)))
+  (let [gf (:gen-fn ps)
+        given (fn [t] (if (identical? (:gen-fn t) gf) t (assoc t :gen-fn gf)))]
+    (if-let [t (:trace (check ps))]
+      (mapv #(given (:trace (gfi/generate (trace/maker t) (:args ps) % (rng/key 0))))
+            (cm/unstack (plain-choices (:choices t) (:n ps)) (:n ps)))
+      (mapv given (:traces ps)))))
 
 (defn- unbatched [ps] (if (batched? ps) (per-particle ps (traces ps)) ps))
 
