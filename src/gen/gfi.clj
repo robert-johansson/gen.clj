@@ -156,6 +156,21 @@
           (same-value? (first xs) (first ys) budget) (recur (next xs) (next ys))
           :else false)))
 
+(defn- same-entries?
+  "Are maps a and b of one length and the same keys and values pairwise, in
+   iteration order? An entry is no value of its own: an identical key or
+   value costs one identical? test and no budget (review 7, R7-2)."
+  [a b budget]
+  (let [^java.util.Iterator xs (.iterator ^Iterable a)
+        ^java.util.Iterator ys (.iterator ^Iterable b)]
+    (loop []
+      (if (.hasNext xs)
+        (and (.hasNext ys)
+             (let [^java.util.Map$Entry x (.next xs) ^java.util.Map$Entry y (.next ys)]
+               (and (same-value? (.getKey x) (.getKey y) budget) (same-value? (.getValue x) (.getValue y) budget)
+                    (recur))))
+        (not (.hasNext ys))))))
+
 (defn same-value?
   "Are a and b the same value, judged without reading an array (a host read
    inside a run) and as code holding them could tell (review 6, R6-1)? They
@@ -165,10 +180,11 @@
    their closed-over values (a fn built again from the same expression and
    locals); maps, sets, vectors and lists by their metadata and their
    elements pairwise in iteration order (an array-map's order, a sorted
-   collection's, a vector against a list all count), never by hashing. An
-   array is the same only as itself, and so is anything else. A comparison
-   looks at up to 256 values before it calls the rest different, which is
-   sound: a value called different only makes what holds it run again."
+   collection's and its comparator, a vector against a list all count), a
+   map's entries by key and value, never by hashing. An array is the same
+   only as itself, and so is anything else. A comparison looks at up to 256
+   values before it calls the rest different, which is sound: a value
+   called different only makes what holds it run again."
   ([a b] (or (identical? a b) (same-value? a b (long-array 1 same-limit))))
   ([a b ^longs budget]
    (cond
@@ -181,7 +197,12 @@
      (fn? a) (every? (fn [^java.lang.reflect.Field f] (same-value? (.get f a) (.get f b) budget))
                      (.get closure-fields (class a)))
      (or (map? a) (set? a) (and (sequential? a) (counted? a)))
-     (and (== (count a) (count b)) (same-value? (meta a) (meta b) budget) (same-seq? a b budget))
+     (and (== (count a) (count b)) (same-value? (meta a) (meta b) budget)
+          ;; the comparator decides where conj puts a value: (sorted-set-by
+          ;; < 5) is not (sorted-set-by > 5) (review 7, R7-6)
+          (or (not (instance? clojure.lang.Sorted a))
+              (same-value? (.comparator ^clojure.lang.Sorted a) (.comparator ^clojure.lang.Sorted b) budget))
+          (if (map? a) (same-entries? a b budget) (same-seq? a b budget)))
      :else false)))
 
 (defn same-gen-fn?
@@ -205,13 +226,13 @@
 
 (def ^:dynamic ^:no-doc *revising*
   "While generate-again's generate runs, {:constraints :prefix}: the
-   revise's constraints, and the path of the call running now (a call
-   extends it, gen.dynamic/run-call). Each call's generate in it drops the
-   old choices its callee leaves unvisited (generate-dropping), never a
-   constraint (review 6, R6-3), so a structure change costs every call one
-   more run of its own, not the whole revise one per call. nil otherwise.
-   Public operations run without it (outside-revise): a caller's own
-   constraints stay checked."
+   revise's constraints, with any a run adds (constraining), and the path
+   of the call running now (a call extends it, gen.dynamic/run-call). Each
+   call's generate in it drops the old choices its callee leaves unvisited
+   (generate-dropping), never a constraint (review 6, R6-3), so a structure
+   change costs every call one more run of its own, not the whole revise
+   one per call. nil otherwise. Public operations run without it
+   (outside-revise): a caller's own constraints stay checked."
   nil)
 
 (defmacro ^:no-doc outside-revise
@@ -219,18 +240,31 @@
   [& body]
   `(if *revising* (binding [*revising* nil] ~@body) (do ~@body)))
 
+(defn ^:no-doc constraining
+  "(f), a run of the call running now that takes choices (at its own
+   addresses) as constraints too, such as a proposal's: in a revise they
+   are constraints of the revise, never dropped, so one the run leaves is
+   the unvisited error, as outside a revise (review 7, R7-1)."
+  [choices f]
+  (if (and *revising* (not (cm/empty? choices)))
+    (let [{:keys [constraints prefix]} *revising*
+          at-prefix (if (seq prefix) (cm/set-choice cm/EMPTY prefix choices) choices)]
+      (binding [*revising* (assoc *revising* :constraints (cm/override constraints at-prefix))] (f)))
+    (f)))
+
 (defn ^:no-doc generate-dropping
   "(generate sigma)'s result and the sigma it ran with, in a revise
    (*revising*) at the call at path prefix: sigma less the paths of every
    unvisited error that sigma holds as old choices (not under the revise's
    constraints), each error's paths dropped at once and generate run again.
-   Any other error is raised."
+   Any other error is raised. Each round drops paths the sigma of that
+   round holds, so it ends: a path raised again once dropped is raised."
   [generate sigma prefix]
-  (let [constraints (:constraints *revising*)
-        old? (fn [p] (and (not (cm/empty? (cm/get-submap sigma p)))
-                          (cm/empty? (cm/get-submap constraints (into prefix p)))))]
+  (let [constraints (:constraints *revising*)]
     (loop [sigma sigma]
-      (let [r (try (generate sigma)
+      (let [old? (fn [p] (and (not (cm/empty? (cm/get-submap sigma p)))
+                              (cm/empty? (cm/get-submap constraints (into prefix p)))))
+            r (try (generate sigma)
                    (catch clojure.lang.ExceptionInfo e
                      (let [{flagged :unvisited paths :paths} (ex-data e)]
                        (if (and flagged (seq paths) (every? old? paths)) {::drop paths} (throw e)))))]
@@ -297,7 +331,7 @@
 
 (extend-protocol IRevisable
   Object
-  (-same-gen-fn? [gf other budget] (and (record? gf) (same-seq? gf other budget)))
+  (-same-gen-fn? [gf other budget] (and (record? gf) (same-entries? gf other budget)))
   (-revise [gf op args opts project-old] (generate-again gf op args opts project-old)))
 
 (defn project-by-maker
