@@ -69,6 +69,15 @@
 
 (defn- p-mixture [a] (reduce clojure.core/+ (map #(clojure.core/* %1 (npdf a %2 1.0)) mix-weights mix-means)))
 
+;; for Eq. 4.4, components that overlap: g(a)/ξ = N(a; 0, 0.5)/N(a; μ_i, 1)
+;; is at most about 3.9, so the sample mean is near normal (with the
+;; mixture above, rare ratios in the hundreds carry the mean, and a sample
+;; of 4000 missed them on Metal: z = -6.2)
+(def overlapping
+  (gen []
+    (let [i (untraced (d/categorical [0.3 0.4 0.3]))]
+      (trace :a (d/normal (array/take (array/array [-1.0 0.0 1.0]) i) 1.0)))))
+
 ;; Eqs. 4.11-4.14: black-box stochastic code between two traced choices
 (defn- simulator
   "Stochastic code with a key: a value in [0, 1.3) that a raises."
@@ -195,15 +204,17 @@
 
 (deftest ^:slow ^:heavy eq-4-4-simulate-draws-omega-given-the-choices
   ;; E[g(τ)/ξ] = ∫ g = 1 under simulate's (τ, ω) ~ p(τ) p̊(ω; τ), for a density
-  ;; g narrow enough for a finite variance
-  (testing "untraced draws: the mixture"
-    (let [rs (mapv (fn [k] (let [tr (gfi/simulate mixture [] k)]
+  ;; g narrower than every component, so that g/ξ is bounded. Planted bug
+  ;; (2026-10-20): a joint sampler drawing ω apart from τ moves the mean by
+  ;; about 0.2 here, against a band of about 0.07
+  (testing "untraced draws: overlapping components"
+    (let [rs (mapv (fn [k] (let [tr (gfi/simulate overlapping [] k)]
                              (clojure.core// (npdf (ts/number (tr :a)) 0.0 0.5) (Math/exp (ts/number (:score tr))))))
                    (rng/split (rng/key 13) 4000))]
       (is (within? rs 1.0))))
   (testing "an estimated density's joint sampler"
     (let [rs (mapv (fn [k] (let [tr (gfi/simulate likelihood [0.4] k)]
-                             (clojure.core// (npdf (ts/number (tr :y)) 0.4 1.0) (Math/exp (ts/number (:score tr))))))
+                             (clojure.core// (npdf (ts/number (tr :y)) 0.4 0.5) (Math/exp (ts/number (:score tr))))))
                    (rng/split (rng/key 14) 4000))]
       (is (within? rs 1.0)))))
 

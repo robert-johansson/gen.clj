@@ -53,7 +53,8 @@
    ratio. regenerate redraws ω the same way, but cannot resample a selected
    choice (there is no proposal density to weigh it by), a loud error;
    project takes all of the choices or none."
-  (:require [gen.array :as array]
+  (:refer-clojure :exclude [-])
+  (:require [gen.array :as array :refer [-]]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.gfi :as gfi]
