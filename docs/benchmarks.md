@@ -199,6 +199,54 @@ How to read these:
   51 ms to a batched IS on Metal; with 6 (the cost-per-particle model),
   0.7 ms (bean genclj-n9ow).
 
+## CUDA on the Jetson AGX Thor (2026-10-20, bean genclj-ls29)
+
+The same two benchmarks on the Thor's GPU (sm_110, MLX v0.32.2 built from
+source, float32), at 7751b76. Two CPU JVMs of the night's verification
+(MLX's CPU backend in float64) ran beside them on the Thor's 14 cores, so
+host-side costs may be somewhat inflated. Metal's columns are from the
+tables above and below.
+
+| Median time | CUDA, checks on | CUDA, checks off | Metal, checks on | Metal, checks off |
+|---|---|---|---|---|
+| linreg: MH, random walk, 300 steps | 2164 ms | 2819 ms | 546 ms | 536 ms |
+| linreg: HMC, L = 10, 150 steps | 12648 ms | 13114 ms | 2226 ms | 2201 ms |
+| linreg: HMC compiled, 150 steps | 1615 ms | 1583 ms | 340 ms | 332 ms |
+| linreg: batched IS, N = 10,000 | 16.4 ms | 8.7 ms | 5.7 ms | 2.4 ms |
+| HMM: scalar IS, N = 100 | 10710 ms | 9615 ms | 2241 ms | 2208 ms |
+| HMM: batched IS, N = 1000 | 221 ms | 125 ms | 72 ms | 21 ms |
+| HMM: particle filter, scalar, N = 100 | 18505 ms | 18079 ms | 5024 ms | 4866 ms |
+| HMM: particle filter, batched, N = 100 | 834 ms | 399 ms | 162 ms | 98 ms |
+| GMM: scalar IS, N = 200 | 4048 ms | 3224 ms | 851 ms | 819 ms |
+| GMM: batched IS, N = 10,000 | 40 ms | 20 ms | 15.7 ms | 6.3 ms |
+| scaling: batched IS, N = 10,000 | 11.2 ms | 5.9 ms | 3.2 ms | 1.5 ms |
+
+MCMC steps (per step, plain → compiled):
+
+| Per step | CUDA | Metal |
+|---|---|---|
+| HMC, N = 100 | 42.8 → 6.6 ms | 12.2 → 1.5 ms |
+| HMC, N = 10,000 | 28.1 → 6.1 ms | 9.0 → 1.6 ms |
+| HMC, N = 1,000,000 | 59.5 → 7.0 ms | 34.9 → 5.9 ms |
+| MALA, N = 100 | 8.6 → 5.5 ms | 1.6 → 1.3 ms |
+| MALA, N = 10,000 | 6.3 → 3.6 ms | 2.2 → 1.3 ms |
+| MALA, N = 1,000,000 | 9.6 → 6.0 ms | 6.1 → 4.6 ms |
+
+- **At these sizes the Thor's GPU is 2.5–6× slower than Metal** on the
+  inference benchmark, scalar and batched paths alike: the costs are per
+  operation and per evaluation (kernel launches, MLX's CUDA backend on one
+  evaluation thread, graphs off), not arithmetic. The gap narrows with
+  size: at a million observations plain HMC is 1.7× Metal's time and
+  compiled HMC 1.2× (7.0 ms against 5.9).
+- **Compile helps CUDA most:** HMC 4.6–8.5×, MALA 1.6–1.8×, as it fuses
+  away launches.
+- **Plain and compiled steps disagree** in two of the six MCMC lines
+  (MALA at N = 10,000, HMC at a million: "same move: false"), where Metal
+  agreed in all: compiled CUDA kernels round their reductions differently,
+  so a near-threshold acceptance can flip. Not a correctness failure of
+  either kernel, but worth a look (with the owner's Thor patches, which
+  include per-thread encoders and graph limits).
+
 ## MCMC steps, plain and compiled (2026-10-19)
 
 `bench/gen/mcmc_bench.clj`: Bayesian linear regression with N observations
