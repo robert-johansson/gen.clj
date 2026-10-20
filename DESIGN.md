@@ -296,6 +296,18 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
   `gen.llm.llama` is llama.cpp's. On Metal the same read from the same
   state is bit-identical, while different batch shapes give a token's
   log-probability differing by up to 5e-2 nats (median 2e-3 to 4e-3).
+- **As built (2026-10-20, genclj-mse0; for the owner's review,
+  `docs/research/llm-lm-protocol.md`).** `gen.llm.lm` is the LM protocol
+  (vocab, encode, decode, token-bytes, byte-vocab, next-logprobs,
+  batch-next-logprobs, score) over any Branching engine. It is
+  content-addressed: a trie of token prefixes (`gen.llm.trie`) records what
+  the engine has read, each token with its score, and the cache
+  (`gen.llm.cache`) owns every live branch, bounded in branches and in KV
+  cells counted as llama.cpp's unified cache counts them (`gen.llm.cells`),
+  evicting least-recently-used ones with `dispose!`. Batching is explicit
+  (a call's one-token reads are one advance), with no autobatcher
+  (recommended), and the same calls on a new engine give the same results,
+  bit for bit.
 
 ## 7. Platform
 
@@ -680,6 +692,42 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     if simulate and assess compute a sequence in the same shapes;
     otherwise it needs a band. The agent's lean is exact; the owner
     decides when that bean starts.
+- **The LM protocol** (2026-10-20, agent; **for the owner's review**;
+  `docs/research/llm-lm-protocol.md`):
+  - Callers hold tokens, never branches. The LM's cache owns every live
+    branch, each the entry of its context in a trie of what the engine has
+    read; a context is read from the deepest held prefix (forked, so it
+    stays) or from nothing. Eviction is `dispose!` under bounds
+    (`:max-branches`, by default every branch the engine has free;
+    `:max-cells`, by default `:n-ctx`), least recently used, and for cells
+    among the branches whose disposal frees cells; a read consumes its
+    source only when branches are short. No branch is dropped, so the
+    engine's GC backstop never runs: `(info engine)` counts its collections
+    (`:collections`, added to `gen.llm.slots`), and the tests require none.
+  - Batching is explicit: `batch-next-logprobs` reads a call's one-token
+    reads in one advance, so a token SMC step is one decode. Recommended:
+    no autobatcher, since coalescing callers by timing would let thread
+    timing choose batch composition and so llama.cpp's results; if one is
+    ever needed, a lockstep batcher in worker order, which stays
+    deterministic.
+  - The cache's choices are a function of its calls, so the same calls on a
+    new engine give the same results, bit for bit (tested on a toy engine
+    whose results depend on batch shape and cell placement, as
+    llama.cpp's).
+  - Recommended value shape: `next-logprobs` returns a new host float array
+    (the engine's form, read on the host by byte marginals, masks and
+    weights; the copy is 17 µs at Qwen3's 151,936 tokens, against a 5.4 ms
+    decode), and the token GF converts at its site. Measured for
+    genclj-0cvv: a `categorical-logits` draw at that size costs 4.6 ms on
+    the JVM backend (Gumbel-max), a host inverse-CDF draw with one
+    gen.random uniform 78 µs.
+  - Every token read keeps the score it was read with (the first read
+    wins), so `score` along what was read reads nothing (assess after
+    simulate, token SMC's prefix potentials). A fresh context is read as its
+    first token and then teacher-forced, so that each of its tokens is
+    scored.
+  - A tokenizer is a map: the vocabulary's size and special tokens, and
+    `:token-bytes`, `:encode`, `:decode`; llama.cpp's is `llama/tokenizer`.
 - **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
   `(array/item x)`, the namespace's last segment, as the Clojure style guide
   has it. It replaced `a`, which the owner found ugly (2026-10-18). The
