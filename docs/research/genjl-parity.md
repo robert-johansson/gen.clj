@@ -70,7 +70,7 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 ### 1d. Static modeling language (Gen.jl core)
 | Capability | GenMLX | gen.clj |
 |---|---|---|
-| `@gen (static)`: a DAG IR where update skips unchanged nodes; cached Julia calls, `nojuliacache`, `draw_graph`, typed traces | P, different mechanism: implicit schema extraction (`schema.cljs`), compiled paths (L1), `dep_graph.cljs`. No explicit static DSL and no IR rendering | soon |
+| `@gen (static)`: a DAG IR where update skips unchanged nodes; cached Julia calls, `nojuliacache`, `draw_graph`, typed traces | P, different mechanism: implicit schema extraction (`schema.cljs`), compiled paths (L1), `dep_graph.cljs`. No explicit static DSL and no IR rendering | soon. *gen.clj (M4, 2026-10-20):* `(gen ^:static [args] (let [...] ret))` (DESIGN.md §9): the graph as data and DOT (`gen.dynamic.static/ir`, `dot`, Gen.jl's `draw_graph`); update and regenerate skip nodes whose inputs did not change; a law requires the same results as without the flag. Julia's caches and typed traces have no counterpart (the JVM's JIT compiles the node fns) |
 | `@load_generated_functions` | n/a (unneeded since 0.4.6) | skip |
 
 ### 1e. Distributions (Gen.jl core)
@@ -335,6 +335,12 @@ batched ops equal per-particle ops, stacked. `gen.batched-test` and
 `gen.fuzz-test` check it per model: every batched particle is the scalar trace
 of its choices, batched weights are the scalar ones, and batched updates obey
 the update law, also over random programs.
+
+The static language has no thesis law of its own either: `laws/static`
+(`static-matches-dynamic`) requires every operation on a static function
+to give what the same body without `^:static` gives under the same keys,
+also when update and regenerate skip nodes, and the general laws hold over
+static models (`gen.static-test`).
 
 ## 4. Hazards found while mapping
 

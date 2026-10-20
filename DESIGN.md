@@ -648,6 +648,22 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   Diffed propagation) come after, on the graph. The graph is also the way
   to compiled scores, batching without the tracer, and CUDA graphs: a fixed
   structure runs the same kernels every time.
+  - **How it runs:** the macro builds one guarded fn per node, of `param`
+    and the node's inputs (over-approximated from the symbols it uses, so
+    a dependency is never missed), and the runner walks the nodes in order
+    with the handler's own trace and splice. A skipped node keeps its value
+    and its site's or call's record (weight 0, as an unchanged rerun gives)
+    and consumes its key, so the walk draws what the dynamic body draws;
+    the trace keeps every node's value for the next update. A node that
+    reads `param` always reruns (a store changes between runs), and a gf
+    with middleware (`with-transitions`) reruns every node, so its
+    transitions see every site. A trace node rerun because an input
+    changed keeps its value, so what depends only on that value still
+    skips.
+  - **Not static:** a body that is not one `let`, an address computed
+    from a value, a `trace` or `splice` inside an expression (a branch on
+    a choice included), a splice without an address, an untraced draw: each
+    a compile error that names the form.
 - **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
   `(array/item x)`, the namespace's last segment, as the Clojure style guide
   has it. It replaced `a`, which the owner found ugly (2026-10-18). The

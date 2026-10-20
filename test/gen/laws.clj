@@ -1,7 +1,7 @@
 (ns gen.laws
   "The GFI's laws (Cusumano-Towner 2020; docs/research/genjl-parity.md §3,
    audited in docs/research/law-audit.md) as test.check properties over any
-   generative functions, in four sets:
+   generative functions, in five sets:
 
    - general: the thesis's definitions, true of every generative function
      (Def 2.1.16, Def 2.3.1, Prop 2.3.1, Def 2.3.2, Eq 4.1's retention);
@@ -12,6 +12,8 @@
      the general set;
    - fixed-support: the support condition, for models whose every address
      has a fixed support;
+   - static: a static generative function against the same body without
+     ^:static;
    - encapsulated: for a generative function with encapsulated randomness
      (§4.5), whose score is an estimate, the laws that hold for one draw of
      it.
@@ -415,6 +417,43 @@
 (def fixed-support
   "For models whose every address has a fixed support."
   {:generate-weights-are-finite-on-a-fixed-support generate-weights-are-finite-on-a-fixed-support})
+
+(defn static-matches-dynamic
+  "The static language is an optimization of the dynamic one (DESIGN.md
+   §9): every operation on a static gf gives what the same body without
+   ^:static gives under the same keys (choices, scores, weights, return
+   values, discards and retdiffs), also when an update or regenerate skips
+   nodes (no-change argdiffs for unchanged arguments)."
+  [cases]
+  (prop/for-all [[[_ gf args :as model] seed picks alt?] cases]
+    (let [plain (assoc gf :static nil)
+          k (rng/key seed)
+          host-choices #(ts/host (cm/to-map (:choices %)))
+          same-trace? (fn [t1 t2] (and (= (host-choices t1) (host-choices t2)) (close? (:score t1) (:score t2))
+                                       (= (ts/host (:retval t1)) (ts/host (:retval t2)))))
+          same? (fn [r1 r2] (and (same-trace? (:trace r1) (:trace r2))
+                                 (close? (or (:weight r1) 0.0) (or (:weight r2) 0.0))
+                                 (= (some-> (:discard r1) cm/to-map ts/host) (some-> (:discard r2) cm/to-map ts/host))
+                                 (= (:retdiff r1) (:retdiff r2))))
+          tr (gfi/simulate gf args k)
+          tp (gfi/simulate plain args k)
+          args' (next-args model seed alt?)
+          diffs (if (= args' args) (diff/no-changes (count args)) (unknown-diffs args'))
+          other (gfi/simulate gf args' (rng/fold-in k 1))
+          sigma (restrict (:choices other) (picked (addrs other) picks))
+          s (sel/from-paths (picked (addrs tr) picks))
+          both (fn [f] (let [r1 (vacuous-on-unvisitable (f gf tr)) r2 (vacuous-on-unvisitable (f plain tp))]
+                         (or (= ::vacuous r1 r2) (same? r1 r2))))]
+      (and (same-trace? tr tp)
+           (both (fn [g _] (gfi/generate g args (restrict (:choices tr) (picked (addrs tr) picks)) (rng/fold-in k 2))))
+           (close? (:weight (gfi/assess gf args (:choices tr) k)) (:weight (gfi/assess plain args (:choices tr) k)))
+           (both (fn [_ t] (gfi/update t args' diffs sigma (rng/fold-in k 3))))
+           (both (fn [_ t] (gfi/update t cm/EMPTY (rng/fold-in k 4))))
+           (both (fn [_ t] (gfi/regenerate t args' diffs s (rng/fold-in k 5))))))))
+
+(def static
+  "For a static generative function (gen ^:static)."
+  {:static-matches-dynamic static-matches-dynamic})
 
 ;; ---------------------------------------------------------------------------
 ;; Encapsulated randomness (thesis §4.5)

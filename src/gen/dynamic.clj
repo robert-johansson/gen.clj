@@ -31,6 +31,7 @@
             [gen.diff :as diff]
             [gen.dist.core :as dc]
             [gen.dynamic.core]
+            [gen.dynamic.static :as static]
             [gen.gfi :as gfi]
             [gen.random :as rng]
             [gen.selection :as sel]
@@ -324,8 +325,8 @@
          :regenerate (= sel/none selection)
          false)))
 
-(defn- initial-state [mode {:keys [key constraints prev selection] :as opts}]
-  {:mode mode :key key
+(defn- initial-state [mode {:keys [key constraints prev selection argdiffs] :as opts}]
+  {:mode mode :key key :argdiffs argdiffs
    :choices cm/EMPTY :scores {} :subtraces {} :score 0.0 :weight 0.0
    :constraints (or constraints cm/EMPTY) :prev prev :selection (or selection sel/none)
    :discard cm/EMPTY :visited #{}
@@ -385,6 +386,73 @@
                                (when-not (neg? i) "at least ") fixed " argument" (when-not (== 1 fixed) "s")
                                ", given " n)
                           {:params params :args n})))))))
+
+;; ---------------------------------------------------------------------------
+;; The static language: a walk of the graph that skips what did not change
+;; ---------------------------------------------------------------------------
+
+(defn- changed-args
+  "The names of the arguments whose argdiffs mark them changed (all of them
+   without argdiffs)."
+  [{:keys [fixed rest]} argdiffs]
+  (if (nil? argdiffs)
+    (set (concat (apply concat fixed) rest))
+    (set (concat (mapcat (fn [names d] (when (diff/changed? d) names)) fixed argdiffs)
+                 (when (some diff/changed? (drop (count fixed) argdiffs)) rest)))))
+
+(defn- keep-node!
+  "Node n's previous value old, with its site's or call's previous record,
+   as an unchanged rerun would leave them (weight 0), and the same key
+   consumed, so that what follows draws what the dynamic body would."
+  [vol {:keys [kind addr]} old]
+  (when-not (= kind :compute)
+    (let [p (path addr)
+          state @vol]
+      (check-running! state p)
+      (check-address! state p)
+      (let [state (assoc state :key (first (rng/split (:key state))))
+            state (if (= kind :trace)
+                    (let [[v lp] (prev-choice state p)] (record state p v lp))
+                    (record-call state p (get (::subtraces (:prev state)) p)))]
+        (vreset! vol (update state :visited conj p)))))
+  old)
+
+(defn- run-static
+  "A static body (gen.dynamic.static), node by node, with the handler's own
+   trace and splice. In update and regenerate, a node keeps its value,
+   score and sub-trace when no input changed (no changed argument, no
+   rerun node whose value changed) and no constraint or selection reaches
+   it; the trace keeps every node's value for the next update. A gf with
+   middleware (with-transitions) reruns every node, so its transitions see
+   every site."
+  [{:keys [nodes ret args-bind] :as st} gf vol trace-fn splice-fn args]
+  (let [{:keys [mode prev constraints selection argdiffs]} @vol
+        values (::node-values prev)
+        skip? (boolean (and values (#{:update :regenerate} mode) (nil? (:transitions gf))))
+        reached? (fn [{:keys [kind addr]}]
+                   (let [p (path addr)]
+                     (cond (= mode :update) (not (cm/empty? (cm/get-submap constraints p)))
+                           (= kind :trace) (path-selected? selection p)
+                           :else (not= sel/none (subselection-at selection p)))))
+        [env changed vals]
+        (reduce (fn [[env changed vals] [i {:keys [kind addr inputs param? f bind] :as n}]]
+                  (let [old (when skip? (nth values i))
+                        keep? (and skip? (not param?) (not-any? changed inputs) (not (reached? n)))
+                        v (if keep?
+                            (keep-node! vol n old)
+                            (case kind
+                              :trace (trace-fn addr (f read-param env))
+                              :splice (let [[g as] (f read-param env)] (apply splice-fn addr g as))
+                              :compute (f read-param env)))]
+                    [(merge env (bind v))
+                     (if (and skip? (identical? v old)) changed (into changed (:names n)))
+                     (conj vals v)]))
+                [(args-bind args) (if skip? (changed-args (:args st) argdiffs) #{}) []]
+                (map-indexed vector nodes))]
+    (vswap! vol assoc ::node-values vals)
+    (if (and skip? (not (:param? ret)) (not-any? changed (:inputs ret)))
+      (:retval prev)
+      ((:f ret) read-param env))))
 
 (defn- execute
   "Run gf's body on args under the transitions of mode; the final state with
@@ -460,7 +528,9 @@
                                             {:path p})))
                           (vreset! vol (update state' :visited conj p))
                           v))))
-        retval (realize! (apply (:body-fn gf) trace-fn splice-fn read-param untraced-fn args))]
+        retval (realize! (if-let [st (:static gf)]
+                           (run-static st gf vol trace-fn splice-fn args)
+                           (apply (:body-fn gf) trace-fn splice-fn read-param untraced-fn args)))]
     (vswap! vol assoc ::finished true)
     (assoc (finish @vol) :retval retval)))
 
@@ -469,7 +539,8 @@
                                     :retval (:retval state) :score (:score state)})
                  ::scores (:scores state)
                  ::subtraces (:subtraces state))
-    (pos? (long (:omega-count state))) (assoc ::trace/omega (:omega state))))
+    (pos? (long (:omega-count state))) (assoc ::trace/omega (:omega state))
+    (::node-values state) (assoc ::node-values (::node-values state))))
 
 (defn- holds-batch?
   "Does x hold a batched value (in its maps, vectors and realized seqs)?"
@@ -526,7 +597,7 @@
 ;; DynamicGF
 ;; ---------------------------------------------------------------------------
 
-(defrecord DynamicGF [body-fn source params transitions dispatch]
+(defrecord DynamicGF [body-fn source params transitions dispatch static]
   gfi/IGenerativeFunction
   (-simulate [gf args key] (:trace (run gf :simulate args {:key key})))
   (-generate [gf args constraints key] (run gf :generate args {:key key :constraints constraints}))
@@ -571,14 +642,16 @@
 
 (defn make-gen-fn
   "A dynamic generative function from a body fn of (trace splice param
-   untraced & args) and its source form."
-  [body-fn source]
-  ;; a variadic body fn of fewer hidden parameters would take the arguments
-  ;; shifted, silently (a fixed arity fails on its own)
-  (when (and (instance? clojure.lang.RestFn body-fn) (< (.getRequiredArity ^clojure.lang.RestFn body-fn) 4))
-    (throw (ex-info "make-gen-fn: the body fn takes trace, splice, param and untraced before the arguments"
-                    {:required-arity (.getRequiredArity ^clojure.lang.RestFn body-fn)})))
-  (->DynamicGF body-fn source nil nil nil))
+   untraced & args) and its source form, and optionally the graph of a
+   static body (the gen macro's, gen.dynamic.static)."
+  ([body-fn source] (make-gen-fn body-fn source nil))
+  ([body-fn source static]
+   ;; a variadic body fn of fewer hidden parameters would take the arguments
+   ;; shifted, silently (a fixed arity fails on its own)
+   (when (and (instance? clojure.lang.RestFn body-fn) (< (.getRequiredArity ^clojure.lang.RestFn body-fn) 4))
+     (throw (ex-info "make-gen-fn: the body fn takes trace, splice, param and untraced before the arguments"
+                     {:required-arity (.getRequiredArity ^clojure.lang.RestFn body-fn)})))
+   (->DynamicGF body-fn source nil nil nil static)))
 
 (defn with-params
   "gf with the trainable-parameter store params, a map of name to value read
@@ -810,6 +883,31 @@
   '{double clojure.core/double long clojure.core/long float clojure.core/float int clojure.core/int
     short clojure.core/short byte clojure.core/byte char clojure.core/char boolean clojure.core/boolean})
 
+(defn- names-map
+  "The form of a map from each of names (quoted) to its value."
+  [names]
+  (into {} (map (fn [s] [(list 'quote s) s])) names))
+
+(defn- static-form
+  "The runtime graph of the static body st (gen.dynamic.static/analyze):
+   per node, its kind, address, names and inputs, a guarded fn of (param,
+   the inputs' values) for its distribution, call or value, and a fn
+   binding its names from its value."
+  [st params coercions locals]
+  (let [node-fn (fn [{:keys [inputs expr]}]
+                  (guard-branches `(fn [~'param {:syms [~@inputs]}] ~expr) (into locals inputs)))
+        param? (fn [expr] (boolean (some #{'param} (tree-seq coll? seq expr))))
+        v (gensym "v")
+        args (gensym "args")]
+    `{:args '~(:args st)
+      :args-bind (fn [~args] (let [~params ~args ~@coercions] ~(names-map (concat (apply concat (:fixed (:args st))) (:rest (:args st))))))
+      :nodes [~@(for [n (:nodes st)]
+                  `{:kind ~(:kind n) :addr ~(:addr n) :names '~(:names n) :inputs '~(:inputs n) :form '~(:form n)
+                    :param? ~(param? (:expr n))
+                    :f ~(node-fn n)
+                    :bind (fn [~v] (let [~(:binding n) ~v] ~(names-map (:names n))))})]
+      :ret {:inputs '~(:inputs (:ret st)) :param? ~(param? (:expr (:ret st))) :f ~(node-fn (:ret st))}}))
+
 (defmacro gen
   "A generative function. params are the arguments (destructuring allowed);
    in body, (trace addr dist) and (splice addr gf & args) make random choices
@@ -824,6 +922,12 @@
    update or regenerate keeps it unless the change hints say something
    changed (DESIGN.md §9). Untraced values must not decide which addresses
    are visited.
+
+   (gen ^:static [args] (let [bindings…] ret)) is a static body (Gen.jl's
+   @gen (static)): each binding a call at a constant address or a pure
+   expression, so update and regenerate skip the nodes that did not change,
+   with the same results as without the flag (gen.dynamic.static, which
+   also renders the graph). A body that is not static is a compile error.
 
    Conditionals, catch clauses, and clojure.core's truthiness tests and
    lookups (not, filter, every?, get, …; gen.dynamic.core), branch per
@@ -851,14 +955,17 @@
         ;; parameters takes at most four: coerce them in the body instead
         prim (filter #(and (symbol? %) (primitive-coercions (:tag (meta %)))) params)
         plain (mapv #(if (some #{%} prim) (vary-meta % dissoc :tag) %) params)
+        coercions (mapcat (fn [p] [(vary-meta p dissoc :tag) (list (primitive-coercions (:tag (meta p))) (vary-meta p dissoc :tag))]) prim)
+        locals (into (set (keys &env)) *outer-locals*)
+        st (when (:static (meta params)) (static/analyze plain body))
         body (if (seq prim)
                [`(let [~@(mapcat (fn [p] [(vary-meta p dissoc :tag) (list (primitive-coercions (:tag (meta p))) (vary-meta p dissoc :tag))]) prim)]
                    ~@body)]
                body)
         body-fn (guard-branches `(fn [~'trace ~'splice ~'param ~'untraced ~@plain]
                                    (let [~'untraced-key (fn [] (~'untraced))] ~@body))
-                                (into (set (keys &env)) *outer-locals*))]
-    `(make-gen-fn ~body-fn '~(cons params body))))
+                                locals)]
+    `(make-gen-fn ~body-fn '~(cons params body) ~(when st (static-form st plain coercions locals)))))
 
 (defmacro guarded-fn
   "fn, with a gen body's guards: if and case tests branch through truthy?,
