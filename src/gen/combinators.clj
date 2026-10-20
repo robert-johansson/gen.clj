@@ -73,14 +73,16 @@
 
 (defn- element-key [key i] (rng/fold-in key i))
 
-;; Kernel calls. (A batched run is this same code under the batch tracer.)
-(defn- simulate-at [gf args key] (:trace (dyn/call gf :simulate args {:key key})))
-(defn- generate-at [gf args cs key] (dyn/call gf :generate args {:constraints cs :key key}))
+;; Kernel calls, through dyn/run-call (a batched run is this same code
+;; under the batch tracer); at is the call's address, its choices' place in
+;; the combinator's (nil for a Switch's branch).
+(defn- simulate-at [gf args key] (:trace (dyn/run-call gf :simulate args {:key key})))
+(defn- generate-at [gf args cs key at] (dyn/run-call gf :generate args {:constraints cs :key key :at at}))
 (defn- assess-at [gf args choices key] (gfi/-assess gf args choices key))
-(defn- update-at [gf old args argdiffs cs key]
-  (dyn/call gf :update args {:prev old :argdiffs argdiffs :constraints cs :key key}))
-(defn- regenerate-at [gf old args argdiffs s key]
-  (dyn/call gf :regenerate args {:prev old :argdiffs argdiffs :selection s :key key}))
+(defn- update-at [gf old args argdiffs cs key at]
+  (dyn/run-call gf :update args {:prev old :argdiffs argdiffs :constraints cs :key key :at at}))
+(defn- regenerate-at [gf old args argdiffs s key at]
+  (dyn/run-call gf :regenerate args {:prev old :argdiffs argdiffs :selection s :key key :at at}))
 
 (defn- assoc-element [choices i sub]
   (if (cm/empty? sub) (cm/remove-submap choices i) (cm/set-submap choices i sub)))
@@ -93,11 +95,8 @@
     (throw (ex-info (str (name op) ": a single value was given where indexed choices belong")
                     {:op op})))
   (let [addrs (clojure.core/map first (cm/submaps choices))]
-    (doseq [i addrs]
-      (when-not (and (integer? i) (< -1 i n))
-        (throw (ex-info (str (name op) ": the constraint at " i " was not visited (the indices are 0 to "
-                             (dec n) ")")
-                        {:op op :address i :n n}))))
+    (when-let [outside (seq (remove #(and (integer? %) (< -1 % n)) addrs))]
+      (throw (gfi/unvisited op (mapv vector outside) (str "the indices are 0 to " (dec n)))))
     (into (sorted-set) (clojure.core/map long) addrs)))
 
 (defn- selected-indices
@@ -106,15 +105,6 @@
   (cond (instance? gen.selection.None s) (sorted-set)
         (instance? gen.selection.Hierarchical s) (into (sorted-set) (filter integer?) (keys (:m s)))
         :else :all))
-
-(defn- rerun-all?
-  "Must every kernel call run again? When a kernel does not compute as the
-   one that made the calls' traces (dyn/same-gen-fn?): a trace given another
-   gen-fn at the top level, which no argument shows. (A call whose store
-   or callee changed is dyn/call's to run again.) pairs: [kernel, a trace
-   it made or nil]."
-  [pairs]
-  (boolean (some (fn [[kernel sub]] (and sub (not (dyn/same-gen-fn? kernel (:gen-fn sub))))) pairs)))
 
 (defn- elements-trace [gf args {:keys [subs choices retval score]}]
   (assoc (trace/make-trace {:gen-fn gf :args args :choices choices :retval retval :score score})
@@ -234,7 +224,7 @@
                         (let [ea (element-args args i)
                               k (element-key key i)]
                           (if constraints
-                            (let [{sub :trace w :weight} (generate-at kernel ea (cm/get-submap constraints i) k)]
+                            (let [{sub :trace w :weight} (generate-at kernel ea (cm/get-submap constraints i) k [i])]
                               (put-element acc i sub nil w))
                             (put-element acc i (simulate-at kernel ea k) nil 0.0))))
                       empty-acc
@@ -259,16 +249,16 @@
                             k (element-key key i)]
                         (put-update acc i old
                                     (if (= op :update)
-                                      (update-at kernel old ea ead (cm/get-submap cs i) k)
-                                      (regenerate-at kernel old ea ead (sel/get-subselection cs i) k)))))
+                                      (update-at kernel old ea ead (cm/get-submap cs i) k [i])
+                                      (regenerate-at kernel old ea ead (sel/get-subselection cs i) k [i])))))
                     (trace-acc tr)
-                    (visits (if (rerun-all? [[kernel (first old-subs)]]) :all (changed-elements argdiffs)) targets kept))
+                    (visits (changed-elements argdiffs) targets kept))
         acc (drop-elements acc kept op)
         acc (reduce (fn [acc i]
                       (let [ea (element-args args i)
                             k (element-key key i)]
                         (if (= op :update)
-                          (let [{sub :trace w :weight} (generate-at kernel ea (cm/get-submap cs i) k)]
+                          (let [{sub :trace w :weight} (generate-at kernel ea (cm/get-submap cs i) k [i])]
                             (put-element acc i sub nil w))
                           (put-element acc i (simulate-at kernel ea k) nil 0.0))))
                     acc
@@ -331,7 +321,7 @@
                 (let [sa (step-args t state params)
                       k (element-key key t)
                       [sub w] (if constraints
-                                (let [r (generate-at kernel sa (cm/get-submap constraints t) k)] [(:trace r) (:weight r)])
+                                (let [r (generate-at kernel sa (cm/get-submap constraints t) k [t])] [(:trace r) (:weight r)])
                                 [(simulate-at kernel sa k) 0.0])]
                   (recur (inc t) (:retval sub) (put-element acc t sub nil w)))
                 acc))]
@@ -346,8 +336,7 @@
   (let [n (check-steps n)
         kernel (:kernel gf)
         [_ dinit & dparams] argdiffs
-        ;; a changed store or kernel changes every step, as a parameter does
-        params-changed? (or (some diff/changed? dparams) (rerun-all? [[kernel (first (::subtraces tr))]]))
+        params-changed? (some diff/changed? dparams)
         old-subs (::subtraces tr)
         prev-n (count old-subs)
         kept (min n prev-n)
@@ -365,8 +354,8 @@
                   sad (into [diff/no-change sdiff] dparams)
                   k (element-key key t)
                   r (if (= op :update)
-                      (update-at kernel old sa sad (cm/get-submap cs t) k)
-                      (regenerate-at kernel old sa sad (sel/get-subselection cs t) k))]
+                      (update-at kernel old sa sad (cm/get-submap cs t) k [t])
+                      (regenerate-at kernel old sa sad (sel/get-subselection cs t) k [t]))]
               (recur (inc t) (:retval (:trace r)) (:retdiff r) (put-update acc t old r)))
 
             :else
@@ -378,7 +367,7 @@
                 (let [sa (step-args t state params)
                       k (element-key key t)
                       [sub w] (if (= op :update)
-                                (let [r (generate-at kernel sa (cm/get-submap cs t) k)] [(:trace r) (:weight r)])
+                                (let [r (generate-at kernel sa (cm/get-submap cs t) k [t])] [(:trace r) (:weight r)])
                                 [(simulate-at kernel sa k) 0.0])]
                   (recur (inc t) (:retval sub) (put-element acc t sub nil w)))
                 acc))]
@@ -433,7 +422,7 @@
 (defn- switch-generate [gf [idx & bargs :as args] constraints key]
   (let [b (branch gf idx)]
     (if constraints
-      (let [{sub :trace w :weight} (generate-at b (vec bargs) constraints key)]
+      (let [{sub :trace w :weight} (generate-at b (vec bargs) constraints key nil)]
         {:trace (switch-trace gf (vec args) idx sub) :weight w})
       {:trace (switch-trace gf (vec args) idx (simulate-at b (vec bargs) key)) :weight 0.0})))
 
@@ -450,8 +439,8 @@
             sub (::subtrace tr)
             bdiffs (if (= (branch-index idx) (::branch tr)) (vec (rest argdiffs)) (unknown-diffs bargs))
             r (if (= op :update)
-                (update-at b sub bargs bdiffs cs key)
-                (regenerate-at b sub bargs bdiffs cs key))]
+                (update-at b sub bargs bdiffs cs key nil)
+                (regenerate-at b sub bargs bdiffs cs key nil))]
         (assoc r :trace (switch-trace gf args idx (:trace r))))
       ;; a new branch: generated afresh; the old choices are discarded
       (let [{t :trace w :weight} (switch-generate gf args (when (= op :update) cs) key)]
@@ -515,19 +504,12 @@
           (throw (ex-info (str (name op) ": a single value was given where Recurse's nodes belong") {:op op})))
         (into {} (clojure.core/map (fn [[i sub]]
                                      (when-not (nat-int? i)
-                                       (throw (ex-info (str (name op) ": the constraint at " i " was not visited"
-                                                            " (Recurse's addresses are node indices)")
-                                                       {:op op :address i})))
+                                       (throw (gfi/unvisited op [[i]] "Recurse's addresses are node indices")))
                                      (when (cm/has-value? sub)
-                                       (throw (ex-info (str (name op) ": a value at node " i
-                                                            " was not visited (a node has :production and :aggregation)")
-                                                       {:op op :address i})))
+                                       (throw (gfi/unvisited op [[i]] (str "a value at node " i ": a node has :production and :aggregation"))))
                                      (let [parts (set (clojure.core/map first (cm/submaps sub)))]
-                                       (when-let [bad (first (remove #{:production :aggregation} parts))]
-                                         (throw (ex-info (str (name op) ": the constraint at [" i " " bad
-                                                              "] was not visited (a node has :production and"
-                                                              " :aggregation)")
-                                                         {:op op :address [i bad]})))
+                                       (when-let [bad (seq (remove #{:production :aggregation} parts))]
+                                         (throw (gfi/unvisited op (mapv #(vector i %) bad) "a node has :production and :aggregation")))
                                        [i parts])))
               (cm/submaps cs)))))
 
@@ -541,27 +523,28 @@
   "One kernel run at node: revised from old when given (update or
    regenerate), else new (generate, or simulate for regenerate and
    unconstrained runs). {:trace :weight :retdiff :discard}."
-  [op kernel old args argdiffs cs key]
+  [op kernel old args argdiffs cs key at]
   (cond
     old (if (= op :regenerate)
-          (regenerate-at kernel old args argdiffs cs key)
-          (update-at kernel old args argdiffs cs key))
-    (and cs (not= op :regenerate)) (assoc (generate-at kernel args cs key) :retdiff diff/unknown-change)
+          (regenerate-at kernel old args argdiffs cs key at)
+          (update-at kernel old args argdiffs cs key at))
+    (and cs (not= op :regenerate)) (assoc (generate-at kernel args cs key at) :retdiff diff/unknown-change)
     :else {:trace (simulate-at kernel args key) :weight 0.0 :retdiff diff/unknown-change}))
 
 (defn- production-phase
   "The productions from the root, in node order (parents before children):
    a retained node is revisited only when its input may have changed or it
    is targeted. {:prods :p-diffs :weight :discard}."
-  [{:keys [gf old-p targets op cs node-key rerun?]} input input-diff]
+  [{:keys [gf old-p targets op cs node-key]} input input-diff]
   (let [{:keys [production max-branch]} gf]
     ;; weight starts boxed: it accumulates arrays on array backends
     (loop [todo (sorted-map 0 [input input-diff]) prods {} p-diffs {} weight (Double/valueOf 0.0) discard cm/EMPTY]
       (if-let [[node [in d]] (first todo)]
         (let [old (old-p node)
-              revisit? (or rerun? (nil? old) (diff/changed? d) (targeted? targets node :production))
+              revisit? (or (nil? old) (diff/changed? d) (targeted? targets node :production))
               r (if revisit?
-                  (run-node op production old [in] [d] (node-cs op cs node :production) (node-key node :production))
+                  (run-node op production old [in] [d] (node-cs op cs node :production) (node-key node :production)
+                            [node :production])
                   {:trace old :weight 0.0 :retdiff diff/no-change})
               out (production-output gf node (:trace r))
               child-diff (if (diff/changed? (:retdiff r)) diff/unknown-change diff/no-change)]
@@ -576,7 +559,7 @@
    node is revisited when its value, its children or its target may have
    changed. {:aggs :a-diffs :weight :discard}, the weight and discard
    continuing the production phase's."
-  [{:keys [gf old-a targets op cs node-key rerun?]} {:keys [prods p-diffs weight discard]}]
+  [{:keys [gf old-a targets op cs node-key]} {:keys [prods p-diffs weight discard]}]
   (let [{:keys [aggregation max-branch]} gf]
     (reduce (fn [{:keys [aggs a-diffs weight discard]} node]
               (let [{v :value children :children} (:retval (prods node))
@@ -585,11 +568,11 @@
                     v-changed? (diff/changed? (p-diffs node))
                     ws-changed? (or (nil? old) (not= (count children) (count (second (:args old))))
                                     (some #(diff/changed? (a-diffs %)) kids))
-                    r (if (or rerun? (nil? old) v-changed? ws-changed? (targeted? targets node :aggregation))
+                    r (if (or (nil? old) v-changed? ws-changed? (targeted? targets node :aggregation))
                         (run-node op aggregation old [v (mapv #(:retval (aggs %)) kids)]
                                   [(if v-changed? diff/unknown-change diff/no-change)
                                    (if ws-changed? diff/unknown-change diff/no-change)]
-                                  (node-cs op cs node :aggregation) (node-key node :aggregation))
+                                  (node-cs op cs node :aggregation) (node-key node :aggregation) [node :aggregation])
                         {:trace old :weight 0.0 :retdiff diff/no-change})]
                 {:aggs (assoc aggs node (:trace r)) :a-diffs (assoc a-diffs node (:retdiff r))
                  :weight (+ weight (:weight r)) :discard (put-part discard node :aggregation (:discard r))}))
@@ -609,17 +592,12 @@
   [gf tr [input] [input-diff] op cs key]
   (let [ctx {:gf gf :old-p (::productions tr {}) :old-a (::aggregations tr {}) :targets (recurse-targets op cs)
              :op op :cs cs
-             :node-key (partial node-key key)
-             ;; under another store or kernel, every node runs again
-             :rerun? (and tr (rerun-all? [[(:production gf) (get (::productions tr) 0)]
-                                          [(:aggregation gf) (get (::aggregations tr) 0)]]))}
+             :node-key (partial node-key key)}
         {:keys [prods] :as produced} (production-phase ctx input input-diff)
         _ (when (and cs (not= op :regenerate))
             (doseq [node (keys (:targets ctx))]
               (when-not (contains? prods node)
-                (throw (ex-info (str (name op) ": the constraint at node " node " was not visited (the tree has nodes "
-                                     (vec (sort (keys prods))) ")")
-                                {:op op :address node})))))
+                (throw (gfi/unvisited op [[node]] (str "the tree has nodes " (vec (sort (keys prods)))))))))
         {:keys [aggs a-diffs weight discard]} (aggregation-phase ctx produced)
         {:keys [old-p old-a]} ctx
         gone (remove prods (keys old-p))
@@ -657,7 +635,7 @@
                         [ps weight]))
         _ (doseq [node (keys targets)]
             (when-not (contains? ps node)
-              (throw (ex-info (str "assess: the choices at node " node " were not visited") {:address node}))))
+              (throw (gfi/unvisited :assess [[node]] (str "the tree has nodes " (vec (sort (keys ps))))))))
         [as weight] (reduce (fn [[as weight] node]
                               (let [{v :value children :children} (ps node)
                                     ws (mapv #(as (child-of max-branch node %)) (range (count children)))

@@ -384,12 +384,14 @@
 
 (deftest stores-are-compared-without-reading-arrays
   ;; an array that is not the same object counts as changed (confirmation
-  ;; review N9: = read both on the host, inside the handler)
-  (let [same? #'gen.dynamic/same-store? x (array/array [1.0 2.0])]
+  ;; review N9: = read both on the host, inside the handler); host values
+  ;; and collections of them compare by value (review 5, R5-3)
+  (let [same? gfi/same-value? x (array/array [1.0 2.0])]
     (is (same? {:w x :n 2.0} {:w x :n 2.0}))
     (is (not (same? {:w x} {:w (array/array [1.0 2.0])})))
     (is (not (same? {:w x} {:w x :v 1.0})))
-    (is (same? nil {}))))
+    (is (same? {:w [1.0 2.0] :ks #{:a :b}} {:w (vector 1.0 (+ 1.0 1.0)) :ks (hash-set :b :a)}))
+    (is (not (same? {:w [1.0 2.0]} {:w [1.0 3.0]})))))
 
 (deftest a-local-is-not-the-var-it-shadows
   ;; a local bound inside a gen body is not in the inner gen's &env: count

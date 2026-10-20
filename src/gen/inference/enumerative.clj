@@ -49,7 +49,8 @@
             [gen.inference.proposal :as proposal]
             [gen.inference.weights :as w]
             [gen.random :as rng]
-            [gen.selection :as sel]))
+            [gen.selection :as sel]
+            [gen.trace :as trace]))
 
 (set! *warn-on-reflection* true)
 
@@ -230,7 +231,7 @@
                            tr (try (:trace (gfi/with-exact-density "with-exact-proposal" (gfi/generate g args constraints (rng/key 0))))
                                    (catch clojure.lang.ExceptionInfo e
                                      ;; a choice of the other run goes unused under c
-                                     (throw (if (re-find #"was not visited" (ex-message e)) (structure-error e) e))))]
+                                     (throw (if (:unvisited (ex-data e)) (structure-error e) e))))]
                        (when-not (= (+ n-choices (count c)) (count (cm/addresses (:choices tr))))
                          (throw (structure-error nil)))
                        [(:score tr) (gfi/project tr unconstrained) (:retval tr)]))
@@ -279,7 +280,7 @@
         chosen (reduce (fn [m p] (cm/set-choice m p (array/take (array/array (mapv #(get % p) cs)) idx)))
                        (cm/merge sigma others) free)
         tr (:trace (gfi/generate gf args chosen k-final))]
-    {:trace (assoc tr :gen-fn egf) :weight (- (array/logsumexp s) (array/logsumexp r))}))
+    {:trace (trace/as-made-by tr egf) :weight (- (array/logsumexp s) (array/logsumexp r))}))
 
 (defn- exact-weight
   "The weight exact-generate gives for producing the trace tr of gf on args
@@ -298,25 +299,25 @@
 
 (defrecord ExactProposalGF [gf paths limit check-retval?]
   gfi/IGenerativeFunction
-  (-simulate [this args key] (assoc (gfi/-simulate gf args key) :gen-fn this))
+  (-simulate [this args key] (trace/as-made-by (gfi/-simulate gf args key) this))
   (-generate [this args constraints key] (exact-generate this args constraints key))
   (-update [this tr args argdiffs constraints key]
     ;; gf's update keeps, overwrites and removes choices; fresh ones are
     ;; then drawn by the exact proposal given the kept ones
     (let [[k-update k-fresh] (rng/split key)
-          {t2 :trace :as r} (gfi/-update gf (assoc tr :gen-fn gf) args argdiffs constraints k-update)
+          {t2 :trace :as r} (gfi/-update gf (trace/as-made-by tr gf) args argdiffs constraints k-update)
           before (set (cm/addresses (:choices tr)))
           given (set (cm/addresses constraints))
           fresh (vec (remove #(or (before %) (given %)) (cm/addresses (:choices t2))))]
       (if (empty? fresh)
-        (assoc r :trace (assoc t2 :gen-fn this))
+        (assoc r :trace (trace/as-made-by t2 this))
         (let [kept (sel/get-selected (:choices t2) (sel/complement (sel/from-paths fresh)))
               {t3 :trace w :weight} (exact-generate this args kept k-fresh)]
           (when-not (same-addresses? (:choices t2) (:choices t3))
             (throw (ex-info "with-exact-proposal: the fresh choices of this update change the model's structure" {})))
           {:trace t3 :weight (- w (:score tr)) :retdiff diff/unknown-change :discard (:discard r)}))))
   (-regenerate [this tr args argdiffs selection key]
-    (proposal/regenerate-under this #(exact-generate this %1 %2 %3) #(exact-weight this %1 %2 %3)
+    (proposal/regenerate-under #(exact-generate this %1 %2 %3) #(exact-weight this %1 %2 %3)
                                tr args argdiffs selection key))
   ;; as its generate, it needs exact densities
   (-assess [_ args choices key] (gfi/with-exact-density "with-exact-proposal" (gfi/-assess gf args choices key)))

@@ -137,14 +137,11 @@
   "θ ~ N(0, 1), and y given θ by the estimated likelihood."
   (gen [] (let [theta (trace :theta (d/normal 0 1))] (splice :y likelihood theta) theta)))
 
-;; an estimator has no proposal density, so regenerate cannot resample its
-;; choice: the laws without a selection that may hold it
+;; an estimator has no proposal density, so regenerate resamples its choices
+;; all at once (its joint sampler) or not at all; these have one each. The
+;; joint sampler draws ω otherwise than the estimate: no same-key score
 (def estimated-laws
-  ;; and its joint sampler draws ω otherwise than its estimate: no same-key score
-  (apply dissoc laws/encapsulated [:score-is-assessed-on-the-same-key
-                                   :regenerate-keeps-unselected-values :regenerate-weight-is-the-projection-ratio
-                                   :regenerate-weight-with-new-arguments-is-the-projection-ratio
-                                   :regenerate-weight-is-the-retained-density-ratio :regenerating-everything-has-weight-zero]))
+  (dissoc laws/encapsulated :score-is-assessed-on-the-same-key))
 
 (laws/deflaws estimated [["likelihood" likelihood [0.5] [[1.5]]] ["pm-model" pm-model [] []]] 60 estimated-laws)
 
@@ -175,6 +172,19 @@
           r (gfi/update tr cm/EMPTY (rng/key 10))]
       (is (= (omega tr) (omega (:trace r))))
       (is (== 0.0 (ts/number (:weight r))))))
+  (testing "a changed store or gen-fn at the call redraws it, in a dynamic callee too (review 5: a revise)"
+    (let [noisy (gen [] (let [e (untraced (d/normal 0 1))] (trace :x (d/normal (+ e (param :w)) 1))))
+          model (gen [] (let [a (trace :a (d/uniform 0 1))] (splice :c (gen.dynamic/with-params noisy {:w (* 10.0 a)}))))
+          callee-omega #(omega (get (:gen.dynamic/subtraces %) [:c]))
+          tr (gfi/simulate model [] (rng/key 11))
+          {t :trace w :weight} (gfi/update tr (cm/choicemap :a 0.9) (rng/key 12))]
+      (is (some? (callee-omega tr)))
+      (is (not= (callee-omega tr) (callee-omega t)))
+      (is (ts/close? w (- (:score t) (:score tr))))
+      (let [tr (gfi/simulate (gen.dynamic/with-params noisy {:w 1.0}) [] (rng/key 13))
+            {t :trace w :weight} (gfi/update (assoc tr :gen-fn (gen.dynamic/with-params noisy {:w 5.0})) cm/EMPTY (rng/key 14))]
+        (is (not= (omega tr) (omega t)))
+        (is (ts/close? w (- (:score t) (:score tr)))))))
   (testing "a Map's unchanged elements keep theirs"
     (let [m (comb/map noisy-kernel)
           tr (gfi/simulate m [[0.1 0.2 0.3]] (rng/key 7))
@@ -407,15 +417,19 @@
     (let [no-sim (custom/estimated {:addresses [:y] :estimate (:estimate likelihood)})
           tr (gfi/simulate likelihood [0.4] (rng/key 21))]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"needs :simulate" (gfi/simulate no-sim [0.4] (rng/key 22))))
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"cannot resample a selected choice"
-                            (gfi/regenerate tr (sel/select :y) (rng/key 23))))
+      (testing "regenerate takes all of its choices (its joint sampler, weight 0) or none (review 5, R5-6)"
+        (is (ts/close? 0.0 (:weight (gfi/regenerate tr (sel/select :y) (rng/key 23)))))
+        (let [two (custom/estimated {:addresses [:y1 :y2] :estimate (fn [_ _ _] 0.0)})
+              t2 (:trace (gfi/generate two [] (cm/choicemap :y1 1.0 :y2 2.0) (rng/key 24)))]
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"cannot resample some of the choices only"
+                                (gfi/regenerate t2 (sel/select :y1) (rng/key 25))))))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be a function" (custom/estimated {:addresses [:y] :estimate 3})))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #":addresses names its choices" (custom/estimated {:estimate (:estimate likelihood)})))
       (testing "choices other than all of them (law audit, 2026-10-20: a strict subset gave a trace missing a choice)"
         (let [two (custom/estimated {:addresses [:y1 :y2] :estimate (fn [_ _ _] 0.0)})]
           (is (thrown-with-msg? clojure.lang.ExceptionInfo #"needs every choice of the estimator"
                                 (gfi/generate two [] (cm/choicemap :y1 1.0) (rng/key 32))))
-          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"needs every choice of the estimator"
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"the constraint at \[:y3\] was not visited"
                                 (gfi/assess two [] (cm/choicemap :y1 1.0 :y2 2.0 :y3 0.0) (rng/key 33))))))))
   (testing "a body's untraced would hide a var of that name"
     (let [ns (create-ns 'gen.encapsulated-test.shadowed)]

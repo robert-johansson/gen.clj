@@ -134,7 +134,7 @@
    true to Clojure's if, so one branch was taken for every particle)."
   [gf op args n opts]
   (let [[[r bools] branch] (array/logging-branches
-                            #(batch/unread-bools (fn [] (gfi/run-op gf op args (assoc opts :batch-shape [n])))))]
+                            #(batch/unread-bools (fn [] (gfi/outside-revise (gfi/run-op gf op args (assoc opts :batch-shape [n]))))))]
     ;; a batched-branch error the code caught still means the particles differ
     (when branch (throw branch))
     (when (seq bools)

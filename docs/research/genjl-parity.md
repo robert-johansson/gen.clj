@@ -62,7 +62,7 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 | Pair addresses `:a => :b` | Y: vector paths `[:a :b]` | core |
 | Nested call `@trace(gf(args), :ns)` | Y: `(splice :ns gf args)` | core |
 | Shared-namespace call `@trace(gf(args))` / `{*} ~` | N: splice always nests | core |
-| Untraced call `gf(args)` | Y: `dyn/call` | core |
+| Untraced call `gf(args)` | Y: `dyn/call` | core. *gen.clj:* `(gf a b)`, IFn `invoke` on dynamic generative functions, the combinators and the deterministic ones: a simulated run's return value (`dyn/run-call` is the internal dispatch of traced calls, not this) |
 | `@param` with `init_param!`, `get_param`, `set_param!`, `get_param_grad`, `set_param_grad!`, `zero_param_grad!` | P: `(param :name default)` plus a functional `::param-store`; no gradient accumulators | core |
 | `(grad)` arg annotations, `@gen (grad)` | n/a (MLX AD covers all args). **gen.clj needs a JVM AD substrate** | core |
 | Address discipline (no prefix collisions, fixed support per address) | Y: laws `:address-uniqueness`, `:no-mutation`, `:no-external-randomness`; `verify.cljs` | core |

@@ -51,15 +51,16 @@
    weighs log ξ; without constraints it is simulate, weight 0. update keeps the
    trace when nothing changed (no-change argdiffs, no constraints), and
    otherwise estimates afresh: weight log ξ' - log ξ, the pseudo-marginal
-   ratio. regenerate redraws ω the same way, but cannot resample a selected
-   choice (there is no proposal density to weigh it by), a loud error;
-   project takes all of the choices or none."
+   ratio. regenerate redraws ω the same way; with every choice selected it
+   draws the choices and ω afresh from simulate (weight 0, as generate's),
+   and it cannot resample some of the choices only (there is no proposal
+   density to weigh them by), a loud error. project takes all of the
+   choices or none."
   (:refer-clojure :exclude [-])
   (:require [gen.array :as array :refer [-]]
             [gen.array.batch :as batch]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
-            [gen.dynamic :as dyn]
             [gen.gfi :as gfi]
             [gen.selection :as sel]
             [gen.trace :as trace]))
@@ -68,9 +69,7 @@
 
 (defn- no-choices! [op choices]
   (when-not (cm/empty? choices)
-    (throw (ex-info (str (name op) ": a deterministic generative function makes no choices, but was given "
-                         (pr-str (vec (cm/addresses choices))))
-                    {:op op :addresses (vec (cm/addresses choices))}))))
+    (throw (gfi/unvisited op (vec (cm/addresses choices)) "a deterministic generative function makes no choices"))))
 
 (defn- detached [arg] (array/tree-map #(if (array/array? %) (array/stop-gradient %) %) arg))
 
@@ -116,17 +115,13 @@
     (trace/make-trace {:gen-fn gf :args args :choices cm/EMPTY :retval retval :score 0.0 ::state state})))
 
 (defn- updated
-  "tr moved to args (argdiffs), with update-with-state, or kept when nothing
-   changed (no argument, and gf is the one that made tr: dyn/kept?), run
-   again when gf is another: [trace retdiff]."
+  "tr moved to args (argdiffs) with update-with-state, or kept when no
+   argument changed: [trace retdiff]. (A trace gf did not make, or a call
+   whose store changed, is gfi/revise's: it runs again.)"
   [gf tr args argdiffs]
   (let [args (vec args)]
-    (cond
-      (and (every? diff/no-change? argdiffs) (= (count args) (count (:args tr))) (dyn/kept? gf tr))
+    (if (and (every? diff/no-change? argdiffs) (= (count args) (count (:args tr))))
       [tr diff/no-change]
-      (not (dyn/same-gen-fn? gf (:gen-fn tr)))
-      [(run gf args) diff/unknown-change]
-      :else
       (let [[state retval retdiff] ((:update-with-state gf) (::state tr) args (vec argdiffs))]
         [(assoc tr :args args :retval retval ::state state) retdiff]))))
 
@@ -207,13 +202,24 @@
 
 (defn- check-addresses!
   "choices are all of gf's choices (an estimate is of all of them), a loud
-   error otherwise."
+   error otherwise: an unvisited one for choices at other addresses."
   [gf op choices]
   (let [given (set (cm/addresses choices))]
+    (when-let [others (seq (remove (:addresses gf) given))]
+      (throw (gfi/unvisited op (vec (sort-by str others)) (str "the estimator's choices are " (vec (sort-by str (:addresses gf)))))))
     (when-not (= given (:addresses gf))
       (throw (ex-info (str "estimated: " (name op) " needs every choice of the estimator, " (vec (sort-by str (:addresses gf)))
                            ", given " (vec (sort-by str given)))
                       {:op op :addresses (:addresses gf) :given given})))))
+
+(defn- estimator
+  "(f & args), the user's :estimate or :simulate: a constraint left
+   unvisited in there is its own error, not one of the estimated
+   function's choices (which gfi/revise could drop)."
+  [f & args]
+  (try (apply f args)
+       (catch clojure.lang.ExceptionInfo e
+         (throw (if (:unvisited (ex-data e)) (ex-info (ex-message e) (dissoc (ex-data e) :unvisited) e) e)))))
 
 (defn- estimate-at
   "The trace of gf on args with choices, ω drawn from key."
@@ -221,13 +227,13 @@
   (gfi/check-exact-density! "an estimated density")
   (check-unbatched!)
   (check-addresses! gf op choices)
-  (estimated-trace gf args choices ((:estimate gf) (vec args) choices key) key))
+  (estimated-trace gf args choices (estimator (:estimate gf) (vec args) choices key) key))
 
 (defn- simulated [gf args key]
   (gfi/check-exact-density! "an estimated density")
   (check-unbatched!)
   (if-let [simulate (:simulate gf)]
-    (let [{:keys [choices log-estimate] :as r} (simulate (vec args) key)]
+    (let [{:keys [choices log-estimate] :as r} (estimator simulate (vec args) key)]
       (when-not (and (cm/choicemap? choices) (some? log-estimate))
         (throw (ex-info "estimated: :simulate returns {:choices (a choice map) :log-estimate}"
                         {:returned (keys r)})))
@@ -248,20 +254,23 @@
       {:trace (simulated this args key) :weight 0.0}
       (let [t (estimate-at this :generate args constraints key)] {:trace t :weight (:score t)})))
   (-update [this tr args argdiffs constraints key]
-    (if (and (unchanged? argdiffs) (cm/empty? constraints) (dyn/kept? this tr))
+    (if (and (unchanged? argdiffs) (cm/empty? constraints))
       {:trace tr :weight 0.0 :retdiff diff/no-change :discard cm/EMPTY}
       (let [t (estimate-at this :update args (cm/override (:choices tr) constraints) key)]
         {:trace t :weight (- (:score t) (:score tr)) :retdiff diff/unknown-change
          :discard (sel/get-selected (:choices tr) (sel/from-choicemap constraints))})))
   (-regenerate [this tr args argdiffs selection key]
-    (when-not (cm/empty? (sel/get-selected (:choices tr) selection))
-      (throw (ex-info (str "estimated: regenerate cannot resample a selected choice, since an estimator has no"
-                           " proposal density to weigh it by; update it with a proposal instead")
-                      {:selected (vec (cm/addresses (sel/get-selected (:choices tr) selection)))})))
-    (if (and (unchanged? argdiffs) (dyn/kept? this tr))
-      {:trace tr :weight 0.0 :retdiff diff/no-change}
-      (let [t (estimate-at this :regenerate args (:choices tr) key)]
-        {:trace t :weight (- (:score t) (:score tr)) :retdiff diff/unknown-change})))
+    (let [chosen (sel/get-selected (:choices tr) selection)]
+      (cond
+        ;; every choice: the joint sampler is the internal proposal, as in generate
+        (= chosen (:choices tr)) {:trace (simulated this args key) :weight 0.0 :retdiff diff/unknown-change}
+        (not (cm/empty? chosen))
+        (throw (ex-info (str "estimated: regenerate cannot resample some of the choices only, since an estimator has no"
+                             " proposal density to weigh them by; select all of them, or update with a proposal")
+                        {:selected (vec (cm/addresses chosen))}))
+        (unchanged? argdiffs) {:trace tr :weight 0.0 :retdiff diff/no-change}
+        :else (let [t (estimate-at this :regenerate args (:choices tr) key)]
+                {:trace t :weight (- (:score t) (:score tr)) :retdiff diff/unknown-change}))))
   (-assess [this args choices key]
     (let [t (estimate-at this :assess args choices key)] {:weight (:score t) :retval (:retval t)}))
   (-propose [this args key]

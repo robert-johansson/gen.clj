@@ -347,31 +347,65 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   `(dyn/with-params gf store)` as a record field. `(param :w)` in a body reads
   the store in effect, which reaches every nested splice and combinator kernel
   (one namespace per model, like Pyro's store). A missing parameter is a loud
-  error. **What a call may keep is decided in one place, `dyn/call`**, the
-  dispatch of every call a generative function makes (a splice, a
-  combinator's kernel). Each trace a call makes is marked with the store in
-  effect at the call. An update or regenerate whose store differs from the
-  mark (a name added or removed, or a value that is not the same object or
-  an equal host value: stores are compared without reading an array), or
-  whose generative function does not compute as the one that made the
-  trace (`dyn/same-gen-fn?`: the same object, or the same body, one
-  compiled fn over identical closed-over values, with the same store and
-  middleware), keeps nothing: it runs again as generate from the old
-  choices (update's weight is generate's less the old score, regenerate's
-  less the old projection on the unselected choices, Eq. 4.1, taken under
-  the store the old trace ran under) and gives an unknown-change retdiff,
-  so the ordinary diff machinery reruns what the change reaches. No
-  argument shows a store or a function, and this way no kind of
-  generative function has to know about either: reviews 3 and 4
-  (2026-10-20) found one kind after another that kept a stale call (Map,
-  Unfold, Recurse, estimated densities, the proposal overrides, a
-  deterministic callee picked by a choice) while each kind checked for
-  itself. Two checks stay local, for what no call shows: the static walk's
-  (a node reading `(param :w)` has no inputs), and, for a trace given
-  another gen-fn at the top level, where there is no call, the
-  combinators' kernel identity and `dyn/kept?`. If the new run no longer
-  visits an old choice (the structure changed), the callee's own update
-  decides, with unknown-change argdiffs. Gradients are values: `gen.gradients/param-gradients` returns a map,
+  error. **What an update or regenerate may keep of a trace is decided in
+  two places, for every kind of generative function** (revised 2026-10-20
+  after review 5; reviews 3 and 4 had found one kind after another that
+  kept a stale call while each kind checked for itself: Map, Unfold,
+  Recurse, estimated densities, the proposal overrides, a deterministic
+  callee picked by a choice). No argument shows a store or a function, so
+  no kind's own skipping could see either.
+  - **The maker.** A trace records the generative function that made it
+    (`gen.trace/maker`; `(assoc tr :gen-fn g)` keeps it, and a wrapper's
+    trace of its model is the wrapper's, `trace/as-made-by`). `gfi/run-op`,
+    the dispatch of every nested call and of `gfi/update`,
+    `gfi/regenerate` and gen.batched, revises (`gfi/revise`) a trace whose
+    maker the generative function does not compute as. That is
+    `gfi/same-gen-fn?`: identical, or of one class and the same by its
+    kind's rule (`gfi/IRevisable`). A record's fields must be the same
+    values (`gfi/same-value?`: host values and collections by value, fns
+    by class and closed-over values, generative functions recursively,
+    arrays by identity, never reading one, at most 256 values a
+    comparison). A DynamicGF compares its body fn, store, middleware and
+    dispatcher. So a Switch, a closure or a combinator a body builds again
+    is the same one, and its calls stay incremental. (On MLX a computed
+    scalar is an array, so a closure over one is another gen-fn on every
+    run there: still correct, but its calls run again.)
+  - **The store.** Each trace a call makes is marked with the store in
+    effect at the call (`dyn/run-call`). A call under another store than
+    the mark (compared by `gfi/same-value?`) revises the old trace, which
+    is projected under its own store.
+  - **A revise** keeps nothing of the old trace but its choices. A
+    DynamicGF revising a dynamic trace runs the handler's own update or
+    regenerate against it, as an `if` would. Every site is rescored with
+    the recorded log probabilities, and the static walk skips nothing for
+    a trace another gen-fn made. Each nested call checks its own context,
+    and middleware sees the operation asked for. Every other kind
+    generates from the old choices (`gfi/generate-again`): update's
+    weight is generate's less the old score, and its discard every old
+    choice that did not survive unchanged. Regenerate's weight is
+    generate's less the old trace's projection on the old choices it kept
+    (Eq. 4.1). An old choice the new run leaves unvisited is dropped where
+    it is left: each call in the revise's generate (`gfi/*revising*`) runs
+    its callee once more without it. A structure change thus costs each
+    call one more run (2n kernel runs for an n-element Map, not n²/2). A
+    dropped choice cancels against the reverse move in regenerate. A
+    constraint the new run leaves is the usual unvisited error, and
+    public operations run outside the revise (`gfi/outside-revise`), so a
+    constraint user code gives stays checked. The retdiff is
+    unknown-change, and ω is drawn afresh in every kind: a changed store
+    or gen-fn is a change of what the function depends on, though no hint
+    shows it.
+  - **Unvisited constraints** are one error kind (`gfi/unvisited`:
+    `:unvisited`, `:paths`), raised by every kind and named under each
+    call's address on the way up (`gfi/under`). An estimator's or other
+    user function's own unvisited error is not one of the function's
+    choices, so a revise does not drop it.
+  - **Local checks** remain where no call shows the change: the static
+    walk's skip, for a node reading `(param :w)`, which has no inputs.
+    `with-params` and `with-transitions` take only dynamic generative
+    functions, whose bodies read them.
+
+  Gradients are values: `gen.gradients/param-gradients` returns a map,
   and optimizers return a new store. This is Gen.jl's `@param`,
   `init_param!` and `accumulate_param_gradients!`/`apply!`, but functional.
 - **Batched execution** (decided 2026-10-18 by the agent, for the owner's
@@ -629,9 +663,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
 - **Encapsulated randomness** (thesis §4.5; owner, 2026-10-20): a
   generative function may own randomness ω outside its choice map, its
   score an unbiased estimate ξ of its density (Eq. 4.3), and the trace
-  keeps ω. An update or regenerate keeps ω when the change hints say
-  nothing it depends on changed (no-change argdiffs, no constraint or
-  selection under it), so an identity update weighs exactly 0 and a call
+  keeps ω. An update or regenerate keeps ω when nothing it depends on
+  changed (no-change argdiffs, no constraint or selection under it, and
+  the same store and gen-fn at the call: a revise draws it afresh), so an
+  identity update weighs exactly 0 and a call
   that is skipped keeps its ω; otherwise it draws ω′ with the operation's
   key and weighs log ξ′ − log ξ (regenerate less its proposal ratio). The
   thesis redraws ω at every update (§4.5.1), so its identity updates need
@@ -670,10 +705,13 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     with constraints needs all of the choices (any other set is a loud
     error: the law audit found a strict subset gave a trace missing one);
     without, it is simulate with weight 0, valid on the extended space. A
-    batched run falls back to particles, as for untraced draws. regenerate of a selected choice, and simulate without
-    a joint sampler, are loud errors: an estimator has no proposal density
-    to weigh them by. Pseudo-marginal MH and PMMH are then MH on a model
-    with either.
+    batched run falls back to particles, as for untraced draws. regenerate
+    with every choice selected draws them and ω afresh from the joint
+    sampler, weight 0, as generate does (review 5, R5-6: a revise did so
+    already, and the kind itself refused). regenerate of some of the
+    choices only, and simulate without a joint sampler, are loud errors:
+    an estimator has no proposal density to weigh them by. Pseudo-marginal
+    MH and PMMH are then MH on a model with either.
   - **assess takes a key,** as every other operation (rule 2), since it
     draws ω; with the same key it weighs what generate weighs on the same
     choices, a general law. `(assess gf args choices)` draws one from the
