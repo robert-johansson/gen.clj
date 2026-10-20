@@ -31,7 +31,13 @@
   ^double [^floats ref ^floats got top]
   (reduce max 0.0 (map #(Math/abs (- (aget ref (int %)) (aget got (int %)))) (top-tokens ref top))))
 
+(def ^:dynamic *observe*
+  "When bound, called with (what, |Δ|) for every comparison a check makes
+   against its band: how bands are measured (gen.llm.llama-test)."
+  nil)
+
 (defn- within [failures what d band]
+  (when *observe* (*observe* what d))
   (cond-> failures
     (not (<= d band)) (conj (format "%s: |Δ log p| = %.3g > band %.3g" what d (double band)))))
 
