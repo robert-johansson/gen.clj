@@ -181,7 +181,8 @@ may come from different reads. The scores on a path are the first read's
    threefry draw and two logs per token of the vocabulary) and its
    log-probability 1.0 ms (a log-softmax), together about one decode; a
    host draw from the float row with one gen.random uniform (inverse CDF)
-   costs 78 µs, and the row is already normalized, so its log-probability
+   costs about 335 µs on average over keys (corrected 2026-10-21: the 78
+   µs first given was one key's), and the row is already normalized, so its log-probability
    is a read. Worth a token distribution that does this (or a cheaper
    `categorical-logits` sampler for long rows), and `from-host` taking
    float arrays.

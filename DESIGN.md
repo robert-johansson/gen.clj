@@ -316,6 +316,15 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
   host draws by `token/dist` from `(fold-in key i)`. The GFI laws hold
   exactly on the toy engines, also on one whose reads differ with their
   shapes as llama.cpp's do.
+- **As built (2026-10-21, genclj-loyp; for the owner's review,
+  `docs/research/llm-token-smc.md`).** `gen.llm.potential` weighs token
+  sequences after genlm-control's `Potential` (prefix, complete, the next
+  token's weights over the vocabulary and the end). `gen.llm.smc` is token
+  SMC over a completion, twisted by a potential, with
+  gen.inference.particle-filter's interface: one batched LM read a step,
+  bootstrap, masked or custom proposals, ESS-gated resampling, an
+  estimate unbiased in exp space, particles convertible to the
+  completion's traces.
 
 ## 7. Platform
 
@@ -732,7 +741,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     or more, or 4 MB G1 regions, where no row is humongous. Measured for
     genclj-0cvv: a `categorical-logits` draw at that size costs 4.6 ms on
     the JVM backend (Gumbel-max), a host inverse-CDF draw with one
-    gen.random uniform 78 µs.
+    gen.random uniform about 335 µs on average over keys (corrected
+    2026-10-21: the 78 µs first given was one key's; the draw scans the
+    row in token order, half of it on average).
   - Every token read keeps the score it was read with (the first read
     wins), so `score` along what was read reads nothing (assess after
     simulate, token SMC's prefix potentials). A fresh context is read as its
@@ -759,7 +770,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     probability is read from the row. It is the one exception to rule 3
     ("core code calls only gen.array"), confined to the LLM layer, which
     computes on host floats as the engine does: a `categorical-logits` draw
-    over 151,936 tokens costs 4.6 ms, about a decode, a host draw 78 µs.
+    over 151,936 tokens costs 4.6 ms, about a decode, a host draw 78 µs
+    [corrected 2026-10-21, agent: about 335 µs on average over keys, the
+    78 µs being one key's; still a fourteenth of a `categorical-logits`
+    draw].
 - **The token generative function** (2026-10-21, agent; **for the owner's
   review**, PROVISIONAL while the owner is away;
   `docs/research/llm-token-gf.md`):
@@ -786,6 +800,27 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   - `token/forced` builds constraints (a prefix, text), `token/from` the
     suffix selection; no temperature or top-k (another distribution, a
     later option).
+- **Token SMC and potentials** (2026-10-21, agent; **for the owner's
+  review**, PROVISIONAL while the owner is away;
+  `docs/research/llm-token-smc.md`):
+  - A potential (`gen.llm.potential`) has `prefix` and `complete` log
+    weights of a token context and `logw-next`, a float array of n-vocab
+    + 1 entries (the end an index past the vocabulary), consistent as
+    genlm-control's. Contexts are the generated tokens; an LM's end token
+    stands for the end.
+  - `gen.llm.smc` takes a completion and its arguments, so its target is
+    the token generative function's distribution times exp(complete):
+    a completion stopped at max-tokens is complete. The prefix weights
+    twist the steps; exp(log-ml-estimate) is unbiased for Z = Σ
+    p(x)·exp(complete(x)).
+  - A token weighs log p − log q + its twist, p the LM's ledger's score,
+    so particles agree with the completion's traces exactly. Proposals:
+    the LM's row, the row masked by the twist and renormalized, or a
+    function.
+  - The interface and state are gen.inference.particle-filter's;
+    resampling ESS-gated at n/2, systematic by default. One
+    `lm/batch-next-logprobs` a step; particles are token vectors and the
+    LM's trie owns the branches.
 - **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
   `(array/item x)`, the namespace's last segment, as the Clojure style guide
   has it. It replaced `a`, which the owner found ugly (2026-10-18). The

@@ -57,12 +57,14 @@
           _ (lm/next-logprobs m ctx)
           row (lm/next-logprobs m ctx)
           dist (token/dist row)
-          key (rng/key 1)]
+          ;; keys in turn: a draw's cost depends on where its uniform falls
+          k (volatile! 0)
+          next-key #(rng/key (vswap! k (fn [x] (mod (inc (long x)) 4096))))]
       (println "| | µs |")
       (println "|---|---|")
       (doseq [[what f] [["the toy engine's row (its \"decode\")" #(toy/toy-logprobs 151936 ctx)]
                         ["next-logprobs of a held context (the row's copy)" #(lm/next-logprobs m ctx)]
-                        ["the host draw (inverse CDF of one uniform)" #(dc/sample dist key)]
+                        ["the host draw (inverse CDF of one uniform), over 4,096 keys" #(dc/sample dist (next-key))]
                         ["the score, from the LM's ledger" #(lm/score m ctx [17])]]]
         (println (format "| %s | %.0f |" what (us f)))))))
 

@@ -251,9 +251,15 @@ run, reverted), eighteen, all caught:
 
 So a completion adds about 4 µs a token to the LM calls under it, at a
 97-token vocabulary. At Qwen3's 151,936 tokens its own work a token is the
-row's copy (18 µs) and the host draw (80 µs), the score's lookup under a
-microsecond: about 100 µs, against a llama.cpp decode of 5.8 ms (M2 Max,
-one branch): under 2%.
+row's copy (18 µs) and the host draw, the score's lookup under a
+microsecond. The draw costs about 335 µs on average over keys (353 µs on a
+peaked row): it sums exp over the row in token order until the uniform, half
+the vocabulary on average. (The bench's single key gave 80 µs, the figure
+first reported; corrected 2026-10-21.) So about 350 µs a token, against a
+llama.cpp decode of 5.8 ms (M2 Max, one branch): 6%. Rows that came with
+their probabilities as well (the engine computes the exponentials when it
+normalizes) would make a draw a float sum, tens of microseconds: a
+recommendation for the engine layer, not built.
 
 ## For the llama.cpp runs
 
