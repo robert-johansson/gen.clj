@@ -715,9 +715,13 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     whose results depend on batch shape and cell placement, as
     llama.cpp's).
   - Recommended value shape: `next-logprobs` returns a new host float array
-    (the engine's form, read on the host by byte marginals, masks and
-    weights; the copy is 17 µs at Qwen3's 151,936 tokens, against a 5.4 ms
-    decode), and the token GF converts at its site. Measured for
+    (the engine's form, normalized on the host already, read there by byte
+    marginals, masks and weights; the copy is 17 µs at Qwen3's 151,936
+    tokens, against a 5.8 ms decode, and humongous below a 4 GB heap but
+    reclaimed at no measurable cost), and the token GF converts at its
+    site. A held entry costs its row and about 7 KiB, so the cache holds
+    at most `:max-branches` rows; recommended: LLM work on a heap of 8 GB
+    or more, or 4 MB G1 regions, where no row is humongous. Measured for
     genclj-0cvv: a `categorical-logits` draw at that size costs 4.6 ms on
     the JVM backend (Gumbel-max), a host inverse-CDF draw with one
     gen.random uniform 78 µs.

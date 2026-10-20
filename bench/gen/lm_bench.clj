@@ -6,9 +6,11 @@
    Qwen3's vocabulary (151,936 tokens), the costs behind next-logprobs'
    value shape (a float array copy, a gen.array conversion, a draw).
 
-   Run: clojure -M:test:bench -m gen.lm-bench   (the toy engines are test code)
+   Run: clojure -M:bench -m gen.lm-bench          (the toy engines)
+        clojure -M:bench -m gen.lm-bench memory   (the memory held and churned;
+                                                   try -J-Xmx2g too)
    With llama.cpp's libraries (native/build-llama.sh) and a model:
-        clojure -M:test:bench -m gen.lm-bench model.gguf"
+        clojure -M:bench -m gen.lm-bench model.gguf"
   (:require [criterium.core :as crit]
             [gen.array :as array]
             [gen.dist :as d]
@@ -164,6 +166,54 @@
       (println (format "| %s | %.0f |" what (us f))))))
 
 ;; ---------------------------------------------------------------------------
+;; Memory
+;; ---------------------------------------------------------------------------
+
+(defn- retained
+  "The heap in use after full collections, in bytes (a measurement, never
+   on the LM's path)."
+  ^long []
+  (dotimes [_ 4] (System/gc) (Thread/sleep 100))
+  (let [r (Runtime/getRuntime)] (- (.totalMemory r) (.freeMemory r))))
+
+(defn- gc-counts
+  "[collections milliseconds] of every collector so far."
+  []
+  (reduce (fn [[n ms] ^java.lang.management.GarbageCollectorMXBean b]
+            [(+ (long n) (.getCollectionCount b)) (+ (long ms) (.getCollectionTime b))])
+          [0 0] (ManagementFactory/getGarbageCollectorMXBeans)))
+
+(defn- memory []
+  (let [v 151936
+        heap (.maxMemory (Runtime/getRuntime))]
+    (println (format "\n## Memory, Qwen3's vocabulary (151,936 tokens; a row is 593 KiB), max heap %d MiB"
+                     (quot heap 1048576)))
+    (with-open [^java.io.Closeable e (toy/engine {:n-vocab v :max-branches 64 :n-ctx 4096})
+                m (lm/lm e (tt/tokenizer v) {:max-cells 65536})]
+      (let [prompt [95 40 73]
+            _ (lm/next-logprobs m prompt)
+            before (retained)
+            _ (lm/batch-next-logprobs m (mapv #(conj prompt %) (range 63)))
+            after (retained)
+            [n0 ms0] (gc-counts)
+            t0 (System/nanoTime)
+            _ (dotimes [_ 5000] (lm/next-logprobs m prompt))
+            us (/ (- (System/nanoTime) t0) 1e3 5000)
+            [n1 ms1] (gc-counts)]
+        (println (format "Held per entry (63 more entries): %.0f KiB" (/ (- after before) 63.0 1024)))
+        (println (format "Hits, each copying its row: %.1f µs each; %d collections, %d ms of GC over 5,000"
+                         us (- (long n1) (long n0)) (- (long ms1) (long ms0))))))
+    (with-open [^java.io.Closeable e (toy/engine {:n-vocab n-vocab :max-branches 32 :n-ctx 4096})
+                m (lm/lm e (tt/tokenizer n-vocab) {:max-cells 65536})]
+      (let [before (retained)
+            ;; 32 entries of 2,000 tokens, no two sharing a token after the first
+            _ (doseq [i (range 32)] (lm/next-logprobs m (into [i] (map #(mod (+ i %) 90)) (range 1999))))
+            after (retained)
+            tokens (:tokens (lm/info m))]
+        (println (format "Held per token on a path (%d tokens, rows of 97): %.0f bytes" tokens
+                         (/ (- after before 0.0) tokens)))))))
+
+;; ---------------------------------------------------------------------------
 ;; llama.cpp
 ;; ---------------------------------------------------------------------------
 
@@ -224,9 +274,11 @@
                                (:collections (br/info e)))))))))))
 
 (defn -main
-  "The toy engines' costs; with a GGUF file, llama.cpp's."
-  [& [model]]
-  (if model
-    (llama-costs model)
-    (do (overhead) (allocation) (workloads) (value-shape)))
+  "The toy engines' costs; with memory, only the memory held and churned;
+   with a GGUF file, llama.cpp's."
+  [& [arg]]
+  (case arg
+    nil (do (overhead) (allocation) (workloads) (value-shape) (memory))
+    "memory" (memory)
+    (llama-costs arg))
   (shutdown-agents))

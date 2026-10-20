@@ -162,10 +162,14 @@ may come from different reads. The scores on a path are the first read's
    call.** The engine's form; every consumer below the token site reads it
    on the host (byte marginals over the token-byte trie, grammar masks, SMC
    weights, top-k), and the LM layer stays below gen.array as the engine
-   layer does (DESIGN §9). Measured at Qwen3's 151,936 tokens (table below):
-   the copy costs 17 µs, a conversion to a JVM-backend array 105 µs, against
-   a llama.cpp decode of 5.4 ms (M2 Max). The token GF converts at its
-   site. Alternatives: (a) a shared read-only view, no copy (saves 17 µs
+   layer does (DESIGN §9). The engine normalizes every row on the host
+   already (1.25 ms a row, now on a pool of its own: the Branching review's
+   N1), so an array on MLX's device would add a transfer on top. Measured at
+   Qwen3's 151,936 tokens (tables below): the copy costs 17 µs, a conversion
+   to a JVM-backend array 105 µs, against a llama.cpp decode of 5.8 ms (M2
+   Max). The copy is a humongous object below a 4 GB heap (N11), reclaimed
+   eagerly: 5,000 hits at `-Xmx2g` cost 14 ms of GC. The token GF converts
+   at its site. Alternatives: (a) a shared read-only view, no copy (saves 17 µs
    and the row's 600 KB, most of the caller's allocation per token, with
    values still safe from mutation: a `FloatBuffer.asReadOnlyBuffer` or a
    small immutable type, which every host consumer then reads through); (b) gen.array arrays on the current backend (the
@@ -205,7 +209,7 @@ may come from different reads. The scores on a path are the first read's
 6. **Smaller choices** (recommended; the owner may overrule):
    - A fresh context is read as its first token, then the rest
      teacher-forced: two decodes instead of one prefill (on llama.cpp, a
-     one-token decode, ~5 ms, once per context the LM holds no prefix of),
+     one-token decode, ~6 ms, once per context the LM holds no prefix of),
      so that every token after the first has a score and the trie needs no
      unknown scores.
    - `score` keeps what it reads (the whole sequence becomes an entry), and
@@ -280,8 +284,9 @@ contexts after each call.
 
 ## Measurements (toy engines, this Mac, pure JVM)
 
-`clojure -M:test:bench -m gen.lm-bench` (criterium means; M4, GraalVM 25,
-nice'd, sharing the machine). The toy engine's 97-token vocabulary keeps
+`clojure -M:bench -m gen.lm-bench` (criterium means; M4, GraalVM 25,
+nice'd, sharing the machine; before the merge of the Branching review,
+whose costs on the toy engines are the same). The toy engine's 97-token vocabulary keeps
 its own work small, so the first table is the LM's cost over the Branching
 operations it makes (each of those is a hop to the engine's thread).
 
@@ -297,8 +302,10 @@ So the LM adds 13 to 24 µs to a one-token read (its books, and evicting a
 branch, one more engine call), and 4 to 16 µs to each read of a batch,
 growing with the context: content addressing reads the context, once to
 check its tokens and once to find it in the trie (about 9 ns a token
-together). Against llama.cpp's 5.4 ms for one branch's decode and 27.6 ms
-for 15 (M2 Max, `llm-branching.md`), that is about 1% or less. Two rounds of
+together). Against llama.cpp's 5.8 ms for one branch's advance and 13.5 ms
+for 15 (M2 Max, with the review's normalization pool, `llm-branching.md`),
+that is under 1% for one branch and a few percent for a batch of long
+contexts. Two rounds of
 measurement changed the cache: victims are disposed of in one call, the
 books are keyed by entry ids instead of contexts (hashing a 1000-token
 vector costs 10 µs), and a context's tokens are checked by a loop instead
@@ -338,6 +345,26 @@ next-logprobs' value shape at Qwen3's 151,936 tokens, JVM backend, µs:
 | `categorical-logits` log-probability of a token (log-softmax, pick) | 981 |
 | a host draw: one gen.random uniform, inverse CDF over the float row | 78 |
 
+**Memory** (`clojure -M:bench -m gen.lm-bench memory`, at the default heap,
+8 GB here, and at `-Xmx2g`). A held entry costs its branch's row and about 7
+KiB of books: the cache never copies a row to hold it, and it holds rows
+only at its entries (at most `:max-branches`); a path without an entry
+holds tokens and scores only, about 20 bytes a token (about 36 with token ids
+above 127, whose boxed longs are objects of their own).
+
+| | default heap (4 MB regions) | `-Xmx2g` (1 MB regions) |
+|---|---|---|
+| held per entry, Qwen3 (a 594 KiB row) | 600 KiB | 1,025 KiB: the row is humongous, a region of its own |
+| 5,000 hits, each copying a row | 28.9 µs a hit; 14 collections, 6 ms of GC | 28.1 µs; 17 collections, 14 ms |
+
+So the bound on held rows is `:max-branches` rows (64 × 594 KiB = 37 MiB for
+Qwen3; 255 × 1 MiB for Gemma 3), and below the heap where a row stops
+being humongous (4 GB for Qwen3, 8 GB for Gemma 3's 1,048,592-byte rows)
+each held row takes a whole region, up to 2 MiB for Gemma 3's. Copies
+cost nothing measurable either way. **Recommendation:** run LLM work
+with a heap of 8 GB or more, or `-XX:G1HeapRegionSize=4m`, where no row is
+humongous.
+
 ## For the llama.cpp runs
 
 Not run yet: llama.cpp's libraries and a GGUF model are not on this Mac
@@ -348,7 +375,7 @@ Qwen3-0.6B, Qwen3.5-0.8B (hybrid) and Gemma-3-270M (sliding window):
 - `clojure -J-Dgen.llama.test-model=<gguf> -X:test :nses '[gen.llm.llama-lm-test]'`:
   the contract within 0.1 nats, bit-identical reruns on new engines, the
   GGUF tokenizer's byte vocabulary (and its cost).
-- `clojure -M:test:bench -m gen.lm-bench <gguf>`: per-call costs against the
+- `clojure -M:bench -m gen.lm-bench <gguf>`: per-call costs against the
   Branching operations (hit, one-token read, 8 and 32 in one advance, a
   16-token score read and from the trie), and a token SMC of 16 particles ×
   64 steps (ms a step, reads, evictions, hit rate, backstop count).
