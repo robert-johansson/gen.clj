@@ -327,7 +327,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   `gamma(shape, scale)`, `categorical(probs)`), plus explicitly named variants
   where they matter numerically (e.g. `categorical-logits`). Each GenMLX name
   whose meaning changed has a safeguard that makes a naive port fail loudly
-  (`docs/porting-genmlx.md`).
+  (`docs/porting-genmlx.md`). Families Gen.jl does not have take
+  Distributions.jl's parameters, which GenDistributions' users write
+  (`pareto(alpha, theta)`, `triangular(a, b, c)`; M4, 2026-10-20).
 - **House style: gen.array's operators are referred** in place of
   `clojure.core`'s (`(+ a b)`, not `(array/add a b)`); `max`, `min`, `take` and
   `flatten` are never referred (`docs/array-api.md` §2, §12).
@@ -514,11 +516,17 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   differentiated is a loud error (the library has no gradient), and a lazy
   backend evaluates an array to read it, the cost of a host library.
   Apache Commons Math 3 is the JVM's Distributions.jl: `gen.dist.commons-math`
-  (`real` and `integer` for any of its distributions, and the thirteen
-  univariate families gen.dist lacks, with Distributions.jl's parameters)
-  lives in `ext/commons-math` behind the `:commons-math` alias, outside the
-  core's dependencies (§8). Some of its quantiles come from a solver, to
-  about 1e-9.
+  (`real` and `integer` for any of its distributions, and its discrete
+  hypergeometric and zipf) lives in `ext/commons-math` behind the
+  `:commons-math` alias, outside the core's dependencies (§8). Some of its
+  quantiles come from a solver, to about 1e-9. A host library's draws read
+  their parameters on the host, fall back from batched runs and have no
+  gradients, so the continuous families Distributions.jl has beyond Gen.jl's
+  built-ins are native in gen.dist instead, with its names and parameters:
+  chi-squared, f-dist, gumbel, levy, log-normal, logistic, nakagami, pareto,
+  student-t, triangular and weibull, which batch, run on every backend and
+  differentiate (checked against scipy's densities and, in the extension's
+  tests, against Commons Math's).
 - **The internal-proposal override** (thesis Alg. 16; M4, 2026-10-19):
   `(gen.inference.proposal/with-internal-proposal gf q)`. q is a dynamic
   generative function called as `(q constraints & args)`; it proposes some
