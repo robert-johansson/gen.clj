@@ -4,7 +4,7 @@
 integrate with the pi coding agent, and kmet (a Clojure port of pi, which the
 owner's fork is bringing to the JVM) could play that role for gen.clj. A
 draft for milestones M6 and M7: nothing here is decided beyond writing it
-down. Beans: the M6 and M7 milestones and their first spike.*
+down. Beans: M6 genclj-ytew, M7 genclj-tw4p, and M6's first spike genclj-kaa8.*
 
 ## 1. The idea
 
