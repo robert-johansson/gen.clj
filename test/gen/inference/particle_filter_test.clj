@@ -509,6 +509,42 @@
         (is (not= (tr [0 :x]) (tr' [0 :x])))
         (is (ts/close? (- w' w) (- (- (:score tr') (:score tr)) (ts/number (dc/log-prob (d/normal m s) (tr' [1 :x]))))))))))
 
+;; ---------------------------------------------------------------------------
+;; A proposal with encapsulated randomness (thesis §4.5.4)
+;; ---------------------------------------------------------------------------
+
+(def coin-proposal
+  "The locally optimal mean shifted by ±0.6, the sign an untraced coin: the
+   proposal's density is estimated, ξ = N(x_t; m ± 0.6, 0.5)."
+  (gen [tr t y]
+    (let [[m _] (optimal-moments (tr [(dec t) :x]) y)]
+      (trace [t :x] (d/normal (+ m (array/where (untraced (d/bernoulli 0.5)) 0.6 -0.6)) 0.5)))))
+
+(defn- run-coin-filter [n key]
+  (let [ks (rng/split key (* 2 (count ys)))]
+    (reduce (fn [state t]
+              (-> state
+                  (pf/maybe-resample {:key (ks (dec (* 2 t)))})
+                  (pf/step [(inc t) 0.0] [diff/unknown-change diff/no-change] (observation t)
+                           {:proposal coin-proposal :proposal-args [t (ys t)] :key (ks (* 2 t))})))
+            (pf/initialize model [1 0.0] (observation 0) n {:key (ks 0)})
+            (range 1 (count ys)))))
+
+(deftest ^:heavy smc-with-an-encapsulated-proposal-is-unbiased
+  ;; §4.5.4 (law audit E19): a step weighs log p - log ξ, ξ the proposal's
+  ;; estimate on the ω it proposed with, and E[1/ξ] = 1/q given the choice
+  ;; (Eq. 4.4), so E[exp(estimate)] = p(y) still: over 2000 filters of 20
+  ;; particles, within five standard errors of the runs' own spread (0.98 ±
+  ;; 0.024; with 5 particles the standard error was 0.079, a ratio of 72
+  ;; among them). Planted bug (2026-10-20): the proposal's score assessed on
+  ;; a fresh ω (a coin apart from the one that moved x_t), which inflates
+  ;; 1/ξ, gives 3500 ± 74
+  (let [runs 2000
+        ratios (mapv #(lml-ratio (run-coin-filter 20 %)) (rng/split (rng/key 92) runs))
+        mean (/ (reduce + ratios) runs)
+        sd (Math/sqrt (/ (reduce + (map #(* (- % mean) (- % mean)) ratios)) (dec runs)))]
+    (is (< (ts/abs (- mean 1.0)) (* 5 (/ sd (Math/sqrt runs)))) (str mean " ± " (/ sd (Math/sqrt runs))))))
+
 (deftest edge-cases-of-the-genparticlefilters-operations
   (testing "optimal resampling skips particles of weight 0"
     (let [state {:traces [:a :b :c :d] :log-weights [0.0 ##-Inf 1.0 2.0] :log-ml 0.0}
