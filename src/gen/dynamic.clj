@@ -640,6 +640,65 @@
       :regenerate {:trace (make-trace gf args state) :weight (:weight state)
                    :retdiff (retdiff (:prev opts) state)})))
 
+;; ---------------------------------------------------------------------------
+;; A static function's score: one generated function of its choices
+;; ---------------------------------------------------------------------------
+
+(declare static-scored?)
+
+(defn ^:no-doc static-site
+  "[value log-density] of a static body's trace node at path p of choices,
+   with assess's checks."
+  [dist choices p]
+  (let [c (cm/get-submap choices p)]
+    (when-not (cm/has-value? c)
+      (throw (ex-info (str "assess: no value for the choice at " p) {:path p})))
+    (given-value {:mode :assess} dist c)))
+
+(defn ^:no-doc static-call
+  "[weight retval] of a static body's splice: the callee's assess on args
+   with sub, under key k (nil under an exact-density operation, where no
+   draw may happen)."
+  [g args sub k]
+  (let [args (realize! (vec args))]
+    (if (static-scored? g)
+      ((:score (:static g)) read-param args sub k)
+      (let [r (gfi/run-op g :assess args {:key (or k (rng/key 0)) :constraints sub})] [(:weight r) (:retval r)]))))
+
+(defn- check-static-choices!
+  "Every choice must sit at a node's address, as assess checks: the top
+   level here (a callee checks its own), every path when a node's address
+   is a path."
+  [{:keys [roots paths]} choices]
+  (if paths
+    (doseq [p (cm/addresses choices)]
+      (when-not (some (fn [[kind q]] (if (= kind :trace) (= p q) (= q (subvec p 0 (min (count p) (count q)))))) paths)
+        (throw (ex-info (str "assess: the constraint at " p " was not visited") {:path p :op :assess}))))
+    (doseq [[k _] (cm/submaps choices)]
+      (when-not (contains? roots k)
+        (throw (ex-info (str "assess: the constraint at " [k] " was not visited") {:path [k] :op :assess}))))))
+
+(defn- static-score
+  "assess of a static gf by its generated score fn, without the handler:
+   [weight retval]. Keys are consumed as the handler's assess consumes
+   them, so a callee's encapsulated randomness draws what it would there;
+   under an operation that needs exact densities (gfi/with-exact-density),
+   where a draw is an error anyway, no key is split."
+  [gf args choices key]
+  (check-arity! gf args)
+  (let [st (:static gf)
+        run #(do (check-static-choices! st choices)
+                 (let [[w rv] ((:score st) read-param (vec args) choices (when-not gfi/*exact-density* key))]
+                   [w (realize! rv)]))]
+    (if-let [ps (:params gf)] (binding [*params* (merge *params* ps)] (run)) (run))))
+
+(defn- static-scored?
+  "Is gf a static function whose assess runs its score fn? Not with
+   middleware or a dispatcher, which must see the run, nor batched."
+  [gf]
+  (and (dynamic-gf? gf) (:static gf) (nil? (:transitions gf)) (nil? (:dispatch gf))
+       (not (batch/batch-backend? array/*backend*))))
+
 (defn- project* [tr s]
   (let [from-choices (reduce (fn [acc [p lp]] (if (path-selected? s p) (+ acc lp) acc))
                              0.0 (::scores tr))]
@@ -658,7 +717,10 @@
     (run gf :update args {:key key :prev tr :argdiffs argdiffs :constraints constraints}))
   (-regenerate [gf tr args argdiffs selection key]
     (run gf :regenerate args {:key key :prev tr :argdiffs argdiffs :selection selection}))
-  (-assess [gf args choices key] (run gf :assess args {:key key :constraints choices}))
+  (-assess [gf args choices key]
+    (if (static-scored? gf)
+      (let [[w rv] (static-score gf args choices key)] {:weight w :retval rv})
+      (run gf :assess args {:key key :constraints choices})))
   (-propose [gf args key]
     (let [tr (:trace (run gf :simulate args {:key key}))]
       {:choices (:choices tr) :weight (:score tr) :retval (:retval tr)}))
@@ -941,6 +1003,36 @@
   [names]
   (into {} (map (fn [s] [(list 'quote s) s])) names))
 
+(defn- score-form
+  "The form of a static body's score fn, (fn [param args choices key] →
+   [weight retval]): the body's bindings in order as locals, a trace node's
+   value from choices with its log density, a splice's callee assessed on
+   its sub-map, keys split as the handler's assess splits them (none when
+   key is nil)."
+  [st params coercions locals]
+  (let [args (gensym "args") choices (gensym "choices") key (gensym "key")
+        {:keys [bindings terms]}
+        (reduce (fn [{:keys [bindings terms k]} {:keys [kind addr binding expr]}]
+                  (case kind
+                    :trace (let [v (gensym "v") lp (gensym "lp") k' (gensym "k")]
+                             {:bindings (into bindings [[v lp] `(static-site ~expr ~choices ~(path addr))
+                                                        binding v
+                                                        k' `(when ~k (first (rng/split ~k)))])
+                              :terms (conj terms lp) :k k'})
+                    :splice (let [[g as] expr w (gensym "w") rv (gensym "rv") k' (gensym "k") ks (gensym "ks")]
+                              {:bindings (into bindings [[k' ks] `(if ~k (rng/split ~k) [nil nil])
+                                                         [w rv] `(static-call ~g ~as (cm/get-submap ~choices ~(path addr)) ~ks)
+                                                         binding rv])
+                               :terms (conj terms w) :k k'})
+                    {:bindings (into bindings [binding expr]) :terms terms :k k}))
+                {:bindings [] :terms [] :k key}
+                (:nodes st))]
+    (guard-branches
+     `(fn [~'param ~args ~choices ~key]
+        (let [~params ~args ~@coercions ~@bindings]
+          [(reduce array/+ 0.0 [~@terms]) ~(:expr (:ret st))]))
+     locals)))
+
 (defn- static-form
   "The runtime graph of the static body st (gen.dynamic.static/analyze):
    per node, its kind, address, names and inputs, a guarded fn of (param,
@@ -968,7 +1060,11 @@
                          (when (= :splice (:kind n)) {:arg-specs `'~(:arg-specs n)})
                          (call n)))]
       :ret ~(merge {:inputs `'~(:inputs (:ret st)) :param? (param? (:expr (:ret st))) :f (node-fn (:ret st))}
-                   (call (:ret st)))}))
+                   (call (:ret st)))
+      :score ~(score-form st params coercions locals)
+      :roots ~(set (keep #(when-let [a (:addr %)] (first (path a))) (:nodes st)))
+      :paths ~(when (some #(vector? (:addr %)) (:nodes st))
+                (vec (keep #(when-let [a (:addr %)] [(:kind %) (path a)]) (:nodes st))))}))
 
 (defmacro gen
   "A generative function. params are the arguments (destructuring allowed);

@@ -6,14 +6,23 @@
    The body is one let. Each binding is a call at a constant address,
    (trace addr dist) or (splice addr gf & args), or a pure expression of the
    arguments and earlier bindings (any pure Clojure, including destructuring);
-   then the return expression. Branching happens only inside called
+   then the return expression, which may itself be such a call. Branching happens only inside called
    generative functions. This namespace checks a body at macroexpansion and
    builds its graph as data; gen.dynamic runs it.
 
      (ir gf)    the graph: the arguments, the nodes in order ({:kind :trace,
                 :splice or :compute, :addr, :names, :inputs, :form}) and the
                 return expression's inputs
-     (dot gf)   the graph in Graphviz's DOT (Gen.jl's draw_graph)"
+     (dot gf)   the graph in Graphviz's DOT (Gen.jl's draw_graph)
+
+   A lint says which dynamic generative functions the flag would take, so
+   that a model gets the static language's speed where it fits, without an
+   implicit switch:
+
+     (could-be-static gf)  {:static? true}, or {:static? false :reason …}
+     (lint ns …)           per generative function var of the namespaces
+                           (the current one by default): {:var :static?
+                           :reason}, the flagged ones as {:already true}"
   (:require [clojure.string :as str]))
 
 (def ^:private effects
@@ -125,14 +134,19 @@
           _ (when-not (= 1 (count ret)) (not-static "the let returns one expression" form))
           args (arg-names params)
           known (set (concat (apply concat (:fixed args)) (:rest args)))
+          ;; a call in return position is a last node, its value returned
+          [ret pairs] (let [r (first ret)]
+                        (if (and (seq? r) ('#{trace splice} (first r)))
+                          (let [v (gensym "ret")] [v (concat (partition 2 bindings) [[v r]])])
+                          [r (partition 2 bindings)]))
           [nodes _] (reduce (fn [[nodes known] [binding init]]
                               (let [n (node env binding init known)]
                                 [(conj nodes n) (into known (:names n))]))
-                            [[] known] (partition 2 bindings))
+                            [[] known] pairs)
           names (into known (mapcat :names nodes))]
       {:args args
        :nodes nodes
-       :ret (compute-node env (pure! (first ret) "the return expression") names)})))
+       :ret (compute-node env (pure! ret "the return expression") names)})))
 
 (defn ir
   "gf's graph as data (see the namespace doc), or nil when gf is not static."
@@ -160,3 +174,33 @@
                 line)
         ret-lines (cons "  \"return\" [shape=doublecircle];" (for [s (:inputs return)] (str "  " (id (get owner s s)) " -> \"return\";")))]
     (str "digraph {\n" (str/join "\n" (concat arg-lines lines ret-lines)) "\n}\n")))
+
+;; ---------------------------------------------------------------------------
+;; The lint
+;; ---------------------------------------------------------------------------
+
+(defn could-be-static
+  "Would ^:static take the dynamic generative function gf? Its source is
+   analyzed as the flag would analyze it (in ns, the namespace it was
+   defined in, by default the current one): {:static? true}, or
+   {:static? false :reason the compile error's message}."
+  ([gf] (could-be-static gf *ns*))
+  ([gf ns]
+   (let [[params & body] (:source gf)]
+     (try (binding [*ns* (the-ns ns)] (analyze (vec params) body {}))
+          {:static? true}
+          (catch clojure.lang.ExceptionInfo e {:static? false :reason (ex-message e)})))))
+
+(defn lint
+  "The generative function vars of the namespaces (the current one by
+   default), each with could-be-static's verdict, or {:already true} when
+   it is static: [{:var :static? :reason :already}], in name order."
+  [& nss]
+  (let [dynamic? (requiring-resolve 'gen.dynamic/dynamic-gf?)]
+    (vec (for [ns (or (seq nss) [*ns*])
+               [_ v] (sort-by key (ns-interns (the-ns ns)))
+               :let [gf (when (bound? v) @v)]
+               :when (and gf (dynamic? gf) (:source gf))]
+           (if (:static gf)
+             {:var v :already true}
+             (assoc (could-be-static gf ns) :var v))))))

@@ -672,6 +672,24 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     language's speed where it fits without an implicit switch
     (genclj-ef7r): GenMLX's automatic analysis of every body is what the
     triage found least reliable.
+    - *Scores:* the macro generates one straight-line fn per static body,
+      `(fn [param args choices key] → [weight retval])`, the bindings as
+      locals: a trace node's value read from the choices with its log
+      density, a splice's callee assessed (a static callee by its own score
+      fn). A static gf's `assess` is that fn, so everything built on assess
+      (HMC, MALA, MAP, choice gradients, MH's backward densities) uses it.
+      Keys are split as the handler's assess splits them, so a callee's
+      encapsulated randomness draws the same; under `with-exact-density`,
+      where a draw is an error anyway, none is split. On the JVM backend
+      assess is 1.8–2.8× faster (10 and 100 observations); gradients and
+      HMC gain about 1.25×, their cost being autodiff's, and on MLX a
+      compiled step was one fused graph already (`array/compile` traced the
+      handler), so there the gain is the trace, not the step.
+    - *The lint:* `(static/could-be-static gf)` runs the flag's analysis
+      over a dynamic gf's source in its namespace; `(static/lint ns …)`
+      reports every generative function var. A call in return position,
+      `(let [...] (trace :y …))`, is static too: a last node, its value
+      returned.
 - **Change hints and Diffed propagation** (Gen.jl's IntDiff, SetDiff,
   DictDiff and Diffed; M4, 2026-10-20): `gen.diff` adds `int-diff`,
   `set-diff` and `dict-diff` beside `vector-diff` (each collapsing to

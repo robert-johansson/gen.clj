@@ -73,6 +73,22 @@
 (laws/deflaws static models 100)
 (laws/deflaws static models 100 laws/static)
 
+;; a static body over a callee with encapsulated randomness: its score fn
+;; must split keys as the handler's assess does (assess = generate on the
+;; same key), and skip them only under an exact-density operation
+(def noisy-callee (gen [m] (trace :x (d/normal (+ m (untraced (d/normal 0 0.5))) 1))))
+
+(def over-noise
+  (gen ^:static [m]
+    (let [mu (trace :mu (d/normal m 1))
+          x (splice :inner noisy-callee mu)
+          _ (trace :y (d/normal x 1))]
+      x)))
+
+(def omega-laws (merge laws/encapsulated laws/static))
+
+(laws/deflaws static-omega [[:over-noise over-noise [0.0] [[1.0]]]] 60 omega-laws)
+
 ;; ---------------------------------------------------------------------------
 ;; Skipping
 ;; ---------------------------------------------------------------------------
@@ -203,6 +219,30 @@
                                                                          a (if b (trace :x (d/normal 0 1)) 0.0)] a))]
                         ["a splice without an address" '(gen ^:static [g] (let [a (splice g)] a))]
                         ["an untraced draw" '(gen ^:static [] (let [a (untraced (d/normal 0 1))] a))]
-                        ["a trace in the return expression" '(gen ^:static [] (let [a 1] (trace :a (d/normal a 1))))]]]
+                        ["a trace inside the return expression" '(gen ^:static [] (let [a 1] (+ 1 (trace :a (d/normal a 1)))))]]]
       (testing why
         (is (re-find #"gen \^:static" (str (static-error form))))))))
+
+;; ---------------------------------------------------------------------------
+;; The lint
+;; ---------------------------------------------------------------------------
+
+(def fits (gen [m] (let [a (trace :a (d/normal m 1)) b (* 2 a)] (trace :b (d/normal b 1)))))
+(def branches (gen [] (let [b (trace :b (d/bernoulli 0.5)) x (if b (trace :x (d/normal 0 1)) 0.0)] x)))
+(def loops (gen [n] (doseq [i (range n)] (trace [:y i] (d/normal 0 1)))))
+(def noisy (gen [] (let [e (untraced (d/normal 0 1))] (trace :x (d/normal e 1)))))
+
+(deftest the-lint-says-what-the-flag-would-take
+  (is (= {:static? true} (static/could-be-static fits 'gen.static-test)))
+  (doseq [[gf why] [[branches #"calls trace"] [loops #"one let"] [noisy #"untraced"]]]
+    (let [{:keys [static? reason]} (static/could-be-static gf 'gen.static-test)]
+      (is (false? static?))
+      (is (re-find why reason))))
+  (testing "over a namespace"
+    (let [report (into {} (map (juxt (comp :name meta :var) identity)) (static/lint 'gen.static-test))]
+      (is (:static? (report 'fits)))
+      (is (false? (:static? (report 'loops))))
+      (is (:already (report 'linreg)))))
+  (testing "the verdict is the flag's: a body the lint accepts compiles with ^:static"
+    (binding [*ns* (the-ns 'gen.static-test)]
+      (is (dyn/dynamic-gf? (eval (list* `gen (vary-meta (first (:source fits)) assoc :static true) (rest (:source fits)))))))))

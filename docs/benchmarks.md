@@ -332,3 +332,19 @@ mu))` against the same body without the flag, per update:
 What is skipped costs nothing; when everything reruns, the walk of the
 graph costs about 20 µs over the plain body at this size (its env maps),
 lost in the work beyond about 100 observations.
+
+**Compiled scores** (genclj-rj78; JVM backend, a Metal test run beside it):
+a static gf's assess is a generated straight-line fn of its choices. On
+GenMLX's linear regression with a static kernel in its Map, against the
+same bodies without the flag:
+
+| | N = 10, static / dynamic | N = 100, static / dynamic |
+|---|---|---|
+| assess | 77 / 139 µs | 137 / 389 µs |
+| choice-gradients | 236 / 228 µs | 1060 / 1324 µs |
+| HMC, L = 10, plain | 3038 / 2574 µs | 16509 / 18345 µs |
+| HMC, L = 10, compiled | 1818 / 1859 µs | 12064 / 15224 µs |
+
+Autodiff dominates the gradients and HMC; plain HMC still runs an update
+per leapfrog step, which the static runner does more slowly than the
+handler at N = 10 (its env maps).
