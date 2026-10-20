@@ -413,13 +413,12 @@
     (apply merge (zipmap rest (repeat rest-d)) positional)))
 
 (defn- spec-diff
-  "An argument's diff from its spec (gen.dynamic.static): its symbol's,
-   none for a constant, or unknown-change unless every input of its
-   expression is unchanged."
-  [diffs {:keys [symbol constant inputs]}]
-  (cond symbol (get diffs symbol diff/no-change)
+  "An argument's diff from its spec: its slot's, none for a constant, or
+   unknown-change unless every slot its expression reads is unchanged."
+  [diffs {:keys [slot constant in]}]
+  (cond slot (nth diffs slot)
         constant diff/no-change
-        (every? #(diff/no-change? (get diffs % diff/no-change)) inputs) diff/no-change
+        (every? #(diff/no-change? (nth diffs %)) in) diff/no-change
         :else diff/unknown-change))
 
 (defn- computed
@@ -427,7 +426,7 @@
    of a var gets its diff from gen.diff/propagate."
   [{:keys [f rule args-f arg-specs alias]} env diffs old skip?]
   (cond
-    alias [(get env alias) (if skip? (get diffs alias diff/no-change) diff/unknown-change)]
+    alias [(nth env alias) (if skip? (nth diffs alias) diff/unknown-change)]
     ;; the value from the node's guarded fn, as the body computes it; the
     ;; rule sees the arguments only for the diff
     rule
@@ -463,7 +462,7 @@
    retdiff, from gen.diff/propagate for a binding that is one call, and a
    splice hands its callee its arguments' diffs. A gf with middleware
    (with-transitions) reruns every node, so its transitions see every site."
-  [{:keys [nodes ret args-bind params] :as st} gf vol trace-fn splice-at args]
+  [{:keys [nodes ret args-bind params slots size] :as st} gf vol trace-fn splice-at args]
   (let [{:keys [mode prev constraints selection argdiffs]} @vol
         values (::node-values prev)
         ;; the values are this graph's (not another static gf's at the same
@@ -477,11 +476,11 @@
                      (cond (= mode :update) (not (cm/empty? (cm/get-submap constraints p)))
                            (= kind :trace) (path-selected? selection p)
                            :else (not= sel/none (subselection-at selection p)))))
-        unchanged? (fn [diffs names] (every? #(diff/no-change? (get diffs % diff/no-change)) names))
+        unchanged? (fn [diffs in] (every? #(diff/no-change? (nth diffs %)) in))
         [env diffs vals]
-        (reduce (fn [[env diffs vals] [i {:keys [kind addr inputs param? f bind names symbol? arg-specs] :as n}]]
+        (reduce (fn [[env diffs vals] [i {:keys [kind addr in out f bind symbol? arg-specs] :as n}]]
                   (let [old (when skip? (nth values i))
-                        keep? (and skip? (unchanged? diffs inputs) (not (reached? n)))
+                        keep? (and skip? (unchanged? diffs in) (not (reached? n)))
                         [v d] (cond
                                 keep? [(keep-node! vol n old) diff/no-change]
                                 (= kind :trace) (let [v (trace-fn addr (f read-param env))]
@@ -489,16 +488,19 @@
                                 (= kind :splice) (let [[g as] (f read-param env)]
                                                    (splice-at addr g as (when skip? (mapv #(spec-diff diffs %) arg-specs))))
                                 :else (computed n env diffs old skip?))]
-                    [(merge env (bind v))
-                     (merge diffs (if symbol?
-                                    {(first names) d}
-                                    (zipmap names (repeat (if (diff/no-change? d) diff/no-change diff/unknown-change)))))
+                    [(bind env v)
+                     (let [d (if (or symbol? (diff/no-change? d)) d diff/unknown-change)]
+                       (reduce #(assoc %1 %2 d) diffs out))
                      (conj vals v)]))
-                [(args-bind args) (if skip? (arg-name-diffs (:args st) params argdiffs) {}) []]
+                [(args-bind args)
+                 (reduce-kv (fn [ds x d] (assoc ds (slots x) d))
+                            (vec (repeat size diff/no-change))
+                            (if skip? (arg-name-diffs (:args st) params argdiffs) {}))
+                 []]
                 (map-indexed vector nodes))]
     ;; the store in effect, which the next update's skipping requires
     (vswap! vol assoc ::node-values vals ::params *params*)
-    (if (and skip? (unchanged? diffs (:inputs ret)))
+    (if (and skip? (unchanged? diffs (:in ret)))
       (do (vswap! vol assoc ::retdiff diff/no-change) (:retval prev))
       (let [[v d] (computed ret env diffs (:retval prev) skip?)]
         (vswap! vol assoc ::retdiff d)
@@ -1049,32 +1051,47 @@
      locals)))
 
 (defn- static-form
-  "The runtime graph of the static body st (gen.dynamic.static/analyze):
-   per node, its kind, address, names and inputs, a guarded fn of (param,
-   the inputs' values) for its distribution, call or value, and a fn
-   binding its names from its value."
+  "The runtime graph of the static body st (gen.dynamic.static/analyze),
+   its names in slots (the arguments' first): per node, its kind, address,
+   names and inputs, the slots it reads and writes, a guarded fn of (param,
+   env) for its distribution, call or value, a fn writing its names' slots
+   from its value, and how its diff is found (a rule, an alias, argument
+   specs)."
   [st params coercions locals]
-  (let [node-fn (fn [{:keys [inputs expr]}]
-                  (guard-branches `(fn [~'param {:syms [~@inputs]}] ~expr) (into locals inputs)))
+  (let [arg-names (vec (concat (apply concat (:fixed (:args st))) (:rest (:args st))))
+        names (vec (distinct (concat arg-names (mapcat :names (:nodes st)))))
+        slots (zipmap names (range))
+        env (gensym "env")
+        reads (fn [inputs] (vec (mapcat (fn [x] [x `(nth ~env ~(slots x))]) inputs)))
+        node-fn (fn [{:keys [inputs expr]}]
+                  (guard-branches `(fn [~'param ~env] (let ~(reads inputs) ~expr)) (into locals inputs)))
         param? (fn [expr] (boolean (some #{'param} (tree-seq coll? seq expr))))
+        spec (fn [{:keys [symbol constant inputs]}]
+               (cond (and symbol (contains? slots symbol)) {:slot (slots symbol)}
+                     (or symbol constant) {:constant true}
+                     :else {:in (mapv slots inputs)}))
         call (fn [{:keys [call args arg-specs inputs alias]}]
-               (cond call {:rule `(var ~call) :arg-specs `'~arg-specs
-                           :args-f `(fn [~'param {:syms [~@inputs]}] [~@args])}
-                     alias {:alias `'~alias}))
+               (cond call {:rule `(var ~call) :arg-specs (mapv spec arg-specs)
+                           :args-f `(fn [~'param ~env] (let ~(reads inputs) [~@args]))}
+                     alias {:alias (slots alias)}))
         v (gensym "v")
         args (gensym "args")]
     `{:args '~(:args st)
       :params '~params
-      :args-bind (fn [~args] (let [~params ~args ~@coercions] ~(names-map (concat (apply concat (:fixed (:args st))) (:rest (:args st))))))
+      :slots '~slots
+      :size ~(count names)
+      :args-bind (fn [~args] (let [~params ~args ~@coercions] [~@arg-names ~@(repeat (- (count names) (count arg-names)) nil)]))
       :nodes [~@(for [n (:nodes st)]
                   (merge `{:kind ~(:kind n) :addr ~(:addr n) :names '~(:names n) :inputs '~(:inputs n) :form '~(:form n)
+                           :in ~(mapv slots (:inputs n)) :out ~(mapv slots (:names n))
                            :symbol? ~(symbol? (:binding n))
                            :param? ~(param? (:expr n))
                            :f ~(node-fn n)
-                           :bind (fn [~v] (let [~(:binding n) ~v] ~(names-map (:names n))))}
-                         (when (= :splice (:kind n)) {:arg-specs `'~(:arg-specs n)})
+                           :bind (fn [~env ~v] (let [~(:binding n) ~v] (-> ~env ~@(map (fn [x] `(assoc ~(slots x) ~x)) (:names n)))))}
+                         (when (= :splice (:kind n)) {:arg-specs (mapv spec (:arg-specs n))})
                          (call n)))]
-      :ret ~(merge {:inputs `'~(:inputs (:ret st)) :param? (param? (:expr (:ret st))) :f (node-fn (:ret st))}
+      :ret ~(merge {:inputs `'~(:inputs (:ret st)) :in (mapv slots (:inputs (:ret st)))
+                    :param? (param? (:expr (:ret st))) :f (node-fn (:ret st))}
                    (call (:ret st)))
       :score ~(score-form st params coercions locals)
       :roots ~(set (keep #(when-let [a (:addr %)] (first (path a))) (:nodes st)))

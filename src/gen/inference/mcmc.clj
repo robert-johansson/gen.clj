@@ -127,23 +127,15 @@
   ([trace selection tau] (mala trace selection tau nil))
   ([trace selection tau key-or-opts]
    (let [{:keys [key compile?]} (step-opts key-or-opts)
-         [k-propose k-update k-accept] (rng/split key 3)]
-     (or (when compile?
-           (let [[proto v others] (flat-values trace selection)
-                 noise (rng/normal k-propose (array/shape v))]
-             (when-let [[v' log-q] (compiled-step trace proto others [:mala tau]
-                                                  #(mala-proposal (:gen-fn trace) (:args trace) proto tau)
-                                                  v noise others)]
-               (let [[t' weight] (move-to trace proto v' k-update)]
-                 (accept trace t' (+ weight log-q) k-accept)))))
-         (let [sd (Math/sqrt (* 2.0 (double tau)))
-               [proto v g] (flat-gradient trace selection)
-               fwd-mu (+ v (* tau g))
-               v' (+ fwd-mu (* sd (rng/normal k-propose (array/shape v))))
-               [t' weight] (move-to trace proto v' k-update)
-               [_ _ g'] (flat-gradient t' selection)
-               bwd-mu (+ v' (* tau g'))]
-           (accept trace t' (+ (- weight (normal-lp v' fwd-mu sd)) (normal-lp v bwd-mu sd)) k-accept))))))
+         [k-propose k-update k-accept] (rng/split key 3)
+         [proto v others] (flat-values trace selection)
+         noise (rng/normal k-propose (array/shape v))
+         build #(mala-proposal (:gen-fn trace) (:args trace) proto tau)
+         ;; the proposal as a function of the selected values, compiled or not
+         [v' log-q] (or (when compile? (compiled-step trace proto others [:mala tau] build v noise others))
+                        ((build) v noise others))
+         [t' weight] (move-to trace proto v' k-update)]
+     (accept trace t' (+ weight log-q) k-accept))))
 
 (defn- leapfrogs
   "L leapfrog steps as a function of arrays only: [v p others] → [v' p']."
@@ -166,7 +158,8 @@
    one MLX graph on the MLX backend, the same steps on the JVM backend), a
    function of the selected values and the other choices, cached per model,
    arguments and structure. A model that reads a value on the host cannot
-   be compiled and runs the steps one at a time."
+   be compiled and runs the same function uncompiled. Either way the trace
+   is updated once, after the L steps."
   ([trace selection] (hmc trace selection nil))
   ([trace selection opts] (hmc trace selection opts (or (:key opts) (gfi/next-key))))
   ([trace selection {:keys [L eps compile?] :or {L 10 eps 0.1}} key]
@@ -174,24 +167,14 @@
          kinetic (fn [p] (normal-lp p 0.0 1.0))
          finish (fn [t' p0 p]
                   (accept trace t' (+ (- (:score t') (:score trace)) (- (kinetic p) (kinetic p0))) k-accept))]
-     (or (when compile?
-           (let [[proto v others] (flat-values trace selection)
-                 p0 (rng/normal k-momenta (array/shape v))]
-             (when-let [[v' p] (compiled-step trace proto others [:hmc L eps]
-                                              #(leapfrogs (:gen-fn trace) (:args trace) proto L eps)
-                                              v p0 others)]
-               (finish (first (move-to trace proto v' k-update)) p0 p))))
-         (let [[proto v g] (flat-gradient trace selection)
-               p0 (rng/normal k-momenta (array/shape v))
-               [t' p] (loop [i 0 t trace v v g g p p0]
-                        (if (< i (long L))
-                          (let [p (+ p (* (/ eps 2.0) g))
-                                v (+ v (* eps p))
-                                [t _] (move-to t proto v (rng/fold-in k-update i))
-                                [_ _ g] (flat-gradient t selection)]
-                            (recur (inc i) t v g (+ p (* (/ eps 2.0) g))))
-                          [t p]))]
-           (finish t' p0 p))))))
+     (let [[proto v others] (flat-values trace selection)
+           p0 (rng/normal k-momenta (array/shape v))
+           build #(leapfrogs (:gen-fn trace) (:args trace) proto L eps)
+           ;; the L steps as a function of the selected values, compiled or
+           ;; not: the trace is updated once, at the end
+           [v' p] (or (when compile? (compiled-step trace proto others [:hmc L eps] build v p0 others))
+                      ((build) v p0 others))]
+       (finish (first (move-to trace proto v' k-update)) p0 p)))))
 
 (defn map-optimize
   "One step of gradient ascent on the log density of the selected choices,
