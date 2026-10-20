@@ -91,7 +91,9 @@
 
 (defn read
   "The value at addr of an input space (model-in or aux-in), tagged
-   :discrete or :continuous."
+   :discrete or :continuous. A discrete value comes back as a host value
+   (a boolean or a number), so the body may branch on it with if: on a lazy
+   backend it is an array, which would always be truthy."
   [space addr tag]
   (check-space :read space #{:model-in :aux-in})
   (check-tag :read tag)
@@ -107,7 +109,7 @@
       (vswap! st #(-> % (update :reads conj [space p tag]) (assoc-in [:read-tags [space p]] tag))))
     (if (= tag :continuous)
       (get (:subst s) [space p] (cm/get-value sub))
-      (cm/get-value sub))))
+      (let [v (cm/get-value sub)] (if (array/array? v) (array/->clj v) v)))))
 
 (defn write
   "Set addr of an output space (model-out or aux-out) to value, tagged

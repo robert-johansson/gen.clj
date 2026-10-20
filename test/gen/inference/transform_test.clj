@@ -174,7 +174,7 @@
                         (let [tr (:trace (gfi/generate scaled [] (cm/choicemap :x x :y 0.8) (rng/key 0)))]
                           (mh/involutive-mh tr log-scale [] move key)))
                       xs (rng/split (rng/key 14) n))
-        xs' (mapv #((:trace %) :x) stepped)
+        xs' (mapv #(ts/number ((:trace %) :x)) stepped)
         accepted (count (filter :accepted? stepped))
         [m s] (mean-sd xs')]
     (is (< 0.2 (/ accepted n) 0.95) (str accepted " accepted"))

@@ -63,7 +63,7 @@
         stepped (mapv (fn [x key]
                         (tk/mh (:trace (gfi/generate tt/scaled [] (cm/choicemap :x x :y 0.8) (rng/key 0))) scale [] key))
                       xs (rng/split (rng/key 8) n))
-        [m s] (tt/mean-sd (mapv #((:trace %) :x) stepped))]
+        [m s] (tt/mean-sd (mapv #(ts/number ((:trace %) :x)) stepped))]
     (is (< 0.2 (/ (count (filter :accepted? stepped)) n) 0.95))
     (is (< (Math/abs (- m 0.64)) (* 5 (/ (Math/sqrt 0.2) (Math/sqrt n)))) (str m))
     (is (< (Math/abs (- (* s s) 0.2)) (* 5 0.2 (Math/sqrt (/ 2.0 (dec n))))) (str (* s s)))))

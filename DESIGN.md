@@ -558,6 +558,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
 - **Transform bodies are eager** (2026-10-20): a lazy call (for, map, …)
   holding a write, copy or tcall is an error when the transform is
   defined (use doseq, run! or mapv), as `gen` bodies run to completion.
+  A discrete read returns a host value, so the body branches with a plain
+  `if`: on MLX a sampled boolean is an array, always truthy, which sent a
+  random walk down the merge branch (the full battery on Metal, the same
+  night).
 - **Recurse** (M4, 2026-10-20): `(comb/recurse production aggregation
   max-branch)` as Gen.jl's, with 0-based nodes (root 0, child j of node i
   at i·max-branch + j + 1), choices at `[i :production]` and
