@@ -308,7 +308,8 @@
   (doseq [cov [[[2.0 2.0] [2.0 2.0]] [[8.0 -6.0 2.0] [-6.0 5.0 -1.0] [2.0 -1.0 1.0]]]]
     (let [e (try (d/mvnormal (vec (repeat (count cov) 0.0)) cov) nil (catch clojure.lang.ExceptionInfo e e))]
       (is (re-find #"positive definite" (str (ex-message e))) (str cov))
-      (is (= {:distribution "mvnormal" :param "cov" :dtype (ts/float-dtype)} (ex-data e)) (str cov))))
+      (is (= {:distribution "mvnormal" :param "cov" :dtype (ts/float-dtype)} (dissoc (ex-data e) :suggested-jitter))
+          (str cov))))
   (testing "covariances singular at float32 precision only"
     ;; 1 - 2⁻²⁶ is 1 in float32 (a zero pivot); 1 - 2⁻²³ is a float32 whose
     ;; κ·ε is 2. In float64 both give the closed form, within κ·ε.
@@ -324,6 +325,36 @@
           (is (thrown-with-msg? clojure.lang.ExceptionInfo #"float32"
                                 (d/mvnormal [0.0 0.0] (array/astype (array/array cov) :float32)))
               (str rho)))))))
+
+(deftest mvnormal-suggests-a-jitter
+  ;; the owner's decision: the threshold holds at every precision, so in
+  ;; float32 a Gaussian-process kernel needs a jitter at float32's scale.
+  ;; When the factor exists, the error names the smallest 1, 2 or 5 × 10ᵏ
+  ;; that passes once added to the diagonal.
+  (let [n 50
+        xs (mapv #(/ (double %) (dec n)) (range n))
+        ;; squared exponential, length scale 0.1 on [0, 1], 1e-6 on the diagonal
+        kernel (vec (for [a xs] (vec (for [b xs] (+ (Math/exp (* -50.0 (Math/pow (- a b) 2))) (if (= a b) 1e-6 0.0))))))
+        mu (vec (repeat n 0.0))]
+    (when-not (ts/f32?)
+      (is (some? (d/mvnormal mu kernel)) "the same kernel passes in float64"))
+    ;; float32: host data on a float32 backend, a float32 array on the JVM's
+    (when (or (ts/f32?) (ts/jvm?))
+      (let [cov (if (ts/f32?) kernel (array/astype (array/array kernel) :float32))
+            plus (fn [jitter] (if (ts/f32?)
+                                (vec (map-indexed (fn [i row] (update row i + jitter)) kernel))
+                                (array/+ cov (array/* jitter (array/eye n {:dtype :float32})))))
+            e (try (d/mvnormal mu cov) nil (catch clojure.lang.ExceptionInfo e e))
+            jitter (:suggested-jitter (ex-data e))]
+        (is (= :float32 (:dtype (ex-data e))))
+        (is (number? jitter))
+        (is (re-find (re-pattern (str "jitter of " jitter)) (str (ex-message e))))
+        (is (some? (d/mvnormal mu (plus jitter))) "adding it passes")
+        (is (thrown? clojure.lang.ExceptionInfo (d/mvnormal mu (plus (* 0.4 jitter))))
+            "0.4 times it, at most the next smaller suggestion, does not"))))
+  (testing "none for a factor that fails, also when a jitter would mend it"
+    (let [e (try (d/mvnormal [0.0 0.0] [[1.0 1.0001] [1.0001 1.0]]) nil (catch clojure.lang.ExceptionInfo e e))]
+      (is (= {:distribution "mvnormal" :param "cov" :dtype (ts/float-dtype)} (ex-data e))))))
 
 (dc/defdist softmax-categorical
   "A user-defined distribution without a value-shape clause."

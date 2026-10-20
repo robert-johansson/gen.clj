@@ -16,9 +16,11 @@
                                      lgamma log-beta xlogy xlog1py logical-and logical-or]]
             [gen.array.dtype :as dt]
             [gen.array.linalg :as la]
+            [gen.array.protocols :as p]
             [gen.array.shape :as sh]
             [gen.dist.core :as dc :refer [defdist]]
-            [gen.random :as rng]))
+            [gen.random :as rng])
+  (:import [gen.array.protocols IBatchedValue]))
 
 (set! *warn-on-reflection* true)
 
@@ -191,10 +193,34 @@
         m (la/solve-triangular (la/cholesky a) (* eye (array/expand-dims (sqrt (la/diagonal a)) -2)))]
     (array/all-true? (< (* n (machine-epsilon dtype) (array/sum (square m) {:axis [-2 -1]})) 1.0))))
 
+(defn- host-max
+  "The largest element of x on the host, across every particle of a batched
+   value (as array/all-true? reads one)."
+  ^double [x]
+  (double (array/item (array/max (if (instance? IBatchedValue x) (p/-all-particles x) x)))))
+
+(defn- suggested-jitter
+  "The smallest jitter, 1, 2 or 5 times a power of ten from ε times a's
+   largest diagonal entry up to that entry, that lets positive-definite?
+   pass once added to a's diagonal; nil when a's factor fails (no jitter at
+   the dtype's scale mends an indefinite matrix) or none does."
+  [a dtype]
+  (when-not (array/any-true? (array/isnan (la/cholesky a)))
+    (let [eye (array/with-backend (array/backend a) (array/eye (peek (array/shape a)) {:dtype (array/dtype a)}))
+          top (host-max (la/diagonal a))
+          lo (* (machine-epsilon dtype) top)]
+      (->> (for [e (iterate inc (long (Math/floor (Math/log10 lo)))) m [1 2 5]] (Double/parseDouble (str m "e" e)))
+           (drop-while #(< % lo))
+           (take-while #(<= % top))
+           (filter #(positive-definite? (+ a (* % eye)) dtype))
+           first))))
+
 (defdist mvnormal
   "mvnormal(mu, cov): the multivariate normal with mean vector mu and
    covariance matrix cov (batched over leading axes). A concrete cov must be
-   symmetric and positive definite, also to the precision it is factored in."
+   symmetric and positive definite, also to the precision it is factored in;
+   when its factor exists but is too ill-conditioned, the error suggests a
+   jitter for its diagonal."
   [mu cov]
   (validate (dc/check (and (<= 1 (array/ndim mu)) (<= 2 (array/ndim cov))
                            (= (peek (array/shape mu)) (peek (array/shape cov)) (peek (pop (array/shape cov)))))
@@ -207,9 +233,13 @@
                 (dc/check (array/all-true? (<= (array/abs (- cov cov-t)) (+ 1e-8 (* 1e-5 (array/abs cov-t)))))
                           "mvnormal" "cov must be symmetric" {})
                 (let [dtype (factored-dtype cov)]
-                  (dc/check (positive-definite? cov dtype) "mvnormal"
-                            (str "cov must be positive definite, and not singular at " (name dtype) " precision")
-                            {:param "cov" :dtype dtype})))))
+                  (when-not (positive-definite? cov dtype)
+                    (let [jitter (suggested-jitter cov dtype)]
+                      (throw (ex-info (cond-> (str "mvnormal: cov must be positive definite, and not singular at "
+                                                   (name dtype) " precision")
+                                        jitter (str "; adding a jitter of " jitter " to its diagonal passes"))
+                                      (cond-> {:distribution "mvnormal" :param "cov" :dtype dtype}
+                                        jitter (assoc :suggested-jitter jitter))))))))))
   (sample [key shape]
     (let [d (peek (array/shape mu))
           batch (sh/broadcast (sh/broadcast shape (pop (array/shape mu))) (pop (pop (array/shape cov))))
