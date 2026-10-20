@@ -8,11 +8,13 @@
             [gen.choicemap :as cm]
             [gen.dist :as d]
             [gen.dist.core :as dc]
+            [gen.inference.mh :as mh]
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
             [gen.inference.proposal :as prop]
             [gen.laws :as laws]
             [gen.random :as rng]
+            [gen.selection :as sel]
             [gen.test-support :as ts]))
 
 (defn- open? [sigma addr] (not (cm/has-value? (cm/get-submap sigma addr))))
@@ -57,6 +59,9 @@
     [1.0] [[2.0]]]])
 
 (laws/deflaws internal-proposal law-models 60 laws/general)
+;; every address has a fixed support: Def. 4.1.1 has content for a proposal
+;; other than the prior (law audit gap 8)
+(laws/deflaws internal-proposal law-models 60 laws/fixed-support)
 
 (deftest the-exact-posterior-as-proposal-gives-the-evidence
   ;; mu ~ N(0, 1), y ~ N(mu, 1): mu | y ~ N(y/2, √½), and p(y) = N(y; 0, √2).
@@ -136,3 +141,22 @@
         m (/ (reduce clojure.core/+ ratios) n)
         sd (Math/sqrt (/ (reduce clojure.core/+ (map #(Math/pow (clojure.core/- % m) 2) ratios)) (dec n)))]
     (is (< (Math/abs (clojure.core/- m 1.0)) (* 5 (/ sd (Math/sqrt n)))) (str m " ± " (/ sd (Math/sqrt n))))))
+
+(deftest ^:slow ^:heavy mh-under-an-override-keeps-the-posterior
+  ;; law audit gap 6: from 4000 exact posterior draws (y = 1.3: mu | y ~
+  ;; N(0.65, sqrt(1/2))), one selection-MH move with q = N(1, 1.5) as the
+  ;; internal proposal keeps mean and variance within 5 standard errors
+  (let [gf (prop/with-internal-proposal normal-normal
+             (gen [sigma] (when (open? sigma :mu) (trace :mu (d/normal 1.0 1.5)))))
+        n 4000
+        v 0.5
+        mus (mapv #(clojure.core/+ 0.65 (clojure.core/* (Math/sqrt v) %)) (ts/host (dc/sample (d/normal 0 1) (rng/key 95) [n])))
+        moved (mapv (fn [mu k] (let [[k0 k1] (rng/split k)]
+                                 (ts/number ((:trace (mh/mh (:trace (gfi/generate gf [] (cm/choicemap :mu mu :y 1.3) k0))
+                                                            (sel/select :mu) k1))
+                                             :mu))))
+                    mus (rng/split (rng/key 96) n))
+        m (clojure.core// (reduce clojure.core/+ moved) n)
+        var (clojure.core// (reduce clojure.core/+ (map #(let [e (clojure.core/- % m)] (clojure.core/* e e)) moved)) (dec n))]
+    (is (< (Math/abs (clojure.core/- m 0.65)) (clojure.core/* 5 (Math/sqrt (clojure.core// v n)))))
+    (is (< (Math/abs (clojure.core/- var v)) (clojure.core/* 5 v (Math/sqrt (clojure.core// 2.0 (dec n))))))))

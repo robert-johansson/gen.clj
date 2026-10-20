@@ -454,13 +454,17 @@
 
 (defn- gather
   "x with every batched value's particles gathered at idx, as a new batch of
-   n' particles: through traces, choice maps, records, maps and vectors, so
-   a resampled trace is made without re-running the model."
+   n' particles: through traces, choice maps, records, maps, vectors, sets,
+   lists and seqs (a static trace's node values among them), so a
+   resampled trace is made without re-running the model."
   [x idx n']
   (cond (batch/batched? x) (batch/gather x idx [n'])
         (record? x) (reduce-kv (fn [m k v] (assoc m k (gather v idx n'))) x x)
         (map? x) (into (empty x) (map (fn [[k v]] [k (gather v idx n')])) x)
         (vector? x) (mapv #(gather % idx n') x)
+        (set? x) (into (empty x) (map #(gather % idx n')) x)
+        (list? x) (apply list (map #(gather % idx n') x))
+        (seq? x) (doall (map #(gather % idx n') x))
         :else x))
 
 (defn take

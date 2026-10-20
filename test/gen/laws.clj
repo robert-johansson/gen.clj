@@ -436,6 +436,8 @@
                                  (or (nil? (:retdiff r1)) (sound-retdiff? tr r1))))
           args' (next-args model seed alt?)
           diffs (if (= args' args) (diff/no-changes (count args)) (unknown-diffs args'))
+          ;; precise argdiffs too, which the static walk propagates (review, 2026-10-20)
+          precise (mapv diff/compute args args')
           other (gfi/simulate gf args' (rng/fold-in k 1))
           sigma (restrict (:choices other) (picked (addrs other) picks))
           s (sel/from-paths (picked (addrs tr) picks))
@@ -445,6 +447,8 @@
            (both (fn [g _] (gfi/generate g args (restrict (:choices tr) (picked (addrs tr) picks)) (rng/fold-in k 2))))
            (close? (:weight (gfi/assess gf args (:choices tr) k)) (:weight (gfi/assess plain args (:choices tr) k)))
            (both (fn [_ t] (gfi/update t args' diffs sigma (rng/fold-in k 3))))
+           (both (fn [_ t] (gfi/update t args' precise sigma (rng/fold-in k 3))))
+           (both (fn [_ t] (gfi/regenerate t args' precise s (rng/fold-in k 6))))
            (both (fn [_ t] (gfi/update t cm/EMPTY (rng/fold-in k 4))))
            (both (fn [_ t] (gfi/regenerate t args' diffs s (rng/fold-in k 5))))))))
 
@@ -511,6 +515,16 @@
         (close? w (- (- (:score t2) (:score tr)) (lp t2 (remove #(or (was %) (constrained %)) (addrs t2))))))
       true)))
 
+(defn score-is-assessed-on-the-same-key
+  "Def 2.1.16 pointwise for untraced draws: simulate and assess on one key
+   draw the same ω, so the score is assess's weight (law audit gap 12). An
+   estimator's joint sampler draws ω otherwise than its estimate."
+  [cases]
+  (prop/for-all [[[_ gf args] seed] cases]
+    (let [k (rng/key seed)
+          tr (gfi/simulate gf args k)]
+      (close? (:score tr) (:weight (gfi/assess gf args (:choices tr) k))))))
+
 (defn identity-update-keeps-omega
   "An update that changes nothing keeps ω and the score (DESIGN.md §9)."
   [cases]
@@ -535,7 +549,8 @@
           :updates-restore-their-choices updates-restore-their-choices
           :regenerate-keeps-unselected-values regenerate-keeps-unselected-values
           :update-weight-is-the-score-change-less-fresh update-weight-is-the-score-change-less-fresh
-          :identity-update-keeps-omega identity-update-keeps-omega}))
+          :identity-update-keeps-omega identity-update-keeps-omega
+          :score-is-assessed-on-the-same-key score-is-assessed-on-the-same-key}))
 
 (defmacro deflaws
   "A defspec per law (from gen.laws/all, or the given law map: a var's

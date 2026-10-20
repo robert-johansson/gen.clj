@@ -54,13 +54,16 @@
   [trace proposal proposal-args {:keys [involution backward backward-args]} k-propose k-update]
   (let [{fwd :choices fwd-weight :weight fwd-retval :retval} (gfi/propose proposal (into [trace] proposal-args) k-propose)
         [moved weight bwd] (if involution
-                             (let [r (involution trace fwd fwd-retval proposal-args)]
+                             ;; a deterministic involution: with encapsulated randomness its
+                             ;; update would fix one draw of it (it has no key)
+                             (let [r (gfi/with-exact-density "Involutive MCMC (the involution's update)"
+                                       (involution trace fwd fwd-retval proposal-args))]
                                [(:trace r) (:weight r) (:bwd-choices r)])
                              (let [r (gfi/update trace fwd k-update)]
                                [(:trace r) (:weight r) (:discard r)]))
         {bwd-weight :weight} (gfi/assess (or backward proposal)
                                          (into [moved] (if backward backward-args proposal-args))
-                                         bwd (rng/fold-in k-propose 1))]
+                                         bwd (gfi/backward-key k-propose))]
     {:trace moved :weight (+ (- weight fwd-weight) bwd-weight)}))
 
 (defn- proposal-mh

@@ -426,3 +426,60 @@
                 ;; the same structure: no fresh choices drawn differently
                 (is (close? (:weight r) (:weight ri)) (str label " " args'))
                 (is (= (:discard r) (:discard ri)))))))))))
+
+;; ---------------------------------------------------------------------------
+;; Elements are independent (law audit gap 1)
+;; ---------------------------------------------------------------------------
+
+(defn- correlation* [xs ys]
+  (let [n (count xs)
+        mean #(clojure.core// (reduce clojure.core/+ %) n)
+        cx (map #(clojure.core/- % (mean xs)) xs)
+        cy (map #(clojure.core/- % (mean ys)) ys)
+        dot #(reduce clojure.core/+ (map clojure.core/* %1 %2))]
+    (clojure.core// (dot cx cy) (Math/sqrt (clojure.core/* (dot cx cx) (dot cy cy))))))
+
+(deftest ^:slow ^:heavy elements-are-independent
+  ;; each element, step and node draws from its own key: the sample
+  ;; correlation of two is within 5/sqrt(n) of 0. Planted bug (audit,
+  ;; 2026-10-20): an element key that ignores the index passed every other
+  ;; test; the correlation is then 1.0
+  (let [n 2000
+        keys (rng/split (rng/key 90) n)
+        band (clojure.core// 5.0 (Math/sqrt n))
+        independent? (fn [pairs] (< (Math/abs (correlation* (map first pairs) (map second pairs))) band))
+        at (fn [tr p] (ts/number (tr p)))]
+    (testing "Map"
+      (let [m (comb/map (gen [x] (trace :z (d/normal x 1))))]
+        (is (independent? (map #(let [tr (gfi/simulate m [[0.0 0.0]] %)] [(at tr [0 :z]) (at tr [1 :z])]) keys)))))
+    (testing "Map's unconstrained elements in generate"
+      (let [m (comb/map (gen [x] (trace :z (d/normal x 1))))]
+        (is (independent? (map #(let [tr (:trace (gfi/generate m [[0.0 0.0 0.0]] (cm/choicemap [2 :z] 1.0) %))]
+                                  [(at tr [0 :z]) (at tr [1 :z])])
+                               keys)))))
+    (testing "Unfold's innovations"
+      (let [u (comb/unfold (gen [_t s] (trace :s (d/normal (* 0.5 s) 1))))]
+        (is (independent? (map #(let [tr (gfi/simulate u [2 0.0] %)]
+                                  [(at tr [0 :s]) (clojure.core/- (at tr [1 :s]) (clojure.core/* 0.5 (at tr [0 :s])))])
+                               keys)))))
+    (testing "Recurse's nodes"
+      (let [r (comb/recurse (gen [depth] {:value (trace :v (d/normal 0 1)) :children (if (zero? depth) [1 1] [])})
+                            (gen [v ws] (reduce + v ws))
+                            2)]
+        (is (independent? (map #(let [tr (gfi/simulate r [0] %)] [(at tr [1 :production :v]) (at tr [2 :production :v])]) keys)))))))
+
+;; ---------------------------------------------------------------------------
+;; Precise hints for Switch and Recurse (law audit gap 9)
+;; ---------------------------------------------------------------------------
+
+(deftest switch-and-recurse-precise-hints-match-unknown-change
+  ;; an update with no-change argdiffs and a constraint gives what the same
+  ;; update with unknown-change gives
+  (doseq [seed (range 8)]
+    (let [k (rng/key (+ 91 seed))
+          sw (gfi/simulate switched [0 0.5] (rng/key seed))
+          tree-tr (gfi/simulate tree [0] (rng/key seed))]
+      (is (same-result? (gfi/update sw [0 0.5] [diff/no-change diff/no-change] (cm/choicemap :a 0.3) k)
+                        (gfi/update sw [0 0.5] [diff/unknown-change diff/unknown-change] (cm/choicemap :a 0.3) k)))
+      (is (same-result? (gfi/update tree-tr [0] [diff/no-change] (cm/choicemap [0 :production :v] 0.7) k)
+                        (gfi/update tree-tr [0] [diff/unknown-change] (cm/choicemap [0 :production :v] 0.7) k))))))

@@ -9,6 +9,7 @@
             [gen.dist :as d]
             [gen.dist.core :as dc]
             [gen.dynamic :refer [gen]]
+            [gen.gfi :as gfi]
             [gen.inference.importance :as imp]
             [gen.random :as rng]))
 
@@ -143,3 +144,31 @@
         m (/ (reduce + ratios) runs)
         sd (Math/sqrt (/ (reduce + (map #(Math/pow (- % m) 2) ratios)) (dec runs)))]
     (is (< (Math/abs (- m 1.0)) (* 5 (/ sd (Math/sqrt runs)))) (str m " ± " (/ sd (Math/sqrt runs))))))
+
+;; The thesis's example of importance sampling with stochastic structure
+;; (Alg 2, p. 80): E[sum_i x_i^2 over the steps taken] = 7.0 under
+;; p_inf_squares, estimated with the proposal q_inf_squares (law audit gap
+;; 10). Planted bug (audit): the proposal's score not subtracted
+
+(def p-inf-squares
+  (gen [] (loop [i 1 xtot 0.0]
+            (if (trace [:go i] (d/bernoulli 0.5))
+              (let [x (trace [:x i] (d/normal i 1))] (recur (inc i) (+ xtot (* x x))))
+              xtot))))
+
+(def q-inf-squares
+  (gen [] (loop [i 1]
+            (when (trace [:go i] (d/bernoulli 0.7))
+              (trace [:x i] (d/normal i 1))
+              (recur (inc i))))))
+
+(deftest ^:slow ^:heavy the-thesis-s-infinite-squares-example
+  (let [n 20000
+        wgs (mapv (fn [k] (let [[k1 k2] (rng/split k)
+                                {c :choices wq :weight} (gfi/propose q-inf-squares [] k1)
+                                {t :trace w :weight} (gfi/generate p-inf-squares [] c k2)]
+                            (clojure.core/* (Math/exp (ts/number (- w wq))) (ts/number (:retval t)))))
+                  (rng/split (rng/key 97) n))
+        m (clojure.core// (reduce clojure.core/+ wgs) n)
+        sd (Math/sqrt (clojure.core// (reduce clojure.core/+ (map #(let [e (clojure.core/- % m)] (clojure.core/* e e)) wgs)) (dec n)))]
+    (is (< (Math/abs (clojure.core/- m 7.0)) (clojure.core/* 5 (clojure.core// sd (Math/sqrt n)))) (str m))))

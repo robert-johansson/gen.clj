@@ -35,7 +35,8 @@
    as a likelihood that a particle filter or importance sampler estimates
    for pseudo-marginal MCMC:
 
-     (estimated {:estimate (fn [args choices key] log-estimate)
+     (estimated {:addresses [:y]
+                 :estimate (fn [args choices key] log-estimate)
                  :simulate (fn [args key] {:choices … :log-estimate …})})
 
    estimate draws the estimator's randomness ω from key and returns log ξ,
@@ -46,8 +47,8 @@
    choices' own latent, the others from the proposal), and returns the
    estimate at both. The trace keeps the key as ω.
 
-   generate with constraints takes them as all of the choices and weighs
-   log ξ; without constraints it is simulate, weight 0. update keeps the
+   generate with constraints, all of the choices (others are a loud error),
+   weighs log ξ; without constraints it is simulate, weight 0. update keeps the
    trace when nothing changed (no-change argdiffs, no constraints), and
    otherwise estimates afresh: weight log ξ' - log ξ, the pseudo-marginal
    ratio. regenerate redraws ω the same way, but cannot resample a selected
@@ -55,6 +56,7 @@
    project takes all of the choices or none."
   (:refer-clojure :exclude [-])
   (:require [gen.array :as array :refer [-]]
+            [gen.array.batch :as batch]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.gfi :as gfi]
@@ -190,19 +192,40 @@
   (trace/make-trace {:gen-fn gf :args (vec args) :choices choices :score log-estimate
                      :retval ((:retval gf) args choices) ::trace/omega omega}))
 
+(defn- check-unbatched!
+  "An estimate in a batched run raises the fallback: a particle's ω must
+   reproduce its own estimate, as for untraced draws."
+  []
+  (when (batch/batch-backend? array/*backend*)
+    (throw (array/batched-branch "An estimated density in a batched run" {}))))
+
+(defn- check-addresses!
+  "choices are all of gf's choices (an estimate is of all of them), a loud
+   error otherwise."
+  [gf op choices]
+  (let [given (set (cm/addresses choices))]
+    (when-not (= given (:addresses gf))
+      (throw (ex-info (str "estimated: " (name op) " needs every choice of the estimator, " (vec (sort-by str (:addresses gf)))
+                           ", given " (vec (sort-by str given)))
+                      {:op op :addresses (:addresses gf) :given given})))))
+
 (defn- estimate-at
   "The trace of gf on args with choices, ω drawn from key."
-  [gf args choices key]
+  [gf op args choices key]
   (gfi/check-exact-density! "an estimated density")
+  (check-unbatched!)
+  (check-addresses! gf op choices)
   (estimated-trace gf args choices ((:estimate gf) (vec args) choices key) key))
 
 (defn- simulated [gf args key]
   (gfi/check-exact-density! "an estimated density")
+  (check-unbatched!)
   (if-let [simulate (:simulate gf)]
     (let [{:keys [choices log-estimate] :as r} (simulate (vec args) key)]
       (when-not (and (cm/choicemap? choices) (some? log-estimate))
         (throw (ex-info "estimated: :simulate returns {:choices (a choice map) :log-estimate}"
                         {:returned (keys r)})))
+      (check-addresses! gf :simulate choices)
       (estimated-trace gf args choices log-estimate key))
     (throw (ex-info (str "estimated: simulate (and generate without constraints) needs :simulate, a joint sampler of"
                          " the choices and the estimator's randomness (thesis §4.5.1); generate with the choices,"
@@ -211,17 +234,17 @@
 
 (defn- unchanged? [argdiffs] (every? diff/no-change? argdiffs))
 
-(defrecord EstimatedGF [estimate simulate retval]
+(defrecord EstimatedGF [estimate simulate retval addresses]
   gfi/IGenerativeFunction
   (-simulate [this args key] (simulated this args key))
   (-generate [this args constraints key]
     (if (cm/empty? constraints)
       {:trace (simulated this args key) :weight 0.0}
-      (let [t (estimate-at this args constraints key)] {:trace t :weight (:score t)})))
+      (let [t (estimate-at this :generate args constraints key)] {:trace t :weight (:score t)})))
   (-update [this tr args argdiffs constraints key]
     (if (and (unchanged? argdiffs) (cm/empty? constraints))
       {:trace tr :weight 0.0 :retdiff diff/no-change :discard cm/EMPTY}
-      (let [t (estimate-at this args (cm/override (:choices tr) constraints) key)]
+      (let [t (estimate-at this :update args (cm/override (:choices tr) constraints) key)]
         {:trace t :weight (- (:score t) (:score tr)) :retdiff diff/unknown-change
          :discard (sel/get-selected (:choices tr) (sel/from-choicemap constraints))})))
   (-regenerate [this tr args argdiffs selection key]
@@ -231,10 +254,10 @@
                       {:selected (vec (cm/addresses (sel/get-selected (:choices tr) selection)))})))
     (if (unchanged? argdiffs)
       {:trace tr :weight 0.0 :retdiff diff/no-change}
-      (let [t (estimate-at this args (:choices tr) key)]
+      (let [t (estimate-at this :regenerate args (:choices tr) key)]
         {:trace t :weight (- (:score t) (:score tr)) :retdiff diff/unknown-change})))
   (-assess [this args choices key]
-    (let [t (estimate-at this args choices key)] {:weight (:score t) :retval (:retval t)}))
+    (let [t (estimate-at this :assess args choices key)] {:weight (:score t) :retval (:retval t)}))
   (-propose [this args key]
     (let [t (simulated this args key)] {:choices (:choices t) :weight (:score t) :retval (:retval t)}))
   (-project [_ tr selection]
@@ -246,14 +269,18 @@
 
 (defn estimated
   "A generative function whose density is estimated (see the namespace
-   doc), from :estimate, (fn [args choices key] log-estimate); optionally
-   :simulate, (fn [args key] {:choices :log-estimate}), and :retval, (fn
-   [args choices] retval) (nil by default)."
-  [{:keys [estimate simulate retval] :as spec}]
+   doc), from :addresses, its choices' addresses (keywords or paths), and
+   :estimate, (fn [args choices key] log-estimate); optionally :simulate,
+   (fn [args key] {:choices :log-estimate}), and :retval, (fn [args
+   choices] retval) (nil by default). Choices other than all of them are a
+   loud error."
+  [{:keys [estimate simulate retval addresses] :as spec}]
   (doseq [[k f] {:estimate estimate :simulate simulate :retval retval}]
     (when (and (or f (= k :estimate)) (not (ifn? f)))
       (throw (ex-info (str "estimated: " k " must be a function") {:keys (vec (keys spec))}))))
-  (->EstimatedGF estimate simulate (or retval (constantly nil))))
+  (when-not (and (sequential? addresses) (seq addresses))
+    (throw (ex-info "estimated: :addresses names its choices, e.g. [:y] or [[:obs 0] [:obs 1]]" {:keys (vec (keys spec))})))
+  (->EstimatedGF estimate simulate (or retval (constantly nil)) (set (map #(if (vector? %) % [%]) addresses))))
 
 (defmethod print-method EstimatedGF [_ ^java.io.Writer w]
   (.write w "#gen/estimated"))

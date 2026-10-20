@@ -64,14 +64,61 @@
           z (trace :z (d/normal y 1))]
       z)))
 
+(def rules
+  "One-call bindings of every propagate rule on a vector argument, into a
+   Map: the law's precise argdiffs exercise each (review, 2026-10-20)."
+  (gen ^:static [xs i]
+    (let [a (trace :a (d/normal 0 1))
+          ys (conj xs a)
+          zs (assoc ys 0 1.5)
+          n (count zs)
+          x1 (get xs i 0.0)
+          w (nth zs 1)
+          v (vec zs)
+          out (splice :m (comb/map point) v (vec (repeat n w)) (vec (repeat n x1)))]
+      out)))
+
+(def dict-rules
+  "The rules on a map argument."
+  (gen ^:static [m]
+    (let [a (trace :a (d/normal 0 1))
+          m2 (assoc m :k a)
+          c (count m2)
+          g (get m2 :j 0.0)
+          y (trace :y (d/normal (+ g (* 0.1 c)) 1))]
+      y)))
+
+(def branch-a (gen ^:static [m] (let [a (trace :a (d/normal m 1))] a)))
+(def branch-b (gen ^:static [m] (let [a (trace :a (d/normal (+ m 5.0) 1)) b (trace :b (d/normal a 1))] b)))
+(def branch-c (gen ^:static [m] (let [c (trace :c (d/normal m 1))] c)))
+
+(def switch-of-static
+  "A Switch between static branches: the update from one to the other must
+   not reuse the old branch's node values (review, 2026-10-20)."
+  (gen [i m] (splice :s (comb/switch branch-a branch-b) i m)))
+
+(def callee-changes
+  "A splice whose callee is another static function after an update."
+  (gen [pick m] (splice :x (if (= pick 0) branch-a (if (= pick 1) branch-b branch-c)) m)))
+
 (def models
   [[:linreg linreg [[1.0 2.0 3.0]] [[[1.0 2.5]] [[0.5 1.0 1.5 2.0]]]]
    [:hierarchical hierarchical [3] [[2] [4]]]
    [:destructured destructured [{:mu 0.0 :sd 1.0}] [[{:mu 1.0 :sd 1.0}]]]
-   [:nested nested [0.0] [[1.5]]]])
+   [:nested nested [0.0] [[1.5]]]
+   [:rules rules [[0.1 0.2 0.3] 1] [[[0.1 0.9 0.3] 1] [[0.1 0.2] 1] [[0.1 0.2 0.3 0.4] 2] [[0.1 0.2 0.3] 5]]]
+   [:dict-rules dict-rules [{:j 0.5 :x 1.0}] [[{:j 0.7 :x 1.0}] [{:x 1.0}] [{:j 0.5 :x 1.0 :z 2.0}]]]])
+
+;; dynamic parents of static functions: the general laws (a static callee's
+;; update from another graph's trace was wrong before the review)
+(laws/deflaws static-callees [[:switch-of-static switch-of-static [0 0.5] [[1 0.5]]]
+                              [:callee-changes callee-changes [0 0.5] [[1 0.5] [2 0.5]]]]
+  100)
 
 (laws/deflaws static models 100)
 (laws/deflaws static models 100 laws/static)
+;; every model but :destructured (a uniform between chosen bounds) has fixed supports
+(laws/deflaws static (filterv (comp #{:linreg :hierarchical :nested :rules :dict-rules} first) models) 100 laws/fixed-support)
 
 ;; a static body over a callee with encapsulated randomness: its score fn
 ;; must split keys as the handler's assess does (assess = generate on the
@@ -173,6 +220,55 @@
     (is (= {:a 1 :b 1} (counted [[0.1 0.2 0.3 0.4]] diff/unknown-change)))))
 
 ;; ---------------------------------------------------------------------------
+;; The review's cases (2026-10-20), each wrong or silent before its fix
+;; ---------------------------------------------------------------------------
+
+(deftest a-changed-store-reruns-what-reads-it
+  ;; a callee's param read, a param in a splice argument, an aliased param:
+  ;; the walk cannot see them, so it skips nothing under a changed store
+  (let [reader (gen [] (trace :y (d/normal (param :w) 1)))
+        kernel (gen [x] (trace :y (d/normal x 1)))
+        cases {:in-a-callee (gen ^:static [] (let [c (splice :c reader)] c))
+               :in-an-argument (gen ^:static [] (let [ys (splice :ys (comb/map kernel) (param :xs))] ys))
+               :aliased (gen ^:static [] (let [p param y (trace :y (d/normal (p :w) 1))] y))}
+        before {:w 0.0 :xs [0.0 0.0]}
+        after {:w 3.0 :xs [3.0 3.0]}]
+    (doseq [[label model] cases]
+      (testing label
+        (let [weight (fn [gf] (let [tr (gfi/simulate (dyn/with-params gf before) [] (rng/key 40))]
+                                (:weight (gfi/update (assoc tr :gen-fn (dyn/with-params gf after)) cm/EMPTY (rng/key 41)))))]
+          (is (ts/close? (weight (assoc model :static nil)) (weight model)))
+          (is (not (ts/close? 0.0 (weight model)))))))))
+
+(deftest a-local-is-not-the-var-it-shadows
+  ;; inside a gen body the enclosing locals are not in &env
+  (let [count (fn [_] 42)
+        outer (gen [xs] (let [g (gen ^:static [ys] (let [n (count ys)] n))] (splice :g g xs)))]
+    (is (= 42 (ts/host (:retval (gfi/simulate outer [[1 2]] (rng/key 42))))))))
+
+(deftest destructuring-binds-what-clojure-binds
+  (let [gf (gen ^:static [m] (let [{:keys [a/b c]} m y (trace :y (d/normal (+ b c) 1))] y))]
+    (is (some? (:retval (gfi/simulate gf [{:a/b 1.0 :c 2.0}] (rng/key 43)))))))
+
+(deftest a-batched-static-run-guards-as-the-body-does
+  ;; one-call bindings run the guarded fns: the fallback is the dynamic body's
+  (let [model (gen ^:static [] (let [b (trace :b (d/bernoulli 0.5)) nb (not b) y (trace :y (d/normal (if nb 1.0 -1.0) 1))] y))
+        reason #(:message (batched/fallback-reason (batched/simulate % [] 6 (rng/key 44))))]
+    (is (= (reason (assoc model :static nil)) (reason model)))))
+
+(deftest resampled-node-values-follow-their-particles
+  ;; a node value in a list is gathered with its particle (batched/take)
+  (binding [batched/*spot-checks* 0]
+    (let [model (gen ^:static [] (let [a (trace :a (d/normal 0 1)) pair (list a 1.0) y (trace :y (d/normal (first pair) 1))] y))
+          ps (batched/take (batched/simulate model [] 4 (rng/key 45)) [3 2 1 0])
+          {ws :weights} (batched/update ps [] [] (cm/choicemap :y 0.5) (rng/key 46))]
+      (is (ts/close? (array/array (mapv #(ts/number (:weight (gfi/update % (cm/choicemap :y 0.5) (rng/key 46)))) (batched/traces ps))) ws)))))
+
+(deftest an-inline-gen-is-a-pure-binding
+  (let [gf (gen ^:static [] (let [k (gen [m] (trace :z (d/normal m 1))) z (splice :k k 0.0)] z))]
+    (is (number? (ts/host (:retval (gfi/simulate gf [] (rng/key 47))))))))
+
+;; ---------------------------------------------------------------------------
 ;; The graph
 ;; ---------------------------------------------------------------------------
 
@@ -183,6 +279,9 @@
     (is (= [:slope :intercept nil :ys] (mapv :addr nodes)))
     (is (= '[[] [] [xs] [xs n slope intercept]] (mapv :inputs nodes)))
     (is (= '[ys] (:inputs return))))
+  (testing "a string address is escaped: \"\\\"y\\\"\", not \"\"y\"\""
+    (let [dot (static/dot (gen ^:static [x] (let [y (trace "y" (d/normal x 1))] y)))]
+      (is (str/includes? dot "\"\\\"y\\\"\" [shape=ellipse"))))
   (let [dot (static/dot linreg)]
     (is (str/starts-with? dot "digraph {"))
     (is (str/includes? dot "\":slope\" -> \":ys\";"))

@@ -144,7 +144,8 @@
   (-regenerate [this tr args argdiffs selection key]
     (regenerate-under #(proposal-generate this %1 %2 %3) #(proposal-weight this %1 %2 %3)
                       tr args argdiffs selection key))
-  (-assess [_ args choices key] (gfi/-assess gf args choices key))
+  ;; generate gives the model the second of its key's split: assess, the same
+  (-assess [_ args choices key] (gfi/-assess gf args choices (second (rng/split key))))
   (-propose [_ args key] (gfi/-propose gf args key))
   (-project [this tr selection]
     (proposal-weight this (:args tr) (sel/get-selected (:choices tr) selection) tr)))

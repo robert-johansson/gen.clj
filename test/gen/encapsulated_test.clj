@@ -103,8 +103,9 @@
 (def untraced-models
   [["mixture" mixture [] []]
    ["simulator" with-simulator [0.4] [[0.7]]]
-   ["map" (comb/map noisy-kernel) [[0.1 0.2 0.3]] [[[0.1 0.5 0.3]] [[0.1 0.2]]]]
-   ["unfold" (comb/unfold noisy-step) [3 0.0] [[2 0.0] [3 0.5]]]
+   ;; growing alternatives too, so that updates make fresh choices (law audit gap 5)
+   ["map" (comb/map noisy-kernel) [[0.1 0.2 0.3]] [[[0.1 0.5 0.3]] [[0.1 0.2]] [[0.1 0.2 0.3 0.4]]]]
+   ["unfold" (comb/unfold noisy-step) [3 0.0] [[2 0.0] [3 0.5] [5 0.0]]]
    ["spliced" spliced [0.0] [[1.0]]]])
 
 (laws/deflaws untraced untraced-models 100 laws/encapsulated)
@@ -120,7 +121,8 @@
 
 (def likelihood
   (custom/estimated
-   {:estimate (fn [[theta] choices key]
+   {:addresses [:y]
+    :estimate (fn [[theta] choices key]
                 (is-log-estimate theta (cm/get-choice choices :y) (dc/sample (d/normal 0 1) key [n-importance])))
     :simulate (fn [[theta] key]
                 (let [[k-z k-y k-j k-zs] (rng/split key 4)
@@ -137,7 +139,9 @@
 ;; an estimator has no proposal density, so regenerate cannot resample its
 ;; choice: the laws without a selection that may hold it
 (def estimated-laws
-  (apply dissoc laws/encapsulated [:regenerate-keeps-unselected-values :regenerate-weight-is-the-projection-ratio
+  ;; and its joint sampler draws ω otherwise than its estimate: no same-key score
+  (apply dissoc laws/encapsulated [:score-is-assessed-on-the-same-key
+                                   :regenerate-keeps-unselected-values :regenerate-weight-is-the-projection-ratio
                                    :regenerate-weight-with-new-arguments-is-the-projection-ratio
                                    :regenerate-weight-is-the-retained-density-ratio :regenerating-everything-has-weight-zero]))
 
@@ -180,6 +184,21 @@
     (is (= (ts/host (:choices (gfi/simulate plain [] k))) (ts/host (:choices (gfi/simulate noisy [] k)))))
     (is (nil? (omega (gfi/simulate plain [] k))))))
 
+(deftest an-estimated-density-falls-back-to-particles
+  ;; for the reason it has (review, 2026-10-20: the stated one was a spot check's)
+  (is (= "An estimated density in a batched run"
+         (:message (batched/fallback-reason (batched/simulate likelihood [0.4] 4 (rng/key 50)))))))
+
+(def noisy-normal (gen [] (let [mu (trace :mu (d/normal 0 1)) e (untraced (d/normal 0 0.3))] (trace :y (d/normal (+ mu e) 1)) mu)))
+
+;; an override over a model with ω: assess draws what generate draws on the
+;; same key (review, 2026-10-20: it gave the model another key)
+(laws/deflaws omega-override
+  [[:override (gen.inference.proposal/with-internal-proposal
+               noisy-normal (gen [sigma] (when-not (cm/has-value? (cm/get-submap sigma :mu)) (trace :mu (d/normal 0.5 1)))))
+    [] []]]
+  60 {:assess-is-generate-with-every-choice laws/assess-is-generate-with-every-choice})
+
 (deftest a-batched-run-falls-back-to-particles
   ;; each particle's ω must reproduce its own draws
   (let [k (rng/key 10)
@@ -217,6 +236,40 @@
                              (clojure.core// (npdf (ts/number (tr :y)) 0.4 0.5) (Math/exp (ts/number (:score tr))))))
                    (rng/split (rng/key 14) 4000))]
       (is (within? rs 1.0)))))
+
+(deftest ^:slow ^:heavy eq-4-3-on-black-box-code-and-combinators
+  ;; law audit gap 2: the exact marginals of the thesis's black-box example
+  ;; (Eqs. 4.11-4.14) and of untraced Map and Unfold elements, at residuals of
+  ;; one sign (with mixed signs a shared-key bug moved the mean by 2.8 se only)
+  (let [mean-xi (fn [gf args choices seed] (mapv #(Math/exp (ts/number (:weight (gfi/assess gf args choices %))))
+                                                  (rng/split (rng/key seed) 4000)))
+        n3 (Math/pow (npdf 1.5 0.0 (Math/sqrt 1.25)) 3)]
+    (testing "a simulator between two choices: p(a, b) with b given a through U + 0.3a"
+      (is (within? (mean-xi with-simulator [0.4] (cm/choicemap :a true :b true) 60) (* 0.4 0.34)))
+      (is (within? (mean-xi with-simulator [0.4] (cm/choicemap :a false :b true) 61) (* 0.6 0.58))))
+    (testing "a Map of untraced kernels: N(y; x, √1.25) per element"
+      (is (within? (mean-xi (comb/map noisy-kernel) [[0.1 0.2 0.3]]
+                            (cm/choicemap [0 :y] 1.6 [1 :y] 1.7 [2 :y] 1.8) 62)
+                   n3)))
+    (testing "an Unfold of untraced steps: each innovation 1.5"
+      (is (within? (mean-xi (comb/unfold noisy-step) [3 0.0]
+                            (cm/choicemap [0 :s] 1.5 [1 :s] (+ (* 0.9 1.5) 1.5) [2 :s] (+ (* 0.9 2.85) 1.5)) 63)
+                   n3)))))
+
+(def theta-z-y
+  "θ ~ N(0, 1), z untraced N(0, 1), y ~ N(θ + z, 1): p(y) = N(y; 0, √3), and
+   θ given y = 1.5 is N(0.5, √(2/3))."
+  (gen [] (let [theta (trace :theta (d/normal 0 1))
+                z (untraced (d/normal 0 1))]
+            (trace :y (d/normal (+ theta z) 1))
+            theta)))
+
+(deftest ^:slow ^:heavy pseudo-marginal-importance-sampling-is-unbiased
+  ;; law audit gap 4: generate with some constraints on a model with
+  ;; untraced draws, E[exp w] = p(y)
+  (let [ws (mapv #(Math/exp (ts/number (:weight (gfi/generate theta-z-y [] (cm/choicemap :y 1.5) %))))
+                 (rng/split (rng/key 64) 4000))]
+    (is (within? ws (npdf 1.5 0.0 (Math/sqrt 3.0))))))
 
 (defn- pmmh-thetas
   "θ after steps selection-MH moves on θ, in n chains of model from the
@@ -257,7 +310,35 @@
                           theta))]
       (is (posterior-ok? (pmmh-thetas model (cm/choicemap :y 1.5) 2000 150 (rng/key 15)) 1.5))))
   (testing "an estimated likelihood"
-    (is (posterior-ok? (pmmh-thetas pm-model (cm/choicemap [:y :y] 1.5) 2000 100 (rng/key 16)) 1.5))))
+    (is (posterior-ok? (pmmh-thetas pm-model (cm/choicemap [:y :y] 1.5) 2000 100 (rng/key 16)) 1.5)))
+  ;; planted bug (audit, 2026-10-20): an update that keeps ω under a
+  ;; constraint gives mean 0.74
+  (testing "through update: MH with a random-walk proposal, Eq. 4.16 (law audit gap 3)"
+    (let [walk (gen [t] (trace :theta (d/normal (t :theta) 0.8)))
+          thetas (mapv (fn [k] (let [[k0 & ks] (rng/split k 151)]
+                                 (ts/number ((reduce (fn [tr k] (:trace (mh/mh tr walk [] k)))
+                                                     (:trace (gfi/generate theta-z-y [] (cm/choicemap :y 1.5) k0)) ks)
+                                             :theta))))
+                       (rng/split (rng/key 65) 2000))]
+      (is (posterior-ok? thetas 1.5)))))
+
+(deftest ^:slow ^:heavy mh-with-an-encapsulated-proposal-keeps-the-posterior
+  ;; §4.5.4, law audit gap 4b: θ' ~ N(θ ± 0.6, 0.5), the sign an untraced
+  ;; coin; from exact posterior draws (θ ~ N(0, 1), y ~ N(θ, 1), y = 1: N(0.5,
+  ;; √0.5)), five moves keep the posterior. Planted bug (audit): the forward
+  ;; score from a fresh ω instead of the proposing one gives variance 1.04
+  (let [model (gen [] (let [theta (trace :theta (d/normal 0 1))] (trace :y (d/normal theta 1)) theta))
+        q (gen [t] (trace :theta (d/normal (+ (t :theta) (array/where (untraced (d/bernoulli 0.5)) 0.6 -0.6)) 0.5)))
+        n 4000
+        starts (mapv #(clojure.core/+ 0.5 (clojure.core/* (Math/sqrt 0.5) %)) (ts/host (dc/sample (d/normal 0 1) (rng/key 66) [n])))
+        thetas (mapv (fn [theta k] (let [[k0 & ks] (rng/split k 6)]
+                                     (ts/number ((reduce (fn [tr k] (:trace (mh/mh tr q [] k)))
+                                                         (:trace (gfi/generate model [] (cm/choicemap :theta theta :y 1.0) k0)) ks)
+                                                 :theta))))
+                     starts (rng/split (rng/key 67) n))
+        [m s] (mean-sd thetas)]
+    (is (< (Math/abs (clojure.core/- m 0.5)) (clojure.core/* 5 (Math/sqrt (clojure.core// 0.5 n)))))
+    (is (< (Math/abs (clojure.core/- (clojure.core/* s s) 0.5)) (clojure.core/* 5 0.5 (Math/sqrt (clojure.core// 2.0 (dec n))))))))
 
 (deftest ^:slow ^:heavy importance-sampling-with-an-encapsulated-proposal
   ;; §4.5.4: a proposal whose density is estimated keeps the marginal
@@ -288,12 +369,19 @@
     (let [f (:retval (gfi/simulate (gen [] (fn [] (untraced (d/normal 0 1)))) [] (rng/key 20)))]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"after the generative function returned" (f)))))
   (testing "an estimated density"
-    (let [no-sim (custom/estimated {:estimate (:estimate likelihood)})
+    (let [no-sim (custom/estimated {:addresses [:y] :estimate (:estimate likelihood)})
           tr (gfi/simulate likelihood [0.4] (rng/key 21))]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"needs :simulate" (gfi/simulate no-sim [0.4] (rng/key 22))))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"cannot resample a selected choice"
                             (gfi/regenerate tr (sel/select :y) (rng/key 23))))
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be a function" (custom/estimated {:estimate 3})))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be a function" (custom/estimated {:addresses [:y] :estimate 3})))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #":addresses names its choices" (custom/estimated {:estimate (:estimate likelihood)})))
+      (testing "choices other than all of them (law audit, 2026-10-20: a strict subset gave a trace missing a choice)"
+        (let [two (custom/estimated {:addresses [:y1 :y2] :estimate (fn [_ _ _] 0.0)})]
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"needs every choice of the estimator"
+                                (gfi/generate two [] (cm/choicemap :y1 1.0) (rng/key 32))))
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"needs every choice of the estimator"
+                                (gfi/assess two [] (cm/choicemap :y1 1.0 :y2 2.0 :y3 0.0) (rng/key 33))))))))
   (testing "a body's untraced would hide a var of that name"
     (let [ns (create-ns 'gen.encapsulated-test.shadowed)]
       (intern ns 'untraced (fn [x] x))
@@ -327,6 +415,13 @@
                        ["elliptical-slice" #(mcmc/elliptical-slice fs-tr :f [0.0 0.0] [[1.0 0.0] [0.0 1.0]] (rng/key 29))]
                        ["the exact proposal" #(gfi/generate (enum/with-exact-proposal bern [:b]) [] (cm/choicemap :y 0.5)
                                                              (rng/key 30))]
+                       ["the exact proposal's assess" #(gfi/assess (enum/with-exact-proposal bern [:b]) []
+                                                                   (cm/choicemap :b true :y 0.5) (rng/key 35))]
+                       ;; review, 2026-10-20: its update fixed ω to one draw (key 0)
+                       ["an involution" #(mh/involutive-mh tr (gen [_] nil) []
+                                                           (fn [t _ _ _] {:trace (:trace (gfi/update t (cm/choicemap :theta 0.1) (rng/key 0)))
+                                                                          :weight 0.0 :bwd-choices cm/EMPTY})
+                                                           (rng/key 34))]
                        ["an internal proposal's density"
                         #(let [gf (prop/with-internal-proposal model (gen [_] (trace :theta (d/normal (untraced (d/normal 0 1)) 1))))]
                            (gfi/project (:trace (gfi/generate gf [] (cm/choicemap :y 1.5) (rng/key 31))) (sel/select :theta)))]]]

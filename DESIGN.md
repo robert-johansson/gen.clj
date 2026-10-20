@@ -592,8 +592,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   separate runs (assess against a trace's score, generate with every
   choice against it, propose against assess, an update and its reverse)
   hold only in expectation for a function with ω, under either rule, since
-  each run draws its own ω. Such functions get their own law set: the
-  pointwise laws without those, and the thesis's Eqs. 4.3–4.16 as
+  each run draws its own ω, except that simulate and assess on one key draw
+  the same ω for untraced draws (a law). Such functions get their own law
+  set: the pointwise laws without those, and the thesis's Eqs. 4.3–4.16 as
   statistical laws.
   - **In gen bodies (§4.5.2),** `(untraced dist)` draws without an address
     and `(untraced-key)` hands other stochastic code a key; untraced values
@@ -601,18 +602,23 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     ω is one key, folded from the operation's key apart from the sites'
     sequence (an untraced draw never shifts a site's key; the n-th draw
     takes ω folded with n), and the trace keeps it as `:gen.trace/omega`.
-    The handler's weights are then the thesis's (Eq. 4.7) with no new
-    weight code. Untraced values must not decide which addresses are
+    The handler's weights are then exact with no new weight code: Eq. 4.7
+    on the extended space of choices and untraced draws, the internal
+    proposal of the choices conditioned on ω (the handler draws them
+    interleaved), a different kernel from the ω-free Eq. 4.7 (regenerating
+    the mixture's :a weighs exactly 0) with the same target. Untraced values must not decide which addresses are
     visited (p. 159): an obligation, as in the thesis and Gen.jl, since no
     sound check short of rerunning the body exists. A batched run falls
     back to particles, since a particle's ω must reproduce its own draws.
     `untraced` and `untraced-key` are reserved in bodies as `trace` is:
     the macro refuses a body that would hide a var of either name.
-  - **Estimators (§4.5.3),** `gen.custom/estimated`: `:estimate` (fn [args
-    choices key] → log ξ, ω drawn from the key, which the trace keeps) and
-    an optional joint `:simulate`. generate with constraints takes them as
-    all of the choices; without, it is simulate with weight 0, valid on the
-    extended space. regenerate of a selected choice, and simulate without
+  - **Estimators (§4.5.3),** `gen.custom/estimated`: `:addresses` (its
+    choices), `:estimate` (fn [args choices key] → log ξ, ω drawn from the
+    key, which the trace keeps) and an optional joint `:simulate`. generate
+    with constraints needs all of the choices (any other set is a loud
+    error: the law audit found a strict subset gave a trace missing one);
+    without, it is simulate with weight 0, valid on the extended space. A
+    batched run falls back to particles, as for untraced draws. regenerate of a selected choice, and simulate without
     a joint sampler, are loud errors: an estimator has no proposal density
     to weigh them by. Pseudo-marginal MH and PMMH are then MH on a model
     with either.
@@ -627,6 +633,13 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     Each computed its density with a fixed key, so with ω it would fix one
     draw of it and target the wrong distribution, silently (found the same
     day, after an owner's question: all eight ran without error).
+    Involutive MCMC too (the review, the same day): Gen.jl's involution,
+    (fn [trace fwd-choices fwd-retval proposal-args]), has no key, so its
+    update redrew ω from one fixed key and the chain sampled the posterior
+    given one z. With ω it is now a loud error; MH with a proposal is the
+    pseudo-marginal route. The alternative, a key for the involution,
+    would keep split-merge moves on pseudo-marginal models at the cost of
+    Gen.jl's argument shape: for the owner to choose.
 - **The static modeling language** (Gen.jl's `@gen (static)`; owner,
   2026-10-20): a flag on `gen`, `(gen ^:static [args] (let [...] ret))`,
   not a second macro or a second semantics. The body is an ordinary `gen`
@@ -654,12 +667,18 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     with the handler's own trace and splice. A skipped node keeps its value
     and its site's or call's record (weight 0, as an unchanged rerun gives)
     and consumes its key, so the walk draws what the dynamic body draws;
-    the trace keeps every node's value for the next update. A node that
-    reads `param` always reruns (a store changes between runs), and a gf
-    with middleware (`with-transitions`) reruns every node, so its
-    transitions see every site. A trace node rerun because an input
-    changed keeps its value, so what depends only on that value still
-    skips.
+    the trace keeps every node's value for the next update, with the
+    parameter store in effect. A node is skipped only when the previous
+    trace is this graph's (not another static function's at the address, a
+    Switch's other branch) and the store is equal (a callee reads it, an
+    argument may), conditions the review of the same day found missing.
+    Every value comes from the node's guarded fn, as the body computes it.
+    A gf with middleware (`with-transitions`) reruns every node, so its
+    transitions see every site; a kept callee's own middleware does not
+    run. A trace node rerun because an input changed keeps its value, so
+    what depends only on that value still skips. The analysis sees the
+    enclosing locals, a gen body's too, so a local that shadows a var is
+    the local.
   - **Not static:** a body that is not one `let`, an address computed
     from a value, a `trace` or `splice` inside an expression (a branch on
     a choice included), a splice without an address, an untraced draw: each
@@ -706,8 +725,16 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   callee's retdiff, anything else no-change or unknown-change. A splice
   hands its callee its arguments' diffs (an identical argument stays
   no-change), so a Map reruns only the elements a vector-diff names, and
-  the function's retdiff is its return expression's. Each rule is checked
-  to describe the change it predicts over random vectors, maps and edits.
+  the function's retdiff is its return expression's. A rule gives the diff
+  from the previous call's result to this one's, for its own arity only,
+  and an element's diff only for a collection of its diff's kind; the
+  first rules gave the diff from the argument to the result, so a changed
+  conj or assoc value went unseen (the review, the same day).
+  `(diff/compute prev now)` gives the precise diff of two host values.
+  Every rule is checked at every argument position against random edits
+  (a changed element, key or default, an append or a shrink, a new or
+  removed key, a fresh value), and the static law runs with computed
+  argdiffs.
 - **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
   `(array/item x)`, the namespace's last segment, as the Clojure style guide
   has it. It replaced `a`, which the owner found ugly (2026-10-18). The

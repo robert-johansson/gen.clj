@@ -83,30 +83,59 @@
   (not (no-change? d)))
 
 (defn element-changed?
-  "Might element i of a vector with diff d have changed (or be new)?"
+  "Might element i of a vector with diff d have changed (or be new, or be
+   gone)?"
   [d i]
   (cond (no-change? d) false
-        (vector-diff? d) (or (>= i (:prev-length d)) (contains? (:updated d) i))
+        (vector-diff? d) (or (>= i (min (:prev-length d) (:new-length d))) (contains? (:updated d) i))
         :else true))
 
 (defn consistent?
   "Does diff d describe the change from prev to new: equal values for
    no-change, the lengths and the unchanged elements of a vector-diff, the
    amount of an int-diff, the elements of a set-diff, the entries of a
-   dict-diff? (unknown-change describes any change.)"
+   dict-diff, and each element diff of the elements it names? (unknown-change
+   describes any change.)"
   [prev new d]
   (cond (no-change? d) (= prev new)
         (unknown-change? d) true
         (vector-diff? d) (and (= (:prev-length d) (count prev)) (= (:new-length d) (count new))
-                              (every? #(or (contains? (:updated d) %) (= (nth prev %) (nth new %)))
+                              (every? #(if-let [e (get (:updated d) %)]
+                                         (consistent? (nth prev %) (nth new %) e)
+                                         (= (nth prev %) (nth new %)))
                                       (range (min (count prev) (count new)))))
         (int-diff? d) (== (- (double new) (double prev)) (double (:amount d)))
-        (set-diff? d) (= new (into (apply disj (set prev) (:deleted d)) (:added d)))
-        (dict-diff? d) (and (= (set (keys new)) (into (apply disj (set (keys prev)) (:deleted d)) (keys (:added d))))
+        ;; added elements (keys) were absent and deleted ones present, so
+        ;; that count's rule can trust them
+        (set-diff? d) (and (not-any? #(contains? (set prev) %) (:added d)) (every? #(contains? (set prev) %) (:deleted d))
+                           (= new (into (apply disj (set prev) (:deleted d)) (:added d))))
+        (dict-diff? d) (and (not-any? #(contains? prev %) (keys (:added d))) (every? #(contains? prev %) (:deleted d))
+                            (= (set (keys new)) (into (apply disj (set (keys prev)) (:deleted d)) (keys (:added d))))
                             (every? (fn [[k v]] (= v (get new k))) (:added d))
-                            (every? #(or (contains? (:updated d) %) (contains? (:added d) %) (= (get prev %) (get new %)))
+                            (every? #(if-let [e (get (:updated d) %)]
+                                       (consistent? (get prev %) (get new %) e)
+                                       (= (get prev %) (get new %)))
                                     (filter #(contains? prev %) (keys new))))
         :else false))
+
+(defn compute
+  "The diff from prev to now, as precise as these kinds state it: no-change
+   for equal values; for two vectors a vector-diff naming the elements that
+   differ; for two maps a dict-diff, two sets a set-diff, two integers an
+   int-diff; unknown-change otherwise (e.g. to build argdiffs from values)."
+  [prev now]
+  (cond (= prev now) no-change
+        (and (vector? prev) (vector? now))
+        (vector-diff (count now) (count prev)
+                     (into {} (for [i (range (min (count prev) (count now))) :when (not= (prev i) (now i))]
+                                [i (compute (prev i) (now i))])))
+        (and (map? prev) (map? now) (not (record? prev)) (not (record? now)))
+        (dict-diff (into {} (remove #(contains? prev (key %))) now)
+                   (set (remove #(contains? now %) (keys prev)))
+                   (into {} (for [[k v] now :when (and (contains? prev k) (not= v (prev k)))] [k (compute (prev k) v)])))
+        (and (set? prev) (set? now)) (set-diff (remove prev now) (remove now prev))
+        (and (integer? prev) (integer? now)) (int-diff (- now prev))
+        :else unknown-change))
 
 ;; ---------------------------------------------------------------------------
 ;; Propagation (Gen.jl's Diffed)
@@ -129,34 +158,45 @@
                              :else unknown-change)))
 
 (defn- element-diff
-  "The diff of coll's element at key k (unchanged), coll's diff being d."
+  "The diff of coll's element at key k (unchanged), coll's diff being d: a
+   vector-diff on a vector (a key that is not an index finds nothing both
+   times), a dict-diff on a map, a set-diff on a set; anything else
+   unknown-change."
   [coll d k]
-  (cond (vector-diff? d) (if (element-changed? d k) (get (:updated d) k unknown-change) no-change)
-        (dict-diff? d) (cond (or (contains? (:added d) k) (contains? (:deleted d) k)) unknown-change
-                             :else (get (:updated d) k no-change))
-        (set-diff? d) (if (or (contains? (:added d) k) (contains? (:deleted d) k)) unknown-change no-change)
+  (cond (and (vector-diff? d) (vector? coll)) (cond (not (integer? k)) no-change
+                                                    (element-changed? d k) (get (:updated d) k unknown-change)
+                                                    :else no-change)
+        (and (dict-diff? d) (map? coll)) (cond (or (contains? (:added d) k) (contains? (:deleted d) k)) unknown-change
+                                               :else (get (:updated d) k no-change))
+        (and (set-diff? d) (set? coll)) (if (or (contains? (:added d) k) (contains? (:deleted d) k)) unknown-change no-change)
         :else unknown-change))
 
-(defmethod propagate #'clojure.core/nth [_ [coll k] [d dk :as diffs]]
-  (unchanged-or diffs #(if (no-change? dk) (element-diff coll d k) unknown-change)))
+;; Each rule gives the diff from the previous call's result to this one's.
+;; A call of another arity than the rule's is unknown-change.
 
-(defmethod propagate #'clojure.core/get [_ [coll k] [d dk & more :as diffs]]
-  (unchanged-or diffs #(if (and (no-change? dk) (every? no-change? more)) (element-diff coll d k) unknown-change)))
+(defmethod propagate #'clojure.core/nth [_ [coll k :as args] [d dk :as diffs]]
+  (unchanged-or diffs #(if (and (= 2 (count args)) (no-change? dk)) (element-diff coll d k) unknown-change)))
 
-(defmethod propagate #'clojure.core/conj [_ [coll x] [d dx :as diffs]]
-  ;; a vector grows at its end: precise when its length did not change
+(defmethod propagate #'clojure.core/get [_ [coll k :as args] [d dk & more :as diffs]]
+  (unchanged-or diffs #(if (and (<= 2 (count args) 3) (no-change? dk) (every? no-change? more))
+                         (element-diff coll d k)
+                         unknown-change)))
+
+(defmethod propagate #'clojure.core/conj [_ [coll x :as args] [d dx :as diffs]]
+  ;; on a vector whose length did not change, both results hold x last
   (unchanged-or diffs #(let [n (count coll)]
-                         (cond (not (vector? coll)) unknown-change
-                               (no-change? d) (vector-diff (inc n) n {})
+                         (cond (not (and (= 2 (count args)) (vector? coll))) unknown-change
+                               (no-change? d) (vector-diff (inc n) (inc n) {n dx})
                                (and (vector-diff? d) (= (:new-length d) (:prev-length d)))
                                (vector-diff (inc n) (inc n) (cond-> (:updated d) (changed? dx) (assoc n dx)))
                                :else unknown-change))))
 
-(defmethod propagate #'clojure.core/assoc [_ [coll k x] [d dk dx :as diffs]]
-  (unchanged-or diffs #(cond (not (and (no-change? d) (no-change? dk))) unknown-change
+(defmethod propagate #'clojure.core/assoc [_ [coll k x :as args] [d dk dx :as diffs]]
+  ;; with coll and k unchanged, both results hold k: only its value changed
+  (unchanged-or diffs #(cond (not (and (= 3 (count args)) (no-change? d) (no-change? dk))) unknown-change
                              (vector? coll) (let [n (count coll)]
-                                              (if (< k n) (vector-diff n n {k dx}) (vector-diff (inc n) n {})))
-                             (map? coll) (if (contains? coll k) (dict-diff {} #{} {k dx}) (dict-diff {k x} #{} {}))
+                                              (if (< k n) (vector-diff n n {k dx}) (vector-diff (inc n) (inc n) {n dx})))
+                             (map? coll) (dict-diff {} #{} {k dx})
                              :else unknown-change)))
 
 (defn- sum-of-amounts [diffs sign]
@@ -170,5 +210,8 @@
   (defmethod propagate v [_ args diffs]
     (unchanged-or diffs #(if (= 1 (count args)) (let [[d] diffs] (if (int-diff? d) (int-diff (- (:amount d))) unknown-change))
                             (sum-of-amounts diffs true)))))
-(doseq [v [#'clojure.core/inc #'clojure.core/dec #'clojure.core/vec #'clojure.core/identity]]
-  (defmethod propagate v [_ _ [d]] d))
+;; amounts are host numbers: lengths, or what a rule computed from them
+(doseq [v [#'clojure.core/inc #'clojure.core/dec]]
+  (defmethod propagate v [_ _ [d]] (if (or (no-change? d) (int-diff? d)) d unknown-change)))
+(defmethod propagate #'clojure.core/vec [_ _ [d]] (if (or (no-change? d) (vector-diff? d)) d unknown-change))
+(defmethod propagate #'clojure.core/identity [_ _ [d]] d)

@@ -121,6 +121,16 @@
   (.set ^java.util.concurrent.atomic.AtomicLong counter 0)
   nil)
 
+(def ^:private backward-salt 0x6261636b)
+
+(defn backward-key
+  "A key for a move's backward assess, folded from the move's key k apart
+   from any key a generative function derives from k (sites split it, Map
+   and Unfold fold it with small element indices), so encapsulated
+   randomness there never repeats the model's."
+  [k]
+  (rng/fold-in k backward-salt))
+
 (defn next-key
   "A fresh key from the implicit key source (deterministic given the seed and
    the order of calls)."

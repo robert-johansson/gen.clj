@@ -1,7 +1,8 @@
 (ns gen.diff-test
   "Change hints (gen.diff): the diff kinds, consistent? (does a diff describe
-   a change), and propagate's rules, each checked to give a diff that
-   describes the change it predicts, over random vectors, maps and edits."
+   a change), compute, and propagate's rules, each checked to give a diff
+   that describes the change it predicts, over random calls with every
+   argument edited or not."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as tgen]
@@ -25,33 +26,83 @@
     (is (diff/consistent? [1] [2] diff/unknown-change))
     (is (not (diff/consistent? [1] [2] diff/no-change)))))
 
-;; a random vector and an edit of it: [prev new diff]
-(def ^:private edited-vector
-  (tgen/let [v (tgen/vector tgen/small-integer 1 6)
-             kind (tgen/elements [:set :append :same])
-             i (tgen/choose 0 (dec (count v)))
-             x tgen/small-integer]
-    (case kind
-      :set [v (assoc v i x) (diff/vector-diff (count v) (count v) (if (= x (v i)) {} {i diff/unknown-change}))]
-      :append [v (conj v x) (diff/vector-diff (inc (count v)) (count v) {})]
-      :same [v v diff/no-change])))
+;; Random calls of every rule's function, each argument edited or not (a
+;; changed element, an appended or dropped one, a new or removed key, a
+;; fresh value), the diffs from diff/compute: the rule's diff must describe
+;; the change of the result. (The first version edited only the collection
+;; and never shrank one: the review of 2026-10-20 found five unsound rules
+;; it passed.)
 
-(defspec propagated-diffs-describe-the-change 300
-  ;; each rule, applied to a vector before and after a random edit, with the
-  ;; edit's diff: the diff it gives describes the change of the result
-  (prop/for-all [[v v' d] edited-vector
-                 j (tgen/choose 0 5)
-                 y tgen/small-integer]
-    (let [j (mod j (count v))
-          check (fn [f args args']
-                  (diff/consistent? (apply @f args) (apply @f args')
-                                    (diff/propagate f args' (into [d] (repeat (dec (count args)) diff/no-change)))))]
-      (and (check #'clojure.core/count [v] [v'])
-           (check #'clojure.core/nth [v j] [v' j])
-           (check #'clojure.core/get [v j] [v' j])
-           (check #'clojure.core/conj [v y] [v' y])
-           (or (>= j (count v')) (check #'clojure.core/assoc [v j y] [v' j y]))
-           (check #'clojure.core/vec [v] [v'])))))
+(def ^:private small tgen/small-integer)
+(def ^:private a-key (tgen/one-of [(tgen/choose 0 4) (tgen/elements [:a :b :c])]))
+(def ^:private a-coll
+  (tgen/one-of [(tgen/vector small 0 4) (tgen/map (tgen/elements [:a :b :c 0 1]) small) (tgen/set small)]))
+
+(defn- edited
+  "A generator of the value after an edit of x (or none)."
+  [x fresh]
+  (let [structural (cond (and (vector? x) (seq x)) [(tgen/fmap #(assoc x (mod % (count x)) (inc (nth x (mod % (count x))))) small)
+                                                    (tgen/return (pop x))
+                                                    (tgen/fmap #(conj x %) small)]
+                         (vector? x) [(tgen/fmap #(conj x %) small)]
+                         (map? x) [(tgen/fmap (fn [[k v]] (assoc x k v)) (tgen/tuple (tgen/elements [:a :b :c 0 1]) small))
+                                   (tgen/return (if (seq x) (dissoc x (first (keys x))) x))]
+                         (set? x) [(tgen/fmap #(conj x %) small) (tgen/return (if (seq x) (disj x (first x)) x))]
+                         :else [])]
+    (tgen/one-of (concat [(tgen/return x) fresh] structural))))
+
+(defn- call
+  "A generator of [f prev-args new-args] for f with argument kinds."
+  [f & kinds]
+  (tgen/bind (apply tgen/tuple kinds)
+             (fn [prev] (tgen/fmap (fn [new] [f prev new])
+                                   (apply tgen/tuple (map edited prev kinds))))))
+
+(def ^:private calls
+  (tgen/one-of [(call #'clojure.core/count a-coll)
+                (call #'clojure.core/nth (tgen/vector small 0 4) (tgen/choose 0 4))
+                (call #'clojure.core/get a-coll a-key)
+                (call #'clojure.core/get a-coll a-key small)
+                (call #'clojure.core/conj (tgen/vector small 0 4) small)
+                (call #'clojure.core/conj (tgen/vector small 0 4) small small)
+                (call #'clojure.core/assoc (tgen/one-of [(tgen/vector small 0 4) (tgen/map a-key small)]) a-key small)
+                (call #'clojure.core/assoc (tgen/map a-key small) a-key small a-key small)
+                (call #'clojure.core/vec a-coll)
+                (call #'clojure.core/inc small)
+                (call #'clojure.core/dec small)
+                (call #'clojure.core/+ small small)
+                (call #'clojure.core/- small small)
+                (call #'clojure.core/- small)
+                (call #'clojure.core/identity a-coll)]))
+
+(defn- result [f args] (try (apply @f args) (catch Exception _ ::throws)))
+
+(defspec every-rule-describes-the-change 2000
+  (prop/for-all [[f prev new] calls]
+    (let [r0 (result f prev) r1 (result f new)]
+      (or (= ::throws r0) (= ::throws r1)
+          (diff/consistent? r0 r1 (diff/propagate f new (mapv diff/compute prev new)))))))
+
+(deftest the-review-s-counterexamples
+  ;; each was unsound before the review of 2026-10-20
+  (let [d #(diff/propagate %1 %2 %3) nc diff/no-change uc diff/unknown-change]
+    (testing "conj with a changed element: the last element changed, the length did not"
+      (is (= (diff/vector-diff 3 3 {2 uc}) (d #'clojure.core/conj [[1 2] 3] [nc uc]))))
+    (testing "assoc appending, or of a new key: both results hold it"
+      (is (= (diff/vector-diff 3 3 {2 uc}) (d #'clojure.core/assoc [[1 2] 2 9] [nc nc uc])))
+      (is (= (diff/dict-diff {} #{} {:k uc}) (d #'clojure.core/assoc [{} :k 9] [nc nc uc]))))
+    (testing "variadic calls"
+      (is (diff/unknown-change? (d #'clojure.core/assoc [{} :p 1 :q 2] [nc nc nc nc uc])))
+      (is (diff/unknown-change? (d #'clojure.core/conj [[] 1 2] [nc nc uc]))))
+    (testing "get past a shrunk end, and a key that is not an index"
+      (is (diff/unknown-change? (d #'clojure.core/get [[1 2] 2 0] [(diff/vector-diff 2 3 {}) nc nc])))
+      (is (diff/no-change? (d #'clojure.core/get [[1 2] :k 0] [(diff/vector-diff 2 3 {}) nc nc]))))
+    (testing "vec, inc and dec pass on only the diffs of their kind"
+      (is (diff/unknown-change? (d #'clojure.core/vec [{:a 1}] [(diff/dict-diff {} #{} {:a uc})])))
+      (is (diff/unknown-change? (d #'clojure.core/inc [1] [(diff/vector-diff 1 1 {})]))))
+    (testing "consistent? checks element diffs, and set- and dict-diffs' added and deleted"
+      (is (not (diff/consistent? [1 2] [1 5] (diff/vector-diff 2 2 {1 (diff/int-diff 1)}))))
+      (is (not (diff/consistent? #{1 2} #{1 2} (diff/set-diff #{1} #{})))))))
 
 (defspec int-diffs-add-up 200
   (prop/for-all [a tgen/small-integer b tgen/small-integer da tgen/small-integer db tgen/small-integer]

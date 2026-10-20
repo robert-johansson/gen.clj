@@ -41,19 +41,25 @@
   (or (keyword? addr) (string? addr) (number? addr) (boolean? addr)
       (and (vector? addr) (seq addr) (every? constant-address? addr))))
 
+(defn- outside-gens
+  "The symbols of form outside the gen forms in it (a nested gen's trace is
+   its own)."
+  [form]
+  (filter symbol? (tree-seq #(and (coll? %) (not (and (seq? %) ('#{gen gen.dynamic/gen} (first %))))) seq form)))
+
 (defn- pure!
   "form, checked to make none of the body's own calls."
   [form what]
-  (when-let [e (first (filter effects (symbols form)))]
+  (when-let [e (first (filter effects (outside-gens form)))]
     (not-static (str what " calls " e ", which a static body may do only as a binding's whole expression") form))
   form)
 
 (defn bound-names
-  "The symbols a binding form binds (destructuring included), in order;
-   _ binds nothing."
+  "The symbols a binding form binds (destructuring included, :keys with
+   namespaced or keyword entries too), in order; _ binds nothing."
   [binding]
-  (let [written (disj (set (symbols binding)) '_)]
-    (vec (distinct (filter written (take-nth 2 (destructure [binding nil])))))))
+  (vec (distinct (remove #(or (= '_ %) (re-matches #"(vec|map|seq|first|p)__\d+" (name %)))
+                         (take-nth 2 (destructure [binding nil]))))))
 
 (defn- inputs [form known] (vec (distinct (filter known (symbols form)))))
 
@@ -62,9 +68,11 @@
 (defn- call-var
   "The var form calls, when form is one call of a function var (not a
    local, a macro or a special form) on symbols and constants: the
-   binding whose diff gen.diff/propagate can give precisely."
-  [env form]
-  (when (and (seq? form) (symbol? (first form)) (not (contains? env (first form))) (every? simple-arg? (rest form)))
+   binding whose diff gen.diff/propagate can give precisely. locals are
+   the enclosing locals (a gen body's too, which &env does not hold)."
+  [{:keys [env locals]} form]
+  (when (and (seq? form) (symbol? (first form)) (not (contains? env (first form))) (not (contains? locals (first form)))
+             (every? simple-arg? (rest form)))
     (let [v (resolve env (first form))]
       (when (and (var? v) (not (:macro (meta v))))
         (symbol (str (.-ns ^clojure.lang.Var v)) (str (.-sym ^clojure.lang.Var v)))))))
@@ -123,10 +131,13 @@
   "The graph of a static body (a body of one let), or a loud error: {:args
    (arg-names), :nodes [{:kind :addr :binding :names :inputs :expr :form,
    and :call :args :arg-specs for one call of a var, :arg-specs for a
-   splice}], :ret (a compute node)}. env is the macro's &env."
-  [params body env]
+   splice}], :ret (a compute node)}. env is the macro's &env, locals the
+   enclosing locals."
+  ([params body env] (analyze params body env #{}))
+  ([params body env locals]
   (when-not (= 1 (count body)) (not-static "the body is one let form" (vec body)))
-  (let [form (first body)]
+  (let [env {:env env :locals (set locals)}
+        form (first body)]
     (when-not (and (seq? form) (#{'let 'clojure.core/let} (first form)))
       (not-static "the body is one let form" form))
     (let [[_ bindings & ret] form
@@ -146,7 +157,7 @@
           names (into known (mapcat :names nodes))]
       {:args args
        :nodes nodes
-       :ret (compute-node env (pure! ret "the return expression") names)})))
+       :ret (compute-node env (pure! ret "the return expression") names)}))))
 
 (defn ir
   "gf's graph as data (see the namespace doc), or nil when gf is not static."
@@ -161,7 +172,7 @@
    nodes, an edge from each input."
   [gf]
   (let [{:keys [args nodes return]} (or (ir gf) (throw (ex-info "dot: not a static generative function" {})))
-        id #(str "\"" % "\"")
+        id #(str "\"" (str/escape (str %) {\" "\\\"" \\ "\\\\"}) "\"")
         arg-lines (for [n (concat (apply concat (:fixed args)) (:rest args))] (str "  " (id n) " [shape=plaintext];"))
         node-id (fn [i n] (if (:addr n) (pr-str (:addr n)) (str "#" i)))
         owner (into {} (for [[i n] (map-indexed vector nodes) s (:names n)] [s (node-id i n)]))

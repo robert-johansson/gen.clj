@@ -118,3 +118,26 @@ addresses, changed args with disappearing calls; regenerate (Eq 4.1, Alg 18);
 project, propose, assess, retdiff soundness; selection, custom-proposal and
 involutive MH; IS and SIR (Algs 13, 14); kernel reversals; the statistical
 bands (E[w²] formula, χ²₅ threshold).
+
+## Thesis errata (audits of 2026-10-20)
+
+From the interim audit:
+- **p. 71:** "(τ', σ') := h_update(σ, τ)" should be h_update(τ, σ), and
+  "h_update defined with respect to p(·;x)" should be p(·;x').
+- **p. 146:** "log w = 1" should be log w = 0.
+- **p. 152, Alg. 16:** "Q.generate((x', σ'), τ)" should be Q.generate((x,
+  σ'), τ), by Eq. 4.1's q(υ'; x, σ'). gen.clj uses `(:args tr)`.
+- **p. 157:** update and regenerate return "t' = (P, x', τ, ω')", which
+  should be τ'. Regenerate's "ω' ~ q̊(·; x, τ')" should be x'.
+
+From the final audit:
+- **Algs 3, 7, 10, 13, 14:** NORMALIZE returns ℓ̄ = log Σ w̃ as log ẑ;
+  Eq. 3.5's ẑ is the mean, so log ẑ = ℓ̄ − log n, and each SMC step's
+  increment loses log n. gen.clj's estimates are means (its tests compare
+  with exact evidence).
+- **Alg 7 (p. 105):** the incremental weight omits −s_j.LOGPDF(), the
+  proposal's density.
+- **Alg 6 (p. 97):** it returns t', which is never defined (t_k is meant).
+- **Eq. 4.16 (p. 160):** with Alg 5's names (σ forward, σ' the discard) the
+  ratio is q(σ'; x, τ')/q(σ; x, τ): σ and σ' are swapped (a different slip
+  from Eq. 4.15's).

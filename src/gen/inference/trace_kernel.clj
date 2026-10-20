@@ -127,7 +127,7 @@
          _ (when-let [extra (seq (tf/unconstrained-additions (:choices trace) update discard (:choices t')))]
              (throw (ex-info (str "trace-kernel/mh: the kernel's update leaves new choices unwritten: " (vec extra))
                              {:addresses (vec extra)})))
-         {bwd :weight} (gfi/assess kernel (into [t'] args) backward (rng/fold-in k-update 1))]
+         {bwd :weight} (gfi/assess kernel (into [t'] args) backward (gfi/backward-key k-update))]
      (mh/accept trace t' (+ (- w fwd) bwd (log-abs-det kernel trace args kc ret (kept-by discard))) k-accept))))
 
 (defn mh-kernel
@@ -150,7 +150,7 @@
           {kc :choices fwd :weight [update backward :as ret] :retval} (gfi/propose k (into [trace] k-args) k-propose)
           [args argdiffs] (tf/new-arguments trace p-new-args p-argdiffs)
           {t' :trace w :weight discard :discard} (gfi/update trace args argdiffs (cm/merge update new-observations) k-update)
-          {bwd :weight [l-update l-backward] :retval} (gfi/assess l (into [t'] l-args) backward (rng/fold-in k-update 1))]
+          {bwd :weight [l-update l-backward] :retval} (gfi/assess l (into [t'] l-args) backward (gfi/backward-key k-update))]
       (when check?
         (let [{t'' :trace} (gfi/update t' (:args trace) (vec (repeat (count (:args trace)) diff/unknown-change))
                                        (cm/merge l-update prev-observations) k-check)]

@@ -318,7 +318,8 @@
   (-regenerate [this tr args argdiffs selection key]
     (proposal/regenerate-under #(exact-generate this %1 %2 %3) #(exact-weight this %1 %2 %3)
                                tr args argdiffs selection key))
-  (-assess [_ args choices key] (gfi/-assess gf args choices key))
+  ;; as its generate, it needs exact densities
+  (-assess [_ args choices key] (gfi/with-exact-density "with-exact-proposal" (gfi/-assess gf args choices key)))
   (-propose [_ args key] (gfi/-propose gf args key))
   (-project [this tr selection]
     (exact-weight this (:args tr) (sel/get-selected (:choices tr) selection) tr)))

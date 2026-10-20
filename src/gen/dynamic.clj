@@ -425,10 +425,11 @@
   [{:keys [f rule args-f arg-specs alias]} env diffs old skip?]
   (cond
     alias [(get env alias) (if skip? (get diffs alias diff/no-change) diff/unknown-change)]
+    ;; the value from the node's guarded fn, as the body computes it; the
+    ;; rule sees the arguments only for the diff
     rule
-    (let [as (args-f read-param env)
-          v (apply @rule as)]
-      [v (if skip? (diff/propagate rule as (mapv #(spec-diff diffs %) arg-specs)) diff/unknown-change)])
+    (let [v (f read-param env)]
+      [v (if skip? (diff/propagate rule (args-f read-param env) (mapv #(spec-diff diffs %) arg-specs)) diff/unknown-change)])
     :else
     (let [v (f read-param env)]
       [v (if (and skip? (identical? v old)) diff/no-change diff/unknown-change)])))
@@ -462,7 +463,12 @@
   [{:keys [nodes ret args-bind params] :as st} gf vol trace-fn splice-at args]
   (let [{:keys [mode prev constraints selection argdiffs]} @vol
         values (::node-values prev)
-        skip? (boolean (and values (#{:update :regenerate} mode) (nil? (:transitions gf))))
+        ;; the values are this graph's (not another static gf's at the same
+        ;; address, a Switch's other branch), read under an equal store (a
+        ;; callee's param reads, a param in an argument)
+        skip? (boolean (and values (#{:update :regenerate} mode) (nil? (:transitions gf))
+                            (identical? st (:static (:gen-fn prev)))
+                            (= *params* (::params prev))))
         reached? (fn [{:keys [kind addr]}]
                    (let [p (path addr)]
                      (cond (= mode :update) (not (cm/empty? (cm/get-submap constraints p)))
@@ -472,7 +478,7 @@
         [env diffs vals]
         (reduce (fn [[env diffs vals] [i {:keys [kind addr inputs param? f bind names symbol? arg-specs] :as n}]]
                   (let [old (when skip? (nth values i))
-                        keep? (and skip? (not param?) (unchanged? diffs inputs) (not (reached? n)))
+                        keep? (and skip? (unchanged? diffs inputs) (not (reached? n)))
                         [v d] (cond
                                 keep? [(keep-node! vol n old) diff/no-change]
                                 (= kind :trace) (let [v (trace-fn addr (f read-param env))]
@@ -487,8 +493,9 @@
                      (conj vals v)]))
                 [(args-bind args) (if skip? (arg-name-diffs (:args st) params argdiffs) {}) []]
                 (map-indexed vector nodes))]
-    (vswap! vol assoc ::node-values vals)
-    (if (and skip? (not (:param? ret)) (unchanged? diffs (:inputs ret)))
+    ;; the store in effect, which the next update's skipping requires
+    (vswap! vol assoc ::node-values vals ::params *params*)
+    (if (and skip? (unchanged? diffs (:inputs ret)))
       (do (vswap! vol assoc ::retdiff diff/no-change) (:retval prev))
       (let [[v d] (computed ret env diffs (:retval prev) skip?)]
         (vswap! vol assoc ::retdiff d)
@@ -568,15 +575,8 @@
                               (binding [*params* (merge *params* ps)] (run-body))
                               (run-body))
                             (finally (vreset! transition outer)))))
-                      (let [[addr gf & args] xs
-                            ;; trace calls in lazy arguments happen now, in this body
-                            args (realize! (vec args))
-                            p (path addr)
-                            state @vol]
-                        (check-running! state p)
-                        (when-not (gfi/generative-function? gf)
-                          (throw (ex-info (str "splice at " p " needs a generative function") {:path p :value gf})))
-                        (first (splice-at addr gf args nil)))))
+                      ;; trace calls in lazy arguments happen now, in this body (splice-at)
+                      (let [[addr gf & args] xs] (first (splice-at addr gf args nil)))))
         retval (realize! (if-let [st (:static gf)]
                            (run-static st gf vol trace-fn splice-at args)
                            (apply (:body-fn gf) trace-fn splice-fn read-param untraced-fn args)))]
@@ -589,7 +589,7 @@
                  ::scores (:scores state)
                  ::subtraces (:subtraces state))
     (pos? (long (:omega-count state))) (assoc ::trace/omega (:omega state))
-    (::node-values state) (assoc ::node-values (::node-values state))))
+    (::node-values state) (assoc ::node-values (::node-values state) ::params (::params state))))
 
 (defn- holds-batch?
   "Does x hold a batched value (in its maps, vectors and realized seqs)?"
@@ -1115,11 +1115,8 @@
         plain (mapv #(if (some #{%} prim) (vary-meta % dissoc :tag) %) params)
         coercions (mapcat (fn [p] [(vary-meta p dissoc :tag) (list (primitive-coercions (:tag (meta p))) (vary-meta p dissoc :tag))]) prim)
         locals (into (set (keys &env)) *outer-locals*)
-        st (when (:static (meta params)) (static/analyze plain body &env))
-        body (if (seq prim)
-               [`(let [~@(mapcat (fn [p] [(vary-meta p dissoc :tag) (list (primitive-coercions (:tag (meta p))) (vary-meta p dissoc :tag))]) prim)]
-                   ~@body)]
-               body)
+        st (when (:static (meta params)) (static/analyze plain body &env locals))
+        body (if (seq prim) [`(let [~@coercions] ~@body)] body)
         body-fn (guard-branches `(fn [~'trace ~'splice ~'param ~'untraced ~@plain]
                                    (let [~'untraced-key (fn [] (~'untraced))] ~@body))
                                 locals)]
