@@ -35,10 +35,10 @@ are fixed (`docs/research/acceptance-2026-10-19.md`). Benchmarks are in
 and on CUDA (the Jetson AGX Thor, sm_110).** It passes the backend
 conformance suite against the JVM reference on every device, and the full
 battery (298 tests, slow and heavy included) on Metal, with the tape and
-with native gradients, and on CUDA. MLX's CPU backend passes the light
-battery in float32 and float64, and the full battery in float64 (on the
-Mac, the day before; on the Thor, the first 15 namespaces in full and the
-rest on the light tier). Every property passed a soak (ten times its
+with native gradients, on CUDA, and on MLX's CPU backend: float32 on the
+Mac and the Thor, float64 split between them (the Thor's first 15
+namespaces, the Mac's other 9). M2 was first closed on MLX's CPU light
+tier and reopened the same morning to finish these. Every property passed a soak (ten times its
 cases, fresh seeds) on each device after the soaks found one wrong test
 assumption (only Metal flushes float32 subnormals). The record is
 `docs/research/m2-verification-2026-10-20.md`. CUDA needs MLX v0.32.2
