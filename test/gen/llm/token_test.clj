@@ -23,6 +23,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [gen.batched :as batched]
             [gen.choicemap :as cm]
+            [gen.combinators :as comb]
             [gen.diff :as diff]
             [gen.dist :as d]
             [gen.dist.core :as dc]
@@ -80,11 +81,18 @@
       (trace :liked (d/bernoulli (if (some #{3 4} tokens) 0.9 0.3)))
       tokens)))
 
+(def ^:private turns
+  "A conversation: each turn's prompt is the context so far, which the
+   turn's completion extends (an Unfold of completions)."
+  (comb/unfold (gen [_t ctx] (into ctx (splice :reply stops ctx 3)))))
+
 (laws/deflaws completion
   [[:stops stops [prompt 4] [[prompt 2] [prompt 6] [[95 41] 4]]]
    [:fixed fixed [prompt 3] [[prompt 1] [prompt 5] [[3] 3]]]
    [:open-ended open-ended [prompt 3] [[prompt 2]]]
-   [:composed composed [3] [[1] [5]]]]
+   [:composed composed [3] [[1] [5]]]
+   [:map (comb/map stops) [[prompt [95 41]] [3 2]] [[[prompt [95 41]] [1 4]] [[[3] [95 41]] [3 2]]]]
+   [:turns turns [3 prompt] [[2 prompt] [4 prompt] [3 [95 41]]]]]
   100)
 
 (def ^:private noisy
@@ -297,7 +305,8 @@
                     ["a bad position" #(token/forced -1 [3])]
                     ["a bad suffix" #(token/from -1)]
                     ["end tokens not a set" #(token/completion m {:eos [3]})]
-                    ["end tokens past the vocabulary" #(token/completion m {:eos #{97}})]]]
+                    ["end tokens past the vocabulary" #(token/completion m {:eos #{97}})]
+                    ["a completion past the LM's context" #(gfi/simulate fixed [prompt 600])]]]
     (is (thrown? clojure.lang.ExceptionInfo (f)) what)))
 
 ;; ---------------------------------------------------------------------------

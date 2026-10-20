@@ -181,9 +181,11 @@ engine (`gen.llm.cell-engine`):
 
 - **The GFI laws** (`laws/deflaws`, general and forward-sampling, 21 laws,
   100 trials each) over a completion that ends on a third of the tokens,
-  one with no end tokens, one ending on EOS, and a gen model whose prompt
+  one with no end tokens, one ending on EOS, a gen model whose prompt
   depends on a choice (`:topic`) and whose observation depends on the
-  tokens, with changed arguments (other lengths, another prompt).
+  tokens, a Map of completions over two prompts, and a conversation (an
+  Unfold whose turn's prompt is the context so far, extended by the turn's
+  completion), with changed arguments (other lengths, other prompts).
 - **Score once:** the same laws (40 trials) on the noisy cell engine, whose
   reads differ with their shape and cells as llama.cpp's do, with room for
   every read: exact. And a targeted test: a token drawn after the LM scored
@@ -208,7 +210,8 @@ engine (`gen.llm.cell-engine`):
   stays consistent; batched runs fall back with independent particles; the
   LM's engine never ran its GC backstop.
 - **Misuse** is loud: arity, prompts, max-tokens, constraints (past the
-  maximum, at keywords, not tokens, nested), bad positions and end sets.
+  maximum, at keywords, not tokens, nested), bad positions and end sets, a
+  completion past the LM's context.
 
 Mutations of `gen.llm.token` checked (2026-10-21, each applied, the suite
 run, reverted), eighteen, all caught:
