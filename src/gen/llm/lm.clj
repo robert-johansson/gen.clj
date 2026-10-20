@@ -114,7 +114,7 @@
 
 (defn- check-token [m t what]
   (let [n (:n-vocab (-tokenizer m))]
-    (when-not (and (integer? t) (< -1 (long t) (long n)))
+    (when-not (and (integer? t) (<= 0 t) (< t n))
       (throw (ex-info (str what ": not a token of the vocabulary (0 to " (dec (long n)) "): " (pr-str t))
                       {:reason :invalid-token :token t :n-vocab n})))
     t))

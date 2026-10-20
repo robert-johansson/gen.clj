@@ -356,6 +356,14 @@
   (when (:closed? (state c))
     (throw (ex-info "lm: the LM is closed" {:reason :closed}))))
 
+(defn- token?
+  "Is t a token of a vocabulary of n tokens? (Quick for a long; a big
+   integer is out of range, not an error.)"
+  [t ^long n]
+  (if (instance? Long t)
+    (< -1 (.longValue ^Long t) n)
+    (and (integer? t) (not (neg? (compare t 0))) (neg? (compare t n)))))
+
 (defn- check-context
   "ctx fits in the cache, and its tokens are tokens of the vocabulary."
   [c ctx]
@@ -368,9 +376,7 @@
                       {:reason :context-full :tokens n :limit limit})))
     (dotimes [i n]
       (let [t (nth ctx i)]
-        (when-not (if (instance? Long t)
-                    (< -1 (.longValue ^Long t) n-vocab)
-                    (and (integer? t) (< -1 (long t) n-vocab)))
+        (when-not (token? t n-vocab)
           (throw (ex-info (str "lm: not a token of the vocabulary (0 to " (dec n-vocab) "): " (pr-str t))
                           {:reason :invalid-token :token t :n-vocab n-vocab})))))))
 

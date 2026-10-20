@@ -496,6 +496,7 @@
                                 [:invalid-token #(lm/next-logprobs m (conj prompt n-vocab))]
                                 [:invalid-token #(lm/next-logprobs m (conj prompt -1))]
                                 [:invalid-token #(lm/next-logprobs m (conj prompt 1.0))]
+                                [:invalid-token #(lm/next-logprobs m (conj prompt 100000000000000000000N))]
                                 [:context-full #(lm/next-logprobs m (vec (repeat 21 1)))]
                                 [:invalid-token #(lm/batch-next-logprobs m [(conj prompt 1) (conj prompt :a)])]
                                 [:no-tokens #(lm/batch-next-logprobs m [(conj prompt 1) []])]
@@ -504,7 +505,8 @@
                                 [:invalid-token #(lm/score m prompt [1 n-vocab])]
                                 [:invalid-token #(lm/score m prompt 1)]
                                 [:context-full #(lm/score m prompt (vec (repeat 18 1)))]
-                                [:invalid-token #(lm/token-bytes m n-vocab)]]]
+                                [:invalid-token #(lm/token-bytes m n-vocab)]
+                                [:invalid-token #(lm/token-bytes m 100000000000000000000N)]]]
                 (is (= want (reason f))))
               (is (= before (lm/info m)) "nothing read, nothing counted")
               (is (empty? (books m e {:max-branches 4 :max-cells 20})))))))
