@@ -675,6 +675,19 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   GenParticleFilters' UpdatingTraceTranslator with a transform
   (`updating-translator`), applied to a filter by `pf/move-reweight`;
   without a transform it is Del Moral's SMC samplers.
+- **Kernels that read the trace, `(kern ^:trace [tr & args] …)`** (owner,
+  2026-10-20, after the final law audit): Gen.jl's `@kern` reads the trace
+  in its loops, branches and lets, as the thesis's p. 102 kernel loops over
+  `trace[:degree]`. `kern` builds its chain from its arguments alone, so it
+  can't. With `^:trace` on its parameters, the first parameter is bound to
+  the trace as it is when each statement is evaluated, a kernel statement
+  applies its kernel and continues with the result, and the reversal runs
+  the statements reversed (loops backwards, each kernel's reversal). The
+  thesis's invariant (pp. 100–101) is checked dynamically after every
+  application: the loop collections, conditions and let values read again
+  from the final trace must be those the run read, or it is a loud error
+  (the reversal would undo another kernel). Values compare on the host
+  (kernels run at the inference loop's boundary).
 - **Trace kernels, GenTraceKernelDSL** (M4, 2026-10-20): no new macro. A
   kernel is a `gen` function whose first argument is the model trace and
   whose return value is `[update backward]`; its choices are the auxiliary

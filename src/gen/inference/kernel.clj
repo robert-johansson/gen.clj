@@ -16,6 +16,10 @@
      (checked k observations)  k, then check that it left the observations alone
      (kern [args] stmt …)  Gen.jl's @kern: statements, loops and branches over
                            the arguments, as one chain with its reversal
+     (kern ^:trace [tr args] stmt …)
+                           the same, reading the trace in its loops,
+                           branches and lets, with the thesis's invariant
+                           checked after every application
 
    A combinator's result reports the accept decisions of the MH moves it
    made, in order, as :accepted (a vector of booleans) when they all report
@@ -117,6 +121,82 @@
       "let" (let [[_ bindings & body] form] `(let ~bindings ~(statements body)))
       `(checked-kernel ~form '~form))))
 
+(defn ^:no-doc control-value
+  "A value a (kern ^:trace …) body's control flow read, on the host: an
+   array read at the inference loop's boundary, in collections too."
+  [v]
+  (cond (array/array? v) (array/->clj v)
+        (and (sequential? v) (not (record? v))) (mapv control-value v)
+        (and (map? v) (not (record? v))) (into {} (map (fn [[k x]] [k (control-value x)])) v)
+        :else v))
+
+(defn ^:no-doc trace-kernel
+  "The kernel of a (kern ^:trace …) body. forward and backward are (fn [t
+   apply! record]) running the statements (backward: reversed, loops
+   backwards) against the volatile t: apply! applies a kernel to @t, record
+   notes a control value (a loop's collection, a condition, a let's value)
+   and returns it. The i-th kernel applied takes the key folded with i.
+   After a run, the body runs again on the final trace without applying a
+   kernel: the control values it reads must be those the run read (the
+   thesis's invariant, pp. 100-101), or it is a loud error."
+  [forward backward]
+  (letfn [(run [body reversal? trace key]
+            (let [t (volatile! trace)
+                  n (volatile! 0)
+                  moves (volatile! [])
+                  seen (volatile! [])
+                  apply! (fn [k]
+                           (let [r ((step-fn (if reversal? (reversal k) k)) @t (rng/fold-in key @n))]
+                             (vswap! n inc)
+                             (vswap! moves #(when % (some->> (accepted-moves r) (into %))))
+                             (vreset! t (:trace r))))
+                  record (fn [v] (vswap! seen conj v) v)]
+              (body t apply! record)
+              (let [again (volatile! [])]
+                (body (volatile! @t) (fn [_] nil) (fn [v] (vswap! again conj v) v))
+                (let [read (mapv control-value @seen) final (mapv control-value @again)]
+                  (when-not (= read final)
+                    (throw (ex-info (str "kern: the kernels changed what the control flow reads (a loop's collection,"
+                                         " a condition or a let's value), so the reversal would not undo the kernel:"
+                                         " read " (pr-str read) ", then " (pr-str final) " from the final trace")
+                                    {:read read :final final})))))
+              (cond-> {:trace @t} @moves (assoc :accepted @moves))))]
+    (->Kernel (fn [trace key] (run forward false trace key)) (fn [trace key] (run backward true trace key)))))
+
+(declare traced-statements)
+
+(defn- traced-form
+  "A (kern ^:trace …) statement as code against the volatile t, with the
+   trace parameter tr bound to @t wherever an expression is evaluated;
+   apply! and record as in trace-kernel. reverse? gives the reversal's code:
+   statements reversed, loops backwards, and apply! applies reversals."
+  [form tr t apply! record reverse?]
+  (let [head (when (and (seq? form) (symbol? (first form))) (name (first form)))
+        at (fn [expr] `(let [~tr (deref ~t)] ~expr))
+        noted (fn [expr] `(~record ~(at expr)))
+        body (fn [forms] (traced-statements forms tr t apply! record reverse?))]
+    (case head
+      ("doseq" "for")
+      ;; the iterations as thunks, the collections read once at the loop
+      (let [[_ bindings & stmts] form
+            bindings' (vec (mapcat (fn [[b e]]
+                                     (case b
+                                       (:when :while) [b `(control-value ~(noted e))]
+                                       :let [b (vec (mapcat (fn [[x v]] [x (noted v)]) (partition 2 e)))]
+                                       [b `(~record (vec ~(at e)))]))
+                                   (partition 2 bindings)))
+            thunks (gensym "iterations")]
+        `(let [~thunks (vec (for ~bindings' (fn [] ~(body stmts))))]
+           (run! #(%) ~(if reverse? `(rseq ~thunks) thunks))))
+      "when" (let [[_ c & stmts] form] `(when (control-value ~(noted c)) ~(body stmts)))
+      "if" (let [[_ c a b] form] `(if (control-value ~(noted c)) ~(body [a]) ~(when (some? b) (body [b]))))
+      "let" (let [[_ bindings & stmts] form]
+              `(let ~(vec (mapcat (fn [[x v]] [x (noted v)]) (partition 2 bindings))) ~(body stmts)))
+      `(~apply! (checked-kernel ~(at form) '~form)))))
+
+(defn- traced-statements [forms tr t apply! record reverse?]
+  `(do ~@(map #(traced-form % tr t apply! record reverse?) (if reverse? (reverse forms) forms)) nil))
+
 (defmacro kern
   "Gen.jl's @kern: (kern [args] statement …) is a function of args returning
    one kernel, the statements' kernels in order. A statement is a kernel, or
@@ -125,9 +205,31 @@
    trace, so the result is a chain and its reversal is automatic: every
    statement reversed, in reverse order (loops run backwards).
 
-     (kern [n] (mh (sel/select :mu)) (doseq [i (range n)] (mh (sel/select [:z i]))))"
+     (kern [n] (mh (sel/select :mu)) (doseq [i (range n)] (mh (sel/select [:z i]))))
+
+   (kern ^:trace [tr args] statement …) reads the trace, as Gen.jl's @kern
+   does: tr is the trace as it is when each statement is evaluated (after
+   the kernels before it), in a kernel statement's arguments and in the
+   loops, conditions and lets. Kernels apply in order, the i-th with the
+   key folded with i; the reversal runs the statements reversed, loops
+   backwards, each kernel's reversal (loud for a kernel without one).
+   After every application, the thesis's invariant is checked (pp.
+   100-101): the loop collections, conditions and let values, read again
+   from the final trace, must be those the run read; a kernel that changes
+   them is a loud error. Conditions are Clojure's truthiness of host values
+   (an array is read on the host).
+
+     (kern ^:trace [tr]
+       (mh (sel/select :degree))
+       (doseq [i (range (inc (array/item (tr :degree))))] (mh (sel/select [:coeff i]))))"
   [params & body]
-  `(fn ~params ~(statements body)))
+  (if (:trace (meta params))
+    (let [[tr & args] params
+          t (gensym "t") apply! (gensym "apply") record (gensym "record")]
+      `(fn [~@args]
+         (trace-kernel (fn [~t ~apply! ~record] ~(traced-statements body tr t apply! record false))
+                       (fn [~t ~apply! ~record] ~(traced-statements body tr t apply! record true)))))
+    `(fn ~params ~(statements body))))
 
 (defn repeat
   "The kernel applied n times."

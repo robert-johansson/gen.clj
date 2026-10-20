@@ -154,3 +154,104 @@
   (testing "a statement that is not a kernel is loud"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not a kernel"
                           ((k/kern [] (k/mh (sel/select :a)) (when-not true (k/mh (sel/select :b)))))))))
+
+;; ---------------------------------------------------------------------------
+;; Kernels that read the trace (kern ^:trace; the owner, after the final law
+;; audit: Gen.jl's @kern reads the trace in its control flow)
+;; ---------------------------------------------------------------------------
+
+(def ^:private counted
+  "A model whose :n decides how many [:z i] it makes."
+  (gen [] (let [n (trace :n (d/categorical [0.2 0.3 0.5]))]
+            (doseq [i (range n)] (trace [:z i] (d/normal 0 1)))
+            (trace :x (d/normal 0 1)))))
+
+(defn- host-of [tr addr] (ts/host (tr addr)))
+
+(deftest a-kern-that-reads-the-trace
+  (let [log (atom [])
+        kernel (k/kern ^:trace [tr extra?]
+                 (recording log :first)
+                 (doseq [i (range (host-of tr :n))] (recording log [:loop i]))
+                 (when (and extra? (pos? (host-of tr :n))) (recording log :extra))
+                 (let [label [:last (host-of tr :n)]] (recording log label)))
+        tr (:trace (gfi/generate counted [] (cm/choicemap :n 2) (rng/key 1)))]
+    (testing "the statements in order, loops and branches read from the trace"
+      ((kernel true) tr (rng/key 2))
+      (is (= [:first [:loop 0] [:loop 1] :extra [:last 2]] @log)))
+    (testing "the reversal: every statement reversed, in reverse order"
+      (reset! log [])
+      ((k/reversal (kernel true)) tr (rng/key 3))
+      (is (= [[:last 2] :extra [:loop 1] [:loop 0] :first] @log)))
+    (testing "another trace, another structure"
+      (reset! log [])
+      ((kernel true) (:trace (gfi/generate counted [] (cm/choicemap :n 0) (rng/key 4))) (rng/key 5))
+      (is (= [:first [:last 0]] @log))))
+  (testing "a kernel's arguments see the trace as the statements before it left it"
+    (let [seen (atom [])
+          set-x (k/symmetric (fn [tr key] {:trace (:trace (gfi/update tr (cm/choicemap :x 5.0) key))}))
+          kernel ((k/kern ^:trace [tr] set-x (recording seen (host-of tr :x)) set-x))
+          tr (:trace (gfi/generate counted [] (cm/choicemap :n 1 :x 0.5) (rng/key 6)))]
+      (kernel tr (rng/key 7))
+      (is (= [5.0] @seen))))
+  (testing "a kernel that changes what the control flow reads is loud (the reversal would not undo it)"
+    (let [grow (k/symmetric (fn [tr key] {:trace (:trace (gfi/update tr (cm/choicemap :n 2) key))}))
+          kernel ((k/kern ^:trace [tr] (doseq [_ (range (host-of tr :n))] grow)))
+          tr (:trace (gfi/generate counted [] (cm/choicemap :n 1) (rng/key 8)))]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"changed what the control flow reads" (kernel tr (rng/key 9))))))
+  (testing "every application gets its own key, also in loops and in the reversal"
+    (let [keys-seen (atom [])
+          record-key (k/symmetric (fn [tr key] (swap! keys-seen conj key) {:trace tr}))
+          kernel ((k/kern ^:trace [tr] record-key (doseq [_ (range (host-of tr :n))] record-key) record-key))
+          tr (:trace (gfi/generate counted [] (cm/choicemap :n 2) (rng/key 14)))]
+      (kernel tr (rng/key 15))
+      ((k/reversal kernel) tr (rng/key 15))
+      (is (= 8 (count @keys-seen)))
+      (is (= 4 (count (set (take 4 @keys-seen)))))
+      (is (= 4 (count (set (drop 4 @keys-seen)))))))
+  (testing "a statement without a reversal makes the reversal loud"
+    (let [kernel ((k/kern ^:trace [_tr] (k/kernel (fn [t _] {:trace t}))))
+          tr (gfi/simulate counted [] (rng/key 10))]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no declared reversal" ((k/reversal kernel) tr (rng/key 11)))))))
+
+;; the thesis's p. 102 kernel: an MH move on a polynomial's degree, then MH
+;; on each coefficient up to the degree the trace then holds
+(def ^:private polynomial
+  (gen [xs]
+    (let [degree (trace :degree (d/bernoulli 0.5))
+          c0 (trace [:coeff 0] (d/categorical [0.3 0.4 0.3]))
+          c1 (if degree (trace [:coeff 1] (d/categorical [0.3 0.4 0.3])) 1)]
+      (doseq [[j x] (map-indexed vector xs)]
+        (trace [:y j] (d/normal (+ (- c0 1) (* (- c1 1) x)) 0.5)))
+      degree)))
+
+(def ^:private polynomial-kernel
+  (k/kern ^:trace [tr]
+    (k/mh (sel/select :degree))
+    (doseq [i (range (if (host-of tr :degree) 2 1))] (k/mh (sel/select [:coeff i])))))
+
+(deftest ^:heavy the-thesis-s-degree-kernel-leaves-the-posterior-invariant
+  ;; start from exact posterior draws (by enumeration), apply the kernel
+  ;; once: (degree, c0) keeps the posterior's distribution, within 5
+  ;; standard errors per cell
+  (let [xs [1.0 2.0]
+        obs (cm/choicemap [:y 0] 1.1 [:y 1] 2.3)
+        cells (vec (for [degree [false true] c0 [0 1 2] c1 (if degree [0 1 2] [nil])]
+                     (cond-> (cm/choicemap :degree degree [:coeff 0] c0) c1 (cm/set-choice [:coeff 1] c1))))
+        weights (mapv #(Math/exp (ts/number (:weight (gfi/assess polynomial [xs] (cm/merge % obs) (rng/key 0))))) cells)
+        total (reduce clojure.core/+ weights)
+        cumulative (vec (reductions clojure.core/+ weights))
+        n 3000
+        draw (fn [k] (let [u (clojure.core/* total (ts/number (:retval (gfi/simulate (d/uniform 0 1) [] k))))
+                           i (min (count (take-while #(clojure.core/< % u) cumulative)) (dec (count cells)))]
+                       (:trace (gfi/generate polynomial [xs] (cm/merge (cells i) obs) (rng/key 0)))))
+        ends (map #(:trace ((polynomial-kernel) (draw %1) %2)) (rng/split (rng/key 12) n) (rng/split (rng/key 13) n))
+        cell-of (fn [tr] [(host-of tr :degree) (host-of tr [:coeff 0])])
+        exact (reduce (fn [m [c w]] (update m [(ts/host (cm/get-choice c :degree)) (ts/host (cm/get-choice c [:coeff 0]))]
+                                            (fnil clojure.core/+ 0.0) (clojure.core// w total)))
+                      {} (map vector cells weights))
+        observed (frequencies (map cell-of ends))]
+    (doseq [[cell p] exact]
+      (let [f (clojure.core// (get observed cell 0) (double n))]
+        (is (clojure.core/< (Math/abs (clojure.core/- f p)) (clojure.core/* 5 (Math/sqrt (clojure.core// (clojure.core/* p (clojure.core/- 1 p)) n))))
+            (str cell ": " f " against " p))))))
