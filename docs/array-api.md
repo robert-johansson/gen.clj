@@ -129,13 +129,16 @@ A distribution body, compared with GenMLX:
   - MLX: `{:float :float32 :int :int32}`.
 
   Core code never names a dtype unless it must (e.g. indices are ints).
-- **Promotion:** NumPy's table, plus weak numbers. It is implemented once, in
-  `gen.array`, so every backend promotes identically. Backends only see operands
-  that already share a dtype.
+- **Promotion:** NumPy's table, plus weak numbers, except for booleans in
+  arithmetic (below). It is implemented once, in `gen.array`, so every backend
+  promotes identically. Backends only see operands that already share a dtype.
 - **Comparisons return `:bool`,** and so do `bernoulli` samples. That matches
   Gen.jl's `Bool`. GenMLX returned 0/1 floats, which `where`-based code then had
   to compare against `ONE`. Bool arrays work in `array/where` and promote to int or
-  float in arithmetic, exactly as in NumPy.
+  float in arithmetic as in Julia (DESIGN.md §9): `(+ true true)` is 2 and
+  `(negate true)` is -1, where NumPy's `+` and `*` on two booleans are logical
+  or and and, and its `-` an error. Mixed with numbers, and in reductions,
+  the two agree.
 - **JVM storage:** every dtype is stored in a `double[]`. int64 values are exact
   up to 2^53, which is ample for counts and indices; bool is 0/1. One storage
   type keeps the backend small. The dtype tag carries the semantics.

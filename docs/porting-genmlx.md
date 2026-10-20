@@ -46,7 +46,7 @@ gen.clj uses Gen.jl's names and parameterizations (DESIGN.md §9):
 | `discrete-uniform [lo hi]` | `uniform-discrete [low high]`, inclusive | no | the name differs |
 | `neg-binomial [r p]` | `neg-binom [r p]`: failures before the r-th success | no | the name differs |
 | `geometric [p]` | `geometric [p]`: failures before the first success | no | — |
-| `bernoulli [p]` gives `0.0`/`1.0` | `bernoulli [p]` gives `false`/`true` | **yes**: a body's `if` takes 0 as true | bools work in `where` and promote in arithmetic; a 0/1 value (an observation or constraint) is an error |
+| `bernoulli [p]` gives `0.0`/`1.0` | `bernoulli [p]` gives `false`/`true` | **yes**: a body's `if` takes 0 as true | bools work in `where` and count in arithmetic, as GenMLX's 0/1 did (`(+ true true)` is 2, as in Julia); a 0/1 value (an observation or constraint) is an error |
 | `piecewise-uniform [bounds probs]` (unnormalized probs) | `piecewise-uniform [bounds probs]` (probabilities) | normalization | non-probabilities throw |
 | `broadcasted-normal [mu sigma]` | `normal` (or its alias `broadcasted-normal`) | no | — |
 | `uniform`, `exponential`, `poisson`, `laplace`, `cauchy`, `inv-gamma`, `dirichlet` | the same names and parameters | no | — |

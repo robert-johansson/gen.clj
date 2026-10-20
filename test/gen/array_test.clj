@@ -10,7 +10,7 @@
   (try (f) nil (catch clojure.lang.ExceptionInfo e (ex-data e))))
 
 (deftest host-math
-  (testing "number-only ops stay on the host and follow NumPy semantics"
+  (testing "number-only ops stay on the host and follow NumPy semantics, but booleans count in arithmetic, as in Julia (DESIGN.md §9)"
     (are [expected actual] (= expected actual)
       3 (array/+ 1 2)
       3.5 (array/+ 1 2.5)
@@ -34,6 +34,19 @@
     (is (= -5 (array/- 5)))
     (is (= 0.25 (array// 4)))
     (is (= 24 (array/* 1 2 3 4)))))
+
+(deftest booleans-count-in-arithmetic
+  ;; Julia's rule, not NumPy's logical + and * (DESIGN.md §9, genclj-6pnx)
+  (let [a (array/array [true true false])
+        b (array/array [true false false])]
+    (doseq [[label expected actual] [["+" [2 1 0] (array/+ a b)]
+                                     ["*" [1 0 0] (array/* a b)]
+                                     ["-" [0 1 0] (array/- a b)]
+                                     ["negate" [-1 -1 0] (array/negate a)]]]
+      (testing label
+        (is (= expected (ts/host actual)))
+        (is (= (ts/int-dtype) (array/dtype actual)))))
+    (is (= 2 (ts/host (array/sum a))) "as sum counts")))
 
 (deftest creation-and-conversion
   (is (= [[1 2] [3 4]] (array/->clj (array/array [[1 2] [3 4]]))))

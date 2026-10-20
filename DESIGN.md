@@ -386,6 +386,20 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
 - **Bernoulli values are booleans,** as in Gen.jl: 0/1 (GenMLX's) is an
   error, since a body's `if` takes 0 as true while the density scores it as
   false. NaN parameters and NaN constrained values are errors too.
+- **Booleans in arithmetic count, as in Julia** (owner, 2026-10-20;
+  genclj-6pnx): `+`, `-`, `*` and `negate` on booleans give integers,
+  `(+ true true)` is 2, `(negate true)` is -1. With numbers and in
+  reductions, NumPy, JAX and Julia agree. Unlike NumPy and JAX, whose `+`
+  and `*` on two booleans are logical or and and, and `-` an error. The
+  reasons:
+  - Gen.jl models are Julia code.
+  - Code ported from GenMLX counts and gates with arithmetic on bernoulli
+    draws, which were 0/1 there. Under NumPy's rule a count would become a
+    logical or, silently.
+  - Julia's rule agrees with `sum`, where NumPy's `+` does not.
+
+  `(* true true)` is the integer 1 (Julia keeps a Bool), the same value
+  under one rule.
 - **Bodies run to completion:** lazy sequences in a body's return value are
   realized during the run, and a `trace` or `splice` after the run is a loud
   error. Before this, `(map … (trace …))` at the end of a body gave a trace
