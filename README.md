@@ -9,12 +9,15 @@ Generative Function Interface (GFI): `simulate`, `generate`, `update`,
 `regenerate`, `assess`, `propose` and `project`, each a pure function of its
 arguments and an explicit random key.
 
-**Status: M1 is complete; M2 is under way.** The core runs on the JVM,
+**Status: M1, M2 and most of M4 are done.** The core runs on the JVM,
 CPU-only, with nothing but a JDK: a pure-Clojure array backend with
 reverse-mode autodiff. An MLX backend (M2) runs the same code on Apple's GPU
-(Metal) and on MLX's CPU backend: it passes the backend conformance suite and
-the test battery there. CUDA on Linux is next. Then come local LLMs as
-generative functions (M3) and Gen.jl parity (M4). See `DESIGN.md`.
+(Metal), on MLX's CPU backend and on CUDA (verified on a Jetson AGX Thor):
+it passes the backend conformance suite and the test battery on each. Gen.jl
+parity (M4) covers the core and GenParticleFilters, GenSMCP3 and
+GenTraceKernelDSL, except the static modeling language and encapsulated
+randomness. Local LLMs as generative functions (M3) come next. See
+`DESIGN.md`.
 
 ## A model and two kinds of inference
 
@@ -125,8 +128,11 @@ depends on Clojure alone.
 
 `native/build-mlx.sh` fetches the official MLX 0.32.2 wheel (no Metal
 compiler needed), builds mlx-c v0.7.0 against it, and puts the libraries in
-`native/build/`; `clojure -T:build java` compiles the Java binding. Then
-any program or test runs on MLX with system properties:
+`native/build/`; `clojure -T:build java` compiles the Java binding. For CUDA
+on a GPU the wheels do not cover (the Thor's sm_110),
+`native/build-mlx.sh cuda13-source` builds MLX from source; point
+`-Dgen.mlx.lib` at the result. Then any program or test runs on MLX with
+system properties:
 
 ```
 clojure -J-Dgen.backend=mlx -X:test:light                         # Metal (the GPU)

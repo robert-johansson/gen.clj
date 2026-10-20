@@ -31,15 +31,37 @@ passes found the remaining bugs, nearly all in batched execution, and they
 are fixed (`docs/research/acceptance-2026-10-19.md`). Benchmarks are in
 `docs/benchmarks.md`.
 
-**M2 (2026-10-19): the MLX backend runs on Metal and on MLX's CPU backend.**
-It passes the backend conformance suite against the JVM reference, and the
-full test battery on Metal (294 tests, the slow and heavy ones included).
-On MLX's CPU backend in float64 the full battery passes too (all 24
-namespaces, the heavy tests included: about 100 minutes, in two runs).
-Benchmarks against GenMLX on the same machine are in `docs/benchmarks.md`.
-Memory is bounded by default after a kernel panic from test JVMs (§9).
-CUDA on Linux remains (beans genclj-v3el, genclj-0kge), as does making
-native autodiff the default (genclj-fuvr).
+**M2 (2026-10-20): the MLX backend runs on Metal, on MLX's CPU backend
+and on CUDA (the Jetson AGX Thor, sm_110).** It passes the backend
+conformance suite against the JVM reference on every device, and the full
+battery (298 tests, slow and heavy included) on Metal, with the tape and
+with native gradients, and on CUDA. MLX's CPU backend passes the light
+battery in float32 and float64, and the full battery in float64 (on the
+Mac, the day before; on the Thor, the first 15 namespaces in full and the
+rest on the light tier). Every property passed a soak (ten times its
+cases, fresh seeds) on each device after the soaks found one wrong test
+assumption (only Metal flushes float32 subnormals). The record is
+`docs/research/m2-verification-2026-10-20.md`. CUDA needs MLX v0.32.2
+built from source for sm_110, unpatched. Benchmarks, within gen.clj by the
+owner's choice, are in `docs/benchmarks.md`. The RTX PRO 6000 (x86_64,
+sm_120) comes later (genclj-kw88); native autodiff stays opt-in
+(genclj-fuvr).
+
+**M4 (2026-10-20): Gen.jl parity, but for the static modeling language and
+encapsulated randomness,** which wait for the owner's decisions (a
+proposal is in genclj-0q3a; the semantics question in genclj-1ogo).
+Added: call_at and choice_at, the internal-proposal override, custom
+deterministic generative functions with custom gradients
+(`array/custom-vjp`), `@dist`, `@kern`, wake-sleep's lecture, pair and
+unpair, GenParticleFilters' operations, black-box VI and VIMCO, the trace
+transform DSL with its translators, SMCP3, GenTraceKernelDSL's trace
+kernels, and Recurse. A code review and an interim audit of the laws
+against the thesis, the same night, found bugs in gen.clj (fixed, each
+with a test that fails without the fix) and four upstream: Gen.jl's
+general translator adds the forward proposal's score, its Recurse update
+weighs new nodes by their scores, GenParticleFilters' optimal resize
+biases the estimate, and GenTraceKernelDSL's Jacobian trimming hides
+non-bijections (§9).
 
 Only the beautiful core is ported first. Everything else in GenMLX that *could*
 be ported is tracked as a deferred bean with a note on how to port it cleanly
