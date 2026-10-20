@@ -2,10 +2,12 @@
 
 *Research notes, 2026-10-20. Bean genclj-hzoa, the first step of M5
 (genclj-xxuc): the coverage table, not the port. Gen.jl's source is the
-0.4.8 tag (commit 0e8cfac, 2025-07-11), read only; no Julia was run.
-gen.clj is m4-more at 12e788d. Each mapping was checked in gen.clj's code;
-where a mapping was not clear from the code, a short REPL run on the
-pure-JVM backend checked it ("checked" below, listed in §7).*
+0.4.8 tag (commit 0e8cfac, 2025-07-11), read only for the mapping; Gen.jl
+was then run once on this Mac, with the owner's go-ahead, for its own suite
+and the upstream findings (§4.3). gen.clj is m4-more at 12e788d. Each
+mapping was checked in gen.clj's code; where a mapping was not clear from
+the code, a short REPL run on the pure-JVM backend checked it ("checked"
+below, listed in §7).*
 
 ## 0. Summary
 
@@ -14,9 +16,9 @@ pure-JVM backend checked it ("checked" below, listed in §7).*
   `modeling_library/modeling_library.jl`) and 34 test files. One of them,
   `inference/enumerative.jl`, is included by nothing, so Gen.jl's own suite
   never runs it (U2). The 34 files hold **1,699 assertions** (1,684 `@test`,
-  15 `@test_throws`) in 195 leaf testsets. These are counted as written; loops
-  run some of them several times, which is presumably DESIGN.md §1's "about
-  1,900".
+  15 `@test_throws`) in 195 leaf testsets, counted as written. Run, loops
+  included, they are 1,863 assertions (1,832 without `enumerative.jl`):
+  DESIGN.md §1's "about 1,900".
 - **By category** (§3):
 
   | port | oracle | statistical | n/a | gap |
@@ -31,17 +33,26 @@ pure-JVM backend checked it ("checked" below, listed in §7).*
   more precise retdiffs (D1, 16), its lenient choice-map accessors (D4, 16)
   and beta's density at 0 and 1 (D6, 4).
 - **The oracle is needed for 6 assertions**, Switch's regenerate weights
-  (U1). Gen.jl's run is otherwise a cross-check: statistics for the 6
-  statistical testsets, and the upstream suite once (§5).
-- **Upstream findings** (§4.3): Gen.jl's Switch regenerate weighs a
-  resampled choice by log p(z′) − log p(z) whenever the index's argdiff is
-  not NoChange, which is every call from the dynamic language, so selection
-  MH on a choice under a Switch would target p² (U1, to confirm);
-  `enumerative.jl` never runs (U2); `dist_dsl.jl:29` uses a singular
-  covariance (U3); the batched `lecture!` test scores the unbatched q (U4).
+  (U1), as fixtures of Gen.jl's values. The rest of a Gen.jl run is a
+  cross-check: statistics for the 6 statistical testsets (§5).
+- **Gen.jl's own suite passes** on Julia 1.12.6 (run once, 2026-10-20):
+  1,863 assertions pass, none fail or error, in 214 testsets, `enumerative.jl`
+  included (§4.3).
+- **Upstream findings, run** (§4.3):
+  - U1 confirmed. A Switch called from `@gen` code weighs a choice resampled
+    from its prior log p(z′) − log p(z) exactly, where Eq. 4.1 gives 0, and
+    selection MH on that choice settles at p(z)² p(y | z): mean 0.4987 ±
+    0.0018 against the exact posterior's 0.75 (142 standard errors), as the
+    p² reading predicts (0.5).
+  - U2 confirmed: `enumerative.jl` is never included; run, it passes (31 of 31).
+  - U3 refuted: the singular covariance does not error. Cholesky succeeds
+    with a pivot of 2.1e-8, and both sides of the assertion give 15.24.
+  - U4 confirmed: the batched `lecture!` test's assertion passes with
+    q_batched never trained (−0.2250), and q_batched's own training does not
+    converge (θ −5.70 for −2, its score −2.73 for −0.215).
 - **gen.clj findings** (§4.4): five loud-error gaps, among them a silently
   wrong `dc/log-prob` for a homogeneous mixture of mvnormals and an
-  `mvnormal` that accepts the singular 2·ones(2, 2).
+  `mvnormal` that accepts the singular 2·ones(2, 2) (as Gen.jl's does, U3).
 
 ## 1. Method
 
@@ -289,7 +300,7 @@ groups.
 
 | Line | Testset | Asserts | What it checks | gen.clj counterpart | Category | Notes |
 |---:|---|---:|---|---|---|---|
-| 1 | enumerative inference | 31 | choice_vol_grid (discrete, continuous, 2-d), enumerative_inference weights, lml, MAP | `enum/choice-vol-grid`, `enumerative-inference`, `marginal`; `grids-follow-gen-jl` | port 27 · n/a 4 | U2: not included by runtests.jl; N: size(grid) of the N-d grid (D12); exact == on grid values becomes close? |
+| 1 | enumerative inference | 31 | choice_vol_grid (discrete, continuous, 2-d), enumerative_inference weights, lml, MAP | `enum/choice-vol-grid`, `enumerative-inference`, `marginal`; `grids-follow-gen-jl` | port 27 · n/a 4 | U2: not included by runtests.jl, passes when run; N: size(grid) of the N-d grid (D12); exact == on grid values becomes close? |
 
 #### `test/modeling_library/custom_determ.jl` (37 assertions)
 
@@ -421,7 +432,7 @@ groups.
 
 | Line | Testset | Asserts | What it checks | gen.clj counterpart | Category | Notes |
 |---:|---|---:|---|---|---|---|
-| 1 | dist DSL (untyped) | 29 | pushforwards (exp, + 1, broadcast parameters, mvnormal), labels from an Array, a Dict and an enum, 1 - uniform | `gen.dist.dsl/dist`; `dist-dsl-test/*` | port 17 · gap 12 | G7 (labels, checked); line 29's covariance 2·ones(2,2) is singular (U3) |
+| 1 | dist DSL (untyped) | 29 | pushforwards (exp, + 1, broadcast parameters, mvnormal), labels from an Array, a Dict and an enum, 1 - uniform | `gen.dist.dsl/dist`; `dist-dsl-test/*` | port 17 · gap 12 | G7 (labels, checked); line 29's covariance 2·ones(2,2) is singular, and Gen.jl and gen.clj both give 15.24 (U3) |
 | 72 | dist DSL (typed) | 8 + 6 throws | typed @dist parameters: labels of a type, MethodErrors for wrong types | `dist` (untyped) | port 3 · n/a 6 · gap 5 | G7; N: Julia type dispatch (MethodError) |
 
 #### `test/modeling_library/mixture.jl` (52 assertions)
@@ -551,47 +562,119 @@ Mixed testsets: 54. Testsets without assertions: 7 (smoke tests and empty testse
 | G14 | `fill` of a tracked scalar under autodiff | `array/full` with a tape value throws ClassCastException (checked), not an ex-info; `broadcast-to` and `(+ (zeros …) x)` differentiate (checked) | small | 2 | No |
 | G15 | The static IR's shape: argument nodes, one Julia node per argument expression, parameter nodes, node identity, the distribution or callee object | `static/ir`: one node per binding, inputs as names, the source form | medium, or n/a | 33 | No; the owner may call the IR's internal form n/a, which moves 33 gap to n/a |
 
-### 4.3 Upstream findings (to confirm with the oracle)
+### 4.3 Upstream findings, run
 
-- **U1. Switch's regenerate weight.** `src/modeling_library/switch/regenerate.jl`
-  has two `process!` methods. With a NoChange index argdiff it calls the
-  branch's own regenerate. With any other argdiff, UnknownChange included, it
-  generates the branch from the unselected old choices and weighs
-  `w_generate − project(old, ¬S) + project(new, S) − project(old, S)`. Two
-  terms depart from Eq. 4.1 (thesis p. 144) with forward sampling:
-  - a selected choice z drawn from its prior should weigh 0 (the proposal
-    ratio cancels the density ratio, as the NoChange path and Gen.jl's
-    dynamic regenerate give), but weighs log p(z′) − log p(z);
-  - an unselected old choice the new branch drops is subtracted, where it
-    should cancel against the reverse move.
+Run on this Mac on 2026-10-20, with the owner's go-ahead: Homebrew's Julia
+1.12.6 (Apple M4), the installed Gen 0.4.8 (`~/.julia/packages/Gen/mP0Sq`,
+whose `src/` and `test/` equal the tag's), Distributions 0.25.123. Offline,
+from a scratch project and depot, single-threaded, `nice -n 15`. The scripts
+stay in the session's scratchpad (`m5-julia/`): `run_suite.jl` (the
+recording test set), `u1.jl`, `u3.jl`, `u4.jl`.
 
-  The dynamic language calls every callee with UnknownChange argdiffs
-  (`src/dynamic/regenerate.jl:78`), so this is the path of any Switch inside
-  a `@gen` function. If the reading is right, `mh(tr, select(:x => :z))` on a
-  choice under a Switch accepts with min(1, p(z′)/p(z)) for a prior proposal,
-  and targets p² (for an unobserved z). `switch.jl:78` and `:284` assert
-  exactly this weight, as `old_score ≈ new_score − w`, which holds for
-  `score(t′) − score(t)`. gen.clj's regenerate is Eq. 4.1 (it weighs 0 in the
-  bare case, checked), so those 6 assertions are the oracle's.
-- **U2.** `test/inference/enumerative.jl` (31 assertions) is not included by
-  `test/inference/inference.jl`, so Gen.jl's CI never runs it.
-- **U3.** `dist_dsl.jl:29` evaluates `mvnormal(zeros(2), ones(2), 2 .* ones(2, 2))`:
-  a singular covariance. Distributions.jl's `MvNormal` factors it with a
-  checked Cholesky, which should throw PosDefException, so the testset may
-  error upstream. Uncertain without a run; the port uses a positive-definite
-  matrix.
-- **U4.** `train.jl:176`, after training `q_batched` with `lecture_batched!`,
-  scores `q` (the first part's proposal), so the batched training's result is
-  never checked.
-- `recurse.jl:223` carries a `# FAIL` comment on an assertion that gen.clj's
-  structure update satisfies (its discard holds the removed node's two
-  choices, checked); the upstream run will say whether Gen.jl's does.
+**The suite.** `runtests.jl`, then `inference/enumerative.jl`, under a test
+set that records each testset's pass, fail, error and broken counts and
+every problem's line and message (`test/fixtures/genjl/upstream-run.edn`):
+**1,863 pass, 0 fail, 0 error, 0 broken**, in 214 testsets, 169 s. Of
+them 197 are leaves: §2's 195, of which `gen_fn_interface.jl`'s two run once
+per modeling language.
+Executed counts differ from §3's sites where loops repeat an assertion, or
+where an if/else runs one branch (`kernel_dsl.jl`):
+
+| File | Sites | Passed | File | Sites | Passed |
+|---|---:|---:|---|---:|---:|
+| `autodiff.jl` | 2 | 2 | `inference/trace_translators.jl` | 5 | 5 |
+| `diff.jl` | 32 | 32 | `inference/kernel_dsl.jl` | 2 | 1 |
+| `selection.jl` | 35 | 35 | `inference/enumerative.jl` | 31 | 31 |
+| `assignment.jl` | 132 | 143 | `modeling_library/custom_determ.jl` | 37 | 37 |
+| `gen_fn_interface.jl` | 5 | 10 | `modeling_library/distributions.jl` | 138 | 138 |
+| `dsl/macros.jl` | 14 | 14 | `modeling_library/choice_at.jl` | 74 | 74 |
+| `dsl/dynamic_dsl.jl` | 88 | 150 | `modeling_library/call_at.jl` | 74 | 74 |
+| `dsl/static_dsl.jl` | 175 | 175 | `modeling_library/map.jl` | 137 | 139 |
+| `optional_args.jl` | 58 | 58 | `modeling_library/unfold.jl` | 181 | 199 |
+| `static_ir/static_ir.jl` | 138 | 138 | `modeling_library/recurse.jl` | 122 | 142 |
+| `tilde_sugar.jl` | 12 | 12 | `modeling_library/switch.jl` | 51 | 72 |
+| `inference/importance_sampling.jl` | 16 | 22 | `modeling_library/dist_dsl.jl` | 43 | 43 |
+| `inference/train.jl` | 8 | 12 | `modeling_library/mixture.jl` | 52 | 55 |
+| `inference/variational.jl` | 7 | 7 | `modeling_library/product.jl` | 14 | 20 |
+| `inference/particle_filter.jl` | 13 | 17 | **all** | **1,699** | **1,863** |
+| `inference/mh.jl` | 3 | 6 | | | |
+
+The four smoke tests (mala, hmc, map_optimize, elliptical slice) and Gen
+issue 168's regression test ran without error. `recurse.jl:223`, marked
+`# FAIL`, passes.
+
+- **U1. Switch's regenerate weight: confirmed.**
+  `src/modeling_library/switch/regenerate.jl` has two `process!` methods. With
+  a NoChange index argdiff it calls the branch's own regenerate. With any
+  other argdiff, UnknownChange included, it generates the branch from the
+  unselected old choices and weighs `w_generate − project(old, ¬S) +
+  project(new, S) − project(old, S)`. Two terms depart from Eq. 4.1 (thesis
+  p. 144) with forward sampling. A selected choice drawn from its prior should
+  weigh 0, as the NoChange path and Gen.jl's dynamic regenerate give, but
+  weighs log p(z′) − log p(z). An unselected old choice the new branch drops
+  is subtracted, where it should cancel against the reverse move. The dynamic
+  language calls every callee with UnknownChange argdiffs
+  (`src/dynamic/regenerate.jl:78`), so this is the path of every Switch in a
+  `@gen` function. `u1.jl` shows each part:
+  - *The weight* (10 regenerations each of `select(:x => :z)`, z ~ N(0, 1)
+    under `Switch(leaf, other)` at `:x`). Called from a `@gen` function, the
+    weight equals log p(z′) − log p(z) to the last bit (it reaches 2.08);
+    called from a static function (a constant index is NoChange) or with
+    `leaf` spliced directly, it is 0. The bare Switch weighs 0 with a
+    NoChange index argdiff and log p(z′) − log p(z) exactly with
+    UnknownChange.
+  - *A dropped choice.* From the branch with z ~ N(0, 1) and w ~ N(0, 1) to
+    one with z ~ N(1, 2), `select()`: the weight is 1.260301, which is Eq.
+    4.1's 0.233634 (w cancels) less log p(w).
+  - *The consequence.* z ~ N(0, 1) under the Switch, y ~ N(z, 1), y = 1.5;
+    selection MH on z, 200,000 steps after 1,000, standard errors from 200
+    batch means. The exact posterior is N(0.75, 0.5); the p² reading
+    predicts p(z)² p(y | z) ∝ N(0.5, 1/3).
+
+    | Caller | Mean ± SE | Variance ± SE | Acceptance |
+    |---|---|---|---:|
+    | `@gen` function → Switch | 0.4987 ± 0.0018 | 0.3350 ± 0.0015 | 0.572 |
+    | static function → Switch | 0.7472 ± 0.0028 | 0.5049 ± 0.0025 | 0.534 |
+    | `@gen` function → `leaf`, no Switch | 0.7500 ± 0.0027 | 0.5030 ± 0.0025 | 0.534 |
+
+    The first chain's mean is 142 standard errors from the exact 0.75 and
+    0.7 from 0.5; its variance 107 from 0.5 and 1.1 from 1/3. The other two
+    are within 2 standard errors of the exact posterior.
+
+  `switch.jl:78` and `:284` assert this weight, as `old_score ≈ new_score −
+  w`, so they pass upstream. gen.clj's regenerate is Eq. 4.1 (it weighs 0 in
+  the bare case, checked), so their 6 assertions stay the oracle's: a fixture
+  of Gen.jl's weights on recorded choices, against which the port shows both
+  formulas. Worth reporting upstream (the owner's call).
+- **U2: confirmed.** `test/inference/enumerative.jl` is not included by
+  `test/inference/inference.jl`, so Gen.jl's CI never runs it. Run, its 31
+  assertions pass.
+- **U3: refuted.** `dist_dsl.jl:29` evaluates `mvnormal(zeros(2), ones(2), 2
+  .* ones(2, 2))`, a singular covariance, and the testset passes (29 of 29).
+  Distributions.jl's checked Cholesky succeeds: rounding leaves a positive
+  pivot, the factor's diagonal is [1.414, 2.1e-8], and the log density is
+  15.240802 on both sides of the `==` (15.490802 at [1, 1], on the line the
+  matrix spans; −4.5e15 at [2, 0], off it). gen.clj gives the same 15.24
+  (F1). The assertion holds but compares a density that has no meaning; the
+  port uses a positive-definite matrix.
+- **U4: confirmed, by reading and by a run.** `train.jl:176`, after training
+  `q_batched` with `lecture_batched!`, scores `q`, the first part's proposal.
+  `u4.jl` runs the testset's code with its seed. Line 155's score is −0.2165
+  (θ −2.0022, log σ −1.2093; the optimum is −½ log 2π − log 0.3 − ½ =
+  −0.2150). Line 176 as written gives −0.2053, and −0.2250 with q_batched
+  never trained, also within the test's ±0.05 of −0.21: the assertion does
+  not depend on q_batched. q_batched itself does not reach the optimum:
+  after its 100 iterations θ = −5.6965 and log σ = 1.2531, and its own score
+  is −2.7342 (untrained: −2.9625). The likely cause is the step:
+  `lecture_batched!` accumulates the gradient summed over the batch of
+  1,000, so `FixedStepGradientDescent(0.001)` steps 1.0 along the mean
+  gradient, ten times the first part's 1e-4 × 1,000 = 0.1.
 
 ### 4.4 gen.clj findings: errors that should be loud
 
 | ID | Finding | Checked |
 |---|---|---|
-| F1 | `dist/mvnormal`'s positive-definiteness check looks for NaN in the Cholesky factor, so the singular `2·ones(2, 2)` passes and `log-prob` returns 15.24 | yes |
+| F1 | `dist/mvnormal`'s positive-definiteness check looks for NaN in the Cholesky factor, so the singular `2·ones(2, 2)` passes and `log-prob` returns 15.24. Gen.jl computes the same 15.240802 (U3), so this matches upstream; a stricter check is the owner's call | yes |
 | F2 | `dc/log-prob` of `(homogeneous-mixture mvnormal)` returns −4.135 where the density is −4.754: nothing rejects a multivariate family outside a trace site | yes |
 | F3 | `sel/selected?`, `sel/get-subselection` and `cm/set-submap` take a vector path as one (absent) address, silently; `cm/set-submap` then holds a vector key | yes |
 | F4 | `array/full` of a tape value throws ClassCastException | yes |
@@ -600,8 +683,8 @@ Mixed testsets: 54. Testsets without assertions: 7 (smoke tests and empty testse
 ## 5. The oracle
 
 Nearly every expected value is in the tests or follows from their models, so
-Gen.jl is needed for few assertions. It is still worth one run, for four
-things:
+Gen.jl is needed for few assertions. Its uses are four; the last ran on
+2026-10-20 (§4.3), with U1–U4:
 
 1. **Values for assertions (2 testsets, 6 assertions).** `switch.jl:78` and
    `:284` (U1). Fixture: for the bare Switch (`bang0`/`fuzz0`) and the nested
@@ -611,8 +694,7 @@ things:
    old and new choices, scores, and Gen.jl's weight. The gen.clj test assesses
    both choice maps, shows that Gen.jl's weight is `score(t′) − score(t)` on
    them and that Eq. 4.1 gives gen.clj's, and records the difference in §9.
-   An MH chain of 10⁵ steps on a prior-only choice under a Switch, its mean
-   and variance, would show U1's p² directly.
+   (U1's p² is already shown by an MH chain, §4.3.)
 2. **Values for a decision (1 testset, 4 assertions).** `distributions.jl:19`:
    `logpdf(beta, x, a, b)` for x ∈ {0, eps, 1 − eps, 1} and (a, b) ∈ {(0.5,
    0.5), (0.5, 1.5), (1.5, 0.5), (1, 1), (2, 2)}, if the owner wants Gen.jl's
@@ -624,14 +706,13 @@ things:
    `recurse.jl:66` (the 20 strings' frequencies in 1,000 runs). Each over 20
    seeds: mean and standard deviation, compared with gen.clj's statistics,
    never sample by sample.
-4. **The upstream suite once** (M5's fourth checklist item), on Julia 1.12
-   with Gen 0.4.8, plus `enumerative.jl` run on its own (U2), recording each
-   testset's pass, fail and error counts; it settles U3 and `recurse.jl:223`.
+4. **The upstream suite once** (M5's fourth checklist item): done, every
+   assertion passes, `enumerative.jl` included (§4.3).
 
 The script, `test/fixtures/genjl/generate.jl` (Julia needed only to
 regenerate, as Python for `generate.py`), would write
-`test/fixtures/genjl/{switch-regenerate,beta-endpoints,statistics,upstream-run}.edn`.
-A sketch:
+`test/fixtures/genjl/{switch-regenerate,beta-endpoints,statistics}.edn`
+(`upstream-run.edn` is written, §4.3). A sketch:
 
 ```julia
 # julia --project=<an environment with Gen 0.4.8> test/fixtures/genjl/generate.jl
@@ -685,13 +766,13 @@ put("beta-endpoints.edn", [Dict(:x => x, :alpha => a, :beta => b, :log_prob => l
 #    particle_filter.jl and recurse.jl, wrapped in functions returning the
 #    tested quantity, then Dict(:testset => ..., :mean => mean(v), :sd => std(v), :n => 20)
 
-# 4. the upstream suite: Pkg.test("Gen") with a custom Test.AbstractTestSet that
-#    records (file, testset, pass, fail, error), then include("test/inference/enumerative.jl")
-#    under the same test set; written as upstream-run.edn
+# 4. the upstream suite: done by run_suite.jl (§4.3), a recording Test.AbstractTestSet
+#    around runtests.jl and inference/enumerative.jl; written as upstream-run.edn
 ```
 
-The run uses fenrir, which needs the owner's go-ahead (fenrir's grant covers
-M2 and M4 verification).
+The suite and the U1–U4 runs used this Mac's Julia 1.12.6 and installed Gen
+0.4.8, offline (the owner's go-ahead, 2026-10-20). The fixtures of items 1–3
+can be written the same way, without fenrir.
 
 ## 6. Proposed port order and beans
 
@@ -723,8 +804,8 @@ agent time, medium a day or two.
 | 16 | `dist` with non-numeric labels | G7 (parameters that are not arrays) | 17 gap | medium | — |
 | 17 | Custom functions' parameters | G5 | 1 gap | small | — |
 | 18 | mvnormal's check | F1: a positive-definiteness check that rejects singular matrices | — | small | — |
-| 19 | The oracle | `test/fixtures/genjl/generate.jl`, its run on fenrir (owner's go-ahead), the four fixtures; the upstream suite's record | — | medium | owner |
-| 20 | Switch's regenerate upstream | U1: the 6 assertions against the fixture, a §9 note; report upstream (owner's call) | 6 oracle | small | 19 |
+| 19 | The oracle | `test/fixtures/genjl/generate.jl` and its three fixtures (switch-regenerate, beta-endpoints, statistics), run locally as the upstream run was; the upstream record is done (§4.3) | — | small–medium | — |
+| 20 | Switch's regenerate upstream | U1, confirmed: the 6 assertions against the fixture, a §9 note; report upstream (owner's call) | 6 oracle | small | 19 |
 
 Beans 1–7 can run in parallel; with 9–17 done, every assertion is a port,
 an oracle comparison, a statistical test or an n/a with its reason.
@@ -775,4 +856,4 @@ Gen.jl test expects.
 | a rest parameter for optional arguments | — | calls and updates with 1 or 3 arguments work |
 | `gen` with two arities | — | compile error |
 | `mh` with a selection on a static model (Gen issue 168) | runs | runs |
-| mvnormal with 2·ones(2, 2) | PosDefException (U3) | 15.24 (F1) |
+| mvnormal with 2·ones(2, 2) | (Gen.jl, run: 15.240802, U3) | 15.24 (F1) |
