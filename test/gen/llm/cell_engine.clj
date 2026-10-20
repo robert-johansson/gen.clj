@@ -140,8 +140,10 @@
 
 (defn engine
   [{:keys [n-vocab max-branches n-ctx n-batch max-cells noise fail-reads]
-    :or {n-vocab 97 max-branches 8 n-ctx 256 n-batch 64 max-cells 1024 fail-reads #{}}}]
-  (let [n-slots (inc max-branches)]
+    :or {n-vocab 97 max-branches 8 n-ctx 256 max-cells 1024 fail-reads #{}}}]
+  (let [n-slots (inc max-branches)
+        ;; as llama.cpp's engine: a decode holds a token for every slot
+        n-batch (max (long (or n-batch 64)) n-slots)]
     (slots/engine #(CellSlots. n-vocab n-slots n-ctx n-batch max-cells noise fail-reads
                                (object-array (repeat n-slots [])) (object-array (repeat n-slots []))
                                (int-array max-cells) (volatile! (into (sorted-set) (range max-cells)))
