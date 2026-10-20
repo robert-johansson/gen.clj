@@ -525,18 +525,23 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     ported tests check behavior, not the IR's form.
   - *A covariance singular in floating point is an error (F1).* mvnormal
     rejects a covariance whose Cholesky factor fails, or whose condition
-    leaves the density no correct digits: trace(H⁻¹) ≥ 1/(n·ε), where H is
-    the correlation matrix of L·Lᵀ (between 1/λmin and n/λmin) and ε is that
-    of the dtype the density is computed in (float32 on MLX, host data
-    included). Gen.jl, through LAPACK's potrf, rejects only a failed
+    leaves the density no correct digits: trace(H⁻¹) ≥ 1/ε, where H is the
+    correlation matrix of L·Lᵀ (between 1/λmin and n/λmin) and ε is that of
+    the dtype the density is computed in (float32 on MLX, host data
+    included). The bound is the measured one, not the worst case's: a
+    float32 log density's error tracks (0.05–0.4)·ε·trace(H⁻¹) on squared-
+    exponential kernels of 50 to 1,000 points, so the bound rejects where
+    the error nears 0.1 nats. The worst case's 1/(n·ε), the first version,
+    rejected kernels accurate to 1e-4 nats (n = 1,000, jitter 0.1), the
+    owner's correction the same night. Gen.jl, through LAPACK's potrf, rejects only a failed
     factorization, so it accepts `2·ones(2, 2)` (a pivot positive by
     rounding) and gives 15.24. dist_dsl.jl:29's case is ported as the
     error. The check runs on host values and concrete arrays only (rule 5).
     The same rule holds at every precision (the owner, the same night): in
     float32 it also rejects matrices that are positive definite but whose
-    float32 density is off by nats, such as a 50-point GP kernel with a
-    jitter of 1e-6. The error names the dtype and suggests a jitter at its
-    scale.
+    float32 density is off by tenths of a nat or more, such as a
+    1,000-point GP kernel with a jitter of 1e-5 (0.75 nats). The error
+    names the dtype and suggests a jitter at its scale (about 1e-3 there).
 - **Bodies run to completion:** lazy sequences in a body's return value are
   realized during the run, and a `trace` or `splice` after the run is a loud
   error. Before this, `(map … (trace …))` at the end of a body gave a trace
