@@ -163,7 +163,7 @@
 (def ^:private counted
   "A model whose :n decides how many [:z i] it makes."
   (gen [] (let [n (trace :n (d/categorical [0.2 0.3 0.5]))]
-            (doseq [i (range n)] (trace [:z i] (d/normal 0 1)))
+            (doseq [i (range (ts/number n))] (trace [:z i] (d/normal 0 1)))
             (trace :x (d/normal 0 1)))))
 
 (defn- host-of [tr addr] (ts/host (tr addr)))
