@@ -333,21 +333,34 @@ What is skipped costs nothing; when everything reruns, the walk of the
 graph costs about 20 µs over the plain body at this size (its env maps),
 lost in the work beyond about 100 observations.
 
-**Compiled scores** (genclj-rj78; JVM backend, a Metal test run beside it):
-a static gf's assess is a generated straight-line fn of its choices. On
-GenMLX's linear regression with a static kernel in its Map, against the
-same bodies without the flag:
+**Compiled scores** (genclj-rj78; this Mac, idle, 2026-10-20 at 566b6f2,
+`clojure [-J-Dgen.backend=mlx [-J-Dgen.mlx.device=cpu]] -M:bench -m
+gen.static-bench`): a static gf's assess is a generated straight-line fn of
+its choices. On GenMLX's linear regression with a static kernel in its Map,
+against the same bodies without the flag; each figure is the median of five
+rounds after warm-up, in µs per call, each result forced:
 
-| | N = 10, static / dynamic | N = 100, static / dynamic |
-|---|---|---|
-| assess | 77 / 139 µs | 137 / 389 µs |
-| choice-gradients | 236 / 228 µs | 1060 / 1324 µs |
-| HMC, L = 10, plain | 3038 / 2574 µs | 16509 / 18345 µs |
-| HMC, L = 10, compiled | 1818 / 1859 µs | 12064 / 15224 µs |
+| | JVM, N = 10 | JVM, N = 100 | Metal, N = 10 | Metal, N = 100 | MLX CPU, N = 10 | MLX CPU, N = 100 |
+|---|---|---|---|---|---|---|
+| assess, static / dynamic | 32 / 60 | 105 / 275 | 369 / 408 | 2195 / 2569 | 185 / 222 | 1455 / 1762 |
+| choice-gradients | 108 / 132 | 932 / 1192 | 581 / 599 | 4186 / 4536 | 368 / 391 | 3087 / 3495 |
+| HMC, L = 10, plain | 1355 / 1587 | 10664 / 13453 | 7390 / 7720 | 52042 / 55633 | 5548 / 5802 | 39536 / 43526 |
+| HMC, L = 10, compiled | 1295 / 1595 | 10653 / 13493 | 1780 / 1778 | 7443 / 7285 | 1067 / 1043 | 4697 / 4690 |
+| MALA, plain | 289 / 331 | 2317 / 2738 | 2574 / 2624 | 12699 / 13201 | 1541 / 1606 | 9323 / 9878 |
+| MALA, compiled | 293 / 338 | 2358 / 2778 | 1550 / 1528 | 4655 / 4708 | 784 / 769 | 3286 / 3208 |
 
-Autodiff dominates the gradients and HMC; plain HMC still runs an update
-per leapfrog step, which the static runner does more slowly than the
-handler at N = 10 (its env maps).
+- The static function is never slower than the dynamic one. On the JVM its
+  assess is 1.9× faster at 10 observations and 2.6× at 100, and its HMC and
+  MALA steps 1.15–1.3×. An earlier measurement, beside a Metal test run,
+  had plain HMC slower static than dynamic at N = 10 (3038 against 2574 µs);
+  idle it is faster (1355 against 1587).
+- Compiling a step pays on MLX, where it fuses the step into one graph: HMC
+  4.2× (Metal) and 5.2× (MLX CPU) at N = 10, 7.0× and 8.4× at N = 100, and
+  MALA 1.7–2.8×. On the JVM a step is host code already, so compiling gains
+  nothing. Compiled steps trace one graph whether the function is static or
+  dynamic, so the two then cost the same.
+- At these sizes the JVM backend is competitive: a compiled HMC step at
+  N = 100 costs 10.7 ms on the JVM, 7.4 ms on Metal and 4.7 ms on MLX's CPU.
 
 ## MLX's CPU on the Thor against the Mac (2026-10-20, bean genclj-7fzy)
 
