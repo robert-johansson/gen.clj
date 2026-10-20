@@ -567,9 +567,13 @@ Mixed testsets: 54. Testsets without assertions: 7 (smoke tests and empty testse
 Run on this Mac on 2026-10-20, with the owner's go-ahead: Homebrew's Julia
 1.12.6 (Apple M4), the installed Gen 0.4.8 (`~/.julia/packages/Gen/mP0Sq`,
 whose `src/` and `test/` equal the tag's), Distributions 0.25.123. Offline,
-from a scratch project and depot, single-threaded, `nice -n 15`. The scripts
-stay in the session's scratchpad (`m5-julia/`): `run_suite.jl` (the
-recording test set), `u1.jl`, `u3.jl`, `u4.jl`.
+from a scratch project and depot, single-threaded, `nice -n 15`. The
+scripts: `test/fixtures/genjl/run_suite.jl` (the recording test set, with
+the project's `Project.toml` and `Manifest.toml` beside it), and the
+reproductions `docs/research/genjl-upstream/u1.jl`, `u3.jl` and `u4.jl`.
+Regenerate the record with `env JULIA_PKG_OFFLINE=true JULIA_NUM_THREADS=1
+julia --project=test/fixtures/genjl test/fixtures/genjl/run_suite.jl
+<Gen's test dir> test/fixtures/genjl`; tests never need Julia.
 
 **The suite.** `runtests.jl`, then `inference/enumerative.jl`, under a test
 set that records each testset's pass, fail, error and broken counts and
