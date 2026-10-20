@@ -76,7 +76,7 @@
         [k-propose k-update] (rng/split (rng/key 10) 3)
         u (cm/get-choice (:choices (gfi/propose kern [tr] k-propose)) :u)
         {la :log-alpha t' :trace} (tk/mh tr kern [] (rng/key 10))
-        t'' (:trace (gfi/update tr (cm/choicemap :y (* 2.0 (Math/exp (* 0.5 u)))) k-update))]
+        t'' (:trace (gfi/update tr (cm/choicemap :y (* 2.0 (Math/exp (* 0.5 (ts/number u))))) k-update))]
     (is (ts/close? (+ (- (:score t'') (:score tr)) (- (lp (d/normal 0 1) u)) (lp (d/normal 0 1) (- u)) (* 0.5 u)) la))))
 
 ;; SMCP3 on a linear-Gaussian state-space step: x_1 ~ N(0.8 x_0, 1),

@@ -68,7 +68,7 @@
         evidence (dc/log-prob (d/normal 0 (Math/sqrt 2)) y)]
     (doseq [k (range 8)]
       (is (ts/close? evidence (:weight (gfi/generate exact [] (cm/choicemap :y y) (rng/key k)))
-                     {:rtol 1e-12 :atol 1e-12})
+                     {:rtol (ts/tol 1e-12) :atol (ts/tol 1e-12)})
           (str "key " k)))
     (testing "the default proposal does not have this property"
       (let [ws (map #(ts/number (:weight (gfi/generate normal-normal [] (cm/choicemap :y y) (rng/key %)))) (range 8))]
@@ -114,8 +114,8 @@
     (testing "a new b that keeps :x keeps its value, with the projection ratio as weight"
       (is (seq (filter vector? outcomes)))
       (doseq [[b x w] (filter vector? outcomes)]
-        (is (true? b))
-        (is (= 0.4 x) "the unselected :x is kept")
+        (is (true? (ts/host b)))
+        (is (ts/close? 0.4 x) "the unselected :x is kept")
         (is (ts/close? 0.0 w) "b's proposal is its prior: the weight is 0")))
     (testing "a new b that drops :x is a loud error"
       (is (seq (remove vector? outcomes)))

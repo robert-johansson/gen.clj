@@ -205,9 +205,13 @@
                         [store state] (learn/step opt state store grads)]
                     (recur (inc i) store state k-next))
                   store))]
-    (is (< (ts/abs (- (:a store) 0.5)) 0.05) (str store))
-    (is (< (ts/abs (:b store)) 0.05) (str store))
-    (is (< (ts/abs (- (:log-s store) (Math/log (Math/sqrt 0.5)))) 0.05) (str store)))
+    ;; five standard deviations of the final values over 16 keys (JVM,
+    ;; measured 2026-10-20: 0.029, 0.043 and 0.048; Adam's iterates keep
+    ;; moving at the optimum). The band of 0.05 before was under two, and
+    ;; failed on float32 backends
+    (is (< (ts/abs (- (:a store) 0.5)) 0.15) (str store))
+    (is (< (ts/abs (:b store)) 0.22) (str store))
+    (is (< (ts/abs (- (:log-s store) (Math/log (Math/sqrt 0.5)))) 0.25) (str store)))
   (testing "one lecture: the proposal's score on the model's own latent choice"
     (let [{:keys [score grads]} (learn/lecture conjugate [] amortized {:a 0.5 :b 0.0 :log-s 0.0} (fn [tr] [(tr :y)]) (rng/key 3))]
       (is (ts/finite? score))
