@@ -19,6 +19,7 @@
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
             [gen.custom :as custom]
+            [gen.diff :as diff]
             [gen.dist :as d]
             [gen.dynamic :as dyn :refer [gen]]
             [gen.gfi :as gfi]
@@ -497,12 +498,14 @@
           model (given-a-store (gen [] (splice :p (enum/with-exact-proposal
                                                      (gen [] (let [b (trace :b (d/bernoulli 0.5))] (splice :m (comb/map k) (vec (range 20))) b))
                                                      [:b]))))
-          tr (:trace (gfi/generate model [] (cm/choicemap :a 0.1) (rng/key 1)))]
+          tr (:trace (gfi/generate model [] (cm/choicemap :a 0.1) (rng/key 1)))
+          cs (cm/choicemap :a 0.9)]
       (reset! runs 0)
-      (let [{u :trace} (gfi/update tr (cm/choicemap :a 0.9) (rng/key 2))]
+      (let [{u :trace w :weight} (gfi/update tr cs (rng/key 2))]
         (is (moved? u))
         (is (= 100 @runs))
-        (is (consistent? model u))))))
+        (is (consistent? model u))
+        (is (ts/close? (update-truth model tr u cs) w))))))
 
 (deftest a-constraint-the-revised-run-leaves-is-loud
   ;; a revise drops old choices, never constraints: in a dynamic callee's
@@ -571,7 +574,18 @@
               model (given-a-store (gen [] (splice :p est)))
               tr (gfi/simulate model [] (rng/key 1))]
           (is (thrown-with-msg? clojure.lang.ExceptionInfo #"the constraint at \[:c :typo\] was not visited"
-                                (gfi/update tr (cm/choicemap :a 0.9) (rng/key 2)))))))))
+                                (gfi/update tr (cm/choicemap :a 0.9) (rng/key 2))))))))
+  (testing "a kernel's own generate, in a Map's revise: loud after one run (review 7, G3: an old? that did not ask sigma dropped the path, which removed nothing, forever; the kernel stops a revise that runs on)"
+    (let [runs (atom 0)
+          other (gen [] (trace :x (d/normal 0 1)))
+          before (comb/map (gen [_i] (trace :x (d/normal 0 1))))
+          after (comb/map (gen [_i] (when (< 10 (swap! runs inc)) (throw (ex-info "the revise runs on" {})))
+                            (gfi/generate other [] (cm/choicemap :typo 1.0) (rng/key 9))
+                            (trace :x (d/normal 0 1))))
+          tr (gfi/simulate before [[0]] (rng/key 1))
+          e (try (gfi/update (assoc tr :gen-fn after) cm/EMPTY (rng/key 2)) nil (catch clojure.lang.ExceptionInfo e e))]
+      (is (= [0 :typo] (:path (ex-data e))))
+      (is (= 1 @runs)))))
 
 ;; ---------------------------------------------------------------------------
 ;; The discard of a value replaced by nested choices (review 5, R5-4)
@@ -693,6 +707,13 @@
         (is (== 0.0 (ts/number (:weight (gfi/update tr cm/EMPTY (rng/key 2))))))
         (gfi/update tr (cm/choicemap :z 0.1) (rng/key 3))
         (is (= 0 @estimates))))
+    (testing "a callee given an equal store computed in the body keeps its untraced draw: an update that reruns the body weighs 0 (review 7, G9: a store compared by identity revised it, redrawing ω)"
+      (let [with-omega (gen [] (let [u (untraced (d/normal 0 1))] (trace :x (d/normal (+ u (param :w)) 1))))
+            model (gen [] (let [z (trace :z (d/normal 0 1))]
+                            (splice :c (dyn/with-params with-omega {:w (clojure.core/+ 1.0 1.0)}))
+                            z))
+            tr (gfi/simulate model [] (rng/key 1))]
+        (is (== 0.0 (ts/number (:weight (gfi/update tr (cm/choicemap :z (tr :z)) (rng/key 2))))))))
     (testing "an internal proposal built in the body, an unrelated choice: its proposal does not run"
       (let [q-runs (atom 0)
             kq' (gen [cs x] (swap! q-runs inc) (when-not (cm/has-value? (cm/get-submap cs :y)) (trace :y (d/normal x 2))))
@@ -727,12 +748,32 @@
           e (try (gfi/generate model [] (cm/choicemap [:c :y1] 1.0 [:c :y2] 2.0) (rng/key 1)) nil
                  (catch clojure.lang.ExceptionInfo e e))]
       (is (= #{[:c :y1] [:c :y2]} (set (:paths (ex-data e)))))))
-  (testing "a user function's own error keeps its own path"
+  (testing "assess names a bad leaf in an Unfold's step and in a Recurse's aggregation by its full path (review 7: G16 and G17 named [:c :z] and [:c 0 :production :z])"
+    (let [step (gen [_t s] (trace :y (d/normal s 1)))
+          production (gen [x] {:value (trace :v (d/normal x 1)) :children []})
+          aggregation (gen [v _ws] (+ v (trace :a (d/normal 0 1))))]
+      (doseq [[model p] [[(gen [] (splice :c (comb/unfold step) 2 0.0)) [:c 1 :z]]
+                         [(gen [] (splice :c (comb/recurse production aggregation 1) 0.0)) [:c 0 :aggregation :z]]]]
+        (let [tr (gfi/simulate model [] (rng/key 1))
+              e (try (gfi/assess model [] (cm/merge (:choices tr) (cm/choicemap p 1.0)) (rng/key 2)) nil
+                     (catch clojure.lang.ExceptionInfo e e))]
+          (is (= p (:path (ex-data e))))))))
+  (testing "a user function's own error keeps its own path, in :apply, :update-with-state and an estimated's :retval (review 7: G14, G15 named it under the call)"
     (let [inner (gen [] (trace :x (d/normal 0 1)))
-          model (gen [] (splice :d (custom/deterministic {:apply (fn [_] (:weight (gfi/generate inner [] (cm/choicemap :typo 1.0) (rng/key 2))))})))
-          e (try (gfi/simulate model [] (rng/key 1)) nil (catch clojure.lang.ExceptionInfo e e))]
-      (is (= [:typo] (:path (ex-data e))))
-      (is (not (:unvisited (ex-data e)))))))
+          typo (fn [& _] (:weight (gfi/generate inner [] (cm/choicemap :typo 1.0) (rng/key 2))))
+          error-of (fn [f] (try (f) nil (catch clojure.lang.ExceptionInfo e e)))]
+      (doseq [[label e]
+              {":apply" (error-of #(gfi/simulate (gen [] (splice :d (custom/deterministic {:apply typo}))) [] (rng/key 1)))
+               ":update-with-state"
+               (error-of #(let [model (gen [x] (splice :d (custom/deterministic {:apply (fn [[x]] x) :update-with-state typo}) x))]
+                            (gfi/update (gfi/simulate model [1.0] (rng/key 1)) [2.0] [diff/unknown-change] cm/EMPTY (rng/key 3))))
+               "an estimated's :retval"
+               (error-of #(let [est (custom/estimated {:addresses [:y] :retval typo
+                                                       :estimate (fn [_ cs k] (:weight (gfi/assess (d/normal 0 1) [] (cm/get-submap cs :y) k)))})]
+                            (gfi/generate (gen [] (splice :e est)) [] (cm/choicemap [:e :y] 0.5) (rng/key 1))))}]
+        (testing label
+          (is (= [:typo] (:path (ex-data e))))
+          (is (not (:unvisited (ex-data e)))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Probes of the mutations review 6 found surviving (R6-6)
