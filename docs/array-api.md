@@ -139,6 +139,10 @@ A distribution body, compared with GenMLX:
   `(negate true)` is -1, where NumPy's `+` and `*` on two booleans are logical
   or and and, and its `-` an error. Mixed with numbers, and in reductions,
   the two agree.
+- **Casts to integers are Java's** (DESIGN.md §9): a float truncates toward
+  zero, saturates at the dtype's range (the infinities too) and takes NaN to
+  0; an integer narrowed wraps. Every backend gives the same, MLX by emulation
+  (its own cast is C++'s, undefined out of range).
 - **JVM storage:** every dtype is stored in a `double[]`. int64 values are exact
   up to 2^53, which is ample for counts and indices; bool is 0/1. One storage
   type keeps the backend small. The dtype tag carries the semantics.

@@ -248,6 +248,22 @@
     ;; float mod and floor-div by MLX's kernels: within an ulp of the quotient
     (conforms? (if (= op array//) ieee transcendental) op x y)))
 
+(deftest integer-division-at-the-edges
+  ;; MIN / -1 overflows: x86's idiv traps on it, which killed the JVM on
+  ;; MLX's x86 CPU (genclj-kw88, M2 review finding 11); Java's floorDiv
+  ;; wraps to MIN and floorMod gives 0. And a zero divisor gives 0. In the
+  ;; tested backend's int dtype, as the reference is compared in it
+  (let [mn (if (= int-dt :int32) Integer/MIN_VALUE Long/MIN_VALUE)]
+    (doseq [op [array/mod array/floor-div]]
+      (is (conforms? exact op {:data [mn mn 7 -7 0 mn 5] :dtype int-dt} {:data [-1 1 -1 -1 -1 2 0] :dtype int-dt})))))
+
+(deftest casts-to-int-at-the-edges
+  ;; Java's casts (DESIGN.md §9): MLX's own is C++'s, which gave MIN for
+  ;; all of these on x86's CPU (genclj-kw88). (uint32: gen.array-test, as
+  ;; the reference has no uint32 arrays)
+  (is (conforms? exact #(array/astype % int-dt)
+                 {:data [##NaN ##Inf ##-Inf 1e20 -1e20 2.7 -2.7 -0.5 2147483648.0 -2147483648.0 4294967296.0] :dtype float-dt})))
+
 (defspec mixed-dtypes-promote trials
   (prop/for-all [op (gen/elements [array/+ array/* array/maximum array/<])
                  x gen-any-spec

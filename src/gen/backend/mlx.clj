@@ -542,22 +542,53 @@
   "remainder or floor-divide of int handles, as the JVM backend (and NumPy):
    0 for a zero divisor, since integer division by zero is undefined in
    MLX's kernels; and floor division rounding down, which MLX's (truncating)
-   floor_divide does not: (x - x mod y) / y, an exact division."
+   floor_divide does not: (x - x mod y) / y, an exact division. A -1
+   divisor of a signed dtype never reaches the kernels either: MIN / -1
+   overflows, which x86's idiv traps (SIGFPE, a JVM crash on MLX's CPU,
+   genclj-kw88). x mod -1 is 0 and x floor-div -1 is -x, wrapping at MIN as
+   Java's floorDiv."
   [b op hx hy dtype]
   (let [hx (long hx) hy (long hy)
         s (stream b)
         temps (java.util.ArrayList.)
         t (fn ^long [^long h] (.add temps h) h)
         zero (t (scalar-handle 0 dtype))
-        one (t (scalar-handle 1 dtype))]
+        one (t (scalar-handle 1 dtype))
+        signed? (not= dtype :uint32)]
     (try
       (let [z (t (Mlx/mlx_equal hy zero s))
-            safe (t (Mlx/mlx_where z one hy s))
+            m1 (when signed? (t (Mlx/mlx_equal hy (t (scalar-handle -1 dtype)) s)))
+            safe (t (Mlx/mlx_where (if m1 (t (Mlx/mlx_logical_or z m1 s)) z) one hy s))
             r (t (Mlx/mlx_remainder hx safe s))
             q (if (= op :remainder)
                 r
-                (t (Mlx/mlx_floor_divide (t (Mlx/mlx_subtract hx r s)) safe s)))]
+                (let [q (t (Mlx/mlx_floor_divide (t (Mlx/mlx_subtract hx r s)) safe s))]
+                  (if m1 (t (Mlx/mlx_where m1 (t (Mlx/mlx_negative q s)) q s)) q)))]
         (Mlx/mlx_where z zero q s))
+      (finally (doseq [h temps] (MlxRaw/mlx_array_free (long h)))))))
+
+(defn- java-int-cast
+  "Float handle h (of dtype from) cast to the int dtype as Java casts
+   (DESIGN.md §9): truncated toward zero, saturating at the dtype's range
+   (the infinities too), NaN 0. MLX's own cast is C++'s, undefined out of
+   range: MIN for all of these on x86's CPU, MIN for an int64 NaN on the GPU.
+   The bounds are powers of two, exact in every float dtype (or infinite,
+   in float16, whose finite values all fit)."
+  [b ^long h from dtype]
+  (let [s (stream b)
+        temps (java.util.ArrayList.)
+        t (fn ^long [^long h] (.add temps h) h)
+        k (fn ^long [v d] (t (scalar-handle v d)))
+        [lo hi lo-int hi-int] (case dtype
+                                :int32 [-2147483648.0 2147483648.0 Integer/MIN_VALUE Integer/MAX_VALUE]
+                                :int64 [-9.223372036854775808E18 9.223372036854775808E18 Long/MIN_VALUE Long/MAX_VALUE]
+                                :uint32 [0.0 4294967296.0 0 4294967295])]
+    (try
+      (let [over (t (Mlx/mlx_greater_equal h (k hi from) s))
+            under (t (Mlx/mlx_less h (k lo from) s))
+            bad (t (Mlx/mlx_logical_or (t (Mlx/mlx_logical_or over under s)) (t (Mlx/mlx_isnan h s)) s))
+            cast (t (Mlx/mlx_astype (t (Mlx/mlx_where bad (k 0.0 from) h s)) (int (code dtype)) s))]
+        (Mlx/mlx_where over (k hi-int dtype) (t (Mlx/mlx_where under (k lo-int dtype) cast s)) s))
       (finally (doseq [h temps] (MlxRaw/mlx_array_free (long h)))))))
 
 (defn- int-power
@@ -1331,7 +1362,10 @@
       (wrap b (Mlx/mlx_arange (double start) (double stop) (double step) (int (code dtype)) (stream b)))))
   (-astype [b x dtype]
     (with-operands b :astype [h x nil]
-      (wrap b (Mlx/mlx_astype h (int (code dtype)) (stream b)))))
+      (let [from (dtype-on b x)]
+        (wrap b (if (and (= :float (dt/kind from)) (= :int (dt/kind dtype)))
+                  (java-int-cast b h from dtype)
+                  (Mlx/mlx_astype h (int (code dtype)) (stream b)))))))
 
   (-elementwise [b op args dtype] (guarded op (elementwise b op args dtype)))
   (-reduce [b op x axes keep-dims?] (guarded op (reduce-op b op x axes keep-dims?)))

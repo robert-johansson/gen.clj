@@ -386,6 +386,15 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
 - **Bernoulli values are booleans,** as in Gen.jl: 0/1 (GenMLX's) is an
   error, since a body's `if` takes 0 as true while the density scores it as
   false. NaN parameters and NaN constrained values are errors too.
+- **Casts to integers are Java's** (owner, 2026-10-20; genclj-kw88). On
+  every backend, a float cast to an integer dtype truncates toward zero,
+  saturates at the dtype's range (±Inf too) and takes NaN to 0. An integer
+  cast to a narrower one wraps, as Java's `(int)` of a long does. Before
+  this, the backends disagreed on NaN, ±Inf and out-of-range values. The
+  JVM backend threw on ±Inf and did not clamp int32. MLX's GPU saturated
+  but took NaN to MIN for int64. MLX's x86 CPU gave MIN for all of them
+  (the M2 review, finding 11, confirmed on fenrir). A loud error would need
+  a host read of every cast on a lazy backend.
 - **Booleans in arithmetic count, as in Julia** (owner, 2026-10-20;
   genclj-6pnx): `+`, `-`, `*` and `negate` on booleans give integers,
   `(+ true true)` is 2, `(negate true)` is -1. With numbers and in
