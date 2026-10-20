@@ -38,7 +38,7 @@ ten times its cases).
 | Thor | CUDA | full battery | 298 tests, 1734 assertions, 0 failures | 8909 s | 13.4 GB |
 | Thor | CUDA | soak | 110 of 111 properties; the failure was the test's assumption below, and the conformance soak rerun with the fix passed all 20 | 5661 s | 13.1 GB |
 | Thor | MLX CPU, float64 | full battery | namespaces 1–15 in full (slow and heavy included) before the 4-hour limit, 0 failures; 16–24 on the light tier: 51 tests, 581 assertions, 0 failures | 14400 s + 1550 s | 13.4 GB |
-| Thor | MLX CPU, float64 | soak | running at this writing (04:05): 41 of 111 properties passed, 0 failed | started 03:16 | |
+| Thor | MLX CPU, float64 | soak | 50 of 111 properties by 05:56, 0 failed (its 3-hour limit ends it at 06:16; the Mac's float64 soak covers all 111) | started 03:16 | |
 
 The light battery skips the ^:slow and ^:heavy tests, which take minutes
 each on MLX's CPU (one evaluation per value read); the full batteries on
@@ -49,6 +49,22 @@ runs of about 100 minutes; bean genclj-rtif), on an earlier commit.
 Benchmarks: on the Mac in `docs/benchmarks.md` (genclj-ls29); CUDA on the Thor in its own section there
 (the GPU is 2.5–6× slower than Metal at these sizes, from per-operation
 costs; 1.2× for compiled HMC at a million observations).
+
+## After M4's merge (main at 4d11594)
+
+M4 (Gen.jl parity) merged into main the same night (b3d74c1). On main:
+
+| Device | Run | Result | Time | Peak RSS |
+|---|---|---|---|---|
+| JVM | full battery | 469 tests, 2437 assertions, 0 failures | 109 s | |
+| Metal | full battery | 469 tests, 2404 assertions, 0 failures | 2948 s | 1.6 GB |
+| MLX CPU, float32 | light battery | 444 tests, 2329 assertions, 0 failures | 199 s | 3.9 GB |
+| MLX CPU, float64 | light battery | 444 tests, 2325 assertions, 0 failures | 1590 s | 7.4 GB |
+
+Metal found what the JVM could not: three M4 tests that assumed host
+numbers or float64, a statistical band set too tight (now measured), and
+one bug, a transform branching with a plain `if` on a boolean that MLX
+holds as an array (discrete reads are now host values).
 
 ## What the final runs found and fixed
 
