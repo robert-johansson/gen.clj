@@ -41,11 +41,16 @@
 (def with-args
   (gen [m] (let [x (trace :x (d/normal m 2))] (trace :y (d/normal x 1)) x)))
 
+(def proposes-the-latent
+  (prop/with-internal-proposal normal-normal
+    (gen [sigma] (when (open? sigma :mu) (trace :mu (d/normal 1.0 1.5))))))
+
+(def proposal-reads-the-arguments
+  (prop/with-internal-proposal with-args
+    (gen [sigma m] (when (open? sigma :x) (trace :x (d/normal (+ m 0.5) 1.5))))))
+
 (def law-models
-  [[:proposes-the-latent
-    (prop/with-internal-proposal normal-normal
-      (gen [sigma] (when (open? sigma :mu) (trace :mu (d/normal 1.0 1.5)))))
-    [] []]
+  [[:proposes-the-latent proposes-the-latent [] []]
    [:proposes-one-of-two-from-the-data
     (prop/with-internal-proposal two-latents
       (gen [sigma] (when (open? sigma :a)
@@ -55,10 +60,7 @@
     (prop/with-internal-proposal branching
       (gen [sigma] (when (open? sigma :z) (trace :z (d/bernoulli 0.7)))))
     [] []]
-   [:proposal-reads-the-arguments
-    (prop/with-internal-proposal with-args
-      (gen [sigma m] (when (open? sigma :x) (trace :x (d/normal (+ m 0.5) 1.5)))))
-    [1.0] [[2.0]]]])
+   [:proposal-reads-the-arguments proposal-reads-the-arguments [1.0] [[2.0]]]])
 
 (laws/deflaws internal-proposal law-models 60 laws/general)
 ;; every address has a fixed support: Def. 4.1.1 has content for a proposal
@@ -72,10 +74,10 @@
 ;; its generate leaving q out (forward sampling) fails them too
 (def spliced-models
   [[:splices-an-override
-    (gen [] (let [mu (splice :p (second (first law-models)))] (trace :z (d/normal mu 1)) mu))
+    (gen [] (let [mu (splice :p proposes-the-latent)] (trace :z (d/normal mu 1)) mu))
     [] []]
    [:splices-an-override-with-arguments
-    (gen [m] (let [x (splice :p (second (nth law-models 3)) m)] (trace :z (d/normal x 1))))
+    (gen [m] (let [x (splice :p proposal-reads-the-arguments m)] (trace :z (d/normal x 1))))
     [1.0] [[2.0]]]])
 
 (laws/deflaws spliced-internal-proposal spliced-models 60 laws/general)

@@ -520,7 +520,7 @@
     (let [[m _] (optimal-moments (tr [(dec t) :x]) y)]
       (trace [t :x] (d/normal (+ m (array/where (untraced (d/bernoulli 0.5)) 0.6 -0.6)) 0.5)))))
 
-(deftest ^:heavy smc-with-an-encapsulated-proposal-is-unbiased
+(deftest ^:slow ^:heavy smc-with-an-encapsulated-proposal-is-unbiased
   ;; §4.5.4 (law audit E19): a step weighs log p - log ξ, ξ the proposal's
   ;; estimate on the ω it proposed with, and E[1/ξ] = 1/q given the choice
   ;; (Eq. 4.4), so E[exp(estimate)] = p(y) still: over 2000 filters of 20

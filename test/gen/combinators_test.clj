@@ -483,11 +483,10 @@
                                  #(let [s0 (at % [0 :s]) s1 (at % [1 :s]) s2 (at % [2 :s])]
                                     [(clojure.core/- s1 (clojure.core/* 0.5 s0)) (clojure.core/- s2 (clojure.core/* 0.5 s1))]))))))
     (testing "Recurse: two nodes an update adds"
+      ;; a root of depth 1 has no children; of depth 0, two
       (let [r (comb/recurse (gen [depth] {:value (trace :v (d/normal 0 1)) :children (if (zero? depth) [1 1] [])})
                             (gen [v ws] (reduce + v ws))
-                            2)
-            ;; a root of depth 1 has no children; of depth 0, two
-            ]
+                            2)]
         (is (independent? (grown r [1] [0] [diff/unknown-change] #(vector (at % [1 :production :v]) (at % [2 :production :v])))))))))
 
 ;; ---------------------------------------------------------------------------

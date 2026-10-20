@@ -2,9 +2,10 @@
   "The static modeling language (gen ^:static, gen.dynamic.static): the
    general laws, and every operation equal to the same body's without the
    flag (laws/static), on models with splices of Map, Unfold and other
-   static functions, destructuring and parameters; update and regenerate
-   skip the nodes that did not change; the graph as data and as DOT;
-   batched runs; bodies that are not static are compile errors."
+   static functions, destructuring and parameters, as are the choice
+   gradients through the compiled score; update and regenerate skip the
+   nodes that did not change; the graph as data and as DOT; batched runs;
+   bodies that are not static are compile errors."
   (:refer-clojure :exclude [+ - *])
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
@@ -183,6 +184,19 @@
 ;; a static body over a callee with encapsulated randomness: its score fn
 ;; must split keys as the handler's assess does (assess = generate on the
 ;; same key), and skip them only under an exact-density operation
+(def noisy-callee (gen [m] (trace :x (d/normal (+ m (untraced (d/normal 0 0.5))) 1))))
+
+(def over-noise
+  (gen ^:static [m]
+    (let [mu (trace :mu (d/normal m 1))
+          x (splice :inner noisy-callee mu)
+          _ (trace :y (d/normal x 1))]
+      x)))
+
+(def omega-laws (merge laws/encapsulated laws/static))
+
+(laws/deflaws static-omega [[:over-noise over-noise [0.0] [[1.0]]]] 60 omega-laws)
+
 ;; ---------------------------------------------------------------------------
 ;; Gradients through the compiled score (the final law audit, F2)
 ;; ---------------------------------------------------------------------------
@@ -218,21 +232,8 @@
         (let [s (continuous-gradients gf args (rng/key seed))
               d (continuous-gradients (assoc gf :static nil) args (rng/key seed))]
           (is (seq s))
-          (is (= (keys s) (keys d)))
+          (is (= (set (keys s)) (set (keys d))))
           (doseq [p (keys s)] (is (ts/close? (s p) (d p)) (str p))))))))
-
-(def noisy-callee (gen [m] (trace :x (d/normal (+ m (untraced (d/normal 0 0.5))) 1))))
-
-(def over-noise
-  (gen ^:static [m]
-    (let [mu (trace :mu (d/normal m 1))
-          x (splice :inner noisy-callee mu)
-          _ (trace :y (d/normal x 1))]
-      x)))
-
-(def omega-laws (merge laws/encapsulated laws/static))
-
-(laws/deflaws static-omega [[:over-noise over-noise [0.0] [[1.0]]]] 60 omega-laws)
 
 ;; ---------------------------------------------------------------------------
 ;; Skipping

@@ -403,7 +403,10 @@
   ;; and swap (Eq. 3.16), is a-swap-involution-is-plain-mh. Planted bugs
   ;; (2026-10-20): the involution's weight without log |det J| fails the
   ;; reciprocal; Alg. 5's printed sign in the move's proposal terms fails the
-  ;; conditional swap
+  ;; conditional swap. The identity is the thesis's example pinned: with no
+  ;; proposal choices and a Jacobian of 1, neither bug moves its weight of 0.
+  ;; It fails a weight that is not 0 on an unchanged trace, such as |det J|
+  ;; in place of its log (planted, 2026-10-20; the reciprocal fails too)
   (let [nothing (gen [_] nil)]
     (testing "the identity, with a proposal of no choices: weight 1"
       (let [identity-t (tf/involutive (tf/transform [mi ai mo ao] (write mo :x (read mi :x :continuous) :continuous)))]
