@@ -126,19 +126,30 @@
   [engine]
   (-info engine))
 
+(defn- vocabulary-tokens
+  "tokens as a vector of longs, each below n-vocab, or a loud error
+   (:invalid-token) naming what was given them."
+  [n-vocab tokens what]
+  (when-not (sequential? tokens)
+    (throw (ex-info (str what ": the tokens are a sequence of integers, not " (pr-str tokens))
+                    {:reason :invalid-token :tokens tokens})))
+  (mapv (fn [t]
+          (if (index? t n-vocab)
+            (long t)
+            (throw (invalid-token what t n-vocab))))
+        tokens))
+
 (defn check-tokens
   "tokens as a vector of longs, each a token of engine's vocabulary, or a
    loud error (:invalid-token) naming what was given them."
   [engine tokens what]
-  (let [n-vocab (:n-vocab (-info engine))]
-    (when-not (sequential? tokens)
-      (throw (ex-info (str what ": the tokens are a sequence of integers, not " (pr-str tokens))
-                      {:reason :invalid-token :tokens tokens})))
-    (mapv (fn [t]
-            (if (index? t n-vocab)
-              (long t)
-              (throw (invalid-token what t n-vocab))))
-          tokens)))
+  (vocabulary-tokens (:n-vocab (-info engine)) tokens what))
+
+(defn- branch-tokens
+  "check-tokens against b's vocabulary, which its log-probabilities span
+   (no call of the engine)."
+  [^Branch b tokens what]
+  (vocabulary-tokens (alength ^floats (.-logprobs b)) tokens what))
 
 (defn- non-empty [ts what]
   (when (empty? ts)
@@ -187,7 +198,7 @@
   [branches tokens]
   (let [bs (branch-vector branches "advance")
         e (.-engine ^Branch (first bs))
-        ts (check-tokens e tokens "advance")]
+        ts (branch-tokens (first bs) tokens "advance")]
     (when-not (= (count bs) (count ts))
       (throw (ex-info (str "advance: " (count bs) " branches but " (count ts) " tokens (one each)")
                       {:reason :count-mismatch :branches (count bs) :tokens (count ts)})))
@@ -200,7 +211,7 @@
   [branch tokens]
   (let [b (as-branch branch)
         e (.-engine b)]
-    (-extend e b (non-empty (check-tokens e tokens "extend") "extend"))))
+    (-extend e b (non-empty (branch-tokens b tokens "extend") "extend"))))
 
 (defn score
   "The log-probability of each token of a continuation given branch and the
@@ -209,7 +220,7 @@
   [branch tokens]
   (let [b (as-branch branch)
         e (.-engine b)]
-    (-score e b (non-empty (check-tokens e tokens "score") "score"))))
+    (-score e b (non-empty (branch-tokens b tokens "score") "score"))))
 
 (defn resample
   "The branches' states, one for each ancestor index (into branches): a
