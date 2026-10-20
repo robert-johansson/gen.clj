@@ -71,7 +71,7 @@ Python.
 | L1 data | `gen.choicemap`, `gen.selection`, `gen.trace`, `gen.diff` |
 | L2 GFI | `gen.gfi` (protocol + API), `gen.dynamic` (handler, DynamicGF, `gen`), `gen.dynamic.core` (guarded clojure.core fns for `gen` bodies) |
 | L3 distributions | `gen.dist.core` (record, `defdist`), `gen.dist`, `gen.dist.dsl` (`dist`: pushforwards, Gen.jl's `@dist`) |
-| L4 combinators | `gen.combinators` (map, unfold, switch, recurse, call-at, choice-at), `gen.custom` (deterministic generative functions, custom gradients) |
+| L4 combinators | `gen.combinators` (map, unfold, switch, recurse, call-at, choice-at), `gen.custom` (deterministic generative functions, custom gradients, estimated densities) |
 | L5 inference | `gen.inference.weights`, `.importance`, `.mh`, `.kernel`, `.particle-filter`, `.mcmc` (HMC, MALA, MAP, elliptical slice), `.enumerative` (grids, exact proposals), `.proposal` (internal-proposal override), `.transform` (Gen.jl's @transform, trace translators, SMCP3), `.trace-kernel` (GenTraceKernelDSL), `.vi` (black-box VI, VIMCO); `gen.gradients`, `gen.learning` |
 
 ## Rules

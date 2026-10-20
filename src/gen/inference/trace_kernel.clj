@@ -84,7 +84,8 @@
                                   [mc kc] (map-indexed vector ins)))
             outputs (fn [x]
                       (let [[mc' kc'] (substituted x)
-                            [u b] (:retval (gfi/assess kernel (into [(assoc trace :choices mc')] args) kc'))]
+                            [u b] (:retval (gfi/with-exact-density "A trace kernel's Jacobian"
+                                             (gfi/assess kernel (into [(assoc trace :choices mc')] args) kc' (rng/key 0))))]
                         (array/concatenate (mapv (fn [[sp p]] (array/flatten (cm/get-choice (if (= sp :update) u b) p)))
                                                  outs))))
             x (array/concatenate (mapv array/flatten in-values))
@@ -126,7 +127,7 @@
          _ (when-let [extra (seq (tf/unconstrained-additions (:choices trace) update discard (:choices t')))]
              (throw (ex-info (str "trace-kernel/mh: the kernel's update leaves new choices unwritten: " (vec extra))
                              {:addresses (vec extra)})))
-         {bwd :weight} (gfi/assess kernel (into [t'] args) backward)]
+         {bwd :weight} (gfi/assess kernel (into [t'] args) backward (rng/fold-in k-update 1))]
      (mh/accept trace t' (+ (- w fwd) bwd (log-abs-det kernel trace args kc ret (kept-by discard))) k-accept))))
 
 (defn mh-kernel
@@ -149,7 +150,7 @@
           {kc :choices fwd :weight [update backward :as ret] :retval} (gfi/propose k (into [trace] k-args) k-propose)
           [args argdiffs] (tf/new-arguments trace p-new-args p-argdiffs)
           {t' :trace w :weight discard :discard} (gfi/update trace args argdiffs (cm/merge update new-observations) k-update)
-          {bwd :weight [l-update l-backward] :retval} (gfi/assess l (into [t'] l-args) backward)]
+          {bwd :weight [l-update l-backward] :retval} (gfi/assess l (into [t'] l-args) backward (rng/fold-in k-update 1))]
       (when check?
         (let [{t'' :trace} (gfi/update t' (:args trace) (vec (repeat (count (:args trace)) diff/unknown-change))
                                        (cm/merge l-update prev-observations) k-check)]

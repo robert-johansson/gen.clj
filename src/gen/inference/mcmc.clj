@@ -96,7 +96,8 @@
    array/compile): [v others] → log p, with v the flat selected values (shaped
    by proto) and others the other choices as a map."
   [gf args proto]
-  (fn [v others] (:weight (gfi/assess gf args (cm/merge (cm/from-map others) (cm/from-array proto v))))))
+  (fn [v others] (gfi/with-exact-density "A gradient-based move (HMC, MALA)"
+                   (:weight (gfi/assess gf args (cm/merge (cm/from-map others) (cm/from-array proto v)) (rng/key 0))))))
 
 (defn- mala-proposal
   "MALA's proposal as a function of arrays only: [v noise others] →
@@ -226,7 +227,7 @@
          lp0 (dc/log-prob prior f0)
          at (fn [theta]
               (let [f (+ mu (+ (* x (Math/cos theta)) (* nu (Math/sin theta))))
-                    {t :trace w :weight} (gfi/update trace (cm/choicemap addr f) (rng/key 0))]
+                    {t :trace w :weight} (gfi/with-exact-density "elliptical-slice" (gfi/update trace (cm/choicemap addr f) (rng/key 0)))]
                 [t (double (array/item (- w (- (dc/log-prob prior f) lp0))))]))]
      (loop [i 0
             theta (* 2.0 Math/PI (double (array/item (rng/uniform (rng/fold-in k-theta 0)))))

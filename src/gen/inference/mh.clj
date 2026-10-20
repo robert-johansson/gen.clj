@@ -60,7 +60,7 @@
                                [(:trace r) (:weight r) (:discard r)]))
         {bwd-weight :weight} (gfi/assess (or backward proposal)
                                          (into [moved] (if backward backward-args proposal-args))
-                                         bwd)]
+                                         bwd (rng/fold-in k-propose 1))]
     {:trace moved :weight (+ (- weight fwd-weight) bwd-weight)}))
 
 (defn- proposal-mh

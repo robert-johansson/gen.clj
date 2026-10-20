@@ -1,7 +1,7 @@
 (ns gen.laws
   "The GFI's laws (Cusumano-Towner 2020; docs/research/genjl-parity.md §3,
    audited in docs/research/law-audit.md) as test.check properties over any
-   generative functions, in two sets:
+   generative functions, in three sets:
 
    - general: the thesis's definitions, true of every generative function
      (Def 2.1.16, Def 2.3.1, Prop 2.3.1, Def 2.3.2, Eq 4.1's retention);
@@ -9,7 +9,10 @@
      choices from the prior, each site from its own key, as every gen.clj
      generative function does so far. A generative function with an optimal
      or overridden internal proposal (thesis pp. 145-152) need satisfy only
-     the general set.
+     the general set;
+   - encapsulated: for a generative function with encapsulated randomness
+     (§4.5), whose score is an estimate, the laws that hold for one draw of
+     it.
 
    Models are [label gf args alt-args]: alt-args is a vector of other
    argument vectors, so that update and regenerate are also checked with
@@ -266,6 +269,15 @@
     (let [{c :choices w :weight} (gfi/propose gf args (rng/key seed))]
       (close? w (:weight (gfi/assess gf args c))))))
 
+(defn assess-is-generate-with-every-choice
+  "assess's weight is generate's on the same choices and key: the key draws
+   the same encapsulated randomness in both (§4.5.1)."
+  [cases]
+  (prop/for-all [[[_ gf args] seed] cases]
+    (let [tr (gfi/simulate gf args (rng/key seed))
+          k (rng/key (inc seed))]
+      (close? (:weight (gfi/assess gf args (:choices tr) k)) (:weight (gfi/generate gf args (:choices tr) k))))))
+
 ;; ---------------------------------------------------------------------------
 ;; Forward-sampling laws
 ;; ---------------------------------------------------------------------------
@@ -368,7 +380,8 @@
    :regenerate-weight-is-the-projection-ratio regenerate-weight-is-the-projection-ratio
    :update-weight-is-the-projection-change update-weight-is-the-projection-change
    :regenerate-weight-with-new-arguments-is-the-projection-ratio regenerate-weight-with-new-arguments-is-the-projection-ratio
-   :propose-weight-is-the-assessed-density propose-weight-is-the-assessed-density})
+   :propose-weight-is-the-assessed-density propose-weight-is-the-assessed-density
+   :assess-is-generate-with-every-choice assess-is-generate-with-every-choice})
 
 (def forward-sampling
   {:generate-without-constraints-has-weight-zero generate-without-constraints-has-weight-zero
@@ -381,6 +394,91 @@
    :identity-update-reports-no-change identity-update-reports-no-change})
 
 (def all (merge general forward-sampling))
+
+;; ---------------------------------------------------------------------------
+;; Encapsulated randomness (thesis §4.5)
+;; ---------------------------------------------------------------------------
+
+(defn generate-with-every-choice-weighs-its-score [cases]
+  (prop/for-all [[[_ gf args] seed] cases]
+    (let [tr (gfi/simulate gf args (rng/key seed))
+          {g :trace w :weight} (gfi/generate gf args (:choices tr) (rng/key (inc seed)))]
+      (and (= (:choices tr) (:choices g)) (close? w (:score g))))))
+
+(defn generated-traces-keep-their-constraints [cases]
+  (prop/for-all [[[_ gf args] seed picks] cases]
+    (let [tr (gfi/simulate gf args (rng/key seed))
+          sigma (restrict (:choices tr) (picked (addrs tr) picks))
+          r (vacuous-on-unvisitable (gfi/generate gf args sigma (rng/key (inc seed))))]
+      (or (= ::vacuous r)
+          (let [{g :trace w :weight} r]
+            (and (not (array/truthy? (array/isnan w)))
+                 (every? #(= (cm/get-choice sigma %) (cm/get-choice (:choices g) %)) (cm/addresses sigma))))))))
+
+(defn updates-restore-their-choices
+  "Prop 2.3.1 for the choices: the discards of an update, given back,
+   restore them (the weights agree only in expectation)."
+  [cases]
+  (prop/for-all [[model seed picks alt?] cases]
+    (if-let [{:keys [tr sigma] {t2 :trace disc :discard :as r} :result} (update-case model seed picks alt?)]
+      (let [now (set (addrs t2))
+            constrained (set (cm/addresses sigma))
+            expected-discard (restrict (:choices tr) (filter #(or (constrained %) (not (now %))) (addrs tr)))
+            {t3 :trace} (gfi/update t2 (:args tr) (unknown-diffs (:args tr)) disc (rng/key seed))]
+        (and (sound-retdiff? tr r)
+             (every? #(= (cm/get-choice sigma %) (cm/get-choice (:choices t2) %)) constrained)
+             (every? #(= (cm/get-choice (:choices tr) %) (cm/get-choice (:choices t2) %))
+                     (remove constrained (filter now (addrs tr))))
+             (= expected-discard disc)
+             (= (:choices tr) (:choices t3))))
+      true)))
+
+(defn regenerate-keeps-unselected-values [cases]
+  (prop/for-all [[[_ gf args :as model] seed picks alt?] cases]
+    (let [k (rng/key seed)
+          tr (gfi/simulate gf args k)
+          args' (next-args model seed alt?)
+          s (sel/from-paths (picked (addrs tr) picks))
+          {t2 :trace :as r} (gfi/regenerate tr args' (unknown-diffs args') s (rng/fold-in k 1))
+          selected (set (cm/addresses (sel/get-selected (:choices tr) s)))
+          now (set (addrs t2))]
+      (and (sound-retdiff? tr r)
+           (every? #(= (cm/get-choice (:choices tr) %) (cm/get-choice (:choices t2) %))
+                   (remove selected (filter now (addrs tr))))))))
+
+(defn update-weight-is-the-score-change-less-fresh [cases]
+  (prop/for-all [[model seed picks alt?] cases]
+    (if-let [{:keys [tr sigma] {t2 :trace w :weight} :result} (update-case model seed picks alt?)]
+      (let [was (set (addrs tr))
+            constrained (set (cm/addresses sigma))]
+        (close? w (- (- (:score t2) (:score tr)) (lp t2 (remove #(or (was %) (constrained %)) (addrs t2))))))
+      true)))
+
+(defn identity-update-keeps-omega
+  "An update that changes nothing keeps ω and the score (DESIGN.md §9)."
+  [cases]
+  (prop/for-all [[[_ gf args] seed] cases]
+    (let [tr (gfi/simulate gf args (rng/key seed))
+          t2 (:trace (gfi/update tr cm/EMPTY (rng/key (inc seed))))]
+      (and (= (:gen.trace/omega tr) (:gen.trace/omega t2)) (= (ts/number (:score tr)) (ts/number (:score t2)))))))
+
+(def encapsulated
+  "The laws of a generative function with encapsulated randomness ω, whose
+   score is an estimate: those of general and forward-sampling that hold for
+   one ω, and the others without their comparisons of separate runs (assess
+   against a trace's score, propose against assess, an update and its
+   reverse), which hold only in expectation (Eqs. 4.3-4.4, tested
+   statistically)."
+  (merge (apply dissoc all [:score-is-the-assessed-density :generate-with-every-choice-is-deterministic
+                            :generated-traces-are-consistent :updates-are-reversible-with-exact-discards
+                            :regenerate-keeps-unselected-choices :propose-weight-is-the-assessed-density
+                            :update-weight-is-the-score-change-less-fresh-choices])
+         {:generate-with-every-choice-weighs-its-score generate-with-every-choice-weighs-its-score
+          :generated-traces-keep-their-constraints generated-traces-keep-their-constraints
+          :updates-restore-their-choices updates-restore-their-choices
+          :regenerate-keeps-unselected-values regenerate-keeps-unselected-values
+          :update-weight-is-the-score-change-less-fresh update-weight-is-the-score-change-less-fresh
+          :identity-update-keeps-omega identity-update-keeps-omega}))
 
 (defmacro deflaws
   "A defspec per law (from gen.laws/all, or the given law map: a var's

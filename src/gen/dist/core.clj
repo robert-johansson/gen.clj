@@ -300,7 +300,7 @@
             lp (total (log-prob d v))]
         {:trace (dist-trace d v lp) :weight (- lp (:score tr)) :retdiff diff/no-change})))
 
-  (-assess [d _ choices]
+  (-assess [d _ choices _key]
     (when-not (cm/has-value? choices)
       (throw (ex-info "assess: a distribution needs its value" {:type type})))
     (let [v (cm/get-value choices)]

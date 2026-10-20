@@ -29,11 +29,35 @@
    an array for an array or number, a tree of the argument's shape for a
    tree; it passes through a return value that is a float array or number. With a gradient, the
    function runs on the arguments' values (array/stop-gradient), so it may
-   use host arithmetic, a solver, anything (array/custom-vjp)."
+   use host arithmetic, a solver, anything (array/custom-vjp).
+
+   A generative function whose density is estimated (thesis §4.5.3), such
+   as a likelihood that a particle filter or importance sampler estimates
+   for pseudo-marginal MCMC:
+
+     (estimated {:estimate (fn [args choices key] log-estimate)
+                 :simulate (fn [args key] {:choices … :log-estimate …})})
+
+   estimate draws the estimator's randomness ω from key and returns log ξ,
+   an unbiased estimate of the density of choices (all of the function's
+   choices): E_ω[ξ] = p(choices; args). simulate, optional, samples the
+   choices and ω jointly, the choices from p and ω given them from the
+   estimator's conditional (for an importance sampler, one sample is the
+   choices' own latent, the others from the proposal), and returns the
+   estimate at both. The trace keeps the key as ω.
+
+   generate with constraints takes them as all of the choices and weighs
+   log ξ; without constraints it is simulate, weight 0. update keeps the
+   trace when nothing changed (no-change argdiffs, no constraints), and
+   otherwise estimates afresh: weight log ξ' - log ξ, the pseudo-marginal
+   ratio. regenerate redraws ω the same way, but cannot resample a selected
+   choice (there is no proposal density to weigh it by), a loud error;
+   project takes all of the choices or none."
   (:require [gen.array :as array]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.gfi :as gfi]
+            [gen.selection :as sel]
             [gen.trace :as trace]))
 
 (set! *warn-on-reflection* true)
@@ -110,7 +134,7 @@
   (-regenerate [this tr args argdiffs _selection _key]
     (let [[t retdiff] (updated this tr args argdiffs)]
       {:trace t :weight 0.0 :retdiff retdiff}))
-  (-assess [this args choices]
+  (-assess [this args choices _key]
     (no-choices! :assess choices)
     {:weight 0.0 :retval (:retval (run this args))})
   (-propose [this args _key] {:choices cm/EMPTY :weight 0.0 :retval (:retval (run this args))})
@@ -156,3 +180,79 @@
 
 (defmethod print-method DeterministicGF [_ ^java.io.Writer w]
   (.write w "#gen/deterministic"))
+
+;; ---------------------------------------------------------------------------
+;; Estimated densities (encapsulated randomness, thesis §4.5)
+;; ---------------------------------------------------------------------------
+
+(defn- estimated-trace [gf args choices log-estimate omega]
+  (trace/make-trace {:gen-fn gf :args (vec args) :choices choices :score log-estimate
+                     :retval ((:retval gf) args choices) ::trace/omega omega}))
+
+(defn- estimate-at
+  "The trace of gf on args with choices, ω drawn from key."
+  [gf args choices key]
+  (gfi/check-exact-density! "an estimated density")
+  (estimated-trace gf args choices ((:estimate gf) (vec args) choices key) key))
+
+(defn- simulated [gf args key]
+  (gfi/check-exact-density! "an estimated density")
+  (if-let [simulate (:simulate gf)]
+    (let [{:keys [choices log-estimate] :as r} (simulate (vec args) key)]
+      (when-not (and (cm/choicemap? choices) (some? log-estimate))
+        (throw (ex-info "estimated: :simulate returns {:choices (a choice map) :log-estimate}"
+                        {:returned (keys r)})))
+      (estimated-trace gf args choices log-estimate key))
+    (throw (ex-info (str "estimated: simulate (and generate without constraints) needs :simulate, a joint sampler of"
+                         " the choices and the estimator's randomness (thesis §4.5.1); generate with the choices,"
+                         " update and assess need only :estimate")
+                    {}))))
+
+(defn- unchanged? [argdiffs] (every? diff/no-change? argdiffs))
+
+(defrecord EstimatedGF [estimate simulate retval]
+  gfi/IGenerativeFunction
+  (-simulate [this args key] (simulated this args key))
+  (-generate [this args constraints key]
+    (if (cm/empty? constraints)
+      {:trace (simulated this args key) :weight 0.0}
+      (let [t (estimate-at this args constraints key)] {:trace t :weight (:score t)})))
+  (-update [this tr args argdiffs constraints key]
+    (if (and (unchanged? argdiffs) (cm/empty? constraints))
+      {:trace tr :weight 0.0 :retdiff diff/no-change :discard cm/EMPTY}
+      (let [t (estimate-at this args (cm/override (:choices tr) constraints) key)]
+        {:trace t :weight (- (:score t) (:score tr)) :retdiff diff/unknown-change
+         :discard (sel/get-selected (:choices tr) (sel/from-choicemap constraints))})))
+  (-regenerate [this tr args argdiffs selection key]
+    (when-not (cm/empty? (sel/get-selected (:choices tr) selection))
+      (throw (ex-info (str "estimated: regenerate cannot resample a selected choice, since an estimator has no"
+                           " proposal density to weigh it by; update it with a proposal instead")
+                      {:selected (vec (cm/addresses (sel/get-selected (:choices tr) selection)))})))
+    (if (unchanged? argdiffs)
+      {:trace tr :weight 0.0 :retdiff diff/no-change}
+      (let [t (estimate-at this args (:choices tr) key)]
+        {:trace t :weight (- (:score t) (:score tr)) :retdiff diff/unknown-change})))
+  (-assess [this args choices key]
+    (let [t (estimate-at this args choices key)] {:weight (:score t) :retval (:retval t)}))
+  (-propose [this args key]
+    (let [t (simulated this args key)] {:choices (:choices t) :weight (:score t) :retval (:retval t)}))
+  (-project [_ tr selection]
+    (let [chosen (sel/get-selected (:choices tr) selection)]
+      (cond (cm/empty? chosen) 0.0
+            (= chosen (:choices tr)) (:score tr)
+            :else (throw (ex-info "estimated: project takes all of the choices or none (the estimate is of all of them)"
+                                  {:selected (vec (cm/addresses chosen))}))))))
+
+(defn estimated
+  "A generative function whose density is estimated (see the namespace
+   doc), from :estimate, (fn [args choices key] log-estimate); optionally
+   :simulate, (fn [args key] {:choices :log-estimate}), and :retval, (fn
+   [args choices] retval) (nil by default)."
+  [{:keys [estimate simulate retval] :as spec}]
+  (doseq [[k f] {:estimate estimate :simulate simulate :retval retval}]
+    (when (and (or f (= k :estimate)) (not (ifn? f)))
+      (throw (ex-info (str "estimated: " k " must be a function") {:keys (vec (keys spec))}))))
+  (->EstimatedGF estimate simulate (or retval (constantly nil))))
+
+(defmethod print-method EstimatedGF [_ ^java.io.Writer w]
+  (.write w "#gen/estimated"))

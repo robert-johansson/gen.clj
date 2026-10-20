@@ -4,7 +4,11 @@
    A trace holds the generative function, its arguments, its random choices
    (a choice map), its return value and its score, log p(choices; args).
    Calling a trace on an address or path returns the choice there, like Gen.jl's
-   trace[addr]: (tr :slope), (tr [:y 0])."
+   trace[addr]: (tr :slope), (tr [:y 0]).
+
+   A trace of a generative function with encapsulated randomness (thesis
+   §4.5) also holds that randomness, a key, under :gen.trace/omega, and its
+   score is an estimate."
   (:require [gen.choicemap :as cm]))
 
 (set! *warn-on-reflection* true)

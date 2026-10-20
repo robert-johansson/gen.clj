@@ -96,7 +96,9 @@ E; A and C passed everything. Control: the printed Alg 5 sign (D) is caught.
 - Laws 11, 12 and 18 are not in the thesis (18 could cite §3.4.4, pp. 98–100,
   Prop 3.4.1); the section title overstates.
 - Law 14: an identity update does not have weight 0 with encapsulated
-  randomness (p. 157): log w = log ξ(x,τ,ω')/ξ(x,τ,ω).
+  randomness (p. 157): log w = log ξ(x,τ,ω')/ξ(x,τ,ω). gen.clj keeps ω
+  when nothing changed (owner, 2026-10-20), so its identity update weighs
+  0; both rules are exact (DESIGN.md §9).
 - Law 1: also cite DML restriction 2, unique addresses (p. 63).
 
 Verified citations: Def 2.1.3 p. 49, Def 2.1.7 p. 52, Def 2.1.16 p. 56,

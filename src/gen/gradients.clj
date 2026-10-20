@@ -20,6 +20,7 @@
             [gen.choicemap :as cm]
             [gen.dynamic :as dyn]
             [gen.gfi :as gfi]
+            [gen.random :as rng]
             [gen.selection :as sel]))
 
 (set! *warn-on-reflection* true)
@@ -32,9 +33,11 @@
     (and (seq leaves) (every? #(and (array/array? %) (= :float (dt/kind (array/dtype %)))) leaves))))
 
 (defn- objective
-  "assess's weight of gf on args and choices, plus ⟨retgrad, retval⟩."
+  "assess's weight of gf on args and choices, plus ⟨retgrad, retval⟩. The
+   key is fixed, so the objective is a function: of the choices alone for an
+   exact density, and at one draw of the encapsulated randomness otherwise."
   [gf args choices retgrad]
-  (let [{w :weight rv :retval} (gfi/assess gf args choices)]
+  (let [{w :weight rv :retval} (gfi/with-exact-density "A gradient" (gfi/assess gf args choices (rng/key 0)))]
     (if (nil? retgrad)
       w
       (reduce + w (map (fn [g v] (array/sum (* g v))) (array/tree-leaves retgrad) (array/tree-leaves rv))))))

@@ -15,8 +15,8 @@ reverse-mode autodiff. An MLX backend (M2) runs the same code on Apple's GPU
 (Metal), on MLX's CPU backend and on CUDA (verified on a Jetson AGX Thor):
 it passes the backend conformance suite and the test battery on each. Gen.jl
 parity (M4) covers the core and GenParticleFilters, GenSMCP3 and
-GenTraceKernelDSL, except the static modeling language and encapsulated
-randomness. Local LLMs as generative functions (M3) come next. See
+GenTraceKernelDSL, and encapsulated randomness for pseudo-marginal
+inference, except the static modeling language. Local LLMs as generative functions (M3) come next. See
 `DESIGN.md`.
 
 ## A model and two kinds of inference

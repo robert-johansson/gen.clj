@@ -55,7 +55,7 @@
                                ;; the trace's value, as a constraint would be taken
                                (generate (assoc state :constraints choices) p dist key)
                                (do (vreset! missing? true) (simulate state p dist key))))))
-        tr (gfi/simulate replaying qargs (rng/key 0))]
+        tr (gfi/with-exact-density "with-internal-proposal (its proposal's density)" (gfi/simulate replaying qargs (rng/key 0)))]
     (when-not (= (set @visited) (set (cm/addresses (:choices tr))))
       (throw (ex-info (str "with-internal-proposal: the proposal calls a generative function at an address,"
                            " which cannot be replayed against a trace: trace those choices in the proposal")
@@ -144,7 +144,7 @@
   (-regenerate [this tr args argdiffs selection key]
     (regenerate-under #(proposal-generate this %1 %2 %3) #(proposal-weight this %1 %2 %3)
                       tr args argdiffs selection key))
-  (-assess [_ args choices] (gfi/-assess gf args choices))
+  (-assess [_ args choices key] (gfi/-assess gf args choices key))
   (-propose [_ args key] (gfi/-propose gf args key))
   (-project [this tr selection]
     (proposal-weight this (:args tr) (sel/get-selected (:choices tr) selection) tr)))

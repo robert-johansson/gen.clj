@@ -45,7 +45,7 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 | `choice_gradients(trace, sel, retgrad)` → (arg_grads, values, grads) | P: `gradients.cljs` `choice-gradients` takes an address vector; no retgrad, no arg grads | core |
 | `accumulate_param_gradients!(trace, retgrad, scale)` | P: functional gradients via `mx/grad` (`learning.cljs make-param-loss-fn`); no stateful accumulator | core |
 | `get_params(gf)` | P: a name-keyed store in `learning.cljs`; no per-GF registry | core |
-| Non-addressable randomness r: `get_score = log p(r,t)/q(r;x,t)` | Y: `encapsulated.cljs`, `Trace.omega` | soon |
+| Non-addressable randomness r: `get_score = log p(r,t)/q(r;x,t)` | Y: `encapsulated.cljs`, `Trace.omega` | soon. *gen.clj (M4, 2026-10-20):* `(untraced dist)` and `(untraced-key)` in gen bodies, ω a key the trace keeps, kept unless the change hints say something changed (DESIGN.md §9); `gen.custom/estimated` for estimators; `assess` takes a key. Pseudo-marginal MH and PMMH are MH on such a model |
 
 ### 1b. Change hints and incremental computation (Gen.jl core)
 | Capability | GenMLX | gen.clj |
@@ -273,7 +273,9 @@ q = internal proposal.
 14. **Encapsulated randomness** (Def 4.5.1, p. 155; Eqs. 4.2–4.3, p. 156).
     - E_{q̊}[ξ] = p(τ;x).
     - project costs 0. An identity update does not have weight 0: it resamples
-      ω' (p. 157), so log w = log ξ(x,τ,ω')/ξ(x,τ,ω).
+      ω' (p. 157), so log w = log ξ(x,τ,ω')/ξ(x,τ,ω). *gen.clj keeps ω when
+      the change hints say nothing changed (owner, 2026-10-20; DESIGN.md
+      §9), so its identity update weighs 0; both are exact.*
     - Pseudo-marginal MH targets the exact posterior.
 15. **Custom-proposal MH requirements** (Alg. 5 and requirements, p. 92). The
     proposal never samples an observed address, and every move is reversible:
@@ -319,7 +321,7 @@ tested, ◐ partly, — not yet (the feature does not exist yet).
 | 11 Project | ✓ `project-of-everything-is-the-score`, `project-splits-the-score` |
 | 12 Propose | ✓ `propose-weight-is-the-assessed-density` |
 | 13 Gradients | ◐ every VJP against finite differences (`gen.array.tape-test`); `choice-gradients-match-finite-differences` (with a retgrad), `argument-gradients`, `parameter-gradients` (`gen.gradients-test`); custom gradients (`custom-vjps`, `gradients-pass-through`). Missing (law audit gap K): argument gradients with a nonzero retgrad (Eq. 2.11) |
-| 14 Encapsulated randomness | — (M4) |
+| 14 Encapsulated randomness | ✓ (M4, `gen.encapsulated-test`) `laws/encapsulated`, the laws that hold for one ω, over untraced draws (the thesis's mixture, Eqs. 4.8–4.10; black-box code between choices, Eqs. 4.11–4.14; Map, Unfold and splices) and estimated densities; `assess-is-generate-with-every-choice` (general set); `omega-is-kept-unless-something-changes`, `untraced-draws-leave-the-sites-keys-alone`; Eq. 4.3 `eq-4-3-the-estimate-is-unbiased`, Eq. 4.4 through simulate `eq-4-4-simulate-draws-omega-given-the-choices`; Eqs. 4.15–4.16 `pseudo-marginal-mh-targets-the-exact-posterior` (untraced and an importance-sampling likelihood); §4.5.4 `importance-sampling-with-an-encapsulated-proposal`; `operations-that-need-exact-densities-are-loud`. Planted bugs documented in place |
 | 15 Custom-proposal MH | ✓ `kernels-leave-the-posterior-invariant` (`:custom`) and `structure-changing-moves-target-the-posterior` (`:q4-mh`); `a-proposal-that-ignores-the-backward-move-is-caught`; `checked-kernels-catch-a-proposal-that-writes-an-observation` |
 | 16 Trace translators | ✓ (M4) `a-pushforward-translates-with-weight-zero` (deterministic: p(z)·\|dz/dx\| = p(x)), `a-change-of-variables-translates-with-weight-zero` (general, both directions, with q-forward and q-backward), `extending-by-the-conditional-weighs-the-evidence`, the round-trip checks (inside `a-change-of-variables-translates-with-weight-zero` and the SMCP3 tests); Jacobians against closed forms (`jacobians-match-the-closed-forms`). Missing (law audit gap H): translators with observations, and across two models in SMC |
 | 17 Involutive MCMC | ✓ discrete: stationarity and `the-involution-is-an-involution`; continuous, with transforms (M4): `involutive-mh-with-a-transform-keeps-the-posterior` (a multiplicative move, Jacobian e^u), `a-reversible-jump-keeps-the-posterior` (split/merge between dimensions, ±log 2), `a-read-the-update-keeps-is-an-output`, `the-involution-check` |

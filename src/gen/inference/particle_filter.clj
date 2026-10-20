@@ -164,7 +164,7 @@
                         {:keys [choices weight]} (gfi/propose proposal (into [tr] proposal-args) k-propose)
                         r (gfi/update tr args argdiffs (cm/merge observations choices) k-update)]
                     (if backward
-                      (update r :weight + (- (:weight (gfi/assess backward (into [(:trace r)] backward-args) (:discard r)))
+                      (update r :weight + (- (:weight (gfi/assess backward (into [(:trace r)] backward-args) (:discard r) (rng/fold-in k-update 1)))
                                              weight))
                       (do (check-discard (:discard r) i)
                           (update r :weight - weight))))

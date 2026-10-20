@@ -240,14 +240,16 @@
         prev-sub (when-not replaced? old-sub)
         state (if replaced? (replace-call state p old-sub) state)
         ;; a batched run's callees run batched too: they inherit the batch tracer
-        base {}]
+        base {}
+        ;; the callee's key, the same in every mode: assess draws what
+        ;; generate would with the same key
+        [k state] (sub-key state)
+        opts (assoc base :key k)]
     (if (= mode :assess)
-      (let [{w :weight rv :retval} (gfi/run-op gf :assess args (assoc base :constraints cons :key (rng/key 0)))]
+      (let [{w :weight rv :retval} (gfi/run-op gf :assess args (assoc opts :constraints cons))]
         [rv (cond-> (-> state (update :score + w) (add-weight w))
               (not (cm/empty? cons)) (update :choices cm/set-choice p cons))])
-      (let [[k state] (sub-key state)
-            opts (assoc base :key k)
-            r (cond
+      (let [r (cond
                 (= mode :simulate) (gfi/run-op gf :simulate args opts)
                 (= mode :generate) (gfi/run-op gf :generate args (assoc opts :constraints cons))
                 (nil? prev-sub) (if (= mode :update)
@@ -301,11 +303,35 @@
       ;; regenerate: choices no longer visited cancel against the reverse move
       state)))
 
-(defn- initial-state [mode {:keys [key constraints prev selection]}]
+;; ---------------------------------------------------------------------------
+;; Encapsulated randomness: untraced draws (thesis §4.5)
+;; ---------------------------------------------------------------------------
+
+(def ^:private omega-salt
+  "Folded into an operation's key for its encapsulated randomness ω, apart
+   from the sites' sequence, so untraced draws never shift a site's key."
+  0x6f6d6567)
+
+(defn- keeps-omega?
+  "Does an update or regenerate keep the previous trace's ω? Only when the
+   change hints say nothing the function depends on changed: no-change
+   argdiffs, and no constraint (update) or selection (regenerate) under it.
+   Otherwise ω is drawn afresh, a pseudo-marginal refresh (DESIGN.md §9)."
+  [mode {:keys [argdiffs constraints selection]}]
+  (and (some? argdiffs) (every? diff/no-change? argdiffs)
+       (case mode
+         :update (or (nil? constraints) (cm/empty? constraints))
+         :regenerate (= sel/none selection)
+         false)))
+
+(defn- initial-state [mode {:keys [key constraints prev selection] :as opts}]
   {:mode mode :key key
    :choices cm/EMPTY :scores {} :subtraces {} :score 0.0 :weight 0.0
    :constraints (or constraints cm/EMPTY) :prev prev :selection (or selection sel/none)
-   :discard cm/EMPTY :visited #{}})
+   :discard cm/EMPTY :visited #{}
+   ;; ω: the previous trace's when kept, else folded from the key at the first
+   ;; untraced draw
+   :omega (when (keeps-omega? mode opts) (::trace/omega prev)) :omega-key key :omega-count 0})
 
 (def ^:dynamic *params*
   "The trainable parameters in effect: the store of the outermost generative
@@ -369,6 +395,24 @@
         ;; callee's middleware for the callee's body
         transition (volatile! (or (get (:transitions gf) mode) (site-transitions mode)))
         vol (volatile! (initial-state mode opts))
+        ;; the n-th untraced draw's key is ω folded with n
+        untraced-fn (fn untraced
+                      ([] (let [state @vol]
+                            (when (::finished state)
+                              (throw (ex-info "An untraced draw after the generative function returned: a lazy sequence escaped the body (realize it in the body, e.g. with mapv or doall)" {})))
+                            (gfi/check-exact-density! "an untraced draw")
+                            ;; each particle's ω must reproduce its own draws
+                            (when (batch/batch-backend? array/*backend*)
+                              (throw (array/batched-branch "An untraced draw in a batched run" {})))
+                            (let [omega (or (:omega state) (rng/fold-in (:omega-key state) omega-salt))
+                                  n (long (:omega-count state))]
+                              (vreset! vol (assoc state :omega omega :omega-count (inc n)))
+                              (rng/fold-in omega n))))
+                      ([dist]
+                       (when-not (instance? gen.dist.core.Distribution dist)
+                         (throw (ex-info "untraced draws from a distribution; give other stochastic code a key with (untraced-key)"
+                                         {:value dist})))
+                       (dc/sample dist (untraced) [])))
         trace-fn (fn [addr dist]
                    (let [p (path addr)
                          state @vol]
@@ -393,7 +437,7 @@
                                           {:gen-fn (type sub)})))
                         (check-arity! sub args)
                         (let [outer @transition
-                              run-body #(apply (:body-fn sub) trace-fn splice-fn read-param args)]
+                              run-body #(apply (:body-fn sub) trace-fn splice-fn read-param untraced-fn args)]
                           (vreset! transition (or (get (:transitions sub) mode) (site-transitions mode)))
                           (try
                             (if-let [ps (:params sub)]
@@ -416,15 +460,16 @@
                                             {:path p})))
                           (vreset! vol (update state' :visited conj p))
                           v))))
-        retval (realize! (apply (:body-fn gf) trace-fn splice-fn read-param args))]
+        retval (realize! (apply (:body-fn gf) trace-fn splice-fn read-param untraced-fn args))]
     (vswap! vol assoc ::finished true)
     (assoc (finish @vol) :retval retval)))
 
 (defn- make-trace [gf args state]
-  (assoc (trace/make-trace {:gen-fn gf :args args :choices (:choices state)
-                            :retval (:retval state) :score (:score state)})
-         ::scores (:scores state)
-         ::subtraces (:subtraces state)))
+  (cond-> (assoc (trace/make-trace {:gen-fn gf :args args :choices (:choices state)
+                                    :retval (:retval state) :score (:score state)})
+                 ::scores (:scores state)
+                 ::subtraces (:subtraces state))
+    (pos? (long (:omega-count state))) (assoc ::trace/omega (:omega state))))
 
 (defn- holds-batch?
   "Does x hold a batched value (in its maps, vectors and realized seqs)?"
@@ -485,11 +530,11 @@
   gfi/IGenerativeFunction
   (-simulate [gf args key] (:trace (run gf :simulate args {:key key})))
   (-generate [gf args constraints key] (run gf :generate args {:key key :constraints constraints}))
-  (-update [gf tr args _argdiffs constraints key]
-    (run gf :update args {:key key :prev tr :constraints constraints}))
-  (-regenerate [gf tr args _argdiffs selection key]
-    (run gf :regenerate args {:key key :prev tr :selection selection}))
-  (-assess [gf args choices] (run gf :assess args {:key (rng/key 0) :constraints choices}))
+  (-update [gf tr args argdiffs constraints key]
+    (run gf :update args {:key key :prev tr :argdiffs argdiffs :constraints constraints}))
+  (-regenerate [gf tr args argdiffs selection key]
+    (run gf :regenerate args {:key key :prev tr :argdiffs argdiffs :selection selection}))
+  (-assess [gf args choices key] (run gf :assess args {:key key :constraints choices}))
   (-propose [gf args key]
     (let [tr (:trace (run gf :simulate args {:key key}))]
       {:choices (:choices tr) :weight (:score tr) :retval (:retval tr)}))
@@ -525,9 +570,14 @@
 (defn dynamic-gf? [x] (instance? DynamicGF x))
 
 (defn make-gen-fn
-  "A dynamic generative function from a body fn of (trace splice & args) and
-   its source form."
+  "A dynamic generative function from a body fn of (trace splice param
+   untraced & args) and its source form."
   [body-fn source]
+  ;; a variadic body fn of fewer hidden parameters would take the arguments
+  ;; shifted, silently (a fixed arity fails on its own)
+  (when (and (instance? clojure.lang.RestFn body-fn) (< (.getRequiredArity ^clojure.lang.RestFn body-fn) 4))
+    (throw (ex-info "make-gen-fn: the body fn takes trace, splice, param and untraced before the arguments"
+                    {:required-arity (.getRequiredArity ^clojure.lang.RestFn body-fn)})))
   (->DynamicGF body-fn source nil nil nil))
 
 (defn with-params
@@ -617,7 +667,7 @@
        (let [head (first form)]
          (and (symbol? head) (not (contains? locals head))
               (when-let [v (resolve head)] (lazy-fns (symbol v)))
-              (some #{'trace 'splice} (tree-seq coll? seq (rest form)))))))
+              (some #{'trace 'splice 'untraced 'untraced-key} (tree-seq coll? seq (rest form)))))))
 
 (defn- discarded-lazy-call
   "The lazy call with trace calls that would be discarded with form's value:
@@ -766,6 +816,15 @@
    and calls, (param name) reads a trainable parameter (with-params), and
    conditionals branch on the values of 0-d arrays.
 
+   (untraced dist) draws from dist without an address, and (untraced-key)
+   gives other stochastic code (a simulator, an inner sampler) a key: the
+   function's encapsulated randomness ω (thesis §4.5.2). Untraced values
+   are not choices and add nothing to the score, so the score is an unbiased
+   estimate of the choices' density given ω. The trace keeps ω, and an
+   update or regenerate keeps it unless the change hints say something
+   changed (DESIGN.md §9). Untraced values must not decide which addresses
+   are visited.
+
    Conditionals, catch clauses, and clojure.core's truthiness tests and
    lookups (not, filter, every?, get, …; gen.dynamic.core), branch per
    particle in a batched run: on a value that differs across particles they
@@ -781,7 +840,14 @@
    when, if, let or do in statement position), or bound and never used, is
    a compile error. Prefer mapv, doseq and run!."
   [params & body]
-  (let [;; the body fn has three hidden parameters, and a fn with primitive
+  ;; the body's untraced and untraced-key would silently shadow a var of
+  ;; that name (an enclosing body's own are locals, and fine)
+  (doseq [s '[untraced untraced-key]]
+    (when (and (some #{s} (tree-seq coll? seq body)) (not (contains? &env s)) (var? (resolve &env s)))
+      (throw (ex-info (str "gen: " s " in a body is gen's own (encapsulated randomness), but it would hide the var "
+                           (resolve &env s) ": rename the var")
+                      {:symbol s :var (resolve &env s)}))))
+  (let [;; the body fn has four hidden parameters, and a fn with primitive
         ;; parameters takes at most four: coerce them in the body instead
         prim (filter #(and (symbol? %) (primitive-coercions (:tag (meta %)))) params)
         plain (mapv #(if (some #{%} prim) (vary-meta % dissoc :tag) %) params)
@@ -789,7 +855,8 @@
                [`(let [~@(mapcat (fn [p] [(vary-meta p dissoc :tag) (list (primitive-coercions (:tag (meta p))) (vary-meta p dissoc :tag))]) prim)]
                    ~@body)]
                body)
-        body-fn (guard-branches `(fn [~'trace ~'splice ~'param ~@plain] ~@body)
+        body-fn (guard-branches `(fn [~'trace ~'splice ~'param ~'untraced ~@plain]
+                                   (let [~'untraced-key (fn [] (~'untraced))] ~@body))
                                 (into (set (keys &env)) *outer-locals*))]
     `(make-gen-fn ~body-fn '~(cons params body))))
 

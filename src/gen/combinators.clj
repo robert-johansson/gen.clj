@@ -76,7 +76,7 @@
 ;; Kernel calls. (A batched run is this same code under the batch tracer.)
 (defn- simulate-at [gf args key] (gfi/-simulate gf args key))
 (defn- generate-at [gf args cs key] (gfi/-generate gf args cs key))
-(defn- assess-at [gf args choices] (gfi/-assess gf args choices))
+(defn- assess-at [gf args choices key] (gfi/-assess gf args choices key))
 (defn- update-at [gf old args argdiffs cs key] (gfi/-update gf old args argdiffs cs key))
 (defn- regenerate-at [gf old args argdiffs s key] (gfi/-regenerate gf old args argdiffs s key))
 
@@ -264,12 +264,12 @@
                     (range kept n))]
     (incremental-result gf args acc op n prev-n)))
 
-(defn- map-assess [gf args choices]
+(defn- map-assess [gf args choices key]
   (let [args (map-args args)
         n (map-length args)]
     (indices :assess choices n)
     (reduce (fn [{:keys [weight retval]} i]
-              (let [r (assess-at (:kernel gf) (element-args args i) (cm/get-submap choices i))]
+              (let [r (assess-at (:kernel gf) (element-args args i) (cm/get-submap choices i) (element-key key i))]
                 {:weight (+ weight (:weight r)) :retval (conj retval (:retval r))}))
             {:weight 0.0 :retval []}
             (range n))))
@@ -280,7 +280,7 @@
   (-generate [gf args constraints key] (map-generate gf args constraints key))
   (-update [gf tr args argdiffs constraints key] (map-revise gf tr args argdiffs :update constraints key))
   (-regenerate [gf tr args argdiffs selection key] (map-revise gf tr args argdiffs :regenerate selection key))
-  (-assess [gf args choices] (map-assess gf args choices))
+  (-assess [gf args choices key] (map-assess gf args choices key))
   (-propose [gf args key] (propose-from-trace (:trace (map-generate gf args nil key))))
   (-project [_ tr selection] (project-elements tr selection)))
 
@@ -372,13 +372,13 @@
                 acc))]
     (incremental-result gf (vec args) acc op n prev-n)))
 
-(defn- unfold-assess [gf [n init & params] choices]
+(defn- unfold-assess [gf [n init & params] choices key]
   (let [n (check-steps n)]
   (indices :assess choices n)
   ;; weight starts boxed: it accumulates arrays on array backends
   (loop [t 0 state init weight (Double/valueOf 0.0) retval []]
     (if (< t n)
-      (let [r (assess-at (:kernel gf) (step-args t state params) (cm/get-submap choices t))]
+      (let [r (assess-at (:kernel gf) (step-args t state params) (cm/get-submap choices t) (element-key key t))]
         (recur (inc t) (:retval r) (+ weight (:weight r)) (conj retval (:retval r))))
       {:weight weight :retval retval}))))
 
@@ -388,7 +388,7 @@
   (-generate [gf args constraints key] (unfold-generate gf args constraints key))
   (-update [gf tr args argdiffs constraints key] (unfold-revise gf tr args argdiffs :update constraints key))
   (-regenerate [gf tr args argdiffs selection key] (unfold-revise gf tr args argdiffs :regenerate selection key))
-  (-assess [gf args choices] (unfold-assess gf args choices))
+  (-assess [gf args choices key] (unfold-assess gf args choices key))
   (-propose [gf args key] (propose-from-trace (:trace (unfold-generate gf args nil key))))
   (-project [_ tr selection] (project-elements tr selection)))
 
@@ -453,7 +453,7 @@
   (-generate [gf args constraints key] (switch-generate gf args constraints key))
   (-update [gf tr args argdiffs constraints key] (switch-revise gf tr args argdiffs :update constraints key))
   (-regenerate [gf tr args argdiffs selection key] (switch-revise gf tr args argdiffs :regenerate selection key))
-  (-assess [gf [idx & bargs] choices] (gfi/-assess (branch gf idx) (vec bargs) choices))
+  (-assess [gf [idx & bargs] choices key] (gfi/-assess (branch gf idx) (vec bargs) choices key))
   (-propose [gf args key] (propose-from-trace (:trace (switch-generate gf args nil key))))
   (-project [_ tr selection] (let [sub (::subtrace tr)] (gfi/-project (:gen-fn sub) sub selection))))
 
@@ -587,6 +587,8 @@
 (defn- node-choices [choices node p a]
   (-> choices (put-part node :production (:choices p)) (put-part node :aggregation (:choices a))))
 
+(defn- node-key [key node part] (element-key (element-key key node) (if (= part :production) 0 1)))
+
 (defn- recurse-run
   "generate (tr nil), update or regenerate of a Recurse trace: the
    production phase, then the aggregation phase. Nodes no longer reached
@@ -595,7 +597,7 @@
   [gf tr [input] [input-diff] op cs key]
   (let [ctx {:gf gf :old-p (::productions tr {}) :old-a (::aggregations tr {}) :targets (recurse-targets op cs)
              :op op :cs cs
-             :node-key (fn [node part] (element-key (element-key key node) (if (= part :production) 0 1)))}
+             :node-key (partial node-key key)}
         {:keys [prods] :as produced} (production-phase ctx input input-diff)
         _ (when (and cs (not= op :regenerate))
             (doseq [node (keys (:targets ctx))]
@@ -626,12 +628,13 @@
     (throw (ex-info (str "Recurse takes one argument, the root's input; given " (count args)) {:args args})))
   (vec args))
 
-(defn- recurse-assess [gf [input] choices]
+(defn- recurse-assess [gf [input] choices key]
   (let [{:keys [production aggregation max-branch]} gf
         targets (recurse-targets :assess choices)
         [ps weight] (loop [todo (sorted-map 0 input) ps {} weight (Double/valueOf 0.0)]
                       (if-let [[node in] (first todo)]
-                        (let [r (assess-at production [in] (cm/get-submap choices [node :production]))
+                        (let [r (assess-at production [in] (cm/get-submap choices [node :production])
+                                           (node-key key node :production))
                               out (production-output gf node r)]
                           (recur (into (dissoc todo node)
                                        (map-indexed (fn [j c] [(child-of max-branch node j) c]) (:children out)))
@@ -643,7 +646,8 @@
         [as weight] (reduce (fn [[as weight] node]
                               (let [{v :value children :children} (ps node)
                                     ws (mapv #(as (child-of max-branch node %)) (range (count children)))
-                                    r (assess-at aggregation [v ws] (cm/get-submap choices [node :aggregation]))]
+                                    r (assess-at aggregation [v ws] (cm/get-submap choices [node :aggregation])
+                                                 (node-key key node :aggregation))]
                                 [(assoc as node (:retval r)) (+ weight (:weight r))]))
                             [{} weight] (sort > (keys ps)))]
     {:weight weight :retval (as 0)}))
@@ -661,7 +665,7 @@
   (-generate [gf args constraints key] (recurse-run gf nil (recurse-args args) [diff/unknown-change] :generate constraints key))
   (-update [gf tr args argdiffs constraints key] (recurse-run gf tr (recurse-args args) argdiffs :update constraints key))
   (-regenerate [gf tr args argdiffs selection key] (recurse-run gf tr (recurse-args args) argdiffs :regenerate selection key))
-  (-assess [gf args choices] (recurse-assess gf (recurse-args args) choices))
+  (-assess [gf args choices key] (recurse-assess gf (recurse-args args) choices key))
   (-propose [gf args key] (propose-from-trace (gfi/-simulate gf args key)))
   (-project [_ tr selection] (recurse-project tr selection)))
 

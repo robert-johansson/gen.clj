@@ -595,6 +595,38 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   each run draws its own ω. Such functions get their own law set: the
   pointwise laws without those, and the thesis's Eqs. 4.3–4.16 as
   statistical laws.
+  - **In gen bodies (§4.5.2),** `(untraced dist)` draws without an address
+    and `(untraced-key)` hands other stochastic code a key; untraced values
+    add nothing to the score, which is then the choices' density given ω.
+    ω is one key, folded from the operation's key apart from the sites'
+    sequence (an untraced draw never shifts a site's key; the n-th draw
+    takes ω folded with n), and the trace keeps it as `:gen.trace/omega`.
+    The handler's weights are then the thesis's (Eq. 4.7) with no new
+    weight code. Untraced values must not decide which addresses are
+    visited (p. 159): an obligation, as in the thesis and Gen.jl, since no
+    sound check short of rerunning the body exists. A batched run falls
+    back to particles, since a particle's ω must reproduce its own draws.
+    `untraced` and `untraced-key` are reserved in bodies as `trace` is:
+    the macro refuses a body that would hide a var of either name.
+  - **Estimators (§4.5.3),** `gen.custom/estimated`: `:estimate` (fn [args
+    choices key] → log ξ, ω drawn from the key, which the trace keeps) and
+    an optional joint `:simulate`. generate with constraints takes them as
+    all of the choices; without, it is simulate with weight 0, valid on the
+    extended space. regenerate of a selected choice, and simulate without
+    a joint sampler, are loud errors: an estimator has no proposal density
+    to weigh them by. Pseudo-marginal MH and PMMH are then MH on a model
+    with either.
+  - **assess takes a key,** as every other operation (rule 2), since it
+    draws ω; with the same key it weighs what generate weighs on the same
+    choices, a general law. `(assess gf args choices)` draws one from the
+    implicit source.
+  - **Operations that need exact densities refuse ω** (`gfi/with-exact-density`):
+    gradients (choice and parameter gradients, HMC, MALA, MAP, VI's and
+    learning's gradients), elliptical slice, the exact proposal, an
+    internal proposal's replayed density and a trace kernel's Jacobian.
+    Each computed its density with a fixed key, so with ω it would fix one
+    draw of it and target the wrong distribution, silently (found the same
+    day, after an owner's question: all eight ran without error).
 - **The static modeling language** (Gen.jl's `@gen (static)`; owner,
   2026-10-20): a flag on `gen`, `(gen ^:static [args] (let [...] ret))`,
   not a second macro or a second semantics. The body is an ordinary `gen`

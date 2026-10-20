@@ -24,6 +24,11 @@
    argument. Weights follow Gen.jl and the Cusumano-Towner thesis
    (docs/research/genjl-parity.md §3).
 
+   A generative function may own randomness that is not among its choices
+   (encapsulated randomness, thesis §4.5): its score is then an unbiased
+   estimate of its density, and assess, which draws that randomness, is
+   random too.
+
    A trace is called on an address or path for its choice there, like
    Gen.jl's trace[addr]: (tr :slope), (tr [:y 0]); :choices, :retval, :score
    and :args are its fields."
@@ -42,9 +47,30 @@
   (-generate [gf args constraints key])
   (-update [gf trace args argdiffs constraints key])
   (-regenerate [gf trace args argdiffs selection key])
-  (-assess [gf args choices])
+  (-assess [gf args choices key])
   (-propose [gf args key])
   (-project [gf trace selection]))
+
+(def ^:dynamic *exact-density*
+  "The name of the operation in effect that needs exact densities (a
+   gradient, an exact enumeration, a replayed proposal), or nil. Under it,
+   encapsulated randomness is a loud error: the score would be an estimate
+   at one draw of it, which the operation would silently fix."
+  nil)
+
+(defmacro with-exact-density
+  "body, in which encapsulated randomness is an error naming op."
+  [op & body]
+  `(binding [*exact-density* ~op] ~@body))
+
+(defn check-exact-density!
+  "Throws when an operation that needs exact densities is in effect: what
+   (an untraced draw, an estimated density) makes the score an estimate."
+  [what]
+  (when-let [op *exact-density*]
+    (throw (ex-info (str op " needs exact densities, but " what " makes the score an estimate"
+                         " (encapsulated randomness, thesis §4.5)")
+                    {:op op}))))
 
 (defn generative-function?
   "Does x implement the GFI? Inline implementations answer by an instance
@@ -67,7 +93,7 @@
     (case op
       :simulate {:trace (-simulate gf args key)}
       :generate (-generate gf args constraints key)
-      :assess (-assess gf args constraints)
+      :assess (-assess gf args constraints key)
       :update (-update gf prev args argdiffs constraints key)
       :regenerate (-regenerate gf prev args argdiffs selection key))))
 
@@ -192,9 +218,13 @@
    (-regenerate (:gen-fn trace) trace (vec args) (vec argdiffs) (check-selection :regenerate selection) key)))
 
 (defn assess
-  "The log density of fully specified choices, and the return value."
-  [gf args choices]
-  (-assess gf (check-args :assess args) (check-choice-map :assess "the choices" choices)))
+  "The log density of fully specified choices, and the return value. The
+   key draws the encapsulated randomness of a generative function that has
+   some; with the same key, assess's weight is generate's on the same
+   choices."
+  ([gf args choices] (assess gf args choices (next-key)))
+  ([gf args choices key]
+   (-assess gf (check-args :assess args) (check-choice-map :assess "the choices" choices) key)))
 
 (defn propose
   "Sample choices from gf, with their log density and the return value."

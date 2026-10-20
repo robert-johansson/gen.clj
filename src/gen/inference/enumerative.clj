@@ -227,7 +227,7 @@
                                              (ex-info (str "with-exact-proposal: the model's structure depends on the"
                                                            " enumerated choices (under " (pr-str c) ")")
                                                       {:assignment c} cause))
-                           tr (try (:trace (gfi/generate g args constraints (rng/key 0)))
+                           tr (try (:trace (gfi/with-exact-density "with-exact-proposal" (gfi/generate g args constraints (rng/key 0))))
                                    (catch clojure.lang.ExceptionInfo e
                                      ;; a choice of the other run goes unused under c
                                      (throw (if (re-find #"was not visited" (ex-message e)) (structure-error e) e))))]
@@ -288,7 +288,7 @@
   (let [seen (volatile! {})
         g (watching gf (set paths) seen)
         ;; the supports, from a run with every choice given
-        _ (gfi/generate g args (:choices tr) (rng/key 0))
+        _ (gfi/with-exact-density "with-exact-proposal" (gfi/generate g args (:choices tr) (rng/key 0)))
         free (free-paths paths sigma)
         _ (check-visited! free seen (:choices tr))
         {s :s r :r} (enumerated g args sigma (others-of (:choices tr) sigma free) free seen limit)]
@@ -318,7 +318,7 @@
   (-regenerate [this tr args argdiffs selection key]
     (proposal/regenerate-under #(exact-generate this %1 %2 %3) #(exact-weight this %1 %2 %3)
                                tr args argdiffs selection key))
-  (-assess [_ args choices] (gfi/-assess gf args choices))
+  (-assess [_ args choices key] (gfi/-assess gf args choices key))
   (-propose [_ args key] (gfi/-propose gf args key))
   (-project [this tr selection]
     (exact-weight this (:args tr) (sel/get-selected (:choices tr) selection) tr)))

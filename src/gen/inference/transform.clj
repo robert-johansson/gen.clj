@@ -379,7 +379,7 @@
               (throw (ex-info (str "translator: the new trace has choices the transform did not write: " (vec extra))
                               {:addresses (vec extra)})))
           bwd (if q-backward
-                (:weight (gfi/assess q-backward (into [t'] q-backward-args) aux-out))
+                (:weight (gfi/assess q-backward (into [t'] q-backward-args) aux-out (rng/fold-in k-generate 1)))
                 (if (cm/empty? aux-out)
                   0.0
                   (throw (ex-info "translator: the transform writes auxiliary choices but there is no :q-backward"
@@ -457,7 +457,7 @@
           (gfi/update trace args argdiffs (cm/merge (if t (get-in s [:outputs :model-out]) u) new-observations) k-update)
           ldj (if t (log-abs-det t trace u s (fn [p] (not (cm/has-value? (cm/get-submap discard p))))) 0.0)
           u' (if t (get-in s [:outputs :aux-out]) discard)
-          bwd (cond q-backward (:weight (gfi/assess q-backward (into [t'] q-backward-args) u'))
+          bwd (cond q-backward (:weight (gfi/assess q-backward (into [t'] q-backward-args) u' (rng/fold-in k-update 1)))
                     (cm/empty? u') 0.0
                     :else (throw (ex-info "updating-translator: there are backward choices but no :q-backward"
                                           {:backward (cm/to-map u')})))]
