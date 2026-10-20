@@ -523,6 +523,15 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     kinds (argument, parameter and per-expression nodes) are its Julia
     representation. `static/ir` has one node per binding by design, and the
     ported tests check behavior, not the IR's form.
+  - *A covariance singular in floating point is an error (F1).* mvnormal
+    rejects a covariance whose Cholesky factor fails, or whose condition
+    leaves the density no correct digits: trace(H⁻¹) ≥ 1/(n·ε), where H is
+    the correlation matrix of L·Lᵀ (between 1/λmin and n/λmin) and ε is that
+    of the dtype the density is computed in (float32 on MLX, host data
+    included). Gen.jl, through LAPACK's potrf, rejects only a failed
+    factorization, so it accepts `2·ones(2, 2)` (a pivot positive by
+    rounding) and gives 15.24. dist_dsl.jl:29's case is ported as the
+    error. The check runs on host values and concrete arrays only (rule 5).
 - **Bodies run to completion:** lazy sequences in a body's return value are
   realized during the run, and a `trace` or `splice` after the run is a loud
   error. Before this, `(map … (trace …))` at the end of a body gave a trace
