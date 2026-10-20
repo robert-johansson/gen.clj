@@ -7,7 +7,9 @@
    - close?: equal within the precision of the backend's default float
      (float64: 1e-12; float32: a few ulps, relative and absolute).
    - jvm?, float-dtype, int-dtype: for the few checks that are about one
-     backend's representation."
+     backend's representation.
+   - correlation: the sample correlation of host numbers, for checks of
+     independence."
   (:refer-clojure :exclude [abs])
   (:require [gen.array :as array]
             [gen.array.protocols :as p]
@@ -85,3 +87,12 @@
   "Is the 0-d array or number x finite?"
   [x]
   (Double/isFinite (number x)))
+
+(defn correlation
+  "The sample correlation of the coordinates of pairs [x y] of host numbers."
+  [pairs]
+  (let [centered (fn [xs] (let [m (/ (reduce + xs) (count xs))] (map #(- % m) xs)))
+        xs (centered (map first pairs))
+        ys (centered (map second pairs))
+        dot (fn [as bs] (reduce + (map * as bs)))]
+    (/ (dot xs ys) (Math/sqrt (* (dot xs xs) (dot ys ys))))))

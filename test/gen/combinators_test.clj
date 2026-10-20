@@ -431,14 +431,6 @@
 ;; Elements are independent (law audit gap 1)
 ;; ---------------------------------------------------------------------------
 
-(defn- correlation* [xs ys]
-  (let [n (count xs)
-        mean #(clojure.core// (reduce clojure.core/+ %) n)
-        cx (map #(clojure.core/- % (mean xs)) xs)
-        cy (map #(clojure.core/- % (mean ys)) ys)
-        dot #(reduce clojure.core/+ (map clojure.core/* %1 %2))]
-    (clojure.core// (dot cx cy) (Math/sqrt (clojure.core/* (dot cx cx) (dot cy cy))))))
-
 (deftest ^:slow ^:heavy elements-are-independent
   ;; each element, step and node draws from its own key: the sample
   ;; correlation of two is within 5/sqrt(n) of 0. Planted bug (audit,
@@ -447,7 +439,7 @@
   (let [n 2000
         keys (rng/split (rng/key 90) n)
         band (clojure.core// 5.0 (Math/sqrt n))
-        independent? (fn [pairs] (< (Math/abs (correlation* (map first pairs) (map second pairs))) band))
+        independent? (fn [pairs] (< (Math/abs (ts/correlation pairs)) band))
         at (fn [tr p] (ts/number (tr p)))]
     (testing "Map"
       (let [m (comb/map (gen [x] (trace :z (d/normal x 1))))]
@@ -475,7 +467,7 @@
   (let [n 2000
         keys (rng/split (rng/key 92) n)
         band (clojure.core// 5.0 (Math/sqrt n))
-        independent? (fn [pairs] (< (Math/abs (correlation* (map first pairs) (map second pairs))) band))
+        independent? (fn [pairs] (< (Math/abs (ts/correlation pairs)) band))
         at (fn [tr p] (ts/number (tr p)))
         grown (fn [gf args args' argdiffs pick]
                 (map #(let [[k1 k2] (rng/split %)
