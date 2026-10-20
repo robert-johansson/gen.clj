@@ -551,7 +551,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     float32 it also rejects matrices that are positive definite but whose
     float32 density is off by tenths of a nat or more, such as a
     1,000-point GP kernel with a jitter of 1e-5 (0.75 nats). The error
-    names the dtype and suggests a jitter at its scale (about 1e-3 there).
+    names the dtype and suggests a jitter at its scale (2e-4 there).
 - **Bodies run to completion:** lazy sequences in a body's return value are
   realized during the run, and a `trace` or `splice` after the run is a loud
   error. Before this, `(map … (trace …))` at the end of a body gave a trace
