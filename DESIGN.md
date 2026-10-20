@@ -311,6 +311,7 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
 | SCI | later | Sandboxed eval of LLM-generated code (program synthesis) |
 | clojure.math (built in) | yes | Replaces GenMLX's ~370 `js/Math` calls |
 | criterium | yes | `:bench` |
+| Apache Commons Math 3 | extension | `:commons-math` (`ext/commons-math`): its distributions as gen.clj's, GenDistributions' role (M4, 2026-10-20) |
 
 The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
 **not needed** on the JVM.
@@ -326,7 +327,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   `gamma(shape, scale)`, `categorical(probs)`), plus explicitly named variants
   where they matter numerically (e.g. `categorical-logits`). Each GenMLX name
   whose meaning changed has a safeguard that makes a naive port fail loudly
-  (`docs/porting-genmlx.md`).
+  (`docs/porting-genmlx.md`). Families Gen.jl does not have take
+  Distributions.jl's parameters, which GenDistributions' users write
+  (`pareto(alpha, theta)`, `triangular(a, b, c)`; M4, 2026-10-20).
 - **House style: gen.array's operators are referred** in place of
   `clojure.core`'s (`(+ a b)`, not `(array/add a b)`); `max`, `min`, `take` and
   `flatten` are never referred (`docs/array-api.md` §2, §12).
@@ -506,6 +509,30 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   inverts the path to it through +, −, ×, ÷, negate, exp and log, with the
   log-Jacobians. Non-numeric labels wait for parameters that are not arrays.
   The name `dist` follows Gen.jl's macro (owner, 2026-10-20).
+- **Distributions from a host library, GenDistributions'
+  `DistributionsBacked`** (M4, 2026-10-20; decided by the agent, for the
+  owner's review): `(gen.dist.host/family {:name :make :quantile
+  :log-density})` makes a family of univariate distributions from a host
+  object built from the parameters, its quantile function and its log
+  density (and `:discrete?`, `:support`). A draw is the quantile of a
+  Threefry uniform in (0, 1), so it is a pure function of the key (rule 2)
+  and the same on every backend; a library's own random generator is never
+  used. Parameters and values are read on the host, as the guarded
+  lookups read them: a batched one raises the batched fallback, one being
+  differentiated is a loud error (the library has no gradient), and a lazy
+  backend evaluates an array to read it, the cost of a host library.
+  Apache Commons Math 3 is the JVM's Distributions.jl: `gen.dist.commons-math`
+  (`real` and `integer` for any of its distributions, and its discrete
+  hypergeometric and zipf) lives in `ext/commons-math` behind the
+  `:commons-math` alias, outside the core's dependencies (§8). Some of its
+  quantiles come from a solver, to about 1e-9. A host library's draws read
+  their parameters on the host, fall back from batched runs and have no
+  gradients, so the continuous families Distributions.jl has beyond Gen.jl's
+  built-ins are native in gen.dist instead, with its names and parameters:
+  chi-squared, f-dist, gumbel, levy, log-normal, logistic, nakagami, pareto,
+  student-t, triangular and weibull, which batch, run on every backend and
+  differentiate (checked against scipy's densities and, in the extension's
+  tests, against Commons Math's).
 - **The internal-proposal override** (thesis Alg. 16; M4, 2026-10-19):
   `(gen.inference.proposal/with-internal-proposal gf q)`. q is a dynamic
   generative function called as `(q constraints & args)`; it proposes some

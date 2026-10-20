@@ -1,7 +1,10 @@
 (ns gen.dist
   "Gen.jl's built-in distributions, with Gen.jl's names and parameterizations
    (normal by standard deviation, gamma by scale, categorical by
-   probabilities), plus categorical-logits. Discrete values are 0-based
+   probabilities), plus categorical-logits, and further continuous
+   families with Distributions.jl's names and parameters (chi-squared,
+   f-dist, gumbel, levy, log-normal, logistic, nakagami, pareto, student-t,
+   triangular, weibull). Discrete values are 0-based
    integers; bernoulli values are booleans.
 
    Every log-prob is -Inf outside the support. Every sampler is a pure,
@@ -216,6 +219,170 @@
                         (<= (array/abs (- (array/sum v {:axis -1}) 1)) 1e-6))
            (- (array/sum (xlogy (- alpha 1) v) {:axis -1})
               (- (array/sum (lgamma alpha) {:axis -1}) (lgamma (array/sum alpha {:axis -1})))))))
+
+;; ---------------------------------------------------------------------------
+;; Beyond Gen.jl's built-ins: Distributions.jl's families with its names and
+;; parameters (what GenDistributions' users write), native, so they batch,
+;; run on every backend and differentiate (gen.dist.commons-math wraps a
+;; host library's for the rest)
+;; ---------------------------------------------------------------------------
+
+(def ^:private log-2 (Math/log 2.0))
+
+(defn- stand-in
+  "v where in-support holds, else s: the other lanes stay finite, so a
+   gradient through the guard is not NaN."
+  [in-support v s]
+  (where in-support v s))
+
+(defdist chi-squared
+  "chi-squared(nu): the χ² distribution with nu degrees of freedom (Chisq)."
+  [nu]
+  (validate (dc/check-positive "chi-squared" "nu" nu))
+  (sample [key shape] (* 2.0 (rng/gamma key (/ nu 2.0) (dc/elementwise-shape shape nu) (opts nu))))
+  (log-prob [v]
+    (let [k (/ nu 2.0)]
+      (guard (>= v 0) (- (xlogy (- k 1) v) (/ v 2.0) (lgamma k) (* k log-2))))))
+
+(defdist f-dist
+  "f-dist(nu1, nu2): Fisher's F distribution, the ratio of χ² draws over
+   their degrees of freedom (FDist)."
+  [nu1 nu2]
+  (validate (dc/check-positive "f-dist" "nu1" nu1) (dc/check-positive "f-dist" "nu2" nu2))
+  (sample [key shape]
+    (let [s (dc/elementwise-shape shape nu1 nu2)
+          [k1 k2] (rng/split key)]
+      (/ (* nu2 (rng/gamma k1 (/ nu1 2.0) s (opts nu1 nu2))) (* nu1 (rng/gamma k2 (/ nu2 2.0) s (opts nu1 nu2))))))
+  (log-prob [v]
+    (let [in (>= v 0)
+          x (stand-in in v 1.0)]
+      (guard in (- (+ (* 0.5 (+ (* nu1 (log nu1)) (* nu2 (log nu2)))) (xlogy (- (/ nu1 2.0) 1) x))
+                   (* (/ (+ nu1 nu2) 2.0) (log (+ nu2 (* nu1 x))))
+                   (log-beta (/ nu1 2.0) (/ nu2 2.0)))))))
+
+(defdist gumbel
+  "gumbel(mu, theta): the Gumbel (maximum) distribution, location mu and
+   scale theta (Gumbel)."
+  [mu theta]
+  (validate (dc/check-positive "gumbel" "theta" theta))
+  (sample [key shape] (+ mu (* theta (rng/gumbel key (dc/elementwise-shape shape mu theta) (opts mu theta)))))
+  (log-prob [v]
+    (let [z (/ (- v mu) theta)]
+      (- (+ (log theta) z (exp (- z)))))))
+
+(def ^:private levy-floor
+  "A floor under a normal draw's square: an exactly-zero draw would be an
+   infinite Lévy value."
+  1e-30)
+
+(defdist levy
+  "levy(mu, sigma): the Lévy distribution, location mu and scale sigma,
+   mu + sigma/Z² for a standard normal Z (Levy)."
+  [mu sigma]
+  (validate (dc/check-positive "levy" "sigma" sigma))
+  (sample [key shape]
+    (let [z (rng/normal key (dc/elementwise-shape shape mu sigma) (opts mu sigma))]
+      (+ mu (/ sigma (array/maximum (square z) levy-floor)))))
+  (log-prob [v]
+    (let [in (> v mu)
+          d (stand-in in (- v mu) 1.0)]
+      (guard in (- (* 0.5 (log (/ sigma (* 2.0 Math/PI)))) (* 1.5 (log d)) (/ sigma (* 2.0 d)))))))
+
+(defdist log-normal
+  "log-normal(mu, sigma): e^X for X normal(mu, sigma) (LogNormal)."
+  [mu sigma]
+  (validate (dc/check-positive "log-normal" "sigma" sigma))
+  (sample [key shape]
+    (exp (+ mu (* sigma (rng/normal key (dc/elementwise-shape shape mu sigma) (opts mu sigma))))))
+  (log-prob [v]
+    (let [in (> v 0)
+          lx (log (stand-in in v 1.0))]
+      (guard in (- (+ lx (log sigma) half-log-2pi (* 0.5 (square (/ (- lx mu) sigma)))))))))
+
+(defdist logistic
+  "logistic(mu, theta): the logistic distribution, location mu and scale
+   theta (Logistic)."
+  [mu theta]
+  (validate (dc/check-positive "logistic" "theta" theta))
+  ;; the difference of two standard Gumbel draws is standard logistic
+  (sample [key shape]
+    (let [s (dc/elementwise-shape shape mu theta)
+          [k1 k2] (rng/split key)]
+      (+ mu (* theta (- (rng/gumbel k1 s (opts mu theta)) (rng/gumbel k2 s (opts mu theta)))))))
+  (log-prob [v]
+    (let [z (/ (- v mu) theta)]
+      (- (+ z (log theta) (* 2.0 (array/logaddexp 0.0 (- z))))))))
+
+(defdist nakagami
+  "nakagami(m, omega): the Nakagami distribution, shape m (at least 1/2)
+   and spread omega, the root of a gamma(m, omega/m) draw (Nakagami)."
+  [m omega]
+  (validate (dc/check-positive "nakagami" "omega" omega)
+            (when (array/host? m) (dc/check (>= m 0.5) "nakagami" "m must be at least 1/2" {:m m})))
+  (sample [key shape]
+    (sqrt (* (/ omega m) (rng/gamma key m (dc/elementwise-shape shape m omega) (opts m omega)))))
+  (log-prob [v]
+    (guard (>= v 0) (- (+ log-2 (* m (log m)) (xlogy (- (* 2.0 m) 1) v))
+                       (lgamma m) (* m (log omega)) (/ (* m (square v)) omega)))))
+
+(defdist pareto
+  "pareto(alpha, theta): the Pareto distribution, shape alpha and scale
+   (minimum) theta (Pareto)."
+  [alpha theta]
+  (validate (dc/check-positive "pareto" "alpha" alpha) (dc/check-positive "pareto" "theta" theta))
+  (sample [key shape]
+    (* theta (exp (/ (rng/exponential key (dc/elementwise-shape shape alpha theta) (opts alpha theta)) alpha))))
+  (log-prob [v]
+    (let [in (>= v theta)]
+      (guard in (- (+ (log alpha) (* alpha (log theta))) (* (+ alpha 1) (log (stand-in in v theta))))))))
+
+(defdist student-t
+  "student-t(nu): Student's t distribution with nu degrees of freedom, a
+   standard normal over the root of a χ²/nu draw (TDist)."
+  [nu]
+  (validate (dc/check-positive "student-t" "nu" nu))
+  (sample [key shape]
+    (let [s (dc/elementwise-shape shape nu)
+          [k1 k2] (rng/split key)
+          g (rng/gamma k2 (/ nu 2.0) s (opts nu))]
+      (* (rng/normal k1 s (opts nu)) (sqrt (/ nu (* 2.0 (array/maximum g levy-floor)))))))
+  (log-prob [v]
+    (- (lgamma (/ (+ nu 1) 2.0)) (lgamma (/ nu 2.0)) (* 0.5 (log (* nu Math/PI)))
+       (* (/ (+ nu 1) 2.0) (log1p (/ (square v) nu))))))
+
+(defdist triangular
+  "triangular(a, b, c): the triangular distribution on [a, b] with mode c
+   (TriangularDist)."
+  [a b c]
+  (validate (when (every? array/host? [a b c])
+              (dc/check (and (< a b) (<= a c) (<= c b)) "triangular" "needs a < b and a <= c <= b" {:a a :b b :c c})))
+  (sample [key shape]
+    (let [u (rng/uniform key (dc/elementwise-shape shape a b c) (opts a b c))
+          w (- b a)]
+      (where (< u (/ (- c a) w))
+             (+ a (sqrt (* u w (- c a))))
+             (- b (sqrt (* (- 1.0 u) w (- b c)))))))
+  (log-prob [v]
+    (let [w (- b a)
+          left (> (- c a) 0)
+          right (> (- b c) 0)]
+      (where (logical-and (>= v a) (< v c))
+             (log (/ (* 2.0 (- v a)) (* w (stand-in left (- c a) 1.0))))
+             (where (logical-and (>= v c) (<= v b))
+                    (log (/ (* 2.0 (- b v)) (* w (stand-in right (- b c) 1.0))))
+                    ##-Inf)))))
+
+(defdist weibull
+  "weibull(alpha, theta): the Weibull distribution, shape alpha and scale
+   theta (Weibull)."
+  [alpha theta]
+  (validate (dc/check-positive "weibull" "alpha" alpha) (dc/check-positive "weibull" "theta" theta))
+  (sample [key shape]
+    (* theta (array/pow (rng/exponential key (dc/elementwise-shape shape alpha theta) (opts alpha theta)) (/ 1.0 alpha))))
+  (log-prob [v]
+    (let [in (>= v 0)
+          x (/ (stand-in in v 0.0) theta)]
+      (guard in (- (+ (log (/ alpha theta)) (xlogy (- alpha 1) x)) (array/pow x alpha))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Discrete distributions
@@ -486,6 +653,8 @@
 ;; ---------------------------------------------------------------------------
 
 (doseq [t [::normal ::uniform ::beta ::gamma ::inv-gamma ::exponential ::laplace ::cauchy ::beta-uniform
+           ::chi-squared ::f-dist ::gumbel ::levy ::log-normal ::logistic ::nakagami ::pareto ::student-t
+           ::triangular ::weibull
            ::bernoulli ::uniform-discrete ::geometric ::poisson ::binom ::neg-binom]]
   (defmethod dc/-value-shape t [d] (dc/elementwise-value-shape d)))
 

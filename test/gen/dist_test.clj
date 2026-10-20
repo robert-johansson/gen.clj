@@ -4,11 +4,14 @@
             [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
             [gen.array :as array :refer [-]]
+            [gen.array.special]
+            [gen.batched :as batched]
             [gen.choicemap :as cm]
             [gen.dist :as d]
             [gen.dist.core :as dc]
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
+            [gen.laws :as laws]
             [gen.random :as rng]
             [gen.selection :as sel]))
 
@@ -126,7 +129,29 @@
     (check (d/neg-binom 2.5 0.4) 3.75 9.375)
     (check (d/uniform-discrete 2 5) 3.5 1.25)
     (check (d/categorical [0.2 0.5 0.3]) 1.1 0.49)
-    (check (d/piecewise-uniform [0.0 1.0 3.0 4.0] [0.5 0.2 0.3]) 1.7 (- (+ (/ 0.5 3) (* 0.2 (/ 13.0 3)) (* 0.3 (/ 37.0 3))) 2.89))))
+    (check (d/piecewise-uniform [0.0 1.0 3.0 4.0] [0.5 0.2 0.3]) 1.7 (- (+ (/ 0.5 3) (* 0.2 (/ 13.0 3)) (* 0.3 (/ 37.0 3))) 2.89))
+    ;; Distributions.jl's families (the variance band needs a finite fourth
+    ;; moment: Pareto's shape above 4, Student's nu above 4)
+    (let [g #(Math/exp (array/item (array/lgamma (double %))))]
+      (check (d/chi-squared 3.0) 3.0 6.0)
+      (check (d/f-dist 3.0 12.0) (/ 12.0 10) (/ (* 2 144.0 13) (* 3 100 8)))
+      (check (d/gumbel 1.0 2.0) (+ 1.0 (* 2.0 0.5772156649015329)) (/ (* Math/PI Math/PI 4.0) 6))
+      (check (d/log-normal 0.2 0.5) (Math/exp 0.325) (* (- (Math/exp 0.25) 1) (Math/exp 0.65)))
+      (check (d/logistic 0.5 1.5) 0.5 (/ (* Math/PI Math/PI 2.25) 3))
+      (check (d/nakagami 1.5 2.0) (* (/ (g 2.0) (g 1.5)) (Math/sqrt (/ 2.0 1.5)))
+             (* 2.0 (- 1 (* (/ 1 1.5) (Math/pow (/ (g 2.0) (g 1.5)) 2)))))
+      (check (d/pareto 5.0 1.5) (/ (* 5.0 1.5) 4.0) (/ (* 1.5 1.5 5.0) (* 16.0 3.0)))
+      (check (d/student-t 6.0) 0.0 1.5)
+      (check (d/triangular 0.0 2.0 0.5) (/ 2.5 3) (/ 3.25 18))
+      (check (d/weibull 1.5 2.0) (* 2.0 (g (+ 1 (/ 1 1.5)))) (* 4.0 (- (g (+ 1 (/ 2 1.5))) (Math/pow (g (+ 1 (/ 1 1.5))) 2)))))))
+
+(deftest the-levy-distribution-s-cdf
+  ;; no mean: P(X <= mu + 4 sigma) = erfc(sqrt(1/8)), within five standard errors
+  (let [n 100000
+        x (dc/sample (d/levy 1.0 0.5) (rng/key 98) [n])
+        p (gen.array.special/erfc (Math/sqrt (/ 0.5 (* 2 2.0))))
+        f (/ (ts/number (array/sum (array/astype (array/<= x 3.0) :float32))) n)]
+    (is (< (Math/abs (- f p)) (* 5 (Math/sqrt (/ (* p (- 1 p)) n)))) (str f " against " p))))
 
 ;; ---------------------------------------------------------------------------
 ;; Mixtures and products
@@ -192,3 +217,45 @@
   ;; shape, [3] here) rejected the valid constraint 1
   (let [m (gen [] (trace :k (softmax-categorical [0.0 1.0 2.0])))]
     (is (map? (gfi/generate m [] (cm/choicemap :k 1) (rng/key 1))))))
+
+;; ---------------------------------------------------------------------------
+;; Distributions.jl's families: native, so they differentiate and batch
+;; ---------------------------------------------------------------------------
+
+(def ^:private further
+  "[name constructor params value]: each family at an interior value."
+  [["chi-squared" d/chi-squared [3.0] 2.0] ["f-dist" d/f-dist [3.0 10.0] 1.2] ["gumbel" d/gumbel [1.0 2.0] 0.5]
+   ["levy" d/levy [1.0 0.5] 3.0] ["log-normal" d/log-normal [0.2 0.5] 1.5] ["logistic" d/logistic [0.5 1.5] 0.3]
+   ["nakagami" d/nakagami [1.5 2.0] 1.2] ["pareto" d/pareto [3.0 1.5] 2.5] ["student-t" d/student-t [5.0] 1.3]
+   ["triangular" d/triangular [0.0 2.0 0.5] 1.4] ["weibull" d/weibull [1.5 2.0] 1.5]])
+
+(deftest gradients-of-the-further-families
+  ;; with respect to the value and each parameter, against central finite
+  ;; differences of the log density (float64 on the JVM, a band on float32)
+  (let [h 1e-6
+        fd (fn [f x] (/ (- (f (+ x h)) (f (- x h))) (* 2 h)))]
+    (doseq [[label make params v] further
+            i (range -1 (count params))]
+      (let [lp (fn [x] (ts/number (dc/log-prob (apply make (if (neg? i) params (assoc params i x))) (if (neg? i) x v))))
+            at (if (neg? i) v (params i))
+            ;; the parameter as an array, so the tape differentiates it
+            g (if (neg? i)
+                (array/grad #(dc/log-prob (apply make params) %))
+                (array/grad #(dc/log-prob (apply make (assoc params i %)) v)))]
+        (is (ts/close? (fd lp at) (ts/number (g (array/array at))) {:rtol (ts/tol 1e-5) :atol (ts/tol 1e-6)})
+            (str label (if (neg? i) " d/dv" (str " d/dparam" i))))))))
+
+(def further-model
+  (gen []
+    (let [nu (trace :nu (d/gamma 4 1))
+          t (trace :t (d/student-t nu))
+          w (trace :w (d/weibull 1.5 2.0))
+          l (trace :l (d/log-normal 0.0 0.5))
+          tri (trace :tri (d/triangular 0.0 2.0 0.5))]
+      (trace :y (d/logistic (array/+ (array/+ t w) (array/+ l tri)) 1.0)))))
+
+(laws/deflaws further [[:model further-model [] []]] 100)
+
+(deftest the-further-families-batch
+  (let [ps (batched/simulate further-model [] 8 (rng/key 97))]
+    (is (nil? (batched/fallback-reason ps)))))

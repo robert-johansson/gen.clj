@@ -132,6 +132,23 @@ def distributions():
         i = max(i for i in range(3) if bounds[i] <= v)
         return math.log(ps[i]) - math.log(bounds[i + 1] - bounds[i])
     add("piecewise-uniform", [bounds, ps], [-1.0, 0.5, 2.0, 3.5, 4.0, 5.0], pw)
+    # beyond Gen.jl's built-ins, with Distributions.jl's parameters
+    add("chi-squared", [3.0], [-1.0, 0.0, 0.5, 2.0, 7.0], lambda v: st.chi2.logpdf(v, 3.0))
+    add("chi-squared", [2.0], [0.0, 1.0], lambda v: st.chi2.logpdf(v, 2.0))
+    add("f-dist", [3.0, 10.0], [-1.0, 0.0, 0.3, 1.2, 4.0], lambda v: st.f.logpdf(v, 3.0, 10.0))
+    add("gumbel", [1.0, 2.0], [-5.0, 1.0, 5.0, 30.0], lambda v: st.gumbel_r.logpdf(v, 1.0, 2.0))
+    add("levy", [1.0, 0.5], [0.5, 1.0, 1.2, 3.0, 50.0], lambda v: st.levy.logpdf(v, 1.0, 0.5))
+    add("log-normal", [0.2, 0.5], [-1.0, 0.0, 0.3, 1.0, 3.0], lambda v: st.lognorm.logpdf(v, 0.5, scale=math.exp(0.2)))
+    add("logistic", [0.5, 1.5], [-40.0, -2.0, 0.5, 3.0, 40.0], lambda v: st.logistic.logpdf(v, 0.5, 1.5))
+    add("nakagami", [1.5, 2.0], [-1.0, 0.0, 0.3, 1.2, 2.5], lambda v: st.nakagami.logpdf(v, 1.5, scale=math.sqrt(2.0)))
+    add("pareto", [3.0, 1.5], [1.0, 1.5, 1.6, 2.5, 6.0], lambda v: st.pareto.logpdf(v, 3.0, scale=1.5))
+    add("student-t", [5.0], [-30.0, -2.0, 0.0, 1.3], lambda v: st.t.logpdf(v, 5.0))
+    add("student-t", [0.7], [-3.0, 0.4], lambda v: st.t.logpdf(v, 0.7))
+    add("triangular", [0.0, 2.0, 0.5], [-0.1, 0.0, 0.2, 0.5, 1.4, 2.0, 2.1],
+        lambda v: st.triang.logpdf(v, 0.25, loc=0.0, scale=2.0))
+    add("triangular", [0.0, 1.0, 0.0], [0.0, 0.5, 1.0], lambda v: st.triang.logpdf(v, 0.0, loc=0.0, scale=1.0))
+    add("weibull", [1.5, 2.0], [-1.0, 0.0, 0.4, 1.5, 4.0], lambda v: st.weibull_min.logpdf(v, 1.5, scale=2.0))
+    add("weibull", [1.0, 2.0], [0.0, 1.0], lambda v: st.weibull_min.logpdf(v, 1.0, scale=2.0))
     return cases
 
 
