@@ -119,7 +119,10 @@
 
 (deftest selecting-absent-addresses-changes-nothing
   ;; p. 149: a selection may name addresses the trace does not have (the
-  ;; final law audit, 4.b)
+  ;; final law audit, 4.b). A pin of the thesis's statement, which fails a
+  ;; regenerate that throws on an absent address or misreads one. Planted
+  ;; bug (2026-10-20): regenerate checking its selection as update checks
+  ;; its constraints, loud on a selected address it does not visit
   (let [branch (gen [] (let [a (trace :a (d/bernoulli 0.3))] (when a (trace :b (d/normal 0 1))) (trace :c (d/normal 0 1))))
         tr (:trace (gfi/generate branch [] (cm/choicemap :a false :c 0.4) (rng/key 1)))
         {t :trace w :weight} (gfi/regenerate tr (sel/select :b) (rng/key 2))]

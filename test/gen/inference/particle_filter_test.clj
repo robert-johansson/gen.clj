@@ -62,23 +62,40 @@
     (let [v (/ 1.0 (+ (/ 1.0 (* q q)) (/ 1.0 (* r r))))]
       (trace [0 :x] (d/normal (* v (/ y (* r r))) (Math/sqrt v))))))
 
+(def optimal-proposals {:initial initial-proposal :proposal optimal-proposal})
+
 (defn- run-filter
-  "A filter over every observation, resampling adaptively; the final state."
-  [n key & [{:keys [proposal?]}]]
+  "A filter over every observation, resampling adaptively; the final state.
+   With :proposal, each step after the first proposes from it, on (trace, t,
+   y_t), and with :initial the first step, on (y_0); the internal proposal
+   otherwise."
+  [n key & [{:keys [initial proposal]}]]
   (let [ks (rng/split key (* 2 (count ys)))
         init (pf/initialize model [1 0.0] (observation 0) n
-                            (cond-> {:key (ks 0)}
-                              proposal? (assoc :proposal initial-proposal :proposal-args [(ys 0)])))]
+                            (cond-> {:key (ks 0)} initial (assoc :proposal initial :proposal-args [(ys 0)])))]
     (reduce (fn [state t]
               (-> state
                   (pf/maybe-resample {:key (ks (dec (* 2 t)))})
                   (pf/step [(inc t) 0.0] [diff/unknown-change diff/no-change] (observation t)
-                           (cond-> {:key (ks (* 2 t))}
-                             proposal? (assoc :proposal optimal-proposal :proposal-args [t (ys t)])))))
+                           (cond-> {:key (ks (* 2 t))} proposal (assoc :proposal proposal :proposal-args [t (ys t)])))))
             init
             (range 1 (count ys)))))
 
 (defn- exact-lml [] (first (last kalman)))
+
+(defn- mean-and-error
+  "The mean of xs and its standard error, from their own spread."
+  [xs]
+  (let [n (count xs)
+        m (/ (reduce + xs) n)]
+    [m (/ (Math/sqrt (/ (reduce + (map #(* (- % m) (- % m)) xs)) (dec n))) (Math/sqrt n))]))
+
+(defn- mean-near?
+  "Is the mean of xs within five standard errors of mu (and 1e-9, for xs
+   without spread)?"
+  [xs mu]
+  (let [[m se] (mean-and-error xs)]
+    (< (ts/abs (- m mu)) (+ 1e-9 (* 5 se)))))
 
 (deftest the-estimate-approaches-the-exact-marginal-likelihood
   (let [state (run-filter 2000 (rng/key 1))]
@@ -97,12 +114,9 @@
 
 (defn- unbiased? [proposal?]
   ;; law 20: E[exp(estimate)] = p(y), checked against the runs' own spread
-  (let [runs 400
-        ratios (map #(Math/exp (- (pf/log-ml-estimate (run-filter 20 % {:proposal? proposal?})) (exact-lml)))
-                    (rng/split (rng/key (if proposal? 4 3)) runs))
-        mean (/ (reduce + ratios) runs)
-        sd (Math/sqrt (/ (reduce + (map #(* (- % mean) (- % mean)) ratios)) (dec runs)))]
-    (< (ts/abs (- mean 1.0)) (* 5 (/ sd (Math/sqrt runs))))))
+  (mean-near? (map #(Math/exp (- (pf/log-ml-estimate (run-filter 20 % (when proposal? optimal-proposals))) (exact-lml)))
+                   (rng/split (rng/key (if proposal? 4 3)) 400))
+              1.0))
 
 (deftest ^:heavy the-estimate-is-unbiased-in-exp-space
   (is (unbiased? false) "with the internal proposal")
@@ -110,7 +124,7 @@
 
 (deftest the-optimal-proposal-reduces-variance
   (let [spread (fn [proposal?]
-                 (let [ests (map #(pf/log-ml-estimate (run-filter 20 % {:proposal? proposal?}))
+                 (let [ests (map #(pf/log-ml-estimate (run-filter 20 % (when proposal? optimal-proposals)))
                                  (rng/split (rng/key 5) 100))
                        m (/ (reduce + ests) 100)]
                    (/ (reduce + (map #(* (- % m) (- % m)) ests)) 99)))]
@@ -161,13 +175,8 @@
   "Over many runs of (move state key), the mean of exp(log-ML estimate)
    equals its value before, within five standard errors."
   [state move]
-  (let [before (pf/log-ml-estimate state)
-        ratios (map #(Math/exp (- (pf/log-ml-estimate (move state %)) before))
-                    (rng/split (rng/key 11) 4000))
-        n (count ratios)
-        m (/ (reduce + ratios) n)
-        sd (Math/sqrt (/ (reduce + (map #(* (- % m) (- % m)) ratios)) (dec n)))]
-    (< (ts/abs (- m 1.0)) (+ 1e-9 (* 5 (/ sd (Math/sqrt n)))))))
+  (let [before (pf/log-ml-estimate state)]
+    (mean-near? (map #(Math/exp (- (pf/log-ml-estimate (move state %)) before)) (rng/split (rng/key 11) 4000)) 1.0)))
 
 (defn- unbiased-resampling? [state opts]
   (unbiased-moves? state #(pf/resample %1 (assoc opts :key %2))))
@@ -224,12 +233,8 @@
   "Law 20 after f: over runs filters of 20 particles, the mean of
    exp(estimate - exact) is 1 within five standard errors."
   [f seed]
-  (let [runs 400
-        ratios (map #(let [[k1 k2] (rng/split %)] (lml-ratio (f (run-filter 20 k1) k2)))
-                    (rng/split (rng/key seed) runs))
-        mean (/ (reduce + ratios) runs)
-        sd (Math/sqrt (/ (reduce + (map #(* (- % mean) (- % mean)) ratios)) (dec runs)))]
-    (< (ts/abs (- mean 1.0)) (* 5 (/ sd (Math/sqrt runs))))))
+  (mean-near? (map #(let [[k1 k2] (rng/split %)] (lml-ratio (f (run-filter 20 k1) k2))) (rng/split (rng/key seed) 400))
+              1.0))
 
 (def last-x [(dec (count ys)) :x])
 
@@ -348,13 +353,11 @@
           (is (= (if (= layout :contiguous) [0 0 1 1 2 2] [0 1 2 0 1 2])
                  (mapv #(long (% :k)) (pf/traces state)))))))
     (testing "the remainder goes to random strata, unbiased"
-      (let [n 4000
-            ratios (map #(Math/exp (- (pf/log-ml-estimate (pf/initialize discrete-model [] obs 4 {:strata strata :key %})) discrete-evidence))
-                        (rng/split (rng/key 62) n))
-            mean (/ (reduce + ratios) n)
-            sd (Math/sqrt (/ (reduce + (map #(* (- % mean) (- % mean)) ratios)) (dec n)))]
-        (is (pos? sd))
-        (is (< (ts/abs (- mean 1.0)) (* 5 (/ sd (Math/sqrt n)))))))
+      (let [ratios (mapv #(Math/exp (- (pf/log-ml-estimate (pf/initialize discrete-model [] obs 4 {:strata strata :key %}))
+                                       discrete-evidence))
+                         (rng/split (rng/key 62) 4000))]
+        (is (pos? (second (mean-and-error ratios))))
+        (is (mean-near? ratios 1.0))))
     (is (= 4 (count (pf/choice-product {:a [1 2] :b [true false]}))))))
 
 (def re-propose
@@ -456,11 +459,8 @@
             (range 1 (count ys)))))
 
 (deftest ^:slow ^:heavy smc-samplers-with-a-backward-kernel-stay-unbiased
-  (let [runs 400
-        ratios (map #(lml-ratio (run-smc-samplers 20 %)) (rng/split (rng/key 85) runs))
-        mean (/ (reduce + ratios) runs)
-        sd (Math/sqrt (/ (reduce + (map #(* (- % mean) (- % mean)) ratios)) (dec runs)))]
-    (is (< (ts/abs (- mean 1.0)) (* 5 (/ sd (Math/sqrt runs)))) (str mean " ± " (/ sd (Math/sqrt runs))))))
+  (let [ratios (mapv #(lml-ratio (run-smc-samplers 20 %)) (rng/split (rng/key 85) 400))]
+    (is (mean-near? ratios 1.0) (pr-str (mean-and-error ratios)))))
 
 (deftest an-extending-translator-with-a-transform
   ;; x_1 = 2z, z ~ N(0, 1): the weight is the score change less log N(x_1; 0, 2)
@@ -520,17 +520,7 @@
     (let [[m _] (optimal-moments (tr [(dec t) :x]) y)]
       (trace [t :x] (d/normal (+ m (array/where (untraced (d/bernoulli 0.5)) 0.6 -0.6)) 0.5)))))
 
-(defn- run-coin-filter [n key]
-  (let [ks (rng/split key (* 2 (count ys)))]
-    (reduce (fn [state t]
-              (-> state
-                  (pf/maybe-resample {:key (ks (dec (* 2 t)))})
-                  (pf/step [(inc t) 0.0] [diff/unknown-change diff/no-change] (observation t)
-                           {:proposal coin-proposal :proposal-args [t (ys t)] :key (ks (* 2 t))})))
-            (pf/initialize model [1 0.0] (observation 0) n {:key (ks 0)})
-            (range 1 (count ys)))))
-
-(deftest ^:heavy smc-with-an-encapsulated-proposal-is-unbiased
+(deftest ^:slow ^:heavy smc-with-an-encapsulated-proposal-is-unbiased
   ;; §4.5.4 (law audit E19): a step weighs log p - log ξ, ξ the proposal's
   ;; estimate on the ω it proposed with, and E[1/ξ] = 1/q given the choice
   ;; (Eq. 4.4), so E[exp(estimate)] = p(y) still: over 2000 filters of 20
@@ -539,11 +529,8 @@
   ;; among them). Planted bug (2026-10-20): the proposal's score assessed on
   ;; a fresh ω (a coin apart from the one that moved x_t), which inflates
   ;; 1/ξ, gives 3500 ± 74
-  (let [runs 2000
-        ratios (mapv #(lml-ratio (run-coin-filter 20 %)) (rng/split (rng/key 92) runs))
-        mean (/ (reduce + ratios) runs)
-        sd (Math/sqrt (/ (reduce + (map #(* (- % mean) (- % mean)) ratios)) (dec runs)))]
-    (is (< (ts/abs (- mean 1.0)) (* 5 (/ sd (Math/sqrt runs)))) (str mean " ± " (/ sd (Math/sqrt runs))))))
+  (let [ratios (mapv #(lml-ratio (run-filter 20 % {:proposal coin-proposal})) (rng/split (rng/key 92) 2000))]
+    (is (mean-near? ratios 1.0) (pr-str (mean-and-error ratios)))))
 
 (deftest edge-cases-of-the-genparticlefilters-operations
   (testing "optimal resampling skips particles of weight 0"
@@ -649,13 +636,9 @@
         weighted-sum (fn [st] (reduce + (map #(* (Math/exp (ts/number %1)) (ts/number (%2 [1 :x]))) (:log-weights st) (:traces st))))
         sum-unbiased? (fn [opts]
                         ;; E[Σ w'·x'] = Σ w·x over many resamplings of the view, within five standard errors
-                        (let [before (weighted-sum state)
-                              sums (map #(weighted-sum (pf/update-view state view-idx pf/resample (assoc opts :key %)))
-                                        (rng/split (rng/key 37) 4000))
-                              n (count sums)
-                              m (/ (reduce + sums) n)
-                              sd (Math/sqrt (/ (reduce + (map #(* (- % m) (- % m)) sums)) (dec n)))]
-                          (< (ts/abs (- m before)) (+ 1e-9 (* 5 (/ sd (Math/sqrt n)))))))]
+                        (mean-near? (map #(weighted-sum (pf/update-view state view-idx pf/resample (assoc opts :key %)))
+                                         (rng/split (rng/key 37) 4000))
+                                    (weighted-sum state)))]
     (is (< 2.0 (w/ess (mapv (:log-weights state) view-idx))) "the view's weights are spread")
     (is (unbiased-moves? state #(pf/update-view %1 view-idx pf/resample {:key %2 :priority (fn [lw] (map (partial * 0.5) lw))}))
         "tempered priorities")

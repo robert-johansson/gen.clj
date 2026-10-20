@@ -113,6 +113,15 @@
                  x (trace :x (d/normal (+ m z1) 1))]
              (trace :y (d/normal (- x z2) 1)))))
 
+;; ω in a dynamic body whose update makes fresh sites (law audit, finding 6):
+;; the encapsulated update law saw fresh choices only in Map and Unfold, so a
+;; handler update that adds a fresh site's log density instead of leaving
+;; -log q out (C11) passed it. Planted bug (2026-10-20): C11 fails
+;; update-weight-is-the-score-change-less-fresh over this model
+(def growing-noisy
+  (gen [n] (let [e (untraced (d/normal 0 0.5))]
+             (doseq [i (range n)] (trace [:y i] (d/normal e 1))))))
+
 (def untraced-models
   [["mixture" mixture [] []]
    ["simulator" with-simulator [0.4] [[0.7]]]
@@ -120,20 +129,10 @@
    ["map" (comb/map noisy-kernel) [[0.1 0.2 0.3]] [[[0.1 0.5 0.3]] [[0.1 0.2]] [[0.1 0.2 0.3 0.4]]]]
    ["unfold" (comb/unfold noisy-step) [3 0.0] [[2 0.0] [3 0.5] [5 0.0]]]
    ["spliced" spliced [0.0] [[1.0]]]
-   ["two-draws" two-draws [0.0] [[1.0]]]])
+   ["two-draws" two-draws [0.0] [[1.0]]]
+   ["growing-noisy" growing-noisy [2] [[3] [4]]]])
 
 (laws/deflaws untraced untraced-models 100 laws/encapsulated)
-
-;; ω in a dynamic body whose update makes fresh sites (law audit, finding 6):
-;; the encapsulated update law saw fresh choices only in Map and Unfold, so a
-;; handler update that adds a fresh site's log density instead of leaving
-;; -log q out (C11) passed it. Planted bug (2026-10-20): C11 fails this law
-(def growing-noisy
-  (gen [n] (let [e (untraced (d/normal 0 0.5))]
-             (doseq [i (range n)] (trace [:y i] (d/normal e 1))))))
-
-(laws/deflaws untraced-fresh [["growing-noisy" growing-noisy [2] [[3] [4]]]] 100
-  {:update-weight-is-the-score-change-less-fresh laws/update-weight-is-the-score-change-less-fresh})
 
 ;; An estimated density: y given θ, with y ~ N(θ + z, 1) and z ~ N(0, 1), so
 ;; p(y; θ) = N(y; θ, √2), estimated by importance sampling over z from its
@@ -315,13 +314,6 @@
       (is (within? (mean-xi spliced [0.0] (cm/choicemap :mu 0.2 [:inner :a] true [:inner :b] true :y -1.3) 69)
                    (* (npdf 0.2 0.0 1.0) 0.4 0.34 (npdf -1.3 0.2 (Math/sqrt 2.0))))))))
 
-(defn- correlation [pairs]
-  (let [centered (fn [xs] (let [[m _] (mean-sd xs)] (map #(clojure.core/- % m) xs)))
-        cx (centered (map first pairs))
-        cy (centered (map second pairs))
-        dot (fn [as bs] (reduce clojure.core/+ (map clojure.core/* as bs)))]
-    (clojure.core// (dot cx cy) (Math/sqrt (clojure.core/* (dot cx cx) (dot cy cy))))))
-
 (deftest ^:heavy untraced-draws-in-a-body-are-independent
   ;; §4.5.2 (law audit E21): a body's untraced draws are its black-box code's
   ;; own randomness, the n-th from ω folded with n, so two of them are
@@ -334,7 +326,7 @@
     (let [two (gen [] [(untraced (d/normal 0 1)) (untraced (d/normal 0 1))])
           n 2000
           pairs (mapv #(mapv ts/number (:retval (gfi/simulate two [] %))) (rng/split (rng/key 4242) n))]
-      (is (< (Math/abs (correlation pairs)) (clojure.core// 5.0 (Math/sqrt n))))))
+      (is (< (Math/abs (ts/correlation pairs)) (clojure.core// 5.0 (Math/sqrt n))))))
   (testing "Eq. 4.3 with y ~ N(z1 - z2, 1): E[ξ] = N(1.5; 0, √3)"
     (let [m (gen [] (let [z1 (untraced (d/normal 0 1)) z2 (untraced (d/normal 0 1))] (trace :y (d/normal (- z1 z2) 1))))
           xis (mapv #(Math/exp (ts/number (:weight (gfi/assess m [] (cm/choicemap :y 1.5) %)))) (rng/split (rng/key 4243) 4000))]
