@@ -490,6 +490,15 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
 
   `(* true true)` is the integer 1 (Julia keeps a Bool), the same value
   under one rule.
+- **A draw beyond the float range is +Inf** (owner, 2026-10-20), with log
+  density -Inf, exact for the value stored, as IEEE floats and Julia's
+  Distributions in Float32 give. In float32 this is common at small shapes:
+  about 9 % of weibull(0.01, 1)'s draws pass Float/MAX_VALUE, and Pareto's
+  docstring already said so. A cap at the largest float would give finite
+  densities at the price of a silent atom. A loud error would need a host
+  read of each draw on a lazy backend, or a threshold on the parameters.
+  The other edge stays as it is: a draw that underflows to 0, where a
+  density can be +Inf, is floored at the dtype's smallest normal number.
 - **Bodies run to completion:** lazy sequences in a body's return value are
   realized during the run, and a `trace` or `splice` after the run is a loud
   error. Before this, `(map … (trace …))` at the end of a body gave a trace
