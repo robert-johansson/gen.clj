@@ -95,7 +95,7 @@
 (defn- end-tokens
   "The completion's end tokens."
   [gf]
-  (:eos gf))
+  (:end-tokens gf))
 
 (defn- dead?
   "Has a token of the run so far weight 0, so that no sequence it begins

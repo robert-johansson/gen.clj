@@ -42,7 +42,11 @@
      do);
    - the engine's freed branches not forgotten:
      a-closed-engine-is-loud-and-forgotten;
-   - a failed read's forks kept: a-failed-read-leaves-the-books-straight."
+   - a failed read's forks kept: a-failed-read-leaves-the-books-straight.
+   And of 2026-10-21 (review-lm):
+   - a held entry's row scoring the token after it before the path's first
+     read: a-score-is-the-first-reads (the exact engines cannot tell the
+     two apart)."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
@@ -343,6 +347,19 @@
                     "the last token scored by the held context before it")
                 (is (= (exact-scores prompt [1]) (lm/score m prompt [1])))
                 (is (= reads (:reads (lm/info m))) "no read: each token kept the score it was read with"))))))
+
+(deftest a-score-is-the-first-reads
+  ;; on the noisy engine: [1 2] scored teacher-forced, then prompt+[1] read
+  ;; again as a one-token read: the score of 2 after it stays the first
+  ;; read's, though prompt+[1]'s row is now the second read's
+  (run-on {:max-branches 8 :max-cells 64 :noise 1e-3}
+          (fn [m _]
+            (lm/next-logprobs m prompt)
+            (let [kept (lm/score m prompt [1 2])
+                  row (lm/next-logprobs m (conj prompt 1))]
+              (is (= kept (lm/score m prompt [1 2])))
+              (is (= [(kept 1)] (lm/score m (conj prompt 1) [2])))
+              (is (not= (kept 1) (double (aget row 2))) "the second read differs: the test can tell")))))
 
 (deftest a-scored-sequence-is-kept
   (run-on {:max-branches 8 :max-cells 64}

@@ -61,13 +61,13 @@
 (def ^:private accents (grammar/grammar bytes-lm "(?:ab|é)+c?"))
 
 (def ^:private labelled (token/completion ascii {:potential label}))
-(def ^:private words (token/completion ascii {:eos #{} :potential word}))
+(def ^:private words (token/completion ascii {:end-tokens #{} :potential word}))
 (def ^:private accented (token/completion bytes-lm {:potential accents}))
 
 (defn- text-tokens
   "A completion's tokens before its end token."
   [gf tokens]
-  (if (and (seq tokens) (contains? (:eos gf) (peek tokens))) (pop tokens) tokens))
+  (if (and (seq tokens) (contains? (:end-tokens gf) (peek tokens))) (pop tokens) tokens))
 
 ;; ---------------------------------------------------------------------------
 ;; The laws
@@ -104,10 +104,10 @@
 (deftest completions-never-leave-the-language
   (doseq [[gf args g] [[labelled [prompt 6] label] [words [prompt 5] word] [accented [bprompt 5] accents]]]
     (let [trs (map #(gfi/simulate gf args (rng/key %)) (range 300))
-          ended (filter #(contains? (:eos gf) (peek (:retval %))) trs)]
+          ended (filter #(contains? (:end-tokens gf) (peek (:retval %))) trs)]
       (is (every? #(zero? (potential/prefix g (text-tokens gf (:retval %)))) trs) "every text a prefix of the language's")
       (is (every? #(zero? (potential/complete g (pop (:retval %)))) ended) "every ended text one of its strings")
-      (is (or (empty? (:eos gf)) (< 30 (count ended))) "and many end")
+      (is (or (empty? (:end-tokens gf)) (< 30 (count ended))) "and many end")
       (is (< 20 (count (distinct (map :retval trs)))) "many completions"))))
 
 (deftest a-text-of-a-word-is-a-word
@@ -258,7 +258,7 @@
   (is (= :invalid-weights (bc/reason #(token/completion ascii {:potential accents}))) "another vocabulary's")
   (is (= :zero-prefix (bc/reason #(token/completion ascii {:potential (potential/potential 97 {:prefix (constantly ##-Inf)
                                                                                                :complete (constantly ##-Inf)})}))))
-  (is (= :zero-weight (bc/reason #(gfi/simulate (token/completion ascii {:eos #{} :potential (grammar/grammar ascii "ab")})
+  (is (= :zero-weight (bc/reason #(gfi/simulate (token/completion ascii {:end-tokens #{} :potential (grammar/grammar ascii "ab")})
                                                 [prompt 4] (rng/key 1))))
       "a grammar complete with no end tokens to end it")
   (is (= :inexpressible (bc/reason #(grammar/grammar ascii "é+"))) "no token holds é's bytes")

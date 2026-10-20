@@ -179,8 +179,8 @@
               m (lm/lm e (tokenizer vocab))]
     (doseq [[lname re] [["string content, [^\"]*" "[^\"]*"] ["digits, [0-9]*" "[0-9]*"]]]
       (let [g (grammar/grammar m re)
-            plain (token/completion m {:eos #{}})
-            under (token/completion m {:eos #{} :potential g})
+            plain (token/completion m {:end-tokens #{}})
+            under (token/completion m {:end-tokens #{} :potential g})
             prompt [0]
             seed (volatile! 0)
             row (lm/next-logprobs m prompt)

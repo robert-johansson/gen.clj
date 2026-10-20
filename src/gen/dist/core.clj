@@ -315,7 +315,14 @@
   (-project [_ tr selection]
     (if (sel/root-selected? selection) (:score tr) 0.0)))
 
+(defmulti -printed-params
+  "A distribution's parameters as it prints them: arrays as host data."
+  (fn [d] (:type d)))
+
+(defmethod -printed-params :default [d]
+  (into {} (map (fn [[k v]] [k (if (and (array/array? v) (not (array/host? v))) (array/->clj v) v)])) (:params d)))
+
 (defmethod print-method Distribution [d ^java.io.Writer w]
   (.write w (str "#gen/dist[" (name (:type d)) " "))
-  (print-method (into {} (map (fn [[k v]] [k (if (array/host? v) v (array/->clj v))])) (:params d)) w)
+  (print-method (-printed-params d) w)
   (.write w "]"))

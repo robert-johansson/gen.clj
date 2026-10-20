@@ -19,7 +19,7 @@
    And a text's probability under an LM, marginalizing over the ways
    tokens spell it (as GenMLX's bytes.cljs and genlm-bytes):
 
-     (byte-lm lm opts)                    → lm read as bytes (opts :eos, :beam)
+     (byte-lm lm opts)                    → lm read as bytes (opts :end-tokens, :beam)
      (prefix-logprob b prompt text)       → log P(the text after prompt begins with text)
      (text-logprob b prompt text)         → log P(the text is text, then ends)
      (next-byte-logprobs b prompt text)   → each next byte's, and the end's"
@@ -210,31 +210,33 @@
         (Double/isInfinite b) (if (pos? b) b a)
         :else (let [m (Math/max a b)] (+ m (Math/log (+ (Math/exp (- a m)) (Math/exp (- b m))))))))
 
-(defrecord ByteLM [lm trie eos beam])
+(defrecord ByteLM [lm trie end-tokens beam])
 
 (defmethod print-method ByteLM [b ^java.io.Writer w]
   (.write w (str "#<ByteLM " (:lm b) (when (:beam b) (str ", beam " (:beam b))) ">")))
 
 (defn byte-lm
   "lm's text as bytes, marginalizing over tokenizations: for
-   prefix-logprob, text-logprob and next-byte-logprobs. opts: :eos, the
-   tokens that end a text (default the LM's :eog; gen.llm.token's
-   completion's :eos); :beam, at most this many tokenizations kept at each
+   prefix-logprob, text-logprob and next-byte-logprobs. opts: :end-tokens,
+   the tokens that end a text (default the LM's :eog; gen.llm.token's
+   completion's :end-tokens); :beam, at most this many tokenizations kept at each
    token boundary, the most probable (default nil: every one, exact).
    Tokens with no bytes are never in a text (they would let a text have
    infinitely many tokenizations); with a beam, probabilities are lower
    bounds."
   ([lm] (byte-lm lm {}))
-  ([lm {:keys [eos beam] :as opts}]
+  ([lm {:keys [end-tokens beam] :as opts}]
    (let [{:keys [n-vocab eog]} (lm/vocab lm)
-         eos (set (if (contains? opts :eos) eos eog))
+         end-tokens (if (contains? opts :end-tokens) end-tokens eog)
          byte-vocab (lm/byte-vocab lm)]
-     (when-not (every? #(and (integer? %) (< -1 (long %) (long n-vocab))) eos)
-       (throw (ex-info (str "byte-lm: :eos is a set of tokens, not " (pr-str eos)) {:reason :invalid-token :eos eos})))
+     (when-not (and (set? end-tokens) (every? #(and (integer? %) (< -1 (long %) (long n-vocab))) end-tokens))
+       (throw (ex-info (str "byte-lm: :end-tokens is a set of tokens, not " (pr-str end-tokens))
+                       {:reason :invalid-end-tokens :end-tokens end-tokens})))
      (when-not (or (nil? beam) (pos-int? beam))
        (throw (ex-info (str "byte-lm: :beam is a positive integer or nil, not " (pr-str beam)) {:reason :invalid-option :beam beam})))
      ;; end tokens are kept out of the trie: they end a text, and hold none of it
-     (->ByteLM lm (byte-trie (vec (map-indexed (fn [t bs] (if (eos t) (byte-array 0) bs)) byte-vocab))) eos beam))))
+     (->ByteLM lm (byte-trie (vec (map-indexed (fn [t bs] (if (end-tokens t) (byte-array 0) bs)) byte-vocab)))
+               (into #{} (map long) end-tokens) beam))))
 
 (defn- text-bytes ^bytes [what text]
   (cond (string? text) (.getBytes ^String text java.nio.charset.StandardCharsets/UTF_8)
@@ -267,7 +269,7 @@
    bytes, j a token boundary inside b, and then a token that begins with
    the rest of b; the runs are walked boundary by boundary, each
    boundary's contexts read in one batch."
-  [{:keys [lm trie eos beam]} prompt ^bytes b]
+  [{:keys [lm trie end-tokens beam]} prompt ^bytes b]
   (let [n (alength b)
         next (double-array 256 Double/NEGATIVE_INFINITY)]
     (loop [j 0 at {0 [[[] 0.0]]} prefix (if (zero? n) 0.0 Double/NEGATIVE_INFINITY) end Double/NEGATIVE_INFINITY]
@@ -285,7 +287,7 @@
                         [(reduce (fn [at [k t]] (update at k (fnil conj []) [(conj ctx t) (+ lp (aget row (int t)))]))
                                  at splits)
                          (if (and (< j n) (<= 0 node)) (log-add prefix (+ lp (log-mass trie row node))) prefix)
-                         (if (== j n) (log-add end (+ lp (log-sum row eos))) end)])
+                         (if (== j n) (log-add end (+ lp (log-sum row end-tokens))) end)])
                       [at prefix end] (map vector particles rows))]
           (recur (inc j) (dissoc at j) (double prefix) (double end)))))))
 

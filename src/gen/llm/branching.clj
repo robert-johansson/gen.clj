@@ -71,11 +71,13 @@
     b
     (throw (ex-info (str "Not a branch: " (pr-str b)) {:reason :not-a-branch :value b}))))
 
-(defn- index?
-  "Is x an integer in [0, n)? (Generic comparison: a big integer is out of
-   range, not an error.)"
-  [x n]
-  (and (integer? x) (<= 0 x) (< x n)))
+(defn index?
+  "Is x an integer in [0, n), a token of a vocabulary of n tokens, say?
+   (Quick for a long; a big integer is out of range, not an error.)"
+  [x ^long n]
+  (if (instance? Long x)
+    (< -1 (.longValue ^Long x) n)
+    (and (integer? x) (not (neg? (compare x 0))) (neg? (compare x n)))))
 
 (defn- invalid-token [what t n-vocab]
   (ex-info (str what ": not a token of the vocabulary (0 to " (dec (long n-vocab)) "): " (pr-str t))

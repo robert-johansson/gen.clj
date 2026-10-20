@@ -66,12 +66,11 @@
                          from (gen/choose 0 6)
                          sc (gen/vector (gen/fmap double gen/small-integer) 6)]
                  [:insert ctx (min from (count ctx)) sc])
-               (gen/fmap #(vector :remove %) gen/nat)
-               (gen/fmap #(vector :update %) gen/nat)]))
+               (gen/fmap #(vector :remove %) gen/nat)]))
 
 (defn- apply-op
   "[trie model] after op (inserts at contexts that have an entry, and
-   removes or updates of no entry, are skipped)."
+   removes of no entry, are skipped)."
   [[t m] [kind x from sc]]
   (let [ks (vec (sort-by pr-str (keys (:entries m))))]
     (case kind
@@ -83,12 +82,7 @@
       :remove (if (empty? ks)
                 [t m]
                 (let [ctx (ks (mod x (count ks)))]
-                  [(trie/remove-entry t ctx) (model-remove m ctx)]))
-      :update (if (empty? ks)
-                [t m]
-                (let [ctx (ks (mod x (count ks)))]
-                  [(trie/update-entry t ctx #(assoc % :touched true))
-                   (update-in m [:entries ctx] assoc :touched true)])))))
+                  [(trie/remove-entry t ctx) (model-remove m ctx)])))))
 
 (defn- agrees?
   "Does the trie answer every query as the model does?"

@@ -55,18 +55,6 @@
 
 (set! *warn-on-reflection* true)
 
-(defmacro ^:private defcombinator
-  "defrecord, plus untraced calls as in Gen.jl: (gf a b) is the return value
-   of a simulated run."
-  [name fields & impls]
-  `(defrecord ~name ~fields
-     ~@impls
-     clojure.lang.IFn
-     ~@(for [n (range 7)]
-         (let [as (vec (repeatedly n #(gensym "arg")))]
-           `(~'invoke [this# ~@as] (:retval (gfi/simulate this# ~as)))))
-     (~'applyTo [this# args#] (:retval (gfi/simulate this# (vec args#))))))
-
 ;; ---------------------------------------------------------------------------
 ;; Indexed elements (Map and Unfold)
 ;; ---------------------------------------------------------------------------
@@ -274,7 +262,7 @@
             {:weight 0.0 :retval []}
             (range n))))
 
-(defcombinator MapGF [kernel]
+(gfi/defgf MapGF [kernel]
   gfi/IGenerativeFunction
   (-simulate [gf args key] (:trace (map-generate gf args nil key)))
   (-generate [gf args constraints key] (map-generate gf args constraints key))
@@ -382,7 +370,7 @@
         (recur (inc t) (:retval r) (+ weight (:weight r)) (conj retval (:retval r))))
       {:weight weight :retval retval}))))
 
-(defcombinator UnfoldGF [kernel]
+(gfi/defgf UnfoldGF [kernel]
   gfi/IGenerativeFunction
   (-simulate [gf args key] (:trace (unfold-generate gf args nil key)))
   (-generate [gf args constraints key] (unfold-generate gf args constraints key))
@@ -447,7 +435,7 @@
           (= op :update) (assoc :weight (- w (:score tr)) :discard (:choices tr))
           (= op :regenerate) (assoc :weight 0.0))))))
 
-(defcombinator SwitchGF [branches]
+(gfi/defgf SwitchGF [branches]
   gfi/IGenerativeFunction
   (-simulate [gf args key] (:trace (switch-generate gf args nil key)))
   (-generate [gf args constraints key] (switch-generate gf args constraints key))
@@ -655,7 +643,7 @@
                        0.0 subs))]
     (+ (part (::productions tr) :production) (part (::aggregations tr) :aggregation))))
 
-(defcombinator RecurseGF [production aggregation max-branch]
+(gfi/defgf RecurseGF [production aggregation max-branch]
   gfi/IGenerativeFunction
   (-simulate [gf args key] (:trace (recurse-run gf nil (recurse-args args) [diff/unknown-change] :generate nil key)))
   (-generate [gf args constraints key] (recurse-run gf nil (recurse-args args) [diff/unknown-change] :generate constraints key))

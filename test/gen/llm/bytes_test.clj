@@ -113,7 +113,7 @@
     (is (< (first by-width) (- exact 1e-4)) "one tokenization misses mass: the test can tell")))
 
 (deftest end-tokens-hold-no-text
-  (let [no-ends (bytes/byte-lm m {:eos #{}})]
+  (let [no-ends (bytes/byte-lm m {:end-tokens #{}})]
     (is (close? (bytes/prefix-logprob bm [bos] "</s>") Double/NEGATIVE_INFINITY) "the end token ends the text")
     (is (< Double/NEGATIVE_INFINITY (bytes/prefix-logprob no-ends [bos] "</s>")) "unless it is no end")
     (is (= Double/NEGATIVE_INFINITY (bytes/text-logprob no-ends [bos] "ab")) "no end, no complete text")))
@@ -122,5 +122,6 @@
   (is (= :zero-prefix (bc/reason #(bytes/next-byte-logprobs bm [bos] "z"))))
   (is (= :invalid-text (bc/reason #(bytes/prefix-logprob bm [bos] 3))))
   (is (= :invalid-token (bc/reason #(bytes/prefix-logprob bm [] "a"))))
-  (is (= :invalid-token (bc/reason #(bytes/byte-lm m {:eos #{n-vocab}}))))
+  (is (= :invalid-end-tokens (bc/reason #(bytes/byte-lm m {:end-tokens #{n-vocab}}))))
+  (is (= :invalid-end-tokens (bc/reason #(bytes/byte-lm m {:end-tokens [1]}))))
   (is (= :invalid-option (bc/reason #(bytes/byte-lm m {:beam 0})))))
