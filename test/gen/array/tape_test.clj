@@ -245,3 +245,28 @@
       (is (= 1.0 (ts/host ((array/grad (fn [x] ((array/grad (fn [y] (array/* x y))) x))) 1.0))))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"inside a differentiated"
                             ((array/grad (fn [x] ((array/grad (fn [y] (array/* x y))) x))) 1.0))))))
+
+(deftest custom-vjps
+  (let [square (array/custom-vjp (fn [x] (array/* x x)) (fn [[x] _ g] [(array/* 2.0 (array/* g x))]))
+        tripled (array/custom-vjp (fn [x] (array/* x x)) (fn [_ _ g] [(array/* 3.0 g)]))
+        scaled (array/custom-vjp (fn [x n] (array/* x n)) (fn [[_ n] _ g] [(array/* g n) nil]))
+        v (array/array [1.0 -2.0])]
+    (testing "the value is the function's"
+      (is (= 4.0 (ts/host (square 2.0))))
+      (is (= [1.0 4.0] (ts/host (square v)))))
+    (testing "the gradient is the rule's, composed with the rest"
+      (is (ts/close? (* 3 (Math/cos 0.5)) ((array/grad #(tripled (array/sin %))) 0.5)))
+      (is (ts/close? ((array/grad #(array/sum (array/* % %))) v) ((array/grad #(array/sum (square %))) v))))
+    (testing "a nil cotangent: no gradient for that argument"
+      (is (= [4.0 4.0] (ts/host ((array/grad #(array/sum (scaled % 4.0))) v))))
+      (is (= [0.0 0.0] (ts/host (second ((array/grad #(array/sum (scaled %1 %2)) {:argnums [0 1]}) v (array/array [3.0 3.0])))))))
+    (when-not (ts/native-grad?)
+      ;; MLX's own transformations run f inside the trace, where no value
+      ;; can be read on the host (as in compile)
+      (testing "host code the tape cannot see through"
+        (let [tanh (array/custom-vjp (fn [x] (Math/tanh (array/item x))) (fn [_ out g] [(array/* g (- 1.0 (* out out)))]))]
+          (is (ts/close? (- 1 (Math/pow (Math/tanh 0.3) 2)) ((array/grad #(tanh (array/* 1.0 %))) 0.3)))))
+      (testing "a rule with the wrong number of cotangents is loud"
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"one cotangent per argument"
+                              ((array/grad #(array/sum ((array/custom-vjp (fn [x] x) (fn [_ _ g] [g g])) %))) v)))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not an array" ((array/custom-vjp identity identity) :a)))))

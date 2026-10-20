@@ -22,8 +22,9 @@
 
 (set! *warn-on-reflection* true)
 
-(defn- accept
-  "Accept proposed with probability min(1, exp(log-alpha))."
+(defn accept
+  "Accept proposed with probability min(1, exp(log-alpha)): {:trace
+   :accepted? :log-alpha}."
   [trace proposed log-alpha key]
   (let [la (double (array/item log-alpha))]
     (when (Double/isNaN la)
@@ -41,6 +42,27 @@
     (throw (ex-info "MH with a proposal needs its proposal arguments as a vector"
                     {:proposal-args proposal-args}))))
 
+(defn move
+  "A proposed move and its log acceptance ratio, {:trace trace' :weight w}
+   (also a move-reweight weight, gen.inference.particle-filter). Forward
+   choices u come from (proposal trace args…) drawn with k-propose. With
+   :involution, (involution trace u retval args) gives trace', the
+   backward choices u' and the move's weight; otherwise the trace is updated
+   with u (k-update) and u' is the discard. u' is assessed under
+   :backward on (trace', :backward-args…), or under the proposal on
+   (trace', args…). w = the move's weight - log q(u) + log q_bwd(u')."
+  [trace proposal proposal-args {:keys [involution backward backward-args]} k-propose k-update]
+  (let [{fwd :choices fwd-weight :weight fwd-retval :retval} (gfi/propose proposal (into [trace] proposal-args) k-propose)
+        [moved weight bwd] (if involution
+                             (let [r (involution trace fwd fwd-retval proposal-args)]
+                               [(:trace r) (:weight r) (:bwd-choices r)])
+                             (let [r (gfi/update trace fwd k-update)]
+                               [(:trace r) (:weight r) (:discard r)]))
+        {bwd-weight :weight} (gfi/assess (or backward proposal)
+                                         (into [moved] (if backward backward-args proposal-args))
+                                         bwd)]
+    {:trace moved :weight (+ (- weight fwd-weight) bwd-weight)}))
+
 (defn- proposal-mh
   "Gen.jl's MH with a custom proposal: propose forward choices from
    q(trace, args...), update the trace with them, and assess the discard
@@ -52,10 +74,8 @@
                     {:value proposal})))
   (check-proposal-args proposal-args)
   (let [[k-propose k-update k-accept] (rng/split key 3)
-        {fwd :choices fwd-weight :weight} (gfi/propose proposal (into [trace] proposal-args) k-propose)
-        {proposed :trace weight :weight discard :discard} (gfi/update trace fwd k-update)
-        {bwd-weight :weight} (gfi/assess proposal (into [proposed] proposal-args) discard)]
-    (accept trace proposed (+ (- weight fwd-weight) bwd-weight) k-accept)))
+        {proposed :trace w :weight} (move trace proposal proposal-args {} k-propose k-update)]
+    (accept trace proposed w k-accept)))
 
 (defn mh
   "One Metropolis-Hastings move: with a selection, regenerate it; with a
@@ -84,11 +104,8 @@
   ([trace proposal proposal-args involution key]
    (check-proposal-args proposal-args)
    (let [[k-propose k-accept] (rng/split key)
-         {fwd :choices fwd-weight :weight fwd-retval :retval}
-         (gfi/propose proposal (into [trace] proposal-args) k-propose)
-         {proposed :trace bwd :bwd-choices weight :weight} (involution trace fwd fwd-retval proposal-args)
-         {bwd-weight :weight} (gfi/assess proposal (into [proposed] proposal-args) bwd)]
-     (accept trace proposed (+ (- weight fwd-weight) bwd-weight) k-accept))))
+         {proposed :trace w :weight} (move trace proposal proposal-args {:involution involution} k-propose nil)]
+     (accept trace proposed w k-accept))))
 
 (defn mh-particles
   "One selection-MH move for each of n particles (n independent chains,

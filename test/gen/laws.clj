@@ -78,9 +78,17 @@
     (and (close? (:score tr) w) (= (:retval tr) rv))))
 
 (defn- sound-retdiff?
-  "Def 2.3.2: no-change promises an equal return value."
+  "Def 2.3.2: no-change promises an equal return value; a vector-diff, the
+   two lengths and equal elements below both outside :updated (law audit
+   gap F: only no-change was checked)."
   [old {tr :trace rd :retdiff}]
-  (or (not (diff/no-change? rd)) (= (:retval old) (:retval tr))))
+  (cond (diff/no-change? rd) (= (:retval old) (:retval tr))
+        (diff/vector-diff? rd)
+        (let [a (:retval old) b (:retval tr)]
+          (and (= (:prev-length rd) (count a)) (= (:new-length rd) (count b))
+               (every? #(or (contains? (:updated rd) %) (= (nth a %) (nth b %)))
+                       (range (min (count a) (count b))))))
+        :else true))
 
 (defn- unvisitable?
   "Constraints drawn from another run that this run cannot visit (a
@@ -187,6 +195,72 @@
     (let [tr (gfi/simulate gf args (rng/key seed))]
       (close? (gfi/project tr sel/all) (:score tr)))))
 
+(defn generate-weight-is-the-projection
+  "generate's weight given sigma is the projection of its trace on sigma's
+   addresses: both are log p(τ)/q(τ∖σ | σ), q the internal proposal,
+   whatever it is (forward sampling, an exact or a custom proposal)."
+  [cases]
+  (prop/for-all [[[_ gf args] seed picks] cases]
+    (let [k (rng/key seed)
+          tr0 (gfi/simulate gf args k)
+          sigma (restrict (:choices tr0) (picked (addrs tr0) picks))]
+      ;; the same key, so forward sampling takes tr0's branches; a custom
+      ;; proposal may take others, under which some of sigma is unused: the
+      ;; law says nothing about such a case
+      (if-let [{tr :trace w :weight} (try (gfi/generate gf args sigma k)
+                                          (catch clojure.lang.ExceptionInfo e
+                                            (when-not (re-find #"was not visited" (ex-message e)) (throw e))))]
+        (close? w (gfi/project tr (sel/from-paths (cm/addresses sigma))))
+        true))))
+
+(defn regenerate-weight-is-the-projection-ratio
+  "regenerate's weight is the ratio of the projections of the new and the
+   old trace on the retained choices (Eq. 4.1): with forward sampling, the
+   retained density ratio; for any internal proposal, its correction."
+  [cases]
+  (prop/for-all [[[_ gf args] seed picks] cases]
+    (let [tr (gfi/simulate gf args (rng/key seed))
+          chosen (set (picked (addrs tr) picks))
+          {t2 :trace w :weight} (gfi/regenerate tr (sel/from-paths chosen) (rng/key (inc seed)))
+          now (set (addrs t2))
+          retained (sel/from-paths (filter #(and (now %) (not (chosen %))) (addrs tr)))]
+      (close? w (- (gfi/project t2 retained) (gfi/project tr retained))))))
+
+(defn update-weight-is-the-projection-change
+  "update's weight is the projection of the new trace on its choices that
+   are not fresh (kept from the old trace or constrained), less the old
+   score: log p(τ')/q(fresh | the rest) - log p(τ) (Def. 2.3.1, p. 69,
+   with an internal proposal), whatever the proposal. Before this law the
+   general set left update's weight unchecked: a planted +1 passed all of
+   it (law audit, 2026-10-20)."
+  [cases]
+  (prop/for-all [[model seed picks alt?] cases]
+    (if-let [{:keys [tr sigma] {t2 :trace w :weight} :result} (update-case model seed picks alt?)]
+      (let [was (set (addrs tr))
+            constrained (set (cm/addresses sigma))
+            kept (filter #(or (was %) (constrained %)) (addrs t2))]
+        (close? w (- (gfi/project t2 (sel/from-paths kept)) (:score tr))))
+      true)))
+
+(defn regenerate-weight-with-new-arguments-is-the-projection-ratio
+  "Eq. 4.1 with new arguments (p. 144): the projection of the new trace, on
+   the new arguments, on the retained choices, less the old trace's on its
+   own arguments (the reverse move generates at the old arguments: the
+   thesis's Alg. 16 reads x' there, an erratum). A move whose new arguments
+   leave an unselected choice unvisited is loud and the case vacuous."
+  [cases]
+  (prop/for-all [[[_ gf args :as model] seed picks] cases]
+    (let [tr (gfi/simulate gf args (rng/key seed))
+          args' (next-args model seed true)
+          chosen (set (picked (addrs tr) picks))
+          r (vacuous-on-unvisitable
+             (gfi/regenerate tr args' (unknown-diffs args') (sel/from-paths chosen) (rng/key (inc seed))))]
+      (or (= ::vacuous r)
+          (let [{t2 :trace w :weight} r
+                now (set (addrs t2))
+                retained (sel/from-paths (filter #(and (now %) (not (chosen %))) (addrs tr)))]
+            (close? w (- (gfi/project t2 retained) (gfi/project tr retained))))))))
+
 (defn propose-weight-is-the-assessed-density [cases]
   (prop/for-all [[[_ gf args] seed] cases]
     (let [{c :choices w :weight} (gfi/propose gf args (rng/key seed))]
@@ -290,6 +364,10 @@
    :regenerate-keeps-unselected-choices regenerate-keeps-unselected-choices
    :regenerating-nothing-changes-nothing regenerating-nothing-changes-nothing
    :project-of-everything-is-the-score project-of-everything-is-the-score
+   :generate-weight-is-the-projection generate-weight-is-the-projection
+   :regenerate-weight-is-the-projection-ratio regenerate-weight-is-the-projection-ratio
+   :update-weight-is-the-projection-change update-weight-is-the-projection-change
+   :regenerate-weight-with-new-arguments-is-the-projection-ratio regenerate-weight-with-new-arguments-is-the-projection-ratio
    :propose-weight-is-the-assessed-density propose-weight-is-the-assessed-density})
 
 (def forward-sampling

@@ -8,6 +8,7 @@
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
             [gen.dist :as d]
+            [gen.dist.core :as dc]
             [gen.dynamic :as dyn :refer [gen]]
             [gen.gfi :as gfi]
             [gen.gradients :as g]
@@ -184,3 +185,73 @@
     (is (< (first history) (last history)) "the log density rises")
     (is (< (ts/abs (- (:w store) w)) 1e-3))
     (is (< (ts/abs (- (:b store) (- my (* w mx)))) 1e-3))))
+
+(def ^:private conjugate
+  (gen [] (let [mu (trace :mu (d/normal 0 1))] (trace :y (d/normal mu 1)) mu)))
+
+(def ^:private amortized
+  "A proposal for mu given y: N(a·y + b, exp(log-s))."
+  (gen [y] (trace :mu (d/normal (+ (* (param :a) y) (param :b)) (array/exp (param :log-s))))))
+
+(deftest lecture-trains-a-proposal-toward-the-posterior
+  ;; mu | y ~ N(y/2, √½): the sleep phase's optimum is a = 1/2, b = 0,
+  ;; log-s = log √½
+  (let [opt (learn/adam {:lr 0.02})
+        y-of (fn [tr] [(tr :y)])
+        store (loop [i 0 store {:a 0.0 :b 0.3 :log-s 0.5} state (learn/init opt {:a 0.0 :b 0.3 :log-s 0.5}) key (rng/key 21)]
+                (if (< i 1500)
+                  (let [[k k-next] (rng/split key)
+                        {:keys [grads]} (learn/lecture-batched conjugate [] amortized store y-of 16 k)
+                        [store state] (learn/step opt state store grads)]
+                    (recur (inc i) store state k-next))
+                  store))]
+    (is (< (ts/abs (- (:a store) 0.5)) 0.05) (str store))
+    (is (< (ts/abs (:b store)) 0.05) (str store))
+    (is (< (ts/abs (- (:log-s store) (Math/log (Math/sqrt 0.5)))) 0.05) (str store)))
+  (testing "one lecture: the proposal's score on the model's own latent choice"
+    (let [{:keys [score grads]} (learn/lecture conjugate [] amortized {:a 0.5 :b 0.0 :log-s 0.0} (fn [tr] [(tr :y)]) (rng/key 3))]
+      (is (ts/finite? score))
+      (is (= #{:a :b :log-s} (set (keys grads)))))))
+
+(deftest one-step-updates-several-stores
+  ;; Gen.jl's ParamUpdate over gf => params pairs: stores nested in a map
+  (let [opt (learn/sgd {:lr 0.1})
+        [stores _] (learn/step opt nil {:model {:w 1.0} :proposal {:a 2.0}} {:model {:w 0.5} :proposal {:a -1.0}})]
+    (is (ts/close? 1.05 (get-in stores [:model :w])))
+    (is (ts/close? 1.9 (get-in stores [:proposal :a])))))
+
+(deftest a-step-updates-the-parameters-it-is-given
+  (doseq [opt [(learn/sgd {:lr 0.1}) (learn/adam {:lr 0.1}) (learn/gradient-descent {:step-size-init 0.1 :step-size-beta 1.0})]]
+    (let [store {:w 1.0 :b 2.0}
+          [store' _] (learn/step opt (learn/init opt store) store {:w 0.5})]
+      (is (= 2.0 (:b store')) (str (:kind opt) ": :b has no gradient and stays"))
+      (is (< 1.0 (ts/number (:w store'))) (str (:kind opt) ": :w ascends"))))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"does not have"
+                        (learn/step (learn/sgd {:lr 0.1}) nil {:w 1.0} {:v 0.5}))))
+
+(deftest argument-gradients-with-a-return-value-gradient
+  ;; Eq. 2.11 (law audit gap K): log N(z; x, 1) + retgrad·(x·z) has
+  ;; ∂/∂x = (z - x) + retgrad·z = 0.5 + 1.7·1.2 = 2.54 at x = 0.7, z = 1.2
+  (let [model (gen [x] (let [z (trace :z (d/normal x 1))] (* x z)))
+        tr (:trace (gfi/generate model [0.7] (cm/choicemap :z 1.2) (rng/key 1)))
+        {[xg] :arg-grads} (g/choice-gradients tr sel/none 1.7 {:argnums [0]})
+        f (fn [x] (+ (ts/number (:weight (gfi/assess model [x] (cm/choicemap :z 1.2)))) (* 1.7 x 1.2)))
+        h 1e-5]
+    (is (ts/close? 2.54 xg {:rtol (ts/tol 1e-9) :atol (ts/tol 1e-9)}))
+    (when (ts/jvm?)
+      (is (ts/close? (/ (- (f (+ 0.7 h)) (f (- 0.7 h))) (* 2 h)) xg {:rtol 1e-6 :atol 1e-6}) "and the finite difference"))))
+
+(deftest lecture-is-exact
+  ;; Eqs. 3.8-3.9 (law audit gap M): the score is log q(mu; w·y, e^log-s) of
+  ;; the model's own mu, the gradient its closed form
+  (let [model (gen [] (let [mu (trace :mu (d/normal 0 1))] (trace :y (d/normal mu 1))))
+        proposal (gen [y] (trace :mu (d/normal (* (param :w) y) (array/exp (param :log-s)))))
+        store {:w 0.3 :log-s 0.1}
+        key (rng/key 21)
+        {:keys [score grads]} (learn/lecture model [] proposal store (fn [tr] [(tr :y)]) key)
+        tr (gfi/simulate model [] (first (rng/split key)))
+        mu (ts/number (tr :mu)) y (ts/number (tr :y))
+        s (Math/exp 0.1) z (/ (- mu (* 0.3 y)) s)]
+    (is (ts/close? (ts/number (dc/log-prob (d/normal (* 0.3 y) s) mu)) score))
+    (is (ts/close? (* (/ z s) y) (:w grads)))
+    (is (ts/close? (- (* z z) 1.0) (:log-s grads)))))

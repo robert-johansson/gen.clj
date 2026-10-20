@@ -252,6 +252,17 @@
   p/IWrappingBackend
   (-inner [_] inner)
 
+  p/ICustomVjp
+  (-custom-vjp [t f vjp args]
+    (let [ps (mapv primal args)
+          out (apply f ps)]
+      (when (tracked? out)
+        (throw (ex-info (str "custom-vjp: f closes over a value being differentiated, whose gradient would be"
+                             " lost; pass it as an argument")
+                        {:op :custom-vjp})))
+      (record t out args
+              (fn [g need] (mapv #(when %2 %1) (vjp ps out g) need)))))
+
   p/IBackend
   (-name [_] :tape)
   (-defaults [_] (p/-defaults inner))

@@ -39,6 +39,13 @@
    runs on the wrapping backend."
   (-inner [b] "The backend this one wraps."))
 
+(defprotocol ICustomVjp
+  "A backend that differentiates through a function by a VJP it is given
+   (gen.array/custom-vjp): the tape, and MLX in native mode."
+  (-custom-vjp [b f vjp args]
+    "(apply f args), whose gradient comes from (vjp args out cotangent), a
+     vector of one cotangent per argument (nil for none)."))
+
 (defprotocol ICompiling
   "A backend that compiles functions of its arrays (MLX: mlx_compile)."
   (-compile [b f opts]

@@ -964,6 +964,11 @@
 
 (defn- custom-vjps? [] (and (= grad-mode :native) (not *tracing-compile*)))
 
+(def ^:private ^:dynamic *differentiating*
+  "True while native-value-and-grad runs its function: a custom VJP left out
+   of a compiled graph there would give a wrong gradient."
+  false)
+
 (def ^:private default-backend-var (delay (requiring-resolve 'gen.array/*backend*)))
 
 (defn- custom-vjp
@@ -1285,6 +1290,22 @@
         (catch MlxException e# (throw (mlx-error ~op [] e#)))))
 
 (deftype MlxBackend [^Config config]
+  p/ICustomVjp
+  (-custom-vjp [b f vjp args]
+    (when (and *tracing-compile* *differentiating*)
+      (throw (ex-info (str "custom-vjp inside array/compile under native gradients: MLX's compiled graphs"
+                           " leave custom VJPs out, so the gradient would be wrong; differentiate outside"
+                           " compile, or use the tape")
+                      {:op :custom-vjp})))
+    (if-not (custom-vjps?)
+      (apply f args)
+      (first (custom-vjp b
+                         (fn [xs] [(apply f xs)])
+                         (fn [ps cs os]
+                           (mapv (fn [ct p] (as-array b (or ct (p/-full b (p/-shape b p) 0 (p/-dtype b p))) nil))
+                                 (vjp ps (first os) (first cs)) ps))
+                         (mapv #(as-array b % nil) args)))))
+
   p/ICompiling
   (-compile [b f opts] (if (compiles? b) (guarded :compile (compile-fn b f opts)) f))
 
@@ -1332,7 +1353,7 @@
   (-value-and-grad [b f args argnums]
     (guarded :value-and-grad
       (if (= grad-mode :native)
-        (native-value-and-grad b f args argnums)
+        (binding [*differentiating* true] (native-value-and-grad b f args argnums))
         ((requiring-resolve 'gen.array.tape/value-and-grad) b f args argnums)))))
 
 (defn- config ^Config [b] (.-config ^MlxBackend b))

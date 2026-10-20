@@ -464,6 +464,86 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   rejects the header MLX's wheel ships). Probed once, with a warning; values
   are unchanged, only unfused. Not patched in MLX, and no g++ wrapper: a
   watch bean (genclj-hjzh) revisits it with newer wheels.
+- **Pushforward distributions, Gen.jl's `@dist`** (M4, 2026-10-19):
+  `(gen.dist.dsl/dist name [params] body)` expands into a `defdist`. The body
+  makes exactly one draw (a call of a `defdist` constructor, which the macro
+  finds by var metadata). A discrete draw's density sums the mass of the
+  support values mapped to v, so any function works; a continuous draw's
+  inverts the path to it through +, −, ×, ÷, negate, exp and log, with the
+  log-Jacobians. Non-numeric labels wait for parameters that are not arrays.
+  The name `dist` follows Gen.jl's macro; open for the owner.
+- **The internal-proposal override** (thesis Alg. 16; M4, 2026-10-19):
+  `(gen.inference.proposal/with-internal-proposal gf q)`. q is a dynamic
+  generative function called as `(q constraints & args)`; it proposes some
+  of the open choices at gf's addresses, and gf's forward sampling makes the
+  rest, so generate's weight is log p(τ) − log q(τ_q | σ) − log f(τ_f | σ, τ_q).
+  project replays q against a trace (its choices taken from the trace, as
+  constraints are) for its density and its addresses; a q that calls another
+  generative function at an address cannot be replayed, a loud error. Two
+  general laws came with it, holding for every internal proposal:
+  generate's weight is the projection on the constraints, and regenerate's
+  is the ratio of projections on the retained choices (Eq. 4.1). Before
+  them the general set checked project only on everything, which missed a
+  planted bug.
+- **Custom gradients, `array/custom-vjp`** (M4, 2026-10-20; one of §8's
+  reserved names): `(array/custom-vjp f vjp)` is f, differentiated through
+  by `(vjp args out g)`, one cotangent per argument. It is an optional
+  backend protocol (`ICustomVjp`): the tape records it as one node, MLX's
+  native mode makes it one `mlx_custom_vjp`, and elsewhere it is f. On it
+  rests Gen.jl's CustomGradientGF: `gen.custom/deterministic` with
+  `:gradient` (or CustomDetermGF's `:gradient-with-state`) runs its
+  function on the arguments' values, so the function may be host code,
+  and gives the tape the rule, a tree argument's gradient spread over its
+  leaves. Single outputs; cotangents must have their arguments' shapes;
+  an f that closes over a value being differentiated is an error (its
+  gradient would be lost); in native mode f runs inside MLX's
+  transformation and may not read values on the host, and inside
+  `array/compile` a custom VJP under native gradients is an error (MLX's
+  compiled graphs leave custom VJPs out).
+- **Trace transforms** (M4, 2026-10-20): `gen.inference.transform`, Gen.jl's
+  @transform as `(deftransform name [model-in aux-in model-out aux-out]
+  body)`, the body calling `read`, `write` and `copy` with Gen.jl's tags
+  (the four names are bound to the spaces, as in Gen.jl's header). The
+  body is run once for its outputs and again under `array/grad` for the
+  Jacobian of its continuous part, the continuous reads substituted;
+  outputs are the continuous writes, copies of continuous reads, and the
+  continuous reads an update keeps unwritten (so an involution may read a
+  choice it leaves alone). Translators are `(fn [trace key] → {:trace
+  :weight})`, so a particle filter takes one as a move-reweight kernel;
+  the symmetric translator is `involution`, the function
+  `mh/involutive-mh` already took. An involution must write every new
+  choice: its update samples nothing, a loud error otherwise. The general
+  translator subtracts the forward proposal's score (Eq. 3.12); Gen.jl's
+  GeneralTraceTranslator adds it (src/inference/trace_translators.jl on
+  master, while its SymmetricTraceTranslator subtracts), a sign bug the
+  change-of-variables test, whose weight is exactly 0, would catch. SMCP3 is
+  GenParticleFilters' UpdatingTraceTranslator with a transform
+  (`updating-translator`), applied to a filter by `pf/move-reweight`;
+  without a transform it is Del Moral's SMC samplers.
+- **Trace kernels, GenTraceKernelDSL** (M4, 2026-10-20): no new macro. A
+  kernel is a `gen` function whose first argument is the model trace and
+  whose return value is `[update backward]`; its choices are the auxiliary
+  randomness, so propose and assess give the forward and backward scores.
+  log |det J| reruns the kernel's assess with the trace's and the kernel's
+  continuous choices substituted by tracked values, under `array/grad`.
+  It leaves out only the trace's choices no output depends on:
+  GenTraceKernelDSL also drops constant outputs and kernel choices no
+  output uses, which hides moves that are not bijections (found by the law
+  audit, 2026-10-20), so here they make the matrix non-square or singular,
+  a loud error. A continuous choice the update keeps but an output depends
+  on counts as an unchanged output. Calls of other generative functions
+  return their values (GenTraceKernelDSL returns their traces).
+- **Transform bodies are eager** (2026-10-20): a lazy call (for, map, …)
+  holding a write, copy or tcall is an error when the transform is
+  defined (use doseq, run! or mapv), as `gen` bodies run to completion.
+- **Recurse** (M4, 2026-10-20): `(comb/recurse production aggregation
+  max-branch)` as Gen.jl's, with 0-based nodes (root 0, child j of node i
+  at i·max-branch + j + 1), choices at `[i :production]` and
+  `[i :aggregation]`, the production kernel returning `{:value v :children
+  [inputs]}`, and one argument (no `root_idx`). An update's new nodes add
+  their generate weights, where Gen.jl's code adds their scores, which is
+  the same only when every new choice is constrained; regenerate is
+  implemented too (Gen.jl has none).
 - **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
   `(array/item x)`, the namespace's last segment, as the Clojure style guide
   has it. It replaced `a`, which the owner found ugly (2026-10-18). The

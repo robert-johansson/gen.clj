@@ -214,6 +214,27 @@
 ;; Arrays: flat views and batches
 ;; ---------------------------------------------------------------------------
 
+(defn pair
+  "Gen.jl's pair: a choice map holding a under key-a and b under key-b."
+  [a b key-a key-b]
+  (when (= key-a key-b)
+    (throw (ex-info "pair: the two keys must differ" {:key key-a})))
+  (when (some vector? [key-a key-b])
+    (throw (ex-info "pair takes two single addresses, not paths" {:keys [key-a key-b]})))
+  (-> EMPTY (set-submap key-a a) (set-submap key-b b)))
+
+(defn unpair
+  "Gen.jl's unpair: [the submap at key-a, the submap at key-b] of c, which
+   must hold nothing else."
+  [c key-a key-b]
+  (when (some vector? [key-a key-b])
+    (throw (ex-info "unpair takes two single addresses, not paths" {:keys [key-a key-b]})))
+  (let [others (remove #{key-a key-b} (map first (submaps c)))]
+    (when (seq others)
+      (throw (ex-info (str "unpair: the choice map holds more than " (pr-str key-a) " and " (pr-str key-b))
+                      {:keys (vec others)})))
+    [(get-submap c key-a) (get-submap c key-b)]))
+
 (defn to-array
   "Every leaf, flattened and concatenated in canonical address order, as one
    1-d array (Gen.jl's to_array)."

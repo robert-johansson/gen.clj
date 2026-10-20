@@ -23,8 +23,10 @@
    choices at addrs from their exact conditional given everything else, by
    enumerating them. Its weight is log p(observations) exactly when every
    other choice is observed. regenerate on those choices is a Gibbs move
-   (weight 0). It satisfies the general GFI laws (gen.laws), not the
-   forward-sampling ones.
+   (weight 0); it keeps every unselected choice, and a selection that would
+   leave one unvisited is a loud error (gen.inference.proposal). It
+   satisfies the general GFI laws (gen.laws), not the forward-sampling
+   ones.
 
    Inside an Unfold or a Map, each step's weight is exact given the step's
    arguments. So the total is the exact likelihood, with the enumerated
@@ -44,6 +46,7 @@
             [gen.dist.core :as dc]
             [gen.dynamic :as dyn]
             [gen.gfi :as gfi]
+            [gen.inference.proposal :as proposal]
             [gen.inference.weights :as w]
             [gen.random :as rng]
             [gen.selection :as sel]))
@@ -313,17 +316,8 @@
             (throw (ex-info "with-exact-proposal: the fresh choices of this update change the model's structure" {})))
           {:trace t3 :weight (- w (:score tr)) :retdiff diff/unknown-change :discard (:discard r)}))))
   (-regenerate [this tr args argdiffs selection key]
-    (let [selected (set (cm/addresses (sel/get-selected (:choices tr) selection)))]
-      (if (and (empty? selected) (every? diff/no-change? argdiffs))
-        {:trace tr :weight 0.0 :retdiff diff/no-change}
-        ;; Eq 4.1: the retained choices are the constraints of both moves
-        (let [[k-regenerate k-generate] (rng/split key)
-              t1 (:trace (gfi/-regenerate gf (assoc tr :gen-fn gf) args argdiffs selection k-regenerate))
-              now (set (cm/addresses (:choices t1)))
-              retained (filter #(and (now %) (not (selected %))) (cm/addresses (:choices tr)))
-              sigma (sel/get-selected (:choices tr) (sel/from-paths retained))
-              {t2 :trace w :weight} (exact-generate this args sigma k-generate)]
-          {:trace t2 :weight (- w (exact-weight this (:args tr) sigma tr)) :retdiff diff/unknown-change}))))
+    (proposal/regenerate-under #(exact-generate this %1 %2 %3) #(exact-weight this %1 %2 %3)
+                               tr args argdiffs selection key))
   (-assess [_ args choices] (gfi/-assess gf args choices))
   (-propose [_ args key] (gfi/-propose gf args key))
   (-project [this tr selection]

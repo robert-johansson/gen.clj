@@ -187,3 +187,18 @@
     (is (< (stationary? p-mh-target step) (threshold p-mh-target)) (str label " is not stationary"))
     (is (< (converged? p-mh-target step (cm/choicemap :a false)) (threshold p-mh-target))
         (str label " does not converge"))))
+
+(def q2-mh (gen [_] (trace :a (d/bernoulli 0.5))))
+(def q3-mh (gen [_] (trace :a (d/bernoulli 0.0))))
+
+(deftest the-thesis-invalid-proposals-are-loud
+  ;; Alg. 5, requirement 3 (pp. 92-93; law audit gap J): q2 and q3 cannot
+  ;; propose b's value back, so a move from a = T to a = F, which discards
+  ;; b, cannot be weighed: a loud error, never a silent move
+  (let [two (:trace (gfi/generate p-mh [] (cm/choicemap :a true :b false :c true) (rng/key 1)))]
+    (doseq [[label q] [[:q2-mh q2-mh] [:q3-mh q3-mh]]]
+      (let [outcomes (map #(try (let [r (mh/mh two q [] %)] (if ((:trace r) :a) :stayed :moved))
+                                (catch clojure.lang.ExceptionInfo _ :loud))
+                          (rng/split (rng/key 2) 12))]
+        (is (not-any? #{:moved} outcomes) (str label " " (frequencies outcomes)))
+        (is (some #{:loud} outcomes) (str label " " (frequencies outcomes)))))))

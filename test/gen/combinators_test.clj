@@ -55,19 +55,54 @@
       (splice :pick switched (if (trace :which (d/bernoulli 0.5)) 0 1) (peek path))
       xs)))
 
+(def grow
+  "A random binary tree two levels deep at most, a value at each node."
+  (gen [depth]
+    (let [split? (trace :split (d/bernoulli (if (< depth 2) 0.6 0.0)))]
+      {:value (trace :v (d/normal depth 1)) :children (if split? [(inc depth) (inc depth)] [])})))
+
+(def fold
+  "A node's sum, observed with noise."
+  (gen [v ws] (let [s (reduce + v ws)] (trace :obs (d/normal s 1)) s)))
+
+(def tree (comb/recurse grow fold 2))
+
 (def models
   [[:map mapped [[1.0 2.0 3.0]]]
+
    [:map-2-args (comb/map (gen [x y] (trace :z (d/normal x y)))) [[0.0 1.0] [1.0 2.0]]]
    [:unfold unfolded [4 0.0 0.1]]
    [:switch switched [1 0.5]]
    [:keyed-switch keyed [:a 0.5]]
-   [:spliced spliced [3]]])
+   [:spliced spliced [3]]
+   [:call-at (comb/call-at element) [1.0 :here] [[2.5 :here]]]
+   [:call-at-a-path (comb/call-at unfolded) [3 0.0 0.1 [:walk 1]] [[4 0.0 0.1 [:walk 1]]]]
+   [:choice-at (comb/choice-at d/normal) [0.0 1.0 :x] [[0.5 2.0 :x]]]])
 
 (laws/deflaws combinators models 100)
+
+;; Recurse's own set: its trees change shape under update and regenerate
+(laws/deflaws recurse [[:recurse tree [0] [[1]]]
+                       [:recurse-spliced (gen [d] (let [s (splice :t tree d)] (trace :y (d/normal s 1)))) [0] [[1]]]]
+  100)
 
 ;; ---------------------------------------------------------------------------
 ;; Map
 ;; ---------------------------------------------------------------------------
+
+(deftest call-at-and-choice-at
+  (testing "call-at puts the callee's choices under its last argument"
+    (let [tr (gfi/simulate (comb/call-at element) [1.0 [:at 3]] (rng/key 1))]
+      (is (every? #(= [:at 3] (subvec % 0 2)) (cm/addresses (:choices tr))))
+      (is (close? (:score tr) (:weight (gfi/assess element [1.0] (cm/get-submap (cm/get-submap (:choices tr) :at) 3)))))
+      (is (= (:retval tr) (tr [:at 3 :z])) "the callee's return value")))
+  (testing "choice-at makes one choice at its last argument"
+    (let [tr (gfi/simulate (comb/choice-at d/normal) [0.0 1.0 :x] (rng/key 2))]
+      (is (= [[:x]] (cm/addresses (:choices tr))))
+      (is (= (:retval tr) (tr :x)))))
+  (testing "loud errors"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"distribution constructor" (comb/choice-at (d/normal 0 1))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"generative function" (comb/call-at 3)))))
 
 (defn- subtraces [tr] (:gen.combinators/subtraces tr))
 
@@ -293,3 +328,100 @@
         {t :trace w :weight} (gfi/regenerate tr [1] [diff/unknown-change] sel/none (rng/key 4))]
     (is (= 0.3 (:retval t)) "two distributions: the value stays")
     (is (close? w (- (dc/log-prob (d/normal 5 1) 0.3) (dc/log-prob (d/normal 0 1) 0.3))))))
+
+;; ---------------------------------------------------------------------------
+;; Recurse
+;; ---------------------------------------------------------------------------
+
+(deftest recurse-builds-and-folds-the-tree
+  (let [counted (comb/recurse (gen [n] {:value n :children (if (< n 2) [(inc n) (inc n)] [])})
+                              (gen [v ws] (reduce + v ws))
+                              2)]
+    (is (= 10 (:retval (gfi/assess counted [0] cm/EMPTY)) (:retval (gfi/simulate counted [0] (rng/key 1)))) "0 + 2·1 + 4·2")
+    (is (= 10 (counted 0)) "an untraced call"))
+  (testing "node indices: the root 0, child j of node i at i·max-branch + j + 1"
+    (let [tr (:trace (gfi/generate tree [0] (cm/choicemap [0 :production :split] true [1 :production :split] true
+                                                           [2 :production :split] false)
+                                   (rng/key 2)))
+          nodes (set (keys (cm/to-map (:choices tr))))]
+      (is (= #{0 1 2 3 4} nodes))
+      (is (ts/close? (:retval tr) (reduce + (map #(tr [% :production :v]) nodes))))
+      (is (ts/close? (+ (tr [1 :production :v]) (tr [3 :production :v]) (tr [4 :production :v]))
+                     (:retval ((:gen.combinators/aggregations tr) 1)))
+          "node 1 folds its value and its children's")))
+  (testing "max-branch is enforced"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"more than max-branch"
+                          (gfi/simulate (comb/recurse (gen [_] {:value 0 :children [1 2 3]}) fold 2) [0] (rng/key 3))))))
+
+(deftest recurse-updates-only-the-changed-path
+  (let [tr (:trace (gfi/generate tree [0] (cm/choicemap [0 :production :split] true [1 :production :split] true
+                                                         [2 :production :split] true)
+                                 (rng/key 4)))
+        {t' :trace w :weight d :discard} (gfi/update tr [0] [diff/no-change] (cm/choicemap [3 :production :v] 0.25) (rng/key 5))
+        prods (fn [t] (:gen.combinators/productions t))
+        aggs (fn [t] (:gen.combinators/aggregations t))]
+    (is (ts/close? 0.25 (t' [3 :production :v])))
+    (is (= {3 {:production {:v (tr [3 :production :v])}}} (cm/to-map d)))
+    (is (ts/close? (- (:score t') (:score tr)) w))
+    (testing "nodes off the path from 3 to the root keep their subtraces"
+      (doseq [n [0 1 2 4 5 6]] (is (identical? ((prods tr) n) ((prods t') n)) (str "production " n)))
+      (doseq [n [2 4 5 6]] (is (identical? ((aggs tr) n) ((aggs t') n)) (str "aggregation " n)))
+      (doseq [n [0 1 3]] (is (not (identical? ((aggs tr) n) ((aggs t') n))) (str "aggregation " n " revisited"))))
+    (testing "pruning a subtree discards it"
+      (let [{t'' :trace w :weight d :discard} (gfi/update tr [0] [diff/no-change] (cm/choicemap [1 :production :split] false)
+                                                          (rng/key 6))]
+        (is (= #{0 1 2 5 6} (set (keys (cm/to-map (:choices t''))))))
+        (is (= #{1 3 4} (set (keys (cm/to-map d)))))
+        (is (ts/close? (- (:score t'') (:score tr)) w) "the update samples nothing")))
+    (testing "constraints off the tree are loud"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"a value at node 0"
+                            (gfi/generate tree [0] (cm/choicemap 0 1.0) (rng/key 9))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not visited"
+                            (gfi/update tr [0] [diff/no-change] (cm/choicemap [9 :production :v] 1.0) (rng/key 7))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not visited"
+                            (gfi/generate tree [0] (cm/choicemap [0 :elsewhere] 1.0) (rng/key 8)))))))
+
+;; ---------------------------------------------------------------------------
+;; Combinators against their bodies written inline (Prop. 2.3.2; §5.3,
+;; pp. 176-177; law audit gap G)
+;; ---------------------------------------------------------------------------
+
+(def inline-map (gen [xs] (mapv (fn [i x] (splice i element x)) (range (count xs)) xs)))
+
+(def inline-unfold
+  (gen [n init drift]
+    (loop [t 0 state init acc []]
+      (if (< t n)
+        (let [s (splice t step t state drift)] (recur (inc t) s (conj acc s)))
+        acc))))
+
+(def inline-node
+  "Recurse's node as the thesis's recursive function (p. 177), its choices
+   at Recurse's addresses."
+  (gen [input node]
+    (let [{:keys [value children]} (splice [node :production] grow input)
+          ws (mapv (fn [j c] (splice inline-node c (+ (* node 2) j 1))) (range (count children)) children)]
+      (splice [node :aggregation] fold value ws))))
+
+(deftest combinators-match-their-bodies-inlined
+  (doseq [[label gf args inline inline-args moves]
+          [[:map mapped [[1.0 2.0 3.0]] inline-map [[1.0 2.0 3.0]]
+            [[[[1.0 2.0 3.0]] (cm/choicemap [1 :z] 0.4)] [[[1.0 2.0]] cm/EMPTY] [[[1.0 5.0 3.0]] (cm/choicemap [0 :z] -1.0)]]]
+           [:unfold unfolded [4 0.0 0.1] inline-unfold [4 0.0 0.1]
+            [[[4 0.0 0.1] (cm/choicemap [1 :s] 0.3)] [[2 0.0 0.1] cm/EMPTY] [[4 0.5 0.2] (cm/choicemap [3 :obs] 1.0)]]]
+           [:recurse tree [0] inline-node [0 0]
+            [[[0] (cm/choicemap [0 :production :v] 0.25)] [[1] cm/EMPTY] [[0] (cm/choicemap [0 :production :split] false)]]]]]
+    (testing (name label)
+      (doseq [seed (range 4)]
+        (let [tr (gfi/simulate gf args (rng/key seed))
+              ti (:trace (gfi/generate inline inline-args (:choices tr) (rng/key 99)))]
+          (is (= (:choices tr) (:choices ti)))
+          (is (close? (:score tr) (:score ti)) "the same density")
+          (doseq [[args' sigma] moves]
+            (let [inline-args' (if (= label :recurse) (conj (vec args') 0) args')
+                  r (gfi/update tr args' (vec (repeat (count args') diff/unknown-change)) sigma (rng/key 5))
+                  ri (gfi/update ti inline-args' (vec (repeat (count inline-args') diff/unknown-change)) sigma (rng/key 5))]
+              (when (= (set (cm/addresses (:choices (:trace r)))) (set (cm/addresses (:choices (:trace ri)))))
+                ;; the same structure: no fresh choices drawn differently
+                (is (close? (:weight r) (:weight ri)) (str label " " args'))
+                (is (= (:discard r) (:discard ri)))))))))))

@@ -14,6 +14,8 @@
      (cycle n [k1 k2])     k1, k2, k1, … for n steps in all
      (mix [k1 k2] [w1 w2]) one of the kernels, chosen with probability ∝ w
      (checked k observations)  k, then check that it left the observations alone
+     (kern [args] stmt …)  Gen.jl's @kern: statements, loops and branches over
+                           the arguments, as one chain with its reversal
 
    A combinator's result reports the accept decisions of the MH moves it
    made, in order, as :accepted (a vector of booleans) when they all report
@@ -87,6 +89,45 @@
   "The kernels applied in sequence."
   [& kernels]
   (with-reversals sequence-fn (vec kernels) reverse))
+
+(declare kern-form)
+
+(defn- statements
+  "A body's statements as one kernel: the lone statement's, or their chain."
+  [forms]
+  (if (= 1 (count forms)) (kern-form (first forms)) `(chain ~@(map kern-form forms))))
+
+(defn checked-kernel
+  "k, when it is a kernel (a function); a loud error naming form otherwise."
+  [k form]
+  (if (ifn? k)
+    k
+    (throw (ex-info (str "kern: " (pr-str form) " gave " (pr-str k) ", not a kernel") {:form form}))))
+
+(defn- kern-form
+  "A kern statement as a kernel expression: a loop is the chain of its
+   iterations, a branch the chain of its taken side (or none), a let binds
+   over its statements; any other form is a kernel."
+  [form]
+  (let [head (when (and (seq? form) (symbol? (first form))) (name (first form)))]
+    (case head
+      ("doseq" "for") (let [[_ bindings & body] form] `(apply chain (for ~bindings ~(statements body))))
+      "when" (let [[_ c & body] form] `(if ~c ~(statements body) (chain)))
+      "if" (let [[_ c a b] form] `(if ~c ~(kern-form a) ~(if (some? b) (kern-form b) `(chain))))
+      "let" (let [[_ bindings & body] form] `(let ~bindings ~(statements body)))
+      `(checked-kernel ~form '~form))))
+
+(defmacro kern
+  "Gen.jl's @kern: (kern [args] statement …) is a function of args returning
+   one kernel, the statements' kernels in order. A statement is a kernel, or
+   doseq/for, if/when or let over statements; their conditions and ranges
+   are computed from the arguments when the kernel is made, never from the
+   trace, so the result is a chain and its reversal is automatic: every
+   statement reversed, in reverse order (loops run backwards).
+
+     (kern [n] (mh (sel/select :mu)) (doseq [i (range n)] (mh (sel/select [:z i]))))"
+  [params & body]
+  `(fn ~params ~(statements body)))
 
 (defn repeat
   "The kernel applied n times."

@@ -30,9 +30,12 @@
   (and (not (jvm?)) (= "native" (System/getProperty "gen.mlx.grad"))))
 
 (defn flushes-subnormals?
-  "Does the backend flush float32 subnormals to zero (Metal does)?"
+  "Does the backend flush float32 subnormals to zero? Metal does; CUDA keeps
+   them, as the CPU does (found by the Thor's soak, 2026-10-20)."
   []
-  (and (not (jvm?)) (= :gpu ((requiring-resolve 'gen.backend.mlx/device) array/*backend*))))
+  (and (not (jvm?))
+       (= :gpu ((requiring-resolve 'gen.backend.mlx/device) array/*backend*))
+       (.startsWith (System/getProperty "os.name") "Mac")))
 
 (defn float64?
   "Does the backend have float64 (MLX's GPUs do not)?"

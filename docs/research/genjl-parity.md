@@ -80,13 +80,13 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 | Distribution API: `random, logpdf, logpdf_grad, has_output_grad, has_argument_grads, is_discrete` | P: `defdist` plus multimethods; gradients via AD; `support` | core |
 | `HomogeneousMixture`, `HeterogeneousMixture` | P: `dist/core.cljs mixture` takes instantiated components and log-weights | core |
 | `ProductDistribution` | Y: `product` | core |
-| `@dist` DSL (CONST→ARG→RND typing, exactly one random draw, pushforward) | N: `map->dist` is manual | soon |
+| `@dist` DSL (CONST→ARG→RND typing, exactly one random draw, pushforward) | N: `map->dist` is manual | soon. *gen.clj (M4, 2026-10-19):* `gen.dist.dsl/dist`, exactly one draw; discrete draws sum the mass mapped to a value (any function, repeated labels), continuous ones invert +, −, ×, ÷, negate, exp and log with their Jacobians; closed forms, normalization and laws checked |
 
 ### 1f. Custom generative functions (Gen.jl core)
 | Capability | GenMLX | gen.clj |
 |---|---|---|
-| `CustomGradientGF` (`apply`, `gradient`) | Y: `custom_gradient.cljs` (scalar output only) | soon |
-| `CustomDetermGF` / `CustomUpdateGF` (`apply_with_state`, `update_with_state` → retdiff, `num_args`) | N (closest is `nn.cljs nn->gen-fn`) | soon |
+| `CustomGradientGF` (`apply`, `gradient`) | Y: `custom_gradient.cljs` (scalar output only) | soon. *gen.clj (M4, 2026-10-20):* `(gen.custom/deterministic {:apply f :gradient g})`, and `:gradient-with-state` for CustomDetermGF; array outputs, on `array/custom-vjp` (tape and MLX native) |
+| `CustomDetermGF` / `CustomUpdateGF` (`apply_with_state`, `update_with_state` → retdiff, `num_args`) | N (closest is `nn.cljs nn->gen-fn`) | soon. *gen.clj (M4, 2026-10-19):* `gen.custom/deterministic` with `:apply-with-state` and `:update-with-state` (laws alone and spliced; incremental updates checked); custom gradients with `:gradient-with-state` (genclj-8cp8) |
 | Hand-written GFI implementations | Y: implement the protocols | core |
 
 ### 1g. Combinators (Gen.jl core)
@@ -95,9 +95,9 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 | `Map`, VectorDiff-driven (revisits only changed or constrained elements) | Y: `combinators.cljs` MapCombinator. Keys are **0-based**; Gen.jl's are 1-based | core |
 | `Unfold(kernel)` with args `(N, init, extras...)`; retdiff-driven skipping; changing N | Y: UnfoldCombinator, `unfold-extend`, structure-changing `update-with-args` | core |
 | `Switch(gfs...)` / `Switch(dict, gfs...)`; a branch change gives a fresh subtrace plus a discard | Y (integer index) / P (no dict-keyed constructor) | core |
-| `Recurse(production, aggregation, max_branch, U,V,W)` (PCFG trees) | P: `recurse` is a fixed-point "maker" combinator, not the production/reduction tree; `update-with-args` throws | core |
-| `call_at(gf, K)` / `choice_at` | N | soon |
-| Internal-proposal override (thesis §4.4, Alg. 16, p. 152; not found in the 0.4.8 modeling library) | P: via `dispatch/with-dispatch` | soon |
+| `Recurse(production, aggregation, max_branch, U,V,W)` (PCFG trees) | P: `recurse` is a fixed-point "maker" combinator, not the production/reduction tree; `update-with-args` throws | core. *gen.clj (M4, 2026-10-20):* `(comb/recurse production aggregation max-branch)`, 0-based nodes, every GFI operation incremental (a node is revisited when its input, its value, its children or its target may have changed); the general laws, alone and spliced |
+| `call_at(gf, K)` / `choice_at` | N | soon. *gen.clj (M4, 2026-10-19):* `comb/call-at` and `comb/choice-at`, the address as the last argument as in Gen.jl; dynamic generative functions over `splice` and `trace`, so their GFI is the handler's (laws in `combinators-test`) |
+| Internal-proposal override (thesis §4.4, Alg. 16, p. 152; not found in the 0.4.8 modeling library) | P: via `dispatch/with-dispatch` | soon. *gen.clj (M4, 2026-10-19):* `gen.inference.proposal/with-internal-proposal`: q, called as `(q constraints & args)`, proposes some open choices and forward sampling the rest; project replays q against a trace |
 
 ### 1h. Choice maps, selections, traces (Gen.jl core)
 | Capability | GenMLX | gen.clj |
@@ -106,15 +106,15 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 | `set_value!`, `set_submap!`, `merge`, `isempty`, `==` | Y: persistent `set-value`, `set-submap`, `merge-cm` | core |
 | `to_array(cm, T)`, `from_array(proto, arr)` | N | core |
 | `get_selected(cm, sel)` | N | core |
-| `pair`/`unpair`, `nested_view` | N | later |
+| `pair`/`unpair`, `nested_view` | N | later. *gen.clj (M4, 2026-10-19):* `cm/pair`, `cm/unpair` (loud when other keys are present); `nested_view` is `cm/to-map` |
 | `select`, `selectall`, `complement`, Empty/All/Hierarchical/Dynamic/Static/Complement selections, `push!`, `set_subselection!` | Y: `selection.cljs` | core |
 
 ### 1i. Parameters, optimizers, learning (Gen.jl core)
 | Capability | GenMLX | gen.clj |
 |---|---|---|
-| `ParamUpdate(conf, gf=>params)`, `apply!`, `FixedStepGradientDescent`, `GradientDescent(init, beta)`, `ADAM`, `init_update_state`/`apply_update!` | P: `learning.cljs` sgd/adam/train; `nn/optimizer`; no decaying GD; no per-GF ParamUpdate | core |
+| `ParamUpdate(conf, gf=>params)`, `apply!`, `FixedStepGradientDescent`, `GradientDescent(init, beta)`, `ADAM`, `init_update_state`/`apply_update!` | P: `learning.cljs` sgd/adam/train; `nn/optimizer`; no decaying GD; no per-GF ParamUpdate | core. *gen.clj:* `gen.learning` sgd, gradient-descent, adam, `init`/`step` (M1); several generative functions' stores step together nested in a map, a subset when only it is given (M4, tested) |
 | `train!(gf, data_gen, update, epochs, ...)` | P: `learning/train`, `amortized.cljs train-proposal` | core |
-| `lecture!`, `lecture_batched!` (sleep phase); wake phase via `train!` | Y: `learning.cljs` wake-sleep | soon |
+| `lecture!`, `lecture_batched!` (sleep phase); wake phase via `train!` | Y: `learning.cljs` wake-sleep | soon. *gen.clj (M4, 2026-10-19):* `learning/lecture`, `lecture-batched`: the proposal scored on the latent choices of the model's own traces (found by replaying it), with its parameter gradients; trains a proposal to the conjugate posterior |
 
 ### 1j. Inference library (Gen.jl core)
 | Capability | GenMLX | gen.clj |
@@ -123,26 +123,26 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 | …with a custom proposal GF | **N** in importance.cljs (only `amortized.cljs` and `smcp3-init`) | core |
 | `mh(trace, selection)` | Y: `mcmc.cljs mh`, `kernel.cljs mh-kernel` | core |
 | `mh(trace, proposal, args)` | Y: `mh-custom` | core |
-| `mh(trace, proposal, args, involution)` / `involutive_mcmc` | Y/P: `involutive-mh` (no Jacobian); `translator.cljs` (AD Jacobian, `reversible-jump-mh`) | core |
-| `check=`, `observations=` stationarity checks | N | soon |
+| `mh(trace, proposal, args, involution)` / `involutive_mcmc` | Y/P: `involutive-mh` (no Jacobian); `translator.cljs` (AD Jacobian, `reversible-jump-mh`) | core. *gen.clj (M4, 2026-10-20):* `mh/involutive-mh` with `(transform/involution t)`, the Jacobian by AD; a reversible jump (split/merge) keeps the exact posterior over one step |
+| `check=`, `observations=` stationarity checks | N | soon. *gen.clj (M1):* `(k/checked kernel observations)` checks after every application, forward and reversed |
 | `mala(trace, sel, tau)` | Y | core |
 | `hmc(trace, sel; L, eps)` | Y (with dual-averaging adaptation) | core |
 | `elliptical_slice(trace, addr, mu, cov)` | Y | core |
-| `@kern` (`for`/`if`/`let`, auto reversal), `@pkern`, `@rkern`, `reversal` | P: kernel.cljs combinators, `with-reversal`; no macro DSL, no check | core |
+| `@kern` (`for`/`if`/`let`, auto reversal), `@pkern`, `@rkern`, `reversal` | P: kernel.cljs combinators, `with-reversal`; no macro DSL, no check | core. *gen.clj (M4, 2026-10-19):* `(k/kern [args] stmt …)`, with doseq/for, if/when and let over the arguments: one chain, reversed automatically; `@pkern` is `k/kernel`, `@rkern` `(k/kernel f reverse-f)`, `reversal` `k/reversal` |
 | `map_optimize(trace, sel; ...)` (backtracking line search) | Y: `map-optimize` (Adam/SGD instead) | core |
 | `enumerative_inference` + `choice_vol_grid` (including continuous grid volumes) | P: `enumerate.cljs`, `exact.cljs`; discrete only | core. *gen.clj (2026-10-19):* `gen.inference.enumerative`, discrete and continuous (N-d) grids; plus `with-exact-proposal`, the exact conditional as a model's internal proposal for its finite choices (Gibbs regenerate; exact likelihoods inside Unfold when the state does not depend on those choices, checked by `:check-retval?`) |
 | `initialize_particle_filter` / `particle_filter_step!` (default or custom proposal), `maybe_resample!`, `log_ml_estimate`, `get_traces`, `get_log_weights`, `sample_unweighted_traces` | P: `smc.cljs` functional whole-sequence API; default proposal only (custom via `smcp3.cljs`); `steppable.cljs` | core |
-| Trace transform DSL: `@transform`, `@read`/`@write` with `:discrete`/`:continuous`, `@copy`, `@tcall`, `pair_bijections!`, `is_involution!`, `inverse` | P: translator.cljs read/write/copy-choice, `jacobian-logdet`, `sparse-jacobian-logdet`; no macro DSL, no discrete/continuous tagging, no inverse pairing check | core |
-| `Deterministic`/`General`/`SimpleExtending`/`Symmetric` TraceTranslator | P: `trace-translator`/`apply-translator`, `coarse-to-fine-smc` | core |
-| `black_box_vi!` (score-function estimator; variational model is a GF with `@param`) | P: `vi.cljs` (mean-field ADVI, programmable VI over raw log-density + flat params); `adev.cljs` | core |
-| `black_box_vimco!` | Y: `vimco` | core |
+| Trace transform DSL: `@transform`, `@read`/`@write` with `:discrete`/`:continuous`, `@copy`, `@tcall`, `pair_bijections!`, `is_involution!`, `inverse` | P: translator.cljs read/write/copy-choice, `jacobian-logdet`, `sparse-jacobian-logdet`; no macro DSL, no discrete/continuous tagging, no inverse pairing check | core. *gen.clj (M4, 2026-10-20):* `gen.inference.transform`: `deftransform`/`transform` with `read`, `write`, `copy` (tagged), `tcall`, `pair`, `involutive`, `inverse`; log |det J| by AD over the continuous reads and writes (copies of reads, and reads an update retains, as outputs; copies of unread choices left out) |
+| `Deterministic`/`General`/`SimpleExtending`/`Symmetric` TraceTranslator | P: `trace-translator`/`apply-translator`, `coarse-to-fine-smc` | core. *gen.clj (M4, 2026-10-20):* `transform/translator`, `deterministic-translator`, `extending-translator`, `involution` (the symmetric one), with Gen.jl's `check` as `:check?` (and `:prev-observations`) |
+| `black_box_vi!` (score-function estimator; variational model is a GF with `@param`) | P: `vi.cljs` (mean-field ADVI, programmable VI over raw log-density + flat params); `adev.cljs` | core. *gen.clj (M4, 2026-10-19):* `(vi/black-box-vi model args observations q q-args store optimizer opts)`, q a generative function over a parameter store; Gen.jl's estimator, or with `:baseline :leave-one-out` (unbiased, and exactly zero at the posterior); `vi/elbo-gradient` is one iteration |
+| `black_box_vimco!` | Y: `vimco` | core. *gen.clj (M4, 2026-10-19):* `vi/black-box-vimco`, VIMCO's leave-one-out control variates with the geometric (default) or arithmetic baseline, as Gen.jl's `geometric` keyword; `vi/vimco-gradient` is one iteration |
 
 ### 1k. Ecosystem packages
 | Package | What it adds | GenMLX | gen.clj |
 |---|---|---|---|
-| GenParticleFilters | `pf_initialize` (custom proposal, stratified), `pf_update!` (fwd/bwd proposals + transform, translator, stratified), `pf_resample!` (multinomial/residual/stratified, `priority_fn`), `pf_rejuvenate!`/`pf_move_accept!`/`pf_move_reweight!`, `pf_resize!` (multinomial/residual/optimal), `pf_replicate!`/`pf_dereplicate!`/`pf_coalesce!`/`pf_introduce!`, mean/var/proportionmap, ESS, log-ML, substate views; `UpdatingTraceTranslator`/`ExtendingTraceTranslator` | P: systematic/residual/stratified resampling, ESS threshold, MH move-accept rejuvenation, csmc, vsmc. Missing: priority weights, move-reweight, resize, stratified init, statistics helpers | soon |
-| GenSMCP3 | `SMCP3Update(fwd, bwd, ...)` with automatic sparse Jacobian correction | P: `smcp3.cljs` via edit ProposalEdit; no auto-Jacobian | soon |
-| GenTraceKernelDSL | `@kernel` mixing sampling and deterministic code; MH/SMC kernels returning (forward, reverse) choicemaps | N (closest: `edit.cljs`) | soon |
+| GenParticleFilters | `pf_initialize` (custom proposal, stratified), `pf_update!` (fwd/bwd proposals + transform, translator, stratified), `pf_resample!` (multinomial/residual/stratified, `priority_fn`), `pf_rejuvenate!`/`pf_move_accept!`/`pf_move_reweight!`, `pf_resize!` (multinomial/residual/optimal), `pf_replicate!`/`pf_dereplicate!`/`pf_coalesce!`/`pf_introduce!`, mean/var/proportionmap, ESS, log-ML, substate views; `UpdatingTraceTranslator`/`ExtendingTraceTranslator` | P: systematic/residual/stratified resampling, ESS threshold, MH move-accept rejuvenation, csmc, vsmc. Missing: priority weights, move-reweight, resize, stratified init, statistics helpers | soon. *gen.clj (M4, 2026-10-20):* `pf/initialize` with `:strata` (and `pf/choice-product`), `pf/resample` with `:priority`, `:n` and `:method :optimal`, `pf/resize`, `pf/rejuvenate` (move-accept), `pf/move-reweight` with the kernels of `pf/reweighting` (selection, proposal, backward proposal, involution), `pf/replicate`, `pf/dereplicate` (keepfirst, sample), `pf/coalesce`, `pf/introduce`, `pf/mean`, `pf/variance`, `pf/proportions`. Optimal resampling corrects GenParticleFilters' threshold search, which counts the threshold weight among the drawn and biases the estimate (for W = [0.1 0.2 0.7] to two particles the weights add to 1.2·n). `pf/step` takes `:backward` (pf_update! with a backward proposal), and a translator is a move-reweight kernel, so `(pf/move-reweight state translator)` is pf_update! with one. Left: substate views |
+| GenSMCP3 | `SMCP3Update(fwd, bwd, ...)` with automatic sparse Jacobian correction | P: `smcp3.cljs` via edit ProposalEdit; no auto-Jacobian | soon. *gen.clj (M4, 2026-10-20):* `transform/updating-translator` with `:transform` (GenParticleFilters' UpdatingTraceTranslator, as GenSMCP3 builds it), run on a filter by `pf/move-reweight`; the Jacobian by AD, copies of unread choices left out; without a transform, Del Moral's SMC samplers. Tests: a reparameterized proposal weighs exactly as the optimal one, a backward kernel's exact weight, the estimate unbiased |
+| GenTraceKernelDSL | `@kernel` mixing sampling and deterministic code; MH/SMC kernels returning (forward, reverse) choicemaps | N (closest: `edit.cljs`) | soon. *gen.clj (M4, 2026-10-20):* `gen.inference.trace-kernel`: a kernel is a `gen` function of the trace returning `[update backward]`; `tk/mh`, `tk/mh-kernel`, `tk/smcp3` (a translator for `pf/move-reweight`), log \|det J\| by AD over the trace's and the kernel's continuous choices, trimmed as GenTraceKernelDSL, reads the update keeps counted as unchanged outputs |
 | GenPseudoMarginal / "GenSMC" | `selection_sir_gf`, `selection_sir_mh`, `sir_pgibbs`, `ais`, `ais_gf`, `selection_ais_mh` | P: `encapsulated.cljs` pseudo-marginal-mh, `pmcmc.cljs`; AIS only in laws | later |
 | GenVariableElimination | Factor graphs from traces, variable elimination, exact backward samplers | P, different: `exact.cljs` tensor enumeration, `hmm_forward.cljs` | later |
 | GenDirectionalStats | Distributions on orientations and rotations (SO(3)), involutive kernels | P: von-mises, wrapped-cauchy, wrapped-normal; no SO(3) | later |
@@ -308,23 +308,23 @@ tested, ◐ partly, — not yet (the feature does not exist yet).
 |---|---|
 | 1 Structured density, unique addresses | ✓ `errors-are-loud` (repeated and nested addresses); `runs-are-pure-functions-of-the-key` |
 | 2 Score = density | ✓ `score-is-the-assessed-density`, and trace consistency inside every generate/update/regenerate law |
-| 3 Generate | ✓ `generate-with-every-choice-is-deterministic`, `generate-without-constraints-has-weight-zero`, `generate-weight-is-the-constrained-density`, `generated-traces-are-consistent`; E[w] = p̄(σ): `the-estimate-is-unbiased-in-exp-space` |
+| 3 Generate | ✓ `generate-with-every-choice-is-deterministic`, `generate-without-constraints-has-weight-zero`, `generate-weight-is-the-constrained-density`, `generated-traces-are-consistent`; for any internal proposal, `generate-weight-is-the-projection` (M4); E[w] = p̄(σ): `the-estimate-is-unbiased-in-exp-space` |
 | 4 Support condition | ◐ generate weights never NaN (`generated-traces-are-consistent`) |
-| 5 Update weight and discard | ✓ `updates-are-reversible-with-exact-discards` (exact Def 2.3.1 discard), `update-weight-is-the-score-change-less-fresh-choices`, `identity-update-changes-nothing` |
+| 5 Update weight and discard | ✓ `updates-are-reversible-with-exact-discards` (exact Def 2.3.1 discard), `update-weight-is-the-score-change-less-fresh-choices` (forward sampling), `update-weight-is-the-projection-change` (general, any internal proposal; added 2026-10-20 after the law audit's planted +1 passed every general law), `identity-update-changes-nothing` |
 | 6 Update is reversible | ✓ the same, with changed args and random constraint subsets; `update-without-fresh-choices-is-exactly-reversible`; `a-choice-that-becomes-a-call-is-discarded` |
-| 7 Compositionality | ✓ `splicing-is-compositional`; `switch-branches-share-addresses` (Switch against the equivalent `if`); combinator laws over a model splicing Map/Unfold/Switch; `a-different-callee-at-an-address-is-a-new-call` |
-| 8 Change hints | ✓ `map-/unfold-precise-hints-match-unknown-change`; retdiff soundness inside the update/regenerate laws |
-| 9 Regenerate | ✓ `regenerate-weight-is-the-retained-density-ratio`, `regenerate-keeps-unselected-choices`, `regenerating-nothing-changes-nothing`, `regenerating-everything-has-weight-zero` (random selections, changed args) |
+| 7 Compositionality | ◐ `splicing-is-compositional`; `switch-branches-share-addresses` (Switch against the equivalent `if`); combinator laws over a model splicing Map/Unfold/Switch; `a-different-callee-at-an-address-is-a-new-call`. Missing (law audit gap G): Map, Unfold and Recurse against an equivalent inlined dynamic function (Prop. 2.3.2, p. 73; §5.3, pp. 176–177) |
+| 8 Change hints | ◐ `map-/unfold-precise-hints-match-unknown-change`; retdiff soundness inside the update/regenerate laws, but only that no-change means an equal value: vector-diffs are not checked (law audit gap F), and Recurse has no precise-against-unknown-hint property |
+| 9 Regenerate | ✓ `regenerate-weight-is-the-retained-density-ratio`, `regenerate-keeps-unselected-choices`, `regenerating-nothing-changes-nothing`, `regenerating-everything-has-weight-zero` (random selections, changed args); for any internal proposal, `regenerate-weight-is-the-projection-ratio` (Eq. 4.1, M4) |
 | 10 Selection MH stationary | ✓ `kernels-leave-the-posterior-invariant`, `structure-changing-moves-target-the-posterior` (thesis p_mh); with the optimal internal proposal, regenerate is Gibbs: `regenerating-the-enumerated-choices-is-gibbs` (weight 0, posterior frequencies) |
 | 11 Project | ✓ `project-of-everything-is-the-score`, `project-splits-the-score` |
 | 12 Propose | ✓ `propose-weight-is-the-assessed-density` |
-| 13 Gradients | ◐ every VJP against finite differences (`gen.array.tape-test`); choice and argument gradients come with genclj-96om |
+| 13 Gradients | ◐ every VJP against finite differences (`gen.array.tape-test`); `choice-gradients-match-finite-differences` (with a retgrad), `argument-gradients`, `parameter-gradients` (`gen.gradients-test`); custom gradients (`custom-vjps`, `gradients-pass-through`). Missing (law audit gap K): argument gradients with a nonzero retgrad (Eq. 2.11) |
 | 14 Encapsulated randomness | — (M4) |
-| 15 Custom-proposal MH | ✓ custom-proposal and q4_mh stationarity; `a-proposal-that-ignores-the-backward-move-is-caught`; `checked-kernels-catch-a-proposal-that-writes-an-observation` |
-| 16 Trace translators | — (genclj-lfjt, M4) |
-| 17 Involutive MCMC | ◐ discrete: stationarity and `the-involution-is-an-involution`; Jacobians with genclj-ynwh |
+| 15 Custom-proposal MH | ✓ `kernels-leave-the-posterior-invariant` (`:custom`) and `structure-changing-moves-target-the-posterior` (`:q4-mh`); `a-proposal-that-ignores-the-backward-move-is-caught`; `checked-kernels-catch-a-proposal-that-writes-an-observation` |
+| 16 Trace translators | ✓ (M4) `a-pushforward-translates-with-weight-zero` (deterministic: p(z)·\|dz/dx\| = p(x)), `a-change-of-variables-translates-with-weight-zero` (general, both directions, with q-forward and q-backward), `extending-by-the-conditional-weighs-the-evidence`, the round-trip checks (inside `a-change-of-variables-translates-with-weight-zero` and the SMCP3 tests); Jacobians against closed forms (`jacobians-match-the-closed-forms`). Missing (law audit gap H): translators with observations, and across two models in SMC |
+| 17 Involutive MCMC | ✓ discrete: stationarity and `the-involution-is-an-involution`; continuous, with transforms (M4): `involutive-mh-with-a-transform-keeps-the-posterior` (a multiplicative move, Jacobian e^u), `a-reversible-jump-keeps-the-posterior` (split/merge between dimensions, ±log 2), `a-read-the-update-keeps-is-an-output`, `the-involution-check` |
 | 18 Kernel reversal | ✓ `reversals` (chain, cycle, repeat, mix) |
-| 19 Internal-proposal override | — (M4) |
+| 19 Internal-proposal override | ◐ `gen.inference.proposal/with-internal-proposal`: the general laws over proposals of some, all and a structure-deciding part of the open choices, with arguments; `the-exact-posterior-as-proposal-gives-the-evidence` (every key's weight is log p(y)). regenerate keeps every unselected choice and is loud when a selection would drop one (`regenerating-a-structure-deciding-choice`; it was wrong before, law audit gap A). Missing: unbiasedness of generate under an override (gap D), Eq. 4.1 with changed arguments (gap C), stationarity beyond fixed structure |
 | 20 Estimators | ✓ IS and particle-filter log-ML unbiased in exp space (internal, custom, partial and optimal proposals; batched); the PF incremental weight |
 
 Batched execution has no thesis law of its own; its law is vmap's
