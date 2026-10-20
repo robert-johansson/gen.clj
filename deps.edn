@@ -1,5 +1,6 @@
-{;; target/classes holds the compiled Java binding of mlx-c (clojure -T:build
- ;; java), which only the MLX backend loads
+{;; target/classes holds the compiled Java bindings of mlx-c and llama.cpp
+ ;; (clojure -T:build java), which only the MLX backend and the llama.cpp
+ ;; engine load
  :paths ["src" "target/classes"]
 
  ;; Core policy (DESIGN.md §8): Clojure + the backend, nothing else.
@@ -25,15 +26,17 @@
   :conformance {:exec-args {:nses [gen.array-test gen.array-props-test gen.special-test gen.linalg-test
                                    gen.random-test gen.array.tape-test gen.array.batch-test gen.dist-test gen.reference-test]}}
 
-  ;; clojure -M:bench …     (criterium; add :c2 to compare C2 against the Graal JIT)
-  :bench {:extra-paths ["bench"]
+  ;; clojure -M:bench …     (criterium; add :c2 to compare C2 against the Graal JIT;
+  ;;                         test/ for the LLM benches, which measure the
+  ;;                         Branching contract's statistic)
+  :bench {:extra-paths ["bench" "test"]
           :jvm-opts ["--enable-native-access=ALL-UNNAMED"]
           :extra-deps {criterium/criterium {:mvn/version "0.4.6"}}}
 
   :dev {:extra-paths ["dev"]
         :jvm-opts ["--enable-native-access=ALL-UNNAMED"]}
 
-  ;; clojure -T:build java   compile the mlx-c binding (src-java) into target/classes
+  ;; clojure -T:build java   compile the bindings (src-java) into target/classes
   :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.14"}}
           :ns-default build}
 

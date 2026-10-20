@@ -285,8 +285,8 @@ linalg and quantized matmul.
 ```
 LLM generative functions   token GF · grammar middleware · token SMC · structured output
 LM protocol                vocab/encode/decode · next-logprobs · batch-next-logprobs · score   (genlm-shaped,
-                           content-addressed, with a token-prefix trie + autobatcher)
-Branching protocol         open · fork · advance-batch · dispose · teacher-forced score · resample
+                           content-addressed, with a token-prefix trie; batching explicit)
+Branching protocol         open · fork · advance · extend · score · resample · dispose!
 engines                    llama.cpp (llama.h via our own filtered jextract FFM)  |  MLX-native forwards (later)
 ```
 
@@ -317,6 +317,45 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
   - HTTP servers: only top-k logprobs.
 - **Open risk.** Loading llama.cpp's ggml-metal and MLX's Metal backend in one
   process. Spike bean.
+- **As built (2026-10-20, genclj-kwxd; approved by the owner the same day,
+  `docs/research/llm-branching.md`).** The binding is jextract's over
+  llama.h v0.7.0 (`native/jextract-llama.sh`, sources committed, the
+  library's version checked at load), and llama.cpp builds with
+  `native/build-llama.sh`. `gen.llm.branching` is the Branching protocol
+  (open, fork, advance, extend, score, resample, dispose!), `gen.llm.slots`
+  runs any engine over sequence slots on a thread of its own, and
+  `gen.llm.llama` is llama.cpp's. On Metal the same read from the same
+  state is bit-identical, while different batch shapes give a token's
+  log-probability differing by up to 5e-2 nats (median 2e-3 to 4e-3).
+- **As built (2026-10-20, genclj-mse0; for the owner's review,
+  `docs/research/llm-lm-protocol.md`).** `gen.llm.lm` is the LM protocol
+  (vocab, encode, decode, token-bytes, byte-vocab, next-logprobs,
+  batch-next-logprobs, score) over any Branching engine. It is
+  content-addressed: a trie of token prefixes (`gen.llm.trie`) records what
+  the engine has read, each token with its score, and the cache
+  (`gen.llm.cache`) owns every live branch, bounded in branches and in KV
+  cells counted as llama.cpp's unified cache counts them (`gen.llm.cells`),
+  evicting least-recently-used ones with `dispose!`. Batching is explicit
+  (a call's one-token reads are one advance), with no autobatcher
+  (recommended), and the same calls on a new engine give the same results,
+  bit for bit.
+- **As built (2026-10-21, genclj-0cvv; for the owner's review,
+  `docs/research/llm-token-gf.md`).** `gen.llm.token/completion` is the
+  token generative function over an LM: arguments `[prompt max-tokens]`,
+  token i at address i, until an end token (kept) or max-tokens; every GFI
+  operation, with each token's score from the LM's ledger (score once) and
+  host draws by `token/dist` from `(fold-in key i)`. The GFI laws hold
+  exactly on the toy engines, also on one whose reads differ with their
+  shapes as llama.cpp's do.
+- **As built (2026-10-21, genclj-loyp; for the owner's review,
+  `docs/research/llm-token-smc.md`).** `gen.llm.potential` weighs token
+  sequences after genlm-control's `Potential` (prefix, complete, the next
+  token's weights over the vocabulary and the end). `gen.llm.smc` is token
+  SMC over a completion, twisted by a potential, with
+  gen.inference.particle-filter's interface: one batched LM read a step,
+  bootstrap, masked or custom proposals, ESS-gated resampling, an
+  estimate unbiased in exp space, particles convertible to the
+  completion's traces.
 
 ## 7. Platform
 
@@ -973,6 +1012,162 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   on a model where each rule's result is read by a choice or a Map, so a
   rule that understates a change alters a weight; one that overstates it
   costs only a rerun, which the diff tests catch.
+- **The Branching protocol and the llama.cpp engine** (2026-10-20, agent;
+  approved by the owner the same day; `docs/research/llm-branching.md`):
+  - A branch is a value (its tokens and next-token log-probabilities,
+    float arrays normalized in double) holding a state, a KV-cache
+    sequence. advance, extend and resample consume their branches and
+    return successors, so a stale branch is a loud error, never another
+    state; fork and score leave theirs alone.
+  - dispose! frees at once and is loud on a branch that is not live; a
+    live branch dropped unreachable is freed by a phantom reference at the
+    engine's next operation, and a GC runs when sequences or KV cells run
+    short (traces will hold branches). An unreachable engine is closed.
+    The GC is a last resort: resample frees the dead itself, and with
+    `-XX:+DisableExplicitGC` an exhausted engine is a loud error. Memory
+    management stays in the native membrane, out of semantics code (rule
+    3), as with MLX's arrays.
+  - One platform thread per engine; the calls are synchronous.
+  - score reads into a scratch copy, so no sequence ever loses its end
+    (which hybrid models cannot undo); the cache is always unified (forks
+    copy metadata), sliding-window layers full-size; at most 255 branches.
+  - `extend`, a teacher-forced advance with its scores, is added to the
+    list above; `advance` is the batch operation, `dispose!` has a bang.
+  - The engine layer computes on host floats with clojure.core, not
+    gen.array (it sits below the GFI, like a backend).
+  - **Engines never sample.** They give log-probabilities only, so a token
+    is drawn by gen.random with its site's key (rule 2); no engine adds
+    llama.cpp's sampler.
+  - *Open, for genclj-0cvv:* scores depend on batch shape (up to 5e-2
+    nats a token), so law 2 (score = assess's weight) holds exactly only
+    if simulate and assess compute a sequence in the same shapes;
+    otherwise it needs a band. The agent's lean is exact; the owner
+    decides when that bean starts.
+- **The LM protocol** (2026-10-20, agent; approved by the owner the same
+  night, every recommendation below; `docs/research/llm-lm-protocol.md`):
+  - Callers hold tokens, never branches. The LM's cache owns every live
+    branch, each the entry of its context in a trie of what the engine has
+    read; a context is read from the deepest held prefix (forked, so it
+    stays) or from nothing. Eviction is `dispose!` under bounds
+    (`:max-branches`, by default every branch the engine has free;
+    `:max-cells`, by default `:n-ctx`), least recently used, and for cells
+    among the branches whose disposal frees cells; a read consumes its
+    source only when branches are short. No branch is dropped, so the
+    engine's GC backstop never runs: `(info engine)` counts its collections
+    (`:collections`, added to `gen.llm.slots`), and the tests require none.
+  - Batching is explicit: `batch-next-logprobs` reads a call's one-token
+    reads in one advance, so a token SMC step is one decode. Recommended:
+    no autobatcher, since coalescing callers by timing would let thread
+    timing choose batch composition and so llama.cpp's results; if one is
+    ever needed, a lockstep batcher in worker order, which stays
+    deterministic.
+  - The cache's choices are a function of its calls, so the same calls on a
+    new engine give the same results, bit for bit (tested on a toy engine
+    whose results depend on batch shape and cell placement, as
+    llama.cpp's).
+  - Recommended value shape: `next-logprobs` returns a new host float array
+    (the engine's form, normalized on the host already, read there by byte
+    marginals, masks and weights; the copy is 17 µs at Qwen3's 151,936
+    tokens, against a 5.8 ms decode, and humongous below a 4 GB heap but
+    reclaimed at no measurable cost), and the token GF converts at its
+    site. A held entry costs its row and about 7 KiB, so the cache holds
+    at most `:max-branches` rows; recommended: LLM work on a heap of 8 GB
+    or more, or 4 MB G1 regions, where no row is humongous. Measured for
+    genclj-0cvv: a `categorical-logits` draw at that size costs 4.6 ms on
+    the JVM backend (Gumbel-max), a host inverse-CDF draw with one
+    gen.random uniform about 335 µs on average over keys (corrected
+    2026-10-21: the 78 µs first given was one key's; the draw scans the
+    row in token order, half of it on average).
+  - Every token read keeps the score it was read with (the first read
+    wins), so `score` along what was read reads nothing (assess after
+    simulate, token SMC's prefix potentials). A fresh context is read as its
+    first token and then teacher-forced, so that each of its tokens is
+    scored.
+  - A tokenizer is a map: the vocabulary's size and special tokens, and
+    `:token-bytes`, `:encode`, `:decode`; llama.cpp's is `llama/tokenizer`.
+- **The token generative function's foundations** (owner, 2026-10-20,
+  before genclj-0cvv starts):
+  - *Score once.* Each token's score is computed once and kept by the LM
+    protocol's trie (the first read wins), as GenMLX's score-once ledger.
+    simulate, assess, update and regenerate read it, so the GFI laws hold
+    exactly within one LM. Across fresh LMs, or after an evicted row is read
+    again, values agree within the measured band (llama_noise: 0.1 nats a
+    token on Metal; long contexts and CPU builds need their own). Every token
+    is computed in whatever batch shape its call gives, so this is the one
+    exactness llama.cpp allows without giving up batching.
+  - *The trie owns the branches.* Traces hold tokens, never a branch; the LM
+    protocol's cache owns every live branch and frees by explicit `dispose!`,
+    so the engine's GC backstop is never on an inference path.
+  - *Host draws.* A token is drawn by a distribution in `gen.llm`, by inverse
+    CDF over the row from one uniform that gen.random derives from the
+    site's key (rule 2 holds; draws are deterministic), and its log
+    probability is read from the row. It is the one exception to rule 3
+    ("core code calls only gen.array"), confined to the LLM layer, which
+    computes on host floats as the engine does: a `categorical-logits` draw
+    over 151,936 tokens costs 4.6 ms, about a decode, a host draw 78 µs
+    [corrected 2026-10-21, agent: about 335 µs on average over keys, the
+    78 µs being one key's; still a fourteenth of a `categorical-logits`
+    draw].
+- **The token generative function** (2026-10-21, agent; **for the owner's
+  review**, PROVISIONAL while the owner is away;
+  `docs/research/llm-token-gf.md`):
+  - `gen.llm.token/completion` over an LM is a generative function of
+    `[prompt max-tokens]` (a token vector, a non-negative integer, both
+    arguments so update can change them; together within the LM's
+    `:limit`, checked before any read). Token i is at address i, as
+    Map's and Unfold's elements are; a spliced completion's tokens are
+    `[:story 0]`, `[:story 1]`, …
+  - An end token is a choice: drawn, scored, kept, and it ends the
+    completion. The end tokens default to the LM's `:eog`; `:end-tokens`
+    replaces them, `#{}` gives exactly max-tokens. The return value is the
+    token vector, the end token included.
+  - **PROVISIONAL (owner to confirm), 2026-10-21:** the option is
+    `:end-tokens`, not `:eos` as first built. It is a set, while
+    `(lm/vocab m)`'s `:eos` is a single token, so
+    `{:eos #{(:eos (lm/vocab m))}}` read as a pun (review-lm's
+    recommendation). Alternatives: `:eog`, the vocabulary's name for its
+    set; `:eos` as before.
+  - Scores are the LM's ledger's (`lm/score`), never the drawn row's; a
+    trace keeps them, and update and regenerate keep them for every token
+    whose context is unchanged (a constraint equal to the token there, or a
+    redraw equal to it, changes nothing) and rescore the tokens after the
+    first change, a run of them in one LM call. So the laws hold exactly
+    within one LM while it holds its rows, and a revision that changes no
+    token weighs exactly 0 after any eviction (corrected 2026-10-21: the
+    first build kept scores only before the first constraint or selection,
+    so a constraint equal to its token rescored the rest, review-lm M1).
+  - `token/dist` is the host distribution (usable at any site); token i is
+    drawn from `(fold-in key i)`. A draw is loud when it finds its row's
+    probabilities not summing to 1 (within 1e-4), at no cost: the walk
+    holds the total. Under a batch tracer the operations raise
+    the batched-branch error: gen.batched falls back to one particle at a
+    time. Native batching belongs to token SMC (one
+    `lm/batch-next-logprobs` per step), since batched traces cannot hold
+    completions of different lengths.
+  - `token/forced` builds constraints (a prefix, text), `token/from` the
+    suffix selection; no temperature or top-k (another distribution, a
+    later option).
+- **Token SMC and potentials** (2026-10-21, agent; **for the owner's
+  review**, PROVISIONAL while the owner is away;
+  `docs/research/llm-token-smc.md`):
+  - A potential (`gen.llm.potential`) has `prefix` and `complete` log
+    weights of a token context and `logw-next`, a float array of n-vocab
+    + 1 entries (the end an index past the vocabulary), consistent as
+    genlm-control's. Contexts are the generated tokens; an LM's end token
+    stands for the end.
+  - `gen.llm.smc` takes a completion and its arguments, so its target is
+    the token generative function's distribution times exp(complete):
+    a completion stopped at max-tokens is complete. The prefix weights
+    twist the steps; exp(log-ml-estimate) is unbiased for Z = Σ
+    p(x)·exp(complete(x)).
+  - A token weighs log p − log q + its twist, p the LM's ledger's score,
+    so particles agree with the completion's traces exactly. Proposals:
+    the LM's row, the row masked by the twist and renormalized, or a
+    function.
+  - The interface and state are gen.inference.particle-filter's;
+    resampling ESS-gated at n/2, systematic by default. One
+    `lm/batch-next-logprobs` a step; particles are token vectors and the
+    LM's trie owns the branches.
 - **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
   `(array/item x)`, the namespace's last segment, as the Clojure style guide
   has it. It replaced `a`, which the owner found ugly (2026-10-18). The

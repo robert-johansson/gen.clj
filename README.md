@@ -143,3 +143,15 @@ clojure -J-Dgen.backend=mlx -J-Dgen.mlx.device=cpu -J-Dgen.mlx.dtypes=64 -X:test
 MLX is float32 by default (float64 only on its CPU backend). Arrays are lazy:
 inference loops evaluate once per iteration. `docs/array-api.md` §13
 describes the backend and the few ways it differs from the JVM backend.
+
+## Local LLMs (optional; M3, in progress)
+
+`native/build-llama.sh` builds llama.cpp v0.7.0's libraries (with Metal on
+macOS) into `native/build/llama/`, and `clojure -T:build java` compiles the
+binding. `gen.llm.llama/engine` loads a GGUF model, and `gen.llm.branching`
+forks, advances, scores and resamples its branches
+(`docs/research/llm-branching.md`). The engine's tests need a model:
+
+```
+clojure -J-Dgen.llama.test-model=Qwen3-0.6B-Q8_0.gguf -X:test :nses '[gen.llm.llama-test]'
+```
