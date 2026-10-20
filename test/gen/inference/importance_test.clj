@@ -170,5 +170,18 @@
                             (clojure.core/* (Math/exp (ts/number (- w wq))) (ts/number (:retval t)))))
                   (rng/split (rng/key 97) n))
         m (clojure.core// (reduce clojure.core/+ wgs) n)
-        sd (Math/sqrt (clojure.core// (reduce clojure.core/+ (map #(let [e (clojure.core/- % m)] (clojure.core/* e e)) wgs)) (dec n)))]
-    (is (< (Math/abs (clojure.core/- m 7.0)) (clojure.core/* 5 (clojure.core// sd (Math/sqrt n)))) (str m))))
+        sd (Math/sqrt (clojure.core// (reduce clojure.core/+ (map #(let [e (clojure.core/- % m)] (clojure.core/* e e)) wgs)) (dec n)))
+        band (clojure.core/* 5 (clojure.core// sd (Math/sqrt n)))]
+    (is (< (Math/abs (clojure.core/- m 7.0)) band) (str m))
+    ;; law audit, finding 7: the same estimator through the library, with no
+    ;; observations, exp(log-ml-estimate) Σ_i exp(lnw_i) g_i = Σ_i w_i g_i / n,
+    ;; on other keys, within the same band (6.95, and 6.91 above, a band of
+    ;; 0.29). Planted bug (the audit's C2, 2026-10-20): importance-sampling
+    ;; not subtracting the proposal's score gives 0.033
+    (testing "through importance-sampling"
+      (let [{:keys [traces log-normalized-weights log-ml-estimate]}
+            (imp/importance-sampling p-inf-squares [] cm/EMPTY n {:proposal q-inf-squares :proposal-args [] :key (rng/key 98)})
+            estimate (clojure.core/* (Math/exp (ts/number log-ml-estimate))
+                                     (reduce clojure.core/+ (map #(clojure.core/* (Math/exp (ts/number %1)) (ts/number (:retval %2)))
+                                                                 log-normalized-weights traces)))]
+        (is (< (Math/abs (clojure.core/- estimate 7.0)) band) (str estimate))))))

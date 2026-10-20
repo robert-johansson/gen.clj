@@ -1,7 +1,9 @@
 (ns gen.inference.proposal-test
   "The internal-proposal override: the general GFI laws over models whose
    proposals make some, all, or a structure-deciding part of the open
-   choices; exactness with the exact posterior as the proposal; loud errors."
+   choices, and over models that splice one; exactness with the exact
+   posterior as the proposal; the worked examples of pp. 143-144; loud
+   errors."
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array :refer [+ - * /]]
@@ -63,13 +65,33 @@
 ;; other than the prior (law audit gap 8)
 (laws/deflaws internal-proposal law-models 60 laws/fixed-support)
 
+;; §4.4, p. 154 (law audit 4.c): a model that calls a generative function with
+;; an internal proposal, which proposes the callee's choices for it. Planted
+;; bugs (2026-10-20): the override's project dropping log q (the audit's C3)
+;; fails generate-weight-is-the-projection and the Eq. 4.1 laws over these;
+;; its generate leaving q out (forward sampling) fails them too
+(def spliced-models
+  [[:splices-an-override
+    (gen [] (let [mu (splice :p (second (first law-models)))] (trace :z (d/normal mu 1)) mu))
+    [] []]
+   [:splices-an-override-with-arguments
+    (gen [m] (let [x (splice :p (second (nth law-models 3)) m)] (trace :z (d/normal x 1))))
+    [1.0] [[2.0]]]])
+
+(laws/deflaws spliced-internal-proposal spliced-models 60 laws/general)
+(laws/deflaws spliced-internal-proposal spliced-models 60 laws/fixed-support)
+
+(def exact-normal-normal
+  "normal-normal with its exact posterior as q: given y, mu ~ N(y/2, √½)."
+  (prop/with-internal-proposal normal-normal
+    (gen [sigma] (when (open? sigma :mu)
+                   (trace :mu (d/normal (* 0.5 (given sigma :y)) (Math/sqrt 0.5)))))))
+
 (deftest the-exact-posterior-as-proposal-gives-the-evidence
   ;; mu ~ N(0, 1), y ~ N(mu, 1): mu | y ~ N(y/2, √½), and p(y) = N(y; 0, √2).
   ;; With that posterior as q, every key's weight is log p(y) exactly
   (let [y 1.3
-        exact (prop/with-internal-proposal normal-normal
-                (gen [sigma] (when (open? sigma :mu)
-                               (trace :mu (d/normal (* 0.5 (given sigma :y)) (Math/sqrt 0.5))))))
+        exact exact-normal-normal
         evidence (dc/log-prob (d/normal 0 (Math/sqrt 2)) y)]
     (doseq [k (range 8)]
       (is (ts/close? evidence (:weight (gfi/generate exact [] (cm/choicemap :y y) (rng/key k)))
@@ -77,7 +99,63 @@
           (str "key " k)))
     (testing "the default proposal does not have this property"
       (let [ws (map #(ts/number (:weight (gfi/generate normal-normal [] (cm/choicemap :y y) (rng/key %)))) (range 8))]
-        (is (apply not= ws))))))
+        (is (apply not= ws))))
+    ;; §4.4 (law audit 4.c). Planted bug (2026-10-20): the override's
+    ;; generate leaving q out fails every key
+    (testing "and a model that splices it uses its proposal: z, unconstrained, adds nothing"
+      (let [model (gen [] (let [mu (splice :p exact)] (trace :z (d/normal mu 1))))]
+        (doseq [k (range 8)]
+          (is (ts/close? evidence (:weight (gfi/generate model [] (cm/choicemap [:p :y] y) (rng/key k)))
+                         {:rtol (ts/tol 1e-12) :atol (ts/tol 1e-12)})
+              (str "key " k)))))))
+
+;; ---------------------------------------------------------------------------
+;; The worked examples of pp. 143-144
+;; ---------------------------------------------------------------------------
+
+(def abc
+  "The model of p. 143's table: p({a F c F}) = 0.45, p({a F c T}) = 0.05,
+   p({a T b F c F}) = 0.05, p({a T b F c T}) = 0.2, p({a T b T c F}) =
+   p({a T b T c T}) = 0.125."
+  (gen [] (let [a (trace :a (d/bernoulli 0.5))
+                b (when a (trace :b (d/bernoulli 0.5)))]
+            (trace :c (d/bernoulli (if a (if b 0.5 0.8) 0.1))))))
+
+(def abc-proposal
+  "The internal proposal of p. 143: a ~ Bern(0.6), then b ~ Bern(0.5) when a
+   is true, and c ~ Bern(0.5), each where σ leaves it open. For σ1 = {c T}
+   it gives q({a F}) = 0.4, q({a T b F}) = q({a T b T}) = 0.3. (Its table
+   for σ2 = {b F}, whose {a F} branches leave b unvisited, is a loud error
+   in gen.clj: generate visits every constraint.)"
+  (gen [sigma] (let [a (if (open? sigma :a) (trace :a (d/bernoulli 0.6)) (given sigma :a))]
+                 (when (and a (open? sigma :b)) (trace :b (d/bernoulli 0.5)))
+                 (when (open? sigma :c) (trace :c (d/bernoulli 0.5))))))
+
+(deftest the-thesis-s-generate-and-regenerate-examples
+  ;; law audit, finding 9: every outcome's weight exactly, the thesis's own
+  ;; among them. Planted bugs (2026-10-20): the override's generate weight
+  ;; without -log q fails the generate example; its project dropping log q
+  ;; (the audit's C3) fails the regenerate example
+  (let [pgf (prop/with-internal-proposal abc abc-proposal)
+        outcome (fn [tr] (if (ts/host (tr :a)) [true (ts/host (tr :b))] [false]))
+        log #(Math/log %)]
+    (testing "p. 143: generate given σ1 = {c T}; υ = {a F} weighs log 0.05 - log 0.4"
+      (let [expected {[false] (- (log 0.05) (log 0.4))
+                      [true false] (- (log 0.2) (log 0.3))
+                      [true true] (- (log 0.125) (log 0.3))}
+            rs (map #(gfi/generate pgf [] (cm/choicemap :c true) %) (rng/split (rng/key 8) 16))]
+        (is (= (set (keys expected)) (set (map (comp outcome :trace) rs))) "every outcome drawn")
+        (doseq [{tr :trace w :weight} rs]
+          (is (ts/close? (expected (outcome tr)) w) (str (outcome tr))))))
+    (testing "p. 144: regenerating {a, b} of {a T b F c T}; υ = {a F} weighs log (0.05 · 0.3)/(0.2 · 0.4)"
+      (let [tr (:trace (gfi/generate pgf [] (cm/choicemap :a true :b false :c true) (rng/key 9)))
+            expected {[false] (log (/ (* 0.05 0.3) (* 0.2 0.4)))
+                      [true false] 0.0
+                      [true true] (log (/ (* 0.125 0.3) (* 0.2 0.3)))}
+            rs (map #(gfi/regenerate tr (sel/select :a :b) %) (rng/split (rng/key 10) 16))]
+        (is (= (set (keys expected)) (set (map (comp outcome :trace) rs))) "every outcome drawn")
+        (doseq [{t :trace w :weight} rs]
+          (is (ts/close? (expected (outcome t)) w) (str (outcome t))))))))
 
 (deftest the-distribution-is-the-model's
   (let [pgf (prop/with-internal-proposal normal-normal (gen [sigma] (trace :mu (d/normal 5 0.1))))

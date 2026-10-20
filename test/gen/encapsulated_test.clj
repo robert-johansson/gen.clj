@@ -6,10 +6,11 @@
    - ω is kept unless the change hints say something changed, and untraced
      draws never shift a site's key.
    - The statistical laws: Eq. 4.3 (E_q̊ ξ = p) and Eq. 4.4 (E_p̊ 1/ξ =
-     1/p, through simulate); pseudo-marginal MH reaches the exact posterior
-     (Eqs. 4.15-4.16), with untraced draws and with an importance-sampling
-     likelihood; importance sampling with an encapsulated proposal is
-     unbiased (§4.5.4).
+     1/p, through simulate); a body's untraced draws are independent;
+     pseudo-marginal MH reaches the exact posterior (Eqs. 4.15-4.16), with
+     untraced draws, with an importance-sampling likelihood and with a
+     particle filter's (p. 160); importance sampling with an encapsulated
+     proposal is unbiased (§4.5.4).
    - Loud misuse, and operations that need exact densities (gradients,
      elliptical slice, exact and replayed proposals) refuse encapsulated
      randomness rather than fix one draw of it silently."
@@ -29,6 +30,7 @@
             [gen.inference.importance :as is]
             [gen.inference.mcmc :as mcmc]
             [gen.inference.mh :as mh]
+            [gen.inference.particle-filter :as pf]
             [gen.inference.transform :as tf]
             [gen.inference.proposal :as prop]
             [gen.laws :as laws]
@@ -101,15 +103,37 @@
       (splice :inner with-simulator 0.4)
       (trace :y (d/normal (+ mu (untraced (d/normal 0 1))) 1)))))
 
+;; two untraced draws in one body, the second from ω folded with 1, which a
+;; body of one draw never reaches (law audit E21). Planted bug (2026-10-20):
+;; assess folding every draw with 0 passes every law over the other models,
+;; and fails assess-is-generate and the same-key score over this one
+(def two-draws
+  (gen [m] (let [z1 (untraced (d/normal 0 1))
+                 z2 (untraced (d/normal 0 1))
+                 x (trace :x (d/normal (+ m z1) 1))]
+             (trace :y (d/normal (- x z2) 1)))))
+
 (def untraced-models
   [["mixture" mixture [] []]
    ["simulator" with-simulator [0.4] [[0.7]]]
    ;; growing alternatives too, so that updates make fresh choices (law audit gap 5)
    ["map" (comb/map noisy-kernel) [[0.1 0.2 0.3]] [[[0.1 0.5 0.3]] [[0.1 0.2]] [[0.1 0.2 0.3 0.4]]]]
    ["unfold" (comb/unfold noisy-step) [3 0.0] [[2 0.0] [3 0.5] [5 0.0]]]
-   ["spliced" spliced [0.0] [[1.0]]]])
+   ["spliced" spliced [0.0] [[1.0]]]
+   ["two-draws" two-draws [0.0] [[1.0]]]])
 
 (laws/deflaws untraced untraced-models 100 laws/encapsulated)
+
+;; ω in a dynamic body whose update makes fresh sites (law audit, finding 6):
+;; the encapsulated update law saw fresh choices only in Map and Unfold, so a
+;; handler update that adds a fresh site's log density instead of leaving
+;; -log q out (C11) passed it. Planted bug (2026-10-20): C11 fails this law
+(def growing-noisy
+  (gen [n] (let [e (untraced (d/normal 0 0.5))]
+             (doseq [i (range n)] (trace [:y i] (d/normal e 1))))))
+
+(laws/deflaws untraced-fresh [["growing-noisy" growing-noisy [2] [[3] [4]]]] 100
+  {:update-weight-is-the-score-change-less-fresh laws/update-weight-is-the-score-change-less-fresh})
 
 ;; An estimated density: y given θ, with y ~ N(θ + z, 1) and z ~ N(0, 1), so
 ;; p(y; θ) = N(y; θ, √2), estimated by importance sampling over z from its
@@ -282,7 +306,39 @@
     (testing "an Unfold of untraced steps: each innovation 1.5"
       (is (within? (mean-xi (comb/unfold noisy-step) [3 0.0]
                             (cm/choicemap [0 :s] 1.5 [1 :s] (+ (* 0.9 1.5) 1.5) [2 :s] (+ (* 0.9 2.85) 1.5)) 63)
-                   n3)))))
+                   n3)))
+    ;; law audit, finding 9. Planted bug (2026-10-20): a splice that gives its
+    ;; callee the caller's key, so both bodies draw one ω (the callee's
+    ;; uniform is then the quantile of the caller's normal), gives 0.0152
+    ;; against 0.0085, a band of 0.0011
+    (testing "a splice: the callee's ω is its own, E[ξ] = N(μ; m, 1) p(a, b) N(y; μ, √2)"
+      (is (within? (mean-xi spliced [0.0] (cm/choicemap :mu 0.2 [:inner :a] true [:inner :b] true :y -1.3) 69)
+                   (* (npdf 0.2 0.0 1.0) 0.4 0.34 (npdf -1.3 0.2 (Math/sqrt 2.0))))))))
+
+(defn- correlation [pairs]
+  (let [centered (fn [xs] (let [[m _] (mean-sd xs)] (map #(clojure.core/- % m) xs)))
+        cx (centered (map first pairs))
+        cy (centered (map second pairs))
+        dot (fn [as bs] (reduce clojure.core/+ (map clojure.core/* as bs)))]
+    (clojure.core// (dot cx cy) (Math/sqrt (clojure.core/* (dot cx cx) (dot cy cy))))))
+
+(deftest ^:heavy untraced-draws-in-a-body-are-independent
+  ;; §4.5.2 (law audit E21): a body's untraced draws are its black-box code's
+  ;; own randomness, the n-th from ω folded with n, so two of them are
+  ;; independent. Planted bug (the audit's B2, 2026-10-20): every draw from ω
+  ;; itself, another model's randomness consistently, so every pointwise law
+  ;; passes; here the correlation is then 1.0, and E[ξ] 0.1295 against
+  ;; 0.1583, 12 standard errors off (z1 + z2 in place of the difference moved
+  ;; it by 4.7 only)
+  (testing "two draws are uncorrelated: the sample correlation within 5/√n of 0"
+    (let [two (gen [] [(untraced (d/normal 0 1)) (untraced (d/normal 0 1))])
+          n 2000
+          pairs (mapv #(mapv ts/number (:retval (gfi/simulate two [] %))) (rng/split (rng/key 4242) n))]
+      (is (< (Math/abs (correlation pairs)) (clojure.core// 5.0 (Math/sqrt n))))))
+  (testing "Eq. 4.3 with y ~ N(z1 - z2, 1): E[ξ] = N(1.5; 0, √3)"
+    (let [m (gen [] (let [z1 (untraced (d/normal 0 1)) z2 (untraced (d/normal 0 1))] (trace :y (d/normal (- z1 z2) 1))))
+          xis (mapv #(Math/exp (ts/number (:weight (gfi/assess m [] (cm/choicemap :y 1.5) %)))) (rng/split (rng/key 4243) 4000))]
+      (is (within? xis (npdf 1.5 0.0 (Math/sqrt 3.0)))))))
 
 (def theta-z-y
   "θ ~ N(0, 1), z untraced N(0, 1), y ~ N(θ + z, 1): p(y) = N(y; 0, √3), and
@@ -311,15 +367,19 @@
                         :theta))))
         (rng/split key n)))
 
-(defn- posterior-ok?
-  "Are the θs N(y/3, √(2/3)) (θ ~ N(0, 1), y ~ N(θ, √2))? Mean within 5
-   standard errors, variance within 5 of its standard errors."
-  [thetas y]
+(defn- normal-ok?
+  "Are the θs N(mu, √v)? Mean within 5 standard errors, variance within 5
+   of its standard errors."
+  [thetas mu v]
   (let [n (count thetas)
-        [m s] (mean-sd thetas)
-        v (/ 2.0 3.0)]
-    (and (< (Math/abs (clojure.core/- m (clojure.core// y 3.0))) (clojure.core/* 5 (Math/sqrt (clojure.core// v n))))
+        [m s] (mean-sd thetas)]
+    (and (< (Math/abs (clojure.core/- m mu)) (clojure.core/* 5 (Math/sqrt (clojure.core// v n))))
          (< (Math/abs (clojure.core/- (clojure.core/* s s) v)) (clojure.core/* 5 v (Math/sqrt (clojure.core// 2.0 (dec n))))))))
+
+(defn- posterior-ok?
+  "Are the θs N(y/3, √(2/3)) (θ ~ N(0, 1), y ~ N(θ, √2))?"
+  [thetas y]
+  (normal-ok? thetas (clojure.core// y 3.0) (clojure.core// 2.0 3.0)))
 
 ;; Planted bugs (2026-10-20), each caught on the JVM backend:
 ;; - keeping ω when θ changes (keeps-omega? true for regenerate): each chain
@@ -349,6 +409,66 @@
                                              :theta))))
                        (rng/split (rng/key 65) 2000))]
       (is (posterior-ok? thetas 1.5)))))
+
+;; PMMH with an SMC estimator (thesis p. 160, law audit E17): θ ~ N(0, 1), and
+;; y_0..y_2 given θ from a linear-Gaussian state-space model, y_t ~ N(x_t + θ,
+;; 0.5) with x_t ~ N(0.8 x_{t-1}, 1), x_{-1} = 0. The likelihood is a particle
+;; filter's estimate on y - θ (10 particles, resampled at every step), so the
+;; estimate carries the log marginal likelihood across resamplings
+(def ssm (comb/unfold (gen [_t prev] (let [x (trace :x (d/normal (* 0.8 prev) 1))] (trace :y (d/normal x 0.5)) x))))
+
+(def ssm-ys [0.3 1.1 -0.4])
+
+(defn- pf-log-estimate [theta ys key]
+  (let [ks (rng/split key (* 2 (count ys)))
+        obs (fn [t] (cm/choicemap [t :y] (- (ys t) theta)))]
+    (pf/log-ml-estimate
+     (reduce (fn [state t]
+               (-> state
+                   (pf/resample {:key (ks (dec (* 2 t)))})
+                   (pf/step [(inc t) 0.0] [gen.diff/unknown-change gen.diff/no-change] (obs t) {:key (ks (* 2 t))})))
+             (pf/initialize ssm [1 0.0] (obs 0) 10 {:key (ks 0)})
+             (range 1 (count ys))))))
+
+(def smc-likelihood
+  (custom/estimated
+   {:addresses (mapv #(vector :y %) (range (count ssm-ys)))
+    :estimate (fn [[theta] choices key]
+                (pf-log-estimate theta (mapv #(cm/get-choice choices [:y %]) (range (count ssm-ys))) key))}))
+
+(def smc-model
+  (gen [] (let [theta (trace :theta (d/normal 0 1))] (splice :ys smc-likelihood theta) theta)))
+
+(defn- ssm-log-likelihood
+  "log p(ys | θ) by the Kalman filter, on the host."
+  [ys theta]
+  (first (reduce (fn [[lml m p] y]
+                   (let [m- (clojure.core/* 0.8 m)
+                         p- (clojure.core/+ (clojure.core/* 0.64 p) 1.0)
+                         s (clojure.core/+ p- 0.25)
+                         k (clojure.core// p- s)
+                         e (clojure.core/- y theta m-)]
+                     [(clojure.core/+ lml (Math/log (npdf e 0.0 (Math/sqrt s))))
+                      (clojure.core/+ m- (clojure.core/* k e))
+                      (clojure.core/* (clojure.core/- 1.0 k) p-)]))
+                 [0.0 0.0 0.0] ys)))
+
+(deftest ^:slow ^:heavy pmmh-with-a-particle-filter-estimator-targets-the-exact-posterior
+  ;; log p(y | θ) is quadratic in θ, so its values at -1, 0, 1 give the
+  ;; Gaussian posterior: precision 1 + A, mean b/(1 + A). 1000 chains of 40
+  ;; selection-MH moves from the prior; mean and variance within 5 of their
+  ;; standard errors (measured 0.164 and 0.526 against 0.138 and 0.515, bands
+  ;; 0.114 and 0.115; the log estimate's sd is 0.72). Planted bugs
+  ;; (2026-10-20): the filter's estimate without the log marginal likelihood
+  ;; its resamplings carried (the last step's alone) gives -0.197 and 0.934;
+  ;; an estimated density that keeps its estimate when θ changes gives 0.048
+  ;; and 0.932, about the prior
+  (let [[l- l0 l+] (map #(ssm-log-likelihood ssm-ys %) [-1.0 0.0 1.0])
+        precision (clojure.core/- 1.0 (clojure.core/+ l+ l- (clojure.core/* -2.0 l0)))
+        mu (clojure.core// (clojure.core// (clojure.core/- l+ l-) 2.0) precision)
+        obs (apply cm/choicemap (mapcat (fn [t y] [[:ys :y t] y]) (range) ssm-ys))
+        thetas (pmmh-thetas smc-model obs 1000 40 (rng/key 70))]
+    (is (normal-ok? thetas mu (clojure.core// 1.0 precision)) (str (mean-sd thetas) " against " mu))))
 
 (deftest ^:slow ^:heavy involutive-mcmc-is-pseudo-marginal
   ;; the involution's update takes the move's key, so it redraws ω, a
