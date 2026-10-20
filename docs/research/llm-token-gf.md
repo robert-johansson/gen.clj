@@ -39,7 +39,7 @@ PROVISIONAL in DESIGN.md §9.*
 
 | Function | Meaning |
 |---|---|
-| `(completion lm)`, `(completion lm {:eos tokens})` | the generative function of `[prompt max-tokens]`; `:eos`, the set of end tokens (default the LM's `:eog`; `#{}` for exactly max-tokens) |
+| `(completion lm)`, `(completion lm {:end-tokens tokens})` | the generative function of `[prompt max-tokens]`; `:end-tokens`, the set of end tokens (default the LM's `:eog`; `#{}` for exactly max-tokens) |
 | `(dist row)` | the distribution of one token given its log-probabilities (a float array, as `lm/next-logprobs` gives): a host draw, its log-probability the row's entry; usable at any `trace` site |
 | `(forced tokens)`, `(forced at tokens)` | constraints forcing tokens at the positions at, at + 1, … (0 by default) |
 | `(from k)` | the selection of every token from position k on |
@@ -60,17 +60,19 @@ kept) or max-tokens of them; its return value is the vector of tokens.
 - **assess** scores the tokens in one LM call; the tokens must be at the
   positions 0 to n-1 without a gap, with no end token but the last, and end
   at an end token or max-tokens, otherwise loud.
-- **update** keeps the tokens before the first change (a constraint, or a
-  new prompt) with their scores, and rescores the rest through the LM, in
-  one call for each run of known tokens. A token made an end token ends the
+- **update** keeps the tokens before the first change (a constraint that
+  differs from the token there, or a new prompt) with their scores, and
+  rescores the rest through the LM, in one call for each run of known
+  tokens. A token made an end token ends the
   completion there and discards the rest; an end token made a common one, or
   a larger max-tokens, draws fresh tokens, whose scores stay out of the
   weight (forward sampling); a smaller max-tokens truncates. The discard is
   the overwritten tokens and those no longer visited. The weight is the new
   score less the old, less the fresh tokens'.
-- **regenerate** keeps the tokens before the first selected one, resamples
-  the selected, rescores the others; `(from k)` resamples the suffix, the
-  tokens whose distributions depend on token k. The weight is the retained
+- **regenerate** keeps the tokens before the first change with their
+  scores (a selected token redrawn as it was is no change), resamples the
+  selected, rescores the others after it; `(from k)` resamples the suffix,
+  the tokens whose distributions depend on token k. The weight is the retained
   tokens' score ratio (Eq. 4.1), 0 for a suffix with unchanged arguments.
 - **project** sums the selected tokens' scores; **propose** is a simulate.
 - **Change hints:** the retdiff of update and regenerate is a vector-diff
@@ -86,9 +88,13 @@ kept) or max-tokens of them; its return value is the vector of tokens.
 ledger's, `lm/score`, computed once and kept by its trie, never the entry
 of the row the token was drawn from. A trace also keeps its tokens' scores,
 which update and regenerate reuse wherever a token's context is unchanged,
-so an identity update weighs exactly 0 even after the LM evicted the rows.
-Within one LM, assess and a trace's score agree bit for bit; the laws hold
-exactly. On llama.cpp the row a token was drawn from and the score the LM
+so a revision that changes no token weighs exactly 0 even after the LM
+evicted the rows. (The first build kept them only before the first
+constraint or selection, so a constraint equal to its token rescored the
+rest; corrected 2026-10-21 after review-lm.) Within one LM, while it holds
+the rows it read, assess and a trace's score agree bit for bit and the laws
+hold exactly; after an eviction assess reads the rows again, within the
+engine's noise. On llama.cpp the row a token was drawn from and the score the LM
 keeps for it differ by the engine's noise when the LM read that token
 before in another shape (a teacher-forced read of a forced or assessed
 sequence): sampling is then from the row, scoring from the ledger, within
@@ -96,13 +102,16 @@ the band (`llm-branching.md`).
 
 **Draws** (the owner's foundation): token i is drawn with `(fold-in key i)`
 of the operation's key, by `token/dist`: one uniform from gen.random on the
-JVM backend (float64), its inverse CDF over the row in token order. So a
-completion is a pure function of its key, and in update and regenerate a
-fresh token at position i draws from the same schedule. Under a batch
-tracer (`gen.batched`) the operations, and `token/dist`'s draws, raise the
-batched-branch error, so a batched run falls back to one particle at a time
-on every backend (forcing the JVM backend's draw under a tracer over MLX
-would otherwise give every particle the same token).
+JVM backend (float64), its inverse CDF over the row in token order. So the
+same key draws the same tokens from the same rows, and in update and
+regenerate a fresh token at position i draws from the same schedule. (On
+llama.cpp a row read again after an eviction differs within the engine's
+noise, so a run's scores, and rarely its tokens, depend on the LM's history
+as well.) Under a batch tracer (`gen.batched`) the operations, and
+`token/dist`'s draws, raise the batched-branch error with its reason, so a
+batched run falls back to one particle at a time on every backend. (Without
+the check a batched key fails in the draw with a ClassCastException, and
+gen.batched falls back all the same: the check is there for the reason.)
 
 ## Decisions
 
@@ -123,8 +132,11 @@ would otherwise give every particle the same token).
 3. **Recommendation: end and length.** An end token is a choice like any
    other: drawn, scored, kept in the trace and the return value, and it ends
    the completion; the end tokens default to the LM's `:eog` (every
-   end-of-generation token, which the GGUF names), `:eos` replaces them, and
-   `#{}` gives completions of exactly max-tokens. A completion that reaches
+   end-of-generation token, which the GGUF names), `:end-tokens` replaces
+   them, and `#{}` gives completions of exactly max-tokens. The option was
+   `:eos` as first built; renamed 2026-10-21, PROVISIONAL (owner to
+   confirm), because it is a set while the vocabulary's `:eos` is one token
+   (review-lm). Alternatives: `:eog`, the vocabulary's name for its set. A completion that reaches
    max-tokens without one simply stops. Alternatives: the end token kept
    out of the return value, or GenMLX's single EOS id.
 4. **Recommendation: the return value** is the vector of drawn tokens, the
@@ -147,8 +159,12 @@ would otherwise give every particle the same token).
      GenMLX's ledger, for project and the reuse in update and regenerate;
    - `from` lives in `gen.llm.token`; a suffix selection over integer
      addresses would serve Unfold too, and could move to `gen.selection`;
-   - `token/dist` checks its row's type and size, not its normalization
-     (an O(vocabulary) pass a token): rows come from an LM.
+   - `token/dist` checks its row's type and size when made, and a draw its
+     normalization, as far as the walk goes, from the total it sums anyway:
+     a row of no mass, of probabilities in place of their logs, with NaN,
+     or short of 1 where the walk passes it is loud (`:invalid-row`;
+     review-lm). A full pass over the row (O(vocabulary) a token) is not
+     made.
 
 ## Batching
 
@@ -168,7 +184,7 @@ particles end at different lengths, and a batched trace holds one value
 array per address for every particle, so ragged completions need a mask or
 padding (GenMLX's masked-EOS algebra pads with a token of log-probability
 0), which changes what a completion's choices are. Clean only for
-completions of exactly max-tokens (`:eos #{}`). **Recommendation:** keep the
+completions of exactly max-tokens (`:end-tokens #{}`). **Recommendation:** keep the
 fallback, and batch where the inference algorithm moves its particles in
 step: token SMC (genclj-loyp) calls `lm/batch-next-logprobs` over its
 particles' contexts each step, one advance for all of them, and resamples
@@ -186,13 +202,25 @@ engine (`gen.llm.cell-engine`):
   tokens, a Map of completions over two prompts, and a conversation (an
   Unfold whose turn's prompt is the context so far, extended by the turn's
   completion), with changed arguments (other lengths, other prompts).
-- **Score once:** the same laws (40 trials) on the noisy cell engine, whose
-  reads differ with their shape and cells as llama.cpp's do, with room for
-  every read: exact. And a targeted test: a token drawn after the LM scored
-  it teacher-forced keeps the LM's first score, so assess agrees, while the
-  row it was drawn from differs.
+- **Score once:** the same laws (40 trials, a fixed seed) on the noisy cell
+  engine, whose reads differ with their shape and cells as llama.cpp's do,
+  with room for every read: exact. Over 97 tokens, random programs seldom
+  draw a token the LM read before in another shape, so the laws run over 5
+  tokens as well, completions of exactly 8, where draws keep following
+  paths read teacher-forced before. Targeted tests cover the same ground
+  directly: at 20 prompts, a token drawn after the LM scored it
+  teacher-forced (an end token at some) keeps the LM's first score, so
+  assess agrees, while the row it was drawn from differs; and after
+  evictions, an update constraining a token to its value, one extending the
+  completion, and a regenerate redrawing a token as it was all weigh exactly
+  0, while the LM's re-read scores differ. In the LM's suite,
+  `a-score-is-the-first-reads` holds the cache to the first read.
+- **Rows that are not normalized** are loud at the draw: no mass, the
+  probabilities in place of their logs, NaN (every key), a mass of 0.2 (the
+  keys whose uniform falls past it, within 5 standard errors of 4 in 5).
 - **Draws:** `token/dist`'s frequencies over 5,000 keys within 5 standard
-  errors; a completion's first token over 4,000 keys against the exact row;
+  errors; a completion's first token over 4,000 keys against the exact row
+  (each token expected 10 times or more on its own, the rarer pooled);
   token i is exactly `token/dist`'s draw with `(fold-in key i)`.
 - **Each operation against the exact model:** end tokens and max-tokens,
   forced prefixes and text, forced ends, assess (and its loud refusals),
@@ -203,39 +231,53 @@ engine (`gen.llm.cell-engine`):
   whole completion, then its second token) end distributed as the exact
   posterior of P(a token in {3, 4, 5} | liked), by enumeration, within 5
   standard errors.
-- **Inference:** importance sampling (2,000 samples) and 20 particle filters
+- **Inference:** importance sampling's estimate (2,000 samples, within 5
+  standard errors of the mean importance weight) and 20 particle filters
   of 100 particles over two steps estimate the exact marginal likelihood
   (by enumeration over 97² token pairs) within 5 standard errors; MH over
   token traces (suffix and topic moves) keeps the observation, moves,
   stays consistent; batched runs fall back with independent particles; the
   LM's engine never ran its GC backstop.
-- **Misuse** is loud: arity, prompts, max-tokens, constraints (past the
-  maximum, at keywords, not tokens, nested), bad positions and end sets, a
-  completion past the LM's context.
+- **Misuse** is loud, each error with a `:reason`: arity, prompts,
+  max-tokens, constraints (past the maximum, at keywords, not tokens,
+  nested), bad positions and end sets, a completion over something not an
+  LM, a completion past the LM's context.
 
 Mutations of `gen.llm.token` checked (2026-10-21, each applied, the suite
-run, reverted), eighteen, all caught:
+run, reverted; again after review-lm's fixes, the set below), twenty-three,
+all caught:
 
 | Mutation | Caught by |
 |---|---|
-| a drawn token scored from its row, not the LM's ledger | a-drawn-token-is-scored-as-the-lm-keeps-it (the laws cannot see it: random programs never draw a token the LM read before in another shape) |
-| one key for every site | token-i-is-drawn-with-its-site-key, importance-sampling…, batched-runs… (22 failures) |
-| the inverse CDF one token off | the-distribution-draws…, a-completion-draws…, a-particle-filter… (7 failures) |
+| a drawn token scored from its row, not the LM's ledger | drawn-tokens-are-scored-as-the-lm-keeps-them (40 failures), and the five-token score-once laws (regenerate-keeps-unselected-choices at the suite's seed; one to seven laws at each of six seeds). Before the five-token case, the 97-token laws caught it in 2 runs of 4 (review-lm), never at a fixed seed |
+| one key for every site | token-i-is-drawn-with-its-site-key, importance-sampling…, batched-runs…, drawn-tokens… (62) |
+| the inverse CDF one token off | the-distribution-draws…, a-completion-draws…, a-particle-filter… (8) |
 | token/dist reading the next entry | the-distribution-reads-its-row (1) |
-| end tokens ignored | most laws and tests (178 failures) |
-| a run of known tokens passing an end token | update laws, on both engines (6) |
-| update keeping the first changed token's old value | identity-update…, the update laws, a-particle-filter… (20) |
-| update weighing fresh tokens | the update weight laws, a-particle-filter… (6) |
-| update not discarding truncated tokens | updates-are-reversible…, update-weight… (6) |
-| regenerate weighing selected tokens | the regenerate weight laws (10) |
+| end tokens ignored | most laws and tests (178 failures, 21 errors) |
+| a run of known tokens passing an end token | update laws, on both engines; update-rescores-after-a-change (6) |
+| update weighing fresh tokens | the update weight laws, a-particle-filter…, unchanged-tokens-keep-their-scores-after-eviction (7) |
+| update not discarding truncated tokens | updates-are-reversible…, update-weight…, update-rescores… (6) |
+| regenerate weighing selected tokens | the regenerate weight laws, regenerate-from-a-boundary… (10) |
 | regenerate keeping selected tokens | regenerate-from-a-boundary…, mh-moves…, mh-over-tokens-targets-the-posterior (3) |
-| generate weighing unconstrained tokens | the generate weight laws, a-particle-filter… (9) |
+| generate weighing unconstrained tokens | the generate weight laws, generate-forces-tokens, a-particle-filter… (12) |
 | project ignoring the selection | the projection laws (19) |
-| the retdiff missing the changed positions | the laws' retdiff soundness (5) |
-| the retdiff's lengths swapped | the laws' retdiff soundness (5) |
-| update's no-change shortcut taken with constraints | the update laws, on both engines (12) |
+| the retdiff missing the changed positions | the laws' retdiff soundness, update-rescores… (5) |
+| the retdiff's lengths swapped | the same (5) |
+| update's no-change shortcut taken with constraints | the update laws, on both engines; update-rescores… (12) |
 | regenerate's no-change shortcut taken with a selection | mh-moves…, mh-over-tokens-targets-the-posterior, regenerate-from-a-boundary… (3) |
 | no batched-branch check | batched-runs-fall-back… (1) |
+| no reuse of the trace's scores (review-lm's T2 and T3, which the suite missed before) | unchanged-tokens-keep-their-scores-after-eviction (5) |
+| reuse across a new prompt | update-rescores-after-a-change, the update and regenerate laws, mh-moves… (6) |
+| reuse of the first changed token's score | update-rescores…, regenerate-from-a-boundary…, the update and regenerate laws on both engines, mh-moves… (9) |
+| reuse after the run has left the trace | regenerate-from-a-boundary…, the regenerate laws on both engines (3) |
+| no normalization check where the walk stops | a-row-that-is-not-normalized-is-loud (1) |
+| none at the row's end | the same (3) |
+
+And of `gen.llm.cache` (review-lm's L1): a held entry's row scoring the
+token after it before the path's first read is caught by
+`gen.llm.lm-test/a-score-is-the-first-reads`, drawn-tokens… and the
+score-once laws (35 failures); the LM's suite alone missed it before, its
+exact engines unable to tell the two reads apart.
 
 ## Measurements (toy engine, this Mac, pure JVM)
 

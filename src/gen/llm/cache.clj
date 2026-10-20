@@ -225,7 +225,8 @@
   (let [at (reduce (fn [at [i p]] (update at p (fnil conj []) i)) {} (map-indexed vector parents))
         by-index (reduce (fn [by-index p]
                            (let [is (at p)
-                                 forks (br/fork p (cond-> (count is) (consumed p) dec))]
+                                 n (- (count is) (if (consumed p) 1 0))
+                                 forks (if (pos? n) (br/fork p n) [])]
                              (vswap! made into forks)
                              (into by-index (map vector is (cond-> forks (consumed p) (conj p))))))
                          {} (distinct parents))]
@@ -356,14 +357,6 @@
   (when (:closed? (state c))
     (throw (ex-info "lm: the LM is closed" {:reason :closed}))))
 
-(defn- token?
-  "Is t a token of a vocabulary of n tokens? (Quick for a long; a big
-   integer is out of range, not an error.)"
-  [t ^long n]
-  (if (instance? Long t)
-    (< -1 (.longValue ^Long t) n)
-    (and (integer? t) (not (neg? (compare t 0))) (neg? (compare t n)))))
-
 (defn- check-context
   "ctx fits in the cache, and its tokens are tokens of the vocabulary."
   [c ctx]
@@ -376,7 +369,7 @@
                       {:reason :context-full :tokens n :limit limit})))
     (dotimes [i n]
       (let [t (nth ctx i)]
-        (when-not (token? t n-vocab)
+        (when-not (br/index? t n-vocab)
           (throw (ex-info (str "lm: not a token of the vocabulary (0 to " (dec n-vocab) "): " (pr-str t))
                           {:reason :invalid-token :token t :n-vocab n-vocab})))))))
 

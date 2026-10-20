@@ -6,15 +6,21 @@
    - The GFI laws (gen.laws, general and forward-sampling) over completions
      that end on a third of the tokens, on none, or on EOS, and over a gen
      model whose prompt depends on a choice and whose observation on the
-     tokens; and again on the noisy cell engine, whose reads differ with
-     their shape and cells, as llama.cpp's do: score once keeps every law
-     exact within one LM.
+     tokens; and again, with a fixed seed, on the noisy cell engine, whose
+     reads differ with their shape and cells as llama.cpp's do, over 97
+     tokens and over 5 (where draws keep following paths the LM read before
+     teacher-forced): every law exact within one LM.
+   - Score once, targeted: a drawn token the LM read before in another
+     shape keeps the LM's first score, and a revision that changes no token
+     weighs exactly 0 after the LM evicted its rows.
    - Each operation against the exact model: draws, end tokens, forced
-     tokens, rescoring, discards, suffix regeneration, projection.
+     tokens, rescoring, discards, suffix regeneration, projection; rows
+     that are not normalized are loud.
    - Inference over a model containing a completion: importance sampling and
      a particle filter estimate the exact marginal likelihood (by
-     enumeration), within 5 standard errors; MH runs; batched runs fall back
-     to one particle at a time; the LM's engine never runs its GC backstop.
+     enumeration), within 5 standard errors; MH targets the exact
+     posterior; batched runs fall back to one particle at a time; the LM's
+     engine never runs its GC backstop.
    - Misuse is loud.
 
    Mutations of gen.llm.token checked (2026-10-21, each applied, the suite
@@ -53,8 +59,8 @@
   "A third of the toy's tokens end a completion, so that ends are common."
   (set (range 32)))
 
-(def ^:private stops (token/completion m {:eos ends}))
-(def ^:private fixed (token/completion m {:eos #{}}))
+(def ^:private stops (token/completion m {:end-tokens ends}))
+(def ^:private fixed (token/completion m {:end-tokens #{}}))
 (def ^:private open-ended (token/completion m))
 
 (def ^:private prompt [95 40 73])
@@ -100,9 +106,24 @@
    cells, with room for every read of the laws below (no eviction)."
   (token/completion (lm/lm (ce/engine {:n-vocab n-vocab :max-branches 50000 :max-cells 200000 :noise 1e-3})
                            (tt/tokenizer n-vocab) {:max-cells 200000})
-                    {:eos ends}))
+                    {:end-tokens ends}))
 
-(laws/deflaws score-once [[:noisy noisy [prompt 4] [[prompt 2] [prompt 6] [[95 41] 4]]]] 40)
+(def ^:private small
+  "A completion over five tokens, 4 the end, on the noisy engine: so few
+   that draws keep following paths the LM read before in another shape
+   (teacher-forced), where the row a token is drawn from and the score the
+   LM keeps for it differ."
+  (token/completion
+   (lm/lm (ce/engine {:n-vocab 5 :max-branches 50000 :max-cells 200000 :noise 1e-3})
+          {:n-vocab 5 :bos nil :eos 4 :eog #{4} :add-bos? false
+           :token-bytes (fn [t] (byte-array [(byte t)])) :encode (fn [_ _] []) :decode (fn [ts] (apply str ts))}
+          {:max-cells 200000})
+   {:end-tokens #{}}))
+
+(laws/deflaws score-once
+  [[:noisy noisy [prompt 4] [[prompt 2] [prompt 6] [[95 41] 4]]]
+   [:small small [[0 1] 8] [[[0 1] 5] [[0 1] 10] [[2] 8]]]]
+  {:num-tests 40 :seed 2026})
 
 ;; ---------------------------------------------------------------------------
 ;; One token
@@ -135,7 +156,20 @@
     (is (= [0 1 2 3 4] (dc/support dist)))
     (is (dc/discrete? dist))
     (is (= :invalid-row (bc/reason #(token/dist [0.0 -1.0]))))
-    (is (= :invalid-row (bc/reason #(token/dist (float-array 0)))))))
+    (is (= :invalid-row (bc/reason #(token/dist (float-array 0)))))
+    (is (= "#gen/dist[dist {:n-vocab 5}]" (pr-str dist)))))
+
+(deftest a-row-that-is-not-normalized-is-loud
+  ;; the draw finds it out as it walks: a total past 1 where it stops, or
+  ;; short of 1 (or NaN) at the row's end
+  (let [loud? (fn [row seed] (= :invalid-row (bc/reason #(dc/sample (token/dist (float-array row)) (rng/key seed)))))
+        seeds (range 50)]
+    (is (every? #(loud? [##-Inf ##-Inf ##-Inf] %) seeds) "no mass")
+    (is (every? #(loud? [0.1 0.2 0.7] %) seeds) "probabilities, not their logs")
+    (is (every? #(loud? [##NaN -1.0 -1.0] %) seeds) "NaN")
+    (let [n (count (filter #(loud? (map (fn [p] (Math/log p)) [0.1 0.1]) %) seeds))]
+      (is (<= (Math/abs (- n 40)) (* 5 (Math/sqrt 8)))
+          "a mass of 0.2: loud whenever the uniform falls past it, 4 keys in 5 (within 5 standard errors)"))))
 
 (deftest the-distribution-is-a-site-of-gen-models
   (let [model (gen [] (trace :t (token/dist small-row)))
@@ -148,13 +182,20 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest a-completion-draws-from-the-lm
-  ;; the first token's frequencies over 4,000 keys, within 5 standard errors
+  ;; the first token's frequencies over 4,000 keys, within 5 standard
+  ;; errors: each token expected 10 times or more on its own, the rarer
+  ;; ones pooled (a binomial count is near normal from about 10 expected)
   (let [k 4000
         counts (frequencies (map #(first (:retval (gfi/simulate fixed [prompt 1] (rng/key %)))) (range k)))
-        ^floats r (row prompt)]
-    (is (every? true? (for [t (range n-vocab)
-                            :let [p (Math/exp (aget r t))]]
-                        (<= (Math/abs (- (get counts t 0) (* k p))) (+ 1 (* 5 (Math/sqrt (* k p (- 1 p)))))))))))
+        ^floats r (row prompt)
+        p (fn [t] (Math/exp (aget r (int t))))
+        {common true rare false} (group-by #(<= 10.0 (* k (p %))) (range n-vocab))
+        within? (fn [ts]
+                  (let [q (reduce + (map p ts))
+                        c (reduce + (map #(get counts % 0) ts))]
+                    (<= (Math/abs (- c (* k q))) (* 5 (Math/sqrt (* k q (- 1 q)))))))]
+    (is (every? #(within? [%]) common))
+    (is (within? rare) "the rarer tokens, pooled")))
 
 (deftest token-i-is-drawn-with-its-site-key
   ;; the documented schedule: token i is token/dist's draw from (fold-in key i)
@@ -164,26 +205,56 @@
       (is (= tokens (mapv (fn [i] (dc/sample (token/dist (row (into prompt (subvec tokens 0 i)))) (rng/fold-in k i)))
                           (range 6)))))))
 
-(deftest a-drawn-token-is-scored-as-the-lm-keeps-it
-  ;; on the noisy engine: [a b] scored teacher-forced first, then b drawn
-  ;; after a forced a, from a row read in another shape. The trace takes b's
-  ;; score from the LM's ledger (the first read), so assess agrees with it;
-  ;; the row b was drawn from differs by the noise.
-  (with-open [^java.io.Closeable e (ce/engine {:n-vocab n-vocab :max-branches 16 :noise 1e-3})
+(deftest drawn-tokens-are-scored-as-the-lm-keeps-them
+  ;; on the noisy engine, at 20 prompts: [a b] scored teacher-forced first,
+  ;; then b drawn after a forced a, from a row read in another shape (b is
+  ;; the draw on the exact row: the noise moves a draw only near a boundary
+  ;; of the CDF), an end token at some. The trace takes b's score from the
+  ;; LM's ledger (the first read), so assess agrees with it; the row b was
+  ;; drawn from differs by the noise.
+  (with-open [^java.io.Closeable e (ce/engine {:n-vocab n-vocab :max-branches 128 :noise 1e-3})
               lm (lm/lm e (tt/tokenizer n-vocab))]
-    (let [gf (token/completion lm {:eos #{}})
-          [a b] [50 51]
-          ;; a key whose draw after a is b (on the exact row: the noise moves
-          ;; a draw only near a boundary of the CDF)
-          seed (first (filter #(= b (dc/sample (token/dist (row (conj prompt a))) (rng/fold-in (rng/key %) 1)))
-                              (range)))
-          kept (lm/score lm prompt [a b])
-          {tr :trace} (gfi/generate gf [prompt 2] (token/forced [a]) (rng/key seed))]
-      (is (= [a b] (:retval tr)) "b drawn")
-      (is (= kept (::token/scores tr)) "both scores the LM's first")
-      (is (= (:score tr) (:weight (gfi/assess gf [prompt 2] (:choices tr)))))
-      (is (not= (kept 1) (double (aget (lm/next-logprobs lm (conj prompt a)) (int b))))
-          "the row it was drawn from differs: the test can tell"))))
+    (let [gf (token/completion lm {:end-tokens ends})
+          drawn (doall
+                 (for [j (range 20)
+                       :let [prompt [95 40 j]
+                             a (+ 40 j)
+                             k (rng/key j)
+                             b (dc/sample (token/dist (row (conj prompt a))) (rng/fold-in k 1))
+                             kept (lm/score lm prompt [a b])
+                             {tr :trace} (gfi/generate gf [prompt 3] (token/forced [a]) k)]]
+                   (do (is (= [a b] (subvec (:retval tr) 0 2)) "b drawn")
+                       (is (= kept (subvec (::token/scores tr) 0 2)) "both scores the LM's first")
+                       (is (= (:score tr) (:weight (gfi/assess gf [prompt 3] (:choices tr)))))
+                       (is (not= (kept 1) (double (aget (lm/next-logprobs lm (conj prompt a)) (int b))))
+                           "the row it was drawn from differs: the test can tell")
+                       b)))]
+      (is (some ends drawn) "an end token drawn")
+      (is (not-every? ends drawn)))))
+
+(deftest unchanged-tokens-keep-their-scores-after-eviction
+  ;; on the noisy engine, short of branches: a revision that changes no
+  ;; token weighs exactly 0, though the rows its tokens were read from are
+  ;; gone (score once, by the trace)
+  (with-open [^java.io.Closeable e (ce/engine {:n-vocab n-vocab :max-branches 8 :noise 1e-3})
+              lm (lm/lm e (tt/tokenizer n-vocab))]
+    (let [gf (token/completion lm {:end-tokens #{}})
+          tr (gfi/simulate gf [prompt 6] (rng/key 1))
+          evict! #(doseq [s (range 3)] (gfi/simulate gf [[95 41 (+ 7 s)] 6] (rng/key (+ 10 s))))]
+      (evict!)
+      (is (= 0.0 (:weight (gfi/update tr (cm/choicemap 2 (tr 2)) (rng/key 2)))) "a token constrained to its value")
+      (let [{t2 :trace w :weight} (gfi/update tr [prompt 8] [diff/no-change diff/unknown-change] cm/EMPTY (rng/key 3))]
+        (is (= 0.0 w) "a longer completion: its fresh tokens stay out of the weight")
+        (is (= (::token/scores tr) (subvec (::token/scores t2) 0 6))))
+      (evict!)
+      (let [r (some #(let [r (gfi/regenerate tr (sel/select 3) (rng/key %))]
+                       (when (= (:retval tr) (:retval (:trace r))) r))
+                    (range 2000))]
+        (is (= 0.0 (:weight r)) "a token redrawn as it was")
+        (is (= (::token/scores tr) (::token/scores (:trace r)))))
+      (is (pos? (:evictions (lm/info lm))))
+      (is (not= (::token/scores tr) (lm/score lm prompt (:retval tr)))
+          "the LM reads the evicted rows again, with other noise: the test can tell"))))
 
 (deftest a-trace-holds-tokens-and-their-scores
   (let [tr (gfi/simulate fixed [prompt 5] (rng/key 1))
@@ -228,10 +299,10 @@
   (let [tokens [50 51 52]]
     (is (= {:weight (exact-score prompt tokens) :retval tokens} (gfi/assess fixed [prompt 3] (token/forced tokens))))
     (is (= {:weight 0.0 :retval []} (gfi/assess fixed [prompt 0] cm/EMPTY)))
-    (doseq [[what choices max] [["too few tokens" (token/forced [50 51]) 3]
-                                ["a gap" (cm/choicemap 0 50 2 52) 3]
-                                ["a token after an end" (token/forced [50 5 52]) 3]]]
-      (is (thrown? clojure.lang.ExceptionInfo (gfi/assess stops [prompt max] choices)) what))))
+    (doseq [[what choices reason] [["too few tokens" (token/forced [50 51]) :missing-choice]
+                                   ["a gap" (cm/choicemap 0 50 2 52) :missing-choice]
+                                   ["a token after an end" (token/forced [50 5 52]) :not-visited]]]
+      (is (= reason (bc/reason #(gfi/assess stops [prompt 3] choices))) what))))
 
 (deftest update-rescores-after-a-change
   (let [tr (gfi/simulate fixed [prompt 5] (rng/key 1))
@@ -291,23 +362,25 @@
     (is (re-find #"not continuous" (ex-message (try (grad/choice-gradients tr (sel/select 0)) (catch Exception x x)))))))
 
 (deftest misuse-is-loud
-  (doseq [[what f] [["one argument" #(gfi/simulate fixed [prompt])]
-                    ["an empty prompt" #(gfi/simulate fixed [[] 3])]
-                    ["a prompt of non-tokens" #(gfi/simulate fixed [[95 :a] 3])]
-                    ["a prompt past the vocabulary" #(gfi/simulate fixed [[97] 3])]
-                    ["a negative max-tokens" #(gfi/simulate fixed [prompt -1])]
-                    ["a fractional max-tokens" #(gfi/simulate fixed [prompt 2.5])]
-                    ["a constraint past max-tokens" #(gfi/generate fixed [prompt 3] (cm/choicemap 3 50))]
-                    ["a constraint at a keyword" #(gfi/generate fixed [prompt 3] (cm/choicemap :a 50))]
-                    ["a constraint that is no token" #(gfi/generate fixed [prompt 3] (cm/choicemap 0 97))]
-                    ["a constraint of nested choices" #(gfi/generate fixed [prompt 3] (cm/choicemap 0 {:a 1}))]
-                    ["a single value" #(gfi/generate fixed [prompt 3] (cm/->Value 3))]
-                    ["a bad position" #(token/forced -1 [3])]
-                    ["a bad suffix" #(token/from -1)]
-                    ["end tokens not a set" #(token/completion m {:eos [3]})]
-                    ["end tokens past the vocabulary" #(token/completion m {:eos #{97}})]
-                    ["a completion past the LM's context" #(gfi/simulate fixed [prompt 600])]]]
-    (is (thrown? clojure.lang.ExceptionInfo (f)) what)))
+  (doseq [[what f reason]
+          [["one argument" #(gfi/simulate fixed [prompt]) :invalid-args]
+           ["an empty prompt" #(gfi/simulate fixed [[] 3]) :no-tokens]
+           ["a prompt of non-tokens" #(gfi/simulate fixed [[95 :a] 3]) :invalid-token]
+           ["a prompt past the vocabulary" #(gfi/simulate fixed [[97] 3]) :invalid-token]
+           ["a negative max-tokens" #(gfi/simulate fixed [prompt -1]) :invalid-args]
+           ["a fractional max-tokens" #(gfi/simulate fixed [prompt 2.5]) :invalid-args]
+           ["a constraint past max-tokens" #(gfi/generate fixed [prompt 3] (cm/choicemap 3 50)) :not-visited]
+           ["a constraint at a keyword" #(gfi/generate fixed [prompt 3] (cm/choicemap :a 50)) :not-visited]
+           ["a constraint that is no token" #(gfi/generate fixed [prompt 3] (cm/choicemap 0 97)) :invalid-token]
+           ["a constraint of nested choices" #(gfi/generate fixed [prompt 3] (cm/choicemap 0 {:a 1})) :invalid-choices]
+           ["a single value" #(gfi/generate fixed [prompt 3] (cm/->Value 3)) :invalid-choices]
+           ["a bad position" #(token/forced -1 [3]) :invalid-position]
+           ["a bad suffix" #(token/from -1) :invalid-position]
+           ["end tokens not a set" #(token/completion m {:end-tokens [3]}) :invalid-end-tokens]
+           ["end tokens past the vocabulary" #(token/completion m {:end-tokens #{97}}) :invalid-end-tokens]
+           ["a completion over an engine, not an LM" #(token/completion engine) :invalid-lm]
+           ["a completion past the LM's context" #(gfi/simulate fixed [prompt 600]) :context-full]]]
+    (is (= reason (bc/reason f)) what)))
 
 ;; ---------------------------------------------------------------------------
 ;; Inference over a model containing a completion
@@ -332,11 +405,14 @@
 (defn- sd ^double [xs] (let [mu (mean xs)] (Math/sqrt (/ (reduce + (map #(Math/pow (- % mu) 2) xs)) (dec (count xs))))))
 
 (deftest importance-sampling-estimates-the-marginal
+  ;; the estimate, exp(log-ml-estimate), within 5 standard errors of the
+  ;; mean importance weight (each weight n·exp(log-ml + its normalized log))
   (let [z (exact-marginal (fn [t0 t1] (if (some #{3 4 5} [t0 t1]) 0.9 0.2)))
         n 2000
-        {:keys [traces]} (importance/importance-sampling liked [] (cm/choicemap :liked true) n {:key (rng/key 7)})
-        ws (map #(if (some #{3 4 5} (:retval %)) 0.9 0.2) traces)]
-    (is (<= (Math/abs (- (mean ws) z)) (* 5 (/ (sd ws) (Math/sqrt n)))))))
+        {:keys [log-ml-estimate log-normalized-weights]}
+        (importance/importance-sampling liked [] (cm/choicemap :liked true) n {:key (rng/key 7)})
+        ws (map #(* n (Math/exp (+ log-ml-estimate %))) log-normalized-weights)]
+    (is (<= (Math/abs (- (Math/exp log-ml-estimate) z)) (* 5 (/ (sd ws) (Math/sqrt n)))))))
 
 (def ^:private observed
   "One observation per token, of its parity."

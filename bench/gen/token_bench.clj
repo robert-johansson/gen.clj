@@ -30,7 +30,7 @@
   (println "\n## Per token, toy engine (97 tokens), µs: a 50-token completion against the LM calls alone")
   (with-open [^java.io.Closeable e (toy/engine {:max-branches 64 :n-ctx 1024})
               m (lm/lm e (tt/tokenizer 97) {:max-cells 65536})]
-    (let [gf (token/completion m {:eos #{}})
+    (let [gf (token/completion m {:end-tokens #{}})
           seed (volatile! 0)
           ;; each run new tokens, so that every token is a one-token read
           sim (us #(gfi/simulate gf [prompt 50] (rng/key (vswap! seed inc))))
