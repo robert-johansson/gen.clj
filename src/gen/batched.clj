@@ -53,7 +53,8 @@
             [gen.array.batch :as batch]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
-            [gen.random :as rng]))
+            [gen.random :as rng]
+            [gen.trace :as trace]))
 
 (set! *warn-on-reflection* true)
 
@@ -134,7 +135,7 @@
    true to Clojure's if, so one branch was taken for every particle)."
   [gf op args n opts]
   (let [[[r bools] branch] (array/logging-branches
-                            #(batch/unread-bools (fn [] (gfi/run-op gf op args (assoc opts :batch-shape [n])))))]
+                            #(batch/unread-bools (fn [] (gfi/outside-revise (gfi/run-op gf op args (assoc opts :batch-shape [n]))))))]
     ;; a batched-branch error the code caught still means the particles differ
     (when branch (throw branch))
     (when (seq bools)
@@ -170,12 +171,17 @@
 
 (defn traces
   "The n scalar traces, each rebuilt exactly from its particle's choices
-   (after check)."
+   (after check) by the generative function that made them, and given the
+   particles' :gen-fn: particles given another gen-fn, (assoc ps :gen-fn g),
+   hold traces given g, which an update or regenerate revises (gfi/revise),
+   per particle as when batched (review 6, R6-2)."
   [ps]
-  (if-let [t (:trace (check ps))]
-    (mapv #(:trace (gfi/generate (:gen-fn ps) (:args ps) % (rng/key 0)))
-          (cm/unstack (plain-choices (:choices t) (:n ps)) (:n ps)))
-    (:traces ps)))
+  (let [gf (:gen-fn ps)
+        given (fn [t] (if (identical? (:gen-fn t) gf) t (assoc t :gen-fn gf)))]
+    (if-let [t (:trace (check ps))]
+      (mapv #(given (:trace (gfi/generate (trace/maker t) (:args ps) % (rng/key 0))))
+            (cm/unstack (plain-choices (:choices t) (:n ps)) (:n ps)))
+      (mapv given (:traces ps)))))
 
 (defn- unbatched [ps] (if (batched? ps) (per-particle ps (traces ps)) ps))
 
@@ -357,14 +363,15 @@
 
 (defn check
   "ps, verified: when operations since its last spot check went unchecked
-   (*verified-updates*), the trace they left is spot-checked now, and a
-   mismatch is the loud divergence error. The accessors (traces, scores,
-   choice) and the particle filter's results call it, so results are not
-   read from unchecked particles; so does a fallback, which starts from
-   them."
+   (*verified-updates*), the trace they left is spot-checked now, against
+   the generative function that made it (particles may since have been
+   given another, review 7, R7-3), and a mismatch is the loud divergence
+   error. The accessors (traces, scores, choice) and the particle filter's
+   results call it, so results are not read from unchecked particles; so
+   does a fallback, which starts from them."
   [ps]
   (when (and (batched? ps) (::unchecked? ps))
-    (try (spot-check! (:gen-fn ps) (:args ps) (:n ps) (:trace ps))
+    (try (spot-check! (trace/maker (:trace ps)) (:args ps) (:n ps) (:trace ps))
          (catch clojure.lang.ExceptionInfo e
            (throw (if (::mismatch (ex-data e)) (diverged e) e)))))
   ps)
@@ -454,14 +461,22 @@
 
 (defn- gather
   "x with every batched value's particles gathered at idx, as a new batch of
-   n' particles: through traces, choice maps, records, maps and vectors, so
-   a resampled trace is made without re-running the model."
+   n' particles: through traces, choice maps, records, maps, vectors, sets,
+   lists and seqs (a static trace's node values among them), so a
+   resampled trace is made without re-running the model. What holds no
+   batched value is kept as it is, its identity too (a static update checks
+   its generative function's, and its store's), and a seq is gathered
+   lazily, as it may be infinite."
   [x idx n']
-  (cond (batch/batched? x) (batch/gather x idx [n'])
-        (record? x) (reduce-kv (fn [m k v] (assoc m k (gather v idx n'))) x x)
-        (map? x) (into (empty x) (map (fn [[k v]] [k (gather v idx n')])) x)
-        (vector? x) (mapv #(gather % idx n') x)
-        :else x))
+  (let [same? (fn [xs ys] (every? true? (map identical? xs ys)))]
+    (cond (batch/batched? x) (batch/gather x idx [n'])
+          (gfi/generative-function? x) x
+          (map? x) (reduce-kv (fn [m k v] (let [v' (gather v idx n')] (if (identical? v v') m (assoc m k v')))) x x)
+          (vector? x) (let [v (mapv #(gather % idx n') x)] (if (same? v x) x v))
+          (set? x) (let [v (map #(gather % idx n') x)] (if (same? v x) x (into (empty x) v)))
+          (list? x) (let [v (map #(gather % idx n') x)] (if (same? v x) x (apply list v)))
+          (seq? x) (map #(gather % idx n') x)
+          :else x)))
 
 (defn take
   "The particles at indices (a seq of n' integers), e.g. after resampling."
@@ -474,12 +489,16 @@
 
 (defn select
   "ps's particle where mask (n booleans, or a bool array) is true and qs's
-   elsewhere: the per-particle accept step of n MH chains."
+   elsewhere: the per-particle accept step of n MH chains. Each particle
+   keeps its trace's maker, given ps's :gen-fn, as traces gives it: so the
+   batched merge is rebuilt by the makers' generative function, and
+   particles of different makers fall back (review 7, R7-5)."
   [mask ps qs]
   (let [n (:n ps)
         keep (vec (if (array/array? mask) (array/->clj mask) mask))
-        fallback #(per-particle ps (mapv (fn [keep? p q] (if keep? p q)) keep (traces ps) (traces qs)))]
-    (if (and (batched? ps) (batched? qs)
+        fallback #(per-particle ps (mapv (fn [keep? p q] (if keep? p q)) keep (traces ps) (traces qs)))
+        maker (some-> (:trace ps) trace/maker)]
+    (if (and (batched? ps) (batched? qs) (gfi/same-gen-fn? maker (trace/maker (:trace qs)))
              (= (cm/addresses (:choices (:trace ps))) (cm/addresses (:choices (:trace qs)))))
       (let [m (array/array keep)
             cp (:choices (:trace ps))
@@ -492,7 +511,8 @@
                                                                      (array/tree-map #(plain % n) (cm/get-choice cq path)))))
                            cm/EMPTY (cm/addresses cp))]
         ;; the rebuild is not checked
-        (batched-or (assoc ps :trace (rebuild (:gen-fn ps) (:args ps) n merged) ::unchecked? true) (fallback)))
+        (batched-or (assoc ps :trace (assoc (rebuild maker (:args ps) n merged) :gen-fn (:gen-fn ps)) ::unchecked? true)
+                    (fallback)))
       (fallback))))
 
 (defn choice

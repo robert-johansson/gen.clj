@@ -299,6 +299,7 @@
    [:unfold chain [3 0.0 0.6] [[4 0.0 0.6] [2 0.0 0.3]]]])
 
 (laws/deflaws exact-proposal law-models 60 laws/general)
+(laws/deflaws exact-proposal law-models 60 laws/fixed-support)
 
 ;; ---------------------------------------------------------------------------
 ;; Loud errors

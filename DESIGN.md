@@ -20,6 +20,25 @@ Clojure on the JVM. In order:
    (decided with the owner 2026-10-18). Each milestone tests the laws of the
    features it builds; a coverage matrix in `docs/research/genjl-parity.md` §3
    tracks every law.
+5. **M5 — Gen.jl's own test suite passes** (the owner, 2026-10-20: after M4
+   closes). Gen.jl 0.4.8's tests (38 files, about 1,900 assertions) are
+   ported file by file to gen.clj tests, each citing its source. A table
+   marks each as ported or not applicable, with a reason (Julia-only
+   machinery). Gen.jl itself, installed on this Mac (Gen 0.4.8 on Julia
+   1.12.6; its suite passes here, `docs/research/genjl-test-suite.md`), is
+   the oracle for expected values, written as EDN fixtures as scipy's and
+   JAX's are, so the tests never need Julia. Its seeded statistical tests
+   are compared by their statistics, as for GenMLX. A port that fails is a
+   gap to fix, or a documented difference.
+6. **M6 — gen.clj inside kmet** and **7. M7 — inference over agents**
+   (drafts, the owner, 2026-10-20; `docs/research/kmet-integration.md`).
+   kmet is a Clojure port of the pi coding agent, which the owner's fork
+   brings to the JVM. M6 serves kmet from a local model through gen.clj,
+   with sessions as traces (scored and edited) and tool-call grammars. M7
+   treats the agent as a generative function: SMC over trajectories with
+   verifiers, inverse planning, and the LLM proposing programs through
+   `run_code`. Both come after M3's token generative function. Neither core
+   depends on the other; the integration is a third artifact.
 
 **Status (2026-10-19): M1 is complete.** The pure-JVM backend runs every
 layer: arrays with reverse-mode AD, the data algebra, the GFI and dynamic
@@ -63,6 +82,18 @@ general translator adds the forward proposal's score, its Recurse update
 weighs new nodes by their scores, GenParticleFilters' optimal resize
 biases the estimate, and GenTraceKernelDSL's Jacobian trimming hides
 non-bijections (§9).
+
+**M4 is complete (2026-10-21).** Every feature of Gen.jl's checklist that
+gen.clj targets is in (`docs/research/genjl-parity.md` §1), and every law the
+thesis states for them is a test (§3, after a final law audit and a
+confirmation read of the new tests). It was verified on the JVM (main: 818
+tests, 4,016 assertions), on Metal (the full battery, 790 tests, and every
+namespace changed after it), and on MLX's CPU in float32 and float64 (751
+tests each). Reviews 5 to 7 and the confirmation read found the last bugs
+(fixed, each with a test). Benchmarks of the static language's compiled
+scores are in `docs/benchmarks.md`. The night's owner decisions are in §9.
+Next: M5 (Gen.jl's own suite; its coverage table is
+`docs/research/genjl-test-suite.md`) and M3's remainder.
 
 Only the beautiful core is ported first. Everything else in GenMLX that *could*
 be ported is tracked as a deferred bean with a note on how to port it cleanly
@@ -321,6 +352,7 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
 | SCI | later | Sandboxed eval of LLM-generated code (program synthesis) |
 | clojure.math (built in) | yes | Replaces GenMLX's ~370 `js/Math` calls |
 | criterium | yes | `:bench` |
+| Apache Commons Math 3 | extension | `:commons-math` (`ext/commons-math`): its distributions as gen.clj's, GenDistributions' role (M4, 2026-10-20) |
 
 The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
 **not needed** on the JVM.
@@ -336,7 +368,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   `gamma(shape, scale)`, `categorical(probs)`), plus explicitly named variants
   where they matter numerically (e.g. `categorical-logits`). Each GenMLX name
   whose meaning changed has a safeguard that makes a naive port fail loudly
-  (`docs/porting-genmlx.md`).
+  (`docs/porting-genmlx.md`). Families Gen.jl does not have take
+  Distributions.jl's parameters, which GenDistributions' users write
+  (`pareto(alpha, theta)`, `triangular(a, b, c)`; M4, 2026-10-20).
 - **House style: gen.array's operators are referred** in place of
   `clojure.core`'s (`(+ a b)`, not `(array/add a b)`); `max`, `min`, `take` and
   `flatten` are never referred (`docs/array-api.md` §2, §12).
@@ -354,7 +388,76 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   `(dyn/with-params gf store)` as a record field. `(param :w)` in a body reads
   the store in effect, which reaches every nested splice and combinator kernel
   (one namespace per model, like Pyro's store). A missing parameter is a loud
-  error. Gradients are values: `gen.gradients/param-gradients` returns a map,
+  error. **What an update or regenerate may keep of a trace is decided in
+  two places, for every kind of generative function** (revised 2026-10-20
+  after reviews 5 and 6; reviews 3 and 4 had found one kind after another that
+  kept a stale call while each kind checked for itself: Map, Unfold,
+  Recurse, estimated densities, the proposal overrides, a deterministic
+  callee picked by a choice). No argument shows a store or a function, so
+  no kind's own skipping could see either.
+  - **The maker.** A trace records the generative function that made it
+    (`gen.trace/maker`; `(assoc tr :gen-fn g)` keeps it, and a wrapper's
+    trace of its model is the wrapper's, `trace/as-made-by`). `gfi/run-op`,
+    the dispatch of every nested call and of `gfi/update`,
+    `gfi/regenerate` and gen.batched, revises (`gfi/revise`) a trace whose
+    maker the generative function does not compute as. Particles given
+    another gen-fn are revised per particle as when batched (their
+    per-particle traces are rebuilt by their maker and given the new
+    gen-fn). That is
+    `gfi/same-gen-fn?`: identical, or of one class and the same by its
+    kind's rule (`gfi/IRevisable`). A record's fields must be the same
+    values (`gfi/same-value?`), as code holding them could tell (review
+    6). Values must be of one class. Scalars compare by `.equals`, which
+    tells −0.0 from 0.0. Maps, sets and sequential collections compare by
+    metadata and element by element in iteration order, so an array-map's
+    order or a vector against a list counts, and nothing is hashed. Fns
+    compare by their closed-over values, and generative functions
+    recursively. Arrays compare by identity, never read, and a comparison
+    looks at most 256 values. A DynamicGF compares its body fn, store,
+    middleware and dispatcher. So a Switch, a closure or a combinator a body builds again
+    is the same one, and its calls stay incremental. (On MLX a computed
+    scalar is an array, so a closure over one is another gen-fn on every
+    run there: still correct, but its calls run again.)
+  - **The store.** Each trace a call makes is marked with the store in
+    effect at the call (`dyn/run-call`). A call under another store than
+    the mark (compared by `gfi/same-value?`) revises the old trace, which
+    is projected under its own store.
+  - **A revise** keeps nothing of the old trace but its choices. A
+    DynamicGF revising a dynamic trace runs the handler's own update or
+    regenerate against it, as an `if` would. Every site is rescored with
+    the recorded log probabilities, and the static walk skips nothing for
+    a trace another gen-fn made. Each nested call checks its own context,
+    and middleware sees the operation asked for. Every other kind
+    generates from the old choices (`gfi/generate-again`): update's
+    weight is generate's less the old score, and its discard every old
+    choice that did not survive unchanged. Regenerate's weight is
+    generate's less the old trace's projection on the old choices it kept
+    (Eq. 4.1). An old choice the new run leaves unvisited is dropped where
+    it is left. Each call in the revise's generate runs its callee once
+    more without it: `gfi/*revising*` carries the revise's constraints and
+    the call's path, so only old choices are dropped, never a constraint.
+    A structure change thus costs each call one more run: 2n kernel runs
+    for an n-element Map, not n²/2. A proposal override reruns once more,
+    without the drops, so that its proposal sees the final constraints
+    (3n). A dropped choice cancels against the reverse move in regenerate.
+    A constraint the new run leaves is the usual unvisited error. Public
+    operations run outside the revise (`gfi/outside-revise`), so a
+    constraint user code gives stays checked. The retdiff is
+    unknown-change, and ω is drawn afresh in every kind: a changed store
+    or gen-fn is a change of what the function depends on, though no hint
+    shows it.
+  - **Unvisited constraints** are one error kind (`gfi/unvisited`:
+    `:unvisited`, `:paths`), raised by every kind and named under each
+    call's address on the way up (`gfi/under`), in assess too. A user
+    function's own unvisited error (any of gen.custom's functions) is
+    neither one of the function's choices nor named under its call, so a
+    revise does not drop it.
+  - **Local checks** remain where no call shows the change: the static
+    walk's skip, for a node reading `(param :w)`, which has no inputs.
+    `with-params` and `with-transitions` take only dynamic generative
+    functions, whose bodies read them.
+
+  Gradients are values: `gen.gradients/param-gradients` returns a map,
   and optimizers return a new store. This is Gen.jl's `@param`,
   `init_param!` and `accumulate_param_gradients!`/`apply!`, but functional.
 - **Batched execution** (decided 2026-10-18 by the agent, for the owner's
@@ -419,6 +522,58 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
 
   `(* true true)` is the integer 1 (Julia keeps a Bool), the same value
   under one rule.
+- **A draw beyond the float range is +Inf** (owner, 2026-10-20), with log
+  density -Inf, exact for the value stored, as IEEE floats and Julia's
+  Distributions in Float32 give. In float32 this is common at small shapes:
+  about 9 % of weibull(0.01, 1)'s draws pass Float/MAX_VALUE, and Pareto's
+  docstring already said so. A cap at the largest float would give finite
+  densities at the price of a silent atom. A loud error would need a host
+  read of each draw on a lazy backend, or a threshold on the parameters.
+  The other edge stays as it is: a draw that underflows to 0, where a
+  density can be +Inf, is floored at the dtype's smallest normal number.
+- **Differences from Gen.jl's test suite** (owner, 2026-10-20, after the
+  M5 inventory, `docs/research/genjl-test-suite.md` §4):
+  - *Retdiffs are more precise (D1).* A dynamic function's retdiff is
+    no-change when its return value is the previous one, where Gen.jl's
+    dynamic language always says UnknownChange. So an unchanged Map or
+    Unfold element is absent from a VectorDiff, and a splice turns an
+    argdiff into no-change for an argument identical to the previous call's.
+    This is sound, since a diff claims only what holds. The ports assert
+    gen.clj's diffs, and that they are consistent (`diff/consistent?`).
+  - *Lookups are loud (D4).* `cm/get-choice`, `cm/get-value` and
+    `(tr addr)` at a missing or node address throw ex-info, as Gen.jl
+    throws KeyError, where they returned nil (rule 6). Clojure's `get` on a
+    choice map stays the nil-returning lookup. To be done in M5.
+  - *Beta is exact at 0 and 1 (D6):* +Inf when α < 1 (or β < 1), where
+    Gen.jl substitutes a finite value. As with draws beyond the float
+    range, gen.clj keeps the exact value.
+  - *No default positional arguments (G3).* Clojure has none. A rest
+    parameter (`[x & [y z]]`) covers calls, update and regenerate with any
+    number of arguments, and a trace's args are the ones given. A
+    multi-arity `gen` stays possible if parity is wanted later.
+  - *The static IR's internal shape is not ported (G15).* Gen.jl's node
+    kinds (argument, parameter and per-expression nodes) are its Julia
+    representation. `static/ir` has one node per binding by design, and the
+    ported tests check behavior, not the IR's form.
+  - *A covariance singular in floating point is an error (F1).* mvnormal
+    rejects a covariance whose Cholesky factor fails, or whose condition
+    leaves the density no correct digits: trace(H⁻¹) ≥ 1/ε, where H is the
+    correlation matrix of L·Lᵀ (between 1/λmin and n/λmin) and ε is that of
+    the dtype the density is computed in (float32 on MLX, host data
+    included). The bound is the measured one, not the worst case's: a
+    float32 log density's error tracks (0.05–0.4)·ε·trace(H⁻¹) on squared-
+    exponential kernels of 50 to 1,000 points, so the bound rejects where
+    the error nears 0.1 nats. The worst case's 1/(n·ε), the first version,
+    rejected kernels accurate to 1e-4 nats (n = 1,000, jitter 0.1), the
+    owner's correction the same night. Gen.jl, through LAPACK's potrf, rejects only a failed
+    factorization, so it accepts `2·ones(2, 2)` (a pivot positive by
+    rounding) and gives 15.24. dist_dsl.jl:29's case is ported as the
+    error. The check runs on host values and concrete arrays only (rule 5).
+    The same rule holds at every precision (the owner, the same night): in
+    float32 it also rejects matrices that are positive definite but whose
+    float32 density is off by tenths of a nat or more, such as a
+    1,000-point GP kernel with a jitter of 1e-5 (0.75 nats). The error
+    names the dtype and suggests a jitter at its scale (2e-4 there).
 - **Bodies run to completion:** lazy sequences in a body's return value are
   realized during the run, and a `trace` or `splice` after the run is a loud
   error. Before this, `(map … (trace …))` at the end of a body gave a trace
@@ -528,6 +683,31 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   inverts the path to it through +, −, ×, ÷, negate, exp and log, with the
   log-Jacobians. Non-numeric labels wait for parameters that are not arrays.
   The name `dist` follows Gen.jl's macro (owner, 2026-10-20).
+- **Distributions from a host library, GenDistributions'
+  `DistributionsBacked`** (M4, 2026-10-20; decided by the agent, for the
+  owner's review): `(gen.dist.host/family {:name :make :quantile
+  :log-density})` makes a family of univariate distributions from a host
+  object built from the parameters, its quantile function and its log
+  density (and `:discrete?`, `:support`). A draw is the quantile of a
+  Threefry uniform in (0, 1), so it is a pure function of the key (rule 2)
+  and the same on every backend; a library's own random generator is never
+  used. Parameters and values are read on the host, as the guarded
+  lookups read them: a batched one raises the batched fallback, as does a
+  draw in a batched run (it would be every particle's), one being
+  differentiated is a loud error (the library has no gradient), and a lazy
+  backend evaluates an array to read it, the cost of a host library.
+  Apache Commons Math 3 is the JVM's Distributions.jl: `gen.dist.commons-math`
+  (`real` and `integer` for any of its distributions, and its discrete
+  hypergeometric and zipf) lives in `ext/commons-math` behind the
+  `:commons-math` alias, outside the core's dependencies (§8). Some of its
+  quantiles come from a solver, to about 1e-9. A host library's draws read
+  their parameters on the host, fall back from batched runs and have no
+  gradients, so the continuous families Distributions.jl has beyond Gen.jl's
+  built-ins are native in gen.dist instead, with its names and parameters:
+  chi-squared, f-dist, gumbel, levy, log-normal, logistic, nakagami, pareto,
+  student-t, triangular and weibull, which batch, run on every backend and
+  differentiate (checked against scipy's densities and, in the extension's
+  tests, against Commons Math's).
 - **The internal-proposal override** (thesis Alg. 16; M4, 2026-10-19):
   `(gen.inference.proposal/with-internal-proposal gf q)`. q is a dynamic
   generative function called as `(q constraints & args)`; it proposes some
@@ -579,6 +759,27 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   GenParticleFilters' UpdatingTraceTranslator with a transform
   (`updating-translator`), applied to a filter by `pf/move-reweight`;
   without a transform it is Del Moral's SMC samplers.
+- **Kernels that read the trace, `(kern ^:trace [tr & args] …)`** (owner,
+  2026-10-20, after the final law audit): Gen.jl's `@kern` reads the trace
+  in its loops, branches and lets, as the thesis's p. 102 kernel loops over
+  `trace[:degree]`. `kern` builds its chain from its arguments alone, so it
+  can't. With `^:trace` on its parameters, the first parameter is bound to
+  the trace as it is when each statement is evaluated, a kernel statement
+  applies its kernel and continues with the result, and the reversal runs
+  the statements reversed (loops backwards, each kernel's reversal). The
+  thesis's invariant (pp. 100–101) is checked per construct, as Gen.jl
+  checks it: after the body of each loop, branch and let, what the
+  construct read (its collections, its condition, its values) is read again
+  and must be unchanged, or it is a loud error (the reversal would not undo
+  the kernel), and the reversal checks its constructs the same way. A later
+  statement may change what an earlier construct read: the p. 102 kernel's
+  structure move changes the `:degree` its first loop read. Prop. 3.4.1
+  asks only that each construct's own body keep it (the reversal's argument
+  is at `trace-kernel`). Gen.jl checks only with `check=true`; gen.clj
+  always checks. Values compare on the host (kernels run at the inference
+  loop's boundary). (Corrected after the confirmation read of the M4 tests,
+  C1: the first check compared every construct with the final trace, which
+  rejected the p. 102 kernel in its own order.)
 - **Trace kernels, GenTraceKernelDSL** (M4, 2026-10-20): no new macro. A
   kernel is a `gen` function whose first argument is the model trace and
   whose return value is `[update backward]`; its choices are the auxiliary
@@ -610,9 +811,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
 - **Encapsulated randomness** (thesis §4.5; owner, 2026-10-20): a
   generative function may own randomness ω outside its choice map, its
   score an unbiased estimate ξ of its density (Eq. 4.3), and the trace
-  keeps ω. An update or regenerate keeps ω when the change hints say
-  nothing it depends on changed (no-change argdiffs, no constraint or
-  selection under it), so an identity update weighs exactly 0 and a call
+  keeps ω. An update or regenerate keeps ω when nothing it depends on
+  changed (no-change argdiffs, no constraint or selection under it, and
+  the same store and gen-fn at the call: a revise draws it afresh), so an
+  identity update weighs exactly 0 and a call
   that is skipped keeps its ω; otherwise it draws ω′ with the operation's
   key and weighs log ξ′ − log ξ (regenerate less its proposal ratio). The
   thesis redraws ω at every update (§4.5.1), so its identity updates need
@@ -625,9 +827,59 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   separate runs (assess against a trace's score, generate with every
   choice against it, propose against assess, an update and its reverse)
   hold only in expectation for a function with ω, under either rule, since
-  each run draws its own ω. Such functions get their own law set: the
-  pointwise laws without those, and the thesis's Eqs. 4.3–4.16 as
+  each run draws its own ω, except that simulate and assess on one key draw
+  the same ω for untraced draws (a law). Such functions get their own law
+  set: the pointwise laws without those, and the thesis's Eqs. 4.3–4.16 as
   statistical laws.
+  - **In gen bodies (§4.5.2),** `(untraced dist)` draws without an address
+    and `(untraced-key)` hands other stochastic code a key; untraced values
+    add nothing to the score, which is then the choices' density given ω.
+    ω is one key, folded from the operation's key apart from the sites'
+    sequence (an untraced draw never shifts a site's key; the n-th draw
+    takes ω folded with n), and the trace keeps it as `:gen.trace/omega`.
+    The handler's weights are then exact with no new weight code: Eq. 4.7
+    on the extended space of choices and untraced draws, the internal
+    proposal of the choices conditioned on ω (the handler draws them
+    interleaved), a different kernel from the ω-free Eq. 4.7 (regenerating
+    the mixture's :a weighs exactly 0) with the same target. Untraced values must not decide which addresses are
+    visited (p. 159): an obligation, as in the thesis and Gen.jl, since no
+    sound check short of rerunning the body exists. A batched run falls
+    back to particles, since a particle's ω must reproduce its own draws.
+    `untraced` and `untraced-key` are reserved in bodies as `trace` is:
+    the macro refuses a body that would hide a var of either name.
+  - **Estimators (§4.5.3),** `gen.custom/estimated`: `:addresses` (its
+    choices), `:estimate` (fn [args choices key] → log ξ, ω drawn from the
+    key, which the trace keeps) and an optional joint `:simulate`. generate
+    with constraints needs all of the choices (any other set is a loud
+    error: the law audit found a strict subset gave a trace missing one);
+    without, it is simulate with weight 0, valid on the extended space. A
+    batched run falls back to particles, as for untraced draws. regenerate
+    with every choice selected draws them and ω afresh from the joint
+    sampler, weight 0, as generate does (review 5, R5-6: a revise did so
+    already, and the kind itself refused). regenerate of some of the
+    choices only, and simulate without a joint sampler, are loud errors:
+    an estimator has no proposal density to weigh them by. Pseudo-marginal
+    MH and PMMH are then MH on a model with either.
+  - **assess takes a key,** as every other operation (rule 2), since it
+    draws ω; with the same key it weighs what generate weighs on the same
+    choices, a general law. `(assess gf args choices)` draws one from the
+    implicit source.
+  - **Operations that need exact densities refuse ω** (`gfi/with-exact-density`):
+    gradients (choice and parameter gradients, HMC, MALA, MAP, VI's and
+    learning's gradients), elliptical slice, the exact proposal, an
+    internal proposal's replayed density and a trace kernel's Jacobian.
+    Each computed its density with a fixed key, so with ω it would fix one
+    draw of it and target the wrong distribution, silently (found the same
+    day, after an owner's question: all eight ran without error).
+  - **An involution takes a key** (owner, 2026-10-20): `(fn [trace
+    fwd-choices fwd-retval proposal-args key])`, one argument past Gen.jl's
+    shape, as every gen.clj operation takes a key. Without one, the review
+    found, its update redrew ω from a fixed key and the chain sampled the
+    posterior given one z; with the move's key the update is a
+    pseudo-marginal refresh, so split-merge and reversible-jump moves work
+    on models with encapsulated randomness (Gen.jl's global RNG gives it
+    this too). `involutive-mh` splits its key in three (the proposal's,
+    the acceptance's, the involution's), so the first two are unchanged.
 - **The static modeling language** (Gen.jl's `@gen (static)`; owner,
   2026-10-20): a flag on `gen`, `(gen ^:static [args] (let [...] ret))`,
   not a second macro or a second semantics. The body is an ordinary `gen`
@@ -640,15 +892,97 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   branch at the top level, a computed address, `trace` or `splice` passed
   as a value). The check is sound, since `trace` and `splice` are the
   macro's own locals, unlike GenMLX's schema extraction over quoted source
-  by symbol name. simulate, generate and assess run the handler; update and
-  regenerate walk the graph and rerun a node only when a parent changed or
-  it is constrained or selected, through the handler's own site
-  transitions. A law requires the static and the dynamic function of the
-  same body to give identical traces, weights, discards and retdiffs under
-  the same keys. Change hints beyond VectorDiff (IntDiff, SetDiff, DictDiff,
-  Diffed propagation) come after, on the graph. The graph is also the way
+  by symbol name. simulate, generate, update and regenerate walk the graph
+  with the handler's own trace and splice (simulate and generate run every
+  node; update and regenerate rerun a node only when a parent changed or
+  it is constrained or selected), and assess runs the generated score fn. A law requires the static and the dynamic function of the
+  same body to give identical traces, weights and discards under the same
+  keys, and a sound retdiff (the static one may be more precise). The
+  graph is also the way
   to compiled scores, batching without the tracer, and CUDA graphs: a fixed
   structure runs the same kernels every time.
+  - **How it runs:** the macro builds one guarded fn per node, of `param`
+    and the node's inputs (over-approximated from the symbols it uses, so
+    a dependency is never missed), and the runner walks the nodes in order
+    with the handler's own trace and splice. A skipped node keeps its value
+    and its site's or call's record (weight 0, as an unchanged rerun gives)
+    and consumes its key, so the walk draws what the dynamic body draws;
+    the trace keeps every node's value for the next update, with the
+    parameter store in effect. A node is skipped only when the previous
+    trace is this graph's (not another static function's at the address, a
+    Switch's other branch) and the store is the same (a callee reads it, an
+    argument may), conditions the review of the same day found missing.
+    Every value comes from the node's guarded fn, as the body computes it.
+    A gf with middleware (`with-transitions`) reruns every node, so its
+    transitions see every site; a kept callee's own middleware does not
+    run. A trace node rerun because an input changed keeps its value, so
+    what depends only on that value still skips. The analysis sees the
+    enclosing locals, a gen body's too, so a local that shadows a var is
+    the local.
+  - **Not static:** a body that is not one `let`, an address computed
+    from a value, a `trace` or `splice` inside an expression (a branch on
+    a choice included), a splice without an address, an untraced draw, an
+    address used twice or one under another: each a compile error that
+    names the form.
+  - **Compiled scores and a lint, in M4 (owner, 2026-10-20).** A static
+    function's graph gives its log density as a pure function of its
+    choices, which HMC, MALA, MAP and gradients use for static models, so
+    `array/compile` can fuse a whole score (genclj-rj78). A lint says which
+    dynamic functions the flag would take, so a model gets the static
+    language's speed where it fits without an implicit switch
+    (genclj-ef7r): GenMLX's automatic analysis of every body is what the
+    triage found least reliable.
+    - *Scores:* the macro generates one straight-line fn per static body,
+      `(fn [param args choices key] → [weight retval])`, the bindings as
+      locals: a trace node's value read from the choices with its log
+      density, a splice's callee assessed (a static callee by its own score
+      fn, under its own store, with the handler's checks of its choices and
+      arguments). A static gf's `assess` is that fn, so everything built on assess
+      (HMC, MALA, MAP, choice gradients, MH's backward densities) uses it.
+      Keys are split as the handler's assess splits them, so a callee's
+      encapsulated randomness draws the same; under `with-exact-density`,
+      where a draw is an error anyway, none is split. On the JVM backend,
+      idle, assess is 1.9× faster at 10 observations and 2.6× at 100;
+      gradients, HMC and MALA gain 1.15–1.3×, their cost being autodiff's
+      (`docs/benchmarks.md`), and on MLX a
+      compiled step was one fused graph already (`array/compile` traced the
+      handler), so there the gain is the trace, not the step.
+    - *The lint:* `(static/could-be-static gf)` runs the flag's analysis
+      over a dynamic gf's source in its namespace; `(static/lint ns …)`
+      reports every generative function var. A call in return position,
+      `(let [...] (trace :y …))`, is static too: a last node, its value
+      returned.
+- **Change hints and Diffed propagation** (Gen.jl's IntDiff, SetDiff,
+  DictDiff and Diffed; M4, 2026-10-20): `gen.diff` adds `int-diff`,
+  `set-diff` and `dict-diff` beside `vector-diff` (each collapsing to
+  no-change when empty), and `consistent?`, whether a diff describes the
+  change between two values, which the laws' retdiff soundness now uses
+  for every kind. `(diff/propagate f args diffs)` is an open multimethod on
+  the function's var giving the diff of a call, with rules for `count`,
+  `nth`, `get`, `conj`, `assoc`, `+`, `-` (clojure.core's and gen.array's),
+  `inc`, `dec` and `vec`; Gen.jl dispatches on a Diffed value type, which
+  Clojure's core functions do not take, so here the rule belongs to the
+  call. In a static body every name carries a diff: an argument's from its
+  argdiff, a binding that is one call of a var on symbols and constants
+  from its rule, a bare symbol's from its input, a splice's from its
+  callee's retdiff, anything else no-change or unknown-change. A splice
+  hands its callee its arguments' diffs (an identical argument stays
+  no-change), so a Map reruns only the elements a vector-diff names, and
+  the function's retdiff is its return expression's. A rule gives the diff
+  from the previous call's result to this one's, for its own arity only,
+  and an element's diff only for a collection of its diff's kind, with a
+  key of a kind the rule can compare (a backend array, which the guarded
+  lookups read on the host, and a number that is not an integer, which
+  `nth` truncates, give unknown-change); the
+  first rules gave the diff from the argument to the result, so a changed
+  conj or assoc value went unseen (the review, the same day).
+  `(diff/compute prev now)` gives the precise diff of two host values.
+  Every rule is checked at every argument position against random edits
+  (a changed element, key or default, an append or a shrink, a new or
+  removed key, a fresh value). The static law runs with computed argdiffs
+  on a model where each rule's result is read by a choice or a Map, so a
+  rule that understates a change alters a weight; one that overstates it
+  costs only a rerun, which the diff tests catch.
 - **The Branching protocol and the llama.cpp engine** (2026-10-20, agent;
   approved by the owner the same day; `docs/research/llm-branching.md`):
   - A branch is a value (its tokens and next-token log-probabilities,
@@ -699,7 +1033,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     OpenBLAS, and others) are welcome later as optional plug-ins where they
     give real speedups (bean genclj-w4kw), never needed to run.
 - **Git:** the main repo is public-ready, with `.beans/`, `.beans.yml`,
-  `.claude/` and `*.pdf` gitignored. `.beans/` is its own private repo
+  `.claude/` and `*.pdf` gitignored. Its remote is the private
+  `robert-johansson/gen.clj` (the owner, 2026-10-21, at M4's close: private
+  until gen.clj has a license); main is pushed at a milestone's close or with
+  the owner's go-ahead. `.beans/` is its own private repo
   (`robert-johansson/gen.clj-beans`), synced by SessionStart/PreCompact/Stop
   hooks (see `.beans/hooks/README.txt`).
 

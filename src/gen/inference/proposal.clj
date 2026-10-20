@@ -34,7 +34,8 @@
             [gen.dynamic :as dyn]
             [gen.gfi :as gfi]
             [gen.random :as rng]
-            [gen.selection :as sel]))
+            [gen.selection :as sel]
+            [gen.trace :as trace]))
 
 (set! *warn-on-reflection* true)
 
@@ -55,7 +56,7 @@
                                ;; the trace's value, as a constraint would be taken
                                (generate (assoc state :constraints choices) p dist key)
                                (do (vreset! missing? true) (simulate state p dist key))))))
-        tr (gfi/simulate replaying qargs (rng/key 0))]
+        tr (gfi/with-exact-density "with-internal-proposal (its proposal's density)" (gfi/simulate replaying qargs (rng/key 0)))]
     (when-not (= (set @visited) (set (cm/addresses (:choices tr))))
       (throw (ex-info (str "with-internal-proposal: the proposal calls a generative function at an address,"
                            " which cannot be replayed against a trace: trace those choices in the proposal")
@@ -80,13 +81,19 @@
 
 (defn- proposal-generate
   "generate under q: q's choices given the constraints sigma, then gf's
-   forward sampling for the rest."
+   forward sampling for the rest. In a revise, gf's calls drop the old
+   choices they leave, never q's (gfi/constraining), and the whole run
+   repeats without them, so that q proposes given the final constraints
+   (gfi/rerun-without-drops)."
   [{:keys [gf q] :as pgf} args sigma key]
   (let [[k-q k-gen] (rng/split key)
-        {q-choices :choices q-weight :weight} (gfi/propose q (into [sigma] args) k-q)
-        _ (check-open sigma (cm/addresses q-choices))
-        {tr :trace w :weight} (gfi/generate gf args (cm/merge sigma q-choices) k-gen)]
-    {:trace (assoc tr :gen-fn pgf) :weight (- w q-weight)}))
+        attempt (fn [sigma]
+                  (let [{q-choices :choices q-weight :weight} (gfi/propose q (into [sigma] args) k-q)
+                        _ (check-open sigma (cm/addresses q-choices))
+                        {tr :trace w :weight} (gfi/constraining q-choices
+                                                                #(gfi/-generate gf args (cm/merge sigma q-choices) k-gen))]
+                    {:trace (trace/as-made-by tr pgf) :weight (- w q-weight)}))]
+    (if gfi/*revising* (first (gfi/rerun-without-drops attempt sigma)) (attempt sigma))))
 
 (defn- proposal-weight
   "The weight proposal-generate gives for producing the trace tr of gf on
@@ -106,7 +113,9 @@
    moves, the new trace from (generate args sigma key) and the old one
    weighed by (weight (:args tr) sigma tr), both returning the internal
    proposal's generate weight. A selection or new arguments that would leave
-   an unselected choice unvisited is a loud error. Shared by
+   an unselected choice unvisited is a loud error. tr is kept when nothing
+   is selected and no argument changed. (A trace the generative function
+   did not make, or a call whose store changed, is gfi/revise's.) Shared by
    with-internal-proposal and gen.inference.enumerative/with-exact-proposal."
   [generate weight tr args argdiffs selection key]
   (if (and (cm/empty? (sel/get-selected (:choices tr) selection)) (every? diff/no-change? argdiffs))
@@ -115,7 +124,7 @@
           {t2 :trace w :weight}
           (try (generate args sigma key)
                (catch clojure.lang.ExceptionInfo e
-                 (if (re-find #"not visited" (ex-message e))
+                 (if (:unvisited (ex-data e))
                    (throw (ex-info (str "regenerate leaves an unselected choice unvisited (" (ex-message e)
                                         "); select the choices the selection or the new arguments decide")
                                    {:selection selection} e))
@@ -124,18 +133,18 @@
 
 (defrecord InternalProposalGF [gf q]
   gfi/IGenerativeFunction
-  (-simulate [this args key] (assoc (gfi/-simulate gf args key) :gen-fn this))
+  (-simulate [this args key] (trace/as-made-by (gfi/-simulate gf args key) this))
   (-generate [this args constraints key] (proposal-generate this args constraints key))
   (-update [this tr args argdiffs constraints key]
     ;; gf's update keeps, overwrites and removes choices; fresh ones are then
     ;; drawn by the proposal given the kept ones
     (let [[k-update k-fresh] (rng/split key)
-          {t2 :trace :as r} (gfi/-update gf (assoc tr :gen-fn gf) args argdiffs constraints k-update)
+          {t2 :trace :as r} (gfi/-update gf (trace/as-made-by tr gf) args argdiffs constraints k-update)
           before (set (cm/addresses (:choices tr)))
           given (set (cm/addresses constraints))
           fresh (vec (remove #(or (before %) (given %)) (cm/addresses (:choices t2))))]
       (if (empty? fresh)
-        (assoc r :trace (assoc t2 :gen-fn this))
+        (assoc r :trace (trace/as-made-by t2 this))
         (let [kept (sel/get-selected (:choices t2) (sel/complement (sel/from-paths fresh)))
               {t3 :trace w :weight} (proposal-generate this args kept k-fresh)]
           (when-not (same-addresses? (:choices t2) (:choices t3))
@@ -144,7 +153,8 @@
   (-regenerate [this tr args argdiffs selection key]
     (regenerate-under #(proposal-generate this %1 %2 %3) #(proposal-weight this %1 %2 %3)
                       tr args argdiffs selection key))
-  (-assess [_ args choices] (gfi/-assess gf args choices))
+  ;; generate gives the model the second of its key's split: assess, the same
+  (-assess [_ args choices key] (gfi/-assess gf args choices (second (rng/split key))))
   (-propose [_ args key] (gfi/-propose gf args key))
   (-project [this tr selection]
     (proposal-weight this (:args tr) (sel/get-selected (:choices tr) selection) tr)))

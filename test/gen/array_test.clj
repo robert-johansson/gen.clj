@@ -253,7 +253,15 @@
   (is (not (array/equal? (array/array [1 2]) (array/array [[1 2]]))))
   (is (not (array/equal? (array/array [##NaN]) (array/array [##NaN]))))
   (is (array/allclose? (array/array [1.0 ##Inf]) (array/array [1.000001 ##Inf])))
-  (is (array/allclose? (array/array [##NaN]) (array/array [##NaN]) {:equal-nan? true})))
+  (is (array/allclose? (array/array [##NaN]) (array/array [##NaN]) {:equal-nan? true}))
+  (testing "an infinity is close only to itself, as in NumPy (review 7, R7-7: the band is infinite there)"
+    (is (array/allclose? ##-Inf ##-Inf))
+    (is (not (array/allclose? 1.0 ##Inf)))
+    (is (not (array/allclose? 1.0 ##-Inf)))
+    (is (not (array/allclose? ##-Inf ##Inf)))
+    (is (not (array/allclose? ##Inf 1.0)))
+    (is (not (array/allclose? (array/array [1.0 2.0]) (array/array [1.0 ##Inf]))))
+    (is (not (array/allclose? 1.0 ##Inf {:rtol 1.0 :atol 1.0})))))
 
 (deftest trees
   (let [t {:a (array/array [1 2]) :b [3.0 {:c (array/array [4])}]}]

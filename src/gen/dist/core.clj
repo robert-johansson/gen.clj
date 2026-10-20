@@ -116,6 +116,8 @@
 
 (defn int-dtype [b] (:int (p/-defaults b)))
 
+(defn float-dtype [b] (:float (p/-defaults b)))
+
 (defn check
   "Throw unless ok, naming the distribution and parameter."
   [ok dist-name message data]
@@ -300,7 +302,7 @@
             lp (total (log-prob d v))]
         {:trace (dist-trace d v lp) :weight (- lp (:score tr)) :retdiff diff/no-change})))
 
-  (-assess [d _ choices]
+  (-assess [d _ choices _key]
     (when-not (cm/has-value? choices)
       (throw (ex-info "assess: a distribution needs its value" {:type type})))
     (let [v (cm/get-value choices)]
@@ -315,7 +317,14 @@
   (-project [_ tr selection]
     (if (sel/root-selected? selection) (:score tr) 0.0)))
 
+(defmulti -printed-params
+  "A distribution's parameters as it prints them: arrays as host data."
+  (fn [d] (:type d)))
+
+(defmethod -printed-params :default [d]
+  (into {} (map (fn [[k v]] [k (if (and (array/array? v) (not (array/host? v))) (array/->clj v) v)])) (:params d)))
+
 (defmethod print-method Distribution [d ^java.io.Writer w]
   (.write w (str "#gen/dist[" (name (:type d)) " "))
-  (print-method (into {} (map (fn [[k v]] [k (if (array/host? v) v (array/->clj v))])) (:params d)) w)
+  (print-method (-printed-params d) w)
   (.write w "]"))

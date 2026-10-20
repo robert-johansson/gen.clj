@@ -80,6 +80,7 @@
    [:choice-at (comb/choice-at d/normal) [0.0 1.0 :x] [[0.5 2.0 :x]]]])
 
 (laws/deflaws combinators models 100)
+(laws/deflaws combinators models 100 laws/fixed-support)
 
 ;; Recurse's own set: its trees change shape under update and regenerate
 (laws/deflaws recurse [[:recurse tree [0] [[1]]]
@@ -425,3 +426,97 @@
                 ;; the same structure: no fresh choices drawn differently
                 (is (close? (:weight r) (:weight ri)) (str label " " args'))
                 (is (= (:discard r) (:discard ri)))))))))))
+
+;; ---------------------------------------------------------------------------
+;; Elements are independent (law audit gap 1)
+;; ---------------------------------------------------------------------------
+
+(deftest ^:slow ^:heavy elements-are-independent
+  ;; each element, step and node draws from its own key: the sample
+  ;; correlation of two is within 5/sqrt(n) of 0. Planted bug (audit,
+  ;; 2026-10-20): an element key that ignores the index passed every other
+  ;; test; the correlation is then 1.0
+  (let [n 2000
+        keys (rng/split (rng/key 90) n)
+        band (clojure.core// 5.0 (Math/sqrt n))
+        independent? (fn [pairs] (< (Math/abs (ts/correlation pairs)) band))
+        at (fn [tr p] (ts/number (tr p)))]
+    (testing "Map"
+      (let [m (comb/map (gen [x] (trace :z (d/normal x 1))))]
+        (is (independent? (map #(let [tr (gfi/simulate m [[0.0 0.0]] %)] [(at tr [0 :z]) (at tr [1 :z])]) keys)))))
+    (testing "Map's unconstrained elements in generate"
+      (let [m (comb/map (gen [x] (trace :z (d/normal x 1))))]
+        (is (independent? (map #(let [tr (:trace (gfi/generate m [[0.0 0.0 0.0]] (cm/choicemap [2 :z] 1.0) %))]
+                                  [(at tr [0 :z]) (at tr [1 :z])])
+                               keys)))))
+    (testing "Unfold's innovations"
+      (let [u (comb/unfold (gen [_t s] (trace :s (d/normal (* 0.5 s) 1))))]
+        (is (independent? (map #(let [tr (gfi/simulate u [2 0.0] %)]
+                                  [(at tr [0 :s]) (clojure.core/- (at tr [1 :s]) (clojure.core/* 0.5 (at tr [0 :s])))])
+                               keys)))))
+    (testing "Recurse's nodes"
+      (let [r (comb/recurse (gen [depth] {:value (trace :v (d/normal 0 1)) :children (if (zero? depth) [1 1] [])})
+                            (gen [v ws] (reduce + v ws))
+                            2)]
+        (is (independent? (map #(let [tr (gfi/simulate r [0] %)] [(at tr [1 :production :v]) (at tr [2 :production :v])]) keys)))))))
+
+(deftest ^:slow ^:heavy elements-an-update-adds-are-independent
+  ;; the elements, steps and nodes an update adds draw from keys of their
+  ;; own (the final law audit, F9: giving them all one key passed every
+  ;; other test; the correlation is then 1.0)
+  (let [n 2000
+        keys (rng/split (rng/key 92) n)
+        band (clojure.core// 5.0 (Math/sqrt n))
+        independent? (fn [pairs] (< (Math/abs (ts/correlation pairs)) band))
+        at (fn [tr p] (ts/number (tr p)))
+        grown (fn [gf args args' argdiffs pick]
+                (map #(let [[k1 k2] (rng/split %)
+                            tr (gfi/simulate gf args k1)]
+                        (pick (:trace (gfi/update tr args' argdiffs cm/EMPTY k2))))
+                     keys))]
+    (testing "Map: two elements an update adds"
+      (let [m (comb/map (gen [x] (trace :z (d/normal x 1))))]
+        (is (independent? (grown m [[0.0]] [[0.0 0.0 0.0]] [diff/unknown-change] #(vector (at % [1 :z]) (at % [2 :z])))))))
+    (testing "Unfold: the innovations of two steps an update adds"
+      (let [u (comb/unfold (gen [_t s] (trace :s (d/normal (* 0.5 s) 1))))]
+        (is (independent? (grown u [1 0.0] [3 0.0] [diff/unknown-change diff/no-change]
+                                 #(let [s0 (at % [0 :s]) s1 (at % [1 :s]) s2 (at % [2 :s])]
+                                    [(clojure.core/- s1 (clojure.core/* 0.5 s0)) (clojure.core/- s2 (clojure.core/* 0.5 s1))]))))))
+    (testing "Recurse: two nodes an update adds"
+      ;; a root of depth 1 has no children; of depth 0, two
+      (let [r (comb/recurse (gen [depth] {:value (trace :v (d/normal 0 1)) :children (if (zero? depth) [1 1] [])})
+                            (gen [v ws] (reduce + v ws))
+                            2)]
+        (is (independent? (grown r [1] [0] [diff/unknown-change] #(vector (at % [1 :production :v]) (at % [2 :production :v])))))))))
+
+;; ---------------------------------------------------------------------------
+;; Precise hints for Switch and Recurse (law audit gap 9)
+;; ---------------------------------------------------------------------------
+
+(deftest switch-and-recurse-precise-hints-match-unknown-change
+  ;; an update with no-change argdiffs and a constraint gives what the same
+  ;; update with unknown-change gives
+  (doseq [seed (range 8)]
+    (let [k (rng/key (+ 91 seed))
+          sw (gfi/simulate switched [0 0.5] (rng/key seed))
+          tree-tr (gfi/simulate tree [0] (rng/key seed))]
+      (is (same-result? (gfi/update sw [0 0.5] [diff/no-change diff/no-change] (cm/choicemap :a 0.3) k)
+                        (gfi/update sw [0 0.5] [diff/unknown-change diff/unknown-change] (cm/choicemap :a 0.3) k)))
+      (is (same-result? (gfi/update tree-tr [0] [diff/no-change] (cm/choicemap [0 :production :v] 0.7) k)
+                        (gfi/update tree-tr [0] [diff/unknown-change] (cm/choicemap [0 :production :v] 0.7) k)))))
+  (testing "a Switch of Map branches, whose argdiffs decide what the branch skips (the final law audit: dynamic branches skip nothing, so the test above cannot see a branch given wrong argdiffs)"
+    (let [branch (comb/map (gen [x] (trace :z (d/normal x 1))))
+          sw (comb/switch branch branch)
+          args [0 [0.0 1.0 2.0]]
+          args' [0 [0.0 1.5 2.0]]
+          precise (mapv diff/compute args args')]
+      (doseq [seed (range 8)]
+        (let [tr (gfi/simulate sw args (rng/key seed))
+              k (rng/key (+ 99 seed))
+              r (gfi/update tr args' precise cm/EMPTY k)
+              assessed (:weight (gfi/assess sw args' (:choices (:trace r)) (rng/key 0)))]
+          (is (same-result? r (gfi/update tr args' [diff/unknown-change diff/unknown-change] cm/EMPTY k)))
+          ;; and right: a Switch that told its branch no-change would leave
+          ;; element 1 scored at its old mean in both runs
+          (is (close? assessed (:score (:trace r))))
+          (is (close? (- assessed (:score tr)) (:weight r))))))))

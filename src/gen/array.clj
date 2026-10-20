@@ -1097,10 +1097,12 @@
        (truthy? (all (== x y)))))
 
 (defn allclose?
-  "Are x and y elementwise within atol + rtol·|y| (broadcasting)? Options:
-   :rtol (1e-5), :atol (1e-8), :equal-nan? (false)."
+  "Are x and y elementwise within atol + rtol·|y| (broadcasting)? As in
+   NumPy, an infinity is close only to itself (the band is infinite there).
+   Options: :rtol (1e-5), :atol (1e-8), :equal-nan? (false)."
   ([x y] (allclose? x y nil))
   ([x y {:keys [rtol atol equal-nan?] :or {rtol 1e-5 atol 1e-8}}]
-   (let [close (logical-or (== x y) (<= (abs (- x y)) (+ atol (* rtol (abs y)))))
+   (let [within (<= (abs (- x y)) (+ atol (* rtol (abs y))))
+         close (logical-or (== x y) (logical-and within (logical-and (isfinite x) (isfinite y))))
          close (if equal-nan? (logical-or close (logical-and (isnan x) (isnan y))) close)]
      (truthy? (all close)))))

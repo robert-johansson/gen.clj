@@ -91,15 +91,17 @@
 
 ;; The fits' bands are five standard deviations of the final values over 16
 ;; keys (Adam at 0.02, 800 iterations), measured: Gen.jl's estimator ends
-;; with sd 0.041 in m and 0.031 in log-s; the leave-one-out baseline is
-;; exactly zero at the posterior, where every log weight is log p(y), so it
-;; stops there.
+;; with sd 0.041 in m and 0.031 in log-s, and the last 100 ELBOs average
+;; 0.0023 below the evidence with sd 0.0011 (keys 7 to 22; the final law
+;; audit asked for this band's derivation), so that gap's band is 0.0023 +
+;; 5 × 0.0011, 0.008; the leave-one-out baseline is exactly zero at the
+;; posterior, where every log weight is log p(y), so it stops there.
 (deftest black-box-vi-finds-the-posterior
   (let [{:keys [store history]} (vi/black-box-vi model [] observations family [] start (learn/adam {:lr 0.02})
                                                   {:iters 800 :samples 20 :key (rng/key 7)})]
     (is (< (ts/abs (- (:m store) (:m posterior))) 0.21) (str store))
     (is (< (ts/abs (- (:log-s store) (:log-s posterior))) 0.16) (str store))
-    (is (< (ts/abs (- (average-of-last 100 history) evidence)) 0.01) "the ELBO reaches the evidence"))
+    (is (< (ts/abs (- (average-of-last 100 history) evidence)) 0.008) "the ELBO reaches the evidence"))
   (testing "with a leave-one-out baseline"
     (let [{:keys [store history]} (vi/black-box-vi model [] observations family [] start (learn/adam {:lr 0.02})
                                                     {:iters 800 :samples 20 :baseline :leave-one-out :key (rng/key 7)})]

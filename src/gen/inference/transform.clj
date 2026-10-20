@@ -35,7 +35,8 @@
    - (translator {:p-new :p-new-args :new-observations :q-forward
      :q-forward-args :q-backward :q-backward-args :transform}): Gen.jl's
      GeneralTraceTranslator, and DeterministicTraceTranslator without the
-     proposals (deterministic-translator);
+     proposals ((deterministic-translator {:p-new :p-new-args
+     :new-observations :transform}));
    - (extending-translator {:p-new-args :p-argdiffs :new-observations
      :q-forward :q-forward-args :transform}): SimpleExtendingTraceTranslator
      (GenParticleFilters' ExtendingTraceTranslator with a :transform);
@@ -379,7 +380,7 @@
               (throw (ex-info (str "translator: the new trace has choices the transform did not write: " (vec extra))
                               {:addresses (vec extra)})))
           bwd (if q-backward
-                (:weight (gfi/assess q-backward (into [t'] q-backward-args) aux-out))
+                (:weight (gfi/assess q-backward (into [t'] q-backward-args) aux-out (gfi/backward-key k-generate)))
                 (if (cm/empty? aux-out)
                   0.0
                   (throw (ex-info "translator: the transform writes auxiliary choices but there is no :q-backward"
@@ -393,11 +394,15 @@
       {:trace t' :weight (+ (- (:score t') (:score trace)) (- bwd fwd) ldj)})))
 
 (defn deterministic-translator
-  "Gen.jl's DeterministicTraceTranslator: the transform maps the trace's
-   choices to p-new's, with no auxiliary choices."
-  ([p-new p-new-args new-observations t] (deterministic-translator p-new p-new-args new-observations t {}))
-  ([p-new p-new-args new-observations t opts]
-   (translator (merge opts {:p-new p-new :p-new-args p-new-args :new-observations new-observations :transform t}))))
+  "Gen.jl's DeterministicTraceTranslator: a translator whose transform maps
+   the trace's choices to p-new's with no auxiliary choices. Options as for
+   translator, without the proposals: {:p-new :p-new-args :new-observations
+   :transform}, and :check? with :prev-observations."
+  [{:keys [q-forward q-backward] :as opts}]
+  (when (or q-forward q-backward)
+    (throw (ex-info "A deterministic translator has no auxiliary choices; translator takes :q-forward and :q-backward"
+                    {:q-forward q-forward :q-backward q-backward})))
+  (translator opts))
 
 (defn new-arguments
   "[args argdiffs] for a translator's update: p-new-args (the trace's own
@@ -457,7 +462,7 @@
           (gfi/update trace args argdiffs (cm/merge (if t (get-in s [:outputs :model-out]) u) new-observations) k-update)
           ldj (if t (log-abs-det t trace u s (fn [p] (not (cm/has-value? (cm/get-submap discard p))))) 0.0)
           u' (if t (get-in s [:outputs :aux-out]) discard)
-          bwd (cond q-backward (:weight (gfi/assess q-backward (into [t'] q-backward-args) u'))
+          bwd (cond q-backward (:weight (gfi/assess q-backward (into [t'] q-backward-args) u' (gfi/backward-key k-update)))
                     (cm/empty? u') 0.0
                     :else (throw (ex-info "updating-translator: there are backward choices but no :q-backward"
                                           {:backward (cm/to-map u')})))]
@@ -474,9 +479,10 @@
 (defn involution
   "Transform t as the involution of involutive MCMC (Gen.jl's
    SymmetricTraceTranslator): (fn [trace fwd-choices fwd-retval
-   proposal-args]) → {:trace :bwd-choices :weight}, for
+   proposal-args key]) → {:trace :bwd-choices :weight}, for
    gen.inference.mh/involutive-mh. t's model-out choices update the trace
-   (every new choice must be written, so the update samples nothing), its
+   with key (every new choice must be written, so the update samples none;
+   the key draws a model's encapsulated randomness afresh), its
    aux-out are the backward choices, and the weight is the update's plus
    log |det J|, the trace's unwritten continuous reads that update keeps
    counting as unchanged outputs. With {:check? true}, t applied again must
@@ -484,11 +490,12 @@
   ([t] (involution t {}))
   ([t {:keys [check?]}]
    (check-transform :involution t)
-   (fn [trace fwd-choices _ _]
+   (fn [trace fwd-choices _ _ key]
      (let [s (execute t trace fwd-choices nil)
            model-out (get-in s [:outputs :model-out])
-           ;; every new choice is constrained, so the update's key goes unused
-           {t' :trace w :weight discard :discard} (gfi/update trace model-out (rng/key 0))
+           ;; every new choice is constrained; the key draws a model's
+           ;; encapsulated randomness afresh, a pseudo-marginal refresh
+           {t' :trace w :weight discard :discard} (gfi/update trace model-out key)
            _ (when-let [extra (seq (unconstrained-additions (:choices trace) model-out discard (:choices t')))]
                (throw (ex-info (str "involution: the updated trace has new choices the transform did not write: "
                                     (vec extra))

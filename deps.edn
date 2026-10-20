@@ -40,6 +40,12 @@
   :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.14"}}
           :ns-default build}
 
+  ;; Apache Commons Math's distributions (gen.dist.commons-math), outside
+  ;; the core's dependencies: clojure -X:test:commons-math runs its tests too
+  :commons-math {:extra-paths ["ext/commons-math/src" "ext/commons-math/test"]
+                 :extra-deps {org.apache.commons/commons-math3 {:mvn/version "3.6.1"}}
+                 :exec-args {:dirs ["test" "ext/commons-math/test"]}}
+
   ;; the MLX backend as the default (creation functions); the device is
   ;; -Dgen.mlx.device=cpu|gpu (default gpu when there is one)
   :mlx {:jvm-opts ["-Dgen.backend=mlx"]}

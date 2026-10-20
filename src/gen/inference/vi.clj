@@ -30,11 +30,6 @@
 
 (set! *warn-on-reflection* true)
 
-(defn- scaled-sum
-  "Σ_i c_i · g_i over gradient trees gs (maps of name to arrays or numbers)."
-  [cs gs]
-  (apply merge-with + (map (fn [c g] (array/tree-map #(* c %) g)) cs gs)))
-
 (defn- draw
   "A trace of q and its log weight: [q-trace log-w]. The model generates
    with the observations and q's choices as constraints, so latent choices
@@ -60,7 +55,7 @@
                  nil lws
                  :leave-one-out (mapv #(- % (/ (- total %) (dec n))) lws))]
     {:objective (/ total n)
-     :grads (scaled-sum (map #(/ % n) signal) (map (comp grad/param-gradients first) runs))}))
+     :grads (grad/weighted-sum (map #(/ % n) signal) (map (comp grad/param-gradients first) runs))}))
 
 (defn vimco-gradient
   "One iteration's estimates for the K-sample bound: {:objective
@@ -84,7 +79,7 @@
         ;; ∇ of the bound: Σ_j (L - L_{-j}) ∇ log q_j - Σ_j w̃_j ∇ log q_j
         cs (mapv (fn [j] (- (- bound (loo j)) (normalized j))) (range k))]
     {:objective bound
-     :grads (scaled-sum cs (map (comp grad/param-gradients first) runs))}))
+     :grads (grad/weighted-sum cs (map (comp grad/param-gradients first) runs))}))
 
 (defn- fit [estimate store optimizer {:keys [iters key] :or {iters 1000}}]
   (loop [i 0 store store state (learn/init optimizer store) history [] key (or key (gfi/next-key))]
@@ -114,5 +109,5 @@
          (let [runs (mapv #(vimco-gradient model model-args observations q q-args store samples (assoc opts :key %))
                           (rng/split key estimates))]
            {:objective (/ (reduce clojure.core/+ (map :objective runs)) estimates)
-            :grads (scaled-sum (repeat estimates (/ 1.0 estimates)) (map :grads runs))}))
+            :grads (grad/mean (map :grads runs))}))
        store optimizer opts))

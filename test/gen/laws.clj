@@ -1,7 +1,7 @@
 (ns gen.laws
   "The GFI's laws (Cusumano-Towner 2020; docs/research/genjl-parity.md §3,
    audited in docs/research/law-audit.md) as test.check properties over any
-   generative functions, in two sets:
+   generative functions, in six sets:
 
    - general: the thesis's definitions, true of every generative function
      (Def 2.1.16, Def 2.3.1, Prop 2.3.1, Def 2.3.2, Eq 4.1's retention);
@@ -9,7 +9,17 @@
      choices from the prior, each site from its own key, as every gen.clj
      generative function does so far. A generative function with an optimal
      or overridden internal proposal (thesis pp. 145-152) need satisfy only
-     the general set.
+     the general set;
+   - fixed-support: the support condition, for models whose every address
+     has a fixed support;
+   - static: a static generative function against the same body without
+     ^:static;
+   - encapsulated: for a generative function with encapsulated randomness
+     (§4.5), whose score is an estimate, the laws that hold for one draw of
+     it;
+   - across: an update or regenerate of a trace that another generative
+     function made (gf under another store, say), which keeps only its
+     choices (gfi/revise).
 
    Models are [label gf args alt-args]: alt-args is a vector of other
    argument vectors, so that update and regenerate are also checked with
@@ -24,7 +34,8 @@
             [gen.gfi :as gfi]
             [gen.random :as rng]
             [gen.selection :as sel]
-            [gen.test-support :as ts]))
+            [gen.test-support :as ts]
+            [gen.trace :as trace]))
 
 (defn close?
   "Weights within the backend's precision. On a float32 backend a weight is a
@@ -41,10 +52,14 @@
 
 (defn cases
   "Cases [[label gf args alt-args] seed picks alt?] over models: a vector of
-   model entries, or a generator of them (e.g. random models)."
+   model entries, or a generator of them (e.g. random models). picks says
+   for each address, in order, whether a law constrains or selects it,
+   cycled after 32: with 8, addresses 8 apart were always picked together,
+   and a rule bug whose case needs one picked and the other not passed
+   (the confirmation review, 2026-10-20)."
   [models]
   (gen/tuple (if (gen/generator? models) models (gen/elements models))
-             gen/nat (gen/vector gen/boolean 8) gen/boolean))
+             gen/nat (gen/vector gen/boolean 32) gen/boolean))
 
 ;; ---------------------------------------------------------------------------
 ;; Helpers
@@ -70,25 +85,26 @@
 
 (defn- in-support? [tr] (array/truthy? (array/all (array/isfinite (:score tr)))))
 
-(defn- consistent?
-  "Trace consistency (Def 2.1.16): the score is the assessed density of the
-   choices, and the return value is the one they determine."
-  [tr]
-  (let [{w :weight rv :retval} (gfi/assess (:gen-fn tr) (:args tr) (:choices tr))]
+(defn- assessed?
+  "Is tr's score gf's assessed density of its choices, and its return value
+   the one they determine?"
+  [gf tr]
+  (let [{w :weight rv :retval} (gfi/assess gf (:args tr) (:choices tr) (rng/key 0))]
     (and (close? (:score tr) w) (= (:retval tr) rv))))
 
+(defn- consistent?
+  "Trace consistency (Def 2.1.16): tr's score and return value are those its
+   gen-fn assesses."
+  [tr]
+  (assessed? (:gen-fn tr) tr))
+
 (defn- sound-retdiff?
-  "Def 2.3.2: no-change promises an equal return value; a vector-diff, the
-   two lengths and equal elements below both outside :updated (law audit
-   gap F: only no-change was checked)."
+  "Def 2.3.2: the retdiff describes the change of the return value
+   (gen.diff/consistent?): no-change an equal value; a vector-diff the two
+   lengths and equal elements below both outside :updated (law audit gap
+   F: only no-change was checked); an int-, set- or dict-diff its change."
   [old {tr :trace rd :retdiff}]
-  (cond (diff/no-change? rd) (= (:retval old) (:retval tr))
-        (diff/vector-diff? rd)
-        (let [a (:retval old) b (:retval tr)]
-          (and (= (:prev-length rd) (count a)) (= (:new-length rd) (count b))
-               (every? #(or (contains? (:updated rd) %) (= (nth a %) (nth b %)))
-                       (range (min (count a) (count b))))))
-        :else true))
+  (boolean (diff/consistent? (:retval old) (:retval tr) rd)))
 
 (defn- unvisitable?
   "Constraints drawn from another run that this run cannot visit (a
@@ -104,16 +120,52 @@
 (defn- update-case
   "A random update: constraints are a random subset of another run's choices
    (with the new arguments), so they may change values, add addresses and
-   change structure. nil when the update rejects them as unvisitable."
-  [[_ gf args :as model] seed picks alt?]
-  (let [k (rng/key seed)
-        tr (gfi/simulate gf args k)
-        args' (next-args model seed alt?)
-        other (gfi/simulate gf args' (rng/fold-in k 1))
-        sigma (restrict (:choices other) (picked (addrs other) picks))
-        r (vacuous-on-unvisitable (gfi/update tr args' (unknown-diffs args') sigma (rng/fold-in k 2)))]
-    (when-not (= ::vacuous r)
-      {:tr tr :args' args' :sigma sigma :result r})))
+   change structure. Given gf', the other run is gf''s and the trace is
+   updated as gf''s (gfi/revise). nil when the update rejects the
+   constraints as unvisitable."
+  ([model seed picks alt?] (update-case model seed picks alt? nil))
+  ([[_ gf args :as model] seed picks alt? gf']
+   (let [k (rng/key seed)
+         tr (gfi/simulate gf args k)
+         args' (next-args model seed alt?)
+         other (gfi/simulate (or gf' gf) args' (rng/fold-in k 1))
+         sigma (restrict (:choices other) (picked (addrs other) picks))
+         r (vacuous-on-unvisitable
+            (gfi/update (cond-> tr gf' (assoc :gen-fn gf')) args' (unknown-diffs args') sigma (rng/fold-in k 2)))]
+     (when-not (= ::vacuous r)
+       {:tr tr :args' args' :sigma sigma :result r}))))
+
+(defn- fresh
+  "The choices of t2, an update of tr with sigma, drawn afresh: neither tr's
+   nor constrained."
+  [tr t2 sigma]
+  (let [was (set (addrs tr))
+        constrained (set (cm/addresses sigma))]
+    (remove #(or (was %) (constrained %)) (addrs t2))))
+
+(defn- kept
+  "The choices of t2, an update of tr with sigma, not drawn afresh: kept
+   from tr or constrained."
+  [tr t2 sigma]
+  (remove (set (fresh tr t2 sigma)) (addrs t2)))
+
+(defn- exact-discard
+  "Def 2.3.1: the discard of an update of tr to t2 with sigma is τ
+   restricted to (A_τ ∩ A_σ) ∪ (A_τ ∖ A_τ')."
+  [tr t2 sigma]
+  (let [now (set (addrs t2))
+        constrained (set (cm/addresses sigma))]
+    (restrict (:choices tr) (filter #(or (constrained %) (not (now %))) (addrs tr)))))
+
+(defn- applied?
+  "Does t2, an update of tr with sigma, hold sigma's values, and tr's
+   unconstrained choices that remain unchanged?"
+  [tr t2 sigma]
+  (let [now (set (addrs t2))
+        constrained (set (cm/addresses sigma))]
+    (and (every? #(= (cm/get-choice sigma %) (cm/get-choice (:choices t2) %)) constrained)
+         (every? #(= (cm/get-choice (:choices tr) %) (cm/get-choice (:choices t2) %))
+                 (remove constrained (filter now (addrs tr)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; General laws
@@ -150,24 +202,15 @@
 (defn updates-are-reversible-with-exact-discards [cases]
   (prop/for-all [[model seed picks alt?] cases]
     (if-let [{:keys [tr sigma] {t2 :trace disc :discard :as r} :result} (update-case model seed picks alt?)]
-      (let [was (set (addrs tr))
-            now (set (addrs t2))
-            constrained (set (cm/addresses sigma))
-            ;; Def 2.3.1: the discard is τ restricted to (A_τ ∩ A_σ) ∪ (A_τ ∖ A_τ')
-            expected-discard (restrict (:choices tr) (filter #(or (constrained %) (not (now %))) (addrs tr)))
-            fresh (remove #(or (was %) (constrained %)) (addrs t2))
-            {t3 :trace disc3 :discard} (gfi/update t2 (:args tr) (unknown-diffs (:args tr)) disc (rng/key seed))]
+      (let [{t3 :trace disc3 :discard} (gfi/update t2 (:args tr) (unknown-diffs (:args tr)) disc (rng/key seed))]
         (and (consistent? t2)
              (sound-retdiff? tr r)
-             (every? #(= (cm/get-choice sigma %) (cm/get-choice (:choices t2) %)) constrained)
-             ;; unconstrained choices that remain keep their values
-             (every? #(= (cm/get-choice (:choices tr) %) (cm/get-choice (:choices t2) %))
-                     (remove constrained (filter now (addrs tr))))
-             (= expected-discard disc)
+             (applied? tr t2 sigma)
+             (= (exact-discard tr t2 sigma) disc)
              ;; Prop 2.3.1: updating back with the discard restores the trace,
              ;; and discards σ with the freshly proposed choices
              (= (:choices tr) (:choices t3))
-             (= (cm/merge sigma (restrict (:choices t2) fresh)) disc3)))
+             (= (cm/merge sigma (restrict (:choices t2) (fresh tr t2 sigma))) disc3)))
       true)))
 
 (defn regenerate-keeps-unselected-choices [cases]
@@ -236,10 +279,7 @@
   [cases]
   (prop/for-all [[model seed picks alt?] cases]
     (if-let [{:keys [tr sigma] {t2 :trace w :weight} :result} (update-case model seed picks alt?)]
-      (let [was (set (addrs tr))
-            constrained (set (cm/addresses sigma))
-            kept (filter #(or (was %) (constrained %)) (addrs t2))]
-        (close? w (- (gfi/project t2 (sel/from-paths kept)) (:score tr))))
+      (close? w (- (gfi/project t2 (sel/from-paths (kept tr t2 sigma))) (:score tr)))
       true)))
 
 (defn regenerate-weight-with-new-arguments-is-the-projection-ratio
@@ -266,6 +306,15 @@
     (let [{c :choices w :weight} (gfi/propose gf args (rng/key seed))]
       (close? w (:weight (gfi/assess gf args c))))))
 
+(defn assess-is-generate-with-every-choice
+  "assess's weight is generate's on the same choices and key: the key draws
+   the same encapsulated randomness in both (§4.5.1)."
+  [cases]
+  (prop/for-all [[[_ gf args] seed] cases]
+    (let [tr (gfi/simulate gf args (rng/key seed))
+          k (rng/key (inc seed))]
+      (close? (:weight (gfi/assess gf args (:choices tr) k)) (:weight (gfi/generate gf args (:choices tr) k))))))
+
 ;; ---------------------------------------------------------------------------
 ;; Forward-sampling laws
 ;; ---------------------------------------------------------------------------
@@ -287,9 +336,7 @@
 (defn update-weight-is-the-score-change-less-fresh-choices [cases]
   (prop/for-all [[model seed picks alt?] cases]
     (if-let [{:keys [tr sigma] {t2 :trace w :weight disc :discard} :result} (update-case model seed picks alt?)]
-      (let [was (set (addrs tr))
-            constrained (set (cm/addresses sigma))
-            fresh-lp (lp t2 (remove #(or (was %) (constrained %)) (addrs t2)))
+      (let [fresh-lp (lp t2 (fresh tr t2 sigma))
             {w3 :weight} (gfi/update t2 (:args tr) (unknown-diffs (:args tr)) disc (rng/key seed))]
         (and (close? w (- (- (:score t2) (:score tr)) fresh-lp))
              ;; the reverse weight is defined only inside the support (Def
@@ -368,7 +415,8 @@
    :regenerate-weight-is-the-projection-ratio regenerate-weight-is-the-projection-ratio
    :update-weight-is-the-projection-change update-weight-is-the-projection-change
    :regenerate-weight-with-new-arguments-is-the-projection-ratio regenerate-weight-with-new-arguments-is-the-projection-ratio
-   :propose-weight-is-the-assessed-density propose-weight-is-the-assessed-density})
+   :propose-weight-is-the-assessed-density propose-weight-is-the-assessed-density
+   :assess-is-generate-with-every-choice assess-is-generate-with-every-choice})
 
 (def forward-sampling
   {:generate-without-constraints-has-weight-zero generate-without-constraints-has-weight-zero
@@ -381,6 +429,213 @@
    :identity-update-reports-no-change identity-update-reports-no-change})
 
 (def all (merge general forward-sampling))
+
+(defn generate-weights-are-finite-on-a-fixed-support
+  "Def. 4.1.1's support condition, for a model whose every address has a
+   fixed support (thesis pp. 169-170): constraints drawn from a simulated
+   trace are in the support, so the trace's score and generate's weight
+   are finite (law audit gap E: not-NaN let a -Inf weight pass). Planted
+   bug (2026-10-20): normal's log density -Inf beyond 2.5 standard
+   deviations fails it, on the dynamic and the combinator models."
+  [cases]
+  (prop/for-all [[[_ gf args] seed picks] cases]
+    (let [tr (gfi/simulate gf args (rng/key seed))
+          sigma (restrict (:choices tr) (picked (addrs tr) picks))
+          r (vacuous-on-unvisitable (gfi/generate gf args sigma (rng/key (inc seed))))]
+      (and (in-support? tr)
+           (or (= ::vacuous r) (array/truthy? (array/all (array/isfinite (:weight r)))))))))
+
+(def fixed-support
+  "For models whose every address has a fixed support."
+  {:generate-weights-are-finite-on-a-fixed-support generate-weights-are-finite-on-a-fixed-support})
+
+(defn static-matches-dynamic
+  "The static language is an optimization of the dynamic one (DESIGN.md
+   §9): every operation on a static gf gives what the same body without
+   ^:static gives under the same keys (choices, scores, weights, return
+   values and discards, and a sound retdiff), also when an update or
+   regenerate skips nodes (no-change argdiffs for unchanged arguments)."
+  [cases]
+  (prop/for-all [[[_ gf args :as model] seed picks alt?] cases]
+    (let [plain (assoc gf :static nil)
+          k (rng/key seed)
+          tr (gfi/simulate gf args k)
+          tp (gfi/simulate plain args k)
+          host-choices #(ts/host (cm/to-map (:choices %)))
+          same-trace? (fn [t1 t2] (and (= (host-choices t1) (host-choices t2)) (close? (:score t1) (:score t2))
+                                       (= (ts/host (:retval t1)) (ts/host (:retval t2)))))
+          ;; the static retdiff may be more precise than the dynamic one (a
+          ;; propagated diff), so it need only be sound
+          same? (fn [r1 r2] (and (same-trace? (:trace r1) (:trace r2))
+                                 (close? (or (:weight r1) 0.0) (or (:weight r2) 0.0))
+                                 (= (some-> (:discard r1) cm/to-map ts/host) (some-> (:discard r2) cm/to-map ts/host))
+                                 (or (nil? (:retdiff r1)) (sound-retdiff? tr r1))))
+          args' (next-args model seed alt?)
+          diffs (if (= args' args) (diff/no-changes (count args)) (unknown-diffs args'))
+          ;; precise argdiffs too, which the static walk propagates (review, 2026-10-20)
+          precise (mapv diff/compute args args')
+          other (gfi/simulate gf args' (rng/fold-in k 1))
+          sigma (restrict (:choices other) (picked (addrs other) picks))
+          s (sel/from-paths (picked (addrs tr) picks))
+          both (fn [f] (let [r1 (vacuous-on-unvisitable (f gf tr)) r2 (vacuous-on-unvisitable (f plain tp))]
+                         (or (= ::vacuous r1 r2) (same? r1 r2))))]
+      (and (same-trace? tr tp)
+           (both (fn [g _] (gfi/generate g args (restrict (:choices tr) (picked (addrs tr) picks)) (rng/fold-in k 2))))
+           (close? (:weight (gfi/assess gf args (:choices tr) k)) (:weight (gfi/assess plain args (:choices tr) k)))
+           (both (fn [_ t] (gfi/update t args' diffs sigma (rng/fold-in k 3))))
+           (both (fn [_ t] (gfi/update t args' precise sigma (rng/fold-in k 3))))
+           (both (fn [_ t] (gfi/regenerate t args' precise s (rng/fold-in k 6))))
+           (both (fn [_ t] (gfi/update t cm/EMPTY (rng/fold-in k 4))))
+           (both (fn [_ t] (gfi/regenerate t args' diffs s (rng/fold-in k 5))))))))
+
+(def static
+  "For a static generative function (gen ^:static)."
+  {:static-matches-dynamic static-matches-dynamic})
+
+;; ---------------------------------------------------------------------------
+;; Encapsulated randomness (thesis §4.5)
+;; ---------------------------------------------------------------------------
+
+(defn generate-with-every-choice-weighs-its-score [cases]
+  (prop/for-all [[[_ gf args] seed] cases]
+    (let [tr (gfi/simulate gf args (rng/key seed))
+          {g :trace w :weight} (gfi/generate gf args (:choices tr) (rng/key (inc seed)))]
+      (and (= (:choices tr) (:choices g)) (close? w (:score g))))))
+
+(defn generated-traces-keep-their-constraints [cases]
+  (prop/for-all [[[_ gf args] seed picks] cases]
+    (let [tr (gfi/simulate gf args (rng/key seed))
+          sigma (restrict (:choices tr) (picked (addrs tr) picks))
+          r (vacuous-on-unvisitable (gfi/generate gf args sigma (rng/key (inc seed))))]
+      (or (= ::vacuous r)
+          (let [{g :trace w :weight} r]
+            (and (not (array/truthy? (array/isnan w)))
+                 (every? #(= (cm/get-choice sigma %) (cm/get-choice (:choices g) %)) (cm/addresses sigma))))))))
+
+(defn updates-restore-their-choices
+  "Prop 2.3.1 for the choices: the discards of an update, given back,
+   restore them (the weights agree only in expectation)."
+  [cases]
+  (prop/for-all [[model seed picks alt?] cases]
+    (if-let [{:keys [tr sigma] {t2 :trace disc :discard :as r} :result} (update-case model seed picks alt?)]
+      (let [{t3 :trace} (gfi/update t2 (:args tr) (unknown-diffs (:args tr)) disc (rng/key seed))]
+        (and (sound-retdiff? tr r)
+             (applied? tr t2 sigma)
+             (= (exact-discard tr t2 sigma) disc)
+             (= (:choices tr) (:choices t3))))
+      true)))
+
+(defn regenerate-keeps-unselected-values [cases]
+  (prop/for-all [[[_ gf args :as model] seed picks alt?] cases]
+    (let [k (rng/key seed)
+          tr (gfi/simulate gf args k)
+          args' (next-args model seed alt?)
+          s (sel/from-paths (picked (addrs tr) picks))
+          {t2 :trace :as r} (gfi/regenerate tr args' (unknown-diffs args') s (rng/fold-in k 1))
+          selected (set (cm/addresses (sel/get-selected (:choices tr) s)))
+          now (set (addrs t2))]
+      (and (sound-retdiff? tr r)
+           (every? #(= (cm/get-choice (:choices tr) %) (cm/get-choice (:choices t2) %))
+                   (remove selected (filter now (addrs tr))))))))
+
+(defn update-weight-is-the-score-change-less-fresh [cases]
+  (prop/for-all [[model seed picks alt?] cases]
+    (if-let [{:keys [tr sigma] {t2 :trace w :weight} :result} (update-case model seed picks alt?)]
+      (close? w (- (- (:score t2) (:score tr)) (lp t2 (fresh tr t2 sigma))))
+      true)))
+
+(defn score-is-assessed-on-the-same-key
+  "Def 2.1.16 pointwise for untraced draws: simulate and assess on one key
+   draw the same ω, so the score is assess's weight (law audit gap 12). An
+   estimator's joint sampler draws ω otherwise than its estimate."
+  [cases]
+  (prop/for-all [[[_ gf args] seed] cases]
+    (let [k (rng/key seed)
+          tr (gfi/simulate gf args k)]
+      (close? (:score tr) (:weight (gfi/assess gf args (:choices tr) k))))))
+
+(defn identity-update-keeps-omega
+  "An update that changes nothing keeps ω and the score (DESIGN.md §9)."
+  [cases]
+  (prop/for-all [[[_ gf args] seed] cases]
+    (let [tr (gfi/simulate gf args (rng/key seed))
+          t2 (:trace (gfi/update tr cm/EMPTY (rng/key (inc seed))))]
+      (and (= (:gen.trace/omega tr) (:gen.trace/omega t2)) (= (ts/number (:score tr)) (ts/number (:score t2)))))))
+
+(def encapsulated
+  "The laws of a generative function with encapsulated randomness ω, whose
+   score is an estimate: those of general and forward-sampling that hold for
+   one ω, and the others without their comparisons of separate runs (assess
+   against a trace's score, propose against assess, an update and its
+   reverse), which hold only in expectation (Eqs. 4.3-4.4, tested
+   statistically)."
+  (merge (apply dissoc all [:score-is-the-assessed-density :generate-with-every-choice-is-deterministic
+                            :generated-traces-are-consistent :updates-are-reversible-with-exact-discards
+                            :regenerate-keeps-unselected-choices :propose-weight-is-the-assessed-density
+                            :update-weight-is-the-score-change-less-fresh-choices])
+         {:generate-with-every-choice-weighs-its-score generate-with-every-choice-weighs-its-score
+          :generated-traces-keep-their-constraints generated-traces-keep-their-constraints
+          :updates-restore-their-choices updates-restore-their-choices
+          :regenerate-keeps-unselected-values regenerate-keeps-unselected-values
+          :update-weight-is-the-score-change-less-fresh update-weight-is-the-score-change-less-fresh
+          :identity-update-keeps-omega identity-update-keeps-omega
+          :score-is-assessed-on-the-same-key score-is-assessed-on-the-same-key}))
+
+;; ---------------------------------------------------------------------------
+;; Across generative functions (gfi/revise)
+;; ---------------------------------------------------------------------------
+
+(defn update-across-generative-functions
+  "An update of a trace that gf made, given gf' (another generative function,
+   such as gf under another store): only its choices are kept (gfi/revise),
+   so Def. 2.3.1 holds against gf': the new trace is gf''s, the weight is
+   log p'(τ') - log q'(fresh | the rest) - log p(τ) (the projection of τ' on
+   its kept choices, less τ's score), the discard is the old choices
+   constrained or gone, and updating back with gf and the discard restores
+   τ, the two weights adding to -log q'(fresh) (law audit F5: store-test had
+   examples only). Models are [label gf args alt-args gf']."
+  [cases]
+  (prop/for-all [[[_ gf _ _ gf' :as model] seed picks alt?] cases]
+    (if-let [{:keys [tr sigma] {t2 :trace w :weight disc :discard} :result} (update-case model seed picks alt? gf')]
+      (let [kept-lp (gfi/project t2 (sel/from-paths (kept tr t2 sigma)))
+            {t3 :trace w3 :weight} (gfi/update (assoc t2 :gen-fn gf) (:args tr) (unknown-diffs (:args tr)) disc
+                                               (rng/fold-in (rng/key seed) 3))]
+        (and (gfi/same-gen-fn? gf' (trace/maker t2))
+             (assessed? gf' t2)
+             (applied? tr t2 sigma)
+             (close? w (- kept-lp (:score tr)))
+             (= (exact-discard tr t2 sigma) disc)
+             (= (:choices tr) (:choices t3))
+             (assessed? gf t3)
+             (or (not (in-support? t2)) (close? (+ w w3) (- kept-lp (:score t2))))))
+      true)))
+
+(defn regenerate-across-generative-functions
+  "A regenerate of a trace that gf made, given gf': the unselected choices
+   are kept, and the weight is Eq. 4.1's with each trace projected by its
+   own generative function, on the retained choices."
+  [cases]
+  (prop/for-all [[[_ gf args _ gf' :as model] seed picks alt?] cases]
+    (let [k (rng/key seed)
+          tr (gfi/simulate gf args k)
+          args' (next-args model seed alt?)
+          chosen (set (picked (addrs tr) picks))
+          r (vacuous-on-unvisitable
+             (gfi/regenerate (assoc tr :gen-fn gf') args' (unknown-diffs args') (sel/from-paths chosen) (rng/fold-in k 1)))]
+      (or (= ::vacuous r)
+          (let [{t2 :trace w :weight} r
+                now (set (addrs t2))
+                retained (filter #(and (now %) (not (chosen %))) (addrs tr))]
+            (and (gfi/same-gen-fn? gf' (trace/maker t2))
+                 (assessed? gf' t2)
+                 (every? #(= (cm/get-choice (:choices tr) %) (cm/get-choice (:choices t2) %)) retained)
+                 (close? w (- (gfi/project t2 (sel/from-paths retained)) (gfi/project tr (sel/from-paths retained))))))))))
+
+(def across
+  "For pairs of generative functions: models [label gf args alt-args gf'],
+   gf' typically gf under another store (gen.dynamic/with-params)."
+  {:update-across-generative-functions update-across-generative-functions
+   :regenerate-across-generative-functions regenerate-across-generative-functions})
 
 (defmacro deflaws
   "A defspec per law (from gen.laws/all, or the given law map: a var's

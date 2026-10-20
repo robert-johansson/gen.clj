@@ -30,13 +30,12 @@
   (if (array/host? x) (double x) (array/with-backend reference (array/array (array/->clj x) {:dtype :float64}))))
 
 (defn- fd-grad
-  "The central-difference gradient of the scalar function f at x, in float64
-   on the reference backend (x on it)."
-  [f x]
+  "The central-difference gradient of the scalar function f at x, of step h,
+   in float64 on the reference backend (x on it)."
+  [f x h]
   (array/with-backend reference
     (let [xs (flat x)
-          s (array/shape x)
-          h 1e-6]
+          s (array/shape x)]
       (from-flat (for [i (range (count xs))]
                    (let [at (fn [d] (double (array/item (f (from-flat (update xs i + d) s)))))]
                      (/ (- (at h) (at (- h))) (* 2 h))))
@@ -47,16 +46,22 @@
     (and (= (array/shape g) (array/shape fd))
          (array/allclose? g fd (if (ts/f32?) {:rtol 2e-3 :atol 2e-4} {:rtol 1e-5 :atol 1e-6})))))
 
-(defn- grad-matches?
-  "Does f's gradient with respect to each argument match finite differences?"
-  [f & xs]
+(defn- grad-matches-by?
+  "Does f's gradient with respect to each argument match finite differences
+   of step h?"
+  [h f & xs]
   (let [xs (vec xs)
         grads (apply (array/grad f {:argnums (vec (range (count xs)))}) xs)
         ref-xs (mapv on-reference xs)]
     (every? true?
             (for [i (range (count xs))]
               (close-grads? (nth grads i)
-                            (fd-grad #(apply f (assoc ref-xs i %)) (nth ref-xs i)))))))
+                            (fd-grad #(apply f (assoc ref-xs i %)) (nth ref-xs i) h))))))
+
+(defn- grad-matches?
+  "Does f's gradient with respect to each argument match finite differences?"
+  [f & xs]
+  (apply grad-matches-by? 1e-6 f xs))
 
 (defn- projected
   "A scalar function of f's arguments: f's output weighted by fixed
@@ -210,12 +215,16 @@
            [:bernoulli-p #(dc/log-prob (d/bernoulli %1) true) 0.3]
            [:categorical #(dc/log-prob (d/categorical-logits %1) 1) (array/array [0.2 -0.5 1.0])]
            [:mvnormal #(dc/log-prob (d/mvnormal %1 %2) %3) (array/array [0.1 -0.3]) (array/array [[2.0 0.3] [0.3 1.0]]) (array/array [0.5 0.2])]
-           [:dirichlet #(dc/log-prob (d/dirichlet %1) %2) (array/array [1.5 2.0 0.7]) (array/array [0.2 0.5 0.3])]
            [:normal-mixture #(dc/log-prob ((d/homogeneous-mixture d/normal) [0.3 0.7] %1 %2) %3)
             (array/array [-1.0 1.5]) (array/array [0.6 1.2]) 0.4]
            [:heterogeneous-mixture #(dc/log-prob ((d/heterogeneous-mixture [d/normal d/gamma]) [0.4 0.6] [%1 1.0] [%2 1.0]) %3)
             0.2 2.0 1.3]]]
-    (is (apply grad-matches? f xs) (str label))))
+    (is (apply grad-matches? f xs) (str label)))
+  ;; the value's differences stay inside the support, |sum v - 1| <= 1e-6:
+  ;; with a step of 1e-6 two of them left it, and the reference was -Inf and
+  ;; +Inf, which allclose? called close to anything (review 7, R7-7)
+  (is (grad-matches-by? 1e-8 #(dc/log-prob (d/dirichlet %1) %2) (array/array [1.5 2.0 0.7]) (array/array [0.2 0.5 0.3]))
+      ":dirichlet"))
 
 ;; ---------------------------------------------------------------------------
 ;; The API
