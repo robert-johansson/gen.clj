@@ -214,6 +214,11 @@
            (when (= 1 (.codePointCount s 0 (count s))) (.codePointAt s 0)))
          (catch java.nio.charset.CharacterCodingException _ nil))))
 
+(def ^:private boundaries
+  "The code points where UTF-8's encodings change length, and around the
+   surrogates."
+  [0 0x7F 0x80 0x7FF 0x800 0xFFF 0x1000 0xD7FF 0xE000 0xFFFF 0x10000 0x3FFFF 0x40000 0x10FFFF])
+
 (def ^:private gen-code-range
   (gen/fmap sort (gen/vector (gen/one-of [(gen/choose 0 0x7FF) (gen/choose 0x800 0xFFFF) (gen/choose 0 0x10FFFF)]) 2)))
 
@@ -229,7 +234,7 @@
            (every? ok? (map #(byte-array (map unchecked-byte %)) longer))
            (every? #(or (<= 0xD800 % 0xDFFF)
                         (= (<= lo % hi) (regex/matches? d (string-of [%]))))
-                   inside)))))
+                   (filter #(<= 0 % 0x10FFFF) (concat boundaries [lo hi (dec lo) (inc hi)] inside)))))))
 
 (deftest every-character-and-nothing-else
   (let [any (regex/dfa regex/any-char)]
