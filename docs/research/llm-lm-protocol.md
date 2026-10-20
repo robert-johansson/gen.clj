@@ -3,8 +3,10 @@
 *2026-10-20, bean genclj-mse0 (M3's second). Built by an agent on branch
 m3-lm, over the Branching protocol (`docs/research/llm-branching.md`). The
 choices that are the owner's to make (names, the value shape, the eviction
-policy, an autobatcher, and smaller ones) are marked **Recommendation**.
-Summarized in DESIGN.md §6 and §9, for the owner's review.*
+policy, an autobatcher, and smaller ones), marked **Approved**, were all
+approved by the owner the same night, with the token generative function's
+foundations (score once, the trie owns the branches, host draws; DESIGN.md
+§9). Summarized in DESIGN.md §6 and §9.*
 
 ## What exists
 
@@ -153,12 +155,12 @@ may come from different reads. The scores on a path are the first read's
 
 ## Decisions
 
-1. **Recommendation: the names.** `gen.llm.lm` (alias `lm`), `lm/lm`,
+1. **Approved (owner, 2026-10-20): the names.** `gen.llm.lm` (alias `lm`), `lm/lm`,
    `vocab`, `encode`, `decode`, `token-bytes`, `byte-vocab`,
    `next-logprobs`, `batch-next-logprobs`, `score`, `info`: DESIGN §6's
    list, genlm's `next_token_logprobs` shortened as §6 has it.
    Alternatives: `gen.llm.model`, `next-token-logprobs`.
-2. **Recommendation: the value shape: host float arrays, a new one per
+2. **Approved (owner, 2026-10-20): the value shape: host float arrays, a new one per
    call.** The engine's form; every consumer below the token site reads it
    on the host (byte marginals over the token-byte trie, grammar masks, SMC
    weights, top-k), and the LM layer stays below gen.array as the engine
@@ -183,14 +185,14 @@ may come from different reads. The scores on a path are the first read's
    is a read. Worth a token distribution that does this (or a cheaper
    `categorical-logits` sampler for long rows), and `from-host` taking
    float arrays.
-3. **Recommendation: the eviction policy.** LRU for branches; for cells,
+3. **Approved (owner, 2026-10-20): the eviction policy.** LRU for branches; for cells,
    LRU among the branches whose disposal frees cells; sources pinned and
    forked, consumed only when branches are short. The bounds default to
    the engine's (every free branch, all of `:n-ctx`), so an LM should be its
    engine's only user. Alternatives: plain LRU for both (evicts ancestors
    that free no cells, losing the prompt), advance in place by default
    (fewer forks, no backtracking to a parent), a pinned-prompt API.
-4. **Recommendation: no autobatcher.** One that coalesces concurrent
+4. **Approved (owner, 2026-10-20): no autobatcher.** One that coalesces concurrent
    callers by timing (genlm-backend's `_join_batch` with its timeout) makes
    batch composition, and on llama.cpp the results, depend on thread
    timing: runs would not repeat bit for bit, and the laws would need
@@ -203,7 +205,7 @@ may come from different reads. The scores on a path are the first read's
    latency each round and needs workers to register and deregister.
    Recommended as a later bean only if a workload needs it; SMC and batched
    MH call `batch-next-logprobs` directly.
-5. **Recommendation: the tokenizer is a map** (data and three functions)
+5. **Approved (owner, 2026-10-20): the tokenizer is a map** (data and three functions)
    rather than a protocol: four implementations (llama.cpp, MLX's HF
    tokenizers, the toy, a token GF's table) with three functions each.
 6. **Smaller choices** (recommended; the owner may overrule):
@@ -361,7 +363,7 @@ So the bound on held rows is `:max-branches` rows (64 × 594 KiB = 37 MiB for
 Qwen3; 255 × 1 MiB for Gemma 3), and below the heap where a row stops
 being humongous (4 GB for Qwen3, 8 GB for Gemma 3's 1,048,592-byte rows)
 each held row takes a whole region, up to 2 MiB for Gemma 3's. Copies
-cost nothing measurable either way. **Recommendation:** run LLM work
+cost nothing measurable either way. **Approved (owner, 2026-10-20):** run LLM work
 with a heap of 8 GB or more, or `-XX:G1HeapRegionSize=4m`, where no row is
 humongous.
 
