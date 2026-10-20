@@ -596,13 +596,17 @@
         (is (= (:log-weights state) (:log-weights moved)))))))
 
 (defn- one-step-filter
-  "30 particles resampled once, then stepped: an estimate so far, and
-   weights of a moderate spread (a view's resampling draws several)."
+  "30 particles resampled once (an estimate so far), stepped, then given
+   weights of a set moderate spread, host values, so that a view's
+   resampling draws several on every backend. (A filter's own weights
+   differ by float32 rounding, enough to change the resampled parents: on
+   MLX that view was one particle's, ESS 1.12.)"
   [key]
   (let [[k1 k2 k3] (rng/split key 3)]
     (-> (pf/initialize model [1 0.0] (observation 0) 30 {:key k1})
         (pf/resample {:key k2})
-        (pf/step [2 0.0] [diff/unknown-change diff/no-change] (observation 1) {:key k3}))))
+        (pf/step [2 0.0] [diff/unknown-change diff/no-change] (observation 1) {:key k3})
+        (assoc :log-weights (mapv #(* 0.8 (Math/sin (* 1.7 %))) (range 30))))))
 
 (deftest resampling-a-view-keeps-the-estimate-unbiased
   (let [state (one-step-filter (rng/key 36))
