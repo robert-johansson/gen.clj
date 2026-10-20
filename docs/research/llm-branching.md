@@ -158,15 +158,48 @@ directly (resampling as one lane gather).
   fork whose extension finds the cache full after two of its decodes cannot
   be rolled back (v0.7.0's recurrent `seq_rm` refuses), so it is freed,
   loudly; on an attention model the same failure leaves the fork as it
-  was.
+  was. So is a real fatal decode (below).
 - **Sliding-window models** (Gemma): `swa_full` by default, so a branch
   keeps every token a fork may need. Tested with Gemma-3-270M (window 512;
-  llama.cpp logs "using full-size SWA cache"): the contract passes. No test
-  has branches longer than the window yet.
+  llama.cpp logs "using full-size SWA cache"): the contract passes, and
+  so it does past the window (genclj-vdxm): forks taken at 600 and 1,000
+  tokens, a resample there, and scores of a continuation from 472 across
+  512 give fresh reads' distributions, within a band measured for long
+  branches (0.6 nats, Numerics). A planted copy keeping only the window's
+  positions, as if a sliding-window model needed no more, fails it by 4
+  to 39 nats: Gemma 3's full-attention layers need the whole history.
+  - *Without `swa_full`* (measured, not a test: it is llama.cpp's
+    behaviour), the window cache has pad(n_swa · n_seq_max + n_ubatch,
+    256) cells, so a branch longer than that keeps only its latest
+    positions there (positions 840 to 2,599 of 2,600, in 1,792 cells), and
+    llama.cpp reuses a cell only when its one sequence has moved past it.
+    Below that size nothing changes: forks, resamples and scores at 600 and
+    1,000 tokens give the same values bit for bit. Above it, a fork pins the
+    window cache: the copy shares every cell, none is reusable, and the
+    next decode of the fork finds no room (`:kv-full`; on Metal at 4,000
+    tokens in 3,072 cells, on the CPU at 2,600 in 1,792). Forks thus break
+    loudly, not silently. A read that fails after overwriting cells still
+    inside the window could not be undone; the one probed (a read of 48
+    aborted after its first decode, at 2,600 tokens) found free cells and
+    was undone exactly, as with `swa_full`.
 - **Refused:** encoder-decoder, diffusion and memoryless (embedding) models.
 - **Decode failures** are ex-infos (`:kv-full`, `:aborted`,
   `:invalid-batch`, `:decode-failed`) carrying llama.cpp's last logged
-  error, and a row of NaN or infinite logits is one too.
+  error, and a row of NaN or infinite logits is one too. A fatal one is
+  tested through llama.cpp's abort callback (genclj-vdxm), set by the
+  test alone through `llama_set_abort_callback` (found in libllama; the
+  binding leaves it out): status 2, after which llama.cpp keeps the
+  ubatches it finished and removes the aborted one. Only the CPU backend
+  checks the callback (once before each graph node; ggml-metal enqueues
+  its first two command buffers regardless, and checks only when
+  capturing), so the test's engine is CPU-only with 16-token decodes
+  (below the 32 at which llama.cpp hands a CPU model's work to the GPU),
+  and the abort lands at a counted check: the first, or the first of a
+  read's second decode, counted on a decode of the same size (537 checks
+  for Qwen3-0.6B, 785 for Qwen3.5, the same every time). An attention
+  model's branch is restored exactly (its next step equals, bit for bit, a
+  fork's taken before); a hybrid one's is lost, named and freed, even when aborted at
+  once, since llama.cpp moves the recurrent state before it computes.
 - **Version pinning:** the binding passes `llama_model_params` and
   `llama_context_params` by value, whose layouts change between releases, so
   `LlamaRuntime` refuses a libllama whose `llama_version()` is not "0.7.0".
@@ -207,8 +240,36 @@ stay inside it, with the same determinism:
 | Qwen3.5-0.8B Q8_0 (hybrid) | 1.6e-2 | 1.0e-3 | 1.6e-2 | 0 |
 | Gemma-3-270M Q8_0 (SWA) | 2.3e-2 | 4.7e-3 | 3.0e-2 | 0 |
 
-CPU and CUDA builds
-have other kernels: measure them with the bench before using the band there.
+Branches past a sliding window (`bench/gen/llama_long_noise.clj`: the
+contract's own comparisons, for four long texts at 600, 800, 1,000 and
+1,400 tokens and a continuation across 512; the engine of the long-branch
+test) are noisier for Gemma:
+
+| Model | fork vs fresh, max | child vs fresh, max | overall max (n 2,200) |
+|---|---|---|---|
+| Gemma-3-270M Q8_0 | 0.28 | 5.0e-2 | 0.28 |
+| Qwen3-0.6B Q8_0 | 1.6e-2 | 3.0e-2 | 3.0e-2 |
+| Qwen3.5-0.8B Q8_0 | 8.3e-3 | 8.9e-3 | 8.9e-3 |
+
+Gemma's 0.28 is one comparison (the next largest is 5.0e-2): a fork at
+1,000 tokens of a code text, after a newline whose successor has log p of
+-6e-6, in the deep tail of the reference's 64 tokens (log p of -10 to
+-22), where a fresh read's prefill and a one-token step round
+differently; the fork and the branch advanced alone agree there to 1e-3.
+The long-branch test's band is twice it, 0.6 nats; the short-prompt band
+of 0.1 does not hold for Gemma's long branches.
+
+The engine's paths agree exactly with same-shape paths: a resampled
+child equals the same steps without resample bit for bit (from 600
+tokens on; at 100, 1e-4 to 2e-3 from the cache's layout), and `score`
+equals `extend` to 1e-8 (the float rounding of the last score). The
+differences above are kernel noise between shapes.
+
+**CPU builds are far noisier across shapes.** On the M2 Max's CPU backend
+(16-token decodes, Q8_0's repacked matrix kernels), a fresh read and the
+same tokens stepped differ by up to 0.46 nats (Gemma at 600 tokens; Qwen3
+0.17), while same shapes agree exactly. CPU and CUDA builds need bands
+of their own: measure them with the benches before using these.
 
 ## Costs (M2 Max, Metal, Qwen3-0.6B Q8_0, means)
 
@@ -244,7 +305,9 @@ have other kernels: measure them with the bench before using the band there.
   line `llama_kv_cache: size = … MiB (… cells, … layers, …)` (and its
   per-buffer "KV buffer size" lines) through the log callback.
 - **Not done here:** Linux CUDA and CPU builds (written, not run), MLX and
-  llama.cpp in one test JVM (the spike showed it), the 8B and 30B models.
+  llama.cpp in one test JVM (the spike showed it), the 8B and 30B models,
+  and a fatal decode on Metal (only the CPU backend honours an abort, and
+  no other deterministic way exists without a `GGML_ASSERT`).
 
 ## The review
 
