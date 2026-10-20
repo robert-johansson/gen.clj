@@ -274,6 +274,25 @@ tokens on; at 100, 1e-4 to 2e-3 from the cache's layout), and `score`
 equals `extend` to 1e-8 (the float rounding of the last score). The
 differences above are kernel noise between shapes.
 
+**On the Mac mini M4** (2026-10-21, Metal, 10-core GPU; M3's development
+machine since genclj-m54h), both benches again, with the same models
+(copied from the MacBook, their sha256 checked). Every same-state read is
+bit-identical, and both bands hold:
+
+| Model | short prompts, max (M4 / M2 Max) | long branches, max (M4 / M2 Max) |
+|---|---|---|
+| Qwen3-0.6B Q8_0 | 4.3e-2 / 5.2e-2 | 6.9e-2 / 3.0e-2 |
+| Qwen3.5-0.8B Q8_0 | 1.5e-2 / 1.6e-2 | 1.1e-2 / 8.9e-3 |
+| Gemma-3-270M Q8_0 | 2.7e-2 / 3.0e-2 | 0.15 / 0.28 |
+
+The short-prompt band (0.1) is 2.3 times the M4's largest difference, the
+chat-formatted prompt's again; the long-branch band (0.6) 3.9 times, at
+Gemma's same deep-tail case (the code text at 1,000 tokens, token 107).
+Only Qwen3's long branches moved up, to 6.9e-2 at one case (the prose
+text at 1,400 tokens), still inside both bands. The medians are those of
+the M2 Max (2e-3 to 1e-2). The bench's costs ran beside another agent's
+JVM tests, so they are not recorded as the M4's.
+
 **CPU builds are far noisier across shapes.** On the M2 Max's CPU backend
 (16-token decodes, Q8_0's repacked matrix kernels), a fresh read and the
 same tokens stepped differ by up to 0.46 nats (Gemma at 600 tokens; Qwen3
