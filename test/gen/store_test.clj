@@ -73,6 +73,21 @@
         (is (consistent? model r) "regenerate")
         (is (ts/close? (- (assessed model r) (ts/number (:score tr))) rw) "regenerate's weight")))))
 
+(deftest a-changed-call-is-weighed-against-its-old-store
+  ;; the store at a call changes (the whole model is given another): the
+  ;; call runs again, and the old trace is weighed under the store it ran
+  ;; under, which an exact proposal's projection needs (it reruns its model)
+  (let [exact (enum/with-exact-proposal inner-b [:b])
+        model (gen [] (splice :p exact 0.0))
+        before (dyn/with-params model {:w 1.0})
+        after (dyn/with-params model {:w 5.0})
+        tr (gfi/simulate before [] (rng/key 16))
+        {t :trace w :weight} (gfi/regenerate (assoc tr :gen-fn after) sel/none (rng/key 17))]
+    (is (consistent? after t))
+    ;; nothing selected: the projection ratio on every choice (Eq. 4.1),
+    ;; each projection under its own model's store
+    (is (ts/close? (- (gfi/project t sel/all) (gfi/project tr sel/all)) w))))
+
 ;; ---------------------------------------------------------------------------
 ;; Another generative function at the address (review 4, R4)
 ;; ---------------------------------------------------------------------------

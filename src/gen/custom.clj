@@ -113,7 +113,7 @@
         plain (if gradient (mapv detached args) args)
         [retval state] ((:apply-with-state gf) plain)
         retval (if gradient (with-gradient retval state args plain gradient) retval)]
-    (dyn/record-store (trace/make-trace {:gen-fn gf :args args :choices cm/EMPTY :retval retval :score 0.0 ::state state}))))
+    (trace/make-trace {:gen-fn gf :args args :choices cm/EMPTY :retval retval :score 0.0 ::state state})))
 
 (defn- updated
   "tr moved to args (argdiffs), with update-with-state, or kept when nothing
@@ -128,7 +128,7 @@
       [(run gf args) diff/unknown-change]
       :else
       (let [[state retval retdiff] ((:update-with-state gf) (::state tr) args (vec argdiffs))]
-        [(dyn/record-store (assoc tr :args args :retval retval ::state state)) retdiff]))))
+        [(assoc tr :args args :retval retval ::state state) retdiff]))))
 
 (defrecord DeterministicGF [apply-with-state update-with-state gradient]
   gfi/IGenerativeFunction
@@ -194,12 +194,9 @@
 ;; Estimated densities (encapsulated randomness, thesis §4.5)
 ;; ---------------------------------------------------------------------------
 
-(defn- estimated-trace
-  "With the store in effect: an estimator may run a model that reads it."
-  [gf args choices log-estimate omega]
-  (dyn/record-store
-   (trace/make-trace {:gen-fn gf :args (vec args) :choices choices :score log-estimate
-                      :retval ((:retval gf) args choices) ::trace/omega omega})))
+(defn- estimated-trace [gf args choices log-estimate omega]
+  (trace/make-trace {:gen-fn gf :args (vec args) :choices choices :score log-estimate
+                     :retval ((:retval gf) args choices) ::trace/omega omega}))
 
 (defn- check-unbatched!
   "An estimate in a batched run raises the fallback: a particle's ω must

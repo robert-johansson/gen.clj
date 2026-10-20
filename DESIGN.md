@@ -347,23 +347,31 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   `(dyn/with-params gf store)` as a record field. `(param :w)` in a body reads
   the store in effect, which reaches every nested splice and combinator kernel
   (one namespace per model, like Pyro's store). A missing parameter is a loud
-  error. A trace records the store it ran under. A generative function
-  keeps a previous trace (or a call of it) on no-change argdiffs only when
-  it computes as the one that made it and under the same store
-  (`dyn/kept?`): a dynamic body reruns anyway, a static one compares, Map,
-  Unfold and Recurse revisit every call of a kernel under another store or
-  of another kernel, and deterministic and estimated functions and the
-  internal and exact proposal overrides run again. Stores are compared
-  without reading an array (a name added or removed, or a value that is not
-  the same object or an equal host value), and generative functions by
-  `dyn/same-gen-fn?`: the same object, or the same body (one compiled fn
-  over identical closed-over values) with the same store and middleware,
-  so a kernel a body builds again on every run is the same kernel, and one
-  that closes over another value is not. No argument shows any of this, so
-  each kind checks for itself, under any parent (the confirmation review,
-  reviews 3 and 4, 2026-10-20: a Map, an Unfold and a Recurse kept stale
-  calls; then estimated densities, the overrides' regenerate, and a
-  deterministic callee picked by a choice). Gradients are values: `gen.gradients/param-gradients` returns a map,
+  error. **What a call may keep is decided in one place, `dyn/call`**, the
+  dispatch of every call a generative function makes (a splice, a
+  combinator's kernel). Each trace a call makes is marked with the store in
+  effect at the call. An update or regenerate whose store differs from the
+  mark (a name added or removed, or a value that is not the same object or
+  an equal host value: stores are compared without reading an array), or
+  whose generative function does not compute as the one that made the
+  trace (`dyn/same-gen-fn?`: the same object, or the same body, one
+  compiled fn over identical closed-over values, with the same store and
+  middleware), keeps nothing: it runs again as generate from the old
+  choices (update's weight is generate's less the old score, regenerate's
+  less the old projection on the unselected choices, Eq. 4.1, taken under
+  the store the old trace ran under) and gives an unknown-change retdiff,
+  so the ordinary diff machinery reruns what the change reaches. No
+  argument shows a store or a function, and this way no kind of
+  generative function has to know about either: reviews 3 and 4
+  (2026-10-20) found one kind after another that kept a stale call (Map,
+  Unfold, Recurse, estimated densities, the proposal overrides, a
+  deterministic callee picked by a choice) while each kind checked for
+  itself. Two checks stay local, for what no call shows: the static walk's
+  (a node reading `(param :w)` has no inputs), and, for a trace given
+  another gen-fn at the top level, where there is no call, the
+  combinators' kernel identity and `dyn/kept?`. If the new run no longer
+  visits an old choice (the structure changed), the callee's own update
+  decides, with unknown-change argdiffs. Gradients are values: `gen.gradients/param-gradients` returns a map,
   and optimizers return a new store. This is Gen.jl's `@param`,
   `init_param!` and `accumulate_param_gradients!`/`apply!`, but functional.
 - **Batched execution** (decided 2026-10-18 by the agent, for the owner's

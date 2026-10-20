@@ -74,11 +74,13 @@
 (defn- element-key [key i] (rng/fold-in key i))
 
 ;; Kernel calls. (A batched run is this same code under the batch tracer.)
-(defn- simulate-at [gf args key] (gfi/-simulate gf args key))
-(defn- generate-at [gf args cs key] (gfi/-generate gf args cs key))
+(defn- simulate-at [gf args key] (:trace (dyn/call gf :simulate args {:key key})))
+(defn- generate-at [gf args cs key] (dyn/call gf :generate args {:constraints cs :key key}))
 (defn- assess-at [gf args choices key] (gfi/-assess gf args choices key))
-(defn- update-at [gf old args argdiffs cs key] (gfi/-update gf old args argdiffs cs key))
-(defn- regenerate-at [gf old args argdiffs s key] (gfi/-regenerate gf old args argdiffs s key))
+(defn- update-at [gf old args argdiffs cs key]
+  (dyn/call gf :update args {:prev old :argdiffs argdiffs :constraints cs :key key}))
+(defn- regenerate-at [gf old args argdiffs s key]
+  (dyn/call gf :regenerate args {:prev old :argdiffs argdiffs :selection s :key key}))
 
 (defn- assoc-element [choices i sub]
   (if (cm/empty? sub) (cm/remove-submap choices i) (cm/set-submap choices i sub)))
@@ -106,21 +108,17 @@
         :else :all))
 
 (defn- rerun-all?
-  "Must every kernel call of tr run again? When the store in effect is
-   another (a kernel may read it), or a kernel does not compute as the one
-   that made the calls' traces (dyn/same-gen-fn?: a trace given another
-   gen-fn, a closure over another value): neither shows in the arguments.
-   pairs: [kernel, a trace it made or nil]."
-  [tr pairs]
-  (boolean (or (dyn/store-changed? tr)
-               (some (fn [[kernel sub]] (and sub (not (dyn/same-gen-fn? kernel (:gen-fn sub))))) pairs))))
+  "Must every kernel call run again? When a kernel does not compute as the
+   one that made the calls' traces (dyn/same-gen-fn?): a trace given another
+   gen-fn at the top level, which no argument shows. (A call whose store
+   or callee changed is dyn/call's to run again.) pairs: [kernel, a trace
+   it made or nil]."
+  [pairs]
+  (boolean (some (fn [[kernel sub]] (and sub (not (dyn/same-gen-fn? kernel (:gen-fn sub))))) pairs)))
 
-(defn- elements-trace
-  "A Map's or Unfold's trace, with the parameter store in effect (a kernel
-   may read it: under another, update revisits every element)."
-  [gf args {:keys [subs choices retval score]}]
-  (dyn/record-store (assoc (trace/make-trace {:gen-fn gf :args args :choices choices :retval retval :score score})
-                           ::subtraces subs)))
+(defn- elements-trace [gf args {:keys [subs choices retval score]}]
+  (assoc (trace/make-trace {:gen-fn gf :args args :choices choices :retval retval :score score})
+         ::subtraces subs))
 
 (def ^:private empty-acc
   {:subs [] :choices cm/EMPTY :retval [] :score 0.0 :weight 0.0 :discard cm/EMPTY :retdiffs {}})
@@ -264,7 +262,7 @@
                                       (update-at kernel old ea ead (cm/get-submap cs i) k)
                                       (regenerate-at kernel old ea ead (sel/get-subselection cs i) k)))))
                     (trace-acc tr)
-                    (visits (if (rerun-all? tr [[kernel (first old-subs)]]) :all (changed-elements argdiffs)) targets kept))
+                    (visits (if (rerun-all? [[kernel (first old-subs)]]) :all (changed-elements argdiffs)) targets kept))
         acc (drop-elements acc kept op)
         acc (reduce (fn [acc i]
                       (let [ea (element-args args i)
@@ -349,7 +347,7 @@
         kernel (:kernel gf)
         [_ dinit & dparams] argdiffs
         ;; a changed store or kernel changes every step, as a parameter does
-        params-changed? (or (some diff/changed? dparams) (rerun-all? tr [[kernel (first (::subtraces tr))]]))
+        params-changed? (or (some diff/changed? dparams) (rerun-all? [[kernel (first (::subtraces tr))]]))
         old-subs (::subtraces tr)
         prev-n (count old-subs)
         kept (min n prev-n)
@@ -613,8 +611,8 @@
              :op op :cs cs
              :node-key (partial node-key key)
              ;; under another store or kernel, every node runs again
-             :rerun? (and tr (rerun-all? tr [[(:production gf) (get (::productions tr) 0)]
-                                             [(:aggregation gf) (get (::aggregations tr) 0)]]))}
+             :rerun? (and tr (rerun-all? [[(:production gf) (get (::productions tr) 0)]
+                                          [(:aggregation gf) (get (::aggregations tr) 0)]]))}
         {:keys [prods] :as produced} (production-phase ctx input input-diff)
         _ (when (and cs (not= op :regenerate))
             (doseq [node (keys (:targets ctx))]
@@ -630,13 +628,12 @@
                             (reduce #(node-choices %1 %2 (old-p %2) (old-a %2)) discard gone)]
                            [weight discard])
         nodes (sort (keys prods))
-        t (dyn/record-store
-           (assoc (trace/make-trace {:gen-fn gf :args [input]
+        t (assoc (trace/make-trace {:gen-fn gf :args [input]
                                     :choices (reduce #(node-choices %1 %2 (prods %2) (aggs %2)) cm/EMPTY nodes)
                                     :retval (:retval (aggs 0))
                                     :score (reduce + 0.0 (concat (clojure.core/map :score (vals prods))
                                                                  (clojure.core/map :score (vals aggs))))})
-                  ::productions prods ::aggregations aggs))]
+                 ::productions prods ::aggregations aggs)]
     (cond-> {:trace t :weight weight}
       (not= op :generate) (assoc :retdiff (if tr (a-diffs 0) diff/unknown-change))
       (= op :update) (assoc :discard discard))))

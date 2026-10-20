@@ -212,19 +212,6 @@
                                  (or (identical? v w) (and (array/host? v) (array/host? w) (= v w)))))
                    a))))
 
-(defn ^:no-doc record-store
-  "tr with the store in effect, which its update compares with its own
-   (store-changed?): a combinator's kernels may read it, and no argument
-   shows that it changed."
-  [tr]
-  (if *params* (assoc tr ::params *params*) tr))
-
-(defn ^:no-doc store-changed?
-  "Does the store in effect differ from the one the trace prev ran under?
-   Then everything that may read it must run again."
-  [prev]
-  (not (same-store? *params* (::params prev))))
-
 (defn- arg-diffs
   "Argdiffs for a splice's new args against its previous call's: no-change
    for an identical argument (sound, and O(1)), else the hint given (the
@@ -271,9 +258,60 @@
       (not (cm/empty? (:choices old))) (update :discard cm/set-choice p (:choices old)))
     state))
 
+(declare same-gen-fn?)
+
+(defn- unvisited? [e]
+  (boolean (or (:unvisited (ex-data e)) (re-find #"not visited" (str (ex-message e))))))
+
+(defn- generated-again
+  "A call whose context changed (call), run again as generate from prev's
+   choices: update's (prev's choices overridden by the constraints) or
+   regenerate's (the unselected ones). update's weight is generate's less
+   prev's score (the score change less the fresh choices), regenerate's
+   generate's less prev's projection on the unselected choices (Eq. 4.1).
+   nil when the new run leaves one of the old choices unvisited (the
+   structure changed): the callee's own update decides then."
+  [gf op args {:keys [prev constraints selection] :as opts}]
+  (let [sigma (if (= op :update)
+                (cm/override (:choices prev) (or constraints cm/EMPTY))
+                (sel/get-selected (:choices prev) (sel/complement selection)))]
+    (try
+      (let [{t :trace w :weight} (gfi/run-op gf :generate args (-> opts (dissoc :prev :argdiffs :selection) (assoc :constraints sigma)))]
+        (if (= op :update)
+          {:trace t :weight (- w (:score prev)) :retdiff diff/unknown-change
+           :discard (if constraints (sel/get-selected (:choices prev) (sel/from-choicemap constraints)) cm/EMPTY)}
+          ;; prev's projection under the store at its call (a callee's
+          ;; project may run its model)
+          {:trace t :weight (- w (binding [*params* (::site-store prev)] (gfi/project prev (sel/complement selection))))
+           :retdiff diff/unknown-change}))
+      (catch clojure.lang.ExceptionInfo e
+        (when-not (unvisited? e) (throw e))))))
+
+(defn ^:no-doc call
+  "op on gf at a call site, a splice or a combinator's kernel, through
+   gfi/run-op (opts as there): the one place a call's context is checked.
+   Each trace a call makes is marked with the store in effect at the call.
+   An update or regenerate whose store differs from the one at the
+   previous call (prev's mark), or whose generative function does not
+   compute as prev's maker (same-gen-fn?), keeps nothing: it runs again
+   as generate from prev's choices (generated-again), whatever kind gf
+   is and however many arguments it takes, and gives an unknown-change
+   retdiff. (No argument shows a store or a function, so a callee's own
+   skipping cannot see them.)"
+  [gf op args opts]
+  (let [prev (:prev opts)
+        changed? (and prev (#{:update :regenerate} op)
+                      (not (and (same-store? *params* (::site-store prev)) (same-gen-fn? gf (:gen-fn prev)))))
+        r (or (when changed? (generated-again gf op args opts))
+              (gfi/run-op gf op args (cond-> opts changed? (assoc :argdiffs (vec (repeat (count args) diff/unknown-change))))))
+        t (:trace r)]
+    (cond-> r
+      (and t (not (identical? (::site-store t) *params*))) (assoc :trace (assoc t ::site-store *params*))
+      changed? (assoc :retdiff diff/unknown-change))))
+
 (defn- splice-call
   "Call gf at path p under the run's operation, scalar or batched (through
-   gfi/run-op), nesting its choices and recording its sub-trace: [retval
+   call), nesting its choices and recording its sub-trace: [retval
    state' retdiff]. hints are argdiffs for the arguments that are not
    identical to the previous call's."
   [state p gf args & [hints]]
@@ -295,14 +333,14 @@
         [rv (cond-> (-> state (update :score + w) (add-weight w))
               (not (cm/empty? cons)) (update :choices cm/set-choice p cons))])
       (let [r (cond
-                (= mode :simulate) (gfi/run-op gf :simulate args opts)
-                (= mode :generate) (gfi/run-op gf :generate args (assoc opts :constraints cons))
+                (= mode :simulate) (call gf :simulate args opts)
+                (= mode :generate) (call gf :generate args (assoc opts :constraints cons))
                 (nil? prev-sub) (if (= mode :update)
-                                  (gfi/run-op gf :generate args (assoc opts :constraints cons))
-                                  (gfi/run-op gf :simulate args opts))
-                (= mode :update) (gfi/run-op gf :update args (assoc opts :prev prev-sub :constraints cons :argdiffs argdiffs))
-                :else (gfi/run-op gf :regenerate args (assoc opts :prev prev-sub :argdiffs argdiffs
-                                                             :selection (subselection-at (:selection state) p))))
+                                  (call gf :generate args (assoc opts :constraints cons))
+                                  (call gf :simulate args opts))
+                (= mode :update) (call gf :update args (assoc opts :prev prev-sub :constraints cons :argdiffs argdiffs))
+                :else (call gf :regenerate args (assoc opts :prev prev-sub :argdiffs argdiffs
+                                                       :selection (subselection-at (:selection state) p))))
             {tr :trace w :weight d :discard rd :retdiff} r]
         [(:retval tr) (cond-> (record-call state p tr)
                         w (add-weight w)
@@ -764,7 +802,9 @@
   (-propose [gf args key]
     (let [tr (:trace (run gf :simulate args {:key key}))]
       {:choices (:choices tr) :weight (:score tr) :retval (:retval tr)}))
-  (-project [_ tr selection] (project* tr selection))
+  ;; under gf's own store, as its run: a callee's project may run its model
+  (-project [gf tr selection]
+    (if-let [ps (:params gf)] (binding [*params* (with-store ps)] (project* tr selection)) (project* tr selection)))
 
   ;; an untraced call, as in Gen.jl: (gf a b) is the return value of a simulated run
   clojure.lang.IFn
@@ -836,10 +876,11 @@
 
 (defn ^:no-doc kept?
   "May gf keep tr, its previous trace, when no argument changed? Only when
-   gf computes as the one that made tr (same-gen-fn?) and under the store
-   tr ran under: neither shows in the arguments."
+   gf computes as the one that made tr (same-gen-fn?). The store is call's
+   to check, at every call; this is for a trace given another gen-fn at
+   the top level, where there is no call."
   [gf tr]
-  (and (same-gen-fn? gf (:gen-fn tr)) (not (store-changed? tr))))
+  (same-gen-fn? gf (:gen-fn tr)))
 
 (defn make-gen-fn
   "A dynamic generative function from a body fn of (trace splice param
