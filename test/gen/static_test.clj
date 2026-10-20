@@ -18,6 +18,7 @@
             [gen.dynamic :as dyn :refer [gen]]
             [gen.dynamic.static :as static]
             [gen.gfi :as gfi]
+            [gen.gradients :as grad]
             [gen.laws :as laws]
             [gen.random :as rng]
             [gen.selection :as sel]
@@ -182,6 +183,44 @@
 ;; a static body over a callee with encapsulated randomness: its score fn
 ;; must split keys as the handler's assess does (assess = generate on the
 ;; same key), and skip them only under an exact-density operation
+;; ---------------------------------------------------------------------------
+;; Gradients through the compiled score (the final law audit, F2)
+;; ---------------------------------------------------------------------------
+
+(def chain-static
+  (gen ^:static [] (let [a (trace :a (d/normal 0 1)) b (trace :b (d/normal a 1)) y (trace :y (d/normal b 0.5))] y)))
+
+(defn- continuous-gradients
+  "The choice gradients of gf's trace from key k on args, over its float
+   choices: a map of path to gradient."
+  [gf args k]
+  (let [tr (gfi/simulate gf args k)
+        paths (filter #(instance? Double (ts/host (cm/get-choice (:choices tr) %))) (cm/addresses (:choices tr)))
+        g (:gradients (grad/choice-gradients tr (sel/from-paths paths)))]
+    (into {} (map (fn [p] [p (ts/host (cm/get-choice g p))]) paths))))
+
+(deftest choice-gradients-through-the-compiled-score-are-the-handler-s
+  ;; a static gf's assess is its compiled score fn, and so are the
+  ;; gradients HMC, MALA and MAP take (DESIGN.md §9). Planted bug (the
+  ;; audit's S2b): a stop-gradient on each trace node's binding in
+  ;; score-form keeps every value and passed all 123 gradient, mcmc, static
+  ;; and vi tests; here da is -0.3 and db 0.5
+  (testing "Eq. 2.12 against the closed form: d/da = -a + (b - a) = -0.8, d/db = -(b - a) + 4 (y - b) = 5.7"
+    (let [tr (:trace (gfi/generate chain-static [] (cm/choicemap :a 0.3 :b -0.2 :y 1.1) (rng/key 0)))
+          g (:gradients (grad/choice-gradients tr (sel/select :a :b)))]
+      (is (ts/close? -0.8 (ts/host (cm/get-choice g :a))))
+      (is (ts/close? 5.7 (ts/host (cm/get-choice g :b))))))
+  (testing "the same as the body without the flag, over the static models with float choices"
+    (doseq [[label gf args] [[:chain chain-static []] [:linreg linreg [[1.0 2.0 3.0]]] [:hierarchical hierarchical [3]]
+                              [:nested nested [0.0]] [:double-index double-index [[0.0 0.0] 1.0]]]
+            seed (range 3)]
+      (testing [label seed]
+        (let [s (continuous-gradients gf args (rng/key seed))
+              d (continuous-gradients (assoc gf :static nil) args (rng/key seed))]
+          (is (seq s))
+          (is (= (keys s) (keys d)))
+          (doseq [p (keys s)] (is (ts/close? (s p) (d p)) (str p))))))))
+
 (def noisy-callee (gen [m] (trace :x (d/normal (+ m (untraced (d/normal 0 0.5))) 1))))
 
 (def over-noise

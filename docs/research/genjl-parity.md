@@ -311,10 +311,10 @@ tested, ◐ partly, — not yet (the feature does not exist yet).
 | 1 Structured density, unique addresses | ✓ `errors-are-loud` (repeated and nested addresses); `runs-are-pure-functions-of-the-key` |
 | 2 Score = density | ✓ `score-is-the-assessed-density`, and trace consistency inside every generate/update/regenerate law |
 | 3 Generate | ✓ `generate-with-every-choice-is-deterministic`, `generate-without-constraints-has-weight-zero`, `generate-weight-is-the-constrained-density`, `generated-traces-are-consistent`; for any internal proposal, `generate-weight-is-the-projection` (M4); E[w] = p̄(σ): `the-estimate-is-unbiased-in-exp-space`, `importance-sampling-with-stochastic-structure-is-unbiased`, the thesis's own example (Alg 2, p. 80: `the-thesis-s-infinite-squares-example`, M4); assess on the same key: `assess-is-generate-with-every-choice` (M4) |
-| 4 Support condition | ✓ generate weights never NaN (`generated-traces-are-consistent`); for models whose every address has a fixed support, simulated scores and generate weights on their choices are finite (`generate-weights-are-finite-on-a-fixed-support`, `laws/fixed-support`, over the dynamic and combinator models; law audit gap E, M4) |
+| 4 Support condition | ✓ generate weights never NaN (`generated-traces-are-consistent`); for models whose every address has a fixed support, simulated scores and generate weights on their choices are finite (`generate-weights-are-finite-on-a-fixed-support`, `laws/fixed-support`, over the dynamic, combinator, internal-proposal, exact-proposal and static models; law audit gap E, M4) |
 | 5 Update weight and discard | ✓ `updates-are-reversible-with-exact-discards` (exact Def 2.3.1 discard), `update-weight-is-the-score-change-less-fresh-choices` (forward sampling), `update-weight-is-the-projection-change` (general, any internal proposal; added 2026-10-20 after the law audit's planted +1 passed every general law), `identity-update-changes-nothing` |
 | 6 Update is reversible | ✓ the same, with changed args and random constraint subsets; `update-without-fresh-choices-is-exactly-reversible`; `a-choice-that-becomes-a-call-is-discarded` |
-| 7 Compositionality | ✓ `splicing-is-compositional`; `switch-branches-share-addresses` (Switch against the equivalent `if`); combinator laws over a model splicing Map/Unfold/Switch; `a-different-callee-at-an-address-is-a-new-call`; Map, Unfold and Recurse against equivalent inlined dynamic functions (`combinators-match-their-bodies-inlined`, gap G); elements independent (p. 176: `elements-are-independent`, M4: an element key that ignored the index passed every other law) |
+| 7 Compositionality | ✓ `splicing-is-compositional`; `switch-branches-share-addresses` (Switch against the equivalent `if`); combinator laws over a model splicing Map/Unfold/Switch; `a-different-callee-at-an-address-is-a-new-call`; Map, Unfold and Recurse against equivalent inlined dynamic functions (`combinators-match-their-bodies-inlined`, gap G); elements independent (p. 176: `elements-are-independent`, M4: an element key that ignored the index passed every other law), also the elements, steps and nodes an update adds (`elements-an-update-adds-are-independent`, the final law audit's F9) |
 | 8 Change hints | ✓ precise against unknown hints for Map, Unfold (`map-/unfold-precise-hints-match-unknown-change`), Switch and Recurse (`switch-and-recurse-precise-hints-match-unknown-change`, M4); retdiff soundness inside the update/regenerate laws for every diff kind and nested element diffs (`gen.diff/consistent?`: vector-diffs since gap F, int-, set- and dict-diffs, M4); every propagation rule at every argument position against random edits (`every-rule-describes-the-change`, `int-diffs-add-up`, `map-diffs-describe-the-change`, `the-review-s-counterexamples`); static bodies pass precise diffs to callees (`change-hints-reach-a-callee`, `a-one-call-binding-has-a-precise-diff`, and `static-matches-dynamic` with `diff/compute`'s argdiffs) |
 | 9 Regenerate | ✓ `regenerate-weight-is-the-retained-density-ratio`, `regenerate-keeps-unselected-choices`, `regenerating-nothing-changes-nothing`, `regenerating-everything-has-weight-zero` (random selections, changed args); for any internal proposal, `regenerate-weight-is-the-projection-ratio` (Eq. 4.1, M4) |
 | 10 Selection MH stationary | ✓ `kernels-leave-the-posterior-invariant`, `structure-changing-moves-target-the-posterior` (thesis p_mh); with the optimal internal proposal, regenerate is Gibbs: `regenerating-the-enumerated-choices-is-gibbs` (weight 0, posterior frequencies); the p. 148 example's acceptances are 1 (`the-thesis-s-exact-acceptances`) |
@@ -337,10 +337,13 @@ of its choices, batched weights are the scalar ones, and batched updates obey
 the update law, also over random programs.
 
 The static language has no thesis law of its own either: `laws/static`
-(`static-matches-dynamic`) requires every operation on a static function
-to give what the same body without `^:static` gives under the same keys,
-also when update and regenerate skip nodes, and the general laws hold over
-static models (`gen.static-test`).
+(`static-matches-dynamic`) requires every GFI operation on a static
+function to give what the same body without `^:static` gives under the same
+keys, also when update and regenerate skip nodes, and the general laws hold
+over static models (`gen.static-test`). The compiled score's gradients,
+which HMC, MALA and MAP use, equal the handler's and the closed form
+(`choice-gradients-through-the-compiled-score-are-the-handler-s`, the final
+law audit's F2).
 
 ## 4. Hazards found while mapping
 
