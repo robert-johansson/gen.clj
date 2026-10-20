@@ -68,9 +68,12 @@
                      (* (Math/exp (+ lp (potential/complete p (body x)))) (double (f x)))))))
 
 (def ^:private no-repeats
-  "A constraint: no token the same as the one before, and no 3 at all."
+  "A constraint: no token the same as the one before, no 3 at all, and at
+   least two tokens before the end (so that ending and drawing token 4 as a
+   token weigh differently)."
   (let [ok? (fn [ctx] (and (not-any? #{3} ctx) (not-any? (fn [[a b]] (= a b)) (partition 2 1 ctx))))]
-    (potential/potential n-vocab {:prefix #(if (ok? %) 0.0 ##-Inf) :complete #(if (ok? %) 0.0 ##-Inf)})))
+    (potential/potential n-vocab {:prefix #(if (ok? %) 0.0 ##-Inf)
+                                  :complete #(if (and (ok? %) (<= 2 (count %))) 0.0 ##-Inf)})))
 
 (def ^:private soft
   "A soft twist: each 1 costs 0.7; a whole sequence costs 0.5 unless its
@@ -79,6 +82,10 @@
    prefix weight counts)."
   (let [ones #(+ 0.3 (* -0.7 (count (filter #{1} %))))]
     (potential/potential n-vocab {:prefix ones :complete #(- (ones %) (if (= 2 (peek %)) 0.0 0.5))})))
+
+(def ^:private nothing
+  "A potential no sequence satisfies."
+  (potential/potential n-vocab {:prefix (fn [c] (if (seq c) ##-Inf 0.0)) :complete (constantly ##-Inf)}))
 
 (defn- uniform-proposal [_context ^floats row]
   (float-array (alength row) (float (- (Math/log (alength row))))))
@@ -141,9 +148,12 @@
     (is (laws/close? (potential/complete soft []) (smc/log-ml-estimate s)))))
 
 (deftest a-masked-constraint-is-always-satisfied
-  (let [s (smc/run completion args 40 {:potential no-repeats :proposal :masked :key (rng/key 2)})]
+  (let [opts {:potential no-repeats :proposal :masked :key (rng/key 2)}
+        s (smc/run completion args 40 opts)]
     (is (every? #(Double/isFinite (potential/complete no-repeats (body %))) (smc/particles s)))
-    (is (every? Double/isFinite (:log-weights s)))))
+    (is (every? Double/isFinite (:log-weights s)))
+    (is (every? Double/isFinite (:log-weights (smc/step (smc/initialize completion args 200 opts))))
+        "no particle ends at the first step, which the constraint forbids")))
 
 ;; ---------------------------------------------------------------------------
 ;; Reads, traces, keys
@@ -199,12 +209,15 @@
                      #(smc/step (smc/initialize completion args 4 {:potential (potential/potential 3 {:prefix (constantly 0.0)
                                                                                                       :complete (constantly 0.0)})}))]
                     ["a proposal that returns no row" #(smc/step (smc/initialize completion args 4 {:proposal (constantly [0.0])}))]
-                    ["every particle impossible"
-                     #(smc/maybe-resample (smc/step (smc/initialize completion args 4
-                                                                    {:potential (potential/potential n-vocab {:prefix (fn [c] (if (seq c) ##-Inf 0.0))
-                                                                                                              :complete (constantly ##-Inf)})})))]]]
-    (is (thrown? clojure.lang.ExceptionInfo (f)) what))
-  (is (= :impossible (bc/reason #(smc/run completion args 4 {:potential (potential/potential n-vocab {:prefix (fn [c] (if (seq c) ##-Inf 0.0))
-                                                                                                      :complete (constantly ##-Inf)})
-                                                              :key (rng/key 1)})))
-      "every particle at weight 0, named as such"))
+                    ["resampling particles all of weight 0"
+                     #(smc/resample (smc/step (smc/initialize completion args 4 {:potential nothing})))]]]
+    (is (thrown? clojure.lang.ExceptionInfo (f)) what)))
+
+(deftest particles-all-of-weight-0-estimate-z-as-0
+  ;; the estimator's value, not an error: refusing it would bias Ẑ upwards
+  (let [s (smc/run completion args 4 {:potential nothing :key (rng/key 1)})]
+    (is (smc/done? s))
+    (is (= ##-Inf (smc/log-ml-estimate s)))
+    (is (= 0.0 (smc/ess s)))
+    (is (every? nil? (smc/traces s)) "dead particles have no traces")
+    (is (= :impossible (bc/reason #(smc/resample s))) "and cannot be resampled")))

@@ -149,7 +149,10 @@
   (let [n (alength row)
         x (double-array n)]
     (dotimes [t n]
-      (aset x t (+ (aget row t) (aget ws (end-entry completion t)))))
+      (aset x t (+ (aget row t) (aget ws t))))
+    ;; an end token's twist is the end's
+    (doseq [t (:eos completion)]
+      (aset x (int t) (+ (aget row (int t)) (aget ws n))))
     (let [z (log-sum-exp x)]
       (if (Double/isInfinite z)
         [nil z]
@@ -227,20 +230,16 @@
 ;; Resampling, the estimate, the results
 ;; ---------------------------------------------------------------------------
 
-(defn- possible
-  "The state's log weights, unless every one is -Inf: then loudly, every
-   particle having fallen to weight 0."
-  [state what]
-  (let [lw (:log-weights state)]
-    (when (every? #(== Double/NEGATIVE_INFINITY (double %)) lw)
-      (throw (ex-info (str what ": every particle has weight 0 (the potential allows none of their sequences)")
-                      {:reason :impossible :n (count lw)})))
-    lw))
+(defn- dead-all?
+  "Has every particle fallen to weight 0?"
+  [state]
+  (every? #(== Double/NEGATIVE_INFINITY (double %)) (:log-weights state)))
 
 (defn ess
-  "The effective sample size of the particles' weights."
+  "The effective sample size of the particles' weights (0 when every one
+   has weight 0)."
   ^double [state]
-  (w/ess (possible state "smc/ess")))
+  (if (dead-all? state) 0.0 (w/ess (:log-weights state))))
 
 (defn resample
   "The particles drawn in proportion to their weights (:method, default
@@ -248,7 +247,10 @@
    into :log-ml. Resampling copies token vectors."
   ([state] (resample state {}))
   ([state {:keys [method key] :or {method :systematic}}]
-   (let [lw (possible state "smc/resample")
+   (when (dead-all? state)
+     (throw (ex-info "smc/resample: every particle has weight 0 (the potential allows none of their sequences)"
+                     {:reason :impossible :n (count (:log-weights state))})))
+   (let [lw (:log-weights state)
          n (count lw)
          parents (w/resample method lw n (or key (step-key state 1)))]
      (assoc state
@@ -273,21 +275,25 @@
   (every? :done? (:particles state)))
 
 (defn run
-  "initialize, then step and maybe-resample until every particle has
-   finished: the final state. opts: initialize's and maybe-resample's
-   (:ess-threshold, :method)."
+  "initialize, then step (and maybe-resample, while particles go on) until
+   every particle has finished: the final state. opts: initialize's and
+   maybe-resample's (:ess-threshold, :method)."
   ([completion args n] (run completion args n {}))
   ([completion args n opts]
    (loop [state (initialize completion args n opts)]
      (if (done? state)
        state
-       (recur (maybe-resample (step state) (dissoc opts :key)))))))
+       (let [state (step state)]
+         (recur (if (done? state) state (maybe-resample state (dissoc opts :key)))))))))
 
 (defn log-ml-estimate
   "The estimate of log Z, unbiased in exp space: the log marginal
-   likelihood of the potential under the completion (0 without one)."
+   likelihood of the potential under the completion (0 without one; -Inf
+   when every particle has fallen to weight 0, an estimate of Z = 0)."
   ^double [state]
-  (+ (double (:log-ml state)) (w/log-mean-exp (possible state "smc/log-ml-estimate"))))
+  (if (dead-all? state)
+    Double/NEGATIVE_INFINITY
+    (+ (double (:log-ml state)) (w/log-mean-exp (:log-weights state)))))
 
 (defn particles
   "The particles' token vectors, in order."
