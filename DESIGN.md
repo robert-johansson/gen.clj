@@ -308,6 +308,14 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
   (a call's one-token reads are one advance), with no autobatcher
   (recommended), and the same calls on a new engine give the same results,
   bit for bit.
+- **As built (2026-10-21, genclj-0cvv; for the owner's review,
+  `docs/research/llm-token-gf.md`).** `gen.llm.token/completion` is the
+  token generative function over an LM: arguments `[prompt max-tokens]`,
+  token i at address i, until an end token (kept) or max-tokens; every GFI
+  operation, with each token's score from the LM's ledger (score once) and
+  host draws by `token/dist` from `(fold-in key i)`. The GFI laws hold
+  exactly on the toy engines, also on one whose reads differ with their
+  shapes as llama.cpp's do.
 
 ## 7. Platform
 
@@ -752,6 +760,32 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     ("core code calls only gen.array"), confined to the LLM layer, which
     computes on host floats as the engine does: a `categorical-logits` draw
     over 151,936 tokens costs 4.6 ms, about a decode, a host draw 78 µs.
+- **The token generative function** (2026-10-21, agent; **for the owner's
+  review**, PROVISIONAL while the owner is away;
+  `docs/research/llm-token-gf.md`):
+  - `gen.llm.token/completion` over an LM is a generative function of
+    `[prompt max-tokens]` (a token vector, a non-negative integer, both
+    arguments so update can change them). Token i is at address i, as
+    Map's and Unfold's elements are; a spliced completion's tokens are
+    `[:story 0]`, `[:story 1]`, …
+  - An end token is a choice: drawn, scored, kept, and it ends the
+    completion. The end tokens default to the LM's `:eog`; `:eos` replaces
+    them, `#{}` gives exactly max-tokens. The return value is the token
+    vector, the end token included.
+  - Scores are the LM's ledger's (`lm/score`), never the drawn row's; a
+    trace keeps them, and update and regenerate rescore only the tokens
+    after the first change, a run of them in one LM call. So the laws hold
+    exactly within one LM, and an identity update weighs 0 after any
+    eviction.
+  - `token/dist` is the host distribution (usable at any site); token i is
+    drawn from `(fold-in key i)`. Under a batch tracer the operations raise
+    the batched-branch error: gen.batched falls back to one particle at a
+    time. Native batching belongs to token SMC (one
+    `lm/batch-next-logprobs` per step), since batched traces cannot hold
+    completions of different lengths.
+  - `token/forced` builds constraints (a prefix, text), `token/from` the
+    suffix selection; no temperature or top-k (another distribution, a
+    later option).
 - **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
   `(array/item x)`, the namespace's last segment, as the Clojure style guide
   has it. It replaced `a`, which the owner found ugly (2026-10-18). The
