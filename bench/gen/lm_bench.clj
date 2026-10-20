@@ -233,7 +233,8 @@
   (let [engine @(requiring-resolve 'gen.llm.llama/engine)
         tokenizer @(requiring-resolve 'gen.llm.llama/tokenizer)
         tokenize @(requiring-resolve 'gen.llm.llama/tokenize)]
-    (with-open [^java.io.Closeable e (engine {:model model :max-branches 96 :n-ctx 8192})]
+    ;; branches: the LM's 64, the bench's own prompt branch, and its 32 forks
+    (with-open [^java.io.Closeable e (engine {:model model :max-branches 128 :n-ctx 8192})]
       (let [t0 (System/nanoTime)
             tok (tokenizer e)]
         (println (format "\n## llama.cpp: %s\n\nThe tokenizer (every token's bytes, %d tokens): %.0f ms"
