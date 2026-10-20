@@ -113,6 +113,10 @@
 
 (laws/deflaws dynamic models 100)
 
+;; every address has a fixed support (the mixtures' union is the reals)
+(laws/deflaws dynamic (filterv (comp #{:linreg :shared-namespace :mixtures :spliced-distribution :p-mh} first) models)
+  100 laws/fixed-support)
+
 (deftest update-without-fresh-choices-is-exactly-reversible
   ;; constraints covering the new branch: w = Δscore, the reverse weight is
   ;; -w and the reverse discard is σ (Prop 2.3.1, Def 2.3.1)

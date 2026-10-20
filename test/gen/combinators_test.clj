@@ -80,6 +80,7 @@
    [:choice-at (comb/choice-at d/normal) [0.0 1.0 :x] [[0.5 2.0 :x]]]])
 
 (laws/deflaws combinators models 100)
+(laws/deflaws combinators models 100 laws/fixed-support)
 
 ;; Recurse's own set: its trees change shape under update and regenerate
 (laws/deflaws recurse [[:recurse tree [0] [[1]]]

@@ -1,7 +1,7 @@
 (ns gen.laws
   "The GFI's laws (Cusumano-Towner 2020; docs/research/genjl-parity.md §3,
    audited in docs/research/law-audit.md) as test.check properties over any
-   generative functions, in three sets:
+   generative functions, in four sets:
 
    - general: the thesis's definitions, true of every generative function
      (Def 2.1.16, Def 2.3.1, Prop 2.3.1, Def 2.3.2, Eq 4.1's retention);
@@ -10,6 +10,8 @@
      generative function does so far. A generative function with an optimal
      or overridden internal proposal (thesis pp. 145-152) need satisfy only
      the general set;
+   - fixed-support: the support condition, for models whose every address
+     has a fixed support;
    - encapsulated: for a generative function with encapsulated randomness
      (§4.5), whose score is an estimate, the laws that hold for one draw of
      it.
@@ -394,6 +396,25 @@
    :identity-update-reports-no-change identity-update-reports-no-change})
 
 (def all (merge general forward-sampling))
+
+(defn generate-weights-are-finite-on-a-fixed-support
+  "Def. 4.1.1's support condition, for a model whose every address has a
+   fixed support (thesis pp. 169-170): constraints drawn from a simulated
+   trace are in the support, so the trace's score and generate's weight
+   are finite (law audit gap E: not-NaN let a -Inf weight pass). Planted
+   bug (2026-10-20): normal's log density -Inf beyond 2.5 standard
+   deviations fails it, on the dynamic and the combinator models."
+  [cases]
+  (prop/for-all [[[_ gf args] seed picks] cases]
+    (let [tr (gfi/simulate gf args (rng/key seed))
+          sigma (restrict (:choices tr) (picked (addrs tr) picks))
+          r (vacuous-on-unvisitable (gfi/generate gf args sigma (rng/key (inc seed))))]
+      (and (in-support? tr)
+           (or (= ::vacuous r) (array/truthy? (array/all (array/isfinite (:weight r)))))))))
+
+(def fixed-support
+  "For models whose every address has a fixed support."
+  {:generate-weights-are-finite-on-a-fixed-support generate-weights-are-finite-on-a-fixed-support})
 
 ;; ---------------------------------------------------------------------------
 ;; Encapsulated randomness (thesis §4.5)
