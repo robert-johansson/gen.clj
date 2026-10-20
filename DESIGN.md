@@ -692,8 +692,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     if simulate and assess compute a sequence in the same shapes;
     otherwise it needs a band. The agent's lean is exact; the owner
     decides when that bean starts.
-- **The LM protocol** (2026-10-20, agent; **for the owner's review**;
-  `docs/research/llm-lm-protocol.md`):
+- **The LM protocol** (2026-10-20, agent; approved by the owner the same
+  night, every recommendation below; `docs/research/llm-lm-protocol.md`):
   - Callers hold tokens, never branches. The LM's cache owns every live
     branch, each the entry of its context in a trie of what the engine has
     read; a context is read from the deepest held prefix (forked, so it
@@ -732,6 +732,26 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     scored.
   - A tokenizer is a map: the vocabulary's size and special tokens, and
     `:token-bytes`, `:encode`, `:decode`; llama.cpp's is `llama/tokenizer`.
+- **The token generative function's foundations** (owner, 2026-10-20,
+  before genclj-0cvv starts):
+  - *Score once.* Each token's score is computed once and kept by the LM
+    protocol's trie (the first read wins), as GenMLX's score-once ledger.
+    simulate, assess, update and regenerate read it, so the GFI laws hold
+    exactly within one LM. Across fresh LMs, or after an evicted row is read
+    again, values agree within the measured band (llama_noise: 0.1 nats a
+    token on Metal; long contexts and CPU builds need their own). Every token
+    is computed in whatever batch shape its call gives, so this is the one
+    exactness llama.cpp allows without giving up batching.
+  - *The trie owns the branches.* Traces hold tokens, never a branch; the LM
+    protocol's cache owns every live branch and frees by explicit `dispose!`,
+    so the engine's GC backstop is never on an inference path.
+  - *Host draws.* A token is drawn by a distribution in `gen.llm`, by inverse
+    CDF over the row from one uniform that gen.random derives from the
+    site's key (rule 2 holds; draws are deterministic), and its log
+    probability is read from the row. It is the one exception to rule 3
+    ("core code calls only gen.array"), confined to the LLM layer, which
+    computes on host floats as the engine does: a `categorical-logits` draw
+    over 151,936 tokens costs 4.6 ms, about a decode, a host draw 78 µs.
 - **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
   `(array/item x)`, the namespace's last segment, as the Clojure style guide
   has it. It replaced `a`, which the owner found ugly (2026-10-18). The
