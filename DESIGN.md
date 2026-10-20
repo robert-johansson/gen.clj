@@ -286,6 +286,16 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
   - HTTP servers: only top-k logprobs.
 - **Open risk.** Loading llama.cpp's ggml-metal and MLX's Metal backend in one
   process. Spike bean.
+- **As built (2026-10-20, genclj-kwxd; for the owner's review,
+  `docs/research/llm-branching.md`).** The binding is jextract's over
+  llama.h v0.7.0 (`native/jextract-llama.sh`, sources committed, the
+  library's version checked at load), and llama.cpp builds with
+  `native/build-llama.sh`. `gen.llm.branching` is the Branching protocol
+  (open, fork, advance, extend, score, resample, dispose!), `gen.llm.slots`
+  runs any engine over sequence slots on a thread of its own, and
+  `gen.llm.llama` is llama.cpp's. On Metal the same read from the same
+  state is bit-identical, while different batch shapes give a token's
+  log-probability differing by up to 5e-2 nats (median 2e-3 to 4e-3).
 
 ## 7. Platform
 
@@ -639,6 +649,24 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   Diffed propagation) come after, on the graph. The graph is also the way
   to compiled scores, batching without the tracer, and CUDA graphs: a fixed
   structure runs the same kernels every time.
+- **The Branching protocol and the llama.cpp engine** (2026-10-20, agent,
+  for the owner's review; `docs/research/llm-branching.md`):
+  - A branch is a value (its tokens and next-token log-probabilities,
+    float arrays normalized in double) holding a state, a KV-cache
+    sequence. advance, extend and resample consume their branches and
+    return successors, so a stale branch is a loud error, never another
+    state; fork and score leave theirs alone.
+  - dispose! frees at once and is loud on a branch that is not live; a
+    live branch dropped unreachable is freed by a phantom reference when
+    the engine needs its sequence (traces will hold branches).
+  - One platform thread per engine; the calls are synchronous.
+  - score reads into a scratch copy, so no sequence ever loses its end
+    (which hybrid models cannot undo); the cache is always unified (forks
+    copy metadata), sliding-window layers full-size; at most 255 branches.
+  - `extend`, a teacher-forced advance with its scores, is added to the
+    list above; the names are the agent's.
+  - The engine layer computes on host floats with clojure.core, not
+    gen.array (it sits below the GFI, like a backend).
 - **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
   `(array/item x)`, the namespace's last segment, as the Clojure style guide
   has it. It replaced `a`, which the owner found ugly (2026-10-18). The

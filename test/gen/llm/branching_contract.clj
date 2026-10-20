@@ -108,8 +108,10 @@
 
 (defn check-score-matches-steps
   "score gives each continuation token the log-probability of advancing by
-   it, step by step; extend gives the same scores and the branch a fresh
-   read of the whole sequence would; score leaves its branch alone."
+   it, step by step (token by token, so the sums, the continuation's
+   log-probability, agree within the band times its length); extend gives
+   the same scores and the branch a fresh read of the whole sequence would;
+   score leaves its branch alone."
   [engine {:keys [prompt continuation band top] :or {top 64}}]
   (let [b (br/open engine prompt)
         before (br/logprobs b)
