@@ -40,7 +40,7 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 | `regenerate(trace,args,argdiffs,selection)` → (trace, w, retdiff) | P: `regenerate [gf trace sel]` has no args/argdiffs and no retdiff; `edit.cljs` CompositeEdit can emulate it | core |
 | `project(trace, selection)` | Y: IProject | core |
 | `get_args/get_retval/get_choices/get_score/get_gen_fn`, `trace[addr]`, `trace[]` | Y: `trace.cljs` | core |
-| `has_argument_grads` | P: the protocol exists, but DynamicGF returns nil | core. *gen.clj (M1):* moot under full AD. `choice-gradients` differentiates every argument that is a tree of floats (nil for the others) |
+| `has_argument_grads` | P: the protocol exists, but DynamicGF returns nil | core. *gen.clj (M1):* moot under full AD. `choice-gradients` differentiates the arguments named by `:argnums` (none by default, as Gen.jl differentiates only `(grad)` arguments), each a tree of floats; the others' gradients are nil |
 | `accepts_output_grad` | N | core. *gen.clj (M1):* every generative function takes a retgrad (`choice-gradients`, `param-gradients`) |
 | `choice_gradients(trace, sel, retgrad)` → (arg_grads, values, grads) | P: `gradients.cljs` `choice-gradients` takes an address vector; no retgrad, no arg grads | core |
 | `accumulate_param_gradients!(trace, retgrad, scale)` | P: functional gradients via `mx/grad` (`learning.cljs make-param-loss-fn`); no stateful accumulator | core |
@@ -70,7 +70,7 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 ### 1d. Static modeling language (Gen.jl core)
 | Capability | GenMLX | gen.clj |
 |---|---|---|
-| `@gen (static)`: a DAG IR where update skips unchanged nodes; cached Julia calls, `nojuliacache`, `draw_graph`, typed traces | P, different mechanism: implicit schema extraction (`schema.cljs`), compiled paths (L1), `dep_graph.cljs`. No explicit static DSL and no IR rendering | soon. *gen.clj (M4, 2026-10-20):* `(gen ^:static [args] (let [...] ret))` (DESIGN.md §9): the graph as data and DOT (`gen.dynamic.static/ir`, `dot`, Gen.jl's `draw_graph`); update and regenerate skip nodes whose inputs did not change; a law requires the same results as without the flag. Julia's caches and typed traces have no counterpart (the JVM's JIT compiles the node fns) |
+| `@gen (static)`: a DAG IR where update skips unchanged nodes; cached Julia calls, `nojuliacache`, `draw_graph`, typed traces | P, different mechanism: implicit schema extraction (`schema.cljs`), compiled paths (L1), `dep_graph.cljs`. No explicit static DSL and no IR rendering | soon. *gen.clj (M4, 2026-10-20):* `(gen ^:static [args] (let [...] ret))` (DESIGN.md §9): the graph as data and DOT (`gen.dynamic.static/ir`, `dot`, Gen.jl's `draw_graph`); update and regenerate skip nodes whose inputs did not change; a law requires the same results as without the flag. Julia's node cache is the trace's node values, always kept (`nojuliacache` has no counterpart: `static_ir.jl`'s cached-node rerun counts agree, `docs/research/genjl-test-suite.md`); typed traces have none (the JVM's JIT compiles the node fns) |
 | `@load_generated_functions` | n/a (unneeded since 0.4.6) | skip |
 
 ### 1e. Distributions (Gen.jl core)
