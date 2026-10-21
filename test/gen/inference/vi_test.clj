@@ -133,6 +133,79 @@
     (is (ts/close? evidence (:objective (vi/elbo-gradient model' [] observations family [] posterior 8 {:key (rng/key 9)}))
                    {:rtol 1e-6 :atol 1e-6}))))
 
+;; ---------------------------------------------------------------------------
+;; Training the model's parameters (Gen.jl's model_update)
+;; ---------------------------------------------------------------------------
+
+(def theta-model
+  "model with mu's prior mean a parameter: ∇θ log p(mu, y) = mu - θ, and
+   the evidence N(1.3; θ, √2) is largest at θ = 1.3."
+  (gen [] (let [mu (trace :mu (d/normal (param :theta) 1))] (trace :y (d/normal mu 1)) mu)))
+
+(def theta 0.4)
+
+(defn- estimates
+  "elbo-gradient's or vimco-gradient's estimates at the model store
+   {:theta t}, from start, with key k."
+  [estimator t k opts]
+  (estimator theta-model [] observations family [] start 6 (assoc opts :key k :model-store {:theta t})))
+
+(deftest the-model-gradient-is-the-objective's
+  ;; q's draws do not depend on θ, so with one key the objective is a
+  ;; function of θ alone and :model-grads its derivative: a central
+  ;; difference, exact for the ELBO (quadratic in θ) up to rounding,
+  ;; eps · |objective| / h, about 3e-13 in float64 and 3e-4 in float32
+  (doseq [[estimator opts] [[vi/elbo-gradient {}] [vi/elbo-gradient {:baseline :leave-one-out}]
+                            [vi/vimco-gradient {:baseline :geometric}] [vi/vimco-gradient {:baseline :arithmetic}]]]
+    (let [h 1e-3
+          k (rng/key 13)
+          at (fn [t] (ts/number (:objective (estimates estimator t k opts))))
+          difference (/ (clojure.core/- (at (+ theta h)) (at (- theta h))) (* 2 h))
+          tol (if (ts/f32?) 1e-3 1e-6)]
+      (is (ts/close? difference (:theta (:model-grads (estimates estimator theta k opts))) {:rtol tol :atol tol})
+          (str estimator " " opts)))))
+
+(defn- vimco-model-reference
+  "Draws of the K-sample bound's θ-gradient at θ, Σ_k w̃_k (z_k - θ), z_k ~
+   q = N(m, e^log-s) and log w_k = log N(z_k; θ, 1) + log N(1.3; z_k, 1) -
+   log q(z_k): n sets of k draws, by array arithmetic."
+  [{:keys [m log-s]} k n key]
+  (let [s (Math/exp log-s)
+        e (dc/sample (d/normal 0 1) key [n k])
+        z (+ m (* s e))
+        lw (+ (* -0.5 (array/square (- z theta))) (* -0.5 (array/square (- 1.3 z))) (* 0.5 (array/square e)))
+        w (array/softmax lw {:axis 1})]
+    (ts/host (array/sum (* w (- z theta)) {:axis 1}))))
+
+(deftest ^:slow ^:heavy the-model-gradient-is-unbiased
+  (testing "the ELBO's: E_q[mu - θ] = m - θ"
+    (let [grads (map #(ts/number (:theta (:model-grads (estimates vi/elbo-gradient theta % {}))))
+                     (rng/split (rng/key 14) 2000))]
+      (is (agrees? (mean-and-se grads) [(- (:m start) theta) 0.0]) (str (mean-and-se grads)))))
+  (testing "the K-sample bound's, against draws of its formula"
+    (let [grads (map #(ts/number (:theta (:model-grads (estimates vi/vimco-gradient theta % {}))))
+                     (rng/split (rng/key 15) 2000))
+          reference (vimco-model-reference start 6 100000 (rng/key 16))]
+      (is (agrees? (mean-and-se grads) (mean-and-se reference))
+          (str (mean-and-se grads) " against " (mean-and-se reference))))))
+
+;; The joint fits reach the evidence's maximum, θ = 1.3, where q is the
+;; posterior. Bands: the final θ's bias and five standard deviations over
+;; 16 keys (17 to 32), measured: the ELBO's fit (Adam at 0.02 for both, 800
+;; iterations of 20 samples) ends at 1.295, sd 0.026, so 0.14; the K-sample
+;; bound's (Adam at 0.01, 1500 iterations, K = 4) at 1.291, sd 0.028, so
+;; 0.15.
+(deftest the-model's-parameters-train-with-q's
+  (doseq [[fit lr band opts] [[vi/black-box-vi 0.02 0.14 {:samples 20 :iters 800}]
+                              [vi/black-box-vimco 0.01 0.15 {:samples 4 :iters 1500}]]]
+    (let [{:keys [model-store]} (fit theta-model [] observations family [] start (learn/adam {:lr lr})
+                                     (assoc opts :key (rng/key 17) :model-store {:theta 0.0}
+                                            :model-optimizer (learn/adam {:lr lr})))]
+      (is (< (ts/abs (- (:theta model-store) 1.3)) band) (str fit " " model-store))))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"both :model-store and :model-optimizer"
+                        (vi/black-box-vi theta-model [] observations family [] start (learn/adam {:lr 0.02})
+                                         {:iters 1 :model-store {:theta 0.0}}))))
+
 (deftest estimates-need-enough-samples
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"at least 2"
                         (vi/elbo-gradient model [] observations family [] start 1 {:baseline :leave-one-out :key (rng/key 10)})))

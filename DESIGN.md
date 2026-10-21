@@ -1586,6 +1586,20 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     would need a band of 2.6. A watch bean (genclj-gjiz) keeps the cause,
     and an upstream report if it is llama.cpp's. The alternatives were the
     rule's 2.6 and investigating before M3's close.
+- **Variational inference trains the model's parameters too (M5's G4;
+  m3-grammar's design).** `vi/black-box-vi` and `black-box-vimco` take
+  `:model-store` and `:model-optimizer`, Gen.jl's `model_update`: the model
+  runs under that store, and each iteration also steps it along the
+  objective's gradient in the model's parameters, ∇θ log p(x, z) averaged
+  over the draws (the ELBO's) or weighted by the normalized weights w̃_k
+  (the K-sample bound's). q's draws do not depend on θ, so each is the
+  exact gradient of the iteration's estimate. One option without the other
+  is a loud error, not q's optimizer taken silently; the result holds
+  `:model-store`, and `elbo-gradient` and `vimco-gradient` return
+  `:model-grads`. The alternative, one store tree `{:q … :model …}` under
+  one optimizer (as gen.learning allows), was dropped: it gives both stores
+  one step size, where Gen.jl's minimal VAE trains q and the model at two
+  (1e-4 and 0.002). (Approved under the owner's delegation, 2026-10-21.)
 - **Git:** the main repo is public-ready, with `.beans/`, `.beans.yml`,
   `.claude/` and `*.pdf` gitignored. Its remote is the private
   `robert-johansson/gen.clj` (the owner, 2026-10-21, at M4's close: private
