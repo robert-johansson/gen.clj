@@ -21,6 +21,9 @@
 
 (dist doubled-poisson [rate] (* 2.0 (d/poisson rate)))
 (dist exp-geometric [p] (array/exp (d/geometric p)))
+;; dist_dsl.jl:20's vec_normal, through Gen.jl's alias: (def broadcasted-normal
+;; normal) lacked the constructor mark, so this failed to expand (M5)
+(dist vec-normal [mu sigma] (d/broadcasted-normal (+ mu 1.0) (* sigma 2.0)))
 
 (defn- lp [d v] (ts/number (dc/log-prob d v)))
 
@@ -111,3 +114,10 @@
                           (dc/log-prob (through-sin) 0.5))))
   (testing "the draw's own checks, at construction"
     (is (thrown? clojure.lang.ExceptionInfo (shifted-exponential -1.0 0.0)))))
+
+(deftest an-alias-of-a-constructor-is-a-draw
+  (let [mu (array/array [0.0 1.0])
+        sigma (array/array [1.0 2.0])
+        v (array/array [0.5 -1.0])]
+    (is (ts/close? (dc/log-prob (d/normal (+ mu 1.0) (* sigma 2.0)) v)
+                   (dc/log-prob (vec-normal mu sigma) v)))))
