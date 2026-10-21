@@ -1389,6 +1389,28 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   a combinator at the top had to be spliced into one. D7's rule stands, one
   store per generative function and gradients as values; this extends where
   the stores are found.
+- **A call's trace and return value by address; merge and Recurse's
+  numbering (owner, 2026-10-21; M5's G1, F3, G10, G13; m3-grammar's
+  design).**
+  - `(trace/subtrace tr addr)` is Gen.jl's `get_call(tr, addr).subtrace`:
+    the trace of the call at an address or a path, nil where no call is
+    (until D4 decides the loud form); `[]` is `tr` itself, and a path into a
+    call descends into its subtrace. `(tr addr)` is Gen.jl's `trace[addr]`:
+    the choice there, otherwise the call's return value, so `(tr [])` is the
+    return value (`trace[]`) and Map's `(tr i)` is element i's.
+  - The mechanism is a protocol in gen.trace dispatched on the trace's
+    generative function (a call's subtrace for a path prefix; Object's
+    default nil), so each combinator keeps its representation private:
+    dynamic functions (call-at and choice-at with them), Map and Unfold by
+    index, Switch through its branch, Recurse by [node :production] and
+    [node :aggregation].
+  - The path rule's edges: `[]` is the root for `cm/set-choice` and
+    `cm/set-submap`; `cm/from-map` nests a vector key as a path (an overlap
+    is a loud merge error); a vector inside a path is a loud error wherever a
+    path is walked.
+  - `cm/merge` takes 0 to n choice maps (none gives EMPTY, merge's
+    identity). Recurse's numbering is Gen.jl's, 0-based: `get-child`,
+    `get-child-num`, `get-parent`, their arguments checked loudly.
 - **Git:** the main repo is public-ready, with `.beans/`, `.beans.yml`,
   `.claude/` and `*.pdf` gitignored. Its remote is the private
   `robert-johansson/gen.clj` (the owner, 2026-10-21, at M4's close: private
