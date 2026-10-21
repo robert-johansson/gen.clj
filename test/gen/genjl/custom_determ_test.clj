@@ -10,7 +10,9 @@
    from choice-gradients with :argnums (D7): there is no accumulator to
    scale. Arguments that are differentiated are floats (gen.clj
    differentiates trees of floats only)."
+  (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
+            [gen.array :refer [+ - * /]]
             [gen.choicemap :as cm]
             [gen.custom :as custom]
             [gen.diff :as diff]
