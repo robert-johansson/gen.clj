@@ -1357,6 +1357,29 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     with the live count and the hint (eval! as you go, and drop graphs).
   - Alternatives were only a clearer error (no retry), or MLX's own
     message as before.
+- **A vector is a path, everywhere (owner, 2026-10-21; M5's G9 and F3).**
+  gen.choicemap's rule, an address is any value except a vector and a
+  vector is a path, now holds for selections too; before, `sel/selected?`
+  and `sel/get-subselection` read a vector as one (absent) address and
+  silently answered false and `none`, and `cm/set-submap` stored a vector
+  key.
+  - The protocol methods become `-selected?` and `-subselection`, one
+    address at a time, implemented and never called by users (as
+    IChoiceMap's `-get-submap`). The public `selected?` and
+    `get-subselection` take an address or a path, walked an address at a
+    time; the empty path is the root (`root-selected?`, and `s` itself).
+    As in Gen.jl, selecting an address selects every path under it.
+  - `sel/set-subselection` is Gen.jl's `set_subselection!`, persistent: on
+    `none` or a hierarchical selection it nests, on `all`, a complement or
+    a custom selection it is a loud ex-info. `hierarchical` builds through
+    it, so a vector key nests.
+  - `cm/set-submap` takes an address or a path, as `get-submap` does; the
+    handlers' single-address fast paths (`set-value`, `remove-submap`) are
+    loud on a vector. No public function reads a vector as one address.
+  - Alternatives were separate path functions (two names for one idea, and
+    a rule for selections unlike choice maps') or a path record in place
+    of vectors (churn: vectors are paths in `select`, `from-paths`,
+    `cm/addresses` and every trace). Built in M5 (bean 10).
 - **Git:** the main repo is public-ready, with `.beans/`, `.beans.yml`,
   `.claude/` and `*.pdf` gitignored. Its remote is the private
   `robert-johansson/gen.clj` (the owner, 2026-10-21, at M4's close: private
