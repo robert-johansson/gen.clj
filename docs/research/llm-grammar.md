@@ -147,53 +147,64 @@ grammar holds the text.
 
 ## Measurements
 
-`clojure -M:bench -m gen.grammar-bench` on this Mac (M4, pure JVM, nice'd,
-other agents' JVMs running), with the vocabularies of the three GGUF files
-in `/Users/robert/gen-clj-models` (read from their headers; llama.cpp not
-loaded): Qwen3's byte-level BPE (151,936 tokens; its trie 333,802 nodes,
-built in 228 ms), Qwen3.5's (248,320; 592,346 nodes, 400 ms) and Gemma 3's
-SentencePiece (262,144; 600,436 nodes, 386 ms).
+`clojure -M:bench -m gen.grammar-bench` on the Mac mini M4 (pure JVM,
+Graal JIT), alone on a quiet machine (2026-10-21, m3-round3 764469e),
+with the vocabularies of the three GGUF files in `/Users/robert/gen-clj-models`
+(read from their headers; llama.cpp not loaded): Qwen3's byte-level BPE
+(151,936 tokens; its trie 333,802 nodes, built in 185 ms), Qwen3.5's
+(248,320; 592,346 nodes, 224 ms) and Gemma 3's SentencePiece (262,144;
+600,436 nodes, 161 ms).
 
-| language | DFA states | DFA ms | states reached by tokens | every mask, ms (Qwen3 / Qwen3.5 / Gemma 3) | per state, ms (Qwen3) |
+| language | DFA states | DFA ms (Qwen3's run / the others') | states reached by tokens | every mask, ms (Qwen3 / Qwen3.5 / Gemma 3) | per state, ms (Qwen3) |
 |---|---|---|---|---|---|
-| a phone number, `[0-9]{3}-[0-9]{4}` | 9 | 3 | 9 | 1 / 1 / 0 | 0.14 |
-| yes or no, ` ?(?:yes\|no)` | 6 | 2 | 6 | 1 / 0 / 0 | 0.09 |
-| a JSON string | 15 | 7 | 15 | 11 / 10 / 11 | 0.74 |
-| a JSON number | 9 | 2 | 9 | 0 / 0 / 0 | 0.03 |
-| a JSON object (name, age, up to 5 tags) | 132 | 28–69 | 132 | 44 / 25 / 23 | 0.33 |
-| tool calls, prose and blocks (GenMLX's qwen3_xml shape) | 117 | 29–41 | 117 | 5 / 9 / 10 | 0.05 |
-| any text, `.*` | 8 | 1–2 | 8 | 2 / 3 / 3 | 0.21 |
+| a phone number, `[0-9]{3}-[0-9]{4}` | 9 | 2.4 / 0.4–4.7 | 9 | 1 / 0 / 0 | 0.11 |
+| yes or no, ` ?(?:yes\|no)` | 6 | 2.2 / 0.4–2.1 | 6 | 0 / 0 / 0 | 0.07 |
+| a JSON string | 15 | 7.8 / 2.0–3.0 | 15 | 10 / 3 / 3 | 0.70 |
+| a JSON number | 9 | 2.3 / 0.6–1.2 | 9 | 0 / 0 / 0 | 0.02 |
+| a JSON object (name, age, up to 5 tags) | 132 | 75 / 34–42 | 132 | 41 / 17 / 17 | 0.31 |
+| tool calls, prose and blocks (GenMLX's qwen3_xml shape) | 117 | 39 / 27–30 | 117 | 5 / 8 / 8 | 0.05 |
+| any text, `.*` | 8 | 1.6 / 1.0–1.1 | 8 | 2 / 3 / 3 | 0.20 |
+
+(Qwen3's run is the first, the JIT still warming: its DFA and mask times
+are the highest.)
 
 - **A state's mask** costs its sweep: from a permissive state (`.*`'s
-  start, nearly every token allowed) 1.3 ms at Qwen3's vocabulary and 2.4
-  ms at the 250,000-token ones; from a restrictive one (a digit, 10 or 20
-  tokens allowed) about 1 µs, since the sweep skips every dead subtree in
-  one jump. Nothing is allocated per token; a mask is a 19 KB bitset at
-  Qwen3's vocabulary.
+  start, nearly every token allowed) 1.15 ms at Qwen3's vocabulary and 2.1
+  to 2.2 ms at the 250,000-token ones; from a restrictive one (a digit, 10
+  or 20 tokens allowed) 0.8 to 1.1 µs, since the sweep skips every dead
+  subtree in one jump. Nothing is allocated per token; a mask is a 19 KB
+  bitset at Qwen3's vocabulary.
 - **For comparison**, GenMLX's naive sweep took about eight minutes for a
   773-state tool-call grammar at 151,000 tokens, and its fix (bucketing
   tokens by first character, genmlx-4tcd) about a hundredth of that.
 - **Per token, decoding:** advancing a grammar's state by a token, 5 ns; the
-  state of a 12-token context from the start, 50 ns; a dense `logw-next`
-  row, 24 µs at Qwen3's vocabulary (42–46 µs at the larger ones).
+  state of a 12-token context from the start, 60 ns.
+- **A site under a grammar**, µs a token (the toy engine at each
+  vocabulary, its rows of the GGUF's size):
 
-- **A site under a grammar** (`constrained/weighted`: the LM's row times
-  the weights, renormalized; then the draw, as any completion's) at Qwen3's
-  151,936 tokens: a permissive state (all but a few tokens allowed) 338 µs,
-  most of it the passes over the row, since the normalizer of a constraint
-  that disallows few tokens is 1 less their mass (an exp for each
-  disallowed token, not each allowed one: before that, 878 µs, exp-bound);
-  a restrictive state (ten digits) 163 µs; soft weights (a general
-  potential) about 1 ms, an exp a token. The grammar's dense `logw-next`
-  row adds 25 µs (restrictive) to 117 µs (permissive). Against a llama.cpp
-  decode of 5.8 ms (M2 Max, one branch), a constrained token costs 3 to 8 %
-  more than a plain one. *Measured while other JVMs and the GPU tests ran;
-  to be measured again on a quiet machine before the owner's review.*
-- **Where the rest would come from:** the row's passes are O(vocabulary)
-  even where a grammar allows ten tokens, because `logw-next` is a dense
-  row; a sparse form of it (Decisions, 10) would make a restrictive site
-  cost its allowed tokens.
+  | | Qwen3 (151,936) | Qwen3.5 (248,320) | Gemma 3 (262,144) |
+  |---|---|---|---|
+  | `constrained/weighted`, permissive (`[^"]*`: all but about 1,500 allowed) | 165 | 298 | 275 |
+  | the grammar's dense `logw-next` row there | 103 | 161 | 175 |
+  | `constrained/weighted`, restrictive (`[0-9]*`: 10 or 20 allowed) | 255 | 459 | 445 |
+  | the grammar's dense `logw-next` row there | 17 | 28 | 29 |
 
+  A permissive constraint's normalizer is 1 less the disallowed mass (an
+  exp for each disallowed token: before that, about 880 µs at Qwen3's
+  vocabulary on a loaded machine, exp-bound); a restrictive one's is the
+  allowed tokens' sum, over passes that each read the whole row (four,
+  against the permissive three), so it costs more. Soft weights (a general
+  potential) cost an exp a token. So a constrained token costs 270 µs
+  (Qwen3) to 490 µs (the 250,000-token vocabularies) beyond its draw,
+  against a llama.cpp decode of 5.8 ms (M2 Max, one branch, Qwen3): 5 to
+  8 %. (The bench's "what the grammar adds" row compares
+  simulate's per-token time with and without the grammar; the plain
+  completion makes one more LM call a token, its score, so that row is
+  not the grammar's cost and is not quoted.)
+- **Where the rest would come from:** the passes are O(vocabulary) even
+  where a grammar allows ten tokens, because `logw-next` is a dense row; a
+  sparse form of it (Decisions, 10) would make a restrictive site cost its
+  allowed tokens.
 
 ## Grammars as potentials
 
@@ -393,8 +404,8 @@ evidence:
   bugs were in its own code too (ASCII-only alphabet, anchors as literals,
   class escapes, `a{0}`, the end token walked through the DFA, an
   eight-minute mask), none of them instaparse's to fix.
-- **Performance.** A JSON object grammar's 132 states: the DFA in 28–69 ms,
-  every mask at Qwen3's vocabulary in 44 ms; a tool-call grammar of 117
+- **Performance.** A JSON object grammar's 132 states: the DFA in 34–75 ms,
+  every mask at Qwen3's vocabulary in 41 ms; a tool-call grammar of 117
   states, its masks in 5 ms (GenMLX's naive sweep took about eight minutes
   for a 773-state tool-call grammar, genmlx-4tcd, and about a hundredth of
   that after its fix). Measurements below.
@@ -437,7 +448,7 @@ owner).
    bytes is allowed wherever the text may go on (it changes no text), as
    genlm's coerced potentials have it.
 5. **Recommendation: exact masks, made eagerly.** Every state the tokens
-   reach is explored when the grammar is made (5 to 44 ms for the grammars
+   reach is explored when the grammar is made (5 to 41 ms for the grammars
    measured at Qwen3's vocabulary), and a token is allowed only into a
    state tokens can complete. The alternative, masks made lazily per state
    from byte-level liveness, is genlm's and GenMLX's, and lets a
