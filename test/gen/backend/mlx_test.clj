@@ -447,3 +447,86 @@
         (is (= (quot ram 16) headroom)))
       (is (= mlx (max 0 (- bytes reserved headroom))))
       (is (< active mlx)))))
+
+;; ---------------------------------------------------------------------------
+;; Metal's buffer limit: collected and retried once (genclj-9tyh)
+;; ---------------------------------------------------------------------------
+;; MLX on macOS makes every buffer through Metal, which allows about 499,000,
+;; and recovers fully once buffers are freed. Where a buffer is made (an
+;; array from host data, an evaluation), the limit runs a full collection
+;; and one retry; at the limit again, :mlx-buffer-limit.
+
+(defn- limit-error []
+  (gen.mlx.MlxException. "mlx_array_new_data" "[metal::malloc] Resource limit (499000) exceeded."))
+
+(deftest the-buffer-limit-is-retried-once
+  ;; the retry itself, with an error made here: fast, on any device
+  (when-mlx
+    (let [at-limit @(requiring-resolve 'gen.backend.mlx/at-buffer-limit)
+          [_ collections0] (vec (gen.mlx.MlxRuntime/lifetimeStats))
+          calls (atom 0)]
+      (testing "at the limit once: a collection, then the call again"
+        (is (= :made (at-limit "x" #(if (= 1 (swap! calls inc)) (throw (limit-error)) :made))))
+        (is (= 2 @calls))
+        (is (< collections0 (second (gen.mlx.MlxRuntime/lifetimeStats))) "a collection, whatever the thresholds"))
+      (testing "at the limit twice: a loud error, MLX's its cause"
+        (let [e (try (at-limit "x" #(throw (limit-error))) (catch Exception e e))]
+          (is (= :mlx-buffer-limit (:reason (ex-data e))) (pr-str e))
+          (is (= "x" (:op (ex-data e))))
+          (is (integer? (:live-arrays (ex-data e))))
+          (is (= (gen.mlx.MlxRuntime/arrayCap) (:cap (ex-data e))))
+          (is (instance? gen.mlx.MlxException (ex-cause e)))))
+      (testing "any other MLX error: as it was, without a retry"
+        (reset! calls 0)
+        (let [e (try (at-limit "x" #(do (swap! calls inc) (throw (gen.mlx.MlxException. "f" "bad shape"))))
+                     (catch Exception e e))]
+          (is (instance? gen.mlx.MlxException e))
+          (is (= 1 @calls)))))))
+
+(defn- held-until-the-limit
+  "One-element arrays made and held until making another fails: how many,
+   and the failure. They are unreachable once this returns."
+  [b]
+  (loop [held (transient [])]
+    (let [r (try (array/with-backend b (array/array [1.0])) (catch Exception e e))]
+      (if (instance? Throwable r)
+        [(count held) r]
+        (recur (conj! held r))))))
+
+(deftest ^:slow metals-buffer-limit-is-collected-and-retried
+  ;; held arrays reach the limit loudly (:mlx-buffer-limit); dropped, they
+  ;; are garbage, so the next array made, and then the next evaluation (a
+  ;; graph made beforehand that needs 20,000 buffers at once), meets the
+  ;; limit, collects and succeeds. Filling the limit takes a minute or two
+  ;; on Metal; skipped where the device reports no limit (CUDA, the CPU on
+  ;; Linux). Mutations checked on Metal (2026-10-21): without the retry, the
+  ;; array and the evaluation after the drop meet :mlx-buffer-limit (499,000
+  ;; arrays live), and the fast test sees one call; with MLX's error in
+  ;; place of the ex-info, both tests find no :reason and no cause.
+  (when-mlx
+    (if (<= (quot Long/MAX_VALUE 8) (gen.mlx.MlxRuntime/arrayCap))
+      (println "Skipping metals-buffer-limit-is-collected-and-retried: the device reports no buffer limit")
+      (let [b (mlx)
+            memory @(requiring-resolve 'gen.backend.mlx/memory)
+            k 20000
+            g (array/with-backend b
+                (let [x (array/array [2.0])]
+                  (array/sum (array/concatenate (mapv (fn [_] (array/sin x)) (range k))))))]
+        (try
+          (testing "held arrays: a loud error"
+            (let [[n e] (held-until-the-limit b)]
+              (is (= :mlx-buffer-limit (:reason (ex-data e))) (pr-str e))
+              (is (< (gen.mlx.MlxRuntime/arrayCap) n) (str n " arrays held"))
+              (is (.contains (str (ex-message (ex-cause e))) "Resource limit"))))
+          (testing "the same arrays dropped: the next array is made after a collection"
+            (let [c0 (:collections (memory))]
+              (is (= [2.0] (array/->clj (array/with-backend b (array/array [2.0])))))
+              (is (< c0 (:collections (memory))))))
+          (testing "filled and dropped again: the graph evaluates after a collection"
+            (held-until-the-limit b)
+            (let [c0 (:collections (memory))]
+              (is (< (Math/abs (- (* k (Math/sin 2.0)) (array/item g))) 0.05))
+              (is (< c0 (:collections (memory))))))
+          (finally
+            ((requiring-resolve 'gen.backend.mlx/collect!))
+            ((requiring-resolve 'gen.backend.mlx/clear-cache!))))))))
