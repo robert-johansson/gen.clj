@@ -15,16 +15,12 @@
             [gen.dist.core :as dc]
             [gen.dynamic :refer [gen]]
             [gen.genjl.finite-diff :as fd]
+            [gen.genjl.support :as genjl]
             [gen.gfi :as gfi]
             [gen.gradients :as grads]
             [gen.random :as rng]
             [gen.selection :as sel]
             [gen.test-support :as ts]))
-
-(defn- density
-  "Gen.jl's logpdf, on the host."
-  [make x & args]
-  (ts/number (apply (fd/logpdf make) x args)))
 
 (defn- log-mix
   "log Σ wₖ exp(lₖ), on the host."
@@ -44,8 +40,8 @@
         args [x ws a b alpha beta]]
     (is (not (dc/discrete? (uniform-beta ws a b alpha beta))))
     (is (number? (ts/host (dc/sample (uniform-beta ws a b alpha beta) (rng/key 1)))) "a draw")
-    (is (ts/close? (log-mix [w1 w2] [(density d/uniform x a b) (density d/beta x alpha beta)])
-                   (density uniform-beta x ws a b alpha beta)))
+    (is (ts/close? (log-mix [w1 w2] [(genjl/logpdf d/uniform x a b) (genjl/logpdf d/beta x alpha beta)])
+                   (genjl/logpdf uniform-beta x ws a b alpha beta)))
     (testing "logpdf_grad against finite differences"
       (is (fd/logpdf-grad-matches? uniform-beta args 0) "x")
       (is (fd/logpdf-grad-matches? uniform-beta args 1 {:dx fd/probability-dx}) "the two weights")
@@ -64,8 +60,8 @@
         args [x ws mus stds]]
     (is (not (dc/discrete? (mixture-of-normals ws mus stds))))
     (is (number? (ts/host (dc/sample (mixture-of-normals ws mus stds) (rng/key 1)))) "a draw")
-    (is (ts/close? (log-mix [w1 w2] [(density d/normal x mu1 std1) (density d/normal x mu2 std2)])
-                   (density mixture-of-normals x ws mus stds)))
+    (is (ts/close? (log-mix [w1 w2] [(genjl/logpdf d/normal x mu1 std1) (genjl/logpdf d/normal x mu2 std2)])
+                   (genjl/logpdf mixture-of-normals x ws mus stds)))
     (testing "logpdf_grad against finite differences"
       (let [[_ _ gmus gstds] (apply fd/logpdf-grad mixture-of-normals args)]
         (is (= [2] (array/shape gmus)))
@@ -76,8 +72,8 @@
       (is (fd/logpdf-grad-matches? mixture-of-normals args 3) "the two standard deviations"))
     (testing "the tape, through each scalar as Gen.jl tracks it"
       (let [scalar-logpdf (fn [x w1 w2 mu1 mu2 std1 std2]
-                            ((fd/logpdf mixture-of-normals) x (array/stack [w1 w2]) (array/stack [mu1 mu2])
-                                                            (array/stack [std1 std2])))
+                            (genjl/log-density mixture-of-normals x (array/stack [w1 w2]) (array/stack [mu1 mu2])
+                                               (array/stack [std1 std2])))
             scalars [x w1 w2 mu1 mu2 std1 std2]
             tracked (apply (array/grad scalar-logpdf {:argnums (vec (range 7))}) scalars)]
         (doseq [i (range 7)]
@@ -95,8 +91,8 @@
         args [x ws ns ps]]
     (is (dc/discrete? (mixture-of-binomials ws ns ps)))
     (is (<= 0 (ts/host (dc/sample (mixture-of-binomials ws ns ps) (rng/key 1)))) "a draw")
-    (is (ts/close? (log-mix [w1 w2] [(density d/binom x n1 p1) (density d/binom x n2 p2)])
-                   (density mixture-of-binomials x ws ns ps)))
+    (is (ts/close? (log-mix [w1 w2] [(genjl/logpdf d/binom x n1 p1) (genjl/logpdf d/binom x n2 p2)])
+                   (genjl/logpdf mixture-of-binomials x ws ns ps)))
     (testing "logpdf_grad against finite differences"
       (is (fd/logpdf-grad-matches? mixture-of-binomials args 1 {:dx fd/probability-dx}) "the two weights")
       (is (fd/logpdf-grad-matches? mixture-of-binomials args 3) "the two probabilities"))))
@@ -126,8 +122,8 @@
         args [x ws mus covs]]
     (is (not (dc/discrete? (mixture-of-mvnormals ws mus covs))))
     (is (= [2] (array/shape (dc/sample (mixture-of-mvnormals ws mus covs) (rng/key 1)))) "a draw")
-    (is (ts/close? (log-mix [w1 w2] [(density d/mvnormal x mu1 cov1) (density d/mvnormal x mu2 cov2)])
-                   (density mixture-of-mvnormals x ws mus covs)))
+    (is (ts/close? (log-mix [w1 w2] [(genjl/logpdf d/mvnormal x mu1 cov1) (genjl/logpdf d/mvnormal x mu2 cov2)])
+                   (genjl/logpdf mixture-of-mvnormals x ws mus covs)))
     (testing "logpdf_grad against finite differences"
       (let [[_ _ gmus gcovs] (apply fd/logpdf-grad mixture-of-mvnormals args)]
         (is (= [2 2] (array/shape gmus)))

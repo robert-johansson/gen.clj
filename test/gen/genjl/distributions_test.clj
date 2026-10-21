@@ -11,6 +11,7 @@
             [gen.dist :as d]
             [gen.dist.core :as dc]
             [gen.genjl.finite-diff :as fd]
+            [gen.genjl.support :as genjl]
             [gen.random :as rng]
             [gen.test-support :as ts]))
 
@@ -18,11 +19,6 @@
   "A draw of dist, on the host."
   [dist]
   (ts/host (dc/sample dist (rng/key 1))))
-
-(defn- density
-  "Gen.jl's logpdf(dist, x, args...) on the host."
-  [make x & args]
-  (ts/number (apply (fd/logpdf make) x args)))
 
 (defn- grads
   "Gen.jl's logpdf_grad(dist, args...) on the host: a vector of the
@@ -44,12 +40,12 @@
   ;; where alpha (at 0) or beta (at 1) is below 1, where Gen.jl substitutes
   ;; a finite value
   (is (< 0 (draw (d/beta 0.5 0.5)) 1))
-  (is (= ##-Inf (density d/beta -1.0 0.5 0.5)))
+  (is (= ##-Inf (genjl/logpdf d/beta -1.0 0.5 0.5)))
   (testing "exact at the endpoints: Gen.jl's logpdf(eps) < logpdf(0) < Inf is logpdf(eps) < logpdf(0) = Inf"
     (doseq [[inside edge a b] [[eps 0.0 0.5 0.5] [eps 0.0 0.5 1.5] [(- 1 eps) 1.0 0.5 0.5] [(- 1 eps) 1.0 1.5 0.5]]]
-      (let [at-edge (density d/beta edge a b)]
+      (let [at-edge (genjl/logpdf d/beta edge a b)]
         (is (= ##Inf at-edge) (str "at " edge " with alpha " a ", beta " b))
-        (is (< (density d/beta inside a b) at-edge)))))
+        (is (< (genjl/logpdf d/beta inside a b) at-edge)))))
   (doseq [i (range 3)]
     (is (fd/logpdf-grad-matches? d/beta [0.4 0.2 0.3] i) (str "d/darg" i))))
 
@@ -58,28 +54,28 @@
   ;; 2, its value 2 is 1. Distributions.jl's own integer-probability bug,
   ;; and the value's nothing gradient, are n/a.
   (is (<= 0 (draw (d/categorical [0.2 0.3 0.5])) 2))
-  (is (= ##-Inf (density d/categorical -1 (array/array [0.2 0.3 0.5]))))
+  (is (= ##-Inf (genjl/logpdf d/categorical -1 (array/array [0.2 0.3 0.5]))))
   (is (fd/logpdf-grad-matches? d/categorical [1 (array/array [0.2 0.3 0.5])] 1 {:dx fd/probability-dx})
       "the three probabilities' finite_diff_vec"))
 
 (deftest gamma
   ;; distributions.jl:67
   (is (< 0 (draw (d/gamma 1.0 1.0))))
-  (is (= ##-Inf (density d/gamma -1.0 1.0 1.0)))
+  (is (= ##-Inf (genjl/logpdf d/gamma -1.0 1.0 1.0)))
   (doseq [i (range 3)]
     (is (fd/logpdf-grad-matches? d/gamma [0.4 0.2 0.3] i) (str "d/darg" i))))
 
 (deftest inv-gamma
   ;; distributions.jl:85
   (is (< 0 (draw (d/inv-gamma 1.0 1.0))))
-  (is (= ##-Inf (density d/inv-gamma -1.0 1.0 1.0)))
+  (is (= ##-Inf (genjl/logpdf d/inv-gamma -1.0 1.0 1.0)))
   (doseq [i (range 3)]
     (is (fd/logpdf-grad-matches? d/inv-gamma [0.4 0.2 0.3] i) (str "d/darg" i))))
 
 (deftest normal
   ;; distributions.jl:103: no overflow at 1e13, exactly
   (when (ts/float64?)
-    (is (= -5e25 (density d/normal 1e13 0.0 1.0)))
+    (is (= -5e25 (genjl/logpdf d/normal 1e13 0.0 1.0)))
     (is (= [-1e13 1e13 1e26] (grads d/normal 1e13 0.0 1.0))))
   (doseq [i (range 3)]
     (is (fd/logpdf-grad-matches? d/normal [0.4 0.2 0.3] i) (str "d/darg" i))))
@@ -123,22 +119,22 @@
         "Julia's (2, 3) and (1, 2, 3), which NumPy would broadcast the other way round"))
   (testing "logpdf is a number, its gradients the arguments' shapes"
     (let [args [(array/ones [4 2]) (array/ones [1 2]) (array/ones [4 1])]]
-      (is (= [] (array/shape (apply (fd/logpdf d/broadcasted-normal) args))))
+      (is (= [] (array/shape (apply genjl/log-density d/broadcasted-normal args))))
       (is (= [[4 2] [1 2] [4 1]] (mapv array/shape (apply fd/logpdf-grad d/broadcasted-normal args))))))
   (testing "a value of the wrong shape, or one only broadcast-compatible, or parameters that do not broadcast"
     (doseq [[label args] {"wrong" [(array/ones [2 1]) (array/ones [3 1]) (array/ones [1 2])]
                           "broadcast-compatible" [(array/ones [3 1]) (array/ones [3 1]) (array/ones [1 2])]
                           "incompatible parameters" [(array/ones [1 2]) (array/ones [2 1]) (array/ones [3 1])]}]
-      (is (throws? #(apply (fd/logpdf d/broadcasted-normal) args)) (str label ": logpdf"))
+      (is (throws? #(apply genjl/logpdf d/broadcasted-normal args)) (str label ": logpdf"))
       (is (throws? #(apply fd/logpdf-grad d/broadcasted-normal args)) (str label ": logpdf_grad"))))
   (testing "logpdf with broadcast parameters equals logpdf with them expanded"
     ;; Julia's x (2, 4, 1), mu (1, 4), std (2, 1, 1), reversed
     (let [x (array/array [[[0.2 0.5] [0.3 0.4] [0.4 0.3] [0.5 0.2]]])
           mu (array/array [[0.7] [0.7] [0.8] [0.6]])
           std (array/array [[[0.2 0.1]]])
-          logpdf (fd/logpdf d/broadcasted-normal)]
-      (is (= (ts/number (logpdf x mu std))
-             (ts/number (logpdf x (array/broadcast-to mu [1 4 2]) (array/broadcast-to std [1 4 2]))))))))
+          logpdf (partial genjl/logpdf d/broadcasted-normal)]
+      (is (= (logpdf x mu std)
+             (logpdf x (array/broadcast-to mu [1 4 2]) (array/broadcast-to std [1 4 2])))))))
 
 (defn- symmetrized
   "(g + gᵀ)/2: a covariance gradient from the tape sits on the triangle the
@@ -150,7 +146,7 @@
   ;; distributions.jl:217
   (is (= 2 (count (draw (d/mvnormal [0.0 0.0] [[1.0 0.2] [0.2 1.4]])))))
   (let [args [(array/array [0.1 0.2]) (array/array [0.3 0.4]) (array/array [[1.0 0.2] [0.2 1.4]])]
-        f (fd/logpdf d/mvnormal)
+        f (partial genjl/logpdf d/mvnormal)
         [gx gmu gcov] (apply fd/logpdf-grad d/mvnormal args)]
     (is (fd/grad-close? gx (fd/finite-diff f args 0)) "x's two finite_diff_vec")
     (is (fd/grad-close? gmu (fd/finite-diff f args 1)) "mu's two")
@@ -176,22 +172,22 @@
     (is (= 4 (count x)))
     (is (ts/close? 1.0 (reduce + x))))
   (testing "values off the simplex"
-    (is (= ##-Inf (density d/dirichlet (array/array [0.0 0.0]) (array/array [1.0 1.0]))))
-    (is (= ##-Inf (density d/dirichlet (array/array [1.0 1.0]) (array/array [1.0 1.0]))))
-    (is (= ##-Inf (density d/dirichlet (array/array [2.0 -1.0]) (array/array [1.0 1.0]))))
-    (is (throws? #(density d/dirichlet (array/array [0.5 0.5]) (array/array [-1.0 1.0]))) "a negative alpha")
-    (is (throws? #(density d/dirichlet (array/array [0.5 0.5]) (array/array [-1.0 1.0]))) "(again, as Gen.jl)")
-    (is (not= ##-Inf (density d/dirichlet (array/array [0.0 1.0]) (array/array [1.0 1.0]))) "a corner, with alpha 1"))
+    (is (= ##-Inf (genjl/logpdf d/dirichlet (array/array [0.0 0.0]) (array/array [1.0 1.0]))))
+    (is (= ##-Inf (genjl/logpdf d/dirichlet (array/array [1.0 1.0]) (array/array [1.0 1.0]))))
+    (is (= ##-Inf (genjl/logpdf d/dirichlet (array/array [2.0 -1.0]) (array/array [1.0 1.0]))))
+    (is (throws? #(genjl/logpdf d/dirichlet (array/array [0.5 0.5]) (array/array [-1.0 1.0]))) "a negative alpha")
+    (is (throws? #(genjl/logpdf d/dirichlet (array/array [0.5 0.5]) (array/array [-1.0 1.0]))) "(again, as Gen.jl)")
+    (is (not= ##-Inf (genjl/logpdf d/dirichlet (array/array [0.0 1.0]) (array/array [1.0 1.0]))) "a corner, with alpha 1"))
   (testing "values against scipy's, as Gen.jl's against Distributions.jl's"
     (doseq [[x alpha] [[[0.01 0.99] [2.0 2.0]] [[0.01 0.99] [1.0 4.0]] [[0.01 0.99] [0.01 0.01]] [[0.2 0.2 0.6] [2.0 2.0 4.0]]]]
-      (is (ts/close? (dirichlet-references [x alpha]) (density d/dirichlet (array/array x) (array/array alpha))
+      (is (ts/close? (dirichlet-references [x alpha]) (genjl/logpdf d/dirichlet (array/array x) (array/array alpha))
                      {:rtol (ts/tol 1e-10)})
           (str x " under " alpha))))
   (testing "gradients: with respect to x through a softmax, and to alpha"
     (let [alpha (array/array [1.0 2.0 3.0 3.0])
           s (array/array [0.25 0.25 0.25 0.25])
           [gx galpha] (fd/logpdf-grad d/dirichlet s alpha)
-          f (fd/logpdf d/dirichlet)]
+          f (partial genjl/logpdf d/dirichlet)]
       (is (fd/grad-close? (array/matmul gx (softmax-jacobian s))
                           (fd/finite-diff (fn [x a] (f (array/softmax x) a)) [(array/zeros [4]) alpha] 0))
           "x's four, chained through softmax_grad")
@@ -204,19 +200,19 @@
 (deftest uniform
   ;; distributions.jl:292
   (is (< -0.5 (draw (d/uniform -0.5 0.5)) 0.5))
-  (is (= ##-Inf (density d/uniform -1.0 -0.5 0.5)))
+  (is (= ##-Inf (genjl/logpdf d/uniform -1.0 -0.5 0.5)))
   (doseq [i (range 3)]
     (is (fd/logpdf-grad-matches? d/uniform [0.0 -0.5 0.5] i) (str "d/darg" i))))
 
 (deftest uniform-discrete
   ;; distributions.jl:310; its nothing gradients are n/a
   (is (<= 10 (draw (d/uniform-discrete 10 20)) 20))
-  (is (= ##-Inf (density d/uniform-discrete -1 10 20))))
+  (is (= ##-Inf (genjl/logpdf d/uniform-discrete -1 10 20))))
 
 (deftest piecewise-uniform
   ;; distributions.jl:325
   (is (< -0.5 (draw (d/piecewise-uniform [-0.5 0.5] [1.0])) 0.5))
-  (is (= ##-Inf (density d/piecewise-uniform -1.0 (array/array [-0.5 0.5]) (array/array [1.0]))))
+  (is (= ##-Inf (genjl/logpdf d/piecewise-uniform -1.0 (array/array [-0.5 0.5]) (array/array [1.0]))))
   (let [args [0.5 (array/array [-1.0 0.0 1.0]) (array/array [0.4 0.6])]]
     (is (fd/logpdf-grad-matches? d/piecewise-uniform args 0) "x")
     (is (fd/logpdf-grad-matches? d/piecewise-uniform args 1) "the three bounds' finite_diff_vec")
@@ -225,41 +221,41 @@
 (deftest beta-uniform
   ;; distributions.jl:346
   (is (< 0 (draw (d/beta-uniform 0.5 0.5 0.5)) 1))
-  (is (= ##-Inf (density d/beta-uniform -1.0 0.5 0.5 0.5)))
+  (is (= ##-Inf (genjl/logpdf d/beta-uniform -1.0 0.5 0.5 0.5)))
   (doseq [i (range 4)]
     (is (fd/logpdf-grad-matches? d/beta-uniform [0.5 0.4 10.0 2.0] i) (str "d/darg" i))))
 
 (deftest geometric
   ;; distributions.jl:365; the value's nothing gradient is n/a
   (is (<= 0 (draw (d/geometric 0.5))))
-  (is (= ##-Inf (density d/geometric -1 0.5)))
+  (is (= ##-Inf (genjl/logpdf d/geometric -1 0.5)))
   (is (fd/logpdf-grad-matches? d/geometric [4 0.3] 1)))
 
 (deftest binom
   ;; distributions.jl:381; the nothing gradients are n/a
   (is (<= 0 (draw (d/binom 5 0.3))))
-  (is (= ##-Inf (density d/binom -1 5 0.3)))
+  (is (= ##-Inf (genjl/logpdf d/binom -1 5 0.3)))
   (is (fd/logpdf-grad-matches? d/binom [2 5 0.3] 2)))
 
 (deftest neg-binom
   ;; distributions.jl:398; r is real, so Gen.jl differentiates it (5 here
   ;; as a float); the value's nothing gradient is n/a
   (is (<= 0 (draw (d/neg-binom 5 0.3))))
-  (is (= ##-Inf (density d/neg-binom -1 5 0.3)))
+  (is (= ##-Inf (genjl/logpdf d/neg-binom -1 5 0.3)))
   (is (fd/logpdf-grad-matches? d/neg-binom [2 5.0 0.3] 1))
   (is (fd/logpdf-grad-matches? d/neg-binom [2 5.0 0.3] 2)))
 
 (deftest exponential
   ;; distributions.jl:415
   (is (< 0 (draw (d/exponential 0.5))))
-  (is (= ##-Inf (density d/exponential -1.0 0.5)))
+  (is (= ##-Inf (genjl/logpdf d/exponential -1.0 0.5)))
   (is (fd/logpdf-grad-matches? d/exponential [1.2 0.5] 0))
   (is (fd/logpdf-grad-matches? d/exponential [1.2 0.5] 1)))
 
 (deftest poisson
   ;; distributions.jl:431; the value's nothing gradient is n/a
   (is (<= 0 (draw (d/poisson 1.0))))
-  (is (= ##-Inf (density d/poisson -1 1.0)))
+  (is (= ##-Inf (genjl/logpdf d/poisson -1 1.0)))
   (is (fd/logpdf-grad-matches? d/poisson [4 2.0] 1)))
 
 (deftest laplace
