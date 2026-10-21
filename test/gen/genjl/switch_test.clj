@@ -24,7 +24,8 @@
             [gen.gradients :as g]
             [gen.random :as rng]
             [gen.selection :as sel]
-            [gen.test-support :as ts :refer [close?]]))
+            [gen.test-support :as ts :refer [close?]]
+            [gen.trace :as trace]))
 
 (def ^:private x 5.0)
 (def ^:private y 3.0)
@@ -114,17 +115,16 @@
 ;; ---------------------------------------------------------------------------
 
 (def bang1
-  "switch.jl:115: bang with its own std, a parameter."
-  (gen [x y] (trace :z (d/normal (+ x y) (param :bang1-std)))))
+  "switch.jl:115: bang with its own std, a parameter (init_param!'s 3.0)."
+  (dyn/with-params (gen [x y] (trace :z (d/normal (+ x y) (param :std)))) {:std 3.0}))
 
 (def fuzz1
-  "switch.jl:121: fuzz with its own std, a parameter."
-  (gen [x y] (trace :z (d/normal (+ x (* 2 y)) (param :fuzz1-std)))))
+  "switch.jl:121: fuzz with its own std, a parameter (init_param!'s 3.0)."
+  (dyn/with-params (gen [x y] (trace :z (d/normal (+ x (* 2 y)) (param :std)))) {:std 3.0}))
 
 (def bam
-  "switch.jl:128, holding both branches' parameters, as init_param! sets
-   them (D7: one store per model)."
-  (dyn/with-params (gen [s] (splice :x (comb/switch bang1 fuzz1) s x y)) {:bang1-std 3.0 :fuzz1-std 3.0}))
+  "switch.jl:128"
+  (gen [s] (splice :x (comb/switch bang1 fuzz1) s x y)))
 
 ;; switch.jl:134
 (deftest hierarchy-simulate
@@ -166,14 +166,16 @@
 
 ;; switch.jl:199: Gen.jl constrains :z, which bam lacks (its choice is
 ;; :x => :z), and generate ignores it; dropped here (D11), so each of the
-;; four runs draws z
+;; four runs draws z. Each branch holds its std; bam holds none, so the
+;; gradients are the Switch's, from its trace at :x, by branch (DESIGN §9)
 (deftest hierarchy-accumulate-param-gradients
   (doseq [k (range 4)]
     (let [dstd (fn [tr mean] (nth (logpdf-grad d/normal (tr [:x :z]) mean std) 2))
+          switch-grads #(g/param-gradients (trace/subtrace % :x) 1.0)
           tr0 (gfi/simulate bam [0] (rng/fold-in (rng/key 19) k))
           tr1 (gfi/simulate bam [1] (rng/fold-in (rng/key 20) k))]
-      (is (approx? (dstd tr0 (+ x y)) (:bang1-std (g/param-gradients tr0 1.0))) (str "run " k))
-      (is (approx? (dstd tr1 (+ x (* 2 y))) (:fuzz1-std (g/param-gradients tr1 1.0))) (str "run " k)))))
+      (is (approx? (dstd tr0 (+ x y)) (get-in (switch-grads tr0) [0 :std])) (str "run " k))
+      (is (approx? (dstd tr1 (+ x (* 2 y))) (get-in (switch-grads tr1) [1 :std])) (str "run " k)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Branches that call another generative function

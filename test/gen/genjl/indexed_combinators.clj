@@ -29,20 +29,11 @@
   (:require [clojure.test :refer [is]]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
-            [gen.dynamic :as dyn :refer [gen]]
             [gen.genjl.expectations :as expectations]
             [gen.genjl.support :as support :refer [approx?]]
             [gen.gfi :as gfi]
             [gen.random :as rng]
             [gen.test-support :refer [close?]]))
-
-(defn holding
-  "A model holding a parameter store for gf, a combinator, as Gen.jl's
-   set_param! sets its kernel's: one store per model (D7), and a
-   combinator has none of its own, so a dynamic function splicing gf at
-   addr holds it."
-  [addr gf store]
-  (dyn/with-params (gen [& args] (apply splice addr gf args)) store))
 
 (defn update
   "update of tr, the result keeping tr for check."

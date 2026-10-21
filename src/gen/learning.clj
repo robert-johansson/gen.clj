@@ -14,7 +14,9 @@
    together (Gen.jl's ParamUpdate with gf => params pairs) when they are
    nested in a map, {:model store :proposal store}, and only the
    parameters given gradients when the gradients name a subset; a
-   gradient for a name the store lacks is an error.
+   gradient for a name the store lacks is an error. A combinator's stores
+   (gen.gfi/stores) are such a tree, and gfi/with-stores gives the stepped
+   ones back to it.
 
    lecture and lecture-batched are the sleep phase of wake-sleep (Gen.jl's
    lecture! and lecture_batched!): the proposal's log density of the

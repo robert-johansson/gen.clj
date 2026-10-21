@@ -10,7 +10,7 @@
             [gen.combinators :as comb]
             [gen.diff :as diff]
             [gen.dist :as d]
-            [gen.dynamic :refer [gen]]
+            [gen.dynamic :as dyn :refer [gen]]
             [gen.genjl.finite-diff :refer [logpdf-grad]]
             [gen.genjl.indexed-combinators :as indexed]
             [gen.genjl.support :as support :refer [approx?]]
@@ -253,16 +253,15 @@
   "unfold.jl:483: the kernel with std a parameter."
   (gen [t x-prev alpha beta] (trace :x (d/normal (+ (* x-prev alpha) beta) (param :std)))))
 
-(def ^:private model
-  "Unfold(kernel) holding the kernel's std, as set_param! does (D7)."
-  (indexed/holding :u (comb/unfold dynamic-kernel) {:std 1.0}))
+(def ^:private chain
+  "Unfold(kernel), the kernel holding its std, as set_param! sets it."
+  (comb/unfold (dyn/with-params dynamic-kernel {:std 1.0})))
 
 ;; unfold.jl:481: argument gradients (D7: choice-gradients' :argnums, the
 ;; length and the initial state not differentiated, as in Gen.jl) and the
-;; parameter's
+;; parameter's, from the Unfold's trace (its kernel's store, DESIGN §9)
 (deftest accumulate-param-gradients-of-a-dynamic-kernel
-  (let [tr (:trace (gfi/generate model [2 x-init alpha beta] (cm/set-submap cm/EMPTY :u (cm/choicemap [0 :x] x1 [1 :x] x2))
-                                 (rng/key 6)))
+  (let [tr (:trace (gfi/generate chain [2 x-init alpha beta] (cm/choicemap [0 :x] x1 [1 :x] x2) (rng/key 6)))
         [dn dinit dalpha dbeta] (:arg-grads (g/choice-gradients tr sel/none nil {:argnums [2 3]}))
         m1 (+ (* x-init alpha) beta)
         m2 (+ (* x1 alpha) beta)

@@ -1471,6 +1471,32 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   a combinator at the top had to be spliced into one. D7's rule stands, one
   store per generative function and gradients as values; this extends where
   the stores are found.
+  - *The design (genclj-umww; approved under the owner's delegation,
+    2026-10-21).* `gfi/stores` gives the stores a generative function holds, in
+    its callees' shape, and `gfi/with-stores` gives a tree of that shape back
+    (protocol `gfi/IStores`; Object holds none). A dynamic or deterministic
+    function holds its own store (`with-params`); a Map and an Unfold their
+    kernel's; a Switch `{branch stores}` over the branches that hold some; a
+    Recurse `{:production … :aggregation …}`; combinators nest.
+    `param-gradients` differentiates that tree, so its result has the same
+    shape: a Map's is its kernel's, summed over the elements, and a Switch's
+    has a gradient for each holding branch, zero for one the trace did not
+    take. Each store is its own namespace: two branches' `:std` are two
+    parameters, as Gen.jl's per-function parameters are.
+  - gen.learning steps the tree as any other (`learn/step` on `(gfi/stores
+    gf)` and the gradients), and `gfi/with-stores` gives the stepped stores
+    back to the combinator.
+  - A dynamic function's callees are in its body, not its fields, so their
+    own stores are not its: their gradients are the call's trace's,
+    `(param-gradients (trace/subtrace tr addr) retgrad)`, with the caller's
+    cotangent of the call's value as retgrad when the caller uses it
+    (switch.jl:199's port). call-at and choice-at are dynamic functions
+    here, so their own store is what a trace of theirs differentiates, and
+    the callee reads it.
+  - Alternatives: one map merging the callees' stores by name, which makes
+    two branches' `:std` one parameter, unlike Gen.jl; and reaching every
+    store in the trace's tree, which a dynamic body's callees cannot be given
+    back.
 - **A custom function's trainable parameters (M5's G5, genclj-2294;
   approved under the owner's delegation, 2026-10-21).** `(custom/deterministic
   {:params [:w] …})` names the parameters a deterministic function reads,

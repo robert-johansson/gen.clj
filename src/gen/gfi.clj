@@ -334,6 +334,43 @@
   (-same-gen-fn? [gf other budget] (and (record? gf) (same-entries? gf other budget)))
   (-revise [gf op args opts project-old] (generate-again gf op args opts project-old)))
 
+;; ---------------------------------------------------------------------------
+;; The trainable-parameter stores a generative function holds
+;; ---------------------------------------------------------------------------
+
+(defprotocol IStores
+  "The stores of trainable parameters a generative function holds, as
+   gen.gradients/param-gradients differentiates and gen.learning steps
+   them: a dynamic or deterministic function's own (with-params), and a
+   combinator's callees'. Every other generative function holds none
+   (extended to Object)."
+  (-stores [gf]
+    "gf's stores, or nil: a store is a map of name to value, and a
+     combinator's are in the shape of its callees.")
+  (-with-stores [gf stores]
+    "gf holding stores, in -stores' shape, in place of its own."))
+
+(extend-protocol IStores
+  Object
+  (-stores [_] nil)
+  (-with-stores [gf stores]
+    (throw (ex-info (str "A " (.getName (class gf)) " holds no parameter stores") {:stores stores}))))
+
+(defn stores
+  "The trainable-parameter stores gf holds, or nil: a dynamic or
+   deterministic function's own store (a map of name to value); a Map's or
+   an Unfold's, its kernel's; a Switch's, {branch stores} over the branches
+   that hold some; a Recurse's, {:production stores :aggregation stores}
+   over those that do."
+  [gf]
+  (-stores gf))
+
+(defn with-stores
+  "gf holding stores, in the shape (stores gf) gives, as gen.learning's
+   step returns them."
+  [gf stores]
+  (-with-stores gf stores))
+
 (defn project-by-maker
   "tr's projection on selection by its maker (which a trace given another
    gen-fn is not projected by)."

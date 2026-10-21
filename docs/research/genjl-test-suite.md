@@ -389,7 +389,7 @@ groups.
 | 60 | map combinator / update | 74 | growing, shrinking, unchanged and custom-argdiff updates: choices, discard, score, weight, retval, retdiff | as above; `map-precise-hints-match-unknown-change` (cases checked) | port 74 | D1 (decided): an element whose value did not change is absent from the retdiff (checked); the port asserts gen.clj's |
 | 232 | map combinator / regenerate | 45 | the same for regenerate | as above | port 45 | D1 (decided) |
 | 345 | map combinator / choice_gradients | 6 | argument and choice gradients with a random retval gradient | `choice-gradients` | port 6 |  |
-| 376 | map combinator / accumulate_param_gradients! | 3 | argument and parameter gradients | `choice-gradients`, `param-gradients` | port 3 | D7 |
+| 376 | map combinator / accumulate_param_gradients! | 3 | argument and parameter gradients | `choice-gradients`, `param-gradients` on the Map's trace (its kernel's store, genclj-umww) | port 3 | D7 |
 
 #### `test/modeling_library/unfold.jl` (181 assertions)
 
@@ -402,7 +402,7 @@ groups.
 | 92 | unfold combinator / assess | 5 | weight and retval | as above | port 5 |  |
 | 114 | unfold combinator / update | 84 | growing, shrinking, unchanged, init- and params-changed updates with retdiffs | as above; `unfold-precise-hints-match-unknown-change` (every retdiff checked) | port 84 | the kernel is static, so Gen.jl's retdiffs are precise too |
 | 327 | unfold combinator / regenerate | 59 | the same for regenerate | as above (checked) | port 59 |  |
-| 481 | unfold combinator / test 1 - accumulate_param_gradients! | 5 | argument and parameter gradients of a dynamic kernel | `choice-gradients`, `param-gradients` | port 5 | D7 |
+| 481 | unfold combinator / test 1 - accumulate_param_gradients! | 5 | argument and parameter gradients of a dynamic kernel | `choice-gradients`, `param-gradients` on the Unfold's trace (genclj-umww) | port 5 | D7 |
 | 523 | unfold combinator / test 2 - accumulate_param_gradients! | 1 | the gradient of 2^10 x through ten steps | `choice-gradients` (checked: 1024) | port 1 | `nothing` retgrads become zeros |
 | 538 | unfold combinator / choice gradients | 2 | choice gradients propagate through the state, with and without a retval gradient (loops of 10) | `choice-gradients` | port 2 |  |
 
@@ -432,7 +432,7 @@ groups.
 | 160 | Hierarchy / update | 2 | old = new - weight, same and other branch | as above | port 2 |  |
 | 171 | Hierarchy / regenerate | 3 | old = new - weight with select() | as above (branches share :z, so Eq. 4.1 agrees) | port 3 |  |
 | 182 | Hierarchy / choice gradients | 2 | choice gradients in both branches (loop of 4) | `choice-gradients` | port 2 |  |
-| 199 | Hierarchy / accumulate parameter gradients | 2 | each branch's std gradient | `param-gradients` | port 2 | D7 (one store), D11 (its constraint at :z is unvisited) |
+| 199 | Hierarchy / accumulate parameter gradients | 2 | each branch's std gradient | `param-gradients` of the Switch's trace, by branch, each holding its std (genclj-umww) | port 2 | D7, D11 (its constraint at :z is unvisited) |
 | 236 | More complex hierarchy / simulate | 2 | branches with a nested call | as above | port 2 |  |
 | 243 | More complex hierarchy / generate | 4 | weight of a constrained choice | as above | port 4 |  |
 | 256 | More complex hierarchy / assess | 2 | weight | as above | port 2 |  |

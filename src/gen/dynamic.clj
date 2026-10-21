@@ -762,6 +762,9 @@
 ;; ---------------------------------------------------------------------------
 
 (defrecord DynamicGF [body-fn source params transitions dispatch static]
+  gfi/IStores
+  (-stores [gf] (:params gf))
+  (-with-stores [gf stores] (assoc gf :params stores))
   gfi/IGenerativeFunction
   (-simulate [gf args key] (:trace (run gf :simulate args {:key key})))
   (-generate [gf args constraints key] (run gf :generate args {:key key :constraints constraints}))
