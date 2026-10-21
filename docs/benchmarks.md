@@ -134,6 +134,237 @@ How to read these:
   read nothing then. The memory bounds were ruled out first: turning off the
   collection trigger, or the cache and memory limits, changed nothing.
 
+## Against Gen.jl, same machine (2026-10-21, bean genclj-h6uu)
+
+gen.clj's dynamic language against Gen.jl's dynamic DSL, on the same
+models and operations as `gen.model-bench` and the scalar paths of
+`gen.genmlx-bench`, on this Mac with nothing else running.
+
+**Settings.**
+- **Machine:** Apple M4 (10 cores: 4 performance, 6 efficiency), 32 GB,
+  macOS 27.0.1. Idle: load 1.2, no other JVM or Julia process.
+- **Run:** 2026-10-21, 08:38 to 08:42. One process at a time, each under
+  `nice -n 10`, CPU only.
+- **gen.clj:** at c392062 with this branch's per-choice section, on Oracle
+  GraalVM 25.0.4 (Graal JIT), the JVM backend, float64.
+  - `clojure -M:bench -m gen.model-bench`: criterium's quick-benchmark, a
+    5 s warm-up, a GC, 6 samples of about 0.1 s; the mean time per call.
+  - `clojure -M:bench -m gen.genmlx-bench`: 20 warm-up runs (2 if a run
+    takes 50 ms or more), then the median of 7 timed runs, or 3 for scalar
+    runs of 1000 particles or more.
+- **Gen.jl:** 0.4.8 on Julia 1.12.6 (Homebrew), the default v1.12
+  environment, whose Gen is identical to the tag 0.4.8. One thread,
+  `--startup-file=no`. BenchmarkTools is not installed, so the script times
+  `time_ns` loops built as the two harnesses above: a 5 s warm-up, a GC and
+  6 samples of about 0.1 s, the mean per call; or 20 warm-ups and the
+  median of 7 (3). The global RNG is seeded with 1.
+- **The script** is `bench/genjl/genjl_bench.jl`. Rerun it with
+  `nice -n 10 julia --startup-file=no bench/genjl/genjl_bench.jl` and Gen
+  0.4.8 in the active environment; add `quick` for a short check that is
+  not a timing run. Its models are gen.clj's line for line, 1-based where
+  gen.clj's addresses are 0-based. linreg, for instance:
+
+  ```julia
+  @gen function linreg(xs::Vector{Float64})
+      slope = @trace(normal(0, 10), :slope)
+      intercept = @trace(normal(0, 10), :intercept)
+      for (i, x) in enumerate(xs)
+          @trace(normal(slope * x + intercept, 1), (:y, i))
+      end
+      return slope
+  end
+  ```
+
+  The other models: `hierarchical`, 10 calls of a one-choice
+  `observation` at `(:obs, i)`; `Unfold` of a step that traces `:x` and
+  `:y`; the normal-normal model of `gen.genmlx-bench`, and its growing
+  version for the particle filter. Gen.jl's operations are the GFI's own:
+  `simulate`, `generate`, `assess`, `update` and `regenerate` with
+  `NoChange` argdiffs, `choice_gradients`, `importance_sampling`, `mh`,
+  `initialize_particle_filter` and `particle_filter_step!`.
+
+**`gen.model-bench`'s operations, µs a call:**
+
+| Operation | gen.clj | Gen.jl | gen.clj / Gen.jl |
+|---|---|---|---|
+| linreg (12 sites): simulate | 19.15 | 2.75 | 7.0 |
+| linreg: generate with 10 observations | 19.68 | 3.06 | 6.4 |
+| linreg: assess | 18.38 | 2.48 | 7.4 |
+| linreg: update one choice | 17.30 | 7.43 | 2.3 |
+| linreg: regenerate `:slope` | 16.66 | 5.85 | 2.8 |
+| linreg: choice gradients (slope, intercept) | 117.33 | 20.62 | 5.7 |
+| hierarchical (10 calls): simulate | 38.55 | 6.01 | 6.4 |
+| hierarchical: update `:mu` | 44.37 | 18.06 | 2.5 |
+| Unfold (50 steps): extend by one step | 6.64 | 1.10 | 6.0 |
+| linreg × 1000, one at a time: generate | 19,820 | 3,187 | 6.2 |
+| linreg × 1000, batched: generate | 488 | — | — |
+| linreg × 1000, batched: regenerate `:slope` | 405 | — | — |
+
+Gen.jl has no batched execution. gen.clj's batched generate of 1000
+particles takes 488 µs, 6.5 times faster than Gen.jl's 1000 one at a time.
+
+**The cost per traced choice:** linreg with K observations, so K + 2
+choices, µs a call (µs a choice):
+
+| K | gen.clj simulate | Gen.jl simulate | gen.clj generate | Gen.jl generate |
+|---|---|---|---|---|
+| 10 | 19.63 (1.64) | 2.66 (0.22) | 19.31 (1.61) | 3.25 (0.27) |
+| 100 | 162.8 (1.60) | 18.00 (0.18) | 159.2 (1.56) | 21.72 (0.21) |
+| 1000 | 1708 (1.71) | 190.7 (0.19) | 1854 (1.85) | 236.8 (0.24) |
+
+Where the time goes, as far as these numbers tell:
+- **Per choice.** Each added choice costs about the same from 10 to 1000
+  choices, a little more past 100 on both sides:
+  - simulate, from K = 10 to 100: 1.59 µs a choice in gen.clj against
+    0.17 µs in Gen.jl (9.3 times); from 100 to 1000, 1.72 against 0.19
+    (8.9 times);
+  - generate: 1.55 against 0.21 (7.6 times), then 1.88 against 0.24 (7.9
+    times).
+- **Fixed cost.** The line through K = 10 and 100 leaves 0.5 to 0.8 µs a
+  call on either side (simulate and generate). So neither has a fixed cost
+  that matters here: the gap is in the work done for each traced choice.
+- **By operation.** The gap is largest for the operations that build a
+  trace from its choices (simulate, generate, assess: 6.4 to 7.4 times) and
+  for choice gradients (5.7). It is smallest for those that revise a trace
+  (update and regenerate: 2.3 to 2.8 times), where Gen.jl costs more than
+  its own simulate (7.4 and 5.9 µs against 2.8) and gen.clj less (17.3 and
+  16.7 against 19.2). The data do not say which steps of a traced choice
+  cost what: that needs a profile of gen.clj's handler.
+
+**`gen.genmlx-bench`'s scalar paths, ms a particle (a unit for MH and the
+filter), at the largest N:**
+
+| | gen.clj | Gen.jl | gen.clj / Gen.jl | gen.clj batched |
+|---|---|---|---|---|
+| generate (N = 3000) | 0.0096 | 0.0012 | 8.0 | 0.0005 |
+| importance sampling (N = 1000) | 0.0100 | 0.0012 | 8.3 | 0.0004 |
+| MH, one step (20 chains of 10) | 0.0141 | 0.0031 | 4.5 | — |
+| particle filter, a particle-step (N = 500) | 0.0069 | 0.0020 | 3.5 | 0.0002 (N = 1000) |
+
+At small N gen.clj's scalar rows also carry its harness's JIT warm-up
+(0.26 ms a particle at N = 1 for generate), where Julia compiled at the
+first call. gen.clj's batched paths are 2.4 to 10 times faster than
+Gen.jl's scalar ones from about 1000 particles.
+
+**What it means.** On scalar models, Gen.jl's dynamic DSL builds a trace
+6.4 to 7.4 times faster than gen.clj's dynamic language (7.6 to 9.3 times
+for each added choice). It is 5.7 times faster at choice gradients, and
+2.3 to 2.8 times at updates. gen.clj's batched execution, which Gen.jl
+lacks, more than closes the gap for many particles. The static language
+(`gen ^:static`, above) speeds up assess 1.9 to 2.6 times. The rest of the
+gap is the dynamic handler's per-choice cost, the target for the CPU-path
+work (genclj-4n51). The gen.clj figures here are about 12% slower than the
+table at the top (19.2 against 17.0 µs for linreg simulate, 2026-10-18):
+other code has landed since, and the conditions differ.
+
+### Where gen.clj's 1.7 µs a choice goes (JDK Flight Recorder)
+
+**Setup.**
+- linreg simulate at K = 1000 (1002 choices) on the JVM backend, same key
+  each call.
+- A 10 s warm-up, then a JFR recording with the `profile` settings over
+  40 s of back-to-back simulates on one thread. That gave 22,492 simulates
+  at 1,779 µs each (1.78 µs a choice), 3,110 execution samples and 11,348
+  allocation samples.
+- One JVM, nice'd, beside another agent's MLX run (2026-10-21 08:45). The
+  proportions hold; absolute times may move.
+- Separately, the thread's allocated bytes (ThreadMXBean) were counted over
+  a run: 5,520,272 bytes a simulate at K = 1000, **5.5 KB a choice** (4.9 KB
+  at K = 10, 5.1 KB at K = 100).
+- Each sample is attributed to the innermost gen.clj function on its stack
+  that names a phase. gen.array's operators are see-through, so their work
+  counts for whatever called them.
+
+| phase | time (samples) | allocation |
+|---|---|---|
+| **the handler's bookkeeping** | **50.6%** | **66.2%** |
+| choicemap: `set-choice` into the run's choices | 13.7% | 21.6% |
+| `record`: the state's `:scores` (a map by path) and `:score` | 13.5% | 21.3% |
+| the trace function: the `:visited` set, the state | 10.8% | 15.5% |
+| `check-address!`: used paths, their prefixes, the choices under them | 7.2% | 2.7% |
+| `site-key`: the state's `:key` | 3.3% | 5.1% |
+| the rest of the handler | 2.1% | 0.3% |
+| **the distribution** (normal: its draw's shape and options, the affine transform, erfinv, log-prob, construction checks) | **28.8%** | **16.5%** |
+| **random bits** (the site's key split, threefry, the JVM backend's 0-d uniform) | **17.3%** | **13.8%** |
+| **the model body** (its loop and arithmetic) | 2.8% | 2.8% |
+| other | 0.5% | 0.2% |
+
+**What the profile shows:**
+- **Over half the time is the handler's bookkeeping, and two thirds of the
+  allocation.** For every choice the run:
+  - updates its state, a hash map of 16 keys, five times: `:key`,
+    `:choices`, `:scores`, `:score` and `:visited`;
+  - adds the path (a vector `[:y i]`) to three persistent collections keyed
+    by it: the choices, the scores and the visited set;
+  - looks the path and its prefixes up again in `check-address!`.
+
+  The hottest frames are Clojure's `PersistentHashMap` assoc, hash and
+  node-copying (`BitmapIndexedNode.assoc` alone is 11% of samples), and by
+  class the allocation is mostly their node arrays (`Object[]` 39%,
+  `INode[]` 10%).
+- **The distribution's 29% is mostly general-purpose code on two doubles.**
+  - Including the random bits under it, normal's draw takes 34% of the time
+    and its log-prob 6%.
+  - The draw computes its shape (`elementwise-shape`, varargs and a reduce
+    over the parameters' shapes: 6.0%) and an options map.
+  - It then goes through gen.array's generic operators. On host numbers
+    each operator classifies its operands' types first: `dtype/kind` and
+    `op-class` are 4% of the samples.
+  - erfinv's Halley step is only 3%.
+- **Random bits, 17%:**
+  - The site's key split is the smaller part: threefry's `hash2x32` is 1.5%.
+  - Most is the JVM backend's uniform kernel for a 0-d draw
+    (`random-uniform`: 9%, largely its own frame), and `gen.random`'s
+    uniform and normal around it (4%).
+- **Boxing and the GC:**
+  - `java.lang.Double` is 7.3% of the bytes, about 25 boxed doubles a
+    choice. `ArraySeq` (varargs) is 5%.
+  - The young collections paused for 0.5 ms each, about 10 a second: under
+    1% of the time. Allocation costs at the allocation sites and in memory
+    traffic, not in pauses.
+- **The rest is small:** the model body's own loop and arithmetic is 2.8%,
+  and nothing else is large.
+
+**Recommendations** (for the owner, ranked by expected gain; none built):
+1. **The handler's state as run-local accumulators** (most of the 51% of
+   the time and 66% of the allocation).
+   - Keep one value per used path, for example a map from the path to
+     `[value log-prob]`. It answers "visited", gives the scores, and builds
+     the choices, so each choice costs one insertion where it now costs
+     three, plus the lookups.
+   - Hold the run's mutable parts in a record, or in transients that never
+     leave the run, rather than a 16-key hash map assoc'ed five times a
+     choice.
+   - The transitions and their results stay as they are. Rule 1, the
+     handler as the semantics, is about what they compute, and the laws
+     check it. But whether run-local mutation fits rule 3 ("no hidden
+     mutable state") is the owner's call.
+2. **A host-scalar path for scalar distributions** (most of the 29%).
+   - When every parameter is a host number and the shape is `[]`, normal's
+     sample and log-prob need neither `elementwise-shape`, the options map
+     nor gen.array's type dispatch: a uniform, one erfinv and a few
+     primitive flops.
+   - It must give the same bits as today's path: the same uniform, then
+     erfinv, then the affine transform. That keeps every fixed-key test and
+     fixture as it is, and they check it.
+3. **A scalar uniform in gen.random** (about half of the 17%). A 0-d uniform
+   could come straight from threefry's bits as a double, without the
+   backend's array kernel (a `double[]` of one, `make`, the generic
+   affine). The site's key split stays, as rule 2 requires.
+
+Together these three cover about 97% of the samples, but how much each
+recovers has to be measured after it is built. Gen.jl's 0.19 µs a choice
+comes from a different design (a mutable trace, and one global stateful
+generator rather than a key per site). Rule 2's keys are a cost gen.clj
+chooses to pay: here at most the 1.5% of `hash2x32` and the split.
+
+The profile is reproducible:
+- `clojure -M:bench -m gen.choice-profile jfr out.jfr` records it;
+- read it with `jfr view hot-methods` and `jfr view allocation-by-site`
+  (which counts a 26 GB sample from JFR's own start-up that the phase table
+  leaves out);
+- `clojure -M:bench -m gen.choice-profile alloc` counts the bytes a choice.
+
 ## GenMLX's inference benchmarks, within gen.clj (2026-10-19)
 
 `bench/gen/inference_bench.clj` ports GenMLX's `bench/linreg.cljs`,
