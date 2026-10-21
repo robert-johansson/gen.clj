@@ -201,9 +201,10 @@
 
 (defn updates-are-reversible-with-exact-discards [cases]
   (prop/for-all [[model seed picks alt?] cases]
-    (if-let [{:keys [tr sigma] {t2 :trace disc :discard :as r} :result} (update-case model seed picks alt?)]
+    (if-let [{:keys [tr sigma args'] {t2 :trace disc :discard :as r} :result} (update-case model seed picks alt?)]
       (let [{t3 :trace disc3 :discard} (gfi/update t2 (:args tr) (unknown-diffs (:args tr)) disc (rng/key seed))]
         (and (consistent? t2)
+             (= args' (:args t2))
              (sound-retdiff? tr r)
              (applied? tr t2 sigma)
              (= (exact-discard tr t2 sigma) disc)
@@ -223,6 +224,7 @@
           selected (set (cm/addresses (sel/get-selected (:choices tr) s)))
           now (set (addrs t2))]
       (and (consistent? t2)
+           (= args' (:args t2))
            (sound-retdiff? tr r)
            (every? #(= (cm/get-choice (:choices tr) %) (cm/get-choice (:choices t2) %))
                    (remove selected (filter now (addrs tr))))))))

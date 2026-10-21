@@ -528,3 +528,20 @@
   "The log density of the selected choices of a trace."
   [trace selection]
   (-project (:gen-fn trace) trace (check-selection :project selection)))
+
+;; ---------------------------------------------------------------------------
+;; Defining generative functions
+;; ---------------------------------------------------------------------------
+
+(defmacro defgf
+  "defrecord, for a generative function, plus untraced calls as in Gen.jl:
+   (gf a b) is the return value of a simulated run (with a key from the
+   implicit source)."
+  [name fields & impls]
+  `(defrecord ~name ~fields
+     ~@impls
+     clojure.lang.IFn
+     ~@(for [n (range 7)]
+         (let [as (vec (repeatedly n #(gensym "arg")))]
+           `(~'invoke [this# ~@as] (:retval (simulate this# ~as)))))
+     (~'applyTo [this# args#] (:retval (simulate this# (vec args#))))))
