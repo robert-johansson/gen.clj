@@ -47,7 +47,7 @@ Nothing in L0–L5 requires `gen.llm.*`; `gen.llm.lm` requires only
 | `(next-logprobs m context)` | log p(t \| context) for every token t: a new float array |
 | `(batch-next-logprobs m contexts)` | the same for each context, read together (below) |
 | `(score m context continuation)` | [log p(c_i \| context, c_<i)], doubles; `[]` for an empty continuation |
-| `(info m)` | `:live :cells :tokens :max-branches :max-cells :closed?` and since creation `:requests :hits :reads :read-tokens :forks :evictions` |
+| `(info m)` | `:live :cells :tokens :max-branches :max-cells :limit :closed?` and since creation `:requests :hits :reads :read-tokens :forks :evictions`; `:limit` is the most tokens a context, or a context and its scored continuation, may hold |
 
 `LM` is a protocol of four methods (`-tokenizer`, `-next-logprobs` over a
 vector of contexts, `-score`, `-info`): the LM over an engine is one

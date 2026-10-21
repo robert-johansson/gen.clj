@@ -13,7 +13,8 @@
 
    Models are [label gf args alt-args]: alt-args is a vector of other
    argument vectors, so that update and regenerate are also checked with
-   changed arguments. (deflaws prefix models n) defines a defspec per law."
+   changed arguments, which the revised trace must hold. (deflaws prefix
+   models n) defines a defspec per law."
   (:refer-clojure :exclude [+ -])
   (:require [clojure.test.check.clojure-test]
             [clojure.test.check.generators :as gen]
@@ -149,7 +150,7 @@
 
 (defn updates-are-reversible-with-exact-discards [cases]
   (prop/for-all [[model seed picks alt?] cases]
-    (if-let [{:keys [tr sigma] {t2 :trace disc :discard :as r} :result} (update-case model seed picks alt?)]
+    (if-let [{:keys [tr sigma args'] {t2 :trace disc :discard :as r} :result} (update-case model seed picks alt?)]
       (let [was (set (addrs tr))
             now (set (addrs t2))
             constrained (set (cm/addresses sigma))
@@ -158,6 +159,7 @@
             fresh (remove #(or (was %) (constrained %)) (addrs t2))
             {t3 :trace disc3 :discard} (gfi/update t2 (:args tr) (unknown-diffs (:args tr)) disc (rng/key seed))]
         (and (consistent? t2)
+             (= args' (:args t2))
              (sound-retdiff? tr r)
              (every? #(= (cm/get-choice sigma %) (cm/get-choice (:choices t2) %)) constrained)
              ;; unconstrained choices that remain keep their values
@@ -180,6 +182,7 @@
           selected (set (cm/addresses (sel/get-selected (:choices tr) s)))
           now (set (addrs t2))]
       (and (consistent? t2)
+           (= args' (:args t2))
            (sound-retdiff? tr r)
            (every? #(= (cm/get-choice (:choices tr) %) (cm/get-choice (:choices t2) %))
                    (remove selected (filter now (addrs tr))))))))

@@ -781,7 +781,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   `docs/research/llm-token-gf.md`):
   - `gen.llm.token/completion` over an LM is a generative function of
     `[prompt max-tokens]` (a token vector, a non-negative integer, both
-    arguments so update can change them). Token i is at address i, as
+    arguments so update can change them; together within the LM's
+    `:limit`, checked before any read). Token i is at address i, as
     Map's and Unfold's elements are; a spliced completion's tokens are
     `[:story 0]`, `[:story 1]`, …
   - An end token is a choice: drawn, scored, kept, and it ends the

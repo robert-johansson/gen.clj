@@ -319,7 +319,9 @@
 
 (defn- check-args
   "[prompt max-tokens], checked: a non-empty token vector and a
-   non-negative integer."
+   non-negative integer, together within the LM's :limit (the longest
+   completion's sequence is scored), so that their validity never depends
+   on the draws."
   [op gf args]
   (when-not (= 2 (count args))
     (throw (ex-info (str (name op) ": a completion takes [prompt max-tokens], not " (count args) " arguments")
@@ -334,6 +336,12 @@
     (when-not (nat-int? max-tokens)
       (throw (ex-info (str (name op) ": max-tokens is a non-negative integer, not " (pr-str max-tokens))
                       {:op op :reason :invalid-args :max-tokens max-tokens})))
+    (when-let [limit (:limit gf)]
+      (when (< (long limit) (+ (count prompt) (long max-tokens)))
+        (throw (ex-info (str (name op) ": a prompt of " (count prompt) " tokens and max-tokens " max-tokens
+                             " exceed the LM's limit of " limit " tokens (lm/info's :limit)")
+                        {:op op :reason :context-full :prompt-tokens (count prompt) :max-tokens max-tokens
+                         :limit limit}))))
     [(vec prompt) (long max-tokens)]))
 
 (defn- positions
@@ -426,7 +434,8 @@
 
 (defn- update* [gf tr args constraints key]
   (one-particle! "update")
-  (let [[prompt max-tokens :as args] (check-args :update gf args)
+  (let [;; args normalized (the prompt a vector, max-tokens a long), as the trace's are
+        [prompt max-tokens :as args] (check-args :update gf args)
         old (:retval tr)
         n-old (count old)
         constrained (positions :update gf constraints max-tokens)]
@@ -445,7 +454,8 @@
 
 (defn- regenerate* [gf tr args selection key]
   (one-particle! "regenerate")
-  (let [[prompt max-tokens :as args] (check-args :regenerate gf args)
+  (let [;; args normalized (the prompt a vector, max-tokens a long), as the trace's are
+        [prompt max-tokens :as args] (check-args :regenerate gf args)
         old (:retval tr)
         n-old (count old)
         selected? (fn [i] (sel/selected? selection i))]
@@ -461,7 +471,7 @@
 (defn- project* [tr selection]
   (sum (keep-indexed (fn [i s] (when (sel/selected? selection i) s)) (::scores tr))))
 
-(gfi/defgf Completion [lm end-tokens n-vocab potential]
+(gfi/defgf Completion [lm end-tokens n-vocab limit potential]
   gfi/IGenerativeFunction
   (-simulate [gf args key] (simulate* gf args key))
   (-generate [gf args constraints key] (generate* gf args constraints key))
@@ -480,11 +490,12 @@
   "The generative function of lm's completions of a prompt: its arguments
    are [prompt max-tokens], a token vector and a non-negative integer, and
    its trace holds the tokens drawn after the prompt at the positions 0, 1,
-   … (see the namespace's docstring). opts: :end-tokens, the tokens that
-   end a completion (a set; default the LM's end-of-generation tokens,
-   :eog; #{} for completions of exactly max-tokens); :potential, a
-   potential over the LM's vocabulary (gen.llm.potential) that reweighs
-   each token's distribution (gen.llm.constrained)."
+   … (see the namespace's docstring); the prompt and max-tokens tokens
+   must fit the LM's :limit. opts: :end-tokens, the tokens that end a
+   completion (a set; default the LM's end-of-generation tokens, :eog; #{}
+   for completions of exactly max-tokens); :potential, a potential over
+   the LM's vocabulary (gen.llm.potential) that reweighs each token's
+   distribution (gen.llm.constrained)."
   ([lm] (completion lm {}))
   ([lm {:keys [end-tokens potential] :as opts}]
    (when-not (satisfies? lm/LM lm)
@@ -495,5 +506,5 @@
      (when-not (and (set? end-tokens) (every? #(br/index? % n-vocab) end-tokens))
        (throw (ex-info (str "token/completion: :end-tokens is a set of tokens of the vocabulary, not " (pr-str end-tokens))
                        {:reason :invalid-end-tokens :end-tokens end-tokens})))
-     (->Completion lm (into #{} (map long) end-tokens) (long n-vocab)
+     (->Completion lm (into #{} (map long) end-tokens) (long n-vocab) (:limit (lm/info lm))
                    (some-> potential (constrained/check-potential n-vocab))))))

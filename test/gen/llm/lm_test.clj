@@ -525,6 +525,19 @@
               (is (= before (lm/info m)) "nothing read, nothing counted")
               (is (empty? (books m e {:max-branches 4 :max-cells 20})))))))
 
+(deftest the-limit-bounds-contexts-and-scored-sequences
+  ;; :limit, the lesser of the engine's :n-ctx and :max-cells: a context or
+  ;; a scored sequence of that many tokens is read, one more is refused
+  (run-on {:max-branches 4 :max-cells 20}
+          (fn [m _]
+            (let [limit (:limit (lm/info m))
+                  room (- limit (count prompt))]
+              (is (= 20 limit))
+              (is (= n-vocab (alength (lm/next-logprobs m (vec (repeat limit 1))))))
+              (is (= :context-full (bc/reason #(lm/next-logprobs m (vec (repeat (inc limit) 1))))))
+              (is (= room (count (lm/score m prompt (vec (repeat room 2))))))
+              (is (= :context-full (bc/reason #(lm/score m prompt (vec (repeat (inc room) 2))))))))))
+
 (deftest bad-options-and-tokenizers-are-loud
   (with-open [e (ce/engine {:max-branches 4})]
     (let [tok (tt/tokenizer n-vocab)]
