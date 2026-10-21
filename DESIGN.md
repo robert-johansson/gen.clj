@@ -1006,21 +1006,25 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     what depends only on that value still skips. The analysis sees the
     enclosing locals, a gen body's too, so a local that shadows a var is
     the local.
-  - **Not static:** a body that is not one `let`, an address computed
-    from a value, a `trace` or `splice` inside an expression (a branch on
-    a choice included), a splice without an address, an untraced draw, an
-    address used twice or one under another: each a compile error that
-    names the form.
+  - **Not static:** a body that is not one `let`, an address whose first
+    key is computed, a `trace` or `splice` where it is not evaluated
+    exactly once whenever its expression is (a branch, a function, a `let`
+    inside an expression, an `and` or `or`: see the rewrites below), a
+    splice without an address, an untraced draw, an address used twice or
+    one under another: each a compile error that names the form.
   - **Macros and quoted data (M5, G11 and G12; owner, 2026-10-21):** a
     binding's head, and the return expression's, is macroexpanded before
     it is classified, as `gen` expands a dynamic body, so a user macro that
-    expands to a `trace` or a `splice` is that call; a computation stays as
-    written, its expansion checked as it is. Only the head is expanded, so
-    a call hidden in a macro inside an expression is the compiler's error
-    (trace is unbound there), as before: catching it would take a walk
-    that knows the expression's locals. Quoted data is data: it may mention
-    `trace`, and its symbols are no inputs.
-  - **Static rewrites (M5, G2, genclj-lgij; owner, 2026-10-21; to build).**
+    expands to a `trace` or a `splice` is that call; a computation is its
+    expansion, whose names are its inputs (its form shown as written; the
+    review of the evening found a head macro reading a local unbound).
+    Only the head is expanded, so a call hidden in a macro inside an
+    expression is the compiler's error (trace is unbound there), as before:
+    catching it would take a walk that knows the expression's locals; and
+    a macro nested so must be hygienic, reading only the locals it is
+    given. Quoted data is data: it may mention `trace`, and its symbols are
+    no inputs.
+  - **Static rewrites (M5, G2; owner, 2026-10-21; built in genclj-lgij).**
     The rewrites live in the static analysis only; the body fn, the dynamic
     semantics, is unchanged, and the static law runs over every rewritten
     body.

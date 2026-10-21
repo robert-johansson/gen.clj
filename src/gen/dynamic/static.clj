@@ -3,19 +3,31 @@
    fixed structure, (gen ^:static [args] (let [bindings…] ret)), whose
    graph lets update and regenerate skip what did not change.
 
-   The body is one let. Each binding is a call at a constant address,
-   (trace addr dist) or (splice addr gf & args), or a pure expression of the
-   arguments and earlier bindings (any pure Clojure, including destructuring);
-   then the return expression, which may itself be such a call. A binding's
-   head is macroexpanded first, as the dynamic gen expands its body, so a
-   macro that expands to a call is that call; quoted data is data, and may
-   mention trace. Branching happens only inside called generative functions.
-   This namespace checks a body at macroexpansion and builds its graph as
-   data; gen.dynamic runs it.
+   The body is one let. Each binding is a call, (trace addr dist) or
+   (splice addr gf & args), or a pure expression of the arguments and
+   earlier bindings (any pure Clojure, including destructuring); then the
+   return expression, which may itself be such a call. A binding's head is
+   macroexpanded first, as the dynamic gen expands its body, so a macro that
+   expands to a call is that call, and one that expands to a computation is
+   that computation, its inputs the names the expansion reads. A macro
+   nested deeper is the compiler's to expand, after the analysis found the
+   inputs from the names the binding mentions, so it must be hygienic: it
+   reads only the locals it is given. Quoted data is data, and may mention
+   trace. Branching happens only inside called generative functions.
+
+   An address starts with a constant key: [:x i] is a node at :x whose
+   further keys are computed from its inputs, run as the dynamic body runs
+   it. A call nested where it is evaluated exactly once whenever its
+   expression is (a function call's arguments, a literal's elements, an
+   if's test) is hoisted into a node of its own before the binding, in
+   evaluation order, so the static graph draws what the body draws (DESIGN.md
+   §9). This namespace checks a body at macroexpansion and builds its graph
+   as data; gen.dynamic runs it.
 
      (ir gf)    the graph: the arguments, the nodes in order ({:kind :trace,
-                :splice or :compute, :addr, :names, :inputs, :form}) and the
-                return expression's inputs
+                :splice or :compute, :addr, :names, :inputs, :form, and
+                :keys, a computed address's further keys}) and the return
+                expression's inputs
      (dot gf)   the graph in Graphviz's DOT (Gen.jl's draw_graph)
 
    A lint says which dynamic generative functions the flag would take, so
@@ -41,13 +53,28 @@
 
 (defn- not-static [why form]
   (throw (ex-info (str "gen ^:static: " why ": " (pr-str form)
-                       " (a static body is one let of calls at constant addresses and pure bindings;"
+                       " (a static body is one let of calls at addresses that start with a constant, and pure"
+                       " bindings;"
                        " use gen without ^:static for any other body)")
                   {:form form})))
 
 (defn- constant-address? [addr]
   (or (keyword? addr) (string? addr) (number? addr) (boolean? addr)
       (and (vector? addr) (seq addr) (every? constant-address? addr))))
+
+(defn- split-address
+  "[address keys] of a call: the longest leading run of constant keys of
+   its address, the node's, and the keys computed after it (nil when the
+   address is constant). The first key must be a constant, as Gen.jl's
+   must be a Symbol."
+  [addr call]
+  (cond (constant-address? addr) [addr nil]
+        (and (vector? addr) (constant-address? (first addr)))
+        (let [[prefix ks] (split-with constant-address? addr)]
+          [(if (next prefix) (vec prefix) (first prefix)) (vec ks)])
+        :else (not-static (str (first call) "'s address must start with a constant key"
+                               (when (= 'splice (first call)) " (a splice without an address is dynamic)"))
+                          call)))
 
 (defn- outside-gens
   "The symbols of form outside the gen forms and the quoted data in it (a
@@ -72,21 +99,22 @@
 
 (defn- inputs [form known] (vec (distinct (filter known (symbols form)))))
 
-(defn- macro-call?
-  "Is form a call of a macro (not of a local, nor one of the body's own
-   calls, nor gen, whose body is its own)?"
+(defn- macro-name
+  "The macro form calls, as a qualified symbol: not a local, nor one of the
+   body's own calls, nor gen, whose body is its own (nil otherwise)."
   [{:keys [env locals]} form]
-  (and (seq? form) (symbol? (first form)) (not (effects (first form)))
-       (not (contains? env (first form))) (not (contains? locals (first form)))
-       (let [v (resolve env (first form))]
-         (boolean (and (var? v) (:macro (meta v)) (not= 'gen.dynamic/gen (symbol v)))))))
+  (when (and (seq? form) (symbol? (first form)) (not (effects (first form)))
+             (not (contains? env (first form))) (not (contains? locals (first form))))
+    (let [v (resolve env (first form))]
+      (when (and (var? v) (:macro (meta v)) (not= 'gen.dynamic/gen (symbol v)))
+        (symbol v)))))
 
 (defn- expanded
   "form, its head macroexpanded until it is no macro's: what a binding is,
    as the dynamic gen expands its body, so that a user macro expanding to
    (trace …) or (splice …) is that call."
   [env form]
-  (if (macro-call? env form) (recur env (macroexpand-1 form)) form))
+  (if (macro-name env form) (recur env (macroexpand-1 form)) form))
 
 (defn- simple-arg? [form] (or (symbol? form) (not (coll? form))))
 
@@ -120,9 +148,9 @@
       v (assoc :call v :args (vec (rest form)) :arg-specs (mapv #(arg-spec % known) (rest form))))))
 
 (defn- node
-  "The node of one binding, given the names bound so far: a call when the
-   binding, its head macroexpanded, is one, else a computation as written
-   (its expansion checked too)."
+  "The node of one binding, given the names bound so far, from the binding
+   with its head macroexpanded: a call, or a computation (its form as
+   written)."
   [env binding init known]
   (let [names (bound-names binding)
         call (expanded env init)
@@ -130,22 +158,108 @@
     (merge {:binding binding :names names :form init}
            (cond
              (= 'trace head)
-             (let [[_ addr dist & more] call]
-               (when (seq more) (not-static "trace takes an address and a distribution" call))
-               (when-not (constant-address? addr) (not-static "trace's address must be a constant" call))
-               {:kind :trace :addr addr :expr (pure! dist "a distribution") :inputs (inputs dist known)})
+             (let [[_ addr dist & more] call
+                   _ (when (seq more) (not-static "trace takes an address and a distribution" call))
+                   [addr ks] (split-address addr call)]
+               (cond-> {:kind :trace :addr addr :expr (pure! dist "a distribution") :inputs (inputs [dist ks] known)}
+                 ks (assoc :keys (pure! ks "an address"))))
 
              (= 'splice head)
-             (let [[_ addr gf & args] call]
-               (when-not (constant-address? addr)
-                 (not-static "splice needs a constant address (a splice without one is dynamic)" call))
-               (let [expr `[~gf [~@args]]]
-                 {:kind :splice :addr addr :expr (pure! expr "a splice's arguments") :inputs (inputs expr known)
-                  :arg-specs (mapv #(arg-spec % known) args)}))
+             (let [[_ addr gf & args] call
+                   [addr ks] (split-address addr call)
+                   expr `[~gf [~@args]]]
+               (cond-> {:kind :splice :addr addr :expr (pure! expr "a splice's arguments") :inputs (inputs [expr ks] known)
+                        :arg-specs (mapv #(arg-spec % known) args)}
+                 ks (assoc :keys (pure! ks "an address"))))
 
              :else
-             (do (pure! call "a binding")
-                 (compute-node env init known))))))
+             (compute-node env call known)))))
+
+;; ---------------------------------------------------------------------------
+;; Hoisting: a call nested where it is evaluated exactly once
+;; ---------------------------------------------------------------------------
+
+(defn- call-form? [form] (and (seq? form) (contains? '#{trace splice} (first form))))
+
+(defn- calls?
+  "Does form call trace or splice (outside nested gens and quoted data)?"
+  [form]
+  (boolean (some '#{trace splice} (outside-gens form))))
+
+(defn- not-once
+  "The error for a call inside form, where (inside where) it is not
+   evaluated exactly once whenever its expression is: it names the call."
+  [where why form]
+  (let [call (or (first (filter call-form? (tree-seq #(and (coll? %) (not (quoted? %))) seq form))) form)]
+    (not-static (str where " calls " (if (call-form? call) (first call) "trace") (when why (str ", " why))) call)))
+
+(declare hoist-in)
+
+(defn- hoist-all
+  "[forms pairs]: hoist-in over forms, in order."
+  [env forms]
+  (reduce (fn [[out pairs] f] (let [[f' ps] (hoist-in env f)] [(conj out f') (into pairs ps)]))
+          [[] []] forms))
+
+(defn- hoist-call
+  "[name pairs]: call bound to a fresh name, after the calls its address
+   and arguments evaluate (theirs first)."
+  [env [head & args]]
+  (let [[args' pairs] (hoist-all env args)
+        sym (gensym (str head "__"))]
+    [sym (conj pairs [sym (apply list head args')])]))
+
+(defn- hoist-in
+  "[form' pairs]: form with each trace or splice call it evaluates exactly
+   once whenever it is evaluated (a function call's arguments, a vector,
+   map or set's elements, an if's test) replaced by a fresh name, and the
+   pairs [name call] in Clojure's evaluation order (arguments left to
+   right, the innermost call first), so the graph draws what the body
+   draws. A call anywhere else is not static. A form without calls is as
+   written."
+  [env form]
+  (if-not (calls? form)
+    [form []]
+    (let [m (macro-name env form)]
+      (cond
+        ('#{clojure.core/and clojure.core/or} m)
+        (not-once (str "an " (name m)) (str "which runs only when the arguments before it are "
+                                            (if (= 'clojure.core/and m) "true" "false"))
+                  form)
+        m (hoist-in env (macroexpand-1 form))
+        (call-form? form) (hoist-call env form)
+        (vector? form) (hoist-all env form)
+        (map? form) (let [[xs pairs] (hoist-all env (apply concat form))] [(into {} (map vec) (partition 2 xs)) pairs])
+        (set? form) (let [[xs pairs] (hoist-all env form)] [(set xs) pairs])
+        (seq? form)
+        (let [h (first form)]
+          (cond
+            (= 'if h) (let [[_ test & branches] form
+                            [test' pairs] (hoist-in env test)]
+                        (when-let [b (first (filter calls? branches))]
+                          (not-once "a branch of an if"
+                                    "which would run only when the branch is taken, where a node runs every time" b))
+                        [(apply list 'if test' branches) pairs])
+            ('#{fn* letfn*} h) (not-once "a function inside an expression"
+                                         "which may run any number of times, where a node runs once" form)
+            ('#{let* loop*} h) (not-once "a let inside an expression" "bind that value in the body's let instead" form)
+            (special-symbol? h) (not-once (str "a " h " inside an expression") nil form)
+            :else (let [[xs pairs] (hoist-all env form)] [(apply list xs) pairs])))
+        :else [form []]))))
+
+(defn- hoisted
+  "The pairs [binding init] one binding becomes: the calls its expression
+   (or its call's address and arguments) evaluates exactly once, hoisted
+   before it, then the binding reading them, written as it was when
+   nothing was hoisted."
+  [env [binding init]]
+  (let [call (expanded env init)
+        [init' pairs] (if (call-form? call)
+                        (let [[head & args] call
+                              [args' pairs] (hoist-all env args)]
+                          [(apply list head args') pairs])
+                        (hoist-in env init))]
+    (conj pairs [binding (if (seq pairs) init' init)])))
 
 (defn arg-names
   "[[names…] per argument], the rest parameter's names last, and whether
@@ -192,28 +306,31 @@
           ;; or macros they shadow
           in-scope (fn [names] (update env :locals into names))
           ;; a call in return position is a last node, its value returned
-          [ret pairs] (let [r (first ret)
-                            call (expanded (in-scope (into known (mapcat (comp bound-names first) (partition 2 bindings)))) r)]
-                        (if (and (seq? call) ('#{trace splice} (first call)))
+          [ret pairs] (let [r (first ret)]
+                        (if (call-form? (expanded (in-scope (into known (mapcat (comp bound-names first) (partition 2 bindings))))
+                                                  r))
                           (let [v (gensym "ret")] [v (concat (partition 2 bindings) [[v r]])])
                           [r (partition 2 bindings)]))
-          [nodes _] (reduce (fn [[nodes known] [binding init]]
-                              (let [n (node (in-scope known) binding init known)]
-                                [(conj nodes n) (into known (:names n))]))
-                            [[] known] pairs)
-          _ (check-addresses! nodes)
-          names (into known (mapcat :names nodes))]
+          add (fn [[nodes known] [binding init]]
+                (let [n (node (in-scope known) binding init known)]
+                  [(conj nodes n) (into known (:names n))]))
+          [nodes names] (reduce (fn [acc pair] (reduce add acc (hoisted (in-scope (second acc)) pair)))
+                                [[] known] pairs)
+          [ret ret-pairs] (hoist-in (in-scope names) ret)
+          [nodes names] (reduce add [nodes names] ret-pairs)
+          _ (check-addresses! nodes)]
       {:args args
        :nodes nodes
-       :ret (do (pure! (expanded (in-scope names) ret) "the return expression")
-                (compute-node (in-scope names) ret names))}))))
+       :ret (let [ret (expanded (in-scope names) ret)]
+              (pure! ret "the return expression")
+              (compute-node (in-scope names) ret names))}))))
 
 (defn ir
   "gf's graph as data (see the namespace doc), or nil when gf is not static."
   [gf]
   (when-let [{:keys [args nodes ret]} (:static gf)]
     {:args args
-     :nodes (mapv #(select-keys % [:kind :addr :names :inputs :form]) nodes)
+     :nodes (mapv #(select-keys % [:kind :addr :keys :names :inputs :form]) nodes)
      :return {:inputs (:inputs ret)}}))
 
 (defn dot
@@ -223,7 +340,9 @@
   (let [{:keys [args nodes return]} (or (ir gf) (throw (ex-info "dot: not a static generative function" {})))
         id #(str "\"" (str/escape (str %) {\" "\\\"" \\ "\\\\"}) "\"")
         arg-lines (for [n (concat (apply concat (:fixed args)) (:rest args))] (str "  " (id n) " [shape=plaintext];"))
-        node-id (fn [i n] (if (some? (:addr n)) (pr-str (:addr n)) (str "#" i)))
+        node-id (fn [i n] (cond (:keys n) (pr-str (into (if (vector? (:addr n)) (:addr n) [(:addr n)]) (:keys n)))
+                                (some? (:addr n)) (pr-str (:addr n))
+                                :else (str "#" i)))
         owner (into {} (for [[i n] (map-indexed vector nodes) s (:names n)] [s (node-id i n)]))
         lines (for [[i n] (map-indexed vector nodes)
                     :let [me (node-id i n)]

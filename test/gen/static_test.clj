@@ -6,7 +6,8 @@
    gradients through the compiled score; update and regenerate skip the
    nodes that did not change; the graph as data and as DOT; batched runs;
    bodies that are not static are compile errors, a binding's head is
-   macroexpanded and quoted data is data."
+   macroexpanded, quoted data is data, a call nested where it is evaluated
+   once is hoisted, and an address's keys after the first may be computed."
   (:refer-clojure :exclude [+ - *])
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
@@ -151,6 +152,12 @@
   [addr gf & args]
   `(~'splice ~addr ~gf ~@args))
 
+(defmacro ^:private twice-x
+  "(* 2.0 x): a macro that reads a local it is not given, at a binding's
+   head (review of 9d9h, 2026-10-21)."
+  []
+  '(* 2.0 x))
+
 (defmacro ^:private hidden-at
   "1 plus (trace addr (d/normal x 1)): a call inside an expression."
   [addr x]
@@ -172,6 +179,28 @@
     (let [a (trace :a (d/normal m 1))
           form '(trace :x (d/normal a 1))]
       [a form])))
+
+(def hoisting
+  "Calls nested where they are evaluated exactly once, hoisted into nodes
+   in evaluation order: a vector's elements, a distribution's argument, an
+   if's test, a map's value and the return expression's argument (M5,
+   Gen.jl's static_dsl.jl:410 and 466: G2)."
+  (gen ^:static [m]
+    (let [pt [(trace :x (d/normal m 1)) (trace :y (d/normal m 2))]
+          z (trace :z (d/normal (+ (first pt) (trace :w (d/normal 0 1))) 1))
+          [mu sd] (if (trace :b (d/bernoulli 0.5)) [m 1.0] [z 2.0])
+          q {:v (trace :v (d/normal mu sd))}]
+      (+ (:v q) (trace :u (d/normal z 1))))))
+
+(def computed
+  "Addresses whose keys after the first are computed (M5, Gen.jl's
+   static_dsl.jl:266 and 299: G2): a choice, a call, keys that are an
+   expression, the return expression's call."
+  (gen ^:static [i j]
+    (let [a (trace [:a i] (d/normal 0 1))
+          b (splice [:b i :c] point a 1.0 0.0)
+          c (trace [:c j i] (d/normal b 1))]
+      (trace [:d (+ i j)] (d/normal c 1)))))
 
 (def branch-a (gen ^:static [m] (let [a (trace :a (d/normal m 1))] a)))
 (def branch-b (gen ^:static [m] (let [a (trace :a (d/normal (+ m 5.0) 1)) b (trace :b (d/normal a 1))] b)))
@@ -200,7 +229,9 @@
    [:callee-store callee-store [0.0] [[1.0]]]
    [:dict-rules dict-rules [{:j 0.5 :x 1.0}] [[{:j 0.7 :x 1.0}] [{:x 1.0}] [{:j 0.5 :x 1.0 :z 2.0}]]]
    [:expanded-heads expanded-heads [0.5] [[1.5]]]
-   [:quoting quoting [0.0] [[1.0]]]])
+   [:quoting quoting [0.0] [[1.0]]]
+   [:hoisting hoisting [0.0] [[1.0]]]
+   [:computed computed [0 1] [[1 1] [0 2] [2 0]]]])
 
 ;; dynamic parents of static functions: the general laws (a static callee's
 ;; update from another graph's trace was wrong before the review)
@@ -215,7 +246,7 @@
 (laws/deflaws static-rules (filterv (comp #{:rules} first) models) 300 laws/static)
 ;; every model but :destructured (a uniform between chosen bounds) has fixed supports
 (laws/deflaws static (filterv (comp #{:linreg :hierarchical :nested :rules :dict-rules :double-index :callee-store
-                                      :expanded-heads :quoting}
+                                      :expanded-heads :quoting :hoisting :computed}
                                      first)
                                models)
   100 laws/fixed-support)
@@ -635,17 +666,67 @@
   (try (eval form) nil
        (catch clojure.lang.Compiler$CompilerException e (ex-message (ex-cause e)))))
 
+(deftest a-call-nested-once-is-hoisted
+  (let [{:keys [nodes return]} (static/ir hoisting)]
+    (is (= [:x :y nil :w :z :b nil :v nil :u] (mapv :addr nodes)) "the calls in evaluation order, each before what reads it")
+    (is (= [:trace :trace :compute :trace :trace :trace :compute :trace :compute :trace] (mapv :kind nodes)))
+    (is (= '[pt] (:names (nth nodes 2))))
+    (is (some (set (:names (nth nodes 3))) (:inputs (nth nodes 4))) ":z reads :w's node")
+    (is (= (set (concat (:names (nth nodes 8)) (:names (nth nodes 9)))) (set (:inputs return))) "the return reads q and :u"))
+  (testing "a body as Gen.jl's tests write it"
+    (let [{tr :trace w :weight} (gfi/generate hoisting [0.0] (cm/choicemap :x 1.0 :y 2.0 :w 0.5 :z 1.0 :b true :v 0.0 :u 1.0)
+                                              (rng/key 51))
+          lp (fn [v mu sd] (dc/log-prob (d/normal mu sd) v))]
+      (is (ts/close? (+ (lp 1.0 0.0 1) (lp 2.0 0.0 2) (lp 0.5 0 1) (lp 1.0 1.5 1) (dc/log-prob (d/bernoulli 0.5) true)
+                        (lp 0.0 0.0 1.0) (lp 1.0 1.0 1))
+                     w))
+      (is (ts/close? 1.0 (:retval tr))))))
+
+(deftest a-computed-address-is-a-node-at-its-constant-prefix
+  (let [{:keys [nodes]} (static/ir computed)]
+    (is (= [[:trace :a '[i]] [:splice :b '[i :c]] [:trace :c '[j i]] [:trace :d '[(+ i j)]]]
+           (mapv (juxt :kind :addr :keys) nodes))))
+  (let [tr (gfi/simulate computed [0 1] (rng/key 52))]
+    (is (= #{[:a 0] [:b 0 :c :y] [:c 1 0] [:d 1]} (set (cm/addresses (:choices tr)))) "the keys as the dynamic body computes them")
+    (testing "update: a node whose keys did not change is kept; one whose did is drawn at the new path"
+      (let [{t :trace d :discard} (gfi/update tr [1 1] [diff/unknown-change diff/no-change] cm/EMPTY (rng/key 53))]
+        (is (= #{[:a 1] [:b 1 :c :y] [:c 1 1] [:d 2]} (set (cm/addresses (:choices t)))))
+        (is (= (:choices tr) d) "the old paths are discarded"))
+      (let [{t :trace} (gfi/update tr [0 1] [diff/no-change diff/no-change] (cm/choicemap [:d 1] 0.5) (rng/key 54))]
+        (is (identical? ((:gen.dynamic/subtraces tr) [:b 0 :c]) ((:gen.dynamic/subtraces t) [:b 0 :c])) "a kept call")
+        (is (= 0.5 (t [:d 1])) "a constraint at a computed path reaches its node")))
+    (testing "assess: a choice under a computed prefix but off its path is unvisited"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not visited"
+                            (gfi/assess computed [0 1] (cm/set-choice (:choices tr) [:a 5] 0.0) (rng/key 55))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not visited"
+                            (gfi/assess computed [0 1] (cm/set-choice (:choices tr) [:b 0 :d] 0.0) (rng/key 55)))))))
+
+(deftest a-call-not-evaluated-once-is-not-static
+  (binding [*ns* (the-ns 'gen.static-test)]
+    (doseq [[why form] [[#"a branch of an if calls trace.*\(trace :x" '(gen ^:static [b] (let [a (if b (trace :x (d/normal 0 1)) 0.0)] a))]
+                        [#"a branch of an if calls trace" '(gen ^:static [b] (let [a (cond b 1 (trace :c (d/bernoulli 0.5)) 2 :else 3)] a))]
+                        [#"a branch of an if calls splice" '(gen ^:static [b g] (let [a (when b (splice :s g))] a))]
+                        [#"a function inside an expression calls trace" '(gen ^:static [xs] (let [a (mapv #(trace [:y %] (d/normal 0 1)) xs)] a))]
+                        [#"a let inside an expression calls trace" '(gen ^:static [] (let [a (+ 1 (let [b 2] (trace :a (d/normal b 1))))] a))]
+                        [#"an and calls trace, which runs only when the arguments before it are true" '(gen ^:static [b] (let [a (and b (trace :a (d/bernoulli 0.5)))] a))]
+                        [#"an or calls trace" '(gen ^:static [b] (let [a (or b (trace :a (d/bernoulli 0.5)))] a))]
+                        [#"trace's address must start with a constant key" '(gen ^:static [i] (let [a (trace [i :a] (d/normal 0 1))] a))]
+                        [#"splice's address must start with a constant key" '(gen ^:static [i g] (let [a (splice [i] g)] a))]]]
+      (testing (str why)
+        (is (re-find why (str (static-error form))))))))
+
 (deftest a-body-that-is-not-static-is-a-compile-error
   (binding [*ns* (the-ns 'gen.static-test)]
     (doseq [[why form] [["not one let" '(gen ^:static [] (trace :a (d/normal 0 1)))]
                         ["two forms" '(gen ^:static [] (let [a 1] a) 2)]
-                        ["a computed address" '(gen ^:static [i] (let [a (trace [:a i] (d/normal 0 1))] a))]
-                        ["a trace inside an expression" '(gen ^:static [] (let [a (+ 1 (trace :a (d/normal 0 1)))] a))]
+                        ["an address whose first key is computed" '(gen ^:static [i] (let [a (trace [i :a] (d/normal 0 1))] a))]
+                        ["a computed address" '(gen ^:static [i] (let [a (trace i (d/normal 0 1))] a))]
+                        ["a trace in a function" '(gen ^:static [] (let [a (mapv (fn [m] (trace :a (d/normal m 1))) [0])] a))]
                         ["a branch on a choice" '(gen ^:static [] (let [b (trace :b (d/bernoulli 0.5))
                                                                          a (if b (trace :x (d/normal 0 1)) 0.0)] a))]
                         ["a splice without an address" '(gen ^:static [g] (let [a (splice g)] a))]
                         ["an untraced draw" '(gen ^:static [] (let [a (untraced (d/normal 0 1))] a))]
-                        ["a trace inside the return expression" '(gen ^:static [] (let [a 1] (+ 1 (trace :a (d/normal a 1)))))]
+                        ["a trace in the return expression's branch" '(gen ^:static [] (let [a 1] (if (pos? a) (trace :a (d/normal a 1)) 0)))]
                         ["a repeated address" '(gen ^:static [] (let [a (trace :a (d/normal 0 1)) b (trace :a (d/normal a 1))] b))]
                         ["an address under another" '(gen ^:static [g] (let [a (trace :a (d/normal 0 1)) b (splice [:a :b] g)] b))]]]
       (testing why
@@ -665,6 +746,17 @@
           gf (gen ^:static [m] (let [a (noisy-at :a m)] a))]
       (is (= [:compute] (mapv :kind (:nodes (static/ir gf)))))
       (is (ts/close? 3.0 (gf 1.5)))))
+  (testing "a head macro expanding to a computation: its inputs are the expansion's"
+    (binding [*ns* (the-ns 'gen.static-test)]
+      (let [form '(gen ^:static [x] (let [y (twice-x) z (trace :z (d/normal y 1.0))] z))]
+        (is (nil? (static-error form)) "it compiles, as the dynamic body does")
+        (when-let [gf (try (eval form) (catch Exception _ nil))]
+          (is (= '[x] (:inputs (first (:nodes (static/ir gf))))))
+          (is (= '(twice-x) (:form (first (:nodes (static/ir gf))))) "the form as written")
+          (let [[static dynamic] (static-and-dynamic-updates gf [1.0] [2.0] [diff/unknown-change])]
+            (is (ts/close? (:weight dynamic) (:weight static)) "an update reruns it")
+            (is (ts/close? (:score (:trace dynamic)) (:score (:trace static))))))
+        (is (nil? (static-error '(gen ^:static [x] (let [] (twice-x))))) "in the return expression too"))))
   (testing "a macro hiding a call inside an expression is still a compile error"
     ;; only a binding's head is expanded, so the compiler meets the trace
     ;; outside the body, where trace is not bound
