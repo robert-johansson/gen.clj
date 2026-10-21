@@ -112,6 +112,22 @@
     (is (close? exact (peek by-width)) "exact when every tokenization fits")
     (is (< (first by-width) (- exact 1e-4)) "one tokenization misses mass: the test can tell")))
 
+(deftest a-beam-keeps-the-most-probable-runs
+  ;; "aba": two runs reach the boundary after "ab", the token ab and the
+  ;; tokens a b; a beam of 1 keeps the more probable, so what it misses is
+  ;; the other's share, each run's mass times that of the tokens beginning
+  ;; with the rest, "a"
+  (let [[a b ab] [0 1 2]
+        share (fn [run] (* (Math/exp (reduce + (map-indexed (fn [i t] (aget (row (into [bos] (subvec run 0 i))) (int t))) run)))
+                           (brute-prefix (into [bos] run) (utf8 "a"))))
+        p-ab (Math/exp (aget (row [bos]) (int ab)))
+        p-a-b (* (Math/exp (aget (row [bos]) (int a))) (Math/exp (aget (row [bos a]) (int b))))
+        dropped (if (< p-ab p-a-b) [ab] [a b])
+        exact (Math/exp (bytes/prefix-logprob bm [bos] "aba"))
+        beam-1 (Math/exp (bytes/prefix-logprob (bytes/byte-lm m {:beam 1}) [bos] "aba"))]
+    (is (not= p-ab p-a-b))
+    (is (<= (Math/abs (- (- exact beam-1) (share dropped))) 1e-9) "the less probable run is the one dropped")))
+
 (deftest end-tokens-hold-no-text
   (let [no-ends (bytes/byte-lm m {:end-tokens #{}})]
     (is (close? (bytes/prefix-logprob bm [bos] "</s>") Double/NEGATIVE_INFINITY) "the end token ends the text")

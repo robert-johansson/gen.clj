@@ -161,6 +161,18 @@
   (prop/for-all [r gen-char-term vocab gen-text-vocab]
     (masks-match? (regex/dfa r) vocab)))
 
+(deftest masks-over-a-vocabulary-of-many-words
+  ;; masks are bitsets of 64-token words: a vocabulary of 97 one-character
+  ;; tokens (the toy ASCII) and one of 300 pieces, against brute force
+  (let [ascii (mapv #(utf8 (str (char %))) (range 32 127))
+        pieces (vec (distinct-by-content (for [s ["ab" "ba" "aé" "€b" "abab" "éé"] i (range (count (utf8 s))) j (range (inc i) (inc (count (utf8 s))))]
+                                           (java.util.Arrays/copyOfRange ^bytes (utf8 s) (int i) (int j)))))
+        many (into ascii (map #(utf8 (str "<" % ">"))) (range 200))]
+    (is (< 64 (count ascii)))
+    (doseq [[re vocab] [["[a-c]+(-[0-9]{1,2})?" ascii] ["[^\"]*\"" ascii] ["(ab|é)+€?" (into many pieces)]
+                        ["<1[0-9]{2}>(x|<5>)*" many]]]
+      (is (masks-match? (regex/dfa re) vocab) re))))
+
 (deftest a-token-into-a-state-tokens-cannot-complete-is-not-allowed
   ;; "ab" or "ac": the vocabulary spells "ab" but no token ends "c", so the
   ;; byte-live state after "a" is reached by "a" and then "b" only; the token

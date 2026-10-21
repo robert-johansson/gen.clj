@@ -287,7 +287,11 @@
         (is (= Double/NEGATIVE_INFINITY (first (::token/scores tr))))
         (is (= (mapv #(double (aget (row (into bprompt (subvec tokens 0 %))) (int (tokens %)))) (range 1 (count tokens)))
                (subvec (::token/scores tr) 1))
-            "after it, the LM's: every site a distribution")))))
+            "after it, the LM's: every site a distribution"))
+      (let [{tr :trace} (gfi/generate accented [bprompt 3] (token/forced x) (rng/key 1))]
+        (is (= (mapv #(double (aget (row (into bprompt (subvec x 0 %))) (int (x %)))) [1 2])
+               (subvec (::token/scores tr) 1))
+            "known tokens after it too, as drawn ones")))))
 
 (deftest mh-moves-within-the-language
   (let [{tr :trace} (gfi/generate composed [4] (cm/choicemap :liked true) (rng/key 1))
