@@ -1,9 +1,10 @@
 (ns gen.llm.llama-lm-test
   "The LM protocol over the llama.cpp engine: the contract
-   (gen.llm.lm-contract) within llama.cpp's float noise, the band of
-   gen.llm.llama-test (0.1 nats, twice the largest difference
-   bench/gen/llama_noise.clj measured between two computations of one
-   distribution on Metal), and bit for bit where a computation repeats; and
+   (gen.llm.lm-contract) within llama.cpp's float noise, the band of the
+   engine's device (gen.llm.llama.bands: 0.1 nats on Metal, twice the
+   largest difference bench/gen/llama_noise.clj measured between two
+   computations of one distribution; skipped with a note for quantized
+   weights on CUDA), and bit for bit where a computation repeats; and
    the GGUF's tokenizer as the LM's.
 
    Needs llama.cpp's libraries (native/build-llama.sh), the compiled
@@ -12,6 +13,7 @@
    gen.llm.llama-test does; skipped with a note otherwise."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gen.llm.branching :as br]
+            [gen.llm.llama.bands :as bands]
             [gen.llm.branching-contract :as bc]
             [gen.llm.lm :as lm]
             [gen.llm.lm-contract :as contract]
@@ -65,14 +67,16 @@
   {:prompt ((llama 'tokenize) e "The capital of Sweden is a city called")
    :continuation ((llama 'tokenize) e " Stockholm, which is known for its many islands and" {:add-special? false})
    :k 4
-   :band 0.1})
+   :band (:band (bands/bands (br/info e)))})
 
 (deftest the-contract-holds-within-the-noise
   (when @available?
     (let [{:keys [engine] :as s} (setup)]
       (doseq [[k check] contract/checks]
         (testing k
-          (is (= [] (contract/run-check check s (opts engine))))))
+          (if-let [note (:skip (bands/bands (br/info engine)))]
+            (println note)
+            (is (= [] (contract/run-check check s (opts engine)))))))
       (is (zero? (:live (br/info engine))) "every check closes what it makes"))))
 
 (deftest the-gguf-tokenizer-is-the-lms

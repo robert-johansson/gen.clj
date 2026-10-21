@@ -27,9 +27,11 @@
      replays where llama.cpp puts them (gen.llm.llama.recurrent) and splits
      a step whose states would land far apart into decodes over runs of
      adjacent cells, when that costs less: a function of the engine's own
-     operations, never of timing. gen.llama.split-recurrent false (default
-     true) keeps one decode a step; (info e) says :split-recurrent?, and
-     step-splits what was split.
+     operations, never of timing. It pays on Metal and not on CUDA (where an
+     extra decode costs more than the copies it saves), so it is on only
+     where the weights are on Metal; gen.llama.split-recurrent true or false
+     says otherwise. (info e) says :split-recurrent?, and step-splits what
+     was split.
    - Encoder-decoder, diffusion and embedding models are refused.
    - The engine reserves the memory it holds (:footprint in info: the
      model's weights, and the KV-cache, recurrent-state, output and compute
@@ -40,6 +42,13 @@
      engine's own, a thread per row up to four, while the engine's thread
      waits: normalizing a vocabulary on the host costs about as much as a
      row's share of the decode.
+   - Accuracy depends on the device and the weights (DESIGN §6). On Metal
+     a token's log-probability agrees with an f32 forward pass within about
+     0.01 nats and varies with batch shape by at most about 0.05. With
+     quantized weights (Q8_0) the x86 CPU and CUDA builds are about 0.2
+     nats a token off that, and on CUDA the result also depends on what
+     shares the batch; float weights (F16, BF16) bring both within about
+     0.01. For exact scores and weights off Metal, use float weights.
 
    llama.cpp's log goes to System.err from warnings up (gen.llama.log:
    none, error, warn, info, debug); libllama is found in gen.llama.lib
@@ -167,16 +176,26 @@
    leans towards fewer decodes."
   6.0)
 
+(defn- metal?
+  "Are the model's weights on Metal (fp, the engine's footprint: llama.cpp's
+   buffer names)?"
+  [fp]
+  (boolean (some (fn [{:keys [kind buffer]}] (and (= kind :model) (.startsWith (str buffer) "Metal")))
+                 (:buffers fp))))
+
 (defn- split-recurrent?
   "gen.llama.split-recurrent: does a recurrent or hybrid model's engine
-   split its steps (default true)?"
-  []
-  (let [v (System/getProperty "gen.llama.split-recurrent" "true")]
-    (case v
-      "true" true
-      "false" false
-      (throw (ex-info (str "llama/engine: gen.llama.split-recurrent is true or false, not " (pr-str v))
-                      {:reason :invalid-option :gen.llama.split-recurrent v})))))
+   split its steps? By default only on Metal (the owner, DESIGN §9): there a
+   split step of Qwen3.5-0.8B cost a quarter to a third of one decode; on
+   CUDA (fenrir, 2026-10-21) about twice one decode."
+  [fp]
+  (case (System/getProperty "gen.llama.split-recurrent")
+    nil (metal? fp)
+    "true" true
+    "false" false
+    (throw (ex-info (str "llama/engine: gen.llama.split-recurrent is true or false, not "
+                         (pr-str (System/getProperty "gen.llama.split-recurrent")))
+                    {:reason :invalid-option :gen.llama.split-recurrent (System/getProperty "gen.llama.split-recurrent")}))))
 
 ;; An engine that splits steps holds a volatile
 ;;   {:cells   the replay (gen.llm.llama.recurrent), nil once it is off
@@ -467,7 +486,7 @@
   (LlamaRuntime/load)
   (LlamaRuntime/clearLastError)
   (let [{:keys [model gpu-layers n-slots] :as opts} (check-options opts)
-        split? (split-recurrent?)
+        _ (split-recurrent? nil)
         arena (Arena/ofConfined)
         undo (volatile! (list #(.close arena)))
         owned (fn [free x] (vswap! undo conj #(free x)) x)]
@@ -483,7 +502,7 @@
             vocab (Llama/llama_model_get_vocab m)
             fp (footprint m log)
             described (describe m ctx vocab opts fp)
-            splits (when (and split? (some (:model described) [:recurrent? :hybrid?]))
+            splits (when (and (split-recurrent? fp) (some (:model described) [:recurrent? :hybrid?]))
                      (volatile! {:cells (recurrent/empty-cells n-slots) :off nil :steps 0 :split 0 :decodes 0}))
             info (assoc described :split-recurrent? (some? splits))
             slots (LlamaSlots. m ctx (memory ctx) vocab batch arena pool (:n-vocab info) n-batch info splits)]

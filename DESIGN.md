@@ -327,6 +327,17 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
   `gen.llm.llama` is llama.cpp's. On Metal the same read from the same
   state is bit-identical, while different batch shapes give a token's
   log-probability differing by up to 5e-2 nats (median 2e-3 to 4e-3).
+- **Quantized weights off Metal (measured 2026-10-21, fenrir; genclj-kw88).**
+  With Q8_0 weights, llama.cpp's x86 CPU and CUDA builds give log-probabilities
+  about 0.22 nats a token (median; up to about 2) from Metal's, which agrees
+  with an f32 forward pass within 0.008. The CPU build is batch-invariant;
+  CUDA's also varies with batch composition by about 0.2 (max about 1). Flash
+  attention, CUDA graphs and cuBLAS-only matmuls change nothing; f16 weights
+  bring both within about 0.01 of Metal, and CUDA's batch variation to 0.13 at
+  most (likely cause, unproven: int8 dot products with quantized activations
+  on those backends). So on CUDA and x86 CPU, exact inference (scores, SMC
+  weights, comparisons across devices) wants float (F16/BF16) weights;
+  quantized ones are for speed.
 - **As built (2026-10-20, genclj-mse0; for the owner's review,
   `docs/research/llm-lm-protocol.md`).** `gen.llm.lm` is the LM protocol
   (vocab, encode, decode, token-bytes, byte-vocab, next-logprobs,
@@ -668,6 +679,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     eighth of RAM of active memory. MLX's own defaults are all of RAM.
   - Where MLX's semantics differ from NumPy's, the backend follows NumPy's:
     NaN in `sign` and `argmax`, integer floor division, float64 accuracy.
+    So too the sign of a zero (owner, 2026-10-21, genclj-3mx6): Metal's
+    float32 `atan(-0.0)` is +0.0, and the backend returns x itself at
+    zero, as NumPy and the JVM backend do.
   - Configured by `gen.mlx.device` (`cpu`, `gpu`) and `gen.mlx.dtypes`
     (`32`, `64`).
   - In `gen` bodies, a 0-d backend array counts as its host value for
@@ -969,6 +983,43 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     a choice included), a splice without an address, an untraced draw, an
     address used twice or one under another: each a compile error that
     names the form.
+  - **Macros and quoted data (M5, G11 and G12; owner, 2026-10-21):** a
+    binding's head, and the return expression's, is macroexpanded before
+    it is classified, as `gen` expands a dynamic body, so a user macro that
+    expands to a `trace` or a `splice` is that call; a computation stays as
+    written, its expansion checked as it is. Only the head is expanded, so
+    a call hidden in a macro inside an expression is the compiler's error
+    (trace is unbound there), as before: catching it would take a walk
+    that knows the expression's locals. Quoted data is data: it may mention
+    `trace`, and its symbols are no inputs.
+  - **Static rewrites (M5, G2, genclj-lgij; owner, 2026-10-21; to build).**
+    The rewrites live in the static analysis only; the body fn, the dynamic
+    semantics, is unchanged, and the static law runs over every rewritten
+    body.
+    - *A computed address is a node of its own kind (B1),* not Gen.jl's
+      `call_at`/`choice_at` nodes: `(trace [:x i] d)` stays a trace node
+      and `(splice [:x i] gf …)` a call node. The address is the longest
+      leading run of constant keys (the first key must be one, as Gen.jl
+      requires a Symbol) followed by keys computed from the node's inputs;
+      it runs as the dynamic body does (one site, its key, its address);
+      it is skipped only when its inputs, the keys' among them, are
+      unchanged and no constraint or selection reaches its previous path;
+      assess and the overlap check see its constant prefix, as for a
+      splice. Gen.jl's rewrite into a splice would split the key, so
+      `(gen [i] …)` and `(gen ^:static [i] …)` of one source would draw
+      different values, and gen.dynamic would load gen.combinators.
+    - *A call nested in an expression is hoisted* into a node bound to a
+      fresh name, placed before the binding in Clojure's evaluation order
+      (arguments left to right, the innermost call first), where it is
+      evaluated exactly once: a function call's arguments, a vector, map
+      or set literal's elements, and an `if`'s test (so `when`'s, and
+      `cond`'s first). Not a nested `let`'s init. The hoisted call may not
+      read a local bound inside the expression.
+    - *A call in a branch* (an `if`'s, a later `cond` test, `and`, `or`)
+      stays a compile error naming the call and why. Gen.jl hoists it and
+      runs it whether or not the branch is taken, so its static function is
+      a different model from the same dynamic body: a recorded difference
+      (D16, `docs/research/genjl-test-suite.md`).
   - **Compiled scores and a lint, in M4 (owner, 2026-10-20).** A static
     function's graph gives its log density as a pure function of its
     choices, which HMC, MALA, MAP and gradients use for static models, so
@@ -1226,8 +1277,14 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     fails other than for room, and when a slot's state position
     (`llama_memory_seq_pos_min`) disagrees with it, loudly on System.err.
     Where a state sits changes no result, only the cost.
+  - **Default by device (owner, 2026-10-21; genclj-kw88):** the split is on
+    only where the model's weights are on Metal. On CUDA (fenrir's RTX PRO
+    6000, shared) a split step of Qwen3.5-0.8B cost about twice one decode
+    (52 against 24 ms), an extra decode costing more there than the copies
+    it saves; genclj-mxi9 measures CUDA and the CPU properly. The property
+    still says otherwise either way.
   - Names for the owner: the property `gen.llama.split-recurrent` (default
-    true; false keeps one decode a step, exactly as before), the info key
+    by device, above; false keeps one decode a step, exactly as before), the info key
     `:split-recurrent?`, the diagnostics `llama/step-splits`, the namespace
     `gen.llm.llama.recurrent`. An upstream llama.cpp issue (copy only the
     states that moved) is drafted for the owner, not filed (genclj-g5gx).
@@ -1389,6 +1446,39 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   a combinator at the top had to be spliced into one. D7's rule stands, one
   store per generative function and gradients as values; this extends where
   the stores are found.
+- **A call's trace and return value by address; merge and Recurse's
+  numbering (owner, 2026-10-21; M5's G1, F3, G10, G13; m3-grammar's
+  design).**
+  - `(trace/subtrace tr addr)` is Gen.jl's `get_call(tr, addr).subtrace`:
+    the trace of the call at an address or a path, nil where no call is
+    (until D4 decides the loud form); `[]` is `tr` itself, and a path into a
+    call descends into its subtrace. `(tr addr)` is Gen.jl's `trace[addr]`:
+    the choice there, otherwise the call's return value, so `(tr [])` is the
+    return value (`trace[]`) and Map's `(tr i)` is element i's.
+  - The mechanism is a protocol in gen.trace dispatched on the trace's
+    generative function (a call's subtrace for a path prefix; Object's
+    default nil), so each combinator keeps its representation private:
+    dynamic functions (call-at and choice-at with them), Map and Unfold by
+    index, Switch through its branch, Recurse by [node :production] and
+    [node :aggregation].
+  - The path rule's edges: `[]` is the root for `cm/set-choice` and
+    `cm/set-submap`; `cm/from-map` nests a vector key as a path (an overlap
+    is a loud merge error); a vector inside a path is a loud error wherever a
+    path is walked.
+  - `cm/merge` takes 0 to n choice maps (none gives EMPTY, merge's
+    identity). Recurse's numbering is Gen.jl's, 0-based: `get-child`,
+    `get-child-num`, `get-parent`, their arguments checked loudly.
+- **Filling with an array is loud (owner, 2026-10-21; M5's G14).**
+  `array/full` and `full-like` take a scalar fill value (a host number or a
+  0-d array, tracked on the tape too); an array of values is an ex-info on
+  every backend, pointing to `broadcast-to`. Before, the JVM threw a
+  ClassCastException and MLX broadcast it silently.
+- **llama.cpp's band by device (owner, 2026-10-21; genclj-kw88).** The
+  Branching contract's llama.cpp tests take their band from the device's
+  measured noise: twice its measured maximum, 0.1 nats on Metal (as before)
+  and about 0.26 on CUDA with float weights (f16: max 0.13). With quantized
+  weights on CUDA the contract's noise checks are skipped with a note naming
+  DESIGN §6's measurement, never given a band wide enough to hide it.
 - **Git:** the main repo is public-ready, with `.beans/`, `.beans.yml`,
   `.claude/` and `*.pdf` gitignored. Its remote is the private
   `robert-johansson/gen.clj` (the owner, 2026-10-21, at M4's close: private
