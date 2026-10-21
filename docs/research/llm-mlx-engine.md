@@ -286,20 +286,81 @@ tape on tiny models is the reference that tests it.
    GenMLX's checkpoints are here. Then its golden pins: argmax and top 5
    exact on the bf16 weights, logprobs within its bands.
 
-## 6. Phases (bean suggestions)
+## 6. Phases, as proposed beans (not created)
 
-| Phase | Work | Needs |
-|---|---|---|
-| P1 | gen.array's LLM ops: composites, MLX natives, VJPs, conformance tests | pure JVM, then MLX |
-| P2 | GGUF loading and Qwen3's forward; Qwen3-0.6B against llama.cpp | an MLX slot |
-| P3 | The Slots engine: caches (a), stacking, lane groups; the contract and the LM layers on it | MLX |
-| P4 | Qwen3.5: GatedDeltaNet as a composite (token loop, then chunked), then a Metal kernel; Qwen3.5-0.8B against llama.cpp | MLX, Metal |
-| P5 | Gradients and LoRA (genclj-q4xv) | MLX |
-| P6 | Speed: caches (b), `array/compile` of a step, CUDA kernels on the Thor | Metal, CUDA |
+genclj-gvfa would become a feature under genclj-54u1, with one task per
+phase. Each phase is blocked by the one before it unless its entry says
+otherwise. The owner's decisions in the last section come first: P1's
+names, and whether to download GenMLX's checkpoints (P2's parity item).
+
+**P1. gen.array's LLM operations** (task, llm, array; needs the pure JVM,
+then MLX)
+- `rms-norm`, `rope` (NEOX and traditional, partial dims, positions per
+  row) and `sdpa` (GQA, a boolean or additive mask), as composites, with
+  MLX's fast ops as `-native-ops`.
+- `quantized-matmul` and `dequantize` as primitives: the JVM dequantizes,
+  MLX calls `mlx_quantized_matmul` and `mlx_dequantize`. Their VJP is with
+  respect to x only.
+- Conformance tests (MLX against the JVM), the tape's VJP checks, and
+  mutations planted.
+- array-api.md §6's table updated.
+- Done when: the conformance suite passes on the JVM, MLX's CPU and Metal.
+
+**P2. GGUF weights and Qwen3's forward** (task, llm, mlx; needs an MLX slot)
+- `gen.llm.mlx.gguf`: `mlx_load_gguf`, the metadata read into a config,
+  the tensors by llama.cpp's names, and Q8_0 as quantized triples.
+- `gen.llm.mlx.qwen3`: the forward from the prototype, over P1's ops, with
+  embeddings by `take` and dequantize and a tied output by
+  `quantized-matmul`.
+- The tokenizer: llama.cpp's vocabulary, loaded `vocab_only`.
+- Tests:
+  - tiny-model self-consistency on the JVM (the prototype's four checks);
+  - Qwen3-0.6B's log-probabilities against the llama engine within a band
+    measured as `llama_noise` measures, the band and its spread recorded;
+  - planted convention errors fail by nats.
+- Optional, if the owner downloads GenMLX's checkpoint: GenMLX's golden
+  pins.
+
+**P3. The engine: Slots over cache values** (task, llm, mlx; needs MLX)
+- `gen.llm.mlx` (or `gen.llm.mlx.engine`): a `Slots` implementation.
+  - Copy shares a value and clear drops it.
+  - A run is a prefill or a teacher-forced extension with its scores.
+  - A step is one decode: caches concatenated, the step's caches stacked
+    with masks and RoPE positions per row, and lane groups for steps of
+    exactly a group's rows.
+- The Branching contract with its own band; gen.llm.lm, token and SMC
+  suites over it.
+- The shared memory budget's tests with the engine open.
+
+**P4. Qwen3.5: GatedDeltaNet** (task, llm, mlx; blocked by P2, not P3)
+- `gen.llm.mlx.qwen35`, with llama.cpp's conventions (§1):
+  - the GatedDeltaNet as a composite: the token loop, then the chunked
+    form of chunks of 64;
+  - partial RoPE and the gated attention.
+- A Metal kernel for the step and the chunked scan through
+  `mlx_fast_metal_kernel`, behind the composite as a native op, tested
+  against it.
+- Qwen3.5-0.8B against the llama engine within its band.
+
+**P5. Gradients and LoRA** (task, llm, mlx; blocked by P3; unblocks
+genclj-q4xv)
+- Dense adapters beside the frozen quantized weights.
+- `array/value-and-grad` through the forward, in the tape and in MLX's
+  native mode: finite differences on tiny JVM models, and native against
+  the tape on MLX.
+- One LoRA step on a tiny model lowers its loss.
+
+**P6. Speed** (task, llm, mlx, performance; blocked by P3)
+- Static-capacity caches with `slice_update`, after an explicit release of
+  consumed handles in gen.backend.mlx (a new name). The donation measured.
+- `array/compile` of a step at a stable shape.
+- CUDA kernels on the Thor (genclj-mxi9's machine).
+- A bench against the llama engine on the LM's rows (`gen.lm-bench`).
 
 ## 7. To check when MLX is free
 
-Each is a few minutes in one MLX JVM:
+`llm-mlx-engine/mlx_checks.clj` makes all four in one MLX JVM, with
+llama.cpp for the last; it has not run yet:
 - `mlx_load_gguf` on both files: names, shapes and dtypes;
 - `quantized_matmul` against `dequantize` then `matmul` on a real tensor;
 - donation: a `slice_update` of an unshared array leaves its buffer in

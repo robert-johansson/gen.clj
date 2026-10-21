@@ -1,6 +1,6 @@
 ;; A GGUF file's header on the pure JVM, for docs/research/llm-mlx-engine.md:
 ;; its metadata (arrays summarized) and every tensor's name, shape (GGML
-;; order: innermost first) and type.
+;; order: innermost first), type and offset from :data-start.
 ;; Run: clojure -M docs/research/llm-mlx-engine/gguf_header.clj <model.gguf> …
 (import '[java.nio ByteOrder MappedByteBuffer] '[java.nio.channels FileChannel FileChannel$MapMode]
         '[java.nio.file Path StandardOpenOption])
@@ -25,8 +25,10 @@
       (let [version (u32) n-tensors (u64) n-kv (u64)
             kv (into (sorted-map) (repeatedly n-kv #(let [k (string) t (u32)] [k (value t)])))
             tensors (vec (repeatedly n-tensors #(let [nm (string) nd (u32) dims (vec (repeatedly nd u64)) t (u32) off (u64)]
-                                                  {:name nm :dims dims :type (ggml-types t t) :offset off})))]
-        {:version version :kv kv :tensors tensors}))))
+                                                  {:name nm :dims dims :type (ggml-types t t) :offset off})))
+            align (long (get kv "general.alignment" 32))
+            data-start (* align (quot (+ (.position b) (dec align)) align))]
+        {:version version :kv kv :tensors tensors :data-start data-start}))))
 
 (doseq [path *command-line-args*]
   (let [{:keys [version kv tensors]} (header path)]
