@@ -351,12 +351,15 @@
                {:groups groups :out out :ms ms}))}))
 
 (defn- within-band
-  "Each of out's rows against its token advanced alone: the failures."
+  "Each of out's rows against its token advanced alone: the failures, or nil
+   where this engine has no band (gen.llm.llama.bands: is-within-noise says
+   why)."
   [alone tokens out]
-  (vec (keep (fn [[t b]]
-               (let [d (contract/max-diff (alone t) (br/logprobs b) 64)]
-                 (when-not (<= d (:band (noise))) (format "token %d: |Δ log p| = %.3g" t d))))
-             (map vector tokens out))))
+  (when-let [band (:band (noise))]
+    (vec (keep (fn [[t b]]
+                 (let [d (contract/max-diff (alone t) (br/logprobs b) 64)]
+                   (when-not (<= d band) (format "token %d: |Δ log p| = %.3g" t d))))
+               (map vector tokens out)))))
 
 (deftest a-scattered-step-is-split
   ;; A recurrent or hybrid model's decode copies every state from the lowest
