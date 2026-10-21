@@ -2,9 +2,9 @@
   "Custom deterministic generative functions: incremental updates through
    update-with-state, the GFI laws alone and spliced in a model, gradients,
    trainable parameters, loud errors."
-  (:refer-clojure :exclude [+ *])
+  (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
-            [gen.array :as array :refer [+ *]]
+            [gen.array :as array :refer [+ - * /]]
             [gen.array.tape]
             [gen.choicemap :as cm]
             [gen.custom :as custom]
@@ -119,7 +119,7 @@
 (def norm
   "The Euclidean norm, kept as the state its gradient uses."
   (custom/deterministic {:apply-with-state (fn [[v]] (let [n (array/sqrt (array/sum (* v v)))] [n n]))
-                         :gradient-with-state (fn [n [v] g] [(* g (array// v n))])}))
+                         :gradient-with-state (fn [n [v] g] [(* g (/ v n))])}))
 
 (deftest gradients-pass-through
   (testing "a given gradient, through code the tape cannot see"
