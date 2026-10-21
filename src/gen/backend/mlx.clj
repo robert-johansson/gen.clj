@@ -633,13 +633,23 @@
     (let [f (unary-fns op)
           s (stream b)]
       (with-operands b op [h x dtype]
-        (wrap b (if (and (= op :sign) (= :float (dt/kind dtype)))
+        (wrap b (cond
+                  (and (= op :sign) (= :float (dt/kind dtype)))
                   ;; MLX's sign of NaN is 0; NumPy's (and the JVM backend's) NaN
                   (let [sg (f h s)
                         nan (Mlx/mlx_isnan h s)]
                     (try (Mlx/mlx_where nan h sg s)
                          (finally (MlxRaw/mlx_array_free sg) (MlxRaw/mlx_array_free nan))))
-                  (f h s)))))))
+
+                  (and (= op :arctan) (not= dtype :float64))
+                  ;; Metal's float32 atan(-0.0) is +0.0: x itself at zero (where
+                  ;; not x), as NumPy and the JVM backend; float64's keeps the sign
+                  (let [at (f h s)
+                        zero (Mlx/mlx_logical_not h s)]
+                    (try (Mlx/mlx_where zero h at s)
+                         (finally (MlxRaw/mlx_array_free at) (MlxRaw/mlx_array_free zero))))
+
+                  :else (f h s)))))))
 
 (defn- int-division
   "remainder or floor-divide of int handles, as the JVM backend (and NumPy):

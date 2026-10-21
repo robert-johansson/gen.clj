@@ -140,6 +140,8 @@
                             [:arctan array/atan 2.0 0.2] [:sinh array/sinh 1.0 (Math/cosh 1.0)]
                             [:cosh array/cosh 1.0 (Math/sinh 1.0)]]]
     (is (ts/close? want ((array/grad f) x)) (str label)))
+  (testing "atan at signed zeros, where the MLX backend returns x itself: 1"
+    (is (= [1.0 1.0 0.5] (array/->clj ((array/grad #(array/sum (array/atan %))) (array/array [0.0 -0.0 1.0]))))))
   (testing "atan2(y, x): (x, -y)/(x² + y²), on both sides of the y axis"
     (doseq [[y x want] [[1.0 2.0 [0.4 -0.2]] [1.0 -2.0 [-0.4 -0.2]] [-3.0 -4.0 [-0.16 0.12]]]]
       (is (every? true? (map ts/close? want ((array/grad array/atan2 {:argnums [0 1]}) y x))) (str [y x]))))
