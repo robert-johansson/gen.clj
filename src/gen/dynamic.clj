@@ -476,13 +476,13 @@
       [v (if (and skip? (identical? v old)) diff/no-change diff/unknown-change)])))
 
 (defn- keep-node!
-  "Node n's previous value old, with its site's or call's previous record,
-   as an unchanged rerun would leave them (weight 0), and the same key
-   consumed, so that what follows draws what the dynamic body would."
-  [vol {:keys [kind addr]} old]
+  "A node of kind at path p, kept: its previous value old, with its site's
+   or call's previous record, as an unchanged rerun would leave them
+   (weight 0), and the same key consumed, so that what follows draws what
+   the dynamic body would."
+  [vol kind p old]
   (when-not (= kind :compute)
-    (let [p (path addr)
-          state @vol]
+    (let [state @vol]
       (check-running! state p)
       (check-address! state p)
       (let [state (second (site-key state))
@@ -512,22 +512,24 @@
         skip? (boolean (and values (#{:update :regenerate} mode) (nil? (:transitions gf))
                             (gfi/same-gen-fn? gf (trace/maker prev))
                             (gfi/same-value? *params* (::params prev))))
-        reached? (fn [{:keys [kind addr]}]
-                   (let [p (path addr)]
-                     (cond (= mode :update) (not (cm/empty? (cm/get-submap constraints p)))
-                           (= kind :trace) (sel/selected? selection p)
-                           :else (not= sel/none (sel/get-subselection selection p)))))
+        reached? (fn [kind p]
+                   (cond (= mode :update) (not (cm/empty? (cm/get-submap constraints p)))
+                         (= kind :trace) (sel/selected? selection p)
+                         :else (not= sel/none (sel/get-subselection selection p))))
         unchanged? (fn [diffs in] (every? #(diff/no-change? (nth diffs %)) in))
         [env diffs vals]
-        (reduce (fn [[env diffs vals] [i {:keys [kind addr in out f bind symbol? arg-specs] :as n}]]
+        (reduce (fn [[env diffs vals] [i {:keys [kind addr keys-f in out f bind symbol? arg-specs] :as n}]]
                   (let [old (when skip? (nth values i))
-                        keep? (and skip? (unchanged? diffs in) (not (reached? n)))
+                        ;; a computed address's path, from the inputs (the
+                        ;; previous one when the node is kept)
+                        p (when (some? addr) (if keys-f (into (path addr) (keys-f read-param env)) (path addr)))
+                        keep? (and skip? (unchanged? diffs in) (not (and p (reached? kind p))))
                         [v d] (cond
-                                keep? [(keep-node! vol n old) diff/no-change]
-                                (= kind :trace) (let [v (trace-fn addr (f read-param env))]
+                                keep? [(keep-node! vol kind p old) diff/no-change]
+                                (= kind :trace) (let [v (trace-fn p (f read-param env))]
                                                   [v (if (and skip? (identical? v old)) diff/no-change diff/unknown-change)])
                                 (= kind :splice) (let [[g as] (f read-param env)]
-                                                   (splice-at addr g as (when skip? (mapv #(spec-diff diffs %) arg-specs))))
+                                                   (splice-at p g as (when skip? (mapv #(spec-diff diffs %) arg-specs))))
                                 :else (computed n env diffs old skip?))]
                     [(bind env v)
                      (let [d (if (or symbol? (diff/no-change? d)) d diff/unknown-change)]
@@ -716,6 +718,16 @@
         (static-score g args sub k)
         (let [r (gfi/run-op g :assess args {:key (or k (rng/key 0)) :constraints sub})] [(:weight r) (:retval r)]))
       (catch clojure.lang.ExceptionInfo e (throw (gfi/under e p))))))
+
+(defn ^:no-doc check-computed!
+  "assess's check of a node at a computed address (a constant prefix and
+   computed keys): every choice under the prefix lies at the node's path p
+   (a choice), or under it (a call), so none goes unvisited."
+  [choices prefix p exact?]
+  (doseq [q (cm/addresses (cm/get-submap choices prefix))
+          :let [full (into prefix q)]]
+    (when-not (if exact? (= full p) (= p (subvec full 0 (min (count full) (count p)))))
+      (throw (gfi/unvisited :assess [full])))))
 
 (defn- check-static-choices!
   "Every choice must sit at a node's address, as assess checks: the top
@@ -1118,19 +1130,29 @@
   [st params coercions locals]
   (let [args (gensym "args") choices (gensym "choices") key (gensym "key")
         {:keys [bindings terms]}
-        (reduce (fn [{:keys [bindings terms k]} {:keys [kind addr binding expr]}]
-                  (case kind
-                    :trace (let [v (gensym "v") lp (gensym "lp") k' (gensym "k")]
-                             {:bindings (into bindings [[v lp] `(static-site ~expr ~choices ~(path addr))
-                                                        binding v
-                                                        k' `(when ~k (first (rng/split ~k)))])
-                              :terms (conj terms lp) :k k'})
-                    :splice (let [[g as] expr w (gensym "w") rv (gensym "rv") k' (gensym "k") ks (gensym "ks")]
-                              {:bindings (into bindings [[k' ks] `(if ~k (rng/split ~k) [nil nil])
-                                                         [w rv] `(static-call ~(path addr) ~g ~as (cm/get-submap ~choices ~(path addr)) ~ks)
-                                                         binding rv])
-                               :terms (conj terms w) :k k'})
-                    {:bindings (into bindings [binding expr]) :terms terms :k k}))
+        (reduce (fn [{:keys [bindings terms k]} {:keys [kind addr binding expr] computed :keys}]
+                  (let [;; a computed address's path, checked to hold every
+                        ;; choice under its prefix
+                        p (gensym "p")
+                        at (when (some? addr)
+                             (if computed
+                               [p `(into ~(path addr) [~@computed])
+                                '_ `(check-computed! ~choices ~(path addr) ~p ~(= kind :trace))]
+                               [p (path addr)]))]
+                    (case kind
+                      :trace (let [v (gensym "v") lp (gensym "lp") k' (gensym "k")]
+                               {:bindings (-> bindings (into at)
+                                              (into [[v lp] `(static-site ~expr ~choices ~p)
+                                                     binding v
+                                                     k' `(when ~k (first (rng/split ~k)))]))
+                                :terms (conj terms lp) :k k'})
+                      :splice (let [[g as] expr w (gensym "w") rv (gensym "rv") k' (gensym "k") ks (gensym "ks")]
+                                {:bindings (-> bindings (into at)
+                                               (into [[k' ks] `(if ~k (rng/split ~k) [nil nil])
+                                                      [w rv] `(static-call ~p ~g ~as (cm/get-submap ~choices ~p) ~ks)
+                                                      binding rv]))
+                                 :terms (conj terms w) :k k'})
+                      {:bindings (into bindings [binding expr]) :terms terms :k k})))
                 {:bindings [] :terms [] :k key}
                 (:nodes st))]
     (guard-branches
@@ -1155,6 +1177,8 @@
         reads (fn [inputs] (vec (mapcat (fn [x] [x `(nth ~env ~(slots x))]) inputs)))
         node-fn (fn [{:keys [inputs expr]}]
                   (guard-branches `(fn [~'param ~env] (let ~(reads inputs) ~expr)) (into locals inputs)))
+        keys-fn (fn [{:keys [inputs] ks :keys}]
+                  (guard-branches `(fn [~'param ~env] (let ~(reads inputs) [~@ks])) (into locals inputs)))
         param? (fn [expr] (boolean (some #{'param} (tree-seq coll? seq expr))))
         spec (fn [{:keys [symbol constant inputs]}]
                (cond (and symbol (contains? slots symbol)) {:slot (slots symbol)}
@@ -1175,18 +1199,22 @@
                   (merge `{:kind ~(:kind n) :addr ~(:addr n) :names '~(:names n) :inputs '~(:inputs n) :form '~(:form n)
                            :in ~(mapv slots (:inputs n)) :out ~(mapv slots (:names n))
                            :symbol? ~(symbol? (:binding n))
-                           :param? ~(param? (:expr n))
+                           :param? ~(param? [(:expr n) (:keys n)])
                            :f ~(node-fn n)
+                           :keys-f ~(when (:keys n) (keys-fn n))
                            :bind (fn [~env ~v] (let [~(:binding n) ~v] (-> ~env ~@(map (fn [x] `(assoc ~(slots x) ~x)) (:names n)))))}
                          (when (= :splice (:kind n)) {:arg-specs (mapv spec (:arg-specs n))})
+                         (when (:keys n) {:keys (list 'quote (:keys n))})
                          (call n)))]
       :ret ~(merge {:inputs `'~(:inputs (:ret st)) :in (mapv slots (:inputs (:ret st)))
                     :param? (param? (:expr (:ret st))) :f (node-fn (:ret st))}
                    (call (:ret st)))
       :score ~(score-form st params coercions locals)
       :roots ~(set (keep #(when-some [a (:addr %)] (first (path a))) (:nodes st)))
+      ;; a node at a computed address holds its prefix, as a call does
+      ;; (its score fn checks the rest: check-computed!)
       :paths ~(when (some #(vector? (:addr %)) (:nodes st))
-                (vec (keep #(when-some [a (:addr %)] [(:kind %) (path a)]) (:nodes st))))}))
+                (vec (keep #(when-some [a (:addr %)] [(if (:keys %) :splice (:kind %)) (path a)]) (:nodes st))))}))
 
 (defmacro gen
   "A generative function. params are the arguments (destructuring allowed);

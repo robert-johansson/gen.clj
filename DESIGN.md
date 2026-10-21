@@ -1006,11 +1006,12 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     what depends only on that value still skips. The analysis sees the
     enclosing locals, a gen body's too, so a local that shadows a var is
     the local.
-  - **Not static:** a body that is not one `let`, an address computed
-    from a value, a `trace` or `splice` inside an expression (a branch on
-    a choice included), a splice without an address, an untraced draw, an
-    address used twice or one under another: each a compile error that
-    names the form.
+  - **Not static:** a body that is not one `let`, an address whose first
+    key is computed, a `trace` or `splice` where it is not evaluated
+    exactly once whenever its expression is (a branch, a function, a `let`
+    inside an expression, an `and` or `or`: see the rewrites below), a
+    splice without an address, an untraced draw, an address used twice or
+    one under another: each a compile error that names the form.
   - **Macros and quoted data (M5, G11 and G12; owner, 2026-10-21):** a
     binding's head, and the return expression's, is macroexpanded before
     it is classified, as `gen` expands a dynamic body, so a user macro that
