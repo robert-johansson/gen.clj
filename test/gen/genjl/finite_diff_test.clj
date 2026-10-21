@@ -4,6 +4,7 @@
             [gen.array :as array]
             [gen.dist :as d]
             [gen.genjl.finite-diff :as fd]
+            [gen.genjl.support :as genjl]
             [gen.test-support :as ts]))
 
 (deftest finite-differences
@@ -11,15 +12,15 @@
     (let [f (fn [x y] (* x x y))]
       (is (< (Math/abs (- 12.0 (fd/finite-diff f [3.0 2.0] 0))) 1e-8))
       (is (< (Math/abs (- 9.0 (fd/finite-diff f [3.0 2.0] 1))) 1e-8))))
-  (testing "an array argument: every partial, in its shape"
-    (is (array/allclose? (array/array [2.0 4.0 6.0])
-                         (fd/finite-diff #(array/sum (array/square %)) [(array/array [1.0 2.0 3.0])] 0)
-                         {:rtol 1e-8 :atol 1e-8})))
+  (testing "an array argument, from the backend under test: every partial, in its shape, in float64"
+    (let [partials (fd/finite-diff #(array/sum (array/square %)) [(array/array [1.0 2.0 3.0])] 0)]
+      (is (= :float64 (array/dtype partials)))
+      (is (genjl/approx? [2.0 4.0 6.0] partials {:rtol 1e-8 :atol 1e-8}))))
   (testing "symmetric: (j, k) and (k, j) move together, so one triangle's read counts half on each"
-    (is (array/allclose? (array/array [[0.0 0.5] [0.5 0.0]])
-                         (fd/finite-diff #(array/item (array/slice (array/slice % 0 0 1) 1 1 2))
-                                         [(array/array [[1.0 2.0] [2.0 3.0]])] 0 {:symmetric? true})
-                         {:rtol 1e-8 :atol 1e-8})))
+    (is (genjl/approx? [[0.0 0.5] [0.5 0.0]]
+                       (fd/finite-diff #(array/item (array/slice (array/slice % 0 0 1) 1 1 2))
+                                       [(array/array [[1.0 2.0] [2.0 3.0]])] 0 {:symmetric? true})
+                       {:rtol 1e-8 :atol 1e-8})))
   (testing "another step"
     (is (< (Math/abs (- 6.0 (fd/finite-diff (fn [x] (* x x)) [3.0] 0 {:dx 1e-3}))) 1e-9))))
 
@@ -39,9 +40,10 @@
 
 (deftest isapprox
   (is (fd/grad-close? 1.0 (+ 1.0 1e-9)))
-  (is (not (fd/grad-close? 1.0 1.001)))
+  (is (not (fd/grad-close? 1.0 1.01)) "outside float64's band and float32's")
   (is (fd/grad-close? (array/array [1.0 1e-12]) (array/array [1.0 0.0])) "in the norm, not element by element")
   (is (not (fd/grad-close? (array/array [1.0 2.0]) (array/array [[1.0 2.0]]))) "shapes must agree")
-  (when-not (ts/f32?)
-    (is (not (fd/grad-close? 1.0 (+ 1.0 1e-7))) "isapprox's default rtol, √eps")
-    (is (fd/grad-close? 1.0 (+ 1.0 1e-8) {:rtol 1e-7}) "or the testset's own")))
+  (if (ts/f32?)
+    (is (fd/grad-close? 1.0 1.001) "float32's band, rtol 2e-3")
+    (do (is (not (fd/grad-close? 1.0 (+ 1.0 1e-7))) "isapprox's default rtol, √eps")
+        (is (fd/grad-close? 1.0 (+ 1.0 1e-8) {:rtol 1e-7}) "or the testset's own"))))
