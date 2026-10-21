@@ -40,6 +40,13 @@
      engine's own, a thread per row up to four, while the engine's thread
      waits: normalizing a vocabulary on the host costs about as much as a
      row's share of the decode.
+   - Accuracy depends on the device and the weights (DESIGN §6). On Metal
+     a token's log-probability agrees with an f32 forward pass within about
+     0.01 nats and varies with batch shape by at most about 0.05. With
+     quantized weights (Q8_0) the x86 CPU and CUDA builds are about 0.2
+     nats a token off that, and on CUDA the result also depends on what
+     shares the batch; float weights (F16, BF16) bring both within about
+     0.01. For exact scores and weights off Metal, use float weights.
 
    llama.cpp's log goes to System.err from warnings up (gen.llama.log:
    none, error, warn, info, debug); libllama is found in gen.llama.lib
