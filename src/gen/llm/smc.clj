@@ -24,7 +24,8 @@
    with a 0/-Inf potential (a constraint), the probability that a
    completion satisfies it.
 
-   opts at initialize: :potential (none: weight 1), :proposal, :key.
+   opts at initialize: :potential (none: weight 1), :proposal, :key,
+   :host-pool.
    - :lm (the default), the bootstrap: tokens drawn from the LM's row.
    - :masked, the LM's row times the potential's next-token weights,
      renormalized (for a constraint, the row masked to its allowed tokens):
@@ -41,7 +42,15 @@
    number of particles, a step is one advance. Particles hold tokens; the
    LM's trie owns every branch, and resampling copies token vectors.
    Draws are on the host: particle i's token at step t from (fold-in
-   (fold-in key t) i), by token/dist. Resampling (maybe-resample, or run's)
+   (fold-in key t) i), by token/dist. The particles' proposal rows (:lm's,
+   :masked's) and draws, pure functions of their rows, twists and keys,
+   run on a host pool, collected in order, so every result is the calling
+   thread's alone, bit for bit, whatever the pool's size; the LM's and the
+   potential's calls, and a proposal function's, stay on the calling
+   thread. :host-pool is an ExecutorService (host-pool makes one), false
+   for the calling thread alone, or by default a shared pool of daemon
+   threads, its size the system property gen.llm.host-threads (default:
+   the available processors up to 4; 1 turns it off). Resampling (maybe-resample, or run's)
    is when the effective sample size falls below :ess-threshold (n/2 by
    default), by :method (:systematic by default; any of
    gen.inference.weights'), and moves the weights' mean into :log-ml."
@@ -51,13 +60,15 @@
             [gen.llm.lm :as lm]
             [gen.llm.potential :as potential]
             [gen.llm.token :as token]
-            [gen.random :as rng]))
+            [gen.random :as rng])
+  (:import [java.util Collection]
+           [java.util.concurrent ExecutionException ExecutorService Executors Future]))
 
 (set! *warn-on-reflection* true)
 (set! *unchecked-math* :warn-on-boxed)
 
 ;; A state: {:completion :args [prompt max-tokens] :potential :proposal
-;; :key :t (steps so far) :particles [{:tokens :done? :log-p}] :log-weights
+;; :key :host-pool (an ExecutorService or false) :t (steps so far) :particles [{:tokens :done? :log-p}] :log-weights
 ;; :log-ml :resampled?}. :log-p is a particle's log p(tokens), its trace's
 ;; score; a particle whose weight fell to 0 stops, :dead?. Step t draws
 ;; with (fold-in (fold-in key t) 0) and resamples with (fold-in (fold-in
@@ -76,6 +87,43 @@
                     {:reason (if (and (sequential? prompt) (empty? prompt)) :no-tokens :invalid-args) :args args})))
   [(vec prompt) (long max-tokens)])
 
+(defn host-pool
+  "A fixed pool of n daemon threads for the particles' host work (their
+   proposal rows and draws), to give initialize as :host-pool; close it
+   when done, or let the JVM's exit end it."
+  ^ExecutorService [n]
+  (when-not (pos-int? n)
+    (throw (ex-info (str "smc/host-pool: a pool has a positive number of threads, not " (pr-str n))
+                    {:reason :invalid-args :n n})))
+  (Executors/newFixedThreadPool (int n) (-> (Thread/ofPlatform) (.name "gen.llm.smc host-" 0) (.daemon true) .factory)))
+
+(def ^:private default-threads
+  "The shared pool's threads: the system property gen.llm.host-threads, or
+   half the available processors up to 4, as the llama.cpp engine's row
+   pool. 1 runs the host work on the calling thread."
+  (delay (let [n (or (some-> (System/getProperty "gen.llm.host-threads") parse-long)
+                     (max 1 (min 4 (quot (.availableProcessors (Runtime/getRuntime)) 2))))]
+           (when-not (pos? (long n))
+             (throw (ex-info (str "smc: gen.llm.host-threads is a positive integer, not " n)
+                             {:reason :invalid-option :host-threads n})))
+           (long n))))
+
+(def ^:private shared-pool
+  (delay (when (< 1 (long @default-threads)) (host-pool @default-threads))))
+
+(defn- pool-of
+  "initialize's :host-pool, checked: an ExecutorService, false (the
+   calling thread), or by default the shared pool (false if it has one
+   thread)."
+  [opts]
+  (if (contains? opts :host-pool)
+    (let [pool (:host-pool opts)]
+      (when-not (or (false? pool) (instance? ExecutorService pool))
+        (throw (ex-info (str "smc: :host-pool is an ExecutorService or false, not " (pr-str pool))
+                        {:reason :invalid-option :host-pool pool})))
+      pool)
+    (or @shared-pool false)))
+
 (defn- check-proposal [proposal potential]
   (cond
     (= :lm proposal) proposal
@@ -90,10 +138,10 @@
 (defn initialize
   "n particles of the completion on [prompt max-tokens], none drawn yet,
    their log weights the potential's prefix weight of no tokens. opts:
-   :potential, :proposal (:lm, :masked or a function) and :key (see the
-   namespace's docstring)."
+   :potential, :proposal (:lm, :masked or a function), :key and
+   :host-pool (see the namespace's docstring)."
   ([completion args n] (initialize completion args n {}))
-  ([completion args n {:keys [potential proposal key] :or {proposal :lm}}]
+  ([completion args n {:keys [potential proposal key] :or {proposal :lm} :as opts}]
    (let [args (check-args completion args)]
      (when-not (pos-int? n)
        (throw (ex-info (str "smc: the number of particles is a positive integer, not " (pr-str n))
@@ -105,6 +153,7 @@
         :potential potential
         :proposal (check-proposal proposal potential)
         :key (or key (gfi/next-key))
+        :host-pool (pool-of opts)
         :t 0
         :particles (vec (repeat n {:tokens [] :done? done? :log-p 0.0}))
         :log-weights (vec (repeat n (if done? (if potential (potential/complete potential []) 0.0) w0)))
@@ -162,64 +211,89 @@
           (dotimes [t n] (aset q t (unchecked-float (- (aget x t) z))))
           [q z])))))
 
-(defn- proposal-row
-  "The proposal's row for a particle at context with the LM's row (nil if
-   no token is possible under a masked proposal)."
-  ^floats [state context ^floats row ws]
-  (let [proposal (:proposal state)]
-    (cond
-      (= :lm proposal) row
-      (= :masked proposal) (first (masked (:completion state) row ws))
-      :else (let [q (proposal context row)]
-              (when-not (and (instance? float/1 q) (== (alength ^floats q) (alength row)))
-                (throw (ex-info "smc: a proposal function returns a float array of the vocabulary's log-probabilities"
-                                {:reason :invalid-row :value q})))
-              q))))
+(defn- function-row
+  "A proposal function's row for a particle at context, checked."
+  ^floats [proposal context ^floats row]
+  (let [q (proposal context row)]
+    (when-not (and (instance? float/1 q) (== (alength ^floats q) (alength row)))
+      (throw (ex-info "smc: a proposal function returns a float array of the vocabulary's log-probabilities"
+                      {:reason :invalid-row :value q})))
+    q))
 
-(defn- advance-particle
-  "particle (live, at context, the LM's row there) one token further: [the
-   particle, its log weight's increment]."
-  [state particle context ^floats row key]
-  (let [{:keys [completion potential]} state
-        m (:lm completion)
-        ws (when potential (twist-row state (:tokens particle)))
-        q (proposal-row state context row ws)]
-    (if (nil? q)
-      ;; the potential allows no next token: a particle of weight 0
-      [(assoc particle :done? true :dead? true) Double/NEGATIVE_INFINITY]
-      (let [t (long (dc/sample (token/dist q) key))
-            log-p (double (first (lm/score m context [t])))
-            tokens (conj (:tokens particle) t)
-            end? (contains? (:end-tokens completion) t)
-            capped? (and (not end?) (== (count tokens) (long (second (:args state)))))
-            twist (if ws (double (aget ^floats ws (int (end-entry completion t)))) 0.0)
-            ;; stopped at max-tokens: the whole sequence's weight replaces the
-            ;; prefix's (a particle of weight 0 stays 0)
-            twist (if (and potential capped? (not (Double/isInfinite twist)))
-                    (+ twist (- (potential/complete potential tokens) (potential/prefix potential tokens)))
-                    twist)
-            dw (+ (- log-p (double (aget q (int t)))) twist)
-            dead? (Double/isInfinite dw)]
-        [(cond-> {:tokens tokens :done? (or end? capped? dead?) :log-p (+ (double (:log-p particle)) log-p)}
-           dead? (assoc :dead? true))
-         dw]))))
+(defn- proposed
+  "A particle's proposal row and its token drawn with key: [q t], or nil
+   if the potential allows no next token (under :masked). q is the
+   function's row f-row when the proposal is a function, else :lm's (the
+   LM's row) or :masked's, made here: a pure function of the rows and the
+   key, so it may run on the host pool."
+  [state ^floats row ws f-row key]
+  (when-let [q (case (:proposal state)
+                 :lm row
+                 :masked (first (masked (:completion state) row ws))
+                 f-row)]
+    [q (long (dc/sample (token/dist q) key))]))
+
+(defn- weighed
+  "particle (live, at context) with token t, drawn from proposal row q, and
+   its log weight's increment: [the particle, the increment]; a particle of
+   weight 0 if the potential allows no token (nil for [q t])."
+  [state particle context ws [q t]]
+  (if (nil? q)
+    [(assoc particle :done? true :dead? true) Double/NEGATIVE_INFINITY]
+    (let [{:keys [completion potential]} state
+          t (long t)
+          log-p (double (first (lm/score (:lm completion) context [t])))
+          tokens (conj (:tokens particle) t)
+          end? (contains? (:end-tokens completion) t)
+          capped? (and (not end?) (== (count tokens) (long (second (:args state)))))
+          twist (if ws (double (aget ^floats ws (int (end-entry completion t)))) 0.0)
+          ;; stopped at max-tokens: the whole sequence's weight replaces the
+          ;; prefix's (a particle of weight 0 stays 0)
+          twist (if (and potential capped? (not (Double/isInfinite twist)))
+                  (+ twist (- (potential/complete potential tokens) (potential/prefix potential tokens)))
+                  twist)
+          dw (+ (- log-p (double (aget ^floats q (int t)))) twist)
+          dead? (Double/isInfinite dw)]
+      [(cond-> {:tokens tokens :done? (or end? capped? dead?) :log-p (+ (double (:log-p particle)) log-p)}
+         dead? (assoc :dead? true))
+       dw])))
+
+(defn- in-order
+  "(f x) for each x of xs, in order: on pool when it is one and there are
+   several, each call under the calling thread's bindings; else on the
+   calling thread. What a call threw is rethrown, once every call has
+   ended."
+  [pool f xs]
+  (if (and pool (next xs))
+    (let [f (bound-fn* f)]
+      (mapv (fn [^Future fut]
+              (try (.get fut)
+                   (catch ExecutionException x (throw (.getCause x)))))
+            (.invokeAll ^ExecutorService pool ^Collection (mapv (fn [x] ^Callable (fn [] (f x))) xs))))
+    (mapv f xs)))
 
 (defn step
   "Every live particle one token further: their contexts read in one
    lm/batch-next-logprobs, a token drawn from each one's proposal, and each
-   one's log weight increased by log p - log q plus the twist. Finished
-   particles are kept as they are. opts: :key (by default the state's,
-   folded with the step)."
+   one's log weight increased by log p - log q plus the twist. The
+   proposal rows (:lm's, :masked's) and the draws run on the state's host
+   pool; the LM's and the potential's calls, and a proposal function's,
+   on the calling thread. Finished particles are kept as they are. opts:
+   :key (by default the state's, folded with the step)."
   ([state] (step state {}))
   ([state {:keys [key]}]
-   (let [{:keys [completion particles t]} state
+   (let [{:keys [completion potential proposal particles t]} state
          [prompt] (:args state)
          live (filterv #(not (:done? (particles %))) (range (count particles)))
          contexts (mapv #(into prompt (:tokens (particles %))) live)
          rows (when (seq live) (lm/batch-next-logprobs (:lm completion) contexts))
+         twists (mapv #(when potential (twist-row state (:tokens (particles %)))) live)
+         f-rows (if (fn? proposal) (mapv #(function-row proposal %1 %2) contexts rows) (repeat nil))
          draws (or key (step-key state 0))
-         moved (mapv (fn [i context row] (advance-particle state (particles i) context row (rng/fold-in draws i)))
-                     live contexts rows)]
+         drawn (in-order (:host-pool state)
+                         (fn [[i row ws f-row]] (proposed state row ws f-row (rng/fold-in draws i)))
+                         (map vector live rows twists f-rows))
+         moved (mapv #(weighed state (particles %1) %2 %3 %4) live contexts twists drawn)]
      (assoc (reduce (fn [s [i [p dw]]]
                       (-> s
                           (assoc-in [:particles i] p)

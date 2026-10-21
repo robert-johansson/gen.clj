@@ -150,7 +150,7 @@ most) is enumerated and Z computed exactly:
 misuse is loud, and the contract check catches planted inconsistencies.
 
 Mutations checked (2026-10-21, each applied, the suite run, reverted),
-sixteen, all caught:
+twenty-two, all caught (the last six of the host pool, m3-par):
 
 | Mutation | Caught by |
 |---|---|
@@ -169,6 +169,12 @@ sixteen, all caught:
 | an all-dead state estimated as Z = 1 | particles-all-of-weight-0-estimate-z-as-0 |
 | run resampling after every particle finished | particles-all-of-weight-0… |
 | potential: dense weights without the base; a product of its first | potential-test |
+| the host pool's results in another order | the-host-pool-changes-nothing, the estimates (38) |
+| a draw's key by thread, not by particle | the-host-pool-changes-nothing, the reads and draws tests (33) |
+| the potential's calls on the pool | no-lm-or-potential-call-runs-on-the-pool |
+| a task's error wrapped (ExecutionException) | a-pool-task-s-error-is-raised-as-itself, a-pool-task-sees… |
+| a new pool for every run | the-default-pool-is-shared |
+| a task without the calling thread's bindings | a-pool-task-sees-the-calling-thread-s-bindings (a batch tracer's batched-branch error, lost on the pool) |
 
 ## Measurements
 

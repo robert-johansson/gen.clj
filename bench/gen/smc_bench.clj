@@ -3,11 +3,14 @@
    against the batched LM call under it, with no potential, a cheap one (a
    mask, as a grammar's) and the masked proposal; and at Qwen3's
    vocabulary (151,936 tokens) the part of a particle's step that is the
-   SMC's own; with a GGUF model, the same over llama.cpp.
+   SMC's own, by the host pool's size; with a GGUF model, the same over
+   llama.cpp.
 
    Run: clojure -M:bench -m gen.smc-bench
+        clojure -M:bench -m gen.smc-bench host     (the host pool alone)
         clojure -J-Dgen.llama.lib=<lib> -M:bench -m gen.smc-bench model.gguf"
-  (:require [gen.llm.branching :as br]
+  (:require [clojure.string :as str]
+            [gen.llm.branching :as br]
             [gen.llm.lm :as lm]
             [gen.llm.potential :as potential]
             [gen.llm.smc :as smc]
@@ -65,6 +68,45 @@
                 m (lm/lm e (tt/tokenizer n-vocab) {:max-cells 1000000})]
       (println (step-row m [95 40 73] n 32)))))
 
+(defn- with-pool
+  "(f pool) for a host pool of threads threads, or (f false) for none."
+  [threads f]
+  (if threads
+    (with-open [^java.util.concurrent.ExecutorService pool (smc/host-pool threads)] (f pool))
+    (f false)))
+
+(defn- host-costs
+  "The host pool's effect at Qwen3's vocabulary on the toy engine: a step
+   of n particles over 16 steps, never resampling, so that every step reads
+   n contexts, as the LM's batch alone does; ms a step."
+  []
+  (let [n-vocab 151936
+        steps 16]
+    (println "\n## The host pool: a step of n particles over 16 steps, toy engine (151,936 tokens), no resampling, ms a step")
+    (println "| particles | proposal | the LM's batch alone | calling thread | 2 threads | 4 threads | 8 threads |")
+    (println "|---|---|---|---|---|---|---|")
+    (doseq [n [8 32 64]]
+      (with-open [^java.io.Closeable e (toy/engine {:n-vocab n-vocab :max-branches 160 :n-ctx 128})
+                  m (lm/lm e (tt/tokenizer n-vocab) {:max-cells 1000000})]
+        (let [gf (token/completion m {:end-tokens #{}})
+              prompt [95 40 73]
+              seed (volatile! 0)
+              raw (fn [] (loop [ctxs (vec (for [i (range n)] (conj prompt (mod (+ i (vswap! seed inc)) 90)))) t 0]
+                           (when (< t steps)
+                             (lm/batch-next-logprobs m ctxs)
+                             (recur (mapv #(conj % 1) ctxs) (inc t)))))
+              batch (/ (ms raw) steps)]
+          (doseq [[label opts] [["bootstrap" {}] ["masked, a mask" {:potential (mask n-vocab) :proposal :masked}]]]
+            (println (format "| %d | %s | %.2f | %s |" n label batch
+                             (str/join " | "
+                                       (for [threads [false 2 4 8]]
+                                         (with-pool threads
+                                           (fn [pool]
+                                             (format "%.2f" (/ (ms #(smc/run gf [prompt steps] n
+                                                                             (assoc opts :key (rng/key (vswap! seed inc))
+                                                                                    :host-pool pool :ess-threshold 0)))
+                                                               steps))))))))))))))
+
 (defn- llama-per-step
   "The same over llama.cpp with model, 16 steps."
   [model]
@@ -81,9 +123,11 @@
       (println (format "\nBackstop collections: %d" (:collections (br/info e)))))))
 
 (defn -main
-  "The toy engine's costs; with a GGUF file, llama.cpp's."
-  [& [model]]
-  (if model
-    (llama-per-step model)
-    (do (per-step 97) (per-step 151936)))
+  "The toy engine's costs; with host, the host pool's alone; with a GGUF
+   file, llama.cpp's."
+  [& [arg]]
+  (case arg
+    nil (do (per-step 97) (per-step 151936) (host-costs))
+    "host" (host-costs)
+    (llama-per-step arg))
   (shutdown-agents))
