@@ -8,8 +8,8 @@
 
    gen.clj's step returns the state, so a step's incremental weights are
    the state's log weights, one per particle. The ports assert their count
-   with 100 particles; Gen.jl's 20,000 serve its log-ML band, which is the
-   statistical port's (pending, below)."
+   with 100 particles; Gen.jl's 20,000 serve its log-ML bands, the
+   statistical testsets'."
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array :refer [+ - * /]]
@@ -122,8 +122,25 @@
     (doseq [state (rest (filtered num-particles {} {} (rng/key 2)))]
       (is (= num-particles (count (:log-weights state)))))))
 
-;; Pending:
-;; - particle_filter.jl:143 and :169: log-ml-estimate within 0.02 of the
-;;   forward algorithm's, with 20,000 particles (statistical, genclj-zgkq).
+(def ^:private log-ml-sd
+  "The sd of the log-ML estimate with 20,000 particles. Over 200 keys at
+   1,000 particles it is 0.0279 with the custom proposal and 0.0414 with the
+   internal one, and √20 times smaller at 20,000 (0.0051 and 0.0095 over 24
+   keys); the estimates' mean is within 0.0016 of the exact value.
+   Gen.jl's atol 0.02 is 3.2 and 2.2 of them."
+  {:custom (/ 0.0279 (Math/sqrt 20)) :internal (/ 0.0414 (Math/sqrt 20))})
+
+(def ^:private exact-log-ml (Math/log (hmm-forward prior emission transition obs-x)))
+
+(deftest ^:slow ^:heavy log-ml-estimates
+  (testing "a custom proposal" ; particle_filter.jl:143
+    (is (genjl/approx? exact-log-ml
+                       (pf/log-ml-estimate (last (filtered 20000 {:proposal init-proposal :proposal-args [(obs-x 0)]}
+                                                           {:proposal step-proposal} (rng/key 3))))
+                       {:atol (* 5 (:custom log-ml-sd))})))
+  (testing "the internal proposal" ; particle_filter.jl:169
+    (is (genjl/approx? exact-log-ml (pf/log-ml-estimate (last (filtered 20000 {} {} (rng/key 4))))
+                       {:atol (* 5 (:internal log-ml-sd))}))))
+
 ;; n/a: particle_filter.jl:172, the state's copy, ==, hash and mutation
 ;; independence (8): gen.clj's states are persistent values.
