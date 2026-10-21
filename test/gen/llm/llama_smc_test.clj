@@ -1,9 +1,10 @@
 (ns gen.llm.llama-smc-test
   "Token SMC (gen.llm.smc) over llama.cpp, with a lipogram as the potential
    (no token whose bytes hold the letter e: a grammar's mask in miniature),
-   by the masked proposal and by the bootstrap: every particle obeys it,
-   its trace's score is its log p (score once), a step after the first is
-   one read, and the engine's GC backstop never runs.
+   by the masked proposal and by the bootstrap, and with a grammar
+   (gen.llm.grammar, a date) by the masked proposal: every particle obeys
+   it, its trace's score is its log p (score once), a step after the first
+   is one read, and the engine's GC backstop never runs.
 
    Needs llama.cpp's libraries (native/build-llama.sh), the compiled
    binding (clojure -T:build java) and a model, given as
@@ -12,6 +13,7 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gen.gfi :as gfi]
             [gen.llm.branching :as br]
+            [gen.llm.grammar :as grammar]
             [gen.llm.lm :as lm]
             [gen.llm.potential :as potential]
             [gen.llm.smc :as smc]
@@ -91,6 +93,32 @@
             (is (every? #(= (:score %) (:weight (gfi/assess completion args (:choices %)))) trs)
                 "score once, bit for bit")
             (println (str "llama SMC (" (name proposal) "): " (pr-str (lm/decode lm (:tokens (first live)))))))))
+      (is (zero? (:collections (br/info engine))) "no GC backstop"))))
+
+(deftest a-grammar-holds-for-every-particle
+  ;; token SMC under a grammar (gen.llm.grammar: a date), by the masked
+  ;; proposal: every particle stays alive and ends, its text a string of
+  ;; the language; the estimate (the probability that the LM's completion
+  ;; is a date) is finite; the particles' log p are their traces' scores
+  (when @available?
+    (let [{:keys [lm completion engine]} (setup)
+          date #" ?[0-9]{4}-[0-9]{2}-[0-9]{2}"
+          g (grammar/grammar lm (str date))
+          args [((llama 'tokenize) engine "Today's date, written as YYYY-MM-DD, is") 16]
+          s (smc/run completion args 32 {:potential g :proposal :masked :key (rng/key 3)})
+          live (remove :dead? (:particles s))
+          ends (:eog (lm/vocab lm))
+          texts (mapv #(lm/decode lm (vec (remove ends (:tokens %)))) live)
+          trs (smc/traces s)]
+      (is (= 32 (count live)) "the masked proposal draws only allowed tokens")
+      (is (every? #(contains? ends (peek (:tokens %))) live) "every particle ends")
+      (is (every? #(re-matches date %) texts) (pr-str (frequencies texts)))
+      (is (Double/isFinite (smc/log-ml-estimate s)))
+      (is (<= (smc/log-ml-estimate s) 0.0) "the probability of a date, estimated")
+      (is (= (mapv :log-p live) (mapv :score trs)))
+      (is (every? #(= (:score %) (:weight (gfi/assess completion args (:choices %)))) trs) "score once, bit for bit")
+      (println "llama SMC under a date grammar:" (pr-str (frequencies texts))
+               (format "log Z %.3f" (smc/log-ml-estimate s)))
       (is (zero? (:collections (br/info engine))) "no GC backstop"))))
 
 (deftest a-step-after-the-first-is-one-read

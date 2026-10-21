@@ -327,5 +327,43 @@ The masked proposal at 64 particles went from 106 to 51 ms a step, now 3
 ms over the bootstrap rather than 55: its rows on the pool, and
 `constrained/weighted` allocating only the row it returns. SMC comes under
 the batch alone because it resamples, after which particles share
-contexts and a step reads fewer. Peak RSS 3.5 GB, no GC backstop. With
-Qwen3.5 and Gemma-3-270M, and with a grammar potential: in later runs.
+contexts and a step reads fewer. Peak RSS 3.5 GB, no GC backstop.
+
+With all three models and a grammar (2026-10-21 08:05, m3-smc2, no other
+JVM): the last column runs SMC under `gen.llm.grammar`'s `[0-9, ]*`
+(digits, commas and spaces, so that a particle can go on for the bench's
+16 tokens), by the masked proposal; the grammar is made in 218, 306 and
+400 ms (one live state, its mask over the vocabulary). ms a step:
+
+| model | particles | the LM's batch alone | SMC, no potential | a mask, bootstrap | a mask, masked proposal | a grammar, masked proposal |
+|---|---|---|---|---|---|---|
+| Qwen3-0.6B | 8 | 17.6 | 12.9 | 12.6 | 12.6 | 11.7 |
+| Qwen3-0.6B | 32 | 69.3 | 27.5 | 27.5 | 29.3 | 27.9 |
+| Qwen3-0.6B | 64 | 103.9 | 47.1 | 47.6 | 53.0 | 44.9 |
+| Qwen3.5-0.8B | 8 | 25.9 | 25.9 | 31.8 | 34.7 | 34.1 |
+| Qwen3.5-0.8B | 32 | 183.0 | 94.3 | 102.7 | 100.1 | 102.2 |
+| Qwen3.5-0.8B | 64 | 229.7 | 150.4 | 152.6 | 147.1 | 136.4 |
+| Gemma-3-270M | 8 | 13.8 | 12.4 | 12.2 | 12.7 | 11.9 |
+| Gemma-3-270M | 32 | 58.8 | 31.1 | 29.8 | 33.6 | 32.2 |
+| Gemma-3-270M | 64 | 83.8 | 50.8 | 51.9 | 59.7 | 61.8 |
+
+A grammar's mask costs no more than the bench's own (both a fresh float
+row a particle and step); a grammar's steps can be cheaper still, its
+particles sharing contexts after resampling. Qwen3.5 (hybrid) costs two to
+three times the others at 32 and 64 particles, with the recurrent step
+split (main 261a885): its batch alone takes 183 ms at 32 contexts. Peak
+RSS 3.4, 6.5 and 2.9 GB; no GC backstop.
+
+**Under a grammar, on llama.cpp** (`gen.llm.llama-smc-test`,
+`a-grammar-holds-for-every-particle`): SMC of 32 particles, max-tokens
+16, under the date grammar ` ?[0-9]{4}-[0-9]{2}-[0-9]{2}` by the masked
+proposal, after "Today's date, written as YYYY-MM-DD, is". Every particle
+lives, ends, and its text is a string of the language; the particles' log
+p are their traces' scores and assess's, bit for bit; no backstop. log Ẑ,
+the log probability that the LM's completion is such a date: −21.36
+(Qwen3-0.6B, 6 distinct dates after resampling, among them " 1997-09-19"),
+−9.81 (Qwen3.5-0.8B, 32 distinct, " 2024-06-07" among them) and −10.58
+(Gemma-3-270M, 32 distinct). The planted bug, the masked proposal without
+the potential's weights (a bootstrap that the grammar then weighs), fails
+the test on Qwen3-0.6B: no particle survives, log Ẑ is −Inf (and the
+lipogram's masked run keeps 11 of 32).

@@ -4,13 +4,14 @@
    mask, as a grammar's) and the masked proposal; and at Qwen3's
    vocabulary (151,936 tokens) the part of a particle's step that is the
    SMC's own, by the host pool's size; with a GGUF model, the same over
-   llama.cpp.
+   llama.cpp, and under a grammar (gen.llm.grammar).
 
    Run: clojure -M:bench -m gen.smc-bench
         clojure -M:bench -m gen.smc-bench host     (the host pool alone)
         clojure -J-Dgen.llama.lib=<lib> -M:bench -m gen.smc-bench model.gguf"
   (:require [clojure.string :as str]
             [gen.llm.branching :as br]
+            [gen.llm.grammar :as grammar]
             [gen.llm.lm :as lm]
             [gen.llm.potential :as potential]
             [gen.llm.smc :as smc]
@@ -41,8 +42,9 @@
 
 (defn- step-row
   "A table row for n particles of steps steps over the LM m from prompt:
-   ms a step, for the LM's batch alone and for SMC."
-  [m prompt n steps]
+   ms a step, for the LM's batch alone and for SMC; with a grammar, also
+   for SMC under it by the masked proposal."
+  [m prompt n steps grammar]
   (let [n-vocab (long (:n-vocab (lm/vocab m)))
         gf (token/completion m {:end-tokens #{}})
         seed (volatile! 0)
@@ -51,14 +53,21 @@
                      (when (< t steps)
                        (lm/batch-next-logprobs m ctxs)
                        (recur (mapv #(conj % 1) ctxs) (inc t)))))]
-    (format "| %d | %.2f | %.2f | %.2f | %.2f |" n
-            (/ (ms raw) steps) (/ (ms (run {})) steps)
-            (/ (ms (run {:potential (mask n-vocab)})) steps)
-            (/ (ms (run {:potential (mask n-vocab) :proposal :masked})) steps))))
+    (str (format "| %d | %.2f | %.2f | %.2f | %.2f |" n
+                 (/ (ms raw) steps) (/ (ms (run {})) steps)
+                 (/ (ms (run {:potential (mask n-vocab)})) steps)
+                 (/ (ms (run {:potential (mask n-vocab) :proposal :masked})) steps))
+         (when grammar
+           (format " %.2f |" (/ (ms (run {:potential grammar :proposal :masked})) steps))))))
 
 (def ^:private header
   ["| particles | the LM's batch alone | SMC, no potential | a mask, bootstrap | a mask, masked proposal |"
    "|---|---|---|---|---|"])
+
+(def ^:private grammar-language
+  "The llama bench's grammar: digits, commas and spaces, any number, so
+   that every particle can go on for the bench's 16 tokens."
+  "[0-9, ]*")
 
 (defn- per-step [n-vocab]
   (println (format "\n## A step of n particles over 32 steps, toy engine (%d tokens), ms a step (resampling at ESS < n/2)" n-vocab))
@@ -66,7 +75,7 @@
   (doseq [n [8 32 64]]
     (with-open [^java.io.Closeable e (toy/engine {:n-vocab n-vocab :max-branches 160 :n-ctx 128})
                 m (lm/lm e (tt/tokenizer n-vocab) {:max-cells 1000000})]
-      (println (step-row m [95 40 73] n 32)))))
+      (println (step-row m [95 40 73] n 32 nil)))))
 
 (defn- with-pool
   "(f pool) for a host pool of threads threads, or (f false) for none."
@@ -117,9 +126,14 @@
                 m (lm/lm e (tokenizer e))]
       (println (format "\n## A step of n particles over 16 steps, llama.cpp: %s (%d tokens), ms a step"
                        (:desc (:model (br/info e))) (:n-vocab (lm/vocab m))))
-      (run! println header)
-      (doseq [n [8 32 64]]
-        (println (step-row m (tokenize e "Once upon a time") n 16)))
+      (let [t0 (System/nanoTime)
+            g (grammar/grammar m grammar-language {:end-tokens #{}})]
+        (println (format "The grammar %s: %s, made in %.0f ms" (pr-str grammar-language) (grammar/info g)
+                         (/ (- (System/nanoTime) t0) 1e6)))
+        (println (str (first header) " a grammar, masked proposal |"))
+        (println (str (second header) "---|"))
+        (doseq [n [8 32 64]]
+          (println (step-row m (tokenize e "Once upon a time") n 16 g))))
       (println (format "\nBackstop collections: %d" (:collections (br/info e)))))))
 
 (defn -main
