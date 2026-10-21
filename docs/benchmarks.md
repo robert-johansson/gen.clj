@@ -158,10 +158,11 @@ models and operations as `gen.model-bench` and the scalar paths of
   `time_ns` loops built as the two harnesses above: a 5 s warm-up, a GC and
   6 samples of about 0.1 s, the mean per call; or 20 warm-ups and the
   median of 7 (3). The global RNG is seeded with 1.
-- **The script** (`genjl_bench.jl`) was kept outside the repo, in the
-  agent's scratch directory, as asked. Its models are gen.clj's line for
-  line, 1-based where gen.clj's addresses are 0-based. linreg, for
-  instance:
+- **The script** is `bench/genjl/genjl_bench.jl`. Rerun it with
+  `nice -n 10 julia --startup-file=no bench/genjl/genjl_bench.jl` and Gen
+  0.4.8 in the active environment; add `quick` for a short check that is
+  not a timing run. Its models are gen.clj's line for line, 1-based where
+  gen.clj's addresses are 0-based. linreg, for instance:
 
   ```julia
   @gen function linreg(xs::Vector{Float64})
@@ -255,10 +256,6 @@ gap is the dynamic handler's per-choice cost, the target for the CPU-path
 work (genclj-4n51). The gen.clj figures here are about 12% slower than the
 table at the top (19.2 against 17.0 µs for linreg simulate, 2026-10-18):
 other code has landed since, and the conditions differ.
-
-**Recommendation:** keep the Julia script in the repo (`bench/genjl/`, say)
-so that the comparison can be re-run. It is outside the repo now, as the
-work was asked.
 
 ### Where gen.clj's 1.7 µs a choice goes (JDK Flight Recorder)
 
@@ -367,7 +364,7 @@ The profile is reproducible:
   26 GB sample from JFR's own start-up that the phase table leaves out;
 - the per-thread allocation count, `P/lm-scripts/alloc_linreg.clj`.
 
-These scripts sit outside the repo, with the Julia one.
+These two scripts sit outside the repo.
 
 ## GenMLX's inference benchmarks, within gen.clj (2026-10-19)
 
