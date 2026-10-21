@@ -60,6 +60,19 @@
     (is (= (cm/choicemap :a 1.0 :b 2.0) (cm/choicemap :b 2.0 :a 1.0)))
     (is (= "#gen/choicemap {:a 1.0}" (pr-str (cm/choicemap :a 1.0))))))
 
+(deftest a-choice-map-value-is-itself
+  ;; nodes and values are records, so map? is true of them: choicemap and
+  ;; from-map once read their fields as addresses ([:d :m :a :v]), the
+  ;; natural port of assignment.jl's StaticChoiceMap with submaps (M5)
+  (let [sub (cm/choicemap :a 1.0 :b 2.0)
+        expected (cm/choicemap [:d :a] 1.0 [:d :b] 2.0 :c 3.0)]
+    (is (= expected (cm/choicemap :c 3.0 :d sub)))
+    (is (= expected (cm/from-map {:c 3.0 :d sub})))
+    (is (= expected (cm/from-map (cm/from-map {:c 3.0 :d sub}))) "a choice map is its own from-map")
+    (is (= [[:c] [:x :d :a] [:x :d :b]] (cm/addresses (cm/from-map {:c 3.0 :x {:d sub}}))) "nested in a plain map")
+    (is (= 2.0 (cm/get-choice (cm/choicemap :d (cm/->Value 2.0)) :d)) "a leaf choice map")
+    (is (= [[:d]] (cm/addresses (cm/choicemap :d (cm/->Value 2.0)))))))
+
 (deftest functional-update
   (let [c (cm/choicemap :a 1.0)]
     (is (= 2.0 (cm/get-choice (cm/set-choice c [:b :c] 2.0) [:b :c])))

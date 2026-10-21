@@ -4,14 +4,14 @@
    a Value (a leaf holding one choice); they are plain Clojure data with a thin
    protocol, so equality, hashing and structural sharing come for free.
 
-(set! *warn-on-reflection* true)
-
    An address is any value except a vector; a vector is a path of addresses
    ([:y 3] is :y, then 3), playing the role of Gen.jl's :y => 3. Leaf order is
    canonical (addresses sorted), so to-array and from-array agree for any two
    choice maps with the same addresses."
   (:refer-clojure :exclude [empty? merge to-array])
   (:require [gen.array :as array]))
+
+(set! *warn-on-reflection* true)
 
 (defprotocol IChoiceMap
   (-has-value? [cm])
@@ -47,7 +47,8 @@
 
 (defn choicemap
   "A choice map from address-value pairs. An address may be a path vector;
-   a value that is a plain map becomes a nested choice map.
+   a value that is a choice map is set as itself, and one that is a plain
+   map becomes a nested choice map.
    (choicemap :slope 2.0 [:y 0] 1.5 :params {:a 1 :b 2})
 
    A value that is a Clojure vector is a product value (one value of a
@@ -62,12 +63,14 @@
           (partition 2 kvs)))
 
 (defn from-map
-  "A choice map from a nested Clojure map (maps become nodes, anything else a
-   leaf)."
+  "A choice map from a nested Clojure map: plain maps become nodes, a choice
+   map stays itself, anything else is a leaf. Nodes and values are records,
+   so map? is true of them: they are told apart first, or their fields would
+   be read as addresses."
   [m]
-  (if (map? m)
-    (->Node (into {} (map (fn [[k v]] [k (from-map v)])) m))
-    (->Value m)))
+  (cond (choicemap? m) m
+        (map? m) (->Node (into {} (map (fn [[k v]] [k (from-map v)])) m))
+        :else (->Value m)))
 
 ;; ---------------------------------------------------------------------------
 ;; Access
