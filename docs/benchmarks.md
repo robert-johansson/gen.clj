@@ -359,12 +359,11 @@ generator rather than a key per site). Rule 2's keys are a cost gen.clj
 chooses to pay: here at most the 1.5% of `hash2x32` and the split.
 
 The profile is reproducible:
-- `P/lm-scripts/profile_linreg.clj` (`clojure -M:bench <file> <out.jfr>`);
-- `jfr view hot-methods`, and `jfr view allocation-by-site`, which counts a
-  26 GB sample from JFR's own start-up that the phase table leaves out;
-- the per-thread allocation count, `P/lm-scripts/alloc_linreg.clj`.
-
-These two scripts sit outside the repo.
+- `clojure -M:bench -m gen.choice-profile jfr out.jfr` records it;
+- read it with `jfr view hot-methods` and `jfr view allocation-by-site`
+  (which counts a 26 GB sample from JFR's own start-up that the phase table
+  leaves out);
+- `clojure -M:bench -m gen.choice-profile alloc` counts the bytes a choice.
 
 ## GenMLX's inference benchmarks, within gen.clj (2026-10-19)
 
