@@ -14,7 +14,8 @@ records them PROVISIONAL in DESIGN.md §9.*
 | The potential contract as a check any potential runs (`check-consistent`) | `test/gen/llm/potential_contract.clj` |
 | Token SMC over a completion, twisted by a potential | `gen.llm.smc` |
 | Tests on an enumerable toy vocabulary | `test/gen/llm/potential_test.clj`, `test/gen/llm/smc_test.clj` |
-| Costs | `bench/gen/smc_bench.clj` |
+| The same over llama.cpp, a lipogram as the potential (skipped without `-J-Dgen.llama.test-model`) | `test/gen/llm/llama_smc_test.clj` |
+| Costs, on the toy engine or a GGUF model | `bench/gen/smc_bench.clj` |
 
 ## Potentials
 
@@ -138,7 +139,12 @@ most) is enumerated and Z computed exactly:
 - **Reads, traces, keys**: each step is one LM read; particles convert to
   the completion's traces with their log p as scores, consistent with
   assess; runs are pure functions of the key; no GC backstop; misuse is
-  loud.
+  loud, each error with a `:reason` (`:invalid-model`, `:invalid-args`,
+  `:no-tokens`, `:invalid-option`, `:invalid-potential`, `:invalid-row`,
+  `:not-done`, `:impossible`), which the test checks.
+- The masked proposal's rows, renormalized in double and stored as floats,
+  pass `token/dist`'s normalization check (within 1e-4 of 1), which a
+  proposal function's rows must pass too.
 
 `gen.llm.potential-test`: dense next weights are consistent, products sum,
 misuse is loud, and the contract check catches planted inconsistencies.
@@ -196,9 +202,19 @@ thread-safe). And rows that came with their probabilities (the engine
 computes the exponentials when it normalizes) would make a draw a float
 sum, tens of microseconds.
 
-## For the llama.cpp runs
+## On llama.cpp
 
-The SMC tests run on the toy engine only; on llama.cpp the same run is a
-batched decode per step. To measure there: a step of 8, 32 and 64
-particles against the batched advance alone, with and without a grammar
-potential (from m3-grammar).
+`gen.llm.llama-smc-test` runs token SMC over a real model with a
+lipogram as the potential (no token whose bytes hold an e: 0 or -Inf, a
+grammar's mask in miniature), 32 particles of 12 tokens, by the masked
+proposal and by the bootstrap. It checks that every live particle's text
+obeys it, that the estimate is finite and at most 0 (a probability), that
+the particles' log p are their traces' scores and assess's bit for bit
+(score once), that a step after the first is one read, and that the GC
+backstop never runs.
+
+`clojure -J-Dgen.llama.lib=<lib> -M:bench -m gen.smc-bench <gguf>` gives a
+step of 8, 32 and 64 particles over 16 steps against the LM's batch alone,
+with no potential and with a mask (bootstrap and masked). With a grammar
+potential (m3-grammar) once it joins. The runs on the M4 are recorded
+below when made.
