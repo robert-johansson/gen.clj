@@ -97,8 +97,53 @@
         (is (false? (ts/host (cm/get-choice d (prefix 3)))))
         (is (= diff/unknown-change rd))))))
 
+;; ---------------------------------------------------------------------------
+;; recurse.jl:110, the likeliest strings (statistical)
+;; ---------------------------------------------------------------------------
+
+(def ^:private likeliest
+  "recurse.jl:110, test_strings: the grammar's 20 likeliest strings."
+  ["(.aa)" "(-aa)" "(.bb)" "(-bb)"
+   "(.a(.aa)a)" "(-a(.aa)a)" "(.a(-aa)a)" "(-a(-aa)a)"
+   "(.b(.bb)b)" "(-b(.bb)b)" "(.b(-bb)b)" "(-b(-bb)b)"
+   "(.a(.bb)a)" "(-a(.bb)a)" "(.a(-bb)a)" "(-a(-bb)a)"
+   "(.b(.aa)b)" "(-b(.aa)b)" "(.b(-aa)b)" "(-b(-aa)b)"])
+
+(defn- probability
+  "The probability of a string of the grammar, its one derivation's: every
+   node's rule and prefix."
+  [s]
+  (let [body (subs s 2 (dec (count s)))]
+    (* (if (= \. (nth s 1)) 0.4 0.6)
+       (case body
+         "aa" 0.23
+         "bb" 0.27
+         (* (if (= \a (first body)) 0.24 0.26) (probability (subs body 1 (dec (count body)))))))))
+
+(def ^:private runs
+  "Gen.jl's 1,000 runs miss its least likely string, (.a(.aa)a) at
+   p = 0.0088, with probability e^-8.9 = 1.4e-4. In 10,000 its count is 88
+   with a standard error of 9.4, so 5 standard errors stay above 0."
+  10000)
+
+(defn- check-frequencies
+  "test_strings, by frequency: each likeliest string's count in strings
+   within 5 standard errors of runs·p, which is above 0, so it appears."
+  [strings]
+  (let [counts (frequencies strings)]
+    (doseq [s likeliest]
+      (let [p (probability s)
+            n (get counts s 0)]
+        (is (< (abs (- n (* runs p))) (* 5 (Math/sqrt (* runs p (- 1 p)))))
+            (str s ": " n " in " runs ", p = " p))))))
+
+(deftest the-likeliest-strings
+  ;; recurse.jl:110
+  (testing "generate" ; recurse.jl:136
+    (check-frequencies (map #(:retval (:trace (gfi/generate pcfg [nil] cm/EMPTY %))) (rng/split (rng/key 4) runs))))
+  (testing "simulate" ; recurse.jl:145
+    (check-frequencies (map #(:retval (gfi/simulate pcfg [nil] %)) (rng/split (rng/key 5) runs)))))
+
 ;; Pending
 ;; - recurse.jl:3, Recurse's node numbering (get_child, get_child_num,
 ;;   get_parent; 54 assertions): G13, genclj-cbec.
-;; - recurse.jl:110, the 20 likeliest strings among 1,000 runs of generate
-;;   and of simulate: statistical, genclj-zgkq.
