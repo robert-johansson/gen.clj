@@ -1244,8 +1244,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     their bytes, while instaparse has no parser state to carry from token
     to token, so each token would be a reparse. GenMLX used it only to read
     the regex syntax, a 150-line descent here. Measured at Qwen3's 151,936
-    tokens: every mask of a 117-state tool-call grammar in 5 ms, of a
-    132-state JSON object in 44 ms.
+    tokens (M4, quiet): every mask of a 117-state tool-call grammar in 5 ms,
+    of a 132-state JSON object in 41 ms; a constrained token costs 270 µs
+    (Qwen3) to 490 µs (250,000 tokens) beyond its draw, 5 to 8 % of a
+    5.8 ms llama.cpp decode, the dense `logw-next` row a part of it.
   - *Languages over bytes, characters as UTF-8*, because tokens are byte
     strings that cross character boundaries; `[^"]` admits every character,
     not printable ASCII (GenMLX's genmlx-6dax). The regex syntax is
