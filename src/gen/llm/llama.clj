@@ -31,6 +31,11 @@
      true) keeps one decode a step; (info e) says :split-recurrent?, and
      step-splits what was split.
    - Encoder-decoder, diffusion and embedding models are refused.
+   - The engine reserves the memory it holds (:footprint in info: the
+     model's weights, and the KV-cache, recurrent-state, output and compute
+     buffers llama.cpp reported allocating, read from its log as the engine
+     is made) in gen.array.memory, until it closes: the MLX backend's
+     budget leaves it out.
    - A decode's rows of logits are normalized on a small pool of the
      engine's own, a thread per row up to four, while the engine's thread
      waits: normalizing a vocabulary on the host costs about as much as a
@@ -41,7 +46,8 @@
    (default native/build/llama/<platform>/lib, gen.llama.LlamaRuntime).
    tokenize, token-bytes and detokenize use the GGUF's own vocabulary;
    tokenizer gathers them as the LM protocol's tokenizer (gen.llm.lm)."
-  (:require [gen.llm.branching :as br]
+  (:require [gen.array.memory :as reservations]
+            [gen.llm.branching :as br]
             [gen.llm.llama.recurrent :as recurrent]
             [gen.llm.slots :as slots])
   (:import [gen.llama LlamaRuntime LlamaRuntime$Batch]
@@ -289,7 +295,8 @@
     (replayed! splits recurrent/clear slot)
     (replay-checked! splits mem [slot] "clear"))
 
-  (slots-close [_]
+  (slots-close [this]
+    (reservations/release! this)
     (.shutdown pool)
     (Llama/llama_batch_free (.-struct batch))
     (Llama/llama_free ctx)
@@ -392,11 +399,39 @@
           n (Llama/llama_model_desc model buf 256)]
       (if (neg? n) "" (.getString buf 0)))))
 
+(def ^:private buffer-line
+  ;; llama.cpp v0.7.0 reports each buffer it allocates, at info level:
+  ;; "load_tensors:   Metal_Mapped model buffer size =   604.15 MiB",
+  ;; "llama_kv_cache:      Metal KV buffer size =   448.00 MiB", and the
+  ;; recurrent state's (RS), output and compute buffers alike
+  #"(?m)^\s*\w+:\s+(\S+)\s+(model|KV|RS|output|compute) buffer size =\s+([0-9.]+) MiB")
+
+(defn- footprint
+  "The memory model m's engine holds: :bytes, its weights (the model's
+   size) and every other buffer llama.cpp reported allocating in log, the
+   text it logged as the model loaded and the context was made; :buffers,
+   each [{:kind :model|:kv|:rs|:output|:compute, :buffer its backend's
+   name, :bytes}], to 0.01 MiB. The weights count once: the model buffers
+   of a mapped file are views of one mapping (Metal's maps the whole file,
+   the CPU's the token embeddings again), so they are listed, not added."
+  [^MemorySegment m log]
+  (let [buffers (mapv (fn [[_ buffer kind mib]]
+                        {:kind (keyword (.toLowerCase ^String kind))
+                         :buffer buffer
+                         :bytes (Math/round (* (Double/parseDouble mib) 1048576.0))})
+                      (re-seq buffer-line log))]
+    (when-not (some #(= :model (:kind %)) buffers)
+      (throw (llama-failure "llama.cpp reported no model buffer, so the engine's footprint is unknown"
+                            {:reason :no-footprint})))
+    {:bytes (reduce + (Llama/llama_model_size m) (map :bytes (remove #(= :model (:kind %)) buffers)))
+     :buffers buffers}))
+
 (defn- describe
-  "The Slots' info: sizes, special tokens, the model."
-  [^MemorySegment m ^MemorySegment ctx ^MemorySegment vocab {:keys [model n-slots]}]
+  "The Slots' info: sizes, special tokens, the model, its footprint."
+  [^MemorySegment m ^MemorySegment ctx ^MemorySegment vocab {:keys [model n-slots]} footprint]
   (let [n-vocab (Llama/llama_vocab_n_tokens vocab)]
     {:engine :llama.cpp
+     :footprint footprint
      :n-vocab n-vocab
      :n-slots n-slots
      :n-ctx (long (Llama/llama_n_ctx_seq ctx))
@@ -415,9 +450,19 @@
              :hybrid? (Llama/llama_model_is_hybrid m)}
      :gpu-offload? (Llama/llama_supports_gpu_offload)}))
 
+(defn- logged
+  "[(f), what llama.cpp logged on this thread while f ran]."
+  [f]
+  (LlamaRuntime/startCapture)
+  (let [v (try (f)
+               (catch Throwable t
+                 (LlamaRuntime/endCapture)
+                 (throw t)))]
+    [v (LlamaRuntime/endCapture)]))
+
 (defn- open-slots
-  "LlamaSlots for opts, made on the engine's thread. A failure frees what
-   was made, last first."
+  "LlamaSlots for opts, made on the engine's thread, its footprint reserved.
+   A failure frees what was made, last first."
   [opts]
   (LlamaRuntime/load)
   (LlamaRuntime/clearLastError)
@@ -427,19 +472,23 @@
         undo (volatile! (list #(.close arena)))
         owned (fn [free x] (vswap! undo conj #(free x)) x)]
     (try
-      (let [m (owned Llama/llama_model_free (doto (load-model arena model gpu-layers) check-decoder-only))
-            ctx (owned Llama/llama_free (new-context arena m opts))
+      (let [[[m ctx] log] (logged #(let [m (owned Llama/llama_model_free
+                                                  (doto (load-model arena model gpu-layers) check-decoder-only))]
+                                      [m (owned Llama/llama_free (new-context arena m opts))]))
             _ (check-context ctx n-slots)
             n-batch (long (Llama/llama_n_batch ctx))
             batch (owned #(Llama/llama_batch_free (.-struct ^LlamaRuntime$Batch %))
                          (LlamaRuntime$Batch. (Llama/llama_batch_init arena (int n-batch) (int 0) (int 1)) n-batch))
             pool (owned #(.shutdown ^ExecutorService %) (row-pool))
             vocab (Llama/llama_model_get_vocab m)
-            described (describe m ctx vocab opts)
+            fp (footprint m log)
+            described (describe m ctx vocab opts fp)
             splits (when (and split? (some (:model described) [:recurrent? :hybrid?]))
                      (volatile! {:cells (recurrent/empty-cells n-slots) :off nil :steps 0 :split 0 :decodes 0}))
-            info (assoc described :split-recurrent? (some? splits))]
-        (LlamaSlots. m ctx (memory ctx) vocab batch arena pool (:n-vocab info) n-batch info splits))
+            info (assoc described :split-recurrent? (some? splits))
+            slots (LlamaSlots. m ctx (memory ctx) vocab batch arena pool (:n-vocab info) n-batch info splits)]
+        (reservations/reserve! slots (:bytes fp) (str "llama.cpp: " (:desc (:model info))))
+        slots)
       (catch Throwable t
         (run! #(%) @undo)
         (throw t)))))

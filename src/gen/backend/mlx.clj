@@ -16,6 +16,15 @@
      frees the cache and waits for running work before allocating, to half
      of RAM. MLX's defaults are all of RAM for both, which let one JVM take
      the whole machine (2026-10-19: a kernel panic from memory exhaustion).
+     MLX's limit is no cap, though: past it MLX goes on allocating, without
+     an error (genclj-zztc, 2026-10-20).
+   - So the backend keeps a budget of its own (budget, set-budget!): MLX's
+     active memory may reach the budget it shares with native engines on
+     the same machine (an LLM engine's weights and caches, which they
+     reserve in gen.array.memory), less those reservations and a headroom.
+     After every evaluation the backend checks it; past it, it collects
+     unreachable arrays and checks again, and then it is a loud error
+     (:reason :mlx-budget-exceeded) with the numbers.
    - 0-d arrays are MLX arrays too (the JVM backend's are host values), so
      scalar code stays lazy. Reading one on the host (item, truthy?) evaluates.
    - Ops run on the backend's stream, a stream MLX lets any thread use. One
@@ -36,6 +45,10 @@
      gen.mlx.grad    tape (default) or native
      gen.mlx.cache-bytes   MLX's buffer cache (default a sixteenth of RAM)
      gen.mlx.memory-bytes  MLX's memory limit (default half of RAM)
+     gen.mlx.budget-bytes  the budget MLX shares with native engines (default
+                           half of RAM)
+     gen.mlx.budget-headroom-bytes  kept free of both (default a sixteenth
+                           of RAM)
      gen.mlx.gc-bytes, gen.mlx.gc-arrays  when the backend collects (above)
      gen.mlx.gc-new-bytes  collect after this many bytes of new arrays
                            (default a sixteenth of RAM)
@@ -46,6 +59,7 @@
      gen.mlx.lib           the directory of libmlxc (default
                            native/build/<platform>/lib; MlxRuntime)"
   (:require [gen.array.dtype :as dt]
+            [gen.array.memory :as reservations]
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]
             [gen.random.threefry])
@@ -161,16 +175,58 @@
       (.get (.submit ex ^Runnable (fn [])))
       {:executor ex :thread @t})))
 
+;; ---------------------------------------------------------------------------
+;; The budget (budget and set-budget! below)
+;; ---------------------------------------------------------------------------
+
+(defn- physical-memory ^long []
+  (.getTotalMemorySize ^com.sun.management.OperatingSystemMXBean
+                       (java.lang.management.ManagementFactory/getOperatingSystemMXBean)))
+
+(defonce ^:private budget-limits
+  (atom {:bytes (Long/getLong "gen.mlx.budget-bytes" (quot (physical-memory) 2))
+         :headroom (Long/getLong "gen.mlx.budget-headroom-bytes" (quot (physical-memory) 16))}))
+
+(defn- mlx-budget
+  "The bytes of active memory MLX's arrays may hold: the budget less the
+   native engines' reservations and the headroom."
+  ^long []
+  (let [{:keys [^long bytes ^long headroom]} @budget-limits]
+    (max 0 (- bytes (reservations/reserved) headroom))))
+
+(declare collect! budget)
+
+(defn- check-budget!
+  "MLX's active memory within its budget, after an evaluation: past it,
+   collect the arrays that became unreachable and check again; still past
+   it, a loud error."
+  []
+  (when (> (Mlx/mlx_get_active_memory) (mlx-budget))
+    (collect!)
+    (let [active (Mlx/mlx_get_active_memory)
+          {:keys [mlx] :as b} (budget)]
+      (when (> active (long mlx))
+        (throw (ex-info (format (str "MLX holds %.1f MB, over its budget of %.1f MB (%.1f MB shared with native"
+                                     " engines, less %.1f MB they reserved and %.1f MB of headroom): drop arrays,"
+                                     " or raise the budget (set-budget!, gen.mlx.budget-bytes)")
+                                (/ active 1e6) (/ (long mlx) 1e6) (/ (long (:bytes b)) 1e6)
+                                (/ (long (:reserved b)) 1e6) (/ (long (:headroom b)) 1e6))
+                        (assoc b :reason :mlx-budget-exceeded :active active
+                               :reservations (reservations/reservations-held))))))))
+
 (defn- evaluating*
   "(f) holding the evaluation lock; where evaluations need one thread
-   (one-eval-thread?), on that thread, with the caller's bindings."
+   (one-eval-thread?), on that thread, with the caller's bindings. Then
+   MLX's active memory is checked against the budget (check-budget!)."
   [f]
-  (if (or (not @one-eval-thread?) (identical? (Thread/currentThread) (:thread @eval-thread)))
-    (locking eval-lock (f))
-    (let [task (.submit ^java.util.concurrent.ExecutorService (:executor @eval-thread)
-                        ^java.util.concurrent.Callable (bound-fn* #(locking eval-lock (f))))]
-      (try (.get task)
-           (catch java.util.concurrent.ExecutionException e (throw (.getCause e)))))))
+  (let [v (if (or (not @one-eval-thread?) (identical? (Thread/currentThread) (:thread @eval-thread)))
+            (locking eval-lock (f))
+            (let [task (.submit ^java.util.concurrent.ExecutorService (:executor @eval-thread)
+                                ^java.util.concurrent.Callable (bound-fn* #(locking eval-lock (f))))]
+              (try (.get task)
+                   (catch java.util.concurrent.ExecutionException e (throw (.getCause e))))))]
+    (check-budget!)
+    v))
 
 (defmacro ^:private evaluating
   "Run body (which evaluates MLX arrays) holding the evaluation lock, on the
@@ -1419,10 +1475,6 @@
                  32 {:float :float32 :int :int32}
                  64 {:float :float64 :int :int64})))))
 
-(defn- physical-memory ^long []
-  (.getTotalMemorySize ^com.sun.management.OperatingSystemMXBean
-                       (java.lang.management.ManagementFactory/getOperatingSystemMXBean)))
-
 (defonce ^:private memory-bounds
   ;; once per process, before any array: set-cache-limit! and
   ;; set-memory-limit! change them later
@@ -1481,6 +1533,36 @@
   (Thread/sleep 20)
   (MlxRuntime/drain)
   (memory))
+
+;; ---------------------------------------------------------------------------
+;; The budget
+;; ---------------------------------------------------------------------------
+
+(defn budget
+  "MLX's memory budget: :mlx, the bytes of active memory its arrays may
+   hold, which is :bytes (the budget it shares with native engines on this
+   machine) less :reserved (what they hold, gen.array.memory) and
+   :headroom (kept free of both); and :active, what MLX holds now."
+  []
+  (let [{:keys [bytes headroom]} @budget-limits]
+    {:mlx (mlx-budget)
+     :bytes bytes
+     :reserved (reservations/reserved)
+     :headroom headroom
+     :active (Mlx/mlx_get_active_memory)}))
+
+(defn set-budget!
+  "Set the budget MLX shares with native engines (:bytes), the headroom
+   kept free of both (:headroom), or both: non-negative integers. Returns
+   the previous {:bytes :headroom}."
+  [limits]
+  (doseq [[k v] (select-keys limits [:bytes :headroom])]
+    (when-not (and (int? v) (not (neg? v)))
+      (throw (ex-info (str "set-budget!: " k " is a non-negative integer, not " (pr-str v))
+                      {:reason :invalid-option k v}))))
+  (let [old @budget-limits]
+    (swap! budget-limits merge (select-keys limits [:bytes :headroom]))
+    old))
 
 (defmethod print-method MlxArray [^MlxArray x ^java.io.Writer w]
   (.write w "#gen/array[")
