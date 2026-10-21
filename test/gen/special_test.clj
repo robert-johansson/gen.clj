@@ -65,8 +65,9 @@
               got (f (mapv array/array columns))]
           (if (ts/jvm?)
             (is (= (mapv (comp bits f first) pts) (mapv bits (array/->clj got))) (name k))
-            ;; on float32, against the host at the rounded inputs
-            (let [rounded (mapv (fn [[args]] (mapv #(if (ts/f32?) (double (float %)) %) args)) pts)
+            ;; on float32, against the host at the rounded inputs (unchecked:
+            ;; float refuses the infinities)
+            (let [rounded (mapv (fn [[args]] (mapv #(if (ts/f32?) (double (unchecked-float %)) %) args)) pts)
                   want (mapv f rounded)]
               (is (ts/close? (array/array want {:dtype (ts/float-dtype)}) got
                              (assoc (if (ts/f32?) {:rtol 1e-5 :atol 1e-6} {:rtol 1e-13 :atol 1e-14}) :equal-nan? true))
