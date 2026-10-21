@@ -156,7 +156,7 @@ most) is enumerated and Z computed exactly:
 misuse is loud, and the contract check catches planted inconsistencies.
 
 Mutations checked (2026-10-21, each applied, the suite run, reverted),
-twenty-two, all caught (the last six of the host pool, m3-par):
+twenty-three, all caught (the last seven of the host pool, m3-par):
 
 | Mutation | Caught by |
 |---|---|
@@ -181,6 +181,7 @@ twenty-two, all caught (the last six of the host pool, m3-par):
 | a task's error wrapped (ExecutionException) | a-pool-task-s-error-is-raised-as-itself, a-pool-task-sees… |
 | a new pool for every run | the-default-pool-is-shared |
 | a task without the calling thread's bindings | a-pool-task-sees-the-calling-thread-s-bindings (a batch tracer's batched-branch error, lost on the pool) |
+| an unparsable gen.llm.host-threads falling back to the default | the-pool-s-size-is-a-positive-integer-or-loud |
 
 ## Measurements
 
@@ -224,7 +225,9 @@ the calling thread.
 - **Interface.** `:host-pool` at initialize: an ExecutorService
   (`smc/host-pool n` makes a fixed pool of daemon threads; close it, or
   let the JVM's exit end it), `false` for the calling thread alone, or by
-  default the shared pool.
+  default the shared pool. Never run SMC inside a task of the pool it is
+  given: a step waits for its tasks, queued behind the one that waits, so
+  the pool can deadlock.
 
 **PROVISIONAL (owner to confirm), 2026-10-21:**
 - **Ownership:** `gen.llm.smc` owns one shared pool, made on first use, of
@@ -236,7 +239,8 @@ the calling thread.
 - **Size:** half the available processors up to 4, as the llama.cpp
   engine's row pool (4 on the M4, its performance cores; the engine's
   thread, the GC and the row pool need the rest), or the system property
-  `gen.llm.host-threads`. Alternative: the processors less one.
+  `gen.llm.host-threads`, which is loud (`:invalid-option`) unless a
+  positive integer. Alternative: the processors less one.
 - **Off switch:** `:host-pool false` for a run; `-Dgen.llm.host-threads=1`
   for the process.
 

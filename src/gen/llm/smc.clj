@@ -50,8 +50,11 @@
    thread. :host-pool is an ExecutorService (host-pool makes one), false
    for the calling thread alone, or by default a shared pool of daemon
    threads, its size the system property gen.llm.host-threads (default:
-   the available processors up to 4; 1 turns it off). Resampling (maybe-resample, or run's)
-   is when the effective sample size falls below :ess-threshold (n/2 by
+   half the available processors, up to 4; 1 turns it off). Do not run
+   SMC inside a task of the pool it is given: a step waits for its tasks,
+   queued behind the one that waits, so the pool can deadlock.
+   Resampling (maybe-resample, or run's) is when the effective sample
+   size falls below :ess-threshold (n/2 by
    default), by :method (:systematic by default; any of
    gen.inference.weights'), and moves the weights' mean into :log-ml."
   (:require [gen.dist.core :as dc]
@@ -90,23 +93,30 @@
 (defn host-pool
   "A fixed pool of n daemon threads for the particles' host work (their
    proposal rows and draws), to give initialize as :host-pool; close it
-   when done, or let the JVM's exit end it."
+   when done, or let the JVM's exit end it. Never run SMC from one of its
+   own tasks: a step waits on tasks queued behind that one (a deadlock)."
   ^ExecutorService [n]
   (when-not (pos-int? n)
     (throw (ex-info (str "smc/host-pool: a pool has a positive number of threads, not " (pr-str n))
                     {:reason :invalid-args :n n})))
   (Executors/newFixedThreadPool (int n) (-> (Thread/ofPlatform) (.name "gen.llm.smc host-" 0) (.daemon true) .factory)))
 
+(defn- host-threads
+  "The shared pool's threads, from the system property gen.llm.host-threads
+   (a string; a value that is not a positive integer is loud) or, without
+   it, half of processors up to 4, as the llama.cpp engine's row pool. 1
+   runs the host work on the calling thread."
+  ^long [property ^long processors]
+  (if (nil? property)
+    (max 1 (min 4 (quot processors 2)))
+    (let [n (parse-long property)]
+      (when-not (and n (pos? (long n)))
+        (throw (ex-info (str "smc: gen.llm.host-threads is a positive integer, not " (pr-str property))
+                        {:reason :invalid-option :host-threads property})))
+      (long n))))
+
 (def ^:private default-threads
-  "The shared pool's threads: the system property gen.llm.host-threads, or
-   half the available processors up to 4, as the llama.cpp engine's row
-   pool. 1 runs the host work on the calling thread."
-  (delay (let [n (or (some-> (System/getProperty "gen.llm.host-threads") parse-long)
-                     (max 1 (min 4 (quot (.availableProcessors (Runtime/getRuntime)) 2))))]
-           (when-not (pos? (long n))
-             (throw (ex-info (str "smc: gen.llm.host-threads is a positive integer, not " n)
-                             {:reason :invalid-option :host-threads n})))
-           (long n))))
+  (delay (host-threads (System/getProperty "gen.llm.host-threads") (.availableProcessors (Runtime/getRuntime)))))
 
 (def ^:private shared-pool
   (delay (when (< 1 (long @default-threads)) (host-pool @default-threads))))
@@ -139,7 +149,8 @@
   "n particles of the completion on [prompt max-tokens], none drawn yet,
    their log weights the potential's prefix weight of no tokens. opts:
    :potential, :proposal (:lm, :masked or a function), :key and
-   :host-pool (see the namespace's docstring)."
+   :host-pool (see the namespace's docstring; never a pool whose own task
+   runs this SMC)."
   ([completion args n] (initialize completion args n {}))
   ([completion args n {:keys [potential proposal key] :or {proposal :lm} :as opts}]
    (let [args (check-args completion args)]

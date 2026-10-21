@@ -255,6 +255,16 @@
     (with-open [^ExecutorService pool (smc/host-pool 2)]
       (is (branch? #(batch/batched [2] (smc/step (assoc s :host-pool pool))))))))
 
+(deftest the-pool-s-size-is-a-positive-integer-or-loud
+  (let [threads #'smc/host-threads]
+    (is (= 4 (threads nil 10)) "half the processors")
+    (is (= 4 (threads nil 32)) "up to 4")
+    (is (= 1 (threads nil 1)))
+    (is (= 3 (threads "3" 10)))
+    (is (= 1 (threads "1" 10)) "the off switch")
+    (doseq [bad ["four" "4 " "" "0" "-2" "2.5"]]
+      (is (= :invalid-option (bc/reason #(threads bad 10))) (pr-str bad)))))
+
 (deftest the-default-pool-is-shared
   (let [pools (map #(:host-pool (smc/initialize completion args 4 {:key (rng/key %)})) (range 2))]
     (is (or (every? false? pools) (and (instance? ExecutorService (first pools)) (apply identical? pools)))
