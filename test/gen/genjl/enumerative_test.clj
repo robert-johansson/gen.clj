@@ -16,6 +16,7 @@
             [gen.dist :as d]
             [gen.dist.core :as dc]
             [gen.dynamic :refer [gen]]
+            [gen.genjl.support :refer [approx?]]
             [gen.inference.enumerative :as enum]
             [gen.inference.weights :as w]
             [gen.test-support :as ts]))
@@ -26,12 +27,6 @@
   (mapv #(/ (+ % (* lo per-unit)) (double per-unit)) (range n)))
 
 (defn- log-sum-exp [xs] (:log-total (w/normalize xs)))
-
-(defn- approx?
-  "Julia's ≈: within √eps relatively, of float64 or, on a float32 backend,
-   of float32."
-  [x y]
-  (ts/close? x y {:rtol (if (ts/f32?) 3.5e-4 1.5e-8) :atol 0.0}))
 
 ;; ---------------------------------------------------------------------------
 ;; enumerative.jl:3, polynomial regression

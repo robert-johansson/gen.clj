@@ -18,9 +18,9 @@
             [gen.diff :as diff]
             [gen.dist :as d]
             [gen.dynamic :refer [gen]]
+            [gen.genjl.support :refer [approx?]]
             [gen.inference.particle-filter :as pf]
-            [gen.random :as rng]
-            [gen.test-support :as ts]))
+            [gen.random :as rng]))
 
 (defn- hmm-forward
   "particle_filter.jl:1: p(emissions) of an HMM, by the forward algorithm.
@@ -46,7 +46,7 @@
         path (fn [z0 z1] (* (prior z0) (get-in transition [z0 z1])
                                          (get-in emission [z0 x0]) (get-in emission [z1 x1])))
         expected (+ (path 0 0) (path 0 1) (path 1 0) (path 1 1))]
-    (is (ts/close? expected (hmm-forward prior emission transition [x0 x1])))))
+    (is (approx? expected (hmm-forward prior emission transition [x0 x1])))))
 
 ;; ---------------------------------------------------------------------------
 ;; particle_filter.jl:50, particle filtering

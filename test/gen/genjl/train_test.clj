@@ -1,19 +1,19 @@
 (ns gen.genjl.train-test
   "Gen.jl 0.4.8's test/inference/train.jl, ported in part: the parameter
    gradients of a student model, summed over a minibatch of a teacher's
-   data, against central finite differences of assess (train.jl:82).
-   Gen.jl accumulates them into each parameter (accumulate_param_gradients!,
-   get_param_grad); gen.clj's are values, summed over the traces (D7).
-
-   The finite differences run on the JVM backend in float64, whatever the
-   backend under test, as gen.gradients-test's do: a float32 difference at
-   dx = 1e-6 would be noise."
+   data, against central finite differences of assess (train.jl:82), which
+   gen.genjl.finite-diff takes in float64 on the JVM backend. Gen.jl
+   accumulates the gradients into each parameter
+   (accumulate_param_gradients!, get_param_grad); gen.clj's are values,
+   summed over the traces (D7)."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
             [gen.choicemap :as cm]
             [gen.dist :as d]
             [gen.dynamic :as dyn :refer [gen]]
             [gen.gfi :as gfi]
+            [gen.genjl.finite-diff :as finite-diff]
+            [gen.genjl.support :as support]
             [gen.gradients :as grad]
             [gen.random :as rng]
             [gen.test-support :as ts]))
@@ -44,17 +44,15 @@
   (let [{:keys [choices]} (gfi/propose teacher [] key)]
     [[(cm/get-choice choices :z)] (cm/choicemap :x (cm/get-choice choices :x) :y (cm/get-choice choices :y))]))
 
-(def ^:private reference (array/backend-named :jvm))
-
 (defn- total-log-density
-  "Σ over the minibatch of assess of the student under params, on the JVM
-   backend in float64."
-  [params minibatch]
-  (array/with-backend reference
-    (reduce + (map (fn [[inputs constraints]]
-                     (double (array/item (:weight (gfi/assess (dyn/with-params student params)
-                                                              (ts/host inputs) (cm/from-map (ts/host constraints)))))))
-                   minibatch))))
+  "train.jl:86: Σ over the minibatch of assess of the student, as a
+   function of its five parameters."
+  [minibatch]
+  (fn [& thetas]
+    (let [student (dyn/with-params student (zipmap names thetas))]
+      (reduce + (map (fn [[inputs constraints]]
+                       (ts/number (:weight (gfi/assess student (ts/host inputs) (cm/from-map (ts/host constraints))))))
+                     minibatch)))))
 
 (deftest parameter-gradients-match-finite-differences
   ;; train.jl:73, a minibatch of 100
@@ -65,13 +63,10 @@
                                              (:trace (gfi/generate (dyn/with-params student store) inputs constraints
                                                                    (rng/key 2)))))
                                           minibatch))
-        dx 1e-6]
-    (doseq [name names]
-      (testing (str name)
-        (let [expected (/ (- (total-log-density (update store name + dx) minibatch)
-                             (total-log-density (update store name - dx) minibatch))
-                          (* 2 dx))]
-          (is (< (Math/abs (- (ts/number (name gradients)) expected)) 1e-4)))))))
+        density (total-log-density minibatch)]
+    (doseq [[i theta] (map-indexed vector names)]
+      (testing (str theta)
+        (is (support/approx? (theta gradients) (finite-diff/finite-diff density (mapv store names) i) {:atol 1e-4}))))))
 
 ;; Pending (statistical, genclj-zgkq): train.jl:116 to :122, the parameters
 ;; after 2,000 epochs of SGD on the teacher's data; train.jl:126, lecture!
