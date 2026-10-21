@@ -17,7 +17,8 @@
             [gen.laws :as laws]
             [gen.random :as rng]
             [gen.selection :as sel]
-            [gen.test-support :as ts]))
+            [gen.test-support :as ts]
+            [gen.trace :as trace]))
 
 (defn- open? [sigma addr] (not (cm/has-value? (cm/get-submap sigma addr))))
 
@@ -163,6 +164,12 @@
   (let [pgf (prop/with-internal-proposal normal-normal (gen [sigma] (trace :mu (d/normal 5 0.1))))
         choices (cm/choicemap :mu 0.2 :y 1.0)]
     (is (ts/close? (:weight (gfi/assess normal-normal [] choices)) (:weight (gfi/assess pgf [] choices))))))
+
+(deftest calls-are-the-model's
+  (let [pgf (prop/with-internal-proposal (gen [] (splice :inner normal-normal)) (gen [_sigma] nil))
+        tr (gfi/simulate pgf [] (rng/key 4))]
+    (is (= (ts/host (tr [:inner :mu])) (ts/host (tr :inner))))
+    (is (= normal-normal (:gen-fn (trace/subtrace tr :inner))))))
 
 (deftest misuse-is-loud
   (testing "a proposal for a constrained choice"

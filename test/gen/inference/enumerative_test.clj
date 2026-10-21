@@ -20,7 +20,8 @@
             [gen.inference.particle-filter :as pf]
             [gen.laws :as laws]
             [gen.random :as rng]
-            [gen.selection :as sel]))
+            [gen.selection :as sel]
+            [gen.trace :as trace]))
 
 (defn- log ^double [x] (Math/log (double x)))
 
@@ -138,6 +139,13 @@
   (testing "inside importance sampling, every weight is exact, so one sample suffices"
     (is (close-to (:log-ml-estimate (imp/importance-sampling exact [] observations 1 {:key (rng/key 3)}))
                   (log evidence)))))
+
+(deftest calls-are-the-model's
+  (let [inner (gen [] (trace :x (d/normal 0 1)))
+        egf (enum/with-exact-proposal (gen [] (let [a (trace :a (d/bernoulli 0.3))] (splice :inner inner) a)) [:a])
+        tr (gfi/simulate egf [] (rng/key 4))]
+    (is (= (ts/host (tr [:inner :x])) (ts/host (tr :inner))))
+    (is (= inner (:gen-fn (trace/subtrace tr :inner))))))
 
 (deftest unobserved-choices-keep-the-forward-proposal
   ;; enumerating :b alone, with :a drawn from its prior: the weight is

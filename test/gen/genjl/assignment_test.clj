@@ -8,8 +8,7 @@
    leaf is an array (a Clojure vector is a product value), and Map's index
    addresses are 0-based (D2). genjl/shallow checks Gen.jl's pairs of
    shallow counts in one assertion.
-   The assertions that wait for loud lookups (D4) and a variadic merge
-   (G10) are at the end."
+   The assertions that wait for loud lookups (D4) are at the end."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
             [gen.choicemap :as cm]
@@ -100,6 +99,15 @@
         submap2 (cm/choicemap :y 4.0)]
     (merged (cm/choicemap :a 1.0 :b 2.0 :c submap :shared submap)
             (cm/choicemap :d 3.0 :e submap :f submap :shared submap2))))
+
+;; assignment.jl:114 and :143, whose dynamic and static choice maps are
+;; the same here
+(deftest variadic-merge
+  (let [choices1 (cm/choicemap :a 1)
+        choices2 (cm/choicemap :b 2)
+        choices3 (cm/choicemap :c 3)]
+    (is (= choices1 (cm/merge choices1)))
+    (is (= (cm/choicemap :a 1 :b 2 :c 3) (cm/merge choices1 choices2 choices3)))))
 
 (defn- empty-where-absent
   "assignment.jl's assertions on an empty choice map: get_submap at an
@@ -219,8 +227,6 @@
 ;;   assignment.jl:158, 170, 228, 234, 285  get_submap at a value, and through one
 ;;   assignment.jl:195, 209, 212, 247, 253, 256  get_value at a submap, or where nothing is
 ;;   assignment.jl:271, 283, 292  has_submap is false at a value
-;; Pending G10, merge of one or of n choice maps (genclj-cbec):
-;;   assignment.jl:119-120, 148-149
 ;; Not applicable: static_get_submap and static_get_value
 ;; (assignment.jl:164, 176, 187, 203, 218), and the conversion to a
 ;; StaticChoiceMap (assignment.jl:404).

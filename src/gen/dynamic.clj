@@ -45,14 +45,6 @@
 
 (defn- path [addr] (if (vector? addr) addr [addr]))
 
-(defn- subselection-at
-  "The selection for the subtree at path p."
-  [s p]
-  (reduce sel/get-subselection s p))
-
-(defn- path-selected? [s p]
-  (sel/selected? (subselection-at s (pop p)) (peek p)))
-
 (defn- check-address!
   "A path may be used once, and never under or above another used path."
   [state p]
@@ -160,7 +152,7 @@
 
 (defn- regenerate-site [state p dist k]
   (let [prev (prev-choice state p)]
-    (if (and prev (not (path-selected? (:selection state) p)))
+    (if (and prev (not (sel/selected? (:selection state) p)))
       (let [[v prev-lp] prev
             _ (dc/check-value-shape dist v)
             lp (site-log-prob dist v)]
@@ -315,7 +307,7 @@
                                   (run-call gf :simulate args opts))
                 (= mode :update) (run-call gf :update args (assoc opts :prev prev-sub :constraints cons :argdiffs argdiffs))
                 :else (run-call gf :regenerate args (assoc opts :prev prev-sub :argdiffs argdiffs
-                                                           :selection (subselection-at (:selection state) p))))
+                                                           :selection (sel/get-subselection (:selection state) p))))
             {tr :trace w :weight d :discard rd :retdiff} r]
         [(:retval tr) (cond-> (record-call state p tr)
                         w (add-weight w)
@@ -523,8 +515,8 @@
         reached? (fn [{:keys [kind addr]}]
                    (let [p (path addr)]
                      (cond (= mode :update) (not (cm/empty? (cm/get-submap constraints p)))
-                           (= kind :trace) (path-selected? selection p)
-                           :else (not= sel/none (subselection-at selection p)))))
+                           (= kind :trace) (sel/selected? selection p)
+                           :else (not= sel/none (sel/get-subselection selection p)))))
         unchanged? (fn [diffs in] (every? #(diff/no-change? (nth diffs %)) in))
         [env diffs vals]
         (reduce (fn [[env diffs vals] [i {:keys [kind addr in out f bind symbol? arg-specs] :as n}]]
@@ -760,9 +752,9 @@
        (not (batch/batch-backend? array/*backend*))))
 
 (defn- project* [tr s]
-  (let [from-choices (reduce (fn [acc [p lp]] (if (path-selected? s p) (+ acc lp) acc))
+  (let [from-choices (reduce (fn [acc [p lp]] (if (sel/selected? s p) (+ acc lp) acc))
                              0.0 (::scores tr))]
-    (reduce (fn [acc [p sub]] (+ acc (gfi/-project (:gen-fn sub) sub (subselection-at s p))))
+    (reduce (fn [acc [p sub]] (+ acc (gfi/-project (:gen-fn sub) sub (sel/get-subselection s p))))
             from-choices (::subtraces tr))))
 
 ;; ---------------------------------------------------------------------------
@@ -787,6 +779,12 @@
   ;; under gf's own store, as its run: a callee's project may run its model
   (-project [gf tr selection]
     (if-let [ps (:params gf)] (binding [*params* (with-store ps)] (project* tr selection)) (project* tr selection)))
+
+  ;; a call is at a path of one or more addresses
+  trace/ICalls
+  (-call [_ tr p]
+    (let [subs (::subtraces tr)]
+      (some #(when-let [sub (get subs (subvec p 0 %))] [sub (subvec p %)]) (range 1 (inc (count p))))))
 
   gfi/IRevisable
   ;; the source and the static graph follow from the body fn's class
