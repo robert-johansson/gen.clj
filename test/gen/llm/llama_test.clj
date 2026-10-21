@@ -1,7 +1,8 @@
 (ns gen.llm.llama-test
   "The llama.cpp engine: the Branching contract (gen.llm.branching-contract)
    within llama.cpp's float noise, and what is the engine's own (the
-   vocabulary, the KV cache's contents, a full cache, closing).
+   vocabulary, the KV cache's contents, a full cache, closing, and a
+   recurrent model's split steps).
 
    Needs llama.cpp's libraries (native/build-llama.sh), the compiled binding
    (clojure -T:build java) and a model, given as
@@ -46,6 +47,7 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gen.llm.branching :as br]
             [gen.llm.branching-contract :as contract :refer [reason]]
+            [gen.llm.llama.recurrent :as recurrent]
             [gen.llm.long-texts :as long-texts]
             [gen.llm.slots :as slots]
             [gen.llm.toy-engine :as toy])
@@ -286,6 +288,152 @@
           (is (= 100 (br/position c)))
           (is (= 2 (:live (br/info e))))
           (br/dispose! [a c]))))))
+
+;; ---------------------------------------------------------------------------
+;; A recurrent model's step over scattered cells
+;; ---------------------------------------------------------------------------
+
+(defn- splits
+  "Engine e's volatile of split steps (its replay of the recurrent cells,
+   gen.llm.llama.recurrent, under :cells), or nil."
+  ^clojure.lang.Volatile [e]
+  (slots/call e (fn [s] (clojure.lang.Reflector/getInstanceField s "splits"))))
+
+(defn- with-split-property
+  "(f) with gen.llama.split-recurrent set to v (nil: unset), then as it was."
+  [v f]
+  (let [k "gen.llama.split-recurrent"
+        was (System/getProperty k)
+        put #(if % (System/setProperty k %) (System/clearProperty k))]
+    (put v)
+    (try (f) (finally (put was)))))
+
+(defn- median [xs] (nth (sort xs) (quot (count xs) 2)))
+
+(defn- scattered-steps
+  "On engine e (40 branches): a prompt's branch root, and (step) the
+   advance of eight forks of root whose recurrent cells are 1 and 30 to 36,
+   among 28 other branches (36 children held on cells 1 to 36, the first
+   and the last seven disposed of): {:groups the replay's plan (nil if it
+   is off) :out the eight :ms the advance's time}, the 28 disposed of."
+  [e]
+  (let [{:keys [prompt]} (opts e)
+        root (br/open e prompt)
+        ts (contract/top-tokens (br/logprobs root) 100)
+        tokens (subvec ts 0 8)]
+    {:root root
+     :tokens tokens
+     :alone (fn [t] (let [[s] (br/advance [(br/fork root)] [t])]
+                      (br/logprobs (doto s br/dispose!))))
+     :step (fn []
+             (let [held (br/advance (br/fork root 36) (subvec ts 50 86))
+                   gone (into [(held 0)] (subvec held 29 36))
+                   _ (br/dispose! gone)
+                   fs (br/fork root 8)
+                   groups (some-> (splits e) deref :cells
+                                  (recurrent/plan (mapv #(slots/slot-of e %) fs) (mapv br/position fs) 6.0))
+                   t0 (System/nanoTime)
+                   out (br/advance fs tokens)
+                   ms (/ (- (System/nanoTime) t0) 1e6)]
+               (br/dispose! (remove (set gone) held))
+               {:groups groups :out out :ms ms}))}))
+
+(defn- within-band
+  "Each of out's rows against its token advanced alone: the failures."
+  [alone tokens out]
+  (vec (keep (fn [[t b]]
+               (let [d (contract/max-diff (alone t) (br/logprobs b) 64)]
+                 (when-not (<= d band) (format "token %d: |Δ log p| = %.3g" t d))))
+             (map vector tokens out))))
+
+(deftest a-scattered-step-is-split
+  ;; A recurrent or hybrid model's decode copies every state from the lowest
+  ;; to the highest cell its sequences land on. Eight forks on cells 1 and
+  ;; 30 to 36 would copy the 28 states between in one decode; the engine
+  ;; makes two, over cell 1 and cells 30 to 36, which copy none. Its rows
+  ;; are those of each fork advanced alone, within the band; the same steps
+  ;; from the same operations give the same rows bit for bit (a plan is a
+  ;; function of the engine's operations); and the step costs less than
+  ;; half of one decode's. The time is the test of the replay: were the
+  ;; states elsewhere than it says, the runs would not be tight. On
+  ;; Qwen3.5-0.8B (Metal, Mac mini M4, 2026-10-21) 39.7 ms split against
+  ;; 123.1 in one decode (0.32; 0.32 again in a second run). Mutations
+  ;; checked there: no split fails the counts and the ratio (1.00); a
+  ;; group's rows put back reversed fail the band by 4.2 to 17 nats.
+  (when-llama
+    (with-open [e ((llama 'engine) {:model model-path :max-branches 40 :n-ctx 2048})]
+      (let [{:keys [recurrent? hybrid?]} (:model (br/info e))]
+        (if-not (or recurrent? hybrid?)
+          (do (is (not (:split-recurrent? (br/info e))) "attention models keep one decode a step")
+              (is (nil? ((llama 'step-splits) e))))
+          (let [{:keys [root tokens alone step]} (scattered-steps e)
+                rows (fn [] (let [{:keys [groups out]} (step)
+                                  r {:groups groups :failures (within-band alone tokens out) :rows (mapv br/logprobs out)}]
+                              (br/dispose! out)
+                              r))
+                _ (rows)
+                {:keys [groups failures] :as first-rows} (rows)]
+            (is (:split-recurrent? (br/info e)))
+            (is (= [[0] [1 2 3 4 5 6 7]] groups) "cell 1, then cells 30 to 36")
+            (is (= [] failures))
+            (is (every? true? (map #(java.util.Arrays/equals ^floats %1 ^floats %2) (:rows first-rows) (:rows (rows))))
+                "the same operations, the same rows")
+            (is (= {:off nil} (select-keys ((llama 'step-splits) e) [:off])))
+            (let [before ((llama 'step-splits) e)
+                  split (median (repeatedly 5 #(let [{:keys [out ms]} (step)] (br/dispose! out) ms)))
+                  after ((llama 'step-splits) e)
+                  one (with-redefs [recurrent/plan (fn [_ seqs _ ^double _] [(vec (range (count seqs)))])]
+                        (br/dispose! (:out (step)))
+                        (median (repeatedly 5 #(let [{:keys [out ms]} (step)] (br/dispose! out) ms))))]
+              (println (format "a-scattered-step-is-split: %.1f ms split, %.1f ms in one decode (%.2f)"
+                               split one (/ split one)))
+              ;; each run: the 36 children's step, one decode, and the planted step, two
+              (is (= [10 5 15] (map #(- (% after) (% before)) [:steps :split :decodes]))
+                  "step-splits counts them")
+              (is (< (/ split one) 0.5) (format "split %.1f ms, one decode %.1f ms" split one)))
+            (br/dispose! root)
+            (is (zero? (:live (br/info e))))))))))
+
+(deftest the-split-switch
+  ;; gen.llama.split-recurrent false: no replay, one decode a step, as
+  ;; before the replay existed; anything but true or false is refused
+  (when-llama
+    (is (= :invalid-option (reason #(with-split-property "yes" (fn [] ((llama 'engine) {:model model-path}))))))
+    (let [e (with-split-property "false" #((llama 'engine) {:model model-path :max-branches 40 :n-ctx 2048}))]
+      (try
+        (is (not (:split-recurrent? (br/info e))))
+        (is (nil? (splits e)))
+        (is (nil? ((llama 'step-splits) e)))
+        (let [{:keys [root tokens alone step]} (scattered-steps e)
+              {:keys [groups out]} (step)]
+          (is (nil? groups))
+          (is (= [] (within-band alone tokens out)))
+          (br/dispose! (cons root out)))
+        (finally (.close ^java.io.Closeable e))))))
+
+(deftest a-replay-that-disagrees-stops
+  ;; a replay planted wrong (root's state one position on) disagrees with
+  ;; llama.cpp at the next operation that touches it, a fork of root: the
+  ;; engine stops splitting, says why, and keeps stepping, one decode a step
+  (when-llama
+    (with-open [e ((llama 'engine) {:model model-path :max-branches 40 :n-ctx 2048})]
+      (when (:split-recurrent? (br/info e))
+        (let [{:keys [root tokens alone step]} (scattered-steps e)
+              v (splits e)
+              cell (get-in @v [:cells :cells (slots/slot-of e root) :tail])
+              err (java.io.ByteArrayOutputStream.)
+              stderr System/err]
+          (slots/call e (fn [_] (vswap! v update-in [:cells :cells cell :pos] inc)))
+          (let [{:keys [groups out]} (try (System/setErr (java.io.PrintStream. err true))
+                                          (step)
+                                          (finally (System/setErr stderr)))
+                {:keys [off decodes steps]} ((llama 'step-splits) e)]
+            (is (nil? groups) "the replay is off")
+            (is (re-find #"copy: the replay of llama.cpp's recurrent cells puts slot \d+'s state at position" (str off)))
+            (is (re-find #"gen.llm.llama: copy" (str err)) "said on System.err")
+            (is (= decodes steps) "one decode a step")
+            (is (= [] (within-band alone tokens out)))
+            (br/dispose! (cons root out))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Branches longer than a sliding window
