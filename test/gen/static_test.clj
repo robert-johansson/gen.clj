@@ -5,7 +5,8 @@
    static functions, destructuring and parameters, as are the choice
    gradients through the compiled score; update and regenerate skip the
    nodes that did not change; the graph as data and as DOT; batched runs;
-   bodies that are not static are compile errors."
+   bodies that are not static are compile errors, a binding's head is
+   macroexpanded and quoted data is data."
   (:refer-clojure :exclude [+ - *])
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
@@ -16,6 +17,7 @@
             [gen.custom :as custom]
             [gen.diff :as diff]
             [gen.dist :as d]
+            [gen.dist.core :as dc]
             [gen.dynamic :as dyn :refer [gen]]
             [gen.dynamic.static :as static]
             [gen.gfi :as gfi]
@@ -139,6 +141,38 @@
           y (trace :y (d/normal (+ g (* 0.1 c)) 1))]
       y)))
 
+(defmacro ^:private noisy-at
+  "(trace addr (d/normal x 1)): a user macro expanding to a call."
+  [addr x]
+  `(~'trace ~addr (d/normal ~x 1)))
+
+(defmacro ^:private called-at
+  "(splice addr gf & args): a user macro expanding to a call."
+  [addr gf & args]
+  `(~'splice ~addr ~gf ~@args))
+
+(defmacro ^:private hidden-at
+  "1 plus (trace addr (d/normal x 1)): a call inside an expression."
+  [addr x]
+  `(+ 1 (noisy-at ~addr ~x)))
+
+(def expanded-heads
+  "Bindings and a return expression whose heads are user macros that
+   expand to calls, which the dynamic gen expands (M5, Gen.jl's macros.jl:
+   G11)."
+  (gen ^:static [m]
+    (let [a (noisy-at :a m)
+          b (called-at :b point a 1.0 0.0)]
+      (noisy-at :c b))))
+
+(def quoting
+  "A body returning quoted data that mentions trace and a binding, data and
+   not a call (M5, Gen.jl's tilde_sugar.jl:66: G12)."
+  (gen ^:static [m]
+    (let [a (trace :a (d/normal m 1))
+          form '(trace :x (d/normal a 1))]
+      [a form])))
+
 (def branch-a (gen ^:static [m] (let [a (trace :a (d/normal m 1))] a)))
 (def branch-b (gen ^:static [m] (let [a (trace :a (d/normal (+ m 5.0) 1)) b (trace :b (d/normal a 1))] b)))
 (def branch-c (gen ^:static [m] (let [c (trace :c (d/normal m 1))] c)))
@@ -164,7 +198,9 @@
    [:rebound rebound [1.0 2.0 {:z 30.0} 0.5] [[1.0 3.0 {:z 31.0} 0.5]]]
    [:rest-rebound rest-rebound [1.0 2.0] [[1.0 5.0]]]
    [:callee-store callee-store [0.0] [[1.0]]]
-   [:dict-rules dict-rules [{:j 0.5 :x 1.0}] [[{:j 0.7 :x 1.0}] [{:x 1.0}] [{:j 0.5 :x 1.0 :z 2.0}]]]])
+   [:dict-rules dict-rules [{:j 0.5 :x 1.0}] [[{:j 0.7 :x 1.0}] [{:x 1.0}] [{:j 0.5 :x 1.0 :z 2.0}]]]
+   [:expanded-heads expanded-heads [0.5] [[1.5]]]
+   [:quoting quoting [0.0] [[1.0]]]])
 
 ;; dynamic parents of static functions: the general laws (a static callee's
 ;; update from another graph's trace was wrong before the review)
@@ -178,7 +214,10 @@
 ;; one choice constrained and the element it moves unconstrained comes up
 (laws/deflaws static-rules (filterv (comp #{:rules} first) models) 300 laws/static)
 ;; every model but :destructured (a uniform between chosen bounds) has fixed supports
-(laws/deflaws static (filterv (comp #{:linreg :hierarchical :nested :rules :dict-rules :double-index :callee-store} first) models)
+(laws/deflaws static (filterv (comp #{:linreg :hierarchical :nested :rules :dict-rules :double-index :callee-store
+                                      :expanded-heads :quoting}
+                                     first)
+                               models)
   100 laws/fixed-support)
 
 ;; a static body over a callee with encapsulated randomness: its score fn
@@ -580,6 +619,34 @@
                         ["an address under another" '(gen ^:static [g] (let [a (trace :a (d/normal 0 1)) b (splice [:a :b] g)] b))]]]
       (testing why
         (is (re-find #"gen \^:static" (str (static-error form))))))))
+
+(deftest a-binding-s-head-is-macroexpanded
+  (let [{:keys [nodes return]} (static/ir expanded-heads)]
+    (is (= [:trace :splice :trace] (mapv :kind nodes)) "the user macros' calls, the return expression's last")
+    (is (= [:a :b :c] (mapv :addr nodes)))
+    (is (= '[(noisy-at :a m) (called-at :b point a 1.0 0.0)] (mapv :form (take 2 nodes))) "the forms as written")
+    (is (= (:names (peek nodes)) (:inputs return))))
+  (let [{tr :trace w :weight} (gfi/generate expanded-heads [0.5] (cm/choicemap :a 1.0 [:b :y] 2.0 :c 3.0) (rng/key 50))]
+    (is (ts/close? (+ (dc/log-prob (d/normal 0.5 1) 1.0) (dc/log-prob (d/normal 1.0 1) 2.0) (dc/log-prob (d/normal 2.0 1) 3.0)) w))
+    (is (ts/close? 3.0 (:retval tr))))
+  (testing "a local is not the macro it shadows"
+    (let [noisy-at (fn [_ x] (* 2 x))
+          gf (gen ^:static [m] (let [a (noisy-at :a m)] a))]
+      (is (= [:compute] (mapv :kind (:nodes (static/ir gf)))))
+      (is (ts/close? 3.0 (gf 1.5)))))
+  (testing "a macro hiding a call inside an expression is still a compile error"
+    ;; only a binding's head is expanded, so the compiler meets the trace
+    ;; outside the body, where trace is not bound
+    (binding [*ns* (the-ns 'gen.static-test)]
+      (is (re-find #"Unable to resolve symbol: trace"
+                   (str (static-error '(gen ^:static [] (let [a (hidden-at :a 0)] a)))))))))
+
+(deftest quoted-data-is-data
+  (is (= '(trace :x (d/normal a 1)) (second (quoting 0.0))))
+  (let [{:keys [nodes]} (static/ir quoting)]
+    (is (= [:trace :compute] (mapv :kind nodes)))
+    (is (= [] (:inputs (second nodes))) "a quoted symbol is no input"))
+  (is (= '(trace :x (d/normal 0 1)) ((gen ^:static [] (let [] '(trace :x (d/normal 0 1)))))) "a quoted return value"))
 
 ;; ---------------------------------------------------------------------------
 ;; The lint
