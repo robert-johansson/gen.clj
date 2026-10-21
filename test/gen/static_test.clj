@@ -604,6 +604,8 @@
     (is (= [:slope :intercept nil :ys] (mapv :addr nodes)))
     (is (= '[[] [] [xs] [xs n slope intercept]] (mapv :inputs nodes)))
     (is (= '[ys] (:inputs return))))
+  (testing "the address false is a node's, as any constant"
+    (is (str/includes? (static/dot (gen ^:static [] (let [a (trace false (d/normal 0 1))] a))) "\"false\" [shape=ellipse")))
   (testing "a string address is escaped: \"\\\"y\\\"\", not \"\"y\"\""
     (let [dot (static/dot (gen ^:static [x] (let [y (trace "y" (d/normal x 1))] y)))]
       (is (str/includes? dot "\"\\\"y\\\"\" [shape=ellipse"))))

@@ -223,7 +223,7 @@
   (let [{:keys [args nodes return]} (or (ir gf) (throw (ex-info "dot: not a static generative function" {})))
         id #(str "\"" (str/escape (str %) {\" "\\\"" \\ "\\\\"}) "\"")
         arg-lines (for [n (concat (apply concat (:fixed args)) (:rest args))] (str "  " (id n) " [shape=plaintext];"))
-        node-id (fn [i n] (if (:addr n) (pr-str (:addr n)) (str "#" i)))
+        node-id (fn [i n] (if (some? (:addr n)) (pr-str (:addr n)) (str "#" i)))
         owner (into {} (for [[i n] (map-indexed vector nodes) s (:names n)] [s (node-id i n)]))
         lines (for [[i n] (map-indexed vector nodes)
                     :let [me (node-id i n)]
