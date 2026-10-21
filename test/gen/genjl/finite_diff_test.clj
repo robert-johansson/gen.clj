@@ -21,6 +21,15 @@
                                          [(array/array [[1.0 2.0] [2.0 3.0]])] 0 {:symmetric? true})
                          {:rtol 1e-8 :atol 1e-8}))))
 
+(deftest log-densities
+  (testing "an array value: the sum of its elements' log densities, as Gen.jl's logpdf"
+    (is (ts/close? ((fd/logpdf d/normal) (array/array [0.0 1.0]) (array/zeros [2]) 1.0)
+                   (- (* -1 (Math/log (* 2 Math/PI))) 0.5))))
+  (testing "a value of another shape than the parameters': an error, as Gen.jl's DimensionMismatch"
+    (is (thrown? clojure.lang.ExceptionInfo ((fd/logpdf d/normal) (array/zeros [1 3]) (array/zeros [2 3]) 1.0))))
+  (testing "another step"
+    (is (< (Math/abs (- 6.0 (fd/finite-diff (fn [x] (* x x)) [3.0] 0 {:dx 1e-3}))) 1e-9))))
+
 (deftest logpdf-gradients
   (testing "normal(0.4; 0.2, 0.3): -(x - μ)/σ², (x - μ)/σ², -1/σ + (x - μ)²/σ³"
     (let [[gx gmu gs] (fd/logpdf-grad d/normal 0.4 0.2 0.3)]

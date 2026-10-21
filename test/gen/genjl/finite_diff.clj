@@ -8,7 +8,8 @@
    backend's would be noise; the gradients they check come from gen.clj on
    the backend under test."
   (:require [gen.array :as array]
-            [gen.dist.core :as dc]
+            [gen.choicemap :as cm]
+            [gen.gfi :as gfi]
             [gen.test-support :as ts]))
 
 (def dx "Gen.jl's step (runtests.jl:104)." 1e-6)
@@ -29,14 +30,15 @@
    (Gen.jl's finite_diff), an array of the argument's shape for an array
    (finite_diff_arr_fullarg, whose elements are finite_diff_vec's and
    finite_diff_arr's). With :symmetric?, a matrix's (j, k) and (k, j)
-   move together, as a covariance's must (finite_diff_mat_sym)."
+   move together, as a covariance's must (finite_diff_mat_sym). :dx
+   changes the step."
   ([f args i] (finite-diff f args i nil))
-  ([f args i {:keys [symmetric?]}]
+  ([f args i {:keys [symmetric?] h :dx :or {h dx}}]
    (array/with-backend reference
      (let [args (mapv on-reference args)
            x (nth args i)
            value (fn [arg] (double (array/item (apply f (assoc args i arg)))))
-           central (fn [moved n] (/ (- (value (moved dx)) (value (moved (- dx)))) (* 2 n dx)))]
+           central (fn [moved n] (/ (- (value (moved h)) (value (moved (- h)))) (* 2 n h)))]
        (if (array/host? x)
          (central #(+ (double x) %) 1)
          (let [shape (array/shape x)
@@ -57,16 +59,24 @@
     (float? x)
     (contains? #{:float16 :bfloat16 :float32 :float64} (array/dtype x))))
 
+(defn logpdf
+  "Gen.jl's logpdf(dist, value, args...) as a function of value and args,
+   for the distribution (apply make args): its log density at value,
+   summed over the elements of an array value, as assess gives it (which
+   checks the value's shape)."
+  [make]
+  (fn [value & args] (:weight (gfi/assess (apply make args) [] (cm/->Value value)))))
+
 (defn logpdf-grad
-  "Gen.jl's logpdf_grad: the gradients of the log density of (apply make
-   args) at value, with respect to the value and each argument, as a vector
-   [value-grad arg-grad ...]; nil for an integer or a boolean one, as
-   Gen.jl's nothing."
+  "Gen.jl's logpdf_grad: the gradients of (logpdf make) at value and args,
+   with respect to the value and each argument, as a vector [value-grad
+   arg-grad ...]; nil for an integer or a boolean one, as Gen.jl's
+   nothing."
   [make value & args]
   (let [xs (into [value] args)
         wrt (filterv #(differentiable? (xs %)) (range (count xs)))
         grads (when (seq wrt)
-                (apply (array/grad (fn [v & as] (dc/log-prob (apply make as) v)) {:argnums wrt}) xs))]
+                (apply (array/grad (logpdf make) {:argnums wrt}) xs))]
     (reduce (fn [out [k g]] (assoc out k g)) (vec (repeat (count xs) nil)) (map vector wrt grads))))
 
 (def ^:private sqrt-eps
