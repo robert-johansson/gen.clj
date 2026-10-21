@@ -101,10 +101,11 @@
 
 ;; The bands come from 8 training keys (1 to 8), measured. BBVI ends with θ
 ;; 0.049 above opt-theta on average, sd 0.034 (3,000 steps of q's 1e-4 do
-;; not quite converge): bias plus five sd is 0.22, where Gen.jl's atol is
-;; 0.1 (key 3 ends 0.114 off). Its last ELBO estimate is within 0.002 ±
-;; 0.004 of log p(xs) relatively, VIMCO's last bound 0.0003 ± 0.0022, so
-;; Gen.jl's rtol of 0.1 holds with room (bias plus five sd: 0.023, 0.012).
+;; not quite converge), so θ's band is that bias plus five sd, 0.22: Gen.jl's
+;; atol of 0.1 is only 1.5 sd above the bias (key 3 ends 0.114 off). Its
+;; last ELBO estimate is within 0.002 ± 0.004 of log p(xs) relatively,
+;; VIMCO's last bound 0.0003 ± 0.0022, so Gen.jl's rtol of 0.1 holds with
+;; room (bias plus five sd: 0.023, 0.012).
 (deftest ^:slow ^:heavy minimal-vae
   ;; variational.jl:107, BBVI with the score-function estimator
   (let [{:keys [model-store history]}
