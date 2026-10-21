@@ -53,9 +53,10 @@
   (log-prob [v]
     (- (+ half-log-2pi (log std) (* 0.5 (square (/ (- v mu) std)))))))
 
-(def broadcasted-normal
+(def ^{::dc/constructor true} broadcasted-normal
   "broadcasted_normal(mu, std): normal with broadcast array parameters (in
-   gen.clj, normal itself already broadcasts)."
+   gen.clj, normal itself already broadcasts). A constructor to the dist DSL
+   too, as defdist marks its own."
   normal)
 
 (defdist uniform
