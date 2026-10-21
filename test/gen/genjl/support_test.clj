@@ -1,7 +1,7 @@
 (ns gen.genjl.support-test
   "gen.genjl.support against Julia's and Gen.jl's own answers (Julia 1.12,
    Gen 0.4.8)."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
             [gen.choicemap :as cm]
             [gen.dist :as d]
@@ -23,7 +23,12 @@
 
 (deftest logpdf-is-the-log-density
   ;; normal's at its mean: -log(2π)/2
-  (is (genjl/approx? -0.9189385332046727 (genjl/logpdf d/normal 0.0 0.0 1.0))))
+  (is (genjl/approx? -0.9189385332046727 (genjl/logpdf d/normal 0.0 0.0 1.0)))
+  (testing "an array value: the sum of its elements' log densities"
+    (is (genjl/approx? (- (* -1 (Math/log (* 2 Math/PI))) 0.5)
+                       (genjl/logpdf d/normal (array/array [0.0 1.0]) (array/zeros [2]) 1.0))))
+  (testing "a value of another shape than the distribution's: an error, as Julia's DimensionMismatch"
+    (is (thrown? clojure.lang.ExceptionInfo (genjl/logpdf d/normal (array/zeros [1 3]) (array/zeros [2 3]) 1.0)))))
 
 (deftest choice-map-queries
   (let [c (cm/choicemap :x 1 [:y :z] 2)]
