@@ -12,7 +12,8 @@ gradients, numeric parity with GenMLX and logits that stay on the device.*
 - **Weights.** No download is needed. MLX's own GGUF loader (`mlx_load_gguf`,
   already in our binding) reads the three models in `~/gen-clj-models`
   unchanged: each holds only F32 and Q8_0 tensors. MLX turns Q8_0 into its
-  affine 8-bit quantization (groups of 32, exact). What a GGUF holds follows
+  affine 8-bit quantization (groups of 32), exact once its float16 scales
+  are cast to float32 (measured, §7). What a GGUF holds follows
   llama.cpp's conventions, not Hugging Face's, so the forward follows
   llama.cpp's graphs for the tensors' meaning (§1).
 - **The forward over gen.array.** Every layer of both models can be written
@@ -48,7 +49,10 @@ accessors (keys, arrays, metadata strings and arrays), and our binding
   (uint32, packed), `name.scales` and `name.biases` (float16, one of each
   per group of 32).
   - For Q8_0 the int8 values are shifted to uint8 (`x ^ 0x80`) and the bias
-    is −128·scale, so scale·u + bias = scale·q exactly.
+    is −128·scale, so scale·u + bias = scale·q in exact arithmetic. MLX
+    computes in the scales' dtype, though: with the float16 scales as
+    loaded, the dequantized weights are d·q rounded to float16 (§7).
+    Cast to float32 first, they are the file's d·q exactly.
   - These feed `mlx_quantized_matmul` (bits 8, group size 32, `transpose`
     true) and `mlx_dequantize` directly.
 - Any other type (the K-quants among them) is dequantized to float16 by
@@ -357,20 +361,68 @@ genclj-q4xv)
 - CUDA kernels on the Thor (genclj-mxi9's machine).
 - A bench against the llama engine on the LM's rows (`gen.lm-bench`).
 
-## 7. To check when MLX is free
+## 7. Checked on MLX (2026-10-21)
 
-`llm-mlx-engine/mlx_checks.clj` makes all four in one MLX JVM, with
-llama.cpp for the last; it has not run yet:
-- `mlx_load_gguf` on both files: names, shapes and dtypes;
-- `quantized_matmul` against `dequantize` then `matmul` on a real tensor;
-- donation: a `slice_update` of an unshared array leaves its buffer in
-  place, through our binding, once its handle is released;
-- the first P2 measurement: the logits for one prompt against the llama
-  engine's.
+`llm-mlx-engine/mlx_checks.clj` made all four checks in one MLX JVM on the
+Mac mini M4 (Metal), with llama.cpp for the last. Each run exited normally
+under the memory guard (peak 2.6 GB). To repeat them:
+`clojure -Sdeps '{:paths ["src" "test" "target/classes"]}' -J-Dgen.mlx.lib=… -J-Dgen.llama.lib=… -M docs/research/llm-mlx-engine/mlx_checks.clj ~/gen-clj-models`,
+with check numbers after it to run some of them, or `4-heads` and `4-rope`
+for the planted errors.
+
+1. **Loading.** `mlx_load_gguf` reads both models, every array as the
+   header says:
+   - Qwen3-0.6B: 310 tensors, 704 arrays;
+   - Qwen3.5-0.8B: 335 tensors, 725 arrays.
+
+   F32 tensors come out as float32 with their dimensions reversed. Each
+   Q8_0 tensor comes out as a uint32 weight [out, in/4] with float16 scales
+   and biases [out, in/32].
+2. **Q8_0's values** (`blk.0.attn_q`, rows 0 to 2, against the file's blocks
+   read on the host):
+
+   | Scales | `dequantize` | `quantized_matmul` against `dequantize` then `matmul` (max \|y\| 7.28) |
+   |---|---|---|
+   | float16, as loaded | d·q rounded to float16, exactly (not d·q) | max \|Δ\| 1.7e-3 |
+   | cast to float32 | d·q exactly | max \|Δ\| 6.4e-6 |
+
+   **Recommendation:** cast the scales and biases to float32 at load, so
+   that MLX, the JVM's reference and the file agree exactly. It costs 40
+   bytes per 32 weights against 36, about 11% more weight memory. Float16
+   scales remain an option for speed (P6).
+3. **Donation.** A `slice_update` of an unshared 4 MiB array wrote in place
+   (the same buffer address), its handle freed before evaluation. With the
+   input still held, it copied. Copy-on-write therefore works through our
+   binding, given an explicit release.
+4. **Qwen3-0.6B against the llama engine**, the same GGUF, two prompts of 8
+   tokens. The prototype's composites ran on MLX, with today's gen.array
+   operations and the weights dequantized to float32. Argmax and the top 5
+   (as sets) equal llama.cpp's, with the max |Δ log p| over llama.cpp's top
+   64:
+
+   | Scales | "The capital of Sweden is a city called" | "def fibonacci(n):\n    if n <" |
+   |---|---|---|
+   | float16 | 0.0039 | 0.0080 |
+   | float32 | 0.0060 | 0.0052 |
+
+   That is inside llama.cpp's own spread between batch shapes (up to 5e-2,
+   median 2e-3 to 4e-3, `llm-branching.md`). Planted convention errors fail
+   it:
+   - KV heads tiled where Qwen3 interleaves them: 24.3 and 21.7 nats, argmax
+     wrong;
+   - RoPE rotating the other way: 3.5 and 8.4 nats.
+
+   Swapping RoPE's two halves in both q and k is no error at all: the dot
+   products, and so the logits, do not change.
+
+So P2's central risk, whether the GGUF's weights and llama.cpp's
+conventions give llama.cpp's distribution through gen.array, is retired for
+Qwen3. Qwen3.5's conventions (§1) are still unchecked against llama.cpp.
 
 ## Recommendations for the owner
 
-1. Weights from the GGUF files already here, through MLX's loader; GenMLX's
+1. Weights from the GGUF files already here, through MLX's loader, with the
+   Q8_0 scales and biases cast to float32 at load (§7); GenMLX's
    safetensors only if exact GenMLX parity is wanted (a download).
 2. The tokenizer: llama.cpp's vocabulary, loaded `vocab_only`.
 3. gen.array gains `rms-norm`, `rope`, `sdpa` (composites with MLX natives),

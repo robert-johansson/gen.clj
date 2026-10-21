@@ -1,19 +1,22 @@
 ;; The checks of docs/research/llm-mlx-engine.md §7, on MLX (one JVM, with
-;; llama.cpp for the fourth):
+;; llama.cpp for the fourth), and their results there:
 ;;   1. MLX's GGUF loader reads both models: every F32 tensor as float32,
 ;;      every Q8_0 one as a packed uint32 weight with float16 scales and
 ;;      biases in groups of 32;
-;;   2. MLX's Q8_0 dequantization equals the file's blocks (d · q) exactly,
-;;      and quantized_matmul agrees with dequantize-then-matmul;
+;;   2. MLX's Q8_0 dequantization against the file's blocks (d · q), with
+;;      the float16 scales as loaded and cast to float32, and
+;;      quantized_matmul against dequantize-then-matmul;
 ;;   3. a slice_update writes in place when nothing else holds its input
 ;;      (MLX donates the buffer), and copies when something does;
 ;;   4. Qwen3-0.6B's next-token log-probabilities from tiny_forward.clj's
 ;;      composites over the GGUF's weights, dequantized, against the llama
-;;      engine's on the same file.
-;; Run (from the repository, after clojure -T:build java):
+;;      engine's on the same file; with planted convention errors (4-heads,
+;;      4-rope) it must fail.
+;; Run (from the repository, after clojure -T:build java), with check
+;; numbers after the directory to run only those:
 ;;   clojure -Sdeps '{:paths ["src" "test" "target/classes"]}' -J--enable-native-access=ALL-UNNAMED \
 ;;     -J-Dgen.mlx.lib=<mlx lib> -J-Dgen.llama.lib=<llama lib> \
-;;     -M docs/research/llm-mlx-engine/mlx_checks.clj <dir of the GGUF files>
+;;     -M docs/research/llm-mlx-engine/mlx_checks.clj <dir of the GGUF files> [1 2 3 4 4-heads 4-rope]
 (ns mlx-checks
   (:refer-clojure :exclude [+ - * / < > <= >= ==])
   (:require [gen.array :as array :refer [+ - * / < > <= >= ==]]
@@ -35,8 +38,9 @@
 (defn handle ^long [x] (clojure.lang.Reflector/getInstanceField x "h"))
 (def f32 ((deref #'gen.backend.mlx/dtype-codes) :float32))
 
+;; header, from gguf_header.clj, defined here
 (let [s (slurp "docs/research/llm-mlx-engine/gguf_header.clj")] (load-string (subs s 0 (.indexOf s "(doseq"))))
-(def header (resolve 'user/header))
+(declare header)
 
 (defn gguf-arrays
   "Every array MLX's GGUF loader makes of the file at path, by name."
@@ -93,19 +97,26 @@
 (defn check-quantized [arrays]
   (array/with-backend b
     (let [w (arrays "blk.0.attn_q.weight") s (arrays "blk.0.attn_q.scales") z (arrays "blk.0.attn_q.biases")
-          deq (wrap (Mlx/mlx_dequantize (handle w) (handle s) (handle z) (int 32) (int 8) "affine" 0 (int f32) stream))
-          mine (array/->clj (array/slice deq 0 0 3))
+          deq (fn [s z] (wrap (Mlx/mlx_dequantize (handle w) (handle s) (handle z) (int 32) (int 8) "affine" 0 (int f32) stream)))
+          qmm (fn [x s z] (wrap (Mlx/mlx_quantized_matmul (handle x) (handle w) (handle s) (handle z) true (int 32) (int 8) "affine" stream)))
+          rows #(array/->clj (array/slice % 0 0 3))
           theirs (file-rows qwen3 "blk.0.attn_q.weight" [0 1 2])
+          f16 (fn [rs] (mapv (fn [r] (mapv #(double (Float/float16ToFloat (Float/floatToFloat16 (float %)))) r)) rs))
+          s32 (array/astype s :float32) z32 (array/astype z :float32)
+          same (fn [mine ref] (if (= mine ref)
+                                "exactly"
+                                (str "NOT exactly (first difference "
+                                     (first (keep-indexed (fn [i [a c]] (when (not= a c) [i a c])) (map vector (flatten mine) (flatten ref))))
+                                     ")")))
           x (random/normal (random/key 1) [1 4 1024])
-          qmm (wrap (Mlx/mlx_quantized_matmul (handle x) (handle w) (handle s) (handle z) true (int 32) (int 8) "affine" stream))
-          ref (array/matmul x (array/transpose deq))
-          d (array/item (array/max (array/abs (- qmm ref))))
-          scale (array/item (array/max (array/abs ref)))]
-      (println (format "2. Q8_0: MLX's dequantized rows 0-2 equal the file's d·q %s; quantized_matmul vs dequantize+matmul: max |Δ| %.2e (of max |y| %.2f)"
-                       (if (= mine theirs) "exactly" (str "NOT exactly (first difference at "
-                                                         (first (keep-indexed (fn [i [a c]] (when (not= a c) [i a c]))
-                                                                              (map vector (flatten mine) (flatten theirs)))) ")"))
-                       d scale)))))
+          gap (fn [y ref] (format "max |Δ| %.2e of max |y| %.2f" (array/item (array/max (array/abs (- y ref))))
+                                  (array/item (array/max (array/abs ref)))))]
+      (println (format "2. Q8_0, blk.0.attn_q, rows 0-2: dequantized with the loaded float16 scales, equal to the file's d·q %s, and to d·q rounded to float16 %s"
+                       (same (rows (deq s z)) theirs) (same (rows (deq s z)) (f16 theirs))))
+      (println (format "   with the scales and biases cast to float32 first: equal to d·q %s" (same (rows (deq s32 z32)) theirs)))
+      (println (format "   quantized_matmul against dequantize then matmul: float16 scales %s; float32 scales %s"
+                       (gap (qmm x s z) (array/matmul x (array/transpose (deq s z))))
+                       (gap (qmm x s32 z32) (array/matmul x (array/transpose (deq s32 z32)))))))))
 
 (defn check-donation []
   (let [data (fn ^long [^long h] (.address ^MemorySegment (Mlx/mlx_array_data_float32 h)))
@@ -126,14 +137,30 @@
                      (if (== pa2 pu2) "IN PLACE (the held array overwritten!)" "copied")))
     (run! #(Mlx/mlx_array_free %) [u a2 u2 upd])))
 
-(defn check-logits [arrays]
-  (let [s (slurp "docs/research/llm-mlx-engine/tiny_forward.clj")]
+(def mutations
+  "Planted convention errors, for the check's power: KV heads tiled where
+   llama.cpp's Qwen3 interleaves them, and RoPE rotating the other way.
+   (Swapping RoPE's two halves in both q and k is no error: their dot
+   products do not change, and neither do the logits.)"
+  {"heads" ["(array/broadcast-to (array/expand-dims x [2]) [b kv rep s d])" "(array/broadcast-to (array/expand-dims x [1]) [b rep kv s d])"]
+   "rope" ["c (array/cos ang) s (array/sin ang)" "c (array/cos ang) s (- (array/sin ang))"]})
+
+(defn check-logits
+  "scales: :float16 as loaded, or :float32 (the file's d·q exactly);
+   mutation: nil, or a key of mutations."
+  ([arrays scales] (check-logits arrays scales nil))
+  ([arrays scales mutation]
+  (let [s (slurp "docs/research/llm-mlx-engine/tiny_forward.clj")
+        s (if-let [[from to] (mutations mutation)]
+            (do (assert (.contains s ^String from)) (.replace s ^String from ^String to))
+            s)]
     (load-string (subs s 0 (.indexOf s ";; ---------------------------------------------------------------------------\n;; The checks"))))
   (let [forward @(resolve 'tiny-forward/forward)
         cfg {:heads 16 :kv-heads 8 :head-dim 128 :eps 1e-6 :theta 1000000.0}
+        cast (fn [x] (if (= scales :float32) (array/astype x :float32) x))
         deq (fn [base] (if-let [sc (arrays (str base ".scales"))]
-                         (wrap (Mlx/mlx_dequantize (handle (arrays (str base ".weight"))) (handle sc)
-                                                   (handle (arrays (str base ".biases"))) (int 32) (int 8) "affine" 0 (int f32) stream))
+                         (wrap (Mlx/mlx_dequantize (handle (arrays (str base ".weight"))) (handle (cast sc))
+                                                   (handle (cast (arrays (str base ".biases")))) (int 32) (int 8) "affine" 0 (int f32) stream))
                          (arrays (str base ".weight"))))
         model {:embed (deq "token_embd") :norm (deq "output_norm")
                :layers (vec (for [i (range 28) :let [p (str "blk." i ".")]]
@@ -152,13 +179,16 @@
               top (fn [^floats a k] (vec (take k (sort-by #(- (aget a (int %))) (range (alength a))))))
               ref-top (top ref 64)
               d (reduce max (map #(Math/abs (- (aget ^floats ref (int %)) (aget ^floats lp (int %)))) ref-top))]
-          (println (format "4. %s (%d tokens): argmax %s, top 5 %s, max |Δ log p| over llama.cpp's top 64: %.3g"
-                           (pr-str text) n (if (= (first ref-top) (first (top lp 1))) "equal" "DIFFERS")
-                           (if (= (set (take 5 ref-top)) (set (top lp 5))) "equal as sets" "DIFFER") d)))))))
+          (println (format "4. %s scales%s, %s (%d tokens): argmax %s, top 5 %s, max |Δ log p| over llama.cpp's top 64: %.3g"
+                           (name scales) (if mutation (str ", mutation " mutation) "") (pr-str text) n (if (= (first ref-top) (first (top lp 1))) "equal" "DIFFERS")
+                           (if (= (set (take 5 ref-top)) (set (top lp 5))) "equal as sets" "DIFFER") d))))))))
 
-(let [a3 (check-load qwen3)]
-  (check-load qwen35)
-  (check-quantized a3)
-  (check-donation)
-  (check-logits a3))
+(let [only (set (rest *command-line-args*))
+      run? #(or (empty? only) (only %))
+      a3 (check-load qwen3)]
+  (when (run? "1") (check-load qwen35))
+  (when (run? "2") (check-quantized a3))
+  (when (run? "3") (check-donation))
+  (when (run? "4") (check-logits a3 :float16) (check-logits a3 :float32))
+  (doseq [m (keys mutations) :when (only (str "4-" m))] (check-logits a3 :float32 m)))
 (shutdown-agents)
