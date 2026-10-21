@@ -27,8 +27,7 @@
 (def ^:private bar (gen ^:static [r] (let [a (trace :a (d/normal 0 1))] r)))
 
 (deftest tilde-syntax-smoke-test-static
-  ;; tilde_sugar.jl:19 (pending: the calls' return values). Gen.jl's
-  ;; Float64 is the backend's float dtype
+  ;; tilde_sugar.jl:19. Gen.jl's Float64 is the backend's float dtype
   (let [foo (gen ^:static []
               (let [x (splice :x bar 1)
                     yz (splice [:y :z] bar 2)
@@ -40,20 +39,18 @@
     (testing "random choices"
       (doseq [path [:u [:v :w] [:x :a] [:y :z :a]]]
         (is (= (ts/float-dtype) (array/dtype (tr path))) (str path))))
+    (testing "auxiliary state: a call's return value"
+      (is (= 1 (tr :x)))
+      (is (= 2 (tr [:y :z]))))
     (testing "return value"
       (is (= (ts/host (:retval tr)) (ts/host (tr :ret)))))))
 
 (deftest tilde-syntax-preserved-in-quoted-expressions
-  ;; tilde_sugar.jl:66, the dynamic function (pending: the static one)
-  (let [tilde-expr (gen [] '(trace :x (d/normal 0 1)))]
-    (is (= '(trace :x (d/normal 0 1)) (tilde-expr)))))
+  ;; tilde_sugar.jl:66, once per modeling language: quoted data is data
+  (doseq [[lang tilde-expr] {:dynamic (gen [] '(trace :x (d/normal 0 1)))
+                             :static (gen ^:static [] (let [] '(trace :x (d/normal 0 1))))}]
+    (testing lang
+      (is (= '(trace :x (d/normal 0 1)) (tilde-expr))))))
 
 ;; Not ported (n/a, genjl-test-suite.md §2): tilde_sugar.jl:50, the output
 ;; of desugar_tildes, Julia's macro internals.
-;;
-;; Pending:
-;; - tilde_sugar.jl:43-44, trace[:x] == 1 and trace[:y => :z] == 2: a
-;;   call's return value by its address (G1, genclj-cbec).
-;; - tilde_sugar.jl:75, a static body returning the quoted
-;;   (trace :x (d/normal 0 1)): gen ^:static rejects it as a call of trace
-;;   (G12, genclj-9d9h).
