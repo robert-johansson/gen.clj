@@ -356,11 +356,11 @@ public final class MlxRuntime {
       Thread.currentThread().interrupt();
     }
     long live = LIVE.get();
-    arrayThreshold = nextArrayThreshold(live, BASE_ARRAYS, MAX_ARRAYS);
-    if (live > MAX_ARRAYS && !warnedNearLimit) {
+    arrayThreshold = nextArrayThreshold(live, BASE_ARRAYS, Cap.MAX_ARRAYS);
+    if (live > Cap.MAX_ARRAYS && !warnedNearLimit) {
       warnedNearLimit = true;
       System.err.println("gen.mlx: " + live + " MLX arrays are live, near Metal's buffer limit"
-          + " (about " + (long) (MAX_ARRAYS / 0.6) + "); hold fewer arrays, or eval! and drop graphs");
+          + " (about " + (long) (Cap.MAX_ARRAYS / 0.6) + "); hold fewer arrays, or eval! and drop graphs");
     }
     byteThreshold = Math.max(BASE_BYTES, 2 * activeMemory());
   }
@@ -380,29 +380,43 @@ public final class MlxRuntime {
   /** The highest array threshold: 60% of Metal's buffer limit (the device's
    *  resource_limit; MLX on macOS allocates every buffer through Metal, also
    *  on the CPU device), or none where the device has no such limit (CUDA,
-   *  the CPU on Linux). */
-  private static final long MAX_ARRAYS = maxArrays();
+   *  the CPU on Linux). Read at the first collection, not in MlxRuntime's
+   *  initializer: the backend's first mlx-c call initializes MlxRuntime from
+   *  inside that function's MlxRaw holder class, so the initializer cannot
+   *  call mlx-c. It did, and the cap was no limit on Metal: its first call,
+   *  mlx_device_new_type, met its own half-initialized holder (2026-10-21,
+   *  176 errors from Metal's buffer limit in the full battery). */
+  private static final class Cap {
+    static final long MAX_ARRAYS = maxArrays();
+  }
+
+  /** No limit: the device reports no buffer limit, or there is no GPU. */
+  private static final long NO_CAP = Long.MAX_VALUE / 4;
 
   private static long maxArrays() {
+    long dev = Mlx.mlx_device_new_type(1, 0);
     try {
-      Scratch s = scratch();
-      long dev = MlxRaw.mlx_device_new_type(1, 0);
-      MemorySegment info = s.out(1);
-      if (MlxRaw.mlx_device_info_get(info, dev) == 0) {
-        long handle = info.get(JAVA_LONG, 0);
-        MemorySegment key = s.string("resource_limit");
-        MemorySegment has = s.out(1);
-        if (MlxRaw.mlx_device_info_has_key(has, handle, key) == 0 && has.get(JAVA_BOOLEAN, 0)) {
-          MemorySegment v = s.out(1);
-          if (MlxRaw.mlx_device_info_get_size(v, handle, key) == 0) {
-            return Math.max(BASE_ARRAYS, (long) (0.6 * v.get(JAVA_LONG, 0)));
-          }
-        }
+      long info;
+      try {
+        info = Mlx.mlx_device_info_get(dev);
+      } catch (MlxException e) {
+        return NO_CAP;
       }
-    } catch (Throwable t) {
-      // no GPU device: no Metal limit
+      try {
+        return Mlx.mlx_device_info_has_key(info, "resource_limit")
+            ? Math.max(BASE_ARRAYS, (long) (0.6 * Mlx.mlx_device_info_get_size(info, "resource_limit")))
+            : NO_CAP;
+      } finally {
+        Mlx.mlx_device_info_free(info);
+      }
+    } finally {
+      Mlx.mlx_device_free(dev);
     }
-    return Long.MAX_VALUE / 4;
+  }
+
+  /** The highest array threshold (Cap), for tests and diagnostics. */
+  public static long arrayCap() {
+    return Cap.MAX_ARRAYS;
   }
 
   private static long activeMemory() {
