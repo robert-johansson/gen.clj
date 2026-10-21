@@ -8,8 +8,13 @@
    arguments and earlier bindings (any pure Clojure, including destructuring);
    then the return expression, which may itself be such a call. A binding's
    head is macroexpanded first, as the dynamic gen expands its body, so a
-   macro that expands to a call is that call; quoted data is data, and may
-   mention trace. Branching happens only inside called generative functions.
+   macro that expands to a call is that call, and one that expands to a
+   computation is that computation, its inputs the names the expansion
+   reads. A macro nested deeper is the compiler's to expand, after the
+   analysis found the inputs from the names the binding mentions, so it
+   must be hygienic: it reads only the locals it is given. Quoted data is
+   data, and may mention trace. Branching happens only inside called
+   generative functions.
    This namespace checks a body at macroexpansion and builds its graph as
    data; gen.dynamic runs it.
 
@@ -120,9 +125,9 @@
       v (assoc :call v :args (vec (rest form)) :arg-specs (mapv #(arg-spec % known) (rest form))))))
 
 (defn- node
-  "The node of one binding, given the names bound so far: a call when the
-   binding, its head macroexpanded, is one, else a computation as written
-   (its expansion checked too)."
+  "The node of one binding, given the names bound so far, from the binding
+   with its head macroexpanded: a call, or a computation (its form as
+   written)."
   [env binding init known]
   (let [names (bound-names binding)
         call (expanded env init)
@@ -144,8 +149,7 @@
                   :arg-specs (mapv #(arg-spec % known) args)}))
 
              :else
-             (do (pure! call "a binding")
-                 (compute-node env init known))))))
+             (compute-node env call known)))))
 
 (defn arg-names
   "[[names…] per argument], the rest parameter's names last, and whether
@@ -205,8 +209,9 @@
           names (into known (mapcat :names nodes))]
       {:args args
        :nodes nodes
-       :ret (do (pure! (expanded (in-scope names) ret) "the return expression")
-                (compute-node (in-scope names) ret names))}))))
+       :ret (let [ret (expanded (in-scope names) ret)]
+              (pure! ret "the return expression")
+              (compute-node (in-scope names) ret names))}))))
 
 (defn ir
   "gf's graph as data (see the namespace doc), or nil when gf is not static."

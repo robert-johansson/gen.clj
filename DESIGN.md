@@ -1014,12 +1014,15 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   - **Macros and quoted data (M5, G11 and G12; owner, 2026-10-21):** a
     binding's head, and the return expression's, is macroexpanded before
     it is classified, as `gen` expands a dynamic body, so a user macro that
-    expands to a `trace` or a `splice` is that call; a computation stays as
-    written, its expansion checked as it is. Only the head is expanded, so
-    a call hidden in a macro inside an expression is the compiler's error
-    (trace is unbound there), as before: catching it would take a walk
-    that knows the expression's locals. Quoted data is data: it may mention
-    `trace`, and its symbols are no inputs.
+    expands to a `trace` or a `splice` is that call; a computation is its
+    expansion, whose names are its inputs (its form shown as written; the
+    review of the evening found a head macro reading a local unbound).
+    Only the head is expanded, so a call hidden in a macro inside an
+    expression is the compiler's error (trace is unbound there), as before:
+    catching it would take a walk that knows the expression's locals; and
+    a macro nested so must be hygienic, reading only the locals it is
+    given. Quoted data is data: it may mention `trace`, and its symbols are
+    no inputs.
   - **Static rewrites (M5, G2, genclj-lgij; owner, 2026-10-21; to build).**
     The rewrites live in the static analysis only; the body fn, the dynamic
     semantics, is unchanged, and the static law runs over every rewritten

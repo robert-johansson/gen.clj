@@ -151,6 +151,12 @@
   [addr gf & args]
   `(~'splice ~addr ~gf ~@args))
 
+(defmacro ^:private twice-x
+  "(* 2.0 x): a macro that reads a local it is not given, at a binding's
+   head (review of 9d9h, 2026-10-21)."
+  []
+  '(* 2.0 x))
+
 (defmacro ^:private hidden-at
   "1 plus (trace addr (d/normal x 1)): a call inside an expression."
   [addr x]
@@ -665,6 +671,17 @@
           gf (gen ^:static [m] (let [a (noisy-at :a m)] a))]
       (is (= [:compute] (mapv :kind (:nodes (static/ir gf)))))
       (is (ts/close? 3.0 (gf 1.5)))))
+  (testing "a head macro expanding to a computation: its inputs are the expansion's"
+    (binding [*ns* (the-ns 'gen.static-test)]
+      (let [form '(gen ^:static [x] (let [y (twice-x) z (trace :z (d/normal y 1.0))] z))]
+        (is (nil? (static-error form)) "it compiles, as the dynamic body does")
+        (when-let [gf (try (eval form) (catch Exception _ nil))]
+          (is (= '[x] (:inputs (first (:nodes (static/ir gf))))))
+          (is (= '(twice-x) (:form (first (:nodes (static/ir gf))))) "the form as written")
+          (let [[static dynamic] (static-and-dynamic-updates gf [1.0] [2.0] [diff/unknown-change])]
+            (is (ts/close? (:weight dynamic) (:weight static)) "an update reruns it")
+            (is (ts/close? (:score (:trace dynamic)) (:score (:trace static))))))
+        (is (nil? (static-error '(gen ^:static [x] (let [] (twice-x))))) "in the return expression too"))))
   (testing "a macro hiding a call inside an expression is still a compile error"
     ;; only a binding's head is expanded, so the compiler meets the trace
     ;; outside the body, where trace is not bound
