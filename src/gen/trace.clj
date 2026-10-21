@@ -72,7 +72,7 @@
    call is. A path that goes on past a call continues in its trace."
   [tr addr]
   (loop [tr tr
-         p (if (vector? addr) addr [addr])]
+         p (cm/path addr)]
     (if (empty? p)
       tr
       (when-let [[sub more] (-call (maker tr) tr p)]

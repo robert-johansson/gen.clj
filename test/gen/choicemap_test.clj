@@ -163,6 +163,8 @@
                        ["not a selection" #(sel/set-subselection sel/none :z true)]
                        ["a vector inside a path" #(sel/select [[:y 0] :z])]
                        ["a vector inside a path" #(sel/hierarchical [[:y] 0] sel/all)]
+                       ["a vector inside a path, read" #(sel/selected? s [:y [0]])]
+                       ["a vector inside a path, read" #(sel/get-subselection s [:y [0]])]
                        ["a dangling address" #(sel/hierarchical :x)]]]
         (is (thrown? clojure.lang.ExceptionInfo (f)) why))))
   (testing "in choice maps"
@@ -179,7 +181,9 @@
                        ["a submap under a value" #(cm/set-submap c [:x :y] (cm/choicemap :z 2.0))]
                        ["a submap under a root value" #(cm/set-submap (cm/->Value 1.0) :y (cm/choicemap :z 2.0))]
                        ["a vector inside a path" #(cm/set-choice c [[:y 0] :z] 2.0)]
-                       ["a map's paths that overlap" #(cm/from-map {[:a :b] 1 :a 2})]]]
+                       ["a map's paths that overlap" #(cm/from-map {[:a :b] 1 :a 2})]
+                       ["a vector inside a path, read" #(cm/get-submap c [[:x] :y])]
+                       ["a vector inside a path, read" #(cm/get-choice c [:x [:y]])]]]
         (is (thrown? clojure.lang.ExceptionInfo (f)) why)))))
 
 (deftest merge-takes-any-number

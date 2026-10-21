@@ -56,7 +56,7 @@
   "The selection for the addresses under an address or path (s itself at
    the empty path)."
   [s addr]
-  (if (vector? addr) (reduce -subselection s addr) (-subselection s addr)))
+  (if (vector? addr) (reduce -subselection s (cm/path addr)) (-subselection s addr)))
 
 (defn selected?
   "Is the leaf at an address or path selected? At the empty path, the
@@ -64,16 +64,7 @@
   [s addr]
   (cond (not (vector? addr)) (-selected? s addr)
         (empty? addr) (root-selected? s)
-        :else (-selected? (get-subselection s (pop addr)) (peek addr))))
-
-(defn- written-path
-  "The path of an address or path that a selection is built at. A vector
-   inside it is an error: a vector is a path, never an address."
-  [addr]
-  (let [p (if (vector? addr) addr [addr])]
-    (when (some vector? p)
-      (throw (ex-info (str "A path's addresses cannot be vectors: " (pr-str addr)) {:path addr})))
-    p))
+        :else (let [p (cm/path addr)] (-selected? (get-subselection s (pop p)) (peek p)))))
 
 (defn set-subselection
   "s with sub the selection under an address or path (Gen.jl's
@@ -83,7 +74,7 @@
   [s addr sub]
   (when-not (selection? sub)
     (throw (ex-info (str "set-subselection takes a selection, not a " (type sub)) {:addr addr})))
-  (let [p (written-path addr)]
+  (let [p (cm/path addr)]
     ((fn put [s i]
        (cond (== i (count p)) sub
              (instance? None s) (->Hierarchical {(nth p i) (put none (inc i))})
@@ -109,7 +100,7 @@
   (doseq [p paths]
     (when-not (vector? p)
       (throw (ex-info (str "from-paths takes paths (vectors), not " (pr-str p)) {:path p})))
-    (written-path p))
+    (cm/path p))
   (paths->selection paths))
 
 (defn select

@@ -119,7 +119,9 @@
     (is (= tr (trace/subtrace tr [])))
     (is (nil? (trace/subtrace tr :mu)) "a choice is not a call")
     (is (nil? (trace/subtrace tr [:xs 3])) "nor an element past the end")
-    (is (nil? (tr :absent))))
+    (is (nil? (tr :absent)))
+    (is (thrown? clojure.lang.ExceptionInfo (trace/subtrace tr [[:xs] 1])) "a vector inside a path")
+    (is (thrown? clojure.lang.ExceptionInfo (tr [:xs [1]]))))
   (testing "a path continues past an element"
     (let [tr (gfi/simulate (comb/map (gen [x] (splice :inner element x) :done)) [[1.0 2.0]] (rng/key 9))]
       (is (= :done (tr 1)))

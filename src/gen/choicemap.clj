@@ -88,16 +88,17 @@
   [cm]
   (when (has-value? cm) (-get-value cm)))
 
-(defn- path [addr] (if (vector? addr) addr [addr]))
-
-(defn- written-path
-  "The path of an address or path that an update writes at. A vector
-   inside it is an error: a vector is a path, never an address."
+(defn path
+  "The path of an address or a path: [addr] for an address, a vector
+   itself. A vector inside a path is an error, since a vector is a path and
+   never an address."
   [addr]
-  (let [p (path addr)]
-    (when (some vector? p)
-      (throw (ex-info (str "A path's addresses cannot be vectors: " (pr-str addr)) {:path addr})))
-    p))
+  (if (vector? addr)
+    (do (dotimes [i (count addr)]
+          (when (vector? (nth addr i))
+            (throw (ex-info (str "A path's addresses cannot be vectors: " (pr-str addr)) {:path addr}))))
+        addr)
+    [addr]))
 
 (defn- single-address
   "addr, which f takes as one address: a vector, a path, is an error."
@@ -211,7 +212,7 @@
    the empty path, v is the whole choice map. Descending through an existing
    leaf throws rather than discarding it."
   [cm addr v]
-  (let [p (written-path addr)]
+  (let [p (path addr)]
     (when (nil? v)
       (throw (ex-info (str "A choice value cannot be nil (at " p ")") {:path p})))
     (put-at cm p 0 (if (choicemap? v) v (->Value v)))))
