@@ -5,6 +5,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [gen.test-support :as ts]
             [gen.array :as array :refer [+ - * /]]
+            [gen.array.batch :as batch]
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
             [gen.dist :as d]
@@ -370,6 +371,29 @@
       (is (< 1.0 (ts/number (:w store'))) (str (:kind opt) ": :w ascends"))))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"does not have"
                         (learn/step (learn/sgd {:lr 0.1}) nil {:w 1.0} {:v 0.5}))))
+
+(defn- evaluated?
+  "Is x a value rather than a graph: always on an eager backend, and on MLX
+   when MLX holds its data."
+  [x]
+  (or (not (array/array? x)) (array/concrete? x) ((requiring-resolve 'gen.backend.mlx/evaluated?) x)))
+
+(deftest a-step-is-evaluated
+  ;; a step is an inference loop's boundary (rule 3): on a lazy backend its
+  ;; store and state are values, so a loop of steps holds no graph from one
+  ;; to the next. Without it, train-test's lecture loop grew each store into
+  ;; a graph over every step before (genclj-9e9e: 270 KB a lecture on Metal)
+  (doseq [opt [(learn/sgd {:lr 0.1}) (learn/adam {:lr 0.1}) (learn/gradient-descent {:step-size-init 0.1 :step-size-beta 1.0})]]
+    (let [store {:w (array/array [1.0 2.0]) :b (array/array 0.5)}
+          grads {:w (* 2.0 (array/array [0.5 -0.5])) :b (* 3.0 (array/array 0.1))}
+          stepped (learn/step opt (learn/init opt store) store grads)]
+      (is (every? evaluated? (array/tree-leaves stepped)) (str (:kind opt)))))
+  (testing "a step inside a gradient (tape values), and under the batch tracer, is the same step"
+    (let [lr 0.1
+          w-after #(:w (first (learn/step (learn/sgd {:lr lr}) nil {:w %} {:w (* 2.0 %)})))]
+      (is (ts/close? (+ 1.0 (* 2.0 lr)) ((array/grad w-after) 1.5)) "d/dw of w + lr·2w")
+      (let [ws (array/array [1.0 2.0 3.0])]
+        (is (ts/close? (* (+ 1.0 (* 2.0 lr)) ws) (batch/unwrap (batch/batched [3] (w-after (batch/wrap ws [3]))) [3])))))))
 
 (deftest argument-gradients-with-a-return-value-gradient
   ;; Eq. 2.11 (law audit gap K): log N(z; x, 1) + retgrad·(x·z) has

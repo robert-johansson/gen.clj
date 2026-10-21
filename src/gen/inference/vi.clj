@@ -120,9 +120,9 @@
     (if (< i iters)
       (let [[k k-next] (rng/split key)
             {:keys [objective grads model-grads]} (estimate store model-store k)
-            [store state] (array/eval! (learn/step optimizer state store grads))
+            [store state] (learn/step optimizer state store grads)
             [model-store model-state] (if model-store
-                                        (array/eval! (learn/step model-optimizer model-state model-store model-grads))
+                                        (learn/step model-optimizer model-state model-store model-grads)
                                         [nil nil])]
         (recur (inc i) store state model-store model-state (conj history objective) k-next))
       (cond-> {:store store :history history}

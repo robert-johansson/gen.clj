@@ -752,9 +752,18 @@ The decisions are §12 items 15–18, for the owner's review.*
   `gen.mlx.constants`), and Threefry takes its key as one buffer.
 - **Evaluation at loop boundaries (§9).** Inference loops evaluate once
   per iteration (`gfi/eval-trace!`): MCMC runs, particle-filter steps,
-  scalar importance sampling, training steps. So a graph stays one
-  iteration deep. Before this, scalar importance sampling with 10,000
-  particles kept 10,000 pending traces, about 250,000 buffers.
+  scalar importance sampling, and optimizer steps (`learn/step` itself,
+  so any loop over it, genclj-9e9e). So a graph stays one iteration deep.
+  Before this, scalar importance sampling with 10,000 particles kept
+  10,000 pending traces, about 250,000 buffers.
+- **The backend cannot see an unevaluated graph's size.** A graph holds
+  every array it reads in MLX's own nodes, after the JVM has freed their
+  handles: the live count, MLX's active and cache memory and the JVM heap
+  all stay small while the process grows. MLX exposes no graph size, so
+  neither the collections nor the budget checks can bound it; only
+  evaluation does. Measured on Metal: about 270 KB of resident memory per
+  lecture of a training loop that stepped without evaluating (genclj-9e9e).
+  `gen.backend.mlx/evaluated?` tells a value from a graph.
 - Decompositions and solves run on the CPU stream, the only one where MLX
   implements them.
 

@@ -15,7 +15,9 @@
    smaller on MLX, where every scalar is an array (sgd-run, lecture-run),
    each with bands for its size."
   (:refer-clojure :exclude [+ - * /])
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.java.shell :as shell]
+            [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
             [gen.array :as array :refer [+ - * /]]
             [gen.choicemap :as cm]
             [gen.dist :as d]
@@ -204,3 +206,26 @@
     ;; lecture-batched, at the first part's step, trains q to the optimum.
     (check-trained (trained #(:grads (learn/lecture-batched p [] q %1 x-of (:batch lecture-run) %2)) (rng/key 6))
                    (rng/key 7))))
+
+(defn- rss-mb
+  "This JVM's resident memory in MB, as ps reports it."
+  []
+  (let [pid (.pid (java.lang.ProcessHandle/current))]
+    (quot (Long/parseLong (str/trim (:out (shell/sh "ps" "-o" "rss=" "-p" (str pid))))) 1024)))
+
+(deftest ^:slow trained-holds-no-graph-across-steps
+  ;; genclj-9e9e, on a lazy backend (on the JVM nothing is deferred):
+  ;; trained steps without evaluating, as a loop written by hand may.
+  ;; learn/step evaluates its store and state, so memory stays bounded;
+  ;; before, each store was a graph over every lecture of every step before
+  ;; it, about 270 KB a lecture. Measured on Metal (2026-10-22), after this
+  ;; warm-up (the JIT, the heap, MLX's caches): these 5,000 lectures grew
+  ;; RSS by 101-108 MB in three runs, and by 596 MB unevaluated; the bound
+  ;; sits between them, 2.4 times from each
+  (when-not (ts/jvm?)
+    (let [lectures (fn [b] (fn [store k] (grad/mean (map #(:grads (learn/lecture p [] q store x-of %)) (rng/split k b)))))]
+      (trained (lectures 10) (rng/key 8))
+      (let [r0 (rss-mb)
+            _ (trained (lectures 50) (rng/key 9))
+            grown (- (rss-mb) r0)]
+        (is (< grown 250) (str "RSS grew " grown " MB over 100 steps of 50 lectures"))))))
