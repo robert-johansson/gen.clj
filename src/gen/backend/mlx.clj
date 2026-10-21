@@ -597,6 +597,8 @@
   {:negative (mlx-fn negative 1) :abs (mlx-fn abs 1) :sign (mlx-fn sign 1) :sqrt (mlx-fn sqrt 1)
    :exp (mlx-fn exp 1) :log (mlx-fn log 1) :expm1 (mlx-fn expm1 1) :log1p (mlx-fn log1p 1)
    :sin (mlx-fn sin 1) :cos (mlx-fn cos 1) :tan (mlx-fn tan 1) :tanh (mlx-fn tanh 1)
+   :sinh (mlx-fn sinh 1) :cosh (mlx-fn cosh 1)
+   :arcsin (mlx-fn arcsin 1) :arccos (mlx-fn arccos 1) :arctan (mlx-fn arctan 1)
    :erf (mlx-fn erf 1) :erfinv (mlx-fn erfinv 1)
    :floor (mlx-fn floor 1) :ceil (mlx-fn ceil 1) :round (fn [^long h ^long s] (Mlx/mlx_round h (int 0) s))
    :isnan (mlx-fn isnan 1) :isinf (mlx-fn isinf 1) :logical-not (mlx-fn logical_not 1)
@@ -608,7 +610,8 @@
    :minimum (mlx-fn minimum 2) :remainder (mlx-fn remainder 2) :floor-divide (mlx-fn floor_divide 2)
    :less (mlx-fn less 2) :less-equal (mlx-fn less_equal 2) :greater (mlx-fn greater 2)
    :greater-equal (mlx-fn greater_equal 2) :equal (mlx-fn equal 2) :not-equal (mlx-fn not_equal 2)
-   :logical-and (mlx-fn logical_and 2) :logical-or (mlx-fn logical_or 2) :logaddexp (mlx-fn logaddexp 2)})
+   :logical-and (mlx-fn logical_and 2) :logical-or (mlx-fn logical_or 2) :logaddexp (mlx-fn logaddexp 2)
+   :arctan2 (mlx-fn arctan2 2)})
 
 (declare exact-route broadcast-to)
 
@@ -630,13 +633,23 @@
     (let [f (unary-fns op)
           s (stream b)]
       (with-operands b op [h x dtype]
-        (wrap b (if (and (= op :sign) (= :float (dt/kind dtype)))
+        (wrap b (cond
+                  (and (= op :sign) (= :float (dt/kind dtype)))
                   ;; MLX's sign of NaN is 0; NumPy's (and the JVM backend's) NaN
                   (let [sg (f h s)
                         nan (Mlx/mlx_isnan h s)]
                     (try (Mlx/mlx_where nan h sg s)
                          (finally (MlxRaw/mlx_array_free sg) (MlxRaw/mlx_array_free nan))))
-                  (f h s)))))))
+
+                  (and (= op :arctan) (not= dtype :float64))
+                  ;; Metal's float32 atan(-0.0) is +0.0: x itself at zero (where
+                  ;; not x), as NumPy and the JVM backend; float64's keeps the sign
+                  (let [at (f h s)
+                        zero (Mlx/mlx_logical_not h s)]
+                    (try (Mlx/mlx_where zero h at s)
+                         (finally (MlxRaw/mlx_array_free at) (MlxRaw/mlx_array_free zero))))
+
+                  :else (f h s)))))))
 
 (defn- int-division
   "remainder or floor-divide of int handles, as the JVM backend (and NumPy):

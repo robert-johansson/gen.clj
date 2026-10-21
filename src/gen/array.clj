@@ -161,7 +161,7 @@
   (case op
     :add (c/+ x y) :subtract (c/- x y) :multiply (c/* x y) :divide (c// x y)
     :power (Math/pow x y) :maximum (Math/max x y) :minimum (Math/min x y)
-    :remainder (dt/floor-mod x y) :floor-divide (Math/floor (c// x y))
+    :remainder (dt/floor-mod x y) :floor-divide (Math/floor (c// x y)) :arctan2 (Math/atan2 x y)
     :less (c/< x y) :less-equal (c/<= x y) :greater (c/> x y) :greater-equal (c/>= x y)
     :equal (c/== x y) :not-equal (not (c/== x y))
     :logical-and (and (not (c/== x 0.0)) (not (c/== y 0.0)))
@@ -203,6 +203,8 @@
                  :sqrt (Math/sqrt v) :exp (Math/exp v) :log (Math/log v)
                  :expm1 (Math/expm1 v) :log1p (Math/log1p v)
                  :sin (Math/sin v) :cos (Math/cos v) :tan (Math/tan v) :tanh (Math/tanh v)
+                 :arcsin (Math/asin v) :arccos (Math/acos v) :arctan (Math/atan v)
+                 :sinh (Math/sinh v) :cosh (Math/cosh v)
                  :erf (special/erf v) :erfinv (special/erfinv v)
                  :floor (Math/floor v) :ceil (Math/ceil v) :round (Math/rint v)
                  :isnan (Double/isNaN v) :isinf (Double/isInfinite v)))
@@ -312,6 +314,15 @@
 (defunary cos :cos "Elementwise cosine.")
 (defunary tan :tan "Elementwise tangent.")
 (defunary tanh :tanh "Elementwise hyperbolic tangent.")
+(defunary sinh :sinh "Elementwise hyperbolic sine.")
+(defunary cosh :cosh "Elementwise hyperbolic cosine.")
+(defunary asin :arcsin "Elementwise inverse sine, in [-π/2, π/2] (NaN outside [-1, 1]).")
+(defunary acos :arccos "Elementwise inverse cosine, in [0, π] (NaN outside [-1, 1]).")
+(defunary atan :arctan "Elementwise inverse tangent, in [-π/2, π/2].")
+(defbinary atan2 :arctan2
+  "Elementwise angle of the point (x, y) from the positive x axis, in
+   [-π, π], broadcasting: (atan2 y x), as Math/atan2 and Julia's atan(y, x).
+   Signed zeros choose the side of the cut along the negative x axis.")
 (defunary erf :erf "Elementwise error function.")
 (defunary erfinv :erfinv "Elementwise inverse error function (±Inf at ±1, NaN outside [-1, 1]).")
 (defunary floor :floor "Elementwise floor.")
@@ -524,12 +535,24 @@
   ([data {:keys [dtype]}]
    (p/-from-host *backend* data dtype)))
 
+(defn- check-fill
+  "A fill value must be a scalar: a host one, or a 0-d (per-particle) array."
+  [op value]
+  (when-not (or (host? value) (empty? (shape value)))
+    (throw (ex-info (str (name op) ": the fill value must be a scalar, not an array of shape " (shape value)
+                         " (broadcast-to fills with an array)")
+                    {:op op :value-shape (shape value)}))))
+
 (defn full
-  "An array of the given shape filled with value. Options: :dtype (default: the
-   backend's default dtype for the kind of value)."
+  "An array of the given shape filled with value: a host scalar or a 0-d
+   array. An array runs on its own backend where that wraps *backend*: a
+   value being differentiated on the tape, so the fill has its gradient.
+   Options: :dtype (default: the backend's default dtype for the kind of
+   value)."
   ([shape value] (full shape value nil))
   ([shape value {dt :dtype}]
-   (let [b *backend*]
+   (check-fill :full value)
+   (let [b (join-backends :full *backend* (operand-backend :full value))]
      (p/-full b (vec shape) value
               (or dt
                   (if (host? value)
@@ -555,10 +578,12 @@
 
 (defn full-like
   "An array with x's shape, backend and (unless given) dtype, filled with
-   value. A host scalar x is weakly typed (weak-dtype)."
+   value, a scalar (on value's backend when that wraps x's, as full). A host
+   scalar x is weakly typed (weak-dtype)."
   ([x value] (full-like x value nil))
   ([x value {dt :dtype}]
-   (let [b (backend x)]
+   (check-fill :full-like value)
+   (let [b (join-backends :full-like (backend x) (operand-backend :full-like value))]
      (p/-full b (shape x) value (or dt (weak-dtype x b))))))
 
 (defn zeros-like [x] (full-like x 0))
