@@ -15,10 +15,16 @@
    - One read a step; particles convert to the completion's traces, whose
      scores are the particles' log p; runs are pure functions of their key;
      no GC backstop; misuse is loud.
+   - The host pool: runs on pools of 1, 2 and 8 threads are the calling
+     thread's bit for bit; no LM, potential or proposal-function call runs
+     on the pool; a task's error and the caller's bindings reach it as on
+     the calling thread; the default pool is shared.
 
    Mutations of gen.llm.smc checked (2026-10-21, each applied, the suite
    run, and reverted): see docs/research/llm-token-smc.md, Tests."
   (:require [clojure.test :refer [deftest is testing]]
+            [gen.array :as array]
+            [gen.array.batch :as batch]
             [gen.gfi :as gfi]
             [gen.laws :as laws]
             [gen.llm.branching :as br]
@@ -28,7 +34,8 @@
             [gen.llm.smc :as smc]
             [gen.llm.token :as token]
             [gen.llm.toy-engine :as toy]
-            [gen.random :as rng]))
+            [gen.random :as rng])
+  (:import [java.util.concurrent ExecutorService ThreadPoolExecutor]))
 
 (def ^:private n-vocab 5)
 (def ^:private end 4)
@@ -188,6 +195,81 @@
     (is (= (smc/particles (run)) (smc/particles (run))))
     (is (= (:log-weights (run)) (:log-weights (run))))))
 
+;; ---------------------------------------------------------------------------
+;; The host pool
+;; ---------------------------------------------------------------------------
+
+(deftest the-host-pool-changes-nothing
+  ;; the proposal rows and draws on pools of 1, 2 and 8 threads give the
+  ;; calling thread's run bit for bit: the particles, the weights, the
+  ;; estimate; for each kind of proposal
+  (doseq [opts [{:potential soft} {:potential soft :proposal :masked} {:potential no-repeats :proposal :masked}
+                {:potential soft :proposal uniform-proposal}]]
+    (let [run (fn [pool] (smc/run completion [prompt 8] 40 (assoc opts :key (rng/key 7) :host-pool pool)))
+          alone (run false)]
+      (doseq [n [1 2 8]]
+        (with-open [^ExecutorService pool (smc/host-pool n)]
+          (let [r (run pool)]
+            (is (= (smc/particles alone) (smc/particles r)) (str n " threads"))
+            (is (= (:log-weights alone) (:log-weights r)) (str n " threads"))
+            (is (= (smc/log-ml-estimate alone) (smc/log-ml-estimate r)) (str n " threads"))
+            (is (pos? (.getCompletedTaskCount ^ThreadPoolExecutor pool)) "the pool ran the draws")))))))
+
+(deftest no-lm-or-potential-call-runs-on-the-pool
+  ;; a recording LM and potential, and a recording proposal function: every
+  ;; call on the calling thread
+  (let [caller (Thread/currentThread)
+        threads (atom #{})
+        note! (fn [] (swap! threads conj (Thread/currentThread)))
+        recording (reify lm/LM
+                    (-tokenizer [_] (lm/-tokenizer m))
+                    (-next-logprobs [_ contexts] (note!) (lm/-next-logprobs m contexts))
+                    (-score [_ context continuation] (note!) (lm/-score m context continuation))
+                    (-info [_] (lm/-info m)))
+        noted (potential/potential n-vocab {:prefix #(do (note!) (potential/prefix soft %))
+                                            :complete #(do (note!) (potential/complete soft %))
+                                            :logw-next #(do (note!) (potential/logw-next soft %))})]
+    (with-open [^ExecutorService pool (smc/host-pool 4)]
+      (doseq [proposal [:masked :lm (fn [context row] (note!) (uniform-proposal context row))]]
+        (smc/run (token/completion recording) [prompt 8] 40
+                 {:potential noted :proposal proposal :key (rng/key 8) :host-pool pool}))
+      (is (pos? (.getCompletedTaskCount ^ThreadPoolExecutor pool))))
+    (is (= #{caller} @threads))))
+
+(deftest a-pool-task-s-error-is-raised-as-itself
+  ;; a twist of NaN makes the masked rows NaN, which the draw, on the pool,
+  ;; finds loud
+  (let [nan (potential/potential n-vocab {:prefix (constantly 0.0) :complete (constantly 0.0)
+                                          :logw-next (fn [_] (float-array (inc n-vocab) Float/NaN))})]
+    (with-open [^ExecutorService pool (smc/host-pool 2)]
+      (is (= :invalid-row (bc/reason #(smc/run completion args 8 {:potential nan :proposal :masked :host-pool pool
+                                                                  :key (rng/key 9)})))))))
+
+(deftest a-pool-task-sees-the-calling-thread-s-bindings
+  ;; under a batch tracer a token draw is the batched-branch error (one
+  ;; particle at a time), on the pool as on the calling thread
+  (let [s (smc/initialize completion args 8 {:key (rng/key 10) :host-pool false})
+        branch? (fn [f] (try (f) false
+                             (catch clojure.lang.ExceptionInfo e (boolean (::array/batched-branch (ex-data e))))))]
+    (is (branch? #(batch/batched [2] (smc/step s))))
+    (with-open [^ExecutorService pool (smc/host-pool 2)]
+      (is (branch? #(batch/batched [2] (smc/step (assoc s :host-pool pool))))))))
+
+(deftest the-pool-s-size-is-a-positive-integer-or-loud
+  (let [threads #'smc/host-threads]
+    (is (= 4 (threads nil 10)) "half the processors")
+    (is (= 4 (threads nil 32)) "up to 4")
+    (is (= 1 (threads nil 1)))
+    (is (= 3 (threads "3" 10)))
+    (is (= 1 (threads "1" 10)) "the off switch")
+    (doseq [bad ["four" "4 " "" "0" "-2" "2.5"]]
+      (is (= :invalid-option (bc/reason #(threads bad 10))) (pr-str bad)))))
+
+(deftest the-default-pool-is-shared
+  (let [pools (map #(:host-pool (smc/initialize completion args 4 {:key (rng/key %)})) (range 2))]
+    (is (or (every? false? pools) (and (instance? ExecutorService (first pools)) (apply identical? pools)))
+        "one pool for every run, or the calling thread on one processor")))
+
 (deftest inference-never-reaches-the-backstop
   (dotimes [seed 5] (smc/run completion [prompt 8] 60 {:potential soft :key (rng/key seed)}))
   (is (zero? (:collections (br/info engine))))
@@ -211,6 +293,8 @@
             :invalid-potential]
            ["a proposal that returns no row" #(smc/step (smc/initialize completion args 4 {:proposal (constantly [0.0])}))
             :invalid-row]
+           ["a pool of no threads" #(smc/host-pool 0) :invalid-args]
+           ["a host pool that is no executor" #(smc/initialize completion args 4 {:host-pool 3}) :invalid-option]
            ["resampling particles all of weight 0"
             #(smc/resample (smc/step (smc/initialize completion args 4 {:potential nothing}))) :impossible]]]
     (is (= reason (bc/reason f)) what)))

@@ -69,7 +69,9 @@ satisfies it.
 **Proposals.** `:lm` draws from the LM's row (the bootstrap); `:masked`
 from the row times the twist's next-token weights, renormalized (for a
 constraint, the row restricted to its allowed tokens: the locally optimal
-proposal of a one-step twist, GenMLX's grammar-masked); a function
+proposal of a one-step twist, GenMLX's grammar-masked), by
+`gen.llm.constrained/weighted`, the one implementation, which a
+constrained completion's sites use too; a function
 `(fn [context row] → q)` gives any other, q a normalized float row. A
 token's weight is log p − log q + its twist, with p the LM's score from
 its ledger (as the completion's), so a particle's log p is its trace's
@@ -142,15 +144,31 @@ most) is enumerated and Z computed exactly:
   loud, each error with a `:reason` (`:invalid-model`, `:invalid-args`,
   `:no-tokens`, `:invalid-option`, `:invalid-potential`, `:invalid-row`,
   `:not-done`, `:impossible`), which the test checks.
+- **The host pool**: runs on pools of 1, 2 and 8 threads are the calling
+  thread's bit for bit, for every proposal; a recording LM, potential and
+  proposal function see every call on the calling thread; a task's error
+  is raised as itself, and a task sees the caller's bindings (a batch
+  tracer's batched-branch error, from the pool); the default pool is
+  shared.
 - The masked proposal's rows, renormalized in double and stored as floats,
   pass `token/dist`'s normalization check (within 1e-4 of 1), which a
   proposal function's rows must pass too.
+- **`:masked` by `constrained/weighted`** (2026-10-21, review R6, replacing
+  smc's own log-sum-exp in double): runs with the soft twist, and with a
+  potential nothing satisfies, are the same bit for bit; under a
+  constraint that disallows few tokens (`no-repeats`, one or two of five)
+  weighted takes the normalizer as log1p(−the disallowed mass), so a
+  proposal row can differ in its last float bit. Over 6 runs of 30
+  particles the particles were the same, the log weights within 3.7e-9
+  and log Ẑ within 5.3e-10. No test moved: the tests of the estimate are
+  statistical, and the exact ones (masked constraints satisfied, Ẑ of 0)
+  do not depend on the normalizer's last bit.
 
 `gen.llm.potential-test`: dense next weights are consistent, products sum,
 misuse is loud, and the contract check catches planted inconsistencies.
 
 Mutations checked (2026-10-21, each applied, the suite run, reverted),
-sixteen, all caught:
+twenty-three, all caught (the last seven of the host pool, m3-par):
 
 | Mutation | Caught by |
 |---|---|
@@ -169,6 +187,13 @@ sixteen, all caught:
 | an all-dead state estimated as Z = 1 | particles-all-of-weight-0-estimate-z-as-0 |
 | run resampling after every particle finished | particles-all-of-weight-0… |
 | potential: dense weights without the base; a product of its first | potential-test |
+| the host pool's results in another order | the-host-pool-changes-nothing, the estimates (38) |
+| a draw's key by thread, not by particle | the-host-pool-changes-nothing, the reads and draws tests (33) |
+| the potential's calls on the pool | no-lm-or-potential-call-runs-on-the-pool |
+| a task's error wrapped (ExecutionException) | a-pool-task-s-error-is-raised-as-itself, a-pool-task-sees… |
+| a new pool for every run | the-default-pool-is-shared |
+| a task without the calling thread's bindings | a-pool-task-sees-the-calling-thread-s-bindings (a batch tracer's batched-branch error, lost on the pool) |
+| an unparsable gen.llm.host-threads falling back to the default | the-pool-s-size-is-a-positive-integer-or-loud |
 
 ## Measurements
 
@@ -189,18 +214,90 @@ particles stop.) At Qwen3's vocabulary the SMC's own work a particle-step
 is 0.2 to 0.55 ms, nearly all of it the host draw (about 335 µs on average
 over keys: a sum of exp over the row in token order to the uniform, half
 the vocabulary on average); the masked proposal adds about 0.9 ms (the
-twist row, and a log-sum-exp over the whole row). Against llama.cpp's
+twist row, and the normalizer over the whole row; measured before R6
+replaced smc's own with `constrained/weighted`, which allocates only the
+row it returns). Against llama.cpp's
 batched decode (13.5 ms for 15 rows, M2 Max) that is a third of a row's
 share for the bootstrap, more for the masked proposal.
 
-**Recommendation (not built): parallel host work.** A particle's proposal
-row and draw are pure functions of its row, its twist and its key, so they
-can run on a small fixed pool (as the engine's row normalization, the
-Branching review's N1), deterministic whatever the threads; the LM's
-scores and the potential's calls stay sequential (a potential need not be
-thread-safe). And rows that came with their probabilities (the engine
-computes the exponentials when it normalizes) would make a draw a float
-sum, tens of microseconds.
+## The host pool (built 2026-10-21, m3-par)
+
+A particle's proposal row (the LM's row, or the masked row) and its draw
+are pure functions of its row, its twist and its key. So a step runs them
+on a fixed pool of daemon threads, and collects them in particle order,
+each task under the calling thread's bindings. The LM's calls (the step's
+batch read, each token's score from the ledger), the potential's (the
+next-token weights, prefix and complete) and a proposal function's stay
+on the calling thread: none of them need be thread-safe, and the LM reads
+in the order the program gives. A task's error is raised as itself once
+every task has ended. With one live particle, or no pool, the work runs on
+the calling thread.
+
+- **Determinism.** A run is the calling thread's alone, bit for bit, at
+  every pool size: particles, weights and the estimate, tested at 1, 2 and
+  8 threads for each proposal (the LM's rows, masked, a function).
+- **Interface.** `:host-pool` at initialize: an ExecutorService
+  (`smc/host-pool n` makes a fixed pool of daemon threads; close it, or
+  let the JVM's exit end it), `false` for the calling thread alone, or by
+  default the shared pool. Never run SMC inside a task of the pool it is
+  given: a step waits for its tasks, queued behind the one that waits, so
+  the pool can deadlock.
+
+**PROVISIONAL (owner to confirm), 2026-10-21:**
+- **Ownership:** `gen.llm.smc` owns one shared pool, made on first use, of
+  daemon threads named `gen.llm.smc host-N`; never the common pool. A
+  caller may pass its own. Alternatives: the LM owning it (it would serve
+  the token generative function's draws too, which are one particle at a
+  time and gain nothing); no default (every caller passes a pool); a pool
+  for each run (thread churn).
+- **Size:** half the available processors up to 4, as the llama.cpp
+  engine's row pool (4 on the M4, its performance cores; the engine's
+  thread, the GC and the row pool need the rest), or the system property
+  `gen.llm.host-threads`, which is loud (`:invalid-option`) unless a
+  positive integer. Alternative: the processors less one.
+- **Off switch:** `:host-pool false` for a run; `-Dgen.llm.host-threads=1`
+  for the process.
+
+**Measured** (`clojure -M:bench -m gen.smc-bench host`, 2026-10-21 07:50,
+this Mac with no other JVM running, after R6): a step of n particles over
+16 steps at Qwen3's vocabulary (151,936 tokens) on the toy engine, never
+resampling; ms a step:
+
+| particles | proposal | the LM's batch alone | calling thread | 2 threads | 4 threads | 8 threads |
+|---|---|---|---|---|---|---|
+| 8 | bootstrap | 5.71 | 11.30 | 10.08 | 9.46 | 9.32 |
+| 8 | masked, a mask | 5.71 | 12.24 | 10.66 | 9.82 | 9.70 |
+| 32 | bootstrap | 41.84 | 44.25 | 39.43 | 37.41 | 36.30 |
+| 32 | masked, a mask | 41.84 | 49.44 | 42.41 | 39.37 | 38.38 |
+| 64 | bootstrap | 59.32 | 88.40 | 78.43 | 73.36 | 72.50 |
+| 64 | masked, a mask | 59.32 | 99.55 | 85.11 | 79.18 | 76.73 |
+
+At 64 particles the pool's 4 threads (the default here) take 17% off the
+bootstrap's step and 20% off the masked proposal's; 8 threads a little
+more. The host work (the step less the batch) falls from 29 to 14 ms
+(bootstrap) and from 40 to 20 (masked). The rest of a step is the LM's
+batch (the toy engine's rows, on one thread) and the sequential scores.
+(The batch alone reads n contexts at every step, SMC one at its first,
+where every particle is at the prompt; so at 32 particles SMC's step can
+come under the batch's.) Two earlier runs beside a Metal battery, before
+R6, were noisier and slower (the masked proposal at 64 particles took
+171 to 177 ms on the calling thread, smc's own normalizer then
+allocating a double row besides the proposal's).
+
+**Recommendation (not built): rows with their cumulative probabilities.**
+A draw sums exp over the row in token order until the uniform: about
+335 µs at 151,936 tokens, half the row on average, for every particle,
+even when particles share a row after resampling. An engine computes
+those exponentials already when it normalizes a row (llama.cpp's,
+`LlamaRuntime/logSumExp`, takes exp(l − m) of every logit).
+If a row came with its cumulative probabilities in double (1.2 MB at
+Qwen3's vocabulary, besides the row's 600 KB of floats), a draw would be
+a binary search, under a microsecond, and its normalization check the
+array's last entry. The cost is in the Branching engine (m3-llama's): a
+second array per row, written in the same pass, held while the row is.
+Better made lazily, per row and once (a branch is a value, so a delay on
+it), so that rows no one draws from cost nothing. It does not help the
+masked proposal, whose row is the LM's times the twist, made per particle.
 
 ## On llama.cpp
 
@@ -215,6 +312,20 @@ backstop never runs.
 
 `clojure -J-Dgen.llama.lib=<lib> -M:bench -m gen.smc-bench <gguf>` gives a
 step of 8, 32 and 64 particles over 16 steps against the LM's batch alone,
-with no potential and with a mask (bootstrap and masked). With a grammar
-potential (m3-grammar) once it joins. The runs on the M4 are recorded
-below when made.
+with no potential and with a mask (bootstrap and masked), resampling at
+ESS < n/2. With Qwen3-0.6B on the M4 (Metal), ms a step, first on the
+calling thread (m3-main, 2026-10-21 02:40, beside other agents' JVMs),
+then with the host pool and R6 (m3-par, 07:55, no other JVM):
+
+| particles | the LM's batch alone | SMC, no potential | a mask, bootstrap | a mask, masked proposal |
+|---|---|---|---|---|
+| 8 | 16.2 / 16.1 | 13.0 / 12.4 | 13.0 / 12.5 | 19.0 / 12.7 |
+| 32 | 70.4 / 69.4 | 29.4 / 27.4 | 29.0 / 27.2 | 54.8 / 28.9 |
+| 64 | 105.1 / 103.5 | 50.5 / 47.2 | 51.4 / 48.2 | 106.4 / 51.3 |
+
+The masked proposal at 64 particles went from 106 to 51 ms a step, now 3
+ms over the bootstrap rather than 55: its rows on the pool, and
+`constrained/weighted` allocating only the row it returns. SMC comes under
+the batch alone because it resamples, after which particles share
+contexts and a step reads fewer. Peak RSS 3.5 GB, no GC backstop. With
+Qwen3.5 and Gemma-3-270M, and with a grammar potential: in later runs.

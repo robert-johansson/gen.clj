@@ -1190,6 +1190,23 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     resampling ESS-gated at n/2, systematic by default. One
     `lm/batch-next-logprobs` a step; particles are token vectors and the
     LM's trie owns the branches.
+  - **The host pool (2026-10-21, m3-par; PROVISIONAL, owner to
+    confirm):** each particle's proposal row and draw, pure functions of
+    its row, twist and key, run on a fixed pool of daemon threads,
+    collected in particle order under the caller's bindings, so a run is
+    the calling thread's alone bit for bit at every pool size; the LM's,
+    the potential's and a proposal function's calls stay on the calling
+    thread. `gen.llm.smc` owns one shared pool, made on first use, never
+    the common pool; `:host-pool` takes the caller's own
+    (`smc/host-pool n`) or `false`. Its size: half the processors up to 4,
+    as the llama.cpp engine's row pool, or `-Dgen.llm.host-threads` (1
+    turns it off). Alternatives: the LM owning it, no default pool, a pool
+    for each run. Measured (quiet, Qwen3's vocabulary, 64 particles): 4
+    threads take 17% (bootstrap) to 20% (masked) off a step on the toy
+    engine; on llama.cpp with Qwen3-0.6B, with R6's `constrained/weighted`,
+    the masked proposal's step went from 106 to 51 ms. Recommended, not built: rows that carry their cumulative
+    probabilities from the engine (a draw by binary search;
+    `docs/research/llm-token-smc.md`).
 - **A hybrid model's steps split over its recurrent cells** (2026-10-21,
   agent; **PROVISIONAL (owner to confirm)**; `docs/research/llm-branching.md`,
   Recurrent states and split steps):
