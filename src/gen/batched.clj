@@ -242,9 +242,11 @@
   (if (batch/batched? x) (Read. true (array/take (batch/value x) indices 0)) (Read. false x)))
 
 (defn- on-host
-  "A gathered read's host values."
+  "A gathered read's host values: an array's, read; a choice that is no
+   array (a label: gen.dist.dsl) as it is, as spot-check-here! takes it."
   [^Read r]
-  (Read. (.-batched? r) (array/->clj (.-v r))))
+  (let [v (.-v r)]
+    (Read. (.-batched? r) (if (array/array? v) (array/->clj v) v))))
 
 (defn- particle-host
   "The host value of a read at the j-th checked particle."
