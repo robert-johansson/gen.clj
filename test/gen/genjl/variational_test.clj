@@ -4,16 +4,19 @@
    model with no observations, whose posterior is its prior, and VIMCO's
    smoke runs. Gen.jl's GradientDescent and gen.clj's gradient-descent take
    the same decaying step, and both average the score-function gradient over
-   the samples, so the fit is Gen.jl's.
+   the samples, as Gen.jl's black_box_vi! does.
 
-   The band is Gen.jl's atol, 0.001. At q = p the log weight is 0 for every
-   sample, so the gradient's variance vanishes with the distance to the
-   optimum and the fit converges to it: over 8 keys, no parameter ended
-   farther than 2e-9 from its target (1.6e-11 to 1.9e-9 by parameter).
-   Gen.jl's step is bold, though: over 16 keys one run's σ collapsed to 0
-   in its first steps (a loud error); key 1's converges.
+   Gen.jl's step, GradientDescent(1., 1000) (variational.jl:26), diverges
+   for about 1 key in 16 (measured: over 16 keys of its 2,000 iterations of
+   100 samples, one run's σ collapsed to 0 in its first steps, a loud
+   error), so a test that passed would pass by its key. The port takes half
+   the step, under which no run of 24 keys (2,000 iterations) or 32 (200)
+   diverged. At q = p the log weight is 0 for every sample, so the
+   gradient's variance vanishes with the distance to the optimum: the slope
+   converges, and the intercept's mean, whose ELBO is flatter, follows its
+   schedule's remainder. The bands are 5 sds over those keys.
 
-   On MLX, where every scalar is an array, Gen.jl's run is 25 million array
+   On MLX, where every scalar is an array, the JVM's run is 25 million array
    operations (counted on the JVM): bbvi-run gives it one of 1.3 million."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
@@ -52,23 +55,23 @@
   (reduce (fn [r t] (* r (- 1 (/ (* step (/ 1001.0 (+ 1000 t))) (Math/exp 4))))) 1.0 (range 1 (inc iters))))
 
 (def ^:private bbvi-run
-  "The fit and its bands.
-   - On the JVM, Gen.jl's: GradientDescent(1., 1000) (variational.jl:26),
-     2,000 iterations of 100 samples, every parameter within 0.001.
-   - On MLX, half the step (no run of 32 keys diverged), 200 iterations of
-     50 samples. The slope converges; the intercept's mean is still on its
-     way, at 1 - (remainder 200 0.5) = 0.812 (-0.188 over 32 keys, sd
-     0.024). Each band is 5 sds over those keys: 0.0016, 0.0021, 0.024 and
-     0.0065."
+  "The fit's size and its bands, each 5 sds over keys at that size.
+   - On the JVM, Gen.jl's 2,000 iterations of 100 samples. The intercept's
+     mean ends at 1 - (remainder 2000 0.5), 4.1e-5 short (4.13e-5 over 24
+     keys, sd 4.3e-6); the sds are 1.4e-7, 1.9e-7, 4.3e-6 and 4.2e-7.
+   - On MLX, 200 iterations of 50. The intercept's mean is still on its way,
+     at 1 - (remainder 200 0.5) = 0.813 (-0.188 over 32 keys); the sds are
+     0.0016, 0.0021, 0.024 and 0.0065."
   (if (ts/jvm?)
-    {:step 1.0 :iters 2000 :samples 100 :expected targets
-     :atol {:slope-mu 0.001 :slope-log-std 0.001 :intercept-mu 0.001 :intercept-log-std 0.001}}
-    {:step 0.5 :iters 200 :samples 50 :expected (assoc targets :intercept-mu (- 1.0 (remainder 200 0.5)))
+    {:iters 2000 :samples 100 :expected (assoc targets :intercept-mu (- 1.0 (remainder 2000 0.5)))
+     :atol {:slope-mu 7.5e-7 :slope-log-std 1e-6 :intercept-mu 2.2e-5 :intercept-log-std 2.1e-6}}
+    {:iters 200 :samples 50 :expected (assoc targets :intercept-mu (- 1.0 (remainder 200 0.5)))
      :atol {:slope-mu 0.008 :slope-log-std 0.011 :intercept-mu 0.12 :intercept-log-std 0.033}}))
 
 (def ^:private descent
-  ;; variational.jl:26: GradientDescent(1., 1000), on MLX half the step
-  (learn/gradient-descent {:step-size-init (:step bbvi-run) :step-size-beta 1000}))
+  "variational.jl:26's GradientDescent(1., 1000) at half its step (see the
+   namespace doc)."
+  (learn/gradient-descent {:step-size-init 0.5 :step-size-beta 1000}))
 
 (def ^:private vimco-run
   "VIMCO's smoke runs: Gen.jl's 50 iterations of 100 estimates on the JVM,
