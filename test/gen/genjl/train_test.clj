@@ -12,8 +12,8 @@
             [gen.dist :as d]
             [gen.dynamic :as dyn :refer [gen]]
             [gen.gfi :as gfi]
-            [gen.genjl.finite-diff :as finite-diff]
-            [gen.genjl.support :as support]
+            [gen.genjl.finite-diff :as fd]
+            [gen.genjl.support :as genjl]
             [gen.gradients :as grad]
             [gen.random :as rng]
             [gen.test-support :as ts]))
@@ -66,7 +66,7 @@
         density (total-log-density minibatch)]
     (doseq [[i theta] (map-indexed vector names)]
       (testing (str theta)
-        (is (support/approx? (theta gradients) (finite-diff/finite-diff density (mapv store names) i) {:atol 1e-4}))))))
+        (is (genjl/approx? (theta gradients) (fd/finite-diff density (mapv store names) i) {:atol 1e-4}))))))
 
 ;; Pending (statistical, genclj-zgkq): train.jl:116 to :122, the parameters
 ;; after 2,000 epochs of SGD on the teacher's data; train.jl:126, lecture!

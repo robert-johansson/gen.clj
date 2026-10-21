@@ -6,7 +6,7 @@
             [gen.choicemap :as cm]
             [gen.dist :as d]
             [gen.dynamic :refer [gen]]
-            [gen.genjl.support :refer [approx?]]
+            [gen.genjl.support :as genjl]
             [gen.inference.importance :as imp]
             [gen.inference.weights :as w]
             [gen.random :as rng]
@@ -35,7 +35,7 @@
             (imp/importance-sampling model [] observations n (assoc opts :key (rng/key 1)))]
         (is (= n (count traces)))
         (is (= n (count log-normalized-weights)))
-        (is (approx? (log-sum-exp log-normalized-weights) 0.0 {:atol 1e-14}))
+        (is (genjl/approx? (log-sum-exp log-normalized-weights) 0.0 {:atol 1e-14}))
         (is (not (Double/isNaN log-ml-estimate)))
         (doseq [tr traces]
           (is (observed? tr))))))
@@ -47,6 +47,6 @@
         ;; importance_sampling.jl:37 and :42 test the log weights of the
         ;; last importance_sampling call again (importance_resampling
         ;; returns none): ported as written
-        (is (approx? (log-sum-exp log-weights) 0.0 {:atol 1e-14}))
+        (is (genjl/approx? (log-sum-exp log-weights) 0.0 {:atol 1e-14}))
         (is (not (Double/isNaN lml)))
         (is (observed? tr))))))

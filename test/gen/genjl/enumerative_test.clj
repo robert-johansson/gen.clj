@@ -16,7 +16,7 @@
             [gen.dist :as d]
             [gen.dist.core :as dc]
             [gen.dynamic :refer [gen]]
-            [gen.genjl.support :refer [approx?]]
+            [gen.genjl.support :as genjl]
             [gen.inference.enumerative :as enum]
             [gen.inference.weights :as w]
             [gen.test-support :as ts]))
@@ -71,9 +71,9 @@
       (let [[choices vol] (first grid)
             {:keys [degree coeff]} (ts/host choices)]
         (is (and (== 1 degree) (= [0 1 2] (sort (keys coeff))) (every? #(ts/close? -0.9 %) (vals coeff))))
-        (is (approx? log-vol vol)))
+        (is (genjl/approx? log-vol vol)))
       (is (every? (fn [[choices _]] (in-poly-box? 2 #(cm/get-choice choices %))) grid))
-      (is (every? (fn [[_ vol]] (approx? log-vol vol)) grid)))
+      (is (every? (fn [[_ vol]] (genjl/approx? log-vol vol)) grid)))
     (testing "enumerative inference over it"
       (let [{:keys [traces log-normalized-weights log-ml-estimate]}
             (enum/enumerative-inference poly-model [2 xs] observations grid)
@@ -81,8 +81,8 @@
             lml (log-sum-exp joint)]
         (is (= 2000 (count traces)))
         (is (every? #(in-poly-box? 2 %) traces))
-        (is (approx? lml log-ml-estimate))
-        (is (every? true? (map #(approx? (- %1 lml) %2) joint log-normalized-weights)))
+        (is (genjl/approx? lml log-ml-estimate))
+        (is (every? true? (map #(genjl/approx? (- %1 lml) %2) joint log-normalized-weights)))
         (testing "the polynomial is most likely quadratic"
           (let [degrees (enum/marginal {:traces traces :log-normalized-weights log-normalized-weights} :degree)]
             (is (= 2 (key (apply max-key val degrees))))))
@@ -113,9 +113,9 @@
       (is (= 3200 (count grid)))
       (let [[choices vol] (first grid)]
         (is (= {:sign false :z [-2.0 -2.0]} (ts/host choices)))
-        (is (approx? log-vol vol)))
+        (is (genjl/approx? log-vol vol)))
       (is (every? (fn [[choices _]] (in-square? (cm/get-choice choices :z))) grid))
-      (is (every? (fn [[_ vol]] (approx? log-vol vol)) grid)))
+      (is (every? (fn [[_ vol]] (genjl/approx? log-vol vol)) grid)))
     (testing "enumerative inference over it"
       (let [{:keys [traces log-normalized-weights log-ml-estimate]}
             (enum/enumerative-inference mixture-model [] cm/EMPTY grid)
@@ -127,8 +127,8 @@
             lml (log-sum-exp joint)]
         (is (= 3200 (count traces)))
         (is (every? #(in-square? (% :z)) traces))
-        (is (approx? lml log-ml-estimate))
-        (is (every? true? (map #(approx? (- %1 lml) %2) joint log-normalized-weights)))
+        (is (genjl/approx? lml log-ml-estimate))
+        (is (every? true? (map #(genjl/approx? (- %1 lml) %2) joint log-normalized-weights)))
         (testing "the largest weights are at the modes"
           (let [top (apply max log-normalized-weights)
                 [first-mode second-mode] (map traces (filter #(= top (log-normalized-weights %)) (range (count traces))))]
