@@ -8,7 +8,9 @@ and the upstream findings (§4.3). gen.clj is m4-more at 12e788d. Each
 mapping was checked in gen.clj's code; where a mapping was not clear from
 the code, a short REPL run on the pure-JVM backend checked it ("checked"
 below, listed in §7). F1, F2 and G6 were updated after their fixes on
-m4-f12 (2beab42, b9eb9d2, 7e85fb3; F1 by the owner's decision, D15).*
+m4-f12 (2beab42, b9eb9d2, 7e85fb3; F1 by the owner's decision, D15). The
+categories were updated on 2026-10-21 (genclj-fevk) to the owner's
+decisions and the ports merged at 17fd8bd (§3).*
 
 ## 0. Summary
 
@@ -24,18 +26,23 @@ m4-f12 (2beab42, b9eb9d2, 7e85fb3; F1 by the owner's decision, D15).*
 
   | port | oracle | statistical | n/a | gap |
   |---:|---:|---:|---:|---:|
-  | 1,262 (74.3 %) | 6 | 33 | 110 | 288 (17.0 %) |
+  | 1,371 (80.7 %) | 6 | 33 | 210 | 79 (4.6 %) |
 
-- **The gaps are mostly small.** By assertions: optional arguments (G3, 60),
-  Recurse's node-numbering helpers (G13, 54, three one-line functions), the
-  static language's rewriting of computed addresses and nested traces (G2,
-  49), the static IR's shape (G15, 33, possibly n/a) and paths in selections
-  (G9, 18). Three behaviors differ without a documented decision: gen.clj's
-  more precise retdiffs (D1, 16), its lenient choice-map accessors (D4, 16)
-  and beta's density at 0 and 1 (D6, 4).
-- **The oracle is needed for 6 assertions**, Switch's regenerate weights
-  (U1), as fixtures of Gen.jl's values. The rest of a Gen.jl run is a
-  cross-check: statistics for the 6 statistical testsets (§5).
+  At first (2026-10-20) port was 1,262, n/a 110 and gap 288. The owner's
+  decisions (DESIGN §9) moved D1's precise retdiffs (16) and D6's exact
+  beta (4) to port, and G3's default arguments (60) and G15's IR shape (40)
+  to n/a; G1 and G8–G14 were built, and their 88 assertions port (with one
+  of `selection.jl:49`'s, a port the first count took for a gap).
+- **The gaps left each have a bean:** the static
+  language's rewriting of computed addresses and nested traces (G2, 42,
+  genclj-lgij), labels that are not numbers in `dist` (G7, 17,
+  genclj-414l), loud lookups (D4, 16, genclj-ocwu), VI that trains the
+  model's parameters (G4, 3, genclj-xjte) and a custom function's own
+  parameters (G5, 1, genclj-2294).
+- **The oracle** (§5) wrote Gen.jl's values as fixtures (genclj-il3d):
+  Switch's regenerate weights, which its 6 assertions are checked against
+  (U1, genclj-c5rl), beta at its endpoints (D6), and the statistical
+  testsets' statistics over 20 seeds, a cross-check of gen.clj's.
 - **Gen.jl's own suite passes** on Julia 1.12.6 (run once, 2026-10-20):
   1,863 assertions pass, none fail or error, in 214 testsets, `enumerative.jl`
   included (§4.3).
@@ -52,10 +59,12 @@ m4-f12 (2beab42, b9eb9d2, 7e85fb3; F1 by the owner's decision, D15).*
   - U4 confirmed: the batched `lecture!` test's assertion passes with
     q_batched never trained (−0.2250), and q_batched's own training does not
     converge (θ −5.70 for −2, its score −2.73 for −0.215).
-- **gen.clj findings** (§4.4): five loud-error gaps. Two are fixed: a
-  silently wrong `dc/log-prob` for a homogeneous mixture of mvnormals (F2,
-  with G6), and an `mvnormal` that accepted the singular 2·ones(2, 2), as
-  Gen.jl's does (F1: an error now, D15).
+- **gen.clj findings** (§4.4): five loud-error gaps, all fixed: a silently
+  wrong `dc/log-prob` for a homogeneous mixture of mvnormals (F2, with G6),
+  an `mvnormal` that accepted the singular 2·ones(2, 2), as Gen.jl's does
+  (F1: an error now, D15), vector paths read as one address (F3, with G9),
+  `full` of a tape value (F4, with G14) and quoted `trace` in a static body
+  (F5, G12).
 
 ## 1. Method
 
@@ -68,14 +77,17 @@ m4-f12 (2beab42, b9eb9d2, 7e85fb3; F1 by the owner's decision, D15).*
   categories, so each row gives the split.
   - **port**: the expected value is in the test or follows from the model, so
     the assertion ports without Julia. A port may rely on a documented
-    difference (D2, D3, D5, D7–D9, D11–D15 in §4.1). A testset without
-    assertions (a smoke test) ports as a run without error.
+    difference (D1–D3, D5–D16 in §4.1). A testset without assertions (a
+    smoke test) ports as a run without error.
   - **oracle**: needs a value Gen.jl computes.
   - **statistical**: seeded sampling, compared by statistics with a
     variance-derived band (CLAUDE.md's test conventions).
-  - **n/a**: Julia-only machinery, with the reason in the row.
-  - **gap**: gen.clj lacks the feature or names it differently (G1–G15), or
-    behaves differently without a documented decision (D1, D4, D6).
+  - **n/a**: Julia-only machinery, or a feature the owner decided gen.clj
+    does without (G3, G15), with the reason in the row.
+  - **gap**: gen.clj lacks the feature (G2, G4, G5, G7), or the decided
+    behavior is not built yet (D4). Each has a bean. The first mapping also
+    counted D1 and D6 here, behaviors that differed without a documented
+    decision, and the gaps since closed (G1, G8–G14).
 - **IDs.** D* are differences of behavior (§4.1), G* gaps (§4.2), U*
   upstream findings (§4.3), F* gen.clj findings (§4.4).
 - **Index base.** Line numbers are Gen.jl's, as `test/<file>:<line>` of the
@@ -93,7 +105,7 @@ groups.
 
 | Line | Testset | Asserts | What it checks | gen.clj counterpart | Category | Notes |
 |---:|---|---:|---|---|---|---|
-| 3 | autodiff / fill | 2 | gradient of a scalar filled into a vector and a matrix is the sum of the cotangents | `array/grad` over `array/broadcast-to` (passes); `array/full` of a tracked scalar throws (G14) | gap 2 | G14; ports at once with `broadcast-to` |
+| 3 | autodiff / fill | 2 | gradient of a scalar filled into a vector and a matrix is the sum of the cotangents | `array/grad` over `array/full` of a tracked scalar | port 2 | G14, closed (genclj-3mx6): `full` takes a tape value |
 
 #### `test/diff.jl` (32 assertions)
 
@@ -109,9 +121,9 @@ groups.
 
 | Line | Testset | Asserts | What it checks | gen.clj counterpart | Category | Notes |
 |---:|---|---:|---|---|---|---|
-| 1 | dynamic selection | 18 | `in` for addresses and pair paths, `s[addr]`, set_subselection! | `sel/select`, `selected?`, `get-subselection`; `choicemap-test/selection-algebra` | port 7 · n/a 1 · gap 10 | G9: paths and set-subselection; N: `isa DynamicSelection` |
-| 36 | all selection | 4 | selectall contains every address and path | `sel/all` | port 2 · gap 2 | G9 (paths) |
-| 49 | complement selection | 13 | complement of all, none, a nested selection, double complement, its subselection | `sel/complement`; `a-selection-and-its-complement-partition-the-choices` | port 7 · gap 6 | G9 (paths); semantics checked by hand (reduce over get-subselection) |
+| 1 | dynamic selection | 18 | `in` for addresses and pair paths, `s[addr]`, set_subselection! | `sel/select`, `selected?`, `get-subselection`, `set-subselection`; `choicemap-test/selection-algebra` | port 17 · n/a 1 | G9, closed (genclj-cbec): paths and `set-subselection`; N: `isa DynamicSelection` |
+| 36 | all selection | 4 | selectall contains every address and path | `sel/all` | port 4 | G9 (paths), closed |
+| 49 | complement selection | 13 | complement of all, none, a nested selection, double complement, its subselection | `sel/complement`; `a-selection-and-its-complement-partition-the-choices` | port 13 | G9 (paths, 5 of them; the first count said 6), closed; semantics checked by hand (reduce over get-subselection) |
 
 #### `test/assignment.jl` (132 assertions)
 
@@ -122,12 +134,12 @@ groups.
 | 52 | dynamic assignment copy constructor | 4 | DynamicChoiceMap(other) copies values and submaps | persistent values: the map is its own copy | port 4 |  |
 | 67 | internal vector assignment to/from array | 8 | vectorize_internal's index-keyed choice map to/from array | an int-keyed node (Map's choice maps), 0-based | port 8 | D2 |
 | 86 | dynamic assignment merge | 10 | merge of overlapping-node choice maps | `cm/merge`; `functional-update` | port 10 |  |
-| 114 | dynamic assignment variadic merge | 2 | merge of one and of three choice maps | `cm/merge` is binary | gap 2 | G10 |
+| 114 | dynamic assignment variadic merge | 2 | merge of one and of three choice maps | `cm/merge` of 0 to n choice maps | port 2 | G10, closed (genclj-cbec) |
 | 123 | static assignment merge | 10 | merge of static choice maps | `cm/merge` | port 10 |  |
-| 143 | static assignment variadic merge | 2 | merge of one and of three | `cm/merge` is binary | gap 2 | G10 |
-| 152 | static assignment errors | 12 | KeyError from get_submap/get_value at the wrong kind of address; empty submap when absent | `cm/get-submap`, `cm/get-choice` return a Value, EMPTY or nil | port 2 · n/a 5 · gap 5 | D4; N: `static_get_submap(…, Val(:x))` |
-| 221 | dynamic assignment errors | 7 | the same KeyErrors on a dynamic choice map | as above | port 2 · gap 5 | D4 |
-| 259 | dynamic assignment overwrite | 16 | overwriting values and submaps; has_value/has_submap after; illegal set under a value | `cm/set-choice`, `set-submap`, `has-submap?` | port 12 · gap 4 | D4 (`has-submap?` is true at a value; get-submap at a value); the illegal set ports through `set-choice` (`set-submap` takes a path silently, G9) |
+| 143 | static assignment variadic merge | 2 | merge of one and of three | `cm/merge` of 0 to n | port 2 | G10, closed |
+| 152 | static assignment errors | 12 | KeyError from get_submap/get_value at the wrong kind of address; empty submap when absent | `cm/get-submap`, `cm/get-choice` return a Value, EMPTY or nil | port 2 · n/a 5 · gap 5 | D4: decided (loud lookups), to build (genclj-ocwu); N: `static_get_submap(…, Val(:x))` |
+| 221 | dynamic assignment errors | 7 | the same KeyErrors on a dynamic choice map | as above | port 2 · gap 5 | D4: decided, to build (genclj-ocwu) |
+| 259 | dynamic assignment overwrite | 16 | overwriting values and submaps; has_value/has_submap after; illegal set under a value | `cm/set-choice`, `set-submap`, `has-submap?` | port 12 · gap 4 | D4, decided, to build (genclj-ocwu): `has-submap?` is true at a value, get-submap at a value; the illegal set ports through `set-choice`, and `set-submap` takes a path (G9) |
 | 315 | dynamic assignment constructor | 2 | choicemap((:x, 1), (:y => :a, 2)) | `cm/choicemap` | port 2 |  |
 | 322 | choice map equality | 6 | == and != of nested choice maps | records compare by value | port 6 |  |
 | 337 | choice map nested view | 8 | nested_view: getindex, length, keys, == | `cm/to-map` (parity §1h) | port 8 |  |
@@ -147,48 +159,48 @@ groups.
 | Line | Testset | Asserts | What it checks | gen.clj counterpart | Category | Notes |
 |---:|---|---:|---|---|---|---|
 | 38 | macros in dynamic DSL | 7 | user macros expanding to a distribution, an @trace, a `~` statement or Expr(:gentrace) | `gen` macroexpands its body (checked: a macro to a distribution and one to `(trace …)`) | port 3 · n/a 4 | N: macros that bind a variable in the enclosing scope (`y ~ …` statements) and Expr(:gentrace) |
-| 122 | macros in static DSL | 7 | the same in static functions | `gen ^:static`: a macro inside a distribution works; one at a binding's head that expands to `trace` is a compile error | port 2 · n/a 4 · gap 1 | G11 |
+| 122 | macros in static DSL | 7 | the same in static functions | `gen ^:static`: a macro inside a distribution or at a binding's head (macroexpanded) | port 3 · n/a 4 | G11, closed (genclj-9d9h) |
 
 #### `test/dsl/dynamic_dsl.jl` (88 assertions)
 
 | Line | Testset | Asserts | What it checks | gen.clj counterpart | Category | Notes |
 |---:|---|---:|---|---|---|---|
-| 8 | Julia call syntax | 5 | calling a gen function, default arguments, (grad) one-liners, an addressless @trace | IFn on DynamicGF (`dynamic-test/untraced-calls`), addressless `splice` (`splices-without-an-address-share-the-namespace`) | port 3 · gap 2 | G3 (default arguments) |
+| 8 | Julia call syntax | 5 | calling a gen function, default arguments, (grad) one-liners, an addressless @trace | IFn on DynamicGF (`dynamic-test/untraced-calls`), addressless `splice` (`splices-without-an-address-share-the-namespace`) | port 3 · n/a 2 | n/a: default arguments (G3, decided: Clojure has none) |
 | 38 | return type | 1 | get_return_type of a typed @gen | none | n/a 1 | Julia return-type annotations |
 | 49 | address visitor | 4 | AddressVisitor/all_visited (internal) | the handler's visited set and `gfi/unvisited` (`dynamic-test/errors-are-loud`) | n/a 4 | internal API; the behavior is generate's loud unvisited check |
 | 73 | simulate | 3 | retval, args and score of a bernoulli site | `gfi/simulate` | port 3 |  |
-| 86 | update | 19 | a branch switch: discard, new choices, score, weight, retdiff; a loop's update; discard of a shrinking loop | `gfi/update`; `structure-changing-update`, laws `updates-are-reversible-with-exact-discards` | port 18 · gap 1 | D1: the loop body returns nil both times, retdiff no-change (Gen.jl UnknownChange) |
-| 199 | regenerate | 9 | 10 regenerations of the branch with a changed argument: score, values, weight, retdiff | `gfi/regenerate`; `regenerate-weight-is-the-retained-density-ratio` | port 8 · gap 1 | D1: when the branch stays, the return value is unchanged, retdiff no-change; the loop's mu = rand() becomes fixed host values |
+| 86 | update | 19 | a branch switch: discard, new choices, score, weight, retdiff; a loop's update; discard of a shrinking loop | `gfi/update`; `structure-changing-update`, laws `updates-are-reversible-with-exact-discards` | port 19 | D1 (decided): the loop body returns nil both times, retdiff no-change (Gen.jl UnknownChange); the port asserts gen.clj's |
+| 199 | regenerate | 9 | 10 regenerations of the branch with a changed argument: score, values, weight, retdiff | `gfi/regenerate`; `regenerate-weight-is-the-retained-density-ratio` | port 9 | D1 (decided): when the branch stays, the return value is unchanged, retdiff no-change; the loop's mu = rand() becomes fixed host values |
 | 293 | choice_gradients and accumulate_param_gradients! | 15 | argument, choice and parameter gradients (with a retval gradient) against finite differences | `grad/choice-gradients` (:argnums), `grad/param-gradients` (one store for foo and bar); `gradients-test/*` | port 15 | D7 |
 | 381 | backprop params with splice | 1 | a parameter read in an addressless callee gets the retval gradient | `param-gradients` through an addressless `splice` (checked: 2.0) | port 1 |  |
 | 400 | gradient descent with fixed step size | 2 | FixedStepGradientDescent one step; the accumulator is reset | `learning/sgd` + `learning/step` (checked: 0.001) | port 1 · n/a 1 | N: accumulator reset (D7) |
 | 415 | gradient descent with shrinking step size | 2 | GradientDescent(0.001, 1000) one step | `learning/gradient-descent` (checked: 0.001) | port 1 · n/a 1 | N: accumulator reset (D7) |
 | 430 | multi-component addresses | 14 | pair addresses :x => 1, nested calls, submaps | vector paths `[:x 0]`; `splices-nest-choices` | port 14 |  |
 | 465 | project | 4 | project on none, one, a nested and two addresses | `gfi/project`; `project-splits-the-score` | port 4 |  |
-| 487 | getindex(trace) | 8 | trace[addr] for choices, for a call (its return value), trace[] and a missing address | `(tr path)`, `:retval` | port 5 · gap 3 | G1 (a call's return value), D4 (a missing address is nil) |
+| 487 | getindex(trace) | 8 | trace[addr] for choices, for a call (its return value), trace[] and a missing address | `(tr path)`, `:retval` | port 7 · gap 1 | G1 (a call's return value), closed (genclj-cbec); D4 (a missing address is nil), decided, to build (genclj-ocwu) |
 | 535 | docstrings | 1 | @doc of a @gen function | a Clojure def's docstring | n/a 1 | Julia's @doc |
 
 #### `test/dsl/static_dsl.jl` (175 assertions)
 
 | Line | Testset | Asserts | What it checks | gen.clj counterpart | Category | Notes |
 |---:|---|---:|---|---|---|---|
-| 118 | check IR | 77 | the IR of datum and model: argument, choice, call and Julia nodes, their inputs, types, grad flags, return node | `gen.dynamic.static/ir`; `static-test/the-graph-as-data-and-as-dot` | port 33 · n/a 19 · gap 25 | N: types and (grad) flags; G15: per-expression Julia nodes, node identity, dist objects |
-| 266 | at_choice | 16 | `:x => i` in a static body becomes a choice_at call node | a compile error (computed address); `comb/choice-at` by hand works | gap 16 | G2 |
-| 299 | at_call | 17 | `@trace(foo(mu), :x => i)` becomes a call_at node | a compile error; `comb/call-at` by hand | gap 17 | G2 |
+| 118 | check IR | 77 | the IR of datum and model: argument, choice, call and Julia nodes, their inputs, types, grad flags, return node | `gen.dynamic.static/ir`; `static-test/the-graph-as-data-and-as-dot` | port 33 · n/a 44 | N: types and (grad) flags (19); G15, decided n/a (25): per-expression Julia nodes, node identity, dist objects |
+| 266 | at_choice | 16 | `:x => i` in a static body becomes a choice_at call node | a compile error (computed address); `comb/choice-at` by hand works | gap 16 | G2: decided, to build (genclj-lgij) |
+| 299 | at_call | 17 | `@trace(foo(mu), :x => i)` becomes a call_at node | a compile error; `comb/call-at` by hand | gap 17 | G2: decided, to build (genclj-lgij) |
 | 333 | tracked diff annotation | 2 | (static, diffs) option | always on | n/a 2 | D10 |
 | 349 | no julia cache annotation | 2 | (static, nojuliacache) option | node values always kept | n/a 2 | D10 |
-| 367 | trainable parameters | 2 | @param makes a TrainableParameterNode that can be returned | `(param :theta)` as a compute binding (checked) | port 1 · gap 1 | G15 (no parameter node kind) |
-| 381 | returning a trace directly | 7 | `return @trace(...)` and `x = @trace(...); return x` have equivalent IRs | a call in return position is a last node (static/analyze) | port 4 · n/a 1 · gap 2 | G15 (constant argument nodes), N: typ |
-| 410 | @trace within Julia expressions | 5 | a tuple of two @traces; @trace inside a distribution's argument; call and generate | a compile error in `gen ^:static` (checked); the rewritten bindings work (checked) | gap 5 | G2; also D5 (circle's std 0) |
-| 435 | repeated assignments | 8 | x = x + 1 and y = y + 1: separate nodes; calls give 1 and 3 | static let rebinding (checked: 1 and 3) | port 3 · gap 5 | G15 (the IR names both nodes y) |
-| 466 | tuple assignments | 11 | destructuring, a ternary on an @trace, generate weights | destructuring works (`destructuring-binds-what-clojure-binds`); a trace inside the ternary is a compile error | gap 11 | G2 (the rewritten body gives the weights, checked), G15 |
+| 367 | trainable parameters | 2 | @param makes a TrainableParameterNode that can be returned | `(param :theta)` as a compute binding (checked) | port 1 · n/a 1 | n/a: G15 (no parameter node kind) |
+| 381 | returning a trace directly | 7 | `return @trace(...)` and `x = @trace(...); return x` have equivalent IRs | a call in return position is a last node (static/analyze) | port 4 · n/a 3 | n/a: G15 (constant argument nodes, 2), and typ |
+| 410 | @trace within Julia expressions | 5 | a tuple of two @traces; @trace inside a distribution's argument; call and generate | a compile error in `gen ^:static` (checked); the rewritten bindings work (checked) | gap 5 | G2: decided, to build (genclj-lgij); also D5 (circle's std 0) |
+| 435 | repeated assignments | 8 | x = x + 1 and y = y + 1: separate nodes; calls give 1 and 3 | static let rebinding (checked: 1 and 3) | port 3 · n/a 5 | n/a: G15 (argument nodes and node identity; the IR names both nodes y) |
+| 466 | tuple assignments | 11 | destructuring, a ternary on an @trace, generate weights | destructuring works (`destructuring-binds-what-clojure-binds`); a trace inside the ternary is a compile error | n/a 7 · gap 4 | n/a: G15 (the IR's nodes and inputs, 7); G2 (the generates, 4): decided, to build (genclj-lgij); the rewritten body gives the weights (checked) |
 | 501 | use of 'end' | 1 | x[3:end] in a static body | subvec | n/a 1 | Julia's `end` index |
 | 513 | 'return nothing' | 1 | a static body returning nothing | `(gen ^:static [] (let [] nil))` (checked) | port 1 |  |
-| 523 | getindex(trace) | 7 | trace[addr] for choices, calls and trace[] in a static function | `(tr path)`, `:retval` | port 5 · gap 2 | G1 |
+| 523 | getindex(trace) | 7 | trace[addr] for choices, calls and trace[] in a static function | `(tr path)`, `:retval` | port 7 | G1, closed (genclj-cbec) |
 | 560 | docstrings | 1 | @doc of a static function | def docstring | n/a 1 | Julia's @doc |
 | 573 | one-line definitions | 2 | @gen (static) f(x) = (...) | none needed | n/a 2 | Julia's short function syntax |
 | 584 | module-defined static functions | 4 | two modules each defining foo | namespaces | n/a 4 | Julia modules and generated functions |
-| 596 | static gen function choicemaps | 9 + 1 throws | the choices of a static function with a static callee; propose with a trace argument | static `splice`, `gfi/propose` (checked) | port 9 · gap 1 | D4 (@test_throws KeyError get_submap at a value) |
+| 596 | static gen function choicemaps | 9 + 1 throws | the choices of a static function with a static callee; propose with a trace argument | static `splice`, `gfi/propose` (checked) | port 9 · gap 1 | D4 (@test_throws KeyError get_submap at a value): decided, to build (genclj-ocwu) |
 | 633 | returning a SML function from macro | 1 | a macro that defines a static function | a Clojure macro emitting `(def … (gen ^:static …))` (checked) | port 1 |  |
 | 640 | global variables | 1 | a static body reads a module global | vars in static bodies (`a-local-is-not-the-var-it-shadows`) | port 1 |  |
 
@@ -196,8 +208,8 @@ groups.
 
 | Line | Testset | Asserts | What it checks | gen.clj counterpart | Category | Notes |
 |---:|---|---:|---|---|---|---|
-| 3 | optional positional args (calling + GFI) | 42 | default arguments in calls, simulate/generate/update/regenerate, gradients, nested and gf-valued defaults | a rest parameter `[x & [y z]]` covers calls and the GFI (checked), but the trace's args stay as given | gap 42 | G3; G1 (`get_call(tr, :foo).subtrace`) |
-| 131 | optional positional args (combinators) | 16 | kernels with defaults under call_at, Map, Unfold and Recurse | rest parameters in kernels | gap 16 | G3; D2, D13 |
+| 3 | optional positional args (calling + GFI) | 42 | default arguments in calls, simulate/generate/update/regenerate, gradients, nested and gf-valued defaults | a rest parameter `[x & [y z]]` covers calls and the GFI (checked), but the trace's args stay as given | n/a 42 | n/a: G3, decided (Clojure has no default positional arguments; a rest parameter covers calls, update and regenerate) |
+| 131 | optional positional args (combinators) | 16 | kernels with defaults under call_at, Map, Unfold and Recurse | rest parameters in kernels | n/a 16 | n/a: G3, decided, as above |
 
 #### `test/static_ir/static_ir.jl` (138 assertions)
 
@@ -208,8 +220,8 @@ groups.
 | 75 | simulate | 2 | score and retval of foo(a, b) with a callee and a parameter | `gen ^:static`, `with-params` | port 2 |  |
 | 89 | generate | 4 | constrained choices, score, weight | `gfi/generate` | port 4 |  |
 | 108 | project | 1 | project on two addresses | `gfi/project` | port 1 |  |
-| 120 | update without tracked diffs | 45 | five argdiff/constraint cases: choices, retval, weight, retdiff, discard, a counter of node reruns, score | `static-test/update-and-regenerate-skip-what-did-not-change` (all five cases checked) | port 42 · n/a 1 · gap 2 | D1 (case 3: b passed again is identical, so the callee gets no-change: counter 0, retdiff no-change); N: case 5's counter is 1 only under nojuliacache (D10) |
-| 200 | regenerate without tracked diffs | 40 | the same five cases for regenerate | as above (checked) | port 37 · n/a 1 · gap 2 | D1 (case 3), D10 (case 5's counter); cases 4 and 5 need another key than simulate's |
+| 120 | update without tracked diffs | 45 | five argdiff/constraint cases: choices, retval, weight, retdiff, discard, a counter of node reruns, score | `static-test/update-and-regenerate-skip-what-did-not-change` (all five cases checked) | port 44 · n/a 1 | D1 (decided; case 3: b passed again is identical, so the callee gets no-change: counter 0, retdiff no-change); N: case 5's counter is 1 only under nojuliacache (D10) |
+| 200 | regenerate without tracked diffs | 40 | the same five cases for regenerate | as above (checked) | port 39 · n/a 1 | D1 (decided; case 3), D10 (case 5's counter); cases 4 and 5 need another key than simulate's |
 | 277 | backprop | 19 | choice and parameter gradients of a static function with a static callee | `choice-gradients`, `param-gradients`; `choice-gradients-through-the-compiled-score-are-the-handler-s` | port 17 · n/a 2 | N: get_param_grad before and after zero_param_grad! (D7) |
 | 432 | update with tracked diffs | 8 | a callee whose retdiff is NoChange keeps the caller's NoChange; with and without track_diffs | diff propagation in static bodies (checked) | port 5 · n/a 3 | N: reruns counted under nojuliacache, and the untracked variant (D10) |
 | 468 | regenerate with tracked diffs | 8 | the same for regenerate | as above | port 5 · n/a 3 | D10 |
@@ -221,9 +233,9 @@ groups.
 | Line | Testset | Asserts | What it checks | gen.clj counterpart | Category | Notes |
 |---:|---|---:|---|---|---|---|
 | 8 | tilde syntax smoke test (dynamic) | 2 | `{:coin => i} ~ bernoulli(p)` returns its value; the sum of two booleans; the score | `trace`; booleans count (checked: 2) | port 2 | D9 |
-| 19 | tilde syntax smoke test (static) | 7 | tilde forms in a static body, call return values, `return {:ret} ~ …` | static `trace`/`splice` | port 5 · gap 2 | G1 |
+| 19 | tilde syntax smoke test (static) | 7 | tilde forms in a static body, call return values, `return {:ret} ~ …` | static `trace`/`splice` | port 7 | G1, closed (genclj-cbec) |
 | 50 | tilde syntax desugars as expected (static) | 1 | desugar_tildes output | none | n/a 1 | Julia macro internals |
-| 66 | tilde syntax preserved in quoted expressions | 2 | a quoted `x ~ normal(0, 1)` returned from a body | a quoted `(trace …)`: fine in `gen`, rejected by `gen ^:static` (checked) | port 1 · gap 1 | G12 |
+| 66 | tilde syntax preserved in quoted expressions | 2 | a quoted `x ~ normal(0, 1)` returned from a body | a quoted `(trace …)` is data in `gen` and `gen ^:static` | port 2 | G12, closed (genclj-9d9h) |
 
 #### `test/inference/importance_sampling.jl` (16 assertions)
 
@@ -243,7 +255,7 @@ groups.
 | Line | Testset | Asserts | What it checks | gen.clj counterpart | Category | Notes |
 |---:|---|---:|---|---|---|---|
 | 1 | black box variational inference | 4 | BBVI recovers the prior's parameters (atol 0.001); VIMCO smoke runs | `vi/black-box-vi`, `black-box-vimco`; `vi-test/black-box-vi-finds-the-posterior` | statistical 4 | the score-function gradient is exactly 0 at q = p, so the tight band holds |
-| 56 | minimal vae | 3 | BBVI and VIMCO training the model's parameter and q together | not in gen.clj (vi.clj: model_update is not here) | gap 3 | G4 |
+| 56 | minimal vae | 3 | BBVI and VIMCO training the model's parameter and q together | not in gen.clj (vi.clj: model_update is not here) | gap 3 | G4, to build (genclj-xjte) |
 
 #### `test/inference/particle_filter.jl` (13 assertions)
 
@@ -288,7 +300,7 @@ groups.
 
 | Line | Testset | Asserts | What it checks | gen.clj counterpart | Category | Notes |
 |---:|---|---:|---|---|---|---|
-| 3 | DeterministicTraceTranslator | 2 | polar to cartesian and back with pair_bijections! and check=true | `transform/deterministic-translator`, `pair` | gap 2 | G8 (atan2) |
+| 3 | DeterministicTraceTranslator | 2 | polar to cartesian and back with pair_bijections! and check=true | `transform/deterministic-translator`, `pair`, `array/atan2` | port 2 | G8, closed (genclj-3mx6) |
 | 44 | SimpleExtendingTraceTranslator | 1 | weight = update weight - proposal score | `transform/extending-translator` (checked: equal) | port 1 |  |
 | 73 | SymmetricTraceTranslator | 1 | a discrete/continuous involution with is_involution! and check=true | `transform/involution`, `involutive` | port 1 |  |
 | 116 | GeneralTraceTranslator | 1 | continuous to discrete + auxiliary with pair_bijections! and check=true | `transform/translator` | port 1 |  |
@@ -309,7 +321,7 @@ groups.
 
 | Line | Testset | Asserts | What it checks | gen.clj counterpart | Category | Notes |
 |---:|---|---:|---|---|---|---|
-| 1 | custom deterministic generative function with custom update and gradient | 23 | CustomDetermGF: simulate, generate, update (Unknown, VectorDiff), regenerate, gradients, its own trainable parameter | `gen.custom/deterministic` (:apply-with-state, :update-with-state, :gradient-with-state); `custom-test/updates-reuse-the-state` | port 22 · gap 1 | G5 (gen_fn.my_grad, scaled by 3) |
+| 1 | custom deterministic generative function with custom update and gradient | 23 | CustomDetermGF: simulate, generate, update (Unknown, VectorDiff), regenerate, gradients, its own trainable parameter | `gen.custom/deterministic` (:apply-with-state, :update-with-state, :gradient-with-state); `custom-test/updates-reuse-the-state` | port 22 · gap 1 | G5 (gen_fn.my_grad, scaled by 3), to build (genclj-2294) |
 | 126 | custom gradient GF | 2 | CustomGradientGF arg gradients, unscaled by accumulate | `deterministic` with :apply and :gradient (checked: [2 2]) | port 2 |  |
 | 144 | custom update GF | 12 | CustomUpdateGF simulate and incremental updates | `deterministic` with :update-with-state (checked) | port 12 |  |
 
@@ -318,8 +330,8 @@ groups.
 | Line | Testset | Asserts | What it checks | gen.clj counterpart | Category | Notes |
 |---:|---|---:|---|---|---|---|
 | 4 | bernoulli | 2 | logpdf_grad of the probability | `array/grad` of `dc/log-prob` | port 2 |  |
-| 19 | beta | 9 | range, out of support, finite densities at 0 and 1, gradients | `dist/beta` | port 5 · gap 4 | D6 (+Inf at 0 and 1, checked) |
-| 43 | categorical | 7 | range, out of support, Distributions.jl's integer-probability bug, gradients | `dist/categorical` (0-based) | port 5 · n/a 2 | D2; N: Distributions.Categorical itself, and `nothing` for the value's gradient |
+| 19 | beta | 9 | range, out of support, finite densities at 0 and 1, gradients | `dist/beta` | port 9 | D6 (decided: exact, +Inf at 0 and 1; the port asserts it, the oracle records Gen.jl's finite values) |
+| 43 | categorical | 7 | range, out of support, Distributions.jl's integer-probability bug, gradients | `dist/categorical` (0-based) | port 5 · n/a 2 | D2; N: Distributions.Categorical itself, and `nothing` for the value's gradient; finite_diff_vec over the probabilities steps 1e-7, since gen.clj checks that they sum to 1 within 1e-6 (rule 5) and Gen.jl's 1e-6 sits on that edge |
 | 67 | gamma | 5 | range, out of support, gradients | `dist/gamma` | port 5 |  |
 | 85 | inv_gamma | 5 | range, out of support, gradients | `dist/inv-gamma` | port 5 |  |
 | 103 | normal | 5 | no overflow at 1e13 (exact -5e25 and gradients), gradients | `dist/normal` (checked: exact) | port 5 |  |
@@ -330,7 +342,7 @@ groups.
 | 237 | dirichlet | 20 | bounds, values against Distributions.jl, gradients through a softmax | `dist/dirichlet`; values from scipy (test/fixtures/generate.py) | port 20 | D5 (alpha < 0 throws, checked) |
 | 292 | uniform | 5 | range, out of support, gradients | `dist/uniform` | port 5 |  |
 | 310 | uniform_discrete | 3 | range, out of support, no gradients | `dist/uniform-discrete` | port 2 · n/a 1 | N: `nothing` gradients |
-| 325 | piecewise_uniform | 8 | range, out of support, gradients of x, bounds and probs | `dist/piecewise-uniform` (checked) | port 8 |  |
+| 325 | piecewise_uniform | 8 | range, out of support, gradients of x, bounds and probs | `dist/piecewise-uniform` (checked) | port 8 | the probabilities' finite differences step 1e-7, as categorical's |
 | 346 | beta uniform mixture | 6 | range, out of support, gradients | `dist/beta-uniform` | port 6 |  |
 | 365 | geometric | 4 | range, out of support, gradient of p | `dist/geometric` | port 3 · n/a 1 | N: `nothing` |
 | 381 | binom | 5 | range, out of support, gradient of p | `dist/binom` | port 3 · n/a 2 | N: `nothing` |
@@ -371,12 +383,12 @@ groups.
 | Line | Testset | Asserts | What it checks | gen.clj counterpart | Category | Notes |
 |---:|---|---:|---|---|---|---|
 | 15 | map combinator / Julia call | 1 | calling a Map | IFn on MapGF | port 1 |  |
-| 19 | map combinator / simulate | 3 | score; retval[i] is trace[i => :z] and trace[i] | `comb/map`; `map-basics` | port 2 · gap 1 | G1 (trace[i]) |
+| 19 | map combinator / simulate | 3 | score; retval[i] is trace[i => :z] and trace[i] | `comb/map`; `map-basics` | port 3 | G1 (trace[i]), closed (genclj-cbec) |
 | 30 | map combinator / generate | 2 | a constrained element | as above | port 2 |  |
 | 41 | map combinator / propose | 1 | weight | as above | port 1 |  |
 | 49 | map combinator / assess | 2 | weight and retval | as above | port 2 |  |
-| 60 | map combinator / update | 74 | growing, shrinking, unchanged and custom-argdiff updates: choices, discard, score, weight, retval, retdiff | as above; `map-precise-hints-match-unknown-change` (cases checked) | port 68 · gap 6 | D1: an element whose value did not change is absent from the retdiff (checked) |
-| 232 | map combinator / regenerate | 45 | the same for regenerate | as above | port 41 · gap 4 | D1 |
+| 60 | map combinator / update | 74 | growing, shrinking, unchanged and custom-argdiff updates: choices, discard, score, weight, retval, retdiff | as above; `map-precise-hints-match-unknown-change` (cases checked) | port 74 | D1 (decided): an element whose value did not change is absent from the retdiff (checked); the port asserts gen.clj's |
+| 232 | map combinator / regenerate | 45 | the same for regenerate | as above | port 45 | D1 (decided) |
 | 345 | map combinator / choice_gradients | 6 | argument and choice gradients with a random retval gradient | `choice-gradients` | port 6 |  |
 | 376 | map combinator / accumulate_param_gradients! | 3 | argument and parameter gradients | `choice-gradients`, `param-gradients` | port 3 | D7 |
 
@@ -399,7 +411,7 @@ groups.
 
 | Line | Testset | Asserts | What it checks | gen.clj counterpart | Category | Notes |
 |---:|---|---:|---|---|---|---|
-| 3 | recurse node numbering | 54 | get_child, get_child_num, get_parent for max_branch 1, 2 and 3 | private `child-of` only | gap 54 | G13; D2 |
+| 3 | recurse node numbering | 54 | get_child, get_child_num, get_parent for max_branch 1, 2 and 3 | `comb/get-child`, `get-child-num`, `get-parent` (0-based) | port 54 | G13, closed (genclj-cbec); D2 |
 | 66 | simple pcfg | 68 | the 20 likeliest strings appear in 1,000 runs (twice); generate with every choice; updates of a value and of the structure | `comb/recurse`; `recurse-builds-and-folds-the-tree`, `recurse-updates-only-the-changed-path` (generate and the structure update checked) | port 48 · statistical 20 | D2, D13 |
 
 #### `test/modeling_library/switch.jl` (51 assertions)
@@ -412,7 +424,7 @@ groups.
 | 51 | Bare combinator / assess | 1 | weight | as above | port 1 |  |
 | 58 | Bare combinator / propose | 1 | weight | as above | port 1 |  |
 | 63 | Bare combinator / update | 2 | old score = new score - weight, with a constraint at an address the switch lacks | `switch-branches-share-addresses` | port 2 | D11: the constraint is unvisited (loud, checked); the port drops it |
-| 78 | Bare combinator / regenerate | 3 | old score = new score - weight under regenerate | `regenerate-weight-is-the-retained-density-ratio` (gen.clj weighs 0, checked) | oracle 3 | U1 |
+| 78 | Bare combinator / regenerate | 3 | old score = new score - weight under regenerate | `regenerate-weight-is-the-retained-density-ratio` (gen.clj weighs 0, checked) | oracle 3 | U1: checked on Gen.jl's recorded moves (genclj-c5rl) |
 | 97 | Bare combinator / choice gradients | 2 | choice gradients in both branches (loop of 4) | `choice-gradients` | port 2 |  |
 | 134 | Hierarchy / simulate | 1 | a Switch called from a gen function | as above | port 1 |  |
 | 139 | Hierarchy / generate | 2 | weight of a constrained choice | as above | port 2 |  |
@@ -427,7 +439,7 @@ groups.
 | 256 | More complex hierarchy / assess | 2 | weight | as above | port 2 |  |
 | 266 | More complex hierarchy / propose | 2 | weight of the proposed choices | as above | port 2 |  |
 | 273 | More complex hierarchy / update | 2 | old = new - weight across branches | as above | port 2 |  |
-| 284 | More complex hierarchy / regenerate | 4 | old = new - weight under regenerate, a branch that drops a call | Eq. 4.1 differs (checked) | port 1 · oracle 3 | U1 |
+| 284 | More complex hierarchy / regenerate | 4 | old = new - weight under regenerate, a branch that drops a call | Eq. 4.1 differs (checked) | port 1 · oracle 3 | U1: checked on Gen.jl's recorded moves (genclj-c5rl) |
 | 297 | More complex hierarchy / choice gradients | 1 | the first branch's choice gradient (loop of 4) | `choice-gradients` | port 1 |  |
 | 331 | More complex hierarchy to test discard / update | 4 | the discard of a branch change, deep addresses | `switch-branches-share-addresses` | port 4 |  |
 
@@ -435,8 +447,8 @@ groups.
 
 | Line | Testset | Asserts | What it checks | gen.clj counterpart | Category | Notes |
 |---:|---|---:|---|---|---|---|
-| 1 | dist DSL (untyped) | 29 | pushforwards (exp, + 1, broadcast parameters, mvnormal), labels from an Array, a Dict and an enum, 1 - uniform | `gen.dist.dsl/dist`; `dist-dsl-test/*` | port 17 · gap 12 | G7 (labels, checked); line 29's covariance 2·ones(2,2) is singular: Gen.jl gives 15.24 (U3), gen.clj rejects it (D15), so line 29's 4 assertions port as the error |
-| 72 | dist DSL (typed) | 8 + 6 throws | typed @dist parameters: labels of a type, MethodErrors for wrong types | `dist` (untyped) | port 3 · n/a 6 · gap 5 | G7; N: Julia type dispatch (MethodError) |
+| 1 | dist DSL (untyped) | 29 | pushforwards (exp, + 1, broadcast parameters, mvnormal), labels from an Array, a Dict and an enum, 1 - uniform | `gen.dist.dsl/dist`; `dist-dsl-test/*` | port 17 · gap 12 | G7 (labels, checked), to build (genclj-414l); line 29's covariance 2·ones(2,2) is singular: Gen.jl gives 15.24 (U3), gen.clj rejects it (D15), so line 29's 4 assertions port as the error |
+| 72 | dist DSL (typed) | 8 + 6 throws | typed @dist parameters: labels of a type, MethodErrors for wrong types | `dist` (untyped) | port 3 · n/a 6 · gap 5 | G7, to build (genclj-414l); N: Julia type dispatch (MethodError) |
 
 #### `test/modeling_library/mixture.jl` (52 assertions)
 
@@ -461,17 +473,17 @@ groups.
 
 | File | Testsets | Assertions | port | oracle | statistical | n/a | gap |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `autodiff.jl` | 1 | 2 | 0 | 0 | 0 | 0 | 2 |
+| `autodiff.jl` | 1 | 2 | 2 | 0 | 0 | 0 | 0 |
 | `diff.jl` | 5 | 32 | 32 | 0 | 0 | 0 | 0 |
-| `selection.jl` | 3 | 35 | 16 | 0 | 0 | 1 | 18 |
-| `assignment.jl` | 17 | 132 | 108 | 0 | 0 | 6 | 18 |
+| `selection.jl` | 3 | 35 | 34 | 0 | 0 | 1 | 0 |
+| `assignment.jl` | 17 | 132 | 112 | 0 | 0 | 6 | 14 |
 | `gen_fn_interface.jl` | 2 | 5 | 5 | 0 | 0 | 0 | 0 |
-| `dsl/macros.jl` | 2 | 14 | 5 | 0 | 0 | 8 | 1 |
-| `dsl/dynamic_dsl.jl` | 14 | 88 | 73 | 0 | 0 | 8 | 7 |
-| `dsl/static_dsl.jl` | 19 | 175 | 58 | 0 | 0 | 32 | 85 |
-| `optional_args.jl` | 2 | 58 | 0 | 0 | 0 | 0 | 58 |
-| `static_ir/static_ir.jl` | 11 | 138 | 121 | 0 | 0 | 13 | 4 |
-| `tilde_sugar.jl` | 4 | 12 | 8 | 0 | 0 | 1 | 3 |
+| `dsl/macros.jl` | 2 | 14 | 6 | 0 | 0 | 8 | 0 |
+| `dsl/dynamic_dsl.jl` | 14 | 88 | 77 | 0 | 0 | 10 | 1 |
+| `dsl/static_dsl.jl` | 19 | 175 | 60 | 0 | 0 | 72 | 43 |
+| `optional_args.jl` | 2 | 58 | 0 | 0 | 0 | 58 | 0 |
+| `static_ir/static_ir.jl` | 11 | 138 | 125 | 0 | 0 | 13 | 0 |
+| `tilde_sugar.jl` | 4 | 12 | 11 | 0 | 0 | 1 | 0 |
 | `inference/importance_sampling.jl` | 1 | 16 | 16 | 0 | 0 | 0 | 0 |
 | `inference/train.jl` | 2 | 8 | 1 | 0 | 7 | 0 | 0 |
 | `inference/variational.jl` | 2 | 7 | 0 | 0 | 4 | 0 | 3 |
@@ -481,33 +493,44 @@ groups.
 | `inference/map_optimize.jl` | 1 | 0 | 0 | 0 | 0 | 0 | 0 |
 | `inference/elliptical_slice.jl` | 1 | 0 | 0 | 0 | 0 | 0 | 0 |
 | `inference/mh.jl` | 1 | 3 | 3 | 0 | 0 | 0 | 0 |
-| `inference/trace_translators.jl` | 4 | 5 | 3 | 0 | 0 | 0 | 2 |
+| `inference/trace_translators.jl` | 4 | 5 | 5 | 0 | 0 | 0 | 0 |
 | `inference/kernel_dsl.jl` | 1 | 2 | 2 | 0 | 0 | 0 | 0 |
 | `inference/enumerative.jl` | 1 | 31 | 27 | 0 | 0 | 4 | 0 |
 | `modeling_library/custom_determ.jl` | 3 | 37 | 36 | 0 | 0 | 0 | 1 |
-| `modeling_library/distributions.jl` | 22 | 138 | 126 | 0 | 0 | 8 | 4 |
+| `modeling_library/distributions.jl` | 22 | 138 | 130 | 0 | 0 | 8 | 0 |
 | `modeling_library/choice_at.jl` | 8 | 74 | 74 | 0 | 0 | 0 | 0 |
 | `modeling_library/call_at.jl` | 8 | 74 | 74 | 0 | 0 | 0 | 0 |
-| `modeling_library/map.jl` | 9 | 137 | 126 | 0 | 0 | 0 | 11 |
+| `modeling_library/map.jl` | 9 | 137 | 137 | 0 | 0 | 0 | 0 |
 | `modeling_library/unfold.jl` | 10 | 181 | 181 | 0 | 0 | 0 | 0 |
-| `modeling_library/recurse.jl` | 2 | 122 | 48 | 0 | 20 | 0 | 54 |
+| `modeling_library/recurse.jl` | 2 | 122 | 102 | 0 | 20 | 0 | 0 |
 | `modeling_library/switch.jl` | 24 | 51 | 42 | 6 | 0 | 3 | 0 |
 | `modeling_library/dist_dsl.jl` | 2 | 43 | 20 | 0 | 0 | 6 | 17 |
 | `modeling_library/mixture.jl` | 4 | 52 | 43 | 0 | 0 | 9 | 0 |
 | `modeling_library/product.jl` | 3 | 14 | 11 | 0 | 0 | 3 | 0 |
-| **all** | **195** | **1699** | **1262** | **6** | **33** | **110** | **288** |
+| **all** | **195** | **1699** | **1371** | **6** | **33** | **210** | **79** |
 
 ### Totals per category
 
 | Category | Assertions | Share | Testsets wholly in it |
 |---|---:|---:|---:|
-| port | 1262 | 74.3 % | 107 |
+| port | 1371 | 80.7 % | 123 |
 | oracle | 6 | 0.4 % | 1 |
 | statistical | 33 | 1.9 % | 2 |
-| n/a | 110 | 6.5 % | 12 |
-| gap | 288 | 17.0 % | 12 |
+| n/a | 210 | 12.4 % | 14 |
+| gap | 79 | 4.6 % | 4 |
 
-Mixed testsets: 54. Testsets without assertions: 7 (smoke tests and empty testsets).
+Mixed testsets: 44. Testsets without assertions: 7 (smoke tests and empty testsets).
+
+The first mapping (2026-10-20) counted port 1,262 (74.3 %), n/a 110 and
+gap 288. The owner's decisions then moved D1 (16) and D6 (4) to port, and
+G3 (60) and G15 (40, with 7 of `static_dsl.jl:466`'s assertions, which are
+the IR's) to n/a; G1 and G8–G14 were built (88 to port, and one of
+`selection.jl:49`'s was a port the first count took for a gap). The 79 left
+each wait on a bean: G2's static rewrites (42,
+genclj-lgij), G7's non-numeric labels (17, genclj-414l), D4's loud lookups
+(16, genclj-ocwu), G4's model_update (3, genclj-xjte) and G5's own
+parameters (1, genclj-2294). Counted at batch 4's head (17fd8bd), against
+the ports' pending lists.
 
 ### The n/a assertions, by reason
 
@@ -522,7 +545,9 @@ Mixed testsets: 54. Testsets without assertions: 7 (smoke tests and empty testse
 | Julia type dispatch (`MethodError` for typed `@dist` parameters) | 6 |
 | The N-d shape of an enumeration grid (D12) | 4 |
 | Gradient accumulators (`get_param_grad` after a reset, D7) | 4 |
-| **all** | **110** |
+| No default positional arguments (G3, the owner's decision): `optional_args.jl` and `dynamic_dsl.jl:8` | 60 |
+| The static IR's internal shape (G15, the owner's decision): argument and per-expression nodes, parameter nodes, node identity, the distribution and callee objects | 40 |
+| **all** | **210** |
 
 ## 4. Differences and gaps
 
@@ -530,12 +555,12 @@ Mixed testsets: 54. Testsets without assertions: 7 (smoke tests and empty testse
 
 | ID | Difference | Documented? | Assertions | Proposal |
 |---|---|---|---:|---|
-| D1 | **Retdiffs are more precise.** A dynamic function's retdiff is no-change when its return value equals the previous one; Gen.jl's dynamic language always returns UnknownChange (`src/dynamic/update.jl:200`, `regenerate.jl:141`). Map's and Unfold's element retdiffs follow, so an unchanged element is absent from a VectorDiff, and a Map update with nothing changed returns no-change where Gen.jl returns a VectorDiff naming the element. A splice also turns a caller's argdiff into no-change for an argument identical to the previous call's, where Gen.jl trusts the argdiff, so a callee given UnknownChange for an unchanged value does not rerun. Sound (a diff only claims what holds), checked. | In docstrings (`gen.dynamic` retdiff, `arg-diffs`), not as a difference from Gen.jl | 16 gap | Document in DESIGN.md §9; the ports assert gen.clj's diffs, and that they are consistent (`diff/consistent?`) |
-| D2 | **0-based indices.** Map and Unfold addresses, Recurse nodes, categorical's values and Switch's branch index. | §9 for Map, Unfold and Recurse; docstrings for categorical and Switch | (port) | Add categorical and Switch to §9's bullet |
+| D1 | **Retdiffs are more precise.** A dynamic function's retdiff is no-change when its return value equals the previous one; Gen.jl's dynamic language always returns UnknownChange (`src/dynamic/update.jl:200`, `regenerate.jl:141`). Map's and Unfold's element retdiffs follow, so an unchanged element is absent from a VectorDiff, and a Map update with nothing changed returns no-change where Gen.jl returns a VectorDiff naming the element. A splice also turns a caller's argdiff into no-change for an argument identical to the previous call's, where Gen.jl trusts the argdiff, so a callee given UnknownChange for an unchanged value does not rerun. Sound (a diff only claims what holds), checked. | DESIGN §9 (the owner, 2026-10-20: kept) | 16 port | Decided: the ports assert gen.clj's diffs, and that they are consistent (`diff/consistent?`) |
+| D2 | **0-based indices.** Map and Unfold addresses, Recurse nodes, categorical's values and Switch's branch index. | §9, with categorical's values and Switch's branch index (genclj-fevk) | (port) | — |
 | D3 | **Row-major arrays, NumPy broadcasting.** Julia pads shapes on the right and is column-major; the ports reverse Julia's shapes (checked on the broadcasting cases). A covariance gradient from the tape sits on the triangle the Cholesky reads; the port symmetrizes it to compare with Gen.jl's. | `docs/array-api.md` (NumPy broadcasting) | (port) | A porting note |
-| D4 | **Lenient choice-map and trace accessors.** `cm/get-submap` at a value returns the Value and through a value EMPTY; `cm/get-choice`, `cm/get-value` and `(tr addr)` at a missing or node address return nil; `cm/has-submap?` is true at a value. Gen.jl throws KeyError, or answers false. | No; CLAUDE.md rule 6 ("never … a silent default") argues for loud | 16 gap | Owner: KeyError-like errors (a `get-choice` that throws, keeping nil-returning lookups under another name), or a documented Clojure idiom |
+| D4 | **Lenient choice-map and trace accessors.** `cm/get-submap` at a value returns the Value and through a value EMPTY; `cm/get-choice`, `cm/get-value` and `(tr addr)` at a missing or node address return nil; `cm/has-submap?` is true at a value. Gen.jl throws KeyError, or answers false. | DESIGN §9 (the owner, 2026-10-20: loud) | 16 gap until built | Decided: `cm/get-choice`, `cm/get-value` and `(tr addr)` throw at a missing or node address, as Gen.jl's KeyError; Clojure's `get` stays the nil-returning lookup. To build (genclj-ocwu), then the 16 port |
 | D5 | **Invalid parameters throw** (dirichlet α ≤ 0, normal std 0) where Gen.jl returns −Inf or samples the mean. | CLAUDE.md rule 5 | (port) | The ports assert the error |
-| D6 | **Beta at 0 and 1.** gen.clj gives the exact density, +Inf when α < 1 (β < 1); Gen.jl substitutes a finite value "as if x = eps/e" (`src/modeling_library/distributions/beta.jl`). | No | 4 gap | Owner; DESIGN §9 already keeps exact infinities for draws beyond the float range |
+| D6 | **Beta at 0 and 1.** gen.clj gives the exact density, +Inf when α < 1 (β < 1); Gen.jl substitutes a finite value "as if x = eps/e" (`src/modeling_library/distributions/beta.jl`). | DESIGN §9 (the owner, 2026-10-20: exact) | 4 port | Decided: the port asserts +Inf; the oracle records Gen.jl's finite values (`beta-endpoints.edn`) |
 | D7 | **One parameter store per model; gradients are values.** No per-function parameters, accumulators or scale factor (`get_param_grad`, `zero_param_grad!`, `set_param!`, `accumulate_param_gradients!(tr, g, scale)`); argument gradients come from `choice-gradients` with `:argnums`. | §9 | (port), 4 n/a | — |
 | D8 | An involution takes a key, a fifth argument. | §9 | (port) | — |
 | D9 | Booleans count in arithmetic (`tilde_sugar.jl`'s coin sum, checked). | §9 | (port) | — |
@@ -551,21 +576,21 @@ Mixed testsets: 54. Testsets without assertions: 7 (smoke tests and empty testse
 
 | ID | Gap | What gen.clj has | Size | Assertions | Covered by a documented difference? |
 |---|---|---|---|---:|---|
-| G1 | `trace[addr]` at a call gives the call's return value (also Map's `trace[i]`); `get_call(tr, addr).subtrace` | `(tr addr)` is nil at a call (checked); the subtrace sits in `:gen.dynamic/subtraces`, an internal key | small | 7 | No |
-| G2 | The static language rewrites a computed address (`:x => i`) into a `choice_at`/`call_at` call node, and hoists `@trace` out of expressions (a tuple, a ternary, a distribution's argument) | Both are compile errors in `gen ^:static` (checked), documented as not static; written as separate bindings, or with `comb/choice-at`, they work (checked) | medium | 49 | Partly: §9 lists them as not static, not as a difference from Gen.jl |
-| G3 | Optional positional arguments with defaults (`@gen function foo(x, y=2)`), in the trace's args too | One parameter vector per `gen`; a rest parameter `[x & [y z]]` covers calls, update and regenerate with any number of arguments (checked), but the trace's args stay as given | medium | 60 | No; could become one (Clojure has no default arguments) |
-| G4 | `black_box_vi!`/`black_box_vimco!` with `model_update`, training the model's parameters with q's (the minimal VAE) | Only q's store is trained (`gen.inference.vi`'s docstring says so) | medium | 3 | No |
-| G5 | A custom deterministic function's own trainable parameters (`accumulate_param_gradients_determ!`, the scale factor) | Argument gradients only (`:gradient-with-state`) | small–medium | 1 | No |
+| G1 | `trace[addr]` at a call gives the call's return value (also Map's `trace[i]`); `get_call(tr, addr).subtrace` | Closed (genclj-cbec, DESIGN §9): `(tr addr)` is the call's return value where no choice is (`(tr [])` the trace's), and `(trace/subtrace tr addr)` its trace. Before, `(tr addr)` was nil at a call | — | — (its 7 port now) | — |
+| G2 | The static language rewrites a computed address (`:x => i`) into a `choice_at`/`call_at` call node, and hoists `@trace` out of expressions (a tuple, a ternary, a distribution's argument) | Both are compile errors in `gen ^:static` (checked); written as separate bindings, or with `comb/choice-at`, they work (checked). Decided, to build (DESIGN §9, static rewrites; genclj-lgij) | medium | 42 (`static_dsl.jl:466`'s other 7 are the IR's, G15) | Decided |
+| G3 | Optional positional arguments with defaults (`@gen function foo(x, y=2)`), in the trace's args too | One parameter vector per `gen`; a rest parameter `[x & [y z]]` covers calls, update and regenerate with any number of arguments (checked), but the trace's args stay as given | — | 60 n/a | n/a by the owner's decision (DESIGN §9: Clojure has none) |
+| G4 | `black_box_vi!`/`black_box_vimco!` with `model_update`, training the model's parameters with q's (the minimal VAE) | Only q's store is trained (`gen.inference.vi`'s docstring says so); to build (genclj-xjte) | medium | 3 | No |
+| G5 | A custom deterministic function's own trainable parameters (`accumulate_param_gradients_determ!`, the scale factor) | Argument gradients only (`:gradient-with-state`); to build (genclj-2294) | small–medium | 1 | No |
 | G6 | `HomogeneousMixture` of a multivariate family (`HomogeneousMixture(mvnormal, [1, 2])`, dims per argument) | Closed (b9eb9d2): `(homogeneous-mixture family dims)` takes Gen.jl's dims, slices each parameter on the axis before its own (means [K d], covariances [K d d]) and mixes the K components' densities of the whole value. Before, it took scalar families, and with mvnormal `dc/log-prob` returned a wrong number (F2) | — | — (its 10 port now) | — |
-| G7 | `@dist` with non-numeric labels (`labels[categorical(p)]` over symbols, a Dict of labels, enums, user types) | Numeric labels through `array/take` work (checked); keywords fail ("equal: not an array: :a"). §9: "Non-numeric labels wait for parameters that are not arrays" | medium | 17 | Noted in §9 as pending |
-| G8 | `atan2` (and `asin`, `acos`, `atan`, `sinh`, `cosh`) in gen.array, differentiable and on MLX | None of them (checked); `trace_translators.jl`'s polar transform needs `atan(y, x)` under the Jacobian's `grad` | small | 2 | No |
-| G9 | Paths in selections: `(:x => :u) in s`, `s[:y => :z]`, `set_subselection!` | `sel/selected?` and `get-subselection` take one address, and a vector path silently answers false and None (checked); reducing `get-subselection` over the path gives Gen.jl's answers (checked). No `set-subselection` | small | 18 | No |
-| G10 | `merge` of one or of n choice maps | Binary `cm/merge` (a 1-argument call is an ArityException) | trivial | 4 | No |
-| G11 | A user macro at a static binding's head that expands to `(trace …)` | "Unable to resolve symbol: trace" (checked): `static/analyze` does not macroexpand a binding before classifying it; the dynamic `gen` does (checked) | small | 1 | No |
-| G12 | A static body returning quoted data that mentions `trace` | Rejected as a call of `trace` (checked); `pure!` walks into `quote` | small | 1 | No |
-| G13 | Recurse's numbering helpers `get_child`, `get_child_num`, `get_parent` | A private `child-of` | trivial | 54 | Numbering is documented (0-based, §9) |
-| G14 | `fill` of a tracked scalar under autodiff | `array/full` with a tape value throws ClassCastException (checked), not an ex-info; `broadcast-to` and `(+ (zeros …) x)` differentiate (checked) | small | 2 | No |
-| G15 | The static IR's shape: argument nodes, one Julia node per argument expression, parameter nodes, node identity, the distribution or callee object | `static/ir`: one node per binding, inputs as names, the source form | medium, or n/a | 33 | No; the owner may call the IR's internal form n/a, which moves 33 gap to n/a |
+| G7 | `@dist` with non-numeric labels (`labels[categorical(p)]` over symbols, a Dict of labels, enums, user types) | Numeric labels through `array/take` work (checked); keywords fail ("equal: not an array: :a"). §9: "Non-numeric labels wait for parameters that are not arrays"; to build (genclj-414l) | medium | 17 | Noted in §9 as pending |
+| G8 | `atan2` (and `asin`, `acos`, `atan`, `sinh`, `cosh`) in gen.array, differentiable and on MLX | Closed (genclj-3mx6, 241f0ef): `array/atan2`, `asin`, `acos`, `atan`, `sinh`, `cosh`, differentiable and on MLX | — | — (its 2 port now) | — |
+| G9 | Paths in selections: `(:x => :u) in s`, `s[:y => :z]`, `set_subselection!` | Closed (genclj-cbec, DESIGN §9: a vector is a path, everywhere): `selected?` and `get-subselection` take an address or a path, and `sel/set-subselection` is `set_subselection!`, persistent. Before, a vector path silently answered false and none | — | — (its 17 port now; the first count said 18) | — |
+| G10 | `merge` of one or of n choice maps | Closed (genclj-cbec): `cm/merge` takes 0 to n choice maps | — | — (its 4 port now) | — |
+| G11 | A user macro at a static binding's head that expands to `(trace …)` | Closed (genclj-9d9h): `static/analyze` macroexpands a binding's head before classifying it, as the dynamic `gen` does | — | — (its 1 ports now) | — |
+| G12 | A static body returning quoted data that mentions `trace` | Closed (genclj-9d9h): quoted data is data | — | — (its 1 ports now) | — |
+| G13 | Recurse's numbering helpers `get_child`, `get_child_num`, `get_parent` | Closed (genclj-cbec): `comb/get-child`, `get-child-num` and `get-parent`, 0-based, their arguments checked | — | — (its 54 port now) | — |
+| G14 | `fill` of a tracked scalar under autodiff | Closed (genclj-3mx6, DESIGN §9: filling with an array is loud): `array/full` takes a scalar fill, a tape value too; an array fill is an ex-info. Before, a tape value threw ClassCastException | — | — (its 2 port now) | — |
+| G15 | The static IR's shape: argument nodes, one Julia node per argument expression, parameter nodes, node identity, the distribution or callee object | `static/ir`: one node per binding, inputs as names, the source form | — | 40 n/a (33, and `static_dsl.jl:466`'s 7) | n/a by the owner's decision (DESIGN §9: the static IR's internal shape is not ported) |
 
 ### 4.3 Upstream findings, run
 
@@ -704,9 +729,9 @@ issue 168's regression test ran without error. `recurse.jl:223`, marked
 |---|---|---|
 | F1 | `dist/mvnormal`'s positive-definiteness check looked for NaN in the Cholesky factor, so the singular `2·ones(2, 2)` passed and `log-prob` returned 15.24, as Gen.jl's 15.240802 (U3). Fixed in 2beab42 by the owner's decision (D15): a covariance singular in floating point is an error, at every precision, so in float32 a GP kernel needs a jitter at float32's scale; the error suggests one (7e85fb3) | yes |
 | F2 | `dc/log-prob` of `(homogeneous-mixture mvnormal)` returned −4.135 where the density is −4.754: nothing rejected a multivariate family outside a trace site. Fixed in b9eb9d2 with G6, as were the mixtures' samplers, whose component pick met a vector draw's own axis | yes |
-| F3 | `sel/selected?`, `sel/get-subselection` and `cm/set-submap` take a vector path as one (absent) address, silently; `cm/set-submap` then holds a vector key | yes |
-| F4 | `array/full` of a tape value throws ClassCastException | yes |
-| F5 | A quoted `(trace …)` in a static body is a compile error (G12) | yes |
+| F3 | `sel/selected?`, `sel/get-subselection` and `cm/set-submap` took a vector path as one (absent) address, silently; `cm/set-submap` then held a vector key. Fixed in genclj-cbec (ad6b675) by the owner's decision (a vector is a path, everywhere; with G9) | yes |
+| F4 | `array/full` of a tape value threw ClassCastException. Fixed in genclj-3mx6 (241f0ef; with G14) | yes |
+| F5 | A quoted `(trace …)` in a static body was a compile error. Fixed in genclj-9d9h (fd20b6b; G12) | yes |
 
 ## 5. The oracle
 
