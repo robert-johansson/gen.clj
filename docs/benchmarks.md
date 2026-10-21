@@ -260,6 +260,115 @@ other code has landed since, and the conditions differ.
 so that the comparison can be re-run. It is outside the repo now, as the
 work was asked.
 
+### Where gen.clj's 1.7 µs a choice goes (JDK Flight Recorder)
+
+**Setup.**
+- linreg simulate at K = 1000 (1002 choices) on the JVM backend, same key
+  each call.
+- A 10 s warm-up, then a JFR recording with the `profile` settings over
+  40 s of back-to-back simulates on one thread. That gave 22,492 simulates
+  at 1,779 µs each (1.78 µs a choice), 3,110 execution samples and 11,348
+  allocation samples.
+- One JVM, nice'd, beside another agent's MLX run (2026-10-21 08:45). The
+  proportions hold; absolute times may move.
+- Separately, the thread's allocated bytes (ThreadMXBean) were counted over
+  a run: 5,520,272 bytes a simulate at K = 1000, **5.5 KB a choice** (4.9 KB
+  at K = 10, 5.1 KB at K = 100).
+- Each sample is attributed to the innermost gen.clj function on its stack
+  that names a phase. gen.array's operators are see-through, so their work
+  counts for whatever called them.
+
+| phase | time (samples) | allocation |
+|---|---|---|
+| **the handler's bookkeeping** | **50.6%** | **66.2%** |
+| choicemap: `set-choice` into the run's choices | 13.7% | 21.6% |
+| `record`: the state's `:scores` (a map by path) and `:score` | 13.5% | 21.3% |
+| the trace function: the `:visited` set, the state | 10.8% | 15.5% |
+| `check-address!`: used paths, their prefixes, the choices under them | 7.2% | 2.7% |
+| `site-key`: the state's `:key` | 3.3% | 5.1% |
+| the rest of the handler | 2.1% | 0.3% |
+| **the distribution** (normal: its draw's shape and options, the affine transform, erfinv, log-prob, construction checks) | **28.8%** | **16.5%** |
+| **random bits** (the site's key split, threefry, the JVM backend's 0-d uniform) | **17.3%** | **13.8%** |
+| **the model body** (its loop and arithmetic) | 2.8% | 2.8% |
+| other | 0.5% | 0.2% |
+
+**What the profile shows:**
+- **Over half the time is the handler's bookkeeping, and two thirds of the
+  allocation.** For every choice the run:
+  - updates its state, a hash map of 16 keys, five times: `:key`,
+    `:choices`, `:scores`, `:score` and `:visited`;
+  - adds the path (a vector `[:y i]`) to three persistent collections keyed
+    by it: the choices, the scores and the visited set;
+  - looks the path and its prefixes up again in `check-address!`.
+
+  The hottest frames are Clojure's `PersistentHashMap` assoc, hash and
+  node-copying (`BitmapIndexedNode.assoc` alone is 11% of samples), and by
+  class the allocation is mostly their node arrays (`Object[]` 39%,
+  `INode[]` 10%).
+- **The distribution's 29% is mostly general-purpose code on two doubles.**
+  - Including the random bits under it, normal's draw takes 34% of the time
+    and its log-prob 6%.
+  - The draw computes its shape (`elementwise-shape`, varargs and a reduce
+    over the parameters' shapes: 6.0%) and an options map.
+  - It then goes through gen.array's generic operators. On host numbers
+    each operator classifies its operands' types first: `dtype/kind` and
+    `op-class` are 4% of the samples.
+  - erfinv's Halley step is only 3%.
+- **Random bits, 17%:**
+  - The site's key split is the smaller part: threefry's `hash2x32` is 1.5%.
+  - Most is the JVM backend's uniform kernel for a 0-d draw
+    (`random-uniform`: 9%, largely its own frame), and `gen.random`'s
+    uniform and normal around it (4%).
+- **Boxing and the GC:**
+  - `java.lang.Double` is 7.3% of the bytes, about 25 boxed doubles a
+    choice. `ArraySeq` (varargs) is 5%.
+  - The young collections paused for 0.5 ms each, about 10 a second: under
+    1% of the time. Allocation costs at the allocation sites and in memory
+    traffic, not in pauses.
+- **The rest is small:** the model body's own loop and arithmetic is 2.8%,
+  and nothing else is large.
+
+**Recommendations** (for the owner, ranked by expected gain; none built):
+1. **The handler's state as run-local accumulators** (most of the 51% of
+   the time and 66% of the allocation).
+   - Keep one value per used path, for example a map from the path to
+     `[value log-prob]`. It answers "visited", gives the scores, and builds
+     the choices, so each choice costs one insertion where it now costs
+     three, plus the lookups.
+   - Hold the run's mutable parts in a record, or in transients that never
+     leave the run, rather than a 16-key hash map assoc'ed five times a
+     choice.
+   - The transitions and their results stay as they are. Rule 1, the
+     handler as the semantics, is about what they compute, and the laws
+     check it. But whether run-local mutation fits rule 3 ("no hidden
+     mutable state") is the owner's call.
+2. **A host-scalar path for scalar distributions** (most of the 29%).
+   - When every parameter is a host number and the shape is `[]`, normal's
+     sample and log-prob need neither `elementwise-shape`, the options map
+     nor gen.array's type dispatch: a uniform, one erfinv and a few
+     primitive flops.
+   - It must give the same bits as today's path: the same uniform, then
+     erfinv, then the affine transform. That keeps every fixed-key test and
+     fixture as it is, and they check it.
+3. **A scalar uniform in gen.random** (about half of the 17%). A 0-d uniform
+   could come straight from threefry's bits as a double, without the
+   backend's array kernel (a `double[]` of one, `make`, the generic
+   affine). The site's key split stays, as rule 2 requires.
+
+Together these three cover about 97% of the samples, but how much each
+recovers has to be measured after it is built. Gen.jl's 0.19 µs a choice
+comes from a different design (a mutable trace, and one global stateful
+generator rather than a key per site). Rule 2's keys are a cost gen.clj
+chooses to pay: here at most the 1.5% of `hash2x32` and the split.
+
+The profile is reproducible:
+- `P/lm-scripts/profile_linreg.clj` (`clojure -M:bench <file> <out.jfr>`);
+- `jfr view hot-methods`, and `jfr view allocation-by-site`, which counts a
+  26 GB sample from JFR's own start-up that the phase table leaves out;
+- the per-thread allocation count, `P/lm-scripts/alloc_linreg.clj`.
+
+These scripts sit outside the repo, with the Julia one.
+
 ## GenMLX's inference benchmarks, within gen.clj (2026-10-19)
 
 `bench/gen/inference_bench.clj` ports GenMLX's `bench/linreg.cljs`,
