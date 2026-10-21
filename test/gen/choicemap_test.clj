@@ -154,6 +154,11 @@
       (is (= s (sel/hierarchical :x sel/all [:y 0] sel/all)) "hierarchical nests a path")
       (is (= (sel/select [:y 0] [:y 1]) (sel/set-subselection (sel/select [:y 0]) [:y 1] sel/all)))
       (is (= (sel/select :z) (sel/set-subselection sel/none :z sel/all)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"goes inside a complement,"
+                            (sel/set-subselection (sel/complement s) [:a :b] sel/all))
+          "the error names the kind")
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"goes inside all,"
+                            (sel/set-subselection s [:x :u] sel/none)))
       (doseq [[why f] [["inside all" #(sel/set-subselection sel/all :x sel/none)]
                        ["inside a selected address" #(sel/set-subselection s [:x :u] sel/none)]
                        ["inside a complement" #(sel/set-subselection (sel/complement s) :z sel/all)]
