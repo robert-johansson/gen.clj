@@ -245,13 +245,9 @@
     (is (not (support/has-value? gradients [0 :z])))
     (is (approx? (+ (first (lp-grad z2 6.0)) (retgrad 1)) (cm/get-choice gradients [1 :z])))))
 
-(def ^:private model
-  "bar holding foo's std, as set_param! does (D7)."
-  (indexed/holding :map (comb/map foo) {:std 1.0}))
-
-;; map.jl:376
+;; map.jl:376: the Map's trace differentiates its kernel's store (DESIGN §9)
 (deftest accumulate-param-gradients
-  (let [tr (:trace (gfi/generate model (args 2) (cm/set-submap cm/EMPTY :map both-constrained) (rng/key 6)))
+  (let [tr (:trace (gfi/generate bar (args 2) both-constrained (rng/key 6)))
         [gxs gys] (:arg-grads (g/choice-gradients tr sel/none retgrad {:argnums [0 1]}))
         [_ _ dstd1] (lp-grad z1 4.0)
         [_ _ dstd2] (lp-grad z2 6.0)]

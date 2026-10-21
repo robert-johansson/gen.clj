@@ -275,7 +275,25 @@
             {:weight 0.0 :retval []}
             (range n))))
 
+;; A combinator's trainable-parameter stores (gfi/IStores): its callees',
+;; keyed as it holds them, a Map's and an Unfold's those of their one kernel
+
+(defn- callee-stores
+  "{key stores} over the callees, a vector or map of generative functions
+   by key, that hold stores; nil when none does."
+  [callees]
+  (not-empty (into {} (keep (fn [[k gf]] (when-let [s (gfi/stores gf)] [k s]))) (if (map? callees) callees (map-indexed vector callees)))))
+
+(defn- with-callee-stores
+  "callees (a vector or map of generative functions by key) with stores,
+   {key stores}, given to them."
+  [callees stores]
+  (reduce-kv (fn [cs k s] (assoc cs k (gfi/with-stores (get cs k) s))) callees stores))
+
 (gfi/defgf MapGF [kernel]
+  gfi/IStores
+  (-stores [gf] (gfi/stores (:kernel gf)))
+  (-with-stores [gf stores] (assoc gf :kernel (gfi/with-stores (:kernel gf) stores)))
   gfi/IGenerativeFunction
   (-simulate [gf args key] (:trace (map-generate gf args nil key)))
   (-generate [gf args constraints key] (map-generate gf args constraints key))
@@ -386,6 +404,9 @@
       {:weight weight :retval retval}))))
 
 (gfi/defgf UnfoldGF [kernel]
+  gfi/IStores
+  (-stores [gf] (gfi/stores (:kernel gf)))
+  (-with-stores [gf stores] (assoc gf :kernel (gfi/with-stores (:kernel gf) stores)))
   gfi/IGenerativeFunction
   (-simulate [gf args key] (:trace (unfold-generate gf args nil key)))
   (-generate [gf args constraints key] (unfold-generate gf args constraints key))
@@ -453,6 +474,9 @@
           (= op :regenerate) (assoc :weight 0.0))))))
 
 (gfi/defgf SwitchGF [branches]
+  gfi/IStores
+  (-stores [gf] (callee-stores (:branches gf)))
+  (-with-stores [gf stores] (update gf :branches with-callee-stores stores))
   gfi/IGenerativeFunction
   (-simulate [gf args key] (:trace (switch-generate gf args nil key)))
   (-generate [gf args constraints key] (switch-generate gf args constraints key))
@@ -693,6 +717,9 @@
     (+ (part (::productions tr) :production) (part (::aggregations tr) :aggregation))))
 
 (gfi/defgf RecurseGF [production aggregation max-branch]
+  gfi/IStores
+  (-stores [gf] (callee-stores (select-keys gf [:production :aggregation])))
+  (-with-stores [gf stores] (with-callee-stores gf stores))
   gfi/IGenerativeFunction
   (-simulate [gf args key] (:trace (recurse-run gf nil (recurse-args args) [diff/unknown-change] :generate nil key)))
   (-generate [gf args constraints key] (recurse-run gf nil (recurse-args args) [diff/unknown-change] :generate constraints key))

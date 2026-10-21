@@ -179,6 +179,9 @@
           :else [(run gf args) diff/unknown-change])))
 
 (defrecord DeterministicGF [apply-with-state update-with-state gradient param-names param-gradient params]
+  gfi/IStores
+  (-stores [gf] (:params gf))
+  (-with-stores [gf stores] (assoc gf :params stores))
   gfi/IGenerativeFunction
   (-simulate [this args _key] (run this args))
   (-generate [this args constraints _key]
