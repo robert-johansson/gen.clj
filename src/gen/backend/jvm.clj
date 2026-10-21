@@ -169,7 +169,7 @@
            (dotimes [i# n#] (let [~y (aget b# i#)] (aset out# i# (double ~expr))))
            out#))
        (defn- ~general ^"[D" [^"[D" a# sa# ^"[D" b# sb# os#]
-         (let [n# (sh/size os#) out# (double-array n#)
+         (let [n# (sh/cells os#) out# (double-array n#)
                inner# (long (peek os#))
                la# (row-layout sa# os#) lb# (row-layout sb# os#)
                ^"[J" ra# (nth la# 0) ia# (long (nth la# 1))
@@ -230,7 +230,7 @@
       :logical-or (b-or a sa b sb os))))
 
 (defn- where-kernel ^doubles [^doubles c sc ^doubles x sx ^doubles y sy os]
-  (let [n (sh/size os) out (double-array n)]
+  (let [n (sh/cells os) out (double-array n)]
     (if (and (= sc os) (= sx os) (= sy os))
       (dotimes [i n]
         (aset out i (if (== (aget c i) 0.0) (aget y i) (aget x i))))
@@ -423,7 +423,7 @@
                               {:shapes (vec shapes) :axis axis}))))
         out-shape (assoc s0 axis (reduce + (map #(long (nth % axis)) shapes)))
         outer (sh/size (subvec s0 0 axis))
-        out (double-array (sh/size out-shape))]
+        out (double-array (sh/cells out-shape))]
     (loop [o 0 pos 0]
       (when (< o outer)
         (recur (inc o)
@@ -465,7 +465,7 @@
         outer (sh/size (subvec shape 0 axis))
         m (alength ix)
         out-shape (vec (concat (subvec shape 0 axis) (shape-of indices) (subvec shape (inc axis))))
-        out (double-array (* outer m inner))]
+        out (double-array (sh/cells out-shape))]
     (dotimes [o outer]
       (dotimes [j m]
         (let [i (index-value (aget ix j) d)]
@@ -537,7 +537,7 @@
         yo (sh/broadcast-offsets by batch)
         nb (sh/size batch)
         ^doubles a (data-of x) ^doubles b (data-of y)
-        out (double-array (* nb n m))]
+        out (double-array (sh/cells (into batch [n m])))]
     (dotimes [q nb]
       (let [abase (* (aget xo q) n k)
             bbase (* (aget yo q) k m)
@@ -628,7 +628,7 @@
         ^longs ao ao ^longs bo bo
         ^doubles ad (data-of a) ^doubles bd (data-of b)
         nb (sh/size batch)
-        out (double-array (* nb n k))
+        out (double-array (sh/cells (into batch [n k])))
         tr? (boolean transpose?)
         ;; solving L x = b (or Uᵀ x = b) runs forward; U x = b (or Lᵀ x = b) backward
         forward? (not= (boolean lower?) tr?)]
@@ -688,7 +688,7 @@
         ^longs ao ao ^longs bo bo
         ^doubles ad (data-of a) ^doubles bd (data-of b)
         nb (sh/size batch)
-        out (double-array (* nb n k))
+        out (double-array (sh/cells (into batch [n k])))
         lu (double-array (* n n))
         perm (long-array n)]
     (dotimes [q nb]
@@ -739,7 +739,7 @@
     :slogdet (slogdet (nth args 0))))
 
 (defn- random-uniform [key shape dtype]
-  (let [n (sh/size shape)
+  (let [n (sh/cells shape)
         data (case dtype
                :float64 (threefry/uniform-doubles key n)
                :float32 (threefry/uniform-floats key n)
@@ -856,11 +856,11 @@
   (-full [_ shape value dtype]
     (check-dtype dtype)
     (let [v (dt/host-double (dt/host-cast value dtype))]
-      (make (doto (double-array (sh/size shape)) (java.util.Arrays/fill v)) shape dtype)))
+      (make (doto (double-array (sh/cells shape)) (java.util.Arrays/fill v)) shape dtype)))
   (-arange [_ start stop step dtype]
     (check-dtype dtype)
     (let [start (double start) stop (double stop) step (double step)
-          n (max 0 (long (Math/ceil (/ (- stop start) step))))
+          n (sh/cells [(max 0 (long (Math/ceil (/ (- stop start) step))))])
           out (double-array n)]
       (dotimes [i n] (aset out i (+ start (* i step))))
       (make out [n] dtype)))

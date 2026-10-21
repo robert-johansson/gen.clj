@@ -6,14 +6,42 @@
 (set! *warn-on-reflection* true)
 (set! *unchecked-math* :warn-on-boxed)
 
+(defn- too-many-cells [shape cells limit]
+  (ex-info (str "an array of shape " (pr-str shape) " has " cells " cells; " limit)
+           {:reason :too-many-cells :shape shape :cells cells}))
+
 (defn size
-  "Number of elements in an array of this shape."
+  "Number of elements in an array of this shape, exactly: a count past a
+   long's range is a loud error (as is any shape that large)."
   ^long [shape]
   (let [r (count shape)]
-    (loop [s 1 i 0]
+    ;; over: the product so far passed a long; a later zero still gives 0
+    (loop [s 1 i 0 over false]
       (if (< i r)
-        (recur (* s (long (nth shape i))) (inc i))
-        s))))
+        (let [d (long (nth shape i))
+              p (* s d)]
+          (cond (zero? d) 0
+                (or over (not (zero? (Math/multiplyHigh s d))) (neg? p)) (recur s (inc i) true)
+                :else (recur p (inc i) false)))
+        (if over
+          (throw (too-many-cells shape "more than Long/MAX_VALUE" "no array holds as many"))
+          s)))))
+
+(def ^:const max-cells
+  "The most cells a JVM array holds: Integer/MAX_VALUE less the 8 the JVM
+   may keep for an array's header."
+  (- Integer/MAX_VALUE 8))
+
+(defn cells
+  "The number of cells of a JVM array of this shape, checked: past the
+   JVM's array limit (max-cells), an ex-info naming the shape, its count
+   and the limit, before anything is allocated (a long count read as an int
+   wraps, and a wrapped count can be small: a malformed array)."
+  ^long [shape]
+  (let [n (size shape)]
+    (when (< max-cells n)
+      (throw (too-many-cells shape n (str "a JVM array holds at most " max-cells))))
+    n))
 
 (defn strides
   "Row-major element strides of a contiguous array of this shape."
@@ -74,7 +102,7 @@
    slices and reductions."
   ^longs [dims ^longs strides ^long base]
   (let [r (count dims)
-        n (size dims)
+        n (cells dims)
         ds (long-array dims)
         idx (long-array r)
         offs (long-array n)
