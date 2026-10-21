@@ -969,6 +969,15 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     a choice included), a splice without an address, an untraced draw, an
     address used twice or one under another: each a compile error that
     names the form.
+  - **Macros and quoted data (M5, G11 and G12):** a binding's head, and
+    the return expression's, is macroexpanded before it is classified, as
+    `gen` expands a dynamic body, so a user macro that expands to a
+    `trace` or a `splice` is that call; a computation stays as written,
+    its expansion checked as it is. Only the head is expanded, so a call
+    hidden in a macro inside an expression is the compiler's error (trace
+    is unbound there), as before. Quoted data is data: it may mention
+    `trace`, and its symbols are no inputs. (My recommendation, for the
+    owner's review.)
   - **Compiled scores and a lint, in M4 (owner, 2026-10-20).** A static
     function's graph gives its log density as a pure function of its
     choices, which HMC, MALA, MAP and gradients use for static models, so

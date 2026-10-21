@@ -6,9 +6,12 @@
    The body is one let. Each binding is a call at a constant address,
    (trace addr dist) or (splice addr gf & args), or a pure expression of the
    arguments and earlier bindings (any pure Clojure, including destructuring);
-   then the return expression, which may itself be such a call. Branching happens only inside called
-   generative functions. This namespace checks a body at macroexpansion and
-   builds its graph as data; gen.dynamic runs it.
+   then the return expression, which may itself be such a call. A binding's
+   head is macroexpanded first, as the dynamic gen expands its body, so a
+   macro that expands to a call is that call; quoted data is data, and may
+   mention trace. Branching happens only inside called generative functions.
+   This namespace checks a body at macroexpansion and builds its graph as
+   data; gen.dynamic runs it.
 
      (ir gf)    the graph: the arguments, the nodes in order ({:kind :trace,
                 :splice or :compute, :addr, :names, :inputs, :form}) and the
@@ -29,7 +32,12 @@
   "The body's own calls, which a static body makes only at a binding's head."
   '#{trace splice untraced untraced-key})
 
-(defn- symbols [form] (filter symbol? (tree-seq coll? seq form)))
+(defn- quoted? [form] (and (seq? form) (= 'quote (first form))))
+
+(defn- symbols
+  "The symbols of form, but quoted data's (which is not code)."
+  [form]
+  (filter symbol? (tree-seq #(and (coll? %) (not (quoted? %))) seq form)))
 
 (defn- not-static [why form]
   (throw (ex-info (str "gen ^:static: " why ": " (pr-str form)
@@ -42,10 +50,11 @@
       (and (vector? addr) (seq addr) (every? constant-address? addr))))
 
 (defn- outside-gens
-  "The symbols of form outside the gen forms in it (a nested gen's trace is
-   its own)."
+  "The symbols of form outside the gen forms and the quoted data in it (a
+   nested gen's trace is its own, and quoted data is not code)."
   [form]
-  (filter symbol? (tree-seq #(and (coll? %) (not (and (seq? %) ('#{gen gen.dynamic/gen} (first %))))) seq form)))
+  (filter symbol? (tree-seq #(and (coll? %) (not (quoted? %)) (not (and (seq? %) ('#{gen gen.dynamic/gen} (first %)))))
+                            seq form)))
 
 (defn- pure!
   "form, checked to make none of the body's own calls."
@@ -62,6 +71,22 @@
                          (take-nth 2 (destructure [binding nil]))))))
 
 (defn- inputs [form known] (vec (distinct (filter known (symbols form)))))
+
+(defn- macro-call?
+  "Is form a call of a macro (not of a local, nor one of the body's own
+   calls, nor gen, whose body is its own)?"
+  [{:keys [env locals]} form]
+  (and (seq? form) (symbol? (first form)) (not (effects (first form)))
+       (not (contains? env (first form))) (not (contains? locals (first form)))
+       (let [v (resolve env (first form))]
+         (boolean (and (var? v) (:macro (meta v)) (not= 'gen.dynamic/gen (symbol v)))))))
+
+(defn- expanded
+  "form, its head macroexpanded until it is no macro's: what a binding is,
+   as the dynamic gen expands its body, so that a user macro expanding to
+   (trace …) or (splice …) is that call."
+  [env form]
+  (if (macro-call? env form) (recur env (macroexpand-1 form)) form))
 
 (defn- simple-arg? [form] (or (symbol? form) (not (coll? form))))
 
@@ -95,28 +120,32 @@
       v (assoc :call v :args (vec (rest form)) :arg-specs (mapv #(arg-spec % known) (rest form))))))
 
 (defn- node
-  "The node of one binding, given the names bound so far."
+  "The node of one binding, given the names bound so far: a call when the
+   binding, its head macroexpanded, is one, else a computation as written
+   (its expansion checked too)."
   [env binding init known]
   (let [names (bound-names binding)
-        head (when (seq? init) (first init))]
+        call (expanded env init)
+        head (when (seq? call) (first call))]
     (merge {:binding binding :names names :form init}
            (cond
              (= 'trace head)
-             (let [[_ addr dist & more] init]
-               (when (seq more) (not-static "trace takes an address and a distribution" init))
-               (when-not (constant-address? addr) (not-static "trace's address must be a constant" init))
+             (let [[_ addr dist & more] call]
+               (when (seq more) (not-static "trace takes an address and a distribution" call))
+               (when-not (constant-address? addr) (not-static "trace's address must be a constant" call))
                {:kind :trace :addr addr :expr (pure! dist "a distribution") :inputs (inputs dist known)})
 
              (= 'splice head)
-             (let [[_ addr gf & args] init]
+             (let [[_ addr gf & args] call]
                (when-not (constant-address? addr)
-                 (not-static "splice needs a constant address (a splice without one is dynamic)" init))
+                 (not-static "splice needs a constant address (a splice without one is dynamic)" call))
                (let [expr `[~gf [~@args]]]
                  {:kind :splice :addr addr :expr (pure! expr "a splice's arguments") :inputs (inputs expr known)
                   :arg-specs (mapv #(arg-spec % known) args)}))
 
              :else
-             (compute-node env init known)))))
+             (do (pure! call "a binding")
+                 (compute-node env init known))))))
 
 (defn arg-names
   "[[names…] per argument], the rest parameter's names last, and whether
@@ -160,8 +189,9 @@
           args (arg-names params)
           known (set (concat (apply concat (:fixed args)) (:rest args)))
           ;; a call in return position is a last node, its value returned
-          [ret pairs] (let [r (first ret)]
-                        (if (and (seq? r) ('#{trace splice} (first r)))
+          [ret pairs] (let [r (first ret)
+                            call (expanded env r)]
+                        (if (and (seq? call) ('#{trace splice} (first call)))
                           (let [v (gensym "ret")] [v (concat (partition 2 bindings) [[v r]])])
                           [r (partition 2 bindings)]))
           [nodes _] (reduce (fn [[nodes known] [binding init]]
@@ -172,7 +202,8 @@
           names (into known (mapcat :names nodes))]
       {:args args
        :nodes nodes
-       :ret (compute-node env (pure! ret "the return expression") names)}))))
+       :ret (do (pure! (expanded env ret) "the return expression")
+                (compute-node env ret names))}))))
 
 (defn ir
   "gf's graph as data (see the namespace doc), or nil when gf is not static."
