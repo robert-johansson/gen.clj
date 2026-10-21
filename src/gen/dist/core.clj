@@ -221,6 +221,16 @@
   [p]
   (if (or (array/array? p) (nil? p)) p (array/with-backend (array/backend-named :jvm) (array/array p))))
 
+(defn ^:no-doc ->checkable-param
+  "->checkable for a defdist parameter: data that is not array data is an
+   error naming the distribution and the parameter, at construction."
+  [dist-name param-name p]
+  (try (->checkable p)
+       (catch clojure.lang.ExceptionInfo e
+         (throw (ex-info (str dist-name ": " param-name " must be an array or array data (numbers and booleans): "
+                              (ex-message e))
+                         {:distribution dist-name :param param-name} e)))))
+
 (defmacro defdist
   "Define a distribution: a constructor and its methods.
 
@@ -253,15 +263,15 @@
         d (gensym "d")
         bind-params (vec (mapcat (fn [p] [p `(get (:params ~d) ~(keyword p))]) params))
         ;; a ^:host parameter that is host data is kept as given
-        as-given (fn [p f] (if (:host (meta p)) `(if (host-data? ~p) ~p (~f ~p)) `(~f ~p)))]
+        as-given (fn [p form] (if (:host (meta p)) `(if (host-data? ~p) ~p ~form) form))]
     `(do
        ;; marked, so a pushforward's body can find its one random draw (gen.dist.dsl)
        (defn ~(vary-meta dist-name assoc ::constructor true) ~@(when doc [doc]) ~params
          ;; validated as given (host data on the host), then made arrays
-         (let [~@(mapcat (fn [p] [p (as-given p `->checkable)]) params)]
+         (let [~@(mapcat (fn [p] [p (as-given p `(->checkable-param ~(name dist-name) ~(name p) ~p))]) params)]
            ~@(map (fn [p] `(check-param-not-nan ~(name dist-name) ~(name p) ~p)) params)
            ~@(get clauses 'validate))
-         (let [~@(mapcat (fn [p] [p (as-given p `->array)]) params)]
+         (let [~@(mapcat (fn [p] [p (as-given p `(->array ~p))]) params)]
            (->Distribution ~type-kw ~(into {} (map (fn [p] [(keyword p) p])) params))))
        ~(when-let [[[k s] & sample-body] (get clauses 'sample)]
           `(defmethod -sample ~type-kw [~d ~k ~s] (let ~bind-params ~@sample-body)))

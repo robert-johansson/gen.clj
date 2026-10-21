@@ -114,8 +114,9 @@
   (testing "a batch of labels is an error, as no array holds them"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not numbers, so it draws one at a time"
                           (dc/sample (labeled-cat [:a :b] [0.5 0.5]) (rng/key 1) [4]))))
-  (testing "a family's parameters that are not ^:host must be arrays or their data"
-    (is (thrown? clojure.lang.ExceptionInfo (d/categorical [:a :b])))))
+  (testing "a family's parameters that are not ^:host must be arrays or their data, at construction"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"categorical: probs must be an array or array data"
+                          (d/categorical [:a :b])))))
 
 (def ^:private labeled-model
   (gen [] (let [k (trace :k (labeled-cat [:x :y :z] [0.2 0.5 0.3]))]

@@ -60,6 +60,11 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"std must be positive" (d/normal 0 [1.0 -1.0])))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"in \[0, 1\]" (d/bernoulli [0.5 1.5])))
     (is (some? (d/normal [0 0] [1.0 2.0]))))
+  (testing "a family's parameters are arrays or their data: keywords are an error at construction, naming both"
+    (doseq [[label f] [["labels" #(d/normal [:a :b] 1.0)] ["a keyword" #(d/normal :a 1.0)] ["a map" #(d/categorical {0 0.5 1 0.5})]]]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"^(normal: mu|categorical: probs) must be an array or array data" (f))
+          label))
+    (is (= {:distribution "normal" :param "mu"} (ex-data (try (d/normal [:a :b] 1.0) (catch clojure.lang.ExceptionInfo e e))))))
   (testing "counts and integer bounds must be integers"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"n must be an integer" (d/binom 2.5 0.3)))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"n must be an integer" (d/binom -1 0.3)))
