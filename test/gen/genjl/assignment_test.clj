@@ -7,8 +7,10 @@
    the vector [:d :a], c[addr] is (cm/get-choice c addr), a vector-valued
    leaf is an array (a Clojure vector is a product value), and Map's index
    addresses are 0-based (D2). genjl/shallow checks Gen.jl's pairs of
-   shallow counts in one assertion.
-   The assertions that wait for loud lookups (D4) are at the end."
+   shallow counts in one assertion. Lookups are loud where Gen.jl throws
+   KeyError (D4), with the error's :reason checked, but get_submap at a
+   value is that value, a choice map here: D4's one difference
+   (DESIGN.md §9)."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
             [gen.choicemap :as cm]
@@ -109,20 +111,32 @@
     (is (= choices1 (cm/merge choices1)))
     (is (= (cm/choicemap :a 1 :b 2 :c 3) (cm/merge choices1 choices2 choices3)))))
 
-(defn- empty-where-absent
-  "assignment.jl's assertions on an empty choice map: get_submap at an
-   address or a path that holds nothing is empty."
-  [choices]
-  (is (cm/empty? (cm/get-submap choices :x)))
-  (is (cm/empty? (cm/get-submap choices [:x :y]))))
+(defn- assignment-errors
+  "assignment.jl's errors on choice maps that make builds from address-value
+   pairs: get_submap through a value and get_value where no value is are
+   loud (Gen.jl's KeyError), get_submap where nothing is is empty, and
+   get_submap at a value is that value (D4's difference)."
+  [make]
+  (testing "get_submap at a value: the value, where Gen.jl throws KeyError"
+    (is (= (cm/->Value 1) (cm/get-submap (make :x 1) :x))))
+  (testing "get_submap through a value"
+    (is (= :through-value (:reason (ts/thrown-data (cm/get-submap (make :x 1) [:x :y]))))))
+  (testing "get_submap where nothing is"
+    (is (cm/empty? (cm/get-submap (make) :x)))
+    (is (cm/empty? (cm/get-submap (make) [:x :y]))))
+  (testing "get_value at a submap"
+    (is (= :node (:reason (ts/thrown-data (cm/get-choice (make [:x :y] 1) :x))))))
+  (testing "get_value where nothing is"
+    (is (= :absent (:reason (ts/thrown-data (cm/get-choice (make) :x)))))
+    (is (= :absent (:reason (ts/thrown-data (cm/get-choice (make) [:x :y])))))))
 
-;; assignment.jl:152
+;; assignment.jl:152. Gen.jl's static_get_submap and static_get_value are n/a
 (deftest static-assignment-errors
-  (empty-where-absent (cm/choicemap)))
+  (assignment-errors cm/choicemap))
 
-;; assignment.jl:221
+;; assignment.jl:221, the choice maps built by set_value!
 (deftest dynamic-assignment-errors
-  (empty-where-absent cm/EMPTY))
+  (assignment-errors (fn [& kvs] (reduce (fn [c [a v]] (cm/set-choice c a v)) cm/EMPTY (partition 2 kvs)))))
 
 ;; assignment.jl:259
 (deftest dynamic-assignment-overwrite
@@ -131,15 +145,20 @@
   (testing "a value with a submap"
     (let [choices (cm/set-choice cm/EMPTY :x 1)]
       (is (genjl/has-value? choices :x))
+      (is (not (cm/has-submap? choices :x)))
       (let [choices (cm/set-submap choices :x (cm/set-choice cm/EMPTY :y 2))]
         (is (not (genjl/has-value? choices :x)))
         (is (not (cm/empty? (cm/get-submap choices :x))))
         (is (cm/has-submap? choices :x)))))
   (testing "a submap with a value"
-    (is (= 2 (choice (-> cm/EMPTY (cm/set-choice [:x :y] 1) (cm/set-choice :x 2)) :x))))
+    (let [choices (-> cm/EMPTY (cm/set-choice [:x :y] 1) (cm/set-choice :x 2))]
+      (is (not (cm/has-submap? choices :x)))
+      (is (= (cm/->Value 2) (cm/get-submap choices :x)) "the value, where Gen.jl throws KeyError (D4)")
+      (is (= 2 (choice choices :x)))))
   (testing "a submap with a submap"
     (let [choices (cm/set-choice cm/EMPTY [:x :y] 1)]
       (is (cm/has-submap? choices :x))
+      (is (not (cm/has-submap? choices [:x :y])))
       (let [choices (cm/set-submap choices :x (cm/set-choice cm/EMPTY :z 2))]
         (is (not (cm/empty? (cm/get-submap choices :x))))
         (is (not (genjl/has-value? choices [:x :y])))
@@ -221,12 +240,6 @@
     (testing "no two of d's keys hash alike"
       (is (apply distinct? (map hash (keys d)))))))
 
-;; Pending D4, loud lookups (genclj-ocwu): Gen.jl's KeyError, where
-;; get-submap returns the value or EMPTY, get-choice nil, and has-submap?
-;; is true at a value.
-;;   assignment.jl:158, 170, 228, 234, 285  get_submap at a value, and through one
-;;   assignment.jl:195, 209, 212, 247, 253, 256  get_value at a submap, or where nothing is
-;;   assignment.jl:271, 283, 292  has_submap is false at a value
 ;; Not applicable: static_get_submap and static_get_value
 ;; (assignment.jl:164, 176, 187, 203, 218), and the conversion to a
 ;; StaticChoiceMap (assignment.jl:404).

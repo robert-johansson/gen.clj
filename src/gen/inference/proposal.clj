@@ -52,7 +52,7 @@
                     (assoc (:transitions q) :simulate
                            (fn [state p dist key]
                              (vswap! visited conj p)
-                             (if (cm/has-value? (cm/get-submap choices p))
+                             (if (cm/has-value? choices p)
                                ;; the trace's value, as a constraint would be taken
                                (generate (assoc state :constraints choices) p dist key)
                                (do (vreset! missing? true) (simulate state p dist key))))))

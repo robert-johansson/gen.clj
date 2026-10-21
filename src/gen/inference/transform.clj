@@ -101,7 +101,7 @@
   (let [st (state! :read)
         s @st
         p (path addr)
-        sub (cm/get-submap (get-in s [:inputs space]) p)]
+        sub (cm/get-submap (get-in s [:inputs space]) p cm/EMPTY)]
     (when-not (cm/has-value? sub)
       (throw (ex-info (str "read: no choice at " p " of " (name space)) {:space space :path p})))
     (if-let [tag' (get-in s [:read-tags [space p]])]
@@ -137,7 +137,7 @@
   (let [st (state! :copy)
         fp (path from-addr)
         tp (path to-addr)
-        sub (cm/get-submap (get-in @st [:inputs from-space]) fp)]
+        sub (cm/get-submap (get-in @st [:inputs from-space]) fp cm/EMPTY)]
     (when (cm/empty? sub)
       (throw (ex-info (str "copy: nothing at " fp " of " (name from-space)) {:space from-space :path fp})))
     (when (contains? (:written-set @st) [to-space tp])
@@ -340,9 +340,9 @@
    constraints nor the old trace's choices that the update kept (not in
    discard) account for: choices the update sampled."
   [old-choices constraints discard new-choices]
-  (remove (fn [p] (or (cm/has-value? (cm/get-submap constraints p))
-                      (and (cm/has-value? (cm/get-submap old-choices p))
-                           (not (cm/has-value? (cm/get-submap discard p))))))
+  (remove (fn [p] (or (cm/has-value? constraints p)
+                      (and (cm/has-value? old-choices p)
+                           (not (cm/has-value? discard p)))))
           (cm/addresses new-choices)))
 
 ;; ---------------------------------------------------------------------------
@@ -460,7 +460,7 @@
           s (when t (execute t trace u nil))
           {t' :trace w :weight discard :discard}
           (gfi/update trace args argdiffs (cm/merge (if t (get-in s [:outputs :model-out]) u) new-observations) k-update)
-          ldj (if t (log-abs-det t trace u s (fn [p] (not (cm/has-value? (cm/get-submap discard p))))) 0.0)
+          ldj (if t (log-abs-det t trace u s (fn [p] (not (cm/has-value? discard p)))) 0.0)
           u' (if t (get-in s [:outputs :aux-out]) discard)
           bwd (cond q-backward (:weight (gfi/assess q-backward (into [t'] q-backward-args) u' (gfi/backward-key k-update)))
                     (cm/empty? u') 0.0
@@ -500,7 +500,7 @@
                (throw (ex-info (str "involution: the updated trace has new choices the transform did not write: "
                                     (vec extra))
                                {:addresses (vec extra)})))
-           retained? (fn [p] (not (cm/has-value? (cm/get-submap discard p))))
+           retained? (fn [p] (not (cm/has-value? discard p)))
            ldj (log-abs-det t trace fwd-choices s retained?)
            bwd (get-in s [:outputs :aux-out])]
        (when check?

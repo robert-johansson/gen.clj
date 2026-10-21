@@ -192,7 +192,7 @@
   (doseq [p free]
     (when-not (contains? @seen p)
       (throw (ex-info (str "with-exact-proposal: the choice at " p
-                           (if (some? (cm/get-choice choices p))
+                           (if (cm/has-value? choices p)
                              " is made by a generative function the model calls at an address; wrap that one"
                              " was not visited"))
                       {:path p})))))

@@ -298,8 +298,8 @@
     (is (approx? (gfi/project tr (sel/select [:z :x] :y)) (+ (logpdf d/normal x 0 1) (logpdf d/normal y 0 2))))))
 
 (deftest getindex-trace
-  ;; dynamic_dsl.jl:487: choices and calls' return values by address, and
-  ;; trace[] (pending: absent addresses)
+  ;; dynamic_dsl.jl:487: choices and calls' return values by address,
+  ;; trace[], and loud lookups where nothing is (D4)
   (let [bar (gen [r] (trace :a (d/normal 0 1)) r)
         foo (gen []
               (splice :x bar 1)
@@ -317,7 +317,10 @@
       (is (= 1 (tr :x)))
       (is (= 2 (tr [:y :z]))))
     (testing "return value"
-      (is (= 7 (:retval tr))))))
+      (is (= 7 (:retval tr))))
+    (testing "an address that does not exist"
+      (doseq [addr [:absent [:absent :x]]]
+        (is (= :absent (:reason (ts/thrown-data (tr addr)))) (str addr))))))
 
 ;; Not ported (n/a, genjl-test-suite.md §2):
 ;; - dynamic_dsl.jl:20 and :30, bar() and oneliner(5.0): default arguments
@@ -328,6 +331,3 @@
 ;; - dynamic_dsl.jl:412 and :427, get_param_grad after apply_update!: the
 ;;   accumulator's reset (D7).
 ;; - dynamic_dsl.jl:535, @doc of a @gen function: Julia's docstrings.
-;;
-;; Pending: dynamic_dsl.jl:529, trace[:absent] and trace[:absent => :x]
-;; throw: loud lookups (D4, genclj-ocwu).

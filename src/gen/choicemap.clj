@@ -7,7 +7,14 @@
    An address is any value except a vector; a vector is a path of addresses
    ([:y 3] is :y, then 3), playing the role of Gen.jl's :y => 3. Leaf order is
    canonical (addresses sorted), so to-array and from-array agree for any two
-   choice maps with the same addresses."
+   choice maps with the same addresses.
+
+   Lookups are loud where Gen.jl's throw KeyError: get-choice where no value
+   is, get-value of a node, get-submap on a path through a value. Each takes
+   a not-found value to give there instead, as nth does:
+   (get-choice c :x nil). The questions has-value? and has-submap? never
+   throw. Clojure's get on a choice map reads the record's fields, not
+   addresses."
   (:refer-clojure :exclude [empty? merge to-array])
   (:require [gen.array :as array]))
 
@@ -78,16 +85,6 @@
 ;; Access
 ;; ---------------------------------------------------------------------------
 
-(defn has-value?
-  "Does this choice map hold a leaf value?"
-  [cm]
-  (and (choicemap? cm) (-has-value? cm)))
-
-(defn get-value
-  "The leaf value of a Value choice map (nil for a node or nil)."
-  [cm]
-  (when (has-value? cm) (-get-value cm)))
-
 (defn path
   "The path of an address or a path: [addr] for an address, a vector
    itself. A vector inside a path is an error, since a vector is a path and
@@ -107,17 +104,14 @@
     (throw (ex-info (str f " takes a single address, not the path " (pr-str addr)) {:addr addr})))
   addr)
 
-(defn get-submap
-  "The choice map at an address or path (EMPTY when absent)."
-  [cm addr]
-  (reduce (fn [cm a] (or (when (choicemap? cm) (-get-submap cm a)) (reduced EMPTY)))
-          cm
-          (path addr)))
+(declare get-submap)
 
-(defn get-choice
-  "The value at an address or path, or nil when absent or a node."
-  [cm addr]
-  (get-value (get-submap cm addr)))
+(defn has-value?
+  "Does this choice map hold a leaf value, or hold one at the address or
+   path? A question, which never throws: false where nothing is, at a node,
+   and on a path through a value."
+  ([cm] (and (choicemap? cm) (-has-value? cm)))
+  ([cm addr] (has-value? (get-submap cm addr nil))))
 
 (defn empty?
   "Does the choice map hold no values?"
@@ -126,10 +120,68 @@
       (and (not (has-value? cm))
            (every? (fn [[_ sub]] (empty? sub)) (-submaps cm)))))
 
+(defn- walk
+  "[the choice map at path p of cm (EMPTY when nothing is there), nil], or
+   [nil the prefix of p that holds a value] when p goes on through one."
+  [cm p]
+  (loop [cm cm i 0]
+    (cond (== i (count p)) [cm nil]
+          (has-value? cm) [nil (subvec p 0 i)]
+          :else (if-let [sub (when (choicemap? cm) (-get-submap cm (nth p i)))]
+                  (recur sub (inc i))
+                  [EMPTY nil]))))
+
+(defn ^:no-doc lookup-error
+  "The error of a loud lookup that found nothing it could return at path p
+   of cm (what names the lookup and what it missed): an ex-info whose :reason
+   is what cm holds at p (:absent, :value, :node or :through-value), with
+   :path p and :at, the prefix of p that holds a value when p goes through
+   one."
+  [what cm p]
+  (let [[sub at] (walk cm p)
+        reason (cond at :through-value (has-value? sub) :value (empty? sub) :absent :else :node)]
+    (ex-info (str what " at " (pr-str p) ": " (case reason
+                                                 :absent "nothing is there"
+                                                 :value "a value is there"
+                                                 :node "nested choices are there"
+                                                 :through-value (str "the path goes through the value at " (pr-str at))))
+             {:reason reason :path p :at at})))
+
+(def ^:private none (Object.))
+
+(defn get-submap
+  "The choice map at an address or path: a node, a value (a choice map
+   too), or EMPTY when nothing is there. A path through a value is loud, as
+   Gen.jl's KeyError; with not-found, it gives not-found there."
+  ([cm addr]
+   (let [sub (get-submap cm addr none)]
+     (if (identical? sub none) (throw (lookup-error "get-submap: no choice map" cm (path addr))) sub)))
+  ([cm addr not-found]
+   (let [[sub at] (walk cm (path addr))] (if at not-found sub))))
+
+(defn get-choice
+  "The value at an address or path. Loud where there is none (nothing,
+   nested choices, a path through a value), as Gen.jl's KeyError; with
+   not-found, it gives not-found there, as nth does."
+  ([cm addr]
+   (let [v (get-choice cm addr none)]
+     (if (identical? v none) (throw (lookup-error "get-choice: no value" cm (path addr))) v)))
+  ([cm addr not-found]
+   (let [[sub] (walk cm (path addr))] (if (has-value? sub) (-get-value sub) not-found))))
+
+(defn get-value
+  "The value of a value choice map (a leaf). Loud for a node or nothing;
+   with not-found, it gives not-found there."
+  ([cm] (if (has-value? cm) (-get-value cm) (throw (lookup-error "get-value: no value" cm []))))
+  ([cm not-found] (if (has-value? cm) (-get-value cm) not-found)))
+
 (defn has-submap?
-  "Is there a non-empty choice map at the address or path?"
+  "Are there choices under the address or path: a node that holds values
+   (Gen.jl's has_submap, false at a value)? A question, which never throws:
+   false on a path through a value."
   [cm addr]
-  (not (empty? (get-submap cm addr))))
+  (let [sub (get-submap cm addr nil)]
+    (and (not (has-value? sub)) (not (empty? sub)))))
 
 (def ^:private address-order
   "A total order on addresses: comparable values of one class by value,

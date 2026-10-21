@@ -117,9 +117,11 @@
     (is (= (ts/host (peek (:retval (trace/subtrace tr :path)))) (ts/host (tr [:path 2]))) "an Unfold step's")
     (is (= (ts/host (:retval tr)) (ts/host (tr []))) "the empty path: the trace's own")
     (is (= tr (trace/subtrace tr [])))
-    (is (nil? (trace/subtrace tr :mu)) "a choice is not a call")
-    (is (nil? (trace/subtrace tr [:xs 3])) "nor an element past the end")
-    (is (nil? (tr :absent)))
+    (is (= :value (:reason (ts/thrown-data (trace/subtrace tr :mu)))) "a choice is not a call")
+    (is (= :absent (:reason (ts/thrown-data (trace/subtrace tr [:xs 3])))) "nor an element past the end")
+    (is (nil? (trace/subtrace tr :mu nil)) "unless given a not-found value")
+    (is (= :absent (:reason (ts/thrown-data (tr :absent)))))
+    (is (nil? (tr :absent nil)))
     (is (thrown? clojure.lang.ExceptionInfo (trace/subtrace tr [[:xs] 1])) "a vector inside a path")
     (is (thrown? clojure.lang.ExceptionInfo (tr [:xs [1]]))))
   (testing "a path continues past an element"
@@ -134,7 +136,7 @@
     (let [tr (gfi/simulate tree [0] (rng/key 7))]
       (is (= (ts/host (:retval tr)) (ts/host (tr [0 :aggregation]))) "the root's aggregation")
       (is (= grow (:gen-fn (trace/subtrace tr [0 :production]))))
-      (is (nil? (trace/subtrace tr [0])) "a node is two calls, not one")))
+      (is (= :node (:reason (ts/thrown-data (trace/subtrace tr [0])))) "a node is two calls, not one")))
   (testing "call-at's at its address"
     (let [tr (gfi/simulate (comb/call-at element) [1.0 :here] (rng/key 8))]
       (is (= (ts/host (:retval tr)) (ts/host (tr :here)))))))
