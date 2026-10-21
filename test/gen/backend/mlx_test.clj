@@ -85,6 +85,34 @@
       (is (every? #(> (next-threshold %) %) [10000 160000 299999 350000 1000000])
           "always above what is live"))))
 
+(defn- buffer-limit
+  "The GPU's buffer limit (its device info's resource_limit), or nil where
+   it reports none or there is no GPU."
+  []
+  (let [dev (gen.mlx.Mlx/mlx_device_new_type 1 0)]
+    (try
+      (let [info (gen.mlx.Mlx/mlx_device_info_get dev)]
+        (try
+          (when (gen.mlx.Mlx/mlx_device_info_has_key info "resource_limit")
+            (gen.mlx.Mlx/mlx_device_info_get_size info "resource_limit"))
+          (finally (gen.mlx.Mlx/mlx_device_info_free info))))
+      (catch gen.mlx.MlxException _ nil)
+      (finally (gen.mlx.Mlx/mlx_device_free dev)))))
+
+(deftest the-array-cap-is-metals-buffer-limit
+  ;; the cap was read in MlxRuntime's initializer, which the backend's first
+  ;; mlx-c call reaches from inside that call's half-initialized binding
+  ;; class: with the MLX backend loaded first (-Dgen.backend=mlx) the cap
+  ;; was no limit, and the full Metal battery met MLX's buffer limit
+  ;; (2026-10-21)
+  (when-mlx
+    (mlx)
+    (if-let [limit (buffer-limit)]
+      (is (= (max (Long/getLong "gen.mlx.gc-arrays" 100000) (long (* 0.6 limit)))
+             (gen.mlx.MlxRuntime/arrayCap))
+          "60% of the buffer limit")
+      (is (< (quot Long/MAX_VALUE 8) (gen.mlx.MlxRuntime/arrayCap)) "no limit, no cap"))))
+
 (deftest large-argument-blocks-reuse-scratch
   ;; an argument block over half the scratch buffer (more than 64 handles,
   ;; as eval! of a large trace passes) was allocated afresh on every call
