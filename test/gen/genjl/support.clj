@@ -4,12 +4,13 @@
    close? and tol. A helper only one port needs stays in that port.
 
    - approx?: Julia's isapprox, as Gen.jl's tests use it.
-   - logpdf: Gen.jl's logpdf(dist, x, params...).
+   - logpdf: Gen.jl's logpdf(dist, x, params...); log-density, the same
+     on the backend, to differentiate.
    - has-value?: Gen.jl's has_value(c, addr).
    - shallow: the counts of Gen.jl's get_values_shallow and
      get_submaps_shallow."
   (:require [gen.choicemap :as cm]
-            [gen.dist.core :as dc]
+            [gen.gfi :as gfi]
             [gen.test-support :as ts]))
 
 (defn- host-shape
@@ -45,12 +46,21 @@
               (and (every? #(Double/isFinite %) (concat xs ys))
                    (<= (norm (map - xs ys)) (max atol (* rtol (max (norm xs) (norm ys)))))))))))
 
+(defn log-density
+  "logpdf's value as the backend under test holds it, not read on the
+   host, so that it can be differentiated (gen.genjl.finite-diff's
+   logpdf-grad)."
+  [dist x & params]
+  (:weight (gfi/assess (apply dist params) [] (cm/->Value x))))
+
 (defn logpdf
   "Gen.jl's logpdf(dist, x, params...): the log density (or mass) of x
-   under (apply dist params), a host double.
+   under (apply dist params), a host double, as assess weighs it: for an
+   array value, the sum of its elements', and an error for a value whose
+   shape is not the distribution's (Julia's DimensionMismatch).
    (logpdf d/normal 0.5 0.0 1.0)"
   [dist x & params]
-  (ts/number (dc/log-prob (apply dist params) x)))
+  (ts/number (apply log-density dist x params)))
 
 (defn has-value?
   "Gen.jl's has_value(c, addr): is there a value at the address or path?"
