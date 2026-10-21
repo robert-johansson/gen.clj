@@ -140,17 +140,20 @@
 
 (defn- param-values
   "{name value} of gf's parameters in the store in effect: its own store
-   over the calling model's, as a dynamic function's (param name) reads."
+   over the calling model's, as a dynamic function's (param name) reads
+   ({} at once for a function without parameters)."
   [{:keys [param-names params]}]
-  (let [store (if dyn/*params* (merge dyn/*params* params) params)]
-    (into {} (map (fn [name]
-                    (let [v (get store name ::missing)]
-                      (when (identical? ::missing v)
-                        (throw (ex-info (str "The parameter " (pr-str name) " has no value: call the function from a"
-                                             " model whose store has it, or give it one with gen.custom/with-params")
-                                        {:param name :available (vec (keys store))})))
-                      [name v])))
-          param-names)))
+  (if (empty? param-names)
+    {}
+    (let [store (if dyn/*params* (merge dyn/*params* params) params)]
+      (into {} (map (fn [name]
+                      (let [v (get store name ::missing)]
+                        (when (identical? ::missing v)
+                          (throw (ex-info (str "The parameter " (pr-str name) " has no value: call the function from a"
+                                               " model whose store has it, or give it one with gen.custom/with-params")
+                                          {:param name :available (vec (keys store))})))
+                        [name v])))
+            param-names))))
 
 (defn- run [gf args]
   (let [args (vec args)
