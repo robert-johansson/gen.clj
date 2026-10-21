@@ -4,6 +4,8 @@
 
      (completion lm)                       → a generative function of [prompt max-tokens]
      (completion lm {:end-tokens tokens})  → one that ends on these tokens (default: the LM's :eog)
+     (completion lm {:potential p})        → one under a potential: each token's distribution
+                                             the LM's times p's next-token weights, renormalized
      (dist row)                            → the distribution of one token, given its log-probabilities
      (forced tokens)                       → constraints: tokens at the positions 0, 1, …
      (forced at tokens)                    → at the positions at, at + 1, …
@@ -53,7 +55,17 @@
    raise the batched-branch error, and a batched run falls back to one
    particle at a time: a read for each particle's token, where token SMC
    (gen.llm.smc) reads a step's particles in one advance. Tokens are
-   discrete: choice-gradients over them is a loud error (gen.gradients)."
+   discrete: choice-gradients over them is a loud error (gen.gradients).
+
+   Under a potential (gen.llm.potential; a grammar, gen.llm.grammar), the
+   same operations with each token's distribution reweighed at its site
+   (gen.llm.constrained): a completion masked by a grammar and
+   renormalized, token by token, as GenMLX's grammar-masked decoder. Its
+   GFI weights are that local distribution's, q, not the LM conditioned on
+   the potential: gen.llm.constrained/conditional-weight is a trace's
+   importance weight for that. Its scores are its sites' log q, from the
+   LM's rows at their contexts (one read for each, as the normalizer needs
+   every token's)."
   (:require [gen.array :as array]
             [gen.array.batch :as batch]
             [gen.choicemap :as cm]
@@ -61,6 +73,7 @@
             [gen.dist.core :as dc]
             [gen.gfi :as gfi]
             [gen.llm.branching :as br]
+            [gen.llm.constrained :as constrained]
             [gen.llm.lm :as lm]
             [gen.random :as rng]
             [gen.selection :as sel]
@@ -216,11 +229,16 @@
         (let [run (conj run t)]
           (if (contains? (:end-tokens gf) t) run (recur (inc j) run)))))))
 
-(defn- append [state tokens scores]
-  (-> state
-      (update :ctx into tokens)
-      (update :tokens into tokens)
-      (update :scores into scores)))
+(defn- append
+  "state with tokens and their scores appended; :dead? once a score is
+   -Inf (a token of weight 0 under a potential: no sequence it begins has
+   weight)."
+  [state tokens scores]
+  (cond-> (-> state
+              (update :ctx into tokens)
+              (update :tokens into tokens)
+              (update :scores into scores))
+    (some #(== Double/NEGATIVE_INFINITY (double %)) scores) (assoc :dead? true)))
 
 (defn- agreeing
   "How many of run's first tokens are the revised trace's at their
@@ -232,11 +250,29 @@
     (loop [j 0]
       (if (and (< j n) (= (run j) (old-tokens (+ i j)))) (recur (inc j)) j))))
 
+(defn- run-scores
+  "The scores of run, known tokens after state: the LM's, in one call (or,
+   under a potential, its sites')."
+  [gf state run]
+  (if (:potential gf)
+    (constrained/run-scores gf state run)
+    (lm/score (:lm gf) (:ctx state) run)))
+
+(defn- draw-next
+  "The next token after state, drawn with key: [t score], from the LM's
+   row (its score nil, for scored to take), or under a potential from its
+   site's distribution, scored by it."
+  [gf state key]
+  (if (:potential gf)
+    (constrained/draw-next gf state #(draw % key))
+    [(draw (lm/next-logprobs (:lm gf) (:ctx state)) key) nil]))
+
 (defn- scored
   "state with run appended: the tokens that are still the revised trace's
    keep its scores (score once, whatever the LM has evicted since); the
-   rest are scored by the LM, in one call."
-  [m state run]
+   rest are scored by the LM, in one call (fresh's scores, when given, are
+   a fresh token's)."
+  [gf state run fresh]
   (let [j (agreeing state run)
         i (count (:tokens state))
         state (cond-> state
@@ -244,7 +280,7 @@
     (if (< j (count run))
       (let [unscored (subvec run j)]
         (-> state
-            (append unscored (lm/score m (:ctx state) unscored))
+            (append unscored (or fresh (run-scores gf state unscored)))
             (assoc :old nil)))
       state)))
 
@@ -254,19 +290,18 @@
    the LM's row with their site keys, (fold-in key i). Each token is scored
    by the LM (the score it keeps, which is the row's entry unless it read
    the token before), or keeps the revised trace's while the run is that
-   trace's."
+   trace's. Under a potential, by the sites' distributions."
   [gf state known max-tokens key]
-  (let [m (:lm gf)]
-    (loop [state state]
-      (if (end? gf state max-tokens)
-        state
-        (let [i (count (:tokens state))
-              run (run-of gf known i max-tokens)]
-          (recur
-           (if (seq run)
-             (scored m state run)
-             (let [t (draw (lm/next-logprobs m (:ctx state)) (rng/fold-in key i))]
-               (update (scored m state [t]) :fresh conj i)))))))))
+  (loop [state state]
+    (if (end? gf state max-tokens)
+      state
+      (let [i (count (:tokens state))
+            run (run-of gf known i max-tokens)]
+        (recur
+         (if (seq run)
+           (scored gf state run nil)
+           (let [[t score] (draw-next gf state (rng/fold-in key i))]
+             (update (scored gf state [t] score) :fresh conj i))))))))
 
 (defn- start
   "The state before the first token, after prompt; revising trace tr, if
@@ -385,7 +420,7 @@
       (throw (gfi/unvisited :assess (mapv vector (range (inc (long i)) n)) (str "the end token at " i " ends the completion"))))
     (when-not (or (= n max-tokens) (and (pos? n) (contains? end-tokens (peek tokens))))
       (throw (missing n (str "the tokens end before an end token or max-tokens, " max-tokens))))
-    {:weight (if (zero? n) 0.0 (sum (lm/score (:lm gf) prompt tokens)))
+    {:weight (if (zero? n) 0.0 (sum (run-scores gf (start prompt) tokens)))
      :retval tokens}))
 
 (defn- retdiff
@@ -445,7 +480,7 @@
 (defn- project* [tr selection]
   (sum (keep-indexed (fn [i s] (when (sel/selected? selection i) s)) (::scores tr))))
 
-(gfi/defgf Completion [lm end-tokens n-vocab limit]
+(gfi/defgf Completion [lm end-tokens n-vocab limit potential]
   gfi/IGenerativeFunction
   (-simulate [gf args key] (simulate* gf args key))
   (-generate [gf args constraints key] (generate* gf args constraints key))
@@ -458,7 +493,7 @@
   (-project [_ tr selection] (project* tr selection)))
 
 (defmethod print-method Completion [gf ^java.io.Writer w]
-  (.write w (str "#gen/completion[" (:lm gf) "]")))
+  (.write w (str "#gen/completion[" (:lm gf) (when (:potential gf) (str " under " (:potential gf))) "]")))
 
 (defn completion
   "The generative function of lm's completions of a prompt: its arguments
@@ -467,9 +502,11 @@
    … (see the namespace's docstring); the prompt and max-tokens tokens
    must fit the LM's :limit. opts: :end-tokens, the tokens that end a
    completion (a set; default the LM's end-of-generation tokens, :eog; #{}
-   for completions of exactly max-tokens)."
+   for completions of exactly max-tokens); :potential, a potential over
+   the LM's vocabulary (gen.llm.potential) that reweighs each token's
+   distribution (gen.llm.constrained)."
   ([lm] (completion lm {}))
-  ([lm {:keys [end-tokens] :as opts}]
+  ([lm {:keys [end-tokens potential] :as opts}]
    (when-not (satisfies? lm/LM lm)
      (throw (ex-info (str "token/completion: a completion is over an LM (gen.llm.lm), not " (pr-str lm))
                      {:reason :invalid-lm :lm lm})))
@@ -478,4 +515,6 @@
      (when-not (and (set? end-tokens) (every? #(br/index? % n-vocab) end-tokens))
        (throw (ex-info (str "token/completion: :end-tokens is a set of tokens of the vocabulary, not " (pr-str end-tokens))
                        {:reason :invalid-end-tokens :end-tokens end-tokens})))
-     (->Completion lm (into #{} (map long) end-tokens) (long n-vocab) (:limit (lm/info lm))))))
+     (let [end-tokens (into #{} (map long) end-tokens)]
+       (->Completion lm end-tokens (long n-vocab) (:limit (lm/info lm))
+                     (some-> potential (constrained/check-potential n-vocab end-tokens)))))))
