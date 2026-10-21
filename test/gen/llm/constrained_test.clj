@@ -21,6 +21,9 @@
 
    Mutations checked: see docs/research/llm-grammar.md, Tests."
   (:require [clojure.test :refer [deftest is testing]]
+            [clojure.test.check.clojure-test :refer [defspec]]
+            [clojure.test.check.generators :as tgen]
+            [clojure.test.check.properties :as prop]
             [gen.batched :as batched]
             [gen.choicemap :as cm]
             [gen.dist :as d]
@@ -60,7 +63,10 @@
 (def ^:private word (grammar/grammar ascii "[a-z]+"))
 (def ^:private accents (grammar/grammar bytes-lm "(?:ab|é)+c?"))
 
+(def ^:private free-text (grammar/grammar ascii "[^\"]*"))
+
 (def ^:private labelled (token/completion ascii {:potential label}))
+(def ^:private quoted (token/completion ascii {:potential free-text}))
 (def ^:private words (token/completion ascii {:end-tokens #{} :potential word}))
 (def ^:private accented (token/completion bytes-lm {:potential accents}))
 
@@ -84,6 +90,7 @@
 (laws/deflaws constrained
   [[:label labelled [prompt 4] [[prompt 2] [prompt 6] [[95 41] 4]]]
    [:words words [prompt 3] [[prompt 1] [prompt 5] [[3] 3]]]
+   [:quoted quoted [prompt 3] [[prompt 1] [prompt 5]]]
    [:accented accented [bprompt 4] [[bprompt 2] [bprompt 6] [[(:bos btok) 0] 4]]]
    [:composed composed [3] [[1] [5]]]]
   100)
@@ -98,17 +105,69 @@
 (laws/deflaws constrained-noisy [[:noisy noisy [prompt 4] [[prompt 2] [prompt 6] [[95 41] 4]]]] 40)
 
 ;; ---------------------------------------------------------------------------
+;; The site's distribution
+;; ---------------------------------------------------------------------------
+
+(defn- direct
+  "log q by its definition, in double: each token's log weight less the
+   log of the sum of their exponentials."
+  [end-tokens ^floats row ^floats ws]
+  (let [n (alength row)
+        x (mapv #(+ (double (aget row %)) (double (aget ws (if (contains? end-tokens %) n %)))) (range n))
+        m (reduce max x)]
+    (when-not (Double/isInfinite m)
+      (let [z (+ m (Math/log (reduce + (map #(Math/exp (- % m)) x))))]
+        (mapv #(- % z) x)))))
+
+(def ^:private gen-site
+  "A normalized row of 50 tokens and weights: of 0 and -Inf, the disallowed
+   few or many (both of weighted's ways to its normalizer), or soft."
+  (tgen/let [logits (tgen/vector (tgen/double* {:min -6.0 :max 6.0 :NaN? false}) 50)
+             kind (tgen/elements [:constraint :soft])
+             disallowed (tgen/choose 0 50)
+             cut (tgen/vector (tgen/choose 0 50) 51)
+             soft (tgen/vector (tgen/double* {:min -5.0 :max 0.0 :NaN? false}) 51)
+             end-tokens (tgen/set (tgen/choose 0 49) {:max-elements 3})]
+    (let [z (Math/log (reduce + (map #(Math/exp %) logits)))]
+      [end-tokens
+       (float-array (map #(- % z) logits))
+       (float-array (if (= kind :soft) soft (map #(if (< % disallowed) Float/NEGATIVE_INFINITY 0.0) cut)))])))
+
+(defspec weighted-is-the-renormalized-product 300
+  (prop/for-all [[end-tokens row ws] gen-site]
+    (let [[q log-z] (constrained/weighted end-tokens row ws)
+          want (direct end-tokens row ws)]
+      (if (nil? want)
+        (and (nil? q) (= Double/NEGATIVE_INFINITY log-z))
+        (and (every? #(let [a (double (aget ^floats q %)) b (want %)]
+                        (or (= a b) (<= (Math/abs (- a b)) 1e-5)))
+                     (range 50))
+             (<= (Math/abs (- 1.0 (reduce + (map #(Math/exp (aget ^floats q %)) (range 50))))) 1e-5))))))
+
+;; ---------------------------------------------------------------------------
 ;; In the language
 ;; ---------------------------------------------------------------------------
 
 (deftest completions-never-leave-the-language
-  (doseq [[gf args g] [[labelled [prompt 6] label] [words [prompt 5] word] [accented [bprompt 5] accents]]]
+  (doseq [[gf args g] [[labelled [prompt 6] label] [words [prompt 5] word] [accented [bprompt 5] accents]
+                       [quoted [prompt 40] free-text]]]
     (let [trs (map #(gfi/simulate gf args (rng/key %)) (range 300))
           ended (filter #(contains? (:end-tokens gf) (peek (:retval %))) trs)]
       (is (every? #(zero? (potential/prefix g (text-tokens gf (:retval %)))) trs) "every text a prefix of the language's")
       (is (every? #(zero? (potential/complete g (pop (:retval %)))) ended) "every ended text one of its strings")
       (is (or (empty? (:end-tokens gf)) (< 30 (count ended))) "and many end")
       (is (< 20 (count (distinct (map :retval trs)))) "many completions"))))
+
+(deftest a-permissive-grammar-scores-exactly
+  ;; free text allows all but two of the 97 tokens: weighted's normalizer is
+  ;; then 1 less the disallowed mass; the scores against the definition
+  (doseq [seed (range 20)]
+    (let [tr (gfi/simulate quoted [prompt 4] (rng/key seed))
+          tokens (:retval tr)
+          site (fn [i] (let [ctx (subvec tokens 0 i)
+                             ws (potential/logw-next free-text (text-tokens quoted ctx))]
+                         ((direct (:end-tokens quoted) (toy/toy-logprobs 97 (into prompt ctx)) ws) (tokens i))))]
+      (is (every? #(<= (Math/abs (- (site %) ((::token/scores tr) %))) 3e-6) (range (count tokens)))))))
 
 (deftest a-text-of-a-word-is-a-word
   (let [tr (gfi/simulate words [prompt 5] (rng/key 1))]

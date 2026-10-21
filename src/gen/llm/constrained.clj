@@ -76,13 +76,62 @@
           (recur (inc t) (if end? (inc j) j) s))
         s))))
 
+(defn- allowed-count
+  "For weights of 0 and -Inf only (a constraint's: a grammar's mask), how
+   many tokens the site allows (an end token by the end's); -1 when some
+   weight is neither."
+  ^long [^floats ws ^ints ends]
+  (let [n (dec (alength ws))
+        k (alength ends)
+        end-weight (double (aget ws n))]
+    (if-not (or (== end-weight 0.0) (== end-weight Double/NEGATIVE_INFINITY))
+      -1
+      (loop [t 0 j 0 c 0]
+        (if (< t n)
+          (let [end? (and (< j k) (== t (aget ends j)))
+                w (if end? end-weight (double (aget ws t)))]
+            (cond (== w 0.0) (recur (inc t) (if end? (inc j) j) (inc c))
+                  (== w Double/NEGATIVE_INFINITY) (recur (inc t) (if end? (inc j) j) c)
+                  :else -1))
+          c)))))
+
+(defn- disallowed-mass
+  "Σ p(t) over the tokens a constraint disallows (as allowed-count's)."
+  ^double [^floats row ^floats ws ^ints ends]
+  (let [n (alength row)
+        k (alength ends)
+        end-weight (double (aget ws n))]
+    (loop [t 0 j 0 s 0.0]
+      (if (< t n)
+        (let [end? (and (< j k) (== t (aget ends j)))
+              w (if end? end-weight (double (aget ws t)))]
+          (recur (inc t) (if end? (inc j) j) (if (Double/isInfinite w) (+ s (Math/exp (aget row t))) s)))
+        s))))
+
+(defn- log-normalizer
+  "log Σ_t p(t) exp(w(t)) at the site, -Inf when no token has weight. Under
+   a constraint that disallows few tokens, by the row's total of 1 less
+   their mass: an exp for each disallowed token, not for each allowed one
+   (when that mass is under a half, so that the difference keeps its
+   precision)."
+  ^double [^floats row ^floats ws ^ints ends]
+  (let [n (alength row)
+        allowed (allowed-count ws ends)]
+    (if (< (- n allowed) allowed)
+      (let [d (disallowed-mass row ws ends)]
+        (if (< d 0.5)
+          (Math/log1p (- d))
+          (let [m (max-weight row ws ends)] (+ m (Math/log (sum-exp row ws ends m))))))
+      (let [m (max-weight row ws ends)]
+        (if (Double/isInfinite m) m (+ m (Math/log (sum-exp row ws ends m))))))))
+
 (defn weighted
-  "The LM's row (log-probabilities by token, a float array) times a
-   potential's next-token weights ws (n-vocab + 1 entries, the end last;
-   an end token, of end-tokens, takes the end's), renormalized: [q log-z],
-   q a new float array of the site's log-probabilities and log-z the log
-   of the normalizer, Σ_t p(t) exp(w(t)). [nil -Inf] when the weights allow
-   no token. Three passes over the row, allocating only q."
+  "The LM's row (log-probabilities by token, a float array, normalized)
+   times a potential's next-token weights ws (n-vocab + 1 entries, the end
+   last; an end token, of end-tokens, takes the end's), renormalized: [q
+   log-z], q a new float array of the site's log-probabilities and log-z
+   the log of the normalizer, Σ_t p(t) exp(w(t)). [nil -Inf] when the
+   weights allow no token. A few passes over the row, allocating only q."
   [end-tokens ^floats row ^floats ws]
   (let [n (alength row)]
     (when-not (== (alength ws) (inc n))
@@ -92,11 +141,10 @@
     (let [ends (int-array (sort end-tokens))
           k (alength ends)
           end-weight (double (aget ws n))
-          m (max-weight row ws ends)]
-      (if (Double/isInfinite m)
+          log-z (log-normalizer row ws ends)]
+      (if (Double/isInfinite log-z)
         [nil Double/NEGATIVE_INFINITY]
-        (let [log-z (+ m (Math/log (sum-exp row ws ends m)))
-              q (float-array n)]
+        (let [q (float-array n)]
           (loop [t 0 j 0]
             (when (< t n)
               (let [end? (and (< j k) (== t (aget ends j)))]
