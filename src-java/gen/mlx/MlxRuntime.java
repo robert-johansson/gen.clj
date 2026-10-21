@@ -406,6 +406,12 @@ public final class MlxRuntime {
    *  thresholds above what is still live (but below Metal's limit). */
   public static synchronized void collect() {
     if (LIVE.get() <= arrayThreshold && FRESH.get() <= NEW_BYTES && activeMemory() <= byteThreshold) return;
+    collectNow();
+  }
+
+  /** collect, whatever the thresholds: at Metal's buffer limit, before a
+   *  retry (gen.backend.mlx, genclj-9tyh). */
+  public static synchronized void collectNow() {
     COLLECTIONS.incrementAndGet();
     FRESH.set(0);
     System.gc();

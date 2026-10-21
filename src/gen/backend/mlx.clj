@@ -214,17 +214,50 @@
                         (assoc b :reason :mlx-budget-exceeded :active active
                                :reservations (reservations/reservations-held))))))))
 
+;; ---------------------------------------------------------------------------
+;; Metal's buffer limit (genclj-9tyh, DESIGN §9)
+;; ---------------------------------------------------------------------------
+
+(defn- buffer-limit?
+  "Is e MLX's error at Metal's buffer limit ([metal::malloc] Resource limit
+   exceeded)?"
+  [e]
+  (and (instance? MlxException e) (.contains (str (ex-message e)) "Resource limit")))
+
+(defn- at-buffer-limit
+  "(f), which makes buffers: an array from host data, or an evaluation.
+   MLX on macOS makes every buffer through Metal, which allows about
+   499,000, and it recovers fully once buffers are freed. So at the limit
+   the arrays that became unreachable are collected (whatever the
+   thresholds), MLX's buffer cache is cleared, and f runs once more; at the
+   limit again, the buffers are held, and the error is loud."
+  [what f]
+  (let [attempt #(try [(f)]
+                      (catch MlxException e (if (buffer-limit? e) e (throw e))))
+        r (attempt)
+        r (if (vector? r) r (do (MlxRuntime/collectNow) (Mlx/mlx_clear_cache) (attempt)))]
+    (if (vector? r)
+      (first r)
+      (let [live (aget (MlxRuntime/lifetimeStats) 0)]
+        (throw (ex-info (str what ": Metal's buffer limit, with " live " MLX arrays live after a collection:"
+                             " eval! as you go, and drop graphs and arrays no longer needed")
+                        {:reason :mlx-buffer-limit :op what :live-arrays live :cap (MlxRuntime/arrayCap)}
+                        r))))))
+
 (defn- evaluating*
   "(f) holding the evaluation lock; where evaluations need one thread
-   (one-eval-thread?), on that thread, with the caller's bindings. Then
+   (one-eval-thread?), on that thread, with the caller's bindings; once
+   more after a collection at Metal's buffer limit (at-buffer-limit). Then
    MLX's active memory is checked against the budget (check-budget!)."
   [f]
-  (let [v (if (or (not @one-eval-thread?) (identical? (Thread/currentThread) (:thread @eval-thread)))
-            (locking eval-lock (f))
-            (let [task (.submit ^java.util.concurrent.ExecutorService (:executor @eval-thread)
-                                ^java.util.concurrent.Callable (bound-fn* #(locking eval-lock (f))))]
-              (try (.get task)
-                   (catch java.util.concurrent.ExecutionException e (throw (.getCause e))))))]
+  (let [run (fn []
+              (if (or (not @one-eval-thread?) (identical? (Thread/currentThread) (:thread @eval-thread)))
+                (locking eval-lock (f))
+                (let [task (.submit ^java.util.concurrent.ExecutorService (:executor @eval-thread)
+                                    ^java.util.concurrent.Callable (bound-fn* #(locking eval-lock (f))))]
+                  (try (.get task)
+                       (catch java.util.concurrent.ExecutionException e (throw (.getCause e)))))))
+        v (at-buffer-limit "evaluation" run)]
     (check-budget!)
     v))
 
@@ -240,27 +273,28 @@
 
 (defn- host? [x] (or (instance? Number x) (instance? Boolean x)))
 
+(defn- made
+  "The handle (make) returns, from the mlx-c constructor named what: those
+   report a failure (out of memory, Metal's buffer limit) only by an empty
+   handle, which throws MLX's error, after a retry at the buffer limit
+   (at-buffer-limit)."
+  ^long [what make]
+  (at-buffer-limit what #(let [h (long (make))]
+                           (if (zero? h) (throw (MlxRuntime/error what)) h))))
+
 (defn- half-scalar-handle
   "A new handle for the host scalar x as :float16 or :bfloat16."
   [x dtype]
-  (let [f (MlxRaw/mlx_array_new_float32 (unchecked-float (dt/host-double x)))]
+  (let [f (made "mlx_array_new_float32" #(MlxRaw/mlx_array_new_float32 (unchecked-float (dt/host-double x))))]
     (try (Mlx/mlx_astype f (int (code dtype)) (long aux-stream))
          (finally (MlxRaw/mlx_array_free f)))))
-
-(defn- made
-  "h, the handle an mlx-c constructor returned: those report a failure (out
-   of memory, say) only by returning an empty handle."
-  ^long [^long h what]
-  (if (zero? h)
-    (throw (MlxRuntime/error what))
-    h))
 
 (declare scalar-handle*)
 
 (defn- scalar-handle
   "A new handle for the host scalar x as dtype."
   ^long [x dtype]
-  (made (scalar-handle* x dtype) "mlx_array_new"))
+  (made "mlx_array_new" #(scalar-handle* x dtype)))
 
 (defn- scalar-handle*
   ^long [x dtype]
@@ -433,8 +467,8 @@
     (with-open [arena (Arena/ofConfined)]
       (let [data (segment-of arena values dtype)
             shp (.allocateFrom arena ValueLayout/JAVA_INT (int-array (map int shape)))]
-        (wrap b (made (MlxRaw/mlx_array_new_data data shp (int (count shape)) (int (code dtype)))
-                      "mlx_array_new_data"))))))
+        (wrap b (made "mlx_array_new_data"
+                      #(MlxRaw/mlx_array_new_data data shp (int (count shape)) (int (code dtype)))))))))
 
 (declare device)
 
@@ -1180,11 +1214,9 @@
         konst (fn ^long [v dtype] (if-let [h (constant v dtype)] (long h) (t (scalar-handle v dtype))))
         ;; the key's two words, one buffer
         kw (t (with-open [arena (Arena/ofConfined)]
-                (made (MlxRaw/mlx_array_new_data
-                       (.allocateFrom arena ValueLayout/JAVA_INT (int-array [(unchecked-int (.-k0 key)) (unchecked-int (.-k1 key))]))
-                       (.allocateFrom arena ValueLayout/JAVA_INT (int-array [2]))
-                       (int 1) (int (code :uint32)))
-                      "mlx_array_new_data")))
+                (let [words (.allocateFrom arena ValueLayout/JAVA_INT (int-array [(unchecked-int (.-k0 key)) (unchecked-int (.-k1 key))]))
+                      shape (.allocateFrom arena ValueLayout/JAVA_INT (int-array [2]))]
+                  (made "mlx_array_new_data" #(MlxRaw/mlx_array_new_data words shape (int 1) (int (code :uint32)))))))
         k0 (t (Mlx/mlx_slice kw (int-array [0]) (int-array [1]) (int-array [1]) s))
         k1 (t (Mlx/mlx_slice kw (int-array [1]) (int-array [2]) (int-array [1]) s))
         ;; counters [hi32(i) lo32(i)] = [0 i]

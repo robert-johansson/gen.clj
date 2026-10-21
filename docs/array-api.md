@@ -700,6 +700,17 @@ The decisions are §12 items 15–18, for the owner's review.*
   second step, 29.7 → 34.9 ms per step, while its compiled steps make few
   new arrays and do not (`docs/benchmarks.md`). A larger
   `gen.mlx.gc-new-bytes` trades memory for fewer pauses.
+- **At Metal's buffer limit** (genclj-9tyh, DESIGN §9). Graphs can still
+  reach the limit, since the cap counts only the arrays the JVM owns, and
+  MLX recovers fully once buffers are freed.
+  - So where a buffer is made (an array from host data, or an
+    evaluation), "[metal::malloc] Resource limit exceeded" runs a full
+    collection, whatever the thresholds, and clears MLX's buffer cache.
+    Then the call runs once more.
+  - At the limit again the buffers are held, and the error is loud: an
+    ex-info with `:reason :mlx-buffer-limit`, `:live-arrays`, `:cap` and
+    the hint (eval! as you go, and drop graphs and arrays no longer
+    needed), with MLX's error as its cause.
 - **CUDA (Linux)** (2026-10-19, the Jetson Thor). Every evaluation runs on
   one thread, with the caller's bindings: MLX's CUDA backend fails when a
   stream is evaluated from another thread than before, and the stream then
