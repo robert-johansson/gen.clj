@@ -46,24 +46,35 @@
 ;; The site's distribution
 ;; ---------------------------------------------------------------------------
 
-(defn- weight-at
-  "Token t's log weight at its site: the LM's log-probability plus the
-   potential's weight, an end token's the end's."
-  ^double [^floats row ^floats ws ^booleans end? ^long t]
-  (+ (double (aget row t)) (double (aget ws (if (aget end? t) (alength row) t)))))
+(defn- max-weight
+  "The largest of the site's log weights: the LM's log-probability plus the
+   potential's weight, an end token's (ends, sorted) the end's. One pass,
+   the next end token tracked by its index."
+  ^double [^floats row ^floats ws ^ints ends]
+  (let [n (alength row)
+        k (alength ends)
+        end-weight (double (aget ws n))]
+    (loop [t 0 j 0 m Double/NEGATIVE_INFINITY]
+      (if (< t n)
+        (if (and (< j k) (== t (aget ends j)))
+          (recur (inc t) (inc j) (Math/max m (+ (double (aget row t)) end-weight)))
+          (recur (inc t) j (Math/max m (+ (double (aget row t)) (double (aget ws t))))))
+        m))))
 
-(defn- end-mask ^booleans [end-tokens ^long n]
-  (let [end? (boolean-array n)]
-    (doseq [t end-tokens] (aset end? (int t) true))
-    end?))
-
-(defn- max-weight ^double [^floats row ^floats ws ^booleans end?]
-  (loop [t 0 m Double/NEGATIVE_INFINITY]
-    (if (< t (alength row)) (recur (inc t) (Math/max m (weight-at row ws end? t))) m)))
-
-(defn- sum-exp ^double [^floats row ^floats ws ^booleans end? ^double m]
-  (loop [t 0 s 0.0]
-    (if (< t (alength row)) (recur (inc t) (+ s (Math/exp (- (weight-at row ws end? t) m)))) s)))
+(defn- sum-exp
+  "Σ exp(x - m) over the site's log weights x (as max-weight's), skipping
+   those of weight 0."
+  ^double [^floats row ^floats ws ^ints ends ^double m]
+  (let [n (alength row)
+        k (alength ends)
+        end-weight (double (aget ws n))]
+    (loop [t 0 j 0 s 0.0]
+      (if (< t n)
+        (let [end? (and (< j k) (== t (aget ends j)))
+              x (+ (double (aget row t)) (if end? end-weight (double (aget ws t))))
+              s (if (Double/isInfinite x) s (+ s (Math/exp (- x m))))]
+          (recur (inc t) (if end? (inc j) j) s))
+        s))))
 
 (defn weighted
   "The LM's row (log-probabilities by token, a float array) times a
@@ -71,20 +82,26 @@
    an end token, of end-tokens, takes the end's), renormalized: [q log-z],
    q a new float array of the site's log-probabilities and log-z the log
    of the normalizer, Σ_t p(t) exp(w(t)). [nil -Inf] when the weights allow
-   no token."
+   no token. Three passes over the row, allocating only q."
   [end-tokens ^floats row ^floats ws]
   (let [n (alength row)]
     (when-not (== (alength ws) (inc n))
       (throw (ex-info (str "constrained: the potential's next-token weights have " (alength ws) " entries, not "
                            (inc n) " (the LM's vocabulary and the end)")
                       {:reason :invalid-weights :entries (alength ws) :n-vocab n})))
-    (let [end? (end-mask end-tokens n)
-          m (max-weight row ws end?)]
+    (let [ends (int-array (sort end-tokens))
+          k (alength ends)
+          end-weight (double (aget ws n))
+          m (max-weight row ws ends)]
       (if (Double/isInfinite m)
         [nil Double/NEGATIVE_INFINITY]
-        (let [log-z (+ m (Math/log (sum-exp row ws end? m)))
+        (let [log-z (+ m (Math/log (sum-exp row ws ends m)))
               q (float-array n)]
-          (dotimes [t n] (aset q t (unchecked-float (- (weight-at row ws end? t) log-z))))
+          (loop [t 0 j 0]
+            (when (< t n)
+              (let [end? (and (< j k) (== t (aget ends j)))]
+                (aset q t (unchecked-float (- (+ (double (aget row t)) (if end? end-weight (double (aget ws t)))) log-z)))
+                (recur (inc t) (if end? (inc j) j)))))
           [q log-z])))))
 
 ;; ---------------------------------------------------------------------------
