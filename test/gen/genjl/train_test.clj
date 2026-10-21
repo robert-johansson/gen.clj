@@ -11,7 +11,9 @@
    their sum; gen.clj's gradients are values (D7), and its train and
    lecture-batched average them, so the ports scale Gen.jl's steps by the
    batch size. The statistical bands come from each estimate's variance,
-   derived beside it."
+   derived beside it. The statistical runs are Gen.jl's on the JVM and
+   smaller on MLX, where every scalar is an array (sgd-run, lecture-run),
+   each with bands for its size."
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array :refer [+ - * /]]
@@ -92,19 +94,31 @@
   (let [rho (- 1 (* 0.01 50 0.25))]
     (/ (* 0.01 (Math/sqrt (/ 50 4.0))) (Math/sqrt (- 1 (* rho rho))))))
 
+(def ^:private sgd-run
+  "The epochs and θ2-θ5's threshold. y = xor(x, z) given both, so θ2 to θ5
+   grow without bound: u = e^|θ| follows du = 0.01·count·u/(1 + u), count
+   about 12.5 a step, so u + log u = 1 + 0.125·epochs.
+   - On the JVM, Gen.jl's 2,000 epochs and ±5: |θ| = 5.50 (sd 0.008 over
+     12 keys), 60 sd past them.
+   - On MLX, where every scalar is an array, 30 epochs of the same steps
+     (340,000 array operations, counted on the JVM, where Gen.jl's run makes
+     22 million): |θ| = 1.25 (1.25 to 1.27, sd at most 0.035 over 20 keys),
+     so 1.07 is 5 sd inside it. θ1 is stationary after 30 steps as after
+     2,000 (0.875³⁰ = 0.02)."
+  (if (ts/jvm?) {:epochs 2000 :threshold 5.0} {:epochs 30 :threshold 1.07}))
+
 (deftest ^:slow ^:heavy sgd-learns-the-teacher
   ;; train.jl:109
-  (let [{:keys [store]} (learn/train student start sgd teacher-data grad/param-gradients
-                                     {:epochs 2000 :batches-per-epoch 1 :batch-size 50 :key (rng/key 3)})]
+  (let [{:keys [epochs threshold]} sgd-run
+        {:keys [store]} (learn/train student start sgd teacher-data grad/param-gradients
+                                     {:epochs epochs :batches-per-epoch 1 :batch-size 50 :key (rng/key 3)})]
     ;; p(x | z = 0) = p(x | z = 1) = 0.5
     (is (genjl/approx? (:theta1 store) 0.0 {:atol (* 5 theta1-sd)}))
-    ;; y = xor(x, z) given both, so θ2 to θ5 grow without bound: e^|θ| gains
-    ;; about 0.01 per example of its case, 25,000 in 2,000 steps, and |θ|
-    ;; ends at 5.50 (sd 0.008 over 12 keys), 60 sd past the thresholds
-    (is (< (ts/number (:theta2 store)) -5))
-    (is (> (ts/number (:theta3 store)) 5))
-    (is (> (ts/number (:theta4 store)) 5))
-    (is (< (ts/number (:theta5 store)) -5))))
+    ;; y | z, x = xor(x, z)
+    (is (< (ts/number (:theta2 store)) (- threshold)))
+    (is (> (ts/number (:theta3 store)) threshold))
+    (is (> (ts/number (:theta4 store)) threshold))
+    (is (< (ts/number (:theta5 store)) (- threshold)))))
 
 ;; ---------------------------------------------------------------------------
 ;; train.jl:126, lecture! (statistical)
@@ -120,10 +134,30 @@
 
 (defn- x-of [tr] [(tr :x)])
 
-(def ^:private optimum
-  "train.jl:155's -0.21: the best expected score in q's family. z - x + 2
-   is p's noise, so θ = -2 and σ = 0.3: -½ log 2π - log 0.3 - ½ = -0.2149."
-  (- (* -0.5 (Math/log (* 2 Math/PI))) (Math/log 0.3) 0.5))
+(defn- expected-score
+  "The expected score of q under store, E log q(z; x + θ, e^s) over p: z - x
+   + 2 is p's noise, N(0, 0.3), so -½ log 2π - s - (0.09 + (θ + 2)²)/(2e^{2s}).
+   Its maximum, train.jl:155's -0.21, is at θ = -2 and s = log 0.3:
+   -½ log 2π - log 0.3 - ½ = -0.2149."
+  [{:keys [theta log-std]}]
+  (let [theta (ts/number theta) s (ts/number log-std)]
+    (- (* -0.5 (Math/log (* 2 Math/PI))) s (/ (+ 0.09 (Math/pow (+ theta 2) 2)) (* 2 (Math/exp (* 2 s)))))))
+
+(def ^:private lecture-run
+  "Lectures a step, scores to estimate with, and the trained store's
+   spread: θ's and log σ's sd about -2 and log 0.3 after the 100 steps of
+   0.1 along a mean of b lectures' gradients. θ's gradient, (z - x - θ)/σ²,
+   has sd 1/0.3 at the optimum and pulls with 0.1/σ² = 1.11 (an AR(1) of
+   coefficient -0.11); log σ's, (z - x - θ)²/σ² - 1, has sd √2 and pulls with
+   0.2 (coefficient 0.8).
+   - On the JVM, Gen.jl's 1,000 lectures a step and 10,000 scores: sds 0.0105
+     and 0.0075 (0.0096 and 0.0057 over 6 keys).
+   - On MLX, 10 and 500 (139,000 array operations a part, counted on the
+     JVM): sds 0.106 and 0.089, the larger of derived and measured (0.082 and
+     0.089 over 20 keys; derived 0.106 and 0.075)."
+  (if (ts/jvm?)
+    {:batch 1000 :scores 10000 :theta-sd 0.0105 :log-std-sd 0.0075}
+    {:batch 10 :scores 500 :theta-sd 0.106 :log-std-sd 0.089}))
 
 (def ^:private lecture-step
   "train.jl:147: FixedStepGradientDescent(1e-4) along the sum of 1,000
@@ -138,27 +172,29 @@
           {:theta 0.0 :log-std 0.0}
           (rng/split key 100)))
 
-(defn- scores-near-the-optimum?
-  "train.jl:155, isapprox(score, -0.21, atol=5e-2): the mean of 10,000
-   lectures' scores under store, within 5 of its standard errors of the
-   optimum. The scores' sd is 0.69, so the error is 0.007 (Gen.jl's atol
-   is 7). Training leaves the expected score below the optimum by about
-   5e-4: θ's spread after training is 0.01 (over 6 keys), and
-   (Δθ)²/(2σ²) = 5e-4."
+(defn- check-trained
+  "train.jl:155, isapprox(score, -0.21, atol=5e-2), as its two claims: the
+   trained store is near the optimum, within 5 of its sds (lecture-run), and
+   lecture's score estimates the store's expected score, the mean of
+   lecture-run's scores within 5 of its standard errors (on the JVM the
+   scores' sd is 0.69 and the error 0.007; Gen.jl's atol is 7 of them)."
   [store key]
-  (let [scores (mapv #(ts/number (:score (learn/lecture p [] q store x-of %))) (rng/split key 10000))
-        n (count scores)
-        mean (/ (reduce + scores) n)
-        se (Math/sqrt (/ (reduce + (map #(let [e (- % mean)] (* e e)) scores)) (* n (dec n))))]
-    (genjl/approx? mean optimum {:atol (* 5 se)})))
+  (let [{:keys [scores theta-sd log-std-sd]} lecture-run
+        xs (mapv #(ts/number (:score (learn/lecture p [] q store x-of %))) (rng/split key scores))
+        n (count xs)
+        mean (/ (reduce + xs) n)
+        se (Math/sqrt (/ (reduce + (map #(let [e (- % mean)] (* e e)) xs)) (* n (dec n))))]
+    (is (genjl/approx? (:theta store) -2.0 {:atol (* 5 theta-sd)}) "θ")
+    (is (genjl/approx? (:log-std store) (Math/log 0.3) {:atol (* 5 log-std-sd)}) "log σ")
+    (is (genjl/approx? mean (expected-score store) {:atol (* 5 se)}) "the score")))
 
 (deftest ^:slow ^:heavy lecture-trains-q-toward-the-posterior
   ;; train.jl:126
   (testing "lecture"
-    (is (scores-near-the-optimum?
-         (trained (fn [store k] (grad/mean (map #(:grads (learn/lecture p [] q store x-of %)) (rng/split k 1000))))
-                  (rng/key 4))
-         (rng/key 5))))
+    (check-trained (trained (fn [store k] (grad/mean (map #(:grads (learn/lecture p [] q store x-of %))
+                                                          (rng/split k (:batch lecture-run)))))
+                            (rng/key 4))
+                   (rng/key 5)))
   (testing "lecture-batched"
     ;; train.jl:176 scores q, the first part's proposal, not q_batched (U4,
     ;; docs/research/genjl-test-suite.md §4.3), so Gen.jl's assertion holds
@@ -166,5 +202,5 @@
     ;; along the sum of 1,000 gradients, ten times the first part's step,
     ;; stops far from the optimum). The port checks what the test means:
     ;; lecture-batched, at the first part's step, trains q to the optimum.
-    (is (scores-near-the-optimum? (trained #(:grads (learn/lecture-batched p [] q %1 x-of 1000 %2)) (rng/key 6))
-                                  (rng/key 7)))))
+    (check-trained (trained #(:grads (learn/lecture-batched p [] q %1 x-of (:batch lecture-run) %2)) (rng/key 6))
+                   (rng/key 7))))
