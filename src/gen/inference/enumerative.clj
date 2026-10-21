@@ -328,7 +328,10 @@
   (-assess [_ args choices key] (gfi/with-exact-density "with-exact-proposal" (gfi/-assess gf args choices key)))
   (-propose [_ args key] (gfi/-propose gf args key))
   (-project [this tr selection]
-    (exact-weight this (:args tr) (sel/get-selected (:choices tr) selection) tr)))
+    (exact-weight this (:args tr) (sel/get-selected (:choices tr) selection) tr))
+  ;; its traces are the model's
+  trace/ICalls
+  (-call [_ tr p] (trace/-call gf tr p)))
 
 (defn with-exact-proposal
   "gf with the exact conditional as its internal proposal for the finite

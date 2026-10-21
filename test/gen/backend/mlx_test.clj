@@ -483,6 +483,31 @@
           (is (instance? gen.mlx.MlxException e))
           (is (= 1 @calls)))))))
 
+(defn- source-forms
+  "The top-level forms of a source file, read as data."
+  [path]
+  (with-open [r (java.io.PushbackReader. (clojure.java.io/reader path))]
+    (binding [*read-eval* false]
+      (doall (take-while #(not= % ::eof) (repeatedly #(read {:eof ::eof} r)))))))
+
+(deftest every-array-from-host-data-is-made-through-made
+  ;; at Metal's buffer limit an mlx-c constructor (mlx_array_new_*) returns
+  ;; an empty handle; made turns that into MLX's error, collects and
+  ;; retries once. A constructor called raw handed the empty handle on, to
+  ;; fail in the next op (genclj-j9nx: safe-indices' scalars, found by the
+  ;; full Metal battery). Read from the source, so it runs without MLX.
+  ;; scalar-handle* is a constructor too, called only through made
+  (let [constructor? (fn [x] (and (symbol? x) (#{"Mlx" "MlxRaw"} (namespace x))
+                                  (.startsWith (name x) "mlx_array_new")))
+        raw (fn raw [form]
+              (cond (and (seq? form) (= 'made (first form))) []
+                    (and (seq? form) (#{'defn 'defn-} (first form)) (= 'scalar-handle* (second form))) []
+                    (and (seq? form) (= 'scalar-handle* (first form))) [form]
+                    (constructor? form) [form]
+                    (coll? form) (mapcat raw form)
+                    :else []))]
+    (is (= [] (vec (mapcat raw (source-forms "src/gen/backend/mlx.clj")))))))
+
 (defn- held-until-the-limit
   "One-element arrays made and held until making another fails: how many,
    and the failure. They are unreachable once this returns."
@@ -527,6 +552,15 @@
             (let [c0 (:collections (memory))]
               (is (< (Math/abs (- (* k (Math/sin 2.0)) (array/item g))) 0.05))
               (is (< c0 (:collections (memory))))))
+          (testing "and take by an array index makes its scalars after a collection (genclj-j9nx)"
+            ;; the particle filter's 0-d index, whose bounds safe-indices
+            ;; makes from host data
+            (let [x (array/with-backend b (array/array [[1.0 2.0] [3.0 4.0]]))
+                  i (array/with-backend b (array/array 1))]
+              (held-until-the-limit b)
+              (let [c0 (:collections (memory))]
+                (is (= [3.0 4.0] (array/->clj (array/take x i 0))))
+                (is (< c0 (:collections (memory)))))))
           (finally
             ((requiring-resolve 'gen.backend.mlx/collect!))
             ((requiring-resolve 'gen.backend.mlx/clear-cache!))))))))

@@ -120,6 +120,10 @@ A distribution body, compared with GenMLX:
     configuration, not state that computation depends on.
 - **`*-like` variants** (`zeros-like`, `full-like`, …) create on the backend
   and dtype of an existing array.
+- **A fill value** (`full`, `full-like`) is a scalar: a host one, or a 0-d
+  array. An array fill value is an operand: a tracked one makes the fill on
+  the tape, so it has a gradient (the cotangent's sum). An array of values
+  is an error; `broadcast-to` fills with one.
 
 ## 5. Dtypes
 
@@ -163,7 +167,7 @@ needs, taken from GenMLX's measured call counts
 | conversion | `astype` `item` `->clj` `eval!` `array?` `shape` `ndim` `size` `dtype` | `-astype` `-to-host` `-eval!` `-shape` `-dtype` | `ndim`, `size` |
 | arithmetic | `+ - * /` (variadic), `negate`, `pow`, `maximum` `minimum`, `mod` `floor-div`, `abs` `sign` | `:add :subtract :multiply :divide :power :maximum :minimum :remainder :floor-divide :negative :abs :sign` | — |
 | exp/log | `exp` `log` `expm1` `log1p` `sqrt` `square` `logaddexp` `xlogy` | `:exp :log :expm1 :log1p :sqrt` | `square`, `logaddexp` (native in MLX: one op, and its gradient is exact at ties under MLX's autodiff), `xlogy` |
-| trig | `sin` `cos` `tan` `tanh` `sigmoid` `softplus` | `:sin :cos :tan :tanh` | `sigmoid`, `softplus` |
+| trig | `sin` `cos` `tan` `tanh` `sinh` `cosh` `asin` `acos` `atan` `atan2` `sigmoid` `softplus` | `:sin :cos :tan :tanh :sinh :cosh :arcsin :arccos :arctan :arctan2` | `sigmoid`, `softplus` |
 | rounding | `floor` `ceil` `round` `clip` | `:floor :ceil :round` | `clip` |
 | special | `erf` `erfinv` `lgamma` `digamma` `log-beta` | `:erf :erfinv` (native in MLX; closed-form derivatives) | `lgamma`, `digamma`, `log-beta` |
 | predicates | `isnan` `isinf` `isfinite` | `:isnan :isinf` | `isfinite` |
@@ -775,6 +779,7 @@ conformance suite.
 | negative-step slices read a stop of -1 from the end | NumPy's bounds |
 | float64 `exp`, `sin`, `cos`, `erf`, `erfinv` on the CPU are float32 approximations (up to 1e-4 relative) | exact routes via `expm1`, `tan`, `log` (`gen.backend.mlx.exact`), within a few ulps |
 | Metal's float32 `expm1` is off by up to 660 ulps | Kahan's formula from `exp` and `log`, 3 ulps |
+| Metal's float32 `atan(-0.0)` is +0.0 | x itself at zero, as NumPy |
 | empty arrays have no data pointer | read as empty |
 | Cholesky of a matrix that is not positive definite returns a partial factor | NaN where a diagonal entry is not positive (LAPACK's failing pivot) |
 | a singular `solve` fails inside a CPU task, reported at a later evaluation of other arrays | the identity stands in for matrices with a zero LU pivot; their solutions are NaN |

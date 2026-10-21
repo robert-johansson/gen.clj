@@ -1,8 +1,8 @@
 (ns gen.genjl.trace-translators-test
   "Gen.jl 0.4.8's test/inference/trace_translators.jl, ported: the
    extending, symmetric and general trace translators, with their
-   transforms checked (gen.inference.transform). The deterministic one
-   waits on atan2 (pending, below). Steps are 0-based (D2)."
+   transforms checked (gen.inference.transform), and the deterministic
+   one. Steps are 0-based (D2)."
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is]]
             [gen.array :as array :refer [+ - * /]]
@@ -14,6 +14,47 @@
             [gen.inference.transform :as tr]
             [gen.random :as rng]
             [gen.test-support :as ts]))
+
+;; ---------------------------------------------------------------------------
+;; trace_translators.jl:3, DeterministicTraceTranslator
+;; ---------------------------------------------------------------------------
+
+(def ^:private polar
+  (gen [] (trace :r (d/inv-gamma 1 1)) (trace :theta (d/uniform (- (/ Math/PI 2)) (/ Math/PI 2)))))
+
+(def ^:private cartesian
+  (gen [] (trace :x (d/normal 0 1)) (trace :y (d/normal 0 1))))
+
+(tr/deftransform ^:private to-cartesian [p1 _q1 p2 _q2]
+  (let [r (tr/read p1 :r :continuous)
+        theta (tr/read p1 :theta :continuous)]
+    (tr/write p2 :x (* r (array/cos theta)) :continuous)
+    (tr/write p2 :y (* r (array/sin theta)) :continuous)))
+
+(tr/deftransform ^:private to-polar [p2 _q2 p1 _q1]
+  (let [x (tr/read p2 :x :continuous)
+        y (tr/read p2 :y :continuous)]
+    (tr/write p1 :r (array/sqrt (+ (* x x) (* y y))) :continuous)
+    (tr/write p1 :theta (array/atan2 y x) :continuous)))
+
+(deftest deterministic-trace-translator
+  ;; trace_translators.jl:3: polar to cartesian and back, each checked (the
+  ;; Jacobian's gradient runs through atan2's)
+  (let [[f finv] (tr/pair to-cartesian to-polar)
+        to-xy (tr/deterministic-translator {:p-new cartesian :p-new-args [] :new-observations cm/EMPTY
+                                            :transform f :check? true})
+        to-r-theta (tr/deterministic-translator {:p-new polar :p-new-args [] :new-observations cm/EMPTY
+                                                 :transform finv :check? true})
+        t1 (:trace (gfi/generate polar [] (cm/choicemap :theta 0.0) (rng/key 1)))
+        t2 (:trace (gfi/generate cartesian [] (cm/choicemap :y 0.0 :x 1.0) (rng/key 2)))
+        {xy :trace xy-weight :weight} (to-xy t1 (rng/key 3))
+        {r-theta :trace r-theta-weight :weight} (to-r-theta t2 (rng/key 4))]
+    (is (== 0 (array/item (xy :y))))
+    (is (== 0 (array/item (r-theta :theta))))
+    ;; beyond Gen.jl's assertions, the weights: the scores' difference and
+    ;; log |det J|, log r one way and log 1/r the other (r = 1 here)
+    (is (ts/close? (+ (- (:score xy) (:score t1)) (Math/log (ts/number (t1 :r)))) xy-weight))
+    (is (ts/close? (- (:score r-theta) (:score t2)) r-theta-weight))))
 
 ;; ---------------------------------------------------------------------------
 ;; trace_translators.jl:44, SimpleExtendingTraceTranslator
@@ -119,7 +160,3 @@
         {t2 :trace} (translator t1 (rng/key 2))]
     (is (and (== 1 (array/item (t2 :i))) (== 10 (array/item (t2 :j)))))))
 
-;; Pending:
-;; - trace_translators.jl:3, DeterministicTraceTranslator (2 assertions):
-;;   polar to cartesian and back, checked, needs atan(y, x) under the
-;;   Jacobian's gradient (G8, genclj-3mx6).

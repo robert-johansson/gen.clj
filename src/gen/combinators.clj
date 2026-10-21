@@ -18,7 +18,9 @@
                         node's value. Args (input), the root's; node i's
                         choices are at [i :production] and [i :aggregation],
                         the root 0 and child j of node i at
-                        i·max-branch + j + 1. Returns the root's aggregation.
+                        i·max-branch + j + 1 (get-child; get-child-num
+                        and get-parent invert it). Returns the root's
+                        aggregation.
      (call-at gf)       Gen.jl's call_at: args (& args k) call gf on args,
                         its choices under address k.
      (choice-at dist)   Gen.jl's choice_at: args (& args k), one choice at
@@ -95,6 +97,14 @@
   (cond (instance? gen.selection.None s) (sorted-set)
         (instance? gen.selection.Hierarchical s) (into (sorted-set) (filter integer?) (keys (:m s)))
         :else :all))
+
+(defn- element-call
+  "Map's or Unfold's call at path p: element (p 0)'s trace."
+  [tr p]
+  (let [subs (::subtraces tr)
+        i (p 0)]
+    (when (and (integer? i) (< -1 i (count subs)))
+      [(subs i) (subvec p 1)])))
 
 (defn- elements-trace [gf args {:keys [subs choices retval score]}]
   (assoc (trace/make-trace {:gen-fn gf :args args :choices choices :retval retval :score score})
@@ -273,7 +283,9 @@
   (-regenerate [gf tr args argdiffs selection key] (map-revise gf tr args argdiffs :regenerate selection key))
   (-assess [gf args choices key] (map-assess gf args choices key))
   (-propose [gf args key] (propose-from-trace (:trace (map-generate gf args nil key))))
-  (-project [_ tr selection] (project-elements tr selection)))
+  (-project [_ tr selection] (project-elements tr selection))
+  trace/ICalls
+  (-call [_ tr p] (element-call tr p)))
 
 (defn map
   "Gen.jl's Map combinator: the kernel applied independently to each element
@@ -381,7 +393,9 @@
   (-regenerate [gf tr args argdiffs selection key] (unfold-revise gf tr args argdiffs :regenerate selection key))
   (-assess [gf args choices key] (unfold-assess gf args choices key))
   (-propose [gf args key] (propose-from-trace (:trace (unfold-generate gf args nil key))))
-  (-project [_ tr selection] (project-elements tr selection)))
+  (-project [_ tr selection] (project-elements tr selection))
+  trace/ICalls
+  (-call [_ tr p] (element-call tr p)))
 
 (defn unfold
   "Gen.jl's Unfold combinator: a state-space chain of n kernel steps."
@@ -446,7 +460,10 @@
   (-regenerate [gf tr args argdiffs selection key] (switch-revise gf tr args argdiffs :regenerate selection key))
   (-assess [gf [idx & bargs] choices key] (gfi/-assess (branch gf idx) (vec bargs) choices key))
   (-propose [gf args key] (propose-from-trace (:trace (switch-generate gf args nil key))))
-  (-project [_ tr selection] (let [sub (::subtrace tr)] (gfi/-project (:gen-fn sub) sub selection))))
+  (-project [_ tr selection] (let [sub (::subtrace tr)] (gfi/-project (:gen-fn sub) sub selection)))
+  ;; the branch's addresses are the switch's
+  trace/ICalls
+  (-call [_ tr p] (let [sub (::subtrace tr)] (trace/-call (trace/maker sub) sub p))))
 
 (defn switch
   "Gen.jl's Switch combinator: (switch gf0 gf1 …) is called with a branch
@@ -460,7 +477,40 @@
 ;; Recurse
 ;; ---------------------------------------------------------------------------
 
-(defn- child-of [max-branch node j] (+ (* node max-branch) j 1))
+(defn- check-numbering
+  "Loud unless every number is a natural number, max-branch positive."
+  [f max-branch & numbers]
+  (when-not (and (pos-int? max-branch) (every? nat-int? numbers))
+    (throw (ex-info (str f ": node numbers are natural numbers and max-branch a positive integer")
+                    {:numbers (vec numbers) :max-branch max-branch}))))
+
+(defn get-child
+  "Gen.jl's get_child, 0-based: the node number of child j (0 to
+   max-branch - 1) of node parent, parent·max-branch + j + 1."
+  [parent j max-branch]
+  (check-numbering "get-child" max-branch parent j)
+  (when-not (< j max-branch)
+    (throw (ex-info (str "get-child: child " j " of at most " max-branch) {:j j :max-branch max-branch})))
+  (clojure.core/+ (* parent max-branch) j 1))
+
+(defn- check-not-root [f child]
+  (when (zero? child)
+    (throw (ex-info (str f ": the root, node 0, has no parent") {:child child}))))
+
+(defn get-child-num
+  "Gen.jl's get_child_num, 0-based: which child of its parent node child
+   (not the root) is."
+  [child max-branch]
+  (check-numbering "get-child-num" max-branch child)
+  (check-not-root "get-child-num" child)
+  (mod (dec child) max-branch))
+
+(defn get-parent
+  "Gen.jl's get_parent, 0-based: the parent of node child (not the root)."
+  [child max-branch]
+  (check-numbering "get-parent" max-branch child)
+  (check-not-root "get-parent" child)
+  (quot (dec child) max-branch))
 
 (defn- put-part
   "choices with sub at [node part], unless sub is empty."
@@ -507,7 +557,7 @@
   (or (= :all targets) (contains? (get targets node) part)))
 
 (defn- node-cs [op cs node part]
-  (when cs (if (= op :regenerate) (sel/get-subselection (sel/get-subselection cs node) part) (cm/get-submap cs [node part]))))
+  (when cs (if (= op :regenerate) (sel/get-subselection cs [node part]) (cm/get-submap cs [node part]))))
 
 (defn- run-node
   "One kernel run at node: revised from old when given (update or
@@ -539,7 +589,7 @@
               out (production-output gf node (:trace r))
               child-diff (if (diff/changed? (:retdiff r)) diff/unknown-change diff/no-change)]
           (recur (into (dissoc todo node)
-                       (map-indexed (fn [j c] [(child-of max-branch node j) [c child-diff]]) (:children out)))
+                       (map-indexed (fn [j c] [(get-child node j max-branch) [c child-diff]]) (:children out)))
                  (assoc prods node (:trace r)) (assoc p-diffs node (:retdiff r)) (+ weight (:weight r))
                  (put-part discard node :production (:discard r))))
         {:prods prods :p-diffs p-diffs :weight weight :discard discard}))))
@@ -553,7 +603,7 @@
   (let [{:keys [aggregation max-branch]} gf]
     (reduce (fn [{:keys [aggs a-diffs weight discard]} node]
               (let [{v :value children :children} (:retval (prods node))
-                    kids (clojure.core/map #(child-of max-branch node %) (range (count children)))
+                    kids (clojure.core/map #(get-child node % max-branch) (range (count children)))
                     old (old-a node)
                     v-changed? (diff/changed? (p-diffs node))
                     ws-changed? (or (nil? old) (not= (count children) (count (second (:args old))))
@@ -620,7 +670,7 @@
                                            (node-key key node :production) [node :production])
                               out (production-output gf node r)]
                           (recur (into (dissoc todo node)
-                                       (map-indexed (fn [j c] [(child-of max-branch node j) c]) (:children out)))
+                                       (map-indexed (fn [j c] [(get-child node j max-branch) c]) (:children out)))
                                  (assoc ps node out) (+ weight (:weight r))))
                         [ps weight]))
         _ (doseq [node (keys targets)]
@@ -628,7 +678,7 @@
               (throw (gfi/unvisited :assess [[node]] (str "the tree has nodes " (vec (sort (keys ps))))))))
         [as weight] (reduce (fn [[as weight] node]
                               (let [{v :value children :children} (ps node)
-                                    ws (mapv #(as (child-of max-branch node %)) (range (count children)))
+                                    ws (mapv #(as (get-child node % max-branch)) (range (count children)))
                                     r (assess-at aggregation [v ws] (cm/get-submap choices [node :aggregation])
                                                  (node-key key node :aggregation) [node :aggregation])]
                                 [(assoc as node (:retval r)) (+ weight (:weight r))]))
@@ -638,7 +688,7 @@
 (defn- recurse-project [tr s]
   (let [part (fn [subs part]
                (reduce (fn [w [node sub]]
-                         (+ w (gfi/-project (:gen-fn sub) sub (sel/get-subselection (sel/get-subselection s node) part))))
+                         (+ w (gfi/-project (:gen-fn sub) sub (sel/get-subselection s [node part]))))
                        0.0 subs))]
     (+ (part (::productions tr) :production) (part (::aggregations tr) :aggregation))))
 
@@ -650,7 +700,13 @@
   (-regenerate [gf tr args argdiffs selection key] (recurse-run gf tr (recurse-args args) argdiffs :regenerate selection key))
   (-assess [gf args choices key] (recurse-assess gf (recurse-args args) choices key))
   (-propose [gf args key] (propose-from-trace (gfi/-simulate gf args key)))
-  (-project [_ tr selection] (recurse-project tr selection)))
+  (-project [_ tr selection] (recurse-project tr selection))
+  ;; node i's production at [i :production], its aggregation at [i :aggregation]
+  trace/ICalls
+  (-call [_ tr p]
+    (when (<= 2 (count p))
+      (when-let [sub (get (case (p 1) :production (::productions tr) :aggregation (::aggregations tr) nil) (p 0))]
+        [sub (subvec p 2)]))))
 
 (defn recurse
   "Gen.jl's Recurse combinator (see the namespace doc): a tree grown by the

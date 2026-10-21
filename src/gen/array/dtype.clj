@@ -81,6 +81,7 @@
    :remainder :arith :floor-divide :arith :negative :arith :abs :arith :sign :arith
    :divide :float :exp :float :log :float :expm1 :float :log1p :float :sqrt :float
    :sin :float :cos :float :tan :float :tanh :float :erf :float :erfinv :float :logaddexp :float
+   :arcsin :float :arccos :float :arctan :float :arctan2 :float :sinh :float :cosh :float
    :floor :round :ceil :round :round :round
    :less :compare :less-equal :compare :greater :compare :greater-equal :compare
    :equal :compare :not-equal :compare

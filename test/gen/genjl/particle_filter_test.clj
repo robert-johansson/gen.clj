@@ -8,8 +8,8 @@
 
    gen.clj's step returns the state, so a step's incremental weights are
    the state's log weights, one per particle. The ports assert their count
-   with 100 particles; Gen.jl's 20,000 serve its log-ML band, which is the
-   statistical port's (pending, below)."
+   with 100 particles; Gen.jl's 20,000 (1,000 on MLX, n-estimate) serve
+   its log-ML bands, the statistical testsets'."
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array :refer [+ - * /]]
@@ -20,7 +20,8 @@
             [gen.dynamic :refer [gen]]
             [gen.genjl.support :as genjl]
             [gen.inference.particle-filter :as pf]
-            [gen.random :as rng]))
+            [gen.random :as rng]
+            [gen.test-support :as ts]))
 
 (defn- hmm-forward
   "particle_filter.jl:1: p(emissions) of an HMM, by the forward algorithm.
@@ -122,8 +123,34 @@
     (doseq [state (rest (filtered num-particles {} {} (rng/key 2)))]
       (is (= num-particles (count (:log-weights state)))))))
 
-;; Pending:
-;; - particle_filter.jl:143 and :169: log-ml-estimate within 0.02 of the
-;;   forward algorithm's, with 20,000 particles (statistical, genclj-zgkq).
+(def ^:private n-estimate
+  "The log-ML runs' particles: Gen.jl's 20,000 on the JVM, 1,000 on MLX.
+   There every particle's values are arrays, 59 of them (counted on the
+   JVM), so 20,000 particles would hold 1.2 million, past Metal's limit of
+   about 499,000 buffers; 1,000 hold 59,000."
+  (if (ts/jvm?) 20000 1000))
+
+(def ^:private log-ml-sd
+  "The sd of the log-ML estimate with n-estimate particles. Over 200 keys at
+   1,000 particles it is 0.0279 with the custom proposal and 0.0414 with the
+   internal one, and √(1,000/n) of that at n: 0.0062 and 0.0093 at 20,000
+   (0.0051 and 0.0095 measured over 24 keys). The estimates' mean is within
+   0.0016 of the exact value. Gen.jl's atol 0.02 is 3.2 and 2.2 of them at
+   20,000."
+  (let [scale (Math/sqrt (/ 1000.0 n-estimate))]
+    {:custom (* 0.0279 scale) :internal (* 0.0414 scale)}))
+
+(def ^:private exact-log-ml (Math/log (hmm-forward prior emission transition obs-x)))
+
+(deftest ^:slow ^:heavy log-ml-estimates
+  (testing "a custom proposal" ; particle_filter.jl:143
+    (is (genjl/approx? exact-log-ml
+                       (pf/log-ml-estimate (last (filtered n-estimate {:proposal init-proposal :proposal-args [(obs-x 0)]}
+                                                           {:proposal step-proposal} (rng/key 3))))
+                       {:atol (* 5 (:custom log-ml-sd))})))
+  (testing "the internal proposal" ; particle_filter.jl:169
+    (is (genjl/approx? exact-log-ml (pf/log-ml-estimate (last (filtered n-estimate {} {} (rng/key 4))))
+                       {:atol (* 5 (:internal log-ml-sd))}))))
+
 ;; n/a: particle_filter.jl:172, the state's copy, ==, hash and mutation
 ;; independence (8): gen.clj's states are persistent values.

@@ -4,7 +4,8 @@ Run with any Python that has numpy, scipy and jax (e.g. GenMLX's venv):
 
     ~/code/genmlx/.venv/bin/python -I test/fixtures/generate.py
 
-Writes test/fixtures/special.edn (scipy.special), test/fixtures/random.edn
+Writes test/fixtures/special.edn (scipy.special, and numpy's inverse
+trigonometric and hyperbolic functions), test/fixtures/random.edn
 (JAX's threefry: keys, splits, bits and samplers, float64 via jax_enable_x64)
 and test/fixtures/distributions.edn (scipy.stats log densities in Gen.jl's
 parameterizations).
@@ -57,7 +58,37 @@ def special():
                        0.2, 0.49, 0.5, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0, 5.5, 27.0], sp.erf),
         ":erfinv": pairs([-0.999999, -0.99, -0.9, -0.5, -0.1, -1e-9, 0.0, 1e-9, 0.1,
                           0.3, 0.5, 0.8, 0.9, 0.99, 0.999, 0.9999999, 0.999999999999], sp.erfinv),
+        **elementary(),
     }
+
+
+def elementary():
+    """numpy's inverse trigonometric and hyperbolic functions, with their
+    signed zeros, and atan2 as [y, x, atan2(y, x)]: the four quadrants and
+    the axes, the signed zeros that choose a side of the cut along the
+    negative x axis, and the infinities."""
+    inf = math.inf
+    unit = [-1.0, -0.999999, -0.9, -0.5, -1e-8, -0.0, 0.0, 1e-12, 0.3, 0.5, 0.7,
+            0.99999999, 1.0, 1.5]
+    hyperbolic = [-30.0, -5.0, -1.0, -0.3, -1e-6, -0.0, 0.0, 1e-10, 1e-3, 0.5, 1.0,
+                  2.5, 10.0, 50.0, 700.0, 800.0]
+    points = [(1.0, 1.0), (1.0, -1.0), (-1.0, -1.0), (-1.0, 1.0), (0.5, 2.0),
+              (2.0, 1e-10), (-3.0, 1e8), (1e-8, -1.0), (-1e-8, -1.0),
+              (0.0, 0.0), (-0.0, 0.0), (0.0, -0.0), (-0.0, -0.0),
+              (0.0, -1.0), (-0.0, -1.0), (1.0, 0.0), (-1.0, -0.0),
+              (inf, inf), (inf, -inf), (-inf, inf), (-inf, -inf),
+              (1.0, inf), (1.0, -inf), (-1.0, -inf), (inf, 1.0), (math.nan, 1.0)]
+    # asin outside [-1, 1] is NaN, and sinh and cosh overflow, by design
+    with np.errstate(invalid="ignore", over="ignore"):
+        return {
+            ":asin": pairs(unit, np.arcsin),
+            ":acos": pairs(unit, np.arccos),
+            ":atan": pairs([-1e10, -100.0, -3.0, -1.0, -0.5, -1e-9, -0.0, 0.0, 1e-12, 0.4,
+                            1.0, 2.5, 50.0, 1e8, inf], np.arctan),
+            ":sinh": pairs(hyperbolic, np.sinh),
+            ":cosh": pairs(hyperbolic, np.cosh),
+            ":atan2": [[y, x, float(np.arctan2(y, x))] for y, x in points],
+        }
 
 
 def u32(x):

@@ -43,7 +43,7 @@
   [x]
   (instance? gen.choicemap.IChoiceMap x))
 
-(declare from-map set-choice)
+(declare from-map set-choice merge)
 
 (defn choicemap
   "A choice map from address-value pairs. An address may be a path vector;
@@ -64,13 +64,15 @@
 
 (defn from-map
   "A choice map from a nested Clojure map: plain maps become nodes, a choice
-   map stays itself, anything else is a leaf. Nodes and values are records,
-   so map? is true of them: they are told apart first, or their fields would
-   be read as addresses."
+   map stays itself, anything else is a leaf. A vector key is a path, and
+   keys whose paths overlap are an error (merge's). Nodes and values are
+   records, so map? is true of them: they are told apart first, or their
+   fields would be read as addresses."
   [m]
   (cond (choicemap? m) m
-        (map? m) (->Node (into {} (map (fn [[k v]] [k (from-map v)])) m))
-        :else (->Value m)))
+        (not (map? m)) (->Value m)
+        (some vector? (keys m)) (reduce merge EMPTY (map (fn [[k v]] (set-choice EMPTY k (from-map v))) m))
+        :else (->Node (into {} (map (fn [[k v]] [k (from-map v)])) m))))
 
 ;; ---------------------------------------------------------------------------
 ;; Access
@@ -86,7 +88,24 @@
   [cm]
   (when (has-value? cm) (-get-value cm)))
 
-(defn- path [addr] (if (vector? addr) addr [addr]))
+(defn path
+  "The path of an address or a path: [addr] for an address, a vector
+   itself. A vector inside a path is an error, since a vector is a path and
+   never an address."
+  [addr]
+  (if (vector? addr)
+    (do (dotimes [i (count addr)]
+          (when (vector? (nth addr i))
+            (throw (ex-info (str "A path's addresses cannot be vectors: " (pr-str addr)) {:path addr}))))
+        addr)
+    [addr]))
+
+(defn- single-address
+  "addr, which f takes as one address: a vector, a path, is an error."
+  [f addr]
+  (when (vector? addr)
+    (throw (ex-info (str f " takes a single address, not the path " (pr-str addr)) {:addr addr})))
+  addr)
 
 (defn get-submap
   "The choice map at an address or path (EMPTY when absent)."
@@ -163,47 +182,64 @@
 ;; ---------------------------------------------------------------------------
 
 (defn set-value
-  "cm with the leaf value v at a single address (fast path for handlers)."
+  "cm with the leaf value v at a single address (fast path for handlers; a
+   path is an error: set-choice takes paths)."
   [cm addr v]
+  (single-address "set-value" addr)
   (cond (instance? Node cm) (->Node (assoc (:m cm) addr (->Value v)))
         (nil? cm) (->Node {addr (->Value v)})
         :else (throw (ex-info "set-value needs a node" {:addr addr}))))
 
-(defn set-submap
-  "cm with the choice map sub at a single address."
-  [cm addr sub]
-  (->Node (assoc (:m (or cm EMPTY)) addr sub)))
-
 (defn remove-submap
-  "cm without anything at a single address."
+  "cm without anything at a single address (a path is an error)."
   [cm addr]
+  (single-address "remove-submap" addr)
   (if (instance? Node cm) (->Node (dissoc (:m cm) addr)) cm))
 
+(defn- put-at
+  "cm with leaf at path p, from p's i-th address on."
+  [cm p ^long i leaf]
+  (if (== i (count p))
+    leaf
+    (do (when (has-value? cm)
+          (throw (ex-info "set-choice: the path descends through a leaf value" {:path p :leaf (get-value cm)})))
+        (let [m (:m (or cm EMPTY))
+              a (nth p i)]
+          (->Node (assoc m a (put-at (get m a EMPTY) p (inc i) leaf)))))))
+
 (defn set-choice
-  "cm with value v (a leaf value or a choice map) at an address or path.
-   Descending through an existing leaf throws rather than discarding it."
+  "cm with value v (a leaf value or a choice map) at an address or path; at
+   the empty path, v is the whole choice map. Descending through an existing
+   leaf throws rather than discarding it."
   [cm addr v]
-  (let [[a & more] (path addr)]
+  (let [p (path addr)]
     (when (nil? v)
-      (throw (ex-info (str "A choice value cannot be nil (at " (path addr) ")") {:path (path addr)})))
-    (when (has-value? cm)
-      (throw (ex-info "set-choice: the path descends through a leaf value"
-                      {:path (path addr) :leaf (get-value cm)})))
-    (let [m (:m (or cm EMPTY))]
-      (->Node (assoc m a (if more
-                           (set-choice (get m a EMPTY) (vec more) v)
-                           (if (choicemap? v) v (->Value v))))))))
+      (throw (ex-info (str "A choice value cannot be nil (at " p ")") {:path p})))
+    (put-at cm p 0 (if (choicemap? v) v (->Value v)))))
+
+(defn set-submap
+  "cm with the choice map sub at an address or path, as get-submap reads
+   it (Gen.jl's set_submap!). Descending through an existing leaf throws
+   rather than discarding it."
+  [cm addr sub]
+  (when-not (choicemap? sub)
+    (throw (ex-info (str "set-submap takes a choice map, not a " (type sub) " (set-choice takes values)")
+                    {:addr addr})))
+  (set-choice cm addr sub))
 
 (defn merge
-  "The union of two choice maps whose addresses are disjoint (Gen.jl's merge).
-   Throws when both hold a value at an address, or a value in one sits on a
-   path the other descends through."
-  [x y]
-  (cond (empty? x) y
-        (empty? y) x
-        (or (has-value? x) (has-value? y))
-        (throw (ex-info "merge: the choice maps overlap" {:left (to-map x) :right (to-map y)}))
-        :else (->Node (merge-with merge (:m x) (:m y)))))
+  "The union of choice maps whose addresses are disjoint (Gen.jl's merge;
+   EMPTY of none). Throws when two hold a value at an address, or a value
+   in one sits on a path another descends through."
+  ([] EMPTY)
+  ([x] x)
+  ([x y]
+   (cond (empty? x) y
+         (empty? y) x
+         (or (has-value? x) (has-value? y))
+         (throw (ex-info "merge: the choice maps overlap" {:left (to-map x) :right (to-map y)}))
+         :else (->Node (merge-with merge (:m x) (:m y)))))
+  ([x y & more] (reduce merge (merge x y) more)))
 
 (defn override
   "y laid over x: where both have entries, y's replaces x's whole subtree;

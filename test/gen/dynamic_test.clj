@@ -17,7 +17,8 @@
             [gen.laws :as laws]
             [gen.random :as rng]
             [gen.selection :as sel]
-            [gen.test-support :as ts]))
+            [gen.test-support :as ts]
+            [gen.trace :as trace]))
 
 ;; ---------------------------------------------------------------------------
 ;; Models
@@ -309,6 +310,22 @@
 ;; ---------------------------------------------------------------------------
 ;; Splices without an address; middleware and dispatch
 ;; ---------------------------------------------------------------------------
+
+;; Gen.jl's trace[addr] at a call (M5's G1), as dynamic_dsl.jl:487 asks it
+(deftest a-call's-return-value-is-at-its-address
+  (doseq [static? [false true]]
+    (let [bar (if static? (gen ^:static [r] (let [_ (trace :a (d/normal 0 1))] r)) (gen [r] (trace :a (d/normal 0 1)) r))
+          foo (if static?
+                (gen ^:static [] (let [_ (splice :x bar 1) _ (splice [:y :z] bar 2) _ (trace :u (d/normal 0 1))] 7))
+                (gen [] (splice :x bar 1) (splice [:y :z] bar 2) (trace :u (d/normal 0 1)) 7))
+          tr (gfi/simulate foo [] (rng/key 0))]
+      (testing (if static? "static" "dynamic")
+        (is (= 1 (tr :x)))
+        (is (= 2 (tr [:y :z])) "a call at a path")
+        (is (= 7 (tr [])) "the trace's own, at the empty path")
+        (is (= (ts/host (tr [:y :z :a])) (ts/host ((trace/subtrace tr [:y :z]) :a))))
+        (is (nil? (trace/subtrace tr :y)) "a prefix of a call's path is not a call")
+        (is (nil? (trace/subtrace tr :u)) "nor is a choice")))))
 
 (deftest splices-without-an-address-share-the-namespace
   (let [tr (gfi/simulate shared-namespace [] (rng/key 1))]

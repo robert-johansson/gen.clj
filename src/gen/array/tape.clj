@@ -181,6 +181,16 @@
    :cos (fn [g [x] _ need] (grads need (array/negate (* g (array/sin x)))))
    :tan (fn [g _ out need] (grads need (* g (+ 1.0 (* out out)))))
    :tanh (fn [g _ out need] (grads need (* g (- 1.0 (* out out)))))
+   :sinh (fn [g [x] _ need] (grads need (* g (array/cosh x))))
+   :cosh (fn [g [x] _ need] (grads need (* g (array/sinh x))))
+   ;; √(1 - x²) as √((1 - x)(1 + x)), which does not cancel near ±1
+   :arcsin (fn [g [x] _ need] (grads need (/ g (array/sqrt (* (- 1.0 x) (+ 1.0 x))))))
+   :arccos (fn [g [x] _ need] (grads need (array/negate (/ g (array/sqrt (* (- 1.0 x) (+ 1.0 x)))))))
+   :arctan (fn [g [x] _ need] (grads need (/ g (+ 1.0 (* x x)))))
+   ;; atan2(y, x): ∂y = x/(x² + y²), ∂x = -y/(x² + y²) (NaN at the origin)
+   :arctan2 (fn [g [y x] _ need]
+              (let [r2 (+ (* x x) (* y y))]
+                (grads need (* g (/ x r2)) (array/negate (* g (/ y r2))))))
    :erf (fn [g [x] _ need] (grads need (* g (* (/ 2.0 sqrt-pi) (array/exp (array/negate (* x x)))))))
    :erfinv (fn [g _ out need] (grads need (* g (* (/ sqrt-pi 2.0) (array/exp (* out out))))))
    :where (fn [g [c] _ need] (grads need nil (array/where c g 0.0) (array/where c 0.0 g)))})
@@ -276,7 +286,13 @@
   (-shape [_ x] (let [v (primal x)] (if (array/host? v) [] (p/-shape inner v))))
   (-dtype [_ x] (primal-dtype inner (primal x)))
 
-  (-full [_ shape value dtype] (p/-full inner shape value dtype))
+  (-full [t shape value dtype]
+    ;; a tracked fill value is broadcast: its cotangent is the result's,
+    ;; summed back to its shape (a scalar's: the sum), in its own dtype
+    (let [v (primal value)
+          vd (primal-dtype inner v)]
+      (record t (p/-full inner shape v dtype) [value]
+              (fn [g _] [(cond-> (unbroadcast g (array/shape v)) (not= vd dtype) (array/astype vd))]))))
   (-arange [_ start stop step dtype] (p/-arange inner start stop step dtype))
   (-astype [t x dtype]
     (let [v (primal x)

@@ -42,6 +42,8 @@
   (is (vmap-matches? array/exp [b23] #{0}))
   (is (vmap-matches? #(array/where (array/> %1 0) %1 %2) [b3 s3] #{0}))
   (is (vmap-matches? array/pow [(array/abs b3) 2.0] #{0}))
+  (is (vmap-matches? array/atan2 [b3 s3] #{0}) "atan2: a per-particle y, a shared x")
+  (is (vmap-matches? array/asin [(array/tanh b23)] #{0}))
   (is (vmap-matches? #(array/+ % 1.0) [bs] #{0})))
 
 (deftest reductions-and-scans
