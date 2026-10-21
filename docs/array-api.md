@@ -306,8 +306,19 @@ needs, taken from GenMLX's measured call counts
     Maps in the arguments match whatever order they list their keys in (an
     independent review found arguments swapped when they did not, fixed
     2026-10-19). MLX keeps its compiled graphs per thread, so a compiled
-    function called from another thread traces there again (bean
-    genclj-hfwo).
+    function called from another thread traces there again.
+  - **Threads** (bean genclj-hfwo). A compiled function may be called from
+    any thread. Each MLX closure is compiled with an id of its own, never
+    reused, and freeing it erases its traces from the cache of every
+    thread that called it (`MlxRuntime.Compiled`).
+    - Before, mlx_compile's closure erased only the compiling thread's
+      trace. Another thread's trace stayed, with every constant it
+      captured, until that thread exited.
+    - That trace was keyed by the address of a deleted function, which a
+      later compiled function could be given.
+    - From a virtual thread, whose MLX cache is its carrier thread's, the
+      trace is erased after each call, so a compiled function traces every
+      call there.
   - **On the JVM backend**, it is f itself.
   - **Arguments** are arrays or trees of them, and so are results.
   - **f must not read a value on the host** (`truthy?`, `item`): that is a

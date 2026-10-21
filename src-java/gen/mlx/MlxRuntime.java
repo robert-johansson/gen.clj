@@ -229,19 +229,19 @@ public final class MlxRuntime {
    *  does: no hashing, O(1) insert and remove). */
   private static final class Owned extends PhantomReference<Object> {
     final long handle;
-    final boolean closure;
+    final Compiled compiled;
     Owned prev, next;
 
-    Owned(Object owner, long handle, boolean closure) {
+    Owned(Object owner, long handle, Compiled compiled) {
       super(owner, OWNED_QUEUE);
       this.handle = handle;
-      this.closure = closure;
+      this.compiled = compiled;
     }
   }
 
   private static final ReferenceQueue<Object> OWNED_QUEUE = new ReferenceQueue<>();
   private static final Object OWNED_LOCK = new Object();
-  private static final Owned OWNED_HEAD = new Owned(null, 0, false);
+  private static final Owned OWNED_HEAD = new Owned(null, 0, null);
   static {
     OWNED_HEAD.prev = OWNED_HEAD;
     OWNED_HEAD.next = OWNED_HEAD;
@@ -286,7 +286,7 @@ public final class MlxRuntime {
    *  it. Collects (System.gc) under array or memory pressure, since the GC
    *  does not see MLX's native memory. */
   public static void adopt(Object owner, long handle) {
-    Owned o = new Owned(owner, handle, false);
+    Owned o = new Owned(owner, handle, null);
     synchronized (OWNED_LOCK) {
       o.next = OWNED_HEAD.next;
       o.prev = OWNED_HEAD;
@@ -300,10 +300,75 @@ public final class MlxRuntime {
     if (live > arrayThreshold || fresh > NEW_BYTES || ((n & 4095) == 0 && activeMemory() > byteThreshold)) collect();
   }
 
-  /** Make owner own the mlx_closure handle (a compiled function): freed,
-   *  with mlx_closure_free, once owner is unreachable. */
-  public static void adoptClosure(Object owner, long handle) {
-    Owned o = new Owned(owner, handle, true);
+  /** A compiled function: its closure and the compile caches it has
+   *  entries in (genclj-hfwo). MLX keeps a compile cache per thread, keyed
+   *  by a function's id, and the closures mlx_compile makes erase their
+   *  entry only from the cache of the thread that compiled them. A call
+   *  from another thread traced there too, and its entry stayed, with the
+   *  graph and every constant the trace captured, under the address of a
+   *  deleted function, which a later one could be given. So a closure is
+   *  compiled with an id of its own (mlx_detail_compile), never reused,
+   *  each platform thread that applies it records its cache first, and
+   *  freeing it erases the id from every one (a cache goes with its
+   *  thread: erasing from one whose thread has exited does nothing). A
+   *  virtual thread's cache is its carrier's, which can change between
+   *  calls, so its entry is erased after each call: from a virtual thread
+   *  a compiled function traces every call. */
+  public static final class Compiled {
+    /** Ids above every address, so none meets a function MLX compiles by
+     *  its address. */
+    private static final AtomicLong IDS = new AtomicLong(1L << 62);
+    public final long handle;
+    private final long id;
+    private final ConcurrentHashMap<Thread, Long> caches = new ConcurrentHashMap<>();
+
+    /** fun (an mlx_closure, which the caller still owns) compiled. */
+    public Compiled(long fun, boolean shapeless) {
+      this.id = IDS.getAndIncrement();
+      this.handle = Mlx.mlx_detail_compile(fun, id, shapeless, MemorySegment.NULL, 0);
+    }
+
+    /** Before this thread applies the closure: its cache recorded (and
+     *  the records of threads that have exited dropped). */
+    public void enter() {
+      Thread t = Thread.currentThread();
+      if (t.isVirtual() || caches.containsKey(t)) return;
+      for (Thread other : caches.keySet()) {
+        if (!other.isAlive()) {
+          Long cache = caches.remove(other);
+          if (cache != null) MlxRaw.mlx_compile_cache_free(cache);
+        }
+      }
+      caches.put(t, Mlx.mlx_detail_compile_cache());
+    }
+
+    /** After this thread applied the closure. */
+    public void exit() {
+      if (!Thread.currentThread().isVirtual()) return;
+      long cache = Mlx.mlx_detail_compile_cache();
+      MlxRaw.mlx_detail_compile_erase(cache, id);
+      MlxRaw.mlx_compile_cache_free(cache);
+    }
+
+    /** The threads whose caches are recorded (diagnostics, tests). */
+    public int threads() {
+      return caches.size();
+    }
+
+    private void release() {
+      for (Long cache : caches.values()) {
+        MlxRaw.mlx_detail_compile_erase(cache, id);
+        MlxRaw.mlx_compile_cache_free(cache);
+      }
+      caches.clear();
+      MlxRaw.mlx_closure_free(handle);
+    }
+  }
+
+  /** Make owner own the compiled function c: freed, its entries erased from
+   *  every thread's compile cache, once owner is unreachable. */
+  public static void adoptCompiled(Object owner, Compiled c) {
+    Owned o = new Owned(owner, c.handle, c);
     synchronized (OWNED_LOCK) {
       o.next = OWNED_HEAD.next;
       o.prev = OWNED_HEAD;
@@ -328,8 +393,8 @@ public final class MlxRuntime {
       o.next = null;
       o.prev = null;
     }
-    if (o.closure) {
-      MlxRaw.mlx_closure_free(o.handle);
+    if (o.compiled != null) {
+      o.compiled.release();
       return 0;
     }
     MlxRaw.mlx_array_free(o.handle);
