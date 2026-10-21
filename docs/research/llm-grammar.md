@@ -161,7 +161,23 @@ SentencePiece (262,144; 600,436 nodes, 386 ms).
   state of a 12-token context from the start, 50 ns; a dense `logw-next`
   row, 24 µs at Qwen3's vocabulary (42–46 µs at the larger ones).
 
-@@DECODING@@
+- **A site under a grammar** (`constrained/weighted`: the LM's row times
+  the weights, renormalized; then the draw, as any completion's) at Qwen3's
+  151,936 tokens: a permissive state (all but a few tokens allowed) 338 µs,
+  most of it the passes over the row, since the normalizer of a constraint
+  that disallows few tokens is 1 less their mass (an exp for each
+  disallowed token, not each allowed one: before that, 878 µs, exp-bound);
+  a restrictive state (ten digits) 163 µs; soft weights (a general
+  potential) about 1 ms, an exp a token. The grammar's dense `logw-next`
+  row adds 25 µs (restrictive) to 117 µs (permissive). Against a llama.cpp
+  decode of 5.8 ms (M2 Max, one branch), a constrained token costs 3 to 8 %
+  more than a plain one. *Measured while other JVMs and the GPU tests ran;
+  to be measured again on a quiet machine before the owner's review.*
+- **Where the rest would come from:** the row's passes are O(vocabulary)
+  even where a grammar allows ten tokens, because `logw-next` is a dense
+  row; a sparse form of it (Decisions, 10) would make a restrictive site
+  cost its allowed tokens.
+
 
 ## Grammars as potentials
 
@@ -465,7 +481,8 @@ split one.
   sixth of the text cases reach states that bytes can complete and tokens
   cannot. **The potential contract** (`gen.llm.potential-contract`)
   exactly, and the autoregressive factorization, along random constrained
-  walks. **Misuse**: an empty language, an inexpressible one, bad
+  walks. Masks over vocabularies of more than 64 tokens (every word of the
+  bitset). **Misuse**: an empty language, an inexpressible one, bad
   vocabularies.
 - `gen.llm.bytes-test`. **Exact against brute force**: prefix and text
   probabilities of every text of up to four bytes over a vocabulary with
@@ -474,12 +491,20 @@ split one.
   completion's own frequencies** (gen.llm.token, 4,000 keys) of texts
   beginning with five strings, within 5 standard errors. `next-byte-logprobs`
   is the prefixes' ratios and sums to 1 (within the rows' float rounding).
-  A beam's lower bounds rise to the exact value.
+  A beam's lower bounds rise to the exact value, and a beam of one keeps
+  the more probable run (the mass it misses is the other's).
 - `gen.llm.constrained-test`. **The GFI laws** (general and forward-sampling,
   100 trials each) over a completion under a grammar of single-character
   tokens, one of fixed length, one of multi-byte tokens splitting a
-  character, and a gen model splicing one with an observation; and on the
-  noisy cell engine (40 trials): exact. **In the language**: 300 completions
+  character, one of free text, a gen model splicing one with an
+  observation, and a Map of them; on the noisy cell engine (40 trials):
+  exact. **The laws across generative functions** over traces revised from
+  a constrained completion to a plain one, back, and to another grammar.
+  Not the fixed-support law: under a grammar a token's support depends on
+  the tokens before it, and the law fails at its first trial, as it
+  should. **The site's distribution** against its definition (300 random
+  rows and weights: constraints disallowing few or many tokens, and soft
+  weights). **In the language**: 300 completions
   each, every text a prefix of the language's, every ended one a string of
   it. **The density exactly**: every completion of a small grammar on the
   multi-byte vocabulary enumerated (more than 40), its density computed
@@ -495,5 +520,56 @@ split one.
 - `gen.llm.token-test` (62 tests) passes unchanged: the unconstrained
   completion is the same code path.
 
-@@MUTATIONS@@
+### Mutations
+
+Each applied in a worktree of its own, the namespace's suite run, and
+reverted (2026-10-21, `scratchpad/grammar-mut/run.py`): 42 planted bugs.
+38 were caught by failing tests; three were missed at first and are
+caught by tests added for them (marked *); one shows as a hang.
+
+| Mutation | Caught by |
+|---|---|
+| UTF-8: surrogates kept | every-character-and-nothing-else |
+| UTF-8: the lead byte of two-byte characters wrong | the regex suite does not finish (it stalls in chars-accepts-exactly-the-utf8-of-its-characters): caught, as a hang |
+| derivative of a concatenation ignores a nullable head | the-syntax-agrees-with-java-util-regex, the-constructors-agree…, equal-languages…, text-not-containing-a-string (6 failures) |
+| `.` matches a newline | the-syntax-agrees-with-java-util-regex, the-constructors-agree… |
+| `\s` without `\x0B` | the same two |
+| a negated class not negated | the same two |
+| a counted repeat never counts down | the-syntax-agrees…, dfas-are-minimal, equal-languages… (5) |
+| alternatives of single bytes merged into the first | chars-accepts-exactly…, the-syntax-agrees…, equal-languages… (5) |
+| `(x{0,b}){0,d}` read as `x{0,b+d}` | nullable-repeats-normalize |
+| byte classes drop the bytes outside a set | 20 failures and errors across the regex suite |
+| a lazy `?` read as a quantifier | lazy-quantifiers-are-the-same-language |
+| Hopcroft: a split of a waiting block adds the smaller half only | the-syntax-agrees…, the-constructors-agree… |
+| no minimization | dfas-are-minimal, equal-languages…, a-transition-map-keeps-its-language… (10) |
+| the empty language keeps a dead start | every-state-is-live-and-reached |
+| a block accepts as the first state | 9 failures across the regex suite |
+| trie: one byte too few in common | the-trie-holds-the-vocabulary |
+| sweep: a dead subtree entered | byte- and text-masks-match-brute-force, the-weights-are-consistent |
+| sweep: tokens with no bytes never allowed | byte-masks-match-brute-force |
+| grammar: tokens into states tokens cannot complete allowed | a-token-into-a-state-tokens-cannot-complete-is-not-allowed, both masks properties, the-weights-are-consistent |
+| grammar: only the start explored | the masks properties, a-dead-context-has-no-next-weights… (5) |
+| logw-next: the end allowed in live states | the-weights-are-consistent |
+| allowed?: the wrong bit (t & 31) | *masks-over-a-vocabulary-of-many-words (every random vocabulary had fewer than 32 tokens) |
+| log-mass: the tokens at a node, not under it | marginals-equal-brute-force, the-marginal-is-the-completions, the-next-byte… (44) |
+| marginals: a text ends where it is a prefix | marginals-equal-brute-force, the-next-byte… (41) |
+| marginals: end tokens counted as text | end-tokens-hold-no-text, the-next-byte… (39) |
+| marginals: the beam keeps the least probable | *a-beam-keeps-the-most-probable-runs |
+| weighted: an end token weighs as its own token, not the end | completions-never-leave-the-language and the laws (37) |
+| weighted: not renormalized | the laws, the exact densities (73) |
+| the normalizer's complement forgets the disallowed mass | a-permissive-grammar-scores-exactly, the laws (42) |
+| soft weights read as a constraint's | weighted-is-the-renormalized-product |
+| the disallowed mass takes end tokens by their own entries | weighted-is-the-renormalized-product, the-density-is-the-local-one, local-is-not-global |
+| draw-next: drawn from the LM's row, scored by the site's | completions-never-leave-the-language, the laws (25) |
+| run-scores: the weights one token late | the laws (34) |
+| draw-next: -Inf after a token of weight 0 | the update weight laws (NaN) |
+| run-scores: -Inf after a token of weight 0 | *generate-weighs-the-forced-tokens-by-their-sites (no GFI weight sees it: the trace's scores do) |
+| dead?: only the last token | the laws (11 errors: weights asked of a dead context) |
+| conditional-weight without the whole-sequence weight | local-is-not-global |
+| conditional-weight with the end token in the text | local-is-not-global |
+| check-potential: no vocabulary check | misuse-is-loud |
+| token.clj: assess ignores the potential | the laws (14) |
+| token.clj: draws ignore the potential | completions-never-leave-the-language, the laws (25) |
+| token.clj: a run of known tokens ignores the potential | the laws (28) |
+
 
