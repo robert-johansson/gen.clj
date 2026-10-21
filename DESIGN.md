@@ -356,6 +356,22 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
   bootstrap, masked or custom proposals, ESS-gated resampling, an
   estimate unbiased in exp space, particles convertible to the
   completion's traces.
+- **As built (2026-10-21, genclj-q38h; for the owner's review,
+  `docs/research/llm-grammar.md`).** Grammar-constrained decoding, on our
+  own regex engine (no instaparse). `gen.llm.regex` builds regular
+  languages over bytes as terms (characters as UTF-8; intersection and
+  complement) and their minimal DFAs by Brzozowski derivatives
+  (`gen.llm.dfa`); its regex syntax agrees with java.util.regex where it
+  accepts. `gen.llm.grammar` reads a language through an LM's vocabulary
+  with exact masks (every state its tokens reach explored; a token allowed
+  only into a state tokens can complete), swept over a trie of the tokens'
+  bytes (`gen.llm.bytes`), and is a potential (`gen.llm.potential`).
+  `(token/completion m {:potential p})` is the completion under a potential:
+  each token's distribution the LM's row times the potential's weights,
+  renormalized at its site (`gen.llm.constrained`), whose GFI laws hold;
+  `constrained/conditional-weight` is a trace's importance weight for the
+  LM conditioned on the potential. `gen.llm.bytes` also gives a text's
+  probability over its tokenizations.
 
 ## 7. Platform
 
@@ -376,7 +392,7 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
 | test.check (official) | yes | `:test`. GFI laws as properties, run with clojure.test `defspec` |
 | malli (official) | edges only | `gen.dev` instrumentation; LLM structured output (schema → grammar) |
 | clojure.spec | no | Overlaps malli; specs aren't data; spec2 has been alpha for years |
-| instaparse (official) | decide in M3 | LLM grammar module only |
+| instaparse (official) | no (recommended, PROVISIONAL: §9, grammar-constrained decoding) | our own regex → DFA engine (`gen.llm.regex`) |
 | promesa | no | The core is synchronous; JVM tokenizers are synchronous; virtual threads cover concurrency |
 | SCI | later | Sandboxed eval of LLM-generated code (program synthesis) |
 | clojure.math (built in) | yes | Replaces GenMLX's ~370 `js/Math` calls |
@@ -1219,6 +1235,49 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     (`gen.mlx.budget-bytes`, as MLX's own limit), the headroom a sixteenth
     (`gen.mlx.budget-headroom-bytes`). The names above are recommendations
     too.
+- **Grammar-constrained decoding** (2026-10-21, agent; **for the owner's
+  review**, PROVISIONAL while the owner is away;
+  `docs/research/llm-grammar.md`):
+  - *Our own engine, no instaparse* (DESIGN §8). Masks ask whether a text
+    with a token appended is still a prefix of the language; a DFA answers
+    by one transition a byte, shared by every token through the trie of
+    their bytes, while instaparse has no parser state to carry from token
+    to token, so each token would be a reparse. GenMLX used it only to read
+    the regex syntax, a 150-line descent here. Measured at Qwen3's 151,936
+    tokens: every mask of a 117-state tool-call grammar in 5 ms, of a
+    132-state JSON object in 44 ms.
+  - *Languages over bytes, characters as UTF-8*, because tokens are byte
+    strings that cross character boundaries; `[^"]` admits every character,
+    not printable ASCII (GenMLX's genmlx-6dax). The regex syntax is
+    java.util.regex's where it accepts, and loud elsewhere.
+  - *Exact masks*: a token is allowed only into a state some sequence of
+    the vocabulary's tokens completes, every state the tokens reach
+    explored when the grammar is made; so a grammar's `prefix` is 0 or -Inf
+    by reachability and a constrained completion never strands. An empty
+    language and one the vocabulary cannot spell are loud.
+  - *What a grammar holds* is the text: the tokens' bytes concatenated, as
+    the LM's decode (special tokens by their rendered bytes, as GenMLX's
+    tool calls relied on), read byte by byte, so a token may end inside a
+    character. A completion's end tokens are not text: the end is allowed
+    where the text is complete. A token with no bytes is allowed wherever
+    the text may go on.
+  - *The middleware is the completion's `:potential` option*: the token
+    GF's transitions are written once and the potential reweighs each
+    site's distribution (row times weights, renormalized; an end token
+    takes the end's weight), the semantics in `gen.llm.constrained`
+    (`weighted`, also for token SMC's masked proposal).
+  - *Its GFI weights are the local distribution's*, q(x) = Π_i p(x_i | x_<i)
+    exp(w_i(x_i)) / Z_i, which is not the LM conditioned on the potential,
+    π(x) ∝ p(x) exp(w(x)): renormalizing token by token favors sequences
+    whose early tokens leave little mass disallowed (tested on the toy
+    engine). `constrained/conditional-weight` is log p(x) + w(x) - log q(x),
+    the importance weight for π, whose mean is the probability that the
+    LM's completion satisfies the grammar.
+  - *Weight 0*: a constrained or kept token of weight 0 scores -Inf and the
+    sites after it are the LM's rows, so moves to it are rejected, never
+    NaN; a context of weight with no token allowed is loud.
+  - *Byte-level marginals* (`bytes/byte-lm`): a text's probability over
+    every tokenization, exact by default, a beam for a lower bound.
 - **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
   `(array/item x)`, the namespace's last segment, as the Clojure style guide
   has it. It replaced `a`, which the owner found ugly (2026-10-18). The
