@@ -980,6 +980,43 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     a choice included), a splice without an address, an untraced draw, an
     address used twice or one under another: each a compile error that
     names the form.
+  - **Macros and quoted data (M5, G11 and G12; owner, 2026-10-21):** a
+    binding's head, and the return expression's, is macroexpanded before
+    it is classified, as `gen` expands a dynamic body, so a user macro that
+    expands to a `trace` or a `splice` is that call; a computation stays as
+    written, its expansion checked as it is. Only the head is expanded, so
+    a call hidden in a macro inside an expression is the compiler's error
+    (trace is unbound there), as before: catching it would take a walk
+    that knows the expression's locals. Quoted data is data: it may mention
+    `trace`, and its symbols are no inputs.
+  - **Static rewrites (M5, G2, genclj-lgij; owner, 2026-10-21; to build).**
+    The rewrites live in the static analysis only; the body fn, the dynamic
+    semantics, is unchanged, and the static law runs over every rewritten
+    body.
+    - *A computed address is a node of its own kind (B1),* not Gen.jl's
+      `call_at`/`choice_at` nodes: `(trace [:x i] d)` stays a trace node
+      and `(splice [:x i] gf …)` a call node. The address is the longest
+      leading run of constant keys (the first key must be one, as Gen.jl
+      requires a Symbol) followed by keys computed from the node's inputs;
+      it runs as the dynamic body does (one site, its key, its address);
+      it is skipped only when its inputs, the keys' among them, are
+      unchanged and no constraint or selection reaches its previous path;
+      assess and the overlap check see its constant prefix, as for a
+      splice. Gen.jl's rewrite into a splice would split the key, so
+      `(gen [i] …)` and `(gen ^:static [i] …)` of one source would draw
+      different values, and gen.dynamic would load gen.combinators.
+    - *A call nested in an expression is hoisted* into a node bound to a
+      fresh name, placed before the binding in Clojure's evaluation order
+      (arguments left to right, the innermost call first), where it is
+      evaluated exactly once: a function call's arguments, a vector, map
+      or set literal's elements, and an `if`'s test (so `when`'s, and
+      `cond`'s first). Not a nested `let`'s init. The hoisted call may not
+      read a local bound inside the expression.
+    - *A call in a branch* (an `if`'s, a later `cond` test, `and`, `or`)
+      stays a compile error naming the call and why. Gen.jl hoists it and
+      runs it whether or not the branch is taken, so its static function is
+      a different model from the same dynamic body: a recorded difference
+      (D16, `docs/research/genjl-test-suite.md`).
   - **Compiled scores and a lint, in M4 (owner, 2026-10-20).** A static
     function's graph gives its log density as a pure function of its
     choices, which HMC, MALA, MAP and gradients use for static models, so
