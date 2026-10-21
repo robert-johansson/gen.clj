@@ -5,8 +5,8 @@ m3-tgf, over the LM protocol (`docs/research/llm-lm-protocol.md`) and the
 foundations the owner decided on 2026-10-20 (DESIGN.md §9: score once, the
 trie owns the branches, host draws). The choices that are the owner's
 (addresses, arguments, end and length semantics, the return value, names)
-are marked **Recommendation**; the owner being away, the lead records them
-PROVISIONAL in DESIGN.md §9.*
+are marked **Recommendation**; the owner confirmed them all on 2026-10-21
+(DESIGN.md §9).*
 
 ## What exists
 
@@ -155,8 +155,8 @@ gen.batched falls back all the same: the check is there for the reason.)
    the completion; the end tokens default to the LM's `:eog` (every
    end-of-generation token, which the GGUF names), `:end-tokens` replaces
    them, and `#{}` gives completions of exactly max-tokens. The option was
-   `:eos` as first built; renamed 2026-10-21, PROVISIONAL (owner to
-   confirm), because it is a set while the vocabulary's `:eos` is one token
+   `:eos` as first built; renamed 2026-10-21 (confirmed by the owner
+   that day), because it is a set while the vocabulary's `:eos` is one token
    (review-lm). Alternatives: `:eog`, the vocabulary's name for its set. A completion that reaches
    max-tokens without one simply stops. Alternatives: the end token kept
    out of the return value, or GenMLX's single EOS id.

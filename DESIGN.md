@@ -338,10 +338,22 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
   on those backends). So on CUDA and x86 CPU, exact inference (scores, SMC
   weights, comparisons across devices) wants float (F16/BF16) weights;
   quantized ones are for speed.
-- **As built (2026-10-20, genclj-mse0; for the owner's review,
-  `docs/research/llm-lm-protocol.md`).** `gen.llm.lm` is the LM protocol
-  (vocab, encode, decode, token-bytes, byte-vocab, next-logprobs,
-  batch-next-logprobs, score) over any Branching engine. It is
+- **Float weights on CUDA (measured 2026-10-21, fenrir; genclj-kw88).** Two
+  computations of one distribution differ by at most 0.13 (Qwen3-0.6B f16),
+  0.15 (Qwen3.5-0.8B BF16) and 0.26 (Gemma-3-270M F16; 0.078 as F32,
+  converted from the F16 file without loss); branches without a sliding
+  window, past 512 tokens, by at most 0.11. Past Gemma's sliding window they
+  differ by up to 1.3 nats as F16 and 0.68 as F32 (median 0.02 to 0.05;
+  the worst, a fork at 1,000 tokens of the code text advanced, is the same
+  case in both), where llama.cpp's x86 CPU build gives 0.25 and Metal 0.28.
+  F16's half-precision matrix products account for half of it; the rest is
+  a CUDA path past the window, not found yet (flash attention's kernel and
+  the f16 KV cache are the suspects; watch bean genclj-gjiz).
+- **As built (2026-10-20, genclj-mse0; approved under the owner's
+  delegation, 2026-10-21; `docs/research/llm-lm-protocol.md`).**
+  `gen.llm.lm` is the LM protocol (vocab, encode, decode, token-bytes,
+  byte-vocab, next-logprobs, batch-next-logprobs, score) over any
+  Branching engine. It is
   content-addressed: a trie of token prefixes (`gen.llm.trie`) records what
   the engine has read, each token with its score, and the cache
   (`gen.llm.cache`) owns every live branch, bounded in branches and in KV
@@ -350,7 +362,7 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
   (a call's one-token reads are one advance), with no autobatcher
   (recommended), and the same calls on a new engine give the same results,
   bit for bit.
-- **As built (2026-10-21, genclj-0cvv; for the owner's review,
+- **As built (2026-10-21, genclj-0cvv; confirmed by the owner, 2026-10-21,
   `docs/research/llm-token-gf.md`).** `gen.llm.token/completion` is the
   token generative function over an LM: arguments `[prompt max-tokens]`,
   token i at address i, until an end token (kept) or max-tokens; every GFI
@@ -358,7 +370,7 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
   host draws by `token/dist` from `(fold-in key i)`. The GFI laws hold
   exactly on the toy engines, also on one whose reads differ with their
   shapes as llama.cpp's do.
-- **As built (2026-10-21, genclj-loyp; for the owner's review,
+- **As built (2026-10-21, genclj-loyp; confirmed by the owner, 2026-10-21,
   `docs/research/llm-token-smc.md`).** `gen.llm.potential` weighs token
   sequences after genlm-control's `Potential` (prefix, complete, the next
   token's weights over the vocabulary and the end). `gen.llm.smc` is token
@@ -367,7 +379,7 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
   bootstrap, masked or custom proposals, ESS-gated resampling, an
   estimate unbiased in exp space, particles convertible to the
   completion's traces.
-- **As built (2026-10-21, genclj-q38h; for the owner's review,
+- **As built (2026-10-21, genclj-q38h; confirmed by the owner, 2026-10-21,
   `docs/research/llm-grammar.md`).** Grammar-constrained decoding, on our
   own regex engine (no instaparse). `gen.llm.regex` builds regular
   languages over bytes as terms (characters as UTF-8; intersection and
@@ -403,7 +415,7 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
 | test.check (official) | yes | `:test`. GFI laws as properties, run with clojure.test `defspec` |
 | malli (official) | edges only | `gen.dev` instrumentation; LLM structured output (schema → grammar) |
 | clojure.spec | no | Overlaps malli; specs aren't data; spec2 has been alpha for years |
-| instaparse (official) | no (recommended, PROVISIONAL: §9, grammar-constrained decoding) | our own regex → DFA engine (`gen.llm.regex`) |
+| instaparse (official) | no (the owner, 2026-10-21: §9, grammar-constrained decoding) | our own regex → DFA engine (`gen.llm.regex`) |
 | promesa | no | The core is synchronous; JVM tokenizers are synchronous; virtual threads cover concurrency |
 | SCI | later | Sandboxed eval of LLM-generated code (program synthesis) |
 | clojure.math (built in) | yes | Replaces GenMLX's ~370 `js/Math` calls |
@@ -1175,9 +1187,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     [corrected 2026-10-21, agent: about 335 µs on average over keys, the
     78 µs being one key's; still a fourteenth of a `categorical-logits`
     draw].
-- **The token generative function** (2026-10-21, agent; **for the owner's
-  review**, PROVISIONAL while the owner is away;
-  `docs/research/llm-token-gf.md`):
+- **The token generative function** (2026-10-21, agent; confirmed by the
+  owner, 2026-10-21; `docs/research/llm-token-gf.md`):
   - `gen.llm.token/completion` over an LM is a generative function of
     `[prompt max-tokens]` (a token vector, a non-negative integer, both
     arguments so update can change them; together within the LM's
@@ -1188,7 +1199,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     completion. The end tokens default to the LM's `:eog`; `:end-tokens`
     replaces them, `#{}` gives exactly max-tokens. The return value is the
     token vector, the end token included.
-  - **PROVISIONAL (owner to confirm), 2026-10-21:** the option is
+  - **Confirmed by the owner, 2026-10-21:** the option is
     `:end-tokens`, not `:eos` as first built. It is a set, while
     `(lm/vocab m)`'s `:eos` is a single token, so
     `{:eos #{(:eos (lm/vocab m))}}` read as a pun (review-lm's
@@ -1220,9 +1231,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     store; another completion's trace is revised from its choices), and
     satisfies the general, forward-sampling, fixed-support and across law
     sets.
-- **Token SMC and potentials** (2026-10-21, agent; **for the owner's
-  review**, PROVISIONAL while the owner is away;
-  `docs/research/llm-token-smc.md`):
+- **Token SMC and potentials** (2026-10-21, agent; confirmed by the owner,
+  2026-10-21; `docs/research/llm-token-smc.md`):
   - A potential (`gen.llm.potential`) has `prefix` and `complete` log
     weights of a token context and `logw-next`, a float array of n-vocab
     + 1 entries (the end an index past the vocabulary), consistent as
@@ -1241,9 +1251,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     resampling ESS-gated at n/2, systematic by default. One
     `lm/batch-next-logprobs` a step; particles are token vectors and the
     LM's trie owns the branches.
-  - **The host pool (2026-10-21, m3-par; PROVISIONAL, owner to
-    confirm):** each particle's proposal row and draw, pure functions of
-    its row, twist and key, run on a fixed pool of daemon threads,
+  - **The host pool (2026-10-21, m3-par; confirmed by the owner,
+    2026-10-21):** each particle's proposal row and draw, pure functions
+    of its row, twist and key, run on a fixed pool of daemon threads,
     collected in particle order under the caller's bindings, so a run is
     the calling thread's alone bit for bit at every pool size; the LM's,
     the potential's and a proposal function's calls stay on the calling
@@ -1259,8 +1269,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     probabilities from the engine (a draw by binary search;
     `docs/research/llm-token-smc.md`).
 - **A hybrid model's steps split over its recurrent cells** (2026-10-21,
-  agent; **PROVISIONAL (owner to confirm)**; `docs/research/llm-branching.md`,
-  Recurrent states and split steps):
+  agent; confirmed by the owner, 2026-10-21, with its default by device below;
+  `docs/research/llm-branching.md`, Recurrent states and split steps):
   - A recurrent or hybrid model's decode copies every state from the
     lowest to the highest cell its sequences land on (llama.cpp's
     `find_slot` and `build_rs`): on Qwen3.5-0.8B (Metal) 3.5 ms for each
@@ -1288,8 +1298,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     `:split-recurrent?`, the diagnostics `llama/step-splits`, the namespace
     `gen.llm.llama.recurrent`. An upstream llama.cpp issue (copy only the
     states that moved) is drafted for the owner, not filed (genclj-g5gx).
-- **The shared memory budget** (2026-10-21, agent; **PROVISIONAL (owner to
-  confirm)**; genclj-zztc; `docs/research/llm-branching.md`, The shared
+- **The shared memory budget** (2026-10-21, agent; confirmed by the owner,
+  2026-10-21; genclj-zztc; `docs/research/llm-branching.md`, The shared
   memory budget):
   - MLX's memory limit is no cap, and the machine runs short well below
     it with a model's weights mapped beside MLX's arrays. gen.clj keeps a
@@ -1309,9 +1319,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     (`gen.mlx.budget-bytes`, as MLX's own limit), the headroom a sixteenth
     (`gen.mlx.budget-headroom-bytes`). The names above are recommendations
     too.
-- **Grammar-constrained decoding** (2026-10-21, agent; **for the owner's
-  review**, PROVISIONAL while the owner is away;
-  `docs/research/llm-grammar.md`):
+- **Grammar-constrained decoding** (2026-10-21, agent; confirmed by the
+  owner, 2026-10-21; `docs/research/llm-grammar.md`):
   - *Our own engine, no instaparse* (DESIGN §8). Masks ask whether a text
     with a token appended is still a prefix of the language; a DFA answers
     by one transition a byte, shared by every token through the trie of
@@ -1337,8 +1346,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     character. A completion's end tokens are not text: the end is allowed
     where the text is complete. A token with no bytes is allowed wherever
     the text may go on.
-  - *A grammar knows its end tokens* (**PROVISIONAL, owner to confirm**,
-    2026-10-21, after the round-3 review's R2):
+  - *A grammar knows its end tokens* (2026-10-21, after the round-3
+    review's R2; confirmed by the owner, 2026-10-21):
     `(grammar/grammar m language {:end-tokens ts})`, by default the LM's
     `:eog` (none for a byte vocabulary). It leaves them out of the text,
     its trie and its liveness, so a language that needs an end token's
@@ -1479,6 +1488,13 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   and about 0.26 on CUDA with float weights (f16: max 0.13). With quantized
   weights on CUDA the contract's noise checks are skipped with a note naming
   DESIGN §6's measurement, never given a band wide enough to hide it.
+  - **With the float models measured (owner, 2026-10-21):** CUDA's band is
+    0.53, twice Gemma-3-270M F16's 0.26, and 0.23 for long branches without
+    a sliding window. Past a sliding window on CUDA the noise checks are
+    skipped with a note, as for quantized weights: the measured 1.3 nats
+    would need a band of 2.6. A watch bean (genclj-gjiz) keeps the cause,
+    and an upstream report if it is llama.cpp's. The alternatives were the
+    rule's 2.6 and investigating before M3's close.
 - **Git:** the main repo is public-ready, with `.beans/`, `.beans.yml`,
   `.claude/` and `*.pdf` gitignored. Its remote is the private
   `robert-johansson/gen.clj` (the owner, 2026-10-21, at M4's close: private

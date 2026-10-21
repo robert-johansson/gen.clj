@@ -3,8 +3,8 @@
 *2026-10-21, bean genclj-loyp (M3), built by an agent on branch m3-smc
 over the token generative function (`docs/research/llm-token-gf.md`) and
 the LM protocol (`docs/research/llm-lm-protocol.md`). The choices that are
-the owner's are marked **Recommendation**; the owner being away, the lead
-records them PROVISIONAL in DESIGN.md §9.*
+the owner's are marked **Recommendation**; the owner confirmed them all on
+2026-10-21 (DESIGN.md §9).*
 
 ## What exists
 
@@ -243,7 +243,7 @@ the calling thread.
   given: a step waits for its tasks, queued behind the one that waits, so
   the pool can deadlock.
 
-**PROVISIONAL (owner to confirm), 2026-10-21:**
+**Confirmed by the owner, 2026-10-21:**
 - **Ownership:** `gen.llm.smc` owns one shared pool, made on first use, of
   daemon threads named `gen.llm.smc host-N`; never the common pool. A
   caller may pass its own. Alternatives: the LM owning it (it would serve
