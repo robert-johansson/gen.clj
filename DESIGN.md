@@ -1174,6 +1174,51 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     resampling ESS-gated at n/2, systematic by default. One
     `lm/batch-next-logprobs` a step; particles are token vectors and the
     LM's trie owns the branches.
+- **A hybrid model's steps split over its recurrent cells** (2026-10-21,
+  agent; **PROVISIONAL (owner to confirm)**; `docs/research/llm-branching.md`,
+  Recurrent states and split steps):
+  - A recurrent or hybrid model's decode copies every state from the
+    lowest to the highest cell its sequences land on (llama.cpp's
+    `find_slot` and `build_rs`): on Qwen3.5-0.8B (Metal) 3.5 ms for each
+    state in the span not read. The LM's cached entries sit between a
+    step's cells, so its batched reads cost 3.6 times raw operations.
+  - `gen.llm.llama.recurrent` (pure, internal, pinned to llama.cpp
+    620d222) replays where llama.cpp puts the states, and the llama.cpp
+    engine splits a step into decodes over runs of adjacent cells when the
+    replay finds it cheaper: only for recurrent and hybrid models, and as a
+    function of the engine's own operations, never of timing, so the same
+    calls give the same rows bit for bit. Measured: the LM's 8 batched
+    reads 106 → 32 ms (raw 26), 32 reads 186 → 98 ms (raw 78).
+  - The replay stops (one decode a step from then on) after a decode that
+    fails other than for room, and when a slot's state position
+    (`llama_memory_seq_pos_min`) disagrees with it, loudly on System.err.
+    Where a state sits changes no result, only the cost.
+  - Names for the owner: the property `gen.llama.split-recurrent` (default
+    true; false keeps one decode a step, exactly as before), the info key
+    `:split-recurrent?`, the diagnostics `llama/step-splits`, the namespace
+    `gen.llm.llama.recurrent`. An upstream llama.cpp issue (copy only the
+    states that moved) is drafted for the owner, not filed (genclj-g5gx).
+- **The shared memory budget** (2026-10-21, agent; **PROVISIONAL (owner to
+  confirm)**; genclj-zztc; `docs/research/llm-branching.md`, The shared
+  memory budget):
+  - MLX's memory limit is no cap, and the machine runs short well below
+    it with a model's weights mapped beside MLX's arrays. gen.clj keeps a
+    budget of its own, shared by MLX and native engines.
+  - `gen.array.memory` (L0, beside the backends; plain numbers, no native
+    library) holds reservations: `reserve!`, `release!`, `reserved`,
+    `reservations-held`. A llama.cpp engine reserves its footprint
+    (`:footprint` in its info: its weights once, as `llama_model_size`,
+    and the KV-cache, recurrent-state, output and compute buffers
+    llama.cpp reports allocating) when made and releases it when closed.
+  - The MLX backend checks after every evaluation, in the membrane, that
+    its active memory fits the budget less the reservations and a
+    headroom; past it, it collects and checks again, then throws
+    `:mlx-budget-exceeded` with the numbers. `budget` and
+    `set-budget! {:bytes :headroom}` in `gen.backend.mlx`.
+  - Defaults for the owner: the budget half the physical memory
+    (`gen.mlx.budget-bytes`, as MLX's own limit), the headroom a sixteenth
+    (`gen.mlx.budget-headroom-bytes`). The names above are recommendations
+    too.
 - **gen.array's alias is `array` (owner, 2026-10-19):** `(array/shape x)`,
   `(array/item x)`, the namespace's last segment, as the Clojure style guide
   has it. It replaced `a`, which the owner found ugly (2026-10-18). The
