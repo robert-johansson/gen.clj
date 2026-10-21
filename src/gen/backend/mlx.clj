@@ -369,6 +369,15 @@
            ~@(map (fn [raw] `(release ~raw)) raws)
            ~@(map (fn [x] `(fence ~x)) xs))))))
 
+(defn- retained
+  "A new reference to the handle of x (an MlxArray, or a host scalar as b's
+   default dtype) for MLX to own, as a closure's result: x kept reachable
+   until the reference is made (a host scalar's array, made for the call,
+   would be unreachable as soon as its handle was read). MLX errors name
+   op."
+  ^long [b op x]
+  (long (with-operands b op [h x nil] (MlxRuntime/retain h))))
+
 ;; ---------------------------------------------------------------------------
 ;; Host boundary
 ;; ---------------------------------------------------------------------------
@@ -419,7 +428,8 @@
   [b values shape dtype]
   (if (#{:float16 :bfloat16} dtype)
     (let [x (from-values b values shape :float32)]
-      (wrap b (Mlx/mlx_astype (.-h ^MlxArray x) (code dtype) (stream b))))
+      (with-operands b :astype [h x nil]
+        (wrap b (Mlx/mlx_astype h (code dtype) (stream b)))))
     (with-open [arena (Arena/ofConfined)]
       (let [data (segment-of arena values dtype)
             shp (.allocateFrom arena ValueLayout/JAVA_INT (int-array (map int shape)))]
@@ -1066,7 +1076,7 @@
    the rules make arrays (eye, arange)."
   [b forward vjp ins]
   (let [arrays (fn [^longs hs] (mapv #(wrap b %) hs))
-        handles (fn [xs] (long-array (map #(MlxRuntime/retain (.-h ^MlxArray (as-array b % nil))) xs)))
+        handles (fn [xs] (long-array (map #(retained b :custom-vjp %) xs)))
         on-b (fn [f] (with-bindings {@default-backend-var b} (f)))
         fun (MlxRuntime/closure (reify gen.mlx.MlxRuntime$Closure
                                   (apply [_ hs] (handles (on-b #(forward (arrays hs)))))))
@@ -1264,8 +1274,7 @@
                 (when-not (and (or (host? out) (mlx-array? out)) (= [] (shape-of out)))
                   (throw (ex-info "value-and-grad needs a function returning a scalar"
                                   {:shape (shape-of out) :value out})))
-                (let [out (as-array b out nil)]
-                  (long-array [(MlxRuntime/retain (.-h ^MlxArray out))]))))
+                (long-array [(retained b :value-and-grad out)])))
         cl (when (seq xs) (MlxRuntime/closure (reify gen.mlx.MlxRuntime$Closure (apply [_ ins] (run ins)))))
         temps (java.util.ArrayList.)]
     (if (empty? xs)
@@ -1317,7 +1326,7 @@
                     (throw (ex-info (str "compile: the function's results must be arrays (or trees of them), not "
                                          (pr-str o))
                                     {:op :compile :value o}))))
-                (long-array (map #(MlxRuntime/retain (.-h ^MlxArray (as-array b % nil))) outs))))
+                (long-array (map #(retained b :compile %) outs))))
         cl (MlxRuntime/closure (reify gen.mlx.MlxRuntime$Closure (apply [_ ins] (run ins))))
         ^gen.mlx.MlxRuntime$Compiled c
         (try (gen.mlx.MlxRuntime$Compiled. cl (boolean shapeless?))
