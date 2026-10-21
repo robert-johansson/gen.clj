@@ -3,8 +3,8 @@
    (gen.llm.lm-contract) within llama.cpp's float noise, the band of the
    engine's device (gen.llm.llama.bands: 0.1 nats on Metal, twice the
    largest difference bench/gen/llama_noise.clj measured between two
-   computations of one distribution; skipped with a note for quantized
-   weights on CUDA), and bit for bit where a computation repeats; and
+   computations of one distribution, 0.53 on CUDA; skipped with a note for
+   quantized weights on CUDA), and bit for bit where a computation repeats; and
    the GGUF's tokenizer as the LM's.
 
    Needs llama.cpp's libraries (native/build-llama.sh), the compiled
@@ -74,7 +74,7 @@
     (let [{:keys [engine] :as s} (setup)]
       (doseq [[k check] contract/checks]
         (testing k
-          (if-let [note (:skip (bands/bands (br/info engine)))]
+          (if-let [note (get-in (bands/bands (br/info engine)) [:skip :band])]
             (println note)
             (is (= [] (contract/run-check check s (opts engine)))))))
       (is (zero? (:live (br/info engine))) "every check closes what it makes"))))

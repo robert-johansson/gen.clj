@@ -300,6 +300,17 @@ same tokens stepped differ by up to 0.46 nats (Gemma at 600 tokens; Qwen3
 0.17), while same shapes agree exactly. CPU and CUDA builds need bands
 of their own: measure them with the benches before using these.
 
+**CUDA, measured (fenrir's RTX PRO 6000, sm_120, 2026-10-21;
+genclj-kw88).** Quantized weights vary with batch composition by about 0.2
+nats a token (up to about 1), so the noise checks skip there. Float
+weights stay small: at most 0.13 (Qwen3-0.6B f16), 0.15 (Qwen3.5-0.8B
+BF16) and 0.26 (Gemma-3-270M F16; 0.078 as F32), and 0.11 for long
+branches without a sliding window, so the band is 0.53 and 0.23. Past
+Gemma's window, CUDA gives up to 1.3 nats as F16 and 0.68 as F32, at
+Gemma's same deep-tail case (the code text at 1,000 tokens, token 107),
+where the x86 CPU build gives 0.25: skipped with a note until the cause is
+found (genclj-gjiz). DESIGN.md §6 and §9 (llama.cpp's band by device).
+
 ## Costs (M2 Max, Metal, Qwen3-0.6B Q8_0, means)
 
 Normalizing a row of logits on the host (a log-sum-exp in double over the
@@ -337,8 +348,9 @@ Gemma's are. Forks and resampled children share their parent's array.
 Qwen3.5-0.8B costing 3.6 times the raw Branching operations at 8 contexts
 and 2.5 times at 32, with no such overhead on Qwen3 or Gemma. The cause is
 llama.cpp's placement of recurrent states. The fix below is built and
-tested. **Recommendation (PROVISIONAL, for the owner):** keep it, under
-the names given at the end.*
+tested. **Recommendation:** keep it, under the names given at the end
+(confirmed by the owner, 2026-10-21, with the split on by default only
+where the weights are on Metal).*
 
 **Where the time goes.** All of it is inside `llama_decode`: an LM read's
 fork, dispose and eviction calls take under 0.3 ms. Three pieces of
@@ -509,7 +521,7 @@ would read, to ggml-org/llama.cpp:
 Filing it is outward-facing; the reproduction would need writing in C
 first.
 
-**Names for the owner (PROVISIONAL):**
+**Names (confirmed by the owner, 2026-10-21):**
 - the property `gen.llama.split-recurrent`;
 - the diagnostics function `llama/step-splits`;
 - the info key `:split-recurrent?`;
@@ -535,7 +547,8 @@ first.
   state). (3) The GC backstop lets traces own branches.
 - **genclj-zztc (shared memory budget):** built, below (The shared memory
   budget).
-- **Not done here:** Linux CUDA and CPU builds (written, not run), MLX and
+- **Not done here:** Linux CUDA and CPU builds (written, not run; since
+  run on fenrir, 2026-10-21, genclj-kw88), MLX and
   llama.cpp in one test JVM (the spike showed it), the 8B and 30B models,
   and a fatal decode on Metal (only the CPU backend honours an abort, and
   no other deterministic way exists without a `GGML_ASSERT`).

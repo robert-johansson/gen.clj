@@ -16,7 +16,12 @@
 #     ignored. Tested on an M2 Max, macOS 27 (2026-10-20).
 #   Linux x86_64 / aarch64: cpu (default), or cuda (GGML_CUDA; needs the CUDA
 #     toolkit, and builds for CMAKE_CUDA_ARCHITECTURES, default this
-#     machine's GPU). Neither is tested yet.
+#     machine's GPU). Both tested on x86_64 with CUDA 13.3 and an RTX PRO
+#     6000 (sm_120), 2026-10-21. A toolkit installed from pip lacks CCCL's
+#     headers (cub, thrust): give them as CUDAFLAGS="-isystem <cccl>/include"
+#     (MLX's CUDA build fetches CCCL into its cmake directory, _deps/cccl-src).
+#     The JVM then needs the toolkit's libraries on LD_LIBRARY_PATH (pip's
+#     nvidia/cu13/lib) when they are not on the system's loader path.
 #   The JVM finds the libraries with -Dgen.llama.lib=native/build/llama/<platform>/lib
 #   (default: this platform's, under the working directory).
 #   LLAMA_CPP_REPO clones from another place than GitHub (a local clone, say);
