@@ -137,58 +137,134 @@
                      (if (== pa2 pu2) "IN PLACE (the held array overwritten!)" "copied")))
     (run! #(Mlx/mlx_array_free %) [u a2 u2 upd])))
 
+;; ---------------------------------------------------------------------------
+;; 4 and 5: the next-token log-probabilities against the llama engine's
+;; ---------------------------------------------------------------------------
+
 (def mutations
-  "Planted convention errors, for the check's power: KV heads tiled where
-   llama.cpp's Qwen3 interleaves them, and RoPE rotating the other way.
-   (Swapping RoPE's two halves in both q and k is no error: their dot
-   products do not change, and neither do the logits.)"
-  {"heads" ["(array/broadcast-to (array/expand-dims x [2]) [b kv rep s d])" "(array/broadcast-to (array/expand-dims x [1]) [b rep kv s d])"]
-   "rope" ["c (array/cos ang) s (array/sin ang)" "c (array/cos ang) s (- (array/sin ang))"]})
+  "Planted convention errors, for the checks' power, as edits of
+   tiny_forward.clj's source:
+   - heads (Qwen3): KV heads tiled (query head h reading KV head h mod KV)
+     where llama.cpp groups them (h / (H/KV));
+   - rope (Qwen3): RoPE rotating the other way. (Swapping RoPE's two halves
+     in both q and k is no error: their dot products do not change, and
+     neither do the logits.)
+   - conv-shift (Qwen3.5): the conv state keeps the oldest inputs, not the
+     newest (it matters only to a cached step);
+   - conv-kernel (Qwen3.5): the conv kernel applied newest input first;
+   - q-gate (Qwen3.5): the query and the output gate swapped in q's
+     projection."
+  {"heads" #(.replace ^String % "(array/broadcast-to (array/expand-dims x [2]) [b kv rep s d])"
+                      "(array/broadcast-to (array/expand-dims x [1]) [b rep kv s d])")
+   "rope" #(.replace ^String % "c (array/cos ang) s (array/sin ang)" "c (array/cos ang) s (- (array/sin ang))")
+   "conv-shift" #(.replace ^String % "{:conv (array/slice padded 1 t (+ t (dec conv))) :state state}"
+                           "{:conv (array/slice padded 1 0 (dec conv)) :state state}")
+   "conv-kernel" #(.replace ^String % "(array/slice (:conv-w w) 1 j (inc j))" "(array/slice (:conv-w w) 1 (- conv j 1) (- conv j))")
+   "q-gate" #(-> ^String %
+                 (.replace "(array/slice qg 3 0 head-dim)" "QUERY")
+                 (.replace "(array/slice qg 3 head-dim (* 2 head-dim))" "(array/slice qg 3 0 head-dim)")
+                 (.replace "QUERY" "(array/slice qg 3 head-dim (* 2 head-dim))"))})
+
+(defn- forward-fn
+  "tiny_forward.clj's forward, with mutation (a key of mutations, or nil)
+   planted in its source."
+  [mutation]
+  (let [s (slurp "docs/research/llm-mlx-engine/tiny_forward.clj")
+        s' (if mutation ((mutations mutation) s) s)]
+    (when mutation (assert (not= s s') (str "the mutation " mutation " changed nothing")))
+    (load-string (subs s' 0 (.indexOf s' ";; ---------------------------------------------------------------------------\n;; The checks")))
+    @(resolve 'tiny-forward/forward)))
+
+(defn- dequantizer
+  "base -> its tensor: base.weight, dequantized to float32 if quantized
+   (scales :float16 as loaded, or :float32 cast first)."
+  [arrays scales]
+  (let [cast (fn [x] (if (= scales :float32) (array/astype x :float32) x))]
+    (fn [base]
+      (if-let [sc (arrays (str base ".scales"))]
+        (wrap (Mlx/mlx_dequantize (handle (arrays (str base ".weight"))) (handle (cast sc))
+                                  (handle (cast (arrays (str base ".biases")))) (int 32) (int 8) "affine" 0 (int f32) stream))
+        (or (arrays (str base ".weight")) (throw (ex-info (str "no tensor " base) {:base base})))))))
+
+(defn- qwen3-model [arrays scales]
+  (let [deq (dequantizer arrays scales)]
+    {:path qwen3
+     :cfg {:heads 16 :kv-heads 8 :head-dim 128 :eps 1e-6 :theta 1000000.0}
+     :model {:embed (deq "token_embd") :norm (deq "output_norm")
+             :layers (vec (for [i (range 28) :let [p (str "blk." i ".")]]
+                            {:kind :attn :attn-norm (deq (str p "attn_norm")) :ffn-norm (deq (str p "ffn_norm"))
+                             :q (deq (str p "attn_q")) :k (deq (str p "attn_k")) :v (deq (str p "attn_v"))
+                             :o (deq (str p "attn_output")) :q-norm (deq (str p "attn_q_norm")) :k-norm (deq (str p "attn_k_norm"))
+                             :gate (deq (str p "ffn_gate")) :up (deq (str p "ffn_up")) :down (deq (str p "ffn_down"))}))}}))
+
+(defn- qwen35-model
+  "Qwen3.5-0.8B from its GGUF's tensors, by llama.cpp's names: 24 layers
+   (blk.24, the MTP block, left out), layer i full attention when i mod 4
+   is 3, else GatedDeltaNet."
+  [arrays scales]
+  (let [deq (dequantizer arrays scales)]
+    {:path qwen35
+     :cfg {:heads 8 :kv-heads 2 :head-dim 256 :rope-dims 64 :gated? true :eps 1e-6 :theta 1.0e7
+           :lin-heads 16 :dk 128 :dv 128 :conv 4}
+     :model {:embed (deq "token_embd") :norm (deq "output_norm")
+             :layers (vec (for [i (range 24) :let [p (str "blk." i ".")]]
+                            (merge {:attn-norm (deq (str p "attn_norm")) :ffn-norm (deq (str p "post_attention_norm"))
+                                    :gate (deq (str p "ffn_gate")) :up (deq (str p "ffn_up")) :down (deq (str p "ffn_down"))}
+                                   (if (= 3 (mod i 4))
+                                     {:kind :attn :q (deq (str p "attn_q")) :k (deq (str p "attn_k")) :v (deq (str p "attn_v"))
+                                      :o (deq (str p "attn_output")) :q-norm (deq (str p "attn_q_norm")) :k-norm (deq (str p "attn_k_norm"))}
+                                     {:kind :gdn :qkv (deq (str p "attn_qkv")) :z (deq (str p "attn_gate"))
+                                      :b (deq (str p "ssm_beta")) :a (deq (str p "ssm_alpha")) :conv-w (deq (str p "ssm_conv1d"))
+                                      :A (arrays (str p "ssm_a")) :dt-bias (arrays (str p "ssm_dt.bias"))
+                                      :ssm-norm (deq (str p "ssm_norm")) :out (deq (str p "ssm_out"))}))))}}))
 
 (defn check-logits
-  "scales: :float16 as loaded, or :float32 (the file's d·q exactly);
-   mutation: nil, or a key of mutations."
-  ([arrays scales] (check-logits arrays scales nil))
-  ([arrays scales mutation]
-  (let [s (slurp "docs/research/llm-mlx-engine/tiny_forward.clj")
-        s (if-let [[from to] (mutations mutation)]
-            (do (assert (.contains s ^String from)) (.replace s ^String from ^String to))
-            s)]
-    (load-string (subs s 0 (.indexOf s ";; ---------------------------------------------------------------------------\n;; The checks"))))
-  (let [forward @(resolve 'tiny-forward/forward)
-        cfg {:heads 16 :kv-heads 8 :head-dim 128 :eps 1e-6 :theta 1000000.0}
-        cast (fn [x] (if (= scales :float32) (array/astype x :float32) x))
-        deq (fn [base] (if-let [sc (arrays (str base ".scales"))]
-                         (wrap (Mlx/mlx_dequantize (handle (arrays (str base ".weight"))) (handle (cast sc))
-                                                   (handle (cast (arrays (str base ".biases")))) (int 32) (int 8) "affine" 0 (int f32) stream))
-                         (arrays (str base ".weight"))))
-        model {:embed (deq "token_embd") :norm (deq "output_norm")
-               :layers (vec (for [i (range 28) :let [p (str "blk." i ".")]]
-                              {:kind :attn :attn-norm (deq (str p "attn_norm")) :ffn-norm (deq (str p "ffn_norm"))
-                               :q (deq (str p "attn_q")) :k (deq (str p "attn_k")) :v (deq (str p "attn_v"))
-                               :o (deq (str p "attn_output")) :q-norm (deq (str p "attn_q_norm")) :k-norm (deq (str p "attn_k_norm"))
-                               :gate (deq (str p "ffn_gate")) :up (deq (str p "ffn_up")) :down (deq (str p "ffn_down"))}))}]
-    (with-open [^java.io.Closeable e ((requiring-resolve 'gen.llm.llama/engine) {:model qwen3 :max-branches 1 :n-ctx 512})]
+  "The next-token log-probabilities of two prompts from the prototype's
+   forward on MLX, against the llama engine's on the same GGUF: computed
+   whole, and as a cached prefill of all but the last token and one step
+   (the caches' conventions: KV, conv and recurrent state). label names
+   the check; {:keys [path cfg model]} from qwen3-model or qwen35-model."
+  [label {:keys [path cfg model]} mutation]
+  (let [forward (forward-fn mutation)]
+    (with-open [^java.io.Closeable e ((requiring-resolve 'gen.llm.llama/engine) {:model path :max-branches 1 :n-ctx 512})]
       (doseq [text ["The capital of Sweden is a city called" "def fibonacci(n):\n    if n <"]]
         (let [prompt ((requiring-resolve 'gen.llm.llama/tokenize) e text)
               n (count prompt)
               ref (let [x (br/open e prompt)] (br/logprobs (doto x br/dispose!)))
-              lp (array/with-backend b
-                   (let [[logits _] (forward cfg model nil (array/array [prompt] {:dtype :int32}) (array/array [(vec (range n))]))]
-                     (float-array (array/->clj (array/log-softmax (array/reshape (array/slice logits 1 (dec n) n) [(last (array/shape logits))]))))))
+              last-row (fn [logits] (let [t (second (array/shape logits))]
+                                      (float-array (array/->clj (array/log-softmax (array/reshape (array/slice logits 1 (dec t) t)
+                                                                                                  [(last (array/shape logits))]))))))
+              [whole cached] (array/with-backend b
+                               (let [ids (fn [from to] (array/array [(subvec prompt from to)] {:dtype :int32}))
+                                     pos (fn [from to] (array/array [(vec (range from to))]))
+                                     [lw _] (forward cfg model nil (ids 0 n) (pos 0 n))
+                                     [_ c] (forward cfg model nil (ids 0 (dec n)) (pos 0 (dec n)))
+                                     [ls _] (forward cfg model c (ids (dec n) n) (pos (dec n) n))]
+                                 [(last-row lw) (last-row ls)]))
               top (fn [^floats a k] (vec (take k (sort-by #(- (aget a (int %))) (range (alength a))))))
               ref-top (top ref 64)
-              d (reduce max (map #(Math/abs (- (aget ^floats ref (int %)) (aget ^floats lp (int %)))) ref-top))]
-          (println (format "4. %s scales%s, %s (%d tokens): argmax %s, top 5 %s, max |Δ log p| over llama.cpp's top 64: %.3g"
-                           (name scales) (if mutation (str ", mutation " mutation) "") (pr-str text) n (if (= (first ref-top) (first (top lp 1))) "equal" "DIFFERS")
-                           (if (= (set (take 5 ref-top)) (set (top lp 5))) "equal as sets" "DIFFER") d))))))))
+              verdict (fn [^floats lp]
+                        (format "argmax %s, top 5 %s, max |Δ log p| %.3g"
+                                (if (= (first ref-top) (first (top lp 1))) "equal" "DIFFERS")
+                                (if (= (set (take 5 ref-top)) (set (top lp 5))) "equal" "DIFFER")
+                                (reduce max (map #(Math/abs (- (aget ^floats ref (int %)) (aget lp (int %)))) ref-top))))]
+          (println (format "%s%s, %s (%d tokens):\n     whole: %s\n    cached: %s"
+                           label (if mutation (str ", mutation " mutation) "") (pr-str text) n
+                           (verdict whole) (verdict cached))))))))
 
 (let [only (set (rest *command-line-args*))
       run? #(or (empty? only) (only %))
-      a3 (check-load qwen3)]
-  (when (run? "1") (check-load qwen35))
+      a3 (when (some run? ["1" "2" "4"]) (check-load qwen3))
+      a35 (when (some run? ["1" "5"]) (check-load qwen35))]
   (when (run? "2") (check-quantized a3))
   (when (run? "3") (check-donation))
-  (when (run? "4") (check-logits a3 :float16) (check-logits a3 :float32))
-  (doseq [m (keys mutations) :when (only (str "4-" m))] (check-logits a3 :float32 m)))
+  (when (run? "4")
+    (check-logits "4. Qwen3-0.6B, float16 scales" (qwen3-model a3 :float16) nil)
+    (check-logits "4. Qwen3-0.6B, float32 scales" (qwen3-model a3 :float32) nil))
+  (doseq [m ["heads" "rope"] :when (only (str "4-" m))]
+    (check-logits "4. Qwen3-0.6B, float32 scales" (qwen3-model (or a3 (check-load qwen3)) :float32) m))
+  (when (run? "5")
+    (check-logits "5. Qwen3.5-0.8B, float32 scales" (qwen35-model a35 :float32) nil))
+  (doseq [m ["conv-shift" "conv-kernel" "q-gate"] :when (only (str "5-" m))]
+    (check-logits "5. Qwen3.5-0.8B, float32 scales" (qwen35-model (or a35 (check-load qwen35)) :float32) m)))
 (shutdown-agents)

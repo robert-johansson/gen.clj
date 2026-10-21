@@ -63,7 +63,7 @@
 (defn init
   "Random weights: matrices N(0, 0.2²), norms 1 + N(0, 0.1²); layer i is
    GatedDeltaNet when (kind i) is :gdn."
-  [key {:keys [vocab hidden heads kv-heads head-dim ffn layers lin-heads dk dv conv]} kind]
+  [key {:keys [vocab hidden heads kv-heads head-dim ffn layers lin-heads dk dv conv gated?]} kind]
   (let [ks (atom (random/split key 400))
         draw (fn [shape sd] (let [k (first @ks)] (swap! ks rest) (* sd (random/normal k shape))))
         norm (fn [n] (+ 1.0 (draw [n] 0.1)))
@@ -80,23 +80,34 @@
                               :A (- (array/exp (draw [lin-heads] 0.3)))          ; as the GGUF's ssm_a: -exp(A_log)
                               :dt-bias (draw [lin-heads] 0.3) :ssm-norm (norm dv)
                               :out (draw [hidden (* lin-heads dv)] 0.2)}
-                             {:q (draw [(* heads head-dim) hidden] 0.2) :k (draw [(* kv-heads head-dim) hidden] 0.2)
+                             {:q (draw [(* heads head-dim (if gated? 2 1)) hidden] 0.2) :k (draw [(* kv-heads head-dim) hidden] 0.2)
                               :v (draw [(* kv-heads head-dim) hidden] 0.2) :o (draw [hidden (* heads head-dim)] 0.2)
                               :q-norm (norm head-dim) :k-norm (norm head-dim)}))))}))
 
-(defn- attn-layer [{:keys [heads kv-heads head-dim eps theta]} w hn pos entry]
+(defn- attn-layer
+  "Softmax attention as llama.cpp's qwen3 graph computes it, or, with
+   :gated?, as its qwen35 one: q's projection holds each head's query and
+   then its output gate, RoPE covers the first :rope-dims of a head, and
+   the output is gated by a sigmoid."
+  [{:keys [heads kv-heads head-dim eps theta gated? rope-dims] :or {rope-dims head-dim}} w hn pos entry]
   (let [[b t _] (array/shape hn)
-        proj (fn [m n norm] (-> (linear hn (m w)) (array/reshape [b t n head-dim]) (array/transpose [0 2 1 3])
-                                (cond-> norm (rms-norm (norm w) eps))))
-        q (rope (proj :q heads :q-norm) pos head-dim theta)
-        k (rope (proj :k kv-heads :k-norm) pos head-dim theta)
-        v (proj :v kv-heads nil)
+        heads-of (fn [x n] (array/transpose (array/reshape x [b t n head-dim]) [0 2 1 3]))
+        qg (linear hn (:q w))
+        [q gate] (if gated?
+                   (let [qg (array/reshape qg [b t heads (* 2 head-dim)])]
+                     [(array/reshape (array/slice qg 3 0 head-dim) [b t (* heads head-dim)])
+                      (array/reshape (array/slice qg 3 head-dim (* 2 head-dim)) [b t (* heads head-dim)])])
+                   [qg nil])
+        q (rope (rms-norm (heads-of q heads) (:q-norm w) eps) pos rope-dims theta)
+        k (rope (rms-norm (heads-of (linear hn (:k w)) kv-heads) (:k-norm w) eps) pos rope-dims theta)
+        v (heads-of (linear hn (:v w)) kv-heads)
         k (if entry (array/concatenate [(:k entry) k] 2) k)
         v (if entry (array/concatenate [(:v entry) v] 2) v)
         s (second (rest (array/shape k)))
         ;; key j (all cached, then the chunk's) is visible from query i when j <= s - t + i
         visible (<= (array/arange s) (+ (array/expand-dims (array/arange t) [-1]) (- s t)))
-        o (-> (attention q k v visible) (array/transpose [0 2 1 3]) (array/reshape [b t (* heads head-dim)]))]
+        o (-> (attention q k v visible) (array/transpose [0 2 1 3]) (array/reshape [b t (* heads head-dim)])
+              (cond-> gate (* (array/sigmoid gate))))]
     [(linear o (:o w)) {:k k :v v}]))
 
 (defn- gdn-layer
@@ -115,8 +126,8 @@
                                    (* (array/slice padded 1 j (+ j t))
                                       (array/reshape (array/slice (:conv-w w) 1 j (inc j)) [ch])))))
         heads (fn [from to d] (array/reshape (array/slice conv-out 2 from to) [b t hv d]))
-        q (* (l2-norm (heads 0 key-dim dk) 1e-12) (/ 1.0 (Math/sqrt dk)))
-        k (l2-norm (heads key-dim (* 2 key-dim) dk) 1e-12)
+        q (* (l2-norm (heads 0 key-dim dk) 1e-6) (/ 1.0 (Math/sqrt dk)))
+        k (l2-norm (heads key-dim (* 2 key-dim) dk) 1e-6)
         v (heads (* 2 key-dim) ch dv)
         beta (array/sigmoid (linear hn (:b w)))                           ; [B T Hv]
         g (array/exp (* (:A w) (array/softplus (+ (linear hn (:a w)) (:dt-bias w)))))
@@ -156,7 +167,7 @@
 (defn- positions [from n] (array/array [(vec (range from (+ from n)))]))
 (defn- max-diff [a b] (array/item (array/max (array/abs (- a b)))))
 
-(defn check [label kind]
+(defn check [label cfg kind]
   (let [model (init (random/key 7) cfg kind)
         ctx [5 17 42 3 88 11 60 2 9]
         n (count ctx)
@@ -202,6 +213,7 @@
     (println (format "  4. a cache continued twice from one value: the same logits (|Δ| = %.1e), another token's differ (%.2f)"
                      (max-diff s8 s8') (max-diff s8 o8)))))
 
-(check "Qwen3-like, 4 attention layers" (constantly :attn))
-(check "Qwen3.5-like, GatedDeltaNet with every fourth layer attention" #(if (= 3 (mod % 4)) :attn :gdn))
+(check "Qwen3-like, 4 attention layers" cfg (constantly :attn))
+(check "Qwen3.5-like, GatedDeltaNet with every fourth layer gated attention, RoPE on half of each head"
+       (assoc cfg :gated? true :rope-dims 4) #(if (= 3 (mod % 4)) :attn :gdn))
 (shutdown-agents)

@@ -87,8 +87,9 @@ matmul weight is [out, in] as in Hugging Face's layout.
 So the tensors' meaning comes from llama.cpp's graphs (`src/models/qwen3.cpp`,
 `qwen35.cpp`, `delta-net-base.cpp`), and the structure from GenMLX's
 forwards, which read Hugging Face's checkpoints. A convention got wrong is
-self-consistent. In the prototype, KV heads interleaved where they should
-be tiled pass every self-consistency check, so only logits against
+self-consistent. In the prototype, KV heads tiled (query head h reading
+KV head h mod KV) where llama.cpp groups them (h / (H/KV)) pass every
+self-consistency check, so only logits against
 llama.cpp catch such errors (§5).
 
 **The tokenizer.** **Recommendation:** llama.cpp's vocabulary from the same
@@ -167,20 +168,26 @@ M3's. **Recommendation:**
   would hold a 0.6B model's weights in about 4.8 GB.
 
 **The prototype's results** (pure JVM, float64, random weights; Qwen3-like:
-4 attention layers, Qwen3.5-like: 3 GatedDeltaNet layers and one attention
-layer; hidden 32, vocabulary 97):
+4 attention layers; Qwen3.5-like: 3 GatedDeltaNet layers and one gated
+attention layer with RoPE on half of each head; hidden 32, vocabulary 97):
 
 | Check | Qwen3-like | Qwen3.5-like |
 |---|---|---|
 | prefill of 4, a chunk of 3, two steps, against the full forward of 9 | \|Δ logit\| 0 | 0 |
 | a batch of two contexts against one alone | 0 | 0 |
-| the tape's gradients (one weight of layer 0, the embedding) against central differences | relative 6.3e-9 | 1.5e-9 |
-| one cache value continued twice | identical; another token's differ by 2.1 | identical; 3.6 |
+| the tape's gradients (one weight of layer 0, the embedding) against central differences | relative 6.3e-9 | 3.4e-9 |
+| one cache value continued twice | identical; another token's differ by 2.1 | identical; 3.5 |
 
-The checks can fail: the chunk's positions shifted by one fail the first
-check by 1.1 and 0.26 logits, and the conv state dropped from the cache fails
-it on the Qwen3.5-like model by 4.2. KV heads interleaved instead of tiled
-pass all four, which is why §5 compares with llama.cpp.
+The checks can fail:
+- the chunk's positions shifted by one fail the first check by 1.1 and
+  0.052 logits;
+- the conv state dropped from the cache fails it on the Qwen3.5-like model
+  by 4.1, and so does the conv state keeping its oldest inputs instead of
+  its newest.
+
+KV heads tiled instead of grouped pass all four checks, as do the conv
+kernel applied backwards and q's query and gate swapped. A wrong convention
+is self-consistent, which is why §5 compares with llama.cpp.
 
 ## 3. The engine under the Branching protocol
 
@@ -278,7 +285,7 @@ tape on tiny models is the reference that tests it.
    Qwen3.5-0.8B, the next-token log-probabilities over the top 64 tokens
    should agree within a band measured as `llama_noise` measures llama.cpp's
    own, with the same argmax and top 5. This is the check for conventions:
-   planted errors (KV heads interleaved, the norm's +1 added twice, the
+   planted errors (KV heads tiled instead of grouped, the norm's +1 added twice, the
    `ssm_a` sign) should fail it by nats. Q8_0 matmuls differ between the
    two engines (on the CPU llama.cpp quantizes the activations as well), so
    the band is measured per platform.
@@ -408,7 +415,7 @@ for the planted errors.
    That is inside llama.cpp's own spread between batch shapes (up to 5e-2,
    median 2e-3 to 4e-3, `llm-branching.md`). Planted convention errors fail
    it:
-   - KV heads tiled where Qwen3 interleaves them: 24.3 and 21.7 nats, argmax
+   - KV heads tiled where Qwen3 groups them: 24.3 and 21.7 nats, argmax
      wrong;
    - RoPE rotating the other way: 3.5 and 8.4 nats.
 
