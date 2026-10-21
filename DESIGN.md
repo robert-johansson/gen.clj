@@ -1201,7 +1201,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     (`smc/host-pool n`) or `false`. Its size: half the processors up to 4,
     as the llama.cpp engine's row pool, or `-Dgen.llm.host-threads` (1
     turns it off). Alternatives: the LM owning it, no default pool, a pool
-    for each run. Recommended, not built: rows that carry their cumulative
+    for each run. Measured (quiet, Qwen3's vocabulary, 64 particles): 4
+    threads take 17% (bootstrap) to 20% (masked) off a step on the toy
+    engine; on llama.cpp with Qwen3-0.6B, with R6's `constrained/weighted`,
+    the masked proposal's step went from 106 to 51 ms. Recommended, not built: rows that carry their cumulative
     probabilities from the engine (a draw by binary search;
     `docs/research/llm-token-smc.md`).
 - **A hybrid model's steps split over its recurrent cells** (2026-10-21,

@@ -258,28 +258,31 @@ the calling thread.
 - **Off switch:** `:host-pool false` for a run; `-Dgen.llm.host-threads=1`
   for the process.
 
-**Measured** (`clojure -M:bench -m gen.smc-bench host`): a step of n
-particles over 16 steps at Qwen3's vocabulary (151,936 tokens) on the toy
-engine, never resampling, so that every step reads n contexts as the LM's
-batch alone does; ms a step, two runs, while another agent's Metal battery
-used the CPU (so indicative only; see the quiet run below when made):
+**Measured** (`clojure -M:bench -m gen.smc-bench host`, 2026-10-21 07:50,
+this Mac with no other JVM running, after R6): a step of n particles over
+16 steps at Qwen3's vocabulary (151,936 tokens) on the toy engine, never
+resampling; ms a step:
 
 | particles | proposal | the LM's batch alone | calling thread | 2 threads | 4 threads | 8 threads |
 |---|---|---|---|---|---|---|
-| 8 | bootstrap | 12.0 / 8.0 | 22.8 / 14.4 | 20.4 / 13.2 | 12.9 / 12.0 | 11.7 / 12.0 |
-| 8 | masked, a mask | 12.0 / 8.0 | 21.1 / 22.4 | 17.4 / 17.5 | 15.5 / 15.7 | 14.8 / 15.4 |
-| 32 | bootstrap | 51.6 / 52.1 | 71.6 / 51.9 | 47.8 / 47.2 | 45.4 / 45.3 | 57.5 / 42.8 |
-| 32 | masked, a mask | 51.6 / 52.1 | 81.3 / 84.1 | 66.3 / 66.0 | 58.5 / 57.4 | 52.4 / 61.6 |
-| 64 | bootstrap | 69.7 / 76.8 | 98.4 / 100.8 | 97.4 / 120.8 | 115.6 / 94.1 | 88.3 / 99.7 |
-| 64 | masked, a mask | 69.7 / 76.8 | 170.6 / 177.3 | 143.0 / 121.0 | 120.5 / 103.9 | 107.6 / 94.8 |
+| 8 | bootstrap | 5.71 | 11.30 | 10.08 | 9.46 | 9.32 |
+| 8 | masked, a mask | 5.71 | 12.24 | 10.66 | 9.82 | 9.70 |
+| 32 | bootstrap | 41.84 | 44.25 | 39.43 | 37.41 | 36.30 |
+| 32 | masked, a mask | 41.84 | 49.44 | 42.41 | 39.37 | 38.38 |
+| 64 | bootstrap | 59.32 | 88.40 | 78.43 | 73.36 | 72.50 |
+| 64 | masked, a mask | 59.32 | 99.55 | 85.11 | 79.18 | 76.73 |
 
-The masked proposal's host work (the step less the batch) falls from about
-100 ms to 20 to 40 at 64 particles with 8 threads, and from about 30 ms to
-5 to 10 at 32 with 4 or more; the bootstrap's, a draw each, from about
-25 ms to 18 at 64 particles. The rest of a step is the LM's batch (here
-the toy engine's rows, on one thread) and the sequential scores. The noise
-is large (at 64 particles the bootstrap with 4 threads once ran slower
-than the calling thread).
+At 64 particles the pool's 4 threads (the default here) take 17% off the
+bootstrap's step and 20% off the masked proposal's; 8 threads a little
+more. The host work (the step less the batch) falls from 29 to 14 ms
+(bootstrap) and from 40 to 20 (masked). The rest of a step is the LM's
+batch (the toy engine's rows, on one thread) and the sequential scores.
+(The batch alone reads n contexts at every step, SMC one at its first,
+where every particle is at the prompt; so at 32 particles SMC's step can
+come under the batch's.) Two earlier runs beside a Metal battery, before
+R6, were noisier and slower (the masked proposal at 64 particles took
+171 to 177 ms on the calling thread, smc's own normalizer then
+allocating a double row besides the proposal's).
 
 **Recommendation (not built): rows with their cumulative probabilities.**
 A draw sums exp over the row in token order until the uniform: about
@@ -309,6 +312,20 @@ backstop never runs.
 
 `clojure -J-Dgen.llama.lib=<lib> -M:bench -m gen.smc-bench <gguf>` gives a
 step of 8, 32 and 64 particles over 16 steps against the LM's batch alone,
-with no potential and with a mask (bootstrap and masked). With a grammar
-potential (m3-grammar) once it joins. The runs on the M4 are recorded
-below when made.
+with no potential and with a mask (bootstrap and masked), resampling at
+ESS < n/2. With Qwen3-0.6B on the M4 (Metal), ms a step, first on the
+calling thread (m3-main, 2026-10-21 02:40, beside other agents' JVMs),
+then with the host pool and R6 (m3-par, 07:55, no other JVM):
+
+| particles | the LM's batch alone | SMC, no potential | a mask, bootstrap | a mask, masked proposal |
+|---|---|---|---|---|
+| 8 | 16.2 / 16.1 | 13.0 / 12.4 | 13.0 / 12.5 | 19.0 / 12.7 |
+| 32 | 70.4 / 69.4 | 29.4 / 27.4 | 29.0 / 27.2 | 54.8 / 28.9 |
+| 64 | 105.1 / 103.5 | 50.5 / 47.2 | 51.4 / 48.2 | 106.4 / 51.3 |
+
+The masked proposal at 64 particles went from 106 to 51 ms a step, now 3
+ms over the bootstrap rather than 55: its rows on the pool, and
+`constrained/weighted` allocating only the row it returns. SMC comes under
+the batch alone because it resamples, after which particles share
+contexts and a step reads fewer. Peak RSS 3.5 GB, no GC backstop. With
+Qwen3.5 and Gemma-3-270M, and with a grammar potential: in later runs.
