@@ -2,8 +2,10 @@
   "Model-level costs on the JVM backend: GFI operations on small scalar
    models, batched against per-particle execution, and gradients. The
    baseline the MLX backend must beat for small models (its eval floor is
-   tens of µs).
-   Run: clojure -M:bench -m gen.model-bench   (add :c2 to compare with C2)"
+   tens of µs); and the cost per traced choice, linreg with K
+   observations (against Gen.jl's dynamic DSL, docs/benchmarks.md).
+   Run: clojure -M:bench -m gen.model-bench              (add :c2 to compare with C2)
+        clojure -M:bench -m gen.model-bench per-choice   (the cost per choice alone)"
   (:refer-clojure :exclude [+ *])
   (:require [criterium.core :as crit]
             [gen.array :as array :refer [+ *]]
@@ -38,7 +40,21 @@
 
 (defn- us-per-call [f] (* 1e6 (first (:mean (crit/quick-benchmark* f {})))))
 
-(defn -main [& _]
+(defn- per-choice
+  "simulate and generate of linreg with K observations (K + 2 choices), K =
+   10, 100, 1000: µs a call and a choice."
+  []
+  (println "\n== Per traced choice: linreg with K observations (K + 2 choices) ==")
+  (doseq [k [10 100 1000]]
+    (let [xs (vec (range (double k)))
+          obs (apply cm/choicemap (mapcat (fn [i] [[:y i] (* 2.0 i)]) (range k)))
+          key (rng/key 1)
+          s (us-per-call #(gfi/simulate linreg [xs] key))
+          g (us-per-call #(gfi/generate linreg [xs] obs key))]
+      (println (format "  K=%-5d simulate %10.2f µs (%.3f µs a choice)   generate %10.2f µs (%.3f µs a choice)"
+                       k s (/ s (+ k 2)) g (/ g (+ k 2)))))))
+
+(defn- model-costs []
   (let [xs (vec (range 10.0))
         obs (apply cm/choicemap (mapcat (fn [i] [[:y i] (* 2.0 i)]) (range 10)))
         k (rng/key 1)
@@ -63,3 +79,8 @@
                "(C2)" "(Graal JIT)"))
     (doseq [[label f] cases]
       (println (format "%-52s %10.2f µs" label (us-per-call f))))))
+
+(defn -main [& [arg]]
+  (case arg
+    "per-choice" (per-choice)
+    (do (model-costs) (per-choice))))

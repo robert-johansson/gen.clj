@@ -134,6 +134,132 @@ How to read these:
   read nothing then. The memory bounds were ruled out first: turning off the
   collection trigger, or the cache and memory limits, changed nothing.
 
+## Against Gen.jl, same machine (2026-10-21, bean genclj-h6uu)
+
+gen.clj's dynamic language against Gen.jl's dynamic DSL, on the same
+models and operations as `gen.model-bench` and the scalar paths of
+`gen.genmlx-bench`, on this Mac with nothing else running.
+
+**Settings.**
+- **Machine:** Apple M4 (10 cores: 4 performance, 6 efficiency), 32 GB,
+  macOS 27.0.1. Idle: load 1.2, no other JVM or Julia process.
+- **Run:** 2026-10-21, 08:38 to 08:42. One process at a time, each under
+  `nice -n 10`, CPU only.
+- **gen.clj:** at c392062 with this branch's per-choice section, on Oracle
+  GraalVM 25.0.4 (Graal JIT), the JVM backend, float64.
+  - `clojure -M:bench -m gen.model-bench`: criterium's quick-benchmark, a
+    5 s warm-up, a GC, 6 samples of about 0.1 s; the mean time per call.
+  - `clojure -M:bench -m gen.genmlx-bench`: 20 warm-up runs (2 if a run
+    takes 50 ms or more), then the median of 7 timed runs, or 3 for scalar
+    runs of 1000 particles or more.
+- **Gen.jl:** 0.4.8 on Julia 1.12.6 (Homebrew), the default v1.12
+  environment, whose Gen is identical to the tag 0.4.8. One thread,
+  `--startup-file=no`. BenchmarkTools is not installed, so the script times
+  `time_ns` loops built as the two harnesses above: a 5 s warm-up, a GC and
+  6 samples of about 0.1 s, the mean per call; or 20 warm-ups and the
+  median of 7 (3). The global RNG is seeded with 1.
+- **The script** (`genjl_bench.jl`) was kept outside the repo, in the
+  agent's scratch directory, as asked. Its models are gen.clj's line for
+  line, 1-based where gen.clj's addresses are 0-based. linreg, for
+  instance:
+
+  ```julia
+  @gen function linreg(xs::Vector{Float64})
+      slope = @trace(normal(0, 10), :slope)
+      intercept = @trace(normal(0, 10), :intercept)
+      for (i, x) in enumerate(xs)
+          @trace(normal(slope * x + intercept, 1), (:y, i))
+      end
+      return slope
+  end
+  ```
+
+  The other models: `hierarchical`, 10 calls of a one-choice
+  `observation` at `(:obs, i)`; `Unfold` of a step that traces `:x` and
+  `:y`; the normal-normal model of `gen.genmlx-bench`, and its growing
+  version for the particle filter. Gen.jl's operations are the GFI's own:
+  `simulate`, `generate`, `assess`, `update` and `regenerate` with
+  `NoChange` argdiffs, `choice_gradients`, `importance_sampling`, `mh`,
+  `initialize_particle_filter` and `particle_filter_step!`.
+
+**`gen.model-bench`'s operations, µs a call:**
+
+| Operation | gen.clj | Gen.jl | gen.clj / Gen.jl |
+|---|---|---|---|
+| linreg (12 sites): simulate | 19.15 | 2.75 | 7.0 |
+| linreg: generate with 10 observations | 19.68 | 3.06 | 6.4 |
+| linreg: assess | 18.38 | 2.48 | 7.4 |
+| linreg: update one choice | 17.30 | 7.43 | 2.3 |
+| linreg: regenerate `:slope` | 16.66 | 5.85 | 2.8 |
+| linreg: choice gradients (slope, intercept) | 117.33 | 20.62 | 5.7 |
+| hierarchical (10 calls): simulate | 38.55 | 6.01 | 6.4 |
+| hierarchical: update `:mu` | 44.37 | 18.06 | 2.5 |
+| Unfold (50 steps): extend by one step | 6.64 | 1.10 | 6.0 |
+| linreg × 1000, one at a time: generate | 19,820 | 3,187 | 6.2 |
+| linreg × 1000, batched: generate | 488 | — | — |
+| linreg × 1000, batched: regenerate `:slope` | 405 | — | — |
+
+Gen.jl has no batched execution. gen.clj's batched generate of 1000
+particles takes 488 µs, 6.5 times faster than Gen.jl's 1000 one at a time.
+
+**The cost per traced choice:** linreg with K observations, so K + 2
+choices, µs a call (µs a choice):
+
+| K | gen.clj simulate | Gen.jl simulate | gen.clj generate | Gen.jl generate |
+|---|---|---|---|---|
+| 10 | 19.63 (1.64) | 2.66 (0.22) | 19.31 (1.61) | 3.25 (0.27) |
+| 100 | 162.8 (1.60) | 18.00 (0.18) | 159.2 (1.56) | 21.72 (0.21) |
+| 1000 | 1708 (1.71) | 190.7 (0.19) | 1854 (1.85) | 236.8 (0.24) |
+
+Where the time goes, as far as these numbers tell:
+- **Per choice.** Each added choice costs about the same from 10 to 1000
+  choices, a little more past 100 on both sides:
+  - simulate, from K = 10 to 100: 1.59 µs a choice in gen.clj against
+    0.17 µs in Gen.jl (9.3 times); from 100 to 1000, 1.72 against 0.19
+    (8.9 times);
+  - generate: 1.55 against 0.21 (7.6 times), then 1.88 against 0.24 (7.9
+    times).
+- **Fixed cost.** The line through K = 10 and 100 leaves 0.5 to 0.8 µs a
+  call on either side (simulate and generate). So neither has a fixed cost
+  that matters here: the gap is in the work done for each traced choice.
+- **By operation.** The gap is largest for the operations that build a
+  trace from its choices (simulate, generate, assess: 6.4 to 7.4 times) and
+  for choice gradients (5.7). It is smallest for those that revise a trace
+  (update and regenerate: 2.3 to 2.8 times), where Gen.jl costs more than
+  its own simulate (7.4 and 5.9 µs against 2.8) and gen.clj less (17.3 and
+  16.7 against 19.2). The data do not say which steps of a traced choice
+  cost what: that needs a profile of gen.clj's handler.
+
+**`gen.genmlx-bench`'s scalar paths, ms a particle (a unit for MH and the
+filter), at the largest N:**
+
+| | gen.clj | Gen.jl | gen.clj / Gen.jl | gen.clj batched |
+|---|---|---|---|---|
+| generate (N = 3000) | 0.0096 | 0.0012 | 8.0 | 0.0005 |
+| importance sampling (N = 1000) | 0.0100 | 0.0012 | 8.3 | 0.0004 |
+| MH, one step (20 chains of 10) | 0.0141 | 0.0031 | 4.5 | — |
+| particle filter, a particle-step (N = 500) | 0.0069 | 0.0020 | 3.5 | 0.0002 (N = 1000) |
+
+At small N gen.clj's scalar rows also carry its harness's JIT warm-up
+(0.26 ms a particle at N = 1 for generate), where Julia compiled at the
+first call. gen.clj's batched paths are 2.4 to 10 times faster than
+Gen.jl's scalar ones from about 1000 particles.
+
+**What it means.** On scalar models, Gen.jl's dynamic DSL builds a trace
+6.4 to 7.4 times faster than gen.clj's dynamic language (7.6 to 9.3 times
+for each added choice). It is 5.7 times faster at choice gradients, and
+2.3 to 2.8 times at updates. gen.clj's batched execution, which Gen.jl
+lacks, more than closes the gap for many particles. The static language
+(`gen ^:static`, above) speeds up assess 1.9 to 2.6 times. The rest of the
+gap is the dynamic handler's per-choice cost, the target for the CPU-path
+work (genclj-4n51). The gen.clj figures here are about 12% slower than the
+table at the top (19.2 against 17.0 µs for linreg simulate, 2026-10-18):
+other code has landed since, and the conditions differ.
+
+**Recommendation:** keep the Julia script in the repo (`bench/genjl/`, say)
+so that the comparison can be re-run. It is outside the repo now, as the
+work was asked.
+
 ## GenMLX's inference benchmarks, within gen.clj (2026-10-19)
 
 `bench/gen/inference_bench.clj` ports GenMLX's `bench/linreg.cljs`,
