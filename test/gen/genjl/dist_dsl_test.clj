@@ -51,13 +51,17 @@
       (is (= (mapv #(* 2.0 %) (nth original 2)) (nth transformed 2)))))
   (testing "a covariance that is singular in floating point: an error on both sides (D15)"
     ;; Gen.jl's 2·ones(2, 2), whose Cholesky factor exists only by rounding,
-    ;; gives 15.24 there (U3); gen.clj rejects it, whether given or made
+    ;; gives 15.24 there (U3); gen.clj rejects it, whether given or made,
+    ;; where the backend can read an array's values (rule 5: an eager one)
     (let [[x mu sigma] [(array/zeros [2]) (array/zeros [2]) (array/ones [2 2])]
           singular? (fn [f] (try (f) false (catch clojure.lang.ExceptionInfo e (boolean (re-find #"positive definite" (ex-message e))))))]
-      (is (singular? #(genjl/logpdf transformed-mvnormal x mu sigma)) "logpdf of the transformed distribution")
-      (is (singular? #(genjl/logpdf d/mvnormal x (array/ones [2]) (* 2.0 (array/ones [2 2])))) "logpdf of mvnormal itself")
-      (is (singular? #(grads transformed-mvnormal x mu sigma)) "logpdf_grad of the transformed distribution")
-      (is (singular? #(grads d/mvnormal x (array/ones [2]) (* 2.0 (array/ones [2 2])))) "logpdf_grad of mvnormal itself")))
+      (when (array/concrete? sigma)
+        (is (singular? #(genjl/logpdf transformed-mvnormal x mu sigma)) "logpdf of the transformed distribution")
+        (is (singular? #(genjl/logpdf d/mvnormal x (array/ones [2]) (* 2.0 (array/ones [2 2])))) "logpdf of mvnormal itself")
+        (is (singular? #(grads transformed-mvnormal x mu sigma)) "logpdf_grad of the transformed distribution")
+        (is (singular? #(grads d/mvnormal x (array/ones [2]) (* 2.0 (array/ones [2 2])))) "logpdf_grad of mvnormal itself"))
+      (is (singular? #(genjl/logpdf d/mvnormal x (array/ones [2]) [[2.0 2.0] [2.0 2.0]]))
+          "given as data, which every backend validates (dc/->checkable)")))
   (testing "1 - uniform (Gen.jl's issue 253)"
     (is (< (draw (real-minus-uniform 1.0 2.0)) 0))
     (is (= 0.0 (genjl/logpdf real-minus-uniform -0.5 1.0 2.0)))

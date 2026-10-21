@@ -175,8 +175,10 @@
     (is (= ##-Inf (genjl/logpdf d/dirichlet (array/array [0.0 0.0]) (array/array [1.0 1.0]))))
     (is (= ##-Inf (genjl/logpdf d/dirichlet (array/array [1.0 1.0]) (array/array [1.0 1.0]))))
     (is (= ##-Inf (genjl/logpdf d/dirichlet (array/array [2.0 -1.0]) (array/array [1.0 1.0]))))
-    (is (throws? #(genjl/logpdf d/dirichlet (array/array [0.5 0.5]) (array/array [-1.0 1.0]))) "a negative alpha")
-    (is (throws? #(genjl/logpdf d/dirichlet (array/array [0.5 0.5]) (array/array [-1.0 1.0]))) "(again, as Gen.jl)")
+    ;; alpha as data, as Julia's literal: data is validated on every backend
+    ;; (dc/->checkable), an array's values only where they can be read (rule 5)
+    (is (throws? #(genjl/logpdf d/dirichlet (array/array [0.5 0.5]) [-1.0 1.0])) "a negative alpha")
+    (is (throws? #(genjl/logpdf d/dirichlet (array/array [0.5 0.5]) [-1.0 1.0])) "(again, as Gen.jl)")
     (is (not= ##-Inf (genjl/logpdf d/dirichlet (array/array [0.0 1.0]) (array/array [1.0 1.0]))) "a corner, with alpha 1"))
   (testing "values against scipy's, as Gen.jl's against Distributions.jl's"
     (doseq [[x alpha] [[[0.01 0.99] [2.0 2.0]] [[0.01 0.99] [1.0 4.0]] [[0.01 0.99] [0.01 0.01]] [[0.2 0.2 0.6] [2.0 2.0 4.0]]]]
