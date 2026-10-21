@@ -18,6 +18,7 @@
             [gen.array.dtype :as dt]
             [gen.array.linalg :as la]
             [gen.choicemap :as cm]
+            [gen.custom :as custom]
             [gen.dynamic :as dyn]
             [gen.gfi :as gfi]
             [gen.random :as rng]
@@ -84,15 +85,18 @@
 (defn param-gradients
   "The gradient of the trace's log density (plus ⟨retgrad, retval⟩) with
    respect to the trainable parameters of its generative function's store
-   (gen.dynamic/with-params): a map of name to gradient. A functional
-   accumulate_param_gradients!: sum the maps over traces to accumulate."
+   (gen.dynamic/with-params, or gen.custom/with-params for a deterministic
+   function's own): a map of name to gradient. A functional
+   accumulate_param_gradients!: sum the maps over traces to accumulate, or
+   weigh them (weighted-sum) for its scale factor."
   ([trace] (param-gradients trace nil))
   ([trace retgrad]
    (let [{gf :gen-fn args :args choices :choices} trace
-         store (:params gf)]
+         store (:params gf)
+         with-store (if (custom/deterministic? gf) custom/with-params dyn/with-params)]
      (when (empty? store)
        (throw (ex-info "param-gradients: the trace's generative function has no parameter store" {})))
-     ((array/grad (fn [ps] (objective (dyn/with-params gf ps) args choices retgrad))) store))))
+     ((array/grad (fn [ps] (objective (with-store gf ps) args choices retgrad))) store))))
 
 (defn- tree-add
   "x + y over gradient trees, leaf by leaf; a name in one tree only keeps

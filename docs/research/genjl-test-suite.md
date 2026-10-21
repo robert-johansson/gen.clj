@@ -26,19 +26,18 @@ decisions and the ports merged at 17fd8bd (§3).*
 
   | port | oracle | statistical | n/a | gap |
   |---:|---:|---:|---:|---:|
-  | 1,371 (80.7 %) | 6 | 33 | 210 | 79 (4.6 %) |
+  | 1,372 (80.8 %) | 6 | 33 | 210 | 78 (4.6 %) |
 
   At first (2026-10-20) port was 1,262, n/a 110 and gap 288. The owner's
   decisions (DESIGN §9) moved D1's precise retdiffs (16) and D6's exact
   beta (4) to port, and G3's default arguments (60) and G15's IR shape (40)
-  to n/a; G1 and G8–G14 were built, and their 88 assertions port (with one
-  of `selection.jl:49`'s, a port the first count took for a gap).
+  to n/a; G1, G5 and G8–G14 were built, and their 89 assertions port (with
+  one of `selection.jl:49`'s, a port the first count took for a gap).
 - **The gaps left each have a bean:** the static
   language's rewriting of computed addresses and nested traces (G2, 42,
   genclj-lgij), labels that are not numbers in `dist` (G7, 17,
-  genclj-414l), loud lookups (D4, 16, genclj-ocwu), VI that trains the
-  model's parameters (G4, 3, genclj-xjte) and a custom function's own
-  parameters (G5, 1, genclj-2294).
+  genclj-414l), loud lookups (D4, 16, genclj-ocwu) and VI that trains the
+  model's parameters (G4, 3, genclj-xjte).
 - **The oracle** (§5) wrote Gen.jl's values as fixtures (genclj-il3d):
   Switch's regenerate weights, which its 6 assertions are checked against
   (U1, genclj-c5rl), beta at its endpoints (D6), and the statistical
@@ -84,10 +83,10 @@ decisions and the ports merged at 17fd8bd (§3).*
     variance-derived band (CLAUDE.md's test conventions).
   - **n/a**: Julia-only machinery, or a feature the owner decided gen.clj
     does without (G3, G15), with the reason in the row.
-  - **gap**: gen.clj lacks the feature (G2, G4, G5, G7), or the decided
+  - **gap**: gen.clj lacks the feature (G2, G4, G7), or the decided
     behavior is not built yet (D4). Each has a bean. The first mapping also
     counted D1 and D6 here, behaviors that differed without a documented
-    decision, and the gaps since closed (G1, G8–G14).
+    decision, and the gaps since closed (G1, G5, G8–G14).
 - **IDs.** D* are differences of behavior (§4.1), G* gaps (§4.2), U*
   upstream findings (§4.3), F* gen.clj findings (§4.4).
 - **Index base.** Line numbers are Gen.jl's, as `test/<file>:<line>` of the
@@ -321,7 +320,7 @@ groups.
 
 | Line | Testset | Asserts | What it checks | gen.clj counterpart | Category | Notes |
 |---:|---|---:|---|---|---|---|
-| 1 | custom deterministic generative function with custom update and gradient | 23 | CustomDetermGF: simulate, generate, update (Unknown, VectorDiff), regenerate, gradients, its own trainable parameter | `gen.custom/deterministic` (:apply-with-state, :update-with-state, :gradient-with-state); `custom-test/updates-reuse-the-state` | port 22 · gap 1 | G5 (gen_fn.my_grad, scaled by 3), to build (genclj-2294) |
+| 1 | custom deterministic generative function with custom update and gradient | 23 | CustomDetermGF: simulate, generate, update (Unknown, VectorDiff), regenerate, gradients, its own trainable parameter | `gen.custom/deterministic` (:apply-with-state, :update-with-state, :gradient-with-state); `custom-test/updates-reuse-the-state` | port 23 | G5 (gen_fn.my_grad, scaled by 3), closed (genclj-2294): `:params` and `custom/with-params` |
 | 126 | custom gradient GF | 2 | CustomGradientGF arg gradients, unscaled by accumulate | `deterministic` with :apply and :gradient (checked: [2 2]) | port 2 |  |
 | 144 | custom update GF | 12 | CustomUpdateGF simulate and incremental updates | `deterministic` with :update-with-state (checked) | port 12 |  |
 
@@ -496,7 +495,7 @@ groups.
 | `inference/trace_translators.jl` | 4 | 5 | 5 | 0 | 0 | 0 | 0 |
 | `inference/kernel_dsl.jl` | 1 | 2 | 2 | 0 | 0 | 0 | 0 |
 | `inference/enumerative.jl` | 1 | 31 | 27 | 0 | 0 | 4 | 0 |
-| `modeling_library/custom_determ.jl` | 3 | 37 | 36 | 0 | 0 | 0 | 1 |
+| `modeling_library/custom_determ.jl` | 3 | 37 | 37 | 0 | 0 | 0 | 0 |
 | `modeling_library/distributions.jl` | 22 | 138 | 130 | 0 | 0 | 8 | 0 |
 | `modeling_library/choice_at.jl` | 8 | 74 | 74 | 0 | 0 | 0 | 0 |
 | `modeling_library/call_at.jl` | 8 | 74 | 74 | 0 | 0 | 0 | 0 |
@@ -507,30 +506,29 @@ groups.
 | `modeling_library/dist_dsl.jl` | 2 | 43 | 20 | 0 | 0 | 6 | 17 |
 | `modeling_library/mixture.jl` | 4 | 52 | 43 | 0 | 0 | 9 | 0 |
 | `modeling_library/product.jl` | 3 | 14 | 11 | 0 | 0 | 3 | 0 |
-| **all** | **195** | **1699** | **1371** | **6** | **33** | **210** | **79** |
+| **all** | **195** | **1699** | **1372** | **6** | **33** | **210** | **78** |
 
 ### Totals per category
 
 | Category | Assertions | Share | Testsets wholly in it |
 |---|---:|---:|---:|
-| port | 1371 | 80.7 % | 123 |
+| port | 1372 | 80.8 % | 124 |
 | oracle | 6 | 0.4 % | 1 |
 | statistical | 33 | 1.9 % | 2 |
 | n/a | 210 | 12.4 % | 14 |
-| gap | 79 | 4.6 % | 4 |
+| gap | 78 | 4.6 % | 4 |
 
-Mixed testsets: 44. Testsets without assertions: 7 (smoke tests and empty testsets).
+Mixed testsets: 43. Testsets without assertions: 7 (smoke tests and empty testsets).
 
 The first mapping (2026-10-20) counted port 1,262 (74.3 %), n/a 110 and
 gap 288. The owner's decisions then moved D1 (16) and D6 (4) to port, and
 G3 (60) and G15 (40, with 7 of `static_dsl.jl:466`'s assertions, which are
-the IR's) to n/a; G1 and G8–G14 were built (88 to port, and one of
-`selection.jl:49`'s was a port the first count took for a gap). The 79 left
-each wait on a bean: G2's static rewrites (42,
-genclj-lgij), G7's non-numeric labels (17, genclj-414l), D4's loud lookups
-(16, genclj-ocwu), G4's model_update (3, genclj-xjte) and G5's own
-parameters (1, genclj-2294). Counted at batch 4's head (17fd8bd), against
-the ports' pending lists.
+the IR's) to n/a; G1, G5 and G8–G14 were built (89 to port, and one of
+`selection.jl:49`'s was a port the first count took for a gap). The 78 left
+each wait on a bean: G2's static rewrites (42, genclj-lgij), G7's
+non-numeric labels (17, genclj-414l), D4's loud lookups (16, genclj-ocwu)
+and G4's model_update (3, genclj-xjte). Counted against the ports'
+pending lists at batch 4's head (17fd8bd), with G5's port (genclj-2294).
 
 ### The n/a assertions, by reason
 
@@ -580,7 +578,7 @@ the ports' pending lists.
 | G2 | The static language rewrites a computed address (`:x => i`) into a `choice_at`/`call_at` call node, and hoists `@trace` out of expressions (a tuple, a ternary, a distribution's argument) | Both are compile errors in `gen ^:static` (checked); written as separate bindings, or with `comb/choice-at`, they work (checked). Decided, to build (DESIGN §9, static rewrites; genclj-lgij) | medium | 42 (`static_dsl.jl:466`'s other 7 are the IR's, G15) | Decided |
 | G3 | Optional positional arguments with defaults (`@gen function foo(x, y=2)`), in the trace's args too | One parameter vector per `gen`; a rest parameter `[x & [y z]]` covers calls, update and regenerate with any number of arguments (checked), but the trace's args stay as given | — | 60 n/a | n/a by the owner's decision (DESIGN §9: Clojure has none) |
 | G4 | `black_box_vi!`/`black_box_vimco!` with `model_update`, training the model's parameters with q's (the minimal VAE) | Only q's store is trained (`gen.inference.vi`'s docstring says so); to build (genclj-xjte) | medium | 3 | No |
-| G5 | A custom deterministic function's own trainable parameters (`accumulate_param_gradients_determ!`, the scale factor) | Argument gradients only (`:gradient-with-state`); to build (genclj-2294) | small–medium | 1 | No |
+| G5 | A custom deterministic function's own trainable parameters (`accumulate_param_gradients_determ!`, the scale factor) | Closed (genclj-2294, DESIGN §9): `:params` names the parameters a deterministic function reads from the store in effect (its own, `custom/with-params`, over the caller's); `param-gradients` differentiates them through its code or by `:param-gradient-with-state` | — | — (its 1 ports now) | — |
 | G6 | `HomogeneousMixture` of a multivariate family (`HomogeneousMixture(mvnormal, [1, 2])`, dims per argument) | Closed (b9eb9d2): `(homogeneous-mixture family dims)` takes Gen.jl's dims, slices each parameter on the axis before its own (means [K d], covariances [K d d]) and mixes the K components' densities of the whole value. Before, it took scalar families, and with mvnormal `dc/log-prob` returned a wrong number (F2) | — | — (its 10 port now) | — |
 | G7 | `@dist` with non-numeric labels (`labels[categorical(p)]` over symbols, a Dict of labels, enums, user types) | Numeric labels through `array/take` work (checked); keywords fail ("equal: not an array: :a"). §9: "Non-numeric labels wait for parameters that are not arrays"; to build (genclj-414l) | medium | 17 | Noted in §9 as pending |
 | G8 | `atan2` (and `asin`, `acos`, `atan`, `sinh`, `cosh`) in gen.array, differentiable and on MLX | Closed (genclj-3mx6, 241f0ef): `array/atan2`, `asin`, `acos`, `atan`, `sinh`, `cosh`, differentiable and on MLX | — | — (its 2 port now) | — |
