@@ -13,17 +13,12 @@
             [gen.gfi :as gfi]
             [gen.test-support :as ts]))
 
-(def ^:private gen-fns
-  "The gen.clj port's models of each case's generative function."
-  {:bare-same switch/sc :bare-switch switch/sc :bare-doubled switch/sc
-   :nested-drop switch/bam2 :nested-drop-z switch/bam2 :nested-mh switch/bam2})
-
 (deftest switch-regenerations
-  (is (= (zipmap (keys gen-fns) (repeat 10)) (frequencies (map :case oracle/switch-regenerations))))
+  (is (= (zipmap (keys switch/oracle-models) (repeat 10)) (frequencies (map :case oracle/switch-regenerations))))
   (doseq [{:keys [case draw] :as record} oracle/switch-regenerations
           side [:old :new]]
     (let [{:keys [args choices score]} (side record)]
-      (is (genjl/approx? score (:weight (gfi/assess (gen-fns case) args choices)))
+      (is (genjl/approx? score (:weight (gfi/assess (switch/oracle-models case) args choices)))
           (str case ", draw " draw ", " (name side))))))
 
 (defn- d6?

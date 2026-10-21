@@ -615,6 +615,19 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   - *Beta is exact at 0 and 1 (D6):* +Inf when α < 1 (or β < 1), where
     Gen.jl substitutes a finite value. As with draws beyond the float
     range, gen.clj keeps the exact value.
+  - *Regenerate's weight is Eq. 4.1's, under a Switch too (U1;
+    genclj-c5rl).* A choice resampled from its prior adds nothing, and an
+    old choice the new run drops cancels against the reverse move, so the
+    weight is the ratio of the densities of the choices kept. Gen.jl
+    0.4.8's Switch, with an index argdiff other than NoChange (the path of
+    every Switch called from `@gen` code), weighs the change of score
+    instead: it adds log p(z′) − log p(z) for the resampled choices and
+    subtracts a dropped choice's log density, so selection MH on a choice
+    under it targets p(z)² p(y | z). switch.jl:85, :89, :94, :288, :292 and
+    :294 assert Gen.jl's formula; the port checks them on Gen.jl's own
+    moves, which the oracle recorded, and Eq. 4.1 on gen.clj's. Reporting
+    upstream is the owner's call (the draft is
+    `docs/research/genjl-upstream/issue-1-switch-regenerate.md`).
   - *No default positional arguments (G3).* Clojure has none. A rest
     parameter (`[x & [y z]]`) covers calls, update and regenerate with any
     number of arguments, and a trace's args are the ones given. A

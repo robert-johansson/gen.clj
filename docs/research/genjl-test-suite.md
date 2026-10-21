@@ -723,7 +723,7 @@ Gen.jl is needed for few assertions. Its uses are four; the last ran on
    gen.clj test assesses both choice maps, shows that Gen.jl's weight is
    `score(t′) − score(t)` on them and that Eq. 4.1 gives gen.clj's, and
    records the difference in §9. (U1's p² is already shown by an MH chain,
-   §4.3.)
+   §4.3.) Done: `switch_test.clj`'s `regenerate-weights` (genclj-c5rl).
 2. **Values for a decision (1 testset, 4 assertions).** `distributions.jl:19`:
    `logpdf(beta, x, a, b)` for x ∈ {0, eps, 1 − eps, 1} and (a, b) ∈ {(0.5,
    0.5), (0.5, 1.5), (1.5, 0.5), (1, 1), (2, 2)}, if the owner wants Gen.jl's
