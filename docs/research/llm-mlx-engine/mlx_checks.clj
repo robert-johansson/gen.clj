@@ -1,5 +1,5 @@
 ;; The checks of docs/research/llm-mlx-engine.md §7, on MLX (one JVM, with
-;; llama.cpp for the fourth), and their results there:
+;; llama.cpp for the fourth and fifth), and their results there:
 ;;   1. MLX's GGUF loader reads both models: every F32 tensor as float32,
 ;;      every Q8_0 one as a packed uint32 weight with float16 scales and
 ;;      biases in groups of 32;
@@ -11,12 +11,15 @@
 ;;   4. Qwen3-0.6B's next-token log-probabilities from tiny_forward.clj's
 ;;      composites over the GGUF's weights, dequantized, against the llama
 ;;      engine's on the same file; with planted convention errors (4-heads,
-;;      4-rope) it must fail.
+;;      4-rope) it must fail;
+;;   5. the same for Qwen3.5-0.8B, whole and as a cached prefill plus a
+;;      step, with planted errors of its own (5-conv-shift, 5-conv-kernel,
+;;      5-q-gate).
 ;; Run (from the repository, after clojure -T:build java), with check
 ;; numbers after the directory to run only those:
 ;;   clojure -Sdeps '{:paths ["src" "test" "target/classes"]}' -J--enable-native-access=ALL-UNNAMED \
 ;;     -J-Dgen.mlx.lib=<mlx lib> -J-Dgen.llama.lib=<llama lib> \
-;;     -M docs/research/llm-mlx-engine/mlx_checks.clj <dir of the GGUF files> [1 2 3 4 4-heads 4-rope]
+;;     -M docs/research/llm-mlx-engine/mlx_checks.clj <dir of the GGUF files> [1 2 3 4 5 4-heads …]
 (ns mlx-checks
   (:refer-clojure :exclude [+ - * / < > <= >= ==])
   (:require [gen.array :as array :refer [+ - * / < > <= >= ==]]

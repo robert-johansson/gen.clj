@@ -370,12 +370,12 @@ genclj-q4xv)
 
 ## 7. Checked on MLX (2026-10-21)
 
-`llm-mlx-engine/mlx_checks.clj` made all four checks in one MLX JVM on the
-Mac mini M4 (Metal), with llama.cpp for the last. Each run exited normally
+`llm-mlx-engine/mlx_checks.clj` made these checks in MLX JVMs on the Mac
+mini M4 (Metal), one at a time, with llama.cpp for the last two. Each run exited normally
 under the memory guard (peak 2.6 GB). To repeat them:
 `clojure -Sdeps '{:paths ["src" "test" "target/classes"]}' -J-Dgen.mlx.lib=… -J-Dgen.llama.lib=… -M docs/research/llm-mlx-engine/mlx_checks.clj ~/gen-clj-models`,
-with check numbers after it to run some of them, or `4-heads` and `4-rope`
-for the planted errors.
+with check numbers after it to run some of them, or `4-heads`, `4-rope`,
+`5-conv-shift`, `5-conv-kernel` and `5-q-gate` for the planted errors.
 
 1. **Loading.** `mlx_load_gguf` reads both models, every array as the
    header says:
@@ -422,9 +422,37 @@ for the planted errors.
    Swapping RoPE's two halves in both q and k is no error at all: the dot
    products, and so the logits, do not change.
 
+5. **Qwen3.5-0.8B against the llama engine** (the same prompts, the
+   scales cast to float32). The prototype's 24 layers ran from the GGUF's
+   tensors by llama.cpp's names: GatedDeltaNet, and at every fourth layer
+   gated attention with RoPE on 64 of each head's 256 dims. Each prompt was
+   computed whole, and as a cached prefill of all but its last token plus
+   one step, which carries the KV cache, the conv state and the recurrent
+   state.
+
+   | Prompt | whole | cached |
+   |---|---|---|
+   | "The capital of Sweden is a city called" (8 tokens) | 0.00078 | 0.00078 |
+   | "def fibonacci(n):\n    if n <" (9 tokens) | 0.0019 | 0.0019 |
+
+   Argmax and the top 5 equal llama.cpp's in all four cases. Planted
+   errors specific to Qwen3.5 fail it:
+
+   | Planted error | whole | cached |
+   |---|---|---|
+   | the conv state keeping its oldest inputs, not its newest | unchanged (0.00078, 0.0019) | 1.7 and 6.9 nats, top 5 wrong |
+   | the conv kernel applied newest input first | 17.0 and 8.9 nats, argmax wrong | the same |
+   | q's query and output gate swapped | 25.2 and 14.8 nats, argmax wrong | the same |
+
+   The first shows only in a cached step, which is why the check makes
+   one. The last two are self-consistent: they pass every check on the
+   tiny models (§2), so only this comparison catches them.
+
 So P2's central risk, whether the GGUF's weights and llama.cpp's
 conventions give llama.cpp's distribution through gen.array, is retired for
-Qwen3. Qwen3.5's conventions (§1) are still unchecked against llama.cpp.
+both families, Qwen3 and Qwen3.5. That covers the hybrid layers and their
+caches, at 0.8B, where key and value heads are equal (§1's V-head order is
+the identity there).
 
 ## Recommendations for the owner
 
