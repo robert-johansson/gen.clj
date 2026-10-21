@@ -1343,6 +1343,20 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     thread and uses no virtual threads.
   - docs/array-api.md's compile entry says so (its "Threads" item), an
     addition to the approved API doc that the owner accepted with the fix.
+- **Metal's buffer limit: collect and retry once (owner, 2026-10-21;
+  genclj-9tyh).** MLX on macOS allocates every buffer through Metal, which
+  allows about 499,000. The backend's array cap (60% of that, genclj-hche)
+  counts only the arrays the JVM owns, so graphs can still reach the limit.
+  - Measured: MLX recovers fully after "[metal::malloc] Resource limit
+    exceeded", both when an array is made and mid-evaluation. Dropped and
+    collected, the arrays free their buffers, the same graph evaluates to
+    its value, and a fill reaches the limit again: no leak.
+  - So at the two places a buffer is made (an array from host data, and
+    an evaluation), the limit error runs a full collection and the call is
+    retried once. A second failure is a loud ex-info, `:mlx-buffer-limit`,
+    with the live count and the hint (eval! as you go, and drop graphs).
+  - Alternatives were only a clearer error (no retry), or MLX's own
+    message as before.
 - **Git:** the main repo is public-ready, with `.beans/`, `.beans.yml`,
   `.claude/` and `*.pdf` gitignored. Its remote is the private
   `robert-johansson/gen.clj` (the owner, 2026-10-21, at M4's close: private
