@@ -1471,8 +1471,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   a combinator at the top had to be spliced into one. D7's rule stands, one
   store per generative function and gradients as values; this extends where
   the stores are found.
-- **A custom function's trainable parameters (M5's G5, genclj-2294; the
-  agent, 2026-10-21, for the owner's review).** `(custom/deterministic
+- **A custom function's trainable parameters (M5's G5, genclj-2294;
+  approved under the owner's delegation, 2026-10-21).** `(custom/deterministic
   {:params [:w] …})` names the parameters a deterministic function reads,
   and `:apply-with-state` (or `:apply`) takes their values as a second
   argument, `{name value}`. They come from the store in effect: the calling
