@@ -329,8 +329,9 @@ ms over the bootstrap rather than 55: its rows on the pool, and
 the batch alone because it resamples, after which particles share
 contexts and a step reads fewer. Peak RSS 3.5 GB, no GC backstop.
 
-With all three models and a grammar (2026-10-21 08:05, m3-smc2, no other
-JVM): the last column runs SMC under `gen.llm.grammar`'s `[0-9, ]*`
+With all three models and a grammar (2026-10-21 08:05, m3-smc2;
+approximate: another agent's array bench and JVM suite were using the
+CPU): the last column runs SMC under `gen.llm.grammar`'s `[0-9, ]*`
 (digits, commas and spaces, so that a particle can go on for the bench's
 16 tokens), by the masked proposal; the grammar is made in 218, 306 and
 400 ms (one live state, its mask over the vocabulary). ms a step:
