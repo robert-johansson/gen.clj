@@ -525,12 +525,16 @@ split one.
 Each applied in a worktree of its own, the namespace's suite run, and
 reverted (2026-10-21, `scratchpad/grammar-mut/run.py`): 42 planted bugs.
 38 were caught by failing tests; three were missed at first and are
-caught by tests added for them (marked *); one shows as a hang.
+caught by tests added for them (marked *); one first showed as a stall
+(marked †): the UTF-8 property decoded 65,536 strings in every trial and
+shrank vectors of 300 of them, so its failing case shrank for minutes.
+It now decodes them once and generates three integers (its random strings
+drawn from a seed inside the trial), and the mutated suite fails in 4 s.
 
 | Mutation | Caught by |
 |---|---|
 | UTF-8: surrogates kept | every-character-and-nothing-else |
-| UTF-8: the lead byte of two-byte characters wrong | the regex suite does not finish (it stalls in chars-accepts-exactly-the-utf8-of-its-characters): caught, as a hang |
+| UTF-8: the lead byte of two-byte characters wrong | †chars-accepts-exactly-the-utf8-of-its-characters, the-syntax-agrees…, every-character-and-nothing-else, text-not-containing-a-string, within 4 s |
 | derivative of a concatenation ignores a nullable head | the-syntax-agrees-with-java-util-regex, the-constructors-agree…, equal-languages…, text-not-containing-a-string (6 failures) |
 | `.` matches a newline | the-syntax-agrees-with-java-util-regex, the-constructors-agree… |
 | `\s` without `\x0B` | the same two |

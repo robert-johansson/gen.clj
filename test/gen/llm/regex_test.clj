@@ -223,16 +223,26 @@
 (def ^:private gen-code-range
   (gen/fmap sort (gen/vector (gen/one-of [(gen/choose 0 0x7FF) (gen/choose 0x800 0xFFFF) (gen/choose 0 0x10FFFF)]) 2)))
 
+(def ^:private short-strings
+  "Every string of one byte, and of two bytes past ASCII, with the one
+   character each encodes (nil for none): decoded once, not in every trial."
+  (mapv (fn [bs] [bs (decodes-to bs)])
+        (concat (for [a (range 256)] (byte-array [(unchecked-byte a)]))
+                (for [a (range 128 256) b (range 128 256)] (byte-array [(unchecked-byte a) (unchecked-byte b)])))))
+
 (defspec chars-accepts-exactly-the-utf8-of-its-characters 40
+  ;; the generated values are three integers, the random strings drawn
+  ;; from seed inside the trial: a failing case shrinks in a few steps, so
+  ;; a regression fails within seconds rather than shrinking for minutes
   (prop/for-all [[lo hi] gen-code-range
-                 longer (gen/vector (gen/vector (gen/choose 0 255) 3 4) 300)
-                 inside (gen/vector (gen/choose 0 0x10FFFF) 50)]
+                 seed gen/nat]
     (let [d (regex/dfa (regex/chars [lo hi]))
-          ok? (fn [^bytes bs] (= (dfa/matches? d bs)
-                                 (boolean (when-let [c (decodes-to bs)] (<= lo c hi)))))]
-      (and (every? ok? (for [a (range 256)] (byte-array [(unchecked-byte a)])))
-           (every? ok? (for [a (range 128 256) b (range 128 256)] (byte-array [(unchecked-byte a) (unchecked-byte b)])))
-           (every? ok? (map #(byte-array (map unchecked-byte %)) longer))
+          rnd (java.util.Random. seed)
+          longer (repeatedly 300 #(byte-array (repeatedly (+ 3 (.nextInt rnd 2)) (fn [] (unchecked-byte (.nextInt rnd 256))))))
+          inside (repeatedly 50 #(.nextInt rnd 0x110000))
+          in? (fn [c] (boolean (and c (<= lo c hi))))]
+      (and (every? (fn [[bs c]] (= (dfa/matches? d bs) (in? c))) short-strings)
+           (every? #(= (dfa/matches? d %) (in? (decodes-to %))) longer)
            (every? #(or (<= 0xD800 % 0xDFFF)
                         (= (<= lo % hi) (regex/matches? d (string-of [%]))))
                    (filter #(<= 0 % 0x10FFFF) (concat boundaries [lo hi (dec lo) (inc hi)] inside)))))))
