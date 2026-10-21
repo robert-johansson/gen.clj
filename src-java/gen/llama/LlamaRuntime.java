@@ -92,6 +92,7 @@ public final class LlamaRuntime {
     }
 
     static final ThreadLocal<int[]> LEVEL = ThreadLocal.withInitial(() -> new int[] {0});
+    static final ThreadLocal<StringBuilder> CAPTURE = new ThreadLocal<>();
     static final ThreadLocal<StringBuilder> ERROR = ThreadLocal.withInitial(StringBuilder::new);
     static final ThreadLocal<String> LAST_ERROR = new ThreadLocal<>();
 
@@ -102,6 +103,8 @@ public final class LlamaRuntime {
         if (level != 5) current[0] = level;
         int effective = current[0];
         String s = text.reinterpret(Long.MAX_VALUE).getString(0, StandardCharsets.UTF_8);
+        StringBuilder capture = CAPTURE.get();
+        if (capture != null) capture.append(s);
         if (effective == 4) {
           StringBuilder b = ERROR.get();
           if (level != 5) b.setLength(0);
@@ -136,6 +139,19 @@ public final class LlamaRuntime {
 
   public static void clearLastError() {
     Log.LAST_ERROR.remove();
+  }
+
+  /** Keep everything llama.cpp logs on this thread, at every level and
+   *  whatever gen.llama.log prints, until endCapture. */
+  public static void startCapture() {
+    Log.CAPTURE.set(new StringBuilder());
+  }
+
+  /** What llama.cpp logged on this thread since startCapture, and stop. */
+  public static String endCapture() {
+    StringBuilder b = Log.CAPTURE.get();
+    Log.CAPTURE.remove();
+    return b == null ? "" : b.toString();
   }
 
   // ---- batches -----------------------------------------------------------------------
