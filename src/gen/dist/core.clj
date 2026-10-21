@@ -195,6 +195,25 @@
   [p]
   (if (or (array/array? p) (nil? p)) p (array/array p)))
 
+(def ^:private double-array-class (Class/forName "[D"))
+
+(defn- first-element
+  "The first leaf of Clojure data, descending into sequential collections
+   (an empty one is its own)."
+  [p]
+  (if (and (sequential? p) (seq p)) (recur (first p)) p))
+
+(defn host-data?
+  "Is p a value that is neither an array nor array data (numbers and
+   booleans, nested in sequential collections, or a double[]): a keyword,
+   string, record, map, function, or a collection of them? A collection is
+   told by its first element, so a mixed one is array data, which
+   gen.array/array rejects."
+  [p]
+  (and (some? p) (not (array/array? p))
+       (let [e (first-element p)]
+         (not (or (array/host? e) (and (sequential? e) (empty? e)) (instance? double-array-class e))))))
+
 (defn ->checkable
   "A parameter as validation sees it: Clojure data as a JVM backend array,
    which is always concrete (so host data is checked on every backend, also
@@ -220,7 +239,10 @@
    without it, value shapes are not checked.
 
    Parameters given as Clojure vectors become arrays, after validation, which
-   checks them on the host (so also on a lazy backend). The type keyword is
+   checks them on the host (so also on a lazy backend). A parameter marked
+   ^:host may also be host data (host-data?: labels, a map, a record), which
+   is kept as given: the same for every particle of a batch, and never
+   differentiated. The others must be arrays or array data. The type keyword is
    namespace-qualified, so definitions from different namespaces never collide.
    discrete? says whether its values are discrete (false by default)."
   [dist-name & body]
@@ -229,15 +251,17 @@
         clauses (into {} (map (juxt first rest)) (rest body))
         type-kw (keyword (str *ns*) (name dist-name))
         d (gensym "d")
-        bind-params (vec (mapcat (fn [p] [p `(get (:params ~d) ~(keyword p))]) params))]
+        bind-params (vec (mapcat (fn [p] [p `(get (:params ~d) ~(keyword p))]) params))
+        ;; a ^:host parameter that is host data is kept as given
+        as-given (fn [p f] (if (:host (meta p)) `(if (host-data? ~p) ~p (~f ~p)) `(~f ~p)))]
     `(do
        ;; marked, so a pushforward's body can find its one random draw (gen.dist.dsl)
        (defn ~(vary-meta dist-name assoc ::constructor true) ~@(when doc [doc]) ~params
          ;; validated as given (host data on the host), then made arrays
-         (let [~@(mapcat (fn [p] [p `(->checkable ~p)]) params)]
+         (let [~@(mapcat (fn [p] [p (as-given p `->checkable)]) params)]
            ~@(map (fn [p] `(check-param-not-nan ~(name dist-name) ~(name p) ~p)) params)
            ~@(get clauses 'validate))
-         (let [~@(mapcat (fn [p] [p `(->array ~p)]) params)]
+         (let [~@(mapcat (fn [p] [p (as-given p `->array)]) params)]
            (->Distribution ~type-kw ~(into {} (map (fn [p] [(keyword p) p])) params))))
        ~(when-let [[[k s] & sample-body] (get clauses 'sample)]
           `(defmethod -sample ~type-kw [~d ~k ~s] (let ~bind-params ~@sample-body)))

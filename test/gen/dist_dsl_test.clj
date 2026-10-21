@@ -1,10 +1,13 @@
 (ns gen.dist-dsl-test
   "Pushforward distributions (Gen.jl's @dist): densities against closed
    forms, normalization (which a wrong Jacobian breaks), the discrete case
-   with repeated labels, sampling, the GFI laws inside a model, loud errors."
+   with repeated labels, labels that are not numbers, sampling, batched
+   runs, the GFI laws inside a model, loud errors."
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array :refer [+ - * /]]
+            [gen.batched :as b]
+            [gen.choicemap :as cm]
             [gen.dist :as d]
             [gen.dist.core :as dc]
             [gen.dist.dsl :refer [dist]]
@@ -18,6 +21,10 @@
 (dist reciprocal [mu sd c] (/ c (d/normal mu sd)))
 (dist chained [mu sd] (* 2.0 (array/exp (+ (d/normal mu sd) 1.0))))
 (dist labeled [probs labels] (array/take labels (d/categorical probs)))
+(dist labeled-cat [labels probs] (nth labels (d/categorical probs)))
+(def ^:private colors {false :red true :green})
+(dist color [p] (get colors (d/bernoulli p)))
+(defrecord ^:private Label [name])
 
 (dist doubled-poisson [rate] (* 2.0 (d/poisson rate)))
 (dist exp-geometric [p] (array/exp (d/geometric p)))
@@ -80,6 +87,52 @@
   (testing "samples are labels"
     (is (every? #{10.0 20.0 30.0} (map double (ts/host (dc/sample (labeled [0.2 0.5 0.3] [10 20 30]) (rng/key 1) [50])))))))
 
+(deftest labels-that-are-not-numbers
+  (let [d (labeled-cat [:a :b :c] [0.2 0.5 0.3])]
+    (is (ts/close? (Math/log 0.5) (lp d :b)))
+    (is (= ##-Inf (lp d :z)) "not a label")
+    (is (= ##-Inf (lp d 1)) "nor a number, the index of one")
+    (is (= [:a :b :c] (dc/support d)))
+    (is (ts/close? 1.0 (reduce + (map #(Math/exp (lp d %)) (dc/support d)))) "normalized"))
+  (testing "repeated labels add up, and the support lists each once"
+    (let [d (labeled-cat [:a :b :a] [0.2 0.5 0.3])]
+      (is (ts/close? (Math/log 0.5) (lp d :a)))
+      (is (= [:a :b] (dc/support d)))))
+  (testing "a map's labels, and records, which compare by value"
+    (is (ts/close? (Math/log 0.25) (lp (color 0.25) :green)))
+    (is (ts/close? 0.0 (lp (labeled-cat [(->Label :a)] [1.0]) (->Label :a)))))
+  (testing "a label has a gradient for its probabilities: categorical's at its index"
+    (let [probs (array/array [0.2 0.5 0.3])
+          g (fn [f v] ((array/grad #(f v %)) probs))]
+      (is (ts/close? (g #(dc/log-prob (d/categorical %2) %1) 1) (g #(dc/log-prob (labeled-cat [:a :b :c] %2) %1) :b)))))
+  (testing "draws are labels, in proportion, on every backend (the draw is read where a lookup needs it)"
+    (let [n 2000
+          draws (frequencies (map #(dc/sample (labeled-cat [:a :b :c] [0.2 0.5 0.3]) %) (rng/split (rng/key 5) n)))]
+      (is (= #{:a :b :c} (set (keys draws))))
+      ;; the count of :b, binomial(n, 0.5): five standard errors
+      (is (< (Math/abs (- (draws :b) (* 0.5 n))) (* 5 (Math/sqrt (* n 0.25)))))))
+  (testing "a batch of labels is an error, as no array holds them"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not numbers, so it draws one at a time"
+                          (dc/sample (labeled-cat [:a :b] [0.5 0.5]) (rng/key 1) [4]))))
+  (testing "a family's parameters that are not ^:host must be arrays or their data"
+    (is (thrown? clojure.lang.ExceptionInfo (d/categorical [:a :b])))))
+
+(def ^:private labeled-model
+  (gen [] (let [k (trace :k (labeled-cat [:x :y :z] [0.2 0.5 0.3]))]
+            (trace :v (d/normal (if (= k :y) 1.0 0.0) 1))
+            k)))
+
+(deftest labels-in-a-batched-run
+  (testing "a draw is read per particle: the run falls back"
+    (let [ps (b/simulate labeled-model [] 8 (rng/key 6))]
+      (is (not (b/batched? ps)))
+      (is (:gen.array/batched-branch (:data (b/fallback-reason ps))))
+      (is (every? #{:x :y :z} (map #(% :k) (:traces ps))))))
+  (testing "a given label is scored on the host for every particle: no fallback"
+    (let [{ps :particles w :weights} (b/generate labeled-model [] (cm/choicemap :k :z) 8 (rng/key 7))]
+      (is (b/batched? ps))
+      (is (ts/close? (array/full [8] (Math/log 0.3)) w)))))
+
 (deftest sampling-follows-the-body
   (let [n 20000
         xs (ts/host (dc/sample (shifted-exponential 2.0 1.0) (rng/key 2) [n]))
@@ -94,7 +147,8 @@
     [2.0] [[3.0]]]
    [:discrete-pushforward
     (gen [] (let [k (trace :k (labeled [0.2 0.5 0.3] [1 2 3]))] (trace :y (d/normal k 1)) k))
-    [] []]])
+    [] []]
+   [:labels-in-a-model labeled-model [] []]])
 
 (laws/deflaws pushforward models 60)
 
