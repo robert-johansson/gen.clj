@@ -1423,6 +1423,26 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     with the live count and the hint (eval! as you go, and drop graphs).
   - Alternatives were only a clearer error (no retry), or MLX's own
     message as before.
+- **An optimizer step evaluates what it returns (genclj-9e9e).**
+  `learn/step` evaluates its new store and optimizer state: a step is an
+  inference loop's boundary (rule 3). A training loop written by hand that
+  did not evaluate (train-test's lecture loop) made each store a graph over
+  every step before it. MLX's nodes held it after the JVM freed the
+  handles, invisible to the backend's live count, MLX's active and cache
+  memory and the heap: about 270 KB of resident memory per lecture on
+  Metal, 1 GB to 10 GB in 8 s at Gen.jl's size, where `learn/train`, which
+  evaluated its steps, stayed flat. `train` and black-box VI no longer
+  evaluate the step themselves (VI's history holds host numbers: each
+  draw's log weight is read). A step inside a gradient (tape values) or under the batch
+  tracer is unchanged: the wrappers evaluate their primals. The other loops
+  a user drives step by step were checked: MCMC runs, particle-filter
+  steps, rejuvenation and move-reweight already evaluate per iteration;
+  MH, MALA, HMC, MAP and elliptical slice read their decision, which
+  evaluates the new choices, and their lazy score is one step deep (20,000
+  hand-driven MH and MALA steps that read nothing stayed bounded). The
+  alternative was to fix only the test's loop and document the rule, which
+  would leave the trap for the next loop written by hand (approved under
+  the owner's delegation, 2026-10-21).
 - **A vector is a path, everywhere (owner, 2026-10-21; M5's G9 and F3).**
   gen.choicemap's rule, an address is any value except a vector and a
   vector is a path, now holds for selections too; before, `sel/selected?`

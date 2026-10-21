@@ -72,22 +72,26 @@
     :adam {:t 0 :m (array/tree-map array/zeros-like store) :v (array/tree-map array/zeros-like store)}))
 
 (defn step
-  "[store' state']: one ascent step from store along the gradients."
+  "[store' state']: one ascent step from store along the gradients,
+   evaluated. A step is an inference loop's boundary (rule 3): on a lazy
+   backend a loop of unevaluated steps would make each store a graph over
+   every step before it, which no collection frees (genclj-9e9e)."
   [{:keys [kind lr beta1 beta2 eps] :as optimizer} state store grads]
-  (case kind
-    :sgd [(update-given #(+ %1 (* lr %2)) store grads) nil]
-    :gradient-descent (let [t (inc (:t state))
-                            {:keys [init beta]} optimizer
-                            size (/ (* init (+ beta 1.0)) (+ beta t))]
-                        [(update-given #(+ %1 (* size %2)) store grads) {:t t}])
-    :adam (let [t (inc (:t state))
-                m (update-given #(+ (* beta1 %1) (* (- 1.0 beta1) %2)) (:m state) grads)
-                v (update-given #(+ (* beta2 %1) (* (- 1.0 beta2) (* %2 %2))) (:v state) grads)
-                c1 (- 1.0 (Math/pow beta1 t))
-                c2 (- 1.0 (Math/pow beta2 t))]
-            [(update-given (fn [theta _ mi vi] (+ theta (* lr (/ (/ mi c1) (+ (array/sqrt (/ vi c2)) eps)))))
-                           store grads m v)
-             {:t t :m m :v v}])))
+  (array/eval!
+   (case kind
+     :sgd [(update-given #(+ %1 (* lr %2)) store grads) nil]
+     :gradient-descent (let [t (inc (:t state))
+                             {:keys [init beta]} optimizer
+                             size (/ (* init (+ beta 1.0)) (+ beta t))]
+                         [(update-given #(+ %1 (* size %2)) store grads) {:t t}])
+     :adam (let [t (inc (:t state))
+                 m (update-given #(+ (* beta1 %1) (* (- 1.0 beta1) %2)) (:m state) grads)
+                 v (update-given #(+ (* beta2 %1) (* (- 1.0 beta2) (* %2 %2))) (:v state) grads)
+                 c1 (- 1.0 (Math/pow beta1 t))
+                 c2 (- 1.0 (Math/pow beta2 t))]
+             [(update-given (fn [theta _ mi vi] (+ theta (* lr (/ (/ mi c1) (+ (array/sqrt (/ vi c2)) eps)))))
+                            store grads m v)
+              {:t t :m m :v v}]))))
 
 (defn train
   "Fit the trainable parameters of gf by maximizing the log density of
@@ -111,7 +115,7 @@
                                                (:trace (gfi/generate (dyn/with-params gf store) args constraints k-gen))))
                                            (split k-batch batch-size))
                               traces (vec results)
-                              [store state] (array/eval! (step optimizer state store (grad/mean (map gradients-fn traces))))]
+                              [store state] (step optimizer state store (grad/mean (map gradients-fn traces)))]
                           [store state (/ (reduce + (map #(double (array/item (:score %))) traces)) batch-size)]))
                       [store state nil]
                       (split k-epoch batches-per-epoch))]
