@@ -1147,6 +1147,12 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   - `token/forced` builds constraints (a prefix, text), `token/from` the
     suffix selection; no temperature or top-k (another distribution, a
     later option).
+  - On M4's GFI (m3-main, 2026-10-21): unvisited constraints are
+    `gfi/unvisited` errors, every address at once, so a revise drops old
+    tokens past a new end; a completion keeps `IRevisable`'s defaults (no
+    store; another completion's trace is revised from its choices), and
+    satisfies the general, forward-sampling, fixed-support and across law
+    sets.
 - **Token SMC and potentials** (2026-10-21, agent; **for the owner's
   review**, PROVISIONAL while the owner is away;
   `docs/research/llm-token-smc.md`):

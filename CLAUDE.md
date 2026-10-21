@@ -34,6 +34,9 @@ clojure -X:test:commons-math          # also the Commons Math extension (ext/com
 clojure -J-Dgen.backend=mlx -X:test   # any suite on the MLX backend (add -J-Dgen.mlx.device=cpu|gpu, -J-Dgen.mlx.dtypes=64)
 clojure -M:bench -m gen.array-bench   # per-op costs; add :c2 to compare C2 with Graal's JIT
 clojure -M:bench -m gen.model-bench   # model-level costs (GFI ops, batching, gradients)
+clojure -J-Dgen.llama.lib=<lib> -J-Dgen.llama.test-model=<gguf> -X:test :nses '[gen.llm.llama-test gen.llm.llama-lm-test gen.llm.llama-token-test gen.llm.llama-smc-test]'
+clojure -J-Dgen.llama.lib=<lib> -M:bench -m gen.llama-noise <gguf>              # llama.cpp's float noise and costs
+clojure -J-Dgen.llama.lib=<lib> -M:test:bench -m gen.llama-long-noise <gguf>    # the same past a sliding window
 ```
 
 **The MLX backend** needs its native libraries and Java binding, built once:
@@ -43,6 +46,17 @@ changing mlx-c's version, regenerate the binding with `clojure -M
 native/bindgen.clj`. The backend conformance suite
 (`gen.backend-conformance-test`) compares a backend with the JVM backend;
 without the native libraries the MLX tests skip.
+
+**llama.cpp** (the local-LLM engine, `gen.llm.llama`) needs its libraries,
+built once: `native/build-llama.sh` builds the pinned release (v0.7.0; Metal
+on macOS, `cpu` or `cuda` on Linux) into `native/build/llama/<platform>`,
+then `clojure -T:build java`. The JVM finds them with
+`-J-Dgen.llama.lib=<dir>/lib` (default: that build directory). On the M4 Mac
+they are installed at `~/gen-clj-models/llama-v0.7.0`, beside the test
+models (Qwen3-0.6B, Qwen3.5-0.8B and Gemma-3-270M, Q8_0 GGUFs). The llama.cpp
+tests take a model with `-J-Dgen.llama.test-model=<gguf>` and skip without
+one; run one model JVM at a time. Everything else in `gen.llm` runs on the
+pure-JVM toy engines (`test/gen/llm/toy_engine.clj`, `cell_engine.clj`).
 
 **Test conventions.**
 - **Determinism.** Statistical tests use fixed keys, so they are deterministic. Their
@@ -74,6 +88,8 @@ Python.
 | L3 distributions | `gen.dist.core` (record, `defdist`), `gen.dist`, `gen.dist.dsl` (`dist`: pushforwards, Gen.jl's `@dist`), `gen.dist.host` (host-library families, GenDistributions; `gen.dist.commons-math` in `ext/`) |
 | L4 combinators | `gen.combinators` (map, unfold, switch, recurse, call-at, choice-at), `gen.custom` (deterministic generative functions, custom gradients, estimated densities) |
 | L5 inference | `gen.inference.weights`, `.importance`, `.mh`, `.kernel`, `.particle-filter`, `.mcmc` (HMC, MALA, MAP, elliptical slice), `.enumerative` (grids, exact proposals), `.proposal` (internal-proposal override), `.transform` (Gen.jl's @transform, trace translators, SMCP3), `.trace-kernel` (GenTraceKernelDSL), `.vi` (black-box VI, VIMCO); `gen.gradients`, `gen.learning` |
+| LLM runtime | `gen.llm.branching` (the Branching protocol), `.slots` (slot engines on one thread), `.llama` (llama.cpp; Java binding in `src-java/gen/llama`), `gen.llm.lm` (the LM protocol), `.cache`, `.trie`, `.cells` (the LM's cache, prefix trie, KV-cell ledger) |
+| LLM generative functions | `gen.llm.token` (completions, the token distribution), `gen.llm.potential` (potentials), `gen.llm.smc` (token SMC) |
 
 ## Rules
 

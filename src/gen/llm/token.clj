@@ -28,6 +28,11 @@
    - project sums the selected tokens' scores; propose is a simulate.
    - The retdiff of update and regenerate is a vector-diff of the token
      vector (the positions whose tokens changed), or no-change.
+   - A completion reads no parameter store and keeps gen.gfi's IRevisable
+     defaults: two compute the same when they share the LM (the same
+     object), the end tokens and the vocabulary; a trace that another one
+     made is revised from its choices (gfi/revise), each token rescored
+     through this one's LM, those past a new end token dropped.
 
    Score once (DESIGN §9): a token's score is the LM's, computed once and
    kept by its trie, so every operation reads the same number for the same
@@ -315,18 +320,19 @@
 
 (defn- positions
   "The tokens choices holds, by position (a sorted map), each checked: a
-   position below max-tokens, a token of the vocabulary."
+   position below max-tokens (else gen.gfi's unvisited error, for every
+   address past them), a token of the vocabulary."
   [op gf choices ^long max-tokens]
   (when (cm/has-value? choices)
     (throw (ex-info (str (name op) ": a completion's choices are tokens by position, not a single value")
                     {:op op :reason :invalid-choices})))
-  (let [n-vocab (long (:n-vocab gf))]
+  (let [n-vocab (long (:n-vocab gf))
+        subs (cm/submaps choices)]
+    (when-let [outside (seq (remove #(br/index? (key %) max-tokens) subs))]
+      (throw (gfi/unvisited op (mapv (comp vector key) outside)
+                            (str "a completion of " max-tokens " tokens has positions 0 to " (dec max-tokens)))))
     (into (sorted-map)
           (map (fn [[i sub]]
-                 (when-not (br/index? i max-tokens)
-                   (throw (ex-info (str (name op) ": the constraint at " (pr-str i) " was not visited (a completion of "
-                                        max-tokens " tokens has positions 0 to " (dec max-tokens) ")")
-                                   {:op op :reason :not-visited :address i :max-tokens max-tokens})))
                  (when-not (cm/has-value? sub)
                    (throw (ex-info (str (name op) ": the choice at " i " is a token, not nested choices")
                                    {:op op :reason :invalid-choices :address i})))
@@ -336,16 +342,21 @@
                                           (dec n-vocab) "): " (pr-str (cm/get-value sub)))
                                      {:op op :reason :invalid-token :address i :value (cm/get-value sub)})))
                    [(long i) (long t)])))
-          (cm/submaps choices))))
+          subs)))
 
 (defn- check-visited
   "Every constrained position is one of the run's (the sequence may have
-   ended before it)."
+   ended before it): else the unvisited error, for every one past its
+   end."
   [op constrained {:keys [tokens]}]
-  (when-let [i (first (filter #(<= (count tokens) (long %)) (keys constrained)))]
-    (throw (ex-info (str (name op) ": the constraint at " i " was not visited (the completion ended after "
-                         (count tokens) " tokens)")
-                    {:op op :reason :not-visited :address i :length (count tokens)}))))
+  (when-let [past (seq (filter #(<= (count tokens) (long %)) (keys constrained)))]
+    (throw (gfi/unvisited op (mapv vector past) (str "the completion ended after " (count tokens) " tokens")))))
+
+(defn- missing
+  "assess's error for the token at position i, which choices lack."
+  [i detail]
+  (ex-info (str "assess: no value for the choice at [" i "] (" detail ")")
+           {:op :assess :reason :missing-choice :missing-choice true :path [i]}))
 
 (defn- simulate* [gf args key]
   (one-particle! "simulate")
@@ -368,18 +379,12 @@
         tokens (vec (vals given))
         n (count tokens)
         end-tokens (:end-tokens gf)]
-    (when-not (= (vec (keys given)) (vec (range n)))
-      (throw (ex-info (str "assess: the tokens are at the positions 0 to " (dec n) " without a gap, not "
-                           (vec (keys given)))
-                      {:op :assess :reason :missing-choice :positions (vec (keys given))})))
+    (when-let [gap (first (remove given (range n)))]
+      (throw (missing gap (str "the tokens are at " (vec (keys given)) ", which leaves a gap"))))
     (when-let [i (first (filter #(contains? end-tokens (tokens %)) (range (dec n))))]
-      (throw (ex-info (str "assess: the constraint at " (inc (long i)) " was not visited (the end token at " i
-                           " ends the completion)")
-                      {:op :assess :reason :not-visited :address (inc (long i))})))
+      (throw (gfi/unvisited :assess (mapv vector (range (inc (long i)) n)) (str "the end token at " i " ends the completion"))))
     (when-not (or (= n max-tokens) (and (pos? n) (contains? end-tokens (peek tokens))))
-      (throw (ex-info (str "assess: the tokens end at " n ", before an end token or max-tokens (" max-tokens
-                           "): position " n " is unconstrained")
-                      {:op :assess :reason :missing-choice :address n :max-tokens max-tokens})))
+      (throw (missing n (str "the tokens end before an end token or max-tokens, " max-tokens))))
     {:weight (if (zero? n) 0.0 (sum (lm/score (:lm gf) prompt tokens)))
      :retval tokens}))
 
@@ -446,7 +451,7 @@
   (-generate [gf args constraints key] (generate* gf args constraints key))
   (-update [gf tr args _argdiffs constraints key] (update* gf tr args constraints key))
   (-regenerate [gf tr args _argdiffs selection key] (regenerate* gf tr args selection key))
-  (-assess [gf args choices] (assess* gf args choices))
+  (-assess [gf args choices _key] (assess* gf args choices))
   (-propose [gf args key]
     (let [tr (simulate* gf args key)]
       {:choices (:choices tr) :weight (:score tr) :retval (:retval tr)}))
