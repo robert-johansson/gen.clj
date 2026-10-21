@@ -1024,7 +1024,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     a macro nested so must be hygienic, reading only the locals it is
     given. Quoted data is data: it may mention `trace`, and its symbols are
     no inputs.
-  - **Static rewrites (M5, G2, genclj-lgij; owner, 2026-10-21; to build).**
+  - **Static rewrites (M5, G2; owner, 2026-10-21; built in genclj-lgij).**
     The rewrites live in the static analysis only; the body fn, the dynamic
     semantics, is unchanged, and the static law runs over every rewritten
     body.
