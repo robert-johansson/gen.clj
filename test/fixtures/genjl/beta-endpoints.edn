@@ -1,0 +1,64 @@
+;; Gen.jl's logpdf(beta, x, alpha, beta) at and next to 0 and 1 (D6): finite at an endpoint
+;; where the density is infinite, "as if x = eps/e" (src/modeling_library/distributions/beta.jl).
+;; Written by test/fixtures/genjl/generate.jl: Gen 0.4.8, Julia 1.12.6, arm64-apple-darwin25.4.0.
+[{:alpha 0.5
+ :beta 0.5
+ :log-prob 17.377096808709176
+ :x 0.0} {:alpha 0.5
+ :beta 1.5
+ :log-prob 18.070243989269123
+ :x 0.0} {:alpha 1.5
+ :beta 0.5
+ :log-prob ##-Inf
+ :x 0.0} {:alpha 1.0
+ :beta 1.0
+ :log-prob 0.0
+ :x 0.0} {:alpha 2.0
+ :beta 2.0
+ :log-prob ##-Inf
+ :x 0.0} {:alpha 0.5
+ :beta 0.5
+ :log-prob 16.877096808709176
+ :x 2.220446049250313e-16} {:alpha 0.5
+ :beta 1.5
+ :log-prob 17.570243989269123
+ :x 2.220446049250313e-16} {:alpha 1.5
+ :beta 0.5
+ :log-prob -18.47340939984803
+ :x 2.220446049250313e-16} {:alpha 1.0
+ :beta 1.0
+ :log-prob -0.0
+ :x 2.220446049250313e-16} {:alpha 2.0
+ :beta 2.0
+ :log-prob -34.2518939198891
+ :x 2.220446049250313e-16} {:alpha 0.5
+ :beta 0.5
+ :log-prob 16.877096808709176
+ :x 0.9999999999999998} {:alpha 0.5
+ :beta 1.5
+ :log-prob -18.47340939984803
+ :x 0.9999999999999998} {:alpha 1.5
+ :beta 0.5
+ :log-prob 17.570243989269123
+ :x 0.9999999999999998} {:alpha 1.0
+ :beta 1.0
+ :log-prob -0.0
+ :x 0.9999999999999998} {:alpha 2.0
+ :beta 2.0
+ :log-prob -34.2518939198891
+ :x 0.9999999999999998} {:alpha 0.5
+ :beta 0.5
+ :log-prob 17.377096808709176
+ :x 1.0} {:alpha 0.5
+ :beta 1.5
+ :log-prob ##-Inf
+ :x 1.0} {:alpha 1.5
+ :beta 0.5
+ :log-prob 18.070243989269123
+ :x 1.0} {:alpha 1.0
+ :beta 1.0
+ :log-prob 0.0
+ :x 1.0} {:alpha 2.0
+ :beta 2.0
+ :log-prob ##-Inf
+ :x 1.0}]

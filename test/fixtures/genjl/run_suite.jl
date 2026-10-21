@@ -50,14 +50,7 @@ function Test.finish(ts::RecTS)
 end
 
 # --- EDN ---------------------------------------------------------------------
-edn(x::Nothing) = "nil"
-edn(x::Bool) = x ? "true" : "false"
-edn(x::Integer) = string(x)
-edn(x::AbstractFloat) = isnan(x) ? "##NaN" : isinf(x) ? (x > 0 ? "##Inf" : "##-Inf") : repr(Float64(x))
-edn(x::Symbol) = ":" * replace(string(x), "_" => "-")
-edn(x::AbstractString) = repr(String(x))
-edn(x::Union{AbstractVector,Tuple}) = "[" * join(map(edn, collect(x)), " ") * "]"
-edn(x::AbstractDict) = "{" * join(["$(edn(k)) $(edn(v))" for (k, v) in x], "\n ") * "}"
+include("edn.jl")
 
 relfile(f) = (s = string(f); startswith(s, TESTDIR) ? s[length(TESTDIR)+2:end] : s)
 

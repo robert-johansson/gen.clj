@@ -575,7 +575,8 @@ whose `src/` and `test/` equal the tag's), Distributions 0.25.123. Offline,
 from a scratch project and depot, single-threaded, `nice -n 15`. The
 scripts: `test/fixtures/genjl/run_suite.jl` (the recording test set, with
 the project's `Project.toml` and `Manifest.toml` beside it), and the
-reproductions `docs/research/genjl-upstream/u1.jl`, `u3.jl` and `u4.jl`.
+reproductions `docs/research/genjl-upstream/u1.jl`, `u3.jl`, `u4.jl` and
+`u5.jl`.
 Regenerate the record with `env JULIA_PKG_OFFLINE=true JULIA_NUM_THREADS=1
 julia --project=test/fixtures/genjl test/fixtures/genjl/run_suite.jl
 <Gen's test dir> test/fixtures/genjl`; tests never need Julia.
@@ -679,6 +680,23 @@ issue 168's regression test ran without error. `recurse.jl:223`, marked
   `lecture_batched!` accumulates the gradient summed over the batch of
   1,000, so `FixedStepGradientDescent(0.001)` steps 1.0 along the mean
   gradient, ten times the first part's 1e-4 × 1,000 = 0.1.
+- **U5: Switch's generate leaves its trace's score at 0** (found writing the
+  oracle, 2026-10-21; by reading and by a run). `process!` in
+  `src/modeling_library/switch/generate.jl` never adds the branch's score,
+  as `simulate.jl`'s does, so `get_score` of a Switch trace from `generate`
+  is 0, and a `@gen` caller's score lacks the Switch's choices. `update`
+  with an UnknownChange index argdiff, the path of every Switch called from
+  `@gen` code, subtracts that score (`update.jl:95`), so its weight is off
+  by the old trace's log density. `u5.jl`: generate with z = 7 gives score
+  0 where the log density, and `project(tr, AllSelection())`, are −2.9064;
+  an update that changes nothing weighs −2.9064 after generate and 0 after
+  simulate; from a caller, moving y from 6 to 6.5 weighs −2.531 where the
+  exact weight is 0.375. Gen.jl's tests start their updates and
+  regenerates from simulate, so they pass. generate's own weights are
+  right; an update after it is not (by reading, a particle filter of a
+  model with a Switch is one: `initialize_particle_filter` generates and
+  each step updates). The oracle's Switch fixture starts from simulate.
+  Worth reporting upstream with U1 (the owner's call).
 
 ### 4.4 gen.clj findings: errors that should be loud
 
@@ -698,13 +716,14 @@ Gen.jl is needed for few assertions. Its uses are four; the last ran on
 
 1. **Values for assertions (2 testsets, 6 assertions).** `switch.jl:78` and
    `:284` (U1). Fixture: for the bare Switch (`bang0`/`fuzz0`) and the nested
-   one (`bang2`/`fuzz2` under `bam2`), an initial trace generated with every
-   choice constrained, then 10 regenerations per case (the test's args,
-   argdiffs and selections, plus the plain `mh(tr, select(:x => :z))` move):
-   old and new choices, scores, and Gen.jl's weight. The gen.clj test assesses
-   both choice maps, shows that Gen.jl's weight is `score(t′) − score(t)` on
-   them and that Eq. 4.1 gives gen.clj's, and records the difference in §9.
-   (U1's p² is already shown by an MH chain, §4.3.)
+   one (`bang2`/`fuzz2` under `bam2`), a simulated initial trace (a
+   generated one has score 0, U5), then 10 regenerations per case (the
+   test's args, argdiffs and selections, plus the plain `mh(tr, select(:x =>
+   :z))` move): old and new choices, scores, and Gen.jl's weight. The
+   gen.clj test assesses both choice maps, shows that Gen.jl's weight is
+   `score(t′) − score(t)` on them and that Eq. 4.1 gives gen.clj's, and
+   records the difference in §9. (U1's p² is already shown by an MH chain,
+   §4.3.)
 2. **Values for a decision (1 testset, 4 assertions).** `distributions.jl:19`:
    `logpdf(beta, x, a, b)` for x ∈ {0, eps, 1 − eps, 1} and (a, b) ∈ {(0.5,
    0.5), (0.5, 1.5), (1.5, 0.5), (1, 1), (2, 2)}, if the owner wants Gen.jl's
@@ -719,70 +738,51 @@ Gen.jl is needed for few assertions. Its uses are four; the last ran on
 4. **The upstream suite once** (M5's fourth checklist item): done, every
    assertion passes, `enumerative.jl` included (§4.3).
 
-The script, `test/fixtures/genjl/generate.jl` (Julia needed only to
-regenerate, as Python for `generate.py`), would write
-`test/fixtures/genjl/{switch-regenerate,beta-endpoints,statistics}.edn`
-(`upstream-run.edn` is written, §4.3). A sketch:
+**The fixtures** (genclj-il3d, 2026-10-21). `test/fixtures/genjl/generate.jl`
+writes items 1–3 as EDN in gen.clj's terms (keyword addresses, Switch's
+branch index 0-based), beside `upstream-run.edn` (item 4), with the EDN
+writer it shares with `run_suite.jl` (`edn.jl`). It ran in 81 s on this
+Mac's Julia 1.12.6 and Gen 0.4.8, offline, single-threaded, from a scratch
+depot (`JULIA_DEPOT_PATH=<scratch>:~/.julia`, so nothing is written to
+`~/.julia`):
 
-```julia
-# julia --project=<an environment with Gen 0.4.8> test/fixtures/genjl/generate.jl
-using Gen, Random, Statistics, Test
-const OUT = @__DIR__
+    env JULIA_PKG_OFFLINE=true JULIA_NUM_THREADS=1 \
+      nice -n 15 julia --project=test/fixtures/genjl test/fixtures/genjl/generate.jl
 
-# EDN, as generate.py writes it; addresses become gen.clj's (keywords,
-# 0-based Map/Unfold/Recurse indices, Switch index - 1)
-edn(x::Bool) = x ? "true" : "false"
-edn(x::Integer) = string(x)
-edn(x::AbstractFloat) = isnan(x) ? "##NaN" : isinf(x) ? (x > 0 ? "##Inf" : "##-Inf") : repr(Float64(x))
-edn(x::Symbol) = ":" * replace(string(x), "_" => "-")
-edn(x::AbstractString) = repr(x)
-edn(x::Union{AbstractVector,Tuple}) = "[" * join(map(edn, collect(x)), " ") * "]"
-edn(x::AbstractDict) = "{" * join(["$(edn(k)) $(edn(v))" for (k, v) in x], " ") * "}"
-choices_edn(c::ChoiceMap) = Dict{Any,Any}(
-    [k => v for (k, v) in get_values_shallow(c)]...,
-    [k => choices_edn(s) for (k, s) in get_submaps_shallow(c)]...)
-put(name, x) = open(io -> println(io, edn(x)), joinpath(OUT, name), "w")
+- `switch-regenerate.edn`: six cases, 10 regenerations each, of a simulated
+  trace: switch.jl:85, :89 and :94 (the bare Switch), :288 and :292 (one
+  case), :294, and the move `mh(tr, select(:x => :z))` makes (NoChange
+  argdiffs from the caller), each with the old and new arguments, choices
+  and scores, the argdiffs and selection, and Gen.jl's weight.
+- `beta-endpoints.edn`: Gen.jl's beta log density at x ∈ {0, eps, 1 − eps,
+  1} for the five (α, β) above.
+- `statistics.edn`: each statistical testset's quantities over seeds 1 to
+  20 (seed 1 is Gen.jl's own run), values, mean and sd.
 
-# 1. Switch regenerate (switch.jl:78 and :284, U1)
-@gen function bang0(x, y) z ~ normal(x + y, 3.0); z end
-@gen function fuzz0(x, y) z ~ normal(x + 2 * y, 3.0); z end
-sc = Switch(bang0, fuzz0)
-@gen function bang2(x, y) z ~ normal(x + y, 3.0); z end
-@gen function fuzz2(x, y) z ~ normal(x + 2 * y, 3.0); q ~ bang2(z, y); z end
-sc2 = Switch(bang2, fuzz2)
-@gen function bam2(s) x ~ sc2(s, 5.0, 3.0); x end
-Random.seed!(20261020)
-cases = Any[]
-for (label, gf, args, init, new_args, argdiffs, sel) in [
-        (:bare_same, sc, (2, 5.0, 3.0), choicemap(:z => 7.0), (2, 5.0, 3.0), (UnknownChange(), NoChange(), NoChange()), select(:z)),
-        (:bare_switch, sc, (2, 5.0, 3.0), choicemap(:z => 7.0), (1, 5.0, 3.0), (UnknownChange(), NoChange(), NoChange()), select(:z)),
-        (:nested_drop, bam2, (2,), choicemap((:x => :z) => 7.0, (:x => :q => :z) => 9.0), (1,), (UnknownChange(),), select()),
-        (:nested_drop_z, bam2, (2,), choicemap((:x => :z) => 7.0, (:x => :q => :z) => 9.0), (1,), (UnknownChange(),), select(:x => :z))]
-    tr, = generate(gf, args, init)
-    for draw in 1:10
-        new_tr, w, = regenerate(tr, new_args, argdiffs, sel)
-        push!(cases, Dict(:case => label, :draw => draw, :weight => w,
-                          :old => Dict(:args => collect(args), :choices => choices_edn(get_choices(tr)), :score => get_score(tr)),
-                          :new => Dict(:args => collect(new_args), :choices => choices_edn(get_choices(new_tr)), :score => get_score(new_tr))))
-    end
-end
-put("switch-regenerate.edn", cases)
+Tests read them through `gen.genjl.oracle` (`switch-regenerations`, with
+choice maps, gen.diff argdiffs and a selection; `beta-endpoints`;
+`(statistic testset & path)`), and `gen.genjl.oracle-test` checks the
+translation: gen.clj's assess of every recorded choice map gives Gen.jl's
+score, and beta's densities agree except at D6's four points.
 
-# 2. beta at its endpoints (distributions.jl:19, D6)
-put("beta-endpoints.edn", [Dict(:x => x, :alpha => a, :beta => b, :log_prob => logpdf(beta, x, a, b))
-                           for x in (0.0, eps(), 1 - eps(), 1.0), (a, b) in ((0.5, 0.5), (0.5, 1.5), (1.5, 0.5), (1.0, 1.0), (2.0, 2.0))])
+Gen.jl's statistics, against gen.clj's measurements for the statistical
+ports (genclj-zgkq; gen.clj's keys differ, so samples are never compared):
 
-# 3. statistics over 20 seeds: the bodies of train.jl, variational.jl,
-#    particle_filter.jl and recurse.jl, wrapped in functions returning the
-#    tested quantity, then Dict(:testset => ..., :mean => mean(v), :sd => std(v), :n => 20)
+| Testset | Quantity | Gen.jl, 20 seeds (mean, sd) | gen.clj (mean, sd, keys) |
+|---|---|---|---|
+| `train.jl:1` | θ₁ | 0.0041, 0.0745 | 0.0105, 0.0813, 12 (derived sd 0.073) |
+| | θ₂, θ₃, θ₄, θ₅ | −5.505, 5.502, 5.507, −5.504; sd 0.005–0.006 | −5.503, 5.505, 5.505, −5.501; sd 0.004–0.008, 12 |
+| `train.jl:126` | θ | −2.0033, 0.0106 | −2.0040, 0.0096, 6 |
+| | log σ | −1.2036, 0.0065 | −1.2014, 0.0057, 6 |
+| | score (optimum −0.2149) | −0.2139, 0.0082 | −0.2129 in one run (SE 0.007) |
+| | line 176's score (of q, U4) | −0.2138, 0.0069 | n/a: the port scores what lecture-batched trains |
+| `variational.jl:1` | the four parameters | within 2.4e-9 of the targets (μ_intercept; the others 4.5e-11) | within 2e-9, 8 |
+| `particle_filter.jl:96` | log-ML (exact −4.8765) | −4.8782, 0.0073 | −4.8752, 0.0051, 24 |
+| `particle_filter.jl:146` | log-ML | −4.8737, 0.0106 | −4.8754, 0.0095, 24 |
+| `recurse.jl:66` | the 20 strings' counts in 1,000 runs | every mean within 2.5 standard errors of 1,000·p; no count below 2 | the port's 10,000 runs, within 5 binomial standard errors |
 
-# 4. the upstream suite: done by run_suite.jl (§4.3), a recording Test.AbstractTestSet
-#    around runtests.jl and inference/enumerative.jl; written as upstream-run.edn
-```
-
-The suite and the U1–U4 runs used this Mac's Julia 1.12.6 and installed Gen
-0.4.8, offline (the owner's go-ahead, 2026-10-20). The fixtures of items 1–3
-can be written the same way, without fenrir.
+Gen.jl's two PCFG loops (`generate` with no constraints, then `simulate`)
+each start from `Random.seed!(1)` and draw the same strings.
 
 ## 6. Proposed port order and beans
 
