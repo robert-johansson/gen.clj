@@ -866,7 +866,9 @@
   "gf with the trainable-parameter store params, a map of name to value read
    by (param name) in gf's body and in every generative function it calls.
    gf is a dynamic generative function: the store is the body's (another
-   kind reads the store of the dynamic function that calls it)."
+   kind reads the store of the dynamic function that calls it; a
+   deterministic function that names :params may have its own,
+   gen.custom/with-params)."
   [gf params]
   (check-dynamic! "with-params" gf)
   (assoc gf :params params))

@@ -524,8 +524,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     revise does not drop it.
   - **Local checks** remain where no call shows the change: the static
     walk's skip, for a node reading `(param :w)`, which has no inputs.
-    `with-params` and `with-transitions` take only dynamic generative
-    functions, whose bodies read them.
+    `dyn/with-params` and `with-transitions` take dynamic generative
+    functions, whose bodies read them, and `custom/with-params` a
+    deterministic function that names the `:params` its code reads (G5).
 
   Gradients are values: `gen.gradients/param-gradients` returns a map,
   and optimizers return a new store. This is Gen.jl's `@param`,
@@ -1470,6 +1471,28 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   a combinator at the top had to be spliced into one. D7's rule stands, one
   store per generative function and gradients as values; this extends where
   the stores are found.
+- **A custom function's trainable parameters (M5's G5, genclj-2294; the
+  agent, 2026-10-21, for the owner's review).** `(custom/deterministic
+  {:params [:w] …})` names the parameters a deterministic function reads,
+  and `:apply-with-state` (or `:apply`) takes their values as a second
+  argument, `{name value}`. They come from the store in effect: the calling
+  model's, or the function's own (`custom/with-params`, Gen.jl's fields of a
+  CustomDetermGF) over it, as a dynamic function's `(param name)` reads. So
+  a model's store trains them with gen.learning, and a store change runs
+  the function again (the call's store mark), never update-with-state with
+  stale values.
+  - `param-gradients` differentiates them through the function's code, or,
+    with `:gradient-with-state`, by `:param-gradient-with-state`, `(fn [state
+    args retgrad] {name gradient})`, Gen.jl's
+    `accumulate_param_gradients_determ!`. The function then sees the
+    parameters' values, not the tape's, as it sees the arguments'. Its
+    scale factor is the caller's weight on the returned gradient (D7).
+  - Loud: a missing parameter; `:params` with the stateless `:gradient`;
+    `:gradient-with-state` without `:param-gradient-with-state` (or the
+    reverse); `with-params` on a function without `:params`.
+  - Alternatives: the parameters as a dynamic var the user's code reads
+    (implicit, and the custom gradient could not see them as inputs), or as
+    extra arguments (they would show in the trace's args and argdiffs).
 - **A call's trace and return value by address; merge and Recurse's
   numbering (owner, 2026-10-21; M5's G1, F3, G10, G13; m3-grammar's
   design).**

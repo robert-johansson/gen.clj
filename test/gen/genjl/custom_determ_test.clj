@@ -4,12 +4,13 @@
    update that reuses its state and a gradient of its own.
 
    Gen.jl's MyDeterministicGF multiplies by a trainable parameter of its
-   own; gen.clj's custom functions have none (G5), so here it is the
-   constant 1.0 in the state, and gen.clj handles a no-change update itself
-   (so no update for NoChange is written). Argument gradients are values
-   from choice-gradients with :argnums (D7): there is no accumulator to
-   scale. Arguments that are differentiated are floats (gen.clj
-   differentiates trees of floats only)."
+   own, my_param, here a :params of the function with its own store (G5),
+   and gen.clj handles a no-change update itself (so no update for NoChange
+   is written). Gradients are values (D7): argument gradients come from
+   choice-gradients with :argnums, the parameter's from param-gradients,
+   and Gen.jl's scale factor is the caller's weight. Arguments that are
+   differentiated are floats (gen.clj differentiates trees of floats
+   only)."
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :refer [+ - * /]]
@@ -33,20 +34,25 @@
        (reduce + 0 (subvec arr (min n n-prev)))
        (- (reduce + 0 (subvec prev (min n n-prev)))))))
 
-;; custom_determ.jl:13, MyDeterministicGF: sum(arr) * my_param
-(def ^:private my-param 1.0)
-
+;; custom_determ.jl:13, MyDeterministicGF: sum(arr) * my_param, my_param
+;; 1.0 (MyDeterministicGF())
 (def ^:private my-deterministic
-  (custom/deterministic
-   {:apply-with-state (fn [[arr]] (let [retval (* (reduce + arr) my-param)]
-                                    [retval {:sum retval :prev arr :my-param my-param}]))
-    :update-with-state (fn [state [arr] [argdiff]]
-                         (let [retval (if (diff/vector-diff? argdiff)
-                                        (vector-sum (* (:sum state) (:my-param state)) (:prev state) arr argdiff)
-                                        (* (reduce + arr) (:my-param state)))]
-                           [(assoc state :sum retval :prev arr) retval diff/unknown-change]))
-    :gradient-with-state (fn [state _args retgrad]
-                           [(vec (repeat (count (:prev state)) (* retgrad (:my-param state))))])}))
+  (custom/with-params
+   (custom/deterministic
+    {:params [:my-param]
+     :apply-with-state (fn [[arr] {:keys [my-param]}]
+                         (let [retval (* (reduce + arr) my-param)]
+                           [retval {:sum retval :prev arr :my-param my-param}]))
+     :update-with-state (fn [state [arr] [argdiff]]
+                          (let [retval (if (diff/vector-diff? argdiff)
+                                         (vector-sum (* (:sum state) (:my-param state)) (:prev state) arr argdiff)
+                                         (* (reduce + arr) (:my-param state)))]
+                            [(assoc state :sum retval :prev arr) retval diff/unknown-change]))
+     :gradient-with-state (fn [state _args retgrad]
+                            [(vec (repeat (count (:prev state)) (* retgrad (:my-param state))))])
+     ;; accumulate_param_gradients_determ!: my_grad += retgrad * state.sum
+     :param-gradient-with-state (fn [state _args retgrad] {:my-param (* retgrad (:sum state))})})
+   {:my-param 1.0}))
 
 (deftest custom-deterministic-generative-function
   ;; custom_determ.jl:1
@@ -88,8 +94,11 @@
                                                             sel/none 2.0 {:argnums [0]})))]
     (testing "choice gradients"
       (is (= [2.0 2.0 2.0] (ts/host (arg-grad (rng/key 9))))))
-    (testing "the argument gradient, not scaled by 3 (a value: no accumulator, D7)"
-      (is (= [2.0 2.0 2.0] (ts/host (arg-grad (rng/key 10))))))))
+    (testing "accumulate parameter gradients: the argument gradient, not scaled by 3"
+      (is (= [2.0 2.0 2.0] (ts/host (arg-grad (rng/key 10))))))
+    (testing "and the parameter's, scaled by 3 (custom_determ.jl:122), the caller's weight"
+      (let [tr (gfi/simulate my-deterministic [[1.0 2.0 3.0]] (rng/key 11))]
+        (is (== (* 2.0 (+ 1 2 3) 3.0) (ts/number (:my-param (grad/weighted-sum [3.0] [(grad/param-gradients tr 2.0)])))))))))
 
 ;; custom_determ.jl:128, CustomPlus: a + b, its gradient (retgrad, retgrad)
 (def ^:private custom-plus
@@ -137,8 +146,3 @@
         (is (= [[1 2 4 5]] (:args t2)))
         (is (= diff/unknown-change rd))
         (is (cm/empty? discard))))))
-
-;; Pending:
-;; - custom_determ.jl:122, gen_fn.my_grad == 2 * (1 + 2 + 3) * 3: a custom
-;;   function's own trainable parameter, scaled by accumulate_param_gradients!
-;;   (G5, genclj-2294).
