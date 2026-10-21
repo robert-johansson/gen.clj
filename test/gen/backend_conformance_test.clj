@@ -169,6 +169,11 @@
 
 (def gen-finite (gen/fmap no-subnormal (gen/double* {:infinite? false :NaN? false :min -10.0 :max 10.0})))
 (def gen-positive (gen/double* {:infinite? false :NaN? false :min 0.01 :max 50.0}))
+(def gen-unit
+  "Mostly [-1, 1], asin's and acos's domain, with its ends and points outside."
+  (gen/fmap no-subnormal
+            (gen/frequency [[8 (gen/double* {:NaN? false :min -1.0 :max 1.0})]
+                            [1 (gen/elements [-1.0 1.0 1.5 -2.0 ##NaN])]])))
 (def gen-int (gen/choose -20 20))
 
 (defn- gen-spec
@@ -218,6 +223,8 @@
 (defspec unary-transcendental trials
   (prop/for-all [[op x] (gen/let [[op elem] (gen/elements [[array/exp gen-finite] [array/expm1 gen-finite] [array/tanh gen-finite]
                                                            [array/sin gen-finite] [array/cos gen-finite] [array/erf gen-finite]
+                                                           [array/sinh gen-finite] [array/cosh gen-finite] [array/atan gen-float]
+                                                           [array/asin gen-unit] [array/acos gen-unit]
                                                            [array/log gen-positive] [array/log1p gen-positive]
                                                            [array/erfinv (gen/double* {:NaN? false :min -0.999 :max 0.999})]])
                                   x (gen/bind gen-shape #(gen-spec % elem float-dt))]
@@ -247,6 +254,10 @@
                  [x y] (gen/one-of [(gen-pair gen-float float-dt) (gen-pair gen-int int-dt)])]
     ;; float mod and floor-div by MLX's kernels: within an ulp of the quotient
     (conforms? (if (= op array//) ieee transcendental) op x y)))
+
+(defspec atan2-of-any-point trials
+  (prop/for-all [[y x] (gen/one-of [(gen-pair gen-float float-dt) (gen-pair gen-int int-dt)])]
+    (conforms? transcendental array/atan2 y x)))
 
 (deftest integer-division-at-the-edges
   ;; MIN / -1 overflows: x86's idiv traps on it, which killed the JVM on

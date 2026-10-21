@@ -83,6 +83,10 @@
   (is (= [1.0 1.5 2.0] (array/->clj (array/arange 1 2.5 0.5))))
   (is (= [0.0 0.5 1.0] (array/->clj (array/linspace 0 1 3))))
   (is (= [7 7] (array/->clj (array/full-like (array/array [1 2]) 7))))
+  (is (= [[2.5 2.5]] (array/->clj (array/full [1 2] (array/array 2.5)))) "a 0-d array fills too")
+  (is (= {:op :full :value-shape [2]} (thrown-data #(array/full [3 2] (array/array [1.0 2.0]))))
+      "an array of values does not: broadcast-to does that")
+  (is (= {:op :full-like :value-shape [2]} (thrown-data #(array/full-like (array/zeros [3 2]) (array/array [1.0 2.0])))))
   (is (= 5 (array/item (array/array [[5]]))))
   (is (thrown-data #(array/item (array/array [1 2])))))
 
