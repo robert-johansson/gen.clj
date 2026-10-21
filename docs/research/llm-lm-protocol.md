@@ -368,20 +368,39 @@ cost nothing measurable either way. **Approved (owner, 2026-10-20):** run LLM wo
 with a heap of 8 GB or more, or `-XX:G1HeapRegionSize=4m`, where no row is
 humongous.
 
-## For the llama.cpp runs
+## On llama.cpp (2026-10-21, the Mac mini M4, Metal)
 
-Not run yet: llama.cpp's libraries and a GGUF model are not on this Mac
-(the Branching runs were on the MacBook), and this Mac is shared until M4
-closes. To do, with
-Qwen3-0.6B, Qwen3.5-0.8B (hybrid) and Gemma-3-270M (sliding window):
+With Qwen3-0.6B, Qwen3.5-0.8B (hybrid) and Gemma-3-270M (sliding window),
+Q8_0, llama.cpp v0.7.0:
 
-- `clojure -J-Dgen.llama.test-model=<gguf> -X:test :nses '[gen.llm.llama-lm-test]'`:
-  the contract within 0.1 nats, bit-identical reruns on new engines, the
-  GGUF tokenizer's byte vocabulary (and its cost).
-- `clojure -M:bench -m gen.lm-bench <gguf>`: per-call costs against the
-  Branching operations (hit, one-token read, 8 and 32 in one advance, a
-  16-token score read and from the trie), and a token SMC of 16 particles ×
-  64 steps (ms a step, reads, evictions, hit rate, backstop count).
+- **`gen.llm.llama-lm-test`** passes with each model: the contract within
+  0.1 nats, bit-identical reruns on new engines, the GGUF tokenizer's byte
+  vocabulary (151,936, 248,320 and 262,144 tokens, read in 64 to 114 ms).
+  Peak RSS 1.6, 3.1 and 1.1 GB.
+- **`gen.lm-bench <gguf>`**, ms a call (the LM, then the Branching
+  operations alone; another agent's JVM tests ran beside it, so the costs
+  are indicative):
+
+| call | Qwen3-0.6B | Qwen3.5-0.8B | Gemma-3-270M |
+|---|---|---|---|
+| hit (the prompt) | 0.03 | 0.06 | 0.04 |
+| one-token read | 8.82 / 8.78 | 15.77 / 14.59 | 7.74 / 7.69 |
+| 8 one-token reads, one advance | 13.77 / 13.57 | 117.36 / 32.12 | 11.32 / 11.72 |
+| 32 one-token reads, one advance | 29.16 / 27.07 | 197.69 / 79.04 | 30.00 / 25.06 |
+| 16 tokens scored, read | 17.96 / 17.36 | 23.42 / 22.60 | 15.71 / 16.02 |
+| 16 tokens scored from the trie | 0.01 | 0.01 | 0.01 |
+| token SMC, 16 particles × 64 steps, a step | 15.6 | 115.6 | 18.5 |
+
+  The token SMC workload made 65 reads (one a step), hit 0.45 to 0.48 of
+  its requests and never ran the GC backstop. On the attention-only models
+  the LM adds nothing measurable to the engine's work. On Qwen3.5 its
+  batched one-token reads cost 3.6 times the raw operations at 8 contexts
+  and 2.5 times at 32: not yet explained (a guess: the hybrid model's
+  recurrent state, which every fork copies and every eviction drops). To
+  profile on a quiet GPU.
+- Command lines: `clojure -J-Dgen.llama.lib=<lib> -J-Dgen.llama.test-model=<gguf>
+  -X:test :nses '[gen.llm.llama-lm-test]'` and `clojure -J-Dgen.llama.lib=<lib>
+  -M:bench -m gen.lm-bench <gguf>`.
 
 ## For the next beans
 
