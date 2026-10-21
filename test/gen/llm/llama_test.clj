@@ -374,9 +374,12 @@
   ;; Qwen3.5-0.8B (Metal, Mac mini M4, 2026-10-21) 39.7 ms split against
   ;; 123.1 in one decode (0.32; 0.32 again in a second run). Mutations
   ;; checked there: no split fails the counts and the ratio (1.00); a
-  ;; group's rows put back reversed fail the band by 4.2 to 17 nats.
+  ;; group's rows put back reversed fail the band by 4.2 to 17 nats. The
+  ;; split is on by default only on Metal (DESIGN §9: on CUDA, fenrir,
+  ;; 2026-10-21, it cost about twice one decode), so the test turns it on,
+  ;; and asks for the saving only there.
   (when-llama
-    (with-open [e ((llama 'engine) {:model model-path :max-branches 40 :n-ctx 2048})]
+    (with-open [e (with-split-property "true" #((llama 'engine) {:model model-path :max-branches 40 :n-ctx 2048}))]
       (let [{:keys [recurrent? hybrid?]} (:model (br/info e))]
         (if-not (or recurrent? hybrid?)
           (do (is (not (:split-recurrent? (br/info e))) "attention models keep one decode a step")
@@ -405,7 +408,8 @@
               ;; each run: the 36 children's step, one decode, and the planted step, two
               (is (= [10 5 15] (map #(- (% after) (% before)) [:steps :split :decodes]))
                   "step-splits counts them")
-              (is (< (/ split one) 0.5) (format "split %.1f ms, one decode %.1f ms" split one)))
+              (when (= :metal (bands/device (br/info e)))
+                (is (< (/ split one) 0.5) (format "split %.1f ms, one decode %.1f ms" split one))))
             (br/dispose! root)
             (is (zero? (:live (br/info e))))))))))
 
@@ -414,6 +418,11 @@
   ;; before the replay existed; anything but true or false is refused
   (when-llama
     (is (= :invalid-option (reason #(with-split-property "yes" (fn [] ((llama 'engine) {:model model-path}))))))
+    ;; unset, a recurrent or hybrid model's engine splits only on Metal
+    (with-open [e (with-split-property nil #((llama 'engine) {:model model-path}))]
+      (let [{:keys [recurrent? hybrid?]} (:model (br/info e))]
+        (is (= (boolean (and (or recurrent? hybrid?) (= :metal (bands/device (br/info e)))))
+               (:split-recurrent? (br/info e))))))
     (let [e (with-split-property "false" #((llama 'engine) {:model model-path :max-branches 40 :n-ctx 2048}))]
       (try
         (is (not (:split-recurrent? (br/info e))))
@@ -431,7 +440,7 @@
   ;; llama.cpp at the next operation that touches it, a fork of root: the
   ;; engine stops splitting, says why, and keeps stepping, one decode a step
   (when-llama
-    (with-open [e ((llama 'engine) {:model model-path :max-branches 40 :n-ctx 2048})]
+    (with-open [e (with-split-property "true" #((llama 'engine) {:model model-path :max-branches 40 :n-ctx 2048}))]
       (when (:split-recurrent? (br/info e))
         (let [{:keys [root tokens alone step]} (scattered-steps e)
               v (splits e)

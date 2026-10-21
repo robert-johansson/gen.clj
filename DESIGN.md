@@ -1237,8 +1237,14 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     fails other than for room, and when a slot's state position
     (`llama_memory_seq_pos_min`) disagrees with it, loudly on System.err.
     Where a state sits changes no result, only the cost.
+  - **Default by device (owner, 2026-10-21; genclj-kw88):** the split is on
+    only where the model's weights are on Metal. On CUDA (fenrir's RTX PRO
+    6000, shared) a split step of Qwen3.5-0.8B cost about twice one decode
+    (52 against 24 ms), an extra decode costing more there than the copies
+    it saves; genclj-mxi9 measures CUDA and the CPU properly. The property
+    still says otherwise either way.
   - Names for the owner: the property `gen.llama.split-recurrent` (default
-    true; false keeps one decode a step, exactly as before), the info key
+    by device, above; false keeps one decode a step, exactly as before), the info key
     `:split-recurrent?`, the diagnostics `llama/step-splits`, the namespace
     `gen.llm.llama.recurrent`. An upstream llama.cpp issue (copy only the
     states that moved) is drafted for the owner, not filed (genclj-g5gx).
