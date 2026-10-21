@@ -894,18 +894,24 @@
    evaluating)."
   ^long [b ^long h ^long d]
   (let [s (stream b)
-        ;; int32 indices, whatever the int dtype
-        i32 (Mlx/mlx_astype h (code :int32) s)
-        zero (MlxRaw/mlx_array_new_int 0)
-        dd (MlxRaw/mlx_array_new_int (int d))
-        top (MlxRaw/mlx_array_new_int (int (dec d)))
-        neg (Mlx/mlx_less i32 zero s)
-        wrapped (Mlx/mlx_add i32 dd s)
-        n (Mlx/mlx_where neg wrapped i32 s)]
+        temps (java.util.ArrayList.)
+        ;; each handle made is freed, also when a later one fails
+        t (fn ^long [^long x] (.add temps x) x)]
     (try
-      (Mlx/mlx_clip n zero top s)
+      (let [;; int32 indices, whatever the int dtype
+            i32 (t (Mlx/mlx_astype h (code :int32) s))
+            ;; through made, as every array made from host data: at Metal's
+            ;; buffer limit a raw constructor gives an empty handle, which
+            ;; the next op rejects (genclj-j9nx)
+            zero (t (scalar-handle 0 :int32))
+            dd (t (scalar-handle d :int32))
+            top (t (scalar-handle (dec d) :int32))
+            neg (t (Mlx/mlx_less i32 zero s))
+            wrapped (t (Mlx/mlx_add i32 dd s))
+            n (t (Mlx/mlx_where neg wrapped i32 s))]
+        (Mlx/mlx_clip n zero top s))
       (finally
-        (doseq [t [i32 zero dd top neg wrapped n]] (MlxRaw/mlx_array_free (long t)))))))
+        (doseq [x temps] (MlxRaw/mlx_array_free (long x)))))))
 
 (defn- take-op [b x indices axis]
   (let [d (long (nth (shape-of x) axis))]
