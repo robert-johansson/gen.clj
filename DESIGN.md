@@ -1380,6 +1380,15 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     a rule for selections unlike choice maps') or a path record in place
     of vectors (churn: vectors are paths in `select`, `from-paths`,
     `cm/addresses` and every trace). Built in M5 (bean 10).
+- **Parameter gradients through a combinator's trace (owner, 2026-10-21;
+  from M5's map.jl port).** `param-gradients` on a combinator's trace (Map,
+  Unfold, Switch, Recurse, call-at) differentiates its callees' parameter
+  stores, accumulated over the elements, as Gen.jl's
+  `accumulate_param_gradients!` does on a Map trace. Before, it threw unless
+  the trace's own generative function was a dynamic one holding a store, so
+  a combinator at the top had to be spliced into one. D7's rule stands, one
+  store per generative function and gradients as values; this extends where
+  the stores are found.
 - **Git:** the main repo is public-ready, with `.beans/`, `.beans.yml`,
   `.claude/` and `*.pdf` gitignored. Its remote is the private
   `robert-johansson/gen.clj` (the owner, 2026-10-21, at M4's close: private
