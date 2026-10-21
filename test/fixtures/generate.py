@@ -120,6 +120,10 @@ def distributions():
     alpha = [2.0, 0.5, 3.0]
     add("dirichlet", [alpha], [[0.2, 0.3, 0.5], [0.6, 0.1, 0.3]],
         lambda v: st.dirichlet.logpdf(v, alpha))
+    # Gen.jl's distributions.jl:237 compares these with Distributions.jl
+    for a, v in [([2.0, 2.0], [0.01, 0.99]), ([1.0, 4.0], [0.01, 0.99]),
+                 ([0.01, 0.01], [0.01, 0.99]), ([2.0, 2.0, 4.0], [0.2, 0.2, 0.6])]:
+        add("dirichlet", [a], [v], lambda v, a=a: st.dirichlet.logpdf(v, a))
     mu, cov = [1.0, -1.0], [[2.0, 0.5], [0.5, 1.0]]
     add("mvnormal", [mu, cov], [[0.0, 0.0], [1.5, -2.0]],
         lambda v: st.multivariate_normal.logpdf(v, mu, cov))
