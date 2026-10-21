@@ -3,9 +3,12 @@
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
             [gen.dist :as d]
+            [gen.dist.dsl :refer [dist]]
             [gen.genjl.finite-diff :as fd]
             [gen.genjl.support :as genjl]
             [gen.test-support :as ts]))
+
+(dist ^:private labeled [labels probs] (nth labels (d/categorical probs)))
 
 (deftest finite-differences
   (testing "a number argument: the partial derivative"
@@ -36,7 +39,13 @@
       (is (fd/grad-close? gp (/ 1 0.3) {:rtol 1e-12}) "d log p / dp"))
     (let [[gx gn gp] (fd/logpdf-grad d/binom 2 5 0.3)]
       (is (= [nil nil] [gx gn]))
-      (is (some? gp)))))
+      (is (some? gp))))
+  (testing "a label, or labels: nil"
+    (let [probs (array/array [0.5 0.5])
+          [gx glabels gp] (fd/logpdf-grad labeled :b [:a :b] probs)]
+      (is (= [nil nil] [gx glabels]))
+      (is (fd/grad-close? gp (fd/finite-diff (partial genjl/logpdf labeled) [:b [:a :b] probs] 2
+                                             {:dx fd/probability-dx}))))))
 
 (deftest isapprox
   (is (fd/grad-close? 1.0 (+ 1.0 1e-9)))

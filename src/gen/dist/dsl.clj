@@ -5,6 +5,7 @@
      (dist shifted-exponential [rate shift] (+ (d/exponential rate) shift))
      (dist log-normal [mu sd] (array/exp (d/normal mu sd)))
      (dist labeled [probs labels] (array/take labels (d/categorical probs)))
+     (dist labeled-cat [labels probs] (nth labels (d/categorical probs)))
 
    The body has exactly one call of a distribution constructor (the draw);
    the rest of it is gen.array code on the parameters and constants,
@@ -26,11 +27,22 @@
    first needed. Values outside a step's range (exp's at or below 0) have
    density 0.
 
+   Labels need not be numbers. A parameter may be host data (keywords, a
+   map, records: defdist's ^:host), and the body plain Clojure on the draw,
+   guarded as a gen body is (gen.dynamic/guarded-fn): a lookup by the draw
+   (nth, get) reads its host value on every backend, and raises the
+   batched fallback for a batched draw, so a batched run draws such a
+   value one particle at a time. Its density compares with = where a value
+   is not a number (array/== where both are), over an enumerable support
+   only; (sample d key [n]) of it is an error, since no array holds the
+   values.
+
    The constructor validates as defdist's do, and builds the draw, so
    (shifted-exponential -1 0) fails as (d/exponential -1) does."
   (:refer-clojure :exclude [+ - * /])
   (:require [gen.array :as array :refer [+ - * /]]
-            [gen.dist.core :as dc]))
+            [gen.dist.core :as dc]
+            [gen.dynamic :as dynamic]))
 
 (defn- resolved [env sym] (when (symbol? sym) (resolve env sym)))
 
@@ -110,6 +122,28 @@
        (catch clojure.lang.ExceptionInfo e
          (if (some #(contains? (ex-data e) %) [:type :distribution]) nil (throw e)))))
 
+(defn ^:no-doc maps-to
+  "Is y, the body's value at a draw, the value v: elementwise where both are
+   numbers (arrays), by = where either is not (a label)."
+  [y v]
+  (if (and (array/array? y) (array/array? v)) (array/== y v) (= y v)))
+
+(defn ^:no-doc host-value
+  "y, the body's value at a support value, as host data."
+  [y]
+  (if (array/array? y) (array/->clj y) y))
+
+(defn ^:no-doc check-batch
+  "Throw when f, the body, maps the draw d to values that are not numbers:
+   a batch of them (a sample of a batch shape) has no array."
+  [dist-name d f batch-shape]
+  (when (and (seq batch-shape) (dc/discrete? d))
+    (when-let [x (first (enumerable-support d))]
+      (when-not (array/array? (f x))
+        (throw (ex-info (str dist-name ": its values are not numbers, so it draws one at a time, not a batch of shape "
+                             batch-shape)
+                        {:dist dist-name :batch-shape batch-shape}))))))
+
 (defmacro dist
   "Define a distribution as a pushforward of one draw (see the namespace
    doc): (dist name doc? [params] body)."
@@ -129,18 +163,25 @@
         dd (gensym "d")
         inverted (try (inversion &env body v) (catch clojure.lang.ExceptionInfo e e))
         not-invertible (when (instance? Exception inverted)
-                         `(throw (ex-info ~(ex-message inverted) {:dist ~(str dist-name)})))]
-    `(dc/defdist ~dist-name ~@(when doc [doc]) ~params
+                         `(throw (ex-info ~(ex-message inverted) {:dist ~(str dist-name)})))
+        ;; the body as a function of the draw, guarded as a gen body
+        body-fn `(dynamic/guarded-fn [~x] ~f-body)]
+    `(dc/defdist ~dist-name ~@(when doc [doc]) ~(mapv #(vary-meta % assoc :host true) params)
        (~'validate ~draw)
-       (~'sample [key# shape#] (let [~x (dc/sample ~draw key# shape#)] ~f-body))
+       (~'sample [key# shape#]
+        (let [d# ~draw
+              f# ~body-fn]
+          (check-batch ~(str dist-name) d# f# shape#)
+          (f# (dc/sample d# key# shape#))))
        (~'log-prob [~v]
         (let [~dd ~draw]
           (if (dc/discrete? ~dd)
             (if-let [support# (enumerable-support ~dd)]
               ;; the mass of the support values the body maps to v
-              (array/logsumexp
-               (array/stack (mapv (fn [~x] (array/where (array/== ~f-body ~v) (dc/log-prob ~dd ~x) ##-Inf)) support#))
-               {:axis 0})
+              (let [f# ~body-fn]
+                (array/logsumexp
+                 (array/stack (mapv (fn [~x] (array/where (maps-to (f# ~x) ~v) (dc/log-prob ~dd ~x) ##-Inf)) support#))
+                 {:axis 0}))
               ~(or not-invertible
                    (let [[bindings x-of-v] inverted]
                      ;; the inverse rounded to the draw's integers, kept when it maps back
@@ -158,5 +199,6 @@
                       ;; outside a step's range the inverse is NaN: density 0
                       (array/where (array/isnan lp#) ##-Inf lp#)))))))
        (~'discrete? [] (dc/discrete? ~draw))
-       (~'support [] (let [d# ~draw]
-                       (vec (distinct (map (fn [~x] (array/->clj ~f-body)) (dc/support d#)))))))))
+       (~'support [] (let [d# ~draw
+                           f# ~body-fn]
+                       (vec (distinct (map #(host-value (f# %)) (dc/support d#)))))))))

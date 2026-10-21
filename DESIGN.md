@@ -768,8 +768,31 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   finds by var metadata). A discrete draw's density sums the mass of the
   support values mapped to v, so any function works; a continuous draw's
   inverts the path to it through +, −, ×, ÷, negate, exp and log, with the
-  log-Jacobians. Non-numeric labels wait for parameters that are not arrays.
-  The name `dist` follows Gen.jl's macro (owner, 2026-10-20).
+  log-Jacobians. The name `dist` follows Gen.jl's macro (owner, 2026-10-20).
+  Labels need not be numbers (genclj-414l, G7). A `defdist` parameter
+  marked `^:host` may be host data (`dc/host-data?`: keywords, strings,
+  records, maps, functions, collections of them), kept as given, while
+  array data still becomes an array; every other parameter converts as
+  before, so a family given keywords fails at construction with an ex-info
+  naming the distribution and the parameter. Every parameter of a `dist` is
+  `^:host`, since its body decides what it is, as in Gen.jl's untyped
+  `@dist`: one `labeled-cat` takes numeric labels (arrays, batched) and
+  keywords. The body is guarded as a `gen` body is: a lookup by the draw
+  reads its host value on every backend, and raises the batched fallback
+  on a batched draw. Over an enumerable support, a label's density
+  compares by `=` (`array/==` where both values are numbers), so a given
+  label is scored on the host, without the fallback, and the gradient
+  reaches the probabilities; a label itself has none (Gen.jl's
+  `nothing`). A host parameter is the same for every particle; a draw of
+  labels in a batched run falls back to one particle at a time, and
+  `(sample d key [n])` of labels is an ex-info, as no array holds them.
+  The alternatives: conversion by shape for every parameter, which would
+  move a numeric family's error for keyword data from construction to a
+  bare "not an array" at first use (rule 6); and a mark on each host
+  parameter of a `dist`, an annotation Gen.jl's untyped `@dist` does not
+  need, since a `dist` parameter is read only by the body and by the
+  draw's constructor, which validates its own (approved under the owner's
+  delegation, 2026-10-21).
 - **Distributions from a host library, GenDistributions'
   `DistributionsBacked`** (M4, 2026-10-20; decided by the agent, for the
   owner's review): `(gen.dist.host/family {:name :make :quantile
