@@ -679,6 +679,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     eighth of RAM of active memory. MLX's own defaults are all of RAM.
   - Where MLX's semantics differ from NumPy's, the backend follows NumPy's:
     NaN in `sign` and `argmax`, integer floor division, float64 accuracy.
+    So too the sign of a zero (owner, 2026-10-21, genclj-3mx6): Metal's
+    float32 `atan(-0.0)` is +0.0, and the backend returns x itself at
+    zero, as NumPy and the JVM backend do.
   - Configured by `gen.mlx.device` (`cpu`, `gpu`) and `gen.mlx.dtypes`
     (`32`, `64`).
   - In `gen` bodies, a 0-d backend array counts as its host value for
