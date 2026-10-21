@@ -4,8 +4,8 @@
 over the token generative function (`docs/research/llm-token-gf.md`) and
 the potentials of `gen.llm.potential` (m3-smc, a83022f). The owner is away
 overnight: the choices that are theirs (the dependency, the semantics of a
-constrained completion, names) are marked **Recommendation**, recorded
-PROVISIONAL in DESIGN.md §9.*
+constrained completion, names) are marked **Recommendation**; the owner
+confirmed them all on 2026-10-21 (DESIGN.md §9).*
 
 ## What exists
 
@@ -417,8 +417,8 @@ evidence:
   instaparse does not expose either; it would be a potential of its own
   (Schema → grammar, above).
 
-So DESIGN §8's row becomes: instaparse, **no** (PROVISIONAL, for the
-owner).
+So DESIGN §8's row becomes: instaparse, **no** (confirmed by the owner,
+2026-10-21).
 
 
 ## Decisions
