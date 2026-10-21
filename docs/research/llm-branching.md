@@ -17,6 +17,7 @@ engine layer. Summarized in DESIGN.md §6 and §9.*
 | The Branching protocol, the Branch value, the checked operations | `gen.llm.branching` |
 | An engine over numbered sequence slots: threading, lifetimes, capacity | `gen.llm.slots` |
 | The llama.cpp engine | `gen.llm.llama` |
+| The replay of llama.cpp's recurrent cells (620d222), and the planner that splits a hybrid model's steps over them | `gen.llm.llama.recurrent` |
 | The contract as engine-agnostic checks; a pure-JVM toy engine; tests | `test/gen/llm/` |
 | Float-noise and cost measurement, for short prompts and for branches past a sliding window (the contract's own statistic) | `bench/gen/llama_noise.clj`, `bench/gen/llama_long_noise.clj` |
 
@@ -330,6 +331,190 @@ measurable cost: 13.8 ms for an advance of 15); with the default heap of a
 64 GB machine (16 GB, 8 MB regions) none is, and with 4 GB (2 MB regions)
 Gemma's are. Forks and resampled children share their parent's array.
 
+## Recurrent states and split steps (2026-10-21)
+
+*m3-lm's bench (07ea7ac) found the LM protocol's batched one-token reads on
+Qwen3.5-0.8B costing 3.6 times the raw Branching operations at 8 contexts
+and 2.5 times at 32, with no such overhead on Qwen3 or Gemma. The cause is
+llama.cpp's placement of recurrent states. The fix below is built and
+tested. **Recommendation (PROVISIONAL, for the owner):** keep it, under
+the names given at the end.*
+
+**Where the time goes.** All of it is inside `llama_decode`: an LM read's
+fork, dispose and eviction calls take under 0.3 ms. Three pieces of
+llama.cpp (620d222) explain it:
+- **`find_slot`** (`llama-memory-recurrent.cpp`). A sequence that shares
+  its cell (a fork, or a branch others were forked from) takes the next
+  empty cell. The search starts at the head and wraps round. The
+  decode's range is then `n_rs` = highest cell − lowest + 1, and the
+  gather moves its sequences to adjacent cells from the lowest.
+- **`build_rs`** (`llama-graph.cpp`) gathers all `n_rs` states and writes
+  back the `n_rs − n_seqs` it does not change ("states_extra").
+- **Graph reuse.** A graph is reused only while `n_rs`, the head and
+  `rs_z` stay the same (`llm_graph_input_rs::can_reuse`).
+
+A Qwen3.5-0.8B state is 19 MB: 18 GatedDeltaNet layers of 16×128×128 f32.
+Measured on the Mac mini M4 (Metal), for one advance of 8 forks whose cells
+were planted to span d (three runs each, spread under 1 ms):
+
+| d | 8 | 16 | 32 | 64 | 100 |
+|---|---|---|---|---|---|
+| ms | 25.4 | 50.0 | 106.2 | 221.4 | 345.6 |
+
+The costs are:
+- 3.5 ms for each state in the span that is not read;
+- 2.1 ms for each sequence read (raw 8 forks: 24.7 ms; raw 32: 75.4 ms);
+- about 10 ms for the decode itself;
+- about 1.5 ms for a graph rebuild.
+
+**Why the LM pays and raw operations do not.** The LM's cache keeps
+entries that are not in the step, and they sit between the step's cells.
+Its LRU evictions free cells out of order, often across the end of the
+63-cell ring its entries occupy. The forks of the next step then land on
+cells like {2, 3, 4, 60…64}: `n_rs` 63 for 8 sequences, 218 ms.
+- Raw forks disposed of at once reuse one block of cells.
+- A step of every live branch keeps them adjacent, since the gather
+  compacts it. Raw SMC that advances every particle has `n_rs` equal to
+  `n_seqs` at N = 16, 32 and 64.
+
+To check this, the bench's exact operations were replayed on the toy
+engine through a replay of llama.cpp's cell bookkeeping:
+- the LM's counters equal the real run's (426 evictions, 489 forks, 93
+  reads);
+- the replay's `n_rs` per decode, priced with the costs above, predicts
+  the measured rows within 3% (100.5 predicted against 98.5 ms measured,
+  176 against 174).
+
+**The options**, priced by the replay (ms a step):
+
+| Workload | as is | (a) parents consumed | (b) LM working set bounded | (E) steps split | raw |
+|---|---|---|---|---|---|
+| LM, 8 one-token reads | 100 | prefix entries lost | – | 28.6 | 26.8 |
+| LM, 32 one-token reads | 176 | prefix entries lost | – | 86 | 77 |
+| SMC N=16, LM of 64 | 99 | 94 | 60 (LM of 24) | 49 | |
+| SMC N=32, LM of 64 | 134 | 117 | 91 (LM of 40) | 72 (70 with (b)) | |
+
+- (a) Always consuming a read's parent, so that its state stays in place,
+  drops the prefix's entry. Every later read of the prefix then starts
+  again from nothing, and with (E) it costs more than (E) alone (98
+  against 72).
+- (b) works, but only bounds the span by the LM's size.
+- (E) leaves every caller's policy as it is.
+
+**The fix (E), built: gen.llm.llama.recurrent.** It is a pure, internal
+namespace pinned to 620d222. It replays `seq_cp`, `seq_rm` and `find_slot`,
+and `gen.llm.llama` feeds it every memory operation of a recurrent or
+hybrid model's engine.
+
+*Planning a step.*
+- The planner replays the step as one decode and finds the cell each
+  sequence would take.
+- A dynamic program cuts those cells into runs of adjacent ones, each run
+  costing a fixed amount plus its span.
+- The runs that take empty cells go in the order the search finds those
+  cells.
+- A sequence that keeps its cell is decoded after the others sharing it,
+  which leave first, earliest deadline first.
+- The plan is kept only if the replay finds it cheaper than one decode.
+- The fixed cost is 6 states. On this model it is about 3; plans cost
+  about the same from 3 to 12, and larger models' decodes cost more
+  against their states.
+- Planning costs about 0.15 ms of host time a step.
+
+*Running a step.* The engine decodes the groups in turn and puts the rows
+back in the step's order.
+
+*Its properties.*
+- **Deterministic.** A plan is a function of the engine's operations,
+  never of timing. The same calls give the same decodes and the same rows,
+  bit for bit (tested).
+- **Only recurrent and hybrid models.** Attention models keep one decode a
+  step.
+  - `gen.llama.split-recurrent` false (default true) turns it off, and
+    then the engine behaves exactly as before.
+  - `(info e)` has `:split-recurrent?`, and `llama/step-splits` reports
+    `{:steps :split :decodes :off}`.
+- **The replay stops, and steps are one decode from then on:**
+  - after a decode that fails other than by finding no room (1) or by its
+    batch being refused (-1);
+  - when, after any read, step, copy or clear, a touched slot's state
+    position (`llama_memory_seq_pos_min`) disagrees with the replay's.
+    This one is also said on System.err and recorded in `step-splits`.
+- **What the cross-check cannot see.** v0.7.0 exposes no cell's index, so
+  the check catches drift in which sequences hold states and where they
+  stand, not in which cells they sit. Placement changes no result, so such
+  drift can only cost time. `a-scattered-step-is-split` guards it, since
+  its timing depends on the cells being where the replay says.
+- **Costs.**
+  - Splitting changes batch shapes, which move scores within the noise.
+    The contract and its 0.1- and 0.6-nat bands still hold on all three
+    models.
+  - A step that fails in its second decode loses its first group's slots
+    (`:lost-slots`), as does any recurrent decode that cannot be undone.
+
+**Measured with the fix** (Mac mini M4, Metal, Qwen3.5-0.8B; two runs
+back to back, the switch on and off):
+
+| Row | split | one decode a step | raw |
+|---|---|---|---|
+| LM, one one-token read | 13.3 ms | 15.2 ms | |
+| LM, 8 one-token reads | **32.4 ms** | 106.4 ms | 25.3–26.3 ms |
+| LM, 32 one-token reads | **98.1 ms** | 185.5 ms | 78.0–78.6 ms |
+
+The LM's overhead over raw operations falls from 4.1 to 1.23 times at 8
+contexts, and from 2.4 to 1.25 times at 32. The new tests:
+- `gen.llm.llama.recurrent-test`: cases worked from the source, a property
+  of random operations, and six planted mutations, each caught;
+- on the model (`gen.llm.llama-test`):
+  - `a-scattered-step-is-split`: 39.7 ms split against 123.1 ms in one
+    decode; planted mutations (no split, a group's rows put back
+    reversed) caught;
+  - `the-split-switch`;
+  - `a-replay-that-disagrees-stops`.
+
+The llama tests pass with all three models: 40 tests with Qwen3.5 (with
+the replay's), 31 with Qwen3 and with Gemma.
+
+**Not measured.**
+- CUDA and CPU builds, whose copy and decode costs differ, so the fixed
+  cost of 6 needs checking there (Thor, fenrir).
+- Models other than Qwen3.5-0.8B.
+
+**For m3-lm (cache.clj, a recommendation).** With (E) nothing is needed.
+Optionally, for hybrid models, size the LM's `:max-branches` near its
+working set (about 1.25 N for SMC of N): with (E) that gains 2 ms a step
+at N = 32. Without (E) it would be the only lever. Do not consume parents
+by default, (a).
+
+**Upstream, (c): a note for the owner's decision, not filed.** The issue
+would read, to ggml-org/llama.cpp:
+
+> *Recurrent memory: a decode copies every state between its lowest and
+> highest cell.* `llama_memory_recurrent::find_slot` gives each sequence
+> that shares its cell the next empty one, searching from the head and
+> wrapping round, and sets `n = max − min + 1`. `build_rs` then gathers
+> `n_rs` rows and writes back the `n_rs − n_seqs` rows it does not change.
+> With many sequences live but not in the batch, as in a cache of branches
+> or tree search, the span is often several times the batch. On
+> Qwen3.5-0.8B (Metal, M4), 8 sequences spanning 63 cells take 218 ms
+> against 28 ms when adjacent: 3.5 ms for each state between. Possible
+> fixes:
+> - copy only the cells whose source moved (`src0 != i`);
+> - have `find_slot` prefer empty cells next to the batch's own;
+> - or let the gather pick a contiguous block.
+>
+> A planted-span reproduction is attached (`span_probe.clj`'s first part,
+> rewritten in C against `llama.h`).
+
+Filing it is outward-facing; the reproduction would need writing in C
+first.
+
+**Names for the owner (PROVISIONAL):**
+- the property `gen.llama.split-recurrent`;
+- the diagnostics function `llama/step-splits`;
+- the info key `:split-recurrent?`;
+- the internal namespace `gen.llm.llama.recurrent`.
+
 ## For the next beans
 
 - **genclj-mse0 (LM protocol).** A trie node can hold a live Branch: its
@@ -348,16 +533,81 @@ Gemma's are. Forks and resampled children share their parent's array.
   so 255 at most for all live traces; resume regenerate from forks at a few
   sites, or re-prefill from the trace's tokens (deterministic for a given
   state). (3) The GC backstop lets traces own branches.
-- **genclj-zztc (shared memory budget).** `(:bytes (:model (info e)))` is the
-  weights' size. llama.h v0.7.0 reports no KV-cache size: compute it from
-  the model's dimensions (cells × layers × KV heads × head size × 2 × 2
-  bytes for f16, for plain attention), or read llama.cpp's info-level log
-  line `llama_kv_cache: size = … MiB (… cells, … layers, …)` (and its
-  per-buffer "KV buffer size" lines) through the log callback.
+- **genclj-zztc (shared memory budget):** built, below (The shared memory
+  budget).
 - **Not done here:** Linux CUDA and CPU builds (written, not run), MLX and
   llama.cpp in one test JVM (the spike showed it), the 8B and 30B models,
   and a fatal decode on Metal (only the CPU backend honours an abort, and
   no other deterministic way exists without a `GGML_ASSERT`).
+
+## The shared memory budget (genclj-zztc)
+
+*2026-10-21, branch m3-budget. The defaults and names marked
+**Recommendation** are the owner's to decide.*
+
+The spike (genclj-zztc) found that MLX's memory limit is no cap (MLX
+allocates past it without an error) and that with a 30B model mapped the
+machine's available memory fell to 9.5 GB at about 10 GB of MLX data, far
+below MLX's limit of half the RAM. gen.clj keeps a budget of its own:
+
+- **Reservations** (`gen.array.memory`): a registry of the memory native
+  engines hold beside the array backends (`reserve!`, `release!`,
+  `reserved`, `reservations-held`). Plain numbers, no native library, so an
+  engine reserves without loading MLX and MLX reads them without knowing
+  the engine.
+- **The budget** (`gen.backend.mlx`, in the membrane): MLX's active memory
+  may reach the budget shared with native engines, less their reservations
+  and a headroom. After every evaluation (`evaluating*`, which every
+  evaluation and host read goes through) the backend reads MLX's active
+  memory; past the budget it collects unreachable arrays (`collect!`) and
+  reads again; still past it, an ex-info (`:reason :mlx-budget-exceeded`)
+  with the active memory, the budget, the reservations and the headroom.
+  No evaluation moves into semantics code (CLAUDE.md rule 3). `budget`
+  reports it; `set-budget! {:bytes :headroom}` sets it.
+- **The engine's footprint** (`:footprint` in a llama.cpp engine's info):
+  its weights (the model's size, `llama_model_size`) and the other buffers
+  llama.cpp reported allocating, read from its info-level log while the
+  model loads and the context is made (`LlamaRuntime/startCapture`,
+  whatever `gen.llama.log` prints): the KV-cache, recurrent-state (RS),
+  output and compute buffers, to 0.01 MiB. The model buffers are listed
+  but not added: a mapped file's are views of one mapping (Metal's maps
+  the whole file, the CPU's the token embeddings again, 165 to 270 MB that
+  would count twice). The engine reserves its footprint when made and
+  releases it when closed (or collected). llama.h's
+  dimensions cannot give the KV cache's size in general: Qwen3's head size
+  is 128, explicit in its GGUF, not its width over its heads (64), and
+  sliding-window caches, recurrent state and compute buffers are not
+  dimensions at all; llama.cpp's own report is exact for every
+  architecture it loads, and the pinned version fixes its format (a
+  footprint without a model buffer is a loud error).
+- **Measured** (the M4, 2026-10-21): Qwen3-0.6B's KV cache is 112.0 MiB
+  at 1,024 cells, exactly 28 layers × 8 KV heads × (128 + 128) × 2 bytes
+  per cell (448 MiB at 4,096). The footprints, at 1,024 and 4,096 cells:
+  Qwen3-0.6B 1.25 and 1.61 GB, Qwen3.5-0.8B 1.67 and 1.72 GB (its
+  recurrent state 61 MB, constant), Gemma-3-270M 1.04 and 1.11 GB (two KV
+  caches, full-size window and global). The Metal compute buffer, which
+  holds a batch's logits (512 × the vocabulary × 4 bytes), is 0.32 to
+  0.55 GB of each: a large share for small models.
+- **Tests** (`gen.backend.mlx-test`, `gen.llm.llama-test`): an evaluation
+  past a small budget is the error, with the numbers; a dead array past
+  the budget is collected first, and the evaluation goes on; a reservation
+  shrinks the budget, and its release gives it back; the default leaves
+  room; an engine reserves exactly its footprint while open, the model
+  buffers read hold its weights, its KV cache doubles with the cells, and
+  with MLX in the same JVM an open engine shrinks MLX's budget by its
+  footprint. Each of six planted bugs fails them: the check left out, no
+  collection before the error, reservations ignored, the KV lines not
+  read, no release at close, the mapped model buffers added up.
+- **Recommendation (defaults):** the shared budget half the physical
+  memory (`gen.mlx.budget-bytes`), the headroom a sixteenth
+  (`gen.mlx.budget-headroom-bytes`): on this 32 GB Mac 16 GB shared, 14 GB
+  for MLX with no engine open; with the 30B-A3B model (17 GB of weights) on
+  the 64 GB MacBook, 32 − 4 − 17.5 = 10.5 GB for MLX, where the spike saw
+  trouble at about 10 GB. The shared budget's default equals MLX's memory
+  limit's (`gen.mlx.memory-bytes`, half the RAM).
+- **Recommendation (names):** the namespace `gen.array.memory` (L0, beside
+  the backends) and `budget` / `set-budget!` in `gen.backend.mlx`, next to
+  `memory`, `set-memory-limit!` and `collect!`.
 
 ## The review
 
