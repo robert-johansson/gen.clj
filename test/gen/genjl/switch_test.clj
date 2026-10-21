@@ -229,7 +229,7 @@
     (is (balances? tr (gfi/update tr [0] unknown (cm/choicemap [:x :z] 10.0) (rng/key 31))))))
 
 ;; switch.jl:284: the same branch with nothing selected (the other three
-;; assertions are pending)
+;; are regenerate-weights', on Gen.jl's recorded moves)
 (deftest nested-regenerate
   (let [tr (gfi/simulate bam2 [1] (rng/key 32))]
     (is (balances? tr (gfi/regenerate tr [1] unknown sel/none (rng/key 33))))))
