@@ -42,12 +42,14 @@
    case of a-read-that-fails-midway-is-undone, on Qwen3.5.)
    Branches past a sliding window have a band of their own, measured for
    them (long-band, below).
-   CPU and CUDA builds have other kernels: measure their noise with the
-   bench before trusting this band there."
+   Other devices take their own bands, from their own measurements
+   (gen.llm.llama.bands): on CUDA with quantized weights the noise checks
+   are skipped with a note (DESIGN §6)."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gen.array.memory :as reservations]
             [gen.llm.branching :as br]
             [gen.llm.branching-contract :as contract :refer [reason]]
+            [gen.llm.llama.bands :as bands]
             [gen.llm.llama.recurrent :as recurrent]
             [gen.llm.long-texts :as long-texts]
             [gen.llm.slots :as slots]
@@ -88,14 +90,23 @@
 (defmacro ^:private when-llama [& body]
   `(when @available? ~@body))
 
-(def ^:private band 0.1)
-
 (def ^:private engine-opts {:max-branches 12 :n-ctx 2048})
 
 (def ^:private shared (atom nil))
 
 (defn- engine []
   (or @shared (reset! shared ((llama 'engine) (assoc engine-opts :model model-path)))))
+
+(defn- noise
+  "The shared engine's bands, or :skip with its note (gen.llm.llama.bands)."
+  []
+  (bands/bands (br/info (engine))))
+
+(defmacro ^:private is-within-noise
+  "(is form msg) where llama.cpp's noise checks apply to this engine; else
+   the note saying why not."
+  [form & msg]
+  `(if-let [note# (:skip (noise))] (println note#) (is ~form ~@msg)))
 
 (use-fixtures :once (fn [f]
                       (try (f)
@@ -106,14 +117,14 @@
 (defn- opts [e]
   {:prompt ((llama 'tokenize) e "The capital of Sweden is a city called")
    :continuation ((llama 'tokenize) e " Stockholm, which is known for its many islands and" {:add-special? false})
-   :k 4 :band band})
+   :k 4 :band (:band (noise))})
 
 (deftest the-contract-holds-within-the-noise
   (when-llama
     (let [e (engine)]
       (doseq [[k check] contract/checks]
         (testing k
-          (is (= [] (contract/run-check check e (opts e))))))
+          (is-within-noise (= [] (contract/run-check check e (opts e))))))
       (is (zero? (:live (br/info e))) "every check disposes what it makes"))))
 
 (deftest the-engine-describes-itself
@@ -221,12 +232,12 @@
                                           " and black-box variational inference, all of them written"
                                           " against the one generative function interface")
                                    {:add-special? false})
-            o {:prompt prompt :continuation continuation :k 2 :band band}]
+            o {:prompt prompt :continuation continuation :k 2 :band (:band (noise))}]
         (is (< 16 (count prompt)) "the prompt takes more than one decode")
         (is (< 32 (count continuation)) "the continuation takes three")
         (doseq [k [:score-matches-steps :fork-matches-fresh]]
           (testing k
-            (is (= [] (contract/run-check (contract/checks k) e o)))))))))
+            (is-within-noise (= [] (contract/run-check (contract/checks k) e o)))))))))
 
 (deftest a-read-that-fails-midway-is-undone
   ;; 256 cells, 16 tokens a decode: branches of 150 and 60 tokens leave 46
@@ -344,7 +355,7 @@
   [alone tokens out]
   (vec (keep (fn [[t b]]
                (let [d (contract/max-diff (alone t) (br/logprobs b) 64)]
-                 (when-not (<= d band) (format "token %d: |Δ log p| = %.3g" t d))))
+                 (when-not (<= d (:band (noise))) (format "token %d: |Δ log p| = %.3g" t d))))
              (map vector tokens out))))
 
 (deftest a-scattered-step-is-split
@@ -376,7 +387,7 @@
                 {:keys [groups failures] :as first-rows} (rows)]
             (is (:split-recurrent? (br/info e)))
             (is (= [[0] [1 2 3 4 5 6 7]] groups) "cell 1, then cells 30 to 36")
-            (is (= [] failures))
+            (is-within-noise (= [] failures))
             (is (every? true? (map #(java.util.Arrays/equals ^floats %1 ^floats %2) (:rows first-rows) (:rows (rows))))
                 "the same operations, the same rows")
             (is (= {:off nil} (select-keys ((llama 'step-splits) e) [:off])))
@@ -408,7 +419,7 @@
         (let [{:keys [root tokens alone step]} (scattered-steps e)
               {:keys [groups out]} (step)]
           (is (nil? groups))
-          (is (= [] (within-band alone tokens out)))
+          (is-within-noise (= [] (within-band alone tokens out)))
           (br/dispose! (cons root out)))
         (finally (.close ^java.io.Closeable e))))))
 
@@ -433,25 +444,23 @@
             (is (re-find #"copy: the replay of llama.cpp's recurrent cells puts slot \d+'s state at position" (str off)))
             (is (re-find #"gen.llm.llama: copy" (str err)) "said on System.err")
             (is (= decodes steps) "one decode a step")
-            (is (= [] (within-band alone tokens out)))
+            (is-within-noise (= [] (within-band alone tokens out)))
             (br/dispose! (cons root out))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Branches longer than a sliding window
 ;; ---------------------------------------------------------------------------
 
-(def ^:private long-band
-  ;; 0.6 nats: twice the largest |Δ log p| bench/gen/llama_long_noise.clj
-  ;; measured for these very comparisons (the engine below, the long texts,
-  ;; positions 600 and 1000 and a continuation from 472 across 512) on
-  ;; Metal (2026-10-20): 0.28 with Gemma-3-270M (a fork at 1000 tokens of
-  ;; the code text, in the deep tail of a peaked distribution: log p of -10
-  ;; to -22 after a newline whose successor has log p -6e-6; the fork
-  ;; batched and the branch advanced alone agree there to 1e-3), median
-  ;; 1e-2; Qwen3-0.6B at most 2.9e-2, Qwen3.5-0.8B 8.9e-3. A copy that keeps
-  ;; only the window's positions moves them by 4 to 5 nats (median, up to
-  ;; 39).
-  0.6)
+;; the band past a sliding window, by device (gen.llm.llama.bands): 0.6 on
+;; Metal, twice the largest |Δ log p| bench/gen/llama_long_noise.clj
+;; measured for these very comparisons (the engine below, the long texts,
+;; positions 600 and 1000 and a continuation from 472 across 512) on Metal
+;; (2026-10-20): 0.28 with Gemma-3-270M (a fork at 1000 tokens of the code
+;; text, in the deep tail of a peaked distribution: log p of -10 to -22
+;; after a newline whose successor has log p -6e-6; the fork batched and the
+;; branch advanced alone agree there to 1e-3), median 1e-2; Qwen3-0.6B at
+;; most 2.9e-2, Qwen3.5-0.8B 8.9e-3. A copy that keeps only the window's
+;; positions moves them by 4 to 5 nats (median, up to 39).
 
 (deftest branches-longer-than-a-sliding-window
   ;; Gemma 3's layers mix a sliding window of 512 tokens with full
@@ -467,8 +476,8 @@
                 [len n] [[(+ window 88) 40] [(+ window 488) 40] [(- window 40) 80]]
                 [k check] (select-keys contract/checks [:fork-matches-fresh :score-matches-steps :resample])]
           (testing [text len k]
-            (is (= [] (contract/run-check check e {:prompt (subvec all 0 len) :continuation (subvec all len (+ len n))
-                                                   :k 4 :band long-band})))))
+            (is-within-noise (= [] (contract/run-check check e {:prompt (subvec all 0 len) :continuation (subvec all len (+ len n))
+                                                   :k 4 :band (:long-band (noise))})))))
         (is (zero? (:live (br/info e))))))))
 
 ;; ---------------------------------------------------------------------------

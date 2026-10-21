@@ -327,6 +327,17 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
   `gen.llm.llama` is llama.cpp's. On Metal the same read from the same
   state is bit-identical, while different batch shapes give a token's
   log-probability differing by up to 5e-2 nats (median 2e-3 to 4e-3).
+- **Quantized weights off Metal (measured 2026-10-21, fenrir; genclj-kw88).**
+  With Q8_0 weights, llama.cpp's x86 CPU and CUDA builds give log-probabilities
+  about 0.22 nats a token (median; up to about 2) from Metal's, which agrees
+  with an f32 forward pass within 0.008. The CPU build is batch-invariant;
+  CUDA's also varies with batch composition by about 0.2 (max about 1). Flash
+  attention, CUDA graphs and cuBLAS-only matmuls change nothing; f16 weights
+  bring both within about 0.01 of Metal, and CUDA's batch variation to 0.13 at
+  most (likely cause, unproven: int8 dot products with quantized activations
+  on those backends). So on CUDA and x86 CPU, exact inference (scores, SMC
+  weights, comparisons across devices) wants float (F16/BF16) weights;
+  quantized ones are for speed.
 - **As built (2026-10-20, genclj-mse0; for the owner's review,
   `docs/research/llm-lm-protocol.md`).** `gen.llm.lm` is the LM protocol
   (vocab, encode, decode, token-bytes, byte-vocab, next-logprobs,
@@ -1389,6 +1400,39 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   a combinator at the top had to be spliced into one. D7's rule stands, one
   store per generative function and gradients as values; this extends where
   the stores are found.
+- **A call's trace and return value by address; merge and Recurse's
+  numbering (owner, 2026-10-21; M5's G1, F3, G10, G13; m3-grammar's
+  design).**
+  - `(trace/subtrace tr addr)` is Gen.jl's `get_call(tr, addr).subtrace`:
+    the trace of the call at an address or a path, nil where no call is
+    (until D4 decides the loud form); `[]` is `tr` itself, and a path into a
+    call descends into its subtrace. `(tr addr)` is Gen.jl's `trace[addr]`:
+    the choice there, otherwise the call's return value, so `(tr [])` is the
+    return value (`trace[]`) and Map's `(tr i)` is element i's.
+  - The mechanism is a protocol in gen.trace dispatched on the trace's
+    generative function (a call's subtrace for a path prefix; Object's
+    default nil), so each combinator keeps its representation private:
+    dynamic functions (call-at and choice-at with them), Map and Unfold by
+    index, Switch through its branch, Recurse by [node :production] and
+    [node :aggregation].
+  - The path rule's edges: `[]` is the root for `cm/set-choice` and
+    `cm/set-submap`; `cm/from-map` nests a vector key as a path (an overlap
+    is a loud merge error); a vector inside a path is a loud error wherever a
+    path is walked.
+  - `cm/merge` takes 0 to n choice maps (none gives EMPTY, merge's
+    identity). Recurse's numbering is Gen.jl's, 0-based: `get-child`,
+    `get-child-num`, `get-parent`, their arguments checked loudly.
+- **Filling with an array is loud (owner, 2026-10-21; M5's G14).**
+  `array/full` and `full-like` take a scalar fill value (a host number or a
+  0-d array, tracked on the tape too); an array of values is an ex-info on
+  every backend, pointing to `broadcast-to`. Before, the JVM threw a
+  ClassCastException and MLX broadcast it silently.
+- **llama.cpp's band by device (owner, 2026-10-21; genclj-kw88).** The
+  Branching contract's llama.cpp tests take their band from the device's
+  measured noise: twice its measured maximum, 0.1 nats on Metal (as before)
+  and about 0.26 on CUDA with float weights (f16: max 0.13). With quantized
+  weights on CUDA the contract's noise checks are skipped with a note naming
+  DESIGN §6's measurement, never given a band wide enough to hide it.
 - **Git:** the main repo is public-ready, with `.beans/`, `.beans.yml`,
   `.claude/` and `*.pdf` gitignored. Its remote is the private
   `robert-johansson/gen.clj` (the owner, 2026-10-21, at M4's close: private
