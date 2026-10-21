@@ -142,6 +142,12 @@ most) is enumerated and Z computed exactly:
   loud, each error with a `:reason` (`:invalid-model`, `:invalid-args`,
   `:no-tokens`, `:invalid-option`, `:invalid-potential`, `:invalid-row`,
   `:not-done`, `:impossible`), which the test checks.
+- **The host pool**: runs on pools of 1, 2 and 8 threads are the calling
+  thread's bit for bit, for every proposal; a recording LM, potential and
+  proposal function see every call on the calling thread; a task's error
+  is raised as itself, and a task sees the caller's bindings (a batch
+  tracer's batched-branch error, from the pool); the default pool is
+  shared.
 - The masked proposal's rows, renormalized in double and stored as floats,
   pass `token/dist`'s normalization check (within 1e-4 of 1), which a
   proposal function's rows must pass too.
@@ -199,14 +205,78 @@ twist row, and a log-sum-exp over the whole row). Against llama.cpp's
 batched decode (13.5 ms for 15 rows, M2 Max) that is a third of a row's
 share for the bootstrap, more for the masked proposal.
 
-**Recommendation (not built): parallel host work.** A particle's proposal
-row and draw are pure functions of its row, its twist and its key, so they
-can run on a small fixed pool (as the engine's row normalization, the
-Branching review's N1), deterministic whatever the threads; the LM's
-scores and the potential's calls stay sequential (a potential need not be
-thread-safe). And rows that came with their probabilities (the engine
-computes the exponentials when it normalizes) would make a draw a float
-sum, tens of microseconds.
+## The host pool (built 2026-10-21, m3-par)
+
+A particle's proposal row (the LM's row, or the masked row) and its draw
+are pure functions of its row, its twist and its key. So a step runs them
+on a fixed pool of daemon threads, and collects them in particle order,
+each task under the calling thread's bindings. The LM's calls (the step's
+batch read, each token's score from the ledger), the potential's (the
+next-token weights, prefix and complete) and a proposal function's stay
+on the calling thread: none of them need be thread-safe, and the LM reads
+in the order the program gives. A task's error is raised as itself once
+every task has ended. With one live particle, or no pool, the work runs on
+the calling thread.
+
+- **Determinism.** A run is the calling thread's alone, bit for bit, at
+  every pool size: particles, weights and the estimate, tested at 1, 2 and
+  8 threads for each proposal (the LM's rows, masked, a function).
+- **Interface.** `:host-pool` at initialize: an ExecutorService
+  (`smc/host-pool n` makes a fixed pool of daemon threads; close it, or
+  let the JVM's exit end it), `false` for the calling thread alone, or by
+  default the shared pool.
+
+**PROVISIONAL (owner to confirm), 2026-10-21:**
+- **Ownership:** `gen.llm.smc` owns one shared pool, made on first use, of
+  daemon threads named `gen.llm.smc host-N`; never the common pool. A
+  caller may pass its own. Alternatives: the LM owning it (it would serve
+  the token generative function's draws too, which are one particle at a
+  time and gain nothing); no default (every caller passes a pool); a pool
+  for each run (thread churn).
+- **Size:** half the available processors up to 4, as the llama.cpp
+  engine's row pool (4 on the M4, its performance cores; the engine's
+  thread, the GC and the row pool need the rest), or the system property
+  `gen.llm.host-threads`. Alternative: the processors less one.
+- **Off switch:** `:host-pool false` for a run; `-Dgen.llm.host-threads=1`
+  for the process.
+
+**Measured** (`clojure -M:bench -m gen.smc-bench host`): a step of n
+particles over 16 steps at Qwen3's vocabulary (151,936 tokens) on the toy
+engine, never resampling, so that every step reads n contexts as the LM's
+batch alone does; ms a step, two runs, while another agent's Metal battery
+used the CPU (so indicative only; see the quiet run below when made):
+
+| particles | proposal | the LM's batch alone | calling thread | 2 threads | 4 threads | 8 threads |
+|---|---|---|---|---|---|---|
+| 8 | bootstrap | 12.0 / 8.0 | 22.8 / 14.4 | 20.4 / 13.2 | 12.9 / 12.0 | 11.7 / 12.0 |
+| 8 | masked, a mask | 12.0 / 8.0 | 21.1 / 22.4 | 17.4 / 17.5 | 15.5 / 15.7 | 14.8 / 15.4 |
+| 32 | bootstrap | 51.6 / 52.1 | 71.6 / 51.9 | 47.8 / 47.2 | 45.4 / 45.3 | 57.5 / 42.8 |
+| 32 | masked, a mask | 51.6 / 52.1 | 81.3 / 84.1 | 66.3 / 66.0 | 58.5 / 57.4 | 52.4 / 61.6 |
+| 64 | bootstrap | 69.7 / 76.8 | 98.4 / 100.8 | 97.4 / 120.8 | 115.6 / 94.1 | 88.3 / 99.7 |
+| 64 | masked, a mask | 69.7 / 76.8 | 170.6 / 177.3 | 143.0 / 121.0 | 120.5 / 103.9 | 107.6 / 94.8 |
+
+The masked proposal's host work (the step less the batch) falls from about
+100 ms to 20 to 40 at 64 particles with 8 threads, and from about 30 ms to
+5 to 10 at 32 with 4 or more; the bootstrap's, a draw each, from about
+25 ms to 18 at 64 particles. The rest of a step is the LM's batch (here
+the toy engine's rows, on one thread) and the sequential scores. The noise
+is large (at 64 particles the bootstrap with 4 threads once ran slower
+than the calling thread).
+
+**Recommendation (not built): rows with their cumulative probabilities.**
+A draw sums exp over the row in token order until the uniform: about
+335 µs at 151,936 tokens, half the row on average, for every particle,
+even when particles share a row after resampling. An engine computes
+those exponentials already when it normalizes a row (llama.cpp's,
+`LlamaRuntime/logSumExp`, takes exp(l − m) of every logit).
+If a row came with its cumulative probabilities in double (1.2 MB at
+Qwen3's vocabulary, besides the row's 600 KB of floats), a draw would be
+a binary search, under a microsecond, and its normalization check the
+array's last entry. The cost is in the Branching engine (m3-llama's): a
+second array per row, written in the same pass, held while the row is.
+Better made lazily, per row and once (a branch is a value, so a delay on
+it), so that rows no one draws from cost nothing. It does not help the
+masked proposal, whose row is the LM's times the twist, made per particle.
 
 ## On llama.cpp
 
