@@ -9,7 +9,8 @@
    - jvm?, float-dtype, int-dtype: for the few checks that are about one
      backend's representation.
    - correlation: the sample correlation of host numbers, for checks of
-     independence."
+     independence.
+   - thrown-data: the ex-data of a loud error, to check what it says."
   (:refer-clojure :exclude [abs])
   (:require [gen.array :as array]
             [gen.array.protocols :as p]
@@ -87,6 +88,11 @@
   "Is the 0-d array or number x finite?"
   [x]
   (Double/isFinite (number x)))
+
+(defmacro thrown-data
+  "The ex-data of the ex-info body throws, or nil when body returns."
+  [& body]
+  `(try ~@body nil (catch clojure.lang.ExceptionInfo e# (ex-data e#))))
 
 (defn correlation
   "The sample correlation of the coordinates of pairs [x y] of host numbers."

@@ -224,7 +224,7 @@
                         (let [ea (element-args args i)
                               k (element-key key i)]
                           (if constraints
-                            (let [{sub :trace w :weight} (generate-at kernel ea (cm/get-submap constraints i) k [i])]
+                            (let [{sub :trace w :weight} (generate-at kernel ea (cm/get-submap constraints i cm/EMPTY) k [i])]
                               (put-element acc i sub nil w))
                             (put-element acc i (simulate-at kernel ea k) nil 0.0))))
                       empty-acc
@@ -249,7 +249,7 @@
                             k (element-key key i)]
                         (put-update acc i old
                                     (if (= op :update)
-                                      (update-at kernel old ea ead (cm/get-submap cs i) k [i])
+                                      (update-at kernel old ea ead (cm/get-submap cs i cm/EMPTY) k [i])
                                       (regenerate-at kernel old ea ead (sel/get-subselection cs i) k [i])))))
                     (trace-acc tr)
                     (visits (changed-elements argdiffs) targets kept))
@@ -258,7 +258,7 @@
                       (let [ea (element-args args i)
                             k (element-key key i)]
                         (if (= op :update)
-                          (let [{sub :trace w :weight} (generate-at kernel ea (cm/get-submap cs i) k [i])]
+                          (let [{sub :trace w :weight} (generate-at kernel ea (cm/get-submap cs i cm/EMPTY) k [i])]
                             (put-element acc i sub nil w))
                           (put-element acc i (simulate-at kernel ea k) nil 0.0))))
                     acc
@@ -270,7 +270,7 @@
         n (map-length args)]
     (indices :assess choices n)
     (reduce (fn [{:keys [weight retval]} i]
-              (let [r (assess-at (:kernel gf) (element-args args i) (cm/get-submap choices i) (element-key key i) [i])]
+              (let [r (assess-at (:kernel gf) (element-args args i) (cm/get-submap choices i cm/EMPTY) (element-key key i) [i])]
                 {:weight (+ weight (:weight r)) :retval (conj retval (:retval r))}))
             {:weight 0.0 :retval []}
             (range n))))
@@ -341,7 +341,7 @@
                 (let [sa (step-args t state params)
                       k (element-key key t)
                       [sub w] (if constraints
-                                (let [r (generate-at kernel sa (cm/get-submap constraints t) k [t])] [(:trace r) (:weight r)])
+                                (let [r (generate-at kernel sa (cm/get-submap constraints t cm/EMPTY) k [t])] [(:trace r) (:weight r)])
                                 [(simulate-at kernel sa k) 0.0])]
                   (recur (inc t) (:retval sub) (put-element acc t sub nil w)))
                 acc))]
@@ -374,7 +374,7 @@
                   sad (into [diff/no-change sdiff] dparams)
                   k (element-key key t)
                   r (if (= op :update)
-                      (update-at kernel old sa sad (cm/get-submap cs t) k [t])
+                      (update-at kernel old sa sad (cm/get-submap cs t cm/EMPTY) k [t])
                       (regenerate-at kernel old sa sad (sel/get-subselection cs t) k [t]))]
               (recur (inc t) (:retval (:trace r)) (:retdiff r) (put-update acc t old r)))
 
@@ -387,7 +387,7 @@
                 (let [sa (step-args t state params)
                       k (element-key key t)
                       [sub w] (if (= op :update)
-                                (let [r (generate-at kernel sa (cm/get-submap cs t) k [t])] [(:trace r) (:weight r)])
+                                (let [r (generate-at kernel sa (cm/get-submap cs t cm/EMPTY) k [t])] [(:trace r) (:weight r)])
                                 [(simulate-at kernel sa k) 0.0])]
                   (recur (inc t) (:retval sub) (put-element acc t sub nil w)))
                 acc))]
@@ -399,7 +399,7 @@
   ;; weight starts boxed: it accumulates arrays on array backends
   (loop [t 0 state init weight (Double/valueOf 0.0) retval []]
     (if (< t n)
-      (let [r (assess-at (:kernel gf) (step-args t state params) (cm/get-submap choices t) (element-key key t) [t])]
+      (let [r (assess-at (:kernel gf) (step-args t state params) (cm/get-submap choices t cm/EMPTY) (element-key key t) [t])]
         (recur (inc t) (:retval r) (+ weight (:weight r)) (conj retval (:retval r))))
       {:weight weight :retval retval}))))
 
@@ -587,7 +587,7 @@
   (or (= :all targets) (contains? (get targets node) part)))
 
 (defn- node-cs [op cs node part]
-  (when cs (if (= op :regenerate) (sel/get-subselection cs [node part]) (cm/get-submap cs [node part]))))
+  (when cs (if (= op :regenerate) (sel/get-subselection cs [node part]) (cm/get-submap cs [node part] cm/EMPTY))))
 
 (defn- run-node
   "One kernel run at node: revised from old when given (update or
@@ -696,7 +696,7 @@
         targets (recurse-targets :assess choices)
         [ps weight] (loop [todo (sorted-map 0 input) ps {} weight (Double/valueOf 0.0)]
                       (if-let [[node in] (first todo)]
-                        (let [r (assess-at production [in] (cm/get-submap choices [node :production])
+                        (let [r (assess-at production [in] (cm/get-submap choices [node :production] cm/EMPTY)
                                            (node-key key node :production) [node :production])
                               out (production-output gf node r)]
                           (recur (into (dissoc todo node)
@@ -709,7 +709,7 @@
         [as weight] (reduce (fn [[as weight] node]
                               (let [{v :value children :children} (ps node)
                                     ws (mapv #(as (child-of node % max-branch)) (range (count children)))
-                                    r (assess-at aggregation [v ws] (cm/get-submap choices [node :aggregation])
+                                    r (assess-at aggregation [v ws] (cm/get-submap choices [node :aggregation] cm/EMPTY)
                                                  (node-key key node :aggregation) [node :aggregation])]
                                 [(assoc as node (:retval r)) (+ weight (:weight r))]))
                             [{} weight] (sort > (keys ps)))]

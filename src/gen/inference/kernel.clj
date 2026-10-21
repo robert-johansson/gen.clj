@@ -295,7 +295,7 @@
 (defn- check-observations! [trace observations]
   (doseq [addr (cm/addresses observations)]
     (let [observed (cm/get-choice observations addr)
-          actual (cm/get-choice (:choices trace) addr)]
+          actual (cm/get-choice (:choices trace) addr nil)]
       (when-not (and (some? actual) (array/equal? observed actual))
         (throw (ex-info (str "The kernel changed the observation at " addr)
                         {:path addr :observed observed :actual actual}))))))

@@ -613,8 +613,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     gen.clj's diffs, and that they are consistent (`diff/consistent?`).
   - *Lookups are loud (D4).* `cm/get-choice`, `cm/get-value` and
     `(tr addr)` at a missing or node address throw ex-info, as Gen.jl
-    throws KeyError, where they returned nil (rule 6). Clojure's `get` on a
-    choice map stays the nil-returning lookup. To be done in M5.
+    throws KeyError, where they returned nil (rule 6). Built in M5, with a
+    not-found arity for the lenient lookup (the bullet "Lookups are loud"
+    below).
   - *Beta is exact at 0 and 1 (D6):* +Inf when α < 1 (or β < 1), where
     Gen.jl substitutes a finite value. As with draws beyond the float
     range, gen.clj keeps the exact value.
@@ -1550,8 +1551,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   numbering (owner, 2026-10-21; M5's G1, F3, G10, G13; m3-grammar's
   design).**
   - `(trace/subtrace tr addr)` is Gen.jl's `get_call(tr, addr).subtrace`:
-    the trace of the call at an address or a path, nil where no call is
-    (until D4 decides the loud form); `[]` is `tr` itself, and a path into a
+    the trace of the call at an address or a path, loud where no call is
+    (D4, "Lookups are loud" below); `[]` is `tr` itself, and a path into a
     call descends into its subtrace. `(tr addr)` is Gen.jl's `trace[addr]`:
     the choice there, otherwise the call's return value, so `(tr [])` is the
     return value (`trace[]`) and Map's `(tr i)` is element i's.
@@ -1568,6 +1569,43 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   - `cm/merge` takes 0 to n choice maps (none gives EMPTY, merge's
     identity). Recurse's numbering is Gen.jl's, 0-based: `get-child`,
     `get-child-num`, `get-parent`, their arguments checked loudly.
+- **Lookups are loud (M5's D4, genclj-ocwu; approved under the owner's
+  delegation, 2026-10-21).** One rule: a lookup throws where Gen.jl throws
+  KeyError, and, given a not-found value, gives that value there instead,
+  as `nth` does. The questions never throw.
+  - Loud:
+    - `(cm/get-choice c a)` where no value is: nothing there, a node, or a path through a value;
+    - `(cm/get-value c)` of a node or of nothing;
+    - `(cm/get-submap c a)` on a path through a value;
+    - `(tr a)` where neither a choice nor a call is;
+    - `(trace/subtrace tr a)` where no call is.
+
+    The error is an ex-info with data `{:reason :path :at}`. `:reason` says what the choices hold at the path: `:absent`, `:value`, `:node` or `:through-value`. `:at` is the prefix holding a value when the path goes through one.
+  - Lenient:
+    - each lookup with a not-found argument, such as `(cm/get-choice c a nil)` or `(tr a nil)`, which never builds an exception;
+    - the questions `(cm/has-value? c a)`, a new address arity, and `(cm/has-submap? c a)`, now false at a value as Gen.jl's has_submap is. Both are false on a path through a value, where Gen.jl's has_value throws (untested upstream).
+  - `get-submap` at a value is the Value, as before. A value is the choice
+    map at its address: a distribution's trace has one for its choices, and
+    the handler and the combinators hand it to the callee there as its
+    constraints. Gen.jl 0.4.8 throws KeyError there, so its four such
+    assertions (`assignment.jl:158, 228, 285`, `static_dsl.jl:613`) port as
+    this difference.
+  - The handler's and the combinators' walks use the not-found arity, so
+    their speed is unchanged. A value where a run calls (a constraint, or an
+    old choice in a revise) stays the unvisited error that a revise drops.
+    A loud walk there made the kind-changing model's laws fail (the spike,
+    `genclj-ocwu`).
+  - Clojure's `get` on a choice map or a trace reads the record's fields,
+    not addresses. It never was a lookup, and the earlier sentence calling
+    it the nil-returning one is struck.
+  - **A breaking change** for code built on gen.clj that reads an absent
+    choice as nil (memo.clj, GenGDT and others): `(tr :b)`, `(cm/get-choice
+    c a)`, `(cm/get-value c)` and `(trace/subtrace tr a)` now throw there.
+    The migration is to pass a not-found value, `(tr :b nil)`, or to ask
+    `(cm/has-value? c a)` first.
+  - Alternatives:
+    - `get-submap` loud at a value too. Gen.jl's four assertions would then port as written, but internal code would need a second accessor for "whatever is at p".
+    - Nil-returning functions under new names, which makes two vocabularies for one lookup.
 - **Filling with an array is loud (owner, 2026-10-21; M5's G14).**
   `array/full` and `full-like` take a scalar fill value (a host number or a
   0-d array, tracked on the tape too); an array of values is an ex-info on

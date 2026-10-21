@@ -113,7 +113,7 @@
             (throw (ex-info "The trace kernel's Jacobian is singular here: its move is not a bijection" {})))
           logabs)))))
 
-(defn- kept-by [discard] (fn [p] (not (cm/has-value? (cm/get-submap discard p)))))
+(defn- kept-by [discard] (fn [p] (not (cm/has-value? discard p))))
 
 (defn mh
   "An MH move with trace kernel k (on (trace, args…)) as its own reverse:

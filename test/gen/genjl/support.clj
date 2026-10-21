@@ -63,9 +63,11 @@
   (ts/number (apply log-density dist x params)))
 
 (defn has-value?
-  "Gen.jl's has_value(c, addr): is there a value at the address or path?"
+  "Gen.jl's has_value(c, addr): is there a value at the address or path?
+   cm/has-value?'s question, false where nothing is, at a node and through
+   a value."
   [c addr]
-  (cm/has-value? (cm/get-submap c addr)))
+  (cm/has-value? c addr))
 
 (defn shallow
   "{:values n :submaps m}: how many values and submaps sit directly at the

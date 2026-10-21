@@ -235,6 +235,8 @@
         ch (:choices tr)]
     (is (support/has-value? ch :x))
     (is (not (support/has-value? ch :y)))
+    ;; static_dsl.jl:613's KeyError: the value, a choice map here (D4's difference)
+    (is (= (cm/->Value (cm/get-choice ch :x)) (cm/get-submap ch :x)))
     (is (support/has-value? (cm/get-submap ch :a) :b))
     (is (= cm/EMPTY (cm/get-submap ch :y)))
     (is (= {:values 1 :submaps 1} (support/shallow ch)))
@@ -264,10 +266,6 @@
 (deftest global-variables
   (is (close? 2 (uses-external))))
 
-;; Pending
-;; - static_dsl.jl:613, @test_throws KeyError get_submap(ch, :x): a loud
-;;   lookup at a value (D4), genclj-ocwu.
-;;
 ;; Not ported
 ;; - G15, the IR's internal shape (the owner's decision): check IR's 25
 ;;   assertions on argument positions, per-expression nodes, node identity

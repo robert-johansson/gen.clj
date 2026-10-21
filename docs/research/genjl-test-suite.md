@@ -26,18 +26,19 @@ decisions and the ports merged at 17fd8bd (§3).*
 
   | port | oracle | statistical | n/a | gap |
   |---:|---:|---:|---:|---:|
-  | 1,372 (80.8 %) | 6 | 33 | 210 | 78 (4.6 %) |
+  | 1,388 (81.7 %) | 6 | 33 | 210 | 62 (3.6 %) |
 
   At first (2026-10-20) port was 1,262, n/a 110 and gap 288. The owner's
   decisions (DESIGN §9) moved D1's precise retdiffs (16) and D6's exact
   beta (4) to port, and G3's default arguments (60) and G15's IR shape (40)
-  to n/a; G1, G5 and G8–G14 were built, and their 89 assertions port (with
-  one of `selection.jl:49`'s, a port the first count took for a gap).
+  to n/a; G1, G5, G8–G14 and D4's loud lookups were built, and their 105
+  assertions port (with one of `selection.jl:49`'s, a port the first count
+  took for a gap).
 - **The gaps left each have a bean:** the static
   language's rewriting of computed addresses and nested traces (G2, 42,
   genclj-lgij), labels that are not numbers in `dist` (G7, 17,
-  genclj-414l), loud lookups (D4, 16, genclj-ocwu) and VI that trains the
-  model's parameters (G4, 3, genclj-xjte).
+  genclj-414l) and VI that trains the model's parameters (G4, 3,
+  genclj-xjte).
 - **The oracle** (§5) wrote Gen.jl's values as fixtures (genclj-il3d):
   Switch's regenerate weights, which its 6 assertions are checked against
   (U1, genclj-c5rl), beta at its endpoints (D6), and the statistical
@@ -76,17 +77,17 @@ decisions and the ports merged at 17fd8bd (§3).*
   categories, so each row gives the split.
   - **port**: the expected value is in the test or follows from the model, so
     the assertion ports without Julia. A port may rely on a documented
-    difference (D1–D3, D5–D16 in §4.1). A testset without assertions (a
+    difference (D1–D16 in §4.1). A testset without assertions (a
     smoke test) ports as a run without error.
   - **oracle**: needs a value Gen.jl computes.
   - **statistical**: seeded sampling, compared by statistics with a
     variance-derived band (CLAUDE.md's test conventions).
   - **n/a**: Julia-only machinery, or a feature the owner decided gen.clj
     does without (G3, G15), with the reason in the row.
-  - **gap**: gen.clj lacks the feature (G2, G4, G7), or the decided
-    behavior is not built yet (D4). Each has a bean. The first mapping also
-    counted D1 and D6 here, behaviors that differed without a documented
-    decision, and the gaps since closed (G1, G5, G8–G14).
+  - **gap**: gen.clj lacks the feature (G2, G4, G7). Each has a bean. The
+    first mapping also counted D1, D4 and D6 here, behaviors that differed
+    without a documented decision, and the gaps since closed (G1, G5,
+    G8–G14).
 - **IDs.** D* are differences of behavior (§4.1), G* gaps (§4.2), U*
   upstream findings (§4.3), F* gen.clj findings (§4.4).
 - **Index base.** Line numbers are Gen.jl's, as `test/<file>:<line>` of the
@@ -136,9 +137,9 @@ groups.
 | 114 | dynamic assignment variadic merge | 2 | merge of one and of three choice maps | `cm/merge` of 0 to n choice maps | port 2 | G10, closed (genclj-cbec) |
 | 123 | static assignment merge | 10 | merge of static choice maps | `cm/merge` | port 10 |  |
 | 143 | static assignment variadic merge | 2 | merge of one and of three | `cm/merge` of 0 to n | port 2 | G10, closed |
-| 152 | static assignment errors | 12 | KeyError from get_submap/get_value at the wrong kind of address; empty submap when absent | `cm/get-submap`, `cm/get-choice` return a Value, EMPTY or nil | port 2 · n/a 5 · gap 5 | D4: decided (loud lookups), to build (genclj-ocwu); N: `static_get_submap(…, Val(:x))` |
-| 221 | dynamic assignment errors | 7 | the same KeyErrors on a dynamic choice map | as above | port 2 · gap 5 | D4: decided, to build (genclj-ocwu) |
-| 259 | dynamic assignment overwrite | 16 | overwriting values and submaps; has_value/has_submap after; illegal set under a value | `cm/set-choice`, `set-submap`, `has-submap?` | port 12 · gap 4 | D4, decided, to build (genclj-ocwu): `has-submap?` is true at a value, get-submap at a value; the illegal set ports through `set-choice`, and `set-submap` takes a path (G9) |
+| 152 | static assignment errors | 12 | KeyError from get_submap/get_value at the wrong kind of address; empty submap when absent | `cm/get-submap`, `cm/get-choice`: loud where Gen.jl throws KeyError (D4) | port 7 · n/a 5 | D4, built (genclj-ocwu): the error's `:reason` is checked; get_submap at a value (158) is the value, D4's difference; N: `static_get_submap(…, Val(:x))` |
+| 221 | dynamic assignment errors | 7 | the same KeyErrors on a dynamic choice map | as above | port 7 | D4, built (genclj-ocwu); get_submap at a value (228) is the value, D4's difference |
+| 259 | dynamic assignment overwrite | 16 | overwriting values and submaps; has_value/has_submap after; illegal set under a value | `cm/set-choice`, `set-submap`, `has-submap?` | port 16 | D4, built (genclj-ocwu): `has-submap?` is false at a value, and get_submap at a value (285) is the value, D4's difference; the illegal set ports through `set-choice`, and `set-submap` takes a path (G9) |
 | 315 | dynamic assignment constructor | 2 | choicemap((:x, 1), (:y => :a, 2)) | `cm/choicemap` | port 2 |  |
 | 322 | choice map equality | 6 | == and != of nested choice maps | records compare by value | port 6 |  |
 | 337 | choice map nested view | 8 | nested_view: getindex, length, keys, == | `cm/to-map` (parity §1h) | port 8 |  |
@@ -176,7 +177,7 @@ groups.
 | 415 | gradient descent with shrinking step size | 2 | GradientDescent(0.001, 1000) one step | `learning/gradient-descent` (checked: 0.001) | port 1 · n/a 1 | N: accumulator reset (D7) |
 | 430 | multi-component addresses | 14 | pair addresses :x => 1, nested calls, submaps | vector paths `[:x 0]`; `splices-nest-choices` | port 14 |  |
 | 465 | project | 4 | project on none, one, a nested and two addresses | `gfi/project`; `project-splits-the-score` | port 4 |  |
-| 487 | getindex(trace) | 8 | trace[addr] for choices, for a call (its return value), trace[] and a missing address | `(tr path)`, `:retval` | port 7 · gap 1 | G1 (a call's return value), closed (genclj-cbec); D4 (a missing address is nil), decided, to build (genclj-ocwu) |
+| 487 | getindex(trace) | 8 | trace[addr] for choices, for a call (its return value), trace[] and a missing address | `(tr path)`, `:retval` | port 8 | G1 (a call's return value), closed (genclj-cbec); D4 (a missing address is loud), built (genclj-ocwu) |
 | 535 | docstrings | 1 | @doc of a @gen function | a Clojure def's docstring | n/a 1 | Julia's @doc |
 
 #### `test/dsl/static_dsl.jl` (175 assertions)
@@ -199,7 +200,7 @@ groups.
 | 560 | docstrings | 1 | @doc of a static function | def docstring | n/a 1 | Julia's @doc |
 | 573 | one-line definitions | 2 | @gen (static) f(x) = (...) | none needed | n/a 2 | Julia's short function syntax |
 | 584 | module-defined static functions | 4 | two modules each defining foo | namespaces | n/a 4 | Julia modules and generated functions |
-| 596 | static gen function choicemaps | 9 + 1 throws | the choices of a static function with a static callee; propose with a trace argument | static `splice`, `gfi/propose` (checked) | port 9 · gap 1 | D4 (@test_throws KeyError get_submap at a value): decided, to build (genclj-ocwu) |
+| 596 | static gen function choicemaps | 9 + 1 throws | the choices of a static function with a static callee; propose with a trace argument | static `splice`, `gfi/propose` (checked) | port 10 | D4, built (genclj-ocwu): @test_throws KeyError get_submap at a value ports as the value, D4's difference |
 | 633 | returning a SML function from macro | 1 | a macro that defines a static function | a Clojure macro emitting `(def … (gen ^:static …))` (checked) | port 1 |  |
 | 640 | global variables | 1 | a static body reads a module global | vars in static bodies (`a-local-is-not-the-var-it-shadows`) | port 1 |  |
 
@@ -475,11 +476,11 @@ groups.
 | `autodiff.jl` | 1 | 2 | 2 | 0 | 0 | 0 | 0 |
 | `diff.jl` | 5 | 32 | 32 | 0 | 0 | 0 | 0 |
 | `selection.jl` | 3 | 35 | 34 | 0 | 0 | 1 | 0 |
-| `assignment.jl` | 17 | 132 | 112 | 0 | 0 | 6 | 14 |
+| `assignment.jl` | 17 | 132 | 126 | 0 | 0 | 6 | 0 |
 | `gen_fn_interface.jl` | 2 | 5 | 5 | 0 | 0 | 0 | 0 |
 | `dsl/macros.jl` | 2 | 14 | 6 | 0 | 0 | 8 | 0 |
-| `dsl/dynamic_dsl.jl` | 14 | 88 | 77 | 0 | 0 | 10 | 1 |
-| `dsl/static_dsl.jl` | 19 | 175 | 60 | 0 | 0 | 72 | 43 |
+| `dsl/dynamic_dsl.jl` | 14 | 88 | 78 | 0 | 0 | 10 | 0 |
+| `dsl/static_dsl.jl` | 19 | 175 | 61 | 0 | 0 | 72 | 42 |
 | `optional_args.jl` | 2 | 58 | 0 | 0 | 0 | 58 | 0 |
 | `static_ir/static_ir.jl` | 11 | 138 | 125 | 0 | 0 | 13 | 0 |
 | `tilde_sugar.jl` | 4 | 12 | 11 | 0 | 0 | 1 | 0 |
@@ -506,29 +507,30 @@ groups.
 | `modeling_library/dist_dsl.jl` | 2 | 43 | 20 | 0 | 0 | 6 | 17 |
 | `modeling_library/mixture.jl` | 4 | 52 | 43 | 0 | 0 | 9 | 0 |
 | `modeling_library/product.jl` | 3 | 14 | 11 | 0 | 0 | 3 | 0 |
-| **all** | **195** | **1699** | **1372** | **6** | **33** | **210** | **78** |
+| **all** | **195** | **1699** | **1388** | **6** | **33** | **210** | **62** |
 
 ### Totals per category
 
 | Category | Assertions | Share | Testsets wholly in it |
 |---|---:|---:|---:|
-| port | 1372 | 80.8 % | 124 |
+| port | 1388 | 81.7 % | 128 |
 | oracle | 6 | 0.4 % | 1 |
 | statistical | 33 | 1.9 % | 2 |
 | n/a | 210 | 12.4 % | 14 |
-| gap | 78 | 4.6 % | 4 |
+| gap | 62 | 3.6 % | 4 |
 
-Mixed testsets: 43. Testsets without assertions: 7 (smoke tests and empty testsets).
+Mixed testsets: 39. Testsets without assertions: 7 (smoke tests and empty testsets).
 
 The first mapping (2026-10-20) counted port 1,262 (74.3 %), n/a 110 and
 gap 288. The owner's decisions then moved D1 (16) and D6 (4) to port, and
 G3 (60) and G15 (40, with 7 of `static_dsl.jl:466`'s assertions, which are
 the IR's) to n/a; G1, G5 and G8–G14 were built (89 to port, and one of
-`selection.jl:49`'s was a port the first count took for a gap). The 78 left
-each wait on a bean: G2's static rewrites (42, genclj-lgij), G7's
-non-numeric labels (17, genclj-414l), D4's loud lookups (16, genclj-ocwu)
-and G4's model_update (3, genclj-xjte). Counted against the ports'
-pending lists at batch 4's head (17fd8bd), with G5's port (genclj-2294).
+`selection.jl:49`'s was a port the first count took for a gap), and D4's
+loud lookups (16, genclj-ocwu). The 62 left each wait on a bean: G2's
+static rewrites (42, genclj-lgij), G7's non-numeric labels (17,
+genclj-414l) and G4's model_update (3, genclj-xjte). Counted against the
+ports' pending lists at batch 4's head (17fd8bd), with G5's port
+(genclj-2294) and D4's (genclj-ocwu).
 
 ### The n/a assertions, by reason
 
@@ -556,7 +558,7 @@ pending lists at batch 4's head (17fd8bd), with G5's port (genclj-2294).
 | D1 | **Retdiffs are more precise.** A dynamic function's retdiff is no-change when its return value equals the previous one; Gen.jl's dynamic language always returns UnknownChange (`src/dynamic/update.jl:200`, `regenerate.jl:141`). Map's and Unfold's element retdiffs follow, so an unchanged element is absent from a VectorDiff, and a Map update with nothing changed returns no-change where Gen.jl returns a VectorDiff naming the element. A splice also turns a caller's argdiff into no-change for an argument identical to the previous call's, where Gen.jl trusts the argdiff, so a callee given UnknownChange for an unchanged value does not rerun. Sound (a diff only claims what holds), checked. | DESIGN §9 (the owner, 2026-10-20: kept) | 16 port | Decided: the ports assert gen.clj's diffs, and that they are consistent (`diff/consistent?`) |
 | D2 | **0-based indices.** Map and Unfold addresses, Recurse nodes, categorical's values and Switch's branch index. | §9, with categorical's values and Switch's branch index (genclj-fevk) | (port) | — |
 | D3 | **Row-major arrays, NumPy broadcasting.** Julia pads shapes on the right and is column-major; the ports reverse Julia's shapes (checked on the broadcasting cases). A covariance gradient from the tape sits on the triangle the Cholesky reads; the port symmetrizes it to compare with Gen.jl's. | `docs/array-api.md` (NumPy broadcasting) | (port) | A porting note |
-| D4 | **Lenient choice-map and trace accessors.** `cm/get-submap` at a value returns the Value and through a value EMPTY; `cm/get-choice`, `cm/get-value` and `(tr addr)` at a missing or node address return nil; `cm/has-submap?` is true at a value. Gen.jl throws KeyError, or answers false. | DESIGN §9 (the owner, 2026-10-20: loud) | 16 gap until built | Decided: `cm/get-choice`, `cm/get-value` and `(tr addr)` throw at a missing or node address, as Gen.jl's KeyError; Clojure's `get` stays the nil-returning lookup. To build (genclj-ocwu), then the 16 port |
+| D4 | **Loud lookups; get-submap at a value is the value.** Built (genclj-ocwu): `cm/get-choice`, `cm/get-value`, `cm/get-submap` on a path through a value, `(tr addr)` and `trace/subtrace` throw where Gen.jl throws KeyError (an ex-info with `:reason`, `:path`, `:at`), and take a not-found value to give there instead, as `nth` does; `has-value?` and `has-submap?` (false at a value) never throw. The one difference: `cm/get-submap` at a value gives the value, a choice map in gen.clj, where Gen.jl 0.4.8 throws KeyError (`assignment.jl:158, 228, 285`, `static_dsl.jl:613`). Before, the accessors returned nil, EMPTY or the Value, and `has-submap?` was true at a value. | DESIGN §9 ("Lookups are loud", approved under the owner's delegation, 2026-10-21) | 16 port (4 asserting the difference) | Built (genclj-ocwu) |
 | D5 | **Invalid parameters throw** (dirichlet α ≤ 0, normal std 0) where Gen.jl returns −Inf or samples the mean. | CLAUDE.md rule 5 | (port) | The ports assert the error |
 | D6 | **Beta at 0 and 1.** gen.clj gives the exact density, +Inf when α < 1 (β < 1); Gen.jl substitutes a finite value "as if x = eps/e" (`src/modeling_library/distributions/beta.jl`). | DESIGN §9 (the owner, 2026-10-20: exact) | 4 port | Decided: the port asserts +Inf; the oracle records Gen.jl's finite values (`beta-endpoints.edn`) |
 | D7 | **One parameter store per model; gradients are values.** No per-function parameters, accumulators or scale factor (`get_param_grad`, `zero_param_grad!`, `set_param!`, `accumulate_param_gradients!(tr, g, scale)`); argument gradients come from `choice-gradients` with `:argnums`. | §9 | (port), 4 n/a | — |

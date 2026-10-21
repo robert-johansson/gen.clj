@@ -36,5 +36,6 @@
     (is (genjl/has-value? c [:y :z]))
     (is (not (genjl/has-value? c :y)) "a node")
     (is (not (genjl/has-value? c :w)) "nothing")
+    (is (not (genjl/has-value? c [:x :a])) "a path through a value")
     (is (= {:values 1 :submaps 1} (genjl/shallow c)))
     (is (= {:values 0 :submaps 0} (genjl/shallow cm/EMPTY)))))

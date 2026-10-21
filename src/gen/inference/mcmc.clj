@@ -215,7 +215,7 @@
          cov (dc/->array cov)
          [k-nu k-u k-theta] (rng/split key 3)
          prior (d/mvnormal mu cov)
-         f0 (or (trace addr)
+         f0 (or (trace addr nil)
                 (throw (ex-info (str "elliptical-slice: the trace has no choice at " (pr-str addr)) {:addr addr})))
          x (- f0 mu)
          nu (- (dc/sample prior k-nu) mu)

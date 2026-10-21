@@ -102,9 +102,11 @@
 
 (defn- constraint-at
   "The constraint value at a primitive site, or nil. A nested choice map there
-   is an error: it would otherwise be silently ignored."
+   is an error: it would otherwise be silently ignored. A value on the way
+   to p (a constraint at an address where the run calls) is no constraint
+   here, so it stays the unvisited error, which a revise drops."
   [state p op]
-  (let [c (cm/get-submap (:constraints state) p)]
+  (let [c (cm/get-submap (:constraints state) p cm/EMPTY)]
     (cond (cm/has-value? c) c
           (cm/empty? c) nil
           :else (throw (ex-info (str (name op) ": the constraint at " p " is a nested choice map,"
@@ -282,7 +284,7 @@
    identical to the previous call's."
   [state p gf args & [hints]]
   (let [mode (:mode state)
-        cons (cm/get-submap (:constraints state) p)
+        cons (cm/get-submap (:constraints state) p cm/EMPTY)
         old-sub (get (::subtraces (:prev state)) p)
         replaced? (and old-sub (not (compatible-callee? (:gen-fn old-sub) gf)))
         prev-sub (when-not replaced? old-sub)
@@ -513,7 +515,7 @@
                             (gfi/same-gen-fn? gf (trace/maker prev))
                             (gfi/same-value? *params* (::params prev))))
         reached? (fn [kind p]
-                   (cond (= mode :update) (not (cm/empty? (cm/get-submap constraints p)))
+                   (cond (= mode :update) (not (cm/empty? (cm/get-submap constraints p cm/EMPTY)))
                          (= kind :trace) (sel/selected? selection p)
                          :else (not= sel/none (sel/get-subselection selection p))))
         unchanged? (fn [diffs in] (every? #(diff/no-change? (nth diffs %)) in))
@@ -699,7 +701,7 @@
   "[value log-density] of a static body's trace node at path p of choices,
    with assess's checks."
   [dist choices p]
-  (let [c (cm/get-submap choices p)]
+  (let [c (cm/get-submap choices p cm/EMPTY)]
     (when-not (cm/has-value? c)
       (throw (ex-info (str "assess: no value for the choice at " p) {:path p :missing-choice true})))
     (given-value {:mode :assess} dist c)))
@@ -724,7 +726,7 @@
    computed keys): every choice under the prefix lies at the node's path p
    (a choice), or under it (a call), so none goes unvisited."
   [choices prefix p exact?]
-  (doseq [q (cm/addresses (cm/get-submap choices prefix))
+  (doseq [q (cm/addresses (cm/get-submap choices prefix cm/EMPTY))
           :let [full (into prefix q)]]
     (when-not (if exact? (= full p) (= p (subvec full 0 (min (count full) (count p)))))
       (throw (gfi/unvisited :assess [full])))))
@@ -1149,7 +1151,7 @@
                       :splice (let [[g as] expr w (gensym "w") rv (gensym "rv") k' (gensym "k") ks (gensym "ks")]
                                 {:bindings (-> bindings (into at)
                                                (into [[k' ks] `(if ~k (rng/split ~k) [nil nil])
-                                                      [w rv] `(static-call ~p ~g ~as (cm/get-submap ~choices ~p) ~ks)
+                                                      [w rv] `(static-call ~p ~g ~as (cm/get-submap ~choices ~p cm/EMPTY) ~ks)
                                                       binding rv]))
                                  :terms (conj terms w) :k k'})
                       {:bindings (into bindings [binding expr]) :terms terms :k k})))
