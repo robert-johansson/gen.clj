@@ -156,6 +156,9 @@
       (is (close? 1.2 (tr [:v :w])))
       (is (close? 1.3 (tr [:x :a])))
       (is (close? 1.4 (tr [:y :z :a]))))
+    (testing "auxiliary state: a call's return value at its address"
+      (is (close? 1 (tr :x)))
+      (is (close? 2 (tr [:y :z]))))
     (testing "the return value"
       (is (= 7 (:retval tr))))))
 
@@ -211,12 +214,8 @@
 ;;   within Julia expressions, 5) and 491-497 (tuple assignments'
 ;;   generates, 4): computed addresses and nested traces rewritten into
 ;;   bindings (G2), genclj-lgij.
-;; - static_dsl.jl:552-553, trace[:x] and trace[:y => :z]: a call's return
-;;   value at its address (G1), genclj-cbec.
 ;; - static_dsl.jl:613, @test_throws KeyError get_submap(ch, :x): a loud
 ;;   lookup at a value (D4), genclj-ocwu.
-;; - macros.jl:122, macros in the static language (2 port, 1 G11): they go
-;;   in gen.genjl.macros-test, once the dynamic part's port is merged.
 ;;
 ;; Not ported
 ;; - G15, the IR's internal shape (the owner's decision): check IR's 25
