@@ -69,7 +69,9 @@ satisfies it.
 **Proposals.** `:lm` draws from the LM's row (the bootstrap); `:masked`
 from the row times the twist's next-token weights, renormalized (for a
 constraint, the row restricted to its allowed tokens: the locally optimal
-proposal of a one-step twist, GenMLX's grammar-masked); a function
+proposal of a one-step twist, GenMLX's grammar-masked), by
+`gen.llm.constrained/weighted`, the one implementation, which a
+constrained completion's sites use too; a function
 `(fn [context row] → q)` gives any other, q a normalized float row. A
 token's weight is log p − log q + its twist, with p the LM's score from
 its ledger (as the completion's), so a particle's log p is its trace's
@@ -151,6 +153,16 @@ most) is enumerated and Z computed exactly:
 - The masked proposal's rows, renormalized in double and stored as floats,
   pass `token/dist`'s normalization check (within 1e-4 of 1), which a
   proposal function's rows must pass too.
+- **`:masked` by `constrained/weighted`** (2026-10-21, review R6, replacing
+  smc's own log-sum-exp in double): runs with the soft twist, and with a
+  potential nothing satisfies, are the same bit for bit; under a
+  constraint that disallows few tokens (`no-repeats`, one or two of five)
+  weighted takes the normalizer as log1p(−the disallowed mass), so a
+  proposal row can differ in its last float bit. Over 6 runs of 30
+  particles the particles were the same, the log weights within 3.7e-9
+  and log Ẑ within 5.3e-10. No test moved: the tests of the estimate are
+  statistical, and the exact ones (masked constraints satisfied, Ẑ of 0)
+  do not depend on the normalizer's last bit.
 
 `gen.llm.potential-test`: dense next weights are consistent, products sum,
 misuse is loud, and the contract check catches planted inconsistencies.
@@ -202,7 +214,9 @@ particles stop.) At Qwen3's vocabulary the SMC's own work a particle-step
 is 0.2 to 0.55 ms, nearly all of it the host draw (about 335 µs on average
 over keys: a sum of exp over the row in token order to the uniform, half
 the vocabulary on average); the masked proposal adds about 0.9 ms (the
-twist row, and a log-sum-exp over the whole row). Against llama.cpp's
+twist row, and the normalizer over the whole row; measured before R6
+replaced smc's own with `constrained/weighted`, which allocates only the
+row it returns). Against llama.cpp's
 batched decode (13.5 ms for 15 rows, M2 Max) that is a third of a row's
 share for the bootstrap, more for the masked proposal.
 

@@ -28,7 +28,8 @@
    :host-pool.
    - :lm (the default), the bootstrap: tokens drawn from the LM's row.
    - :masked, the LM's row times the potential's next-token weights,
-     renormalized (for a constraint, the row masked to its allowed tokens):
+     renormalized (for a constraint, the row masked to its allowed tokens;
+     gen.llm.constrained/weighted, as a constrained completion's sites):
      the locally optimal proposal of a one-step twist.
    - a function (fn [context row] → q), q a float array of the next
      token's log-probabilities (normalized), given the context (the prompt
@@ -59,6 +60,7 @@
    gen.inference.weights'), and moves the weights' mean into :log-ml."
   (:require [gen.dist.core :as dc]
             [gen.gfi :as gfi]
+            [gen.llm.constrained :as constrained]
             [gen.inference.weights :as w]
             [gen.llm.lm :as lm]
             [gen.llm.potential :as potential]
@@ -192,36 +194,6 @@
                       {:reason :invalid-potential :entries (alength ws) :expected n})))
     ws))
 
-(defn- max-of ^double [^doubles x]
-  (areduce x t m Double/NEGATIVE_INFINITY (Math/max m (aget x t))))
-
-(defn- sum-exp ^double [^doubles x ^double m]
-  (areduce x t s 0.0 (+ s (Math/exp (- (aget x t) m)))))
-
-(defn- log-sum-exp
-  "log Σ exp(x), -Inf when every entry is."
-  ^double [^doubles x]
-  (let [m (max-of x)]
-    (if (Double/isInfinite m) m (+ m (Math/log (sum-exp x m))))))
-
-(defn- masked
-  "The LM's row times the twist, renormalized: the masked proposal, and its
-   log normalizer (-Inf when the twist allows no token)."
-  [completion ^floats row ^floats ws]
-  (let [n (alength row)
-        x (double-array n)]
-    (dotimes [t n]
-      (aset x t (+ (aget row t) (aget ws t))))
-    ;; an end token's twist is the end's
-    (doseq [t (:end-tokens completion)]
-      (aset x (int t) (+ (aget row (int t)) (aget ws n))))
-    (let [z (log-sum-exp x)]
-      (if (Double/isInfinite z)
-        [nil z]
-        (let [q (float-array n)]
-          (dotimes [t n] (aset q t (unchecked-float (- (aget x t) z))))
-          [q z])))))
-
 (defn- function-row
   "A proposal function's row for a particle at context, checked."
   ^floats [proposal context ^floats row]
@@ -240,7 +212,7 @@
   [state ^floats row ws f-row key]
   (when-let [q (case (:proposal state)
                  :lm row
-                 :masked (first (masked (:completion state) row ws))
+                 :masked (first (constrained/weighted (:end-tokens (:completion state)) row ws))
                  f-row)]
     [q (long (dc/sample (token/dist q) key))]))
 
