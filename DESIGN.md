@@ -1471,8 +1471,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   a combinator at the top had to be spliced into one. D7's rule stands, one
   store per generative function and gradients as values; this extends where
   the stores are found.
-  - *The design (genclj-umww; the agent, 2026-10-21, for the owner's
-    review).* `gfi/stores` gives the stores a generative function holds, in
+  - *The design (genclj-umww; approved under the owner's delegation,
+    2026-10-21).* `gfi/stores` gives the stores a generative function holds, in
     its callees' shape, and `gfi/with-stores` gives a tree of that shape back
     (protocol `gfi/IStores`; Object holds none). A dynamic or deterministic
     function holds its own store (`with-params`); a Map and an Unfold their
