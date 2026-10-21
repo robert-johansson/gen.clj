@@ -15,6 +15,36 @@
             [gen.random :as rng]
             [gen.test-support :as ts]))
 
+(defn- numbering
+  "[max-branch children child-nums parents]: recurse.jl's cases for one
+   max-branch, each number one less. children are [parent j child],
+   child-nums [child j] and parents [child parent]."
+  [max-branch children child-nums parents]
+  (doseq [[parent j child] children]
+    (is (= child (comb/get-child parent j max-branch))))
+  (doseq [[child j] child-nums]
+    (is (= j (comb/get-child-num child max-branch))))
+  (doseq [[child parent] parents]
+    (is (= parent (comb/get-parent child max-branch)))))
+
+;; recurse.jl:3
+(deftest recurse-node-numbering
+  (testing "max-branch 1"
+    (numbering 1
+               [[0 0 1] [1 0 2] [2 0 3]]
+               [[1 0] [2 0] [3 0]]
+               [[1 0] [2 1] [3 2]]))
+  (testing "max-branch 2"
+    (numbering 2
+               [[0 0 1] [0 1 2] [1 0 3] [1 1 4] [2 0 5]]
+               [[1 0] [2 1] [3 0] [4 1] [5 0]]
+               [[1 0] [2 0] [3 1] [4 1] [5 2]]))
+  (testing "max-branch 3"
+    (numbering 3
+               [[0 0 1] [0 1 2] [0 2 3] [1 0 4] [1 1 5] [1 2 6] [2 0 7] [2 1 8] [2 2 9] [3 0 10]]
+               [[1 0] [2 1] [3 2] [4 0] [5 1] [6 2] [7 0] [8 1] [9 2] [10 0]]
+               [[1 0] [2 0] [3 0] [4 1] [5 1] [6 1] [7 2] [8 2] [9 2] [10 3]])))
+
 (def production
   "recurse.jl:68: rules aSa, bSb (one child each), aa and bb (none)."
   (gen [_]
@@ -98,7 +128,5 @@
         (is (= diff/unknown-change rd))))))
 
 ;; Pending
-;; - recurse.jl:3, Recurse's node numbering (get_child, get_child_num,
-;;   get_parent; 54 assertions): G13, genclj-cbec.
 ;; - recurse.jl:110, the 20 likeliest strings among 1,000 runs of generate
 ;;   and of simulate: statistical, genclj-zgkq.

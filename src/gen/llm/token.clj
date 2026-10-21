@@ -193,8 +193,8 @@
 
 (defrecord From [^long k]
   sel/ISelection
-  (selected? [_ addr] (and (integer? addr) (<= k (long addr))))
-  (get-subselection [this addr] (if (sel/selected? this addr) sel/all sel/none)))
+  (-selected? [_ addr] (and (integer? addr) (<= k (long addr))))
+  (-subselection [this addr] (if (sel/-selected? this addr) sel/all sel/none)))
 
 (defn from
   "The selection of every token from position k on: regenerating it

@@ -139,6 +139,55 @@
     (is (cm/empty? (sel/get-selected c sel/none)))
     (is (= c (sel/get-selected c (sel/from-choicemap c))))))
 
+;; A vector is a path, everywhere (DESIGN.md §9, M5's G9 and F3): every
+;; function that takes an address takes a path too, or is loud on one.
+(deftest a-vector-is-a-path
+  (testing "in selections"
+    (let [s (sel/select :x [:y 0])]
+      (is (sel/selected? s [:y 0]))
+      (is (sel/selected? s [:x :u]) "selecting :x selects every path under it")
+      (is (not (sel/selected? s [:y 1])))
+      (is (= sel/all (sel/get-subselection s [:y 0])))
+      (is (= s (sel/get-subselection s [])) "the empty path is s itself")
+      (is (sel/selected? sel/all []) "and the root")
+      (is (not (sel/selected? s [])))
+      (is (= s (sel/hierarchical :x sel/all [:y 0] sel/all)) "hierarchical nests a path")
+      (is (= (sel/select [:y 0] [:y 1]) (sel/set-subselection (sel/select [:y 0]) [:y 1] sel/all)))
+      (is (= (sel/select :z) (sel/set-subselection sel/none :z sel/all)))
+      (doseq [[why f] [["inside all" #(sel/set-subselection sel/all :x sel/none)]
+                       ["inside a selected address" #(sel/set-subselection s [:x :u] sel/none)]
+                       ["inside a complement" #(sel/set-subselection (sel/complement s) :z sel/all)]
+                       ["inside another kind of selection"
+                        #(sel/set-subselection (reify sel/ISelection (-selected? [_ _] false) (-subselection [this _] this))
+                                               :z sel/all)]
+                       ["not a selection" #(sel/set-subselection sel/none :z true)]
+                       ["a vector inside a path" #(sel/select [[:y 0] :z])]
+                       ["a vector inside a path" #(sel/hierarchical [[:y] 0] sel/all)]
+                       ["a dangling address" #(sel/hierarchical :x)]]]
+        (is (thrown? clojure.lang.ExceptionInfo (f)) why))))
+  (testing "in choice maps"
+    (let [c (cm/choicemap :x 1.0)]
+      (is (= (cm/choicemap :x 1.0 [:y 0 :z] 2.0) (cm/set-submap c [:y 0] (cm/choicemap :z 2.0))))
+      (is (= (cm/->Value 2.0) (cm/set-choice c [] 2.0)) "the empty path is the root")
+      (is (= (cm/choicemap :z 2.0) (cm/set-submap c [] (cm/choicemap :z 2.0))))
+      (is (= (cm/choicemap [:a :b] 1 [:a :c] 2 :d 3) (cm/from-map {[:a :b] 1 [:a :c] 2 :d 3}))
+          "a map's vector key is a path")
+      (is (= (cm/choicemap [:x :y 0] 1) (cm/choicemap :x {[:y 0] 1})))
+      (doseq [[why f] [["set-value takes one address" #(cm/set-value c [:y 0] 2.0)]
+                       ["remove-submap takes one address" #(cm/remove-submap c [:x])]
+                       ["a submap is a choice map" #(cm/set-submap c :y 2.0)]
+                       ["a submap under a value" #(cm/set-submap c [:x :y] (cm/choicemap :z 2.0))]
+                       ["a submap under a root value" #(cm/set-submap (cm/->Value 1.0) :y (cm/choicemap :z 2.0))]
+                       ["a vector inside a path" #(cm/set-choice c [[:y 0] :z] 2.0)]
+                       ["a map's paths that overlap" #(cm/from-map {[:a :b] 1 :a 2})]]]
+        (is (thrown? clojure.lang.ExceptionInfo (f)) why)))))
+
+(deftest merge-takes-any-number
+  (is (= cm/EMPTY (cm/merge)))
+  (is (= (cm/choicemap :a 1 [:b :c] 2 [:b :d] 3)
+         (cm/merge (cm/choicemap :a 1) (cm/choicemap [:b :c] 2) (cm/choicemap [:b :d] 3))))
+  (is (thrown? clojure.lang.ExceptionInfo (cm/merge (cm/choicemap :a 1) cm/EMPTY (cm/choicemap :a 2)))))
+
 (def gen-choicemap-and-selection
   (gen/let [c gen-choicemap
             picks (gen/vector gen/boolean (count (cm/addresses c)))]

@@ -18,7 +18,8 @@
             [gen.gfi :as gfi]
             [gen.laws :as laws :refer [close?]]
             [gen.random :as rng]
-            [gen.selection :as sel]))
+            [gen.selection :as sel]
+            [gen.trace :as trace]))
 
 ;; ---------------------------------------------------------------------------
 ;; Models
@@ -104,6 +105,37 @@
   (testing "loud errors"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"distribution constructor" (comb/choice-at (d/normal 0 1))))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"generative function" (comb/call-at 3)))))
+
+;; Gen.jl's trace[addr] at a call and get_call(tr, addr).subtrace (M5's
+;; G1), through every kind that makes calls
+(deftest calls-by-address
+  (let [tr (gfi/simulate spliced [3] (rng/key 5))
+        xs (trace/subtrace tr :xs)]
+    (is (= (ts/host (:retval xs)) (ts/host (tr :xs))) "a spliced Map's return value")
+    (is (= (ts/host (tr [:xs 1 :z])) (ts/host (tr [:xs 1]))) "an element's, through the Map")
+    (is (= (trace/subtrace xs 1) (trace/subtrace tr [:xs 1])) "a path continues in the call's trace")
+    (is (= (ts/host (peek (:retval (trace/subtrace tr :path)))) (ts/host (tr [:path 2]))) "an Unfold step's")
+    (is (= (ts/host (:retval tr)) (ts/host (tr []))) "the empty path: the trace's own")
+    (is (= tr (trace/subtrace tr [])))
+    (is (nil? (trace/subtrace tr :mu)) "a choice is not a call")
+    (is (nil? (trace/subtrace tr [:xs 3])) "nor an element past the end")
+    (is (nil? (tr :absent))))
+  (testing "a path continues past an element"
+    (let [tr (gfi/simulate (comb/map (gen [x] (splice :inner element x) :done)) [[1.0 2.0]] (rng/key 9))]
+      (is (= :done (tr 1)))
+      (is (= (ts/host (tr [1 :inner :z])) (ts/host (tr [1 :inner]))))))
+  (testing "a Switch's calls are its branch's"
+    (let [tr (gfi/simulate (comb/switch (gen [x] (splice :inner element x)) a-branch) [0 1.0] (rng/key 6))]
+      (is (= (ts/host (tr [:inner :z])) (ts/host (tr :inner))))
+      (is (= element (:gen-fn (trace/subtrace tr :inner))))))
+  (testing "a Recurse's at [node :production] and [node :aggregation]"
+    (let [tr (gfi/simulate tree [0] (rng/key 7))]
+      (is (= (ts/host (:retval tr)) (ts/host (tr [0 :aggregation]))) "the root's aggregation")
+      (is (= grow (:gen-fn (trace/subtrace tr [0 :production]))))
+      (is (nil? (trace/subtrace tr [0])) "a node is two calls, not one")))
+  (testing "call-at's at its address"
+    (let [tr (gfi/simulate (comb/call-at element) [1.0 :here] (rng/key 8))]
+      (is (= (ts/host (:retval tr)) (ts/host (tr :here)))))))
 
 (defn- subtraces [tr] (:gen.combinators/subtraces tr))
 
@@ -353,6 +385,22 @@
   (testing "max-branch is enforced"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"more than max-branch"
                           (gfi/simulate (comb/recurse (gen [_] {:value 0 :children [1 2 3]}) fold 2) [0] (rng/key 3))))))
+
+(defspec recurse-numbering-inverts-get-child 200
+  (prop/for-all [max-branch (gen/choose 1 6) parent gen/nat j gen/nat]
+    (let [j (mod j max-branch)
+          child (comb/get-child parent j max-branch)]
+      (and (= parent (comb/get-parent child max-branch))
+           (= j (comb/get-child-num child max-branch))))))
+
+(deftest recurse-numbering-is-loud
+  (doseq [[why f] [["a child past max-branch" #(comb/get-child 0 2 2)]
+                   ["a negative node" #(comb/get-child -1 0 2)]
+                   ["max-branch 0" #(comb/get-child 0 0 0)]
+                   ["the root's parent" #(comb/get-parent 0 2)]
+                   ["the root's child number" #(comb/get-child-num 0 2)]
+                   ["a node that is not an integer" #(comb/get-parent 1.0 2)]]]
+    (is (thrown? clojure.lang.ExceptionInfo (f)) why)))
 
 (deftest recurse-updates-only-the-changed-path
   (let [tr (:trace (gfi/generate tree [0] (cm/choicemap [0 :production :split] true [1 :production :split] true

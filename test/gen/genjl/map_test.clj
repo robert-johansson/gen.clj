@@ -75,7 +75,9 @@
 (deftest simulate
   (let [tr (gfi/simulate bar (args 2) (rng/key 2))]
     (check tr {:retval [(z tr 0) (z tr 1)]
-               :score (+ (lp (z tr 0) 4.0) (lp (z tr 1) 6.0))})))
+               :score (+ (lp (z tr 0) 4.0) (lp (z tr 1) 6.0))})
+    ;; map.jl:25, trace[i]: element i's return value
+    (check tr {:retval [(tr 0) (tr 1)]})))
 
 ;; map.jl:30
 (deftest generate
@@ -256,7 +258,3 @@
     (is (approx? mean-grads gxs))
     (is (approx? mean-grads gys))
     (is (approx? (+ dstd1 dstd2) (:std (g/param-gradients tr retgrad))))))
-
-;; Pending
-;; - map.jl:25, get_retval(trace)[i] == trace[i]: a call's return value at
-;;   its address (G1), genclj-cbec.

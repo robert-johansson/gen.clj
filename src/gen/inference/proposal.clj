@@ -157,7 +157,10 @@
   (-assess [_ args choices key] (gfi/-assess gf args choices (second (rng/split key))))
   (-propose [_ args key] (gfi/-propose gf args key))
   (-project [this tr selection]
-    (proposal-weight this (:args tr) (sel/get-selected (:choices tr) selection) tr)))
+    (proposal-weight this (:args tr) (sel/get-selected (:choices tr) selection) tr))
+  ;; its traces are the model's
+  trace/ICalls
+  (-call [_ tr p] (trace/-call gf tr p)))
 
 (defn with-internal-proposal
   "gf with q as its internal proposal for the choices q makes (see the
