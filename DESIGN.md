@@ -1330,6 +1330,19 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   - Native performance libraries (BLAS/LAPACK through Accelerate or
     OpenBLAS, and others) are welcome later as optional plug-ins where they
     give real speedups (bean genclj-w4kw), never needed to run.
+- **Compiled functions across threads (owner, 2026-10-21; genclj-hfwo).**
+  A compiled function may be called from any thread.
+  - Each MLX closure compiles under an id of its own, never reused, and
+    freeing it erases its traces from every thread's compile cache. Before,
+    a second thread's trace leaked, and a later compiled function at a
+    reused address replayed it (wrong results, reproduced on Metal).
+  - Accepted cost: on a virtual thread, whose MLX cache is its carrier's, a
+    compiled function retraces every call. Measured on a 20-op chain of
+    10,000 floats: 513 µs a call, against 289 µs on a platform thread and
+    566 µs uncompiled. gen.clj itself compiles on the calling platform
+    thread and uses no virtual threads.
+  - docs/array-api.md's compile entry says so (its "Threads" item), an
+    addition to the approved API doc that the owner accepted with the fix.
 - **Git:** the main repo is public-ready, with `.beans/`, `.beans.yml`,
   `.claude/` and `*.pdf` gitignored. Its remote is the private
   `robert-johansson/gen.clj` (the owner, 2026-10-21, at M4's close: private
