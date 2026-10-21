@@ -30,6 +30,7 @@
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.dynamic :as dyn :refer [gen]]
+            [gen.genjl.expectations :as expectations]
             [gen.genjl.support :as support :refer [approx?]]
             [gen.gfi :as gfi]
             [gen.random :as rng]
@@ -65,11 +66,6 @@
   [leaf result i]
   (cm/get-choice (:choices (observed result)) [i leaf]))
 
-(defn- diff-kind [d]
-  (cond (diff/no-change? d) :no-change
-        (diff/vector-diff? d) :vector-diff
-        :else d))
-
 (def ^:private checks
   "Each key's assertions, from what the result shows (with at, the
    address of index i) and the expectation."
@@ -88,7 +84,7 @@
    :retval (fn [{:keys [retval]} want]
              (is (= (count want) (count retval)) "length(retval)")
              (doseq [[i v] (map-indexed vector want)] (is (close? v (nth retval i)) (str "retval[" i "]"))))
-   :retdiff (fn [{:keys [retdiff]} want] (is (= want (diff-kind retdiff)) "the retdiff's kind"))
+   :retdiff (fn [{:keys [retdiff]} want] (is (= want (expectations/diff-kind retdiff)) "the retdiff's kind"))
    :updated (fn [{:keys [retdiff]} want]
               (doseq [[i d] want] (is (= d (get (:updated retdiff) i)) (str "retdiff.updated[" i "]"))))
    :not-updated (fn [{:keys [retdiff]} want]
@@ -101,9 +97,6 @@
   "Assert Gen.jl's expectations of a result (see the namespace doc)."
   [leaf result expected]
   (let [seen (assoc (observed result) :at (fn [i] [i leaf]))]
-    (doseq [[k want] expected]
-      (if-let [f (checks k)]
-        (f seen want)
-        (throw (ex-info (str "check: no assertion is named " k) {:key k :known (keys checks)}))))
+    (expectations/check checks seen expected)
     (when-let [prev (:prev result)]
       (is (diff/consistent? (:retval prev) (:retval seen) (:retdiff seen)) "a consistent retdiff (D1)"))))
