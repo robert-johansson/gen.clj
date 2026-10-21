@@ -188,22 +188,25 @@
           _ (when-not (= 1 (count ret)) (not-static "the let returns one expression" form))
           args (arg-names params)
           known (set (concat (apply concat (:fixed args)) (:rest args)))
+          ;; the arguments and the bindings so far are locals, not the vars
+          ;; or macros they shadow
+          in-scope (fn [names] (update env :locals into names))
           ;; a call in return position is a last node, its value returned
           [ret pairs] (let [r (first ret)
-                            call (expanded env r)]
+                            call (expanded (in-scope (into known (mapcat (comp bound-names first) (partition 2 bindings)))) r)]
                         (if (and (seq? call) ('#{trace splice} (first call)))
                           (let [v (gensym "ret")] [v (concat (partition 2 bindings) [[v r]])])
                           [r (partition 2 bindings)]))
           [nodes _] (reduce (fn [[nodes known] [binding init]]
-                              (let [n (node env binding init known)]
+                              (let [n (node (in-scope known) binding init known)]
                                 [(conj nodes n) (into known (:names n))]))
                             [[] known] pairs)
           _ (check-addresses! nodes)
           names (into known (mapcat :names nodes))]
       {:args args
        :nodes nodes
-       :ret (do (pure! (expanded env ret) "the return expression")
-                (compute-node env ret names))}))))
+       :ret (do (pure! (expanded (in-scope names) ret) "the return expression")
+                (compute-node (in-scope names) ret names))}))))
 
 (defn ir
   "gf's graph as data (see the namespace doc), or nil when gf is not static."

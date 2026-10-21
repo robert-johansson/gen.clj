@@ -487,6 +487,35 @@
     (is (not (ts/close? 0.0 (update-weight g))))
     (is (ts/close? (update-weight (assoc g :static nil)) (update-weight g)))))
 
+(defn- static-and-dynamic-updates
+  "The update of gf's trace on args to args' (argdiffs), and the same
+   body's without ^:static, each with its previous trace as :prev."
+  [gf args args' argdiffs]
+  (for [g [gf (assoc gf :static nil)]]
+    (let [tr (gfi/simulate g args (rng/key 56))]
+      (assoc (gfi/update tr args' argdiffs cm/EMPTY (rng/key 57)) :prev tr))))
+
+(deftest a-name-in-the-body-is-not-the-var-it-shadows
+  ;; genclj-q2g1, found by the G2 rewrites: a binding, an argument or a
+  ;; name the return expression calls, named like a var with a diff rule
+  ;; (nth), was read as that var, so an update kept a stale value: weight
+  ;; 0 where the dynamic body's is -2.35, or claimed no change of the
+  ;; return value
+  (let [sum (fn [v _] (reduce + v))
+        moved (diff/vector-diff 2 2 {1 diff/unknown-change})]
+    (doseq [[what gf args args' argdiffs]
+            [["a binding" (gen ^:static [xs] (let [nth (fn [v _] (reduce + v)) s (nth xs 0) y (trace :y (d/normal s 1))] y))
+              [[1.0 2.0]] [[1.0 5.0]] [moved]]
+             ["an argument" (gen ^:static [nth xs] (let [s (nth xs 0) y (trace :y (d/normal s 1))] y))
+              [sum [1.0 2.0]] [sum [1.0 5.0]] [diff/no-change moved]]
+             ["the return expression" (gen ^:static [xs] (let [nth (fn [v _] (reduce + v)) y (trace :y (d/normal 0 1))] (nth xs 0)))
+              [[1.0 2.0]] [[1.0 5.0]] [moved]]]]
+      (testing what
+        (let [[static dynamic] (static-and-dynamic-updates gf args args' argdiffs)]
+          (is (ts/close? (:weight dynamic) (:weight static)) "the weight")
+          (is (ts/close? (:score (:trace dynamic)) (:score (:trace static))) "the score")
+          (is (diff/consistent? (:retval (:prev static)) (:retval (:trace static)) (:retdiff static)) "the retdiff"))))))
+
 (deftest destructuring-binds-what-clojure-binds
   (let [gf (gen ^:static [m] (let [{:keys [a/b c]} m y (trace :y (d/normal (+ b c) 1))] y))]
     (is (some? (:retval (gfi/simulate gf [{:a/b 1.0 :c 2.0}] (rng/key 43)))))))
