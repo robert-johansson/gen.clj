@@ -238,7 +238,7 @@
               (update :ctx into tokens)
               (update :tokens into tokens)
               (update :scores into scores))
-    (some #(Double/isInfinite (double %)) scores) (assoc :dead? true)))
+    (some #(== Double/NEGATIVE_INFINITY (double %)) scores) (assoc :dead? true)))
 
 (defn- agreeing
   "How many of run's first tokens are the revised trace's at their

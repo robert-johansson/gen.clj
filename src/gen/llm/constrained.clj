@@ -186,7 +186,7 @@
                     [(conj out (double (aget row t))) true]
                     (let [[^floats q] (weighted (end-tokens gf) row (potential/logw-next potential (into tokens (subvec run 0 i))))
                           s (if q (double (aget q t)) Double/NEGATIVE_INFINITY)]
-                      [(conj out s) (Double/isInfinite s)]))))]
+                      [(conj out s) (== Double/NEGATIVE_INFINITY s)]))))]
     (loop [i 0 acc [[] (dead? state)]]
       (if (< i n)
         (let [m (min n (+ i reads-at-once))
@@ -237,7 +237,7 @@
         tokens (:retval tr)
         score (double (:score tr))]
     (cond (nil? potential) 0.0
-          (Double/isInfinite score) Double/NEGATIVE_INFINITY
+          (== Double/NEGATIVE_INFINITY score) Double/NEGATIVE_INFINITY
           :else (let [text (if (and (seq tokens) (contains? (end-tokens gf) (peek tokens))) (pop tokens) tokens)
                       log-p (double (if (seq tokens) (reduce + 0.0 (lm/score lm prompt tokens)) 0.0))]
                   (- (+ log-p (potential/complete potential text)) score)))))
