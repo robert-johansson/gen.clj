@@ -1297,7 +1297,10 @@
 
 (defn- compile-fn
   "p/-compile: f (a fn of a vector of MlxArrays to a vector of arrays) as an
-   MLX closure, compiled with mlx_compile; the returned fn applies it."
+   MLX closure, compiled with an id of its own; the returned fn applies it,
+   from any thread. MLX traces it once per thread and input signature, and
+   its traces are erased from every thread's compile cache when it is freed
+   (MlxRuntime.Compiled, genclj-hfwo)."
   [b f {:keys [shapeless?]}]
   (let [run (fn [^longs ins]
               (let [outs (try (binding [*tracing-compile* true] (f (mapv #(wrap b %) ins)))
@@ -1316,20 +1319,27 @@
                                     {:op :compile :value o}))))
                 (long-array (map #(MlxRuntime/retain (.-h ^MlxArray (as-array b % nil))) outs))))
         cl (MlxRuntime/closure (reify gen.mlx.MlxRuntime$Closure (apply [_ ins] (run ins))))
-        compiled (try (Mlx/mlx_compile cl (boolean shapeless?))
-                      ;; the compiled closure holds the function for retracing
-                      (finally (MlxRaw/mlx_closure_free cl)))
+        ^gen.mlx.MlxRuntime$Compiled c
+        (try (gen.mlx.MlxRuntime$Compiled. cl (boolean shapeless?))
+             ;; the compiled closure holds the function for retracing
+             (finally (MlxRaw/mlx_closure_free cl)))
+        compiled (.-handle c)
         g (fn [xs]
             (let [in (MlxRuntime/vectorOf (long-array (map #(.-h ^MlxArray %) xs)))]
               (try
-                (let [out (try (Mlx/mlx_closure_apply compiled in)
+                ;; nothing between enter, the call and exit may block: a
+                ;; virtual thread could move to another carrier, whose
+                ;; cache is another
+                (.enter c)
+                (let [out (try (try (Mlx/mlx_closure_apply compiled in)
+                                    (finally (.exit c)))
                                (catch MlxException e (throw (mlx-error :compile xs e))))]
                   (try (mapv #(wrap b %) (MlxRuntime/vectorArrays out))
                        (finally (MlxRaw/mlx_vector_array_free out))))
                 (finally
                   (MlxRaw/mlx_vector_array_free in)
                   (fence xs)))))]
-    (MlxRuntime/adoptClosure g compiled)
+    (MlxRuntime/adoptCompiled g c)
     g))
 
 (def ^:private cpu-compile

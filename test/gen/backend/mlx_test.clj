@@ -283,6 +283,84 @@
                                    g [0.1 0.5] minv-t-sums)))))))))
 
 ;; ---------------------------------------------------------------------------
+;; Compiled functions called from several threads (genclj-hfwo)
+;; ---------------------------------------------------------------------------
+;; MLX keeps a compile cache per thread. mlx_compile's closures erased their
+;; entry only from the cache of the thread that compiled them, so a call
+;; from another thread left a trace there: kept, with every constant it
+;; captured, until that thread exited, and keyed by the address of a deleted
+;; function, which a later compiled function could be given. Mutation
+;; checked on Metal (2026-10-21): the old mlx_compile planted back fails the
+;; first test (256 MB kept) and the second (from round 3 on, the other
+;; thread returned round 2's x·2 every time).
+
+(defn- on-thread
+  "(f) on executor ex's thread: its value, or what it threw."
+  [^java.util.concurrent.ExecutorService ex f]
+  (try (.get (.submit ex ^java.util.concurrent.Callable f))
+       (catch java.util.concurrent.ExecutionException e (throw (.getCause e)))))
+
+(defn- settled-active
+  "MLX's active memory once the unreachable arrays and compiled functions
+   are freed."
+  []
+  (let [collect! (requiring-resolve 'gen.backend.mlx/collect!)]
+    (dotimes [_ 3] (collect!))
+    (:active ((requiring-resolve 'gen.backend.mlx/memory)))))
+
+(deftest a-freed-compiled-function-leaves-no-trace-on-other-threads
+  ;; a compiled function closing over a 256 MB constant, called on this
+  ;; thread and on another that stays alive, then dropped: once collected,
+  ;; MLX's active memory is back where it was
+  (when-mlx
+    (let [b (mlx)]
+      (when ((requiring-resolve 'gen.backend.mlx/compiles?) b)
+        (let [ex (java.util.concurrent.Executors/newSingleThreadExecutor)]
+          (try
+            (let [base (settled-active)
+                  [here there] ((fn []
+                                  (let [c (array/eval! (array/with-backend b (array/full [(* 64 1024 1024)] 0.5)))
+                                        f (array/compile (fn [x] (array/+ x (array/max c))))
+                                        x (array/with-backend b (array/array [1.0 2.0]))]
+                                    [(array/->clj (f x)) (on-thread ex #(array/->clj (f x)))])))
+                  kept (- (settled-active) base)]
+              (is (= [1.5 2.5] here there) "both threads ran the compiled function")
+              (is (< kept (* 16 1024 1024)) (format "%.0f MB still held" (/ kept 1048576.0))))
+            (finally (.shutdown ex))))))))
+
+(deftest ^:slow a-compiled-function-never-replays-another
+  ;; rounds of a compiled x·i, each called on this thread and then on
+  ;; another, then dropped and collected: every result is its own x·i, never
+  ;; an earlier round's trace found under a reused address
+  (when-mlx
+    (let [b (mlx)]
+      (when ((requiring-resolve 'gen.backend.mlx/compiles?) b)
+        (let [ex (java.util.concurrent.Executors/newSingleThreadExecutor)
+              x (array/with-backend b (array/array [2.0]))]
+          (try
+            (let [wrong (vec (keep (fn [i]
+                                     (let [f (array/compile (fn [y] (array/* y (double i))))
+                                           here (array/->clj (f x))
+                                           there (on-thread ex #(array/->clj (f x)))]
+                                       (settled-active)
+                                       (when-not (= [(* 2.0 i)] here there) [i here there])))
+                                   (range 1 65)))]
+              (is (= [] wrong) "each round's results are its own"))
+            (finally (.shutdown ex))))))))
+
+(deftest compiled-functions-run-on-virtual-threads
+  ;; a virtual thread's MLX cache is its carrier's, which can change between
+  ;; calls: the trace is erased after each call, and the results are right
+  (when-mlx
+    (let [b (mlx)
+          f (array/compile (fn [y] (array/* y 3.0)))
+          x (array/with-backend b (array/array [1.0 2.0]))
+          results (with-open [ex (java.util.concurrent.Executors/newVirtualThreadPerTaskExecutor)]
+                    (mapv #(.get ^java.util.concurrent.Future %)
+                          (doall (for [_ (range 8)] (.submit ex ^java.util.concurrent.Callable #(array/->clj (f x)))))))]
+      (is (every? #{[3.0 6.0]} results)))))
+
+;; ---------------------------------------------------------------------------
 ;; The budget: past it an evaluation is a loud error, after a collection
 ;; ---------------------------------------------------------------------------
 
