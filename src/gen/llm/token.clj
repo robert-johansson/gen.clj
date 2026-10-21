@@ -229,11 +229,16 @@
         (let [run (conj run t)]
           (if (contains? (:end-tokens gf) t) run (recur (inc j) run)))))))
 
-(defn- append [state tokens scores]
-  (-> state
-      (update :ctx into tokens)
-      (update :tokens into tokens)
-      (update :scores into scores)))
+(defn- append
+  "state with tokens and their scores appended; :dead? once a score is
+   -Inf (a token of weight 0 under a potential: no sequence it begins has
+   weight)."
+  [state tokens scores]
+  (cond-> (-> state
+              (update :ctx into tokens)
+              (update :tokens into tokens)
+              (update :scores into scores))
+    (some #(Double/isInfinite (double %)) scores) (assoc :dead? true)))
 
 (defn- agreeing
   "How many of run's first tokens are the revised trace's at their
@@ -510,5 +515,6 @@
      (when-not (and (set? end-tokens) (every? #(br/index? % n-vocab) end-tokens))
        (throw (ex-info (str "token/completion: :end-tokens is a set of tokens of the vocabulary, not " (pr-str end-tokens))
                        {:reason :invalid-end-tokens :end-tokens end-tokens})))
-     (->Completion lm (into #{} (map long) end-tokens) (long n-vocab) (:limit (lm/info lm))
-                   (some-> potential (constrained/check-potential n-vocab))))))
+     (let [end-tokens (into #{} (map long) end-tokens)]
+       (->Completion lm end-tokens (long n-vocab) (:limit (lm/info lm))
+                     (some-> potential (constrained/check-potential n-vocab end-tokens)))))))

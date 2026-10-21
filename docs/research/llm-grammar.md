@@ -44,8 +44,8 @@ No new dependency. Nothing outside `gen.llm.*` requires these namespaces.
 | `(regex/parse s)`, the term constructors (above) | a regular language over bytes, as a value |
 | `(regex/dfa r)`, `(regex/dfa r {:max-states n})`, `(regex/matches? r text)` | its minimal DFA; membership of a string |
 | `(dfa/dfa {:start :accept :transitions})`, `step`, `walk`, `accepting?`, `matches?`, `->data` | DFAs over bytes from data, and their operations |
-| `(grammar/grammar vocab language)` | a language (regex, term or DFA) over a vocabulary (an LM, or a byte vocabulary): masks for every state the tokens reach; a potential |
-| `(grammar/state g tokens)`, `advance`, `live?`, `accepting?`, `allowed?`, `allowed`, `automaton`, `info` | a grammar's states and masks |
+| `(grammar/grammar vocab language)`, `(grammar/grammar vocab language {:end-tokens ts})` | a language (regex, term or DFA) over a vocabulary (an LM, or a byte vocabulary): masks for every state the tokens reach; a potential. The end tokens (default an LM's `:eog`, none for a byte vocabulary) are not text, and must be the completion's |
+| `(grammar/state g tokens)`, `advance`, `live?`, `accepting?`, `allowed?`, `allowed`, `automaton`, `end-tokens`, `info` | a grammar's states and masks |
 | `(potential/prefix g ctx)`, `complete`, `logw-next` | a grammar as a potential: 0 or -Inf; the mask as n-vocab + 1 weights |
 | `(token/completion m {:potential p})` | the completion under a potential (any potential: a grammar, a product, a weighted one) |
 | `(constrained/weighted end-tokens row ws)` | a site's distribution: the row times the weights, renormalized, `[q log-z]` (for token SMC's masked proposal too) |
@@ -94,10 +94,19 @@ the common regex syntax into one; `(dfa r)` compiles a term or a regex.
   accepts, and refuses loudly what it does not support rather than give it
   another dialect's meaning: backreferences, lookaround, word boundaries,
   anchors inside, inline flags, possessive quantifiers, `\p`, nested classes
-  and `&&`, unescaped `]` `{` `}` outside a class or `[` inside. `^` first
-  and `$` last are allowed (matching is whole-string); GenMLX read them as
+  and `&&`, unescaped `]` `{` `}` outside a class or `[` inside, and a lone
+  surrogate (no character; the constructors refuse one too). `^` first and
+  `$` last are allowed (matching is whole-string); GenMLX read them as
   literal characters (genmlx-bgyu). A lazy `?` is accepted: it changes no
-  language.
+  language. A backslash before an ASCII letter or digit is reserved, as
+  java.util.regex and Python have it; before any other character it is
+  that character. Code points are compared as numbers throughout: a
+  character past U+FFFF is never read by its low 16 bits (U+1002A once
+  parsed as `*`, found by the round-3 review; the tests' alphabet holds
+  U+1002A and U+2007C, also escaped).
+- **Nested repeats** `(x{0,b}){0,d}` become `x{0,bd}` exactly while bd
+  fits a long; past it the nesting stays (65536⁴ once wrapped to the
+  empty string's language).
 
 ## Masks over a vocabulary (`gen.llm.bytes`, `gen.llm.grammar`)
 
@@ -126,8 +135,15 @@ grammar holds the text.
   language is a loud `:empty-language`, and one no sequence of tokens spells
   a loud `:inexpressible`.
 - **Special tokens** are read by their bytes (llama.cpp renders them), as
-  the text is; a completion's end tokens are not text: the end is the
-  potential's end entry, allowed where the text is complete.
+  the text is. **End tokens are not text**: a grammar knows its end tokens
+  (an LM's `:eog` by default, or `:end-tokens`), leaves them out of its
+  trie and liveness (advancing by one is dead), and the end is the
+  potential's end entry, allowed where the text is complete. A completion
+  under a grammar must have the grammar's end tokens (loud
+  `:mismatched-end-tokens` otherwise), and a language that needs an end
+  token's bytes is `:inexpressible`. (The first build read every token as
+  text: a grammar `[ab]{3}\n` with a newline end token passed `prefix` and
+  stranded every completion, found by the round-3 review.)
 
 ## Measurements
 
@@ -237,8 +253,10 @@ of its strings; π weighs it by `complete`, so incomplete ones get weight 0.
 
 **Scores.** A site's score is log q_i(x_i), computed from the LM's row at
 its context (the normalizer needs every token's probability, so a run of
-k known tokens takes k rows, read in one `lm/batch-next-logprobs`, where
-the unconstrained completion reads one teacher-forced sequence). Within
+k known tokens takes k rows, read 32 contexts at a time, each row reduced
+to its score before the next read, where the unconstrained completion
+reads one teacher-forced sequence; at Qwen3's vocabulary the rows of 500
+tokens at once would be 304 MB). Within
 one LM the rows are held, so the laws hold exactly, also on the noisy
 cell engine; after an evicted row is read again on llama.cpp, within the
 engine's noise, as the token GF's scores.

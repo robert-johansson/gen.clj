@@ -178,7 +178,7 @@
   (with-open [^java.io.Closeable e (toy/engine {:n-vocab (count vocab) :max-branches 64 :n-ctx 1024})
               m (lm/lm e (tokenizer vocab))]
     (doseq [[lname re] [["string content, [^\"]*" "[^\"]*"] ["digits, [0-9]*" "[0-9]*"]]]
-      (let [g (grammar/grammar m re)
+      (let [g (grammar/grammar m re {:end-tokens #{}})
             plain (token/completion m {:end-tokens #{}})
             under (token/completion m {:end-tokens #{} :potential g})
             prompt [0]

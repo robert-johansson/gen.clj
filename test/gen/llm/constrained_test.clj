@@ -66,7 +66,7 @@
 (def ^:private bprompt [(:bos btok)])
 
 (def ^:private label (grammar/grammar ascii "[a-c]+(-[0-9]{1,2})?"))
-(def ^:private word (grammar/grammar ascii "[a-z]+"))
+(def ^:private word (grammar/grammar ascii "[a-z]+" {:end-tokens #{}}))
 (def ^:private accents (grammar/grammar bytes-lm "(?:ab|é)+c?"))
 
 (def ^:private free-text (grammar/grammar ascii "[^\"]*"))
@@ -107,7 +107,8 @@
   ;; (gfi/revise, which keeps only its choices)
   [[:to-plain labelled [prompt 4] [[prompt 2] [prompt 6]] (token/completion ascii)]
    [:from-plain (token/completion ascii) [prompt 4] [[prompt 2] [prompt 6]] labelled]
-   [:to-another-grammar labelled [prompt 4] [[prompt 2] [prompt 6]] (token/completion ascii {:potential word})]]
+   [:to-another-grammar labelled [prompt 4] [[prompt 2] [prompt 6]]
+    (token/completion ascii {:potential (grammar/grammar ascii "[a-z]+")})]]
   100 laws/across)
 
 (def ^:private noisy
@@ -183,6 +184,22 @@
                              ws (potential/logw-next free-text (text-tokens quoted ctx))]
                          ((direct (:end-tokens quoted) (toy/toy-logprobs 97 (into prompt ctx)) ws) (tokens i))))]
       (is (every? #(<= (Math/abs (- (site %) ((::token/scores tr) %))) 3e-6) (range (count tokens)))))))
+
+(deftest an-end-token-is-the-end-not-text
+  ;; the review's case: a newline token that ends the completion. Its bytes
+  ;; are not text, so a grammar that needs a newline in the text cannot be
+  ;; spelled (it once passed prefix and stranded every simulate); one whose
+  ;; text stops where the newline ends it can
+  (let [nl (bt/tokenizer ["a" "b" "\n"])
+        m (lm/lm (toy/engine {:n-vocab (:n-vocab nl) :max-branches 64 :n-ctx 128}) nl {:max-cells 5000})
+        three (grammar/grammar m "[ab]{3}" {:end-tokens #{2}})
+        gf (token/completion m {:end-tokens #{2} :potential three})
+        runs (map #(:retval (gfi/simulate gf [[(:bos nl)] 6] (rng/key %))) (range 50))]
+    (is (= :inexpressible (bc/reason #(grammar/grammar m "[ab]{3}\n" {:end-tokens #{2}}))))
+    (is (every? #(and (= 4 (count %)) (= 2 (peek %)) (every? #{0 1} (pop %))) runs) "three letters, then the end")
+    (is (= Double/NEGATIVE_INFINITY (potential/prefix three [0 2])) "an end token in a context is no prefix")
+    (is (= 0.0 (potential/prefix (grammar/grammar m "[ab]{3}\n" {:end-tokens #{}}) [0 0 0 2]))
+        "with no end tokens, the newline is text")))
 
 (deftest a-text-of-a-word-is-a-word
   (let [tr (gfi/simulate words [prompt 5] (rng/key 1))]
@@ -287,6 +304,35 @@
 ;; The operations under a grammar
 ;; ---------------------------------------------------------------------------
 
+(defn- recording
+  "lm, recording how many contexts each of its reads takes (in reads)."
+  [m reads]
+  (reify lm/LM
+    (-tokenizer [_] (lm/-tokenizer m))
+    (-next-logprobs [_ contexts] (swap! reads conj (count contexts)) (lm/-next-logprobs m contexts))
+    (-score [_ context continuation] (lm/-score m context continuation))
+    (-info [_] (lm/-info m))))
+
+(deftest a-long-run-is-read-a-chunk-at-a-time
+  ;; a run of known tokens needs a row for each (the normalizer is the
+  ;; whole vocabulary's): read 32 contexts at a time, each row reduced to
+  ;; its site's score before the next read, never all of them at once (at
+  ;; Qwen3's vocabulary 304 MB for 500 tokens)
+  (let [reads (atom [])
+        m (recording (lm/lm (toy/engine {:max-branches 64 :n-ctx 512}) (tt/tokenizer 97) {:max-cells 8192}) reads)
+        g (grammar/grammar m "[a-z]+" {:end-tokens #{}})
+        gf (token/completion m {:end-tokens #{} :potential g})
+        tokens (let [rnd (java.util.Random. 7)] (vec (repeatedly 100 #(+ 65 (.nextInt rnd 26)))))
+        w (:weight (gfi/assess gf [prompt 100] (token/forced tokens)))]
+    (is (< Double/NEGATIVE_INFINITY w 0.0))
+    (is (<= 4 (count (filter #(< 1 %) @reads))) "several reads of many contexts")
+    (is (every? #(<= % 32) @reads) "none of more than 32")
+    (is (= w (:weight (gfi/assess (token/completion (lm/lm (toy/engine {:max-branches 64 :n-ctx 512}) (tt/tokenizer 97)
+                                                           {:max-cells 8192})
+                                                    {:end-tokens #{} :potential g})
+                                  [prompt 100] (token/forced tokens))))
+        "the same scores as on an LM read any other way")))
+
 (deftest generate-weighs-the-forced-tokens-by-their-sites
   (let [forced [0 1]
         {tr :trace w :weight} (gfi/generate accented [bprompt 4] (token/forced forced) (rng/key 3))]
@@ -336,8 +382,12 @@
   (is (= :invalid-weights (bc/reason #(token/completion ascii {:potential accents}))) "another vocabulary's")
   (is (= :zero-prefix (bc/reason #(token/completion ascii {:potential (potential/potential 97 {:prefix (constantly ##-Inf)
                                                                                                :complete (constantly ##-Inf)})}))))
-  (is (= :zero-weight (bc/reason #(gfi/simulate (token/completion ascii {:end-tokens #{} :potential (grammar/grammar ascii "ab")})
+  (is (= :zero-weight (bc/reason #(gfi/simulate (token/completion ascii {:end-tokens #{}
+                                                                         :potential (grammar/grammar ascii "ab" {:end-tokens #{}})})
                                                 [prompt 4] (rng/key 1))))
       "a grammar complete with no end tokens to end it")
+  (is (= :mismatched-end-tokens (bc/reason #(token/completion ascii {:end-tokens #{} :potential label})))
+      "a grammar whose end tokens are not the completion's")
+  (is (= :mismatched-end-tokens (bc/reason #(token/completion ascii {:potential word}))))
   (is (= :inexpressible (bc/reason #(grammar/grammar ascii "é+"))) "no token holds é's bytes")
   (is (= :empty-language (bc/reason #(grammar/grammar ascii "[^\\x00-\\x{10FFFF}]")))))

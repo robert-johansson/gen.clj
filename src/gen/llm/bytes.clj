@@ -2,8 +2,9 @@
   "A vocabulary's bytes: the token byte trie, which grammar masks walk
    (gen.llm.grammar).
 
-     (byte-trie byte-vocab)       → the trie of the tokens' bytes (a vector of
-                                    byte arrays by token, gen.llm.lm/byte-vocab's)
+     (byte-trie byte-vocab excluded) → the trie of the tokens' bytes (a vector of
+                                    byte arrays by token, gen.llm.lm/byte-vocab's),
+                                    but excluded's (end tokens)
      (token-bytes trie t)         → token t's bytes (do not write them)
      (root trie), (child trie node b), (depth trie node)
      (tokens-at trie node)        → the tokens whose bytes end at node
@@ -40,50 +41,55 @@
 (defmethod print-method ByteTrie [t ^java.io.Writer w] (.write w (str t)))
 
 (defn byte-trie
-  "The trie of byte-vocab's tokens (a vector of byte arrays, by token)."
-  ^ByteTrie [byte-vocab]
-  (when-not (and (sequential? byte-vocab) (seq byte-vocab) (every? bytes? byte-vocab))
-    (throw (ex-info "byte-trie: a byte vocabulary is a non-empty vector of byte arrays, by token"
-                    {:reason :invalid-vocab})))
-  (let [vocab (object-array byte-vocab)
-        n (alength vocab)
-        len (fn [t] (alength ^bytes (aget vocab (long t))))
-        order (sort (fn [a b] (let [c (java.util.Arrays/compareUnsigned ^bytes (aget vocab (long a)) ^bytes (aget vocab (long b)))]
-                                (if (zero? c) (compare a b) c)))
-                    (filter #(pos? (long (len %))) (range n)))
-        cap (inc (long (reduce + 0 (map len order))))
-        max-depth (long (reduce max 0 (map len order)))
-        edge (byte-array cap)
-        depth (int-array cap)
-        end (int-array cap)
-        first (int-array (inc cap))
-        tokens (int-array (count order))
-        path (int-array (inc max-depth))]
-    ;; tokens in byte order are the trie's preorder: each token opens the
-    ;; nodes past its common prefix with the one before, and closes the
-    ;; nodes of that one deeper than it
-    (loop [ts (seq order) nodes 1 held 0 ^bytes prev (byte-array 0)]
-      (if-let [t (clojure.core/first ts)]
-        (let [^bytes bs (aget vocab (long t))
-              m (java.util.Arrays/mismatch prev bs)
-              common (if (neg? m) (alength bs) m)]
-          (loop [d (alength prev)] (when (< common d) (aset end (aget path d) (int nodes)) (recur (dec d))))
-          (dotimes [i (- (alength bs) common)]
-            (let [d (+ common i 1)
-                  node (+ nodes i)]
-              (aset edge node (aget bs (dec d)))
-              (aset depth node (int d))
-              (aset first node (int held))
-              (aset path d (int node))))
-          (aset tokens held (int t))
-          (recur (next ts) (+ nodes (- (alength bs) common)) (inc held) bs))
-        (do (loop [d (alength prev)] (when (pos? d) (aset end (aget path d) (int nodes)) (recur (dec d))))
-            (aset end 0 (int nodes))
-            (aset first nodes (int held))
-            (ByteTrie. n (object-array (map #(aclone ^bytes %) byte-vocab))
-                       (java.util.Arrays/copyOf edge (int nodes)) (java.util.Arrays/copyOf depth (int nodes))
-                       (java.util.Arrays/copyOf end (int nodes)) (java.util.Arrays/copyOf first (int (inc nodes)))
-                       tokens (int-array (filter #(zero? (long (len %))) (range n))) max-depth))))))
+  "The trie of byte-vocab's tokens (a vector of byte arrays, by token),
+   but those of excluded (a set; none by default), which are neither in
+   the trie nor bare: a completion's end tokens, which end a text and
+   hold none of it."
+  (^ByteTrie [byte-vocab] (byte-trie byte-vocab #{}))
+  (^ByteTrie [byte-vocab excluded]
+   (when-not (and (sequential? byte-vocab) (seq byte-vocab) (every? bytes? byte-vocab))
+     (throw (ex-info "byte-trie: a byte vocabulary is a non-empty vector of byte arrays, by token"
+                     {:reason :invalid-vocab})))
+   (let [vocab (object-array byte-vocab)
+         n (alength vocab)
+         len (fn [t] (alength ^bytes (aget vocab (long t))))
+         order (sort (fn [a b] (let [c (java.util.Arrays/compareUnsigned ^bytes (aget vocab (long a)) ^bytes (aget vocab (long b)))]
+                                 (if (zero? c) (compare a b) c)))
+                     (filter #(and (pos? (long (len %))) (not (excluded %))) (range n)))
+         cap (inc (long (reduce + 0 (map len order))))
+         max-depth (long (reduce max 0 (map len order)))
+         edge (byte-array cap)
+         depth (int-array cap)
+         end (int-array cap)
+         first (int-array (inc cap))
+         tokens (int-array (count order))
+         path (int-array (inc max-depth))]
+     ;; tokens in byte order are the trie's preorder: each token opens the
+     ;; nodes past its common prefix with the one before, and closes the
+     ;; nodes of that one deeper than it
+     (loop [ts (seq order) nodes 1 held 0 ^bytes prev (byte-array 0)]
+       (if-let [t (clojure.core/first ts)]
+         (let [^bytes bs (aget vocab (long t))
+               m (java.util.Arrays/mismatch prev bs)
+               common (if (neg? m) (alength bs) m)]
+           (loop [d (alength prev)] (when (< common d) (aset end (aget path d) (int nodes)) (recur (dec d))))
+           (dotimes [i (- (alength bs) common)]
+             (let [d (+ common i 1)
+                   node (+ nodes i)]
+               (aset edge node (aget bs (dec d)))
+               (aset depth node (int d))
+               (aset first node (int held))
+               (aset path d (int node))))
+           (aset tokens held (int t))
+           (recur (next ts) (+ nodes (- (alength bs) common)) (inc held) bs))
+         (do (loop [d (alength prev)] (when (pos? d) (aset end (aget path d) (int nodes)) (recur (dec d))))
+             (aset end 0 (int nodes))
+             (aset first nodes (int held))
+             (ByteTrie. n (object-array (map #(aclone ^bytes %) byte-vocab))
+                        (java.util.Arrays/copyOf edge (int nodes)) (java.util.Arrays/copyOf depth (int nodes))
+                        (java.util.Arrays/copyOf end (int nodes)) (java.util.Arrays/copyOf first (int (inc nodes)))
+                        tokens (int-array (filter #(and (zero? (long (len %))) (not (excluded %))) (range n)))
+                        max-depth)))))))
 
 (defn n-vocab ^long [^ByteTrie trie] (.-n-vocab trie))
 
@@ -235,8 +241,7 @@
      (when-not (or (nil? beam) (pos-int? beam))
        (throw (ex-info (str "byte-lm: :beam is a positive integer or nil, not " (pr-str beam)) {:reason :invalid-option :beam beam})))
      ;; end tokens are kept out of the trie: they end a text, and hold none of it
-     (->ByteLM lm (byte-trie (vec (map-indexed (fn [t bs] (if (end-tokens t) (byte-array 0) bs)) byte-vocab)))
-               (into #{} (map long) end-tokens) beam))))
+     (->ByteLM lm (byte-trie byte-vocab end-tokens) (into #{} (map long) end-tokens) beam))))
 
 (defn- text-bytes ^bytes [what text]
   (cond (string? text) (.getBytes ^String text java.nio.charset.StandardCharsets/UTF_8)

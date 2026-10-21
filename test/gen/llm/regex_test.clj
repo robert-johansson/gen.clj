@@ -39,8 +39,14 @@
 ;; ---------------------------------------------------------------------------
 
 (def ^:private alphabet
-  "Characters of one to four bytes, a newline, and metacharacters."
-  [97 98 99 10 45 46 34 233 8364 119070])
+  "Characters of one to four bytes, a newline, and metacharacters; past
+   U+FFFF, two whose low 16 bits are * and | (a parser reading (char c)
+   there would take them for those)."
+  [97 98 99 10 45 46 34 233 8364 119070 0x1002A 0x2007C])
+
+(def ^:private escapable
+  "Characters a backslash keeps literal: not ASCII letters or digits."
+  [46 42 233 0x1002A 0x2007C])
 
 (def ^:private others
   "Characters in no tree, for strings outside the trees' classes."
@@ -75,6 +81,7 @@
     (gen/frequency [[6 (gen/fmap (fn [c] [:char c]) gen-char)]
                     [2 gen-char-class]
                     [1 (gen/return [:dot])]
+                    [1 (gen/fmap (fn [c] [:escaped c]) (gen/elements escapable))]
                     [1 (gen/fmap (fn [e] [:escape e]) (gen/elements [\d \w \s \D]))]
                     [1 (gen/return [:empty])]]))))
 
@@ -90,6 +97,7 @@
     (case kind
       :char (render-char (first args) false)
       :dot "."
+      :escaped (str "\\" (string-of [(first args)]))
       :empty "(?:)"
       :escape (str "\\" (first args))
       :class (let [[negated? items] args]
@@ -121,6 +129,7 @@
   (case kind
     :char (regex/chars (first args))
     :dot (regex/chars-except \newline)
+    :escaped (regex/chars (first args))
     :empty regex/epsilon
     :escape (escape-term (first args))
     :class (let [[negated? items] args
@@ -159,6 +168,7 @@
     (case kind
       :char (gen/return [(first args)])
       :dot (pick (remove #{10} (concat alphabet others)))
+      :escaped (gen/return [(first args)])
       :empty (gen/return [])
       :escape (pick (class-chars [:class false [[:escape (first args)]]]))
       :class (pick (class-chars t))
@@ -221,7 +231,9 @@
   [0 0x7F 0x80 0x7FF 0x800 0xFFF 0x1000 0xD7FF 0xE000 0xFFFF 0x10000 0x3FFFF 0x40000 0x10FFFF])
 
 (def ^:private gen-code-range
-  (gen/fmap sort (gen/vector (gen/one-of [(gen/choose 0 0x7FF) (gen/choose 0x800 0xFFFF) (gen/choose 0 0x10FFFF)]) 2)))
+  "Two characters, in order (a surrogate is none: moved past them)."
+  (gen/fmap (fn [cs] (sort (map #(if (<= 0xD800 % 0xDFFF) (+ % 0x800) %) cs)))
+            (gen/vector (gen/one-of [(gen/choose 0 0x7FF) (gen/choose 0x800 0xFFFF) (gen/choose 0 0x10FFFF)]) 2)))
 
 (def ^:private short-strings
   "Every string of one byte, and of two bytes past ASCII, with the one
@@ -370,6 +382,14 @@
                "\\uD800" "\\x4" "\\"]]
     (is (= :invalid-regex (bc/reason #(regex/parse bad))) bad))
   (is (= :invalid-regex (bc/reason #(regex/parse 3))))
+  (is (= :invalid-regex (bc/reason #(regex/parse "a\uD800b"))) "a lone surrogate in the regex")
+  (is (= :invalid-regex (bc/reason #(regex/parse "[a\uDC00]"))) "in a class")
+  (is (= :invalid-regex (bc/reason #(regex/parse "\\\uD800"))) "escaped")
+  (doseq [[what f] [["text" #(regex/text "a\uD800")] ["chars, a code point" #(regex/chars 0xD800)]
+                    ["chars, a char" #(regex/chars (char 0xDFFF))] ["chars, a string" #(regex/chars "a\uDC00")]
+                    ["chars, a range's end" #(regex/chars [0xD800 0xE000])] ["chars-except" #(regex/chars-except 0xDBFF)]]]
+    (is (= :invalid-term (bc/reason f)) (str "a surrogate is no character: " what)))
+  (is (regex/matches? (regex/chars [0xD000 0xE000]) "\uE000") "a range across the surrogates holds the characters around them")
   (is (= :too-many-states (bc/reason #(regex/dfa "a{0,500}" {:max-states 100}))))
   (doseq [[what f] [["a term" #(regex/cat "a")] ["bytes" #(regex/bytes-of [256])] ["bounds" #(regex/repeat regex/any-byte 3 2)]
                     ["a char" #(regex/chars :a)] ["a range" #(regex/chars [\z \a])] ["text" #(regex/text 3)]
@@ -385,6 +405,25 @@
     (is (= :too-many-states (bc/reason #(regex/dfa "(?:\\s+(?:a|\"|€)\\d{1,}|(?:.{2,4}){1}){2,4}(?:[^céc-€](?:é+){2,4})?"
                                                    {:max-states 200}))))
     (is (< (- (System/nanoTime) t0) 5e9) "within seconds")))
+
+(deftest nested-repeats-never-wrap
+  ;; (x{0,b}){0,d} is x{0,bd}, exactly: 65536^4 wrapped to 0 in an int, the
+  ;; language of the empty string; past a long, the nesting stays
+  (let [r (regex/parse "(((a{0,65536}){0,65536}){0,65536}){0,65536}")]
+    (is (not= regex/epsilon r))
+    (is (= [:repeat [:repeat (regex/text "a") 0 (* 65536 65536 65536)] 0 65536] r) "nested once, past a long"))
+  (is (= (regex/repeat (regex/text "a") 0 (* 65536 65536)) (regex/parse "(a{0,65536}){0,65536}")) "one counter, while it fits")
+  (let [t0 (System/nanoTime)]
+    (is (= :too-many-states (bc/reason #(regex/dfa "(a{0,65536}){0,65536}" {:max-states 1000}))) "a{0,2^32}: too large a DFA")
+    (is (< (- (System/nanoTime) t0) 5e9) "loudly, within seconds")))
+
+(deftest characters-past-the-bmp-are-themselves
+  (doseq [c [0x1002A 0x1007C 0x10028 0x1002E 0x1005C 0x1005E 0x2007C]]
+    (let [x (string-of [c])]
+      (is (regex/matches? (str "a" x "b") (str "a" x "b")) (format "U+%X" c))
+      (is (regex/matches? (str "\\" x) x) (format "U+%X escaped" c))
+      (is (regex/matches? (str "[" x "]+") (str x x)) (format "U+%X in a class" c))))
+  (is (not (regex/matches? (str "a" (string-of [0x1002A])) "aaa")) "not a *"))
 
 (deftest nullable-repeats-normalize
   (is (= (regex/repeat (regex/opt (regex/text "ab")) 2 3) (regex/repeat (regex/text "ab") 0 3)))

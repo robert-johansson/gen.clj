@@ -4,22 +4,30 @@
    it: masks for grammar-constrained decoding and the weights of a potential.
 
      (grammar vocab language)   → a grammar; vocab an LM or a byte vocabulary
+     (grammar vocab language {:end-tokens ts})
                                   (a vector of byte arrays by token), language
-                                  a regex, a term (gen.llm.regex) or a DFA
+                                  a regex, a term (gen.llm.regex) or a DFA;
+                                  the end tokens, not text (default: an LM's
+                                  :eog, none for a byte vocabulary)
      (state g tokens)           → the DFA state after the tokens' bytes (-1: dead)
      (advance g state t)        → the state after token t
      (live? g state)            → can tokens still complete the language from it?
      (accepting? g state)       → are the bytes so far a string of the language?
      (allowed? g state t), (allowed g state)
                                 → may token t come next; the tokens that may
-     (automaton g), (info g)    → its DFA; its sizes
+     (automaton g), (end-tokens g), (info g)
+                                → its DFA; its end tokens; its sizes
 
    A grammar is a potential (gen.llm.potential): (potential/prefix g
    tokens), complete and logw-next weigh token sequences by it.
 
    A token sequence's text is its tokens' bytes, concatenated (an LM's
    decode); the grammar holds the text, read byte by byte, so a token may
-   end inside a character or span several of the DFA's transitions. A
+   end inside a character or span several of the DFA's transitions. End
+   tokens are not text: a completion's end token is the end, allowed where
+   the text is complete (the end's weight), so a grammar leaves them out,
+   and its end tokens must be the completion's (gen.llm.constrained checks
+   them). A language that needs an end token's bytes is inexpressible. A
    token is allowed after a context when its bytes lead to a live state:
    one from which some sequence of tokens (not merely of bytes) reaches an
    accepting state. That is exact: every state the vocabulary reaches from
@@ -47,8 +55,15 @@
 
 ;; masks: by DFA state, the bitset of allowed tokens (gen.llm.bytes/sweep's
 ;; form) for the live states the vocabulary reaches, nil for the others;
-;; live: the same states.
-(deftype Grammar [dfa ^ByteTrie trie ^objects masks ^booleans live info]
+;; live: the same states; ends: the end tokens, by token.
+(declare prefix complete logw-next)
+
+(deftype Grammar [dfa ^ByteTrie trie ^objects masks ^booleans live ^booleans ends end-tokens info]
+  potential/Potential
+  (-prefix [g context] (prefix g context))
+  (-complete [g context] (complete g context))
+  (-logw-next [g context] (logw-next g context))
+
   Object
   (toString [_]
     (str "#<Grammar " (:states info) " states (" (:reachable info) " reached by tokens), "
@@ -97,43 +112,63 @@
           (recur (into (pop todo) (remove live) (preds s)) (conj live s)))
         live))))
 
+(defn- end-tokens-of
+  "The end tokens opts gives, or vocab's default: an LM's :eog, none for a
+   byte vocabulary; checked."
+  [vocab byte-vocab opts]
+  (let [ts (cond (contains? opts :end-tokens) (:end-tokens opts)
+                 (satisfies? lm/LM vocab) (:eog (lm/vocab vocab))
+                 :else #{})]
+    (when-not (and (set? ts) (every? #(and (integer? %) (< -1 (long %) (count byte-vocab))) ts))
+      (throw (ex-info (str "grammar: :end-tokens is a set of tokens of the vocabulary, not " (pr-str ts))
+                      {:reason :invalid-end-tokens :end-tokens ts})))
+    (into #{} (map long) ts)))
+
 (defn grammar
   "The grammar of language (a regex, a regex term or a DFA) over vocab's
    tokens (an LM, or a vector of byte arrays by token, as
-   gen.llm.lm/byte-vocab gives). Every state the tokens reach is explored
-   and its mask made now. Loud when the language is empty
-   (:empty-language) or no sequence of the tokens spells a string of it
-   (:inexpressible)."
-  [vocab language]
-  (let [byte-vocab (byte-vocab-of vocab)
-        d (dfa-of language)
-        _ (when (zero? (dfa/size d))
-            (throw (ex-info "grammar: the language is empty" {:reason :empty-language :language language})))
-        trie (bytes/byte-trie byte-vocab)
-        n (dfa/size d)
-        t0 (System/nanoTime)
-        {:keys [masks succ]} (explore trie d)
-        live-states (token-live d succ)
-        _ (when-not (contains? live-states (dfa/start d))
-            (throw (ex-info (str "grammar: no sequence of the vocabulary's tokens spells a string of the language"
-                                 " (its tokens lack bytes the language needs)")
-                            {:reason :inexpressible :language language})))
-        live (boolean-array n)
-        _ (doseq [s live-states] (aset live (long s) true))
-        ;; when some reached state is not live, a token into it is not allowed
-        exact (if (= (count live-states) (count masks))
-                masks
-                (into {} (map (fn [s] [s (bytes/sweep trie (dfa/table d) s live nil)])) live-states))
-        out (object-array n)]
-    (doseq [[s mask] exact] (aset out (long s) mask))
-    (Grammar. d trie out live
-              {:states n
-               :reachable (count masks)
-               :live (count live-states)
-               :n-vocab (bytes/n-vocab trie)
-               :mask-ns (- (System/nanoTime) t0)})))
+   gen.llm.lm/byte-vocab gives). opts: :end-tokens, the tokens that end a
+   text (a set; default an LM's :eog, none for a byte vocabulary), left
+   out of the text: a completion under the grammar must have these end
+   tokens. Every state the tokens reach is explored and its mask made now.
+   Loud when the language is empty (:empty-language) or no sequence of the
+   text tokens spells a string of it (:inexpressible)."
+  ([vocab language] (grammar vocab language {}))
+  ([vocab language opts]
+   (let [byte-vocab (byte-vocab-of vocab)
+         end-tokens (end-tokens-of vocab byte-vocab opts)
+         d (dfa-of language)
+         _ (when (zero? (dfa/size d))
+             (throw (ex-info "grammar: the language is empty" {:reason :empty-language :language language})))
+         trie (bytes/byte-trie byte-vocab end-tokens)
+         n (dfa/size d)
+         t0 (System/nanoTime)
+         {:keys [masks succ]} (explore trie d)
+         live-states (token-live d succ)
+         _ (when-not (contains? live-states (dfa/start d))
+             (throw (ex-info (str "grammar: no sequence of the vocabulary's tokens spells a string of the language"
+                                  " (its tokens lack bytes the language needs)")
+                             {:reason :inexpressible :language language})))
+         live (boolean-array n)
+         _ (doseq [s live-states] (aset live (long s) true))
+         ;; when some reached state is not live, a token into it is not allowed
+         exact (if (= (count live-states) (count masks))
+                 masks
+                 (into {} (map (fn [s] [s (bytes/sweep trie (dfa/table d) s live nil)])) live-states))
+         out (object-array n)
+         ends (boolean-array (count byte-vocab))]
+     (doseq [[s mask] exact] (aset out (long s) mask))
+     (doseq [t end-tokens] (aset ends (long t) true))
+     (Grammar. d trie out live ends end-tokens
+               {:states n
+                :reachable (count masks)
+                :live (count live-states)
+                :n-vocab (bytes/n-vocab trie)
+                :mask-ns (- (System/nanoTime) t0)}))))
 
 (defn automaton "g's DFA." [^Grammar g] (.-dfa g))
+
+(defn end-tokens "g's end tokens, which are not text (a set)." [^Grammar g] (.-end-tokens g))
 
 (defn info
   "g's sizes: :states (its DFA's), :reachable (by tokens from the start),
@@ -143,9 +178,10 @@
   (.-info g))
 
 (defn advance
-  "The state after token t from state s (-1: dead)."
+  "The state after token t from state s (-1: dead, and for an end token,
+   which is no text)."
   ^long [^Grammar g ^long s ^long t]
-  (if (neg? s) -1 (dfa/walk (.-dfa g) s (bytes/token-bytes (.-trie g) t))))
+  (if (or (neg? s) (aget ^booleans (.-ends g) t)) -1 (dfa/walk (.-dfa g) s (bytes/token-bytes (.-trie g) t))))
 
 (defn state
   "The DFA state after the bytes of tokens, from the start (-1: dead)."
@@ -212,9 +248,3 @@
             (recur (bit-and bits (dec bits)))))))
     (when (accepting? g s) (aset out n (float 0.0)))
     out))
-
-(extend-type Grammar
-  potential/Potential
-  (-prefix [g context] (prefix g context))
-  (-complete [g context] (complete g context))
-  (-logw-next [g context] (logw-next g context)))

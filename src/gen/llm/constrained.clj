@@ -36,7 +36,8 @@
    context of positive weight where the potential allows no token (a
    grammar complete there, with no end token to end the completion) is a
    loud error."
-  (:require [gen.llm.lm :as lm]
+  (:require [gen.llm.grammar :as grammar]
+            [gen.llm.lm :as lm]
             [gen.llm.potential :as potential]))
 
 (set! *warn-on-reflection* true)
@@ -46,67 +47,53 @@
 ;; The site's distribution
 ;; ---------------------------------------------------------------------------
 
+(defmacro ^:private fold-weights
+  "acc folded over a site's tokens t, 0 to n-vocab - 1 (ws holds n-vocab +
+   1 weights), w bound to each one's potential weight, an end token's (of
+   ends, a sorted int array) the end's: (fold-weights [t w ws ends] [acc
+   init] body), body the next acc. One primitive loop, the next end token
+   tracked by its index; a function's body, so that it does not box."
+  [[t w ws ends] [acc init] & body]
+  `(let [ws# ~ws
+         ends# ~ends
+         n# (dec (alength ^"[F" ws#))
+         k# (alength ^"[I" ends#)
+         end-weight# (double (aget ^"[F" ws# n#))]
+     (loop [~t 0 j# 0 ~acc ~init]
+       (if (< ~t n#)
+         (let [end?# (and (< j# k#) (== ~t (aget ^"[I" ends# j#)))
+               ~w (if end?# end-weight# (double (aget ^"[F" ws# ~t)))]
+           (recur (inc ~t) (if end?# (inc j#) j#) (do ~@body)))
+         ~acc))))
+
 (defn- max-weight
   "The largest of the site's log weights: the LM's log-probability plus the
-   potential's weight, an end token's (ends, sorted) the end's. One pass,
-   the next end token tracked by its index."
+   potential's weight."
   ^double [^floats row ^floats ws ^ints ends]
-  (let [n (alength row)
-        k (alength ends)
-        end-weight (double (aget ws n))]
-    (loop [t 0 j 0 m Double/NEGATIVE_INFINITY]
-      (if (< t n)
-        (if (and (< j k) (== t (aget ends j)))
-          (recur (inc t) (inc j) (Math/max m (+ (double (aget row t)) end-weight)))
-          (recur (inc t) j (Math/max m (+ (double (aget row t)) (double (aget ws t))))))
-        m))))
+  (fold-weights [t w ws ends] [m Double/NEGATIVE_INFINITY]
+    (Math/max m (+ (double (aget row t)) w))))
 
 (defn- sum-exp
-  "Σ exp(x - m) over the site's log weights x (as max-weight's), skipping
-   those of weight 0."
+  "Σ exp(x - m) over the site's log weights x, skipping those of weight 0."
   ^double [^floats row ^floats ws ^ints ends ^double m]
-  (let [n (alength row)
-        k (alength ends)
-        end-weight (double (aget ws n))]
-    (loop [t 0 j 0 s 0.0]
-      (if (< t n)
-        (let [end? (and (< j k) (== t (aget ends j)))
-              x (+ (double (aget row t)) (if end? end-weight (double (aget ws t))))
-              s (if (Double/isInfinite x) s (+ s (Math/exp (- x m))))]
-          (recur (inc t) (if end? (inc j) j) s))
-        s))))
+  (fold-weights [t w ws ends] [s 0.0]
+    (let [x (+ (double (aget row t)) w)]
+      (if (Double/isInfinite x) s (+ s (Math/exp (- x m)))))))
 
 (defn- allowed-count
   "For weights of 0 and -Inf only (a constraint's: a grammar's mask), how
-   many tokens the site allows (an end token by the end's); -1 when some
-   weight is neither."
+   many tokens the site allows; -1 when some weight is neither."
   ^long [^floats ws ^ints ends]
-  (let [n (dec (alength ws))
-        k (alength ends)
-        end-weight (double (aget ws n))]
-    (if-not (or (== end-weight 0.0) (== end-weight Double/NEGATIVE_INFINITY))
-      -1
-      (loop [t 0 j 0 c 0]
-        (if (< t n)
-          (let [end? (and (< j k) (== t (aget ends j)))
-                w (if end? end-weight (double (aget ws t)))]
-            (cond (== w 0.0) (recur (inc t) (if end? (inc j) j) (inc c))
-                  (== w Double/NEGATIVE_INFINITY) (recur (inc t) (if end? (inc j) j) c)
-                  :else -1))
-          c)))))
+  (fold-weights [_ w ws ends] [c 0]
+    (if (neg? c)
+      c
+      (if (== w 0.0) (inc c) (if (== w Double/NEGATIVE_INFINITY) c -1)))))
 
 (defn- disallowed-mass
-  "Σ p(t) over the tokens a constraint disallows (as allowed-count's)."
+  "Σ p(t) over the tokens a constraint disallows."
   ^double [^floats row ^floats ws ^ints ends]
-  (let [n (alength row)
-        k (alength ends)
-        end-weight (double (aget ws n))]
-    (loop [t 0 j 0 s 0.0]
-      (if (< t n)
-        (let [end? (and (< j k) (== t (aget ends j)))
-              w (if end? end-weight (double (aget ws t)))]
-          (recur (inc t) (if end? (inc j) j) (if (Double/isInfinite w) (+ s (Math/exp (aget row t))) s)))
-        s))))
+  (fold-weights [t w ws ends] [s 0.0]
+    (if (Double/isInfinite w) (+ s (Math/exp (aget row t))) s)))
 
 (defn- log-normalizer
   "log Σ_t p(t) exp(w(t)) at the site, -Inf when no token has weight. Under
@@ -139,17 +126,12 @@
                            (inc n) " (the LM's vocabulary and the end)")
                       {:reason :invalid-weights :entries (alength ws) :n-vocab n})))
     (let [ends (int-array (sort end-tokens))
-          k (alength ends)
-          end-weight (double (aget ws n))
           log-z (log-normalizer row ws ends)]
       (if (Double/isInfinite log-z)
         [nil Double/NEGATIVE_INFINITY]
         (let [q (float-array n)]
-          (loop [t 0 j 0]
-            (when (< t n)
-              (let [end? (and (< j k) (== t (aget ends j)))]
-                (aset q t (unchecked-float (- (+ (double (aget row t)) (if end? end-weight (double (aget ws t)))) log-z)))
-                (recur (inc t) (if end? (inc j) j)))))
+          (fold-weights [t w ws ends] [_ 0]
+            (do (aset q t (unchecked-float (- (+ (double (aget row t)) w) log-z))) 0))
           [q log-z])))))
 
 ;; ---------------------------------------------------------------------------
@@ -164,9 +146,15 @@
 
 (defn- dead?
   "Has a token of the run so far weight 0, so that no sequence it begins
-   has weight?"
-  [{:keys [scores]}]
-  (boolean (some #(Double/isInfinite (double %)) scores)))
+   has weight? (gen.llm.token's run state keeps the flag.)"
+  [state]
+  (boolean (:dead? state)))
+
+(def ^:private ^:const reads-at-once
+  "How many of a run's contexts one read takes: each row is reduced to its
+   site's score before the next read, so a long run holds a few rows (at
+   Qwen3's vocabulary 19 MB), not one for each token."
+  32)
 
 (defn draw-next
   "The run's next token, drawn by draw (a function of a row of
@@ -187,27 +175,30 @@
 
 (defn run-scores
   "The log-probabilities of run, tokens known to follow the run so far,
-   each at its site: the LM's rows at their contexts read in one call, the
-   potential's weights at each. -Inf for a token of weight 0, the LM's
-   row's entry for each token after one."
+   each at its site: the LM's rows at their contexts, read chunk at a time,
+   and the potential's weights at each. -Inf for a token of weight 0, the
+   LM's row's entry for each token after one."
   [{:keys [lm potential] :as gf} {:keys [ctx tokens] :as state} run]
   (let [n (count run)
-        rows (lm/batch-next-logprobs lm (mapv #(into ctx (subvec run 0 %)) (range n)))]
-    (loop [i 0 out [] dead (dead? state)]
-      (if (== i n)
-        out
-        (let [t (int (run i))
-              ^floats row (rows i)]
-          (if dead
-            (recur (inc i) (conj out (double (aget row t))) true)
-            (let [[^floats q] (weighted (end-tokens gf) row (potential/logw-next potential (into tokens (subvec run 0 i))))
-                  s (if q (double (aget q t)) Double/NEGATIVE_INFINITY)]
-              (recur (inc i) (conj out s) (Double/isInfinite s)))))))))
+        score (fn [[out dead] ^long i ^floats row]
+                (let [t (int (run i))]
+                  (if dead
+                    [(conj out (double (aget row t))) true]
+                    (let [[^floats q] (weighted (end-tokens gf) row (potential/logw-next potential (into tokens (subvec run 0 i))))
+                          s (if q (double (aget q t)) Double/NEGATIVE_INFINITY)]
+                      [(conj out s) (Double/isInfinite s)]))))]
+    (loop [i 0 acc [[] (dead? state)]]
+      (if (< i n)
+        (let [m (min n (+ i reads-at-once))
+              rows (lm/batch-next-logprobs lm (mapv #(into ctx (subvec run 0 %)) (range i m)))]
+          (recur m (reduce (fn [acc j] (score acc j (rows (- (long j) i)))) acc (range i m))))
+        (first acc)))))
 
 (defn check-potential
-  "potential, checked for a completion over n-vocab tokens: a potential that
-   gives the empty context weight."
-  [potential ^long n-vocab]
+  "potential, checked for a completion over n-vocab tokens with end-tokens:
+   a potential that gives the empty context weight, and for a grammar one
+   whose end tokens (which it leaves out of the text) are the completion's."
+  [potential ^long n-vocab end-tokens]
   (when-not (satisfies? potential/Potential potential)
     (throw (ex-info (str "token/completion: :potential is a potential (gen.llm.potential), not " (pr-str potential))
                     {:reason :invalid-potential :potential potential})))
@@ -219,6 +210,11 @@
       (throw (ex-info (str "token/completion: the potential's next-token weights have " n " entries, not " (inc n-vocab)
                            " (the LM's vocabulary and the end)")
                       {:reason :invalid-weights :entries n :n-vocab n-vocab}))))
+  (when (and (grammar/grammar? potential) (not= (grammar/end-tokens potential) (set end-tokens)))
+    (throw (ex-info (str "token/completion: the grammar's end tokens " (grammar/end-tokens potential)
+                         " are not the completion's " (set end-tokens)
+                         " (a grammar leaves its end tokens out of the text: make it with the same :end-tokens)")
+                    {:reason :mismatched-end-tokens :grammar (grammar/end-tokens potential) :completion (set end-tokens)})))
   potential)
 
 ;; ---------------------------------------------------------------------------

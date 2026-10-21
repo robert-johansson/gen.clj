@@ -27,8 +27,8 @@
 
    The regex syntax (parse) is the common one, matching whole strings, and
    agrees with java.util.regex (with UNIX_LINES) on every regex it accepts:
-   - a character stands for itself; \\ before a character that is not a
-     letter or digit makes it literal (\\. \\\\ \\( \\[ \\{ …); \\n \\t \\r \\f,
+   - a character stands for itself; \\ before a character that is not an
+     ASCII letter or digit makes it literal (\\. \\\\ \\( \\[ \\{ …); \\n \\t \\r \\f,
      \\xhh, \\x{h…}, \\uhhhh are characters;
    - . is any character but a newline; [abc], [a-z], [^…] (any character
      but these); \\d \\w \\s are [0-9], [A-Za-z0-9_] and [ \\t\\n\\x0B\\f\\r],
@@ -151,6 +151,18 @@
 
 (declare star)
 
+(defn- nested-bound
+  "The upper bound of (x{0,b}){0,d}: b·d, exactly (nil, no bound, when
+   either is), or false when the product would pass Long/MAX_VALUE: the
+   nesting is then left as it is, never wrapped. (A DFA of such a term
+   tracks every pair of counts, so its construction is slow to reach
+   :max-states.)"
+  [d b]
+  (if (or (nil? d) (nil? b))
+    nil
+    (try (Math/multiplyExact (long d) (long b))
+         (catch ArithmeticException _ false))))
+
 (defn repeat
   "From lo to hi strings of r's language, concatenated (hi nil: no upper
    bound)."
@@ -171,8 +183,8 @@
           (and (== lo 1) (= hi 1)) r
           (and (zero? lo) (nil? hi)) (star r)
           (= :star (tag r)) r
-          (and (= :repeat (tag r)) (zero? lo) (zero? (long (nth r 2))))
-          (repeat (nth r 1) 0 (when (and hi (nth r 3)) (* (long hi) (long (nth r 3)))))
+          (and (= :repeat (tag r)) (zero? lo) (zero? (long (nth r 2))) (not (false? (nested-bound hi (nth r 3)))))
+          (repeat (nth r 1) 0 (nested-bound hi (nth r 3)))
           :else [:repeat r lo (some-> hi long)])))
 
 (defn star
@@ -256,16 +268,30 @@
   (apply alt (for [r (without-surrogates rs), sq (utf8-sequences r)]
                (apply cat (map (fn [[lo hi]] (bytes-of (range lo (inc (long hi))))) sq)))))
 
+(defn- check-character
+  "c, a code point, unless it is a surrogate: a loud error."
+  ^long [what ^long c spec]
+  (when (<= 0xD800 c 0xDFFF)
+    (throw (ex-info (str what ": U+" (Long/toHexString c) " is a surrogate, not a character") {:reason :invalid-term :spec spec})))
+  c)
+
+(defn- code-points
+  "The code points of the string s, checked to be characters (a lone
+   surrogate is loud)."
+  [what ^String s]
+  (mapv #(check-character what (long %) s) (.toArray (.codePoints s))))
+
 (defn- spec-ranges
   "The code point ranges of chars's specs."
   [what specs]
   (into [] (mapcat (fn [spec]
-                     (let [cp (fn [x] (cond (char? x) (long (int x))
-                                            (and (integer? x) (<= 0 x max-char)) (long x)
-                                            :else (throw (ex-info (str what ": a character is a char or a code point, not "
-                                                                       (pr-str x))
-                                                                  {:reason :invalid-term :spec spec}))))]
-                       (cond (string? spec) (map (fn [c] [c c]) (.toArray (.codePoints ^String spec)))
+                     (let [cp (fn [x] (let [c (cond (char? x) (long (int x))
+                                                    (and (integer? x) (<= 0 x max-char)) (long x)
+                                                    :else (throw (ex-info (str what ": a character is a char or a code point, not "
+                                                                               (pr-str x))
+                                                                          {:reason :invalid-term :spec spec})))]
+                                        (check-character what c spec)))]
+                       (cond (string? spec) (map (fn [c] [c c]) (code-points what spec))
                              (and (vector? spec) (= 2 (count spec)))
                              (let [[lo hi] (map cp spec)]
                                (when (< (long hi) (long lo))
@@ -277,7 +303,9 @@
 
 (defn chars
   "One character of the specs: chars, strings of them, [lo hi] ranges of
-   chars or code points. (chars [\\a \\z] \\_) is [a-z_]."
+   chars or code points. (chars [\\a \\z] \\_) is [a-z_]. A surrogate (U+D800 to
+   U+DFFF) is no character: a loud error as a spec or a range's end (a
+   range across them holds the characters around them)."
   [& specs]
   (chars-term (spec-ranges "chars" specs)))
 
@@ -289,10 +317,12 @@
 (def any-char "Any character (a Unicode scalar value, as UTF-8)." (chars [0 max-char]))
 
 (defn text
-  "The string s, as UTF-8."
+  "The string s, as UTF-8 (a lone surrogate in it, which UTF-8 cannot
+   encode, a loud error)."
   [^String s]
   (when-not (string? s)
     (throw (ex-info (str "text: a string, not " (pr-str s)) {:reason :invalid-term :text s})))
+  (code-points "text" s)
   (apply cat (map #(bytes-of [(bit-and (long %) 0xff)]) (.getBytes s StandardCharsets/UTF_8))))
 
 ;; ---------------------------------------------------------------------------
@@ -357,6 +387,18 @@
 
 (defn- cp-at [p i] (get (:cps p) i))
 
+(defn- ch
+  "The char of code point c, nil past U+FFFF: (char c) there keeps c's low
+   16 bits (U+1002A would read as *)."
+  [c]
+  (when (< (long c) 0x10000) (char c)))
+
+(defn- literal
+  "Code point c at i, a character (a lone surrogate is loud)."
+  [p i c]
+  (when (<= 0xD800 (long c) 0xDFFF) (fail p i "a lone surrogate is not a character"))
+  c)
+
 (defn- at?
   "Is the character at i ch?"
   [p i ch]
@@ -383,9 +425,9 @@
   [p ^long i]
   (let [c (cp-at p i)]
     (when (nil? c) (fail p i "a backslash ends the regex"))
-    (let [ch (char c)
-          class (when (< (long c) 128) (class-escapes (Character/toLowerCase ch)))]
-      (cond class [[:set (if (Character/isUpperCase ch) (ranges-complement class) class)] (inc i)]
+    (let [ch (when (< (long c) 128) (char c))
+          class (when ch (class-escapes (Character/toLowerCase (char ch))))]
+      (cond class [[:set (if (Character/isUpperCase (char ch)) (ranges-complement class) class)] (inc i)]
             (= ch \n) [[:char 10] (inc i)]
             (= ch \t) [[:char 9] (inc i)]
             (= ch \r) [[:char 13] (inc i)]
@@ -398,9 +440,11 @@
                                 :else (recur (inc j))))]
               [[:char (hex p (+ i 2) close)] (inc (long close))])
             (= ch \x) [[:char (hex p (inc i) (+ i 3))] (+ i 3)]
-            (Character/isDigit (int c)) (fail p i "backreferences and octal escapes are not supported")
-            (Character/isLetter (int c)) (fail p i (str "\\" ch " is not supported"))
-            :else [[:char c] (inc i)]))))
+            ;; an ASCII letter or digit is reserved (as java.util.regex and
+            ;; Python have it); any other character escaped is itself
+            (and ch (Character/isDigit (char ch))) (fail p i "backreferences and octal escapes are not supported")
+            (and ch (Character/isLetter (char ch))) (fail p i (str "\\" ch " is not supported"))
+            :else [[:char (literal p i c)] (inc i)]))))
 
 (defn- class-item
   "One member of a class at i: [[:char c] i'] or [[:set ranges] i']."
@@ -409,7 +453,7 @@
         (at? p i \[) (fail p i "a [ in a class (escape it: nested classes are not supported)")
         (and (at? p i \&) (at? p (inc i) \&)) (fail p i "&& in a class (escape an &)")
         (at? p i \\) (escape p (inc i))
-        :else [[:char (cp-at p i)] (inc i)]))
+        :else [[:char (literal p i (cp-at p i))] (inc i)]))
 
 (defn- char-class
   "The class after a [ at i - 1: [term i']."
@@ -447,7 +491,7 @@
   "The atom at i: [term i'], or nil at the end of an alternative."
   [p ^long i]
   (when-let [c (cp-at p i)]
-    (case (char c)
+    (case (ch c)
       (\| \)) nil
       \( (group p (inc i))
       \[ (char-class p (inc i))
@@ -456,9 +500,9 @@
            [(chars-term (if (= kind :set) x [[x x]])) j])
       \^ (if (zero? i) [epsilon (inc i)] (fail p i "^ only first (escape it for the character)"))
       \$ (if (== i (dec (count (:cps p)))) [epsilon (inc i)] (fail p i "$ only last (escape it for the character)"))
-      (\* \+ \? \{) (fail p i (str "nothing to repeat before " (char c)))
-      (\] \}) (fail p i (str "an unescaped " (char c) " (escape it)"))
-      [(chars-term [[c c]]) (inc i)])))
+      (\* \+ \? \{) (fail p i (str "nothing to repeat before " (ch c)))
+      (\] \}) (fail p i (str "an unescaped " (ch c) " (escape it)"))
+      (let [c (literal p i c)] [(chars-term [[c c]]) (inc i)]))))
 
 (defn- count-at
   "The decimal count at i, or nil: [n i']."
@@ -487,7 +531,7 @@
   [p ^long i]
   (when-let [[r j] (atom-at p i)]
     (let [j (long j)
-          q (some-> (cp-at p j) char)]
+          q (some-> (cp-at p j) ch)]
       (if-not (#{\* \+ \? \{} q)
         [r j]
         (let [[r k] (case q
@@ -498,7 +542,7 @@
               ;; a lazy ? matches the same language; another quantifier is loud
               k (if (at? p k \?) (inc (long k)) (long k))]
           (cond (at? p k \+) (fail p k "possessive quantifiers change the language and are not supported")
-                (#{\* \? \{} (some-> (cp-at p k) char)) (fail p k "a quantifier after a quantifier")
+                (#{\* \? \{} (some-> (cp-at p k) ch)) (fail p k "a quantifier after a quantifier")
                 :else [r k]))))))
 
 (defn- concatenation [p ^long i]

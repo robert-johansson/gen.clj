@@ -101,6 +101,73 @@
                    (IntBuffer/wrap col)))]
     (sort-by first (vals (group-by column (range 256))))))
 
+(defn- inverse
+  "The inverse of a complete automaton's transitions (delta holds state s's
+   successor on class c at s * k + c): [off inv], the states s with
+   delta(s, c) = t at inv[off[c n + t] … off[c n + t + 1])."
+  [^ints delta ^long n ^long k]
+  (let [off (int-array (inc (* k n)))
+        inv (int-array (* k n))]
+    (dotimes [s n]
+      (dotimes [c k]
+        (let [i (inc (+ (* c n) (aget delta (+ (* s k) c))))] (aset off i (inc (aget off i))))))
+    (dotimes [i (* k n)] (aset off (inc i) (+ (aget off (inc i)) (aget off i))))
+    (let [fill (aclone off)]
+      (dotimes [s n]
+        (dotimes [c k]
+          (let [i (+ (* c n) (aget delta (+ (* s k) c)))]
+            (aset inv (aget fill i) (int s))
+            (aset fill i (inc (aget fill i)))))))
+    [off inv]))
+
+;; A partition of the states: block b's states are elems[lo[b] … hi[b]),
+;; where[s] is s's index in elems, block[s] its block, and the first
+;; marked[b] of a block's states are the ones the current splitter marked;
+;; waiting[b] when b is on the worklist.
+
+(defn- mark-predecessors!
+  "Marks every state whose successor on class c is in splitter, moving it
+   to the front of its block: the blocks touched, in the order touched."
+  [{:keys [^ints off ^ints inv ^ints elems ^ints where ^ints block ^ints lo ^ints marked]} ^long n ^long c ^ints splitter]
+  (loop [x 0 touched (transient [])]
+    (if (== x (alength splitter))
+      (persistent! touched)
+      (let [i (+ (* c n) (aget splitter x))]
+        (recur (inc x)
+               (loop [j (aget off i) touched touched]
+                 (if (== j (aget off (inc i)))
+                   touched
+                   (let [s (aget inv j)
+                         b (aget block s)
+                         front (+ (aget lo b) (aget marked b))]
+                     (if (< (aget where s) front)
+                       (recur (inc j) touched)
+                       (let [u (aget elems front)]
+                         (aset elems (aget where s) u)
+                         (aset where u (aget where s))
+                         (aset elems front s)
+                         (aset where s (int front))
+                         (aset marked b (inc (aget marked b)))
+                         (recur (inc j) (if (== 1 (aget marked b)) (conj! touched b) touched))))))))))))
+
+(defn- split!
+  "Splits block b into its marked states, a new block numbered new, and
+   the rest, unless all of b is marked: the block to wait on (Hopcroft's:
+   the new one when b already waits, else the smaller), or nil."
+  [{:keys [^ints elems ^ints block ^ints lo ^ints hi ^ints marked ^booleans waiting]} ^long b ^long new]
+  (let [m (aget marked b)]
+    (aset marked b 0)
+    (when (< m (- (aget hi b) (aget lo b)))
+      (aset lo new (aget lo b))
+      (aset hi new (int (+ (aget lo b) m)))
+      (aset lo b (aget hi new))
+      (dotimes [i m] (aset block (aget elems (+ (aget lo new) i)) (int new)))
+      (let [wait (cond (aget waiting b) new
+                       (<= m (- (aget hi b) (aget lo b))) new
+                       :else b)]
+        (aset waiting wait true)
+        wait))))
+
 (defn- partition-states
   "The coarsest partition of the states 0 … n - 1 of a complete automaton
    (delta holds state s's successor on class c at s * k + c) that separates
@@ -108,80 +175,34 @@
    Hopcroft's algorithm: each state's block, an int array. States share a
    block exactly when their languages are equal."
   ^ints [^ints delta ^long n ^long k ^booleans accept]
-  (let [;; the states s with delta(s, c) = t: inv[off[c n + t] … off[c n + t + 1])
-        off (int-array (inc (* k n)))
-        inv (int-array (* k n))
-        _ (dotimes [s n]
-            (dotimes [c k]
-              (let [i (inc (+ (* c n) (aget delta (+ (* s k) c))))] (aset off i (inc (aget off i))))))
-        _ (dotimes [i (* k n)] (aset off (inc i) (+ (aget off (inc i)) (aget off i))))
-        fill (aclone off)
-        _ (dotimes [s n]
-            (dotimes [c k]
-              (let [i (+ (* c n) (aget delta (+ (* s k) c)))]
-                (aset inv (aget fill i) (int s))
-                (aset fill i (inc (aget fill i))))))
-        ;; block b's states are elems[lo[b] … hi[b]), the first marked[b] of
-        ;; them marked by the current splitter
-        elems (int-array (sort-by #(if (aget accept (long %)) 0 1) (range n)))
-        where (int-array n)
-        block (int-array n)
-        lo (int-array n)
-        hi (int-array n)
-        marked (int-array n)
-        waiting (boolean-array n)
+  (let [[off inv] (inverse delta n k)
         n-accept (count (filter #(aget accept (long %)) (range n)))
-        blocks (if (or (zero? n-accept) (== n-accept n)) 1 2)]
+        first-blocks (if (or (zero? n-accept) (== n-accept n)) 1 2)
+        p {:off off :inv inv
+           :elems (int-array (sort-by #(if (aget accept (long %)) 0 1) (range n)))
+           :where (int-array n) :block (int-array n) :lo (int-array n) :hi (int-array n)
+           :marked (int-array n) :waiting (boolean-array n)}
+        {:keys [^ints elems ^ints where ^ints block ^ints lo ^ints hi ^booleans waiting]} p]
+    ;; accepting states first, a block of them and one of the rest
     (dotimes [i n]
       (let [s (aget elems i)]
         (aset where s (int i))
-        (aset block s (int (if (and (== blocks 2) (<= n-accept i)) 1 0)))))
-    (aset hi 0 (int (if (== blocks 2) n-accept n)))
-    (when (== blocks 2) (aset lo 1 (int n-accept)) (aset hi 1 (int n)))
-    (dotimes [b blocks] (aset waiting b true))
-    (loop [todo (vec (range blocks)) blocks blocks]
+        (aset block s (int (if (and (== first-blocks 2) (<= n-accept i)) 1 0)))))
+    (aset hi 0 (int (if (== first-blocks 2) n-accept n)))
+    (when (== first-blocks 2) (aset lo 1 (int n-accept)) (aset hi 1 (int n)))
+    (dotimes [b first-blocks] (aset waiting b true))
+    (loop [todo (vec (range first-blocks)) blocks first-blocks]
       (if-let [a (peek todo)]
         (let [splitter (Arrays/copyOfRange elems (aget lo (long a)) (aget hi (long a)))
               _ (aset waiting (long a) false)
-              [todo blocks]
-              (reduce
-               (fn [[todo ^long blocks] ^long c]
-                 ;; mark the predecessors on class c, moving each to the front of its block
-                 (let [touched (reduce
-                                (fn [touched t]
-                                  (let [i (+ (* c n) (long t))]
-                                    (reduce (fn [touched ^long j]
-                                              (let [s (aget inv j)
-                                                    b (aget block s)
-                                                    front (+ (aget lo b) (aget marked b))]
-                                                (if (< (aget where s) front)
-                                                  touched
-                                                  (let [u (aget elems front)]
-                                                    (aset elems (aget where s) u)
-                                                    (aset where u (aget where s))
-                                                    (aset elems front s)
-                                                    (aset where s (int front))
-                                                    (aset marked b (inc (aget marked b)))
-                                                    (if (== 1 (aget marked b)) (conj touched b) touched)))))
-                                            touched (range (aget off i) (aget off (inc i))))))
-                                [] splitter)]
-                   ;; split each touched block into its marked part (a new block) and the rest
-                   (reduce (fn [[todo ^long blocks] ^long b]
-                             (let [m (aget marked b)]
-                               (aset marked b 0)
-                               (if (== m (- (aget hi b) (aget lo b)))
-                                 [todo blocks]
-                                 (let [new blocks]
-                                   (aset lo new (aget lo b))
-                                   (aset hi new (int (+ (aget lo b) m)))
-                                   (aset lo b (aget hi new))
-                                   (dotimes [i m] (aset block (aget elems (+ (aget lo new) i)) (int new)))
-                                   (let [smaller (if (<= m (- (aget hi b) (aget lo b))) new b)
-                                         add (if (aget waiting b) new smaller)]
-                                     (aset waiting add true)
-                                     [(conj todo add) (inc blocks)])))))
-                           [todo blocks] touched)))
-               [(pop todo) blocks] (range k))]
+              ;; every class's predecessors of the splitter split the blocks they touch
+              [todo blocks] (reduce (fn [[todo blocks] c]
+                                      (reduce (fn [[todo ^long blocks] b]
+                                                (if-let [wait (split! p b blocks)]
+                                                  [(conj todo wait) (inc blocks)]
+                                                  [todo blocks]))
+                                              [todo blocks] (mark-predecessors! p n c splitter)))
+                                    [(pop todo) blocks] (range k))]
           (recur todo (long blocks)))
         block))))
 

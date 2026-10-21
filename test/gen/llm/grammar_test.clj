@@ -122,12 +122,13 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- brute
-  "Every token walked from every state: the states tokens reach from the
-   start, those of them from which tokens reach acceptance (a fixed point),
-   and each such state's allowed tokens."
-  [d vocab]
+  "Every token walked from every state, but the end tokens, which are no
+   text: the states tokens reach from the start, those of them from which
+   tokens reach acceptance (a fixed point), and each such state's allowed
+   tokens."
+  [d vocab end-tokens]
   (let [walk (fn [s t] (dfa/walk d s (vocab t)))
-        tokens (range (count vocab))
+        tokens (remove (set end-tokens) (range (count vocab)))
         reachable (loop [seen #{(dfa/start d)} todo [(dfa/start d)]]
                     (if-let [s (peek todo)]
                       (let [new (remove seen (filter #(<= 0 %) (map #(walk s %) tokens)))]
@@ -140,26 +141,37 @@
      :live live
      :masks (into {} (map (fn [s] [s (vec (filter #(contains? live (walk s %)) tokens))])) live)}))
 
-(defn- masks-match? [d vocab]
-  (let [{:keys [live masks reachable]} (brute d vocab)]
-    (cond (zero? (dfa/size d)) (= :empty-language (bc/reason #(grammar/grammar vocab d)))
-          (not (contains? live (dfa/start d))) (= :inexpressible (bc/reason #(grammar/grammar vocab d)))
-          :else (let [g (grammar/grammar vocab d)]
-                  (and (= (count reachable) (:reachable (grammar/info g)))
-                       (= (count live) (:live (grammar/info g)))
-                       (every? (fn [s] (and (= (grammar/live? g s) (contains? live s))
-                                            (= (grammar/allowed g s) (get masks s []))
-                                            (every? #(= (grammar/allowed? g s %) (boolean (some #{%} (get masks s []))))
-                                                    (range (count vocab)))))
-                               (range -1 (dfa/size d))))))))
+(defn- masks-match?
+  ([d vocab] (masks-match? d vocab #{}))
+  ([d vocab end-tokens]
+   (let [{:keys [live masks reachable]} (brute d vocab end-tokens)
+         make #(grammar/grammar vocab d {:end-tokens end-tokens})]
+     (cond (zero? (dfa/size d)) (= :empty-language (bc/reason make))
+           (not (contains? live (dfa/start d))) (= :inexpressible (bc/reason make))
+           :else (let [g (make)]
+                   (and (= (count reachable) (:reachable (grammar/info g)))
+                        (= (count live) (:live (grammar/info g)))
+                        (every? (fn [s] (and (= (grammar/live? g s) (contains? live s))
+                                             (= (grammar/allowed g s) (get masks s []))
+                                             (every? #(= (grammar/allowed? g s %) (boolean (some #{%} (get masks s []))))
+                                                     (range (count vocab)))
+                                             (every? #(= -1 (grammar/advance g s %)) end-tokens)))
+                                (range -1 (dfa/size d)))))))))
+
+(defn- gen-end-tokens
+  "Up to two of a vocabulary's tokens, as end tokens."
+  [vocab]
+  (gen/set (gen/choose 0 (dec (count vocab))) {:max-elements 2}))
 
 (defspec byte-masks-match-brute-force 300
-  (prop/for-all [r gen-byte-term vocab gen-byte-vocab]
-    (masks-match? (regex/dfa r) vocab)))
+  (prop/for-all [r gen-byte-term
+                 [vocab ends] (gen/bind gen-byte-vocab #(gen/tuple (gen/return %) (gen-end-tokens %)))]
+    (masks-match? (regex/dfa r) vocab ends)))
 
 (defspec text-masks-match-brute-force 300
-  (prop/for-all [r gen-char-term vocab gen-text-vocab]
-    (masks-match? (regex/dfa r) vocab)))
+  (prop/for-all [r gen-char-term
+                 [vocab ends] (gen/bind gen-text-vocab #(gen/tuple (gen/return %) (gen-end-tokens %)))]
+    (masks-match? (regex/dfa r) vocab ends)))
 
 (deftest masks-over-a-vocabulary-of-many-words
   ;; masks are bitsets of 64-token words: a vocabulary of 97 one-character

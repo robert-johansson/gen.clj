@@ -100,6 +100,14 @@
         (let [r (tc/quick-check 10 (law cases) :seed 20261021)]
           (is (:pass? r) (str k " " (pr-str (select-keys r [:fail :shrunk])))))))))
 
+(def ^:private band
+  "How far one token's log-probability may differ between two reads of it
+   in different batch shapes on llama.cpp (Metal): 0.1 nats, twice the
+   largest difference measured on short prompts (5.2e-2 on the M2 Max,
+   4.3e-2 on the M4; docs/research/llm-branching.md, Numerics). CPU builds
+   need their own."
+  0.1)
+
 (deftest a-text-is-at-least-as-likely-as-its-tokenization
   (when @available?
     (let [{:keys [lm]} (setup)
@@ -110,6 +118,8 @@
           marginal (bytes/prefix-logprob b p " Stockholm")]
       ;; the text's prefix probability counts every tokenization and every
       ;; token after it that begins with the rest: at least the canonical
-      ;; tokenization's, within the engine's noise
-      (println "llama: log P(\" Stockholm\" ...) over tokenizations" marginal ", canonical" canonical)
-      (is (<= (- canonical 0.5) marginal 0.0)))))
+      ;; tokenization's, read by rows where the score is teacher-forced, so
+      ;; within the band for each of its tokens
+      (println "llama: log P(\" Stockholm\" ...) over tokenizations" marginal ", canonical" canonical
+               "(" (count stockholm) "tokens)")
+      (is (<= (- canonical (* (count stockholm) band)) marginal 0.0)))))

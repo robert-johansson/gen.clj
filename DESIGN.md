@@ -1261,6 +1261,21 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     character. A completion's end tokens are not text: the end is allowed
     where the text is complete. A token with no bytes is allowed wherever
     the text may go on.
+  - *A grammar knows its end tokens* (**PROVISIONAL, owner to confirm**,
+    2026-10-21, after the round-3 review's R2):
+    `(grammar/grammar m language {:end-tokens ts})`, by default the LM's
+    `:eog` (none for a byte vocabulary). It leaves them out of the text,
+    its trie and its liveness, so a language that needs an end token's
+    bytes is `:inexpressible` when the grammar is made; and a completion
+    under a grammar must have the same end tokens (`:mismatched-end-tokens`
+    otherwise). The first build read every token as text, end tokens
+    included, while the completion gives an end token the end's weight: a
+    grammar `[ab]{3}\n` with a newline end token passed `prefix` and
+    stranded every completion. Alternatives: the completion passes its end
+    tokens to the potential on every call (a change to gen.llm.potential's
+    protocol, for every potential); or the completion makes its grammar
+    itself, `(token/completion m {:grammar language})` (one way less to
+    disagree, but grammars no longer potentials shared with token SMC).
   - *The middleware is the completion's `:potential` option*: the token
     GF's transitions are written once and the potential reweighs each
     site's distribution (row times weights, renormalized; an end token
