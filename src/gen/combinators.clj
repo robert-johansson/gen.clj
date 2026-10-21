@@ -501,6 +501,12 @@
 ;; Recurse
 ;; ---------------------------------------------------------------------------
 
+(defn- child-of
+  "The node number of child j of node node, unchecked: Recurse's own
+   loops, whose max-branch and number of children are checked already."
+  [node j max-branch]
+  (clojure.core/+ (* node max-branch) j 1))
+
 (defn- check-numbering
   "Loud unless every number is a natural number, max-branch positive."
   [f max-branch & numbers]
@@ -515,7 +521,7 @@
   (check-numbering "get-child" max-branch parent j)
   (when-not (< j max-branch)
     (throw (ex-info (str "get-child: child " j " of at most " max-branch) {:j j :max-branch max-branch})))
-  (clojure.core/+ (* parent max-branch) j 1))
+  (child-of parent j max-branch))
 
 (defn- check-not-root [f child]
   (when (zero? child)
@@ -613,7 +619,7 @@
               out (production-output gf node (:trace r))
               child-diff (if (diff/changed? (:retdiff r)) diff/unknown-change diff/no-change)]
           (recur (into (dissoc todo node)
-                       (map-indexed (fn [j c] [(get-child node j max-branch) [c child-diff]]) (:children out)))
+                       (map-indexed (fn [j c] [(child-of node j max-branch) [c child-diff]]) (:children out)))
                  (assoc prods node (:trace r)) (assoc p-diffs node (:retdiff r)) (+ weight (:weight r))
                  (put-part discard node :production (:discard r))))
         {:prods prods :p-diffs p-diffs :weight weight :discard discard}))))
@@ -627,7 +633,7 @@
   (let [{:keys [aggregation max-branch]} gf]
     (reduce (fn [{:keys [aggs a-diffs weight discard]} node]
               (let [{v :value children :children} (:retval (prods node))
-                    kids (clojure.core/map #(get-child node % max-branch) (range (count children)))
+                    kids (clojure.core/map #(child-of node % max-branch) (range (count children)))
                     old (old-a node)
                     v-changed? (diff/changed? (p-diffs node))
                     ws-changed? (or (nil? old) (not= (count children) (count (second (:args old))))
@@ -694,7 +700,7 @@
                                            (node-key key node :production) [node :production])
                               out (production-output gf node r)]
                           (recur (into (dissoc todo node)
-                                       (map-indexed (fn [j c] [(get-child node j max-branch) c]) (:children out)))
+                                       (map-indexed (fn [j c] [(child-of node j max-branch) c]) (:children out)))
                                  (assoc ps node out) (+ weight (:weight r))))
                         [ps weight]))
         _ (doseq [node (keys targets)]
@@ -702,7 +708,7 @@
               (throw (gfi/unvisited :assess [[node]] (str "the tree has nodes " (vec (sort (keys ps))))))))
         [as weight] (reduce (fn [[as weight] node]
                               (let [{v :value children :children} (ps node)
-                                    ws (mapv #(as (get-child node % max-branch)) (range (count children)))
+                                    ws (mapv #(as (child-of node % max-branch)) (range (count children)))
                                     r (assess-at aggregation [v ws] (cm/get-submap choices [node :aggregation])
                                                  (node-key key node :aggregation) [node :aggregation])]
                                 [(assoc as node (:retval r)) (+ weight (:weight r))]))
