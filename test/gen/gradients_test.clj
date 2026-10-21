@@ -12,6 +12,8 @@
             [gen.dynamic :as dyn :refer [gen]]
             [gen.gfi :as gfi]
             [gen.gradients :as g]
+            [gen.inference.enumerative :as enum]
+            [gen.inference.proposal :as prop]
             [gen.learning :as learn]
             [gen.random :as rng]
             [gen.selection :as sel]))
@@ -281,6 +283,29 @@
   (testing "no store is loud"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"holds no parameter store"
                           (g/param-gradients (gfi/simulate (comb/map plain) [[1.0]] (rng/key 37)))))))
+
+;; with-internal-proposal and with-exact-proposal keep their model's density,
+;; so their stores and parameter gradients are the model's
+(deftest a-wrapper-s-stores-are-its-model-s
+  (let [model (dyn/with-params (gen [] (let [k (trace :k (d/bernoulli 0.3))]
+                                          (trace :x (d/normal (+ (param :mu) (array/where k 1.0 0.0)) 1))))
+                               {:mu 0.5})
+        choices (cm/choicemap :k true :x 1.2)
+        own (g/param-gradients (:trace (gfi/generate model [] choices (rng/key 40))))]
+    (doseq [[label wrapped] [["an internal proposal" (prop/with-internal-proposal
+                                                      model
+                                                      (gen [cs] (when-not (cm/has-value? (cm/get-submap cs :k))
+                                                                  (trace :k (d/bernoulli 0.5)))))]
+                             ["an exact proposal" (enum/with-exact-proposal model [:k])]]]
+      (testing label
+        (let [tr (:trace (gfi/generate wrapped [] choices (rng/key 41)))
+              moved (gfi/with-stores wrapped {:mu 2.0})]
+          (is (= {:mu 0.5} (gfi/stores wrapped)))
+          (is (ts/close? (:mu own) (:mu (g/param-gradients tr))) "the model's gradient, d/dmu = 1.2 - 1.5")
+          (is (= {:mu 2.0} (gfi/stores moved)))
+          ;; d/dmu log N(1.2; mu + 1, 1) at mu = 2
+          (is (ts/close? -1.8 (:mu (g/param-gradients (:trace (gfi/generate moved [] choices (rng/key 42))))))
+              "the stores given back reach the model"))))))
 
 (deftest learning-steps-a-combinator-s-stores
   ;; gen.learning steps the tree gfi/stores gives, and gfi/with-stores gives
