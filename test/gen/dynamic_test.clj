@@ -401,6 +401,49 @@
       (gfi/simulate m [] (rng/key 2))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"after the generative function returned" (doall @escaped))))))
 
+(def ^:private signed-zero
+  "x · 0.0: 0.0 or -0.0 by x's sign."
+  (gen [] (* (trace :x (d/normal 0.0 1.0)) 0.0)))
+
+(deftest unchanged-is-same-value
+  ;; The post-M5 review's P1-01 and P1-03 (DESIGN.md §9, D1): the retdiff
+  ;; decided "unchanged" by =, so a callee's 0.0 that became -0.0, a vector
+  ;; that became a list or a sorted map an array map was no-change, and a
+  ;; static caller or an Unfold kept the node that tells them apart; and =
+  ;; walked an infinite lazy return value forever. Planted bug (2026-10-22):
+  ;; = back in the retdiff fails the four weights and the scores, and times
+  ;; out both lazy updates
+  (let [lp (fn [y mu] (dc/log-prob (d/normal mu 1.0) y))
+        reading (fn [callee mean-of]
+                  (gen ^:static [] (let [v (splice :in callee) y (trace :y (d/normal (mean-of v) 1.0))] y)))
+        cases [["a signed zero" (reading signed-zero #(array/atan2 % -1.0)) {:in {:x 1.0} :y 1.0} {:in {:x -1.0}}
+                (- (lp 1.0 (- Math/PI)) (lp 1.0 Math/PI))]
+               ["a vector, then a list"
+                (reading (gen [] (if (trace :b (d/bernoulli 0.5)) [1.0 2.0] (list 1.0 2.0))) #(first (conj % 5.0)))
+                {:in {:b true} :y 0.0} {:in {:b false}} (- (lp 0.0 5.0) (lp 0.0 1.0))]
+               ["a sorted map, then an array map"
+                (reading (gen [] (if (trace :b (d/bernoulli 0.5)) (sorted-map :b 1.0 :a 2.0) (array-map :b 1.0 :a 2.0)))
+                         #(val (first %)))
+                {:in {:b true} :y 0.0} {:in {:b false}} (- (lp 0.0 1.0) (lp 0.0 2.0))]
+               ;; step t's mean is atan2(state, -1), its next state x · 0.0;
+               ;; step 0's x from 1 to -1, then step 1's state from 0.0 to -0.0
+               ["an Unfold over a dynamic kernel"
+                (gen [] (splice :in (comb/unfold (gen [_t s] (* (trace :x (d/normal (array/atan2 s -1.0) 1.0)) 0.0))) 2 0.0))
+                {:in {0 {:x 1.0} 1 {:x 1.0}}} {:in {0 {:x -1.0}}}
+                (+ (- (lp -1.0 Math/PI) (lp 1.0 Math/PI)) (- (lp 1.0 (- Math/PI)) (lp 1.0 Math/PI)))]]]
+    (doseq [[label gf init constraints expected] cases]
+      (testing label
+        (let [tr (:trace (gfi/generate gf [] (cm/from-map init) (rng/key 1)))
+              {t :trace w :weight} (gfi/update tr (cm/from-map constraints) (rng/key 2))]
+          (is (close? expected w))
+          (is (close? (:weight (gfi/assess gf [] (:choices t) (rng/key 3))) (:score t)) "the score is the new choices'")))))
+  (testing "an infinite lazy return value is changed, at once"
+    (doseq [[label body] [["iterate" (gen [x0] (trace :y (d/normal x0 1)) (iterate #(* 0.9 %) x0))]
+                          ["repeat" (gen [x0] (trace :y (d/normal x0 1)) (repeat x0))]]]
+      (let [tr (:trace (gfi/generate body [1.0] (cm/choicemap :y 0.0) (rng/key 4)))
+            r (ts/within 10000 #(gfi/update tr (cm/choicemap :y 0.5) (rng/key 5)))]
+        (is (diff/unknown-change? (:retdiff r)) label)))))
+
 (deftest guarded-clojure-core-matches-clojure-core
   ;; third acceptance test: the substitution must not change ordinary code
   (let [k (rng/key 0)

@@ -19,10 +19,22 @@
    elements that changed). It has rules for count, nth, get, conj, assoc,
    +, -, inc, dec and vec, and is open: (defmethod propagate #'my-fn [_
    args diffs] …). (consistent? prev new d) says whether d describes the
-   change from prev to new."
+   change from prev to new.
+
+   Unchanged means gen.gfi/same-value? (DESIGN.md §9, D1): by class and
+   order, so -0.0 is not 0.0 and a list is not a vector, and bounded, so a
+   value past its budget, or a lazy one not yet realized, counts as
+   changed."
   (:require [gen.array :as array]))
 
 (set! *warn-on-reflection* true)
+
+(def ^:private same-value
+  "gen.gfi/same-value?, resolved when first used: gen.gfi requires this
+   namespace."
+  (delay (requiring-resolve 'gen.gfi/same-value?)))
+
+(defn- same? [a b] (@same-value a b))
 
 (defrecord NoChange [])
 (defrecord UnknownChange [])
@@ -91,18 +103,18 @@
         :else true))
 
 (defn consistent?
-  "Does diff d describe the change from prev to new: equal values for
-   no-change, the lengths and the unchanged elements of a vector-diff, the
-   amount of an int-diff, the elements of a set-diff, the entries of a
-   dict-diff, and each element diff of the elements it names? (unknown-change
-   describes any change.)"
+  "Does diff d describe the change from prev to new: the same value
+   (gen.gfi/same-value?) for no-change, the lengths and the unchanged
+   elements of a vector-diff, the amount of an int-diff, the elements of a
+   set-diff, the entries of a dict-diff, and each element diff of the
+   elements it names? (unknown-change describes any change.)"
   [prev new d]
-  (cond (no-change? d) (= prev new)
+  (cond (no-change? d) (same? prev new)
         (unknown-change? d) true
         (vector-diff? d) (and (= (:prev-length d) (count prev)) (= (:new-length d) (count new))
                               (every? #(if-let [e (get (:updated d) %)]
                                          (consistent? (nth prev %) (nth new %) e)
-                                         (= (nth prev %) (nth new %)))
+                                         (same? (nth prev %) (nth new %)))
                                       (range (min (count prev) (count new)))))
         (int-diff? d) (== (- (double new) (double prev)) (double (:amount d)))
         ;; added elements (keys) were absent and deleted ones present, so
@@ -111,31 +123,38 @@
                            (= new (into (apply disj (set prev) (:deleted d)) (:added d))))
         (dict-diff? d) (and (not-any? #(contains? prev %) (keys (:added d))) (every? #(contains? prev %) (:deleted d))
                             (= (set (keys new)) (into (apply disj (set (keys prev)) (:deleted d)) (keys (:added d))))
-                            (every? (fn [[k v]] (= v (get new k))) (:added d))
+                            (every? (fn [[k v]] (same? v (get new k))) (:added d))
                             (every? #(if-let [e (get (:updated d) %)]
                                        (consistent? (get prev %) (get new %) e)
-                                       (= (get prev %) (get new %)))
+                                       (same? (get prev %) (get new %)))
                                     (filter #(contains? prev %) (keys new))))
         :else false))
 
 (defn compute
   "The diff from prev to now, as precise as these kinds state it: no-change
-   for equal values; for two vectors a vector-diff naming the elements that
-   differ; for two maps a dict-diff, two sets a set-diff, two integers an
-   int-diff; unknown-change otherwise (e.g. to build argdiffs from values)."
+   for the same value (gen.gfi/same-value?); for two vectors a vector-diff
+   naming the elements that differ; for two maps a dict-diff, two sets a
+   set-diff, two integers an int-diff; unknown-change otherwise (e.g. to
+   build argdiffs from values). Values same-value? tells apart are never
+   no-change, though their entries are all the same (another class, order
+   or metadata, or past its budget)."
   [prev now]
-  (cond (= prev now) no-change
-        (and (vector? prev) (vector? now))
-        (vector-diff (count now) (count prev)
-                     (into {} (for [i (range (min (count prev) (count now))) :when (not= (prev i) (now i))]
-                                [i (compute (prev i) (now i))])))
-        (and (map? prev) (map? now) (not (record? prev)) (not (record? now)))
-        (dict-diff (into {} (remove #(contains? prev (key %))) now)
-                   (set (remove #(contains? now %) (keys prev)))
-                   (into {} (for [[k v] now :when (and (contains? prev k) (not= v (prev k)))] [k (compute (prev k) v)])))
-        (and (set? prev) (set? now)) (set-diff (remove prev now) (remove now prev))
-        (and (integer? prev) (integer? now)) (int-diff (- now prev))
-        :else unknown-change))
+  (if (same? prev now)
+    no-change
+    (let [d (cond (and (vector? prev) (vector? now))
+                  (vector-diff (count now) (count prev)
+                               (into {} (for [i (range (min (count prev) (count now))) :when (not (same? (prev i) (now i)))]
+                                          [i (compute (prev i) (now i))])))
+                  (and (map? prev) (map? now) (not (record? prev)) (not (record? now)))
+                  (dict-diff (into {} (remove #(contains? prev (key %))) now)
+                             (set (remove #(contains? now %) (keys prev)))
+                             (into {} (for [[k v] now :when (and (contains? prev k) (not (same? v (prev k))))]
+                                        [k (compute (prev k) v)])))
+                  (and (set? prev) (set? now)) (set-diff (remove prev now) (remove now prev))
+                  (and (integer? prev) (integer? now)) (int-diff (- now prev))
+                  :else unknown-change)]
+      ;; an empty dict-, set- or int-diff collapses to no-change
+      (if (no-change? d) unknown-change d))))
 
 ;; ---------------------------------------------------------------------------
 ;; Propagation (Gen.jl's Diffed)

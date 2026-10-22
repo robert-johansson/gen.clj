@@ -135,6 +135,13 @@
     (and d (not (cm/empty? d))) (update :discard cm/set-submap i d)
     (diff/changed? rd) (assoc-in [:retdiffs i] rd)))
 
+(defn- keep-first
+  "v's first n elements, as v itself when they are all of it: a vector of
+   v's class, so a return value nothing changed is the same value
+   (gfi/same-value?), and no subvec holds on to dropped elements."
+  [v n]
+  (if (== n (count v)) v (into [] (take n) v)))
+
 (defn- drop-elements
   "acc without the elements from n on. update discards them and subtracts
    their scores from the weight; in regenerate they cancel against the
@@ -150,8 +157,8 @@
                                          (update :discard cm/set-submap i (:choices sub))))))
                 acc
                 (clojure.core/map vector (range n (count (:subs acc))) gone))
-        (update :subs subvec 0 n)
-        (update :retval subvec 0 n))))
+        (update :subs keep-first n)
+        (update :retval keep-first n))))
 
 (defn- retdiff [{:keys [retdiffs]} n prev-n]
   (if (and (= n prev-n) (empty? retdiffs)) diff/no-change (diff/vector-diff n prev-n retdiffs)))
