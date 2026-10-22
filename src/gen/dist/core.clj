@@ -12,7 +12,6 @@
   (:refer-clojure :exclude [-])
   (:require [gen.array :as array :refer [-]]
             [gen.array.dtype :as dt]
-            [gen.array.protocols :as p]
             [gen.array.shape :as sh]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
@@ -128,7 +127,7 @@
   [batch-shape & params]
   (reduce sh/broadcast (vec batch-shape) (map array/shape params)))
 
-(defn int-dtype [b] (:int (p/-defaults b)))
+(defn int-dtype [b] (:int (array/defaults b)))
 
 (def ^:private float-limit-table
   {:float64 {:tiny Double/MIN_NORMAL :max Double/MAX_VALUE :eps (Math/ulp 1.0)}
@@ -143,7 +142,7 @@
   [dtype]
   (get float-limit-table dtype (:float64 float-limit-table)))
 
-(defn float-dtype [b] (:float (p/-defaults b)))
+(defn float-dtype [b] (:float (array/defaults b)))
 
 (defn check
   "Throw unless ok, naming the distribution and parameter."

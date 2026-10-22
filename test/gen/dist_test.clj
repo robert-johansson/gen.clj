@@ -496,6 +496,19 @@
                            :dist))
         (pr-str form))))
 
+(deftest the-distribution-layer-calls-only-gen-array
+  ;; rule 3, genclj-z6iy (I3-11): gen.dist and gen.dist.core called
+  ;; gen.array.protocols for a backend's default dtypes and a batch's
+  ;; particles; now array/defaults and array/all-particles (planted: the
+  ;; protocols required again)
+  (doseq [n '[gen.dist gen.dist.core gen.dist.dsl gen.dist.host]]
+    (require n)
+    (is (not-any? #(or (= 'gen.array.protocols (ns-name %)) (.startsWith (name (ns-name %)) "gen.backend"))
+                  (vals (ns-aliases n)))
+        (str n))
+    (is (not-any? #(.startsWith (.getName ^Class %) "gen.array.protocols") (vals (ns-imports n))) (str n)))
+  (is (= {:float (ts/float-dtype) :int (ts/int-dtype)} (array/defaults array/*backend*))))
+
 (deftest every-family-declares-its-value-shape
   ;; genclj-wmug (I3-07): value shapes and discreteness were registered in
   ;; two lists far from the definitions, so a family left out had no shape

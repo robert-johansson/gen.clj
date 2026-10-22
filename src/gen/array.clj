@@ -132,7 +132,10 @@
 
 (defn size [x] (sh/size (shape x)))
 
-(defn- defaults [b] (p/-defaults b))
+(defn defaults
+  "Backend b's default dtypes, {:float … :int …} (docs/array-api.md §5)."
+  [b]
+  (p/-defaults b))
 
 (defn- common-dtype
   "The dtype the operands xs combine to on backend b (weak host scalars)."
@@ -1102,17 +1105,23 @@
 ;; Comparison helpers (for tests and assertions)
 ;; ---------------------------------------------------------------------------
 
+(defn all-particles
+  "Every particle of a batched value (gen.array.batch) on a leading axis, for
+   a check or a bound over all of them; any other value as it is."
+  [x]
+  (if (instance? gen.array.protocols.IBatchedValue x) (p/-all-particles x) x))
+
 (defn all-true?
   "Is every element of the bool array x true, across every particle of a
    batched value (gen.array.batch)? For validation, which must hold for all
    particles; branching uses truthy?, which a batch cannot answer."
   [x]
-  (truthy? (all (if (instance? gen.array.protocols.IBatchedValue x) (p/-all-particles x) x))))
+  (truthy? (all (all-particles x))))
 
 (defn any-true?
   "Is some element of the bool array x true, across every particle?"
   [x]
-  (truthy? (any (if (instance? gen.array.protocols.IBatchedValue x) (p/-all-particles x) x))))
+  (truthy? (any (all-particles x))))
 
 (defn equal?
   "Do x and y have the same shape and numerically equal elements? (NaN is

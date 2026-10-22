@@ -16,11 +16,9 @@
                                      lgamma log-beta xlogy xlog1py logical-and logical-or]]
             [gen.array.dtype :as dt]
             [gen.array.linalg :as la]
-            [gen.array.protocols :as p]
             [gen.array.shape :as sh]
             [gen.dist.core :as dc :refer [defdist]]
-            [gen.random :as rng])
-  (:import [gen.array.protocols IBatchedValue]))
+            [gen.random :as rng]))
 
 (set! *warn-on-reflection* true)
 
@@ -299,9 +297,9 @@
 
 (defn- host-max
   "The largest element of x on the host, across every particle of a batched
-   value (as array/all-true? reads one)."
+   value."
   ^double [x]
-  (double (array/item (array/max (if (instance? IBatchedValue x) (p/-all-particles x) x)))))
+  (double (array/item (array/max (array/all-particles x)))))
 
 (defn- rung
   "The i-th readable jitter: 1, 2 or 5 times 10^⌊i/3⌋."

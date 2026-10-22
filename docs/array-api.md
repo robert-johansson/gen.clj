@@ -128,7 +128,7 @@ A distribution body, compared with GenMLX:
 ## 5. Dtypes
 
 - **Keywords:** `:bool :int32 :int64 :uint32 :float16 :bfloat16 :float32 :float64`.
-  Each backend declares its defaults:
+  Each backend declares its defaults, which `(array/defaults b)` gives:
   - JVM: `{:float :float64 :int :int64}`;
   - MLX: `{:float :float32 :int :int32}`.
 
