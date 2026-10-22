@@ -133,6 +133,19 @@
 
 (defn int-dtype [b] (:int (p/-defaults b)))
 
+(def ^:private float-limit-table
+  {:float64 {:tiny Double/MIN_NORMAL :max Double/MAX_VALUE :eps (Math/ulp 1.0)}
+   :float32 {:tiny (double Float/MIN_NORMAL) :max (double Float/MAX_VALUE) :eps (double (Math/ulp (float 1.0)))}
+   :bfloat16 {:tiny (double Float/MIN_NORMAL) :max 3.3895313892515355E38 :eps 0.0078125}
+   :float16 {:tiny 6.103515625E-5 :max 65504.0 :eps 9.765625E-4}})
+
+(defn float-limits
+  "{:tiny :max :eps} of a float dtype: its smallest normal number, its
+   largest finite one and the ulp of 1, for clamps and tolerances at the
+   dtype's edges. Other kinds take float64's (an integer is exact)."
+  [dtype]
+  (get float-limit-table dtype (:float64 float-limit-table)))
+
 (defn float-dtype [b] (:float (p/-defaults b)))
 
 (defn check

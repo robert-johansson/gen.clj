@@ -643,7 +643,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   floor and the clamp see where a draw lies: x/(x + y) of two underflowed
   gammas was 0/0 = NaN (448 of 2,000 draws), where flooring the gammas
   first would put the draw at 1/2. A shape below 1 boosts in log space,
-  log Γ(α+1)'s draw - E/α for an exponential E (genclj-uli3).
+  log Γ(α+1)'s draw - E/α for an exponential E (genclj-uli3). Every beta
+  and dirichlet draw changes for a given key (PROVISIONAL, owner to
+  confirm, 2026-10-22: the old draws could be kept for α ≥ 1, at the cost
+  of a second sampler).
 - **A mixture of a discrete and a continuous family is an error** when it
   is made (owner, 2026-10-22, the post-M5 review's P2-02). Its density would add a pmf to a pdf: given
   y = 0, the posterior came out 0.267 where 0.80 is exact. Gen.jl's types
