@@ -224,7 +224,7 @@
                         (let [ea (element-args args i)
                               k (element-key key i)]
                           (if constraints
-                            (let [{sub :trace w :weight} (generate-at kernel ea (cm/get-submap constraints i) k [i])]
+                            (let [{sub :trace w :weight} (generate-at kernel ea (cm/get-submap constraints i cm/EMPTY) k [i])]
                               (put-element acc i sub nil w))
                             (put-element acc i (simulate-at kernel ea k) nil 0.0))))
                       empty-acc
@@ -249,7 +249,7 @@
                             k (element-key key i)]
                         (put-update acc i old
                                     (if (= op :update)
-                                      (update-at kernel old ea ead (cm/get-submap cs i) k [i])
+                                      (update-at kernel old ea ead (cm/get-submap cs i cm/EMPTY) k [i])
                                       (regenerate-at kernel old ea ead (sel/get-subselection cs i) k [i])))))
                     (trace-acc tr)
                     (visits (changed-elements argdiffs) targets kept))
@@ -258,7 +258,7 @@
                       (let [ea (element-args args i)
                             k (element-key key i)]
                         (if (= op :update)
-                          (let [{sub :trace w :weight} (generate-at kernel ea (cm/get-submap cs i) k [i])]
+                          (let [{sub :trace w :weight} (generate-at kernel ea (cm/get-submap cs i cm/EMPTY) k [i])]
                             (put-element acc i sub nil w))
                           (put-element acc i (simulate-at kernel ea k) nil 0.0))))
                     acc
@@ -270,12 +270,30 @@
         n (map-length args)]
     (indices :assess choices n)
     (reduce (fn [{:keys [weight retval]} i]
-              (let [r (assess-at (:kernel gf) (element-args args i) (cm/get-submap choices i) (element-key key i) [i])]
+              (let [r (assess-at (:kernel gf) (element-args args i) (cm/get-submap choices i cm/EMPTY) (element-key key i) [i])]
                 {:weight (+ weight (:weight r)) :retval (conj retval (:retval r))}))
             {:weight 0.0 :retval []}
             (range n))))
 
+;; A combinator's trainable-parameter stores (gfi/IStores): its callees',
+;; keyed as it holds them, a Map's and an Unfold's those of their one kernel
+
+(defn- callee-stores
+  "{key stores} over the callees, a vector or map of generative functions
+   by key, that hold stores; nil when none does."
+  [callees]
+  (not-empty (into {} (keep (fn [[k gf]] (when-let [s (gfi/stores gf)] [k s]))) (if (map? callees) callees (map-indexed vector callees)))))
+
+(defn- with-callee-stores
+  "callees (a vector or map of generative functions by key) with stores,
+   {key stores}, given to them."
+  [callees stores]
+  (reduce-kv (fn [cs k s] (assoc cs k (gfi/with-stores (get cs k) s))) callees stores))
+
 (gfi/defgf MapGF [kernel]
+  gfi/IStores
+  (-stores [gf] (gfi/stores (:kernel gf)))
+  (-with-stores [gf stores] (assoc gf :kernel (gfi/with-stores (:kernel gf) stores)))
   gfi/IGenerativeFunction
   (-simulate [gf args key] (:trace (map-generate gf args nil key)))
   (-generate [gf args constraints key] (map-generate gf args constraints key))
@@ -323,7 +341,7 @@
                 (let [sa (step-args t state params)
                       k (element-key key t)
                       [sub w] (if constraints
-                                (let [r (generate-at kernel sa (cm/get-submap constraints t) k [t])] [(:trace r) (:weight r)])
+                                (let [r (generate-at kernel sa (cm/get-submap constraints t cm/EMPTY) k [t])] [(:trace r) (:weight r)])
                                 [(simulate-at kernel sa k) 0.0])]
                   (recur (inc t) (:retval sub) (put-element acc t sub nil w)))
                 acc))]
@@ -356,7 +374,7 @@
                   sad (into [diff/no-change sdiff] dparams)
                   k (element-key key t)
                   r (if (= op :update)
-                      (update-at kernel old sa sad (cm/get-submap cs t) k [t])
+                      (update-at kernel old sa sad (cm/get-submap cs t cm/EMPTY) k [t])
                       (regenerate-at kernel old sa sad (sel/get-subselection cs t) k [t]))]
               (recur (inc t) (:retval (:trace r)) (:retdiff r) (put-update acc t old r)))
 
@@ -369,7 +387,7 @@
                 (let [sa (step-args t state params)
                       k (element-key key t)
                       [sub w] (if (= op :update)
-                                (let [r (generate-at kernel sa (cm/get-submap cs t) k [t])] [(:trace r) (:weight r)])
+                                (let [r (generate-at kernel sa (cm/get-submap cs t cm/EMPTY) k [t])] [(:trace r) (:weight r)])
                                 [(simulate-at kernel sa k) 0.0])]
                   (recur (inc t) (:retval sub) (put-element acc t sub nil w)))
                 acc))]
@@ -381,11 +399,14 @@
   ;; weight starts boxed: it accumulates arrays on array backends
   (loop [t 0 state init weight (Double/valueOf 0.0) retval []]
     (if (< t n)
-      (let [r (assess-at (:kernel gf) (step-args t state params) (cm/get-submap choices t) (element-key key t) [t])]
+      (let [r (assess-at (:kernel gf) (step-args t state params) (cm/get-submap choices t cm/EMPTY) (element-key key t) [t])]
         (recur (inc t) (:retval r) (+ weight (:weight r)) (conj retval (:retval r))))
       {:weight weight :retval retval}))))
 
 (gfi/defgf UnfoldGF [kernel]
+  gfi/IStores
+  (-stores [gf] (gfi/stores (:kernel gf)))
+  (-with-stores [gf stores] (assoc gf :kernel (gfi/with-stores (:kernel gf) stores)))
   gfi/IGenerativeFunction
   (-simulate [gf args key] (:trace (unfold-generate gf args nil key)))
   (-generate [gf args constraints key] (unfold-generate gf args constraints key))
@@ -453,6 +474,9 @@
           (= op :regenerate) (assoc :weight 0.0))))))
 
 (gfi/defgf SwitchGF [branches]
+  gfi/IStores
+  (-stores [gf] (callee-stores (:branches gf)))
+  (-with-stores [gf stores] (update gf :branches with-callee-stores stores))
   gfi/IGenerativeFunction
   (-simulate [gf args key] (:trace (switch-generate gf args nil key)))
   (-generate [gf args constraints key] (switch-generate gf args constraints key))
@@ -477,6 +501,12 @@
 ;; Recurse
 ;; ---------------------------------------------------------------------------
 
+(defn- child-of
+  "The node number of child j of node node, unchecked: Recurse's own
+   loops, whose max-branch and number of children are checked already."
+  [node j max-branch]
+  (clojure.core/+ (* node max-branch) j 1))
+
 (defn- check-numbering
   "Loud unless every number is a natural number, max-branch positive."
   [f max-branch & numbers]
@@ -491,7 +521,7 @@
   (check-numbering "get-child" max-branch parent j)
   (when-not (< j max-branch)
     (throw (ex-info (str "get-child: child " j " of at most " max-branch) {:j j :max-branch max-branch})))
-  (clojure.core/+ (* parent max-branch) j 1))
+  (child-of parent j max-branch))
 
 (defn- check-not-root [f child]
   (when (zero? child)
@@ -557,7 +587,7 @@
   (or (= :all targets) (contains? (get targets node) part)))
 
 (defn- node-cs [op cs node part]
-  (when cs (if (= op :regenerate) (sel/get-subselection cs [node part]) (cm/get-submap cs [node part]))))
+  (when cs (if (= op :regenerate) (sel/get-subselection cs [node part]) (cm/get-submap cs [node part] cm/EMPTY))))
 
 (defn- run-node
   "One kernel run at node: revised from old when given (update or
@@ -589,7 +619,7 @@
               out (production-output gf node (:trace r))
               child-diff (if (diff/changed? (:retdiff r)) diff/unknown-change diff/no-change)]
           (recur (into (dissoc todo node)
-                       (map-indexed (fn [j c] [(get-child node j max-branch) [c child-diff]]) (:children out)))
+                       (map-indexed (fn [j c] [(child-of node j max-branch) [c child-diff]]) (:children out)))
                  (assoc prods node (:trace r)) (assoc p-diffs node (:retdiff r)) (+ weight (:weight r))
                  (put-part discard node :production (:discard r))))
         {:prods prods :p-diffs p-diffs :weight weight :discard discard}))))
@@ -603,7 +633,7 @@
   (let [{:keys [aggregation max-branch]} gf]
     (reduce (fn [{:keys [aggs a-diffs weight discard]} node]
               (let [{v :value children :children} (:retval (prods node))
-                    kids (clojure.core/map #(get-child node % max-branch) (range (count children)))
+                    kids (clojure.core/map #(child-of node % max-branch) (range (count children)))
                     old (old-a node)
                     v-changed? (diff/changed? (p-diffs node))
                     ws-changed? (or (nil? old) (not= (count children) (count (second (:args old))))
@@ -666,11 +696,11 @@
         targets (recurse-targets :assess choices)
         [ps weight] (loop [todo (sorted-map 0 input) ps {} weight (Double/valueOf 0.0)]
                       (if-let [[node in] (first todo)]
-                        (let [r (assess-at production [in] (cm/get-submap choices [node :production])
+                        (let [r (assess-at production [in] (cm/get-submap choices [node :production] cm/EMPTY)
                                            (node-key key node :production) [node :production])
                               out (production-output gf node r)]
                           (recur (into (dissoc todo node)
-                                       (map-indexed (fn [j c] [(get-child node j max-branch) c]) (:children out)))
+                                       (map-indexed (fn [j c] [(child-of node j max-branch) c]) (:children out)))
                                  (assoc ps node out) (+ weight (:weight r))))
                         [ps weight]))
         _ (doseq [node (keys targets)]
@@ -678,8 +708,8 @@
               (throw (gfi/unvisited :assess [[node]] (str "the tree has nodes " (vec (sort (keys ps))))))))
         [as weight] (reduce (fn [[as weight] node]
                               (let [{v :value children :children} (ps node)
-                                    ws (mapv #(as (get-child node % max-branch)) (range (count children)))
-                                    r (assess-at aggregation [v ws] (cm/get-submap choices [node :aggregation])
+                                    ws (mapv #(as (child-of node % max-branch)) (range (count children)))
+                                    r (assess-at aggregation [v ws] (cm/get-submap choices [node :aggregation] cm/EMPTY)
                                                  (node-key key node :aggregation) [node :aggregation])]
                                 [(assoc as node (:retval r)) (+ weight (:weight r))]))
                             [{} weight] (sort > (keys ps)))]
@@ -693,6 +723,9 @@
     (+ (part (::productions tr) :production) (part (::aggregations tr) :aggregation))))
 
 (gfi/defgf RecurseGF [production aggregation max-branch]
+  gfi/IStores
+  (-stores [gf] (callee-stores (select-keys gf [:production :aggregation])))
+  (-with-stores [gf stores] (with-callee-stores gf stores))
   gfi/IGenerativeFunction
   (-simulate [gf args key] (:trace (recurse-run gf nil (recurse-args args) [diff/unknown-change] :generate nil key)))
   (-generate [gf args constraints key] (recurse-run gf nil (recurse-args args) [diff/unknown-change] :generate constraints key))

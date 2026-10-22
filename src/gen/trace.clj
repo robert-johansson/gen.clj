@@ -7,7 +7,9 @@
    Gen.jl's trace[addr]: the choice, (tr :slope) or (tr [:y 0]), or the
    return value of the call there; at the empty path, (tr []), the trace's
    own. (subtrace tr addr) is the call's trace (Gen.jl's
-   get_call(tr, addr).subtrace).
+   get_call(tr, addr).subtrace). Both are loud where there is no such
+   choice or call, and take a not-found value to give there instead, as
+   gen.choicemap's lookups do: (tr :b nil).
 
    A trace also records its maker, the generative function that made it
    (maker). Giving a trace another :gen-fn, (assoc tr :gen-fn g), keeps the
@@ -23,11 +25,18 @@
 
 (declare subtrace)
 
+(def ^:private none (Object.))
+
 (defrecord Trace [gen-fn args choices retval score]
   clojure.lang.IFn
   (invoke [this addr]
-    (let [v (cm/get-choice choices addr)]
-      (if (some? v) v (:retval (subtrace this addr)))))
+    (let [v (this addr none)]
+      (if (identical? v none) (throw (cm/lookup-error "trace: no choice or call" choices (cm/path addr))) v)))
+  (invoke [this addr not-found]
+    (let [v (cm/get-choice choices addr none)]
+      (if (identical? v none)
+        (let [s (subtrace this addr none)] (if (identical? s none) not-found (:retval s)))
+        v)))
   (applyTo [this args] (clojure.lang.AFn/applyToHelper this args)))
 
 (defn make-trace
@@ -68,12 +77,17 @@
 
 (defn subtrace
   "The trace of the call at an address or path in tr (Gen.jl's
-   get_call(tr, addr).subtrace), tr itself at the empty path; nil where no
-   call is. A path that goes on past a call continues in its trace."
-  [tr addr]
-  (loop [tr tr
-         p (cm/path addr)]
-    (if (empty? p)
-      tr
-      (when-let [[sub more] (-call (maker tr) tr p)]
-        (recur sub more)))))
+   get_call(tr, addr).subtrace), tr itself at the empty path. A path that
+   goes on past a call continues in its trace. Loud where no call is, as
+   get_call's KeyError; with not-found, it gives not-found there."
+  ([tr addr]
+   (let [s (subtrace tr addr none)]
+     (if (identical? s none) (throw (cm/lookup-error "subtrace: no call" (:choices tr) (cm/path addr))) s)))
+  ([tr addr not-found]
+   (loop [tr tr
+          p (cm/path addr)]
+     (if (empty? p)
+       tr
+       (if-let [[sub more] (-call (maker tr) tr p)]
+         (recur sub more)
+         not-found)))))

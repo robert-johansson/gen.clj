@@ -221,7 +221,7 @@
   (case (count p)
     0 cm/EMPTY
     1 (cm/remove-submap choices (first p))
-    (let [sub (without (cm/get-submap choices [(first p)]) (subvec p 1))]
+    (let [sub (without (cm/get-submap choices [(first p)] cm/EMPTY) (subvec p 1))]
       (if (cm/empty? sub) (cm/remove-submap choices (first p)) (cm/set-submap choices (first p) sub)))))
 
 (def ^:dynamic ^:no-doc *revising*
@@ -262,8 +262,8 @@
   [generate sigma prefix]
   (let [constraints (:constraints *revising*)]
     (loop [sigma sigma]
-      (let [old? (fn [p] (and (not (cm/empty? (cm/get-submap sigma p)))
-                              (cm/empty? (cm/get-submap constraints (into prefix p)))))
+      (let [old? (fn [p] (and (not (cm/empty? (cm/get-submap sigma p cm/EMPTY)))
+                              (cm/empty? (cm/get-submap constraints (into prefix p) cm/EMPTY))))
             r (try (generate sigma)
                    (catch clojure.lang.ExceptionInfo e
                      (let [{flagged :unvisited paths :paths} (ex-data e)]
@@ -282,14 +282,14 @@
   (loop [sigma sigma]
     (let [r (attempt sigma)
           new (:choices (:trace r))
-          dropped (remove #(cm/has-value? (cm/get-submap new %)) (cm/addresses sigma))]
+          dropped (remove #(cm/has-value? new %) (cm/addresses sigma))]
       (if (seq dropped) (recur (reduce without sigma dropped)) [r sigma]))))
 
 (defn- survivors
   "The paths of old (choices) that the new choices still hold, less those
    under constraints: the old values a revise kept."
   [old new constraints]
-  (filter #(and (cm/has-value? (cm/get-submap new %)) (cm/empty? (cm/get-submap constraints %)))
+  (filter #(and (cm/has-value? new %) (cm/empty? (cm/get-submap constraints % cm/EMPTY)))
           (if (cm/has-value? old) [[]] (cm/addresses old))))
 
 (defn generate-again
@@ -313,7 +313,7 @@
         [{t :trace w :weight}] (binding [*revising* {:constraints constraints :prefix []}]
                                  (generate-dropping #(-generate gf args % key) sigma []))
         new (:choices t)]
-    (when-let [missed (seq (remove #(cm/has-value? (cm/get-submap new %)) (cm/addresses constraints)))]
+    (when-let [missed (seq (remove #(cm/has-value? new %) (cm/addresses constraints)))]
       (throw (unvisited op missed)))
     (if (= op :update)
       (let [kept (set (survivors old new constraints))]
@@ -333,6 +333,43 @@
   Object
   (-same-gen-fn? [gf other budget] (and (record? gf) (same-entries? gf other budget)))
   (-revise [gf op args opts project-old] (generate-again gf op args opts project-old)))
+
+;; ---------------------------------------------------------------------------
+;; The trainable-parameter stores a generative function holds
+;; ---------------------------------------------------------------------------
+
+(defprotocol IStores
+  "The stores of trainable parameters a generative function holds, as
+   gen.gradients/param-gradients differentiates and gen.learning steps
+   them: a dynamic or deterministic function's own (with-params), and a
+   combinator's callees'. Every other generative function holds none
+   (extended to Object)."
+  (-stores [gf]
+    "gf's stores, or nil: a store is a map of name to value, and a
+     combinator's are in the shape of its callees.")
+  (-with-stores [gf stores]
+    "gf holding stores, in -stores' shape, in place of its own."))
+
+(extend-protocol IStores
+  Object
+  (-stores [_] nil)
+  (-with-stores [gf stores]
+    (throw (ex-info (str "A " (.getName (class gf)) " holds no parameter stores") {:stores stores}))))
+
+(defn stores
+  "The trainable-parameter stores gf holds, or nil: a dynamic or
+   deterministic function's own store (a map of name to value); a Map's or
+   an Unfold's, its kernel's; a Switch's, {branch stores} over the branches
+   that hold some; a Recurse's, {:production stores :aggregation stores}
+   over those that do."
+  [gf]
+  (-stores gf))
+
+(defn with-stores
+  "gf holding stores, in the shape (stores gf) gives, as gen.learning's
+   step returns them."
+  [gf stores]
+  (-with-stores gf stores))
 
 (defn project-by-maker
   "tr's projection on selection by its maker (which a trace given another

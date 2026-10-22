@@ -31,6 +31,21 @@
    function runs on the arguments' values (array/stop-gradient), so it may
    use host arithmetic, a solver, anything (array/custom-vjp).
 
+   Trainable parameters (Gen.jl's parameters of a CustomDetermGF) are
+   named with :params and read from the store in effect: the store of the
+   model that calls the function, or its own (with-params) over that one,
+   as a dynamic function's (param name). apply-with-state (or apply) then
+   takes their values as a second argument, {name value}:
+
+     (deterministic {:params [:w]
+                     :apply-with-state (fn [[x] {:keys [w]}] [(* w x) w])})
+
+   gen.gradients/param-gradients differentiates them through the code, or,
+   with :gradient-with-state, by :param-gradient-with-state, (fn [state
+   args retgrad] {name gradient}) (Gen.jl's accumulate_param_gradients_determ!,
+   whose scale factor is the caller's: gradients are values, D7). A model
+   holding them in its store trains them with gen.learning.
+
    A generative function whose density is estimated (thesis §4.5.3), such
    as a likelihood that a particle filter or importance sampler estimates
    for pseudo-marginal MCMC:
@@ -61,6 +76,7 @@
             [gen.array.batch :as batch]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
+            [gen.dynamic :as dyn]
             [gen.gfi :as gfi]
             [gen.selection :as sel]
             [gen.trace :as trace]))
@@ -92,13 +108,12 @@
         :else [g]))
 
 (defn- with-gradient
-  "retval, which apply-with-state computed from plain (the detached args),
-   with its gradient with respect to the arguments' array leaves given by
-   (gradient state plain retval retgrad): one entry per argument, an array
-   for an array argument, a tree of its shape for a tree (nil for none)."
-  [retval state args plain gradient]
-  (let [leaves (mapv #(vec (leaves-like % %)) args)
-        positions (vec (for [i (range (count args)) [j leaf] (map-indexed vector (leaves i)) :when (array/array? leaf)]
+  "retval, computed from the inputs' detached values, with its gradient with
+   respect to the inputs' array leaves given by (cotangents retgrad): one
+   tree per input, of its shape (nil for none)."
+  [retval inputs cotangents]
+  (let [leaves (mapv #(vec (leaves-like % %)) inputs)
+        positions (vec (for [i (range (count inputs)) [j leaf] (map-indexed vector (leaves i)) :when (array/array? leaf)]
                          [i j]))]
     (when-not (array/array? retval)
       (throw (ex-info (str "A deterministic generative function with a gradient returns an array or a number, not "
@@ -107,35 +122,69 @@
     (if (empty? positions)
       retval
       (apply (array/custom-vjp (fn [& _] retval)
-                               (fn [_ _ g] (let [grads (vec (gradient state plain retval g))]
-                                             (when-not (= (count grads) (count args))
-                                               (throw (ex-info (str "The gradient returned " (count grads) " entries for "
-                                                                    (count args) " arguments (nil for none)")
-                                                               {:gradients grads})))
-                                             (let [by-leaf (mapv #(vec (leaves-like (args %) (grads %))) (range (count args)))]
-                                               (mapv (fn [[i j]] ((by-leaf i) j)) positions)))))
+                               (fn [_ _ g] (let [cts (cotangents g)
+                                                 by-leaf (mapv #(vec (leaves-like (inputs %) (cts %))) (range (count inputs)))]
+                                             (mapv (fn [[i j]] ((by-leaf i) j)) positions))))
              (mapv (fn [[i j]] ((leaves i) j)) positions)))))
+
+(defn- arg-gradients
+  "The user's gradient with respect to the arguments, one entry per
+   argument (nil for none), checked."
+  [gradient state args retval g]
+  (let [grads (vec (gradient state args retval g))]
+    (when-not (= (count grads) (count args))
+      (throw (ex-info (str "The gradient returned " (count grads) " entries for "
+                           (count args) " arguments (nil for none)")
+                      {:gradients grads})))
+    grads))
+
+(defn- param-values
+  "{name value} of gf's parameters in the store in effect: its own store
+   over the calling model's, as a dynamic function's (param name) reads
+   ({} at once for a function without parameters)."
+  [{:keys [param-names params]}]
+  (if (empty? param-names)
+    {}
+    (let [store (if dyn/*params* (merge dyn/*params* params) params)]
+      (into {} (map (fn [name]
+                      (let [v (get store name ::missing)]
+                        (when (identical? ::missing v)
+                          (throw (ex-info (str "The parameter " (pr-str name) " has no value: call the function from a"
+                                               " model whose store has it, or give it one with gen.custom/with-params")
+                                          {:param name :available (vec (keys store))})))
+                        [name v])))
+            param-names))))
 
 (defn- run [gf args]
   (let [args (vec args)
-        gradient (:gradient gf)
-        plain (if gradient (mapv detached args) args)
-        [retval state] (user-call (:apply-with-state gf) plain)
-        retval (if gradient (with-gradient retval state args plain gradient) retval)]
+        {:keys [gradient param-gradient]} gf
+        params (param-values gf)
+        [plain plain-params] (if gradient [(mapv detached args) (detached params)] [args params])
+        [retval state] (user-call (:apply-with-state gf) plain plain-params)
+        retval (if gradient
+                 (with-gradient retval (conj args params)
+                   (fn [g] (conj (arg-gradients gradient state plain retval g)
+                                 (when param-gradient (param-gradient state plain g)))))
+                 retval)]
     (trace/make-trace {:gen-fn gf :args args :choices cm/EMPTY :retval retval :score 0.0 ::state state})))
 
 (defn- updated
-  "tr moved to args (argdiffs) with update-with-state, or kept when no
-   argument changed: [trace retdiff]. (A trace gf did not make, or a call
-   whose store changed, is gfi/revise's: it runs again.)"
+  "tr moved to args (argdiffs) with update-with-state, or run again without
+   one, or kept when no argument changed: [trace retdiff]. (A trace gf did
+   not make, or a call whose store changed, is gfi/revise's: it runs
+   again.)"
   [gf tr args argdiffs]
-  (let [args (vec args)]
-    (if (and (every? diff/no-change? argdiffs) (= (count args) (count (:args tr))))
-      [tr diff/no-change]
-      (let [[state retval retdiff] (user-call (:update-with-state gf) (::state tr) args (vec argdiffs))]
-        [(assoc tr :args args :retval retval ::state state) retdiff]))))
+  (let [args (vec args)
+        update-with-state (:update-with-state gf)]
+    (cond (and (every? diff/no-change? argdiffs) (= (count args) (count (:args tr)))) [tr diff/no-change]
+          update-with-state (let [[state retval retdiff] (user-call update-with-state (::state tr) args (vec argdiffs))]
+                              [(assoc tr :args args :retval retval ::state state) retdiff])
+          :else [(run gf args) diff/unknown-change])))
 
-(defrecord DeterministicGF [apply-with-state update-with-state gradient]
+(defrecord DeterministicGF [apply-with-state update-with-state gradient param-names param-gradient params]
+  gfi/IStores
+  (-stores [gf] (:params gf))
+  (-with-stores [gf stores] (assoc gf :params stores))
   gfi/IGenerativeFunction
   (-simulate [this args _key] (run this args))
   (-generate [this args constraints _key]
@@ -168,10 +217,13 @@
   "A deterministic generative function (see the namespace doc), from
    :apply-with-state, (fn [args] [retval state]), or :apply, (fn [args]
    retval); optionally :update-with-state, (fn [state args argdiffs] [state
-   retval retdiff]); and optionally a gradient: :gradient, (fn [args retval
+   retval retdiff]); optionally a gradient: :gradient, (fn [args retval
    retgrad] grads), or :gradient-with-state, (fn [state args retgrad]
-   grads)."
-  [{:keys [apply-with-state update-with-state gradient gradient-with-state] :as spec}]
+   grads); and optionally :params, the names of its trainable parameters,
+   whose values apply-with-state (or apply) takes as a second argument and,
+   with :gradient-with-state, :param-gradient-with-state differentiates,
+   (fn [state args retgrad] {name gradient})."
+  [{:keys [apply-with-state update-with-state gradient gradient-with-state params param-gradient-with-state] :as spec}]
   (let [f (:apply spec)
         _ (when-not (= 1 (count (filter ifn? [apply-with-state f])))
             (throw (ex-info "deterministic needs :apply-with-state, (fn [args] [retval state]), or :apply, (fn [args] retval)"
@@ -180,17 +232,50 @@
             (throw (ex-info "deterministic: :update-with-state must be (fn [state args argdiffs] [state retval retdiff])" {})))
         _ (when (and gradient gradient-with-state)
             (throw (ex-info "deterministic takes :gradient or :gradient-with-state, not both" {})))
-        _ (doseq [[k g] {:gradient gradient :gradient-with-state gradient-with-state}]
+        _ (doseq [[k g] {:gradient gradient :gradient-with-state gradient-with-state
+                         :param-gradient-with-state param-gradient-with-state}]
             (when (and g (not (ifn? g)))
               (throw (ex-info (str "deterministic: " k " must be a function") {k g}))))
         _ (when (and gradient-with-state (not apply-with-state))
             (throw (ex-info "deterministic: :gradient-with-state needs :apply-with-state (with :apply, use :gradient)" {})))
-        apply-with-state (or apply-with-state (fn [args] [(f args) nil]))]
+        _ (when-not (or (nil? params) (and (vector? params) (seq params) (every? keyword? params)))
+            (throw (ex-info "deterministic: :params names the trainable parameters, a vector of keywords" {:params params})))
+        _ (when (and params gradient)
+            (throw (ex-info (str "deterministic: a gradient for a function with :params is :gradient-with-state,"
+                                 " with :param-gradient-with-state for the parameters")
+                            {:params params})))
+        _ (when-not (= (boolean (and params gradient-with-state)) (boolean param-gradient-with-state))
+            (throw (ex-info (if param-gradient-with-state
+                              "deterministic: :param-gradient-with-state needs :params and :gradient-with-state"
+                              "deterministic: with :params, :gradient-with-state needs :param-gradient-with-state")
+                            {:params params})))
+        apply-with-state (cond apply-with-state (if params apply-with-state (fn [args _] (apply-with-state args)))
+                               params (fn [args ps] [(f args ps) nil])
+                               :else (fn [args _] [(f args) nil]))]
     (->DeterministicGF apply-with-state
-                       (or update-with-state
-                           (fn [_ args _] (let [[retval state] (apply-with-state args)] [state retval diff/unknown-change])))
+                       update-with-state
                        (cond gradient (fn [_ args retval g] (gradient args retval g))
-                             gradient-with-state (fn [state args _ g] (gradient-with-state state args g))))))
+                             gradient-with-state (fn [state args _ g] (gradient-with-state state args g)))
+                       params
+                       param-gradient-with-state
+                       nil)))
+
+(defn deterministic?
+  "Is f a deterministic generative function (gen.custom/deterministic)?"
+  [f]
+  (instance? DeterministicGF f))
+
+(defn with-params
+  "f, a deterministic generative function with :params, with its own store
+   params, a map of name to value: its parameters are read from it, over
+   the store of a model that calls it (as gen.dynamic/with-params)."
+  [f params]
+  (when-not (and (deterministic? f) (seq (:param-names f)))
+    (throw (ex-info "with-params takes a deterministic generative function that names its :params"
+                    {:gen-fn (type f) :param-names (:param-names f)})))
+  (when-not (map? params)
+    (throw (ex-info "with-params: the store is a map of parameter names to values" {:params params})))
+  (assoc f :params params))
 
 (defmethod print-method DeterministicGF [_ ^java.io.Writer w]
   (.write w "#gen/deterministic"))

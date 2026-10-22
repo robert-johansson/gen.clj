@@ -73,10 +73,11 @@
     (is (fd/logpdf-grad-matches? d/inv-gamma [0.4 0.2 0.3] i) (str "d/darg" i))))
 
 (deftest normal
-  ;; distributions.jl:103: no overflow at 1e13, exactly
-  (when (ts/float64?)
-    (is (= -5e25 (genjl/logpdf d/normal 1e13 0.0 1.0)))
-    (is (= [-1e13 1e13 1e26] (grads d/normal 1e13 0.0 1.0))))
+  ;; distributions.jl:103: no overflow at 1e13, exactly in Float64, to
+  ;; float32's precision on a float32 backend (which rounds 1e13 itself)
+  (let [same? (if (ts/f32?) #(ts/close? (array/array %1) (array/array %2)) =)]
+    (is (same? -5e25 (genjl/logpdf d/normal 1e13 0.0 1.0)))
+    (is (same? [-1e13 1e13 1e26] (grads d/normal 1e13 0.0 1.0))))
   (doseq [i (range 3)]
     (is (fd/logpdf-grad-matches? d/normal [0.4 0.2 0.3] i) (str "d/darg" i))))
 

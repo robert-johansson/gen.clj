@@ -28,11 +28,13 @@
 
 (defn- on-reference
   "x as the reference backend holds it: a host number as it is, an array
-   as a float64 array, a vector element by element."
+   as a float64 array, a vector element by element, a label (a keyword, a
+   record) as it is."
   [x]
   (cond (array/host? x) x
         (vector? x) (mapv on-reference x)
-        :else (array/with-backend reference (array/array (array/->clj x) {:dtype :float64}))))
+        (array/array? x) (array/with-backend reference (array/array (array/->clj x) {:dtype :float64}))
+        :else x))
 
 (defn finite-diff
   "The central-difference partial derivatives of f, a scalar function of
@@ -67,11 +69,13 @@
 
 (defn- differentiable?
   "Does Gen.jl give x a gradient (a float, not an integer or a boolean, or
-   a vector of floats)?"
+   a vector of floats)? A label (a keyword, a record, a vector of them) has
+   none."
   [x]
   (cond (array/host? x) (float? x)
         (vector? x) (every? differentiable? x)
-        :else (contains? #{:float16 :bfloat16 :float32 :float64} (array/dtype x))))
+        (array/array? x) (contains? #{:float16 :bfloat16 :float32 :float64} (array/dtype x))
+        :else false))
 
 (defn logpdf-grad
   "Gen.jl's logpdf_grad(dist, value, args...): the gradients of the log

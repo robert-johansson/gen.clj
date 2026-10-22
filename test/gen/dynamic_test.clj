@@ -324,8 +324,9 @@
         (is (= 2 (tr [:y :z])) "a call at a path")
         (is (= 7 (tr [])) "the trace's own, at the empty path")
         (is (= (ts/host (tr [:y :z :a])) (ts/host ((trace/subtrace tr [:y :z]) :a))))
-        (is (nil? (trace/subtrace tr :y)) "a prefix of a call's path is not a call")
-        (is (nil? (trace/subtrace tr :u)) "nor is a choice")))))
+        (is (= :node (:reason (ts/thrown-data (trace/subtrace tr :y)))) "a prefix of a call's path is not a call")
+        (is (= :value (:reason (ts/thrown-data (trace/subtrace tr :u)))) "nor is a choice")
+        (is (= ::none (trace/subtrace tr :u ::none)) "unless given a not-found value")))))
 
 (deftest splices-without-an-address-share-the-namespace
   (let [tr (gfi/simulate shared-namespace [] (rng/key 1))]

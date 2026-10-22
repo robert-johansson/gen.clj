@@ -6,7 +6,9 @@
    lacks, which it ignores there and gen.clj rejects (D11): the ports drop
    those constraints. Most assertions are Gen.jl's
    isapprox(get_score(tr), get_score(new_tr) - w): a revision's weight is
-   its change of score."
+   its change of score. Regenerate's, there, is not gen.clj's (U1): its six
+   assertions are checked on Gen.jl's own moves (gen.genjl.oracle), beside
+   gen.clj's weight, Eq. 4.1's."
   (:refer-clojure :exclude [+ - *])
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :refer [+ - *]]
@@ -16,12 +18,14 @@
             [gen.dist :as d]
             [gen.dynamic :as dyn :refer [gen]]
             [gen.genjl.finite-diff :refer [logpdf-grad]]
+            [gen.genjl.oracle :as oracle]
             [gen.genjl.support :as support :refer [approx?]]
             [gen.gfi :as gfi]
             [gen.gradients :as g]
             [gen.random :as rng]
             [gen.selection :as sel]
-            [gen.test-support :refer [close?]]))
+            [gen.test-support :as ts :refer [close?]]
+            [gen.trace :as trace]))
 
 (def ^:private x 5.0)
 (def ^:private y 3.0)
@@ -111,17 +115,16 @@
 ;; ---------------------------------------------------------------------------
 
 (def bang1
-  "switch.jl:115: bang with its own std, a parameter."
-  (gen [x y] (trace :z (d/normal (+ x y) (param :bang1-std)))))
+  "switch.jl:115: bang with its own std, a parameter (init_param!'s 3.0)."
+  (dyn/with-params (gen [x y] (trace :z (d/normal (+ x y) (param :std)))) {:std 3.0}))
 
 (def fuzz1
-  "switch.jl:121: fuzz with its own std, a parameter."
-  (gen [x y] (trace :z (d/normal (+ x (* 2 y)) (param :fuzz1-std)))))
+  "switch.jl:121: fuzz with its own std, a parameter (init_param!'s 3.0)."
+  (dyn/with-params (gen [x y] (trace :z (d/normal (+ x (* 2 y)) (param :std)))) {:std 3.0}))
 
 (def bam
-  "switch.jl:128, holding both branches' parameters, as init_param! sets
-   them (D7: one store per model)."
-  (dyn/with-params (gen [s] (splice :x (comb/switch bang1 fuzz1) s x y)) {:bang1-std 3.0 :fuzz1-std 3.0}))
+  "switch.jl:128"
+  (gen [s] (splice :x (comb/switch bang1 fuzz1) s x y)))
 
 ;; switch.jl:134
 (deftest hierarchy-simulate
@@ -163,14 +166,16 @@
 
 ;; switch.jl:199: Gen.jl constrains :z, which bam lacks (its choice is
 ;; :x => :z), and generate ignores it; dropped here (D11), so each of the
-;; four runs draws z
+;; four runs draws z. Each branch holds its std; bam holds none, so the
+;; gradients are the Switch's, from its trace at :x, by branch (DESIGN §9)
 (deftest hierarchy-accumulate-param-gradients
   (doseq [k (range 4)]
     (let [dstd (fn [tr mean] (nth (logpdf-grad d/normal (tr [:x :z]) mean std) 2))
+          switch-grads #(g/param-gradients (trace/subtrace % :x) 1.0)
           tr0 (gfi/simulate bam [0] (rng/fold-in (rng/key 19) k))
           tr1 (gfi/simulate bam [1] (rng/fold-in (rng/key 20) k))]
-      (is (approx? (dstd tr0 (+ x y)) (:bang1-std (g/param-gradients tr0 1.0))) (str "run " k))
-      (is (approx? (dstd tr1 (+ x (* 2 y))) (:fuzz1-std (g/param-gradients tr1 1.0))) (str "run " k)))))
+      (is (approx? (dstd tr0 (+ x y)) (get-in (switch-grads tr0) [0 :std])) (str "run " k))
+      (is (approx? (dstd tr1 (+ x (* 2 y))) (get-in (switch-grads tr1) [1 :std])) (str "run " k)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Branches that call another generative function
@@ -226,7 +231,7 @@
     (is (balances? tr (gfi/update tr [0] unknown (cm/choicemap [:x :z] 10.0) (rng/key 31))))))
 
 ;; switch.jl:284: the same branch with nothing selected (the other three
-;; assertions are pending)
+;; are regenerate-weights', on Gen.jl's recorded moves)
 (deftest nested-regenerate
   (let [tr (gfi/simulate bam2 [1] (rng/key 32))]
     (is (balances? tr (gfi/regenerate tr [1] unknown sel/none (rng/key 33))))))
@@ -268,12 +273,55 @@
         (is (close? (tr [:x :q :q :z]) (cm/get-choice d [:x :q :q :z])))
         (is (balances? tr r))))))
 
-;; Pending
-;; - switch.jl:85, 89 and 94 (bare regenerate) and 288, 292 and 294
-;;   (regenerate of branches that call another), isapprox(get_score(tr),
-;;   get_score(new_tr) - w): Gen.jl's regenerate weight there is wrong (U1),
-;;   genclj-c5rl.
-;;
+;; ---------------------------------------------------------------------------
+;; Regenerate's weight: Gen.jl's, on its own moves, and Eq. 4.1 (U1)
+;; ---------------------------------------------------------------------------
+
+(def oracle-models
+  "The models of the oracle's Switch cases (gen.genjl.oracle)."
+  {:bare-same sc :bare-switch sc :bare-doubled sc
+   :nested-drop bam2 :nested-drop-z bam2 :nested-mh bam2})
+
+(defn- traced
+  "gen.clj's trace of a recorded revision: its args, every choice given."
+  [case {:keys [args choices]}]
+  (:trace (gfi/generate (oracle-models case) args choices (rng/key 37))))
+
+(defn- retained
+  "The choices a regenerate of t to t' with selection keeps: t's
+   unselected choices that t' still has."
+  [t t' selection]
+  (let [selected (set (cm/addresses (sel/get-selected (:choices t) selection)))
+        now (set (cm/addresses (:choices t')))]
+    (sel/from-paths (filter now (remove selected (cm/addresses (:choices t)))))))
+
+(defn- eq-4-1
+  "Regenerate's weight for the move from t to t' (Eq. 4.1, thesis p. 144):
+   the ratio of the two traces' densities of the choices kept. Resampled
+   choices cancel against their proposal, and dropped ones against the
+   reverse move's."
+  [t t' selection]
+  (let [kept (retained t t' selection)]
+    (- (gfi/project t' kept) (gfi/project t kept))))
+
+;; switch.jl:85, :89 and :94 (the bare Switch) and :288, :292 and :294 (the
+;; nested one), isapprox(get_score(tr), get_score(new_tr) - w): true of
+;; Gen.jl's weights on its moves, which the oracle recorded (ten each, and
+;; the move mh(tr, select(:x => :z)) makes). Gen.jl's regenerate there adds
+;; the resampled choices' log p(z') - log p(z) and subtracts a dropped
+;; choice's log density, so its weight is the change of score, which Eq.
+;; 4.1's differs from on every recorded move; gen.clj's regenerate gives
+;; Eq. 4.1's weight on its own moves from the same traces.
+(deftest regenerate-weights
+  (doseq [{:keys [case line draw old new argdiffs selection weight]} oracle/switch-regenerations]
+    (testing (str line ", draw " draw)
+      (let [t (traced case old)
+            t' (traced case new)]
+        (is (approx? weight (- (:score t') (:score t))) "Gen.jl's weight is the change of score")
+        (is (not (approx? weight (eq-4-1 t t' selection))) "and not Eq. 4.1's")
+        (let [{t'' :trace w :weight} (gfi/regenerate t (:args new) argdiffs selection (rng/fold-in (rng/key 38) draw))]
+          (is (close? (eq-4-1 t t'' selection) w) "gen.clj's is Eq. 4.1's"))))))
+
 ;; Not ported
 ;; - switch.jl:10, a SwitchTrace built by hand: Gen.jl's internal
 ;;   constructor (n/a).

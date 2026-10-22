@@ -66,6 +66,13 @@
         (empty? addr) (root-selected? s)
         :else (let [p (cm/path addr)] (-selected? (get-subselection s (pop p)) (peek p)))))
 
+(defn- kind
+  "s's kind, as the docstrings name it."
+  [s]
+  (cond (instance? All s) "all"
+        (instance? Complement s) "a complement"
+        :else (str "another kind of selection (" (.getSimpleName ^Class (class s)) ")")))
+
 (defn set-subselection
   "s with sub the selection under an address or path (Gen.jl's
    set_subselection!, persistent; sub itself at the empty path). s and the
@@ -81,7 +88,7 @@
              (instance? Hierarchical s) (let [m (:m s) a (nth p i)]
                                           (->Hierarchical (assoc m a (put (get m a none) (inc i)))))
              :else (throw (ex-info (str "set-subselection: the path " (pr-str addr) " goes inside "
-                                        (if (instance? All s) "all" (type s)) ", which cannot be nested")
+                                        (kind s) ", which cannot be nested")
                                    {:path p :selection s}))))
      s 0)))
 

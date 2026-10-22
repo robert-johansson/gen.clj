@@ -430,8 +430,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
 - **Namespace root: `gen`** (`gen.choicemap`, `gen.dynamic`, …). The collision
   with probcomp/Gen.clj's `gen.*` is accepted, since the two are never on one
   classpath. Maven coordinates are decided at first publish.
-- **Map/Unfold addresses are 0-based** (Clojure idiom, as in GenMLX). Gen.jl is
-  1-based; document this in a migration note.
+- **Indices are 0-based** (Clojure idiom, as in GenMLX; D2): Map's and
+  Unfold's addresses, Recurse's nodes (root 0), categorical's values
+  (categorical-logits' too: 0 to n - 1) and Switch's branch index (branch 0
+  is the first). Gen.jl is 1-based; document this in a migration note.
 - **Distributions use Gen.jl names and parameterizations** (`normal(mu, std)`,
   `gamma(shape, scale)`, `categorical(probs)`), plus explicitly named variants
   where they matter numerically (e.g. `categorical-logits`). Each GenMLX name
@@ -522,8 +524,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     revise does not drop it.
   - **Local checks** remain where no call shows the change: the static
     walk's skip, for a node reading `(param :w)`, which has no inputs.
-    `with-params` and `with-transitions` take only dynamic generative
-    functions, whose bodies read them.
+    `dyn/with-params` and `with-transitions` take dynamic generative
+    functions, whose bodies read them, and `custom/with-params` a
+    deterministic function that names the `:params` its code reads (G5).
 
   Gradients are values: `gen.gradients/param-gradients` returns a map,
   and optimizers return a new store. This is Gen.jl's `@param`,
@@ -610,11 +613,25 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     gen.clj's diffs, and that they are consistent (`diff/consistent?`).
   - *Lookups are loud (D4).* `cm/get-choice`, `cm/get-value` and
     `(tr addr)` at a missing or node address throw ex-info, as Gen.jl
-    throws KeyError, where they returned nil (rule 6). Clojure's `get` on a
-    choice map stays the nil-returning lookup. To be done in M5.
+    throws KeyError, where they returned nil (rule 6). Built in M5, with a
+    not-found arity for the lenient lookup (the bullet "Lookups are loud"
+    below).
   - *Beta is exact at 0 and 1 (D6):* +Inf when α < 1 (or β < 1), where
     Gen.jl substitutes a finite value. As with draws beyond the float
     range, gen.clj keeps the exact value.
+  - *Regenerate's weight is Eq. 4.1's, under a Switch too (U1;
+    genclj-c5rl).* A choice resampled from its prior adds nothing, and an
+    old choice the new run drops cancels against the reverse move, so the
+    weight is the ratio of the densities of the choices kept. Gen.jl
+    0.4.8's Switch, with an index argdiff other than NoChange (the path of
+    every Switch called from `@gen` code), weighs the change of score
+    instead: it adds log p(z′) − log p(z) for the resampled choices and
+    subtracts a dropped choice's log density, so selection MH on a choice
+    under it targets p(z)² p(y | z). switch.jl:85, :89, :94, :288, :292 and
+    :294 assert Gen.jl's formula; the port checks them on Gen.jl's own
+    moves, which the oracle recorded, and Eq. 4.1 on gen.clj's. Reporting
+    upstream is the owner's call (the draft is
+    `docs/research/genjl-upstream/issue-1-switch-regenerate.md`).
   - *No default positional arguments (G3).* Clojure has none. A rest
     parameter (`[x & [y z]]`) covers calls, update and regenerate with any
     number of arguments, and a trace's args are the ones given. A
@@ -752,8 +769,31 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   finds by var metadata). A discrete draw's density sums the mass of the
   support values mapped to v, so any function works; a continuous draw's
   inverts the path to it through +, −, ×, ÷, negate, exp and log, with the
-  log-Jacobians. Non-numeric labels wait for parameters that are not arrays.
-  The name `dist` follows Gen.jl's macro (owner, 2026-10-20).
+  log-Jacobians. The name `dist` follows Gen.jl's macro (owner, 2026-10-20).
+  Labels need not be numbers (genclj-414l, G7). A `defdist` parameter
+  marked `^:host` may be host data (`dc/host-data?`: keywords, strings,
+  records, maps, functions, collections of them), kept as given, while
+  array data still becomes an array; every other parameter converts as
+  before, so a family given keywords fails at construction with an ex-info
+  naming the distribution and the parameter. Every parameter of a `dist` is
+  `^:host`, since its body decides what it is, as in Gen.jl's untyped
+  `@dist`: one `labeled-cat` takes numeric labels (arrays, batched) and
+  keywords. The body is guarded as a `gen` body is: a lookup by the draw
+  reads its host value on every backend, and raises the batched fallback
+  on a batched draw. Over an enumerable support, a label's density
+  compares by `=` (`array/==` where both values are numbers), so a given
+  label is scored on the host, without the fallback, and the gradient
+  reaches the probabilities; a label itself has none (Gen.jl's
+  `nothing`). A host parameter is the same for every particle; a draw of
+  labels in a batched run falls back to one particle at a time, and
+  `(sample d key [n])` of labels is an ex-info, as no array holds them.
+  The alternatives: conversion by shape for every parameter, which would
+  move a numeric family's error for keyword data from construction to a
+  bare "not an array" at first use (rule 6); and a mark on each host
+  parameter of a `dist`, an annotation Gen.jl's untyped `@dist` does not
+  need, since a `dist` parameter is read only by the body and by the
+  draw's constructor, which validates its own (approved under the owner's
+  delegation, 2026-10-21).
 - **Distributions from a host library, GenDistributions'
   `DistributionsBacked`** (M4, 2026-10-20; decided by the agent, for the
   owner's review): `(gen.dist.host/family {:name :make :quantile
@@ -990,21 +1030,25 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     what depends only on that value still skips. The analysis sees the
     enclosing locals, a gen body's too, so a local that shadows a var is
     the local.
-  - **Not static:** a body that is not one `let`, an address computed
-    from a value, a `trace` or `splice` inside an expression (a branch on
-    a choice included), a splice without an address, an untraced draw, an
-    address used twice or one under another: each a compile error that
-    names the form.
+  - **Not static:** a body that is not one `let`, an address whose first
+    key is computed, a `trace` or `splice` where it is not evaluated
+    exactly once whenever its expression is (a branch, a function, a `let`
+    inside an expression, an `and` or `or`: see the rewrites below), a
+    splice without an address, an untraced draw, an address used twice or
+    one under another: each a compile error that names the form.
   - **Macros and quoted data (M5, G11 and G12; owner, 2026-10-21):** a
     binding's head, and the return expression's, is macroexpanded before
     it is classified, as `gen` expands a dynamic body, so a user macro that
-    expands to a `trace` or a `splice` is that call; a computation stays as
-    written, its expansion checked as it is. Only the head is expanded, so
-    a call hidden in a macro inside an expression is the compiler's error
-    (trace is unbound there), as before: catching it would take a walk
-    that knows the expression's locals. Quoted data is data: it may mention
-    `trace`, and its symbols are no inputs.
-  - **Static rewrites (M5, G2, genclj-lgij; owner, 2026-10-21; to build).**
+    expands to a `trace` or a `splice` is that call; a computation is its
+    expansion, whose names are its inputs (its form shown as written; the
+    review of the evening found a head macro reading a local unbound).
+    Only the head is expanded, so a call hidden in a macro inside an
+    expression is the compiler's error (trace is unbound there), as before:
+    catching it would take a walk that knows the expression's locals; and
+    a macro nested so must be hygienic, reading only the locals it is
+    given. Quoted data is data: it may mention `trace`, and its symbols are
+    no inputs.
+  - **Static rewrites (M5, G2; owner, 2026-10-21; built in genclj-lgij).**
     The rewrites live in the static analysis only; the body fn, the dynamic
     semantics, is unchanged, and the static law runs over every rewritten
     body.
@@ -1423,6 +1467,26 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     with the live count and the hint (eval! as you go, and drop graphs).
   - Alternatives were only a clearer error (no retry), or MLX's own
     message as before.
+- **An optimizer step evaluates what it returns (genclj-9e9e).**
+  `learn/step` evaluates its new store and optimizer state: a step is an
+  inference loop's boundary (rule 3). A training loop written by hand that
+  did not evaluate (train-test's lecture loop) made each store a graph over
+  every step before it. MLX's nodes held it after the JVM freed the
+  handles, invisible to the backend's live count, MLX's active and cache
+  memory and the heap: about 270 KB of resident memory per lecture on
+  Metal, 1 GB to 10 GB in 8 s at Gen.jl's size, where `learn/train`, which
+  evaluated its steps, stayed flat. `train` and black-box VI no longer
+  evaluate the step themselves (VI's history holds host numbers: each
+  draw's log weight is read). A step inside a gradient (tape values) or under the batch
+  tracer is unchanged: the wrappers evaluate their primals. The other loops
+  a user drives step by step were checked: MCMC runs, particle-filter
+  steps, rejuvenation and move-reweight already evaluate per iteration;
+  MH, MALA, HMC, MAP and elliptical slice read their decision, which
+  evaluates the new choices, and their lazy score is one step deep (20,000
+  hand-driven MH and MALA steps that read nothing stayed bounded). The
+  alternative was to fix only the test's loop and document the rule, which
+  would leave the trap for the next loop written by hand (approved under
+  the owner's delegation, 2026-10-21).
 - **A vector is a path, everywhere (owner, 2026-10-21; M5's G9 and F3).**
   gen.choicemap's rule, an address is any value except a vector and a
   vector is a path, now holds for selections too; before, `sel/selected?`
@@ -1455,12 +1519,60 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   a combinator at the top had to be spliced into one. D7's rule stands, one
   store per generative function and gradients as values; this extends where
   the stores are found.
+  - *The design (genclj-umww; approved under the owner's delegation,
+    2026-10-21).* `gfi/stores` gives the stores a generative function holds, in
+    its callees' shape, and `gfi/with-stores` gives a tree of that shape back
+    (protocol `gfi/IStores`; Object holds none). A dynamic or deterministic
+    function holds its own store (`with-params`); a Map and an Unfold their
+    kernel's; a Switch `{branch stores}` over the branches that hold some; a
+    Recurse `{:production … :aggregation …}`; combinators nest.
+    `param-gradients` differentiates that tree, so its result has the same
+    shape: a Map's is its kernel's, summed over the elements, and a Switch's
+    has a gradient for each holding branch, zero for one the trace did not
+    take. Each store is its own namespace: two branches' `:std` are two
+    parameters, as Gen.jl's per-function parameters are.
+  - gen.learning steps the tree as any other (`learn/step` on `(gfi/stores
+    gf)` and the gradients), and `gfi/with-stores` gives the stepped stores
+    back to the combinator.
+  - A dynamic function's callees are in its body, not its fields, so their
+    own stores are not its: their gradients are the call's trace's,
+    `(param-gradients (trace/subtrace tr addr) retgrad)`, with the caller's
+    cotangent of the call's value as retgrad when the caller uses it
+    (switch.jl:199's port). call-at and choice-at are dynamic functions
+    here, so their own store is what a trace of theirs differentiates, and
+    the callee reads it.
+  - Alternatives: one map merging the callees' stores by name, which makes
+    two branches' `:std` one parameter, unlike Gen.jl; and reaching every
+    store in the trace's tree, which a dynamic body's callees cannot be given
+    back.
+- **A custom function's trainable parameters (M5's G5, genclj-2294;
+  approved under the owner's delegation, 2026-10-21).** `(custom/deterministic
+  {:params [:w] …})` names the parameters a deterministic function reads,
+  and `:apply-with-state` (or `:apply`) takes their values as a second
+  argument, `{name value}`. They come from the store in effect: the calling
+  model's, or the function's own (`custom/with-params`, Gen.jl's fields of a
+  CustomDetermGF) over it, as a dynamic function's `(param name)` reads. So
+  a model's store trains them with gen.learning, and a store change runs
+  the function again (the call's store mark), never update-with-state with
+  stale values.
+  - `param-gradients` differentiates them through the function's code, or,
+    with `:gradient-with-state`, by `:param-gradient-with-state`, `(fn [state
+    args retgrad] {name gradient})`, Gen.jl's
+    `accumulate_param_gradients_determ!`. The function then sees the
+    parameters' values, not the tape's, as it sees the arguments'. Its
+    scale factor is the caller's weight on the returned gradient (D7).
+  - Loud: a missing parameter; `:params` with the stateless `:gradient`;
+    `:gradient-with-state` without `:param-gradient-with-state` (or the
+    reverse); `with-params` on a function without `:params`.
+  - Alternatives: the parameters as a dynamic var the user's code reads
+    (implicit, and the custom gradient could not see them as inputs), or as
+    extra arguments (they would show in the trace's args and argdiffs).
 - **A call's trace and return value by address; merge and Recurse's
   numbering (owner, 2026-10-21; M5's G1, F3, G10, G13; m3-grammar's
   design).**
   - `(trace/subtrace tr addr)` is Gen.jl's `get_call(tr, addr).subtrace`:
-    the trace of the call at an address or a path, nil where no call is
-    (until D4 decides the loud form); `[]` is `tr` itself, and a path into a
+    the trace of the call at an address or a path, loud where no call is
+    (D4, "Lookups are loud" below); `[]` is `tr` itself, and a path into a
     call descends into its subtrace. `(tr addr)` is Gen.jl's `trace[addr]`:
     the choice there, otherwise the call's return value, so `(tr [])` is the
     return value (`trace[]`) and Map's `(tr i)` is element i's.
@@ -1477,6 +1589,43 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   - `cm/merge` takes 0 to n choice maps (none gives EMPTY, merge's
     identity). Recurse's numbering is Gen.jl's, 0-based: `get-child`,
     `get-child-num`, `get-parent`, their arguments checked loudly.
+- **Lookups are loud (M5's D4, genclj-ocwu; approved under the owner's
+  delegation, 2026-10-21).** One rule: a lookup throws where Gen.jl throws
+  KeyError, and, given a not-found value, gives that value there instead,
+  as `nth` does. The questions never throw.
+  - Loud:
+    - `(cm/get-choice c a)` where no value is: nothing there, a node, or a path through a value;
+    - `(cm/get-value c)` of a node or of nothing;
+    - `(cm/get-submap c a)` on a path through a value;
+    - `(tr a)` where neither a choice nor a call is;
+    - `(trace/subtrace tr a)` where no call is.
+
+    The error is an ex-info with data `{:reason :path :at}`. `:reason` says what the choices hold at the path: `:absent`, `:value`, `:node` or `:through-value`. `:at` is the prefix holding a value when the path goes through one.
+  - Lenient:
+    - each lookup with a not-found argument, such as `(cm/get-choice c a nil)` or `(tr a nil)`, which never builds an exception;
+    - the questions `(cm/has-value? c a)`, a new address arity, and `(cm/has-submap? c a)`, now false at a value as Gen.jl's has_submap is. Both are false on a path through a value, where Gen.jl's has_value throws (untested upstream).
+  - `get-submap` at a value is the Value, as before. A value is the choice
+    map at its address: a distribution's trace has one for its choices, and
+    the handler and the combinators hand it to the callee there as its
+    constraints. Gen.jl 0.4.8 throws KeyError there, so its four such
+    assertions (`assignment.jl:158, 228, 285`, `static_dsl.jl:613`) port as
+    this difference.
+  - The handler's and the combinators' walks use the not-found arity, so
+    their speed is unchanged. A value where a run calls (a constraint, or an
+    old choice in a revise) stays the unvisited error that a revise drops.
+    A loud walk there made the kind-changing model's laws fail (the spike,
+    `genclj-ocwu`).
+  - Clojure's `get` on a choice map or a trace reads the record's fields,
+    not addresses. It never was a lookup, and the earlier sentence calling
+    it the nil-returning one is struck.
+  - **A breaking change** for code built on gen.clj that reads an absent
+    choice as nil (memo.clj, GenGDT and others): `(tr :b)`, `(cm/get-choice
+    c a)`, `(cm/get-value c)` and `(trace/subtrace tr a)` now throw there.
+    The migration is to pass a not-found value, `(tr :b nil)`, or to ask
+    `(cm/has-value? c a)` first.
+  - Alternatives:
+    - `get-submap` loud at a value too. Gen.jl's four assertions would then port as written, but internal code would need a second accessor for "whatever is at p".
+    - Nil-returning functions under new names, which makes two vocabularies for one lookup.
 - **Filling with an array is loud (owner, 2026-10-21; M5's G14).**
   `array/full` and `full-like` take a scalar fill value (a host number or a
   0-d array, tracked on the tape too); an array of values is an ex-info on
@@ -1495,6 +1644,20 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     would need a band of 2.6. A watch bean (genclj-gjiz) keeps the cause,
     and an upstream report if it is llama.cpp's. The alternatives were the
     rule's 2.6 and investigating before M3's close.
+- **Variational inference trains the model's parameters too (M5's G4;
+  m3-grammar's design).** `vi/black-box-vi` and `black-box-vimco` take
+  `:model-store` and `:model-optimizer`, Gen.jl's `model_update`: the model
+  runs under that store, and each iteration also steps it along the
+  objective's gradient in the model's parameters, ∇θ log p(x, z) averaged
+  over the draws (the ELBO's) or weighted by the normalized weights w̃_k
+  (the K-sample bound's). q's draws do not depend on θ, so each is the
+  exact gradient of the iteration's estimate. One option without the other
+  is a loud error, not q's optimizer taken silently; the result holds
+  `:model-store`, and `elbo-gradient` and `vimco-gradient` return
+  `:model-grads`. The alternative, one store tree `{:q … :model …}` under
+  one optimizer (as gen.learning allows), was dropped: it gives both stores
+  one step size, where Gen.jl's minimal VAE trains q and the model at two
+  (1e-4 and 0.002). (Approved under the owner's delegation, 2026-10-21.)
 - **Git:** the main repo is public-ready, with `.beans/`, `.beans.yml`,
   `.claude/` and `*.pdf` gitignored. Its remote is the private
   `robert-johansson/gen.clj` (the owner, 2026-10-21, at M4's close: private

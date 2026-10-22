@@ -1576,6 +1576,15 @@
      :live-arrays live
      :collections collections}))
 
+(defn evaluated?
+  "Does MLX hold the MLX array x's data, rather than the graph it is
+   computed by? An unevaluated graph holds every array it reads, which
+   neither the backend's collections nor MLX's memory counters see
+   (DESIGN §9, genclj-9e9e)."
+  [x]
+  (try (Mlx/_mlx_array_is_available (.-h ^MlxArray x))
+       (finally (fence x))))
+
 (defn set-memory-limit!
   "Set MLX's memory limit in bytes; returns the previous limit. It is not a
    cap: near it MLX frees its buffer cache, and allocations past it still

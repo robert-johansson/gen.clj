@@ -192,7 +192,7 @@
   (doseq [p free]
     (when-not (contains? @seen p)
       (throw (ex-info (str "with-exact-proposal: the choice at " p
-                           (if (some? (cm/get-choice choices p))
+                           (if (cm/has-value? choices p)
                              " is made by a generative function the model calls at an address; wrap that one"
                              " was not visited"))
                       {:path p})))))
@@ -329,9 +329,12 @@
   (-propose [_ args key] (gfi/-propose gf args key))
   (-project [this tr selection]
     (exact-weight this (:args tr) (sel/get-selected (:choices tr) selection) tr))
-  ;; its traces are the model's
+  ;; its traces, density and parameter stores are the model's
   trace/ICalls
-  (-call [_ tr p] (trace/-call gf tr p)))
+  (-call [_ tr p] (trace/-call gf tr p))
+  gfi/IStores
+  (-stores [_] (gfi/stores gf))
+  (-with-stores [this stores] (assoc this :gf (gfi/with-stores gf stores))))
 
 (defn with-exact-proposal
   "gf with the exact conditional as its internal proposal for the finite

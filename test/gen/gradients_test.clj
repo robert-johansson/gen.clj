@@ -5,6 +5,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [gen.test-support :as ts]
             [gen.array :as array :refer [+ - * /]]
+            [gen.array.batch :as batch]
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
             [gen.dist :as d]
@@ -12,6 +13,8 @@
             [gen.dynamic :as dyn :refer [gen]]
             [gen.gfi :as gfi]
             [gen.gradients :as g]
+            [gen.inference.enumerative :as enum]
+            [gen.inference.proposal :as prop]
             [gen.learning :as learn]
             [gen.random :as rng]
             [gen.selection :as sel]))
@@ -186,6 +189,142 @@
     (is (< (ts/abs (- (:w store) w)) 1e-3))
     (is (< (ts/abs (- (:b store) (- my (* w mx)))) 1e-3))))
 
+;; ---------------------------------------------------------------------------
+;; Parameters a combinator's callees hold (DESIGN §9, genclj-umww)
+;; ---------------------------------------------------------------------------
+
+(defn- store-paths
+  "The paths to the parameters in a tree of stores."
+  [stores]
+  (mapcat (fn [[k v]] (if (map? v) (map #(into [k] %) (store-paths v)) [[k]])) stores))
+
+(defn- fd-store
+  "The central difference of the objective in the parameter at path of the
+   stores the trace's generative function holds."
+  [{gf :gen-fn args :args choices :choices} path retgrad]
+  (let [stores (gfi/stores gf)
+        at (fn [d] (objective (gfi/with-stores gf (update-in stores path + d)) args choices retgrad))]
+    (/ (- (at h) (at (- h))) (* 2 h))))
+
+(defn- store-gradients-match?
+  "param-gradients of tr, in the shape of its stores, against finite
+   differences, parameter by parameter."
+  [tr & [retgrad]]
+  (let [stores (gfi/stores (:gen-fn tr))
+        grads (g/param-gradients tr retgrad)]
+    (and (= (set (store-paths stores)) (set (store-paths grads)))
+         (every? #(grad-close? (get-in grads %) (fd-store tr % retgrad)) (store-paths stores)))))
+
+(def ^:private scaled
+  "z ~ N(mu·x, s), holding its parameters."
+  (dyn/with-params (gen [x] (trace :z (d/normal (* (param :mu) x) (param :s)))) {:mu 0.5 :s 1.5}))
+
+(def ^:private ar1
+  "An AR(1) step, x ~ N(a·x_prev, 1), holding a."
+  (dyn/with-params (gen [t prev] (trace :x (d/normal (* (param :a) prev) 1))) {:a 0.8}))
+
+(def ^:private shifted
+  "z ~ N(x + shift, 1), holding shift."
+  (dyn/with-params (gen [x] (trace :z (d/normal (+ x (param :shift)) 1))) {:shift 0.3}))
+
+(def ^:private plain
+  "z ~ N(x, 1), holding nothing."
+  (gen [x] (trace :z (d/normal x 1))))
+
+(def ^:private counting-down
+  "A Recurse whose production holds m and aggregation c: node n draws u ~
+   N(m, 1) and has child n - 1 while n > 0; its value y ~ N(c + the child's
+   y, 1)."
+  (comb/recurse (dyn/with-params (gen [n] (trace :u (d/normal (param :m) 1)) {:value n :children (if (pos? n) [(dec n)] [])})
+                                 {:m 0.2})
+                (dyn/with-params (gen [_ kids] (trace :y (d/normal (reduce + (param :c) kids) 1))) {:c -0.4})
+                1))
+
+(deftest parameter-gradients-through-combinators
+  (testing "Map: the kernel's store, accumulated over the elements"
+    (let [xs [1.0 2.0 3.0]
+          zs [0.4 1.7 2.2]
+          tr (:trace (gfi/generate (comb/map scaled) [xs] (apply cm/choicemap (mapcat (fn [i z] [[i :z] z]) (range) zs))
+                                   (rng/key 30)))
+          per-element (map #(g/param-gradients (:trace (gfi/generate scaled [%1] (cm/choicemap :z %2) (rng/key 31)))) xs zs)
+          summed (g/weighted-sum (repeat 1.0) per-element)]
+      (is (= {:mu 0.5 :s 1.5} (gfi/stores (:gen-fn tr))))
+      (is (store-gradients-match? tr))
+      (is (and (ts/close? (:mu summed) (:mu (g/param-gradients tr))) (ts/close? (:s summed) (:s (g/param-gradients tr))))
+          "the elements' gradients, summed")))
+  (testing "Unfold: the kernel's"
+    (is (store-gradients-match? (:trace (gfi/generate (comb/unfold ar1) [3 1.0] (cm/choicemap [0 :x] 0.9 [1 :x] 0.5 [2 :x] 0.7)
+                                                      (rng/key 32))))))
+  (testing "Switch: by branch, the inactive one's zero"
+    (let [sw (comb/switch scaled shifted plain)]
+      (is (= {0 {:mu 0.5 :s 1.5} 1 {:shift 0.3}} (gfi/stores sw)) "the branches that hold one")
+      (doseq [[b branch] [[0 scaled] [1 shifted]]]
+        (let [tr (:trace (gfi/generate sw [b 2.0] (cm/choicemap :z 1.1) (rng/key 33)))
+              own (g/param-gradients (:trace (gfi/generate branch [2.0] (cm/choicemap :z 1.1) (rng/key 33))))]
+          (is (store-gradients-match? tr) (str "branch " b))
+          (is (every? (fn [[k v]] (ts/close? v (get-in (g/param-gradients tr) [b k]))) own)
+              (str "branch " b "'s, as its own trace's"))
+          (is (ts/close? 0.0 (get-in (g/param-gradients tr) (if (= b 0) [1 :shift] [0 :mu]))) (str "branch " b))))))
+  (testing "Switch with branch keys"
+    (is (store-gradients-match? (:trace (gfi/generate (comb/switch {:a scaled :b shifted}) [:b 2.0] (cm/choicemap :z 1.1)
+                                                      (rng/key 34))))))
+  (testing "Recurse: the production's and the aggregation's"
+    (let [choices (cm/choicemap [0 :production :u] 0.1 [1 :production :u] -0.3 [2 :production :u] 0.6
+                                [0 :aggregation :y] -1.0 [1 :aggregation :y] -0.6 [2 :aggregation :y] 0.2)
+          tr (:trace (gfi/generate counting-down [2] choices (rng/key 35)))]
+      (is (= {:production {:m 0.2} :aggregation {:c -0.4}} (gfi/stores counting-down)))
+      (is (store-gradients-match? tr))
+      ;; d/dm Σ log N(u; m, 1) = Σ (u - m); d/dc Σ log N(y; c + y_child, 1) = Σ (y - c - y_child)
+      (is (ts/close? (- (+ 0.1 -0.3 0.6) (* 3 0.2)) (get-in (g/param-gradients tr) [:production :m])))
+      (is (ts/close? (+ (- -1.0 -0.4 -0.6) (- -0.6 -0.4 0.2) (- 0.2 -0.4)) (get-in (g/param-gradients tr) [:aggregation :c])))))
+  (testing "nested: a Map of Switches, with a return-value gradient"
+    (let [tr (:trace (gfi/generate (comb/map (comb/switch scaled shifted)) [[0 1] [2.0 -1.0]]
+                                   (cm/choicemap [0 :z] 0.8 [1 :z] -0.2) (rng/key 36)))]
+      (is (store-gradients-match? tr [0.5 -2.0]))))
+  (testing "no store is loud"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"holds no parameter store"
+                          (g/param-gradients (gfi/simulate (comb/map plain) [[1.0]] (rng/key 37)))))))
+
+;; with-internal-proposal and with-exact-proposal keep their model's density,
+;; so their stores and parameter gradients are the model's
+(deftest a-wrapper-s-stores-are-its-model-s
+  (let [model (dyn/with-params (gen [] (let [k (trace :k (d/bernoulli 0.3))]
+                                          (trace :x (d/normal (+ (param :mu) (array/where k 1.0 0.0)) 1))))
+                               {:mu 0.5})
+        choices (cm/choicemap :k true :x 1.2)
+        own (g/param-gradients (:trace (gfi/generate model [] choices (rng/key 40))))]
+    (doseq [[label wrapped] [["an internal proposal" (prop/with-internal-proposal
+                                                      model
+                                                      (gen [cs] (when-not (cm/has-value? (cm/get-submap cs :k))
+                                                                  (trace :k (d/bernoulli 0.5)))))]
+                             ["an exact proposal" (enum/with-exact-proposal model [:k])]]]
+      (testing label
+        (let [tr (:trace (gfi/generate wrapped [] choices (rng/key 41)))
+              moved (gfi/with-stores wrapped {:mu 2.0})]
+          (is (= {:mu 0.5} (gfi/stores wrapped)))
+          (is (ts/close? (:mu own) (:mu (g/param-gradients tr))) "the model's gradient, d/dmu = 1.2 - 1.5")
+          (is (= {:mu 2.0} (gfi/stores moved)))
+          ;; d/dmu log N(1.2; mu + 1, 1) at mu = 2
+          (is (ts/close? -1.8 (:mu (g/param-gradients (:trace (gfi/generate moved [] choices (rng/key 42))))))
+              "the stores given back reach the model"))))))
+
+(deftest learning-steps-a-combinator-s-stores
+  ;; gen.learning steps the tree gfi/stores gives, and gfi/with-stores gives
+  ;; it back: the Map's kernel's mu to its maximum likelihood, Σx·z/Σx², s
+  ;; fixed
+  (let [xs [1.0 2.0 3.0]
+        zs [2.1 3.9 6.2]
+        kernel (dyn/with-params (gen [x] (trace :z (d/normal (* (param :mu) x) 1))) {:mu 0.5})
+        data (apply cm/choicemap (mapcat (fn [i z] [[i :z] z]) (range) zs))
+        opt (learn/sgd {:lr 0.02})
+        trained (reduce (fn [gf i]
+                          (let [tr (:trace (gfi/generate gf [xs] data (rng/key i)))
+                                [stores _] (learn/step opt nil (gfi/stores gf) (g/param-gradients tr))]
+                            (gfi/with-stores gf stores)))
+                        (comb/map kernel)
+                        (range 300))]
+    (is (< (ts/abs (- (:mu (gfi/stores trained)) (/ (reduce + (map * xs zs)) (reduce + (map * xs xs))))) 1e-4))))
+
 (def ^:private conjugate
   (gen [] (let [mu (trace :mu (d/normal 0 1))] (trace :y (d/normal mu 1)) mu)))
 
@@ -232,6 +371,29 @@
       (is (< 1.0 (ts/number (:w store'))) (str (:kind opt) ": :w ascends"))))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"does not have"
                         (learn/step (learn/sgd {:lr 0.1}) nil {:w 1.0} {:v 0.5}))))
+
+(defn- evaluated?
+  "Is x a value rather than a graph: always on an eager backend, and on MLX
+   when MLX holds its data."
+  [x]
+  (or (not (array/array? x)) (array/concrete? x) ((requiring-resolve 'gen.backend.mlx/evaluated?) x)))
+
+(deftest a-step-is-evaluated
+  ;; a step is an inference loop's boundary (rule 3): on a lazy backend its
+  ;; store and state are values, so a loop of steps holds no graph from one
+  ;; to the next. Without it, train-test's lecture loop grew each store into
+  ;; a graph over every step before (genclj-9e9e: 270 KB a lecture on Metal)
+  (doseq [opt [(learn/sgd {:lr 0.1}) (learn/adam {:lr 0.1}) (learn/gradient-descent {:step-size-init 0.1 :step-size-beta 1.0})]]
+    (let [store {:w (array/array [1.0 2.0]) :b (array/array 0.5)}
+          grads {:w (* 2.0 (array/array [0.5 -0.5])) :b (* 3.0 (array/array 0.1))}
+          stepped (learn/step opt (learn/init opt store) store grads)]
+      (is (every? evaluated? (array/tree-leaves stepped)) (str (:kind opt)))))
+  (testing "a step inside a gradient (tape values), and under the batch tracer, is the same step"
+    (let [lr 0.1
+          w-after #(:w (first (learn/step (learn/sgd {:lr lr}) nil {:w %} {:w (* 2.0 %)})))]
+      (is (ts/close? (+ 1.0 (* 2.0 lr)) ((array/grad w-after) 1.5)) "d/dw of w + lr·2w")
+      (let [ws (array/array [1.0 2.0 3.0])]
+        (is (ts/close? (* (+ 1.0 (* 2.0 lr)) ws) (batch/unwrap (batch/batched [3] (w-after (batch/wrap ws [3]))) [3])))))))
 
 (deftest argument-gradients-with-a-return-value-gradient
   ;; Eq. 2.11 (law audit gap K): log N(z; x, 1) + retgrad·(x·z) has

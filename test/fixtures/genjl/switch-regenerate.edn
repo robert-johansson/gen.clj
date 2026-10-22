@@ -1,0 +1,705 @@
+;; Gen.jl's Switch regenerate (U1, docs/research/genjl-test-suite.md §4.3): for each case, a
+;; simulated trace, then 10 regenerations of it. :old and :new hold the arguments (the
+;; branch index 0-based), choices and scores; :weight is Gen.jl's.
+;; Written by test/fixtures/genjl/generate.jl: Gen 0.4.8, Julia 1.12.6, arm64-apple-darwin25.4.0.
+[{:selection [[:z]]
+ :case :bare-same
+ :line "switch.jl:85"
+ :weight 0.025676896847192765
+ :old {:choices {:z 12.722155622931297}
+ :args [1 5.0 3.0]
+ :score -2.1823185990724427}
+ :argdiffs [:unknown-change :no-change :no-change]
+ :draw 1
+ :new {:choices {:z 12.582288167921513}
+ :args [1 5.0 3.0]
+ :score -2.15664170222525}} {:selection [[:z]]
+ :case :bare-same
+ :line "switch.jl:85"
+ :weight 0.005081504001390513
+ :old {:choices {:z 12.722155622931297}
+ :args [1 5.0 3.0]
+ :score -2.1823185990724427}
+ :argdiffs [:unknown-change :no-change :no-change]
+ :draw 2
+ :new {:choices {:z 12.695391670844485}
+ :args [1 5.0 3.0]
+ :score -2.1772370950710522}} {:selection [[:z]]
+ :case :bare-same
+ :line "switch.jl:85"
+ :weight 0.16418467903105727
+ :old {:choices {:z 12.722155622931297}
+ :args [1 5.0 3.0]
+ :score -2.1823185990724427}
+ :argdiffs [:unknown-change :no-change :no-change]
+ :draw 3
+ :new {:choices {:z 11.102448850822517}
+ :args [1 5.0 3.0]
+ :score -2.0181339200413855}} {:selection [[:z]]
+ :case :bare-same
+ :line "switch.jl:85"
+ :weight -2.0785285422611386
+ :old {:choices {:z 12.722155622931297}
+ :args [1 5.0 3.0]
+ :score -2.1823185990724427}
+ :argdiffs [:unknown-change :no-change :no-change]
+ :draw 4
+ :new {:choices {:z 4.64552647733155}
+ :args [1 5.0 3.0]
+ :score -4.260847141333581}} {:selection [[:z]]
+ :case :bare-same
+ :line "switch.jl:85"
+ :weight 0.16472356713379854
+ :old {:choices {:z 12.722155622931297}
+ :args [1 5.0 3.0]
+ :score -2.1823185990724427}
+ :argdiffs [:unknown-change :no-change :no-change]
+ :draw 5
+ :new {:choices {:z 10.9717904061442}
+ :args [1 5.0 3.0]
+ :score -2.017595031938644}} {:selection [[:z]]
+ :case :bare-same
+ :line "switch.jl:85"
+ :weight 0.15941177859242162
+ :old {:choices {:z 12.722155622931297}
+ :args [1 5.0 3.0]
+ :score -2.1823185990724427}
+ :argdiffs [:unknown-change :no-change :no-change]
+ :draw 6
+ :new {:choices {:z 10.689503663579913}
+ :args [1 5.0 3.0]
+ :score -2.022906820480021}} {:selection [[:z]]
+ :case :bare-same
+ :line "switch.jl:85"
+ :weight 0.15813432555351392
+ :old {:choices {:z 12.722155622931297}
+ :args [1 5.0 3.0]
+ :score -2.1823185990724427}
+ :argdiffs [:unknown-change :no-change :no-change]
+ :draw 7
+ :new {:choices {:z 11.345546132420306}
+ :args [1 5.0 3.0]
+ :score -2.024184273518929}} {:selection [[:z]]
+ :case :bare-same
+ :line "switch.jl:85"
+ :weight -0.22739478895793397
+ :old {:choices {:z 12.722155622931297}
+ :args [1 5.0 3.0]
+ :score -2.1823185990724427}
+ :argdiffs [:unknown-change :no-change :no-change]
+ :draw 8
+ :new {:choices {:z 8.343136023271667}
+ :args [1 5.0 3.0]
+ :score -2.4097133880303767}} {:selection [[:z]]
+ :case :bare-same
+ :line "switch.jl:85"
+ :weight -0.8626825999296175
+ :old {:choices {:z 12.722155622931297}
+ :args [1 5.0 3.0]
+ :score -2.1823185990724427}
+ :argdiffs [:unknown-change :no-change :no-change]
+ :draw 9
+ :new {:choices {:z 6.699522492986738}
+ :args [1 5.0 3.0]
+ :score -3.0450011990020602}} {:selection [[:z]]
+ :case :bare-same
+ :line "switch.jl:85"
+ :weight -0.8069004744450092
+ :old {:choices {:z 12.722155622931297}
+ :args [1 5.0 3.0]
+ :score -2.1823185990724427}
+ :argdiffs [:unknown-change :no-change :no-change]
+ :draw 10
+ :new {:choices {:z 6.81789185582151}
+ :args [1 5.0 3.0]
+ :score -2.989219073517452}} {:selection [[:z]]
+ :case :bare-switch
+ :line "switch.jl:89"
+ :weight -0.5887767191744384
+ :old {:choices {:z 10.788395504801738}
+ :args [1 5.0 3.0]
+ :score -2.0200384031165664}
+ :argdiffs [:unknown-change :no-change :no-change]
+ :draw 1
+ :new {:choices {:z 11.262323927437004}
+ :args [0 5.0 3.0]
+ :score -2.6088151222910048}} {:selection [[:z]]
+ :case :bare-switch
+ :line "switch.jl:89"
+ :weight -0.13586588021357304
+ :old {:choices {:z 10.788395504801738}
+ :args [1 5.0 3.0]
+ :score -2.0200384031165664}
+ :argdiffs [:unknown-change :no-change :no-change]
+ :draw 2
+ :new {:choices {:z 9.578088180753035}
+ :args [0 5.0 3.0]
+ :score -2.1559042833301394}} {:selection [[:z]]
+ :case :bare-switch
+ :line "switch.jl:89"
+ :weight -1.6079571272989561
+ :old {:choices {:z 10.788395504801738}
+ :args [1 5.0 3.0]
+ :score -2.0200384031165664}
+ :argdiffs [:unknown-change :no-change :no-change]
+ :draw 3
+ :new {:choices {:z 2.6159490387098563}
+ :args [0 5.0 3.0]
+ :score -3.6279955304155225}} {:selection [[:z]]
+ :case :bare-switch
+ :line "switch.jl:89"
+ :weight -1.201581419724202
+ :old {:choices {:z 10.788395504801738}
+ :args [1 5.0 3.0]
+ :score -2.0200384031165664}
+ :argdiffs [:unknown-change :no-change :no-change]
+ :draw 4
+ :new {:choices {:z 12.655452933649286}
+ :args [0 5.0 3.0]
+ :score -3.2216198228407684}} {:selection [[:z]]
+ :case :bare-switch
+ :line "switch.jl:89"
+ :weight -0.817298917264508
+ :old {:choices {:z 10.788395504801738}
+ :args [1 5.0 3.0]
+ :score -2.0200384031165664}
+ :argdiffs [:unknown-change :no-change :no-change]
+ :draw 5
+ :new {:choices {:z 11.841374359932816}
+ :args [0 5.0 3.0]
+ :score -2.8373373203810743}} {:selection [[:z]]
+ :case :bare-switch
+ :line "switch.jl:89"
+ :weight -0.3775459228779394
+ :old {:choices {:z 10.788395504801738}
+ :args [1 5.0 3.0]
+ :score -2.0200384031165664}
+ :argdiffs [:unknown-change :no-change :no-change]
+ :draw 6
+ :new {:choices {:z 5.384545340826758}
+ :args [0 5.0 3.0]
+ :score -2.3975843259945058}} {:selection [[:z]]
+ :case :bare-switch
+ :line "switch.jl:89"
+ :weight -3.235158979516397
+ :old {:choices {:z 10.788395504801738}
+ :args [1 5.0 3.0]
+ :score -2.0200384031165664}
+ :argdiffs [:unknown-change :no-change :no-change]
+ :draw 7
+ :new {:choices {:z 0.3660208217677692}
+ :args [0 5.0 3.0]
+ :score -5.255197382632963}} {:selection [[:z]]
+ :case :bare-switch
+ :line "switch.jl:89"
+ :weight -0.03652528008277356
+ :old {:choices {:z 10.788395504801738}
+ :args [1 5.0 3.0]
+ :score -2.0200384031165664}
+ :argdiffs [:unknown-change :no-change :no-change]
+ :draw 8
+ :new {:choices {:z 7.162007455953196}
+ :args [0 5.0 3.0]
+ :score -2.05656368319934}} {:selection [[:z]]
+ :case :bare-switch
+ :line "switch.jl:89"
+ :weight -0.0009022732772034914
+ :old {:choices {:z 10.788395504801738}
+ :args [1 5.0 3.0]
+ :score -2.0200384031165664}
+ :argdiffs [:unknown-change :no-change :no-change]
+ :draw 9
+ :new {:choices {:z 7.752983034230909}
+ :args [0 5.0 3.0]
+ :score -2.02094067639377}} {:selection [[:z]]
+ :case :bare-switch
+ :line "switch.jl:89"
+ :weight -0.026071813497826835
+ :old {:choices {:z 10.788395504801738}
+ :args [1 5.0 3.0]
+ :score -2.0200384031165664}
+ :argdiffs [:unknown-change :no-change :no-change]
+ :draw 10
+ :new {:choices {:z 7.283013873670492}
+ :args [0 5.0 3.0]
+ :score -2.046110216614393}} {:selection [[:z]]
+ :case :bare-doubled
+ :line "switch.jl:94"
+ :weight -1.3129752596691895
+ :old {:choices {:z 7.225243725542693}
+ :args [0 5.0 3.0]
+ :score -2.0508978932511694}
+ :argdiffs [:unknown-change :unknown-change :unknown-change]
+ :draw 1
+ :new {:choices {:z 17.077216035731777}
+ :args [1 10.0 6.0]
+ :score -3.363873152920359}} {:selection [[:z]]
+ :case :bare-doubled
+ :line "switch.jl:94"
+ :weight -0.14319894035571812
+ :old {:choices {:z 7.225243725542693}
+ :args [0 5.0 3.0]
+ :score -2.0508978932511694}
+ :argdiffs [:unknown-change :unknown-change :unknown-change]
+ :draw 2
+ :new {:choices {:z 20.21735359332988}
+ :args [1 10.0 6.0]
+ :score -2.1940968336068876}} {:selection [[:z]]
+ :case :bare-doubled
+ :line "switch.jl:94"
+ :weight 0.03274755244208549
+ :old {:choices {:z 7.225243725542693}
+ :args [0 5.0 3.0]
+ :score -2.0508978932511694}
+ :argdiffs [:unknown-change :unknown-change :unknown-change]
+ :draw 3
+ :new {:choices {:z 22.103881378761677}
+ :args [1 10.0 6.0]
+ :score -2.018150340809084}} {:selection [[:z]]
+ :case :bare-doubled
+ :line "switch.jl:94"
+ :weight -0.09705666071607899
+ :old {:choices {:z 7.225243725542693}
+ :args [0 5.0 3.0]
+ :score -2.0508978932511694}
+ :argdiffs [:unknown-change :unknown-change :unknown-change]
+ :draw 4
+ :new {:choices {:z 23.53207936403451}
+ :args [1 10.0 6.0]
+ :score -2.1479545539672484}} {:selection [[:z]]
+ :case :bare-doubled
+ :line "switch.jl:94"
+ :weight -0.11902652760110044
+ :old {:choices {:z 7.225243725542693}
+ :args [0 5.0 3.0]
+ :score -2.0508978932511694}
+ :argdiffs [:unknown-change :unknown-change :unknown-change]
+ :draw 5
+ :new {:choices {:z 20.343882618402073}
+ :args [1 10.0 6.0]
+ :score -2.16992442085227}} {:selection [[:z]]
+ :case :bare-doubled
+ :line "switch.jl:94"
+ :weight -0.1436842658100299
+ :old {:choices {:z 7.225243725542693}
+ :args [0 5.0 3.0]
+ :score -2.0508978932511694}
+ :argdiffs [:unknown-change :unknown-change :unknown-change]
+ :draw 6
+ :new {:choices {:z 20.214905025106084}
+ :args [1 10.0 6.0]
+ :score -2.1945821590611994}} {:selection [[:z]]
+ :case :bare-doubled
+ :line "switch.jl:94"
+ :weight -0.42873848841588247
+ :old {:choices {:z 7.225243725542693}
+ :args [0 5.0 3.0]
+ :score -2.0508978932511694}
+ :argdiffs [:unknown-change :unknown-change :unknown-change]
+ :draw 7
+ :new {:choices {:z 19.11598542370243}
+ :args [1 10.0 6.0]
+ :score -2.479636381667052}} {:selection [[:z]]
+ :case :bare-doubled
+ :line "switch.jl:94"
+ :weight -0.1955287460279611
+ :old {:choices {:z 7.225243725542693}
+ :args [0 5.0 3.0]
+ :score -2.0508978932511694}
+ :argdiffs [:unknown-change :unknown-change :unknown-change]
+ :draw 8
+ :new {:choices {:z 19.970279646524116}
+ :args [1 10.0 6.0]
+ :score -2.2464266392791306}} {:selection [[:z]]
+ :case :bare-doubled
+ :line "switch.jl:94"
+ :weight -0.298548860498816
+ :old {:choices {:z 7.225243725542693}
+ :args [0 5.0 3.0]
+ :score -2.0508978932511694}
+ :argdiffs [:unknown-change :unknown-change :unknown-change]
+ :draw 9
+ :new {:choices {:z 19.55579731327583}
+ :args [1 10.0 6.0]
+ :score -2.3494467537499855}} {:selection [[:z]]
+ :case :bare-doubled
+ :line "switch.jl:94"
+ :weight -1.0058702827472792
+ :old {:choices {:z 7.225243725542693}
+ :args [0 5.0 3.0]
+ :score -2.0508978932511694}
+ :argdiffs [:unknown-change :unknown-change :unknown-change]
+ :draw 10
+ :new {:choices {:z 26.325033222330436}
+ :args [1 10.0 6.0]
+ :score -3.0567681759984486}} {:selection []
+ :case :nested-drop
+ :line "switch.jl:288 and :292"
+ :weight 2.1565690560476627
+ :old {:choices {:x {:z 12.318014998105632
+ :q {:z 10.91228938207124}}}
+ :args [1]
+ :score -5.209967295912955}
+ :argdiffs [:unknown-change]
+ :draw 1
+ :new {:choices {:x {:z 12.318014998105632}}
+ :args [0]
+ :score -3.0533982398652926}} {:selection []
+ :case :nested-drop
+ :line "switch.jl:288 and :292"
+ :weight 2.1565690560476627
+ :old {:choices {:x {:z 12.318014998105632
+ :q {:z 10.91228938207124}}}
+ :args [1]
+ :score -5.209967295912955}
+ :argdiffs [:unknown-change]
+ :draw 2
+ :new {:choices {:x {:z 12.318014998105632}}
+ :args [0]
+ :score -3.0533982398652926}} {:selection []
+ :case :nested-drop
+ :line "switch.jl:288 and :292"
+ :weight 2.1565690560476627
+ :old {:choices {:x {:z 12.318014998105632
+ :q {:z 10.91228938207124}}}
+ :args [1]
+ :score -5.209967295912955}
+ :argdiffs [:unknown-change]
+ :draw 3
+ :new {:choices {:x {:z 12.318014998105632}}
+ :args [0]
+ :score -3.0533982398652926}} {:selection []
+ :case :nested-drop
+ :line "switch.jl:288 and :292"
+ :weight 2.1565690560476627
+ :old {:choices {:x {:z 12.318014998105632
+ :q {:z 10.91228938207124}}}
+ :args [1]
+ :score -5.209967295912955}
+ :argdiffs [:unknown-change]
+ :draw 4
+ :new {:choices {:x {:z 12.318014998105632}}
+ :args [0]
+ :score -3.0533982398652926}} {:selection []
+ :case :nested-drop
+ :line "switch.jl:288 and :292"
+ :weight 2.1565690560476627
+ :old {:choices {:x {:z 12.318014998105632
+ :q {:z 10.91228938207124}}}
+ :args [1]
+ :score -5.209967295912955}
+ :argdiffs [:unknown-change]
+ :draw 5
+ :new {:choices {:x {:z 12.318014998105632}}
+ :args [0]
+ :score -3.0533982398652926}} {:selection []
+ :case :nested-drop
+ :line "switch.jl:288 and :292"
+ :weight 2.1565690560476627
+ :old {:choices {:x {:z 12.318014998105632
+ :q {:z 10.91228938207124}}}
+ :args [1]
+ :score -5.209967295912955}
+ :argdiffs [:unknown-change]
+ :draw 6
+ :new {:choices {:x {:z 12.318014998105632}}
+ :args [0]
+ :score -3.0533982398652926}} {:selection []
+ :case :nested-drop
+ :line "switch.jl:288 and :292"
+ :weight 2.1565690560476627
+ :old {:choices {:x {:z 12.318014998105632
+ :q {:z 10.91228938207124}}}
+ :args [1]
+ :score -5.209967295912955}
+ :argdiffs [:unknown-change]
+ :draw 7
+ :new {:choices {:x {:z 12.318014998105632}}
+ :args [0]
+ :score -3.0533982398652926}} {:selection []
+ :case :nested-drop
+ :line "switch.jl:288 and :292"
+ :weight 2.1565690560476627
+ :old {:choices {:x {:z 12.318014998105632
+ :q {:z 10.91228938207124}}}
+ :args [1]
+ :score -5.209967295912955}
+ :argdiffs [:unknown-change]
+ :draw 8
+ :new {:choices {:x {:z 12.318014998105632}}
+ :args [0]
+ :score -3.0533982398652926}} {:selection []
+ :case :nested-drop
+ :line "switch.jl:288 and :292"
+ :weight 2.1565690560476627
+ :old {:choices {:x {:z 12.318014998105632
+ :q {:z 10.91228938207124}}}
+ :args [1]
+ :score -5.209967295912955}
+ :argdiffs [:unknown-change]
+ :draw 9
+ :new {:choices {:x {:z 12.318014998105632}}
+ :args [0]
+ :score -3.0533982398652926}} {:selection []
+ :case :nested-drop
+ :line "switch.jl:288 and :292"
+ :weight 2.1565690560476627
+ :old {:choices {:x {:z 12.318014998105632
+ :q {:z 10.91228938207124}}}
+ :args [1]
+ :score -5.209967295912955}
+ :argdiffs [:unknown-change]
+ :draw 10
+ :new {:choices {:x {:z 12.318014998105632}}
+ :args [0]
+ :score -3.0533982398652926}} {:selection [[:x :z]]
+ :case :nested-drop-z
+ :line "switch.jl:294"
+ :weight 4.678359479857524
+ :old {:choices {:x {:z 13.113859496237133
+ :q {:z 7.441964741037479}}}
+ :args [1]
+ :score -8.461221677917298}
+ :argdiffs [:unknown-change]
+ :draw 1
+ :new {:choices {:x {:z 2.3630145670433187}}
+ :args [0]
+ :score -3.7828621980597728}} {:selection [[:x :z]]
+ :case :nested-drop-z
+ :line "switch.jl:294"
+ :weight 6.269970093089517
+ :old {:choices {:x {:z 13.113859496237133
+ :q {:z 7.441964741037479}}}
+ :args [1]
+ :score -8.461221677917298}
+ :argdiffs [:unknown-change]
+ :draw 2
+ :new {:choices {:x {:z 9.768223326729387}}
+ :args [0]
+ :score -2.1912515848277794}} {:selection [[:x :z]]
+ :case :nested-drop-z
+ :line "switch.jl:294"
+ :weight 6.3738624574708584
+ :old {:choices {:x {:z 13.113859496237133
+ :q {:z 7.441964741037479}}}
+ :args [1]
+ :score -8.461221677917298}
+ :argdiffs [:unknown-change]
+ :draw 3
+ :new {:choices {:x {:z 6.879040065691103}}
+ :args [0]
+ :score -2.087359220446438}} {:selection [[:x :z]]
+ :case :nested-drop-z
+ :line "switch.jl:294"
+ :weight 6.382518167296005
+ :old {:choices {:x {:z 13.113859496237133
+ :q {:z 7.441964741037479}}}
+ :args [1]
+ :score -8.461221677917298}
+ :argdiffs [:unknown-change]
+ :draw 4
+ :new {:choices {:x {:z 9.049165572001469}}
+ :args [0]
+ :score -2.078703510621292}} {:selection [[:x :z]]
+ :case :nested-drop-z
+ :line "switch.jl:294"
+ :weight 4.428773351184413
+ :old {:choices {:x {:z 13.113859496237133
+ :q {:z 7.441964741037479}}}
+ :args [1]
+ :score -8.461221677917298}
+ :argdiffs [:unknown-change]
+ :draw 5
+ :new {:choices {:x {:z 1.9776952013799711}}
+ :args [0]
+ :score -4.032448326732884}} {:selection [[:x :z]]
+ :case :nested-drop-z
+ :line "switch.jl:294"
+ :weight 6.0406291354709865
+ :old {:choices {:x {:z 13.113859496237133
+ :q {:z 7.441964741037479}}}
+ :args [1]
+ :score -8.461221677917298}
+ :argdiffs [:unknown-change]
+ :draw 6
+ :new {:choices {:x {:z 10.693464492122274}}
+ :args [0]
+ :score -2.42059254244631}} {:selection [[:x :z]]
+ :case :nested-drop-z
+ :line "switch.jl:294"
+ :weight 6.144647761189846
+ :old {:choices {:x {:z 13.113859496237133
+ :q {:z 7.441964741037479}}}
+ :args [1]
+ :score -8.461221677917298}
+ :argdiffs [:unknown-change]
+ :draw 7
+ :new {:choices {:x {:z 5.679996614790397}}
+ :args [0]
+ :score -2.31657391672745}} {:selection [[:x :z]]
+ :case :nested-drop-z
+ :line "switch.jl:294"
+ :weight 6.217260671618698
+ :old {:choices {:x {:z 13.113859496237133
+ :q {:z 7.441964741037479}}}
+ :args [1]
+ :score -8.461221677917298}
+ :argdiffs [:unknown-change]
+ :draw 8
+ :new {:choices {:x {:z 10.018757865536301}}
+ :args [0]
+ :score -2.243961006298598}} {:selection [[:x :z]]
+ :case :nested-drop-z
+ :line "switch.jl:294"
+ :weight 6.379277023971042
+ :old {:choices {:x {:z 13.113859496237133
+ :q {:z 7.441964741037479}}}
+ :args [1]
+ :score -8.461221677917298}
+ :argdiffs [:unknown-change]
+ :draw 9
+ :new {:choices {:x {:z 6.923390053305051}}
+ :args [0]
+ :score -2.0819446539462545}} {:selection [[:x :z]]
+ :case :nested-drop-z
+ :line "switch.jl:294"
+ :weight 1.780499357698698
+ :old {:choices {:x {:z 13.113859496237133
+ :q {:z 7.441964741037479}}}
+ :args [1]
+ :score -8.461221677917298}
+ :argdiffs [:unknown-change]
+ :draw 10
+ :new {:choices {:x {:z 17.161718559867722}}
+ :args [0]
+ :score -6.680722320218599}} {:selection [[:x :z]]
+ :case :nested-mh
+ :line "mh(tr, select(:x => :z)), U1"
+ :weight 3.4651903897451524
+ :old {:choices {:x {:z 3.3753280763354656
+ :q {:z 11.80291123859014}}}
+ :args [1]
+ :score -8.901450584118269}
+ :argdiffs [:no-change]
+ :draw 1
+ :new {:choices {:x {:z 13.278381321656553
+ :q {:z 11.80291123859014}}}
+ :args [1]
+ :score -5.4362601943731175}} {:selection [[:x :z]]
+ :case :nested-mh
+ :line "mh(tr, select(:x => :z)), U1"
+ :weight -2.4940869138768367
+ :old {:choices {:x {:z 3.3753280763354656
+ :q {:z 11.80291123859014}}}
+ :args [1]
+ :score -8.901450584118269}
+ :argdiffs [:no-change]
+ :draw 2
+ :new {:choices {:x {:z 17.966015305469355
+ :q {:z 11.80291123859014}}}
+ :args [1]
+ :score -11.395537497995107}} {:selection [[:x :z]]
+ :case :nested-mh
+ :line "mh(tr, select(:x => :z)), U1"
+ :weight -0.5671479135955151
+ :old {:choices {:x {:z 3.3753280763354656
+ :q {:z 11.80291123859014}}}
+ :args [1]
+ :score -8.901450584118269}
+ :argdiffs [:no-change]
+ :draw 3
+ :new {:choices {:x {:z 16.807588540788515
+ :q {:z 11.80291123859014}}}
+ :args [1]
+ :score -9.468598497713785}} {:selection [[:x :z]]
+ :case :nested-mh
+ :line "mh(tr, select(:x => :z)), U1"
+ :weight 4.449242063231063
+ :old {:choices {:x {:z 3.3753280763354656
+ :q {:z 11.80291123859014}}}
+ :args [1]
+ :score -8.901450584118269}
+ :argdiffs [:no-change]
+ :draw 4
+ :new {:choices {:x {:z 8.30547249347688
+ :q {:z 11.80291123859014}}}
+ :args [1]
+ :score -4.452208520887206}} {:selection [[:x :z]]
+ :case :nested-mh
+ :line "mh(tr, select(:x => :z)), U1"
+ :weight 4.57870933139034
+ :old {:choices {:x {:z 3.3753280763354656
+ :q {:z 11.80291123859014}}}
+ :args [1]
+ :score -8.901450584118269}
+ :argdiffs [:no-change]
+ :draw 5
+ :new {:choices {:x {:z 11.07702217396686
+ :q {:z 11.80291123859014}}}
+ :args [1]
+ :score -4.32274125272793}} {:selection [[:x :z]]
+ :case :nested-mh
+ :line "mh(tr, select(:x => :z)), U1"
+ :weight 1.9275015869788872
+ :old {:choices {:x {:z 3.3753280763354656
+ :q {:z 11.80291123859014}}}
+ :args [1]
+ :score -8.901450584118269}
+ :argdiffs [:no-change]
+ :draw 6
+ :new {:choices {:x {:z 4.877231656913816
+ :q {:z 11.80291123859014}}}
+ :args [1]
+ :score -6.973948997139383}} {:selection [[:x :z]]
+ :case :nested-mh
+ :line "mh(tr, select(:x => :z)), U1"
+ :weight 4.722657926504061
+ :old {:choices {:x {:z 3.3753280763354656
+ :q {:z 11.80291123859014}}}
+ :args [1]
+ :score -8.901450584118269}
+ :argdiffs [:no-change]
+ :draw 7
+ :new {:choices {:x {:z 9.607483905622782
+ :q {:z 11.80291123859014}}}
+ :args [1]
+ :score -4.178792657614209}} {:selection [[:x :z]]
+ :case :nested-mh
+ :line "mh(tr, select(:x => :z)), U1"
+ :weight 3.7666660728715584
+ :old {:choices {:x {:z 3.3753280763354656
+ :q {:z 11.80291123859014}}}
+ :args [1]
+ :score -8.901450584118269}
+ :argdiffs [:no-change]
+ :draw 8
+ :new {:choices {:x {:z 6.953516330379516
+ :q {:z 11.80291123859014}}}
+ :args [1]
+ :score -5.134784511246711}} {:selection [[:x :z]]
+ :case :nested-mh
+ :line "mh(tr, select(:x => :z)), U1"
+ :weight 4.694049390221309
+ :old {:choices {:x {:z 3.3753280763354656
+ :q {:z 11.80291123859014}}}
+ :args [1]
+ :score -8.901450584118269}
+ :argdiffs [:no-change]
+ :draw 9
+ :new {:choices {:x {:z 10.48788225152129
+ :q {:z 11.80291123859014}}}
+ :args [1]
+ :score -4.2074011938969615}} {:selection [[:x :z]]
+ :case :nested-mh
+ :line "mh(tr, select(:x => :z)), U1"
+ :weight 4.0882252310635225
+ :old {:choices {:x {:z 3.3753280763354656
+ :q {:z 11.80291123859014}}}
+ :args [1]
+ :score -8.901450584118269}
+ :argdiffs [:no-change]
+ :draw 10
+ :new {:choices {:x {:z 7.493902166637318
+ :q {:z 11.80291123859014}}}
+ :args [1]
+ :score -4.813225353054747}}]

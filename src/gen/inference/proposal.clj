@@ -52,7 +52,7 @@
                     (assoc (:transitions q) :simulate
                            (fn [state p dist key]
                              (vswap! visited conj p)
-                             (if (cm/has-value? (cm/get-submap choices p))
+                             (if (cm/has-value? choices p)
                                ;; the trace's value, as a constraint would be taken
                                (generate (assoc state :constraints choices) p dist key)
                                (do (vreset! missing? true) (simulate state p dist key))))))
@@ -158,9 +158,12 @@
   (-propose [_ args key] (gfi/-propose gf args key))
   (-project [this tr selection]
     (proposal-weight this (:args tr) (sel/get-selected (:choices tr) selection) tr))
-  ;; its traces are the model's
+  ;; its traces, density and parameter stores are the model's
   trace/ICalls
-  (-call [_ tr p] (trace/-call gf tr p)))
+  (-call [_ tr p] (trace/-call gf tr p))
+  gfi/IStores
+  (-stores [_] (gfi/stores gf))
+  (-with-stores [this stores] (assoc this :gf (gfi/with-stores gf stores))))
 
 (defn with-internal-proposal
   "gf with q as its internal proposal for the choices q makes (see the

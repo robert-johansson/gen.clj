@@ -45,8 +45,8 @@
     (is (= 2.0 (cm/get-choice c :slope)))
     (is (= 1.5 (cm/get-choice c [:y 0])) "a vector is a path")
     (is (= 2 (cm/get-choice c [:params :b])))
-    (is (nil? (cm/get-choice c :missing)))
-    (is (nil? (cm/get-choice c :y)) "a node has no value")
+    (is (= :absent (:reason (ts/thrown-data (cm/get-choice c :missing)))))
+    (is (= :node (:reason (ts/thrown-data (cm/get-choice c :y)))) "a node has no value")
     (is (cm/has-submap? c :y))
     (is (= {0 1.5 1 -1.0} (cm/to-map (cm/get-submap c :y))))
     (is (= [[:params :a] [:params :b] [:slope] [:y 0] [:y 1]] (cm/addresses c))
@@ -59,6 +59,36 @@
   (testing "values are data: equality and printing"
     (is (= (cm/choicemap :a 1.0 :b 2.0) (cm/choicemap :b 2.0 :a 1.0)))
     (is (= "#gen/choicemap {:a 1.0}" (pr-str (cm/choicemap :a 1.0))))))
+
+(deftest lookups-are-loud
+  ;; D4 (DESIGN.md §9): a lookup throws where Gen.jl throws KeyError, and
+  ;; gives a not-found value there instead when one is passed, as nth
+  ;; does; the questions never throw. Planted bugs (2026-10-21): get-choice
+  ;; giving nil where nothing is, has-submap? true at a value, get-submap
+  ;; giving EMPTY through a value
+  (let [c (cm/choicemap :x 1.0 [:y :z] 2.0)]
+    (testing "get-choice"
+      (is (= 1.0 (cm/get-choice c :x)))
+      (is (= {:reason :absent :path [:w] :at nil} (ts/thrown-data (cm/get-choice c :w))))
+      (is (= {:reason :node :path [:y] :at nil} (ts/thrown-data (cm/get-choice c :y))))
+      (is (= {:reason :through-value :path [:x :a] :at [:x]} (ts/thrown-data (cm/get-choice c [:x :a]))))
+      (is (= [::none ::none ::none 1.0 2.0] (map #(cm/get-choice c % ::none) [:w :y [:x :a] :x [:y :z]]))))
+    (testing "get-value, of a choice map itself"
+      (is (= 1.0 (cm/get-value (cm/get-submap c :x))))
+      (is (= [:node :absent :absent] (map #(:reason (ts/thrown-data (cm/get-value %))) [c cm/EMPTY nil])))
+      (is (= ::none (cm/get-value c ::none))))
+    (testing "get-submap: a value is the choice map at its address, nothing is EMPTY"
+      (is (= (cm/->Value 1.0) (cm/get-submap c :x)))
+      (is (= cm/EMPTY (cm/get-submap c :w)))
+      (is (= (cm/choicemap :z 2.0) (cm/get-submap c :y)))
+      (is (= {:reason :through-value :path [:x :a] :at [:x]} (ts/thrown-data (cm/get-submap c [:x :a]))))
+      (is (= ::none (cm/get-submap c [:x :a] ::none))))
+    (testing "the questions"
+      (is (= [true false false false true] (map #(cm/has-value? c %) [:x :y :w [:x :a] [:y :z]])))
+      (is (= [false true false false false] (map #(cm/has-submap? c %) [:x :y :w [:x :a] [:y :z]]))))
+    (testing "a message names the lookup, the path and what is there"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"get-choice: no value at \[:x :a\]: the path goes through the value at \[:x\]"
+                            (cm/get-choice c [:x :a]))))))
 
 (deftest a-choice-map-value-is-itself
   ;; nodes and values are records, so map? is true of them: choicemap and
@@ -154,6 +184,11 @@
       (is (= s (sel/hierarchical :x sel/all [:y 0] sel/all)) "hierarchical nests a path")
       (is (= (sel/select [:y 0] [:y 1]) (sel/set-subselection (sel/select [:y 0]) [:y 1] sel/all)))
       (is (= (sel/select :z) (sel/set-subselection sel/none :z sel/all)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"goes inside a complement,"
+                            (sel/set-subselection (sel/complement s) [:a :b] sel/all))
+          "the error names the kind")
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"goes inside all,"
+                            (sel/set-subselection s [:x :u] sel/none)))
       (doseq [[why f] [["inside all" #(sel/set-subselection sel/all :x sel/none)]
                        ["inside a selected address" #(sel/set-subselection s [:x :u] sel/none)]
                        ["inside a complement" #(sel/set-subselection (sel/complement s) :z sel/all)]
