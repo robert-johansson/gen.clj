@@ -224,8 +224,7 @@ needs, taken from GenMLX's measured call counts
   - exponential: `−log1p(−u)`;
   - gamma: Marsaglia–Tsang with a fixed number of vectorized proposals. That
     keeps it branch-free, so there's no eval inside a sampler (a GenMLX smell,
-    dist.cljs:410-445). The first accepted proposal is `rng/first-accepted`'s
-    fold, which gen.dist's Poisson and binomial rejection samplers share;
+    dist.cljs:410-445);
   - beta and dirichlet: via gamma, from the gammas' logs (a sigmoid, a
     softmax), which do not underflow.
   - Because the algorithms are shared, the backends sample from identical laws.
