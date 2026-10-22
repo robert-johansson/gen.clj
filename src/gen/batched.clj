@@ -189,11 +189,6 @@
 ;; Spot checks against the scalar handler
 ;; ---------------------------------------------------------------------------
 
-(defn- particle-value
-  "Particle i's value of x (a shared value is every particle's)."
-  [x i]
-  (if (batch/batched? x) (array/take (batch/value x) i 0) x))
-
 (defn- spot-indices [n]
   (let [m *spot-checks*]
     (cond (= :all m) (range n)
@@ -201,11 +196,11 @@
           :else (map #(quot (* % n) m) (range m)))))
 
 (defn- tolerance-of
-  "The relative tolerance for comparing a value of x's dtype: its float
+  "The relative tolerance for comparing a value of dtype dt: its float
    precision (a scalar run of host parameters computes in float64 on the
    host, a batched run in the backend's float)."
-  [x]
-  (case (array/dtype x) (:float16 :bfloat16) 1e-2 :float32 1e-5 1e-8))
+  [dt]
+  (case dt (:float16 :bfloat16) 1e-2 :float32 1e-5 1e-8))
 
 (defn- close-host-values?
   "Are the host values u and v (numbers, booleans, nested vectors) equal
@@ -220,45 +215,101 @@
               (<= (Math/abs (- u v)) (* rtol (max 1.0 (Math/abs u) (Math/abs v))))))
         :else (= u v)))
 
-(defn- same-value?
-  "Do a scalar run's value x and a batched run's particle value y agree?
-   Only arrays are compared, on the host (no dtype need exist on the
-   backend: Metal has no float64), within the precision of the narrower
-   float."
-  [x y]
-  (or (not (array/array? x))
-      (and (array/array? y)
-           (= (array/shape x) (array/shape y))
-           (close-host-values? (array/->clj x) (array/->clj y) (max (tolerance-of x) (tolerance-of y))))))
-
-(declare spot-check-here!)
-
-(deftype ^:private Read [batched? v])
+;; A value of the batched trace at the checked particles: a batched one's
+;; rows there (an [k …] array) or a shared one as it is, its dtype (nil for
+;; a choice that is no array: a label, gen.dist.dsl), and its host values
+;; once read.
+(deftype ^:private Read [batched? v dtype host])
 
 (defn- gathered
-  "x at the checked particles: a batched x's values at indices (an [k …]
-   array, not yet evaluated), anything else as it is."
+  "x at the checked particles indices, not yet read."
   [x indices]
-  (if (batch/batched? x) (Read. true (array/take (batch/value x) indices 0)) (Read. false x)))
+  (if (batch/batched? x)
+    (let [a (batch/value x)] (Read. true (array/take a indices 0) (array/dtype a) nil))
+    (Read. false x (when (array/array? x) (array/dtype x)) nil)))
 
 (defn- on-host
-  "A gathered read's host values: an array's, read; a choice that is no
-   array (a label: gen.dist.dsl) as it is, as spot-check-here! takes it."
+  "A gathered read with its host values: an array's, read; a value that is
+   no array as it is."
   [^Read r]
   (let [v (.-v r)]
-    (Read. (.-batched? r) (if (array/array? v) (array/->clj v) v))))
+    (Read. (.-batched? r) v (.-dtype r) (if (array/array? v) (array/->clj v) v))))
 
 (defn- particle-host
   "The host value of a read at the j-th checked particle."
   [^Read r j]
-  (if (.-batched? r) (nth (.-v r) j) (.-v r)))
+  (if (.-batched? r) (nth (.-host r) j) (.-host r)))
 
-(defn- lazy-batch?
-  "Is t, a batched trace, on a lazy backend (where each scalar re-run would
-   cost evaluations)?"
+(defn- batch-backend
+  "The backend of the batched trace t's batched values (nil when none is: a
+   batched choice makes the score batched)."
   [t]
-  (let [s (:score t)]
-    (and (batch/batched? s) (not (array/concrete? (batch/value s))))))
+  (some #(when (batch/batched? %) (array/backend (batch/value %))) [(:score t) (:retval t)]))
+
+(defn- reads-of
+  "The batched trace t's choices, score and array return value at the
+   checked particles idx, read on the host. On a lazy backend (lazy?) the
+   whole trace is evaluated at once (the caller reads it next: weights,
+   scores), then the checked rows, and only the rows move: two
+   evaluations, where reading each value would cost one each."
+  [t idx lazy?]
+  (let [indices (some-> (batch-backend t) (array/with-backend (array/array idx)))
+        reads (cond-> {:choices (map-leaves #(gathered % indices) (:choices t))
+                       :score (gathered (:score t) indices)}
+                (array/array? (:retval t)) (assoc :retval (gathered (:retval t) indices)))]
+    (when lazy?
+      (array/eval! (mapv #(if (batch/batched? %) (batch/value %) %)
+                         (concat (array/tree-leaves (cm/to-map (:choices t))) [(:score t)]
+                                 (when (array/array? (:retval t)) [(:retval t)]))))
+      (array/eval! (mapv #(.-v ^Read %) (concat (array/tree-leaves (cm/to-map (:choices reads)))
+                                                 (keep reads [:score :retval])))))
+    (cond-> (assoc reads :choices (map-leaves on-host (:choices reads)) :score (on-host (:score reads)))
+      (:retval reads) (assoc :retval (on-host (:retval reads))))))
+
+(defn- agrees?
+  "Does a scalar run's value x agree with the batched run's read r at the
+   j-th checked particle? Only an array x is compared, on the host (no
+   dtype need exist on the backend: Metal has no float64), within the
+   precision of the narrower float; the batched run must then have given
+   an array too."
+  [x ^Read r j]
+  (or (not (array/array? x))
+      (and (some? r)
+           (close-host-values? (array/->clj x) (particle-host r j)
+                               (max (tolerance-of (array/dtype x)) (tolerance-of (.-dtype r)))))))
+
+(defn- mismatch
+  "A spot check's error: the batched run disagrees with the scalar handler
+   at particle i, because why."
+  ([i why data] (mismatch i why data nil))
+  ([i why data cause]
+   (ex-info (str "The batched run disagrees with the scalar handler at particle " i ": " why)
+            (assoc data :particle i ::mismatch true) cause)))
+
+(defn- choice-at
+  "The j-th checked particle's choice from its read r, for a re-run on the
+   JVM backend (reference?: its host value, an array for nested vectors) or
+   on the batch's own (a batched one's host value made again in its dtype,
+   a shared one as it is)."
+  [^Read r j reference?]
+  (cond reference? (let [v (particle-host r j)] (if (sequential? v) (array/array v) v))
+        (.-batched? r) (array/array (particle-host r j) {:dtype (.-dtype r)})
+        :else (.-v r)))
+
+(defn- re-run!
+  "Throw unless each checked particle (idx), re-run through the scalar
+   handler from its choices (choice-at), gives the batched run's score and
+   array return value."
+  [gf args idx reads reference?]
+  (doseq [[j i] (map-indexed vector idx)]
+    (let [cs (map-leaves #(choice-at % j reference?) (:choices reads))
+          st (try (:trace (gfi/generate gf args cs (rng/key 0)))
+                  (catch Exception e
+                    ;; the scalar run of the particle's choices takes another path
+                    (throw (mismatch i (str "the scalar run of its choices fails (" (ex-message e) ")") {} e))))]
+      (when-not (and (agrees? (:score st) (:score reads) j) (agrees? (:retval st) (:retval reads) j))
+        (throw (mismatch i "the code branches on a batched value where the tracer cannot see it"
+                         {:scalar-score (:score st) :batched-score (particle-host (:score reads) j)}))))))
 
 (def ^:private reference (delay (array/backend-named :jvm)))
 
@@ -276,84 +327,34 @@
           (and (instance? clojure.lang.ExceptionInfo e) (:backends (ex-data e))) true
           :else (recur (.getCause e)))))
 
-(defn- reference-spot-check!
-  "spot-check! for a lazy backend's batched trace: the checked particles'
-   choices, scores and return values are gathered on the lazy backend,
-   evaluated at once and read on the host, and each checked particle is
-   re-run on the JVM backend (microseconds, where a scalar run on the lazy
-   backend costs evaluations). Returns nil when the model reaches arrays of
-   the lazy backend the JVM run cannot mix with (it closes over them), so
-   the caller checks on the lazy backend instead."
-  [gf args n t]
-  (let [idx (vec (spot-indices n))
-        indices (array/with-backend (array/backend (batch/value (:score t))) (array/array idx))
-        reads (cond-> {:choices (map-leaves #(gathered % indices) (:choices t))
-                       :score (gathered (:score t) indices)}
-                (array/array? (:retval t)) (assoc :retval (gathered (:retval t) indices)))
-        ;; the whole trace evaluated at once (the caller reads it next:
-        ;; weights, scores), then the checked rows, and only the rows moved:
-        ;; two evaluations, where reading each value would cost one each
-        _ (array/eval! (mapv #(if (batch/batched? %) (batch/value %) %)
-                             (concat (array/tree-leaves (cm/to-map (:choices t))) [(:score t)]
-                                     (when (array/array? (:retval t)) [(:retval t)]))))
-        _ (array/eval! (mapv #(.-v ^Read %) (concat (array/tree-leaves (cm/to-map (:choices reads)))
-                                                     (keep reads [:score :retval]))))
-        choices (map-leaves on-host (:choices reads))
-        ^Read score (on-host (:score reads))
-        retval (some-> (:retval reads) on-host)
-        rtol (max (tolerance-of (:score t)) 1e-8)
-        args' (array/tree-map on-reference args)]
-    (try
-      (array/with-backend @reference
-        (doseq [[j i] (map-indexed vector idx)]
-          (let [cs (map-leaves #(let [v (particle-host % j)] (if (sequential? v) (array/array v) v)) choices)
-                st (try (:trace (gfi/generate gf args' cs (rng/key 0)))
-                        (catch Exception e
-                          (if (mixed-backends? e)
-                            (throw e)
-                            (throw (ex-info (str "The batched run disagrees with the scalar handler at particle " i
-                                                 ": the scalar run of its choices fails (" (ex-message e) ")")
-                                            {:particle i ::mismatch true} e)))))]
-            (when-not (and (close-host-values? (array/->clj (:score st)) (particle-host score j) rtol)
-                           (or (nil? retval) (not (array/array? (:retval st)))
-                               (close-host-values? (array/->clj (:retval st)) (particle-host retval j)
-                                                   (max rtol (tolerance-of (:retval t))))))
-              (throw (ex-info (str "The batched run disagrees with the scalar handler at particle " i
-                                   ": the code branches on a batched value where the tracer cannot see it")
-                              {:particle i :scalar-score (:score st) :batched-score (particle-host score j)
-                               ::mismatch true})))))
-        t)
-      (catch Exception e
-        (if (mixed-backends? e) nil (throw e))))))
+(defn- lazy-batch?
+  "Is t, a batched trace, on a lazy backend (where each scalar re-run would
+   cost evaluations)?"
+  [t]
+  (let [s (:score t)]
+    (and (batch/batched? s) (not (array/concrete? (batch/value s))))))
 
 (defn- spot-check!
   "Throw unless the batched trace t of gf on args agrees with the scalar
-   handler re-run on each spot-checked particle's choices. On a lazy
-   backend the re-runs are on the JVM backend when the model allows it.
-   With no particles to check (*spot-checks* 0) it reads nothing."
+   handler re-run on each spot-checked particle's choices, read on the host
+   for all of them at once. On a lazy backend the re-runs are on the JVM
+   backend (microseconds, where a scalar run on the lazy backend costs
+   evaluations), unless the model reaches arrays of the lazy backend that
+   the JVM run cannot mix with (it closes over them): then, as on other
+   backends, on the batch's own. With no particles to check (*spot-checks*
+   0) it reads nothing."
   [gf args n t]
-  (if (empty? (spot-indices n))
-    t
-    (or (when (lazy-batch? t) (reference-spot-check! gf args n t))
-        (spot-check-here! gf args n t))))
-
-(defn- spot-check-here!
-  "spot-check! on the batched trace's own backend."
-  [gf args n t]
-  (doseq [i (spot-indices n)]
-    (let [st (try (:trace (gfi/generate gf args (map-leaves #(particle-value % i) (:choices t)) (rng/key 0)))
-                  (catch Exception e
-                    ;; the scalar run of the particle's choices takes another path
-                    (throw (ex-info (str "The batched run disagrees with the scalar handler at particle " i
-                                         ": the scalar run of its choices fails (" (ex-message e) ")")
-                                    {:particle i ::mismatch true} e))))
-          score (particle-value (:score t) i)
-          retval (particle-value (:retval t) i)]
-      (when-not (and (same-value? (:score st) score) (same-value? (:retval st) retval))
-        (throw (ex-info (str "The batched run disagrees with the scalar handler at particle " i
-                             ": the code branches on a batched value where the tracer cannot see it")
-                        {:particle i :scalar-score (:score st) :batched-score score ::mismatch true})))))
-  t)
+  (let [idx (vec (spot-indices n))]
+    (when (seq idx)
+      (let [lazy? (lazy-batch? t)
+            reads (reads-of t idx lazy?)]
+        (when-not (and lazy?
+                       (try (array/with-backend @reference
+                              (re-run! gf (array/tree-map on-reference args) idx reads true))
+                            true
+                            (catch Exception e (if (mixed-backends? e) false (throw e)))))
+          (re-run! gf args idx reads false))))
+    t))
 
 (defn- diverged
   "The loud error of a spot-check mismatch e after unchecked operations."

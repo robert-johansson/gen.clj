@@ -568,3 +568,30 @@
       (let [ps (b/simulate linreg [[1.0 2.0]] 16 (rng/key 57))]
         (is (b/batched? ps))
         (is (nil? (b/fallback-reason ps))))))))
+
+(defn- spot-checked-on
+  "f's value, its batched runs spot-checked as on a lazy backend (lazy?:
+   re-run on the JVM backend) or as on an eager one (re-run on their own),
+   whatever the backend."
+  [lazy? f]
+  (with-redefs [gen.batched/lazy-batch? (constantly lazy?)] (f)))
+
+(deftest one-spot-check-for-every-backend
+  ;; Both kinds of backend check the same host reads of the checked
+  ;; particles, re-run on the JVM backend or on the batch's own (the post-M5
+  ;; review's I2-07, which made the two loops one).
+  (when (ts/jvm?)
+    (testing "either way, what the tracer cannot see falls back"
+      ;; plant: a re-run that compares nothing passes both
+      (doseq [lazy? [true false]]
+        (let [ps (spot-checked-on lazy? #(b/simulate hidden-lookup [] 50 (rng/key 50)))]
+          (is (re-find #"disagrees with the scalar handler" (:message (b/fallback-reason ps))) (str lazy?))))))
+  (testing "on its own backend a choice is re-run in its dtype"
+    ;; the verifier's caveat (a dirichlet of float32 parameters draws
+    ;; float32); plant: a choice made again from its host values by
+    ;; array/array alone, float64 on the JVM backend, takes the other branch
+    ;; and falls back
+    (let [m (gen [] (let [x (trace :x (d/dirichlet (array/array [1.0 1.0] {:dtype :float32})))]
+                      (trace :y (d/normal (if (= :float32 (array/dtype x)) 0.0 5.0) 1))))]
+      (binding [b/*spot-checks* :all]
+        (is (b/batched? (spot-checked-on false #(b/simulate m [] 8 (rng/key 58)))))))))
