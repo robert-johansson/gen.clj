@@ -109,6 +109,30 @@
 
 (defn- same-addresses? [x y] (= (set (cm/addresses x)) (set (cm/addresses y))))
 
+(defn update-under
+  "update for this, a wrapper of the generative function (:gf this) with
+   an internal proposal: gf's update keeps, overwrites and removes choices,
+   a change in the arguments' number included, and the fresh choices it
+   makes are then drawn by the internal proposal given the kept ones,
+   (generate args kept key), weighed against tr's score. Fresh choices that
+   change the model's structure are a loud error naming the wrapper. Shared
+   by with-internal-proposal and gen.inference.enumerative/with-exact-proposal,
+   as regenerate-under is."
+  [wrapper-name this generate tr args argdiffs constraints key]
+  (let [[k-update k-fresh] (rng/split key)
+        {t2 :trace :as r} (gfi/-update (:gf this) (trace/as-made-by tr (:gf this)) args argdiffs constraints k-update)
+        before (set (cm/addresses (:choices tr)))
+        given (set (cm/addresses constraints))
+        fresh (vec (remove #(or (before %) (given %)) (cm/addresses (:choices t2))))]
+    (if (empty? fresh)
+      (assoc r :trace (trace/as-made-by t2 this))
+      (let [kept (sel/get-selected (:choices t2) (sel/complement (sel/from-paths fresh)))
+            {t3 :trace w :weight} (generate args kept k-fresh)]
+        (when-not (same-addresses? (:choices t2) (:choices t3))
+          (throw (ex-info (str wrapper-name ": the fresh choices of this update change the model's structure")
+                          {:wrapper wrapper-name})))
+        {:trace t3 :weight (- w (:score tr)) :retdiff diff/unknown-change :discard (:discard r)}))))
+
 (defn regenerate-under
   "regenerate for a generative function with an internal proposal
    (Eq. 4.1): the unselected choices of tr are the constraints of both
@@ -140,20 +164,7 @@
   (-simulate [this args key] (trace/as-made-by (gfi/-simulate gf args key) this))
   (-generate [this args constraints key] (proposal-generate this args constraints key))
   (-update [this tr args argdiffs constraints key]
-    ;; gf's update keeps, overwrites and removes choices; fresh ones are then
-    ;; drawn by the proposal given the kept ones
-    (let [[k-update k-fresh] (rng/split key)
-          {t2 :trace :as r} (gfi/-update gf (trace/as-made-by tr gf) args argdiffs constraints k-update)
-          before (set (cm/addresses (:choices tr)))
-          given (set (cm/addresses constraints))
-          fresh (vec (remove #(or (before %) (given %)) (cm/addresses (:choices t2))))]
-      (if (empty? fresh)
-        (assoc r :trace (trace/as-made-by t2 this))
-        (let [kept (sel/get-selected (:choices t2) (sel/complement (sel/from-paths fresh)))
-              {t3 :trace w :weight} (proposal-generate this args kept k-fresh)]
-          (when-not (same-addresses? (:choices t2) (:choices t3))
-            (throw (ex-info "with-internal-proposal: the fresh choices of this update change the model's structure" {})))
-          {:trace t3 :weight (- w (:score tr)) :retdiff diff/unknown-change :discard (:discard r)}))))
+    (update-under "with-internal-proposal" this #(proposal-generate this %1 %2 %3) tr args argdiffs constraints key))
   (-regenerate [this tr args argdiffs selection key]
     (regenerate-under #(proposal-generate this %1 %2 %3) #(proposal-weight this %1 %2 %3)
                       tr args argdiffs selection key))
