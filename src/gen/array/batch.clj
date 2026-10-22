@@ -96,7 +96,11 @@
   ;; batched values are as concrete as the wrapped backend's: validation reads
   ;; every particle (gen.array/all-true?)
   (-lazy? [_] (p/-lazy? inner))
-  (-native-ops [_] #{})
+  ;; the wrapped backend's, since -elementwise passes any op on lifted: a
+  ;; batched op takes the implementation its particles would (rule 1;
+  ;; genclj-bk62: MLX's logaddexp unbatched, the composite batched, whose
+  ;; gradient at ties is 0 under MLX's autodiff where the op's is 1/2)
+  (-native-ops [_] (p/-native-ops inner))
 
   (-from-host [_ data dtype] (p/-from-host inner data dtype))
   (-to-host [_ x] (if (batched? x) (branch! "read on the host") (p/-to-host inner x)))

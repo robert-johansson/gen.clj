@@ -146,9 +146,16 @@
 (defn- cpu-stream ^long [b] (.-cpu-stream ^Config (config b)))
 (defn- defaults [b] (.-defaults ^Config (config b)))
 
+(defn- with-device
+  "(f d) for a new handle d of the :cpu or :gpu device, freed after: mlx-c
+   allocates each one, and a stream made from it keeps its own copy."
+  [device f]
+  (let [d (Mlx/mlx_device_new_type (int (case device :cpu 0 :gpu 1)) (int 0))]
+    (try (f d) (finally (Mlx/mlx_device_free d)))))
+
 (defonce ^:private aux-stream
   ;; for conversions made where no backend is at hand
-  (Mlx/mlx_stream_new_thread_unsafe (Mlx/mlx_device_new_type (int 0) (int 0))))
+  (with-device :cpu #(Mlx/mlx_stream_new_thread_unsafe (long %))))
 
 (def ^:private eval-lock (Object.))
 
@@ -160,7 +167,7 @@
    GPU), every evaluation runs on one thread. Metal and the CPU device let
    any thread evaluate (the CPU device on Linux too)."
   (delay (and (not (.contains (.toLowerCase (System/getProperty "os.name")) "mac"))
-              (Mlx/mlx_device_is_available (Mlx/mlx_device_new_type (int 1) (int 0))))))
+              (with-device :gpu #(Mlx/mlx_device_is_available (long %))))))
 
 (defonce ^:private eval-thread
   (delay
@@ -349,6 +356,49 @@
               (do (MlxRaw/mlx_array_free h) prev)
               h))))))
 
+;; Temporary handles: every one a site makes is registered as it is made,
+;; and all are freed when the site exits, by an exception too (genclj-f0wz)
+
+(defn- free-temp
+  "Free a temporary: an array's handle (a long), or [kind h] for a closure,
+   a custom VJP, a value-and-grad closure or a vector of arrays."
+  [x]
+  (if (vector? x)
+    (let [[kind h] x
+          h (long h)]
+      (case kind
+        :closure (MlxRaw/mlx_closure_free h)
+        :custom-vjp (MlxRaw/mlx_closure_custom_free h)
+        :value-and-grad (MlxRaw/mlx_closure_value_and_grad_free h)
+        :vector (MlxRaw/mlx_vector_array_free h)))
+    (MlxRaw/mlx_array_free (long x))))
+
+(defn- temp!
+  "Register the temporary x (as free-temp takes it) with temps; its handle."
+  ^long [^java.util.ArrayList temps x]
+  (.add temps x)
+  (long (if (vector? x) (second x) x)))
+
+(defmacro ^:private with-temps
+  "Run body with t a function that registers a new temporary and returns
+   its handle: (t h) an array's, (t kind h) another kind's (free-temp).
+   Every one registered is freed when body exits, by an exception too, so
+   a site whose handles all go through t as it makes them frees those made
+   before a failure. (The review's I1-04: written out by hand ten times,
+   three copies made handles before their try, and leaked them there.)"
+  [[t] & body]
+  ;; primitive hints built outside the syntax quote, which would qualify them
+  (let [temps (gensym "temps")
+        h (with-meta (gensym "h") {:tag 'long})
+        kind (gensym "kind")]
+    `(let [~temps (java.util.ArrayList.)
+           ~t (fn (~(with-meta [h] {:tag 'long}) (temp! ~temps ~h))
+                  (~(with-meta [kind h] {:tag 'long}) (temp! ~temps [~kind ~h])))]
+       (try
+         ~@body
+         (finally
+           (doseq [x# ~temps] (free-temp x#)))))))
+
 (defn- operand
   "The handle of operand x: x's own, or the shared constant for a host scalar
    (as dtype, or b's default for it). When the constant cache is full, a new
@@ -361,13 +411,6 @@
       (if-let [h (constant x d)]
         (long h)
         (- (scalar-handle x d))))))
-
-(defn- handle-of ^long [^long raw] (Math/abs raw))
-
-(defn- release
-  "Free the handle operand made, if it made a new one."
-  [^long raw]
-  (when (neg? raw) (MlxRaw/mlx_array_free (- raw))))
 
 (defn- as-array
   "x as an MlxArray of b (a host scalar as dtype, or b's default)."
@@ -387,20 +430,19 @@
 
 (defmacro ^:private with-operands
   "Bind each handle symbol to the handle of its operand (b, x, dtype), run
-   body, then release the handles made for host scalars and keep the operands
+   body, then free the handles made for host scalars (with-temps, so also
+   when a later operand's fails to be made) and keep the operands
    reachable. MLX errors become ex-info naming op."
   [b op bindings & body]
   (let [triples (partition 3 bindings)
-        hs (map first triples)
-        raws (map #(gensym (str (name %) "-raw")) hs)
-        xs (map second triples)]
-    `(let [~@(mapcat (fn [[_ x d] raw] [raw `(operand ~b ~x ~d)]) triples raws)
-           ~@(mapcat (fn [h raw] [h `(handle-of ~raw)]) hs raws)]
+        xs (map second triples)
+        t (gensym "t")]
+    `(with-temps [~t]
        (try
-         ~@body
+         (let [~@(mapcat (fn [[h x d]] [h `(let [raw# (operand ~b ~x ~d)] (if (neg? raw#) (long (~t (- raw#))) raw#))]) triples)]
+           ~@body)
          (catch MlxException e# (throw (mlx-error ~op [~@xs] e#)))
          (finally
-           ~@(map (fn [raw] `(release ~raw)) raws)
            ~@(map (fn [x] `(fence ~x)) xs))))))
 
 (defn- retained
@@ -545,29 +587,26 @@
           dtype (.-dtype x)
           read-as (if (#{:float16 :bfloat16} dtype) :float32 dtype)
           n (sh/size shape)
-          s (stream b)
-          temps (java.util.ArrayList.)]
-      (try
-        (let [h (.-h x)
-              h (if (= read-as dtype) h (let [c (Mlx/mlx_astype h (int (code read-as)) s)] (.add temps c) c))
-              vs (evaluating
-                   (Mlx/mlx_array_eval h)
-                   ;; data pointers address the buffer as laid out: a
-                   ;; row-contiguous array is read in place (its flags are set
-                   ;; once evaluated), a view is copied first. Copying every
-                   ;; array cost a device round trip per read, evaluated or not
-                   (let [c (if (Mlx/_mlx_array_is_row_contiguous h)
-                             h
-                             (let [c (Mlx/mlx_contiguous (long h) false s)]
-                               (.add temps c)
-                               (Mlx/mlx_array_eval c)
-                               c))]
-                     (read-values c n read-as)))]
-          (if (empty? shape) (first vs) (nest vs shape)))
-        (catch MlxException e (throw (mlx-error :->clj [x] e)))
-        (finally
-          (doseq [t temps] (MlxRaw/mlx_array_free (long t)))
-          (fence x))))))
+          s (stream b)]
+      (with-temps [t]
+        (try
+          (let [h (.-h x)
+                h (if (= read-as dtype) h (t (Mlx/mlx_astype h (int (code read-as)) s)))
+                vs (evaluating
+                     (Mlx/mlx_array_eval h)
+                     ;; data pointers address the buffer as laid out: a
+                     ;; row-contiguous array is read in place (its flags are set
+                     ;; once evaluated), a view is copied first. Copying every
+                     ;; array cost a device round trip per read, evaluated or not
+                     (let [c (if (Mlx/_mlx_array_is_row_contiguous h)
+                               h
+                               (let [c (t (Mlx/mlx_contiguous (long h) false s))]
+                                 (Mlx/mlx_array_eval c)
+                                 c))]
+                       (read-values c n read-as)))]
+            (if (empty? shape) (first vs) (nest vs shape)))
+          (catch MlxException e (throw (mlx-error :->clj [x] e)))
+          (finally (fence x)))))))
 
 (defn- eval-arrays! [xs]
   ;; an evaluation boundary is a good moment to free what became unreachable
@@ -636,18 +675,14 @@
         (wrap b (cond
                   (and (= op :sign) (= :float (dt/kind dtype)))
                   ;; MLX's sign of NaN is 0; NumPy's (and the JVM backend's) NaN
-                  (let [sg (f h s)
-                        nan (Mlx/mlx_isnan h s)]
-                    (try (Mlx/mlx_where nan h sg s)
-                         (finally (MlxRaw/mlx_array_free sg) (MlxRaw/mlx_array_free nan))))
+                  (with-temps [t]
+                    (Mlx/mlx_where (t (Mlx/mlx_isnan h s)) h (t (f h s)) s))
 
                   (and (= op :arctan) (not= dtype :float64))
                   ;; Metal's float32 atan(-0.0) is +0.0: x itself at zero (where
                   ;; not x), as NumPy and the JVM backend; float64's keeps the sign
-                  (let [at (f h s)
-                        zero (Mlx/mlx_logical_not h s)]
-                    (try (Mlx/mlx_where zero h at s)
-                         (finally (MlxRaw/mlx_array_free at) (MlxRaw/mlx_array_free zero))))
+                  (with-temps [t]
+                    (Mlx/mlx_where (t (Mlx/mlx_logical_not h s)) h (t (f h s)) s))
 
                   :else (f h s)))))))
 
@@ -663,13 +698,11 @@
   [b op hx hy dtype]
   (let [hx (long hx) hy (long hy)
         s (stream b)
-        temps (java.util.ArrayList.)
-        t (fn ^long [^long h] (.add temps h) h)
-        zero (t (scalar-handle 0 dtype))
-        one (t (scalar-handle 1 dtype))
         signed? (not= dtype :uint32)]
-    (try
-      (let [z (t (Mlx/mlx_equal hy zero s))
+    (with-temps [t]
+      (let [zero (t (scalar-handle 0 dtype))
+            one (t (scalar-handle 1 dtype))
+            z (t (Mlx/mlx_equal hy zero s))
             m1 (when signed? (t (Mlx/mlx_equal hy (t (scalar-handle -1 dtype)) s)))
             safe (t (Mlx/mlx_where (if m1 (t (Mlx/mlx_logical_or z m1 s)) z) one hy s))
             r (t (Mlx/mlx_remainder hx safe s))
@@ -677,8 +710,7 @@
                 r
                 (let [q (t (Mlx/mlx_floor_divide (t (Mlx/mlx_subtract hx r s)) safe s))]
                   (if m1 (t (Mlx/mlx_where m1 (t (Mlx/mlx_negative q s)) q s)) q)))]
-        (Mlx/mlx_where z zero q s))
-      (finally (doseq [h temps] (MlxRaw/mlx_array_free (long h)))))))
+        (Mlx/mlx_where z zero q s)))))
 
 (defn- java-int-cast
   "Float handle h (of dtype from) cast to the int dtype as Java casts
@@ -689,20 +721,17 @@
    in float16, whose finite values all fit)."
   [b ^long h from dtype]
   (let [s (stream b)
-        temps (java.util.ArrayList.)
-        t (fn ^long [^long h] (.add temps h) h)
-        k (fn ^long [v d] (t (scalar-handle v d)))
         [lo hi lo-int hi-int] (case dtype
                                 :int32 [-2147483648.0 2147483648.0 Integer/MIN_VALUE Integer/MAX_VALUE]
                                 :int64 [-9.223372036854775808E18 9.223372036854775808E18 Long/MIN_VALUE Long/MAX_VALUE]
                                 :uint32 [0.0 4294967296.0 0 4294967295])]
-    (try
-      (let [over (t (Mlx/mlx_greater_equal h (k hi from) s))
+    (with-temps [t]
+      (let [k (fn ^long [v d] (t (scalar-handle v d)))
+            over (t (Mlx/mlx_greater_equal h (k hi from) s))
             under (t (Mlx/mlx_less h (k lo from) s))
             bad (t (Mlx/mlx_logical_or (t (Mlx/mlx_logical_or over under s)) (t (Mlx/mlx_isnan h s)) s))
             cast (t (Mlx/mlx_astype (t (Mlx/mlx_where bad (k 0.0 from) h s)) (int (code dtype)) s))]
-        (Mlx/mlx_where over (k hi-int dtype) (t (Mlx/mlx_where under (k lo-int dtype) cast s)) s))
-      (finally (doseq [h temps] (MlxRaw/mlx_array_free (long h)))))))
+        (Mlx/mlx_where over (k hi-int dtype) (t (Mlx/mlx_where under (k lo-int dtype) cast s)) s)))))
 
 (defn- int-power
   "x^y of int handles, as the JVM backend (and host math): exact for y >= 0;
@@ -713,15 +742,13 @@
   [b hx hy dtype]
   (let [hx (long hx) hy (long hy)
         s (stream b)
-        temps (java.util.ArrayList.)
-        t (fn ^long [^long h] (.add temps h) h)
         fdt (int (code (:float (defaults b))))
-        i64 (int (code :int64))
-        k (fn ^long [v d] (t (scalar-handle v d)))]
-    (try
+        i64 (int (code :int64))]
+    (with-temps [t]
       ;; MLX's integer power gives 0 in every element once any exponent is
       ;; negative: the exact path sees only non-negative stand-ins
-      (let [neg (t (Mlx/mlx_less hy (k 0 dtype) s))
+      (let [k (fn ^long [v d] (t (scalar-handle v d)))
+            neg (t (Mlx/mlx_less hy (k 0 dtype) s))
             exact (t (Mlx/mlx_power hx (t (Mlx/mlx_where neg (k 0 dtype) hy s)) s))
             f (t (Mlx/mlx_power (t (Mlx/mlx_astype hx fdt s)) (t (Mlx/mlx_astype hy fdt s)) s))
             fin (t (Mlx/mlx_isinf f s))
@@ -733,8 +760,7 @@
             java (t (Mlx/mlx_where pos-inf (k Long/MAX_VALUE :int64)
                                    (t (Mlx/mlx_where neg-inf (k Long/MIN_VALUE :int64) cast s)) s))
             java (if (= dtype :int64) java (t (Mlx/mlx_astype java (int (code dtype)) s)))]
-        (Mlx/mlx_where neg java exact s))
-      (finally (doseq [h temps] (MlxRaw/mlx_array_free (long h)))))))
+        (Mlx/mlx_where neg java exact s)))))
 
 (defn- binary [b op x y dtype]
   (let [sx (shape-of x) sy (shape-of y)]
@@ -777,10 +803,8 @@
         s (stream b)
         ax (int axis)
         kd (boolean kd)
-        temps (java.util.ArrayList.)
-        t (fn ^long [^long x] (.add temps x) x)
         int-code (int (code (:int (defaults b))))]
-    (try
+    (with-temps [t]
       (let [i (t (if (= op :argmax) (Mlx/mlx_argmax_axis h ax kd s) (Mlx/mlx_argmin_axis h ax kd s)))
             i (if (= :float (dt/kind dtype))
                 (let [nan (t (Mlx/mlx_isnan h s))
@@ -789,8 +813,7 @@
                   (t (Mlx/mlx_where any-nan first-nan i s)))
                 i)]
         ;; MLX's indices are uint32
-        (Mlx/mlx_astype i int-code s))
-      (finally (doseq [x temps] (MlxRaw/mlx_array_free (long x)))))))
+        (Mlx/mlx_astype i int-code s)))))
 
 (def ^:private sum-block-size
   (delay (long @(requiring-resolve 'gen.backend.mlx.exact/block-size))))
@@ -870,17 +893,14 @@
                      (= (assoc s axis 0) (assoc s0 axis 0)))
         (throw (ex-info "Arrays must agree on every axis but the concatenation axis"
                         {:shapes shapes :axis axis}))))
-    (let [d (dtype-on b (first xs))
-          raws (mapv #(operand b % d) xs)
-          hs (mapv handle-of raws)
-          v (MlxRuntime/vectorOf (long-array hs))]
-      (try
-        (wrap b (Mlx/mlx_concatenate_axis v (int axis) (stream b)))
-        (catch MlxException e (throw (mlx-error :concatenate xs e)))
-        (finally
-          (Mlx/mlx_vector_array_free v)
-          (run! release raws)
-          (fence xs))))))
+    (let [d (dtype-on b (first xs))]
+      (with-temps [t]
+        (try
+          (let [hs (mapv #(let [raw (operand b % d)] (if (neg? raw) (t (- raw)) raw)) xs)
+                v (t :vector (MlxRuntime/vectorOf (long-array hs)))]
+            (wrap b (Mlx/mlx_concatenate_axis v (int axis) (stream b))))
+          (catch MlxException e (throw (mlx-error :concatenate xs e)))
+          (finally (fence xs)))))))
 
 (defn- slice [b x starts stops steps]
   (let [shape (shape-of x)
@@ -914,11 +934,8 @@
    gathers do not check bounds; a lazy backend cannot check them without
    evaluating)."
   ^long [b ^long h ^long d]
-  (let [s (stream b)
-        temps (java.util.ArrayList.)
-        ;; each handle made is freed, also when a later one fails
-        t (fn ^long [^long x] (.add temps x) x)]
-    (try
+  (let [s (stream b)]
+    (with-temps [t]
       (let [;; int32 indices, whatever the int dtype
             i32 (t (Mlx/mlx_astype h (code :int32) s))
             ;; through made, as every array made from host data: at Metal's
@@ -930,9 +947,7 @@
             neg (t (Mlx/mlx_less i32 zero s))
             wrapped (t (Mlx/mlx_add i32 dd s))
             n (t (Mlx/mlx_where neg wrapped i32 s))]
-        (Mlx/mlx_clip n zero top s))
-      (finally
-        (doseq [x temps] (MlxRaw/mlx_array_free (long x)))))))
+        (Mlx/mlx_clip n zero top s)))))
 
 (defn- take-op [b x indices axis]
   (let [d (long (nth (shape-of x) axis))]
@@ -988,12 +1003,10 @@
           (wrap b (Mlx/mlx_matmul hx hy s))
           ;; MLX multiplies floats only: ints go through the widest float the
           ;; device has (exact while products stay below 2^24 or 2^53)
-          (let [f (code (:float (defaults b)))
-                fx (Mlx/mlx_astype hx f s)
-                fy (Mlx/mlx_astype hy f s)
-                m (Mlx/mlx_matmul fx fy s)]
-            (try (wrap b (Mlx/mlx_astype m (code d) s))
-                 (finally (doseq [t [fx fy m]] (MlxRaw/mlx_array_free (long t)))))))))))
+          (with-temps [t]
+            (let [f (code (:float (defaults b)))]
+              (wrap b (Mlx/mlx_astype (t (Mlx/mlx_matmul (t (Mlx/mlx_astype hx f s)) (t (Mlx/mlx_astype hy f s)) s))
+                                      (code d) s)))))))))
 
 (defn- check-square [shape op]
   (let [r (count shape)]
@@ -1003,8 +1016,9 @@
 
 (defn- batch-broadcast
   "Handles of a [.. n n] and rhs [.. n k] broadcast to one batch shape (MLX's
-   solves want equal batch axes; gen.array's broadcast them)."
-  [b ha sa hr sr temps]
+   solves want equal batch axes; gen.array's broadcast them), new ones
+   registered with t (with-temps)."
+  [b ha sa hr sr t]
   (let [ha (long ha) hr (long hr)
         ba (subvec sa 0 (- (count sa) 2))
         br (subvec sr 0 (- (count sr) 2))
@@ -1013,9 +1027,7 @@
         to (fn [^long h shape tail]
              (if (= shape (into batch tail))
                h
-               (let [t (Mlx/mlx_broadcast_to h (int-array (map int (into batch tail))) s)]
-                 (.add ^java.util.ArrayList temps t)
-                 t)))]
+               (long (t (Mlx/mlx_broadcast_to h (int-array (map int (into batch tail))) s)))))]
     [(to ha sa (subvec sa (- (count sa) 2))) (to hr sr (subvec sr (- (count sr) 2)))]))
 
 (defn- check-rhs
@@ -1031,94 +1043,91 @@
   (long (t (Mlx/mlx_diagonal h (int 0) (int -2) (int -1) (long s)))))
 
 (defn- linalg* [b op args]
-  (let [cpu (cpu-stream b)
-        temps (java.util.ArrayList.)
-        t (fn ^long [^long h] (.add temps h) h)
-        nan (fn ^long [dtype] (t (scalar-handle ##NaN dtype)))]
-    (try
-      (case op
-        ;; MLX returns a partial factor for a matrix that is not positive
-        ;; definite; LAPACK leaves the failing pivot non-positive there, so the
-        ;; contract's NaN is where a diagonal entry is not positive
-        :cholesky
-        (let [[a] args
-              d (dtype-on b a)]
-          (check-square (shape-of a) :cholesky)
-          (with-operands b :cholesky [h a nil]
-            (let [l (t (Mlx/mlx_linalg_cholesky h false cpu))
-                  pd (t (Mlx/mlx_all_axis (t (Mlx/mlx_greater (diag-of-temp t l cpu) (t (scalar-handle 0 d)) cpu))
-                                          (int -1) true cpu))]
-              (wrap b (Mlx/mlx_where (t (Mlx/mlx_expand_dims pd (int -1) cpu)) l (nan d) cpu)))))
+  (let [cpu (cpu-stream b)]
+    (with-temps [t]
+      (let [nan (fn ^long [dtype] (t (scalar-handle ##NaN dtype)))]
+        (case op
+          ;; MLX returns a partial factor for a matrix that is not positive
+          ;; definite; LAPACK leaves the failing pivot non-positive there, so the
+          ;; contract's NaN is where a diagonal entry is not positive
+          :cholesky
+          (let [[a] args
+                d (dtype-on b a)]
+            (check-square (shape-of a) :cholesky)
+            (with-operands b :cholesky [h a nil]
+              (let [l (t (Mlx/mlx_linalg_cholesky h false cpu))
+                    pd (t (Mlx/mlx_all_axis (t (Mlx/mlx_greater (diag-of-temp t l cpu) (t (scalar-handle 0 d)) cpu))
+                                            (int -1) true cpu))]
+                (wrap b (Mlx/mlx_where (t (Mlx/mlx_expand_dims pd (int -1) cpu)) l (nan d) cpu)))))
 
-        ;; MLX's triangular solve inverts the matrix, which fails on a zero
-        ;; diagonal entry (reported at a later evaluation, as for :solve): a NaN
-        ;; there instead gives NaN solutions, as a degenerate solve gives
-        ;; non-finite ones on the JVM backend (not an error)
-        :solve-triangular
-        (let [[a rhs {:keys [lower? transpose?]}] args
-              d (dtype-on b a)
-              sa (shape-of a)]
-          (check-square sa :solve-triangular)
-          (check-rhs :solve-triangular sa (shape-of rhs))
-          (with-operands b :solve-triangular [ha a nil hr rhs nil]
-            (let [[ha hr] (batch-broadcast b ha sa hr (shape-of rhs) temps)
-                  n (int (peek sa))
-                  eye (t (Mlx/mlx_eye n n (int 0) (int (code :bool)) cpu))
-                  zero-diag (t (Mlx/mlx_expand_dims (t (Mlx/mlx_equal (diag-of-temp t ha cpu) (t (scalar-handle 0 d)) cpu))
-                                                    (int -2) cpu))
-                  safe (t (Mlx/mlx_where (t (Mlx/mlx_logical_and eye zero-diag cpu)) (nan d) ha cpu))]
-              ;; Lᵀx = b is solving with the upper triangle of Lᵀ
-              (wrap b (if transpose?
-                        (Mlx/mlx_linalg_solve_triangular (t (Mlx/mlx_swapaxes safe (int -1) (int -2) cpu)) hr
-                                                         (boolean lower?) cpu)
-                        (Mlx/mlx_linalg_solve_triangular safe hr (not lower?) cpu))))))
+          ;; MLX's triangular solve inverts the matrix, which fails on a zero
+          ;; diagonal entry (reported at a later evaluation, as for :solve): a NaN
+          ;; there instead gives NaN solutions, as a degenerate solve gives
+          ;; non-finite ones on the JVM backend (not an error)
+          :solve-triangular
+          (let [[a rhs {:keys [lower? transpose?]}] args
+                d (dtype-on b a)
+                sa (shape-of a)]
+            (check-square sa :solve-triangular)
+            (check-rhs :solve-triangular sa (shape-of rhs))
+            (with-operands b :solve-triangular [ha a nil hr rhs nil]
+              (let [[ha hr] (batch-broadcast b ha sa hr (shape-of rhs) t)
+                    n (int (peek sa))
+                    eye (t (Mlx/mlx_eye n n (int 0) (int (code :bool)) cpu))
+                    zero-diag (t (Mlx/mlx_expand_dims (t (Mlx/mlx_equal (diag-of-temp t ha cpu) (t (scalar-handle 0 d)) cpu))
+                                                      (int -2) cpu))
+                    safe (t (Mlx/mlx_where (t (Mlx/mlx_logical_and eye zero-diag cpu)) (nan d) ha cpu))]
+                ;; Lᵀx = b is solving with the upper triangle of Lᵀ
+                (wrap b (if transpose?
+                          (Mlx/mlx_linalg_solve_triangular (t (Mlx/mlx_swapaxes safe (int -1) (int -2) cpu)) hr
+                                                           (boolean lower?) cpu)
+                          (Mlx/mlx_linalg_solve_triangular safe hr (not lower?) cpu))))))
 
-        ;; A singular system fails inside MLX's solve, and MLX reports a CPU
-        ;; task's failure at a later evaluation, of other arrays. So singular
-        ;; matrices (a zero pivot of the LU factor) are never given to it: the
-        ;; identity stands in, and their solutions are NaN
-        :solve
-        (let [[a rhs] args
-              d (dtype-on b a)
-              sa (shape-of a)]
-          (check-square sa :solve)
-          (check-rhs :solve sa (shape-of rhs))
-          (with-operands b :solve [ha a nil hr rhs nil]
-            (let [[ha hr] (batch-broadcast b ha sa hr (shape-of rhs) temps)
-                  n (int (peek sa))
-                  [lu _] (map t (Mlx/mlx_linalg_lu_factor ha cpu))
-                  singular (t (Mlx/mlx_expand_dims
-                               (t (Mlx/mlx_any_axis (t (Mlx/mlx_equal (diag-of-temp t lu cpu) (t (scalar-handle 0 d)) cpu))
-                                                    (int -1) true cpu))
-                               (int -1) cpu))
-                  eye (t (Mlx/mlx_eye n n (int 0) (int (code d)) cpu))
-                  safe (t (Mlx/mlx_where singular eye ha cpu))
-                  x (t (Mlx/mlx_linalg_solve safe hr cpu))]
-              (wrap b (Mlx/mlx_where singular (nan d) x cpu)))))
+          ;; A singular system fails inside MLX's solve, and MLX reports a CPU
+          ;; task's failure at a later evaluation, of other arrays. So singular
+          ;; matrices (a zero pivot of the LU factor) are never given to it: the
+          ;; identity stands in, and their solutions are NaN
+          :solve
+          (let [[a rhs] args
+                d (dtype-on b a)
+                sa (shape-of a)]
+            (check-square sa :solve)
+            (check-rhs :solve sa (shape-of rhs))
+            (with-operands b :solve [ha a nil hr rhs nil]
+              (let [[ha hr] (batch-broadcast b ha sa hr (shape-of rhs) t)
+                    n (int (peek sa))
+                    [lu _] (mapv t (Mlx/mlx_linalg_lu_factor ha cpu))
+                    singular (t (Mlx/mlx_expand_dims
+                                 (t (Mlx/mlx_any_axis (t (Mlx/mlx_equal (diag-of-temp t lu cpu) (t (scalar-handle 0 d)) cpu))
+                                                      (int -1) true cpu))
+                                 (int -1) cpu))
+                    eye (t (Mlx/mlx_eye n n (int 0) (int (code d)) cpu))
+                    safe (t (Mlx/mlx_where singular eye ha cpu))
+                    x (t (Mlx/mlx_linalg_solve safe hr cpu))]
+                (wrap b (Mlx/mlx_where singular (nan d) x cpu)))))
 
-        ;; from the LU factor (MLX's slogdet throws on a singular matrix):
-        ;; sign · Π sign(u_ii) · (-1)^swaps and Σ log |u_ii|, so a singular
-        ;; matrix gives [0 -Inf], as on the JVM backend
-        :slogdet
-        (let [[a] args
-              d (dtype-on b a)
-              sa (shape-of a)]
-          (check-square sa :slogdet)
-          (with-operands b :slogdet [h a nil]
-            (let [[lu piv] (map t (Mlx/mlx_linalg_lu_factor h cpu))
-                  u (diag-of-temp t lu cpu)
-                  n (peek sa)
-                  logabs (Mlx/mlx_sum_axis (t (Mlx/mlx_log (t (Mlx/mlx_abs u cpu)) cpu)) (int -1) false cpu)
-                  idx (t (Mlx/mlx_arange 0.0 (double n) 1.0 (int (code :uint32)) cpu))
-                  swaps (t (Mlx/mlx_sum_axis (t (Mlx/mlx_astype (t (Mlx/mlx_not_equal piv idx cpu)) (int (code :int32)) cpu))
-                                             (int -1) false cpu))
-                  odd (t (Mlx/mlx_remainder swaps (t (scalar-handle 2 :int32)) cpu))
-                  perm (t (Mlx/mlx_subtract (t (scalar-handle 1 d))
-                                            (t (Mlx/mlx_multiply (t (scalar-handle 2 d)) (t (Mlx/mlx_astype odd (int (code d)) cpu)) cpu))
-                                            cpu))
-                  sign (Mlx/mlx_multiply (t (Mlx/mlx_prod_axis (t (Mlx/mlx_sign u cpu)) (int -1) false cpu)) perm cpu)]
-              [(wrap b sign) (wrap b logabs)]))))
-      (finally (doseq [h temps] (MlxRaw/mlx_array_free (long h)))))))
+          ;; from the LU factor (MLX's slogdet throws on a singular matrix):
+          ;; sign · Π sign(u_ii) · (-1)^swaps and Σ log |u_ii|, so a singular
+          ;; matrix gives [0 -Inf], as on the JVM backend
+          :slogdet
+          (let [[a] args
+                d (dtype-on b a)
+                sa (shape-of a)]
+            (check-square sa :slogdet)
+            (with-operands b :slogdet [h a nil]
+              (let [[lu piv] (mapv t (Mlx/mlx_linalg_lu_factor h cpu))
+                    u (diag-of-temp t lu cpu)
+                    n (peek sa)
+                    logabs (Mlx/mlx_sum_axis (t (Mlx/mlx_log (t (Mlx/mlx_abs u cpu)) cpu)) (int -1) false cpu)
+                    idx (t (Mlx/mlx_arange 0.0 (double n) 1.0 (int (code :uint32)) cpu))
+                    swaps (t (Mlx/mlx_sum_axis (t (Mlx/mlx_astype (t (Mlx/mlx_not_equal piv idx cpu)) (int (code :int32)) cpu))
+                                               (int -1) false cpu))
+                    odd (t (Mlx/mlx_remainder swaps (t (scalar-handle 2 :int32)) cpu))
+                    perm (t (Mlx/mlx_subtract (t (scalar-handle 1 d))
+                                              (t (Mlx/mlx_multiply (t (scalar-handle 2 d)) (t (Mlx/mlx_astype odd (int (code d)) cpu)) cpu))
+                                              cpu))
+                    sign (Mlx/mlx_multiply (t (Mlx/mlx_prod_axis (t (Mlx/mlx_sign u cpu)) (int -1) false cpu)) perm cpu)]
+                [(wrap b sign) (wrap b logabs)]))))))))
 
 ;; MLX has no VJP for its Cholesky, LU or inverse (GenMLX's fork patched
 ;; some), so in native mode each linear-algebra op is one mlx_custom_vjp
@@ -1151,29 +1160,19 @@
   [b forward vjp ins]
   (let [arrays (fn [^longs hs] (mapv #(wrap b %) hs))
         handles (fn [xs] (long-array (map #(retained b :custom-vjp %) xs)))
-        on-b (fn [f] (with-bindings {@default-backend-var b} (f)))
-        fun (MlxRuntime/closure (reify gen.mlx.MlxRuntime$Closure
-                                  (apply [_ hs] (handles (on-b #(forward (arrays hs)))))))
-        bwd (MlxRuntime/customVjp (reify gen.mlx.MlxRuntime$CustomVjp
-                                    (apply [_ ps cs os] (handles (on-b #(vjp (arrays ps) (arrays cs) (arrays os)))))))
-        temps (java.util.ArrayList.)]
-    (try
-      (let [cv (Mlx/mlx_custom_vjp fun bwd)
-            _ (.add temps [:closure cv])
-            in (MlxRuntime/vectorOf (long-array (map #(.-h ^MlxArray %) ins)))
-            _ (.add temps [:vec in])
-            ;; MLX makes the custom function's node on the default device
-            out (with-default-stream b #(Mlx/mlx_closure_apply cv in))
-            _ (.add temps [:vec out])]
-        (arrays (MlxRuntime/vectorArrays out)))
-      (finally
-        (fence ins)
-        (doseq [[kind h] temps]
-          (case kind
-            :closure (MlxRaw/mlx_closure_free (long h))
-            :vec (MlxRaw/mlx_vector_array_free (long h))))
-        (MlxRaw/mlx_closure_free fun)
-        (MlxRaw/mlx_closure_custom_free bwd)))))
+        on-b (fn [f] (with-bindings {@default-backend-var b} (f)))]
+    (with-temps [t]
+      (try
+        (let [fun (t :closure (MlxRuntime/closure (reify gen.mlx.MlxRuntime$Closure
+                                                    (apply [_ hs] (handles (on-b #(forward (arrays hs))))))))
+              bwd (t :custom-vjp (MlxRuntime/customVjp (reify gen.mlx.MlxRuntime$CustomVjp
+                                                         (apply [_ ps cs os] (handles (on-b #(vjp (arrays ps) (arrays cs) (arrays os))))))))
+              cv (t :closure (Mlx/mlx_custom_vjp fun bwd))
+              in (t :vector (MlxRuntime/vectorOf (long-array (map #(.-h ^MlxArray %) ins))))
+              ;; MLX makes the custom function's node on the default device
+              out (t :vector (with-default-stream b #(Mlx/mlx_closure_apply cv in)))]
+          (arrays (MlxRuntime/vectorArrays out)))
+        (finally (fence ins))))))
 
 (defn- exact-route
   "op of the MlxArrays xs by its exact composite (gen.backend.mlx.exact).
@@ -1247,23 +1246,21 @@
   (let [s (stream b)
         n (sh/size shape)
         _ (when (>= n 0x100000000)
-            (throw (ex-info "random-uniform: more than 2^32 elements" {:shape shape})))
-        temps (java.util.ArrayList.)
-        t (fn ^long [^long h] (.add temps h) h)
-        ;; a shared constant, or a new handle (freed below) when the cache is full
-        konst (fn ^long [v dtype] (if-let [h (constant v dtype)] (long h) (t (scalar-handle v dtype))))
-        ;; the key's two words, one buffer
-        kw (t (with-open [arena (Arena/ofConfined)]
-                (let [words (.allocateFrom arena ValueLayout/JAVA_INT (int-array [(unchecked-int (.-k0 key)) (unchecked-int (.-k1 key))]))
-                      shape (.allocateFrom arena ValueLayout/JAVA_INT (int-array [2]))]
-                  (made "mlx_array_new_data" #(MlxRaw/mlx_array_new_data words shape (int 1) (int (code :uint32)))))))
-        k0 (t (Mlx/mlx_slice kw (int-array [0]) (int-array [1]) (int-array [1]) s))
-        k1 (t (Mlx/mlx_slice kw (int-array [1]) (int-array [2]) (int-array [1]) s))
-        ;; counters [hi32(i) lo32(i)] = [0 i]
-        c1 (t (Mlx/mlx_arange 0.0 (double n) 1.0 (int (code :uint32)) s))
-        c0 (t (Mlx/mlx_zeros (int-array [n]) (int (code :uint32)) s))]
-    (try
-      (let [[w0 w1] (threefry-words b k0 k1 c0 c1 t konst)
+            (throw (ex-info "random-uniform: more than 2^32 elements" {:shape shape})))]
+    (with-temps [t]
+      (let [;; a shared constant, or a new handle (registered) when the cache is full
+            konst (fn ^long [v dtype] (if-let [h (constant v dtype)] (long h) (t (scalar-handle v dtype))))
+            ;; the key's two words, one buffer
+            kw (t (with-open [arena (Arena/ofConfined)]
+                    (let [words (.allocateFrom arena ValueLayout/JAVA_INT (int-array [(unchecked-int (.-k0 key)) (unchecked-int (.-k1 key))]))
+                          shape (.allocateFrom arena ValueLayout/JAVA_INT (int-array [2]))]
+                      (made "mlx_array_new_data" #(MlxRaw/mlx_array_new_data words shape (int 1) (int (code :uint32)))))))
+            k0 (t (Mlx/mlx_slice kw (int-array [0]) (int-array [1]) (int-array [1]) s))
+            k1 (t (Mlx/mlx_slice kw (int-array [1]) (int-array [2]) (int-array [1]) s))
+            ;; counters [hi32(i) lo32(i)] = [0 i]
+            c1 (t (Mlx/mlx_arange 0.0 (double n) 1.0 (int (code :uint32)) s))
+            c0 (t (Mlx/mlx_zeros (int-array [n]) (int (code :uint32)) s))
+            [w0 w1] (threefry-words b k0 k1 c0 c1 t konst)
             u (case dtype
                 ;; 23 mantissa bits of w0 ^ w1, as gen.random.threefry/uniform-floats
                 :float32 (let [bits (t (Mlx/mlx_bitwise_xor w0 w1 s))
@@ -1282,8 +1279,7 @@
                                      (c 0x3FF0000000000000) s))
                                f (t (Mlx/mlx_view m (int (code :float64)) s))]
                            (t (Mlx/mlx_subtract f (konst 1.0 :float64) s))))]
-        (wrap b (Mlx/mlx_reshape u (int-array (map int shape)) s)))
-      (finally (doseq [h temps] (MlxRaw/mlx_array_free (long h)))))))
+        (wrap b (Mlx/mlx_reshape u (int-array (map int shape)) s))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Gradients: MLX's own (mlx_value_and_grad), with f as an MLX closure of
@@ -1346,31 +1342,21 @@
                 (when-not (and (or (host? out) (mlx-array? out)) (= [] (shape-of out)))
                   (throw (ex-info "value-and-grad needs a function returning a scalar"
                                   {:shape (shape-of out) :value out})))
-                (long-array [(retained b :value-and-grad out)])))
-        cl (when (seq xs) (MlxRuntime/closure (reify gen.mlx.MlxRuntime$Closure (apply [_ ins] (run ins)))))
-        temps (java.util.ArrayList.)]
+                (long-array [(retained b :value-and-grad out)])))]
     (if (empty? xs)
       ;; nothing to differentiate (MLX's grad needs an argument): the value,
       ;; with the (leafless) trees as gradients, as the tape gives
       [(apply f args) trees]
-    (try
-      (let [vag (Mlx/mlx_value_and_grad cl (int-array (range (count xs))))
-            _ (.add temps [:vag vag])
-            in (MlxRuntime/vectorOf (long-array (map #(.-h ^MlxArray %) xs)))
-            _ (.add temps [:vec in])
-            [vs gs] (vec (with-default-stream b #(Mlx/mlx_closure_value_and_grad_apply vag in)))
-            _ (.add temps [:vec vs])
-            _ (.add temps [:vec gs])
-            v (wrap b (first (MlxRuntime/vectorArrays vs)))
-            gs (mapv #(wrap b %) (MlxRuntime/vectorArrays gs))]
-        [v (refill trees gs)])
-      (finally
-        (fence xs)
-        (doseq [[kind h] temps]
-          (case kind
-            :vag (MlxRaw/mlx_closure_value_and_grad_free (long h))
-            :vec (MlxRaw/mlx_vector_array_free (long h))))
-        (MlxRaw/mlx_closure_free cl))))))
+      (with-temps [t]
+        (try
+          (let [cl (t :closure (MlxRuntime/closure (reify gen.mlx.MlxRuntime$Closure (apply [_ ins] (run ins)))))
+                vag (t :value-and-grad (Mlx/mlx_value_and_grad cl (int-array (range (count xs)))))
+                in (t :vector (MlxRuntime/vectorOf (long-array (map #(.-h ^MlxArray %) xs))))
+                [vs gs] (mapv #(t :vector %) (with-default-stream b #(Mlx/mlx_closure_value_and_grad_apply vag in)))
+                v (wrap b (first (MlxRuntime/vectorArrays vs)))
+                gs (mapv #(wrap b %) (MlxRuntime/vectorArrays gs))]
+            [v (refill trees gs)])
+          (finally (fence xs)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The backend
@@ -1545,7 +1531,7 @@
 (defn gpu?
   "Does MLX have a GPU here (Metal, or CUDA on Linux)?"
   []
-  (Mlx/mlx_device_is_available (device-handle :gpu)))
+  (with-device :gpu #(Mlx/mlx_device_is_available (long %))))
 
 (defn make-backend
   "An MLX backend. Options: :device (:cpu or :gpu, default :gpu when MLX has
@@ -1560,8 +1546,8 @@
     (vreset! p/lazy-backends? true)
     (MlxBackend.
      (->Config device
-               (Mlx/mlx_stream_new_thread_unsafe (device-handle device))
-               (Mlx/mlx_stream_new_thread_unsafe (device-handle :cpu))
+               (with-device device #(Mlx/mlx_stream_new_thread_unsafe (long %)))
+               (with-device :cpu #(Mlx/mlx_stream_new_thread_unsafe (long %)))
                (case (long dtypes)
                  32 {:float :float32 :int :int32}
                  64 {:float :float64 :int :int64})))))

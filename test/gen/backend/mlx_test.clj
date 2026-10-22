@@ -508,6 +508,95 @@
                     :else []))]
     (is (= [] (vec (mapcat raw (source-forms "src/gen/backend/mlx.clj")))))))
 
+;; ---------------------------------------------------------------------------
+;; Temporary handles: with-temps frees them, failure paths too (genclj-f0wz)
+;; ---------------------------------------------------------------------------
+
+(deftest temporaries-are-made-in-with-temps-and-devices-freed
+  ;; the review's I1-04: ten hand-written cleanups (a java.util.ArrayList of
+  ;; handles and a finally), three of which made handles before their try,
+  ;; and device handles never freed. Read from the source, so it runs
+  ;; without MLX. Planted (2026-10-22): int-division written by hand again,
+  ;; and gpu? taking a device without freeing it, each fail
+  (let [forms (source-forms "src/gen/backend/mlx.clj")
+        named (fn [form] (when (seq? form) (second form)))
+        uses (fn [form pred] (filter pred (tree-seq coll? seq form)))
+        array-list? #(= 'java.util.ArrayList. %)
+        new-device? #(and (symbol? %) (= "mlx_device_new_type" (name %)))]
+    (is (= ['with-temps] (vec (keep #(when (seq (uses % array-list?)) (named %)) forms)))
+        "a list of temporaries only in with-temps")
+    (is (= ['with-device 'device-handle] (vec (keep #(when (seq (uses % new-device?)) (named %)) forms)))
+        "devices made only by with-device and device-handle")
+    (is (every? #(seq (uses % (fn [x] (and (symbol? x) (= "mlx_device_free" (name x))))))
+                (filter #(and (not= 'device-handle (named %))
+                              (seq (uses % (fn [x] (and (seq? x) (= 'device-handle (first x)))))))
+                        forms))
+        "who calls device-handle frees what it gets")))
+
+(defn- counting-temporaries
+  "[registered freed]: the temporaries with-temps registers and frees while
+   (f) runs and is evaluated, the k-th registration failing when fail-at
+   is k (the handle then freed, as a constructor failing makes none)."
+  [f fail-at]
+  (let [registered (atom 0)
+        freed (atom 0)
+        temp! @(requiring-resolve 'gen.backend.mlx/temp!)
+        free-temp @(requiring-resolve 'gen.backend.mlx/free-temp)]
+    (with-redefs-fn {(requiring-resolve 'gen.backend.mlx/temp!)
+                     (fn ^long [temps x]
+                       (if (= fail-at (inc @registered))
+                         (do (swap! registered inc) (free-temp x) (throw (ex-info "planted" {::planted true})))
+                         (let [h (temp! temps x)] (swap! registered inc) h)))
+                     (requiring-resolve 'gen.backend.mlx/free-temp)
+                     (fn [x] (swap! freed inc) (free-temp x))}
+      #(try (array/eval! (f))
+            (catch clojure.lang.ExceptionInfo e (when-not (::planted (ex-data e)) (throw e)))))
+    [(if fail-at (dec @registered) @registered) @freed]))
+
+(deftest every-temporary-is-freed-when-a-site-fails
+  ;; each site of with-temps, run whole and then failing at each of its
+  ;; registrations in turn: what was registered before is freed. Planted
+  ;; (2026-10-22): with-temps' finally freeing nothing fails
+  (when-mlx
+    (array/with-backend (mlx)
+      (let [la-ns (requiring-resolve 'gen.array.linalg/cholesky)
+            solve (requiring-resolve 'gen.array.linalg/solve)
+            slogdet (requiring-resolve 'gen.array.linalg/slogdet)
+            uniform (requiring-resolve 'gen.random/uniform)
+            key (requiring-resolve 'gen.random/key)
+            ints (array/array [7 -7 5 0] {:dtype :int32})
+            divisors (array/array [2 3 0 -1] {:dtype :int32})
+            floats (array/array [0.5 ##NaN -2.5 3e10])
+            spd (array/array [[4.0 1.0] [1.0 3.0]])
+            sites [["to-host, a half float" #(array/->clj (array/astype floats :float16))]
+                   ["to-host, a view" #(array/->clj (array/transpose (array/array [[1.0 2.0] [3.0 4.0]])))]
+                   ["unary's sign" #(array/sign floats)]
+                   ["unary's atan" #(array/atan floats)]
+                   ["int-division" #(array/mod ints divisors)]
+                   ["floor division" #(array/floor-div ints divisors)]
+                   ["java-int-cast" #(array/astype floats :int32)]
+                   ["int-power" #(array/pow ints (array/array [2 -1 0 3] {:dtype :int32}))]
+                   ["arg-reduce" #(array/argmax floats)]
+                   ["safe-indices" #(array/take floats (array/array [0 -1] {:dtype :int32}) 0)]
+                   ["the integer matmul" #(array/matmul (array/reshape ints [2 2]) (array/reshape ints [2 2]))]
+                   ["cholesky" #(la-ns spd)]
+                   ["solve" #(solve spd (array/array [1.0 2.0]))]
+                   ["slogdet" #(slogdet spd)]
+                   ["random-uniform" #(uniform (key 3) [5])]
+                   ["concatenate" #(array/concatenate [floats (array/array [1.0])] 0)]]
+            ;; MLX's own gradients: native value-and-grad, and linalg's custom VJPs
+            sites (cond-> sites
+                    (= "native" (System/getProperty "gen.mlx.grad"))
+                    (conj ["native value-and-grad" #((array/grad (fn [x] (array/sum (array/* x x)))) floats)]
+                          ["a custom VJP (cholesky's)" #((array/grad (fn [m] (array/sum (la-ns m)))) spd)]))]
+        (doseq [[label f] sites]
+          (let [[n freed] (counting-temporaries f nil)]
+            (is (pos? n) (str label ": registers its temporaries"))
+            (is (= n freed) (str label ": run whole"))
+            (doseq [k (range 1 (inc n))]
+              (let [[before freed] (counting-temporaries f k)]
+                (is (= before freed) (str label ": failing at its temporary " k))))))))))
+
 (defn- held-until-the-limit
   "One-element arrays made and held until making another fails: how many,
    and the failure. They are unreachable once this returns."
