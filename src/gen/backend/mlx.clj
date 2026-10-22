@@ -1488,8 +1488,17 @@
 
   (-full [b shape value dtype]
     (code dtype)
-    (with-operands b :full [hv value dtype]
-      (wrap b (Mlx/mlx_full (int-array (map int shape)) hv (int (code dtype)) (stream b)))))
+    (if (mlx-array? value)
+      ;; an array value cast and broadcast, as the batch tracer fills, not
+      ;; mlx_full: MLX's Full::vjp multiplies the cotangent by the value, so
+      ;; MLX's own gradients scaled a fill's by it (genclj-hf5z;
+      ;; docs/research/mlx-upstream/issue-1-full-vjp.md)
+      (with-operands b :full [hv value nil]
+        (with-temps [t]
+          (let [hd (if (= dtype (dtype-on b value)) hv (t (Mlx/mlx_astype hv (int (code dtype)) (stream b))))]
+            (wrap b (Mlx/mlx_broadcast_to hd (int-array (map int shape)) (stream b))))))
+      (with-operands b :full [hv value dtype]
+        (wrap b (Mlx/mlx_full (int-array (map int shape)) hv (int (code dtype)) (stream b))))))
   (-arange [b start stop step dtype]
     (guarded :arange
       (wrap b (Mlx/mlx_arange (double start) (double stop) (double step) (int (code dtype)) (stream b)))))

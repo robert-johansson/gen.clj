@@ -284,6 +284,11 @@ needs, taken from GenMLX's measured call counts
   - MLX's `maximum` gives a tie's gradient to its second argument (the
     tape splits it). So composites avoid it where they are smooth:
     `softplus` uses a double `where`, and `logaddexp` is MLX's own op.
+  - MLX's `Full` multiplies a fill's cotangent by the fill value (its JVP
+    is right). So the backend fills with an array value by a cast and
+    `broadcast_to`, whose VJP MLX has right, and keeps `mlx_full` for host
+    scalars (genclj-hf5z; a draft upstream issue is
+    `docs/research/mlx-upstream/issue-1-full-vjp.md`).
   - Inside `array/compile` the custom VJPs are left out, and MLX
     differentiates the composites' own graphs (it has no VJP for linear
     algebra there). MLX keeps compiled graphs in a thread-local cache, and
