@@ -894,4 +894,8 @@
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"with-params needs a dynamic generative function"
                         (dyn/with-params (comb/map kernel) {:w 1.0})))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"with-transitions needs a dynamic generative function"
-                        (dyn/with-transitions (comb/map kernel) {}))))
+                        (dyn/with-transitions (comb/map kernel) {})))
+  ;; the post-M5 review's I2-09: a Map took the dispatcher and never called
+  ;; it; plant: without the check, nothing is thrown
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"with-dispatch needs a dynamic generative function"
+                        (dyn/with-dispatch (comb/map kernel) (fn [& _] nil)))))

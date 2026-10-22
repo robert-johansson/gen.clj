@@ -97,6 +97,12 @@
         addr)
     [addr]))
 
+(defn ^:no-doc path*
+  "path without its check, for paths built by code (a handler's per-site
+   path): [addr] for an address, a vector itself."
+  [addr]
+  (if (vector? addr) addr [addr]))
+
 (defn- single-address
   "addr, which f takes as one address: a vector, a path, is an error."
   [f addr]
@@ -209,18 +215,25 @@
   [cm]
   (remove (fn [[_ sub]] (has-value? sub)) (submaps cm)))
 
+(defn leaves
+  "Every leaf as [path value], in canonical address order: one depth-first
+   walk."
+  [cm]
+  (letfn [(add [acc prefix cm]
+            (if (has-value? cm)
+              (conj! acc [prefix (-get-value cm)])
+              (reduce (fn [acc [addr sub]] (add acc (conj prefix addr) sub)) acc (submaps cm))))]
+    (if (choicemap? cm) (persistent! (add (transient []) [] cm)) [])))
+
 (defn addresses
   "Every leaf path, in canonical order."
   [cm]
-  (cond (not (choicemap? cm)) []
-        (has-value? cm) [[]]
-        :else (into [] (mapcat (fn [[addr sub]] (map #(into [addr] %) (addresses sub))))
-                    (submaps cm))))
+  (mapv first (leaves cm)))
 
 (defn values
   "Every leaf value, in the canonical order of addresses."
   [cm]
-  (map #(get-choice cm %) (addresses cm)))
+  (mapv second (leaves cm)))
 
 (defn to-map
   "The choice map as a nested Clojure map of values."
@@ -234,8 +247,8 @@
 ;; ---------------------------------------------------------------------------
 
 (defn set-value
-  "cm with the leaf value v at a single address (fast path for handlers; a
-   path is an error: set-choice takes paths)."
+  "cm with the leaf value v at a single address, of a node (or nil); a path
+   is an error: set-choice takes paths."
   [cm addr v]
   (single-address "set-value" addr)
   (cond (instance? Node cm) (->Node (assoc (:m cm) addr (->Value v)))
@@ -278,6 +291,17 @@
     (throw (ex-info (str "set-submap takes a choice map, not a " (type sub) " (set-choice takes values)")
                     {:addr addr})))
   (set-choice cm addr sub))
+
+(defn remove-path
+  "cm without anything at an address or path, and without the nodes that
+   leaves empty (at the empty path, EMPTY)."
+  [cm addr]
+  (let [p (path addr)]
+    (case (count p)
+      0 EMPTY
+      1 (remove-submap cm (first p))
+      (let [sub (remove-path (get-submap cm [(first p)] EMPTY) (subvec p 1))]
+        (if (empty? sub) (remove-submap cm (first p)) (set-submap cm (first p) sub))))))
 
 (defn merge
   "The union of choice maps whose addresses are disjoint (Gen.jl's merge;
@@ -331,20 +355,21 @@
   "Every leaf, flattened and concatenated in canonical address order, as one
    1-d array (Gen.jl's to_array)."
   [cm]
-  (let [leaves (values cm)]
-    (if (clojure.core/empty? leaves)
+  (let [vs (values cm)]
+    (if (clojure.core/empty? vs)
       (array/zeros [0])
-      (array/concatenate (mapv array/flatten leaves)))))
+      (array/concatenate (mapv array/flatten vs)))))
 
 (defn from-array
   "A choice map with the addresses, leaf shapes and leaf dtypes of proto,
    filled in order from the 1-d array arr (the inverse of to-array, which
    concatenates into one dtype: a bool choice comes back a bool)."
   [proto arr]
-  (let [paths (addresses proto)
+  (let [ls (leaves proto)
+        paths (map first ls)
         ;; a host value's dtype is weak: its kind's default on arr's backend
-        dtypes (mapv #(array/weak-dtype (get-choice proto %) (array/backend arr)) paths)
-        shapes (map #(array/shape (get-choice proto %)) paths)
+        dtypes (mapv #(array/weak-dtype (second %) (array/backend arr)) ls)
+        shapes (map #(array/shape (second %)) ls)
         sizes (map #(reduce * 1 %) shapes)
         needed (reduce + sizes)]
     (when-not (== needed (array/size arr))
@@ -370,26 +395,23 @@
   "Stack choice maps with identical addresses into one whose leaves have a new
    leading axis (the batch of particles)."
   [cms]
-  (let [paths (addresses (first cms))]
-    (doseq [cm (rest cms)]
-      (when-not (= paths (addresses cm))
-        (throw (ex-info "stack: the choice maps have different addresses"
-                        {:expected paths :got (addresses cm)}))))
-    (reduce (fn [acc p] (set-choice acc p (stack-values (mapv #(get-choice % p) cms))))
+  (let [lss (mapv leaves cms)
+        paths (mapv first (first lss))]
+    (doseq [ls (rest lss)
+            :let [got (mapv first ls)]]
+      (when-not (= paths got)
+        (throw (ex-info "stack: the choice maps have different addresses" {:expected paths :got got}))))
+    (reduce (fn [acc [i p]] (set-choice acc p (stack-values (mapv #(second (nth % i)) lss))))
             EMPTY
-            paths)))
+            (map-indexed vector paths))))
 
 (defn unstack
   "Split a choice map whose leaves have a leading batch axis of size n into n
    choice maps (the inverse of stack)."
   [cm n]
-  (if (has-value? cm)
-    ;; a value at the root (a distribution's choice map)
-    (mapv #(->Value (array/tree-map (fn [v] (array/take v %)) (get-value cm))) (range n))
-    (mapv (fn [i]
-            (reduce (fn [acc p] (set-choice acc p (array/tree-map #(array/take % i) (get-choice cm p))))
-                    EMPTY
-                    (addresses cm)))
+  (let [ls (leaves cm)]
+    ;; a value at the root (a distribution's choice map) is at the path []
+    (mapv (fn [i] (reduce (fn [acc [p v]] (set-choice acc p (array/tree-map #(array/take % i) v))) EMPTY ls))
           (range n))))
 
 ;; ---------------------------------------------------------------------------

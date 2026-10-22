@@ -67,8 +67,7 @@
 (defn- simulate-at [gf args key] (:trace (dyn/run-call gf :simulate args {:key key})))
 (defn- generate-at [gf args cs key at] (dyn/run-call gf :generate args {:constraints cs :key key :at at}))
 (defn- assess-at [gf args choices key at]
-  (try (gfi/-assess gf args choices key)
-       (catch clojure.lang.ExceptionInfo e (throw (gfi/under e at)))))
+  (dyn/run-call gf :assess args {:constraints choices :key key :at at}))
 (defn- update-at [gf old args argdiffs cs key at]
   (dyn/run-call gf :update args {:prev old :argdiffs argdiffs :constraints cs :key key :at at}))
 (defn- regenerate-at [gf old args argdiffs s key at]
@@ -91,9 +90,8 @@
 (defn- selected-indices
   "The indices a selection may select something under: :all, or a sorted set."
   [s]
-  (cond (instance? gen.selection.None s) (sorted-set)
-        (instance? gen.selection.Hierarchical s) (into (sorted-set) (filter integer?) (keys (:m s)))
-        :else :all))
+  (let [as (sel/top-addresses s)]
+    (if (= :all as) :all (into (sorted-set) (filter integer?) as))))
 
 (defn- element-call
   "Map's or Unfold's call at path p: element (p 0)'s trace."
@@ -288,7 +286,8 @@
   "{key stores} over the callees, a vector or map of generative functions
    by key, that hold stores; nil when none does."
   [callees]
-  (not-empty (into {} (keep (fn [[k gf]] (when-let [s (gfi/stores gf)] [k s]))) (if (map? callees) callees (map-indexed vector callees)))))
+  (not-empty (into {} (keep (fn [[k gf]] (when-let [s (gfi/stores gf)] [k s])))
+                   (if (map? callees) callees (map-indexed vector callees)))))
 
 (defn- with-callee-stores
   "callees (a vector or map of generative functions by key) with stores,
@@ -321,37 +320,33 @@
 ;; Unfold
 ;; ---------------------------------------------------------------------------
 
-(declare check-steps*)
-
 (defn- check-steps
   "The number of steps as a host integer (a one-element array is read; a
    number that differs across a batch's particles raises the batched-branch
    error, so batched inference falls back)."
   [n]
   (let [n (if (array/backend-array? n) (array/item n) n)]
-    (check-steps* n)))
-
-(defn- check-steps* [n]
-  (when-not (nat-int? n)
-    (throw (ex-info "Unfold's first argument, the number of steps, must be a non-negative integer" {:n n})))
-  n)
+    (when-not (nat-int? n)
+      (throw (ex-info "Unfold's first argument, the number of steps, must be a non-negative integer" {:n n})))
+    n))
 
 (defn- step-args [t state params] (into [t state] params))
 
 (defn- unfold-generate [gf [n init & params :as args] constraints key]
-  (let [n (check-steps n)]
-  (when constraints (indices :generate constraints n))
-  (let [kernel (:kernel gf)
-        acc (loop [t 0 state init acc empty-acc]
-              (if (< t n)
-                (let [sa (step-args t state params)
-                      k (element-key key t)
-                      [sub w] (if constraints
-                                (let [r (generate-at kernel sa (cm/get-submap constraints t cm/EMPTY) k [t])] [(:trace r) (:weight r)])
-                                [(simulate-at kernel sa k) 0.0])]
-                  (recur (inc t) (:retval sub) (put-element acc t sub nil w)))
-                acc))]
-    {:trace (elements-trace gf (vec args) acc) :weight (:weight acc)})))
+  (let [n (check-steps n)
+        kernel (:kernel gf)]
+    (when constraints (indices :generate constraints n))
+    (let [acc (loop [t 0 state init acc empty-acc]
+                (if (< t n)
+                  (let [sa (step-args t state params)
+                        k (element-key key t)
+                        [sub w] (if constraints
+                                  (let [r (generate-at kernel sa (cm/get-submap constraints t cm/EMPTY) k [t])]
+                                    [(:trace r) (:weight r)])
+                                  [(simulate-at kernel sa k) 0.0])]
+                    (recur (inc t) (:retval sub) (put-element acc t sub nil w)))
+                  acc))]
+      {:trace (elements-trace gf (vec args) acc) :weight (:weight acc)})))
 
 (defn- unfold-revise
   "update or regenerate of an Unfold trace. Walks the retained steps,
@@ -402,13 +397,13 @@
 
 (defn- unfold-assess [gf [n init & params] choices key]
   (let [n (check-steps n)]
-  (indices :assess choices n)
-  ;; weight starts boxed: it accumulates arrays on array backends
-  (loop [t 0 state init weight (Double/valueOf 0.0) retval []]
-    (if (< t n)
-      (let [r (assess-at (:kernel gf) (step-args t state params) (cm/get-submap choices t cm/EMPTY) (element-key key t) [t])]
-        (recur (inc t) (:retval r) (+ weight (:weight r)) (conj retval (:retval r))))
-      {:weight weight :retval retval}))))
+    (indices :assess choices n)
+    ;; weight starts boxed: it accumulates arrays on array backends
+    (loop [t 0 state init weight (Double/valueOf 0.0) retval []]
+      (if (< t n)
+        (let [r (assess-at (:kernel gf) (step-args t state params) (cm/get-submap choices t cm/EMPTY) (element-key key t) [t])]
+          (recur (inc t) (:retval r) (+ weight (:weight r)) (conj retval (:retval r))))
+        {:weight weight :retval retval}))))
 
 (gfi/defgf UnfoldGF [kernel]
   gfi/IStores
@@ -577,7 +572,8 @@
                                      (when-not (nat-int? i)
                                        (throw (gfi/unvisited op [[i]] "Recurse's addresses are node indices")))
                                      (when (cm/has-value? sub)
-                                       (throw (gfi/unvisited op [[i]] (str "a value at node " i ": a node has :production and :aggregation"))))
+                                       (throw (gfi/unvisited op [[i]] (str "a value at node " i
+                                                                           ": a node has :production and :aggregation"))))
                                      (let [parts (set (clojure.core/map first (cm/submaps sub)))]
                                        (when-let [bad (seq (remove #{:production :aggregation} parts))]
                                          (throw (gfi/unvisited op (mapv #(vector i %) bad) "a node has :production and :aggregation")))

@@ -129,6 +129,11 @@
      gf may not have made: revise's result. (project-old prev selection) is
      prev's projection under the context prev ran in."))
 
+(def ^:no-doc realize-limit
+  "How many elements of a lazy return value a run realizes (gen.dynamic's
+   realize!), and so how many a walk of one may read (gen.batched)."
+  10000)
+
 (def ^:private same-limit
   "How many values one comparison looks at before it calls the rest
    different (which is sound: a different gen-fn only runs again)."
@@ -245,15 +250,6 @@
   (or (identical? a b)
       (and (identical? (class a) (class b)) (-same-gen-fn? a b (long-array 1 same-limit)))))
 
-(defn- without
-  "choices without anything at path p."
-  [choices p]
-  (case (count p)
-    0 cm/EMPTY
-    1 (cm/remove-submap choices (first p))
-    (let [sub (without (cm/get-submap choices [(first p)] cm/EMPTY) (subvec p 1))]
-      (if (cm/empty? sub) (cm/remove-submap choices (first p)) (cm/set-submap choices (first p) sub)))))
-
 (def ^:dynamic ^:no-doc *revising*
   "While generate-again's generate runs, {:constraints :prefix}: the
    revise's constraints, with any a run adds (constraining), and the path
@@ -299,7 +295,7 @@
                      (let [{flagged :unvisited paths :paths} (ex-data e)]
                        (if (and flagged (seq paths) (every? old? paths)) {::drop paths} (throw e)))))]
         (if-let [paths (::drop r)]
-          (recur (reduce without sigma paths))
+          (recur (reduce cm/remove-path sigma paths))
           [r sigma])))))
 
 (defn ^:no-doc rerun-without-drops
@@ -313,7 +309,7 @@
     (let [r (attempt sigma)
           new (:choices (:trace r))
           dropped (remove #(cm/has-value? new %) (cm/addresses sigma))]
-      (if (seq dropped) (recur (reduce without sigma dropped)) [r sigma]))))
+      (if (seq dropped) (recur (reduce cm/remove-path sigma dropped)) [r sigma]))))
 
 (defn- survivors
   "The paths of old (choices) that the new choices still hold, less those
@@ -543,7 +539,7 @@
   [op args argdiffs]
   (when-not (= (count args) (count argdiffs))
     (throw (ex-info (str (name op) ": " (count args) " arguments but " (count argdiffs) " argdiffs")
-                    {:args (count args) :argdiffs (count argdiffs)}))))
+                    {:op op :args (count args) :argdiffs (count argdiffs)}))))
 
 (defn update
   "The trace with new arguments and constrained choices. Returns the new trace,
@@ -556,11 +552,12 @@
      (update trace args (diff/no-changes (count args)) constraints key)))
   ([trace args argdiffs constraints] (update trace args argdiffs constraints (next-key)))
   ([trace args argdiffs constraints key]
-   (check-argdiffs :update (check-args :update args) argdiffs)
-   (outside-revise
-    (run-op (:gen-fn trace) :update (vec args)
-            {:prev trace :argdiffs (vec argdiffs) :constraints (check-choice-map :update "the constraints" constraints)
-             :key key}))))
+   (let [args (check-args :update args)]
+     (check-argdiffs :update args argdiffs)
+     (outside-revise
+      (run-op (:gen-fn trace) :update args
+              {:prev trace :argdiffs (vec argdiffs) :constraints (check-choice-map :update "the constraints" constraints)
+               :key key})))))
 
 (defn regenerate
   "The trace with new arguments and the selected choices resampled from the
@@ -572,10 +569,11 @@
      (regenerate trace args (diff/no-changes (count args)) selection key)))
   ([trace args argdiffs selection] (regenerate trace args argdiffs selection (next-key)))
   ([trace args argdiffs selection key]
-   (check-argdiffs :regenerate (check-args :regenerate args) argdiffs)
-   (outside-revise
-    (run-op (:gen-fn trace) :regenerate (vec args)
-            {:prev trace :argdiffs (vec argdiffs) :selection (check-selection :regenerate selection) :key key}))))
+   (let [args (check-args :regenerate args)]
+     (check-argdiffs :regenerate args argdiffs)
+     (outside-revise
+      (run-op (:gen-fn trace) :regenerate args
+              {:prev trace :argdiffs (vec argdiffs) :selection (check-selection :regenerate selection) :key key})))))
 
 (defn assess
   "The log density of fully specified choices, and the return value. The

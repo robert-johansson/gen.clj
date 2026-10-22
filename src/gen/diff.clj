@@ -17,7 +17,7 @@
    language (gen ^:static) applies it to a binding that is one call, so
    that a precise diff reaches a callee (a Map then reruns only the
    elements that changed). It has rules for count, nth, get, conj, assoc,
-   +, -, inc, dec and vec, and is open: (defmethod propagate #'my-fn [_
+   +, -, inc, dec, vec and identity, and is open: (defmethod propagate #'my-fn [_
    args diffs] …). (consistent? prev new d) says whether d describes the
    change from prev to new.
 
@@ -56,7 +56,7 @@
 (defn int-diff
   "A number changed by amount (Gen.jl's IntDiff); no-change for 0."
   [amount]
-  (if (zero? amount) (->NoChange) (->IntDiff amount)))
+  (if (zero? amount) no-change (->IntDiff amount)))
 
 (defrecord SetDiff [added deleted])
 
@@ -64,7 +64,7 @@
   "A set gained the elements of added and lost those of deleted (Gen.jl's
    SetDiff); no-change when both are empty."
   [added deleted]
-  (if (and (empty? added) (empty? deleted)) (->NoChange) (->SetDiff (set added) (set deleted))))
+  (if (and (empty? added) (empty? deleted)) no-change (->SetDiff (set added) (set deleted))))
 
 (defrecord DictDiff [added deleted updated])
 
@@ -74,7 +74,7 @@
    changed; every other key kept its value (Gen.jl's DictDiff)."
   [added deleted updated]
   (if (and (empty? added) (empty? deleted) (empty? updated))
-    (->NoChange)
+    no-change
     (->DictDiff (into {} added) (set deleted) (into {} updated))))
 
 (defn no-change? [d] (instance? NoChange d))
@@ -119,8 +119,9 @@
         (int-diff? d) (== (- (double new) (double prev)) (double (:amount d)))
         ;; added elements (keys) were absent and deleted ones present, so
         ;; that count's rule can trust them
-        (set-diff? d) (and (not-any? #(contains? (set prev) %) (:added d)) (every? #(contains? (set prev) %) (:deleted d))
-                           (= new (into (apply disj (set prev) (:deleted d)) (:added d))))
+        (set-diff? d) (let [prev (set prev)]
+                        (and (not-any? #(contains? prev %) (:added d)) (every? #(contains? prev %) (:deleted d))
+                             (= new (into (apply disj prev (:deleted d)) (:added d)))))
         (dict-diff? d) (and (not-any? #(contains? prev %) (keys (:added d))) (every? #(contains? prev %) (:deleted d))
                             (= (set (keys new)) (into (apply disj (set (keys prev)) (:deleted d)) (keys (:added d))))
                             (every? (fn [[k v]] (same? v (get new k))) (:added d))
