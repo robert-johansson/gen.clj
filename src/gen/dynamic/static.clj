@@ -22,7 +22,8 @@
    if's test) is hoisted into a node of its own before the binding, in
    evaluation order, so the static graph draws what the body draws (DESIGN.md
    §9). This namespace checks a body at macroexpansion and builds its graph
-   as data; gen.dynamic runs it.
+   as data, with the code of its nodes and its score fn (static-form,
+   guarded by gen.dynamic.guard); gen.dynamic's handler runs them.
 
      (ir gf)    the graph: the arguments, the nodes in order ({:kind :trace,
                 :splice or :compute, :addr, :names, :inputs, :form, and
@@ -38,7 +39,11 @@
      (lint ns …)           per generative function var of the namespaces
                            (the current one by default): {:var :static?
                            :reason}, the flagged ones as {:already true}"
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [gen.array :as array]
+            [gen.choicemap :as cm]
+            [gen.dynamic.guard :as guard]
+            [gen.random :as rng]))
 
 (def ^:private effects
   "The body's own calls, which a static body makes only at a binding's head."
@@ -332,6 +337,117 @@
        :ret (let [ret (expanded (in-scope names) ret)]
               (pure! (in-scope names) ret "the return expression")
               (compute-node (in-scope names) ret names))}))))
+
+;; ---------------------------------------------------------------------------
+;; The code: the graph's runtime form and its score fn, which gen.dynamic's
+;; handler runs (static-site, static-call and check-computed! are its)
+;; ---------------------------------------------------------------------------
+
+(defn- path [addr] (if (vector? addr) addr [addr]))
+
+(defn- names-map
+  "The form of a map from each of names (quoted) to its value."
+  [names]
+  (into {} (map (fn [s] [(list 'quote s) s])) names))
+
+(defn- score-form
+  "The form of a static body's score fn, (fn [param args choices key] →
+   [weight retval]): the body's bindings in order as locals, a trace node's
+   value from choices with its log density, a splice's callee assessed on
+   its sub-map, keys split as the handler's assess splits them (none when
+   key is nil)."
+  [st params coercions locals]
+  (let [args (gensym "args") choices (gensym "choices") key (gensym "key")
+        {:keys [bindings terms]}
+        (reduce (fn [{:keys [bindings terms k]} {:keys [kind addr binding expr] computed :keys}]
+                  (let [;; a computed address's path, checked to hold every
+                        ;; choice under its prefix
+                        p (gensym "p")
+                        at (when (some? addr)
+                             (if computed
+                               [p `(into ~(path addr) [~@computed])
+                                '_ `(gen.dynamic/check-computed! ~choices ~(path addr) ~p ~(= kind :trace))]
+                               [p (path addr)]))]
+                    (case kind
+                      :trace (let [v (gensym "v") lp (gensym "lp") k' (gensym "k")]
+                               {:bindings (-> bindings (into at)
+                                              (into [[v lp] `(gen.dynamic/static-site ~expr ~choices ~p)
+                                                     binding v
+                                                     k' `(when ~k (first (rng/split ~k)))]))
+                                :terms (conj terms lp) :k k'})
+                      :splice (let [[g as] expr w (gensym "w") rv (gensym "rv") k' (gensym "k") ks (gensym "ks")]
+                                {:bindings (-> bindings (into at)
+                                               (into [[k' ks] `(if ~k (rng/split ~k) [nil nil])
+                                                      [w rv] `(gen.dynamic/static-call ~p ~g ~as (cm/get-submap ~choices ~p cm/EMPTY) ~ks)
+                                                      binding rv]))
+                                 :terms (conj terms w) :k k'})
+                      {:bindings (into bindings [binding expr]) :terms terms :k k})))
+                {:bindings [] :terms [] :k key}
+                (:nodes st))]
+    (guard/guard-branches
+     `(fn [~'param ~args ~choices ~key]
+        (let [~params ~args ~@coercions ~@bindings]
+          [(reduce array/+ 0.0 [~@terms]) ~(:expr (:ret st))]))
+     locals)))
+
+(defn static-form
+  "The runtime graph of the static body st (gen.dynamic.static/analyze),
+   its names in slots (the arguments' first): per node, its kind, address,
+   names and inputs, the slots it reads and writes, a guarded fn of (param,
+   env) for its distribution, call or value, a fn writing its names' slots
+   from its value, and how its diff is found (a rule, an alias, argument
+   specs)."
+  [st params coercions locals]
+  (let [;; each name once: a name bound twice ([w w z]) holds its last binding, as let's
+        arg-names (vec (distinct (concat (apply concat (:fixed (:args st))) (:rest (:args st)))))
+        names (vec (distinct (concat arg-names (mapcat :names (:nodes st)))))
+        slots (zipmap names (range))
+        env (gensym "env")
+        reads (fn [inputs] (vec (mapcat (fn [x] [x `(nth ~env ~(slots x))]) inputs)))
+        node-fn (fn [{:keys [inputs expr]}]
+                  (guard/guard-branches `(fn [~'param ~env] (let ~(reads inputs) ~expr)) (into locals inputs)))
+        keys-fn (fn [{:keys [inputs] ks :keys}]
+                  (guard/guard-branches `(fn [~'param ~env] (let ~(reads inputs) [~@ks])) (into locals inputs)))
+        param? (fn [expr] (boolean (some #{'param} (tree-seq coll? seq expr))))
+        spec (fn [{:keys [symbol constant inputs]}]
+               (cond (and symbol (contains? slots symbol)) {:slot (slots symbol)}
+                     (or symbol constant) {:constant true}
+                     :else {:in (mapv slots inputs)}))
+        call (fn [{:keys [call args arg-specs inputs alias]}]
+               (cond call {:rule `(var ~call) :arg-specs (mapv spec arg-specs)
+                           :args-f `(fn [~'param ~env] (let ~(reads inputs) [~@args]))}
+                     alias {:alias (slots alias)}))
+        v (gensym "v")
+        args (gensym "args")]
+    `{:args '~(:args st)
+      :params '~params
+      :slots '~slots
+      :size ~(count names)
+      :args-bind (fn [~args] (let [~params ~args ~@coercions] [~@arg-names ~@(repeat (- (count names) (count arg-names)) nil)]))
+      :nodes [~@(for [n (:nodes st)]
+                  (merge `{:kind ~(:kind n) :addr ~(:addr n) :names '~(:names n) :inputs '~(:inputs n) :form '~(:form n)
+                           :in ~(mapv slots (:inputs n)) :out ~(mapv slots (:names n))
+                           :symbol? ~(symbol? (:binding n))
+                           :param? ~(param? [(:expr n) (:keys n)])
+                           :f ~(node-fn n)
+                           :keys-f ~(when (:keys n) (keys-fn n))
+                           :bind (fn [~env ~v] (let [~(:binding n) ~v] (-> ~env ~@(map (fn [x] `(assoc ~(slots x) ~x)) (:names n)))))}
+                         (when (= :splice (:kind n)) {:arg-specs (mapv spec (:arg-specs n))})
+                         (when (:keys n) {:keys (list 'quote (:keys n))})
+                         (call n)))]
+      :ret ~(merge {:inputs `'~(:inputs (:ret st)) :in (mapv slots (:inputs (:ret st)))
+                    :param? (param? (:expr (:ret st))) :f (node-fn (:ret st))}
+                   (call (:ret st)))
+      :score ~(score-form st params coercions locals)
+      :roots ~(set (keep #(when-some [a (:addr %)] (first (path a))) (:nodes st)))
+      ;; a node at a computed address holds its prefix, as a call does
+      ;; (its score fn checks the rest: check-computed!)
+      :paths ~(when (some #(vector? (:addr %)) (:nodes st))
+                (vec (keep #(when-some [a (:addr %)] [(if (:keys %) :splice (:kind %)) (path a)]) (:nodes st))))}))
+
+;; ---------------------------------------------------------------------------
+;; The graph as data
+;; ---------------------------------------------------------------------------
 
 (defn ir
   "gf's graph as data (see the namespace doc), or nil when gf is not static."
