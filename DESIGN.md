@@ -465,7 +465,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   bit-identical to JAX. Every trace site consumes one key. The implicit key
   source has a random root seed for each JVM (`gfi/seed!` fixes it). See §3.5.
   `fold-in` takes 64-bit data (owner, 2026-10-22, the post-M5 review's P2-09): it hashes
-  `[hi32 d, lo32 d]`.
+  `[hi32 d, lo32 d]`. Its data is a non-negative integer: negative or
+  fractional data is a loud error, which no caller passes. The old 32-bit
+  mask wrapped negatives as JAX does, and a long cast truncated 2.5 to 2.
   - Below 2^32 a key is JAX's, bit for bit. Beyond, it is distinct, where
     JAX masks typed data to 32 bits.
   - With the mask, Recurse's node numbers past 2^32 (depth 32 for
@@ -664,7 +666,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   **PROVISIONAL (owner to confirm; 2026-10-22, from m3-grammar's
   cross-review): `lgamma(+Inf)` and `digamma(+Inf)` are +Inf,** as in
   SciPy and Julia, where gen.array gave NaN (both the composite and its
-  bit-identical host path).
+  bit-identical host path). So too, following SciPy: lgamma(−Inf) is
+  −Inf (|Γ| goes to 0 between the poles), where gen.array gave +Inf
+  through its pole branch; and digamma(−0.0) is +Inf, the limit from below,
+  keeping the sign of a zero, where `(+ z 0)` made it −Inf.
   The other edge stays as it is: a draw that underflows to 0, where a
   density can be +Inf, is floored at the dtype's smallest normal number.
   That holds in every family, gamma, beta and dirichlet included, which
@@ -697,6 +702,16 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     families guard their arguments instead.
   - The alternative was to leave it, with a NaN gradient whenever a
     parameter vector holds an exact 0.
+- **Probabilities sum to 1 within their dtype** (PROVISIONAL, owner to
+  confirm; 2026-10-22, m3-lm's genclj-ggdl). check-probabilities (also the
+  mixtures' weights) and dirichlet's support bound |Σp − 1| by
+  4·log2(K)·ε of the values' dtype, never below 1e-6. That's room for two
+  blocked or pairwise sums: one that normalized the values, one that checks
+  them (genclj-y0mp measured each within 0.8·log2(K)·ε). The fixed 1e-6
+  refused float32 probabilities at K = 10⁴; float32 there now gets 6.3e-6,
+  and float64 keeps 1e-6. The alternative was K·ε, which would accept data
+  normalized by a naive sequential float32 sum but is 0.12 at K = 10⁶ in
+  float32, so it would barely check. Under log2(K) such data is a loud error.
 - **A mixture of a discrete and a continuous family is an error** when it
   is made (owner, 2026-10-22, the post-M5 review's P2-02). Its density would add a pmf to a pdf: given
   y = 0, the posterior came out 0.267 where 0.80 is exact. Gen.jl's types
