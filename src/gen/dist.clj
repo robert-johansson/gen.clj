@@ -35,6 +35,14 @@
   [in-support v s]
   (where in-support v s))
 
+(defn- check-vector
+  "A parameter whose last axis holds a family's values (probabilities,
+   logits, concentrations) must have one: a scalar would fail later at an
+   axis, naming neither the family nor the parameter."
+  [dist-name param-name v]
+  (dc/check (<= 1 (array/ndim v)) dist-name (str param-name " must be a vector (its last axis), got a scalar")
+            {:param param-name :shape (array/shape v)}))
+
 (defn- largest-float
   "The largest finite float of x's dtype."
   ^double [x]
@@ -379,7 +387,7 @@
   "dirichlet(alpha): the Dirichlet distribution over the simplex of the last
    axis of alpha."
   [alpha]
-  (validate (dc/check (<= 1 (array/ndim alpha)) "dirichlet" "alpha must be a vector" {:alpha-shape (array/shape alpha)})
+  (validate (check-vector "dirichlet" "alpha" alpha)
             (dc/check-positive "dirichlet" "alpha" alpha))
   (sample [key shape]
     ;; g/Σg for gamma draws g, from their logs (a draw underflows to 0 at a
@@ -596,7 +604,7 @@
   "categorical(probs): index i (0-based) with probability probs[i]; probs must
    be probabilities (see categorical-logits for logits)."
   [probs]
-  (validate (dc/check-probabilities "categorical" "probs" probs))
+  (validate (check-vector "categorical" "probs" probs) (dc/check-probabilities "categorical" "probs" probs))
   (sample [key shape] (rng/categorical key (log probs) (sh/broadcast shape (pop (array/shape probs))) (opts probs)))
   (log-prob [v] (pick-guarded log-mass probs v))
   (support [] (vec (range (peek (array/shape probs)))))
@@ -606,6 +614,7 @@
   "categorical-logits(logits): index i (0-based) with probability
    softmax(logits)[i]. Any finite logits; the form LLM token sites use."
   [logits]
+  (validate (check-vector "categorical-logits" "logits" logits))
   (sample [key shape] (rng/categorical key logits (sh/broadcast shape (pop (array/shape logits))) (opts logits)))
   (log-prob [v] (pick-guarded identity (array/log-softmax logits) v))
   (support [] (vec (range (peek (array/shape logits)))))
