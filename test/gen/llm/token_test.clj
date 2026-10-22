@@ -410,6 +410,27 @@
       (is (= [50 5] (:retval t2)))
       (is (= (cm/from-map (zipmap (range 1 (count (:retval tr))) (subvec (:retval tr) 1))) disc)))))
 
+(deftest the-retdiff-is-d1-s-unchanged
+  ;; genclj-h37q: no-change means gfi/same-value? (D1), token by token.
+  ;; Planted (2026-10-22): clojure.core/= on the vectors, as before, fails
+  ;; the first two (= takes -0.0 for 0.0 and NaN for no NaN, values a
+  ;; completion never holds today: the drift the bean guards against);
+  ;; same-value? on the whole vectors fails the last: forced again, a
+  ;; completion's 300 tokens are new Longs, most past the cached ones below
+  ;; 128, and 256 of them exhaust same-value?'s budget
+  (let [retdiff #'token/retdiff]
+    (is (= (diff/vector-diff 1 1 {0 diff/unknown-change}) (retdiff [0.0] [-0.0])))
+    (is (= diff/no-change (retdiff [##NaN] [##NaN])))
+    (testing "a long completion forced again to its own tokens is unchanged"
+      (with-open [engine (toy/engine {:n-vocab 1000 :max-branches 64 :n-ctx 512})]
+        (let [wide (token/completion (lm/lm engine (tt/tokenizer 1000) {:max-cells 4096}) {:end-tokens #{}})
+              tr (gfi/simulate wide [prompt 300] (rng/key 8))
+              {t2 :trace w :weight rd :retdiff} (gfi/update tr (token/forced (:retval tr)) (rng/key 9))]
+          (is (< 256 (count (remove #(< (long %) 128) (:retval tr)))) "past the budget")
+          (is (= (:retval tr) (:retval t2)))
+          (is (= 0.0 w))
+          (is (= diff/no-change rd)))))))
+
 (deftest regenerating-nothing-with-new-arguments-revises
   ;; the no-change shortcut is for unchanged arguments only: with nothing
   ;; selected, a larger max-tokens extends a completion that stopped at the
