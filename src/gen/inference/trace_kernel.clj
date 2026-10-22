@@ -45,11 +45,11 @@
    error."
   (:refer-clojure :exclude [+ -])
   (:require [gen.array :as array :refer [+ -]]
-            [gen.array.dtype :as dt]
             [gen.array.linalg :as la]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.gfi :as gfi]
+            [gen.gradients :as grad]
             [gen.inference.kernel :as k]
             [gen.inference.mh :as mh]
             [gen.inference.transform :as tf]
@@ -57,11 +57,8 @@
 
 (set! *warn-on-reflection* true)
 
-(defn- continuous? [v]
-  (and (array/array? v) (not (boolean? v)) (= :float (dt/kind (array/dtype v)))))
-
 (defn- continuous-addresses [choices]
-  (filterv #(continuous? (cm/get-choice choices %)) (cm/addresses choices)))
+  (filterv #(grad/continuous? (cm/get-choice choices %)) (cm/addresses choices)))
 
 (defn- columns
   "[space path] of each flattened element of the values at addrs."
@@ -79,40 +76,34 @@
         ins (into (mapv #(vector :model %) (continuous-addresses mc)) (map #(vector :kernel %)) (continuous-addresses kc))
         outs (into (mapv #(vector :update %) (continuous-addresses update)) (map #(vector :backward %))
                    (continuous-addresses backward))
-        source (fn [sp] (if (= sp :model) mc kc))
-        in-values (mapv (fn [[sp p]] (cm/get-choice (source sp) p)) ins)
-        offsets (vec (reductions clojure.core/+ 0 (map array/size in-values)))
-        substituted (fn [x]
-                      (reduce (fn [[mc kc] [i [sp p]]]
-                                (let [v (array/reshape (array/slice x 0 (offsets i) (offsets (inc i)))
-                                                       (array/shape (in-values i)))]
-                                  (if (= sp :model) [(cm/set-choice mc p v) kc] [mc (cm/set-choice kc p v)])))
-                              [mc kc] (map-indexed vector ins)))
-        ;; the kernel on the trace the substituted choices make, so its
-        ;; reads of a call's value, the return value and the score are
-        ;; tracked too. Only the kernel needs exact densities: the model may
-        ;; hold encapsulated randomness (a pseudo-marginal move), drawn
-        ;; here at key 0, which the check at x below makes loud wherever
-        ;; the kernel's outputs depend on it
-        kernel-outputs (fn [x]
-                         (let [[mc' kc'] (substituted x)
-                               trace' (:trace (gfi/generate (:gen-fn trace) (:args trace) mc' (rng/key 0)))]
-                           (:retval (gfi/with-exact-density "A trace kernel's Jacobian"
-                                      (gfi/assess kernel (into [trace'] args) kc' (rng/key 0))))))
-        continuous-outs (fn [[u b]] (reduce (fn [c [sp p]] (cm/set-choice c (into [sp] p) (cm/get-choice (if (= sp :update) u b) p)))
-                                            cm/EMPTY outs))
-        outputs (fn [x] (let [[u b] (kernel-outputs x)]
-                          (array/concatenate (mapv (fn [[sp p]] (array/flatten (cm/get-choice (if (= sp :update) u b) p))) outs))))
-        m (reduce clojure.core/+ 0 (map (fn [[sp p]] (array/size (cm/get-choice (if (= sp :update) update backward) p)))
-                                        outs))
+        in-values (mapv (fn [[sp p]] (cm/get-choice (if (= sp :model) mc kc) p)) ins)
+        out-values (fn [[u b]] (mapv (fn [[sp p]] (cm/get-choice (if (= sp :update) u b) p)) outs))
+        m (reduce + 0 (map array/size (out-values [update backward])))
         rows (if (and (seq ins) (seq outs))
-               (let [x (array/concatenate (mapv array/flatten in-values))]
+               (let [[x unflatten] (grad/flattened in-values)
+                     substituted (fn [x] (reduce (fn [[mc kc] [[sp p] v]]
+                                                   (if (= sp :model) [(cm/set-choice mc p v) kc] [mc (cm/set-choice kc p v)]))
+                                                 [mc kc] (map vector ins (unflatten x))))
+                     ;; the kernel on the trace the substituted choices make,
+                     ;; so its reads of a call's value, the return value and
+                     ;; the score are tracked too. Only the kernel needs exact
+                     ;; densities: the model may hold encapsulated randomness
+                     ;; (a pseudo-marginal move), drawn here at key 0, which
+                     ;; the check below makes loud wherever the kernel's
+                     ;; outputs depend on it
+                     kernel-outputs (fn [x]
+                                      (let [[mc' kc'] (substituted x)
+                                            trace' (:trace (gfi/generate (:gen-fn trace) (:args trace) mc' (rng/key 0)))]
+                                        (:retval (gfi/with-exact-density "A trace kernel's Jacobian"
+                                                   (gfi/assess kernel (into [trace'] args) kc' (rng/key 0))))))
+                     continuous-outs (fn [ub] (reduce (fn [c [[sp p] v]] (cm/set-choice c (into [sp] p) v))
+                                                      cm/EMPTY (map vector outs (out-values ub))))]
                  (when-not (tf/same-choices? (continuous-outs (kernel-outputs x)) (continuous-outs [update backward]))
                    (throw (ex-info (str "The trace kernel gives other outputs on the trace its choices make than on the"
                                         " trace itself: they depend on the model's encapsulated randomness, which its"
                                         " Jacobian cannot follow")
                                    {:outputs (mapv vec (map rest outs))})))
-                 (mapv (fn [j] (vec (array/->clj ((array/grad #(array/take (outputs %) j)) x)))) (range m)))
+                 (array/->clj (grad/jacobian #(array/concatenate (mapv array/flatten (out-values (kernel-outputs %)))) x m)))
                (vec (repeat m [])))
         cols (into (columns :model mc (continuous-addresses mc)) (columns :kernel kc (continuous-addresses kc)))
         ;; every output and every kernel choice counts: a constant output,

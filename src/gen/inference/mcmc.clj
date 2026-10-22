@@ -26,6 +26,7 @@
             [gen.dist.core :as dc]
             [gen.gfi :as gfi]
             [gen.gradients :as grad]
+            [gen.inference.mh :as mh]
             [gen.random :as rng]
             [gen.selection :as sel]))
 
@@ -37,14 +38,12 @@
   {:trace trace :accepted? false :log-alpha ##-Inf :diverged? true})
 
 (defn- accept
-  "The MH decision on proposed, of log acceptance ratio log-alpha: a ratio
-   that is not finite (an energy that overflowed or is NaN) diverged."
+  "mh/accept's decision on proposed, of log acceptance ratio log-alpha: a
+   ratio that is not finite (an energy that overflowed or is NaN) diverged."
   [trace proposed log-alpha key]
-  (let [la (double (array/item log-alpha))]
-    (if (Double/isFinite la)
-      (let [accepted? (or (>= la 0.0) (< (Math/log (double (array/item (rng/uniform key)))) la))]
-        {:trace (if accepted? proposed trace) :accepted? accepted? :log-alpha la :diverged? false})
-      (diverged trace))))
+  (if (Double/isFinite (double (array/item log-alpha)))
+    (assoc (mh/accept trace proposed log-alpha key) :diverged? false)
+    (diverged trace)))
 
 (defn- finite
   "Are the elements of xs all finite? A boolean array, read on the host only
@@ -95,7 +94,7 @@
    NaN must reach the divergence check."
   [x mu ^double sd]
   (let [z (/ (- x mu) sd)]
-    (array/sum (- (* -0.5 (* z z)) (clojure.core/+ (Math/log sd) (clojure.core/* 0.5 (Math/log (clojure.core/* 2.0 Math/PI))))))))
+    (array/sum (- (* -0.5 (* z z)) (+ (Math/log sd) (* 0.5 (Math/log (* 2.0 Math/PI))))))))
 
 (def ^:private compiled-steps
   "Compiled kernel steps by kernel and settings, model, arguments and choice

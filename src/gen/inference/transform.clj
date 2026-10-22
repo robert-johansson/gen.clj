@@ -234,7 +234,7 @@
 ;; Running a transform, and its Jacobian
 ;; ---------------------------------------------------------------------------
 
-(defn- choices-of [x]
+(defn- input-choices [x]
   (cond (nil? x) cm/EMPTY
         (cm/choicemap? x) x
         (contains? x :choices) (:choices x)
@@ -246,7 +246,7 @@
   "One run of t's body on the inputs, the continuous reads replaced by subst
    ({[space path] value}) when given: the run's state."
   [t model-in aux-in subst]
-  (let [st (volatile! {:inputs {:model-in (choices-of model-in) :aux-in (choices-of aux-in)}
+  (let [st (volatile! {:inputs {:model-in (input-choices model-in) :aux-in (input-choices aux-in)}
                        :subst subst :reads [] :read-tags {}
                        :outputs {:model-out cm/EMPTY :aux-out cm/EMPTY}
                        :writes [] :written-set #{} :copies []})]
@@ -283,9 +283,8 @@
   (let [ins (filterv #(= :continuous (nth % 2)) (:reads s))
         in-values (mapv (fn [[sp p]] (cm/get-choice (get-in s [:inputs sp]) p)) ins)
         outs (output-specs s retained?)
-        offsets (vec (reductions clojure.core/+ 0 (map array/size in-values)))
-        n (peek offsets)
-        m (reduce clojure.core/+ 0 (map #(array/size (output-value s %)) outs))]
+        n (reduce + 0 (map array/size in-values))
+        m (reduce + 0 (map #(array/size (output-value s %)) outs))]
     (when-not (= n m)
       (let [inputs (mapv #(vec (take 2 %)) ins) outputs (mapv #(vec (rest %)) outs)]
         (throw (ex-info (str "The transform's continuous part maps " n " dimensions to " m
@@ -293,20 +292,14 @@
                         {:inputs inputs :outputs outputs}))))
     (if (zero? n)
       0.0
-      (let [unflatten (fn [x] (into {} (map-indexed (fn [i [sp p]]
-                                                      [[sp p] (array/reshape (array/slice x 0 (offsets i) (offsets (inc i)))
-                                                                             (array/shape (in-values i)))])
-                                                    ins)))
-            g (fn [x] (let [run (execute t model-in aux-in (unflatten x))]
+      (let [[x unflatten] (grad/flattened in-values)
+            g (fn [x] (let [run (execute t model-in aux-in (zipmap (map #(vec (take 2 %)) ins) (unflatten x)))]
                         (array/concatenate (mapv #(array/flatten (output-value run %)) outs))))
-            logabs (grad/log-abs-det-jacobian g (array/concatenate (mapv array/flatten in-values)))]
+            logabs (grad/log-abs-det-jacobian g x)]
         (when (== ##-Inf (double (array/item logabs)))
           (throw (ex-info "The transform's Jacobian is singular here: its continuous part is not a bijection"
                           {:transform (:name t)})))
         logabs))))
-
-(defn- continuous? [v]
-  (and (array/array? v) (not (boolean? v)) (= :float (dt/kind (array/dtype v)))))
 
 (defn- check-consumed!
   "Every continuous input of run s that the move consumes, (consumed? space
@@ -318,7 +311,7 @@
         lost (vec (for [sp [:model-in :aux-in]
                         :let [choices (get-in s [:inputs sp])]
                         p (cm/addresses choices)
-                        :when (and (continuous? (cm/get-choice choices p)) (consumed? sp p)
+                        :when (and (grad/continuous? (cm/get-choice choices p)) (consumed? sp p)
                                    (not= :continuous (get-in s [:read-tags [sp p]])) (not (copied? sp p)))]
                     [sp p]))]
     (when (seq lost)
@@ -340,7 +333,7 @@
 ;; Checks
 ;; ---------------------------------------------------------------------------
 
-(defn- same-value? [x y]
+(defn- close-value? [x y]
   (cond (not (and (array/array? x) (array/array? y))) (= x y)
         (not= (array/shape x) (array/shape y)) false
         (every? #(= :float (dt/kind (array/dtype %))) [x y])
@@ -354,7 +347,7 @@
   [a b]
   (let [as (cm/addresses a)]
     (and (= (set as) (set (cm/addresses b)))
-         (every? #(same-value? (cm/get-choice a %) (cm/get-choice b %)) as))))
+         (every? #(close-value? (cm/get-choice a %) (cm/get-choice b %)) as))))
 
 (defn- check-round-trip! [what before after]
   (when-not (same-choices? before after)

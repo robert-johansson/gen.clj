@@ -8,7 +8,9 @@
      (choice-gradients trace selection retgrad {:argnums [0]})
      (param-gradients trace)                     → {name gradient}
      (param-gradients trace retgrad)
+     (jacobian f x m)                            → ∂f/∂x, an [m n] array
      (log-abs-det-jacobian f x)                  → log |det ∂f/∂x|
+     (flattened values)                          → [x unflatten]
 
    The objective is log p(τ; x) plus ⟨retgrad, retval⟩ when retgrad (a
    cotangent of the return value, of the same tree shape) is given, as in
@@ -26,12 +28,18 @@
 
 (set! *warn-on-reflection* true)
 
+(defn continuous?
+  "Is v a float array or floating-point number: a value a gradient or a
+   Jacobian can see?"
+  [v]
+  (and (array/array? v) (= :float (dt/kind (array/dtype v)))))
+
 (defn- float-tree?
   "Is every leaf of x a float array or floating-point number (and there is
    at least one)?"
   [x]
   (let [leaves (array/tree-leaves x)]
-    (and (seq leaves) (every? #(and (array/array? %) (= :float (dt/kind (array/dtype %)))) leaves))))
+    (and (seq leaves) (every? continuous? leaves))))
 
 (defn- node-kind [x]
   (cond (map? x) "a map" (sequential? x) "a sequence" :else "a leaf"))
@@ -142,11 +150,25 @@
   (let [n (count gs)]
     (weighted-sum (repeat n (/ 1.0 n)) gs)))
 
+(defn jacobian
+  "∂f/∂x of f, a 1-d float array → a 1-d array of m elements (m ≥ 1), at
+   x: an [m n] array, by one reverse pass per output."
+  [f x m]
+  (array/stack (mapv (fn [i] ((array/grad (fn [v] (array/take (f v) i))) x)) (range m))))
+
 (defn log-abs-det-jacobian
-  "log |det J| of f: a 1-d float array → a 1-d array of the same size, at x,
-   by one reverse pass per output (for the volume change of an involution,
-   thesis Eq 3.15)."
+  "log |det J| of f: a 1-d float array → a 1-d array of the same size, at x
+   (for the volume change of an involution, thesis Eq 3.15)."
   [f x]
-  (let [n (array/size x)
-        rows (mapv (fn [i] ((array/grad (fn [v] (array/take (f v) i))) x)) (range n))]
-    (second (la/slogdet (array/stack rows)))))
+  (second (la/slogdet (jacobian f x (array/size x)))))
+
+(defn flattened
+  "[x unflatten] of values, a non-empty seq of arrays: x their elements
+   concatenated, a 1-d array, and (unflatten x') the values a 1-d array
+   like x holds, each in its own shape: what a Jacobian differentiates."
+  [values]
+  (let [values (vec values)
+        offsets (vec (reductions + 0 (map array/size values)))]
+    [(array/concatenate (mapv array/flatten values))
+     (fn [x] (mapv (fn [i v] (array/reshape (array/slice x 0 (offsets i) (offsets (inc i))) (array/shape v)))
+                   (range) values))]))

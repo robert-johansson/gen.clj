@@ -306,7 +306,16 @@
         (let [back (pf/dereplicate replicated 3 {:layout layout})]
           (is (= (:traces state) (:traces back)) "keepfirst undoes replicate")
           (is (= (:log-weights state) (:log-weights back))))))
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not groups of 3" (pf/dereplicate state 3))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not groups of 3" (pf/dereplicate state 3)))
+    ;; the post-M5 review's I3-14. Planted bug (2026-10-22): the case
+    ;; without a default throws a bare IllegalArgumentException
+    (is (= :first (:method (ts/thrown-data (pf/dereplicate (pf/replicate state 2) 2 {:method :first}))))))
+  (testing "a proposal that writes an observation is named, as in importance sampling (the review's I3-08)"
+    ;; planted bug (2026-10-22): the filter's own propose-and-generate, as
+    ;; before, throws cm/merge's "merge: the choice maps overlap"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"overlap the observations"
+                          (pf/initialize model [1 0.0] (observation 0) 4
+                                         {:proposal (gen [] (trace [0 :y] (d/normal 0 1))) :key (rng/key 52)}))))
   (testing "a batched state stays batched"
     (let [state (pf/initialize model [1 0.0] (observation 0) 4 {:batched? true :key (rng/key 50)})
           replicated (pf/replicate state 2 {:layout :interleaved})]
