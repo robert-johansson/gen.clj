@@ -488,10 +488,30 @@
                           {:unknown '[logprob] :missing '[log-prob]}
                           '(gen.dist.core/defdist v-exp [rate] (sample [k s] 1.0) (logprob [v] 0.0))
                           {:repeated '[log-prob]}
-                          '(gen.dist.core/defdist v-twice [x] (sample [k s] 1.0) (log-prob [v] 0.0) (log-prob [v] 1.0))}]
+                          '(gen.dist.core/defdist v-twice [x] (sample [k s] 1.0) (log-prob [v] 0.0) (log-prob [v] 1.0))
+                          {:flag-and-clause '[value-shape]}
+                          '(gen.dist.core/defdist ^:elementwise v-both [x] (sample [k s] 1.0) (log-prob [v] 0.0)
+                             (value-shape [] []))}]
     (is (= problem (dissoc (ts/thrown-data (try (eval form) (catch clojure.lang.Compiler$CompilerException e (throw (ex-cause e)))))
                            :dist))
         (pr-str form))))
+
+(deftest every-family-declares-its-value-shape
+  ;; genclj-wmug (I3-07): value shapes and discreteness were registered in
+  ;; two lists far from the definitions, so a family left out had no shape
+  ;; check, silently (review 1's bug 6, review 3's B5). Each of gen.dist's
+  ;; families now declares both where it is defined (planted: weibull
+  ;; without ^:elementwise, poisson without ^:discrete).
+  (let [families (for [[sym v] (ns-publics 'gen.dist)
+                       :let [t (keyword "gen.dist" (name sym))]
+                       :when (and (::dc/constructor (meta v)) (contains? (methods dc/-sample) t))]
+                   t)]
+    (is (= 31 (count families)))
+    (is (every? #(contains? (methods dc/-value-shape) %) families)
+        (str (remove #(contains? (methods dc/-value-shape) %) families)))
+    (is (= #{::d/bernoulli ::d/categorical ::d/categorical-logits ::d/uniform-discrete ::d/geometric ::d/poisson
+             ::d/binom ::d/neg-binom}
+           (set (filter #(contains? (methods dc/-discrete?) %) families))))))
 
 (deftest user-distributions-without-a-value-shape-are-not-rejected
   ;; third review B13: the default value shape (the parameters' broadcast

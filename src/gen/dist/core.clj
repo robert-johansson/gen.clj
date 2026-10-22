@@ -283,7 +283,11 @@
 
    value-shape gives the shape of one value (from the parameters, bound by
    name). Values of another shape are then errors rather than several draws;
-   without it, value shapes are not checked.
+   without it, value shapes are not checked. Two flags on the name declare
+   the common cases at the definition: ^:elementwise, a family whose values
+   have its parameters' broadcast shape (elementwise-value-shape), and
+   ^:discrete, one of discrete values. A flag and its clause together are an
+   error.
 
    Parameters given as Clojure vectors become arrays, after validation, which
    checks them on the host (so also on a lazy backend). A parameter marked
@@ -300,14 +304,18 @@
   (let [[doc body] (if (string? (first body)) [(first body) (rest body)] [nil body])
         params (first body)
         heads (map #(when (seq? %) (first %)) (rest body))
+        {:keys [elementwise discrete]} (meta dist-name)
         problems (into {} (remove (comp empty? val))
                        {:unknown (vec (remove '#{validate sample log-prob support discrete? value-shape} heads))
                         :repeated (vec (for [[h n] (frequencies heads) :when (< 1 n)] h))
-                        :missing (vec (remove (set heads) '[sample log-prob]))})
+                        :missing (vec (remove (set heads) '[sample log-prob]))
+                        :flag-and-clause (cond-> []
+                                           (and elementwise (some #{'value-shape} heads)) (conj 'value-shape)
+                                           (and discrete (some #{'discrete?} heads)) (conj 'discrete?))})
         _ (when (seq problems)
             (throw (ex-info (str "defdist " dist-name ": " (pr-str problems) " (its clauses are validate, sample,"
                                  " log-prob, support, discrete? and value-shape, each at most once, sample and"
-                                 " log-prob required)")
+                                 " log-prob required; ^:elementwise and ^:discrete stand for the last two)")
                             (assoc problems :dist (str dist-name)))))
         clauses (into {} (map (juxt first rest)) (rest body))
         type-kw (keyword (str *ns*) (name dist-name))
@@ -317,7 +325,8 @@
         as-given (fn [p form] (if (:host (meta p)) `(if (host-data? ~p) ~p ~form) form))]
     `(do
        ;; marked, so a pushforward's body can find its one random draw (gen.dist.dsl)
-       (defn ~(vary-meta dist-name assoc ::constructor true) ~@(when doc [doc]) ~params
+       (defn ~(vary-meta dist-name #(-> % (assoc ::constructor true) (dissoc :elementwise :discrete))) ~@(when doc [doc])
+         ~params
          ;; validated as given (host data on the host), then made arrays
          (let [~@(mapcat (fn [p] [p (as-given p `(->checkable-param ~(name dist-name) ~(name p) ~p))]) params)]
            ~@(map (fn [p] `(check-param-not-nan ~(name dist-name) ~(name p) ~p)) params)
@@ -330,10 +339,14 @@
           `(defmethod -log-prob ~type-kw [~d ~v] (let ~bind-params ~@lp-body)))
        ~(when-let [[_ & support-body] (get clauses 'support)]
           `(defmethod -support ~type-kw [~d] (let ~bind-params ~@support-body)))
-       ~(when-let [[_ & discrete-body] (get clauses 'discrete?)]
-          `(defmethod -discrete? ~type-kw [~d] (let ~bind-params ~@discrete-body)))
-       ~(when-let [[_ & shape-body] (get clauses 'value-shape)]
-          `(defmethod -value-shape ~type-kw [~d] (let ~bind-params ~@shape-body)))
+       ~(if discrete
+          `(defmethod -discrete? ~type-kw [~'_] true)
+          (when-let [[_ & discrete-body] (get clauses 'discrete?)]
+            `(defmethod -discrete? ~type-kw [~d] (let ~bind-params ~@discrete-body))))
+       ~(if elementwise
+          `(defmethod -value-shape ~type-kw [~d] (elementwise-value-shape ~d))
+          (when-let [[_ & shape-body] (get clauses 'value-shape)]
+            `(defmethod -value-shape ~type-kw [~d] (let ~bind-params ~@shape-body))))
        (var ~dist-name))))
 
 ;; ---------------------------------------------------------------------------
