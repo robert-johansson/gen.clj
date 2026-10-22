@@ -465,7 +465,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   bit-identical to JAX. Every trace site consumes one key. The implicit key
   source has a random root seed for each JVM (`gfi/seed!` fixes it). See §3.5.
   `fold-in` takes 64-bit data (owner, 2026-10-22, the post-M5 review's P2-09): it hashes
-  `[hi32 d, lo32 d]`.
+  `[hi32 d, lo32 d]`. Its data is a non-negative integer: negative or
+  fractional data is a loud error, which no caller passes. The old 32-bit
+  mask wrapped negatives as JAX does, and a long cast truncated 2.5 to 2.
   - Below 2^32 a key is JAX's, bit for bit. Beyond, it is distinct, where
     JAX masks typed data to 32 bits.
   - With the mask, Recurse's node numbers past 2^32 (depth 32 for
