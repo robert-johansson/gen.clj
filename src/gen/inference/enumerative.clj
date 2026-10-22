@@ -302,7 +302,7 @@
 
 (defn- same-addresses? [x y] (= (set (cm/addresses x)) (set (cm/addresses y))))
 
-(defrecord ExactProposalGF [gf paths limit check-retval?]
+(gfi/defgf ExactProposalGF [gf paths limit check-retval?]
   gfi/IGenerativeFunction
   (-simulate [this args key] (trace/as-made-by (gfi/-simulate gf args key) this))
   (-generate [this args constraints key] (exact-generate this args constraints key))

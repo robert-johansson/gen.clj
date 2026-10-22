@@ -62,9 +62,12 @@
 (defn value-shape [d] (-value-shape d))
 
 (defn elementwise-value-shape
-  "The value shape of an elementwise family: its parameters' broadcast shape."
+  "The value shape of an elementwise family: its parameters' broadcast shape.
+   It is checked on every kept site of an update or regenerate, so it walks
+   the parameters without a seq and skips host scalars (shape [])."
   [d]
-  (reduce sh/broadcast [] (keep #(when (array/array? %) (array/shape %)) (vals (:params d)))))
+  (reduce-kv (fn [s _ p] (if (or (array/host? p) (not (array/array? p))) s (sh/broadcast s (array/shape p))))
+             [] (:params d)))
 
 (defn check-value-shape
   "Throw unless v has the distribution's value shape (when it declares one)."
