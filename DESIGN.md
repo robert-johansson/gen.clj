@@ -711,6 +711,14 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     So too the sign of a zero (owner, 2026-10-21, genclj-3mx6): Metal's
     float32 `atan(-0.0)` is +0.0, and the backend returns x itself at
     zero, as NumPy and the JVM backend do.
+    So too a float32 sum's accuracy (owner, 2026-10-22, genclj-y0mp, found
+    by memo.clj). MLX's CPU accumulates a float32 sum sequentially, so its
+    error grows with the number of terms: 10⁶ terms of 10⁻⁶ sum to
+    1 − 1.2e-3, where Metal and JAX give 1 to within an ulp or two. On the
+    CPU device the backend sums float32 in blocks, then sums the block sums,
+    so the error grows with log n, as with NumPy's pairwise sum. `mean`,
+    `variance`, `logsumexp` and `softmax` are sums too. Metal and CUDA are
+    unchanged.
   - Configured by `gen.mlx.device` (`cpu`, `gpu`) and `gen.mlx.dtypes`
     (`32`, `64`).
   - In `gen` bodies, a 0-d backend array counts as its host value for
