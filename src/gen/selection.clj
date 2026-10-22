@@ -73,6 +73,17 @@
         (instance? Complement s) "a complement"
         :else (str "another kind of selection (" (.getSimpleName ^Class (class s)) ")")))
 
+(defn- put-at
+  "s with sub at path p, from p's i-th address on."
+  [s p ^long i sub]
+  (cond (== i (count p)) sub
+        (instance? None s) (->Hierarchical {(nth p i) (put-at none p (inc i) sub)})
+        (instance? Hierarchical s) (let [m (:m s) a (nth p i)]
+                                     (->Hierarchical (assoc m a (put-at (get m a none) p (inc i) sub))))
+        :else (throw (ex-info (str "set-subselection: the path " (pr-str p) " goes inside "
+                                   (kind s) ", which cannot be nested")
+                              {:path p :selection s}))))
+
 (defn set-subselection
   "s with sub the selection under an address or path (Gen.jl's
    set_subselection!, persistent; sub itself at the empty path). s and the
@@ -81,16 +92,16 @@
   [s addr sub]
   (when-not (selection? sub)
     (throw (ex-info (str "set-subselection takes a selection, not a " (type sub)) {:addr addr})))
-  (let [p (cm/path addr)]
-    ((fn put [s i]
-       (cond (== i (count p)) sub
-             (instance? None s) (->Hierarchical {(nth p i) (put none (inc i))})
-             (instance? Hierarchical s) (let [m (:m s) a (nth p i)]
-                                          (->Hierarchical (assoc m a (put (get m a none) (inc i)))))
-             :else (throw (ex-info (str "set-subselection: the path " (pr-str addr) " goes inside "
-                                        (kind s) ", which cannot be nested")
-                                   {:path p :selection s}))))
-     s 0)))
+  (put-at s (cm/path addr) 0 sub))
+
+(defn top-addresses
+  "The addresses at s's top level under which it may select something: a
+   set, or :all when that may be any (all, a complement, another kind of
+   selection)."
+  [s]
+  (cond (instance? None s) #{}
+        (instance? Hierarchical s) (set (keys (:m s)))
+        :else :all))
 
 (defn- paths->selection [paths]
   (cond (clojure.core/empty? paths) none
@@ -114,7 +125,7 @@
   "The selection of the given addresses or paths, each with everything under it.
    (select :slope [:y 0])"
   [& addrs]
-  (from-paths (map #(if (vector? %) % [%]) addrs)))
+  (from-paths (map cm/path* addrs)))
 
 (defn hierarchical
   "A selection from address-subselection pairs, an address or a path each
@@ -149,6 +160,6 @@
                         (let [kept (if (cm/has-value? sub)
                                      (when (-selected? s addr) sub)
                                      (get-selected sub (-subselection s addr)))]
-                          (if (or (nil? kept) (cm/empty? kept)) acc (cm/set-submap acc addr kept))))
+                          (if (cm/empty? kept) acc (cm/set-submap acc addr kept))))
                       cm/EMPTY
                       (cm/submaps choices))))

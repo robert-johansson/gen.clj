@@ -289,7 +289,7 @@
    the score fn's assess)."
   [nodes]
   (let [paths (for [{:keys [kind addr form]} nodes :when (not= kind :compute)]
-                [(if (vector? addr) addr [addr]) form])]
+                [(cm/path* addr) form])]
     (doseq [[i [p _]] (map-indexed vector paths)
             [q form] (drop (inc i) paths)
             :let [n (min (count p) (count q))]
@@ -305,50 +305,43 @@
    enclosing locals."
   ([params body env] (analyze params body env #{}))
   ([params body env locals]
-  (when-not (= 1 (count body)) (not-static "the body is one let form" (vec body)))
-  (let [env {:env env :locals (set locals)}
-        form (first body)]
-    (when-not (and (seq? form) (#{'let 'clojure.core/let} (first form)))
-      (not-static "the body is one let form" form))
-    (let [[_ bindings & ret] form
-          _ (when-not (and (vector? bindings) (even? (count bindings))) (not-static "a let needs pairs of bindings" form))
-          _ (when-not (= 1 (count ret)) (not-static "the let returns one expression" form))
-          args (arg-names params)
-          known (set (concat (apply concat (:fixed args)) (:rest args)))
-          ;; the arguments and the bindings so far are locals, not the vars
-          ;; or macros they shadow
-          in-scope (fn [names] (update env :locals into names))
-          ;; a call in return position is a last node, its value returned
-          [ret pairs] (let [r (first ret)]
-                        (if (call-form? (expanded (in-scope (into known (mapcat (comp bound-names first) (partition 2 bindings))))
-                                                  r))
-                          (let [v (gensym "ret")] [v (concat (partition 2 bindings) [[v r]])])
-                          [r (partition 2 bindings)]))
-          add (fn [[nodes known] [binding init]]
-                (let [n (node (in-scope known) binding init known)]
-                  [(conj nodes n) (into known (:names n))]))
-          [nodes names] (reduce (fn [acc pair] (reduce add acc (hoisted (in-scope (second acc)) pair)))
-                                [[] known] pairs)
-          [ret ret-pairs] (hoist-in (in-scope names) ret)
-          [nodes names] (reduce add [nodes names] ret-pairs)
-          _ (check-addresses! nodes)]
-      {:args args
-       :nodes nodes
-       :ret (let [ret (expanded (in-scope names) ret)]
-              (pure! (in-scope names) ret "the return expression")
-              (compute-node (in-scope names) ret names))}))))
+   (when-not (= 1 (count body)) (not-static "the body is one let form" (vec body)))
+   (let [env {:env env :locals (set locals)}
+         form (first body)]
+     (when-not (and (seq? form) (#{'let 'clojure.core/let} (first form)))
+       (not-static "the body is one let form" form))
+     (let [[_ bindings & ret] form
+           _ (when-not (and (vector? bindings) (even? (count bindings))) (not-static "a let needs pairs of bindings" form))
+           _ (when-not (= 1 (count ret)) (not-static "the let returns one expression" form))
+           args (arg-names params)
+           known (set (concat (apply concat (:fixed args)) (:rest args)))
+           ;; the arguments and the bindings so far are locals, not the vars
+           ;; or macros they shadow
+           in-scope (fn [names] (update env :locals into names))
+           ;; a call in return position is a last node, its value returned
+           [ret pairs] (let [r (first ret)]
+                         (if (call-form? (expanded (in-scope (into known (mapcat (comp bound-names first) (partition 2 bindings))))
+                                                   r))
+                           (let [v (gensym "ret")] [v (concat (partition 2 bindings) [[v r]])])
+                           [r (partition 2 bindings)]))
+           add (fn [[nodes known] [binding init]]
+                 (let [n (node (in-scope known) binding init known)]
+                   [(conj nodes n) (into known (:names n))]))
+           [nodes names] (reduce (fn [acc pair] (reduce add acc (hoisted (in-scope (second acc)) pair)))
+                                 [[] known] pairs)
+           [ret ret-pairs] (hoist-in (in-scope names) ret)
+           [nodes names] (reduce add [nodes names] ret-pairs)
+           _ (check-addresses! nodes)]
+       {:args args
+        :nodes nodes
+        :ret (let [ret (expanded (in-scope names) ret)]
+               (pure! (in-scope names) ret "the return expression")
+               (compute-node (in-scope names) ret names))}))))
 
 ;; ---------------------------------------------------------------------------
 ;; The code: the graph's runtime form and its score fn, which gen.dynamic's
 ;; handler runs (static-site, static-call and check-computed! are its)
 ;; ---------------------------------------------------------------------------
-
-(defn- path [addr] (if (vector? addr) addr [addr]))
-
-(defn- names-map
-  "The form of a map from each of names (quoted) to its value."
-  [names]
-  (into {} (map (fn [s] [(list 'quote s) s])) names))
 
 (defn- score-form
   "The form of a static body's score fn, (fn [param args choices key] →
@@ -365,9 +358,9 @@
                         p (gensym "p")
                         at (when (some? addr)
                              (if computed
-                               [p `(into ~(path addr) [~@computed])
-                                '_ `(gen.dynamic/check-computed! ~choices ~(path addr) ~p ~(= kind :trace))]
-                               [p (path addr)]))]
+                               [p `(into ~(cm/path* addr) [~@computed])
+                                '_ `(gen.dynamic/check-computed! ~choices ~(cm/path* addr) ~p ~(= kind :trace))]
+                               [p (cm/path* addr)]))]
                     (case kind
                       :trace (let [v (gensym "v") lp (gensym "lp") k' (gensym "k")]
                                {:bindings (-> bindings (into at)
@@ -378,7 +371,8 @@
                       :splice (let [[g as] expr w (gensym "w") rv (gensym "rv") k' (gensym "k") ks (gensym "ks")]
                                 {:bindings (-> bindings (into at)
                                                (into [[k' ks] `(if ~k (rng/split ~k) [nil nil])
-                                                      [w rv] `(gen.dynamic/static-call ~p ~g ~as (cm/get-submap ~choices ~p cm/EMPTY) ~ks)
+                                                      [w rv] `(gen.dynamic/static-call ~p ~g ~as
+                                                                                       (cm/get-submap ~choices ~p cm/EMPTY) ~ks)
                                                       binding rv]))
                                  :terms (conj terms w) :k k'})
                       {:bindings (into bindings [binding expr]) :terms terms :k k})))
@@ -439,11 +433,11 @@
                     :param? (param? (:expr (:ret st))) :f (node-fn (:ret st))}
                    (call (:ret st)))
       :score ~(score-form st params coercions locals)
-      :roots ~(set (keep #(when-some [a (:addr %)] (first (path a))) (:nodes st)))
+      :roots ~(set (keep #(when-some [a (:addr %)] (first (cm/path* a))) (:nodes st)))
       ;; a node at a computed address holds its prefix, as a call does
       ;; (its score fn checks the rest: check-computed!)
       :paths ~(when (some #(vector? (:addr %)) (:nodes st))
-                (vec (keep #(when-some [a (:addr %)] [(if (:keys %) :splice (:kind %)) (path a)]) (:nodes st))))}))
+                (vec (keep #(when-some [a (:addr %)] [(if (:keys %) :splice (:kind %)) (cm/path* a)]) (:nodes st))))}))
 
 ;; ---------------------------------------------------------------------------
 ;; The graph as data
@@ -464,7 +458,7 @@
   (let [{:keys [args nodes return]} (or (ir gf) (throw (ex-info "dot: not a static generative function" {})))
         id #(str "\"" (str/escape (str %) {\" "\\\"" \\ "\\\\"}) "\"")
         arg-lines (for [n (concat (apply concat (:fixed args)) (:rest args))] (str "  " (id n) " [shape=plaintext];"))
-        node-id (fn [i n] (cond (:keys n) (pr-str (into (if (vector? (:addr n)) (:addr n) [(:addr n)]) (:keys n)))
+        node-id (fn [i n] (cond (:keys n) (pr-str (into (cm/path* (:addr n)) (:keys n)))
                                 (some? (:addr n)) (pr-str (:addr n))
                                 :else (str "#" i)))
         owner (into {} (for [[i n] (map-indexed vector nodes) s (:names n)] [s (node-id i n)]))
@@ -475,7 +469,8 @@
                                     "];")
                                (for [s (:inputs n)] (str "  " (id (get owner s s)) " -> " (id me) ";")))]
                 line)
-        ret-lines (cons "  \"return\" [shape=doublecircle];" (for [s (:inputs return)] (str "  " (id (get owner s s)) " -> \"return\";")))]
+        ret-lines (cons "  \"return\" [shape=doublecircle];"
+                        (for [s (:inputs return)] (str "  " (id (get owner s s)) " -> \"return\";")))]
     (str "digraph {\n" (str/join "\n" (concat arg-lines lines ret-lines)) "\n}\n")))
 
 ;; ---------------------------------------------------------------------------

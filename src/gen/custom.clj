@@ -145,7 +145,7 @@
   [{:keys [param-names params]}]
   (if (empty? param-names)
     {}
-    (let [store (if dyn/*params* (merge dyn/*params* params) params)]
+    (let [store (dyn/with-store params)]
       (into {} (map (fn [name]
                       (let [v (get store name ::missing)]
                         (when (identical? ::missing v)
@@ -209,6 +209,35 @@
   (-propose [this args _key] {:choices cm/EMPTY :weight 0.0 :retval (:retval (run this args))})
   (-project [_ _tr _selection] 0.0))
 
+(defn- check-spec!
+  "Throw unless deterministic's spec is whole and consistent: one apply,
+   functions where they are named, and gradients that fit the parameters."
+  [{:keys [apply-with-state update-with-state gradient gradient-with-state params param-gradient-with-state] :as spec}]
+  (when-not (= 1 (count (filter ifn? [apply-with-state (:apply spec)])))
+    (throw (ex-info "deterministic needs :apply-with-state, (fn [args] [retval state]), or :apply, (fn [args] retval)"
+                    {:keys (vec (keys spec))})))
+  (when (and update-with-state (not (ifn? update-with-state)))
+    (throw (ex-info "deterministic: :update-with-state must be (fn [state args argdiffs] [state retval retdiff])" {})))
+  (when (and gradient gradient-with-state)
+    (throw (ex-info "deterministic takes :gradient or :gradient-with-state, not both" {})))
+  (doseq [[k g] {:gradient gradient :gradient-with-state gradient-with-state
+                 :param-gradient-with-state param-gradient-with-state}]
+    (when (and g (not (ifn? g)))
+      (throw (ex-info (str "deterministic: " k " must be a function") {k g}))))
+  (when (and gradient-with-state (not apply-with-state))
+    (throw (ex-info "deterministic: :gradient-with-state needs :apply-with-state (with :apply, use :gradient)" {})))
+  (when-not (or (nil? params) (and (vector? params) (seq params) (every? keyword? params)))
+    (throw (ex-info "deterministic: :params names the trainable parameters, a vector of keywords" {:params params})))
+  (when (and params gradient)
+    (throw (ex-info (str "deterministic: a gradient for a function with :params is :gradient-with-state,"
+                         " with :param-gradient-with-state for the parameters")
+                    {:params params})))
+  (when-not (= (boolean (and params gradient-with-state)) (boolean param-gradient-with-state))
+    (throw (ex-info (if param-gradient-with-state
+                      "deterministic: :param-gradient-with-state needs :params and :gradient-with-state"
+                      "deterministic: with :params, :gradient-with-state needs :param-gradient-with-state")
+                    {:params params}))))
+
 (defn deterministic
   "A deterministic generative function (see the namespace doc), from
    :apply-with-state, (fn [args] [retval state]), or :apply, (fn [args]
@@ -220,31 +249,8 @@
    with :gradient-with-state, :param-gradient-with-state differentiates,
    (fn [state args retgrad] {name gradient})."
   [{:keys [apply-with-state update-with-state gradient gradient-with-state params param-gradient-with-state] :as spec}]
+  (check-spec! spec)
   (let [f (:apply spec)
-        _ (when-not (= 1 (count (filter ifn? [apply-with-state f])))
-            (throw (ex-info "deterministic needs :apply-with-state, (fn [args] [retval state]), or :apply, (fn [args] retval)"
-                            {:keys (vec (keys spec))})))
-        _ (when (and update-with-state (not (ifn? update-with-state)))
-            (throw (ex-info "deterministic: :update-with-state must be (fn [state args argdiffs] [state retval retdiff])" {})))
-        _ (when (and gradient gradient-with-state)
-            (throw (ex-info "deterministic takes :gradient or :gradient-with-state, not both" {})))
-        _ (doseq [[k g] {:gradient gradient :gradient-with-state gradient-with-state
-                         :param-gradient-with-state param-gradient-with-state}]
-            (when (and g (not (ifn? g)))
-              (throw (ex-info (str "deterministic: " k " must be a function") {k g}))))
-        _ (when (and gradient-with-state (not apply-with-state))
-            (throw (ex-info "deterministic: :gradient-with-state needs :apply-with-state (with :apply, use :gradient)" {})))
-        _ (when-not (or (nil? params) (and (vector? params) (seq params) (every? keyword? params)))
-            (throw (ex-info "deterministic: :params names the trainable parameters, a vector of keywords" {:params params})))
-        _ (when (and params gradient)
-            (throw (ex-info (str "deterministic: a gradient for a function with :params is :gradient-with-state,"
-                                 " with :param-gradient-with-state for the parameters")
-                            {:params params})))
-        _ (when-not (= (boolean (and params gradient-with-state)) (boolean param-gradient-with-state))
-            (throw (ex-info (if param-gradient-with-state
-                              "deterministic: :param-gradient-with-state needs :params and :gradient-with-state"
-                              "deterministic: with :params, :gradient-with-state needs :param-gradient-with-state")
-                            {:params params})))
         apply-with-state (cond apply-with-state (if params apply-with-state (fn [args _] (apply-with-state args)))
                                params (fn [args ps] [(f args ps) nil])
                                :else (fn [args _] [(f args) nil]))]
@@ -297,7 +303,8 @@
   [gf op choices]
   (let [given (set (cm/addresses choices))]
     (when-let [others (seq (remove (:addresses gf) given))]
-      (throw (gfi/unvisited op (vec (sort-by str others)) (str "the estimator's choices are " (vec (sort-by str (:addresses gf)))))))
+      (throw (gfi/unvisited op (vec (sort-by str others))
+                            (str "the estimator's choices are " (vec (sort-by str (:addresses gf)))))))
     (when-not (= given (:addresses gf))
       (throw (ex-info (str "estimated: " (name op) " needs every choice of the estimator, " (vec (sort-by str (:addresses gf)))
                            ", given " (vec (sort-by str given)))
@@ -382,7 +389,7 @@
       (throw (ex-info (str "estimated: " k " must be a function") {:keys (vec (keys spec))}))))
   (when-not (and (sequential? addresses) (seq addresses))
     (throw (ex-info "estimated: :addresses names its choices, e.g. [:y] or [[:obs 0] [:obs 1]]" {:keys (vec (keys spec))})))
-  (->EstimatedGF estimate simulate (or retval (constantly nil)) (set (map #(if (vector? %) % [%]) addresses))))
+  (->EstimatedGF estimate simulate (or retval (constantly nil)) (set (map cm/path* addresses))))
 
 (defmethod print-method EstimatedGF [_ ^java.io.Writer w]
   (.write w "#gen/estimated"))

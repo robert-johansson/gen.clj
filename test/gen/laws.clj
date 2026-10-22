@@ -87,11 +87,11 @@
 
 (defn- same-retval?
   "Are return values a and b equal (=), two seqs on the part of them a run
-   realizes, their first 10,000 elements (gen.dynamic's realize-limit)? =
-   would walk an infinite one forever."
+   realizes, their first gfi/realize-limit elements? = would walk an
+   infinite one forever."
   [a b]
   (if (and (seq? a) (seq? b))
-    (= (take 10000 a) (take 10000 b))
+    (= (take gfi/realize-limit a) (take gfi/realize-limit b))
     (= a b)))
 
 (defn- assessed?

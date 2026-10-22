@@ -15,7 +15,7 @@
    the values of 0-d arrays (docs/array-api.md §8a).
 
    Every GFI operation runs the body under a handler: a pure transition from
-   (state, address, distribution) to [value state'], one per operation,
+   (state, path, distribution, key) to [value state'], one per operation,
    threaded through a single volatile! for the duration of one call. Each site
    consumes one key from a sequence split off the operation's key. The same
    transitions serve one execution or a batch of particles: a batched run is
@@ -42,8 +42,6 @@
 ;; ---------------------------------------------------------------------------
 ;; Addresses
 ;; ---------------------------------------------------------------------------
-
-(defn- path [addr] (if (vector? addr) addr [addr]))
 
 (defn- check-address!
   "A path may be used once, and never under or above another used path."
@@ -197,12 +195,19 @@
    function that has one, merged with any inner one's (with-params)."
   nil)
 
-(defn- with-store
+(defn ^:no-doc with-store
   "The store in effect within a generative function with its own store ps:
    ps over the outer one (not a copy when there is none, so a store keeps
    its identity from run to run)."
   [ps]
   (if *params* (merge *params* ps) ps))
+
+(defmacro ^:private with-store-of
+  "body under gf's own store, when it has one (with-params)."
+  [gf & body]
+  `(if-let [ps# (:params ~gf)]
+     (binding [*params* (with-store ps#)] ~@body)
+     (do ~@body)))
 
 (defn- arg-diffs
   "Argdiffs for a splice's new args against its previous call's: no-change
@@ -214,7 +219,8 @@
          args (concat prev-args (repeat nil)) (concat hints (repeat nil)))))
 
 (defn- record-call
-  "state with the sub-trace tr at path p (score sc)."
+  "state with the sub-trace tr at path p, its score added and its choices
+   nested there."
   [state p tr]
   (cond-> (-> state
               (update :subtraces assoc p tr)
@@ -271,15 +277,12 @@
         cons (cm/get-submap (:constraints state) p cm/EMPTY)
         prev-sub (get (::subtraces (:prev state)) p)
         argdiffs (when prev-sub (arg-diffs (:args prev-sub) args hints))
-        ;; a batched run's callees run batched too: they inherit the batch tracer
-        base {}
         ;; the callee's key, the same in every mode: assess draws what
         ;; generate would with the same key
         [k state] (site-key state)
-        opts (assoc base :key k :at p)]
+        opts {:key k :at p}]
     (if (= mode :assess)
-      (let [{w :weight rv :retval} (try (gfi/run-op gf :assess args (assoc opts :constraints cons))
-                                        (catch clojure.lang.ExceptionInfo e (throw (gfi/under e p))))]
+      (let [{w :weight rv :retval} (run-call gf :assess args (assoc opts :constraints cons))]
         [rv (cond-> (-> state (update :score + w) (add-weight w))
               (not (cm/empty? cons)) (update :choices cm/set-choice p cons))])
       (let [r (cond
@@ -379,20 +382,18 @@
 
 (declare run-handler)
 
-(def ^:private realize-limit 10000)
-
 (defn- realize!
   "Force the lazy sequences in a body's return value (and in the vectors,
    lists and maps holding them), so that trace calls in them happen during
    the run. Every seq but a list may be lazy, whatever its class: a LazySeq,
    a cons or a chunk onto a lazy tail ((cons x (map …)), (seq (map …))), and
    iterate's, cycle's, repeat's and range's. Lazy sequences cache their
-   elements, so this changes no value. Only a seq's first realize-limit
+   elements, so this changes no value. Only a seq's first gfi/realize-limit
    elements are forced: the rest of a longer (or infinite) one stays lazy,
    and a trace call in it is a loud error after the run (check-running!)."
   [x]
   (cond (or (vector? x) (list? x)) (run! realize! x)
-        (seq? x) (run! realize! (take realize-limit x))
+        (seq? x) (run! realize! (take gfi/realize-limit x))
         (map? x) (run! realize! (vals x)))
   x)
 
@@ -513,7 +514,7 @@
                   (let [old (when skip? (nth values i))
                         ;; a computed address's path, from the inputs (the
                         ;; previous one when the node is kept)
-                        p (when (some? addr) (if keys-f (into (path addr) (keys-f read-param env)) (path addr)))
+                        p (when (some? addr) (if keys-f (into (cm/path* addr) (keys-f read-param env)) (cm/path* addr)))
                         keep? (and skip? (unchanged? diffs in) (not (and p (reached? kind p))))
                         [v d] (cond
                                 keep? [(keep-node! vol kind p old) diff/no-change]
@@ -552,7 +553,10 @@
         untraced-fn (fn untraced
                       ([] (let [state @vol]
                             (when (::finished state)
-                              (throw (ex-info "An untraced draw after the generative function returned: a lazy sequence escaped the body (realize it in the body, e.g. with mapv or doall)" {})))
+                              (throw (ex-info (str "An untraced draw after the generative function returned: a lazy"
+                                                   " sequence escaped the body (realize it in the body, e.g. with mapv"
+                                                   " or doall)")
+                                              {})))
                             (gfi/check-exact-density! "an untraced draw")
                             ;; each particle's ω must reproduce its own draws
                             (when (batch/batch-backend? array/*backend*)
@@ -567,7 +571,7 @@
                                          {:value dist})))
                        (dc/sample dist (untraced) [])))
         trace-fn (fn [addr dist]
-                   (let [p (path addr)
+                   (let [p (cm/path* addr)
                          state @vol]
                      (check-running! state p)
                      (when-not (instance? gen.dist.core.Distribution dist)
@@ -581,7 +585,7 @@
         ;; a call at an address: [value retdiff], hints the arguments' argdiffs
         splice-at (fn [addr gf args hints]
                     (let [args (realize! (vec args))
-                          p (path addr)
+                          p (cm/path* addr)
                           state @vol]
                       (check-running! state p)
                       (when-not (gfi/generative-function? gf)
@@ -609,9 +613,7 @@
                               run-body #(apply (:body-fn sub) trace-fn splice-fn read-param untraced-fn args)]
                           (vreset! transition (or (get (:transitions sub) mode) (site-transitions mode)))
                           (try
-                            (if-let [ps (:params sub)]
-                              (binding [*params* (with-store ps)] (run-body))
-                              (run-body))
+                            (with-store-of sub (run-body))
                             (finally (vreset! transition outer)))))
                       ;; trace calls in lazy arguments happen now, in this body (splice-at)
                       (let [[addr gf & args] xs] (first (splice-at addr gf args nil)))))
@@ -645,21 +647,18 @@
           (gfi/same-value? (:retval prev-trace) (:retval state)) diff/no-change
           :else diff/unknown-change)))
 
-(defn run
-  "Run a GFI operation on a dynamic generative function. opts: :key,
-   :batch-shape ([] by default; [N] runs N particles at once), and per
-   operation :constraints, :prev (the previous trace) and :selection. Returns
-   the operation's result map."
+(defn- run
+  "Run a GFI operation on a dynamic generative function: its dispatcher's
+   result, or the handler's. opts: :key, and per operation :constraints,
+   :prev (the previous trace) and :selection (a batched run is
+   gfi/run-op's: this code under the batch tracer). Returns the operation's
+   result map."
   [gf op args opts]
-  (if (seq (:batch-shape opts))
-    (batch/batched (:batch-shape opts) (run gf op args (dissoc opts :batch-shape)))
-    (or (when-let [dispatch (:dispatch gf)] (dispatch gf op args opts))
-        (run-handler gf op args opts))))
+  (or (when-let [dispatch (:dispatch gf)] (dispatch gf op args opts))
+      (run-handler gf op args opts)))
 
 (defn- run-handler [gf op args opts]
-  (let [state (if-let [ps (:params gf)]
-                (binding [*params* (with-store ps)] (execute gf op args opts))
-                (execute gf op args opts))]
+  (let [state (with-store-of gf (execute gf op args opts))]
     (case op
       :simulate {:trace (make-trace gf args state)}
       :generate {:trace (make-trace gf args state) :weight (:weight state)}
@@ -693,11 +692,10 @@
   (when-not (gfi/generative-function? g)
     (throw (ex-info (str "splice at " p " needs a generative function") {:path p :value g})))
   (let [args (realize! (vec args))]
-    (try
-      (if (static-scored? g)
-        (static-score g args sub k)
-        (let [r (gfi/run-op g :assess args {:key (or k (rng/key 0)) :constraints sub})] [(:weight r) (:retval r)]))
-      (catch clojure.lang.ExceptionInfo e (throw (gfi/under e p))))))
+    (if (static-scored? g)
+      (try (static-score g args sub k)
+           (catch clojure.lang.ExceptionInfo e (throw (gfi/under e p))))
+      (let [r (run-call g :assess args {:key (or k (rng/key 0)) :constraints sub :at p})] [(:weight r) (:retval r)]))))
 
 (defn ^:no-doc check-computed!
   "assess's check of a node at a computed address (a constant prefix and
@@ -734,7 +732,7 @@
         run #(do (check-static-choices! st choices)
                  (let [[w rv] ((:score st) read-param (vec args) choices (when-not gfi/*exact-density* key))]
                    [w (realize! rv)]))]
-    (if-let [ps (:params gf)] (binding [*params* (with-store ps)] (run)) (run))))
+    (with-store-of gf (run))))
 
 (defn- static-scored?
   "Is gf a static function whose assess runs its score fn? Not with
@@ -775,7 +773,7 @@
       {:choices (:choices tr) :weight (:score tr) :retval (:retval tr)}))
   ;; under gf's own store, as its run: a callee's project may run its model
   (-project [gf tr selection]
-    (if-let [ps (:params gf)] (binding [*params* (with-store ps)] (project* tr selection)) (project* tr selection)))
+    (with-store-of gf (project* tr selection)))
 
   ;; a call is at a path of one or more addresses
   trace/ICalls
@@ -799,6 +797,12 @@
       (gfi/generate-again gf op args opts project-old))))
 
 (defn dynamic-gf? [x] (instance? DynamicGF x))
+
+(defn ^:no-doc dynamic-gf
+  "A DynamicGF of a body fn, its source and its static graph (or nil),
+   without a store, middleware or dispatcher."
+  [body-fn source static]
+  (->DynamicGF body-fn source nil nil nil static))
 
 (defn make-gen-fn
   "A dynamic generative function from a body fn of (trace splice param
@@ -824,7 +828,7 @@
      (when-not fits?
        (throw (ex-info "make-gen-fn: the body fn takes trace, splice, param and untraced before the arguments its source names"
                        {:params params :arities fixed :required-arity required})))
-     (->DynamicGF body-fn source nil nil nil static))))
+     (dynamic-gf body-fn source static))))
 
 (defn- check-dynamic! [what gf]
   (when-not (dynamic-gf? gf)
@@ -859,12 +863,14 @@
 (defn with-dispatch
   "gf with an execution seam: (dispatch gf op args opts) runs before the
    handler and returns the operation's result map, or nil to leave it to the
-   handler (opts as for run, without :batch-shape: a batched run calls the
-   dispatcher under the batch tracer, where (gen.array.batch/batch-backend?
-   gen.array/*backend*) holds). A dispatcher is an optimization: it must be
-   observationally equivalent to the handler, which gen.laws checks
-   (dispatch-matches-handler)."
+   handler (opts: :key, and per operation :constraints, :prev and
+   :selection; a batched run calls the dispatcher under the batch tracer,
+   where (gen.array.batch/batch-backend? gen.array/*backend*) holds). A
+   dispatcher is an optimization: it must be observationally equivalent to
+   the handler, which gen.laws checks (dispatch-matches-handler). gf is a
+   dynamic generative function."
   [gf dispatch]
+  (check-dynamic! "with-dispatch" gf)
   (assoc gf :dispatch dispatch))
 
 (defmethod print-method DynamicGF [gf ^java.io.Writer w]
@@ -927,7 +933,9 @@
         ;; parameters takes at most four: coerce them in the body instead
         prim (filter #(and (symbol? %) (primitive-coercions (:tag (meta %)))) params)
         plain (mapv #(if (some #{%} prim) (vary-meta % dissoc :tag) %) params)
-        coercions (mapcat (fn [p] [(vary-meta p dissoc :tag) (list (primitive-coercions (:tag (meta p))) (vary-meta p dissoc :tag))]) prim)
+        coercions (mapcat (fn [p] (let [untagged (vary-meta p dissoc :tag)]
+                                    [untagged (list (primitive-coercions (:tag (meta p))) untagged)]))
+                          prim)
         locals (guard/locals &env)
         st (when (:static (meta params)) (static/analyze plain body &env locals))
         body (if (seq prim) [`(let [~@coercions] ~@body)] body)
@@ -936,7 +944,7 @@
                                 locals)]
     ;; the body fn takes the four hidden parameters: no check (make-gen-fn's
     ;; reflects, and an inline gen is built on every run of its body)
-    `(->DynamicGF ~body-fn '~(cons params body) nil nil nil ~(when st (static/static-form st plain coercions locals)))))
+    `(dynamic-gf ~body-fn '~(cons params body) ~(when st (static/static-form st plain coercions locals)))))
 
 (defmacro guarded-fn
   "fn, with a gen body's guards: if and case tests branch through truthy?,

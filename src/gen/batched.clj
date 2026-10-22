@@ -123,7 +123,7 @@
                      (cm/choicemap? x) (walk (cm/to-map x))
                      (map? x) (run! walk (vals x))
                      ;; a realized prefix of a lazy return value, as realize! forced it
-                     (seq? x) (run! walk (clojure.core/take 10000 x))
+                     (seq? x) (run! walk (clojure.core/take gfi/realize-limit x))
                      (coll? x) (run! walk x)))]
     (walk r)
     s))

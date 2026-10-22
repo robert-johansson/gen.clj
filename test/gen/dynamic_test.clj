@@ -293,7 +293,7 @@
 (deftest batched-handler
   (testing "the same transitions run N particles at once, under the batch tracer"
     (let [k (rng/key 7)
-          {tr :trace} (dyn/run linreg :simulate [[1.0 2.0]] {:key k :batch-shape [5]})]
+          {tr :trace} (gfi/run-op linreg :simulate [[1.0 2.0]] {:key k :batch-shape [5]})]
       (is (= [] (array/shape (tr :slope))) "inside the trace, values have their per-particle shapes")
       (is (= [5] (array/shape (batch/unwrap (tr :slope) [5]))) "with a leading batch axis underneath")
       (testing "each particle's score is its own assessed density"
@@ -301,7 +301,7 @@
           (is (close? (array/take (batch/unwrap (:score tr) [5]) i) (:weight (gfi/assess linreg [[1.0 2.0]] c))))))))
   (testing "branching on a batch of values is loud, not silently wrong"
     (is (:gen.array/batched-branch
-         (ex-data (try (dyn/run branching :simulate [] {:key (rng/key 1) :batch-shape [4]})
+         (ex-data (try (gfi/run-op branching :simulate [] {:key (rng/key 1) :batch-shape [4]})
                        (catch clojure.lang.ExceptionInfo e e)))))))
 
 (deftest the-implicit-key-source
