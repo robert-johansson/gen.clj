@@ -156,6 +156,32 @@
           (same-value? (first xs) (first ys) budget) (recur (next xs) (next ys))
           :else false)))
 
+(defn- realized-link
+  "The seq at the link x when reaching it forces nothing: x's own (nil when
+   empty), or ::pending for a lazy link not yet realized (a LazySeq's, an
+   iterate's or a cycle's)."
+  [x]
+  (if (and (instance? clojure.lang.IPending x) (not (realized? x)))
+    ::pending
+    (.seq ^clojure.lang.ISeq x)))
+
+(defn- same-realized-seq?
+  "Are the seqs xs and ys the same values pairwise, in order, as far as
+   their links are realized, never forcing one? A link not yet realized on
+   either side makes them different (unknown). Each link costs one of the
+   budget, so an infinite seq of identical values ends too."
+  [xs ys ^longs budget]
+  (loop [xs xs ys ys]
+    (or (identical? xs ys)
+        (let [xs (realized-link xs) ys (realized-link ys)]
+          (cond (or (identical? ::pending xs) (identical? ::pending ys)) false
+                (nil? xs) (nil? ys)
+                (nil? ys) false
+                (neg? (aset budget 0 (dec (aget budget 0)))) false
+                (same-value? (.first ^clojure.lang.ISeq xs) (.first ^clojure.lang.ISeq ys) budget)
+                (recur (.more ^clojure.lang.ISeq xs) (.more ^clojure.lang.ISeq ys))
+                :else false)))))
+
 (defn- same-entries?
   "Are maps a and b of one length and the same keys and values pairwise, in
    iteration order? An entry is no value of its own: an identical key or
@@ -181,10 +207,13 @@
    locals); maps, sets, vectors and lists by their metadata and their
    elements pairwise in iteration order (an array-map's order, a sorted
    collection's and its comparator, a vector against a list all count), a
-   map's entries by key and value, never by hashing. An array is the same
-   only as itself, and so is anything else. A comparison looks at up to 256
-   values before it calls the rest different, which is sound: a value
-   called different only makes what holds it run again."
+   map's entries by key and value, never by hashing; another seq (a lazy
+   one, a cons) by its metadata and its elements as far as both are
+   realized, never forcing one: a link not yet realized makes it
+   different. An array is the same only as itself, and so is anything
+   else. A comparison looks at up to 256 values (and links of a seq) before
+   it calls the rest different, which is sound: a value called different
+   only makes what holds it run again."
   ([a b] (or (identical? a b) (same-value? a b (long-array 1 same-limit))))
   ([a b ^longs budget]
    (cond
@@ -203,6 +232,7 @@
           (or (not (instance? clojure.lang.Sorted a))
               (same-value? (.comparator ^clojure.lang.Sorted a) (.comparator ^clojure.lang.Sorted b) budget))
           (if (map? a) (same-entries? a b budget) (same-seq? a b budget)))
+     (seq? a) (and (same-value? (meta a) (meta b) budget) (same-realized-seq? a b budget))
      :else false)))
 
 (defn same-gen-fn?

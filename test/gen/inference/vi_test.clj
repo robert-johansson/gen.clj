@@ -189,6 +189,68 @@
       (is (agrees? (mean-and-se grads) (mean-and-se reference))
           (str (mean-and-se grads) " against " (mean-and-se reference))))))
 
+;; Latents the model draws itself (the post-M5 review's P3-01): q proposes
+;; z1 at its prior, N(0, 1), so z1 cancels from the weight, and the model
+;; draws the other latent from a θ-dependent prior. Planted bugs
+;; (2026-10-22): the model gradient without their score-function term, as
+;; before, averages -0.004 for the coin's ELBO gradient of 2, 0.006 for the
+;; shift's 3, 1.44 for the coin's bound gradient of 1.622 and 0.88 for the
+;; shift's 1.258, each 17 to 315 standard errors off. The ELBO's term with
+;; no baseline (per-iteration sd 1.20 for the coin), or with its baseline
+;; but -∇θ log f dropped (0.69), fails the sd's bound of 0.4: the estimate's
+;; sd is 0.28, and an sd from 1,000 iterations is within about 0.01
+
+(def ^:private coin-model
+  "b ~ bernoulli(θ), y ~ N(b ? 1 : -1, 1): with y = 1 the ELBO is
+   c - 2(1 - θ), so ∂/∂θ = 2."
+  (gen [] (trace :z1 (d/normal 0 1)) (let [b (trace :b (d/bernoulli (param :theta)))] (trace :y (d/normal (array/where b 1.0 -1.0) 1)))))
+
+(def ^:private shift-model
+  "z2 ~ N(θ, 1), y ~ N(z1 + z2, 1): with y = 3 the ELBO is
+   E[-½(3 - z1 - z2)²] + c, so ∂/∂θ = 3 - θ at q's m = 0."
+  (gen [] (let [z1 (trace :z1 (d/normal 0 1)) z2 (trace :z2 (d/normal (param :theta) 1))] (trace :y (d/normal (+ z1 z2) 1)))))
+
+(def ^:private z1-family (gen [] (trace :z1 (d/normal (param :m) 1))))
+
+(defn- coin-bound-derivative
+  "∂/∂θ of coin-model's K-sample bound, exactly: with n of the K coins
+   true, L(θ) = c + Σ_n Bin(n; K, θ) log((n + (K - n) e⁻²) / K)."
+  [k theta]
+  (let [choose (fn [n i] (reduce (fn [acc j] (/ (* acc (- n j)) (inc j))) 1.0 (range i)))]
+    (reduce clojure.core/+ (for [n (range (inc k))]
+                             (* (choose k n) (Math/log (/ (+ n (* (- k n) (Math/exp -2.0))) k))
+                                (- (* n (Math/pow theta (dec n)) (Math/pow (- 1 theta) (- k n)))
+                                   (* (- k n) (Math/pow theta n) (Math/pow (- 1 theta) (- k n 1)))))))))
+
+(defn- shift-bound-reference
+  "Draws of shift-model's K-sample bound θ-gradient by reparameterization:
+   log w_k = log N(3; s_k, 1) + c, s_k = z1 + z2 ~ N(θ, √2), so the gradient
+   is Σ_k w̃_k (3 - s_k); n sets of k draws."
+  [theta k n key]
+  (let [s (+ theta (* (Math/sqrt 2.0) (dc/sample (d/normal 0 1) key [n k])))
+        w (array/softmax (* -0.5 (array/square (- 3.0 s))) {:axis 1})]
+    (ts/host (array/sum (* w (- 3.0 s)) {:axis 1}))))
+
+(deftest ^:slow ^:heavy the-model-gradient-counts-the-latents-the-model-draws
+  (let [grads (fn [estimator gf y theta seed]
+                (map #(ts/number (:theta (:model-grads (estimator gf [] (cm/choicemap :y y) z1-family [] {:m 0.0} 10
+                                                                  {:key % :model-store {:theta theta}}))))
+                     (rng/split (rng/key seed) 1000)))]
+    (testing "the ELBO's, a coin: 2, at its baseline's variance"
+      (let [gs (grads vi/elbo-gradient coin-model 1.0 0.5 30)
+            [m se :as g] (mean-and-se gs)]
+        (is (agrees? g [2.0 0.0]) (str g))
+        (is (< (* se (Math/sqrt (count gs))) 0.4) (str "sd " (* se (Math/sqrt (count gs)))))))
+    (testing "the ELBO's, a shift: 3 - θ = 3"
+      (let [g (mean-and-se (grads vi/elbo-gradient shift-model 3.0 0.0 31))] (is (agrees? g [3.0 0.0]) (str g))))
+    (testing "the K-sample bound's, a coin (K = 10)"
+      (let [g (mean-and-se (grads vi/vimco-gradient coin-model 1.0 0.5 32))]
+        (is (agrees? g [(coin-bound-derivative 10 0.5) 0.0]) (str g " against " (coin-bound-derivative 10 0.5)))))
+    (testing "the K-sample bound's, a shift, against draws of its pathwise gradient"
+      (let [g (mean-and-se (grads vi/vimco-gradient shift-model 3.0 0.0 33))
+            reference (mean-and-se (shift-bound-reference 0.0 10 100000 (rng/key 34)))]
+        (is (agrees? g reference) (str g " against " reference))))))
+
 ;; The joint fits reach the evidence's maximum, θ = 1.3, where q is the
 ;; posterior. Bands: the final θ's bias and five standard deviations over
 ;; 16 keys (17 to 32), measured: the ELBO's fit (Adam at 0.02 for both, 800

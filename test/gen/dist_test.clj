@@ -95,7 +95,21 @@
     (doseq [[expected f] [[{:distribution "normal" :param "std"} #(d/normal 0.0 nil)]
                           [{:distribution "bernoulli" :param "p"} #(d/bernoulli nil)]
                           [{:distribution "categorical" :param "probs"} #(d/categorical nil)]]]
-      (is (= expected (ts/thrown-data (f)))))))
+      (is (= expected (ts/thrown-data (f))))))
+  (testing "a boolean for a numeric parameter is an error naming both, and so is an infinite count (cross-review 4)"
+    ;; since I3-16 gen.array's comparisons took true as 1.0, so bernoulli,
+    ;; binom and poisson constructed with true, and the others threw a raw
+    ;; ClassCastException; binom's n of Inf passed check-integer (planted:
+    ;; no check-numeric; check-integer without isfinite)
+    (doseq [[expected f] [[{:distribution "bernoulli" :param "p"} #(d/bernoulli true)]
+                          [{:distribution "binom" :param "p"} #(d/binom 3 true)]
+                          [{:distribution "poisson" :param "lam"} #(d/poisson true)]
+                          [{:distribution "geometric" :param "p"} #(d/geometric true)]
+                          [{:distribution "normal" :param "std"} #(d/normal 0.0 true)]
+                          [{:distribution "normal" :param "mu"} #(d/normal [true false] 1.0)]]]
+      (is (= expected (ts/thrown-data (f)))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"n must be an integer" (d/binom ##Inf 0.5)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"n must be an integer" (d/binom [3 ##Inf] 0.5)))))
 
 (deftest supports
   (is (= [false true] (dc/support (d/bernoulli 0.3))))
@@ -863,3 +877,27 @@
       (let [h #(array/array % {:dtype :float16})
             m ((d/homogeneous-mixture d/normal) (h [0.5 0.5 0.0]) (h [0.0 1.0 2.0]) (h [1.0 1.0 1.0]))]
         (is (Double/isFinite (ts/number (dc/log-prob m (h 0.3)))))))))
+
+(deftest probabilities-sum-to-1-within-their-dtype
+  ;; genclj-ggdl (the verifier's P2-07 point): the bound on |Σp - 1| was a
+  ;; fixed 1e-6, float64's. A float32 sum of 10⁴ terms lies further off, so
+  ;; dirichlet's own draws scored -Inf at K = 10⁴ on MLX's CPU (before
+  ;; genclj-y0mp's blocked sum), and float32 probabilities that normalized
+  ;; to 1 were refused. The bound is dc/probability-tolerance, 4·log2(K)·ε,
+  ;; and at least 1e-6 (planted: the fixed 1e-6 again, in
+  ;; check-probabilities and in dirichlet's support).
+  (let [k 10000
+        off (fn [delta] (into [(+ (/ 1.0 k) delta)] (repeat (dec k) (/ 1.0 k))))
+        jvm32 #(array/with-backend (array/backend-named :jvm) (array/array % {:dtype :float32}))]
+    (testing "categorical's probabilities, checked on the host"
+      (is (some? (d/categorical (jvm32 (off 3e-6)))) "3e-6 off: within float32's 6.3e-6")
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be probabilities" (d/categorical (jvm32 (off 1e-4)))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be probabilities" (d/categorical (off 3e-6)))
+          "float64 data keeps its 1e-6"))
+    (testing "dirichlet's support in float32, on the backend under test"
+      (let [dd (d/dirichlet (array/full [k] 1.0 {:dtype :float32}))
+            v #(array/array (off %) {:dtype :float32})]
+        (is (Double/isFinite (ts/number (dc/log-prob dd (v 3e-6)))))
+        (is (= ##-Inf (ts/number (dc/log-prob dd (v 1e-4)))))))
+    (is (= [1e-6 1e-6] [(dc/probability-tolerance 3 :float64) (dc/probability-tolerance k :float64)]))
+    (is (ts/close? (* 4 (/ (Math/log k) (Math/log 2)) (Math/ulp (float 1.0))) (dc/probability-tolerance k :float32)))))

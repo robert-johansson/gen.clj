@@ -59,6 +59,10 @@ Found while auditing, handled in the backend without patches
   from the LU factor: `[0 -Inf]` there, as on the JVM backend.
 - **MLX's CPU float64 transcendentals** are float32 approximations (exact
   routes in `gen.backend.mlx.exact`).
+- **Full's VJP** (2026-10-22, genclj-hf5z) multiplies the cotangent by
+  the fill value, so native gradients of `full` of a tracked value were
+  scaled by it. The backend fills with an array value by `broadcast_to`.
+  Draft issue: `docs/research/mlx-upstream/issue-1-full-vjp.md`.
 
 The Metal toolchain is installed now (2026-10-19), so source builds of MLX
 work on the M4 when a patch series needs one.

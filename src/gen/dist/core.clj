@@ -98,6 +98,15 @@
   (when (and (array/array? v) (array/concrete? v) (= :float (dt/kind (array/dtype v))) (array/any-true? (array/isnan v)))
     (throw (ex-info (str (name op) ": a constrained value is NaN") {:op op :value v}))))
 
+(defn check-numeric
+  "A parameter must be numbers, not booleans: gen.array's comparisons take
+   true as 1, so a boolean would pass a family's checks as 1.0 (or fail
+   them with a ClassCastException). For every parameter not marked ^:host."
+  [dist-name param-name v]
+  (when (= :bool (array/dtype v))
+    (throw (ex-info (str dist-name ": " param-name " must be numbers, not booleans")
+                    {:distribution dist-name :param param-name}))))
+
 (defn check-param-not-nan
   "A parameter must not be NaN (in any element, read when concrete): a NaN
    would make every log density NaN rather than fail."
@@ -145,6 +154,16 @@
   [dtype]
   (get float-limit-table dtype (:float64 float-limit-table)))
 
+(defn probability-tolerance
+  "How far from 1 the sum of k probabilities of dtype may be: 4·log2(k)·ε,
+   room for two blocked or pairwise float sums (one normalized them, one
+   checks them), each measured within 0.8·log2(k)·ε on MLX's CPU. It is
+   never below 1e-6, float64's former bound, which leaves room for
+   probabilities given to six digits. A fixed 1e-6 rejected float32 sums
+   of many terms (dirichlet draws at K = 10⁴)."
+  ^double [k dtype]
+  (max 1e-6 (* 4.0 (/ (Math/log (max (long k) 2)) (Math/log 2.0)) (double (:eps (float-limits dtype))))))
+
 (defn float-dtype [b] (:float (array/defaults b)))
 
 (defn check
@@ -186,10 +205,11 @@
    check-positive."
   [dist-name param-name v min]
   (cond (array/host? v)
-        (check (and (== v (Math/rint (double v))) (>= v min)) dist-name
+        (check (and (Double/isFinite (double v)) (== v (Math/rint (double v))) (>= v min)) dist-name
                (str param-name " must be an integer of at least " min ", got " v) {:param param-name :value v})
         (array/concrete? v)
-        (check (array/all-true? (array/logical-and (== v (array/floor v)) (>= v min))) dist-name
+        (check (array/all-true? (array/logical-and (array/logical-and (array/isfinite v) (== v (array/floor v))) (>= v min)))
+               dist-name
                (str param-name " must be an integer of at least " min " in every element") {:param param-name})))
 
 (defn support-bound
@@ -209,7 +229,8 @@
   [dist-name param-name ps]
   (when (array/concrete? ps)
     (let [ok? (and (array/all-true? (>= ps 0))
-                   (array/all-true? (<= (array/abs (- (array/sum ps {:axis -1}) 1.0)) 1e-6)))]
+                   (array/all-true? (<= (array/abs (- (array/sum ps {:axis -1}) 1.0))
+                                        (probability-tolerance (peek (array/shape ps)) (array/dtype ps)))))]
       (check ok? dist-name
              (str param-name " must be probabilities (non-negative, summing to 1)"
                   " — for log-probabilities or logits use categorical-logits")
@@ -327,6 +348,7 @@
          ~params
          ;; validated as given (host data on the host), then made arrays
          (let [~@(mapcat (fn [p] [p (as-given p `(->checkable-param ~(name dist-name) ~(name p) ~p))]) params)]
+           ~@(keep (fn [p] (when-not (:host (meta p)) `(check-numeric ~(name dist-name) ~(name p) ~p))) params)
            ~@(map (fn [p] `(check-param-not-nan ~(name dist-name) ~(name p) ~p)) params)
            ~@(get clauses 'validate))
          (let [~@(mapcat (fn [p] [p (as-given p `(->array ~p))]) params)]

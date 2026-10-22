@@ -389,7 +389,8 @@
       (floored (array/softmax lg {:axis -1}))))
   (log-prob [v]
     (guard (logical-and (array/all (>= v 0) {:axis -1})
-                        (<= (array/abs (- (array/sum v {:axis -1}) 1)) 1e-6))
+                        (<= (array/abs (- (array/sum v {:axis -1}) 1))
+                            (dc/probability-tolerance (peek (array/shape v)) (array/dtype v))))
            (- (array/sum (xlogy (- alpha 1) v) {:axis -1})
               (- (array/sum (lgamma alpha) {:axis -1}) (lgamma (array/sum alpha {:axis -1}))))))
   (value-shape [] (array/shape alpha)))

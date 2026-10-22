@@ -50,7 +50,9 @@
   [x]
   (or (instance? Number x) (instance? Boolean x)))
 
-(defn- backend-array? [x]
+(defn backend-array?
+  "Is x a backend array (an array value that is not a host scalar)?"
+  [x]
   (instance? gen.array.protocols.IArray x))
 
 (defn array?
@@ -495,27 +497,31 @@
         lg (lgamma-lanczos (where reflect? (- 1 x) x))
         xs (where reflect? x 0.25)
         pole? (logical-and (<= x 0) (== x (floor x)))]
-    ;; +Inf at +Inf, as SciPy and Julia (genclj-9gyi), where Lanczos gives
-    ;; Inf·Inf - Inf
-    (where (logical-or pole? (== x ##Inf))
-           ##Inf
-           (where reflect?
-                  (- (Math/log Math/PI) (log (abs (sin (* Math/PI xs)))) lg)
-                  lg))))
+    ;; as SciPy (genclj-9gyi): +Inf at +Inf, where Lanczos gives Inf·Inf - Inf,
+    ;; and -Inf at -Inf, which the poles' test takes for one
+    (where (== x ##-Inf)
+           ##-Inf
+           (where (logical-or pole? (== x ##Inf))
+                  ##Inf
+                  (where reflect?
+                         (- (Math/log Math/PI) (log (abs (sin (* Math/PI xs)))) lg)
+                         lg)))))
 
 (defn lgamma
-  "Elementwise log |Γ(x)| (+Inf at the poles 0, -1, -2, … and at +Inf, as
-   SciPy): Lanczos for x >= 0.5, the reflection formula below. A composite, so differentiable
-   and identical on every backend; a host number takes gen.array.special's
-   lgamma, the same operations at about 20 ns where the composite's dispatch
-   costs 700."
+  "Elementwise log |Γ(x)| (+Inf at the poles 0, -1, -2, … and at +Inf, -Inf
+   at -Inf, as SciPy): Lanczos for x >= 0.5, the reflection formula below. A
+   composite, so differentiable and identical on every backend; a host number
+   takes gen.array.special's lgamma, the same operations at about 20 ns where
+   the composite's dispatch costs 700."
   [x]
   (if (exact-double? x) (special/lgamma (double x)) (lgamma-composite x)))
 
 (defn- digamma-composite [x]
   (let [reflect? (< x 0)
         z (where reflect? (- 1 x) x)
-        shift (reduce + (map #(/ (+ z %)) (range 10)))
+        ;; 1/z first, not 1/(z + 0), which made -0.0 positive: +Inf at -0.0,
+        ;; as SciPy (genclj-9gyi)
+        shift (reduce + (/ z) (map #(/ (+ z %)) (range 1 10)))
         w (+ z 10)
         w2 (/ (square w))
         series (* w2 (+ (/ 12.0)
@@ -534,8 +540,9 @@
 (defn digamma
   "Elementwise digamma ψ(x) = d/dx log Γ(x): ten recurrence steps
    ψ(x) = ψ(x+1) - 1/x, then the asymptotic series (to x^-12), with the
-   reflection formula for x < 0. As SciPy: -Inf at 0, NaN at negative
-   integers. A host number takes gen.array.special's digamma, as lgamma."
+   reflection formula for x < 0. As SciPy: -Inf at 0.0 and +Inf at -0.0 (the
+   limits from either side), NaN at negative integers. A host number takes
+   gen.array.special's digamma, as lgamma."
   [x]
   (if (exact-double? x) (special/digamma (double x)) (digamma-composite x)))
 

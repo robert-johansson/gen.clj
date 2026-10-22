@@ -30,7 +30,7 @@
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.dist.core :as dc]
-            [gen.dynamic.core]
+            [gen.dynamic.guard :as guard]
             [gen.dynamic.static :as static]
             [gen.gfi :as gfi]
             [gen.random :as rng]
@@ -424,14 +424,20 @@
 (defn- arg-name-diffs
   "Each argument name's diff: an argument bound to a symbol takes its
    argdiff; a destructured one's names no-change or unknown-change. Every
-   name unknown-change without argdiffs."
-  [{:keys [fixed rest]} params argdiffs]
+   name unknown-change without argdiffs. The rest parameter's names are
+   no-change only when the number of arguments is the previous call's
+   (same-count?) and the argdiffs past the fixed ones are: a change in the
+   number of arguments is a change, whatever the argdiffs say (DESIGN.md
+   §9, G3)."
+  [{:keys [fixed rest]} params argdiffs same-count?]
   (let [d-of (fn [d] (if (diff/no-change? d) diff/no-change diff/unknown-change))
         positional (map (fn [names form i]
                           (let [d (if argdiffs (nth argdiffs i diff/unknown-change) diff/unknown-change)]
                             (if (symbol? form) {form d} (zipmap names (repeat (d-of d))))))
                         fixed params (range))
-        rest-d (if (and argdiffs (every? diff/no-change? (drop (count fixed) argdiffs))) diff/no-change diff/unknown-change)]
+        rest-d (if (and argdiffs same-count? (every? diff/no-change? (drop (count fixed) argdiffs)))
+                 diff/no-change
+                 diff/unknown-change)]
     ;; in binding order: a name bound again (by a later parameter, or the
     ;; rest parameter) holds its last binding, as in let
     (apply merge (concat positional [(zipmap rest (repeat rest-d))]))))
@@ -523,7 +529,7 @@
                 [(args-bind args)
                  (reduce-kv (fn [ds x d] (assoc ds (slots x) d))
                             (vec (repeat size diff/no-change))
-                            (if skip? (arg-name-diffs (:args st) params argdiffs) {}))
+                            (if skip? (arg-name-diffs (:args st) params argdiffs (== (count args) (count (:args prev)))) {}))
                  []]
                 (map-indexed vector nodes))]
     (vswap! vol assoc ::node-values vals)
@@ -630,7 +636,9 @@
    unknown-change; otherwise no-change when the return value is the
    previous one by gfi/same-value? (DESIGN.md §9, D1), unknown-change
    otherwise. same-value? reads no array (a batched one included) and is
-   bounded, so a long or lazy return value is unknown-change."
+   bounded, and a lazy value counts only as far as it is realized (as
+   realize! leaves a return value), so a long return value, or an infinite
+   one, is unknown-change."
   [prev-trace state]
   (let [d (::retdiff state)]
     (cond (and d (not (diff/unknown-change? d))) d
@@ -863,305 +871,13 @@
   (.write w (str "#gen/fn" (pr-str (first (:source gf))))))
 
 ;; ---------------------------------------------------------------------------
-;; The gen macro: conditionals branch on values
+;; The gen macro (its body rewriter is gen.dynamic.guard, the static
+;; language's analysis and code gen.dynamic.static)
 ;; ---------------------------------------------------------------------------
-
-(defn case-key
-  "case's dispatch value, checked: a value that differs across the particles
-   of a batch cannot pick one clause (gen.array.batch), so it raises the
-   batched-branch error rather than falling to the default clause; a 0-d
-   backend array (an MLX scalar) dispatches on its host value, as on the JVM
-   backend."
-  [x]
-  (if (instance? gen.array.protocols.IBatchedValue x)
-    (throw (array/batched-branch "case on a batched value: it differs across particles" {}))
-    (gen.dynamic.core/host-value "case on" x)))
-
-(declare guard-branches)
-
-(def ^:private guarded-core
-  "The functions that test truthiness, look up by key or test
-   representation, to their guarded versions in gen.dynamic.core (each names
-   the function it guards in its :guards metadata)."
-  (into {} (keep (fn [[s v]] (when-let [g (:guards (meta v))] [g (symbol "gen.dynamic.core" (name s))])))
-        (ns-publics 'gen.dynamic.core)))
-
-(def ^:dynamic ^:private *outer-locals*
-  "The locals of the gen body being guarded, while forms inside it are
-   macroexpanded: a gen (or guarded-fn) nested in it sees them."
-  #{})
-
-(defn- expand
-  "form macroexpanded, with the locals around it visible to nested gens."
-  [form locals]
-  (binding [*outer-locals* locals] (macroexpand form)))
-
-(defn- guard-symbol
-  "sym, or its guarded version when it names one of guarded-core's
-   functions (and is not a local)."
-  [sym locals]
-  (if (contains? locals sym)
-    sym
-    (let [v (try (resolve sym) (catch Exception _ nil))]
-      (or (when (var? v) (guarded-core (symbol v))) sym))))
-
-(defn- guard-body [forms locals] (map #(guard-branches % locals) forms))
-
-(def ^:private lazy-fns
-  '#{clojure.core/map clojure.core/map-indexed clojure.core/mapcat clojure.core/keep
-     clojure.core/keep-indexed clojure.core/filter clojure.core/remove clojure.core/for
-     gen.dynamic.core/filter gen.dynamic.core/remove})
-
-(defn- discarded-lazy-trace?
-  "Is form a lazy call (map, for, keep, …) whose trace or splice calls would
-   never run because its value is discarded?"
-  [form locals]
-  (and (seq? form)
-       (let [head (first form)]
-         (and (symbol? head) (not (contains? locals head))
-              (when-let [v (resolve head)] (lazy-fns (symbol v)))
-              (some #{'trace 'splice 'untraced 'untraced-key} (tree-seq coll? seq (rest form)))))))
-
-(defn- discarded-lazy-call
-  "The lazy call with trace calls that would be discarded with form's value:
-   form itself (as written, (for …), or macroexpanded, (->> xs (map …))), or
-   the value of an if, do, let or letfn it expands to (when, cond, …)."
-  [form locals]
-  (let [expanded (if (and (seq? form) (symbol? (first form)) (not (contains? locals (first form))))
-                   (expand form locals)
-                   form)]
-    (cond (or (discarded-lazy-trace? form locals) (discarded-lazy-trace? expanded locals)) form
-          (not (seq? expanded)) nil
-          :else (case (first expanded)
-                  if (some #(discarded-lazy-call % locals) (drop 2 expanded))
-                  do (some-> (last (rest expanded)) (discarded-lazy-call locals))
-                  (let* loop* letfn*) (let [[_ bindings & body] expanded]
-                                        (some-> (last body)
-                                                (discarded-lazy-call (into locals (take-nth 2 bindings)))))
-                  nil))))
-
-(defn- guard-statements
-  "A body's forms, guarded; every form but the last is a statement, whose
-   value is discarded, so a lazy call there with trace calls is an error."
-  [forms locals]
-  (doseq [f (butlast forms)]
-    (when-let [lazy (discarded-lazy-call f locals)]
-      (throw (ex-info (str "In gen: " (pr-str (first lazy)) " here is lazy and its value is discarded,"
-                           " so its trace calls would never run. Use doseq, run! or mapv.")
-                      {:form f}))))
-  (guard-body forms locals))
-
-(defn- check-lazy-bindings
-  "A let binding of a lazy call with trace calls whose symbol is never used:
-   its trace calls would never run, so it is an error, as for a statement."
-  [bindings body locals]
-  (let [pairs (vec (partition 2 bindings))]
-    (doseq [[i [sym init]] (map-indexed vector pairs)
-            :let [expanded (if (and (seq? init) (symbol? (first init)) (not (contains? locals (first init))))
-                             (expand init locals)
-                             init)]]
-      (when (and (symbol? sym)
-                 (or (discarded-lazy-trace? init locals) (discarded-lazy-trace? expanded locals))
-                 (not (some #{sym} (tree-seq coll? seq (concat (map second (subvec pairs (inc i))) body)))))
-        (throw (ex-info (str "In gen: " sym " is bound to a lazy " (pr-str (first init)) " and never used,"
-                             " so its trace calls would never run. Use doseq, run! or mapv.")
-                        {:form init}))))))
-
-(defn- guard-bindings
-  "[bindings' locals'] for a let*/loop* binding vector."
-  [bindings locals]
-  (reduce (fn [[acc ls] [sym init]] [(conj acc sym (guard-branches init ls)) (conj ls sym)])
-          [[] locals]
-          (partition 2 bindings)))
-
-(defn- guard-fn [[_ & more] locals]
-  (let [[fname more] (if (symbol? (first more)) [(first more) (rest more)] [nil more])
-        locals (cond-> locals fname (conj fname))
-        arities (if (vector? (first more)) [more] more)]
-    (list* 'fn* (concat (when fname [fname])
-                        (for [[params & body] arities]
-                          (list* params (guard-statements body (into locals (remove #{'&} params)))))))))
-
-(defn- guard-special [form locals]
-  (case (first form)
-    (quote var) form
-    if (let [[_ test then else] form]
-         (list* 'if (list `array/truthy? (guard-branches test locals))
-                (guard-branches then locals)
-                (when (= 4 (count form)) [(guard-branches else locals)])))
-    (let* loop*) (let [[op bindings & body] form
-                       _ (when (= 'let* op) (check-lazy-bindings bindings body locals))
-                       [bindings locals] (guard-bindings bindings locals)]
-                   (list* op bindings (guard-statements body locals)))
-    do (list* 'do (guard-statements (rest form) locals))
-    fn* (guard-fn form locals)
-    ;; (reify* [interfaces] (method [this params…] body…) …): the parameters are locals
-    reify* (let [[_ interfaces & methods] form]
-             (list* 'reify* interfaces
-                    (for [[mname params & body] methods]
-                      (list* mname params (guard-statements body (into locals params))))))
-    ;; (. target member args…) or (. target (member args…)): a member name is
-    ;; not a var, even when it is spelled like one (.get)
-    . (let [[_ target member & args] form]
-        (list* '. (guard-branches target locals)
-               (if (seq? member)
-                 (list* (first member) (guard-body (rest member) locals))
-                 member)
-               (guard-body args locals)))
-    letfn* (let [[_ bindings & body] form
-                 locals (into locals (take-nth 2 bindings))]
-             (list* 'letfn*
-                    (vec (mapcat (fn [[n f]] [n (guard-branches f locals)]) (partition 2 bindings)))
-                    (guard-body body locals)))
-    ;; a caught exception may be thrown for some particles only: in a batched
-    ;; run, a catch clause raises the fallback first (gen.dynamic.core/caught)
-    try (list* 'try (for [f (rest form)]
-                      (cond (and (seq? f) (= 'catch (first f)))
-                            (let [[_ cls sym & body] f]
-                              (list* 'catch cls sym (list `gen.dynamic.core/caught sym)
-                                     (guard-body body (conj locals sym))))
-                            (and (seq? f) (= 'finally (first f)))
-                            (list* 'finally (guard-body (rest f) locals))
-                            :else (guard-branches f locals))))
-    ;; case*'s dispatch value is a local symbol (case binds it): check it first
-    ;; dispatching on case-key's value (case* needs a local: rebind it)
-    case* (let [[_ ge shift mask default imap & more] form]
-            (list 'let* [ge (list `case-key ge)]
-                  (list* 'case* ge shift mask (guard-branches default locals)
-                   (into (empty imap) (map (fn [[k [test then]]] [k [test (guard-branches then locals)]])) imap)
-                   more)))
-    (apply list (guard-body form locals))))
-
-(defn- keep-meta
-  "guarded, with the metadata of the form it came from (type hints, lines)."
-  [form guarded]
-  (if-let [m (meta form)]
-    (if (instance? clojure.lang.IObj guarded) (with-meta guarded (merge (meta guarded) m)) guarded)
-    guarded))
-
-(defn- guard-branches
-  "form, macroexpanded, with every if test wrapped in gen.array/truthy?, and
-   the truthiness tests, lookups and representation tests of
-   gen.dynamic.core in place of the functions they guard. locals are the
-   symbols bound around form (never macroexpanded as heads)."
-  [form locals]
-  (cond
-    (seq? form) (let [head (first form)]
-                  (if (and (symbol? head) (contains? locals head))
-                    (keep-meta form (apply list (guard-body form locals)))
-                    (let [expanded (expand form locals)]
-                      (if (seq? expanded)
-                        (keep-meta expanded (guard-special expanded locals))
-                        (guard-branches expanded locals)))))
-    (vector? form) (keep-meta form (mapv #(guard-branches % locals) form))
-    (map? form) (into (empty form) (map (fn [[k v]] [(guard-branches k locals) (guard-branches v locals)])) form)
-    (set? form) (into (empty form) (map #(guard-branches % locals)) form)
-    (symbol? form) (guard-symbol form locals)
-    :else form))
 
 (def ^:private primitive-coercions
   '{double clojure.core/double long clojure.core/long float clojure.core/float int clojure.core/int
     short clojure.core/short byte clojure.core/byte char clojure.core/char boolean clojure.core/boolean})
-
-(defn- names-map
-  "The form of a map from each of names (quoted) to its value."
-  [names]
-  (into {} (map (fn [s] [(list 'quote s) s])) names))
-
-(defn- score-form
-  "The form of a static body's score fn, (fn [param args choices key] →
-   [weight retval]): the body's bindings in order as locals, a trace node's
-   value from choices with its log density, a splice's callee assessed on
-   its sub-map, keys split as the handler's assess splits them (none when
-   key is nil)."
-  [st params coercions locals]
-  (let [args (gensym "args") choices (gensym "choices") key (gensym "key")
-        {:keys [bindings terms]}
-        (reduce (fn [{:keys [bindings terms k]} {:keys [kind addr binding expr] computed :keys}]
-                  (let [;; a computed address's path, checked to hold every
-                        ;; choice under its prefix
-                        p (gensym "p")
-                        at (when (some? addr)
-                             (if computed
-                               [p `(into ~(path addr) [~@computed])
-                                '_ `(check-computed! ~choices ~(path addr) ~p ~(= kind :trace))]
-                               [p (path addr)]))]
-                    (case kind
-                      :trace (let [v (gensym "v") lp (gensym "lp") k' (gensym "k")]
-                               {:bindings (-> bindings (into at)
-                                              (into [[v lp] `(static-site ~expr ~choices ~p)
-                                                     binding v
-                                                     k' `(when ~k (first (rng/split ~k)))]))
-                                :terms (conj terms lp) :k k'})
-                      :splice (let [[g as] expr w (gensym "w") rv (gensym "rv") k' (gensym "k") ks (gensym "ks")]
-                                {:bindings (-> bindings (into at)
-                                               (into [[k' ks] `(if ~k (rng/split ~k) [nil nil])
-                                                      [w rv] `(static-call ~p ~g ~as (cm/get-submap ~choices ~p cm/EMPTY) ~ks)
-                                                      binding rv]))
-                                 :terms (conj terms w) :k k'})
-                      {:bindings (into bindings [binding expr]) :terms terms :k k})))
-                {:bindings [] :terms [] :k key}
-                (:nodes st))]
-    (guard-branches
-     `(fn [~'param ~args ~choices ~key]
-        (let [~params ~args ~@coercions ~@bindings]
-          [(reduce array/+ 0.0 [~@terms]) ~(:expr (:ret st))]))
-     locals)))
-
-(defn- static-form
-  "The runtime graph of the static body st (gen.dynamic.static/analyze),
-   its names in slots (the arguments' first): per node, its kind, address,
-   names and inputs, the slots it reads and writes, a guarded fn of (param,
-   env) for its distribution, call or value, a fn writing its names' slots
-   from its value, and how its diff is found (a rule, an alias, argument
-   specs)."
-  [st params coercions locals]
-  (let [;; each name once: a name bound twice ([w w z]) holds its last binding, as let's
-        arg-names (vec (distinct (concat (apply concat (:fixed (:args st))) (:rest (:args st)))))
-        names (vec (distinct (concat arg-names (mapcat :names (:nodes st)))))
-        slots (zipmap names (range))
-        env (gensym "env")
-        reads (fn [inputs] (vec (mapcat (fn [x] [x `(nth ~env ~(slots x))]) inputs)))
-        node-fn (fn [{:keys [inputs expr]}]
-                  (guard-branches `(fn [~'param ~env] (let ~(reads inputs) ~expr)) (into locals inputs)))
-        keys-fn (fn [{:keys [inputs] ks :keys}]
-                  (guard-branches `(fn [~'param ~env] (let ~(reads inputs) [~@ks])) (into locals inputs)))
-        param? (fn [expr] (boolean (some #{'param} (tree-seq coll? seq expr))))
-        spec (fn [{:keys [symbol constant inputs]}]
-               (cond (and symbol (contains? slots symbol)) {:slot (slots symbol)}
-                     (or symbol constant) {:constant true}
-                     :else {:in (mapv slots inputs)}))
-        call (fn [{:keys [call args arg-specs inputs alias]}]
-               (cond call {:rule `(var ~call) :arg-specs (mapv spec arg-specs)
-                           :args-f `(fn [~'param ~env] (let ~(reads inputs) [~@args]))}
-                     alias {:alias (slots alias)}))
-        v (gensym "v")
-        args (gensym "args")]
-    `{:args '~(:args st)
-      :params '~params
-      :slots '~slots
-      :size ~(count names)
-      :args-bind (fn [~args] (let [~params ~args ~@coercions] [~@arg-names ~@(repeat (- (count names) (count arg-names)) nil)]))
-      :nodes [~@(for [n (:nodes st)]
-                  (merge `{:kind ~(:kind n) :addr ~(:addr n) :names '~(:names n) :inputs '~(:inputs n) :form '~(:form n)
-                           :in ~(mapv slots (:inputs n)) :out ~(mapv slots (:names n))
-                           :symbol? ~(symbol? (:binding n))
-                           :param? ~(param? [(:expr n) (:keys n)])
-                           :f ~(node-fn n)
-                           :keys-f ~(when (:keys n) (keys-fn n))
-                           :bind (fn [~env ~v] (let [~(:binding n) ~v] (-> ~env ~@(map (fn [x] `(assoc ~(slots x) ~x)) (:names n)))))}
-                         (when (= :splice (:kind n)) {:arg-specs (mapv spec (:arg-specs n))})
-                         (when (:keys n) {:keys (list 'quote (:keys n))})
-                         (call n)))]
-      :ret ~(merge {:inputs `'~(:inputs (:ret st)) :in (mapv slots (:inputs (:ret st)))
-                    :param? (param? (:expr (:ret st))) :f (node-fn (:ret st))}
-                   (call (:ret st)))
-      :score ~(score-form st params coercions locals)
-      :roots ~(set (keep #(when-some [a (:addr %)] (first (path a))) (:nodes st)))
-      ;; a node at a computed address holds its prefix, as a call does
-      ;; (its score fn checks the rest: check-computed!)
-      :paths ~(when (some #(vector? (:addr %)) (:nodes st))
-                (vec (keep #(when-some [a (:addr %)] [(if (:keys %) :splice (:kind %)) (path a)]) (:nodes st))))}))
 
 (defmacro gen
   "A generative function. params are the arguments (destructuring allowed);
@@ -1212,15 +928,15 @@
         prim (filter #(and (symbol? %) (primitive-coercions (:tag (meta %)))) params)
         plain (mapv #(if (some #{%} prim) (vary-meta % dissoc :tag) %) params)
         coercions (mapcat (fn [p] [(vary-meta p dissoc :tag) (list (primitive-coercions (:tag (meta p))) (vary-meta p dissoc :tag))]) prim)
-        locals (into (set (keys &env)) *outer-locals*)
+        locals (guard/locals &env)
         st (when (:static (meta params)) (static/analyze plain body &env locals))
         body (if (seq prim) [`(let [~@coercions] ~@body)] body)
-        body-fn (guard-branches `(fn [~'trace ~'splice ~'param ~'untraced ~@plain]
+        body-fn (guard/guard-branches `(fn [~'trace ~'splice ~'param ~'untraced ~@plain]
                                    (let [~'untraced-key (fn [] (~'untraced))] ~@body))
                                 locals)]
     ;; the body fn takes the four hidden parameters: no check (make-gen-fn's
     ;; reflects, and an inline gen is built on every run of its body)
-    `(->DynamicGF ~body-fn '~(cons params body) nil nil nil ~(when st (static-form st plain coercions locals)))))
+    `(->DynamicGF ~body-fn '~(cons params body) nil nil nil ~(when st (static/static-form st plain coercions locals)))))
 
 (defmacro guarded-fn
   "fn, with a gen body's guards: if and case tests branch through truthy?,
@@ -1230,7 +946,7 @@
    batched run (gen.batched) where a plain fn would take one branch for
    every particle."
   [& fn-tail]
-  (guard-branches `(fn ~@fn-tail) (into (set (keys &env)) *outer-locals*)))
+  (guard/guard-branches `(fn ~@fn-tail) (guard/locals &env)))
 
 (defmacro defn-guarded
   "defn with guarded-fn's guards: (defn-guarded name doc? [params] body…)."

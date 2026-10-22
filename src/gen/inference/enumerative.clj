@@ -42,7 +42,6 @@
   (:refer-clojure :exclude [-])
   (:require [gen.array :as array :refer [-]]
             [gen.choicemap :as cm]
-            [gen.diff :as diff]
             [gen.dist.core :as dc]
             [gen.dynamic :as dyn]
             [gen.gfi :as gfi]
@@ -300,27 +299,12 @@
         {s :s r :r} (enumerated g args sigma (others-of (:choices tr) sigma free) free seen limit)]
     (- (array/logsumexp s) (array/logsumexp r))))
 
-(defn- same-addresses? [x y] (= (set (cm/addresses x)) (set (cm/addresses y))))
-
 (gfi/defgf ExactProposalGF [gf paths limit check-retval?]
   gfi/IGenerativeFunction
   (-simulate [this args key] (trace/as-made-by (gfi/-simulate gf args key) this))
   (-generate [this args constraints key] (exact-generate this args constraints key))
   (-update [this tr args argdiffs constraints key]
-    ;; gf's update keeps, overwrites and removes choices; fresh ones are
-    ;; then drawn by the exact proposal given the kept ones
-    (let [[k-update k-fresh] (rng/split key)
-          {t2 :trace :as r} (gfi/-update gf (trace/as-made-by tr gf) args argdiffs constraints k-update)
-          before (set (cm/addresses (:choices tr)))
-          given (set (cm/addresses constraints))
-          fresh (vec (remove #(or (before %) (given %)) (cm/addresses (:choices t2))))]
-      (if (empty? fresh)
-        (assoc r :trace (trace/as-made-by t2 this))
-        (let [kept (sel/get-selected (:choices t2) (sel/complement (sel/from-paths fresh)))
-              {t3 :trace w :weight} (exact-generate this args kept k-fresh)]
-          (when-not (same-addresses? (:choices t2) (:choices t3))
-            (throw (ex-info "with-exact-proposal: the fresh choices of this update change the model's structure" {})))
-          {:trace t3 :weight (- w (:score tr)) :retdiff diff/unknown-change :discard (:discard r)}))))
+    (proposal/update-under "with-exact-proposal" this #(exact-generate this %1 %2 %3) tr args argdiffs constraints key))
   (-regenerate [this tr args argdiffs selection key]
     (proposal/regenerate-under #(exact-generate this %1 %2 %3) #(exact-weight this %1 %2 %3)
                                tr args argdiffs selection key))

@@ -373,6 +373,62 @@
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"did not write"
                               ((tf/involution half) tr (cm/choicemap :u 0.2) nil nil (rng/key 0))))))))
 
+(def ^:private mu-y (gen [] (let [mu (trace :mu (d/normal 0 1))] (trace :y (d/normal mu 1)))))
+
+(def ^:private standard-u (gen [_] (trace :u (d/normal 0 1))))
+
+(deftest inputs-a-move-consumes-are-read
+  ;; the post-M5 review's P3-07: a continuous input the move consumes (an
+  ;; auxiliary choice, or a model choice the update overwrites or
+  ;; discards) that the body never reads is lost, a loud error, except an
+  ;; observation :new-observations replace, which is data. Planted bugs
+  ;; (2026-10-22): no check, as before, lets each of the first four
+  ;; through (the first one's E[exp w] is 6.4 where 1 is right); the
+  ;; replaced observation counted makes the last one loud
+  (let [tr (:trace (gfi/generate mu-y [] (cm/choicemap :mu 0.3 :y 0.8) (rng/key 50)))
+        loses (fn [lost f] (is (= lost (:inputs (ts/thrown-data (f))))))]
+    (testing "an updating translator that overwrites mu with u"
+      (loses [[:model-in [:mu]]]
+             #((tf/updating-translator {:q-forward standard-u :q-backward (gen [_] nil)
+                                        :transform (tf/transform [mi ai mo ao] (write mo :mu (read ai :u :continuous) :continuous))})
+               tr (rng/key 51))))
+    (testing "an involution that does the same"
+      (loses [[:model-in [:mu]]]
+             #((tf/involution (tf/transform [mi ai mo ao] (write mo :mu (read ai :u :continuous) :continuous)))
+               tr (cm/choicemap :u 0.2) nil nil (rng/key 52))))
+    (testing "a translator that throws u away"
+      (loses [[:aux-in [:u]]]
+             #((tf/translator {:p-new mu-y :q-forward standard-u :new-observations (cm/choicemap :y 0.8)
+                               :transform (tf/transform [mi ai mo ao] (copy mi :mu mo :mu))})
+               tr (rng/key 53))))
+    (testing "an extending translator that throws a proposed choice away"
+      (loses [[:model-in [:w]]]
+             #((tf/extending-translator {:p-new-args [2] :new-observations (cm/choicemap [:y 1] 1.1)
+                                         :q-forward (gen [_] (trace :z (d/normal 0 1)) (trace :w (d/normal 0 1)))
+                                         :transform (tf/transform [mi ai mo ao] (write mo [:x 1] (read mi :z :continuous) :continuous))})
+               (:trace (gfi/generate growing [1] (cm/choicemap [:y 0] 0.4) (rng/key 54))) (rng/key 55))))
+    (testing "a new observation replaces y: the swap of mu and u weighs log N(0.9; u, 1) - log N(0.8; mu, 1)"
+      (let [swap-mu (tf/transform [mi ai mo ao]
+                      (write mo :mu (read ai :u :continuous) :continuous)
+                      (write ao :u (read mi :mu :continuous) :continuous))
+            {t' :trace w :weight} ((tf/updating-translator {:q-forward standard-u :q-backward standard-u :transform swap-mu
+                                                            :new-observations (cm/choicemap :y 0.9)})
+                                   tr (rng/key 56))]
+        (is (ts/close? (- (lp (d/normal (t' :mu) 1) 0.9) (lp (d/normal 0.3 1) 0.8)) w))))
+    (testing "the transform reads the replaced y, an unchanged input (m3-grammar's cross-review): |det J| = 1"
+      ;; planted bug (2026-10-22): y counted as consumed in the Jacobian, as
+      ;; in d828198, throws "maps 3 dimensions to 2"
+      (let [nudge (tf/transform [mi ai mo ao]
+                    (let [mu (read mi :mu :continuous) y (read mi :y :continuous) u (read ai :u :continuous)]
+                      (write mo :mu (+ mu (+ u (* 0.1 y))) :continuous)
+                      (write ao :u (- 0.0 u) :continuous)))
+            {t' :trace w :weight} ((tf/updating-translator {:q-forward standard-u :q-backward standard-u :transform nudge
+                                                            :new-observations (cm/choicemap :y 0.9)})
+                                   tr (rng/key 57))
+            mu' (ts/number (t' :mu))]
+        (is (ts/close? (- (+ (lp (d/normal 0 1) mu') (lp (d/normal mu' 1) 0.9)) (+ (lp (d/normal 0 1) 0.3) (lp (d/normal 0.3 1) 0.8)))
+                       w))))))
+
 (def walk-u (gen [tr] (trace :u (d/normal (tr :x) 0.5))))
 
 (def swap

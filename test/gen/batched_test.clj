@@ -466,6 +466,8 @@
 (defprotocol ^:private Scalar (scalar-kind [x]))
 (extend-protocol Scalar Double (scalar-kind [_] :double))
 
+(def ^:private vector-class "The class of a [2] array." (class (array/zeros [2])))
+
 (deftest representation-tests-answer-for-the-particles
   ;; fourth acceptance test B2
   (doseq [[label m] [[:instance? (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (if (instance? Double x) 3.0 0.0) 1))))]
@@ -473,7 +475,15 @@
                      [:coll? (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (if (coll? x) 0.0 3.0) 1))))]
                      [:class (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (if (= Double (class x)) 3.0 0.0) 1))))]
                      [:satisfies? (gen [] (let [x (trace :x (d/normal 0 1))]
-                                            (trace :y (d/normal (if (satisfies? Scalar x) 3.0 0.0) 1))))]]]
+                                            (trace :y (d/normal (if (satisfies? Scalar x) 3.0 0.0) 1))))]
+                     ;; the post-M5 review's I2-04: one predicate, and a vector
+                     ;; particle's prototype made through gen.array; plants: the
+                     ;; unguarded backend-array? (true of a batch) fails the
+                     ;; first, a prototype that is the batch itself the second
+                     [:backend-array? (gen [] (let [x (trace :x (d/normal 0 1))]
+                                                (trace :y (d/normal (if (array/backend-array? x) 0.0 3.0) 1))))]
+                     [:class-of-a-vector (gen [] (let [x (trace :x (d/normal (array/zeros [2]) 1))]
+                                                   (trace :y (d/normal (if (= vector-class (class x)) 3.0 0.0) 1))))]]]
     (let [obs (cm/choicemap :y 3.0)
           s (imp/importance-sampling m [] obs 200 {:key (rng/key 73)})
           r (binding [b/*spot-checks* 0] (imp/importance-sampling m [] obs 200 {:key (rng/key 73) :batched? true}))]

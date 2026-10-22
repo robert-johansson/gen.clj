@@ -317,7 +317,7 @@
   "x as the JVM backend holds it: a backend array read on the host and made
    there; anything else as it is."
   [x]
-  (if (and (instance? gen.array.protocols.IArray x) (not (batch/batched? x)))
+  (if (and (array/backend-array? x) (not (batch/batched? x)))
     (array/with-backend @reference (array/array (array/->clj x)))
     x))
 

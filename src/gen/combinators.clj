@@ -207,9 +207,11 @@
         argdiffs))
 
 (defn- changed-elements
-  "The indices whose arguments may have changed: :all, or a sorted set."
-  [argdiffs]
-  (if (every? #(or (diff/no-change? %) (diff/vector-diff? %)) argdiffs)
+  "The indices whose arguments may have changed: :all, or a sorted set. A
+   change in the number of arguments changes every element's (DESIGN.md §9,
+   G3: no argdiff can say one went or came)."
+  [argdiffs same-count?]
+  (if (and same-count? (every? #(or (diff/no-change? %) (diff/vector-diff? %)) argdiffs))
     (into (sorted-set) (mapcat #(when (diff/vector-diff? %) (keys (:updated %)))) argdiffs)
     :all))
 
@@ -256,7 +258,7 @@
                                       (update-at kernel old ea ead (cm/get-submap cs i cm/EMPTY) k [i])
                                       (regenerate-at kernel old ea ead (sel/get-subselection cs i) k [i])))))
                     (trace-acc tr)
-                    (visits (changed-elements argdiffs) targets kept))
+                    (visits (changed-elements argdiffs (== (count args) (count (:args tr)))) targets kept))
         acc (drop-elements acc kept op)
         acc (reduce (fn [acc i]
                       (let [ea (element-args args i)
@@ -326,7 +328,7 @@
    number that differs across a batch's particles raises the batched-branch
    error, so batched inference falls back)."
   [n]
-  (let [n (if (and (array/array? n) (not (array/host? n))) (array/item n) n)]
+  (let [n (if (array/backend-array? n) (array/item n) n)]
     (check-steps* n)))
 
 (defn- check-steps* [n]
@@ -360,7 +362,8 @@
   (let [n (check-steps n)
         kernel (:kernel gf)
         [_ dinit & dparams] argdiffs
-        params-changed? (some diff/changed? dparams)
+        ;; a change in their number is a change (DESIGN.md §9, G3)
+        params-changed? (or (not= (count args) (count (:args tr))) (some diff/changed? dparams))
         old-subs (::subtraces tr)
         prev-n (count old-subs)
         kept (min n prev-n)
@@ -437,7 +440,7 @@
    all, and array/item raises the batched-branch error (gen.array.batch), so
    batched inference falls back to one particle at a time."
   [idx]
-  (if (or (array/host? idx) (not (array/array? idx))) idx (array/item idx)))
+  (if (array/backend-array? idx) (array/item idx) idx))
 
 (defn- branch [gf idx]
   (or (get (:branches gf) (branch-index idx))

@@ -149,7 +149,9 @@
     (is (grad-matches? (projected array/atan2) (array/array [0.3 -1.2 2.0]) (array/array [1.5])))))
 
 (deftest full-of-a-tracked-value
-  ;; a fill is a broadcast: the value's gradient is the cotangent's sum (G14)
+  ;; a fill is a broadcast: the value's gradient is the cotangent's sum (G14),
+  ;; under MLX's native gradients too (genclj-hf5z: MLX's Full::vjp scales it
+  ;; by the value; with mlx_full for an array value all four fail natively)
   (let [g (array/array [[1.0 2.0] [3.0 4.0]])]
     (is (ts/close? 10.0 ((array/grad #(array/sum (array/* g (array/full [2 2] %)))) 2.3)))
     (is (ts/close? 10.0 ((array/grad #(array/sum (array/* g (array/full-like g %)))) 2.3)) "full-like")
