@@ -31,7 +31,9 @@
             [gen.laws :as laws]
             [gen.llm.branching :as br]
             [gen.llm.branching-contract :as bc]
+            [gen.llm.byte-tokenizer :as bt]
             [gen.llm.constrained :as constrained]
+            [gen.llm.grammar :as grammar]
             [gen.llm.lm :as lm]
             [gen.llm.potential :as potential]
             [gen.llm.smc :as smc]
@@ -335,6 +337,27 @@
           zs (estimates {:potential no-repeats :proposal :masked} 50 40)]
       (is (within-5-se? weights z) (str "the conditional weights' mean " (mean weights) ", Z " z))
       (is (within-5-se? zs z) (str "SMC's mean " (mean zs) ", Z " z)))))
+
+;; SMC's :potential must read contexts with the completion's end tokens, if
+;; it declares any (DESIGN §9, "A potential declares its end tokens"; the
+;; review's P4-02 and I4-02). DESIGN's example: a newline that ends the
+;; completion, and a grammar that needs one in its text. SMC once took the
+;; pair and returned log Ẑ = -Inf for every run, silently; the matched
+;; grammar, whose text stops where the newline ends it, estimates Z.
+(deftest the-potential-s-end-tokens-are-the-completion-s
+  (let [nl (bt/tokenizer ["a" "b" "\n"])
+        m (lm/lm (toy/engine {:n-vocab (:n-vocab nl) :max-branches 64 :n-ctx 128}) nl {:max-cells 5000})
+        lines (token/completion m {:end-tokens #{2}})
+        args [[(:bos nl)] 6]
+        g (grammar/grammar m "[ab]{3}\n" {:end-tokens #{}})]
+    (doseq [p [g (potential/product g)]]
+      (is (= :mismatched-end-tokens (bc/reason #(smc/initialize lines args 8 {:potential p})))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"^smc: " (smc/initialize lines args 8 {:potential g})))
+    (let [s (smc/run lines args 32 {:potential (grammar/grammar m "[ab]{3}" {:end-tokens #{2}}) :proposal :masked
+                                    :key (rng/key 1)})]
+      (is (Double/isFinite (smc/log-ml-estimate s)))
+      (is (every? #(and (= 4 (count %)) (= 2 (peek %)) (every? #{0 1} (pop %))) (smc/particles s))
+          "three letters, then the end"))))
 
 (deftest particles-all-of-weight-0-estimate-z-as-0
   ;; the estimator's value, not an error: refusing it would bias Ẑ upwards

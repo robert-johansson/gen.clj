@@ -87,6 +87,13 @@ I4-01; bean genclj-rd26):
 - The potential's next-token weights are checked against the vocabulary
   at every call (`twist-row`), the only check for the `:lm` and function
   proposals, since a potential's functions may return any array.
+- A potential that declares end tokens (`potential/end-tokens`: a
+  grammar's, or a product holding one) must declare the completion's,
+  `:mismatched-end-tokens` otherwise, by `potential/check-end-tokens`, the
+  check the completion makes too (genclj-1lpj; DESIGN §9, "A potential
+  declares its end tokens"). It is the only check `initialize` makes of the
+  potential: one that rules every sequence out is an estimate of Z = 0,
+  not an error.
 
 **Proposals.** `:lm` draws from the LM's row (the bootstrap); `:masked`
 from the row times the twist's next-token weights, renormalized (for a

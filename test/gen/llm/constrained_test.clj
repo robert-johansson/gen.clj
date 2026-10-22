@@ -199,7 +199,13 @@
     (is (every? #(and (= 4 (count %)) (= 2 (peek %)) (every? #{0 1} (pop %))) runs) "three letters, then the end")
     (is (= Double/NEGATIVE_INFINITY (potential/prefix three [0 2])) "an end token in a context is no prefix")
     (is (= 0.0 (potential/prefix (grammar/grammar m "[ab]{3}\n" {:end-tokens #{}}) [0 0 0 2]))
-        "with no end tokens, the newline is text")))
+        "with no end tokens, the newline is text")
+    (testing "and that grammar under a completion the newline ends is refused, bare or in a product"
+      (let [g (grammar/grammar m "[ab]{3}\n" {:end-tokens #{}})]
+        (doseq [p [g (potential/product g) (potential/product (potential/potential (:n-vocab nl) {:prefix (constantly 0.0)
+                                                                                               :complete (constantly 0.0)})
+                                                              g)]]
+          (is (= :mismatched-end-tokens (bc/reason #(token/completion m {:end-tokens #{2} :potential p})))))))))
 
 (deftest a-text-of-a-word-is-a-word
   (let [tr (gfi/simulate words [prompt 5] (rng/key 1))]
@@ -389,5 +395,7 @@
   (is (= :mismatched-end-tokens (bc/reason #(token/completion ascii {:end-tokens #{} :potential label})))
       "a grammar whose end tokens are not the completion's")
   (is (= :mismatched-end-tokens (bc/reason #(token/completion ascii {:potential word}))))
+  (is (= :mismatched-end-tokens (bc/reason #(token/completion ascii {:end-tokens #{} :potential (potential/product label)})))
+      "a grammar inside a product declares its end tokens too (it once passed, then failed mid-run)")
   (is (= :inexpressible (bc/reason #(grammar/grammar ascii "é+"))) "no token holds é's bytes")
   (is (= :empty-language (bc/reason #(grammar/grammar ascii "[^\\x00-\\x{10FFFF}]")))))

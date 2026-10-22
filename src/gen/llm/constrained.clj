@@ -36,8 +36,7 @@
    context of positive weight where the potential allows no token (a
    grammar complete there, with no end token to end the completion) is a
    loud error."
-  (:require [gen.llm.grammar :as grammar]
-            [gen.llm.lm :as lm]
+  (:require [gen.llm.lm :as lm]
             [gen.llm.potential :as potential]))
 
 (set! *warn-on-reflection* true)
@@ -196,8 +195,10 @@
 
 (defn check-potential
   "potential, checked for a completion over n-vocab tokens with end-tokens:
-   a potential that gives the empty context weight, and for a grammar one
-   whose end tokens (which it leaves out of the text) are the completion's."
+   a potential that gives the empty context weight, whose next-token
+   weights are the vocabulary's and the end's, and whose end tokens, if it
+   declares any (a grammar, which leaves them out of the text), are the
+   completion's (potential/check-end-tokens)."
   [potential ^long n-vocab end-tokens]
   (when-not (satisfies? potential/Potential potential)
     (throw (ex-info (str "token/completion: :potential is a potential (gen.llm.potential), not " (pr-str potential))
@@ -210,12 +211,7 @@
       (throw (ex-info (str "token/completion: the potential's next-token weights have " n " entries, not " (inc n-vocab)
                            " (the LM's vocabulary and the end)")
                       {:reason :invalid-weights :entries n :n-vocab n-vocab}))))
-  (when (and (grammar/grammar? potential) (not= (grammar/end-tokens potential) (set end-tokens)))
-    (throw (ex-info (str "token/completion: the grammar's end tokens " (grammar/end-tokens potential)
-                         " are not the completion's " (set end-tokens)
-                         " (a grammar leaves its end tokens out of the text: make it with the same :end-tokens)")
-                    {:reason :mismatched-end-tokens :grammar (grammar/end-tokens potential) :completion (set end-tokens)})))
-  potential)
+  (potential/check-end-tokens "token/completion" potential end-tokens))
 
 ;; ---------------------------------------------------------------------------
 ;; The global conditional

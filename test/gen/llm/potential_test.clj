@@ -1,8 +1,8 @@
 (ns gen.llm.potential-test
   "Potentials (gen.llm.potential) and the contract check
    (gen.llm.potential-contract) other potentials use: the dense next-token
-   weights, products, misuse; and the check's power, against planted
-   inconsistencies."
+   weights, products, the end tokens a potential declares, misuse; and the
+   check's power, against planted inconsistencies."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.llm.branching-contract :as bc]
             [gen.llm.potential :as potential]
@@ -46,6 +46,30 @@
     (let [p (potential/potential n {:prefix #(potential/prefix by-length %) :complete #(potential/complete by-length %)
                                     :logw-next bad})]
       (is (seq (contract/check-consistent p n contexts 1e-6)) what))))
+
+;; A potential declares the end tokens it reads contexts with, or has no
+;; opinion (DESIGN §9, "A potential declares its end tokens"): a product
+;; carries its factors' set, and two factors that disagree are an error
+;; when it is made; check-end-tokens is the one comparison with a
+;; completion's.
+(deftest potentials-declare-their-end-tokens
+  (let [ended (potential/potential n {:prefix (constantly 0.0) :complete (constantly 0.0) :end-tokens #{5}})
+        other (potential/potential n {:prefix (constantly 0.0) :complete (constantly 0.0) :end-tokens #{4 5}})]
+    (is (nil? (potential/end-tokens by-length)) "no opinion")
+    (is (= #{5} (potential/end-tokens ended)))
+    (is (nil? (potential/end-tokens "not a potential")))
+    (is (= #{5} (potential/end-tokens (potential/product by-length ended))) "a factor's set")
+    (is (= #{5} (potential/end-tokens (potential/product ended (potential/product ended no-repeats)))))
+    (is (nil? (potential/end-tokens (potential/product by-length no-repeats))))
+    (is (= :mismatched-end-tokens (bc/reason #(potential/product ended by-length other))) "two factors disagree")
+    (testing "the check"
+      (is (= ended (potential/check-end-tokens "here" ended #{5})))
+      (is (= by-length (potential/check-end-tokens "here" by-length #{4})) "no opinion passes")
+      (is (= :mismatched-end-tokens (bc/reason #(potential/check-end-tokens "here" ended #{4}))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"^here: " (potential/check-end-tokens "here" ended #{}))
+          "naming its caller"))
+    (is (= :invalid-end-tokens (bc/reason #(potential/potential n {:prefix identity :complete identity :end-tokens #{n}}))))
+    (is (= :invalid-end-tokens (bc/reason #(potential/potential n {:prefix identity :complete identity :end-tokens [1]}))))))
 
 (deftest misuse-is-loud
   (is (= :zero-prefix (bc/reason #(potential/logw-next no-repeats [3 3]))))

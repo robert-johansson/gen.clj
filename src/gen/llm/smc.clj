@@ -30,7 +30,10 @@
    weighs by the LM's rows, so a constrained completion is refused
    (:constrained-completion). Its target, the LM's completions held to the
    potential, is SMC's with that potential as :potential, and the :masked
-   proposal draws as the constrained completion's sites do.
+   proposal draws as the constrained completion's sites do. A :potential
+   that declares end tokens (potential/end-tokens: a grammar's) must
+   declare the completion's (:mismatched-end-tokens); one that rules every
+   sequence out is no error, an estimate of Z = 0.
 
    opts at initialize: :potential (none: weight 1), :proposal, :key,
    :host-pool.
@@ -168,6 +171,9 @@
   ([completion args n] (initialize completion args n {}))
   ([completion args n {:keys [potential proposal key] :or {proposal :lm} :as opts}]
    (let [args (token/check-args :smc (check-completion completion) args)]
+     ;; only the end tokens: a potential that rules every sequence out is
+     ;; an estimate of Z = 0, not an error
+     (when potential (potential/check-end-tokens "smc" potential (:end-tokens completion)))
      (when-not (pos-int? n)
        (throw (ex-info (str "smc: the number of particles is a positive integer, not " (pr-str n))
                        {:reason :invalid-args :n n})))
