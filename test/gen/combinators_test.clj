@@ -420,6 +420,35 @@
           (is (= (:choices tr) d) "the old choices are discarded")
           (is (close? w (- (:score tr))) "the new ones are drawn from the prior"))))))
 
+(def ^:private second-or-first
+  "A kernel whose mean is its second argument, when it has one, else its first."
+  (gen [a & [b]] (trace :x (d/normal (if b b a) 1))))
+
+(def ^:private stepping
+  "An Unfold kernel whose mean is its second parameter, when it has one."
+  (gen [_t s a & [b]] (trace :x (d/normal (if b b a) 1)) s))
+
+(deftest a-change-in-the-number-of-arguments-is-a-change
+  ;; genclj-5wy4 (DESIGN.md §9, G3): no argdiff can say an argument went or
+  ;; came, so Map's and Unfold's revise kept every element with no-change
+  ;; argdiffs: weight 0.0 where 30.0 is right, and the old score. Plant:
+  ;; without the count check, every weight here is 0.0
+  (let [lp (fn [mu] (dc/log-prob (d/normal mu 1) 0.5))
+        obs (cm/from-map {0 {:x 0.5} 1 {:x 0.5} 2 {:x 0.5}})
+        nc diff/no-change]
+    (doseq [[label gf before after] [["Map" (comb/map second-or-first) [[1.0 1.0 1.0] [5.0 5.0 5.0]] [[1.0 1.0 1.0]]]
+                                     ["Unfold" (comb/unfold stepping) [3 0.0 1.0 5.0] [3 0.0 1.0]]]
+            [change from to expected] [["one fewer" before after (* 3 (- (lp 1.0) (lp 5.0)))]
+                                       ["one more" after before (* 3 (- (lp 5.0) (lp 1.0)))]]]
+      (testing (str label ", " change)
+        (let [tr (:trace (gfi/generate gf from obs (rng/key 1)))
+              ncs (vec (repeat (count to) nc))
+              {u :trace uw :weight} (gfi/update tr to ncs cm/EMPTY (rng/key 2))
+              {rw :weight} (gfi/regenerate tr to ncs sel/none (rng/key 3))]
+          (is (close? expected uw))
+          (is (close? expected rw) "regenerate")
+          (is (close? (:weight (gfi/assess gf to (:choices u))) (:score u)) "the score is the new arguments'"))))))
+
 (deftest switches-of-compatible-branches-keep-shared-addresses
   ;; third review B2: a Switch of two Maps (or two distributions) regenerated
   ;; at its index alone resampled every unselected choice, with weight 0
