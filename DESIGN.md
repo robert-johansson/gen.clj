@@ -602,6 +602,22 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   starting trace stays an error. Before, a divergence threw "constrained
   value is NaN", a rule meant for user data: HMC on Neal's funnel at
   L 10, eps 0.5 died at step 1,309 from a valid state.
+  **PROVISIONAL (owner to confirm; 2026-10-22, fix-inference's
+  recommendation, taken while the owner was away):** a distribution's
+  parameter check failing at a position the trajectory tries is also a
+  divergence.
+  - Example: at the funnel's L 3, eps 20, a finite v near −1500 underflows
+    exp(v/2) to a std of 0. The JVM backend's concrete check threw
+    "normal: std must be positive" (33 of 300 proposals), where MLX's
+    compiled path sees only NaN and already counted a divergence. The
+    density is undefined there, and Stan likewise rejects a proposal on a
+    domain error inside the leapfrog.
+  - Only the ex-infos of a parameter check are caught (`:distribution`
+    and `:param`, from dc/check and check-param-not-nan), inside the
+    leapfrog and MALA steps. A structure change, a value's shape and the
+    starting trace stay loud.
+  - The alternative was to keep these loud, as "non-finite" reads
+    literally, so the outcome would depend on the backend.
 - **Casts to integers are Java's** (owner, 2026-10-20; genclj-kw88). On
   every backend, a float cast to an integer dtype truncates toward zero,
   saturates at the dtype's range (±Inf too) and takes NaN to 0. An integer
