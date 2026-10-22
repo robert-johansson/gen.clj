@@ -172,12 +172,15 @@
             (rseq (pop path)))))
 
 (defn- reduce-entries
-  "(f acc entry) over the trie's entries, depth first, as reduce."
+  "(f acc entry) over the trie's entries, depth first, as reduce: a loop
+   over a stack of the nodes to visit, a node's children on it in their
+   order (a path may pass as many nodes as its tokens)."
   [f init trie]
-  (letfn [(walk [acc node]
-            (let [acc (if-let [e (:entry node)] (f acc e) acc)]
-              (reduce-kv (fn [acc _ child] (walk acc child)) acc (:children node))))]
-    (walk init trie)))
+  (loop [acc init stack (list trie)]
+    (if-let [node (first stack)]
+      (recur (if-let [e (:entry node)] (f acc e) acc)
+             (into (rest stack) (reverse (vals (:children node)))))
+      acc)))
 
 (defn entries
   "The trie's entries, depth first: a vector."
@@ -185,8 +188,9 @@
   (reduce-entries conj [] trie))
 
 (defn size
-  "The number of tokens the trie holds."
+  "The number of tokens the trie holds: a loop over a stack of its nodes."
   ^long [trie]
-  (letfn [(walk [^long n node]
-            (reduce-kv (fn [^long n _ child] (walk (+ n (count (:tokens child))) child)) n (:children node)))]
-    (walk 0 trie)))
+  (loop [n 0 stack (list trie)]
+    (if-let [node (first stack)]
+      (recur (+ n (count (:tokens node))) (into (rest stack) (vals (:children node))))
+      n)))

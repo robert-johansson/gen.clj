@@ -42,9 +42,22 @@
     (is (= trie/empty-trie (trie/remove-entry t [1 2 3])))
     (is (= trie/empty-trie (trie/remove-entry t (list 1 2 3))) "any sequence of the tokens")))
 
+;; Every walk of the trie loops, so a path may pass as many nodes as its
+;; tokens: an entry at every prefix of 3,000 tokens, a node at each
+;; (genclj-6h3b: entries and size recursed, and entries overflowed the
+;; stack here). Plant: the recursive walk of entries or size fails this.
+(deftest a-trie-of-a-deep-path-is-walked
+  (let [n 3000
+        tokens (vec (range n))
+        t (reduce (fn [t k] (trie/insert t (subvec tokens 0 k) (dec k) [0.0] k)) trie/empty-trie (range 1 (inc n)))]
+    (is (= (vec (range 1 (inc n))) (trie/entries t)) "depth first: the shallowest first")
+    (is (= n (trie/size t)))
+    (is (= (dec n) (count (trie/entries (trie/remove-entry t tokens)))))
+    (is (= (dec n) (trie/size (trie/remove-entry t tokens))))))
+
 (deftest remove-entry-takes-a-path-of-many-nodes
   ;; an entry at every prefix of 3,000 tokens, a node at each: the deepest
-  ;; removed, and then one in the middle (read by match, which loops too)
+  ;; removed, and then one in the middle
   (let [n 3000
         tokens (vec (range n))
         t (reduce (fn [t k] (trie/insert t (subvec tokens 0 k) (dec k) [0.0] k)) trie/empty-trie (range 1 (inc n)))
