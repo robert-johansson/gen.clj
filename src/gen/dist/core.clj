@@ -142,6 +142,16 @@
   [dtype]
   (get float-limit-table dtype (:float64 float-limit-table)))
 
+(defn probability-tolerance
+  "How far from 1 the sum of k probabilities of dtype may be: 4·log2(k)·ε,
+   room for two blocked or pairwise float sums (one normalized them, one
+   checks them), each measured within 0.8·log2(k)·ε on MLX's CPU. It is
+   never below 1e-6, float64's former bound, which leaves room for
+   probabilities given to six digits. A fixed 1e-6 rejected float32 sums
+   of many terms (dirichlet draws at K = 10⁴)."
+  ^double [k dtype]
+  (max 1e-6 (* 4.0 (/ (Math/log (max (long k) 2)) (Math/log 2.0)) (double (:eps (float-limits dtype))))))
+
 (defn float-dtype [b] (:float (array/defaults b)))
 
 (defn check
@@ -206,7 +216,8 @@
   [dist-name param-name ps]
   (when (array/concrete? ps)
     (let [ok? (and (array/all-true? (>= ps 0))
-                   (array/all-true? (<= (array/abs (- (array/sum ps {:axis -1}) 1.0)) 1e-6)))]
+                   (array/all-true? (<= (array/abs (- (array/sum ps {:axis -1}) 1.0))
+                                        (probability-tolerance (peek (array/shape ps)) (array/dtype ps)))))]
       (check ok? dist-name
              (str param-name " must be probabilities (non-negative, summing to 1)"
                   " — for log-probabilities or logits use categorical-logits")
