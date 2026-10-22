@@ -145,11 +145,12 @@
                    {:dtype (float-dtype opts b logits) :backend b})]
      (array/argmax (+ g logits) {:axis -1}))))
 
-(defn first-accepted
+(defn ^:no-doc first-accepted
   "The value of the first accepted of proposals, [accept? value] pairs in
    order, else fallback: the fold of a rejection sampler with a fixed number
-   of vectorized rounds (gamma's here, gen.dist's Poisson and binomial), so
-   it runs branch-free and batches."
+   of vectorized rounds, so it runs branch-free and batches. The samplers'
+   shared helper (gamma's here, gen.dist's Poisson and binomial), not part
+   of gen.random's API (docs/array-api.md §7)."
   [fallback proposals]
   (reduce (fn [acc [ok value]] (array/where ok value acc)) fallback (reverse proposals)))
 
