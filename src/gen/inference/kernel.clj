@@ -136,7 +136,7 @@
    array read at the inference loop's boundary, in collections too."
   [v]
   (cond (array/array? v) (array/->clj v)
-        (and (sequential? v) (not (record? v))) (mapv control-value v)
+        (sequential? v) (mapv control-value v)
         (and (map? v) (not (record? v))) (into {} (map (fn [[k x]] [k (control-value x)])) v)
         :else v))
 
@@ -417,10 +417,10 @@
     (throw (ex-info "run needs :samples ≥ 0, :burn ≥ 0 and :thin ≥ 1" {:samples samples :burn burn :thin thin})))
   (let [f (step-fn kernel)
         steps (+ burn (* samples thin))
-        keys (if (pos? steps) (rng/split (or key (gfi/next-key)) steps) [])]
+        step-keys (if (pos? steps) (rng/split (or key (gfi/next-key)) steps) [])]
     (loop [i 0 t trace traces (transient []) accepted 0 moves 0 reported? true diverged 0]
       (if (< i steps)
-        (let [r (f t (keys i))
+        (let [r (f t (step-keys i))
               i' (inc i)
               ;; one iteration's graph at a time on a lazy backend
               t' (gfi/eval-trace! (:trace r))

@@ -54,6 +54,10 @@
         {mt :trace lp :weight} (gfi/generate model model-args (cm/merge observations (:choices qt)) km)]
     [qt (double (array/item (- lp (:score qt)))) mt]))
 
+(defn- unknown-baseline [baseline baselines]
+  (throw (ex-info (str "The :baseline is one of " (pr-str baselines) ", not " (pr-str baseline))
+                  {:baseline baseline :baselines baselines})))
+
 (defn- model-under
   "The model under its store, when its parameters are trained."
   [model model-store]
@@ -115,12 +119,13 @@
         model (model-under model model-store)
         runs (mapv #(draw model model-args observations q q-args %) (rng/split (or key (gfi/next-key)) n))
         lws (mapv second runs)
-        total (reduce clojure.core/+ lws)
+        total (reduce + lws)
         ;; log w less the mean log weight of the other draws
         loo (when (> n 1) (mapv #(- % (/ (- total %) (dec n))) lws))
         signal (case baseline
                  nil lws
-                 :leave-one-out loo)]
+                 :leave-one-out loo
+                 (unknown-baseline baseline [nil :leave-one-out]))]
     (cond-> {:objective (/ total n)
              :grads (grad/weighted-sum (map #(/ % n) signal) (map (comp grad/param-gradients first) runs))}
       ;; the model's own draws' score term takes the leave-one-out
@@ -145,8 +150,9 @@
         normalized (mapv #(Math/exp %) (:log-weights (w/normalize lws)))
         loo (fn [j] (let [others (keep-indexed #(when (not= j %1) %2) lws)
                           stand-in (case baseline
-                                     :geometric (/ (reduce clojure.core/+ others) (dec k))
-                                     :arithmetic (w/log-mean-exp others))]
+                                     :geometric (/ (reduce + others) (dec k))
+                                     :arithmetic (w/log-mean-exp others)
+                                     (unknown-baseline baseline [:geometric :arithmetic]))]
                       (w/log-mean-exp (assoc lws j stand-in))))
         signal (mapv #(- bound (loo %)) (range k))
         ;; ∇ of the bound: Σ_j (L - L_{-j}) ∇ log q_j - Σ_j w̃_j ∇ log q_j
@@ -199,7 +205,7 @@
          (let [runs (mapv #(vimco-gradient model model-args observations q q-args store samples
                                            (assoc opts :key % :model-store model-store))
                           (rng/split key estimates))]
-           (cond-> {:objective (/ (reduce clojure.core/+ (map :objective runs)) estimates)
+           (cond-> {:objective (/ (reduce + (map :objective runs)) estimates)
                     :grads (grad/mean (map :grads runs))}
              model-store (assoc :model-grads (grad/mean (map :model-grads runs))))))
        store optimizer opts))

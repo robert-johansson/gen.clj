@@ -65,17 +65,23 @@
   [{:keys [lr beta1 beta2 eps] :or {lr 0.001 beta1 0.9 beta2 0.999 eps 1e-8}}]
   {:kind :adam :lr lr :beta1 beta1 :beta2 beta2 :eps eps})
 
+(defn- unknown-kind [kind]
+  (throw (ex-info (str "An optimizer's :kind is :sgd, :gradient-descent or :adam (made by sgd, gradient-descent"
+                       " or adam), not " (pr-str kind))
+                  {:kind kind :kinds [:sgd :gradient-descent :adam]})))
+
 (defn init
   "The optimizer's initial state for store."
   [{:keys [kind]} store]
   (case kind
     :sgd nil
     :gradient-descent {:t 0}
-    :adam {:t 0 :m (array/tree-map array/zeros-like store) :v (array/tree-map array/zeros-like store)}))
+    :adam {:t 0 :m (array/tree-map array/zeros-like store) :v (array/tree-map array/zeros-like store)}
+    (unknown-kind kind)))
 
 (defn step
   "[store' state']: one ascent step from store along the gradients,
-   evaluated. A step is an inference loop's boundary (rule 3): on a lazy
+   evaluated. A step is an inference loop's boundary: on a lazy
    backend a loop of unevaluated steps would make each store a graph over
    every step before it, which no collection frees (genclj-9e9e)."
   [{:keys [kind lr beta1 beta2 eps] :as optimizer} state store grads]
@@ -93,7 +99,8 @@
                  c2 (- 1.0 (Math/pow beta2 t))]
              [(update-given (fn [theta _ mi vi] (+ theta (* lr (/ (/ mi c1) (+ (array/sqrt (/ vi c2)) eps)))))
                             store grads m v)
-              {:t t :m m :v v}]))))
+              {:t t :m m :v v}])
+     (unknown-kind kind))))
 
 (defn train
   "Fit the trainable parameters of gf by maximizing the log density of
@@ -105,24 +112,22 @@
    each epoch's mean log density of the last batch. Options also take :key."
   [gf store optimizer data-fn gradients-fn
    {:keys [epochs batches-per-epoch batch-size key] :or {epochs 1 batches-per-epoch 1 batch-size 1}}]
-  (let [split rng/split]
-    (loop [epoch 0 store store state (init optimizer store) history [] key (or key (gfi/next-key))]
-      (if (< epoch epochs)
-        (let [[k-epoch k-next] (split key)
-              [store state score]
-              (reduce (fn [[store state _] k-batch]
-                        (let [results (map (fn [k]
-                                             (let [[k-data k-gen] (split k)
-                                                   [args constraints] (data-fn k-data)]
-                                               (:trace (gfi/generate (dyn/with-params gf store) args constraints k-gen))))
-                                           (split k-batch batch-size))
-                              traces (vec results)
-                              [store state] (step optimizer state store (grad/mean (map gradients-fn traces)))]
-                          [store state (/ (reduce + (map #(double (array/item (:score %))) traces)) batch-size)]))
-                      [store state nil]
-                      (split k-epoch batches-per-epoch))]
-          (recur (inc epoch) store state (conj history score) k-next))
-        {:store store :history history}))))
+  (loop [epoch 0 store store state (init optimizer store) history [] key (or key (gfi/next-key))]
+    (if (< epoch epochs)
+      (let [[k-epoch k-next] (rng/split key)
+            [store state score]
+            (reduce (fn [[store state _] k-batch]
+                      (let [traces (mapv (fn [k]
+                                           (let [[k-data k-gen] (rng/split k)
+                                                 [args constraints] (data-fn k-data)]
+                                             (:trace (gfi/generate (dyn/with-params gf store) args constraints k-gen))))
+                                         (rng/split k-batch batch-size))
+                            [store state] (step optimizer state store (grad/mean (map gradients-fn traces)))]
+                        [store state (/ (reduce + (map #(double (array/item (:score %))) traces)) batch-size)]))
+                    [store state nil]
+                    (rng/split k-epoch batches-per-epoch))]
+        (recur (inc epoch) store state (conj history score) k-next))
+      {:store store :history history})))
 
 (defn lecture
   "The sleep phase of wake-sleep (Gen.jl's lecture!): a trace of model on

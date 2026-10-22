@@ -31,8 +31,11 @@
 
 (set! *warn-on-reflection* true)
 
-(defn- weighted-sample
-  "One trace with its log importance weight."
+(defn weighted-sample
+  "One trace of model on args with its log importance weight ({:trace
+   :weight}): generated with the observations, and with the choices of
+   :proposal on :proposal-args, less their log density, when given. A
+   proposal's choice at an observed address is a loud error."
   [model args observations {:keys [proposal proposal-args]} key]
   (if proposal
     (let [[k-propose k-generate] (rng/split key)
@@ -82,8 +85,8 @@
   ([model args observations n] (importance-resampling model args observations n {}))
   ([model args observations n opts]
    (let [[k-samples k-resample] (rng/split (or (:key opts) (gfi/next-key)))
-         {:keys [traces particles log-normalized-weights log-ml-estimate]}
+         {scalar-traces :traces :keys [particles log-normalized-weights log-ml-estimate]}
          (importance-sampling model args observations n (assoc opts :key k-samples))
          i (first (w/multinomial log-normalized-weights 1 k-resample))]
-     {:trace (if particles (first (batched/traces (batched/take particles [i]))) (traces i))
+     {:trace (if particles (first (batched/traces (batched/take particles [i]))) (scalar-traces i))
       :log-ml-estimate log-ml-estimate})))

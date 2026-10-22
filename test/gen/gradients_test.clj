@@ -132,7 +132,17 @@
                                                           (array/stack [(* x (array/exp u)) (array/negate u)])))
                                                 (array/array [1.5 0.3]))
                         0.3))
-           (ts/tol 1e-12)))))
+           (ts/tol 1e-12))))
+  (testing "a non-square Jacobian, the trace kernels' and transforms' rows: (a, b) ↦ (ab, a + b, b²)"
+    (is (ts/close? (array/array [[3.0 2.0] [1.0 1.0] [0.0 6.0]])
+                   (g/jacobian (fn [v] (let [a (array/take v 0) b (array/take v 1)] (array/stack [(* a b) (+ a b) (* b b)])))
+                               (array/array [2.0 3.0]) 3))))
+  (testing "values flattened for a Jacobian, and back in their shapes"
+    (let [values [0.5 (array/array [1.0 2.0]) (array/array [[3.0 4.0] [5.0 6.0]])]
+          [x unflatten] (g/flattened values)]
+      (is (= [7] (array/shape x)))
+      (is (= (ts/host values) (ts/host (unflatten x))))
+      (is (= [[] [2] [2 2]] (mapv array/shape (unflatten (* 2.0 x))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Parameters
@@ -464,6 +474,13 @@
     (is (ts/close? (ts/number (dc/log-prob (d/normal (* 0.3 y) s) mu)) score))
     (is (ts/close? (* (/ z s) y) (:w grads)))
     (is (ts/close? (- (* z z) 1.0) (:log-s grads)))))
+
+(deftest misnamed-optimizers-are-loud
+  ;; the post-M5 review's I3-14: an unknown :kind names the kinds. Planted
+  ;; bug (2026-10-22): the case without a default throws a bare
+  ;; IllegalArgumentException, "No matching clause"
+  (is (= [:sgd :gradient-descent :adam] (:kinds (ts/thrown-data (learn/init {:kind :rmsprop} {:w 1.0})))))
+  (is (= :rmsprop (:kind (ts/thrown-data (learn/step {:kind :rmsprop} nil {:w 1.0} {:w 0.1}))))))
 
 (deftest gradient-trees-add-leaf-by-leaf
   ;; the one sum behind train, lecture-batched and VI's estimators: nested

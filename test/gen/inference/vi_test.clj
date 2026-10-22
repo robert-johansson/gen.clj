@@ -268,6 +268,14 @@
                         (vi/black-box-vi theta-model [] observations family [] start (learn/adam {:lr 0.02})
                                          {:iters 1 :model-store {:theta 0.0}}))))
 
+(deftest misnamed-baselines-are-loud
+  ;; the post-M5 review's I3-14. Planted bug (2026-10-22): the cases without
+  ;; a default throw a bare IllegalArgumentException
+  (is (= [nil :leave-one-out]
+         (:baselines (ts/thrown-data (vi/elbo-gradient model [] observations family [] start 4 {:baseline :loo :key (rng/key 10)})))))
+  (is (= [:geometric :arithmetic]
+         (:baselines (ts/thrown-data (vi/vimco-gradient model [] observations family [] start 4 {:baseline :harmonic :key (rng/key 11)}))))))
+
 (deftest estimates-need-enough-samples
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"at least 2"
                         (vi/elbo-gradient model [] observations family [] start 1 {:baseline :leave-one-out :key (rng/key 10)})))

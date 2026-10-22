@@ -40,6 +40,7 @@
             [gen.batched :as batched]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
+            [gen.inference.importance :as imp]
             [gen.inference.mh :as mh]
             [gen.inference.weights :as w]
             [gen.random :as rng]))
@@ -89,29 +90,23 @@
    proposal, a stratified initialization runs one particle at a time and
    ignores :batched?."
   ([model args observations n] (initialize model args observations n {}))
-  ([model args observations n {:keys [proposal proposal-args batched? strata layout] :or {layout :contiguous} :as opts}]
+  ([model args observations n {:keys [proposal batched? strata layout] :or {layout :contiguous} :as opts}]
    (if (and batched? (not proposal) (not strata))
      (let [{ps :particles ws :weights} (batched/generate model args observations n (or (:key opts) (gfi/next-key)))]
        {:particles ps :log-weights (vec (array/->clj ws)) :log-ml 0.0})
-   (let [particle (fn [constraints key]
-                    (if proposal
-                      (let [[k-propose k-generate] (rng/split key)
-                            {:keys [choices weight]} (gfi/propose proposal (vec proposal-args) k-propose)
-                            r (gfi/generate model args (cm/merge constraints choices) k-generate)]
-                        (update r :weight - weight))
-                      (gfi/generate model args constraints key)))
-         ;; one particle's graph at a time on a lazy backend, as in moved
-         evaluated (fn [{:keys [trace weight] :as r}] (gfi/eval-trace! trace weight) r)
-         results (if strata
-                   (let [strata (vec strata)
-                         k (count strata)
-                         [k-particles k-strata] (rng/split (or (:key opts) (gfi/next-key)))]
-                     (mapv (fn [s key] (evaluated (update (particle (cm/merge (strata s) observations) key) :weight + (Math/log k))))
-                           (strata-of n k layout k-strata) (rng/split k-particles n)))
-                   (mapv #(evaluated (particle observations %)) (particle-keys opts n)))]
-     {:traces (mapv :trace results)
-      :log-weights (mapv :weight results)
-      :log-ml 0.0}))))
+     (let [particle #(imp/weighted-sample model args %1 opts %2)
+           ;; one particle's graph at a time on a lazy backend, as in moved
+           evaluated (fn [{:keys [trace weight] :as r}] (gfi/eval-trace! trace weight) r)
+           results (if strata
+                     (let [strata (vec strata)
+                           k (count strata)
+                           [k-particles k-strata] (rng/split (or (:key opts) (gfi/next-key)))]
+                       (mapv (fn [s key] (evaluated (update (particle (cm/merge (strata s) observations) key) :weight + (Math/log k))))
+                             (strata-of n k layout k-strata) (rng/split k-particles n)))
+                     (mapv #(evaluated (particle observations %)) (particle-keys opts n)))]
+       {:traces (mapv :trace results)
+        :log-weights (mapv :weight results)
+        :log-ml 0.0}))))
 
 (defn choice-product
   "A choice map for every combination of values (GenParticleFilters'
@@ -168,26 +163,26 @@
        (doseq [[i d] (map-indexed vector ds)] (check-discard d i))
        (array/eval! (:trace ps'))
        (assoc state :particles ps' :log-weights (mapv + (:log-weights state) (array/->clj ws))))
-   (let [state (unbatched state)
-         n (count (:traces state))
-         move (fn [i tr key]
-                (if proposal
-                  (let [[k-propose k-update] (rng/split key)
-                        {:keys [choices weight]} (gfi/propose proposal (into [tr] proposal-args) k-propose)
-                        r (gfi/update tr args argdiffs (cm/merge observations choices) k-update)]
-                    (if backward
-                      (update r :weight + (- (:weight (gfi/assess backward (into [(:trace r)] backward-args) (:discard r) (gfi/backward-key k-update)))
-                                             weight))
-                      (do (check-discard (:discard r) i)
-                          (update r :weight - weight))))
-                  (let [r (gfi/update tr args argdiffs observations key)]
-                    (check-discard (:discard r) i)
-                    r)))
-         results (mapv (fn [i tr lw k] (moved (move i tr k) lw))
-                       (range n) (:traces state) (:log-weights state) (particle-keys opts n))]
-     (assoc state
-            :traces (mapv :trace results)
-            :log-weights (mapv :log-weight results))))))
+     (let [state (unbatched state)
+           n (count (:traces state))
+           move (fn [i tr key]
+                  (if proposal
+                    (let [[k-propose k-update] (rng/split key)
+                          {:keys [choices weight]} (gfi/propose proposal (into [tr] proposal-args) k-propose)
+                          r (gfi/update tr args argdiffs (cm/merge observations choices) k-update)]
+                      (if backward
+                        (update r :weight + (- (:weight (gfi/assess backward (into [(:trace r)] backward-args) (:discard r) (gfi/backward-key k-update)))
+                                               weight))
+                        (do (check-discard (:discard r) i)
+                            (update r :weight - weight))))
+                    (let [r (gfi/update tr args argdiffs observations key)]
+                      (check-discard (:discard r) i)
+                      r)))
+           results (mapv (fn [i tr lw k] (moved (move i tr k) lw))
+                         (range n) (:traces state) (:log-weights state) (particle-keys opts n))]
+       (assoc state
+              :traces (mapv :trace results)
+              :log-weights (mapv :log-weight results))))))
 
 (defn ess
   "The effective sample size of the particles' weights."
@@ -227,7 +222,7 @@
             (throw (ex-info (str "Optimal resampling to " n " particles needs that many of positive weight; there are "
                                  n-old)
                             {:n n :positive n-old})))
-        below (vec (reductions clojure.core/+ (map p order)))
+        below (vec (reductions + (map p order)))
         i (or (first (filter (fn [i] (let [reach (+ (/ (below i) (p (order i))) (- n-old i 1))]
                                        (<= reach (+ n (Math/ulp (double reach))))))
                              (range n-old)))
@@ -235,7 +230,7 @@
         kept (subvec order i)
         others (subvec order 0 i)
         m (- n (count kept))
-        c (when (pos? m) (/ m (reduce clojure.core/+ (map p others))))
+        c (when (pos? m) (/ m (reduce + (map p others))))
         drawn (if (pos? m) (mapv others (w/systematic (mapv lw-normal others) m key)) [])]
     [(into kept drawn)
      (into (mapv #(+ (lw-normal %) (Math/log n)) kept) (when c (repeat m (Math/log (/ n c)))))]))
@@ -361,7 +356,9 @@
                                             (first group)
                                             (group (first (w/multinomial (mapv lw group) 1 key)))))
                      idx (mapv pick groups (rng/split (or key (gfi/next-key)) n))]
-                 (select-particles state idx (mapv (fn [group] (- (w/log-sum-exp (mapv lw group)) (Math/log k))) groups)))))))
+                 (select-particles state idx (mapv (fn [group] (- (w/log-sum-exp (mapv lw group)) (Math/log k))) groups)))
+       (throw (ex-info (str "dereplicate: :method is :keepfirst or :sample, not " (pr-str method))
+                       {:method method :methods [:keepfirst :sample]}))))))
 
 (defn- host-choices [trace]
   (let [c (:choices trace)]
