@@ -2,10 +2,11 @@
   "Purely functional randomness. Keys are immutable values and every sampler is
    a pure function of its key: the same key gives the same draw.
 
-   Keys follow JAX's Threefry scheme (gen.random.threefry). Every sampler is
-   built from a single backend primitive, -random-uniform, using JAX's
-   transforms. On the float64 JVM backend, uniform draws are bit-identical to
-   JAX's, and normal, gumbel and exponential draws match JAX to rounding."
+   Keys follow JAX's Threefry scheme (gen.random.threefry), with fold-in
+   taking 64-bit data. Every sampler is built from a single backend
+   primitive, -random-uniform, using JAX's transforms. On the float64 JVM
+   backend, uniform draws are bit-identical to JAX's, and normal, gumbel and
+   exponential draws match JAX to rounding."
   (:refer-clojure :exclude [key + - * / < > <= >= ==])
   (:require [gen.array :as array :refer [+ - * / < > <= >= ==]]
             [gen.array.dtype :as dt]
@@ -36,7 +37,8 @@
   ([k n] (threefry/split (check-key k) n)))
 
 (defn fold-in
-  "A new key from k and an integer, e.g. to derive one key per address."
+  "A new key from k and an integer (64 bits), e.g. to derive one key per
+   address: (split k n)'s key at index data, for every n past it."
   [k data]
   (threefry/fold-in (check-key k) data))
 

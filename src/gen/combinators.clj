@@ -37,11 +37,9 @@
    - Elements and steps beyond a changed length are generated, or discarded.
    - The retdiff is a vector-diff of the returned vector.
    A Switch whose index changes runs the new branch against the old branch's
-   choices when the branches are compatible (two dynamic generative
-   functions, two distributions, or two combinators of one type), so the
-   addresses they share keep their values, as an if would and as Gen.jl does.
-   Branches of different kinds share no addresses: the new one is generated
-   from the constraints and every old choice is discarded.
+   choices, whatever their kinds (gfi/revise), so the addresses they share
+   keep their values, as an if would and as Gen.jl does; the old choices
+   the new branch does not make are discarded.
 
    Element or step i draws from (fold-in key i), so changing the length never
    shifts another element's randomness."
@@ -84,8 +82,7 @@
    sorted set."
   [op choices n]
   (when (cm/has-value? choices)
-    (throw (ex-info (str (name op) ": a single value was given where indexed choices belong")
-                    {:op op})))
+    (throw (gfi/unvisited op [[]] "a single value was given where indexed choices belong")))
   (let [addrs (clojure.core/map first (cm/submaps choices))]
     (when-let [outside (seq (remove #(and (integer? %) (< -1 % n)) addrs))]
       (throw (gfi/unvisited op (mapv vector outside) (str "the indices are 0 to " (dec n)))))
@@ -451,27 +448,21 @@
         {:trace (switch-trace gf (vec args) idx sub) :weight w})
       {:trace (switch-trace gf (vec args) idx (simulate-at b (vec bargs) key)) :weight 0.0})))
 
-(defn- switch-revise [gf tr [idx & bargs :as args] argdiffs op cs key]
+(defn- switch-revise
+  "update or regenerate of a Switch trace: the branch at the new index runs
+   against the old branch's trace, another branch by gfi/revise, so the
+   addresses both make keep their values (Def 2.3.1), as the equivalent if
+   would and as Gen.jl does."
+  [gf tr [idx & bargs :as args] argdiffs op cs key]
   (let [args (vec args)
-        bargs (vec bargs)]
-    (if (or (= (branch-index idx) (::branch tr))
-            ;; compatible branches (two dynamic GFs, two distributions, two
-            ;; combinators of one type): the new one runs against the old one's
-            ;; choices, so the addresses they share keep their values (Def
-            ;; 2.3.1), as the equivalent if would and as Gen.jl does
-            (dyn/compatible-callee? (:gen-fn (::subtrace tr)) (branch gf idx)))
-      (let [b (branch gf idx)
-            sub (::subtrace tr)
-            bdiffs (if (= (branch-index idx) (::branch tr)) (vec (rest argdiffs)) (unknown-diffs bargs))
-            r (if (= op :update)
-                (update-at b sub bargs bdiffs cs key nil)
-                (regenerate-at b sub bargs bdiffs cs key nil))]
-        (assoc r :trace (switch-trace gf args idx (:trace r))))
-      ;; a new branch: generated afresh; the old choices are discarded
-      (let [{t :trace w :weight} (switch-generate gf args (when (= op :update) cs) key)]
-        (cond-> {:trace t :retdiff diff/unknown-change}
-          (= op :update) (assoc :weight (- w (:score tr)) :discard (:choices tr))
-          (= op :regenerate) (assoc :weight 0.0))))))
+        bargs (vec bargs)
+        b (branch gf idx)
+        sub (::subtrace tr)
+        bdiffs (if (= (branch-index idx) (::branch tr)) (vec (rest argdiffs)) (unknown-diffs bargs))
+        r (if (= op :update)
+            (update-at b sub bargs bdiffs cs key nil)
+            (regenerate-at b sub bargs bdiffs cs key nil))]
+    (assoc r :trace (switch-trace gf args idx (:trace r)))))
 
 (gfi/defgf SwitchGF [branches]
   gfi/IStores
@@ -571,7 +562,7 @@
       (if (= :all is) :all (into {} (clojure.core/map (fn [i] [i #{:production :aggregation}])) is)))
     :else
     (do (when (cm/has-value? cs)
-          (throw (ex-info (str (name op) ": a single value was given where Recurse's nodes belong") {:op op})))
+          (throw (gfi/unvisited op [[]] "a single value was given where Recurse's nodes belong")))
         (into {} (clojure.core/map (fn [[i sub]]
                                      (when-not (nat-int? i)
                                        (throw (gfi/unvisited op [[i]] "Recurse's addresses are node indices")))

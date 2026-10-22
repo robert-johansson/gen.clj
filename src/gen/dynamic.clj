@@ -214,33 +214,6 @@
 
 (declare dynamic-gf?)
 
-(defn compatible-callee?
-  "Can gf update (or regenerate) old's sub-trace? A sub-trace holds choices
-   by address, so any dynamic generative function can run against another's
-   (the addresses they share keep their values, as with if), and any
-   distribution against another's single value; a combinator needs one of its
-   own type, with compatible kernels."
-  [old gf]
-  (cond (identical? old gf) true
-        (and (instance? gen.dist.core.Distribution old) (instance? gen.dist.core.Distribution gf)) true
-        (and (dynamic-gf? old) (dynamic-gf? gf)) true
-        (and (record? old) (gfi/generative-function? old))
-        (and (= (class old) (class gf))
-             (every? (fn [k] (let [x (get old k)]
-                               (or (not (gfi/generative-function? x)) (compatible-callee? x (get gf k)))))
-                     (keys old)))
-        :else (= old gf)))
-
-(defn- replace-call
-  "state without the previous call at p (its choices discarded and, in
-   update, its score subtracted): a different generative function now sits
-   at p, so the old call is gone and the new one is new."
-  [state p old]
-  (if (= (:mode state) :update)
-    (cond-> (add-weight state (array/negate (:score old)))
-      (not (cm/empty? (:choices old))) (update :discard cm/set-choice p (:choices old)))
-    state))
-
 (defn- project-under-its-store
   "tr's projection by its maker under the store at the call that made it
    (a callee's project may run its model)."
@@ -281,15 +254,14 @@
   "Call gf at path p under the run's operation, scalar or batched (through
    run-call), nesting its choices and recording its sub-trace: [retval
    state' retdiff]. hints are argdiffs for the arguments that are not
-   identical to the previous call's."
+   identical to the previous call's. The previous call's sub-trace is
+   revised whatever gf is (another generative function by gfi/revise), so
+   the addresses both make keep their values (Def 2.3.1)."
   [state p gf args & [hints]]
   (let [mode (:mode state)
         cons (cm/get-submap (:constraints state) p cm/EMPTY)
-        old-sub (get (::subtraces (:prev state)) p)
-        replaced? (and old-sub (not (compatible-callee? (:gen-fn old-sub) gf)))
-        prev-sub (when-not replaced? old-sub)
+        prev-sub (get (::subtraces (:prev state)) p)
         argdiffs (when prev-sub (arg-diffs (:args prev-sub) args hints))
-        state (if replaced? (replace-call state p old-sub) state)
         ;; a batched run's callees run batched too: they inherit the batch tracer
         base {}
         ;; the callee's key, the same in every mode: assess draws what
@@ -775,7 +747,9 @@
 ;; DynamicGF
 ;; ---------------------------------------------------------------------------
 
-(defrecord DynamicGF [body-fn source params transitions dispatch static]
+;; an untraced call, as in Gen.jl: (gf a b) is the return value of a
+;; simulated run (gfi/defgf)
+(gfi/defgf DynamicGF [body-fn source params transitions dispatch static]
   gfi/IStores
   (-stores [gf] (:params gf))
   (-with-stores [gf stores] (assoc gf :params stores))
@@ -816,34 +790,7 @@
   (-revise [gf op args opts project-old]
     (if (contains? (:prev opts) ::scores)
       (run-handler gf op args (assoc opts ::revise true))
-      (gfi/generate-again gf op args opts project-old)))
-
-  ;; an untraced call, as in Gen.jl: (gf a b) is the return value of a simulated run
-  clojure.lang.IFn
-  (invoke [this] (:retval (gfi/simulate this [])))
-  (invoke [this a] (:retval (gfi/simulate this [a])))
-  (invoke [this a b] (:retval (gfi/simulate this [a b])))
-  (invoke [this a b c] (:retval (gfi/simulate this [a b c])))
-  (invoke [this a b c d] (:retval (gfi/simulate this [a b c d])))
-  (invoke [this a b c d e] (:retval (gfi/simulate this [a b c d e])))
-  (invoke [this a b c d e f] (:retval (gfi/simulate this [a b c d e f])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20 more]
-    (:retval (gfi/simulate this (into [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20] more))))
-  (applyTo [this args] (:retval (gfi/simulate this (vec args)))))
+      (gfi/generate-again gf op args opts project-old))))
 
 (defn dynamic-gf? [x] (instance? DynamicGF x))
 

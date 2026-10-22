@@ -67,6 +67,24 @@
     (when (ts/jvm?) (is (instance? Double (rng/normal k)) "a 0-d draw is a host number on the JVM backend"))
     (is (= (ts/host (rng/uniform k)) (array/item (rng/uniform k [1]))) "element 0 does not depend on the shape")))
 
+(deftest fold-in-takes-64-bit-data
+  ;; DESIGN §9 (owner, 2026-10-22, the post-M5 review's P2-09). Planted,
+  ;; the old fold-in, which hashed [0, d mod 2^32], fails the last two
+  ;; testings here, recurse-deep-nodes-draw-afresh and
+  ;; the-implicit-key-source's period
+  (let [k (rng/key 1)
+        [k0 k1] (rng/key-data k)
+        two32 (bit-shift-left 1 32)
+        words (fn [w] [(unsigned-bit-shift-right w 32) (bit-and w 0xFFFFFFFF)])]
+    (testing "below 2^32, the counter [0 d]: JAX's keys"
+      (doseq [d (concat (range 36) [65536 123456 (bit-shift-left 1 24) 99999999 (dec (bit-shift-left 1 31))
+                                     (bit-shift-left 1 31) (dec two32)])]
+        (is (= (words (threefry/hash2x32 k0 k1 0 d)) (rng/key-data (rng/fold-in k d))) (str "data " d))))
+    (testing "beyond, distinct"
+      (is (not= (rng/fold-in k 5) (rng/fold-in k (+ two32 5)))))
+    (testing "split's key at index d, for d past 2^32 too: the counter [hi32 d, lo32 d]"
+      (is (= (words (threefry/hash2x32 k0 k1 1 5)) (rng/key-data (rng/fold-in k (+ two32 5))))))))
+
 (defspec fold-in-is-split-at-an-index 100
   (prop/for-all [seed gen/nat i (gen/choose 0 50)]
     (let [k (rng/key seed)]

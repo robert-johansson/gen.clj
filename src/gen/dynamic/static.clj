@@ -76,17 +76,25 @@
                                (when (= 'splice (first call)) " (a splice without an address is dynamic)"))
                           call)))
 
+(defn- nested-gen?
+  "Is form a gen, whose trace is its own: a call whose head is no local and
+   resolves to gen.dynamic/gen, however it is spelled (gen, dyn/gen, …)?"
+  [{:keys [env locals]} form]
+  (and (seq? form) (symbol? (first form))
+       (not (contains? env (first form))) (not (contains? locals (first form)))
+       (let [v (resolve env (first form))]
+         (and (var? v) (= 'gen.dynamic/gen (symbol v))))))
+
 (defn- outside-gens
-  "The symbols of form outside the gen forms and the quoted data in it (a
-   nested gen's trace is its own, and quoted data is not code)."
-  [form]
-  (filter symbol? (tree-seq #(and (coll? %) (not (quoted? %)) (not (and (seq? %) ('#{gen gen.dynamic/gen} (first %)))))
-                            seq form)))
+  "The symbols of form outside the gens and the quoted data in it (a nested
+   gen's trace is its own, and quoted data is not code)."
+  [env form]
+  (filter symbol? (tree-seq #(and (coll? %) (not (quoted? %)) (not (nested-gen? env %))) seq form)))
 
 (defn- pure!
   "form, checked to make none of the body's own calls."
-  [form what]
-  (when-let [e (first (filter effects (outside-gens form)))]
+  [env form what]
+  (when-let [e (first (filter effects (outside-gens env form)))]
     (not-static (str what " calls " e ", which a static body may do only as a binding's whole expression") form))
   form)
 
@@ -143,7 +151,7 @@
    the var and its arguments (for gen.diff/propagate)."
   [env form known]
   (let [v (call-var env form)]
-    (cond-> {:kind :compute :expr (pure! form "a binding") :inputs (inputs form known)}
+    (cond-> {:kind :compute :expr (pure! env form "a binding") :inputs (inputs form known)}
       (and (symbol? form) (known form)) (assoc :alias form)
       v (assoc :call v :args (vec (rest form)) :arg-specs (mapv #(arg-spec % known) (rest form))))))
 
@@ -161,16 +169,16 @@
              (let [[_ addr dist & more] call
                    _ (when (seq more) (not-static "trace takes an address and a distribution" call))
                    [addr ks] (split-address addr call)]
-               (cond-> {:kind :trace :addr addr :expr (pure! dist "a distribution") :inputs (inputs [dist ks] known)}
-                 ks (assoc :keys (pure! ks "an address"))))
+               (cond-> {:kind :trace :addr addr :expr (pure! env dist "a distribution") :inputs (inputs [dist ks] known)}
+                 ks (assoc :keys (pure! env ks "an address"))))
 
              (= 'splice head)
              (let [[_ addr gf & args] call
                    [addr ks] (split-address addr call)
                    expr `[~gf [~@args]]]
-               (cond-> {:kind :splice :addr addr :expr (pure! expr "a splice's arguments") :inputs (inputs [expr ks] known)
+               (cond-> {:kind :splice :addr addr :expr (pure! env expr "a splice's arguments") :inputs (inputs [expr ks] known)
                         :arg-specs (mapv #(arg-spec % known) args)}
-                 ks (assoc :keys (pure! ks "an address"))))
+                 ks (assoc :keys (pure! env ks "an address"))))
 
              :else
              (compute-node env call known)))))
@@ -183,8 +191,8 @@
 
 (defn- calls?
   "Does form call trace or splice (outside nested gens and quoted data)?"
-  [form]
-  (boolean (some '#{trace splice} (outside-gens form))))
+  [env form]
+  (boolean (some '#{trace splice} (outside-gens env form))))
 
 (defn- not-once
   "The error for a call inside form, where (inside where) it is not
@@ -218,7 +226,7 @@
    draws. A call anywhere else is not static. A form without calls is as
    written."
   [env form]
-  (if-not (calls? form)
+  (if-not (calls? env form)
     [form []]
     (let [m (macro-name env form)]
       (cond
@@ -236,7 +244,7 @@
           (cond
             (= 'if h) (let [[_ test & branches] form
                             [test' pairs] (hoist-in env test)]
-                        (when-let [b (first (filter calls? branches))]
+                        (when-let [b (first (filter #(calls? env %) branches))]
                           (not-once "a branch of an if"
                                     "which would run only when the branch is taken, where a node runs every time" b))
                         [(apply list 'if test' branches) pairs])
@@ -322,7 +330,7 @@
       {:args args
        :nodes nodes
        :ret (let [ret (expanded (in-scope names) ret)]
-              (pure! ret "the return expression")
+              (pure! (in-scope names) ret "the return expression")
               (compute-node (in-scope names) ret names))}))))
 
 (defn ir

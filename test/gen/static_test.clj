@@ -215,9 +215,15 @@
   "A splice whose callee is another static function after an update."
   (gen [pick m] (splice :x (if (= pick 0) branch-a (if (= pick 1) branch-b branch-c)) m)))
 
+(def aliased-inner
+  "An inner gen spelled through an alias, spliced twice (the post-M5
+   review's I2-02): two draws, not one hoisted into the outer function."
+  (dyn/gen ^:static [m] (let [g (dyn/gen [] (trace :a (d/normal m 1.0))) y (splice :y g) z (splice :z g)] [y z])))
+
 (def models
   [[:linreg linreg [[1.0 2.0 3.0]] [[[1.0 2.5]] [[0.5 1.0 1.5 2.0]]]]
    [:hierarchical hierarchical [3] [[2] [4]]]
+   [:aliased-inner aliased-inner [0.0] [[1.0]]]
    [:destructured destructured [{:mu 0.0 :sd 1.0}] [[{:mu 1.0 :sd 1.0}]]]
    [:nested nested [0.0] [[1.5]]]
    [:rules rules [[0.1 0.2 0.3] 2 {:p 0.0 :r 1.0}]
@@ -622,7 +628,23 @@
 
 (deftest an-inline-gen-is-a-pure-binding
   (let [gf (gen ^:static [] (let [k (gen [m] (trace :z (d/normal m 1))) z (splice :k k 0.0)] z))]
-    (is (number? (ts/host (:retval (gfi/simulate gf [] (rng/key 47))))))))
+    (is (number? (ts/host (:retval (gfi/simulate gf [] (rng/key 47)))))))
+  (testing "however gen is spelled (the post-M5 review's I2-02)"
+    ;; The analysis knew a nested gen by its spelling, gen or gen.dynamic/gen:
+    ;; through an alias its trace was hoisted into the outer function, one
+    ;; draw where the body makes two. Planted, the spelling check fails the
+    ;; aliased case here and the :aliased-inner laws.
+    (doseq [[spelling gf] [["referred" (gen ^:static [] (let [g (gen [] (trace :a (d/normal 0.0 1.0))) y (splice :y g) z (splice :z g)] [y z]))]
+                           ["aliased" (dyn/gen ^:static [] (let [g (dyn/gen [] (trace :a (d/normal 0.0 1.0))) y (splice :y g) z (splice :z g)] [y z]))]
+                           ["qualified" (gen.dynamic/gen ^:static [] (let [g (gen.dynamic/gen [] (trace :a (d/normal 0.0 1.0)))
+                                                                           y (splice :y g) z (splice :z g)]
+                                                                       [y z]))]]]
+      (testing spelling
+        (let [static (gfi/simulate gf [] (rng/key 48))
+              dynamic (gfi/simulate (assoc gf :static nil) [] (rng/key 48))]
+          (is (= [:compute :splice :splice] (mapv :kind (:nodes (static/ir gf)))) "the inner gen is a value")
+          (is (= (:choices dynamic) (:choices static)))
+          (is (ts/close? (:score dynamic) (:score static))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The graph

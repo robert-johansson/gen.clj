@@ -68,17 +68,40 @@
 
 (def tree (comb/recurse grow fold 2))
 
-(def models
-  [[:map mapped [[1.0 2.0 3.0]]]
+(def kern "One choice :x around m." (gen [m] (trace :x (d/normal m 1.0))))
 
-   [:map-2-args (comb/map (gen [x y] (trace :z (d/normal x y)))) [[0.0 1.0] [1.0 2.0]]]
-   [:unfold unfolded [4 0.0 0.1]]
+(def as-map "kern mapped." (comb/map kern))
+
+(def as-dynamic
+  "A dynamic function making as-map's addresses, its means shifted."
+  (gen [ms] (mapv (fn [i m] (splice i kern (+ m 1.0))) (range (count ms)) ms)))
+
+(def as-unfold
+  "An Unfold making as-map's addresses at its steps."
+  (comb/unfold (gen [_t s] (trace :x (d/normal s 1.0)))))
+
+;; Map's and Unfold's alternative arguments change their length, so that
+;; the exact-discard laws see elements and steps dropped and added (the
+;; post-M5 review's P2-10 gap). A planted drop-elements that leaves a
+;; dropped element out of the discard fails
+;; combinators-updates-are-reversible-with-exact-discards on them.
+(def models
+  [[:map mapped [[1.0 2.0 3.0]] [[[1.0 2.0]] [[1.0 2.0 3.0 4.0]] [[1.0 5.0 3.0]]]]
+
+   [:map-2-args (comb/map (gen [x y] (trace :z (d/normal x y)))) [[0.0 1.0] [1.0 2.0]]
+    [[[0.0] [1.0]] [[0.0 1.0 2.0] [1.0 2.0 3.0]]]]
+   [:unfold unfolded [4 0.0 0.1] [[2 0.0 0.1] [6 0.0 0.1] [4 0.5 0.1]]]
    [:switch switched [1 0.5]]
    [:keyed-switch keyed [:a 0.5]]
    [:spliced spliced [3]]
    [:call-at (comb/call-at element) [1.0 :here] [[2.5 :here]]]
    [:call-at-a-path (comb/call-at unfolded) [3 0.0 0.1 [:walk 1]] [[4 0.0 0.1 [:walk 1]]]]
-   [:choice-at (comb/choice-at d/normal) [0.0 1.0 :x] [[0.5 2.0 :x]]]])
+   [:choice-at (comb/choice-at d/normal) [0.0 1.0 :x] [[0.5 2.0 :x]]]
+   ;; Switches whose branches are of different kinds (the post-M5 review's
+   ;; I2-01): the shared addresses keep their values
+   [:switch-of-kinds (comb/switch as-map as-dynamic) [0 [0.0 1.0]] [[1 [0.0 1.0]] [1 [0.5 1.0]]]]
+   [:switch-of-a-distribution-and-a-map (comb/switch (d/normal 0.0 1.0) as-map) [0] [[1 [0.0]]]]
+   [:switch-of-a-map-and-a-distribution (comb/switch as-map (d/normal 0.0 1.0)) [0 [0.0]] [[1]]]])
 
 (laws/deflaws combinators models 100)
 (laws/deflaws combinators models 100 laws/fixed-support)
@@ -349,6 +372,54 @@
         (is (= 0.3 (t :x)))
         (is (close? w (- (dc/log-prob (d/normal 5 1) 0.3) (dc/log-prob (d/normal 0 1) 0.3))))))))
 
+(deftest a-callee-that-changes-kind-keeps-the-shared-addresses
+  ;; The post-M5 review's I2-01 (and its verifier's V-I2-01, -01b, -01c): a
+  ;; class rule decided before gfi/revise, so a callee of another kind lost
+  ;; every address the two share, and regenerate with nothing selected
+  ;; redrew them. Planted, that rule fails: in a Switch (a new branch of
+  ;; another kind generated afresh), the first and third testings and five
+  ;; laws on :switch-of-kinds; in a splice (an old call of another kind
+  ;; replaced), the second.
+  (let [def-2-3-1 (fn [tr {t :trace w :weight d :discard}]
+                    (is (= (tr [0 :x]) (t [0 :x])) "[0 :x] keeps its value")
+                    (when d (is (cm/empty? d) "nothing is discarded"))
+                    (is (close? w (- (:score t) (:score tr))) "the weight is the change of score"))]
+    (doseq [[label a b] [["a Map, then a dynamic function" as-map as-dynamic]
+                         ["a dynamic function, then a Map" as-dynamic as-map]
+                         ["a Map, then an Unfold" as-map as-unfold]
+                         ["an Unfold, then a Map" as-unfold as-map]]]
+      (testing label
+        (let [sw (comb/switch a b)
+              args (fn [i g] (if (= g as-unfold) [i 1 0.0] [i [0.0]]))
+              tr (gfi/simulate sw (args 0 a) (rng/key 70))
+              argdiffs (vec (repeat (count (args 1 b)) diff/unknown-change))]
+          (def-2-3-1 tr (gfi/update tr (args 1 b) argdiffs cm/EMPTY (rng/key 71)))
+          (def-2-3-1 tr (gfi/regenerate tr (args 1 b) argdiffs sel/none (rng/key 72)))))))
+  (testing "a splice whose callee changes kind"
+    (let [m (gen [k] (splice :s (if (zero? k) as-dynamic as-map) [0.0]))
+          tr (gfi/simulate m [0] (rng/key 73))
+          {t :trace d :discard} (gfi/update tr [1] [diff/unknown-change] cm/EMPTY (rng/key 74))]
+      (is (= (tr [:s 0 :x]) (t [:s 0 :x])))
+      (is (cm/empty? d))))
+  (testing "observations stay through a Switch of a Map and a dynamic function (V-I2-01b)"
+    (let [ys (gen [mu] (trace :y (d/normal mu 1)))
+          sw (comb/switch (comb/map ys) (gen [mus] (mapv (fn [i mu] (splice i ys (+ mu 1.0))) (range (count mus)) mus)))
+          m (gen [] (splice :s sw (trace :i (d/categorical [0.5 0.5])) [0.0 0.0 0.0]))
+          tr (:trace (gfi/generate m [] (cm/choicemap :i 0 [:s 0 :y] 1.5 [:s 1 :y] 1.7 [:s 2 :y] 2.2) (rng/key 75)))
+          {t :trace w :weight} (gfi/update tr (cm/choicemap :i 1) (rng/key 76))]
+      (is (= [1.5 1.7 2.2] (mapv #(t [:s % :y]) (range 3))))
+      (is (close? w (reduce + (map #(- (dc/log-prob (d/normal 1 1) %) (dc/log-prob (d/normal 0 1) %)) [1.5 1.7 2.2]))))))
+  (testing "a distribution's value and indexed choices share no address, and neither is an error (V-I2-01c)"
+    (doseq [[label sw args args'] [["a normal, then a Map" (comb/switch (d/normal 0.0 1.0) as-map) [0] [1 [0.0]]]
+                                   ["a normal, then an Unfold" (comb/switch (d/normal 0.0 1.0) as-unfold) [0] [1 1 0.0]]
+                                   ["a Map, then a normal" (comb/switch as-map (d/normal 0.0 1.0)) [0 [0.0]] [1]]]]
+      (testing label
+        (let [tr (gfi/simulate sw args (rng/key 77))
+              {t :trace w :weight d :discard} (gfi/update tr args' (vec (repeat (count args') diff/unknown-change)) cm/EMPTY
+                                                          (rng/key 78))]
+          (is (= (:choices tr) d) "the old choices are discarded")
+          (is (close? w (- (:score tr))) "the new ones are drawn from the prior"))))))
+
 (deftest switches-of-compatible-branches-keep-shared-addresses
   ;; third review B2: a Switch of two Maps (or two distributions) regenerated
   ;; at its index alone resampled every unselected choice, with weight 0
@@ -369,6 +440,35 @@
 ;; ---------------------------------------------------------------------------
 ;; Recurse
 ;; ---------------------------------------------------------------------------
+
+(deftest recurse-deep-nodes-draw-afresh
+  ;; The post-M5 review's P2-09 (critical): node numbers pass 2^32 at depth
+  ;; 32 (max-branch 2), 16 (4) or 11 (8), also across subtrees. With
+  ;; fold-in masking its data to 32 bits, such nodes shared one key and
+  ;; drew one value (a 40-deep chain had one value at depths 32 to 40).
+  ;; Planted, the mask fails every case here.
+  (doseq [[m depth from] [[2 40 32] [4 20 16] [8 14 11]]]
+    (testing (str "a chain of child 0, max-branch " m)
+      (let [chain (comb/recurse (gen [n] {:value (trace :v (d/normal 0 1)) :children (if (< n depth) [(inc n)] [])})
+                                (gen [v ws] (into [v] (first ws)))
+                                m)
+            vs (ts/host (:retval (gfi/simulate chain [0] (rng/key 60))))]
+        (is (= (inc depth) (count vs)))
+        (is (= (- (inc depth) from) (count (distinct (subvec vs from)))) (str "depths " from " to " depth " differ")))))
+  (testing "two subtrees whose depth-17 nodes are equal mod 2^32 (max-branch 4)"
+    (let [tree (comb/recurse (gen [[kind n]]
+                               {:value (trace :v (d/normal 0 1))
+                                :children (case kind
+                                            :root [[:chain 1] [:chain 1]]
+                                            :chain (if (< n 17) [[:leaf] [:leaf] [:leaf] [:chain (inc n)]] [])
+                                            :leaf [])})
+                             (gen [v _] v)
+                             4)
+          tr (gfi/simulate tree [[:root]] (rng/key 61))
+          ;; the subtrees' roots are nodes 1 and 2; child 3 of node i is 4i + 4
+          deep (fn [start] (nth (iterate #(+ (* 4 %) 4) start) 16))]
+      (is (= (mod (deep 1) (bit-shift-left 1 32)) (mod (deep 2) (bit-shift-left 1 32))))
+      (is (not= (ts/host (tr [(deep 1) :production :v])) (ts/host (tr [(deep 2) :production :v])))))))
 
 (deftest recurse-builds-and-folds-the-tree
   (let [counted (comb/recurse (gen [n] {:value n :children (if (< n 2) [(inc n) (inc n)] [])})
