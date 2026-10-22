@@ -488,15 +488,17 @@
         lg (lgamma-lanczos (where reflect? (- 1 x) x))
         xs (where reflect? x 0.25)
         pole? (logical-and (<= x 0) (== x (floor x)))]
-    (where pole?
+    ;; +Inf at +Inf, as SciPy and Julia (genclj-9gyi), where Lanczos gives
+    ;; Inf·Inf - Inf
+    (where (logical-or pole? (== x ##Inf))
            ##Inf
            (where reflect?
                   (- (Math/log Math/PI) (log (abs (sin (* Math/PI xs)))) lg)
                   lg))))
 
 (defn lgamma
-  "Elementwise log |Γ(x)| (+Inf at the poles 0, -1, -2, …, as SciPy): Lanczos
-   for x >= 0.5, the reflection formula below. A composite, so differentiable
+  "Elementwise log |Γ(x)| (+Inf at the poles 0, -1, -2, … and at +Inf, as
+   SciPy): Lanczos for x >= 0.5, the reflection formula below. A composite, so differentiable
    and identical on every backend; a host number takes gen.array.special's
    lgamma, the same operations at about 20 ns where the composite's dispatch
    costs 700."

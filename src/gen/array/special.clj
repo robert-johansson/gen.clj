@@ -141,10 +141,10 @@
     (+ half-log-2pi (- (* (+ z 0.5) (Math/log t)) t) (Math/log series))))
 
 (defn lgamma
-  "log |Γ(x)| (+Inf at the poles 0, -1, -2, …): gen.array/lgamma on a host
-   double."
+  "log |Γ(x)| (+Inf at the poles 0, -1, -2, … and at +Inf): gen.array/lgamma
+   on a host double."
   ^double [^double x]
-  (cond (and (<= x 0.0) (== x (Math/floor x))) Double/POSITIVE_INFINITY
+  (cond (or (and (<= x 0.0) (== x (Math/floor x))) (== x Double/POSITIVE_INFINITY)) Double/POSITIVE_INFINITY
         (< x 0.5) (- (Math/log Math/PI) (Math/log (Math/abs (Math/sin (* Math/PI x)))) (lgamma-lanczos (- 1.0 x)))
         :else (lgamma-lanczos x)))
 
