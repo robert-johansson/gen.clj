@@ -8,6 +8,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array :refer [+ - * /]]
             [gen.choicemap :as cm]
+            [gen.diff :as diff]
             [gen.dist :as d]
             [gen.dist.core :as dc]
             [gen.inference.mh :as mh]
@@ -195,6 +196,18 @@
             (trace :y (d/normal 0.3 1)))))
 
 (def propose-b (gen [sigma] (when (open? sigma :b) (trace :b (d/bernoulli 0.5)))))
+
+(deftest a-change-in-the-number-of-arguments-is-regenerated
+  ;; the post-M5 review's P1-02, found by its verifier: regenerate-under
+  ;; kept the trace, old arguments and all, when nothing was selected and
+  ;; every argdiff was no-change, though there were fewer arguments.
+  ;; Planted bug (2026-10-22): without the count check, both fail
+  (let [model (gen [_x & more] (trace :z (d/normal 0.0 1.0)) (trace :y (d/normal (count more) 1.0)))
+        pgf (prop/with-internal-proposal model (gen [sigma _x & _more] (when (open? sigma :z) (trace :z (d/normal 0.0 10.0)))))
+        tr (:trace (gfi/generate pgf [0.0 1.0 2.0] (cm/choicemap :y 0.0) (rng/key 1)))
+        r (gfi/regenerate tr [0.0] [diff/no-change] sel/none (rng/key 2))]
+    (is (= [0.0] (:args (:trace r))))
+    (is (ts/close? (- (dc/log-prob (d/normal 0.0 1.0) 0.0) (dc/log-prob (d/normal 2.0 1.0) 0.0)) (:weight r)))))
 
 (deftest regenerating-a-structure-deciding-choice
   (let [pgf (prop/with-internal-proposal gated propose-b)

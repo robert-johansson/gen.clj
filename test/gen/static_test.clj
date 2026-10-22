@@ -112,7 +112,9 @@
 
 (def rest-rebound
   "A rest parameter rebinding a fixed one: the rest is the value, and its
-   diff (review 4, R10: the fixed one's diff won)."
+   diff (review 4, R10: the fixed one's diff won). Its alternatives change
+   the number of arguments, which no argdiff says (the post-M5 review's
+   P1-02)."
   (gen ^:static [a & a] (let [y (trace :y (d/normal (count a) 0.5))] [a y])))
 
 (def double-index
@@ -238,7 +240,7 @@
      [[0.1 0.2 0.3] 5 {:p 0.0}]]]
    [:double-index double-index [[0.0 0.0] 1.0] [[[0.0 0.5] 1.0]]]
    [:rebound rebound [1.0 2.0 {:z 30.0} 0.5] [[1.0 3.0 {:z 31.0} 0.5]]]
-   [:rest-rebound rest-rebound [1.0 2.0] [[1.0 5.0]]]
+   [:rest-rebound rest-rebound [1.0 2.0] [[1.0 5.0] [1.0] [1.0 2.0 3.0]]]
    [:callee-store callee-store [0.0] [[1.0]]]
    [:dict-rules dict-rules [{:j 0.5 :x 1.0}] [[{:j 0.7 :x 1.0}] [{:x 1.0}] [{:j 0.5 :x 1.0 :z 2.0}]]]
    [:expanded-heads expanded-heads [0.5] [[1.5]]]
@@ -738,6 +740,32 @@
                             (gfi/assess computed [0 1] (cm/set-choice (:choices tr) [:a 5] 0.0) (rng/key 55))))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not visited"
                             (gfi/assess computed [0 1] (cm/set-choice (:choices tr) [:b 0 :d] 0.0) (rng/key 55)))))))
+
+(deftest a-change-in-the-number-of-arguments-is-a-change
+  ;; the post-M5 review's P1-02 (DESIGN.md §9, G3): argdiffs are one per new
+  ;; argument, so none says an argument went or came, and a rest
+  ;; parameter's names stayed no-change: the walk kept their nodes. Planted
+  ;; bug (2026-10-22): rest-d without the count check fails every weight here
+  (let [lp (fn [y mu] (dc/log-prob (d/normal mu 1.0) y))
+        counted (gen ^:static [x & more] (let [n (count more) y (trace :y (d/normal n 1.0))] y))]
+    (testing "the most conservative argdiffs a caller can give, update and regenerate"
+      (let [tr (:trace (gfi/generate counted [0.0 1.0 2.0] (cm/choicemap :y 0.0) (rng/key 1)))
+            expected (- (lp 0.0 0.0) (lp 0.0 2.0))]
+        (is (ts/close? expected (:weight (gfi/update tr [0.0] [diff/unknown-change] cm/EMPTY (rng/key 2)))))
+        (is (ts/close? expected (:weight (gfi/regenerate tr [0.0] [diff/unknown-change] sel/none (rng/key 3)))))))
+    (testing "G3's [x & [y]], with the one argdiff its new arguments take"
+      (let [g3 (gen ^:static [x & [y]] (let [mu (if (nil? y) x y) z (trace :z (d/normal mu 1.0))] z))
+            tr (:trace (gfi/generate g3 [0.0 3.0] (cm/choicemap :z 0.0) (rng/key 1)))]
+        (is (ts/close? (- (lp 0.0 0.0) (lp 0.0 3.0)) (:weight (gfi/update tr [0.0] [diff/no-change] cm/EMPTY (rng/key 2)))))))
+    (testing "a splice whose call drops an argument (its first one identical), or adds a nil"
+      (let [one 1.0
+            drops (gen [two?] (if two? (splice :c counted one 2.0) (splice :c counted one)))
+            tr (:trace (gfi/generate drops [true] (cm/from-map {:c {:y 0.0}}) (rng/key 1)))]
+        (is (ts/close? (- (lp 0.0 0.0) (lp 0.0 1.0)) (:weight (gfi/update tr [false] [diff/unknown-change] cm/EMPTY (rng/key 2))))))
+      (let [any (gen ^:static [& xs] (let [n (count xs) y (trace :y (d/normal n 1.0))] y))
+            adds (gen [extra?] (if extra? (splice :c any nil) (splice :c any)))
+            tr (:trace (gfi/generate adds [false] (cm/from-map {:c {:y 0.0}}) (rng/key 1)))]
+        (is (ts/close? (- (lp 0.0 1.0) (lp 0.0 0.0)) (:weight (gfi/update tr [true] [diff/unknown-change] cm/EMPTY (rng/key 2)))))))))
 
 (deftest a-call-not-evaluated-once-is-not-static
   (binding [*ns* (the-ns 'gen.static-test)]
