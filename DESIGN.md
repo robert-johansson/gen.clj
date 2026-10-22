@@ -1839,8 +1839,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   own leave-one-out signal. So each gradient is unbiased for the
   iteration's estimate. (The ELBO's signal is the log weight less the
   mean log weight of the iteration's other draws, with ∇θ log w kept
-  whole, which halves the variance against dropping its zero-mean
-  −∇θ log p(z; θ): `vi/model-gradients` has the derivation. p(z; θ) is
+  whole. Against dropping its zero-mean −∇θ log p(z; θ), that lowers a
+  coin's per-iteration sd from 0.68 to 0.28 and holds a shift's, 1.89
+  against 1.92; `vi/model-gradients` has the derivation. p(z; θ) is
   the density the model's internal proposal drew z with, score − project
   of the constrained addresses, its prior for a gen function.) Without
   that term it was biased: 0.005 where 2 is
