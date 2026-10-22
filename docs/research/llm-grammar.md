@@ -272,7 +272,9 @@ noise) and w(x) the potential's weight of x's tokens before its end token.
 Its mean over q is Z = Σ p(x) exp(w(x)); for a grammar, the probability
 that the LM's completion satisfies it (tested exactly and in the mean).
 Importance sampling with these weights, or token SMC's `:masked` proposal
-(gen.llm.smc, whose steps add the same log Z_i), targets π. A completion
+(gen.llm.smc, whose steps add the same log Z_i), targets π; SMC runs over
+the plain completion, the potential given as its `:potential` (it refuses
+a constrained completion, `:constrained-completion`). A completion
 that stops at max-tokens is a prefix of the language, not necessarily one
 of its strings; π weighs it by `complete`, so incomplete ones get weight 0.
 

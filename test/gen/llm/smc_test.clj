@@ -325,7 +325,11 @@
 ;; smc/traces scored them -Inf. The target such a pairing means, the LM's
 ;; completions held to the potential, is the constrained completion's
 ;; conditional weights' (gen.llm.constrained) and SMC's with the potential
-;; as :potential and the :masked proposal: both estimate its Z.
+;; as :potential and the :masked proposal: both estimate its Z. With a soft
+;; twist besides (the verification's V-P4-01), the readings differ: what
+;; the refused pairing estimated, the LM's rows twisted by the soft
+;; potential alone, and the LM held to the constraint and twisted, by the
+;; product; each is SMC's over the plain completion.
 (deftest a-constrained-completion-is-refused
   (let [constrained (token/completion m {:potential no-repeats})]
     (doseq [f [#(smc/initialize constrained args 4) #(smc/run constrained args 4 {:key (rng/key 1)})]]
@@ -336,14 +340,23 @@
           weights (mapv #(Math/exp (constrained/conditional-weight (gfi/simulate constrained args (rng/key %)))) (range 2000))
           zs (estimates {:potential no-repeats :proposal :masked} 50 40)]
       (is (within-5-se? weights z) (str "the conditional weights' mean " (mean weights) ", Z " z))
-      (is (within-5-se? zs z) (str "SMC's mean " (mean zs) ", Z " z)))))
+      (is (within-5-se? zs z) (str "SMC's mean " (mean zs) ", Z " z)))
+    (let [both (potential/product no-repeats soft)
+          z-soft (exact-z soft)
+          z-both (exact-z both)]
+      (is (< 0.05 (Math/abs (- z-soft z-both))) "two different targets")
+      (doseq [[p z] [[soft z-soft] [both z-both]]]
+        (let [zs (estimates {:potential p :proposal :masked} 50 40)]
+          (is (within-5-se? zs z) (str "SMC's mean " (mean zs) ", Z " z)))))))
 
 ;; SMC's :potential must read contexts with the completion's end tokens, if
 ;; it declares any (DESIGN §9, "A potential declares its end tokens"; the
 ;; review's P4-02 and I4-02). DESIGN's example: a newline that ends the
 ;; completion, and a grammar that needs one in its text. SMC once took the
 ;; pair and returned log Ẑ = -Inf for every run, silently; the matched
-;; grammar, whose text stops where the newline ends it, estimates Z.
+;; grammar, whose text stops where the newline ends it, estimates Z, the
+;; probability of three letters and then the newline (the verification's
+;; V-P4-02: 0.0051).
 (deftest the-potential-s-end-tokens-are-the-completion-s
   (let [nl (bt/tokenizer ["a" "b" "\n"])
         m (lm/lm (toy/engine {:n-vocab (:n-vocab nl) :max-branches 64 :n-ctx 128}) nl {:max-cells 5000})
@@ -353,11 +366,16 @@
     (doseq [p [g (potential/product g)]]
       (is (= :mismatched-end-tokens (bc/reason #(smc/initialize lines args 8 {:potential p})))))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"^smc: " (smc/initialize lines args 8 {:potential g})))
-    (let [s (smc/run lines args 32 {:potential (grammar/grammar m "[ab]{3}" {:end-tokens #{2}}) :proposal :masked
-                                    :key (rng/key 1)})]
-      (is (Double/isFinite (smc/log-ml-estimate s)))
-      (is (every? #(and (= 4 (count %)) (= 2 (peek %)) (every? #{0 1} (pop %))) (smc/particles s))
-          "three letters, then the end"))))
+    (let [matched (grammar/grammar m "[ab]{3}" {:end-tokens #{2}})
+          run #(smc/run lines args 32 {:potential matched :proposal :masked :key (rng/key %)})
+          bos (:bos nl)
+          z (reduce + (for [x [0 1] y [0 1] w [0 1]]
+                        (Math/exp (reduce + (map (fn [ctx t] (aget (toy/toy-logprobs (:n-vocab nl) ctx) (int t)))
+                                                 [[bos] [bos x] [bos x y] [bos x y w]] [x y w 2])))))
+          zs (mapv #(Math/exp (smc/log-ml-estimate (run %))) (range 40))]
+      (is (every? #(and (= 4 (count %)) (= 2 (peek %)) (every? #{0 1} (pop %))) (smc/particles (run 1)))
+          "three letters, then the end")
+      (is (within-5-se? zs z) (str "SMC's mean " (mean zs) ", Z " z)))))
 
 (deftest particles-all-of-weight-0-estimate-z-as-0
   ;; the estimator's value, not an error: refusing it would bias Ẑ upwards

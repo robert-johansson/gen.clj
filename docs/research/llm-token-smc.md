@@ -39,8 +39,8 @@ completion stands for it. Weights are floats, as an LM's rows (Clojure's
 ```clojure
 (require '[gen.llm.smc :as smc] '[gen.llm.token :as token])
 
-(def answer (token/completion m))
-(def s (smc/run answer [prompt 64] 32 {:potential grammar :proposal :masked :key k}))
+(def free (token/completion m))               ; a plain completion: SMC refuses a constrained one
+(def s (smc/run free [prompt 64] 32 {:potential grammar :proposal :masked :key k}))
 (smc/log-ml-estimate s)      ; log Ẑ: the probability that a completion satisfies the grammar
 (smc/particles s)            ; token vectors
 (smc/traces s)               ; the completion's traces, scores = the particles' log p
