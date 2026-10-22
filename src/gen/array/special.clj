@@ -141,22 +141,22 @@
     (+ half-log-2pi (- (* (+ z 0.5) (Math/log t)) t) (Math/log series))))
 
 (defn lgamma
-  "log |Γ(x)| (+Inf at the poles 0, -1, -2, … and at +Inf): gen.array/lgamma
-   on a host double."
+  "log |Γ(x)| (+Inf at the poles 0, -1, -2, … and at +Inf, -Inf at -Inf):
+   gen.array/lgamma on a host double."
   ^double [^double x]
-  (cond (or (and (<= x 0.0) (== x (Math/floor x))) (== x Double/POSITIVE_INFINITY)) Double/POSITIVE_INFINITY
+  (cond (== x Double/NEGATIVE_INFINITY) Double/NEGATIVE_INFINITY
+        (or (and (<= x 0.0) (== x (Math/floor x))) (== x Double/POSITIVE_INFINITY)) Double/POSITIVE_INFINITY
         (< x 0.5) (- (Math/log Math/PI) (Math/log (Math/abs (Math/sin (* Math/PI x)))) (lgamma-lanczos (- 1.0 x)))
         :else (lgamma-lanczos x)))
 
 (defn digamma
-  "ψ(x), d/dx log Γ(x) (-Inf at 0, NaN at the negative integers):
-   gen.array/digamma on a host double."
+  "ψ(x), d/dx log Γ(x) (-Inf at 0.0, +Inf at -0.0, NaN at the negative
+   integers): gen.array/digamma on a host double."
   ^double [^double x]
   (if (and (< x 0.0) (== x (Math/floor x)))
     Double/NaN
     (let [z (if (< x 0.0) (- 1.0 x) x)
-          ;; z + 0.0, not z: the composite's, which makes -0.0 positive
-          shift (+ (/ 1.0 (+ z 0.0)) (/ 1.0 (+ z 1.0)) (/ 1.0 (+ z 2.0)) (/ 1.0 (+ z 3.0)) (/ 1.0 (+ z 4.0))
+          shift (+ (/ 1.0 z) (/ 1.0 (+ z 1.0)) (/ 1.0 (+ z 2.0)) (/ 1.0 (+ z 3.0)) (/ 1.0 (+ z 4.0))
                    (/ 1.0 (+ z 5.0)) (/ 1.0 (+ z 6.0)) (/ 1.0 (+ z 7.0)) (/ 1.0 (+ z 8.0)) (/ 1.0 (+ z 9.0)))
           w (+ z 10.0)
           w2 (/ 1.0 (* w w))

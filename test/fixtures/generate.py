@@ -64,14 +64,13 @@ def special():
 
 
 def edges():
-    """lgamma and digamma at the infinities, NaN and the poles (genclj-9gyi).
-    Left out, as gen.clj's differ and wait for the owner: gammaln(-inf), -inf
-    where gen.clj's is +inf, and psi(-0.0), +inf where gen.clj's is -inf."""
+    """lgamma and digamma at the infinities, NaN, the poles and the signed
+    zeros (genclj-9gyi)."""
     inf = math.inf
     with np.errstate(invalid="ignore", divide="ignore"):
         return {
-            ":lgamma-edges": pairs([inf, math.nan, 0.0, -0.0, -1.0, -2.0, -50.0], sp.gammaln),
-            ":digamma-edges": pairs([inf, -inf, math.nan, 0.0, -1.0, -2.0, -50.0], sp.psi),
+            ":lgamma-edges": pairs([inf, -inf, math.nan, 0.0, -0.0, -1.0, -2.0, -50.0], sp.gammaln),
+            ":digamma-edges": pairs([inf, -inf, math.nan, 0.0, -0.0, -1.0, -2.0, -50.0], sp.psi),
         }
 
 
