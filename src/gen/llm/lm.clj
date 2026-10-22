@@ -29,7 +29,8 @@
    one advance: batching is explicit, so a batch's composition, and with it
    every result, is a function of the program, never of thread timing.
    Calls are synchronous; concurrent callers are served one at a time, in
-   the order they arrive.
+   no promised order: their order, and with it the cache's choices (and
+   on llama.cpp the results, bit for bit), depends on their timing.
 
    A tokenizer is a map: :n-vocab, :bos, :eos, :eog (a set), :add-bos?,
    and the functions :token-bytes (token → a new byte array), :encode
@@ -39,6 +40,7 @@
             [gen.llm.cache :as cache]))
 
 (set! *warn-on-reflection* true)
+(set! *unchecked-math* :warn-on-boxed)
 
 (defprotocol LM
   "What an LM implements, called through this namespace's functions, which

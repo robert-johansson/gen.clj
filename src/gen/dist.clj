@@ -31,6 +31,75 @@
   [in-support lp]
   (where in-support lp ##-Inf))
 
+(defn- stand-in
+  "v where in-support holds, else s: the other lanes stay finite, so a
+   gradient through the guard is not NaN."
+  [in-support v s]
+  (where in-support v s))
+
+(defn- of-dtype
+  "f32 or f64, by x's dtype."
+  ^double [x ^double f32 ^double f64]
+  (if (= :float32 (array/dtype x)) f32 f64))
+
+(defn- largest-float
+  "The largest finite float of x's dtype."
+  ^double [x]
+  (of-dtype x Float/MAX_VALUE Double/MAX_VALUE))
+
+(defn- floored
+  "x at least the smallest normal number of its dtype. A gamma draw of a
+   small shape (its boost U^(1/α)) or a power of one underflows to 0, where
+   a density may be infinite or a quotient infinite; the floor changes only
+   values below it."
+  [x]
+  (array/maximum x (of-dtype x Float/MIN_NORMAL Double/MIN_NORMAL)))
+
+(defn- below-one
+  "x at most the largest float below 1 of its dtype, floored's mirror: a
+   beta draw within half an ulp of 1 rounds to 1, where its density may be
+   infinite."
+  [x]
+  (array/minimum x (of-dtype x (Math/nextDown (float 1.0)) (Math/nextDown 1.0))))
+
+(defn- log-gamma-draw
+  "The log of a gamma(alpha, 1) draw, which does not underflow as the draw
+   does: rng/gamma boosts a shape below 1 as Γ(α+1)·U^(1/α), and the power
+   is 0 for most U at a small α, so here it is log Γ(α+1)'s draw - E/α, for
+   E = -log U an exponential draw."
+  [key alpha shape o]
+  (let [boost? (< alpha 1)
+        [kg ke] (rng/split key)
+        g (rng/gamma kg (where boost? (+ alpha 1) alpha) shape o)]
+    (- (log g) (where boost? (/ (rng/exponential ke shape (assoc o :dtype (array/dtype g))) alpha) 0.0))))
+
+(defn- log-weight
+  "A mixture weight's log, -Inf at 0 through a stand-in: log's gradient
+   there would be 0/0 = NaN, though the mixture sends it nothing."
+  [weighted w]
+  (guard weighted (log (stand-in weighted w 1.0))))
+
+(defn- zero-weight-term
+  "A term of value 0 for a mixture of log density l, carrying the gradient
+   of a weight w of 0 (weighted false), which log-weight does not: w times
+   ∂l/∂w = e^(lp - l) for its component's log density lp, held constant. So
+   a weight that is a function at its bound (beta-uniform's theta at 1) has
+   its one-sided derivative. The slope is at most the largest float: it is
+   infinite where the component's density is beyond the float range times
+   the mixture's."
+  [weighted w lp l]
+  (let [slope (array/minimum (exp (- lp l)) (largest-float l))]
+    (where weighted 0.0 (* w (array/stop-gradient (where (array/isnan slope) 0.0 slope))))))
+
+(defn- log-mixture
+  "log Σₖ wₖ e^lpₖ over the last axis, exact in its gradients also at weights
+   of 0 (zero-weight-term)."
+  [w lps]
+  (let [weighted (> w 0)
+        kd {:axis -1 :keep-dims? true}
+        l (array/logsumexp (+ (log-weight weighted w) lps) kd)]
+    (array/squeeze (+ l (array/sum (zero-weight-term weighted w lps l) kd)) -1)))
+
 (defn- integral? [v] (== v (array/floor v)))
 
 (defn- opts [& params] {:backend (apply dc/backend-of params)})
@@ -62,8 +131,8 @@
 (defdist uniform
   "uniform(low, high): uniform on [low, high]."
   [low high]
-  (validate (when (and (array/host? low) (array/host? high))
-              (dc/check (< low high) "uniform" "low must be below high" {:low low :high high})))
+  (validate (when (every? #(and (some? %) (array/concrete? %)) [low high])
+              (dc/check (array/all-true? (< low high)) "uniform" "low must be below high" {:low low :high high})))
   (sample [key shape]
     (rng/uniform key (dc/elementwise-shape shape low high) (assoc (opts low high) :low low :high high)))
   (log-prob [v]
@@ -74,11 +143,12 @@
   [a b]
   (validate (dc/check-positive "beta" "alpha" a) (dc/check-positive "beta" "beta" b))
   (sample [key shape]
+    ;; x/(x + y) for gamma draws x and y, from their logs: either may
+    ;; underflow at a small shape (0/0 when both do), and the quotient rounds
+    ;; to 1 when y is below x·2^-53
     (let [s (dc/elementwise-shape shape a b)
-          [k1 k2] (rng/split key)
-          x (rng/gamma k1 a s (opts a b))
-          y (rng/gamma k2 b s (opts a b))]
-      (/ x (+ x y))))
+          [k1 k2] (rng/split key)]
+      (below-one (floored (array/sigmoid (- (log-gamma-draw k1 a s (opts a b)) (log-gamma-draw k2 b s (opts a b))))))))
   (log-prob [v]
     (guard (logical-and (>= v 0) (<= v 1))
            (- (+ (xlogy (- a 1) v) (xlog1py (- b 1) (- v))) (log-beta a b)))))
@@ -88,7 +158,7 @@
   [k theta]
   (validate (dc/check-positive "gamma" "shape" k) (dc/check-positive "gamma" "scale" theta))
   (sample [key shape]
-    (* theta (rng/gamma key k (dc/elementwise-shape shape k theta) (opts k theta))))
+    (floored (* theta (rng/gamma key k (dc/elementwise-shape shape k theta) (opts k theta)))))
   (log-prob [v]
     (guard (>= v 0) (- (xlogy (- k 1) v) (/ v theta) (lgamma k) (* k (log theta))))))
 
@@ -111,13 +181,22 @@
   (log-prob [v]
     (guard (>= v 0) (- (log rate) (* rate v)))))
 
+(defn- above-minus-one
+  "The float of dtype next above -1: a uniform's low bound for laplace's
+   log1p(-|u|), which is -Inf at -1 (as rng/normal's bound for erfinv's
+   pole)."
+  ^double [dtype]
+  (if (= :float32 dtype) (double (Math/nextUp (float -1.0))) (Math/nextUp -1.0)))
+
 (defdist laplace
   "laplace(loc, scale): the Laplace (double exponential) distribution."
   [loc scale]
   (validate (dc/check-positive "laplace" "scale" scale))
   (sample [key shape]
-    (let [u (rng/uniform key (dc/elementwise-shape shape loc scale)
-                         (assoc (opts loc scale) :low (Math/nextAfter -1.0 0.0) :high 1.0))]
+    (let [o (opts loc scale)
+          dtype (dc/float-dtype (:backend o))
+          u (rng/uniform key (dc/elementwise-shape shape loc scale)
+                         (assoc o :dtype dtype :low (above-minus-one dtype) :high 1.0))]
       (+ loc (* scale (array/sign u) (log1p (- (array/abs u)))))))
   (log-prob [v]
     (- (+ (log (* 2 scale)) (/ (array/abs (- v loc)) scale)))))
@@ -147,14 +226,24 @@
              (dc/sample (beta a b) k2 s)
              (rng/uniform k3 s (opts theta a b)))))
   (log-prob [v]
-    (guard (logical-and (>= v 0) (<= v 1))
-           (array/logaddexp (+ (log theta) (dc/log-prob (beta a b) v)) (log1p (- theta))))))
+    ;; beta's density and the uniform's, 1, mixed as log-mixture does
+    (let [lp (dc/log-prob (beta a b) v)
+          w-uniform (- 1 theta)
+          some-beta (> theta 0)
+          some-uniform (> w-uniform 0)
+          l (array/logaddexp (+ (log-weight some-beta theta) lp) (log-weight some-uniform w-uniform))]
+      (guard (logical-and (>= v 0) (<= v 1))
+             (+ l (zero-weight-term some-beta theta lp l) (zero-weight-term some-uniform w-uniform 0.0 l))))))
 
 (defdist piecewise-uniform
   "piecewise_uniform(bounds, probs): bin i, chosen with probability probs[i],
    is [bounds[i], bounds[i+1]], uniform within the bin."
   [bounds probs]
-  (validate (dc/check-probabilities "piecewise-uniform" "probs" probs)
+  (validate (dc/check (= 1 (array/ndim bounds) (array/ndim probs)) "piecewise-uniform"
+                      (str "bounds and probs must be vectors, got shapes " (array/shape bounds) " and " (array/shape probs)
+                           " (no batch of bin layouts yet)")
+                      {:bounds (array/shape bounds) :probs (array/shape probs)})
+            (dc/check-probabilities "piecewise-uniform" "probs" probs)
             (dc/check-increasing "piecewise-uniform" "bounds" bounds)
             (dc/check (= (peek (array/shape bounds)) (inc (peek (array/shape probs)))) "piecewise-uniform"
                       "needs one more bound than probabilities" {:bounds (array/shape bounds) :probs (array/shape probs)}))
@@ -282,9 +371,11 @@
   (validate (dc/check (<= 1 (array/ndim alpha)) "dirichlet" "alpha must be a vector" {:alpha-shape (array/shape alpha)})
             (dc/check-all-positive "dirichlet" "alpha" alpha))
   (sample [key shape]
+    ;; g/Σg for gamma draws g, from their logs (a draw underflows to 0 at a
+    ;; small alpha), floored where the normalized value still does
     (let [k (peek (array/shape alpha))
-          g (rng/gamma key alpha (sh/broadcast (conj shape k) (array/shape alpha)) (opts alpha))]
-      (/ g (array/sum g {:axis -1 :keep-dims? true}))))
+          lg (log-gamma-draw key alpha (sh/broadcast (conj shape k) (array/shape alpha)) (opts alpha))]
+      (floored (array/softmax lg {:axis -1}))))
   (log-prob [v]
     (guard (logical-and (array/all (>= v 0) {:axis -1})
                         (<= (array/abs (- (array/sum v {:axis -1}) 1)) 1e-6))
@@ -299,20 +390,6 @@
 ;; ---------------------------------------------------------------------------
 
 (def ^:private log-2 (Math/log 2.0))
-
-(defn- stand-in
-  "v where in-support holds, else s: the other lanes stay finite, so a
-   gradient through the guard is not NaN."
-  [in-support v s]
-  (where in-support v s))
-
-(defn- floored
-  "x at least the smallest normal number of its dtype. A gamma draw of a
-   small shape (its boost U^(1/α)) or a power of one underflows to 0, where
-   a density may be infinite or a quotient infinite; the floor changes only
-   values below it."
-  [x]
-  (array/maximum x (if (= :float32 (array/dtype x)) (double Float/MIN_NORMAL) Double/MIN_NORMAL)))
 
 (defdist chi-squared
   "chi-squared(nu): the χ² distribution with nu degrees of freedom (Chisq)."
@@ -486,15 +563,19 @@
               (str "values are booleans (true or false), not " (pr-str (if (array/host? v) v (array/dtype v)))
                    " (GenMLX's bernoulli gave 0/1)")
               {:value-dtype (array/dtype v)})
-    (where v (log p) (log1p (- p))))
+    ;; the branch not taken sees a stand-in, as where's other lanes do: at
+    ;; p = 1 (or 0) its log's gradient would be 0/0 = NaN
+    (where v (log (stand-in v p 1.0)) (log1p (- (stand-in v 0.0 p)))))
   (support [] [false true]))
 
 (defn- pick-guarded
-  "log-probs[..., v] for integer v in [0, K), -Inf for any other v."
-  [log-probs v]
-  (let [k (peek (array/shape log-probs))
+  "(f xs[..., v]) for integer v in [0, K), -Inf for any other v. The pick
+   comes before f, so a gradient reaches only the entry picked: (log probs)
+   would send 0/0 = NaN from every 0 entry not picked."
+  [f xs v]
+  (let [k (peek (array/shape xs))
         ok (logical-and (logical-and (>= v 0) (< v k)) (integral? v))]
-    (guard ok (array/pick log-probs (to-int (array/clip v 0 (dec k)) log-probs)))))
+    (guard ok (f (stand-in ok (array/pick xs (to-int (array/clip v 0 (dec k)) xs)) 1.0)))))
 
 (defdist categorical
   "categorical(probs): index i (0-based) with probability probs[i]; probs must
@@ -502,7 +583,7 @@
   [probs]
   (validate (dc/check-probabilities "categorical" "probs" probs))
   (sample [key shape] (rng/categorical key (log probs) (sh/broadcast shape (pop (array/shape probs))) (opts probs)))
-  (log-prob [v] (pick-guarded (log probs) v))
+  (log-prob [v] (pick-guarded log probs v))
   (support [] (vec (range (peek (array/shape probs))))))
 
 (defdist categorical-logits
@@ -510,7 +591,7 @@
    softmax(logits)[i]. Any finite logits; the form LLM token sites use."
   [logits]
   (sample [key shape] (rng/categorical key logits (sh/broadcast shape (pop (array/shape logits))) (opts logits)))
-  (log-prob [v] (pick-guarded (array/log-softmax logits) v))
+  (log-prob [v] (pick-guarded identity (array/log-softmax logits) v))
   (support [] (vec (range (peek (array/shape logits))))))
 
 (defdist uniform-discrete
@@ -518,20 +599,20 @@
   [low high]
   (validate (dc/check-integer "uniform-discrete" "low" low Long/MIN_VALUE)
             (dc/check-integer "uniform-discrete" "high" high Long/MIN_VALUE)
-            (when (and (array/host? low) (array/host? high))
-              (dc/check (<= low high) "uniform-discrete" "low must not exceed high" {:low low :high high})))
+            (when (every? #(and (some? %) (array/concrete? %)) [low high])
+              (dc/check (array/all-true? (<= low high)) "uniform-discrete" "low must not exceed high" {:low low :high high})))
   (sample [key shape] (rng/randint key low (+ high 1) (dc/elementwise-shape shape low high) (opts low high)))
   (log-prob [v]
     (guard (logical-and (logical-and (>= v low) (<= v high)) (integral? v))
            (- (log (+ (- high low) 1)))))
-  (support [] (vec (range (dc/support-bound "uniform-discrete" "low" low)
-                          (inc (dc/support-bound "uniform-discrete" "high" high))))))
+  (support [] (let [lo (dc/support-bound low)
+                    hi (dc/support-bound high)]
+                (when (and lo hi) (vec (range lo (inc hi)))))))
 
 (defdist geometric
   "geometric(p): the number of failures before the first success."
   [p]
-  (validate (dc/check-probability "geometric" "p" p)
-            (when (array/host? p) (dc/check (> p 0) "geometric" "p must be in (0, 1]" {:p p})))
+  (validate (dc/check-probability "geometric" "p" p) (dc/check-positive "geometric" "p" p))
   (sample [key shape]
     (let [u (rng/uniform key (dc/elementwise-shape shape p) (opts p))]
       (to-int (array/floor (/ (log1p (- u)) (log1p (- p)))) p)))
@@ -550,16 +631,27 @@
   [fallback proposals]
   (reduce (fn [acc [ok v]] (where ok v acc)) fallback (reverse proposals)))
 
+(defn- inverted
+  "An inversion over a pmf's first inversion-steps terms, from its first
+   term p0 and (ratio j) = p(j+1)/p(j): the number of its partial sums below
+   u times their total. So the count never passes the last term: where
+   rounding leaves the total short of 1 (float32's: 1 - 1.1e-6 for binom(37,
+   0.25), 1 - 3e-7 for poisson(9.1)), u above it counted every later step
+   (40 > n), and the shortfall is spread over the terms instead."
+  [u p0 ratio]
+  (let [cdfs (reductions + (take inversion-steps (map first (iterate (fn [[p j]] [(* p (ratio j)) (inc j)]) [p0 0]))))
+        v (* u (last cdfs))]
+    (reduce (fn [k cdf] (+ k (where (> v cdf) 1 0))) 0 cdfs)))
+
+(defn- poisson-inversion [u lam] (inverted u (exp (- lam)) #(/ lam (+ % 1))))
+
+(defn- binomial-inversion [u n p q] (inverted u (exp (* n (log1p (- p)))) #(/ (* (- n %) p) (* (+ % 1) q))))
+
 (defn- poisson-sample [key lam shape]
   (let [o (opts lam)
         [k-inv k-rej] (rng/split key)
-        ;; inversion (lam < 10): count the CDF values below u
-        u (rng/uniform k-inv shape o)
-        small (first (reduce (fn [[k p cdf] j]
-                               (let [p (* p (/ lam (+ j 1)))]
-                                 [(+ k (where (> u cdf) 1 0)) p (+ cdf p)]))
-                             [0 (exp (- lam)) (exp (- lam))]
-                             (range inversion-steps)))
+        ;; inversion (lam < 10)
+        small (poisson-inversion (rng/uniform k-inv shape o) lam)
         ;; PTRS (lam >= 10)
         log-lam (log lam)
         b (+ 0.931 (* 2.53 (sqrt lam)))
@@ -586,14 +678,8 @@
         p (where flip? (- 1 p) p)
         q (- 1 p)
         [k-inv k-rej] (rng/split key)
-        u (rng/uniform k-inv shape o)
         ;; inversion (n·p < 10)
-        p0 (exp (* n (log1p (- p))))
-        small (first (reduce (fn [[k pk cdf] j]
-                               (let [pk (* pk (/ (* (- n j) p) (* (+ j 1) q)))]
-                                 [(+ k (where (> u cdf) 1 0)) pk (+ cdf pk)]))
-                             [0 p0 p0]
-                             (range inversion-steps)))
+        small (binomial-inversion (rng/uniform k-inv shape o) n p q)
         ;; BTRS (n·p >= 10)
         spq (sqrt (* n p q))
         b (+ 1.15 (* 2.53 spq))
@@ -622,7 +708,7 @@
 (defdist poisson
   "poisson(lambda): the Poisson distribution with mean lambda."
   [lam]
-  (validate (when (array/host? lam) (dc/check (>= lam 0) "poisson" "lambda must be >= 0" {:lambda lam})))
+  (validate (dc/check-non-negative "poisson" "lambda" lam))
   (sample [key shape] (poisson-sample key lam (dc/elementwise-shape shape lam)))
   (log-prob [v]
     (guard (logical-and (>= v 0) (integral? v)) (- (xlogy v lam) lam (lgamma (+ v 1))))))
@@ -637,13 +723,13 @@
     (guard (logical-and (logical-and (>= v 0) (<= v n)) (integral? v))
            (+ (- (lgamma (+ n 1)) (lgamma (+ v 1)) (lgamma (+ (- n v) 1)))
               (xlogy v p) (xlog1py (- n v) (- p)))))
-  (support [] (vec (range (inc (dc/support-bound "binom" "n" n))))))
+  (support [] (some->> (dc/support-bound n) inc range vec)))
 
 (defdist neg-binom
   "neg_binom(r, p): the number of failures before the r-th success (r may be
    real)."
   [r p]
-  (validate (dc/check-positive "neg-binom" "r" r) (dc/check-probability "neg-binom" "p" p))
+  (validate (dc/check-positive "neg-binom" "r" r) (dc/check-probability "neg-binom" "p" p) (dc/check-positive "neg-binom" "p" p))
   (sample [key shape]
     (let [s (dc/elementwise-shape shape r p)
           [k1 k2] (rng/split key)
@@ -682,6 +768,26 @@
                     {:shape s :dim dim :components n})
           (array/take p (if (= 1 (nth s axis)) 0 k) axis)))))
 
+(defn- leading-axes
+  "The batch axes of a homogeneous mixture's parameter p, of rank dim in one
+   component: those before its component axis (none without one)."
+  [p dim]
+  (let [s (array/shape p)
+        axis (- (count s) dim 1)]
+    (if (pos? axis) (subvec s 0 axis) [])))
+
+(defn- mixture
+  "The ::mixture of components by weights w, more keys in its params. Its
+   components are all discrete or all continuous: a pmf and a pdf would add,
+   though they are densities with respect to different measures (Gen.jl's
+   types forbid the mixture too)."
+  [family-name w components more]
+  (let [discrete (mapv dc/discrete? components)]
+    (dc/check (apply = discrete) family-name
+              "cannot mix a discrete and a continuous family: the pmf and the pdf would add"
+              {:discrete discrete})
+    (dc/->Distribution ::mixture (merge {:weights w :components components} more))))
+
 (defn homogeneous-mixture
   "A family of mixtures of one distribution family (Gen.jl's
    HomogeneousMixture): ((homogeneous-mixture normal) weights mus stds)
@@ -690,7 +796,12 @@
    indexes the components, so ((homogeneous-mixture mvnormal [1 2]) weights
    mus covs) takes mus of shape [K d] and covs of shape [K d d]. A parameter
    without that axis is every component's. Weights are the components'
-   probabilities."
+   probabilities.
+
+   A component's value is whole: ((homogeneous-mixture normal [1 1]) w mus
+   stds) with mus of shape [K d] mixes vectors, its log density summed over
+   their d axis, as mvnormal's is. The axes before a parameter's component
+   axis, and the weights' before theirs, are a batch of mixtures."
   ([family] (homogeneous-mixture family nil))
   ([family dims]
    (fn [weights & params]
@@ -703,15 +814,24 @@
        ;; the mixture of its K components, as Gen.jl's logpdf loops over
        ;; them (all at once, the value would need the component axis before
        ;; its own axes, whose number a family does not declare)
-       (dc/->Distribution ::mixture
-                          {:weights w
-                           :components (mapv (fn [k] (apply family (map #(component %1 %2 k n) params dims))) (range n))})))))
+       (let [components (mapv (fn [k] (apply family (map #(component %1 %2 k n) params dims))) (range n))
+             batch (reduce sh/broadcast [] (map leading-axes params dims))]
+         ;; a value's axes: a component's value shape beyond the batch (dims
+         ;; for a family that declares no value shape)
+         (mixture "homogeneous-mixture" w components
+                  {:batch batch
+                   :value-axes (if-let [s (dc/value-shape (first components))]
+                                 (- (count s) (count batch))
+                                 (reduce max 0 dims))}))))))
 
 (defn heterogeneous-mixture
   "A family of mixtures of different distribution families (Gen.jl's
    HeterogeneousMixture): ((heterogeneous-mixture [normal uniform]) weights
    [mu std] [low high]) mixes (normal mu std) and (uniform low high).
-   Components must have values of one shape."
+   Components must have values of one shape, and be all discrete or all
+   continuous. Their log densities mix per element: array parameters of an
+   elementwise family are a batch of mixtures (a vector-valued component is
+   a family of vector values, mvnormal)."
   [families]
   (let [families (vec families)]
     (fn [weights & component-params]
@@ -719,17 +839,20 @@
         (dc/check (= (count families) (count component-params) (peek (array/shape w)))
                   "heterogeneous-mixture" "needs one weight and one parameter vector per component"
                   {:families (count families) :params (count component-params)})
-        (dc/->Distribution ::mixture {:weights w :components (mapv #(apply %1 %2) families component-params)})))))
+        (mixture "heterogeneous-mixture" w (mapv #(apply %1 %2) families component-params) nil)))))
 
-(defmethod dc/-sample ::mixture [{{:keys [weights components]} :params} key shape]
+(defmethod dc/-sample ::mixture [{{:keys [weights components value-axes]} :params} key shape]
   (let [[k-pick k-draw] (rng/split key)
         ;; the weights' batch axes are independent draws too
         shape (sh/broadcast shape (pop (array/shape weights)))
         draws (mapv #(dc/sample %1 %2 shape) components (rng/split k-draw (count components)))
         dtype (reduce dt/promote (map array/dtype draws))
-        ;; one pick per element of the log density, whose axes lead a draw's;
-        ;; the rest are the draw's own (a vector's, for mvnormal)
-        elements (array/shape (dc/log-prob (first components) (first draws)))
+        ;; one pick per value: a homogeneous mixture's values are a draw's
+        ;; last value-axes, others' one per element of the log density, whose
+        ;; axes lead a draw's (the rest are the draw's own: mvnormal's vector)
+        elements (if value-axes
+                   (vec (drop-last value-axes (array/shape (first draws))))
+                   (array/shape (dc/log-prob (first components) (first draws))))
         k (rng/categorical k-pick (log weights) elements (opts weights))
         own (- (array/ndim (first draws)) (count elements))]
     ;; draw every component, keep the picked one (branch-free, so it batches);
@@ -737,9 +860,20 @@
     (array/pick (array/stack (mapv #(array/astype % dtype) draws) -1)
                 (array/reshape k (into (array/shape k) (repeat own 1))))))
 
-(defmethod dc/-log-prob ::mixture [{{:keys [weights components]} :params} v]
-  ;; each component's log density of the whole value, mixed per element
-  (array/logsumexp (+ (log weights) (array/stack (mapv #(dc/log-prob % v) components) -1)) {:axis -1}))
+(defn- whole-values
+  "A homogeneous mixture's component log density lp of v, summed over the
+   axes of one value that it keeps: an elementwise family's (normal's, of a
+   vector component) beyond the value's batch, the broadcast of v's axes
+   before its value-axes and the parameters' batch; none of a family that
+   scores whole values (mvnormal)."
+  [lp v value-axes batch]
+  (let [own (- (array/ndim lp) (count (sh/broadcast (vec (drop-last value-axes (array/shape v))) batch)))]
+    (if (pos? own) (array/sum lp {:axis (vec (range (- own) 0))}) lp)))
+
+(defmethod dc/-log-prob ::mixture [{{:keys [weights components value-axes batch]} :params} v]
+  ;; each component's log density of the whole value, mixed per batch element
+  (log-mixture weights (array/stack (mapv #(cond-> (dc/log-prob % v) value-axes (whole-values v value-axes batch)) components)
+                                    -1)))
 
 (defn product
   "A family of products of independent distributions (Gen.jl's

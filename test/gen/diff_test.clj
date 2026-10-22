@@ -8,7 +8,8 @@
             [clojure.test.check.generators :as tgen]
             [clojure.test.check.properties :as prop]
             [gen.array :as array]
-            [gen.diff :as diff]))
+            [gen.diff :as diff]
+            [gen.test-support :as ts]))
 
 (deftest the-diff-kinds
   (testing "empty changes are no-change"
@@ -110,6 +111,26 @@
     (testing "consistent? checks element diffs, and set- and dict-diffs' added and deleted"
       (is (not (diff/consistent? [1 2] [1 5] (diff/vector-diff 2 2 {1 (diff/int-diff 1)}))))
       (is (not (diff/consistent? #{1 2} #{1 2} (diff/set-diff #{1} #{})))))))
+
+(deftest unchanged-is-same-value
+  ;; the post-M5 review's P1-01 and P1-03 (DESIGN.md §9, D1): unchanged is
+  ;; gen.gfi/same-value?, by class and order and bounded, where
+  ;; clojure.core/= equates values code tells apart and walks an infinite
+  ;; lazy value forever. Planted bug (2026-10-22): = back in consistent? and
+  ;; compute fails each pair's three assertions, and the lazy ones time out
+  (let [within #(ts/within 5000 %)]
+    (doseq [[a b] [[0.0 -0.0] [[1.0 2.0] '(1.0 2.0)]
+                   [(sorted-map :b 1.0 :a 2.0) (array-map :b 1.0 :a 2.0)] [1 (int 1)]]]
+      (testing (str (pr-str a) " and " (pr-str b))
+        (is (not (diff/consistent? a b diff/no-change)))
+        (is (diff/changed? (diff/compute a b)))
+        (is (diff/element-changed? (diff/compute [:k a] [:k b]) 1) "as an element")))
+    (testing "the same values, of one class and order"
+      (is (diff/consistent? [1.0 {:a -0.0}] [1.0 {:a -0.0}] diff/no-change))
+      (is (diff/no-change? (diff/compute (sorted-map :b 1.0 :a 2.0) (sorted-map :a 2.0 :b 1.0)))))
+    (testing "an infinite lazy value counts as changed, at once"
+      (is (false? (within #(diff/consistent? (repeat 1.0) (repeat 1.0) diff/no-change))))
+      (is (diff/unknown-change? (within #(diff/compute (iterate inc 0) (iterate inc 0))))))))
 
 (defspec int-diffs-add-up 200
   (prop/for-all [a tgen/small-integer b tgen/small-integer da tgen/small-integer db tgen/small-integer]

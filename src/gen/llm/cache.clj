@@ -164,9 +164,9 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- reading
-  "(f made), an engine call that conj!es onto the volatile made the forks
-   it makes (which are not entries). If it throws, the live ones are
-   disposed and the exception rethrown, with a failure to dispose of them
+  "(f made), an engine call that adds the forks it makes (which are not
+   entries) to the volatile made. If it throws, the live ones are disposed
+   and the exception rethrown, with a failure to dispose of them
    suppressed onto it (the engine frees them itself if it is closing)."
   [f]
   (let [made (volatile! [])]
@@ -217,7 +217,7 @@
 
 (defn- inputs!
   "The advance's inputs, one for each of parents, in order: each parent's
-   forks, made in one call and conj!ed onto the volatile made, and the
+   forks, made in one call and added to the volatile made, and the
    parent itself last when it is consumed. The maps keyed by branches are
    looked up, never walked."
   [parents consumed made]

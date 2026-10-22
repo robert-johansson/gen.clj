@@ -3,12 +3,12 @@
    read through an LM's vocabulary, so that token sequences can be held to
    it: masks for grammar-constrained decoding and the weights of a potential.
 
-     (grammar vocab language)   → a grammar; vocab an LM or a byte vocabulary
-     (grammar vocab language {:end-tokens ts})
+     (grammar vocab language), (grammar vocab language {:end-tokens ts})
+                                → a grammar; vocab an LM or a byte vocabulary
                                   (a vector of byte arrays by token), language
                                   a regex, a term (gen.llm.regex) or a DFA;
-                                  the end tokens, not text (default: an LM's
-                                  :eog, none for a byte vocabulary)
+                                  ts the end tokens, not text (default: an
+                                  LM's :eog, none for a byte vocabulary)
      (state g tokens)           → the DFA state after the tokens' bytes (-1: dead)
      (advance g state t)        → the state after token t
      (live? g state)            → can tokens still complete the language from it?
@@ -101,15 +101,15 @@
           (recur (pop todo) masks succ)
           (let [reached (boolean-array n)
                 mask (bytes/sweep trie table s any reached)
-                next (filterv #(aget reached (long %)) (range n))]
-            (recur (into (pop todo) (remove masks) next) (assoc masks s mask) (assoc succ s next))))
+                succs (filterv #(aget reached (long %)) (range n))]
+            (recur (into (pop todo) (remove masks) succs) (assoc masks s mask) (assoc succ s succs))))
         {:masks masks :succ succ}))))
 
 (defn- token-live
   "Of the states the vocabulary reaches, those from which its tokens reach
    an accepting state: backwards from the accepting ones."
   [d succ]
-  (let [preds (reduce (fn [preds [s next]] (reduce #(update %1 %2 conj s) preds next)) {} succ)]
+  (let [preds (reduce (fn [preds [s succs]] (reduce #(update %1 %2 conj s) preds succs)) {} succ)]
     (loop [todo (filterv #(dfa/accepting? d %) (keys succ)) live #{}]
       (if-let [s (peek todo)]
         (if (contains? live s)
@@ -207,10 +207,7 @@
 (defn allowed
   "The tokens that may come after state s, in order (a vector)."
   [^Grammar g ^long s]
-  (if-let [^longs mask (when (live? g s) (aget ^objects (.-masks g) s))]
-    (into [] (filter #(not (zero? (bit-and (aget mask (bit-shift-right (long %) 6)) (bit-shift-left 1 (bit-and (long %) 63))))))
-          (range (:n-vocab (.-info g))))
-    []))
+  (filterv #(allowed? g s %) (range (:n-vocab (.-info g)))))
 
 ;; ---------------------------------------------------------------------------
 ;; The potential

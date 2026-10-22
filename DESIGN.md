@@ -638,7 +638,12 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   review 4's floor missed: gamma(0.001, 1000) scored +Inf on 963 of 2,000
   draws. Its mirror (owner, 2026-10-22, the post-M5 review's P2-01): a beta draw that rounds to 1 is
   clamped to the largest float below 1. At beta(0.001, 0.001), 8,802 of
-  20,000 draws rounded to 1 and scored +Inf.
+  20,000 draws rounded to 1 and scored +Inf. Beta and dirichlet are drawn
+  from their gammas' logs (the sigmoid of a difference, a softmax), so the
+  floor and the clamp see where a draw lies: x/(x + y) of two underflowed
+  gammas was 0/0 = NaN (448 of 2,000 draws), where flooring the gammas
+  first would put the draw at 1/2. A shape below 1 boosts in log space,
+  log Γ(α+1)'s draw - E/α for an exponential E (genclj-uli3).
 - **A mixture of a discrete and a continuous family is an error** when it
   is made (owner, 2026-10-22, the post-M5 review's P2-02). Its density would add a pmf to a pdf: given
   y = 0, the posterior came out 0.267 where 0.80 is exact. Gen.jl's types
@@ -851,7 +856,13 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   compares by `=` (`array/==` where both values are numbers), so a given
   label is scored on the host, without the fallback, and the gradient
   reaches the probabilities; a label itself has none (Gen.jl's
-  `nothing`). A host parameter is the same for every particle; a draw of
+  `nothing`). An array label is compared whole, so a vector label is one
+  value (the post-M5 review's P2-03: elementwise, a coin broadcast to
+  [1 2] counted twice). A draw without an enumerable support keeps its own
+  shape: a body that broadcasts it is an error, as such values have no
+  density. Its inverse is kept within a few ulps and a quarter of the
+  lattice's spacing (P2-04: a fixed relative 1e-5 gave mass 97 to a grid
+  under (* 1e-6 (poisson 3))). A host parameter is the same for every particle; a draw of
   labels in a batched run falls back to one particle at a time, and
   `(sample d key [n])` of labels is an ex-info, as no array holds them.
   The alternatives: conversion by shape for every parameter, which would
@@ -1384,7 +1395,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     the common pool; `:host-pool` takes the caller's own
     (`smc/host-pool n`) or `false`. Its size: half the processors up to 4,
     as the llama.cpp engine's row pool, or `-Dgen.llm.host-threads` (1
-    turns it off). Alternatives: the LM owning it, no default pool, a pool
+    turns it off). Both pools are `gen.llm.host`'s (2026-10-22, the
+    post-M5 review's I4-04): one pool function, default size and ordered
+    map, a pool for each, so the engine's follows the property too. Alternatives: the LM owning it, no default pool, a pool
     for each run. Measured (quiet, Qwen3's vocabulary, 64 particles): 4
     threads take 17% (bootstrap) to 20% (masked) off a step on the toy
     engine; on llama.cpp with Qwen3-0.6B, with R6's `constrained/weighted`,

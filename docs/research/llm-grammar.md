@@ -248,9 +248,13 @@ distribution, as GenMLX's middleware changed each categorical site's. So
 the bean's "handler middleware" is an option of the completion. The token
 GF is not a dynamic gen function with a handler; its transitions are
 written once, and a potential reweighs them all, simulate to regenerate.
-`gen.llm.constrained` holds the site's semantics: the weighting, the
-scores of a run of known tokens, the draw. `gen.llm.token` calls it at
-its two sites (a run of known tokens, a fresh token), its only change.
+`gen.llm.constrained` holds the site's math: the weighting (`weighted`,
+and `site-row`, a site's distribution after its tokens), the conditional
+weight and the potential's check. `gen.llm.token` draws and scores by it
+at its two sites (a run of known tokens, a fresh token), its only change,
+and keeps its run's state its own (2026-10-22, the post-M5 review's
+I4-05: constrained once read token's private run state, its draws and
+scores taking the completion and the state).
 
 **Which distribution it is.** q(x) = Π_i q_i(x_i), the **locally
 renormalized** distribution. It is not the LM conditioned on the

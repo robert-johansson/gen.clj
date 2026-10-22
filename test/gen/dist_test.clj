@@ -7,8 +7,10 @@
             [gen.array.special]
             [gen.batched :as batched]
             [gen.choicemap :as cm]
+            [gen.diff :as diff]
             [gen.dist :as d]
             [gen.dist.core :as dc]
+            [gen.dist.dsl :as dsl]
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
             [gen.laws :as laws]
@@ -70,7 +72,23 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"n must be an integer" (d/binom -1 0.3)))
     (is (some? (d/binom 3.0 0.3)) "an integral float counts")
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"low must be an integer" (d/uniform-discrete 0.5 3)))
-    (is (some? (d/uniform-discrete -2 3)))))
+    (is (some? (d/uniform-discrete -2 3))))
+  (testing "array parameters are checked as host ones are (genclj-ggdl, P2-05)"
+    ;; they drew values of density -Inf, or NaN (poisson [-1]); planted
+    ;; back, each check host-only (or neg-binom's p > 0, or piecewise's
+    ;; vectors, dropped) lets its case through. Clojure data is checked on
+    ;; the host on every backend.
+    (doseq [[label f] {"neg-binom p = 0" #(d/neg-binom 2.0 0.0) "geometric p = 0" #(d/geometric 0.0)
+                       "neg-binom [0]" #(d/neg-binom 2.0 [0.0 0.5])
+                       "poisson [-1]" #(d/poisson [-1.0 2.0]) "uniform [1] [0]" #(d/uniform [1.0] [0.0])
+                       "uniform-discrete [3] [1]" #(d/uniform-discrete [3] [1]) "binom [2.5]" #(d/binom [2.5] 0.5)
+                       "binom [-1]" #(d/binom [-1 2] 0.5) "uniform-discrete [0.5]" #(d/uniform-discrete [0.5] [3])
+                       "piecewise-uniform of 2-d parameters" #(d/piecewise-uniform [[0.0 1.0 2.0] [0.0 2.0 4.0]]
+                                                                                    [[0.5 0.5] [0.25 0.75]])}]
+      (is (thrown? clojure.lang.ExceptionInfo (f)) label))
+    (is (every? some? [(d/poisson [0.0 2.0]) (d/uniform [0.0] [1.0]) (d/binom [2 3] 0.5) (d/uniform-discrete [1] [3])
+                       (d/neg-binom 2.0 [1.0 0.5]) (d/geometric [1.0 0.5])])
+        "valid arrays pass")))
 
 (deftest supports
   (is (= [false true] (dc/support (d/bernoulli 0.3))))
@@ -129,6 +147,7 @@
     (check (d/normal 0.5 2.0) 0.5 4.0)
     (check (d/uniform -1.0 3.0) 1.0 (/ 16.0 12))
     (check (d/beta 2.5 0.7) (/ 2.5 3.2) (/ (* 2.5 0.7) (* 3.2 3.2 4.2)))
+    (check (d/beta 0.3 0.5) 0.375 (/ 0.15 (* 0.64 1.8)))
     (check (d/gamma 2.5 1.5) 3.75 5.625)
     (check (d/inv-gamma 10.0 2.0) (/ 2.0 9) (/ 4.0 (* 81 8)))
     (check (d/exponential 1.5) (/ 1 1.5) (/ 1 2.25))
@@ -239,6 +258,53 @@
         (is (ts/close? ((array/grad #(dc/log-prob (mvnormal-mixture w % covs) (array/array x))) (array/array mus))
                        (array/array dmus)))))))
 
+(dsl/dist half-count
+  "Half a poisson count: discrete, of float values."
+  [lam]
+  (array// (d/poisson lam) 2.0))
+
+(def ^:private vector-normals
+  "Gen.jl's HomogeneousMixture(broadcasted_normal, [1, 1]): components of
+   vector values, means of shape [K d]."
+  (d/homogeneous-mixture d/normal [1 1]))
+
+(deftest homogeneous-mixtures-mix-whole-values
+  ;; genclj-e6b0 (the post-M5 review's P2-06): vector-valued components were
+  ;; mixed coordinate by coordinate, and dims made no difference: -3.22 for
+  ;; (0, 10) between clusters at (0, 0) and (10, 10), where -51.84 is right.
+  ;; Planted back (no whole-values), the values fail; summing the batch too
+  ;; (value-axes as the whole value shape, the review's first direction, or
+  ;; over v's batch axes) fails the batches.
+  (let [lp-normal (fn [x mu] (reduce + (map #(- (* -0.5 (Math/pow (- %1 %2) 2)) 0.9189385332046728) x mu)))
+        mix (fn [w lps] (Math/log (reduce + (map #(* %1 (Math/exp %2)) w lps))))
+        mus [[0.0 0.0] [10.0 10.0]]
+        m (vector-normals [0.5 0.5] mus 1.0)]
+    (testing "a whole vector, as mvnormal components score it"
+      (is (close? (dc/log-prob m (array/array [0.0 10.0])) (mix [0.5 0.5] (map #(lp-normal [0.0 10.0] %) mus)) (ts/tol 1e-12)))
+      (is (ts/close? (dc/log-prob m (array/array [0.0 10.0]))
+                     (dc/log-prob (mvnormal-mixture [0.5 0.5] mus [[[1.0 0.0] [0.0 1.0]] [[1.0 0.0] [0.0 1.0]]]) (array/array [0.0 10.0])))))
+    (testing "a batch of values"
+      (let [xs [[0.0 10.0] [1.0 1.0] [9.0 11.0]]]
+        (is (ts/close? (dc/log-prob m (array/array xs)) (array/array (mapv (fn [x] (mix [0.5 0.5] (map #(lp-normal x %) mus))) xs))))))
+    (testing "a batch of mixtures: weights [B K] and means [B K d]"
+      (let [w [[0.3 0.7] [0.9 0.1]]
+            ms [[[0.0 0.0] [1.0 2.0]] [[3.0 3.0] [0.0 -1.0]]]
+            x [0.5 1.5]]
+        (is (ts/close? (dc/log-prob (vector-normals w ms 1.0) (array/array x))
+                       (array/array (mapv (fn [wb mb] (mix wb (map #(lp-normal x %) mb))) w ms))))))
+    (testing "a batch of scalar mixtures: weights [B K] and means [B K], dims [0 0] (the verifier's)"
+      (let [w [[0.3 0.7] [0.5 0.5]] ms [[0.0 1.0] [2.0 3.0]]]
+        (is (ts/close? (dc/log-prob ((d/homogeneous-mixture d/normal [0 0]) w ms 1.0) (array/array [0.5 0.5]))
+                       (array/array (mapv (fn [wb mb] (mix wb (map #(lp-normal [0.5] [%]) mb))) w ms))))))))
+
+(deftest mixtures-of-discrete-and-continuous-families-are-errors
+  ;; genclj-e6b0 (P2-02): the density added a pmf to a pdf, so given y = 0
+  ;; P(w = 0.8 | y = 0) came out 0.267 where 0.80 is exact (planted: no
+  ;; check, and both mixtures are made)
+  (doseq [[label make] {"poisson and normal" #((d/heterogeneous-mixture [d/poisson d/normal]) [0.5 0.5] [3.0] [0.0 1.0])
+                        "spike and slab" #((d/heterogeneous-mixture [d/uniform-discrete d/normal]) [0.3 0.7] [0 0] [0.0 1.0])}]
+    (is (= {:distribution "heterogeneous-mixture" :discrete [true false]} (ts/thrown-data (make))) label)))
+
 (deftest mixture-draws-pick-one-component-per-element
   ;; one pick per element of the log density: a vector value is one
   ;; component's whole draw (the pick met the vector's own axis: a shape
@@ -248,11 +314,18 @@
   (let [n 4000
         band (fn [p] (* 5 (Math/sqrt (/ (* p (- 1 p)) n))))
         frac (fn [pred xs] (/ (count (filter pred xs)) (double n)))]
-    (testing "vector values"
-      (let [far (mvnormal-mixture [0.3 0.7] [[0.0 0.0] [100.0 -100.0]] [[[1.0 0.0] [0.0 1.0]] [[1.0 0.0] [0.0 1.0]]])
-            xs (ts/host (dc/sample far (rng/key 21) [n]))]
-        (is (every? (fn [[a b]] (= (> a 50) (< b -50))) xs) "both coordinates from one component")
-        (is (close? (frac (fn [[a _]] (> a 50)) xs) 0.7 (band 0.7)))))
+    ;; [batch shape]: mvnormal's batch axes lead its values; an elementwise
+    ;; family's batch shape broadcasts with its values, as normal's own does
+    (doseq [[label far batch] [["vector values" (mvnormal-mixture [0.3 0.7] [[0.0 0.0] [100.0 -100.0]]
+                                                                  [[[1.0 0.0] [0.0 1.0]] [[1.0 0.0] [0.0 1.0]]])
+                                [n]]
+                               ;; genclj-e6b0: one pick per coordinate (planted: the old pick)
+                               ["vector values of an elementwise family"
+                                (vector-normals [0.3 0.7] [[0.0 0.0] [100.0 -100.0]] 1.0) [n 1]]]]
+      (testing label
+        (let [xs (ts/host (dc/sample far (rng/key 21) batch))]
+          (is (every? (fn [[a b]] (= (> a 50) (< b -50))) xs) "both coordinates from one component")
+          (is (close? (frac (fn [[a _]] (> a 50)) xs) 0.7 (band 0.7))))))
     (testing "a batched parameter: eight mixtures, which all agree with probability 2⁻⁷"
       (let [m (normal-mixture [0.5 0.5] (array/stack [(array/zeros [8]) (array/full [8] 100.0)] -1) [0.1 0.1])
             xs (ts/host (dc/sample m (rng/key 22) [n 1]))]
@@ -297,8 +370,10 @@
                   (+ (* 3 (array/item (dc/log-prob (d/normal 0 1) 0.0))) (Math/log 0.3)) (ts/tol 1e-12)))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"one element per factor" (dc/log-prob p [(array/zeros [3])])))))
   (testing "heterogeneous mixtures keep each component's values (review 14)"
-    (let [x (dc/sample ((d/heterogeneous-mixture [d/poisson d/normal]) [0.01 0.99] [3.0] [0.5 1.0]) (rng/key 1) [200])]
-      (is (some #(not= % (Math/floor %)) (array/->clj x)) "normal draws are not truncated to integers")))
+    ;; two discrete families, of integer and of float values (a mixture of
+    ;; poisson and normal is an error since genclj-e6b0)
+    (let [x (dc/sample ((d/heterogeneous-mixture [d/poisson half-count]) [0.5 0.5] [3.0] [3.0]) (rng/key 1) [200])]
+      (is (some #(not= % (Math/floor %)) (array/->clj x)) "half counts are not truncated to integers")))
   (testing "bad parameters are errors, not NaN (review 15)"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"positive definite" (d/mvnormal [0.0 0.0] [[1.0 2.0] [2.0 1.0]])))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"symmetric" (d/mvnormal [0.0 0.0] [[1.0 0.5] [0.3 1.0]])))
@@ -402,6 +477,21 @@
   [logits]
   (sample [key shape] (rng/categorical key logits shape))
   (log-prob [v] (array/pick (array/log-softmax logits) v)))
+
+(deftest defdist-checks-its-clauses
+  ;; genclj-ggdl (I3-06): a clause of another name was dropped silently, so
+  ;; a misspelled validate skipped the checks and value-shape the shape's;
+  ;; a repeated one kept the last (planted: no check, and each defines)
+  (doseq [[problem form] {{:unknown '[valdate]}
+                          '(gen.dist.core/defdist v-pos [x] (valdate (gen.dist.core/check-positive "v" "x" x))
+                             (sample [k s] 1.0) (log-prob [v] 0.0))
+                          {:unknown '[logprob] :missing '[log-prob]}
+                          '(gen.dist.core/defdist v-exp [rate] (sample [k s] 1.0) (logprob [v] 0.0))
+                          {:repeated '[log-prob]}
+                          '(gen.dist.core/defdist v-twice [x] (sample [k s] 1.0) (log-prob [v] 0.0) (log-prob [v] 1.0))}]
+    (is (= problem (dissoc (ts/thrown-data (try (eval form) (catch clojure.lang.Compiler$CompilerException e (throw (ex-cause e)))))
+                           :dist))
+        (pr-str form))))
 
 (deftest user-distributions-without-a-value-shape-are-not-rejected
   ;; third review B13: the default value shape (the parameters' broadcast
@@ -512,3 +602,149 @@
     (testing "a gradient outside the support is finite"
       (is (finite? [(ts/number ((array/grad #(dc/log-prob (d/weibull % 2.0) -1.0)) 1.5))
                     (ts/number ((array/grad #(dc/log-prob (d/weibull 1.5 %) -1.0)) 2.0))])))))
+
+;; ---------------------------------------------------------------------------
+;; Gamma, beta and dirichlet at their edges
+;; ---------------------------------------------------------------------------
+
+(defn- in-float32
+  "The family's parameters as float32 arrays of n elements, so a draw of no
+   batch shape is n float32 draws (the JVM backend's 0-d arrays are host
+   doubles)."
+  [family n & params]
+  (apply family (map #(array/full [n] % {:dtype :float32}) params)))
+
+(deftest gamma-beta-and-dirichlet-at-their-edges
+  ;; genclj-uli3 (the post-M5 review's P2-01): their draws were not floored,
+  ;; as §9 says every family's are. gamma(0.001, 1000) drew 0, of density
+  ;; +Inf, about half the time (90 % in float32); beta(0.001, 0.001) drew 0,
+  ;; 1 (x/(x + y) rounds to 1 when y < x·2^-53) and NaN (0/0); a sparse
+  ;; dirichlet drew exact zeros. Planted back, each fails: the floors, the
+  ;; clamp below 1, beta's x/(x + y) of linear draws, the boost's power of U
+  ;; (log of 0: NaN where both underflow), the float32 exponential drawn in
+  ;; float64 (the draws' dtype) and the boost's E·α for E/α (the law).
+  (let [n 2000
+        tiny #(if (= :float32 (array/dtype %)) (double Float/MIN_NORMAL) Double/MIN_NORMAL)
+        top #(if (= :float32 (array/dtype %)) (double (Math/nextDown (float 1.0))) (Math/nextDown 1.0))
+        host (fn [x] (map ts/number (flatten (array/->clj x))))
+        check (fn [label dist batch dtype upper]
+                (let [x (dc/sample dist (rng/key 93) batch)
+                      xs (host x)]
+                  (is (= dtype (array/dtype x)) label)
+                  (is (every? #(<= (tiny x) % (upper x)) xs) label)
+                  (is (every? #(Double/isFinite %) (host (dc/log-prob dist x))) label)
+                  xs))
+        dtypes (if (ts/f32?) [:float32] [(ts/float-dtype) :float32])]
+    (doseq [dtype dtypes
+            :let [f32 (and (= :float32 dtype) (not (ts/f32?)))
+                  make (fn [family k & params] (if f32 (apply in-float32 family k params) (apply family params)))
+                  batch (fn [k] (if f32 [] [k]))]]
+      (testing (name dtype)
+        (check "gamma(0.001, 1000)" (make d/gamma n 0.001 1000.0) (batch n) dtype (constantly Double/MAX_VALUE))
+        (let [xs (check "beta(0.001, 0.001)" (make d/beta n 0.001 0.001) (batch n) dtype top)
+              below (count (filter #(< % 0.5) xs))]
+          ;; symmetric: half below 1/2, within five standard errors
+          (is (< (Math/abs (- below (/ n 2))) (* 5 (Math/sqrt (/ n 4)))) (str below " of " n " below 1/2")))
+        (let [k 1000
+              d (if f32 (d/dirichlet (array/full [k] 0.01 {:dtype :float32})) (d/dirichlet (array/full [k] 0.01)))
+              x (dc/sample d (rng/key 94) [200])]
+          (is (= dtype (array/dtype x)))
+          (is (every? #(<= (tiny x) %) (host x)) "no component is 0")
+          (is (every? #(Double/isFinite %) (host (dc/log-prob d x)))))))
+    (testing "a small shape's law: P(X < 1e-30) = (1e-30)^0.01 for beta(0.01, 1), within five standard errors"
+      (let [m 20000
+            p (Math/pow 1e-30 0.01)
+            below (count (filter #(< % 1e-30) (host (dc/sample (d/beta 0.01 1.0) (rng/key 95) [m]))))]
+        (is (< (Math/abs (- (/ below (double m)) p)) (* 5 (Math/sqrt (/ (* p (- 1 p)) m)))) (str below " of " m))))
+    (testing "an update that keeps a floored draw has the score change as its weight (it was NaN)"
+      ;; g ~ gamma(0.005, 1) underflows with probability 2^(-1075/200) = 0.024
+      (let [model (gen [s] (trace :g (d/gamma 0.005 1.0)) (trace :x (d/normal s 1.0)))
+            trs (map #(gfi/simulate model [0.0] %) (rng/split (rng/key 96) 400))
+            floored (filter #(= (tiny (% :g)) (ts/number (% :g))) trs)]
+        (is (seq floored) "some traces hold a floored draw")
+        (doseq [tr floored]
+          (let [x (ts/number (tr :x))]
+            (is (ts/close? (:weight (gfi/update tr [1.0] [diff/unknown-change] cm/EMPTY (rng/key 1)))
+                           (- (* -0.5 (Math/pow (- x 1.0) 2)) (* -0.5 x x))))))))))
+
+;; ---------------------------------------------------------------------------
+;; Float32 samplers at their edges
+;; ---------------------------------------------------------------------------
+
+(deftest float32-samplers-stay-in-their-supports
+  ;; genclj-3d2x. P2-08: laplace's low bound, nextafter(-1, 0), was
+  ;; float64's, which is -1 in float32, where log1p(-|u|) is -Inf: a +Inf
+  ;; draw about once in 2^23 on MLX (planted: the float64 bound for both).
+  ;; P2-11 and the verifier's poisson: in float32 an inversion's partial
+  ;; sums fall short of 1, binom(37, 0.25)'s by 1.1e-6 and poisson(9.1)'s
+  ;; by 3e-7, so a uniform above them counted every later step, 40 > n,
+  ;; and 40 for the poisson (planted: u not scaled to their total). At the
+  ;; largest float32 below 1 the counts stay in the support.
+  (is (< -1.0 (double (float (#'d/above-minus-one :float32)))))
+  (is (< -1.0 (#'d/above-minus-one :float64)))
+  (let [f32 #(array/array [%] {:dtype :float32})
+        top (f32 (double (Math/nextDown (float 1.0))))]
+    (doseq [[n p] [[37.0 0.25] [7.0 0.41]]]
+      (is (<= (ts/number (#'d/binomial-inversion top (f32 n) (f32 p) (f32 (- 1.0 p)))) n) (str "binom(" n ", " p ")")))
+    (is (< (ts/number (#'d/poisson-inversion top (f32 9.1))) 40) "poisson(9.1)")))
+
+;; ---------------------------------------------------------------------------
+;; Gradients at zero probabilities and at the parameters' bounds
+;; ---------------------------------------------------------------------------
+
+(defn- with-a-zero
+  "A probability vector with an exact 0 that varies with b: [b, 1 - b, 0·b]."
+  [b]
+  (array/stack [b (- 1.0 b) (array/* 0.0 b)]))
+
+(def ^:private at-the-edges
+  "[label log-density at step]: a log density of one argument, at a point
+   where a probability is 0 or a parameter at its bound, and the side of it
+   the finite difference takes (+1 or -1, the side inside the domain)."
+  (let [mix (d/homogeneous-mixture d/normal)]
+    [["categorical, picking b" #(dc/log-prob (d/categorical (with-a-zero %)) 0) 0.25 1]
+     ["categorical, picking 1 - b" #(dc/log-prob (d/categorical (with-a-zero %)) 1) 0.25 1]
+     ["categorical-logits, a -Inf logit" #(dc/log-prob (d/categorical-logits (array/stack [% 0.0 ##-Inf])) 0) 0.5 1]
+     ["bernoulli true at p = 1" #(dc/log-prob (d/bernoulli %) true) 1.0 -1]
+     ["bernoulli false at p = 0" #(dc/log-prob (d/bernoulli %) false) 0.0 1]
+     ["a mixture with a weight of 0" #(dc/log-prob (mix (with-a-zero %) [0.0 1.0 2.0] 1.0) 0.3) 0.25 1]
+     ["a mixture's weight at 0" #(dc/log-prob (mix (array/stack [% (- 1.0 %)]) [0.0 1.0] 1.0) 0.3) 0.0 1]
+     ["a mixture's weight at 1" #(dc/log-prob (mix (array/stack [% (- 1.0 %)]) [0.0 1.0] 1.0) 0.3) 1.0 -1]
+     ["beta-uniform at theta = 0" #(dc/log-prob (d/beta-uniform % 2.0 3.0) 0.3) 0.0 1]
+     ["beta-uniform at theta = 1" #(dc/log-prob (d/beta-uniform % 2.0 3.0) 0.3) 1.0 -1]
+     ["binom at p = 0" #(dc/log-prob (d/binom 5 %) 0) 0.0 1]
+     ["binom at p = 1" #(dc/log-prob (d/binom 5 %) 5) 1.0 -1]
+     ["neg-binom at p = 1" #(dc/log-prob (d/neg-binom 2.0 %) 0) 1.0 -1]
+     ["geometric at p = 1" #(dc/log-prob (d/geometric %) 0) 1.0 -1]
+     ["poisson at lambda = 0" #(dc/log-prob (d/poisson %) 0) 0.0 1]]))
+
+(deftest gradients-at-zero-probabilities-and-bounds
+  ;; genclj-rnbd (from memo.clj): categorical took the log of every
+  ;; probability before its pick, and log's gradient at a 0 it did not pick,
+  ;; 0/0, made the gradient NaN (4.0 is right at b = 0.25). Bernoulli's where
+  ;; over log p and log1p(-p), a mixture's log of a weight of 0 and
+  ;; beta-uniform's branches had the same trap. Planted back, each gives NaN
+  ;; here: (pick-guarded identity (log probs) v), (where v (log p) (log1p
+  ;; (- p))), log-weight's (log w) for (log (stand-in …)), and xlogy
+  ;; without its stand-in (binom, poisson). Dropping zero-weight-term, in
+  ;; log-mixture or in beta-uniform, fails the derivatives at a weight's
+  ;; bound (-1 for 0.22); pick-guarded without its stand-in, the gradient
+  ;; outside the support.
+  ;; Each gradient against a second-order one-sided finite difference, on
+  ;; the JVM backend in float64 whatever the backend under test.
+  (let [h 1e-5
+        jvm (array/backend-named :jvm)]
+    (doseq [[label lp at step] at-the-edges]
+      (let [f #(array/with-backend jvm (ts/number (lp %)))
+            fd (/ (clojure.core/- (* 4 (f (+ at (* step h)))) (* 3 (f at)) (f (+ at (* 2 step h)))) (* 2 step h))
+            g (ts/number ((array/grad lp) (array/array at)))]
+        (is (ts/close? fd g {:rtol (ts/tol 1e-6) :atol (ts/tol 1e-8)}) (str label ": " g " against " fd)))))
+  (testing "outside the support, where the pick is clipped to a 0, the gradient is 0"
+    (is (= 0.0 (ts/number ((array/grad #(dc/log-prob (d/categorical (with-a-zero %)) 5)) (array/array 0.25))))))
+  (testing "a weight of 0 whose component's density is beyond the float range times the mixture's"
+    ;; the slope e^(lp₀ - L) = e^500000: the value stays exact, and the
+    ;; gradient is the largest float (planted: without the cap, both NaN)
+    (let [lp #(dc/log-prob ((d/homogeneous-mixture d/normal) (array/stack [% (- 1.0 %)]) [0.0 1000.0] 1.0) 0.0)
+          [v g] ((array/value-and-grad lp) (array/array 0.0))]
+      (is (ts/close? v (dc/log-prob (d/normal 1000.0 1.0) 0.0)))
+      (is (= (if (ts/f32?) (double Float/MAX_VALUE) Double/MAX_VALUE) (ts/number g))))))

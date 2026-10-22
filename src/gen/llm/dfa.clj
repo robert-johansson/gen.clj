@@ -230,8 +230,8 @@
           dead (aget block sink)
           rep (reduce (fn [rep ^long s] (if (contains? rep (aget block s)) rep (assoc rep (aget block s) s)))
                       {} (range n))
-          succ (fn ^long [^long b ^long byte]
-                 (let [s' (aget table (+ (* (long (rep b)) 256) byte))]
+          succ (fn ^long [^long b ^long x]
+                 (let [s' (aget table (+ (* (long (rep b)) 256) x))]
                    (if (neg? s') dead (aget block s'))))
           first-block (if (neg? start) dead (aget block start))]
       (if (== first-block dead)
@@ -240,8 +240,8 @@
         (let [[order queue] (loop [order {first-block 0} queue [first-block] i 0]
                               (if (== i (count queue))
                                 [order queue]
-                                (let [[order queue] (reduce (fn [[order queue] ^long byte]
-                                                              (let [b (long (succ (queue i) byte))]
+                                (let [[order queue] (reduce (fn [[order queue] ^long x]
+                                                              (let [b (long (succ (queue i) x))]
                                                                 (if (or (== b dead) (contains? order b))
                                                                   [order queue]
                                                                   [(assoc order b (count order)) (conj queue b)])))
@@ -252,9 +252,9 @@
               out-accept (boolean-array m)]
           (doseq [[^long i b] (map-indexed vector queue)]
             (aset out-accept i (aget accept (long (rep b))))
-            (dotimes [byte 256]
-              (let [b' (long (succ b byte))]
-                (aset out (+ (* i 256) byte) (int (if (== b' dead) -1 (order b')))))))
+            (dotimes [x 256]
+              (let [b' (long (succ b x))]
+                (aset out (+ (* i 256) x) (int (if (== b' dead) -1 (order b')))))))
           (Dfa. 0 out out-accept))))))
 
 (defn dfa
