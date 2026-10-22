@@ -95,7 +95,21 @@
     (doseq [[expected f] [[{:distribution "normal" :param "std"} #(d/normal 0.0 nil)]
                           [{:distribution "bernoulli" :param "p"} #(d/bernoulli nil)]
                           [{:distribution "categorical" :param "probs"} #(d/categorical nil)]]]
-      (is (= expected (ts/thrown-data (f)))))))
+      (is (= expected (ts/thrown-data (f))))))
+  (testing "a boolean for a numeric parameter is an error naming both, and so is an infinite count (cross-review 4)"
+    ;; since I3-16 gen.array's comparisons took true as 1.0, so bernoulli,
+    ;; binom and poisson constructed with true, and the others threw a raw
+    ;; ClassCastException; binom's n of Inf passed check-integer (planted:
+    ;; no check-numeric; check-integer without isfinite)
+    (doseq [[expected f] [[{:distribution "bernoulli" :param "p"} #(d/bernoulli true)]
+                          [{:distribution "binom" :param "p"} #(d/binom 3 true)]
+                          [{:distribution "poisson" :param "lam"} #(d/poisson true)]
+                          [{:distribution "geometric" :param "p"} #(d/geometric true)]
+                          [{:distribution "normal" :param "std"} #(d/normal 0.0 true)]
+                          [{:distribution "normal" :param "mu"} #(d/normal [true false] 1.0)]]]
+      (is (= expected (ts/thrown-data (f)))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"n must be an integer" (d/binom ##Inf 0.5)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"n must be an integer" (d/binom [3 ##Inf] 0.5)))))
 
 (deftest supports
   (is (= [false true] (dc/support (d/bernoulli 0.3))))

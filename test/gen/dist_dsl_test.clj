@@ -248,6 +248,14 @@
 (dist shifted-log-normal [mu sd] (+ 1.0 (log-normal mu sd)))
 (dist relabeled [probs] (* 10 (labeled probs [1 2 3])))
 
+(dist maybe-negated [mu flip] (* (if flip -1.0 1.0) (d/normal mu 1)))
+
+(deftest a-host-parameter-may-be-a-boolean
+  ;; cross-review 4: numeric parameters refuse booleans, but a dist's are
+  ;; ^:host, read by its body (planted: check-numeric on ^:host parameters too)
+  (is (ts/close? (lp (d/normal 0.5 1) -0.3) (lp (maybe-negated 0.5 true) 0.3)))
+  (is (ts/close? (lp (d/normal 0.5 1) 0.3) (lp (maybe-negated 0.5 false) 0.3))))
+
 (deftest a-pushforward-of-a-pushforward
   ;; m3-grammar's cross-review of genclj-6rn4: dist's support clause still
   ;; called dc/support, which throws where -support is nil, so a pushforward
