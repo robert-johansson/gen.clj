@@ -88,7 +88,14 @@
       (is (thrown? clojure.lang.ExceptionInfo (f)) label))
     (is (every? some? [(d/poisson [0.0 2.0]) (d/uniform [0.0] [1.0]) (d/binom [2 3] 0.5) (d/uniform-discrete [1] [3])
                        (d/neg-binom 2.0 [1.0 0.5]) (d/geometric [1.0 0.5])])
-        "valid arrays pass")))
+        "valid arrays pass"))
+  (testing "a nil parameter is an error at construction, naming both (genclj-khnp, I3-13)"
+    ;; (d/normal 0.0 nil) constructed, and its first sample threw "shape: not
+    ;; an array: nil" (planted: no nil check)
+    (doseq [[expected f] [[{:distribution "normal" :param "std"} #(d/normal 0.0 nil)]
+                          [{:distribution "bernoulli" :param "p"} #(d/bernoulli nil)]
+                          [{:distribution "categorical" :param "probs"} #(d/categorical nil)]]]
+      (is (= expected (ts/thrown-data (f)))))))
 
 (deftest supports
   (is (= [false true] (dc/support (d/bernoulli 0.3))))
@@ -488,10 +495,43 @@
                           {:unknown '[logprob] :missing '[log-prob]}
                           '(gen.dist.core/defdist v-exp [rate] (sample [k s] 1.0) (logprob [v] 0.0))
                           {:repeated '[log-prob]}
-                          '(gen.dist.core/defdist v-twice [x] (sample [k s] 1.0) (log-prob [v] 0.0) (log-prob [v] 1.0))}]
+                          '(gen.dist.core/defdist v-twice [x] (sample [k s] 1.0) (log-prob [v] 0.0) (log-prob [v] 1.0))
+                          {:flag-and-clause '[value-shape]}
+                          '(gen.dist.core/defdist ^:elementwise v-both [x] (sample [k s] 1.0) (log-prob [v] 0.0)
+                             (value-shape [] []))}]
     (is (= problem (dissoc (ts/thrown-data (try (eval form) (catch clojure.lang.Compiler$CompilerException e (throw (ex-cause e)))))
                            :dist))
         (pr-str form))))
+
+(deftest the-distribution-layer-calls-only-gen-array
+  ;; rule 3, genclj-z6iy (I3-11): gen.dist and gen.dist.core called
+  ;; gen.array.protocols for a backend's default dtypes and a batch's
+  ;; particles; now array/defaults and array/all-particles (planted: the
+  ;; protocols required again)
+  (doseq [n '[gen.dist gen.dist.core gen.dist.dsl gen.dist.host]]
+    (require n)
+    (is (not-any? #(or (= 'gen.array.protocols (ns-name %)) (.startsWith (name (ns-name %)) "gen.backend"))
+                  (vals (ns-aliases n)))
+        (str n))
+    (is (not-any? #(.startsWith (.getName ^Class %) "gen.array.protocols") (vals (ns-imports n))) (str n)))
+  (is (= {:float (ts/float-dtype) :int (ts/int-dtype)} (array/defaults array/*backend*))))
+
+(deftest every-family-declares-its-value-shape
+  ;; genclj-wmug (I3-07): value shapes and discreteness were registered in
+  ;; two lists far from the definitions, so a family left out had no shape
+  ;; check, silently (review 1's bug 6, review 3's B5). Each of gen.dist's
+  ;; families now declares both where it is defined (planted: weibull
+  ;; without ^:elementwise, poisson without ^:discrete).
+  (let [families (for [[sym v] (ns-publics 'gen.dist)
+                       :let [t (keyword "gen.dist" (name sym))]
+                       :when (and (::dc/constructor (meta v)) (contains? (methods dc/-sample) t))]
+                   t)]
+    (is (= 31 (count families)))
+    (is (every? #(contains? (methods dc/-value-shape) %) families)
+        (str (remove #(contains? (methods dc/-value-shape) %) families)))
+    (is (= #{::d/bernoulli ::d/categorical ::d/categorical-logits ::d/uniform-discrete ::d/geometric ::d/poisson
+             ::d/binom ::d/neg-binom}
+           (set (filter #(contains? (methods dc/-discrete?) %) families))))))
 
 (deftest user-distributions-without-a-value-shape-are-not-rejected
   ;; third review B13: the default value shape (the parameters' broadcast
@@ -718,6 +758,17 @@
      ["geometric at p = 1" #(dc/log-prob (d/geometric %) 0) 1.0 -1]
      ["poisson at lambda = 0" #(dc/log-prob (d/poisson %) 0) 0.0 1]]))
 
+(defn- matches-its-finite-difference
+  "Does the gradient of lp (a log density of one argument) at x match a
+   second-order one-sided finite difference from the side step (+1 or -1),
+   on the JVM backend in float64 whatever the backend under test?"
+  [label lp at step]
+  (let [h 1e-5
+        f #(array/with-backend (array/backend-named :jvm) (ts/number (lp %)))
+        fd (/ (clojure.core/- (* 4 (f (+ at (* step h)))) (* 3 (f at)) (f (+ at (* 2 step h)))) (* 2 step h))
+        g (ts/number ((array/grad lp) (array/array at)))]
+    (is (ts/close? fd g {:rtol (ts/tol 1e-6) :atol (ts/tol 1e-8)}) (str label ": " g " against " fd))))
+
 (deftest gradients-at-zero-probabilities-and-bounds
   ;; genclj-rnbd (from memo.clj): categorical took the log of every
   ;; probability before its pick, and log's gradient at a 0 it did not pick,
@@ -732,13 +783,8 @@
   ;; outside the support.
   ;; Each gradient against a second-order one-sided finite difference, on
   ;; the JVM backend in float64 whatever the backend under test.
-  (let [h 1e-5
-        jvm (array/backend-named :jvm)]
-    (doseq [[label lp at step] at-the-edges]
-      (let [f #(array/with-backend jvm (ts/number (lp %)))
-            fd (/ (clojure.core/- (* 4 (f (+ at (* step h)))) (* 3 (f at)) (f (+ at (* 2 step h)))) (* 2 step h))
-            g (ts/number ((array/grad lp) (array/array at)))]
-        (is (ts/close? fd g {:rtol (ts/tol 1e-6) :atol (ts/tol 1e-8)}) (str label ": " g " against " fd)))))
+  (doseq [[label lp at step] at-the-edges]
+    (matches-its-finite-difference label lp at step))
   (testing "outside the support, where the pick is clipped to a 0, the gradient is 0"
     (is (= 0.0 (ts/number ((array/grad #(dc/log-prob (d/categorical (with-a-zero %)) 5)) (array/array 0.25))))))
   (testing "a weight of 0 whose component's density is beyond the float range times the mixture's"
@@ -748,3 +794,96 @@
           [v g] ((array/value-and-grad lp) (array/array 0.0))]
       (is (ts/close? v (dc/log-prob (d/normal 1000.0 1.0) 0.0)))
       (is (= (if (ts/f32?) (double Float/MAX_VALUE) Double/MAX_VALUE) (ts/number g))))))
+
+(dsl/dist coin
+  "A bernoulli's draw as 1.0 or 0.0."
+  [p]
+  (array/where (d/bernoulli p) 1.0 0.0))
+
+(dsl/dist labeled-numbers
+  "A categorical's draw picking one of three numbers."
+  [probs]
+  (array/take (array/array [10.0 20.0 30.0]) (d/categorical probs)))
+
+(dsl/dist binom-labels
+  "A binomial's count picking one of four numbers: array labels over an
+   enumerable draw."
+  [p]
+  (array/take (array/array [10.0 20.0 30.0 40.0]) (d/binom 3 p)))
+
+(dsl/dist shifted-count
+  "A poisson's count plus one: a draw without a support, inverted."
+  [lam]
+  (array/+ 1.0 (d/poisson lam)))
+
+(deftest a-log-mass-of-0-has-gradient-0
+  ;; DESIGN §9 (PROVISIONAL, genclj-rnbd's follow-up): a family that
+  ;; computes a log mass and then selects sent a cotangent of 0 into log at
+  ;; a mass of 0, so a pushforward's match over an enumerable draw had a
+  ;; NaN gradient (the coin at p = 0 observed 0.0, the [b 1-b 0] labels);
+  ;; xlogy's and xlog1py's derivatives at their pole are infinite, so
+  ;; binom, poisson, geometric and neg-binom at a parameter's bound with v
+  ;; outside the mass had ±Inf, and NaN through array labels over binom.
+  ;; Planted back, each fails: categorical's
+  ;; log, bernoulli's rnbd branches, log1m-mass without its stand-in, each
+  ;; family's stand-in parameter, piecewise-uniform's log.
+  (doseq [[label lp at step] [["the coin at p = 0, observed 0.0" #(dc/log-prob (coin %) 0.0) 0.0 1]
+                              ["the coin at p = 1, observed 1.0" #(dc/log-prob (coin %) 1.0) 1.0 -1]
+                              ["[b 1-b 0]'s labels, observed b's" #(dc/log-prob (labeled-numbers (with-a-zero %)) 10.0) 0.25 1]
+                              ["binom's labels at p = 0, observed 0's" #(dc/log-prob (binom-labels %) 10.0) 0.0 1]
+                              ["a shifted poisson at lambda = 0, observed 0's" #(dc/log-prob (shifted-count %) 1.0) 0.0 1]]]
+    (matches-its-finite-difference label lp at step))
+  (testing "a value of mass 0: log density -Inf, gradient 0"
+    (doseq [[label lp at] [["the coin at p = 0, observed 1.0" #(dc/log-prob (coin %) 1.0) 0.0]
+                           ["[b 1-b 0]'s labels, observed the 0's" #(dc/log-prob (labeled-numbers (with-a-zero %)) 30.0) 0.25]
+                           ["binom's labels at p = 0, observed 1's" #(dc/log-prob (binom-labels %) 20.0) 0.0]
+                           ["a shifted poisson at lambda = 0, observed 2's" #(dc/log-prob (shifted-count %) 3.0) 0.0]
+                           ["binom(5, 0) at 2" #(dc/log-prob (d/binom 5 %) 2) 0.0]
+                           ["binom(5, 1) at 3" #(dc/log-prob (d/binom 5 %) 3) 1.0]
+                           ["poisson(0) at 2" #(dc/log-prob (d/poisson %) 2) 0.0]
+                           ["geometric(1) at 2" #(dc/log-prob (d/geometric %) 2) 1.0]
+                           ["neg-binom(2, 1) at 2" #(dc/log-prob (d/neg-binom 2.0 %) 2) 1.0]
+                           ["piecewise-uniform's bin of mass 0" #(dc/log-prob (d/piecewise-uniform [0.0 1.0 2.0 3.0] (with-a-zero %)) 2.5)
+                            0.25]]]
+      (let [[v g] ((array/value-and-grad lp) (array/array at))]
+        (is (= [##-Inf 0.0] [(ts/number v) (ts/number g)]) label)))))
+
+(deftest float-limits-by-dtype
+  ;; m3-grammar's cross-review: half floats took float64's constants, so
+  ;; largest-float's cap was Inf in float16 (a mixture's weight of 0 then
+  ;; NaN) and floored's floor 0 (planted: float16 as float64). Each
+  ;; against IEEE's definition, from the precision p and the exponent's bits.
+  (doseq [[dtype p bits] [[:float64 53 11] [:float32 24 8] [:float16 11 5] [:bfloat16 8 8]]]
+    (let [emax (dec (bit-shift-left 1 (dec bits)))]
+      (is (= {:tiny (Math/pow 2 (- 1 emax)) :max (* (- 2 (Math/pow 2 (- 1 p))) (Math/pow 2 emax)) :eps (Math/pow 2 (- 1 p))}
+             (dc/float-limits dtype))
+          (name dtype))))
+  (when-not (ts/jvm?)
+    (testing "a float16 mixture with a weight of 0"
+      (let [h #(array/array % {:dtype :float16})
+            m ((d/homogeneous-mixture d/normal) (h [0.5 0.5 0.0]) (h [0.0 1.0 2.0]) (h [1.0 1.0 1.0]))]
+        (is (Double/isFinite (ts/number (dc/log-prob m (h 0.3)))))))))
+
+(deftest probabilities-sum-to-1-within-their-dtype
+  ;; genclj-ggdl (the verifier's P2-07 point): the bound on |Σp - 1| was a
+  ;; fixed 1e-6, float64's. A float32 sum of 10⁴ terms lies further off, so
+  ;; dirichlet's own draws scored -Inf at K = 10⁴ on MLX's CPU (before
+  ;; genclj-y0mp's blocked sum), and float32 probabilities that normalized
+  ;; to 1 were refused. The bound is dc/probability-tolerance, 4·log2(K)·ε,
+  ;; and at least 1e-6 (planted: the fixed 1e-6 again, in
+  ;; check-probabilities and in dirichlet's support).
+  (let [k 10000
+        off (fn [delta] (into [(+ (/ 1.0 k) delta)] (repeat (dec k) (/ 1.0 k))))
+        jvm32 #(array/with-backend (array/backend-named :jvm) (array/array % {:dtype :float32}))]
+    (testing "categorical's probabilities, checked on the host"
+      (is (some? (d/categorical (jvm32 (off 3e-6)))) "3e-6 off: within float32's 6.3e-6")
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be probabilities" (d/categorical (jvm32 (off 1e-4)))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be probabilities" (d/categorical (off 3e-6)))
+          "float64 data keeps its 1e-6"))
+    (testing "dirichlet's support in float32, on the backend under test"
+      (let [dd (d/dirichlet (array/full [k] 1.0 {:dtype :float32}))
+            v #(array/array (off %) {:dtype :float32})]
+        (is (Double/isFinite (ts/number (dc/log-prob dd (v 3e-6)))))
+        (is (= ##-Inf (ts/number (dc/log-prob dd (v 1e-4)))))))
+    (is (= [1e-6 1e-6] [(dc/probability-tolerance 3 :float64) (dc/probability-tolerance k :float64)]))
+    (is (ts/close? (* 4 (/ (Math/log k) (Math/log 2)) (Math/ulp (float 1.0))) (dc/probability-tolerance k :float32)))))

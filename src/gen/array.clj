@@ -134,7 +134,10 @@
 
 (defn size [x] (sh/size (shape x)))
 
-(defn- defaults [b] (p/-defaults b))
+(defn defaults
+  "Backend b's default dtypes, {:float … :int …} (docs/array-api.md §5)."
+  [b]
+  (p/-defaults b))
 
 (defn- common-dtype
   "The dtype the operands xs combine to on backend b (weak host scalars)."
@@ -467,42 +470,47 @@
 ;; on a safe stand-in input, so it never produces infinities that autodiff would
 ;; turn into NaN gradients.
 
-(def ^:private lanczos-coefficients
-  "Lanczos approximation, g = 7, n = 9 (relative error ~1e-15 for x >= 0.5)."
-  [0.99999999999980993 676.5203681218851 -1259.1392167224028 771.32342877765313
-   -176.61502916214059 12.507343278686905 -0.13857109526572012
-   9.9843695780195716e-6 1.5056327351493116e-7])
-
 (def ^:private half-log-2pi 0.9189385332046728)
+
+(defn- exact-double?
+  "Is x a host number that its double holds exactly: a Double, or a Long of
+   at most 2^53 in magnitude? (The composites' host values are then the
+   host paths' in gen.array.special, bit for bit.)"
+  [x]
+  (or (instance? Double x) (and (instance? Long x) (<= (Math/abs (long x)) 9007199254740992))))
 
 (defn- lgamma-lanczos
   "log Γ(z) for z >= 0.5."
   [z]
   (let [z (- z 1)
-        [c0 & cs] lanczos-coefficients
+        [c0 & cs] special/lanczos-coefficients
         series (reduce + c0 (map-indexed (fn [i c] (/ c (+ z (inc i)))) cs))
         t (+ z 7.5)]
     (+ half-log-2pi (- (* (+ z 0.5) (log t)) t) (log series))))
 
-(defn lgamma
-  "Elementwise log |Γ(x)| (+Inf at the poles 0, -1, -2, …, as SciPy): Lanczos
-   for x >= 0.5, the reflection formula below."
-  [x]
+(defn- lgamma-composite [x]
   (let [reflect? (< x 0.5)
         lg (lgamma-lanczos (where reflect? (- 1 x) x))
         xs (where reflect? x 0.25)
         pole? (logical-and (<= x 0) (== x (floor x)))]
-    (where pole?
+    ;; +Inf at +Inf, as SciPy and Julia (genclj-9gyi), where Lanczos gives
+    ;; Inf·Inf - Inf
+    (where (logical-or pole? (== x ##Inf))
            ##Inf
            (where reflect?
                   (- (Math/log Math/PI) (log (abs (sin (* Math/PI xs)))) lg)
                   lg))))
 
-(defn digamma
-  "Elementwise digamma ψ(x) = d/dx log Γ(x): ten recurrence steps
-   ψ(x) = ψ(x+1) - 1/x, then the asymptotic series (to x^-12), with the
-   reflection formula for x < 0. As SciPy: -Inf at 0, NaN at negative integers."
+(defn lgamma
+  "Elementwise log |Γ(x)| (+Inf at the poles 0, -1, -2, … and at +Inf, as
+   SciPy): Lanczos for x >= 0.5, the reflection formula below. A composite, so differentiable
+   and identical on every backend; a host number takes gen.array.special's
+   lgamma, the same operations at about 20 ns where the composite's dispatch
+   costs 700."
   [x]
+  (if (exact-double? x) (special/lgamma (double x)) (lgamma-composite x)))
+
+(defn- digamma-composite [x]
   (let [reflect? (< x 0)
         z (where reflect? (- 1 x) x)
         shift (reduce + (map #(/ (+ z %)) (range 10)))
@@ -520,6 +528,14 @@
     (where pole?
            ##NaN
            (where reflect? (- psi (/ Math/PI (tan (* Math/PI xs)))) psi))))
+
+(defn digamma
+  "Elementwise digamma ψ(x) = d/dx log Γ(x): ten recurrence steps
+   ψ(x) = ψ(x+1) - 1/x, then the asymptotic series (to x^-12), with the
+   reflection formula for x < 0. As SciPy: -Inf at 0, NaN at negative
+   integers. A host number takes gen.array.special's digamma, as lgamma."
+  [x]
+  (if (exact-double? x) (special/digamma (double x)) (digamma-composite x)))
 
 (defn log-beta
   "Elementwise log B(a, b) = log Γ(a) + log Γ(b) - log Γ(a + b)."
@@ -967,7 +983,9 @@
   "The diagonal matrix of a vector, or the main diagonal of a matrix."
   [x]
   (case (long (ndim x))
-    1 (* (with-backend (backend x) (eye (size x) {:dtype (dtype x)})) x)
+    ;; x where the identity is, not times it: 0·Inf would be NaN
+    1 (let [i (with-backend (backend x) (arange (size x)))]
+        (where (== (reshape i [-1 1]) (reshape i [1 -1])) x 0))
     2 (let [[n-rows n-cols] (shape x)
             k (c/min (long n-rows) (long n-cols))]
         (reshape (take-along-axis (slice x 0 0 k)
@@ -1104,17 +1122,23 @@
 ;; Comparison helpers (for tests and assertions)
 ;; ---------------------------------------------------------------------------
 
+(defn all-particles
+  "Every particle of a batched value (gen.array.batch) on a leading axis, for
+   a check or a bound over all of them; any other value as it is."
+  [x]
+  (if (instance? gen.array.protocols.IBatchedValue x) (p/-all-particles x) x))
+
 (defn all-true?
   "Is every element of the bool array x true, across every particle of a
    batched value (gen.array.batch)? For validation, which must hold for all
    particles; branching uses truthy?, which a batch cannot answer."
   [x]
-  (truthy? (all (if (instance? gen.array.protocols.IBatchedValue x) (p/-all-particles x) x))))
+  (truthy? (all (all-particles x))))
 
 (defn any-true?
   "Is some element of the bool array x true, across every particle?"
   [x]
-  (truthy? (any (if (instance? gen.array.protocols.IBatchedValue x) (p/-all-particles x) x))))
+  (truthy? (any (all-particles x))))
 
 (defn equal?
   "Do x and y have the same shape and numerically equal elements? (NaN is

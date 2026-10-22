@@ -16,11 +16,9 @@
                                      lgamma log-beta xlogy xlog1py logical-and logical-or]]
             [gen.array.dtype :as dt]
             [gen.array.linalg :as la]
-            [gen.array.protocols :as p]
             [gen.array.shape :as sh]
             [gen.dist.core :as dc :refer [defdist]]
-            [gen.random :as rng])
-  (:import [gen.array.protocols IBatchedValue]))
+            [gen.random :as rng]))
 
 (set! *warn-on-reflection* true)
 
@@ -37,15 +35,10 @@
   [in-support v s]
   (where in-support v s))
 
-(defn- of-dtype
-  "f32 or f64, by x's dtype."
-  ^double [x ^double f32 ^double f64]
-  (if (= :float32 (array/dtype x)) f32 f64))
-
 (defn- largest-float
   "The largest finite float of x's dtype."
   ^double [x]
-  (of-dtype x Float/MAX_VALUE Double/MAX_VALUE))
+  (:max (dc/float-limits (array/dtype x))))
 
 (defn- floored
   "x at least the smallest normal number of its dtype. A gamma draw of a
@@ -53,14 +46,14 @@
    a density may be infinite or a quotient infinite; the floor changes only
    values below it."
   [x]
-  (array/maximum x (of-dtype x Float/MIN_NORMAL Double/MIN_NORMAL)))
+  (array/maximum x (:tiny (dc/float-limits (array/dtype x)))))
 
 (defn- below-one
   "x at most the largest float below 1 of its dtype, floored's mirror: a
    beta draw within half an ulp of 1 rounds to 1, where its density may be
    infinite."
   [x]
-  (array/minimum x (of-dtype x (Math/nextDown (float 1.0)) (Math/nextDown 1.0))))
+  (array/minimum x (- 1.0 (* 0.5 (:eps (dc/float-limits (array/dtype x)))))))
 
 (defn- log-gamma-draw
   "The log of a gamma(alpha, 1) draw, which does not underflow as the draw
@@ -78,6 +71,20 @@
    there would be 0/0 = NaN, though the mixture sends it nothing."
   [weighted w]
   (guard weighted (log (stand-in weighted w 1.0))))
+
+(defn- log-mass
+  "log p for a mass p: -Inf with gradient 0 at 0, through a stand-in, as
+   outside a support. log's gradient there would be infinite, and NaN where
+   a pick, a where or a mixture discards the -Inf (DESIGN §9)."
+  [p]
+  (log-weight (> p 0) p))
+
+(defn- log1m-mass
+  "log(1 - p), as log1p(-p), for the mass 1 - p: -Inf with gradient 0 at
+   p = 1, as log-mass."
+  [p]
+  (let [below-one (< p 1)]
+    (guard below-one (log1p (- (stand-in below-one p 0.0))))))
 
 (defn- zero-weight-term
   "A term of value 0 for a mixture of log density l, carrying the gradient
@@ -111,7 +118,7 @@
 ;; Continuous distributions
 ;; ---------------------------------------------------------------------------
 
-(defdist normal
+(defdist ^:elementwise normal
   "normal(mu, std): the Gaussian with mean mu and standard deviation std.
    Array parameters give an array value whose log density is the sum over its
    elements (Gen.jl's broadcasted_normal)."
@@ -128,17 +135,17 @@
    too, as defdist marks its own."
   normal)
 
-(defdist uniform
+(defdist ^:elementwise uniform
   "uniform(low, high): uniform on [low, high]."
   [low high]
-  (validate (when (every? #(and (some? %) (array/concrete? %)) [low high])
+  (validate (when (every? array/concrete? [low high])
               (dc/check (array/all-true? (< low high)) "uniform" "low must be below high" {:low low :high high})))
   (sample [key shape]
     (rng/uniform key (dc/elementwise-shape shape low high) (assoc (opts low high) :low low :high high)))
   (log-prob [v]
     (guard (logical-and (>= v low) (<= v high)) (- (log (- high low))))))
 
-(defdist beta
+(defdist ^:elementwise beta
   "beta(alpha, beta): the beta distribution on [0, 1]."
   [a b]
   (validate (dc/check-positive "beta" "alpha" a) (dc/check-positive "beta" "beta" b))
@@ -153,7 +160,7 @@
     (guard (logical-and (>= v 0) (<= v 1))
            (- (+ (xlogy (- a 1) v) (xlog1py (- b 1) (- v))) (log-beta a b)))))
 
-(defdist gamma
+(defdist ^:elementwise gamma
   "gamma(shape, scale): the gamma distribution with mean shape·scale."
   [k theta]
   (validate (dc/check-positive "gamma" "shape" k) (dc/check-positive "gamma" "scale" theta))
@@ -162,7 +169,7 @@
   (log-prob [v]
     (guard (>= v 0) (- (xlogy (- k 1) v) (/ v theta) (lgamma k) (* k (log theta))))))
 
-(defdist inv-gamma
+(defdist ^:elementwise inv-gamma
   "inv_gamma(shape, scale): the inverse gamma distribution (1/X for X with
    gamma(shape, 1/scale))."
   [k theta]
@@ -172,7 +179,7 @@
   (log-prob [v]
     (guard (> v 0) (- (* k (log theta)) (lgamma k) (* (+ k 1) (log v)) (/ theta v)))))
 
-(defdist exponential
+(defdist ^:elementwise exponential
   "exponential(rate): the exponential distribution with mean 1/rate."
   [rate]
   (validate (dc/check-positive "exponential" "rate" rate))
@@ -186,9 +193,9 @@
    log1p(-|u|), which is -Inf at -1 (as rng/normal's bound for erfinv's
    pole)."
   ^double [dtype]
-  (if (= :float32 dtype) (double (Math/nextUp (float -1.0))) (Math/nextUp -1.0)))
+  (+ -1.0 (* 0.5 (:eps (dc/float-limits dtype)))))
 
-(defdist laplace
+(defdist ^:elementwise laplace
   "laplace(loc, scale): the Laplace (double exponential) distribution."
   [loc scale]
   (validate (dc/check-positive "laplace" "scale" scale))
@@ -201,7 +208,7 @@
   (log-prob [v]
     (- (+ (log (* 2 scale)) (/ (array/abs (- v loc)) scale)))))
 
-(defdist cauchy
+(defdist ^:elementwise cauchy
   "cauchy(x0, gamma): the Cauchy distribution with location x0 and scale gamma."
   [x0 scale]
   (validate (dc/check-positive "cauchy" "scale" scale))
@@ -212,7 +219,7 @@
   (log-prob [v]
     (- (+ (log (* Math/PI scale)) (log1p (square (/ (- v x0) scale)))))))
 
-(defdist beta-uniform
+(defdist ^:elementwise beta-uniform
   "beta_uniform(theta, alpha, beta): with probability theta a beta(alpha, beta)
    draw, otherwise a uniform draw on [0, 1]."
   [theta a b]
@@ -258,7 +265,9 @@
           i (- (array/sum (>= (array/expand-dims v -1) (array/slice bounds 0 0 n)) {:axis -1}) 1)
           i (to-int (array/clip i 0 (dec n)) bounds)]
       (guard (logical-and (>= v (array/take bounds 0)) (<= v (array/take bounds n)))
-             (- (log (array/take probs i)) (log (- (array/take bounds (+ i 1)) (array/take bounds i))))))))
+             (- (log-mass (array/take probs i)) (log (- (array/take bounds (+ i 1)) (array/take bounds i)))))))
+  ;; one value: bounds and probs are vectors (validate)
+  (value-shape [] []))
 
 (def ^:private machine-epsilon {:float32 (double (Math/ulp (float 1.0))) :float64 (Math/ulp 1.0)})
 
@@ -288,9 +297,9 @@
 
 (defn- host-max
   "The largest element of x on the host, across every particle of a batched
-   value (as array/all-true? reads one)."
+   value."
   ^double [x]
-  (double (array/item (array/max (if (instance? IBatchedValue x) (p/-all-particles x) x)))))
+  (double (array/item (array/max (array/all-particles x)))))
 
 (defn- rung
   "The i-th readable jitter: 1, 2 or 5 times 10^⌊i/3⌋."
@@ -362,14 +371,16 @@
                            -1)]
       (- (* -0.5 (array/sum (square z) {:axis -1}))
          (* 0.5 (la/cholesky-logdet l))
-         (* d half-log-2pi)))))
+         (* d half-log-2pi))))
+  ;; a vector, batched over mu's and cov's leading axes
+  (value-shape [] (conj (sh/broadcast (pop (array/shape mu)) (pop (pop (array/shape cov)))) (peek (array/shape mu)))))
 
 (defdist dirichlet
   "dirichlet(alpha): the Dirichlet distribution over the simplex of the last
    axis of alpha."
   [alpha]
   (validate (dc/check (<= 1 (array/ndim alpha)) "dirichlet" "alpha must be a vector" {:alpha-shape (array/shape alpha)})
-            (dc/check-all-positive "dirichlet" "alpha" alpha))
+            (dc/check-positive "dirichlet" "alpha" alpha))
   (sample [key shape]
     ;; g/Σg for gamma draws g, from their logs (a draw underflows to 0 at a
     ;; small alpha), floored where the normalized value still does
@@ -378,9 +389,11 @@
       (floored (array/softmax lg {:axis -1}))))
   (log-prob [v]
     (guard (logical-and (array/all (>= v 0) {:axis -1})
-                        (<= (array/abs (- (array/sum v {:axis -1}) 1)) 1e-6))
+                        (<= (array/abs (- (array/sum v {:axis -1}) 1))
+                            (dc/probability-tolerance (peek (array/shape v)) (array/dtype v))))
            (- (array/sum (xlogy (- alpha 1) v) {:axis -1})
-              (- (array/sum (lgamma alpha) {:axis -1}) (lgamma (array/sum alpha {:axis -1})))))))
+              (- (array/sum (lgamma alpha) {:axis -1}) (lgamma (array/sum alpha {:axis -1}))))))
+  (value-shape [] (array/shape alpha)))
 
 ;; ---------------------------------------------------------------------------
 ;; Beyond Gen.jl's built-ins: Distributions.jl's families with its names and
@@ -391,7 +404,7 @@
 
 (def ^:private log-2 (Math/log 2.0))
 
-(defdist chi-squared
+(defdist ^:elementwise chi-squared
   "chi-squared(nu): the χ² distribution with nu degrees of freedom (Chisq)."
   [nu]
   (validate (dc/check-positive "chi-squared" "nu" nu))
@@ -400,7 +413,7 @@
     (let [k (/ nu 2.0)]
       (guard (>= v 0) (- (xlogy (- k 1) v) (/ v 2.0) (lgamma k) (* k log-2))))))
 
-(defdist f-dist
+(defdist ^:elementwise f-dist
   "f-dist(nu1, nu2): Fisher's F distribution, the ratio of χ² draws over
    their degrees of freedom (FDist)."
   [nu1 nu2]
@@ -423,7 +436,7 @@
       (guard in (- (+ (* 0.5 (+ (* nu1 (log nu1)) (* nu2 (log nu2)))) kernel)
                    (log-beta (/ nu1 2.0) (/ nu2 2.0)))))))
 
-(defdist gumbel
+(defdist ^:elementwise gumbel
   "gumbel(mu, theta): the Gumbel (maximum) distribution, location mu and
    scale theta (Gumbel)."
   [mu theta]
@@ -433,7 +446,7 @@
     (let [z (/ (- v mu) theta)]
       (- (+ (log theta) z (exp (- z)))))))
 
-(defdist levy
+(defdist ^:elementwise levy
   "levy(mu, sigma): the Lévy distribution, location mu and scale sigma,
    mu + sigma/Z² for a standard normal Z (Levy)."
   [mu sigma]
@@ -446,7 +459,7 @@
           d (stand-in in (- v mu) 1.0)]
       (guard in (- (* 0.5 (log (/ sigma (* 2.0 Math/PI)))) (* 1.5 (log d)) (/ sigma (* 2.0 d)))))))
 
-(defdist log-normal
+(defdist ^:elementwise log-normal
   "log-normal(mu, sigma): e^X for X normal(mu, sigma) (LogNormal)."
   [mu sigma]
   (validate (dc/check-positive "log-normal" "sigma" sigma))
@@ -457,7 +470,7 @@
           lx (log (stand-in in v 1.0))]
       (guard in (- (+ lx (log sigma) half-log-2pi (* 0.5 (square (/ (- lx mu) sigma)))))))))
 
-(defdist logistic
+(defdist ^:elementwise logistic
   "logistic(mu, theta): the logistic distribution, location mu and scale
    theta (Logistic)."
   [mu theta]
@@ -471,7 +484,7 @@
     (let [z (/ (- v mu) theta)]
       (- (+ z (log theta) (* 2.0 (array/logaddexp 0.0 (- z))))))))
 
-(defdist nakagami
+(defdist ^:elementwise nakagami
   "nakagami(m, omega): the Nakagami distribution, shape m and spread omega,
    the root of a gamma(m, omega/m) draw (Nakagami; m > 0, as
    Distributions.jl's, where Commons Math asks m >= 1/2)."
@@ -483,7 +496,7 @@
     (guard (>= v 0) (- (+ log-2 (* m (log m)) (xlogy (- (* 2.0 m) 1) v))
                        (lgamma m) (* m (log omega)) (/ (* m (square v)) omega)))))
 
-(defdist pareto
+(defdist ^:elementwise pareto
   "pareto(alpha, theta): the Pareto distribution, shape alpha and scale
    (minimum) theta (Pareto). For a small alpha some draws lie beyond the
    float range: +Inf, of log density -Inf."
@@ -495,7 +508,7 @@
     (let [in (>= v theta)]
       (guard in (- (+ (log alpha) (* alpha (log theta))) (* (+ alpha 1) (log (stand-in in v theta))))))))
 
-(defdist student-t
+(defdist ^:elementwise student-t
   "student-t(nu): Student's t distribution with nu degrees of freedom, a
    standard normal over the root of a χ²/nu draw (TDist)."
   [nu]
@@ -509,11 +522,11 @@
     (- (lgamma (/ (+ nu 1) 2.0)) (lgamma (/ nu 2.0)) (* 0.5 (log (* nu Math/PI)))
        (* (/ (+ nu 1) 2.0) (log1p (/ (square v) nu))))))
 
-(defdist triangular
+(defdist ^:elementwise triangular
   "triangular(a, b, c): the triangular distribution on [a, b] with mode c
    (TriangularDist)."
   [a b c]
-  (validate (when (every? #(and (some? %) (array/concrete? %)) [a b c])
+  (validate (when (every? array/concrete? [a b c])
               (dc/check (array/all-true? (logical-and (< a b) (logical-and (<= a c) (<= c b))))
                         "triangular" "needs a < b and a <= c <= b" {:a a :b b :c c})))
   (sample [key shape]
@@ -535,7 +548,7 @@
                            (log (/ (* 2.0 (- b v)) (* w (stand-in right (- b c) 1.0))))
                            ##-Inf))))))
 
-(defdist weibull
+(defdist ^:elementwise weibull
   "weibull(alpha, theta): the Weibull distribution, shape alpha and scale
    theta (Weibull). For a small alpha some draws lie beyond the float range
    (in float32, for alpha below about 0.03): +Inf, of log density -Inf."
@@ -552,7 +565,7 @@
 ;; Discrete distributions
 ;; ---------------------------------------------------------------------------
 
-(defdist bernoulli
+(defdist ^:elementwise ^:discrete bernoulli
   "bernoulli(prob): true with probability prob."
   [p]
   (validate (dc/check-probability "bernoulli" "prob" p))
@@ -563,43 +576,47 @@
               (str "values are booleans (true or false), not " (pr-str (if (array/host? v) v (array/dtype v)))
                    " (GenMLX's bernoulli gave 0/1)")
               {:value-dtype (array/dtype v)})
-    ;; the branch not taken sees a stand-in, as where's other lanes do: at
-    ;; p = 1 (or 0) its log's gradient would be 0/0 = NaN
-    (where v (log (stand-in v p 1.0)) (log1p (- (stand-in v 0.0 p)))))
+    ;; each branch is -Inf with gradient 0 at its mass of 0: at p = 1 (or 0)
+    ;; the one not taken would send 0/0 = NaN, and so would a taken one that
+    ;; a pushforward's match discards
+    (where v (log-mass p) (log1m-mass p)))
   (support [] [false true]))
 
 (defn- pick-guarded
   "(f xs[..., v]) for integer v in [0, K), -Inf for any other v. The pick
    comes before f, so a gradient reaches only the entry picked: (log probs)
-   would send 0/0 = NaN from every 0 entry not picked."
+   would send 0/0 = NaN from every 0 entry not picked (and log-mass does
+   from the one picked, where a pushforward discards it)."
   [f xs v]
   (let [k (peek (array/shape xs))
         ok (logical-and (logical-and (>= v 0) (< v k)) (integral? v))]
     (guard ok (f (stand-in ok (array/pick xs (to-int (array/clip v 0 (dec k)) xs)) 1.0)))))
 
-(defdist categorical
+(defdist ^:discrete categorical
   "categorical(probs): index i (0-based) with probability probs[i]; probs must
    be probabilities (see categorical-logits for logits)."
   [probs]
   (validate (dc/check-probabilities "categorical" "probs" probs))
   (sample [key shape] (rng/categorical key (log probs) (sh/broadcast shape (pop (array/shape probs))) (opts probs)))
-  (log-prob [v] (pick-guarded log probs v))
-  (support [] (vec (range (peek (array/shape probs))))))
+  (log-prob [v] (pick-guarded log-mass probs v))
+  (support [] (vec (range (peek (array/shape probs)))))
+  (value-shape [] (pop (array/shape probs))))
 
-(defdist categorical-logits
+(defdist ^:discrete categorical-logits
   "categorical-logits(logits): index i (0-based) with probability
    softmax(logits)[i]. Any finite logits; the form LLM token sites use."
   [logits]
   (sample [key shape] (rng/categorical key logits (sh/broadcast shape (pop (array/shape logits))) (opts logits)))
   (log-prob [v] (pick-guarded identity (array/log-softmax logits) v))
-  (support [] (vec (range (peek (array/shape logits))))))
+  (support [] (vec (range (peek (array/shape logits)))))
+  (value-shape [] (pop (array/shape logits))))
 
-(defdist uniform-discrete
+(defdist ^:elementwise ^:discrete uniform-discrete
   "uniform_discrete(low, high): an integer uniform on low..high inclusive."
   [low high]
   (validate (dc/check-integer "uniform-discrete" "low" low Long/MIN_VALUE)
             (dc/check-integer "uniform-discrete" "high" high Long/MIN_VALUE)
-            (when (every? #(and (some? %) (array/concrete? %)) [low high])
+            (when (every? array/concrete? [low high])
               (dc/check (array/all-true? (<= low high)) "uniform-discrete" "low must not exceed high" {:low low :high high})))
   (sample [key shape] (rng/randint key low (+ high 1) (dc/elementwise-shape shape low high) (opts low high)))
   (log-prob [v]
@@ -609,7 +626,7 @@
                     hi (dc/support-bound high)]
                 (when (and lo hi) (vec (range lo (inc hi)))))))
 
-(defdist geometric
+(defdist ^:elementwise ^:discrete geometric
   "geometric(p): the number of failures before the first success."
   [p]
   (validate (dc/check-probability "geometric" "p" p) (dc/check-positive "geometric" "p" p))
@@ -617,19 +634,17 @@
     (let [u (rng/uniform key (dc/elementwise-shape shape p) (opts p))]
       (to-int (array/floor (/ (log1p (- u)) (log1p (- p)))) p)))
   (log-prob [v]
-    (guard (logical-and (>= v 0) (integral? v)) (+ (log p) (xlog1py v (- p))))))
+    ;; p = 1 puts all the mass at 0: elsewhere -Inf through a stand-in p, as
+    ;; log-mass, since xlog1py's derivative at -1 is infinite
+    (let [some-mass (array/logical-not (logical-and (== p 1) (> v 0)))
+          q (stand-in some-mass p 0.5)]
+      (guard (logical-and (logical-and (>= v 0) (integral? v)) some-mass) (+ (log q) (xlog1py v (- q)))))))
 
 ;; --- Poisson and binomial samplers: inversion for small means, Hörmann's
 ;; transformed rejection (PTRS, BTRS) otherwise, each with fixed rounds ------
 
 (def ^:private rejection-rounds 12)
 (def ^:private inversion-steps 40)
-
-(defn- first-accepted
-  "The value of the first accepted proposal of [accept? value] pairs, else
-   fallback."
-  [fallback proposals]
-  (reduce (fn [acc [ok v]] (where ok v acc)) fallback (reverse proposals)))
 
 (defn- inverted
   "An inversion over a pmf's first inversion-steps terms, from its first
@@ -669,7 +684,7 @@
                          s (log (/ (* v inv-alpha) (+ (/ aa (* us us)) b)))
                          t (- (* k log-lam) lam (lgamma (+ k 1)))]
                      [(logical-or quick (logical-and (array/logical-not reject) (<= s t))) k]))
-        large (first-accepted (array/round lam) (map proposal (range rejection-rounds)))]
+        large (rng/first-accepted (array/round lam) (map proposal (range rejection-rounds)))]
     (to-int (where (< lam 10) small large) lam)))
 
 (defn- binomial-sample [key n p shape]
@@ -701,31 +716,39 @@
                          v' (log (/ (* v alpha) (+ (/ aa (* us us)) b)))
                          slow (<= v' (+ (- h (lgamma (+ k 1)) (lgamma (+ (- n k) 1))) (* (- k m) lpq)))]
                      [(logical-and in-range (logical-or quick slow)) k]))
-        large (first-accepted (array/round (* n p)) (map proposal (range rejection-rounds)))
+        large (rng/first-accepted (array/round (* n p)) (map proposal (range rejection-rounds)))
         x (where (< (* n p) 10) small large)]
     (to-int (where flip? (- n x) x) n p)))
 
-(defdist poisson
+(defdist ^:elementwise ^:discrete poisson
   "poisson(lambda): the Poisson distribution with mean lambda."
   [lam]
   (validate (dc/check-non-negative "poisson" "lambda" lam))
   (sample [key shape] (poisson-sample key lam (dc/elementwise-shape shape lam)))
   (log-prob [v]
-    (guard (logical-and (>= v 0) (integral? v)) (- (xlogy v lam) lam (lgamma (+ v 1))))))
+    ;; lambda = 0 puts all the mass at 0: elsewhere -Inf through a stand-in,
+    ;; as log-mass, since xlogy's derivative at 0 is infinite
+    (let [some-mass (array/logical-not (logical-and (== lam 0) (> v 0)))
+          l (stand-in some-mass lam 1.0)]
+      (guard (logical-and (logical-and (>= v 0) (integral? v)) some-mass) (- (xlogy v l) l (lgamma (+ v 1)))))))
 
-(defdist binom
+(defdist ^:elementwise ^:discrete binom
   "binom(n, p): the number of successes in n trials with success probability p."
   [n p]
   (validate (dc/check-probability "binom" "p" p)
             (dc/check-integer "binom" "n" n 0))
   (sample [key shape] (binomial-sample key n p (dc/elementwise-shape shape n p)))
   (log-prob [v]
-    (guard (logical-and (logical-and (>= v 0) (<= v n)) (integral? v))
-           (+ (- (lgamma (+ n 1)) (lgamma (+ v 1)) (lgamma (+ (- n v) 1)))
-              (xlogy v p) (xlog1py (- n v) (- p)))))
+    ;; p at 0 or 1 puts all the mass at 0 or n: elsewhere -Inf through a
+    ;; stand-in p, as log-mass, since xlogy's derivative at 0 is infinite
+    (let [some-mass (array/logical-not (logical-or (logical-and (== p 0) (> v 0)) (logical-and (== p 1) (< v n))))
+          q (stand-in some-mass p 0.5)]
+      (guard (logical-and (logical-and (logical-and (>= v 0) (<= v n)) (integral? v)) some-mass)
+             (+ (- (lgamma (+ n 1)) (lgamma (+ v 1)) (lgamma (+ (- n v) 1)))
+                (xlogy v q) (xlog1py (- n v) (- q))))))
   (support [] (some->> (dc/support-bound n) inc range vec)))
 
-(defdist neg-binom
+(defdist ^:elementwise ^:discrete neg-binom
   "neg_binom(r, p): the number of failures before the r-th success (r may be
    real)."
   [r p]
@@ -736,9 +759,12 @@
           lam (* (rng/gamma k1 r s (opts r p)) (/ (- 1 p) p))]
       (poisson-sample k2 lam s)))
   (log-prob [v]
-    (guard (logical-and (>= v 0) (integral? v))
-           (+ (- (lgamma (+ v r)) (lgamma r) (lgamma (+ v 1)))
-              (* r (log p)) (xlog1py v (- p))))))
+    ;; p = 1 puts all the mass at 0, as geometric's
+    (let [some-mass (array/logical-not (logical-and (== p 1) (> v 0)))
+          q (stand-in some-mass p 0.5)]
+      (guard (logical-and (logical-and (>= v 0) (integral? v)) some-mass)
+             (+ (- (lgamma (+ v r)) (lgamma r) (lgamma (+ v 1)))
+                (* r (log q)) (xlog1py v (- q)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Mixtures and products: Gen.jl's HomogeneousMixture, HeterogeneousMixture
@@ -870,6 +896,11 @@
   (let [own (- (array/ndim lp) (count (sh/broadcast (vec (drop-last value-axes (array/shape v))) batch)))]
     (if (pos? own) (array/sum lp {:axis (vec (range (- own) 0))}) lp)))
 
+(defmethod dc/-discrete? ::mixture [{{:keys [components]} :params}] (every? dc/discrete? components))
+
+(defmethod dc/-value-shape ::mixture [{{:keys [weights components]} :params}]
+  (some->> (dc/value-shape (first components)) (sh/broadcast (pop (array/shape weights)))))
+
 (defmethod dc/-log-prob ::mixture [{{:keys [weights components value-axes batch]} :params} v]
   ;; each component's log density of the whole value, mixed per batch element
   (log-mixture weights (array/stack (mapv #(cond-> (dc/log-prob % v) value-axes (whole-values v value-axes batch)) components)
@@ -887,6 +918,11 @@
                 {:factors (count families) :params (count factor-params)})
       (dc/->Distribution ::product {:factors (mapv #(apply %1 %2) families factor-params)}))))
 
+(defmethod dc/-discrete? ::product [{{:keys [factors]} :params}] (every? dc/discrete? factors))
+
+;; a vector of one value per factor: no array shape
+(defmethod dc/-value-shape ::product [_] nil)
+
 (defmethod dc/-sample ::product [{{:keys [factors]} :params} key shape]
   (mapv #(dc/sample %1 %2 shape) factors (rng/split key (count factors))))
 
@@ -896,36 +932,3 @@
   ;; each factor's log density summed over its own value's axes; a value of
   ;; another shape than its factor's is an error, not several draws
   (reduce + (map (fn [f x] (dc/check-value-shape f x) (array/sum (dc/log-prob f x))) factors v)))
-
-;; ---------------------------------------------------------------------------
-;; Value shapes: the elementwise families take their parameters' broadcast
-;; shape; the others declare theirs
-;; ---------------------------------------------------------------------------
-
-(doseq [t [::normal ::uniform ::beta ::gamma ::inv-gamma ::exponential ::laplace ::cauchy ::beta-uniform
-           ::chi-squared ::f-dist ::gumbel ::levy ::log-normal ::logistic ::nakagami ::pareto ::student-t
-           ::triangular ::weibull
-           ::bernoulli ::uniform-discrete ::geometric ::poisson ::binom ::neg-binom]]
-  (defmethod dc/-value-shape t [d] (dc/elementwise-value-shape d)))
-
-(doseq [t [::bernoulli ::uniform-discrete ::geometric ::poisson ::binom ::neg-binom ::categorical ::categorical-logits]]
-  (defmethod dc/-discrete? t [_] true))
-
-(defmethod dc/-discrete? ::mixture [{{:keys [components]} :params}] (every? dc/discrete? components))
-(defmethod dc/-discrete? ::product [{{:keys [factors]} :params}] (every? dc/discrete? factors))
-
-(defmethod dc/-value-shape ::dirichlet [{{:keys [alpha]} :params}] (array/shape alpha))
-
-(defmethod dc/-value-shape ::mvnormal [{{:keys [mu cov]} :params}]
-  (conj (sh/broadcast (pop (array/shape mu)) (pop (pop (array/shape cov)))) (peek (array/shape mu))))
-
-(defmethod dc/-value-shape ::categorical [{{:keys [probs]} :params}] (pop (array/shape probs)))
-(defmethod dc/-value-shape ::categorical-logits [{{:keys [logits]} :params}] (pop (array/shape logits)))
-
-(defmethod dc/-value-shape ::piecewise-uniform [{{:keys [bounds probs]} :params}]
-  (sh/broadcast (pop (array/shape bounds)) (pop (array/shape probs))))
-
-(defmethod dc/-value-shape ::mixture [{{:keys [weights components]} :params}]
-  (some->> (dc/value-shape (first components)) (sh/broadcast (pop (array/shape weights)))))
-
-(defmethod dc/-value-shape ::product [_] nil)

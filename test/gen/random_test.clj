@@ -103,6 +103,15 @@
 
 (defn- close? [actual expected band] (< (Math/abs (- (ts/number actual) (ts/number expected))) band))
 
+(deftest the-first-accepted-proposal-wins
+  ;; genclj-khnp (I3-09): gamma's fold and gen.dist's Poisson and binomial
+  ;; one, written twice, are rng/first-accepted; elementwise, the fallback
+  ;; where no round accepts (planted: the fold in order, the last accepted)
+  (is (= 2.0 (rng/first-accepted 0.0 [[false 1.0] [true 2.0] [true 3.0]])))
+  (is (= 0.0 (rng/first-accepted 0.0 [[false 1.0] [false 2.0]])))
+  (is (= [2.0 1.0 0.0] (ts/host (rng/first-accepted (array/zeros [3]) [[(array/array [false true false]) (array/full [3] 1.0)]
+                                                                       [(array/array [true true false]) (array/full [3] 2.0)]])))))
+
 (deftest sampler-moments
   (let [k (rng/key 2026) n 200000]
     (testing "normal"

@@ -146,6 +146,15 @@
                    {:dtype (float-dtype opts b logits) :backend b})]
      (array/argmax (+ g logits) {:axis -1}))))
 
+(defn ^:no-doc first-accepted
+  "The value of the first accepted of proposals, [accept? value] pairs in
+   order, else fallback: the fold of a rejection sampler with a fixed number
+   of vectorized rounds, so it runs branch-free and batches. The samplers'
+   shared helper (gamma's here, gen.dist's Poisson and binomial), not part
+   of gen.random's API (docs/array-api.md §7)."
+  [fallback proposals]
+  (reduce (fn [acc [ok value]] (array/where ok value acc)) fallback (reverse proposals)))
+
 (def ^:private gamma-rounds
   "Proposal rounds per gamma draw. Marsaglia–Tsang accepts with probability
    above 0.95 for alpha >= 1, so twelve rounds all fail with probability below
@@ -174,10 +183,7 @@
                           ok (array/logical-and (> v 0)
                                                 (< (array/log u) (+ (* 0.5 x x) d (- (* d v)) (* d (array/log v)))))]
                       [ok (* d v)]))
-         ;; the first accepted proposal wins: fold from the last round to the first
-         g (reduce (fn [acc [ok value]] (array/where ok value acc))
-                   d
-                   (map proposal (reverse (range gamma-rounds))))]
+         g (first-accepted d (map proposal (range gamma-rounds)))]
      (array/where boost? (* g (array/pow (uniform (ks 0) shape o) (/ 1.0 alpha))) g))))
 
 (defn randint

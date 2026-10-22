@@ -3,6 +3,7 @@
    tracer on batched values equals the op run on each particle's values,
    stacked. Shared (unbatched) operands are the same for every particle."
   (:require [clojure.test :refer [deftest is testing]]
+            [gen.array.protocols :as p]
             [gen.test-support :as ts]
             [gen.array :as array]
             [gen.array.batch :as batch]
@@ -46,6 +47,23 @@
   (is (vmap-matches? array/asin [(array/tanh b23)] #{0}))
   (is (vmap-matches? #(array/+ % 1.0) [bs] #{0})))
 
+(deftest a-batched-op-takes-its-particles-implementation
+  ;; the tracer reports the wrapped backend's native ops, so an op with a
+  ;; native form takes it batched as unbatched (genclj-bk62): on MLX,
+  ;; logaddexp took MLX's op unbatched and the composite batched, whose
+  ;; gradient at ties is 0 under MLX's autodiff where the op's is 1/2.
+  ;; Planted (2026-10-22): the tracer's #{} again fails both, on MLX
+  ;; (the second with -Dgen.mlx.grad=native)
+  (let [inner array/*backend*
+        xs (array/array [1.0 2.5 -3.0])
+        traced (atom nil)]
+    (batch/batched [3] (reset! traced (p/-native-ops (array/backend (batch/wrap xs [3])))))
+    (is (= (p/-native-ops inner) @traced))
+    (testing "logaddexp's gradient at ties, batched as unbatched"
+      (let [grad-x (fn [f] (ts/host (first ((array/grad f {:argnums [0 1]}) xs xs))))]
+        (is (= (grad-x (fn [x y] (array/sum (array/logaddexp x y))))
+               (grad-x (fn [x y] (array/sum (batch/unwrap (batch/batched [3] (array/logaddexp (batch/wrap x [3]) (batch/wrap y [3]))) [3]))))))))))
+
 (deftest reductions-and-scans
   (doseq [[label f] [[:sum array/sum] [:sum-0 #(array/sum % {:axis 0})] [:sum-keep #(array/sum % {:axis 1 :keep-dims? true})]
                      [:max #(array/max % {:axis -1})] [:argmax #(array/astype (array/argmax % {:axis 1}) (ts/float-dtype))]
@@ -88,6 +106,17 @@
   (let [x (batch/unwrap (batch/batched [n] (rng/normal (rng/key 9) [3])) [n])]
     (is (= [n 3] (array/shape x)))
     (is (= n (count (distinct (map first (array/->clj x))))) "independent draws, not one shared draw")))
+
+(deftest all-particles-reads-across-the-batch
+  ;; genclj-z6iy: gen.dist read a batch's particles through the backend
+  ;; protocol; array/all-particles is the public reach, and all-true? and
+  ;; any-true? read through it (planted: a batched value as it is)
+  (let [x (batch/wrap b3 [n])]
+    (is (ts/close? b3 (batch/batched [n] (array/all-particles x))))
+    (is (= [n 3] (array/shape (batch/batched [n] (array/all-particles x)))))
+    (is (identical? s3 (array/all-particles s3)) "an unbatched value as it is")
+    (is (batch/batched [n] (array/all-true? (array/< x 100.0))))
+    (is (not (batch/batched [n] (array/all-true? (array/< x (array/max b3))))) "one particle's element fails")))
 
 (deftest host-reads-are-the-fallback-signal
   (let [x (batch/wrap bs [n])]

@@ -75,6 +75,19 @@
               (is (= (mapv bits (filter zero? want)) (mapv bits (keep-indexed #(when (zero? (want %1)) %2) (array/->clj got))))
                   (str (name k) ": the signs of zeros")))))))))
 
+(deftest lgamma-and-digamma-at-the-edges-as-scipy
+  ;; the infinities, NaN and the poles, on the host and in arrays, against
+  ;; scipy (generate.py's edges). lgamma(+Inf) was NaN on both paths, the
+  ;; Lanczos sum's Inf·Inf - Inf (genclj-9gyi). Planted (2026-10-22): the
+  ;; composite's +Inf case removed fails the arrays, the host path's the
+  ;; host values. Not here, waiting for the owner: gammaln(-inf), which
+  ;; scipy gives as -inf and gen.clj as +Inf, and psi(-0.0), +inf against -Inf
+  (let [same? (fn [a b] (or (and (Double/isNaN a) (Double/isNaN b)) (== a b)))]
+    (doseq [[k f] [[:lgamma-edges array/lgamma] [:digamma-edges array/digamma]]
+            [x expected] (fixtures k)]
+      (is (same? expected (double (f x))) (str (name k) " at " x " on the host"))
+      (is (same? expected (double (array/item (f (array/array [x]))))) (str (name k) " at " x " in an array")))))
+
 (deftest edge-cases
   (is (= ##Inf (array/erfinv 1.0)))
   (is (= ##-Inf (array/erfinv -1.0)))

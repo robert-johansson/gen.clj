@@ -175,7 +175,7 @@
    a quarter of the lattice's spacing there, y-next being the value at x + 1,
    so no value between two images takes either's mass."
   [y y-next v]
-  (let [eps (if (= :float32 (array/dtype y)) (double (Math/ulp (float 1.0))) (Math/ulp 1.0))
+  (let [eps (:eps (dc/float-limits (array/dtype y)))
         off (array/abs (- y v))]
     (array/logical-and (array/<= off (* 4.0 eps (array/abs v)))
                        (array/<= off (* 0.25 (array/abs (- y-next y)))))))
@@ -263,6 +263,7 @@
        ;; errors at a site; an enumerable draw's labels go unchecked
        (~'value-shape [] (let [d# ~draw]
                            (when-not (and (dc/discrete? d#) (dc/enumerable-support d#)) (dc/value-shape d#))))
+       ;; the labels of an enumerable draw, nil for none (dc/enumerable-support)
        (~'support [] (let [d# ~draw
                            f# ~body-fn]
-                       (vec (distinct (map #(host-value (f# %)) (dc/support d#)))))))))
+                       (some->> (dc/enumerable-support d#) (map #(host-value (f# %))) distinct vec))))))

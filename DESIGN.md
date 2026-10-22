@@ -140,8 +140,9 @@ be ported is tracked as a deferred bean with a note on how to port it cleanly
    the *same* code, run under the batch tracer (`gen.array.batch`, vmap
    semantics: docs/array-api.md §8b), never as copies (GenMLX has six).
 4. **Semantics never reads mutable state that changes meaning.** Such
-   state is confined to three places: the single `volatile!` that
-   `gen.dynamic/execute` threads through one model run, the implicit key
+   state is confined to three places: the two `volatile!`s (the
+   transition and the state) that `gen.dynamic/execute` threads through
+   one model run, the implicit key
    source in `gen.gfi`, and native handles inside the membrane. The other
    mutable pieces are caches and registries that never change what an
    operation means:
@@ -494,7 +495,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     trace of its model is the wrapper's, `trace/as-made-by`). `gfi/run-op`,
     the dispatch of every nested call and of `gfi/update`,
     `gfi/regenerate` and gen.batched, revises (`gfi/revise`) a trace whose
-    maker the generative function does not compute as. Particles given
+    maker the generative function does not compute as. `gfi/project`
+    reads a trace by its maker too, as Gen.jl's project dispatches on the
+    trace's type (the post-M5 review's P1-06: by `:gen-fn`, a Map's trace
+    given a dynamic function projected to 0). Particles given
     another gen-fn are revised per particle as when batched (their
     per-particle traces are rebuilt by their maker and given the new
     gen-fn). That is
@@ -598,10 +602,35 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   post-M5 review's P3-05). A leapfrog trajectory whose position, momentum
   or energy turns non-finite is a rejected proposal, with acceptance 0, as
   Stan treats a divergence. The run counts its divergences, so they are
-  not silent. MALA's proposal is treated the same way. A NaN in the
-  starting trace stays an error. Before, a divergence threw "constrained
-  value is NaN", a rule meant for user data: HMC on Neal's funnel at
-  L 10, eps 0.5 died at step 1,309 from a valid state.
+  not silent (the move's `:diverged?`, `:divergences` in `k/run`'s result
+  and in a combinator's). MALA's proposal is treated the same way. The
+  trajectory freezes at its last finite state, so no gradient is taken at
+  a NaN and a compiled step needs no branch. A NaN in the starting trace
+  stays an error. Before, a divergence threw "constrained value is NaN",
+  a rule meant for user data: HMC on Neal's funnel at L 10, eps 0.5 died
+  at step 1,309 from a valid state.
+  **PROVISIONAL (owner to confirm; 2026-10-22, fix-inference's
+  recommendation, taken while the owner was away):** a distribution's
+  parameter check failing at a position the trajectory tries is also a
+  divergence.
+  - Example: at the funnel's L 3, eps 20, a finite v near −1500 underflows
+    exp(v/2) to a std of 0. The JVM backend's concrete check threw
+    "normal: std must be positive" (33 of 300 proposals), where MLX's
+    compiled path sees only NaN and already counted a divergence. The
+    density is undefined there, and Stan likewise rejects a proposal on a
+    domain error inside the leapfrog.
+  - Only the ex-infos of a parameter check are caught (`:distribution`
+    and `:param`, from dc/check and check-param-not-nan), inside the
+    leapfrog and MALA steps. A structure change, a value's shape and the
+    starting trace stay loud.
+  - The alternative was to keep these loud, as "non-finite" reads
+    literally, so the outcome would depend on the backend.
+  - **PROVISIONAL (owner to confirm; 2026-10-22, from m3-grammar's
+    cross-review):** a starting trace whose score or gradient is not
+    finite (−Inf, a log of 0, as well as NaN) is an error for HMC and MALA,
+    as Stan refuses a log(0) start. Otherwise every proposal from it
+    counted as a divergence, and the chain never moved: 40 of 40 on both.
+    MH and the other kernels may still start there.
 - **Casts to integers are Java's** (owner, 2026-10-20; genclj-kw88). On
   every backend, a float cast to an integer dtype truncates toward zero,
   saturates at the dtype's range (±Inf too) and takes NaN to 0. An integer
@@ -632,6 +661,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   docstring already said so. A cap at the largest float would give finite
   densities at the price of a silent atom. A loud error would need a host
   read of each draw on a lazy backend, or a threshold on the parameters.
+  **PROVISIONAL (owner to confirm; 2026-10-22, from m3-grammar's
+  cross-review): `lgamma(+Inf)` and `digamma(+Inf)` are +Inf,** as in
+  SciPy and Julia, where gen.array gave NaN (both the composite and its
+  bit-identical host path).
   The other edge stays as it is: a draw that underflows to 0, where a
   density can be +Inf, is floored at the dtype's smallest normal number.
   That holds in every family, gamma, beta and dirichlet included, which
@@ -643,7 +676,27 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   floor and the clamp see where a draw lies: x/(x + y) of two underflowed
   gammas was 0/0 = NaN (448 of 2,000 draws), where flooring the gammas
   first would put the draw at 1/2. A shape below 1 boosts in log space,
-  log Γ(α+1)'s draw - E/α for an exponential E (genclj-uli3).
+  log Γ(α+1)'s draw - E/α for an exponential E (genclj-uli3). Every beta
+  and dirichlet draw changes for a given key (PROVISIONAL, owner to
+  confirm, 2026-10-22: the old draws could be kept for α ≥ 1, at the cost
+  of a second sampler).
+- **A log mass of 0 has gradient 0, not NaN** (PROVISIONAL, owner to
+  confirm; 2026-10-22, m3-lm's finding while fixing genclj-rnbd, taken
+  while the owner was away).
+  - The problem: a family that computes every support value's log mass and
+    then selects (categorical's pick, bernoulli's two branches, a `dist`
+    pushforward's matches over an enumerable draw) sends a cotangent of 0
+    into log at a mass of 0. That gives 0 · ∞ = NaN, which flows into
+    whatever computed the parameters. `(dist coin [p] (where (bernoulli p)
+    1.0 0.0))` at p = 0, observed 0.0, had a NaN gradient.
+  - The fix is in the families: they take the log through a stand-in
+    where the mass is 0, the convention gen.dist already uses outside a
+    support. So a value of mass 0 has log density −Inf and gradient 0.
+  - gen.array's xlogy and xlog1py keep their derivatives, which are
+    JAX's, because changing L0 would alter them for every caller. The
+    families guard their arguments instead.
+  - The alternative was to leave it, with a NaN gradient whenever a
+    parameter vector holds an exact 0.
 - **A mixture of a discrete and a continuous family is an error** when it
   is made (owner, 2026-10-22, the post-M5 review's P2-02). Its density would add a pmf to a pdf: given
   y = 0, the posterior came out 0.267 where 0.80 is exact. Gen.jl's types
@@ -966,7 +1019,14 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   asks only that each construct's own body keep it (the reversal's argument
   is at `trace-kernel`). Gen.jl checks only with `check=true`; gen.clj
   always checks. Values compare on the host (kernels run at the inference
-  loop's boundary). (Corrected after the confirmation read of the M4 tests,
+  loop's boundary): host data by `=`, with no budget, and a fn, record or
+  generative function by what it holds (its closed-over values, its
+  fields, its kind's rule), so a kernel built again from the same values
+  is the same kernel (the post-M5 review's P3-06: with `=`, a kernel bound
+  in a let was a violation). A kernel statement whose arguments read the
+  trace is a dependent mixture too, so it is checked as a let of its
+  kernel (P3-02: unchecked, as in the thesis and Gen.jl,
+  `(mh (select (if (tr :flag) :x :flag)))` made flag absorbing). (Corrected after the confirmation read of the M4 tests,
   C1: the first check compared every construct with the final trace, which
   rejected the p. 102 kernel in its own order.)
 - **Trace kernels, GenTraceKernelDSL** (M4, 2026-10-20): no new macro. A
@@ -974,8 +1034,22 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   whose return value is `[update backward]`; its choices are the auxiliary
   randomness, so propose and assess give the forward and backward scores.
   log |det J| reruns the kernel's assess with the trace's and the kernel's
-  continuous choices substituted by tracked values, under `array/grad`.
-  It leaves out only the trace's choices no output depends on:
+  continuous choices substituted by tracked values, under `array/grad`,
+  on the trace generate makes from the substituted choices, so what the
+  kernel reads from a call's value, the return value or the score is
+  differentiated too (the post-M5 review's P3-04: with the old trace's
+  call values, log |det J| was log 1.3 off, silently). Only the kernel's
+  assess needs exact densities. The model's generate may draw
+  encapsulated randomness, at key 0, so pseudo-marginal moves work, as
+  involutions do. A kernel whose outputs depend on that randomness (the
+  score of an estimated density, say) fails a check of the outputs at the
+  trace's own choices, loudly (m3-grammar's cross-review).
+  It leaves out only the trace's choices no output depends on and the
+  move leaves alone: a choice the update rewrites or discards is an input,
+  less an observation SMCP3's `:new-observations` replace, which is data
+  (P3-07: a kernel that overwrote mu with fresh noise weighed as a
+  bijection, E[exp w] ≈ 7 where 1 is right). A transform's translators
+  check the same of its unread inputs.
   GenTraceKernelDSL also drops constant outputs and kernel choices no
   output uses, which hides moves that are not bijections (found by the law
   audit, 2026-10-20), so here they make the matrix non-square or singular,
@@ -1190,7 +1264,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   for every kind. `(diff/propagate f args diffs)` is an open multimethod on
   the function's var giving the diff of a call, with rules for `count`,
   `nth`, `get`, `conj`, `assoc`, `+`, `-` (clojure.core's and gen.array's),
-  `inc`, `dec` and `vec`; Gen.jl dispatches on a Diffed value type, which
+  `inc`, `dec`, `vec` and `identity`; Gen.jl dispatches on a Diffed value type, which
   Clojure's core functions do not take, so here the rule belongs to the
   call. In a static body every name carries a diff: an argument's from its
   argdiff, a binding that is one call of a var on symbols and constants
@@ -1779,7 +1853,14 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   (owner, 2026-10-22, the post-M5 review's P3-01). Its draw's score-function term, ∇θ log p(z; θ)
   times the learning signal, is added: the ELBO's log weight, or VIMCO's
   own leave-one-out signal. So each gradient is unbiased for the
-  iteration's estimate. Without that term it was biased: 0.005 where 2 is
+  iteration's estimate. (The ELBO's signal is the log weight less the
+  mean log weight of the iteration's other draws, with ∇θ log w kept
+  whole. Against dropping its zero-mean −∇θ log p(z; θ), that lowers a
+  coin's per-iteration sd from 0.68 to 0.28 and holds a shift's, 1.89
+  against 1.92; `vi/model-gradients` has the derivation. p(z; θ) is
+  the density the model's internal proposal drew z with, score − project
+  of the constrained addresses, its prior for a gen function.) Without
+  that term it was biased: 0.005 where 2 is
   exact, and for VIMCO 1.452 where 1.622 is. The alternative was a
   documented restriction with a loud error, but such latents are a
   supported use. One option without the other

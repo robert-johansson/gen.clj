@@ -12,11 +12,14 @@
    - The potential's weights: along random constrained walks, logw-next is
      prefix(ctx ++ [t]) - prefix(ctx) at every token, complete - prefix at
      the end, and complete is the language's membership of the text.
+   - A random language whose DFA passes :max-states is skipped, as a
+     grammar that cannot be built is.
    - Misuse is loud: an empty language, a vocabulary that cannot spell the
      language.
 
    Mutations checked: see docs/research/llm-grammar.md, Tests."
   (:require [clojure.test :refer [deftest is testing]]
+            [clojure.test.check :as tc]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
@@ -84,6 +87,18 @@
                       lo (mod a (alength bs))
                       hi (+ lo 1 (mod b (- (alength bs) lo)))]]
             (java.util.Arrays/copyOfRange bs (int lo) (int hi)))))))
+
+(defn- dfa-within-limit
+  "r's DFA, or nil when it passes regex/dfa's :max-states, the documented
+   loud error that random terms reach now and then (nested counted repeats
+   of overlapping alternatives, genclj-z4jy). The properties are of the
+   languages that have a DFA, as they are of the grammars that can be
+   built."
+  [r]
+  (try (regex/dfa r)
+       (catch clojure.lang.ExceptionInfo e
+         (when-not (= :too-many-states (:reason (ex-data e)))
+           (throw e)))))
 
 ;; ---------------------------------------------------------------------------
 ;; The trie against the vocabulary
@@ -166,12 +181,12 @@
 (defspec byte-masks-match-brute-force 300
   (prop/for-all [r gen-byte-term
                  [vocab ends] (gen/bind gen-byte-vocab #(gen/tuple (gen/return %) (gen-end-tokens %)))]
-    (masks-match? (regex/dfa r) vocab ends)))
+    (let [d (dfa-within-limit r)] (or (nil? d) (masks-match? d vocab ends)))))
 
 (defspec text-masks-match-brute-force 300
   (prop/for-all [r gen-char-term
                  [vocab ends] (gen/bind gen-text-vocab #(gen/tuple (gen/return %) (gen-end-tokens %)))]
-    (masks-match? (regex/dfa r) vocab ends)))
+    (let [d (dfa-within-limit r)] (or (nil? d) (masks-match? d vocab ends)))))
 
 (deftest masks-over-a-vocabulary-of-many-words
   ;; masks are bitsets of 64-token words: a vocabulary of 97 one-character
@@ -212,34 +227,59 @@
           (let [t (ts (.nextInt rnd (count ts)))]
             (recur (conj ctx t) (grammar/advance g s t))))))))
 
-(defspec the-weights-are-consistent 200
+(defn- weights-consistent?
+  "The potential's weights of r's grammar over vocab, along walks from
+   seed, against its prefix and complete scores and the DFA."
+  [r vocab seed]
+  (let [d (dfa-within-limit r)
+        g (when d (try (grammar/grammar vocab d) (catch clojure.lang.ExceptionInfo _ nil)))
+        contexts (when g (map #(walk-allowed g % (+ seed %)) (range 6)))]
+    (or (nil? g)
+        (and
+         ;; the potential contract's check, exact (the weights are 0 and -Inf)
+         (empty? (contract/check-consistent g (count vocab) contexts 0.0))
+         ;; and the autoregressive factorization: complete(x) - prefix([]) is
+         ;; the sum of the next-token weights along x and the end's
+         (every? (fn [ctx]
+                   (= (- (potential/complete g ctx) (potential/prefix g []))
+                      (+ (reduce + (map-indexed (fn [i t] (double (aget ^floats (potential/logw-next g (subvec ctx 0 i)) (int t))))
+                                                ctx))
+                         (double (aget ^floats (potential/logw-next g ctx) (count vocab))))))
+                 contexts)
+         (every? (fn [ctx]
+                   (let [p (potential/prefix g ctx)
+                         ^floats row (potential/logw-next g ctx)
+                         n (count vocab)]
+                     (and (= 0.0 p)
+                          (= (potential/complete g ctx) (if (dfa/matches? d (concat-bytes vocab ctx)) 0.0 Double/NEGATIVE_INFINITY))
+                          (= (inc n) (alength row))
+                          (every? #(= (double (aget row %)) (- (potential/prefix g (conj ctx %)) p)) (range n))
+                          (= (double (aget row n)) (- (potential/complete g ctx) p))
+                          (= (grammar/state g ctx) (dfa/walk d (dfa/start d) (concat-bytes vocab ctx))))))
+                 contexts)))))
+
+(def ^:private weights-property
   (prop/for-all [r gen-char-term vocab gen-text-vocab seed gen/nat]
-    (let [d (regex/dfa r)
-          g (try (grammar/grammar vocab d) (catch clojure.lang.ExceptionInfo _ nil))
-          contexts (when g (map #(walk-allowed g % (+ seed %)) (range 6)))]
-      (or (nil? g)
-          (and
-           ;; the potential contract's check, exact (the weights are 0 and -Inf)
-           (empty? (contract/check-consistent g (count vocab) contexts 0.0))
-           ;; and the autoregressive factorization: complete(x) - prefix([]) is
-           ;; the sum of the next-token weights along x and the end's
-           (every? (fn [ctx]
-                     (= (- (potential/complete g ctx) (potential/prefix g []))
-                        (+ (reduce + (map-indexed (fn [i t] (double (aget ^floats (potential/logw-next g (subvec ctx 0 i)) (int t))))
-                                                  ctx))
-                           (double (aget ^floats (potential/logw-next g ctx) (count vocab))))))
-                   contexts)
-           (every? (fn [ctx]
-                    (let [p (potential/prefix g ctx)
-                          ^floats row (potential/logw-next g ctx)
-                          n (count vocab)]
-                      (and (= 0.0 p)
-                           (= (potential/complete g ctx) (if (dfa/matches? d (concat-bytes vocab ctx)) 0.0 Double/NEGATIVE_INFINITY))
-                           (= (inc n) (alength row))
-                           (every? #(= (double (aget row %)) (- (potential/prefix g (conj ctx %)) p)) (range n))
-                           (= (double (aget row n)) (- (potential/complete g ctx) p))
-                           (= (grammar/state g ctx) (dfa/walk d (dfa/start d) (concat-bytes vocab ctx))))))
-                   contexts))))))
+    (weights-consistent? r vocab seed)))
+
+(defspec the-weights-are-consistent 200 weights-property)
+
+(deftest a-language-past-max-states-is-an-expected-outcome
+  ;; genclj-z4jy: the-weights-are-consistent drew a term whose DFA passes
+  ;; :max-states (the shrunk one below: 25,292 derivatives, 3,397 states
+  ;; minimal), and the uncaught :too-many-states failed the suite at
+  ;; random, at 3 seeds in 400 of its 200 trials; text-masks-match-brute-
+  ;; force draws from the same terms. Seed 128 draws one at its 61st trial.
+  ;; Planted bug (2026-10-22): dfa-within-limit rethrowing every error, as
+  ;; the bare regex/dfa did, fails the last three
+  (let [a (regex/chars \a)
+        a-or-é (regex/chars \a \é)
+        shrunk (regex/repeat (regex/cat a a-or-é a-or-é (regex/repeat (regex/cat a-or-é a-or-é a-or-é) 1 2) (regex/star a) a-or-é)
+                             2 4)]
+    (is (= :too-many-states (bc/reason #(regex/dfa shrunk))) "the term still passes the limit")
+    (is (nil? (dfa-within-limit shrunk)))
+    (is (weights-consistent? shrunk [(utf8 "a")] 0))
+    (is (:pass? (tc/quick-check 61 weights-property :seed 128)))))
 
 (deftest a-dead-context-has-no-next-weights
   (let [g (grammar/grammar (mapv utf8 ["a" "b"]) "a+")]

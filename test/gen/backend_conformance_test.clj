@@ -341,6 +341,93 @@
           axes (gen/generate (gen-axes (count shape)) 10 seed)]
       (conforms? tol #(op % {:axis axes :keep-dims? keep?}) x))))
 
+;; Long float sums (genclj-y0mp): a sum's error may grow with log n, as a
+;; pairwise sum's (NumPy's), not with n. MLX's CPU accumulated float32
+;; sequentially: 10^6 terms of 10^-6 summed to 1 - 1.2e-3, 9 to 48 times
+;; log2(n)·ε at 10^4 to 10^5 terms. The unit is float32's ε on every
+;; backend: float64 sums are sequential on the JVM backend (up to about
+;; 3,000 times log2(n) of float64's ε at 10^6 terms), still some five orders
+;; of magnitude inside this bound.
+
+(def ^:private eps32 (double (Math/ulp (float 1.0))))
+
+(defn- log-bound
+  "The error a sum of m terms may make, relative to their Σ|x|: twice
+   log2(m) float32 ulps (on MLX's CPU, blocked, a tenth of that measured)."
+  ^double [m]
+  (* 2.0 (/ (Math/log m) (Math/log 2.0)) eps32))
+
+(defspec long-sums-of-equal-terms 12
+  ;; n from 10^4 to 10^6, log-uniformly, and terms of 24 significant bits,
+  ;; exact in float32: simpler ones (test.check's doubles, 0.5 or 1.75)
+  ;; sum exactly even sequentially, and a sequential float32 sum of these
+  ;; exceeds the bound 7 to 600 times (checked on the host)
+  (prop/for-all [k (gen/choose 40 60)
+                 mantissa (gen/choose 8388608 16777215)
+                 scale (gen/choose -30 10)]
+    (let [n (long (Math/pow 10.0 (/ k 10.0)))
+          c (Math/scalb (double mantissa) (- scale 23))
+          got (double (array/item (array/sum (array/full [n] c {:dtype float-dt}))))]
+      (<= (Math/abs (- got (* n c))) (* (log-bound n) n c)))))
+
+(deftest memo-clj-s-sums
+  ;; the report's three: n copies of 1/n against the sum of those terms
+  (doseq [n [10001 100000 1000000]]
+    (let [c (if f64? (/ 1.0 n) (double (float (/ 1.0 n))))
+          got (double (array/item (array/sum (array/full [n] (/ 1.0 n) {:dtype float-dt}))))]
+      (is (<= (Math/abs (- got (* n c))) (* (log-bound n) n c)) (str n " terms: " got)))))
+
+(def ^:private halves?
+  "Does the tested backend have float16 and bfloat16 (MLX; the JVM backend
+   has neither)?"
+  (try (array/array [1.0] {:dtype :bfloat16}) (array/array [1.0] {:dtype :float16}) true
+       (catch clojure.lang.ExceptionInfo _ false)))
+
+(defspec long-half-float-sums 12
+  ;; float16 and bfloat16, at their own precision: n equal terms of the
+  ;; dtype's full precision (11 and 8 significant bits), summing to 128 to
+  ;; 1,024 (in float16's range, its terms normal), within two roundings of
+  ;; the dtype and float32's log-bound: on MLX's CPU they are summed in
+  ;; float32 and cast back (half an ulp measured), and Metal's bfloat16
+  ;; sums come within 1.2 ulps. Accumulated in their own precision, MLX's
+  ;; CPU missed 10^5 terms by 75% in float16 and 99.8% in bfloat16
+  ;; (genclj-y0mp)
+  (prop/for-all [dt (gen/elements [:float16 :bfloat16])
+                 k (gen/choose 40 60)
+                 u (gen/choose 0 1000000)
+                 total (gen/choose 256 1023)]
+    (or (not halves?)
+        (let [bits ({:float16 11 :bfloat16 8} dt)
+              n (long (Math/pow 10.0 (/ k 10.0)))
+              m (+ (bit-shift-left 1 (dec bits)) (mod u (bit-shift-left 1 (dec bits))))
+              c (Math/scalb (double m) (Math/getExponent (/ (double total) (* n m))))
+              got (double (array/item (array/sum (array/full [n] c {:dtype dt}))))
+              eps (Math/scalb 1.0 (- 1 bits))]
+          (<= (Math/abs (- got (* n c))) (* (+ (* 2.0 eps) (log-bound n)) n c))))))
+
+(defn- flat-values [x] (map double (flatten (vector (array/->clj x)))))
+
+(defspec long-sums-over-axes 12
+  ;; uniform terms in (-1, 1) against the JVM backend's float64 sum, each
+  ;; output within log-bound of its terms' Σ|x|; shapes whose reductions
+  ;; take every path (leading, middle, trailing and adjacent axes, counts
+  ;; with and without a divisor near the block size)
+  (prop/for-all [shape (gen/elements [[300000] [700 900] [517 9 63] [64 3 1100] [5 2003 31]])
+                 seed gen/nat
+                 keep? gen/boolean]
+    (let [axes (gen/generate (gen-axes (count shape)) 10 seed)
+          host (array/->clj (array/- (array/* 2.0 (rng/uniform (rng/key seed) shape)) 1.0))
+          got (array/sum (array/array host {:dtype float-dt}) {:axis axes :keep-dims? keep?})
+          [want scale] (array/with-backend reference
+                         (let [x (array/array host {:dtype :float64})]
+                           [(array/sum x {:axis axes :keep-dims? keep?})
+                            (array/sum (array/abs x) {:axis axes :keep-dims? keep?})]))
+          m (quot (reduce * shape) (max 1 (array/size got)))]
+      (and (= (array/shape want) (array/shape got))
+           (or (empty? (array/shape got)) (= float-dt (array/dtype got)))
+           (every? true? (map (fn [g w a] (<= (Math/abs (- g w)) (* (log-bound m) a)))
+                              (flat-values got) (flat-values want) (flat-values scale)))))))
+
 (defspec arg-reductions trials
   (prop/for-all [op (gen/elements [array/argmax array/argmin])
                  shape gen-nonempty-shape
