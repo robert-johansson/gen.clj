@@ -80,11 +80,17 @@
   "An Unfold making as-map's addresses at its steps."
   (comb/unfold (gen [_t s] (trace :x (d/normal s 1.0)))))
 
+;; Map's and Unfold's alternative arguments change their length, so that
+;; the exact-discard laws see elements and steps dropped and added (the
+;; post-M5 review's P2-10 gap). A planted drop-elements that leaves a
+;; dropped element out of the discard fails
+;; combinators-updates-are-reversible-with-exact-discards on them.
 (def models
-  [[:map mapped [[1.0 2.0 3.0]]]
+  [[:map mapped [[1.0 2.0 3.0]] [[[1.0 2.0]] [[1.0 2.0 3.0 4.0]] [[1.0 5.0 3.0]]]]
 
-   [:map-2-args (comb/map (gen [x y] (trace :z (d/normal x y)))) [[0.0 1.0] [1.0 2.0]]]
-   [:unfold unfolded [4 0.0 0.1]]
+   [:map-2-args (comb/map (gen [x y] (trace :z (d/normal x y)))) [[0.0 1.0] [1.0 2.0]]
+    [[[0.0] [1.0]] [[0.0 1.0 2.0] [1.0 2.0 3.0]]]]
+   [:unfold unfolded [4 0.0 0.1] [[2 0.0 0.1] [6 0.0 0.1] [4 0.5 0.1]]]
    [:switch switched [1 0.5]]
    [:keyed-switch keyed [:a 0.5]]
    [:spliced spliced [3]]
