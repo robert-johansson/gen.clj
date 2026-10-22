@@ -164,7 +164,7 @@ needs, taken from GenMLX's measured call counts
 | Group | Public functions (`array/…`) | Primitive op keywords → `IBackend` method | Composite |
 |---|---|---|---|
 | creation | `array` `scalar` `zeros` `ones` `full` `eye` `arange` `linspace` `*-like` | `-from-host` `-full` `-arange` | `eye`, `linspace` |
-| conversion | `astype` `item` `->clj` `eval!` `array?` `shape` `ndim` `size` `dtype` | `-astype` `-to-host` `-eval!` `-shape` `-dtype` | `ndim`, `size` |
+| conversion | `astype` `item` `->clj` `eval!` `array?` `host?` `backend-array?` `shape` `ndim` `size` `dtype` | `-astype` `-to-host` `-eval!` `-shape` `-dtype` | `ndim`, `size` |
 | arithmetic | `+ - * /` (variadic), `negate`, `pow`, `maximum` `minimum`, `mod` `floor-div`, `abs` `sign` | `:add :subtract :multiply :divide :power :maximum :minimum :remainder :floor-divide :negative :abs :sign` | — |
 | exp/log | `exp` `log` `expm1` `log1p` `sqrt` `square` `logaddexp` `xlogy` | `:exp :log :expm1 :log1p :sqrt` | `square`, `logaddexp` (native in MLX: one op, and its gradient is exact at ties under MLX's autodiff), `xlogy` |
 | trig | `sin` `cos` `tan` `tanh` `sinh` `cosh` `asin` `acos` `atan` `atan2` `sigmoid` `softplus` | `:sin :cos :tan :tanh :sinh :cosh :arcsin :arccos :arctan :arctan2` | `sigmoid`, `softplus` |
@@ -208,10 +208,10 @@ needs, taken from GenMLX's measured call counts
   known-answer vectors:
   - `split(k, n)[i] = threefry(k, [hi32(i) lo32(i)])` and `fold-in(k, d) =
     threefry(k, [hi32(d) lo32(d)])`, so `fold-in(k, d) = split(k, ·)[d]`.
-    fold-in takes 64-bit data (owner, 2026-10-22, the post-M5 review's
-    P2-09): below 2^32 its key is JAX's, bit for bit; beyond, it is
-    distinct, where JAX masks typed data to 32 bits and Recurse's deep
-    node numbers then shared keys.
+    fold-in takes non-negative 64-bit data (owner, 2026-10-22, the post-M5
+    review's P2-09): below 2^32 its key is JAX's, bit for bit; beyond, it
+    is distinct, where JAX masks typed data to 32 bits and Recurse's deep
+    node numbers then shared keys. Negative data is a loud error.
   - Element i of any draw depends only on the key and i.
   - MLX uses the older, non-partitionable layout, so the MLX backend will
     implement this scheme itself; it is only uint32 arithmetic.
@@ -392,8 +392,9 @@ Two layers make this safe:
      `(if-not b …)` and `(filter pred xs)` in a body took one branch for
      every particle.
    - Representation tests (`class`, `instance?`, `number?`, `coll?`, …, and
-     gen.array's `host?` and `array?`) answer for a particle's value, whose
-     type the batch's dtype and per-particle shape determine.
+     gen.array's `host?`, `array?` and `backend-array?`) answer for a
+     particle's value, whose type the batch's dtype and per-particle shape
+     determine.
    - A 0-d backend array counts as its host value wherever a body branches,
      compares or looks up on it (MLX's 0-d arrays are MLX arrays; the JVM
      backend's are host scalars already): `case`, `=`, `not=`, `true?`,

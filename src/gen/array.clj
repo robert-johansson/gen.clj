@@ -49,7 +49,9 @@
   [x]
   (or (instance? Number x) (instance? Boolean x)))
 
-(defn- backend-array? [x]
+(defn backend-array?
+  "Is x a backend array (an array value that is not a host scalar)?"
+  [x]
   (instance? gen.array.protocols.IArray x))
 
 (defn array?

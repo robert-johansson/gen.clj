@@ -85,12 +85,21 @@
 
 (defn- in-support? [tr] (array/truthy? (array/all (array/isfinite (:score tr)))))
 
+(defn- same-retval?
+  "Are return values a and b equal (=), two seqs on the part of them a run
+   realizes, their first 10,000 elements (gen.dynamic's realize-limit)? =
+   would walk an infinite one forever."
+  [a b]
+  (if (and (seq? a) (seq? b))
+    (= (take 10000 a) (take 10000 b))
+    (= a b)))
+
 (defn- assessed?
   "Is tr's score gf's assessed density of its choices, and its return value
    the one they determine?"
   [gf tr]
   (let [{w :weight rv :retval} (gfi/assess gf (:args tr) (:choices tr) (rng/key 0))]
-    (and (close? (:score tr) w) (= (:retval tr) rv))))
+    (and (close? (:score tr) w) (same-retval? (:retval tr) rv))))
 
 (defn- consistent?
   "Trace consistency (Def 2.1.16): tr's score and return value are those its

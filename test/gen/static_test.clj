@@ -655,7 +655,11 @@
         (let [static (gfi/simulate gf [] (rng/key 48))
               dynamic (gfi/simulate (assoc gf :static nil) [] (rng/key 48))]
           (is (= [:compute :splice :splice] (mapv :kind (:nodes (static/ir gf)))) "the inner gen is a value")
-          (is (= (:choices dynamic) (:choices static)))
+          (is (= (cm/addresses (:choices dynamic)) (cm/addresses (:choices static))))
+          ;; computed through different graphs: on the host, within the tolerance
+          (doseq [p (cm/addresses (:choices static))]
+            (is (ts/close? (ts/host (cm/get-choice (:choices dynamic) p)) (ts/host (cm/get-choice (:choices static) p)))
+                (str p)))
           (is (ts/close? (:score dynamic) (:score static))))))))
 
 ;; ---------------------------------------------------------------------------

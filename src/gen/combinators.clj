@@ -326,7 +326,7 @@
    number that differs across a batch's particles raises the batched-branch
    error, so batched inference falls back)."
   [n]
-  (let [n (if (and (array/array? n) (not (array/host? n))) (array/item n) n)]
+  (let [n (if (array/backend-array? n) (array/item n) n)]
     (check-steps* n)))
 
 (defn- check-steps* [n]
@@ -437,7 +437,7 @@
    all, and array/item raises the batched-branch error (gen.array.batch), so
    batched inference falls back to one particle at a time."
   [idx]
-  (if (or (array/host? idx) (not (array/array? idx))) idx (array/item idx)))
+  (if (array/backend-array? idx) (array/item idx) idx))
 
 (defn- branch [gf idx]
   (or (get (:branches gf) (branch-index idx))

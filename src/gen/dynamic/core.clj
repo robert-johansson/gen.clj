@@ -2,8 +2,8 @@
   "Guarded versions of the functions that test truthiness, look up by key or
    test a value's representation. Inside gen bodies (and guarded-fn helpers)
    the gen macro uses these in place of the functions each one names in its
-   :guards metadata (clojure.core's, and gen.array's host? and array?), as it
-   wraps if tests in gen.array/truthy?.
+   :guards metadata (clojure.core's, and gen.array's host?, array? and
+   backend-array?), as it wraps if tests in gen.array/truthy?.
 
    On ordinary values each behaves as the original. A batched value
    (gen.array.batch) is one object standing for every particle's value, and
@@ -36,8 +36,7 @@
                             get contains? find get-in])
   (:require [gen.array :as array]
             [gen.array.batch :as batch]
-            [gen.array.dtype :as dt]
-            [gen.array.protocols :as p]))
+            [gen.array.dtype :as dt]))
 
 (set! *warn-on-reflection* true)
 
@@ -46,28 +45,25 @@
   [fname guarded & fdecl]
   `(defn ~(vary-meta fname assoc :guards (list 'quote guarded)) ~@fdecl))
 
-(defn- batched? [x] (clojure.core/instance? gen.array.protocols.IBatchedValue x))
-
 (defn- branch-error [what]
   (array/batched-branch (str what " of a batched value: it differs across particles") {}))
 
 (defn- unbatched
   "x, or the batched-branch error when it is batched."
   [what x]
-  (if (batched? x) (throw (branch-error what)) x))
+  (if (batch/batched? x) (throw (branch-error what)) x))
 
 (defn- scalar-array?
   "Is x a 0-d backend array (not a host scalar, not a batch)?"
   [x]
-  (and (clojure.core/instance? gen.array.protocols.IArray x) (clojure.core/not (batched? x))
-       (clojure.core/= [] (array/shape x))))
+  (and (array/backend-array? x) (clojure.core/not (batch/batched? x)) (clojure.core/= [] (array/shape x))))
 
 (defn ^:no-doc host-value
   "x as Clojure code branching, comparing or looking up on it sees it: a 0-d
    backend array as its host value (read), a batched value an error (it
    differs across particles), anything else itself."
   [what x]
-  (cond (batched? x) (throw (branch-error what))
+  (cond (batch/batched? x) (throw (branch-error what))
         (scalar-array? x) (array/item x)
         :else x))
 
@@ -129,11 +125,12 @@
    value (a particle's, or a 0-d backend array) as a host scalar, as on the
    JVM backend."
   [x]
-  (cond (batched? x)
+  (cond (batch/batched? x)
         (let [dtype (array/dtype x)]
           (if (clojure.core/= [] (array/shape x))
             (host-prototype dtype)
-            (p/-full (p/-inner (p/-backend x)) [1] (if (clojure.core/= :bool (dt/kind dtype)) false 0) dtype)))
+            (array/with-backend (batch/inner-backend x)
+              (array/full [1] (if (clojure.core/= :bool (dt/kind dtype)) false 0) {:dtype dtype}))))
         (scalar-array? x) (host-prototype (array/dtype x))
         :else x))
 
@@ -154,8 +151,10 @@
 
 (defguard array? gen.array/array? [x] (array/array? (particle x)))
 
+(defguard backend-array? gen.array/backend-array? [x] (array/backend-array? (particle x)))
+
 (defn- int-sign-test [what core-pred x]
-  (if (batched? x)
+  (if (batch/batched? x)
     ;; an integer particle's sign differs across particles
     (if (clojure.core/= :int (dt/kind (array/dtype x)))
       (if (clojure.core/= [] (array/shape x)) (throw (branch-error what)) false)

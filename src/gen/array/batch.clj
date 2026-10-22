@@ -305,6 +305,12 @@
 
 (defn batch-backend? [b] (instance? BatchBackend b))
 
+(defn inner-backend
+  "The backend a batched value's particles are arrays of. It reads nothing,
+   so it marks no read (unread-bools)."
+  [^Batched x]
+  (.-inner ^BatchBackend (.-backend x)))
+
 (defn backend-for
   "The batch backend for batch-shape over the backend in effect (which may
    already be that batch backend, in a nested call)."

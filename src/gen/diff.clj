@@ -180,7 +180,7 @@
   "Is k a backend array? The guarded lookups read such a key on the host,
    which a rule cannot (and a fresh array is another map key each run)."
   [k]
-  (and (array/array? k) (not (array/host? k))))
+  (array/backend-array? k))
 
 (defn- element-diff
   "The diff of coll's element at key k (unchanged), coll's diff being d: a

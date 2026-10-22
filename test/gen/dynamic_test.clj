@@ -481,9 +481,29 @@
          [:repeated-lazy repeated-lazy] [:range-beside-cons range-beside-cons]])
   100)
 
+;; The infinite kinds (genclj-54ix), which realize! takes 10,000 elements of:
+;; iterate's (its draws in the steps f traces), cycle's past the chunk cycle
+;; realizes, and an infinite repeat's. Every law but the identity update's
+;; no-change, an implementation property: two infinite values exhaust
+;; same-value?'s budget, so an identity update reports unknown-change, which
+;; is sound (Def 2.3.2). The laws compare a return value as far as a run
+;; realizes it (gen.laws' same-retval?). Plants: an unbounded comparison in
+;; the retdiff (=) does not end (identity-update-changes-nothing timed out);
+;; realize! forcing LazySeqs alone fails four of the 21 laws.
+
+(def iterated (gen [n] (iterate (fn [[i x]] (if (< i n) [(inc i) (trace [:x i] (d/normal x 1))] [i x])) [0 0.0])))
+
+(def cycled (gen [n] (cycle (map #(trace [:x %] (d/normal 0 1)) (range n)))))
+
+(def repeated-forever (gen [n] (repeat (map #(trace [:x %] (d/normal 0 1)) (range n)))))
+
+(def ^:private infinite-laws (dissoc laws/all :identity-update-reports-no-change))
+
+(laws/deflaws lazy-returns-infinite
+  [[:iterated iterated [5] [[3] [8]]] [:cycled cycled [40] [[3] [45]]] [:repeated-forever repeated-forever [5] [[3] [8]]]]
+  100 infinite-laws)
+
 (deftest every-lazy-kind-is-realized-during-the-run
-  ;; the infinite kinds, outside the laws: until the retdiff's equality is
-  ;; bounded (genclj-ws7x), an update comparing two of them would not end
   (let [draws (set (map #(vector :x %) (range 40)))]
     (doseq [[kind m] {"iterate" (gen [] (iterate (fn [[i x]] (if (< i 40) [(inc i) (trace [:x i] (d/normal x 1))] [i x]))
                                                  [0 0.0]))

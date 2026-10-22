@@ -630,7 +630,9 @@
    unknown-change; otherwise no-change when the return value is the
    previous one by gfi/same-value? (DESIGN.md §9, D1), unknown-change
    otherwise. same-value? reads no array (a batched one included) and is
-   bounded, so a long or lazy return value is unknown-change."
+   bounded, and a lazy value counts only as far as it is realized (as
+   realize! leaves a return value), so a long return value, or an infinite
+   one, is unknown-change."
   [prev-trace state]
   (let [d (::retdiff state)]
     (cond (and d (not (diff/unknown-change? d))) d
