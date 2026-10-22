@@ -976,7 +976,9 @@
   "The diagonal matrix of a vector, or the main diagonal of a matrix."
   [x]
   (case (long (ndim x))
-    1 (* (with-backend (backend x) (eye (size x) {:dtype (dtype x)})) x)
+    ;; x where the identity is, not times it: 0·Inf would be NaN
+    1 (let [i (with-backend (backend x) (arange (size x)))]
+        (where (== (reshape i [-1 1]) (reshape i [1 -1])) x 0))
     2 (let [[n-rows n-cols] (shape x)
             k (c/min (long n-rows) (long n-cols))]
         (reshape (take-along-axis (slice x 0 0 k)

@@ -213,7 +213,7 @@
    triangle with its diagonal halved (Murray 2016)."
   [inner l g]
   (let [n (peek (array/shape l))
-        eye (array/eye n)
+        eye (array/eye n {:dtype (array/dtype l)})
         phi (fn [x] (- (tril x false) (* 0.5 (* x eye))))
         p (phi (array/matmul (swap-last-two l) (tril g false)))
         ;; S = l⁻ᵀ p l⁻¹, by two triangular solves
@@ -228,28 +228,34 @@
    values. The tape's rules; the MLX backend gives them to MLX as custom
    VJPs in its native mode."
   [inner op args out g need]
-  (case op
-    :cholesky (grads need (cholesky-vjp inner out g))
-    ;; x = A⁻¹ rhs with A = m or mᵀ: rhs̄ = A⁻ᵀ ḡ, Ā = -rhs̄ xᵀ
-    :solve-triangular
-    (let [[m rhs {:keys [lower? transpose?]}] args
-          rhs-bar (p/-linalg inner :solve-triangular [m g {:lower? lower? :transpose? (not transpose?)}])
-          a-bar (array/negate (array/matmul rhs-bar (swap-last-two out)))]
-      (grads need
-             (unbroadcast (tril (if transpose? (swap-last-two a-bar) a-bar) (not lower?)) (array/shape m))
-             (unbroadcast rhs-bar (array/shape rhs))))
-    :solve
-    (let [[m rhs] args
-          rhs-bar (p/-linalg inner :solve [(swap-last-two m) g])]
-      (grads need
-             (unbroadcast (array/negate (array/matmul rhs-bar (swap-last-two out))) (array/shape m))
-             (unbroadcast rhs-bar (array/shape rhs))))
-    ;; d log|det m| = tr(m⁻¹ dm): m̄ = ḡ m⁻ᵀ
-    :slogdet
-    (let [[m] args
-          n (peek (array/shape m))
-          inv (p/-linalg inner :solve [m (array/broadcast-to (array/eye n) (array/shape m))])]
-      (grads need (* (array/expand-dims (array/expand-dims g -1) -1) (swap-last-two inv))))))
+  ;; the cotangent in the matrix's dtype (gen.array.linalg gives both
+  ;; operands that one), and the identities in it below: a backend's linalg
+  ;; takes operands of one dtype (genclj-d681). The matrix's, not the
+  ;; result's: a 0-d logabs is a host number on the JVM backend
+  (let [d (array/dtype (first args))
+        g (if (= d (array/dtype g)) g (array/astype g d))]
+    (case op
+      :cholesky (grads need (cholesky-vjp inner out g))
+      ;; x = A⁻¹ rhs with A = m or mᵀ: rhs̄ = A⁻ᵀ ḡ, Ā = -rhs̄ xᵀ
+      :solve-triangular
+      (let [[m rhs {:keys [lower? transpose?]}] args
+            rhs-bar (p/-linalg inner :solve-triangular [m g {:lower? lower? :transpose? (not transpose?)}])
+            a-bar (array/negate (array/matmul rhs-bar (swap-last-two out)))]
+        (grads need
+               (unbroadcast (tril (if transpose? (swap-last-two a-bar) a-bar) (not lower?)) (array/shape m))
+               (unbroadcast rhs-bar (array/shape rhs))))
+      :solve
+      (let [[m rhs] args
+            rhs-bar (p/-linalg inner :solve [(swap-last-two m) g])]
+        (grads need
+               (unbroadcast (array/negate (array/matmul rhs-bar (swap-last-two out))) (array/shape m))
+               (unbroadcast rhs-bar (array/shape rhs))))
+      ;; d log|det m| = tr(m⁻¹ dm): m̄ = ḡ m⁻ᵀ
+      :slogdet
+      (let [[m] args
+            n (peek (array/shape m))
+            inv (p/-linalg inner :solve [m (array/broadcast-to (array/eye n {:dtype d}) (array/shape m))])]
+        (grads need (* (array/expand-dims (array/expand-dims g -1) -1) (swap-last-two inv)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The tape backend

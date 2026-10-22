@@ -9,22 +9,44 @@
 
 (set! *warn-on-reflection* true)
 
-(defn- float-array-of
-  "x as a float backend array on b (ints and bools converted)."
-  [b x]
-  (let [x (if (= :float (dt/kind (array/dtype x))) x (array/astype x (:float (p/-defaults b))))]
-    (if (array/host? x) (array/with-backend b (array/array x)) x)))
+(defn- float-dtype-of
+  "The one float dtype the operands xs take on backend b: their common dtype
+   as gen.array's ops promote them (host scalars weakly), or b's default
+   float for ints and bools. A backend's linalg takes operands of one dtype
+   (genclj-d681: a float32 matrix with a float64 right-hand side came back
+   float32 on the JVM, float64 on MLX)."
+  [b xs]
+  (let [strong (reduce (fn [s x] (if (array/host? x) s (let [d (array/dtype x)] (if s (dt/promote s d) d)))) nil xs)
+        d (dt/with-weak strong (set (keep #(when (array/host? %) (dt/kind (dt/host-dtype %))) xs)) (p/-defaults b))]
+    (if (= :float (dt/kind d)) d (:float (p/-defaults b)))))
+
+(defn- floats-of
+  "The operands xs as backend arrays of b in float-dtype-of's one dtype."
+  [b xs]
+  (let [d (float-dtype-of b xs)]
+    (mapv (fn [x] (cond (array/host? x) (array/with-backend b (array/array x {:dtype d}))
+                        (= d (array/dtype x)) x
+                        :else (array/astype x d)))
+          xs)))
 
 (defn- backend-of [& xs] (array/common-backend xs))
 
 (defn- with-matrix-rhs
   "Call (f a rhs) with rhs as [.. n k], restoring a vector right-hand side. A
    right-hand side is a (batch of) vector(s) when it is 1-d or has one axis
-   fewer than the matrix."
-  [a rhs f]
-  (if (or (== 1 (array/ndim rhs)) (== (array/ndim rhs) (dec (array/ndim a))))
-    (array/squeeze (f a (array/expand-dims rhs -1)) -1)
-    (f a rhs)))
+   fewer than the matrix. One without the matrix's rows (a number, say) is
+   an error here, alike on every backend."
+  [op a rhs f]
+  (let [sa (array/shape a)
+        sr (array/shape rhs)
+        vector? (or (== 1 (count sr)) (== (count sr) (dec (count sa))))]
+    (when (or (empty? sr)
+              (and (>= (count sa) 2)
+                   (not= (nth sa (- (count sa) 2)) (nth sr (- (count sr) (if vector? 1 2))))))
+      (throw (ex-info (str (name op) ": matrix and right-hand side do not match") {:shapes [sa sr]})))
+    (if vector?
+      (array/squeeze (f a (array/expand-dims rhs -1)) -1)
+      (f a rhs))))
 
 (defn cholesky
   "The lower Cholesky factor L of a symmetric positive-definite a (a = L·Lᵀ).
@@ -32,36 +54,38 @@
    gives NaN rather than an error, so batched code never throws midway."
   [a]
   (let [b (backend-of a)]
-    (p/-linalg b :cholesky [(float-array-of b a)])))
+    (p/-linalg b :cholesky (floats-of b [a]))))
 
 (defn solve-triangular
   "x with t·x = rhs (or tᵀ·x = rhs) for triangular t. Options: :lower?
    (default true), :transpose?."
   ([t rhs] (solve-triangular t rhs nil))
   ([t rhs {:keys [lower? transpose?] :or {lower? true}}]
-   (let [b (backend-of t rhs)]
-     (with-matrix-rhs (float-array-of b t) (float-array-of b rhs)
+   (let [b (backend-of t rhs)
+         [t rhs] (floats-of b [t rhs])]
+     (with-matrix-rhs :solve-triangular t rhs
        (fn [t rhs] (p/-linalg b :solve-triangular [t rhs {:lower? lower? :transpose? transpose?}]))))))
 
 (defn solve
   "x with m·x = rhs (LU with partial pivoting)."
   [m rhs]
-  (let [b (backend-of m rhs)]
-    (with-matrix-rhs (float-array-of b m) (float-array-of b rhs)
+  (let [b (backend-of m rhs)
+        [m rhs] (floats-of b [m rhs])]
+    (with-matrix-rhs :solve m rhs
       (fn [m rhs] (p/-linalg b :solve [m rhs])))))
 
 (defn inv
-  "The inverse of a square matrix."
+  "The inverse of a square matrix, in its float dtype."
   [m]
   (let [b (backend-of m)
         n (peek (array/shape m))]
-    (solve m (array/with-backend b (array/eye n)))))
+    (solve m (array/with-backend b (array/eye n {:dtype (float-dtype-of b [m])})))))
 
 (defn slogdet
   "[sign log|det m|] (sign 0 and -Inf for a singular matrix)."
   [m]
   (let [b (backend-of m)]
-    (p/-linalg b :slogdet [(float-array-of b m)])))
+    (p/-linalg b :slogdet (floats-of b [m]))))
 
 (defn det
   "The determinant."
@@ -70,10 +94,15 @@
     (* sign (array/exp logabs))))
 
 (defn diagonal
-  "The main diagonals of [.. n n] matrices, as [.. n]."
+  "The main diagonals of [.. n n] matrices, as [.. n]: read, not computed
+   (multiplied by the identity, an infinite entry made the zeros beside it
+   NaN, genclj-d681)."
   [m]
-  (let [n (peek (array/shape m))]
-    (sum (* m (array/with-backend (backend-of m) (array/eye n))) {:axis -1})))
+  (let [s (array/shape m)
+        n (peek s)
+        rows (array/with-backend (backend-of m)
+               (array/reshape (array/arange n) (conj (vec (repeat (- (count s) 2) 1)) n 1)))]
+    (array/squeeze (array/take-along-axis m rows -1) -1)))
 
 (defn cholesky-logdet
   "log det of a = L·Lᵀ from its Cholesky factor L: 2·Σ log diag(L)."
