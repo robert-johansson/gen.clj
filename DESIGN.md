@@ -1024,7 +1024,12 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   on the trace generate makes from the substituted choices, so what the
   kernel reads from a call's value, the return value or the score is
   differentiated too (the post-M5 review's P3-04: with the old trace's
-  call values, log |det J| was log 1.3 off, silently).
+  call values, log |det J| was log 1.3 off, silently). Only the kernel's
+  assess needs exact densities. The model's generate may draw
+  encapsulated randomness, at key 0, so pseudo-marginal moves work, as
+  involutions do. A kernel whose outputs depend on that randomness (the
+  score of an estimated density, say) fails a check of the outputs at the
+  trace's own choices, loudly (m3-grammar's cross-review).
   It leaves out only the trace's choices no output depends on and the
   move leaves alone: a choice the update rewrites or discards is an input,
   less an observation SMCP3's `:new-observations` replace, which is data

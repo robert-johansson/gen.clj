@@ -7,6 +7,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array :refer [+ - * /]]
             [gen.choicemap :as cm]
+            [gen.custom :as custom]
             [gen.diff :as diff]
             [gen.dist :as d]
             [gen.dist.core :as dc]
@@ -238,3 +239,33 @@
             {t' :trace w :weight} ((tk/smcp3 {:k swap :l swap :new-observations (cm/choicemap :y 0.9)}) tr (rng/key 46))
             u (ts/number (t' :mu))]
         (is (ts/close? (- (lp (d/normal u 1) 0.9) (lp (d/normal 0.3 1) 0.8)) w))))))
+
+(deftest a-model-s-encapsulated-randomness-is-allowed-where-the-kernel-does-not-read-it
+  ;; m3-grammar's cross-review of P3-04's fix: the model's generate runs
+  ;; outside with-exact-density (only the kernel needs exact densities), so
+  ;; a pseudo-marginal walk works as before the fix; a kernel whose outputs
+  ;; read the model's ω (its score here) fails the check at the trace's own
+  ;; choices, loudly. Planted bugs (2026-10-22): the generate under
+  ;; with-exact-density, as in d828198, throws "needs exact densities" in
+  ;; the first two cases; without the check the third passes silently,
+  ;; differentiated at another ω
+  (let [lik (custom/estimated {:addresses [:y]
+                               :estimate (fn [[mu] choices key]
+                                           (+ (dc/log-prob (d/normal mu 1) (cm/get-choice choices :y))
+                                              (- (* 0.1 (rng/normal key [])) 0.005)))})
+        model (gen [] (let [mu (trace :mu (d/normal 0 1))] (splice :obs lik mu)))
+        tr (:trace (gfi/generate model [] (cm/choicemap :mu 0.3 [:obs :y] 0.8) (rng/key 50)))
+        walk (gen [tr] (let [u (trace :u (d/normal 0 0.5))] [(cm/choicemap :mu (+ (tr :mu) u)) (cm/choicemap :u (array/negate u))]))
+        walked (fn [key] (let [[k-propose k-update] (rng/split key 3)
+                               u (cm/get-choice (:choices (gfi/propose walk [tr] k-propose)) :u)]
+                           (:weight (gfi/update tr (cm/choicemap :mu (+ 0.3 u)) k-update))))]
+    (testing "MH: a walk's ratio is the update's weight (|det J| = 1)"
+      (is (ts/close? (walked (rng/key 51)) (:log-alpha (tk/mh tr walk [] (rng/key 51))))))
+    (testing "SMCP3: the same weight"
+      (is (ts/close? (walked (rng/key 52)) (:weight ((tk/smcp3 {:k walk :l walk}) tr (rng/key 52))))))
+    (testing "a kernel that reads the score, which depends on ω"
+      (let [by-score (gen [tr] (let [u (trace :u (d/normal 0 0.5))]
+                                 [(cm/choicemap :mu (+ (tr :mu) (* u (array/exp (* 0.01 (:score tr)))))) (cm/choicemap :u (array/negate u))]))
+            {kc :choices ret :retval} (gfi/propose by-score [tr] (rng/key 53))]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"encapsulated randomness"
+                              (tk/log-abs-det by-score tr [] kc ret (constantly true))))))))

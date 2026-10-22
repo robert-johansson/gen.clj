@@ -36,7 +36,9 @@
    output depends on, is an unchanged output. The kernel runs on the trace
    the substituted choices make (generate, every choice constrained), so
    what it reads from a call's value, the return value or the score is
-   differentiated too. GenTraceKernelDSL also drops outputs that depend on
+   differentiated too. The model may hold encapsulated randomness (a
+   pseudo-marginal move), unless the kernel's outputs depend on it: then
+   they differ at the trace's own choices, a loud error. GenTraceKernelDSL also drops outputs that depend on
    no input and kernel choices no output depends on, which hides moves that
    are not bijections (a constant output, randomness thrown away, a value
    overwritten); here they make the matrix non-square or singular, a loud
@@ -86,19 +88,30 @@
                                                        (array/shape (in-values i)))]
                                   (if (= sp :model) [(cm/set-choice mc p v) kc] [mc (cm/set-choice kc p v)])))
                               [mc kc] (map-indexed vector ins)))
-        ;; the trace the substituted choices make, so the kernel's reads of
-        ;; a call's value, the return value and the score are tracked too
-        outputs (fn [x]
-                  (let [[mc' kc'] (substituted x)
-                        [u b] (gfi/with-exact-density "A trace kernel's Jacobian"
-                                (let [trace' (:trace (gfi/generate (:gen-fn trace) (:args trace) mc' (rng/key 0)))]
-                                  (:retval (gfi/assess kernel (into [trace'] args) kc' (rng/key 0)))))]
-                    (array/concatenate (mapv (fn [[sp p]] (array/flatten (cm/get-choice (if (= sp :update) u b) p)))
-                                             outs))))
+        ;; the kernel on the trace the substituted choices make, so its
+        ;; reads of a call's value, the return value and the score are
+        ;; tracked too. Only the kernel needs exact densities: the model may
+        ;; hold encapsulated randomness (a pseudo-marginal move), drawn
+        ;; here at key 0, which the check at x below makes loud wherever
+        ;; the kernel's outputs depend on it
+        kernel-outputs (fn [x]
+                         (let [[mc' kc'] (substituted x)
+                               trace' (:trace (gfi/generate (:gen-fn trace) (:args trace) mc' (rng/key 0)))]
+                           (:retval (gfi/with-exact-density "A trace kernel's Jacobian"
+                                      (gfi/assess kernel (into [trace'] args) kc' (rng/key 0))))))
+        continuous-outs (fn [[u b]] (reduce (fn [c [sp p]] (cm/set-choice c (into [sp] p) (cm/get-choice (if (= sp :update) u b) p)))
+                                            cm/EMPTY outs))
+        outputs (fn [x] (let [[u b] (kernel-outputs x)]
+                          (array/concatenate (mapv (fn [[sp p]] (array/flatten (cm/get-choice (if (= sp :update) u b) p))) outs))))
         m (reduce clojure.core/+ 0 (map (fn [[sp p]] (array/size (cm/get-choice (if (= sp :update) update backward) p)))
                                         outs))
-        rows (if (seq ins)
+        rows (if (and (seq ins) (seq outs))
                (let [x (array/concatenate (mapv array/flatten in-values))]
+                 (when-not (tf/same-choices? (continuous-outs (kernel-outputs x)) (continuous-outs [update backward]))
+                   (throw (ex-info (str "The trace kernel gives other outputs on the trace its choices make than on the"
+                                        " trace itself: they depend on the model's encapsulated randomness, which its"
+                                        " Jacobian cannot follow")
+                                   {:outputs (mapv vec (map rest outs))})))
                  (mapv (fn [j] (vec (array/->clj ((array/grad #(array/take (outputs %) j)) x)))) (range m)))
                (vec (repeat m [])))
         cols (into (columns :model mc (continuous-addresses mc)) (columns :kernel kc (continuous-addresses kc)))

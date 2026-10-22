@@ -414,7 +414,20 @@
             {t' :trace w :weight} ((tf/updating-translator {:q-forward standard-u :q-backward standard-u :transform swap-mu
                                                             :new-observations (cm/choicemap :y 0.9)})
                                    tr (rng/key 56))]
-        (is (ts/close? (- (lp (d/normal (t' :mu) 1) 0.9) (lp (d/normal 0.3 1) 0.8)) w))))))
+        (is (ts/close? (- (lp (d/normal (t' :mu) 1) 0.9) (lp (d/normal 0.3 1) 0.8)) w))))
+    (testing "the transform reads the replaced y, an unchanged input (m3-grammar's cross-review): |det J| = 1"
+      ;; planted bug (2026-10-22): y counted as consumed in the Jacobian, as
+      ;; in d828198, throws "maps 3 dimensions to 2"
+      (let [nudge (tf/transform [mi ai mo ao]
+                    (let [mu (read mi :mu :continuous) y (read mi :y :continuous) u (read ai :u :continuous)]
+                      (write mo :mu (+ mu (+ u (* 0.1 y))) :continuous)
+                      (write ao :u (- 0.0 u) :continuous)))
+            {t' :trace w :weight} ((tf/updating-translator {:q-forward standard-u :q-backward standard-u :transform nudge
+                                                            :new-observations (cm/choicemap :y 0.9)})
+                                   tr (rng/key 57))
+            mu' (ts/number (t' :mu))]
+        (is (ts/close? (- (+ (lp (d/normal 0 1) mu') (lp (d/normal mu' 1) 0.9)) (+ (lp (d/normal 0 1) 0.3) (lp (d/normal 0.3 1) 0.8)))
+                       w))))))
 
 (def walk-u (gen [tr] (trace :u (d/normal (tr :x) 0.5))))
 

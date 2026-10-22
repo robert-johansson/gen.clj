@@ -489,10 +489,11 @@
           s (when t (execute t trace u nil))
           {t' :trace w :weight discard :discard}
           (gfi/update trace args argdiffs (cm/merge (if t (get-in s [:outputs :model-out]) u) new-observations) k-update)
-          ;; an observation the new ones replace is data, not part of the move
-          _ (some-> s (check-consumed! (fn [sp p] (or (= sp :aux-in) (and (cm/has-value? discard p)
-                                                                           (not (cm/has-value? new-observations p)))))))
-          ldj (if t (log-abs-det t trace u s (fn [p] (not (cm/has-value? discard p)))) 0.0)
+          ;; an observation the new ones replace is data, not part of the
+          ;; move: neither consumed nor an input that is lost
+          left-alone? (fn [p] (or (not (cm/has-value? discard p)) (cm/has-value? new-observations p)))
+          _ (some-> s (check-consumed! (fn [sp p] (or (= sp :aux-in) (not (left-alone? p))))))
+          ldj (if t (log-abs-det t trace u s left-alone?) 0.0)
           u' (if t (get-in s [:outputs :aux-out]) discard)
           bwd (cond q-backward (:weight (gfi/assess q-backward (into [t'] q-backward-args) u' (gfi/backward-key k-update)))
                     (cm/empty? u') 0.0
