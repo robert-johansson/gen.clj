@@ -385,12 +385,28 @@
     (= (:choices (gfi/simulate gf args (rng/key seed)))
        (:choices (gfi/simulate gf args (rng/key seed))))))
 
+(defn- holds-array?
+  "Does x hold a backend array (in its maps, vectors and the first 10,000
+   elements of a seq)?"
+  [x]
+  (cond (array/backend-array? x) true
+        (map? x) (boolean (some holds-array? (vals x)))
+        (seq? x) (boolean (some holds-array? (take 10000 x)))
+        (coll? x) (boolean (some holds-array? x))
+        :else false))
+
 (defn identity-update-reports-no-change
   "An implementation property, not a thesis law (Def 2.3.2 allows
-   unknown-change)."
+   unknown-change): an identity update's retdiff is no-change. A return
+   value that holds a backend array may be unknown-change: a body run again
+   builds a new array, and unchanged is gfi/same-value?, which reads no
+   array (DESIGN.md §9, D1). On MLX even a 0-d value is such an array."
   [cases]
   (prop/for-all [[[_ gf args] seed] cases]
-    (diff/no-change? (:retdiff (gfi/update (gfi/simulate gf args (rng/key seed)) cm/EMPTY (rng/key (inc seed)))))))
+    (let [tr (gfi/simulate gf args (rng/key seed))
+          rd (:retdiff (gfi/update tr cm/EMPTY (rng/key (inc seed))))]
+      (or (diff/no-change? rd)
+          (and (diff/unknown-change? rd) (holds-array? (:retval tr)))))))
 
 (defn dispatch-matches-handler
   "A dispatcher (gen.dynamic/with-dispatch) is observationally equivalent to
