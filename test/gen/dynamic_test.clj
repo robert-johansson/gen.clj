@@ -215,6 +215,14 @@
                           (gfi/simulate (gen [] (trace :x (d/normal 0 1)) (trace :x (d/normal 0 1))) [] k)))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"lies under"
                           (gfi/simulate (gen [] (trace :x (d/normal 0 1)) (trace [:x :y] (d/normal 0 1))) [] k)))
+    ;; the post-M5 review's P1-05; plant: the check above reading the
+    ;; choices made (has-submap?), which an empty Map leaves without any
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"already holds nested choices or calls"
+                          (gfi/simulate (gen [] (splice [:x :y] (comb/map observation) []) (trace :x (d/normal 0 1))) [] k))
+        "a choice above a call that made no choices")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"lies under"
+                          (gfi/simulate (gen [] (trace :x (d/normal 0 1)) (splice [:x :y] (comb/map observation) [])) [] k))
+        "and the other order")
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"nested choice map"
                           (gfi/generate linreg [[1.0]] (cm/choicemap [:slope :oops] 1.0) k)))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no value"

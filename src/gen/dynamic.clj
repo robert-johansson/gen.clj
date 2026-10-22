@@ -57,8 +57,17 @@
       (when (contains? visited (subvec p 0 n))
         (throw (ex-info (str "Address " p " lies under the choice at " (subvec p 0 n))
                         {:path p :prefix (subvec p 0 n)}))))
-    (when (cm/has-submap? (:choices state) p)
-      (throw (ex-info (str "Address " p " already holds nested choices") {:path p})))))
+    ;; above a used path, whether it holds choices or not (a call that made none)
+    (when (contains? (::above state) p)
+      (throw (ex-info (str "Address " p " already holds nested choices or calls") {:path p})))))
+
+(defn- visit
+  "state with the path p used: in :visited, and its proper prefixes in
+   ::above."
+  [state p]
+  (-> state
+      (update :visited conj p)
+      (update ::above #(reduce (fn [above n] (conj above (subvec p 0 n))) % (range 1 (count p))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Pure transitions: (state, path, dist) -> [value state']
@@ -353,7 +362,7 @@
   {:mode mode :key key :argdiffs argdiffs
    :choices cm/EMPTY :scores {} :subtraces {} :score 0.0 :weight 0.0
    :constraints (or constraints cm/EMPTY) :prev prev :selection (or selection sel/none)
-   :discard cm/EMPTY :visited #{}
+   :discard cm/EMPTY :visited #{} ::above #{}
    ;; ω: the previous trace's when kept, else folded from the key at the first
    ;; untraced draw
    :omega (when (keeps-omega? mode opts) (::trace/omega prev)) :omega-key key :omega-count 0})
@@ -465,7 +474,7 @@
             state (if (= kind :trace)
                     (let [[v lp] (prev-choice state p)] (record state p v lp))
                     (record-call state p (get (::subtraces (:prev state)) p)))]
-        (vreset! vol (update state :visited conj p)))))
+        (vreset! vol (visit state p)))))
   old)
 
 (defn- run-static
@@ -561,7 +570,7 @@
                      (check-address! state p)
                      (let [[k-site state] (site-key state)
                            [v state] (@transition state p dist k-site)]
-                       (vreset! vol (update state :visited conj p))
+                       (vreset! vol (visit state p))
                        v)))
         ;; a call at an address: [value retdiff], hints the arguments' argdiffs
         splice-at (fn [addr gf args hints]
@@ -577,7 +586,7 @@
                           (throw (ex-info (str "The caller's trace was used during the splice at " p
                                                ": a function passed to the callee calls trace")
                                           {:path p})))
-                        (vreset! vol (update state' :visited conj p))
+                        (vreset! vol (visit state' p))
                         [v rd])))
         splice-fn (fn splice-fn [& xs]
                     (if (gfi/generative-function? (first xs))

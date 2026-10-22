@@ -257,6 +257,22 @@
           {w :weight} (gfi/update (assoc tr :gen-fn est-b) cm/EMPTY (rng/key 2))]
       (is (ts/close? (- (ts/number (:weight (gfi/assess est-b [] (:choices tr) (rng/key 0)))) (ts/number (:score tr))) w)))))
 
+(deftest a-trace-given-another-gen-fn-is-projected-by-its-maker
+  ;; as Gen.jl's project, which dispatches on the trace's type, and as update
+  ;; and regenerate revise it (the post-M5 review's P1-06). Plants: project by
+  ;; :gen-fn reads the maker's records with another kind's -project, 0.0 for
+  ;; the first two; proposal-weight projecting through gfi/project then
+  ;; re-enters the wrapper's own -project, a stack overflow for the third.
+  (let [kern (gen [a] (trace :x (d/normal a 1)))
+        dyn-tr (gfi/simulate kern [0.0] (rng/key 1))
+        map-tr (gfi/simulate (comb/map kern) [[0.0 0.0]] (rng/key 2))
+        model (gen [] (let [z (trace :z (d/normal 0 1))] (trace :y (d/normal z 1))))
+        q (gen [cs] (when-not (cm/has-value? (cm/get-submap cs :z)) (trace :z (d/normal 0.5 1))))
+        prop-tr (:trace (gfi/generate (prop/with-internal-proposal model q) [] (cm/choicemap :y 1.0) (rng/key 3)))]
+    (is (ts/close? (:score map-tr) (gfi/project (assoc map-tr :gen-fn kern) sel/all)) "a Map trace given a dynamic gen-fn")
+    (is (ts/close? (:score dyn-tr) (gfi/project (assoc dyn-tr :gen-fn (comb/map kern)) sel/all)) "a dynamic trace given a Map")
+    (is (ts/close? (:score prop-tr) (gfi/project prop-tr sel/all)) "an internal proposal's trace, made by the wrapper")))
+
 (deftest a-trace-made-under-middleware-is-rescored-without-it
   ;; a static body skips nothing for a trace another gen-fn made: the same
   ;; graph under other middleware (here a distribution swapped in simulate)

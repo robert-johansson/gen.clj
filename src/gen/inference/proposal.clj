@@ -102,7 +102,9 @@
   [{:keys [gf q]} args sigma tr]
   (if-let [[lq q-paths] (replay q (into [sigma] args) (:choices tr))]
     (do (check-open sigma q-paths)
-        (- (gfi/project (assoc tr :gen-fn gf) (sel/from-paths (concat (cm/addresses sigma) q-paths))) lq))
+        ;; the model's projection: tr's maker is the wrapper, whose own
+        ;; projection this is
+        (- (gfi/-project gf tr (sel/from-paths (concat (cm/addresses sigma) q-paths))) lq))
     ##Inf))
 
 (defn- same-addresses? [x y] (= (set (cm/addresses x)) (set (cm/addresses y))))

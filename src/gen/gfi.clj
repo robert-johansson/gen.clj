@@ -372,8 +372,8 @@
   (-with-stores gf stores))
 
 (defn project-by-maker
-  "tr's projection on selection by its maker (which a trace given another
-   gen-fn is not projected by)."
+  "tr's projection on selection by its maker: project without its check of
+   the selection."
   [tr selection]
   (-project (trace/maker tr) tr selection))
 
@@ -562,9 +562,11 @@
   ([gf args key] (-propose gf (check-args :propose args) key)))
 
 (defn project
-  "The log density of the selected choices of a trace."
+  "The log density of the selected choices of a trace, by the generative
+   function that made it (as Gen.jl's project dispatches on the trace's
+   type): a trace given another :gen-fn is still read by its maker."
   [trace selection]
-  (-project (:gen-fn trace) trace (check-selection :project selection)))
+  (project-by-maker trace (check-selection :project selection)))
 
 ;; ---------------------------------------------------------------------------
 ;; Defining generative functions
