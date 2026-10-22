@@ -140,8 +140,9 @@ be ported is tracked as a deferred bean with a note on how to port it cleanly
    the *same* code, run under the batch tracer (`gen.array.batch`, vmap
    semantics: docs/array-api.md §8b), never as copies (GenMLX has six).
 4. **Semantics never reads mutable state that changes meaning.** Such
-   state is confined to three places: the single `volatile!` that
-   `gen.dynamic/execute` threads through one model run, the implicit key
+   state is confined to three places: the two `volatile!`s (the
+   transition and the state) that `gen.dynamic/execute` threads through
+   one model run, the implicit key
    source in `gen.gfi`, and native handles inside the membrane. The other
    mutable pieces are caches and registries that never change what an
    operation means:
@@ -494,7 +495,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     trace of its model is the wrapper's, `trace/as-made-by`). `gfi/run-op`,
     the dispatch of every nested call and of `gfi/update`,
     `gfi/regenerate` and gen.batched, revises (`gfi/revise`) a trace whose
-    maker the generative function does not compute as. Particles given
+    maker the generative function does not compute as. `gfi/project`
+    reads a trace by its maker too, as Gen.jl's project dispatches on the
+    trace's type (the post-M5 review's P1-06: by `:gen-fn`, a Map's trace
+    given a dynamic function projected to 0). Particles given
     another gen-fn are revised per particle as when batched (their
     per-particle traces are rebuilt by their maker and given the new
     gen-fn). That is
@@ -621,6 +625,12 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     starting trace stay loud.
   - The alternative was to keep these loud, as "non-finite" reads
     literally, so the outcome would depend on the backend.
+  - **PROVISIONAL (owner to confirm; 2026-10-22, from m3-grammar's
+    cross-review):** a starting trace whose score or gradient is not
+    finite (−Inf, a log of 0, as well as NaN) is an error for HMC and MALA,
+    as Stan refuses a log(0) start. Otherwise every proposal from it
+    counted as a divergence, and the chain never moved: 40 of 40 on both.
+    MH and the other kernels may still start there.
 - **Casts to integers are Java's** (owner, 2026-10-20; genclj-kw88). On
   every backend, a float cast to an integer dtype truncates toward zero,
   saturates at the dtype's range (±Inf too) and takes NaN to 0. An integer
@@ -651,6 +661,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   docstring already said so. A cap at the largest float would give finite
   densities at the price of a silent atom. A loud error would need a host
   read of each draw on a lazy backend, or a threshold on the parameters.
+  **PROVISIONAL (owner to confirm; 2026-10-22, from m3-grammar's
+  cross-review): `lgamma(+Inf)` and `digamma(+Inf)` are +Inf,** as in
+  SciPy and Julia, where gen.array gave NaN (both the composite and its
+  bit-identical host path).
   The other edge stays as it is: a draw that underflows to 0, where a
   density can be +Inf, is floored at the dtype's smallest normal number.
   That holds in every family, gamma, beta and dirichlet included, which
@@ -658,6 +672,23 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   draws. Its mirror (owner, 2026-10-22, the post-M5 review's P2-01): a beta draw that rounds to 1 is
   clamped to the largest float below 1. At beta(0.001, 0.001), 8,802 of
   20,000 draws rounded to 1 and scored +Inf.
+- **A log mass of 0 has gradient 0, not NaN** (PROVISIONAL, owner to
+  confirm; 2026-10-22, m3-lm's finding while fixing genclj-rnbd, taken
+  while the owner was away).
+  - The problem: a family that computes every support value's log mass and
+    then selects (categorical's pick, bernoulli's two branches, a `dist`
+    pushforward's matches over an enumerable draw) sends a cotangent of 0
+    into log at a mass of 0. That gives 0 · ∞ = NaN, which flows into
+    whatever computed the parameters. `(dist coin [p] (where (bernoulli p)
+    1.0 0.0))` at p = 0, observed 0.0, had a NaN gradient.
+  - The fix is in the families: they take the log through a stand-in
+    where the mass is 0, the convention gen.dist already uses outside a
+    support. So a value of mass 0 has log density −Inf and gradient 0.
+  - gen.array's xlogy and xlog1py keep their derivatives, which are
+    JAX's, because changing L0 would alter them for every caller. The
+    families guard their arguments instead.
+  - The alternative was to leave it, with a NaN gradient whenever a
+    parameter vector holds an exact 0.
 - **A mixture of a discrete and a continuous family is an error** when it
   is made (owner, 2026-10-22, the post-M5 review's P2-02). Its density would add a pmf to a pdf: given
   y = 0, the posterior came out 0.267 where 0.80 is exact. Gen.jl's types
@@ -1214,7 +1245,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   for every kind. `(diff/propagate f args diffs)` is an open multimethod on
   the function's var giving the diff of a call, with rules for `count`,
   `nth`, `get`, `conj`, `assoc`, `+`, `-` (clojure.core's and gen.array's),
-  `inc`, `dec` and `vec`; Gen.jl dispatches on a Diffed value type, which
+  `inc`, `dec`, `vec` and `identity`; Gen.jl dispatches on a Diffed value type, which
   Clojure's core functions do not take, so here the rule belongs to the
   call. In a static body every name carries a diff: an argument's from its
   argdiff, a binding that is one call of a var on symbols and constants
