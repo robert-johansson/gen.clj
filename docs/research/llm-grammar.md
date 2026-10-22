@@ -635,4 +635,10 @@ set, `check-end-tokens` never refusing, a grammar with no opinion (those,
 `the-potential-s-end-tokens-are-the-completion-s`); `potential` dropping
 `:end-tokens`; `token/completion` or token SMC calling no end-token check.
 
-
+2026-10-22 (genclj-z4jy): the random-term properties (the masks' and the
+weights') skip a term whose DFA passes regex/dfa's `:max-states`, as they
+skip a grammar that cannot be built. About 3 seeds in 400 of the weights'
+200 trials drew one (nested counted repeats of overlapping alternatives:
+the shrunk term makes 25,292 derivatives for a minimal DFA of 3,397
+states), and the uncaught error failed the suite at random. Rethrowing it,
+as before, fails `a-language-past-max-states-is-an-expected-outcome`.
