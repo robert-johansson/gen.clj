@@ -637,6 +637,27 @@
                            (- (* -0.5 (Math/pow (- x 1.0) 2)) (* -0.5 x x))))))))))
 
 ;; ---------------------------------------------------------------------------
+;; Float32 samplers at their edges
+;; ---------------------------------------------------------------------------
+
+(deftest float32-samplers-stay-in-their-supports
+  ;; genclj-3d2x. P2-08: laplace's low bound, nextafter(-1, 0), was
+  ;; float64's, which is -1 in float32, where log1p(-|u|) is -Inf: a +Inf
+  ;; draw about once in 2^23 on MLX (planted: the float64 bound for both).
+  ;; P2-11 and the verifier's poisson: in float32 an inversion's partial
+  ;; sums fall short of 1, binom(37, 0.25)'s by 1.1e-6 and poisson(9.1)'s
+  ;; by 3e-7, so a uniform above them counted every later step, 40 > n,
+  ;; and 40 for the poisson (planted: u not scaled to their total). At the
+  ;; largest float32 below 1 the counts stay in the support.
+  (is (< -1.0 (double (float (#'d/above-minus-one :float32)))))
+  (is (< -1.0 (#'d/above-minus-one :float64)))
+  (let [f32 #(array/array [%] {:dtype :float32})
+        top (f32 (double (Math/nextDown (float 1.0))))]
+    (doseq [[n p] [[37.0 0.25] [7.0 0.41]]]
+      (is (<= (ts/number (#'d/binomial-inversion top (f32 n) (f32 p) (f32 (- 1.0 p)))) n) (str "binom(" n ", " p ")")))
+    (is (< (ts/number (#'d/poisson-inversion top (f32 9.1))) 40) "poisson(9.1)")))
+
+;; ---------------------------------------------------------------------------
 ;; Gradients at zero probabilities and at the parameters' bounds
 ;; ---------------------------------------------------------------------------
 

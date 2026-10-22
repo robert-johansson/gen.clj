@@ -181,13 +181,22 @@
   (log-prob [v]
     (guard (>= v 0) (- (log rate) (* rate v)))))
 
+(defn- above-minus-one
+  "The float of dtype next above -1: a uniform's low bound for laplace's
+   log1p(-|u|), which is -Inf at -1 (as rng/normal's bound for erfinv's
+   pole)."
+  ^double [dtype]
+  (if (= :float32 dtype) (double (Math/nextUp (float -1.0))) (Math/nextUp -1.0)))
+
 (defdist laplace
   "laplace(loc, scale): the Laplace (double exponential) distribution."
   [loc scale]
   (validate (dc/check-positive "laplace" "scale" scale))
   (sample [key shape]
-    (let [u (rng/uniform key (dc/elementwise-shape shape loc scale)
-                         (assoc (opts loc scale) :low (Math/nextAfter -1.0 0.0) :high 1.0))]
+    (let [o (opts loc scale)
+          dtype (dc/float-dtype (:backend o))
+          u (rng/uniform key (dc/elementwise-shape shape loc scale)
+                         (assoc o :dtype dtype :low (above-minus-one dtype) :high 1.0))]
       (+ loc (* scale (array/sign u) (log1p (- (array/abs u)))))))
   (log-prob [v]
     (- (+ (log (* 2 scale)) (/ (array/abs (- v loc)) scale)))))
@@ -619,16 +628,27 @@
   [fallback proposals]
   (reduce (fn [acc [ok v]] (where ok v acc)) fallback (reverse proposals)))
 
+(defn- inverted
+  "An inversion over a pmf's first inversion-steps terms, from its first
+   term p0 and (ratio j) = p(j+1)/p(j): the number of its partial sums below
+   u times their total. So the count never passes the last term: where
+   rounding leaves the total short of 1 (float32's: 1 - 1.1e-6 for binom(37,
+   0.25), 1 - 3e-7 for poisson(9.1)), u above it counted every later step
+   (40 > n), and the shortfall is spread over the terms instead."
+  [u p0 ratio]
+  (let [cdfs (reductions + (take inversion-steps (map first (iterate (fn [[p j]] [(* p (ratio j)) (inc j)]) [p0 0]))))
+        v (* u (last cdfs))]
+    (reduce (fn [k cdf] (+ k (where (> v cdf) 1 0))) 0 cdfs)))
+
+(defn- poisson-inversion [u lam] (inverted u (exp (- lam)) #(/ lam (+ % 1))))
+
+(defn- binomial-inversion [u n p q] (inverted u (exp (* n (log1p (- p)))) #(/ (* (- n %) p) (* (+ % 1) q))))
+
 (defn- poisson-sample [key lam shape]
   (let [o (opts lam)
         [k-inv k-rej] (rng/split key)
-        ;; inversion (lam < 10): count the CDF values below u
-        u (rng/uniform k-inv shape o)
-        small (first (reduce (fn [[k p cdf] j]
-                               (let [p (* p (/ lam (+ j 1)))]
-                                 [(+ k (where (> u cdf) 1 0)) p (+ cdf p)]))
-                             [0 (exp (- lam)) (exp (- lam))]
-                             (range inversion-steps)))
+        ;; inversion (lam < 10)
+        small (poisson-inversion (rng/uniform k-inv shape o) lam)
         ;; PTRS (lam >= 10)
         log-lam (log lam)
         b (+ 0.931 (* 2.53 (sqrt lam)))
@@ -655,14 +675,8 @@
         p (where flip? (- 1 p) p)
         q (- 1 p)
         [k-inv k-rej] (rng/split key)
-        u (rng/uniform k-inv shape o)
         ;; inversion (n·p < 10)
-        p0 (exp (* n (log1p (- p))))
-        small (first (reduce (fn [[k pk cdf] j]
-                               (let [pk (* pk (/ (* (- n j) p) (* (+ j 1) q)))]
-                                 [(+ k (where (> u cdf) 1 0)) pk (+ cdf pk)]))
-                             [0 p0 p0]
-                             (range inversion-steps)))
+        small (binomial-inversion (rng/uniform k-inv shape o) n p q)
         ;; BTRS (n·p >= 10)
         spq (sqrt (* n p q))
         b (+ 1.15 (* 2.53 spq))
