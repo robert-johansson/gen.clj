@@ -89,6 +89,17 @@
     (is (= [n 3] (array/shape x)))
     (is (= n (count (distinct (map first (array/->clj x))))) "independent draws, not one shared draw")))
 
+(deftest all-particles-reads-across-the-batch
+  ;; genclj-z6iy: gen.dist read a batch's particles through the backend
+  ;; protocol; array/all-particles is the public reach, and all-true? and
+  ;; any-true? read through it (planted: a batched value as it is)
+  (let [x (batch/wrap b3 [n])]
+    (is (ts/close? b3 (batch/batched [n] (array/all-particles x))))
+    (is (= [n 3] (array/shape (batch/batched [n] (array/all-particles x)))))
+    (is (identical? s3 (array/all-particles s3)) "an unbatched value as it is")
+    (is (batch/batched [n] (array/all-true? (array/< x 100.0))))
+    (is (not (batch/batched [n] (array/all-true? (array/< x (array/max b3))))) "one particle's element fails")))
+
 (deftest host-reads-are-the-fallback-signal
   (let [x (batch/wrap bs [n])]
     (doseq [[label f] [[:item #(array/item x)] [:->clj #(array/->clj x)] [:truthy-of-a-bool #(array/truthy? (array/> x 0))]

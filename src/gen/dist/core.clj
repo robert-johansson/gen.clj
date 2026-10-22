@@ -9,10 +9,9 @@
    Shapes: (sample d key batch-shape) draws a value of the distribution's
    shape broadcast against batch-shape. [] is one draw; [N] is one draw per
    particle. log-prob broadcasts the same way."
-  (:refer-clojure :exclude [-])
-  (:require [gen.array :as array :refer [-]]
+  (:refer-clojure :exclude [- < > <= >= ==])
+  (:require [gen.array :as array :refer [- < > <= >= ==]]
             [gen.array.dtype :as dt]
-            [gen.array.protocols :as p]
             [gen.array.shape :as sh]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
@@ -105,7 +104,7 @@
   [dist-name param-name v]
   (when (if (array/host? v)
           (and (float? v) (Double/isNaN (double v)))
-          (and (array/array? v) (not (array/host? v)) (array/concrete? v) (= :float (dt/kind (array/dtype v)))
+          (and (array/array? v) (array/concrete? v) (= :float (dt/kind (array/dtype v)))
                (array/any-true? (array/isnan v))))
     (throw (ex-info (str dist-name ": " param-name " is NaN") {:distribution dist-name :param param-name}))))
 
@@ -131,7 +130,7 @@
   [batch-shape & params]
   (reduce sh/broadcast (vec batch-shape) (map array/shape params)))
 
-(defn int-dtype [b] (:int (p/-defaults b)))
+(defn int-dtype [b] (:int (array/defaults b)))
 
 (def ^:private float-limit-table
   {:float64 {:tiny Double/MIN_NORMAL :max Double/MAX_VALUE :eps (Math/ulp 1.0)}
@@ -146,7 +145,7 @@
   [dtype]
   (get float-limit-table dtype (:float64 float-limit-table)))
 
-(defn float-dtype [b] (:float (p/-defaults b)))
+(defn float-dtype [b] (:float (array/defaults b)))
 
 (defn check
   "Throw unless ok, naming the distribution and parameter."
@@ -161,36 +160,36 @@
   [dist-name param-name v]
   (cond (array/host? v)
         (check (pos? (double v)) dist-name (str param-name " must be positive, got " v) {:param param-name :value v})
-        (and (some? v) (array/concrete? v))
-        (check (array/all-true? (array/> v 0)) dist-name (str param-name " must be positive") {:param param-name})))
+        (array/concrete? v)
+        (check (array/all-true? (> v 0)) dist-name (str param-name " must be positive") {:param param-name})))
 
 (defn check-probability
   "Parameters must be probabilities in [0, 1], as check-positive."
   [dist-name param-name v]
   (cond (array/host? v)
-        (check (<= 0.0 (double v) 1.0) dist-name (str param-name " must be in [0, 1], got " v)
+        (check (and (<= 0.0 v) (<= v 1.0)) dist-name (str param-name " must be in [0, 1], got " v)
                {:param param-name :value v})
-        (and (some? v) (array/concrete? v))
-        (check (array/all-true? (array/logical-and (array/>= v 0) (array/<= v 1))) dist-name (str param-name " must be in [0, 1]")
+        (array/concrete? v)
+        (check (array/all-true? (array/logical-and (>= v 0) (<= v 1))) dist-name (str param-name " must be in [0, 1]")
                {:param param-name})))
 
 (defn check-non-negative
   "Parameters must be at least 0, as check-positive."
   [dist-name param-name v]
   (cond (array/host? v)
-        (check (>= (double v) 0.0) dist-name (str param-name " must be >= 0, got " v) {:param param-name :value v})
-        (and (some? v) (array/concrete? v))
-        (check (array/all-true? (array/>= v 0)) dist-name (str param-name " must be >= 0") {:param param-name})))
+        (check (>= v 0.0) dist-name (str param-name " must be >= 0, got " v) {:param param-name :value v})
+        (array/concrete? v)
+        (check (array/all-true? (>= v 0)) dist-name (str param-name " must be >= 0") {:param param-name})))
 
 (defn check-integer
   "Parameters that count (trials, bounds) must be integers, at least min, as
    check-positive."
   [dist-name param-name v min]
   (cond (array/host? v)
-        (check (and (== v (Math/rint (double v))) (>= (double v) (double min))) dist-name
+        (check (and (== v (Math/rint (double v))) (>= v min)) dist-name
                (str param-name " must be an integer of at least " min ", got " v) {:param param-name :value v})
-        (and (some? v) (array/concrete? v))
-        (check (array/all-true? (array/logical-and (array/== v (array/floor v)) (array/>= v min))) dist-name
+        (array/concrete? v)
+        (check (array/all-true? (array/logical-and (== v (array/floor v)) (>= v min))) dist-name
                (str param-name " must be an integer of at least " min " in every element") {:param param-name})))
 
 (defn support-bound
@@ -209,25 +208,19 @@
    1. This catches logits passed where probabilities are expected."
   [dist-name param-name ps]
   (when (array/concrete? ps)
-    (let [ok? (and (array/all-true? (array/>= ps 0))
-                   (array/all-true? (array/<= (array/abs (- (array/sum ps {:axis -1}) 1.0)) 1e-6)))]
+    (let [ok? (and (array/all-true? (>= ps 0))
+                   (array/all-true? (<= (array/abs (- (array/sum ps {:axis -1}) 1.0)) 1e-6)))]
       (check ok? dist-name
              (str param-name " must be probabilities (non-negative, summing to 1)"
                   " — for log-probabilities or logits use categorical-logits")
              {:param param-name}))))
 
-(defn check-all-positive
-  "Every element of a concrete array parameter must be positive."
-  [dist-name param-name v]
-  (when (and (some? v) (array/concrete? v))
-    (check (array/all-true? (array/> v 0)) dist-name (str param-name " must be positive") {:param param-name})))
-
 (defn check-increasing
   "A concrete array parameter must increase along its last axis."
   [dist-name param-name v]
-  (when (and (some? v) (array/concrete? v) (> (peek (array/shape v)) 1))
+  (when (and (array/concrete? v) (> (peek (array/shape v)) 1))
     (let [n (peek (array/shape v))]
-      (check (array/all-true? (array/> (array/slice v -1 1 n) (array/slice v -1 0 (dec n))))
+      (check (array/all-true? (> (array/slice v -1 1 n) (array/slice v -1 0 (dec n))))
              dist-name (str param-name " must be increasing") {:param param-name}))))
 
 (defn ->array
@@ -265,6 +258,8 @@
   "->checkable for a defdist parameter: data that is not array data is an
    error naming the distribution and the parameter, at construction."
   [dist-name param-name p]
+  (when (nil? p)
+    (throw (ex-info (str dist-name ": " param-name " is nil") {:distribution dist-name :param param-name})))
   (try (->checkable p)
        (catch clojure.lang.ExceptionInfo e
          (throw (ex-info (str dist-name ": " param-name " must be an array or array data (numbers and booleans): "
@@ -286,7 +281,11 @@
 
    value-shape gives the shape of one value (from the parameters, bound by
    name). Values of another shape are then errors rather than several draws;
-   without it, value shapes are not checked.
+   without it, value shapes are not checked. Two flags on the name declare
+   the common cases at the definition: ^:elementwise, a family whose values
+   have its parameters' broadcast shape (elementwise-value-shape), and
+   ^:discrete, one of discrete values. A flag and its clause together are an
+   error.
 
    Parameters given as Clojure vectors become arrays, after validation, which
    checks them on the host (so also on a lazy backend). A parameter marked
@@ -303,14 +302,18 @@
   (let [[doc body] (if (string? (first body)) [(first body) (rest body)] [nil body])
         params (first body)
         heads (map #(when (seq? %) (first %)) (rest body))
+        {:keys [elementwise discrete]} (meta dist-name)
         problems (into {} (remove (comp empty? val))
                        {:unknown (vec (remove '#{validate sample log-prob support discrete? value-shape} heads))
                         :repeated (vec (for [[h n] (frequencies heads) :when (< 1 n)] h))
-                        :missing (vec (remove (set heads) '[sample log-prob]))})
+                        :missing (vec (remove (set heads) '[sample log-prob]))
+                        :flag-and-clause (cond-> []
+                                           (and elementwise (some #{'value-shape} heads)) (conj 'value-shape)
+                                           (and discrete (some #{'discrete?} heads)) (conj 'discrete?))})
         _ (when (seq problems)
             (throw (ex-info (str "defdist " dist-name ": " (pr-str problems) " (its clauses are validate, sample,"
                                  " log-prob, support, discrete? and value-shape, each at most once, sample and"
-                                 " log-prob required)")
+                                 " log-prob required; ^:elementwise and ^:discrete stand for the last two)")
                             (assoc problems :dist (str dist-name)))))
         clauses (into {} (map (juxt first rest)) (rest body))
         type-kw (keyword (str *ns*) (name dist-name))
@@ -320,7 +323,8 @@
         as-given (fn [p form] (if (:host (meta p)) `(if (host-data? ~p) ~p ~form) form))]
     `(do
        ;; marked, so a pushforward's body can find its one random draw (gen.dist.dsl)
-       (defn ~(vary-meta dist-name assoc ::constructor true) ~@(when doc [doc]) ~params
+       (defn ~(vary-meta dist-name #(-> % (assoc ::constructor true) (dissoc :elementwise :discrete))) ~@(when doc [doc])
+         ~params
          ;; validated as given (host data on the host), then made arrays
          (let [~@(mapcat (fn [p] [p (as-given p `(->checkable-param ~(name dist-name) ~(name p) ~p))]) params)]
            ~@(map (fn [p] `(check-param-not-nan ~(name dist-name) ~(name p) ~p)) params)
@@ -333,10 +337,14 @@
           `(defmethod -log-prob ~type-kw [~d ~v] (let ~bind-params ~@lp-body)))
        ~(when-let [[_ & support-body] (get clauses 'support)]
           `(defmethod -support ~type-kw [~d] (let ~bind-params ~@support-body)))
-       ~(when-let [[_ & discrete-body] (get clauses 'discrete?)]
-          `(defmethod -discrete? ~type-kw [~d] (let ~bind-params ~@discrete-body)))
-       ~(when-let [[_ & shape-body] (get clauses 'value-shape)]
-          `(defmethod -value-shape ~type-kw [~d] (let ~bind-params ~@shape-body)))
+       ~(if discrete
+          `(defmethod -discrete? ~type-kw [~'_] true)
+          (when-let [[_ & discrete-body] (get clauses 'discrete?)]
+            `(defmethod -discrete? ~type-kw [~d] (let ~bind-params ~@discrete-body))))
+       ~(if elementwise
+          `(defmethod -value-shape ~type-kw [~d] (elementwise-value-shape ~d))
+          (when-let [[_ & shape-body] (get clauses 'value-shape)]
+            `(defmethod -value-shape ~type-kw [~d] (let ~bind-params ~@shape-body))))
        (var ~dist-name))))
 
 ;; ---------------------------------------------------------------------------
@@ -349,6 +357,13 @@
 (defn- simulate* [d key]
   (let [v (sample d key)]
     (dist-trace d v (total (log-prob d v)))))
+
+(defn- checked-score
+  "The total log density of v under d, its shape checked first, and, for a
+   value given to op (a constraint, or assessed choices), that it is not
+   NaN."
+  ([d v] (check-value-shape d v) (total (log-prob d v)))
+  ([op d v] (check-not-nan op v) (checked-score d v)))
 
 (defn- check-leaf-constraint
   "A distribution's trace is a single choice: constraints under it are
@@ -365,38 +380,36 @@
   (-generate [d _ constraints key]
     (check-leaf-constraint :generate constraints)
     (if (cm/has-value? constraints)
-      (let [v (doto (cm/get-value constraints) (->> (check-not-nan :generate)) (->> (check-value-shape d)))
-            lp (total (log-prob d v))]
+      (let [v (cm/get-value constraints)
+            lp (checked-score :generate d v)]
         {:trace (dist-trace d v lp) :weight lp})
       {:trace (simulate* d key) :weight 0.0}))
 
   (-update [d tr _ _ constraints _]
     (check-leaf-constraint :update constraints)
     (if (cm/has-value? constraints)
-      (let [v (doto (cm/get-value constraints) (->> (check-not-nan :update)) (->> (check-value-shape d)))
-            lp (total (log-prob d v))]
+      (let [v (cm/get-value constraints)
+            lp (checked-score :update d v)]
         {:trace (dist-trace d v lp) :weight (- lp (:score tr))
          :retdiff diff/unknown-change :discard (:choices tr)})
       ;; the value is kept and rescored: the parameters may have changed
-      (let [v (doto (:retval tr) (->> (check-value-shape d)))
-            lp (total (log-prob d v))]
+      (let [v (:retval tr)
+            lp (checked-score d v)]
         {:trace (dist-trace d v lp) :weight (- lp (:score tr))
          :retdiff diff/no-change :discard cm/EMPTY})))
 
   (-regenerate [d tr _ _ selection key]
     (if (sel/root-selected? selection)
       {:trace (simulate* d key) :weight 0.0 :retdiff diff/unknown-change}
-      (let [v (doto (:retval tr) (->> (check-value-shape d)))
-            lp (total (log-prob d v))]
+      (let [v (:retval tr)
+            lp (checked-score d v)]
         {:trace (dist-trace d v lp) :weight (- lp (:score tr)) :retdiff diff/no-change})))
 
   (-assess [d _ choices _key]
     (when-not (cm/has-value? choices)
       (throw (ex-info "assess: a distribution needs its value" {:type type})))
     (let [v (cm/get-value choices)]
-      (check-not-nan :assess v)
-      (check-value-shape d v)
-      {:weight (total (log-prob d v)) :retval v}))
+      {:weight (checked-score :assess d v) :retval v}))
 
   (-propose [d _ key]
     (let [tr (simulate* d key)]
