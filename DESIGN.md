@@ -1299,6 +1299,16 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     so particles agree with the completion's traces exactly. Proposals:
     the LM's row, the row masked by the twist and renormalized, or a
     function.
+  - **A constrained completion is refused** (owner, 2026-10-22, the
+    post-M5 review's P4-01): `smc/run` and `smc/initialize` throw
+    `:constrained-completion` for a completion with its own `:potential`,
+    naming SMC's `:potential` option instead. For such a completion the two
+    sentences above disagree: the target says the completion's distribution,
+    but p is the LM's score. SMC drew by the LM's rows and ignored the
+    completion's potential, so particles broke a grammar and `smc/traces`
+    scored them -Inf. The same target stays reachable through SMC's
+    `:potential` with the `:masked` proposal. The alternative was p as the
+    completion's site distribution, a second way to say the same target.
   - The interface and state are gen.inference.particle-filter's;
     resampling ESS-gated at n/2, systematic by default. One
     `lm/batch-next-logprobs` a step; particles are token vectors and the
