@@ -494,7 +494,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     trace of its model is the wrapper's, `trace/as-made-by`). `gfi/run-op`,
     the dispatch of every nested call and of `gfi/update`,
     `gfi/regenerate` and gen.batched, revises (`gfi/revise`) a trace whose
-    maker the generative function does not compute as. Particles given
+    maker the generative function does not compute as. `gfi/project`
+    reads a trace by its maker too, as Gen.jl's project dispatches on the
+    trace's type (the post-M5 review's P1-06: by `:gen-fn`, a Map's trace
+    given a dynamic function projected to 0). Particles given
     another gen-fn are revised per particle as when batched (their
     per-particle traces are rebuilt by their maker and given the new
     gen-fn). That is
