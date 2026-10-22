@@ -765,6 +765,17 @@
   [probs]
   (array/take (array/array [10.0 20.0 30.0]) (d/categorical probs)))
 
+(dsl/dist binom-labels
+  "A binomial's count picking one of four numbers: array labels over an
+   enumerable draw."
+  [p]
+  (array/take (array/array [10.0 20.0 30.0 40.0]) (d/binom 3 p)))
+
+(dsl/dist shifted-count
+  "A poisson's count plus one: a draw without a support, inverted."
+  [lam]
+  (array/+ 1.0 (d/poisson lam)))
+
 (deftest a-log-mass-of-0-has-gradient-0
   ;; DESIGN §9 (PROVISIONAL, genclj-rnbd's follow-up): a family that
   ;; computes a log mass and then selects sent a cotangent of 0 into log at
@@ -772,16 +783,21 @@
   ;; NaN gradient (the coin at p = 0 observed 0.0, the [b 1-b 0] labels);
   ;; xlogy's and xlog1py's derivatives at their pole are infinite, so
   ;; binom, poisson, geometric and neg-binom at a parameter's bound with v
-  ;; outside the mass had ±Inf. Planted back, each fails: categorical's
+  ;; outside the mass had ±Inf, and NaN through array labels over binom.
+  ;; Planted back, each fails: categorical's
   ;; log, bernoulli's rnbd branches, log1m-mass without its stand-in, each
   ;; family's stand-in parameter, piecewise-uniform's log.
   (doseq [[label lp at step] [["the coin at p = 0, observed 0.0" #(dc/log-prob (coin %) 0.0) 0.0 1]
                               ["the coin at p = 1, observed 1.0" #(dc/log-prob (coin %) 1.0) 1.0 -1]
-                              ["[b 1-b 0]'s labels, observed b's" #(dc/log-prob (labeled-numbers (with-a-zero %)) 10.0) 0.25 1]]]
+                              ["[b 1-b 0]'s labels, observed b's" #(dc/log-prob (labeled-numbers (with-a-zero %)) 10.0) 0.25 1]
+                              ["binom's labels at p = 0, observed 0's" #(dc/log-prob (binom-labels %) 10.0) 0.0 1]
+                              ["a shifted poisson at lambda = 0, observed 0's" #(dc/log-prob (shifted-count %) 1.0) 0.0 1]]]
     (matches-its-finite-difference label lp at step))
   (testing "a value of mass 0: log density -Inf, gradient 0"
     (doseq [[label lp at] [["the coin at p = 0, observed 1.0" #(dc/log-prob (coin %) 1.0) 0.0]
                            ["[b 1-b 0]'s labels, observed the 0's" #(dc/log-prob (labeled-numbers (with-a-zero %)) 30.0) 0.25]
+                           ["binom's labels at p = 0, observed 1's" #(dc/log-prob (binom-labels %) 20.0) 0.0]
+                           ["a shifted poisson at lambda = 0, observed 2's" #(dc/log-prob (shifted-count %) 3.0) 0.0]
                            ["binom(5, 0) at 2" #(dc/log-prob (d/binom 5 %) 2) 0.0]
                            ["binom(5, 1) at 3" #(dc/log-prob (d/binom 5 %) 3) 1.0]
                            ["poisson(0) at 2" #(dc/log-prob (d/poisson %) 2) 0.0]
