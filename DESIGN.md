@@ -962,8 +962,17 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   whose return value is `[update backward]`; its choices are the auxiliary
   randomness, so propose and assess give the forward and backward scores.
   log |det J| reruns the kernel's assess with the trace's and the kernel's
-  continuous choices substituted by tracked values, under `array/grad`.
-  It leaves out only the trace's choices no output depends on:
+  continuous choices substituted by tracked values, under `array/grad`,
+  on the trace generate makes from the substituted choices, so what the
+  kernel reads from a call's value, the return value or the score is
+  differentiated too (the post-M5 review's P3-04: with the old trace's
+  call values, log |det J| was log 1.3 off, silently).
+  It leaves out only the trace's choices no output depends on and the
+  move leaves alone: a choice the update rewrites or discards is an input,
+  less an observation SMCP3's `:new-observations` replace, which is data
+  (P3-07: a kernel that overwrote mu with fresh noise weighed as a
+  bijection, E[exp w] ≈ 7 where 1 is right). A transform's translators
+  check the same of its unread inputs.
   GenTraceKernelDSL also drops constant outputs and kernel choices no
   output uses, which hides moves that are not bijections (found by the law
   audit, 2026-10-20), so here they make the matrix non-square or singular,

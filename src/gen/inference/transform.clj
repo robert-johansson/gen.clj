@@ -28,7 +28,12 @@
    differentiation: inputs are the continuous reads, outputs the continuous
    writes, the copies of continuous reads, and, where a translator keeps
    the input trace (update), the continuous reads it retains unwritten.
-   Inputs and outputs must have the same total dimension.
+   Inputs and outputs must have the same total dimension, and a continuous
+   input the move consumes (an auxiliary choice, or a model choice the
+   update overwrites or discards, less the observations :new-observations
+   replace) must be read as continuous or copied: one the body never reads
+   is lost. The general translator, which does not know the old trace's
+   observations, checks only its auxiliary choices.
 
    Translators are functions (translator trace key) → {:trace :weight}, the
    weight the log importance weight of the new trace:
@@ -300,6 +305,27 @@
                           {:transform (:name t)})))
         logabs))))
 
+(defn- continuous? [v]
+  (and (array/array? v) (not (boolean? v)) (= :float (dt/kind (array/dtype v)))))
+
+(defn- check-consumed!
+  "Every continuous input of run s that the move consumes, (consumed? space
+   path), is read as continuous or copied: one the body never reads is lost,
+   so the move is not a bijection, and the Jacobian would not see it (the
+   post-M5 review's P3-07)."
+  [s consumed?]
+  (let [copied? (fn [sp p] (some (fn [[fs fp]] (and (= fs sp) (under? fp p))) (:copies s)))
+        lost (vec (for [sp [:model-in :aux-in]
+                        :let [choices (get-in s [:inputs sp])]
+                        p (cm/addresses choices)
+                        :when (and (continuous? (cm/get-choice choices p)) (consumed? sp p)
+                                   (not= :continuous (get-in s [:read-tags [sp p]])) (not (copied? sp p)))]
+                    [sp p]))]
+    (when (seq lost)
+      (throw (ex-info (str "The transform's move consumes continuous inputs its body never reads, " lost
+                           ", so its continuous part is not a bijection")
+                      {:inputs lost})))))
+
 (defn run
   "Transform t of model choices (or a trace) and auxiliary choices:
    {:model the model-out choices, :aux the aux-out choices, :log-abs-det},
@@ -385,6 +411,8 @@
                   0.0
                   (throw (ex-info "translator: the transform writes auxiliary choices but there is no :q-backward"
                                   {:aux (cm/to-map aux-out)}))))
+          ;; the old trace's observations are unknown here, so only u is checked
+          _ (check-consumed! s (fn [sp _] (= sp :aux-in)))
           ldj (log-abs-det t trace u s (constantly false))]
       (when check?
         (let [back (execute (inverse t) t' aux-out nil)]
@@ -435,6 +463,7 @@
       (when-not (cm/empty? discard)
         (throw (ex-info "extending-translator: the update changed or removed choices; it may only add them"
                         {:discard (cm/to-map discard)})))
+      (some-> s (check-consumed! (constantly true)))
       {:trace t' :weight (+ (- w fwd) (if t (log-abs-det t u nil s (constantly false)) 0.0))})))
 
 (defn updating-translator
@@ -460,6 +489,9 @@
           s (when t (execute t trace u nil))
           {t' :trace w :weight discard :discard}
           (gfi/update trace args argdiffs (cm/merge (if t (get-in s [:outputs :model-out]) u) new-observations) k-update)
+          ;; an observation the new ones replace is data, not part of the move
+          _ (some-> s (check-consumed! (fn [sp p] (or (= sp :aux-in) (and (cm/has-value? discard p)
+                                                                           (not (cm/has-value? new-observations p)))))))
           ldj (if t (log-abs-det t trace u s (fn [p] (not (cm/has-value? discard p)))) 0.0)
           u' (if t (get-in s [:outputs :aux-out]) discard)
           bwd (cond q-backward (:weight (gfi/assess q-backward (into [t'] q-backward-args) u' (gfi/backward-key k-update)))
@@ -501,6 +533,7 @@
                                     (vec extra))
                                {:addresses (vec extra)})))
            retained? (fn [p] (not (cm/has-value? discard p)))
+           _ (check-consumed! s (fn [sp p] (or (= sp :aux-in) (not (retained? p)))))
            ldj (log-abs-det t trace fwd-choices s retained?)
            bwd (get-in s [:outputs :aux-out])]
        (when check?
