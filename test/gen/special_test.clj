@@ -76,12 +76,13 @@
                   (str (name k) ": the signs of zeros")))))))))
 
 (deftest lgamma-and-digamma-at-the-edges-as-scipy
-  ;; the infinities, NaN and the poles, on the host and in arrays, against
-  ;; scipy (generate.py's edges). lgamma(+Inf) was NaN on both paths, the
-  ;; Lanczos sum's Inf·Inf - Inf (genclj-9gyi). Planted (2026-10-22): the
-  ;; composite's +Inf case removed fails the arrays, the host path's the
-  ;; host values. Not here, waiting for the owner: gammaln(-inf), which
-  ;; scipy gives as -inf and gen.clj as +Inf, and psi(-0.0), +inf against -Inf
+  ;; the infinities, NaN, the poles and the signed zeros, on the host and in
+  ;; arrays, against scipy (generate.py's edges; genclj-9gyi). lgamma(+Inf)
+  ;; was NaN on both paths, the Lanczos sum's Inf·Inf - Inf; lgamma(-Inf)
+  ;; was +Inf, a pole to its test; digamma(-0.0) was -Inf, 1/(z + 0) making
+  ;; the zero positive. Planted (2026-10-22), each case removed from the
+  ;; composite fails the arrays, and from the host path the host values:
+  ;; lgamma's +Inf and -Inf, and digamma's 1/z back to 1/(z + 0)
   (let [same? (fn [a b] (or (and (Double/isNaN a) (Double/isNaN b)) (== a b)))]
     (doseq [[k f] [[:lgamma-edges array/lgamma] [:digamma-edges array/digamma]]
             [x expected] (fixtures k)]
