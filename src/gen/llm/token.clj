@@ -326,11 +326,12 @@
   (assoc (trace/make-trace {:gen-fn gf :args args :choices (choices-of tokens) :retval tokens :score (sum scores)})
          ::scores scores))
 
-(defn- check-args
-  "[prompt max-tokens], checked: a non-empty token vector and a
-   non-negative integer, together within the LM's :limit (the longest
-   completion's sequence is scored), so that their validity never depends
-   on the draws."
+(defn check-args
+  "[prompt max-tokens], checked for the completion gf: a non-empty vector
+   of tokens of its vocabulary and a non-negative integer, together within
+   the LM's :limit (the longest completion's sequence is scored), so that
+   their validity never depends on the draws. op, a keyword, names the
+   caller in the errors; token SMC checks its arguments by it too."
   [op gf args]
   (when-not (= 2 (count args))
     (throw (ex-info (str (name op) ": a completion takes [prompt max-tokens], not " (count args) " arguments")

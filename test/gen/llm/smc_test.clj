@@ -14,7 +14,9 @@
      particles all satisfy it.
    - One read a step; particles convert to the completion's traces, whose
      scores are the particles' log p; runs are pure functions of their key;
-     no GC backstop; misuse is loud.
+     no GC backstop; misuse is loud: the arguments by the completion's own
+     check, for every key, and a constrained completion refused, its target
+     reached by SMC's :potential and :masked.
    - The host pool: runs on pools of 1, 2 and 8 threads are the calling
      thread's bit for bit; no LM, potential or proposal-function call runs
      on the pool; a task's error and the caller's bindings reach it as on
@@ -29,6 +31,7 @@
             [gen.laws :as laws]
             [gen.llm.branching :as br]
             [gen.llm.branching-contract :as bc]
+            [gen.llm.constrained :as constrained]
             [gen.llm.lm :as lm]
             [gen.llm.potential :as potential]
             [gen.llm.smc :as smc]
@@ -298,6 +301,40 @@
            ["resampling particles all of weight 0"
             #(smc/resample (smc/step (smc/initialize completion args 4 {:potential nothing}))) :impossible]]]
     (is (= reason (bc/reason f)) what)))
+
+;; The completion's arguments are checked as the completion checks them
+;; (token/check-args), before any draw: the same error for every key. With
+;; a copy of its own, SMC once accepted a prompt and max-tokens past the
+;; LM's :limit, which then failed or not by the key (the post-M5 review's
+;; P4-05), and a prompt token outside the vocabulary.
+(deftest the-arguments-are-checked-as-the-completion-checks-them
+  (let [small (token/completion (lm/lm (toy/engine {:n-vocab n-vocab :max-branches 64 :n-ctx 64}) tokenizer {:max-cells 8}))]
+    (is (= 8 (:limit small)))
+    (doseq [k (range 12)]
+      (is (= :context-full (bc/reason #(smc/run small [prompt 10] 4 {:key (rng/key k)}))) (str "past the limit, key " k))
+      (is (= :invalid-token (bc/reason #(smc/run completion [[0 7] 3] 4 {:key (rng/key k)})))
+          (str "a token outside the vocabulary, key " k))))
+  (is (= :invalid-token (bc/reason #(smc/initialize completion [[0 :a] 3] 4))))
+  (is (= :invalid-token (bc/reason #(smc/initialize completion [[0 -1] 3] 4)))))
+
+;; A completion with a potential of its own is refused (DESIGN §9, "A
+;; constrained completion is refused"; the review's P4-01): SMC draws and
+;; weighs by the LM's rows, so its particles broke the potential and
+;; smc/traces scored them -Inf. The target such a pairing means, the LM's
+;; completions held to the potential, is the constrained completion's
+;; conditional weights' (gen.llm.constrained) and SMC's with the potential
+;; as :potential and the :masked proposal: both estimate its Z.
+(deftest a-constrained-completion-is-refused
+  (let [constrained (token/completion m {:potential no-repeats})]
+    (doseq [f [#(smc/initialize constrained args 4) #(smc/run constrained args 4 {:key (rng/key 1)})]]
+      (is (= :constrained-completion (bc/reason f))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"SMC's :potential.*:masked" (smc/initialize constrained args 4))
+        "naming the way that is")
+    (let [z (exact-z no-repeats)
+          weights (mapv #(Math/exp (constrained/conditional-weight (gfi/simulate constrained args (rng/key %)))) (range 2000))
+          zs (estimates {:potential no-repeats :proposal :masked} 50 40)]
+      (is (within-5-se? weights z) (str "the conditional weights' mean " (mean weights) ", Z " z))
+      (is (within-5-se? zs z) (str "SMC's mean " (mean zs) ", Z " z)))))
 
 (deftest particles-all-of-weight-0-estimate-z-as-0
   ;; the estimator's value, not an error: refusing it would bias Ẑ upwards

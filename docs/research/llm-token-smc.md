@@ -66,6 +66,28 @@ prefix([]). exp(log-ml-estimate) is unbiased for Z = Σ p(x)·exp(complete(x));
 for a constraint (weights 0 or −∞), the probability that a completion
 satisfies it.
 
+**What SMC accepts** (2026-10-22, the post-M5 review's P4-01, P4-05 and
+I4-01; bean genclj-rd26):
+
+- The completion's arguments are checked by the completion's own check,
+  `token/check-args`, at `initialize`: a non-empty prompt of tokens of the
+  vocabulary, a non-negative max-tokens, and the two within the LM's
+  `:limit`. SMC had a copy of its own that checked only their shapes, so a
+  prompt and max-tokens past the limit failed or not by the key (11 of 12
+  keys succeeded, and `smc/traces` of a run that did then threw), and a
+  prompt token outside the vocabulary failed only at the first step.
+- A completion with a potential of its own is refused,
+  `:constrained-completion` (DESIGN §9, "A constrained completion is
+  refused"). SMC draws and weighs by the LM's rows, so it ignored that
+  potential: particles broke a grammar, and `smc/traces` scored them −∞.
+  The target the pairing means, the LM's completions held to the
+  potential, is SMC's with the potential as `:potential` and the `:masked`
+  proposal, which draws as the constrained completion's sites do; the
+  constrained completion's conditional weights estimate the same Z.
+- The potential's next-token weights are checked against the vocabulary
+  at every call (`twist-row`), the only check for the `:lm` and function
+  proposals, since a potential's functions may return any array.
+
 **Proposals.** `:lm` draws from the LM's row (the bootstrap); `:masked`
 from the row times the twist's next-token weights, renormalized (for a
 constraint, the row restricted to its allowed tokens: the locally optimal
@@ -144,6 +166,16 @@ most) is enumerated and Z computed exactly:
   loud, each error with a `:reason` (`:invalid-model`, `:invalid-args`,
   `:no-tokens`, `:invalid-option`, `:invalid-potential`, `:invalid-row`,
   `:not-done`, `:impossible`), which the test checks.
+- **What SMC accepts** (genclj-rd26): past the LM's `:limit`, and with a
+  prompt token outside the vocabulary, every one of 12 keys fails at once
+  (`:context-full`, `:invalid-token`), as the completion does; a
+  constrained completion is `:constrained-completion` from `initialize`
+  and `run`, the message naming SMC's `:potential` and `:masked`; and its
+  target's Z is reached both by the constrained completion's conditional
+  weights (2,000 draws) and by SMC with the potential and `:masked`, each
+  within 5 standard errors of the enumerated Z. Plants: SMC checking only
+  the arguments' shapes, a constrained completion accepted, and
+  `twist-row`'s size check dropped each fail the tests.
 - **The host pool**: runs on pools of 1, 2 and 8 threads are the calling
   thread's bit for bit, for every proposal; a recording LM, potential and
   proposal function see every call on the calling thread; a task's error
