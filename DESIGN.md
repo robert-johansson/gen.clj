@@ -627,13 +627,13 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
 
   `(* true true)` is the integer 1 (Julia keeps a Bool), the same value
   under one rule.
-- **lgamma and digamma at their edges are SciPy's** (PROVISIONAL, owner
-  to confirm; 2026-10-22, m3-grammar's cross-review, genclj-9gyi):
-  lgamma(+Inf) and digamma(+Inf) are +Inf, as in SciPy and Julia, where
-  gen.array gave NaN (the composite and its bit-identical host path).
-  lgamma(−Inf) is −Inf (|Γ| goes to 0 between the poles), where the pole
-  branch gave +Inf; digamma(−0.0) is +Inf, the limit from below, keeping
-  the sign of a zero, where `(+ z 0.0)` made it −Inf.
+- **lgamma and digamma at their edges are SciPy's** (confirmed by the owner,
+  2026-10-22; m3-grammar's cross-review, genclj-9gyi): lgamma(+Inf) and
+  digamma(+Inf) are +Inf, as in SciPy and Julia, where gen.array gave NaN (the
+  composite and its bit-identical host path). lgamma(−Inf) is −Inf (|Γ| goes
+  to 0 between the poles), where the pole branch gave +Inf; digamma(−0.0) is
+  +Inf, the limit from below, keeping the sign of a zero, where `(+ z 0.0)`
+  made it −Inf.
 - **A draw beyond the float range is +Inf** (owner, 2026-10-20), with log
   density -Inf, exact for the value stored, as IEEE floats and Julia's
   Distributions in Float32 give. In float32 this is common at small shapes:
@@ -654,10 +654,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   draws), where flooring the gammas first would put the draw at 1/2. A
   shape below 1 boosts in log space, log Γ(α+1)'s draw - E/α for an
   exponential E (genclj-uli3). Every beta and dirichlet draw changes for a
-  given key (PROVISIONAL, owner to confirm; 2026-10-22, genclj-uli3). The
+  given key (confirmed by the owner, 2026-10-22; genclj-uli3). The
   old draws could be kept for α ≥ 1, at the cost of a second sampler.
-- **A log mass of 0 has gradient 0, not NaN** (PROVISIONAL, owner to
-  confirm; 2026-10-22, m3-lm, genclj-rnbd).
+- **A log mass of 0 has gradient 0, not NaN** (confirmed by the owner,
+  2026-10-22; m3-lm, genclj-rnbd).
   - The problem: a family that computes every support value's log mass and
     then selects (categorical's pick, bernoulli's two branches, a `dist`
     pushforward's matches over an enumerable draw) sends a cotangent of 0
@@ -672,16 +672,16 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     families guard their arguments instead.
   - The alternative was to leave it, with a NaN gradient whenever a
     parameter vector holds an exact 0.
-- **Probabilities sum to 1 within their dtype** (PROVISIONAL, owner to
-  confirm; 2026-10-22, m3-lm, genclj-ggdl). check-probabilities (also the
-  mixtures' weights) and dirichlet's support bound |Σp − 1| by
-  4·log2(K)·ε of the values' dtype, never below 1e-6. That's room for two
-  blocked or pairwise sums: one that normalized the values, one that checks
-  them (genclj-y0mp measured each within 0.8·log2(K)·ε). The fixed 1e-6
-  refused float32 probabilities at K = 10⁴; float32 there now gets 6.3e-6,
-  and float64 keeps 1e-6. The alternative was K·ε, which would accept data
-  normalized by a naive sequential float32 sum but is 0.12 at K = 10⁶ in
-  float32, so it would barely check. Under log2(K) such data is a loud error.
+- **Probabilities sum to 1 within their dtype** (confirmed by the owner,
+  2026-10-22; m3-lm, genclj-ggdl). check-probabilities (also the mixtures'
+  weights) and dirichlet's support bound |Σp − 1| by 4·log2(K)·ε of the
+  values' dtype, never below 1e-6. That's room for two blocked or pairwise
+  sums: one that normalized the values, one that checks them (genclj-y0mp
+  measured each within 0.8·log2(K)·ε). The fixed 1e-6 refused float32
+  probabilities at K = 10⁴; float32 there now gets 6.3e-6, and float64 keeps
+  1e-6. The alternative was K·ε, which would accept data normalized by a naive
+  sequential float32 sum but is 0.12 at K = 10⁶ in float32, so it would barely
+  check. Under log2(K) such data is a loud error.
 - **A mixture of a discrete and a continuous family is an error** when it
   is made (owner, 2026-10-22, the post-M5 review's P2-02, genclj-e6b0). Its
   density would add a pmf to a pdf: given y = 0, the posterior came out
@@ -1002,7 +1002,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   "constrained value is NaN", a rule meant for user data: HMC on Neal's
   funnel at L 10, eps 0.5 died at step 1,309 from a valid state.
   - *A parameter check failing at a tried position is a divergence*
-    (PROVISIONAL, owner to confirm; 2026-10-22, genclj-gomm).
+    (confirmed by the owner, 2026-10-22; genclj-gomm).
     - Example: at the funnel's L 3, eps 20, a finite v near −1500
       underflows exp(v/2) to a std of 0. The JVM backend's concrete check
       threw "normal: std must be positive" (33 of 300 proposals), where
@@ -1017,7 +1017,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       value's shape.
     - The alternative was to keep these loud, as "non-finite" reads
       literally, so the outcome would depend on the backend.
-  - *The start must be finite* (PROVISIONAL, owner to confirm; 2026-10-22,
+  - *The start must be finite* (confirmed by the owner, 2026-10-22;
     m3-grammar's cross-review): a starting trace whose score or gradient
     is not finite, NaN or −Inf (a log of 0), is an error for HMC and MALA,
     as Stan refuses a log(0) start. Otherwise every proposal from it
@@ -1066,7 +1066,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   encapsulated randomness, at key 0, so pseudo-marginal moves work, as
   involutions do; a kernel whose outputs depend on that randomness (the
   score of an estimated density, say) fails a check of the outputs at the
-  trace's own choices, loudly (PROVISIONAL, owner to confirm; 2026-10-22,
+  trace's own choices, loudly (confirmed by the owner, 2026-10-22;
   m3-grammar's cross-review, genclj-1ufo).
   It leaves out only the trace's choices no output depends on and the
   move leaves alone: a choice the update rewrites or discards is an input,
