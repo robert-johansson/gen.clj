@@ -131,6 +131,12 @@
     (MlxRuntime/adopt x h)
     x))
 
+(defn- wrap-all
+  "The MlxArrays owning the new handles hs (a long[], as
+   MlxRuntime/vectorArrays gives them)."
+  [b ^longs hs]
+  (mapv #(wrap b %) hs))
+
 (defn- fence
   "Keep x reachable (its handle valid) up to this point."
   [x]
@@ -915,22 +921,19 @@
         (with-operands b :take [h x nil hi i :int32]
           (wrap b (Mlx/mlx_take_axis h hi (int axis) (stream b)))))
       (with-operands b :take [h x nil hi indices nil]
-        (let [si (safe-indices b hi d)]
-          (try (wrap b (Mlx/mlx_take_axis h si (int axis) (stream b)))
-               (finally (MlxRaw/mlx_array_free si))))))))
+        (with-temps [t]
+          (wrap b (Mlx/mlx_take_axis h (t (safe-indices b hi d)) (int axis) (stream b))))))))
 
 (defn- take-along-axis [b x indices axis]
   (with-operands b :take-along-axis [h x nil hi indices nil]
-    (let [si (safe-indices b hi (nth (shape-of x) axis))]
-      (try (wrap b (Mlx/mlx_take_along_axis h si (int axis) (stream b)))
-           (finally (MlxRaw/mlx_array_free si))))))
+    (with-temps [t]
+      (wrap b (Mlx/mlx_take_along_axis h (t (safe-indices b hi (nth (shape-of x) axis))) (int axis) (stream b))))))
 
 (defn- scatter-add [b x indices updates axis]
   (let [d (dtype-on b x)]
     (with-operands b :scatter-add [h x d hi indices nil hu updates d]
-      (let [si (safe-indices b hi (nth (shape-of x) axis))]
-        (try (wrap b (Mlx/mlx_scatter_add_axis h si hu (int axis) (stream b)))
-             (finally (MlxRaw/mlx_array_free si)))))))
+      (with-temps [t]
+        (wrap b (Mlx/mlx_scatter_add_axis h (t (safe-indices b hi (nth (shape-of x) axis))) hu (int axis) (stream b)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Linear algebra
@@ -1082,20 +1085,19 @@
    backward pass does: MLX calls them back with whatever its caller had, and
    the rules make arrays (eye, arange)."
   [b forward vjp ins]
-  (let [arrays (fn [^longs hs] (mapv #(wrap b %) hs))
-        handles (fn [xs] (long-array (map #(retained b :custom-vjp %) xs)))
+  (let [handles (fn [xs] (long-array (map #(retained b :custom-vjp %) xs)))
         on-b (fn [f] (with-bindings {@default-backend-var b} (f)))]
     (with-temps [t]
       (try
         (let [fun (t :closure (MlxRuntime/closure (reify gen.mlx.MlxRuntime$Closure
-                                                    (apply [_ hs] (handles (on-b #(forward (arrays hs))))))))
+                                                    (apply [_ hs] (handles (on-b #(forward (wrap-all b hs))))))))
               bwd (t :custom-vjp (MlxRuntime/customVjp (reify gen.mlx.MlxRuntime$CustomVjp
-                                                         (apply [_ ps cs os] (handles (on-b #(vjp (arrays ps) (arrays cs) (arrays os))))))))
+                                                         (apply [_ ps cs os] (handles (on-b #(vjp (wrap-all b ps) (wrap-all b cs) (wrap-all b os))))))))
               cv (t :closure (Mlx/mlx_custom_vjp fun bwd))
               in (t :vector (MlxRuntime/vectorOf (long-array (map #(.-h ^MlxArray %) ins))))
               ;; MLX makes the custom function's node on the default device
               out (t :vector (with-default-stream b #(Mlx/mlx_closure_apply cv in)))]
-          (arrays (MlxRuntime/vectorArrays out)))
+          (wrap-all b (MlxRuntime/vectorArrays out)))
         (finally (fence ins))))))
 
 (defn- exact-route
@@ -1134,10 +1136,10 @@
   "[w0 w1] handles of Threefry-2x32-20 of the counters [c0 c1] (uint32
    handles) under the key words k0 and k1 (uint32 handles of shape [1]), as
    gen.random.threefry/hash2x32. Everything else is a shared constant, so a
-   pending draw pins only its key's buffer. temp registers each handle made."
-  [b k0 k1 c0 c1 temp konst]
+   pending draw pins only its key's buffer. t registers each handle made
+   (with-temps)."
+  [b k0 k1 c0 c1 t konst]
   (let [s (stream b)
-        t temp
         u (fn ^long [v] (long (konst v :uint32)))
         add (fn ^long [^long x ^long y] (t (Mlx/mlx_add x y s)))
         rotl (fn ^long [^long x r]
@@ -1279,8 +1281,8 @@
                 vag (t :value-and-grad (Mlx/mlx_value_and_grad cl (int-array (range (count xs)))))
                 in (t :vector (MlxRuntime/vectorOf (long-array (map #(.-h ^MlxArray %) xs))))
                 [vs gs] (mapv #(t :vector %) (with-default-stream b #(Mlx/mlx_closure_value_and_grad_apply vag in)))
-                v (wrap b (first (MlxRuntime/vectorArrays vs)))
-                gs (mapv #(wrap b %) (MlxRuntime/vectorArrays gs))]
+                v (first (wrap-all b (MlxRuntime/vectorArrays vs)))
+                gs (wrap-all b (MlxRuntime/vectorArrays gs))]
             [v (refill trees gs)])
           (finally (fence xs)))))))
 
@@ -1327,7 +1329,7 @@
                 (let [out (try (try (Mlx/mlx_closure_apply compiled in)
                                     (finally (.exit c)))
                                (catch MlxException e (throw (mlx-error :compile xs e))))]
-                  (try (mapv #(wrap b %) (MlxRuntime/vectorArrays out))
+                  (try (wrap-all b (MlxRuntime/vectorArrays out))
                        (finally (MlxRaw/mlx_vector_array_free out))))
                 (finally
                   (MlxRaw/mlx_vector_array_free in)

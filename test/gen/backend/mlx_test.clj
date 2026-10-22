@@ -542,7 +542,7 @@
     [form]
     (let [[op & args] form]
       (case op
-        (let let* loop do when when-not binding fn* with-temps with-operands evaluating with-default-stream)
+        (let let* loop do when when-not binding fn* with-open with-temps with-operands evaluating with-default-stream)
         (tail-forms (last form))
         (if if-not) (mapcat tail-forms (rest args))
         cond (mapcat tail-forms (take-nth 2 (rest args)))
@@ -551,35 +551,86 @@
         try (tail-forms (last (remove #(and (seq? %) (#{'catch 'finally} (first %))) args)))
         [form]))))
 
-(deftest every-handle-made-in-with-temps-is-registered-wrapped-or-returned
-  ;; cross-review 3 of genclj-f0wz: in a with-temps body each handle an Mlx
-  ;; call makes goes to t as it is made, or to wrap (the Cleaner then owns
-  ;; it), or is the body's result, so a later failure leaks nothing. slogdet
-  ;; held log|det| unregistered while six more handles were made, which at
-  ;; Metal's buffer limit leaked it and the graph back to its matrix; the
-  ;; failure-path test, counting only what t registered, could not see it.
-  ;; Read from the source, so it runs without MLX. Planted (2026-10-22):
-  ;; slogdet's logabs unwrapped again fails
-  (let [forms (source-forms "src/gen/backend/mlx.clj")
-        ;; the calls that make a handle: not a free, an evaluation or a flag
-        handle-call? (fn [x] (and (seq? x) (symbol? (first x)) (= "Mlx" (namespace (first x)))
-                                  (let [n (name (first x))]
-                                    (not (or (.endsWith n "_free") (= "mlx_array_eval" n) (.startsWith n "_mlx_array_is"))))))
-        registers? (fn [t f] (or (= t f) (and (seq? f) (= 'fn* (first f)) (seq? (last f)) (= t (first (last f))))))
+(def ^:private handle-makers
+  "The backend's makers of new handles besides Mlx's calls: its private fns
+   that return one, and the runtime's makers of handles, closures and
+   vectors."
+  '#{scalar-handle made half-scalar-handle safe-indices int-division java-int-cast int-power
+     MlxRuntime/closure MlxRuntime/customVjp MlxRuntime/vectorOf MlxRuntime/vectorArrays MlxRuntime/retain})
+
+(defn- handle-call?
+  "Does form make a new handle: an Mlx call (not a free, an evaluation or a
+   flag), an MlxRaw constructor, or one of handle-makers?"
+  [form]
+  (and (seq? form) (symbol? (first form))
+       (let [f (first form) n (name f)]
+         (case (namespace f)
+           "Mlx" (not (or (.endsWith n "_free") (= "mlx_array_eval" n) (.startsWith n "_mlx_array_is")))
+           "MlxRaw" (.contains n "_new")
+           (contains? handle-makers f)))))
+
+(defn- loose-handles
+  "The handle-making calls in the backend's source forms that a failure can
+   leak: in a with-temps body, a standalone with-operands body or a helper
+   handed t, one neither registered with t, nor wrapped, nor the body's
+   result. A nested with-temps is checked as its own body."
+  [forms]
+  (let [registers? (fn [t f] (or (= t f) (and (seq? f) (= 'fn* (first f)) (seq? (last f)) (= t (first (last f))))))
         held-by (fn [t form]
-                  ;; the forms a call hands to t, to wrap, or to a mapv of t: their tails
+                  ;; the forms a call hands to t, to wrap (or wrap-all), to
+                  ;; a mapv of t, or to made (a constructor's thunk): their tails
                   (when (seq? form)
-                    (cond (#{t 'wrap} (first form)) (tail-forms (last form))
-                          (and (= 'mapv (first form)) (registers? t (second form))) (tail-forms (last form)))))
-        loose (fn [[_ [t] & body]]
-                (let [inside (tree-seq coll? seq body)
+                    (cond (#{t 'wrap 'wrap-all} (first form)) (tail-forms (last form))
+                          (and (= 'mapv (first form)) (registers? t (second form))) (tail-forms (last form))
+                          (= 'made (first form)) (tail-forms (last form)))))
+        nested-temps? #(and (seq? %) (= 'with-temps (first %)))
+        loose (fn [t body]
+                (let [inside (tree-seq #(and (coll? %) (not (nested-temps? %))) seq body)
                       ok (java.util.IdentityHashMap.)]
                   (doseq [f (concat (tail-forms (last body)) (mapcat #(held-by t %) inside))]
                     (.put ok f true))
                   (filter #(and (handle-call? %) (not (.containsKey ok %))) inside)))
-        bodies (filter #(and (seq? %) (= 'with-temps (first %))) (tree-seq coll? seq forms))]
-    (is (< 10 (count bodies)) "the with-temps bodies are found")
-    (is (= [] (vec (mapcat loose bodies))))))
+        bodies (fn [top]
+                 (let [all (tree-seq coll? seq top)
+                       in-temps (set (mapcat #(when (nested-temps? %) (rest (tree-seq coll? seq %))) all))
+                       t-param (when (and (seq? top) (#{'defn 'defn-} (first top)))
+                                 (some (fn [v] (when (vector? v) (some '#{t} v))) top))]
+                   (concat
+                    (for [f all :when (nested-temps? f)] [(first (second f)) (drop 2 f)])
+                    (for [f all :when (and (seq? f) (= 'with-operands (first f)) (not (in-temps f)))]
+                      ['no-t (drop 4 f)])
+                    (when t-param [[t-param (drop-while #(not (vector? %)) top)]]))))]
+    (vec (for [top forms [t body] (bodies top) f (loose t body)] f))))
+
+(deftest every-handle-made-is-registered-wrapped-or-returned
+  ;; cross-reviews 3 and 5 of genclj-f0wz: each handle a site makes goes to
+  ;; t as it is made, or to wrap (the Cleaner then owns it), or is the
+  ;; site's result, so a later failure leaks nothing. slogdet held log|det|
+  ;; unregistered while six more handles were made, which at Metal's buffer
+  ;; limit leaked it and the graph back to its matrix; the failure-path
+  ;; test, counting only what t registered, could not see it. The walk
+  ;; covers every maker of a handle (not only Mlx's calls), standalone
+  ;; with-operands bodies and the helpers handed t. Read from the source,
+  ;; so it runs without MLX. Planted (2026-10-22): slogdet's logabs
+  ;; unwrapped again fails; the two plants below are cross-review 5's, which
+  ;; the narrower walk let through
+  (let [path "src/gen/backend/mlx.clj"
+        text (slurp path)
+        forms-of (fn [s] (binding [*read-eval* false]
+                           (let [r (java.io.PushbackReader. (java.io.StringReader. s))]
+                             (doall (take-while #(not= % ::eof) (repeatedly #(read {:eof ::eof} r)))))))
+        planted (fn [old new]
+                  (is (.contains ^String text old) (str "the plant's site is in the source: " old))
+                  (loose-handles (forms-of (.replace ^String text ^CharSequence old ^CharSequence new))))]
+    (is (= [] (loose-handles (source-forms path))))
+    (testing "the walk's power"
+      (is (= '[(scalar-handle 0 dtype)]
+             (planted "(let [zero (t (scalar-handle 0 dtype))" "(let [zero (scalar-handle 0 dtype)"))
+          "int-division's zero, made without its t")
+      (is (= '[(Mlx/mlx_contiguous h false (stream b))]
+             (planted "    (wrap b (Mlx/mlx_reshape h (int-array (map int shape)) (stream b)))))"
+                      "    (let [c (Mlx/mlx_contiguous h false (stream b))] (wrap b (Mlx/mlx_reshape c (int-array (map int shape)) (stream b))))))"))
+          "reshape's operand copied before it is wrapped, which leaks on every call"))))
 
 (defn- counting-temporaries
   "[registered freed]: the temporaries with-temps registers and frees while
@@ -624,13 +675,16 @@
             sites [["to-host, a half float" #(array/->clj (array/astype floats :float16))]
                    ["to-host, a view" #(array/->clj (array/transpose (array/array [[1.0 2.0] [3.0 4.0]])))]
                    ["unary's sign" #(array/sign floats)]
-                   ["unary's atan" #(array/atan floats)]
+                   ;; float32: float64's atan has no fix-up, so no temporaries
+                   ["unary's atan" #(array/atan (array/astype floats :float32))]
                    ["int-division" #(array/mod ints divisors)]
                    ["floor division" #(array/floor-div ints divisors)]
                    ["java-int-cast" #(array/astype floats :int32)]
                    ["int-power" #(array/pow ints (array/array [2 -1 0 3] {:dtype :int32}))]
                    ["arg-reduce" #(array/argmax floats)]
                    ["safe-indices" #(array/take floats (array/array [0 -1] {:dtype :int32}) 0)]
+                   ["take-along-axis" #(array/take-along-axis floats (array/array [3 -1] {:dtype :int32}) 0)]
+                   ["scatter-add" #(array/scatter-add floats (array/array [0 2] {:dtype :int32}) (array/array [1.0 2.0]) 0)]
                    ["the integer matmul" #(array/matmul (array/reshape ints [2 2]) (array/reshape ints [2 2]))]
                    ["cholesky" #(la-ns spd)]
                    ["solve" #(solve spd (array/array [1.0 2.0]))]
