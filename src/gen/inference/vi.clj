@@ -23,9 +23,13 @@
    store (with-params), and each iteration also ascends along the gradient
    in its parameters, ∇θ log p(observations, z) averaged over the draws
    (the ELBO's), or weighted by the normalized weights w̃_k (the K-sample
-   bound's). q's draws do not depend on θ, so each is the exact gradient of
-   the iteration's objective estimate, and unbiased. The result then holds
-   :model-store too."
+   bound's). q's draws do not depend on θ, but a latent r the model draws
+   itself, which q does not propose, may: its score-function term,
+   ∇θ log f_θ(r) times the learning signal (the ELBO's log weight less a
+   leave-one-out baseline, VIMCO's own leave-one-out signal), is added,
+   f_θ the density the model's internal proposal drew it with (see
+   model-gradients). So each is an unbiased estimate of the objective's
+   gradient. The result then holds :model-store too."
   (:refer-clojure :exclude [+ - * /])
   (:require [gen.array :as array :refer [+ - * /]]
             [gen.choicemap :as cm]
@@ -34,7 +38,8 @@
             [gen.gradients :as grad]
             [gen.inference.weights :as w]
             [gen.learning :as learn]
-            [gen.random :as rng]))
+            [gen.random :as rng]
+            [gen.selection :as sel]))
 
 (set! *warn-on-reflection* true)
 
@@ -54,10 +59,49 @@
   [model model-store]
   (if model-store (dyn/with-params model model-store) model))
 
+(defn- own-draws-gradient
+  "∇θ log f_θ(r) for the model's trace mt, generated with constraints: the
+   gradient in the model's store of the density its internal proposal drew
+   the other latents r with, score - project(constraints' addresses) at
+   mt's choices; nil when the constraints hold every choice."
+  [mt constraints]
+  (when (some #(not (cm/has-value? constraints %)) (cm/addresses (:choices mt)))
+    (let [gf (:gen-fn mt)
+          constrained (sel/from-paths (cm/addresses constraints))
+          log-f (fn [stores]
+                  (gfi/with-exact-density "VI's model gradient"
+                    (let [t (:trace (gfi/generate (gfi/with-stores gf stores) (:args mt) (:choices mt) (rng/key 0)))]
+                      (- (:score t) (gfi/project t constrained)))))]
+      ((array/grad log-f) (gfi/stores gf)))))
+
 (defn- model-gradients
-  "Σ_i c_i ∇θ log p of the runs' model traces."
-  [cs runs]
-  (grad/weighted-sum cs (map #(grad/param-gradients (nth % 2)) runs)))
+  "Σ_i c_i ∇θ log w_i + Σ_i s_i ∇θ log f_θ(r_i) over the runs, the
+   objective's gradient in the model's store (the post-M5 review's P3-01).
+   The draw i has log w_i = log p(x, z_i, r_i) - log f_θ(r_i) - log q(z_i),
+   r_i the latents the model drew itself from its internal proposal f_θ,
+   so for an objective E[F(log w_1 … log w_n)]
+
+     ∇θ E[F] = E[Σ_i ∂F/∂log w_i · ∇θ log w_i] + E[F · Σ_i ∇θ log f_θ(r_i)].
+
+   c_i is ∂F/∂log w_i: 1/n for the ELBO, w̃_i for the K-sample bound. s_i
+   is F less a baseline that does not depend on r_i, which keeps the
+   estimate unbiased since E[∇θ log f_θ(r_i)] = 0: for the ELBO,
+   (log w_i - b_i)/n with b_i the mean log weight of the other draws (none
+   with one draw); for the bound, L - L₋ᵢ, VIMCO's own signal. With
+   ∇θ log w_i = ∇θ log p - ∇θ log f_θ(r_i), this is Σ_i c_i ∇θ log p +
+   Σ_i (s_i - c_i) ∇θ log f_θ(r_i). The -∇θ log f_θ(r_i) has mean 0 too,
+   but keeping it, with the baseline, lowers the variance. The ELBO's sd
+   per iteration of 10 draws, for a coin b ~ bern(θ) and a shift
+   z ~ N(θ, 1): 0.279 and 1.918; with the term dropped, 0.680 and 1.892;
+   with no baseline, 1.197 and 2.997, or 0.573 and 2.752 dropped."
+  [observations cs signal runs]
+  (let [joint (map (fn [c [_ _ mt]] [c (grad/param-gradients mt)]) cs runs)
+        own (for [[c s [qt _ mt]] (map vector cs signal runs)
+                  :let [g (own-draws-gradient mt (cm/merge observations (:choices qt)))]
+                  :when g]
+              [(- s c) g])
+        terms (concat joint own)]
+    (grad/weighted-sum (map first terms) (map second terms))))
 
 (defn elbo-gradient
   "One iteration's estimates: {:objective the mean log weight (the ELBO),
@@ -72,12 +116,16 @@
         runs (mapv #(draw model model-args observations q q-args %) (rng/split (or key (gfi/next-key)) n))
         lws (mapv second runs)
         total (reduce clojure.core/+ lws)
+        ;; log w less the mean log weight of the other draws
+        loo (when (> n 1) (mapv #(- % (/ (- total %) (dec n))) lws))
         signal (case baseline
                  nil lws
-                 :leave-one-out (mapv #(- % (/ (- total %) (dec n))) lws))]
+                 :leave-one-out loo)]
     (cond-> {:objective (/ total n)
              :grads (grad/weighted-sum (map #(/ % n) signal) (map (comp grad/param-gradients first) runs))}
-      model-store (assoc :model-grads (model-gradients (repeat n (/ 1.0 n)) runs)))))
+      ;; the model's own draws' score term takes the leave-one-out
+      ;; baseline whenever there are two draws or more, whatever q's
+      model-store (assoc :model-grads (model-gradients observations (repeat n (/ 1.0 n)) (map #(/ % n) (or loo lws)) runs)))))
 
 (defn vimco-gradient
   "One iteration's estimates for the K-sample bound: {:objective
@@ -100,12 +148,12 @@
                                      :geometric (/ (reduce clojure.core/+ others) (dec k))
                                      :arithmetic (w/log-mean-exp others))]
                       (w/log-mean-exp (assoc lws j stand-in))))
+        signal (mapv #(- bound (loo %)) (range k))
         ;; ∇ of the bound: Σ_j (L - L_{-j}) ∇ log q_j - Σ_j w̃_j ∇ log q_j
-        cs (mapv (fn [j] (- (- bound (loo j)) (normalized j))) (range k))]
+        cs (mapv - signal normalized)]
     (cond-> {:objective bound
              :grads (grad/weighted-sum cs (map (comp grad/param-gradients first) runs))}
-      ;; ∇θ of the bound: Σ_j w̃_j ∇θ log p(observations, z_j)
-      model-store (assoc :model-grads (model-gradients normalized runs)))))
+      model-store (assoc :model-grads (model-gradients observations normalized signal runs)))))
 
 (defn- fit
   "Ascend from store (and model-store, given) along (estimate store

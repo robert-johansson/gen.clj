@@ -1801,7 +1801,13 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   (owner, 2026-10-22, the post-M5 review's P3-01). Its draw's score-function term, ∇θ log p(z; θ)
   times the learning signal, is added: the ELBO's log weight, or VIMCO's
   own leave-one-out signal. So each gradient is unbiased for the
-  iteration's estimate. Without that term it was biased: 0.005 where 2 is
+  iteration's estimate. (The ELBO's signal is the log weight less the
+  mean log weight of the iteration's other draws, with ∇θ log w kept
+  whole, which halves the variance against dropping its zero-mean
+  −∇θ log p(z; θ): `vi/model-gradients` has the derivation. p(z; θ) is
+  the density the model's internal proposal drew z with, score − project
+  of the constrained addresses, its prior for a gen function.) Without
+  that term it was biased: 0.005 where 2 is
   exact, and for VIMCO 1.452 where 1.622 is. The alternative was a
   documented restriction with a loud error, but such latents are a
   supported use. One option without the other
