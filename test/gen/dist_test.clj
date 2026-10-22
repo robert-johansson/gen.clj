@@ -718,6 +718,17 @@
      ["geometric at p = 1" #(dc/log-prob (d/geometric %) 0) 1.0 -1]
      ["poisson at lambda = 0" #(dc/log-prob (d/poisson %) 0) 0.0 1]]))
 
+(defn- matches-its-finite-difference
+  "Does the gradient of lp (a log density of one argument) at x match a
+   second-order one-sided finite difference from the side step (+1 or -1),
+   on the JVM backend in float64 whatever the backend under test?"
+  [label lp at step]
+  (let [h 1e-5
+        f #(array/with-backend (array/backend-named :jvm) (ts/number (lp %)))
+        fd (/ (clojure.core/- (* 4 (f (+ at (* step h)))) (* 3 (f at)) (f (+ at (* 2 step h)))) (* 2 step h))
+        g (ts/number ((array/grad lp) (array/array at)))]
+    (is (ts/close? fd g {:rtol (ts/tol 1e-6) :atol (ts/tol 1e-8)}) (str label ": " g " against " fd))))
+
 (deftest gradients-at-zero-probabilities-and-bounds
   ;; genclj-rnbd (from memo.clj): categorical took the log of every
   ;; probability before its pick, and log's gradient at a 0 it did not pick,
@@ -732,13 +743,8 @@
   ;; outside the support.
   ;; Each gradient against a second-order one-sided finite difference, on
   ;; the JVM backend in float64 whatever the backend under test.
-  (let [h 1e-5
-        jvm (array/backend-named :jvm)]
-    (doseq [[label lp at step] at-the-edges]
-      (let [f #(array/with-backend jvm (ts/number (lp %)))
-            fd (/ (clojure.core/- (* 4 (f (+ at (* step h)))) (* 3 (f at)) (f (+ at (* 2 step h)))) (* 2 step h))
-            g (ts/number ((array/grad lp) (array/array at)))]
-        (is (ts/close? fd g {:rtol (ts/tol 1e-6) :atol (ts/tol 1e-8)}) (str label ": " g " against " fd)))))
+  (doseq [[label lp at step] at-the-edges]
+    (matches-its-finite-difference label lp at step))
   (testing "outside the support, where the pick is clipped to a 0, the gradient is 0"
     (is (= 0.0 (ts/number ((array/grad #(dc/log-prob (d/categorical (with-a-zero %)) 5)) (array/array 0.25))))))
   (testing "a weight of 0 whose component's density is beyond the float range times the mixture's"
@@ -748,3 +754,40 @@
           [v g] ((array/value-and-grad lp) (array/array 0.0))]
       (is (ts/close? v (dc/log-prob (d/normal 1000.0 1.0) 0.0)))
       (is (= (if (ts/f32?) (double Float/MAX_VALUE) Double/MAX_VALUE) (ts/number g))))))
+
+(dsl/dist coin
+  "A bernoulli's draw as 1.0 or 0.0."
+  [p]
+  (array/where (d/bernoulli p) 1.0 0.0))
+
+(dsl/dist labeled-numbers
+  "A categorical's draw picking one of three numbers."
+  [probs]
+  (array/take (array/array [10.0 20.0 30.0]) (d/categorical probs)))
+
+(deftest a-log-mass-of-0-has-gradient-0
+  ;; DESIGN §9 (PROVISIONAL, genclj-rnbd's follow-up): a family that
+  ;; computes a log mass and then selects sent a cotangent of 0 into log at
+  ;; a mass of 0, so a pushforward's match over an enumerable draw had a
+  ;; NaN gradient (the coin at p = 0 observed 0.0, the [b 1-b 0] labels);
+  ;; xlogy's and xlog1py's derivatives at their pole are infinite, so
+  ;; binom, poisson, geometric and neg-binom at a parameter's bound with v
+  ;; outside the mass had ±Inf. Planted back, each fails: categorical's
+  ;; log, bernoulli's rnbd branches, log1m-mass without its stand-in, each
+  ;; family's stand-in parameter, piecewise-uniform's log.
+  (doseq [[label lp at step] [["the coin at p = 0, observed 0.0" #(dc/log-prob (coin %) 0.0) 0.0 1]
+                              ["the coin at p = 1, observed 1.0" #(dc/log-prob (coin %) 1.0) 1.0 -1]
+                              ["[b 1-b 0]'s labels, observed b's" #(dc/log-prob (labeled-numbers (with-a-zero %)) 10.0) 0.25 1]]]
+    (matches-its-finite-difference label lp at step))
+  (testing "a value of mass 0: log density -Inf, gradient 0"
+    (doseq [[label lp at] [["the coin at p = 0, observed 1.0" #(dc/log-prob (coin %) 1.0) 0.0]
+                           ["[b 1-b 0]'s labels, observed the 0's" #(dc/log-prob (labeled-numbers (with-a-zero %)) 30.0) 0.25]
+                           ["binom(5, 0) at 2" #(dc/log-prob (d/binom 5 %) 2) 0.0]
+                           ["binom(5, 1) at 3" #(dc/log-prob (d/binom 5 %) 3) 1.0]
+                           ["poisson(0) at 2" #(dc/log-prob (d/poisson %) 2) 0.0]
+                           ["geometric(1) at 2" #(dc/log-prob (d/geometric %) 2) 1.0]
+                           ["neg-binom(2, 1) at 2" #(dc/log-prob (d/neg-binom 2.0 %) 2) 1.0]
+                           ["piecewise-uniform's bin of mass 0" #(dc/log-prob (d/piecewise-uniform [0.0 1.0 2.0 3.0] (with-a-zero %)) 2.5)
+                            0.25]]]
+      (let [[v g] ((array/value-and-grad lp) (array/array at))]
+        (is (= [##-Inf 0.0] [(ts/number v) (ts/number g)]) label)))))

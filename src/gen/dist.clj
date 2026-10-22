@@ -79,6 +79,20 @@
   [weighted w]
   (guard weighted (log (stand-in weighted w 1.0))))
 
+(defn- log-mass
+  "log p for a mass p: -Inf with gradient 0 at 0, through a stand-in, as
+   outside a support. log's gradient there would be infinite, and NaN where
+   a pick, a where or a mixture discards the -Inf (DESIGN §9)."
+  [p]
+  (log-weight (> p 0) p))
+
+(defn- log1m-mass
+  "log(1 - p), as log1p(-p), for the mass 1 - p: -Inf with gradient 0 at
+   p = 1, as log-mass."
+  [p]
+  (let [below-one (< p 1)]
+    (guard below-one (log1p (- (stand-in below-one p 0.0))))))
+
 (defn- zero-weight-term
   "A term of value 0 for a mixture of log density l, carrying the gradient
    of a weight w of 0 (weighted false), which log-weight does not: w times
@@ -258,7 +272,7 @@
           i (- (array/sum (>= (array/expand-dims v -1) (array/slice bounds 0 0 n)) {:axis -1}) 1)
           i (to-int (array/clip i 0 (dec n)) bounds)]
       (guard (logical-and (>= v (array/take bounds 0)) (<= v (array/take bounds n)))
-             (- (log (array/take probs i)) (log (- (array/take bounds (+ i 1)) (array/take bounds i))))))))
+             (- (log-mass (array/take probs i)) (log (- (array/take bounds (+ i 1)) (array/take bounds i))))))))
 
 (def ^:private machine-epsilon {:float32 (double (Math/ulp (float 1.0))) :float64 (Math/ulp 1.0)})
 
@@ -563,15 +577,17 @@
               (str "values are booleans (true or false), not " (pr-str (if (array/host? v) v (array/dtype v)))
                    " (GenMLX's bernoulli gave 0/1)")
               {:value-dtype (array/dtype v)})
-    ;; the branch not taken sees a stand-in, as where's other lanes do: at
-    ;; p = 1 (or 0) its log's gradient would be 0/0 = NaN
-    (where v (log (stand-in v p 1.0)) (log1p (- (stand-in v 0.0 p)))))
+    ;; each branch is -Inf with gradient 0 at its mass of 0: at p = 1 (or 0)
+    ;; the one not taken would send 0/0 = NaN, and so would a taken one that
+    ;; a pushforward's match discards
+    (where v (log-mass p) (log1m-mass p)))
   (support [] [false true]))
 
 (defn- pick-guarded
   "(f xs[..., v]) for integer v in [0, K), -Inf for any other v. The pick
    comes before f, so a gradient reaches only the entry picked: (log probs)
-   would send 0/0 = NaN from every 0 entry not picked."
+   would send 0/0 = NaN from every 0 entry not picked (and log-mass does
+   from the one picked, where a pushforward discards it)."
   [f xs v]
   (let [k (peek (array/shape xs))
         ok (logical-and (logical-and (>= v 0) (< v k)) (integral? v))]
@@ -583,7 +599,7 @@
   [probs]
   (validate (dc/check-probabilities "categorical" "probs" probs))
   (sample [key shape] (rng/categorical key (log probs) (sh/broadcast shape (pop (array/shape probs))) (opts probs)))
-  (log-prob [v] (pick-guarded log probs v))
+  (log-prob [v] (pick-guarded log-mass probs v))
   (support [] (vec (range (peek (array/shape probs))))))
 
 (defdist categorical-logits
@@ -617,7 +633,11 @@
     (let [u (rng/uniform key (dc/elementwise-shape shape p) (opts p))]
       (to-int (array/floor (/ (log1p (- u)) (log1p (- p)))) p)))
   (log-prob [v]
-    (guard (logical-and (>= v 0) (integral? v)) (+ (log p) (xlog1py v (- p))))))
+    ;; p = 1 puts all the mass at 0: elsewhere -Inf through a stand-in p, as
+    ;; log-mass, since xlog1py's derivative at -1 is infinite
+    (let [some-mass (array/logical-not (logical-and (== p 1) (> v 0)))
+          q (stand-in some-mass p 0.5)]
+      (guard (logical-and (logical-and (>= v 0) (integral? v)) some-mass) (+ (log q) (xlog1py v (- q)))))))
 
 ;; --- Poisson and binomial samplers: inversion for small means, Hörmann's
 ;; transformed rejection (PTRS, BTRS) otherwise, each with fixed rounds ------
@@ -711,7 +731,11 @@
   (validate (dc/check-non-negative "poisson" "lambda" lam))
   (sample [key shape] (poisson-sample key lam (dc/elementwise-shape shape lam)))
   (log-prob [v]
-    (guard (logical-and (>= v 0) (integral? v)) (- (xlogy v lam) lam (lgamma (+ v 1))))))
+    ;; lambda = 0 puts all the mass at 0: elsewhere -Inf through a stand-in,
+    ;; as log-mass, since xlogy's derivative at 0 is infinite
+    (let [some-mass (array/logical-not (logical-and (== lam 0) (> v 0)))
+          l (stand-in some-mass lam 1.0)]
+      (guard (logical-and (logical-and (>= v 0) (integral? v)) some-mass) (- (xlogy v l) l (lgamma (+ v 1)))))))
 
 (defdist binom
   "binom(n, p): the number of successes in n trials with success probability p."
@@ -720,9 +744,13 @@
             (dc/check-integer "binom" "n" n 0))
   (sample [key shape] (binomial-sample key n p (dc/elementwise-shape shape n p)))
   (log-prob [v]
-    (guard (logical-and (logical-and (>= v 0) (<= v n)) (integral? v))
-           (+ (- (lgamma (+ n 1)) (lgamma (+ v 1)) (lgamma (+ (- n v) 1)))
-              (xlogy v p) (xlog1py (- n v) (- p)))))
+    ;; p at 0 or 1 puts all the mass at 0 or n: elsewhere -Inf through a
+    ;; stand-in p, as log-mass, since xlogy's derivative at 0 is infinite
+    (let [some-mass (array/logical-not (logical-or (logical-and (== p 0) (> v 0)) (logical-and (== p 1) (< v n))))
+          q (stand-in some-mass p 0.5)]
+      (guard (logical-and (logical-and (logical-and (>= v 0) (<= v n)) (integral? v)) some-mass)
+             (+ (- (lgamma (+ n 1)) (lgamma (+ v 1)) (lgamma (+ (- n v) 1)))
+                (xlogy v q) (xlog1py (- n v) (- q))))))
   (support [] (some->> (dc/support-bound n) inc range vec)))
 
 (defdist neg-binom
@@ -736,9 +764,12 @@
           lam (* (rng/gamma k1 r s (opts r p)) (/ (- 1 p) p))]
       (poisson-sample k2 lam s)))
   (log-prob [v]
-    (guard (logical-and (>= v 0) (integral? v))
-           (+ (- (lgamma (+ v r)) (lgamma r) (lgamma (+ v 1)))
-              (* r (log p)) (xlog1py v (- p))))))
+    ;; p = 1 puts all the mass at 0, as geometric's
+    (let [some-mass (array/logical-not (logical-and (== p 1) (> v 0)))
+          q (stand-in some-mass p 0.5)]
+      (guard (logical-and (logical-and (>= v 0) (integral? v)) some-mass)
+             (+ (- (lgamma (+ v r)) (lgamma r) (lgamma (+ v 1)))
+                (* r (log q)) (xlog1py v (- q)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Mixtures and products: Gen.jl's HomogeneousMixture, HeterogeneousMixture
