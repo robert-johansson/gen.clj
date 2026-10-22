@@ -1,0 +1,17 @@
+completions enumerated: 85 ; sum of q_g over them: 0.9999999965700193
+Z_A (q_g·exp h) = 0.45199842267207746
+Z_B (p·exp h)   = 0.48896864793549455
+Z_C (p·exp(g+h))= 0.39155348194590234
+:lm over the constrained completion: mean Z-hat 0.4856161292983041 ± 5 SE 0.02940355259757177 | z-scores A/B/C: [5.716606269713629 -0.5700873433687225 15.995116073179833]
+:lm same keys over the plain completion: bit-identical estimates? true
+:masked over the constrained completion: mean Z-hat 0.4890628300179613 ± 5 SE 0.00740734425463998 | z-scores A/B/C: [25.01868825839072 0.0635734476683448 65.81937109982357]
+:masked same keys over the plain completion: bit-identical estimates? true
+--- first token of 4000 particles over the constrained completion, no SMC potential:
+token 0 : observed 0.028  p_LM 0.029864186708944022  q_g 0.03180640188685987
+token 1 : observed 0.05825  p_LM 0.06106367433962444  q_g 0.0
+token 2 : observed 0.69825  p_LM 0.695674185695307  q_g 0.740917327085453
+token 3 : observed 0.0455  p_LM 0.05023127303536602  q_g 0.053498060168936434
+token 4 : observed 0.17  p_LM 0.16316667802933624  q_g 0.1737782108893212
+--- traces of a finished run over the constrained completion, no SMC potential:
+particles with a 1 (outside g): 83 ; traces of score -Inf: 83 ; scores = :log-p: 0 of 500
+plain completion, scores = :log-p: 500 of 500

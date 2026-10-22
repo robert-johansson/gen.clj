@@ -1,0 +1,7 @@
+1 java.lang.Long | token/dist: -3.8642618656158447 | categorical: -3.8642618656158447
+1.0 java.lang.Double | token/dist: ##-Inf | categorical: -3.8642618656158447
+1.5 java.lang.Double | token/dist: ##-Inf | categorical: ##-Inf
+1 java.lang.Integer | token/dist: -3.8642618656158447 | categorical: -3.8642618656158447
+1.0 java.lang.Float | token/dist: ##-Inf | categorical: -3.8642618656158447
+7 java.lang.Long | token/dist: ##-Inf | categorical: ##-Inf
+-1 java.lang.Long | token/dist: ##-Inf | categorical: ##-Inf

@@ -1,0 +1,5 @@
+the LM's limit: 8
+simulate: :context-full (before any read, for every key)
+smc/run by key: {:no-error 23, :context-full 7}
+a run that succeeded (key 0 ), its particles: [[4] [4] [4] [4]]
+smc/traces of it: :context-full
