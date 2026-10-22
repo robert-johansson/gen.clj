@@ -172,9 +172,10 @@
 
 (defn- same-realized-seq?
   "Are the seqs xs and ys the same values pairwise, in order, as far as
-   their links are realized, never forcing one? A link not yet realized on
-   either side makes them different (unknown). Each link costs one of the
-   budget, so an infinite seq of identical values ends too."
+   their links are realized, never forcing a lazy (IPending) link? One not
+   yet realized on either side makes them different (unknown); a link that
+   is not IPending is read as it goes. Each link costs one of the budget,
+   so an infinite seq of identical values ends too."
   [xs ys ^longs budget]
   (loop [xs xs ys ys]
     (or (identical? xs ys)
