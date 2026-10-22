@@ -6,6 +6,8 @@
    grammar-masked decoder.
 
      (weighted end-tokens row ws)   → [q log-z]: the site's distribution
+     (site-row potential end-tokens row tokens)
+                                    → q, the site's after tokens, or nil
      (conditional-weight trace)     → log p(x) + w(x) - log q(x), a completion's
                                       trace's importance weight for the global
                                       conditional
@@ -135,64 +137,18 @@
           [q log-z])))))
 
 ;; ---------------------------------------------------------------------------
-;; A completion's sites (gen.llm.token calls these for a completion with a
-;; potential; gf a completion, state a run's {:ctx :tokens :scores})
+;; A completion's sites (gen.llm.token draws and scores its tokens by them
+;; under a potential; its run's state is its own)
 ;; ---------------------------------------------------------------------------
 
-(defn- end-tokens
-  "The completion's end tokens."
-  [gf]
-  (:end-tokens gf))
-
-(defn- dead?
-  "Has a token of the run so far weight 0, so that no sequence it begins
-   has weight? (gen.llm.token's run state keeps the flag.)"
-  [state]
-  (boolean (:dead? state)))
-
-(def ^:private ^:const reads-at-once
-  "How many of a run's contexts one read takes: each row is reduced to its
-   site's score before the next read, so a long run holds a few rows (at
-   Qwen3's vocabulary 19 MB), not one for each token."
-  32)
-
-(defn draw-next
-  "The run's next token, drawn by draw (a function of a row of
-   log-probabilities) from its site's distribution, and its score: [t
-   [score]]. After a token of weight 0, from the LM's row, scored by it.
-   Loud where the context has weight but the potential allows no token."
-  [{:keys [lm potential] :as gf} {:keys [ctx tokens] :as state} draw]
-  (let [row (lm/next-logprobs lm ctx)]
-    (if (dead? state)
-      (let [t (long (draw row))] [t [(double (aget row t))]])
-      (let [[^floats q] (weighted (end-tokens gf) row (potential/logw-next potential tokens))]
-        (when-not q
-          (throw (ex-info (str "constrained: the potential allows no token at position " (count tokens)
-                               " (a grammar complete there, with no end tokens to end it?)")
-                          {:reason :zero-weight :position (count tokens)})))
-        (let [t (long (draw q))]
-          [t [(double (aget q t))]])))))
-
-(defn run-scores
-  "The log-probabilities of run, tokens known to follow the run so far,
-   each at its site: the LM's rows at their contexts, read chunk at a time,
-   and the potential's weights at each. -Inf for a token of weight 0, the
-   LM's row's entry for each token after one."
-  [{:keys [lm potential] :as gf} {:keys [ctx tokens] :as state} run]
-  (let [n (count run)
-        score (fn [[out dead] ^long i ^floats row]
-                (let [t (int (run i))]
-                  (if dead
-                    [(conj out (double (aget row t))) true]
-                    (let [[^floats q] (weighted (end-tokens gf) row (potential/logw-next potential (into tokens (subvec run 0 i))))
-                          s (if q (double (aget q t)) Double/NEGATIVE_INFINITY)]
-                      [(conj out s) (== Double/NEGATIVE_INFINITY s)]))))]
-    (loop [i 0 acc [[] (dead? state)]]
-      (if (< i n)
-        (let [m (min n (+ i reads-at-once))
-              rows (lm/batch-next-logprobs lm (mapv #(into ctx (subvec run 0 %)) (range i m)))]
-          (recur m (reduce (fn [acc j] (score acc j (rows (- (long j) i)))) acc (range i m))))
-        (first acc)))))
+(defn site-row
+  "A site's distribution under potential: row, the LM's log-probabilities
+   of the next token after the prompt and tokens, times the potential's
+   next-token weights after tokens, renormalized, an end token of
+   end-tokens taking the end's weight (weighted's q); nil where the
+   potential allows no token."
+  ^floats [potential end-tokens ^floats row tokens]
+  (first (weighted end-tokens row (potential/logw-next potential tokens))))
 
 (defn check-potential
   "potential, checked for a completion over n-vocab tokens with end-tokens:
@@ -245,6 +201,6 @@
         score (double (:score tr))]
     (cond (nil? potential) 0.0
           (== Double/NEGATIVE_INFINITY score) Double/NEGATIVE_INFINITY
-          :else (let [text (if (and (seq tokens) (contains? (end-tokens gf) (peek tokens))) (pop tokens) tokens)
+          :else (let [text (if (and (seq tokens) (contains? (:end-tokens gf) (peek tokens))) (pop tokens) tokens)
                       log-p (double (if (seq tokens) (reduce + 0.0 (lm/score lm prompt tokens)) 0.0))]
                   (- (+ log-p (potential/complete potential text)) score)))))

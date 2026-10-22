@@ -1384,7 +1384,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     the common pool; `:host-pool` takes the caller's own
     (`smc/host-pool n`) or `false`. Its size: half the processors up to 4,
     as the llama.cpp engine's row pool, or `-Dgen.llm.host-threads` (1
-    turns it off). Alternatives: the LM owning it, no default pool, a pool
+    turns it off). Both pools are `gen.llm.host`'s (2026-10-22, the
+    post-M5 review's I4-04): one pool function, default size and ordered
+    map, a pool for each, so the engine's follows the property too. Alternatives: the LM owning it, no default pool, a pool
     for each run. Measured (quiet, Qwen3's vocabulary, 64 particles): 4
     threads take 17% (bootstrap) to 20% (masked) off a step on the toy
     engine; on llama.cpp with Qwen3-0.6B, with R6's `constrained/weighted`,

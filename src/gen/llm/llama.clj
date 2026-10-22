@@ -39,9 +39,10 @@
      is made) in gen.array.memory, until it closes: the MLX backend's
      budget leaves it out.
    - A decode's rows of logits are normalized on a small pool of the
-     engine's own, a thread per row up to four, while the engine's thread
-     waits: normalizing a vocabulary on the host costs about as much as a
-     row's share of the decode.
+     engine's own (gen.llm.host's: up to four threads, or
+     gen.llm.host-threads), while the engine's thread waits: normalizing a
+     vocabulary on the host costs about as much as a row's share of the
+     decode.
    - Accuracy depends on the device and the weights (DESIGN §6). On Metal
      a token's log-probability agrees with an f32 forward pass within about
      0.01 nats and varies with batch shape by at most about 0.05. With
@@ -57,14 +58,14 @@
    tokenizer gathers them as the LM protocol's tokenizer (gen.llm.lm)."
   (:require [gen.array.memory :as reservations]
             [gen.llm.branching :as br]
+            [gen.llm.host :as host]
             [gen.llm.llama.recurrent :as recurrent]
             [gen.llm.slots :as slots])
   (:import [gen.llama LlamaRuntime LlamaRuntime$Batch]
            [gen.llama.ffi Llama llama_context_params llama_model_params]
            [java.lang.foreign Arena MemorySegment ValueLayout]
            [java.nio.charset StandardCharsets]
-           [java.util Collection]
-           [java.util.concurrent Callable ExecutionException ExecutorService Executors Future]))
+           [java.util.concurrent ExecutorService]))
 
 (set! *warn-on-reflection* true)
 
@@ -132,23 +133,10 @@
   (- (LlamaRuntime/logit r (int n-vocab) (int token)) (log-normalizer r n-vocab what)))
 
 (defn- row-pool
-  "The pool that normalizes a decode's rows: up to four platform threads
-   (half the cores), daemons."
+  "The pool that normalizes a decode's rows, of the layer's default size
+   (gen.llm.host: half the cores, up to four, or gen.llm.host-threads)."
   ^ExecutorService []
-  (Executors/newFixedThreadPool
-   (max 1 (min 4 (quot (.availableProcessors (Runtime/getRuntime)) 2)))
-   (-> (Thread/ofPlatform) (.name "gen.llm llama.cpp rows-" 0) (.daemon true) .factory)))
-
-(defn- in-parallel
-  "(f x) for each x of xs, in order, on pool when there are several (what
-   an f threw, rethrown); every call has ended when it returns."
-  [^ExecutorService pool f xs]
-  (if (next xs)
-    (mapv (fn [^Future fut]
-            (try (.get fut)
-                 (catch ExecutionException x (throw (.getCause x)))))
-          (.invokeAll pool ^Collection (mapv (fn [x] ^Callable (fn [] (f x))) xs)))
-    (mapv f xs)))
+  (host/pool "gen.llm llama.cpp rows-" (host/default-threads)))
 
 (defn- restore
   "After a failed decode or read: remove what it may have added to each
@@ -266,7 +254,7 @@
             ;; row k scores the token after token from+k; the run's last
             ;; row is its next-token distribution instead
             (let [scores (if tgts
-                           (into scores (in-parallel pool
+                           (into scores (host/in-order pool
                                                      (fn [[^MemorySegment r k]] (row-score r n-vocab (aget tgts (+ from (long k))) "read"))
                                                      (mapv (fn [k] [(row ctx k "read") k]) (range (min len (- n from 1))))))
                            scores)]
@@ -296,7 +284,7 @@
             (decode! ctx batch "advance")
             (replayed! splits recurrent/decode ss ps)
             (replay-checked! splits mem ss "advance")
-            (doseq [[i r] (map vector g (in-parallel pool #(row-logprobs % n-vocab "advance")
+            (doseq [[i r] (map vector g (host/in-order pool #(row-logprobs % n-vocab "advance")
                                                      (mapv #(row ctx % "advance") (range (count g)))))]
               (aset rows (int i) r))))
         (vec rows)

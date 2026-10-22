@@ -232,7 +232,7 @@ twenty-three, all caught (the last seven of the host pool, m3-par):
 | a task's error wrapped (ExecutionException) | a-pool-task-s-error-is-raised-as-itself, a-pool-task-sees… |
 | a new pool for every run | the-default-pool-is-shared |
 | a task without the calling thread's bindings | a-pool-task-sees-the-calling-thread-s-bindings (a batch tracer's batched-branch error, lost on the pool) |
-| an unparsable gen.llm.host-threads falling back to the default | the-pool-s-size-is-a-positive-integer-or-loud |
+| an unparsable gen.llm.host-threads falling back to the default | the-pool-s-size-is-a-positive-integer-or-loud (now gen.llm.host-test's the-default-size-is-a-positive-integer-or-loud) |
 
 ## Measurements
 
@@ -294,6 +294,12 @@ the calling thread.
   thread, the GC and the row pool need the rest), or the system property
   `gen.llm.host-threads`, which is loud (`:invalid-option`) unless a
   positive integer. Alternative: the processors less one.
+- **One implementation** (2026-10-22, the post-M5 review's I4-04, bean
+  genclj-egmg): the pool, its default size and the ordered map are
+  `gen.llm.host`'s, which the llama.cpp engine's row pool uses too, so
+  the two are the same by construction (the engine's follows
+  `gen.llm.host-threads` too). Each keeps a pool of its own: one shared by
+  both could deadlock, a task waiting on tasks queued behind it.
 - **Off switch:** `:host-pool false` for a run; `-Dgen.llm.host-threads=1`
   for the process.
 
