@@ -97,7 +97,7 @@
   "completion, checked: a completion (gen.llm.token) without a potential
    of its own, which SMC would neither draw nor weigh by."
   [completion]
-  (when-not (instance? gen.llm.token.Completion completion)
+  (when-not (token/completion? completion)
     (throw (ex-info (str "smc: a completion (gen.llm.token/completion) is the model, not " (pr-str completion))
                     {:reason :invalid-model :model completion})))
   (when (:potential completion)

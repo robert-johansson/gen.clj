@@ -49,7 +49,8 @@
             [gen.llm.toy-engine :as toy]
             [gen.llm.toy-tokenizer :as tt]
             [gen.random :as rng]
-            [gen.selection :as sel]))
+            [gen.selection :as sel]
+            [gen.trace :as trace]))
 
 ;; ---------------------------------------------------------------------------
 ;; Two LMs: one token a character (the toy tokenizer), and tokens of several
@@ -378,6 +379,26 @@
 (deftest an-unconstrained-completion-has-weight-0
   (let [tr (gfi/simulate (token/completion ascii) [prompt 3] (rng/key 1))]
     (is (= 0.0 (constrained/conditional-weight tr)))))
+
+;; conditional-weight takes a completion's trace only (DESIGN §9; the
+;; post-M5 review's P4-03): it gave 0.0, the weight of a plain completion,
+;; for any other, so weights over a model that calls a constrained
+;; completion silently became the proposal's own. The model's completion
+;; is its subtrace, which weighs as the completion's own trace.
+(deftest conditional-weight-takes-a-completion-s-trace
+  (let [model (gen [] (splice :answer labelled prompt 4))
+        tr (gfi/simulate model [] (rng/key 1))
+        sub (trace/subtrace tr :answer)]
+    (doseq [[what t] [["a model's" tr]
+                      ["a distribution's" (gfi/simulate (d/normal 0 1) [] (rng/key 2))]
+                      ["a Map's" (gfi/simulate (comb/map labelled) [[prompt prompt] [3 3]] (rng/key 3))]
+                      ["a call-at's" (gfi/simulate (comb/call-at labelled) [prompt 4 :answer] (rng/key 4))]]]
+      (is (= :invalid-trace (bc/reason #(constrained/conditional-weight t))) what))
+    (is (= labelled (:gen-fn sub)))
+    (is (laws/close? (constrained/conditional-weight (:trace (gfi/generate labelled [prompt 4] (token/forced (:retval sub))
+                                                                           (rng/key 5))))
+                     (constrained/conditional-weight sub))
+        "a model's completion, by its subtrace, as the completion's own trace")))
 
 ;; ---------------------------------------------------------------------------
 ;; Misuse

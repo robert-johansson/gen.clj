@@ -30,7 +30,7 @@ No new dependency. Nothing outside `gen.llm.*` requires these namespaces.
 (def phone (grammar/grammar m "[0-9]{3}-[0-9]{4}"))   ; m an LM: masks over its vocabulary
 (def answer (token/completion m {:potential phone}))  ; completions held to the grammar
 (def tr (gfi/simulate answer [prompt 12]))           ; a phone number, token by token
-(constrained/conditional-weight tr)                  ; its importance weight for the LM conditioned on it
+(constrained/conditional-weight tr)                  ; a completion's trace's importance weight for the LM conditioned on it
 
 (def no-close                                         ; terms compose: text without a closing tag
   (regex/intersect (regex/star regex/any-char)
@@ -49,7 +49,7 @@ No new dependency. Nothing outside `gen.llm.*` requires these namespaces.
 | `(potential/prefix g ctx)`, `complete`, `logw-next` | a grammar as a potential: 0 or -Inf; the mask as n-vocab + 1 weights |
 | `(token/completion m {:potential p})` | the completion under a potential (any potential: a grammar, a product, a weighted one), whose declared end tokens (`potential/end-tokens`) must be the completion's |
 | `(constrained/weighted end-tokens row ws)` | a site's distribution: the row times the weights, renormalized, `[q log-z]` (for token SMC's masked proposal too) |
-| `(constrained/conditional-weight tr)` | log p(x) + w(x) - log q(x) |
+| `(constrained/conditional-weight tr)` | log p(x) + w(x) - log q(x), for a completion's trace (any other is `:invalid-trace`; a model's completion is its `trace/subtrace`) |
 | `(bytes/byte-lm m opts)`, `prefix-logprob`, `text-logprob`, `next-byte-logprobs` | a text's probability over its tokenizations |
 | `(bytes/byte-trie byte-vocab)`, `sweep` | the token byte trie and its walk from a DFA state |
 
@@ -453,8 +453,11 @@ So DESIGN §8's row becomes: instaparse, **no** (confirmed by the owner,
    tokens one at a time with `token/dist`; possible later, as
    `(constrained/dist row ws end-tokens)`).
 3. **Recommendation: a constrained completion's GFI weights are the local
-   distribution q's**, and `constrained/conditional-weight` gives the
-   importance weight for π, the LM conditioned on the potential (above).
+   distribution q's**, and `constrained/conditional-weight` gives a
+   completion's trace's importance weight for π, the LM conditioned on the
+   potential (above); any other trace is an error (2026-10-22, the post-M5
+   review's P4-03, DESIGN §9: it gave 0.0, the weight of a plain
+   completion, for a model's trace that calls a constrained one).
    The alternative, a completion whose density is π, has no tractable
    score (Z is a sum over every sequence).
 4. **Recommendation: what a grammar holds** is the text, the tokens' bytes

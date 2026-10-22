@@ -62,8 +62,8 @@
    (gen.llm.constrained): a completion masked by a grammar and
    renormalized, token by token, as GenMLX's grammar-masked decoder. Its
    GFI weights are that local distribution's, q, not the LM conditioned on
-   the potential: gen.llm.constrained/conditional-weight is a trace's
-   importance weight for that. Its scores are its sites' log q, from the
+   the potential: gen.llm.constrained/conditional-weight is a completion's
+   trace's importance weight for that. Its scores are its sites' log q, from the
    LM's rows at their contexts (one read for each, as the normalizer needs
    every token's)."
   (:require [gen.array :as array]
@@ -492,6 +492,8 @@
     (let [tr (simulate* gf args key)]
       {:choices (:choices tr) :weight (:score tr) :retval (:retval tr)}))
   (-project [_ tr selection] (project* tr selection)))
+
+(defn completion? "Is x a completion, a generative function of this namespace?" [x] (instance? Completion x))
 
 (defmethod print-method Completion [gf ^java.io.Writer w]
   (.write w (str "#gen/completion[" (:lm gf) (when (:potential gf) (str " under " (:potential gf))) "]")))
