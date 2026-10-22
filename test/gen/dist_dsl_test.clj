@@ -135,8 +135,9 @@
       (is (ts/close? (array/full [8] (Math/log 0.3)) w))
       ;; a lazy backend's spot check (re-runs on the JVM backend) read every
       ;; choice as an array, so a label made MLX's run fall back where the
-      ;; JVM's, checked in place, did not; called here, it runs on any backend
-      (is (identical? (:trace ps) (#'gen.batched/reference-spot-check! labeled-model [] 8 (:trace ps)))
+      ;; JVM's, checked in place, did not; forced here, it runs on any backend
+      (is (b/batched? (:particles (with-redefs [gen.batched/lazy-batch? (constantly true)]
+                                    (b/generate labeled-model [] (cm/choicemap :k :z) 8 (rng/key 7)))))
           "the lazy backends' spot check takes a label as it is"))))
 
 (deftest sampling-follows-the-body
