@@ -138,7 +138,7 @@
 (defdist ^:elementwise uniform
   "uniform(low, high): uniform on [low, high]."
   [low high]
-  (validate (when (every? #(and (some? %) (array/concrete? %)) [low high])
+  (validate (when (every? array/concrete? [low high])
               (dc/check (array/all-true? (< low high)) "uniform" "low must be below high" {:low low :high high})))
   (sample [key shape]
     (rng/uniform key (dc/elementwise-shape shape low high) (assoc (opts low high) :low low :high high)))
@@ -380,7 +380,7 @@
    axis of alpha."
   [alpha]
   (validate (dc/check (<= 1 (array/ndim alpha)) "dirichlet" "alpha must be a vector" {:alpha-shape (array/shape alpha)})
-            (dc/check-all-positive "dirichlet" "alpha" alpha))
+            (dc/check-positive "dirichlet" "alpha" alpha))
   (sample [key shape]
     ;; g/Σg for gamma draws g, from their logs (a draw underflows to 0 at a
     ;; small alpha), floored where the normalized value still does
@@ -525,7 +525,7 @@
   "triangular(a, b, c): the triangular distribution on [a, b] with mode c
    (TriangularDist)."
   [a b c]
-  (validate (when (every? #(and (some? %) (array/concrete? %)) [a b c])
+  (validate (when (every? array/concrete? [a b c])
               (dc/check (array/all-true? (logical-and (< a b) (logical-and (<= a c) (<= c b))))
                         "triangular" "needs a < b and a <= c <= b" {:a a :b b :c c})))
   (sample [key shape]
@@ -615,7 +615,7 @@
   [low high]
   (validate (dc/check-integer "uniform-discrete" "low" low Long/MIN_VALUE)
             (dc/check-integer "uniform-discrete" "high" high Long/MIN_VALUE)
-            (when (every? #(and (some? %) (array/concrete? %)) [low high])
+            (when (every? array/concrete? [low high])
               (dc/check (array/all-true? (<= low high)) "uniform-discrete" "low must not exceed high" {:low low :high high})))
   (sample [key shape] (rng/randint key low (+ high 1) (dc/elementwise-shape shape low high) (opts low high)))
   (log-prob [v]
@@ -644,12 +644,6 @@
 
 (def ^:private rejection-rounds 12)
 (def ^:private inversion-steps 40)
-
-(defn- first-accepted
-  "The value of the first accepted proposal of [accept? value] pairs, else
-   fallback."
-  [fallback proposals]
-  (reduce (fn [acc [ok v]] (where ok v acc)) fallback (reverse proposals)))
 
 (defn- inverted
   "An inversion over a pmf's first inversion-steps terms, from its first
@@ -689,7 +683,7 @@
                          s (log (/ (* v inv-alpha) (+ (/ aa (* us us)) b)))
                          t (- (* k log-lam) lam (lgamma (+ k 1)))]
                      [(logical-or quick (logical-and (array/logical-not reject) (<= s t))) k]))
-        large (first-accepted (array/round lam) (map proposal (range rejection-rounds)))]
+        large (rng/first-accepted (array/round lam) (map proposal (range rejection-rounds)))]
     (to-int (where (< lam 10) small large) lam)))
 
 (defn- binomial-sample [key n p shape]
@@ -721,7 +715,7 @@
                          v' (log (/ (* v alpha) (+ (/ aa (* us us)) b)))
                          slow (<= v' (+ (- h (lgamma (+ k 1)) (lgamma (+ (- n k) 1))) (* (- k m) lpq)))]
                      [(logical-and in-range (logical-or quick slow)) k]))
-        large (first-accepted (array/round (* n p)) (map proposal (range rejection-rounds)))
+        large (rng/first-accepted (array/round (* n p)) (map proposal (range rejection-rounds)))
         x (where (< (* n p) 10) small large)]
     (to-int (where flip? (- n x) x) n p)))
 

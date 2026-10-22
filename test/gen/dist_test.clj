@@ -88,7 +88,14 @@
       (is (thrown? clojure.lang.ExceptionInfo (f)) label))
     (is (every? some? [(d/poisson [0.0 2.0]) (d/uniform [0.0] [1.0]) (d/binom [2 3] 0.5) (d/uniform-discrete [1] [3])
                        (d/neg-binom 2.0 [1.0 0.5]) (d/geometric [1.0 0.5])])
-        "valid arrays pass")))
+        "valid arrays pass"))
+  (testing "a nil parameter is an error at construction, naming both (genclj-khnp, I3-13)"
+    ;; (d/normal 0.0 nil) constructed, and its first sample threw "shape: not
+    ;; an array: nil" (planted: no nil check)
+    (doseq [[expected f] [[{:distribution "normal" :param "std"} #(d/normal 0.0 nil)]
+                          [{:distribution "bernoulli" :param "p"} #(d/bernoulli nil)]
+                          [{:distribution "categorical" :param "probs"} #(d/categorical nil)]]]
+      (is (= expected (ts/thrown-data (f)))))))
 
 (deftest supports
   (is (= [false true] (dc/support (d/bernoulli 0.3))))
