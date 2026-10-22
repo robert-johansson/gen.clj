@@ -60,7 +60,7 @@
   (when-not (array/truthy? start-ok)
     (throw (ex-info (str kernel ": the starting trace's log density or its gradient at the selection is not finite"
                          " (score " (array/->clj (:score trace)) "), so no move from it can be weighed")
-                    {:score (:score trace) :selection selection}))))
+                    {:reason :non-finite-start :kernel (keyword kernel) :score (:score trace) :selection selection}))))
 
 (defn- nonempty! [v selection]
   (when (zero? (array/size v))

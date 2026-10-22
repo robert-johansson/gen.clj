@@ -177,14 +177,29 @@
                                 tr (:trace (gfi/generate model [] (cm/choicemap :x -0.05 :y 3.0) (rng/key 0)))]
                             (mcmc/hmc tr (sel/select :x) {:L 3 :eps 0.5} (rng/key 72)))))))
 
+(defn- refused-start
+  "How f refused its starting trace: :nan-value, by assess's check of a NaN
+   value (read where values are concrete, as on the JVM), :non-finite-start,
+   by the kernel's check of the start's log density (where values are lazy,
+   as on MLX, the NaN reaches it first), or nil when f returned."
+  [f]
+  (try (f) nil
+       (catch clojure.lang.ExceptionInfo e
+         (cond (= :non-finite-start (:reason (ex-data e))) :non-finite-start
+               (re-find #"constrained value is NaN" (ex-message e)) :nan-value
+               :else (throw e)))))
+
 (deftest a-nan-in-the-starting-trace-stays-an-error
-  ;; DESIGN §9: only a proposal diverges. Planted bug (2026-10-22): every
-  ;; error of the trajectory taken as a divergence passes the trace with a
-  ;; NaN (rejected and reported as diverged)
+  ;; DESIGN §9: only a proposal diverges, and a NaN start is loud on every
+  ;; backend, by one check or the other (on Metal the start's check, found
+  ;; by m3-llama's light run). Planted bug (2026-10-22): every error of the
+  ;; steps taken as a divergence, the start's gradient's too, with the
+  ;; start's check gone, passes the trace with a NaN (rejected and reported
+  ;; as diverged), all six assertions failing
   (let [tr (start-at scalar (cm/choicemap :x 0.2 :y 1.3))
         nan (assoc tr :choices (cm/set-choice (:choices tr) :x ##NaN))]
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"constrained value is NaN" (mcmc/hmc nan x-sel {:L 3 :eps 0.1} (rng/key 5))))
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"constrained value is NaN" (mcmc/mala nan x-sel 0.1 (rng/key 6)))))
+    (is (#{:nan-value :non-finite-start} (refused-start #(mcmc/hmc nan x-sel {:L 3 :eps 0.1} (rng/key 5)))))
+    (is (#{:nan-value :non-finite-start} (refused-start #(mcmc/mala nan x-sel 0.1 (rng/key 6))))))
   (testing "a start of probability 0 too (DESIGN §9, PROVISIONAL; m3-grammar's cross-review)"
     ;; y ~ U(mu - 1, mu + 1) holds y = 3 at mu = 0 with density 0. Planted
     ;; bug (2026-10-22): no check of the start makes every proposal a
@@ -192,10 +207,12 @@
     (let [boxed (gen [] (let [mu (trace :mu (d/normal 0 1))] (trace :y (d/uniform (- mu 1.0) (+ mu 1.0)))))
           start (start-at boxed (cm/choicemap :mu 0.0 :y 3.0))]
       (doseq [compile? [false true]]
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"hmc: the starting trace's log density"
-                              (mcmc/hmc start (sel/select :mu) {:L 5 :eps 1.0 :compile? compile?} (rng/key 7))))
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mala: the starting trace's log density"
-                              (mcmc/mala start (sel/select :mu) 2.0 {:compile? compile? :key (rng/key 8)})))))))
+        (is (= {:reason :non-finite-start :kernel :hmc}
+               (select-keys (ts/thrown-data (mcmc/hmc start (sel/select :mu) {:L 5 :eps 1.0 :compile? compile?} (rng/key 7)))
+                            [:reason :kernel])))
+        (is (= {:reason :non-finite-start :kernel :mala}
+               (select-keys (ts/thrown-data (mcmc/mala start (sel/select :mu) 2.0 {:compile? compile? :key (rng/key 8)}))
+                            [:reason :kernel])))))))
 
 ;; ---------------------------------------------------------------------------
 ;; MAP and elliptical slice
