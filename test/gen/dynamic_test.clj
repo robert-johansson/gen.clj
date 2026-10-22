@@ -98,6 +98,14 @@
       (trace :h ((d/heterogeneous-mixture [d/normal d/uniform]) [0.5 0.5] [u 1.0] [-1.0 1.0]))
       b)))
 
+(def array-valued
+  "A return value the body builds as an array of shape [2], so an identity
+   update builds it again: on the JVM what every 0-d value is on MLX (an
+   array the same only as itself, DESIGN.md §9, D1). Planted bug
+   (2026-10-22): the identity-update law requiring no-change again fails
+   on it, as it failed on Metal."
+  (gen [] (let [x (trace :x (d/normal 0 1))] (array/stack [x (+ x 1.0)]))))
+
 (def models
   [[:linreg linreg [[1.0 2.0 3.0]] [[[1.0 2.5]] [[0.5 1.0 1.5 2.0]]]]
    [:shared-namespace shared-namespace []]
@@ -107,7 +115,8 @@
    [:discrete discrete []]
    [:kind-changing kind-changing []]
    [:spliced-distribution spliced-distribution [0.0] [[2.0] [-1.5]]]
-   [:p-mh p-mh []]])
+   [:p-mh p-mh []]
+   [:array-valued array-valued []]])
 
 (defn- close? [x y] (ts/close? x y))
 
@@ -118,7 +127,7 @@
 (laws/deflaws dynamic models 100)
 
 ;; every address has a fixed support (the mixtures' union is the reals)
-(laws/deflaws dynamic (filterv (comp #{:linreg :shared-namespace :mixtures :spliced-distribution :p-mh} first) models)
+(laws/deflaws dynamic (filterv (comp #{:linreg :shared-namespace :mixtures :spliced-distribution :p-mh :array-valued} first) models)
   100 laws/fixed-support)
 
 (deftest selecting-absent-addresses-changes-nothing
