@@ -396,6 +396,44 @@
         (is (same? {x 1} {x 1}))
         (is (not (same? {x 1} {(array/array [1.0 2.0]) 1})))))))
 
+(deftest same-value-never-realizes-a-lazy-value
+  ;; A seq that is not counted (a lazy one, a cons) is compared as far as
+  ;; its links are realized: the integration of genclj-ws7x with
+  ;; genclj-i6bj, whose realize! realizes a body's lazy return value, yet an
+  ;; identity update of it was unknown-change. Plant: the walk by seq and
+  ;; next forces the unrealized links (the counts grow).
+  (let [n (atom 0)
+        counted (fn [k] (map (fn [i] (swap! n inc) i) (range k)))
+        same? gfi/same-value?]
+    (testing "realized as far as a chunk (32 elements): unknown past it, nothing forced"
+      (let [a (counted 100) b (counted 100)]
+        (first a)
+        (first b)
+        (let [before @n]
+          (is (= 64 before))
+          (is (false? (same? a b)))
+          (is (= before @n)))))
+    (testing "a cons onto an unrealized tail: the same"
+      (let [a (cons 0 (counted 3)) b (cons 0 (counted 3)) before @n]
+        (is (false? (same? a b)))
+        (is (= before @n))))
+    (testing "an iterate realized for 10 elements: the same"
+      (let [it #(iterate (fn [x] (swap! n inc) (inc x)) 0)
+            a (doto (it) (->> (take 10) dorun))
+            b (doto (it) (->> (take 10) dorun))
+            before @n]
+        (is (false? (same? a b)))
+        (is (= before @n))))
+    (testing "realized all through: element by element"
+      (let [a (doall (counted 100)) b (doall (counted 100))]
+        (is (true? (same? a b)))
+        (is (true? (same? (cons 0 a) (cons 0 b))))
+        (is (false? (same? (cons 0 a) (cons 1 b))))
+        (is (false? (same? a (doall (map inc (range 100))))))
+        (is (false? (same? a (with-meta b {:w 1}))) "and their metadata")))
+    (testing "an infinite repeat of one value ends within the budget"
+      (is (false? (ts/within 5000 #(same? (repeat 1.0) (repeat 1.0))))))))
+
 (defn- in-order
   "An array-map whose order :b decides: a callee reading (first (vals m)) sees it."
   [b]
