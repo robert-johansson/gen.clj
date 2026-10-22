@@ -51,6 +51,16 @@
   (prop/with-internal-proposal with-args
     (gen [sigma m] (when (open? sigma :x) (trace :x (d/normal (+ m 0.5) 1.5))))))
 
+(def grows-with-n
+  "n latents and their sum's noisy observation."
+  (gen [n] (let [xs (mapv #(trace (keyword (str "x" %)) (d/normal 0 1)) (range n))]
+             (trace :y (d/normal (reduce + 0.0 xs) 1)))))
+
+(def proposes-what-n-adds
+  (prop/with-internal-proposal grows-with-n
+    (gen [sigma n] (doseq [i (range n) :let [a (keyword (str "x" i))]]
+                     (when (open? sigma a) (trace a (d/normal 0.5 1.5)))))))
+
 (def law-models
   [[:proposes-the-latent proposes-the-latent [] []]
    [:proposes-one-of-two-from-the-data
@@ -62,7 +72,11 @@
     (prop/with-internal-proposal branching
       (gen [sigma] (when (open? sigma :z) (trace :z (d/bernoulli 0.7)))))
     [] []]
-   [:proposal-reads-the-arguments proposal-reads-the-arguments [1.0] [[2.0]]]])
+   [:proposal-reads-the-arguments proposal-reads-the-arguments [1.0] [[2.0]]]
+   ;; an update to more arguments makes fresh choices, which the proposal
+   ;; draws (genclj-nqsm: update-under, shared with with-exact-proposal);
+   ;; fewer arguments would leave an unselected choice to regenerate unvisited
+   [:proposes-what-the-arguments-add proposes-what-n-adds [1] [[2] [3]]]])
 
 (laws/deflaws internal-proposal law-models 60 laws/general)
 ;; every address has a fixed support: Def. 4.1.1 has content for a proposal
@@ -171,6 +185,40 @@
         tr (gfi/simulate pgf [] (rng/key 4))]
     (is (= (ts/host (tr [:inner :mu])) (ts/host (tr :inner))))
     (is (= normal-normal (:gen-fn (trace/subtrace tr :inner))))))
+
+(def ^:private flips-with-n
+  "n coins, rarely heads, each heads with a value below it; its proposal
+   flips each coin heads."
+  (prop/with-internal-proposal
+    (gen [n] (doseq [i (range n)]
+               (when (trace (keyword (str "b" i)) (d/bernoulli 0.001))
+                 (trace (keyword (str "z" i)) (d/normal 0 1)))))
+    (gen [sigma n] (doseq [i (range n) :let [a (keyword (str "b" i))]]
+                     (when (open? sigma a) (trace a (d/bernoulli 0.999)))))))
+
+(deftest updates-stay-the-wrapper-s
+  ;; genclj-nqsm: update-under, shared by the two wrappers, keeps the trace
+  ;; the wrapper's, with fresh choices or without, and a proposal whose fresh
+  ;; choices change the model's structure is a loud error naming the
+  ;; wrapper (planted: the trace left as gf's; no structure check)
+  (let [m proposes-what-n-adds
+        tr (gfi/simulate m [1] (rng/key 3))]
+    (is (identical? m (:gen-fn (:trace (gfi/update tr [1] [diff/no-change] (cm/choicemap :y 0.3) (rng/key 4))))))
+    (is (identical? m (:gen-fn (:trace (gfi/update tr [2] [diff/unknown-change] cm/EMPTY (rng/key 5)))))))
+  (let [tr (gfi/simulate flips-with-n [1] (rng/key 6))]
+    (is (= {:b0 false} (ts/host (cm/to-map (:choices tr)))) "the first coin, forward sampled: tails")
+    (is (= {:wrapper "with-internal-proposal"}
+           (ts/thrown-data (gfi/update tr [2] [diff/unknown-change] cm/EMPTY (rng/key 7))))
+        "the model's update draws the new coin tails, the proposal heads, with a z"))
+  (testing "a change in the arguments' number reaches the model's update (genclj-pwkr), whatever the argdiffs say"
+    ;; m keeps its value: the weight is log N(m; 0, 1) - log N(m; 1, 1)
+    (let [m (prop/with-internal-proposal
+              (gen [x & [y]] (trace :m (d/normal (+ x (or y 0.0)) 1)))
+              (gen [sigma & _] (when (open? sigma :m) (trace :m (d/normal 0.0 2.0)))))
+          tr (gfi/simulate m [0.0 1.0] (rng/key 8))
+          v (ts/number (tr :m))]
+      (is (ts/close? (- (* -0.5 v v) (* -0.5 (* (- v 1.0) (- v 1.0))))
+                     (:weight (gfi/update tr [0.0] [diff/no-change] cm/EMPTY (rng/key 9))))))))
 
 (deftest misuse-is-loud
   (testing "a proposal for a constrained choice"

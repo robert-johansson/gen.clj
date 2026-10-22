@@ -304,9 +304,27 @@
                                     (trace :y (d/normal x 0.5))))
                          [:z])
     [1.0] [[2.0]]]
-   [:unfold chain [3 0.0 0.6] [[4 0.0 0.6] [2 0.0 0.3]]]])
+   [:unfold chain [3 0.0 0.6] [[4 0.0 0.6] [2 0.0 0.3]]]
+   ;; an update to more arguments makes fresh choices, which the exact
+   ;; proposal's generate samples given the enumerated one (genclj-nqsm:
+   ;; update-under, shared with with-internal-proposal; fewer arguments
+   ;; would leave an unselected choice to regenerate unvisited)
+   [:fresh-choices-beside-an-enumerated-one
+    (enum/with-exact-proposal
+      (gen [n] (let [k (trace :k (d/bernoulli 0.3))]
+                 (doseq [i (range n)] (trace (keyword (str "x" i)) (d/normal (if k 1.0 -1.0) 1.0)))))
+      [:k])
+    [1] [[2] [3]]]])
 
 (laws/deflaws exact-proposal law-models 60 laws/general)
+
+(deftest updates-stay-the-wrapper-s
+  ;; genclj-nqsm: update-under keeps the trace the wrapper's, with fresh
+  ;; choices or without (planted: the trace left as gf's)
+  (let [m (second (last law-models))
+        tr (gfi/simulate m [1] (rng/key 3))]
+    (is (identical? m (:gen-fn (:trace (gfi/update tr [1] [diff/no-change] (cm/choicemap :x0 0.3) (rng/key 4))))))
+    (is (identical? m (:gen-fn (:trace (gfi/update tr [2] [diff/unknown-change] cm/EMPTY (rng/key 5))))))))
 (laws/deflaws exact-proposal law-models 60 laws/fixed-support)
 
 ;; ---------------------------------------------------------------------------
