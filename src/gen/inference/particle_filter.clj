@@ -48,6 +48,15 @@
 
 (defn- particle-keys [opts n] (rng/split (or (:key opts) (gfi/next-key)) n))
 
+(defn- moved
+  "A particle after a move r ({:trace :weight}) from log weight lw: its
+   trace and :log-weight lw + r's weight, evaluated as the particle is moved,
+   so that a lazy backend holds one particle's graph at a time (as
+   importance sampling does, docs/array-api.md §13), not every particle's."
+  [r lw]
+  (let [lw (+ lw (:weight r))]
+    {:trace (gfi/eval-trace! (:trace r) lw) :log-weight lw}))
+
 (defn- slots
   "The group of each of groups × size slots: in contiguous blocks (group g
    at g·size … g·size + size - 1) or interleaved (group g at g, g + groups,
@@ -91,13 +100,15 @@
                             r (gfi/generate model args (cm/merge constraints choices) k-generate)]
                         (update r :weight - weight))
                       (gfi/generate model args constraints key)))
+         ;; one particle's graph at a time on a lazy backend, as in moved
+         evaluated (fn [{:keys [trace weight] :as r}] (gfi/eval-trace! trace weight) r)
          results (if strata
                    (let [strata (vec strata)
                          k (count strata)
                          [k-particles k-strata] (rng/split (or (:key opts) (gfi/next-key)))]
-                     (mapv (fn [s key] (update (particle (cm/merge (strata s) observations) key) :weight + (Math/log k)))
+                     (mapv (fn [s key] (evaluated (update (particle (cm/merge (strata s) observations) key) :weight + (Math/log k))))
                            (strata-of n k layout k-strata) (rng/split k-particles n)))
-                   (mapv #(particle observations %) (particle-keys opts n)))]
+                   (mapv #(evaluated (particle observations %)) (particle-keys opts n)))]
      {:traces (mapv :trace results)
       :log-weights (mapv :weight results)
       :log-ml 0.0}))))
@@ -172,13 +183,11 @@
                   (let [r (gfi/update tr args argdiffs observations key)]
                     (check-discard (:discard r) i)
                     r)))
-         results (mapv move (range n) (:traces state) (particle-keys opts n))
-         log-weights (mapv + (:log-weights state) (mapv :weight results))]
-     ;; one step's graph at a time on a lazy backend
-     (array/eval! [(mapv (comp gfi/eval-trace! :trace) results) log-weights])
+         results (mapv (fn [i tr lw k] (moved (move i tr k) lw))
+                       (range n) (:traces state) (:log-weights state) (particle-keys opts n))]
      (assoc state
             :traces (mapv :trace results)
-            :log-weights log-weights)))))
+            :log-weights (mapv :log-weight results))))))
 
 (defn ess
   "The effective sample size of the particles' weights."
@@ -280,9 +289,9 @@
   ([state kernel] (rejuvenate state kernel (gfi/next-key)))
   ([state kernel key]
    (let [state (unbatched state)
-         moved (mapv (fn [tr k] (:trace (kernel tr k))) (:traces state) (rng/split key (count (:traces state))))]
-     (array/eval! (mapv gfi/eval-trace! moved))
-     (assoc state :traces moved))))
+         ;; one particle's graph at a time on a lazy backend, as in moved
+         traces (mapv (fn [tr k] (gfi/eval-trace! (:trace (kernel tr k)))) (:traces state) (rng/split key (count (:traces state))))]
+     (assoc state :traces traces))))
 
 (defn reweighting
   "A move-reweight kernel (GenParticleFilters' move_reweight): (fn [trace
@@ -316,10 +325,9 @@
   ([state kernel] (move-reweight state kernel (gfi/next-key)))
   ([state kernel key]
    (let [state (unbatched state)
-         results (mapv kernel (:traces state) (rng/split key (count (:traces state))))
-         log-weights (mapv + (:log-weights state) (mapv :weight results))]
-     (array/eval! [(mapv (comp gfi/eval-trace! :trace) results) log-weights])
-     (assoc state :traces (mapv :trace results) :log-weights log-weights))))
+         results (mapv (fn [tr lw k] (moved (kernel tr k) lw))
+                       (:traces state) (:log-weights state) (rng/split key (count (:traces state))))]
+     (assoc state :traces (mapv :trace results) :log-weights (mapv :log-weight results)))))
 
 (defn replicate
   "Each particle replaced by k copies (GenParticleFilters' pf_replicate!):

@@ -215,6 +215,31 @@
     (is (== (pf/log-ml-estimate state) (pf/log-ml-estimate moved)))
     (is (some true? (map #(not= (% [t :x]) (%2 [t :x])) (pf/traces state) (pf/traces moved))) "some particles moved")))
 
+(deftest each-particle-is-evaluated-as-it-is-moved
+  ;; One evaluation per particle, as it is moved, so that a lazy backend holds
+  ;; one particle's graph at a time (docs/array-api.md §13, as importance
+  ;; sampling does); eval! is a no-op on the JVM, so the order is recorded.
+  ;; Plants: step, rejuvenate and move-reweight building every particle and
+  ;; then evaluating each and all once more (the post-M5 review's I3-04,
+  ;; [:move :move :move :eval :eval :eval :eval]) fail their three; initialize
+  ;; evaluating nothing fails its own.
+  (let [events (atom [])
+        log! #(swap! events conj %)
+        order (fn [f] (reset! events []) (f) @events)
+        expected (into [] cat (repeat 3 [:move :eval]))
+        logged (fn [kernel] (fn [tr key] (log! :move) (kernel tr key)))
+        state (pf/initialize model [1 0.0] (observation 0) 3 {:key (rng/key 16)})
+        [eval! generate update'] [array/eval! gfi/generate gfi/update]]
+    (with-redefs [array/eval! (fn [x] (log! :eval) (eval! x))]
+      (with-redefs [gfi/generate (fn [& args] (log! :move) (apply generate args))
+                    gfi/update (fn [& args] (log! :move) (apply update' args))]
+        (is (= expected (order #(pf/initialize model [1 0.0] (observation 0) 3 {:key (rng/key 16)}))) "initialize")
+        (is (= expected (order #(pf/step state [2 0.0] [diff/unknown-change diff/no-change] (observation 1) {:key (rng/key 17)})))
+            "step"))
+      (is (= expected (order #(pf/rejuvenate state (logged (k/mh (sel/select [0 :x]))) (rng/key 18)))) "rejuvenate")
+      (is (= expected (order #(pf/move-reweight state (logged (pf/reweighting (sel/select [0 :x]))) (rng/key 19))))
+          "move-reweight"))))
+
 (deftest weighted-statistics
   (let [state {:traces [{:x 1.0} {:x 3.0}] :log-weights [(Math/log 0.25) (Math/log 0.75)] :log-ml 0.0}
         f :x]

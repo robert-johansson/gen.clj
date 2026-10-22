@@ -529,6 +529,17 @@
           tr (gfi/simulate m [1] (rng/key 2))]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"shape" (gfi/update tr [3] [diff/unknown-change] cm/EMPTY (rng/key 3)))
           "a retained value whose parameters change shape"))
+    ;; the value shape skips host-scalar parameters (the post-M5 review's
+    ;; I3-05); plant: skipping array parameters too passes both of these
+    (let [m (gen [mu] (trace :y (d/normal mu 1)))
+          tr (gfi/simulate m [0.0] (rng/key 2))
+          wrong #"A value of shape \[\] for a distribution whose values have shape \[2\]"]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo wrong
+                            (gfi/update tr [(array/array [0.0 1.0])] [diff/unknown-change] cm/EMPTY (rng/key 3)))
+          "a retained value whose host-scalar parameter becomes an array")
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo wrong
+                            (gfi/regenerate tr [(array/array [0.0 1.0])] [diff/unknown-change] sel/none (rng/key 3)))
+          "and on regenerate"))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"shape"
                           (dc/log-prob ((d/product d/normal d/bernoulli) [0 1] [0.3]) [(array/array [1.0 2.0 3.0]) true]))))
   (testing "B6: trace calls in lazy splice arguments are recorded"
