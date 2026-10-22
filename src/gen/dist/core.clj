@@ -298,11 +298,11 @@
 
 (defn- check-leaf-constraint
   "A distribution's trace is a single choice: constraints under it are
-   errors, not silently ignored."
+   unvisited, not silently ignored (so a revise drops such old choices of
+   another kind of callee, and a constraint is loud)."
   [op constraints]
   (when-not (or (cm/has-value? constraints) (cm/empty? constraints))
-    (throw (ex-info (str (name op) ": a distribution's choice is a single value, not nested choices")
-                    {:op op :constraints (cm/to-map constraints)}))))
+    (throw (gfi/unvisited op (cm/addresses constraints) "a distribution's choice is a single value, not nested choices"))))
 
 (defrecord Distribution [type params]
   gfi/IGenerativeFunction
