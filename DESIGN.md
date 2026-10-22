@@ -140,8 +140,9 @@ be ported is tracked as a deferred bean with a note on how to port it cleanly
    the *same* code, run under the batch tracer (`gen.array.batch`, vmap
    semantics: docs/array-api.md §8b), never as copies (GenMLX has six).
 4. **Semantics never reads mutable state that changes meaning.** Such
-   state is confined to three places: the single `volatile!` that
-   `gen.dynamic/execute` threads through one model run, the implicit key
+   state is confined to three places: the two `volatile!`s (the
+   transition and the state) that `gen.dynamic/execute` threads through
+   one model run, the implicit key
    source in `gen.gfi`, and native handles inside the membrane. The other
    mutable pieces are caches and registries that never change what an
    operation means:
@@ -1215,7 +1216,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   for every kind. `(diff/propagate f args diffs)` is an open multimethod on
   the function's var giving the diff of a call, with rules for `count`,
   `nth`, `get`, `conj`, `assoc`, `+`, `-` (clojure.core's and gen.array's),
-  `inc`, `dec` and `vec`; Gen.jl dispatches on a Diffed value type, which
+  `inc`, `dec`, `vec` and `identity`; Gen.jl dispatches on a Diffed value type, which
   Clojure's core functions do not take, so here the rule belongs to the
   call. In a static body every name carries a diff: an argument's from its
   argdiff, a binding that is one call of a var on symbols and constants
