@@ -18,8 +18,8 @@
                            the arguments, as one chain with its reversal
      (kern ^:trace [tr args] stmt …)
                            the same, reading the trace in its loops,
-                           branches and lets, with the thesis's invariant
-                           checked after each of their bodies
+                           branches, lets and kernels' arguments, with the
+                           thesis's invariant checked after each
 
    A combinator's result reports the accept decisions of the MH moves it
    made, in order, as :accepted (a vector of booleans) when they all report
@@ -130,6 +130,39 @@
         (and (map? v) (not (record? v))) (into {} (map (fn [[k x]] [k (control-value x)])) v)
         :else v))
 
+(def ^:private ^java.lang.ClassValue closure-fields
+  "The instance fields of a fn class: the values it closes over."
+  (proxy [java.lang.ClassValue] []
+    (computeValue [^Class c]
+      (vec (for [^java.lang.reflect.Field f (.getDeclaredFields c)
+                 :when (not (java.lang.reflect.Modifier/isStatic (.getModifiers f)))]
+             (doto f (.setAccessible true)))))))
+
+(defn- control-difference
+  "nil when control values a and b are the same, else the first pair of
+   their parts that differ. Host data compares by =, with no budget (a loop
+   may run over a large collection), and what a construct built from it by
+   what that holds: an array by its host value, a generative function by
+   its kind's rule (gfi/same-gen-fn?), a fn by its class and closed-over
+   values, a record by its class and fields. So a kernel built again from
+   the same values is the same kernel."
+  [a b]
+  (let [pairwise (fn [as bs] (some identity (map control-difference as bs)))]
+    (cond (identical? a b) nil
+          (array/array? a) (when-not (and (array/array? b) (= (array/->clj a) (array/->clj b))) [a b])
+          (instance? gen.gfi.IGenerativeFunction a) (when-not (gfi/same-gen-fn? a b) [a b])
+          (fn? a) (if (identical? (class a) (class b))
+                    (let [fields (.get closure-fields (class a))]
+                      (pairwise (map #(.get ^java.lang.reflect.Field % a) fields)
+                                (map #(.get ^java.lang.reflect.Field % b) fields)))
+                    [a b])
+          (record? a) (if (identical? (class a) (class b)) (control-difference (into {} a) (into {} b)) [a b])
+          (map? a) (if (and (map? b) (= (count a) (count b)) (every? #(contains? b %) (keys a)))
+                     (some (fn [[k v]] (control-difference v (get b k))) a)
+                     [a b])
+          (sequential? a) (if (and (sequential? b) (= (count a) (count b))) (pairwise a b) [a b])
+          :else (when-not (= a b) [a b]))))
+
 (defn- noting
   "[the control values (reads note) passed to note, on the host, and what it
    returned]."
@@ -137,6 +170,13 @@
   (let [seen (volatile! [])
         x (reads (fn [v] (vswap! seen conj v) v))]
     [(mapv control-value @seen) x]))
+
+(defn- construct-head
+  "The head of a loop, branch or let form, as a name; nil for a kernel
+   statement."
+  [form]
+  (when (and (seq? form) (symbol? (first form)))
+    (#{"doseq" "for" "when" "if" "let"} (name (first form)))))
 
 (defn- construct-name [form] (str "(" (first form) " " (pr-str (second form)) " …)"))
 
@@ -150,18 +190,22 @@
 ;; the reversal is the construct over the R_v, reading v from its own input,
 ;; which is what backward runs. A chain's reversal is its statements'
 ;; reversals in reverse order, which asks nothing across statements: a later
-;; statement may change what an earlier construct read. (The check sees the
-;; runs that happen, as Gen.jl's does, not every run the proposition
-;; quantifies over.)
+;; statement may change what an earlier construct read. A kernel statement
+;; whose arguments read the trace is a dependent mixture too, its control
+;; value the kernel it builds, so it is checked as a let is (the post-M5
+;; review's P3-02; the thesis and Gen.jl leave it unchecked). (The check
+;; sees the runs that happen, as Gen.jl's does, not every run the
+;; proposition quantifies over.)
 (defn ^:no-doc trace-kernel
   "The kernel of a (kern ^:trace …) body. forward and backward are (fn [t
    apply! construct]) running the statements (backward: reversed, loops
    backwards) against the volatile t. apply! applies a kernel to @t, the
    i-th applied with the key folded with i. (construct form reads run) runs
-   a loop, branch or let: (reads note) reads its control values from @t (a
-   loop's collections and conditions, a condition, a let's values), passing
-   each to note, and returns what run takes; run runs the body. Then reads
-   reads again, and values that differ are a loud error."
+   a loop, branch, let or kernel statement: (reads note) reads its control
+   values from @t (a loop's collections and conditions, a condition, a
+   let's values, a statement's kernel), passing each to note, and returns
+   what run takes; run runs the body. Then reads reads again, and values
+   that differ (control-difference) are a loud error."
   [forward backward]
   (letfn [(run [body reversal? trace key]
             (let [t (volatile! trace)
@@ -176,11 +220,15 @@
                               (let [[read x] (noting reads)]
                                 (run-body x)
                                 (let [[again _] (noting reads)]
-                                  (when-not (= read again)
-                                    (throw (ex-info (str "kern: the body of " (construct-name form) " changed what it"
-                                                         " reads (a loop's collection, a condition or a let's value),"
-                                                         " so the reversal would not undo the kernel: read "
-                                                         (pr-str read) ", then " (pr-str again))
+                                  (when-let [[was is] (control-difference read again)]
+                                    (throw (ex-info (str "kern: "
+                                                         (if (construct-head form)
+                                                           (str "the body of " (construct-name form) " changed what it"
+                                                                " reads (a loop's collection, a condition or a let's value)")
+                                                           (str "the statement " (pr-str form) " changed what its"
+                                                                " arguments read from the trace"))
+                                                         ", so the reversal would not undo the kernel: read "
+                                                         (pr-str was) ", then " (pr-str is))
                                                     {:form form :read read :again again}))))))]
               (body t apply! construct)
               (cond-> {:trace @t} @moves (assoc :accepted @moves))))]
@@ -224,7 +272,11 @@
               ;; each value through a symbol of its own, so a binding may destructure
               (checked `(let [~@(mapcat (fn [v [x e]] [v (noted e) x v]) vs pairs)] ~vs)
                        `(fn [~vs] (let [~@(mapcat (fn [v [x _]] [x v]) vs pairs)] ~(body stmts)))))
-      `(~apply! (checked-kernel ~(at form) '~form)))))
+      ;; a statement that reads the trace, as a let of its kernel
+      (if (some #{tr} (tree-seq coll? seq form))
+        (let [k (gensym "k")]
+          (checked (noted form) `(fn [~k] (~apply! (checked-kernel ~k '~form)))))
+        `(~apply! (checked-kernel ~(at form) '~form))))))
 
 (defn- traced-statements [forms tr t apply! construct reverse?]
   `(do ~@(map #(traced-form % tr t apply! construct reverse?) (if reverse? (reverse forms) forms)) nil))
@@ -249,9 +301,13 @@
    (its collections, its condition, its values) is read again from the
    trace, and a body that changed it is a loud error, in the reversal too:
    the thesis's invariant (pp. 100-101), which Gen.jl checks with
-   check=true and gen.clj always. A later statement may change what an
-   earlier one read, as the thesis's p. 102 kernel does. Conditions are
-   Clojure's truthiness of host values (an array is read on the host).
+   check=true and gen.clj always. A kernel statement whose arguments read
+   tr is checked the same way, as a let of its kernel: built again from
+   the trace it left, the kernel must be the same (fns compare by their
+   closed-over values, so a kernel built again from the same values is
+   the same). A later statement may change what an earlier one read, as
+   the thesis's p. 102 kernel does. Conditions are Clojure's truthiness of
+   host values (an array is read on the host).
 
      (kern ^:trace [tr]
        (doseq [i (range (inc (array/item (tr :degree))))] (mh (sel/select [:coeff i])))

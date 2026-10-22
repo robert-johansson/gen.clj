@@ -237,6 +237,53 @@
           tr (gfi/simulate counted [] (rng/key 12))]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no declared reversal" ((k/reversal kernel) tr (rng/key 13)))))))
 
+(def ^:private flags (gen [] (trace :flag (d/bernoulli 0.5)) (trace :x (d/bernoulli 0.5)) (trace :y (d/bernoulli 0.5))))
+
+(def ^:private walk (gen [tr s] (trace :x (d/normal (tr :x) s))))
+
+(defn- run-of [kernel tr seed] (k/run kernel tr {:samples 50 :key (rng/key seed)}))
+
+(deftest a-kernel-s-arguments-that-read-the-trace-are-checked
+  ;; the post-M5 review's P3-02: a statement whose arguments read tr is the
+  ;; dependent mixture K_a(t) of Prop. 3.4.1, checked as a let is. Planted
+  ;; bug (2026-10-22): the statement applied unchecked, as before, takes
+  ;; flag = true as absorbing (P(flag) 0.745 one step from the target,
+  ;; where 0.5 is stationary) and the walk's backward move at the old scale
+  ;; (E[x²] 1.071 against 1), and every run below returns
+  (let [from-false (:trace (gfi/generate flags [] (cm/choicemap :flag false) (rng/key 20)))
+        line (:trace (gfi/generate (gen [] (trace :x (d/normal 0 1))) [] (cm/choicemap :x 0.0) (rng/key 21)))]
+    (testing "a kernel that moves what its arguments read is loud, forward and reversed"
+      (doseq [kernel [((k/kern ^:trace [tr] (k/mh (sel/select (if (host-of tr :flag) :x :flag)))))
+                      (k/reversal ((k/kern ^:trace [tr] (k/mh (sel/select (if (host-of tr :flag) :x :flag))))))]]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"changed what its arguments read" (run-of kernel from-false 22))))
+      (let [data (ts/thrown-data (run-of ((k/kern ^:trace [tr] (k/mh walk [(+ 1.0 (* (tr :x) (tr :x)))]))) line 23))]
+        (is (= '(k/mh walk [(+ 1.0 (* (tr :x) (tr :x)))]) (:form data)))))
+    (testing "one that leaves them alone passes: flag picks which of x and y moves"
+      (let [kernel ((k/kern ^:trace [tr] (k/mh (sel/select (if (host-of tr :flag) :x :y)))))]
+        (is (= 50 (count (:traces (run-of kernel from-false 24)))))
+        (is (= 50 (count (:traces (run-of (k/reversal kernel) from-false 25)))))))))
+
+(deftest kernels-and-large-collections-pass-the-check
+  ;; the post-M5 review's P3-06: a let or loop value compares by what it
+  ;; holds, so a kernel built again from the same values is the same, and
+  ;; with no budget. Planted bugs (2026-10-22): = (the check before) makes
+  ;; the kernels below loud, since each read builds a new closure;
+  ;; gfi/same-value? (its 256-value budget) makes the large collections loud
+  (let [tr (:trace (gfi/generate flags [] (cm/choicemap :flag false) (rng/key 26)))
+        n (fn [tr] (if (host-of tr :flag) 300 1000))]
+    (doseq [[label kernel] [["a kernel bound in a let" ((k/kern ^:trace [_tr] (let [step (k/mh (sel/select :x))] step step)))]
+                            ["kernels built in a loop's collection"
+                             ((k/kern ^:trace [_tr] (doseq [step (mapv k/mh [(sel/select :x) (sel/select :y)])] step)))]
+                            ["a let of a large collection" ((k/kern ^:trace [tr] (let [xs (vec (range (n tr)))] (k/mh (sel/select (if (= 1000 (count xs)) :x :y))))))]
+                            ["a loop over one" ((k/kern ^:trace [tr] (doseq [_ (range (n tr))] (k/chain)) (k/mh (sel/select :x))))]]]
+      (testing label
+        (is (= 50 (count (:traces (run-of kernel tr 27)))))
+        (is (= 50 (count (:traces (run-of (k/reversal kernel) tr 28))))))))
+  (testing "a kernel built from another value is another kernel"
+    (let [kernel ((k/kern ^:trace [tr] (let [step (k/mh (sel/select (if (host-of tr :flag) :x :flag)))] step)))]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"changed what it reads"
+                            (run-of kernel (:trace (gfi/generate flags [] (cm/choicemap :flag false) (rng/key 29))) 30))))))
+
 ;; ---------------------------------------------------------------------------
 ;; The thesis's p. 102 kernel
 ;; ---------------------------------------------------------------------------

@@ -947,7 +947,14 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   asks only that each construct's own body keep it (the reversal's argument
   is at `trace-kernel`). Gen.jl checks only with `check=true`; gen.clj
   always checks. Values compare on the host (kernels run at the inference
-  loop's boundary). (Corrected after the confirmation read of the M4 tests,
+  loop's boundary): host data by `=`, with no budget, and a fn, record or
+  generative function by what it holds (its closed-over values, its
+  fields, its kind's rule), so a kernel built again from the same values
+  is the same kernel (the post-M5 review's P3-06: with `=`, a kernel bound
+  in a let was a violation). A kernel statement whose arguments read the
+  trace is a dependent mixture too, so it is checked as a let of its
+  kernel (P3-02: unchecked, as in the thesis and Gen.jl,
+  `(mh (select (if (tr :flag) :x :flag)))` made flag absorbing). (Corrected after the confirmation read of the M4 tests,
   C1: the first check compared every construct with the final trace, which
   rejected the p. 102 kernel in its own order.)
 - **Trace kernels, GenTraceKernelDSL** (M4, 2026-10-20): no new macro. A
