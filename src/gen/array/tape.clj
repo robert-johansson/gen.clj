@@ -285,7 +285,7 @@
   (-lazy? [_] (p/-lazy? inner))
   (-native-ops [_] #{})
 
-  (-from-host [_ data dtype] (p/-from-host inner data dtype))
+  (-from-host [_ values shape dtype] (p/-from-host inner values shape dtype))
   (-to-host [_ x] (let [v (primal x)] (if (array/host? v) v (p/-to-host inner v))))
   (-eval! [_ xs] (p/-eval! inner (remove array/host? (map primal xs))))
 

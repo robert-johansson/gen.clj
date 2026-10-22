@@ -5,7 +5,8 @@
   (:refer-clojure :exclude [+ *])
   (:require [gen.array :as array :refer [+ * log sum]]
             [gen.array.dtype :as dt]
-            [gen.array.protocols :as p]))
+            [gen.array.protocols :as p]
+            [gen.array.shape :as sh]))
 
 (set! *warn-on-reflection* true)
 
@@ -34,16 +35,18 @@
 (defn- with-matrix-rhs
   "Call (f a rhs) with rhs as [.. n k], restoring a vector right-hand side. A
    right-hand side is a (batch of) vector(s) when it is 1-d or has one axis
-   fewer than the matrix. One without the matrix's rows (a number, say) is
-   an error here, alike on every backend."
+   fewer than the matrix. a must be square matrices, rhs must have their
+   rows (a number does not), and the batch axes of both must broadcast."
   [op a rhs f]
   (let [sa (array/shape a)
+        n (sh/check-square sa op)
         sr (array/shape rhs)
-        vector? (or (== 1 (count sr)) (== (count sr) (dec (count sa))))]
-    (when (or (empty? sr)
-              (and (>= (count sa) 2)
-                   (not= (nth sa (- (count sa) 2)) (nth sr (- (count sr) (if vector? 1 2))))))
+        vector? (or (== 1 (count sr)) (== (count sr) (dec (count sa))))
+        ;; the axis of the right-hand side's rows
+        rows-at (- (count sr) (if vector? 1 2))]
+    (when-not (and (seq sr) (== n (long (nth sr rows-at))))
       (throw (ex-info (str (name op) ": matrix and right-hand side do not match") {:shapes [sa sr]})))
+    (sh/broadcast (subvec sa 0 (- (count sa) 2)) (subvec sr 0 rows-at))
     (if vector?
       (array/squeeze (f a (array/expand-dims rhs -1)) -1)
       (f a rhs))))
@@ -54,6 +57,7 @@
    gives NaN rather than an error, so batched code never throws midway."
   [a]
   (let [b (backend-of a)]
+    (sh/check-square (array/shape a) :cholesky)
     (p/-linalg b :cholesky (floats-of b [a]))))
 
 (defn solve-triangular
@@ -78,13 +82,14 @@
   "The inverse of a square matrix, in its float dtype."
   [m]
   (let [b (backend-of m)
-        n (peek (array/shape m))]
+        n (sh/check-square (array/shape m) :inv)]
     (solve m (array/with-backend b (array/eye n {:dtype (float-dtype-of b [m])})))))
 
 (defn slogdet
   "[sign log|det m|] (sign 0 and -Inf for a singular matrix)."
   [m]
   (let [b (backend-of m)]
+    (sh/check-square (array/shape m) :slogdet)
     (p/-linalg b :slogdet (floats-of b [m]))))
 
 (defn det

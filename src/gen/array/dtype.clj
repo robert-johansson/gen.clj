@@ -29,6 +29,15 @@
             (ratio? x) (decimal? x)) :float64
         :else :int64))
 
+(defn weak-host-dtype
+  "The dtype a host scalar takes where nothing else gives one: the default
+   of its kind (host numbers are weakly typed), :bool for a boolean."
+  [x defaults]
+  (case (kind (host-dtype x))
+    :float (:float defaults)
+    :int (:int defaults)
+    :bool :bool))
+
 (defn promote
   "The common dtype of two (strong) dtypes."
   [a b]

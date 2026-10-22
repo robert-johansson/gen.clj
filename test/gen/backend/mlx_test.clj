@@ -4,7 +4,8 @@
    native library or the compiled binding is missing."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
-            [gen.array.memory :as reservations]))
+            [gen.array.memory :as reservations]
+            [gen.array.protocols :as p]))
 
 (def available?
   (delay
@@ -134,9 +135,12 @@
         (is (== 1.0 (gen.mlx.Mlx/mlx_array_item_float32 x))))
       (gen.mlx.MlxRaw/mlx_array_free x))
     (testing "through the backend, as ex-info naming the op"
-      (let [b (mlx)]
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"do not broadcast"
-                              (array/with-backend b (array/+ (array/array [1.0 2.0]) (array/array [1.0 2.0 3.0])))))
+      ;; the protocol called directly: gen.array checks shapes before it
+      ;; calls a backend (genclj-q45d), so MLX never sees these
+      (let [b (mlx)
+            [x y] (array/with-backend b [(array/array [1.0 2.0]) (array/array [1.0 2.0 3.0])])]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"^add: .*broadcast"
+                              (p/-elementwise b :add [x y] (array/dtype x))))
         (when (= :gpu ((requiring-resolve 'gen.backend.mlx/device) b))
           (is (thrown? clojure.lang.ExceptionInfo
                        (array/with-backend b (array/->clj (array/array [1.0] {:dtype :float64}))))

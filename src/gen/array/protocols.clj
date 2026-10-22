@@ -19,7 +19,14 @@
        JVM backend represents every 0-d array that way),
      - operands share one dtype (promotion already applied), except for the
        condition of :where and the index arguments of gathers,
-     - axes are non-negative and in range; shapes are vectors of longs.")
+     - axes are non-negative and in range; shapes are vectors of longs,
+     - operands' shapes fit the op (gen.array.shape's rules: they broadcast,
+       agree off the concatenation axis, are square matrices with right-hand
+       sides of their rows, and so on), checked on the model's shapes,
+     - host data is parsed: a shape, its values, and a dtype.
+   A backend that wraps another (the batch tracer, the tape) keeps these
+   when it calls the backend it wraps: its shapes are the checked ones,
+   lifted.")
 
 (defonce ^{:doc "true once a lazy backend (-lazy? true) has been made: a backend
    sets it, so that gen.array/eval! walks nothing where all are eager."}
@@ -67,8 +74,10 @@
      its own composite (built from primitives) otherwise.")
 
   ;; --- host boundary ---------------------------------------------------------
-  (-from-host [b data dtype]
-    "Array from host data: a number, a boolean, or nested vectors of them.")
+  (-from-host [b values shape dtype]
+    "An array of shape and dtype from host values in row-major order, as
+     gen.array.host/parse gives them: a double[] or a seq of numbers and
+     booleans, as many as shape holds (one for shape [], a 0-d array).")
   (-to-host [b x]
     "Host value of x: a number or boolean for 0-d arrays, nested vectors
      otherwise. Forces evaluation.")

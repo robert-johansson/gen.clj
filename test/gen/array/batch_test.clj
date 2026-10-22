@@ -102,6 +102,45 @@
   (is (vmap-matches? #(la/solve-triangular (la/cholesky %1) %2) [bspd b3] #{0 1}))
   (is (vmap-matches? #(second (la/slogdet %)) [bspd] #{0})))
 
+(deftest shape-errors-name-the-model-s-shapes
+  ;; gen.array and gen.array.linalg check shapes before they call a backend
+  ;; (genclj-q45d, the review's I1-02), so under the tracer a mismatch is the
+  ;; error the model would get unbatched, naming its per-particle shapes.
+  ;; The backends checked, on the lifted shapes: [4 1 3] against [4 2 2],
+  ;; and a take-along-axis with indices of lower rank ran, lifted to the
+  ;; array's rank. Planted (2026-10-22): each check taken out of gen.array
+  ;; or gen.array.linalg fails its cases
+  (let [error (fn [f] (try (f) :no-error (catch clojure.lang.ExceptionInfo e [(ex-message e) (ex-data e)])))
+        ints #(array/astype % :int32)
+        broadcast (fn [a b] [(str "Shapes " a " and " b " do not broadcast") {:shapes [a b]}])
+        square (fn [op shape] [(str (name op) " needs square matrices, got shape " shape) {:op op :shape shape}])
+        rhs (fn [op shapes] [(str (name op) ": matrix and right-hand side do not match") {:shapes shapes}])]
+    (doseq [[label f shapes want]
+            [["elementwise" array/+ [[3] [2 2]] (broadcast [3] [2 2])]
+             ["where" #(array/where (array/> %1 0) %2 %3) [[3] [2 2] [2]] (broadcast [3] [2 2])]
+             ["broadcast-to" #(array/broadcast-to % [2 2]) [[3]] (broadcast [3] [2 2])]
+             ["concatenate" #(array/concatenate [%1 %2] 0) [[3 2] [3 4]]
+              ["Arrays must agree on every axis but the concatenation axis" {:shapes [[3 2] [3 4]] :axis 0}]]
+             ["take-along-axis, ranks" #(array/take-along-axis %1 (ints %2) 0) [[3 2] [2]]
+              ["take-along-axis needs indices of the same rank as the array" {:shape [3 2] :indices-shape [2]}]]
+             ["take-along-axis, other axes" #(array/take-along-axis %1 (ints %2) 0) [[3 2] [2 3]] (broadcast [2] [3])]
+             ["pick" #(array/pick %1 (ints %2)) [[2 3] [3]] (broadcast [2] [3])]
+             ["scatter-add" #(array/scatter-add %1 (ints %2) %3 0) [[3 2] [2 3] [2 3]]
+              ["scatter-add needs indices and updates of one shape, equal to the array's but on axis"
+               {:shape [3 2] :indices-shape [2 3] :updates-shape [2 3] :axis 0}]]
+             ["matmul" array/matmul [[2 3] [2 3]] ["matmul: inner dimensions differ (3 vs 2)" {:shapes [[2 3] [2 3]]}]]
+             ["matmul of a scalar" array/matmul [[] [3]] ["matmul needs arrays of rank >= 1" {:shapes [[] [3]]}]]
+             ["cholesky" la/cholesky [[2 3]] (square :cholesky [2 3])]
+             ["slogdet" la/slogdet [[3]] (square :slogdet [3])]
+             ["inv" la/inv [[2 3]] (square :inv [2 3])]
+             ["solve, a vector matrix" la/solve [[3] [3]] (square :solve [3])]
+             ["solve, rows" la/solve [[3 3] [2]] (rhs :solve [[3 3] [2]])]
+             ["solve-triangular, rows" la/solve-triangular [[3 3] [2 1]] (rhs :solve-triangular [[3 3] [2 1]])]
+             ["solve, batch axes" la/solve [[2 3 3] [5 3 1]] (broadcast [2] [5])]]]
+      (is (= want (error #(apply f (map array/zeros shapes)))) (str label ", unbatched"))
+      (is (= want (error #(batch/batched [n] (apply f (map (fn [s] (batch/wrap (array/zeros (into [n] s)) [n])) shapes)))))
+          (str label ", batched")))))
+
 (deftest draws-are-per-particle
   (let [x (batch/unwrap (batch/batched [n] (rng/normal (rng/key 9) [3])) [n])]
     (is (= [n 3] (array/shape x)))
