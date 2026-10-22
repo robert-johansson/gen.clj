@@ -1,7 +1,8 @@
 (ns gen.array-props-test
   "Properties of gen.array, checked against a slow but obviously correct
    reference that works on nested vectors."
-  (:require [clojure.test.check.clojure-test :refer [defspec]]
+  (:require [clojure.test :refer [deftest is]]
+            [clojure.test.check.clojure-test :refer [defspec]]
             [gen.test-support :as ts]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
@@ -159,6 +160,48 @@
                  op (gen/elements [array/negate array/abs array/sign array/exp array/log array/sqrt array/log1p array/expm1
                                    array/floor array/ceil array/round array/tanh array/isnan array/logical-not])]
     (agrees? (op x) (array/item (op (array/array [x]))))))
+
+;; lgamma and digamma on a host number take gen.array.special's paths, the
+;; composites' double operations in their order (genclj-rayh: 20 ns against
+;; 700), so their values are the composites' bit for bit. Plants checked
+;; (2026-10-22): the Lanczos sum's first two terms swapped, the
+;; reflection's two terms subtracted the other way, and digamma's first
+;; term 1/z for 1/(z + 0.0) (which keeps -0.0 negative) each fail both
+;; tests. Swapping the last two terms (1e-5 and 1.5e-7) changed no value on
+;; the 200,019 points, a reordering below the rounding there
+
+(defn- same-bits?
+  "Are the doubles a and b one value: equal bits (every NaN alike, -0.0 not
+   0.0)?"
+  [a b]
+  (== (Double/doubleToLongBits (double a)) (Double/doubleToLongBits (double b))))
+
+(defn- host-paths-agree? [x]
+  (and (same-bits? (array/lgamma x) (#'gen.array/lgamma-composite x))
+       (same-bits? (array/digamma x) (#'gen.array/digamma-composite x))))
+
+(def ^:private gen-gamma-argument
+  "Where lgamma and digamma branch (the poles, the signed zeros, the
+   reflection's edge at 0.5, the infinities, NaN) and doubles of both signs
+   over seven decades, and integers (poisson's counts are Longs)."
+  (gen/one-of [(gen/elements [0.0 -0.0 -1.0 -2.0 -2.5 -0.3 0.5 0.49999999999999994 1.0 2.0 171.6 1e10 1e300
+                              1e-300 -1e-300 ##Inf ##-Inf ##NaN])
+               (gen/fmap (fn [[m e]] (* m (Math/pow 10.0 e)))
+                         (gen/tuple (gen/double* {:min -1.0 :max 1.0 :NaN? false :infinite? false}) (gen/choose -3 4)))
+               (gen/large-integer* {:min -50 :max 200})]))
+
+(defspec host-lgamma-and-digamma-are-the-composites 1000
+  (prop/for-all [x gen-gamma-argument]
+    (host-paths-agree? x)))
+
+(deftest host-lgamma-and-digamma-on-the-review-s-points
+  ;; the verifier's 200,019 points (docs/research/review-post-m5,
+  ;; V-I1-01.clj): the special ones and 200,000 spread over [-3,000, 7,000]
+  (let [r (java.util.Random. 42)
+        xs (concat [0.5 0.49999999999999994 1.0 2.0 3.7 0.0 -0.0 -1.0 -2.0 -2.5 -0.3 1e-300 -1e-300
+                    171.6 1e10 1e300 ##Inf ##-Inf ##NaN]
+                   (repeatedly 200000 #(* (- (.nextDouble r) 0.3) (Math/pow 10.0 (- (* 6.0 (.nextDouble r)) 2.0)))))]
+    (is (= [] (vec (take 5 (remove host-paths-agree? xs)))))))
 
 (defspec sum-over-an-axis-matches-the-reference 200
   (prop/for-all [shape (gen/vector (gen/choose 1 4) 1 3)

@@ -1,7 +1,9 @@
 (ns gen.array.special
   "Scalar special functions in double precision, shared by host math and the
-   JVM backend's kernels. (lgamma and digamma are composites in gen.array, so
-   they are differentiable and identical on every backend.)")
+   JVM backend's kernels. lgamma and digamma are composites in gen.array, so
+   they are differentiable and identical on every backend; the ones here are
+   their host paths, the composites' double operations in their order, so
+   equal to them bit for bit (genclj-rayh).")
 
 (set! *warn-on-reflection* true)
 (set! *unchecked-math* :warn-on-boxed)
@@ -111,3 +113,58 @@
           (== ay 0.0) y
           :else
           (Math/copySign (refine-erfinv ay) y))))
+
+;; ---------------------------------------------------------------------------
+;; The host paths of gen.array's lgamma and digamma
+;; ---------------------------------------------------------------------------
+
+(def lanczos-coefficients
+  "Lanczos approximation, g = 7, n = 9 (relative error ~1e-15 for x >= 0.5),
+   gen.array's lgamma's."
+  [0.99999999999980993 676.5203681218851 -1259.1392167224028 771.32342877765313
+   -176.61502916214059 12.507343278686905 -0.13857109526572012
+   9.9843695780195716e-6 1.5056327351493116e-7])
+
+(def ^:private ^:const half-log-2pi 0.9189385332046728)
+
+(def ^:private ^"[D" lanczos (double-array lanczos-coefficients))
+
+(defn- lgamma-lanczos
+  "log Γ(z) for z >= 0.5: the composite's sum, term by term in its order."
+  ^double [^double z]
+  (let [z (- z 1.0)
+        c lanczos
+        series (+ (aget c 0) (/ (aget c 1) (+ z 1.0)) (/ (aget c 2) (+ z 2.0)) (/ (aget c 3) (+ z 3.0))
+                  (/ (aget c 4) (+ z 4.0)) (/ (aget c 5) (+ z 5.0)) (/ (aget c 6) (+ z 6.0))
+                  (/ (aget c 7) (+ z 7.0)) (/ (aget c 8) (+ z 8.0)))
+        t (+ z 7.5)]
+    (+ half-log-2pi (- (* (+ z 0.5) (Math/log t)) t) (Math/log series))))
+
+(defn lgamma
+  "log |Γ(x)| (+Inf at the poles 0, -1, -2, …): gen.array/lgamma on a host
+   double."
+  ^double [^double x]
+  (cond (and (<= x 0.0) (== x (Math/floor x))) Double/POSITIVE_INFINITY
+        (< x 0.5) (- (Math/log Math/PI) (Math/log (Math/abs (Math/sin (* Math/PI x)))) (lgamma-lanczos (- 1.0 x)))
+        :else (lgamma-lanczos x)))
+
+(defn digamma
+  "ψ(x), d/dx log Γ(x) (-Inf at 0, NaN at the negative integers):
+   gen.array/digamma on a host double."
+  ^double [^double x]
+  (if (and (< x 0.0) (== x (Math/floor x)))
+    Double/NaN
+    (let [z (if (< x 0.0) (- 1.0 x) x)
+          ;; z + 0.0, not z: the composite's, which makes -0.0 positive
+          shift (+ (/ 1.0 (+ z 0.0)) (/ 1.0 (+ z 1.0)) (/ 1.0 (+ z 2.0)) (/ 1.0 (+ z 3.0)) (/ 1.0 (+ z 4.0))
+                   (/ 1.0 (+ z 5.0)) (/ 1.0 (+ z 6.0)) (/ 1.0 (+ z 7.0)) (/ 1.0 (+ z 8.0)) (/ 1.0 (+ z 9.0)))
+          w (+ z 10.0)
+          w2 (/ 1.0 (* w w))
+          series (* w2 (+ (/ 1.0 12.0)
+                          (* w2 (+ (/ 1.0 -120.0)
+                                   (* w2 (+ (/ 1.0 252.0)
+                                            (* w2 (+ (/ 1.0 -240.0)
+                                                     (* w2 (+ (/ 1.0 132.0)
+                                                              (* w2 (/ -691.0 32760.0))))))))))))
+          psi (- (Math/log w) (/ 0.5 w) series shift)]
+      (if (< x 0.0) (- psi (/ Math/PI (Math/tan (* Math/PI x)))) psi))))
