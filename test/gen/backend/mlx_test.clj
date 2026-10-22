@@ -135,12 +135,12 @@
         (is (== 1.0 (gen.mlx.Mlx/mlx_array_item_float32 x))))
       (gen.mlx.MlxRaw/mlx_array_free x))
     (testing "through the backend, as ex-info naming the op"
-      ;; the protocol called directly: gen.array checks shapes before it
-      ;; calls a backend (genclj-q45d), so MLX never sees these
+      ;; the protocol called directly: gen.array checks a reshape's size
+      ;; before it calls a backend (genclj-q45d), so MLX never sees this one
       (let [b (mlx)
-            [x y] (array/with-backend b [(array/array [1.0 2.0]) (array/array [1.0 2.0 3.0])])]
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"^add: .*broadcast"
-                              (p/-elementwise b :add [x y] (array/dtype x))))
+            x (array/with-backend b (array/array [1.0 2.0 3.0]))]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"^reshape: .*[Rr]eshape"
+                              (p/-reshape b x [2 2])))
         (when (= :gpu ((requiring-resolve 'gen.backend.mlx/device) b))
           (is (thrown? clojure.lang.ExceptionInfo
                        (array/with-backend b (array/->clj (array/array [1.0] {:dtype :float64}))))
