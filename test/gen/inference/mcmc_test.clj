@@ -184,7 +184,18 @@
   (let [tr (start-at scalar (cm/choicemap :x 0.2 :y 1.3))
         nan (assoc tr :choices (cm/set-choice (:choices tr) :x ##NaN))]
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"constrained value is NaN" (mcmc/hmc nan x-sel {:L 3 :eps 0.1} (rng/key 5))))
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"constrained value is NaN" (mcmc/mala nan x-sel 0.1 (rng/key 6))))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"constrained value is NaN" (mcmc/mala nan x-sel 0.1 (rng/key 6)))))
+  (testing "a start of probability 0 too (DESIGN §9, PROVISIONAL; m3-grammar's cross-review)"
+    ;; y ~ U(mu - 1, mu + 1) holds y = 3 at mu = 0 with density 0. Planted
+    ;; bug (2026-10-22): no check of the start makes every proposal a
+    ;; divergence, 40 of 40, and the chain never moves
+    (let [boxed (gen [] (let [mu (trace :mu (d/normal 0 1))] (trace :y (d/uniform (- mu 1.0) (+ mu 1.0)))))
+          start (start-at boxed (cm/choicemap :mu 0.0 :y 3.0))]
+      (doseq [compile? [false true]]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"hmc: the starting trace's log density"
+                              (mcmc/hmc start (sel/select :mu) {:L 5 :eps 1.0 :compile? compile?} (rng/key 7))))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mala: the starting trace's log density"
+                              (mcmc/mala start (sel/select :mu) 2.0 {:compile? compile? :key (rng/key 8)})))))))
 
 ;; ---------------------------------------------------------------------------
 ;; MAP and elliptical slice

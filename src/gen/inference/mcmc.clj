@@ -14,8 +14,9 @@
    position, momentum, gradient or energy turns non-finite, or where a
    distribution's parameter fails its check, diverged: it is rejected,
    with acceptance 0 (:log-alpha -Inf), and reported as :diverged?
-   (gen.inference.kernel/run counts them), as Stan treats a divergence; a
-   NaN in the starting trace stays an error. Keys are an
+   (gen.inference.kernel/run counts them), as Stan treats a divergence. A
+   starting trace whose log density or gradient is not finite (NaN, or a
+   probability of 0) is an error, as Stan refuses such a start. Keys are an
    optional last argument (or :key in an options map); omitting one draws
    from the implicit key source."
   (:refer-clojure :exclude [+ - * /])
@@ -50,6 +51,17 @@
    when the kernel finishes."
   [& xs]
   (reduce array/logical-and (map #(array/all (array/isfinite %)) xs)))
+
+(defn- check-start!
+  "Throws unless start-ok, the kernel's step's verdict on the starting
+   trace: a log density or gradient there that is not finite would make
+   every proposal diverge, and the chain never move (DESIGN §9,
+   PROVISIONAL)."
+  [kernel start-ok trace selection]
+  (when-not (array/truthy? start-ok)
+    (throw (ex-info (str kernel ": the starting trace's log density or its gradient at the selection is not finite"
+                         " (score " (array/->clj (:score trace)) "), so no move from it can be weighed")
+                    {:score (:score trace) :selection selection}))))
 
 (defn- nonempty! [v selection]
   (when (zero? (array/size v))
@@ -151,17 +163,19 @@
 
 (defn- mala-proposal
   "MALA's proposal as a function of arrays only: [v noise others] →
-   [v' log q(v | v') - log q(v' | v) diverged], diverged true when v', the
-   gradients or the densities are not finite (or a parameter fails its
-   check at v', tried). The reverse gradient is
-   taken at v' only when v' is finite (at v otherwise: assess would refuse
-   a NaN), so a compiled proposal needs no branch."
+   [v' log q(v | v') - log q(v' | v) diverged start-ok], diverged true when
+   v', the gradients or the densities are not finite (or a parameter fails
+   its check at v', tried), start-ok whether the log density and its
+   gradient at v are. The reverse gradient is taken at v' only when v' is
+   finite (at v otherwise: assess would refuse a NaN), so a compiled
+   proposal needs no branch."
   [gf args proto tau]
-  (let [grad-v (array/grad (log-density gf args proto))
-        grad-tried (tried grad-v #(* % ##NaN))
+  (let [density (log-density gf args proto)
+        value-and-grad (array/value-and-grad density)
+        grad-tried (tried (array/grad density) #(* % ##NaN))
         sd (Math/sqrt (* 2.0 (double tau)))]
     (fn [v noise others]
-      (let [g (grad-v v others)
+      (let [[lp g] (value-and-grad v others)
             fwd-mu (+ v (* tau g))
             v' (+ fwd-mu (* sd noise))
             ok (finite g v')
@@ -169,7 +183,7 @@
             g' (grad-tried v' others)
             bwd-mu (+ v' (* tau g'))
             log-q (- (normal-lp v bwd-mu sd) (normal-lp v' fwd-mu sd))]
-        [v' log-q (array/logical-not (array/logical-and ok (finite g' log-q)))]))))
+        [v' log-q (array/logical-not (array/logical-and ok (finite g' log-q))) (finite lp g)]))))
 
 (defn- options
   "opts, an options map or nil (loud for anything else, such as a key in
@@ -205,8 +219,9 @@
          noise (rng/normal k-propose (array/shape v))
          build #(mala-proposal (:gen-fn trace) (:args trace) proto tau)
          ;; the proposal as a function of the selected values, compiled or not
-         [v' log-q diverged?] (or (when compile? (compiled-step trace proto others [:mala tau] build v noise others))
-                                  ((build) v noise others))]
+         [v' log-q diverged? start-ok] (or (when compile? (compiled-step trace proto others [:mala tau] build v noise others))
+                                           ((build) v noise others))]
+     (check-start! "mala" start-ok trace selection)
      (if (array/truthy? diverged?)
        (diverged trace)
        (let [[t' weight] (move-to trace proto v' k-update)]
@@ -214,18 +229,20 @@
 
 (defn- leapfrogs
   "L leapfrog steps as a function of arrays only: [v p others] → [v' p'
-   diverged]. diverged is true once a position, momentum, gradient or log
-   density turns non-finite (or a parameter fails its check, tried), and
-   from that step on the state stays at its last finite values: no
-   gradient is taken at a non-finite position (assess would refuse a NaN),
-   and a compiled step needs no early exit."
+   diverged start-ok]. diverged is true once a position, momentum,
+   gradient or log density turns non-finite (or a parameter fails its
+   check, tried), and from that step on the state stays at its last finite
+   values: no gradient is taken at a non-finite position (assess would
+   refuse a NaN), and a compiled step needs no early exit. start-ok is
+   whether the log density and its gradient at v are finite."
   [gf args proto L eps]
   (let [value-and-grad (array/value-and-grad (log-density gf args proto))
         tried-value-and-grad (tried value-and-grad (fn [v] [##NaN (* v ##NaN)]))
         half (/ eps 2.0)]
     (fn [v p others]
-      (let [[lp g] (value-and-grad v others)]
-        (loop [i 0 v v p p g g diverged (array/logical-not (finite lp g))]
+      (let [[lp g] (value-and-grad v others)
+            start-ok (finite lp g)]
+        (loop [i 0 v v p p g g diverged (array/logical-not start-ok)]
           (if (< i (long L))
             (let [p-half (+ p (* half g))
                   v-next (+ v (* eps p-half))
@@ -236,7 +253,7 @@
                   diverged (array/logical-or diverged (array/logical-not (finite lp g-next p-next)))]
               (recur (inc i) (array/where diverged v v-next) (array/where diverged p p-next)
                      (array/where diverged g g-next) diverged))
-            [v p diverged]))))))
+            [v p diverged start-ok]))))))
 
 (defn hmc
   "Hamiltonian Monte Carlo on the selected choices: L leapfrog steps of size
@@ -259,8 +276,9 @@
          build #(leapfrogs (:gen-fn trace) (:args trace) proto L eps)
          ;; the L steps as a function of the selected values, compiled or
          ;; not: the trace is updated once, at the end
-         [v' p diverged?] (or (when compile? (compiled-step trace proto others [:hmc L eps] build v p0 others))
-                              ((build) v p0 others))]
+         [v' p diverged? start-ok] (or (when compile? (compiled-step trace proto others [:hmc L eps] build v p0 others))
+                                       ((build) v p0 others))]
+     (check-start! "hmc" start-ok trace selection)
      (if (array/truthy? diverged?)
        (diverged trace)
        (let [[t'] (move-to trace proto v' k-update)]
