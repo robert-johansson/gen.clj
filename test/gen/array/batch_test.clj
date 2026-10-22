@@ -109,7 +109,9 @@
   ;; The backends checked, on the lifted shapes: [4 1 3] against [4 2 2],
   ;; and a take-along-axis with indices of lower rank ran, lifted to the
   ;; array's rank. Planted (2026-10-22): each check taken out of gen.array
-  ;; or gen.array.linalg fails its cases
+  ;; or gen.array.linalg fails its cases, and the tracer's own check of
+  ;; elementwise operands (gen.array leaves those to the backends, the hot
+  ;; path) fails elementwise and where
   (let [error (fn [f] (try (f) :no-error (catch clojure.lang.ExceptionInfo e [(ex-message e) (ex-data e)])))
         ints #(array/astype % :int32)
         broadcast (fn [a b] [(str "Shapes " a " and " b " do not broadcast") {:shapes [a b]}])

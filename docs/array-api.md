@@ -559,7 +559,9 @@ included (`docs/benchmarks.md`).
   before they call a backend, and gen.array parses host data
   (gen.array.host) for every backend (genclj-q45d). So the backends do not
   repeat the checks, and under the batch tracer an error names the shapes
-  the model wrote, not the batch's.
+  the model wrote, not the batch's. Elementwise broadcasting is the
+  exception, being the hot path: the backend checks it as it broadcasts,
+  and the batch tracer checks it per particle before lifting.
 - Nothing produces `NaN` from a shape error. NaNs arise only from the
   mathematics (e.g. `log` of a negative), as in NumPy.
 

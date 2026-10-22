@@ -734,6 +734,7 @@
 
 (defn- binary [b op x y dtype]
   (let [sx (shape-of x) sy (shape-of y)]
+    (sh/broadcast sx sy)
     (if (and (= op :logaddexp) (= dtype :float64))
       ;; MLX's float64 exp is not exact (see unary)
       ;; broadcast first: a custom VJP's cotangents have its inputs' shapes
@@ -748,6 +749,7 @@
                       :else ((binary-fns op) hx hy s))))))))
 
 (defn- where-op [b c x y dtype]
+  (sh/broadcast-all [(shape-of c) (shape-of x) (shape-of y)])
   (let [s (stream b)]
     (with-operands b :where [hc c :bool hx x dtype hy y dtype]
       (wrap b (Mlx/mlx_where hc hx hy s)))))

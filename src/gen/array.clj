@@ -262,8 +262,6 @@
                    (host? y) (dt/with-weak-kind (p/-dtype b x) (dt/kind (dt/host-dtype y)) (defaults b))
                    :else (dt/with-weak-kind (p/-dtype b y) (dt/kind (dt/host-dtype x)) (defaults b)))
           d (dt/input-dtype op common (defaults b))]
-      (when (and (backend-array? x) (backend-array? y))
-        (sh/broadcast (p/-shape b x) (p/-shape b y)))
       (p/-elementwise b op [(cast-to b x d) (cast-to b y d)] d))))
 
 (defmacro ^:private defunary [fname op doc]
@@ -358,7 +356,6 @@
     (host-where c x y)
     (let [b (backend-of :where [c x y])
           d (common-dtype b [x y])]
-      (sh/broadcast (sh/broadcast (shape c) (shape x)) (shape y))
       (p/-elementwise b :where [(cast-to b c :bool) (cast-to b x d) (cast-to b y d)] d))))
 
 (defn stop-gradient

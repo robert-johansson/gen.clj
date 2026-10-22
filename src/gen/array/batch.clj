@@ -25,7 +25,8 @@
    reads, and a raw if reads nothing."
   (:require [gen.array :as array]
             [gen.array.dtype :as dt]
-            [gen.array.protocols :as p]))
+            [gen.array.protocols :as p]
+            [gen.array.shape :as sh]))
 
 (set! *warn-on-reflection* true)
 
@@ -125,7 +126,11 @@
       (if (array/host? x) (dt/host-cast x dtype) (p/-astype inner x dtype))))
 
   (-elementwise [b op args dtype]
-    (let [r (reduce max 0 (map #(count (p/-shape b %)) args))
+    (let [;; the per-particle rank, from the operands' per-particle
+          ;; broadcast: checked before they are lifted, so a mismatch names
+          ;; the model's shapes (unbatched, the backend checks as it
+          ;; broadcasts; genclj-q45d)
+          r (count (reduce (fn [s x] (sh/broadcast s (p/-shape b x))) [] args))
           lifted (mapv #(lift b % r) args)
           out (p/-elementwise inner op lifted dtype)]
       (if (some batched? args) (made out b) out)))

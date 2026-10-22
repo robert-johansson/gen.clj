@@ -20,9 +20,12 @@
      - operands share one dtype (promotion already applied), except for the
        condition of :where and the index arguments of gathers,
      - axes are non-negative and in range; shapes are vectors of longs,
-     - operands' shapes fit the op (gen.array.shape's rules: they broadcast,
-       agree off the concatenation axis, are square matrices with right-hand
-       sides of their rows, and so on), checked on the model's shapes,
+     - operands' shapes fit the op (gen.array.shape's rules: they agree off
+       the concatenation axis, are square matrices with right-hand sides of
+       their rows, and so on), checked on the model's shapes; elementwise
+       operands are the exception, which the backend checks as it
+       broadcasts them (the batch tracer per particle, before it lifts),
+       since an elementwise op is the hot path,
      - host data is parsed: a shape, its values, and a dtype.
    A backend that wraps another (the batch tracer, the tape) keeps these
    when it calls the backend it wraps: its shapes are the checked ones,
