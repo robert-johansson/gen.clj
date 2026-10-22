@@ -375,13 +375,15 @@
 (defn- realize!
   "Force the lazy sequences in a body's return value (and in the vectors,
    lists and maps holding them), so that trace calls in them happen during
-   the run. Lazy sequences cache their elements, so this changes no value.
-   Only lazy sequences proper are forced, and only their first realize-limit
-   elements: the rest of a longer (or infinite) one stays lazy, and a trace
-   call in it is a loud error after the run (check-running!)."
+   the run. Every seq but a list may be lazy, whatever its class: a LazySeq,
+   a cons or a chunk onto a lazy tail ((cons x (map …)), (seq (map …))), and
+   iterate's, cycle's, repeat's and range's. Lazy sequences cache their
+   elements, so this changes no value. Only a seq's first realize-limit
+   elements are forced: the rest of a longer (or infinite) one stays lazy,
+   and a trace call in it is a loud error after the run (check-running!)."
   [x]
-  (cond (instance? clojure.lang.LazySeq x) (run! realize! (take realize-limit x))
-        (or (vector? x) (list? x)) (run! realize! x)
+  (cond (or (vector? x) (list? x)) (run! realize! x)
+        (seq? x) (run! realize! (take realize-limit x))
         (map? x) (run! realize! (vals x)))
   x)
 

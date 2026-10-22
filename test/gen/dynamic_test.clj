@@ -450,6 +450,44 @@
       (gfi/simulate m [] (rng/key 2))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"after the generative function returned" (doall @escaped))))))
 
+;; Return values that are lazy without being LazySeqs (the post-M5 review's
+;; P1-04), at 40 draws: past the 32-element chunk that a cons or a seq
+;; realizes in the body. Plant: realize! forcing LazySeqs alone fails 13 of
+;; the 22 laws on these models, and every-lazy-kind-is-realized-during-the-run
+;; for each kind (simulate kept 32 of conj-onto-lazy's 40 choices; generate's
+;; constraints were "not visited").
+
+(def cons-onto-lazy (gen [n] (cons 0.0 (map #(trace [:x %] (d/normal 0 1)) (range n)))))
+
+(def conj-onto-lazy (gen [n] (conj (map #(trace [:x %] (d/normal 0 1)) (range n)) 0.0)))
+
+(def chunk-onto-lazy (gen [n] (seq (map #(trace [:x %] (d/normal 0 1)) (range n)))))
+
+(def repeated-lazy (gen [n] (repeat 2 (map #(trace [:x %] (d/normal 0 1)) (range n)))))
+
+(def range-beside-cons (gen [n] [(range n) (cons 0.0 (map #(trace [:x %] (d/normal 0 1)) (range n)))]))
+
+(laws/deflaws lazy-returns
+  (mapv (fn [[label m]] [label m [40] [[3] [45]]])
+        [[:cons-onto-lazy cons-onto-lazy] [:conj-onto-lazy conj-onto-lazy] [:chunk-onto-lazy chunk-onto-lazy]
+         [:repeated-lazy repeated-lazy] [:range-beside-cons range-beside-cons]])
+  100)
+
+(deftest every-lazy-kind-is-realized-during-the-run
+  ;; the infinite kinds, outside the laws: until the retdiff's equality is
+  ;; bounded (genclj-ws7x), an update comparing two of them would not end
+  (let [draws (set (map #(vector :x %) (range 40)))]
+    (doseq [[kind m] {"iterate" (gen [] (iterate (fn [[i x]] (if (< i 40) [(inc i) (trace [:x i] (d/normal x 1))] [i x]))
+                                                 [0 0.0]))
+                      "cycle" (gen [] (cycle (map #(trace [:x %] (d/normal 0 1)) (range 40))))
+                      "repeat" (gen [] (repeat (map #(trace [:x %] (d/normal 0 1)) (range 40))))}]
+      (testing kind
+        (let [tr (gfi/simulate m [] (rng/key 1))]
+          (is (= draws (set (cm/addresses (:choices tr)))))
+          (is (close? (:score tr) (:weight (gfi/assess m [] (:choices tr))))))
+        (is (= 0.5 ((:trace (gfi/generate m [] (cm/choicemap [:x 39] 0.5) (rng/key 2))) [:x 39]))
+            "a constraint in the lazy part is visited")))))
+
 (deftest guarded-clojure-core-matches-clojure-core
   ;; third acceptance test: the substitution must not change ordinary code
   (let [k (rng/key 0)
