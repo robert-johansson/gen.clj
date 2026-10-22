@@ -1423,6 +1423,30 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     protocol, for every potential); or the completion makes its grammar
     itself, `(token/completion m {:grammar language})` (one way less to
     disagree, but grammars no longer potentials shared with token SMC).
+  - *A potential declares its end tokens* (owner, 2026-10-22, the post-M5
+    review's P4-02 and I4-02). The check above was a type test for
+    `Grammar` in the completion's constructor. A grammar inside
+    `potential/product` passed it, and token SMC never checked, so a
+    mismatched pair silently estimated another Z (0.37 where the matched
+    pair gives 1).
+    - Now the declaration is an optional protocol in gen.llm.potential:
+      `(potential/end-tokens p)` is a set, or nil for no opinion. A grammar
+      declares its own set. A token-level potential has no opinion, since
+      its contexts never hold an end token; `potential` takes an optional
+      `:end-tokens`.
+    - A product carries its factors' set, and is
+      `:mismatched-end-tokens` when it is made if two factors disagree.
+    - One check in gen.llm.potential compares a potential's set with the
+      end tokens it meets. `token/completion` and `smc/initialize`
+      (for SMC's `:potential`) call it, and only the end-token check:
+      SMC keeps a potential that rules everything out as a -Inf
+      estimate, not an error.
+    - Being a separate protocol, it leaves existing implementations of
+      `Potential` working.
+    - Passing the end tokens on every call was rejected. It changes every
+      potential's protocol and costs every call, but it removes no check:
+      a grammar's trie and liveness are built for one set, so a grammar
+      would still have to compare them.
   - *The middleware is the completion's `:potential` option*: the token
     GF's transitions are written once and the potential reweighs each
     site's distribution (row times weights, renormalized; an end token
