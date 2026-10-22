@@ -655,6 +655,23 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   draws. Its mirror (owner, 2026-10-22, the post-M5 review's P2-01): a beta draw that rounds to 1 is
   clamped to the largest float below 1. At beta(0.001, 0.001), 8,802 of
   20,000 draws rounded to 1 and scored +Inf.
+- **A log mass of 0 has gradient 0, not NaN** (PROVISIONAL, owner to
+  confirm; 2026-10-22, m3-lm's finding while fixing genclj-rnbd, taken
+  while the owner was away).
+  - The problem: a family that computes every support value's log mass and
+    then selects (categorical's pick, bernoulli's two branches, a `dist`
+    pushforward's matches over an enumerable draw) sends a cotangent of 0
+    into log at a mass of 0. That gives 0 · ∞ = NaN, which flows into
+    whatever computed the parameters. `(dist coin [p] (where (bernoulli p)
+    1.0 0.0))` at p = 0, observed 0.0, had a NaN gradient.
+  - The fix is in the families: they take the log through a stand-in
+    where the mass is 0, the convention gen.dist already uses outside a
+    support. So a value of mass 0 has log density −Inf and gradient 0.
+  - gen.array's xlogy and xlog1py keep their derivatives, which are
+    JAX's, because changing L0 would alter them for every caller. The
+    families guard their arguments instead.
+  - The alternative was to leave it, with a NaN gradient whenever a
+    parameter vector holds an exact 0.
 - **A mixture of a discrete and a continuous family is an error** when it
   is made (owner, 2026-10-22, the post-M5 review's P2-02). Its density would add a pmf to a pdf: given
   y = 0, the posterior came out 0.267 where 0.80 is exact. Gen.jl's types
