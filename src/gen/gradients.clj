@@ -11,6 +11,7 @@
      (jacobian f x m)                            → ∂f/∂x, an [m n] array
      (log-abs-det-jacobian f x)                  → log |det ∂f/∂x|
      (flattened values)                          → [x unflatten]
+     (continuous? v)                             → a float array or number?
 
    The objective is log p(τ; x) plus ⟨retgrad, retval⟩ when retgrad (a
    cotangent of the return value, of the same tree shape) is given, as in
