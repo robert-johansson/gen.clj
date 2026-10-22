@@ -1,0 +1,8 @@
+completion under R2's grammar: :mismatched-end-tokens
+completion under (product R2's grammar): :no-error
+  its simulate: :zero-weight
+exact Z = P(three of a/b, then the newline) = 0.005130378438680223
+SMC, :matched :masked : mean Z-hat 0.005159372097738102 (no error)
+SMC, :matched :lm : mean Z-hat 0.004097492 (no error)
+SMC, :r2 :masked : mean Z-hat 0.0 (no error)
+SMC, :r2 :lm : mean Z-hat 0.0 (no error)

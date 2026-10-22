@@ -139,9 +139,22 @@ be ported is tracked as a deferred bean with a note on how to port it cleanly
 3. **One implementation per semantic.** Batched execution is part of M1 (decided):
    the *same* code, run under the batch tracer (`gen.array.batch`, vmap
    semantics: docs/array-api.md §8b), never as copies (GenMLX has six).
-4. **Mutation is confined to three places**: the single `volatile!` that
+4. **Semantics never reads mutable state that changes meaning.** Such
+   state is confined to three places: the single `volatile!` that
    `gen.dynamic/execute` threads through one model run, the implicit key
-   source in `gen.gfi`, and native handles inside the membrane. Hot paths have
+   source in `gen.gfi`, and native handles inside the membrane. The other
+   mutable pieces are caches and registries that never change what an
+   operation means:
+   - L0: gen.array.protocols' lazy-backends flag, the batch backends'
+     interning, gen.array.memory's registry, compile's trace cache, and
+     MLX's constants, budget and CPU-compile probe;
+   - L5: the compiled-step caches;
+   - the LLM runtime's engines and caches, which are membrane state: the
+     LM's cache, the slot engine's books, the llama engine's replay and
+     smc's pool.
+
+   (Restated (owner, 2026-10-22, the post-M5 review's I1 and I4: "three places" had become a count that
+   no longer held.) Hot paths have
    no atoms, production dispatch has no test hooks, and the semantics layer
    makes no memory-management calls (eval and cleanup happen only at
    inference-loop boundaries).
@@ -450,6 +463,17 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
 - **Randomness:** JAX's partitionable Threefry-2x32-20 in pure Clojure,
   bit-identical to JAX. Every trace site consumes one key. The implicit key
   source has a random root seed for each JVM (`gfi/seed!` fixes it). See §3.5.
+  `fold-in` takes 64-bit data (owner, 2026-10-22, the post-M5 review's P2-09): it hashes
+  `[hi32 d, lo32 d]`.
+  - Below 2^32 a key is JAX's, bit for bit. Beyond, it is distinct, where
+    JAX masks typed data to 32 bits.
+  - With the mask, Recurse's node numbers past 2^32 (depth 32 for
+    max-branch 2, 16 for 4, 11 for 8) gave deep nodes one key, and their
+    draws repeated, silently. The implicit key source's counter repeated
+    after 2^32 keys.
+  - Now `fold-in(k, d) = split(k)[d]` for every d.
+  - Alternatives: a loud error for data ≥ 2^32; or keys folded child by
+    child in Recurse, which would change every Recurse program's draws.
 - **Traces store each choice's log-probability** (as Gen.jl does), so update
   and regenerate weights use the true old values and `project` never re-runs
   the model.
@@ -570,6 +594,14 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
 - **Bernoulli values are booleans,** as in Gen.jl: 0/1 (GenMLX's) is an
   error, since a body's `if` takes 0 as true while the density scores it as
   false. NaN parameters and NaN constrained values are errors too.
+- **A diverging HMC trajectory is rejected** (owner, 2026-10-22, the
+  post-M5 review's P3-05). A leapfrog trajectory whose position, momentum
+  or energy turns non-finite is a rejected proposal, with acceptance 0, as
+  Stan treats a divergence. The run counts its divergences, so they are
+  not silent. MALA's proposal is treated the same way. A NaN in the
+  starting trace stays an error. Before, a divergence threw "constrained
+  value is NaN", a rule meant for user data: HMC on Neal's funnel at
+  L 10, eps 0.5 died at step 1,309 from a valid state.
 - **Casts to integers are Java's** (owner, 2026-10-20; genclj-kw88). On
   every backend, a float cast to an integer dtype truncates toward zero,
   saturates at the dtype's range (±Inf too) and takes NaN to 0. An integer
@@ -602,6 +634,15 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   read of each draw on a lazy backend, or a threshold on the parameters.
   The other edge stays as it is: a draw that underflows to 0, where a
   density can be +Inf, is floored at the dtype's smallest normal number.
+  That holds in every family, gamma, beta and dirichlet included, which
+  review 4's floor missed: gamma(0.001, 1000) scored +Inf on 963 of 2,000
+  draws. Its mirror (owner, 2026-10-22, the post-M5 review's P2-01): a beta draw that rounds to 1 is
+  clamped to the largest float below 1. At beta(0.001, 0.001), 8,802 of
+  20,000 draws rounded to 1 and scored +Inf.
+- **A mixture of a discrete and a continuous family is an error** when it
+  is made (owner, 2026-10-22, the post-M5 review's P2-02). Its density would add a pmf to a pdf: given
+  y = 0, the posterior came out 0.267 where 0.80 is exact. Gen.jl's types
+  forbid it.
 - **Differences from Gen.jl's test suite** (owner, 2026-10-20, after the
   M5 inventory, `docs/research/genjl-test-suite.md` §4):
   - *Retdiffs are more precise (D1).* A dynamic function's retdiff is
@@ -611,6 +652,13 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     argdiff into no-change for an argument identical to the previous call's.
     This is sound, since a diff claims only what holds. The ports assert
     gen.clj's diffs, and that they are consistent (`diff/consistent?`).
+    *Unchanged* means `gfi/same-value?` (owner, 2026-10-22, the post-M5 review's P1-01 and
+    P1-03): by class and order, so −0.0 differs from 0.0 and a vector
+    from a list, and bounded. Past its budget, or for a lazy value not
+    yet realized, the answer is unknown-change: sound, at the price of
+    this precision there. With `clojure.core/=` the retdiff, `diff/compute`
+    and `diff/consistent?` gave wrong weights (−6.283 where −4π is right)
+    and hung on an infinite lazy return value.
   - *Lookups are loud (D4).* `cm/get-choice`, `cm/get-value` and
     `(tr addr)` at a missing or node address throw ex-info, as Gen.jl
     throws KeyError, where they returned nil (rule 6). Built in M5, with a
@@ -634,7 +682,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     `docs/research/genjl-upstream/issue-1-switch-regenerate.md`).
   - *No default positional arguments (G3).* Clojure has none. A rest
     parameter (`[x & [y z]]`) covers calls, update and regenerate with any
-    number of arguments, and a trace's args are the ones given. A
+    number of arguments, and a trace's args are the ones given. A change
+    in the number of arguments is a change, whatever the argdiffs say
+    (the post-M5 review's P1-02: a rest parameter, an estimated density
+    and the internal proposal's regenerate kept stale work). A
     multi-arity `gen` stays possible if parity is wanted later.
   - *The static IR's internal shape is not ported (G15).* Gen.jl's node
     kinds (argument, parameter and per-expression nodes) are its Julia
@@ -719,6 +770,14 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     so the error grows with log n, as with NumPy's pairwise sum. `mean`,
     `variance`, `logsumexp` and `softmax` are sums too. Metal and CUDA are
     unchanged.
+    Half floats (owner, 2026-10-22). MLX's CPU accumulates float16 and
+    bfloat16 sums in their own precision: 10⁵ terms of 10⁻⁵ came to
+    1 − 0.75 in float16 and 1 − 0.998 in bfloat16. Blocks alone left
+    −3.8e-4 and −4e-2. So a half-float sum is computed in float32, in
+    blocks, and cast back to its dtype, as JAX and XLA do. Metal gets the
+    same treatment only if its measurement shows half-precision
+    accumulation too. Float64 sums stay sequential, on the JVM backend and
+    on MLX's CPU: about 1e-11 relative at 10⁶ terms.
   - Configured by `gen.mlx.device` (`cpu`, `gpu`) and `gen.mlx.dtypes`
     (`32`, `64`).
   - In `gen` bodies, a 0-d backend array counts as its host value for
@@ -1267,7 +1326,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     first build kept scores only before the first constraint or selection,
     so a constraint equal to its token rescored the rest, review-lm M1).
   - `token/dist` is the host distribution (usable at any site); token i is
-    drawn from `(fold-in key i)`. A draw is loud when it finds its row's
+    drawn from `(fold-in key i)`. It takes an integral double as its
+    token (3.0 is token 3), as gen.dist's discrete families do (owner, 2026-10-22, the post-M5 review's
+    P4-06). A draw is loud when it finds its row's
     probabilities not summing to 1 (within 1e-4), at no cost: the walk
     holds the total. Under a batch tracer the operations raise
     the batched-branch error: gen.batched falls back to one particle at a
@@ -1700,8 +1761,15 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   runs under that store, and each iteration also steps it along the
   objective's gradient in the model's parameters, ∇θ log p(x, z) averaged
   over the draws (the ELBO's) or weighted by the normalized weights w̃_k
-  (the K-sample bound's). q's draws do not depend on θ, so each is the
-  exact gradient of the iteration's estimate. One option without the other
+  (the K-sample bound's). q's draws do not depend on θ, but a latent the
+  model samples itself, which q does not propose, may depend on θ
+  (owner, 2026-10-22, the post-M5 review's P3-01). Its draw's score-function term, ∇θ log p(z; θ)
+  times the learning signal, is added: the ELBO's log weight, or VIMCO's
+  own leave-one-out signal. So each gradient is unbiased for the
+  iteration's estimate. Without that term it was biased: 0.005 where 2 is
+  exact, and for VIMCO 1.452 where 1.622 is. The alternative was a
+  documented restriction with a loud error, but such latents are a
+  supported use. One option without the other
   is a loud error, not q's optimizer taken silently; the result holds
   `:model-store`, and `elbo-gradient` and `vimco-gradient` return
   `:model-grads`. The alternative, one store tree `{:q … :model …}` under

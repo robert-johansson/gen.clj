@@ -1,0 +1,5 @@
+a normal model's trace: 0.0
+a distribution's trace: 0.0
+key 0 | the completion's trace: -0.24700522422790527 | call-at's trace (same tokens: false ): 0.0
+key 1 | the completion's trace: -3.5492699816823006 | call-at's trace (same tokens: false ): 0.0
+key 2 | the completion's trace: -0.5925628617405891 | call-at's trace (same tokens: false ): 0.0

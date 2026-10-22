@@ -1,0 +1,2 @@
+10 tokens: |log weight - complete(x)|, max over 20 particles = 1.668294262344716E-4 (complete(x) about -9334.266666666666 )
+100 tokens: |log weight - complete(x)|, max over 20 particles = 0.0010253906657453626 (complete(x) about -101676.83333333327 )

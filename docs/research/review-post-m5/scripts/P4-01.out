@@ -1,0 +1,11 @@
+--- 1. the constrained completion's own draws all satisfy it (tokens 2, then perhaps the end):
+simulate: fraction violating it = 0.0
+--- 2. SMC over the constrained completion, no SMC potential (target per smc's docstring: the completion's distribution):
+particles violating the completion's constraint: 230 of 2000  log-ml-estimate: 0.0
+traces whose score differs from the particle's :log-p: 2000 ; traces of score -Inf (impossible under the completion): 230
+--- 3. SMC over the constrained completion twisted by the same constraint, :masked:
+Z under the LM, sum p(x) exp(complete(x))      = 0.8908814479504688
+Z under the completion, sum q(x) exp(complete(x)) = 0.9999999897318932
+mean of 40 runs' Z-hat (50 particles)            = 0.8914602498563118
+--- 4. the plain completion, for comparison (the documented use):
+mean Z-hat = 0.8914602498563118

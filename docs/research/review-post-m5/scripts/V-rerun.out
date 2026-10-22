@@ -1,0 +1,92 @@
+
+===== P2-09
+fold-in(k, 5) = fold-in(k, 5 + 2^32): true
+v at depths 29..40: [-0.0283 0.0272 0.5474 1.5664 1.5664 1.5664 1.5664 1.5664 1.5664 1.5664 1.5664 1.5664]
+distinct values among depths 32..40: 1 (independent draws: 9)
+400 simulations of the stopping chain: {:at-most-32 317, ArithmeticException: long overflow 83}
+expected: deeper than 32 with probability 0.1840259102355758
+----- P2-09 took 1.1 s
+
+===== P2-01
+gamma(0.001, 1000) (BUGS' vague dgamma(0.001, 0.001)) : n 2000 | +Inf scores 963 | NaN scores 0 | -Inf scores 0 | zero draws 963
+gamma(0.01, 1) : n 20000 | +Inf scores 8 | NaN scores 0 | -Inf scores 0 | zero draws 8
+beta(0.001, 0.001) : n 2000 | +Inf scores 1253 | NaN scores 0 | -Inf scores 448 | zero draws 484
+chi-squared(0.002) (floored, for contrast) : n 2000 | +Inf scores 0 | NaN scores 0 | -Inf scores 0 | zero draws 0
+dirichlet(0.01 x 1000): n 200 | +Inf scores 87 | NaN 0 | finite 113
+model simulate: +Inf scores 493 of 1000
+generate with y observed (weights finite, the prior's score is not): 1000 finite weights of 1000
+a trace: tau nil tau's value 9.363432816230954E-266 score 296.68213538301995 weight -306.04434991285143
+start: lam 0.0 score ##Inf
+custom-proposal MH, 2000 steps from lam = 0: distinct lam values 1
+one step's log-alpha: ##-Inf
+selection MH on :x: The MH acceptance ratio is NaN
+from lam = MIN_NORMAL: score 698.4398637268877 distinct lam values 1 | selection MH on :x log-alpha 0.03813076472286703
+beta(0.001, 0.001) draws: NaN 448 | exactly 0 484 | exactly 1 769
+----- P2-01 took 1.6 s
+
+===== P2-02
+gen.clj: P(w = 1 | y = 0) = 0.2665707315615686
+exact:   P(w = 1 | y = 0) = 0.7999999999999999
+simulated: runs with y = 0: 4934 , of them w = 1: 3995 = 0.809687880016214
+discrete? of the mixture: false
+----- P2-02 took 11.8 s
+
+===== P2-03
+sample: #gen/array[:float64 [1.0 2.0]] value-shape: nil
+log-prob [1 2]: per element #gen/array[:float64 [-1.2039728043259361 -1.2039728043259361]] ; as a trace's score -2.4079456086518722 ; exact -1.2039728043259361
+log-prob [1 0] (impossible): #gen/array[:float64 [-1.2039728043259361 -0.35667494393873234]] ; as a score -1.5606477482646683 ; exact -Inf
+shifted-pair log-prob [0.3 1.3] (on the line): #gen/array[:float64 [-0.9639385332046728 -0.9639385332046728]]  [0.3 5.0] (off it, probability 0): #gen/array[:float64 [-0.9639385332046728 -8.918938533204672]]
+model score with v = [1 2]: -2.4079456086518722 exact -1.2039728043259361
+----- P2-03 took 0.0 s
+
+===== P2-04
+micro-count(3): log-prob at 2e-6 (k = 2) -1.4959226032237267 exact -1.4959226032237267
+  at 1.5e-6 (no k) -1.4959226032237267 exact -Inf
+  at 2.4e-6 (no k) -1.4959226032237267 exact -Inf
+  summed mass over the grid 0, 1e-8, ..., 1e-5 (a pmf sums to at most 1): 97.41475489217216
+reciprocal(500): at 1/501 (k = 500) -4.02640924906018 ; at 1/501.5 (no k) -4.028407251722456
+----- P2-04 took 0.0 s
+
+===== P2-05
+neg-binom(2, 0): [:accepted :draw 0 :log-prob ##-Inf]
+geometric(0) for contrast: [:error geometric: p must be in (0, 1]]
+neg-binom(2, 1e-300): [:draw 9223372036854775807 :log-prob ##-Inf]
+piecewise-uniform with 2-d parameters: [:error Index 2 is out of bounds for a dimension of size 2]
+uniform [1] [0] (low above high) -> [:accepted :draw #gen/array[:float64 [1.0]] :log-prob #gen/array[:float64 [##-Inf]]]
+poisson [-1] -> [:accepted :draw #gen/array[:int64 [1]] :log-prob #gen/array[:float64 [##NaN]]]
+uniform-discrete [3] [1] -> [:accepted :draw #gen/array[:int64 [2]] :log-prob #gen/array[:float64 [##-Inf]]]
+binom [2.5] 0.5 -> [:accepted :draw #gen/array[:int64 [0]] :log-prob #gen/array[:float64 [-1.7328679513998633]]]
+poisson -1 (host, for contrast) -> [:error poisson: lambda must be >= 0]
+----- P2-05 took 0.0 s
+
+===== P2-06
+log density of (0, 10): mixture of the two components (Gen.jl): -51.83787706640935
+  gen.clj, as a trace site scores it: -3.224171427529236
+  per coordinate: #gen/array[:float64 [-1.612085713764618 -1.612085713764618]]
+draws with one coordinate near each cluster: 9988 of 20000 (a mixture of the components: none)
+with mvnormal components (identity covariance): -51.83787706640935
+----- P2-06 took 0.3 s
+
+===== P2-07
+K 10 sequential : draws failing the 1e-6 check 0 of 200; max |sum - 1| 1.7881393432617188E-7
+K 10 pairwise : draws failing the 1e-6 check 0 of 200; max |sum - 1| 1.1920928955078125E-7
+K 100 sequential : draws failing the 1e-6 check 0 of 200; max |sum - 1| 5.960464477539062E-7
+K 100 pairwise : draws failing the 1e-6 check 0 of 200; max |sum - 1| 1.1920928955078125E-7
+K 1000 sequential : draws failing the 1e-6 check 15 of 200; max |sum - 1| 1.5497207641601562E-6
+K 1000 pairwise : draws failing the 1e-6 check 0 of 200; max |sum - 1| 1.1920928955078125E-7
+K 10000 sequential : draws failing the 1e-6 check 126 of 200; max |sum - 1| 4.887580871582031E-6
+K 10000 pairwise : draws failing the 1e-6 check 0 of 200; max |sum - 1| 1.1920928955078125E-7
+float64, K 10000: -Inf log-probs 0 of 20
+----- P2-07 took 9.5 s
+
+===== P2-08
+float32 low bound as stored: -1.0
+of 2^24 float32 uniforms on [nextafter(-1,0), 1): exactly -1.0: 1 (expected about 2)
+laplace's transform there: loc + scale * sign(u) * log1p(-|u|) = ##Inf
+with rng/normal's float32 bound instead: exactly -1.0: 0
+----- P2-08 took 1.8 s
+
+===== P2-11
+float32 (n, p) cases with n·p < 10, p <= 0.5: 1670 | CDF at n below the largest uniform: 220
+examples [n p cdf(n) P(k > n)]: ([5 0.42 0.9999998 5.960464477539063E-8] [6 0.41000000000000003 0.9999998 5.960464477539063E-8] [7 0.41000000000000003 0.9999997 1.7881393432617188E-7] [8 0.29 0.9999998 5.960464477539063E-8] [8 0.4 0.9999998 5.960464477539063E-8])
+----- P2-11 took 0.0 s

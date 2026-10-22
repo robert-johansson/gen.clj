@@ -1,0 +1,4 @@
+constraint 3 | token/dist: -6.920691967010498 | categorical: -6.920691967010498
+constraint 3.0 | token/dist: ##-Inf | categorical: -6.920691967010498
+row[3] = -6.920692
+a completion constrained to 3.0: [:error :invalid-token]

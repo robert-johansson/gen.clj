@@ -1,0 +1,82 @@
+
+===== I3-02 (a): exceptions per log-prob of a discrete pushforward without a finite support
+ex-infos thrown by 20 log-probs (10 shifted-poisson, 10 shifted-geometric): 20
+shifted-poisson log-prob at 4 (log P(X=3), lam 3; expect -1.4959) => -1.4959226032237267
+shifted-geometric log-prob at 4 (log P(G=2), p .3 = log(.3·.49) = -1.9173) => -1.9173226922034008
+round 0 poisson log-prob ns 1259  shifted-poisson log-prob ns 7347
+round 1 poisson log-prob ns 1339  shifted-poisson log-prob ns 6827
+round 2 poisson log-prob ns 1284  shifted-poisson log-prob ns 7000
+
+===== I3-02 (b): a host family in a dist body, as the public API allows it
+(dist shifted-host [lam] (array/+ (host-poisson lam) 1)), unmarked var => CompilerException: Syntax error macroexpanding gen.dist.dsl/dist at (/private/tmp/claude-501/-Users-robert-code-gen-clj/826ae76f-f183-43cd-bbe4-ed91ce6aaf6f/scratchpad/wt-review/../review-post-m5/scripts/V-I3-all.clj:41:14). #:clojure.error{:phase :macro-syntax-check, :line 41, :column 14, :source "/private/tmp/claude-501/-Users-robert-code-gen-clj/826ae76f-f183-43cd-bbe4-ed91ce6aaf6f/scratchpad/wt-review/../review-post-m5/scripts/V-I3-all.clj", :symbol gen.dist.dsl/dist}
+is host-poisson's var marked as a constructor? => false
+host-poisson's own support (no finite support) => ExceptionInfo: host-poisson has no enumerable support {:family "host-poisson"}
+only with the private marker planted: log-prob at 4 => ExceptionInfo: host-poisson has no enumerable support {:family "host-poisson"}
+
+===== I3-03: labeled categorical log-prob vs the categorical's, and a rebuilt draw
+K 10 categorical us 10.82  labeled-cat us 59.7  dc/log-prob calls in one labeled log-prob: 11
+K 100 categorical us 2.61  labeled-cat us 324.9  dc/log-prob calls in one labeled log-prob: 101
+K 1000 categorical us 5.15  labeled-cat us 5636.0  dc/log-prob calls in one labeled log-prob: 1001
+labeled-cat log-prob of :l3 at K 10 (expect log 0.1 = -2.3026) => -2.3025850929940455
+round 0 exponential log-prob ns 92  shifted-exp ns 216  (d/exponential 2.0) construction ns 43
+round 1 exponential log-prob ns 87  shifted-exp ns 222  (d/exponential 2.0) construction ns 46
+round 2 exponential log-prob ns 95  shifted-exp ns 223  (d/exponential 2.0) construction ns 46
+bernoulli(p of shape [3]) support => [false true]
+one call over the support, (dc/log-prob b (array/array support)) => ExceptionInfo: Shapes [2] and [3] do not broadcast {:shapes [[2] [3]]}
+per-value scoring, stacked (what dist does now) => [[-0.10536051565782631 -0.22314355131420976 -0.35667494393873234] [-2.3025850929940455 -1.6094379124341003 -1.2039728043259361]]
+
+===== I3-04: array/eval! calls in the scalar particle-filter paths (50 particles)
+pf/step: 51
+pf/rejuvenate: 51
+pf/move-reweight: 51
+importance-sampling (for comparison): 50
+pf/initialize: 0
+
+===== I3-05: value-shape check cost, alternating rounds
+round 0 check-value-shape ns 95  value-shape ns 93  log-prob ns 101
+round 1 check-value-shape ns 97  value-shape ns 93  log-prob ns 99
+round 2 check-value-shape ns 95  value-shape ns 93  log-prob ns 100
+round 0 regenerate :mu (200 kept sites) us: with check 283.0  without 251.2  share 11.2%
+round 1 regenerate :mu (200 kept sites) us: with check 281.7  without 252.3  share 10.5%
+round 2 regenerate :mu (200 kept sites) us: with check 271.1  without 237.8  share 12.3%
+round 3 regenerate :mu (200 kept sites) us: with check 265.9  without 238.3  share 10.4%
+
+===== I3-06: defdist and unknown clauses
+construct v-exp (clause logprob) => #gen/dist[v-exp {:rate 1.0}]
+its log-prob => IllegalArgumentException: No method in multimethod '-log-prob' for dispatch value: :user/v-exp
+construct v-pos with rate -1 (validation silently skipped?) => #gen/dist[v-pos {:rate -1.0}]
+v-disc discrete? (declared true under a misspelled clause) => false
+
+===== I3-07: every gen.dist constructor declares a value shape
+constructors: 31  without a value-shape method: []
+with a discrete? method: 8 [bernoulli binom categorical categorical-logits geometric neg-binom poisson uniform-discrete]
+
+===== I3-10: compiled-step cache
+entries after 17 distinct keys: 1 (16 then wholesale eviction: expect 1)
+
+===== I3-12: piecewise-uniform with leading axes; the mixture's element shape
+value-shape => [2]
+sample => ExceptionInfo: Index 2 is out of bounds for a dimension of size 2 {:index 2, :size 2}
+sample, key 4 => ExceptionInfo: Shapes [2 3] and [2] do not broadcast {:shapes [[2 3] [2]]}
+log-prob [0.5 10.5] => ExceptionInfo: Shapes [2] and [3] do not broadcast {:shapes [[2] [3]]}
+normal(mu [3])  value-shape [3]  log-density shape (the mixture's elements) [3]
+mvnormal(d 2)  value-shape [2]  log-density shape (the mixture's elements) []
+
+===== I3-13: nil parameters
+(d/normal 0.0 nil) => #gen/dist[normal {:mu 0.0, :std nil}]
+  sampled => ExceptionInfo: shape: not an array: nil (convert data with gen.array/array) {:op :shape, :value nil}
+(d/bernoulli nil) => #gen/dist[bernoulli {:p nil}]
+(d/categorical nil) => ExceptionInfo: backend: not an array: nil (convert data with gen.array/array) {:op :backend, :value nil}
+
+===== I3-14: case on user options
+learn/init :rmsprop => IllegalArgumentException: No matching clause: :rmsprop
+learn/step :rmsprop => IllegalArgumentException: No matching clause: :rmsprop
+vi/elbo-gradient :baseline :loo => IllegalArgumentException: No matching clause: :loo
+pf/dereplicate :method :first => IllegalArgumentException: No matching clause: :first
+
+===== Missed? hmc's third argument given a key
+mala, key last, twice: -0.8634649820548002 -0.8634649820548002
+hmc, opts then key, twice: 0.45202936984683095 0.45202936984683095
+hmc, a key as its third argument, twice: 1.7149516841809758 -0.050317447222720135
+
+===== done

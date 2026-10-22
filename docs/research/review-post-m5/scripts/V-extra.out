@@ -1,0 +1,5 @@
+batched params: log-prob of [0 4] #gen/array[:float64 [-1.6117503073917223 -3.568939243804871]] ; row by row [-1.6117503073917223 -3.5689392438048704]
+  component 0's value-shape (what the reviewer's direction would sum over): [2]
+poisson: lowest float32 CDF at 39 for lam in 0.1..9.9: lam 9.1 CDF 0.9999997019767761 ; 1 - CDF 2.980232238769531E-7
+  8e6 draws: value 40 drawn 1 times; P(K >= 40) exact 4.037453637795487E-14
+  log-prob of 40: -31.089663173845196
