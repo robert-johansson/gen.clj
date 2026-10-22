@@ -1,0 +1,4 @@
+:soft sum of q over every completion = 1.000000009070571 ; Z = 0.840964979245576 ; E_q[exp(cw)] = 0.840964979245576
+:soft laws: done
+:product sum of q over every completion = 0.9999999920287702 ; Z = 0.8158717270732199 ; E_q[exp(cw)] = 0.8158717270732199
+:product laws: done

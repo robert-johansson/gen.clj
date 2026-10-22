@@ -1,0 +1,12 @@
+;; V-I4-10 (verifier): is a tag on a fn form resolved? Compare smc's own form, which names Callable unimported.
+(set! *warn-on-reflection* true)
+(defn msg [f] (try (f) :no-error (catch Throwable t (str (.getName (class t)) ": " (ex-message t) " / " (some-> t .getCause ex-message)))))
+(println "1." (msg #(eval '(mapv (fn [x] ^NoSuchClass (fn [] x)) [1 2]))))
+(println "2." (msg #(eval '(mapv (fn [x] ^Callable (fn [] x)) [1 2]))))
+(println "3." (msg #(eval '(let [f (fn [x] x)] (mapv (fn [x] ^Callable (fn [] (f x))) [1 2])))))
+(require 'gen.llm.smc)
+(println "4. smc loads; Callable imported in its ns?" (contains? (ns-imports 'gen.llm.smc) 'Callable)
+         "; in user?" (contains? (ns-imports 'user) 'Callable))
+(println "5." (msg #(eval '(.invokeAll ^java.util.concurrent.ExecutorService (java.util.concurrent.Executors/newFixedThreadPool 1)
+                                    ^java.util.Collection (mapv (fn [x] ^NoSuchClass (fn [] x)) [1 2])))))
+(System/exit 0)

@@ -1,0 +1,7 @@
+a completion under the mismatched grammar: :mismatched-end-tokens
+the same grammar inside a product: :no-error
+token SMC, Z = P(the completion's text is in .*) = 1 for every completion of 3 tokens:
+  matched grammar,    :masked  mean Z-hat = 1.0
+  mismatched grammar, :masked  mean Z-hat = 0.3719579586873007  (no error)
+  mismatched grammar, :lm      mean Z-hat = 0.377
+  exact P(no EOS token among 3) = 0.37513368255824375

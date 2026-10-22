@@ -1,0 +1,58 @@
+
+===== V-P2-09
+fold-in(key 1, 5)        = [3243370355 1313272271]  JAX: [3243370355 1313272271]
+fold-in(key 1, 2^32 + 5) = [3243370355 1313272271]
+64-bit fold = today's for 43 values below 2^32: true
+64-bit fold of 5 and 5 + 2^32 differ: true
+max-branch 8, v at depths 8..14: [2.2025 -0.0276 -0.5230 0.4729 0.4729 0.4729 0.4729]
+  nodes mod 2^32: [2396745 19173961 153391689 1227133513 1227133513 1227133513 1227133513]
+max-branch 4: node a at depth 17 = 10021590356 , node b at depth 17 = 14316557652 , equal mod 2^32: true
+  their v: 0.717484171610622 0.717484171610622 | at depth 16 (distinct residues): -0.4146607834901316 -0.9359335797376038
+next-key at counter 0 = next-key at counter 2^32: true
+----- V-P2-09 took 0.8 s
+
+===== V-P2-01
+gamma(0.005): zero draws 510 of 20000 ; derived rate 0.0241 → expected 482 ± 108
+  log-prob at 0: ##Inf
+trace with g = 0: score ##Inf | assess ##Inf
+update to s = 1 (x's density changes, g kept): weight ##NaN ; exact -0.6093996038144914
+regenerate :x: weight ##NaN ; exact (forward-sampling: retained ratio) 0.0
+beta(0.003, 0.003): 20000 draws: NaN 220 (derived 229) | exactly 0 1867 | exactly 1 8802 (derived 1910 each)
+  their log-probs: +Inf 10669 | -Inf 220
+----- V-P2-01 took 0.2 s
+
+===== V-P2-02
+log-prob at 0: -0.5460045490723028 ; w.r.t. counting + Lebesgue -1.2039728043259361 ; what gen.clj adds: -0.5460045490723028
+log-prob at 0.5: -1.4006134771434051 ; exact -1.4006134771434051
+P(Y = 0) by simulation: 0.30011 ; exact 0.3
+discrete? false
+P(w = 0.9 | y = 0): gen.clj 0.671860620132545 ; exact 0.9
+----- V-P2-02 took 0.1 s
+
+===== V-P2-06
+score of (0 4 4): gen.clj -4.673068333144033 | whole-value mixture (Gen.jl) -11.11334678418895 | per-coordinate mixture -4.673068333144033
+dims [1 1], means [K d]: #gen/array[:float64 [-2.122128897584823 -1.275469717779605 -1.275469717779605]] 
+dims [0 0], means [d K]: #gen/array[:float64 [-2.122128897584823 -1.275469717779605 -1.275469717779605]]
+heterogeneous [normal normal], score of (0 4 4): -4.673068333144033
+weights [2 2]: value-shape [2] log-prob of [0 4] #gen/array[:float64 [-1.6117503073917223 -3.218509011069317]] ; rows -1.6117503073917223 -3.218509011069317
+----- V-P2-06 took 0.0 s
+
+===== V-P2-03
+sample: #gen/array[:float64 [2.0 5.0]]
+score of [1 1]: -2.4079456086518722 ; exact log 0.3 = -1.2039728043259361
+score of [1 5] (no point): -1.8971199848858813 ; exact -Inf
+score of [0 5] (no point): -2.3025850929940455 ; exact -Inf
+host labels: log-prob of [1 1] -1.2039728043259361 ; of [1 5] ##-Inf
+----- V-P2-03 took 0.0 s
+
+===== V-P2-04
+offset-count: at 1e6 + 2 -1.4959226032237267 ; at 1e6 + 2.5 (no k) -1.4959226032237267 ; at 1e6 + 2.3 (no k) -1.4959226032237267 ; exact -Inf off the integers
+small-shift: at 5 -1.4959226032237267 ; at 5.00001 (within the tolerance 6e-5) -1.4959226032237267
+----- V-P2-04 took 0.0 s
+
+===== V-P2-11
+cases 1646 | with a float32 CDF at n below 1: 649
+lowest float32 CDF at n: n 37 p 0.25 CDF 0.999998927116394 ; 1 - CDF 1.0728836059570312E-6
+binom(n, float32 p), 8e6 draws on the JVM: draws above n {40 12} ; expected about 8.58306884765625
+dtype of p: :float32 ; of a draw's lp at 40: ##-Inf
+----- V-P2-11 took 20.4 s
