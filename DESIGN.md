@@ -848,7 +848,13 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   compares by `=` (`array/==` where both values are numbers), so a given
   label is scored on the host, without the fallback, and the gradient
   reaches the probabilities; a label itself has none (Gen.jl's
-  `nothing`). A host parameter is the same for every particle; a draw of
+  `nothing`). An array label is compared whole, so a vector label is one
+  value (the post-M5 review's P2-03: elementwise, a coin broadcast to
+  [1 2] counted twice). A draw without an enumerable support keeps its own
+  shape: a body that broadcasts it is an error, as such values have no
+  density. Its inverse is kept within a few ulps and a quarter of the
+  lattice's spacing (P2-04: a fixed relative 1e-5 gave mass 97 to a grid
+  under (* 1e-6 (poisson 3))). A host parameter is the same for every particle; a draw of
   labels in a batched run falls back to one particle at a time, and
   `(sample d key [n])` of labels is an ex-info, as no array holds them.
   The alternatives: conversion by shape for every parameter, which would

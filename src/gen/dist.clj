@@ -592,8 +592,9 @@
   (log-prob [v]
     (guard (logical-and (logical-and (>= v low) (<= v high)) (integral? v))
            (- (log (+ (- high low) 1)))))
-  (support [] (vec (range (dc/support-bound "uniform-discrete" "low" low)
-                          (inc (dc/support-bound "uniform-discrete" "high" high))))))
+  (support [] (let [lo (dc/support-bound low)
+                    hi (dc/support-bound high)]
+                (when (and lo hi) (vec (range lo (inc hi)))))))
 
 (defdist geometric
   "geometric(p): the number of failures before the first success."
@@ -705,7 +706,7 @@
     (guard (logical-and (logical-and (>= v 0) (<= v n)) (integral? v))
            (+ (- (lgamma (+ n 1)) (lgamma (+ v 1)) (lgamma (+ (- n v) 1)))
               (xlogy v p) (xlog1py (- n v) (- p)))))
-  (support [] (vec (range (inc (dc/support-bound "binom" "n" n))))))
+  (support [] (some->> (dc/support-bound n) inc range vec)))
 
 (defdist neg-binom
   "neg_binom(r, p): the number of failures before the r-th success (r may be

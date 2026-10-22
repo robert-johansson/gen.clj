@@ -107,8 +107,7 @@
 (defmethod dc/-support ::host [d]
   (let [{:keys [family object]} (:params d)
         s (when-let [f (:support family)] (f object))]
-    (or (some-> s vec)
-        (throw (ex-info (str (:name family) " has no enumerable support") {:family (:name family)})))))
+    (some-> s vec)))
 
 (defmethod dc/-value-shape ::host [_] [])
 

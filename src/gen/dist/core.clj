@@ -24,7 +24,11 @@
 
 (defmulti -sample "Draw a value: (-sample d key batch-shape)." (fn [d _key _batch-shape] (:type d)))
 (defmulti -log-prob "The log density (or mass) of value v: (-log-prob d v)." (fn [d _v] (:type d)))
-(defmulti -support "The values of a discrete distribution, in order." (fn [d] (:type d)))
+(defmulti -support
+  "The values of a discrete distribution, in order, or nil when it has none
+   to enumerate (its values are not finite, or array parameters bound
+   them)."
+  (fn [d] (:type d)))
 
 (defmulti -discrete?
   "Does the distribution have discrete values (Gen.jl's is_discrete)?"
@@ -34,8 +38,7 @@
 
 (defn discrete? [d] (boolean (-discrete? d)))
 
-(defmethod -support :default [d]
-  (throw (ex-info (str "Distribution " (:type d) " has no enumerable support") {:type (:type d)})))
+(defmethod -support :default [_] nil)
 
 (defn sample
   "A draw from d, a pure function of key. batch-shape (default []) is
@@ -49,7 +52,18 @@
   [d v]
   (-log-prob d v))
 
-(defn support [d] (-support d))
+(defn enumerable-support
+  "d's support, in order, or nil when it has none to enumerate."
+  [d]
+  (-support d))
+
+(defn support
+  "d's support, in order: an error when it has none to enumerate."
+  [d]
+  (or (-support d)
+      (throw (ex-info (str "Distribution " (:type d) " has no enumerable support (its values are not finite,"
+                           " or array parameters bound them)")
+                      {:type (:type d)}))))
 
 (defmulti -value-shape
   "The shape of one value of the distribution, or nil when it is not
@@ -153,16 +167,14 @@
 
 (defn support-bound
   "An integer parameter bounding an enumerable support (a count, a bound),
-   on the host. Supports are host data for enumeration
+   on the host, or nil for an array of several, whose elements bound
+   supports of their own. Supports are host data for enumeration
    (gen.inference.enumerative), so a one-element array is read, also on a
    lazy backend, as a Switch reads its branch index; a batched one (whose
    particles may differ) is the batched-branch error."
-  ^long [dist-name param-name v]
+  [v]
   (cond (array/host? v) (long v)
-        (and (array/array? v) (= 1 (array/size v))) (long (array/item v))
-        :else (throw (ex-info (str dist-name ": an enumerable support needs one " param-name ", not an array of shape "
-                                   (array/shape v))
-                              {:distribution dist-name :param param-name}))))
+        (and (array/array? v) (= 1 (array/size v))) (long (array/item v))))
 
 (defn check-probabilities
   "Concrete probability vectors (the last axis) must be non-negative and sum to
@@ -240,7 +252,7 @@
      (validate (check-positive \"normal\" \"std\" std))
      (sample [key batch-shape] ...)
      (log-prob [v] ...)
-     (support [] ...)
+     (support [] ...)        ; the values in order, nil for none
      (discrete? [] ...)
      (value-shape [] ...))
 

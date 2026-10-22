@@ -15,12 +15,18 @@
    kind it is):
    - a draw with an enumerable support (bernoulli, categorical, …): the
      mass of every value of the support that the body maps to v, summed,
-     so labels may repeat, and the support lists each value once;
+     so labels may repeat, and the support lists each value once. A label
+     is compared whole, so a body that broadcasts its draw to a vector, or
+     picks a vector label, maps a draw to one value;
    - another discrete draw (poisson, geometric, …): the body inverted on the
      way down to the draw, as below but without Jacobians, the result
-     rounded to an integer and kept only when the body maps it back to v;
+     rounded to an integer and kept only when the body maps it back to v,
+     within a few ulps and a quarter of the lattice's spacing there;
    - a continuous draw: the body inverted on the way down to the draw, with
      the log of each step's Jacobian.
+   Only a draw with an enumerable support may map to values of another
+   shape than its own: one draw broadcast to several values has no density,
+   so such a sample, or a value of another shape at a site, is an error.
    The steps an inversion passes through must be invertible: +, -, * and /
    by draw-free terms (either side of / ), negate, exp and log, from
    gen.array. Anything else on the way is an error when the density is
@@ -114,19 +120,65 @@
             y' (gensym "y")]
         (recur (nth args i) y' (conj bindings y' inner) (cond-> jacobians jacobian (conj jacobian)))))))
 
-(defn enumerable-support
-  "d's support, or nil when it has none to enumerate (a distribution
-   without one, or bounds that are arrays). Other errors propagate."
-  [d]
-  (try (dc/support d)
-       (catch clojure.lang.ExceptionInfo e
-         (if (some #(contains? (ex-data e) %) [:type :distribution]) nil (throw e)))))
+(defn- maps-to
+  "Is y, the body's value at a support value, the value v, as a whole: where
+   both are numbers (arrays), equal over y's last label-axes (one label's),
+   so a vector label is one value, and elementwise over the axes before
+   (a batch); by = where either is not (a label of host data)."
+  [y v label-axes]
+  (if (and (array/array? y) (array/array? v))
+    (cond-> (array/== y v) (pos? label-axes) (array/all {:axis (vec (range (- label-axes) 0))}))
+    (= y v)))
 
-(defn ^:no-doc maps-to
-  "Is y, the body's value at a draw, the value v: elementwise where both are
-   numbers (arrays), by = where either is not (a label)."
-  [y v]
-  (if (and (array/array? y) (array/array? v)) (array/== y v) (= y v)))
+(defn- label-axes
+  "The axes of one label in y, the body f's value at the support value x of
+   the draw d, whose values have shape b: all of y's for a draw of one
+   scalar value, else those beyond the draw's batch, which f keeps (an
+   elementwise body's or a gather's alike)."
+  [b f x y]
+  (if (empty? b)
+    (array/ndim y)
+    (- (array/ndim (f (array/full b x))) (count b))))
+
+(defn ^:no-doc support-log-prob
+  "The log mass of v under the pushforward of the draw d by f: the mass of
+   every support value f maps to v, summed (labels may repeat). Labels of
+   host data are matched on the host, so only their matches are scored;
+   array labels are compared whole (maps-to), and a draw of one scalar value
+   scores its whole support in one call."
+  [d f support v]
+  (let [ys (mapv f support)]
+    (if-not (and (array/array? (first ys)) (array/array? v))
+      (let [hits (keep-indexed (fn [i y] (when (= y v) (support i))) ys)]
+        (case (count hits)
+          0 (array/where false (dc/log-prob d (first support)) ##-Inf)
+          1 (dc/log-prob d (first hits))
+          (array/logsumexp (array/stack (mapv #(dc/log-prob d %) hits)) {:axis 0})))
+      (let [vs (dc/value-shape d)
+            r (label-axes (or vs (array/shape (dc/log-prob d (first support)))) f (first support) (first ys))]
+        (array/logsumexp
+         (if (= [] vs)
+           ;; one call where the family declares values of no shape: its
+           ;; log-prob of K values is K log-probs
+           (let [matches (array/stack (mapv #(maps-to % v r) ys))]
+             (array/where matches
+                          (array/reshape (dc/log-prob d (array/array support))
+                                         (into [(count support)] (repeat (dec (array/ndim matches)) 1)))
+                          ##-Inf))
+           ;; else each value's match broadcasts against the draw's batch
+           (array/stack (mapv (fn [x y] (array/where (maps-to y v r) (dc/log-prob d x) ##-Inf)) support ys)))
+         {:axis 0})))))
+
+(defn ^:no-doc on-lattice?
+  "Is y, the body's value at the integer x nearest the inverse of v, v
+   itself: within a few ulps of v's dtype (rounding in the body), and within
+   a quarter of the lattice's spacing there, y-next being the value at x + 1,
+   so no value between two images takes either's mass."
+  [y y-next v]
+  (let [eps (if (= :float32 (array/dtype y)) (double (Math/ulp (float 1.0))) (Math/ulp 1.0))
+        off (array/abs (- y v))]
+    (array/logical-and (array/<= off (* 4.0 eps (array/abs v)))
+                       (array/<= off (* 0.25 (array/abs (- y-next y)))))))
 
 (defn ^:no-doc host-value
   "y, the body's value at a support value, as host data."
@@ -138,11 +190,22 @@
    a batch of them (a sample of a batch shape) has no array."
   [dist-name d f batch-shape]
   (when (and (seq batch-shape) (dc/discrete? d))
-    (when-let [x (first (enumerable-support d))]
+    (when-let [x (first (dc/enumerable-support d))]
       (when-not (array/array? (f x))
         (throw (ex-info (str dist-name ": its values are not numbers, so it draws one at a time, not a batch of shape "
                              batch-shape)
                         {:dist dist-name :batch-shape batch-shape}))))))
+
+(defn ^:no-doc check-shape
+  "Throw when the body maps a draw x of d to a value y of another shape and
+   d has no enumerable support: one draw broadcast to several values has no
+   density (an enumerable draw's labels may have any shape)."
+  [dist-name d x y]
+  (when (and (array/array? y) (not= (array/shape x) (array/shape y)) (nil? (dc/enumerable-support d)))
+    (throw (ex-info (str dist-name ": the body maps a draw of shape " (array/shape x) " to a value of shape "
+                         (array/shape y) ", which has no density; only a draw with an enumerable support"
+                         " (bernoulli, categorical, …) maps to labels of another shape")
+                    {:dist dist-name :draw-shape (array/shape x) :value-shape (array/shape y)}))))
 
 (defmacro dist
   "Define a distribution as a pushforward of one draw (see the namespace
@@ -172,26 +235,23 @@
         (let [d# ~draw
               f# ~body-fn]
           (check-batch ~(str dist-name) d# f# shape#)
-          (f# (dc/sample d# key# shape#))))
+          (let [x# (dc/sample d# key# shape#)
+                y# (f# x#)]
+            (check-shape ~(str dist-name) d# x# y#)
+            y#)))
        (~'log-prob [~v]
         (let [~dd ~draw]
           (if (dc/discrete? ~dd)
-            (if-let [support# (enumerable-support ~dd)]
-              ;; the mass of the support values the body maps to v
-              (let [f# ~body-fn]
-                (array/logsumexp
-                 (array/stack (mapv (fn [~x] (array/where (maps-to (f# ~x) ~v) (dc/log-prob ~dd ~x) ##-Inf)) support#))
-                 {:axis 0}))
+            (if-let [support# (dc/enumerable-support ~dd)]
+              (support-log-prob ~dd ~body-fn support# ~v)
               ~(or not-invertible
                    (let [[bindings x-of-v] inverted]
-                     ;; the inverse rounded to the draw's integers, kept when it maps back
-                     ;; to v (within float32's precision: images of distinct integers
-                     ;; lie much further apart)
+                     ;; the inverse rounded to the draw's integers, kept when the
+                     ;; body maps it back to v (on-lattice?)
                      `(let [~@bindings
-                            ~x (array/round ~x-of-v)]
-                        (array/where (array/<= (array/abs (- ~f-body ~v)) (* 1e-5 (+ 1.0 (array/abs ~v))))
-                                     (dc/log-prob ~dd ~x)
-                                     ##-Inf)))))
+                            ~x (array/round ~x-of-v)
+                            f# ~body-fn]
+                        (array/where (on-lattice? (f# ~x) (f# (+ ~x 1)) ~v) (dc/log-prob ~dd ~x) ##-Inf)))))
             ~(or not-invertible
                  (let [[bindings x-of-v jacobians] inverted]
                    `(let [~@bindings
@@ -199,6 +259,10 @@
                       ;; outside a step's range the inverse is NaN: density 0
                       (array/where (array/isnan lp#) ##-Inf lp#)))))))
        (~'discrete? [] (dc/discrete? ~draw))
+       ;; a draw's own shape where the body is inverted: other shapes are
+       ;; errors at a site; an enumerable draw's labels go unchecked
+       (~'value-shape [] (let [d# ~draw]
+                           (when-not (and (dc/discrete? d#) (dc/enumerable-support d#)) (dc/value-shape d#))))
        (~'support [] (let [d# ~draw
                            f# ~body-fn]
                        (vec (distinct (map #(host-value (f# %)) (dc/support d#)))))))))
