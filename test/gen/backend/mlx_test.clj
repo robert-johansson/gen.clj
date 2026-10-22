@@ -4,7 +4,8 @@
    native library or the compiled binding is missing."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
-            [gen.array.memory :as reservations]))
+            [gen.array.memory :as reservations]
+            [gen.array.protocols :as p]))
 
 (def available?
   (delay
@@ -134,9 +135,12 @@
         (is (== 1.0 (gen.mlx.Mlx/mlx_array_item_float32 x))))
       (gen.mlx.MlxRaw/mlx_array_free x))
     (testing "through the backend, as ex-info naming the op"
-      (let [b (mlx)]
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"do not broadcast"
-                              (array/with-backend b (array/+ (array/array [1.0 2.0]) (array/array [1.0 2.0 3.0])))))
+      ;; the protocol called directly: gen.array checks a reshape's size
+      ;; before it calls a backend (genclj-q45d), so MLX never sees this one
+      (let [b (mlx)
+            x (array/with-backend b (array/array [1.0 2.0 3.0]))]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"^reshape: .*[Rr]eshape"
+                              (p/-reshape b x [2 2])))
         (when (= :gpu ((requiring-resolve 'gen.backend.mlx/device) b))
           (is (thrown? clojure.lang.ExceptionInfo
                        (array/with-backend b (array/->clj (array/array [1.0] {:dtype :float64}))))
@@ -525,13 +529,108 @@
         new-device? #(and (symbol? %) (= "mlx_device_new_type" (name %)))]
     (is (= ['with-temps] (vec (keep #(when (seq (uses % array-list?)) (named %)) forms)))
         "a list of temporaries only in with-temps")
-    (is (= ['with-device 'device-handle] (vec (keep #(when (seq (uses % new-device?)) (named %)) forms)))
-        "devices made only by with-device and device-handle")
-    (is (every? #(seq (uses % (fn [x] (and (symbol? x) (= "mlx_device_free" (name x))))))
-                (filter #(and (not= 'device-handle (named %))
-                              (seq (uses % (fn [x] (and (seq? x) (= 'device-handle (first x)))))))
-                        forms))
-        "who calls device-handle frees what it gets")))
+    ;; with-default-stream took its device by hand too, before its try
+    ;; (cross-review 3): it goes through with-device now
+    (is (= ['with-device] (vec (keep #(when (seq (uses % new-device?)) (named %)) forms)))
+        "devices made only by with-device, which frees them")))
+
+(defn- tail-forms
+  "The forms in tail position of form, the ones it returns: through let,
+   do, if, cond, case, try and fn bodies, and the backend's body macros."
+  [form]
+  (if-not (seq? form)
+    [form]
+    (let [[op & args] form]
+      (case op
+        (let let* loop do when when-not binding fn* with-open with-temps with-operands evaluating with-default-stream)
+        (tail-forms (last form))
+        (if if-not) (mapcat tail-forms (rest args))
+        cond (mapcat tail-forms (take-nth 2 (rest args)))
+        case (let [clauses (rest args)]
+               (mapcat tail-forms (concat (take-nth 2 (rest clauses)) (when (odd? (count clauses)) [(last clauses)]))))
+        try (tail-forms (last (remove #(and (seq? %) (#{'catch 'finally} (first %))) args)))
+        [form]))))
+
+(def ^:private handle-makers
+  "The backend's makers of new handles besides Mlx's calls: its private fns
+   that return one, and the runtime's makers of handles, closures and
+   vectors."
+  '#{scalar-handle made half-scalar-handle safe-indices int-division java-int-cast int-power
+     MlxRuntime/closure MlxRuntime/customVjp MlxRuntime/vectorOf MlxRuntime/vectorArrays MlxRuntime/retain})
+
+(defn- handle-call?
+  "Does form make a new handle: an Mlx call (not a free, an evaluation or a
+   flag), an MlxRaw constructor, or one of handle-makers?"
+  [form]
+  (and (seq? form) (symbol? (first form))
+       (let [f (first form) n (name f)]
+         (case (namespace f)
+           "Mlx" (not (or (.endsWith n "_free") (= "mlx_array_eval" n) (.startsWith n "_mlx_array_is")))
+           "MlxRaw" (.contains n "_new")
+           (contains? handle-makers f)))))
+
+(defn- loose-handles
+  "The handle-making calls in the backend's source forms that a failure can
+   leak: in a with-temps body, a standalone with-operands body or a helper
+   handed t, one neither registered with t, nor wrapped, nor the body's
+   result. A nested with-temps is checked as its own body."
+  [forms]
+  (let [registers? (fn [t f] (or (= t f) (and (seq? f) (= 'fn* (first f)) (seq? (last f)) (= t (first (last f))))))
+        held-by (fn [t form]
+                  ;; the forms a call hands to t, to wrap (or wrap-all), to
+                  ;; a mapv of t, or to made (a constructor's thunk): their tails
+                  (when (seq? form)
+                    (cond (#{t 'wrap 'wrap-all} (first form)) (tail-forms (last form))
+                          (and (= 'mapv (first form)) (registers? t (second form))) (tail-forms (last form))
+                          (= 'made (first form)) (tail-forms (last form)))))
+        nested-temps? #(and (seq? %) (= 'with-temps (first %)))
+        loose (fn [t body]
+                (let [inside (tree-seq #(and (coll? %) (not (nested-temps? %))) seq body)
+                      ok (java.util.IdentityHashMap.)]
+                  (doseq [f (concat (tail-forms (last body)) (mapcat #(held-by t %) inside))]
+                    (.put ok f true))
+                  (filter #(and (handle-call? %) (not (.containsKey ok %))) inside)))
+        bodies (fn [top]
+                 (let [all (tree-seq coll? seq top)
+                       in-temps (set (mapcat #(when (nested-temps? %) (rest (tree-seq coll? seq %))) all))
+                       t-param (when (and (seq? top) (#{'defn 'defn-} (first top)))
+                                 (some (fn [v] (when (vector? v) (some '#{t} v))) top))]
+                   (concat
+                    (for [f all :when (nested-temps? f)] [(first (second f)) (drop 2 f)])
+                    (for [f all :when (and (seq? f) (= 'with-operands (first f)) (not (in-temps f)))]
+                      ['no-t (drop 4 f)])
+                    (when t-param [[t-param (drop-while #(not (vector? %)) top)]]))))]
+    (vec (for [top forms [t body] (bodies top) f (loose t body)] f))))
+
+(deftest every-handle-made-is-registered-wrapped-or-returned
+  ;; cross-reviews 3 and 5 of genclj-f0wz: each handle a site makes goes to
+  ;; t as it is made, or to wrap (the Cleaner then owns it), or is the
+  ;; site's result, so a later failure leaks nothing. slogdet held log|det|
+  ;; unregistered while six more handles were made, which at Metal's buffer
+  ;; limit leaked it and the graph back to its matrix; the failure-path
+  ;; test, counting only what t registered, could not see it. The walk
+  ;; covers every maker of a handle (not only Mlx's calls), standalone
+  ;; with-operands bodies and the helpers handed t. Read from the source,
+  ;; so it runs without MLX. Planted (2026-10-22): slogdet's logabs
+  ;; unwrapped again fails; the two plants below are cross-review 5's, which
+  ;; the narrower walk let through
+  (let [path "src/gen/backend/mlx.clj"
+        text (slurp path)
+        forms-of (fn [s] (binding [*read-eval* false]
+                           (let [r (java.io.PushbackReader. (java.io.StringReader. s))]
+                             (doall (take-while #(not= % ::eof) (repeatedly #(read {:eof ::eof} r)))))))
+        planted (fn [old new]
+                  (is (.contains ^String text old) (str "the plant's site is in the source: " old))
+                  (loose-handles (forms-of (.replace ^String text ^CharSequence old ^CharSequence new))))]
+    (is (= [] (loose-handles (source-forms path))))
+    (testing "the walk's power"
+      (is (= '[(scalar-handle 0 dtype)]
+             (planted "(let [zero (t (scalar-handle 0 dtype))" "(let [zero (scalar-handle 0 dtype)"))
+          "int-division's zero, made without its t")
+      (is (= '[(Mlx/mlx_contiguous h false (stream b))]
+             (planted "    (wrap b (Mlx/mlx_reshape h (int-array (map int shape)) (stream b)))))"
+                      "    (let [c (Mlx/mlx_contiguous h false (stream b))] (wrap b (Mlx/mlx_reshape c (int-array (map int shape)) (stream b))))))"))
+          "reshape's operand copied before it is wrapped, which leaks on every call"))))
 
 (defn- counting-temporaries
   "[registered freed]: the temporaries with-temps registers and frees while
@@ -556,11 +655,14 @@
 (deftest every-temporary-is-freed-when-a-site-fails
   ;; each site of with-temps, run whole and then failing at each of its
   ;; registrations in turn: what was registered before is freed. Planted
-  ;; (2026-10-22): with-temps' finally freeing nothing fails
+  ;; (2026-10-22): with-temps' finally freeing nothing fails. Run it also
+  ;; with -Dgen.mlx.constants=0 (cross-review 3): every host scalar is then
+  ;; a new handle, registered by with-operands, concatenate or konst
   (when-mlx
     (array/with-backend (mlx)
       (let [la-ns (requiring-resolve 'gen.array.linalg/cholesky)
             solve (requiring-resolve 'gen.array.linalg/solve)
+            solve-triangular (requiring-resolve 'gen.array.linalg/solve-triangular)
             slogdet (requiring-resolve 'gen.array.linalg/slogdet)
             uniform (requiring-resolve 'gen.random/uniform)
             key (requiring-resolve 'gen.random/key)
@@ -568,19 +670,27 @@
             divisors (array/array [2 3 0 -1] {:dtype :int32})
             floats (array/array [0.5 ##NaN -2.5 3e10])
             spd (array/array [[4.0 1.0] [1.0 3.0]])
+            ;; a batch of two right-hand sides: batch-broadcast broadcasts the matrix
+            rhs2 (array/array [[[1.0] [2.0]] [[3.0] [4.0]]])
             sites [["to-host, a half float" #(array/->clj (array/astype floats :float16))]
                    ["to-host, a view" #(array/->clj (array/transpose (array/array [[1.0 2.0] [3.0 4.0]])))]
                    ["unary's sign" #(array/sign floats)]
-                   ["unary's atan" #(array/atan floats)]
+                   ;; float32: float64's atan has no fix-up, so no temporaries
+                   ["unary's atan" #(array/atan (array/astype floats :float32))]
                    ["int-division" #(array/mod ints divisors)]
                    ["floor division" #(array/floor-div ints divisors)]
                    ["java-int-cast" #(array/astype floats :int32)]
                    ["int-power" #(array/pow ints (array/array [2 -1 0 3] {:dtype :int32}))]
                    ["arg-reduce" #(array/argmax floats)]
                    ["safe-indices" #(array/take floats (array/array [0 -1] {:dtype :int32}) 0)]
+                   ["take-along-axis" #(array/take-along-axis floats (array/array [3 -1] {:dtype :int32}) 0)]
+                   ["scatter-add" #(array/scatter-add floats (array/array [0 2] {:dtype :int32}) (array/array [1.0 2.0]) 0)]
                    ["the integer matmul" #(array/matmul (array/reshape ints [2 2]) (array/reshape ints [2 2]))]
                    ["cholesky" #(la-ns spd)]
                    ["solve" #(solve spd (array/array [1.0 2.0]))]
+                   ["solve, a batch of right-hand sides" #(solve spd rhs2)]
+                   ["solve-triangular" #(solve-triangular spd (array/array [1.0 2.0]))]
+                   ["solve-triangular, a batch of right-hand sides" #(solve-triangular spd rhs2)]
                    ["slogdet" #(slogdet spd)]
                    ["random-uniform" #(uniform (key 3) [5])]
                    ["concatenate" #(array/concatenate [floats (array/array [1.0])] 0)]]
@@ -596,6 +706,18 @@
             (doseq [k (range 1 (inc n))]
               (let [[before freed] (counting-temporaries f k)]
                 (is (= before freed) (str label ": failing at its temporary " k))))))))))
+
+(deftest a-temporary-of-no-known-kind-fails-where-it-is-registered
+  ;; free-temp's case throws on a kind it does not know, which in
+  ;; with-temps' finally would mask the body's error (cross-review 3), so
+  ;; temp! checks the kind. Planted (2026-10-22): temp! without the check
+  ;; fails
+  (when-mlx
+    (let [temp! @(requiring-resolve 'gen.backend.mlx/temp!)
+          temps (java.util.ArrayList.)]
+      (is (= :closur (:kind (try (temp! temps [:closur 1]) nil (catch clojure.lang.ExceptionInfo e (ex-data e))))))
+      (is (zero? (.size temps)) "and is not registered")
+      (is (== 7 (temp! temps [:vector 7])) "a known kind is"))))
 
 (defn- held-until-the-limit
   "One-element arrays made and held until making another fails: how many,

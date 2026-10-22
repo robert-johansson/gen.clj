@@ -76,6 +76,15 @@
   (is (= [1.0 2.0] (array/->clj (array/array [1 2] {:dtype (ts/float-dtype)}))))
   (is (thrown-data #(array/array [[1 2] [3]])) "ragged data is rejected")
   (is (thrown-data #(array/array [[1 2] [3 [4]]])) "deeply ragged data is rejected")
+  (testing "host data is parsed in gen.array, the same for every backend (genclj-q45d)"
+    (is (= {:shape [2 2] :at-axis 1} (thrown-data #(array/array [[1 2] 3]))))
+    (is (= {:element :a} (thrown-data #(array/array [1 :a]))))
+    (is (= {:data "x"} (thrown-data #(array/array "x"))))
+    (is (= (ts/float-dtype) (array/dtype (array/array (double-array [1.0 2.0])))) "a double[] is floats")
+    ;; the JVM backend kept a double[]'s values whatever the dtype: 0.6 as an
+    ;; int64, which its sum read. Planted (2026-10-22), it fails
+    (is (= 0 (ts/host (array/sum (array/array (double-array [0.6 0.6]) {:dtype (ts/int-dtype)}))))
+        "a double[] is cast to an int dtype, as host data is"))
   (is (thrown-data #(array/+ [1 2] 1)) "Clojure vectors are not arrays")
   (is (= [[0.0 0.0]] (array/->clj (array/zeros [1 2]))))
   (is (= [1 1 1] (array/->clj (array/full [3] 1))))

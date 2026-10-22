@@ -80,6 +80,77 @@
   [shapes]
   (reduce broadcast [] shapes))
 
+;; ---------------------------------------------------------------------------
+;; The ops' shape rules: gen.array checks its operands with these before it
+;; calls a backend, so under the batch tracer an error names the model's
+;; shapes, not the lifted ones (docs/array-api.md §4)
+;; ---------------------------------------------------------------------------
+
+(defn check-broadcast-to
+  "Throws unless an array of shape from broadcasts to shape to."
+  [from to]
+  (when-not (= to (broadcast from to))
+    (throw (ex-info (str "Cannot broadcast " from " to " to) {:from from :to to}))))
+
+(defn concatenate-shape
+  "The shape of arrays of these shapes joined along axis, where they must
+   agree on every other axis."
+  [shapes ^long axis]
+  (let [s0 (first shapes)]
+    (doseq [s shapes]
+      (when-not (and (= (count s) (count s0)) (= (assoc s axis 0) (assoc s0 axis 0)))
+        (throw (ex-info "Arrays must agree on every axis but the concatenation axis"
+                        {:shapes (vec shapes) :axis axis}))))
+    (assoc s0 axis (reduce + (map #(long (nth % axis)) shapes)))))
+
+(defn take-along-axis-shape
+  "The shape of a gather along axis from an array of shape sx by indices of
+   shape si: of one rank, si's on axis, broadcast on every other axis."
+  [sx si ^long axis]
+  (when-not (= (count sx) (count si))
+    (throw (ex-info "take-along-axis needs indices of the same rank as the array"
+                    {:shape sx :indices-shape si})))
+  (mapv (fn [k a b] (if (= k axis) b (first (broadcast [a] [b])))) (range) sx si))
+
+(defn check-scatter-add
+  "Throws unless indices of shape si and updates of shape su have one shape,
+   equal to the array's sx on every axis but axis."
+  [sx si su ^long axis]
+  (when-not (and (= su si) (= (count sx) (count su))
+                 (every? true? (map (fn [k a b] (or (= k axis) (= a b))) (range) sx su)))
+    (throw (ex-info "scatter-add needs indices and updates of one shape, equal to the array's but on axis"
+                    {:shape sx :indices-shape si :updates-shape su :axis axis}))))
+
+(defn matmul-shape
+  "The shape of the NumPy matrix product of arrays of shapes sx and sy: a 1-d
+   operand is a vector, whose axis the product drops, and the leading axes
+   broadcast."
+  [sx sy]
+  (when (or (empty? sx) (empty? sy))
+    (throw (ex-info "matmul needs arrays of rank >= 1" {:shapes [sx sy]})))
+  (let [x-vec? (== 1 (count sx))
+        y-vec? (== 1 (count sy))
+        mx (if x-vec? (into [1] sx) sx)
+        my (if y-vec? (conj sy 1) sy)
+        rx (count mx)
+        ry (count my)
+        k (nth mx (dec rx))
+        k2 (nth my (- ry 2))]
+    (when-not (= k k2)
+      (throw (ex-info (str "matmul: inner dimensions differ (" k " vs " k2 ")") {:shapes [sx sy]})))
+    (cond-> (broadcast (subvec mx 0 (- rx 2)) (subvec my 0 (- ry 2)))
+      (not x-vec?) (conj (nth mx (- rx 2)))
+      (not y-vec?) (conj (nth my (dec ry))))))
+
+(defn check-square
+  "n, for a shape [.. n n] of square matrices; throws for any other, naming op."
+  ^long [shape op]
+  (let [r (count shape)]
+    (when (or (< r 2) (not= (nth shape (- r 1)) (nth shape (- r 2))))
+      (throw (ex-info (str (name op) " needs square matrices, got shape " shape)
+                      {:op op :shape shape})))
+    (long (peek shape))))
+
 (defn axis
   "Normalize a possibly negative axis for an array of the given rank."
   ^long [^long ax ^long rank]

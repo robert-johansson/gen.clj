@@ -324,7 +324,7 @@
                  (gen/choose (- r) (dec r))
                  (gen/fmap #(vec (distinct %)) (gen/vector (gen/choose 0 (dec r)) 0 r))])))
 
-(defspec reductions trials
+(defspec reduction-ops trials
   (prop/for-all [[op tol kinds] (gen/elements [[array/sum loose [:float :int :bool]] [array/prod loose [:float :int]]
                                                [array/max exact [:float :int]] [array/min exact [:float :int]]
                                                [array/all exact [:bool :float]] [array/any exact [:bool :int]]

@@ -13,6 +13,7 @@
   (:refer-clojure :exclude [+ - * / < > <= >= == max min mod abs take flatten compile])
   (:require [clojure.core :as c]
             [gen.array.dtype :as dt]
+            [gen.array.host :as host]
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]
             [gen.array.special :as special]
@@ -553,10 +554,15 @@
 
 (defn array
   "An array from host data: a number, a boolean, nested vectors of them, or a
-   double[]. Options: :dtype."
+   double[]. Options: :dtype (default: the backend's float if any element is
+   a float, :bool if all are booleans, its int otherwise)."
   ([data] (array data nil))
   ([data {:keys [dtype]}]
-   (p/-from-host *backend* data dtype)))
+   (let [b *backend*]
+     (if (host? data)
+       (p/-from-host b [data] [] (or dtype (dt/weak-host-dtype data (defaults b))))
+       (let [[shape values] (host/parse data)]
+         (p/-from-host b values shape (or dtype (host/infer-dtype values (defaults b)))))))))
 
 (defn- check-fill
   "A fill value must be a scalar: a host one, or a 0-d (per-particle) array."
@@ -859,15 +865,20 @@
                      (recur (inc i) (rest src) (conj out (first src)))))))))
 
 (defn broadcast-to "x broadcast to shape." [x new-shape]
-  (p/-broadcast-to (backend-of :broadcast-to [x]) x (mapv long new-shape)))
+  (let [b (backend-of :broadcast-to [x])
+        new-shape (mapv long new-shape)]
+    (sh/check-broadcast-to (shape x) new-shape)
+    (p/-broadcast-to b x new-shape)))
 
 (defn concatenate
   "Join arrays along an existing axis (default 0)."
   ([xs] (concatenate xs 0))
   ([xs axis]
    (let [b (backend-of :concatenate xs)
-         d (common-dtype b xs)]
-     (p/-concatenate b (mapv #(cast-to b % d) xs) (sh/axis (long axis) (ndim (first xs)))))))
+         d (common-dtype b xs)
+         axis (sh/axis (long axis) (ndim (first xs)))]
+     (sh/concatenate-shape (mapv shape xs) axis)
+     (p/-concatenate b (mapv #(cast-to b % d) xs) axis))))
 
 (defn stack
   "Join arrays along a new axis (default 0)."
@@ -932,8 +943,10 @@
    x on every other axis."
   [x indices axis]
   (check-indices :take-along-axis indices)
-  (let [b (backend-of :take-along-axis [x indices])]
-    (p/-take-along-axis b x indices (sh/axis (long axis) (ndim x)))))
+  (let [b (backend-of :take-along-axis [x indices])
+        axis (sh/axis (long axis) (ndim x))]
+    (sh/take-along-axis-shape (shape x) (shape indices) axis)
+    (p/-take-along-axis b x indices axis)))
 
 (defn scatter-add
   "x with updates added at indices along axis, accumulating repeated indices:
@@ -942,8 +955,10 @@
   [x indices updates axis]
   (check-indices :scatter-add indices)
   (let [b (backend-of :scatter-add [x updates indices])
-        d (common-dtype b [x updates])]
-    (p/-scatter-add b (cast-to b x d) indices (cast-to b updates d) (sh/axis (long axis) (ndim x)))))
+        d (common-dtype b [x updates])
+        axis (sh/axis (long axis) (ndim x))]
+    (sh/check-scatter-add (shape x) (shape indices) (shape updates) axis)
+    (p/-scatter-add b (cast-to b x d) indices (cast-to b updates d) axis)))
 
 (defn pick
   "Index the last axis of x by the int array idx, broadcasting the remaining
@@ -956,8 +971,11 @@
         si (shape idx)
         batch-rank (c/max (dec (count sx)) (count si))
         pad (fn [s n] (into (vec (repeat (c/- n (count s)) 1)) s))
-        x' (reshape-on b x (pad sx (inc batch-rank)))
-        i' (reshape-on b idx (conj (pad si batch-rank) 1))
+        sx' (pad sx (inc batch-rank))
+        si' (conj (pad si batch-rank) 1)
+        _ (sh/take-along-axis-shape sx' si' batch-rank)
+        x' (reshape-on b x sx')
+        i' (reshape-on b idx si')
         out (p/-take-along-axis b x' i' batch-rank)]
     (reshape-on b out (pop (shape out)))))
 
@@ -971,6 +989,7 @@
   [x y]
   (let [b (backend-of :matmul [x y])
         d (dt/input-dtype :multiply (common-dtype b [x y]) (defaults b))]
+    (sh/matmul-shape (shape x) (shape y))
     (p/-matmul b (cast-to b x d) (cast-to b y d))))
 
 (defn outer "Outer product of x and y (flattened)." [x y]

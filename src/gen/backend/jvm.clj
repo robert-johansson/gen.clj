@@ -416,19 +416,11 @@
 
 (defn- broadcast-to [x shape]
   (let [shape (vec shape)]
-    (when-not (= shape (sh/broadcast (shape-of x) shape))
-      (throw (ex-info (str "Cannot broadcast " (shape-of x) " to " shape)
-                      {:from (shape-of x) :to shape})))
     (make (gather (data-of x) (sh/broadcast-offsets (shape-of x) shape)) shape (dtype-of x))))
 
 (defn- concatenate [xs ^long axis]
   (let [shapes (map shape-of xs)
         s0 (first shapes)
-        _ (doseq [s shapes]
-            (when-not (and (= (count s) (count s0))
-                           (= (assoc s axis 0) (assoc s0 axis 0)))
-              (throw (ex-info "Arrays must agree on every axis but the concatenation axis"
-                              {:shapes (vec shapes) :axis axis}))))
         out-shape (assoc s0 axis (reduce + (map #(long (nth % axis)) shapes)))
         outer (sh/size (subvec s0 0 axis))
         out (double-array (sh/cells out-shape))]
@@ -483,11 +475,8 @@
 (defn- take-along-axis [x indices ^long axis]
   (let [sx (shape-of x)
         si (shape-of indices)
-        _ (when-not (= (count sx) (count si))
-            (throw (ex-info "take-along-axis needs indices of the same rank as the array"
-                            {:shape sx :indices-shape si})))
-        out-shape (mapv (fn [k a b] (if (= k axis) b (first (sh/broadcast [a] [b]))))
-                        (range) sx si)
+        ;; the shapes broadcast off axis (gen.array checked them)
+        out-shape (mapv (fn [k a b] (if (= k axis) b (max (long a) (long b)))) (range) sx si)
         d (long (nth sx axis))
         ist (sh/strides sx)
         axis-stride (aget ist axis)
@@ -510,10 +499,6 @@
 (defn- scatter-add [x indices updates ^long axis]
   (let [sx (shape-of x)
         su (shape-of updates)
-        _ (when-not (and (= su (shape-of indices)) (= (count sx) (count su))
-                         (every? true? (map (fn [k a b] (or (= k axis) (= a b))) (range) sx su)))
-            (throw (ex-info "scatter-add needs indices and updates of one shape, equal to the array's but on axis"
-                            {:shape sx :indices-shape (shape-of indices) :updates-shape su :axis axis})))
         d (long (nth sx axis))
         st (sh/strides sx)
         axis-stride (aget st axis)
@@ -528,16 +513,11 @@
 
 (defn- matmul [x y]
   (let [sx (shape-of x) sy (shape-of y)
-        _ (when (or (zero? (count sx)) (zero? (count sy)))
-            (throw (ex-info "matmul needs arrays of rank >= 1" {:shapes [sx sy]})))
         x-vec? (= 1 (count sx)) y-vec? (= 1 (count sy))
         sx (if x-vec? [1 (first sx)] sx)
         sy (if y-vec? [(first sy) 1] sy)
         n (long (nth sx (- (count sx) 2))) k (long (peek sx))
-        k2 (long (nth sy (- (count sy) 2))) m (long (peek sy))
-        _ (when-not (== k k2)
-            (throw (ex-info (str "matmul: inner dimensions differ (" k " vs " k2 ")")
-                            {:shapes [(shape-of x) (shape-of y)]})))
+        m (long (peek sy))
         bx (subvec sx 0 (- (count sx) 2))
         by (subvec sy 0 (- (count sy) 2))
         batch (sh/broadcast bx by)
@@ -578,13 +558,6 @@
          (recur (inc ~k))))
      (aget cell# 0)))
 
-(defn- check-square ^long [shape op]
-  (let [r (count shape)]
-    (when (or (< r 2) (not= (nth shape (- r 1)) (nth shape (- r 2))))
-      (throw (ex-info (str (name op) " needs square matrices, got shape " shape)
-                      {:op op :shape shape})))
-    (long (peek shape))))
-
 (defn- cholesky-into!
   "Lower Cholesky factor of the n×n matrix at offset off of a into out (NaN
    everywhere for a matrix that is not positive definite)."
@@ -609,7 +582,7 @@
 
 (defn- cholesky [x]
   (let [shape (shape-of x)
-        n (check-square shape :cholesky)
+        n (long (peek shape))
         ^doubles a (data-of x)
         out (double-array (alength a))]
     (dotimes [q (quot (alength a) (max 1 (* n n)))]
@@ -627,11 +600,8 @@
 
 (defn- solve-triangular [a b lower? transpose?]
   (let [sa (shape-of a) sb (shape-of b)
-        n (check-square sa :solve-triangular)
+        n (long (peek sa))
         k (long (peek sb))
-        _ (when-not (== n (long (nth sb (- (count sb) 2))))
-            (throw (ex-info "solve-triangular: matrix and right-hand side do not match"
-                            {:shapes [sa sb]})))
         [batch ao bo] (batch-pairs sa sb)
         ^longs ao ao ^longs bo bo
         ^doubles ad (data-of a) ^doubles bd (data-of b)
@@ -688,10 +658,8 @@
 
 (defn- solve [a b]
   (let [sa (shape-of a) sb (shape-of b)
-        n (check-square sa :solve)
+        n (long (peek sa))
         k (long (peek sb))
-        _ (when-not (and (>= (count sb) 2) (== n (long (nth sb (- (count sb) 2)))))
-            (throw (ex-info "solve: matrix and right-hand side do not match" {:shapes [sa sb]})))
         [batch ao bo] (batch-pairs sa sb)
         ^longs ao ao ^longs bo bo
         ^doubles ad (data-of a) ^doubles bd (data-of b)
@@ -719,7 +687,7 @@
 
 (defn- slogdet [x]
   (let [shape (shape-of x)
-        n (check-square shape :slogdet)
+        n (long (peek shape))
         ^doubles a (data-of x)
         nb (sh/size (subvec shape 0 (- (count shape) 2)))
         signs (double-array nb)
@@ -758,56 +726,23 @@
 ;; Host boundary
 ;; ---------------------------------------------------------------------------
 
-(defn- host-shape [data]
-  (loop [shape [] d data]
-    (if (sequential? d)
-      (recur (conj shape (count d)) (first d))
-      shape)))
-
-(defn- host-leaves
-  "The leaves of nested data in row-major order, checking that every level is
-   rectangular and every leaf is a number or boolean."
-  [data shape]
-  (let [rank (count shape)
-        walk (fn walk [d ^long ax]
-               (if (== ax rank)
-                 (if (or (instance? Number d) (instance? Boolean d))
-                   [d]
-                   (throw (ex-info (str "Array element is not a number or boolean: " (pr-str d))
-                                   {:element d})))
-                 (if (and (sequential? d) (== (count d) (long (nth shape ax))))
-                   (mapcat #(walk % (inc ax)) d)
-                   (throw (ex-info "Nested data is not rectangular" {:shape shape :at-axis ax})))))]
-    (walk data 0)))
-
-(defn- infer-dtype [leaves]
-  (cond (empty? leaves) :float64
-        (some #(or (instance? Double %) (instance? Float %) (ratio? %) (decimal? %)) leaves) :float64
-        (every? #(instance? Boolean %) leaves) :bool
-        :else :int64))
-
-(defn- from-host [data dtype]
+(defn- from-host
+  "An array of host values (gen.array.host/parse's): a host scalar for shape
+   []; a float64 double[] copied as it is; otherwise each value cast."
+  [values shape dtype]
+  (check-dtype dtype)
   (cond
-    (or (instance? Number data) (instance? Boolean data))
-    (dt/host-cast data (check-dtype (or dtype (dt/host-dtype data))))
+    (empty? shape) (dt/host-cast (first values) dtype)
 
-    (instance? (Class/forName "[D") data)
-    (let [^doubles d data dtype (check-dtype (or dtype :float64))]
-      (make (aclone d) [(alength d)] dtype))
-
-    (sequential? data)
-    (let [shape (host-shape data)
-          leaves (host-leaves data shape)
-          dtype (check-dtype (or dtype (infer-dtype leaves)))
-          out (double-array (count leaves))]
-      (loop [i 0 ls (seq leaves)]
-        (when ls
-          (aset out i (dt/host-double (dt/host-cast (first ls) dtype)))
-          (recur (inc i) (next ls))))
-      (make out shape dtype))
+    (and (instance? double/1 values) (= :float64 dtype)) (make (aclone ^doubles values) shape dtype)
 
     :else
-    (throw (ex-info (str "Cannot make an array from " (type data)) {:data data}))))
+    (let [out (double-array (sh/cells shape))]
+      (loop [i 0 vs (seq values)]
+        (when vs
+          (aset out i (dt/host-double (dt/host-cast (first vs) dtype)))
+          (recur (inc i) (next vs))))
+      (make out shape dtype))))
 
 (defn to-host
   "Nested vectors of host values (a host scalar for 0-d)."
@@ -854,7 +789,7 @@
   (-lazy? [_] false)
   (-native-ops [_] #{})
 
-  (-from-host [_ data dtype] (from-host data dtype))
+  (-from-host [_ values shape dtype] (from-host values shape dtype))
   (-to-host [_ x] (to-host x))
   (-eval! [_ _] nil)
 
