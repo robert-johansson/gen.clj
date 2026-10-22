@@ -598,10 +598,13 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   post-M5 review's P3-05). A leapfrog trajectory whose position, momentum
   or energy turns non-finite is a rejected proposal, with acceptance 0, as
   Stan treats a divergence. The run counts its divergences, so they are
-  not silent. MALA's proposal is treated the same way. A NaN in the
-  starting trace stays an error. Before, a divergence threw "constrained
-  value is NaN", a rule meant for user data: HMC on Neal's funnel at
-  L 10, eps 0.5 died at step 1,309 from a valid state.
+  not silent (the move's `:diverged?`, `:divergences` in `k/run`'s result
+  and in a combinator's). MALA's proposal is treated the same way. The
+  trajectory freezes at its last finite state, so no gradient is taken at
+  a NaN and a compiled step needs no branch. A NaN in the starting trace
+  stays an error. Before, a divergence threw "constrained value is NaN",
+  a rule meant for user data: HMC on Neal's funnel at L 10, eps 0.5 died
+  at step 1,309 from a valid state.
   **PROVISIONAL (owner to confirm; 2026-10-22, fix-inference's
   recommendation, taken while the owner was away):** a distribution's
   parameter check failing at a position the trajectory tries is also a

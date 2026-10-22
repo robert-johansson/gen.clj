@@ -50,9 +50,9 @@
 
 (deftest running-a-chain
   (let [count-up (fn [n _] {:trace (inc n)})]
-    (is (= {:traces [5 8 11 14] :acceptance-rate nil}
+    (is (= {:traces [5 8 11 14] :acceptance-rate nil :divergences 0}
            (k/run count-up 0 {:samples 4 :burn 2 :thin 3 :key (rng/key 1)})))
-    (is (= {:traces [] :acceptance-rate nil} (k/run count-up 0 {:samples 0})))
+    (is (= {:traces [] :acceptance-rate nil :divergences 0} (k/run count-up 0 {:samples 0})))
     (is (thrown? clojure.lang.ExceptionInfo (k/run count-up 0 {:samples 3 :thin 0}))))
   (testing "combinators report their moves' accept decisions, and run counts every move"
     (let [accept (fn [t _] {:trace t :accepted? true})

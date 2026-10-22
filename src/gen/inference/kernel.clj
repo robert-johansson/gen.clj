@@ -23,7 +23,8 @@
 
    A combinator's result reports the accept decisions of the MH moves it
    made, in order, as :accepted (a vector of booleans) when they all report
-   one.
+   one, and how many of its proposals diverged (gen.inference.mcmc's
+   :diverged?) as :divergences, when any did.
 
    (run kernel trace opts) runs a chain and collects samples."
   (:refer-clojure :exclude [repeat cycle reversible?])
@@ -80,14 +81,23 @@
   (cond (contains? r :accepted) (:accepted r)
         (contains? r :accepted?) [(:accepted? r)]))
 
+(defn- divergences
+  "How many proposals a kernel result reports diverged: an HMC or MALA
+   move's :diverged?, or a combinator's :divergences."
+  ^long [r]
+  (cond (contains? r :divergences) (long (:divergences r))
+        (:diverged? r) 1
+        :else 0))
+
 (defn- sequence-fn [fs]
   (fn [trace key]
-    (let [[t moves] (reduce (fn [[t moves] [f k]]
-                              (let [r (f t k)]
-                                [(:trace r) (when moves (some->> (accepted-moves r) (into moves)))]))
-                            [trace []]
-                            (map vector fs (rng/split key (count fs))))]
-      (cond-> {:trace t} moves (assoc :accepted moves)))))
+    (let [[t moves diverged] (reduce (fn [[t moves diverged] [f k]]
+                                       (let [r (f t k)]
+                                         [(:trace r) (when moves (some->> (accepted-moves r) (into moves)))
+                                          (+ diverged (divergences r))]))
+                                     [trace [] 0]
+                                     (map vector fs (rng/split key (count fs))))]
+      (cond-> {:trace t} moves (assoc :accepted moves) (pos? diverged) (assoc :divergences diverged)))))
 
 (defn chain
   "The kernels applied in sequence."
@@ -211,10 +221,12 @@
             (let [t (volatile! trace)
                   n (volatile! 0)
                   moves (volatile! [])
+                  diverged (volatile! 0)
                   apply! (fn [k]
                            (let [r ((step-fn (if reversal? (reversal k) k)) @t (rng/fold-in key @n))]
                              (vswap! n inc)
                              (vswap! moves #(when % (some->> (accepted-moves r) (into %))))
+                             (vswap! diverged + (divergences r))
                              (vreset! t (:trace r))))
                   construct (fn [form reads run-body]
                               (let [[read x] (noting reads)]
@@ -231,7 +243,7 @@
                                                          (pr-str was) ", then " (pr-str is))
                                                     {:form form :read read :again again}))))))]
               (body t apply! construct)
-              (cond-> {:trace @t} @moves (assoc :accepted @moves))))]
+              (cond-> {:trace @t} @moves (assoc :accepted @moves) (pos? @diverged) (assoc :divergences @diverged))))]
     (->Kernel (fn [trace key] (run forward false trace key)) (fn [trace key] (run backward true trace key)))))
 
 (declare traced-statements)
@@ -389,16 +401,18 @@
 (defn run
   "Apply the kernel repeatedly from trace and collect samples. opts:
    :samples (required), :burn (steps discarded first, 0), :thin (steps per
-   sample, 1), :key. Returns {:traces [...] :acceptance-rate r}: the rate
-   over every MH move of every step (a combinator's steps make several), or
-   nil when the kernel does not report its accept decisions."
+   sample, 1), :key. Returns {:traces [...] :acceptance-rate r
+   :divergences n}: the rate over every MH move of every step (a
+   combinator's steps make several), or nil when the kernel does not report
+   its accept decisions, and how many proposals diverged (HMC's and MALA's
+   :diverged?, rejected, as Stan counts them)."
   [kernel trace {:keys [samples burn thin key] :or {burn 0 thin 1}}]
   (when-not (and (nat-int? samples) (nat-int? burn) (pos-int? thin))
     (throw (ex-info "run needs :samples ≥ 0, :burn ≥ 0 and :thin ≥ 1" {:samples samples :burn burn :thin thin})))
   (let [f (step-fn kernel)
         steps (+ burn (* samples thin))
         keys (if (pos? steps) (rng/split (or key (gfi/next-key)) steps) [])]
-    (loop [i 0 t trace traces (transient []) accepted 0 moves 0 reported? true]
+    (loop [i 0 t trace traces (transient []) accepted 0 moves 0 reported? true diverged 0]
       (if (< i steps)
         (let [r (f t (keys i))
               i' (inc i)
@@ -409,6 +423,8 @@
           (recur i' t' (if keep? (conj! traces t') traces)
                  (+ accepted (count (filter true? ms)))
                  (+ moves (count ms))
-                 (and reported? (some? ms))))
+                 (and reported? (some? ms))
+                 (+ diverged (divergences r))))
         {:traces (persistent! traces)
-         :acceptance-rate (when (and reported? (pos? moves)) (/ (double accepted) moves))}))))
+         :acceptance-rate (when (and reported? (pos? moves)) (/ (double accepted) moves))
+         :divergences diverged}))))

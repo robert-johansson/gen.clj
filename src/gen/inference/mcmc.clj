@@ -4,15 +4,20 @@
    works on any generative function, nested addresses included, through
    gen.gradients/choice-gradients.
 
-     (hmc trace selection {:L 10 :eps 0.1})    → {:trace :accepted? :log-alpha}
-     (mala trace selection tau)                → {:trace :accepted? :log-alpha}
+     (hmc trace selection {:L 10 :eps 0.1})    → {:trace :accepted? :log-alpha :diverged?}
+     (mala trace selection tau)                → {:trace :accepted? :log-alpha :diverged?}
      (map-optimize trace selection opts)       → trace
      (elliptical-slice trace addr mu cov)      → trace
 
    The selected choices must keep the trace's structure: HMC and MALA move
-   them jointly and leave every other choice alone. Keys are an optional last
-   argument (or :key in an options map); omitting one draws from the implicit
-   key source."
+   them jointly and leave every other choice alone. A proposal whose
+   position, momentum, gradient or energy turns non-finite, or where a
+   distribution's parameter fails its check, diverged: it is rejected,
+   with acceptance 0 (:log-alpha -Inf), and reported as :diverged?
+   (gen.inference.kernel/run counts them), as Stan treats a divergence; a
+   NaN in the starting trace stays an error. Keys are an
+   optional last argument (or :key in an options map); omitting one draws
+   from the implicit key source."
   (:refer-clojure :exclude [+ - * /])
   (:require [gen.array :as array :refer [+ - * /]]
             [gen.choicemap :as cm]
@@ -25,12 +30,26 @@
 
 (set! *warn-on-reflection* true)
 
-(defn- accept [trace proposed log-alpha key]
+(defn- diverged
+  "The result of a proposal that diverged: rejected, with acceptance 0."
+  [trace]
+  {:trace trace :accepted? false :log-alpha ##-Inf :diverged? true})
+
+(defn- accept
+  "The MH decision on proposed, of log acceptance ratio log-alpha: a ratio
+   that is not finite (an energy that overflowed or is NaN) diverged."
+  [trace proposed log-alpha key]
   (let [la (double (array/item log-alpha))]
-    (when (Double/isNaN la)
-      (throw (ex-info "The acceptance ratio is NaN" {:log-alpha la})))
-    (let [accepted? (or (>= la 0.0) (< (Math/log (double (array/item (rng/uniform key)))) la))]
-      {:trace (if accepted? proposed trace) :accepted? accepted? :log-alpha la})))
+    (if (Double/isFinite la)
+      (let [accepted? (or (>= la 0.0) (< (Math/log (double (array/item (rng/uniform key)))) la))]
+        {:trace (if accepted? proposed trace) :accepted? accepted? :log-alpha la :diverged? false})
+      (diverged trace))))
+
+(defn- finite
+  "Are the elements of xs all finite? A boolean array, read on the host only
+   when the kernel finishes."
+  [& xs]
+  (reduce array/logical-and (map #(array/all (array/isfinite %)) xs)))
 
 (defn- nonempty! [v selection]
   (when (zero? (array/size v))
@@ -59,9 +78,12 @@
     [t w]))
 
 (defn- normal-lp
-  "log N(x; mu, sd) summed over elements."
-  [x mu sd]
-  (array/sum (dc/log-prob (d/normal mu sd) x)))
+  "log N(x; mu, sd) summed over elements, sd a host number. By arithmetic,
+   not gen.dist's normal, which refuses a NaN mean: a diverged gradient's
+   NaN must reach the divergence check."
+  [x mu ^double sd]
+  (let [z (/ (- x mu) sd)]
+    (array/sum (- (* -0.5 (* z z)) (clojure.core/+ (Math/log sd) (clojure.core/* 0.5 (Math/log (clojure.core/* 2.0 Math/PI))))))))
 
 (def ^:private compiled-steps
   "Compiled kernel steps by kernel and settings, model, arguments and choice
@@ -112,23 +134,61 @@
                             {:path path} e))
             (throw e)))))))
 
+(defn- tried
+  "f, a log density's gradient (or value and gradient) of [v others], at
+   positions a move tries: a distribution's parameter that fails its check
+   there (a scale that underflowed to 0, say) leaves the density
+   undefined, so f gives (nan v), a divergence, as Stan rejects a proposal
+   at a domain error (DESIGN §9, PROVISIONAL). Any other error, a
+   structure change or a value's shape, is raised."
+  [f nan]
+  (fn [v others]
+    (try (f v others)
+         (catch clojure.lang.ExceptionInfo e
+           (if (let [{:keys [distribution param]} (ex-data e)] (and distribution param))
+             (nan v)
+             (throw e))))))
+
 (defn- mala-proposal
   "MALA's proposal as a function of arrays only: [v noise others] →
-   [v' log q(v | v') - log q(v' | v)]."
+   [v' log q(v | v') - log q(v' | v) diverged], diverged true when v', the
+   gradients or the densities are not finite (or a parameter fails its
+   check at v', tried). The reverse gradient is
+   taken at v' only when v' is finite (at v otherwise: assess would refuse
+   a NaN), so a compiled proposal needs no branch."
   [gf args proto tau]
   (let [grad-v (array/grad (log-density gf args proto))
+        grad-tried (tried grad-v #(* % ##NaN))
         sd (Math/sqrt (* 2.0 (double tau)))]
     (fn [v noise others]
-      (let [fwd-mu (+ v (* tau (grad-v v others)))
+      (let [g (grad-v v others)
+            fwd-mu (+ v (* tau g))
             v' (+ fwd-mu (* sd noise))
-            bwd-mu (+ v' (* tau (grad-v v' others)))]
-        [v' (- (normal-lp v bwd-mu sd) (normal-lp v' fwd-mu sd))]))))
+            ok (finite g v')
+            v' (array/where ok v' v)
+            g' (grad-tried v' others)
+            bwd-mu (+ v' (* tau g'))
+            log-q (- (normal-lp v bwd-mu sd) (normal-lp v' fwd-mu sd))]
+        [v' log-q (array/logical-not (array/logical-and ok (finite g' log-q)))]))))
+
+(defn- options
+  "opts, an options map or nil (loud for anything else, such as a key in
+   its place, which the kernel would not see)."
+  [opts]
+  (if (or (nil? opts) (map? opts))
+    opts
+    (throw (ex-info (str "The kernel takes an options map here, not " (pr-str opts)) {:value opts}))))
 
 (defn- step-opts
-  "A kernel's last argument, a key or an options map, as an options map
-   with a key."
+  "A kernel's last argument, a key or an options map (loud otherwise), as an
+   options map with a key: the options' :key, or one from the implicit
+   source."
   [key-or-opts]
-  (let [opts (if (map? key-or-opts) key-or-opts {:key key-or-opts})]
+  (let [opts (cond (rng/key? key-or-opts) {:key key-or-opts}
+                   (or (nil? key-or-opts) (map? key-or-opts)) key-or-opts
+                   :else (throw (ex-info (str "The kernel's last argument is a key or an options map, not "
+                                              (pr-str key-or-opts))
+                                         {:value key-or-opts})))]
     (assoc opts :key (or (:key opts) (gfi/next-key)))))
 
 (defn mala
@@ -145,49 +205,66 @@
          noise (rng/normal k-propose (array/shape v))
          build #(mala-proposal (:gen-fn trace) (:args trace) proto tau)
          ;; the proposal as a function of the selected values, compiled or not
-         [v' log-q] (or (when compile? (compiled-step trace proto others [:mala tau] build v noise others))
-                        ((build) v noise others))
-         [t' weight] (move-to trace proto v' k-update)]
-     (accept trace t' (+ weight log-q) k-accept))))
+         [v' log-q diverged?] (or (when compile? (compiled-step trace proto others [:mala tau] build v noise others))
+                                  ((build) v noise others))]
+     (if (array/truthy? diverged?)
+       (diverged trace)
+       (let [[t' weight] (move-to trace proto v' k-update)]
+         (accept trace t' (+ weight log-q) k-accept))))))
 
 (defn- leapfrogs
-  "L leapfrog steps as a function of arrays only: [v p others] → [v' p']."
+  "L leapfrog steps as a function of arrays only: [v p others] → [v' p'
+   diverged]. diverged is true once a position, momentum, gradient or log
+   density turns non-finite (or a parameter fails its check, tried), and
+   from that step on the state stays at its last finite values: no
+   gradient is taken at a non-finite position (assess would refuse a NaN),
+   and a compiled step needs no early exit."
   [gf args proto L eps]
-  (let [grad-v (array/grad (log-density gf args proto))
+  (let [value-and-grad (array/value-and-grad (log-density gf args proto))
+        tried-value-and-grad (tried value-and-grad (fn [v] [##NaN (* v ##NaN)]))
         half (/ eps 2.0)]
     (fn [v p others]
-      (loop [i 0 v v p p g (grad-v v others)]
-        (if (< i (long L))
-          (let [p (+ p (* half g))
-                v (+ v (* eps p))
-                g (grad-v v others)]
-            (recur (inc i) v (+ p (* half g)) g))
-          [v p])))))
+      (let [[lp g] (value-and-grad v others)]
+        (loop [i 0 v v p p g g diverged (array/logical-not (finite lp g))]
+          (if (< i (long L))
+            (let [p-half (+ p (* half g))
+                  v-next (+ v (* eps p-half))
+                  diverged (array/logical-or diverged (array/logical-not (finite p-half v-next)))
+                  v-next (array/where diverged v v-next)
+                  [lp g-next] (tried-value-and-grad v-next others)
+                  p-next (+ p-half (* half g-next))
+                  diverged (array/logical-or diverged (array/logical-not (finite lp g-next p-next)))]
+              (recur (inc i) (array/where diverged v v-next) (array/where diverged p p-next)
+                     (array/where diverged g g-next) diverged))
+            [v p diverged]))))))
 
 (defn hmc
   "Hamiltonian Monte Carlo on the selected choices: L leapfrog steps of size
-   eps with standard normal momenta. Options: :L (10), :eps (0.1),
-   :compile? (false): run the L steps as one compiled function (array/compile:
+   eps with standard normal momenta. The third argument is an options map
+   or a key, and a key may follow the options. Options: :L (10), :eps (0.1),
+   :key, :compile? (false): run the L steps as one compiled function (array/compile:
    one MLX graph on the MLX backend, the same steps on the JVM backend), a
    function of the selected values and the other choices, cached per model,
    arguments and structure. A model that reads a value on the host cannot
    be compiled and runs the same function uncompiled. Either way the trace
    is updated once, after the L steps."
   ([trace selection] (hmc trace selection nil))
-  ([trace selection opts] (hmc trace selection opts (or (:key opts) (gfi/next-key))))
-  ([trace selection {:keys [L eps compile?] :or {L 10 eps 0.1}} key]
-   (let [[k-momenta k-update k-accept] (rng/split key 3)
+  ([trace selection key-or-opts] (let [opts (step-opts key-or-opts)] (hmc trace selection opts (:key opts))))
+  ([trace selection opts key]
+   (let [{:keys [L eps compile?] :or {L 10 eps 0.1}} (options opts)
+         [k-momenta k-update k-accept] (rng/split key 3)
          kinetic (fn [p] (normal-lp p 0.0 1.0))
-         finish (fn [t' p0 p]
-                  (accept trace t' (+ (- (:score t') (:score trace)) (- (kinetic p) (kinetic p0))) k-accept))]
-     (let [[proto v others] (flat-values trace selection)
-           p0 (rng/normal k-momenta (array/shape v))
-           build #(leapfrogs (:gen-fn trace) (:args trace) proto L eps)
-           ;; the L steps as a function of the selected values, compiled or
-           ;; not: the trace is updated once, at the end
-           [v' p] (or (when compile? (compiled-step trace proto others [:hmc L eps] build v p0 others))
-                      ((build) v p0 others))]
-       (finish (first (move-to trace proto v' k-update)) p0 p)))))
+         [proto v others] (flat-values trace selection)
+         p0 (rng/normal k-momenta (array/shape v))
+         build #(leapfrogs (:gen-fn trace) (:args trace) proto L eps)
+         ;; the L steps as a function of the selected values, compiled or
+         ;; not: the trace is updated once, at the end
+         [v' p diverged?] (or (when compile? (compiled-step trace proto others [:hmc L eps] build v p0 others))
+                              ((build) v p0 others))]
+     (if (array/truthy? diverged?)
+       (diverged trace)
+       (let [[t'] (move-to trace proto v' k-update)]
+         (accept trace t' (+ (- (:score t') (:score trace)) (- (kinetic p) (kinetic p0))) k-accept))))))
 
 (defn map-optimize
   "One step of gradient ascent on the log density of the selected choices,

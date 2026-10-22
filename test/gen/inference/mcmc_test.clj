@@ -13,6 +13,7 @@
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
             [gen.gradients :as grad]
+            [gen.inference.kernel :as k]
             [gen.inference.mcmc :as mcmc]
             [gen.inference.mh :as mh]
             [gen.random :as rng]
@@ -105,6 +106,86 @@
     (is (every? #(or (:accepted? %) (identical? tr (:trace %))) rs))
     (is (> (count (filter :accepted? rs)) 80) "small steps on a smooth target are mostly accepted")))
 
+(def ^:private funnel
+  "Neal's funnel: v ~ N(0, 3), x ~ N(0, e^{v/2})."
+  (gen [] (let [v (trace :v (d/normal 0 3))] (trace :x (d/normal 0 (array/exp (* 0.5 v)))))))
+
+(deftest a-diverging-proposal-is-rejected-and-counted
+  ;; the post-M5 review's P3-05 (DESIGN §9): a trajectory whose position,
+  ;; momentum, gradient or energy turns non-finite is rejected, with
+  ;; acceptance 0, and reported. Planted bug (2026-10-22): the kernels as
+  ;; before throw "a constrained value is NaN" at N(0, 1), eps 3, L 400
+  ;; and at sd 0.003, eps 0.1, L 150, and the funnel's chain dies (at L
+  ;; 10, eps 0.5 the verifier's died at step 1,309)
+  (let [unit (start-at (gen [] (trace :x (d/normal 0 1))) (cm/choicemap :x 0.3))
+        tight (start-at (gen [] (trace :x (d/normal 0 0.003))) (cm/choicemap :x 0.001))]
+    (doseq [[label tr opts] [["N(0, 1), eps 3, L 400" unit {:L 400 :eps 3.0}]
+                             ["sd 0.003, eps 0.1, L 150" tight {:L 150 :eps 0.1}]]
+            compile? [false true]]
+      (testing (str label (when compile? ", compiled"))
+        (is (= {:trace tr :accepted? false :log-alpha ##-Inf :diverged? true}
+               (mcmc/hmc tr x-sel (assoc opts :compile? compile?) (rng/key 2))))))
+    (testing "an energy that overflows: rejected and reported too"
+      (is (:diverged? (mcmc/hmc tight x-sel {:L 100 :eps 0.1} (rng/key 2)))))
+    (testing "MALA, its proposal past the float range"
+      (is (= {:trace unit :accepted? false :log-alpha ##-Inf :diverged? true} (mcmc/mala unit x-sel 1e300 (rng/key 3))))))
+  (testing "the funnel: a chain goes on, and k/run counts the divergences, through a chain of kernels too"
+    (let [start (start-at funnel (cm/choicemap :v 0.0 :x 1.0))
+          step (fn [tr key] (mcmc/hmc tr (sel/select :v :x) {:L 20 :eps 1.0} key))
+          ;; the divergences of steps on keys, run's per step split in m
+          by-hand (fn [n m] (reduce (fn [[tr d] key]
+                                      (reduce (fn [[tr d] key] (let [r (step tr key)] [(:trace r) (if (:diverged? r) (inc d) d)]))
+                                              [tr d] (if (= 1 m) [key] (rng/split key m))))
+                                    [start 0] (rng/split (rng/key 4) n)))
+          {:keys [traces divergences]} (try (k/run (k/kernel step) start {:samples 200 :key (rng/key 4)})
+                                            (catch Exception _ nil))]
+      (is (= 200 (count traces)))
+      (is (and divergences (< 10 divergences 190)) (str divergences))
+      (is (= (second (by-hand 200 1)) divergences))
+      (is (= (second (by-hand 100 2))
+             (:divergences (k/run (k/chain (k/kernel step) (k/kernel step)) start {:samples 100 :key (rng/key 4)})))))))
+
+(deftest a-parameter-check-failing-mid-trajectory-is-a-divergence
+  ;; DESIGN §9 (PROVISIONAL, 2026-10-22): at the funnel's L 3, eps 20, a
+  ;; finite v near -1500 underflows exp(v/2) to a std of 0, which the JVM
+  ;; backend's concrete check refuses; the density is undefined there, so
+  ;; the proposal diverged, and the run's acceptance stays a rate over
+  ;; every proposal. Planted bug (2026-10-22): the step's catch rethrowing
+  ;; throws "normal: std must be positive" in each case (33 of 300 HMC
+  ;; proposals from (0, 1), 166 from (-6, 0.01), as independent proposals);
+  ;; MALA's proposal densities by gen.dist's normal throw "normal: mu is
+  ;; NaN" on the diverged gradient
+  (doseq [[v x] [[0.0 1.0] [-6.0 0.01]]]
+    (testing (str "from v = " v ", x = " x ": steps of eps 0.5, then of eps 20")
+      (let [start (start-at funnel (cm/choicemap :v v :x x))
+            n 150
+            hmc (fn [opts] (k/kernel (fn [tr key] (mcmc/hmc tr (sel/select :v :x) opts key))))
+            run (try (k/run (k/chain (hmc {:L 10 :eps 0.5}) (hmc {:L 3 :eps 20.0})) start {:samples n :key (rng/key 8)})
+                     (catch clojure.lang.ExceptionInfo e (ex-message e)))
+            {:keys [acceptance-rate divergences]} (when (map? run) run)]
+        (is (map? run) (str run))
+        (is (and divergences (<= n divergences (* 2 n))) (str divergences))
+        (is (and acceptance-rate (<= 0.0 acceptance-rate (- 1.0 (/ divergences (* 2.0 n))))) (str acceptance-rate)))))
+  (testing "MALA too: tau 3000 from v = 0 proposes v near -1500"
+    (let [start (start-at funnel (cm/choicemap :v 0.0 :x 0.01))]
+      (is (every? :diverged? (map #(mcmc/mala start (sel/select :v :x) 3000.0 %) (rng/split (rng/key 9) 50))))))
+  (testing "other errors at a tried position stay loud: a structure change"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"within the trace's structure"
+                          (let [model (gen [] (let [x (trace :x (d/normal 0 1))]
+                                                (when (array/truthy? (> x 0)) (trace :extra (d/normal 0 1)))
+                                                (trace :y (d/normal x 0.3))))
+                                tr (:trace (gfi/generate model [] (cm/choicemap :x -0.05 :y 3.0) (rng/key 0)))]
+                            (mcmc/hmc tr (sel/select :x) {:L 3 :eps 0.5} (rng/key 72)))))))
+
+(deftest a-nan-in-the-starting-trace-stays-an-error
+  ;; DESIGN §9: only a proposal diverges. Planted bug (2026-10-22): every
+  ;; error of the trajectory taken as a divergence passes the trace with a
+  ;; NaN (rejected and reported as diverged)
+  (let [tr (start-at scalar (cm/choicemap :x 0.2 :y 1.3))
+        nan (assoc tr :choices (cm/set-choice (:choices tr) :x ##NaN))]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"constrained value is NaN" (mcmc/hmc nan x-sel {:L 3 :eps 0.1} (rng/key 5))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"constrained value is NaN" (mcmc/mala nan x-sel 0.1 (rng/key 6))))))
+
 ;; ---------------------------------------------------------------------------
 ;; MAP and elliptical slice
 ;; ---------------------------------------------------------------------------
@@ -113,6 +194,16 @@
   (let [tr (start-at scalar (cm/choicemap :x 0.2 :y 1.3))]
     (testing "hmc takes its key in the options map too"
       (is (= ((:trace (mcmc/hmc tr x-sel {:key (rng/key 5)})) :x) ((:trace (mcmc/hmc tr x-sel {:key (rng/key 5)})) :x))))
+    (testing "a key as hmc's third argument (rule 2; the post-M5 review's verifier)"
+      ;; planted bug (2026-10-22): the 3-arity taking the key for options
+      ;; draws from the implicit source, and the moves differ
+      (let [moves (repeatedly 4 #((:trace (mcmc/hmc tr x-sel (rng/key 7))) :x))]
+        (is (apply = moves))
+        (is (not= (first moves) 0.2) "it moved"))
+      (is (= ((:trace (mcmc/hmc tr x-sel (rng/key 7))) :x) ((:trace (mcmc/hmc tr x-sel {} (rng/key 7))) :x)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"options map" (mcmc/hmc tr x-sel (rng/key 7) (rng/key 8))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"key or an options map" (mcmc/hmc tr x-sel 7)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"key or an options map" (mcmc/mala tr x-sel 0.1 7))))
     (testing "a selection of no choices is an error, not a no-op accepted"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"selects no choices" (mcmc/hmc tr (sel/select :nope) {})))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"selects no choices" (mcmc/mala tr (sel/select :nope) 0.1)))
