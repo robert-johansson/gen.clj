@@ -622,6 +622,12 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     starting trace stay loud.
   - The alternative was to keep these loud, as "non-finite" reads
     literally, so the outcome would depend on the backend.
+  - **PROVISIONAL (owner to confirm; 2026-10-22, from m3-grammar's
+    cross-review):** a starting trace whose score or gradient is not
+    finite (−Inf, a log of 0, as well as NaN) is an error for HMC and MALA,
+    as Stan refuses a log(0) start. Otherwise every proposal from it
+    counted as a divergence, and the chain never moved: 40 of 40 on both.
+    MH and the other kernels may still start there.
 - **Casts to integers are Java's** (owner, 2026-10-20; genclj-kw88). On
   every backend, a float cast to an integer dtype truncates toward zero,
   saturates at the dtype's range (±Inf too) and takes NaN to 0. An integer
@@ -652,6 +658,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   docstring already said so. A cap at the largest float would give finite
   densities at the price of a silent atom. A loud error would need a host
   read of each draw on a lazy backend, or a threshold on the parameters.
+  **PROVISIONAL (owner to confirm; 2026-10-22, from m3-grammar's
+  cross-review): `lgamma(+Inf)` and `digamma(+Inf)` are +Inf,** as in
+  SciPy and Julia, where gen.array gave NaN (both the composite and its
+  bit-identical host path).
   The other edge stays as it is: a draw that underflows to 0, where a
   density can be +Inf, is floored at the dtype's smallest normal number.
   That holds in every family, gamma, beta and dirichlet included, which
