@@ -663,7 +663,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   **PROVISIONAL (owner to confirm; 2026-10-22, from m3-grammar's
   cross-review): `lgamma(+Inf)` and `digamma(+Inf)` are +Inf,** as in
   SciPy and Julia, where gen.array gave NaN (both the composite and its
-  bit-identical host path).
+  bit-identical host path). So too, following SciPy: lgamma(−Inf) is
+  −Inf (|Γ| goes to 0 between the poles), where gen.array gave +Inf
+  through its pole branch; and digamma(−0.0) is +Inf, the limit from below,
+  keeping the sign of a zero, where `(+ z 0)` made it −Inf.
   The other edge stays as it is: a draw that underflows to 0, where a
   density can be +Inf, is floored at the dtype's smallest normal number.
   That holds in every family, gamma, beta and dirichlet included, which
