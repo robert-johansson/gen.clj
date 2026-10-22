@@ -15,6 +15,8 @@
             [gen.dist.core :as dc]
             [gen.dynamic :as dyn :refer [gen]]
             [gen.gfi :as gfi]
+            [gen.inference.enumerative :as enum]
+            [gen.inference.proposal :as proposal]
             [gen.laws :as laws]
             [gen.random :as rng]
             [gen.selection :as sel]
@@ -330,10 +332,12 @@
 (deftest every-generative-function-is-called-with-any-number-of-arguments
   ;; The post-M5 review's I2-06: Map, Unfold, Switch, Recurse, defgf and
   ;; deterministic functions threw AbstractMethodError past six arguments,
-  ;; and an estimated function was not callable. Planted, defgf's six
+  ;; and an estimated function was not callable, nor were the internal
+  ;; and the exact proposal's wrappers (genclj-tp50). Planted, defgf's six
   ;; arities fail every kind from seven arguments on (a dynamic function
-  ;; is a defgf too now).
+  ;; is a defgf too now); a wrapper as a plain record fails all its calls.
   (let [given (gen [& xs] (vec xs))
+        flipped (gen [& xs] (trace :b (d/bernoulli 0.5)) (vec xs))
         kinds {:dynamic given
                :map (comb/map given)
                :unfold (comb/unfold (gen [_t s & ps] (+ s (count ps))))
@@ -342,7 +346,9 @@
                :deterministic (custom/deterministic {:apply vec})
                :estimated (custom/estimated {:addresses [:y] :estimate (fn [_ _ _] 0.0)
                                              :simulate (fn [_ _] {:choices (cm/choicemap :y 1.0) :log-estimate 0.0})
-                                             :retval (fn [args _] (vec args))})}]
+                                             :retval (fn [args _] (vec args))})
+               :internal-proposal (proposal/with-internal-proposal given (gen [_ & _] nil))
+               :exact-proposal (enum/with-exact-proposal flipped [:b])}]
     (doseq [[kind gf] kinds
             [n call] (calls gf)]
       (testing (str (name kind) ", " n " arguments")

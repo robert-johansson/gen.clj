@@ -131,7 +131,7 @@
                    (throw e))))]
       {:trace t2 :weight (- w (weight (:args tr) sigma tr)) :retdiff diff/unknown-change})))
 
-(defrecord InternalProposalGF [gf q]
+(gfi/defgf InternalProposalGF [gf q]
   gfi/IGenerativeFunction
   (-simulate [this args key] (trace/as-made-by (gfi/-simulate gf args key) this))
   (-generate [this args constraints key] (proposal-generate this args constraints key))
