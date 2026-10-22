@@ -1459,6 +1459,14 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     engine). `constrained/conditional-weight` is log p(x) + w(x) - log q(x),
     the importance weight for π, whose mean is the probability that the
     LM's completion satisfies the grammar.
+    It takes a completion's trace only (owner, 2026-10-22, the post-M5
+    review's P4-03), and throws for any other: a model's, a distribution's,
+    a `call-at`'s. It used to read the trace's generative function's
+    `:potential` and give 0.0, the weight of a plain completion, for every
+    trace without one, so importance weights over a model that splices a
+    constrained completion silently became the proposal's own. The
+    alternative was a compositional definition, the sum over the trace's
+    completion subtraces: a new feature, which would want its own design.
   - *Weight 0*: a constrained or kept token of weight 0 scores -Inf and the
     sites after it are the LM's rows, so moves to it are rejected, never
     NaN; a context of weight with no token allowed is loud.
