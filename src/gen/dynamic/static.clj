@@ -384,7 +384,7 @@
           [(reduce array/+ 0.0 [~@terms]) ~(:expr (:ret st))]))
      locals)))
 
-(defn static-form
+(defn ^:no-doc static-form
   "The runtime graph of the static body st (gen.dynamic.static/analyze),
    its names in slots (the arguments' first): per node, its kind, address,
    names and inputs, the slots it reads and writes, a guarded fn of (param,

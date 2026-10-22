@@ -41,10 +41,11 @@
    key per address: (split k n)'s key at index data, for every n past it.
    Other data is an error: as split's index it means nothing, JAX's key for
    a negative integer (data mod 2^32) is not this scheme's, and a long cast
-   would take 2.5 for 2."
+   would take 2.5 for 2 (and fail past Long/MAX_VALUE)."
   [k data]
-  (when-not (and (integer? data) (not (neg? data)))
-    (throw (ex-info (str "fold-in takes a non-negative integer, not " (pr-str data)) {:data data})))
+  (when-not (and (integer? data) (clojure.core/<= 0 data Long/MAX_VALUE))
+    (throw (ex-info (str "fold-in takes a non-negative 64-bit integer, not " (pr-str data))
+                    {:reason :invalid-data :data data})))
   (threefry/fold-in (check-key k) data))
 
 (defn key-data

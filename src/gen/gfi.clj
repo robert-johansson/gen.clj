@@ -214,8 +214,9 @@
    collection's and its comparator, a vector against a list all count), a
    map's entries by key and value, never by hashing; another seq (a lazy
    one, a cons) by its metadata and its elements as far as both are
-   realized, never forcing one: a link not yet realized makes it
-   different. An array is the same only as itself, and so is anything
+   realized, never forcing a lazy (IPending) link: one not yet realized
+   makes it different. (A seq whose links compute without being IPending,
+   such as enumeration-seq's or a user's ISeq type, is read as it goes.) An array is the same only as itself, and so is anything
    else. A comparison looks at up to 256 values (and links of a seq) before
    it calls the rest different, which is sound: a value called different
    only makes what holds it run again."
