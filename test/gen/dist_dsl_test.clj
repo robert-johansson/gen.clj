@@ -243,8 +243,28 @@
   (is (nil? (dc/enumerable-support (d/binom (array/array [3 4]) 0.5))) "array bounds bound supports of their own")
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no enumerable support" (dc/support (d/poisson 3.0)))))
 
+(dist doubled-shift [rate] (+ 1.0 (doubled-poisson rate)))
+(dist shifted-log-normal [mu sd] (+ 1.0 (log-normal mu sd)))
+(dist relabeled [probs] (* 10 (labeled probs [1 2 3])))
+
+(deftest a-pushforward-of-a-pushforward
+  ;; m3-grammar's cross-review of genclj-6rn4: dist's support clause still
+  ;; called dc/support, which throws where -support is nil, so a pushforward
+  ;; of a poisson's or a normal's pushforward threw at log-prob, at its value
+  ;; shape and at a site (planted: (dc/support d#) again). The laws below
+  ;; run each in a model.
+  (is (ts/close? (lp (d/poisson 3.0) 2) (lp (doubled-shift 3.0) 5.0)) "a discrete draw without a support")
+  (is (= ##-Inf (lp (doubled-shift 3.0) 4.0)))
+  (is (ts/close? (lp (log-normal 0.2 0.7) 1.5) (lp (shifted-log-normal 0.2 0.7) 2.5)) "a continuous draw")
+  (is (ts/close? (Math/log 0.5) (lp (relabeled [0.2 0.5 0.3]) 20)) "an enumerable draw")
+  (is (= [nil nil [10 20 30]] (mapv dc/enumerable-support [(doubled-shift 3.0) (shifted-log-normal 0.2 0.7) (relabeled [0.2 0.5 0.3])])))
+  (is (= [[] []] (mapv dc/value-shape [(doubled-shift 3.0) (shifted-log-normal 0.2 0.7)]))))
+
 (def models
-  [[:pushforward-in-a-model
+  [[:nested-discrete (gen [] (let [x (trace :x (doubled-shift 3.0))] (trace :y (d/normal x 1)) x)) [] []]
+   [:nested-continuous (gen [mu] (let [x (trace :x (shifted-log-normal mu 0.5))] (trace :y (d/normal x 1)) x)) [0.2] [[0.4]]]
+   [:nested-enumerable (gen [] (let [x (trace :x (relabeled [0.2 0.5 0.3]))] (trace :y (d/normal x 1)) x)) [] []]
+   [:pushforward-in-a-model
     (gen [rate] (let [x (trace :x (shifted-exponential rate 1.0))] (trace :y (d/normal x 1)) x))
     [2.0] [[3.0]]]
    [:discrete-pushforward

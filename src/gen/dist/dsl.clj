@@ -263,6 +263,7 @@
        ;; errors at a site; an enumerable draw's labels go unchecked
        (~'value-shape [] (let [d# ~draw]
                            (when-not (and (dc/discrete? d#) (dc/enumerable-support d#)) (dc/value-shape d#))))
+       ;; the labels of an enumerable draw, nil for none (dc/enumerable-support)
        (~'support [] (let [d# ~draw
                            f# ~body-fn]
-                       (vec (distinct (map #(host-value (f# %)) (dc/support d#)))))))))
+                       (some->> (dc/enumerable-support d#) (map #(host-value (f# %))) distinct vec))))))
