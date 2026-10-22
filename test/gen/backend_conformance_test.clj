@@ -377,6 +377,34 @@
           got (double (array/item (array/sum (array/full [n] (/ 1.0 n) {:dtype float-dt}))))]
       (is (<= (Math/abs (- got (* n c))) (* (log-bound n) n c)) (str n " terms: " got)))))
 
+(def ^:private halves?
+  "Does the tested backend have float16 and bfloat16 (MLX; the JVM backend
+   has neither)?"
+  (try (array/array [1.0] {:dtype :bfloat16}) (array/array [1.0] {:dtype :float16}) true
+       (catch clojure.lang.ExceptionInfo _ false)))
+
+(defspec long-half-float-sums 12
+  ;; float16 and bfloat16, at their own precision: n equal terms of the
+  ;; dtype's full precision (11 and 8 significant bits), summing to 128 to
+  ;; 1,024 (in float16's range, its terms normal), within two roundings of
+  ;; the dtype and float32's log-bound: on MLX's CPU they are summed in
+  ;; float32 and cast back (half an ulp measured), and Metal's bfloat16
+  ;; sums come within 1.2 ulps. Accumulated in their own precision, MLX's
+  ;; CPU missed 10^5 terms by 75% in float16 and 99.8% in bfloat16
+  ;; (genclj-y0mp)
+  (prop/for-all [dt (gen/elements [:float16 :bfloat16])
+                 k (gen/choose 40 60)
+                 u (gen/choose 0 1000000)
+                 total (gen/choose 256 1023)]
+    (or (not halves?)
+        (let [bits ({:float16 11 :bfloat16 8} dt)
+              n (long (Math/pow 10.0 (/ k 10.0)))
+              m (+ (bit-shift-left 1 (dec bits)) (mod u (bit-shift-left 1 (dec bits))))
+              c (Math/scalb (double m) (Math/getExponent (/ (double total) (* n m))))
+              got (double (array/item (array/sum (array/full [n] c {:dtype dt}))))
+              eps (Math/scalb 1.0 (- 1 bits))]
+          (<= (Math/abs (- got (* n c))) (* (+ (* 2.0 eps) (log-bound n)) n c))))))
+
 (defn- flat-values [x] (map double (flatten (vector (array/->clj x)))))
 
 (defspec long-sums-over-axes 12

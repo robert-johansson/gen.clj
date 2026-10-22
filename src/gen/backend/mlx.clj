@@ -814,6 +814,10 @@
       ;; MLX's CPU accumulates a float32 sum sequentially (DESIGN §9)
       ((requiring-resolve 'gen.backend.mlx.exact/sum) (as-array b x dtype) axes keep-dims?)
 
+      (and (= op :sum) (#{:float16 :bfloat16} dtype) (= :cpu (:device (config b))))
+      ;; and a half-float sum in its own precision: in float32 instead
+      ((requiring-resolve 'gen.backend.mlx.exact/half-sum) (as-array b x dtype) axes keep-dims?)
+
       :else
       (let [ax (int-array axes)
             kd (boolean keep-dims?)]

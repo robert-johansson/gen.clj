@@ -12,7 +12,9 @@
    - float32 sums on the CPU: MLX's accumulate sequentially, so their error
      grows with the count (10^6 terms of 10^-6 sum to 1 - 1.2e-3); summed
      in blocks, and the block sums in blocks, it grows with its log
-     (genclj-y0mp)."
+     (genclj-y0mp). Half-float sums there accumulate in their own
+     precision (10^5 terms of 10^-5: 1 - 0.75 in float16, 1 - 0.998 in
+     bfloat16), so they are summed in float32 and cast back, as JAX's."
   (:refer-clojure :exclude [+ - * / < > >= ==])
   (:require [gen.array :as array :refer [+ - * / < > >= ==]]))
 
@@ -179,6 +181,12 @@
     (array/reshape summed (if keep-dims?
                             (reduce #(assoc %1 %2 1) s axes)
                             (vec (keep-indexed #(when-not (reduced %1) %2) s))))))
+
+(defn half-sum
+  "The float16 or bfloat16 MLX array x summed over axes on MLX's CPU: in
+   float32 (in blocks, past one: sum), then cast back to its dtype."
+  [x axes keep-dims?]
+  (array/astype (array/sum (array/astype x :float32) {:axis axes :keep-dims? keep-dims?}) (array/dtype x)))
 
 (declare float64-unary)
 
