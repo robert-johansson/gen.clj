@@ -175,7 +175,7 @@
    a quarter of the lattice's spacing there, y-next being the value at x + 1,
    so no value between two images takes either's mass."
   [y y-next v]
-  (let [eps (if (= :float32 (array/dtype y)) (double (Math/ulp (float 1.0))) (Math/ulp 1.0))
+  (let [eps (:eps (dc/float-limits (array/dtype y)))
         off (array/abs (- y v))]
     (array/logical-and (array/<= off (* 4.0 eps (array/abs v)))
                        (array/<= off (* 0.25 (array/abs (- y-next y)))))))

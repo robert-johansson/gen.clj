@@ -37,15 +37,10 @@
   [in-support v s]
   (where in-support v s))
 
-(defn- of-dtype
-  "f32 or f64, by x's dtype."
-  ^double [x ^double f32 ^double f64]
-  (if (= :float32 (array/dtype x)) f32 f64))
-
 (defn- largest-float
   "The largest finite float of x's dtype."
   ^double [x]
-  (of-dtype x Float/MAX_VALUE Double/MAX_VALUE))
+  (:max (dc/float-limits (array/dtype x))))
 
 (defn- floored
   "x at least the smallest normal number of its dtype. A gamma draw of a
@@ -53,14 +48,14 @@
    a density may be infinite or a quotient infinite; the floor changes only
    values below it."
   [x]
-  (array/maximum x (of-dtype x Float/MIN_NORMAL Double/MIN_NORMAL)))
+  (array/maximum x (:tiny (dc/float-limits (array/dtype x)))))
 
 (defn- below-one
   "x at most the largest float below 1 of its dtype, floored's mirror: a
    beta draw within half an ulp of 1 rounds to 1, where its density may be
    infinite."
   [x]
-  (array/minimum x (of-dtype x (Math/nextDown (float 1.0)) (Math/nextDown 1.0))))
+  (array/minimum x (- 1.0 (* 0.5 (:eps (dc/float-limits (array/dtype x)))))))
 
 (defn- log-gamma-draw
   "The log of a gamma(alpha, 1) draw, which does not underflow as the draw
@@ -200,7 +195,7 @@
    log1p(-|u|), which is -Inf at -1 (as rng/normal's bound for erfinv's
    pole)."
   ^double [dtype]
-  (if (= :float32 dtype) (double (Math/nextUp (float -1.0))) (Math/nextUp -1.0)))
+  (+ -1.0 (* 0.5 (:eps (dc/float-limits dtype)))))
 
 (defdist laplace
   "laplace(loc, scale): the Laplace (double exponential) distribution."

@@ -791,3 +791,19 @@
                             0.25]]]
       (let [[v g] ((array/value-and-grad lp) (array/array at))]
         (is (= [##-Inf 0.0] [(ts/number v) (ts/number g)]) label)))))
+
+(deftest float-limits-by-dtype
+  ;; m3-grammar's cross-review: half floats took float64's constants, so
+  ;; largest-float's cap was Inf in float16 (a mixture's weight of 0 then
+  ;; NaN) and floored's floor 0 (planted: float16 as float64). Each
+  ;; against IEEE's definition, from the precision p and the exponent's bits.
+  (doseq [[dtype p bits] [[:float64 53 11] [:float32 24 8] [:float16 11 5] [:bfloat16 8 8]]]
+    (let [emax (dec (bit-shift-left 1 (dec bits)))]
+      (is (= {:tiny (Math/pow 2 (- 1 emax)) :max (* (- 2 (Math/pow 2 (- 1 p))) (Math/pow 2 emax)) :eps (Math/pow 2 (- 1 p))}
+             (dc/float-limits dtype))
+          (name dtype))))
+  (when-not (ts/jvm?)
+    (testing "a float16 mixture with a weight of 0"
+      (let [h #(array/array % {:dtype :float16})
+            m ((d/homogeneous-mixture d/normal) (h [0.5 0.5 0.0]) (h [0.0 1.0 2.0]) (h [1.0 1.0 1.0]))]
+        (is (Double/isFinite (ts/number (dc/log-prob m (h 0.3)))))))))
