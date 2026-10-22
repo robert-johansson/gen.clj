@@ -225,7 +225,8 @@ needs, taken from GenMLX's measured call counts
   - gamma: Marsaglia–Tsang with a fixed number of vectorized proposals. That
     keeps it branch-free, so there's no eval inside a sampler (a GenMLX smell,
     dist.cljs:410-445);
-  - beta and dirichlet: via gamma.
+  - beta and dirichlet: via gamma, from the gammas' logs (a sigmoid, a
+    softmax), which do not underflow.
   - Because the algorithms are shared, the backends sample from identical laws.
 - **Stretch goal (bean genclj-ldpy):** make the JVM backend's float32 mode
   bit-identical to MLX's `random.uniform`. The two backends would then produce

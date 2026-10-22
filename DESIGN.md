@@ -638,7 +638,12 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   review 4's floor missed: gamma(0.001, 1000) scored +Inf on 963 of 2,000
   draws. Its mirror (owner, 2026-10-22, the post-M5 review's P2-01): a beta draw that rounds to 1 is
   clamped to the largest float below 1. At beta(0.001, 0.001), 8,802 of
-  20,000 draws rounded to 1 and scored +Inf.
+  20,000 draws rounded to 1 and scored +Inf. Beta and dirichlet are drawn
+  from their gammas' logs (the sigmoid of a difference, a softmax), so the
+  floor and the clamp see where a draw lies: x/(x + y) of two underflowed
+  gammas was 0/0 = NaN (448 of 2,000 draws), where flooring the gammas
+  first would put the draw at 1/2. A shape below 1 boosts in log space,
+  log Γ(α+1)'s draw - E/α for an exponential E (genclj-uli3).
 - **A mixture of a discrete and a continuous family is an error** when it
   is made (owner, 2026-10-22, the post-M5 review's P2-02). Its density would add a pmf to a pdf: given
   y = 0, the posterior came out 0.267 where 0.80 is exact. Gen.jl's types

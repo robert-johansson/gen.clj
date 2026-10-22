@@ -37,10 +37,41 @@
   [in-support v s]
   (where in-support v s))
 
+(defn- of-dtype
+  "f32 or f64, by x's dtype."
+  ^double [x ^double f32 ^double f64]
+  (if (= :float32 (array/dtype x)) f32 f64))
+
 (defn- largest-float
   "The largest finite float of x's dtype."
   ^double [x]
-  (if (= :float32 (array/dtype x)) (double Float/MAX_VALUE) Double/MAX_VALUE))
+  (of-dtype x Float/MAX_VALUE Double/MAX_VALUE))
+
+(defn- floored
+  "x at least the smallest normal number of its dtype. A gamma draw of a
+   small shape (its boost U^(1/α)) or a power of one underflows to 0, where
+   a density may be infinite or a quotient infinite; the floor changes only
+   values below it."
+  [x]
+  (array/maximum x (of-dtype x Float/MIN_NORMAL Double/MIN_NORMAL)))
+
+(defn- below-one
+  "x at most the largest float below 1 of its dtype, floored's mirror: a
+   beta draw within half an ulp of 1 rounds to 1, where its density may be
+   infinite."
+  [x]
+  (array/minimum x (of-dtype x (Math/nextDown (float 1.0)) (Math/nextDown 1.0))))
+
+(defn- log-gamma-draw
+  "The log of a gamma(alpha, 1) draw, which does not underflow as the draw
+   does: rng/gamma boosts a shape below 1 as Γ(α+1)·U^(1/α), and the power
+   is 0 for most U at a small α, so here it is log Γ(α+1)'s draw - E/α, for
+   E = -log U an exponential draw."
+  [key alpha shape o]
+  (let [boost? (< alpha 1)
+        [kg ke] (rng/split key)
+        g (rng/gamma kg (where boost? (+ alpha 1) alpha) shape o)]
+    (- (log g) (where boost? (/ (rng/exponential ke shape (assoc o :dtype (array/dtype g))) alpha) 0.0))))
 
 (defn- log-weight
   "A mixture weight's log, -Inf at 0 through a stand-in: log's gradient
@@ -112,11 +143,12 @@
   [a b]
   (validate (dc/check-positive "beta" "alpha" a) (dc/check-positive "beta" "beta" b))
   (sample [key shape]
+    ;; x/(x + y) for gamma draws x and y, from their logs: either may
+    ;; underflow at a small shape (0/0 when both do), and the quotient rounds
+    ;; to 1 when y is below x·2^-53
     (let [s (dc/elementwise-shape shape a b)
-          [k1 k2] (rng/split key)
-          x (rng/gamma k1 a s (opts a b))
-          y (rng/gamma k2 b s (opts a b))]
-      (/ x (+ x y))))
+          [k1 k2] (rng/split key)]
+      (below-one (floored (array/sigmoid (- (log-gamma-draw k1 a s (opts a b)) (log-gamma-draw k2 b s (opts a b))))))))
   (log-prob [v]
     (guard (logical-and (>= v 0) (<= v 1))
            (- (+ (xlogy (- a 1) v) (xlog1py (- b 1) (- v))) (log-beta a b)))))
@@ -126,7 +158,7 @@
   [k theta]
   (validate (dc/check-positive "gamma" "shape" k) (dc/check-positive "gamma" "scale" theta))
   (sample [key shape]
-    (* theta (rng/gamma key k (dc/elementwise-shape shape k theta) (opts k theta))))
+    (floored (* theta (rng/gamma key k (dc/elementwise-shape shape k theta) (opts k theta)))))
   (log-prob [v]
     (guard (>= v 0) (- (xlogy (- k 1) v) (/ v theta) (lgamma k) (* k (log theta))))))
 
@@ -326,9 +358,11 @@
   (validate (dc/check (<= 1 (array/ndim alpha)) "dirichlet" "alpha must be a vector" {:alpha-shape (array/shape alpha)})
             (dc/check-all-positive "dirichlet" "alpha" alpha))
   (sample [key shape]
+    ;; g/Σg for gamma draws g, from their logs (a draw underflows to 0 at a
+    ;; small alpha), floored where the normalized value still does
     (let [k (peek (array/shape alpha))
-          g (rng/gamma key alpha (sh/broadcast (conj shape k) (array/shape alpha)) (opts alpha))]
-      (/ g (array/sum g {:axis -1 :keep-dims? true}))))
+          lg (log-gamma-draw key alpha (sh/broadcast (conj shape k) (array/shape alpha)) (opts alpha))]
+      (floored (array/softmax lg {:axis -1}))))
   (log-prob [v]
     (guard (logical-and (array/all (>= v 0) {:axis -1})
                         (<= (array/abs (- (array/sum v {:axis -1}) 1)) 1e-6))
@@ -343,14 +377,6 @@
 ;; ---------------------------------------------------------------------------
 
 (def ^:private log-2 (Math/log 2.0))
-
-(defn- floored
-  "x at least the smallest normal number of its dtype. A gamma draw of a
-   small shape (its boost U^(1/α)) or a power of one underflows to 0, where
-   a density may be infinite or a quotient infinite; the floor changes only
-   values below it."
-  [x]
-  (array/maximum x (if (= :float32 (array/dtype x)) (double Float/MIN_NORMAL) Double/MIN_NORMAL)))
 
 (defdist chi-squared
   "chi-squared(nu): the χ² distribution with nu degrees of freedom (Chisq)."

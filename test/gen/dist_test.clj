@@ -7,6 +7,7 @@
             [gen.array.special]
             [gen.batched :as batched]
             [gen.choicemap :as cm]
+            [gen.diff :as diff]
             [gen.dist :as d]
             [gen.dist.core :as dc]
             [gen.dynamic :refer [gen]]
@@ -129,6 +130,7 @@
     (check (d/normal 0.5 2.0) 0.5 4.0)
     (check (d/uniform -1.0 3.0) 1.0 (/ 16.0 12))
     (check (d/beta 2.5 0.7) (/ 2.5 3.2) (/ (* 2.5 0.7) (* 3.2 3.2 4.2)))
+    (check (d/beta 0.3 0.5) 0.375 (/ 0.15 (* 0.64 1.8)))
     (check (d/gamma 2.5 1.5) 3.75 5.625)
     (check (d/inv-gamma 10.0 2.0) (/ 2.0 9) (/ 4.0 (* 81 8)))
     (check (d/exponential 1.5) (/ 1 1.5) (/ 1 2.25))
@@ -512,6 +514,70 @@
     (testing "a gradient outside the support is finite"
       (is (finite? [(ts/number ((array/grad #(dc/log-prob (d/weibull % 2.0) -1.0)) 1.5))
                     (ts/number ((array/grad #(dc/log-prob (d/weibull 1.5 %) -1.0)) 2.0))])))))
+
+;; ---------------------------------------------------------------------------
+;; Gamma, beta and dirichlet at their edges
+;; ---------------------------------------------------------------------------
+
+(defn- in-float32
+  "The family's parameters as float32 arrays of n elements, so a draw of no
+   batch shape is n float32 draws (the JVM backend's 0-d arrays are host
+   doubles)."
+  [family n & params]
+  (apply family (map #(array/full [n] % {:dtype :float32}) params)))
+
+(deftest gamma-beta-and-dirichlet-at-their-edges
+  ;; genclj-uli3 (the post-M5 review's P2-01): their draws were not floored,
+  ;; as §9 says every family's are. gamma(0.001, 1000) drew 0, of density
+  ;; +Inf, about half the time (90 % in float32); beta(0.001, 0.001) drew 0,
+  ;; 1 (x/(x + y) rounds to 1 when y < x·2^-53) and NaN (0/0); a sparse
+  ;; dirichlet drew exact zeros. Planted back, each fails: the floors, the
+  ;; clamp below 1, beta's x/(x + y) of linear draws, the boost's power of U
+  ;; (log of 0: NaN where both underflow), the float32 exponential drawn in
+  ;; float64 (the draws' dtype) and the boost's E·α for E/α (the law).
+  (let [n 2000
+        tiny #(if (= :float32 (array/dtype %)) (double Float/MIN_NORMAL) Double/MIN_NORMAL)
+        top #(if (= :float32 (array/dtype %)) (double (Math/nextDown (float 1.0))) (Math/nextDown 1.0))
+        host (fn [x] (map ts/number (flatten (array/->clj x))))
+        check (fn [label dist batch dtype upper]
+                (let [x (dc/sample dist (rng/key 93) batch)
+                      xs (host x)]
+                  (is (= dtype (array/dtype x)) label)
+                  (is (every? #(<= (tiny x) % (upper x)) xs) label)
+                  (is (every? #(Double/isFinite %) (host (dc/log-prob dist x))) label)
+                  xs))
+        dtypes (if (ts/f32?) [:float32] [(ts/float-dtype) :float32])]
+    (doseq [dtype dtypes
+            :let [f32 (and (= :float32 dtype) (not (ts/f32?)))
+                  make (fn [family k & params] (if f32 (apply in-float32 family k params) (apply family params)))
+                  batch (fn [k] (if f32 [] [k]))]]
+      (testing (name dtype)
+        (check "gamma(0.001, 1000)" (make d/gamma n 0.001 1000.0) (batch n) dtype (constantly Double/MAX_VALUE))
+        (let [xs (check "beta(0.001, 0.001)" (make d/beta n 0.001 0.001) (batch n) dtype top)
+              below (count (filter #(< % 0.5) xs))]
+          ;; symmetric: half below 1/2, within five standard errors
+          (is (< (Math/abs (- below (/ n 2))) (* 5 (Math/sqrt (/ n 4)))) (str below " of " n " below 1/2")))
+        (let [k 1000
+              d (if f32 (d/dirichlet (array/full [k] 0.01 {:dtype :float32})) (d/dirichlet (array/full [k] 0.01)))
+              x (dc/sample d (rng/key 94) [200])]
+          (is (= dtype (array/dtype x)))
+          (is (every? #(<= (tiny x) %) (host x)) "no component is 0")
+          (is (every? #(Double/isFinite %) (host (dc/log-prob d x)))))))
+    (testing "a small shape's law: P(X < 1e-30) = (1e-30)^0.01 for beta(0.01, 1), within five standard errors"
+      (let [m 20000
+            p (Math/pow 1e-30 0.01)
+            below (count (filter #(< % 1e-30) (host (dc/sample (d/beta 0.01 1.0) (rng/key 95) [m]))))]
+        (is (< (Math/abs (- (/ below (double m)) p)) (* 5 (Math/sqrt (/ (* p (- 1 p)) m)))) (str below " of " m))))
+    (testing "an update that keeps a floored draw has the score change as its weight (it was NaN)"
+      ;; g ~ gamma(0.005, 1) underflows with probability 2^(-1075/200) = 0.024
+      (let [model (gen [s] (trace :g (d/gamma 0.005 1.0)) (trace :x (d/normal s 1.0)))
+            trs (map #(gfi/simulate model [0.0] %) (rng/split (rng/key 96) 400))
+            floored (filter #(= (tiny (% :g)) (ts/number (% :g))) trs)]
+        (is (seq floored) "some traces hold a floored draw")
+        (doseq [tr floored]
+          (let [x (ts/number (tr :x))]
+            (is (ts/close? (:weight (gfi/update tr [1.0] [diff/unknown-change] cm/EMPTY (rng/key 1)))
+                           (- (* -0.5 (Math/pow (- x 1.0) 2)) (* -0.5 x x))))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Gradients at zero probabilities and at the parameters' bounds
