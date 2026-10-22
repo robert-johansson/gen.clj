@@ -206,7 +206,12 @@ needs, taken from GenMLX's measured call counts
 - **The scheme is JAX's default ("partitionable") Threefry** (decided
   2026-10-18), verified bit-for-bit against JAX 0.9.1 and Random123's
   known-answer vectors:
-  - `split(k, n)[i] = threefry(k, [hi32(i) lo32(i)])` and `fold-in(k, d) = threefry(k, [0 d])`.
+  - `split(k, n)[i] = threefry(k, [hi32(i) lo32(i)])` and `fold-in(k, d) =
+    threefry(k, [hi32(d) lo32(d)])`, so `fold-in(k, d) = split(k, ·)[d]`.
+    fold-in takes 64-bit data (owner, 2026-10-22, the post-M5 review's
+    P2-09): below 2^32 its key is JAX's, bit for bit; beyond, it is
+    distinct, where JAX masks typed data to 32 bits and Recurse's deep
+    node numbers then shared keys.
   - Element i of any draw depends only on the key and i.
   - MLX uses the older, non-partitionable layout, so the MLX backend will
     implement this scheme itself; it is only uint32 arithmetic.

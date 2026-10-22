@@ -302,6 +302,11 @@
       (is (= a [(model) (model)]) "seed! makes calls without a key repeat exactly")
       (is (not= (first a) (second a)) "successive calls draw fresh keys")
       (is (= 123 (gfi/implicit-seed))))
+    (testing "the stream does not repeat after 2^32 keys (the post-M5 review's P2-09)"
+      (gfi/seed! 5)
+      (let [k0 (gfi/next-key)]
+        (.set ^java.util.concurrent.atomic.AtomicLong @#'gfi/counter (bit-shift-left 1 32))
+        (is (not= k0 (gfi/next-key)) "the key at counter 2^32 is not counter 0's")))
     (gfi/seed! before)))
 
 (deftest untraced-calls

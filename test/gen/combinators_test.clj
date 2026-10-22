@@ -370,6 +370,35 @@
 ;; Recurse
 ;; ---------------------------------------------------------------------------
 
+(deftest recurse-deep-nodes-draw-afresh
+  ;; The post-M5 review's P2-09 (critical): node numbers pass 2^32 at depth
+  ;; 32 (max-branch 2), 16 (4) or 11 (8), also across subtrees. With
+  ;; fold-in masking its data to 32 bits, such nodes shared one key and
+  ;; drew one value (a 40-deep chain had one value at depths 32 to 40).
+  ;; Planted, the mask fails every case here.
+  (doseq [[m depth from] [[2 40 32] [4 20 16] [8 14 11]]]
+    (testing (str "a chain of child 0, max-branch " m)
+      (let [chain (comb/recurse (gen [n] {:value (trace :v (d/normal 0 1)) :children (if (< n depth) [(inc n)] [])})
+                                (gen [v ws] (into [v] (first ws)))
+                                m)
+            vs (ts/host (:retval (gfi/simulate chain [0] (rng/key 60))))]
+        (is (= (inc depth) (count vs)))
+        (is (= (- (inc depth) from) (count (distinct (subvec vs from)))) (str "depths " from " to " depth " differ")))))
+  (testing "two subtrees whose depth-17 nodes are equal mod 2^32 (max-branch 4)"
+    (let [tree (comb/recurse (gen [[kind n]]
+                               {:value (trace :v (d/normal 0 1))
+                                :children (case kind
+                                            :root [[:chain 1] [:chain 1]]
+                                            :chain (if (< n 17) [[:leaf] [:leaf] [:leaf] [:chain (inc n)]] [])
+                                            :leaf [])})
+                             (gen [v _] v)
+                             4)
+          tr (gfi/simulate tree [[:root]] (rng/key 61))
+          ;; the subtrees' roots are nodes 1 and 2; child 3 of node i is 4i + 4
+          deep (fn [start] (nth (iterate #(+ (* 4 %) 4) start) 16))]
+      (is (= (mod (deep 1) (bit-shift-left 1 32)) (mod (deep 2) (bit-shift-left 1 32))))
+      (is (not= (ts/host (tr [(deep 1) :production :v])) (ts/host (tr [(deep 2) :production :v])))))))
+
 (deftest recurse-builds-and-folds-the-tree
   (let [counted (comb/recurse (gen [n] {:value n :children (if (< n 2) [(inc n) (inc n)] [])})
                               (gen [v ws] (reduce + v ws))
