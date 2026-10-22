@@ -54,7 +54,7 @@
   (let [n (count tokens)]
     (loop [node trie depth 0 entry nil entry-depth 0]
       (let [here (:entry node)
-            entry (if here here entry)
+            entry (or here entry)
             entry-depth (if here depth entry-depth)
             child (when (< depth n) (get (:children node) (nth tokens depth)))]
         (if child

@@ -211,9 +211,11 @@
 ;; ---------------------------------------------------------------------------
 
 ;; A run's state: {:ctx the prompt and the tokens so far, :tokens, :scores
-;; (each token's), :fresh (the positions drawn), :old (the revised trace's
-;; tokens and scores while the run is still that trace's, with its prompt
-;; and its tokens so far; else nil)}.
+;; (each token's), :fresh (the positions drawn), :dead? (under a potential,
+;; true once a token has weight 0: no sequence it begins has weight, and
+;; the sites after it are the LM's rows), :old (the revised trace's tokens
+;; and scores while the run is still that trace's, with its prompt and its
+;; tokens so far; else nil)}.
 
 (defn- end?
   "Is the run over: max-tokens of them, or its last token an end token?"
@@ -253,29 +255,67 @@
     (loop [j 0]
       (if (and (< j n) (= (run j) (old-tokens (+ i j)))) (recur (inc j)) j))))
 
+(def ^:private ^:const reads-at-once
+  "How many of a run's contexts one read takes under a potential: each row
+   is reduced to its site's score before the next read, so a long run
+   holds a few rows (at Qwen3's vocabulary 19 MB), not one for each token."
+  32)
+
+(defn- site-scores
+  "The scores of run, known tokens after state, by their sites under gf's
+   potential (gen.llm.constrained/site-row): the LM's rows at their
+   contexts, read reads-at-once at a time, each times the potential's
+   weights. -Inf for a token of weight 0 (or where the potential allows
+   none), and the LM's row's entry for each token after one."
+  [{:keys [lm potential end-tokens]} {:keys [ctx tokens dead?]} run]
+  (let [n (count run)
+        score (fn [[out dead] ^long i ^floats row]
+                (let [t (int (run i))]
+                  (if dead
+                    [(conj out (double (aget row t))) true]
+                    (let [q (constrained/site-row potential end-tokens row (into tokens (subvec run 0 i)))
+                          s (if q (double (aget q t)) Double/NEGATIVE_INFINITY)]
+                      [(conj out s) (== Double/NEGATIVE_INFINITY s)]))))]
+    (loop [i 0 acc [[] (boolean dead?)]]
+      (if (< i n)
+        (let [m (min n (+ i reads-at-once))
+              rows (lm/batch-next-logprobs lm (mapv #(into ctx (subvec run 0 %)) (range i m)))]
+          (recur m (reduce (fn [acc j] (score acc j (rows (- (long j) i)))) acc (range i m))))
+        (first acc)))))
+
 (defn- run-scores
   "The scores of run, known tokens after state: the LM's, in one call (or,
    under a potential, its sites')."
   [gf state run]
   (if (:potential gf)
-    (constrained/run-scores gf state run)
+    (site-scores gf state run)
     (lm/score (:lm gf) (:ctx state) run)))
 
 (defn- draw-next
-  "The next token after state, drawn with key: [t score], from the LM's
-   row (its score nil, for scored to take), or under a potential from its
-   site's distribution, scored by it."
-  [gf state key]
-  (if (:potential gf)
-    (constrained/draw-next gf state #(draw % key))
-    [(draw (lm/next-logprobs (:lm gf) (:ctx state)) key) nil]))
+  "The next token after state, drawn with key, and the score it is drawn
+   with: [t score], from the LM's row (score nil, for scored to take the
+   LM's), or under a potential from its site's distribution (its
+   log-probability of t, a double; after a token of weight 0, the LM's
+   row's). Loud where the context has weight but the potential allows no
+   token."
+  [{:keys [lm potential end-tokens]} {:keys [ctx tokens dead?]} key]
+  (let [row (lm/next-logprobs lm ctx)]
+    (if-not potential
+      [(draw row key) nil]
+      (let [q (if dead? row (constrained/site-row potential end-tokens row tokens))]
+        (when-not q
+          (throw (ex-info (str "token/completion: the potential allows no token at position " (count tokens)
+                               " (a grammar complete there, with no end tokens to end it?)")
+                          {:reason :zero-weight :position (count tokens)})))
+        (let [t (long (draw q key))]
+          [t (double (aget ^floats q t))])))))
 
 (defn- scored
   "state with run appended: the tokens that are still the revised trace's
    keep its scores (score once, whatever the LM has evicted since); the
-   rest are scored by the LM, in one call (fresh's scores, when given, are
-   a fresh token's)."
-  [gf state run fresh]
+   rest are scored by the LM, in one call, or a token just drawn by
+   drawn-score, when given, the score it was drawn with."
+  [gf state run drawn-score]
   (let [j (agreeing state run)
         i (count (:tokens state))
         state (cond-> state
@@ -283,7 +323,7 @@
     (if (< j (count run))
       (let [unscored (subvec run j)]
         (-> state
-            (append unscored (or fresh (run-scores gf state unscored)))
+            (append unscored (if drawn-score [drawn-score] (run-scores gf state unscored)))
             (assoc :old nil)))
       state)))
 

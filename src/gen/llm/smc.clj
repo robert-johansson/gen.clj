@@ -54,38 +54,38 @@
    number of particles, a step is one advance. Particles hold tokens; the
    LM's trie owns every branch, and resampling copies token vectors.
    Draws are on the host: particle i's token at step t from (fold-in
-   (fold-in key t) i), by token/dist. The particles' proposal rows (:lm's,
+   (fold-in (fold-in key t) 0) i), by token/dist. The particles' proposal rows (:lm's,
    :masked's) and draws, pure functions of their rows, twists and keys,
    run on a host pool, collected in order, so every result is the calling
    thread's alone, bit for bit, whatever the pool's size; the LM's and the
    potential's calls, and a proposal function's, stay on the calling
    thread. :host-pool is an ExecutorService (host-pool makes one), false
    for the calling thread alone, or by default a shared pool of daemon
-   threads, its size the system property gen.llm.host-threads (default:
-   half the available processors, up to 4; 1 turns it off). Do not run
-   SMC inside a task of the pool it is given: a step waits for its tasks,
-   queued behind the one that waits, so the pool can deadlock.
-   Resampling (maybe-resample, or run's) is when the effective sample
-   size falls below :ess-threshold (n/2 by
-   default), by :method (:systematic by default; any of
-   gen.inference.weights'), and moves the weights' mean into :log-ml."
+   threads, of gen.llm.host's default size (the system property
+   gen.llm.host-threads, or half the available processors up to 4; 1
+   turns it off). Do not run SMC inside a task of the pool it is given: a
+   step waits for its tasks, queued behind the one that waits, so the pool
+   can deadlock. Resampling (maybe-resample, or run's) is when the
+   effective sample size falls below :ess-threshold (n/2 by default), by
+   :method (:systematic by default; any of gen.inference.weights'), and
+   moves the weights' mean into :log-ml."
   (:require [gen.dist.core :as dc]
             [gen.gfi :as gfi]
             [gen.llm.constrained :as constrained]
+            [gen.llm.host :as host]
             [gen.inference.weights :as w]
             [gen.llm.lm :as lm]
             [gen.llm.potential :as potential]
             [gen.llm.token :as token]
             [gen.random :as rng])
-  (:import [java.util Collection]
-           [java.util.concurrent ExecutionException ExecutorService Executors Future]))
+  (:import [java.util.concurrent ExecutorService]))
 
 (set! *warn-on-reflection* true)
 (set! *unchecked-math* :warn-on-boxed)
 
 ;; A state: {:completion :args [prompt max-tokens] :potential :proposal
-;; :key :host-pool (an ExecutorService or false) :t (steps so far) :particles [{:tokens :done? :log-p}] :log-weights
-;; :log-ml :resampled?}. :log-p is a particle's log p(tokens), its trace's
+;; :key :host-pool (an ExecutorService or false) :t (steps so far)
+;; :particles [{:tokens :done? :log-p}] :log-weights :log-ml :resampled?}. :log-p is a particle's log p(tokens), its trace's
 ;; score; a particle whose weight fell to 0 stops, :dead?. Step t draws
 ;; with (fold-in (fold-in key t) 0) and resamples with (fold-in (fold-in
 ;; key t) 1).
@@ -113,30 +113,12 @@
    when done, or let the JVM's exit end it. Never run SMC from one of its
    own tasks: a step waits on tasks queued behind that one (a deadlock)."
   ^ExecutorService [n]
-  (when-not (pos-int? n)
-    (throw (ex-info (str "smc/host-pool: a pool has a positive number of threads, not " (pr-str n))
-                    {:reason :invalid-args :n n})))
-  (Executors/newFixedThreadPool (int n) (-> (Thread/ofPlatform) (.name "gen.llm.smc host-" 0) (.daemon true) .factory)))
-
-(defn- host-threads
-  "The shared pool's threads, from the system property gen.llm.host-threads
-   (a string; a value that is not a positive integer is loud) or, without
-   it, half of processors up to 4, as the llama.cpp engine's row pool. 1
-   runs the host work on the calling thread."
-  ^long [property ^long processors]
-  (if (nil? property)
-    (max 1 (min 4 (quot processors 2)))
-    (let [n (parse-long property)]
-      (when-not (and n (pos? (long n)))
-        (throw (ex-info (str "smc: gen.llm.host-threads is a positive integer, not " (pr-str property))
-                        {:reason :invalid-option :host-threads property})))
-      (long n))))
-
-(def ^:private default-threads
-  (delay (host-threads (System/getProperty "gen.llm.host-threads") (.availableProcessors (Runtime/getRuntime)))))
+  (host/pool "gen.llm.smc host-" n))
 
 (def ^:private shared-pool
-  (delay (when (< 1 (long @default-threads)) (host-pool @default-threads))))
+  "The default pool, of host/default-threads threads; none (the calling
+   thread) when that is 1."
+  (delay (when (< 1 (host/default-threads)) (host-pool (host/default-threads)))))
 
 (defn- pool-of
   "initialize's :host-pool, checked: an ExecutorService, false (the
@@ -234,10 +216,10 @@
                  f-row)]
     [q (long (dc/sample (token/dist q) key))]))
 
-(defn- weighed
-  "particle (live, at context) with token t, drawn from proposal row q, and
-   its log weight's increment: [the particle, the increment]; a particle of
-   weight 0 if the potential allows no token (nil for [q t])."
+(defn- moved
+  "particle (live, at context) moved by token t, drawn from proposal row q,
+   and its log weight's increment: [the particle, the increment]; a
+   particle of weight 0 if the potential allows no token (nil for [q t])."
   [state particle context ws [q t]]
   (if (nil? q)
     [(assoc particle :done? true :dead? true) Double/NEGATIVE_INFINITY]
@@ -259,20 +241,6 @@
          dead? (assoc :dead? true))
        dw])))
 
-(defn- in-order
-  "(f x) for each x of xs, in order: on pool when it is one and there are
-   several, each call under the calling thread's bindings; else on the
-   calling thread. What a call threw is rethrown, once every call has
-   ended."
-  [pool f xs]
-  (if (and pool (next xs))
-    (let [f (bound-fn* f)]
-      (mapv (fn [^Future fut]
-              (try (.get fut)
-                   (catch ExecutionException x (throw (.getCause x)))))
-            (.invokeAll ^ExecutorService pool ^Collection (mapv (fn [x] ^Callable (fn [] (f x))) xs))))
-    (mapv f xs)))
-
 (defn step
   "Every live particle one token further: their contexts read in one
    lm/batch-next-logprobs, a token drawn from each one's proposal, and each
@@ -285,21 +253,21 @@
   ([state {:keys [key]}]
    (let [{:keys [completion potential proposal particles t]} state
          [prompt] (:args state)
-         live (filterv #(not (:done? (particles %))) (range (count particles)))
+         live (into [] (remove #(:done? (particles %))) (range (count particles)))
          contexts (mapv #(into prompt (:tokens (particles %))) live)
          rows (when (seq live) (lm/batch-next-logprobs (:lm completion) contexts))
          twists (mapv #(when potential (twist-row state (:tokens (particles %)))) live)
          f-rows (if (fn? proposal) (mapv #(function-row proposal %1 %2) contexts rows) (repeat nil))
          draws (or key (step-key state 0))
-         drawn (in-order (:host-pool state)
+         drawn (host/in-order (:host-pool state)
                          (fn [[i row ws f-row]] (proposed state row ws f-row (rng/fold-in draws i)))
                          (map vector live rows twists f-rows))
-         moved (mapv #(weighed state (particles %1) %2 %3 %4) live contexts twists drawn)]
+         moves (mapv #(moved state (particles %1) %2 %3 %4) live contexts twists drawn)]
      (assoc (reduce (fn [s [i [p dw]]]
                       (-> s
                           (assoc-in [:particles i] p)
                           (update-in [:log-weights i] #(+ (double %) (double dw)))))
-                    state (map vector live moved))
+                    state (map vector live moves))
             :t (inc (long t))
             :resampled? false))))
 

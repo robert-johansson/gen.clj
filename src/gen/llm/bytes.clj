@@ -2,9 +2,11 @@
   "A vocabulary's bytes: the token byte trie, which grammar masks walk
    (gen.llm.grammar).
 
-     (byte-trie byte-vocab excluded) → the trie of the tokens' bytes (a vector of
-                                    byte arrays by token, gen.llm.lm/byte-vocab's),
-                                    but excluded's (end tokens)
+     (byte-trie byte-vocab excluded)
+                                  → the trie of the bytes of byte-vocab's tokens
+                                    (a vector of byte arrays by token,
+                                    gen.llm.lm/byte-vocab's), but excluded's
+                                    (end tokens)
      (token-bytes trie t)         → token t's bytes (do not write them)
      (root trie), (child trie node b), (depth trie node)
      (tokens-at trie node)        → the tokens whose bytes end at node
@@ -31,9 +33,9 @@
 
 ;; Node i (0 the root, the empty path): edge[i] its last byte, depth[i] its
 ;; path's length, end[i] one past its subtree; the tokens ending at it are
-;; tokens[first[i] … first[i + 1]), those under it tokens[first[i] …
-;; first[end[i]]).
-(deftype ByteTrie [^long n-vocab ^objects vocab ^bytes edge ^ints depth ^ints end ^ints first ^ints tokens
+;; tokens[offsets[i] … offsets[i + 1]), those under it tokens[offsets[i] …
+;; offsets[end[i]]).
+(deftype ByteTrie [^long n-vocab ^objects vocab ^bytes edge ^ints depth ^ints end ^ints offsets ^ints tokens
                    ^ints bare ^long max-depth]
   Object
   (toString [_] (str "#<ByteTrie " n-vocab " tokens, " (alength depth) " nodes>")))
@@ -61,14 +63,14 @@
          edge (byte-array cap)
          depth (int-array cap)
          end (int-array cap)
-         first (int-array (inc cap))
+         offsets (int-array (inc cap))
          tokens (int-array (count order))
          path (int-array (inc max-depth))]
      ;; tokens in byte order are the trie's preorder: each token opens the
      ;; nodes past its common prefix with the one before, and closes the
      ;; nodes of that one deeper than it
      (loop [ts (seq order) nodes 1 held 0 ^bytes prev (byte-array 0)]
-       (if-let [t (clojure.core/first ts)]
+       (if-let [t (first ts)]
          (let [^bytes bs (aget vocab (long t))
                m (java.util.Arrays/mismatch prev bs)
                common (if (neg? m) (alength bs) m)]
@@ -78,16 +80,16 @@
                    node (+ nodes i)]
                (aset edge node (aget bs (dec d)))
                (aset depth node (int d))
-               (aset first node (int held))
+               (aset offsets node (int held))
                (aset path d (int node))))
            (aset tokens held (int t))
            (recur (next ts) (+ nodes (- (alength bs) common)) (inc held) bs))
          (do (loop [d (alength prev)] (when (pos? d) (aset end (aget path d) (int nodes)) (recur (dec d))))
              (aset end 0 (int nodes))
-             (aset first nodes (int held))
+             (aset offsets nodes (int held))
              (ByteTrie. n (object-array (map #(aclone ^bytes %) byte-vocab))
                         (java.util.Arrays/copyOf edge (int nodes)) (java.util.Arrays/copyOf depth (int nodes))
-                        (java.util.Arrays/copyOf end (int nodes)) (java.util.Arrays/copyOf first (int (inc nodes)))
+                        (java.util.Arrays/copyOf end (int nodes)) (java.util.Arrays/copyOf offsets (int (inc nodes)))
                         tokens (int-array (filter #(and (zero? (long (len %))) (not (excluded %))) (range n)))
                         max-depth)))))))
 
@@ -130,15 +132,15 @@
 (defn tokens-at
   "The tokens whose bytes are node's path (a vector)."
   [^ByteTrie trie ^long node]
-  (let [^ints first (.-first trie)]
-    (mapv #(aget ^ints (.-tokens trie) (long %)) (range (aget first node) (aget first (inc node))))))
+  (let [^ints offsets (.-offsets trie)]
+    (mapv #(aget ^ints (.-tokens trie) (long %)) (range (aget offsets node) (aget offsets (inc node))))))
 
 (defn tokens-under
   "The tokens whose bytes begin with node's path (a vector), the root's
    all but the bare ones."
   [^ByteTrie trie ^long node]
-  (let [^ints first (.-first trie)]
-    (mapv #(aget ^ints (.-tokens trie) (long %)) (range (aget first node) (aget first (aget ^ints (.-end trie) node))))))
+  (let [^ints offsets (.-offsets trie)]
+    (mapv #(aget ^ints (.-tokens trie) (long %)) (range (aget offsets node) (aget offsets (aget ^ints (.-end trie) node))))))
 
 (defn bare
   "The tokens with no bytes (a vector)."
@@ -160,7 +162,7 @@
         ^bytes edge (.-edge trie)
         ^ints depth (.-depth trie)
         ^ints end (.-end trie)
-        ^ints first (.-first trie)
+        ^ints offsets (.-offsets trie)
         ^ints tokens (.-tokens trie)
         n-nodes (alength depth)
         mask (long-array (quot (+ (.-n-vocab trie) 63) 64))
@@ -179,7 +181,7 @@
             (recur (aget end i))
             (do (aset stack d s)
                 (when (aget ok s)
-                  (let [lo (aget first i) hi (aget first (inc i))]
+                  (let [lo (aget offsets i) hi (aget offsets (inc i))]
                     (when (and reached (< lo hi)) (aset reached s true))
                     (loop [j lo]
                       (when (< j hi)
@@ -199,9 +201,9 @@
    contiguous run of the trie's tokens."
   ^double [^ByteTrie trie ^floats row ^long node]
   (let [^ints tokens (.-tokens trie)
-        ^ints first (.-first trie)
-        lo (aget first node)
-        hi (aget first (aget ^ints (.-end trie) node))]
+        ^ints offsets (.-offsets trie)
+        lo (aget offsets node)
+        hi (aget offsets (aget ^ints (.-end trie) node))]
     ;; one pass: the running maximum m, and the sum of exp(x - m)
     (loop [j lo m Double/NEGATIVE_INFINITY s 0.0]
       (if (< j hi)
@@ -225,8 +227,9 @@
   "lm's text as bytes, marginalizing over tokenizations: for
    prefix-logprob, text-logprob and next-byte-logprobs. opts: :end-tokens,
    the tokens that end a text (default the LM's :eog; gen.llm.token's
-   completion's :end-tokens); :beam, at most this many tokenizations kept at each
-   token boundary, the most probable (default nil: every one, exact).
+   completion's :end-tokens); :beam, at most this many tokenizations kept
+   at each token boundary, the most probable (default nil: every one,
+   exact).
    Tokens with no bytes are never in a text (they would let a text have
    infinitely many tokenizations); with a beam, probabilities are lower
    bounds."
@@ -273,10 +276,10 @@
    boundary's contexts read in one batch."
   [{:keys [lm trie end-tokens beam]} prompt ^bytes b]
   (let [n (alength b)
-        next (double-array 256 Double/NEGATIVE_INFINITY)]
+        next-bytes (double-array 256 Double/NEGATIVE_INFINITY)]
     (loop [j 0 at {0 [[[] 0.0]]} prefix (if (zero? n) 0.0 Double/NEGATIVE_INFINITY) end Double/NEGATIVE_INFINITY]
       (if (< n j)
-        {:prefix prefix :next next :end end}
+        {:prefix prefix :next next-bytes :end end}
         (let [particles (cond->> (get at j []) beam (sort-by second >) beam (take beam))
               rows (when (seq particles) (lm/batch-next-logprobs lm (mapv #(into prompt (first %)) particles)))
               [splits node] (walk-text trie b j)
@@ -285,7 +288,7 @@
               (reduce (fn [[at ^double prefix ^double end] [[ctx ^double lp] ^floats row]]
                         (when-not (neg? node)
                           (doseq [[x c] (children trie node)]
-                            (aset next (long x) (log-add (aget next (long x)) (+ lp (log-mass trie row c))))))
+                            (aset next-bytes (long x) (log-add (aget next-bytes (long x)) (+ lp (log-mass trie row c))))))
                         [(reduce (fn [at [k t]] (update at k (fnil conj []) [(conj ctx t) (+ lp (aget row (int t)))]))
                                  at splits)
                          (if (and (< j n) (<= 0 node)) (log-add prefix (+ lp (log-mass trie row node))) prefix)
@@ -319,12 +322,12 @@
    bytes and every beam is wide enough. Loud when text has probability 0
    (:zero-prefix)."
   ^doubles [bm prompt text]
-  (let [{:keys [prefix ^doubles next end]} (marginals bm (prompt-vector "next-byte-logprobs" prompt)
+  (let [{prefix :prefix ^doubles next-bytes :next end :end} (marginals bm (prompt-vector "next-byte-logprobs" prompt)
                                                       (text-bytes "next-byte-logprobs" text))
         prefix (double prefix)
         out (double-array 257)]
     (when (Double/isInfinite prefix)
       (throw (ex-info "next-byte-logprobs: the text has probability 0" {:reason :zero-prefix :text text})))
-    (dotimes [x 256] (aset out x (- (aget next x) prefix)))
+    (dotimes [x 256] (aset out x (- (aget next-bytes x) prefix)))
     (aset out 256 (- (double end) prefix))
     out))

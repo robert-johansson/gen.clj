@@ -37,6 +37,7 @@
   (:refer-clojure :exclude [extend]))
 
 (set! *warn-on-reflection* true)
+(set! *unchecked-math* :warn-on-boxed)
 
 (defprotocol Branching
   "What an engine implements. Called through the functions of this

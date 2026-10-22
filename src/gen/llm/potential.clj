@@ -38,6 +38,7 @@
   (:require [gen.llm.branching :as br]))
 
 (set! *warn-on-reflection* true)
+(set! *unchecked-math* :warn-on-boxed)
 
 (defprotocol Potential
   "What a potential implements, called through this namespace's functions."
@@ -117,13 +118,13 @@
   (when (and (contains? fns :end-tokens) (not (and (set? declared) (every? #(br/index? % n-vocab) declared))))
     (throw (ex-info (str "potential: :end-tokens is a set of tokens of the vocabulary, not " (pr-str declared))
                     {:reason :invalid-end-tokens :end-tokens declared})))
-  (let [next (or logw-next #(dense-logw-next n-vocab prefix complete %))
+  (let [next-weights (or logw-next #(dense-logw-next n-vocab prefix complete %))
         ends (some->> declared (into #{} (map long)))]
     (reify
       Potential
       (-prefix [_ context] (prefix context))
       (-complete [_ context] (complete context))
-      (-logw-next [_ context] (next context))
+      (-logw-next [_ context] (next-weights context))
       EndTokens
       (-end-tokens [_] ends))))
 
