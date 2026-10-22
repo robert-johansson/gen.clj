@@ -114,11 +114,13 @@
    weighed by (weight (:args tr) sigma tr), both returning the internal
    proposal's generate weight. A selection or new arguments that would leave
    an unselected choice unvisited is a loud error. tr is kept when nothing
-   is selected and no argument changed. (A trace the generative function
-   did not make, or a call whose store changed, is gfi/revise's.) Shared by
-   with-internal-proposal and gen.inference.enumerative/with-exact-proposal."
+   is selected and no argument changed, nor their number. (A trace the
+   generative function did not make, or a call whose store changed, is
+   gfi/revise's.) Shared by with-internal-proposal and
+   gen.inference.enumerative/with-exact-proposal."
   [generate weight tr args argdiffs selection key]
-  (if (and (cm/empty? (sel/get-selected (:choices tr) selection)) (every? diff/no-change? argdiffs))
+  (if (and (cm/empty? (sel/get-selected (:choices tr) selection))
+           (== (count args) (count (:args tr))) (every? diff/no-change? argdiffs))
     {:trace tr :weight 0.0 :retdiff diff/no-change}
     (let [sigma (sel/get-selected (:choices tr) (sel/complement selection))
           {t2 :trace w :weight}

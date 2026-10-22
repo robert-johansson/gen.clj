@@ -330,7 +330,12 @@
                          " update and assess need only :estimate")
                     {}))))
 
-(defn- unchanged? [argdiffs] (every? diff/no-change? argdiffs))
+(defn- unchanged?
+  "Did no argument of tr change for args: as many of them, and no-change
+   argdiffs? (A change in the number of arguments is a change, whatever the
+   argdiffs say: DESIGN.md §9, G3.)"
+  [tr args argdiffs]
+  (and (== (count args) (count (:args tr))) (every? diff/no-change? argdiffs)))
 
 (defrecord EstimatedGF [estimate simulate retval addresses]
   gfi/IGenerativeFunction
@@ -340,7 +345,7 @@
       {:trace (simulated this args key) :weight 0.0}
       (let [t (estimate-at this :generate args constraints key)] {:trace t :weight (:score t)})))
   (-update [this tr args argdiffs constraints key]
-    (if (and (unchanged? argdiffs) (cm/empty? constraints))
+    (if (and (unchanged? tr args argdiffs) (cm/empty? constraints))
       {:trace tr :weight 0.0 :retdiff diff/no-change :discard cm/EMPTY}
       (let [t (estimate-at this :update args (cm/override (:choices tr) constraints) key)]
         {:trace t :weight (- (:score t) (:score tr)) :retdiff diff/unknown-change
@@ -354,7 +359,7 @@
         (throw (ex-info (str "estimated: regenerate cannot resample some of the choices only, since an estimator has no"
                              " proposal density to weigh them by; select all of them, or update with a proposal")
                         {:selected (vec (cm/addresses chosen))}))
-        (unchanged? argdiffs) {:trace tr :weight 0.0 :retdiff diff/no-change}
+        (unchanged? tr args argdiffs) {:trace tr :weight 0.0 :retdiff diff/no-change}
         :else (let [t (estimate-at this :regenerate args (:choices tr) key)]
                 {:trace t :weight (- (:score t) (:score tr)) :retdiff diff/unknown-change}))))
   (-assess [this args choices key]

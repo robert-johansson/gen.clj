@@ -224,6 +224,21 @@
     (is (= (ts/host (:choices (gfi/simulate plain [] k))) (ts/host (:choices (gfi/simulate noisy [] k)))))
     (is (nil? (omega (gfi/simulate plain [] k))))))
 
+(deftest an-estimate-is-run-again-when-the-number-of-arguments-changes
+  ;; the post-M5 review's P1-02 (DESIGN.md §9, G3): an estimated density
+  ;; kept its trace, old arguments and estimate, on no-change argdiffs for
+  ;; fewer arguments. Planted bug (2026-10-22): its unchanged? without the
+  ;; count check fails all four
+  (let [lp #(dc/log-prob (d/normal (count %1) 1.0) %2)
+        by-count (custom/estimated {:addresses [:y] :estimate (fn [args choices _key] (lp args (cm/get-choice choices :y)))})
+        tr (:trace (gfi/generate by-count [1.0 2.0] (cm/choicemap :y 0.0) (rng/key 1)))
+        expected (- (lp [1.0] 0.0) (lp [1.0 2.0] 0.0))]
+    (doseq [[op r] [[:update (gfi/update tr [1.0] [gen.diff/no-change] cm/EMPTY (rng/key 2))]
+                    [:regenerate (gfi/regenerate tr [1.0] [gen.diff/no-change] sel/none (rng/key 3))]]]
+      (testing (name op)
+        (is (= [1.0] (:args (:trace r))))
+        (is (ts/close? expected (:weight r)))))))
+
 (deftest an-estimated-density-falls-back-to-particles
   ;; for the reason it has (review, 2026-10-20: the stated one was a spot
   ;; check's), through simulate and through generate, which estimates (the

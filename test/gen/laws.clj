@@ -474,8 +474,10 @@
                                  (or (nil? (:retdiff r1)) (sound-retdiff? tr r1))))
           args' (next-args model seed alt?)
           diffs (if (= args' args) (diff/no-changes (count args)) (unknown-diffs args'))
-          ;; precise argdiffs too, which the static walk propagates (review, 2026-10-20)
-          precise (mapv diff/compute args args')
+          ;; precise argdiffs too, which the static walk propagates (review,
+          ;; 2026-10-20); an argument the previous call did not have is new
+          precise (mapv (fn [i a'] (if (< i (count args)) (diff/compute (nth args i) a') diff/unknown-change))
+                        (range) args')
           other (gfi/simulate gf args' (rng/fold-in k 1))
           sigma (restrict (:choices other) (picked (addrs other) picks))
           s (sel/from-paths (picked (addrs tr) picks))

@@ -441,14 +441,20 @@
 (defn- arg-name-diffs
   "Each argument name's diff: an argument bound to a symbol takes its
    argdiff; a destructured one's names no-change or unknown-change. Every
-   name unknown-change without argdiffs."
-  [{:keys [fixed rest]} params argdiffs]
+   name unknown-change without argdiffs. The rest parameter's names are
+   no-change only when the number of arguments is the previous call's
+   (same-count?) and the argdiffs past the fixed ones are: a change in the
+   number of arguments is a change, whatever the argdiffs say (DESIGN.md
+   §9, G3)."
+  [{:keys [fixed rest]} params argdiffs same-count?]
   (let [d-of (fn [d] (if (diff/no-change? d) diff/no-change diff/unknown-change))
         positional (map (fn [names form i]
                           (let [d (if argdiffs (nth argdiffs i diff/unknown-change) diff/unknown-change)]
                             (if (symbol? form) {form d} (zipmap names (repeat (d-of d))))))
                         fixed params (range))
-        rest-d (if (and argdiffs (every? diff/no-change? (drop (count fixed) argdiffs))) diff/no-change diff/unknown-change)]
+        rest-d (if (and argdiffs same-count? (every? diff/no-change? (drop (count fixed) argdiffs)))
+                 diff/no-change
+                 diff/unknown-change)]
     ;; in binding order: a name bound again (by a later parameter, or the
     ;; rest parameter) holds its last binding, as in let
     (apply merge (concat positional [(zipmap rest (repeat rest-d))]))))
@@ -540,7 +546,7 @@
                 [(args-bind args)
                  (reduce-kv (fn [ds x d] (assoc ds (slots x) d))
                             (vec (repeat size diff/no-change))
-                            (if skip? (arg-name-diffs (:args st) params argdiffs) {}))
+                            (if skip? (arg-name-diffs (:args st) params argdiffs (== (count args) (count (:args prev)))) {}))
                  []]
                 (map-indexed vector nodes))]
     (vswap! vol assoc ::node-values vals)
