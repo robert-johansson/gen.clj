@@ -182,6 +182,27 @@
     (is (= :invalid-row (bc/reason #(token/dist (float-array 0)))))
     (is (= "#gen/dist[dist {:n-vocab 5}]" (pr-str dist)))))
 
+;; An integral number is its token, 3.0 token 3, as gen.dist's discrete
+;; families take it (DESIGN §9; the post-M5 review's P4-06: token/dist
+;; weighed 3.0 -Inf, silently, where categorical gives log p[3], and a
+;; float32 0-d array's item on MLX is such a number). Plant: token-of
+;; giving nil for any number that is no integer fails this test.
+(deftest an-integral-number-is-its-token
+  (let [dist (token/dist small-row)
+        lp (double (aget ^floats small-row 3))]
+    (doseq [v [3 (int 3) 3.0 (float 3.0) 3.0M]]
+      (is (= lp (dc/log-prob dist v)) (pr-str v)))
+    (doseq [v [3.5 ##NaN ##Inf 7.0 -1.0]]
+      (is (= Double/NEGATIVE_INFINITY (dc/log-prob dist v)) (pr-str v)))
+    (let [model (gen [] (trace :t (token/dist small-row)))
+          categorical (gen [] (trace :t (d/categorical (mapv #(Math/exp %) small-row))))]
+      (is (laws/close? (:weight (gfi/generate categorical [] (cm/choicemap :t 3.0) (rng/key 1)))
+                       (:weight (gfi/generate model [] (cm/choicemap :t 3.0) (rng/key 1))))
+          "as categorical at a trace site"))
+    (let [{tr :trace w :weight} (gfi/generate fixed [prompt 2] (cm/choicemap 0 65.0 1 66) (rng/key 2))]
+      (is (= [65 66] (:retval tr)) "a completion's constraint too")
+      (is (= w (:weight (gfi/generate fixed [prompt 2] (cm/choicemap 0 65 1 66) (rng/key 2))))))))
+
 (deftest a-row-that-is-not-normalized-is-loud
   ;; the draw finds it out as it walks: a total past 1 where it stops, or
   ;; short of 1 (or NaN) at the row's end
@@ -461,6 +482,7 @@
            ["a bad suffix" #(token/from -1) :invalid-position]
            ["end tokens not a set" #(token/completion m {:end-tokens [3]}) :invalid-end-tokens]
            ["end tokens past the vocabulary" #(token/completion m {:end-tokens #{97}}) :invalid-end-tokens]
+           ["end tokens past long's range" #(token/completion m {:end-tokens #{100000000000000000000N}}) :invalid-end-tokens]
            ["a completion over an engine, not an LM" #(token/completion engine) :invalid-lm]
            ["a completion past the LM's context" #(gfi/simulate fixed [prompt 600]) :context-full]]]
     (is (= reason (failure f)) what)))

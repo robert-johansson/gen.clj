@@ -140,4 +140,6 @@
   (is (= :invalid-token (bc/reason #(bytes/prefix-logprob bm [] "a"))))
   (is (= :invalid-end-tokens (bc/reason #(bytes/byte-lm m {:end-tokens #{n-vocab}}))))
   (is (= :invalid-end-tokens (bc/reason #(bytes/byte-lm m {:end-tokens [1]}))))
+  (is (= :invalid-end-tokens (bc/reason #(bytes/byte-lm m {:end-tokens #{100000000000000000000N}})))
+      "an end token past long's range (once an IllegalArgumentException: the post-M5 review's I4-03)")
   (is (= :invalid-option (bc/reason #(bytes/byte-lm m {:beam 0})))))

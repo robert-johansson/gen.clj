@@ -509,8 +509,8 @@
         (reservations/reserve! slots (:bytes fp) (str "llama.cpp: " (:desc (:model info))))
         slots)
       (catch Throwable t
-        (run! #(%) @undo)
-        (throw t)))))
+        ;; every undo runs; one that fails is suppressed onto t
+        (throw (br/clean-up t @undo))))))
 
 (defn engine
   "A llama.cpp engine (java.io.Closeable; close it to free the model), on a

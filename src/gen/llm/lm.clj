@@ -74,7 +74,7 @@
     (when-not (= n-vocab engine-vocab)
       (throw (ex-info (str "lm: the tokenizer's " n-vocab " tokens are not the engine's " engine-vocab)
                       {:reason :invalid-tokenizer :n-vocab n-vocab :engine-n-vocab engine-vocab})))
-    (when-not (and (set? eog) (every? #(and (integer? %) (< -1 % n-vocab)) eog))
+    (when-not (and (set? eog) (every? #(br/index? % n-vocab) eog))
       (throw (ex-info "lm: the tokenizer's :eog is a set of tokens" {:reason :invalid-tokenizer :eog eog})))
     tokenizer))
 
@@ -113,11 +113,24 @@
   ((:decode (-tokenizer m)) tokens))
 
 (defn- check-token [m t what]
-  (let [n (:n-vocab (-tokenizer m))]
-    (when-not (and (integer? t) (<= 0 t) (< t n))
-      (throw (ex-info (str what ": not a token of the vocabulary (0 to " (dec (long n)) "): " (pr-str t))
-                      {:reason :invalid-token :token t :n-vocab n})))
+  (let [n (long (:n-vocab (-tokenizer m)))]
+    (when-not (br/index? t n)
+      (throw (br/invalid-token what t n)))
     t))
+
+(defn end-tokens-option
+  "The end tokens opts gives, a set of tokens of a vocabulary of n-vocab
+   (:end-tokens), or default, as a set of longs; what names the caller in
+   the error (:invalid-end-tokens). The reader of every :end-tokens option
+   that defaults to an LM's :eog (a completion's, a byte LM's, a
+   grammar's)."
+  [what opts default n-vocab]
+  (let [ts (if (contains? opts :end-tokens) (:end-tokens opts) default)
+        n (long n-vocab)]
+    (when-not (and (set? ts) (every? #(br/index? % n) ts))
+      (throw (ex-info (str what ": :end-tokens is a set of tokens of the vocabulary, not " (pr-str ts))
+                      {:reason :invalid-end-tokens :end-tokens ts})))
+    (into #{} (map long) ts)))
 
 (defn token-bytes
   "The bytes of token, raw (a token may hold part of a UTF-8 character): a

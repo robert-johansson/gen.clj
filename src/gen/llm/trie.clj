@@ -16,7 +16,7 @@
    where paths part. A path stays only while it leads to an entry, so the
    trie holds no more tokens than its entries' contexts. Tokens compare with
    =, so a context may hold longs or integers. remove-entry takes the
-   tokens of an entry the trie holds.")
+   tokens of an entry the trie holds (:no-entry otherwise).")
 
 (set! *warn-on-reflection* true)
 (set! *unchecked-math* :warn-on-boxed)
@@ -140,20 +140,36 @@
                                        :scores (into (into (vector-of :double) (:scores node)) (:scores child))))
       :else node)))
 
-(defn- remove* [node tokens ^long depth]
-  (if (== depth (count tokens))
-    (dissoc node :entry)
-    (let [t (nth tokens depth)
-          child (get (:children node) t)]
-      (if-let [child (tidy (remove* child tokens (+ depth (count (:tokens child)))))]
-        (assoc-in node [:children t] child)
-        (update node :children dissoc t)))))
+(defn- entry-path
+  "The nodes from the root down to the entry at tokens, each with the
+   token that leads to the next ([node nil] last), or :no-entry when the
+   trie holds no entry there (a path it does not hold, one that ends or
+   parts inside an edge, a node without an entry)."
+  [trie tokens]
+  (let [n (count tokens)
+        no-entry #(ex-info (str "remove-entry: the trie holds no entry at " (pr-str tokens)) {:reason :no-entry :tokens tokens})]
+    (loop [node trie depth 0 path []]
+      (if (== depth n)
+        (if (contains? node :entry) (conj path [node nil]) (throw (no-entry)))
+        (let [t (nth tokens depth)
+              child (get (:children node) t)
+              end (+ depth (count (:tokens child)))]
+          (if (and child (<= end n) (= (:tokens child) (subvec tokens depth end)))
+            (recur child end (conj path [node t]))
+            (throw (no-entry))))))))
 
 (defn remove-entry
   "trie without the entry at tokens, and without the path to it if that
-   leads to no other entry."
+   leads to no other entry. A loop, not a recursion: a path may pass as
+   many nodes as its tokens."
   [trie tokens]
-  (remove* trie tokens 0))
+  (let [path (entry-path trie (vec tokens))]
+    (reduce (fn [below [node t]]
+              (if-let [child (tidy below)]
+                (assoc-in node [:children t] child)
+                (update node :children dissoc t)))
+            (dissoc (first (peek path)) :entry)
+            (rseq (pop path)))))
 
 (defn- reduce-entries
   "(f acc entry) over the trie's entries, depth first, as reduce."

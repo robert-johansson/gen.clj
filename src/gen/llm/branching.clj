@@ -79,9 +79,22 @@
     (< -1 (.longValue ^Long x) n)
     (and (integer? x) (not (neg? (compare x 0))) (neg? (compare x n)))))
 
-(defn- invalid-token [what t n-vocab]
+(defn invalid-token
+  "The error for t, not a token of a vocabulary of n-vocab tokens
+   (:invalid-token, index?'s rule), what naming the caller: the one
+   message of the LLM layer's token checks."
+  [what t n-vocab]
   (ex-info (str what ": not a token of the vocabulary (0 to " (dec (long n-vocab)) "): " (pr-str t))
            {:reason :invalid-token :token t :n-vocab n-vocab}))
+
+(defn clean-up
+  "t, a failure, after each of the cleanup functions fs ran, each even if
+   one before it threw: what they throw goes onto t as suppressed, so that
+   it is kept and t stays the failure raised."
+  ^Throwable [^Throwable t fs]
+  (doseq [f fs]
+    (try (f) (catch Throwable e (.addSuppressed t e))))
+  t)
 
 ;; ---------------------------------------------------------------------------
 ;; A branch's value

@@ -121,13 +121,7 @@
   "The end tokens opts gives, or vocab's default: an LM's :eog, none for a
    byte vocabulary; checked."
   [vocab byte-vocab opts]
-  (let [ts (cond (contains? opts :end-tokens) (:end-tokens opts)
-                 (satisfies? lm/LM vocab) (:eog (lm/vocab vocab))
-                 :else #{})]
-    (when-not (and (set? ts) (every? #(and (integer? %) (< -1 (long %) (count byte-vocab))) ts))
-      (throw (ex-info (str "grammar: :end-tokens is a set of tokens of the vocabulary, not " (pr-str ts))
-                      {:reason :invalid-end-tokens :end-tokens ts})))
-    (into #{} (map long) ts)))
+  (lm/end-tokens-option "grammar" opts (if (satisfies? lm/LM vocab) (:eog (lm/vocab vocab)) #{}) (count byte-vocab)))
 
 (defn grammar
   "The grammar of language (a regex, a regex term or a DFA) over vocab's
