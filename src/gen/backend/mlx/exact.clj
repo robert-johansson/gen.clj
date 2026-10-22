@@ -8,7 +8,11 @@
      1e-4 for sin and cos). These go through its exact ones (expm1, tan, log,
      division).
    - expm1 on the GPU: Metal's is off by up to ~660 float32 ulps (4e-5
-     relative); Kahan's formula from exp and log is within a few."
+     relative); Kahan's formula from exp and log is within a few.
+   - float32 sums on the CPU: MLX's accumulate sequentially, so their error
+     grows with the count (10^6 terms of 10^-6 sum to 1 - 1.2e-3); summed
+     in blocks, and the block sums in blocks, it grows with its log
+     (genclj-y0mp)."
   (:refer-clojure :exclude [+ - * / < > >= ==])
   (:require [gen.array :as array :refer [+ - * / < > >= ==]]))
 
@@ -124,6 +128,57 @@
   [x y]
   (let [m (array/maximum x y)]
     (array/where (array/isinf m) m (+ m (array/log1p (exp (array/negate (array/abs (- x y)))))))))
+
+(def block-size
+  "The most terms a float32 sum on MLX's CPU accumulates in one run (sum):
+   256, by measurement (genclj-y0mp). Blocks of 1,024 and more show their
+   own error again; smaller ones cost more operations."
+  256)
+
+(defn- block-of
+  "The block size for m terms: a divisor of m between half of block-size
+   and block-size when there is one, so the blocks are a reshape alone
+   (slicing off a remainder makes MLX copy the rest, which doubled a long
+   sum's time), else block-size."
+  ^long [^long m]
+  (or (first (filter #(zero? (rem m (long %))) (range block-size (dec (quot block-size 2)) -1)))
+      block-size))
+
+(defn- axis-sum
+  "x summed over axis a, which it keeps (of size 1), in blocks (block-of):
+   each block's sum, then the block sums' the same way, and any remainder's
+   sum added last. Nothing is padded (with +0.0, a padding would turn a
+   sum of -0.0s positive)."
+  [x a]
+  (let [m (nth (array/shape x) a)]
+    (if (<= m block-size)
+      (array/sum x {:axis a :keep-dims? true})
+      (let [d (block-of m)
+            q (quot m d)
+            n (* q d)
+            s (array/shape x)
+            blocks (array/reshape (if (== n m) x (array/slice x a 0 n)) (into (conj (subvec s 0 a) q d) (subvec s (inc a))))
+            sums (axis-sum (array/sum blocks {:axis (inc a)}) a)]
+        (if (== n m) sums (+ sums (array/sum (array/slice x a n m) {:axis a :keep-dims? true})))))))
+
+(defn sum
+  "The float32 MLX array x summed over axes (sorted and distinct) on MLX's
+   CPU, in blocks (axis-sum): each run of adjacent axes as one axis, the
+   runs one at a time. The shape and dtype are MLX's own sum's."
+  [x axes keep-dims?]
+  (let [s (array/shape x)
+        reduced (set axes)
+        ;; runs of adjacent reduced axes, each merged into one dimension
+        dims (reduce (fn [dims i]
+                       (if (and (reduced i) (reduced (dec i)))
+                         (conj (pop dims) (update (peek dims) :size clojure.core/* (nth s i)))
+                         (conj dims {:size (nth s i) :reduced? (boolean (reduced i))})))
+                     [] (range (count s)))
+        merged (array/reshape x (mapv :size dims))
+        summed (reduce axis-sum merged (rseq (vec (keep-indexed #(when (:reduced? %2) %1) dims))))]
+    (array/reshape summed (if keep-dims?
+                            (reduce #(assoc %1 %2 1) s axes)
+                            (vec (keep-indexed #(when-not (reduced %1) %2) s))))))
 
 (declare float64-unary)
 
