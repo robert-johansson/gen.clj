@@ -21,6 +21,10 @@
      distribution differs from the global conditional, and the conditional
      weights recover the latter: exactly, against the enumeration, and in
      their mean, within 5 standard errors.
+   - Soft weights: the laws over a completion under a soft potential and
+     under a grammar times one; on a vocabulary of five tokens, every
+     completion's density the local one, and the conditional weights' Z
+     exact and within 5 standard errors in their mean.
    - generate, update and MH under a grammar; batched runs fall back.
    - Misuse is loud.
 
@@ -101,6 +105,22 @@
    [:accented accented [bprompt 4] [[bprompt 2] [bprompt 6] [[(:bos btok) 0] 4]]]
    [:composed composed [3] [[1] [5]]]
    [:map (comb/map labelled) [[prompt [95 41]] [3 2]] [[[prompt [95 41]] [1 4]] [[[3] [95 41]] [3 2]]]]]
+  100)
+
+;; Soft weights, finite and not 0: a completion under a soft potential, and
+;; under a grammar times one (the post-M5 review's P4-04: no law ran
+;; either). Each a costs 0.4, and a whole sequence 0.3 more unless it ends
+;; in b, so a completion stopped at max-tokens weighs other than its prefix.
+(def ^:private a-costs
+  (let [as #(* -0.4 (count (filter #{65} %)))]
+    (potential/potential 97 {:prefix as :complete #(- (as %) (if (= 66 (peek %)) 0.0 0.3))})))
+
+(def ^:private softened (token/completion ascii {:potential a-costs}))
+(def ^:private labelled-softly (token/completion ascii {:potential (potential/product label a-costs)}))
+
+(laws/deflaws constrained-soft
+  [[:soft softened [prompt 4] [[prompt 2] [prompt 6] [[95 41] 4]]]
+   [:grammar-and-soft labelled-softly [prompt 4] [[prompt 2] [prompt 6] [[95 41] 4]]]]
   100)
 
 (laws/deflaws constrained-revised
@@ -306,6 +326,74 @@
             mean (/ (reduce + ws) k)
             sd (Math/sqrt (/ (reduce + (map #(Math/pow (- % mean) 2) ws)) (dec k)))]
         (is (<= (Math/abs (- mean z)) (* 5 (/ sd (Math/sqrt k)))))))))
+
+;; Soft weights exactly (P4-04): on a vocabulary of five tokens, token 4
+;; the end, every completion of [prompt 3] enumerated. Under a soft
+;; potential, and a constraint times it, each completion's density is the
+;; local one by its definition (each site's row times the weights,
+;; renormalized); Σ_x q(x) exp(cw(x)) is Z = Σ_x p(x) exp(w(x)) exactly; and
+;; the mean of exp(cw) over 4,000 draws is within 5 standard errors of it. P4's verifier planted a conditional-weight
+;; that reads every finite whole-sequence weight as 0 (right for a grammar,
+;; wrong for any soft weight): it passed every test before these, and gave
+;; Σ_x q(x) exp(cw(x)) = 1 where Z is 0.85. These fail it (checked
+;; 2026-10-22, genclj-kdre).
+
+(def ^:private five-tokens
+  {:n-vocab 5 :bos nil :eos 4 :eog #{4} :add-bos? false
+   :token-bytes (fn [t] (byte-array [(byte t)])) :encode (fn [_ _] []) :decode (fn [ts] (apply str ts))})
+
+(def ^:private five (lm/lm (toy/engine {:n-vocab 5 :max-branches 128 :n-ctx 64}) five-tokens {:max-cells 8192}))
+
+(def ^:private zeros-cost
+  "Each 0 costs 0.6, and a whole sequence 0.2 more unless it ends in 2."
+  (let [zs #(* -0.6 (count (filter #{0} %)))]
+    (potential/potential 5 {:prefix zs :complete #(- (zs %) (if (= 2 (peek %)) 0.0 0.2))})))
+
+(def ^:private no-ones
+  "A constraint: no 1."
+  (potential/potential 5 {:prefix #(if (some #{1} %) ##-Inf 0.0) :complete #(if (some #{1} %) ##-Inf 0.0)}))
+
+(defn- five-completions
+  "Every completion of [ctx n] on five, with its log p: [tokens log-p]."
+  [ctx n]
+  (letfn [(walk [tokens ^double lp]
+            (if (or (= n (count tokens)) (and (seq tokens) (= 4 (peek tokens))))
+              [[tokens lp]]
+              (let [^floats r (toy/toy-logprobs 5 (into ctx tokens))]
+                (mapcat (fn [t] (walk (conj tokens t) (+ lp (aget r (int t))))) (range 5)))))]
+    (walk [] 0.0)))
+
+(deftest soft-weights-exactly
+  (let [args [[2 3] 3]
+        xs (five-completions [2 3] 3)
+        body #(if (and (seq %) (= 4 (peek %))) (pop %) %)]
+    (doseq [[what p] [["a soft potential" zeros-cost] ["a constraint times it" (potential/product no-ones zeros-cost)]]]
+      (testing what
+        (let [gf (token/completion five {:potential p})
+              z (reduce + (for [[x lp] xs] (Math/exp (+ lp (potential/complete p (body x))))))
+              by-q (reduce + (for [[x _] xs
+                                   :let [tr (:trace (gfi/generate gf args (token/forced x) (rng/key 0)))]
+                                   :when (Double/isFinite (:score tr))]
+                               (Math/exp (+ (:score tr) (constrained/conditional-weight tr)))))
+              ws (mapv #(Math/exp (constrained/conditional-weight (gfi/simulate gf args (rng/key %)))) (range 4000))
+              mean (/ (reduce + ws) (count ws))
+              sd (Math/sqrt (/ (reduce + (map #(Math/pow (- % mean) 2) ws)) (dec (count ws))))]
+          (is (< 0.05 (Math/abs (- 1.0 z))) "a Z a weight of 0 would miss")
+          ;; float rounding: each site's log q is stored as a float
+          (is (every? (fn [[x _]]
+                        (let [want (reduce + (map-indexed (fn [i t]
+                                                            (let [ctx (subvec x 0 i)]
+                                                              (get (direct #{4} (toy/toy-logprobs 5 (into [2 3] ctx))
+                                                                           (potential/logw-next p ctx))
+                                                                   t)))
+                                                          x))
+                              got (:weight (gfi/assess gf args (token/forced x)))]
+                          (or (= want got) (<= (Math/abs (- want got)) 3e-6))))
+                      (filter (fn [[x _]] (Double/isFinite (potential/prefix p (body x)))) xs))
+              "the local density")
+          ;; float rounding: the scores are sums of float log q's
+          (is (<= (Math/abs (- by-q z)) 1e-5) (str "Σ q exp(cw) " by-q ", Z " z))
+          (is (<= (Math/abs (- mean z)) (* 5 (/ sd (Math/sqrt (count ws))))) (str "the mean " mean ", Z " z)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The operations under a grammar
