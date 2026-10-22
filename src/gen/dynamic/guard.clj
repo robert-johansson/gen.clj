@@ -15,7 +15,7 @@
 
 (set! *warn-on-reflection* true)
 
-(defn case-key
+(defn ^:no-doc case-key
   "case's dispatch value, checked: a value that differs across the particles
    of a batch cannot pick one clause (gen.array.batch), so it raises the
    batched-branch error rather than falling to the default clause; a 0-d
@@ -188,7 +188,7 @@
     (if (instance? clojure.lang.IObj guarded) (with-meta guarded (merge (meta guarded) m)) guarded)
     guarded))
 
-(defn guard-branches
+(defn ^:no-doc guard-branches
   "form, macroexpanded, with every if test wrapped in gen.array/truthy?, and
    the truthiness tests, lookups and representation tests of
    gen.dynamic.core in place of the functions they guard. locals are the
@@ -208,7 +208,7 @@
     (symbol? form) (guard-symbol form locals)
     :else form))
 
-(defn locals
+(defn ^:no-doc locals
   "The locals around a gen (or guarded-fn) form: those of its &env, and
    those of the body being guarded around it, while its forms are
    macroexpanded (a nested gen sees its enclosing body's)."

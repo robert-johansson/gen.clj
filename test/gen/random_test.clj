@@ -89,8 +89,13 @@
       ;; JAX's uint32 does, the 64-bit counter does not, and a long cast took
       ;; 2.5 for 2 (DESIGN §9); plants: no check gives keys for all three, the
       ;; sign check alone for 2.5 and 3.0
-      (doseq [d [-1 2.5 3.0]]
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"takes a non-negative integer, not" (rng/fold-in k d)) (pr-str d)))
+      ;; and past Long/MAX_VALUE, where the long cast threw a raw
+      ;; IllegalArgumentException (cross-review 4); plant: the bound alone
+      ;; missing lets 2^63 through to it
+      (doseq [d [-1 2.5 3.0 (bigint (Math/pow 2 63))]]
+        (is (= :invalid-data (:reason (ex-data (try (rng/fold-in k d) nil (catch clojure.lang.ExceptionInfo e e)))))
+            (pr-str d)))
+      (is (= (rng/fold-in k Long/MAX_VALUE) (rng/fold-in k (bigint Long/MAX_VALUE))) "up to Long/MAX_VALUE")
       (is (= (rng/fold-in k 3) (rng/fold-in k (int 3)) (rng/fold-in k (bigint 3))) "any integer type"))))
 
 (defspec fold-in-is-split-at-an-index 100
