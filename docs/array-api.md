@@ -164,7 +164,7 @@ needs, taken from GenMLX's measured call counts
 | Group | Public functions (`array/…`) | Primitive op keywords → `IBackend` method | Composite |
 |---|---|---|---|
 | creation | `array` `scalar` `zeros` `ones` `full` `eye` `arange` `linspace` `*-like` | `-from-host` `-full` `-arange` | `eye`, `linspace` |
-| conversion | `astype` `item` `->clj` `eval!` `array?` `shape` `ndim` `size` `dtype` | `-astype` `-to-host` `-eval!` `-shape` `-dtype` | `ndim`, `size` |
+| conversion | `astype` `item` `->clj` `eval!` `array?` `host?` `backend-array?` `shape` `ndim` `size` `dtype` | `-astype` `-to-host` `-eval!` `-shape` `-dtype` | `ndim`, `size` |
 | arithmetic | `+ - * /` (variadic), `negate`, `pow`, `maximum` `minimum`, `mod` `floor-div`, `abs` `sign` | `:add :subtract :multiply :divide :power :maximum :minimum :remainder :floor-divide :negative :abs :sign` | — |
 | exp/log | `exp` `log` `expm1` `log1p` `sqrt` `square` `logaddexp` `xlogy` | `:exp :log :expm1 :log1p :sqrt` | `square`, `logaddexp` (native in MLX: one op, and its gradient is exact at ties under MLX's autodiff), `xlogy` |
 | trig | `sin` `cos` `tan` `tanh` `sinh` `cosh` `asin` `acos` `atan` `atan2` `sigmoid` `softplus` | `:sin :cos :tan :tanh :sinh :cosh :arcsin :arccos :arctan :arctan2` | `sigmoid`, `softplus` |
@@ -391,8 +391,9 @@ Two layers make this safe:
      `(if-not b …)` and `(filter pred xs)` in a body took one branch for
      every particle.
    - Representation tests (`class`, `instance?`, `number?`, `coll?`, …, and
-     gen.array's `host?` and `array?`) answer for a particle's value, whose
-     type the batch's dtype and per-particle shape determine.
+     gen.array's `host?`, `array?` and `backend-array?`) answer for a
+     particle's value, whose type the batch's dtype and per-particle shape
+     determine.
    - A 0-d backend array counts as its host value wherever a body branches,
      compares or looks up on it (MLX's 0-d arrays are MLX arrays; the JVM
      backend's are host scalars already): `case`, `=`, `not=`, `true?`,
