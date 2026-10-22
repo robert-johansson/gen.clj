@@ -792,12 +792,33 @@
         (Mlx/mlx_astype i int-code s))
       (finally (doseq [x temps] (MlxRaw/mlx_array_free (long x)))))))
 
+(def ^:private sum-block-size
+  (delay (long @(requiring-resolve 'gen.backend.mlx.exact/block-size))))
+
+(defn- blocked-sum?
+  "Does a sum of x over axes take gen.backend.mlx.exact's blocks: float32
+   on the CPU, of more terms than a block (genclj-y0mp)?"
+  [b x dtype axes]
+  (and (= dtype :float32) (= :cpu (:device (config b)))
+       (> (sh/size (mapv #(nth (shape-of x) %) axes)) (long @sum-block-size))))
+
 (defn- reduce-op [b op x axes keep-dims?]
   (let [s (stream b)
         dtype (dtype-on b x)]
-    (if (empty? axes)
+    (cond
+      (empty? axes)
       ;; over no axis: the identity (argmax/argmin always name one axis)
       (as-array b x dtype)
+
+      (and (= op :sum) (blocked-sum? b x dtype axes))
+      ;; MLX's CPU accumulates a float32 sum sequentially (DESIGN §9)
+      ((requiring-resolve 'gen.backend.mlx.exact/sum) (as-array b x dtype) axes keep-dims?)
+
+      (and (= op :sum) (#{:float16 :bfloat16} dtype) (= :cpu (:device (config b))))
+      ;; and a half-float sum in its own precision: in float32 instead
+      ((requiring-resolve 'gen.backend.mlx.exact/half-sum) (as-array b x dtype) axes keep-dims?)
+
+      :else
       (let [ax (int-array axes)
             kd (boolean keep-dims?)]
         (with-operands b op [h x dtype]
