@@ -39,11 +39,12 @@
 (defn fold-in
   "A new key from k and a non-negative integer (64 bits), e.g. to derive one
    key per address: (split k n)'s key at index data, for every n past it.
-   Negative data is an error: as split's index it means nothing, and JAX's
-   key for it (data mod 2^32) is not this scheme's."
+   Other data is an error: as split's index it means nothing, JAX's key for
+   a negative integer (data mod 2^32) is not this scheme's, and a long cast
+   would take 2.5 for 2."
   [k data]
-  (when (neg? data)
-    (throw (ex-info (str "fold-in takes non-negative data, not " data) {:data data})))
+  (when-not (and (integer? data) (not (neg? data)))
+    (throw (ex-info (str "fold-in takes a non-negative integer, not " (pr-str data)) {:data data})))
   (threefry/fold-in (check-key k) data))
 
 (defn key-data

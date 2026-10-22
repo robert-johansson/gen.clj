@@ -84,10 +84,14 @@
       (is (not= (rng/fold-in k 5) (rng/fold-in k (+ two32 5)))))
     (testing "split's key at index d, for d past 2^32 too: the counter [hi32 d, lo32 d]"
       (is (= (words (threefry/hash2x32 k0 k1 1 5)) (rng/key-data (rng/fold-in k (+ two32 5))))))
-    (testing "negative data is loud"
-      ;; the cross-review of genclj-vh7n: the old mask wrapped it as JAX's
-      ;; uint32 does, the 64-bit counter does not; plant: no check gives a key
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"non-negative data, not -1" (rng/fold-in k -1))))))
+    (testing "data that is no non-negative integer is loud"
+      ;; the cross-review of genclj-vh7n: the old mask wrapped a negative as
+      ;; JAX's uint32 does, the 64-bit counter does not, and a long cast took
+      ;; 2.5 for 2 (DESIGN §9); plants: no check gives keys for all three, the
+      ;; sign check alone for 2.5 and 3.0
+      (doseq [d [-1 2.5 3.0]]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"takes a non-negative integer, not" (rng/fold-in k d)) (pr-str d)))
+      (is (= (rng/fold-in k 3) (rng/fold-in k (int 3)) (rng/fold-in k (bigint 3))) "any integer type"))))
 
 (defspec fold-in-is-split-at-an-index 100
   (prop/for-all [seed gen/nat i (gen/choose 0 50)]
