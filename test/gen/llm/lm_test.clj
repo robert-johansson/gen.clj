@@ -53,6 +53,7 @@
             [clojure.test.check.properties :as prop]
             [gen.llm.branching :as br]
             [gen.llm.branching-contract :as bc]
+            [gen.llm.cache :as cache]
             [gen.llm.cell-engine :as ce]
             [gen.llm.lm :as lm]
             [gen.llm.lm-contract :as contract]
@@ -524,6 +525,39 @@
                 (is (= want (bc/reason f))))
               (is (= before (lm/info m)) "nothing read, nothing counted")
               (is (empty? (books m e {:max-branches 4 :max-cells 20})))))))
+
+;; One rule and one error for a token of the vocabulary (the post-M5
+;; review's I4-03): br/index? and br/invalid-token, which the cache's and
+;; token-bytes' checks raise, and the one reader of an :end-tokens option,
+;; whose copies in byte-lm and grammar once threw IllegalArgumentException
+;; on a big integer. Plants: a copy that coerces with long fails the
+;; end-token checks here and in bytes-test and grammar-test.
+(deftest one-rule-for-a-token-of-the-vocabulary
+  (with-open [m (lm/lm (toy/engine {:max-branches 4 :n-ctx 64}) (tt/tokenizer n-vocab))]
+    (let [message #(try (%) nil (catch clojure.lang.ExceptionInfo e (ex-message e)))]
+      (is (= "lm: not a token of the vocabulary (0 to 96): 97" (ex-message (br/invalid-token "lm" 97 97))))
+      (is (= (ex-message (br/invalid-token "lm" 97 97)) (message #(lm/next-logprobs m [1 97]))) "the cache's")
+      (is (= (ex-message (br/invalid-token "token-bytes" 97 97)) (message #(lm/token-bytes m 97))) "token-bytes'")))
+  (is (= #{4 7} (lm/end-tokens-option "here" {:end-tokens #{4 (int 7)}} #{1} 10)))
+  (is (every? #(instance? Long %) (lm/end-tokens-option "here" {:end-tokens #{4 (int 7)}} #{1} 10)))
+  (is (= #{1} (lm/end-tokens-option "here" {} #{1} 10)) "the default")
+  (is (= #{} (lm/end-tokens-option "here" {:end-tokens #{}} #{1} 10)))
+  (doseq [ts [#{10} #{-1} #{100000000000000000000N} #{1.0} [1] nil]]
+    (is (= :invalid-end-tokens (bc/reason #(lm/end-tokens-option "here" {:end-tokens ts} #{1} 10))) (pr-str ts)))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"^here: " (lm/end-tokens-option "here" {:end-tokens #{10}} #{} 10))))
+
+;; A read that fails keeps its error, and a failure to dispose of its forks
+;; is suppressed onto it, not swallowed (the review's I4-07). Plant: the
+;; old (catch Throwable _) fails this test.
+(deftest a-failed-read-keeps-the-cleanup-s-failure
+  (let [engine (reify br/Branching
+                 (-live? [_ _] true)
+                 (-dispose [_ _] (throw (ex-info "the dispose failed" {}))))
+        fork (gen.llm.branching.Branch. engine 0 [] (float-array 1))
+        e (try (#'cache/reading (fn [made] (vswap! made conj fork) (throw (ex-info "the read failed" {}))))
+               (catch clojure.lang.ExceptionInfo e e))]
+    (is (= "the read failed" (ex-message e)))
+    (is (= ["the dispose failed"] (map ex-message (.getSuppressed ^Throwable e))))))
 
 (deftest the-limit-bounds-contexts-and-scored-sequences
   ;; :limit, the lesser of the engine's :n-ctx and :max-cells: a context or

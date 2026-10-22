@@ -26,8 +26,9 @@
    end inside a character or span several of the DFA's transitions. End
    tokens are not text: a completion's end token is the end, allowed where
    the text is complete (the end's weight), so a grammar leaves them out,
-   and its end tokens must be the completion's (gen.llm.constrained checks
-   them). A language that needs an end token's bytes is inexpressible. A
+   and its end tokens must be the completion's: it declares them
+   (potential/end-tokens), and potential/check-end-tokens compares them
+   wherever it meets a completion. A language that needs an end token's bytes is inexpressible. A
    token is allowed after a context when its bytes lead to a live state:
    one from which some sequence of tokens (not merely of bytes) reaches an
    accepting state. That is exact: every state the vocabulary reaches from
@@ -63,6 +64,10 @@
   (-prefix [g context] (prefix g context))
   (-complete [g context] (complete g context))
   (-logw-next [g context] (logw-next g context))
+
+  ;; it reads contexts with these end tokens, left out of the text
+  potential/EndTokens
+  (-end-tokens [_] end-tokens)
 
   Object
   (toString [_]
@@ -116,13 +121,7 @@
   "The end tokens opts gives, or vocab's default: an LM's :eog, none for a
    byte vocabulary; checked."
   [vocab byte-vocab opts]
-  (let [ts (cond (contains? opts :end-tokens) (:end-tokens opts)
-                 (satisfies? lm/LM vocab) (:eog (lm/vocab vocab))
-                 :else #{})]
-    (when-not (and (set? ts) (every? #(and (integer? %) (< -1 (long %) (count byte-vocab))) ts))
-      (throw (ex-info (str "grammar: :end-tokens is a set of tokens of the vocabulary, not " (pr-str ts))
-                      {:reason :invalid-end-tokens :end-tokens ts})))
-    (into #{} (map long) ts)))
+  (lm/end-tokens-option "grammar" opts (if (satisfies? lm/LM vocab) (:eog (lm/vocab vocab)) #{}) (count byte-vocab)))
 
 (defn grammar
   "The grammar of language (a regex, a regex term or a DFA) over vocab's

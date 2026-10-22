@@ -62,8 +62,8 @@
    (gen.llm.constrained): a completion masked by a grammar and
    renormalized, token by token, as GenMLX's grammar-masked decoder. Its
    GFI weights are that local distribution's, q, not the LM conditioned on
-   the potential: gen.llm.constrained/conditional-weight is a trace's
-   importance weight for that. Its scores are its sites' log q, from the
+   the potential: gen.llm.constrained/conditional-weight is a completion's
+   trace's importance weight for that. Its scores are its sites' log q, from the
    LM's rows at their contexts (one read for each, as the normalizer needs
    every token's)."
   (:require [gen.array :as array]
@@ -146,14 +146,17 @@
   (dc/->Distribution ::dist {:row row}))
 
 (defn- token-of
-  "v as a host integer: v itself, or a concrete 0-d array's item; nil for any
-   other number. Not a number: a loud error."
+  "v as a host integer: v itself, or a concrete 0-d array's item, an
+   integral number its integer (3.0 is token 3, as gen.dist's discrete
+   families take it); nil for any other number. Not a number: a loud
+   error."
   [what v]
   (let [v (if (and (array/array? v) (not (array/host? v)) (array/concrete? v) (empty? (array/shape v)))
             (array/item v)
             v)]
     (cond (integer? v) v
-          (number? v) nil
+          (number? v) (let [d (double v)]
+                        (when (and (Double/isFinite d) (== d (Math/floor d))) (long d)))
           :else (throw (ex-info (str what ": a token is an integer, not " (pr-str v)) {:reason :invalid-token :value v})))))
 
 (defmethod dc/-sample ::dist [d key batch-shape]
@@ -326,11 +329,12 @@
   (assoc (trace/make-trace {:gen-fn gf :args args :choices (choices-of tokens) :retval tokens :score (sum scores)})
          ::scores scores))
 
-(defn- check-args
-  "[prompt max-tokens], checked: a non-empty token vector and a
-   non-negative integer, together within the LM's :limit (the longest
-   completion's sequence is scored), so that their validity never depends
-   on the draws."
+(defn check-args
+  "[prompt max-tokens], checked for the completion gf: a non-empty vector
+   of tokens of its vocabulary and a non-negative integer, together within
+   the LM's :limit (the longest completion's sequence is scored), so that
+   their validity never depends on the draws. op, a keyword, names the
+   caller in the errors; token SMC checks its arguments by it too."
   [op gf args]
   (when-not (= 2 (count args))
     (throw (ex-info (str (name op) ": a completion takes [prompt max-tokens], not " (count args) " arguments")
@@ -492,6 +496,8 @@
       {:choices (:choices tr) :weight (:score tr) :retval (:retval tr)}))
   (-project [_ tr selection] (project* tr selection)))
 
+(defn completion? "Is x a completion, a generative function of this namespace?" [x] (instance? Completion x))
+
 (defmethod print-method Completion [gf ^java.io.Writer w]
   (.write w (str "#gen/completion[" (:lm gf) (when (:potential gf) (str " under " (:potential gf))) "]")))
 
@@ -506,15 +512,11 @@
    the LM's vocabulary (gen.llm.potential) that reweighs each token's
    distribution (gen.llm.constrained)."
   ([lm] (completion lm {}))
-  ([lm {:keys [end-tokens potential] :as opts}]
+  ([lm {:keys [potential] :as opts}]
    (when-not (satisfies? lm/LM lm)
      (throw (ex-info (str "token/completion: a completion is over an LM (gen.llm.lm), not " (pr-str lm))
                      {:reason :invalid-lm :lm lm})))
    (let [{:keys [n-vocab eog]} (lm/vocab lm)
-         end-tokens (if (contains? opts :end-tokens) end-tokens eog)]
-     (when-not (and (set? end-tokens) (every? #(br/index? % n-vocab) end-tokens))
-       (throw (ex-info (str "token/completion: :end-tokens is a set of tokens of the vocabulary, not " (pr-str end-tokens))
-                       {:reason :invalid-end-tokens :end-tokens end-tokens})))
-     (let [end-tokens (into #{} (map long) end-tokens)]
-       (->Completion lm end-tokens (long n-vocab) (:limit (lm/info lm))
-                     (some-> potential (constrained/check-potential n-vocab end-tokens)))))))
+         end-tokens (lm/end-tokens-option "token/completion" opts eog n-vocab)]
+     (->Completion lm end-tokens (long n-vocab) (:limit (lm/info lm))
+                   (some-> potential (constrained/check-potential n-vocab end-tokens))))))

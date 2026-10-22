@@ -29,6 +29,45 @@
 ;; The trie
 ;; ---------------------------------------------------------------------------
 
+;; remove-entry is loud off the trie's entries, :no-entry (the post-M5
+;; review's I4-07): an absent path recursed until a StackOverflowError, one
+;; ending inside an edge threw IndexOutOfBoundsException, and one parting
+;; from an edge inside it removed the entry it shares a first token with.
+;; Plant: the old recursion fails this test (the absent path, the overflow).
+(deftest remove-entry-is-loud-off-the-entries
+  (let [t (trie/insert trie/empty-trie [1 2 3] 0 [0.0 0.0 0.0] :x)
+        reason #(try (%) :no-error (catch clojure.lang.ExceptionInfo e (:reason (ex-data e))) (catch Throwable e (class e)))]
+    (doseq [tokens [[3 4] [1 2] [1 9 3] [1 2 3 4] []]]
+      (is (= :no-entry (reason #(trie/remove-entry t tokens))) (pr-str tokens)))
+    (is (= trie/empty-trie (trie/remove-entry t [1 2 3])))
+    (is (= trie/empty-trie (trie/remove-entry t (list 1 2 3))) "any sequence of the tokens")))
+
+;; Every walk of the trie loops, so a path may pass as many nodes as its
+;; tokens: an entry at every prefix of 3,000 tokens, a node at each
+;; (genclj-6h3b: entries and size recursed, and entries overflowed the
+;; stack here). Plant: the recursive walk of entries or size fails this.
+(deftest a-trie-of-a-deep-path-is-walked
+  (let [n 3000
+        tokens (vec (range n))
+        t (reduce (fn [t k] (trie/insert t (subvec tokens 0 k) (dec k) [0.0] k)) trie/empty-trie (range 1 (inc n)))]
+    (is (= (vec (range 1 (inc n))) (trie/entries t)) "depth first: the shallowest first")
+    (is (= n (trie/size t)))
+    (is (= (dec n) (count (trie/entries (trie/remove-entry t tokens)))))
+    (is (= (dec n) (trie/size (trie/remove-entry t tokens))))))
+
+(deftest remove-entry-takes-a-path-of-many-nodes
+  ;; an entry at every prefix of 3,000 tokens, a node at each: the deepest
+  ;; removed, and then one in the middle
+  (let [n 3000
+        tokens (vec (range n))
+        t (reduce (fn [t k] (trie/insert t (subvec tokens 0 k) (dec k) [0.0] k)) trie/empty-trie (range 1 (inc n)))
+        t1 (trie/remove-entry t tokens)
+        t2 (trie/remove-entry t1 (subvec tokens 0 1500))]
+    (is (= {:depth n :entry n :entry-depth n} (trie/match t tokens)))
+    (is (= {:depth (dec n) :entry (dec n) :entry-depth (dec n)} (trie/match t1 tokens)) "the path to it goes too")
+    (is (= {:depth 1500 :entry 1499 :entry-depth 1499} (trie/match t2 (subvec tokens 0 1500))))
+    (is (= {:depth (dec n) :entry (dec n) :entry-depth (dec n)} (trie/match t2 tokens)) "the entries past it stay")))
+
 (defn- prefixes [ctx] (map #(subvec ctx 0 %) (range 1 (inc (count ctx)))))
 
 (defn- model-insert [{:keys [entries scores]} ctx from sc entry]

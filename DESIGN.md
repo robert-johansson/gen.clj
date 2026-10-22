@@ -405,8 +405,8 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
   `(token/completion m {:potential p})` is the completion under a potential:
   each token's distribution the LM's row times the potential's weights,
   renormalized at its site (`gen.llm.constrained`), whose GFI laws hold;
-  `constrained/conditional-weight` is a trace's importance weight for the
-  LM conditioned on the potential. `gen.llm.bytes` also gives a text's
+  `constrained/conditional-weight` is a completion's trace's importance
+  weight for the LM conditioned on the potential. `gen.llm.bytes` also gives a text's
   probability over its tokenizations.
 
 ## 7. Platform

@@ -30,7 +30,7 @@ No new dependency. Nothing outside `gen.llm.*` requires these namespaces.
 (def phone (grammar/grammar m "[0-9]{3}-[0-9]{4}"))   ; m an LM: masks over its vocabulary
 (def answer (token/completion m {:potential phone}))  ; completions held to the grammar
 (def tr (gfi/simulate answer [prompt 12]))           ; a phone number, token by token
-(constrained/conditional-weight tr)                  ; its importance weight for the LM conditioned on it
+(constrained/conditional-weight tr)                  ; a completion's trace's importance weight for the LM conditioned on it
 
 (def no-close                                         ; terms compose: text without a closing tag
   (regex/intersect (regex/star regex/any-char)
@@ -47,9 +47,9 @@ No new dependency. Nothing outside `gen.llm.*` requires these namespaces.
 | `(grammar/grammar vocab language)`, `(grammar/grammar vocab language {:end-tokens ts})` | a language (regex, term or DFA) over a vocabulary (an LM, or a byte vocabulary): masks for every state the tokens reach; a potential. The end tokens (default an LM's `:eog`, none for a byte vocabulary) are not text, and must be the completion's |
 | `(grammar/state g tokens)`, `advance`, `live?`, `accepting?`, `allowed?`, `allowed`, `automaton`, `end-tokens`, `info` | a grammar's states and masks |
 | `(potential/prefix g ctx)`, `complete`, `logw-next` | a grammar as a potential: 0 or -Inf; the mask as n-vocab + 1 weights |
-| `(token/completion m {:potential p})` | the completion under a potential (any potential: a grammar, a product, a weighted one) |
+| `(token/completion m {:potential p})` | the completion under a potential (any potential: a grammar, a product, a weighted one), whose declared end tokens (`potential/end-tokens`) must be the completion's |
 | `(constrained/weighted end-tokens row ws)` | a site's distribution: the row times the weights, renormalized, `[q log-z]` (for token SMC's masked proposal too) |
-| `(constrained/conditional-weight tr)` | log p(x) + w(x) - log q(x) |
+| `(constrained/conditional-weight tr)` | log p(x) + w(x) - log q(x), for a completion's trace (any other is `:invalid-trace`; a model's completion is its `trace/subtrace`) |
 | `(bytes/byte-lm m opts)`, `prefix-logprob`, `text-logprob`, `next-byte-logprobs` | a text's probability over its tokenizations |
 | `(bytes/byte-trie byte-vocab)`, `sweep` | the token byte trie and its walk from a DFA state |
 
@@ -144,6 +144,20 @@ grammar holds the text.
   token's bytes is `:inexpressible`. (The first build read every token as
   text: a grammar `[ab]{3}\n` with a newline end token passed `prefix` and
   stranded every completion, found by the round-3 review.)
+- **A potential declares its end tokens** (2026-10-22, the post-M5
+  review's P4-02 and I4-02, bean genclj-1lpj; DESIGN §9). The agreement
+  was a type test for `Grammar` on the completion's own `:potential`, so a
+  grammar inside `potential/product` passed it (and the completion failed
+  mid-run with `:zero-weight`), and token SMC never checked (a mismatched
+  pair estimated another Z: 0.37 where the matched pair gives 1). Now a
+  potential declares the end tokens it reads contexts with through an
+  optional protocol, `(potential/end-tokens p)`: a set, or nil for no
+  opinion. A grammar declares its own; `potential` takes `:end-tokens`; a
+  product carries its factors' set and is `:mismatched-end-tokens` when
+  made if two disagree. One check, `potential/check-end-tokens`, compares
+  a potential's set with a completion's, from `token/completion` and from
+  token SMC's `initialize` for its `:potential` (only that check there: a
+  potential that rules every sequence out stays an estimate of Z = 0).
 
 ## Measurements
 
@@ -258,7 +272,9 @@ noise) and w(x) the potential's weight of x's tokens before its end token.
 Its mean over q is Z = Σ p(x) exp(w(x)); for a grammar, the probability
 that the LM's completion satisfies it (tested exactly and in the mean).
 Importance sampling with these weights, or token SMC's `:masked` proposal
-(gen.llm.smc, whose steps add the same log Z_i), targets π. A completion
+(gen.llm.smc, whose steps add the same log Z_i), targets π; SMC runs over
+the plain completion, the potential given as its `:potential` (it refuses
+a constrained completion, `:constrained-completion`). A completion
 that stops at max-tokens is a prefix of the language, not necessarily one
 of its strings; π weighs it by `complete`, so incomplete ones get weight 0.
 
@@ -437,8 +453,11 @@ So DESIGN §8's row becomes: instaparse, **no** (confirmed by the owner,
    tokens one at a time with `token/dist`; possible later, as
    `(constrained/dist row ws end-tokens)`).
 3. **Recommendation: a constrained completion's GFI weights are the local
-   distribution q's**, and `constrained/conditional-weight` gives the
-   importance weight for π, the LM conditioned on the potential (above).
+   distribution q's**, and `constrained/conditional-weight` gives a
+   completion's trace's importance weight for π, the LM conditioned on the
+   potential (above); any other trace is an error (2026-10-22, the post-M5
+   review's P4-03, DESIGN §9: it gave 0.0, the weight of a plain
+   completion, for a model's trace that calls a constrained one).
    The alternative, a completion whose density is π, has no tractable
    score (Z is a sum over every sequence).
 4. **Recommendation: what a grammar holds** is the text, the tokens' bytes
@@ -604,5 +623,12 @@ drawn from a seed inside the trial), and the mutated suite fails in 4 s.
 | token.clj: assess ignores the potential | the laws (14) |
 | token.clj: draws ignore the potential | completions-never-leave-the-language, the laws (25) |
 | token.clj: a run of known tokens ignores the potential | the laws (28) |
+
+2026-10-22 (genclj-1lpj), each caught: a product accepting factors that
+disagree (`potentials-declare-their-end-tokens`); a product declaring no
+set, `check-end-tokens` never refusing, a grammar with no opinion (those,
+`an-end-token-is-the-end-not-text`, `misuse-is-loud` and smc's
+`the-potential-s-end-tokens-are-the-completion-s`); `potential` dropping
+`:end-tokens`; `token/completion` or token SMC calling no end-token check.
 
 

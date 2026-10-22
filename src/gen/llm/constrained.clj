@@ -6,8 +6,9 @@
    grammar-masked decoder.
 
      (weighted end-tokens row ws)   → [q log-z]: the site's distribution
-     (conditional-weight trace)     → log p(x) + w(x) - log q(x), the trace's
-                                      importance weight for the global conditional
+     (conditional-weight trace)     → log p(x) + w(x) - log q(x), a completion's
+                                      trace's importance weight for the global
+                                      conditional
 
    The distribution is local: q(x) = Π_i p(x_i | x_<i) exp(w_i(x_i)) / Z_i,
    w_i the potential's next-token weights and Z_i the normalizer at site i,
@@ -36,8 +37,7 @@
    context of positive weight where the potential allows no token (a
    grammar complete there, with no end token to end the completion) is a
    loud error."
-  (:require [gen.llm.grammar :as grammar]
-            [gen.llm.lm :as lm]
+  (:require [gen.llm.lm :as lm]
             [gen.llm.potential :as potential]))
 
 (set! *warn-on-reflection* true)
@@ -196,8 +196,10 @@
 
 (defn check-potential
   "potential, checked for a completion over n-vocab tokens with end-tokens:
-   a potential that gives the empty context weight, and for a grammar one
-   whose end tokens (which it leaves out of the text) are the completion's."
+   a potential that gives the empty context weight, whose next-token
+   weights are the vocabulary's and the end's, and whose end tokens, if it
+   declares any (a grammar, which leaves them out of the text), are the
+   completion's (potential/check-end-tokens)."
   [potential ^long n-vocab end-tokens]
   (when-not (satisfies? potential/Potential potential)
     (throw (ex-info (str "token/completion: :potential is a potential (gen.llm.potential), not " (pr-str potential))
@@ -210,29 +212,34 @@
       (throw (ex-info (str "token/completion: the potential's next-token weights have " n " entries, not " (inc n-vocab)
                            " (the LM's vocabulary and the end)")
                       {:reason :invalid-weights :entries n :n-vocab n-vocab}))))
-  (when (and (grammar/grammar? potential) (not= (grammar/end-tokens potential) (set end-tokens)))
-    (throw (ex-info (str "token/completion: the grammar's end tokens " (grammar/end-tokens potential)
-                         " are not the completion's " (set end-tokens)
-                         " (a grammar leaves its end tokens out of the text: make it with the same :end-tokens)")
-                    {:reason :mismatched-end-tokens :grammar (grammar/end-tokens potential) :completion (set end-tokens)})))
-  potential)
+  (potential/check-end-tokens "token/completion" potential end-tokens))
 
 ;; ---------------------------------------------------------------------------
 ;; The global conditional
 ;; ---------------------------------------------------------------------------
 
+(def ^:private completion?
+  "gen.llm.token/completion?, resolved when first called: gen.llm.token
+   requires this namespace."
+  (delay (requiring-resolve 'gen.llm.token/completion?)))
+
 (defn conditional-weight
-  "The importance weight of tr, a trace of a completion under a potential,
-   for the LM's completion weighed by the potential, π(x) ∝ p(x) exp(w(x)):
+  "The importance weight of tr, a completion's trace (gen.llm.token), for
+   the LM's completion weighed by its potential, π(x) ∝ p(x) exp(w(x)):
    log p(x) + w(x) - log q(x), with p(x) the unconstrained completion's
    density of tr's tokens (the LM's scores, its end token's included), w(x)
    the potential's weight of the tokens before an end token as a whole
    sequence (all of them when the completion stopped at max-tokens), and
    log q(x) tr's score. Its mean over the completion's traces is Z = Σ p(x)
    exp(w(x)). -Inf for a trace of score -Inf; 0 for a completion with no
-   potential (q is p)."
+   potential (q is p). Any other trace is an error, a model's that calls a
+   completion too: its completion's trace is (gen.trace/subtrace tr addr)."
   ^double [tr]
   (let [{:keys [lm potential] :as gf} (:gen-fn tr)
+        _ (when-not (@completion? gf)
+            (throw (ex-info (str "conditional-weight: a completion's trace (gen.llm.token), not a trace of "
+                                 (pr-str gf) " (a completion a model calls: its trace is gen.trace/subtrace's)")
+                            {:reason :invalid-trace :gen-fn gf})))
         [prompt] (:args tr)
         tokens (:retval tr)
         score (double (:score tr))]

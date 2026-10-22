@@ -14,7 +14,9 @@
      particles all satisfy it.
    - One read a step; particles convert to the completion's traces, whose
      scores are the particles' log p; runs are pure functions of their key;
-     no GC backstop; misuse is loud.
+     no GC backstop; misuse is loud: the arguments by the completion's own
+     check, for every key, and a constrained completion refused, its target
+     reached by SMC's :potential and :masked.
    - The host pool: runs on pools of 1, 2 and 8 threads are the calling
      thread's bit for bit; no LM, potential or proposal-function call runs
      on the pool; a task's error and the caller's bindings reach it as on
@@ -29,6 +31,9 @@
             [gen.laws :as laws]
             [gen.llm.branching :as br]
             [gen.llm.branching-contract :as bc]
+            [gen.llm.byte-tokenizer :as bt]
+            [gen.llm.constrained :as constrained]
+            [gen.llm.grammar :as grammar]
             [gen.llm.lm :as lm]
             [gen.llm.potential :as potential]
             [gen.llm.smc :as smc]
@@ -298,6 +303,79 @@
            ["resampling particles all of weight 0"
             #(smc/resample (smc/step (smc/initialize completion args 4 {:potential nothing}))) :impossible]]]
     (is (= reason (bc/reason f)) what)))
+
+;; The completion's arguments are checked as the completion checks them
+;; (token/check-args), before any draw: the same error for every key. With
+;; a copy of its own, SMC once accepted a prompt and max-tokens past the
+;; LM's :limit, which then failed or not by the key (the post-M5 review's
+;; P4-05), and a prompt token outside the vocabulary.
+(deftest the-arguments-are-checked-as-the-completion-checks-them
+  (let [small (token/completion (lm/lm (toy/engine {:n-vocab n-vocab :max-branches 64 :n-ctx 64}) tokenizer {:max-cells 8}))]
+    (is (= 8 (:limit small)))
+    (doseq [k (range 12)]
+      (is (= :context-full (bc/reason #(smc/run small [prompt 10] 4 {:key (rng/key k)}))) (str "past the limit, key " k))
+      (is (= :invalid-token (bc/reason #(smc/run completion [[0 7] 3] 4 {:key (rng/key k)})))
+          (str "a token outside the vocabulary, key " k))))
+  (is (= :invalid-token (bc/reason #(smc/initialize completion [[0 :a] 3] 4))))
+  (is (= :invalid-token (bc/reason #(smc/initialize completion [[0 -1] 3] 4)))))
+
+;; A completion with a potential of its own is refused (DESIGN §9, "A
+;; constrained completion is refused"; the review's P4-01): SMC draws and
+;; weighs by the LM's rows, so its particles broke the potential and
+;; smc/traces scored them -Inf. The target such a pairing means, the LM's
+;; completions held to the potential, is the constrained completion's
+;; conditional weights' (gen.llm.constrained) and SMC's with the potential
+;; as :potential and the :masked proposal: both estimate its Z. With a soft
+;; twist besides (the verification's V-P4-01), the readings differ: what
+;; the refused pairing estimated, the LM's rows twisted by the soft
+;; potential alone, and the LM held to the constraint and twisted, by the
+;; product; each is SMC's over the plain completion.
+(deftest a-constrained-completion-is-refused
+  (let [constrained (token/completion m {:potential no-repeats})]
+    (doseq [f [#(smc/initialize constrained args 4) #(smc/run constrained args 4 {:key (rng/key 1)})]]
+      (is (= :constrained-completion (bc/reason f))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"SMC's :potential.*:masked" (smc/initialize constrained args 4))
+        "naming the way that is")
+    (let [z (exact-z no-repeats)
+          weights (mapv #(Math/exp (constrained/conditional-weight (gfi/simulate constrained args (rng/key %)))) (range 2000))
+          zs (estimates {:potential no-repeats :proposal :masked} 50 40)]
+      (is (within-5-se? weights z) (str "the conditional weights' mean " (mean weights) ", Z " z))
+      (is (within-5-se? zs z) (str "SMC's mean " (mean zs) ", Z " z)))
+    (let [both (potential/product no-repeats soft)
+          z-soft (exact-z soft)
+          z-both (exact-z both)]
+      (is (< 0.05 (Math/abs (- z-soft z-both))) "two different targets")
+      (doseq [[p z] [[soft z-soft] [both z-both]]]
+        (let [zs (estimates {:potential p :proposal :masked} 50 40)]
+          (is (within-5-se? zs z) (str "SMC's mean " (mean zs) ", Z " z)))))))
+
+;; SMC's :potential must read contexts with the completion's end tokens, if
+;; it declares any (DESIGN §9, "A potential declares its end tokens"; the
+;; review's P4-02 and I4-02). DESIGN's example: a newline that ends the
+;; completion, and a grammar that needs one in its text. SMC once took the
+;; pair and returned log Ẑ = -Inf for every run, silently; the matched
+;; grammar, whose text stops where the newline ends it, estimates Z, the
+;; probability of three letters and then the newline (the verification's
+;; V-P4-02: 0.0051).
+(deftest the-potential-s-end-tokens-are-the-completion-s
+  (let [nl (bt/tokenizer ["a" "b" "\n"])
+        m (lm/lm (toy/engine {:n-vocab (:n-vocab nl) :max-branches 64 :n-ctx 128}) nl {:max-cells 5000})
+        lines (token/completion m {:end-tokens #{2}})
+        args [[(:bos nl)] 6]
+        g (grammar/grammar m "[ab]{3}\n" {:end-tokens #{}})]
+    (doseq [p [g (potential/product g)]]
+      (is (= :mismatched-end-tokens (bc/reason #(smc/initialize lines args 8 {:potential p})))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"^smc: " (smc/initialize lines args 8 {:potential g})))
+    (let [matched (grammar/grammar m "[ab]{3}" {:end-tokens #{2}})
+          run #(smc/run lines args 32 {:potential matched :proposal :masked :key (rng/key %)})
+          bos (:bos nl)
+          z (reduce + (for [x [0 1] y [0 1] w [0 1]]
+                        (Math/exp (reduce + (map (fn [ctx t] (aget (toy/toy-logprobs (:n-vocab nl) ctx) (int t)))
+                                                 [[bos] [bos x] [bos x y] [bos x y w]] [x y w 2])))))
+          zs (mapv #(Math/exp (smc/log-ml-estimate (run %))) (range 40))]
+      (is (every? #(and (= 4 (count %)) (= 2 (peek %)) (every? #{0 1} (pop %))) (smc/particles (run 1)))
+          "three letters, then the end")
+      (is (within-5-se? zs z) (str "SMC's mean " (mean zs) ", Z " z)))))
 
 (deftest particles-all-of-weight-0-estimate-z-as-0
   ;; the estimator's value, not an error: refusing it would bias Ẑ upwards

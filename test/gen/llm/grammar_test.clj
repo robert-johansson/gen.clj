@@ -261,4 +261,6 @@
     (is (= :inexpressible (bc/reason #(grammar/grammar (mapv utf8 ["é" "b"]) "a|ab"))) "no token is a")
     (is (= :invalid-vocab (bc/reason #(grammar/grammar [] "a"))))
     (is (= :invalid-vocab (bc/reason #(grammar/grammar ["a"] "a"))))
-    (is (= :invalid-regex (bc/reason #(grammar/grammar ascii "a("))))))
+    (is (= :invalid-regex (bc/reason #(grammar/grammar ascii "a("))))
+    (is (= :invalid-end-tokens (bc/reason #(grammar/grammar ascii "a" {:end-tokens #{100000000000000000000N}})))
+        "an end token past long's range (once an IllegalArgumentException: the post-M5 review's I4-03)")))

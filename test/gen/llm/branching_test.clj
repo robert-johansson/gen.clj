@@ -38,6 +38,20 @@
 (def ^:private opts
   {:prompt [3 1 4 1 5 9 2 6] :continuation [5 3 5 8 9 7] :k 4 :band 0.0 :top 97})
 
+;; A cleanup after a failure runs every cleanup function, and keeps what
+;; each throws as suppressed on the failure (the post-M5 review's I4-07: an
+;; undo that threw replaced the failure, and the undos after it did not
+;; run). Plant: rethrowing the cleanup's error fails this test.
+(deftest clean-up-keeps-every-failure
+  (let [t (ex-info "the failure" {})
+        ran (atom [])
+        r (br/clean-up t [#(swap! ran conj 1) #(throw (ex-info "second" {})) #(swap! ran conj 3)
+                          #(throw (IllegalStateException. "fourth"))])]
+    (is (identical? t r))
+    (is (= [1 3] @ran) "each runs, after one that threw")
+    (is (= ["second" "fourth"] (map ex-message (.getSuppressed t))))
+    (is (identical? t (br/clean-up t nil)) "no cleanups")))
+
 (deftest the-contract-holds-exactly
   (with-open [e (toy/engine {})]
     (doseq [[k check] contract/checks]

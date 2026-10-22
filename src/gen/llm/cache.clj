@@ -166,16 +166,15 @@
 (defn- reading
   "(f made), an engine call that conj!es onto the volatile made the forks
    it makes (which are not entries). If it throws, the live ones are
-   disposed and the exception rethrown."
+   disposed and the exception rethrown, with a failure to dispose of them
+   suppressed onto it (the engine frees them itself if it is closing)."
   [f]
   (let [made (volatile! [])]
     (try
       (f made)
       (catch Throwable t
-        (when-let [live (seq (filter br/live? @made))]
-          ;; the engine frees them itself if it is closing
-          (try (br/dispose! (vec live)) (catch Throwable _)))
-        (throw t)))))
+        (throw (br/clean-up t (when-let [live (seq (filter br/live? @made))]
+                                [#(br/dispose! (vec live))])))))))
 
 (defn- open!
   "A new branch that has read ctx, from nothing: its first token, then the
@@ -370,8 +369,7 @@
     (dotimes [i n]
       (let [t (nth ctx i)]
         (when-not (br/index? t n-vocab)
-          (throw (ex-info (str "lm: not a token of the vocabulary (0 to " (dec n-vocab) "): " (pr-str t))
-                          {:reason :invalid-token :token t :n-vocab n-vocab})))))))
+          (throw (br/invalid-token "lm" t n-vocab)))))))
 
 (defn- guarded
   "(f); if it throws, the entries the engine no longer holds are forgotten

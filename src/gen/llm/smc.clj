@@ -14,7 +14,9 @@
 
    The target is the completion's distribution weighed by the potential:
    π(x) ∝ p(x) · exp(complete(x)), p the completion's density (end tokens
-   and max-tokens as gen.llm.token has them) and complete the potential's
+   and max-tokens as gen.llm.token has them; its arguments checked as it
+   checks them, token/check-args: tokens of the vocabulary, within the LM's
+   :limit) and complete the potential's
    weight of x as a whole sequence (the tokens before an end token). The
    potential's prefix weights twist the intermediate targets: a step adds
    a token's next-token weight (an end token's is the potential's end
@@ -23,6 +25,15 @@
    exp(log-ml-estimate) estimates Z = Σ p(x)·exp(complete(x)), unbiasedly;
    with a 0/-Inf potential (a constraint), the probability that a
    completion satisfies it.
+
+   The completion is one without a potential of its own: SMC draws and
+   weighs by the LM's rows, so a constrained completion is refused
+   (:constrained-completion). Its target, the LM's completions held to the
+   potential, is SMC's with that potential as :potential, and the :masked
+   proposal draws as the constrained completion's sites do. A :potential
+   that declares end tokens (potential/end-tokens: a grammar's) must
+   declare the completion's (:mismatched-end-tokens); one that rules every
+   sequence out is no error, an estimate of Z = 0.
 
    opts at initialize: :potential (none: weight 1), :proposal, :key,
    :host-pool.
@@ -82,15 +93,19 @@
 (defn- step-key [state ^long purpose]
   (rng/fold-in (rng/fold-in (:key state) (:t state)) purpose))
 
-(defn- check-args [completion [prompt max-tokens :as args]]
-  (when-not (instance? gen.llm.token.Completion completion)
+(defn- check-completion
+  "completion, checked: a completion (gen.llm.token) without a potential
+   of its own, which SMC would neither draw nor weigh by."
+  [completion]
+  (when-not (token/completion? completion)
     (throw (ex-info (str "smc: a completion (gen.llm.token/completion) is the model, not " (pr-str completion))
                     {:reason :invalid-model :model completion})))
-  (when-not (and (= 2 (count args)) (sequential? prompt) (seq prompt) (nat-int? max-tokens))
-    (throw (ex-info (str "smc: the arguments are [prompt max-tokens], a non-empty token vector and a"
-                         " non-negative integer, not " (pr-str args))
-                    {:reason (if (and (sequential? prompt) (empty? prompt)) :no-tokens :invalid-args) :args args})))
-  [(vec prompt) (long max-tokens)])
+  (when (:potential completion)
+    (throw (ex-info (str "smc: the completion has a potential of its own, which SMC neither draws nor weighs by;"
+                         " give it as SMC's :potential instead, with the :masked proposal to draw as the"
+                         " constrained completion does")
+                    {:reason :constrained-completion :potential (:potential completion)})))
+  completion)
 
 (defn host-pool
   "A fixed pool of n daemon threads for the particles' host work (their
@@ -155,7 +170,10 @@
    runs this SMC)."
   ([completion args n] (initialize completion args n {}))
   ([completion args n {:keys [potential proposal key] :or {proposal :lm} :as opts}]
-   (let [args (check-args completion args)]
+   (let [args (token/check-args :smc (check-completion completion) args)]
+     ;; only the end tokens: a potential that rules every sequence out is
+     ;; an estimate of Z = 0, not an error
+     (when potential (potential/check-end-tokens "smc" potential (:end-tokens completion)))
      (when-not (pos-int? n)
        (throw (ex-info (str "smc: the number of particles is a positive integer, not " (pr-str n))
                        {:reason :invalid-args :n n})))

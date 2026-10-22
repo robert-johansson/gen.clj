@@ -231,17 +231,14 @@
    infinitely many tokenizations); with a beam, probabilities are lower
    bounds."
   ([lm] (byte-lm lm {}))
-  ([lm {:keys [end-tokens beam] :as opts}]
+  ([lm {:keys [beam] :as opts}]
    (let [{:keys [n-vocab eog]} (lm/vocab lm)
-         end-tokens (if (contains? opts :end-tokens) end-tokens eog)
+         end-tokens (lm/end-tokens-option "byte-lm" opts eog n-vocab)
          byte-vocab (lm/byte-vocab lm)]
-     (when-not (and (set? end-tokens) (every? #(and (integer? %) (< -1 (long %) (long n-vocab))) end-tokens))
-       (throw (ex-info (str "byte-lm: :end-tokens is a set of tokens, not " (pr-str end-tokens))
-                       {:reason :invalid-end-tokens :end-tokens end-tokens})))
      (when-not (or (nil? beam) (pos-int? beam))
        (throw (ex-info (str "byte-lm: :beam is a positive integer or nil, not " (pr-str beam)) {:reason :invalid-option :beam beam})))
      ;; end tokens are kept out of the trie: they end a text, and hold none of it
-     (->ByteLM lm (byte-trie byte-vocab end-tokens) (into #{} (map long) end-tokens) beam))))
+     (->ByteLM lm (byte-trie byte-vocab end-tokens) end-tokens beam))))
 
 (defn- text-bytes ^bytes [what text]
   (cond (string? text) (.getBytes ^String text java.nio.charset.StandardCharsets/UTF_8)
