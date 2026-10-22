@@ -468,14 +468,17 @@
      :retval tokens}))
 
 (defn- retdiff
-  "How the tokens went from before to after: no-change, or a vector-diff
-   naming the retained positions whose tokens differ."
+  "How the tokens went from before to after: no-change when they are as
+   many and each the same (gfi/same-value?, D1's unchanged), else a
+   vector-diff naming the retained positions whose tokens differ. Compared
+   token by token, so a completion longer than same-value?'s budget keeps
+   its no-change."
   [before after]
-  (if (= before after)
-    diff/no-change
-    (diff/vector-diff (count after) (count before)
-                      (into {} (keep #(when (not= (before %) (after %)) [% diff/unknown-change]))
-                            (range (min (count before) (count after)))))))
+  (let [changed (into {} (keep #(when-not (gfi/same-value? (before %) (after %)) [% diff/unknown-change]))
+                      (range (min (count before) (count after))))]
+    (if (and (== (count before) (count after)) (empty? changed))
+      diff/no-change
+      (diff/vector-diff (count after) (count before) changed))))
 
 (defn- revised
   "An update's or regenerate's result: the trace of state, the weight, the
