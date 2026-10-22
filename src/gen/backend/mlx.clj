@@ -791,15 +791,15 @@
         ;; MLX's indices are uint32
         (Mlx/mlx_astype i int-code s)))))
 
-(def ^:private sum-block-size
-  (delay (long @(requiring-resolve 'gen.backend.mlx.exact/block-size))))
+(def ^:private sum-blocked-above
+  (delay (long @(requiring-resolve 'gen.backend.mlx.exact/blocked-above))))
 
 (defn- blocked-sum?
   "Does a sum of x over axes take gen.backend.mlx.exact's blocks: float32
-   on the CPU, of more terms than a block (genclj-y0mp)?"
+   on the CPU, of more terms than exact/blocked-above (genclj-y0mp)?"
   [b x dtype axes]
   (and (= dtype :float32) (= :cpu (:device (config b)))
-       (> (sh/size (mapv #(nth (shape-of x) %) axes)) (long @sum-block-size))))
+       (> (sh/size (mapv #(nth (shape-of x) %) axes)) (long @sum-blocked-above))))
 
 (defn- reduce-op [b op x axes keep-dims?]
   (let [s (stream b)

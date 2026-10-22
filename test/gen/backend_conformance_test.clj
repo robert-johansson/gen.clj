@@ -428,6 +428,28 @@
            (every? true? (map (fn [g w a] (<= (Math/abs (- g w)) (* (log-bound m) a)))
                               (flat-values got) (flat-values want) (flat-values scale)))))))
 
+(defspec long-sums-of-same-signed-terms 12
+  ;; genclj-v3uw (from memo.clj): equal terms and signed uniform ones hide a
+  ;; block's sequential run, so these are same-signed and heterogeneous,
+  ;; w log w with w = (0.999u + 10^-3)^4 in (10^-12, 1], the cells of an
+  ;; entropy. Shapes of memo.clj's empowerment tables (3125 actions by 169
+  ;; states), with their transposes and a whole-table sum. Planted, MLX's
+  ;; own sum in place of the blocks fails it on MLX's CPU in float32. Blocks
+  ;; of 256 pass: each sum is within a few ulps at either size, and the
+  ;; difference shows only when an iterated computation compounds them
+  (prop/for-all [shape (gen/elements [[528125] [3125 169] [169 3125] [25 125 169]])
+                 seed gen/nat]
+    (let [axes (gen/generate (gen-axes (count shape)) 10 seed)
+          w (array/square (array/square (array/+ (array/* 0.999 (rng/uniform (rng/key seed) shape)) 1e-3)))
+          host (array/->clj (array/* w (array/log w)))
+          got (array/sum (array/array host {:dtype float-dt}) {:axis axes})
+          [want scale] (array/with-backend reference
+                         (let [x (array/array host {:dtype :float64})]
+                           [(array/sum x {:axis axes}) (array/sum (array/abs x) {:axis axes})]))
+          m (quot (reduce * shape) (max 1 (array/size got)))]
+      (every? true? (map (fn [g w a] (<= (Math/abs (- g w)) (* (log-bound m) a)))
+                         (flat-values got) (flat-values want) (flat-values scale))))))
+
 (defspec arg-reductions trials
   (prop/for-all [op (gen/elements [array/argmax array/argmin])
                  shape gen-nonempty-shape

@@ -131,11 +131,18 @@
   (let [m (array/maximum x y)]
     (array/where (array/isinf m) m (+ m (array/log1p (exp (array/negate (array/abs (- x y)))))))))
 
-(def block-size
-  "The most terms a float32 sum on MLX's CPU accumulates in one run (sum):
-   256, by measurement (genclj-y0mp). Blocks of 1,024 and more show their
-   own error again; smaller ones cost more operations."
+(def blocked-above
+  "A float32 sum on MLX's CPU of more terms than this is summed in blocks
+   (sum); a shorter one is MLX's own (genclj-y0mp)."
   256)
+
+(def block-size
+  "The most terms one block of a blocked sum accumulates (sum): 32 (owner,
+   genclj-v3uw). Each sum is within a few ulps with blocks of 256 too, but
+   an iterated computation compounds them: memo.clj's empowerment demo
+   missed float64 by 1.89e-5 with 256 and 4.4e-6 with 32 (JAX's CPU
+   3.6e-6), for 1.3-1.5x a long sum's time."
+  32)
 
 (defn- block-of
   "The block size for m terms: a divisor of m between half of block-size
