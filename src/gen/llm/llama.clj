@@ -68,6 +68,7 @@
            [java.util.concurrent ExecutorService]))
 
 (set! *warn-on-reflection* true)
+(set! *unchecked-math* :warn-on-boxed)
 
 ;; ---------------------------------------------------------------------------
 ;; Decoding
@@ -171,19 +172,20 @@
   (boolean (some (fn [{:keys [kind buffer]}] (and (= kind :model) (.startsWith (str buffer) "Metal")))
                  (:buffers fp))))
 
-(defn- split-recurrent?
-  "gen.llama.split-recurrent: does a recurrent or hybrid model's engine
-   split its steps? By default only on Metal (the owner, DESIGN §9): there a
-   split step of Qwen3.5-0.8B cost a quarter to a third of one decode; on
-   CUDA (fenrir, 2026-10-21) about twice one decode."
-  [fp]
-  (case (System/getProperty "gen.llama.split-recurrent")
-    nil (metal? fp)
-    "true" true
-    "false" false
-    (throw (ex-info (str "llama/engine: gen.llama.split-recurrent is true or false, not "
-                         (pr-str (System/getProperty "gen.llama.split-recurrent")))
-                    {:reason :invalid-option :gen.llama.split-recurrent (System/getProperty "gen.llama.split-recurrent")}))))
+(defn- split-recurrent
+  "gen.llama.split-recurrent, read once: does a recurrent or hybrid model's
+   engine split its steps? true or false, or nil when it is not set: then
+   only on Metal (the owner, DESIGN §9), where a split step of
+   Qwen3.5-0.8B cost a quarter to a third of one decode; on CUDA (fenrir,
+   2026-10-21) about twice one decode."
+  []
+  (let [v (System/getProperty "gen.llama.split-recurrent")]
+    (case v
+      nil nil
+      "true" true
+      "false" false
+      (throw (ex-info (str "llama/engine: gen.llama.split-recurrent is true or false, not " (pr-str v))
+                      {:reason :invalid-option :gen.llama.split-recurrent v})))))
 
 ;; An engine that splits steps holds a volatile
 ;;   {:cells   the replay (gen.llm.llama.recurrent), nil once it is off
@@ -192,13 +194,13 @@
 
 (defn- replayed!
   "The replay becomes (f replay args), if it is on."
-  [^clojure.lang.Volatile splits f & args]
+  [splits f & args]
   (when-let [st (some-> splits deref :cells)]
     (vswap! splits assoc :cells (apply f st args))))
 
 (defn- replay-off!
   "The replay stops: steps are one decode from now on."
-  [^clojure.lang.Volatile splits why]
+  [splits why]
   (vswap! splits assoc :cells nil :off why))
 
 (defn- replay-checked!
@@ -206,7 +208,7 @@
    one's state position (llama_memory_seq_pos_min: a recurrent state's
    position, -1 for none, for a hybrid model too; v0.7.0 tells no cell's
    index). A disagreement stops the replay, loudly on System.err."
-  [^clojure.lang.Volatile splits ^MemorySegment mem slots what]
+  [splits ^MemorySegment mem slots what]
   (when-let [st (some-> splits deref :cells)]
     (when-let [[slot mine theirs]
                (first (keep (fn [slot]
@@ -227,7 +229,7 @@
    restore's removals from position 0, of the slots cleared, remain to
    replay. Any other failure of a decode may leave llama.cpp's cells where
    the replay cannot follow: it stops."
-  [^clojure.lang.Volatile splits ^Throwable t cleared]
+  [splits ^Throwable t cleared]
   (when splits
     (if (contains? #{1 -1 nil} (:code (ex-data t)))
       (run! #(replayed! splits recurrent/clear %) cleared)
@@ -320,8 +322,10 @@
 (def ^:private defaults {:max-branches 8 :n-ctx 4096 :n-batch 512 :gpu-layers -1 :swa-full true})
 
 (def ^:private option-checks
-  {:model string? :max-branches pos-int? :n-ctx pos-int? :n-batch pos-int? :gpu-layers int?
-   :threads #(or (nil? %) (pos-int? %)) :swa-full boolean?})
+  "The options an engine takes, each with its check (a bad :model, no
+   model file there, has an error of its own, :no-model)."
+  {:model #(and (string? %) (.isFile (java.io.File. ^String %))) :max-branches pos-int? :n-ctx pos-int?
+   :n-batch pos-int? :gpu-layers int? :threads #(or (nil? %) (pos-int? %)) :swa-full boolean?})
 
 (defn- check-options
   "opts with their defaults and :n-slots, checked: a loud error for an
@@ -332,11 +336,11 @@
   (let [{:keys [model max-branches] :as opts} (merge defaults opts)
         ;; LLAMA_MAX_SEQ, 256 in v0.7.0
         max-seq (Llama/llama_max_parallel_sequences)]
-    (when-not (and (string? model) (.isFile (java.io.File. ^String model)))
-      (throw (ex-info (str "llama/engine: no model file at " (pr-str model)) {:reason :no-model :model model})))
     (doseq [[k ok?] option-checks
             :when (not (ok? (get opts k)))]
-      (throw (ex-info (str "llama/engine: bad " k ": " (pr-str (get opts k))) {:reason :invalid-option k (get opts k)})))
+      (throw (if (= k :model)
+               (ex-info (str "llama/engine: no model file at " (pr-str model)) {:reason :no-model :model model})
+               (ex-info (str "llama/engine: bad " k ": " (pr-str (get opts k))) {:reason :invalid-option k (get opts k)}))))
     (when-not (< (long max-branches) max-seq)
       (throw (ex-info (str "llama/engine: :max-branches is 1 to " (dec max-seq) " (llama.cpp's " max-seq
                            " sequences, one kept for scoring), not " max-branches)
@@ -474,7 +478,7 @@
   (LlamaRuntime/load)
   (LlamaRuntime/clearLastError)
   (let [{:keys [model gpu-layers n-slots] :as opts} (check-options opts)
-        _ (split-recurrent? nil)
+        split (split-recurrent)
         arena (Arena/ofConfined)
         undo (volatile! (list #(.close arena)))
         owned (fn [free x] (vswap! undo conj #(free x)) x)]
@@ -490,7 +494,7 @@
             vocab (Llama/llama_model_get_vocab m)
             fp (footprint m log)
             described (describe m ctx vocab opts fp)
-            splits (when (and (split-recurrent? fp) (some (:model described) [:recurrent? :hybrid?]))
+            splits (when (and (if (nil? split) (metal? fp) split) (some (:model described) [:recurrent? :hybrid?]))
                      (volatile! {:cells (recurrent/empty-cells n-slots) :off nil :steps 0 :split 0 :decodes 0}))
             info (assoc described :split-recurrent? (some? splits))
             slots (LlamaSlots. m ctx (memory ctx) vocab batch arena pool (:n-vocab info) n-batch info splits)]
@@ -611,7 +615,7 @@
    them (an attention model, or gen.llama.split-recurrent false)."
   [e]
   (on-llama e (fn [^LlamaSlots s]
-                (some-> ^clojure.lang.Volatile (.-splits s) deref (dissoc :cells)))))
+                (some-> (.-splits s) deref (dissoc :cells)))))
 
 (defn kv-positions
   "Diagnostics: [min max] of the positions each slot holds in the KV cache

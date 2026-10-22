@@ -14,6 +14,7 @@
            [java.util.concurrent ExecutionException ExecutorService Executors Future]))
 
 (set! *warn-on-reflection* true)
+(set! *unchecked-math* :warn-on-boxed)
 
 (defn pool
   "A fixed pool of n daemon platform threads, named name-0, name-1, …;

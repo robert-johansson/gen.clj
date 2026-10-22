@@ -18,15 +18,15 @@
    the potential, π(x) ∝ p(x) exp(w(x)) (w the potential's weight of x as a
    whole sequence), unless Π_i Z_i is the same for every x: renormalizing
    token by token favors sequences whose early tokens leave little of the
-   LM's mass disallowed. A constrained
-   completion's GFI weights are q's: its score is log q(x), assess and
-   generate weigh by q, and its laws hold for q. For π, the completion is a
-   proposal: conditional-weight is log p(x) + w(x) - log q(x), with p the
-   unconstrained completion's density (the LM's ledger, as its score), so
-   its mean over q is Z = Σ p(x) exp(w(x)), and for a constraint the
-   probability that the LM's completion satisfies it; self-normalized,
-   these weights give expectations under π (importance sampling, or token
-   SMC's :masked proposal, gen.llm.smc, whose steps weigh the same).
+   LM's mass disallowed. A constrained completion's GFI weights are q's: its
+   score is log q(x), assess and generate weigh by q, and its laws hold for
+   q. For π, the completion is a proposal: conditional-weight is log p(x) +
+   w(x) - log q(x), with p the unconstrained completion's density (the LM's
+   ledger, as its score), so its mean over q is Z = Σ p(x) exp(w(x)), and
+   for a constraint the probability that the LM's completion satisfies it;
+   self-normalized, these weights give expectations under π (importance
+   sampling, or token SMC's :masked proposal, gen.llm.smc, whose steps
+   weigh the same).
 
    A token's end is the potential's end: an end token of the completion takes
    the end's weight (the last of logw-next's n-vocab + 1 entries), the

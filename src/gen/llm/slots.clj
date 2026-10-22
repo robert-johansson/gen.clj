@@ -36,11 +36,12 @@
   (:require [gen.llm.branching :as br])
   (:import [gen.llm.branching Branch]
            [java.lang.ref Cleaner Cleaner$Cleanable PhantomReference ReferenceQueue]
-           [java.util.concurrent Callable CompletableFuture CompletionException ExecutorService Executors
+           [java.util.concurrent CompletableFuture CompletionException ExecutorService Executors
             RejectedExecutionException]
            [java.util.function Supplier]))
 
 (set! *warn-on-reflection* true)
+(set! *unchecked-math* :warn-on-boxed)
 
 (defprotocol Slots
   "A slot-based engine's operations, called only on its thread, with
@@ -164,24 +165,24 @@
                :closed? (boolean (:closed? st))))))
 
 (defn- impl [^SlotEngine e] (.-impl e))
-(defn- state [^SlotEngine e] (.-state e))
+(defn- books-of "The volatile of e's books." [^SlotEngine e] (.-state e))
 (defn- scratch-slot ^long [^SlotEngine e] (:scratch-slot (.-info e)))
 
 (defn- check-open [e what]
-  (when (:closed? @(state e)) (throw (closed-error what))))
+  (when (:closed? @(books-of e)) (throw (closed-error what))))
 
 (defn- free-slot!
   [e slot]
   (slots-clear (impl e) slot)
-  (vswap! (state e) update :free conj slot))
+  (vswap! (books-of e) update :free conj slot))
 
 (defn- forget!
   "Branch id leaves the books, its phantom cleared (collecting the branch
    then frees nothing): its slot, neither freed nor taken."
   [e id]
-  (let [{:keys [slot ^PhantomReference ref]} (get (:live @(state e)) id)]
+  (let [{:keys [slot ^PhantomReference ref]} (get (:live @(books-of e)) id)]
     (.clear ref)
-    (vswap! (state e) without-branch id)
+    (vswap! (books-of e) without-branch id)
     slot))
 
 (defn- consume!
@@ -193,7 +194,7 @@
   "A phantom came off the queue: free its branch's slot if the branch was
    dropped live (not consumed). True if it freed one."
   [e ref]
-  (if-let [id (get (:refs @(state e)) ref)]
+  (if-let [id (get (:refs @(books-of e)) ref)]
     (do (free-slot! e (forget! e id)) true)
     false))
 
@@ -209,7 +210,7 @@
   "Run the GC and free the slots of the unreachable branches it finds: how
    many. Counted in (info engine) as :collections."
   ^long [^SlotEngine e]
-  (vswap! (state e) update :collections inc)
+  (vswap! (books-of e) update :collections inc)
   (System/gc)
   ;; the reference handler enqueues what the GC found after the GC returns
   (loop [wait 100 freed 0]
@@ -240,9 +241,9 @@
 (defn- ensure-free!
   "At least n free slots, collecting unreachable branches if need be."
   [^SlotEngine e ^long n what]
-  (when (< (count (:free @(state e))) n)
+  (when (< (count (:free @(books-of e))) n)
     (collect! e)
-    (let [{:keys [free live]} @(state e)
+    (let [{:keys [free live]} @(books-of e)
           max-branches (:max-branches (.-info e))]
       (when (< (count free) n)
         (throw (ex-info (str what ": " n " more branches would exceed the engine's " max-branches
@@ -253,16 +254,16 @@
 (defn- take-slots!
   "n free slots, taken (the caller has ensured them)."
   [e n]
-  (let [ss (vec (take n (:free @(state e))))]
-    (vswap! (state e) update :free #(reduce disj % ss))
+  (let [ss (vec (take n (:free @(books-of e))))]
+    (vswap! (books-of e) update :free #(reduce disj % ss))
     ss))
 
 (defn- make-branch!
   "A new live branch owning slot."
   [^SlotEngine e tokens logprobs slot]
-  (let [id (:next-id @(state e))
+  (let [id (:next-id @(books-of e))
         b (br/->Branch e id tokens logprobs)]
-    (vswap! (state e) with-branch id slot (PhantomReference. b (.-queue e)))
+    (vswap! (books-of e) with-branch id slot (PhantomReference. b (.-queue e)))
     b))
 
 (defn- live-entry
@@ -270,7 +271,7 @@
   [e ^Branch b what]
   (when-not (identical? e (.-engine b))
     (throw (ex-info (str what ": the branch belongs to another engine") {:reason :engines-differ})))
-  (or (get (:live @(state e)) (.-id b))
+  (or (get (:live @(books-of e)) (.-id b))
       (throw (ex-info (str what ": " b " is not live: advance, extend or resample consumed it (use the branch"
                            " it returned), or it was disposed")
                       {:reason :not-live :branch b}))))
@@ -289,7 +290,7 @@
    the live branches that held them."
   [e ex]
   (doseq [slot (:lost-slots (ex-data ex))]
-    (when-let [id (slot-holder @(state e) slot)]
+    (when-let [id (slot-holder @(books-of e) slot)]
       (forget! e id))
     (free-slot! e slot)))
 
@@ -477,4 +478,4 @@
   "Diagnostics: the slot holding branch b's state, or nil when b is not
    live."
   [^SlotEngine e ^Branch b]
-  (run-on (.-exec e) (.-thread e) #(:slot (get (:live @(state e)) (.-id b))) "slot-of"))
+  (run-on (.-exec e) (.-thread e) #(:slot (get (:live @(books-of e)) (.-id b))) "slot-of"))

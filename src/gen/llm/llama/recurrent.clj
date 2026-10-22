@@ -15,9 +15,10 @@
    others. On Qwen3.5-0.8B (Metal, Mac mini M4) a state is 19 MB, and each
    one in the span costs 3.5 ms, against 2.1 ms for each sequence read and
    about 10 ms for the decode itself (docs/research/llm-branching.md,
-   Recurrent states and split steps). An engine whose live branches are all in its steps keeps them
-   on adjacent cells; one that holds others between them, as the LM
-   protocol's cache does, pays for every one in each step's span.
+   Recurrent states and split steps). An engine whose live branches are
+   all in its steps keeps them on adjacent cells; one that holds others
+   between them, as the LM protocol's cache does, pays for every one in
+   each step's span.
 
    Where a state lives changes no result, only the cost: a replay that
    drifts from llama.cpp costs time, never correctness.
@@ -34,6 +35,7 @@
    each of its sequences took, before the gather moved them).")
 
 (set! *warn-on-reflection* true)
+(set! *unchecked-math* :warn-on-boxed)
 
 (def ^:private no-cell {:pos -1 :tail -1 :seq #{}})
 
@@ -130,7 +132,7 @@
                                                         (update-in [:cells cell :seq] disj q)
                                                         (update-in [:cells free :seq] conj q)))]
                                            [(assoc-in st [:cells q :tail] free)
-                                            (if (< (inc s) n) (next-empty st (inc free)) free)]))
+                                            (if (< (inc s) n) (next-empty st (inc (long free))) free)]))
                              t (long (get-in st [:cells q :tail]))]
                          (recur st (inc s) free (min lo t) (max hi t)))))
         taken (mapv #(get-in st [:cells % :tail]) seqs)
@@ -180,7 +182,7 @@
         cuts (reduce (fn [[best from] j]
                        (let [[b i] (reduce (fn [[b _ :as m] i]
                                              (let [c (+ (double (best i)) fixed
-                                                        (inc (- (long (cs (dec j))) (long (cs i)))))]
+                                                        (inc (- (long (cs (dec (long j)))) (long (cs i)))))]
                                                (if (< c (double b)) [c i] m)))
                                            [Double/POSITIVE_INFINITY 0] (range j))]
                          [(conj best b) (conj from i)]))
@@ -223,12 +225,12 @@
             (reduce (fn [[groups pool ok?] p]
                       (let [k (count (filter found (rs (order p))))
                             [go stay] (split-at k (sort-by due pool))
-                            keepers (filter #(and (stays? %) (== p (long (at (run-of (taken %)))))) (range n))]
+                            keepers (filter #(and (stays? %) (== (long p) (long (at (run-of (taken %)))))) (range n))]
                         [(conj groups (vec (concat go keepers)))
                          stay
-                         (and ok? (== k (count go)) (every? #(>= (long (due %)) p) go) (every? #(> (long (due %)) p) stay))]))
+                         (and ok? (== k (count go)) (every? #(>= (long (due %)) (long p)) go) (every? #(> (long (due %)) (long p)) stay))]))
                     [[] leavers true] (range (count order)))]
-        (if (and ok? (empty? left) (< (double (cost st seqs positions groups fixed))
-                                      (double (cost st seqs positions whole fixed))))
+        ;; whole costs fixed and full's extra states, decoded already
+        (if (and ok? (empty? left) (< (double (cost st seqs positions groups fixed)) (+ fixed (extra full))))
           groups
           whole)))))

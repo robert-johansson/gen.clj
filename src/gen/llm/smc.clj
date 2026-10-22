@@ -54,7 +54,7 @@
    number of particles, a step is one advance. Particles hold tokens; the
    LM's trie owns every branch, and resampling copies token vectors.
    Draws are on the host: particle i's token at step t from (fold-in
-   (fold-in key t) i), by token/dist. The particles' proposal rows (:lm's,
+   (fold-in (fold-in key t) 0) i), by token/dist. The particles' proposal rows (:lm's,
    :masked's) and draws, pure functions of their rows, twists and keys,
    run on a host pool, collected in order, so every result is the calling
    thread's alone, bit for bit, whatever the pool's size; the LM's and the
@@ -63,13 +63,12 @@
    for the calling thread alone, or by default a shared pool of daemon
    threads, of gen.llm.host's default size (the system property
    gen.llm.host-threads, or half the available processors up to 4; 1
-   turns it off). Do not run
-   SMC inside a task of the pool it is given: a step waits for its tasks,
-   queued behind the one that waits, so the pool can deadlock.
-   Resampling (maybe-resample, or run's) is when the effective sample
-   size falls below :ess-threshold (n/2 by
-   default), by :method (:systematic by default; any of
-   gen.inference.weights'), and moves the weights' mean into :log-ml."
+   turns it off). Do not run SMC inside a task of the pool it is given: a
+   step waits for its tasks, queued behind the one that waits, so the pool
+   can deadlock. Resampling (maybe-resample, or run's) is when the
+   effective sample size falls below :ess-threshold (n/2 by default), by
+   :method (:systematic by default; any of gen.inference.weights'), and
+   moves the weights' mean into :log-ml."
   (:require [gen.dist.core :as dc]
             [gen.gfi :as gfi]
             [gen.llm.constrained :as constrained]
@@ -85,8 +84,8 @@
 (set! *unchecked-math* :warn-on-boxed)
 
 ;; A state: {:completion :args [prompt max-tokens] :potential :proposal
-;; :key :host-pool (an ExecutorService or false) :t (steps so far) :particles [{:tokens :done? :log-p}] :log-weights
-;; :log-ml :resampled?}. :log-p is a particle's log p(tokens), its trace's
+;; :key :host-pool (an ExecutorService or false) :t (steps so far)
+;; :particles [{:tokens :done? :log-p}] :log-weights :log-ml :resampled?}. :log-p is a particle's log p(tokens), its trace's
 ;; score; a particle whose weight fell to 0 stops, :dead?. Step t draws
 ;; with (fold-in (fold-in key t) 0) and resamples with (fold-in (fold-in
 ;; key t) 1).
@@ -217,10 +216,10 @@
                  f-row)]
     [q (long (dc/sample (token/dist q) key))]))
 
-(defn- weighed
-  "particle (live, at context) with token t, drawn from proposal row q, and
-   its log weight's increment: [the particle, the increment]; a particle of
-   weight 0 if the potential allows no token (nil for [q t])."
+(defn- moved
+  "particle (live, at context) moved by token t, drawn from proposal row q,
+   and its log weight's increment: [the particle, the increment]; a
+   particle of weight 0 if the potential allows no token (nil for [q t])."
   [state particle context ws [q t]]
   (if (nil? q)
     [(assoc particle :done? true :dead? true) Double/NEGATIVE_INFINITY]
@@ -254,7 +253,7 @@
   ([state {:keys [key]}]
    (let [{:keys [completion potential proposal particles t]} state
          [prompt] (:args state)
-         live (filterv #(not (:done? (particles %))) (range (count particles)))
+         live (into [] (remove #(:done? (particles %))) (range (count particles)))
          contexts (mapv #(into prompt (:tokens (particles %))) live)
          rows (when (seq live) (lm/batch-next-logprobs (:lm completion) contexts))
          twists (mapv #(when potential (twist-row state (:tokens (particles %)))) live)
@@ -263,12 +262,12 @@
          drawn (host/in-order (:host-pool state)
                          (fn [[i row ws f-row]] (proposed state row ws f-row (rng/fold-in draws i)))
                          (map vector live rows twists f-rows))
-         moved (mapv #(weighed state (particles %1) %2 %3 %4) live contexts twists drawn)]
+         moves (mapv #(moved state (particles %1) %2 %3 %4) live contexts twists drawn)]
      (assoc (reduce (fn [s [i [p dw]]]
                       (-> s
                           (assoc-in [:particles i] p)
                           (update-in [:log-weights i] #(+ (double %) (double dw)))))
-                    state (map vector live moved))
+                    state (map vector live moves))
             :t (inc (long t))
             :resampled? false))))
 
