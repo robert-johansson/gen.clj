@@ -132,9 +132,9 @@
 
 (defn- label-axes
   "The axes of one label in y, the body f's value at the support value x of
-   the draw d, whose values have shape b: all of y's for a draw of one
-   scalar value, else those beyond the draw's batch, which f keeps (an
-   elementwise body's or a gather's alike)."
+   a draw whose values have shape b: all of y's for a draw of one scalar
+   value, else those beyond the draw's batch, which f keeps (an elementwise
+   body's or a gather's alike)."
   [b f x y]
   (if (empty? b)
     (array/ndim y)
@@ -171,7 +171,7 @@
 
 (defn ^:no-doc on-lattice?
   "Is y, the body's value at the integer x nearest the inverse of v, v
-   itself: within a few ulps of v's dtype (rounding in the body), and within
+   itself: within a few ulps of y's dtype (rounding in the body), and within
    a quarter of the lattice's spacing there, y-next being the value at x + 1,
    so no value between two images takes either's mass."
   [y y-next v]
