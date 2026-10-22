@@ -750,6 +750,26 @@
                     {:shape s :dim dim :components n})
           (array/take p (if (= 1 (nth s axis)) 0 k) axis)))))
 
+(defn- leading-axes
+  "The batch axes of a homogeneous mixture's parameter p, of rank dim in one
+   component: those before its component axis (none without one)."
+  [p dim]
+  (let [s (array/shape p)
+        axis (- (count s) dim 1)]
+    (if (pos? axis) (subvec s 0 axis) [])))
+
+(defn- mixture
+  "The ::mixture of components by weights w, more keys in its params. Its
+   components are all discrete or all continuous: a pmf and a pdf would add,
+   though they are densities with respect to different measures (Gen.jl's
+   types forbid the mixture too)."
+  [family-name w components more]
+  (let [discrete (mapv dc/discrete? components)]
+    (dc/check (apply = discrete) family-name
+              "cannot mix a discrete and a continuous family: the pmf and the pdf would add"
+              {:discrete discrete})
+    (dc/->Distribution ::mixture (merge {:weights w :components components} more))))
+
 (defn homogeneous-mixture
   "A family of mixtures of one distribution family (Gen.jl's
    HomogeneousMixture): ((homogeneous-mixture normal) weights mus stds)
@@ -758,7 +778,12 @@
    indexes the components, so ((homogeneous-mixture mvnormal [1 2]) weights
    mus covs) takes mus of shape [K d] and covs of shape [K d d]. A parameter
    without that axis is every component's. Weights are the components'
-   probabilities."
+   probabilities.
+
+   A component's value is whole: ((homogeneous-mixture normal [1 1]) w mus
+   stds) with mus of shape [K d] mixes vectors, its log density summed over
+   their d axis, as mvnormal's is. The axes before a parameter's component
+   axis, and the weights' before theirs, are a batch of mixtures."
   ([family] (homogeneous-mixture family nil))
   ([family dims]
    (fn [weights & params]
@@ -771,15 +796,24 @@
        ;; the mixture of its K components, as Gen.jl's logpdf loops over
        ;; them (all at once, the value would need the component axis before
        ;; its own axes, whose number a family does not declare)
-       (dc/->Distribution ::mixture
-                          {:weights w
-                           :components (mapv (fn [k] (apply family (map #(component %1 %2 k n) params dims))) (range n))})))))
+       (let [components (mapv (fn [k] (apply family (map #(component %1 %2 k n) params dims))) (range n))
+             batch (reduce sh/broadcast [] (map leading-axes params dims))]
+         ;; a value's axes: a component's value shape beyond the batch (dims
+         ;; for a family that declares no value shape)
+         (mixture "homogeneous-mixture" w components
+                  {:batch batch
+                   :value-axes (if-let [s (dc/value-shape (first components))]
+                                 (- (count s) (count batch))
+                                 (reduce max 0 dims))}))))))
 
 (defn heterogeneous-mixture
   "A family of mixtures of different distribution families (Gen.jl's
    HeterogeneousMixture): ((heterogeneous-mixture [normal uniform]) weights
    [mu std] [low high]) mixes (normal mu std) and (uniform low high).
-   Components must have values of one shape."
+   Components must have values of one shape, and be all discrete or all
+   continuous. Their log densities mix per element: array parameters of an
+   elementwise family are a batch of mixtures (a vector-valued component is
+   a family of vector values, mvnormal)."
   [families]
   (let [families (vec families)]
     (fn [weights & component-params]
@@ -787,17 +821,20 @@
         (dc/check (= (count families) (count component-params) (peek (array/shape w)))
                   "heterogeneous-mixture" "needs one weight and one parameter vector per component"
                   {:families (count families) :params (count component-params)})
-        (dc/->Distribution ::mixture {:weights w :components (mapv #(apply %1 %2) families component-params)})))))
+        (mixture "heterogeneous-mixture" w (mapv #(apply %1 %2) families component-params) nil)))))
 
-(defmethod dc/-sample ::mixture [{{:keys [weights components]} :params} key shape]
+(defmethod dc/-sample ::mixture [{{:keys [weights components value-axes]} :params} key shape]
   (let [[k-pick k-draw] (rng/split key)
         ;; the weights' batch axes are independent draws too
         shape (sh/broadcast shape (pop (array/shape weights)))
         draws (mapv #(dc/sample %1 %2 shape) components (rng/split k-draw (count components)))
         dtype (reduce dt/promote (map array/dtype draws))
-        ;; one pick per element of the log density, whose axes lead a draw's;
-        ;; the rest are the draw's own (a vector's, for mvnormal)
-        elements (array/shape (dc/log-prob (first components) (first draws)))
+        ;; one pick per value: a homogeneous mixture's values are a draw's
+        ;; last value-axes, others' one per element of the log density, whose
+        ;; axes lead a draw's (the rest are the draw's own: mvnormal's vector)
+        elements (if value-axes
+                   (vec (drop-last value-axes (array/shape (first draws))))
+                   (array/shape (dc/log-prob (first components) (first draws))))
         k (rng/categorical k-pick (log weights) elements (opts weights))
         own (- (array/ndim (first draws)) (count elements))]
     ;; draw every component, keep the picked one (branch-free, so it batches);
@@ -805,9 +842,20 @@
     (array/pick (array/stack (mapv #(array/astype % dtype) draws) -1)
                 (array/reshape k (into (array/shape k) (repeat own 1))))))
 
-(defmethod dc/-log-prob ::mixture [{{:keys [weights components]} :params} v]
-  ;; each component's log density of the whole value, mixed per element
-  (log-mixture weights (array/stack (mapv #(dc/log-prob % v) components) -1)))
+(defn- whole-values
+  "A homogeneous mixture's component log density lp of v, summed over the
+   axes of one value that it keeps: an elementwise family's (normal's, of a
+   vector component) beyond the value's batch, the broadcast of v's axes
+   before its value-axes and the parameters' batch; none of a family that
+   scores whole values (mvnormal)."
+  [lp v value-axes batch]
+  (let [own (- (array/ndim lp) (count (sh/broadcast (vec (drop-last value-axes (array/shape v))) batch)))]
+    (if (pos? own) (array/sum lp {:axis (vec (range (- own) 0))}) lp)))
+
+(defmethod dc/-log-prob ::mixture [{{:keys [weights components value-axes batch]} :params} v]
+  ;; each component's log density of the whole value, mixed per batch element
+  (log-mixture weights (array/stack (mapv #(cond-> (dc/log-prob % v) value-axes (whole-values v value-axes batch)) components)
+                                    -1)))
 
 (defn product
   "A family of products of independent distributions (Gen.jl's

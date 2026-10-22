@@ -10,6 +10,7 @@
             [gen.diff :as diff]
             [gen.dist :as d]
             [gen.dist.core :as dc]
+            [gen.dist.dsl :as dsl]
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
             [gen.laws :as laws]
@@ -241,6 +242,53 @@
         (is (ts/close? ((array/grad #(dc/log-prob (mvnormal-mixture w % covs) (array/array x))) (array/array mus))
                        (array/array dmus)))))))
 
+(dsl/dist half-count
+  "Half a poisson count: discrete, of float values."
+  [lam]
+  (array// (d/poisson lam) 2.0))
+
+(def ^:private vector-normals
+  "Gen.jl's HomogeneousMixture(broadcasted_normal, [1, 1]): components of
+   vector values, means of shape [K d]."
+  (d/homogeneous-mixture d/normal [1 1]))
+
+(deftest homogeneous-mixtures-mix-whole-values
+  ;; genclj-e6b0 (the post-M5 review's P2-06): vector-valued components were
+  ;; mixed coordinate by coordinate, and dims made no difference: -3.22 for
+  ;; (0, 10) between clusters at (0, 0) and (10, 10), where -51.84 is right.
+  ;; Planted back (no whole-values), the values fail; summing the batch too
+  ;; (value-axes as the whole value shape, the review's first direction, or
+  ;; over v's batch axes) fails the batches.
+  (let [lp-normal (fn [x mu] (reduce + (map #(- (* -0.5 (Math/pow (- %1 %2) 2)) 0.9189385332046728) x mu)))
+        mix (fn [w lps] (Math/log (reduce + (map #(* %1 (Math/exp %2)) w lps))))
+        mus [[0.0 0.0] [10.0 10.0]]
+        m (vector-normals [0.5 0.5] mus 1.0)]
+    (testing "a whole vector, as mvnormal components score it"
+      (is (close? (dc/log-prob m (array/array [0.0 10.0])) (mix [0.5 0.5] (map #(lp-normal [0.0 10.0] %) mus)) (ts/tol 1e-12)))
+      (is (ts/close? (dc/log-prob m (array/array [0.0 10.0]))
+                     (dc/log-prob (mvnormal-mixture [0.5 0.5] mus [[[1.0 0.0] [0.0 1.0]] [[1.0 0.0] [0.0 1.0]]]) (array/array [0.0 10.0])))))
+    (testing "a batch of values"
+      (let [xs [[0.0 10.0] [1.0 1.0] [9.0 11.0]]]
+        (is (ts/close? (dc/log-prob m (array/array xs)) (array/array (mapv (fn [x] (mix [0.5 0.5] (map #(lp-normal x %) mus))) xs))))))
+    (testing "a batch of mixtures: weights [B K] and means [B K d]"
+      (let [w [[0.3 0.7] [0.9 0.1]]
+            ms [[[0.0 0.0] [1.0 2.0]] [[3.0 3.0] [0.0 -1.0]]]
+            x [0.5 1.5]]
+        (is (ts/close? (dc/log-prob (vector-normals w ms 1.0) (array/array x))
+                       (array/array (mapv (fn [wb mb] (mix wb (map #(lp-normal x %) mb))) w ms))))))
+    (testing "a batch of scalar mixtures: weights [B K] and means [B K], dims [0 0] (the verifier's)"
+      (let [w [[0.3 0.7] [0.5 0.5]] ms [[0.0 1.0] [2.0 3.0]]]
+        (is (ts/close? (dc/log-prob ((d/homogeneous-mixture d/normal [0 0]) w ms 1.0) (array/array [0.5 0.5]))
+                       (array/array (mapv (fn [wb mb] (mix wb (map #(lp-normal [0.5] [%]) mb))) w ms))))))))
+
+(deftest mixtures-of-discrete-and-continuous-families-are-errors
+  ;; genclj-e6b0 (P2-02): the density added a pmf to a pdf, so given y = 0
+  ;; P(w = 0.8 | y = 0) came out 0.267 where 0.80 is exact (planted: no
+  ;; check, and both mixtures are made)
+  (doseq [[label make] {"poisson and normal" #((d/heterogeneous-mixture [d/poisson d/normal]) [0.5 0.5] [3.0] [0.0 1.0])
+                        "spike and slab" #((d/heterogeneous-mixture [d/uniform-discrete d/normal]) [0.3 0.7] [0 0] [0.0 1.0])}]
+    (is (= {:distribution "heterogeneous-mixture" :discrete [true false]} (ts/thrown-data (make))) label)))
+
 (deftest mixture-draws-pick-one-component-per-element
   ;; one pick per element of the log density: a vector value is one
   ;; component's whole draw (the pick met the vector's own axis: a shape
@@ -250,11 +298,18 @@
   (let [n 4000
         band (fn [p] (* 5 (Math/sqrt (/ (* p (- 1 p)) n))))
         frac (fn [pred xs] (/ (count (filter pred xs)) (double n)))]
-    (testing "vector values"
-      (let [far (mvnormal-mixture [0.3 0.7] [[0.0 0.0] [100.0 -100.0]] [[[1.0 0.0] [0.0 1.0]] [[1.0 0.0] [0.0 1.0]]])
-            xs (ts/host (dc/sample far (rng/key 21) [n]))]
-        (is (every? (fn [[a b]] (= (> a 50) (< b -50))) xs) "both coordinates from one component")
-        (is (close? (frac (fn [[a _]] (> a 50)) xs) 0.7 (band 0.7)))))
+    ;; [batch shape]: mvnormal's batch axes lead its values; an elementwise
+    ;; family's batch shape broadcasts with its values, as normal's own does
+    (doseq [[label far batch] [["vector values" (mvnormal-mixture [0.3 0.7] [[0.0 0.0] [100.0 -100.0]]
+                                                                  [[[1.0 0.0] [0.0 1.0]] [[1.0 0.0] [0.0 1.0]]])
+                                [n]]
+                               ;; genclj-e6b0: one pick per coordinate (planted: the old pick)
+                               ["vector values of an elementwise family"
+                                (vector-normals [0.3 0.7] [[0.0 0.0] [100.0 -100.0]] 1.0) [n 1]]]]
+      (testing label
+        (let [xs (ts/host (dc/sample far (rng/key 21) batch))]
+          (is (every? (fn [[a b]] (= (> a 50) (< b -50))) xs) "both coordinates from one component")
+          (is (close? (frac (fn [[a _]] (> a 50)) xs) 0.7 (band 0.7))))))
     (testing "a batched parameter: eight mixtures, which all agree with probability 2⁻⁷"
       (let [m (normal-mixture [0.5 0.5] (array/stack [(array/zeros [8]) (array/full [8] 100.0)] -1) [0.1 0.1])
             xs (ts/host (dc/sample m (rng/key 22) [n 1]))]
@@ -299,8 +354,10 @@
                   (+ (* 3 (array/item (dc/log-prob (d/normal 0 1) 0.0))) (Math/log 0.3)) (ts/tol 1e-12)))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"one element per factor" (dc/log-prob p [(array/zeros [3])])))))
   (testing "heterogeneous mixtures keep each component's values (review 14)"
-    (let [x (dc/sample ((d/heterogeneous-mixture [d/poisson d/normal]) [0.01 0.99] [3.0] [0.5 1.0]) (rng/key 1) [200])]
-      (is (some #(not= % (Math/floor %)) (array/->clj x)) "normal draws are not truncated to integers")))
+    ;; two discrete families, of integer and of float values (a mixture of
+    ;; poisson and normal is an error since genclj-e6b0)
+    (let [x (dc/sample ((d/heterogeneous-mixture [d/poisson half-count]) [0.5 0.5] [3.0] [3.0]) (rng/key 1) [200])]
+      (is (some #(not= % (Math/floor %)) (array/->clj x)) "half counts are not truncated to integers")))
   (testing "bad parameters are errors, not NaN (review 15)"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"positive definite" (d/mvnormal [0.0 0.0] [[1.0 2.0] [2.0 1.0]])))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"symmetric" (d/mvnormal [0.0 0.0] [[1.0 0.5] [0.3 1.0]])))
