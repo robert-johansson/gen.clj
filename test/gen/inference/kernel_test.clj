@@ -284,6 +284,26 @@
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"changed what it reads"
                             (run-of kernel (:trace (gfi/generate flags [] (cm/choicemap :flag false) (rng/key 29))) 30))))))
 
+(defn- looping
+  "A kernel that steps n times through two closures holding each other (a
+   letfn's), built afresh at each call."
+  [n]
+  (letfn [(down [tr i] (if (pos? i) (up tr (dec i)) {:trace tr}))
+          (up [tr i] (down tr i))]
+    (k/symmetric (fn [tr _key] (down tr n)))))
+
+(deftest closures-that-hold-each-other-compare
+  ;; m3-grammar's cross-review of P3-06's fix: a let's kernel built from a
+  ;; letfn compares co-inductively, and one built from another value
+  ;; differs. Planted bug (2026-10-22): no cycle guard overflows the stack
+  ;; in both cases
+  (let [tr (:trace (gfi/generate flags [] (cm/choicemap :flag false) (rng/key 64)))]
+    (is (= 50 (count (:traces (run-of ((k/kern ^:trace [_tr] (let [step (looping 2)] step))) tr 65)))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"changed what it reads"
+                          (run-of ((k/kern ^:trace [tr] (let [step (looping (if (host-of tr :flag) 1 2))]
+                                                          (k/mh (sel/select :flag)))))
+                                  tr 66)))))
+
 ;; ---------------------------------------------------------------------------
 ;; The thesis's p. 102 kernel
 ;; ---------------------------------------------------------------------------

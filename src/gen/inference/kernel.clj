@@ -155,23 +155,29 @@
    what that holds: an array by its host value, a generative function by
    its kind's rule (gfi/same-gen-fn?), a fn by its class and closed-over
    values, a record by its class and fields. So a kernel built again from
-   the same values is the same kernel."
-  [a b]
-  (let [pairwise (fn [as bs] (some identity (map control-difference as bs)))]
-    (cond (identical? a b) nil
-          (array/array? a) (when-not (and (array/array? b) (= (array/->clj a) (array/->clj b))) [a b])
-          (instance? gen.gfi.IGenerativeFunction a) (when-not (gfi/same-gen-fn? a b) [a b])
-          (fn? a) (if (identical? (class a) (class b))
-                    (let [fields (.get closure-fields (class a))]
-                      (pairwise (map #(.get ^java.lang.reflect.Field % a) fields)
-                                (map #(.get ^java.lang.reflect.Field % b) fields)))
-                    [a b])
-          (record? a) (if (identical? (class a) (class b)) (control-difference (into {} a) (into {} b)) [a b])
-          (map? a) (if (and (map? b) (= (count a) (count b)) (every? #(contains? b %) (keys a)))
-                     (some (fn [[k v]] (control-difference v (get b k))) a)
-                     [a b])
-          (sequential? a) (if (and (sequential? b) (= (count a) (count b))) (pairwise a b) [a b])
-          :else (when-not (= a b) [a b]))))
+   the same values is the same kernel. Closures that hold each other (a
+   letfn's) compare co-inductively: a pair of fns met again on the way
+   down is taken as the same."
+  ([a b] (control-difference a b #{}))
+  ([a b seen]
+   (let [pairwise (fn [as bs seen] (some identity (map #(control-difference %1 %2 seen) as bs)))]
+     (cond (identical? a b) nil
+           (array/array? a) (when-not (and (array/array? b) (= (array/->clj a) (array/->clj b))) [a b])
+           (instance? gen.gfi.IGenerativeFunction a) (when-not (gfi/same-gen-fn? a b) [a b])
+           ;; fns are equal by identity, so the pair is too
+           (fn? a) (cond (contains? seen [a b]) nil
+                         (identical? (class a) (class b))
+                         (let [fields (.get closure-fields (class a))]
+                           (pairwise (map #(.get ^java.lang.reflect.Field % a) fields)
+                                     (map #(.get ^java.lang.reflect.Field % b) fields)
+                                     (conj seen [a b])))
+                         :else [a b])
+           (record? a) (if (identical? (class a) (class b)) (control-difference (into {} a) (into {} b) seen) [a b])
+           (map? a) (if (and (map? b) (= (count a) (count b)) (every? #(contains? b %) (keys a)))
+                      (some (fn [[k v]] (control-difference v (get b k) seen)) a)
+                      [a b])
+           (sequential? a) (if (and (sequential? b) (= (count a) (count b))) (pairwise a b seen) [a b])
+           :else (when-not (= a b) [a b])))))
 
 (defn- noting
   "[the control values (reads note) passed to note, on the host, and what it
