@@ -512,3 +512,64 @@
     (testing "a gradient outside the support is finite"
       (is (finite? [(ts/number ((array/grad #(dc/log-prob (d/weibull % 2.0) -1.0)) 1.5))
                     (ts/number ((array/grad #(dc/log-prob (d/weibull 1.5 %) -1.0)) 2.0))])))))
+
+;; ---------------------------------------------------------------------------
+;; Gradients at zero probabilities and at the parameters' bounds
+;; ---------------------------------------------------------------------------
+
+(defn- with-a-zero
+  "A probability vector with an exact 0 that varies with b: [b, 1 - b, 0·b]."
+  [b]
+  (array/stack [b (- 1.0 b) (array/* 0.0 b)]))
+
+(def ^:private at-the-edges
+  "[label log-density at step]: a log density of one argument, at a point
+   where a probability is 0 or a parameter at its bound, and the side of it
+   the finite difference takes (+1 or -1, the side inside the domain)."
+  (let [mix (d/homogeneous-mixture d/normal)]
+    [["categorical, picking b" #(dc/log-prob (d/categorical (with-a-zero %)) 0) 0.25 1]
+     ["categorical, picking 1 - b" #(dc/log-prob (d/categorical (with-a-zero %)) 1) 0.25 1]
+     ["categorical-logits, a -Inf logit" #(dc/log-prob (d/categorical-logits (array/stack [% 0.0 ##-Inf])) 0) 0.5 1]
+     ["bernoulli true at p = 1" #(dc/log-prob (d/bernoulli %) true) 1.0 -1]
+     ["bernoulli false at p = 0" #(dc/log-prob (d/bernoulli %) false) 0.0 1]
+     ["a mixture with a weight of 0" #(dc/log-prob (mix (with-a-zero %) [0.0 1.0 2.0] 1.0) 0.3) 0.25 1]
+     ["a mixture's weight at 0" #(dc/log-prob (mix (array/stack [% (- 1.0 %)]) [0.0 1.0] 1.0) 0.3) 0.0 1]
+     ["a mixture's weight at 1" #(dc/log-prob (mix (array/stack [% (- 1.0 %)]) [0.0 1.0] 1.0) 0.3) 1.0 -1]
+     ["beta-uniform at theta = 0" #(dc/log-prob (d/beta-uniform % 2.0 3.0) 0.3) 0.0 1]
+     ["beta-uniform at theta = 1" #(dc/log-prob (d/beta-uniform % 2.0 3.0) 0.3) 1.0 -1]
+     ["binom at p = 0" #(dc/log-prob (d/binom 5 %) 0) 0.0 1]
+     ["binom at p = 1" #(dc/log-prob (d/binom 5 %) 5) 1.0 -1]
+     ["neg-binom at p = 1" #(dc/log-prob (d/neg-binom 2.0 %) 0) 1.0 -1]
+     ["geometric at p = 1" #(dc/log-prob (d/geometric %) 0) 1.0 -1]
+     ["poisson at lambda = 0" #(dc/log-prob (d/poisson %) 0) 0.0 1]]))
+
+(deftest gradients-at-zero-probabilities-and-bounds
+  ;; genclj-rnbd (from memo.clj): categorical took the log of every
+  ;; probability before its pick, and log's gradient at a 0 it did not pick,
+  ;; 0/0, made the gradient NaN (4.0 is right at b = 0.25). Bernoulli's where
+  ;; over log p and log1p(-p), a mixture's log of a weight of 0 and
+  ;; beta-uniform's branches had the same trap. Planted back, each gives NaN
+  ;; here: (pick-guarded identity (log probs) v), (where v (log p) (log1p
+  ;; (- p))), log-weight's (log w) for (log (stand-in …)), and xlogy
+  ;; without its stand-in (binom, poisson). Dropping zero-weight-term, in
+  ;; log-mixture or in beta-uniform, fails the derivatives at a weight's
+  ;; bound (-1 for 0.22); pick-guarded without its stand-in, the gradient
+  ;; outside the support.
+  ;; Each gradient against a second-order one-sided finite difference, on
+  ;; the JVM backend in float64 whatever the backend under test.
+  (let [h 1e-5
+        jvm (array/backend-named :jvm)]
+    (doseq [[label lp at step] at-the-edges]
+      (let [f #(array/with-backend jvm (ts/number (lp %)))
+            fd (/ (clojure.core/- (* 4 (f (+ at (* step h)))) (* 3 (f at)) (f (+ at (* 2 step h)))) (* 2 step h))
+            g (ts/number ((array/grad lp) (array/array at)))]
+        (is (ts/close? fd g {:rtol (ts/tol 1e-6) :atol (ts/tol 1e-8)}) (str label ": " g " against " fd)))))
+  (testing "outside the support, where the pick is clipped to a 0, the gradient is 0"
+    (is (= 0.0 (ts/number ((array/grad #(dc/log-prob (d/categorical (with-a-zero %)) 5)) (array/array 0.25))))))
+  (testing "a weight of 0 whose component's density is beyond the float range times the mixture's"
+    ;; the slope e^(lp₀ - L) = e^500000: the value stays exact, and the
+    ;; gradient is the largest float (planted: without the cap, both NaN)
+    (let [lp #(dc/log-prob ((d/homogeneous-mixture d/normal) (array/stack [% (- 1.0 %)]) [0.0 1000.0] 1.0) 0.0)
+          [v g] ((array/value-and-grad lp) (array/array 0.0))]
+      (is (ts/close? v (dc/log-prob (d/normal 1000.0 1.0) 0.0)))
+      (is (= (if (ts/f32?) (double Float/MAX_VALUE) Double/MAX_VALUE) (ts/number g))))))

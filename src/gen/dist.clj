@@ -31,6 +31,44 @@
   [in-support lp]
   (where in-support lp ##-Inf))
 
+(defn- stand-in
+  "v where in-support holds, else s: the other lanes stay finite, so a
+   gradient through the guard is not NaN."
+  [in-support v s]
+  (where in-support v s))
+
+(defn- largest-float
+  "The largest finite float of x's dtype."
+  ^double [x]
+  (if (= :float32 (array/dtype x)) (double Float/MAX_VALUE) Double/MAX_VALUE))
+
+(defn- log-weight
+  "A mixture weight's log, -Inf at 0 through a stand-in: log's gradient
+   there would be 0/0 = NaN, though the mixture sends it nothing."
+  [weighted w]
+  (guard weighted (log (stand-in weighted w 1.0))))
+
+(defn- zero-weight-term
+  "A term of value 0 for a mixture of log density l, carrying the gradient
+   of a weight w of 0 (weighted false), which log-weight does not: w times
+   ∂l/∂w = e^(lp - l) for its component's log density lp, held constant. So
+   a weight that is a function at its bound (beta-uniform's theta at 1) has
+   its one-sided derivative. The slope is at most the largest float: it is
+   infinite where the component's density is beyond the float range times
+   the mixture's."
+  [weighted w lp l]
+  (let [slope (array/minimum (exp (- lp l)) (largest-float l))]
+    (where weighted 0.0 (* w (array/stop-gradient (where (array/isnan slope) 0.0 slope))))))
+
+(defn- log-mixture
+  "log Σₖ wₖ e^lpₖ over the last axis, exact in its gradients also at weights
+   of 0 (zero-weight-term)."
+  [w lps]
+  (let [weighted (> w 0)
+        kd {:axis -1 :keep-dims? true}
+        l (array/logsumexp (+ (log-weight weighted w) lps) kd)]
+    (array/squeeze (+ l (array/sum (zero-weight-term weighted w lps l) kd)) -1)))
+
 (defn- integral? [v] (== v (array/floor v)))
 
 (defn- opts [& params] {:backend (apply dc/backend-of params)})
@@ -147,8 +185,14 @@
              (dc/sample (beta a b) k2 s)
              (rng/uniform k3 s (opts theta a b)))))
   (log-prob [v]
-    (guard (logical-and (>= v 0) (<= v 1))
-           (array/logaddexp (+ (log theta) (dc/log-prob (beta a b) v)) (log1p (- theta))))))
+    ;; beta's density and the uniform's, 1, mixed as log-mixture does
+    (let [lp (dc/log-prob (beta a b) v)
+          w-uniform (- 1 theta)
+          some-beta (> theta 0)
+          some-uniform (> w-uniform 0)
+          l (array/logaddexp (+ (log-weight some-beta theta) lp) (log-weight some-uniform w-uniform))]
+      (guard (logical-and (>= v 0) (<= v 1))
+             (+ l (zero-weight-term some-beta theta lp l) (zero-weight-term some-uniform w-uniform 0.0 l))))))
 
 (defdist piecewise-uniform
   "piecewise_uniform(bounds, probs): bin i, chosen with probability probs[i],
@@ -299,12 +343,6 @@
 ;; ---------------------------------------------------------------------------
 
 (def ^:private log-2 (Math/log 2.0))
-
-(defn- stand-in
-  "v where in-support holds, else s: the other lanes stay finite, so a
-   gradient through the guard is not NaN."
-  [in-support v s]
-  (where in-support v s))
 
 (defn- floored
   "x at least the smallest normal number of its dtype. A gamma draw of a
@@ -486,15 +524,19 @@
               (str "values are booleans (true or false), not " (pr-str (if (array/host? v) v (array/dtype v)))
                    " (GenMLX's bernoulli gave 0/1)")
               {:value-dtype (array/dtype v)})
-    (where v (log p) (log1p (- p))))
+    ;; the branch not taken sees a stand-in, as where's other lanes do: at
+    ;; p = 1 (or 0) its log's gradient would be 0/0 = NaN
+    (where v (log (stand-in v p 1.0)) (log1p (- (stand-in v 0.0 p)))))
   (support [] [false true]))
 
 (defn- pick-guarded
-  "log-probs[..., v] for integer v in [0, K), -Inf for any other v."
-  [log-probs v]
-  (let [k (peek (array/shape log-probs))
+  "(f xs[..., v]) for integer v in [0, K), -Inf for any other v. The pick
+   comes before f, so a gradient reaches only the entry picked: (log probs)
+   would send 0/0 = NaN from every 0 entry not picked."
+  [f xs v]
+  (let [k (peek (array/shape xs))
         ok (logical-and (logical-and (>= v 0) (< v k)) (integral? v))]
-    (guard ok (array/pick log-probs (to-int (array/clip v 0 (dec k)) log-probs)))))
+    (guard ok (f (stand-in ok (array/pick xs (to-int (array/clip v 0 (dec k)) xs)) 1.0)))))
 
 (defdist categorical
   "categorical(probs): index i (0-based) with probability probs[i]; probs must
@@ -502,7 +544,7 @@
   [probs]
   (validate (dc/check-probabilities "categorical" "probs" probs))
   (sample [key shape] (rng/categorical key (log probs) (sh/broadcast shape (pop (array/shape probs))) (opts probs)))
-  (log-prob [v] (pick-guarded (log probs) v))
+  (log-prob [v] (pick-guarded log probs v))
   (support [] (vec (range (peek (array/shape probs))))))
 
 (defdist categorical-logits
@@ -510,7 +552,7 @@
    softmax(logits)[i]. Any finite logits; the form LLM token sites use."
   [logits]
   (sample [key shape] (rng/categorical key logits (sh/broadcast shape (pop (array/shape logits))) (opts logits)))
-  (log-prob [v] (pick-guarded (array/log-softmax logits) v))
+  (log-prob [v] (pick-guarded identity (array/log-softmax logits) v))
   (support [] (vec (range (peek (array/shape logits))))))
 
 (defdist uniform-discrete
@@ -739,7 +781,7 @@
 
 (defmethod dc/-log-prob ::mixture [{{:keys [weights components]} :params} v]
   ;; each component's log density of the whole value, mixed per element
-  (array/logsumexp (+ (log weights) (array/stack (mapv #(dc/log-prob % v) components) -1)) {:axis -1}))
+  (log-mixture weights (array/stack (mapv #(dc/log-prob % v) components) -1)))
 
 (defn product
   "A family of products of independent distributions (Gen.jl's
