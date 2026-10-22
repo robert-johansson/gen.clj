@@ -109,7 +109,16 @@
                           [{:distribution "normal" :param "mu"} #(d/normal [true false] 1.0)]]]
       (is (= expected (ts/thrown-data (f)))))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"n must be an integer" (d/binom ##Inf 0.5)))
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"n must be an integer" (d/binom [3 ##Inf] 0.5)))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"n must be an integer" (d/binom [3 ##Inf] 0.5))))
+  (testing "a scalar where a family's last axis holds its values (rule 6)"
+    ;; (d/categorical 0.5) threw "Axis -1 is out of range for rank 0",
+    ;; naming neither (planted: no check-vector in categorical and in
+    ;; categorical-logits)
+    (doseq [[expected f] [[{:distribution "categorical" :param "probs" :shape []} #(d/categorical 0.5)]
+                          [{:distribution "categorical" :param "probs" :shape []} #(d/categorical (array/array 0.5))]
+                          [{:distribution "categorical-logits" :param "logits" :shape []} #(d/categorical-logits 0.3)]
+                          [{:distribution "dirichlet" :param "alpha" :shape []} #(d/dirichlet 2.0)]]]
+      (is (= expected (ts/thrown-data (f)))))))
 
 (deftest supports
   (is (= [false true] (dc/support (d/bernoulli 0.3))))
