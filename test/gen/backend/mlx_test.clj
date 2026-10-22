@@ -525,13 +525,57 @@
         new-device? #(and (symbol? %) (= "mlx_device_new_type" (name %)))]
     (is (= ['with-temps] (vec (keep #(when (seq (uses % array-list?)) (named %)) forms)))
         "a list of temporaries only in with-temps")
-    (is (= ['with-device 'device-handle] (vec (keep #(when (seq (uses % new-device?)) (named %)) forms)))
-        "devices made only by with-device and device-handle")
-    (is (every? #(seq (uses % (fn [x] (and (symbol? x) (= "mlx_device_free" (name x))))))
-                (filter #(and (not= 'device-handle (named %))
-                              (seq (uses % (fn [x] (and (seq? x) (= 'device-handle (first x)))))))
-                        forms))
-        "who calls device-handle frees what it gets")))
+    ;; with-default-stream took its device by hand too, before its try
+    ;; (cross-review 3): it goes through with-device now
+    (is (= ['with-device] (vec (keep #(when (seq (uses % new-device?)) (named %)) forms)))
+        "devices made only by with-device, which frees them")))
+
+(defn- tail-forms
+  "The forms in tail position of form, the ones it returns: through let,
+   do, if, cond, case, try and fn bodies, and the backend's body macros."
+  [form]
+  (if-not (seq? form)
+    [form]
+    (let [[op & args] form]
+      (case op
+        (let let* loop do when when-not binding fn* with-temps with-operands evaluating with-default-stream)
+        (tail-forms (last form))
+        (if if-not) (mapcat tail-forms (rest args))
+        cond (mapcat tail-forms (take-nth 2 (rest args)))
+        case (let [clauses (rest args)]
+               (mapcat tail-forms (concat (take-nth 2 (rest clauses)) (when (odd? (count clauses)) [(last clauses)]))))
+        try (tail-forms (last (remove #(and (seq? %) (#{'catch 'finally} (first %))) args)))
+        [form]))))
+
+(deftest every-handle-made-in-with-temps-is-registered-wrapped-or-returned
+  ;; cross-review 3 of genclj-f0wz: in a with-temps body each handle an Mlx
+  ;; call makes goes to t as it is made, or to wrap (the Cleaner then owns
+  ;; it), or is the body's result, so a later failure leaks nothing. slogdet
+  ;; held log|det| unregistered while six more handles were made, which at
+  ;; Metal's buffer limit leaked it and the graph back to its matrix; the
+  ;; failure-path test, counting only what t registered, could not see it.
+  ;; Read from the source, so it runs without MLX. Planted (2026-10-22):
+  ;; slogdet's logabs unwrapped again fails
+  (let [forms (source-forms "src/gen/backend/mlx.clj")
+        ;; the calls that make a handle: not a free, an evaluation or a flag
+        handle-call? (fn [x] (and (seq? x) (symbol? (first x)) (= "Mlx" (namespace (first x)))
+                                  (let [n (name (first x))]
+                                    (not (or (.endsWith n "_free") (= "mlx_array_eval" n) (.startsWith n "_mlx_array_is"))))))
+        registers? (fn [t f] (or (= t f) (and (seq? f) (= 'fn* (first f)) (seq? (last f)) (= t (first (last f))))))
+        held-by (fn [t form]
+                  ;; the forms a call hands to t, to wrap, or to a mapv of t: their tails
+                  (when (seq? form)
+                    (cond (#{t 'wrap} (first form)) (tail-forms (last form))
+                          (and (= 'mapv (first form)) (registers? t (second form))) (tail-forms (last form)))))
+        loose (fn [[_ [t] & body]]
+                (let [inside (tree-seq coll? seq body)
+                      ok (java.util.IdentityHashMap.)]
+                  (doseq [f (concat (tail-forms (last body)) (mapcat #(held-by t %) inside))]
+                    (.put ok f true))
+                  (filter #(and (handle-call? %) (not (.containsKey ok %))) inside)))
+        bodies (filter #(and (seq? %) (= 'with-temps (first %))) (tree-seq coll? seq forms))]
+    (is (< 10 (count bodies)) "the with-temps bodies are found")
+    (is (= [] (vec (mapcat loose bodies))))))
 
 (defn- counting-temporaries
   "[registered freed]: the temporaries with-temps registers and frees while
@@ -556,11 +600,14 @@
 (deftest every-temporary-is-freed-when-a-site-fails
   ;; each site of with-temps, run whole and then failing at each of its
   ;; registrations in turn: what was registered before is freed. Planted
-  ;; (2026-10-22): with-temps' finally freeing nothing fails
+  ;; (2026-10-22): with-temps' finally freeing nothing fails. Run it also
+  ;; with -Dgen.mlx.constants=0 (cross-review 3): every host scalar is then
+  ;; a new handle, registered by with-operands, concatenate or konst
   (when-mlx
     (array/with-backend (mlx)
       (let [la-ns (requiring-resolve 'gen.array.linalg/cholesky)
             solve (requiring-resolve 'gen.array.linalg/solve)
+            solve-triangular (requiring-resolve 'gen.array.linalg/solve-triangular)
             slogdet (requiring-resolve 'gen.array.linalg/slogdet)
             uniform (requiring-resolve 'gen.random/uniform)
             key (requiring-resolve 'gen.random/key)
@@ -568,6 +615,8 @@
             divisors (array/array [2 3 0 -1] {:dtype :int32})
             floats (array/array [0.5 ##NaN -2.5 3e10])
             spd (array/array [[4.0 1.0] [1.0 3.0]])
+            ;; a batch of two right-hand sides: batch-broadcast broadcasts the matrix
+            rhs2 (array/array [[[1.0] [2.0]] [[3.0] [4.0]]])
             sites [["to-host, a half float" #(array/->clj (array/astype floats :float16))]
                    ["to-host, a view" #(array/->clj (array/transpose (array/array [[1.0 2.0] [3.0 4.0]])))]
                    ["unary's sign" #(array/sign floats)]
@@ -581,6 +630,9 @@
                    ["the integer matmul" #(array/matmul (array/reshape ints [2 2]) (array/reshape ints [2 2]))]
                    ["cholesky" #(la-ns spd)]
                    ["solve" #(solve spd (array/array [1.0 2.0]))]
+                   ["solve, a batch of right-hand sides" #(solve spd rhs2)]
+                   ["solve-triangular" #(solve-triangular spd (array/array [1.0 2.0]))]
+                   ["solve-triangular, a batch of right-hand sides" #(solve-triangular spd rhs2)]
                    ["slogdet" #(slogdet spd)]
                    ["random-uniform" #(uniform (key 3) [5])]
                    ["concatenate" #(array/concatenate [floats (array/array [1.0])] 0)]]
@@ -596,6 +648,18 @@
             (doseq [k (range 1 (inc n))]
               (let [[before freed] (counting-temporaries f k)]
                 (is (= before freed) (str label ": failing at its temporary " k))))))))))
+
+(deftest a-temporary-of-no-known-kind-fails-where-it-is-registered
+  ;; free-temp's case throws on a kind it does not know, which in
+  ;; with-temps' finally would mask the body's error (cross-review 3), so
+  ;; temp! checks the kind. Planted (2026-10-22): temp! without the check
+  ;; fails
+  (when-mlx
+    (let [temp! @(requiring-resolve 'gen.backend.mlx/temp!)
+          temps (java.util.ArrayList.)]
+      (is (= :closur (:kind (try (temp! temps [:closur 1]) nil (catch clojure.lang.ExceptionInfo e (ex-data e))))))
+      (is (zero? (.size temps)) "and is not registered")
+      (is (== 7 (temp! temps [:vector 7])) "a known kind is"))))
 
 (defn- held-until-the-limit
   "One-element arrays made and held until making another fails: how many,

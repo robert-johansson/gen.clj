@@ -70,7 +70,7 @@
 
 (set! *warn-on-reflection* true)
 
-(declare backend config device-handle)
+(declare backend config)
 
 ;; ---------------------------------------------------------------------------
 ;; Dtypes
@@ -373,9 +373,15 @@
         :vector (MlxRaw/mlx_vector_array_free h)))
     (MlxRaw/mlx_array_free (long x))))
 
+(def ^:private temp-kinds #{:closure :custom-vjp :value-and-grad :vector})
+
 (defn- temp!
-  "Register the temporary x (as free-temp takes it) with temps; its handle."
+  "Register the temporary x (as free-temp takes it) with temps; its handle.
+   A kind free-temp does not know fails here, where it is written, not in
+   with-temps' finally, where it would mask the body's error."
   ^long [^java.util.ArrayList temps x]
+  (when (and (vector? x) (not (temp-kinds (first x))))
+    (throw (ex-info (str "Not a kind of temporary: " (pr-str (first x))) {:kind (first x) :kinds temp-kinds})))
   (.add temps x)
   (long (if (vector? x) (second x) x)))
 
@@ -1118,7 +1124,9 @@
               (let [[lu piv] (mapv t (Mlx/mlx_linalg_lu_factor h cpu))
                     u (diag-of-temp t lu cpu)
                     n (peek sa)
-                    logabs (Mlx/mlx_sum_axis (t (Mlx/mlx_log (t (Mlx/mlx_abs u cpu)) cpu)) (int -1) false cpu)
+                    ;; the results wrapped as they are made: the Cleaner owns
+                    ;; logabs while the handles after it are made
+                    logabs (wrap b (Mlx/mlx_sum_axis (t (Mlx/mlx_log (t (Mlx/mlx_abs u cpu)) cpu)) (int -1) false cpu))
                     idx (t (Mlx/mlx_arange 0.0 (double n) 1.0 (int (code :uint32)) cpu))
                     swaps (t (Mlx/mlx_sum_axis (t (Mlx/mlx_astype (t (Mlx/mlx_not_equal piv idx cpu)) (int (code :int32)) cpu))
                                                (int -1) false cpu))
@@ -1126,8 +1134,8 @@
                     perm (t (Mlx/mlx_subtract (t (scalar-handle 1 d))
                                               (t (Mlx/mlx_multiply (t (scalar-handle 2 d)) (t (Mlx/mlx_astype odd (int (code d)) cpu)) cpu))
                                               cpu))
-                    sign (Mlx/mlx_multiply (t (Mlx/mlx_prod_axis (t (Mlx/mlx_sign u cpu)) (int -1) false cpu)) perm cpu)]
-                [(wrap b sign) (wrap b logabs)]))))))))
+                    sign (wrap b (Mlx/mlx_multiply (t (Mlx/mlx_prod_axis (t (Mlx/mlx_sign u cpu)) (int -1) false cpu)) perm cpu))]
+                [sign logabs]))))))))
 
 ;; MLX has no VJP for its Cholesky, LU or inverse (GenMLX's fork patched
 ;; some), so in native mode each linear-algebra op is one mlx_custom_vjp
@@ -1307,19 +1315,21 @@
    evaluation lock (reentrant: f may read values)."
   [b f]
   (evaluating
-    (let [dev (device-handle (:device (config b)))
-          prev-dev (Mlx/mlx_get_default_device)
-          prev-stream (Mlx/mlx_get_default_stream dev)]
-      (try
-        (Mlx/mlx_set_default_device dev)
-        (Mlx/mlx_set_default_stream (stream b))
-        (f)
-        (finally
-          (Mlx/mlx_set_default_stream prev-stream)
-          (Mlx/mlx_set_default_device prev-dev)
-          (Mlx/mlx_stream_free prev-stream)
-          (Mlx/mlx_device_free prev-dev)
-          (Mlx/mlx_device_free dev))))))
+    (with-device (:device (config b))
+      (fn [dev]
+        (let [dev (long dev)
+              prev-dev (Mlx/mlx_get_default_device)]
+          (try
+            (let [prev-stream (Mlx/mlx_get_default_stream dev)]
+              (try
+                (Mlx/mlx_set_default_device dev)
+                (Mlx/mlx_set_default_stream (stream b))
+                (f)
+                (finally
+                  (Mlx/mlx_set_default_stream prev-stream)
+                  (Mlx/mlx_set_default_device prev-dev)
+                  (Mlx/mlx_stream_free prev-stream))))
+            (finally (Mlx/mlx_device_free prev-dev))))))))
 
 (defn- native-value-and-grad
   "[value grads] of f on args with respect to the positions argnums, by
@@ -1524,9 +1534,6 @@
         ((requiring-resolve 'gen.array.tape/value-and-grad) b f args argnums)))))
 
 (defn- config ^Config [b] (.-config ^MlxBackend b))
-
-(defn- device-handle ^long [device]
-  (Mlx/mlx_device_new_type (int (case device :cpu 0 :gpu 1)) (int 0)))
 
 (defn gpu?
   "Does MLX have a GPU here (Metal, or CUDA on Linux)?"
