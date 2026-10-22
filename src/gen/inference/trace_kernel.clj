@@ -29,13 +29,20 @@
 
    Weights include log |det J|, by automatic differentiation: the inputs are
    the kernel's continuous choices and the trace's continuous choices that
-   an output depends on, the outputs every continuous value of update and
-   backward, and a continuous choice of the trace that the update keeps
-   and no output rewrites, but that an output depends on, is an unchanged
-   output. GenTraceKernelDSL also drops outputs that depend on no input and
-   kernel choices no output depends on, which hides moves that are not
-   bijections (a constant output, randomness thrown away); here they make
-   the matrix non-square or singular, a loud error."
+   the update rewrites or discards (less observations SMCP3's
+   :new-observations replace) or that an output depends on, the outputs
+   every continuous value of update and backward, and a continuous choice
+   of the trace that the update keeps and no output rewrites, but that an
+   output depends on, is an unchanged output. The kernel runs on the trace
+   the substituted choices make (generate, every choice constrained), so
+   what it reads from a call's value, the return value or the score is
+   differentiated too. The model may hold encapsulated randomness (a
+   pseudo-marginal move), unless the kernel's outputs depend on it: then
+   they differ at the trace's own choices, a loud error. GenTraceKernelDSL also drops outputs that depend on
+   no input and kernel choices no output depends on, which hides moves that
+   are not bijections (a constant output, randomness thrown away, a value
+   overwritten); here they make the matrix non-square or singular, a loud
+   error."
   (:refer-clojure :exclude [+ -])
   (:require [gen.array :as array :refer [+ -]]
             [gen.array.dtype :as dt]
@@ -64,54 +71,73 @@
 (defn log-abs-det
   "log |det J| of kernel's move from trace (see the namespace doc): kc are
    the kernel's choices on (trace, args…), [update backward] its return
-   value, and retained? says which of the trace's addresses the update
-   keeps."
+   value, and retained? says which of the trace's addresses the move leaves
+   alone: the update keeps them, or replaces them as data (SMCP3's new
+   observations)."
   [kernel trace args kc [update backward] retained?]
   (let [mc (:choices trace)
         ins (into (mapv #(vector :model %) (continuous-addresses mc)) (map #(vector :kernel %)) (continuous-addresses kc))
         outs (into (mapv #(vector :update %) (continuous-addresses update)) (map #(vector :backward %))
-                   (continuous-addresses backward))]
-    (if (or (empty? ins) (empty? outs))
+                   (continuous-addresses backward))
+        source (fn [sp] (if (= sp :model) mc kc))
+        in-values (mapv (fn [[sp p]] (cm/get-choice (source sp) p)) ins)
+        offsets (vec (reductions clojure.core/+ 0 (map array/size in-values)))
+        substituted (fn [x]
+                      (reduce (fn [[mc kc] [i [sp p]]]
+                                (let [v (array/reshape (array/slice x 0 (offsets i) (offsets (inc i)))
+                                                       (array/shape (in-values i)))]
+                                  (if (= sp :model) [(cm/set-choice mc p v) kc] [mc (cm/set-choice kc p v)])))
+                              [mc kc] (map-indexed vector ins)))
+        ;; the kernel on the trace the substituted choices make, so its
+        ;; reads of a call's value, the return value and the score are
+        ;; tracked too. Only the kernel needs exact densities: the model may
+        ;; hold encapsulated randomness (a pseudo-marginal move), drawn
+        ;; here at key 0, which the check at x below makes loud wherever
+        ;; the kernel's outputs depend on it
+        kernel-outputs (fn [x]
+                         (let [[mc' kc'] (substituted x)
+                               trace' (:trace (gfi/generate (:gen-fn trace) (:args trace) mc' (rng/key 0)))]
+                           (:retval (gfi/with-exact-density "A trace kernel's Jacobian"
+                                      (gfi/assess kernel (into [trace'] args) kc' (rng/key 0))))))
+        continuous-outs (fn [[u b]] (reduce (fn [c [sp p]] (cm/set-choice c (into [sp] p) (cm/get-choice (if (= sp :update) u b) p)))
+                                            cm/EMPTY outs))
+        outputs (fn [x] (let [[u b] (kernel-outputs x)]
+                          (array/concatenate (mapv (fn [[sp p]] (array/flatten (cm/get-choice (if (= sp :update) u b) p))) outs))))
+        m (reduce clojure.core/+ 0 (map (fn [[sp p]] (array/size (cm/get-choice (if (= sp :update) update backward) p)))
+                                        outs))
+        rows (if (and (seq ins) (seq outs))
+               (let [x (array/concatenate (mapv array/flatten in-values))]
+                 (when-not (tf/same-choices? (continuous-outs (kernel-outputs x)) (continuous-outs [update backward]))
+                   (throw (ex-info (str "The trace kernel gives other outputs on the trace its choices make than on the"
+                                        " trace itself: they depend on the model's encapsulated randomness, which its"
+                                        " Jacobian cannot follow")
+                                   {:outputs (mapv vec (map rest outs))})))
+                 (mapv (fn [j] (vec (array/->clj ((array/grad #(array/take (outputs %) j)) x)))) (range m)))
+               (vec (repeat m [])))
+        cols (into (columns :model mc (continuous-addresses mc)) (columns :kernel kc (continuous-addresses kc)))
+        ;; every output and every kernel choice counts: a constant output,
+        ;; or randomness no output keeps, is not a bijection (the thesis
+        ;; leaves out only what is copied); so does a trace choice the
+        ;; update rewrites or discards, whose old value would be lost
+        ;; otherwise. Trace choices the move leaves alone and no output
+        ;; depends on are left out
+        rewritten (set (continuous-addresses update))
+        consumed? (fn [p] (or (rewritten p) (not (retained? p))))
+        used (filterv (fn [c] (let [[sp p] (cols c)] (or (= :kernel sp) (consumed? p) (some #(not (zero? (% c))) rows))))
+                      (range (count cols)))
+        kept (filterv (fn [c] (let [[sp p] (cols c)] (and (= sp :model) (not (consumed? p))))) used)
+        square (into (mapv (fn [row] (mapv row used)) rows)
+                     (map (fn [c] (mapv #(if (= % c) 1.0 0.0) used))) kept)]
+    (when-not (= (count square) (count used))
+      (throw (ex-info (str "The trace kernel's continuous part maps " (count used) " dimensions to " (count square)
+                           "; a bijection keeps them equal")
+                      {:inputs (mapv cols used)})))
+    (if (empty? used)
       0.0
-      (let [source (fn [sp] (if (= sp :model) mc kc))
-            in-values (mapv (fn [[sp p]] (cm/get-choice (source sp) p)) ins)
-            offsets (vec (reductions clojure.core/+ 0 (map array/size in-values)))
-            substituted (fn [x]
-                          (reduce (fn [[mc kc] [i [sp p]]]
-                                    (let [v (array/reshape (array/slice x 0 (offsets i) (offsets (inc i)))
-                                                           (array/shape (in-values i)))]
-                                      (if (= sp :model) [(cm/set-choice mc p v) kc] [mc (cm/set-choice kc p v)])))
-                                  [mc kc] (map-indexed vector ins)))
-            outputs (fn [x]
-                      (let [[mc' kc'] (substituted x)
-                            [u b] (:retval (gfi/with-exact-density "A trace kernel's Jacobian"
-                                             (gfi/assess kernel (into [(assoc trace :choices mc')] args) kc' (rng/key 0))))]
-                        (array/concatenate (mapv (fn [[sp p]] (array/flatten (cm/get-choice (if (= sp :update) u b) p)))
-                                                 outs))))
-            x (array/concatenate (mapv array/flatten in-values))
-            m (reduce clojure.core/+ 0 (map (fn [[sp p]] (array/size (cm/get-choice (if (= sp :update) update backward) p)))
-                                            outs))
-            jacobian (mapv (fn [j] (vec (array/->clj ((array/grad #(array/take (outputs %) j)) x)))) (range m))
-            cols (into (columns :model mc (continuous-addresses mc)) (columns :kernel kc (continuous-addresses kc)))
-            ;; every output and every kernel choice counts: a constant output,
-            ;; or randomness no output keeps, is not a bijection (the thesis
-            ;; leaves out only what is copied); trace choices no output
-            ;; depends on are left alone
-            rows jacobian
-            used (filterv (fn [c] (or (= :kernel (first (cols c))) (some #(not (zero? (% c))) rows)))
-                          (range (count cols)))
-            rewritten (set (continuous-addresses update))
-            kept (filterv (fn [c] (let [[sp p] (cols c)] (and (= sp :model) (not (rewritten p)) (retained? p)))) used)
-            square (into (mapv (fn [row] (mapv row used)) rows)
-                         (map (fn [c] (mapv #(if (= % c) 1.0 0.0) used))) kept)]
-        (when-not (= (count square) (count used))
-          (throw (ex-info (str "The trace kernel's continuous part maps " (count used) " dimensions to " (count square)
-                               "; a bijection keeps them equal")
-                          {:inputs (mapv cols used)})))
-        (let [[sign logabs] (la/slogdet (array/array square))]
-          (when (zero? (double (array/item sign)))
-            (throw (ex-info "The trace kernel's Jacobian is singular here: its move is not a bijection" {})))
-          logabs)))))
+      (let [[sign logabs] (la/slogdet (array/array square))]
+        (when (zero? (double (array/item sign)))
+          (throw (ex-info "The trace kernel's Jacobian is singular here: its move is not a bijection" {})))
+        logabs))))
 
 (defn- kept-by [discard] (fn [p] (not (cm/has-value? discard p))))
 
@@ -160,4 +186,6 @@
           (when-not (tf/same-choices? (:choices trace) (:choices t''))
             (throw (ex-info "smcp3: the backward kernel's update does not restore the trace"
                             {:trace (cm/to-map (:choices trace)) :restored (cm/to-map (:choices t''))})))))
-      {:trace t' :weight (+ w (- bwd fwd) (log-abs-det k trace k-args kc ret (kept-by discard)))})))
+      ;; an observation the new ones replace is data, not part of the move
+      {:trace t' :weight (+ w (- bwd fwd) (log-abs-det k trace k-args kc ret #(or ((kept-by discard) %)
+                                                                                   (cm/has-value? new-observations %))))})))

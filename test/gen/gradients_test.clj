@@ -31,11 +31,19 @@
 (defn- reference-choices [choices]
   (reduce (fn [c p] (cm/set-choice c p (on-reference (cm/get-choice choices p)))) choices (cm/addresses choices)))
 
+(defn- inner
+  "⟨retgrad, retval⟩ on the host, pairing maps by key and vectors by
+   position."
+  [g v]
+  (cond (nil? g) 0.0
+        (map? g) (reduce + 0.0 (map (fn [[k gk]] (inner gk (get v k))) g))
+        (sequential? g) (reduce + 0.0 (map inner g v))
+        :else (double (array/item (array/sum (* g v))))))
+
 (defn- objective [gf args choices retgrad]
   (array/with-backend reference
     (let [{w :weight rv :retval} (gfi/assess gf args (reference-choices choices))]
-      (+ (double (array/item w))
-         (if retgrad (reduce + (map #(double (array/item (array/sum (* %1 %2)))) (array/tree-leaves retgrad) (array/tree-leaves rv))) 0.0)))))
+      (+ (double (array/item w)) (inner retgrad rv)))))
 
 (defn- grad-close?
   "A gradient (of the backend under test) and a float64 finite difference."
@@ -406,6 +414,41 @@
     (is (ts/close? 2.54 xg {:rtol (ts/tol 1e-9) :atol (ts/tol 1e-9)}))
     (when (ts/jvm?)
       (is (ts/close? (/ (- (f (+ 0.7 h)) (f (- 0.7 h))) (* 2 h)) xg {:rtol 1e-6 :atol 1e-6}) "and the finite difference"))))
+
+(deftest a-retgrad-pairs-with-the-return-value-by-structure
+  ;; the post-M5 review's P3-03: maps by key, vectors by position, nil for
+  ;; no cotangent, and any other structure loud. Planted bug (2026-10-22):
+  ;; the leaf-order pairing it replaced gives 1.5 for {:a 1 :b 0}, 0.5 for
+  ;; {:z 1 :y 0}, and takes the short and scalar cotangents silently
+  (let [model (gen [] (let [x (trace :x (d/normal 0 1))] {:b (* 2.0 x) :a x}))
+        tr (:trace (gfi/generate model [] (cm/choicemap :x 0.5) (rng/key 1)))
+        dx (fn [retgrad] (ts/number (cm/get-choice (:gradients (g/choice-gradients tr (sel/select :x) retgrad)) :x)))]
+    (testing "log N(x; 0, 1) + a·x + b·2x has ∂/∂x = -x + a + 2b at x = 0.5, in either key order"
+      (is (ts/close? 0.5 (dx {:a 1.0 :b 0.0})))
+      (is (ts/close? 0.5 (dx {:b 0.0 :a 1.0})))
+      (is (ts/close? 1.5 (dx {:a 0.0 :b 1.0})))
+      (is (ts/close? 0.5 (dx {:a 1.0 :b nil})) "nil: no cotangent")))
+  (testing "through param-gradients: {:y w·x, :z 3w} at x = 0.5 has ∂/∂w = 0.5 y' + 3 z'"
+    (let [model (dyn/with-params (gen [] (let [x (trace :x (d/normal 0 1)) w (param :w)] {:y (* w x) :z (* 3.0 w)}))
+                  {:w 1.0})
+          tr (:trace (gfi/generate model [] (cm/choicemap :x 0.5) (rng/key 1)))
+          dw (fn [retgrad] (ts/number (:w (g/param-gradients tr retgrad))))]
+      (is (ts/close? 3.0 (dw {:z 1.0 :y 0.0})))
+      (is (ts/close? 0.5 (dw {:y 1.0 :z 0.0})))
+      (testing "a key in one tree only is loud"
+        (is (= {:only-retgrad [:q] :only-retval [:z]}
+               (select-keys (ts/thrown-data (dw {:q 1.0 :y 1.0})) [:only-retgrad :only-retval])))
+        (is (= [:z] (:only-retval (ts/thrown-data (dw {:y 1.0}))))))))
+  (testing "vectors pair by position, nested paths named; a short or scalar cotangent is loud"
+    (let [model (gen [] (let [x (trace :x (d/normal 0 1))] [x {:s (* 3.0 x)}]))
+          tr (:trace (gfi/generate model [] (cm/choicemap :x 0.5) (rng/key 1)))
+          dx (fn [retgrad] (ts/number (cm/get-choice (:gradients (g/choice-gradients tr (sel/select :x) retgrad)) :x)))]
+      (is (ts/close? 3.5 (dx [1.0 {:s 1.0}])) "-x + 1 + 3")
+      (is (ts/close? 0.5 (dx [1.0 nil])))
+      (is (= [] (:path (ts/thrown-data (dx [1.0])))) "one element against two")
+      (is (= [] (:path (ts/thrown-data (dx 1.0)))) "a leaf against a sequence")
+      (is (= [1] (:path (ts/thrown-data (dx [1.0 2.0])))) "a leaf against a map")
+      (is (= [1 :s] (:path (ts/thrown-data (dx [1.0 {:s [1.0]}])))) "a sequence against a leaf"))))
 
 (deftest lecture-is-exact
   ;; Eqs. 3.8-3.9 (law audit gap M): the score is log q(mu; w·y, e^log-s) of
