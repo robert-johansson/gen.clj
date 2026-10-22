@@ -10,7 +10,8 @@
      backend's representation.
    - correlation: the sample correlation of host numbers, for checks of
      independence.
-   - thrown-data: the ex-data of a loud error, to check what it says."
+   - thrown-data: the ex-data of a loud error, to check what it says.
+   - within: a call's value, or ::timed-out, for a regression that hung."
   (:refer-clojure :exclude [abs])
   (:require [gen.array :as array]
             [gen.array.protocols :as p]
@@ -93,6 +94,20 @@
   "The ex-data of the ex-info body throws, or nil when body returns."
   [& body]
   `(try ~@body nil (catch clojure.lang.ExceptionInfo e# (ex-data e#))))
+
+(defn within
+  "(f)'s value, or :gen.test-support/timed-out after ms. f runs on a daemon
+   thread, so a call that never returns is left behind without keeping the
+   JVM alive; what f throws is thrown here."
+  [ms f]
+  (let [p (promise)]
+    (doto (Thread. ^Runnable (fn [] (deliver p (try {:value (f)} (catch Throwable e {:error e})))))
+      (.setDaemon true)
+      (.start))
+    (let [r (deref p ms ::timed-out)]
+      (cond (= ::timed-out r) r
+            (:error r) (throw (:error r))
+            :else (:value r)))))
 
 (defn correlation
   "The sample correlation of the coordinates of pairs [x y] of host numbers."

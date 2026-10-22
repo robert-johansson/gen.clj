@@ -625,29 +625,16 @@
     (::node-values state) (assoc ::node-values (::node-values state))
     (::params state) (assoc ::params (::params state))))
 
-(defn- holds-batch?
-  "Does x hold a batched value (in its maps, vectors and realized seqs)?"
-  [x]
-  (cond (batch/batched? x) true
-        (array/array? x) false
-        (map? x) (boolean (some holds-batch? (vals x)))
-        (seq? x) (boolean (some holds-batch? (take realize-limit x)))
-        (coll? x) (boolean (some holds-batch? x))
-        :else false))
-
 (defn- retdiff
   "A static body's propagated retdiff when it knows better than
-   unknown-change; otherwise no-change when the return value is equal to
-   the previous one (sound: equal values cannot differ), unknown-change
-   otherwise."
+   unknown-change; otherwise no-change when the return value is the
+   previous one by gfi/same-value? (DESIGN.md §9, D1), unknown-change
+   otherwise. same-value? reads no array (a batched one included) and is
+   bounded, so a long or lazy return value is unknown-change."
   [prev-trace state]
   (let [d (::retdiff state)]
     (cond (and d (not (diff/unknown-change? d))) d
-          ;; batched return values cannot be compared (gen.array.batch): unknown
-          (and (not (holds-batch? (:retval prev-trace)))
-               (not (holds-batch? (:retval state)))
-               (= (:retval prev-trace) (:retval state)))
-          diff/no-change
+          (gfi/same-value? (:retval prev-trace) (:retval state)) diff/no-change
           :else diff/unknown-change)))
 
 (defn run

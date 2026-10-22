@@ -202,6 +202,13 @@
           c (trace [:c j i] (d/normal b 1))]
       (trace [:d (+ i j)] (d/normal c 1)))))
 
+(def signed-zero
+  "A callee's 0.0 or -0.0 (x · 0.0), read by a node that tells them apart:
+   the retdiff called them unchanged by =, and the walk kept the node (the
+   post-M5 review's P1-01)."
+  (let [callee (gen [] (* (trace :x (d/normal 0.0 1.0)) 0.0))]
+    (gen ^:static [] (let [r (splice :in callee) y (trace :y (d/normal (array/atan2 r -1.0) 1.0))] y))))
+
 (def branch-a (gen ^:static [m] (let [a (trace :a (d/normal m 1))] a)))
 (def branch-b (gen ^:static [m] (let [a (trace :a (d/normal (+ m 5.0) 1)) b (trace :b (d/normal a 1))] b)))
 (def branch-c (gen ^:static [m] (let [c (trace :c (d/normal m 1))] c)))
@@ -237,7 +244,8 @@
    [:expanded-heads expanded-heads [0.5] [[1.5]]]
    [:quoting quoting [0.0] [[1.0]]]
    [:hoisting hoisting [0.0] [[1.0]]]
-   [:computed computed [0 1] [[1 1] [0 2] [2 0]]]])
+   [:computed computed [0 1] [[1 1] [0 2] [2 0]]]
+   [:signed-zero signed-zero []]])
 
 ;; dynamic parents of static functions: the general laws (a static callee's
 ;; update from another graph's trace was wrong before the review)
@@ -250,9 +258,13 @@
 ;; the rules model alone, often enough that a case with unchanged arguments,
 ;; one choice constrained and the element it moves unconstrained comes up
 (laws/deflaws static-rules (filterv (comp #{:rules} first) models) 300 laws/static)
+;; the signed zero alone: a case that moves :in's x across 0 and leaves :y
+;; is one in eight. Planted bug (2026-10-22): the retdiff deciding unchanged
+;; by = again fails it, by the weight and by the retdiff's soundness
+(laws/deflaws static-signed-zero (filterv (comp #{:signed-zero} first) models) 100 laws/static)
 ;; every model but :destructured (a uniform between chosen bounds) has fixed supports
 (laws/deflaws static (filterv (comp #{:linreg :hierarchical :nested :rules :dict-rules :double-index :callee-store
-                                      :expanded-heads :quoting :hoisting :computed}
+                                      :expanded-heads :quoting :hoisting :computed :signed-zero}
                                      first)
                                models)
   100 laws/fixed-support)
