@@ -12,6 +12,7 @@
             [gen.dist.core :as dc]
             [gen.dist.dsl :refer [dist]]
             [gen.dynamic :refer [gen]]
+            [gen.gfi :as gfi]
             [gen.laws :as laws]
             [gen.random :as rng]
             [gen.test-support :as ts]))
@@ -146,6 +147,101 @@
     (is (every? #(>= % 1.0) xs) "every draw is past the shift")
     ;; mean 1 + 1/2, sd 1/2: five standard errors
     (is (< (Math/abs (- mean 1.5)) (* 5 (/ 0.5 (Math/sqrt n)))))))
+
+;; ---------------------------------------------------------------------------
+;; Whole labels, the lattice, a draw's own shape (genclj-6rn4)
+;; ---------------------------------------------------------------------------
+
+(dist coin-pair [p] (* (array/astype (d/bernoulli p) :float64) (array/array [1.0 2.0])))
+(dist pick-point [probs] (array/take (array/array [[0 0] [1 1] [2 5]]) (d/categorical probs) 0))
+(dist shifted-pair [mu] (+ (d/normal mu 1) (array/array [0.0 1.0])))
+(dist micro-count [lam] (* 1e-6 (d/poisson lam)))
+(dist count-reciprocal [lam] (/ 1 (+ 1 (d/poisson lam))))
+(dist far-count [lam] (+ 1e6 (d/poisson lam)))
+(dist farther-count [lam] (+ 1e15 (d/poisson lam)))
+(dist shifted-count [lam] (+ 3 (d/poisson lam)))
+(dist shifted-binom [n p] (+ (d/binom n p) 1))
+
+(defn- lps [d v] (mapv ts/number (array/->clj (dc/log-prob d v))))
+
+(deftest a-label-is-compared-whole
+  ;; the post-M5 review's P2-03: elementwise, coin-pair's [1 2] counted its
+  ;; coin twice (-2.408, for log 0.3) and the impossible [1 0] scored
+  ;; -1.561; pick-point's [1 1] was twice log 0.3, and the impossible [1 5]
+  ;; and [0 5] finite. Planted back (maps-to elementwise), each fails, and
+  ;; so does a batch of draws whose matches stack against its batch.
+  (is (ts/close? (Math/log 0.3) (lp (coin-pair 0.3) (array/array [1.0 2.0]))))
+  (is (= ##-Inf (lp (coin-pair 0.3) (array/array [1.0 0.0]))))
+  (let [pp (pick-point [0.2 0.3 0.5])]
+    (is (ts/close? (Math/log 0.3) (lp pp (array/array [1 1]))))
+    (is (= [##-Inf ##-Inf] [(lp pp (array/array [1 5])) (lp pp (array/array [0 5]))]))
+    (is (= [2] (array/shape (dc/sample pp (rng/key 3)))) "a draw is a vector label")
+    (testing "a batch of values, one result each"
+      (let [[a b c] (lps pp (array/array [[1 1] [2 5] [1 5]]))]
+        (is (and (ts/close? (Math/log 0.3) a) (ts/close? (Math/log 0.5) b) (= ##-Inf c))))))
+  (testing "a batch of draws keeps its batch"
+    (let [probs (array/array [[0.2 0.3 0.5] [0.6 0.3 0.1]])]
+      (is (ts/close? (array/array [(Math/log 0.5) (Math/log 0.1)]) (dc/log-prob (labeled probs [10 20 30]) 30)))
+      (let [[a b] (lps (pick-point probs) (array/array [2 5]))]
+        (is (and (ts/close? (Math/log 0.5) a) (ts/close? (Math/log 0.1) b)))))))
+
+(deftest host-labels-are-matched-on-the-host
+  ;; genclj-6rn4 (I3-03): every support value was scored, K log-probs for a
+  ;; label (6.9 ms at K = 1,000, 55 µs matched on the host). Scoring a value
+  ;; of mass 0 that no label matches also sent its log's gradient 0/0 = NaN
+  ;; (planted: every value scored, as array labels are)
+  (let [probs (array/array [0.25 0.75 0.0])]
+    (is (ts/close? (array/array [4.0 0.0 0.0])
+                   ((array/grad #(dc/log-prob (labeled-cat [:a :b :c] %) :a)) probs)))))
+
+(deftest a-draw-without-a-support-keeps-its-lattice
+  ;; P2-04: the inverse was kept within 1e-5·(1 + |v|), so values off the
+  ;; lattice took a neighbour's mass: micro-count's grid of [0, 1e-5] summed
+  ;; to 97.4, reciprocals and large shifts too. Planted back, the
+  ;; off-lattice values fail; without the quarter-spacing bound, the
+  ;; farthest shift's (a few ulps of 1e15 are half its spacing).
+  (let [m (micro-count 3.0)]
+    (is (ts/close? (lp (d/poisson 3.0) 2) (lp m 2e-6)))
+    (is (= [##-Inf ##-Inf] [(lp m 1.5e-6) (lp m 2.4e-6)]))
+    (is (ts/close? (reduce + (map #(Math/exp (lp (d/poisson 3.0) %)) (range 11)))
+                   (reduce + (map #(Math/exp (lp m (* % 1e-8))) (range 1001))))
+        "the grid's mass is the lattice points' on it"))
+  (is (= ##-Inf (lp (count-reciprocal 500.0) (/ 1.0 501.5))))
+  (is (ts/close? (lp (d/poisson 500.0) 500) (lp (count-reciprocal 500.0) (/ 1.0 501))))
+  (is (= [##-Inf ##-Inf] [(lp (far-count 3.0) 1000002.5) (lp (far-count 3.0) 1000002.3)]))
+  (is (ts/close? (lp (d/poisson 3.0) 2) (lp (far-count 3.0) 1000002.0)))
+  (is (= ##-Inf (lp (shifted-count 3.0) 5.00001)))
+  (is (ts/close? (lp (d/poisson 3.0) 2) (lp (shifted-count 3.0) 5)))
+  (when-not (ts/f32?)
+    (is (= ##-Inf (lp (farther-count 3.0) 1000000000000002.5)))
+    (is (ts/close? (lp (d/poisson 3.0) 2) (lp (farther-count 3.0) 1000000000000002.0))))
+  (testing "a batch of counts bounds no support: the inversion scores it"
+    (is (ts/close? (array/array [(lp (d/binom 3 0.5) 1) (lp (d/binom 4 0.5) 2)])
+                   (dc/log-prob (shifted-binom (array/array [3 4]) 0.5) (array/array [2 3]))))))
+
+(deftest only-an-enumerable-draw-changes-its-shape
+  ;; P2-03's inversion paths: one draw broadcast to several values has no
+  ;; density, but shifted-pair sampled [2]-vectors and scored the off-line
+  ;; [0.3 5.0] finitely, as two draws (planted: no check-shape, and no
+  ;; value-shape)
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"maps a draw of shape \[\] to a value of shape \[2\]"
+                        (dc/sample (shifted-pair 0.0) (rng/key 1))))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"has shape \[2\]"
+                        (gfi/generate (gen [] (trace :x (shifted-pair 0.0))) [] (cm/choicemap :x (array/array [0.3 5.0]))
+                                      (rng/key 1)))))
+
+(deftest a-support-is-asked-for-not-thrown
+  ;; I3-02a: whether a draw had a support was an exception caught on every
+  ;; log-prob (7 µs against poisson's 1.3; 1.8 now). Planted back (the
+  ;; throwing default, caught), the count is 10.
+  (let [n (atom 0)
+        make ex-info]
+    (with-redefs [ex-info (fn [& args] (swap! n inc) (apply make args))]
+      (dotimes [_ 10] (dc/log-prob (doubled-poisson 3.0) 4.0)))
+    (is (zero? @n)))
+  (is (nil? (dc/enumerable-support (d/poisson 3.0))))
+  (is (nil? (dc/enumerable-support (d/binom (array/array [3 4]) 0.5))) "array bounds bound supports of their own")
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no enumerable support" (dc/support (d/poisson 3.0)))))
 
 (def models
   [[:pushforward-in-a-model

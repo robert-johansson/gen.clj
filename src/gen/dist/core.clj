@@ -24,7 +24,11 @@
 
 (defmulti -sample "Draw a value: (-sample d key batch-shape)." (fn [d _key _batch-shape] (:type d)))
 (defmulti -log-prob "The log density (or mass) of value v: (-log-prob d v)." (fn [d _v] (:type d)))
-(defmulti -support "The values of a discrete distribution, in order." (fn [d] (:type d)))
+(defmulti -support
+  "The values of a discrete distribution, in order, or nil when it has none
+   to enumerate (its values are not finite, or array parameters bound
+   them)."
+  (fn [d] (:type d)))
 
 (defmulti -discrete?
   "Does the distribution have discrete values (Gen.jl's is_discrete)?"
@@ -34,8 +38,7 @@
 
 (defn discrete? [d] (boolean (-discrete? d)))
 
-(defmethod -support :default [d]
-  (throw (ex-info (str "Distribution " (:type d) " has no enumerable support") {:type (:type d)})))
+(defmethod -support :default [_] nil)
 
 (defn sample
   "A draw from d, a pure function of key. batch-shape (default []) is
@@ -49,7 +52,18 @@
   [d v]
   (-log-prob d v))
 
-(defn support [d] (-support d))
+(defn enumerable-support
+  "d's support, in order, or nil when it has none to enumerate."
+  [d]
+  (-support d))
+
+(defn support
+  "d's support, in order: an error when it has none to enumerate."
+  [d]
+  (or (-support d)
+      (throw (ex-info (str "Distribution " (:type d) " has no enumerable support (its values are not finite,"
+                           " or array parameters bound them)")
+                      {:type (:type d)}))))
 
 (defmulti -value-shape
   "The shape of one value of the distribution, or nil when it is not
@@ -147,25 +161,35 @@
         (check (array/all-true? (array/logical-and (array/>= v 0) (array/<= v 1))) dist-name (str param-name " must be in [0, 1]")
                {:param param-name})))
 
+(defn check-non-negative
+  "Parameters must be at least 0, as check-positive."
+  [dist-name param-name v]
+  (cond (array/host? v)
+        (check (>= (double v) 0.0) dist-name (str param-name " must be >= 0, got " v) {:param param-name :value v})
+        (and (some? v) (array/concrete? v))
+        (check (array/all-true? (array/>= v 0)) dist-name (str param-name " must be >= 0") {:param param-name})))
+
 (defn check-integer
-  "Host parameters that count (trials, bounds) must be integers, at least min."
+  "Parameters that count (trials, bounds) must be integers, at least min, as
+   check-positive."
   [dist-name param-name v min]
-  (when (array/host? v)
-    (check (and (== v (Math/rint (double v))) (>= (double v) (double min))) dist-name
-           (str param-name " must be an integer of at least " min ", got " v) {:param param-name :value v})))
+  (cond (array/host? v)
+        (check (and (== v (Math/rint (double v))) (>= (double v) (double min))) dist-name
+               (str param-name " must be an integer of at least " min ", got " v) {:param param-name :value v})
+        (and (some? v) (array/concrete? v))
+        (check (array/all-true? (array/logical-and (array/== v (array/floor v)) (array/>= v min))) dist-name
+               (str param-name " must be an integer of at least " min " in every element") {:param param-name})))
 
 (defn support-bound
   "An integer parameter bounding an enumerable support (a count, a bound),
-   on the host. Supports are host data for enumeration
+   on the host, or nil for an array of several, whose elements bound
+   supports of their own. Supports are host data for enumeration
    (gen.inference.enumerative), so a one-element array is read, also on a
    lazy backend, as a Switch reads its branch index; a batched one (whose
    particles may differ) is the batched-branch error."
-  ^long [dist-name param-name v]
+  [v]
   (cond (array/host? v) (long v)
-        (and (array/array? v) (= 1 (array/size v))) (long (array/item v))
-        :else (throw (ex-info (str dist-name ": an enumerable support needs one " param-name ", not an array of shape "
-                                   (array/shape v))
-                              {:distribution dist-name :param param-name}))))
+        (and (array/array? v) (= 1 (array/size v))) (long (array/item v))))
 
 (defn check-probabilities
   "Concrete probability vectors (the last axis) must be non-negative and sum to
@@ -243,7 +267,7 @@
      (validate (check-positive \"normal\" \"std\" std))
      (sample [key batch-shape] ...)
      (log-prob [v] ...)
-     (support [] ...)
+     (support [] ...)        ; the values in order, nil for none
      (discrete? [] ...)
      (value-shape [] ...))
 
@@ -257,10 +281,24 @@
    is kept as given: the same for every particle of a batch, and never
    differentiated. The others must be arrays or array data. The type keyword is
    namespace-qualified, so definitions from different namespaces never collide.
-   discrete? says whether its values are discrete (false by default)."
+   discrete? says whether its values are discrete (false by default).
+
+   sample and log-prob are required, and a clause of another name, or one
+   given twice, is an error when the definition expands: a misspelled
+   validate would skip the checks, a misspelled value-shape the shape's."
   [dist-name & body]
   (let [[doc body] (if (string? (first body)) [(first body) (rest body)] [nil body])
         params (first body)
+        heads (map #(when (seq? %) (first %)) (rest body))
+        problems (into {} (remove (comp empty? val))
+                       {:unknown (vec (remove '#{validate sample log-prob support discrete? value-shape} heads))
+                        :repeated (vec (for [[h n] (frequencies heads) :when (< 1 n)] h))
+                        :missing (vec (remove (set heads) '[sample log-prob]))})
+        _ (when (seq problems)
+            (throw (ex-info (str "defdist " dist-name ": " (pr-str problems) " (its clauses are validate, sample,"
+                                 " log-prob, support, discrete? and value-shape, each at most once, sample and"
+                                 " log-prob required)")
+                            (assoc problems :dist (str dist-name)))))
         clauses (into {} (map (juxt first rest)) (rest body))
         type-kw (keyword (str *ns*) (name dist-name))
         d (gensym "d")
