@@ -747,7 +747,9 @@
 ;; DynamicGF
 ;; ---------------------------------------------------------------------------
 
-(defrecord DynamicGF [body-fn source params transitions dispatch static]
+;; an untraced call, as in Gen.jl: (gf a b) is the return value of a
+;; simulated run (gfi/defgf)
+(gfi/defgf DynamicGF [body-fn source params transitions dispatch static]
   gfi/IStores
   (-stores [gf] (:params gf))
   (-with-stores [gf stores] (assoc gf :params stores))
@@ -788,34 +790,7 @@
   (-revise [gf op args opts project-old]
     (if (contains? (:prev opts) ::scores)
       (run-handler gf op args (assoc opts ::revise true))
-      (gfi/generate-again gf op args opts project-old)))
-
-  ;; an untraced call, as in Gen.jl: (gf a b) is the return value of a simulated run
-  clojure.lang.IFn
-  (invoke [this] (:retval (gfi/simulate this [])))
-  (invoke [this a] (:retval (gfi/simulate this [a])))
-  (invoke [this a b] (:retval (gfi/simulate this [a b])))
-  (invoke [this a b c] (:retval (gfi/simulate this [a b c])))
-  (invoke [this a b c d] (:retval (gfi/simulate this [a b c d])))
-  (invoke [this a b c d e] (:retval (gfi/simulate this [a b c d e])))
-  (invoke [this a b c d e f] (:retval (gfi/simulate this [a b c d e f])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20] (:retval (gfi/simulate this [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20])))
-  (invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20 more]
-    (:retval (gfi/simulate this (into [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20] more))))
-  (applyTo [this args] (:retval (gfi/simulate this (vec args)))))
+      (gfi/generate-again gf op args opts project-old))))
 
 (defn dynamic-gf? [x] (instance? DynamicGF x))
 

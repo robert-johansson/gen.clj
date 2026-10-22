@@ -570,15 +570,31 @@
 ;; Defining generative functions
 ;; ---------------------------------------------------------------------------
 
+(defn ^:no-doc untraced-call
+  "(gf & args), as in Gen.jl: the return value of a simulated run, with a
+   key from the implicit source."
+  [gf args]
+  (:retval (simulate gf args)))
+
+(defn- ifn-methods
+  "IFn's methods for a record whose call on args is (call this args): every
+   arity, the variadic one past twenty, and applyTo."
+  [call]
+  (let [params (fn [n] (vec (repeatedly n #(gensym "a"))))]
+    (concat ['clojure.lang.IFn]
+            (for [n (range 21) :let [as (params n)]]
+              `(~'invoke [this# ~@as] (~call this# ~as)))
+            [(let [as (params 20)] `(~'invoke [this# ~@as more#] (~call this# (into ~as more#))))
+             `(~'applyTo [this# args#] (~call this# (vec args#)))])))
+
 (defmacro defgf
   "defrecord, for a generative function, plus untraced calls as in Gen.jl:
-   (gf a b) is the return value of a simulated run (with a key from the
-   implicit source)."
+   (gf a b …), with any number of arguments, is the return value of a
+   simulated run (with a key from the implicit source). With :call f first
+   among the impls, (f gf args) is the call instead (a deterministic
+   function's, which needs no key)."
   [name fields & impls]
-  `(defrecord ~name ~fields
-     ~@impls
-     clojure.lang.IFn
-     ~@(for [n (range 7)]
-         (let [as (vec (repeatedly n #(gensym "arg")))]
-           `(~'invoke [this# ~@as] (:retval (simulate this# ~as)))))
-     (~'applyTo [this# args#] (:retval (simulate this# (vec args#))))))
+  (let [[call impls] (if (= :call (first impls)) [(second impls) (nnext impls)] [`untraced-call impls])]
+    `(defrecord ~name ~fields
+       ~@impls
+       ~@(ifn-methods call))))

@@ -181,7 +181,13 @@
                               [(assoc tr :args args :retval retval ::state state) retdiff])
           :else [(run gf args) diff/unknown-change])))
 
-(defrecord DeterministicGF [apply-with-state update-with-state gradient param-names param-gradient params]
+(defn- untraced-run
+  "(gf & args): the return value, without a trace or a key."
+  [gf args]
+  (:retval (run gf args)))
+
+(gfi/defgf DeterministicGF [apply-with-state update-with-state gradient param-names param-gradient params]
+  :call untraced-run
   gfi/IStores
   (-stores [gf] (:params gf))
   (-with-stores [gf stores] (assoc gf :params stores))
@@ -201,17 +207,7 @@
     (no-choices! :assess choices)
     {:weight 0.0 :retval (:retval (run this args))})
   (-propose [this args _key] {:choices cm/EMPTY :weight 0.0 :retval (:retval (run this args))})
-  (-project [_ _tr _selection] 0.0)
-
-  clojure.lang.IFn
-  (invoke [this] (:retval (run this [])))
-  (invoke [this a] (:retval (run this [a])))
-  (invoke [this a b] (:retval (run this [a b])))
-  (invoke [this a b c] (:retval (run this [a b c])))
-  (invoke [this a b c d] (:retval (run this [a b c d])))
-  (invoke [this a b c d e] (:retval (run this [a b c d e])))
-  (invoke [this a b c d e f] (:retval (run this [a b c d e f])))
-  (applyTo [this args] (:retval (run this (vec args)))))
+  (-project [_ _tr _selection] 0.0))
 
 (defn deterministic
   "A deterministic generative function (see the namespace doc), from
@@ -332,7 +328,7 @@
 
 (defn- unchanged? [argdiffs] (every? diff/no-change? argdiffs))
 
-(defrecord EstimatedGF [estimate simulate retval addresses]
+(gfi/defgf EstimatedGF [estimate simulate retval addresses]
   gfi/IGenerativeFunction
   (-simulate [this args key] (simulated this args key))
   (-generate [this args constraints key]

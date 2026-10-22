@@ -10,6 +10,7 @@
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.combinators :as comb]
+            [gen.custom :as custom]
             [gen.dist :as d]
             [gen.dist.core :as dc]
             [gen.dynamic :as dyn :refer [gen]]
@@ -311,6 +312,43 @@
 
 (deftest untraced-calls
   (is (number? (ts/host (linreg [1.0 2.0]))) "calling a generative function runs it, like Gen.jl"))
+
+(defmacro ^:private calls
+  "[n (gf 0 1 … n-1)] for n from 0 to 22: every invoke arity, the variadic
+   one past twenty included, as a direct call compiles them."
+  [gf]
+  (vec (for [n (range 23)] [n `(fn [] (~gf ~@(range n)))])))
+
+(defn- outcome
+  "What f gives: its value, or a loud error's message; anything else (an
+   AbstractMethodError, a ClassCastException) is :broken."
+  [f]
+  (try (f)
+       (catch clojure.lang.ExceptionInfo e [:error (ex-message e)])
+       (catch Throwable e [:broken (.getName (class e))])))
+
+(deftest every-generative-function-is-called-with-any-number-of-arguments
+  ;; The post-M5 review's I2-06: Map, Unfold, Switch, Recurse, defgf and
+  ;; deterministic functions threw AbstractMethodError past six arguments,
+  ;; and an estimated function was not callable. Planted, defgf's six
+  ;; arities fail every kind from seven arguments on (a dynamic function
+  ;; is a defgf too now).
+  (let [given (gen [& xs] (vec xs))
+        kinds {:dynamic given
+               :map (comb/map given)
+               :unfold (comb/unfold (gen [_t s & ps] (+ s (count ps))))
+               :switch (comb/switch given)
+               :recurse (comb/recurse (gen [x] {:value x :children []}) (gen [v _] v) 1)
+               :deterministic (custom/deterministic {:apply vec})
+               :estimated (custom/estimated {:addresses [:y] :estimate (fn [_ _ _] 0.0)
+                                             :simulate (fn [_ _] {:choices (cm/choicemap :y 1.0) :log-estimate 0.0})
+                                             :retval (fn [args _] (vec args))})}]
+    (doseq [[kind gf] kinds
+            [n call] (calls gf)]
+      (testing (str (name kind) ", " n " arguments")
+        (let [direct (outcome call)]
+          (is (not (and (vector? direct) (= :broken (first direct)))) "a value or a loud error")
+          (is (= (outcome #(apply gf (range n))) direct) "as apply gives"))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Splices without an address; middleware and dispatch
