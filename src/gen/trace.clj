@@ -14,7 +14,7 @@
    A trace also records its maker, the generative function that made it
    (maker). Giving a trace another :gen-fn, (assoc tr :gen-fn g), keeps the
    maker, so update and regenerate see that g did not make it
-   (gen.gfi/revise).
+   (gen.gfi/revise), and project reads it by its maker.
 
    A trace of a generative function with encapsulated randomness (thesis
    §4.5) also holds that randomness, a key, under :gen.trace/omega, and its
