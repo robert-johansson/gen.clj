@@ -158,12 +158,24 @@
         (check (array/all-true? (array/logical-and (array/>= v 0) (array/<= v 1))) dist-name (str param-name " must be in [0, 1]")
                {:param param-name})))
 
+(defn check-non-negative
+  "Parameters must be at least 0, as check-positive."
+  [dist-name param-name v]
+  (cond (array/host? v)
+        (check (>= (double v) 0.0) dist-name (str param-name " must be >= 0, got " v) {:param param-name :value v})
+        (and (some? v) (array/concrete? v))
+        (check (array/all-true? (array/>= v 0)) dist-name (str param-name " must be >= 0") {:param param-name})))
+
 (defn check-integer
-  "Host parameters that count (trials, bounds) must be integers, at least min."
+  "Parameters that count (trials, bounds) must be integers, at least min, as
+   check-positive."
   [dist-name param-name v min]
-  (when (array/host? v)
-    (check (and (== v (Math/rint (double v))) (>= (double v) (double min))) dist-name
-           (str param-name " must be an integer of at least " min ", got " v) {:param param-name :value v})))
+  (cond (array/host? v)
+        (check (and (== v (Math/rint (double v))) (>= (double v) (double min))) dist-name
+               (str param-name " must be an integer of at least " min ", got " v) {:param param-name :value v})
+        (and (some? v) (array/concrete? v))
+        (check (array/all-true? (array/logical-and (array/== v (array/floor v)) (array/>= v min))) dist-name
+               (str param-name " must be an integer of at least " min " in every element") {:param param-name})))
 
 (defn support-bound
   "An integer parameter bounding an enumerable support (a count, a bound),
@@ -266,10 +278,24 @@
    is kept as given: the same for every particle of a batch, and never
    differentiated. The others must be arrays or array data. The type keyword is
    namespace-qualified, so definitions from different namespaces never collide.
-   discrete? says whether its values are discrete (false by default)."
+   discrete? says whether its values are discrete (false by default).
+
+   sample and log-prob are required, and a clause of another name, or one
+   given twice, is an error when the definition expands: a misspelled
+   validate would skip the checks, a misspelled value-shape the shape's."
   [dist-name & body]
   (let [[doc body] (if (string? (first body)) [(first body) (rest body)] [nil body])
         params (first body)
+        heads (map #(when (seq? %) (first %)) (rest body))
+        problems (into {} (remove (comp empty? val))
+                       {:unknown (vec (remove '#{validate sample log-prob support discrete? value-shape} heads))
+                        :repeated (vec (for [[h n] (frequencies heads) :when (< 1 n)] h))
+                        :missing (vec (remove (set heads) '[sample log-prob]))})
+        _ (when (seq problems)
+            (throw (ex-info (str "defdist " dist-name ": " (pr-str problems) " (its clauses are validate, sample,"
+                                 " log-prob, support, discrete? and value-shape, each at most once, sample and"
+                                 " log-prob required)")
+                            (assoc problems :dist (str dist-name)))))
         clauses (into {} (map (juxt first rest)) (rest body))
         type-kw (keyword (str *ns*) (name dist-name))
         d (gensym "d")

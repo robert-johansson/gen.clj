@@ -131,8 +131,8 @@
 (defdist uniform
   "uniform(low, high): uniform on [low, high]."
   [low high]
-  (validate (when (and (array/host? low) (array/host? high))
-              (dc/check (< low high) "uniform" "low must be below high" {:low low :high high})))
+  (validate (when (every? #(and (some? %) (array/concrete? %)) [low high])
+              (dc/check (array/all-true? (< low high)) "uniform" "low must be below high" {:low low :high high})))
   (sample [key shape]
     (rng/uniform key (dc/elementwise-shape shape low high) (assoc (opts low high) :low low :high high)))
   (log-prob [v]
@@ -239,7 +239,11 @@
   "piecewise_uniform(bounds, probs): bin i, chosen with probability probs[i],
    is [bounds[i], bounds[i+1]], uniform within the bin."
   [bounds probs]
-  (validate (dc/check-probabilities "piecewise-uniform" "probs" probs)
+  (validate (dc/check (= 1 (array/ndim bounds) (array/ndim probs)) "piecewise-uniform"
+                      (str "bounds and probs must be vectors, got shapes " (array/shape bounds) " and " (array/shape probs)
+                           " (no batch of bin layouts yet)")
+                      {:bounds (array/shape bounds) :probs (array/shape probs)})
+            (dc/check-probabilities "piecewise-uniform" "probs" probs)
             (dc/check-increasing "piecewise-uniform" "bounds" bounds)
             (dc/check (= (peek (array/shape bounds)) (inc (peek (array/shape probs)))) "piecewise-uniform"
                       "needs one more bound than probabilities" {:bounds (array/shape bounds) :probs (array/shape probs)}))
@@ -595,8 +599,8 @@
   [low high]
   (validate (dc/check-integer "uniform-discrete" "low" low Long/MIN_VALUE)
             (dc/check-integer "uniform-discrete" "high" high Long/MIN_VALUE)
-            (when (and (array/host? low) (array/host? high))
-              (dc/check (<= low high) "uniform-discrete" "low must not exceed high" {:low low :high high})))
+            (when (every? #(and (some? %) (array/concrete? %)) [low high])
+              (dc/check (array/all-true? (<= low high)) "uniform-discrete" "low must not exceed high" {:low low :high high})))
   (sample [key shape] (rng/randint key low (+ high 1) (dc/elementwise-shape shape low high) (opts low high)))
   (log-prob [v]
     (guard (logical-and (logical-and (>= v low) (<= v high)) (integral? v))
@@ -608,8 +612,7 @@
 (defdist geometric
   "geometric(p): the number of failures before the first success."
   [p]
-  (validate (dc/check-probability "geometric" "p" p)
-            (when (array/host? p) (dc/check (> p 0) "geometric" "p must be in (0, 1]" {:p p})))
+  (validate (dc/check-probability "geometric" "p" p) (dc/check-positive "geometric" "p" p))
   (sample [key shape]
     (let [u (rng/uniform key (dc/elementwise-shape shape p) (opts p))]
       (to-int (array/floor (/ (log1p (- u)) (log1p (- p)))) p)))
@@ -705,7 +708,7 @@
 (defdist poisson
   "poisson(lambda): the Poisson distribution with mean lambda."
   [lam]
-  (validate (when (array/host? lam) (dc/check (>= lam 0) "poisson" "lambda must be >= 0" {:lambda lam})))
+  (validate (dc/check-non-negative "poisson" "lambda" lam))
   (sample [key shape] (poisson-sample key lam (dc/elementwise-shape shape lam)))
   (log-prob [v]
     (guard (logical-and (>= v 0) (integral? v)) (- (xlogy v lam) lam (lgamma (+ v 1))))))
@@ -726,7 +729,7 @@
   "neg_binom(r, p): the number of failures before the r-th success (r may be
    real)."
   [r p]
-  (validate (dc/check-positive "neg-binom" "r" r) (dc/check-probability "neg-binom" "p" p))
+  (validate (dc/check-positive "neg-binom" "r" r) (dc/check-probability "neg-binom" "p" p) (dc/check-positive "neg-binom" "p" p))
   (sample [key shape]
     (let [s (dc/elementwise-shape shape r p)
           [k1 k2] (rng/split key)

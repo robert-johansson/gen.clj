@@ -72,7 +72,23 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"n must be an integer" (d/binom -1 0.3)))
     (is (some? (d/binom 3.0 0.3)) "an integral float counts")
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"low must be an integer" (d/uniform-discrete 0.5 3)))
-    (is (some? (d/uniform-discrete -2 3)))))
+    (is (some? (d/uniform-discrete -2 3))))
+  (testing "array parameters are checked as host ones are (genclj-ggdl, P2-05)"
+    ;; they drew values of density -Inf, or NaN (poisson [-1]); planted
+    ;; back, each check host-only (or neg-binom's p > 0, or piecewise's
+    ;; vectors, dropped) lets its case through. Clojure data is checked on
+    ;; the host on every backend.
+    (doseq [[label f] {"neg-binom p = 0" #(d/neg-binom 2.0 0.0) "geometric p = 0" #(d/geometric 0.0)
+                       "neg-binom [0]" #(d/neg-binom 2.0 [0.0 0.5])
+                       "poisson [-1]" #(d/poisson [-1.0 2.0]) "uniform [1] [0]" #(d/uniform [1.0] [0.0])
+                       "uniform-discrete [3] [1]" #(d/uniform-discrete [3] [1]) "binom [2.5]" #(d/binom [2.5] 0.5)
+                       "binom [-1]" #(d/binom [-1 2] 0.5) "uniform-discrete [0.5]" #(d/uniform-discrete [0.5] [3])
+                       "piecewise-uniform of 2-d parameters" #(d/piecewise-uniform [[0.0 1.0 2.0] [0.0 2.0 4.0]]
+                                                                                    [[0.5 0.5] [0.25 0.75]])}]
+      (is (thrown? clojure.lang.ExceptionInfo (f)) label))
+    (is (every? some? [(d/poisson [0.0 2.0]) (d/uniform [0.0] [1.0]) (d/binom [2 3] 0.5) (d/uniform-discrete [1] [3])
+                       (d/neg-binom 2.0 [1.0 0.5]) (d/geometric [1.0 0.5])])
+        "valid arrays pass")))
 
 (deftest supports
   (is (= [false true] (dc/support (d/bernoulli 0.3))))
@@ -461,6 +477,21 @@
   [logits]
   (sample [key shape] (rng/categorical key logits shape))
   (log-prob [v] (array/pick (array/log-softmax logits) v)))
+
+(deftest defdist-checks-its-clauses
+  ;; genclj-ggdl (I3-06): a clause of another name was dropped silently, so
+  ;; a misspelled validate skipped the checks and value-shape the shape's;
+  ;; a repeated one kept the last (planted: no check, and each defines)
+  (doseq [[problem form] {{:unknown '[valdate]}
+                          '(gen.dist.core/defdist v-pos [x] (valdate (gen.dist.core/check-positive "v" "x" x))
+                             (sample [k s] 1.0) (log-prob [v] 0.0))
+                          {:unknown '[logprob] :missing '[log-prob]}
+                          '(gen.dist.core/defdist v-exp [rate] (sample [k s] 1.0) (logprob [v] 0.0))
+                          {:repeated '[log-prob]}
+                          '(gen.dist.core/defdist v-twice [x] (sample [k s] 1.0) (log-prob [v] 0.0) (log-prob [v] 1.0))}]
+    (is (= problem (dissoc (ts/thrown-data (try (eval form) (catch clojure.lang.Compiler$CompilerException e (throw (ex-cause e)))))
+                           :dist))
+        (pr-str form))))
 
 (deftest user-distributions-without-a-value-shape-are-not-rejected
   ;; third review B13: the default value shape (the parameters' broadcast
