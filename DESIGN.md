@@ -770,6 +770,14 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     so the error grows with log n, as with NumPy's pairwise sum. `mean`,
     `variance`, `logsumexp` and `softmax` are sums too. Metal and CUDA are
     unchanged.
+    Half floats (owner, 2026-10-22). MLX's CPU accumulates float16 and
+    bfloat16 sums in their own precision: 10⁵ terms of 10⁻⁵ came to
+    1 − 0.75 in float16 and 1 − 0.998 in bfloat16. Blocks alone left
+    −3.8e-4 and −4e-2. So a half-float sum is computed in float32, in
+    blocks, and cast back to its dtype, as JAX and XLA do. Metal gets the
+    same treatment only if its measurement shows half-precision
+    accumulation too. Float64 sums stay sequential, on the JVM backend and
+    on MLX's CPU: about 1e-11 relative at 10⁶ terms.
   - Configured by `gen.mlx.device` (`cpu`, `gpu`) and `gen.mlx.dtypes`
     (`32`, `64`).
   - In `gen` bodies, a 0-d backend array counts as its host value for
