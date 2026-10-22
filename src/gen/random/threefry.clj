@@ -9,7 +9,7 @@
      bits32[i]        = w0 ^ w1   where [w0 w1] = threefry(key, [hi32(i) lo32(i)])
      bits64[i]        = w0 << 32 | w1
 
-   fold-in takes non-negative 64-bit data (gen.random rejects negative
+   fold-in takes a non-negative 64-bit integer (gen.random rejects other
    data): below 2^32 its key is JAX's, bit for bit;
    beyond, it is distinct where JAX masks typed data to 32 bits, so that
    Recurse's node numbers and the implicit key source's counter never
