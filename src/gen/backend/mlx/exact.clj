@@ -140,7 +140,7 @@
   "The most terms one block of a blocked sum accumulates (sum): 32 (owner,
    genclj-v3uw). Each sum is within a few ulps with blocks of 256 too, but
    an iterated computation compounds them: memo.clj's empowerment demo
-   missed float64 by 1.89e-5 with 256 and 4.4e-6 with 32 (JAX's CPU
+   missed float64 by 1.89e-5 with 256 and 5.1e-6 with 32 (JAX's CPU
    3.6e-6), for 1.3-1.5x a long sum's time."
   32)
 

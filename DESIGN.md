@@ -822,8 +822,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     few ulps, but an iterated computation compounds those errors:
     memo.clj's empowerment demo (five Blahut–Arimoto levels over 3125 ×
     169 × 169 cells) missed float64 by 1.89e-5 with blocks of 256 and by
-    4.4e-6 with blocks of 32. JAX's CPU misses by 3.6e-6 and Metal by
-    2.2e-6. A long sum takes 1.3–1.5× as long as with blocks of 256.
+    5.1e-6 with blocks of 32 (mean 1.2e-6). JAX's CPU misses by 3.6e-6
+    and Metal by 2.2e-6. Blocking the sums of 33 to 256 terms too gave
+    4.4e-6, at a cost to short sums that was not measured. A long sum
+    takes 1.3–1.5× as long as with blocks of 256.
     Half floats (owner, 2026-10-22, genclj-y0mp). MLX's CPU accumulates
     float16 and bfloat16 sums in their own precision: 10⁵ terms of 10⁻⁵
     came to 1 − 0.75 in float16 and 1 − 0.998 in bfloat16. Blocks alone
