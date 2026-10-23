@@ -27,6 +27,9 @@
      :kernel         :nuts, or :hmc (with :L, 10)
      :max-depth      10, NUTS's
      :eps            1.0, the initial step size
+     :jitter         0: each transition steps by eps·(1 + jitter·(2u - 1)),
+                     u uniform (Stan's stepsize_jitter, in the warmup too),
+                     eps the nominal step size dual averaging adapts
      :inv-metric     the initial inverse metric (mcmc's; the identity)
      :adapt-metric?  true; false adapts the step size alone
      :target-accept  0.8 (Stan's delta); :gamma 0.05, :t0 10, :kappa 0.75
@@ -38,7 +41,7 @@
    Each draw's statistics are its kernel's: nuts's {:accept-stat
    :tree-depth :n-leapfrog :diverged? :energy :eps}, and for :hmc
    {:accept-stat :n-leapfrog :accepted? :diverged? :eps}, the acceptance
-   statistic min(1, α). The result counts the divergences after the warmup
+   statistic min(1, α), :eps the step taken (jittered). The result counts the divergences after the warmup
    and in it. With :warmup 0, sample draws at :eps and :inv-metric as
    given, such as an adapt's. The state is threaded through each iteration
    and every iteration takes its own key, so the same key gives the same
@@ -53,7 +56,7 @@
 (set! *warn-on-reflection* true)
 
 (def ^:private defaults
-  {:warmup 1000 :kernel :nuts :L 10 :max-depth 10 :eps 1.0 :adapt-metric? true
+  {:warmup 1000 :kernel :nuts :L 10 :max-depth 10 :eps 1.0 :jitter 0.0 :adapt-metric? true
    :target-accept 0.8 :gamma 0.05 :t0 10.0 :kappa 0.75 :init-buffer 75 :term-buffer 50 :window 25})
 
 (defn- settings
@@ -66,6 +69,7 @@
         checks {:warmup nat-int? :L pos-int? :max-depth pos-int? :eps positive? :adapt-metric? boolean?
                 :kernel #{:nuts :hmc} :target-accept #(and (positive? %) (< (double %) 1.0)) :gamma positive?
                 :t0 #(and (number? %) (>= (double %) 0.0)) :kappa #(and (positive? %) (<= (double %) 1.0))
+                :jitter #(and (number? %) (<= 0.0 (double %)) (< (double %) 1.0))
                 :init-buffer nat-int? :term-buffer nat-int? :window pos-int?}]
     (doseq [[k ok?] checks]
       (when-not (ok? (get s k))
@@ -189,13 +193,14 @@
 (defn- transition
   "One draw by the kernel at step size eps and inverse metric inv: [trace
    stats]."
-  [trace selection {:keys [kernel L max-depth compile?]} eps inv key]
+  [trace selection {:keys [kernel L max-depth jitter compile?]} eps inv key]
   (case kernel
-    :nuts (let [r (mcmc/nuts trace selection {:eps eps :inv-metric inv :max-depth max-depth :compile? compile?} key)]
+    :nuts (let [r (mcmc/nuts trace selection {:eps eps :jitter jitter :inv-metric inv :max-depth max-depth
+                                              :compile? compile?} key)]
             [(:trace r) (dissoc r :trace)])
-    :hmc (let [r (mcmc/hmc trace selection {:L L :eps eps :inv-metric inv :compile? compile?} key)]
+    :hmc (let [r (mcmc/hmc trace selection {:L L :eps eps :jitter jitter :inv-metric inv :compile? compile?} key)]
            [(:trace r) {:accept-stat (Math/min 1.0 (Math/exp (double (array/item (:log-alpha r)))))
-                        :n-leapfrog L :accepted? (:accepted? r) :diverged? (:diverged? r) :eps eps}])))
+                        :n-leapfrog L :accepted? (:accepted? r) :diverged? (:diverged? r) :eps (get r :eps eps)}])))
 
 (defn- divergences [stats] (count (filter :diverged? stats)))
 
