@@ -17,7 +17,18 @@
      [:switch addr]              a Switch between two small models, its index
                                  a categorical choice at [addr :i]
      [:select addr]              a categorical choice compared with = to pick a
-                                 mean (a host predicate on the choice)"
+                                 mean (a host predicate on the choice)
+
+   Switch-heavy specs (gen-switch-model) add, and keep only statements that
+   stay batched (no :branch or :select):
+     [:switch* addr ps dep gf]   a Switch gf of 2 or 3 random sub-models, its
+                                 index a categorical choice (probabilities ps)
+                                 at [addr :i], its argument the earlier numeric
+                                 choice dep (or 0.0); each branch makes a shared
+                                 choice :c, then its own (addresses by branch,
+                                 Switches nested), and returns the sum of its
+                                 numeric values
+     [:switch-map addr n]        a Map of n Switch kernels, each its own index"
   (:refer-clojure :exclude [+ *])
   (:require [clojure.test.check.generators :as gen]
             [gen.array :as array :refer [+ *]]
@@ -56,6 +67,10 @@
   (comb/switch (dyn/make-gen-fn (fn [trace _ _ _ m] (trace :a (d/normal m 1.0))) '([m]))
                (dyn/make-gen-fn (fn [trace _ _ _ m] (trace :c (d/normal (trace :b (d/gamma 2.0 1.0)) 1.0))) '([m]))))
 
+(def ^:private switch-kernel
+  "A Map kernel that is a Switch, its index its own choice."
+  (dyn/make-gen-fn (fn [trace splice _ _ x] (splice :s switched (trace :i (d/categorical [0.5 0.5])) x)) '([x])))
+
 (declare build)
 
 (defn- run-statements
@@ -81,7 +96,11 @@
               :map (let [[n] more] (assoc env addr (reduce + 0.0 (splice addr (comb/map map-kernel) (vec (repeat n 0.5))))))
               :unfold (let [[n] more] (splice addr (comb/unfold walk) n 0.0) env)
               :switch (let [i (trace [addr :i] (d/categorical [0.5 0.5]))]
-                        (assoc env addr (splice [addr :s] switched i 0.5)))))
+                        (assoc env addr (splice [addr :s] switched i 0.5)))
+              :switch* (let [[ps dep gf] more
+                             x (if dep (array/astype (get env dep 0.0) (:float (gen.array.protocols/-defaults array/*backend*))) 0.0)]
+                         (assoc env addr (splice [addr :s] gf (trace [addr :i] (d/categorical ps)) x)))
+              :switch-map (let [[n] more] (assoc env addr (reduce + 0.0 (splice addr (comb/map switch-kernel) (vec (repeat n 0.5))))))))
           env
           statements))
 
@@ -89,6 +108,15 @@
   "The dynamic generative function of a spec (no arguments)."
   [spec]
   (dyn/make-gen-fn (fn [trace splice _param _untraced] (count (run-statements spec trace splice {}))) (list [] spec)))
+
+(defn- build-branch
+  "A Switch branch of a spec: a generative function of one argument, the
+   earlier value its first statements may depend on (::arg), that returns
+   the sum of its numeric values (a float, whatever the branch)."
+  [spec]
+  (dyn/make-gen-fn (fn [trace splice _param _untraced x]
+                     (reduce + 0.0 (vals (run-statements spec trace splice {::arg x}))))
+                   (list '[x] spec)))
 
 ;; ---------------------------------------------------------------------------
 ;; The generator
@@ -114,29 +142,68 @@
                                   [1 (gen/let [s (statements (dec depth))] [:inline s])]])
                   1 4))))
 
+(defn- switch-statements
+  "A generator of Switch-heavy statements at nesting depth: sites, Maps,
+   Unfolds, Maps of Switch kernels, and Switches of 2 or 3 branches of
+   statements one level down."
+  [depth]
+  (let [site (gen/let [family (gen/elements numeric-families)
+                       dep? gen/boolean]
+               [:site nil family dep?])
+        leaf (gen/frequency [[6 site]
+                             [1 (gen/let [n (gen/choose 0 3)] [:map nil n])]
+                             [1 (gen/let [n (gen/choose 0 3)] [:unfold nil n])]
+                             [1 (gen/let [n (gen/choose 0 3)] [:switch-map nil n])]])
+        switch (gen/let [ws (gen/vector (gen/choose 1 5) 2 3)
+                         dep? gen/boolean
+                         branches (gen/vector (switch-statements (dec depth)) (count ws))]
+                 [:switch* nil (mapv #(/ (double %) (reduce + ws)) ws) dep? branches])]
+    (if (zero? depth)
+      (gen/vector leaf 1 3)
+      (gen/vector (gen/frequency [[4 leaf] [3 switch]]) 1 4))))
+
+(declare assign)
+
+(defn- switch-of
+  "The Switch of branch specs: branch j's addresses are its own (bj-s1,
+   bj-s2, …) but for a choice :c every branch makes alike, so a particle
+   that changes branch keeps it."
+  [branches]
+  (apply comb/switch
+         (map-indexed (fn [j stmts]
+                        (let [counter (atom 0)
+                              [spec _] (assign stmts counter [::arg] #(keyword (str "b" j "-s" %)))]
+                          (build-branch (into [[:site :c :normal ::arg]] spec))))
+                      branches)))
+
 (defn- assign
   "Give every statement a unique address and resolve dependencies to earlier
    numeric sites."
-  [stmts counter earlier]
-  (reduce (fn [[out earlier] [kind _ & more :as st]]
-            (let [addr (keyword (str "s" (swap! counter inc)))]
-              (case kind
-                :site (let [[family dep?] more
-                            dep (when (and dep? (seq earlier)) (peek earlier))]
-                        [(conj out [:site addr family dep]) (conj earlier addr)])
-                :branch (let [[t e] more
-                              [t' _] (assign t counter earlier)
-                              [e' _] (assign e counter earlier)]
-                          [(conj out [:branch addr t' e']) earlier])
-                :splice (let [[s] more] [(conj out [:splice addr (first (assign s (atom 0) []))]) earlier])
-                ;; an inline sub-model shares this namespace: give it addresses from this counter
-                :inline (let [[s'] [(first (assign (second st) counter []))]] [(conj out [:inline s']) earlier])
-                :map [(conj out [:map addr (first more)]) (conj earlier addr)]
-                :unfold [(conj out [:unfold addr (first more)]) earlier]
-                :switch [(conj out [:switch addr]) (conj earlier addr)]
-                :select [(conj out [:select addr]) (conj earlier addr)])))
-          [[] earlier]
-          stmts))
+  ([stmts counter earlier] (assign stmts counter earlier #(keyword (str "s" %))))
+  ([stmts counter earlier address]
+   (reduce (fn [[out earlier] [kind _ & more :as st]]
+             (let [addr (address (swap! counter inc))]
+               (case kind
+                 :site (let [[family dep?] more
+                             dep (when (and dep? (seq earlier)) (peek earlier))]
+                         [(conj out [:site addr family dep]) (conj earlier addr)])
+                 :branch (let [[t e] more
+                               [t' _] (assign t counter earlier address)
+                               [e' _] (assign e counter earlier address)]
+                           [(conj out [:branch addr t' e']) earlier])
+                 :splice (let [[s] more] [(conj out [:splice addr (first (assign s (atom 0) []))]) earlier])
+                 ;; an inline sub-model shares this namespace: give it addresses from this counter
+                 :inline (let [[s'] [(first (assign (second st) counter [] address))]] [(conj out [:inline s']) earlier])
+                 :map [(conj out [:map addr (first more)]) (conj earlier addr)]
+                 :unfold [(conj out [:unfold addr (first more)]) earlier]
+                 :switch [(conj out [:switch addr]) (conj earlier addr)]
+                 :switch* (let [[ps dep? branches] more
+                                dep (when (and dep? (seq earlier)) (peek earlier))]
+                            [(conj out [:switch* addr ps dep (switch-of branches)]) (conj earlier addr)])
+                 :switch-map [(conj out [:switch-map addr (first more)]) (conj earlier addr)]
+                 :select [(conj out [:select addr]) (conj earlier addr)])))
+           [[] earlier]
+           stmts)))
 
 (def gen-spec
   "A random model spec."
@@ -145,3 +212,12 @@
 (def gen-model
   "A random model, as a gen.laws model entry [label gf args]."
   (gen/fmap (fn [spec] [:random (build spec) []]) gen-spec))
+
+(def gen-switch-spec
+  "A random Switch-heavy spec."
+  (gen/fmap #(first (assign % (atom 0) [])) (switch-statements 2)))
+
+(def gen-switch-model
+  "A random Switch-heavy model, as a gen.laws model entry: in a batched run
+   its Switches' indices differ across the particles, and it stays batched."
+  (gen/fmap (fn [spec] [:switch-heavy (build spec) []]) gen-switch-spec))

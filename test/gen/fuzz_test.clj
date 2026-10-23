@@ -1,20 +1,23 @@
 (ns gen.fuzz-test
   "The GFI laws, and batched path equivalence, over random generative
    functions (gen.random-models): random families, dependencies, branches,
-   splices, shared-namespace splices, Map and Unfold."
-  (:refer-clojure :exclude [-])
+   splices, shared-namespace splices, Map and Unfold; and, over Switch-heavy
+   models whose Switches run by partition in a batched run, every batched
+   operation particle by particle against the scalar handler."
+  (:refer-clojure :exclude [+ -])
   (:require [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
             [gen.batched :as b]
-            [gen.array :as array :refer [-]]
+            [gen.array :as array :refer [+ -]]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.selection :as sel]
             [gen.gfi :as gfi]
             [gen.laws :as laws]
             [gen.random :as rng]
-            [gen.random-models :as rm]))
+            [gen.random-models :as rm]
+            [gen.test-support :as ts]))
 
 (laws/deflaws random rm/gen-model 200)
 
@@ -88,3 +91,176 @@
         (or (= ::rejected r)
             (let [{ps' :particles ws :weights ds :discards} r]
               (every? true? (map obeys-the-update-law? olds (b/traces ps') (array/->clj ws) ds own))))))))
+
+;; ---------------------------------------------------------------------------
+;; Switches by partition: Switch-heavy models, particle by particle
+;; ---------------------------------------------------------------------------
+
+;; Every Switch of these models has an index that differs across the
+;; particles, so a batched run partitions them (gen.combinators), Switches
+;; nested in branches and in Map kernels too. Spot checks are off, so the
+;; batched results themselves are compared with the scalar handler's, and a
+;; model must stay batched.
+
+(def ^:private switch-case (gen/tuple rm/gen-switch-model gen/nat (gen/choose 1 6)))
+
+(defn- index-paths
+  "The paths of a trace's top-level Switch indices, which every particle
+   makes."
+  [tr]
+  (filterv #(and (= 2 (count %)) (= :i (peek %))) (cm/addresses (:choices tr))))
+
+(defn- own-indices
+  "n particles' own values at the index paths, from scalar runs."
+  [gf args paths n seed]
+  (mapv #(sel/get-selected (:choices (gfi/simulate gf args %)) (sel/from-paths paths)) (rng/split (rng/key seed) n)))
+
+(defn- consistent? [gf args tr] (laws/close? (:score tr) (:weight (gfi/assess gf args (:choices tr)))))
+
+(defspec switch-heavy-particles-are-their-scalar-traces 100
+  (prop/for-all [[[_ gf args] seed n] switch-case]
+    (binding [b/*spot-checks* 0]
+      (let [ps (b/simulate gf args n (rng/key seed))]
+        (and (b/batched? ps)
+             (every? true? (map #(laws/close? %1 (:weight (gfi/assess gf args (:choices %2))))
+                                (array/->clj (b/scores ps)) (b/traces ps))))))))
+
+(defspec switch-heavy-generates-are-each-particle-s 100
+  ;; each particle constrained to its own indices: it holds them, and its
+  ;; weight is their density given its other choices
+  (prop/for-all [[[_ gf args] seed n] switch-case]
+    (binding [b/*spot-checks* 0]
+      (let [paths (index-paths (gfi/simulate gf args (rng/key seed)))
+            own (own-indices gf args paths n (inc seed))
+            {ps :particles ws :weights} (b/generate gf args cm/EMPTY n (rng/key seed) {:per-particle own})]
+        (and (b/batched? ps)
+             (every? true? (map (fn [tr w c] (and (= (ts/host c) (ts/host (sel/get-selected (:choices tr) (sel/from-paths paths))))
+                                                  (consistent? gf args tr)
+                                                  (laws/close? w (gfi/project tr (sel/from-paths paths)))))
+                                (b/traces ps) (array/->clj ws) own)))))))
+
+(defspec switch-heavy-updates-are-each-particle-s-update 100
+  ;; each particle given its own new indices, which moves particles between
+  ;; branches: its scalar update, with the choices the batched one drew
+  ;; afresh constrained too, makes its choices and discard, and its weight
+  ;; less those fresh choices' density
+  (prop/for-all [[[_ gf args] seed n] switch-case]
+    (binding [b/*spot-checks* 0]
+      (let [ps (b/simulate gf args n (rng/key seed))
+            olds (b/traces ps)
+            own (own-indices gf args (index-paths (first olds)) n (inc seed))
+            {ps' :particles ws :weights ds :discards} (b/update ps args [] cm/EMPTY (rng/key 2) {:per-particle own})]
+        (and (b/batched? ps')
+             (every? true?
+                     (map (fn [old new w d c]
+                            (let [was (set (cm/addresses (:choices old)))
+                                  fresh (remove #(or (was %) (cm/has-value? c %)) (cm/addresses (:choices new)))
+                                  sigma (cm/merge c (sel/get-selected (:choices new) (sel/from-paths fresh)))
+                                  r (gfi/update old sigma (rng/key 0))]
+                              (and (= (ts/host (:choices new)) (ts/host (:choices (:trace r))))
+                                   (= (ts/host d) (ts/host (:discard r)))
+                                   (laws/close? (:weight r) (+ w (if (seq fresh) (gfi/project new (sel/from-paths fresh)) 0.0))))))
+                          olds (b/traces ps') (array/->clj ws) ds own)))))))
+
+(defn- selected-parts
+  "Some of a trace's top-level Switch indices and calls, by the booleans
+   picks."
+  [tr picks]
+  (sel/from-paths (keep (fn [[p pick?]] (when pick? p))
+                        (map vector (mapcat (fn [p] [p (conj (pop p) :s)]) (index-paths tr)) (cycle picks)))))
+
+(defspec switch-heavy-regenerates-obey-the-regenerate-law 100
+  ;; some indices and Switch calls regenerated: w = log p(new)/p(old) over
+  ;; the choices kept, those both make that were not selected (fresh and
+  ;; dropped ones cancel)
+  (prop/for-all [[[_ gf args] seed n] switch-case
+                 picks (gen/vector gen/boolean 1 6)]
+    (binding [b/*spot-checks* 0]
+      (let [ps (b/simulate gf args n (rng/key seed))
+            s (selected-parts (first (b/traces ps)) picks)
+            {ps' :particles ws :weights} (b/regenerate ps args [] s (rng/key 3))]
+        (and (b/batched? ps')
+             (every? true?
+                     (map (fn [old new w]
+                            (let [was (set (cm/addresses (:choices old)))
+                                  kept (sel/from-paths (filter #(and (was %) (not (sel/selected? s %))) (cm/addresses (:choices new))))]
+                              (and (consistent? gf args new)
+                                   (laws/close? w (- (gfi/project new kept) (gfi/project old kept))))))
+                          (b/traces ps) (b/traces ps') (array/->clj ws))))))))
+
+(defspec switch-heavy-take-select-and-project-are-each-particle-s 60
+  (prop/for-all [[[_ gf args] seed n] switch-case
+                 picks (gen/vector gen/nat 1 8)
+                 mask (gen/vector gen/boolean 6)]
+    (binding [b/*spot-checks* 0]
+      (let [ps (b/simulate gf args n (rng/key seed))
+            trs (b/traces ps)
+            paths (index-paths (first trs))
+            qs (:particles (b/regenerate ps args [] (sel/from-paths paths) (rng/key 4)))
+            idx (mapv #(mod % n) picks)
+            keep (vec (take n mask))
+            taken (b/take ps idx)
+            chosen (b/select keep ps qs)
+            choices (fn [ps] (mapv (comp ts/host :choices) (b/traces ps)))
+            s (selected-parts (first trs) mask)]
+        (and (b/batched? taken) (b/batched? chosen)
+             (= (mapv (choices ps) idx) (choices taken))
+             (= (mapv (fn [keep? p q] (if keep? p q)) keep (choices ps) (choices qs)) (choices chosen))
+             (every? true? (map laws/close? (array/->clj (b/project ps s)) (map #(gfi/project % s) trs))))))))
+
+(defn- same-weight?
+  "laws/close?, NaN equal to NaN: a chain of moves may reach a trace of
+   density zero (a kept value outside its new support), after which a
+   weight is -Inf - -Inf."
+  [x y]
+  (or (and (Double/isNaN (ts/number x)) (Double/isNaN (ts/number y))) (laws/close? x y)))
+
+(defspec switch-heavy-particles-stay-their-scalar-traces-through-chains-of-operations 60
+  ;; MH-like moves (regenerate, then select), resampling (take) and updates
+  ;; that move particles between branches, in a random order: a particle's
+  ;; data is then joined, merged and regrouped before later runs read it,
+  ;; and each operation's weights obey its law
+  (prop/for-all [[[_ gf args] seed n] switch-case
+                 ops (gen/vector (gen/tuple (gen/elements [:regenerate :select :take :update]) (gen/vector gen/boolean 6)) 1 6)]
+    (binding [b/*spot-checks* 0]
+      (loop [ps (b/simulate gf args n (rng/key seed))
+             [[op picks] & more] ops
+             k 0]
+        (let [olds (b/traces ps)
+              n (b/size ps)
+              s (selected-parts (first olds) picks)
+              obeys? (fn [ps' ws kept]
+                       (every? true? (map (fn [old new w]
+                                            (let [was (set (cm/addresses (:choices old)))
+                                                  kept (sel/from-paths (filter #(and (was %) (kept %)) (cm/addresses (:choices new))))]
+                                              (and (consistent? gf args new)
+                                                   (same-weight? w (- (gfi/project new kept) (gfi/project old kept))))))
+                                          olds (b/traces ps') (array/->clj ws))))
+              [ps' ok?]
+              (case op
+                :regenerate (let [{ps' :particles ws :weights} (b/regenerate ps args [] s (rng/key k))]
+                              [ps' (obeys? ps' ws #(not (sel/selected? s %)))])
+                :select (let [qs (:particles (b/regenerate ps args [] s (rng/key k)))
+                              keep (vec (take n (cycle picks)))
+                              chosen (b/select keep ps qs)]
+                          [chosen (= (mapv (fn [keep? p q] (if keep? (ts/host (:choices p)) (ts/host (:choices q)))) keep olds (b/traces qs))
+                                     (mapv (comp ts/host :choices) (b/traces chosen)))])
+                :take (let [idx (vec (keep-indexed (fn [i pick?] (when pick? (mod i n))) (take (max n 6) (cycle picks))))
+                            idx (if (seq idx) idx [0])]
+                        [(b/take ps idx) true])
+                :update (let [own (own-indices gf args (index-paths (first olds)) n (+ seed k))
+                              {ps' :particles ws :weights} (b/update ps args [] cm/EMPTY (rng/key k) {:per-particle own})]
+                          ;; the constrained indices and the fresh choices
+                          ;; are not kept
+                          [ps' (every? true? (map (fn [old new w c]
+                                                    (let [was (set (cm/addresses (:choices old)))
+                                                          fresh (remove #(or (was %) (cm/has-value? c %)) (cm/addresses (:choices new)))
+                                                          sigma (cm/merge c (sel/get-selected (:choices new) (sel/from-paths fresh)))]
+                                                      (same-weight? (:weight (gfi/update old sigma (rng/key 0)))
+                                                                    (+ w (if (seq fresh) (gfi/project new (sel/from-paths fresh)) 0.0)))))
+                                                  olds (b/traces ps') (array/->clj ws) own))]))]
+          (cond (not (and ok? (b/batched? ps') (every? #(consistent? gf args %) (b/traces ps'))
+                          (every? true? (map #(laws/close? %1 (:score %2)) (array/->clj (b/scores ps')) (b/traces ps')))))
+                false
+                (seq more) (recur ps' more (inc k))
+                :else true))))))
