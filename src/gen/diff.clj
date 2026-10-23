@@ -8,7 +8,7 @@
    always sound; the others enable work to be skipped.
 
    Diffs: no-change, unknown-change, vector-diff (new and previous lengths,
-   the changed retained elements), int-diff (a number changed by an
+   the changed retained elements), int-diff (an integer changed by an
    amount), set-diff (elements added and deleted) and dict-diff (entries
    added, keys deleted, keys whose values changed), Gen.jl's.
 
@@ -17,7 +17,8 @@
    language (gen ^:static) applies it to a binding that is one call, so
    that a precise diff reaches a callee (a Map then reruns only the
    elements that changed). It has rules for count, nth, get, conj, assoc,
-   +, -, inc, dec, vec and identity, and is open: (defmethod propagate #'my-fn [_
+   +, -, inc, dec (an int-diff only when every operand is an integer), vec
+   and identity, and is open: (defmethod propagate #'my-fn [_
    args diffs] …). (consistent? prev new d) says whether d describes the
    change from prev to new.
 
@@ -25,7 +26,8 @@
    order, so -0.0 is not 0.0 and a list is not a vector, and bounded, so a
    value past its budget, or a lazy one not yet realized, counts as
    changed."
-  (:require [gen.array :as array]))
+  (:require [gen.array :as array]
+            [gen.array.dtype :as dt]))
 
 (set! *warn-on-reflection* true)
 
@@ -54,7 +56,7 @@
 (defrecord IntDiff [amount])
 
 (defn int-diff
-  "A number changed by amount (Gen.jl's IntDiff); no-change for 0."
+  "An integer changed by amount (Gen.jl's IntDiff); no-change for 0."
   [amount]
   (if (zero? amount) no-change (->IntDiff amount)))
 
@@ -230,19 +232,30 @@
                              (map? coll) (dict-diff {} #{} {k dx})
                              :else unknown-change)))
 
-(defn- sum-of-amounts [diffs sign]
-  (if (every? #(or (no-change? %) (int-diff? %)) diffs)
+;; Amounts are host integers: lengths, or what a rule computed from them. A
+;; result moves by its operands' amounts exactly only when every operand is
+;; an integer: a float operand rounds the sum, so that 2 + r and 3 + r may
+;; differ by 1 ± an ulp (found by the static fuzzer).
+
+(defn- integral?
+  "Is x an integer: a host one (not an integral float), or an array of an
+   integer dtype (its dtype read, never its values)?"
+  [x]
+  (or (integer? x) (and (array/backend-array? x) (= :int (dt/kind (array/dtype x))))))
+
+(defn- sum-of-amounts [args diffs sign]
+  (if (and (every? #(or (no-change? %) (int-diff? %)) diffs) (every? integral? args))
     (int-diff (reduce + (map-indexed (fn [i d] (* (if (and sign (pos? i)) -1 1) (if (int-diff? d) (:amount d) 0))) diffs)))
     unknown-change))
 
 (doseq [v [#'clojure.core/+ #'array/+]]
-  (defmethod propagate v [_ _ diffs] (unchanged-or diffs #(sum-of-amounts diffs false))))
+  (defmethod propagate v [_ args diffs] (unchanged-or diffs #(sum-of-amounts args diffs false))))
 (doseq [v [#'clojure.core/- #'array/-]]
   (defmethod propagate v [_ args diffs]
-    (unchanged-or diffs #(if (= 1 (count args)) (let [[d] diffs] (if (int-diff? d) (int-diff (- (:amount d))) unknown-change))
-                            (sum-of-amounts diffs true)))))
-;; amounts are host numbers: lengths, or what a rule computed from them
+    (unchanged-or diffs #(if (= 1 (count args))
+                           (let [[d] diffs] (if (and (int-diff? d) (integral? (first args))) (int-diff (- (:amount d))) unknown-change))
+                           (sum-of-amounts args diffs true)))))
 (doseq [v [#'clojure.core/inc #'clojure.core/dec]]
-  (defmethod propagate v [_ _ [d]] (if (or (no-change? d) (int-diff? d)) d unknown-change)))
+  (defmethod propagate v [_ [x] [d]] (if (or (no-change? d) (and (int-diff? d) (integral? x))) d unknown-change)))
 (defmethod propagate #'clojure.core/vec [_ _ [d]] (if (or (no-change? d) (vector-diff? d)) d unknown-change))
 (defmethod propagate #'clojure.core/identity [_ _ [d]] d)

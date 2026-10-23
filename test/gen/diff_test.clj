@@ -33,9 +33,12 @@
 ;; fresh value), the diffs from diff/compute: the rule's diff must describe
 ;; the change of the result. (The first version edited only the collection
 ;; and never shrank one: the review of 2026-10-20 found five unsound rules
-;; it passed.)
+;; it passed. Arithmetic on integers alone hid that a float operand rounds
+;; a sum, which the static fuzzer found, 2026-10-23.)
 
 (def ^:private small tgen/small-integer)
+;; an integer, or a float whose sum with one rounds
+(def ^:private a-number (tgen/one-of [small (tgen/fmap #(+ 0.1 (/ % 7.0)) small)]))
 (def ^:private a-key (tgen/one-of [(tgen/choose 0 4) (tgen/elements [:a :b :c]) (tgen/elements [0.0 1.0 1.5])]))
 (def ^:private a-coll
   (tgen/one-of [(tgen/vector small 0 4) (tgen/map (tgen/elements [:a :b :c 0 1]) small) (tgen/set small)]))
@@ -75,6 +78,12 @@
                 (call #'clojure.core/+ small small)
                 (call #'clojure.core/- small small)
                 (call #'clojure.core/- small)
+                (call #'clojure.core/inc a-number)
+                (call #'clojure.core/+ a-number a-number)
+                (call #'array/+ a-number a-number)
+                (call #'clojure.core/- a-number a-number)
+                (call #'array/- a-number a-number)
+                (call #'array/- a-number)
                 (call #'clojure.core/identity a-coll)]))
 
 (defn- result [f args] (try (apply @f args) (catch Exception _ ::throws)))

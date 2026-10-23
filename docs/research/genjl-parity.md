@@ -354,10 +354,17 @@ The static language has no thesis law of its own either: `laws/static`
 (`static-matches-dynamic`) requires every GFI operation on a static
 function to give what the same body without `^:static` gives under the same
 keys, also when update and regenerate skip nodes, and the general laws hold
-over static models (`gen.static-test`). The compiled score's gradients,
-which HMC, MALA and MAP use, equal the handler's and the closed form
-(`choice-gradients-through-the-compiled-score-are-the-handler-s`, the final
-law audit's F2).
+over static models (`gen.static-test`). Both hold over random static
+bodies too (`gen.static-fuzz-test`, GenMLX's path-equivalence fuzzer:
+`gen.random-static-models` writes bodies of every family, computations
+under each diff rule, Maps over the vectors they compute, Unfolds, static
+and dynamic callees, hoisted calls, computed addresses, destructuring,
+shadowed names, rest arguments and a store). The compiled score's
+gradients, which HMC, MALA and MAP use, equal the handler's and the closed
+form (`choice-gradients-through-the-compiled-score-are-the-handler-s`, the
+final law audit's F2), and over random continuous static models HMC and
+MALA steps, compiled or not, move as the same body's without the flag
+(`compiled-steps-move-as-plain-steps`).
 
 ## 4. Hazards found while mapping
 
