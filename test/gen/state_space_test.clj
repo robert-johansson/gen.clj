@@ -256,9 +256,13 @@
       (err #"unknown keys \[:transition-ofset\]" ss/kalman [2 prior (assoc params :transition-ofset 5.0)]))
     (err #"does not fit \[2 2\]" ss/kalman [2 {:mean [0.0 0.0] :cov [1.0 1.0 1.0]} (second (kalman-models :vector))])
     (err #"takes \(t belief params\)" ss/kalman [2 prior])
-    (err #"predictive variance must be positive" ss/kalman [2 prior (assoc params :emission-cov -3.0)])
-    (err #"each row of :transition must be probabilities" ss/hmm [2 h-init (assoc h-params :transition [[0.5 0.6 0.1] [0.2 0.6 0.2] [0.1 0.3 0.6]])])
-    (err #"the prior must be probabilities" ss/hmm [2 [0.5 0.6 0.1] h-params])
+    ;; checks that read values, which a lazy backend does not (as
+    ;; distributions validate their parameters)
+    (when (ts/jvm?)
+      (err #"predictive variance must be positive" ss/kalman [2 prior (assoc params :emission-cov -3.0)])
+      (err #"each row of :transition must be probabilities" ss/hmm
+           [2 h-init (assoc h-params :transition [[0.5 0.6 0.1] [0.2 0.6 0.2] [0.1 0.3 0.6]])])
+      (err #"the prior must be probabilities" ss/hmm [2 [0.5 0.6 0.1] h-params]))
     (err #"batched over the 3 states" ss/hmm [2 h-init (assoc h-params :emission (d/categorical [0.2 0.8]))])
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"takes a trace of gen.state-space/kalman or hmm"
                           (ss/sample-states (gfi/simulate (comb/unfold local-level-step) [2 0.0 {:m0 0 :p0 1 :q 1 :r 1}]
