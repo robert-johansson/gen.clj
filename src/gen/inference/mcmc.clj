@@ -11,6 +11,10 @@
      (map-optimize trace selection opts)       → trace
      (elliptical-slice trace addr mu cov)      → trace
 
+     (hmc-particles ps selection opts)          → {:particles :accepted? :log-alpha :diverged?}
+     (mala-particles ps selection tau)          → {:particles :accepted? :log-alpha :diverged?}
+     (map-optimize-particles ps selection opts) → particles
+
    The selected choices must keep the trace's structure: HMC, MALA and NUTS
    move them jointly and leave every other choice alone. They take a
    diagonal metric, :inv-metric (Stan's inv_metric, the identity by
@@ -27,15 +31,26 @@
    Stan's. A starting trace whose log density or gradient is not finite
    (NaN, or a probability of 0) is an error, as Stan refuses such a start.
    Keys are an optional last argument (or :key in an options map); omitting
-   one draws from the implicit key source."
-  (:refer-clojure :exclude [+ - * /])
-  (:require [gen.array :as array :refer [+ - * /]]
+   one draws from the implicit key source.
+
+   The -particles kernels move every particle of a gen.batched collection,
+   n independent chains each accepted on its own, at once: one batched
+   gradient per step for all of them where the model runs batched. Each
+   kernel's move is one function of arrays and keys (hmc-move, mala-move,
+   map-move), which the scalar kernel runs on its trace and the -particles
+   kernel on the batched trace, under the batch tracer
+   (gen.batched/map-particles); where the model does not run batched, each
+   particle's move is the scalar kernel's, from its own key (the key split n
+   ways)."
+  (:refer-clojure :exclude [+ - * / < >=])
+  (:require [gen.array :as array :refer [+ - * / < >=]]
+            [gen.array.batch :as batch]
+            [gen.batched :as batched]
             [gen.choicemap :as cm]
             [gen.dist :as d]
             [gen.dist.core :as dc]
             [gen.gfi :as gfi]
             [gen.gradients :as grad]
-            [gen.inference.mh :as mh]
             [gen.random :as rng]
             [gen.selection :as sel]))
 
@@ -45,14 +60,6 @@
   "The result of a proposal that diverged: rejected, with acceptance 0."
   [trace]
   {:trace trace :accepted? false :log-alpha ##-Inf :diverged? true})
-
-(defn- accept
-  "mh/accept's decision on proposed, of log acceptance ratio log-alpha: a
-   ratio that is not finite (an energy that overflowed or is NaN) diverged."
-  [trace proposed log-alpha key]
-  (if (Double/isFinite (double (array/item log-alpha)))
-    (assoc (mh/accept trace proposed log-alpha key) :diverged? false)
-    (diverged trace)))
 
 (defn- finite
   "Are the elements of xs all finite? A boolean array, read on the host only
@@ -75,12 +82,6 @@
   (when (zero? (array/size v))
     (throw (ex-info "The selection selects no choices of the trace" {:selection selection})))
   v)
-
-(defn- flat-gradient
-  "[values-choicemap flat-values flat-gradient] of the selection at trace."
-  [trace selection]
-  (let [{:keys [values gradients]} (grad/choice-gradients trace selection)]
-    [values (nonempty! (cm/to-array values) selection) (cm/to-array gradients)]))
 
 (defn- flat-values
   "[values-choicemap flat-values others] of the selection at trace, others
@@ -175,33 +176,67 @@
             (throw e)))))))
 
 (defn- tried
-  "f, a log density's gradient (or value and gradient) of [v others], at
-   positions a move tries: a distribution's parameter that fails its check
-   there (a scale that underflowed to 0, say) leaves the density
-   undefined, so f gives (nan v), a divergence, as Stan rejects a proposal
-   at a domain error (DESIGN §9, PROVISIONAL). Any other error, a
-   structure change or a value's shape, is raised."
+  "f, a log density's value and gradient of [v others], at positions a move
+   tries: a distribution's parameter that fails its check there (a scale
+   that underflowed to 0, say) leaves the density undefined, so f gives
+   (nan v), a divergence, as Stan rejects a proposal at a domain error
+   (DESIGN §9, PROVISIONAL). Any other error, a structure change or a
+   value's shape, is raised. In a batched run the check may fail for some
+   particles only: the batched-branch error, so that each particle moves
+   on its own."
   [f nan]
   (fn [v others]
     (try (f v others)
          (catch clojure.lang.ExceptionInfo e
-           (if (let [{:keys [distribution param]} (ex-data e)] (and distribution param))
-             (nan v)
-             (throw e))))))
+           (cond (not (let [{:keys [distribution param]} (ex-data e)] (and distribution param))) (throw e)
+                 (batch/batch-backend? array/*backend*)
+                 (throw (array/batched-branch "A parameter fails its check at a position tried" {} e))
+                 :else (nan v))))))
+
+(def ^:private nan-value-and-grad
+  "A tried value and gradient's divergence."
+  (fn [v] [##NaN (* v ##NaN)]))
+
+(defn- verdict
+  "A move's proposal v' from v (flat values shaped by proto) as a function
+   of arrays only, so per particle in a batched run: {:values the selected
+   choices at v' if accepted, at v if not, :accepted?, :log-alpha (-Inf
+   when diverged), :diverged? (also when log-alpha is not finite: an energy
+   that overflowed, or NaN), :start-ok}. Accepted with probability
+   min(1, exp(log-alpha)) by the uniform of key, as mh/accept."
+  [proto v v' log-alpha diverged start-ok key]
+  (let [diverged (array/logical-or diverged (array/logical-not (array/isfinite log-alpha)))
+        accepted (array/logical-and (array/logical-not diverged)
+                                    (array/logical-or (>= log-alpha 0.0) (< (array/log (rng/uniform key)) log-alpha)))]
+    {:values (cm/from-array proto (array/where accepted v' v))
+     :accepted? accepted
+     :log-alpha (array/where diverged ##-Inf log-alpha)
+     :diverged? diverged
+     :start-ok start-ok}))
+
+(defn- moved
+  "A scalar kernel's result from its move's verdict: the trace updated to
+   the values (with key) when accepted, the trace itself when not."
+  [trace {:keys [values accepted? log-alpha diverged?]} key]
+  (cond (array/truthy? diverged?) (diverged trace)
+        (array/truthy? accepted?) {:trace (:trace (gfi/update trace values key)) :accepted? true
+                                   :log-alpha (double (array/item log-alpha)) :diverged? false}
+        :else {:trace trace :accepted? false :log-alpha (double (array/item log-alpha)) :diverged? false}))
 
 (defn- mala-proposal
   "MALA's proposal as a function of arrays only: [v noise inv others] →
-   [v' log q(v | v') - log q(v' | v) diverged start-ok], preconditioned by
-   the inverse metric inv (v' ~ N(v + tau·inv ⊙ ∇, 2 tau·inv)), diverged
-   true when v', the gradients or the densities are not finite (or a
-   parameter fails its check at v', tried), start-ok whether the log density
-   and its gradient at v are. The reverse gradient is taken at v' only when
-   v' is finite (at v otherwise: assess would refuse a NaN), so a compiled
+   [v' log q(v | v') - log q(v' | v) diverged start-ok lp lp'],
+   preconditioned by the inverse metric inv (v' ~ N(v + tau·inv ⊙ ∇,
+   2 tau·inv)), diverged true when v', the gradients or the densities are
+   not finite (or a parameter fails its check at v', tried), start-ok
+   whether the log density and its gradient at v are, lp and lp' the log
+   densities at v and v'. The reverse gradient is taken at v' only when v'
+   is finite (at v otherwise: assess would refuse a NaN), so a compiled
    proposal needs no branch."
   [gf args proto tau]
   (let [density (log-density gf args proto)
         value-and-grad (array/value-and-grad density)
-        grad-tried (tried (array/grad density) #(* % ##NaN))
+        tried-value-and-grad (tried value-and-grad nan-value-and-grad)
         root-2tau (Math/sqrt (* 2.0 (double tau)))]
     (fn [v noise inv others]
       (let [sd (* root-2tau (array/sqrt inv))
@@ -210,10 +245,10 @@
             v' (+ fwd-mu (* sd noise))
             ok (finite g v')
             v' (array/where ok v' v)
-            g' (grad-tried v' others)
+            [lp' g'] (tried-value-and-grad v' others)
             bwd-mu (+ v' (* tau (* inv g')))
             log-q (- (normal-lp v bwd-mu sd) (normal-lp v' fwd-mu sd))]
-        [v' log-q (array/logical-not (array/logical-and ok (finite g' log-q))) (finite lp g)]))))
+        [v' log-q (array/logical-not (array/logical-and ok (finite g' log-q))) (finite lp g) lp lp']))))
 
 (defn- options
   "opts, an options map or nil (loud for anything else, such as a key in
@@ -235,6 +270,20 @@
                                          {:value key-or-opts})))]
     (assoc opts :key (or (:key opts) (gfi/next-key)))))
 
+(defn- mala-move
+  "MALA's move of trace as a function of arrays and keys only (verdict), so
+   that it runs batched over particles too: options and keys mala's."
+  [trace selection tau {:keys [compile? inv-metric]} key]
+  (let [[k-propose _ k-accept] (rng/split key 3)
+        [proto v others] (flat-values trace selection)
+        inv (inverse-metric inv-metric v)
+        noise (rng/normal k-propose (array/shape v))
+        build #(mala-proposal (:gen-fn trace) (:args trace) proto tau)
+        ;; the proposal as a function of the selected values, compiled or not
+        [v' log-q diverged start-ok lp lp'] (or (when compile? ((compiled trace proto others [:mala tau] build) v noise inv others))
+                                               ((build) v noise inv others))]
+    (verdict proto v v' (+ (- lp' lp) log-q) diverged start-ok k-accept)))
+
 (defn mala
   "Metropolis-adjusted Langevin: propose v' ~ N(v + tau·∇, √(2 tau)) for the
    selected choices v, with the reverse move's density from the gradient at
@@ -244,20 +293,10 @@
    compiled function, as hmc's."
   ([trace selection tau] (mala trace selection tau nil))
   ([trace selection tau key-or-opts]
-   (let [{:keys [key compile? inv-metric]} (step-opts key-or-opts)
-         [k-propose k-update k-accept] (rng/split key 3)
-         [proto v others] (flat-values trace selection)
-         inv (inverse-metric inv-metric v)
-         noise (rng/normal k-propose (array/shape v))
-         build #(mala-proposal (:gen-fn trace) (:args trace) proto tau)
-         ;; the proposal as a function of the selected values, compiled or not
-         [v' log-q diverged? start-ok] (or (when compile? ((compiled trace proto others [:mala tau] build) v noise inv others))
-                                           ((build) v noise inv others))]
-     (check-start! "mala" start-ok trace selection)
-     (if (array/truthy? diverged?)
-       (diverged trace)
-       (let [[t' weight] (move-to trace proto v' k-update)]
-         (accept trace t' (+ weight log-q) k-accept))))))
+   (let [{:keys [key] :as opts} (step-opts key-or-opts)
+         move (mala-move trace selection tau opts key)]
+     (check-start! "mala" (:start-ok move) trace selection)
+     (moved trace move (second (rng/split key 3))))))
 
 (defn- leapfrog
   "One leapfrog step of size eps (signed: negative runs time backwards)
@@ -282,43 +321,72 @@
 
 (defn- leapfrogs
   "L leapfrog steps as a function of arrays only: [v p eps inv others] →
-   [v' p' diverged start-ok]. diverged is true once a step is not ok (a
-   non-finite value, or a parameter failing its check), and from that step
-   on the state stays at its last finite values, so a compiled step needs
-   no early exit. start-ok is whether the log density and its gradient at v
-   are finite."
+   [v' p' diverged start-ok lp lp'], lp and lp' the log densities at v and
+   v'. diverged is true once a step is not ok (a non-finite value, or a
+   parameter failing its check), and from that step on the state stays at
+   its last finite values, so a compiled step needs no early exit. start-ok
+   is whether the log density and its gradient at v are finite."
   [gf args proto L]
   (let [value-and-grad (array/value-and-grad (log-density gf args proto))
         step (leapfrog value-and-grad)]
     (fn [v p eps inv others]
       (let [[lp g] (value-and-grad v others)
             start-ok (finite lp g)]
-        (loop [i 0 v v p p g g diverged (array/logical-not start-ok)]
+        (loop [i 0 v v p p g g lp' lp diverged (array/logical-not start-ok)]
           (if (< i (long L))
-            (let [[v' p' g' _ ok] (step v p g eps inv others)
+            (let [[v-next p-next g-next lp-next ok] (step v p g eps inv others)
                   diverged (array/logical-or diverged (array/logical-not ok))]
-              (recur (inc i) (array/where diverged v v') (array/where diverged p p')
-                     (array/where diverged g g') diverged))
-            [v p diverged start-ok]))))))
+              (recur (inc i) (array/where diverged v v-next) (array/where diverged p p-next)
+                     (array/where diverged g g-next) (array/where diverged lp' lp-next) diverged))
+            [v p diverged start-ok lp lp']))))))
+
+(defn- hmc-move
+  "HMC's move of trace as a function of arrays and keys only (verdict), so
+   that it runs batched over particles too: options and keys hmc's."
+  [trace selection {:keys [L eps compile? inv-metric] :or {L 10 eps 0.1}} key]
+  (let [[k-momenta _ k-accept] (rng/split key 3)
+        [proto v others] (flat-values trace selection)
+        inv (inverse-metric inv-metric v)
+        ;; the momenta's scale, √M
+        sd (/ 1.0 (array/sqrt inv))
+        kinetic (fn [p] (normal-lp p 0.0 sd))
+        p0 (* sd (rng/normal k-momenta (array/shape v)))
+        build #(leapfrogs (:gen-fn trace) (:args trace) proto L)
+        ;; the L steps as a function of the selected values, compiled or
+        ;; not: a trace is updated once, at the end
+        [v' p diverged start-ok lp lp'] (or (when compile? ((compiled trace proto others [:hmc L] build) v p0 eps inv others))
+                                           ((build) v p0 eps inv others))]
+    (verdict proto v v' (+ (- lp' lp) (- (kinetic p) (kinetic p0))) diverged start-ok k-accept)))
 
 (defn- uniform
   "A uniform draw on [0, 1) on key, as a host double."
   ^double [key]
   (double (array/item (rng/uniform key))))
 
+(defn- check-jitter!
+  "jitter, loud unless 0 ≤ jitter < 1."
+  [jitter]
+  (when-not (and (number? jitter) (<= 0.0 (double jitter)) (< (double jitter) 1.0))
+    (throw (ex-info (str ":jitter must be at least 0 and below 1, not " (pr-str jitter))
+                    {:reason :invalid-jitter :jitter jitter})))
+  jitter)
+
+(defn- jitter-step
+  "eps·(1 + jitter·(2u - 1)): the step size of a transition jittered by u."
+  [eps jitter u]
+  (* eps (+ 1.0 (* jitter (- (* 2.0 u) 1.0)))))
+
 (defn- jittered
   "One transition's step size, Stan's stepsize_jitter (Neal 2011's remedy
    for a trajectory of fixed length that returns near its start):
    eps·(1 + jitter·(2u - 1)), u uniform on the transition's key at index 3,
-   beside the three keys it splits. With jitter 0, eps, and nothing is
-   drawn. Loud unless 0 ≤ jitter < 1."
+   beside the three keys it splits, read on the host. With jitter 0, eps,
+   and nothing is drawn. Loud unless 0 ≤ jitter < 1."
   [eps jitter key]
-  (when-not (and (number? jitter) (<= 0.0 (double jitter)) (< (double jitter) 1.0))
-    (throw (ex-info (str ":jitter must be at least 0 and below 1, not " (pr-str jitter))
-                    {:reason :invalid-jitter :jitter jitter})))
+  (check-jitter! jitter)
   (if (zero? (double jitter))
     eps
-    (* eps (+ 1.0 (* (double jitter) (- (* 2.0 (uniform (rng/fold-in key 3))) 1.0))))))
+    (jitter-step eps (double jitter) (uniform (rng/fold-in key 3)))))
 
 (defn hmc
   "Hamiltonian Monte Carlo on the selected choices: L leapfrog steps of size
@@ -338,25 +406,11 @@
   ([trace selection] (hmc trace selection nil))
   ([trace selection key-or-opts] (let [opts (step-opts key-or-opts)] (hmc trace selection opts (:key opts))))
   ([trace selection opts key]
-   (let [{:keys [L eps compile? inv-metric jitter] :or {L 10 eps 0.1 jitter 0}} (options opts)
+   (let [{:keys [eps jitter] :or {eps 0.1 jitter 0} :as opts} (options opts)
          step (jittered eps jitter key)
-         [k-momenta k-update k-accept] (rng/split key 3)
-         [proto v others] (flat-values trace selection)
-         inv (inverse-metric inv-metric v)
-         ;; the momenta's scale, √M
-         sd (/ 1.0 (array/sqrt inv))
-         kinetic (fn [p] (normal-lp p 0.0 sd))
-         p0 (* sd (rng/normal k-momenta (array/shape v)))
-         build #(leapfrogs (:gen-fn trace) (:args trace) proto L)
-         ;; the L steps as a function of the selected values, compiled or
-         ;; not: the trace is updated once, at the end
-         [v' p diverged? start-ok] (or (when compile? ((compiled trace proto others [:hmc L] build) v p0 step inv others))
-                                       ((build) v p0 step inv others))]
-     (check-start! "hmc" start-ok trace selection)
-     (cond-> (if (array/truthy? diverged?)
-               (diverged trace)
-               (let [[t'] (move-to trace proto v' k-update)]
-                 (accept trace t' (+ (- (:score t') (:score trace)) (- (kinetic p) (kinetic p0))) k-accept)))
+         move (hmc-move trace selection (assoc opts :eps step) key)]
+     (check-start! "hmc" (:start-ok move) trace selection)
+     (cond-> (moved trace move (second (rng/split key 3)))
        (pos? (double jitter)) (assoc :eps step)))))
 
 ;; ---------------------------------------------------------------------------
@@ -539,20 +593,37 @@
       :accept-stat (/ (double accept-sum) (long n-leapfrog))
       :tree-depth tree-depth :n-leapfrog n-leapfrog :diverged? diverged? :energy (:h sample) :eps eps})))
 
+(defn- map-move
+  "map-optimize's line search as a function of arrays only, so that it runs
+   batched over particles too, each with its own step size: {:values the
+   selected choices it moves to, :moved?}. The search ends when every
+   particle has its step, read across the batch (array/all-true?)."
+  [trace selection {:keys [max-step-size tau min-step-size] :or {max-step-size 0.1 tau 0.5 min-step-size 1e-16}}]
+  (let [[proto v others] (flat-values trace selection)
+        density (log-density (:gen-fn trace) (:args trace) proto)
+        g ((array/grad density) v others)
+        score (:score trace)]
+    (loop [step max-step-size to v moved false done false]
+      (let [candidate (+ v (* step g))
+            better (>= (density candidate others) score)
+            taken (array/logical-and better (array/logical-not done))
+            to (array/where taken candidate to)
+            moved (array/logical-or moved taken)
+            ;; a step below the least is tried before the search gives up
+            done (array/logical-or done (array/logical-or better (< step min-step-size)))]
+        (if (array/all-true? done)
+          {:values (cm/from-array proto to) :moved? moved}
+          (recur (array/where done step (* step tau)) to moved done))))))
+
 (defn map-optimize
   "One step of gradient ascent on the log density of the selected choices,
    with backtracking: try the step size max-step-size, shrinking it by tau
    until the score does not decrease (Gen.jl's map_optimize). Options:
    :max-step-size (0.1), :tau (0.5), :min-step-size (1e-16)."
   ([trace selection] (map-optimize trace selection nil))
-  ([trace selection {:keys [max-step-size tau min-step-size] :or {max-step-size 0.1 tau 0.5 min-step-size 1e-16}}]
-   (let [[proto v g] (flat-gradient trace selection)
-         score (double (array/item (:score trace)))]
-     (loop [step (double max-step-size)]
-       (let [[t _] (move-to trace proto (+ v (* step g)) (rng/key 0))]
-         (cond (>= (double (array/item (:score t))) score) t
-               (< step (double min-step-size)) trace
-               :else (recur (clojure.core/* step (double tau)))))))))
+  ([trace selection opts]
+   (let [{:keys [values moved?]} (map-move trace selection opts)]
+     (if (array/truthy? moved?) (:trace (gfi/update trace values (rng/key 0))) trace))))
 
 (defn elliptical-slice
   "Elliptical slice sampling (Murray, Adams and MacKay 2010) of the choice at
@@ -585,3 +656,81 @@
            (let [[lo hi] (if (neg? theta) [theta hi] [lo theta])
                  u (double (array/item (rng/uniform (rng/fold-in k-theta (inc i)))))]
              (recur (inc i) (+ lo (* u (- hi lo))) lo hi))))))))
+
+;; ---------------------------------------------------------------------------
+;; Every particle at once
+;; ---------------------------------------------------------------------------
+
+(defn- uncompiled!
+  "A -particles kernel's options, which cannot ask for :compile?: a batched
+   step runs under the batch tracer, which array/compile does not see
+   through."
+  [kernel opts]
+  (when (:compile? opts)
+    (throw (ex-info (str kernel " does not compile its steps: they run under the batch tracer") {:kernel kernel})))
+  opts)
+
+(defn- check-starts!
+  "check-start! for every particle, start-ok an [n] bool array."
+  [kernel start-ok selection]
+  (when-not (array/all-true? start-ok)
+    (let [bad (vec (keep-indexed #(when-not %2 %1) (array/->clj start-ok)))]
+      (throw (ex-info (str kernel ": the log density or its gradient at the selection is not finite at the start of"
+                           " particles " bad ", so no move from them can be weighed")
+                      {:reason :non-finite-start :kernel (keyword kernel) :particles bad :selection selection})))))
+
+(defn- particle-moves
+  "Every particle's move (move, of a trace and a key, as hmc-move) at once,
+   by gen.batched/map-particles, each accepted on its own: {:particles,
+   :accepted? and :diverged? (n booleans each), :log-alpha (an [n] array)},
+   and :eps (an [n] array) when the moves report their step sizes."
+  [kernel ps selection move key]
+  (let [{:keys [values accepted? log-alpha diverged? start-ok eps]} (batched/map-particles ps move key)
+        accepted (mapv true? (array/->clj accepted?))]
+    (check-starts! kernel start-ok selection)
+    (cond-> {:particles (if (some true? accepted) (batched/set-choices ps values) ps)
+             :accepted? accepted
+             :log-alpha log-alpha
+             :diverged? (mapv true? (array/->clj diverged?))}
+      eps (assoc :eps eps))))
+
+(defn hmc-particles
+  "hmc on every particle of a gen.batched collection, n independent chains
+   each accepted on its own: one batched gradient per leapfrog step for all
+   of them, where the model runs batched. Arguments as hmc's, without
+   :compile?; with :jitter each chain's step size is jittered by its own u,
+   as its own hmc's would be (DESIGN §9, PROVISIONAL). Returns {:particles,
+   :accepted? and :diverged? (n booleans each), :log-alpha (an [n] array)},
+   and with :jitter :eps, the steps taken (an [n] array); a start that is
+   not finite is an error, as hmc's."
+  ([ps selection] (hmc-particles ps selection nil))
+  ([ps selection key-or-opts] (let [opts (step-opts key-or-opts)] (hmc-particles ps selection opts (:key opts))))
+  ([ps selection opts key]
+   (let [{:keys [eps jitter] :or {eps 0.1 jitter 0} :as opts} (uncompiled! "hmc-particles" (options opts))
+         jitter (double (check-jitter! jitter))
+         ;; jittered's step, its u drawn per particle (an array, not read)
+         move (fn [t k]
+                (if (zero? jitter)
+                  (hmc-move t selection opts k)
+                  (let [step (jitter-step eps jitter (rng/uniform (rng/fold-in k 3)))]
+                    (assoc (hmc-move t selection (assoc opts :eps step) k) :eps step))))]
+     (particle-moves "hmc" ps selection move key))))
+
+(defn mala-particles
+  "mala on every particle of a gen.batched collection, as hmc-particles:
+   one batched gradient at the start and one at the proposal for all of
+   them. Arguments as mala's, without :compile?; returns as hmc-particles."
+  ([ps selection tau] (mala-particles ps selection tau nil))
+  ([ps selection tau key-or-opts]
+   (let [{:keys [key] :as opts} (uncompiled! "mala-particles" (step-opts key-or-opts))]
+     (particle-moves "mala" ps selection #(mala-move %1 selection tau opts %2) key))))
+
+(defn map-optimize-particles
+  "map-optimize on every particle of a gen.batched collection, each with
+   its own line search: one batched gradient, and one batched score per
+   step size tried, for all of them where the model runs batched. Options
+   as map-optimize's. Returns the particles."
+  ([ps selection] (map-optimize-particles ps selection nil))
+  ([ps selection opts]
+   (let [{:keys [values moved?]} (batched/map-particles ps (fn [t _] (map-move t selection opts)) nil)]
+     (if (array/any-true? moved?) (batched/set-choices ps values) ps))))

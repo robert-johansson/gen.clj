@@ -5,10 +5,12 @@
    holds the posterior, where the ELBO and the K-sample bound both equal
    log p(y). The estimators' means are checked against exact gradients (the
    ELBO's in closed form, the K-sample bound's by reparameterization), which
-   carries the power; the fits check that the loops ascend."
+   carries the power; the fits check that the loops ascend. Each estimate
+   also with its draws batched (:batched?)."
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array :refer [+ - * /]]
+            [gen.batched :as b]
             [gen.choicemap :as cm]
             [gen.dist :as d]
             [gen.dist.core :as dc]
@@ -40,12 +42,14 @@
 (defn- average-of-last [n xs] (/ (reduce clojure.core/+ (take-last n xs)) n))
 
 (deftest at-the-posterior-the-bounds-are-the-evidence
-  (doseq [baseline [nil :leave-one-out]]
-    (is (ts/close? evidence (:objective (vi/elbo-gradient model [] observations family [] posterior 8 {:baseline baseline :key (rng/key 1)}))
+  (doseq [baseline [nil :leave-one-out] batched? [false true]]
+    (is (ts/close? evidence (:objective (vi/elbo-gradient model [] observations family [] posterior 8
+                                                          {:baseline baseline :key (rng/key 1) :batched? batched?}))
                    {:rtol 1e-6 :atol 1e-6})
         "every log weight is log p(y)"))
-  (doseq [baseline [:geometric :arithmetic]]
-    (is (ts/close? evidence (:objective (vi/vimco-gradient model [] observations family [] posterior 8 {:baseline baseline :key (rng/key 2)}))
+  (doseq [baseline [:geometric :arithmetic] batched? [false true]]
+    (is (ts/close? evidence (:objective (vi/vimco-gradient model [] observations family [] posterior 8
+                                                           {:baseline baseline :key (rng/key 2) :batched? batched?}))
                    {:rtol 1e-6 :atol 1e-6})))
   (testing "elsewhere the ELBO is below the evidence"
     (let [elbos (map #(:objective (vi/elbo-gradient model [] observations family [] start 50 {:key %}))
@@ -54,14 +58,18 @@
 
 (deftest ^:slow ^:heavy the-elbo-gradient-is-unbiased
   ;; ELBO(m, s) = E_q[log p(mu, y)] + H(q), so ∂/∂m = 1.3 - 2m and
-  ;; ∂/∂log-s = 1 - 2s²: (3.3, -4.44) at the start
+  ;; ∂/∂log-s = 1 - 2s²: (3.3, -4.44) at the start. Planted (2026-10-23):
+  ;; the batched draws' q gradients all the first draw's average 1/20 of
+  ;; the gradient, hundreds of standard errors off
   (let [exact {:m (- 1.3 (* 2 (:m start))) :log-s (- 1.0 (* 2 (Math/exp (* 2 (:log-s start)))))}]
-    (doseq [baseline [nil :leave-one-out]]
-      (let [grads (map #(:grads (vi/elbo-gradient model [] observations family [] start 20 {:baseline baseline :key %}))
+    (doseq [baseline [nil :leave-one-out] batched? [false true]]
+      (let [grads (map #(:grads (vi/elbo-gradient model [] observations family [] start 20
+                                                  {:baseline baseline :key % :batched? batched?}))
                        (rng/split (rng/key 4) 2000))]
         (doseq [k [:m :log-s]]
           (is (agrees? (mean-and-se (map (comp ts/number k) grads)) [(exact k) 0.0])
-              (str baseline " " k ": " (mean-and-se (map (comp ts/number k) grads)) " against " (exact k))))))))
+              (str baseline (when batched? ", batched ") " " k ": " (mean-and-se (map (comp ts/number k) grads))
+                   " against " (exact k))))))))
 
 (defn- reparameterized-gradient
   "Draws of the K-sample bound's gradient at {:m :log-s} by
@@ -81,13 +89,14 @@
 
 (deftest ^:slow ^:heavy the-vimco-gradient-is-unbiased
   (let [reference (reparameterized-gradient start 10 100000 (rng/key 5))]
-    (doseq [baseline [:geometric :arithmetic]]
-      (let [grads (map #(:grads (vi/vimco-gradient model [] observations family [] start 10 {:baseline baseline :key %}))
+    (doseq [baseline [:geometric :arithmetic] batched? [false true]]
+      (let [grads (map #(:grads (vi/vimco-gradient model [] observations family [] start 10
+                                                   {:baseline baseline :key % :batched? batched?}))
                        (rng/split (rng/key 6) 2000))]
         (doseq [k [:m :log-s]]
           (let [estimate (mean-and-se (map (comp ts/number k) grads))]
             (is (agrees? estimate (mean-and-se (reference k)))
-                (str baseline " " k ": " estimate " against " (mean-and-se (reference k))))))))))
+                (str baseline (when batched? ", batched ") " " k ": " estimate " against " (mean-and-se (reference k))))))))))
 
 ;; The fits' bands are five standard deviations of the final values over 16
 ;; keys (Adam at 0.02, 800 iterations), measured: Gen.jl's estimator ends
@@ -102,6 +111,13 @@
     (is (< (ts/abs (- (:m store) (:m posterior))) 0.21) (str store))
     (is (< (ts/abs (- (:log-s store) (:log-s posterior))) 0.16) (str store))
     (is (< (ts/abs (- (average-of-last 100 history) evidence)) 0.008) "the ELBO reaches the evidence"))
+  (testing "batched"
+    ;; the same estimator's distribution: the same bands
+    (let [{:keys [store history]} (vi/black-box-vi model [] observations family [] start (learn/adam {:lr 0.02})
+                                                    {:iters 800 :samples 20 :key (rng/key 7) :batched? true})]
+      (is (< (ts/abs (- (:m store) (:m posterior))) 0.21) (str store))
+      (is (< (ts/abs (- (:log-s store) (:log-s posterior))) 0.16) (str store))
+      (is (< (ts/abs (- (average-of-last 100 history) evidence)) 0.008))))
   (testing "with a leave-one-out baseline"
     (let [{:keys [store history]} (vi/black-box-vi model [] observations family [] start (learn/adam {:lr 0.02})
                                                     {:iters 800 :samples 20 :baseline :leave-one-out :key (rng/key 7)})]
@@ -130,8 +146,10 @@
   ;; q proposes only :mu; :nuisance comes from the model, and the weight
   ;; stays an importance weight of the extended q, so the ELBO is unchanged
   (let [model' (gen [] (let [mu (trace :mu (d/normal 0 1))] (trace :nuisance (d/normal 0 1)) (trace :y (d/normal mu 1)) mu))]
-    (is (ts/close? evidence (:objective (vi/elbo-gradient model' [] observations family [] posterior 8 {:key (rng/key 9)}))
-                   {:rtol 1e-6 :atol 1e-6}))))
+    (doseq [batched? [false true]]
+      (is (ts/close? evidence (:objective (vi/elbo-gradient model' [] observations family [] posterior 8
+                                                            {:key (rng/key 9) :batched? batched?}))
+                     {:rtol 1e-6 :atol 1e-6})))))
 
 ;; ---------------------------------------------------------------------------
 ;; Training the model's parameters (Gen.jl's model_update)
@@ -156,7 +174,9 @@
   ;; difference, exact for the ELBO (quadratic in θ) up to rounding,
   ;; eps · |objective| / h, about 3e-13 in float64 and 3e-4 in float32
   (doseq [[estimator opts] [[vi/elbo-gradient {}] [vi/elbo-gradient {:baseline :leave-one-out}]
-                            [vi/vimco-gradient {:baseline :geometric}] [vi/vimco-gradient {:baseline :arithmetic}]]]
+                            [vi/vimco-gradient {:baseline :geometric}] [vi/vimco-gradient {:baseline :arithmetic}]]
+          batched? [false true]
+          :let [opts (assoc opts :batched? batched?)]]
     (let [h 1e-3
           k (rng/key 13)
           at (fn [t] (ts/number (:objective (estimates estimator t k opts))))
@@ -164,6 +184,15 @@
           tol (if (ts/f32?) 1e-3 1e-6)]
       (is (ts/close? difference (:theta (:model-grads (estimates estimator theta k opts))) {:rtol tol :atol tol})
           (str estimator " " opts)))))
+
+(deftest batched-draws-are-one-batched-run
+  ;; the draws of q, the model's weights and every gradient, at once: a
+  ;; fallback to one draw at a time (gen.batched/map-particles's) is an
+  ;; error here. Planted (2026-10-23): the tracer's -value-and-grad as
+  ;; before (the batched-branch error) falls back, and fails
+  (with-redefs [b/traces (fn [_] (throw (ex-info "fell back to one draw at a time" {})))]
+    (is (map? (vi/elbo-gradient theta-model [] observations family [] start 6
+                                {:key (rng/key 18) :batched? true :model-store {:theta 0.4}})))))
 
 (defn- vimco-model-reference
   "Draws of the K-sample bound's θ-gradient at θ, Σ_k w̃_k (z_k - θ), z_k ~
@@ -232,9 +261,9 @@
     (ts/host (array/sum (* w (- 3.0 s)) {:axis 1}))))
 
 (deftest ^:slow ^:heavy the-model-gradient-counts-the-latents-the-model-draws
-  (let [grads (fn [estimator gf y theta seed]
+  (let [grads (fn [estimator gf y theta seed & [batched?]]
                 (map #(ts/number (:theta (:model-grads (estimator gf [] (cm/choicemap :y y) z1-family [] {:m 0.0} 10
-                                                                  {:key % :model-store {:theta theta}}))))
+                                                                  {:key % :model-store {:theta theta} :batched? batched?}))))
                      (rng/split (rng/key seed) 1000)))]
     (testing "the ELBO's, a coin: 2, at its baseline's variance"
       (let [gs (grads vi/elbo-gradient coin-model 1.0 0.5 30)
@@ -243,6 +272,9 @@
         (is (< (* se (Math/sqrt (count gs))) 0.4) (str "sd " (* se (Math/sqrt (count gs)))))))
     (testing "the ELBO's, a shift: 3 - θ = 3"
       (let [g (mean-and-se (grads vi/elbo-gradient shift-model 3.0 0.0 31))] (is (agrees? g [3.0 0.0]) (str g))))
+    (testing "batched, both"
+      (let [g (mean-and-se (grads vi/elbo-gradient coin-model 1.0 0.5 35 true))] (is (agrees? g [2.0 0.0]) (str g)))
+      (let [g (mean-and-se (grads vi/elbo-gradient shift-model 3.0 0.0 36 true))] (is (agrees? g [3.0 0.0]) (str g))))
     (testing "the K-sample bound's, a coin (K = 10)"
       (let [g (mean-and-se (grads vi/vimco-gradient coin-model 1.0 0.5 32))]
         (is (agrees? g [(coin-bound-derivative 10 0.5) 0.0]) (str g " against " (coin-bound-derivative 10 0.5)))))

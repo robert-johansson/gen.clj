@@ -716,3 +716,77 @@
                       (trace :y (d/normal (if (= :float32 (array/dtype x)) 0.0 5.0) 1))))]
       (binding [b/*spot-checks* :all]
         (is (b/batched? (spot-checked-on false #(b/simulate m [] 8 (rng/key 58)))))))))
+
+;; ---------------------------------------------------------------------------
+;; Functions of every particle: map-particles and set-choices
+;; ---------------------------------------------------------------------------
+
+(def ^:private observed (cm/choicemap [:y 0] 2.1 [:y 1] 3.9 [:y 2] 6.2))
+
+(defn- unbatched
+  "ps as the per-particle collection a fallback leaves."
+  [ps]
+  (assoc ps :trace nil :traces (b/traces ps)))
+
+(defn- each-trace
+  "f of each of ps's traces, with its row of x, stacked: map-particles by
+   definition (no draws)."
+  [ps f x]
+  (let [rs (map-indexed (fn [i t] (f t nil (array/take x i 0))) (b/traces ps))]
+    {:score (array/stack (mapv :score rs))
+     :shifted (array/stack (mapv :shifted rs))
+     :pair [(array/stack (mapv (comp first :pair) rs)) (array/stack (mapv (comp second :pair) rs))]
+     :doubled (array/stack (mapv #(cm/get-choice (:choices %) :s) rs))}))
+
+(defn- same-results? [r want]
+  (and (close? (:score r) (:score want))
+       (close? (:shifted r) (:shifted want))
+       (every? true? (map close? (:pair r) (:pair want)))
+       (close? (cm/get-choice (:choices r) :s) (:doubled want))))
+
+(deftest map-particles-is-f-of-each-trace
+  ;; vmap's semantics: batched or not, particle i's result is f's on its
+  ;; trace and its rows. Planted (2026-10-23): every particle given
+  ;; particle 0's rows fails the per-particle cases and the fallbacks; a
+  ;; shared value left unbroadcast fails its shape; the guard without its
+  ;; check of unread comparisons fails the raw if
+  (let [n 5
+        ps (:particles (b/generate linreg [[1.0 2.0 3.0]] observed n (rng/key 80)))
+        shifts (array/array (mapv #(* 0.5 %) (range n)))
+        f (fn [t _ shift] {:score (:score t) :shifted (+ (t :slope) shift) :pair [(t :intercept) 2.0]
+                           :choices (cm/choicemap :s (* 2.0 (t :slope)))})
+        want (each-trace ps f shifts)]
+    (is (b/batched? ps))
+    (testing "batched"
+      (let [r (b/map-particles ps f nil shifts)]
+        (is (same-results? r want))
+        (is (= [n] (array/shape (second (:pair r)))) "a shared value, broadcast to every particle")))
+    (testing "per particle, the form a fallback leaves"
+      (is (same-results? (b/map-particles (unbatched ps) f nil shifts) want)))
+    (testing "where f reads a particle's value on the host, or branches on one with a raw if, one trace at a time"
+      ;; batched, the raw if would take its first branch for every particle
+      (doseq [g [(fn [t k shift] (assoc (f t k shift) :read (array/item (t :slope))))
+                 (fn [t k shift] (update (f t k shift) :shifted #(if (array/> (t :slope) 1e9) (+ % 100.0) %)))]]
+        (is (same-results? (b/map-particles ps g nil shifts) want))))
+    (testing "draws are per particle"
+      (let [r (b/map-particles ps (fn [_ k] (rng/normal k [2])) (rng/key 81))]
+        (is (= [n 2] (array/shape r)))
+        (is (= n (count (distinct (map first (ts/host r))))))))))
+
+(deftest set-choices-sets-each-particle-s-own
+  ;; each trace is its generative function's trace of its choices with the
+  ;; new values, batched or not. Planted (2026-10-23): the new values
+  ;; merged under the old ones keep the old slopes
+  (let [n 4
+        ps (:particles (b/generate linreg [[1.0 2.0 3.0]] observed n (rng/key 82)))
+        slopes (array/array [-1.0 0.5 2.0 3.5])
+        new (cm/choicemap :slope slopes)]
+    (doseq [[label ps] [["batched" ps] ["per particle" (unbatched ps)]]]
+      (testing label
+        (let [ps' (b/set-choices ps new)
+              trs (b/traces ps')]
+          (is (= (b/batched? ps) (b/batched? ps')))
+          (is (close? slopes (b/choice ps' :slope)))
+          (is (close? (b/choice ps :intercept) (b/choice ps' :intercept)) "the other choices kept")
+          (is (every? consistent? trs))
+          (is (close? (b/scores ps') (array/stack (mapv :score trs)))))))))

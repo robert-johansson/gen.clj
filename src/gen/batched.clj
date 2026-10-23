@@ -42,6 +42,8 @@
      (regenerate ps args argdiffs selection key)      → {:particles :weights}
      (take ps indices)        → particles: the given ones (resampling)
      (select mask ps qs)      → particles: ps's where mask is true, qs's elsewhere
+     (set-choices ps choices) → particles: each with its own values at choices' addresses
+     (map-particles ps f key xs…) → (f trace key x…) of every particle, stacked
      (traces ps)              → the n scalar traces
      (choice ps addr)         → an [n …] array of the choice across particles
      (scores ps)              → an [n] array
@@ -134,14 +136,15 @@
     (walk r)
     s))
 
-(defn- run
-  "op on gf batched over n particles. A batched comparison that nothing
-   read, and that the run does not hand back, raises the fallback: it is
-   what a raw if on a comparison in a helper function leaves (a batch is
-   true to Clojure's if, so one branch was taken for every particle)."
-  [gf op args n opts]
-  (let [[[r bools] branch] (array/logging-branches
-                            #(batch/unread-bools (fn [] (gfi/outside-revise (gfi/run-op gf op args (assoc opts :batch-shape [n]))))))]
+(defn- guarded
+  "(f) run batched over n particles, under a batched run's guards: a
+   batched-branch error raised in it, caught or not, or a batched
+   comparison that nothing read and the result does not hand back, fails
+   it. Such a comparison is what a raw if on it in a helper function
+   leaves (a batch is true to Clojure's if, so one branch was taken for
+   every particle)."
+  [n f]
+  (let [[[r bools] branch] (array/logging-branches #(batch/unread-bools (fn [] (batch/batched [n] (f)))))]
     ;; a batched-branch error the code caught still means the particles differ
     (when branch (throw branch))
     (when (seq bools)
@@ -152,6 +155,11 @@
                                " unused")
                           {:gen.array/batched-branch true ::unread-comparison true})))))
     r))
+
+(defn- run
+  "op on gf batched over n particles, guarded."
+  [gf op args n opts]
+  (guarded n #(gfi/outside-revise (gfi/run-op gf op args opts))))
 
 (defn- per-particle [ps traces] (assoc ps :trace nil :traces (vec traces)))
 
@@ -617,3 +625,67 @@
       (try (plain (batch/batched [n] (gfi/project (:trace (check ps)) selection)) n)
            (catch Exception _ (each)))
       (each))))
+
+;; ---------------------------------------------------------------------------
+;; Functions of every particle (gradient kernels: gen.inference.mcmc)
+;; ---------------------------------------------------------------------------
+
+(defn- mismatched [rs]
+  (throw (ex-info "map-particles: the particles' results differ in structure" {:results rs})))
+
+(defn- stacked
+  "Results of one structure, one per particle, as one: each array leaf
+   stacked on a leading particle axis. Any other leaf (nil, a keyword) is
+   the same in every result."
+  [rs]
+  (let [r (first rs)]
+    (cond (map? r) (do (when-not (apply = (map #(set (keys %)) rs)) (mismatched rs))
+                       (reduce-kv (fn [m k _] (assoc m k (stacked (mapv #(get % k) rs)))) r r))
+          (or (vector? r) (seq? r)) (do (when-not (apply = (map count rs)) (mismatched rs))
+                                        (apply mapv (fn [& xs] (stacked (vec xs))) rs))
+          (array/array? r) (array/stack (vec rs))
+          (apply = rs) r
+          :else (mismatched rs))))
+
+(defn map-particles
+  "(f trace key x …) of every particle at once, as vmap's: each x a tree of
+   arrays with the leading particle axis, of which a particle is given its
+   own rows. Where ps is batched, f's code runs once, on the batched trace
+   under the batch tracer, with each x batched and the key's draws made per
+   particle. Where ps holds per-particle traces, or the batched run fails
+   (as a batched simulate's would: a branch on a batched value, a host read,
+   an unread batched comparison), f runs on each trace, with its own key
+   (key split n ways; nil stays nil) and rows. f returns a tree of arrays:
+   maps, vectors and choice maps of them. Every array leaf comes back with
+   the leading particle axis, a shared value broadcast to every particle."
+  [ps f key & xs]
+  (let [n (:n ps)
+        rows (fn [i] (map (fn [x] (array/tree-map #(array/take % i 0) x)) xs))
+        each #(stacked (mapv (fn [i t k] (apply f t k (rows i))) (range n) (traces ps) (if key (rng/split key n) (repeat nil))))]
+    (if (batched? ps)
+      ;; checked first, outside the batched run: its re-runs are scalar
+      (let [t (:trace (check ps))]
+        (try (array/tree-map #(if (array/array? %) (plain % n) %)
+                             (guarded n #(apply f t key (map (fn [x] (array/tree-map (fn [v] (batch/wrap v [n])) x)) xs))))
+             (catch Exception e
+               (if (::diverged (ex-data e)) (throw e) (each)))))
+      (each))))
+
+(defn set-choices
+  "The particles with their choices at the addresses of choices set, each
+   particle's to its own value (choices' leaves have the leading particle
+   axis), every other choice kept: each trace remade from its choices by
+   the generative function that made it (gfi/update, where ps holds
+   per-particle traces). The remade batched trace is checked when read, as
+   select's."
+  [ps choices]
+  (let [n (:n ps)
+        row (fn [i] (map-leaves #(array/take % i 0) choices))
+        fallback (fn [ps] (per-particle ps (map-indexed #(:trace (gfi/update %2 (row %1) (rng/key 0))) (traces ps))))]
+    (if (batched? ps)
+      (let [t (:trace (check ps))
+            maker (trace/maker t)
+            merged (cm/override (plain-choices (:choices t) n) choices)]
+        (batched-or (assoc ps :trace (assoc (rebuild maker (:args ps) n merged) :gen-fn (:gen-fn ps)) ::unchecked? true)
+                    (fallback ps)))
+      (fallback ps))))

@@ -74,9 +74,14 @@
         :else (not-an-array op x)))
 
 (defn- wraps?
-  "Does backend b wrap inner (so that mixed operands run on b)?"
+  "Does backend b wrap inner, itself or through the backends it wraps (so
+   that mixed operands run on b)? The tape over the batch tracer wraps the
+   tracer's backend too, whose arrays are a batched run's shared values."
   [b inner]
-  (and (instance? gen.array.protocols.IWrappingBackend b) (identical? (p/-inner b) inner)))
+  (loop [b b]
+    (and (instance? gen.array.protocols.IWrappingBackend b)
+         (let [i (p/-inner b)]
+           (or (identical? i inner) (recur i))))))
 
 (defn- join-backends [op b1 b2]
   (cond (nil? b1) b2
@@ -946,13 +951,19 @@
    :argnums (default 0), or a vector of gradients when :argnums is a vector.
    An argument may be a tree of maps and vectors of float arrays and numbers;
    its gradient has the same structure. stop-gradient blocks differentiation.
-   First order only: f may not itself differentiate."
+   First order only: f may not itself differentiate.
+   In a batched run (gen.array.batch), or of batched arguments, the value
+   and every gradient are per particle, as vmap's (docs/array-api.md §8b):
+   a shared argument's gradient too, which sums over the particles to the
+   gradient of their total."
   ([f] (value-and-grad f nil))
   ([f {:keys [argnums] :or {argnums 0}}]
    (fn [& args]
      (let [args (vec args)
            positions (if (sequential? argnums) (vec argnums) [argnums])
-           b (backend-of :value-and-grad (mapcat #(tree-leaves (nth args %)) positions))
+           ;; in a batched run, on the tracer even when every leaf is
+           ;; shared: f may reach the run's batched values
+           b (effective-backend (backend-of :value-and-grad (mapcat #(tree-leaves (nth args %)) positions)))
            [v grads] (p/-value-and-grad b f args positions)]
        [v (if (sequential? argnums) grads (first grads))]))))
 
