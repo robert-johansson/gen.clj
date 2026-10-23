@@ -719,11 +719,13 @@
 ;; --- Circular families ----------------------------------------------------
 
 (defn- wrap-angle
-  "x as the angle in [-π, π) of the same point on the circle; within
-   [-π, π] also for an x so large (beyond 2^53·π in float64) that its point
-   is lost to rounding."
+  "x as the angle in [-π, π) of the same point on the circle. Where
+   rounding leaves it outside (π, which is -π's point, or anywhere for an x
+   beyond 2^53·π in float64, whose point is lost), it is -π: a where, not a
+   clamp, whose tie at -π would halve a gradient there."
   [x]
-  (array/clip (- x (* two-pi (array/floor (/ (+ x Math/PI) two-pi)))) (- Math/PI) Math/PI))
+  (let [w (- x (* two-pi (array/floor (/ (+ x Math/PI) two-pi))))]
+    (where (logical-and (>= w (- Math/PI)) (< w Math/PI)) w (- Math/PI))))
 
 (defn- on-circle?
   "Is v an angle in [-π, π], the circular families' support? (π is -π's
