@@ -549,7 +549,7 @@
                        :let [t (keyword "gen.dist" (name sym))]
                        :when (and (::dc/constructor (meta v)) (contains? (methods dc/-sample) t))]
                    t)]
-    (is (= 31 (count families)))
+    (is (= 37 (count families)))
     (is (every? #(contains? (methods dc/-value-shape) %) families)
         (str (remove #(contains? (methods dc/-value-shape) %) families)))
     (is (= #{::d/bernoulli ::d/categorical ::d/categorical-logits ::d/uniform-discrete ::d/geometric ::d/poisson

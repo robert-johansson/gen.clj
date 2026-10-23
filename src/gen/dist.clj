@@ -4,8 +4,10 @@
    probabilities), plus categorical-logits, and further continuous
    families with Distributions.jl's names and parameters (chi-squared,
    f-dist, gumbel, levy, log-normal, logistic, nakagami, pareto, student-t,
-   triangular, weibull). Discrete values are 0-based
-   integers; bernoulli values are booleans.
+   triangular, weibull; truncated-normal, von-mises, wishart, inv-wishart),
+   and the wrapped circular families with scipy's (wrapped-cauchy,
+   wrapped-normal). Discrete values are 0-based integers; bernoulli values
+   are booleans; circular values are angles in [-π, π).
 
    Every log-prob is -Inf outside the support. Every sampler is a pure,
    branch-free function of its key: rejection samplers run a fixed number of
@@ -17,6 +19,7 @@
             [gen.array.dtype :as dt]
             [gen.array.linalg :as la]
             [gen.array.shape :as sh]
+            [gen.array.special :as special]
             [gen.dist.core :as dc :refer [defdist]]
             [gen.random :as rng]))
 
@@ -580,6 +583,423 @@
     (let [in (>= v 0)
           x (/ (stand-in in v theta) theta)]
       (guard in (- (+ (log (/ alpha theta)) (xlogy (- alpha 1) x)) (array/pow x alpha))))))
+
+;; ---------------------------------------------------------------------------
+;; GenMLX's further families: the truncated normal, three on the circle and
+;; two over matrices, with Distributions.jl's names and parameters where it
+;; has them (truncated(Normal), VonMises, Wishart, InverseWishart), and
+;; scipy's, centered on mu, for the wrapped families
+;; ---------------------------------------------------------------------------
+
+(def ^:private sqrt-2 (Math/sqrt 2.0))
+(def ^:private two-pi (* 2.0 Math/PI))
+(def ^:private log-2pi (Math/log two-pi))
+
+;; --- The truncated normal -------------------------------------------------
+
+(defn- log-erfc
+  "log erfc(z) for finite z >= 0: Numerical Recipes' Chebyshev fit
+   t·e^(-z² + P(t)) (gen.array.special's erfc on the host), its log taken
+   term by term, so it never underflows (log erfc(40) is -1604.3)."
+  [z]
+  (let [t (/ 2.0 (+ 2.0 z))
+        ty (- (* 4.0 t) 2.0)
+        [c0 & cs] special/erfc-coefficients
+        ;; Clenshaw's recurrence, from the last coefficient down
+        [d dd] (reduce (fn [[d dd] c] [(+ (- (* ty d) dd) c) d]) [0.0 0.0] (reverse cs))]
+    (- (+ (log t) (* 0.5 (+ c0 (* ty d)))) (square z) dd)))
+
+(defn- log-ndtr
+  "log Φ(x) for x <= 0, Φ the standard normal's CDF, -Inf at -Inf:
+   log erfc(-x/√2) - log 2, exact far into the tail."
+  [x]
+  (let [finite (> x ##-Inf)]
+    (guard finite (- (log-erfc (/ (- (stand-in finite x 0.0)) sqrt-2)) log-2))))
+
+(defn- log1mexp
+  "log(1 - e^d) for d <= 0, exact at both ends: log(-expm1(d)) above
+   -log 2, log1p(-e^d) below (Mächler), each on a stand-in where the other
+   holds. -Inf at 0."
+  [d]
+  (let [near (> d (- log-2))]
+    (where near
+           (log (- (array/expm1 (stand-in near d (- log-2)))))
+           (log1p (- (exp (where near (- log-2) d)))))))
+
+(defn- standardized
+  "(x - mu)/sigma for a bound x that may be infinite: an infinite x is its
+   own (sigma > 0), and the quotient is taken of a stand-in, so a gradient of
+   mu or sigma does not meet ∞·0."
+  [x mu sigma]
+  (let [finite (array/isfinite x)]
+    (where finite (/ (- (stand-in finite x 0.0) mu) sigma) x)))
+
+(defn- normal-interval
+  "The standard normal's mass on [a, b] (a < b), and what its inverse CDF
+   reads, of the interval mirrored when a >= 0, so its left end is below 0.
+   In a tail (b < 0 too) the mass is Φ(b)·(1 - Φ(a)/Φ(b)), from log Φ(a) and
+   log Φ(b), which stay exact far into the tail (scipy's truncnorm's); across
+   0 it is (erf(b/√2) - erf(a/√2))/2, a sum of two magnitudes, which never
+   cancels (scipy's 1 - Φ(a) - Φ(-b) does for a narrow interval). A narrow
+   interval in a tail is as exact as the difference of its logs, a relative
+   error of about ε·|a|/(b - a), as scipy's. {:flip? :tail? :la :lb
+   :log-mass}: :la is log Φ(a), :lb log Φ(b) in a tail and log Φ(-b) across
+   0, both of the mirrored interval."
+  [a b]
+  (let [flip? (>= a 0)
+        a' (where flip? (- b) a)
+        b' (where flip? (- a) b)
+        tail? (< b' 0)
+        la (log-ndtr a')
+        lb (log-ndtr (where tail? b' (- b')))]
+    {:flip? flip? :tail? tail? :la la :lb lb
+     ;; each form on a stand-in interval of its kind where the other holds
+     :log-mass (where tail?
+                      (+ lb (log1mexp (where tail? (- la lb) -1.0)))
+                      (log (* 0.5 (- (array/erf (/ (where tail? 1.0 b') sqrt-2))
+                                     (array/erf (/ (where tail? -1.0 a') sqrt-2))))))}))
+
+(def ^:private newton-steps
+  "Newton steps of ndtri-left: from its first guesses, two reach 1e-12 and
+   three float64's precision, measured on y in [-1e6, log 1/2] against
+   scipy's ndtri_exp."
+  3)
+
+(defn- ndtri-left
+  "The x <= 0 with log Φ(x) = y, for y <= log 1/2 (scipy's ndtri_exp on that
+   half): Newton steps on log Φ, whose slope φ/Φ is at least 0.79 there,
+   from a first guess by erfinv above y = -10, and by the tail's asymptote
+   x² + log(2πx²) = -2y below (where 2e^y - 1 rounds to -1 in float32)."
+  [y]
+  (let [s (array/maximum (- (* -2.0 y) log-2pi) 2.0)
+        guess (where (< y -10.0)
+                     (- (sqrt (- s (log s))))
+                     (* sqrt-2 (array/erfinv (- (* 2.0 (exp (array/maximum y -10.0))) 1.0))))
+        step (fn [x]
+               (let [lp (log-ndtr (array/minimum x 0.0))]
+                 (- x (* (- lp y) (exp (+ lp half-log-2pi (* 0.5 (square x))))))))]
+    (nth (iterate step guess) newton-steps)))
+
+(defn- standard-truncated-normal
+  "Draws of the standard normal on [a, b], of shape: its inverse CDF in log
+   space (scipy's truncnorm's), Φ(x) = Φ(a) + u·Z solved where it is below
+   1/2, and Φ(-x) = Φ(-b) + (1 - u)·Z where it is above, so a draw near
+   either end of a wide interval keeps its precision."
+  [key a b shape o]
+  (let [{:keys [flip? tail? la lb log-mass]} (normal-interval a b)
+        dtype (dc/float-dtype (:backend o))
+        u (rng/uniform key shape (assoc o :dtype dtype :low (:tiny (dc/float-limits dtype)) :high 1.0))
+        below (array/logaddexp la (+ (log u) log-mass))
+        above (array/logaddexp lb (+ (log1p (- u)) log-mass))
+        from-above (logical-and (array/logical-not tail?) (> below (- log-2)))
+        x (ndtri-left (where from-above above below))
+        x (where from-above (- x) x)]
+    (where flip? (- x) x)))
+
+(defdist ^:elementwise truncated-normal
+  "truncated-normal(mu, sigma, lo, hi): normal(mu, sigma) conditioned on
+   [lo, hi] (Distributions.jl's truncated(Normal(mu, sigma), lo, hi)); lo
+   must be below hi, and either may be infinite. Its density and its draws
+   work in log Φ, so they stay exact far into either tail (a draw on
+   [50σ, 51σ] is one); a draw inverts the CDF there by Newton steps."
+  [mu sigma lo hi]
+  (validate (dc/check-positive "truncated-normal" "sigma" sigma)
+            (when (every? array/concrete? [lo hi])
+              (dc/check (array/all-true? (< lo hi)) "truncated-normal" "lo must be below hi" {:lo lo :hi hi})))
+  (sample [key shape]
+    (let [z (standard-truncated-normal key (standardized lo mu sigma) (standardized hi mu sigma)
+                                       (dc/elementwise-shape shape mu sigma lo hi) (opts mu sigma lo hi))]
+      ;; within [lo, hi] also where mu + sigma·z rounds past a bound
+      (array/clip (+ mu (* sigma z)) lo hi)))
+  (log-prob [v]
+    (let [{:keys [log-mass]} (normal-interval (standardized lo mu sigma) (standardized hi mu sigma))]
+      (guard (logical-and (>= v lo) (<= v hi))
+             (- (+ half-log-2pi (log sigma) (* 0.5 (square (/ (- v mu) sigma))) log-mass))))))
+
+;; --- Circular families ----------------------------------------------------
+
+(defn- wrap-angle
+  "x as the angle in [-π, π) of the same point on the circle."
+  [x]
+  (- x (* two-pi (array/floor (/ (+ x Math/PI) two-pi)))))
+
+(defn- on-circle?
+  "Is v an angle in [-π, π], the circular families' support? (π is -π's
+   point, and a wrapped draw can round to it.)"
+  [v]
+  (logical-and (>= v (- Math/PI)) (<= v Math/PI)))
+
+(def ^:private i0-series
+  "The ratios of successive terms of I₀(x)'s power series Σ(x²/4)^k/k!²
+   over x²/4, 1/k², last term first: 32 terms, enough to x = 20."
+  (mapv #(/ 1.0 (* % %)) (range 32 0 -1)))
+
+(def ^:private i0-asymptotic
+  "The ratios of successive terms of I₀(x)'s asymptotic series
+   e^x/√(2πx)·Σ((2k-1)!!)²/(k!·(8x)^k) over 1/x, (2k-1)²/8k, last term
+   first: 19 terms, enough from x = 20."
+  (mapv #(/ (square (- (* 2.0 %) 1.0)) (* 8.0 %)) (range 19 0 -1)))
+
+(defn- nested
+  "1 + r₁x(1 + r₂x(1 + …)) for ratios [… r₂ r₁]: a series of positive terms
+   from the ratios of its successive terms, so no term over- or underflows."
+  [ratios x]
+  (reduce (fn [acc r] (+ 1.0 (* (* r x) acc))) 1.0 ratios))
+
+(defn- log-i0e
+  "log(I₀(x)·e^-x) for x >= 0, I₀ the modified Bessel function of order 0:
+   its power series up to x = 20, its asymptotic series beyond, each on a
+   stand-in where the other holds. Within 3e-15 of the log of scipy's i0e on
+   [1e-8, 1e4] (the series' log, near x, keeps x's rounding)."
+  [x]
+  (let [series? (<= x 20.0)
+        xs (array/minimum x 20.0)
+        xa (array/maximum x 20.0)]
+    (where series?
+           (- (log (nested i0-series (* 0.25 (square xs)))) xs)
+           (- (log (nested i0-asymptotic (/ 1.0 xa))) (* 0.5 (log (* two-pi xa)))))))
+
+(def ^:private von-mises-rounds
+  "Proposal rounds per von Mises draw. Best and Fisher's envelope accepts
+   with probability above 0.656 for every kappa (its limit as kappa grows),
+   so 33 rounds all fail with probability below 1e-15 (and the draw then
+   falls back to mu)."
+  33)
+
+(defn- first-accepted-round
+  "The value of the first accepting round, else fallback, of ok and values
+   with the rounds on axis 0: a rejection sampler's fixed rounds drawn as
+   one vectorized proposal, so a draw costs a few array ops whatever their
+   number, and batches (no value is read)."
+  [fallback ok values]
+  (let [rounds (first (array/shape ok))
+        ;; the first accepting round scores highest, rounds - r
+        score (where ok (array/reshape (array/arange rounds 0 -1) (into [rounds] (repeat (dec (array/ndim ok)) 1))) 0)
+        first-ok (array/argmax score {:axis 0 :keep-dims? true})]
+    (where (array/any ok {:axis 0}) (array/squeeze (array/take-along-axis values first-ok 0) 0) fallback)))
+
+(defn- von-mises-angle
+  "Draws of the von Mises distribution centered on 0, of shape: Best and
+   Fisher's rejection from a wrapped Cauchy envelope, written in quantities
+   that stay exact as kappa grows (1 - ρ and κ(r - 1), never r, which
+   rounds to 1, nor acos near 1), so the angle keeps its scale 1/√κ at any
+   kappa; at kappa near 0 it is the uniform."
+  [key kappa shape o]
+  (let [;; at most the largest float over 4, so 2κ stays finite
+        k (array/minimum kappa (/ (largest-float kappa) 4.0))
+        two-k (* 2.0 k)
+        ;; w = √(1 + 4κ²) without overflow, τ = 1 + w, s = √(2τ)
+        m (array/maximum two-k 1.0)
+        w (* m (sqrt (+ (square (/ 1.0 m)) (square (/ two-k m)))))
+        tau (+ 1.0 w)
+        s (sqrt (* 2.0 tau))
+        ;; τ - 2κ + s, with τ - 2κ = 1 + 1/(w + 2κ): no cancellation
+        num (+ 1.0 (/ 1.0 (+ w two-k)) s)
+        ;; the envelope's (1 - ρ)/(1 + ρ), and κ(r - 1)
+        g (/ num (+ tau two-k s))
+        kr (square (/ num (* 2.0 (sqrt (+ tau s)))))
+        rs (into [von-mises-rounds] shape)
+        [k-angle k-accept] (rng/split key)
+        ;; the envelope's draw, by its inverse CDF
+        theta (* 2.0 (array/atan (* g (array/tan (* Math/PI (- (rng/uniform k-angle rs o) 0.5))))))
+        ;; c = κ(r - cos θ) = κ(r - 1) + 2κ·sin²(θ/2), accepted when c·e^(1-c) >= v
+        c (+ kr (* k (* 2.0 (square (array/sin (* 0.5 theta))))))
+        ok (<= (log (rng/uniform k-accept rs o)) (+ (log c) (- 1.0 c)))]
+    (first-accepted-round 0.0 ok theta)))
+
+(defdist ^:elementwise von-mises
+  "von-mises(mu, kappa): the von Mises distribution on the circle, mean
+   direction mu and concentration kappa > 0 (VonMises), density
+   e^(κ·cos(x - μ))/(2π·I₀(κ)), values in [-π, π) (Distributions.jl's are
+   in [μ - π, μ + π]: the same density, on another period). Exact at any
+   kappa, its draws by Best and Fisher's rejection."
+  [mu kappa]
+  (validate (dc/check-positive "von-mises" "kappa" kappa))
+  (sample [key shape]
+    (wrap-angle (+ mu (von-mises-angle key kappa (dc/elementwise-shape shape mu kappa) (opts mu kappa)))))
+  (log-prob [v]
+    ;; κ(cos d - 1) as -2κ·sin²(d/2), exact at a large kappa
+    (guard (on-circle? v)
+           (- (* -2.0 kappa (square (array/sin (* 0.5 (- v mu))))) log-2pi (log-i0e kappa)))))
+
+(defdist ^:elementwise wrapped-cauchy
+  "wrapped-cauchy(mu, rho): cauchy(mu, -log rho) wrapped onto the circle
+   (scipy's wrapcauchy, centered on mu), density
+   (1 - ρ²)/(2π·(1 + ρ² - 2ρ·cos(x - μ))), values in [-π, π); 0 <= rho < 1,
+   and rho = 0 is the uniform on the circle."
+  [mu rho]
+  (validate (dc/check-probability "wrapped-cauchy" "rho" rho)
+            (when (array/concrete? rho)
+              (dc/check (array/all-true? (< rho 1)) "wrapped-cauchy" "rho must be below 1 (1 is a point mass)"
+                        {:param "rho"})))
+  (sample [key shape]
+    ;; the wrapped draw by its own inverse CDF, 2·atan(tanh(γ/2)·tan(π(u - 1/2)))
+    ;; for the Cauchy's scale γ, where (1 - ρ)/(1 + ρ) = tanh(γ/2): no draw
+    ;; far out on the line, whose wrap would lose its precision
+    (let [u (rng/uniform key (dc/elementwise-shape shape mu rho) (opts mu rho))]
+      (wrap-angle (+ mu (* 2.0 (array/atan (* (/ (- 1.0 rho) (+ 1.0 rho)) (array/tan (* Math/PI (- u 0.5))))))))))
+  (log-prob [v]
+    ;; 1 + ρ² - 2ρ·cos d as (1 - ρ)² + 4ρ·sin²(d/2), exact as rho nears 1
+    (guard (on-circle? v)
+           (- (+ (log1p (- rho)) (log1p rho))
+              log-2pi
+              (log (+ (square (- 1.0 rho)) (* 4.0 rho (square (array/sin (* 0.5 (- v mu)))))))))))
+
+(def ^:private wrapped-normal-switch
+  "The sigma at which wrapped-normal's log density changes series. Below
+   it, the sum of N(d + 2πk; 0, σ) over |k| <= 3 omits less than
+   2e^(-24π²/σ²) of the total; above, the Fourier series
+   (1 + 2Σ e^(-n²σ²/2)·cos(nd))/2π to n = 3 omits about 2e^(-8σ²). At 2.25
+   both are below 1e-17, and smaller away from it."
+  2.25)
+
+(defn- log-wrapped-normal
+  "log Σₖ N(d + 2πk; 0, sigma) for d in [-π, π]: the direct sum for a small
+   sigma, the Fourier series for a large one (wrapped-normal-switch), each
+   on a stand-in where the other holds; sigma floored at the smallest
+   normal float, so 1/σ stays finite."
+  [d sigma]
+  (let [direct? (<= sigma wrapped-normal-switch)
+        sd (floored (array/minimum sigma wrapped-normal-switch))
+        sf (array/maximum sigma wrapped-normal-switch)
+        ;; the terms over the nearest (k = 0): e^(-2πk(d + πk)/σ²) <= 1
+        others (reduce + (for [k [-3 -2 -1 1 2 3]]
+                           (exp (* (/ (* -2.0 Math/PI k) sd) (/ (+ d (* Math/PI k)) sd)))))
+        fourier (reduce + (for [n [1 2 3]] (* (exp (* -0.5 n n (square sf))) (array/cos (* n d)))))]
+    (where direct?
+           (- (log1p others) (+ half-log-2pi (log sd) (* 0.5 (square (/ d sd)))))
+           (- (log1p (* 2.0 fourier)) log-2pi))))
+
+(defdist ^:elementwise wrapped-normal
+  "wrapped-normal(mu, sigma): normal(mu, sigma) wrapped onto the circle,
+   density Σₖ N(x + 2πk; μ, σ), values in [-π, π). The sum is two series,
+   each truncated where its omitted terms are below 1e-17 of the total."
+  [mu sigma]
+  (validate (dc/check-positive "wrapped-normal" "sigma" sigma))
+  (sample [key shape]
+    (wrap-angle (+ mu (* sigma (rng/normal key (dc/elementwise-shape shape mu sigma) (opts mu sigma))))))
+  (log-prob [v]
+    (guard (on-circle? v) (log-wrapped-normal (wrap-angle (- v mu)) sigma))))
+
+;; --- Wishart and inverse Wishart ------------------------------------------
+
+(def ^:private log-pi (Math/log Math/PI))
+
+(defn- check-matrix-family
+  "A p×p matrix family's scale must be square matrices, symmetric and
+   positive definite (as mvnormal's covariance), and df above p - 1."
+  [dist-name df scale]
+  (let [s (array/shape scale)
+        p (peek s)]
+    (dc/check (and (<= 2 (count s)) (= p (peek (pop s)))) dist-name
+              (str "scale must be a square matrix (its last two axes), got shape " s) {:param "scale" :shape s})
+    (check-covariance dist-name "scale" scale)
+    (when (array/concrete? df)
+      (dc/check (array/all-true? (> df (dec p))) dist-name (str "df must be above the dimension minus one, " (dec p))
+                {:param "df" :dimension p}))))
+
+(defn- matrix-batch
+  "The batch axes of a matrix family's draws: shape's, df's and scale's
+   leading ones, broadcast."
+  [shape df scale]
+  (reduce sh/broadcast (vec shape) [(array/shape df) (pop (pop (array/shape scale)))]))
+
+(defn- log-multivariate-gamma
+  "log Γ_p(a) = p(p-1)/4·log π + Σⱼ log Γ(a - j/2), j = 0 … p - 1."
+  [a p]
+  (+ (* 0.25 p (dec p) log-pi)
+     (array/sum (lgamma (- (array/expand-dims a -1) (* 0.5 (array/arange p)))) {:axis -1})))
+
+(defn- bartlett
+  "Bartlett's factor of wishart(df, I) of dimension p, of batch shape: the
+   lower triangular A whose A·Aᵀ is so distributed, standard normals below
+   its diagonal and the roots of χ²(df - i) draws on it, i = 0 … p - 1. A
+   χ² draw is 2·gamma((df - i)/2), from the gamma's log, so a small shape
+   does not underflow to 0."
+  [key df p batch o]
+  (let [[k-chi k-normal] (rng/split key)
+        alpha (/ (- (array/expand-dims df -1) (array/arange p)) 2.0)
+        diagonal (exp (* 0.5 (+ log-2 (log-gamma-draw k-chi alpha (conj batch p) o))))
+        i (array/reshape (array/arange p) [p 1])
+        j (array/arange p)]
+    (where (> i j)
+           (rng/normal k-normal (into batch [p p]) o)
+           (where (== i j) (array/expand-dims diagonal -1) 0.0))))
+
+(defn- symmetrized
+  "(m + mᵀ)/2, exactly symmetric: a product M·Mᵀ need not be, on every
+   backend."
+  [m]
+  (* 0.5 (+ m (transposed m))))
+
+(defn- spd-factor
+  "{:in? :l}: whether v (a batch of matrices) is in a matrix family's
+   support, exactly symmetric and positive definite (as Julia's isposdef),
+   and its Cholesky factor, the identity's where it is not, so the log
+   density there is finite before its guard, and so is its gradient."
+  [v]
+  (let [p (peek (array/shape v))
+        in? (logical-and (array/all (== v (transposed v)) {:axis [-2 -1]})
+                         (array/all (array/isfinite (la/cholesky (array/stop-gradient v))) {:axis [-2 -1]}))]
+    {:in? in?
+     :l (la/cholesky (where (array/expand-dims (array/expand-dims in? -1) -1) v (array/eye p {:dtype (array/dtype v)})))}))
+
+(defn- trace-quotient
+  "tr((l·lᵀ)⁻¹·r·rᵀ) = ‖l⁻¹·r‖², for lower triangular l and square r, their
+   batches broadcast."
+  [l r]
+  (let [s (array/shape l)
+        full (into (sh/broadcast (pop (pop s)) (pop (pop (array/shape r)))) (subvec s (- (count s) 2)))]
+    (array/sum (square (la/solve-triangular (array/broadcast-to l full) (array/broadcast-to r full))) {:axis [-2 -1]})))
+
+(defdist wishart
+  "wishart(df, scale): the Wishart distribution over p×p symmetric positive
+   definite matrices with df degrees of freedom and scale matrix S
+   (Wishart(ν, S)), the law of Σᵢ xᵢxᵢᵀ for df draws xᵢ of mvnormal(0, S)
+   when df is an integer; its mean is df·S. df must be above p - 1, and S
+   symmetric positive definite (as mvnormal's covariance); both batch over
+   their leading axes. A value that is not exactly symmetric or not positive
+   definite has log density -Inf. Draws by Bartlett's decomposition."
+  [df scale]
+  (validate (check-matrix-family "wishart" df scale))
+  (sample [key shape]
+    (let [p (peek (array/shape scale))
+          m (array/matmul (la/cholesky scale) (bartlett key df p (matrix-batch shape df scale) (opts df scale)))]
+      (symmetrized (array/matmul m (transposed m)))))
+  (log-prob [v]
+    (let [p (peek (array/shape scale))
+          {:keys [in? l]} (spd-factor v)
+          ls (la/cholesky scale)]
+      (guard in? (- (* 0.5 (- df p 1) (la/cholesky-logdet l))
+                    (* 0.5 (trace-quotient ls l))
+                    (* 0.5 df (+ (* p log-2) (la/cholesky-logdet ls)))
+                    (log-multivariate-gamma (* 0.5 df) p)))))
+  (value-shape [] (let [p (peek (array/shape scale))] (conj (matrix-batch [] df scale) p p))))
+
+(defdist inv-wishart
+  "inv-wishart(df, scale): the inverse Wishart distribution over p×p
+   symmetric positive definite matrices (InverseWishart(ν, Ψ)), the law of
+   W⁻¹ for W with wishart(df, scale⁻¹); its mean is scale/(df - p - 1) for
+   df > p + 1. Its parameters and values are checked as wishart's."
+  [df scale]
+  (validate (check-matrix-family "inv-wishart" df scale))
+  (sample [key shape]
+    ;; W = L⁻ᵀ·A·Aᵀ·L⁻¹ for scale = L·Lᵀ and Bartlett's A, so W⁻¹ = Cᵀ·C
+    ;; for C = A⁻¹·Lᵀ, by a triangular solve (no inverse)
+    (let [p (peek (array/shape scale))
+          batch (matrix-batch shape df scale)
+          a (bartlett key df p batch (opts df scale))
+          c (la/solve-triangular a (array/broadcast-to (transposed (la/cholesky scale)) (conj batch p p)))]
+      (symmetrized (array/matmul (transposed c) c))))
+  (log-prob [v]
+    (let [p (peek (array/shape scale))
+          {:keys [in? l]} (spd-factor v)
+          ls (la/cholesky scale)]
+      (guard in? (- (* 0.5 df (- (la/cholesky-logdet ls) (* p log-2)))
+                    (log-multivariate-gamma (* 0.5 df) p)
+                    (* 0.5 (+ df p 1) (la/cholesky-logdet l))
+                    (* 0.5 (trace-quotient l ls))))))
+  (value-shape [] (let [p (peek (array/shape scale))] (conj (matrix-batch [] df scale) p p))))
 
 ;; ---------------------------------------------------------------------------
 ;; Discrete distributions
