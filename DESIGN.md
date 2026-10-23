@@ -1964,6 +1964,39 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     - summary's sd divides by n − 1, its default quantiles are 5%, 50% and
       95% (posterior's); no MCSE of quantiles, which needs a beta quantile
       function.
+  - **Serialization (genclj-unjc; PROVISIONAL, owner to confirm).**
+    `gen.serialize` writes EDN read by clojure.edn with gen.clj's tags only
+    (`#gen/array {:dtype :shape :data}`, `#gen/choicemap`, `#gen/value`,
+    `#gen/key`, `#gen/trace`), never eval; an unknown or malformed tag, or
+    text after the value, is a loud error. A float is the shortest decimal
+    of its double, exact for every float dtype (NaN loses its payload).
+    Host numbers stay host numbers; backend arrays, MLX's 0-d ones too, are
+    tagged and read back onto `*backend*`. Values are EDN data only;
+    anything else (functions, records, lazy seqs, sorted collections) is
+    refused, naming its path. As in GenSerialization, a trace is its
+    arguments and choices, never its generative function, rebuilt by
+    generate with every choice constrained:
+    - The written score is generate's, computed at write time with the
+      trace's own generative function: Map and Unfold keep scores
+      incrementally (as Gen.jl's), so an updated trace's score equals
+      generate's only within rounding (129 of 200 Map regenerates moved
+      the last bits; at most 8e-14 after 2000 steps). The alternatives,
+      a tolerance or the original score on the rebuilt trace, were not
+      taken.
+    - A trace records the backend and float dtype it was written under, and
+      `read-trace` refuses any other (`:other-numerics`): an exact rebuild
+      is per backend and dtype, since log densities round differently;
+      `read-trace-data` with `gfi/generate` loads it elsewhere. A
+      rounding-error bound for cross-backend reads was the alternative.
+      The MLX device is not recorded, so CPU and GPU float32 may differ as
+      `:score-differs`.
+    - read-trace checks its rebuild's score against the written one bit for
+      bit, and its weight against its score (no choice missing).
+    - Traces with encapsulated randomness are not serializable yet (the
+      lead's call): ω is kept per call, generate draws it afresh and
+      fold-in is one-way, so write-trace refuses an ω anywhere. The hook
+      (`:omegas` for generate, an ICalls `-calls`) is genclj-t8uj.
+    - `gen.array/backend-name` is public, for the recorded numerics.
 
 ## 10. Deferred (tracked, not forgotten)
 
