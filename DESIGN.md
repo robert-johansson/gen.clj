@@ -2029,6 +2029,52 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     - loud errors for an invalid metric, step size, depth or option, and
       Stan's runtime errors (`:improper-posterior` past a step of 1e7,
       `:no-step-size`, `:metric-overflow`).
+    - **Stan's step-size jitter** (owner-approved, 2026-10-23): `:jitter`
+      on hmc and nuts (and the sampler) steps each transition by
+      eps·(1 + jitter·(2u − 1)), u from the transition's own key; the
+      default 0 draws nothing, so every result is bit-identical to before.
+      It is Neal's remedy for a fixed L that resonates: on Metal, adaptive
+      HMC at L 8 on the correlated Gaussian adapted eps 0.4913, L·eps 3.93
+      on the fast mode's period 3.88, bulk ESS 23 (the JVM landed at
+      0.642). The sampler jitters every transition, warmup included, and
+      dual averaging adapts the nominal step (Stan's choice; PROVISIONAL;
+      the alternative, no jitter in the warmup, leaves the adapted step
+      blind to the jitter's effect on acceptance).
+  - **GenMLX's further distributions (genclj-z2gh).** `truncated-normal`,
+    `von-mises`, `wishart` and `inv-wishart` take Distributions.jl's
+    parameters; `wrapped-cauchy` (scipy's wrapcauchy, centered on mu) and
+    `wrapped-normal` have none there. Each is exact at its extremes: the
+    truncated normal in log Φ (draws by a log-space inverse CDF, exact on
+    [50σ, 51σ]); von Mises draws by Best and Fisher's sampler rewritten in
+    1 − ρ and κ(r − 1), exact to κ = 1e300; the wrapped normal's density
+    by two series omitting less than 1e-17; Wishart draws by Bartlett's
+    decomposition, the inverse Wishart's by a triangular solve.
+    mvnormal's covariance check is shared as `check-covariance`.
+    PROVISIONAL (owner to confirm):
+    - invalid parameters are loud: lo ≥ hi (or both bounds infinite on
+      one side), κ ≤ 0, ρ outside [0, 1), df ≤ p − 1, a scale that is not
+      symmetric positive definite (alternatives: lo = hi as a point mass;
+      κ = 0 or a negative ρ as the uniform or μ + π; the singular Wishart);
+    - large κ stays exact, with no normal approximation (numpy switches at
+      1e6, Distributions.jl at 700); κ is clamped at the largest float/4
+      only against overflow;
+    - circular values lie in [-π, π) (a draw that rounds to π, or a huge
+      mu's lost angle, becomes -π), and a value outside [-π, π] scores
+      -Inf (GenMLX's density was periodic, Distributions.jl's von Mises
+      support is [μ − π, μ + π]); a porting note says to wrap angles first;
+    - the wrapped normal draws the uniform from σ = 9 (equal to its law
+      within 6e-18; wrapping σz broke there), and σ is floored at the
+      smallest normal float;
+    - a matrix value must be exactly symmetric and positive definite
+      (Julia's isposdef), else -Inf; its gradient is on the lower triangle
+      (the tape's Cholesky convention);
+    - Wishart draws at df near p − 1 are often singular at the float's
+      precision (in float64, p = 2: 15667 of 20000 at df = 1.01, 2 at 1.5,
+      none from 2), and such a draw scores -Inf, never NaN, as a draw past
+      the float range does (alternatives: floor Bartlett's diagonal, which
+      would change most draws near p − 1; a larger minimum df; an error);
+    - von Mises draws fall back to mu if all 33 rejection rounds fail
+      (probability below 1e-15).
 
 ## 10. Deferred (tracked, not forgotten)
 

@@ -595,6 +595,30 @@
       (is (< 0 (count (filter true? (:diverged? r))) 40) "some diverge, not all")
       (is (each-chain-s? ps #(mcmc/hmc-particles %1 s {:L 1 :eps 1000.0} %2) #(mcmc/hmc %1 s {:L 1 :eps 1000.0} %2) (rng/key 98))))))
 
+(deftest jittered-particle-steps
+  ;; :jitter jitters each chain's step by its own u, as its own hmc's
+  ;; would (DESIGN §9, PROVISIONAL): drawn per particle when batched, from
+  ;; each chain's key when not. Planted (2026-10-23): one u for every
+  ;; particle fails the first; the steps unreported fail the second
+  (let [opts {:L 3 :eps 0.3 :jitter 0.5}
+        ps (:particles (b/generate scalar [] (cm/choicemap :y 1.3) 6 (rng/key 103)))
+        r (mcmc/hmc-particles ps x-sel opts (rng/key 104))
+        steps (ts/host (:eps r))]
+    (is (b/batched? (:particles r)))
+    (is (and (= 6 (count (distinct steps))) (every? #(<= 0.15 % 0.45) steps)) (str steps)))
+  (let [chosen (gen [] (let [k (trace :k (d/categorical [0.5 0.5]))
+                             x (trace :x (d/normal (if (= k 0) 0.0 3.0) 1))]
+                         (trace :y (d/normal x 1))))
+        ps (:particles (b/generate chosen [] (cm/choicemap :y 1.3) 4 (rng/key 105)))
+        opts {:L 3 :eps 0.3 :jitter 0.5}
+        key (rng/key 106)]
+    (is (not (b/batched? ps)))
+    (is (each-chain-s? ps #(mcmc/hmc-particles %1 x-sel opts %2) #(mcmc/hmc %1 x-sel opts %2) key))
+    (is (= (mapv #(:eps (mcmc/hmc %1 x-sel opts %2)) (b/traces ps) (rng/split key 4))
+           (ts/host (:eps (mcmc/hmc-particles ps x-sel opts key))))))
+  (is (= :invalid-jitter (:reason (ts/thrown-data (mcmc/hmc-particles (chains-from scalar (cm/choicemap :x 0.0 :y 1.3) 2)
+                                                                      x-sel {:jitter 1.0} (rng/key 107)))))))
+
 (deftest map-optimization-of-every-particle
   ;; each particle's line search is map-optimize's on its trace (no draws:
   ;; exactly, but for round-off). On a Cauchy density from x = 0.5 the

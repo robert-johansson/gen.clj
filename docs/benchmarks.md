@@ -699,3 +699,39 @@ running one other test JVM:
 - **Remedies, by bean:** fewer ops per scalar draw (Threefry on the host
   for scalar keys, genclj-eof0), on every device; the erfinv route
   (genclj-tftl). Pinning the JVM to two cores helps runs on the Thor.
+
+## Batched enumeration (2026-10-23, bean genclj-7oc1)
+
+`clojure -M:bench -m gen.enumerative-bench`, on the JVM backend (M4,
+GraalVM 25), with other JVMs running (load average 6–8): medians after
+warm-up, spot checks on. `enumerative-inference` on a linear regression
+with 20 observations over a k × k grid of slopes and intercepts (every
+choice given), one point at a time against `{:batched? true}` (the points
+as the particles of one batched run, per-particle constraints); and
+`with-exact-proposal`'s generate enumerating n digits observed through
+their number (10ⁿ assignments), against `{:batched? true}`.
+
+| grid points | one at a time | batched | speedup |
+|---|---|---|---|
+| 100 | 4.30 ms | 1.78 ms | 2.4× |
+| 1,024 | 35.9 ms | 3.80 ms | 9.5× |
+| 10,000 | 409 ms | 25.4 ms | 16× |
+| 99,856 | 6.17 s | 139 ms | 44× |
+| 99,856, in chunks of 10,000 | 4.81 s | 150 ms | 32× |
+
+| assignments | one at a time | batched | speedup |
+|---|---|---|---|
+| 10 | 0.49 ms | 0.77 ms | 0.6× |
+| 100 | 4.83 ms | 1.32 ms | 3.7× |
+| 1,000 | 40.9 ms | 2.01 ms | 20× |
+
+- **Where the batched path's time goes** (10,000 points, 17 ms under the
+  same load): the grid's choice maps, about two thirds of it: checking that
+  no point sets an observed choice (4.9 ms) and stacking the points into
+  batched constraints (6.2 ms, after `choicemap/stack`'s host scalars were
+  made one array, five times faster than stacking them one by one). The
+  batched run itself, spot checks included, is the rest. A grid kept in
+  stacked form (one choice map of [n] arrays) would skip both.
+- **Few assignments lose:** the spot checks re-run up to 8 particles
+  through the scalar handler, so `with-exact-proposal`'s `:batched?` pays
+  only from some tens of assignments; it is opt-in for that reason.

@@ -357,10 +357,14 @@
       (is (= by-hand divergences)))))
 
 (deftest ^:slow ^:heavy adaptive-hmc-samples-the-correlated-gaussian
-  ;; planted bug (2026-10-23): hmc's kinetic energy without the metric puts
-  ;; the four moments 2350 to 510,000 standard errors off
+  ;; jittered, so the chain mixes wherever the adaptation lands: on Metal,
+  ;; unjittered, it landed where L·eps spans the fast mode's period (ESS
+  ;; 23; jitter-breaks-hmc-s-resonance). Jittered by 0.2 here, the bulk
+  ;; ESS is 2470 and 2130. Planted bug (2026-10-23): hmc's kinetic energy
+  ;; without the metric leaves a bulk ESS of 2.2 and 1.3, the moments 179
+  ;; to 650,000 standard errors off
   (let [{:keys [traces stats]} (nuts/sample (start-at correlated [] (cm/choicemap :x 0.0 :y 0.0)) xy
-                                            {:kernel :hmc :L 8 :samples 2000} (rng/key 24))
+                                            {:kernel :hmc :L 8 :jitter 0.2 :samples 2000} (rng/key 24))
         xs (dg/draws traces :x)
         ys (dg/draws traces :y)]
     (is (every? #(= 8 (:n-leapfrog %)) stats))
@@ -370,6 +374,38 @@
     (is (> 5.0 (deviation ys 0.02)))
     (is (> 5.0 (deviation (map #(* (- % 1.0) (- % 1.0)) xs) 4.0)))
     (is (> 5.0 (deviation (map #(* (- % 0.02) (- % 0.02)) ys) 0.0041)))))
+
+(deftest ^:slow ^:heavy jitter-breaks-hmc-s-resonance
+  ;; Stan's step-size jitter (Neal 2011). On N(0, 1), L leapfrog steps of
+  ;; eps = 2 sin(π/L) turn exactly one period, so fixed-step HMC returns to
+  ;; its start at every draw (to rounding): 1000 draws from x = 1.3 stay
+  ;; there. Jittered by 0.3, the chain mixes: a bulk ESS of 200 at least
+  ;; (369) and E[x²] within 5 standard errors of 1. On the correlated
+  ;; Gaussian with its variances as the metric, a step of 0.485 makes L 8
+  ;; span the fast mode's period, 3.9, where adaptive HMC landed on Metal:
+  ;; a bulk ESS of 118 fixed (23 on another key), 2024 jittered by 0.2.
+  ;; Planted bug (2026-10-23): the jitter ignored leaves the chains a bulk
+  ;; ESS of 1.3 and 118, E[x²] 1.5e13 standard errors off
+  (let [L 10
+        eps (* 2.0 (Math/sin (/ Math/PI L)))
+        start (start-at unit [] (cm/choicemap :x 1.3))
+        chain (fn [jitter]
+                (dg/draws (rest (reductions (fn [tr key] (:trace (mcmc/hmc tr (sel/select :x) {:L L :eps eps :jitter jitter} key)))
+                                            start (rng/split (rng/key 35) 1000)))
+                          :x))
+        jittered (chain 0.3)]
+    (is (every? #(< (Math/abs (double (- % 1.3))) 1e-4) (chain 0)) "the fixed step returns to the start")
+    (is (<= 200.0 (bulk-ess jittered)))
+    (is (> 5.0 (deviation (map #(* % %) jittered) 1.0)))
+    (testing "the correlated Gaussian at the step adaptive HMC took on Metal"
+      (let [{:keys [traces stats]} (nuts/sample (start-at correlated [] (cm/choicemap :x 0.0 :y 0.0)) xy
+                                                {:kernel :hmc :L 8 :eps 0.485 :inv-metric [4.0 0.0041] :jitter 0.2
+                                                 :warmup 0 :samples 2000}
+                                                (rng/key 36))
+            steps (map :eps stats)]
+        (is (<= 200.0 (bulk-ess (dg/draws traces :x))))
+        (is (<= 200.0 (bulk-ess (dg/draws traces :y))))
+        (is (< (* 0.8 0.485) (apply min steps) (apply max steps) (* 1.2 0.485)) "each draw's statistics show its step")))))
 
 (deftest the-same-key-gives-the-same-run
   ;; planted bug (2026-10-23): the sampler's transitions drawing their keys
@@ -398,6 +434,24 @@
     (is (every? #(= 0.25 (:eps %)) (:stats r)))
     (is (every? #(<= (:tree-depth %) 3) (:stats r)))
     (is (= {:stats [] :divergences 0} (:warmup r)))))
+
+(deftest a-jittered-transition-reports-its-step
+  ;; each transition steps by eps·(1 + jitter·(2u - 1)); with no jitter
+  ;; nothing is drawn and the result is the one without the option.
+  ;; Planted bug (2026-10-23): the jitter ignored leaves one step among 20,
+  ;; and 31 among the sampler's 35 draws
+  (let [start (start-at correlated [] (cm/choicemap :x 0.3 :y 0.1))
+        opts {:eps 0.5 :inv-metric [4.0 0.004]}]
+    (doseq [[kernel f] [[:hmc mcmc/hmc] [:nuts mcmc/nuts]]]
+      (testing (name kernel)
+        (let [steps (map #(:eps (f start xy (assoc opts :jitter 0.3) %)) (rng/split (rng/key 37) 20))]
+          (is (every? #(< 0.35 % 0.65) steps))
+          (is (= 20 (count (distinct steps)))))
+        (is (= (f start xy opts (rng/key 38)) (f start xy (assoc opts :jitter 0) (rng/key 38))))))
+    (is (not (contains? (mcmc/hmc start xy opts (rng/key 38)) :eps)) "hmc reports its step only when jittered")
+    (testing "the sampler jitters the warmup's transitions too"
+      (let [{:keys [stats warmup]} (nuts/sample start xy {:samples 5 :warmup 30 :jitter 0.3} (rng/key 39))]
+        (is (= 35 (count (distinct (map :eps (concat (:stats warmup) stats))))))))))
 
 (deftest compiled-nuts-makes-the-same-moves
   ;; :compile? runs each leapfrog step as one compiled function (one MLX
@@ -450,9 +504,12 @@
     (testing "the transition's"
       (is (= :invalid-eps (:reason (ts/thrown-data (mcmc/nuts start xy {:eps 0.0} (rng/key 33))))))
       (is (= :invalid-max-depth (:reason (ts/thrown-data (mcmc/nuts start xy {:max-depth 0} (rng/key 33))))))
+      (doseq [jitter [-0.1 1.0 ##NaN "0.2"]
+              [kernel f] [[:nuts mcmc/nuts] [:hmc mcmc/hmc]]]
+        (is (= :invalid-jitter (:reason (ts/thrown-data (f start xy {:jitter jitter} (rng/key 33))))) (str kernel " " jitter)))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"selects no choices" (mcmc/nuts start (sel/select :nope) (rng/key 33)))))
     (testing "the sampler's"
       (doseq [opts [{:samples -1} {:samples 10 :kernel :mala} {:samples 10 :target-accept 1.0} {:samples 10 :warmup 1.5}
-                    {:samples 10 :window 0} {:samples 10 :kappa 0.0} {:samples 10 :eps ##Inf}]]
+                    {:samples 10 :window 0} {:samples 10 :kappa 0.0} {:samples 10 :eps ##Inf} {:samples 10 :jitter 1.0}]]
         (is (= :invalid-option (:reason (ts/thrown-data (nuts/sample start xy opts (rng/key 34))))) (pr-str opts)))
       (is (= :invalid-option (:reason (ts/thrown-data (nuts/sample start xy {} (rng/key 34))))) "samples are required"))))

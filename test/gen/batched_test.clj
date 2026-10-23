@@ -1,8 +1,9 @@
 (ns gen.batched-test
   "Batched execution against scalar execution: each particle of a batched run
    is exactly the scalar trace of its choices, batched weights are the scalar
-   weights particle by particle, the per-particle fallback carries on, and
-   batched inference reaches the exact answers."
+   weights particle by particle (with per-particle constraints too, each
+   particle's own), the per-particle fallback carries on, and batched
+   inference reaches the exact answers."
   (:refer-clojure :exclude [+ - *])
   (:require [gen.test-support :as ts]
             [clojure.test :refer [deftest is testing]]
@@ -18,6 +19,7 @@
             [gen.dist.core :as dc]
             [gen.dynamic :as dyn :refer [gen]]
             [gen.gfi :as gfi]
+            [gen.inference.enumerative :as enum]
             [gen.inference.importance :as imp]
             [gen.inference.mh :as mh]
             [gen.inference.particle-filter :as pf]
@@ -229,6 +231,115 @@
     (is (b/batched? chains))
     (is (< (Math/abs (- m 0.65)) (* 5 (Math/sqrt (/ 0.5 n)))))
     (is (< (Math/abs (- v 0.5)) 0.06))))
+
+;; ---------------------------------------------------------------------------
+;; Per-particle constraints
+;; ---------------------------------------------------------------------------
+
+(defn- runs-at
+  "The choices at paths of n scalar runs of gf on args, keys from seed: n
+   particles' own constraints."
+  [gf args paths n seed]
+  (mapv #(sel/get-selected (:choices (gfi/simulate gf args %)) (sel/from-paths paths)) (rng/split (rng/key seed) n)))
+
+(defn- holds?
+  "Does the trace tr hold the choices c?"
+  [tr c]
+  (every? #(close? (cm/get-choice c %) (tr %)) (cm/addresses c)))
+
+(defspec per-particle-generates-are-each-particle-s-generate 60
+  ;; particle i constrained by its own choices at every other address and
+  ;; by one shared choice: it holds them, and its weight is its scalar
+  ;; generate's, their density given its other choices
+  (prop/for-all [[[_ gf args] seed n] gen-case]
+    (let [addrs (cm/addresses (:choices (gfi/simulate gf args (rng/key (inc seed)))))
+          own-paths (take-nth 2 addrs)
+          shared-paths (take 1 (remove (set own-paths) addrs))
+          own (runs-at gf args own-paths n seed)
+          shared (first (runs-at gf args shared-paths 1 (+ seed 1000)))
+          given (sel/from-paths (concat own-paths shared-paths))
+          {ps :particles ws :weights} (b/generate gf args shared n (rng/key seed) {:per-particle own})]
+      (and (b/batched? ps)
+           (every? true? (map (fn [tr w c] (and (consistent? tr) (holds? tr (cm/merge shared c)) (close? w (gfi/project tr given))))
+                              (b/traces ps) (array/->clj ws) own))))))
+
+(defspec per-particle-updates-are-each-particle-s-update 60
+  ;; particle i updated with its own value at one address and a shared one
+  ;; at another: the weights, discards and choices of its scalar update
+  (prop/for-all [[[_ gf args] seed n] gen-case]
+    (let [ps (b/simulate gf args n (rng/key seed))
+          addrs (cm/addresses (:choices (gfi/simulate gf args (rng/key (inc seed)))))
+          own (runs-at gf args (take 1 addrs) n (+ seed 7))
+          shared (first (runs-at gf args (take-last 1 (rest addrs)) 1 (+ seed 11)))
+          argdiffs (vec (repeat (count args) diff/no-change))
+          {ps' :particles ws :weights ds :discards} (b/update ps args argdiffs shared (rng/key 2) {:per-particle own})
+          scalar (map #(gfi/update %1 (cm/merge shared %2) (rng/key 0)) (b/traces ps) own)]
+      (and (b/batched? ps')
+           (every? true? (map #(close? (:weight %1) %2) scalar (array/->clj ws)))
+           (= (map (comp ts/host :discard) scalar) (map ts/host ds))
+           (= (map (comp ts/host :choices :trace) scalar) (map (comp ts/host :choices) (b/traces ps')))))))
+
+(deftest per-particle-is-said-so-never-read-from-a-shape
+  ;; three particles and a site of shape [3]: a shared [3] value is one
+  ;; value for every particle, per-particle ones are one each
+  (let [m (gen [] (let [z (trace :z (d/normal (array/zeros [3]) 1))] (trace :y (d/normal (array/sum z) 1))))
+        v (array/array [0.1 0.2 0.3])
+        vs [(array/array [1.0 0.0 0.0]) (array/array [0.0 2.0 0.0]) (array/array [0.0 0.0 3.0])]
+        shared (:particles (b/generate m [] (cm/choicemap :z v) 3 (rng/key 80)))
+        own (:particles (b/generate m [] cm/EMPTY 3 (rng/key 80) {:per-particle (mapv #(cm/choicemap :z %) vs)}))]
+    (is (b/batched? shared))
+    (is (b/batched? own))
+    (is (close? (array/stack [v v v]) (b/choice shared :z)))
+    (is (close? (array/stack vs) (b/choice own :z)))))
+
+(deftest per-particle-constraints-that-cannot-share-a-run-fall-back
+  (testing "choice maps of different addresses"
+    (let [own [(cm/choicemap :slope 1.0) (cm/choicemap :intercept 2.0) (cm/choicemap :slope -1.0)]
+          obs (cm/choicemap [:y 0] 0.5)
+          {ps :particles ws :weights} (b/generate linreg [[1.0 2.0]] obs 3 (rng/key 81) {:per-particle own})]
+      (is (not (b/batched? ps)))
+      (is (re-find #"do not stack" (:message (b/fallback-reason ps))))
+      (is (every? true? (map (fn [tr w c] (and (holds? tr (cm/merge obs c))
+                                               (close? w (gfi/project tr (sel/from-choicemap (cm/merge obs c))))))
+                             (b/traces ps) (array/->clj ws) own)))))
+  (testing "a model that branches on a particle's value"
+    (let [{ps :particles ws :weights} (b/generate branching [] cm/EMPTY 3 (rng/key 82)
+                                                  {:per-particle (mapv #(cm/choicemap :switch %) [true false true])})]
+      (is (not (b/batched? ps)))
+      (is (= [true false true] (mapv #(ts/host (% :switch)) (b/traces ps))))
+      (is (close? (array/log (array/array [0.4 0.6 0.4])) ws)))))
+
+(deftest per-particle-constraints-are-checked
+  (let [own (mapv #(cm/choicemap :slope %) [1.0 2.0])
+        ps (b/simulate linreg [[1.0]] 2 (rng/key 83))
+        fails (fn [re f] (is (thrown-with-msg? clojure.lang.ExceptionInfo re (f))))]
+    (fails #"one choice map for each of the 3 particles" #(b/generate linreg [[1.0]] cm/EMPTY 3 (rng/key 1) {:per-particle own}))
+    (fails #"one choice map for each of the 2 particles" #(b/generate linreg [[1.0]] cm/EMPTY 2 (rng/key 1) {:per-particle (first own)}))
+    (fails #"must be a choice map" #(b/generate linreg [[1.0]] cm/EMPTY 2 (rng/key 1) {:per-particle [{:slope 1.0} {:slope 2.0}]}))
+    (fails #"constraints of particle 0 overlap the shared ones"
+           #(b/generate linreg [[1.0]] (cm/choicemap :slope 0.0) 2 (rng/key 1) {:per-particle own}))
+    (fails #"one choice map for each of the 2 particles" #(b/update ps [[1.0]] [diff/no-change] cm/EMPTY (rng/key 1) {:per-particle [cm/EMPTY]}))
+    (fails #"constraints of particle 0 overlap the shared ones"
+           #(b/update ps [[1.0]] [diff/no-change] (cm/choicemap :slope 0.0) (rng/key 1) {:per-particle own}))))
+
+(deftest projections-are-each-particle-s
+  (let [each (fn [ps s] (array/stack (mapv #(gfi/project % s) (b/traces ps))))]
+    (testing "of a batched collection, under the batch tracer"
+      (let [ps (b/simulate linreg [[1.0 2.0]] 5 (rng/key 84))
+            s (sel/select :slope [:y 0])]
+        (is (b/batched? ps))
+        (is (close? (each ps s) (b/project ps s)))))
+    (testing "per particle when that fails: an exact proposal's projection reads a support that differs across them"
+      (let [m (enum/with-exact-proposal (gen [] (let [n (trace :n (d/uniform-discrete 1 3))]
+                                                  (trace :k (d/uniform-discrete 0 n))))
+                                        [:k])
+            ps (b/simulate m [] 6 (rng/key 85))]
+        (is (b/batched? ps))
+        (is (close? (each ps (sel/select :k)) (b/project ps (sel/select :k))))))
+    (testing "and of particles that fell back"
+      (let [ps (b/simulate branching [] 5 (rng/key 86))]
+        (is (not (b/batched? ps)))
+        (is (close? (each ps (sel/select :switch)) (b/project ps (sel/select :switch))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Regressions from the M1 review (docs/research/review-2026-10-18.md)

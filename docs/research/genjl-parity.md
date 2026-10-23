@@ -145,10 +145,10 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 | GenTraceKernelDSL | `@kernel` mixing sampling and deterministic code; MH/SMC kernels returning (forward, reverse) choicemaps | N (closest: `edit.cljs`) | soon. *gen.clj (M4, 2026-10-20):* `gen.inference.trace-kernel`: a kernel is a `gen` function of the trace returning `[update backward]`; `tk/mh`, `tk/mh-kernel`, `tk/smcp3` (a translator for `pf/move-reweight`), log \|det J\| by AD over the trace's and the kernel's continuous choices, trimmed as GenTraceKernelDSL, reads the update keeps counted as unchanged outputs |
 | GenPseudoMarginal / "GenSMC" | `selection_sir_gf`, `selection_sir_mh`, `sir_pgibbs`, `ais`, `ais_gf`, `selection_ais_mh` | P: `encapsulated.cljs` pseudo-marginal-mh, `pmcmc.cljs`; AIS only in laws | later |
 | GenVariableElimination | Factor graphs from traces, variable elimination, exact backward samplers | P, different: `exact.cljs` tensor enumeration, `hmm_forward.cljs` | later |
-| GenDirectionalStats | Distributions on orientations and rotations (SO(3)), involutive kernels | P: von-mises, wrapped-cauchy, wrapped-normal; no SO(3) | later |
+| GenDirectionalStats | Distributions on orientations and rotations (SO(3)), involutive kernels | P: von-mises, wrapped-cauchy, wrapped-normal; no SO(3) | later. *gen.clj (2026-10-23, genclj-z2gh):* `von-mises`, `wrapped-cauchy` and `wrapped-normal` in `gen.dist`, values in [-π, π); no SO(3), no involutive kernels |
 | GenTF / GenPyTorch | TF/PyTorch graphs as GFs | analog: `nn.cljs nn->gen-fn` | later |
 | GenFluxOptimizers | Flux optimizers for Gen params | analog: `nn/optimizer` | later |
-| GenDistributions | Distributions.jl wrapped via `DistributionsBacked` | n/a | soon (Commons Math / fastmath). *gen.clj (M4, 2026-10-20):* `gen.dist.host/family` (a family from a host object's quantile and log density; draws are quantiles of the key's uniforms) and `gen.dist.commons-math` (alias `:commons-math`): any Commons Math 3 distribution by `real`/`integer`, and hypergeometric and Zipf. Univariate; no gradients through a host library (loud), and batched runs fall back. Distributions.jl's continuous families beyond Gen.jl's are native in `gen.dist` with its parameters (chi-squared, f-dist, gumbel, levy, log-normal, logistic, nakagami, pareto, student-t, triangular, weibull): batched, on every backend, differentiable |
+| GenDistributions | Distributions.jl wrapped via `DistributionsBacked` | n/a | soon (Commons Math / fastmath). *gen.clj (M4, 2026-10-20):* `gen.dist.host/family` (a family from a host object's quantile and log density; draws are quantiles of the key's uniforms) and `gen.dist.commons-math` (alias `:commons-math`): any Commons Math 3 distribution by `real`/`integer`, and hypergeometric and Zipf. Univariate; no gradients through a host library (loud), and batched runs fall back. Distributions.jl's continuous families beyond Gen.jl's are native in `gen.dist` with its parameters (chi-squared, f-dist, gumbel, levy, log-normal, logistic, nakagami, pareto, student-t, triangular, weibull; since genclj-z2gh, 2026-10-23, also truncated-normal, von-mises, wishart and inv-wishart, for `truncated(Normal)`, `VonMises`, `Wishart` and `InverseWishart`): batched, on every backend, differentiable |
 | Gen2DAgentMotion, GenRedner | Agent-motion and renderer domain libraries | agents/* is an analog of the first | later / skip |
 
 ## 2. What GenMLX has that Gen.jl does not
@@ -172,16 +172,21 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 - **Extra combinators:** Scan, Mask, Mix, Contramap/MapRetval/Dimap.
 - **Extra inference.**
   - NUTS, enumerative Gibbs, PMMH and particle Gibbs, conditional SMC.
+    *gen.clj (round 1, 2026-10-23):* NUTS and Stan's warmup
+    (`mcmc/nuts`, `gen.inference.nuts`); Gibbs by `with-exact-proposal`.
   - Differentiable resampling and IS.
   - ADEV with REINFORCE and baselines.
   - Programmable VI objectives (IWELBO, PWake, QWake).
   - Amortized neural IS.
   - Fisher/Laplace, steppable/budgeted inference with a cost meter.
-  - Diagnostics (bulk/tail ESS, R-hat).
+  - Diagnostics (bulk/tail ESS, R-hat). *gen.clj (round 1, 2026-10-23):*
+    `gen.inference.diagnostics`.
   - Exact enumeration with the full GFI and entropy/mutual-information queries.
 - **16 extra distributions:** student-t, log-normal, delta, truncated-normal,
   wishart, inv-wishart, von-mises, wrapped-cauchy, wrapped-normal, gaussian-vec,
-  iid, iid-gaussian, weighted, categorical-weights, …
+  iid, iid-gaussian, weighted, categorical-weights, … *gen.clj (round 1,
+  2026-10-23):* all but delta (the owner's decision), the rest already
+  covered by gen.dist's families.
 - **Verification infrastructure.**
   - `gfi.cljs`: about 85 executable laws.
   - `pef.cljs`: path-equivalence fuzzing.

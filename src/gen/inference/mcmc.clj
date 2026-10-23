@@ -358,24 +358,60 @@
                                            ((build) v p0 eps inv others))]
     (verdict proto v v' (+ (- lp' lp) (- (kinetic p) (kinetic p0))) diverged start-ok k-accept)))
 
+(defn- uniform
+  "A uniform draw on [0, 1) on key, as a host double."
+  ^double [key]
+  (double (array/item (rng/uniform key))))
+
+(defn- check-jitter!
+  "jitter, loud unless 0 ≤ jitter < 1."
+  [jitter]
+  (when-not (and (number? jitter) (<= 0.0 (double jitter)) (< (double jitter) 1.0))
+    (throw (ex-info (str ":jitter must be at least 0 and below 1, not " (pr-str jitter))
+                    {:reason :invalid-jitter :jitter jitter})))
+  jitter)
+
+(defn- jitter-step
+  "eps·(1 + jitter·(2u - 1)): the step size of a transition jittered by u."
+  [eps jitter u]
+  (* eps (+ 1.0 (* jitter (- (* 2.0 u) 1.0)))))
+
+(defn- jittered
+  "One transition's step size, Stan's stepsize_jitter (Neal 2011's remedy
+   for a trajectory of fixed length that returns near its start):
+   eps·(1 + jitter·(2u - 1)), u uniform on the transition's key at index 3,
+   beside the three keys it splits, read on the host. With jitter 0, eps,
+   and nothing is drawn. Loud unless 0 ≤ jitter < 1."
+  [eps jitter key]
+  (check-jitter! jitter)
+  (if (zero? (double jitter))
+    eps
+    (jitter-step eps (double jitter) (uniform (rng/fold-in key 3)))))
+
 (defn hmc
   "Hamiltonian Monte Carlo on the selected choices: L leapfrog steps of size
    eps, with momenta drawn from N(0, M), M the inverse of :inv-metric (the
    identity by default: standard normal momenta). The third argument is an
    options map or a key, and a key may follow the options. Options: :L
-   (10), :eps (0.1), :inv-metric, :key, :compile? (false): run the L steps
-   as one compiled function (array/compile: one MLX graph on the MLX
-   backend, the same steps on the JVM backend), a function of the selected
-   values and the other choices, cached per model, arguments and structure.
-   A model that reads a value on the host cannot be compiled and runs the
-   same function uncompiled. Either way the trace is updated once, after
-   the L steps."
+   (10), :eps (0.1), :inv-metric, :jitter (0): each transition steps by
+   eps·(1 + jitter·(2u - 1)), u uniform, Stan's step-size jitter, which
+   keeps L steps from returning near the start (the result then holds the
+   step taken, :eps), :key, :compile? (false): run the L steps as one
+   compiled function (array/compile: one MLX graph on the MLX backend, the
+   same steps on the JVM backend), a function of the selected values and
+   the other choices, cached per model, arguments and structure. A model
+   that reads a value on the host cannot be compiled and runs the same
+   function uncompiled. Either way the trace is updated once, after the L
+   steps."
   ([trace selection] (hmc trace selection nil))
   ([trace selection key-or-opts] (let [opts (step-opts key-or-opts)] (hmc trace selection opts (:key opts))))
   ([trace selection opts key]
-   (let [move (hmc-move trace selection (options opts) key)]
+   (let [{:keys [eps jitter] :or {eps 0.1 jitter 0} :as opts} (options opts)
+         step (jittered eps jitter key)
+         move (hmc-move trace selection (assoc opts :eps step) key)]
      (check-start! "hmc" (:start-ok move) trace selection)
-     (moved trace move (second (rng/split key 3))))))
+     (cond-> (moved trace move (second (rng/split key 3)))
+       (pos? (double jitter)) (assoc :eps step)))))
 
 ;; ---------------------------------------------------------------------------
 ;; NUTS
@@ -403,11 +439,6 @@
       (let [[v p g lp ok] (step v p g eps inv others)
             sharp (* inv p)]
         [v p g sharp (array/where ok (energy lp p sharp) ##Inf)]))))
-
-(defn- uniform
-  "A uniform draw on [0, 1) on key, as a host double."
-  ^double [key]
-  (double (array/item (rng/uniform key))))
 
 (defn- continuing?
   "Stan's compute_criterion: do the velocities a and b (sharp momenta) both
@@ -516,22 +547,25 @@
    progressive sampling, which favours the new subtree. A subtree that
    diverges or turns within itself is left out. The third argument is an
    options map or a key, and a key may follow the options. Options: :eps
-   (0.1), :max-depth (10), :inv-metric, :key, :compile? (false): run each
-   leapfrog step as one compiled function (as hmc's, the tree's logic on
-   the host). The trace is updated once, at the end.
+   (0.1), :max-depth (10), :inv-metric, :jitter (0, as hmc's), :key,
+   :compile? (false): run each leapfrog step as one compiled function (as
+   hmc's, the tree's logic on the host). The trace is updated once, at the
+   end.
 
    Returns {:trace :accept-stat :tree-depth :n-leapfrog :diverged? :energy
    :eps}, Stan's statistics: the mean over every step taken of
    min(1, e^(h0 - h)) (the statistic step-size adaptation targets), the
    number of doublings kept, the leapfrog steps (each one gradient, plus
    one at the start), whether a step diverged (an energy error over 1000,
-   or a non-finite step), the energy of the state drawn and the step size."
+   or a non-finite step), the energy of the state drawn and the step size
+   taken."
   ([trace selection] (nuts trace selection nil))
   ([trace selection key-or-opts] (let [opts (step-opts key-or-opts)] (nuts trace selection opts (:key opts))))
   ([trace selection opts key]
-   (let [{:keys [eps max-depth compile? inv-metric] :or {eps 0.1 max-depth 10}} (options opts)
+   (let [{:keys [eps max-depth compile? inv-metric jitter] :or {eps 0.1 max-depth 10 jitter 0}} (options opts)
          _ (when-not (and (number? eps) (Double/isFinite (double eps)) (pos? (double eps)))
              (throw (ex-info (str "nuts: :eps must be a positive number, not " (pr-str eps)) {:reason :invalid-eps :eps eps})))
+         eps (jittered eps jitter key)
          _ (when-not (pos-int? max-depth)
              (throw (ex-info (str "nuts: :max-depth must be a positive integer, not " (pr-str max-depth))
                              {:reason :invalid-max-depth :max-depth max-depth})))
@@ -648,28 +682,39 @@
 (defn- particle-moves
   "Every particle's move (move, of a trace and a key, as hmc-move) at once,
    by gen.batched/map-particles, each accepted on its own: {:particles,
-   :accepted? and :diverged? (n booleans each), :log-alpha (an [n] array)}."
+   :accepted? and :diverged? (n booleans each), :log-alpha (an [n] array)},
+   and :eps (an [n] array) when the moves report their step sizes."
   [kernel ps selection move key]
-  (let [{:keys [values accepted? log-alpha diverged? start-ok]} (batched/map-particles ps move key)
+  (let [{:keys [values accepted? log-alpha diverged? start-ok eps]} (batched/map-particles ps move key)
         accepted (mapv true? (array/->clj accepted?))]
     (check-starts! kernel start-ok selection)
-    {:particles (if (some true? accepted) (batched/set-choices ps values) ps)
-     :accepted? accepted
-     :log-alpha log-alpha
-     :diverged? (mapv true? (array/->clj diverged?))}))
+    (cond-> {:particles (if (some true? accepted) (batched/set-choices ps values) ps)
+             :accepted? accepted
+             :log-alpha log-alpha
+             :diverged? (mapv true? (array/->clj diverged?))}
+      eps (assoc :eps eps))))
 
 (defn hmc-particles
   "hmc on every particle of a gen.batched collection, n independent chains
    each accepted on its own: one batched gradient per leapfrog step for all
    of them, where the model runs batched. Arguments as hmc's, without
-   :compile?. Returns {:particles, :accepted? and :diverged? (n booleans
-   each), :log-alpha (an [n] array)}; a start that is not finite is an
-   error, as hmc's."
+   :compile?; with :jitter each chain's step size is jittered by its own u,
+   as its own hmc's would be (DESIGN §9, PROVISIONAL). Returns {:particles,
+   :accepted? and :diverged? (n booleans each), :log-alpha (an [n] array)},
+   and with :jitter :eps, the steps taken (an [n] array); a start that is
+   not finite is an error, as hmc's."
   ([ps selection] (hmc-particles ps selection nil))
   ([ps selection key-or-opts] (let [opts (step-opts key-or-opts)] (hmc-particles ps selection opts (:key opts))))
   ([ps selection opts key]
-   (let [opts (uncompiled! "hmc-particles" (options opts))]
-     (particle-moves "hmc" ps selection #(hmc-move %1 selection opts %2) key))))
+   (let [{:keys [eps jitter] :or {eps 0.1 jitter 0} :as opts} (uncompiled! "hmc-particles" (options opts))
+         jitter (double (check-jitter! jitter))
+         ;; jittered's step, its u drawn per particle (an array, not read)
+         move (fn [t k]
+                (if (zero? jitter)
+                  (hmc-move t selection opts k)
+                  (let [step (jitter-step eps jitter (rng/uniform (rng/fold-in k 3)))]
+                    (assoc (hmc-move t selection (assoc opts :eps step) k) :eps step))))]
+     (particle-moves "hmc" ps selection move key))))
 
 (defn mala-particles
   "mala on every particle of a gen.batched collection, as hmc-particles:

@@ -530,6 +530,24 @@ to one particle at a time, and `gen.batched/fallback-reason` says why. For
 one key, a batched run draws other samples than a scalar run (the draws are
 made per site for all particles at once), with the same distribution.
 
+**Per-particle constraints** (*added 2026-10-23, bean genclj-7oc1*). In a
+batched run a constraint is per particle when its value is a batched value,
+and shared otherwise: the handler reads constraints as it reads every value.
+- Callers say which. `gen.batched/generate` and `update` take shared
+  constraints, and `{:per-particle cs}`: n choice maps, particle i's own
+  beside the shared ones, which they must not overlap. A shape never
+  decides: an [N] array given as a shared constraint is one value of shape
+  [N] for every particle.
+- The per-particle choice maps are stacked (`choicemap/stack`) into batched
+  values. Maps of different addresses, or values that do not stack (labels),
+  run one particle at a time, as any batched run that fails.
+- Code that runs part of a batched run's particles (a Switch whose index
+  differs across them, by partition) takes their rows of each batched
+  constraint with them (`gen.array.batch/gather`).
+- Batched enumeration uses them: `enumerative-inference` with `:batched?`
+  constrains particle i to grid point i, and `with-exact-proposal` with
+  `:batched?` constrains particle i to assignment i.
+
 Code outside `gen` bodies is not guarded. Two mechanisms cover it
 (*added 2026-10-19 after the acceptance tests*):
 - **Unread comparisons.** Every batched bool an op makes is registered, and
