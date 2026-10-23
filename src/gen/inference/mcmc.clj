@@ -10,15 +10,20 @@
      (elliptical-slice trace addr mu cov)      → trace
 
    The selected choices must keep the trace's structure: HMC and MALA move
-   them jointly and leave every other choice alone. A proposal whose
-   position, momentum, gradient or energy turns non-finite, or where a
-   distribution's parameter fails its check, diverged: it is rejected,
-   with acceptance 0 (:log-alpha -Inf), and reported as :diverged?
-   (gen.inference.kernel/run counts them), as Stan treats a divergence. A
-   starting trace whose log density or gradient is not finite (NaN, or a
-   probability of 0) is an error, as Stan refuses such a start. Keys are an
-   optional last argument (or :key in an options map); omitting one draws
-   from the implicit key source."
+   them jointly and leave every other choice alone. They take a diagonal
+   metric, :inv-metric (Stan's inv_metric, the identity by default): a
+   variance for each selected value, in the order of (cm/to-array
+   (grad/continuous-selection trace selection)), or one number for all.
+   Momenta are drawn with those precisions and a position moves by
+   inv-metric ⊙ momentum, so variances that match the target's make its
+   scales alike. A proposal whose position, momentum, gradient or energy
+   turns non-finite, or where a distribution's parameter fails its check,
+   diverged: it is rejected, with acceptance 0 (:log-alpha -Inf), and
+   reported as :diverged? (gen.inference.kernel/run counts them), as Stan
+   treats a divergence. A starting trace whose log density or gradient is
+   not finite (NaN, or a probability of 0) is an error, as Stan refuses
+   such a start. Keys are an optional last argument (or :key in an options
+   map); omitting one draws from the implicit key source."
   (:refer-clojure :exclude [+ - * /])
   (:require [gen.array :as array :refer [+ - * /]]
             [gen.choicemap :as cm]
@@ -89,40 +94,60 @@
     [t w]))
 
 (defn- normal-lp
-  "log N(x; mu, sd) summed over elements, sd a host number. By arithmetic,
-   not gen.dist's normal, which refuses a NaN mean: a diverged gradient's
-   NaN must reach the divergence check."
-  [x mu ^double sd]
+  "log N(x; mu, sd) summed over elements, sd a host number or an array. By
+   arithmetic, not gen.dist's normal, which refuses a NaN mean: a diverged
+   gradient's NaN must reach the divergence check."
+  [x mu sd]
   (let [z (/ (- x mu) sd)]
-    (array/sum (- (* -0.5 (* z z)) (+ (Math/log sd) (* 0.5 (Math/log (* 2.0 Math/PI))))))))
+    (array/sum (- (* -0.5 (* z z)) (+ (array/log sd) (* 0.5 (Math/log (* 2.0 Math/PI))))))))
+
+(defn- inverse-metric
+  "The :inv-metric option for the flat values v: the host number 1.0 (the
+   identity, under which hmc and mala move as they did without one) for
+   nil, a positive number, or a vector or array of v's shape. Loud unless
+   every variance is positive and finite."
+  [inv v]
+  (let [m (cond (nil? inv) 1.0
+                (sequential? inv) (array/astype (array/array inv) (array/dtype v))
+                (array/backend-array? inv) (array/astype inv (array/dtype v))
+                :else inv)]
+    (when-not (and (array/array? m)
+                   (or (array/host? m) (= (array/shape m) (array/shape v)))
+                   (array/truthy? (array/all (array/logical-and (array/isfinite m) (array/> m 0)))))
+      (throw (ex-info (str ":inv-metric must be a positive variance, or one for each of the " (array/size v)
+                           " selected values, not " (pr-str inv))
+                      {:reason :invalid-inv-metric :inv-metric inv :shape (array/shape v)})))
+    m))
 
 (def ^:private compiled-steps
   "Compiled kernel steps by kernel and settings, model, arguments and choice
    structure (the most recent few), or ::plain where compiling failed."
   (atom {}))
 
-(defn- compiled-step
+(defn- compiled
   "The kernel step (build) compiled for this trace's model, arguments and
-   choice structure (cached under settings) and applied to args, or nil when
-   the model cannot be compiled (it reads a value on the host), which is
-   remembered."
-  [trace proto others settings build & args]
+   choice structure (cached under settings): a function of the step's
+   arguments, which returns nil when the model cannot be compiled (it reads
+   a value on the host), and that is remembered."
+  [trace proto others settings build]
   (let [structure (fn [m] (array/tree-map (fn [x] [(array/shape x) (array/dtype x)]) m))
-        k [settings (:gen-fn trace) (:args trace) (structure others) (structure (cm/to-map proto))]
-        cached (get @compiled-steps k)]
-    (when-not (= cached ::plain)
-      (let [f (or cached (let [f (array/compile (build))]
-                           (swap! compiled-steps (fn [m] (assoc (if (>= (count m) 16) {} m) k f)))
-                           f))]
-        (try (apply f args)
-             (catch Exception e
-               ;; the first call traces the step: whatever fails there (a host
-               ;; read, a value the trace holds as an array that the model
-               ;; needs on the host) makes the step plain from now on, and the
-               ;; plain kernel raises it again if it is the model's own error
-               (if (or (nil? cached) (= :compile (:op (ex-data e))))
-                 (do (swap! compiled-steps assoc k ::plain) nil)
-                 (throw e))))))))
+        k [settings (:gen-fn trace) (:args trace) (structure others) (structure (cm/to-map proto))]]
+    (fn [& args]
+      (let [cached (get @compiled-steps k)]
+        (when-not (= cached ::plain)
+          (let [f (or cached (let [f (array/compile (build))]
+                               (swap! compiled-steps (fn [m] (assoc (if (>= (count m) 16) {} m) k f)))
+                               f))]
+            (try (apply f args)
+                 (catch Exception e
+                   ;; the first call traces the step: whatever fails there (a
+                   ;; host read, a value the trace holds as an array that the
+                   ;; model needs on the host) makes the step plain from now
+                   ;; on, and the plain kernel raises it again if it is the
+                   ;; model's own error
+                   (if (or (nil? cached) (= :compile (:op (ex-data e))))
+                     (do (swap! compiled-steps assoc k ::plain) nil)
+                     (throw e))))))))))
 
 (defn- log-density
   "The log density of gf on args as a function of arrays only (for
@@ -161,26 +186,28 @@
              (throw e))))))
 
 (defn- mala-proposal
-  "MALA's proposal as a function of arrays only: [v noise others] →
-   [v' log q(v | v') - log q(v' | v) diverged start-ok], diverged true when
-   v', the gradients or the densities are not finite (or a parameter fails
-   its check at v', tried), start-ok whether the log density and its
-   gradient at v are. The reverse gradient is taken at v' only when v' is
-   finite (at v otherwise: assess would refuse a NaN), so a compiled
+  "MALA's proposal as a function of arrays only: [v noise inv others] →
+   [v' log q(v | v') - log q(v' | v) diverged start-ok], preconditioned by
+   the inverse metric inv (v' ~ N(v + tau·inv ⊙ ∇, 2 tau·inv)), diverged
+   true when v', the gradients or the densities are not finite (or a
+   parameter fails its check at v', tried), start-ok whether the log density
+   and its gradient at v are. The reverse gradient is taken at v' only when
+   v' is finite (at v otherwise: assess would refuse a NaN), so a compiled
    proposal needs no branch."
   [gf args proto tau]
   (let [density (log-density gf args proto)
         value-and-grad (array/value-and-grad density)
         grad-tried (tried (array/grad density) #(* % ##NaN))
-        sd (Math/sqrt (* 2.0 (double tau)))]
-    (fn [v noise others]
-      (let [[lp g] (value-and-grad v others)
-            fwd-mu (+ v (* tau g))
+        root-2tau (Math/sqrt (* 2.0 (double tau)))]
+    (fn [v noise inv others]
+      (let [sd (* root-2tau (array/sqrt inv))
+            [lp g] (value-and-grad v others)
+            fwd-mu (+ v (* tau (* inv g)))
             v' (+ fwd-mu (* sd noise))
             ok (finite g v')
             v' (array/where ok v' v)
             g' (grad-tried v' others)
-            bwd-mu (+ v' (* tau g'))
+            bwd-mu (+ v' (* tau (* inv g')))
             log-q (- (normal-lp v bwd-mu sd) (normal-lp v' fwd-mu sd))]
         [v' log-q (array/logical-not (array/logical-and ok (finite g' log-q))) (finite lp g)]))))
 
@@ -207,76 +234,97 @@
 (defn mala
   "Metropolis-adjusted Langevin: propose v' ~ N(v + tau·∇, √(2 tau)) for the
    selected choices v, with the reverse move's density from the gradient at
-   v'. The last argument is a key or an options map: :key, and :compile?
-   (false) to compute the proposal and its densities as one compiled
-   function, as hmc's."
+   v'. The last argument is a key or an options map: :key, :inv-metric (the
+   identity; with variances M⁻¹, v' ~ N(v + tau·M⁻¹∇, 2 tau·M⁻¹)), and
+   :compile? (false) to compute the proposal and its densities as one
+   compiled function, as hmc's."
   ([trace selection tau] (mala trace selection tau nil))
   ([trace selection tau key-or-opts]
-   (let [{:keys [key compile?]} (step-opts key-or-opts)
+   (let [{:keys [key compile? inv-metric]} (step-opts key-or-opts)
          [k-propose k-update k-accept] (rng/split key 3)
          [proto v others] (flat-values trace selection)
+         inv (inverse-metric inv-metric v)
          noise (rng/normal k-propose (array/shape v))
          build #(mala-proposal (:gen-fn trace) (:args trace) proto tau)
          ;; the proposal as a function of the selected values, compiled or not
-         [v' log-q diverged? start-ok] (or (when compile? (compiled-step trace proto others [:mala tau] build v noise others))
-                                           ((build) v noise others))]
+         [v' log-q diverged? start-ok] (or (when compile? ((compiled trace proto others [:mala tau] build) v noise inv others))
+                                           ((build) v noise inv others))]
      (check-start! "mala" start-ok trace selection)
      (if (array/truthy? diverged?)
        (diverged trace)
        (let [[t' weight] (move-to trace proto v' k-update)]
          (accept trace t' (+ weight log-q) k-accept))))))
 
+(defn- leapfrog
+  "One leapfrog step of size eps (signed: negative runs time backwards)
+   under the inverse metric inv, as a function of arrays only: [v p g eps
+   inv others] → [v' p' g' lp ok], g the log density's gradient at v and g'
+   and lp its gradient and value at v'. ok is false when the position,
+   momentum, gradient or log density turns non-finite, or a parameter fails
+   its check at v' (tried). A non-finite v' is replaced by v before the
+   gradient is taken, so no gradient is taken at a non-finite position
+   (assess would refuse a NaN), and a compiled step needs no branch."
+  [value-and-grad]
+  (let [value-and-grad (tried value-and-grad (fn [v] [##NaN (* v ##NaN)]))]
+    (fn [v p g eps inv others]
+      (let [half (/ eps 2.0)
+            p-half (+ p (* half g))
+            v' (+ v (* eps (* inv p-half)))
+            ok (finite p-half v')
+            v' (array/where ok v' v)
+            [lp g'] (value-and-grad v' others)
+            p' (+ p-half (* half g'))]
+        [v' p' g' lp (array/logical-and ok (finite lp g' p'))]))))
+
 (defn- leapfrogs
-  "L leapfrog steps as a function of arrays only: [v p others] → [v' p'
-   diverged start-ok]. diverged is true once a position, momentum,
-   gradient or log density turns non-finite (or a parameter fails its
-   check, tried), and from that step on the state stays at its last finite
-   values: no gradient is taken at a non-finite position (assess would
-   refuse a NaN), and a compiled step needs no early exit. start-ok is
-   whether the log density and its gradient at v are finite."
-  [gf args proto L eps]
+  "L leapfrog steps as a function of arrays only: [v p eps inv others] →
+   [v' p' diverged start-ok]. diverged is true once a step is not ok (a
+   non-finite value, or a parameter failing its check), and from that step
+   on the state stays at its last finite values, so a compiled step needs
+   no early exit. start-ok is whether the log density and its gradient at v
+   are finite."
+  [gf args proto L]
   (let [value-and-grad (array/value-and-grad (log-density gf args proto))
-        tried-value-and-grad (tried value-and-grad (fn [v] [##NaN (* v ##NaN)]))
-        half (/ eps 2.0)]
-    (fn [v p others]
+        step (leapfrog value-and-grad)]
+    (fn [v p eps inv others]
       (let [[lp g] (value-and-grad v others)
             start-ok (finite lp g)]
         (loop [i 0 v v p p g g diverged (array/logical-not start-ok)]
           (if (< i (long L))
-            (let [p-half (+ p (* half g))
-                  v-next (+ v (* eps p-half))
-                  diverged (array/logical-or diverged (array/logical-not (finite p-half v-next)))
-                  v-next (array/where diverged v v-next)
-                  [lp g-next] (tried-value-and-grad v-next others)
-                  p-next (+ p-half (* half g-next))
-                  diverged (array/logical-or diverged (array/logical-not (finite lp g-next p-next)))]
-              (recur (inc i) (array/where diverged v v-next) (array/where diverged p p-next)
-                     (array/where diverged g g-next) diverged))
+            (let [[v' p' g' _ ok] (step v p g eps inv others)
+                  diverged (array/logical-or diverged (array/logical-not ok))]
+              (recur (inc i) (array/where diverged v v') (array/where diverged p p')
+                     (array/where diverged g g') diverged))
             [v p diverged start-ok]))))))
 
 (defn hmc
   "Hamiltonian Monte Carlo on the selected choices: L leapfrog steps of size
-   eps with standard normal momenta. The third argument is an options map
-   or a key, and a key may follow the options. Options: :L (10), :eps (0.1),
-   :key, :compile? (false): run the L steps as one compiled function (array/compile:
-   one MLX graph on the MLX backend, the same steps on the JVM backend), a
-   function of the selected values and the other choices, cached per model,
-   arguments and structure. A model that reads a value on the host cannot
-   be compiled and runs the same function uncompiled. Either way the trace
-   is updated once, after the L steps."
+   eps, with momenta drawn from N(0, M), M the inverse of :inv-metric (the
+   identity by default: standard normal momenta). The third argument is an
+   options map or a key, and a key may follow the options. Options: :L
+   (10), :eps (0.1), :inv-metric, :key, :compile? (false): run the L steps
+   as one compiled function (array/compile: one MLX graph on the MLX
+   backend, the same steps on the JVM backend), a function of the selected
+   values and the other choices, cached per model, arguments and structure.
+   A model that reads a value on the host cannot be compiled and runs the
+   same function uncompiled. Either way the trace is updated once, after
+   the L steps."
   ([trace selection] (hmc trace selection nil))
   ([trace selection key-or-opts] (let [opts (step-opts key-or-opts)] (hmc trace selection opts (:key opts))))
   ([trace selection opts key]
-   (let [{:keys [L eps compile?] :or {L 10 eps 0.1}} (options opts)
+   (let [{:keys [L eps compile? inv-metric] :or {L 10 eps 0.1}} (options opts)
          [k-momenta k-update k-accept] (rng/split key 3)
-         kinetic (fn [p] (normal-lp p 0.0 1.0))
          [proto v others] (flat-values trace selection)
-         p0 (rng/normal k-momenta (array/shape v))
-         build #(leapfrogs (:gen-fn trace) (:args trace) proto L eps)
+         inv (inverse-metric inv-metric v)
+         ;; the momenta's scale, √M
+         sd (/ 1.0 (array/sqrt inv))
+         kinetic (fn [p] (normal-lp p 0.0 sd))
+         p0 (* sd (rng/normal k-momenta (array/shape v)))
+         build #(leapfrogs (:gen-fn trace) (:args trace) proto L)
          ;; the L steps as a function of the selected values, compiled or
          ;; not: the trace is updated once, at the end
-         [v' p diverged? start-ok] (or (when compile? (compiled-step trace proto others [:hmc L eps] build v p0 others))
-                                       ((build) v p0 others))]
+         [v' p diverged? start-ok] (or (when compile? ((compiled trace proto others [:hmc L] build) v p0 eps inv others))
+                                       ((build) v p0 eps inv others))]
      (check-start! "hmc" start-ok trace selection)
      (if (array/truthy? diverged?)
        (diverged trace)

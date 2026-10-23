@@ -388,6 +388,42 @@
         (is (ts/close? log-alpha (:log-alpha r) {:atol (ts/tol 1e-9)}))
         (is (ts/close? (if (:accepted? r) x x0) (moved r)))))))
 
+(deftest one-step-by-hand-with-a-metric
+  ;; the same steps under an inverse metric m (a variance): momenta
+  ;; z/√m, positions moving by m·p, kinetic energy ½ m p²; MALA's proposal
+  ;; N(x + tau·m·∇, 2 tau·m). Planted bug (2026-10-23): HMC's kinetic
+  ;; energy without the metric fails its log-alpha; MALA's drift without
+  ;; it fails both
+  (let [y 1.3 x0 0.4 m 2.5
+        tr (:trace (gfi/generate scalar [] (cm/choicemap :x x0 :y y) (rng/key 0)))
+        grad-x (fn [x] (clojure.core/- y (clojure.core/* 2.0 x)))
+        lp (fn [x] (clojure.core/+ (host-normal-lp x 0.0 1.0) (host-normal-lp y x 1.0)))
+        draw (fn [key] (ts/number (array/take (rng/normal key [1]) 0)))
+        moved (fn [r] (ts/number ((:trace r) :x)))]
+    (testing "HMC"
+      (let [key (rng/key 75) eps 0.3 half (clojure.core// eps 2)
+            p0 (clojure.core// (draw (first (rng/split key 3))) (Math/sqrt m))
+            [x p] (loop [i 0 x x0 p p0]
+                    (if (clojure.core/< i 2)
+                      (let [p (clojure.core/+ p (clojure.core/* half (grad-x x)))
+                            x (clojure.core/+ x (clojure.core/* eps m p))]
+                        (recur (inc i) x (clojure.core/+ p (clojure.core/* half (grad-x x)))))
+                      [x p]))
+            log-alpha (clojure.core/- (clojure.core/- (lp x) (lp x0)) (clojure.core/* 0.5 m (clojure.core/- (clojure.core/* p p) (clojure.core/* p0 p0))))
+            r (mcmc/hmc tr (sel/select :x) {:L 2 :eps eps :inv-metric [m]} key)]
+        (is (ts/close? log-alpha (:log-alpha r) {:atol (ts/tol 1e-9)}))
+        (is (ts/close? (if (:accepted? r) x x0) (moved r)))))
+    (testing "MALA"
+      (let [key (rng/key 76) tau 0.2 sd (Math/sqrt (clojure.core/* 2 tau m))
+            z (draw (first (rng/split key 3)))
+            fwd (clojure.core/+ x0 (clojure.core/* tau m (grad-x x0)))
+            x (clojure.core/+ fwd (clojure.core/* sd z))
+            bwd (clojure.core/+ x (clojure.core/* tau m (grad-x x)))
+            log-alpha (clojure.core/+ (clojure.core/- (lp x) (lp x0)) (clojure.core/- (host-normal-lp x0 bwd sd) (host-normal-lp x fwd sd)))
+            r (mcmc/mala tr (sel/select :x) tau {:inv-metric m :key key})]
+        (is (ts/close? log-alpha (:log-alpha r) {:atol (ts/tol 1e-9)}))
+        (is (ts/close? (if (:accepted? r) x x0) (moved r)))))))
+
 (deftest a-move-that-changes-the-structure-is-named
   ;; :extra exists only for x > 0, and the moves carry x across 0 (review 3:
   ;; the error named assess, not the kernel's requirement)
