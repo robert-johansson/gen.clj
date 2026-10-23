@@ -561,13 +561,6 @@
 ;; Batched runs
 ;; ---------------------------------------------------------------------------
 
-(def ^:private switch-batches-per-particle?
-  "Does a Switch whose index differs across particles run batched
-   (genclj-7tqw, by partition)? Until then such a Mix falls back to one
-   particle at a time; once it does, this is true, and the test below
-   requires the batch."
-  false)
-
 ;; Planted bugs (2026-10-23): Scan's generate simulating its steps fails the
 ;; Scan testing (and the dimap one, a Scan's); a skipped Scan step's carry
 ;; read from its output fails the Scan testing's update. After genclj-7tqw
@@ -599,11 +592,37 @@
           {ps :particles ws :weights} (b/generate m [] obs 4 (rng/key 4))]
       (is (b/batched? ps))
       (is (every? true? (map #(close? %2 (:weight (gfi/generate m [] (:choices %1) (rng/key 0)))) (b/traces ps) (array/->clj ws))))))
-  (testing "Mix with an index per particle"
-    (let [ps (b/simulate mixed [[0.4 0.6] 0.0] 8 (rng/key 5))]
-      (is (= switch-batches-per-particle? (b/batched? ps)) (str (b/fallback-reason ps)))
+  (testing "Mix with an index per particle: its Switch runs by partition (genclj-7tqw)"
+    ;; spot checks off, so that the batched scores and weights themselves
+    ;; are compared with the scalar handler's
+    (binding [b/*spot-checks* 0]
+      (let [args [[0.4 0.6] 0.0]
+            indices (fn [ps] (mapv #(ts/host (% :index)) (b/traces ps)))
+            ps (b/simulate mixed args 8 (rng/key 5))]
+        (is (b/batched? ps))
+        (is (nil? (b/fallback-reason ps)))
+        (is (< 1 (count (distinct (indices ps)))) "the particles' indices differ")
+        (is (every? true? (map #(close? %1 (:weight (gfi/assess mixed args (:choices %2)))) (array/->clj (b/scores ps)) (b/traces ps)))
+            "each particle's score is its choices' density")
+        (testing "and regenerating the index moves particles between components, keeping :x"
+          (let [{ps' :particles ws :weights} (b/regenerate ps args [diff/no-change diff/no-change] (sel/select :index) (rng/key 7))
+                x (sel/select [:component :x])]
+            (is (b/batched? ps'))
+            (is (not= (indices ps) (indices ps')))
+            (is (every? true? (map (fn [before after w] (and (= (ts/host (before [:component :x])) (ts/host (after [:component :x])))
+                                                             (close? w (- (gfi/project after x) (gfi/project before x)))))
+                                   (b/traces ps) (b/traces ps') (array/->clj ws)))))))))
+  (testing "a keyed Switch on booleans, GenMLX's Mask, runs by partition when its branches return values of one kind"
+    (let [masked (fn [off] (gen [] (splice :m (comb/switch {true near false (gen [& _] off)}) (trace :on (d/bernoulli 0.5)) 0.0)))
+          ps (b/simulate (masked 0.0) [] 8 (rng/key 8))
+          nils (b/simulate (masked nil) [] 8 (rng/key 8))]
+      (is (b/batched? ps))
+      (is (nil? (b/fallback-reason ps)))
+      (is (< 1 (count (distinct (map #(ts/host (% :on)) (b/traces ps))))))
       (is (every? consistent? (b/traces ps)))
-      (is (< 1 (count (distinct (map #(ts/host (% :index)) (b/traces ps))))) "the particles' indices differ")))
+      (testing "nil and a number do not stack: the batch falls back, to the same particles"
+        (is (not (b/batched? nils)))
+        (is (every? consistent? (b/traces nils))))))
   (testing "dimap"
     (let [ps (b/simulate summed [0.0 [0.1 0.2] 0.5] 4 (rng/key 6))]
       (is (b/batched? ps))
