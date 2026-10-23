@@ -6,7 +6,9 @@
   (:require [clojure.test :refer [deftest is testing]]
             [gen.test-support :as ts]
             [gen.array :as array :refer [+ - * / >]]
+            [gen.array.batch :as batch]
             [gen.array.linalg :as la]
+            [gen.batched :as b]
             [gen.choicemap :as cm]
             [gen.dist :as d]
             [gen.dist.core :as dc]
@@ -470,3 +472,162 @@
               (is (= (:accepted? plain) (:accepted? compiled)) (str kernel))
               (is (ts/close? (:log-alpha plain) (:log-alpha compiled)) (str kernel))
               (is (ts/close? (:score (:trace plain)) (:score (:trace compiled))) (str kernel)))))))))
+
+;; ---------------------------------------------------------------------------
+;; Every particle at once: hmc-particles, mala-particles,
+;; map-optimize-particles
+;; ---------------------------------------------------------------------------
+
+(defn- chains-from
+  "n particles of model, every one at the choices."
+  [model choices n]
+  (b/take (:particles (b/generate model [] choices 1 (rng/key 0))) (repeat n 0)))
+
+(defn- particles-match?
+  "Do the n particles' values xs (host numbers) have the posterior's mean
+   and variance? Bands of 5 standard errors: the mean's √(var/n), and the
+   sample variance's var·√(2/(n - 1)) for a normal posterior."
+  [xs mean var]
+  (let [n (count xs) [m v] (moments xs)]
+    (and (< (Math/abs (clojure.core/- m mean)) (clojure.core/* 5 (Math/sqrt (clojure.core// var n))))
+         (< (Math/abs (clojure.core/- v var)) (clojure.core/* 5 var (Math/sqrt (clojure.core// 2.0 (dec n))))))))
+
+(deftest ^:slow parallel-hmc-and-mala-chains-target-the-posterior
+  ;; 4000 chains from x = -2, each step one batched gradient per leapfrog
+  ;; step for all of them; the chains stay batched. Planted (2026-10-23):
+  ;; every chain's momenta particle 0's synchronizes the chains, failing
+  ;; HMC's scalar and vector cases
+  (let [n 4000
+        start (chains-from scalar (cm/choicemap :x -2.0 :y 1.3) n)
+        run (fn [step steps key] (reduce (fn [ps k] (:particles (step ps k))) start (rng/split key steps)))]
+    (doseq [[label chains] [["hmc" (run #(mcmc/hmc-particles %1 x-sel {:L 5 :eps 0.3} %2) 30 (rng/key 90))]
+                            ["mala" (run #(mcmc/mala-particles %1 x-sel 0.3 %2) 60 (rng/key 91))]]]
+      (testing label
+        (is (b/batched? chains))
+        (is (particles-match? (ts/host (b/choice chains :x)) 0.65 0.5)))))
+  (testing "a vector latent behind a splice"
+    (let [n 2000
+          chains (reduce (fn [ps k] (:particles (mcmc/hmc-particles ps (sel/select [:latent :z]) {:L 5 :eps 0.25} k)))
+                         (chains-from vector-model (cm/choicemap [:latent :z] (array/array [2.0 2.0]) :y y2) n)
+                         (rng/split (rng/key 92) 30))
+          zs (ts/host (b/choice chains [:latent :z]))]
+      (is (b/batched? chains))
+      (doseq [i [0 1]]
+        (is (particles-match? (map #(nth % i) zs)
+                              (array/item (array/take posterior-mean i))
+                              (array/item (array/take (array/take posterior-cov i) i)))
+            (str "coordinate " i))))))
+
+(deftest particle-moves-by-hand
+  ;; the batched path against arithmetic, particle by particle, with the
+  ;; draws the tracer makes from the kernel's keys (one-step-by-hand's
+  ;; target: log p = log N(x; 0, 1) + log N(y; x, 1), ∇ = y - 2x). Steps
+  ;; long enough that some particles are rejected. Planted (2026-10-23):
+  ;; every particle's momenta particle 0's fails HMC's ratios; a fixed
+  ;; uniform of 1/2 for the acceptance flips particle 1's verdicts
+  (let [y 1.3 n 4
+        x0s [-1.5 0.2 0.9 2.4]
+        ps (b/set-choices (chains-from scalar (cm/choicemap :x 0.0 :y y) n) (cm/choicemap :x (array/array x0s)))
+        grad-x (fn [x] (clojure.core/- y (clojure.core/* 2.0 x)))
+        lp (fn [x] (clojure.core/+ (host-normal-lp x 0.0 1.0) (host-normal-lp y x 1.0)))
+        drawn (fn [f] (ts/host (batch/unwrap (batch/batched [n] (f)) [n])))
+        check (fn [r xs log-alphas key]
+                (let [us (drawn #(rng/uniform (nth (rng/split key 3) 2)))]
+                  (is (b/batched? (:particles r)))
+                  (is (= #{true false} (set (:accepted? r))) "some accepted, some not")
+                  (is (ts/close? (array/array log-alphas) (:log-alpha r) {:atol (ts/tol 1e-9)}))
+                  (is (= (mapv #(or (>= %1 0.0) (< (Math/log %2) %1)) log-alphas us) (:accepted? r)))
+                  (is (ts/close? (array/array (mapv #(if %1 %2 %3) (:accepted? r) xs x0s)) (b/choice (:particles r) :x)))))]
+    (testing "HMC"
+      (let [key (rng/key 95) eps 1.2 half (clojure.core// eps 2)
+            p0s (map first (drawn #(rng/normal (first (rng/split key 3)) [1])))
+            ends (map (fn [x0 p0]
+                        (loop [i 0 x x0 p p0]
+                          (if (clojure.core/< i 2)
+                            (let [p (clojure.core/+ p (clojure.core/* half (grad-x x)))
+                                  x (clojure.core/+ x (clojure.core/* eps p))]
+                              (recur (inc i) x (clojure.core/+ p (clojure.core/* half (grad-x x)))))
+                            [x (clojure.core/+ (clojure.core/- (lp x) (lp x0)) (clojure.core/- (host-normal-lp p 0.0 1.0) (host-normal-lp p0 0.0 1.0)))])))
+                      x0s p0s)]
+        (check (mcmc/hmc-particles ps x-sel {:L 2 :eps eps} key) (mapv first ends) (mapv second ends) key)))
+    (testing "MALA"
+      (let [key (rng/key 96) tau 1.0 sd (Math/sqrt (clojure.core/* 2 tau))
+            zs (map first (drawn #(rng/normal (first (rng/split key 3)) [1])))
+            moves (map (fn [x0 z]
+                         (let [fwd (clojure.core/+ x0 (clojure.core/* tau (grad-x x0)))
+                               x (clojure.core/+ fwd (clojure.core/* sd z))
+                               bwd (clojure.core/+ x (clojure.core/* tau (grad-x x)))]
+                           [x (clojure.core/+ (clojure.core/- (lp x) (lp x0)) (clojure.core/- (host-normal-lp x0 bwd sd) (host-normal-lp x fwd sd)))]))
+                       x0s zs)]
+        (check (mcmc/mala-particles ps x-sel tau key) (mapv first moves) (mapv second moves) key)))))
+
+(defn- each-chain-s?
+  "Is the -particles kernel's step (step ps key) each chain's scalar step
+   (scalar trace key), from its own key (key split n ways), exactly?"
+  [ps step scalar key]
+  (let [r (step ps key)
+        each (map scalar (b/traces ps) (rng/split key (b/size ps)))]
+    (and (= (mapv :accepted? each) (:accepted? r))
+         (= (mapv :diverged? each) (:diverged? r))
+         (= (mapv :log-alpha each) (ts/host (:log-alpha r)))
+         (= (mapv #(:choices (:trace %)) each) (mapv :choices (b/traces (:particles r)))))))
+
+(deftest particle-moves-fall-back-to-each-chain-s-own
+  ;; where the model cannot run batched, or the batched move fails, each
+  ;; chain moves as the scalar kernel does from its key (gen.batched's
+  ;; fallback). Planted (2026-10-23): tried's NaN in a batched run (no
+  ;; fallback) diverges the funnel's batch whole, and fails the second
+  (let [chosen (gen [] (let [k (trace :k (d/categorical [0.5 0.5]))
+                             x (trace :x (d/normal (if (= k 0) 0.0 3.0) 1))]
+                         (trace :y (d/normal x 1))))
+        ps (:particles (b/generate chosen [] (cm/choicemap :y 1.3) 6 (rng/key 95)))]
+    (is (not (b/batched? ps)))
+    (is (each-chain-s? ps #(mcmc/hmc-particles %1 x-sel {:L 3 :eps 0.4} %2) #(mcmc/hmc %1 x-sel {:L 3 :eps 0.4} %2) (rng/key 96)))
+    (is (each-chain-s? ps #(mcmc/mala-particles %1 x-sel 0.3 %2) #(mcmc/mala %1 x-sel 0.3 %2) (rng/key 97))))
+  (testing "a parameter failing its check at some particles' positions: each chain's divergence its own"
+    ;; v ~ N(0, 1000), y ~ N(0, e^v): one step of eps 1000 from v = 0 moves
+    ;; v to 1000·p, past exp's range for some momenta (a scale of 0, which
+    ;; fails its check)
+    (let [scaled (gen [] (let [v (trace :v (d/normal 0 1000))] (trace :y (d/normal 0 (array/exp v)))))
+          ps (chains-from scaled (cm/choicemap :v 0.0 :y 1.0) 40)
+          s (sel/select :v)
+          r (mcmc/hmc-particles ps s {:L 1 :eps 1000.0} (rng/key 98))]
+      (is (< 0 (count (filter true? (:diverged? r))) 40) "some diverge, not all")
+      (is (each-chain-s? ps #(mcmc/hmc-particles %1 s {:L 1 :eps 1000.0} %2) #(mcmc/hmc %1 s {:L 1 :eps 1000.0} %2) (rng/key 98))))))
+
+(deftest map-optimization-of-every-particle
+  ;; each particle's line search is map-optimize's on its trace (no draws:
+  ;; exactly, but for round-off). On a Cauchy density from x = 0.5 the
+  ;; steps 4 and 2 overshoot and 1 is taken, from x = 3 the first: the
+  ;; particles search apart. Planted (2026-10-23): a search without each
+  ;; particle's own state (every particle shrinking its step, and taking
+  ;; every better one) fails
+  (let [cauchy (gen [] (trace :x (d/cauchy 0 1)))
+        ps (b/set-choices (chains-from cauchy (cm/choicemap :x 0.0) 6) (cm/choicemap :x (array/array [-3.0 -1.0 -0.5 0.5 1.0 3.0])))
+        moved (mcmc/map-optimize-particles ps x-sel {:max-step-size 4.0})]
+    (is (b/batched? moved))
+    (is (ts/close? (array/stack (mapv #((mcmc/map-optimize % x-sel {:max-step-size 4.0}) :x) (b/traces ps))) (b/choice moved :x))))
+  (let [ps (:particles (b/generate scalar [] (cm/choicemap :y 1.3) 6 (rng/key 99)))]
+    (testing "to the mode, from every start"
+      (let [ps (reduce (fn [ps _] (mcmc/map-optimize-particles ps x-sel)) ps (range 200))]
+        (is (b/batched? ps))
+        (is (ts/close? (array/full [6] 0.65) (b/choice ps :x) {:atol 1e-6}))))
+    (testing "a vector mode behind a splice"
+      (let [ps (reduce (fn [ps _] (mcmc/map-optimize-particles ps (sel/select [:latent :z]) {:max-step-size 0.3}))
+                       (:particles (b/generate vector-model [] (cm/choicemap :y y2) 3 (rng/key 100)))
+                       (range 300))]
+        (is (ts/close? (array/broadcast-to posterior-mean [3 2]) (b/choice ps [:latent :z]) {:atol 1e-6}))))))
+
+(deftest particle-kernel-errors
+  (let [ps (chains-from scalar (cm/choicemap :x 0.2 :y 1.3) 3)]
+    (testing "a start that is not finite, named by particle"
+      (let [boxed (gen [] (let [mu (trace :mu (d/normal 0 1))] (trace :y (d/uniform (- mu 1.0) (+ mu 1.0)))))
+            qs (b/set-choices (chains-from boxed (cm/choicemap :mu 0.0 :y 0.5) 3) (cm/choicemap :mu (array/array [0.0 -2.0 0.1])))]
+        (is (= {:reason :non-finite-start :kernel :hmc :particles [1]}
+               (select-keys (ts/thrown-data (mcmc/hmc-particles qs (sel/select :mu) {:L 2 :eps 0.1} (rng/key 101)))
+                            [:reason :kernel :particles])))))
+    (testing "no compiled steps"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"does not compile"
+                            (mcmc/hmc-particles ps x-sel {:compile? true} (rng/key 102))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"does not compile"
+                            (mcmc/mala-particles ps x-sel 0.1 {:compile? true}))))))
