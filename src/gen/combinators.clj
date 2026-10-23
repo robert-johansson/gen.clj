@@ -433,6 +433,8 @@
 ;; Switch
 ;; ---------------------------------------------------------------------------
 
+(declare own-constraints)
+
 (defn- branch-index
   "The branch index as a host value: a one-element array is read. (A
    batched one runs by partition: index-keys.)"
@@ -455,7 +457,7 @@
   (let [b (branch gf k)
         bargs (vec (rest args))]
     (if constraints
-      (let [{sub :trace w :weight} (generate-at b bargs constraints key nil)]
+      (let [{sub :trace w :weight} (generate-at b bargs (own-constraints constraints array/*backend*) key nil)]
         {:trace (switch-trace gf args k sub) :weight w})
       {:trace (switch-trace gf args k (simulate-at b bargs key)) :weight 0.0})))
 
@@ -470,7 +472,7 @@
         sub (::subtrace tr)
         bdiffs (if (= k (::branch tr)) (vec (rest argdiffs)) (unknown-diffs bargs))
         r (if (= op :update)
-            (update-at b sub bargs bdiffs cs key nil)
+            (update-at b sub bargs bdiffs (own-constraints cs array/*backend*) key nil)
             (regenerate-at b sub bargs bdiffs cs key nil))]
     (assoc r :trace (switch-trace gf args k (:trace r)))))
 
@@ -520,6 +522,29 @@
         subs (mapv :data groups)]
     (parts-trace gf args groups (batch/scatter (mapv :score subs) rows b) (part/scatter (mapv :retval subs) rows b))))
 
+(defn- in-order
+  "The order taking particles held at rows to the batch's own: nil when
+   they are in it."
+  [rows]
+  (when-not (= rows (range (count rows)))
+    (let [inv (long-array (count rows))]
+      (dotimes [j (count rows)] (aset inv (long (rows j)) (long j)))
+      (vec inv))))
+
+(defn- own-constraints
+  "constraints, for a run of the batch backend b's particles: choices held
+   by part (a Parts value: a batched trace's choices given back, as a
+   gradient's assess or a rebuild gives them) whose particles are all in
+   one group are that group's, taken into b; any other as they are (where
+   the particles' choices differ in structure, the branch's run fails,
+   loudly)."
+  [constraints b]
+  (let [v (cm/get-value constraints nil)]
+    (if (and (batch/parts? v) (== 1 (count (:groups v))))
+      (let [{rows :rows data :data} (first (:groups v))]
+        (part/gather-into data (in-order rows) b))
+      constraints)))
+
 (defn- in-part
   "(f pb) under pb, the part backend of the particles at rows of the batch
    backend b."
@@ -538,7 +563,7 @@
                             (fn [pb]
                               (let [bargs (part/gather-into (vec (rest args)) rows pb)]
                                 (if constraints
-                                  (generate-at (branch gf k) bargs (part/gather-into constraints rows pb) key nil)
+                                  (generate-at (branch gf k) bargs (own-constraints (part/gather-into constraints rows pb) pb) key nil)
                                   {:trace (simulate-at (branch gf k) bargs key) :weight 0.0})))))
                  gs)]
     {:trace (scattered-trace gf args (mapv (fn [[k rows] r] {:key k :rows rows :data (:trace r)}) gs rs) b)
@@ -549,15 +574,6 @@
    branch's."
   [tr m]
   (if-let [ps (::parts tr)] (:groups ps) [{:key (::branch tr) :rows (vec (range m)) :data (::subtrace tr)}]))
-
-(defn- in-order
-  "The order taking particles held at rows to the batch's own: nil when
-   they are in it."
-  [rows]
-  (when-not (= rows (range (count rows)))
-    (let [inv (long-array (count rows))]
-      (dotimes [j (count rows)] (aset inv (long (rows j)) (long j)))
-      (vec inv))))
 
 (defn- revise-parts
   "update or regenerate of a Switch trace whose particles' branches differ,
@@ -578,7 +594,7 @@
                                     ba (part/gather-into bargs rows pb)
                                     bdiffs (if (= k old) (vec (rest argdiffs)) (unknown-diffs bargs))]
                                 (if (= op :update)
-                                  (update-at (branch gf k) prev ba bdiffs (part/gather-into cs rows pb) key nil)
+                                  (update-at (branch gf k) prev ba bdiffs (own-constraints (part/gather-into cs rows pb) pb) key nil)
                                   (regenerate-at (branch gf k) prev ba bdiffs cs key nil))))))
                  cells)
         groups (part/merge-groups (mapv (fn [c r] {:key (:key c) :rows (:rows c) :data (:trace r)}) cells rs) b)
@@ -620,11 +636,11 @@
             gs (part/groups ks)
             rs (mapv (fn [[k rows]]
                        (in-part b rows #(gfi/-assess (branch gf k) (part/gather-into bargs rows %)
-                                                     (part/gather-into choices rows %) key)))
+                                                     (own-constraints (part/gather-into choices rows %) %) key)))
                      gs)]
         {:weight (batch/scatter (mapv :weight rs) (mapv second gs) b)
          :retval (part/scatter (mapv :retval rs) (mapv second gs) b)})
-      (gfi/-assess (branch gf (if ks (first ks) (branch-index idx))) bargs choices key))))
+      (gfi/-assess (branch gf (if ks (first ks) (branch-index idx))) bargs (own-constraints choices array/*backend*) key))))
 
 (defn- switch-project [tr selection]
   (if-let [ps (::parts tr)]

@@ -19,8 +19,10 @@
             [gen.dist.core :as dc]
             [gen.dynamic :as dyn :refer [gen]]
             [gen.gfi :as gfi]
+            [gen.gradients :as grad]
             [gen.inference.enumerative :as enum]
             [gen.inference.importance :as imp]
+            [gen.inference.mcmc :as mcmc]
             [gen.inference.mh :as mh]
             [gen.inference.particle-filter :as pf]
             [gen.laws :refer [close?]]
@@ -863,6 +865,63 @@
         p0 (/ (count (filter #(= 0 %) (array/->clj (b/choice chains :k)))) (double n))]
     (is (b/batched? chains))
     (is (< (Math/abs (- p0 mixture-p0)) (* 5 (Math/sqrt (/ (* mixture-p0 (- 1 mixture-p0)) n)))))))
+
+(def shifted-mixture
+  "The mixture, shifted by a choice outside the Switch."
+  (gen [] (let [mu (trace :mu (d/normal 0 1))
+                k (trace :k (d/categorical [0.3 0.7]))]
+            (trace :y (d/normal (+ mu (splice :c components k 0.0)) 1.0)))))
+
+(def fed-mixture
+  "The mixture, its components' mean a choice: what is differentiated flows
+   into the branches."
+  (gen [] (let [mu (trace :mu (d/normal 0 1))
+                k (trace :k (d/categorical [0.3 0.7]))]
+            (trace :y (d/normal (splice :c components k mu) 1.0)))))
+
+(deftest gradients-and-set-choices-across-a-partitioned-switch
+  ;; vmap's semantics either way: a selection outside the Switch whose
+  ;; values do not flow into it is one batched gradient (the trace's choices
+  ;; by part given back to the branches as constraints, gen.combinators'
+  ;; own-constraints); one inside it, or flowing into its branches, falls
+  ;; back to each trace's gradient. Planted: without own-constraints the
+  ;; batched gradient falls back
+  (let [n 8
+        obs (cm/choicemap :y 1.7)
+        each (fn [ps s] (map #(:gradients (grad/choice-gradients % s)) (b/traces ps)))
+        stacked (fn [gs p] (array/stack (mapv #(cm/get-choice % p) gs)))
+        unbatched (fn [f] (with-redefs [b/traces (fn [_] (throw (ex-info "fell back" {})))] (f)))]
+    (testing "outside the Switch: batched"
+      (let [ps (:particles (b/generate shifted-mixture [] obs n (rng/key 90)))
+            s (sel/select :mu)
+            want (each ps s)
+            r (unbatched #(grad/choice-gradients ps s))]
+        (is (b/batched? ps))
+        (is (< 1 (count (distinct (array/->clj (b/choice ps :k))))))
+        (is (close? (stacked want [:mu]) (cm/get-choice (:gradients r) :mu)))))
+    (testing "inside the Switch, or flowing into it: each trace's"
+      (doseq [[m s p] [[shifted-mixture (sel/select [:c :x]) [:c :x]] [fed-mixture (sel/select :mu) [:mu]]]]
+        (let [ps (:particles (b/generate m [] obs n (rng/key 91)))
+              r (grad/choice-gradients ps s)]
+          (is (b/batched? ps))
+          (is (close? (stacked (each ps s) p) (cm/get-choice (:gradients r) p))))))
+    (testing "set-choices outside the Switch stays batched, inside sets each particle's"
+      (let [ps (:particles (b/generate shifted-mixture [] obs n (rng/key 92)))
+            vs (array/array (mapv #(* 0.25 %) (range n)))]
+        (doseq [[p batched?] [[:mu true] [[:c :x] false]]]
+          (let [ps' (b/set-choices ps (cm/choicemap p vs))
+                trs (b/traces ps')]
+            (is (= batched? (b/batched? ps')) (str p))
+            (is (close? vs (array/stack (mapv #(% p) trs))) (str p))
+            (is (= (map #(ts/host (sel/get-selected (:choices %) (sel/complement (sel/from-paths [(cm/path p)])))) (b/traces ps))
+                   (map #(ts/host (sel/get-selected (:choices %) (sel/complement (sel/from-paths [(cm/path p)])))) trs))
+                "every other choice kept")
+            (is (every? #(close? (:score %) (:weight (gfi/assess shifted-mixture [] (:choices %)))) trs))))))
+    (testing "HMC chains on the shift stay batched"
+      (let [ps (:particles (b/generate shifted-mixture [] obs n (rng/key 93)))
+            {ps' :particles} (mcmc/hmc-particles ps (sel/select :mu) {:eps 0.1 :L 5} (rng/key 94))]
+        (is (b/batched? ps'))
+        (is (= (map #(ts/host (% :k)) (b/traces ps)) (map #(ts/host (% :k)) (b/traces ps'))))))))
 
 (def regimes
   "Two regimes of different structure: y directly, or around a choice of
