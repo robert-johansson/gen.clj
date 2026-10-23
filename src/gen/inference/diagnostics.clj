@@ -13,12 +13,15 @@
      (split-r-hat draws)  split R-hat of the draws themselves
      (mcse-mean draws)    Monte Carlo standard error of the mean
      (mcse-sd draws)      Monte Carlo standard error of the standard deviation
-     (summary draws)      all of these, with the mean, sd and quantiles
+     (summary draws)      mean, sd, quantiles, MCSEs, bulk and tail ESS, R-hat
      (draws traces addr)  a choice's draws from chains of traces
 
    Draws are one quantity's host numbers: a vector of chains, each a vector
    of draws ([chain][draw]), or one chain, a vector of numbers. These run at
-   inference-loop boundaries.
+   inference-loop boundaries:
+
+     (let [runs (mapv #(kernel/run k (start %) {:samples 1000 :key %}) keys)]
+       (summary (draws (map :traces runs) :x)))
 
    These effective sample sizes are of a chain's autocorrelated draws: not
    the effective sample size of weighted samples (gen.inference.weights/ess
@@ -51,6 +54,7 @@
      :out-of-range    the draws' second moments overflow a double, or for
                       an ESS underflow to 0 (spreads past about 1e±154;
                       1e±77 for mcse-sd)
+     :invalid-prob    (summary) a quantile's probability is not in [0, 1]
      :non-scalar      (draws) a value is not a number, boolean or 0-d array"
   (:require [gen.array :as array]
             [gen.array.special :as special]
@@ -240,8 +244,9 @@
 
 (defn- autocorrelation
   "The autocorrelation at lag t of chains centered at their means, w the
-   mean of their variances and var+ the pooled variance: 1 - (w - γ_t)/var+,
-   for γ_t their autocovariances averaged."
+   mean of their variances and var+ the estimate of the marginal variance
+   (w·(n - 1)/n plus the variance of their means): 1 - (w - γ_t)/var+, for
+   γ_t their autocovariances averaged."
   ^double [centered ^double w ^double var+ ^long t]
   (let [n (alength ^doubles (first centered))
         gamma (/ (double (reduce + (map #(lag-product % t) centered)))
@@ -389,8 +394,8 @@
   ([draws {:keys [probs] :or {probs [0.05 0.5 0.95]}}]
    (doseq [p probs]
      (when-not (and (number? p) (<= 0.0 (double p) 1.0))
-       (throw (ex-info (str "A quantile's probability must be in [0, 1], not " (pr-str p))
-                       {:reason :invalid-prob :prob p}))))
+       (invalid! :invalid-prob (str "A quantile's probability must be in [0, 1], not " (pr-str p))
+                 {:prob p})))
    (let [x (pooled (chains draws))
          s (sorted x)]
      {:mean (mean x)
