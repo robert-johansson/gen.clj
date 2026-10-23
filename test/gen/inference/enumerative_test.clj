@@ -2,7 +2,8 @@
   "Enumerative inference (Gen.jl's enumerative_inference, choice_vol_grid)
    and exact proposals, against answers derived by hand: a discrete
    posterior, a conjugate normal, and a state-space model whose discrete
-   latent is summed out step by step (GenGDT's hand enumeration)."
+   latent is summed out step by step (GenGDT's hand enumeration). Batched,
+   both are their scalar forms point by point."
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
             [gen.test-support :as ts]

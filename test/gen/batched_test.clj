@@ -1,8 +1,9 @@
 (ns gen.batched-test
   "Batched execution against scalar execution: each particle of a batched run
    is exactly the scalar trace of its choices, batched weights are the scalar
-   weights particle by particle, the per-particle fallback carries on, and
-   batched inference reaches the exact answers."
+   weights particle by particle (with per-particle constraints too, each
+   particle's own), the per-particle fallback carries on, and batched
+   inference reaches the exact answers."
   (:refer-clojure :exclude [+ - *])
   (:require [gen.test-support :as ts]
             [clojure.test :refer [deftest is testing]]
