@@ -1915,6 +1915,32 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   the owner's go-ahead. `.beans/` is its own private repo
   (`robert-johansson/gen.clj-beans`), synced by SessionStart/PreCompact/Stop
   hooks (see `.beans/hooks/README.txt`).
+- **GenMLX extras, round 1 (owner, 2026-10-23; epic genclj-0qds).** Twelve
+  deferred-port beans in three waves, chosen from the comparison of
+  2026-10-23 (genclj-dglq): diagnostics, NUTS, distributions and
+  serialization; gradients, enumeration and Switch under the batch tracer,
+  and Mix, Scan and dimap; conjugate proposals with Kalman and HMM
+  generative functions, the fuzzer's remainder, particle Gibbs, and
+  Laplace. Main is pushed after each wave once its checks pass. The owner
+  took these recommendations:
+  - **No `delta`.** Gen.jl has none, and GenMLX's scores by exact float
+    equality; a fixed value is better left untraced, or a `gen.custom`
+    deterministic function.
+  - **Serialization is EDN in the core,** arrays as tagged literals. Transit
+    would add a dependency (rule 8).
+  - **The diagnostics' reference values come from ArviZ,** installed into
+    GenMLX's venv for `test/fixtures/generate.py` only; tests never need it.
+  - **NUTS is Stan's:** multinomial NUTS with the generalized no-U-turn
+    criterion, dual averaging toward an acceptance of 0.8, and Stan's
+    windowed warmup with a diagonal metric, so results compare with Stan's.
+  - **A Switch whose index differs across particles batches by
+    partition:** the particles are grouped by index, each branch runs
+    batched over its group, and the results are scattered back. Masked
+    choices (GenJAX's Mask) were the alternative; they would make every
+    reader of a batched trace honor a mask, and run the branches not taken.
+  - Numeric edge semantics in the new code are the owner's (as always);
+    while the round runs autonomously, each is recorded here PROVISIONAL
+    with its alternatives and listed in the wave's report.
 
 ## 10. Deferred (tracked, not forgotten)
 
