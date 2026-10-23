@@ -1,11 +1,13 @@
 (ns gen.gradients-test
   "Choice, argument and parameter gradients against finite differences of the
-   assessed log density (thesis Eqs 2.10-2.12), and parameter learning."
+   assessed log density (thesis Eqs 2.10-2.12), every particle's at once
+   against each trace's, and parameter learning."
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
             [gen.test-support :as ts]
             [gen.array :as array :refer [+ - * /]]
             [gen.array.batch :as batch]
+            [gen.batched :as b]
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
             [gen.dist :as d]
@@ -120,6 +122,69 @@
     (let [m (gen [n] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (* x (clojure.core/* 2.0 n)) 1))))
           tr (sim m [1.5] 10)]
       (is (map? (g/choice-gradients tr (sel/select :x)))))))
+
+(defn- choices-close?
+  "Do choice maps a and b hold the same addresses, with close values?"
+  [a b]
+  (and (= (cm/addresses a) (cm/addresses b))
+       (every? #(ts/close? (cm/get-choice a %) (cm/get-choice b %)) (cm/addresses a))))
+
+(defn- stacked
+  "Trees of one structure (vectors of arrays, or nil), one per particle,
+   stacked leaf by leaf."
+  [ts]
+  (cond (nil? (first ts)) nil
+        (vector? (first ts)) (apply mapv (fn [& xs] (stacked xs)) ts)
+        :else (array/stack (vec ts))))
+
+(defn- batched-only
+  "f's value, where gen.batched/map-particles falling back to one trace at a
+   time is an error: so that a batched collection's result is checked as
+   the batched run made it, not as a fallback made it again."
+  [f]
+  (with-redefs [b/traces (fn [_] (throw (ex-info "map-particles fell back to one trace at a time" {})))]
+    (f)))
+
+(defn- every-particle-s?
+  "Is choice-gradients of the collection ps each of its traces', stacked:
+   values, gradients and argument gradients? A batched collection's in one
+   batched run."
+  [ps selection retgrad opts]
+  (let [run #(g/choice-gradients ps selection retgrad opts)
+        r (if (b/batched? ps) (batched-only run) (run))
+        each (mapv #(g/choice-gradients % selection retgrad opts) (b/traces ps))
+        arg-grads (stacked (mapv :arg-grads each))]
+    (and (choices-close? (:values r) (cm/stack (mapv :values each)))
+         (choices-close? (:gradients r) (cm/stack (mapv :gradients each)))
+         (= (map nil? (:arg-grads r)) (map nil? arg-grads))
+         (every? true? (map ts/close? (remove nil? (array/tree-leaves (:arg-grads r))) (remove nil? (array/tree-leaves arg-grads)))))))
+
+(defn- particles-of [gf args observations n seed]
+  (:particles (b/generate gf args observations n (rng/key seed))))
+
+(deftest every-particle-s-choice-gradients-at-once
+  ;; one batched gradient for all the particles: each particle's its own
+  ;; trace's (gen.array.batch's vmap semantics)
+  (let [obs (cm/choicemap [:y 0] 2.1 [:y 1] 3.9 [:y 2] 6.2)
+        lr (particles-of linreg [[1.0 2.0 3.0]] obs 5 11)]
+    (is (b/batched? lr))
+    (is (every-particle-s? lr (sel/select :slope :intercept) nil nil))
+    (is (every-particle-s? lr sel/all nil nil) "the observations too, shared by every particle")
+    (is (every-particle-s? lr (sel/select :slope) 2.5 nil) "with a return-value gradient")
+    (is (every-particle-s? lr (sel/select :slope) nil {:argnums [0]}) "an argument's, per particle")
+    (is (every-particle-s? (particles-of hierarchical [3] cm/EMPTY 4 12) (sel/select :mu [:obs 1 :x]) nil nil)
+        "nested addresses")
+    (is (every-particle-s? (particles-of (comb/unfold step) [4 0.0] cm/EMPTY 4 13) (sel/select [1 :s] [2 :s]) nil nil)
+        "inside an Unfold")
+    (is (every-particle-s? (particles-of (comb/map observation) [[0.5 1.5]] cm/EMPTY 4 14) (sel/select [0 :x]) nil nil)
+        "inside a Map")
+    (is (every-particle-s? (particles-of mv [] cm/EMPTY 4 15) (sel/select :z) nil nil) "an array-valued choice")
+    (testing "a collection that fell back, one trace at a time"
+      (let [ps (particles-of (gen [] (let [k (trace :k (d/categorical [0.5 0.5]))]
+                                       (trace :x (d/normal (if (= k 0) 0.0 3.0) 1))))
+                             [] cm/EMPTY 6 16)]
+        (is (not (b/batched? ps)))
+        (is (every-particle-s? ps (sel/select :x) nil nil))))))
 
 (deftest discrete-choices-are-rejected
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not continuous"

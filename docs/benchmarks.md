@@ -547,6 +547,67 @@ Mixed, so the tape stays the default (docs/array-api.md §8).
   31.6 → 7.1 ms; MALA, 8.9 → 4.2 ms. Other changes since have made most
   paths faster, so the trigger's cost shows only in the comparison above.
 
+## NUTS against HMC with a tuned L (2026-10-23, bean genclj-tvc0)
+
+`bench/gen/nuts_bench.clj`: a 10-d Gaussian of scales 0.1 to 10
+(log-spaced) and correlations 0.5^|i − j|, one `mvnormal` choice. Each
+kernel runs Stan's warmup (`gen.inference.nuts`: 1000 iterations adapting
+the step size and a diagonal metric), then draws 2000 times. A draw costs
+a gradient per leapfrog step and one at its start. The effective sample
+size is the smallest over the coordinates of their bulk and tail ESSs
+(`gen.inference.diagnostics`). JVM backend, one run (key 1). Reproduce with
+`clojure [-J-Dgen.backend=mlx] -M:bench -m gen.nuts-bench`.
+
+| Kernel | Gradients per draw | Per effective draw | Smallest ESS | Warmup gradients | Step size |
+|---|---|---|---|---|---|
+| NUTS | 9.9 | 16.9 | 1164 | 25,840 | 0.48 |
+| HMC, L = 1 | 2 | 160 | 25 | 2000 | 0.52 |
+| HMC, L = 2 | 3 | 31.5 | 191 | 3000 | 0.45 |
+| HMC, L = 4 (the best L) | 5 | 9.4 | 1065 | 5000 | 0.48 |
+| HMC, L = 8 | 9 | 64 | 283 | 9000 | 0.45 |
+| HMC, L = 16 | 17 | 1421 | 24 | 17,000 | 0.50 |
+| HMC, L = 32 | 33 | 217 | 304 | 33,000 | 0.44 |
+| HMC, L = 64 | 65 | 1851 | 70 | 65,000 | 0.43 |
+
+- **NUTS costs about 1.8 times the best L's gradients per effective
+  draw** (16.9 against 9.4), with no L to choose. Off the best L, HMC is 3
+  to 197 times worse: once the metric makes the target nearly round, a
+  trajectory of L steps returns near its start at some L (16 here).
+- **Per gradient, a NUTS step costs about 1.4× an HMC step** on the JVM
+  (1.1 ms for 6.2 steps against 0.78 ms for 7, at depth 3). JDK Flight
+  Recorder puts two thirds of a transition in the gradients, under 6% in
+  the tree's own logic (the criterion, the draws, the keys), and 8% in
+  the trace's update.
+- No divergences after the warmup.
+
+## Gradients of every particle at once (2026-10-23, bean genclj-7dti)
+
+`bench/gen/batched_gradients_bench.clj`: one batched gradient (the tape
+over the batch tracer, docs/array-api.md §8b) against n scalar gradients,
+each line after checking that the two agree. JVM backend, one run, after
+warm-up. Reproduce with
+`clojure [-J-Dgen.backend=mlx] -M:bench -m gen.batched-gradients-bench`.
+
+| Gradient | n | Batched | One at a time | Speedup |
+|---|---|---|---|---|
+| a regression's log density (2 parameters, 50 observations) | 10 | 0.99 ms | 2.7 ms | 2.7× |
+| | 100 | 0.78 ms | 7.6 ms | 9.8× |
+| | 1000 | 1.9 ms | 39 ms | 20× |
+| `choice-gradients` of linreg (K = 10 trace sites) | 10 | 0.58 ms | 4.5 ms | 7.8× |
+| | 100 | 0.41 ms | 23 ms | 56× |
+| | 1000 | 0.58 ms | 129 ms | 221× |
+| an HMC step, L = 10, on linreg (`hmc-particles` against `hmc`) | 10 | 3.9 ms | 16 ms | 4.0× |
+| | 100 | 3.3 ms | 124 ms | 38× |
+| | 1000 | 5.0 ms | 1232 ms | 246× |
+
+- **Through the GFI the gain grows with the trace sites,** as for
+  batched importance sampling: the handler's per-site cost is paid once
+  for all the particles, and the tape's per-op cost once for all their
+  gradients.
+- **An HMC step of the particles** adds to its L + 1 batched gradients the
+  trace's remaking (`gen.batched/set-choices`) and its spot check, read at
+  the next step: 8 scalar runs, a fixed cost.
+
 ## The static language's skipping (2026-10-20, bean genclj-0q3a)
 
 An update on the JVM backend (this Mac, a Metal test run beside it) of

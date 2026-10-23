@@ -29,9 +29,18 @@
    leave-one-out baseline, VIMCO's own leave-one-out signal), is added,
    f_θ the density the model's internal proposal drew it with (see
    model-gradients). So each is an unbiased estimate of the objective's
-   gradient. The result then holds :model-store too."
+   gradient. The result then holds :model-store too.
+
+   With :batched? true, an iteration's draws run at once (gen.batched): q's
+   n samples drawn as one batched run, and the model's weights and every
+   gradient computed for all of them in one batched pass
+   (gen.batched/map-particles; each draw's gradients its own, as vmap's),
+   falling back to one draw at a time where q or the model cannot run
+   batched. For one key the draws differ from the unbatched ones, with the
+   same distribution."
   (:refer-clojure :exclude [+ - * /])
   (:require [gen.array :as array :refer [+ - * /]]
+            [gen.batched :as batched]
             [gen.choicemap :as cm]
             [gen.dynamic :as dyn]
             [gen.gfi :as gfi]
@@ -42,17 +51,6 @@
             [gen.selection :as sel]))
 
 (set! *warn-on-reflection* true)
-
-(defn- draw
-  "A trace of q, its log weight and the model's trace: [q-trace log-w
-   model-trace]. The model generates with the observations and q's choices
-   as constraints, so latent choices q does not make come from the model's
-   internal proposal (as Gen.jl's)."
-  [model model-args observations q q-args key]
-  (let [[kq km] (rng/split key)
-        qt (gfi/simulate q q-args kq)
-        {mt :trace lp :weight} (gfi/generate model model-args (cm/merge observations (:choices qt)) km)]
-    [qt (double (array/item (- lp (:score qt)))) mt]))
 
 (defn- unknown-baseline [baseline baselines]
   (throw (ex-info (str "The :baseline is one of " (pr-str baselines) ", not " (pr-str baseline))
@@ -78,6 +76,35 @@
                       (- (:score t) (gfi/project t constrained)))))]
       ((array/grad log-f) (gfi/stores gf)))))
 
+(defn- weighed
+  "One draw's log weight and gradients, from qt, a trace of q: {:lw log
+   p(observations, z, r) - log q(z), :q-grads ∇ log q(z) in q's store},
+   and with model?, ∇θ log p as :joint and ∇θ log f_θ(r) as :own (or nil:
+   own-draws-gradient) in the model's. The model generates with the
+   observations and q's choices as constraints, so latent choices r that q
+   does not make come from the model's internal proposal (as Gen.jl's)."
+  [model model-args observations model? qt key]
+  (let [constraints (cm/merge observations (:choices qt))
+        {mt :trace lp :weight} (gfi/generate model model-args constraints key)]
+    (cond-> {:lw (- lp (:score qt)) :q-grads (grad/param-gradients qt)}
+      model? (assoc :joint (grad/param-gradients mt) :own (own-draws-gradient mt constraints)))))
+
+(defn- draws
+  "n draws of q, weighed (each :lw a host double): one at a time, each from
+   its own key (key split n ways, then in two: q's and the model's), or with
+   batched?, all at once (gen.batched: q's n particles from key's first
+   split, the model's runs from its second)."
+  [model model-args observations q q-args n model? batched? key]
+  (if batched?
+    (let [[kq km] (rng/split key)
+          all (batched/map-particles (batched/simulate q q-args n kq) #(weighed model model-args observations model? %1 %2) km)]
+      (mapv (fn [i lw] (assoc (array/tree-map #(some-> % (array/take i 0)) all) :lw lw))
+            (range n) (map double (array/->clj (:lw all)))))
+    (mapv (fn [k]
+            (let [[kq km] (rng/split k)]
+              (update (weighed model model-args observations model? (gfi/simulate q q-args kq) km) :lw #(double (array/item %)))))
+          (rng/split key n))))
+
 (defn- model-gradients
   "Σ_i c_i ∇θ log w_i + Σ_i s_i ∇θ log f_θ(r_i) over the runs, the
    objective's gradient in the model's store (the post-M5 review's P3-01).
@@ -98,27 +125,25 @@
    per iteration of 10 draws, for a coin b ~ bern(θ) and a shift
    z ~ N(θ, 1): 0.279 and 1.918; with the term dropped, 0.680 and 1.892;
    with no baseline, 1.197 and 2.997, or 0.573 and 2.752 dropped."
-  [observations cs signal runs]
-  (let [joint (map (fn [c [_ _ mt]] [c (grad/param-gradients mt)]) cs runs)
-        own (for [[c s [qt _ mt]] (map vector cs signal runs)
-                  :let [g (own-draws-gradient mt (cm/merge observations (:choices qt)))]
-                  :when g]
-              [(- s c) g])
+  [cs signal runs]
+  (let [joint (map (fn [c r] [c (:joint r)]) cs runs)
+        own (for [[c s {g :own}] (map vector cs signal runs) :when g] [(- s c) g])
         terms (concat joint own)]
     (grad/weighted-sum (map first terms) (map second terms))))
 
 (defn elbo-gradient
   "One iteration's estimates: {:objective the mean log weight (the ELBO),
    :grads its score-function gradient with respect to q's store} from n
-   draws (see the namespace doc for :baseline); with :model-store, also
-   :model-grads, its gradient with respect to the model's store."
-  [model model-args observations q q-args store n {:keys [baseline key model-store]}]
+   draws (see the namespace doc for :baseline and :batched?); with
+   :model-store, also :model-grads, its gradient with respect to the model's
+   store."
+  [model model-args observations q q-args store n {:keys [baseline key model-store batched?]}]
   (when (and (= baseline :leave-one-out) (< n 2))
     (throw (ex-info (str "A leave-one-out baseline needs at least 2 samples, given " n) {:samples n})))
   (let [q (dyn/with-params q store)
         model (model-under model model-store)
-        runs (mapv #(draw model model-args observations q q-args %) (rng/split (or key (gfi/next-key)) n))
-        lws (mapv second runs)
+        runs (draws model model-args observations q q-args n (some? model-store) batched? (or key (gfi/next-key)))
+        lws (mapv :lw runs)
         total (reduce + lws)
         ;; log w less the mean log weight of the other draws
         loo (when (> n 1) (mapv #(- % (/ (- total %) (dec n))) lws))
@@ -127,10 +152,10 @@
                  :leave-one-out loo
                  (unknown-baseline baseline [nil :leave-one-out]))]
     (cond-> {:objective (/ total n)
-             :grads (grad/weighted-sum (map #(/ % n) signal) (map (comp grad/param-gradients first) runs))}
+             :grads (grad/weighted-sum (map #(/ % n) signal) (map :q-grads runs))}
       ;; the model's own draws' score term takes the leave-one-out
       ;; baseline whenever there are two draws or more, whatever q's
-      model-store (assoc :model-grads (model-gradients observations (repeat n (/ 1.0 n)) (map #(/ % n) (or loo lws)) runs)))))
+      model-store (assoc :model-grads (model-gradients (repeat n (/ 1.0 n)) (map #(/ % n) (or loo lws)) runs)))))
 
 (defn vimco-gradient
   "One iteration's estimates for the K-sample bound: {:objective
@@ -138,14 +163,15 @@
    Sample j's baseline replaces its weight by the geometric mean of the
    others' (:baseline :geometric, the default) or their arithmetic mean
    (:arithmetic), as Gen.jl's geometric keyword. With :model-store, also
-   :model-grads, the bound's gradient with respect to the model's store."
-  [model model-args observations q q-args store k {:keys [baseline key model-store] :or {baseline :geometric}}]
+   :model-grads, the bound's gradient with respect to the model's store;
+   :batched? as elbo-gradient's."
+  [model model-args observations q q-args store k {:keys [baseline key model-store batched?] :or {baseline :geometric}}]
   (when (< k 2)
     (throw (ex-info (str "VIMCO's leave-one-out control variates need K of at least 2, given " k) {:samples k})))
   (let [q (dyn/with-params q store)
         model (model-under model model-store)
-        runs (mapv #(draw model model-args observations q q-args %) (rng/split (or key (gfi/next-key)) k))
-        lws (mapv second runs)
+        runs (draws model model-args observations q q-args k (some? model-store) batched? (or key (gfi/next-key)))
+        lws (mapv :lw runs)
         bound (w/log-mean-exp lws)
         normalized (mapv #(Math/exp %) (:log-weights (w/normalize lws)))
         loo (fn [j] (let [others (keep-indexed #(when (not= j %1) %2) lws)
@@ -158,8 +184,8 @@
         ;; ∇ of the bound: Σ_j (L - L_{-j}) ∇ log q_j - Σ_j w̃_j ∇ log q_j
         cs (mapv - signal normalized)]
     (cond-> {:objective bound
-             :grads (grad/weighted-sum cs (map (comp grad/param-gradients first) runs))}
-      model-store (assoc :model-grads (model-gradients observations normalized signal runs)))))
+             :grads (grad/weighted-sum cs (map :q-grads runs))}
+      model-store (assoc :model-grads (model-gradients normalized signal runs)))))
 
 (defn- fit
   "Ascend from store (and model-store, given) along (estimate store
@@ -186,7 +212,8 @@
   "Fit q's store by ascending the ELBO (Gen.jl's black_box_vi!). Options:
    :iters (1000), :samples per iteration (20), :baseline (nil or
    :leave-one-out), :model-store and :model-optimizer (to train the
-   model's parameters too), :key."
+   model's parameters too), :batched? (false: the draws one at a time),
+   :key."
   [model model-args observations q q-args store optimizer {:keys [samples] :or {samples 20} :as opts}]
   (fit (fn [store model-store key]
          (elbo-gradient model model-args observations q q-args store samples
@@ -199,7 +226,7 @@
    (10), :estimates, the independent K-sample estimates averaged per
    iteration (1; Gen.jl's samples_per_iter), :baseline (:geometric or
    :arithmetic), :model-store and :model-optimizer (to train the model's
-   parameters too), :key."
+   parameters too), :batched?, :key."
   [model model-args observations q q-args store optimizer {:keys [samples estimates] :or {samples 10 estimates 1} :as opts}]
   (fit (fn [store model-store key]
          (let [runs (mapv #(vimco-gradient model model-args observations q q-args store samples

@@ -1427,6 +1427,9 @@
   p/ICompiling
   (-compile [b f opts] (if (compiles? b) (guarded :compile (compile-fn b f opts)) f))
 
+  p/INativeGrad
+  (-native-grad? [_] (= grad-mode :native))
+
   p/IBackend
   (-name [_] :mlx)
   (-defaults [_] (.-defaults config))

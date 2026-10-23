@@ -13,7 +13,9 @@
 
 (def erfc-coefficients
   "Chebyshev coefficients for erfc on [0, ∞) (Numerical Recipes, 3rd ed.,
-   §6.2), shared with MLX's exact erf (gen.backend.mlx.exact)."
+   §6.2): erfc(z) = t·exp(-z² + c₀/2 + Σⱼ cⱼTⱼ(2t - 1)) for t = 2/(2 + z),
+   shared by this namespace's erfc, gen.dist's log erfc and MLX's exact
+   erf (gen.backend.mlx.exact)."
   [-1.3026537197817094 6.4196979235649026e-1 1.9476473204185836e-2
    -9.561514786808631e-3 -9.46595344482036e-4 3.66839497852761e-4
    4.2523324806907e-5 -2.0278578112534e-5 -1.624290004647e-6

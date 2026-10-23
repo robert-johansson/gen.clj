@@ -6,6 +6,7 @@
 
      (choice-gradients trace selection)          → {:values :gradients :arg-grads}
      (choice-gradients trace selection retgrad {:argnums [0]})
+     (choice-gradients particles selection)      → the same, [n …] arrays
      (param-gradients trace)                     → {name gradient}
      (param-gradients trace retgrad)
      (jacobian f x m)                            → ∂f/∂x, an [m n] array
@@ -17,11 +18,17 @@
    cotangent of the return value, of the same tree shape) is given, as in
    Gen.jl. The trees pair by structure, maps by key and vectors by
    position, with nil for no cotangent (Gen.jl's nothing); another
-   structure is a loud error. Selected choices must be continuous."
+   structure is a loud error. Selected choices must be continuous.
+
+   Given a particle collection (gen.batched) for the trace,
+   choice-gradients takes every particle's at once: one batched gradient,
+   where the model runs batched (gen.batched/map-particles), each particle's
+   its own (an argument's too: gen.array.batch)."
   (:refer-clojure :exclude [+ *])
   (:require [gen.array :as array :refer [+ *]]
             [gen.array.dtype :as dt]
             [gen.array.linalg :as la]
+            [gen.batched :as batched]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
             [gen.random :as rng]
@@ -85,6 +92,26 @@
                         {:path p :value (cm/get-choice selected p)}))))
     selected))
 
+(defn- trace-gradients
+  "choice-gradients of one trace."
+  [trace selection retgrad argnums]
+  (let [{gf :gen-fn args :args choices :choices} trace
+        selected (continuous-selection trace selection)
+        others (sel/get-selected choices (sel/complement selection))]
+    (doseq [i argnums]
+      (when-not (float-tree? (nth args i))
+        (throw (ex-info (str "choice-gradients: argument " i " is not a tree of floats") {:argnum i}))))
+    (let [arg-positions (vec argnums)
+          f (fn [values & dargs]
+              (let [args' (reduce (fn [as [i v]] (assoc as i v)) (vec args) (map vector arg-positions dargs))]
+                (objective gf args' (cm/merge others (cm/from-map values)) retgrad)))
+          [_ [g & arg-gs]] (apply (array/value-and-grad f {:argnums (vec (range (inc (count arg-positions))))})
+                                  (cm/to-map selected) (map #(nth args %) arg-positions))]
+      {:values selected
+       :gradients (if (cm/empty? selected) cm/EMPTY (cm/from-map g))
+       :arg-grads (reduce (fn [gs [i ag]] (assoc gs i ag)) (vec (repeat (count args) nil))
+                          (map vector arg-positions arg-gs))})))
+
 (defn choice-gradients
   "The gradient of the trace's log density (plus ⟨retgrad, retval⟩) with
    respect to the selected choices, and to the arguments at :argnums (none
@@ -92,26 +119,15 @@
    {:values the selected choices, :gradients a choice map of the same shape,
    :arg-grads one entry per argument, nil where not differentiated}.
    Differentiated arguments must be trees of floats, and the model must use
-   them through gen.array (host math on them cannot be differentiated)."
+   them through gen.array (host math on them cannot be differentiated).
+   For a particle collection (gen.batched) in place of the trace, every
+   particle's, each value an array with the leading particle axis."
   ([trace selection] (choice-gradients trace selection nil nil))
   ([trace selection retgrad] (choice-gradients trace selection retgrad nil))
-  ([trace selection retgrad {:keys [argnums]}]
-   (let [{gf :gen-fn args :args choices :choices} trace
-         selected (continuous-selection trace selection)
-         others (sel/get-selected choices (sel/complement selection))]
-     (doseq [i argnums]
-       (when-not (float-tree? (nth args i))
-         (throw (ex-info (str "choice-gradients: argument " i " is not a tree of floats") {:argnum i}))))
-     (let [arg-positions (vec argnums)
-           f (fn [values & dargs]
-               (let [args' (reduce (fn [as [i v]] (assoc as i v)) (vec args) (map vector arg-positions dargs))]
-                 (objective gf args' (cm/merge others (cm/from-map values)) retgrad)))
-           [_ [g & arg-gs]] (apply (array/value-and-grad f {:argnums (vec (range (inc (count arg-positions))))})
-                                   (cm/to-map selected) (map #(nth args %) arg-positions))]
-       {:values selected
-        :gradients (if (cm/empty? selected) cm/EMPTY (cm/from-map g))
-        :arg-grads (reduce (fn [gs [i ag]] (assoc gs i ag)) (vec (repeat (count args) nil))
-                           (map vector arg-positions arg-gs))}))))
+  ([trace selection retgrad {:keys [argnums] :as opts}]
+   (if (batched/particles? trace)
+     (batched/map-particles trace (fn [t _] (choice-gradients t selection retgrad opts)) nil)
+     (trace-gradients trace selection retgrad argnums))))
 
 (defn param-gradients
   "The gradient of the trace's log density (plus ⟨retgrad, retval⟩) with

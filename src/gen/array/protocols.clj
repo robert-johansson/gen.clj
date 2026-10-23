@@ -56,6 +56,14 @@
     "(apply f args), whose gradient comes from (vjp args out cotangent), a
      vector of one cotangent per argument (nil for none)."))
 
+(defprotocol INativeGrad
+  "A backend whose -value-and-grad differentiates by its own transformation
+   (MLX's mlx_value_and_grad), calling f with arrays of its own rather than
+   with gen.array.tape's tracked values. A backend wrapping it (the batch
+   tracer) therefore runs inside the transformation, where under the tape
+   the tape wraps it."
+  (-native-grad? [b] "Does -value-and-grad differentiate natively?"))
+
 (defprotocol ICompiling
   "A backend that compiles functions of its arrays (MLX: mlx_compile)."
   (-compile [b f opts]

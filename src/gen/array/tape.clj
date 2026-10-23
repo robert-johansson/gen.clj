@@ -17,7 +17,11 @@
    ops whose derivative is zero almost everywhere (comparisons, floor, sign,
    floor-divide, …) and stop-gradient give untracked values. cumprod's VJP
    divides by the input (NaN at zeros). First order only: differentiating
-   inside a differentiated function is an error (bean genclj-hors)."
+   inside a differentiated function is an error (bean genclj-hors).
+
+   The wrapped backend may be the batch tracer (gen.array.batch), whose
+   -value-and-grad is this one over itself: every primal and every rule
+   then runs per particle, which makes the gradient vmap's."
   (:refer-clojure :exclude [+ - * / < > <= >= ==])
   (:require [gen.array :as array :refer [+ - * / < > <= >= ==]]
             [gen.array.dtype :as dt]

@@ -273,6 +273,7 @@ needs, taken from GenMLX's measured call counts
   - `array/item` on a tracked value returns its primal. Data-dependent control flow
     is fine (non-differentiable branches, as in Gen.jl).
   - Scope for M1 is first order. Nested AD (Hessians) is bean genclj-hors.
+  - Under the batch tracer, gradients are vmap's (§8b, *Gradients*).
 - **MLX backend:** the same tape by default (§13). With
   `-Dgen.mlx.grad=native`, `array/grad` and `array/value-and-grad` use
   `mlx_value_and_grad` instead (bean genclj-fuvr), which also nests:
@@ -481,6 +482,45 @@ like the AD tape:
 - **Reading on the host.** Reading a batched value on the host (`array/item`,
   `array/->clj`, `truthy?` of a boolean, `=`, hashing) raises the batched-branch
   error. So does host math on one, a `ClassCastException` naming `Batched`.
+- **Gradients** (2026-10-23, bean genclj-7dti). `array/value-and-grad` of
+  batched arguments, or anywhere in a batched run, is vmap's: each particle
+  gets the value and gradient of its own scalar run, on every op the tape
+  knows (linear algebra and custom VJPs included). One backward pass serves
+  every particle.
+  - *The tape wraps the tracer.* The tracer's `-value-and-grad` runs
+    `gen.array.tape` over itself. The tape's primals are batched or shared
+    values, so every op's primal runs per particle. Its backward pass runs
+    the VJP rules, written against gen.array, through the tracer too, so
+    particle i's cotangents are those of its own scalar pass. Neither
+    namespace knows the other: gen.array joins their values (a wrapping
+    backend wraps what its inner backend wraps), and the tracer passes an
+    op with no batched operand to the backend it wraps.
+  - *A shared argument's gradient is per particle* too, as vmap's. Summed
+    over the particles it is the gradient of their total, which a shared
+    parameter's learning needs: one reduction.
+  - *Custom VJPs* record one node, whose function and rule run through the
+    tracer: a rule that reads a value on the host raises the batched-branch
+    error. `stop-gradient` is an op without a rule.
+  - *Native gradients* (MLX, `-Dgen.mlx.grad=native`) cannot wrap the
+    tracer, since MLX's transformation differentiates a function of its own
+    arrays. So the tracer runs inside it: MLX differentiates the sum over
+    the particles of f at the differentiated leaves as whole batches (a
+    shared leaf broadcast to every particle). Particle i's output depends
+    on its own values only, so the gradient with respect to its slice is its
+    own gradient. Custom VJPs reach MLX through the tracer
+    (`ICustomVjp`), lifted to whole batches.
+  - *Not supported:* a batched run inside a differentiated function (the
+    tape outside the tracer). Their values belong to unrelated backends, a
+    loud error; differentiate inside the run and sum the gradients.
+  - *In inference,* through `gen.batched/map-particles`, which runs a
+    function of a trace once on a collection's batched trace (with a
+    batched run's guards, and its fallback to one trace at a time):
+    `gen.gradients/choice-gradients` of a particle collection,
+    `gen.inference.mcmc`'s `hmc-particles`, `mala-particles` and
+    `map-optimize-particles` (n chains, each accepted on its own), and
+    black-box VI's `:batched?` draws. Measured on the JVM backend: 8–221×
+    for choice gradients, 4–246× for an HMC step, from 10 to 1000
+    particles (`docs/benchmarks.md`).
 
 Running a generative function's scalar code under the batch backend runs it
 batched (`gfi/run-op` with `:batch-shape`). Every generative function

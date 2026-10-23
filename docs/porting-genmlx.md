@@ -52,7 +52,13 @@ gen.clj uses Gen.jl's names and parameterizations (DESIGN.md §9):
 | `uniform`, `exponential`, `poisson`, `laplace`, `cauchy`, `inv-gamma`, `dirichlet` | the same names and parameters | no | — |
 | `log-normal [mu sigma]` | `log-normal [mu sigma]` (Distributions.jl's LogNormal) | no | — |
 | `student-t [df loc scale]` | `student-t [nu]`, Distributions.jl's TDist; `loc + scale·T` for the rest | **yes** | three parameters are an arity error |
-| delta, truncated-normal, wishart, von-mises, wrapped-*, iid, … | not yet ported | — | bean genclj-z2gh |
+| `truncated-normal [mu sigma lo hi]` | the same (Distributions.jl's `truncated(Normal(mu, sigma), lo, hi)`) | no | — |
+| `von-mises [mu kappa]`, `wrapped-cauchy [mu rho]`, `wrapped-normal [mu sigma]` | the same parameters, values in [-π, π); `wrapped-cauchy` also takes rho = 0 (the uniform), and `wrapped-normal` is exact at any sigma (GenMLX's seven terms drift from sigma = 4 on: 3e-5 nats at 5, 0.03 at 10) | **yes**, for an angle outside [-π, π]: GenMLX scored any angle by the periodic density | none loud: such an observation weighs -Inf, so every particle does. Wrap observed angles into [-π, π) first |
+| `wishart [df scale]`, `inv-wishart [df scale]` | the same (Distributions.jl's `Wishart`, `InverseWishart`) | no | a flat [k·k] scale (GenMLX reshaped it) is an error, as is one that is not symmetric positive definite; a value that is not exactly symmetric and positive definite weighs -Inf |
+| `delta [v]` | none (the owner's decision: Gen.jl has none, and GenMLX's scored by exact float equality) | — | leave a fixed value untraced, or make it a `gen.custom` deterministic function |
+| `flip [p]` | `bernoulli [p]`, of booleans | **yes**, as `bernoulli` | as `bernoulli` |
+| `gaussian-vec [mu sigma]`, `iid-gaussian [mu sigma t]` | `normal` with array parameters (`[t]` of them for `iid-gaussian`): its log density sums over the value's elements | no | — |
+| `weighted [ws]`, `categorical-weights [ws]` (unnormalized weights) | `categorical` of the normalized weights | normalization | as `categorical`: weights that are not probabilities throw |
 
 Every gen.clj log-prob is checked against scipy.stats in these
 parameterizations (`test/fixtures/distributions.edn`).

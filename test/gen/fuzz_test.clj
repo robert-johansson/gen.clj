@@ -1,9 +1,10 @@
 (ns gen.fuzz-test
-  "The GFI laws, and batched path equivalence, over random generative
-   functions (gen.random-models): random families, dependencies, branches,
-   splices, shared-namespace splices, Map and Unfold; and, over Switch-heavy
-   models whose Switches run by partition in a batched run, every batched
-   operation particle by particle against the scalar handler."
+  "The GFI laws, and batched path equivalence (batched gradients too), over
+   random generative functions (gen.random-models): random families,
+   dependencies, branches, splices, shared-namespace splices, Map and
+   Unfold; and, over Switch-heavy models whose Switches run by partition in
+   a batched run, every batched operation particle by particle against the
+   scalar handler."
   (:refer-clojure :exclude [+ -])
   (:require [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
@@ -12,6 +13,7 @@
             [gen.array :as array :refer [+ -]]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
+            [gen.gradients :as grad]
             [gen.selection :as sel]
             [gen.gfi :as gfi]
             [gen.laws :as laws]
@@ -264,3 +266,26 @@
                 false
                 (seq more) (recur ps' more (inc k))
                 :else true))))))
+(defspec every-particle-s-choice-gradients-of-random-models-are-each-trace-s 100
+  ;; with respect to the continuous choices every particle holds: one
+  ;; batched gradient, or one per trace where the collection fell back
+  ;; (vmap's semantics either way; a NaN where the trace's own gradient has
+  ;; one). A batched collection's gradient must not fall back itself
+  (prop/for-all [[_ gf args] rm/gen-model
+                 seed gen/nat]
+    (binding [b/*spot-checks* 0]
+      (let [ps (b/simulate gf args 3 (rng/key seed))
+            trs (b/traces ps)
+            continuous? #(every? grad/continuous? (array/tree-leaves %))
+            paths (filter (fn [p] (every? #(and (cm/has-value? (:choices %) p) (continuous? (cm/get-choice (:choices %) p))) trs))
+                          (cm/addresses (:choices (first trs))))
+            s (sel/from-paths paths)
+            same? (fn [x y] (ts/close? x y (merge {:equal-nan? true} (if (ts/f32?) {:rtol 1e-4 :atol 1e-3} {}))))]
+        (or (empty? paths)
+            (let [r (if (b/batched? ps)
+                      (with-redefs [b/traces (fn [_] (throw (ex-info "the gradient fell back" {})))]
+                        (grad/choice-gradients ps s))
+                      (grad/choice-gradients ps s))
+                  each (map #(:gradients (grad/choice-gradients % s)) trs)]
+              (every? (fn [p] (same? (cm/get-choice (:gradients r) p) (array/stack (mapv #(cm/get-choice % p) each))))
+                      paths)))))))
