@@ -4,6 +4,7 @@
             [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]
             [gen.array :as array :refer [-]]
+            [gen.array.linalg :as la]
             [gen.array.special]
             [gen.batched :as batched]
             [gen.choicemap :as cm]
@@ -1069,6 +1070,51 @@
                 (is (close? v-hat v (* 5 (Math/sqrt (/ (- (get-in m4s [i j]) (* v-hat v-hat)) m)))) (str label " variance " [i j]))))
             (is (array/all-true? (array/== x (array/transpose x [0 2 1]))) (str label ": exactly symmetric"))))))))
 
+(deftest every-draw-lies-in-its-support
+  ;; large batches of draws, each in its family's support and of finite log
+  ;; density: the circular families' in [-π, π) also for mu at or next to ±π
+  ;; and for a huge mu, the truncated normal's in [lo, hi] into either tail,
+  ;; and the matrix families' exactly symmetric with a Cholesky factor (at a
+  ;; df whose draws are not singular to the float's precision: see
+  ;; the-genmlx-families-at-their-edges). Planted: von Mises draws left
+  ;; unwrapped, mu + θ (56 failures), and the truncated normal's draws
+  ;; without their clip to [lo, hi] (the four-ulp interval) fail. The
+  ;; symmetrization of M·Mᵀ is not caught here: the JVM backend's matmul is
+  ;; exactly symmetric already.
+  (let [n 20000
+        finite? (fn [dist x] (array/all-true? (array/isfinite (dc/log-prob dist x))))
+        mus [Math/PI (- Math/PI) (Math/nextDown Math/PI) (Math/nextUp (- Math/PI)) 3.0 -3.1 1e3 -2.5e16 7.7e18 1e30]]
+    (testing "angles in [-π, π)"
+      (doseq [mu mus
+              dist [(d/von-mises mu 0.01) (d/von-mises mu 4.0) (d/von-mises mu 1e8)
+                    (d/wrapped-cauchy mu 0.0) (d/wrapped-cauchy mu 0.5) (d/wrapped-cauchy mu 0.999)
+                    (d/wrapped-normal mu 0.01) (d/wrapped-normal mu 1.0) (d/wrapped-normal mu 5.0) (d/wrapped-normal mu 1e10)]]
+        (let [x (dc/sample dist (rng/key 69) [n])
+              label (str (:type dist) " " (ts/host (:params dist)))]
+          (is (array/all-true? (array/logical-and (array/>= x (- Math/PI)) (array/< x Math/PI))) label)
+          (is (finite? dist x) (str label ": finite log densities")))))
+    (testing "the truncated normal's draws in [lo, hi]"
+      (doseq [[mu sigma lo hi] [[0.0 1.0 -1.0 2.0] [0.0 1.0 5.0 6.0] [0.0 1.0 50.0 51.0] [0.0 1.0 -51.0 -50.0]
+                                [0.0 1.0 30.0 30.001] [0.0 1.0 0.0 ##Inf] [0.0 1.0 ##-Inf -40.0] [0.0 1.0 -1e-10 1e-10]
+                                [3.0 0.5 3.0 ##Inf] [1e10 1.0 (- 1e10 1.0) (+ 1e10 1.0)] [0.0 1e-30 -1e-30 2e-30]
+                                ;; four ulps wide, where mu + sigma·z rounds past a bound (planted: no clip)
+                                (when-not (ts/f32?) [0.1 0.3 1.0 (+ 1.0 (* 4 (Math/ulp 1.0)))])]
+              :when mu]
+        (let [dist (d/truncated-normal mu sigma lo hi)
+              x (dc/sample dist (rng/key 70) [n])]
+          (is (array/all-true? (array/logical-and (array/>= x lo) (array/<= x hi))) (str [mu sigma lo hi]))
+          (is (finite? dist x) (str [mu sigma lo hi] ": finite log densities")))))
+    (testing "the matrix families' draws symmetric positive definite"
+      (doseq [dist [(d/wishart 5.0 s2) (d/wishart 6.5 s3) (d/wishart [5.0 9.0] [s2 [[4.0 -1.0] [-1.0 0.5]]])
+                    (d/inv-wishart 5.0 s2) (d/inv-wishart 6.5 s3) (d/inv-wishart 30.0 s3)]]
+        (let [;; n draws of each matrix of a batch of them
+              x (dc/sample dist (rng/key 71) (into [n] (repeat (- (count (dc/value-shape dist)) 2) 1)))
+              label (str (:type dist) " " (array/shape x))]
+          (is (array/all-true? (array/== x (array/transpose x (vec (concat (range (- (array/ndim x) 2)) [(dec (array/ndim x)) (- (array/ndim x) 2)])))))
+              (str label ": symmetric"))
+          (is (array/all-true? (array/isfinite (la/cholesky x))) (str label ": a Cholesky factor"))
+          (is (finite? dist x) (str label ": finite log densities")))))))
+
 (defn- log-normal-tail
   "log Q(x), the standard normal's mass above x, for x >= 50, by its
    asymptotic series (to x^-8: within 1e-15 there)."
@@ -1166,6 +1212,18 @@
       (is (= [##-Inf true] (map ts/host [(array/take (dc/log-prob (d/wishart 4.0 s2) (array/array [[[1.0 2.0] [2.0 1.0]] [[2.0 0.3] [0.3 3.0]]])) 0)
                                          (array/isfinite (array/take (dc/log-prob (d/wishart 4.0 s2) (array/array [[[1.0 2.0] [2.0 1.0]] [[2.0 0.3] [0.3 3.0]]])) 1))]))
           "a batch of values, one of them indefinite"))
+    (testing "PROVISIONAL: a draw singular to the float's precision (df near p - 1) has log density -Inf"
+      ;; at df = 1.01 for p = 2 most draws are (χ²(0.01) is below 1e-16 with
+      ;; probability 0.8): -Inf exactly where the draw has no Cholesky factor,
+      ;; never NaN, as a draw beyond the float range is +Inf (DESIGN §9).
+      ;; Planted: the support without its factor test gives NaN
+      (let [dist (d/wishart 1.01 s2)
+            x (dc/sample dist (rng/key 72) [2000])
+            factored (array/all (array/isfinite (la/cholesky x)) {:axis [-2 -1]})
+            lps (dc/log-prob dist x)]
+        (is (array/any-true? (array/logical-not factored)))
+        (is (array/all-true? (array/== factored (array/isfinite lps))))
+        (is (array/all-true? (array/logical-or (array/isfinite lps) (array/== lps ##-Inf))))))
     (testing "matrix value shapes: df's and scale's batch axes, then [p p]"
       (is (= [2 2] (dc/value-shape (d/wishart 3.0 s2))))
       (is (= [4 2 2] (dc/value-shape (d/wishart [3.0 4.0 5.0 6.0] s2))))
