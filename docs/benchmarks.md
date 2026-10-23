@@ -735,3 +735,30 @@ their number (10ⁿ assignments), against `{:batched? true}`.
 - **Few assignments lose:** the spot checks re-run up to 8 particles
   through the scalar handler, so `with-exact-proposal`'s `:batched?` pays
   only from some tens of assignments; it is opt-in for that reason.
+
+## Switches by partition (2026-10-23, bean genclj-7tqw)
+
+`clojure -M:bench -m gen.switch-bench`, on the JVM backend (M4, GraalVM
+25, load average about 1.2): medians after warm-up, spot checks on. A
+mixture of K components of different structures (component j makes j + 1
+choices) whose index differs across the particles, batched by partition,
+against one particle at a time, which is how such a model ran before (its
+batched run fell back).
+
+| K, particles | one at a time | batched | speedup |
+|---|---|---|---|
+| 2, 100 | 3.84 ms | 1.02 ms | 3.8× |
+| 2, 1,000 | 24.8 ms | 1.71 ms | 14.5× |
+| 2, 10,000 | 146 ms | 6.80 ms | 21.5× |
+| 5, 100 | 1.96 ms | 0.75 ms | 2.6× |
+| 5, 1,000 | 17.3 ms | 1.49 ms | 11.7× |
+| 5, 10,000 | 182 ms | 9.11 ms | 20.0× |
+
+An MH sweep of 1,000 chains on the mixture of 2 (the index and the
+component redrawn together, `mh-particles`, so particles move between
+components and `select` joins the two traces): 16.6 ms one at a time, 2.58
+ms batched, 6.4×.
+
+- A site run in G groups draws G·n values (each group takes its rows of
+  the whole batch's draws), and each group pays the handler's per-site
+  cost once: at 10,000 particles, 5 groups cost 1.3× what 2 do.
