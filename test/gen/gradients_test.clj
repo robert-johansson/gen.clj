@@ -368,6 +368,39 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"holds no parameter store"
                           (g/param-gradients (gfi/simulate (comb/map plain) [[1.0]] (rng/key 37)))))))
 
+(def ^:private scan-ar1
+  "An AR(1) Scan step, x ~ N(a·carry, 1), holding a; its carry and output x."
+  (dyn/with-params (gen [prev _] (let [x (trace :x (d/normal (* (param :a) prev) 1))] [x x])) {:a 0.8}))
+
+(deftest parameter-gradients-through-scan-mix-and-dimap
+  ;; each against finite differences and its closed form: d/da Σ log N(x_t;
+  ;; a·x_t-1, 1) = Σ (x_t - a·x_t-1)·x_t-1, and d/dmu log N(z; mu·x, s) =
+  ;; (z - mu·x)·x/s². Planted bugs (2026-10-23): Scan's with-stores keeping
+  ;; the kernel's store fails the first testing; dimap's assess calling the
+  ;; inner on the arguments unmapped, the third
+  (let [dmu (/ (* (- 1.1 (* 0.5 2.0)) 2.0) (* 1.5 1.5))]
+    (testing "Scan: the kernel's, accumulated over the steps"
+      (let [tr (:trace (gfi/generate (comb/scan scan-ar1) [1.0 [nil nil nil]] (cm/choicemap [0 :x] 0.9 [1 :x] 0.5 [2 :x] 0.7)
+                                     (rng/key 38)))]
+        (is (store-gradients-match? tr))
+        (is (ts/close? (+ (* (- 0.9 (* 0.8 1.0)) 1.0) (* (- 0.5 (* 0.8 0.9)) 0.9) (* (- 0.7 (* 0.8 0.5)) 0.5))
+                       (:a (g/param-gradients tr))))))
+    (testing "Mix: by component, as a Switch's"
+      (let [m (comb/mix scaled shifted plain)]
+        (is (= {0 {:mu 0.5 :s 1.5} 1 {:shift 0.3}} (gfi/stores m)))
+        (doseq [i [0 1]]
+          (is (store-gradients-match? (:trace (gfi/generate m [[0.2 0.5 0.3] 2.0] (cm/choicemap :index i [:component :z] 1.1)
+                                                            (rng/key 39))))
+              (str "component " i)))
+        (is (ts/close? dmu (get-in (g/param-gradients (:trace (gfi/generate m [[0.2 0.5 0.3] 2.0]
+                                                                            (cm/choicemap :index 0 [:component :z] 1.1)
+                                                                            (rng/key 39))))
+                                   [0 :mu])))))
+    (testing "dimap: the inner's, on the mapped arguments"
+      (let [tr (:trace (gfi/generate (comb/dimap scaled (fn [x] [(* 2.0 x)]) -) [1.0] (cm/choicemap :z 1.1) (rng/key 40)))]
+        (is (store-gradients-match? tr))
+        (is (ts/close? dmu (:mu (g/param-gradients tr))))))))
+
 ;; with-internal-proposal and with-exact-proposal keep their model's density,
 ;; so their stores and parameter gradients are the model's
 (deftest a-wrapper-s-stores-are-its-model-s

@@ -2076,6 +2076,161 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     - von Mises draws fall back to mu if all 33 rejection rounds fail
       (probability below 1e-15).
 
+  - **Per-particle constraints and batched enumeration (genclj-7oc1;
+    PROVISIONAL, owner to confirm).** `gen.batched/generate` and `update`
+    take `{:per-particle cs}`, n choice maps, each particle's own
+    constraints beside the shared ones (an overlap or a wrong count is
+    loud). Which constraints are per particle is said, never read from a
+    shape. In a batched run they are stacked into batched values, which
+    the handler reads as one value per particle; maps that do not stack
+    (different addresses) run one particle at a time, with a fallback
+    reason, rather than failing. `gen.batched/project` gives the
+    particles' projections. `enumerative-inference` with `:batched?`
+    (opt-in) makes the grid points the particles of one run: `:batches`
+    replaces `:traces` (`enum/traces` and `marginal` read either),
+    `:chunk-size` bounds a run, and the weights equal the scalar loop's
+    point by point when every choice is given; choices left out of the
+    grid are drawn per chunk, so a chunked run's draws differ from one
+    pass. `with-exact-proposal` takes `:batched?` too (opt-in: it pays from
+    some tens of assignments, 0.6× at 10, 20× at 1000); inside a batched
+    run, or with `:check-retval?`, it enumerates one assignment at a time.
+    Measured 2.4× (100 grid points) to 44× (10^5).
+- **Gradients under the batch tracer (genclj-7dti; PROVISIONAL, owner to
+  confirm).** `array/value-and-grad` of batched arguments, or anywhere in a
+  batched run, is vmap's: each particle gets the value and gradient of its
+  own scalar run (docs/array-api.md §8b, *Gradients*).
+  - **The tape wraps the tracer.** The tracer's `-value-and-grad` runs
+    `gen.array.tape` over itself, so every primal and every VJP rule
+    (written against gen.array; linear algebra against the tape's inner
+    backend) runs per particle. gen.array's backend join became
+    transitive (a wrapping backend wraps what its inner backend wraps),
+    the tracer passes an op with no batched operand to its inner backend,
+    and `value-and-grad` dispatches on the effective backend, so a
+    gradient inside a batched run is on the tracer even when every leaf is
+    shared. The alternative, the tracer over the tape (whole-batch arrays
+    on the tape, the [n] output summed), needs a batch backend per tape
+    and a join of the enclosing run's batched values with it; rejected.
+    MLX's native gradients cannot wrap the tracer, so it runs inside them
+    (`p/INativeGrad`): MLX differentiates the sum over the particles at
+    whole-batch leaves, and custom VJPs reach it lifted (the tracer's
+    `ICustomVjp`).
+  - **A shared argument's gradient is per particle** (vmap's), not the sum
+    over particles the bean proposed: a particle's result must be its
+    scalar run's (§3.3). The sum, what a shared parameter's learning
+    needs, is one reduction.
+  - **One kind in both modes** (after the MLX run): a value is batched when
+    a batched value reached it, and a gradient when its argument or the
+    value is. The tape's gradients pass through `by-kind`; MLX's native
+    path takes MLX's ordinary gradient when the value is shared, and runs
+    again with shared leaves broadcast when the value is batched.
+  - **Not supported:** a batched run inside a differentiated function (the
+    tape outside the tracer) is a loud error (unrelated backends);
+    differentiate inside the run and sum. memo.clj will need it for fits
+    whose gradient HMC takes from outside (genclj-hwk1, the backlog).
+  - **In inference:** `gen.batched/map-particles` runs a function of a
+    trace once on a collection's batched trace, with a batched run's
+    guards and the fallback to one trace at a time (keys split n ways);
+    `set-choices` gives each particle its own values (remade as
+    `select`'s, checked when read). On them: `choice-gradients` of a
+    particle collection; `mcmc/hmc-particles`, `mala-particles` and
+    `map-optimize-particles`, n chains each accepted on its own, whose
+    moves are the scalar kernels' own functions of arrays (`hmc-move`,
+    `mala-move`, `map-move`) under the tracer; black-box VI's opt-in
+    `:batched?` draws. HMC's and MALA's acceptance ratios now use the
+    trajectory's log densities (assess weights), and a trace is updated
+    only when its move is accepted. Measured (JVM): 8–221× for choice
+    gradients, 4–246× for an HMC step, 10 to 1000 particles.
+  - The edges: `:compile?` with a -particles kernel is a loud error (a
+    batched step runs under the tracer, which compile does not see
+    through); a parameter failing its check at a tried position in a
+    batched move falls back, each chain then diverging on its own (as the
+    scalar kernels'); a particle whose start is not finite is a loud error
+    naming the particles (`:particles`); a MAP line search runs until
+    every particle has its step (one host read per step size tried);
+    map-particles' non-array leaves must agree across particles (loud
+    otherwise). Batched NUTS is out of scope (tree depths differ per
+    chain).
+  - **`hmc-particles` takes `:jitter`,** each chain's step jittered by its
+    own u, as its own `hmc`'s would be: drawn per particle under the
+    tracer, from each chain's key in the fallback (where the step is
+    exactly its hmc's), reported as `:eps`, an [n] array. Alternatives: one
+    shared u per transition (chains correlated through the step), or a
+    loud error. `mala-particles` takes none, as `mala`.
+  - **Switches by partition (genclj-7tqw; PROVISIONAL where marked).** As
+    the owner decided, a Switch whose index differs across a batch's
+    particles runs each branch batched on its own particles
+    (`gen.partition`: gather, join, scatter). Each part's backend draws the
+    whole batch's draws at its rows (PROVISIONAL; a site in G groups draws
+    G·n values), so a particle draws the same in any partition, bit for
+    bit; the alternative, draws of the part's size from a key folded with
+    the branch, would make a particle's draws depend on the others'
+    branches. The trace holds each group's subtrace and its choices by
+    part (`gen.array.batch/Parts`), which gen.batched reads per particle;
+    arguments and per-particle constraints go into a part by rows, results
+    come back by scatter. Updates run each old group's particles that go
+    to one branch together and join a branch's results, so there is one
+    group per branch; `select` joins traces rather than rebuilding them.
+    Gradients with respect to choices outside a partitioned Switch stay
+    batched; inside it they go per particle. Loud (PROVISIONAL): return
+    values that cannot be one batched value (shape, dtype or structure
+    differing across branches, int against float); a partitioned trace
+    revised by another generative function; a selection under choices
+    held by part; constraints by part whose particles span groups. A
+    partition needs a one-axis batch. Measured: importance sampling on a
+    mixture of structurally different components 3.8× (100 particles) to
+    21.5× (10,000) faster than one particle at a time, an MH sweep of 1000
+    chains between components 6.4×.
+  - **Scan, Mix and dimap (genclj-2gma; PROVISIONAL, owner to confirm).**
+    In gen.combinators, on the handler path, with the general,
+    forward-sampling, fixed-support and across laws and the fuzzer.
+    - `(comb/scan kernel)` is JAX's scan, built like Unfold: arguments
+      `(init xs & params)`, `(kernel carry x & params)` returns
+      `[carry' y]`, and Scan returns `[carry ys]` (GenMLX's took
+      `[init inputs]` and no parameters). A step is revisited when its
+      carry, its input (by a vector-diff of xs), the parameters, its
+      constraints or its selection may have changed; a part of `[carry y]`
+      that is the same value is no-change, so a changed output alone leaves
+      the next step alone. xs is a sequential collection (an array is not
+      split along its first axis, as JAX's is).
+    - `(comb/mix gf…)` and `mix-logits` are a categorical at `:index` and a
+      Switch at `:component`: the traces of
+      `(gen [w & args] (apply splice :component (switch gf…) (trace :index
+      (categorical w)) args))`, so the GFI is the handler's and a Mix
+      batches as its Switch does (per particle, by partition). Weights are
+      the first argument, as probabilities (Gen.jl's mixtures); GenMLX's
+      log weights are a loud error. The alternatives were weights fixed at
+      construction or computed from the arguments (GenMLX), GenMLX's
+      `:component-idx` beside the component's choices, and per-component
+      arguments (GenJAX). A changed Mix argument reaches the component as
+      unknown-change.
+    - `(comb/dimap gf f g)`, `contramap` and `map-retval` call gf on
+      `(apply f args)` and return `(g v)`; the traces are gf's. f is opaque
+      to change hints: no argument changed means the previous inner
+      arguments, no-change; otherwise an identical inner argument is
+      no-change and the rest unknown-change. g runs again only on a changed
+      inner return value.
+    - No Mask: it is `(when active? (splice …))` in a body, or `(switch
+      {true gf false (gen [& _] v)})`, which batches per particle when v is
+      a value of gf's return kind (with v nil it falls back, correctly).
+  - **Running totals never NaN (genclj-awd0, a bug the static fuzzer
+    found; the remedy PROVISIONAL).** Map's, Unfold's and Scan's scores are
+    running totals (score + new − old per changed element), as Gen.jl's.
+    After a choice left its support and came back, the total was
+    −Inf + Inf = NaN where the density is finite, silently. Where an update
+    or regenerate subtracted an element's old score and the total is NaN,
+    the score is now the sum of the elements' scores: on the host only
+    then, and per particle under the batch tracer by a `where` (no host
+    read). A general law holds every kind to it: an updated or regenerated
+    trace's score is the assessed density of its choices, through chains
+    that leave a support and come back (models with bounded kernels
+    exercise it). The cost: nothing where nothing is subtracted (a
+    particle filter's extension); a batched Unfold of 1000 particles
+    revisiting one step of 500 went from 284 to 717 µs, since the where
+    sums every element. Alternatives: always recomputing (3× on the
+    batched extension); counts of infinite elements beside a finite part,
+    or a pairwise sum tree (O(log n) per change, its rounding unlike
+    assess's sequential sum), not built.
+
 ## 10. Deferred (tracked, not forgotten)
 
 `beans list --tag deferred-port` lists every GenMLX area left out of M1–M4, each

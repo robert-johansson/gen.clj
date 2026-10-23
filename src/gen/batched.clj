@@ -55,12 +55,20 @@
    (cs i), which must not overlap them, as its scalar operation would be.
    Which constraints are per particle is said so, never read from a shape:
    a shared [n] array is one value of shape [n] for every particle. Weights
-   are [n] arrays; :discards is a vector of n choice maps."
+   are [n] arrays; :discards is a vector of n choice maps.
+
+   A Switch whose index differs across the particles stays batched: each
+   branch runs on its own particles (by partition, gen.partition), and the
+   batched trace holds that call's choices by part (a
+   gen.array.batch/Parts value), which the accessors read per particle.
+   choice reads through it where every particle makes the choice; select
+   joins traces whose particles took other branches."
   (:refer-clojure :exclude [take update])
   (:require [gen.array :as array]
             [gen.array.batch :as batch]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
+            [gen.partition :as part]
             [gen.random :as rng]
             [gen.trace :as trace]))
 
@@ -171,14 +179,52 @@
   [x n]
   (batch/unwrap x [n]))
 
-(defn- map-leaves [f choices] (cm/from-map (array/tree-map f (cm/to-map choices))))
+(defn- map-leaves
+  "choices with f of each value (of each array of a product value), a value
+   held by part (a Switch's that ran by partition, a gen.array.batch/Parts)
+   as it is."
+  [f choices]
+  (reduce (fn [c [p v]] (cm/set-choice c p (if (batch/parts? v) v (array/tree-map f v)))) cm/EMPTY (cm/leaves choices)))
 
 (defn- plain-choices [choices n] (map-leaves #(plain % n) choices))
 
+(defn- particle-choices
+  "The n particles' own choice maps of a batched run's choices, from each
+   leaf's n values (each v n); under a Switch that ran by partition (a
+   gen.array.batch/Parts value), each group's particles' own."
+  [choices n each]
+  (reduce (fn [cms [p v]]
+            (if (batch/parts? v)
+              (reduce (fn [cms {rows :rows data :data}]
+                        (reduce (fn [cms [r c]] (if (cm/empty? c) cms (clojure.core/update cms r cm/set-choice p c)))
+                                cms (map vector rows (particle-choices data (count rows) each))))
+                      cms (:groups v))
+              (reduce (fn [cms [i x]] (clojure.core/update cms i cm/set-choice p x)) cms (map-indexed vector (each v n)))))
+          (vec (repeat n cm/EMPTY))
+          (cm/leaves choices)))
+
+(defn- rows-of
+  "The n particles' values of a batched run's value (a tree of them, a
+   product distribution's), arrays of the wrapped backend: a shared one
+   broadcast to every particle."
+  [v n]
+  (let [x (array/tree-map #(plain % n) v)]
+    (mapv (fn [i] (array/tree-map #(array/take % i) x)) (range n))))
+
+(defn- unstacked
+  "The n particles' own choice maps of a batched run's choices."
+  [choices n]
+  (particle-choices choices n rows-of))
+
+(defn- by-part?
+  "Does a batched trace hold choices by part (a Switch that ran by
+   partition)?"
+  [t]
+  (boolean (some batch/parts? (cm/values (:choices t)))))
+
 (defn- batched-choices
   "choices whose values have the leading particle axis, as batched values:
-   what a batched run reads as one value per particle (the inverse of
-   plain-choices)."
+   what a batched run reads as one value per particle."
   [choices n]
   (map-leaves #(batch/wrap % [n]) choices))
 
@@ -201,7 +247,7 @@
         given (fn [t] (if (identical? (:gen-fn t) gf) t (assoc t :gen-fn gf)))]
     (if-let [t (:trace (check ps))]
       (mapv #(given (:trace (gfi/generate (trace/maker t) (:args ps) % (rng/key 0))))
-            (cm/unstack (plain-choices (:choices t) (:n ps)) (:n ps)))
+            (unstacked (:choices t) (:n ps)))
       (mapv given (:traces ps)))))
 
 (defn- unbatched [ps] (if (batched? ps) (per-particle ps (traces ps)) ps))
@@ -242,16 +288,17 @@
 ;; once read.
 (deftype ^:private Read [batched? v dtype host])
 
-(defn- gathered
-  "x at the checked particles indices, not yet read."
-  [x indices]
+(defn- read-of
+  "x, a value of the batched trace gathered at the checked particles, not
+   yet read."
+  [x]
   (if (batch/batched? x)
-    (let [a (batch/value x)] (Read. true (array/take a indices 0) (array/dtype a) nil))
+    (let [a (batch/value x)] (Read. true a (array/dtype a) nil))
     (Read. false x (when (array/array? x) (array/dtype x)) nil)))
 
 (defn- on-host
-  "A gathered read with its host values: an array's, read; a value that is
-   no array as it is."
+  "A read with its host values: an array's, read; a value that is no array
+   as it is."
   [^Read r]
   (let [v (.-v r)]
     (Read. (.-batched? r) v (.-dtype r) (if (array/array? v) (array/->clj v) v))))
@@ -261,31 +308,35 @@
   [^Read r j]
   (if (.-batched? r) (nth (.-host r) j) (.-host r)))
 
-(defn- batch-backend
-  "The backend of the batched trace t's batched values (nil when none is: a
-   batched choice makes the score batched)."
+(defn- arrays-of
+  "The arrays of a tree of values: batched ones' arrays, shared ones as
+   they are (through a Switch's choices by part too)."
   [t]
-  (some #(when (batch/batched? %) (array/backend (batch/value %))) [(:score t) (:retval t)]))
+  (keep #(cond (batch/batched? %) (batch/value %) (array/array? %) %) (array/tree-leaves t)))
+
+(declare choice-at)
 
 (defn- reads-of
   "The batched trace t's choices, score and array return value at the
-   checked particles idx, read on the host. On a lazy backend (lazy?) the
-   whole trace is evaluated at once (the caller reads it next: weights,
-   scores), then the checked rows, and only the rows move: two
-   evaluations, where reading each value would cost one each."
+   checked particles idx, read on the host; the choices as a function of
+   reference? (choice-at), giving each checked particle's choice map. On a
+   lazy backend (lazy?) the whole trace is evaluated at once (the caller
+   reads it next: weights, scores), then the checked rows, and only the
+   rows move: two evaluations, where reading each value would cost one
+   each."
   [t idx lazy?]
-  (let [indices (some-> (batch-backend t) (array/with-backend (array/array idx)))
-        reads (cond-> {:choices (map-leaves #(gathered % indices) (:choices t))
-                       :score (gathered (:score t) indices)}
-                (array/array? (:retval t)) (assoc :retval (gathered (:retval t) indices)))]
+  (let [array-retval? (array/array? (:retval t))
+        at (part/gather (cond-> {:choices (:choices t) :score (:score t)} array-retval? (assoc :retval (:retval t))) idx)]
     (when lazy?
-      (array/eval! (mapv #(if (batch/batched? %) (batch/value %) %)
-                         (concat (array/tree-leaves (cm/to-map (:choices t))) [(:score t)]
-                                 (when (array/array? (:retval t)) [(:retval t)]))))
-      (array/eval! (mapv #(.-v ^Read %) (concat (array/tree-leaves (cm/to-map (:choices reads)))
-                                                 (keep reads [:score :retval])))))
-    (cond-> (assoc reads :choices (map-leaves on-host (:choices reads)) :score (on-host (:score reads)))
-      (:retval reads) (assoc :retval (on-host (:retval reads))))))
+      (array/eval! (vec (arrays-of [(cm/to-map (:choices t)) (:score t) (when array-retval? (:retval t))])))
+      (array/eval! (vec (arrays-of [(cm/to-map (:choices at)) (:score at) (:retval at)]))))
+    (cond-> {:score (on-host (read-of (:score at)))
+             :choices (fn [reference?]
+                        (particle-choices (:choices at) (count idx)
+                                          (fn [v m]
+                                            (let [rs (array/tree-map #(on-host (read-of %)) v)]
+                                              (mapv (fn [j] (array/tree-map #(choice-at % j reference?) rs)) (range m))))))}
+      array-retval? (assoc :retval (on-host (read-of (:retval at)))))))
 
 (defn- agrees?
   "Does a scalar run's value x agree with the batched run's read r at the
@@ -322,9 +373,8 @@
    handler from its choices (choice-at), gives the batched run's score and
    array return value."
   [gf args idx reads reference?]
-  (doseq [[j i] (map-indexed vector idx)]
-    (let [cs (map-leaves #(choice-at % j reference?) (:choices reads))
-          st (try (:trace (gfi/generate gf args cs (rng/key 0)))
+  (doseq [[[j i] cs] (map vector (map-indexed vector idx) ((:choices reads) reference?))]
+    (let [st (try (:trace (gfi/generate gf args cs (rng/key 0)))
                   (catch Exception e
                     ;; the scalar run of the particle's choices takes another path
                     (throw (mismatch i (str "the scalar run of its choices fails (" (ex-message e) ")") {} e))))]
@@ -516,7 +566,7 @@
                                           :constraints (batched-constraints :update constraints own n)})]
           {:particles (spot-check-update! ps args t)
            :weights (plain w n)
-           :discards (if (cm/empty? d) (vec (repeat n cm/EMPTY)) (cm/unstack (plain-choices d n) n))})
+           :discards (if (cm/empty? d) (vec (repeat n cm/EMPTY)) (unstacked d n))})
         (fallback (unbatched (check ps))))
        (fallback ps)))))
 
@@ -542,50 +592,50 @@
 ;; Particles as a population
 ;; ---------------------------------------------------------------------------
 
-(defn- gather
-  "x with every batched value's particles gathered at idx, as a new batch of
-   n' particles: through traces, choice maps, records, maps, vectors, sets,
-   lists and seqs (a static trace's node values among them), so a
-   resampled trace is made without re-running the model. What holds no
-   batched value is kept as it is, its identity too (a static update checks
-   its generative function's, and its store's), and a seq is gathered
-   lazily, as it may be infinite."
-  [x idx n']
-  (let [same? (fn [xs ys] (every? true? (map identical? xs ys)))]
-    (cond (batch/batched? x) (batch/gather x idx [n'])
-          (gfi/generative-function? x) x
-          (map? x) (reduce-kv (fn [m k v] (let [v' (gather v idx n')] (if (identical? v v') m (assoc m k v')))) x x)
-          (vector? x) (let [v (mapv #(gather % idx n') x)] (if (same? v x) x v))
-          (set? x) (let [v (map #(gather % idx n') x)] (if (same? v x) x (into (empty x) v)))
-          (list? x) (let [v (map #(gather % idx n') x)] (if (same? v x) x (apply list v)))
-          (seq? x) (map #(gather % idx n') x)
-          :else x)))
-
 (defn take
-  "The particles at indices (a seq of n' integers), e.g. after resampling."
+  "The particles at indices (a seq of n' integers), e.g. after resampling:
+   every batched value of the trace gathered there, lazily, so a resampled
+   trace is made without re-running the model (gen.partition/gather)."
   [ps indices]
   (let [indices (vec indices)
         n' (count indices)]
     (if (batched? ps)
-      (assoc ps :n n' :trace (gather (:trace ps) (array/array indices {:dtype :int64}) n'))
+      (assoc ps :n n' :trace (part/gather (:trace ps) indices))
       (assoc ps :n n' :traces (mapv (:traces ps) indices)))))
+
+(defn- joined-select
+  "select's batched trace by joining: the two traces as one of 2n particles
+   (gen.partition/join), each particle taken from its own, with no run."
+  [keep tp tq n]
+  (part/gather (part/join [tp tq] [n n] (batch/backend array/*backend* [(* 2 n)]))
+               (map-indexed (fn [i keep?] (if keep? i (+ n i))) keep)))
 
 (defn select
   "ps's particle where mask (n booleans, or a bool array) is true and qs's
    elsewhere: the per-particle accept step of n MH chains. Each particle
-   keeps its trace's maker, given ps's :gen-fn, as traces gives it: so the
-   batched merge is rebuilt by the makers' generative function, and
-   particles of different makers fall back (review 7, R7-5)."
+   keeps its trace's maker, given ps's :gen-fn, as traces gives it: so
+   particles of different makers fall back (review 7, R7-5). Traces of the
+   same addresses are merged and rebuilt by the makers' generative function;
+   others (a Switch whose particles took other branches) are joined, and
+   each particle taken from its own (gen.partition/join)."
   [mask ps qs]
   (let [n (:n ps)
         keep (vec (if (array/array? mask) (array/->clj mask) mask))
         fallback #(per-particle ps (mapv (fn [keep? p q] (if keep? p q)) keep (traces ps) (traces qs)))
-        maker (some-> (:trace ps) trace/maker)]
-    (if (and (batched? ps) (batched? qs) (gfi/same-gen-fn? maker (trace/maker (:trace qs)))
-             (= (cm/addresses (:choices (:trace ps))) (cm/addresses (:choices (:trace qs)))))
+        maker (some-> (:trace ps) trace/maker)
+        tp (:trace ps)
+        tq (:trace qs)]
+    (when-not (= n (:n qs) (count keep))
+      (throw (ex-info (str "select: a mask of one boolean for each of the " n " particles of both collections")
+                      {:particles [n (:n qs)] :mask (count keep)})))
+    (cond
+      (not (and (batched? ps) (batched? qs) (gfi/same-gen-fn? maker (trace/maker tq))))
+      (fallback)
+
+      (and (not (by-part? tp)) (not (by-part? tq)) (= (cm/addresses (:choices tp)) (cm/addresses (:choices tq))))
       (let [m (array/array keep)
-            cp (:choices (:trace ps))
-            cq (:choices (:trace qs))
+            cp (:choices tp)
+            cq (:choices tq)
             pick (fn pick [p q]
                    (if (vector? p)
                      (mapv pick p q)
@@ -596,13 +646,54 @@
         ;; the rebuild is not checked
         (batched-or (assoc ps :trace (assoc (rebuild maker (:args ps) n merged) :gen-fn (:gen-fn ps)) ::unchecked? true)
                     (fallback)))
-      (fallback))))
+
+      :else
+      (batched-or (assoc ps :trace (assoc (joined-select keep tp tq n) :gen-fn (:gen-fn ps))
+                         ::unchecked? (boolean (or (::unchecked? ps) (::unchecked? qs))))
+                  (fallback)))))
+
+(defn- by-part-at
+  "[the choices by part (a gen.array.batch/Parts) at a prefix of the path p
+   of choices, the rest of p], or nil."
+  [choices p]
+  (some (fn [i] (let [v (cm/get-choice choices (subvec p 0 i) nil)] (when (batch/parts? v) [v (subvec p i)])))
+        (range (inc (count p)))))
+
+(defn- scattered-choice
+  "The choice at the path more under the choices by part parts, an [m …]
+   array over their m particles: each group's, scattered back. Loud when a
+   group makes none there (p, the whole path, names it)."
+  [parts more p]
+  (let [gs (:groups parts)
+        rows (mapv :rows gs)
+        m (reduce + (map count rows))
+        vs (mapv (fn [{data :data rs :rows}]
+                   (if-let [[inner further] (by-part-at data more)]
+                     (scattered-choice inner further p)
+                     (let [v (cm/get-choice data more ::none)]
+                       (when (identical? ::none v)
+                         (throw (ex-info (str "choice: not every particle has a choice at " p
+                                              " (the branches of a Switch whose index differs across them make different ones)")
+                                         {:path p})))
+                       (array/tree-map #(plain % (count rs)) v))))
+                 gs)
+        scatter (fn scatter [vs]
+                  (if (vector? (first vs))
+                    (apply mapv (fn [& xs] (scatter (vec xs))) vs)
+                    (plain (batch/scatter (mapv #(batch/wrap %1 [(count %2)]) vs rows)
+                                          rows (batch/backend (array/backend (first vs)) [m]))
+                           m)))]
+    (scatter vs)))
 
 (defn choice
-  "The choice at addr across the particles, as an [n …] array."
+  "The choice at addr across the particles, as an [n …] array: through a
+   Switch whose index differs across them when every particle makes it."
   [ps addr]
   (if (batched? ps)
-    (array/tree-map #(plain % (:n ps)) ((:trace (check ps)) addr))
+    (let [t (:trace (check ps))]
+      (if-let [[parts more] (by-part-at (:choices t) (cm/path addr))]
+        (scattered-choice parts more (cm/path addr))
+        (array/tree-map #(plain % (:n ps)) (t addr))))
     (array/stack (mapv #(% addr) (:traces ps)))))
 
 (defn scores
@@ -682,7 +773,9 @@
   (let [n (:n ps)
         row (fn [i] (map-leaves #(array/take % i 0) choices))
         fallback (fn [ps] (per-particle ps (map-indexed #(:trace (gfi/update %2 (row %1) (rng/key 0))) (traces ps))))]
-    (if (batched? ps)
+    ;; a choice under a Switch that ran by partition is set per particle: its
+    ;; particles' choices there differ in structure
+    (if (and (batched? ps) (not-any? #(by-part-at (:choices (:trace ps)) %) (cm/addresses choices)))
       (let [t (:trace (check ps))
             maker (trace/maker t)
             merged (cm/override (plain-choices (:choices t) n) choices)]
