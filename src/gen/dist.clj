@@ -719,9 +719,11 @@
 ;; --- Circular families ----------------------------------------------------
 
 (defn- wrap-angle
-  "x as the angle in [-π, π) of the same point on the circle."
+  "x as the angle in [-π, π) of the same point on the circle; within
+   [-π, π] also for an x so large (beyond 2^53·π in float64) that its point
+   is lost to rounding."
   [x]
-  (- x (* two-pi (array/floor (/ (+ x Math/PI) two-pi)))))
+  (array/clip (- x (* two-pi (array/floor (/ (+ x Math/PI) two-pi)))) (- Math/PI) Math/PI))
 
 (defn- on-circle?
   "Is v an angle in [-π, π], the circular families' support? (π is -π's
@@ -870,6 +872,13 @@
            (- (log1p others) (+ half-log-2pi (log sd) (* 0.5 (square (/ d sd)))))
            (- (log1p (* 2.0 fourier)) log-2pi))))
 
+(def ^:private wrapped-normal-uniform
+  "The sigma from which wrapped-normal draws the uniform on the circle: its
+   density differs from the uniform's by 2e^(-σ²/2) at most, below 6e-18
+   from 9 on, and a wrap of σ·z would lose more to rounding (all of the
+   angle beyond σ = 1e16)."
+  9.0)
+
 (defdist ^:elementwise wrapped-normal
   "wrapped-normal(mu, sigma): normal(mu, sigma) wrapped onto the circle,
    density Σₖ N(x + 2πk; μ, σ), values in [-π, π). The sum is two series,
@@ -877,7 +886,12 @@
   [mu sigma]
   (validate (dc/check-positive "wrapped-normal" "sigma" sigma))
   (sample [key shape]
-    (wrap-angle (+ mu (* sigma (rng/normal key (dc/elementwise-shape shape mu sigma) (opts mu sigma))))))
+    (let [s (dc/elementwise-shape shape mu sigma)
+          o (opts mu sigma)
+          [k-normal k-uniform] (rng/split key)]
+      (where (< sigma wrapped-normal-uniform)
+             (wrap-angle (+ mu (* sigma (rng/normal k-normal s o))))
+             (rng/uniform k-uniform s (assoc o :low (- Math/PI) :high Math/PI)))))
   (log-prob [v]
     (guard (on-circle? v) (log-wrapped-normal (wrap-angle (- v mu)) sigma))))
 
