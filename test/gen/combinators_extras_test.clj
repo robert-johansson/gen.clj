@@ -93,6 +93,18 @@
    [:dimap dimapped [1.0] [[2.0]]]
    [:spliced spliced [2] [[3] [1]]]])
 
+;; Planted bugs (2026-10-23), each failing the laws named: Scan's update
+;; simulating the steps it adds, so that their constraints go unused
+;; (updates-are-reversible-with-exact-discards and both update-weight laws);
+;; a Scan step's discard dropped (updates-are-reversible-… and
+;; update-weight-is-the-score-change-less-fresh-choices); Mix's project 0
+;; (eight: both project laws, generate's two weight laws, regenerate's
+;; three, and update-weight-is-the-projection-change); a dimap without an
+;; argument map whose retdiff is no-change, or one whose mapped arguments
+;; are called unchanged (updates-are-reversible-… and
+;; regenerate-keeps-unselected-choices, by their retdiff checks); a skipped
+;; Scan step whose carry is read from its output
+;; (identity-update-changes-nothing, with the tests below).
 (laws/deflaws extras models 100)
 (laws/deflaws extras models 100 laws/fixed-support)
 
@@ -143,11 +155,12 @@
     (swap! runs inc)
     (let [z (trace :z (d/normal x 1))] [(+ acc z) z])))
 
-;; Planted bugs (2026-10-23), each failing the testing named: part-diff
-;; without its same-value? check (a constrained output alone: 4 runs, every
-;; later step); changed-steps giving every step for a vector-diff (a
-;; changed input: 10 runs); a walk that never skips (every one but the
-;; parameter change and the state's).
+;; Planted bugs (2026-10-23), each failing the testings named: part-diff
+;; without its same-value? check (a constrained output alone: 2 runs, its
+;; step and the next); changed-steps giving every step for a vector-diff (a
+;; changed input: 10 runs; the extension, 11; the shrinking); a walk that
+;; never skips (twelve assertions, in all but the unknown inputs, the
+;; parameter change and the carry that changes).
 (deftest scan-updates-skip-the-steps-nothing-changed
   (let [runs (atom 0)
         sc (comb/scan (counting runs))
@@ -289,9 +302,8 @@
 
 (defn- observations [ys] (apply cm/choicemap (mapcat (fn [t y] [[t :y] y]) (range) ys)))
 
-;; Planted bugs (2026-10-23), each failing both testings: every step given
-;; init as its carry; a step's kernel called with its input and carry
-;; swapped.
+;; Planted bugs (2026-10-23): every step given init as its carry, in
+;; generate's steps (fails the first testing) or in assess's (the second).
 (deftest scan-hmm-evidence-is-the-forward-algorithm-s
   (let [xs (vec (repeat (count observed) nil))
         exact (forward-log-evidence 1 observed)
@@ -304,8 +316,9 @@
 
 ;; The particle filter's estimate is unbiased: its mean over independent
 ;; filters, in exp space, is the evidence within 5 standard errors of the
-;; filters' spread. Planted bug (2026-10-23): a Scan extension that gives
-;; the new step init as its carry fails it (the ratio's mean is 0.39 ± 0.02).
+;; filters' spread (here 0.977 ± 0.023). Planted bug (2026-10-23): a Scan
+;; extension whose new step's carry is init fails it: the ratio's mean is
+;; 2.40 ± 0.03, and the batch falls back (its spot checks disagree).
 (deftest ^:slow scan-particle-filters-estimate-the-evidence
   (let [n 500
         filters 20
@@ -353,8 +366,8 @@
   (gen [weights & args]
     (apply splice :component (comb/switch near far) (trace :index (d/categorical weights)) args)))
 
-;; Planted bug (2026-10-23): a body whose index draw comes after the
-;; component's (another key each) fails it.
+;; Planted bug (2026-10-23): Mix's simulate giving its body a key folded
+;; from its own fails it.
 (deftest mix-is-a-categorical-and-a-switch
   (doseq [seed (range 6)]
     (let [args [[0.3 0.7] 0.5]
@@ -369,9 +382,9 @@
                  (gfi/update ti [[0.6 0.4] 1.0] [diff/unknown-change diff/unknown-change] (cm/choicemap :index 1) (rng/key 50))))
       (is (same? (gfi/regenerate tr (sel/select :index) (rng/key 51)) (gfi/regenerate ti (sel/select :index) (rng/key 51)))))))
 
-;; Planted bug (2026-10-23): a body that hands the component the weights
-;; with the arguments fails every testing (a component then sees two
-;; arguments); logits read as probabilities fail the third.
+;; Planted bugs (2026-10-23): probabilities read as logits fail every
+;; testing; logits read as probabilities, the third (loudly: they are not
+;; probabilities).
 (deftest mix-marginal-density
   (let [w [0.3 0.7]
         x 0.8
@@ -428,9 +441,9 @@
       (is (= (ts/host (tr [:component :x])) (ts/host (tr :component))) "the inner's calls, by address")
       (is (consistent? tr)))))
 
-;; Planted bugs (2026-10-23): inner-argdiffs giving unknown-change for every
-;; changed argument list (the first testing: 3 runs); dimap-revise mapping
-;; the arguments again though none changed (the second's count).
+;; Planted bugs (2026-10-23): inner-call giving unknown-change for every
+;; mapped argument (the first testing: 3 runs); inner-call mapping the
+;; arguments again though none changed (the second's count of maps).
 (deftest contramap-change-hints
   (let [runs (atom 0)
         maps (atom 0)
@@ -462,12 +475,13 @@
         (is (= 1 (first (runs-of #(gfi/update tr [[0.0 1.5 2.0]] [(diff/vector-diff 3 3 {1 diff/unknown-change})] cm/EMPTY
                                               (rng/key 6))))))))))
 
-;; Planted bug (2026-10-23): map-retval's retdiff without its same-value?
-;; check fails the second testing (unknown-change).
+;; Planted bugs (2026-10-23): map-retval's retdiff without its same-value?
+;; check fails the second testing (unknown-change); mapping the return
+;; value again when the inner's is unchanged, the first's identical?.
 (deftest map-retval-retdiffs
-  (let [m (comb/map-retval (comb/map kern) count)
+  (let [m (comb/map-retval (comb/map kern) (fn [xs] {:n (count xs)}))
         tr (gfi/simulate m [[0.0 1.0 2.0]] (rng/key 1))]
-    (is (= 3 (:retval tr)))
+    (is (= {:n 3} (:retval tr)))
     (testing "the inner's return value unchanged: no-change, the same value"
       (let [{t :trace rd :retdiff} (gfi/update tr cm/EMPTY (rng/key 2))]
         (is (diff/no-change? rd))
@@ -477,7 +491,7 @@
         (is (diff/no-change? rd))))
     (testing "the mapped value changed: a sound retdiff"
       (let [{t :trace rd :retdiff} (gfi/update tr [[0.0 1.0]] [diff/unknown-change] cm/EMPTY (rng/key 4))]
-        (is (= 2 (:retval t)))
+        (is (= {:n 2} (:retval t)))
         (is (diff/unknown-change? rd))))))
 
 (deftest dimap-errors-are-loud
@@ -507,6 +521,8 @@
 ;; Stores and identity
 ;; ---------------------------------------------------------------------------
 
+;; Planted bug (2026-10-23): Mix's with-stores keeping its components'
+;; stores fails the first testing.
 (deftest stores-are-the-callees
   (let [held (dyn/with-params (gen [mu] (trace :x (d/normal (+ mu (param :w)) 1))) {:w 1.0})
         held-step (dyn/with-params (gen [c x] (let [s (trace :s (d/normal (+ c x (param :w)) 1))] [s s])) {:w 1.0})]
@@ -524,6 +540,7 @@
       (is (= {:w 1.0} (gfi/stores (comb/contramap held (fn [x] [x])))))
       (is (= {:w 3.0} (gfi/stores (gfi/with-stores (comb/map-retval held -) {:w 3.0})))))))
 
+;; Planted bug (2026-10-23): Mix's same-gen-fn? ignoring logits? fails it.
 (deftest rebuilt-combinators-are-the-same
   ;; so that a body building one again stays incremental
   (is (gfi/same-gen-fn? (comb/mix near far) (comb/mix near far)))
@@ -551,6 +568,9 @@
    requires the batch."
   false)
 
+;; Planted bugs (2026-10-23): Scan's generate simulating its steps fails the
+;; Scan testing (and the dimap one, a Scan's); a skipped Scan step's carry
+;; read from its output fails the Scan testing's update.
 (deftest batched-runs-are-the-scalar-runs
   (testing "Scan: simulate, generate, and the particle filter's extension"
     (let [args [0.0 [0.1 0.2 0.3] 0.5]
