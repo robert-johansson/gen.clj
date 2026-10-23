@@ -2212,6 +2212,24 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     - No Mask: it is `(when active? (splice …))` in a body, or `(switch
       {true gf false (gen [& _] v)})`, which batches per particle when v is
       a value of gf's return kind (with v nil it falls back, correctly).
+  - **Running totals never NaN (genclj-awd0, a bug the static fuzzer
+    found; the remedy PROVISIONAL).** Map's, Unfold's and Scan's scores are
+    running totals (score + new − old per changed element), as Gen.jl's.
+    After a choice left its support and came back, the total was
+    −Inf + Inf = NaN where the density is finite, silently. Where an update
+    or regenerate subtracted an element's old score and the total is NaN,
+    the score is now the sum of the elements' scores: on the host only
+    then, and per particle under the batch tracer by a `where` (no host
+    read). A general law holds every kind to it: an updated or regenerated
+    trace's score is the assessed density of its choices, through chains
+    that leave a support and come back (models with bounded kernels
+    exercise it). The cost: nothing where nothing is subtracted (a
+    particle filter's extension); a batched Unfold of 1000 particles
+    revisiting one step of 500 went from 284 to 717 µs, since the where
+    sums every element. Alternatives: always recomputing (3× on the
+    batched extension); counts of infinite elements beside a finite part,
+    or a pairwise sum tree (O(log n) per change, its rounding unlike
+    assess's sequential sum), not built.
 
 ## 10. Deferred (tracked, not forgotten)
 
