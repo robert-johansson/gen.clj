@@ -17,6 +17,7 @@
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]
             [gen.array.special :as special]
+            [gen.array.tree :as tree]
             [gen.backend.jvm :as jvm]))
 
 (set! *warn-on-reflection* true)
@@ -125,7 +126,7 @@
     []
     (p/-shape (operand-backend :shape x) x)))
 
-(defn ndim [x] (count (shape x)))
+(defn ndim "The number of axes of x (0 for a scalar)." [x] (count (shape x)))
 
 (defn concrete?
   "Can x's values be read without forcing a lazy computation? (Host scalars
@@ -133,7 +134,7 @@
   [x]
   (or (host? x) (not (p/-lazy? (backend x)))))
 
-(defn size [x] (sh/size (shape x)))
+(defn size "The number of elements of x." [x] (sh/size (shape x)))
 
 (defn defaults
   "Backend b's default dtypes, {:float … :int …} (docs/array-api.md §5)."
@@ -158,102 +159,19 @@
     (if (= dtype (p/-dtype b x)) x (p/-astype b x dtype))))
 
 ;; ---------------------------------------------------------------------------
-;; Host math: the semantics of every elementwise op on host scalars
-;; ---------------------------------------------------------------------------
-
-(def ^:private host-defaults {:float :float64 :int :int64})
-
-(defn- host-dd [op ^double x ^double y]
-  (case op
-    :add (c/+ x y) :subtract (c/- x y) :multiply (c/* x y) :divide (c// x y)
-    :power (Math/pow x y) :maximum (Math/max x y) :minimum (Math/min x y)
-    :remainder (dt/floor-mod x y) :floor-divide (Math/floor (c// x y)) :arctan2 (Math/atan2 x y)
-    :less (c/< x y) :less-equal (c/<= x y) :greater (c/> x y) :greater-equal (c/>= x y)
-    :equal (c/== x y) :not-equal (not (c/== x y))
-    :logical-and (and (not (c/== x 0.0)) (not (c/== y 0.0)))
-    :logical-or (or (not (c/== x 0.0)) (not (c/== y 0.0)))))
-
-(defn- host-ll [op ^long x ^long y]
-  (case op
-    :add (unchecked-add x y) :subtract (unchecked-subtract x y)
-    :multiply (unchecked-multiply x y)
-    :power (unchecked-long (Math/pow (double x) (double y)))
-    :maximum (Math/max x y) :minimum (Math/min x y)
-    :remainder (if (zero? y) 0 (Math/floorMod x y))
-    :floor-divide (if (zero? y) 0 (Math/floorDiv x y))
-    :less (c/< x y) :less-equal (c/<= x y) :greater (c/> x y) :greater-equal (c/>= x y)
-    :equal (c/== x y) :not-equal (not (c/== x y))))
-
-(defn- host-bb [op x y]
-  (case op
-    :logical-and (and x y) :logical-or (or x y)
-    :equal (= x y) :not-equal (not= x y)
-    :maximum (or x y) :minimum (and x y)
-    (:less :less-equal :greater :greater-equal) (host-ll op (if x 1 0) (if y 1 0))))
-
-(defn- host-binary [op x y]
-  (if (and (instance? Double x) (instance? Double y))
-    (host-dd op (.doubleValue ^Double x) (.doubleValue ^Double y))
-    (let [in (dt/input-dtype op (dt/promote (dt/host-dtype x) (dt/host-dtype y)) host-defaults)]
-      (case (dt/kind in)
-        :float (host-dd op (dt/host-double x) (dt/host-double y))
-        :int (host-ll op (dt/host-long x) (dt/host-long y))
-        :bool (host-bb op (dt/truthy? x) (dt/truthy? y))))))
-
-(defn- host-unary [op x]
-  (let [in (dt/input-dtype op (dt/host-dtype x) host-defaults)]
-    (case (dt/kind in)
-      :float (let [v (dt/host-double x)]
-               (case op
-                 :negative (c/- v) :abs (Math/abs v) :sign (Math/signum v)
-                 :sqrt (Math/sqrt v) :exp (Math/exp v) :log (Math/log v)
-                 :expm1 (Math/expm1 v) :log1p (Math/log1p v)
-                 :sin (Math/sin v) :cos (Math/cos v) :tan (Math/tan v) :tanh (Math/tanh v)
-                 :arcsin (Math/asin v) :arccos (Math/acos v) :arctan (Math/atan v)
-                 :sinh (Math/sinh v) :cosh (Math/cosh v)
-                 :erf (special/erf v) :erfinv (special/erfinv v)
-                 :floor (Math/floor v) :ceil (Math/ceil v) :round (Math/rint v)
-                 :isnan (Double/isNaN v) :isinf (Double/isInfinite v)))
-      :int (let [v (dt/host-long x)]
-             (case op
-               :negative (unchecked-negate v) :abs (Math/abs v) :sign (Long/signum v)
-               (:floor :ceil :round) v
-               (:isnan :isinf) false))
-      :bool (let [v (dt/truthy? x)]
-              (case op
-                :logical-not (not v)
-                (:isnan :isinf) false)))))
-
-(defn- host-where [c x y]
-  (dt/host-cast (if (dt/truthy? c) x y) (dt/promote (dt/host-dtype x) (dt/host-dtype y))))
-
-(defn host-elementwise
-  "The elementwise op on host scalar operands as gen.array computes it for
-   them: on the host, whatever the backend. For backends that wrap others
-   (the tape), so that a computation on host scalars gives the same values
-   wrapped as unwrapped."
-  [op args]
-  (case op
-    :where (apply host-where args)
-    :stop-gradient (first args)
-    (case (count args)
-      1 (host-unary op (first args))
-      2 (host-binary op (first args) (second args)))))
-
-;; ---------------------------------------------------------------------------
-;; Elementwise dispatch
+;; Elementwise dispatch (host scalars' math is gen.array.host's)
 ;; ---------------------------------------------------------------------------
 
 (defn- ew1 [op x]
   (if (host? x)
-    (host-unary op x)
+    (host/unary op x)
     (let [b (operand-backend op x)
           d (dt/input-dtype op (p/-dtype b x) (defaults b))]
       (p/-elementwise b op [(cast-to b x d)] d))))
 
 (defn- ew2 [op x y]
   (if (and (host? x) (host? y))
-    (host-binary op x y)
+    (host/binary op x y)
     (let [b (join-backends op (operand-backend op x) (operand-backend op y))
           common (cond
                    (and (backend-array? x) (backend-array? y))
@@ -353,7 +271,7 @@
   "Elementwise choice: x where condition c is true, y elsewhere, broadcasting."
   [c x y]
   (if (and (host? c) (host? x) (host? y))
-    (host-where c x y)
+    (host/where c x y)
     (let [b (backend-of :where [c x y])
           d (common-dtype b [x y])]
       (p/-elementwise b :where [(cast-to b c :bool) (cast-to b x d) (cast-to b y d)] d))))
@@ -387,6 +305,11 @@
     (let [r (f)]
       [r @*branch-log*])))
 
+(defn- sole
+  "The one value of a single-element array's host data."
+  [v]
+  (if (sequential? v) (recur (first v)) v))
+
 (defn truthy?
   "The Clojure truthiness of x, for branching, the same on every backend:
    a boolean (host or a one-element bool array) by its value; any number,
@@ -408,7 +331,7 @@
         (let [b (p/-backend x)
               s (p/-shape b x)]
           (cond (not= :bool (p/-dtype b x)) true
-                (== 1 (sh/size s)) (dt/truthy? (loop [v (p/-to-host b x)] (if (sequential? v) (recur (first v)) v)))
+                (== 1 (sh/size s)) (dt/truthy? (sole (p/-to-host b x)))
                 :else (throw (ex-info (str "The truth value of a bool array of shape " s
                                            " is ambiguous: use gen.array/all, any or where")
                                       {:shape s}))))
@@ -452,12 +375,12 @@
 ;; branch cannot turn into a NaN cotangent.
 
 (defn xlogy "Elementwise x·log(y), with 0·log(y) = 0 (also for y = 0)." [x y]
-  (let [zero? (logical-and (== x 0) (== y 0))]
-    (where zero? 0.0 (* x (log (where zero? 1.0 y))))))
+  (let [both-zero (logical-and (== x 0) (== y 0))]
+    (where both-zero 0.0 (* x (log (where both-zero 1.0 y))))))
 
 (defn xlog1py "Elementwise x·log1p(y), with 0·log1p(y) = 0 (also for y = -1)." [x y]
-  (let [zero? (logical-and (== x 0) (== y -1))]
-    (where zero? 0.0 (* x (log1p (where zero? 0.0 y))))))
+  (let [at-pole (logical-and (== x 0) (== y -1))]
+    (where at-pole 0.0 (* x (log1p (where at-pole 0.0 y))))))
 
 (defn clip
   "Elementwise clamp of x to [lo, hi]; either bound may be nil."
@@ -585,17 +508,19 @@
      (p/-full b (vec shape) value
               (or dt
                   (if (host? value)
-                    (dt/with-weak nil #{(dt/kind (dt/host-dtype value))} (defaults b))
+                    (dt/weak-host-dtype value (defaults b))
                     ;; a (per-particle) array fill value keeps its dtype
                     (dtype value)))))))
 
 (defn zeros
+  "An array of zeros. Options: :dtype (default: the backend's float)."
   ([shape] (zeros shape nil))
-  ([shape {:keys [dtype]}] (full shape 0.0 {:dtype (or dtype (:float (defaults *backend*)))})))
+  ([shape {:keys [dtype]}] (full shape 0.0 {:dtype dtype})))
 
 (defn ones
+  "An array of ones. Options: :dtype (default: the backend's float)."
   ([shape] (ones shape nil))
-  ([shape {:keys [dtype]}] (full shape 1.0 {:dtype (or dtype (:float (defaults *backend*)))})))
+  ([shape {:keys [dtype]}] (full shape 1.0 {:dtype dtype})))
 
 (defn weak-dtype
   "The dtype x has on backend b (default *backend*): an array's own; a host
@@ -603,7 +528,7 @@
    that is the default)."
   ([x] (weak-dtype x *backend*))
   ([x b]
-   (if (host? x) (dt/with-weak nil #{(dt/kind (dt/host-dtype x))} (defaults b)) (dtype x))))
+   (if (host? x) (dt/weak-host-dtype x (defaults b)) (dtype x))))
 
 (defn full-like
   "An array with x's shape, backend and (unless given) dtype, filled with
@@ -615,8 +540,8 @@
    (let [b (join-backends :full-like (backend x) (operand-backend :full-like value))]
      (p/-full b (shape x) value (or dt (weak-dtype x b))))))
 
-(defn zeros-like [x] (full-like x 0))
-(defn ones-like [x] (full-like x 1))
+(defn zeros-like "Zeros of x's shape, backend and dtype." [x] (full-like x 0))
+(defn ones-like "Ones of x's shape, backend and dtype." [x] (full-like x 1))
 
 (defn arange
   "A 1-d array [start, stop) by step. Integral arguments give the default int
@@ -661,7 +586,7 @@
     x
     (let [s (shape x)]
       (if (== 1 (sh/size s))
-        (loop [v (->clj x)] (if (sequential? v) (recur (first v)) v))
+        (sole (->clj x))
         (throw (ex-info (str "item needs a single-element array, got shape " s)
                         {:shape s}))))))
 
@@ -669,21 +594,14 @@
 ;; Trees and evaluation
 ;; ---------------------------------------------------------------------------
 
-(defn tree-leaves
-  "The leaves of a tree of nested maps, vectors and seqs, depth first."
-  [t]
-  (cond (map? t) (mapcat tree-leaves (vals t))
-        (or (vector? t) (seq? t)) (mapcat tree-leaves t)
-        :else [t]))
+(def ^{:arglists '([t])
+       :doc "The leaves of a tree of nested maps, vectors and seqs, depth first."}
+  tree-leaves tree/leaves)
 
-(defn tree-map
-  "The tree t with f applied to every leaf (maps, including records, keep their
-   type)."
-  [f t]
-  (cond (map? t) (reduce-kv (fn [m k v] (assoc m k (tree-map f v))) t t)
-        (vector? t) (mapv #(tree-map f %) t)
-        (seq? t) (doall (map #(tree-map f %) t))
-        :else (f t)))
+(def ^{:arglists '([f t])
+       :doc "The tree t with f applied to every leaf (maps, including records, keep
+   their type)."}
+  tree-map tree/map-leaves)
 
 (defn eval!
   "Force evaluation of every backend array in the tree t (a hint on eager
@@ -699,20 +617,10 @@
 ;; Reductions and scans
 ;; ---------------------------------------------------------------------------
 
-(defn host-reduce
-  "The reduction op of a host scalar as gen.array computes it (see
-   host-elementwise)."
-  [op x]
-  (case op
-    (:sum :prod) (if (instance? Boolean x) (if x 1 0) x)
-    (:max :min) x
-    (:argmax :argmin) 0
-    (:all :any) (dt/truthy? x)))
-
 (defn- reduce* [op x {:keys [axis keep-dims?]}]
   (if (host? x)
     (do (sh/axes axis 0)
-        (host-reduce op x))
+        (host/reduction op x))
     (let [b (operand-backend op x)
           axes (sh/axes axis (count (p/-shape b x)))
           d (dt/reduce-input-dtype op (p/-dtype b x) (defaults b))]
@@ -931,7 +839,9 @@
 (defn take
   "Gather along axis (default 0): the axis is replaced by the shape of indices
    (an int array or integer), so a single integer index removes the axis.
-   Negative indices count from the end; out-of-range indices throw."
+   Negative indices count from the end. Out-of-range indices throw on an
+   eager backend and for host indices; a lazy backend clamps array indices
+   (docs/array-api.md §13)."
   ([x indices] (take x indices 0))
   ([x indices axis]
    (check-indices :take indices)
@@ -940,7 +850,9 @@
 
 (defn take-along-axis
   "Gather along axis with an int array of the same rank as x, broadcast against
-   x on every other axis."
+   x on every other axis. Negative indices count from the end. Out-of-range
+   indices throw on an eager backend; a lazy backend clamps them
+   (docs/array-api.md §13)."
   [x indices axis]
   (check-indices :take-along-axis indices)
   (let [b (backend-of :take-along-axis [x indices])
@@ -951,7 +863,8 @@
 (defn scatter-add
   "x with updates added at indices along axis, accumulating repeated indices:
    the transpose of take-along-axis. indices (an int array) and updates have
-   one shape, equal to x's on every axis but axis."
+   one shape, equal to x's on every axis but axis. Indices are bounded as
+   take-along-axis's."
   [x indices updates axis]
   (check-indices :scatter-add indices)
   (let [b (backend-of :scatter-add [x updates indices])
@@ -1078,23 +991,6 @@
 ;; Compilation (docs/array-api.md §8)
 ;; ---------------------------------------------------------------------------
 
-(defn- skeleton [t] (tree-map (fn [_] nil) t))
-
-(defn- refill
-  "The tree skeleton with its leaves, in tree-leaves order, replaced by xs."
-  [skel xs]
-  (let [it (volatile! (seq xs))]
-    (tree-map (fn [_] (let [x (first @it)] (vswap! it next) x)) skel)))
-
-(defn- leaves-in
-  "t's leaves in the order of skel, a skeleton equal to t's. Equal maps may
-   list their keys in different orders, so a cached trace's arguments
-   follow its own skeleton, not the call's."
-  [skel t]
-  (cond (map? skel) (mapcat (fn [k] (leaves-in (get skel k) (get t k))) (keys skel))
-        (or (vector? skel) (seq? skel)) (mapcat leaves-in skel t)
-        :else [t]))
-
 (defn compile
   "f compiled where the backend can: a function of the same arguments
    (arrays, or trees of them) returning what f returns (an array or a tree
@@ -1123,27 +1019,27 @@
                                     ": a key's draws would be replayed by every call; draw outside, or close over the key"))
                              {:value l}))))
          (let [b (backend-of :compile leaves)]
-           (if-not (satisfies? p/ICompiling b)
+           (if-not (instance? gen.array.protocols.ICompiling b)
              (apply f args)
-             (let [skel (skeleton args)
+             (let [skel (tree/skeleton args)
                    entry (or (get @compiled [b skel])
                              (let [out-skel (atom nil)
                                    g (p/-compile b (fn [ins]
-                                                     (let [out (apply f (refill skel ins))]
-                                                       (reset! out-skel (skeleton out))
+                                                     (let [out (apply f (tree/refill skel ins))]
+                                                       (reset! out-skel (tree/skeleton out))
                                                        (vec (tree-leaves out))))
                                                  opts)
                                    e {:g g :out out-skel :in skel}]
                                (swap! compiled assoc [b skel] e)
                                e))
                    ins (with-backend b (mapv #(if (host? %) (array % {:dtype (weak-dtype % b)}) %)
-                                             (leaves-in (:in entry) args)))]
+                                             (tree/leaves-in (:in entry) args)))]
                ;; apply first: the first call traces f, which records the output's structure
                (let [outs ((:g entry) ins)]
-                 (refill @(:out entry) outs))))))))))
+                 (tree/refill @(:out entry) outs))))))))))
 
 ;; ---------------------------------------------------------------------------
-;; Comparison helpers (for tests and assertions)
+;; Validation across particles
 ;; ---------------------------------------------------------------------------
 
 (defn all-particles

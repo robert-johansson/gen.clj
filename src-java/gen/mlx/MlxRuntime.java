@@ -20,9 +20,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import static java.lang.foreign.ValueLayout.*;
 
-/** The hand-written part of the mlx-c binding: loading the library, errors,
- *  per-thread scratch memory and closures (Java functions MLX can call). The
- *  generated classes Mlx and MlxRaw call into it. */
+/** The hand-written part of the mlx-c binding, which the generated classes
+ *  Mlx and MlxRaw call into: loading the library, errors, per-thread scratch
+ *  memory, the lifetime of arrays (owned by Java values, freed once those
+ *  are unreachable, with the collections that MLX's native memory needs),
+ *  compiled functions, and closures (Java functions MLX can call). */
 public final class MlxRuntime {
   private MlxRuntime() {}
 
@@ -167,10 +169,10 @@ public final class MlxRuntime {
       long aligned = (bytes + 7) & ~7L;
       if (pos + aligned > buf.byteSize()) {
         // A bigger buffer, for the rest of this call and every later one:
-        // the arena frees only with its thread, so a block allocated per call
-        // (as large ones once were) leaked on every call. This call's earlier
-        // slices stay valid in the old buffer, and sizes double, so what
-        // growth leaves behind is bounded by twice the largest call.
+        // the arena frees only with its thread, so a block per call would
+        // leak on every call. This call's earlier slices stay valid in the
+        // old buffer, and sizes double, so what growth leaves behind is
+        // bounded by twice the largest call.
         long size = buf.byteSize() * 2;
         while (size < aligned) size *= 2;
         buf = arena.allocate(size, 8);
@@ -286,13 +288,7 @@ public final class MlxRuntime {
    *  it. Collects (System.gc) under array or memory pressure, since the GC
    *  does not see MLX's native memory. */
   public static void adopt(Object owner, long handle) {
-    Owned o = new Owned(owner, handle, null);
-    synchronized (OWNED_LOCK) {
-      o.next = OWNED_HEAD.next;
-      o.prev = OWNED_HEAD;
-      OWNED_HEAD.next.prev = o;
-      OWNED_HEAD.next = o;
-    }
+    link(new Owned(owner, handle, null));
     long live = LIVE.incrementAndGet();
     long n = ADOPTED.incrementAndGet();
     long fresh = FRESH.addAndGet(MlxRaw.mlx_array_nbytes(handle));
@@ -368,7 +364,11 @@ public final class MlxRuntime {
   /** Make owner own the compiled function c: freed, its entries erased from
    *  every thread's compile cache, once owner is unreachable. */
   public static void adoptCompiled(Object owner, Compiled c) {
-    Owned o = new Owned(owner, c.handle, c);
+    link(new Owned(owner, c.handle, c));
+  }
+
+  /** Keep o reachable, at the head of the list of owned handles. */
+  private static void link(Owned o) {
     synchronized (OWNED_LOCK) {
       o.next = OWNED_HEAD.next;
       o.prev = OWNED_HEAD;
@@ -441,8 +441,8 @@ public final class MlxRuntime {
   /** The live-array count that triggers the next collection, given what is
    *  live after one: twice that (at least base), capped at max. Past the cap
    *  the next collection comes after another tenth of it, not at the next
-   *  array: a threshold below the live count ran a full collection per op,
-   *  which looked like a hang (an independent review, 2026-10-19). */
+   *  array: a threshold below the live count would run a full collection
+   *  per op. */
   public static long nextArrayThreshold(long live, long base, long max) {
     long next = Math.max(base, 2 * live);
     return next <= max ? next : Math.max(max, live + max / 10);
@@ -454,9 +454,7 @@ public final class MlxRuntime {
    *  the CPU on Linux). Read at the first collection, not in MlxRuntime's
    *  initializer: the backend's first mlx-c call initializes MlxRuntime from
    *  inside that function's MlxRaw holder class, so the initializer cannot
-   *  call mlx-c. It did, and the cap was no limit on Metal: its first call,
-   *  mlx_device_new_type, met its own half-initialized holder (2026-10-21,
-   *  176 errors from Metal's buffer limit in the full battery). */
+   *  call mlx-c (its call would meet the half-initialized holder). */
   private static final class Cap {
     static final long MAX_ARRAYS = maxArrays();
   }
@@ -549,13 +547,19 @@ public final class MlxRuntime {
     if (status != 0) throw error("mlx_vector_array_set_data");
   }
 
-  /** int fun(mlx_vector_array* res, const mlx_vector_array input, void* payload) */
-  private static int closureCall(MemorySegment res, long input, MemorySegment payload) {
+  private interface Upcall {
+    long[] run() throws Throwable;
+  }
+
+  /** An upcall's frame: call runs with its own (child) scratch, and its
+   *  arrays go into res (MLX takes its own references, so ours are freed);
+   *  what it throws is kept for the failing call to throw, since nothing
+   *  may escape an upcall. */
+  private static int answer(MemorySegment res, Upcall call) {
     Scratch outer = SCRATCH.get();
     SCRATCH.set(outer.child());
     try {
-      Closure f = (Closure) REGISTRY.get(payload.address());
-      long[] outs = f.apply(vectorArrays(input));
+      long[] outs = call.run();
       try {
         setResult(res.reinterpret(8), outs);
       } finally {
@@ -568,32 +572,22 @@ public final class MlxRuntime {
     } finally {
       SCRATCH.set(outer);
     }
+  }
+
+  /** int fun(mlx_vector_array* res, const mlx_vector_array input, void* payload) */
+  private static int closureCall(MemorySegment res, long input, MemorySegment payload) {
+    return answer(res, () -> ((Closure) REGISTRY.get(payload.address())).apply(vectorArrays(input)));
   }
 
   /** int fun(mlx_vector_array* res, primals, cotangents, outputs, void* payload) */
   private static int customVjpCall(MemorySegment res, long primals, long cotangents, long outputs, MemorySegment payload) {
-    Scratch outer = SCRATCH.get();
-    SCRATCH.set(outer.child());
-    try {
-      CustomVjp f = (CustomVjp) REGISTRY.get(payload.address());
-      long[] outs = f.apply(vectorArrays(primals), vectorArrays(cotangents), vectorArrays(outputs));
-      try {
-        setResult(res.reinterpret(8), outs);
-      } finally {
-        for (long h : outs) MlxRaw.mlx_array_free(h);
-      }
-      return 0;
-    } catch (Throwable t) {
-      UPCALL_ERROR.set(t);
-      return 1;
-    } finally {
-      SCRATCH.set(outer);
-    }
+    return answer(res, () -> ((CustomVjp) REGISTRY.get(payload.address()))
+        .apply(vectorArrays(primals), vectorArrays(cotangents), vectorArrays(outputs)));
   }
 
   /** The closure's payload is released (MLX holds it as long as any compiled
    *  or transformed function needs it). */
-  private static void release(MemorySegment payload) {
+  private static void releasePayload(MemorySegment payload) {
     try {
       REGISTRY.remove(payload.address());
     } catch (Throwable t) {
@@ -622,7 +616,7 @@ public final class MlxRuntime {
               MethodType.methodType(int.class, MemorySegment.class, long.class, long.class, long.class, MemorySegment.class)),
           FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS), Arena.global());
       RELEASE_STUB = LINKER.upcallStub(
-          lk.findStatic(MlxRuntime.class, "release", MethodType.methodType(void.class, MemorySegment.class)),
+          lk.findStatic(MlxRuntime.class, "releasePayload", MethodType.methodType(void.class, MemorySegment.class)),
           FunctionDescriptor.ofVoid(ADDRESS), Arena.global());
     } catch (ReflectiveOperationException e) {
       throw new ExceptionInInitializerError(e);

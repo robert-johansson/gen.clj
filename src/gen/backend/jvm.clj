@@ -301,8 +301,9 @@
 
 (defreduce r-sum [acc v] (+ acc v))
 (defreduce r-prod [acc v] (* acc v))
-(defreduce r-max [acc v] (if (or (Double/isNaN acc) (Double/isNaN v)) Double/NaN (Math/max acc v)))
-(defreduce r-min [acc v] (if (or (Double/isNaN acc) (Double/isNaN v)) Double/NaN (Math/min acc v)))
+;; Math/max and Math/min propagate NaN, as NumPy's max and min
+(defreduce r-max [acc v] (Math/max acc v))
+(defreduce r-min [acc v] (Math/min acc v))
 (defreduce r-all [acc v] (if (and (not (== acc 0.0)) (not (== v 0.0))) 1.0 0.0))
 (defreduce r-any [acc v] (if (or (not (== acc 0.0)) (not (== v 0.0))) 1.0 0.0))
 
@@ -371,31 +372,38 @@
           out-shape
           out-dt)))
 
+(defmacro ^:private defscan
+  "An inclusive scan along the middle axis of src viewed as [outer len
+   inner], forward or reversed: one loop per op, as the reductions."
+  [fname [acc v] expr]
+  `(defn- ~fname ^"[D" [^"[D" src# outer# len# inner# reverse?#]
+     (let [outer# (long outer#) len# (long len#) inner# (long inner#) rev# (boolean reverse?#)
+           out# (double-array (alength src#))]
+       (dotimes [o# outer#]
+         (dotimes [j# inner#]
+           (let [base# (+ (* o# len# inner#) j#)]
+             (loop [t# 0 ~acc 0.0]
+               (when (< t# len#)
+                 (let [pos# (+ base# (* (if rev# (- len# 1 t#) t#) inner#))
+                       ~v (aget src# pos#)
+                       next# (if (zero? t#) ~v (double ~expr))]
+                   (aset out# pos# next#)
+                   (recur (inc t#) next#)))))))
+       out#)))
+
+(defscan s-cumsum [acc v] (+ acc v))
+(defscan s-cumprod [acc v] (* acc v))
+(defscan s-cummax [acc v] (Math/max acc v))
+(defscan s-cummin [acc v] (Math/min acc v))
+
 (defn- scan-op [op x ^long axis reverse?]
   (let [shape (shape-of x)
-        ^doubles src (data-of x)
+        src (data-of x)
         len (long (nth shape axis))
         inner (sh/size (subvec shape (inc axis)))
         outer (sh/size (subvec shape 0 axis))
-        out (double-array (alength src))]
-    (dotimes [o outer]
-      (dotimes [j inner]
-        (let [base (+ (* o len inner) j)]
-          (loop [t 0 acc 0.0]
-            (when (< t len)
-              (let [k (if reverse? (- len 1 t) t)
-                    pos (+ base (* k inner))
-                    v (aget src pos)
-                    acc (if (zero? t)
-                          v
-                          (case op
-                            :cumsum (+ acc v)
-                            :cumprod (* acc v)
-                            :cummax (if (or (Double/isNaN acc) (Double/isNaN v)) Double/NaN (Math/max acc v))
-                            :cummin (if (or (Double/isNaN acc) (Double/isNaN v)) Double/NaN (Math/min acc v))))]
-                (aset out pos acc)
-                (recur (inc t) acc)))))))
-    (make out shape (dtype-of x))))
+        f (case op :cumsum s-cumsum :cumprod s-cumprod :cummax s-cummax :cummin s-cummin)]
+    (make (f src outer len inner reverse?) shape (dtype-of x))))
 
 ;; ---------------------------------------------------------------------------
 ;; Shape and indexing
@@ -782,6 +790,11 @@
 ;; The backend
 ;; ---------------------------------------------------------------------------
 
+(def ^:private tape-value-and-grad
+  ;; resolved on first use, once: the tape is written against gen.array,
+  ;; which requires this namespace
+  (delay (requiring-resolve 'gen.array.tape/value-and-grad)))
+
 (deftype JvmBackend []
   p/IBackend
   (-name [_] :jvm)
@@ -826,9 +839,8 @@
   (-matmul [_ x y] (matmul x y))
   (-linalg [_ op args] (linalg op args))
   (-random-uniform [_ key shape dtype] (random-uniform key shape dtype))
-  ;; reverse mode by the backend-generic tape (loaded on first use, since it
-  ;; is written against gen.array, which requires this namespace)
-  (-value-and-grad [b f args argnums] ((requiring-resolve 'gen.array.tape/value-and-grad) b f args argnums)))
+  ;; reverse mode by the backend-generic tape
+  (-value-and-grad [b f args argnums] (@tape-value-and-grad b f args argnums)))
 
 (def backend (JvmBackend.))
 

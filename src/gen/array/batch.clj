@@ -76,7 +76,10 @@
 (defmethod print-method Batched [x ^java.io.Writer w]
   (.write w "#gen/batched[") (print-method (value x) w) (.write w "]"))
 
-(defn batched? [x] (instance? Batched x))
+(defn batched?
+  "Is x a batched value, one value per particle?"
+  [x]
+  (instance? Batched x))
 
 (defn value
   "The wrapped array of a batched value (leading batch axes). Every op reads
@@ -286,17 +289,21 @@
       :else (let [s (p/-shape inner x)]
               (p/-reshape inner x (-> [] (into (repeat (+ (count bs) (- r (count s))) 1)) (into s)))))))
 
+(defn- with-batch-axes
+  "x as an array of backend inner with the leading batch axes of
+   batch-shape: a batched value's array, or an unbatched value broadcast to
+   every particle (a host scalar weakly typed, as everywhere)."
+  [inner x batch-shape]
+  (if (batched? x)
+    (value x)
+    (let [s (array/shape x)
+          v (if (array/host? x) (p/-full inner [] x (dt/weak-host-dtype x (p/-defaults inner))) x)]
+      (p/-broadcast-to inner (p/-reshape inner v (into (vec (repeat (count batch-shape) 1)) s)) (into (vec batch-shape) s)))))
+
 (defn- full-batch
-  "x as an array of the wrapped backend with the full batch axes (an
-   unbatched value broadcast to every particle)."
+  "x as an array of the wrapped backend with the full batch axes."
   [^BatchBackend b x]
-  (let [bs (.-batch-shape b)
-        inner (.-inner b)]
-    (if (batched? x)
-      (value x)
-      (let [s (array/shape x)
-            v (if (array/host? x) (p/-full inner [] x (array/dtype x)) x)]
-        (p/-broadcast-to inner (p/-reshape inner v (into (vec (repeat (count bs) 1)) s)) (into bs s))))))
+  (with-batch-axes (.-inner b) x (.-batch-shape b)))
 
 (def ^:private backends (atom {}))
 
@@ -308,7 +315,10 @@
     (or (get @backends k)
         (get (swap! backends #(if (contains? % k) % (assoc % k (->BatchBackend inner (vec batch-shape))))) k))))
 
-(defn batch-backend? [b] (instance? BatchBackend b))
+(defn batch-backend?
+  "Is b a batch backend (the tracer)?"
+  [b]
+  (instance? BatchBackend b))
 
 (defn inner-backend
   "The backend a batched value's particles are arrays of. It reads nothing,
@@ -352,8 +362,4 @@
    batch-shape: a batched value's array, or an unbatched value broadcast to
    every particle."
   [x batch-shape]
-  (if (batched? x)
-    (value x)
-    (let [s (array/shape x)
-          v (if (array/host? x) (array/array x) x)]
-      (array/broadcast-to (array/reshape v (into (vec (repeat (count batch-shape) 1)) s)) (into (vec batch-shape) s)))))
+  (with-batch-axes (array/backend x) x batch-shape))

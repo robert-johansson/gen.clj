@@ -62,6 +62,7 @@
             [gen.array.memory :as reservations]
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]
+            [gen.array.tree :as tree]
             [gen.random.threefry])
   (:import [gen.mlx Mlx MlxRaw MlxRuntime MlxException]
            [gen.random.threefry Key]
@@ -85,6 +86,16 @@
   (or (dtype-codes dtype)
       (throw (ex-info (str "The MLX backend does not support dtype " dtype)
                       {:dtype dtype :supported (set (keys dtype-codes))}))))
+
+(defn- check-dtype
+  "Throws unless the backend supports dtype."
+  [dtype]
+  (code dtype))
+
+(def ^:private ^:const uint64-code
+  "MLX's code for uint64, which only the float64 sampler's bit arithmetic
+   uses: not a dtype of the backend's (dtype-codes)."
+  4)
 
 (defn- dtype-of-code [^long c]
   (or (code-dtypes c)
@@ -326,7 +337,7 @@
   "The dtype a host scalar has on b where nothing else gives one: the
    backend's default for its kind (host numbers are weakly typed)."
   [b x]
-  (dt/with-weak nil #{(dt/kind (dt/host-dtype x))} (defaults b)))
+  (dt/weak-host-dtype x (defaults b)))
 
 (def ^:private max-constants
   "How many host-scalar constants the backend keeps per dtype
@@ -447,15 +458,18 @@
    reachable. MLX errors become ex-info naming op."
   [b op bindings & body]
   (let [triples (partition 3 bindings)
-        xs (map second triples)
+        ;; each operand form evaluated once, before any handle is made
+        xs (repeatedly (count triples) #(gensym "x"))
         t (gensym "t")]
-    `(with-temps [~t]
-       (try
-         (let [~@(mapcat (fn [[h x d]] [h `(let [raw# (operand ~b ~x ~d)] (if (neg? raw#) (long (~t (- raw#))) raw#))]) triples)]
-           ~@body)
-         (catch MlxException e# (throw (mlx-error ~op [~@xs] e#)))
-         (finally
-           ~@(map (fn [x] `(fence ~x)) xs))))))
+    `(let [~@(mapcat (fn [x [_ form _]] [x form]) xs triples)]
+       (with-temps [~t]
+         (try
+           (let [~@(mapcat (fn [x [h _ d]] [h `(let [raw# (operand ~b ~x ~d)] (if (neg? raw#) (long (~t (- raw#))) raw#))])
+                           xs triples)]
+             ~@body)
+           (catch MlxException e# (throw (mlx-error ~op [~@xs] e#)))
+           (finally
+             ~@(map (fn [x] `(fence ~x)) xs)))))))
 
 (defn- retained
   "A new reference to the handle of x (an MlxArray, or a host scalar as b's
@@ -472,10 +486,20 @@
 
 (defn- segment-of
   "Native memory (in arena) holding values (host scalars, or a double[]) as
-   dtype: a float64 double[] copied as it is."
+   dtype: a double[] copied as it is to float64, rounded element by element
+   to float32 (as host-cast rounds), without boxing."
   ^MemorySegment [^Arena arena values dtype]
-  (if (and (instance? double/1 values) (= :float64 dtype))
+  (cond
+    (and (instance? double/1 values) (= :float64 dtype))
     (.allocateFrom arena ValueLayout/JAVA_DOUBLE ^doubles values)
+
+    (and (instance? double/1 values) (= :float32 dtype))
+    (let [^doubles d values
+          fs (float-array (alength d))]
+      (dotimes [i (alength d)] (aset fs i (unchecked-float (aget d i))))
+      (.allocateFrom arena ValueLayout/JAVA_FLOAT fs))
+
+    :else
     (let [n (count values)
           vs (map #(dt/host-cast % dtype) values)]
       (case dtype
@@ -516,7 +540,7 @@
    scalar constructor."
   [b values shape dtype]
   (gpu-dtype! b dtype)
-  (code dtype)
+  (check-dtype dtype)
   (if (empty? shape)
     (wrap b (scalar-handle (first values) dtype))
     (from-values b values shape dtype)))
@@ -572,8 +596,8 @@
                      (Mlx/mlx_array_eval h)
                      ;; data pointers address the buffer as laid out: a
                      ;; row-contiguous array is read in place (its flags are set
-                     ;; once evaluated), a view is copied first. Copying every
-                     ;; array cost a device round trip per read, evaluated or not
+                     ;; once evaluated), and only a view is copied first, since a
+                     ;; copy costs a device round trip
                      (let [c (if (Mlx/_mlx_array_is_row_contiguous h)
                                h
                                (let [c (t (Mlx/mlx_contiguous (long h) false s))]
@@ -637,7 +661,7 @@
     (and (= dtype :float64) (#{:exp :sin :cos :erf :erfinv} op))
     (exact-route b op [(as-array b x dtype)])
 
-    (and (= op :expm1) (= :gpu (:device (config b))) (#{:float32 :float16 :bfloat16} dtype))
+    (and (= op :expm1) (= :gpu (device b)) (#{:float32 :float16 :bfloat16} dtype))
     (exact-route b :expm1 [(as-array b x dtype)])
 
     (and (#{:floor :ceil :round} op) (not= :float (dt/kind dtype)))
@@ -791,15 +815,26 @@
         ;; MLX's indices are uint32
         (Mlx/mlx_astype i int-code s)))))
 
-(def ^:private sum-blocked-above
-  (delay (long @(requiring-resolve 'gen.backend.mlx.exact/blocked-above))))
+(def ^:private exact-fns
+  ;; gen.backend.mlx.exact's routes, resolved on first use, once: they are
+  ;; written in gen.array, which loads this namespace
+  (delay {:blocked-above (long @(requiring-resolve 'gen.backend.mlx.exact/blocked-above))
+          :sum (requiring-resolve 'gen.backend.mlx.exact/sum)
+          :half-sum (requiring-resolve 'gen.backend.mlx.exact/half-sum)
+          :route (requiring-resolve 'gen.backend.mlx.exact/route)
+          :vjp (requiring-resolve 'gen.backend.mlx.exact/vjp)}))
+
+(def ^:private tape-fns
+  ;; gen.array.tape's, resolved once, as exact-fns
+  (delay {:value-and-grad (requiring-resolve 'gen.array.tape/value-and-grad)
+          :linalg-vjp (requiring-resolve 'gen.array.tape/linalg-vjp)}))
 
 (defn- blocked-sum?
   "Does a sum of x over axes take gen.backend.mlx.exact's blocks: float32
    on the CPU, of more terms than exact/blocked-above (genclj-y0mp)?"
   [b x dtype axes]
-  (and (= dtype :float32) (= :cpu (:device (config b)))
-       (> (sh/size (mapv #(nth (shape-of x) %) axes)) (long @sum-blocked-above))))
+  (and (= dtype :float32) (= :cpu (device b))
+       (> (sh/size (mapv #(nth (shape-of x) %) axes)) (long (:blocked-above @exact-fns)))))
 
 (defn- reduce-op [b op x axes keep-dims?]
   (let [s (stream b)
@@ -811,11 +846,11 @@
 
       (and (= op :sum) (blocked-sum? b x dtype axes))
       ;; MLX's CPU accumulates a float32 sum sequentially (DESIGN §9)
-      ((requiring-resolve 'gen.backend.mlx.exact/sum) (as-array b x dtype) axes keep-dims?)
+      ((:sum @exact-fns) (as-array b x dtype) axes keep-dims?)
 
-      (and (= op :sum) (#{:float16 :bfloat16} dtype) (= :cpu (:device (config b))))
+      (and (= op :sum) (#{:float16 :bfloat16} dtype) (= :cpu (device b)))
       ;; and a half-float sum in its own precision: in float32 instead
-      ((requiring-resolve 'gen.backend.mlx.exact/half-sum) (as-array b x dtype) axes keep-dims?)
+      ((:half-sum @exact-fns) (as-array b x dtype) axes keep-dims?)
 
       :else
       (let [ax (int-array axes)
@@ -1105,12 +1140,12 @@
    In native mode it is one custom VJP with the function's derivative, not
    the composite's graph (branches and Newton steps) differentiated."
   [b op xs]
-  (let [route (requiring-resolve 'gen.backend.mlx.exact/route)]
+  (let [{:keys [route vjp]} @exact-fns]
     (if-not (custom-vjps?)
       (route op xs)
       (first (custom-vjp b
                          (fn [ys] [(route op ys)])
-                         (fn [ps cs os] ((requiring-resolve 'gen.backend.mlx.exact/vjp) op ps (first cs) (first os)))
+                         (fn [ps cs os] (vjp op ps (first cs) (first os)))
                          xs)))))
 
 (defn- linalg [b op args]
@@ -1118,7 +1153,7 @@
     (linalg* b op args)
     (let [n-arrays (if (#{:cholesky :slogdet} op) 1 2)
           opts (drop n-arrays args)
-          rule (requiring-resolve 'gen.array.tape/linalg-vjp)
+          rule (:linalg-vjp @tape-fns)
           outs (custom-vjp b
                            (fn [xs] (let [r (linalg* b op (into xs opts))] (if (vector? r) r [r])))
                            (fn [ps cs os]
@@ -1195,7 +1230,7 @@
                                f (t (Mlx/mlx_view m (int (code :float32)) s))]
                            (t (Mlx/mlx_subtract f (konst 1.0 :float32) s)))
                 ;; 52 mantissa bits of w0 << 32 | w1, as uniform-doubles
-                :float64 (let [u64 (int 4)
+                :float64 (let [u64 (int uint64-code)
                                hi (t (Mlx/mlx_astype w0 u64 s))
                                lo (t (Mlx/mlx_astype w1 u64 s))
                                c (fn ^long [v] (t (Mlx/mlx_astype (konst v :int64) u64 s)))
@@ -1217,15 +1252,6 @@
    :native (mlx_value_and_grad); the system property gen.mlx.grad."
   (keyword (System/getProperty "gen.mlx.grad" "tape")))
 
-(defn- tree-leaves [t] ((requiring-resolve 'gen.array/tree-leaves) t))
-(defn- tree-map [f t] ((requiring-resolve 'gen.array/tree-map) f t))
-
-(defn- refill
-  "The trees with their leaves, in tree-leaves order, replaced by xs."
-  [trees xs]
-  (let [it (volatile! (seq xs))]
-    (mapv (fn [t] (tree-map (fn [_] (let [x (first @it)] (vswap! it next) x)) t)) trees)))
-
 (defn- with-default-stream
   "(f) with MLX's default device and the thread's default stream set to b's:
    MLX builds a gradient's backward pass there, not on the streams the
@@ -1233,7 +1259,7 @@
    evaluation lock (reentrant: f may read values)."
   [b f]
   (evaluating
-    (with-device (:device (config b))
+    (with-device (device b)
       (fn [dev]
         (let [dev (long dev)
               prev-dev (Mlx/mlx_get_default_device)]
@@ -1256,7 +1282,7 @@
   [b f args argnums]
   (let [args (vec args)
         trees (mapv #(nth args %) argnums)
-        leaves (vec (mapcat tree-leaves trees))
+        leaves (vec (tree/leaves trees))
         _ (doseq [l leaves]
             (when-not (and (or (host? l) (mlx-array? l)) (= :float (dt/kind (dtype-on b l))))
               (throw (ex-info (str "Cannot differentiate with respect to " (pr-str l)
@@ -1265,7 +1291,7 @@
         xs (mapv #(as-array b % nil) leaves)
         run (fn [^longs ins]
               (let [ys (mapv #(wrap b %) ins)
-                    args' (reduce (fn [as [i t]] (assoc as i t)) args (map vector argnums (refill trees ys)))
+                    args' (reduce (fn [as [i t]] (assoc as i t)) args (map vector argnums (tree/refill trees ys)))
                     out (apply f args')]
                 (when-not (and (or (host? out) (mlx-array? out)) (= [] (shape-of out)))
                   (throw (ex-info "value-and-grad needs a function returning a scalar"
@@ -1283,7 +1309,7 @@
                 [vs gs] (mapv #(t :vector %) (with-default-stream b #(Mlx/mlx_closure_value_and_grad_apply vag in)))
                 v (first (wrap-all b (MlxRuntime/vectorArrays vs)))
                 gs (wrap-all b (MlxRuntime/vectorArrays gs))]
-            [v (refill trees gs)])
+            [v (tree/refill trees gs)])
           (finally (fence xs)))))))
 
 ;; ---------------------------------------------------------------------------
@@ -1415,7 +1441,7 @@
   (-dtype [b x] (dtype-on b x))
 
   (-full [b shape value dtype]
-    (code dtype)
+    (check-dtype dtype)
     (if (mlx-array? value)
       ;; an array value cast and broadcast, as the batch tracer fills, not
       ;; mlx_full: MLX's Full::vjp multiplies the cotangent by the value, so
@@ -1458,7 +1484,7 @@
     (guarded :value-and-grad
       (if (= grad-mode :native)
         (binding [*differentiating* true] (native-value-and-grad b f args argnums))
-        ((requiring-resolve 'gen.array.tape/value-and-grad) b f args argnums)))))
+        ((:value-and-grad @tape-fns) b f args argnums)))))
 
 (defn- config ^Config [b] (.-config ^MlxBackend b))
 
@@ -1546,12 +1572,12 @@
   (Mlx/mlx_clear_cache))
 
 (defn collect!
-  "Free every MLX array that is unreachable now (a GC and a drain), and
-   return memory."
+  "Free every MLX array that is unreachable now, and return memory: the
+   collection the backend makes at Metal's buffer limit (MlxRuntime's
+   collectNow: a GC, a drain until the queue stays quiet, counted, and the
+   thresholds reset), which the budget's check makes too."
   []
-  (System/gc)
-  (Thread/sleep 20)
-  (MlxRuntime/drain)
+  (MlxRuntime/collectNow)
   (memory))
 
 ;; ---------------------------------------------------------------------------
@@ -1580,9 +1606,7 @@
     (when-not (and (int? v) (not (neg? v)))
       (throw (ex-info (str "set-budget!: " k " is a non-negative integer, not " (pr-str v))
                       {:reason :invalid-option k v}))))
-  (let [old @budget-limits]
-    (swap! budget-limits merge (select-keys limits [:bytes :headroom]))
-    old))
+  (first (swap-vals! budget-limits merge (select-keys limits [:bytes :headroom]))))
 
 (defmethod print-method MlxArray [^MlxArray x ^java.io.Writer w]
   (.write w "#gen/array[")
