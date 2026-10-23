@@ -10,14 +10,20 @@ trigonometric and hyperbolic functions), test/fixtures/random.edn
 (JAX's threefry: keys, splits, bits and samplers, float64 via jax_enable_x64),
 test/fixtures/distributions.edn (scipy.stats log densities in Gen.jl's
 parameterizations, Distributions.jl's for the families Gen.jl lacks, and the
-wrapped normal's from a long direct sum) and test/fixtures/diagnostics.edn
-(ArviZ's MCMC diagnostics on fixed draws).
+wrapped normal's from a long direct sum), test/fixtures/diagnostics.edn
+(ArviZ's MCMC diagnostics on fixed draws) and test/fixtures/state-space.edn
+(state-space models' marginal likelihoods and smoothing marginals, from the
+joint Gaussian of the whole series and from enumerating every path of
+states: no filter). Names of files as arguments write only those.
 """
+import itertools
 import math
 import os
+import sys
 
 import numpy as np
 import scipy.special as sp
+import scipy.stats as st
 
 import jax
 
@@ -367,15 +373,119 @@ def diagnostics():
     return out
 
 
+def joint_gaussian(m0, P0, F, Q, b, Hs, R, c):
+    """The mean and covariance of (x_0 … x_n-1, y_0 … y_n-1) of a
+    linear-Gaussian state-space model, stacked: the states' moments by
+    their recursion, Cov(x_s, x_t) = F^(t-s) Var(x_s), and the
+    observations' by H_t x_t + c + v_t."""
+    n, d, k = len(Hs), len(m0), len(R)
+    mx, vx = [np.asarray(m0, float)], [np.asarray(P0, float)]
+    for _ in range(1, n):
+        mx.append(F @ mx[-1] + b)
+        vx.append(F @ vx[-1] @ F.T + Q)
+    cx = np.zeros((n * d, n * d))
+    for s in range(n):
+        for t in range(s, n):
+            block = np.linalg.matrix_power(F, t - s) @ vx[s]
+            cx[t * d:(t + 1) * d, s * d:(s + 1) * d] = block
+            cx[s * d:(s + 1) * d, t * d:(t + 1) * d] = block.T
+    h = np.zeros((n * k, n * d))
+    for t in range(n):
+        h[t * k:(t + 1) * k, t * d:(t + 1) * d] = Hs[t]
+    mean = np.concatenate([np.concatenate(mx), h @ np.concatenate(mx) + np.tile(c, n)])
+    cy = h @ cx @ h.T + np.kron(np.eye(n), R)
+    cxy = cx @ h.T
+    return mean, np.block([[cx, cxy], [cxy.T, cy]])
+
+
+def kalman_case(name, m0, P0, F, Q, b, H, R, c, n, seed, scalar_state, scalar_obs, xs=None):
+    """A series drawn from the model and its log-likelihood from the joint
+    Gaussian of the observations, with the smoothing marginals of the
+    states (their Gaussian conditional given every observation)."""
+    rng = np.random.default_rng(seed)
+    F, Q, b, R, c = (np.atleast_2d(F), np.atleast_2d(Q), np.atleast_1d(b), np.atleast_2d(R), np.atleast_1d(c))
+    d, k = len(np.atleast_1d(m0)), len(R)
+    Hs = [np.reshape(H if xs is None else [1.0, x], (k, d)) for x in (xs or [None] * n)]
+    mean, cov = joint_gaussian(np.atleast_1d(m0), np.atleast_2d(P0), F, Q, b, Hs, R, c)
+    z = rng.multivariate_normal(mean, cov)
+    y = z[n * d:]
+    ll = st.multivariate_normal.logpdf(y, mean[n * d:], cov[n * d:, n * d:])
+    sxy = cov[:n * d, n * d:]
+    gain = np.linalg.solve(cov[n * d:, n * d:], sxy.T).T
+    sm = mean[:n * d] + gain @ (y - mean[n * d:])
+    sv = cov[:n * d, :n * d] - gain @ sxy.T
+    state = (lambda v: float(v[0])) if scalar_state else (lambda v: [float(x) for x in v])
+    obs = (lambda v: float(v[0])) if scalar_obs else (lambda v: [float(x) for x in v])
+    out = {":name": name, ":ys": [obs(y[t * k:(t + 1) * k]) for t in range(n)], ":log-likelihood": float(ll),
+           ":smoothed-means": [state(sm[t * d:(t + 1) * d]) for t in range(n)],
+           ":smoothed-variances": [state(np.diag(sv)[t * d:(t + 1) * d]) for t in range(n)]}
+    if xs is not None:
+        out[":xs"] = list(xs)
+    return out
+
+
+def hmm_case(name, init, A, emission, sample, n, seed):
+    """A series drawn from the model and its log-likelihood by enumerating
+    every path of states, with the smoothing marginals P(x_t = k | ys)."""
+    rng = np.random.default_rng(seed)
+    init, A = np.asarray(init), np.asarray(A)
+    K = len(init)
+    x = [rng.choice(K, p=init)]
+    for _ in range(1, n):
+        x.append(rng.choice(K, p=A[x[-1]]))
+    ys = [sample(rng, s) for s in x]
+    paths = np.array(list(itertools.product(range(K), repeat=n)))
+    lp = np.log(init[paths[:, 0]]) + sum(np.log(A[paths[:, t - 1], paths[:, t]]) for t in range(1, n))
+    lp = lp + sum(np.array([emission(s, ys[t]) for s in range(K)])[paths[:, t]] for t in range(n))
+    total = sp.logsumexp(lp)
+    w = np.exp(lp - total)
+    marginals = [[float(w[paths[:, t] == s].sum()) for s in range(K)] for t in range(n)]
+    return {":name": name, ":ys": ys, ":log-likelihood": float(total), ":smoothed": marginals}
+
+
+def state_space():
+    kalman = [
+        kalman_case(":local-level", 0.5, 2.0, 1.0, 0.5, 0.0, 1.0, 1.0, 0.0, 6, 1, True, True),
+        # genmlx-rmy7: a transition offset and an emission offset
+        kalman_case(":offsets", 1.0, 0.5, 0.8, 0.3, 5.0, 2.0, 0.7, -1.0, 8, 2, True, True),
+        kalman_case(":constant-velocity", [0.0, 1.0], [[1.0, 0.2], [0.2, 0.5]], [[1.0, 1.0], [0.0, 1.0]],
+                    [[0.05, 0.02], [0.02, 0.1]], [0.0, 0.0], [1.0, 0.0], 0.5, 0.0, 10, 3, False, True),
+        kalman_case(":vector", [0.3, -0.2], [[0.8, 0.1], [0.1, 0.6]], [[0.9, 0.1], [-0.1, 0.9]],
+                    [[0.2, 0.05], [0.05, 0.1]], [0.2, -0.1], [[1.0, 0.5], [0.0, 1.0]],
+                    [[0.5, 0.1], [0.1, 0.4]], [1.0, 0.0], 7, 4, False, False),
+        # a regression whose coefficients drift: H_t = [1 x_t]
+        kalman_case(":time-varying", [0.0, 0.0], [[4.0, 0.0], [0.0, 4.0]], np.eye(2), [[0.01, 0.0], [0.0, 0.02]],
+                    [0.0, 0.0], None, 0.25, 0.0, 6, 5, False, True, xs=[-1.5, -0.4, 0.2, 0.9, 1.6, 2.2]),
+    ]
+    A2 = [[0.7, 0.3], [0.2, 0.8]]
+    B = np.array([[0.6, 0.2, 0.1, 0.1], [0.1, 0.5, 0.3, 0.1], [0.1, 0.1, 0.2, 0.6]])
+    mus, sigmas = np.array([-1.0, 2.0]), np.array([1.0, 0.5])
+    vmus, vcovs = np.array([[0.0, 0.0], [1.5, -1.0]]), np.array([[[1.0, 0.3], [0.3, 0.5]], [[0.4, 0.0], [0.0, 0.8]]])
+    hmm = [
+        {**hmm_case(":categorical", [0.5, 0.3, 0.2], [[0.8, 0.1, 0.1], [0.2, 0.6, 0.2], [0.1, 0.3, 0.6]],
+                    lambda s, y: np.log(B[s, y]), lambda r, s: int(r.choice(4, p=B[s])), 6, 6),
+         ":B": B.tolist()},
+        {**hmm_case(":normal", [0.6, 0.4], A2, lambda s, y: st.norm.logpdf(y, mus[s], sigmas[s]),
+                    lambda r, s: float(r.normal(mus[s], sigmas[s])), 7, 7),
+         ":mus": mus.tolist(), ":sigmas": sigmas.tolist()},
+        {**hmm_case(":mvnormal", [0.6, 0.4], A2, lambda s, y: st.multivariate_normal.logpdf(y, vmus[s], vcovs[s]),
+                    lambda r, s: [float(v) for v in r.multivariate_normal(vmus[s], vcovs[s])], 5, 8),
+         ":mus": vmus.tolist(), ":covs": vcovs.tolist()},
+    ]
+    return {":kalman": kalman, ":hmm": hmm}
+
+
 def write(name, value):
     with open(os.path.join(HERE, name), "w") as f:
         f.write(";; Generated by test/fixtures/generate.py; do not edit.\n")
         f.write(edn(value) + "\n")
 
 
+FILES = {"special.edn": special, "random.edn": random, "distributions.edn": distributions,
+         "diagnostics.edn": diagnostics, "state-space.edn": state_space}
+
 if __name__ == "__main__":
-    write("special.edn", special())
-    write("random.edn", random())
-    write("distributions.edn", distributions())
-    write("diagnostics.edn", diagnostics())
-    print("wrote special.edn, random.edn, distributions.edn and diagnostics.edn")
+    names = sys.argv[1:] or list(FILES)
+    for name in names:
+        write(name, FILES[name]())
+    print("wrote " + ", ".join(names))
