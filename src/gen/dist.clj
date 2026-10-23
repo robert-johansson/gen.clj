@@ -635,16 +635,16 @@
     (where finite (/ (- (stand-in finite x 0.0) mu) sigma) x)))
 
 (defn- normal-interval
-  "The standard normal's mass on [a, b] (a < b), and what its inverse CDF
-   reads, of the interval mirrored when a >= 0, so its left end is below 0.
-   In a tail (b < 0 too) the mass is Φ(b)·(1 - Φ(a)/Φ(b)), from log Φ(a) and
-   log Φ(b), which stay exact far into the tail (scipy's truncnorm's); across
-   0 it is (erf(b/√2) - erf(a/√2))/2, a sum of two magnitudes, which never
-   cancels (scipy's 1 - Φ(a) - Φ(-b) does for a narrow interval). A narrow
-   interval in a tail is as exact as the difference of its logs, a relative
-   error of about ε·|a|/(b - a), as scipy's. {:flip? :tail? :la :lb
-   :log-mass}: :la is log Φ(a), :lb log Φ(b) in a tail and log Φ(-b) across
-   0, both of the mirrored interval."
+  "The log of the standard normal's mass on [a, b] (a < b), and the logs its
+   inverse CDF reads, of the interval mirrored when a >= 0, so that its left
+   end is below 0. In a tail (b < 0 too) the mass is Φ(b)·(1 - Φ(a)/Φ(b)),
+   from log Φ(a) and log Φ(b), which stay exact far into the tail (scipy's
+   truncnorm's); across 0 it is (erf(b/√2) - erf(a/√2))/2, a sum of two
+   magnitudes, which never cancels (scipy's 1 - Φ(a) - Φ(-b) does for a
+   narrow interval). A narrow interval in a tail is as exact as the
+   difference of its logs, a relative error of about ε·|a|/(b - a), as
+   scipy's. {:flip? :tail? :la :lb :log-mass}, of the mirrored interval: :la
+   is log Φ(a), :lb log Φ(b) in a tail and log Φ(-b) across 0."
   [a b]
   (let [flip? (>= a 0)
         a' (where flip? (- b) a)
@@ -700,8 +700,8 @@
   "truncated-normal(mu, sigma, lo, hi): normal(mu, sigma) conditioned on
    [lo, hi] (Distributions.jl's truncated(Normal(mu, sigma), lo, hi)); lo
    must be below hi, and either may be infinite. Its density and its draws
-   work in log Φ, so they stay exact far into either tail (a draw on
-   [50σ, 51σ] is one); a draw inverts the CDF there by Newton steps."
+   work in log Φ, so they stay exact far into either tail (on
+   [μ + 50σ, μ + 51σ], say): a draw inverts the CDF by Newton steps."
   [mu sigma lo hi]
   (validate (dc/check-positive "truncated-normal" "sigma" sigma)
             (when (every? array/concrete? [lo hi])
