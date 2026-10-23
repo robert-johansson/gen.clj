@@ -189,9 +189,11 @@
      back to one point at a time); choices the grid leaves out are drawn
      from the same distribution, but not as the scalar loop draws them;
    - :chunk-size: with :batched?, at most this many points per batched run
-     (and one collection per run), so that a large grid needs that many
-     particles' memory at a time. The weights are those of one run when
-     the grid and the observations give every choice."
+     (and one collection per run), so that a run's working memory is that
+     many particles' (the result holds every point's trace, as the scalar
+     loop's does). The weights are those of one run when the grid and the
+     observations give every choice; choices the grid leaves out are drawn
+     with a key for each run."
   ([model args observations grid] (enumerative-inference model args observations grid nil))
   ([model args observations grid {:keys [key batched? chunk-size]}]
    (let [points (vec grid)
