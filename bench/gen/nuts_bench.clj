@@ -5,9 +5,8 @@
    0.5^|i - j|. Each kernel draws 2000 times after 1000 warmup iterations,
    and is charged a gradient per leapfrog step and one at each draw's
    start. The effective sample size is the smallest over the coordinates
-   and their squares (the means' and the second moments'), by Geyer's
-   initial positive sequence; HMC's L is the best of 1, 2, 4, …, 64 by
-   gradients per effective draw.
+   of their bulk and tail ESSs (gen.inference.diagnostics); HMC's L is the
+   best of 1, 2, 4, …, 64 by gradients per effective draw.
    Run: clojure [-J-Dgen.backend=mlx] -M:bench -m gen.nuts-bench"
   (:require [gen.array :as array]
             [gen.array.protocols :as p]
@@ -15,6 +14,7 @@
             [gen.dist :as d]
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
+            [gen.inference.diagnostics :as dg]
             [gen.inference.nuts :as nuts]
             [gen.random :as rng]
             [gen.selection :as sel]))
@@ -30,26 +30,6 @@
 
 (def target (gen [] (trace :z (d/mvnormal (array/zeros [dim]) cov))))
 
-(defn- ess
-  "The effective sample size of a chain's mean: n over its integrated
-   autocorrelation time, -1 + 2 Σ Γ_m with Γ_m = ρ_2m + ρ_2m+1 summed while
-   positive (Geyer's initial positive sequence)."
-  [xs]
-  (let [xs (double-array xs)
-        n (alength xs)
-        m (/ (areduce xs i s 0.0 (+ s (aget xs i))) n)
-        c (fn [k] (loop [i 0 s 0.0]
-                    (if (< i (- n k))
-                      (recur (inc i) (+ s (* (- (aget xs i) m) (- (aget xs (+ i k)) m))))
-                      (/ s n))))
-        c0 (c 0)
-        rho #(/ (c %) c0)]
-    (loop [j 0 sum 0.0]
-      (let [g (+ (rho (* 2 j)) (rho (inc (* 2 j))))]
-        (if (or (<= g 0.0) (>= (+ 2 (* 2 j)) n))
-          (/ n (- (* 2.0 sum) 1.0))
-          (recur (inc j) (+ sum g)))))))
-
 (defn- measure [opts]
   (let [start (:trace (gfi/generate target [] (cm/choicemap :z (array/zeros [dim])) (rng/key 0)))
         t0 (System/nanoTime)
@@ -57,7 +37,7 @@
                                                                    (rng/key 1))
         secs (/ (- (System/nanoTime) t0) 1e9)
         draws (mapv #(array/->clj (% :z)) traces)
-        min-ess (apply min (for [i (range dim) f [identity #(* % %)]] (ess (map #(f (nth % i)) draws))))
+        min-ess (apply min (for [i (range dim) ess [dg/ess-bulk dg/ess-tail]] (ess (mapv #(nth % i) draws))))
         grads (fn [stats] (reduce + (map #(inc (:n-leapfrog %)) stats)))]
     {:per-draw (/ (grads stats) (double (count stats)))
      :per-effective (/ (grads stats) min-ess)
