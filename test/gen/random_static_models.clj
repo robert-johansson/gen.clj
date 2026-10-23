@@ -19,7 +19,7 @@
 
    A spec:
      {:params [kind…]        the arguments: :real, :hinted (^double, given
-                             an integer first), :vec (a nonempty vector of reals),
+                             an integer), :vec (a nonempty vector of reals),
                              :index (0 to 2), :map ({:p :q}), :keys (a map
                              destructured), :pair (a vector destructured),
                              :rest last (& more, 0 to 2 reals)
@@ -135,6 +135,7 @@
    [:count :index [:coll] '(count %1)]
    [:inc :index [:index] '(inc %1)]
    [:index-sum :int [:index :index] '(+ %1 %2)]
+   [:shift :real [:index :real] '(+ %1 %2)]
    [:map-assoc :map [:map :real] '(assoc %1 :p %2)]
    [:map-get :real [:map] '(get %1 :p 0.0)]
    [:keyword :real [:map] '(:q %1 0.0)]
@@ -391,11 +392,9 @@
          :other (fn [v] (tcg/one-of [(tcg/let [i (tcg/choose 0 (dec (count v))) x quarter] (assoc v i x))
                                      (tcg/fmap #(conj v %) quarter)
                                      (tcg/return (if (next v) (pop v) v))]))}
-   ;; an integer, which a primitive hint coerces; its alternatives are
-   ;; floats, whose argdiffs are unknown-change: an integer's int-diff meets
-   ;; a known bug of gen.diff's + and - rules (gen.static-fuzz-test), and
-   ;; they should be integers again once it is fixed
-   :hinted {:value (tcg/choose -2 2) :other (fn [_] (tcg/fmap double (tcg/choose -2 2)))}
+   ;; an integer, which a primitive hint coerces (and whose argdiff is an
+   ;; int-diff, which reaches float arithmetic)
+   :hinted {:value (tcg/choose -2 2) :other (fn [_] (tcg/choose -2 2))}
    :index {:value (tcg/choose 0 2) :other (fn [_] (tcg/choose 0 2))}
    :map {:value (tcg/hash-map :p quarter :q quarter)
          :other (fn [m] (tcg/one-of [(tcg/fmap #(assoc m :p %) quarter)
