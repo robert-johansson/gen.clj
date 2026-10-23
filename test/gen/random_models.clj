@@ -168,8 +168,8 @@
 
 (defn- switch-statements
   "A generator of Switch-heavy statements at nesting depth: sites, Maps,
-   Unfolds, Maps of Switch kernels, and Switches of 2 or 3 branches of
-   statements one level down."
+   Unfolds, Scans, Mixes, Maps of Switch kernels, and Switches of 2 or 3
+   branches of statements one level down."
   [depth]
   (let [site (gen/let [family (gen/elements numeric-families)
                        dep? gen/boolean]
@@ -177,6 +177,8 @@
         leaf (gen/frequency [[6 site]
                              [1 (gen/let [n (gen/choose 0 3)] [:map nil n])]
                              [1 (gen/let [n (gen/choose 0 3)] [:unfold nil n])]
+                             [1 (gen/let [n (gen/choose 0 3)] [:scan nil n])]
+                             [1 (gen/return [:mix nil])]
                              [1 (gen/let [n (gen/choose 0 3)] [:switch-map nil n])]])
         switch (gen/let [ws (gen/vector (gen/choose 1 5) 2 3)
                          dep? gen/boolean

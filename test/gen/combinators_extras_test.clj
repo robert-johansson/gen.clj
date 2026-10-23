@@ -570,7 +570,10 @@
 
 ;; Planted bugs (2026-10-23): Scan's generate simulating its steps fails the
 ;; Scan testing (and the dimap one, a Scan's); a skipped Scan step's carry
-;; read from its output fails the Scan testing's update.
+;; read from its output fails the Scan testing's update. After genclj-7tqw
+;; (2026-10-24): a Switch scattering its groups' scores in reverse order
+;; fails the per-particle Mix's scores and the Mask's batch (its spot checks
+;; then disagree); a Mask whose false branch returns nil, the Mask's.
 (deftest batched-runs-are-the-scalar-runs
   (testing "Scan: simulate, generate, and the particle filter's extension"
     (let [args [0.0 [0.1 0.2 0.3] 0.5]

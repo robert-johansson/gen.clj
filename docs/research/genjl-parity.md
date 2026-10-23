@@ -177,7 +177,9 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
   `:index`, the component a Switch's call at `:component`), and
   `comb/dimap`, `comb/contramap`, `comb/map-retval` (the inner's traces).
   No Mask: in a body it is `(when active? (splice …))`, as a generative
-  function `(switch {true gf false (gen [& _])})`.
+  function `(switch {true gf false (gen [& _] v)})`, which runs by
+  partition when active? differs across particles and v is a value of gf's
+  return value's kind (nil and a number do not stack, and fall back).
 - **Extra inference.**
   - NUTS, enumerative Gibbs, PMMH and particle Gibbs, conditional SMC.
     *gen.clj (round 1, 2026-10-23):* NUTS and Stan's warmup

@@ -33,7 +33,7 @@ instead.
 | Map/Unfold element addresses | 0-based, as in GenMLX (Gen.jl is 1-based) |
 | `(scan-combinator kernel)` on `[init inputs]`, returning `{:carry :outputs}` | `(comb/scan kernel)` on `(init xs & params)`, returning `[carry ys]`; the kernel's `[carry' y]` is the same |
 | `(mix-combinator components log-weights)`, the index at `:component-idx` beside the component's choices | `((comb/mix gf0 gf1 …) weights & args)`: the weights are an argument and probabilities (GenMLX's log weights are a loud error; `comb/mix-logits` takes them), the index at `:index`, the component's choices under `:component` |
-| `(mask-combinator gf)` on `[active? & args]` | `(when active? (splice addr gf …))` in a body, or `(comb/switch {true gf false (gen [& _])})` |
+| `(mask-combinator gf)` on `[active? & args]` | `(when active? (splice addr gf …))` in a body, or `(comb/switch {true gf false (gen [& _] v)})`, batched by partition when v is of gf's return value's kind (a nil v falls back) |
 | `(contramap-gf gf f)`, `(dimap gf f g)`: f of the argument vector | `(comb/contramap gf f)`, `(comb/dimap gf f g)`: `(apply f args)`, returning a vector of gf's arguments |
 
 ## Distributions
