@@ -907,8 +907,8 @@
 (defn- log-multivariate-gamma
   "log Γ_p(a) = p(p-1)/4·log π + Σⱼ log Γ(a - j/2), j = 0 … p - 1."
   [a p]
-  (+ (* 0.25 p (dec p) log-pi)
-     (array/sum (lgamma (- (array/expand-dims a -1) (* 0.5 (array/arange p)))) {:axis -1})))
+  ;; term by term: a host df's are host lgammas, about 20 ns each
+  (reduce + (* 0.25 p (dec p) log-pi) (map #(lgamma (- a (* 0.5 %))) (range p))))
 
 (defn- bartlett
   "Bartlett's factor of wishart(df, I) of dimension p, of batch shape: the
