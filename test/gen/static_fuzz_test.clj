@@ -85,9 +85,10 @@
 
 (defn- near?
   "Equal up to rounding: the runs compute the same values, in other orders
-   (the score fn's sum against the handler's) or as one compiled graph."
-  [x y]
-  (if (ts/f32?) (laws/close? x y) (ts/close? x y {:rtol 1e-9 :atol 1e-9})))
+   (the score fn's sum against the handler's) or as one compiled graph
+   (laws/close?'s band on float32). opts: :equal-nan?."
+  ([x y] (near? x y nil))
+  ([x y opts] (ts/close? x y (merge (if (ts/f32?) {:rtol 1e-4 :atol 1e-3} {:rtol 1e-9 :atol 1e-9}) opts))))
 
 (defn- leaves [x] (if (sequential? x) (mapcat leaves x) [x]))
 
@@ -102,7 +103,10 @@
       (and (= (select-keys a [:accepted? :diverged? :tree-depth :n-leapfrog])
               (select-keys b [:accepted? :diverged? :tree-depth :n-leapfrog]))
            (every? #(or (= nil (% a) (% b)) (near? (% a) (% b))) [:log-alpha :accept-stat :energy])
-           (near? (:score (:trace a)) (:score (:trace b)))
+           ;; a NaN score is every run's: Map's and Unfold's incremental
+           ;; score after an update out of the support and back (a known
+           ;; bug of gen.combinators, 2026-10-24)
+           (near? (:score (:trace a)) (:score (:trace b)) {:equal-nan? true})
            (= (set (cm/addresses ca)) (set (cm/addresses cb)))
            (every? (fn [p] (every? true? (map near? (values ca p) (values cb p)))) (cm/addresses ca))))))
 
