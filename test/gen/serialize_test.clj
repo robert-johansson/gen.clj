@@ -398,7 +398,11 @@
                          ["[1 2" :not-edn]
                          ["{:a 1 :a 2}" :not-edn]]]
     (is (= reason (:reason (ts/thrown-data (serialize/read text)))) text))
-  (is (= :not-text (:reason (ts/thrown-data (serialize/read 1.0))))))
+  (is (= :not-text (:reason (ts/thrown-data (serialize/read 1.0)))))
+  (testing "no eval, and no tag of *data-readers*"
+    (is (= :not-edn (:reason (ts/thrown-data (serialize/read "#=(+ 1 2)")))))
+    (is (= :unknown-tag (:reason (ts/thrown-data (binding [*data-readers* {'gen/extra identity}]
+                                                   (serialize/read "#gen/extra 1"))))))))
 
 (deftest a-rebuild-that-is-not-exact-is-a-loud-error
   (let [tr (gfi/simulate with-x [0.5] (rng/key 1))
