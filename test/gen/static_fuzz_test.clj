@@ -24,6 +24,14 @@
             [gen.selection :as sel]
             [gen.test-support :as ts]))
 
+;; Planted bugs (2026-10-23, the namespace run twice per plant): the walk
+;; keeping a node whose input changed, the score fn dropping a term, hoisted
+;; calls in reverse order, destructured arguments always unchanged, a kept
+;; node consuming no key, an alias's diff always no-change, a callee's
+;; retdiff ignored, and arguments left uncoerced to their primitive hints
+;; each fail it in both runs; conj's rule dropping the appended element and
+;; get's rule calling every element unchanged fail it in both, once only at
+;; length (below); the rest parameter's count check removed, in one of two.
 (laws/deflaws static-random rsm/gen-model 300 laws/static)
 
 ;; the general laws, slow, as each case evaluates a form (the static law
@@ -102,7 +110,12 @@
   ;; arguments change along it, so that a cached compiled step reused with
   ;; a stale value (other arguments, other choices, another step size or
   ;; metric) moves otherwise; on the static model the gradients are the
-  ;; score fn's, on the dynamic one the handler's.
+  ;; score fn's, on the dynamic one the handler's. Planted bugs
+  ;; (2026-10-23, two runs each): a compiled step cached without the
+  ;; arguments, HMC's and NUTS's steps closing over the other choices, HMC's
+  ;; over the step size, MALA's cached without tau, and a stop-gradient on
+  ;; the score fn's choices fail it in both; HMC's step closing over the
+  ;; inverse metric, in one.
   (prop/for-all [[_ gf args alt-args] rsm/gen-continuous-model
                  kernels (gen/vector gen-kernel 1 2)
                  moves (gen/vector gen-move 2 8)
@@ -133,7 +146,8 @@
   ;; over a fixed sample, the graphs have every node kind, computed
   ;; addresses, destructuring, hoisted calls, parameter reads and every diff
   ;; rule the ops write, and the forms every kind of callee: a fuzzer that
-  ;; silently stopped making one would test less
+  ;; silently stopped making one would test less (planted: computed
+  ;; addresses made constant fail it)
   (let [models (for [size (range 0 200 2) seed (range 3)] (gen/generate rsm/gen-model size (+ seed (* 3 size))))
         nodes (mapcat (fn [[_ gf]] (:nodes (:static gf))) models)
         symbols (set (mapcat (fn [[label]] (filter symbol? (tree-seq coll? seq (:form label)))) models))
@@ -155,7 +169,8 @@
   ;; a property that fails on any model with an Unfold: test.check shrinks
   ;; the spec to that statement alone, and the case prints the spec as data
   ;; and the form it became, ^:static included, which reads back as the same
-  ;; code and evaluates to the same static model
+  ;; code and evaluates to the same static model (planted: the form printed
+  ;; without its metadata fails it)
   (let [unfold? (fn [form] (some #{'comb/unfold} (tree-seq coll? seq form)))
         result (tc/quick-check 100 (prop/for-all [[label] rsm/gen-model] (not (unfold? (:form label)))) :seed 11)
         [[label gf args]] (:smallest (:shrunk result))
