@@ -41,11 +41,20 @@
    Each draw's statistics are its kernel's: nuts's {:accept-stat
    :tree-depth :n-leapfrog :diverged? :energy :eps}, and for :hmc
    {:accept-stat :n-leapfrog :accepted? :diverged? :eps}, the acceptance
-   statistic min(1, α), :eps the step taken (jittered). The result counts the divergences after the warmup
-   and in it. With :warmup 0, sample draws at :eps and :inv-metric as
-   given, such as an adapt's. The state is threaded through each iteration
-   and every iteration takes its own key, so the same key gives the same
-   result; omitting one draws from the implicit key source."
+   statistic min(1, α), :eps the step taken (jittered). The result counts
+   the divergences after the warmup and in it. With :warmup 0, sample
+   draws at :eps and :inv-metric as given, such as an adapt's. The state is
+   threaded through each iteration and every iteration takes its own key,
+   so the same key gives the same result; omitting one draws from the
+   implicit key source.
+
+   Divergences are one warning among several. A chain can miss a region it
+   cannot enter without diverging: on Neal's funnel, after the warmup, most
+   chains never reach the neck and report none. So run several chains and
+   read R-hat and the ESS too (gen.inference.diagnostics: R-hat under 1.01
+   and a bulk ESS of 100 a chain, as Vehtari et al. 2021 advise), and make
+   a hierarchical scale non-centered, x = σ·z with z ~ N(0, 1) traced, as
+   Stan's guide does."
   (:require [gen.array :as array]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]

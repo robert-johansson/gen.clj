@@ -504,7 +504,8 @@
    number of doublings kept, the leapfrog steps (each one gradient, plus
    one at the start), whether a step diverged (an energy error over 1000,
    or a non-finite step), the energy of the state drawn and the step size
-   taken."
+   taken. No divergence does not mean the target was explored (see
+   gen.inference.nuts): read gen.inference.diagnostics too."
   ([trace selection] (nuts trace selection nil))
   ([trace selection key-or-opts] (let [opts (step-opts key-or-opts)] (nuts trace selection opts (:key opts))))
   ([trace selection opts key]
