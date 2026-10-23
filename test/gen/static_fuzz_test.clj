@@ -39,10 +39,11 @@
 
 (def ^:private gen-kernel
   "A kernel and its settings."
-  (gen/hash-map :kernel (gen/elements [:hmc :mala])
+  (gen/hash-map :kernel (gen/elements [:hmc :mala :nuts])
                 :L (gen/elements [1 3])
                 :eps (gen/elements [0.05 0.2])
-                :tau (gen/elements [0.05 0.2])))
+                :tau (gen/elements [0.05 0.2])
+                :inv-metric (gen/elements [nil 0.5 2.0])))
 
 (def ^:private gen-move
   "A step of a chain: one of the chain's kernels (an index), its selection
@@ -61,11 +62,13 @@
     (when (seq all) (sel/from-paths (if (and (= :some which) (seq some)) some all)))))
 
 (defn- move
-  "The kernel step's result, or its error's message."
-  [tr s {:keys [kernel L eps tau]} compile? key]
+  "The kernel step's result, or its error's message (NUTS's trees kept
+   short)."
+  [tr s {:keys [kernel L eps tau inv-metric]} compile? key]
   (try (case kernel
-         :hmc (mcmc/hmc tr s {:L L :eps eps :compile? compile?} key)
-         :mala (mcmc/mala tr s tau {:compile? compile? :key key}))
+         :hmc (mcmc/hmc tr s {:L L :eps eps :inv-metric inv-metric :compile? compile?} key)
+         :mala (mcmc/mala tr s tau {:inv-metric inv-metric :compile? compile? :key key})
+         :nuts (mcmc/nuts tr s {:eps eps :max-depth 3 :inv-metric inv-metric :compile? compile?} key))
        (catch clojure.lang.ExceptionInfo e {:error (ex-message e)})))
 
 (defn- near?
@@ -76,27 +79,30 @@
 
 (defn- leaves [x] (if (sequential? x) (mapcat leaves x) [x]))
 
-(defn- same-move? [a b]
+(defn- same-move?
+  "Do two results of a kernel step agree: the same error, or the same
+   statistics (HMC's and MALA's acceptance, NUTS's tree) and trace?"
+  [a b]
   (if (or (:error a) (:error b))
     (= (:error a) (:error b))
     (let [ca (:choices (:trace a)) cb (:choices (:trace b))
           values (fn [c p] (leaves (ts/host (cm/get-choice c p))))]
-      (and (= (:accepted? a) (:accepted? b))
-           (= (:diverged? a) (:diverged? b))
-           (near? (:log-alpha a) (:log-alpha b))
+      (and (= (select-keys a [:accepted? :diverged? :tree-depth :n-leapfrog])
+              (select-keys b [:accepted? :diverged? :tree-depth :n-leapfrog]))
+           (every? #(or (= nil (% a) (% b)) (near? (% a) (% b))) [:log-alpha :accept-stat :energy])
            (near? (:score (:trace a)) (:score (:trace b)))
            (= (set (cm/addresses ca)) (set (cm/addresses cb)))
            (every? (fn [p] (every? true? (map near? (values ca p) (values cb p)))) (cm/addresses ca))))))
 
 (defspec compiled-steps-move-as-plain-steps 100
-  ;; A chain of HMC and MALA steps over a random continuous static model;
-  ;; at each, from the same trace and key, the step compiled and plain, on
-  ;; the static model and on its body without ^:static, make the same move.
-  ;; A chain takes one or two kernels, and its selections and arguments
-  ;; change along it, so that a cached compiled step reused with a stale
-  ;; value (other arguments, other choices, another step size) moves
-  ;; otherwise; on the static model the gradients are the score fn's, on
-  ;; the dynamic one the handler's.
+  ;; A chain of HMC, MALA and NUTS steps over a random continuous static
+  ;; model; at each, from the same trace and key, the step compiled and
+  ;; plain, on the static model and on its body without ^:static, make the
+  ;; same move. A chain takes one or two kernels, and its selections and
+  ;; arguments change along it, so that a cached compiled step reused with
+  ;; a stale value (other arguments, other choices, another step size or
+  ;; metric) moves otherwise; on the static model the gradients are the
+  ;; score fn's, on the dynamic one the handler's.
   (prop/for-all [[_ gf args alt-args] rsm/gen-continuous-model
                  kernels (gen/vector gen-kernel 1 2)
                  moves (gen/vector gen-move 2 8)

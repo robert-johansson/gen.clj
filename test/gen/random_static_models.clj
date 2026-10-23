@@ -18,9 +18,10 @@
                         gradient-based kernels
 
    A spec:
-     {:params [kind…]        the arguments: :real, :vec (a nonempty vector of
-                             reals), :index (0 to 2), :map ({:p :q}), :keys (a
-                             map destructured), :pair (a vector destructured),
+     {:params [kind…]        the arguments: :real, :hinted (^double, given
+                             an integer), :vec (a nonempty vector of reals),
+                             :index (0 to 2), :map ({:p :q}), :keys (a map
+                             destructured), :pair (a vector destructured),
                              :rest last (& more, 0 to 2 reals)
       :args [value…]         the arguments
       :alt-args [[value…]…]  others, for update and regenerate
@@ -310,6 +311,7 @@
             (let [named #(symbol (str % i))]
               (case kind
                 :real [(conj pv (named "x")) (conj scope [(named "x") :real])]
+                :hinted [(conj pv (with-meta (named "h") {:tag 'double})) (conj scope [(named "h") :real])]
                 :vec [(conj pv (named "xs")) (conj scope [(named "xs") :vec])]
                 :index [(conj pv (named "i")) (conj scope [(named "i") :index])]
                 :map [(conj pv (named "m")) (conj scope [(named "m") :map])]
@@ -389,6 +391,8 @@
          :other (fn [v] (tcg/one-of [(tcg/let [i (tcg/choose 0 (dec (count v))) x quarter] (assoc v i x))
                                      (tcg/fmap #(conj v %) quarter)
                                      (tcg/return (if (next v) (pop v) v))]))}
+   ;; an integer, which a primitive hint coerces
+   :hinted {:value (tcg/choose -2 2) :other (fn [_] (tcg/choose -2 2))}
    :index {:value (tcg/choose 0 2) :other (fn [_] (tcg/choose 0 2))}
    :map {:value (tcg/hash-map :p quarter :q quarter)
          :other (fn [m] (tcg/one-of [(tcg/fmap #(assoc m :p %) quarter)
@@ -407,7 +411,7 @@
   (if (= :rest (peek params)) (into (pop values) (peek values)) values))
 
 (def ^:private gen-signature
-  (tcg/let [fixed (tcg/vector (tcg/frequency (for [[w kind] [[3 :vec] [2 :real] [2 :index] [1 :map] [1 :keys] [1 :pair]]]
+  (tcg/let [fixed (tcg/vector (tcg/frequency (for [[w kind] [[3 :vec] [2 :real] [1 :hinted] [2 :index] [1 :map] [1 :keys] [1 :pair]]]
                                                 [w (tcg/return kind)]))
                               0 3)
             rest? (tcg/frequency [[3 (tcg/return false)] [1 (tcg/return true)]])]
