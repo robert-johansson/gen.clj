@@ -250,6 +250,8 @@ def diagnostics():
         ("cauchy", np.random.default_rng(9).standard_cauchy(size=(4, 250))),
         ("single chain", ar1(10, 0.6, 1, 300)),
         ("binary", binary(11, 4, 150, 0.7)),
+        # ties at the 5% and 95% quantiles: draws equal to them count
+        ("counts", np.random.default_rng(12).poisson(3.0, size=(4, 100)).astype(float)),
         # half ones: the median is 0.5, so the folded draws are constant
         ("two values", np.array([[0, 1, 0, 1, 1, 0, 0, 1, 1, 0], [1, 0, 1, 1, 0, 0, 1, 0, 0, 1]])),
         ("constant", np.full((2, 20), 1.5)),

@@ -39,8 +39,9 @@
   ;; AR(1) chains with positive and negative autocorrelation, shifted means
   ;; and a trend (R-hat above 1), an odd length, short chains, the minimum
   ;; of 4 draws (the cap), Cauchy draws, one chain, binary draws (ties, and
-  ;; a constant 95% indicator), draws whose fold is constant, constant
-  ;; draws and chains stuck at different values
+  ;; a constant 95% indicator), counts (ties at the tail quantiles), draws
+  ;; whose fold is constant, constant draws and chains stuck at different
+  ;; values
   (doseq [{:keys [name draws quantiles] :as c} fixtures]
     (testing name
       (doseq [[k f] diagnostics]
@@ -48,9 +49,9 @@
       (let [s (dg/summary draws)]
         (doseq [k [:mean :sd :ess-bulk :ess-tail :r-hat :mcse-mean :mcse-sd]]
           (is (agrees? (c k) (s k)) (str "summary " k)))
-        (is (= (map first quantiles) (keys (:quantiles s))))
-        (doseq [[p q] quantiles]
-          (is (agrees? q (get-in s [:quantiles p])) (str "quantile " p)))))))
+        ;; the quantiles bit for bit: numpy's interpolation, its two-sided
+        ;; lerp included
+        (is (= quantiles (seq (:quantiles s))))))))
 
 (deftest edges-as-arviz
   (testing "constant draws: the nominal ESS, and R-hat 0/0"
