@@ -7,6 +7,9 @@
        → [[choices log-volume] …]
      (enumerative-inference model args observations grid)
        → {:traces :log-normalized-weights :log-ml-estimate}
+     (enumerative-inference model args observations grid {:batched? true})
+       → {:batches :log-normalized-weights :log-ml-estimate}
+     (traces result)                     → the scalar traces, batched or not
      (marginal result addr)              → {value probability}
      (with-exact-proposal gf addrs)      → a generative function
 
@@ -17,6 +20,10 @@
    they stand for, on continuous grids). log-ml-estimate is log Σ exp(w):
    exact when the grid is discrete and covers every unobserved choice.
    Choices the grid leaves out are drawn by the model's internal proposal.
+   With {:batched? true} the grid's points are the particles of one batched
+   run (gen.batched), each constrained by its own point (per-particle
+   constraints), in chunks of :chunk-size points if given: point by point
+   the same weights when the grid and the observations give every choice.
 
    with-exact-proposal keeps gf's distribution and traces and changes only
    its internal proposal (thesis pp. 145-146): generate draws the finite
@@ -41,6 +48,7 @@
    Keys are an optional last argument (or :key in an options map)."
   (:refer-clojure :exclude [-])
   (:require [gen.array :as array :refer [-]]
+            [gen.batched :as batched]
             [gen.choicemap :as cm]
             [gen.dist.core :as dc]
             [gen.dynamic :as dyn]
@@ -129,37 +137,102 @@
 ;; Enumerative inference
 ;; ---------------------------------------------------------------------------
 
+(defn- check-points!
+  "Throw unless the grid has points, and none sets an observed choice."
+  [points observations]
+  (when (empty? points)
+    (throw (ex-info "enumerative-inference: the grid has no points" {})))
+  (let [observed (set (cm/addresses observations))]
+    (doseq [[choices] points]
+      (when-let [p (some observed (cm/addresses choices))]
+        (throw (ex-info (str "enumerative-inference: the grid sets the observed choice at " p) {:path p}))))))
+
+(defn- one-at-a-time
+  "The points generated one at a time: {:traces :weights}, each weight
+   generate's plus the point's log-volume."
+  [model args observations points key]
+  (let [results (mapv (fn [[choices log-volume] k]
+                        (let [{:keys [trace weight]} (gfi/generate model args (cm/merge observations choices) k)]
+                          (gfi/eval-trace! trace weight)
+                          [trace (+ (double (array/item weight)) (double log-volume))]))
+                      points (rng/split key (count points)))]
+    {:traces (mapv first results) :weights (mapv second results)}))
+
+(defn- in-batches
+  "The points generated in batched runs of at most chunk-size particles,
+   particle i constrained by point i's choices: {:batches :weights}, one
+   particle collection per run."
+  [model args observations points chunk-size key]
+  (let [chunks (mapv vec (partition-all chunk-size points))
+        runs (mapv (fn [chunk k]
+                     (let [{ps :particles ws :weights}
+                           (batched/generate model args observations (count chunk) k {:per-particle (mapv first chunk)})]
+                       [ps (mapv #(+ (double %1) (double %2)) (array/->clj ws) (map second chunk))]))
+                   chunks (rng/split key (count chunks)))]
+    {:batches (mapv first runs) :weights (into [] (mapcat second) runs)}))
+
 (defn enumerative-inference
   "Gen.jl's enumerative_inference: model generated once per point of grid
    (choice-vol-grid, or any collection of [choices log-volume] pairs),
    constrained by the observations and the point's choices, which must not
    overlap them. Returns the traces in grid order, their normalized log
    weights (generate's weight plus the log-volume) and log-ml-estimate,
-   log Σ exp(weight). Options: :key, for choices the grid leaves out."
+   log Σ exp(weight). Options:
+   - :key, for choices the grid leaves out;
+   - :batched? (false): the points are particles of one batched run
+     (gen.batched), each constrained by its own point, so the handler's
+     cost is paid once for the grid. The result holds :batches, particle
+     collections in grid order, in place of :traces; traces gives the
+     scalar traces either way. The weights are the scalar loop's, point by
+     point, when the observations and the grid give every choice (a model
+     that cannot run batched, one that branches on a grid value say, falls
+     back to one point at a time); choices the grid leaves out are drawn
+     from the same distribution, but not as the scalar loop draws them;
+   - :chunk-size: with :batched?, at most this many points per batched run
+     (and one collection per run), so that a large grid needs that many
+     particles' memory at a time. The weights are those of one run when
+     the grid and the observations give every choice."
   ([model args observations grid] (enumerative-inference model args observations grid nil))
-  ([model args observations grid {:keys [key]}]
+  ([model args observations grid {:keys [key batched? chunk-size]}]
    (let [points (vec grid)
-         observed (set (cm/addresses observations))]
-     (when (empty? points)
-       (throw (ex-info "enumerative-inference: the grid has no points" {})))
-     (let [results (mapv (fn [[choices log-volume] k]
-                           (when-let [p (some observed (cm/addresses choices))]
-                             (throw (ex-info (str "enumerative-inference: the grid sets the observed choice at " p)
-                                             {:path p})))
-                           (let [{:keys [trace weight]} (gfi/generate model args (cm/merge observations choices) k)]
-                             (gfi/eval-trace! trace weight)
-                             [trace (+ (double (array/item weight)) (double log-volume))]))
-                         points (rng/split (or key (gfi/next-key)) (count points)))
-           {:keys [log-total log-weights]} (w/normalize (mapv second results))]
-       {:traces (mapv first results) :log-normalized-weights log-weights :log-ml-estimate log-total}))))
+         key (or key (gfi/next-key))]
+     (check-points! points observations)
+     (when-not (or (nil? chunk-size) (pos-int? chunk-size))
+       (throw (ex-info "enumerative-inference: :chunk-size is a positive integer" {:chunk-size chunk-size})))
+     (let [run (if batched?
+                 (in-batches model args observations points (or chunk-size (count points)) key)
+                 (one-at-a-time model args observations points key))
+           {:keys [log-total log-weights]} (w/normalize (:weights run))]
+       (-> run
+           (dissoc :weights)
+           (assoc :log-normalized-weights log-weights :log-ml-estimate log-total))))))
+
+(defn traces
+  "The scalar traces of an enumerative-inference result in grid order,
+   batched or not."
+  [result]
+  (if-let [batches (:batches result)]
+    (into [] (mapcat batched/traces) batches)
+    (:traces result)))
+
+(defn- choice-values
+  "The host values of the choice at addr in a result's traces, in grid
+   order: a batched collection's read at once."
+  [{:keys [traces batches]} addr]
+  (let [of-traces (fn [trs] (map #(array/->clj (cm/get-choice (:choices %) addr)) trs))]
+    (if batches
+      (into [] (mapcat #(if (batched/batched? %) (array/->clj (batched/choice % addr)) (of-traces (batched/traces %))))
+            batches)
+      (vec (of-traces traces)))))
 
 (defn marginal
   "The posterior probability of each value of the choice at addr, from an
-   enumerative-inference result (or any {:traces :log-normalized-weights}):
-   a map from the value (on the host) to its probability."
-  [{:keys [traces log-normalized-weights]} addr]
-  (reduce (fn [m [tr lw]] (update m (array/->clj (cm/get-choice (:choices tr) addr)) (fnil + 0.0) (Math/exp lw)))
-          {} (map vector traces log-normalized-weights)))
+   enumerative-inference result, batched or not (or any {:traces
+   :log-normalized-weights}): a map from the value (on the host) to its
+   probability."
+  [result addr]
+  (reduce (fn [m [v lw]] (update m v (fnil + 0.0) (Math/exp lw)))
+          {} (map vector (choice-values result addr) (:log-normalized-weights result))))
 
 ;; ---------------------------------------------------------------------------
 ;; Exact proposals
@@ -208,6 +281,46 @@
                       {:assignments n :limit limit})))
     (mapv #(zipmap free %) (product supports))))
 
+(defn- structure-error [c cause]
+  (ex-info (str "with-exact-proposal: the model's structure depends on the enumerated choices (under " (pr-str c) ")")
+           {:assignment c} cause))
+
+(defn- assigned
+  "The choice map m with the assignment c (a map from path to value)."
+  [m c]
+  (reduce (fn [m [p v]] (cm/set-choice m p v)) m c))
+
+(defn- checked
+  "tr, the run under the assignment c, unless it made other choices than
+   the n given."
+  [tr c n]
+  (when-not (= n (count (cm/addresses (:choices tr))))
+    (throw (structure-error c nil)))
+  tr)
+
+(defn- one-run-each
+  "g's traces on args, one run under each assignment of cs with the other
+   choices base, checked to make the n given choices."
+  [g args base cs n]
+  (mapv (fn [c]
+          (let [tr (try (:trace (gfi/with-exact-density "with-exact-proposal" (gfi/generate g args (assigned base c) (rng/key 0))))
+                        (catch clojure.lang.ExceptionInfo e
+                          ;; a choice of the other run goes unused under c
+                          (throw (if (:unvisited (ex-data e)) (structure-error c e) e))))]
+            (checked tr c n)))
+        cs))
+
+(defn- one-batch
+  "g's particles on args, one per assignment of cs (per-particle
+   constraints) with the other choices base, from one batched run; nil when
+   it fails, for the runs one at a time to raise the error, naming the
+   assignment. Inside a batched run, where no other can nest, gen.batched
+   runs them one at a time, under that run's tracer."
+  [g args base cs]
+  (try (:particles (gfi/with-exact-density "with-exact-proposal"
+                     (batched/generate g args base (count cs) (rng/key 0) {:per-particle (mapv #(assigned cm/EMPTY %) cs)})))
+       (catch clojure.lang.ExceptionInfo _ nil)))
+
 (defn- enumerated
   "For each assignment c of the free paths, with sigma (the constraints) and
    others (the other choices): s_c, the log density of the trace, and r_c,
@@ -215,28 +328,23 @@
    (project on the unconstrained addresses; finite where s_c is -Inf
    because sigma is impossible under c). Every choice is given, so the
    runs are deterministic. {:assignments :s :r :retvals}, with s and r
-   stacked."
-  [g args sigma others free seen limit]
+   stacked. batched? enumerates in one batched run, without :retvals. Its
+   structure is then one for every assignment, so that of the run whose
+   choices it was given (an assignment among them), and its choices need
+   no check; a run that falls back is checked one assignment at a time."
+  [g args sigma others free seen limit batched?]
   (let [base (cm/merge sigma others)
         cs (assignments free seen limit)
-        n-choices (count (cm/addresses base))
+        n (+ (count (cm/addresses base)) (count free))
         unconstrained (sel/complement (sel/from-choicemap sigma))
-        runs (mapv (fn [c]
-                     (let [constraints (reduce (fn [m [p v]] (cm/set-choice m p v)) base c)
-                           structure-error (fn [cause]
-                                             (ex-info (str "with-exact-proposal: the model's structure depends on the"
-                                                           " enumerated choices (under " (pr-str c) ")")
-                                                      {:assignment c} cause))
-                           tr (try (:trace (gfi/with-exact-density "with-exact-proposal" (gfi/generate g args constraints (rng/key 0))))
-                                   (catch clojure.lang.ExceptionInfo e
-                                     ;; a choice of the other run goes unused under c
-                                     (throw (if (:unvisited (ex-data e)) (structure-error e) e))))]
-                       (when-not (= (+ n-choices (count c)) (count (cm/addresses (:choices tr))))
-                         (throw (structure-error nil)))
-                       [(:score tr) (gfi/project tr unconstrained) (:retval tr)]))
-                   cs)]
-    {:assignments cs :s (array/stack (mapv first runs)) :r (array/stack (mapv second runs))
-     :retvals (mapv #(nth % 2) runs)}))
+        of-traces (fn [trs] {:assignments cs :s (array/stack (mapv :score trs))
+                             :r (array/stack (mapv #(gfi/project % unconstrained) trs)) :retvals (mapv :retval trs)})]
+    (if-let [ps (when batched? (one-batch g args base cs))]
+      (if (batched/batched? ps)
+        {:assignments cs :s (batched/scores ps) :r (batched/project ps unconstrained)}
+        ;; it fell back to one run per assignment
+        (of-traces (mapv #(checked %1 %2 n) (batched/traces ps) cs)))
+      (of-traces (one-run-each g args base cs n)))))
 
 (defn- check-retval!
   "Throw unless the return value is the same under every assignment with
@@ -259,6 +367,13 @@
   (let [given (set (cm/addresses sigma))]
     (vec (remove given paths))))
 
+(defn- batch-enumeration?
+  "Does the exact proposal egf enumerate in one batched run? With
+   :batched?, but not with :check-retval?, which reads every assignment's
+   return value."
+  [{:keys [batched? check-retval?]}]
+  (and batched? (not check-retval?)))
+
 (defn- exact-generate
   "generate under the exact proposal: gf's forward proposal for the choices
    other than the enumerated ones, then the enumerated ones from their exact
@@ -278,7 +393,7 @@
         free (free-paths paths sigma)
         _ (check-visited! free seen (:choices t0))
         others (others-of (:choices t0) sigma free)
-        {cs :assignments s :s r :r rvs :retvals} (enumerated g args sigma others free seen limit)
+        {cs :assignments s :s r :r rvs :retvals} (enumerated g args sigma others free seen limit (batch-enumeration? egf))
         _ (when check-retval? (check-retval! cs s rvs))
         idx (rng/categorical k-pick s)
         chosen (reduce (fn [m p] (cm/set-choice m p (array/take (array/array (mapv #(get % p) cs)) idx)))
@@ -289,17 +404,17 @@
 (defn- exact-weight
   "The weight exact-generate gives for producing the trace tr of gf on args
    from sigma, tr's choices at some addresses."
-  [{:keys [gf paths limit]} args sigma tr]
+  [{:keys [gf paths limit] :as egf} args sigma tr]
   (let [seen (volatile! {})
         g (watching gf (set paths) seen)
         ;; the supports, from a run with every choice given
         _ (gfi/with-exact-density "with-exact-proposal" (gfi/generate g args (:choices tr) (rng/key 0)))
         free (free-paths paths sigma)
         _ (check-visited! free seen (:choices tr))
-        {s :s r :r} (enumerated g args sigma (others-of (:choices tr) sigma free) free seen limit)]
+        {s :s r :r} (enumerated g args sigma (others-of (:choices tr) sigma free) free seen limit (batch-enumeration? egf))]
     (- (array/logsumexp s) (array/logsumexp r))))
 
-(gfi/defgf ExactProposalGF [gf paths limit check-retval?]
+(gfi/defgf ExactProposalGF [gf paths limit check-retval? batched?]
   gfi/IGenerativeFunction
   (-simulate [this args key] (trace/as-made-by (gfi/-simulate gf args key) this))
   (-generate [this args constraints key] (exact-generate this args constraints key))
@@ -335,9 +450,15 @@
    - :check-retval? (false): throw from generate when the return value
      depends on the enumerated choices, for uses that need the weight to be
      exact (a known answer), not an estimate;
-   - :max-assignments (100000)."
+   - :max-assignments (100000);
+   - :batched? (false): enumerate in one batched run (gen.batched), every
+     assignment a particle constrained by it, so the handler's cost is paid
+     once for all of them, at the price of a few scalar runs that check it
+     (gen.batched's spot checks): for many assignments. The weights are the
+     same. Inside a batched run, and with :check-retval?, it enumerates one
+     assignment at a time, as without the option."
   ([gf addrs] (with-exact-proposal gf addrs nil))
-  ([gf addrs {:keys [max-assignments check-retval?] :or {max-assignments 100000}}]
+  ([gf addrs {:keys [max-assignments check-retval? batched?] :or {max-assignments 100000}}]
    (when-not (dyn/dynamic-gf? gf)
      (throw (ex-info "with-exact-proposal needs a dynamic generative function" {:gen-fn (type gf)})))
    (when (empty? addrs)
@@ -345,7 +466,7 @@
    (let [paths (mapv #(if (vector? %) % [%]) addrs)]
      (when-not (apply distinct? paths)
        (throw (ex-info "with-exact-proposal: an address appears twice" {:addresses addrs})))
-     (->ExactProposalGF gf paths max-assignments (boolean check-retval?)))))
+     (->ExactProposalGF gf paths max-assignments (boolean check-retval?) (boolean batched?)))))
 
 (defmethod print-method ExactProposalGF [g ^java.io.Writer wr]
   (.write wr (str "#gen/with-exact-proposal[" (pr-str (:gf g)) " " (pr-str (:paths g)) "]")))
