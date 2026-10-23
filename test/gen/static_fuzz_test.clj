@@ -3,18 +3,22 @@
    (gen.random-static-models): the GFI laws, and every operation equal to
    the same body's without ^:static (laws/static); compiled HMC and MALA
    steps equal to plain ones, and a static model's steps equal to its
-   dynamic body's; the generator reaching every feature; and a failing
-   spec shrunk and printed as data and as the form it became."
+   dynamic body's; the generator reaching every feature; a failing spec
+   shrunk and printed as data and as the form it became; and a bug the
+   fuzzer found in gen.diff's sum rules, stated as known."
   (:require [clojure.edn :as edn]
             [clojure.set :as set]
             [clojure.string :as str]
             [clojure.test :refer [deftest is]]
             [clojure.test.check :as tc]
             [clojure.test.check.clojure-test :refer [defspec]]
-            [clojure.test.check.generators :as gen]
+            [clojure.test.check.generators :as tcg]
             [clojure.test.check.properties :as prop]
+            [gen.array :as array]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
+            [gen.dist :as d]
+            [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
             [gen.gradients :as grad]
             [gen.inference.mcmc :as mcmc]
@@ -47,19 +51,19 @@
 
 (def ^:private gen-kernel
   "A kernel and its settings."
-  (gen/hash-map :kernel (gen/elements [:hmc :mala :nuts])
-                :L (gen/elements [1 3])
-                :eps (gen/elements [0.05 0.2])
-                :tau (gen/elements [0.05 0.2])
-                :inv-metric (gen/elements [nil 0.5 2.0])))
+  (tcg/hash-map :kernel (tcg/elements [:hmc :mala :nuts])
+                :L (tcg/elements [1 3])
+                :eps (tcg/elements [0.05 0.2])
+                :tau (tcg/elements [0.05 0.2])
+                :inv-metric (tcg/elements [nil 0.5 2.0])))
 
 (def ^:private gen-move
   "A step of a chain: one of the chain's kernels (an index), its selection
    (every continuous choice, or some), and new arguments first (an index
    into the model's alternatives) or none."
-  (gen/hash-map :kernel gen/nat
-                :selection (gen/elements [:all :some])
-                :args (gen/one-of [(gen/return nil) gen/nat])))
+  (tcg/hash-map :kernel tcg/nat
+                :selection (tcg/elements [:all :some])
+                :args (tcg/one-of [(tcg/return nil) tcg/nat])))
 
 (defn- selection
   "The trace's continuous choices, all or those picked (all when none is),
@@ -117,10 +121,10 @@
   ;; the score fn's choices fail it in both; HMC's step closing over the
   ;; inverse metric, in one.
   (prop/for-all [[_ gf args alt-args] rsm/gen-continuous-model
-                 kernels (gen/vector gen-kernel 1 2)
-                 moves (gen/vector gen-move 2 8)
-                 picks (gen/vector gen/boolean 8)
-                 seed gen/nat]
+                 kernels (tcg/vector gen-kernel 1 2)
+                 moves (tcg/vector gen-move 2 8)
+                 picks (tcg/vector tcg/boolean 8)
+                 seed tcg/nat]
     (let [dynamic (assoc gf :static nil)]
       (loop [tr (gfi/simulate gf args (rng/key seed)) moves moves i 0]
         (if-let [[m & more] (seq moves)]
@@ -148,7 +152,7 @@
   ;; rule the ops write, and the forms every kind of callee: a fuzzer that
   ;; silently stopped making one would test less (planted: computed
   ;; addresses made constant fail it)
-  (let [models (for [size (range 0 200 2) seed (range 3)] (gen/generate rsm/gen-model size (+ seed (* 3 size))))
+  (let [models (for [size (range 0 200 2) seed (range 3)] (tcg/generate rsm/gen-model size (+ seed (* 3 size))))
         nodes (mapcat (fn [[_ gf]] (:nodes (:static gf))) models)
         symbols (set (mapcat (fn [[label]] (filter symbol? (tree-seq coll? seq (:form label)))) models))
         hoisted? (fn [{[name] :names}] (and name (re-find #"^(trace|splice)__" (str name))))]
@@ -185,3 +189,26 @@
     (let [again (rsm/evaluate (:form read-back))]
       (is (some? (:static again)))
       (is (= (:choices (gfi/simulate gf args (rng/key 3))) (:choices (gfi/simulate again args (rng/key 3))))))))
+
+;; ---------------------------------------------------------------------------
+;; A bug the fuzzer found
+;; ---------------------------------------------------------------------------
+
+(deftest known-bug-a-sum-s-int-diff-through-a-float
+  ;; Found by the static law at length (2026-10-23), reported, not fixed
+  ;; here: gen.diff's + and - rules give the sum of an integer argument with
+  ;; an int-diff and a float an int-diff, which the float's rounding breaks
+  ;; (diff/consistent? compares exactly), so a static body's retdiff is
+  ;; unsound for about one key in six. The assertion states the bug, so that
+  ;; the suite passes while it stands: when the rules give an int-diff only
+  ;; for integers, assert there is none, and give gen.random-static-models's
+  ;; :hinted arguments integer alternatives again. (On the JVM backend: a
+  ;; float return value is a host number there.)
+  (when (ts/jvm?)
+    (let [sum (gen ^:static [n] (let [r (trace :r (d/normal 0.0 1.0))] (array/+ n r)))
+          inconsistent (for [k (range 200)
+                             :let [tr (gfi/simulate sum [2] (rng/key k))
+                                   {t :trace rd :retdiff} (gfi/update tr [3] [(diff/compute 2 3)] cm/EMPTY (rng/key 1))]
+                             :when (not (diff/consistent? (:retval tr) (:retval t) rd))]
+                         k)]
+      (is (seq inconsistent)))))
