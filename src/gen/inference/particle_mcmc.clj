@@ -20,7 +20,7 @@
    extended target the reference and the drawn particle are independent
    draws from the final weights given the particles. particle-gibbs is that
    move as a kernel, which composes with the others. For a model
-   (gen [T] (let [a (trace :a …)] (splice :xs (unfold step) T 0.0 a)))
+   (gen [T] (let [a (trace :a …)] (splice :xs (comb/unfold step) T 0.0 a)))
    whose steps trace :x and :y:
 
      (kernel/cycle [(particle-gibbs (sel/from-paths (for [t (range T)] [:xs t :x]))
@@ -56,7 +56,7 @@
    Not here yet: ancestor sampling (Lindsten, Jordan and Schön 2014), and
    conditional forms of the other resampling schemes."
   (:refer-clojure :exclude [+ -])
-  (:require [gen.array :refer [+ -]]
+  (:require [gen.array :as array :refer [+ -]]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.gfi :as gfi]
