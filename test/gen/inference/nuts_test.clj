@@ -5,7 +5,8 @@
    posteriors (a conjugate normal, a correlated Gaussian of unequal scales,
    a hierarchical model in a Map), the adaptation's targets, divergences,
    keys and errors. Bands are 5 standard errors: of independent draws, or
-   of a chain's mean by batch means."
+   of a chain's mean (gen.inference.diagnostics's Monte Carlo standard
+   error)."
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
             [gen.test-support :as ts]
@@ -16,6 +17,7 @@
             [gen.dist :as d]
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
+            [gen.inference.diagnostics :as dg]
             [gen.inference.kernel :as k]
             [gen.inference.mcmc :as mcmc]
             [gen.inference.nuts :as nuts]
@@ -31,18 +33,17 @@
 (defn- sample-var [xs]
   (let [m (mean xs)] (/ (reduce + (map #(* (- % m) (- % m)) xs)) (double (dec (count xs))))))
 
-(defn- batch-se
-  "The standard error of a chain's mean by batch means: the spread of the
-   means of 20 consecutive batches."
-  [xs]
-  (let [b (quot (count xs) 20)
-        means (map mean (partition b xs))]
-    (Math/sqrt (/ (sample-var means) 20.0))))
-
 (defn- deviation
-  "How far the chain's mean is from truth, in batch-means standard errors."
+  "How far the chain's mean is from truth, in Monte Carlo standard errors."
   [xs truth]
-  (/ (Math/abs (double (- (mean xs) truth))) (batch-se xs)))
+  (/ (Math/abs (double (- (mean xs) truth))) (dg/mcse-mean (vec xs))))
+
+(defn- bulk-ess
+  "The chain's bulk ESS. The tests ask for 200 at least: a chain that stays
+   put has a wide band, which any mean fits, and at 200 a mean's band is
+   under 0.35 sd."
+  [xs]
+  (dg/ess-bulk (vec xs)))
 
 (defn- z
   "The two-sample z statistic of the means of xs and ys, independent draws."
@@ -198,35 +199,39 @@
       (is (< (Math/abs (double (z (map f moved) (map f fresh)))) 5.0) label))))
 
 (deftest ^:slow ^:heavy nuts-samples-a-conjugate-posterior
-  ;; Planted bug (2026-10-23): the energy without the metric puts the mean
-  ;; 16 standard errors off, the variance 8
+  ;; Planted bug (2026-10-23): the energy without the metric freezes the
+  ;; chain (a bulk ESS of 1.3, the mean 7.4 against 1.22: 3.9 standard
+  ;; errors)
   (let [{:keys [traces divergences]} (nuts/sample (start-at conjugate [] conjugate-observations) (sel/select :mu)
                                                   {:samples 2000 :warmup 500} (rng/key 17))
-        mus (map #(value % :mu) traces)
+        mus (dg/draws traces :mu)
         m (/ (reduce + ys) 5.25)]
     (is (zero? divergences))
+    (is (<= 200.0 (bulk-ess mus)))
     (is (> 5.0 (deviation mus m)) (str (mean mus)))
     (is (> 5.0 (deviation (map #(* (- % m) (- % m)) mus) (/ 1.0 5.25))))))
 
 (deftest ^:slow ^:heavy nuts-samples-a-correlated-gaussian-of-unequal-scales
   (let [{:keys [traces stats inv-metric]} (nuts/sample (start-at correlated [] (cm/choicemap :x 0.0 :y 0.0)) xy
                                                        {:samples 2000} (rng/key 18))
-        xs (map #(value % :x) traces)
-        ys (map #(value % :y) traces)]
+        xs (dg/draws traces :x)
+        ys (dg/draws traces :y)]
     (testing "the moments"
+      (is (<= 200.0 (bulk-ess xs)))
+      (is (<= 200.0 (bulk-ess ys)))
       (is (> 5.0 (deviation xs 1.0)))
       (is (> 5.0 (deviation ys 0.02)))
       (is (> 5.0 (deviation (map #(* (- % 1.0) (- % 1.0)) xs) 4.0)))
       (is (> 5.0 (deviation (map #(* (- % 0.02) (- % 0.02)) ys) 0.0041)))
       (is (> 5.0 (deviation (map #(* (- %1 1.0) (- %2 0.02)) xs ys) 0.08))))
     (testing "the adapted metric is the last window's variances: 500 draws, so within 5 standard errors of those"
-      ;; the standard error of a variance from the sampling chain's batch
-      ;; means, scaled to the window's 500 draws
+      ;; the standard error of a variance from the sampling chain's
+      ;; squared deviations, scaled to the window's 500 draws
       (is (and (array/backend-array? inv-metric) (= [2] (array/shape inv-metric))))
       (doseq [[i vs truth] [[0 xs 4.0] [1 ys 0.0041]]
               :when (array/backend-array? inv-metric)]
         (let [sq (map #(let [c (- % (mean vs))] (* c c)) vs)
-              se (* (batch-se sq) (Math/sqrt (/ (count sq) 500.0)))
+              se (* (dg/mcse-mean (vec sq)) (Math/sqrt (/ (count sq) 500.0)))
               n 500.0
               variance (/ (- (ts/number (array/take inv-metric i)) (* 1e-3 (/ 5.0 (+ n 5.0)))) (/ n (+ n 5.0)))]
           (is (< (Math/abs (double (- variance truth))) (* 5.0 se)) (str i ": " variance)))))
@@ -236,9 +241,9 @@
       ;; alone, 30.2 steps against 30.4
       (let [unit-metric (:stats (nuts/sample (start-at correlated [] (cm/choicemap :x 0.0 :y 0.0)) xy
                                              {:samples 500 :adapt-metric? false} (rng/key 18)))
-            steps (map :n-leapfrog stats)
-            unit-steps (map :n-leapfrog unit-metric)]
-        (is (< (+ (mean steps) (* 5.0 (batch-se steps))) (- (mean unit-steps) (* 5.0 (batch-se unit-steps))))
+            steps (mapv :n-leapfrog stats)
+            unit-steps (mapv :n-leapfrog unit-metric)]
+        (is (< (+ (mean steps) (* 5.0 (dg/mcse-mean steps))) (- (mean unit-steps) (* 5.0 (dg/mcse-mean unit-steps))))
             (str (mean steps) " against " (mean unit-steps)))))))
 
 (def ^:private hierarchical-posterior
@@ -254,7 +259,9 @@
 
 (deftest ^:slow ^:heavy nuts-moves-choices-inside-a-map
   ;; nested addresses: mu and each group's theta inside the Map spliced at
-  ;; :groups, the observations beside them left alone
+  ;; :groups, the observations beside them left alone. Planted bug
+  ;; (2026-10-23): the energy without the metric puts every mean and
+  ;; variance 450 to 2850 standard errors off
   (let [n (count group-ys)
         observations (apply cm/choicemap (mapcat (fn [j y] [[:groups j :y] y]) (range) group-ys))
         selection (apply sel/select :mu (map #(vector :groups % :theta) (range n)))
@@ -264,6 +271,7 @@
         draws (map (fn [tr] (into [(value tr :mu)] (map #(value tr [:groups % :theta]) (range n)))) traces)]
     (is (every? (fn [tr] (every? #(= (nth group-ys %) (value tr [:groups % :y])) (range n))) traces))
     (doseq [i (range (inc n))]
+      (is (<= 200.0 (bulk-ess (map #(nth % i) draws))) (str i))
       (is (> 5.0 (deviation (map #(nth % i) draws) (nth m i))) (str "the mean of " i))
       (is (> 5.0 (deviation (map #(let [c (- (nth % i) (nth m i))] (* c c)) draws) (get-in cov [i i])))
           (str "the variance of " i)))))
@@ -317,7 +325,7 @@
 
 (deftest ^:slow ^:heavy dual-averaging-brings-the-acceptance-to-its-target
   ;; With the metric fixed nothing restarts, and over the warmup's second
-  ;; half the acceptance statistic averages 0.8 (within 5 batch-means
+  ;; half the acceptance statistic averages 0.8 (within 5 Monte Carlo
   ;; standard errors). Planted bug (2026-10-23): s̄'s update with the sign
   ;; flipped drives the acceptance to 0
   (let [{:keys [stats]} (nuts/adapt (start-at correlated [] (cm/choicemap :x 0.0 :y 0.0)) xy
@@ -349,11 +357,15 @@
       (is (= by-hand divergences)))))
 
 (deftest ^:slow ^:heavy adaptive-hmc-samples-the-correlated-gaussian
+  ;; planted bug (2026-10-23): hmc's kinetic energy without the metric puts
+  ;; the four moments 2350 to 510,000 standard errors off
   (let [{:keys [traces stats]} (nuts/sample (start-at correlated [] (cm/choicemap :x 0.0 :y 0.0)) xy
                                             {:kernel :hmc :L 8 :samples 2000} (rng/key 24))
-        xs (map #(value % :x) traces)
-        ys (map #(value % :y) traces)]
+        xs (dg/draws traces :x)
+        ys (dg/draws traces :y)]
     (is (every? #(= 8 (:n-leapfrog %)) stats))
+    (is (<= 200.0 (bulk-ess xs)))
+    (is (<= 200.0 (bulk-ess ys)))
     (is (> 5.0 (deviation xs 1.0)))
     (is (> 5.0 (deviation ys 0.02)))
     (is (> 5.0 (deviation (map #(* (- % 1.0) (- % 1.0)) xs) 4.0)))

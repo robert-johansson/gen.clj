@@ -554,24 +554,24 @@ Mixed, so the tape stays the default (docs/array-api.md §8).
 kernel runs Stan's warmup (`gen.inference.nuts`: 1000 iterations adapting
 the step size and a diagonal metric), then draws 2000 times. A draw costs
 a gradient per leapfrog step and one at its start. The effective sample
-size is the smallest over the coordinates and their squares, by Geyer's
-initial positive sequence. JVM backend, one run (key 1). Reproduce with
+size is the smallest over the coordinates of their bulk and tail ESSs
+(`gen.inference.diagnostics`). JVM backend, one run (key 1). Reproduce with
 `clojure [-J-Dgen.backend=mlx] -M:bench -m gen.nuts-bench`.
 
 | Kernel | Gradients per draw | Per effective draw | Smallest ESS | Warmup gradients | Step size |
 |---|---|---|---|---|---|
-| NUTS | 9.9 | 19.4 | 1018 | 25,840 | 0.48 |
-| HMC, L = 1 | 2 | 115 | 35 | 2000 | 0.52 |
-| HMC, L = 2 | 3 | 31.5 | 190 | 3000 | 0.45 |
-| HMC, L = 4 (the best L) | 5 | 10.7 | 932 | 5000 | 0.48 |
-| HMC, L = 8 | 9 | 76 | 236 | 9000 | 0.45 |
-| HMC, L = 16 | 17 | 1219 | 28 | 17,000 | 0.50 |
-| HMC, L = 32 | 33 | 1339 | 49 | 33,000 | 0.44 |
-| HMC, L = 64 | 65 | 1873 | 69 | 65,000 | 0.43 |
+| NUTS | 9.9 | 16.9 | 1164 | 25,840 | 0.48 |
+| HMC, L = 1 | 2 | 160 | 25 | 2000 | 0.52 |
+| HMC, L = 2 | 3 | 31.5 | 191 | 3000 | 0.45 |
+| HMC, L = 4 (the best L) | 5 | 9.4 | 1065 | 5000 | 0.48 |
+| HMC, L = 8 | 9 | 64 | 283 | 9000 | 0.45 |
+| HMC, L = 16 | 17 | 1421 | 24 | 17,000 | 0.50 |
+| HMC, L = 32 | 33 | 217 | 304 | 33,000 | 0.44 |
+| HMC, L = 64 | 65 | 1851 | 70 | 65,000 | 0.43 |
 
-- **NUTS costs about twice the best L's gradients per effective draw**
-  (19.4 against 10.7), with no L to choose. Off the best L, HMC is 3 to
-  175 times worse: once the metric makes the target nearly round, a
+- **NUTS costs about 1.8 times the best L's gradients per effective
+  draw** (16.9 against 9.4), with no L to choose. Off the best L, HMC is 3
+  to 197 times worse: once the metric makes the target nearly round, a
   trajectory of L steps returns near its start at some L (16 here).
 - **Per gradient, a NUTS step costs about 1.4× an HMC step** on the JVM
   (1.1 ms for 6.2 steps against 0.78 ms for 7, at depth 3). JDK Flight
