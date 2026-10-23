@@ -301,22 +301,45 @@
                      (array/where diverged g g') diverged))
             [v p diverged start-ok]))))))
 
+(defn- uniform
+  "A uniform draw on [0, 1) on key, as a host double."
+  ^double [key]
+  (double (array/item (rng/uniform key))))
+
+(defn- jittered
+  "One transition's step size, Stan's stepsize_jitter (Neal 2011's remedy
+   for a trajectory of fixed length that returns near its start):
+   eps·(1 + jitter·(2u - 1)), u uniform on the transition's key at index 3,
+   beside the three keys it splits. With jitter 0, eps, and nothing is
+   drawn. Loud unless 0 ≤ jitter < 1."
+  [eps jitter key]
+  (when-not (and (number? jitter) (<= 0.0 (double jitter)) (< (double jitter) 1.0))
+    (throw (ex-info (str ":jitter must be at least 0 and below 1, not " (pr-str jitter))
+                    {:reason :invalid-jitter :jitter jitter})))
+  (if (zero? (double jitter))
+    eps
+    (* eps (+ 1.0 (* (double jitter) (- (* 2.0 (uniform (rng/fold-in key 3))) 1.0))))))
+
 (defn hmc
   "Hamiltonian Monte Carlo on the selected choices: L leapfrog steps of size
    eps, with momenta drawn from N(0, M), M the inverse of :inv-metric (the
    identity by default: standard normal momenta). The third argument is an
    options map or a key, and a key may follow the options. Options: :L
-   (10), :eps (0.1), :inv-metric, :key, :compile? (false): run the L steps
-   as one compiled function (array/compile: one MLX graph on the MLX
-   backend, the same steps on the JVM backend), a function of the selected
-   values and the other choices, cached per model, arguments and structure.
-   A model that reads a value on the host cannot be compiled and runs the
-   same function uncompiled. Either way the trace is updated once, after
-   the L steps."
+   (10), :eps (0.1), :inv-metric, :jitter (0): each transition steps by
+   eps·(1 + jitter·(2u - 1)), u uniform, Stan's step-size jitter, which
+   keeps L steps from returning near the start (the result then holds the
+   step taken, :eps), :key, :compile? (false): run the L steps as one
+   compiled function (array/compile: one MLX graph on the MLX backend, the
+   same steps on the JVM backend), a function of the selected values and
+   the other choices, cached per model, arguments and structure. A model
+   that reads a value on the host cannot be compiled and runs the same
+   function uncompiled. Either way the trace is updated once, after the L
+   steps."
   ([trace selection] (hmc trace selection nil))
   ([trace selection key-or-opts] (let [opts (step-opts key-or-opts)] (hmc trace selection opts (:key opts))))
   ([trace selection opts key]
-   (let [{:keys [L eps compile? inv-metric] :or {L 10 eps 0.1}} (options opts)
+   (let [{:keys [L eps compile? inv-metric jitter] :or {L 10 eps 0.1 jitter 0}} (options opts)
+         step (jittered eps jitter key)
          [k-momenta k-update k-accept] (rng/split key 3)
          [proto v others] (flat-values trace selection)
          inv (inverse-metric inv-metric v)
@@ -327,13 +350,14 @@
          build #(leapfrogs (:gen-fn trace) (:args trace) proto L)
          ;; the L steps as a function of the selected values, compiled or
          ;; not: the trace is updated once, at the end
-         [v' p diverged? start-ok] (or (when compile? ((compiled trace proto others [:hmc L] build) v p0 eps inv others))
-                                       ((build) v p0 eps inv others))]
+         [v' p diverged? start-ok] (or (when compile? ((compiled trace proto others [:hmc L] build) v p0 step inv others))
+                                       ((build) v p0 step inv others))]
      (check-start! "hmc" start-ok trace selection)
-     (if (array/truthy? diverged?)
-       (diverged trace)
-       (let [[t'] (move-to trace proto v' k-update)]
-         (accept trace t' (+ (- (:score t') (:score trace)) (- (kinetic p) (kinetic p0))) k-accept))))))
+     (cond-> (if (array/truthy? diverged?)
+               (diverged trace)
+               (let [[t'] (move-to trace proto v' k-update)]
+                 (accept trace t' (+ (- (:score t') (:score trace)) (- (kinetic p) (kinetic p0))) k-accept)))
+       (pos? (double jitter)) (assoc :eps step)))))
 
 ;; ---------------------------------------------------------------------------
 ;; NUTS
@@ -361,11 +385,6 @@
       (let [[v p g lp ok] (step v p g eps inv others)
             sharp (* inv p)]
         [v p g sharp (array/where ok (energy lp p sharp) ##Inf)]))))
-
-(defn- uniform
-  "A uniform draw on [0, 1) on key, as a host double."
-  ^double [key]
-  (double (array/item (rng/uniform key))))
 
 (defn- continuing?
   "Stan's compute_criterion: do the velocities a and b (sharp momenta) both
@@ -474,22 +493,25 @@
    progressive sampling, which favours the new subtree. A subtree that
    diverges or turns within itself is left out. The third argument is an
    options map or a key, and a key may follow the options. Options: :eps
-   (0.1), :max-depth (10), :inv-metric, :key, :compile? (false): run each
-   leapfrog step as one compiled function (as hmc's, the tree's logic on
-   the host). The trace is updated once, at the end.
+   (0.1), :max-depth (10), :inv-metric, :jitter (0, as hmc's), :key,
+   :compile? (false): run each leapfrog step as one compiled function (as
+   hmc's, the tree's logic on the host). The trace is updated once, at the
+   end.
 
    Returns {:trace :accept-stat :tree-depth :n-leapfrog :diverged? :energy
    :eps}, Stan's statistics: the mean over every step taken of
    min(1, e^(h0 - h)) (the statistic step-size adaptation targets), the
    number of doublings kept, the leapfrog steps (each one gradient, plus
    one at the start), whether a step diverged (an energy error over 1000,
-   or a non-finite step), the energy of the state drawn and the step size."
+   or a non-finite step), the energy of the state drawn and the step size
+   taken."
   ([trace selection] (nuts trace selection nil))
   ([trace selection key-or-opts] (let [opts (step-opts key-or-opts)] (nuts trace selection opts (:key opts))))
   ([trace selection opts key]
-   (let [{:keys [eps max-depth compile? inv-metric] :or {eps 0.1 max-depth 10}} (options opts)
+   (let [{:keys [eps max-depth compile? inv-metric jitter] :or {eps 0.1 max-depth 10 jitter 0}} (options opts)
          _ (when-not (and (number? eps) (Double/isFinite (double eps)) (pos? (double eps)))
              (throw (ex-info (str "nuts: :eps must be a positive number, not " (pr-str eps)) {:reason :invalid-eps :eps eps})))
+         eps (jittered eps jitter key)
          _ (when-not (pos-int? max-depth)
              (throw (ex-info (str "nuts: :max-depth must be a positive integer, not " (pr-str max-depth))
                              {:reason :invalid-max-depth :max-depth max-depth})))
