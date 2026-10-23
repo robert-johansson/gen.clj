@@ -36,18 +36,24 @@
    particle (a scalar run each) when validating a model's batched form.
    docs/array-api.md §8a–§8b.
 
-     (simulate gf args n key)                    → particles
-     (generate gf args constraints n key)        → {:particles :weights}
-     (update ps args argdiffs constraints key)   → {:particles :weights :discards}
-     (regenerate ps args argdiffs selection key) → {:particles :weights}
+     (simulate gf args n key)                         → particles
+     (generate gf args constraints n key opts?)       → {:particles :weights}
+     (update ps args argdiffs constraints key opts?)  → {:particles :weights :discards}
+     (regenerate ps args argdiffs selection key)      → {:particles :weights}
      (take ps indices)        → particles: the given ones (resampling)
      (select mask ps qs)      → particles: ps's where mask is true, qs's elsewhere
      (traces ps)              → the n scalar traces
      (choice ps addr)         → an [n …] array of the choice across particles
      (scores ps)              → an [n] array
+     (project ps selection)   → an [n] array of the particles' projections
 
-   Constraints are shared by every particle (observations). Weights are [n]
-   arrays; :discards is a vector of n choice maps."
+   Constraints are shared by every particle (observations). generate and
+   update also take per-particle constraints, {:per-particle cs}: cs holds
+   n choice maps, and particle i is constrained by the shared ones and by
+   (cs i), which must not overlap them, as its scalar operation would be.
+   Which constraints are per particle is said so, never read from a shape:
+   a shared [n] array is one value of shape [n] for every particle. Weights
+   are [n] arrays; :discards is a vector of n choice maps."
   (:refer-clojure :exclude [take update])
   (:require [gen.array :as array]
             [gen.array.batch :as batch]
@@ -161,11 +167,18 @@
 
 (defn- plain-choices [choices n] (map-leaves #(plain % n) choices))
 
+(defn- batched-choices
+  "choices whose values have the leading particle axis, as batched values:
+   what a batched run reads as one value per particle (the inverse of
+   plain-choices)."
+  [choices n]
+  (map-leaves #(batch/wrap % [n]) choices))
+
 (defn- rebuild
   "The batched trace of gf on args holding exactly the given per-particle
    choices (arrays with the leading particle axis)."
   [gf args n choices]
-  (:trace (run gf :generate args n {:constraints (map-leaves #(batch/wrap % [n]) choices) :key (rng/key 0)})))
+  (:trace (run gf :generate args n {:constraints (batched-choices choices n) :key (rng/key 0)})))
 
 (declare check)
 
@@ -397,6 +410,55 @@
     (assoc ps :trace t :args (vec args) :updates (inc k) ::unchecked? (or (::unchecked? ps) (not check?)))))
 
 ;; ---------------------------------------------------------------------------
+;; Per-particle constraints
+;; ---------------------------------------------------------------------------
+
+;; In a batched run a constraint is per particle when its value is a batched
+;; value, and shared otherwise: the handler reads constraints as it reads
+;; every value (gen.dynamic). A batched run of per-particle constraints
+;; stacks them into one choice map of batched values (batched-constraints);
+;; code that runs part of a batched run's particles (a Switch whose index
+;; differs across them) takes their rows of each batched constraint with
+;; them (gen.array.batch/gather).
+
+(defn- own-constraints
+  "The per-particle constraints of op, (:per-particle opts): one choice map
+   for each of the n particles, as a vector, or nil."
+  [op opts n]
+  (when-let [cs (:per-particle opts)]
+    (when-not (and (sequential? cs) (= n (count cs)))
+      (throw (ex-info (str (name op) ": :per-particle takes one choice map for each of the " n " particles")
+                      {:op op :n n :given (if (sequential? cs) (count cs) (type cs))})))
+    (mapv #(gfi/check-choice-map op "a particle's constraints" %) cs)))
+
+(defn- constraints-of
+  "Particle i's constraints: the shared ones, with its own when there are
+   per-particle ones (own), which must not overlap them."
+  [op shared own i]
+  (if own
+    (try (cm/merge shared (own i))
+         (catch clojure.lang.ExceptionInfo e
+           (throw (ex-info (str (name op) ": the constraints of particle " i " overlap the shared ones")
+                           {:op op :particle i} e))))
+    shared))
+
+(defn- batched-constraints
+  "The constraints of a batched run of the n particles: the shared ones,
+   with the per-particle ones (own) stacked into batched values. Choice maps
+   that differ in their addresses, or values that do not stack, cannot share
+   a run (and an overlap with the shared ones fails here too, then loudly
+   in the per-particle fallback)."
+  [op shared own n]
+  (if own
+    (let [stacked (try (cm/stack own)
+                       (catch Exception e
+                         (throw (ex-info (str (name op) ": the per-particle constraints do not stack into one batch ("
+                                              (ex-message e) ")")
+                                         {:op op} e))))]
+      (cm/merge shared (batched-choices stacked n)))
+    shared))
+
+;; ---------------------------------------------------------------------------
 ;; GFI operations
 ;; ---------------------------------------------------------------------------
 
@@ -409,36 +471,46 @@
      (per-particle ps (mapv #(gfi/simulate gf args %) (rng/split key n))))))
 
 (defn generate
-  "n particles of gf on args with the shared constraints, and their weights."
-  [gf args constraints n key]
-  (let [constraints (gfi/check-choice-map :generate "the constraints" constraints)
-        ps (->Particles n gf (gfi/check-args :generate args) nil nil)]
-    (batched-or
-     (let [{t :trace w :weight} (run gf :generate args n {:key key :constraints constraints})]
-       {:particles (assoc ps :trace (spot-check! gf args n t)) :weights (plain w n)})
-     (let [rs (mapv #(gfi/generate gf args constraints %) (rng/split key n))]
-       {:particles (per-particle ps (map :trace rs)) :weights (stack-weights (map :weight rs) n)}))))
+  "n particles of gf on args with the shared constraints, and their weights.
+   Options: :per-particle, n choice maps, each particle's own constraints
+   beside the shared ones."
+  ([gf args constraints n key] (generate gf args constraints n key nil))
+  ([gf args constraints n key opts]
+   (let [constraints (gfi/check-choice-map :generate "the constraints" constraints)
+         own (own-constraints :generate opts n)
+         ps (->Particles n gf (gfi/check-args :generate args) nil nil)]
+     (batched-or
+      (let [{t :trace w :weight}
+            (run gf :generate args n {:key key :constraints (batched-constraints :generate constraints own n)})]
+        {:particles (assoc ps :trace (spot-check! gf args n t)) :weights (plain w n)})
+      (let [rs (mapv #(gfi/generate gf args (constraints-of :generate constraints own %1) %2) (range n) (rng/split key n))]
+        {:particles (per-particle ps (map :trace rs)) :weights (stack-weights (map :weight rs) n)})))))
 
 (defn update
-  "Every particle updated to args with the shared constraints."
-  [ps args argdiffs constraints key]
-  (gfi/check-argdiffs :update (gfi/check-args :update args) argdiffs)
-  (let [{:keys [n gen-fn]} ps
-        constraints (gfi/check-choice-map :update "the constraints" constraints)
-        fallback (fn [ps]
-                   (let [rs (mapv #(gfi/update %1 args argdiffs constraints %2) (traces ps) (rng/split key n))]
-                     {:particles (per-particle (assoc ps :args (vec args)) (map :trace rs))
-                      :weights (stack-weights (map :weight rs) n)
-                      :discards (mapv :discard rs)}))]
-    (if (batched? ps)
-      (batched-or
-       (let [{t :trace w :weight d :discard}
-             (run gen-fn :update args n {:prev (:trace ps) :argdiffs argdiffs :constraints constraints :key key})]
-         {:particles (spot-check-update! ps args t)
-          :weights (plain w n)
-          :discards (if (cm/empty? d) (vec (repeat n cm/EMPTY)) (cm/unstack (plain-choices d n) n))})
-       (fallback (unbatched (check ps))))
-      (fallback ps))))
+  "Every particle updated to args with the shared constraints. Options:
+   :per-particle, as generate's."
+  ([ps args argdiffs constraints key] (update ps args argdiffs constraints key nil))
+  ([ps args argdiffs constraints key opts]
+   (gfi/check-argdiffs :update (gfi/check-args :update args) argdiffs)
+   (let [{:keys [n gen-fn]} ps
+         constraints (gfi/check-choice-map :update "the constraints" constraints)
+         own (own-constraints :update opts n)
+         fallback (fn [ps]
+                    (let [rs (mapv #(gfi/update %1 args argdiffs (constraints-of :update constraints own %2) %3)
+                                   (traces ps) (range n) (rng/split key n))]
+                      {:particles (per-particle (assoc ps :args (vec args)) (map :trace rs))
+                       :weights (stack-weights (map :weight rs) n)
+                       :discards (mapv :discard rs)}))]
+     (if (batched? ps)
+       (batched-or
+        (let [{t :trace w :weight d :discard}
+              (run gen-fn :update args n {:prev (:trace ps) :argdiffs argdiffs :key key
+                                          :constraints (batched-constraints :update constraints own n)})]
+          {:particles (spot-check-update! ps args t)
+           :weights (plain w n)
+           :discards (if (cm/empty? d) (vec (repeat n cm/EMPTY)) (cm/unstack (plain-choices d n) n))})
+        (fallback (unbatched (check ps))))
+       (fallback ps)))))
 
 (defn regenerate
   "Every particle with the selection regenerated, at args."
@@ -531,3 +603,17 @@
   (if (batched? ps)
     (plain (:score (:trace (check ps))) (:n ps))
     (stack-weights (map :score (:traces ps)) (:n ps))))
+
+(defn project
+  "The particles' log densities of the selected choices (gfi/project), an
+   [n] array: the batched trace's projection under the batch tracer, or
+   each particle's when that fails (a projection that runs code which
+   cannot treat the particles alike)."
+  [ps selection]
+  (gfi/check-selection :project selection)
+  (let [n (:n ps)
+        each #(stack-weights (map (fn [t] (gfi/project t selection)) (traces ps)) n)]
+    (if (batched? ps)
+      (try (plain (batch/batched [n] (gfi/project (:trace (check ps)) selection)) n)
+           (catch Exception _ (each)))
+      (each))))
