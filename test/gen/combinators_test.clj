@@ -9,6 +9,7 @@
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
             [gen.array :as array :refer [+ - * /]]
+            [gen.batched :as b]
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
             [gen.diff :as diff]
@@ -80,6 +81,11 @@
   "An Unfold making as-map's addresses at its steps."
   (comb/unfold (gen [_t s] (trace :x (d/normal s 1.0)))))
 
+(def bounded
+  "A kernel whose support moves with its argument: a choice an update keeps
+   leaves it, and comes back."
+  (gen [lo] (trace :v (d/uniform lo (+ lo 1.0)))))
+
 ;; Map's and Unfold's alternative arguments change their length, so that
 ;; the exact-discard laws see elements and steps dropped and added (the
 ;; post-M5 review's P2-10 gap). A planted drop-elements that leaves a
@@ -101,7 +107,11 @@
    ;; I2-01): the shared addresses keep their values
    [:switch-of-kinds (comb/switch as-map as-dynamic) [0 [0.0 1.0]] [[1 [0.0 1.0]] [1 [0.5 1.0]]]]
    [:switch-of-a-distribution-and-a-map (comb/switch (d/normal 0.0 1.0) as-map) [0] [[1 [0.0]]]]
-   [:switch-of-a-map-and-a-distribution (comb/switch as-map (d/normal 0.0 1.0)) [0 [0.0]] [[1]]]])
+   [:switch-of-a-map-and-a-distribution (comb/switch as-map (d/normal 0.0 1.0)) [0 [0.0]] [[1]]]
+   ;; elements and steps taken out of their support and brought back
+   ;; (genclj-awd0)
+   [:map-of-a-bounded-kernel (comb/map bounded) [[0.0 0.0]] [[[5.0 0.0]] [[0.0 -3.0]]]]
+   [:unfold-of-a-bounded-step (comb/unfold (gen [_t _s lo] (splice :b bounded lo))) [2 0.0 0.0] [[2 0.0 5.0] [3 0.0 0.0]]]])
 
 (laws/deflaws combinators models 100)
 (laws/deflaws combinators models 100 laws/fixed-support)
@@ -234,6 +244,45 @@
         (is (= 2 (count (:retval t2))))
         (is (= #{2 3 4} (set (map first (cm/addresses disc)))))
         (is (close? w (- (:score t2) (:score tr))))))))
+
+;; ---------------------------------------------------------------------------
+;; A score that leaves its support and comes back (genclj-awd0)
+;; ---------------------------------------------------------------------------
+
+;; Found by the fuzzer: Map, Unfold and Scan keep their scores as a running
+;; total, score + new - old, so an update that took an element out of its
+;; support (-Inf) and one that brought it back left -Inf + Inf = NaN, where
+;; the density is 0.0 (uniforms on [0, 1]). Planted bug (2026-10-24): the
+;; running total unchecked (revised returning acc as it is) fails every
+;; case, on the host and per particle.
+(deftest a-score-that-leaves-its-support-and-comes-back-is-the-density
+  (let [kinds [["Map" (comb/map bounded) (fn [lo] [[lo 0.0]])]
+               ["Unfold" (comb/unfold (gen [_t _s lo] (trace :v (d/uniform lo (+ lo 1.0))))) (fn [lo] [2 0.0 lo])]
+               ["Scan" (comb/scan (gen [c x] (let [v (trace :v (d/uniform x (+ x 1.0)))] [(+ c v) v]))) (fn [lo] [0.0 [lo 0.0]])]]
+        unknown #(vec (repeat (count %) diff/unknown-change))
+        moved (fn [tr args] (:trace (gfi/update tr args (unknown args) cm/EMPTY (rng/key 2))))]
+    (doseq [[label gf args-at] kinds]
+      (testing label
+        (let [tr (:trace (gfi/generate gf (args-at 0.0) (cm/from-map {0 {:v 0.5} 1 {:v 0.5}}) (rng/key 1)))
+              out (moved tr (args-at 5.0))
+              back (moved out (args-at 0.0))]
+          (is (= ##-Inf (ts/number (:score out))) "out of its support")
+          (is (close? 0.0 (:score back)) "and back: the density, not NaN")
+          (is (close? (:weight (gfi/assess gf (args-at 0.0) (:choices back))) (:score back))))
+        (testing ", per particle"
+          ;; particle i's first choice at 0.5 or 0.9: lo 0.6 takes only the
+          ;; 0.5s out of their support
+          (binding [b/*spot-checks* 0]
+            (let [own (mapv #(cm/from-map {0 {:v (if (even? %) 0.5 0.9)} 1 {:v 0.7}}) (range 6))
+                  ps (:particles (b/generate gf (args-at 0.0) cm/EMPTY 6 (rng/key 3) {:per-particle own}))
+                  step (fn [ps args] (:particles (b/update ps args (unknown args) cm/EMPTY (rng/key 4))))
+                  out (step ps (args-at 0.6))
+                  back (step out (args-at 0.0))]
+              (is (b/batched? back))
+              (is (some #(= ##-Inf %) (array/->clj (b/scores out))))
+              (is (some ts/finite? (array/->clj (b/scores out))))
+              (is (every? true? (map #(close? %1 (:weight (gfi/assess gf (args-at 0.0) (:choices %2))))
+                                     (array/->clj (b/scores back)) (b/traces back)))))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Precise change hints give the same results as unknown-change (law 8)

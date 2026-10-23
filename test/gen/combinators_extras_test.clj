@@ -85,6 +85,9 @@
      [0.0 [0.1 0.2 0.3] -0.5]]]
    [:scan-of-a-branching-kernel (comb/scan flipping) [0.0 [0.0 1.0 2.0]] [[0.5 [0.0 1.0]] [0.0 [0.0 1.0 2.0 3.0]]]]
    [:scan-of-nothing scanned [0.0 [] 0.5] [[0.0 [0.4] 0.5]]]
+   ;; steps taken out of their support and brought back (genclj-awd0)
+   [:scan-of-a-bounded-kernel (comb/scan (gen [c x] (let [v (trace :v (d/uniform x (+ x 1.0)))] [(+ c v) v])))
+    [0.0 [0.0 0.0]] [[0.0 [5.0 0.0]] [0.0 [0.0 -3.0]]]]
    [:mix mixed [[0.3 0.7] 0.5] [[[0.6 0.4] 0.5] [[0.3 0.7] 1.5]]]
    [:mix-of-different-addresses mixed-apart [[0.5 0.5] 0.0] [[[0.1 0.9] 0.0] [[0.5 0.5] 2.0]]]
    [:mix-logits mixed-logits [[0.0 1.0 -1.0] 0.5] [[[2.0 0.0 0.0] 0.5]]]
