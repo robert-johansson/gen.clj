@@ -4,10 +4,11 @@
    never its generative function, and read back given the generative
    function, by generate with every choice constrained.
 
-     (write x)            → EDN text of x: choice maps, arrays, keys and EDN data
-     (read s)             → x again, its arrays on gen.array/*backend*
-     (write-trace tr)     → EDN text of a trace: its arguments, choices and score
-     (read-trace gf s)    → gf's trace that the text describes, rebuilt exactly
+     (write x)              → EDN text of x: choice maps, arrays, keys and EDN data
+     (read s)               → x again, its arrays on gen.array/*backend*
+     (write-trace tr)       → EDN text of a trace: its arguments, choices and score
+     (read-trace gf s)      → gf's trace that the text describes, rebuilt exactly
+     (read-trace-data s)    → the written trace's parts, not rebuilt
 
    Save and load with (spit file (write x)) and (read (slurp file)).
 
@@ -17,7 +18,7 @@
      #gen/choicemap {addr sub ...}   a choice map: sub is a nested map (a node) or a value
      #gen/value v                    a choice map that is one value, or a leaf whose value is a map
      #gen/key [k0 k1]                a gen.random key
-     #gen/trace {:args [...] :choices ... :score ...}   a trace, for read-trace
+     #gen/trace {:numerics :args :choices :score}   a trace, for read-trace
 
    Values round-trip exactly:
    - A float is written as the shortest decimal of its double, which every
@@ -42,18 +43,28 @@
    eval. An unknown tag, a malformed tagged value, or text after the value is
    a loud error.
 
-   A trace's written score is generate's score on its arguments and choices.
-   write-trace computes it with the trace's own generative function. It can
-   differ from an updated trace's own score in the last bits, since Map and
-   Unfold keep their scores incrementally. read-trace rebuilds the trace and
-   checks that it is exact:
+   A trace's written score is generate's score on its arguments and
+   choices, which write-trace computes with the trace's own generative
+   function, under the backend and float dtype it records (:numerics,
+   {:backend :jvm :float :float64}, say). The trace read back is generate's,
+   so after updates its score may differ from the original's in the last
+   bits: Map and Unfold keep their scores incrementally, as Gen.jl's do.
+   read-trace rebuilds the trace and checks that it is exact:
+   - it runs under the written backend and float dtype, since log densities
+     round differently on each: elsewhere it is a loud error, and
+     (gfi/generate gf args choices) on read-trace-data's parts loads the
+     trace there instead;
    - the rebuilt score is the written one, bit for bit, so a different
-     generative function or another backend's numerics is a loud error;
+     generative function is a loud error;
    - generate's weight is its score, so no choice was missing and proposed.
-   A trace with encapsulated randomness (thesis §4.5), whose score or return
-   value depends on an ω that generate would draw afresh, cannot be rebuilt
-   that way. write-trace refuses one with ω anywhere in it, and read-trace
-   refuses a rebuilt trace that drew some.
+
+   Traces with encapsulated randomness (thesis §4.5) are not serializable
+   yet. Their scores, or return values, depend on keys ω kept per call: by
+   each callee, each Map or Unfold element, each Switch branch. generate
+   draws every ω afresh from its key (a dynamic function's folded from it,
+   and fold-in is one-way), so no key given to generate reproduces a
+   trace's ω's, least of all after updates have redrawn some of them. write-trace refuses a trace
+   with an ω anywhere in it, and read-trace a rebuild that drew one.
 
    Out of scope: gen.batched particle collections (write the scalar traces
    that (gen.batched/traces ps) gives), LLM completion traces, and generative
@@ -364,30 +375,41 @@
                       {:reason :choices-missing :weight w :score (:score t)})))
     t))
 
+(defn- numerics
+  "What the rounding of a score computed on backend b depends on: b's name
+   and its float dtype."
+  [b]
+  {:backend (array/backend-name b) :float (:float (array/defaults b))})
+
 (defn write-trace
-  "EDN text of the trace tr: #gen/trace {:args :choices :score}, from which
-   read-trace rebuilds it, given its generative function. The score written
-   is generate's, which this computes with tr's :gen-fn and checks to draw
-   nothing. A trace that keeps encapsulated randomness anywhere is a loud
-   error (see the namespace doc)."
+  "EDN text of the trace tr, #gen/trace {:numerics :args :choices :score},
+   from which read-trace rebuilds it, given its generative function. The
+   score written is generate's, which this computes with tr's :gen-fn and
+   checks to draw nothing; :numerics is the backend and float dtype it was
+   computed under. A trace that keeps encapsulated randomness anywhere is a
+   loud error (see the namespace doc)."
   [tr]
   (when-not (trace/trace? tr)
     (throw (ex-info (str "write-trace: takes a trace, not a " (.getName (class tr)))
                     {:reason :not-a-trace :class (class tr)})))
   (when-let [at (omega-at tr)]
     (throw (ex-info (str "write-trace: the trace keeps encapsulated randomness (:gen.trace/omega) at " at
-                         ", which generate would draw afresh (thesis §4.5), so it cannot be rebuilt")
+                         ", which generate would draw afresh (thesis §4.5): such traces are not serializable yet")
                     {:reason :encapsulated-randomness :path at})))
   (let [args (text-of #(emit! % (:args tr) [:args]))
         choices (text-of #(emit-choicemap! % (:choices tr) [:choices]))
         score (:score (rebuild :write-trace (:gen-fn tr) (:args tr) (:choices tr)))]
-    (str "#gen/trace {:args " args ", :choices " choices ", :score " (text-of #(emit! % score [:score])) "}")))
+    (str "#gen/trace {:numerics " (text-of #(emit! % (numerics (array/backend score)) [:numerics]))
+         ", :args " args ", :choices " choices ", :score " (text-of #(emit! % score [:score])) "}")))
 
-;; a #gen/trace's form, as read-trace reads the tag
+;; a #gen/trace's form, as read-trace-data reads the tag
 (deftype Written [form])
 
-(defn- read-written
-  "The {:args :choices :score} of the text s, a #gen/trace alone."
+(defn read-trace-data
+  "The parts of the written trace s (write-trace's text), not rebuilt:
+   {:numerics :args :choices :score}, its arrays on gen.array/*backend*.
+   Where read-trace refuses it, on another backend or float dtype,
+   (gfi/generate gf args choices) loads it there."
   [s]
   (let [bad #(throw (malformed 'gen/trace % {}))
         ;; tags are read inner first, so a trace inside another is the second
@@ -396,11 +418,15 @@
                                                    (when (< 1 (long (vswap! n inc))) (bad "holds another #gen/trace"))
                                                    (Written. form))))]
     (when-not (instance? Written x)
-      (throw (ex-info "read-trace: the text is not a written trace, #gen/trace {:args :choices :score}"
+      (throw (ex-info "read-trace: the text is not a written trace, #gen/trace {:numerics :args :choices :score}"
                       {:reason :not-a-trace})))
     (let [form (.-form ^Written x)]
-      (when-not (and (map? form) (= #{:args :choices :score} (set (keys form))))
-        (bad "is a map of :args, :choices and :score"))
+      (when-not (and (map? form) (= #{:numerics :args :choices :score} (set (keys form))))
+        (bad "is a map of :numerics, :args, :choices and :score"))
+      (when-not (let [ns (:numerics form)]
+                  (and (map? ns) (= #{:backend :float} (set (keys ns)))
+                       (keyword? (:backend ns)) (contains? dt/dtypes (:float ns))))
+        (bad "has :numerics that are not {:backend name :float dtype}"))
       (when-not (vector? (:args form)) (bad "has :args that are not a vector"))
       (when-not (cm/choicemap? (:choices form)) (bad "has :choices that are not a choice map"))
       (when-not (array/array? (:score form)) (bad "has a :score that is not a number"))
@@ -408,15 +434,24 @@
 
 (defn read-trace
   "gf's trace that the text s describes (write-trace's), rebuilt by
-   generate with every choice constrained. A rebuild that is not exact is a
-   loud error: a score other than the written one (a different generative
-   function, or another backend's numerics), a weight other than its score
-   (choices missing), or encapsulated randomness drawn."
+   generate with every choice constrained, on the backend and float dtype
+   it was written under. Anything else is a loud error: another backend or
+   float dtype (log densities round differently there: load the trace's
+   choices with read-trace-data and generate instead), a score other than
+   the written one (a different generative function), a weight other than
+   its score (choices missing), or encapsulated randomness drawn."
   [gf s]
-  (let [{:keys [args choices score]} (read-written s)
-        t (rebuild :read-trace gf args choices)]
-    (when-not (same-number? (:score t) score)
-      (throw (ex-info (str "read-trace: the rebuilt score " (array/item (:score t)) " is not the written "
-                           (array/item score) ": a different generative function, or another backend's numerics")
-                      {:reason :score-differs :score (:score t) :written score})))
-    t))
+  (let [{:keys [args choices score] written :numerics} (read-trace-data s)
+        here (numerics array/*backend*)]
+    (when-not (= written here)
+      (throw (ex-info (str "read-trace: the trace was written under " written " and is read under " here
+                           ": an exact rebuild is per backend and float dtype, whose log densities round"
+                           " differently. To load its choices here: (let [{:keys [args choices]}"
+                           " (gen.serialize/read-trace-data s)] (gen.gfi/generate gf args choices))")
+                      {:reason :other-numerics :written written :reading here})))
+    (let [t (rebuild :read-trace gf args choices)]
+      (when-not (same-number? (:score t) score)
+        (throw (ex-info (str "read-trace: the rebuilt score " (array/item (:score t)) " is not the written "
+                             (array/item score) ": a different generative function")
+                        {:reason :score-differs :score (:score t) :written score})))
+      t)))

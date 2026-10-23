@@ -16,7 +16,8 @@
      malformed tags and text, and rebuilds that are not exact.
    Each property was checked against a planted bug, noted in place."
   (:refer-clojure :exclude [+ *])
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as tcg]
             [clojure.test.check.properties :as prop]
@@ -306,12 +307,33 @@
       (let [tr (gfi/simulate gf args (rng/key k))]
         (is (same-trace? tr (rebuilt tr)))))))
 
-(deftest a-trace-is-written-as-its-arguments-choices-and-score
+(defn- numerics-here [] {:backend (array/backend-name array/*backend*) :float (ts/float-dtype)})
+
+(deftest a-trace-is-written-as-its-numerics-arguments-choices-and-score
   (let [tr (gfi/simulate with-x [0.5] (rng/key 1))
         text (serialize/write-trace tr)]
-    (is (= (str "#gen/trace {:args [0.5], :choices " (serialize/write (:choices tr)) ", :score " (serialize/write (:score tr)) "}")
+    (is (= (str "#gen/trace {:numerics " (serialize/write (numerics-here)) ", :args [0.5], :choices "
+                (serialize/write (:choices tr)) ", :score " (serialize/write (:score tr)) "}")
            text))
-    (is (= {:reason :trace} (ts/thrown-data (serialize/read text))) "read refuses a trace: it needs the generative function")))
+    (is (= {:reason :trace} (ts/thrown-data (serialize/read text))) "read refuses a trace: it needs the generative function")
+    (let [{:keys [numerics args choices score]} (serialize/read-trace-data text)]
+      (is (= (numerics-here) numerics))
+      (is (same? [(:args tr) (:choices tr) (:score tr)] [args choices score]) "read-trace-data's parts, not rebuilt"))))
+
+;; Planted bug (2026-10-23): read-trace not comparing the numerics; the
+;; trace is read back as though written here, and this fails.
+(deftest a-trace-is-rebuilt-only-under-the-numerics-it-was-written-under
+  (let [tr (gfi/simulate with-x [0.5] (rng/key 1))
+        text (serialize/write-trace tr)
+        here (serialize/write (numerics-here))]
+    (doseq [elsewhere [{:backend (if (ts/jvm?) :mlx :jvm) :float (ts/float-dtype)}
+                       {:backend (array/backend-name array/*backend*) :float (if (ts/f32?) :float64 :float32)}]]
+      (let [moved (str/replace text here (serialize/write elsewhere))
+            data (ts/thrown-data (serialize/read-trace with-x moved))]
+        (is (= {:reason :other-numerics :written elsewhere :reading (numerics-here)} data))
+        (testing "read-trace-data's parts load it with generate"
+          (let [{:keys [args choices]} (serialize/read-trace-data moved)]
+            (is (same? (:choices tr) (:choices (:trace (gfi/generate with-x args choices (rng/key 2))))))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Encapsulated randomness
@@ -418,12 +440,19 @@
     (testing "choices the generative function does not make: generate's own error"
       (is (:unvisited (ts/thrown-data (serialize/read-trace (gen [m] (trace :x (d/normal m 2))) text)))))
     (testing "text that is not one written trace"
-      (doseq [[s reason] [["1" :not-a-trace]
-                          ["[#gen/trace {:args [] :choices #gen/choicemap {} :score 0.0}]" :not-a-trace]
-                          ["#gen/trace {:args [] :choices #gen/choicemap {}}" :malformed]
-                          ["#gen/trace (:args [] :choices)" :malformed]
-                          ["#gen/trace {:args () :choices #gen/choicemap {} :score 0.0}" :malformed]
-                          ["#gen/trace {:args [] :choices {} :score 0.0}" :malformed]
-                          ["#gen/trace {:args [] :choices #gen/choicemap {} :score :a}" :malformed]
-                          ["#gen/trace {:args [#gen/trace {:args [] :choices #gen/choicemap {} :score 0.0}] :choices #gen/choicemap {} :score 0.0}" :malformed]]]
+      (doseq [[s reason] (let [n (serialize/write (numerics-here))
+                               t #(str "#gen/trace {:numerics " n " " % "}")]
+                           [["1" :not-a-trace]
+                            [(str "[" (t ":args [] :choices #gen/choicemap {} :score 0.0") "]") :not-a-trace]
+                            [(t ":args [] :choices #gen/choicemap {}") :malformed]
+                            ["#gen/trace {:args [] :choices #gen/choicemap {} :score 0.0}" :malformed]
+                            ["#gen/trace (:numerics [] :args)" :malformed]
+                            [(t ":args () :choices #gen/choicemap {} :score 0.0") :malformed]
+                            [(t ":args [] :choices {} :score 0.0") :malformed]
+                            [(t ":args [] :choices #gen/choicemap {} :score :a") :malformed]
+                            ["#gen/trace {:numerics {:backend :jvm} :args [] :choices #gen/choicemap {} :score 0.0}" :malformed]
+                            ["#gen/trace {:numerics {:backend :jvm :float :float128} :args [] :choices #gen/choicemap {} :score 0.0}" :malformed]
+                            ["#gen/trace {:numerics (:backend :jvm :float) :args [] :choices #gen/choicemap {} :score 0.0}" :malformed]
+                            [(t (str ":args [" (t ":args [] :choices #gen/choicemap {} :score 0.0") "] :choices #gen/choicemap {} :score 0.0"))
+                             :malformed]])]
         (is (= reason (:reason (ts/thrown-data (serialize/read-trace with-x s)))) s)))))
