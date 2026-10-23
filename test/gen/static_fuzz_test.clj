@@ -4,12 +4,12 @@
    the same body's without ^:static (laws/static); compiled HMC and MALA
    steps equal to plain ones, and a static model's steps equal to its
    dynamic body's; the generator reaching every feature; a failing spec
-   shrunk and printed as data and as the form it became; and a bug the
-   fuzzer found in gen.diff's sum rules, stated as known."
+   shrunk and printed as data and as the form it became; and the bug the
+   fuzzer found in gen.diff's sum rules."
   (:require [clojure.edn :as edn]
             [clojure.set :as set]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is]]
+            [clojure.test :refer [deftest is testing]]
             [clojure.test.check :as tc]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as tcg]
@@ -194,21 +194,26 @@
 ;; A bug the fuzzer found
 ;; ---------------------------------------------------------------------------
 
-(deftest known-bug-a-sum-s-int-diff-through-a-float
-  ;; Found by the static law at length (2026-10-23), reported, not fixed
-  ;; here: gen.diff's + and - rules give the sum of an integer argument with
-  ;; an int-diff and a float an int-diff, which the float's rounding breaks
-  ;; (diff/consistent? compares exactly), so a static body's retdiff is
-  ;; unsound for about one key in six. The assertion states the bug, so that
-  ;; the suite passes while it stands: when the rules give an int-diff only
-  ;; for integers, assert there is none, and give gen.random-static-models's
-  ;; :hinted arguments integer alternatives again. (On the JVM backend: a
-  ;; float return value is a host number there.)
-  (when (ts/jvm?)
-    (let [sum (gen ^:static [n] (let [r (trace :r (d/normal 0.0 1.0))] (array/+ n r)))
-          inconsistent (for [k (range 200)
-                             :let [tr (gfi/simulate sum [2] (rng/key k))
-                                   {t :trace rd :retdiff} (gfi/update tr [3] [(diff/compute 2 3)] cm/EMPTY (rng/key 1))]
-                             :when (not (diff/consistent? (:retval tr) (:retval t) rd))]
-                         k)]
-      (is (seq inconsistent)))))
+(deftest a-sum-with-a-float-has-no-int-diff
+  ;; Found by the static law at length (2026-10-23): gen.diff's + and -
+  ;; rules gave the sum of an integer argument with an int-diff and a float
+  ;; an int-diff, which the float's rounding breaks (diff/consistent?
+  ;; compares exactly), so a static body's retdiff was unsound for 32 keys
+  ;; of these 200. An int-diff now needs every operand to be an integer.
+  ;; Planted bug (2026-10-24): the old rules fail every assertion here but
+  ;; the all-integer ones.
+  (testing "the rules"
+    (doseq [f [#'clojure.core/+ #'array/+ #'clojure.core/- #'array/-]]
+      (is (diff/unknown-change? (diff/propagate f [3 0.1] [(diff/int-diff 1) diff/no-change])) (str f))
+      (is (diff/int-diff? (diff/propagate f [3 4] [(diff/int-diff 1) diff/no-change])) (str f " of integers")))
+    (is (diff/unknown-change? (diff/propagate #'clojure.core/inc [3.0] [(diff/int-diff 1)])))
+    (is (= (diff/int-diff 3) (diff/propagate #'array/+ [3 4] [(diff/int-diff 1) (diff/int-diff 2)]))))
+  (testing "a static body's retdiff, the change in an integer argument added to a float"
+    (doseq [[label body] [["+" (gen ^:static [n] (let [r (trace :r (d/normal 0.0 1.0))] (array/+ n r)))]
+                          ["-" (gen ^:static [n] (let [r (trace :r (d/normal 0.0 1.0)) y (array/- n r)] y))]]]
+      (let [inconsistent (for [k (range 200)
+                               :let [tr (gfi/simulate body [2] (rng/key k))
+                                     {t :trace rd :retdiff} (gfi/update tr [3] [(diff/compute 2 3)] cm/EMPTY (rng/key 1))]
+                               :when (not (diff/consistent? (:retval tr) (:retval t) rd))]
+                           k)]
+        (is (empty? inconsistent) label)))))
