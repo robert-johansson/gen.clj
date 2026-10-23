@@ -103,6 +103,21 @@
 
 (defn- funnel-start [] (start-at funnel [] (apply cm/choicemap :v 0.0 (mapcat #(vector [:x %] 0.5) (range 9)))))
 
+(defn- non-centered
+  "The funnel non-centered, with v's prior scale: z_i ~ N(0, 1) traced and
+   x_i = z_i·e^{v/2} computed, so the sampler sees independent normals."
+  [scale]
+  (gen [] (let [v (trace :v (d/normal 0 scale))]
+            (mapv (fn [i] (* (trace [:z i] (d/normal 0 1)) (array/exp (* 0.5 v)))) (range 9)))))
+
+(def non-centered-selection (apply sel/select :v (map #(vector :z %) (range 9))))
+
+(defn- funnel-chains
+  "v's draws from four chains of nuts/sample (keys 1 to 4), each of 1000
+   warmup iterations and 1000 draws."
+  [start selection]
+  (dg/draws (map #(:traces (nuts/sample start selection {:samples 1000 :warmup 1000} (rng/key %))) (range 1 5)) :v))
+
 ;; ---------------------------------------------------------------------------
 ;; The tree
 ;; ---------------------------------------------------------------------------
@@ -355,6 +370,34 @@
                                   [(funnel-start) 0] (rng/split (rng/key 23) 100)))]
       (is (pos? divergences))
       (is (= by-hand divergences)))))
+
+(deftest ^:slow ^:heavy the-diagnostics-flag-the-centered-funnel
+  ;; Four chains on the centered funnel seldom enter its neck (P(v < -3) is
+  ;; 0.013 against 0.159, with one divergence in the four), and the
+  ;; diagnostics say so: the chains disagree (R-hat 1.07, over Vehtari et
+  ;; al.'s 1.01) and v's bulk ESS is 77, under their 100 a chain. Planted
+  ;; bug (2026-10-23): every chain a copy of the first, whose halves agree,
+  ;; leaves R-hat 1.00 (and the ESS 83)
+  (let [vs (funnel-chains (funnel-start) funnel-selection)]
+    (is (< 1.01 (dg/r-hat vs)))
+    (is (< (dg/ess-bulk vs) 400.0))))
+
+(deftest ^:slow ^:heavy the-non-centered-funnel-samples-v-exactly
+  ;; Non-centered, the same four chains agree (R-hat 1.003, bulk ESS 7100)
+  ;; and sample v ~ N(0, 3): P(v < -3) = Φ(-1) and P(v < q) = 0.05 at the
+  ;; exact 5% quantile q = 3·Φ⁻¹(0.05), within 5 Monte Carlo standard
+  ;; errors (the indicators' MCSE, so the quantile's band is the CDF's at
+  ;; it). Planted bug (2026-10-23): v's prior scale 2.5, not 3, puts
+  ;; P(v < -3) 7.9 standard errors off and P(v < q) 10.6
+  (let [vs (funnel-chains (start-at (non-centered 3) [] (apply cm/choicemap :v 0.0 (mapcat #(vector [:z %] 0.5) (range 9))))
+                          non-centered-selection)
+        below (fn [t] (mapv (fn [chain] (mapv #(if (< % t) 1.0 0.0) chain)) vs))
+        q05 (* 3.0 -1.6448536269514722)]
+    (is (< (dg/r-hat vs) 1.01))
+    (is (<= 400.0 (dg/ess-bulk vs)))
+    (doseq [[label t p] [["P(v < -3)" -3.0 0.15865525393145707] ["P(v < q05)" q05 0.05]]]
+      (let [ind (below t)]
+        (is (< (Math/abs (double (- (mean (apply concat ind)) p))) (* 5.0 (dg/mcse-mean ind))) label)))))
 
 (deftest ^:slow ^:heavy adaptive-hmc-samples-the-correlated-gaussian
   ;; jittered, so the chain mixes wherever the adaptation lands: on Metal,
