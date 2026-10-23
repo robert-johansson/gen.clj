@@ -85,10 +85,9 @@
 
 (defn- near?
   "Equal up to rounding: the runs compute the same values, in other orders
-   (the score fn's sum against the handler's) or as one compiled graph
-   (laws/close?'s band on float32). opts: :equal-nan?."
-  ([x y] (near? x y nil))
-  ([x y opts] (ts/close? x y (merge (if (ts/f32?) {:rtol 1e-4 :atol 1e-3} {:rtol 1e-9 :atol 1e-9}) opts))))
+   (the score fn's sum against the handler's) or as one compiled graph."
+  [x y]
+  (if (ts/f32?) (laws/close? x y) (ts/close? x y {:rtol 1e-9 :atol 1e-9})))
 
 (defn- leaves [x] (if (sequential? x) (mapcat leaves x) [x]))
 
@@ -103,10 +102,7 @@
       (and (= (select-keys a [:accepted? :diverged? :tree-depth :n-leapfrog])
               (select-keys b [:accepted? :diverged? :tree-depth :n-leapfrog]))
            (every? #(or (= nil (% a) (% b)) (near? (% a) (% b))) [:log-alpha :accept-stat :energy])
-           ;; a NaN score is every run's: Map's and Unfold's incremental
-           ;; score after an update out of the support and back (a known
-           ;; bug of gen.combinators, 2026-10-24)
-           (near? (:score (:trace a)) (:score (:trace b)) {:equal-nan? true})
+           (near? (:score (:trace a)) (:score (:trace b)))
            (= (set (cm/addresses ca)) (set (cm/addresses cb)))
            (every? (fn [p] (every? true? (map near? (values ca p) (values cb p)))) (cm/addresses ca))))))
 
@@ -123,7 +119,11 @@
   ;; arguments, HMC's and NUTS's steps closing over the other choices, HMC's
   ;; over the step size, MALA's cached without tau, and a stop-gradient on
   ;; the score fn's choices fail it in both; HMC's step closing over the
-  ;; inverse metric, in one.
+  ;; inverse metric, in one. It found genclj-awd0 (2026-10-24): a chain
+  ;; whose new arguments took a Map of uniforms out of its support and back
+  ;; started a step from a NaN score (Map's and Unfold's incremental score,
+  ;; -Inf + Inf), which every run kept alike and same-move? does not equate;
+  ;; at the default count the case is rare (once in about 180).
   (prop/for-all [[_ gf args alt-args] rsm/gen-continuous-model
                  kernels (tcg/vector gen-kernel 1 2)
                  moves (tcg/vector gen-move 2 8)
