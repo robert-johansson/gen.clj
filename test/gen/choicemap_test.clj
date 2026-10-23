@@ -133,7 +133,12 @@
         stacked (cm/stack cs)]
     (is (= [1.0 3.0] (array/->clj (cm/get-choice stacked :a))))
     (is (= (ts/host cs) (ts/host (cm/unstack stacked 2))))
-    (is (thrown? clojure.lang.ExceptionInfo (cm/stack [(cm/choicemap :a 1.0) (cm/choicemap :b 1.0)])))))
+    (is (thrown? clojure.lang.ExceptionInfo (cm/stack [(cm/choicemap :a 1.0) (cm/choicemap :b 1.0)]))))
+  (testing "host scalars stack as array/stack stacks them"
+    (doseq [vs [[1 2] [1.0 2] [true false] [true 1]]]
+      (let [stacked (cm/get-choice (cm/stack (mapv #(cm/choicemap :v %) vs)) :v)]
+        (is (= (array/dtype (array/stack vs)) (array/dtype stacked)) (pr-str vs))
+        (is (= (array/->clj (array/stack vs)) (array/->clj stacked)) (pr-str vs))))))
 
 (defspec to-array-from-array-round-trips 200
   (prop/for-all [c gen-choicemap]
