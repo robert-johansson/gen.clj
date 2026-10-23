@@ -22,11 +22,33 @@
    a gen body, or a vector get or contains? with a batched key
    (docs/array-api.md §8a). For the commonest of these, unread-bools reports
    the batched comparisons that no op read: every op marks the values it
-   reads, and a raw if reads nothing."
+   reads, and a raw if reads nothing.
+
+   Gradients are vmap's: array/value-and-grad of batched arguments, or
+   anywhere in a batched run, gives each particle the value and gradient of
+   its own scalar run, a shared argument's gradient included (summed over
+   the particles, it is the gradient of their total). The tape
+   (gen.array.tape) wraps the tracer:
+   - its primals are batched or shared values, and each op's primal runs
+     through the tracer, per particle;
+   - so does the backward pass, whose rules are written against gen.array
+     (the linear-algebra ones against the tape's inner backend, the
+     tracer), so particle i's cotangents are its own scalar pass's;
+   - neither knows the other: gen.array joins their values (a wrapping
+     backend wraps what its inner backend wraps), and the tracer passes an
+     op with no batched operand to the backend it wraps;
+   - custom-vjp is one node whose function and rule run through the tracer
+     (one that reads a value on the host raises the batched-branch error),
+     and stop-gradient an op without a rule.
+   A native transformation (MLX's, p/INativeGrad) cannot wrap the tracer,
+   so the tracer runs inside it (value-and-grad-inside). A batched run
+   inside a differentiated function, the tape outside the tracer, is a loud
+   error: differentiate inside the run, and sum."
   (:require [gen.array :as array]
             [gen.array.dtype :as dt]
             [gen.array.protocols :as p]
-            [gen.array.shape :as sh]))
+            [gen.array.shape :as sh]
+            [gen.array.tape :as tape]))
 
 (set! *warn-on-reflection* true)
 
@@ -88,7 +110,7 @@
   (.markRead x)
   (let [v (.-v x)] (if (delay? v) @v v)))
 
-(declare backend lift full-batch made)
+(declare backend lift full-batch made value-and-grad-inside)
 
 (deftype BatchBackend [inner batch-shape]
   p/IWrappingBackend
@@ -129,14 +151,17 @@
       (if (array/host? x) (dt/host-cast x dtype) (p/-astype inner x dtype))))
 
   (-elementwise [b op args dtype]
-    (let [;; the per-particle rank, from the operands' per-particle
-          ;; broadcast: checked before they are lifted, so a mismatch names
-          ;; the model's shapes (unbatched, the backend checks as it
-          ;; broadcasts; genclj-q45d)
-          r (count (reduce (fn [s x] (sh/broadcast s (p/-shape b x))) [] args))
-          lifted (mapv #(lift b % r) args)
-          out (p/-elementwise inner op lifted dtype)]
-      (if (some batched? args) (made out b) out)))
+    (if (some batched? args)
+      (let [;; the per-particle rank, from the operands' per-particle
+            ;; broadcast: checked before they are lifted, so a mismatch names
+            ;; the model's shapes (unbatched, the backend checks as it
+            ;; broadcasts; genclj-q45d)
+            r (count (reduce (fn [s x] (sh/broadcast s (p/-shape b x))) [] args))
+            lifted (mapv #(lift b % r) args)]
+        (made (p/-elementwise inner op lifted dtype) b))
+      ;; shared operands only, which the tape over the tracer passes on
+      ;; (gen.array never does: they are not this backend's)
+      (p/-elementwise inner op args dtype)))
 
   (-reduce [b op x axes keep-dims?]
     (if (batched? x)
@@ -243,11 +268,27 @@
   (-random-uniform [b key shape dtype]
     (made (p/-random-uniform inner key (into batch-shape shape) dtype) b))
 
-  (-value-and-grad [_ f args argnums]
-    (if (some batched? (mapcat #(array/tree-leaves (nth args %)) argnums))
-      (throw (array/batched-branch "Differentiating with respect to batched values is not supported" {}))
-      ;; unbatched leaves: an ordinary gradient on the wrapped backend
-      (p/-value-and-grad inner f args argnums))))
+  (-value-and-grad [b f args argnums]
+    (if (and (instance? gen.array.protocols.INativeGrad inner) (p/-native-grad? inner))
+      (value-and-grad-inside b f args argnums)
+      ;; the tape over the tracer: vmap's gradient (see the namespace doc)
+      (tape/value-and-grad b f args argnums)))
+
+  p/ICustomVjp
+  (-custom-vjp [b f vjp args]
+    (cond (not (instance? gen.array.protocols.ICustomVjp inner)) (apply f args)
+          (not-any? batched? args) (p/-custom-vjp inner f vjp args)
+          :else
+          ;; the wrapped backend differentiates through f by the rule (MLX's
+          ;; native gradients, value-and-grad-inside): both lifted to its
+          ;; whole batches, each particle's cotangents its own
+          (let [particles (fn [vs] (mapv #(made % b) vs))]
+            (made (p/-custom-vjp inner
+                                 (fn [& vs] (full-batch b (apply f (particles vs))))
+                                 (fn [vs out g]
+                                   (mapv #(some->> % (full-batch b)) (vjp (particles vs) (made out b) (made g b))))
+                                 (mapv #(full-batch b %) args))
+                  b)))))
 
 (def ^:dynamic ^:private *bools*
   "The batched bool values made in the run in effect (unread-bools), or nil."
@@ -304,6 +345,34 @@
   "x as an array of the wrapped backend with the full batch axes."
   [^BatchBackend b x]
   (with-batch-axes (.-inner b) x (.-batch-shape b)))
+
+;; ---------------------------------------------------------------------------
+;; Gradients inside a native transformation
+;; ---------------------------------------------------------------------------
+
+(defn- value-and-grad-inside
+  "-value-and-grad by the wrapped backend's own transformation (MLX's
+   native gradients, p/INativeGrad), which calls the function it
+   differentiates with arrays of its own: so the tracer runs inside it. It
+   differentiates g, the sum over the particles of f, at the differentiated
+   leaves as whole batches (a shared leaf broadcast to every particle, so
+   that its gradient is per particle). Particle i's output depends on its
+   own values only, so the gradient of the sum with respect to particle i's
+   slice is particle i's gradient. f's per-particle value is kept from the
+   call."
+  [^BatchBackend b f args argnums]
+  (let [inner (.-inner b)
+        at (fn [args h] (reduce (fn [as i] (update as i #(array/tree-map h %))) (vec args) argnums))
+        value (volatile! nil)
+        g (fn [& as]
+            (let [y (apply f (at as #(made % b)))]
+              (when-not (and (array/array? y) (= [] (array/shape y)))
+                (throw (ex-info "value-and-grad needs a function returning a scalar"
+                                {:shape (when (array/array? y) (array/shape y)) :value y})))
+              (vreset! value y)
+              (p/-reduce inner :sum (full-batch b y) (vec (range (count (.-batch-shape b)))) false)))
+        [_ grads] (p/-value-and-grad inner g (at args #(full-batch b %)) argnums)]
+    [@value (mapv (fn [t] (array/tree-map #(made % b) t)) grads)]))
 
 (def ^:private backends (atom {}))
 
