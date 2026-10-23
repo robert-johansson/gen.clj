@@ -157,7 +157,14 @@
            (ts/thrown-data (dg/r-hat [1 ##-Inf 3 4]))))
     (is (= :unequal-chains (reason [[1 2 3 4] [1 2 3 4 5]])))
     (is (= {:reason :too-few-draws :draws 3 :minimum 4} (ts/thrown-data (dg/ess-tail [[1 2 3] [4 5 6]]))))
-    (is (= :invalid-prob (:reason (ts/thrown-data (dg/summary [1 2 3 4] {:probs [0.5 1.5]})))))))
+    (is (= :invalid-prob (:reason (ts/thrown-data (dg/summary [1 2 3 4] {:probs [0.5 1.5]})))))
+    (testing "second moments past a double's range; ranks have none"
+      (let [draws (:draws (fixture "short"))]
+        (doseq [scale [1e200 1e-170]
+                :let [scaled (mapv #(mapv (fn [x] (* scale x)) %) draws)]]
+          (is (= :out-of-range (:reason (ts/thrown-data (dg/ess-mean scaled)))) (str scale))
+          (is (= (dg/ess-bulk draws) (dg/ess-bulk scaled)) (str scale)))
+        (is (= :out-of-range (:reason (ts/thrown-data (dg/split-r-hat (mapv #(mapv (fn [x] (* 1e200 x)) %) draws))))))))))
 
 (deftest summary-quantiles
   (let [draws [[1.0 2.0 3.0 4.0] [5.0 6.0 7.0 8.0]]]

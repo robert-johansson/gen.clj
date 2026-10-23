@@ -36,9 +36,10 @@
    (O(S·n)) for chains that do not.
 
    As ArviZ, constant draws (a quantile's indicator included) have the
-   nominal ESS S, and R-hat is NaN when every draw is the same (0/0) and
-   +Inf for chains stuck at different values. R-hat of one chain is that of
-   its halves, as Stan's posterior computes it (ArviZ's is NaN).
+   nominal ESS S; when every draw is the same, R-hat and mcse-sd are 0/0,
+   NaN (and mcse-mean 0), and chains stuck at different values have R-hat
+   +Inf. R-hat of one chain is that of its halves, as Stan's posterior
+   computes it (ArviZ's is NaN).
 
    Invalid draws are loud errors, with :reason in the ex-data:
 
@@ -47,6 +48,9 @@
      :non-finite      a draw is NaN or infinite
      :unequal-chains  the chains differ in length
      :too-few-draws   the chains have fewer than 4 draws
+     :out-of-range    the draws' second moments overflow a double, or for
+                      an ESS underflow to 0 (spreads past about 1e±154;
+                      1e±77 for mcse-sd)
      :non-scalar      (draws) a value is not a number, boolean or 0-d array"
   (:require [gen.array :as array]
             [gen.array.special :as special]
@@ -262,6 +266,15 @@
           (recur (inc k) (+ sum monotone) (Math/min monotone p) e p))
         (+ -1.0 (* 2.0 sum) (if (or (pos? even) (>= pair 0.0)) even 0.0))))))
 
+(defn- representable!
+  "Throws unless ok?: the draws' second moments overflowed a double (or
+   underflowed to 0 for draws that differ), so no ESS or R-hat comes of
+   them."
+  [ok? data]
+  (when-not ok?
+    (invalid! :out-of-range "The draws' second moments overflow or underflow a double: rescale the draws"
+              data)))
+
 (defn- constant? [cs]
   (let [v (aget ^doubles (first cs) 0)]
     (every? (fn [^doubles x] (areduce x i same true (and same (== (aget x i) v)))) cs)))
@@ -279,9 +292,9 @@
       (let [means (double-array (map mean cs))
             centered (mapv (fn [^doubles x ^double mu] (amap x i _ (- (aget x i) mu))) cs means)
             w (/ (double (reduce + (map #(lag-product % 0) centered))) (* m (dec n)))
-            var+ (+ (/ (* w (dec n)) n) (variance means))
-            tau (Math/max (autocorrelation-time centered w var+) (/ 1.0 (Math/log10 size)))]
-        (/ size tau)))))
+            var+ (+ (/ (* w (dec n)) n) (variance means))]
+        (representable! (and (Double/isFinite var+) (pos? var+)) {:variance var+})
+        (/ size (Math/max (autocorrelation-time centered w var+) (/ 1.0 (Math/log10 size))))))))
 
 (defn- r-hat*
   "Gelman and Rubin's potential scale reduction of two or more chains of
@@ -291,6 +304,7 @@
   (let [n (alength ^doubles (first cs))
         w (mean (double-array (map variance cs)))
         b (* n (variance (double-array (map mean cs))))]
+    (representable! (Double/isFinite (+ w b)) {:within w :between b})
     (Math/sqrt (/ (+ (/ b w) (dec n)) n))))
 
 (defn- quantile-ess
