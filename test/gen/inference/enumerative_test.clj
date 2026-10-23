@@ -170,13 +170,14 @@
     (enum/choice-vol-grid [:drift (mapv #(- (* 0.1 %) 3.0) (range 61)) :continuous]) true]
    [:switch (gen [] (let [mu (trace :mu (d/normal 0 1))] (splice :s (comb/switch kernel doubled) 1 mu)))
     [] (cm/choicemap [:s :y] 0.7) mu-grid true]
-   ;; the Switch's index a grid value, so per particle (one particle at a
-   ;; time until genclj-7tqw batches it)
+   ;; the Switch's index a grid value, so per particle: each branch runs on
+   ;; its own points, the shared constraint in each (by partition,
+   ;; genclj-7tqw)
    [:switch-index (gen [] (let [mu (trace :mu (d/normal 0 1))
                                 k (trace :k (d/categorical [0.5 0.5]))]
                             (splice :s (comb/switch kernel doubled) k mu)))
     [] (cm/choicemap [:s :y] 0.7)
-    (enum/choice-vol-grid [:mu (mapv #(- (* 0.1 %) 3.0) (range 61)) :continuous] [:k [0 1]]) nil]])
+    (enum/choice-vol-grid [:mu (mapv #(- (* 0.1 %) 3.0) (range 61)) :continuous] [:k [0 1]]) true]])
 
 (deftest batched-enumeration-is-the-scalar-loop
   ;; every choice given, so point by point the same: a model that branches

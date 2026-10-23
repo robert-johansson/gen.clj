@@ -43,12 +43,19 @@
    A native transformation (MLX's, p/INativeGrad) cannot wrap the tracer,
    so the tracer runs inside it (value-and-grad-inside). A batched run
    inside a differentiated function, the tape outside the tracer, is a loud
-   error: differentiate inside the run, and sum."
+   error: differentiate inside the run, and sum.
+
+   Some of a batch's particles can run apart, in parts (a Switch whose index
+   differs across them, gen.partition): a part's backend (part-backend)
+   draws what the batch's own run would for its particles, gather-into
+   takes their rows of the batch's values into it, and join and scatter
+   put parts' values back together. Parts holds a batch's data by part."
   (:require [gen.array :as array]
             [gen.array.dtype :as dt]
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]
-            [gen.array.tape :as tape]))
+            [gen.array.tape :as tape]
+            [gen.array.tree :as tree]))
 
 (set! *warn-on-reflection* true)
 
@@ -110,9 +117,11 @@
   (.markRead x)
   (let [v (.-v x)] (if (delay? v) @v v)))
 
-(declare backend lift full-batch made value-and-grad-inside)
+(declare backend lift full-batch made value-and-grad-inside by-kind)
 
-(deftype BatchBackend [inner batch-shape]
+;; draws is nil, or [shape rows] for a part of a batch (part-backend): the
+;; draws of the batch of shape at rows, an int array of the wrapped backend.
+(deftype BatchBackend [inner batch-shape draws]
   p/IWrappingBackend
   (-inner [_] inner)
 
@@ -266,13 +275,17 @@
         (p/-linalg inner op args))))
 
   (-random-uniform [b key shape dtype]
-    (made (p/-random-uniform inner key (into batch-shape shape) dtype) b))
+    (made (if-let [[full rows] draws]
+            (p/-take inner (p/-random-uniform inner key (into full shape) dtype) rows 0)
+            (p/-random-uniform inner key (into batch-shape shape) dtype))
+          b))
 
   (-value-and-grad [b f args argnums]
-    (if (and (instance? gen.array.protocols.INativeGrad inner) (p/-native-grad? inner))
-      (value-and-grad-inside b f args argnums)
-      ;; the tape over the tracer: vmap's gradient (see the namespace doc)
-      (tape/value-and-grad b f args argnums)))
+    (let [[v grads] (if (and (instance? gen.array.protocols.INativeGrad inner) (p/-native-grad? inner))
+                      (value-and-grad-inside b f args argnums)
+                      ;; the tape over the tracer: vmap's gradient (see the namespace doc)
+                      (tape/value-and-grad b f args argnums))]
+      [v (by-kind b v args argnums grads)]))
 
   p/ICustomVjp
   (-custom-vjp [b f vjp args]
@@ -350,29 +363,63 @@
 ;; Gradients inside a native transformation
 ;; ---------------------------------------------------------------------------
 
+(defn- by-kind
+  "grads, f's gradients with respect to args at argnums, each batched
+   exactly when its argument or f's value v is (a shared one broadcast to
+   every particle): so that the tape and a native transformation, which
+   compute the same values, also give them in the same kind."
+  [b v args argnums grads]
+  (mapv (fn [i g]
+          (tree/refill g (map (fn [leaf gl]
+                                (if (and (or (batched? leaf) (batched? v)) (not (batched? gl)))
+                                  (made (full-batch b gl) b)
+                                  gl))
+                              (tree/leaves (nth args i)) (tree/leaves g))))
+        argnums grads))
+
 (defn- value-and-grad-inside
   "-value-and-grad by the wrapped backend's own transformation (MLX's
    native gradients, p/INativeGrad), which calls the function it
    differentiates with arrays of its own: so the tracer runs inside it. It
-   differentiates g, the sum over the particles of f, at the differentiated
-   leaves as whole batches (a shared leaf broadcast to every particle, so
-   that its gradient is per particle). Particle i's output depends on its
-   own values only, so the gradient of the sum with respect to particle i's
-   slice is particle i's gradient. f's per-particle value is kept from the
+   differentiates g at the differentiated leaves, a batched one as its
+   whole batch: g is f where f's value is shared (nothing batched reached
+   it), and the sum over the particles of f where it is batched. Particle
+   i's value depends on its own values only, so the gradient of the sum
+   with respect to particle i's slice is particle i's gradient. A shared
+   leaf's gradient is then per particle only if the leaf is broadcast to
+   every particle first: when the value turns out batched with a shared
+   leaf, f runs again, on the broadcast leaves. f's value is kept from the
    call."
   [^BatchBackend b f args argnums]
   (let [inner (.-inner b)
-        at (fn [args h] (reduce (fn [as i] (update as i #(array/tree-map h %))) (vec args) argnums))
-        value (volatile! nil)
-        g (fn [& as]
-            (let [y (apply f (at as #(made % b)))]
-              (when-not (and (array/array? y) (= [] (array/shape y)))
-                (throw (ex-info "value-and-grad needs a function returning a scalar"
-                                {:shape (when (array/array? y) (array/shape y)) :value y})))
-              (vreset! value y)
-              (p/-reduce inner :sum (full-batch b y) (vec (range (count (.-batch-shape b)))) false)))
-        [_ grads] (p/-value-and-grad inner g (at args #(full-batch b %)) argnums)]
-    [@value (mapv (fn [t] (array/tree-map #(made % b) t)) grads)]))
+        leaves (fn [as i] (tree/leaves (nth as i)))
+        shared? (some #(not (batched? %)) (mapcat #(leaves args %) argnums))
+        attempt (fn [copies?]
+                  ;; a leaf as the transformation takes it, its whole batch
+                  ;; where it is batched (or broadcast, copies?), and back
+                  (let [whole? #(or copies? (batched? %))
+                        out (volatile! nil)
+                        in (reduce (fn [as i] (update as i #(array/tree-map (fn [l] (if (whole? l) (full-batch b l) l)) %)))
+                                   (vec args) argnums)
+                        g (fn [& as]
+                            (let [as (reduce (fn [as i]
+                                               (assoc as i (tree/refill (nth as i)
+                                                                        (map #(if (whole? %1) (made %2 b) %2) (leaves args i) (leaves as i)))))
+                                             (vec as) argnums)
+                                  y (apply f as)]
+                              (when-not (and (array/array? y) (= [] (array/shape y)))
+                                (throw (ex-info "value-and-grad needs a function returning a scalar"
+                                                {:shape (when (array/array? y) (array/shape y)) :value y})))
+                              (vreset! out y)
+                              (cond (not (batched? y)) y
+                                    (and shared? (not copies?)) (throw (ex-info "A shared leaf of a batched value" {::copies true}))
+                                    :else (p/-reduce inner :sum (value y) (vec (range (count (.-batch-shape b)))) false))))
+                        [_ grads] (p/-value-and-grad inner g in argnums)]
+                    [@out (mapv (fn [i gr] (tree/refill gr (map #(if (whole? %1) (made %2 b) %2) (leaves args i) (tree/leaves gr))))
+                                  argnums grads)]))]
+    (try (attempt false)
+         (catch clojure.lang.ExceptionInfo e
+           (if (::copies (ex-data e)) (attempt true) (throw e))))))
 
 (def ^:private backends (atom {}))
 
@@ -382,7 +429,7 @@
   [inner batch-shape]
   (let [k [inner (vec batch-shape)]]
     (or (get @backends k)
-        (get (swap! backends #(if (contains? % k) % (assoc % k (->BatchBackend inner (vec batch-shape))))) k))))
+        (get (swap! backends #(if (contains? % k) % (assoc % k (->BatchBackend inner (vec batch-shape) nil)))) k))))
 
 (defn batch-backend?
   "Is b a batch backend (the tracer)?"
@@ -432,3 +479,109 @@
    every particle."
   [x batch-shape]
   (with-batch-axes (array/backend x) x batch-shape))
+
+;; ---------------------------------------------------------------------------
+;; Parts of a batch
+;; ---------------------------------------------------------------------------
+
+;; Code that runs some of a batch's particles apart (a Switch whose index
+;; differs across them runs each branch on its own: DESIGN.md §9) runs under
+;; a part's backend (part-backend), takes the part's rows of the batch's
+;; values into it (gather-into), and puts its results back (scatter). Such a
+;; batch has one axis.
+
+(defrecord Parts [groups])
+;; A batch's data that differs in structure across its particles, by part:
+;; groups is a vector of {:key :rows :data}, the data of the particles at
+;; rows (host integers, in the order the part holds them), itself a batch of
+;; their number; the particles of a group share key (a Switch's branch).
+
+(defn parts?
+  "Is x a batch's data held by parts (Parts)?"
+  [x]
+  (instance? Parts x))
+
+(defn- one-axis
+  "b's batch shape, which must have one axis."
+  [^BatchBackend b]
+  (let [bs (.-batch-shape b)]
+    (when-not (== 1 (count bs))
+      (throw (array/batched-branch "Parts of a batch of more than one axis" {:batch-shape bs})))
+    bs))
+
+(defn size
+  "The number of particles of b, a batch backend of one axis."
+  [b]
+  (long (first (one-axis b))))
+
+(defn index-array
+  "rows (host integers) as an int array of the batch backend b's wrapped
+   backend: gather-into's indices."
+  [^BatchBackend b rows]
+  (p/-from-host (.-inner b) (vec rows) [(count rows)] :int64))
+
+(defn part-backend
+  "A batch backend for the particles of the batch backend b at rows (host
+   integers, in the part's order): a batch of their number, whose draws are
+   b's draws at rows, so that a particle draws in a part what it would in
+   b's own run. A new backend at each call, as a part's values must join no
+   other part's."
+  [^BatchBackend b rows]
+  (let [inner (.-inner b)
+        idx (index-array b rows)
+        [full outer] (or (.-draws b) [(one-axis b) nil])]
+    (BatchBackend. inner [(count rows)] [full (if outer (p/-take inner outer idx 0) idx)])))
+
+(defn gather-into
+  "x's particles at idx (index-array's int array), or all of them in order
+   when idx is nil, as a value of the batch backend b, lazily (as gather);
+   an unbatched value as it is, every particle's."
+  [x idx b]
+  (if (batched? x)
+    (Batched. (delay (cond-> (value x) idx (array/take idx 0))) b false)
+    x))
+
+(defn- joined
+  "join's array, of the wrapped backend inner."
+  [inner xs ns]
+  (let [shape (array/shape (first xs))
+        strong (remove array/host? xs)
+        dtype (if (seq strong) (array/dtype (first strong)) (dt/weak-host-dtype (first xs) (p/-defaults inner)))]
+    (when-not (and (every? #(= shape (array/shape %)) xs)
+                   (every? #(= dtype (array/dtype %)) strong)
+                   (every? #(= (dt/kind dtype) (dt/kind (dt/host-dtype %))) (filter array/host? xs)))
+      (throw (array/batched-branch "Values that differ in shape or dtype across the parts of a batch cannot be one batched value"
+                                   {:shapes (mapv array/shape xs) :dtypes (mapv array/dtype xs)})))
+    (p/-concatenate inner
+                    (mapv (fn [x n]
+                            (if (batched? x)
+                              (let [v (value x)]
+                                (when-not (= n (first (p/-shape inner v)))
+                                  (throw (ex-info "A part's value is not a batch of the part's particles"
+                                                  {:particles n :shape (p/-shape inner v)})))
+                                v)
+                              (p/-broadcast-to inner
+                                               (p/-reshape inner (if (array/host? x) (p/-full inner [] x dtype) x) (into [1] shape))
+                                               (into [n] shape))))
+                          xs ns)
+                    0)))
+
+(defn join
+  "The values xs of consecutive parts of a batch, (xs j) one of (ns j)
+   particles (a batched value of that many, or a value they all share), as
+   one value of the batch backend b over all their particles in order. The
+   parts must agree in per-particle shape and dtype, a host scalar taking
+   the others' dtype of its kind; otherwise no one value can hold them: the
+   batched-branch error."
+  [xs ns ^BatchBackend b]
+  (made (joined (.-inner b) xs ns) b))
+
+(defn scatter
+  "The values xs of parts that partition the particles of a batch, (xs j)
+   those of the particles at (rows j), as one value of the batch backend b:
+   join's, each particle's value from its part."
+  [xs rows ^BatchBackend b]
+  (let [order (into [] cat rows)
+        inv (long-array (count order))]
+    (dotimes [j (count order)] (aset inv (long (order j)) (long j)))
+    (made (p/-take (.-inner b) (joined (.-inner b) xs (mapv count rows)) (index-array b inv) 0) b)))

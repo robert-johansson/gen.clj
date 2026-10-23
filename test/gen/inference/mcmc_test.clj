@@ -561,16 +561,27 @@
                        x0s zs)]
         (check (mcmc/mala-particles ps x-sel tau key) (mapv first moves) (mapv second moves) key)))))
 
+(defn- agree?
+  "Are the host values xs and ys (vectors of numbers, or of vectors) equal:
+   exactly in float64, within a few ulps in float32? A jittered step is
+   computed in float64 on the host by hmc and in the backend's float by
+   hmc-particles (its u an array), which in float32 can differ in the last
+   place."
+  [xs ys]
+  (if (ts/f32?) (ts/close? (array/array xs) (array/array ys)) (= xs ys)))
+
 (defn- each-chain-s?
   "Is the -particles kernel's step (step ps key) each chain's scalar step
-   (scalar trace key), from its own key (key split n ways), exactly?"
+   (scalar trace key), from its own key (key split n ways)? Exactly, but
+   for agree?'s float32 last place."
   [ps step scalar key]
   (let [r (step ps key)
         each (map scalar (b/traces ps) (rng/split key (b/size ps)))]
     (and (= (mapv :accepted? each) (:accepted? r))
          (= (mapv :diverged? each) (:diverged? r))
-         (= (mapv :log-alpha each) (ts/host (:log-alpha r)))
-         (= (mapv #(:choices (:trace %)) each) (mapv :choices (b/traces (:particles r)))))))
+         (agree? (mapv :log-alpha each) (ts/host (:log-alpha r)))
+         (agree? (mapv #(ts/host (cm/to-array (:choices (:trace %)))) each)
+                 (mapv #(ts/host (cm/to-array (:choices %))) (b/traces (:particles r)))))))
 
 (deftest particle-moves-fall-back-to-each-chain-s-own
   ;; where the model cannot run batched, or the batched move fails, each
@@ -584,16 +595,20 @@
     (is (not (b/batched? ps)))
     (is (each-chain-s? ps #(mcmc/hmc-particles %1 x-sel {:L 3 :eps 0.4} %2) #(mcmc/hmc %1 x-sel {:L 3 :eps 0.4} %2) (rng/key 96)))
     (is (each-chain-s? ps #(mcmc/mala-particles %1 x-sel 0.3 %2) #(mcmc/mala %1 x-sel 0.3 %2) (rng/key 97))))
-  (testing "a parameter failing its check at some particles' positions: each chain's divergence its own"
-    ;; v ~ N(0, 1000), y ~ N(0, e^v): one step of eps 1000 from v = 0 moves
-    ;; v to 1000·p, past exp's range for some momenta (a scale of 0, which
-    ;; fails its check)
-    (let [scaled (gen [] (let [v (trace :v (d/normal 0 1000))] (trace :y (d/normal 0 (array/exp v)))))
-          ps (chains-from scaled (cm/choicemap :v 0.0 :y 1.0) 40)
-          s (sel/select :v)
-          r (mcmc/hmc-particles ps s {:L 1 :eps 1000.0} (rng/key 98))]
-      (is (< 0 (count (filter true? (:diverged? r))) 40) "some diverge, not all")
-      (is (each-chain-s? ps #(mcmc/hmc-particles %1 s {:L 1 :eps 1000.0} %2) #(mcmc/hmc %1 s {:L 1 :eps 1000.0} %2) (rng/key 98))))))
+  ;; where values are concrete: on a lazy backend a parameter's check
+  ;; reads no value (rule 5), so the batched move does not fail, and runs
+  ;; batched, with draws other than the chains' own keys'
+  (when (ts/jvm?)
+    (testing "a parameter failing its check at some particles' positions: each chain's divergence its own"
+      ;; v ~ N(0, 1000), y ~ N(0, e^v): one step of eps 1000 from v = 0 moves
+      ;; v to 1000·p, past exp's range for some momenta (a scale of 0, which
+      ;; fails its check)
+      (let [scaled (gen [] (let [v (trace :v (d/normal 0 1000))] (trace :y (d/normal 0 (array/exp v)))))
+            ps (chains-from scaled (cm/choicemap :v 0.0 :y 1.0) 40)
+            s (sel/select :v)
+            r (mcmc/hmc-particles ps s {:L 1 :eps 1000.0} (rng/key 98))]
+        (is (< 0 (count (filter true? (:diverged? r))) 40) "some diverge, not all")
+        (is (each-chain-s? ps #(mcmc/hmc-particles %1 s {:L 1 :eps 1000.0} %2) #(mcmc/hmc %1 s {:L 1 :eps 1000.0} %2) (rng/key 98)))))))
 
 (deftest jittered-particle-steps
   ;; :jitter jitters each chain's step by its own u, as its own hmc's
@@ -614,8 +629,8 @@
         key (rng/key 106)]
     (is (not (b/batched? ps)))
     (is (each-chain-s? ps #(mcmc/hmc-particles %1 x-sel opts %2) #(mcmc/hmc %1 x-sel opts %2) key))
-    (is (= (mapv #(:eps (mcmc/hmc %1 x-sel opts %2)) (b/traces ps) (rng/split key 4))
-           (ts/host (:eps (mcmc/hmc-particles ps x-sel opts key))))))
+    (is (agree? (mapv #(:eps (mcmc/hmc %1 x-sel opts %2)) (b/traces ps) (rng/split key 4))
+                (ts/host (:eps (mcmc/hmc-particles ps x-sel opts key))))))
   (is (= :invalid-jitter (:reason (ts/thrown-data (mcmc/hmc-particles (chains-from scalar (cm/choicemap :x 0.0 :y 1.3) 2)
                                                                       x-sel {:jitter 1.0} (rng/key 107)))))))
 

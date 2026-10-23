@@ -175,7 +175,7 @@
 
 (def m23 (array/array [[0.3 -1.2 2.0] [1.5 0.7 -0.4]]))
 
-(def reductions
+(def reduction-ops
   "Reductions and scans of a [2 3] array."
   [[:sum array/sum] [:sum-axis #(array/sum % {:axis 1})] [:sum-keep #(array/sum % {:axis 0 :keep-dims? true})]
    [:prod array/prod] [:prod-axis #(array/prod % {:axis 1})] [:max array/max] [:min-axis #(array/min % {:axis 0})]
@@ -186,7 +186,7 @@
    [:logcumsumexp #(array/logcumsumexp % {:axis 1})]])
 
 (deftest reductions-and-scans
-  (doseq [[label f] reductions]
+  (doseq [[label f] reduction-ops]
     (is (grad-matches? (projected f) m23) (str label)))
   (testing "a product with a zero has the exact gradient (no division)"
     (is (= [0.0 0.0 6.0] (array/->clj ((array/grad array/prod) (array/array [2.0 3.0 0.0]))))))
@@ -378,7 +378,7 @@
       (per-particle? (projected f) [(scaled xs xlo xhi (shape 0 sx)) (scaled ys ylo yhi (shape 1 sy))] batched))))
 
 (defspec batched-reduction-and-shape-vjps-are-per-particle 100
-  (prop/for-all [[_ f] (gen/elements (into reductions shape-ops))
+  (prop/for-all [[_ f] (gen/elements (into reduction-ops shape-ops))
                  us gen-particle-uniforms]
     (per-particle? (projected f) [(scaled us -2 2 [n 2 3])] #{0})))
 
@@ -479,6 +479,39 @@
       (let [[v g] ((array/value-and-grad #(f theta %)) (batch/wrap data [n]))]
         (is (ts/close? (array/stack (mapv #(f theta (particle data %)) (range n))) (batch/unwrap v [n])))
         (is (ts/close? (array/negate per-particle) (batch/unwrap g [n])))))))
+
+;; The kind of a batched run's gradients: the same whichever differentiates
+;; (the tape over the tracer, or MLX's native transformation around it,
+;; -Dgen.mlx.grad=native). The value is batched when a batched value
+;; reached it, and a gradient when its argument or the value is. Planted
+;; (2026-10-24): the tape's gradients as they come fail the unbatched
+;; cotangents' cases; the native transformation always broadcasting a
+;; shared argument (as it did) failed the first case on Metal
+
+(deftest batched-gradients-in-one-kind
+  (let [c (particles 1.0)
+        bx (particles (array/array [1.0 -2.0]))
+        cases [;; [label f args batched-args value-batched?]
+               ["shared, nothing batched reaching it" (fn [_] (fn [t] (array/* t t))) [3.0] #{} false]
+               ["shared, a batched value added" (fn [c] (fn [t] (array/+ (array/* t t) c))) [3.0] #{} true]
+               ["shared, times a batched value" (fn [c] (fn [t] (array/* t c))) [3.0] #{} true]
+               ["batched, a value that ignores it" (fn [_] (fn [_] 2.0)) [bx] #{0} false]
+               ["batched, a value through stop-gradient" (fn [_] (fn [x] (array/sum (array/* 0.0 (array/stop-gradient x))))) [bx] #{0} true]
+               ["batched, a linear value" (fn [_] (fn [x] (array/sum (array/* 2.0 x)))) [bx] #{0} true]
+               ["batched and shared" (fn [_] (fn [x t] (array/sum (array/* x t)))) [bx 1.5] #{0} true]]]
+    (doseq [[label make args batched value-batched?] cases]
+      (testing label
+        (let [argnums (vec (range (count args)))
+              [v gs] (batch/batched [n] (apply (array/value-and-grad (make (batch/wrap c [n])) {:argnums argnums})
+                                               (map-indexed #(if (batched %1) (batch/wrap %2 [n]) %2) args)))
+              runs (mapv (fn [p] (apply (array/value-and-grad (make (particle c p)) {:argnums argnums})
+                                        (map-indexed #(if (batched %1) (particle %2 p) %2) args)))
+                         (range n))]
+          (is (= value-batched? (batch/batched? v)) "the value's kind")
+          (is (= (mapv #(or value-batched? (contains? batched %)) argnums) (mapv batch/batched? gs)) "the gradients' kinds")
+          (is (ts/close? (array/stack (mapv first runs)) (batch/unwrap v [n])) "the value")
+          (doseq [i argnums]
+            (is (ts/close? (array/stack (mapv #(nth (second %) i) runs)) (batch/unwrap (nth gs i) [n])) (str "gradient " i))))))))
 
 (deftest batched-gradient-errors
   (let [x (batch/wrap (particles (array/array [1.0 2.0])) [n])]

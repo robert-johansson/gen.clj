@@ -503,12 +503,20 @@ like the AD tape:
     error. `stop-gradient` is an op without a rule.
   - *Native gradients* (MLX, `-Dgen.mlx.grad=native`) cannot wrap the
     tracer, since MLX's transformation differentiates a function of its own
-    arrays. So the tracer runs inside it: MLX differentiates the sum over
-    the particles of f at the differentiated leaves as whole batches (a
-    shared leaf broadcast to every particle). Particle i's output depends
-    on its own values only, so the gradient with respect to its slice is its
-    own gradient. Custom VJPs reach MLX through the tracer
-    (`ICustomVjp`), lifted to whole batches.
+    arrays. So the tracer runs inside it: MLX differentiates f where f's
+    value is shared, and the sum over the particles of f where it is
+    batched, at the differentiated leaves, a batched one as its whole
+    batch. Particle i's output depends on its own values only, so the
+    gradient with respect to its slice is its own gradient. A shared leaf's
+    gradient is per particle only when the leaf is broadcast to every
+    particle, so when the value turns out batched with a shared leaf, f
+    runs again on the broadcast leaves. Custom VJPs reach MLX through the
+    tracer (`ICustomVjp`), lifted to whole batches.
+  - *One kind either way* (2026-10-24, after the Metal run of wave 2): the
+    value is batched when a batched value reached it, and a gradient when
+    its argument or the value is (the tape's are broadcast to match). The
+    tape gave a shared argument's gradient unbatched where native mode
+    broadcast it, so `(ts/host …)` read one and refused the other.
   - *Not supported:* a batched run inside a differentiated function (the
     tape outside the tracer). Their values belong to unrelated backends, a
     loud error; differentiate inside the run and sum the gradients.
@@ -543,10 +551,50 @@ and shared otherwise: the handler reads constraints as it reads every value.
   run one particle at a time, as any batched run that fails.
 - Code that runs part of a batched run's particles (a Switch whose index
   differs across them, by partition) takes their rows of each batched
-  constraint with them (`gen.array.batch/gather`).
+  constraint with them (`gen.partition/gather-into`).
 - Batched enumeration uses them: `enumerative-inference` with `:batched?`
   constrains particle i to grid point i, and `with-exact-proposal` with
   `:batched?` constrains particle i to assignment i.
+
+**Switches by partition** (*added 2026-10-23, bean genclj-7tqw; the
+owner's decision in DESIGN.md §9*). A Switch whose index differs across the
+particles of a batched run stays batched, where it fell back before:
+- **Parts.** The particles are grouped by branch, and each branch runs
+  batched over its group under a part's backend
+  (`gen.array.batch/part-backend`): a batch of the group's particles whose
+  draws are the whole batch's draws at their rows. A particle so draws in
+  its part exactly what the batch's own run would draw for it, whatever the
+  partition: a Switch whose branches are one generative function makes
+  every particle the choices that branch alone would. A site run in G
+  groups draws G·n values (and takes each group's rows).
+- **In and out.** The batch's values go into a part by its rows
+  (`gen.partition/gather-into`: arguments, constraints, old subtraces), and
+  its score, weight and return value come back (`gen.partition/scatter`).
+  Return values that differ in per-particle shape, dtype or structure
+  across the branches (nil against an array, say) cannot be one batched
+  value: the run falls back, loudly. A host scalar takes the dtype of the
+  others of its kind.
+- **Choices by part.** The trace holds each group's branch, rows and
+  subtrace, and its choices by part: a `gen.array.batch/Parts` value at the
+  call's address, where the particles' choices differ in structure.
+  `gen.batched`'s accessors read it per particle; `choice` reads through it
+  where every particle makes the choice, and is loud otherwise.
+- **Updates.** An update or regenerate runs together the particles of an
+  old group that go to one branch (a cell), against their old subtraces
+  (another branch's by `gfi/revise`, as a scalar Switch does), and joins a
+  branch's cells (`gen.partition/join`), so there is one group per branch.
+  Every particle in one branch is the plain trace again. Discards are held
+  by part. Nested partitions work: a Switch in a branch, or in a Map or
+  Unfold kernel, partitions its part's particles, their draws composed.
+- **Populations.** `take` regroups (`gen.partition/gather`). `select` joins
+  two traces whose choices are held by part or differ in their addresses
+  and takes each particle from its own, with no rebuild (it fell back on
+  different addresses before).
+- **Loud edges.** A trace whose choices are held by part, revised by
+  another generative function (`gfi/generate-again`), is the batched-branch
+  error: its choices are no one choice map to generate from. Per-particle
+  constraints that differ in structure across the particles still do not
+  stack, and fall back.
 
 Code outside `gen` bodies is not guarded. Two mechanisms cover it
 (*added 2026-10-19 after the acceptance tests*):

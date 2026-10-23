@@ -19,8 +19,10 @@
             [gen.dist.core :as dc]
             [gen.dynamic :as dyn :refer [gen]]
             [gen.gfi :as gfi]
+            [gen.gradients :as grad]
             [gen.inference.enumerative :as enum]
             [gen.inference.importance :as imp]
+            [gen.inference.mcmc :as mcmc]
             [gen.inference.mh :as mh]
             [gen.inference.particle-filter :as pf]
             [gen.laws :refer [close?]]
@@ -166,11 +168,12 @@
             scalar (map #(:weight (gfi/update % (cm/choicemap :switch true) (rng/key 0))) (b/traces ps))]
         (is (= 8 (count (array/->clj ws))))
         (is (every? true? (map #(and (Double/isFinite %1) (Double/isFinite %2)) (array/->clj ws) (map ts/number scalar)))))))
-  (testing "a Switch whose index differs across particles falls back"
-    (let [sw (gen [] (splice :s (comb/switch observation observation)
-                             (if (trace :c (d/bernoulli 0.5)) 0 1) 0.0))]
-      (is (not (b/batched? (b/simulate sw [] 6 (rng/key 8)))))))
-  (testing "while a shared index stays batched"
+  (testing "a Switch whose index differs across particles stays batched, by partition"
+    (let [sw (gen [] (splice :s (comb/switch observation observation) (trace :c (d/categorical [0.5 0.5])) 0.0))
+          ps (b/simulate sw [] 6 (rng/key 8))]
+      (is (b/batched? ps))
+      (is (nil? (b/fallback-reason ps)))))
+  (testing "as does a shared index"
     (is (b/batched? (b/simulate (gen [] (splice :s (comb/switch observation observation) 1 0.0)) [] 6 (rng/key 9))))))
 
 ;; ---------------------------------------------------------------------------
@@ -716,6 +719,247 @@
                       (trace :y (d/normal (if (= :float32 (array/dtype x)) 0.0 5.0) 1))))]
       (binding [b/*spot-checks* :all]
         (is (b/batched? (spot-checked-on false #(b/simulate m [] 8 (rng/key 58)))))))))
+;; ---------------------------------------------------------------------------
+;; Switches by partition (genclj-7tqw)
+;; ---------------------------------------------------------------------------
+
+;; A Switch whose index differs across the particles runs each branch on its
+;; own particles (DESIGN.md §9). The fuzz tests (gen.fuzz-test) check every
+;; operation particle by particle on random Switch-heavy models; these check
+;; the draws, the loud edges, and inference against exact answers.
+
+(def component-a (gen [m] (trace :x (d/normal m 1.0))))
+
+(def component-b
+  "Structurally different from component-a: x's mean is a choice of its own."
+  (gen [m] (let [u (trace :u (d/normal 0 1))] (trace :x (d/normal (+ m u 3.0) 0.5)))))
+
+(def components (comb/switch component-a component-b))
+
+(def mixture
+  (gen [] (let [k (trace :k (d/categorical [0.3 0.7]))]
+            (trace :y (d/normal (splice :c components k 0.0) 1.0)))))
+
+;; y ~ 0.3 N(0, 2) + 0.7 N(3, 2.25): x is N(0, 1) under a and N(3, 1.25)
+;; under b, and y | x is N(x, 1)
+(def mixture-y 1.2)
+(def mixture-parts [(* 0.3 (Math/exp (dc/log-prob (d/normal 0 (Math/sqrt 2.0)) mixture-y)))
+                    (* 0.7 (Math/exp (dc/log-prob (d/normal 3 1.5) mixture-y)))])
+(def mixture-evidence (Math/log (reduce + mixture-parts)))
+(def mixture-p0 (/ (first mixture-parts) (reduce + mixture-parts)))
+
+(deftest a-switch-of-one-branch-draws-what-the-branch-would
+  ;; A partition runs each branch on its own particles, under a part's
+  ;; backend whose draws are the whole batch's at their rows: a Switch whose
+  ;; branches are all one generative function makes every particle exactly
+  ;; the choices the branch alone would, whatever the partition, in every
+  ;; operation that draws. Plant: parts that draw their own batch (not the
+  ;; batch's rows) fail every comparison.
+  (let [g (gen [m] (let [z (trace :z (d/normal m 1))]
+                     (trace :w (d/gamma 2 1))
+                     (splice :v (comb/map (gen [x] (trace :v (d/normal x 1)))) [z z])
+                     z))
+        ps [0.2 0.3 0.5]
+        direct (gen [] (trace :i (d/categorical ps)) (splice :s g 0.5))
+        parted (gen [] (splice :s (comb/switch g g g) (trace :i (d/categorical ps)) 0.5))
+        nested (gen [] (splice :s (comb/switch (gen [m] (splice :t (comb/switch g g) (trace :j (d/categorical [0.5 0.5])) m)) g g)
+                               (trace :i (d/categorical ps)) 0.5))
+        same? (fn [ps qs] (= (map (comp ts/host :choices) (b/traces ps)) (map (comp ts/host :choices) (b/traces qs))))
+        n 9
+        p (b/simulate direct [] n (rng/key 1))
+        q (b/simulate parted [] n (rng/key 1))]
+    (is (b/batched? q))
+    (is (< 1 (count (distinct (array/->clj (b/choice q :i))))) "the index differs across the particles")
+    (testing "simulate"
+      (is (same? p q)))
+    (testing "generate, constrained by each particle's own index"
+      (let [own (mapv #(cm/choicemap :i %) [0 1 2 2 1 0 0 1 2])
+            gp (b/generate direct [] cm/EMPTY n (rng/key 2) {:per-particle own})
+            gq (b/generate parted [] cm/EMPTY n (rng/key 2) {:per-particle own})]
+        (is (same? (:particles gp) (:particles gq)))
+        (is (close? (:weights gp) (:weights gq)))))
+    (testing "update, moving particles between branches"
+      (let [own (mapv #(cm/choicemap :i %) [2 2 0 1 0 1 2 0 1])
+            up (b/update p [] [] (cm/choicemap [:s :z] 0.3) (rng/key 3) {:per-particle own})
+            uq (b/update q [] [] (cm/choicemap [:s :z] 0.3) (rng/key 3) {:per-particle own})]
+        (is (same? (:particles up) (:particles uq)))
+        (is (close? (:weights up) (:weights uq)))))
+    (testing "regenerate, of each branch's choices"
+      (let [rp (b/regenerate p [] [] (sel/select [:s :z] [:s :v]) (rng/key 4))
+            rq (b/regenerate q [] [] (sel/select [:s :z] [:s :v]) (rng/key 4))]
+        (is (same? (:particles rp) (:particles rq)))
+        (is (close? (:weights rp) (:weights rq)))))
+    (testing "and through nested Switches"
+      (let [r (b/simulate nested [] n (rng/key 1))
+            in-g (fn [tr] (if (cm/has-submap? (:choices tr) [:s :t]) (cm/get-submap (:choices tr) [:s :t]) (cm/get-submap (:choices tr) :s)))]
+        (is (b/batched? r))
+        (is (= (map (comp ts/host in-g) (b/traces r)) (map #(ts/host (cm/get-submap (:choices %) :s)) (b/traces p))))))))
+
+(deftest switches-by-partition-at-the-edges
+  (testing "the fallback no longer triggers for a per-particle index"
+    (binding [b/*spot-checks* :all]
+      (let [ps (b/simulate mixture [] 40 (rng/key 70))]
+        (is (b/batched? ps))
+        (is (nil? (b/fallback-reason ps))))))
+  (testing "a choice every particle makes reads through the partition, one only some make is loud"
+    (let [ps (b/simulate mixture [] 12 (rng/key 71))
+          trs (b/traces ps)]
+      (is (close? (array/stack (mapv #(% [:c :x]) trs)) (b/choice ps [:c :x])))
+      (is (= (mapv #(ts/host (% :k)) trs) (array/->clj (b/choice ps :k))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not every particle has a choice at \[:c :u\]"
+                            (b/choice ps [:c :u])))))
+  (testing "return values that differ in shape across the branches fall back, loudly"
+    (let [m (gen [] (splice :s (comb/switch (gen [] (trace :x (d/normal 0 1)))
+                                            (gen [] (trace :x (d/normal (array/zeros [2]) 1))))
+                            (trace :i (d/categorical [0.5 0.5]))))
+          ps (b/simulate m [] 8 (rng/key 72))]
+      (is (not (b/batched? ps)))
+      (is (re-find #"differ in shape or dtype" (:message (b/fallback-reason ps))))
+      (is (every? #(close? (:score %) (:weight (gfi/assess m [] (:choices %)))) (b/traces ps)))))
+  (testing "a partitioned call revised by another generative function falls back, loudly"
+    ;; its choices are held by part: no one choice map to generate from
+    (let [other (gen [_ m] (trace :x (d/normal m 2.0)))
+          m (gen [flag] (let [k (trace :k (d/categorical [0.5 0.5]))]
+                          (splice :c (if flag components other) k 0.0)))
+          ps (b/simulate m [true] 8 (rng/key 73))
+          {ps' :particles ws :weights} (b/update ps [false] [diff/unknown-change] cm/EMPTY (rng/key 74))]
+      (is (b/batched? ps))
+      (is (not (b/batched? ps')))
+      (is (re-find #"revised by another generative function" (:message (b/fallback-reason ps'))))
+      ;; per particle the scalar update: :x kept, the rest dropped
+      (is (every? true? (map (fn [before after w] (and (= (ts/host (before [:c :x])) (ts/host (after [:c :x])))
+                                                      (close? w (- (:score after) (:score before)))))
+                             (b/traces ps) (b/traces ps') (array/->clj ws))))))
+  (testing "spot checks see a branch's hidden lookup through the partition, re-run either way"
+    (when (ts/jvm?)
+      (doseq [lazy? [true false]]
+        (let [m (gen [] (splice :s (comb/switch (gen [_] (let [k (trace :k (d/categorical [0.5 0.5]))]
+                                                          (trace :y (d/normal (level k) 1))))
+                                                observation)
+                                (trace :i (d/categorical [0.5 0.5])) 0.0))
+              ps (spot-checked-on lazy? #(b/simulate m [] 50 (rng/key 75)))]
+          (is (re-find #"disagrees with the scalar handler" (:message (b/fallback-reason ps))) (str lazy?)))))))
+
+(deftest a-batched-mixture-of-different-structures-reaches-the-exact-answers
+  (let [{:keys [particles log-ml-estimate log-normalized-weights]}
+        (imp/importance-sampling mixture [] (cm/choicemap :y mixture-y) 20000 {:batched? true :key (rng/key 76)})
+        w (map #(Math/exp %) log-normalized-weights)
+        ;; the estimator's standard errors, from its weights (delta method)
+        se-log-ml (Math/sqrt (- (reduce + (map * w w)) (/ 1.0 20000)))
+        zero? (map #(= 0 %) (array/->clj (b/choice particles :k)))
+        p0 (reduce + (map (fn [wi z] (if z wi 0.0)) w zero?))
+        se-p0 (Math/sqrt (reduce + (map (fn [wi z] (let [d (- (if z 1.0 0.0) p0)] (* wi wi d d))) w zero?)))]
+    (is (b/batched? particles))
+    (is (nil? (b/fallback-reason particles)))
+    (is (< (Math/abs (- log-ml-estimate mixture-evidence)) (* 5 se-log-ml)))
+    (is (< (Math/abs (- p0 mixture-p0)) (* 5 se-p0)))))
+
+(deftest parallel-mh-chains-on-a-mixture-move-between-branches
+  ;; independent MH chains whose moves change the index (moving particles
+  ;; between branches, the shared :x kept), or redraw the index and the
+  ;; branch together; each chain's last k is a draw from the posterior
+  (let [n 2000
+        start (:particles (b/generate mixture [] (cm/choicemap :y mixture-y) n (rng/key 77)))
+        chains (reduce (fn [ps [i k]] (:particles (mh/mh-particles ps (if (even? i) (sel/select :k) (sel/select :k :c)) k)))
+                       start (map-indexed vector (rng/split (rng/key 78) 40)))
+        p0 (/ (count (filter #(= 0 %) (array/->clj (b/choice chains :k)))) (double n))]
+    (is (b/batched? chains))
+    (is (< (Math/abs (- p0 mixture-p0)) (* 5 (Math/sqrt (/ (* mixture-p0 (- 1 mixture-p0)) n)))))))
+
+(def shifted-mixture
+  "The mixture, shifted by a choice outside the Switch."
+  (gen [] (let [mu (trace :mu (d/normal 0 1))
+                k (trace :k (d/categorical [0.3 0.7]))]
+            (trace :y (d/normal (+ mu (splice :c components k 0.0)) 1.0)))))
+
+(def fed-mixture
+  "The mixture, its components' mean a choice: what is differentiated flows
+   into the branches."
+  (gen [] (let [mu (trace :mu (d/normal 0 1))
+                k (trace :k (d/categorical [0.3 0.7]))]
+            (trace :y (d/normal (splice :c components k mu) 1.0)))))
+
+(deftest gradients-and-set-choices-across-a-partitioned-switch
+  ;; vmap's semantics either way: a selection outside the Switch whose
+  ;; values do not flow into it is one batched gradient (the trace's choices
+  ;; by part given back to the branches as constraints, gen.combinators'
+  ;; own-constraints); one inside it, or flowing into its branches, falls
+  ;; back to each trace's gradient. Planted: without own-constraints the
+  ;; batched gradient falls back
+  (let [n 8
+        obs (cm/choicemap :y 1.7)
+        each (fn [ps s] (map #(:gradients (grad/choice-gradients % s)) (b/traces ps)))
+        stacked (fn [gs p] (array/stack (mapv #(cm/get-choice % p) gs)))
+        unbatched (fn [f] (with-redefs [b/traces (fn [_] (throw (ex-info "fell back" {})))] (f)))]
+    (testing "outside the Switch: batched"
+      (let [ps (:particles (b/generate shifted-mixture [] obs n (rng/key 90)))
+            s (sel/select :mu)
+            want (each ps s)
+            r (unbatched #(grad/choice-gradients ps s))]
+        (is (b/batched? ps))
+        (is (< 1 (count (distinct (array/->clj (b/choice ps :k))))))
+        (is (close? (stacked want [:mu]) (cm/get-choice (:gradients r) :mu)))))
+    (testing "inside the Switch, or flowing into it: each trace's"
+      (doseq [[m s p] [[shifted-mixture (sel/select [:c :x]) [:c :x]] [fed-mixture (sel/select :mu) [:mu]]]]
+        (let [ps (:particles (b/generate m [] obs n (rng/key 91)))
+              r (grad/choice-gradients ps s)]
+          (is (b/batched? ps))
+          (is (close? (stacked (each ps s) p) (cm/get-choice (:gradients r) p))))))
+    (testing "set-choices outside the Switch stays batched, inside sets each particle's"
+      (let [ps (:particles (b/generate shifted-mixture [] obs n (rng/key 92)))
+            vs (array/array (mapv #(* 0.25 %) (range n)))]
+        (doseq [[p batched?] [[:mu true] [[:c :x] false]]]
+          (let [ps' (b/set-choices ps (cm/choicemap p vs))
+                trs (b/traces ps')]
+            (is (= batched? (b/batched? ps')) (str p))
+            (is (close? vs (array/stack (mapv #(% p) trs))) (str p))
+            (is (= (map #(ts/host (sel/get-selected (:choices %) (sel/complement (sel/from-paths [(cm/path p)])))) (b/traces ps))
+                   (map #(ts/host (sel/get-selected (:choices %) (sel/complement (sel/from-paths [(cm/path p)])))) trs))
+                "every other choice kept")
+            (is (every? #(close? (:score %) (:weight (gfi/assess shifted-mixture [] (:choices %)))) trs))))))
+    (testing "HMC chains on the shift stay batched"
+      (let [ps (:particles (b/generate shifted-mixture [] obs n (rng/key 93)))
+            {ps' :particles} (mcmc/hmc-particles ps (sel/select :mu) {:eps 0.1 :L 5} (rng/key 94))]
+        (is (b/batched? ps'))
+        (is (= (map #(ts/host (% :k)) (b/traces ps)) (map #(ts/host (% :k)) (b/traces ps'))))))))
+
+(def regimes
+  "Two regimes of different structure: y directly, or around a choice of
+   its own."
+  (comb/switch (gen [] (trace :y (d/normal -1.0 0.6)))
+               (gen [] (let [u (trace :u (d/normal 0 1))] (trace :y (d/normal (+ 1.5 u) 0.5))))))
+
+(def regime-step
+  (gen [t k] (let [k' (trace :k (d/categorical (array/where (array/== k 0) (array/array [0.8 0.2]) (array/array [0.3 0.7]))))]
+               (splice :e regimes k')
+               k')))
+
+(deftest ^:slow a-batched-particle-filter-over-switching-regimes-is-unbiased
+  ;; an HMM of two regimes whose emissions differ in structure: the forward
+  ;; algorithm gives p(ys), and the filter's estimate is unbiased for it
+  ;; (law 20): the mean of Z/p(ys) over runs is 1, within 5 standard errors
+  ;; of the runs' measured spread
+  (let [ys [0.4 -1.2 1.9 2.2 -0.3 1.0]
+        emit [#(dc/log-prob (d/normal -1.0 0.6) %) #(dc/log-prob (d/normal 1.5 (Math/sqrt 1.25)) %)]
+        trans [[0.8 0.2] [0.3 0.7]]
+        exact (let [step (fn [alpha y] (mapv (fn [j] (* (Math/exp ((emit j) y))
+                                                         (reduce + (map-indexed (fn [i a] (* a ((trans i) j))) alpha))))
+                                             [0 1]))]
+                (Math/log (reduce + (reduce step [1.0 0.0] ys))))
+        unfolded (comb/unfold regime-step)
+        obs (fn [t] (cm/choicemap [t :e :y] (ys t)))
+        run (fn [n key]
+              (let [ks (rng/split key 12)
+                    init (pf/initialize unfolded [1 0] (obs 0) n {:batched? true :key (ks 0)})]
+                (reduce (fn [s t] (-> s (pf/maybe-resample {:key (ks (dec (* 2 t)))})
+                                      (pf/step [(inc t) 0] [diff/unknown-change diff/no-change] (obs t) {:key (ks (* 2 t))})))
+                        init (range 1 (count ys)))))
+        runs (mapv #(run 100 %) (rng/split (rng/key 79) 200))
+        ratios (map #(Math/exp (- (pf/log-ml-estimate %) exact)) runs)
+        mean (/ (reduce + ratios) (count runs))
+        sd (Math/sqrt (/ (reduce + (map #(* (- % mean) (- % mean)) ratios)) (dec (count runs))))]
+    (is (every? #(b/batched? (:particles %)) runs) "every filter stays batched")
+    (is (< (Math/abs (- mean 1.0)) (* 5 (/ sd (Math/sqrt (count runs))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Functions of every particle: map-particles and set-choices
@@ -764,10 +1008,13 @@
     (testing "per particle, the form a fallback leaves"
       (is (same-results? (b/map-particles (unbatched ps) f nil shifts) want)))
     (testing "where f reads a particle's value on the host, or branches on one with a raw if, one trace at a time"
-      ;; batched, the raw if would take its first branch for every particle
+      ;; batched, the raw if would take its first branch for every particle.
+      ;; Each g against itself on each trace: on MLX a scalar comparison is
+      ;; an array, which a raw if takes for true too (docs/array-api.md §8a,
+      ;; plain helpers), so there g's own scalar semantics add 100 throughout
       (doseq [g [(fn [t k shift] (assoc (f t k shift) :read (array/item (t :slope))))
                  (fn [t k shift] (update (f t k shift) :shifted #(if (array/> (t :slope) 1e9) (+ % 100.0) %)))]]
-        (is (same-results? (b/map-particles ps g nil shifts) want))))
+        (is (same-results? (b/map-particles ps g nil shifts) (each-trace ps g shifts)))))
     (testing "draws are per particle"
       (let [r (b/map-particles ps (fn [_ k] (rng/normal k [2])) (rng/key 81))]
         (is (= [n 2] (array/shape r)))
