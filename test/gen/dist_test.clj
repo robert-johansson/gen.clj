@@ -997,7 +997,8 @@
   ;; without its log c, the envelope's (1 - ρ)/(1 + ρ) without the 2κ of
   ;; its denominator, the wrapped Cauchy's (1 - ρ)/(1 + ρ) as 1 - ρ, the
   ;; truncated normal's interval never mirrored, Bartlett's diagonal of
-  ;; χ²(df) for χ²(df - i), inv-wishart's C as A⁻ᵀ·Lᵀ.
+  ;; χ²(df) for χ²(df - i), or of its means' roots (only the variances
+  ;; fail), inv-wishart's C as A⁻ᵀ·Lᵀ.
   (let [n 100000]
     (testing "the truncated normal: mean and variance"
       (doseq [[mu sigma lo hi :as params] [[0.5 2.0 -1.0 3.0] [0.0 1.0 5.0 6.0] [0.0 1.0 0.0 ##Inf] [1.0 0.5 ##-Inf 0.0]
@@ -1017,7 +1018,9 @@
                                              (into [d/von-mises mu kappa] (map #(/ (bessel-i % kappa) (bessel-i 0 kappa)) [1 2 4])))
                                            (for [[mu rho] [[0.5 0.0] [0.5 0.7] [-3.0 0.99]]]
                                              [d/wrapped-cauchy mu rho rho (* rho rho) (Math/pow rho 4)])
-                                           (for [[mu sigma] [[0.5 0.3] [-3.0 2.0] [1.0 10.0]]]
+                                           ;; uniform draws from sigma = 9 on (planted: σ·z
+                                           ;; wrapped at 1e300 too, all draws 0 or ±π)
+                                           (for [[mu sigma] [[0.5 0.3] [-3.0 2.0] [1.0 8.9] [1.0 10.0] [0.3 1e300]]]
                                              (into [d/wrapped-normal mu sigma] (map #(Math/exp (* -0.5 % % sigma sigma)) [1 2 4]))))]
         (let [label (str (:type (make mu p)) " " [mu p])
               x (dc/sample (make mu p) (rng/key 62) [n])
@@ -1033,22 +1036,37 @@
           (is (mean-within (array/* kappa (array/* 2.0 (array/square (array/sin (array/* 0.5 (array/- x 0.25))))))
                            0.5 0.5)
               (str kappa)))))
-    (testing "Wishart and inverse Wishart: each entry's mean"
+    (testing "Wishart and inverse Wishart: each entry's mean and variance"
       ;; Wishart: df·S, variance df(Sᵢⱼ² + SᵢᵢSⱼⱼ); inverse Wishart: Ψ/(ν - p - 1),
-      ;; variance ((ν - p + 1)Ψᵢⱼ² + (ν - p - 1)ΨᵢᵢΨⱼⱼ)/((ν - p)(ν - p - 1)²(ν - p - 3))
-      (let [m 20000]
-        (doseq [[label dist mean variance]
-                [["wishart(4, S2)" (d/wishart 4.0 s2) #(* 4.0 %1) #(* 4.0 (+ (* %1 %1) (* %2 %3)))]
-                 ["wishart(1.5, S2), small chi-squared shapes" (d/wishart 1.5 s2) #(* 1.5 %1) #(* 1.5 (+ (* %1 %1) (* %2 %3)))]
-                 ["wishart(5.5, S3)" (d/wishart 5.5 s3) #(* 5.5 %1) #(* 5.5 (+ (* %1 %1) (* %2 %3)))]
-                 ["inv-wishart(10, S2)" (d/inv-wishart 10.0 s2) #(/ %1 7.0) #(/ (+ (* 9 %1 %1) (* 7 %2 %3)) (* 8 49 5.0))]
-                 ["inv-wishart(12, S3)" (d/inv-wishart 12.0 s3) #(/ %1 8.0) #(/ (+ (* 10 %1 %1) (* 8 %2 %3)) (* 9 64 6.0))]]]
+      ;; variance ((ν - p + 1)Ψᵢⱼ² + (ν - p - 1)ΨᵢᵢΨⱼⱼ)/((ν - p)(ν - p - 1)²(ν - p - 3)).
+      ;; A variance's band needs a finite eighth moment: so the inverse
+      ;; Wishart's variances at ν = 30 only
+      (let [m 20000
+            ;; [mean variance], each of Sᵢⱼ, Sᵢᵢ, Sⱼⱼ and df
+            wishart [(fn [sij _ _ df] (* df sij)) (fn [sij sii sjj df] (* df (+ (* sij sij) (* sii sjj))))]
+            inverse (fn [nu p]
+                      [(fn [sij _ _ _] (/ sij (- nu p 1)))
+                       (fn [sij sii sjj _] (/ (+ (* (+ (- nu p) 1) sij sij) (* (- nu p 1) sii sjj))
+                                              (* (- nu p) (Math/pow (- nu p 1) 2) (- nu p 3))))])]
+        (doseq [[label dist [mean variance] variances?]
+                [["wishart(4, S2)" (d/wishart 4.0 s2) wishart true]
+                 ["wishart(1.5, S2), small chi-squared shapes" (d/wishart 1.5 s2) wishart true]
+                 ["wishart(5.5, S3)" (d/wishart 5.5 s3) wishart true]
+                 ["inv-wishart(10, S2)" (d/inv-wishart 10.0 s2) (inverse 10.0 2) false]
+                 ["inv-wishart(12, S3)" (d/inv-wishart 12.0 s3) (inverse 12.0 3) false]
+                 ["inv-wishart(30, S3)" (d/inv-wishart 30.0 s3) (inverse 30.0 3) true]]]
           (let [s (ts/host (:scale (:params dist)))
+                df (ts/number (:df (:params dist)))
                 x (dc/sample dist (rng/key 64) [m])
-                means (ts/host (array/mean x {:axis 0}))]
+                c (array/- x (array/mean x {:axis 0}))
+                [means v-hats m4s] (map #(ts/host (array/mean % {:axis 0})) [x (array/square c) (array/square (array/square c))])]
             (doseq [i (range (count s)) j (range (count s))
-                    :let [v (variance (get-in s [i j]) (get-in s [i i]) (get-in s [j j]))]]
-              (is (close? (get-in means [i j]) (mean (get-in s [i j])) (* 5 (Math/sqrt (/ v m)))) (str label " " [i j])))
+                    :let [sij (get-in s [i j]) sii (get-in s [i i]) sjj (get-in s [j j])
+                          v (variance sij sii sjj df)
+                          v-hat (get-in v-hats [i j])]]
+              (is (close? (get-in means [i j]) (mean sij sii sjj df) (* 5 (Math/sqrt (/ v m)))) (str label " mean " [i j]))
+              (when variances?
+                (is (close? v-hat v (* 5 (Math/sqrt (/ (- (get-in m4s [i j]) (* v-hat v-hat)) m)))) (str label " variance " [i j]))))
             (is (array/all-true? (array/== x (array/transpose x [0 2 1]))) (str label ": exactly symmetric"))))))))
 
 (defn- log-normal-tail
@@ -1124,6 +1142,10 @@
               exact (Math/log (reduce + (for [k (range -40 41)]
                                           (Math/exp (lp (d/normal 0.0 sigma) (+ (#'d/wrap-angle d) (* 2 Math/PI k)))))))]
           (is (ts/close? exact direct {:rtol (ts/tol 1e-14) :atol (ts/tol 1e-14)}) (str sigma " " v)))))
+    (testing "draws on the circle also where an angle is lost to rounding"
+      ;; mu = -2.5e16 wraps to -4 (planted: the wrap without its clip)
+      (doseq [dist [(d/von-mises -2.5e16 2.0) (d/wrapped-cauchy -2.5e16 0.5) (d/wrapped-normal -2.5e16 0.5)]]
+        (is (circle? (dc/sample dist (rng/key 68) [100])) (str (:type dist)))))
     (testing "outside the support: -Inf, with a finite gradient"
       (doseq [[label dist v] [["truncated-normal" (d/truncated-normal 0.0 1.0 -1.0 1.0) 1.5]
                               ["von-mises" (d/von-mises 0.0 2.0) 3.5] ["wrapped-cauchy" (d/wrapped-cauchy 0.0 0.5) -3.5]
