@@ -2029,6 +2029,17 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     - loud errors for an invalid metric, step size, depth or option, and
       Stan's runtime errors (`:improper-posterior` past a step of 1e7,
       `:no-step-size`, `:metric-overflow`).
+    - **Stan's step-size jitter** (owner-approved, 2026-10-23): `:jitter`
+      on hmc and nuts (and the sampler) steps each transition by
+      eps·(1 + jitter·(2u − 1)), u from the transition's own key; the
+      default 0 draws nothing, so every result is bit-identical to before.
+      It is Neal's remedy for a fixed L that resonates: on Metal, adaptive
+      HMC at L 8 on the correlated Gaussian adapted eps 0.4913, L·eps 3.93
+      on the fast mode's period 3.88, bulk ESS 23 (the JVM landed at
+      0.642). The sampler jitters every transition, warmup included, and
+      dual averaging adapts the nominal step (Stan's choice; PROVISIONAL;
+      the alternative, no jitter in the warmup, leaves the adapted step
+      blind to the jitter's effect on acceptance).
   - **GenMLX's further distributions (genclj-z2gh).** `truncated-normal`,
     `von-mises`, `wishart` and `inv-wishart` take Distributions.jl's
     parameters; `wrapped-cauchy` (scipy's wrapcauchy, centered on mu) and
