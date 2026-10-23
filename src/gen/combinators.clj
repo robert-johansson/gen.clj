@@ -146,6 +146,7 @@
       (update :choices assoc-element i (:choices sub))
       (assoc-in [:retval i] (:retval sub))
       (update :score #(cond-> (+ % (:score sub)) old (- (:score old))))
+      (cond-> old (assoc :subtracted true))
       (update :weight + w)))
 
 (defn- put-update
@@ -177,15 +178,32 @@
                                          (update :discard cm/set-submap i (:choices sub))))))
                 acc
                 (clojure.core/map vector (range n (count (:subs acc))) gone))
+        (cond-> (seq gone) (assoc :subtracted true))
         (update :subs keep-first n)
         (update :retval keep-first n))))
 
 (defn- retdiff [{:keys [retdiffs]} n prev-n]
   (if (and (= n prev-n) (empty? retdiffs)) diff/no-change (diff/vector-diff n prev-n retdiffs)))
 
+(defn- revised
+  "acc after an update or regenerate, its score checked. The score is a
+   running total: the old one plus the new elements' scores, less those of
+   the elements replaced or dropped. Less an element's -Inf (a choice out
+   of its support), that is -Inf + Inf = NaN where the density may be
+   finite (genclj-awd0). So where the update took an element's score out
+   and the total is NaN, the score is the sum of the elements' scores: on
+   the host only then, and per particle under the batch tracer
+   (array/where), which there sums them whenever an element was taken out."
+  [{:keys [score subs subtracted] :as acc}]
+  (let [summed #(reduce (fn [total sub] (+ total (:score sub))) 0.0 subs)]
+    (cond (not subtracted) acc
+          (array/host? score) (cond-> acc (Double/isNaN (double score)) (assoc :score (summed)))
+          :else (assoc acc :score (array/where (array/isnan score) (summed) score)))))
+
 (defn- incremental-result [gf args acc op n prev-n]
-  (cond-> {:trace (elements-trace gf args acc) :weight (:weight acc) :retdiff (retdiff acc n prev-n)}
-    (= op :update) (assoc :discard (:discard acc))))
+  (let [acc (revised acc)]
+    (cond-> {:trace (elements-trace gf args acc) :weight (:weight acc) :retdiff (retdiff acc n prev-n)}
+      (= op :update) (assoc :discard (:discard acc)))))
 
 (defn- project-elements [tr s]
   (let [subs (::subtraces tr)
@@ -1146,7 +1164,7 @@
         carry-diff (cond (== n prev-n) cdiff
                          (gfi/same-value? (first (:retval tr)) carry) diff/no-change
                          :else diff/unknown-change)]
-    (cond-> {:trace (scan-trace gf (vec args) carry acc) :weight (:weight acc)
+    (cond-> {:trace (scan-trace gf (vec args) carry (revised acc)) :weight (:weight acc)
              :retdiff (scan-retdiff carry-diff (retdiff acc n prev-n))}
       (= op :update) (assoc :discard (:discard acc)))))
 

@@ -326,6 +326,31 @@
           k (rng/key (inc seed))]
       (close? (:weight (gfi/assess gf args (:choices tr) k)) (:weight (gfi/generate gf args (:choices tr) k))))))
 
+(defn updates-and-regenerates-keep-the-assessed-score
+  "Def 2.1.16 after chains of moves: a trace updated to other arguments and
+   constraints and back with its discard, and one regenerated to other
+   arguments and back, has the assessed density of its choices as its
+   score. The first move may take a choice out of its support and the
+   second bring it back: a score kept as a running total (score + new -
+   old) was then -Inf + Inf = NaN where the density is finite
+   (genclj-awd0); updates-are-reversible-with-exact-discards compared only
+   the choices coming back. Planted bug (2026-10-24): that running total
+   unchecked fails it on the combinators' and the extras' bounded kernels."
+  [cases]
+  (prop/for-all [[[_ gf args :as model] seed picks alt?] cases]
+    (let [k (rng/key seed)]
+      (and (if-let [{:keys [tr] {t2 :trace disc :discard} :result} (update-case model seed picks alt?)]
+             (let [r (vacuous-on-unvisitable (gfi/update t2 (:args tr) (unknown-diffs (:args tr)) disc (rng/fold-in k 3)))]
+               (and (consistent? t2) (or (= ::vacuous r) (consistent? (:trace r)))))
+             true)
+           (let [tr (gfi/simulate gf args k)
+                 args' (next-args model seed alt?)
+                 s (sel/from-paths (picked (addrs tr) picks))
+                 r (vacuous-on-unvisitable (gfi/regenerate tr args' (unknown-diffs args') s (rng/fold-in k 4)))]
+             (or (= ::vacuous r)
+                 (let [r2 (vacuous-on-unvisitable (gfi/regenerate (:trace r) args (unknown-diffs args) sel/none (rng/fold-in k 5)))]
+                   (and (consistent? (:trace r)) (or (= ::vacuous r2) (consistent? (:trace r2)))))))))))
+
 ;; ---------------------------------------------------------------------------
 ;; Forward-sampling laws
 ;; ---------------------------------------------------------------------------
@@ -443,7 +468,8 @@
    :update-weight-is-the-projection-change update-weight-is-the-projection-change
    :regenerate-weight-with-new-arguments-is-the-projection-ratio regenerate-weight-with-new-arguments-is-the-projection-ratio
    :propose-weight-is-the-assessed-density propose-weight-is-the-assessed-density
-   :assess-is-generate-with-every-choice assess-is-generate-with-every-choice})
+   :assess-is-generate-with-every-choice assess-is-generate-with-every-choice
+   :updates-and-regenerates-keep-the-assessed-score updates-and-regenerates-keep-the-assessed-score})
 
 (def forward-sampling
   {:generate-without-constraints-has-weight-zero generate-without-constraints-has-weight-zero
@@ -601,7 +627,8 @@
   (merge (apply dissoc all [:score-is-the-assessed-density :generate-with-every-choice-is-deterministic
                             :generated-traces-are-consistent :updates-are-reversible-with-exact-discards
                             :regenerate-keeps-unselected-choices :propose-weight-is-the-assessed-density
-                            :update-weight-is-the-score-change-less-fresh-choices])
+                            :update-weight-is-the-score-change-less-fresh-choices
+                            :updates-and-regenerates-keep-the-assessed-score])
          {:generate-with-every-choice-weighs-its-score generate-with-every-choice-weighs-its-score
           :generated-traces-keep-their-constraints generated-traces-keep-their-constraints
           :updates-restore-their-choices updates-restore-their-choices
