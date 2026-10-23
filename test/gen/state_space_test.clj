@@ -202,7 +202,7 @@
   [xs mu v]
   (< (Math/abs (clojure.core/- (/ (reduce clojure.core/+ xs) (count xs)) mu)) (* 5 (Math/sqrt (/ v (count xs))))))
 
-(deftest ^:slow sampled-states-follow-the-smoothing-marginals
+(deftest ^:slow ^:heavy sampled-states-follow-the-smoothing-marginals
   (let [draws 2000]
     (doseq [name [:local-level :offsets :vector]
             :let [{:keys [args obs smoothed-means smoothed-variances]} (kalman-case name)
