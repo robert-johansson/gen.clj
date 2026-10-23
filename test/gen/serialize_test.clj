@@ -92,11 +92,10 @@
     (:int32 :int64 :uint32) special-ints
     special-floats))
 
-;; Planted bugs (2026-10-23), each failing this property or the special
-;; floats below: -0.0 written as 0.0; a float32 written as its float's
-;; shortest decimal (Float/toString: 0.1 reads back as a double that is no
-;; float32 value, a loud error); the data of a 2-d array written column
-;; first; a shape [] read as [1].
+;; Planted bugs (2026-10-23), each failing this property: -0.0 written as
+;; 0.0; a float32 written as its float's shortest decimal (Float/toString:
+;; 0.1 reads back as a double that is no float32 value, a loud error); the
+;; data of a 2-d array written column first.
 (defn- random-value
   "A value of dtype's kind: one of the special ones half the time."
   [^java.util.Random r dtype]
@@ -141,7 +140,18 @@
             y (round-trip x)]
         (is (= (array/backend-array? x) (array/backend-array? y)) (name dtype))
         (is (same? x y) (name dtype))
-        (is (= (ts/jvm?) (not (array/backend-array? y))) "the JVM backend has no 0-d arrays")))))
+        (is (= (ts/jvm?) (not (array/backend-array? y))) "the JVM backend has no 0-d arrays"))))
+  ;; Planted bug (2026-10-23): shape [] read as [1]. The JVM backend never
+  ;; writes a 0-d #gen/array, so the round trips above pass it there, and
+  ;; this text, as MLX writes it, fails.
+  (testing "a 0-d #gen/array, as MLX writes it, reads back as the backend's 0-d array"
+    (doseq [[text v] [["#gen/array {:dtype :float32, :shape [], :data [0.10000000149011612]}" (double (float 0.1))]
+                      ["#gen/array {:dtype :int32, :shape [], :data [-4]}" -4]
+                      ["#gen/array {:dtype :bool, :shape [], :data [true]}" true]]]
+      (let [y (serialize/read text)]
+        (is (= [] (array/shape y)) text)
+        (is (same? v (array/item y)) text)
+        (is (= (ts/jvm?) (not (array/backend-array? y))) text)))))
 
 (deftest an-array-is-written-with-its-dtype-and-shape
   (let [x (array/array [[1 2 3] [4 5 6]] {:dtype :int32})]
@@ -316,9 +326,9 @@
                      :simulate (fn [_ key] {:choices (cm/choicemap :y (rng/normal key)) :log-estimate 0.0})}))
 
 ;; Planted bug (2026-10-23): omega-at finding nothing. write-trace then
-;; writes these traces and read-trace rebuilds them with other draws of ω:
-;; the scores of noisy and estimated differ (the rebuild check catches
-;; those), but the return value of returns-a-draw does not, silently.
+;; writes these traces, and read-trace rebuilds them silently with ω drawn
+;; from the rebuild's key, not the trace's: write-trace's own rebuild drew
+;; the same, so the written score agrees.
 (deftest encapsulated-randomness-is-refused
   (doseq [[label gf args at] [["untraced draws" noisy [] []]
                               ["a draw only the return value reads"
@@ -365,6 +375,7 @@
   (doseq [[text reason] [["#foo/bar 1" :unknown-tag]
                          ["#gen/arrays {}" :unknown-tag]
                          ["#gen/array [:float64 [1.0]]" :malformed]
+                         ["#gen/array (:dtype :float64 :shape)" :malformed]
                          ["#gen/array {:dtype :float64 :shape [2]}" :malformed]
                          ["#gen/array {:dtype :float128 :shape [1] :data [1.0]}" :malformed]
                          ["#gen/array {:dtype :float64 :shape [-1] :data []}" :malformed]
@@ -406,6 +417,7 @@
       (doseq [[s reason] [["1" :not-a-trace]
                           ["[#gen/trace {:args [] :choices #gen/choicemap {} :score 0.0}]" :not-a-trace]
                           ["#gen/trace {:args [] :choices #gen/choicemap {}}" :malformed]
+                          ["#gen/trace (:args [] :choices)" :malformed]
                           ["#gen/trace {:args () :choices #gen/choicemap {} :score 0.0}" :malformed]
                           ["#gen/trace {:args [] :choices {} :score 0.0}" :malformed]
                           ["#gen/trace {:args [] :choices #gen/choicemap {} :score :a}" :malformed]

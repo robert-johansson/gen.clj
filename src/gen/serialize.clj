@@ -244,21 +244,24 @@
     :bool (boolean? v)))
 
 (defn- read-array [form]
-  (let [bad #(throw (malformed 'gen/array %1 %2))
-        _ (when-not (and (map? form) (= #{:dtype :shape :data} (set (keys form))))
-            (bad "is a map of :dtype, :shape and :data" {:keys (when (map? form) (vec (keys form)))}))
-        {:keys [dtype shape data]} form]
-    (when-not (contains? dt/dtypes dtype)
-      (bad (str "has the dtype " (pr-str dtype) ", which is none of " (sort dt/dtypes)) {:dtype dtype}))
-    (when-not (and (vector? shape) (every? #(and (instance? Long %) (<= 0 (long %))) shape))
-      (bad "has a shape that is not a vector of sizes" {:shape shape}))
-    (when-not (and (vector? data) (= (count data) (reduce *' 1 shape)))
-      (bad (str "of shape " shape " needs " (reduce *' 1 shape) " elements of data") {:shape shape}))
-    (when-let [i (first (keep-indexed (fn [i v] (when-not (fits? dtype v) i)) data))]
-      (bad (str "holds " (pr-str (data i)) ", not a " dtype " value, at index " i) {:dtype dtype :index i :value (data i)}))
-    (cond (empty? shape) (array/array (data 0) {:dtype dtype})
-          :else (cond-> (array/array (if (= :float (dt/kind dtype)) (double-array data) data) {:dtype dtype})
-                  (< 1 (count shape)) (array/reshape shape)))))
+  (let [bad #(throw (malformed 'gen/array %1 %2))]
+    (when-not (and (map? form) (= #{:dtype :shape :data} (set (keys form))))
+      (bad "is a map of :dtype, :shape and :data" {:keys (when (map? form) (vec (keys form)))}))
+    (let [{:keys [dtype shape data]} form
+          n (reduce *' 1 shape)]
+      (when-not (contains? dt/dtypes dtype)
+        (bad (str "has the dtype " (pr-str dtype) ", which is none of " (sort dt/dtypes)) {:dtype dtype}))
+      (when-not (and (vector? shape) (every? #(and (instance? Long %) (<= 0 (long %))) shape))
+        (bad "has a shape that is not a vector of sizes" {:shape shape}))
+      (when-not (and (vector? data) (= (count data) n))
+        (bad (str "of shape " shape " needs " n " elements of data") {:shape shape}))
+      (when-let [i (first (keep-indexed (fn [i v] (when-not (fits? dtype v) i)) data))]
+        (bad (str "holds " (pr-str (data i)) ", not a " dtype " value, at index " i)
+             {:dtype dtype :index i :value (data i)}))
+      (if (empty? shape)
+        (array/array (data 0) {:dtype dtype})
+        (cond-> (array/array (if (= :float (dt/kind dtype)) (double-array data) data) {:dtype dtype})
+          (< 1 (count shape)) (array/reshape shape))))))
 
 (defn- read-choicemap [form]
   (if (and (map? form) (not (record? form)))
@@ -369,7 +372,8 @@
    error (see the namespace doc)."
   [tr]
   (when-not (trace/trace? tr)
-    (throw (ex-info (str "write-trace: takes a trace, not a " (.getName (class tr))) {:class (class tr)})))
+    (throw (ex-info (str "write-trace: takes a trace, not a " (.getName (class tr)))
+                    {:reason :not-a-trace :class (class tr)})))
   (when-let [at (omega-at tr)]
     (throw (ex-info (str "write-trace: the trace keeps encapsulated randomness (:gen.trace/omega) at " at
                          ", which generate would draw afresh (thesis §4.5), so it cannot be rebuilt")
@@ -379,6 +383,7 @@
         score (:score (rebuild :write-trace (:gen-fn tr) (:args tr) (:choices tr)))]
     (str "#gen/trace {:args " args ", :choices " choices ", :score " (text-of #(emit! % score [:score])) "}")))
 
+;; a #gen/trace's form, as read-trace reads the tag
 (deftype Written [form])
 
 (defn- read-written
@@ -389,18 +394,17 @@
         n (volatile! 0)
         x (read-text s (assoc readers 'gen/trace (fn [form]
                                                    (when (< 1 (long (vswap! n inc))) (bad "holds another #gen/trace"))
-                                                   (Written. form))))
-        _ (when-not (instance? Written x)
-            (throw (ex-info "read-trace: the text is not a written trace, #gen/trace {:args :choices :score}"
-                            {:reason :not-a-trace})))
-        form (.-form ^Written x)
-        _ (when-not (and (map? form) (= #{:args :choices :score} (set (keys form))))
-            (bad "is a map of :args, :choices and :score"))
-        {:keys [args choices score]} form]
-    (when-not (vector? args) (bad "has :args that are not a vector"))
-    (when-not (cm/choicemap? choices) (bad "has :choices that are not a choice map"))
-    (when-not (array/array? score) (bad "has a :score that is not a number"))
-    form))
+                                                   (Written. form))))]
+    (when-not (instance? Written x)
+      (throw (ex-info "read-trace: the text is not a written trace, #gen/trace {:args :choices :score}"
+                      {:reason :not-a-trace})))
+    (let [form (.-form ^Written x)]
+      (when-not (and (map? form) (= #{:args :choices :score} (set (keys form))))
+        (bad "is a map of :args, :choices and :score"))
+      (when-not (vector? (:args form)) (bad "has :args that are not a vector"))
+      (when-not (cm/choicemap? (:choices form)) (bad "has :choices that are not a choice map"))
+      (when-not (array/array? (:score form)) (bad "has a :score that is not a number"))
+      form)))
 
 (defn read-trace
   "gf's trace that the text s describes (write-trace's), rebuilt by
