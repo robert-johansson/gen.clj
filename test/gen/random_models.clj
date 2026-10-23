@@ -3,7 +3,8 @@
    model specs (data) and an interpreter that turns a spec into a dynamic
    generative function. Specs mix distribution families, dependencies on
    earlier choices, branches on boolean choices (so structure varies),
-   splices of sub-models, shared-namespace splices and Map/Unfold calls.
+   splices of sub-models, shared-namespace splices, and Map, Unfold, Switch,
+   Scan and Mix calls.
 
    A spec is a vector of statements:
      [:site addr family dep]     a choice; dep is the address of an earlier
@@ -16,6 +17,9 @@
      [:unfold addr n]            an Unfold of a random walk for n steps
      [:switch addr]              a Switch between two small models, its index
                                  a categorical choice at [addr :i]
+     [:scan addr n]              a Scan of a random walk over n inputs, its last
+                                 carry the statement's value
+     [:mix addr]                 a Mix of the Switch's two models
      [:select addr]              a categorical choice compared with = to pick a
                                  mean (a host predicate on the choice)
 
@@ -62,10 +66,26 @@
 (def ^:private walk
   (dyn/make-gen-fn (fn [trace _ _ _ _t s] (trace :s (d/normal (* 0.9 s) 1.0))) '([t s])))
 
+(def ^:private one-site (dyn/make-gen-fn (fn [trace _ _ _ m] (trace :a (d/normal m 1.0))) '([m])))
+
+(def ^:private two-sites
+  (dyn/make-gen-fn (fn [trace _ _ _ m] (trace :c (d/normal (trace :b (d/gamma 2.0 1.0)) 1.0))) '([m])))
+
 (def ^:private switched
   "A Switch of a one-site model and a two-site model with a dependency."
-  (comb/switch (dyn/make-gen-fn (fn [trace _ _ _ m] (trace :a (d/normal m 1.0))) '([m]))
-               (dyn/make-gen-fn (fn [trace _ _ _ m] (trace :c (d/normal (trace :b (d/gamma 2.0 1.0)) 1.0))) '([m]))))
+  (comb/switch one-site two-sites))
+
+(def ^:private scan-step
+  (dyn/make-gen-fn (fn [trace _ _ _ c x] (let [s (trace :s (d/normal (+ (* 0.9 c) x) 1.0))] [s (* 2.0 s)])) '([c x])))
+
+;; Planted bugs (2026-10-23), each failing laws of gen.fuzz-test: a skipped
+;; Scan step's carry read from its output (five, among them
+;; identity-update-changes-nothing; none while the inputs were a new vector
+;; on each run, which an update revisits whole); Mix's project 0 (eleven).
+(def ^:private scan-inputs
+  "Scan's inputs by length, the same vector on every run: a splice's
+   unchanged argument, so that an update skips the steps nothing reaches."
+  (mapv #(vec (repeat % 0.5)) (range 4)))
 
 (def ^:private switch-kernel
   "A Map kernel that is a Switch, its index its own choice."
@@ -97,6 +117,8 @@
               :unfold (let [[n] more] (splice addr (comb/unfold walk) n 0.0) env)
               :switch (let [i (trace [addr :i] (d/categorical [0.5 0.5]))]
                         (assoc env addr (splice [addr :s] switched i 0.5)))
+              :scan (let [[n] more] (assoc env addr (first (splice addr (comb/scan scan-step) 0.0 (scan-inputs n)))))
+              :mix (assoc env addr (splice addr (comb/mix one-site two-sites) [0.4 0.6] 0.5))
               :switch* (let [[ps dep gf] more
                              x (if dep (array/astype (get env dep 0.0) (:float (gen.array.protocols/-defaults array/*backend*))) 0.0)]
                          (assoc env addr (splice [addr :s] gf (trace [addr :i] (d/categorical ps)) x)))
@@ -133,6 +155,8 @@
                              [1 (gen/let [n (gen/choose 0 3)] [:map nil n])]
                              [1 (gen/let [n (gen/choose 0 3)] [:unfold nil n])]
                              [1 (gen/return [:switch nil])]
+                             [1 (gen/let [n (gen/choose 0 3)] [:scan nil n])]
+                             [1 (gen/return [:mix nil])]
                              [1 (gen/return [:select nil])]])]
     (if (zero? depth)
       (gen/vector leaf 1 3)
@@ -144,8 +168,8 @@
 
 (defn- switch-statements
   "A generator of Switch-heavy statements at nesting depth: sites, Maps,
-   Unfolds, Maps of Switch kernels, and Switches of 2 or 3 branches of
-   statements one level down."
+   Unfolds, Scans, Mixes, Maps of Switch kernels, and Switches of 2 or 3
+   branches of statements one level down."
   [depth]
   (let [site (gen/let [family (gen/elements numeric-families)
                        dep? gen/boolean]
@@ -153,6 +177,8 @@
         leaf (gen/frequency [[6 site]
                              [1 (gen/let [n (gen/choose 0 3)] [:map nil n])]
                              [1 (gen/let [n (gen/choose 0 3)] [:unfold nil n])]
+                             [1 (gen/let [n (gen/choose 0 3)] [:scan nil n])]
+                             [1 (gen/return [:mix nil])]
                              [1 (gen/let [n (gen/choose 0 3)] [:switch-map nil n])]])
         switch (gen/let [ws (gen/vector (gen/choose 1 5) 2 3)
                          dep? gen/boolean
@@ -197,6 +223,8 @@
                  :map [(conj out [:map addr (first more)]) (conj earlier addr)]
                  :unfold [(conj out [:unfold addr (first more)]) earlier]
                  :switch [(conj out [:switch addr]) (conj earlier addr)]
+                 :scan [(conj out [:scan addr (first more)]) (conj earlier addr)]
+                 :mix [(conj out [:mix addr]) (conj earlier addr)]
                  :switch* (let [[ps dep? branches] more
                                 dep (when (and dep? (seq earlier)) (peek earlier))]
                             [(conj out [:switch* addr ps dep (switch-of branches)]) (conj earlier addr)])

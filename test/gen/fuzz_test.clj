@@ -1,10 +1,10 @@
 (ns gen.fuzz-test
   "The GFI laws, and batched path equivalence (batched gradients too), over
    random generative functions (gen.random-models): random families,
-   dependencies, branches, splices, shared-namespace splices, Map and
-   Unfold; and, over Switch-heavy models whose Switches run by partition in
-   a batched run, every batched operation particle by particle against the
-   scalar handler."
+   dependencies, branches, splices, shared-namespace splices, Map, Unfold,
+   Switch, Scan and Mix; and, over Switch-heavy models whose Switches run by
+   partition in a batched run, every batched operation particle by particle
+   against the scalar handler."
   (:refer-clojure :exclude [+ -])
   (:require [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
@@ -107,10 +107,16 @@
 (def ^:private switch-case (gen/tuple rm/gen-switch-model gen/nat (gen/choose 1 6)))
 
 (defn- index-paths
-  "The paths of a trace's top-level Switch indices, which every particle
-   makes."
+  "The paths of a trace's top-level Switch and Mix indices, which every
+   particle makes."
   [tr]
-  (filterv #(and (= 2 (count %)) (= :i (peek %))) (cm/addresses (:choices tr))))
+  (filterv #(and (= 2 (count %)) (#{:i :index} (peek %))) (cm/addresses (:choices tr))))
+
+(defn- call-of
+  "The path of the call an index at p picks: a Switch's at :s, a Mix's
+   component at :component."
+  [p]
+  (conj (pop p) (if (= :index (peek p)) :component :s)))
 
 (defn- own-indices
   "n particles' own values at the index paths, from scalar runs."
@@ -165,11 +171,11 @@
                           olds (b/traces ps') (array/->clj ws) ds own)))))))
 
 (defn- selected-parts
-  "Some of a trace's top-level Switch indices and calls, by the booleans
-   picks."
+  "Some of a trace's top-level Switch and Mix indices and calls, by the
+   booleans picks."
   [tr picks]
   (sel/from-paths (keep (fn [[p pick?]] (when pick? p))
-                        (map vector (mapcat (fn [p] [p (conj (pop p) :s)]) (index-paths tr)) (cycle picks)))))
+                        (map vector (mapcat (fn [p] [p (call-of p)]) (index-paths tr)) (cycle picks)))))
 
 (defspec switch-heavy-regenerates-obey-the-regenerate-law 100
   ;; some indices and Switch calls regenerated: w = log p(new)/p(old) over

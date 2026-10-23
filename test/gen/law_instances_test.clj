@@ -54,6 +54,8 @@
 
 (def ^:private aggregation (gen [v ws] (trace :a (d/normal (reduce + v ws) 1))))
 
+(def ^:private scan-step (gen [c x] (let [s (trace :s (d/normal (+ c x (param :w)) 1))] [s s])))
+
 (defn- pair
   "[label (f {:w 1.0}) args alts (f {:w 6.0})]"
   [label f args alts]
@@ -68,6 +70,10 @@
    (pair :unfold-of-a-with-params-step #(comb/unfold (dyn/with-params step %)) [2 0.0] [[3 0.0]])
    (pair :switch-of-with-params-branches #(comb/switch (dyn/with-params chain %) (dyn/with-params forked1 %)) [0 0.5] [[1 0.5]])
    (pair :recurse-of-a-with-params-production #(comb/recurse (dyn/with-params production %) aggregation 2) [0] [[1]])
+   (pair :scan-of-a-with-params-kernel #(comb/scan (dyn/with-params scan-step %)) [0.0 [0.5 1.0]] [[0.0 [0.5 1.0 1.5]]])
+   (pair :mix-of-with-params-components #(comb/mix (dyn/with-params chain %) (dyn/with-params forked1 %)) [[0.5 0.5] 0.5]
+         [[[0.2 0.8] 0.5]])
+   (pair :dimap-of-a-with-params-inner #(comb/dimap (dyn/with-params chain %) (fn [x] [(* 2.0 x)]) vector) [0.5] [[1.5]])
    (pair :static #(dyn/with-params static-chain %) [] [])
    (pair :internal-proposal #(prop/with-internal-proposal (dyn/with-params inner %) q-x) [] [])
    (pair :exact-proposal #(enum/with-exact-proposal (dyn/with-params inner-b %) [:b]) [] [])])
@@ -81,5 +87,6 @@
 ;; regenerate projecting the old trace by the new gen-fn (regenerate). Both
 ;; pass review 6's N5 (store marks never refreshed), which the whole suite
 ;; passes, and R10 (a static walk's own store check, which a revise never
-;; reaches; the fast tier catches it).
+;; reaches; the fast tier catches it). And (2026-10-23) Mix's revise leaving
+;; its body's trace unmarked as the Mix's fails both laws on the Mix pair.
 (laws/deflaws revised models 100 laws/across)
