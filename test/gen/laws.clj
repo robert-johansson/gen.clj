@@ -668,12 +668,13 @@
 
 (defmacro deflaws
   "A defspec per law (from gen.laws/all, or the given law map: a var's
-   symbol or a literal map), named prefix-law, each over cases of models."
+   symbol or a literal map), named prefix-law, each over cases of models,
+   with prefix's metadata (^:slow, say)."
   ([prefix models num-tests] `(deflaws ~prefix ~models ~num-tests all))
   ([prefix models num-tests laws]
    (let [laws-map (if (symbol? laws) @(resolve laws) laws)
          cs (gensym "cases")]
      `(let [~cs (cases ~models)]
         ~@(for [law (keys laws-map)]
-            `(clojure.test.check.clojure-test/defspec ~(symbol (str prefix "-" (name law))) ~num-tests
+            `(clojure.test.check.clojure-test/defspec ~(with-meta (symbol (str prefix "-" (name law))) (meta prefix)) ~num-tests
                ((get ~laws ~law) ~cs)))))))
