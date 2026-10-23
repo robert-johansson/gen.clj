@@ -122,8 +122,9 @@
   ;; inverse metric, in one. It found genclj-awd0 (2026-10-24): a chain
   ;; whose new arguments took a Map of uniforms out of its support and back
   ;; started a step from a NaN score (Map's and Unfold's incremental score,
-  ;; -Inf + Inf), which every run kept alike and same-move? does not equate;
-  ;; at the default count the case is rare (once in about 180).
+  ;; -Inf + Inf), which fails it; at the default count the case is rare
+  ;; (once in about 180), and with awd0's fix, on wave 2's branch, it
+  ;; passes at length too.
   (prop/for-all [[_ gf args alt-args] rsm/gen-continuous-model
                  kernels (tcg/vector gen-kernel 1 2)
                  moves (tcg/vector gen-move 2 8)
