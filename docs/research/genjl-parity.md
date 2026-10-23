@@ -172,16 +172,21 @@ GenMLX adapted 356 of its assertions in `test/genmlx/gen_clj_compat_test.cljs`.
 - **Extra combinators:** Scan, Mask, Mix, Contramap/MapRetval/Dimap.
 - **Extra inference.**
   - NUTS, enumerative Gibbs, PMMH and particle Gibbs, conditional SMC.
+    *gen.clj (round 1, 2026-10-23):* NUTS and Stan's warmup
+    (`mcmc/nuts`, `gen.inference.nuts`); Gibbs by `with-exact-proposal`.
   - Differentiable resampling and IS.
   - ADEV with REINFORCE and baselines.
   - Programmable VI objectives (IWELBO, PWake, QWake).
   - Amortized neural IS.
   - Fisher/Laplace, steppable/budgeted inference with a cost meter.
-  - Diagnostics (bulk/tail ESS, R-hat).
+  - Diagnostics (bulk/tail ESS, R-hat). *gen.clj (round 1, 2026-10-23):*
+    `gen.inference.diagnostics`.
   - Exact enumeration with the full GFI and entropy/mutual-information queries.
 - **16 extra distributions:** student-t, log-normal, delta, truncated-normal,
   wishart, inv-wishart, von-mises, wrapped-cauchy, wrapped-normal, gaussian-vec,
-  iid, iid-gaussian, weighted, categorical-weights, …
+  iid, iid-gaussian, weighted, categorical-weights, … *gen.clj (round 1,
+  2026-10-23):* all but delta (the owner's decision), the rest already
+  covered by gen.dist's families.
 - **Verification infrastructure.**
   - `gfi.cljs`: about 85 executable laws.
   - `pef.cljs`: path-equivalence fuzzing.
