@@ -547,6 +547,39 @@ Mixed, so the tape stays the default (docs/array-api.md §8).
   31.6 → 7.1 ms; MALA, 8.9 → 4.2 ms. Other changes since have made most
   paths faster, so the trigger's cost shows only in the comparison above.
 
+## NUTS against HMC with a tuned L (2026-10-23, bean genclj-tvc0)
+
+`bench/gen/nuts_bench.clj`: a 10-d Gaussian of scales 0.1 to 10
+(log-spaced) and correlations 0.5^|i − j|, one `mvnormal` choice. Each
+kernel runs Stan's warmup (`gen.inference.nuts`: 1000 iterations adapting
+the step size and a diagonal metric), then draws 2000 times. A draw costs
+a gradient per leapfrog step and one at its start. The effective sample
+size is the smallest over the coordinates and their squares, by Geyer's
+initial positive sequence. JVM backend, one run (key 1). Reproduce with
+`clojure [-J-Dgen.backend=mlx] -M:bench -m gen.nuts-bench`.
+
+| Kernel | Gradients per draw | Per effective draw | Smallest ESS | Warmup gradients | Step size |
+|---|---|---|---|---|---|
+| NUTS | 9.9 | 19.4 | 1018 | 25,840 | 0.48 |
+| HMC, L = 1 | 2 | 115 | 35 | 2000 | 0.52 |
+| HMC, L = 2 | 3 | 31.5 | 190 | 3000 | 0.45 |
+| HMC, L = 4 (the best L) | 5 | 10.7 | 932 | 5000 | 0.48 |
+| HMC, L = 8 | 9 | 76 | 236 | 9000 | 0.45 |
+| HMC, L = 16 | 17 | 1219 | 28 | 17,000 | 0.50 |
+| HMC, L = 32 | 33 | 1339 | 49 | 33,000 | 0.44 |
+| HMC, L = 64 | 65 | 1873 | 69 | 65,000 | 0.43 |
+
+- **NUTS costs about twice the best L's gradients per effective draw**
+  (19.4 against 10.7), with no L to choose. Off the best L, HMC is 3 to
+  175 times worse: once the metric makes the target nearly round, a
+  trajectory of L steps returns near its start at some L (16 here).
+- **Per gradient, a NUTS step costs about 1.4× an HMC step** on the JVM
+  (1.1 ms for 6.2 steps against 0.78 ms for 7, at depth 3). JDK Flight
+  Recorder puts two thirds of a transition in the gradients, under 6% in
+  the tree's own logic (the criterion, the draws, the keys), and 8% in
+  the trace's update.
+- No divergences after the warmup.
+
 ## The static language's skipping (2026-10-20, bean genclj-0q3a)
 
 An update on the JVM backend (this Mac, a Metal test run beside it) of
