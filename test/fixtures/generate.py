@@ -8,7 +8,8 @@ Writes test/fixtures/special.edn (scipy.special, and numpy's inverse
 trigonometric and hyperbolic functions), test/fixtures/random.edn
 (JAX's threefry: keys, splits, bits and samplers, float64 via jax_enable_x64)
 and test/fixtures/distributions.edn (scipy.stats log densities in Gen.jl's
-parameterizations).
+parameterizations, Distributions.jl's for the families Gen.jl lacks, and the
+wrapped normal's from a long direct sum).
 """
 import math
 import os
@@ -197,6 +198,92 @@ def distributions():
     add("triangular", [0.0, 1.0, 1.0], [0.0, 0.5, 1.0], lambda v: st.triang.logpdf(v, 1.0, loc=0.0, scale=1.0))
     add("weibull", [1.5, 2.0], [-1.0, 0.0, 0.4, 1.5, 4.0], lambda v: st.weibull_min.logpdf(v, 1.5, scale=2.0))
     add("weibull", [1.0, 2.0], [0.0, 1.0], lambda v: st.weibull_min.logpdf(v, 1.0, scale=2.0))
+    cases += further_families()
+    return cases
+
+
+def further_families():
+    """GenMLX's further families: the truncated normal (scipy's truncnorm),
+    the circular ones on [-pi, pi] (-Inf outside) and Wishart and inverse
+    Wishart. Narrow intervals across 0 are left out: there scipy's
+    1 - Phi(a) - Phi(-b) cancels (6.6e-7 off on [-1e-10, 1e-10]). The von
+    Mises and wrapped Cauchy densities are taken in the stable forms
+    -2k sin^2(d/2) - log(2 pi i0e(k)) and (1 - r)^2 + 4r sin^2(d/2), which
+    scipy's own cancel near the mode at a large concentration; each is
+    checked against scipy's where scipy's is exact."""
+    import scipy.stats as st
+    cases = []
+    inf = math.inf
+
+    def add(name, params, values, f):
+        for v in values:
+            cases.append({":dist": ":" + name, ":params": list(params), ":value": v,
+                          ":log-prob": float(f(v))})
+
+    def truncnorm(mu, sigma, lo, hi):
+        return lambda v: st.truncnorm.logpdf(v, (lo - mu) / sigma, (hi - mu) / sigma, loc=mu, scale=sigma)
+
+    for params, values in [([0.5, 2.0, -1.0, 3.0], [-2.0, -1.0, 0.0, 2.5, 3.0, 3.5]),
+                           ([0.0, 1.0, 0.0, inf], [-0.1, 0.0, 1.0, 8.0]),
+                           ([0.0, 1.0, 5.0, 6.0], [5.0, 5.5, 6.0]),
+                           ([0.0, 1.0, 30.0, 30.5], [30.0, 30.2, 30.5]),
+                           ([2.0, 0.5, -20.0, -18.0], [-20.0, -19.0]),
+                           ([1.0, 0.5, -inf, 0.0], [-3.0, -1.0, 0.0, 0.1]),
+                           ([1.0, 0.5, 3.0, inf], [3.0, 4.0, 100.0]),
+                           ([0.3, 1.2, -inf, inf], [-2.0, 0.0, 2.0])]:
+        add("truncated-normal", params, values, truncnorm(*params))
+
+    def on_circle(f):
+        return lambda v: f(v) if -math.pi <= v <= math.pi else -inf
+
+    def wrapped(d):
+        return (d + math.pi) % (2 * math.pi) - math.pi
+
+    def von_mises(mu, kappa):
+        def f(v):
+            d = wrapped(v - mu)
+            lp = -2 * kappa * math.sin(d / 2) ** 2 - math.log(2 * math.pi * sp.i0e(kappa))
+            if kappa <= 100:
+                assert abs(lp - st.vonmises.logpdf(d, kappa)) < 1e-12 * max(1, abs(lp))
+            return lp
+        return on_circle(f)
+
+    angles = [-4.0, -math.pi, -2.0, -0.5, 0.0, 0.3, 1.0, 3.0, math.pi, 3.5]
+    for mu, kappa in [(0.3, 0.01), (0.3, 1.0), (-2.5, 4.0), (1.0, 50.0), (0.3, 1e4)]:
+        add("von-mises", [mu, kappa], angles, von_mises(mu, kappa))
+
+    def wrapped_cauchy(mu, rho):
+        def f(v):
+            d = wrapped(v - mu)
+            lp = (math.log1p(-rho) + math.log1p(rho) - math.log(2 * math.pi)
+                  - math.log((1 - rho) ** 2 + 4 * rho * math.sin(d / 2) ** 2))
+            if 0 < rho <= 0.9:
+                assert abs(lp - st.wrapcauchy.logpdf(d % (2 * math.pi), rho)) < 1e-12 * max(1, abs(lp))
+            return lp
+        return on_circle(f)
+
+    for mu, rho in [(0.3, 0.0), (0.3, 0.3), (-2.5, 0.9), (1.0, 0.999)]:
+        add("wrapped-cauchy", [mu, rho], angles, wrapped_cauchy(mu, rho))
+
+    def wrapped_normal(mu, sigma):
+        # the long direct sum, its terms past |k| = 60 below e^-7000 of it
+        ks = np.arange(-60, 61)
+        return on_circle(lambda v: sp.logsumexp(st.norm.logpdf(v + 2 * math.pi * ks, mu, sigma)))
+
+    for mu, sigma in [(0.3, 0.1), (0.3, 1.0), (-2.5, 2.25), (1.0, 3.0), (0.3, 10.0)]:
+        add("wrapped-normal", [mu, sigma], angles, wrapped_normal(mu, sigma))
+
+    def matrices(name, logpdf):
+        for df, scale, values in [
+                (3.0, [[1.5]], [[[2.0]], [[0.01]]]),
+                (4.0, [[1.0, 0.5], [0.5, 2.0]], [[[2.0, 0.3], [0.3, 3.0]], [[0.5, -0.2], [-0.2, 0.1]]]),
+                (1.2, [[2.0, -0.4], [-0.4, 0.5]], [[[1.0, 0.1], [0.1, 0.4]]]),
+                (5.5, [[1.0, 0.5, 0.1], [0.5, 2.0, -0.3], [0.1, -0.3, 1.5]],
+                 [[[2.0, 0.3, -0.2], [0.3, 3.0, 0.4], [-0.2, 0.4, 1.0]]])]:
+            add(name, [df, scale], values, lambda v, df=df, scale=scale: logpdf(np.array(v), df, np.array(scale)))
+
+    matrices("wishart", st.wishart.logpdf)
+    matrices("inv-wishart", st.invwishart.logpdf)
     return cases
 
 

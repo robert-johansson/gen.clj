@@ -910,3 +910,353 @@
         (is (= ##-Inf (ts/number (dc/log-prob dd (v 1e-4)))))))
     (is (= [1e-6 1e-6] [(dc/probability-tolerance 3 :float64) (dc/probability-tolerance k :float64)]))
     (is (ts/close? (* 4 (/ (Math/log k) (Math/log 2)) (Math/ulp (float 1.0))) (dc/probability-tolerance k :float32)))))
+
+;; ---------------------------------------------------------------------------
+;; GenMLX's further families: the truncated normal, the circular families,
+;; Wishart and inverse Wishart (genclj-z2gh). Their log densities are
+;; checked against scipy's in log-probs-match-scipy.
+;; ---------------------------------------------------------------------------
+
+(def ^:private s2 [[1.0 0.5] [0.5 2.0]])
+(def ^:private s3 [[1.0 0.5 0.1] [0.5 2.0 -0.3] [0.1 -0.3 1.5]])
+
+(deftest the-genmlx-families-validate-their-parameters
+  ;; planted: the checks of lo < hi, rho < 1, df > p - 1 and of a square
+  ;; scale, each dropped, let their cases through
+  (doseq [[expected f] [[{:distribution "truncated-normal" :param "sigma" :value 0.0} #(d/truncated-normal 0.0 0.0 -1.0 1.0)]
+                        [{:distribution "von-mises" :param "kappa"} #(d/von-mises 0.0 [1.0 -1.0])]
+                        [{:distribution "wrapped-cauchy" :param "rho" :value -0.1} #(d/wrapped-cauchy 0.0 -0.1)]
+                        [{:distribution "wrapped-normal" :param "sigma"} #(d/wrapped-normal 0.0 [1.0 -1.0])]
+                        [{:distribution "wishart" :param "scale" :shape [2 3]} #(d/wishart 3.0 [[1.0 0.0 0.0] [0.0 1.0 0.0]])]
+                        [{:distribution "wishart" :param "scale" :shape [2]} #(d/wishart 3.0 [1.0 1.0])]
+                        [{:distribution "inv-wishart" :param "scale"} #(d/inv-wishart 3.0 [[1.0 0.5] [0.3 1.0]])]]]
+    (is (= expected (ts/thrown-data (f))) (pr-str expected)))
+  (testing "PROVISIONAL edges (genclj-z2gh): loud errors"
+    (doseq [[label f] {"lo = hi" #(d/truncated-normal 0.0 1.0 1.0 1.0) "lo > hi" #(d/truncated-normal 0.0 1.0 1.0 0.0)
+                       "both bounds -Inf" #(d/truncated-normal 0.0 1.0 ##-Inf ##-Inf)
+                       "lo > hi in an array" #(d/truncated-normal 0.0 1.0 [0.0 2.0] [1.0 1.0])
+                       "kappa = 0" #(d/von-mises 0.0 0.0) "rho = 1" #(d/wrapped-cauchy 0.0 1.0)
+                       "rho = 1 in an array" #(d/wrapped-cauchy 0.0 [0.5 1.0])}]
+      (is (thrown? clojure.lang.ExceptionInfo (f)) label))
+    (doseq [[label f] {"wishart df = p - 1" #(d/wishart 1.0 s2) "inv-wishart df = p - 1" #(d/inv-wishart 2.0 s3)
+                       "wishart df below in an array" #(d/wishart [3.0 0.5] s2)}]
+      (is (= {:distribution (if (re-find #"^inv" label) "inv-wishart" "wishart") :param "df" :dimension (if (re-find #"inv" label) 3 2)}
+             (ts/thrown-data (f)))
+          label))
+    (testing "a scale that is not positive definite, with mvnormal's jitter suggestion"
+      (is (re-find #"wishart: scale must be positive definite" (ex-message (try (d/wishart 3.0 [[1.0 2.0] [2.0 1.0]]) (catch Exception e e)))))
+      (is (= {:distribution "inv-wishart" :param "scale" :dtype (ts/float-dtype)}
+             (dissoc (ts/thrown-data (d/inv-wishart 3.0 [[2.0 2.0] [2.0 2.0]])) :suggested-jitter)))))
+  (testing "and what is allowed"
+    (is (every? some? [(d/truncated-normal 0.0 1.0 ##-Inf ##Inf) (d/truncated-normal 0.0 1.0 -1e-300 1e-300)
+                       (d/von-mises 0.0 1e-300) (d/von-mises 0.0 1e300) (d/wrapped-cauchy 0.0 0.0)
+                       (d/wrapped-normal 0.0 1e-300) (d/wishart 1.0001 s2) (d/inv-wishart [2.5 3.0] s3)]))))
+
+(defn- circle?
+  "Are all of x's elements angles in [-π, π]?"
+  [x]
+  (array/all-true? (array/logical-and (array/>= x (- Math/PI)) (array/<= x Math/PI))))
+
+(defn- host-erfc [x] (gen.array.special/erfc (double x)))
+
+(defn- normal-mass
+  "Φ(b) - Φ(a) on the host, from erfc in the form that does not cancel."
+  [a b]
+  (cond (>= a 0) (* 0.5 (- (host-erfc (/ a (Math/sqrt 2))) (host-erfc (/ b (Math/sqrt 2)))))
+        (<= b 0) (* 0.5 (- (host-erfc (/ (- b) (Math/sqrt 2))) (host-erfc (/ (- a) (Math/sqrt 2)))))
+        :else (- 1.0 (* 0.5 (host-erfc (/ b (Math/sqrt 2)))) (* 0.5 (host-erfc (/ (- a) (Math/sqrt 2)))))))
+
+(defn- truncated-normal-moments
+  "[mean variance] of normal(mu, sigma) on [lo, hi]: with r(x) = φ(x)/Z, Z
+   the mass, μ + σ(r(α) - r(β)) and σ²(1 + α·r(α) - β·r(β) - (r(α) - r(β))²)."
+  [mu sigma lo hi]
+  (let [a (/ (- lo mu) sigma) b (/ (- hi mu) sigma)
+        z (normal-mass a b)
+        r (fn [x] (if (Double/isInfinite x) 0.0 (/ (Math/exp (- (* -0.5 x x) 0.9189385332046728)) z)))
+        xr (fn [x] (if (Double/isInfinite x) 0.0 (* x (r x))))
+        m (- (r a) (r b))]
+    [(+ mu (* sigma m)) (* sigma sigma (- (+ 1.0 (xr a)) (xr b) (* m m)))]))
+
+(defn- bessel-i
+  "I_order(x) e^-x by its power series, on the host (for x up to 50)."
+  [order x]
+  (reduce + (for [k (range 300)]
+              (Math/exp (- (* (+ (* 2 k) order) (Math/log (/ x 2.0)))
+                           (gen.array.special/lgamma (double (inc k))) (gen.array.special/lgamma (double (+ k order 1))) x)))))
+
+(defn- mean-within
+  "Is the mean of the draws x (a vector of them) within five standard
+   errors of m, for a variance v?"
+  [x m v]
+  (close? (array/mean x) m (* 5 (Math/sqrt (/ v (array/size x))))))
+
+(deftest the-genmlx-families-sample-their-moments
+  ;; fixed keys; bands of five standard errors from the true variances (the
+  ;; truncated normal's sample variance from its sample's fourth moment, as
+  ;; sampler-moments). Planted, each fails: the von Mises acceptance
+  ;; without its log c, the envelope's (1 - ρ)/(1 + ρ) without the 2κ of
+  ;; its denominator, the wrapped Cauchy's (1 - ρ)/(1 + ρ) as 1 - ρ, the
+  ;; truncated normal's interval never mirrored, Bartlett's diagonal of
+  ;; χ²(df) for χ²(df - i), inv-wishart's C as A⁻ᵀ·Lᵀ.
+  (let [n 100000]
+    (testing "the truncated normal: mean and variance"
+      (doseq [[mu sigma lo hi :as params] [[0.5 2.0 -1.0 3.0] [0.0 1.0 5.0 6.0] [0.0 1.0 0.0 ##Inf] [1.0 0.5 ##-Inf 0.0]
+                                          [0.0 1.0 8.0 ##Inf] [2.0 0.5 -12.0 -11.0] [-1.0 3.0 ##-Inf ##Inf]]]
+        (let [[m v] (truncated-normal-moments mu sigma lo hi)
+              x (dc/sample (apply d/truncated-normal params) (rng/key 61) [n])
+              c (array/- x (array/mean x))
+              v-hat (ts/number (array/mean (array/square c)))
+              m4 (ts/number (array/mean (array/square (array/square c))))]
+          (is (close? (array/mean x) m (* 5 (Math/sqrt (/ v n)))) (str params " mean"))
+          (is (close? v-hat v (* 5 (Math/sqrt (/ (- m4 (* v-hat v-hat)) n)))) (str params " variance"))
+          (is (array/all-true? (array/logical-and (array/>= x lo) (array/<= x hi))) (str params " within [lo, hi]")))))
+    (testing "the circular families: E cos(θ - μ), E cos 2(θ - μ) and E sin(θ - μ)"
+      ;; [family mu param m1 m2 m4], mk = E cos k(θ - μ): von Mises Iₖ(κ)/I₀(κ),
+      ;; wrapped Cauchy ρᵏ, wrapped normal e^(-k²σ²/2)
+      (doseq [[make mu p m1 m2 m4] (concat (for [[mu kappa] [[0.7 0.5] [-2.0 4.0] [3.0 50.0]]]
+                                             (into [d/von-mises mu kappa] (map #(/ (bessel-i % kappa) (bessel-i 0 kappa)) [1 2 4])))
+                                           (for [[mu rho] [[0.5 0.0] [0.5 0.7] [-3.0 0.99]]]
+                                             [d/wrapped-cauchy mu rho rho (* rho rho) (Math/pow rho 4)])
+                                           (for [[mu sigma] [[0.5 0.3] [-3.0 2.0] [1.0 10.0]]]
+                                             (into [d/wrapped-normal mu sigma] (map #(Math/exp (* -0.5 % % sigma sigma)) [1 2 4]))))]
+        (let [label (str (:type (make mu p)) " " [mu p])
+              x (dc/sample (make mu p) (rng/key 62) [n])
+              d (array/- x mu)]
+          (is (circle? x) label)
+          (is (mean-within (array/cos d) m1 (- (/ (+ 1 m2) 2) (* m1 m1))) (str label " cos"))
+          (is (mean-within (array/cos (array/* 2.0 d)) m2 (- (/ (+ 1 m4) 2) (* m2 m2))) (str label " cos 2"))
+          (is (mean-within (array/sin d) 0.0 (/ (- 1 m2) 2)) (str label " sin")))))
+    (testing "von Mises at a large kappa: κ(1 - cos(θ - μ)) is χ²(1)/2 to O(1/κ), mean 1/2, variance 1/2"
+      (doseq [kappa [1e6 1e12]]
+        (let [x (dc/sample (d/von-mises 0.25 kappa) (rng/key 63) [n])]
+          (is (circle? x))
+          (is (mean-within (array/* kappa (array/* 2.0 (array/square (array/sin (array/* 0.5 (array/- x 0.25))))))
+                           0.5 0.5)
+              (str kappa)))))
+    (testing "Wishart and inverse Wishart: each entry's mean"
+      ;; Wishart: df·S, variance df(Sᵢⱼ² + SᵢᵢSⱼⱼ); inverse Wishart: Ψ/(ν - p - 1),
+      ;; variance ((ν - p + 1)Ψᵢⱼ² + (ν - p - 1)ΨᵢᵢΨⱼⱼ)/((ν - p)(ν - p - 1)²(ν - p - 3))
+      (let [m 20000]
+        (doseq [[label dist mean variance]
+                [["wishart(4, S2)" (d/wishart 4.0 s2) #(* 4.0 %1) #(* 4.0 (+ (* %1 %1) (* %2 %3)))]
+                 ["wishart(1.5, S2), small chi-squared shapes" (d/wishart 1.5 s2) #(* 1.5 %1) #(* 1.5 (+ (* %1 %1) (* %2 %3)))]
+                 ["wishart(5.5, S3)" (d/wishart 5.5 s3) #(* 5.5 %1) #(* 5.5 (+ (* %1 %1) (* %2 %3)))]
+                 ["inv-wishart(10, S2)" (d/inv-wishart 10.0 s2) #(/ %1 7.0) #(/ (+ (* 9 %1 %1) (* 7 %2 %3)) (* 8 49 5.0))]
+                 ["inv-wishart(12, S3)" (d/inv-wishart 12.0 s3) #(/ %1 8.0) #(/ (+ (* 10 %1 %1) (* 8 %2 %3)) (* 9 64 6.0))]]]
+          (let [s (ts/host (:scale (:params dist)))
+                x (dc/sample dist (rng/key 64) [m])
+                means (ts/host (array/mean x {:axis 0}))]
+            (doseq [i (range (count s)) j (range (count s))
+                    :let [v (variance (get-in s [i j]) (get-in s [i i]) (get-in s [j j]))]]
+              (is (close? (get-in means [i j]) (mean (get-in s [i j])) (* 5 (Math/sqrt (/ v m)))) (str label " " [i j])))
+            (is (array/all-true? (array/== x (array/transpose x [0 2 1]))) (str label ": exactly symmetric"))))))))
+
+(defn- log-normal-tail
+  "log Q(x), the standard normal's mass above x, for x >= 50, by its
+   asymptotic series (to x^-8: within 1e-15 there)."
+  [x]
+  (let [y (/ 1.0 (* x x))]
+    (+ (* -0.5 x x) (- (Math/log x)) -0.9189385332046728
+       (Math/log (- 1.0 (* y (- 1.0 (* 3.0 y (- 1.0 (* 5.0 y (- 1.0 (* 7.0 y))))))))))))
+
+(deftest truncated-normal-draws-far-into-the-tails
+  ;; on [50, 51] and its mirror [-51, -50], where Φ and erf round to 1: a
+  ;; naive inverse CDF draws every value at a bound or NaN (planted: the
+  ;; draws as √2·erfinv(2(Φ(a) + u·(Φ(b) - Φ(a))) - 1), with erf's Φ, all
+  ;; fail). The mean, (φ(a) - φ(b))/Z, and P(X <= 50.01), from the tail's
+  ;; asymptotic logs, within five standard errors.
+  (let [n 100000
+        a 50.0 b 51.0 x 50.01
+        lqa (log-normal-tail a)
+        lz (+ lqa (Math/log (- 1.0 (Math/exp (- (log-normal-tail b) lqa)))))
+        log-phi #(- (* -0.5 % %) 0.9189385332046728)
+        mean (- (Math/exp (- (log-phi a) lz)) (Math/exp (- (log-phi b) lz)))
+        p (/ (- 1.0 (Math/exp (- (log-normal-tail x) lqa))) (- 1.0 (Math/exp (- (log-normal-tail b) lqa))))]
+    (doseq [[label dist sign] [["[50, 51]" (d/truncated-normal 0.0 1.0 a b) 1.0]
+                               ["[-51, -50]" (d/truncated-normal 0.0 1.0 (- b) (- a)) -1.0]]]
+      (let [z (array/* sign (dc/sample dist (rng/key 65) [n]))
+            below (ts/number (array/mean (array/astype (array/<= z x) (ts/float-dtype))))]
+        (is (array/all-true? (array/logical-and (array/>= z a) (array/<= z b))) label)
+        ;; the variance of a draw is below 1/a², the exponential's
+        (is (close? (array/mean z) mean (* 5 (/ 1.0 a (Math/sqrt n)))) label)
+        (is (close? below p (* 5 (Math/sqrt (/ (* p (- 1 p)) n)))) (str label ": P(|X| <= 50.01) = " below " for " p))
+        (is (every? ts/finite? (ts/host (dc/log-prob dist (array/* sign z))))
+            (str label ": finite log densities"))))))
+
+(deftest the-genmlx-families-at-their-edges
+  (let [lp (fn [dist v] (ts/number (dc/log-prob dist v)))]
+    (testing "a truncated normal with infinite bounds is the normal"
+      (doseq [v [-3.0 0.2 5.0]]
+        (is (ts/close? (lp (d/normal 0.3 1.5) v) (lp (d/truncated-normal 0.3 1.5 ##-Inf ##Inf) v)))))
+    (testing "a narrow interval at 0: -log(hi - lo) at its middle, to O((hi - lo)²) (scipy's 1 - Φ(a) - Φ(-b) is 6.6e-7 off)"
+      ;; planted: the mass across 0 as log1p(-(Φ(a) + Φ(-b))) fails, and so
+      ;; does taking [0, h] for a tail (b' <= 0 for b' < 0)
+      (doseq [[lo hi] [[-1e-10 1e-10] [0.0 1e-10] [-1e-10 0.0]]]
+        (is (ts/close? (- (Math/log (- hi lo))) (lp (d/truncated-normal 0.0 1.0 lo hi) (/ (+ lo hi) 2))) (str [lo hi]))))
+    (testing "rho = 0 is the uniform on the circle, and a tiny kappa nearly so"
+      (doseq [v [-3.0 0.0 2.0]]
+        (is (ts/close? (- (Math/log (* 2 Math/PI))) (lp (d/wrapped-cauchy 1.0 0.0) v)))
+        (is (ts/close? (- (Math/log (* 2 Math/PI))) (lp (d/von-mises 1.0 1e-20) v)))))
+    (when-not (ts/f32?)
+      (testing "rho near 1: log((1 + ρ)/(1 - ρ)/2π) at the mode, from (1 - ρ)² + 4ρ sin²(d/2)"
+        ;; planted: 1 + ρ² - 2ρ cos d, which cancels to 0 or 2e-16 for 1e-24
+        (let [rho (- 1.0 1e-12)]
+          (is (ts/close? (- (Math/log (/ (+ 1.0 rho) (- 1.0 rho))) (Math/log (* 2 Math/PI)))
+                         (lp (d/wrapped-cauchy 0.5 rho) 0.5))))))
+    (testing "a tiny sigma's wrapped normal is the normal, a large one's the uniform"
+      (is (ts/close? (lp (d/normal 0.0 0.01) 0.02) (lp (d/wrapped-normal 0.0 0.01) 0.02)))
+      (doseq [v [0.0 1e-30]]
+        (is (ts/close? (lp (d/normal 0.0 1e-30) v) (lp (d/wrapped-normal 0.0 1e-30) v))))
+      (is (ts/close? (- (Math/log (* 2 Math/PI))) (lp (d/wrapped-normal 0.0 1e10) 1.0))))
+    (testing "log(I₀(κ)e^-κ), of the von Mises' normalizer, within 1e-14 of the power series around its switch at 20"
+      ;; planted: either series cut short (20 terms of the power series, 8
+      ;; of the asymptotic one) fails
+      (doseq [kappa [0.5 5.0 12.0 17.0 19.9 20.0 20.1 23.0 30.0 45.0]]
+        (is (ts/close? (Math/log (bessel-i 0 kappa)) (#'d/log-i0e (array/array kappa))
+                       {:rtol (ts/tol 1e-14) :atol (ts/tol 1e-14)})
+            (str kappa))))
+    (testing "the wrapped normal's two series agree at their switch, and each within 1e-14 near it"
+      ;; planted: three terms of the direct sum (|k| <= 1) or one of the
+      ;; Fourier series fail
+      (doseq [sigma [2.0 2.25 2.5] v [-3.0 0.0 1.5 Math/PI]]
+        (let [d (- v 0.3)
+              direct (#'d/log-wrapped-normal (array/array d) (array/array sigma))
+              exact (Math/log (reduce + (for [k (range -40 41)]
+                                          (Math/exp (lp (d/normal 0.0 sigma) (+ (#'d/wrap-angle d) (* 2 Math/PI k)))))))]
+          (is (ts/close? exact direct {:rtol (ts/tol 1e-14) :atol (ts/tol 1e-14)}) (str sigma " " v)))))
+    (testing "outside the support: -Inf, with a finite gradient"
+      (doseq [[label dist v] [["truncated-normal" (d/truncated-normal 0.0 1.0 -1.0 1.0) 1.5]
+                              ["von-mises" (d/von-mises 0.0 2.0) 3.5] ["wrapped-cauchy" (d/wrapped-cauchy 0.0 0.5) -3.5]
+                              ["wrapped-normal" (d/wrapped-normal 0.0 0.5) 4.0]]]
+        (is (= ##-Inf (lp dist v)) label))
+      (doseq [[label f at] [["truncated-normal mu" #(dc/log-prob (d/truncated-normal % 1.0 -1.0 1.0) 1.5) 0.2]
+                            ["von-mises kappa" #(dc/log-prob (d/von-mises 0.0 %) 3.5) 2.0]
+                            ["wrapped-normal sigma" #(dc/log-prob (d/wrapped-normal 0.0 %) 4.0) 0.5]]]
+        (is (ts/finite? ((array/grad f) (array/array at))) label)))
+    (testing "matrices outside the support: not symmetric, or not positive definite"
+      ;; Julia's isposdef: exact symmetry (planted: the symmetry test
+      ;; dropped, the asymmetric value scores its lower triangle's matrix)
+      (doseq [make [d/wishart d/inv-wishart]
+              [label v] [["asymmetric" [[2.0 0.3] [0.31 3.0]]] ["indefinite" [[1.0 2.0] [2.0 1.0]]] ["singular" [[1.0 1.0] [1.0 1.0]]]]]
+        (is (= ##-Inf (lp (make 4.0 s2) (array/array v))) label)
+        (is (array/all-true? (array/isfinite ((array/grad #(dc/log-prob (make 4.0 s2) %)) (array/array v))))
+            (str label ": a finite gradient")))
+      (is (= [##-Inf true] (map ts/host [(array/take (dc/log-prob (d/wishart 4.0 s2) (array/array [[[1.0 2.0] [2.0 1.0]] [[2.0 0.3] [0.3 3.0]]])) 0)
+                                         (array/isfinite (array/take (dc/log-prob (d/wishart 4.0 s2) (array/array [[[1.0 2.0] [2.0 1.0]] [[2.0 0.3] [0.3 3.0]]])) 1))]))
+          "a batch of values, one of them indefinite"))
+    (testing "matrix value shapes: df's and scale's batch axes, then [p p]"
+      (is (= [2 2] (dc/value-shape (d/wishart 3.0 s2))))
+      (is (= [4 2 2] (dc/value-shape (d/wishart [3.0 4.0 5.0 6.0] s2))))
+      (is (= [3 3 3] (dc/value-shape (d/inv-wishart 4.0 [s3 s3 s3]))))
+      (is (= [5 4 2 2] (array/shape (dc/sample (d/wishart [3.0 4.0 5.0 6.0] s2) (rng/key 1) [5 1]))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"shape"
+                            (gfi/generate (gen [] (trace :w (d/wishart 3.0 s2))) [] (cm/choicemap :w (array/eye 3)) (rng/key 1)))))))
+
+(def ^:private genmlx-families
+  "[name constructor params value]: each family at an interior value, the
+   truncated normal also in a tail and with an infinite bound."
+  [["truncated-normal" d/truncated-normal [0.3 1.5 -1.0 2.0] 0.5]
+   ["truncated-normal in a tail" d/truncated-normal [0.0 1.0 5.0 6.0] 5.3]
+   ["truncated-normal above an infinite lo" d/truncated-normal [0.3 1.5 ##-Inf 2.0] 0.5]
+   ["truncated-normal below an infinite hi" d/truncated-normal [0.3 1.5 1.0 ##Inf] 1.5]
+   ["von-mises" d/von-mises [0.3 2.0] 1.0] ["von-mises at a large kappa" d/von-mises [0.3 50.0] 0.4]
+   ["wrapped-cauchy" d/wrapped-cauchy [0.3 0.6] -2.0]
+   ["wrapped-normal" d/wrapped-normal [0.3 0.7] 2.5] ["wrapped-normal of a wide sigma" d/wrapped-normal [0.3 3.0] 2.5]])
+
+(deftest gradients-of-the-genmlx-families
+  ;; with respect to the value and each finite parameter, against central
+  ;; finite differences on the JVM backend in float64, as
+  ;; gradients-of-the-further-families. Planted: standardized without its
+  ;; stand-in (∞·0: NaN for sigma beside an infinite bound), log1mexp's
+  ;; near branch without its stand-in (NaN), log-i0e's series without its
+  ;; stand-in (NaN at kappa 50) each fail
+  (let [h 1e-6
+        jvm (array/backend-named :jvm)
+        fd (fn [f x] (/ (- (f (+ x h)) (f (- x h))) (* 2 h)))]
+    (doseq [[label make params v] genmlx-families
+            i (range -1 (count params))
+            :let [at (if (neg? i) v (params i))]
+            :when (Double/isFinite at)]
+      (let [lp (fn [x] (array/with-backend jvm
+                         (ts/number (dc/log-prob (apply make (if (neg? i) params (assoc params i x))) (if (neg? i) x v)))))
+            g (if (neg? i)
+                (array/grad #(dc/log-prob (apply make params) %))
+                (array/grad #(dc/log-prob (apply make (assoc params i %)) v)))]
+        (is (ts/close? (fd lp at) (ts/number (g (array/array at))) {:rtol (ts/tol 1e-5) :atol (ts/tol 1e-6)})
+            (str label (if (neg? i) " d/dv" (str " d/dparam" i)))))))
+  (testing "at rho = 0, the wrapped Cauchy's bound: a one-sided difference"
+    (matches-its-finite-difference "wrapped-cauchy d/drho" #(dc/log-prob (d/wrapped-cauchy 0.3 %) -2.0) 0.0 1)))
+
+(deftest gradients-of-the-matrix-families
+  ;; the tape's Cholesky gives a symmetric matrix's gradient on its lower
+  ;; triangle: entry (i, j), i > j, is the derivative along Eᵢⱼ + Eⱼᵢ, the
+  ;; symmetric perturbation a finite difference takes here (on the JVM
+  ;; backend in float64), and the diagonal along Eᵢᵢ. Also df's. Planted:
+  ;; the trace term as tr(S⁻¹X) of S's lower triangle alone fails
+  (let [h 1e-6
+        jvm (array/backend-named :jvm)
+        x3 [[2.0 0.3 -0.2] [0.3 3.0 0.4] [-0.2 0.4 1.0]]
+        bump (fn [m i j e] (cond-> (update-in m [i j] + e) (not= i j) (update-in [j i] + e)))]
+    (doseq [[label make] [["wishart" d/wishart] ["inv-wishart" d/inv-wishart]]]
+      (let [lp (fn [df s x] (array/with-backend jvm (ts/number (dc/log-prob (make df s) (array/array x)))))
+            gx (ts/host ((array/grad #(dc/log-prob (make 5.0 s3) %)) (array/array x3)))
+            gs (ts/host ((array/grad #(dc/log-prob (make 5.0 %) (array/array x3))) (array/array s3)))
+            close (fn [fd g what] (is (ts/close? fd g {:rtol (ts/tol 1e-5) :atol (ts/tol 1e-6)}) (str label " " what)))]
+        (close (/ (- (lp (+ 5.0 h) s3 x3) (lp (- 5.0 h) s3 x3)) (* 2 h))
+               (ts/number ((array/grad #(dc/log-prob (make % s3) (array/array x3))) (array/array 5.0)))
+               "d/ddf")
+        (doseq [i (range 3) j (range 3)]
+          (if (< i j)
+            (is (= 0.0 (get-in gx [i j]) (get-in gs [i j])) (str label " above the diagonal " [i j]))
+            (do (close (/ (- (lp 5.0 s3 (bump x3 i j h)) (lp 5.0 s3 (bump x3 i j (- h)))) (* 2 h)) (get-in gx [i j]) (str "d/dx" [i j]))
+                (close (/ (- (lp 5.0 (bump s3 i j h) x3) (lp 5.0 (bump s3 i j (- h)) x3)) (* 2 h)) (get-in gs [i j]) (str "d/dscale" [i j])))))))))
+
+(def genmlx-families-model
+  "A model of every one of GenMLX's further families, the matrix ones with
+   a df that is a choice."
+  (gen []
+    (let [mu (trace :mu (d/normal 0.0 1.0))
+          x (trace :x (d/truncated-normal mu 1.0 0.0 ##Inf))
+          t (trace :t (d/von-mises mu 4.0))
+          c (trace :c (d/wrapped-cauchy t 0.5))
+          w (trace :w (d/wrapped-normal c 0.8))
+          df (trace :df (d/uniform 3.0 6.0))
+          s (trace :s (d/wishart df [[1.0 0.3] [0.3 1.0]]))]
+      (trace :v (d/inv-wishart (array/+ df 1.0) s))
+      (array/+ x w))))
+
+(laws/deflaws genmlx-families [[:model genmlx-families-model [] []]] 100)
+
+(deftest the-genmlx-families-batch
+  ;; one run for every particle, each particle's score its scalar run's
+  (let [ps (binding [batched/*spot-checks* :all] (batched/simulate genmlx-families-model [] 8 (rng/key 66)))]
+    (is (nil? (batched/fallback-reason ps)))))
+
+(deftest the-samplers-helpers
+  ;; the inversion of log Φ, a truncated normal draw's: in float64 log Φ of
+  ;; its x is y within a few ulps of y's magnitude, over y in [-1e6, log 1/2]
+  ;; (planted: one Newton step, or two, fail), and in float32, what MLX's
+  ;; runs, x is float64's within float32's precision (planted: its first
+  ;; guess by erfinv down to y = -20, where 2e^y - 1 rounds to -1 in
+  ;; float32, gives -Inf). And von Mises draws in float32 whose scale is
+  ;; 1/√κ at any kappa (planted: acos(f) of f = (1 + r·z)/(r + z), Best and
+  ;; Fisher's own form, gives the mode at kappa 1e10 and beyond)
+  (let [jvm (array/backend-named :jvm)
+        ys (into [(- (Math/log 2.0))] (map #(- (Math/pow 10.0 %))) (range -0.15 6.0 0.01))
+        x64 (array/with-backend jvm (#'d/ndtri-left (array/array ys)))
+        x32 (ts/host (#'d/ndtri-left (array/array ys {:dtype :float32})))]
+    (is (every? true? (map #(<= (Math/abs (- %1 %2)) (* 8 (Math/ulp (double %2))))
+                           (array/with-backend jvm (array/->clj (#'d/log-ndtr x64))) ys)))
+    (is (every? true? (map #(<= (Math/abs (- %1 %2)) (* 1e-6 (max 1.0 (Math/abs %2)))) x32 (array/->clj x64)))))
+  (doseq [kappa [1e-3 2.0 1e4 1e10 1e30]]
+    (let [n 20000
+          x (#'d/von-mises-angle (rng/key 67) (array/full [n] kappa {:dtype :float32}) [n] {:dtype :float32})
+          ;; E[2κ(1 - cos θ)], 1 at a large kappa, 2κ(1 - I₁/I₀) below
+          m (if (< kappa 10) (* 2 kappa (- 1 (/ (bessel-i 1 kappa) (bessel-i 0 kappa)))) 1.0)]
+      (is (= :float32 (array/dtype x)))
+      (is (circle? x))
+      ;; κ·2sin²(θ/2) is about χ²(1)/2 at a large kappa (variance 1/2); at a
+      ;; small one its variance is below 2κ², times 4
+      (is (mean-within (array/* (* 2.0 kappa) (array/* 2.0 (array/square (array/sin (array/* 0.5 x)))))
+                       m (if (< kappa 10) (* 16 kappa kappa) 2.0))
+          (str kappa)))))
