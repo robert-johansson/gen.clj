@@ -141,6 +141,11 @@
   [b]
   (p/-defaults b))
 
+(defn backend-name
+  "The keyword naming backend b, as backend-named takes it: :jvm or :mlx."
+  [b]
+  (p/-name b))
+
 (defn- common-dtype
   "The dtype the operands xs combine to on backend b (weak host scalars)."
   [b xs]
