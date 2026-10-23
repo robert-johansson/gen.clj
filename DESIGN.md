@@ -2230,6 +2230,111 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     batched extension); counts of infinite elements beside a finite part,
     or a pairwise sum tree (O(log n) per change, its rounding unlike
     assess's sequential sum), not built.
+  - **Conjugacy, and Kalman and HMM generative functions (genclj-702q;
+    PROVISIONAL, owner to confirm).** Chosen by the user, never detected
+    (§3.1's corollary).
+    - `gen.inference.conjugate/with-conjugate-proposal gf latent children`
+      makes one latent's exact posterior given its observed children gf's
+      internal proposal for it (thesis pp. 145–146), as
+      `with-exact-proposal` does for finite choices: normal–normal and
+      mvnormal–mvnormal with known noise, beta–bernoulli and beta–binomial,
+      gamma(shape, scale)–poisson, dirichlet–categorical.
+    - Correct by construction: a reference run puts the latent at its
+      prior mean and each open child at a value its distribution fixes, so
+      the proposal of the other choices has an exact density whatever
+      depends on what; a final run draws the latent from the posterior,
+      keeps the other choices and draws the open children given the latent.
+      The weight, log p(τ) − log q(τ∖σ | σ) for the proposal used, is then
+      a correct importance weight for any model, and exact (log
+      p(observations), no variance; regenerate on the latent a Gibbs move
+      of weight 0) when only the children depend on the latent. A mismatch
+      costs exactness, never correctness: GenMLX's silent wrong marginals
+      (94qc, yy8u, rmy7, 5ytq, jmk4, su6q) are loud errors or exact here,
+      each a test.
+    - A child's parameter must be the latent's value itself, checked by
+      identity; any function of it is a loud error, so affine Gaussian
+      children are not conjugate pairs here (linear-Gaussian chains are
+      `gen.state-space/kalman`'s; a sound linear tracer would be needed,
+      never numeric probes). Structural checks run on every backend; the
+      value checks (the children's other parameters and every other
+      choice's density unchanged by the latent) read values only on an
+      eager backend, as parameter validation does. `{:check-exact? false}`
+      allows other choices to depend on the latent (the weight unbiased,
+      not exact). Unobserved declared children are drawn after the latent;
+      a choice depending on one is loud by default. One latent per
+      wrapper; zero visited children is loud.
+    - `gen.state-space/kalman` and `hmm` (L4: generative functions in their
+      own right, DESIGN §3's explicitly separate marginalized ones) are
+      Unfolds over a filter step whose state is the belief: the
+      observations are the choices at addresses 0..n−1 and the states are
+      summed out, so scores are exact marginal likelihoods, updates to more
+      steps incremental, and every law (forward-sampling ones too) holds.
+      Arguments are `(n prior params)`, params a map (unknown keys loud), a
+      function of t or a vector of maps; the prior is the first state's
+      (Dynamax's convention); Kalman updates in Joseph's form; an HMM's
+      emission is one distribution batched over the states. Unobserved
+      steps are forward-sampled (no missing-data mask yet).
+      `sample-states` is forward filtering, backward sampling, a function
+      of a trace. Their fixtures come from no filter: the joint Gaussian of
+      the series, and every path of states.
+  - **Laplace and Fisher information (genclj-xg1j; PROVISIONAL, owner to
+    confirm).** `gen.inference.laplace`: Hessians of a trace's log
+    density, in selected continuous choices or in trainable parameters, by
+    central differences of the reverse-mode gradient, symmetrized (the tape
+    is first order; core code calls only gen.array), with a step of
+    ε^⅓·max(1, |x|) from the dtype's epsilon (Nocedal and Wright §8.1;
+    GenMLX used 0.005 in every dtype). Modes by Newton's method with
+    Levenberg damping where −H is not positive definite, Armijo
+    backtracking, and a Newton decrement of ε·max(1, |log p|) as the stop
+    (repeated map-optimize converges linearly, and the Hessian is needed
+    anyway). The Laplace estimate is `:log-ml-estimate`, as importance
+    sampling's; its proposal is a gen function of ignored arguments that
+    traces each selected leaf from its Gaussian conditional, for
+    importance sampling and `with-internal-proposal` alike (a leaf of two
+    or more axes is an error). A stationary point that is no maximum, and
+    an observed Fisher information that is not positive definite, are loud
+    errors (GenMLX damped and warned); `natural-gradient` damps, as a step
+    direction. The observed information is of the trace's whole log
+    density: complete-data information when it holds latents, not of an
+    estimated marginal as GenMLX's was. `bic` takes n explicitly.
+  - **Particle MCMC (genclj-gcus; PROVISIONAL, owner to confirm).**
+    `gen.inference.particle-mcmc` (Andrieu, Doucet and Holenstein 2010):
+    `conditional-smc` is a particle filter conditioned on a trace, built on
+    gen.inference.particle-filter's functions, its selected choices the
+    reference trajectory held at particle 0, its other choices constrained
+    in every particle; `particle-gibbs` is its move as a symmetric kernel
+    (the CSMC kernel is reversible), composing with the MH kernels. PMMH
+    has no API of its own: it is MH on a `gen.custom/estimated` density
+    whose estimate runs a particle filter. The choices: inputs are a trace
+    and a selection, as mh's; one sweep over a vector of steps, not a
+    `:reference` on the filter's step functions (every other filter
+    operation would then have to keep or refuse a reference); the
+    reference's internal-proposal weight by project on its new latents
+    (GenMLX projects onto the observations; they differ only when the
+    arguments change an older choice's density); multinomial resampling
+    only; the ESS threshold n/2 by default, as `maybe-resample`;
+    encapsulated randomness a loud error (the reference's ω would be drawn
+    afresh, genclj-t8uj); the last step's arguments must equal the trace's;
+    n ≥ 2. The CSMC state's log-ml-estimate is conditional, so biased, and
+    says so. Ancestor sampling is deferred: generically it costs O(n·T²).
+  - **The path-equivalence fuzzer's remainder (genclj-y0ij).** GenMLX's
+    PEF, for gen.clj's second execution path, the static language:
+    gen.random-static-models (test code) generates static bodies as data
+    and writes each as a `gen ^:static` form, evaluated at test time;
+    gen.static-fuzz-test holds them to `laws/static` (and the general
+    laws, `^:slow`), and HMC, MALA and NUTS steps, compiled and plain, on
+    the static model and its dynamic body, along random chains whose
+    kernels, selections, arguments and metrics vary. A failing case prints
+    its spec and the form it became. genclj-f5fy's generated code is
+    checked by the same generator. It found two bugs, both fixed:
+    - **gen.diff's +, −, inc and dec rules gave an int-diff through a
+      float operand,** exact only up to rounding (an unsound retdiff under
+      the laws). They now give one only when every operand is an integer
+      (PROVISIONAL: a host integer, or an array of an :int dtype kind; not
+      an integral-valued float, which would be exact only below 2^53 and
+      need a host read of an array); otherwise unknown-change.
+    - **Map's and Unfold's scores turned NaN** (−Inf + Inf) when an update
+      returned an element to its support (genclj-awd0, fixed in wave 2).
 
 ## 10. Deferred (tracked, not forgotten)
 
