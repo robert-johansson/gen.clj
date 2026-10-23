@@ -337,6 +337,30 @@
       (when-let [i (first (filter passes? (take-while #(<= (rung %) top) (iterate inc start))))]
         (rung (last (take-while passes? (range i (dec lowest) -1))))))))
 
+(defn- transposed
+  "m with its last two axes swapped."
+  [m]
+  (let [r (array/ndim m)]
+    (array/transpose m (-> (vec (range r)) (assoc (- r 2) (dec r)) (assoc (dec r) (- r 2))))))
+
+(defn- check-covariance
+  "A concrete m (a covariance or a scale matrix, batched over leading axes)
+   must be symmetric and positive definite, also to the precision it is
+   factored in; when its factor exists but is too ill-conditioned, the error
+   suggests a jitter for its diagonal."
+  [dist-name param-name m]
+  (when (array/concrete? m)
+    (dc/check (array/all-true? (<= (array/abs (- m (transposed m))) (+ 1e-8 (* 1e-5 (array/abs (transposed m))))))
+              dist-name (str param-name " must be symmetric") {:param param-name})
+    (let [dtype (factored-dtype m)]
+      (when-not (positive-definite? m dtype)
+        (let [jitter (suggested-jitter m dtype)]
+          (throw (ex-info (cond-> (str dist-name ": " param-name " must be positive definite, and not singular at "
+                                       (name dtype) " precision")
+                            jitter (str "; adding a jitter of " jitter " to its diagonal passes"))
+                          (cond-> {:distribution dist-name :param param-name :dtype dtype}
+                            jitter (assoc :suggested-jitter jitter)))))))))
+
 (defdist mvnormal
   "mvnormal(mu, cov): the multivariate normal with mean vector mu and
    covariance matrix cov (batched over leading axes). A concrete cov must be
@@ -349,19 +373,7 @@
                       "mvnormal" (str "mu must be a vector and cov a square matrix of its size, got shapes "
                                       (array/shape mu) " and " (array/shape cov))
                       {:mu-shape (array/shape mu) :cov-shape (array/shape cov)})
-            (when (array/concrete? cov)
-              (let [r (array/ndim cov)
-                    cov-t (array/transpose cov (-> (vec (range r)) (assoc (- r 2) (dec r)) (assoc (dec r) (- r 2))))]
-                (dc/check (array/all-true? (<= (array/abs (- cov cov-t)) (+ 1e-8 (* 1e-5 (array/abs cov-t)))))
-                          "mvnormal" "cov must be symmetric" {})
-                (let [dtype (factored-dtype cov)]
-                  (when-not (positive-definite? cov dtype)
-                    (let [jitter (suggested-jitter cov dtype)]
-                      (throw (ex-info (cond-> (str "mvnormal: cov must be positive definite, and not singular at "
-                                                   (name dtype) " precision")
-                                        jitter (str "; adding a jitter of " jitter " to its diagonal passes"))
-                                      (cond-> {:distribution "mvnormal" :param "cov" :dtype dtype}
-                                        jitter (assoc :suggested-jitter jitter))))))))))
+            (check-covariance "mvnormal" "cov" cov))
   (sample [key shape]
     (let [d (peek (array/shape mu))
           batch (sh/broadcast (sh/broadcast shape (pop (array/shape mu))) (pop (pop (array/shape cov))))
