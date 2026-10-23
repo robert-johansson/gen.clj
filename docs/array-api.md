@@ -503,12 +503,20 @@ like the AD tape:
     error. `stop-gradient` is an op without a rule.
   - *Native gradients* (MLX, `-Dgen.mlx.grad=native`) cannot wrap the
     tracer, since MLX's transformation differentiates a function of its own
-    arrays. So the tracer runs inside it: MLX differentiates the sum over
-    the particles of f at the differentiated leaves as whole batches (a
-    shared leaf broadcast to every particle). Particle i's output depends
-    on its own values only, so the gradient with respect to its slice is its
-    own gradient. Custom VJPs reach MLX through the tracer
-    (`ICustomVjp`), lifted to whole batches.
+    arrays. So the tracer runs inside it: MLX differentiates f where f's
+    value is shared, and the sum over the particles of f where it is
+    batched, at the differentiated leaves, a batched one as its whole
+    batch. Particle i's output depends on its own values only, so the
+    gradient with respect to its slice is its own gradient. A shared leaf's
+    gradient is per particle only when the leaf is broadcast to every
+    particle, so when the value turns out batched with a shared leaf, f
+    runs again on the broadcast leaves. Custom VJPs reach MLX through the
+    tracer (`ICustomVjp`), lifted to whole batches.
+  - *One kind either way* (2026-10-24, after the Metal run of wave 2): the
+    value is batched when a batched value reached it, and a gradient when
+    its argument or the value is (the tape's are broadcast to match). The
+    tape gave a shared argument's gradient unbatched where native mode
+    broadcast it, so `(ts/host …)` read one and refused the other.
   - *Not supported:* a batched run inside a differentiated function (the
     tape outside the tracer). Their values belong to unrelated backends, a
     loud error; differentiate inside the run and sum the gradients.

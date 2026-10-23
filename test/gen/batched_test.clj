@@ -764,10 +764,13 @@
     (testing "per particle, the form a fallback leaves"
       (is (same-results? (b/map-particles (unbatched ps) f nil shifts) want)))
     (testing "where f reads a particle's value on the host, or branches on one with a raw if, one trace at a time"
-      ;; batched, the raw if would take its first branch for every particle
+      ;; batched, the raw if would take its first branch for every particle.
+      ;; Each g against itself on each trace: on MLX a scalar comparison is
+      ;; an array, which a raw if takes for true too (docs/array-api.md §8a,
+      ;; plain helpers), so there g's own scalar semantics add 100 throughout
       (doseq [g [(fn [t k shift] (assoc (f t k shift) :read (array/item (t :slope))))
                  (fn [t k shift] (update (f t k shift) :shifted #(if (array/> (t :slope) 1e9) (+ % 100.0) %)))]]
-        (is (same-results? (b/map-particles ps g nil shifts) want))))
+        (is (same-results? (b/map-particles ps g nil shifts) (each-trace ps g shifts)))))
     (testing "draws are per particle"
       (let [r (b/map-particles ps (fn [_ k] (rng/normal k [2])) (rng/key 81))]
         (is (= [n 2] (array/shape r)))
