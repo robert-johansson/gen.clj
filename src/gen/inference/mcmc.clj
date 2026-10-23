@@ -1,29 +1,33 @@
 (ns gen.inference.mcmc
   "Gradient-based MCMC and optimization over a selection of continuous
-   choices, as Gen.jl's hmc, mala, map_optimize and elliptical_slice. Each
-   works on any generative function, nested addresses included, through
-   gen.gradients/choice-gradients.
+   choices, as Gen.jl's hmc, mala, map_optimize and elliptical_slice, and
+   Stan's No-U-Turn Sampler. Each works on any generative function, nested
+   addresses included, through gen.gradients/choice-gradients.
 
      (hmc trace selection {:L 10 :eps 0.1})    → {:trace :accepted? :log-alpha :diverged?}
      (mala trace selection tau)                → {:trace :accepted? :log-alpha :diverged?}
+     (nuts trace selection {:eps 0.1})         → {:trace :accept-stat :tree-depth :n-leapfrog
+                                                  :diverged? :energy :eps}
      (map-optimize trace selection opts)       → trace
      (elliptical-slice trace addr mu cov)      → trace
 
-   The selected choices must keep the trace's structure: HMC and MALA move
-   them jointly and leave every other choice alone. They take a diagonal
-   metric, :inv-metric (Stan's inv_metric, the identity by default): a
-   variance for each selected value, in the order of (cm/to-array
-   (grad/continuous-selection trace selection)), or one number for all.
-   Momenta are drawn with those precisions and a position moves by
+   The selected choices must keep the trace's structure: HMC, MALA and NUTS
+   move them jointly and leave every other choice alone. They take a
+   diagonal metric, :inv-metric (Stan's inv_metric, the identity by
+   default): a variance for each selected value, in the order of
+   (cm/to-array (grad/continuous-selection trace selection)), or one number
+   for all. Momenta are drawn with those precisions and a position moves by
    inv-metric ⊙ momentum, so variances that match the target's make its
-   scales alike. A proposal whose position, momentum, gradient or energy
-   turns non-finite, or where a distribution's parameter fails its check,
-   diverged: it is rejected, with acceptance 0 (:log-alpha -Inf), and
-   reported as :diverged? (gen.inference.kernel/run counts them), as Stan
-   treats a divergence. A starting trace whose log density or gradient is
-   not finite (NaN, or a probability of 0) is an error, as Stan refuses
-   such a start. Keys are an optional last argument (or :key in an options
-   map); omitting one draws from the implicit key source."
+   scales alike (gen.inference.nuts adapts them). A proposal whose
+   position, momentum, gradient or energy turns non-finite, or where a
+   distribution's parameter fails its check, diverged: it is rejected,
+   with acceptance 0 (:log-alpha -Inf), and reported as :diverged?
+   (gen.inference.kernel/run counts them), as Stan treats a divergence;
+   NUTS's trajectory also diverges at an energy error over 1000, as
+   Stan's. A starting trace whose log density or gradient is not finite
+   (NaN, or a probability of 0) is an error, as Stan refuses such a start.
+   Keys are an optional last argument (or :key in an options map); omitting
+   one draws from the implicit key source."
   (:refer-clojure :exclude [+ - * /])
   (:require [gen.array :as array :refer [+ - * /]]
             [gen.choicemap :as cm]
@@ -330,6 +334,188 @@
        (diverged trace)
        (let [[t'] (move-to trace proto v' k-update)]
          (accept trace t' (+ (- (:score t') (:score trace)) (- (kinetic p) (kinetic p0))) k-accept))))))
+
+;; ---------------------------------------------------------------------------
+;; NUTS
+;; ---------------------------------------------------------------------------
+
+(def ^:private max-energy-error
+  "The energy error past which a NUTS trajectory diverged (Stan's
+   max_deltaH)."
+  1000.0)
+
+(defn- energy
+  "The Hamiltonian at log density lp, momentum p and velocity sharp (inv ⊙
+   p): -lp + ½ p·sharp, Stan's."
+  [lp p sharp]
+  (- (* 0.5 (array/sum (* p sharp))) lp))
+
+(defn- nuts-step
+  "NUTS's leapfrog step as a function of arrays only: [v p g eps inv others]
+   → [v' p' g' sharp' h'], with sharp' = inv ⊙ p', the velocity the
+   no-U-turn criterion reads, and h' the energy there, +Inf when the step
+   diverged."
+  [gf args proto]
+  (let [step (leapfrog (array/value-and-grad (log-density gf args proto)))]
+    (fn [v p g eps inv others]
+      (let [[v p g lp ok] (step v p g eps inv others)
+            sharp (* inv p)]
+        [v p g sharp (array/where ok (energy lp p sharp) ##Inf)]))))
+
+(defn- uniform
+  "A uniform draw on [0, 1) on key, as a host double."
+  ^double [key]
+  (double (array/item (rng/uniform key))))
+
+(defn- continuing?
+  "Stan's compute_criterion: do the velocities a and b (sharp momenta) both
+   point along rho, the momenta summed between them? A boolean array."
+  [a b rho]
+  (array/logical-and (array/> (array/sum (* a rho)) 0) (array/> (array/sum (* b rho)) 0)))
+
+(defn- no-u-turn?
+  "The generalized no-U-turn criterion (Betancourt 2017, appendix A) for
+   the subtrees a and b joined, b built on from a's :end, rho their summed
+   momenta, with Stan's extra checks across the join: a's first point with
+   b's, its momenta summed with b's first momentum, and a's last point with
+   b's, b's momenta summed with a's last momentum. One host read."
+  [a b rho]
+  (array/truthy?
+   (array/logical-and (continuing? (:sharp (:beg a)) (:sharp (:end b)) rho)
+                      (array/logical-and (continuing? (:sharp (:beg a)) (:sharp (:beg b)) (+ (:rho a) (:p (:beg b))))
+                                         (continuing? (:sharp (:end a)) (:sharp (:end b)) (+ (:rho b) (:p (:end a))))))))
+
+(defn- subtree
+  "Stan's build_tree: 2^depth leapfrog steps (step, of one signed step
+   size) from the point z, h0 the trajectory's initial energy. Returns
+   {:beg :end :rho :log-weight :proposal :valid? :diverged? :n-leapfrog
+   :accept-sum}: its first and last points, its summed momenta, the log of
+   its points' summed weights e^(h0 - h), a point drawn from them
+   multinomially (between two halves in proportion to their weights), and
+   whether it is valid: no step diverged (an energy error over
+   max-energy-error, or a non-finite step) and neither it nor a subtree in
+   it turned. The counts cover every step taken, an invalid subtree's too,
+   and the acceptance sum adds each step's min(1, e^(h0 - h)). An invalid
+   half ends the subtree, which stops there."
+  [step z depth h0 key]
+  (if (zero? (long depth))
+    (let [z (step z)
+          log-weight (- h0 (:h z))
+          diverged? (clojure.core/> (- (:h z) h0) max-energy-error)]
+      {:beg z :end z :rho (:p z) :log-weight log-weight :proposal z
+       :valid? (not diverged?) :diverged? diverged? :n-leapfrog 1 :accept-sum (Math/min 1.0 (Math/exp log-weight))})
+    (let [[k-init k-final k-pick] (rng/split key 3)
+          init (subtree step z (dec (long depth)) h0 k-init)]
+      (if-not (:valid? init)
+        init
+        (let [final (subtree step (:end init) (dec (long depth)) h0 k-final)
+              counts {:n-leapfrog (+ (:n-leapfrog init) (:n-leapfrog final))
+                      :accept-sum (+ (:accept-sum init) (:accept-sum final))}]
+          (if-not (:valid? final)
+            (merge final counts)
+            (let [log-weight (array/logaddexp (:log-weight init) (:log-weight final))
+                  rho (+ (:rho init) (:rho final))]
+              (merge counts
+                     {:beg (:beg init) :end (:end final) :rho rho :log-weight log-weight
+                      :proposal (if (clojure.core/< (uniform k-pick) (Math/exp (- (:log-weight final) log-weight)))
+                                  (:proposal final)
+                                  (:proposal init))
+                      :valid? (no-u-turn? init final rho) :diverged? false}))))))))
+
+(defn- trajectory
+  "Stan's base_nuts transition from the point z0 with step (a function of
+   the signed step size and a point): the trajectory doubles in a random
+   direction until it turns, a subtree is invalid or it reaches max-depth.
+   Each valid new subtree's proposal replaces the sample with probability
+   min(1, its weight over the old trajectory's), biased progressive
+   sampling. Returns {:sample :tree-depth :n-leapfrog :accept-sum
+   :diverged?}."
+  [step z0 max-depth key]
+  (let [h0 (:h z0)]
+    (loop [depth 0
+           traj {:bck z0 :fwd z0 :rho (:p z0) :log-weight 0.0}
+           sample z0
+           n 0
+           accept-sum 0.0]
+      (let [done (fn [depth diverged?] {:sample sample :tree-depth depth :n-leapfrog n :accept-sum accept-sum
+                                        :diverged? diverged?})]
+        (if (= depth max-depth)
+          (done depth false)
+          (let [[k-dir k-tree k-pick] (rng/split (rng/fold-in key depth) 3)
+                forward? (clojure.core/> (uniform k-dir) 0.5)
+                ;; the trajectory, oriented so that its :end is the end it grows from
+                a (if forward?
+                    {:beg (:bck traj) :end (:fwd traj) :rho (:rho traj)}
+                    {:beg (:fwd traj) :end (:bck traj) :rho (:rho traj)})
+                b (subtree (partial step (if forward? 1.0 -1.0)) (:end a) depth h0 k-tree)
+                n (clojure.core/+ n (long (:n-leapfrog b)))
+                accept-sum (clojure.core/+ accept-sum (double (:accept-sum b)))]
+            (if-not (:valid? b)
+              (assoc (done depth (:diverged? b)) :n-leapfrog n :accept-sum accept-sum)
+              (let [sample (if (clojure.core/< (uniform k-pick) (Math/exp (- (:log-weight b) (:log-weight traj))))
+                             (:proposal b)
+                             sample)
+                    rho (+ (:rho traj) (:rho b))
+                    traj {:bck (if forward? (:bck traj) (:end b)) :fwd (if forward? (:end b) (:fwd traj))
+                          :rho rho :log-weight (array/logaddexp (:log-weight traj) (:log-weight b))}]
+                (if (no-u-turn? a b rho)
+                  (recur (inc depth) traj sample n accept-sum)
+                  {:sample sample :tree-depth (inc depth) :n-leapfrog n :accept-sum accept-sum :diverged? false})))))))))
+
+(defn nuts
+  "One transition of the No-U-Turn Sampler on the selected choices, Stan's
+   (base_nuts.hpp; Betancourt 2017): from momenta drawn as hmc's, the
+   trajectory doubles forwards or backwards at random, by leapfrog steps of
+   size eps, until it makes a U-turn by the generalized criterion (with
+   Stan's extra checks across merged subtrees), a step diverges, or it
+   holds 2^max-depth - 1 steps. The next state is drawn from the
+   trajectory's points in proportion to e^-energy: multinomially within a
+   subtree, and between each new subtree and the old trajectory by biased
+   progressive sampling, which favours the new subtree. A subtree that
+   diverges or turns within itself is left out. The third argument is an
+   options map or a key, and a key may follow the options. Options: :eps
+   (0.1), :max-depth (10), :inv-metric, :key, :compile? (false): run each
+   leapfrog step as one compiled function (as hmc's, the tree's logic on
+   the host). The trace is updated once, at the end.
+
+   Returns {:trace :accept-stat :tree-depth :n-leapfrog :diverged? :energy
+   :eps}, Stan's statistics: the mean over every step taken of
+   min(1, e^(h0 - h)) (the statistic step-size adaptation targets), the
+   number of doublings kept, the leapfrog steps (each one gradient, plus
+   one at the start), whether a step diverged (an energy error over 1000,
+   or a non-finite step), the energy of the state drawn and the step size."
+  ([trace selection] (nuts trace selection nil))
+  ([trace selection key-or-opts] (let [opts (step-opts key-or-opts)] (nuts trace selection opts (:key opts))))
+  ([trace selection opts key]
+   (let [{:keys [eps max-depth compile? inv-metric] :or {eps 0.1 max-depth 10}} (options opts)
+         _ (when-not (and (number? eps) (Double/isFinite (double eps)) (pos? (double eps)))
+             (throw (ex-info (str "nuts: :eps must be a positive number, not " (pr-str eps)) {:reason :invalid-eps :eps eps})))
+         _ (when-not (pos-int? max-depth)
+             (throw (ex-info (str "nuts: :max-depth must be a positive integer, not " (pr-str max-depth))
+                             {:reason :invalid-max-depth :max-depth max-depth})))
+         [k-momenta k-tree k-update] (rng/split key 3)
+         [proto v others] (flat-values trace selection)
+         inv (inverse-metric inv-metric v)
+         [lp g] ((array/value-and-grad (log-density (:gen-fn trace) (:args trace) proto)) v others)
+         _ (check-start! "nuts" (finite lp g) trace selection)
+         p (/ (rng/normal k-momenta (array/shape v)) (array/sqrt inv))
+         sharp (* inv p)
+         z0 {:v v :p p :g g :sharp sharp :h (double (array/item (energy lp p sharp)))}
+         build #(nuts-step (:gen-fn trace) (:args trace) proto)
+         plain (build)
+         run (if compile?
+               (let [f (compiled trace proto others [:nuts] build)]
+                 (fn [& args] (or (apply f args) (apply plain args))))
+               plain)
+         step (fn [direction z]
+                (let [[v p g sharp h] (run (:v z) (:p z) (:g z) (* direction (double eps)) inv others)
+                      h (double (array/item h))]
+                  ;; a NaN energy is an infinite one (Stan's)
+                  {:v v :p p :g g :sharp sharp :h (if (Double/isNaN h) ##Inf h)}))
+         {:keys [sample tree-depth n-leapfrog accept-sum diverged?]} (trajectory step z0 max-depth k-tree)]
+     {:trace (if (identical? sample z0) trace (first (move-to trace proto (:v sample) k-update)))
+      :accept-stat (/ (double accept-sum) (long n-leapfrog))
+      :tree-depth tree-depth :n-leapfrog n-leapfrog :diverged? diverged? :energy (:h sample) :eps eps})))
 
 (defn map-optimize
   "One step of gradient ascent on the log density of the selected choices,
