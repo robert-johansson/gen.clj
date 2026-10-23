@@ -1,8 +1,8 @@
 (ns gen.fuzz-test
   "The GFI laws, and batched path equivalence (batched gradients too), over
    random generative functions (gen.random-models): random families,
-   dependencies, branches, splices, shared-namespace splices, Map and
-   Unfold."
+   dependencies, branches, splices, shared-namespace splices, Map, Unfold,
+   Switch, Scan and Mix."
   (:refer-clojure :exclude [-])
   (:require [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
