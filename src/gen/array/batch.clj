@@ -54,7 +54,8 @@
             [gen.array.dtype :as dt]
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]
-            [gen.array.tape :as tape]))
+            [gen.array.tape :as tape]
+            [gen.array.tree :as tree]))
 
 (set! *warn-on-reflection* true)
 
@@ -116,7 +117,7 @@
   (.markRead x)
   (let [v (.-v x)] (if (delay? v) @v v)))
 
-(declare backend lift full-batch made value-and-grad-inside)
+(declare backend lift full-batch made value-and-grad-inside by-kind)
 
 ;; draws is nil, or [shape rows] for a part of a batch (part-backend): the
 ;; draws of the batch of shape at rows, an int array of the wrapped backend.
@@ -280,10 +281,11 @@
           b))
 
   (-value-and-grad [b f args argnums]
-    (if (and (instance? gen.array.protocols.INativeGrad inner) (p/-native-grad? inner))
-      (value-and-grad-inside b f args argnums)
-      ;; the tape over the tracer: vmap's gradient (see the namespace doc)
-      (tape/value-and-grad b f args argnums)))
+    (let [[v grads] (if (and (instance? gen.array.protocols.INativeGrad inner) (p/-native-grad? inner))
+                      (value-and-grad-inside b f args argnums)
+                      ;; the tape over the tracer: vmap's gradient (see the namespace doc)
+                      (tape/value-and-grad b f args argnums))]
+      [v (by-kind b v args argnums grads)]))
 
   p/ICustomVjp
   (-custom-vjp [b f vjp args]
@@ -361,29 +363,63 @@
 ;; Gradients inside a native transformation
 ;; ---------------------------------------------------------------------------
 
+(defn- by-kind
+  "grads, f's gradients with respect to args at argnums, each batched
+   exactly when its argument or f's value v is (a shared one broadcast to
+   every particle): so that the tape and a native transformation, which
+   compute the same values, also give them in the same kind."
+  [b v args argnums grads]
+  (mapv (fn [i g]
+          (tree/refill g (map (fn [leaf gl]
+                                (if (and (or (batched? leaf) (batched? v)) (not (batched? gl)))
+                                  (made (full-batch b gl) b)
+                                  gl))
+                              (tree/leaves (nth args i)) (tree/leaves g))))
+        argnums grads))
+
 (defn- value-and-grad-inside
   "-value-and-grad by the wrapped backend's own transformation (MLX's
    native gradients, p/INativeGrad), which calls the function it
    differentiates with arrays of its own: so the tracer runs inside it. It
-   differentiates g, the sum over the particles of f, at the differentiated
-   leaves as whole batches (a shared leaf broadcast to every particle, so
-   that its gradient is per particle). Particle i's output depends on its
-   own values only, so the gradient of the sum with respect to particle i's
-   slice is particle i's gradient. f's per-particle value is kept from the
+   differentiates g at the differentiated leaves, a batched one as its
+   whole batch: g is f where f's value is shared (nothing batched reached
+   it), and the sum over the particles of f where it is batched. Particle
+   i's value depends on its own values only, so the gradient of the sum
+   with respect to particle i's slice is particle i's gradient. A shared
+   leaf's gradient is then per particle only if the leaf is broadcast to
+   every particle first: when the value turns out batched with a shared
+   leaf, f runs again, on the broadcast leaves. f's value is kept from the
    call."
   [^BatchBackend b f args argnums]
   (let [inner (.-inner b)
-        at (fn [args h] (reduce (fn [as i] (update as i #(array/tree-map h %))) (vec args) argnums))
-        value (volatile! nil)
-        g (fn [& as]
-            (let [y (apply f (at as #(made % b)))]
-              (when-not (and (array/array? y) (= [] (array/shape y)))
-                (throw (ex-info "value-and-grad needs a function returning a scalar"
-                                {:shape (when (array/array? y) (array/shape y)) :value y})))
-              (vreset! value y)
-              (p/-reduce inner :sum (full-batch b y) (vec (range (count (.-batch-shape b)))) false)))
-        [_ grads] (p/-value-and-grad inner g (at args #(full-batch b %)) argnums)]
-    [@value (mapv (fn [t] (array/tree-map #(made % b) t)) grads)]))
+        leaves (fn [as i] (tree/leaves (nth as i)))
+        shared? (some #(not (batched? %)) (mapcat #(leaves args %) argnums))
+        attempt (fn [copies?]
+                  ;; a leaf as the transformation takes it, its whole batch
+                  ;; where it is batched (or broadcast, copies?), and back
+                  (let [whole? #(or copies? (batched? %))
+                        out (volatile! nil)
+                        in (reduce (fn [as i] (update as i #(array/tree-map (fn [l] (if (whole? l) (full-batch b l) l)) %)))
+                                   (vec args) argnums)
+                        g (fn [& as]
+                            (let [as (reduce (fn [as i]
+                                               (assoc as i (tree/refill (nth as i)
+                                                                        (map #(if (whole? %1) (made %2 b) %2) (leaves args i) (leaves as i)))))
+                                             (vec as) argnums)
+                                  y (apply f as)]
+                              (when-not (and (array/array? y) (= [] (array/shape y)))
+                                (throw (ex-info "value-and-grad needs a function returning a scalar"
+                                                {:shape (when (array/array? y) (array/shape y)) :value y})))
+                              (vreset! out y)
+                              (cond (not (batched? y)) y
+                                    (and shared? (not copies?)) (throw (ex-info "A shared leaf of a batched value" {::copies true}))
+                                    :else (p/-reduce inner :sum (value y) (vec (range (count (.-batch-shape b)))) false))))
+                        [_ grads] (p/-value-and-grad inner g in argnums)]
+                    [@out (mapv (fn [i gr] (tree/refill gr (map #(if (whole? %1) (made %2 b) %2) (leaves args i) (tree/leaves gr))))
+                                  argnums grads)]))]
+    (try (attempt false)
+         (catch clojure.lang.ExceptionInfo e
+           (if (::copies (ex-data e)) (attempt true) (throw e))))))
 
 (def ^:private backends (atom {}))
 
