@@ -1941,6 +1941,29 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   - Numeric edge semantics in the new code are the owner's (as always);
     while the round runs autonomously, each is recorded here PROVISIONAL
     with its alternatives and listed in the wave's report.
+  - **MCMC diagnostics (genclj-hfca; PROVISIONAL, owner to confirm).**
+    `gen.inference.diagnostics` computes bulk and tail ESS, the ESS of the
+    mean, rank-normalized and split R-hat, the MCSE of the mean and sd, and
+    summaries, as Vehtari et al. (2021) define them and ArviZ and Stan's
+    posterior compute them, on host draws ([chain][draw], or one chain).
+    Checked against ArviZ 1.3 (to 1e-12, quantiles bit for bit) and,
+    without Python, against AR(1) chains' known ESS and shifted chains'
+    split R-hat. Autocovariances are direct sums up to Geyer's truncation,
+    O(S·T), not an FFT. The edges:
+    - constant draws as ArviZ: ESS S; R-hat NaN when every draw is the
+      same, +Inf for chains stuck apart (alternatives: posterior's NA, a
+      loud error, GenMLX's 1.0; a constant quantile indicator is normal
+      for a discrete choice, so it must not throw);
+    - one chain's R-hat is its halves' (posterior's; ArviZ gives NaN);
+    - loud errors (`:non-finite`, `:unequal-chains`, `:too-few-draws`
+      below 4, `:out-of-range` for second moments past a double's range)
+      where ArviZ returns NaN; chains of 4 to 9 draws get ArviZ's
+      S·log10(S) cap;
+    - constant means exactly equal (ArviZ's threshold, 1e-15, is absolute,
+      so scale-dependent);
+    - summary's sd divides by n − 1, its default quantiles are 5%, 50% and
+      95% (posterior's); no MCSE of quantiles, which needs a beta quantile
+      function.
 
 ## 10. Deferred (tracked, not forgotten)
 
