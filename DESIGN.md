@@ -2180,6 +2180,38 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     mixture of structurally different components 3.8× (100 particles) to
     21.5× (10,000) faster than one particle at a time, an MH sweep of 1000
     chains between components 6.4×.
+  - **Scan, Mix and dimap (genclj-2gma; PROVISIONAL, owner to confirm).**
+    In gen.combinators, on the handler path, with the general,
+    forward-sampling, fixed-support and across laws and the fuzzer.
+    - `(comb/scan kernel)` is JAX's scan, built like Unfold: arguments
+      `(init xs & params)`, `(kernel carry x & params)` returns
+      `[carry' y]`, and Scan returns `[carry ys]` (GenMLX's took
+      `[init inputs]` and no parameters). A step is revisited when its
+      carry, its input (by a vector-diff of xs), the parameters, its
+      constraints or its selection may have changed; a part of `[carry y]`
+      that is the same value is no-change, so a changed output alone leaves
+      the next step alone. xs is a sequential collection (an array is not
+      split along its first axis, as JAX's is).
+    - `(comb/mix gf…)` and `mix-logits` are a categorical at `:index` and a
+      Switch at `:component`: the traces of
+      `(gen [w & args] (apply splice :component (switch gf…) (trace :index
+      (categorical w)) args))`, so the GFI is the handler's and a Mix
+      batches as its Switch does (per particle, by partition). Weights are
+      the first argument, as probabilities (Gen.jl's mixtures); GenMLX's
+      log weights are a loud error. The alternatives were weights fixed at
+      construction or computed from the arguments (GenMLX), GenMLX's
+      `:component-idx` beside the component's choices, and per-component
+      arguments (GenJAX). A changed Mix argument reaches the component as
+      unknown-change.
+    - `(comb/dimap gf f g)`, `contramap` and `map-retval` call gf on
+      `(apply f args)` and return `(g v)`; the traces are gf's. f is opaque
+      to change hints: no argument changed means the previous inner
+      arguments, no-change; otherwise an identical inner argument is
+      no-change and the rest unknown-change. g runs again only on a changed
+      inner return value.
+    - No Mask: it is `(when active? (splice …))` in a body, or `(switch
+      {true gf false (gen [& _] v)})`, which batches per particle when v is
+      a value of gf's return kind (with v nil it falls back, correctly).
 
 ## 10. Deferred (tracked, not forgotten)
 
