@@ -852,7 +852,7 @@
     (is (< (Math/abs (- log-ml-estimate mixture-evidence)) (* 5 se-log-ml)))
     (is (< (Math/abs (- p0 mixture-p0)) (* 5 se-p0)))))
 
-(deftest ^:slow parallel-mh-chains-on-a-mixture-move-between-branches
+(deftest parallel-mh-chains-on-a-mixture-move-between-branches
   ;; independent MH chains whose moves change the index (moving particles
   ;; between branches, the shared :x kept), or redraw the index and the
   ;; branch together; each chain's last k is a draw from the posterior
