@@ -882,7 +882,9 @@
 (defdist ^:elementwise wrapped-normal
   "wrapped-normal(mu, sigma): normal(mu, sigma) wrapped onto the circle,
    density Σₖ N(x + 2πk; μ, σ), values in [-π, π). The sum is two series,
-   each truncated where its omitted terms are below 1e-17 of the total."
+   each truncated where its omitted terms are below 1e-17 of the total.
+   From sigma = 9 on, its draws are the uniform's, which it then is to
+   float64's precision."
   [mu sigma]
   (validate (dc/check-positive "wrapped-normal" "sigma" sigma))
   (sample [key shape]
