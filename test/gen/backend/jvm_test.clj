@@ -14,6 +14,7 @@
    broadcast reproduction); size multiplying unchecked (counts-are-exact)."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
+            [gen.array.protocols :as p]
             [gen.array.shape :as sh]
             [gen.random :as rng]))
 
@@ -67,3 +68,19 @@
   (is (= 0 (sh/size [4294967296 4294967296 0])))
   (is (= sh/max-cells (sh/cells [sh/max-cells])) "the limit itself fits")
   (is (= :too-many-cells (:reason (failure #(sh/cells [(inc sh/max-cells)]))))))
+
+(deftest extrema-propagate-nan
+  ;; max, min and the running ones by Math/max and Math/min, which propagate
+  ;; NaN themselves, and one loop per scan op (the review's I1-12). Planted
+  ;; (2026-10-22): a max or a cummax that skips NaN ((if (> a b) a b)) fails
+  (let [x (array/with-backend jvm (array/array [1.0 ##NaN 0.5 3.0]))
+        scan (fn [op reverse?] (array/->clj (p/-scan jvm op x 0 reverse?)))
+        nan? #(and (number? %) (Double/isNaN %))]
+    (is (nan? (array/->clj (p/-reduce jvm :max x [0] false))))
+    (is (nan? (array/->clj (p/-reduce jvm :min x [0] false))))
+    (is (= [false true true true] (mapv nan? (scan :cummax false))))
+    (is (= [false true true true] (mapv nan? (scan :cummin false))))
+    (is (= [true true false false] (mapv nan? (scan :cummax true))) "reversed")
+    (is (= [3.0 3.0] (drop 2 (scan :cummax true))))
+    (is (= [1.0 2.0 3.0] (array/->clj (p/-scan jvm :cumsum (array/with-backend jvm (array/array [1.0 1.0 1.0])) 0 false))))
+    (is (= [8.0 4.0 2.0] (array/->clj (p/-scan jvm :cumprod (array/with-backend jvm (array/array [2.0 2.0 2.0])) 0 true))))))

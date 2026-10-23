@@ -707,6 +707,40 @@
               (let [[before freed] (counting-temporaries f k)]
                 (is (= before freed) (str label ": failing at its temporary " k))))))))))
 
+(deftest with-operands-evaluates-each-operand-once
+  ;; the macro spliced each operand form three times (operand, mlx-error's
+  ;; arguments and fence: the review's I1-12). Planted (2026-10-22): the old
+  ;; expansion fails
+  (when-mlx
+    (let [expansion (apply @(requiring-resolve 'gen.backend.mlx/with-operands) nil nil
+                           '[b :op [h (operand-form) nil hy y nil] body])]
+      (is (= 1 (count (filter #{'(operand-form)} (tree-seq coll? seq expansion))))))))
+
+(deftest collect-is-the-buffer-limit-s-collection
+  ;; collect! (and the budget's check, which calls it) slept a fixed 20 ms
+  ;; and drained, uncounted, leaving the fresh-bytes count high; it is
+  ;; MlxRuntime's collectNow now (the review's I1-06). Planted (2026-10-22):
+  ;; the old collect! fails
+  (when-mlx
+    (let [memory (requiring-resolve 'gen.backend.mlx/memory)
+          collect! (requiring-resolve 'gen.backend.mlx/collect!)
+          before (:collections (memory))]
+      (collect!)
+      (is (= (inc before) (:collections (memory))) "counted"))))
+
+(deftest backends-resolve-their-late-namespaces-once
+  ;; requiring-resolve on every call (MLX's tree functions, exact routes on
+  ;; every float64 exp, the tape on every gradient) cost about 120 ns each
+  ;; time (the review's I1-10): each resolves once, in a delay. Read from the
+  ;; source. Planted (2026-10-22): exact/sum resolved per call fails
+  (doseq [path ["src/gen/backend/mlx.clj" "src/gen/backend/jvm.clj"]]
+    (let [loose (fn loose [form]
+                  (cond (and (seq? form) (= 'delay (first form))) []
+                        (and (seq? form) (= 'requiring-resolve (first form))) [form]
+                        (coll? form) (mapcat loose form)
+                        :else []))]
+      (is (= [] (vec (mapcat loose (source-forms path)))) path))))
+
 (deftest a-temporary-of-no-known-kind-fails-where-it-is-registered
   ;; free-temp's case throws on a kind it does not know, which in
   ;; with-temps' finally would mask the body's error (cross-review 3), so

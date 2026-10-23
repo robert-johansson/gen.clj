@@ -72,9 +72,9 @@
     "Does this backend defer computation, so that reading a value forces
      evaluation? (The JVM backend is eager; MLX is lazy.)")
   (-native-ops [b]
-    "Set of composite op keywords this backend implements natively (e.g.
-     #{:logsumexp :lgamma}). gen.array uses the native version when present and
-     its own composite (built from primitives) otherwise.")
+    "The optional ops this backend implements as primitive elementwise op
+     keywords, a set. gen.array looks up one, :logaddexp: listed, it is an
+     -elementwise op; otherwise gen.array composes it from primitives.")
 
   ;; --- host boundary ---------------------------------------------------------
   (-from-host [b values shape dtype]

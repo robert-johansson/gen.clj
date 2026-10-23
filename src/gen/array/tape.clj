@@ -21,6 +21,7 @@
   (:refer-clojure :exclude [+ - * / < > <= >= ==])
   (:require [gen.array :as array :refer [+ - * / < > <= >= ==]]
             [gen.array.dtype :as dt]
+            [gen.array.host :as host]
             [gen.array.protocols :as p]))
 
 (set! *warn-on-reflection* true)
@@ -34,7 +35,10 @@
 (defmethod print-method Tracked [x ^java.io.Writer w]
   (.write w "#gen/tracked[") (print-method (.-primal ^Tracked x) w) (.write w "]"))
 
-(defn tracked? [x] (instance? Tracked x))
+(defn tracked?
+  "Is x a value being differentiated, recorded on a tape?"
+  [x]
+  (instance? Tracked x))
 
 (defn- primal [x] (if (tracked? x) (.-primal ^Tracked x) x))
 
@@ -43,7 +47,7 @@
    kind's default there (float64 only where that is the default)."
   [inner v]
   (if (array/host? v)
-    (dt/with-weak nil #{(dt/kind (dt/host-dtype v))} (p/-defaults inner))
+    (dt/weak-host-dtype v (p/-defaults inner))
     (p/-dtype inner v)))
 
 (defn- differentiable? [x] (= :float (dt/kind (array/dtype x))))
@@ -310,7 +314,7 @@
           ;; host scalars stay on the host, as untaped (a lazy inner backend
           ;; would make them float32 arrays, and the taped values would differ)
           out (if (every? array/host? ps)
-                (array/host-elementwise op ps)
+                (host/elementwise op ps)
                 (p/-elementwise inner op ps dtype))]
       (if-let [rule (elementwise-rules op)]
         (record t out args (fn [g need]
@@ -320,7 +324,7 @@
   (-reduce [t op x axes keep-dims?]
     (let [v (primal x)
           s (array/shape v)
-          out (if (array/host? v) (array/host-reduce op v) (p/-reduce inner op v axes keep-dims?))]
+          out (if (array/host? v) (host/reduction op v) (p/-reduce inner op v axes keep-dims?))]
       (case op
         :sum (record t out [x] (fn [g _] [(spread g s axes)]))
         (:max :min) (record t out [x]

@@ -134,6 +134,7 @@
     dtype))
 
 (defn reduce-result-dtype
+  "The dtype a reduction op returns for an input of dtype in."
   [op in defaults]
   (case op
     (:argmax :argmin) (:int defaults)
@@ -166,12 +167,14 @@
     (not (== 0.0 (.doubleValue ^Number x)))))
 
 (defn host-double
+  "A host scalar as a double (a boolean as 1.0 or 0.0)."
   ^double [x]
   (if (instance? Boolean x)
     (if (.booleanValue ^Boolean x) 1.0 0.0)
     (.doubleValue ^Number x)))
 
 (defn host-long
+  "A host scalar as a long (a boolean as 1 or 0; a float truncated)."
   ^long [x]
   (if (instance? Boolean x)
     (if (.booleanValue ^Boolean x) 1 0)

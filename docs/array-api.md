@@ -99,8 +99,9 @@ A distribution body, compared with GenMLX:
   array, it is coerced to that array's dtype and never promotes it:
   - float32 array + `2.5` → float32;
   - int32 array + `2.5` → the backend's default float dtype.
-- **One backend per op.** Mixing arrays from two backends throws. (Explicit
-  transfer, `(array/to-backend x b)`, comes with M2.)
+- **One backend per op.** Mixing arrays from two backends throws. There is
+  no transfer op: read the values (`->clj`) and make the array again under
+  the other backend.
 - **No `=` on arrays.** Compare with `array/equal?` (exact) or `array/allclose?`.
   Numbers still compare with `=`, but core code doesn't rely on that.
 - **Trees.** Nested maps and vectors whose leaves are arrays are first-class
@@ -156,8 +157,9 @@ A distribution body, compared with GenMLX:
 **Primitive** ops are what a backend implements, via the `IBackend` method
 named. **Composite** ops are written once in `gen.array` in terms of
 primitives, and are therefore automatically differentiable and identical
-across backends. A backend may list composites in `-native-ops` to supply a
-faster or more accurate version. The table is the v1 scope: what the M1 core
+across backends. A backend may list `:logaddexp` in `-native-ops` to take it
+as a primitive elementwise op, faster or more accurate; gen.array looks up no
+other composite there. The table is the v1 scope: what the M1 core
 needs, taken from GenMLX's measured call counts
 (docs/research/genmlx-porting-surface.md §(d)).
 
@@ -173,10 +175,10 @@ needs, taken from GenMLX's measured call counts
 | predicates | `isnan` `isinf` `isfinite` | `:isnan :isinf` | `isfinite` |
 | comparison | `< <= > >= == !=` | `:less :less-equal :greater :greater-equal :equal :not-equal` | — |
 | logic | `logical-and` `logical-or` `logical-not` `where` | `:logical-and :logical-or :logical-not :where` | — |
-| reductions | `sum` `prod` `max` `min` `argmax` `argmin` `all` `any` `mean` `var` `std` `logsumexp` | `-reduce` with `:sum :prod :max :min :argmax :argmin :all :any` | `mean`, `var`, `std`, `logsumexp` |
+| reductions | `sum` `prod` `max` `min` `argmax` `argmin` `all` `any` `mean` `variance` `std` `logsumexp` | `-reduce` with `:sum :prod :max :min :argmax :argmin :all :any` | `mean`, `variance`, `std`, `logsumexp` |
 | normalization | `softmax` `log-softmax` | — | both |
 | scans | `cumsum` `cumprod` `logcumsumexp` | `-scan` with `:cumsum :cumprod :cummax :cummin` | `logcumsumexp` |
-| shape | `reshape` `transpose` `squeeze` `expand-dims` `broadcast-to` `stack` `concatenate` `flatten` `tile` | `-reshape` `-transpose` `-broadcast-to` `-concatenate` | `squeeze`, `expand-dims`, `stack`, `flatten`, `tile` |
+| shape | `reshape` `transpose` `squeeze` `expand-dims` `broadcast-to` `stack` `concatenate` `flatten` | `-reshape` `-transpose` `-broadcast-to` `-concatenate` | `squeeze`, `expand-dims`, `stack`, `flatten` |
 | indexing | `slice` `take` `take-along-axis` `pick` `scatter-add` | `-slice` `-take` `-take-along-axis` `-scatter-add` | `pick` |
 | linear algebra | `matmul` `outer` `diag` · `la/cholesky` `la/solve-triangular` `la/solve` `la/inv` `la/slogdet` | `-matmul` `-linalg` | `outer`, `diag` |
 | gradients | `grad` `value-and-grad` `stop-gradient` | `-value-and-grad`, `:stop-gradient` | — |
