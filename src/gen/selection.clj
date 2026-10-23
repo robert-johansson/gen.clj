@@ -9,7 +9,9 @@
    either, and the empty path is the root. A selection implements
    ISelection one address at a time."
   (:refer-clojure :exclude [complement])
-  (:require [gen.choicemap :as cm]))
+  (:require [gen.array :as array]
+            [gen.array.batch :as batch]
+            [gen.choicemap :as cm]))
 
 (set! *warn-on-reflection* true)
 
@@ -150,15 +152,30 @@
   [choices]
   (from-paths (cm/addresses choices)))
 
+(defn- under-parts!
+  "The batched-branch error: s reaches under a batched run's choices held
+   by part (a Switch whose index differs across the particles,
+   gen.array.batch/Parts), where which choices it selects differs across
+   the particles."
+  [choices s]
+  (when (batch/parts? (cm/get-value choices))
+    (throw (array/batched-branch "A selection reaches under choices that differ in structure across the particles"
+                                 {:selection s}))))
+
 (defn get-selected
-  "The part of a choice map that s selects (Gen.jl's get_selected)."
+  "The part of a choice map that s selects (Gen.jl's get_selected). In a
+   batched trace, a choice held by part (a Switch's whose index differs
+   across the particles) is selected whole or not at all: a selection under
+   it is the batched-branch error."
   [choices s]
   (cond (instance? All s) choices
         (instance? None s) cm/EMPTY
-        (cm/has-value? choices) (if (root-selected? s) choices cm/EMPTY)
+        (cm/has-value? choices) (if (root-selected? s) choices (do (under-parts! choices s) cm/EMPTY))
         :else (reduce (fn [acc [addr sub]]
                         (let [kept (if (cm/has-value? sub)
-                                     (when (-selected? s addr) sub)
+                                     (cond (-selected? s addr) sub
+                                           (instance? None (-subselection s addr)) nil
+                                           :else (under-parts! sub (-subselection s addr)))
                                      (get-selected sub (-subselection s addr)))]
                           (if (cm/empty? kept) acc (cm/set-submap acc addr kept))))
                       cm/EMPTY

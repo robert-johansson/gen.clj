@@ -333,8 +333,15 @@
    generate's less prev's projection on the old choices it kept (Eq. 4.1,
    by (project-old prev selection)): a dropped choice cancels against the
    reverse move, which draws it afresh. The retdiff is unknown-change.
-   IRevisable's default."
+   IRevisable's default. In a batched run, a trace whose choices differ in
+   structure across its particles (a Switch's by partition) is the
+   batched-branch error: its choices are no one choice map to generate
+   from."
   [gf op args {:keys [prev constraints selection key]} project-old]
+  (when (and (batch/batch-backend? array/*backend*) (some batch/parts? (cm/values (:choices prev))))
+    (throw (array/batched-branch (str "A trace whose choices differ in structure across the particles (a Switch whose"
+                                      " index differs across them) is revised by another generative function")
+                                 {})))
   (let [constraints (or constraints cm/EMPTY)
         old (:choices prev)
         sigma (if (= op :update) (cm/override old constraints) (sel/get-selected old (sel/complement selection)))
