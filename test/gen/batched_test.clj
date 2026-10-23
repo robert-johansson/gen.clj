@@ -635,7 +635,10 @@
 
 (deftest map-particles-is-f-of-each-trace
   ;; vmap's semantics: batched or not, particle i's result is f's on its
-  ;; trace and its rows
+  ;; trace and its rows. Planted (2026-10-23): every particle given
+  ;; particle 0's rows fails the per-particle cases and the fallbacks; a
+  ;; shared value left unbroadcast fails its shape; the guard without its
+  ;; check of unread comparisons fails the raw if
   (let [n 5
         ps (:particles (b/generate linreg [[1.0 2.0 3.0]] observed n (rng/key 80)))
         shifts (array/array (mapv #(* 0.5 %) (range n)))

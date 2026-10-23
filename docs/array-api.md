@@ -512,6 +512,15 @@ like the AD tape:
   - *Not supported:* a batched run inside a differentiated function (the
     tape outside the tracer). Their values belong to unrelated backends, a
     loud error; differentiate inside the run and sum the gradients.
+  - *In inference,* through `gen.batched/map-particles`, which runs a
+    function of a trace once on a collection's batched trace (with a
+    batched run's guards, and its fallback to one trace at a time):
+    `gen.gradients/choice-gradients` of a particle collection,
+    `gen.inference.mcmc`'s `hmc-particles`, `mala-particles` and
+    `map-optimize-particles` (n chains, each accepted on its own), and
+    black-box VI's `:batched?` draws. Measured on the JVM backend: 8–221×
+    for choice gradients, 4–246× for an HMC step, from 10 to 1000
+    particles (`docs/benchmarks.md`).
 
 Running a generative function's scalar code under the batch backend runs it
 batched (`gfi/run-op` with `:batch-shape`). Every generative function

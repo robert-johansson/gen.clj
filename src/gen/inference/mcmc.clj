@@ -10,8 +10,9 @@
                                                   :diverged? :energy :eps}
      (map-optimize trace selection opts)       → trace
      (elliptical-slice trace addr mu cov)      → trace
-     (hmc-particles ps selection {:L 10 :eps 0.1})  → {:particles :accepted? :log-alpha :diverged?}
-     (mala-particles ps selection tau)         → {:particles :accepted? :log-alpha :diverged?}
+
+     (hmc-particles ps selection opts)          → {:particles :accepted? :log-alpha :diverged?}
+     (mala-particles ps selection tau)          → {:particles :accepted? :log-alpha :diverged?}
      (map-optimize-particles ps selection opts) → particles
 
    The selected choices must keep the trace's structure: HMC, MALA and NUTS
