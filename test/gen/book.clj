@@ -73,6 +73,15 @@
   []
   (filterv #(.exists (io/file (source-file %))) (book-files)))
 
+(defn- printed-files
+  "The book's files the PDF holds: a part's heading (NN0-…, no code) only
+   when its part has a chapter, so a planned part prints no empty page."
+  []
+  (let [decade #(subs (.getName (io/file %)) 0 2)
+        written (set (map decade (chapters)))]
+    (filterv #(or (not (re-matches #"\d\d0-.*\.md" (.getName (io/file %)))) (written (decade %)))
+             (book-files))))
+
 ;; ---------------------------------------------------------------------------
 ;; Regions and includes
 ;; ---------------------------------------------------------------------------
@@ -293,7 +302,7 @@
   (let [args (into ["pandoc" (str "--metadata-file=" dir "/metadata.yaml") "--top-level-division=chapter"
                     "--pdf-engine=xelatex" "--syntax-highlighting=tango" (str "--resource-path=" dir)
                     "-o" pdf-file]
-                   (book-files))
+                   (printed-files))
         _ (io/make-parents pdf-file)
         exit (try (-> (ProcessBuilder. ^java.util.List args) (.inheritIO) (.start) (.waitFor))
                   (catch java.io.IOException e
