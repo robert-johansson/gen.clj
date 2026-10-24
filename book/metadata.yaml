@@ -9,3 +9,5 @@ toc-depth: 1
 fontsize: 11pt
 geometry: margin=2.5cm
 colorlinks: true
+numbersections: true
+secnumdepth: 0

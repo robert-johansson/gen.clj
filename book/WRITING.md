@@ -24,6 +24,20 @@ Part I, Foundations:
 | 016-update-regenerate.md | Update and Regenerate | GenMLX book 015; Gen.jl's Reasoning about Regenerate |
 | 017-composition.md | Composition | GenMLX book 016 |
 
+Part II, Inference (`020-part-inference.md` holds its heading):
+
+| File | Chapter | Sources |
+|------|---------|---------|
+| 021-inference-toolkit.md | The Inference Toolkit | GenMLX book 021 |
+| 022-mcmc-map.md | MCMC and MAP | Gen.jl's Basics of Iterative Inference: MCMC and MAP |
+| 023-gradient-mcmc.md | Gradient-Based MCMC | GenMLX book 022 |
+| 024-enumeration.md | Debugging with Enumeration | Gen.jl's Debugging with Enumeration |
+| 025-smc.md | Sequential Monte Carlo: Object Tracking | Gen.jl's SMC tutorial |
+| 026-smc-in-depth.md | SMC in Depth | GenMLX book 023 |
+| 027-vi.md | Variational Inference | Gen.jl's VI tutorial; GenMLX book 024 (the ELBO and ADVI) |
+| 028-learning.md | Learning | Gen.jl's Learning Generative Functions; GenMLX book 026 |
+| 029-speeding-up.md | Speeding Up | Gen.jl's Scaling with the SML; GenMLX book 025 |
+
 ## Prose
 
 - **Plain and exact.** Short sentences, active voice, American spelling.
@@ -67,6 +81,11 @@ Part I, Foundations:
 - **Idiomatic, small and documented:** functions with docstrings, `let`
   over repetition, no clever code. A model's arithmetic is gen.array's,
   and a model never reads a value on the host.
+- **Branching on a boolean in host code** (outside a `gen` body): a trace
+  called with an address, `(tr :b)`, returns a host boolean on every
+  backend, but a value read another way (`cm/get-choice`, a return value
+  `(:retval tr)`) is a 0-d array on MLX, which Clojure's `if` takes as
+  true. Branch on those through `array/truthy?`.
 - **Explicit keys everywhere.** Each use gets its own `(rng/key n)` or a
   split; no implicit keys, so every result is reproducible.
 - **Lines of at most 80 characters** (the test enforces it).
@@ -88,10 +107,32 @@ Part I, Foundations:
   code and shown as `;=> true`. Choose thresholds that hold on every
   backend, not ones that happen to pass.
 - `;; error: message` as a region's first line shows a loud error, where
-  the chapter wants the reader to see one.
+  the chapter wants the reader to see one. Write each of its forms behind
+  `#_` in the source, so that requiring the namespace does not throw; the
+  test runs them, and the Markdown shows them, without it.
 - **A check must be able to fail.** Before trusting a statistical check,
   plant a bug (a wrong prior, a skipped move) and see it fail; note what
   you planted in the chapter's bean.
+
+## Running on every backend
+
+The book's gate is the JVM backend, but a reader may run it on MLX, where
+values are lazy arrays and floats are 32-bit, and the book runs there at
+milestones. Part I's chapters needed these:
+
+- **Keep host numbers, not traces, in long loops.** Thousands of traces
+  held at once exhaust MLX's buffers. `is/estimate` and
+  `is/importance-resampling` (one sample at a time) keep no traces; a loop
+  of your own keeps `(array/item w)` and drops each trace it does not
+  return.
+- **Results of sampling differ in float32.** A key draws other values
+  there, and a chain or a resampler can take another path. Show such
+  results with `; float64`, or state them as checks with bands.
+- **Branch on booleans as host booleans** (above): `(tr :b)`, or
+  `array/truthy?`.
+- **Batch where the model allows.** `{:batched? true}` is faster on every
+  backend when every run visits the same addresses; a model whose
+  structure varies runs one sample at a time.
 
 ## Figures
 
