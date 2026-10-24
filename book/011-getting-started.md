@@ -223,7 +223,7 @@ take their given values, and the rest are drawn. Its trace is a starting
 point, which an MCMC algorithm then revises over and over.
 Metropolis–Hastings proposes a new slope, here from its prior, as Gen.jl's
 `metropolis_hastings` does with a selection. It accepts the proposal with a
-probability that favours lines that make the data more probable. Then it
+probability that favors lines that make the data more probable. Then it
 does the same for the intercept.
 
 <!-- code: mh -->

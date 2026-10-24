@@ -279,11 +279,14 @@
     (println "wrote" pdf-file)))
 
 (defn -main
-  "sync: write every chapter's includes from its regions, and its figures.
+  "sync [chapter …]: write the chapters' includes from their regions, and
+   their figures (every chapter when none is named).
+   check [chapter …]: run the chapters' checks, print a summary, and exit 1
+   on a failure.
    pdf: build the book as a PDF."
-  [& [what]]
+  [& [what & named]]
   (case what
-    "sync" (doseq [chapter (chapters)
+    "sync" (doseq [chapter (or (seq named) (chapters))
                    :let [rs (regions (slurp (source-file chapter)))
                          md (slurp chapter)
                          md' (synced md rs)]]
@@ -296,6 +299,14 @@
                  (io/make-parents f)
                  (spit f svg)
                  (println "wrote" (.getPath f)))))
+    "check" (let [counters (binding [clojure.test/*report-counters* (ref clojure.test/*initial-report-counters*)]
+                             (doseq [chapter (or (seq named) (chapters))]
+                               (let [{:keys [regions checks]} (run-chapter chapter)]
+                                 (println chapter ":" regions "regions," checks "checks")))
+                             @clojure.test/*report-counters*)]
+              (println (:pass counters) "passed," (:fail counters) "failed," (:error counters) "errors")
+              (shutdown-agents)
+              (System/exit (if (zero? (+ (:fail counters) (:error counters))) 0 1)))
     "pdf" (pdf!)
-    (println "usage: clojure -M:test -m gen.book sync|pdf"))
+    (println "usage: clojure -M:test -m gen.book sync|check [book/NNN-name.md …] | pdf"))
   (shutdown-agents))
