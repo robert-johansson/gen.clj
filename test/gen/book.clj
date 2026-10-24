@@ -18,7 +18,10 @@
      (gen.array arrays by gen.array/->clj), equals value, which is read, not
      evaluated. A float checks to the digits it shows (half a unit in its
      last place, as Clojure prints it, plus the backend's tolerance), so one
-     text passes on float64 and float32 backends; an integer exactly.
+     text passes on float64 and float32 backends; an integer exactly. So
+     few digits make a weak check (`;=> 0.0` accepts anything within
+     0.05): where values must agree up to rounding, the code says so with
+     gen.array/allclose? and `;=> true`.
    - `;=> value ; float64`: the same, checked only where the default float
      is float64 (the JVM backend; MLX with -Dgen.mlx.dtypes=64). For a
      sampled value: a key draws other values in float32.
