@@ -147,7 +147,18 @@ the appendices (`060-appendices.md`):
 - **A statistical claim is a check with a band from its standard error**
   (five standard errors, or an exact value from theory), written in the
   code and shown as `;=> true`. Choose thresholds that hold on every
-  backend, not ones that happen to pass.
+  backend, not ones that happen to pass. The same 5 holds for every kind
+  of claim:
+  - "A beats B": the gap exceeds 5 standard errors of the difference.
+    When the measured gap is not well above that, add runs; do not lower
+    the threshold.
+  - Monte Carlo estimates compared with each other or with an exact value:
+    5 standard errors, or 5 MCSE for a chain's average.
+  - A learned function (a trained network, a trained proposal): 5× the
+    spread of the result over 8–10 training keys, measured once and
+    written beside the check with the keys it came from.
+  - A band too wide to catch a plausible error (a 2× variance, say) needs
+    more draws, or a claim no stronger than the check.
 - `;; error: message` as a region's first line shows a loud error, where
   the chapter wants the reader to see one. Write each of its forms behind
   `#_` in the source, so that requiring the namespace does not throw; the

@@ -473,6 +473,15 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   III Theory, IV The System, V Applications, and appendices, with Gen.jl's
   tutorials as worked chapters inside them, not a separate tutorial site.
   `gen.book pdf` builds it with Pandoc.
+  The book's checks follow the test rule, with no exceptions (owner,
+  2026-10-24, genclj-fblt): a claim that one method beats another passes
+  at 5 standard errors of the difference, like a two-sided band, and a
+  chapter buys that with runs, not a lower threshold (Part II's 022 had
+  used 3). A comparison of Monte Carlo estimates takes 5 standard errors
+  (MCSE for chains); a learned function (a trained network, a proposal)
+  takes 5× a spread measured over 8–10 training keys, the spread written
+  beside the check; a check whose band is too wide to catch a plausible
+  error (023's metric) gets more draws, or claims only what it can show.
 - **A 1.0 for dependents** (owner, 2026-10-24): memo.clj's 1.0 should
   probably wait for gen.clj's 1.0 rather than pin a commit. Until then
   dependents pin a commit. There is no rush for memo.clj: gen.clj's 1.0
