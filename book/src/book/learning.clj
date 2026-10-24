@@ -446,20 +446,24 @@ em
         (ascend (learn/sgd {:lr 2.0}) store0 steps
                 (em-gradient (sampled ys k) k) key)))
 
-(def mc-20 (mc-em 20 300 (rng/key 14)))
+(def mc-20-runs (mapv #(mc-em 20 300 %) (rng/split (rng/key 14) 4)))
 
-(def mc-20-summary (diag/summary (subvec mc-20 100)))
+(def mc-20 (first mc-20-runs))
 
-[(:mean mc-20-summary) (:logit mle-mixture)]
-;=> [-0.686 -0.670] ; float64
+(def mc-20-summary (diag/summary (mapv #(subvec % 100) mc-20-runs)))
 
-(< (abs (- (:mean mc-20-summary) (:logit mle-mixture))) 0.05)
+[(:mean mc-20-summary) (:mcse-mean mc-20-summary) (:logit mle-mixture)]
+;=> [-0.6906 0.00175 -0.6702] ; float64
+
+(let [{:keys [mean mcse-mean]} mc-20-summary]
+  (< mean (- (:logit mle-mixture) (* 5 mcse-mean))))
 ;=> true
 
 ;; book: mc-em-5
 (def mc-5 (mc-em 5 300 (rng/key 15)))
 
-(< (peek mc-5) (- (:logit mle-mixture) 1.0))
+;; the last logit's spread over ten runs (keys 101 to 110): 0.20
+(< (peek mc-5) (- (:logit mle-mixture) (* 5 0.20)))
 ;=> true
 
 ;; book: em-figure
@@ -552,10 +556,21 @@ em
 ;=> [0.0866 0.0871 0.0887] ; float64
 
 ;; book: net-check-bands
-[(< (abs (array/item (- (array/exp (:log-sigma trained)) rms))) 0.002)
- (< (abs (array/item (- rms noise-rms))) 0.005)
- (< (array/item (array/max (array/abs (- fitted-mean (array/sin grid))))) 0.15)]
-;=> [true true true]
+(def fit-error
+  (array/sqrt (array/mean (array/square (- fitted-mean (array/sin grid))))))
+
+fit-error
+;=> 0.0191 ; float64
+
+;; spreads over ten trainings, each with its own noise (keys 201 to 210)
+;; and initial weights (keys 101 to 110): 0.00033 of sigma - rms, 0.0066
+;; of sigma, 0.00073 of rms - noise-rms, 0.0060 of noise-rms - fit-error
+(let [sigma (array/item (array/exp (:log-sigma trained)))]
+  [(< (abs (- sigma (array/item rms))) (* 5 0.00033))
+   (< (abs (- sigma 0.1)) (* 5 0.0066))
+   (< (array/item (- rms noise-rms)) (* 5 0.00073))
+   (> (array/item (- noise-rms fit-error)) (* 5 0.0060))])
+;=> [true true true true]
 
 ;; book: net-figure
 ;; figure: figures/028-network.svg
@@ -698,10 +713,12 @@ best
 trained-q
 ;=> {:w 3.10 :c -1.86} ; float64
 
+;; the largest spread of the proposal's probability at a point of ys, over
+;; ten trainings (keys 101 to 110): 0.0078
 (let [y (array/array ys)
       prob (fn [{:keys [w c]}] (array/sigmoid (+ (* w y) c)))]
   (< (array/item (array/max (array/abs (- (prob trained-q) (prob best)))))
-     0.05))
+     (* 5 0.0078)))
 ;=> true
 
 ;; book: amortized
@@ -778,7 +795,13 @@ trained-q
 (second-half rws)
 ;=> {:mu0 -1.133 :mu1 1.911 :logit -0.671} ; float64
 
-(near? (second-half rws) mle-mixture 0.05)
+;; the spreads of these averages over ten runs (keys 101 to 110)
+(def rws-spreads {:mu0 0.0045 :mu1 0.0092 :logit 0.0090})
+
+(let [averages (second-half rws)]
+  (every? (fn [[k spread]]
+            (< (abs (- (averages k) (k mle-mixture))) (* 5 spread)))
+          rws-spreads))
 ;=> true
 
 ;; book: solution-1
@@ -885,5 +908,6 @@ trained-q
 coin-gaps
 ;=> {:mu0 -0.014 :mu1 -0.357 :logit 0.209} ; float64
 
-[(< (abs (:logit coin-gaps)) 1.0) (> (abs (:mu1 coin-gaps)) 0.2)]
+;; the spread of either gap over ten runs (keys 101 to 110): 0.014
+[(> (:logit coin-gaps) (* 5 0.014)) (< (:mu1 coin-gaps) (* -5 0.014))]
 ;=> [true true]
