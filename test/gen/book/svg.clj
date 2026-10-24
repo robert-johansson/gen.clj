@@ -96,3 +96,145 @@
              [(str "<polyline fill=\"none\" stroke=\"steelblue\" stroke-width=\"1\" points=\""
                    (str/join " " (map-indexed (fn [i v] (str (fmt (px i)) "," (fmt (py v)))) vs))
                    "\"/>")]))))
+
+(defn histogram
+  "Histograms of samples on one axis, each scaled to a density (its bars'
+   area is its weight in range over its total weight), each with an optional
+   density curve to compare it with. layers is a seq of {:values, and
+   optionally :weights (nonnegative, any scale), :density (a function of
+   x) and :label (shown in a legend)}. Options: :bins (default 40), :range
+   [lo hi] (default the values'), :x-label, :y-label."
+  [layers & [opts]]
+  (let [{:keys [bins range] :or {bins 40}} opts
+        colors ["steelblue" "darkorange" "seagreen" "firebrick"]
+        layers (mapv (fn [{:keys [values weights] :as l} color]
+                       (let [vs (mapv host values)]
+                         (assoc l :color color :vs vs
+                                :ws (if weights (mapv host weights) (vec (repeat (count vs) 1.0))))))
+                     layers colors)
+        all-vs (mapcat :vs layers)
+        [lo hi] (mapv double (or range [(apply min all-vs) (apply max all-vs)]))
+        step (/ (- hi lo) bins)
+        bin (fn [v] (if (== v hi) (dec bins) (long (Math/floor (/ (- v lo) step)))))
+        heights (fn [{:keys [vs ws]}]
+                  (let [total (reduce + ws)]
+                    (->> (map vector vs ws)
+                         (reduce (fn [acc [v w]] (if (<= lo v hi) (update acc (bin v) + w) acc))
+                                 (vec (repeat bins 0.0)))
+                         (mapv #(/ % (* total step))))))
+        curve (fn [f] (mapv (fn [i] (let [x (+ lo (* i (/ (- hi lo) 200.0)))] [x (host (f x))]))
+                            (clojure.core/range 201)))
+        layers (mapv #(cond-> (assoc % :heights (heights %)) (:density %) (assoc :curve (curve (:density %))))
+                     layers)
+        top (apply max (concat (mapcat :heights layers) (map second (mapcat :curve layers))))]
+    (frame (merge {:x-label "value" :y-label "density"} opts)
+           [lo hi] [0.0 (* 1.05 top)]
+           (fn [px py]
+             (concat
+              (for [{:keys [heights color]} layers]
+                (str "<path fill=\"" color "\" fill-opacity=\"0.25\" stroke=\"" color "\" stroke-width=\"1\" d=\"M"
+                     (fmt (px lo)) "," (fmt (py 0.0))
+                     (str/join (map-indexed (fn [i h] (str " L" (fmt (px (+ lo (* i step)))) "," (fmt (py h))
+                                                           " L" (fmt (px (+ lo (* (inc i) step)))) "," (fmt (py h))))
+                                            heights))
+                     " L" (fmt (px hi)) "," (fmt (py 0.0)) " Z\"/>"))
+              (for [{:keys [curve color]} layers :when curve]
+                (str "<polyline fill=\"none\" stroke=\"" color "\" stroke-width=\"2\" points=\""
+                     (str/join " " (map (fn [[x y]] (str (fmt (px x)) "," (fmt (py y)))) curve)) "\"/>"))
+              (for [[i {:keys [label color]}] (map-indexed vector (filter :label layers))
+                    :let [y (+ 30.0 (* 16.0 i))]]
+                (str "<rect x=\"" (- width 120) "\" y=\"" (fmt (- y 9.0)) "\" width=\"12\" height=\"10\" fill=\""
+                     color "\" fill-opacity=\"0.6\"/><text x=\"" (- width 102) "\" y=\"" (fmt y) "\">" label
+                     "</text>")))))))
+(defn tree
+  "The address tree of paths (a choice map's addresses, or any vectors of
+   addresses): a node for each distinct prefix, the root at the top, and the
+   paths' last addresses, the choices, shaded at the ends of their branches.
+   Children keep the order of the paths. Options: :root, the root's label
+   (default \"trace\")."
+  [paths & [opts]]
+  (let [root (get opts :root "trace")
+        ;; [[addr subtree] …] for paths sharing their first addresses
+        grow (fn grow [ps]
+               (let [ps (remove empty? ps)]
+                 (vec (for [a (distinct (map first ps))]
+                        [a (grow (map rest (filter #(= a (first %)) ps)))]))))
+        nodes (grow (map seq paths))
+        depth (fn depth [kids] (if (empty? kids) 0 (inc (apply max (map (comp depth second) kids)))))
+        levels (max 1 (depth nodes))
+        leaves (fn leaves [kids] (if (empty? kids) 1 (reduce + (map (comp leaves second) kids))))
+        n (leaves nodes)
+        row 56.0
+        h (long (+ 40.0 (* row levels)))
+        dx (/ (double width) n)
+        ;; [x y label leaf? parent-x parent-y] of every node below the root
+        place (fn place [kids first-leaf level px py]
+                (loop [kids kids i first-leaf out []]
+                  (if-let [[a sub] (first kids)]
+                    (let [k (leaves sub)
+                          x (* dx (+ i (/ k 2.0)))
+                          y (+ 20.0 (* row level))]
+                      (recur (rest kids) (+ i k)
+                             (into (conj out [x y (pr-str a) (empty? sub) px py])
+                                   (place sub i (inc level) x y))))
+                    out)))
+        rx (/ (double width) 2.0)
+        placed (place nodes 0 1 rx 20.0)
+        box (fn [x y label leaf?]
+              (let [w (+ 10.0 (* 6.5 (count label)))]
+                (str "<g><rect x=\"" (fmt (- x (/ w 2.0))) "\" y=\"" (fmt (- y 9.0)) "\" width=\"" (fmt w)
+                     "\" height=\"18\" rx=\"3\" fill=\"" (if leaf? "#dbe7f3" "white")
+                     "\" stroke=\"steelblue\"/><text x=\"" (fmt x) "\" y=\"" (fmt (+ y 4.0))
+                     "\" text-anchor=\"middle\">" label "</text></g>")))]
+    (str/join
+     "\n"
+     (concat
+      [(str "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" width "\" height=\"" h
+            "\" viewBox=\"0 0 " width " " h "\" font-family=\"sans-serif\" font-size=\"11\">")
+       "<rect width=\"100%\" height=\"100%\" fill=\"white\"/>"]
+      (for [[x y _ _ px py] placed]
+        (str "<line x1=\"" (fmt px) "\" y1=\"" (fmt (+ py 9.0)) "\" x2=\"" (fmt x) "\" y2=\"" (fmt (- y 9.0))
+             "\" stroke=\"gray\"/>"))
+      [(box rx 20.0 root false)]
+      (for [[x y label leaf?] placed] (box x y label leaf?))
+      ["</svg>"]))))
+(defn plot
+  "Layers of points and curves in one box: a model's traces over data. A
+   layer is a map, {:points [[x y] …]} for dots or {:curves [f …]} for the
+   graphs of functions of x across the box, with optional :color (default
+   black for dots, steelblue for curves), :opacity (default 1 for dots, 0.7
+   for curves), :r (a dot's radius, default 3) and :width (a curve's
+   stroke, default 1.5). Options: :x-range and :y-range (default: the dots'
+   span, padded, or the curves' when there are no dots), :title, :x-label,
+   :y-label. Marks are clipped to the box."
+  [layers & [opts]]
+  (let [dots (for [l layers [x y] (:points l)] [(host x) (host y)])
+        span (fn [vs] (padded (apply min vs) (apply max vs)))
+        [x0 x1] (mapv double (or (:x-range opts)
+                                 (some-> (seq (map first dots)) span)
+                                 (throw (ex-info "plot: curves without dots need an :x-range" {}))))
+        grid (mapv #(+ x0 (* (- x1 x0) (/ % 400.0))) (range 401))
+        graph (fn [f] (mapv (fn [x] [x (host (f x))]) grid))
+        layers (mapv #(assoc % ::graphs (mapv graph (:curves %))) layers)
+        [y0 y1] (mapv double (or (:y-range opts)
+                                 (span (or (seq (map second dots))
+                                           (for [l layers g (::graphs l) [_ y] g] y)))))]
+    (frame (merge {:x-label "x" :y-label "y"} opts) [x0 x1] [y0 y1]
+           (fn [px py]
+             (concat
+              [(str "<clipPath id=\"box\"><rect x=\"" (fmt (px x0)) "\" y=\"" (fmt (py y1))
+                    "\" width=\"" (fmt (- (px x1) (px x0))) "\" height=\"" (fmt (- (py y0) (py y1)))
+                    "\"/></clipPath>")
+               "<g clip-path=\"url(#box)\">"]
+              (for [{:keys [points color opacity r width] ::keys [graphs]} layers
+                    mark (concat
+                          (for [g graphs]
+                            (str "<polyline fill=\"none\" stroke=\"" (or color "steelblue")
+                                 "\" stroke-opacity=\"" (or opacity 0.7) "\" stroke-width=\"" (or width 1.5)
+                                 "\" points=\"" (str/join " " (map (fn [[x y]] (str (fmt (px x)) "," (fmt (py y)))) g))
+                                 "\"/>"))
+                          (for [[x y] points]
+                            (str "<circle cx=\"" (fmt (px (host x))) "\" cy=\"" (fmt (py (host y))) "\" r=\"" (or r 3)
+                                 "\" fill=\"" (or color "black") "\" fill-opacity=\"" (or opacity 1) "\"/>")))]
+                mark)
+              ["</g>"])))))

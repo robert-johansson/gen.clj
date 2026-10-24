@@ -16,7 +16,8 @@ and its code is verified for real (DESIGN.md §9).
   (and the figures). Every ```clojure block in a chapter is an include,
   so no code in the book goes untested. Regions the text does not include
   (setup, helpers) still run.
-- **The test** (`gen.book-test`, on every backend) fails when an include
+- **The test** (`gen.book-test`, its gate the JVM backend; on MLX only when
+  asked, `-Dgen.book.mlx=true`) fails when an include
   differs from its region. It then runs the namespace region by region and
   checks the results the code states:
   - `;=> value` after a form shows its result. A float checks to the digits
@@ -29,7 +30,9 @@ and its code is verified for real (DESIGN.md §9).
     float32.
   - A statistical claim is a check in the code, with a band from the
     estimator's standard error, shown as `;=> true`.
-  - `;; error: message` as a region's first line shows a loud error.
+  - `;; error: message` as a region's first line shows a loud error. Its
+    forms are written behind `#_` in the source, so the namespace still
+    loads; the test runs them, and the Markdown shows them, without it.
   - `;; figure: figures/…` as a region's first line makes its last form an
     SVG figure (from `test/gen/book/svg.clj`). The test fails when the
     committed file is stale. The Markdown's image text is its caption.
@@ -42,7 +45,7 @@ The mechanics are in `test/gen/book.clj`.
 
 ```
 clojure -X:test :nses '[gen.book-test]'                       # every chapter
-clojure -J-Dgen.backend=mlx -X:test :nses '[gen.book-test]'   # on MLX
+clojure -J-Dgen.backend=mlx -J-Dgen.book.mlx=true -X:test :nses '[gen.book-test]'   # on MLX, at milestones
 clojure -M:test -m gen.book sync                              # write the includes and figures
 clojure -M:test -m gen.book pdf                               # the PDF: target/book/gen-clj-book.pdf
 ```
@@ -62,7 +65,21 @@ At the REPL (`clojure -M:test:dev`), `(require 'book.getting-started
 One book in five Parts: 01x Part I (Foundations), 02x Part II
 (Inference), 03x Part III (Theory), 04x Part IV (The System), 05x Part V
 (Applications), 06x appendices, numbered in order within each Part.
-`WRITING.md` has the plan of Part I and how a chapter is written.
+`WRITING.md` has the plan of Part I and how a chapter is written. A
+Part's first file (`010-part-foundations.md`) holds its heading for the
+PDF; numbered files without a namespace of code are pages the test skips.
+
+Part I, Foundations:
 
 - `011-getting-started.md`: Getting Started: Linear Regression (Gen.jl's
   Getting Started with the GenMLX book's chapter 011).
+- `012-modeling.md`: Introduction to Modeling (Gen.jl's).
+- `013-conditioning.md`: Conditioning (Gen.jl's A Bottom-up Introduction
+  with the GenMLX book's 012).
+- `014-handler-loop.md`: The Handler Loop (the GenMLX book's 013, as
+  gen.clj's handler works).
+- `015-choice-maps-traces.md`: Choice Maps, Traces and Selections (the
+  GenMLX book's 014).
+- `016-update-regenerate.md`: Update and Regenerate (the GenMLX book's
+  015 with Gen.jl's Reasoning about Regenerate).
+- `017-composition.md`: Composition (the GenMLX book's 016).

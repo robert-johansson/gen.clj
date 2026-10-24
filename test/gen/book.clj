@@ -27,7 +27,9 @@
      sampled value: a key draws other values in float32.
    - `;; error: message` as a region's first line: one of its forms throws
      an ex-info whose message begins with message. The forms after it do
-     not run.
+     not run. In the source, each of the region's forms is written behind
+     `#_`, so that requiring the namespace does not throw; the test runs
+     them, and the Markdown shows them, without it.
    - `;; figure: path` as a region's first line: its last form returns a
      figure's SVG text (gen.book.svg), which is the file book/path. On the
      JVM backend the test fails when the file differs (a stale figure);
@@ -49,15 +51,6 @@
 
 (def dir "book")
 
-(defn chapters
-  "The book's chapters, its numbered Markdown files (011-getting-started.md),
-   in order."
-  []
-  (->> (.listFiles (io/file dir))
-       (filter #(re-matches #"\d{3}-.*\.md" (.getName ^java.io.File %)))
-       (sort-by #(.getName ^java.io.File %))
-       (mapv #(.getPath ^java.io.File %))))
-
 (defn source-file
   "The namespace file of a chapter: book/011-getting-started.md's is
    book/src/book/getting_started.clj."
@@ -65,20 +58,42 @@
   (let [[_ name] (re-matches #"\d{3}-(.*)\.md" (.getName (io/file chapter)))]
     (str dir "/src/book/" (str/replace name "-" "_") ".clj")))
 
+(defn book-files
+  "The book's numbered Markdown files, in order: its chapters, and the
+   pages without code (a part's heading, front matter)."
+  []
+  (->> (.listFiles (io/file dir))
+       (filter #(re-matches #"\d{3}-.*\.md" (.getName ^java.io.File %)))
+       (sort-by #(.getName ^java.io.File %))
+       (mapv #(.getPath ^java.io.File %))))
+
+(defn chapters
+  "The book's chapters: its numbered Markdown files with a namespace of
+   code (source-file), in order."
+  []
+  (filterv #(.exists (io/file (source-file %))) (book-files)))
+
 ;; ---------------------------------------------------------------------------
 ;; Regions and includes
 ;; ---------------------------------------------------------------------------
 
+(defn- error-region? [source] (str/starts-with? source ";; error:"))
+
 (defn regions
-  "The regions of a chapter's source, in order: {:name :line :code}, line
-   being the `;; book:` line's. Text before the first is not a region."
+  "The regions of a chapter's source, in order: {:name :line :source
+   :code}, line being the `;; book:` line's, source the region's text and
+   code what the Markdown shows and the test runs (an error region's
+   without its forms' `#_`). Text before the first is not a region."
   [text]
   (let [lines (str/split-lines text)
         starts (keep-indexed (fn [i l] (when-let [[_ n] (re-matches #";; book: (\S+)\s*" l)] [i n])) lines)
         rs (mapv (fn [[i n] end]
-                   {:name n
-                    :line (inc i)
-                    :code (str (str/trimr (str/join "\n" (drop-while str/blank? (subvec lines (inc i) end)))) "\n")})
+                   (let [source (str (str/trimr (str/join "\n" (drop-while str/blank? (subvec lines (inc i) end))))
+                                     "\n")]
+                     {:name n
+                      :line (inc i)
+                      :source source
+                      :code (if (error-region? source) (str/replace source #"(?m)^#_" "") source)}))
                  starts
                  (concat (map first (rest starts)) [(count lines)]))
         repeated (keep (fn [[n c]] (when (> c 1) n)) (frequencies (map :name rs)))]
@@ -117,6 +132,16 @@
           [i l] (map-indexed vector (str/split-lines code))
           :when (> (count l) max-line)]
     (is false (str "the region " name ", line " (+ line i 1) ": " (count l) " characters, over " max-line))))
+
+(defn check-error-regions
+  "Every top-level form of an error region is written behind #_, so that
+   requiring the chapter's namespace does not throw."
+  [regions]
+  (doseq [{:keys [name source]} regions
+          :when (error-region? source)
+          l (str/split-lines source)
+          :when (re-find #"^[^\s;#]" l)]
+    (is false (str "the error region " name " has a form not behind #_ (the namespace would throw on load): " l))))
 
 (defn check-includes
   "Every include names a region and holds its text, and every clojure
@@ -248,6 +273,7 @@
   (testing chapter
     (let [rs (regions (slurp (source-file chapter)))]
       (check-lines rs)
+      (check-error-regions rs)
       (check-includes (slurp chapter) rs)
       (let [r (run-regions rs)]
         (check-figures (:figures r))
@@ -267,7 +293,7 @@
   (let [args (into ["pandoc" (str "--metadata-file=" dir "/metadata.yaml") "--top-level-division=chapter"
                     "--pdf-engine=xelatex" "--syntax-highlighting=tango" (str "--resource-path=" dir)
                     "-o" pdf-file]
-                   (chapters))
+                   (book-files))
         _ (io/make-parents pdf-file)
         exit (try (-> (ProcessBuilder. ^java.util.List args) (.inheritIO) (.start) (.waitFor))
                   (catch java.io.IOException e
