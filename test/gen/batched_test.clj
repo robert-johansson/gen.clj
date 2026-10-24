@@ -751,10 +751,13 @@
 (deftest a-switch-of-one-branch-draws-what-the-branch-would
   ;; A partition runs each branch on its own particles, under a part's
   ;; backend whose draws are the whole batch's at their rows: a Switch whose
-  ;; branches are all one generative function makes every particle exactly
-  ;; the choices the branch alone would, whatever the partition, in every
-  ;; operation that draws. Plant: parts that draw their own batch (not the
-  ;; batch's rows) fail every comparison.
+  ;; branches are all one generative function makes every particle the
+  ;; choices the branch alone would, whatever the partition, in every
+  ;; operation that draws. Exactly so where an elementwise op rounds alike
+  ;; at every array length; MLX's CPU rounds log1p and pow an ulp apart in
+  ;; its SIMD lanes and its scalar tail (2026-10-24), so values compare
+  ;; within the backend's tolerance. Plant: parts that draw their own batch
+  ;; (not the batch's rows) fail every comparison.
   (let [g (gen [m] (let [z (trace :z (d/normal m 1))]
                      (trace :w (d/gamma 2 1))
                      (splice :v (comb/map (gen [x] (trace :v (d/normal x 1)))) [z z])
@@ -764,7 +767,9 @@
         parted (gen [] (splice :s (comb/switch g g g) (trace :i (d/categorical ps)) 0.5))
         nested (gen [] (splice :s (comb/switch (gen [m] (splice :t (comb/switch g g) (trace :j (d/categorical [0.5 0.5])) m)) g g)
                                (trace :i (d/categorical ps)) 0.5))
-        same? (fn [ps qs] (= (map (comp ts/host :choices) (b/traces ps)) (map (comp ts/host :choices) (b/traces qs))))
+        alike? (fn [a b] (and (= (cm/addresses a) (cm/addresses b))
+                              (every? #(ts/close? (cm/get-choice a %) (cm/get-choice b %)) (cm/addresses a))))
+        same? (fn [ps qs] (every? true? (map alike? (map :choices (b/traces ps)) (map :choices (b/traces qs)))))
         n 9
         p (b/simulate direct [] n (rng/key 1))
         q (b/simulate parted [] n (rng/key 1))]
@@ -793,7 +798,7 @@
       (let [r (b/simulate nested [] n (rng/key 1))
             in-g (fn [tr] (if (cm/has-submap? (:choices tr) [:s :t]) (cm/get-submap (:choices tr) [:s :t]) (cm/get-submap (:choices tr) :s)))]
         (is (b/batched? r))
-        (is (= (map (comp ts/host in-g) (b/traces r)) (map #(ts/host (cm/get-submap (:choices %) :s)) (b/traces p))))))))
+        (is (every? true? (map alike? (map in-g (b/traces r)) (map #(cm/get-submap (:choices %) :s) (b/traces p)))))))))
 
 (deftest switches-by-partition-at-the-edges
   (testing "the fallback no longer triggers for a per-particle index"
