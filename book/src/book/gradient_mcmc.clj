@@ -477,15 +477,46 @@ walk-r-hat
 ;=> [[true true] [true true]]
 
 ;; book: nuts-metric
-(def ess-rate
-  "The fraction of the draws' number that their effective number is."
-  (/ (diag/ess-bulk (:slope nuts-draws)) 1000.0))
+(defn relative-se
+  "The relative standard error of a variance estimated from n draws that
+   mix as the draws xs do: twice that of their standard deviation, from
+   diag/mcse-sd, scaled from their number to n."
+  [xs n]
+  (let [{:keys [sd mcse-sd]} (diag/summary xs)]
+    (* 2 (/ mcse-sd sd) (Math/sqrt (/ (count xs) (double n))))))
 
-(let [ratios (map / (array/->clj (:inv-metric nuts-run))
-                  (array/->clj inv-metric))
-      relative-se (Math/sqrt (/ 2.0 (* 500 ess-rate)))]
-  (every? #(< (abs (- % 1.0)) (* 5 relative-se)) ratios))
-;=> true
+(defn window-se
+  "The larger of the metric's two relative standard errors, for a last
+   window of n draws."
+  [n]
+  (max (relative-se (:slope nuts-draws) n)
+       (relative-se (:intercept nuts-draws) n)))
+
+(window-se 500)
+;=> 0.108 ; float64
+
+;; book: nuts-metric-long
+(def long-warmup
+  (nuts/adapt (first starts) line {:warmup 6000} (rng/key 23)))
+
+(defn ratios
+  "Each adapted variance over the exact one."
+  [adapted]
+  (mapv / (array/->clj (:inv-metric adapted)) (array/->clj inv-metric)))
+
+(ratios long-warmup)
+;=> [0.998 0.987] ; float64
+
+(def metric-band (* 5 (window-se 4300)))
+
+metric-band
+;=> 0.184 ; float64
+
+;; Over 12 other keys (200-211), the long warmup's ratios had standard
+;; deviations of 0.041 and 0.038, as the standard error says (0.037).
+[(< metric-band 0.5)
+ (every? #(< (abs (- % 1.0)) metric-band) (ratios long-warmup))]
+;=> [true true]
 
 ;; book: tilt
 (def correlation
