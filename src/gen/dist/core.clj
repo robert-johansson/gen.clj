@@ -37,6 +37,17 @@
 
 (defn discrete? [d] (boolean (-discrete? d)))
 
+(defmulti -pathwise?
+  "Is the distribution's sample a differentiable function of its parameters
+   for a fixed key (a reparameterization: noise drawn apart from the
+   parameters, then transformed)? What the pathwise gradient estimator
+   needs (gen.inference.vi's :estimator :reparam); false by default."
+  (fn [d] (:type d)))
+
+(defmethod -pathwise? :default [_] false)
+
+(defn pathwise? [d] (boolean (-pathwise? d)))
+
 (defmethod -support :default [_] nil)
 
 (defn sample
@@ -302,11 +313,12 @@
 
    value-shape gives the shape of one value (from the parameters, bound by
    name). Values of another shape are then errors rather than several draws;
-   without it, value shapes are not checked. Two flags on the name declare
-   the common cases at the definition: ^:elementwise, a family whose values
-   have its parameters' broadcast shape (elementwise-value-shape), and
-   ^:discrete, one of discrete values. A flag and its clause together are an
-   error.
+   without it, value shapes are not checked. Flags on the name declare the
+   common cases at the definition: ^:elementwise, a family whose values have
+   its parameters' broadcast shape (elementwise-value-shape); ^:discrete,
+   one of discrete values; and ^:pathwise, one whose sample is a
+   differentiable function of its parameters for a fixed key (pathwise?). A
+   flag and its clause together are an error.
 
    Parameters given as Clojure vectors become arrays, after validation, which
    checks them on the host (so also on a lazy backend). A parameter marked
@@ -323,7 +335,7 @@
   (let [[doc body] (if (string? (first body)) [(first body) (rest body)] [nil body])
         params (first body)
         heads (map #(when (seq? %) (first %)) (rest body))
-        {:keys [elementwise discrete]} (meta dist-name)
+        {:keys [elementwise discrete pathwise]} (meta dist-name)
         problems (into {} (remove (comp empty? val))
                        {:unknown (vec (remove '#{validate sample log-prob support discrete? value-shape} heads))
                         :repeated (vec (for [[h n] (frequencies heads) :when (< 1 n)] h))
@@ -344,7 +356,7 @@
         as-given (fn [p form] (if (:host (meta p)) `(if (host-data? ~p) ~p ~form) form))]
     `(do
        ;; marked, so a pushforward's body can find its one random draw (gen.dist.dsl)
-       (defn ~(vary-meta dist-name #(-> % (assoc ::constructor true) (dissoc :elementwise :discrete))) ~@(when doc [doc])
+       (defn ~(vary-meta dist-name #(-> % (assoc ::constructor true) (dissoc :elementwise :discrete :pathwise))) ~@(when doc [doc])
          ~params
          ;; validated as given (host data on the host), then made arrays
          (let [~@(mapcat (fn [p] [p (as-given p `(->checkable-param ~(name dist-name) ~(name p) ~p))]) params)]
@@ -363,6 +375,8 @@
           `(defmethod -discrete? ~type-kw [~'_] true)
           (when-let [[_ & discrete-body] (get clauses 'discrete?)]
             `(defmethod -discrete? ~type-kw [~d] (let ~bind-params ~@discrete-body))))
+       ~(when pathwise
+          `(defmethod -pathwise? ~type-kw [~'_] true))
        ~(if elementwise
           `(defmethod -value-shape ~type-kw [~d] (elementwise-value-shape ~d))
           (when-let [[_ & shape-body] (get clauses 'value-shape)]

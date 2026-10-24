@@ -13,7 +13,14 @@
    weight, by the score-function estimator: the mean of log w · ∇ log q(z)
    (Gen.jl's, with :baseline nil), or with a leave-one-out baseline
    (:baseline :leave-one-out), which keeps it unbiased and lowers its
-   variance. black-box-vimco ascends the K-sample bound
+   variance. With :estimator :reparam, by the pathwise (reparameterization)
+   estimator instead, ADVI's: z is q's sample for a fixed key, a
+   differentiable function of q's store, so the gradient of the mean log
+   weight itself is unbiased, usually with far less variance. It needs every
+   choice q makes from a family with a pathwise sampler (gen.dist.core/
+   pathwise?: normal, uniform, exponential, …; a bernoulli is a loud
+   error), and every latent choice of the model proposed by q (the model is
+   assessed on the observations and q's choices). black-box-vimco ascends the K-sample bound
    E[log (1/K) Σ w_k] with VIMCO's leave-one-out control variates (Mnih and
    Rezende 2016). Both return {:store :history}, the history holding each
    iteration's objective estimate.
@@ -42,6 +49,7 @@
   (:require [gen.array :as array :refer [+ - * /]]
             [gen.batched :as batched]
             [gen.choicemap :as cm]
+            [gen.dist.core :as dc]
             [gen.dynamic :as dyn]
             [gen.gfi :as gfi]
             [gen.gradients :as grad]
@@ -131,12 +139,49 @@
         terms (concat joint own)]
     (grad/weighted-sum (map first terms) (map second terms))))
 
-(defn elbo-gradient
-  "One iteration's estimates: {:objective the mean log weight (the ELBO),
-   :grads its score-function gradient with respect to q's store} from n
-   draws (see the namespace doc for :baseline and :batched?); with
-   :model-store, also :model-grads, its gradient with respect to the model's
-   store."
+(defn- pathwise-q
+  "q with middleware that refuses a choice from a family without a pathwise
+   sampler, where the pathwise gradient would silently be zero. (Its own
+   sites: a generative function q calls keeps its own transitions.)"
+  [q]
+  (dyn/with-transitions
+    q {:simulate (fn [state path dist key]
+                   (when-not (dc/pathwise? dist)
+                     (throw (ex-info (str "The reparameterization estimator needs every choice of q from a family with a"
+                                          " pathwise sampler (gen.dist.core/pathwise?); the choice at " path " is from "
+                                          (name (:type dist)) ": use :estimator :score")
+                                     {:path path :type (:type dist)})))
+                   ((dyn/site-transitions :simulate) state path dist key))}))
+
+(defn- reparam-elbo-gradient
+  "elbo-gradient by the pathwise estimator: the ELBO estimate from n draws,
+   z_i q's sample for key i, a function of q's store, and its gradient with
+   respect to the store (and the model's, given) by differentiating the
+   estimate itself."
+  [model model-args observations q q-args store n {:keys [key model-store batched?]}]
+  (when batched?
+    (throw (ex-info "The reparameterization estimator runs its draws one at a time: :batched? is not supported with it"
+                    {:estimator :reparam})))
+  (let [q (pathwise-q q)
+        ks (rng/split (or key (gfi/next-key)) n)
+        elbo (fn [q-store m-store]
+               (gfi/with-exact-density "The reparameterization gradient"
+                 (let [qs (gfi/with-stores q q-store)
+                       m (if m-store (gfi/with-stores model m-store) model)
+                       lw (fn [k]
+                            (let [[kq km] (rng/split k)
+                                  qt (gfi/simulate qs q-args kq)
+                                  constraints (cm/merge observations (:choices qt))]
+                              (- (:weight (gfi/assess m model-args constraints km)) (:score qt))))]
+                   (/ (reduce + (map lw ks)) n))))]
+    (if model-store
+      (let [[v [g mg]] ((array/value-and-grad elbo {:argnums [0 1]}) store model-store)]
+        {:objective (double (array/item v)) :grads g :model-grads mg})
+      (let [[v g] ((array/value-and-grad #(elbo % nil)) store)]
+        {:objective (double (array/item v)) :grads g}))))
+
+(defn- score-elbo-gradient
+  "elbo-gradient by the score-function estimator."
   [model model-args observations q q-args store n {:keys [baseline key model-store batched?]}]
   (when (and (= baseline :leave-one-out) (< n 2))
     (throw (ex-info (str "A leave-one-out baseline needs at least 2 samples, given " n) {:samples n})))
@@ -156,6 +201,19 @@
       ;; the model's own draws' score term takes the leave-one-out
       ;; baseline whenever there are two draws or more, whatever q's
       model-store (assoc :model-grads (model-gradients (repeat n (/ 1.0 n)) (map #(/ % n) (or loo lws)) runs)))))
+
+(defn elbo-gradient
+  "One iteration's estimates: {:objective the mean log weight (the ELBO),
+   :grads its gradient with respect to q's store} from n draws, by the
+   score-function estimator, or with :estimator :reparam the pathwise one
+   (see the namespace doc for :baseline, :estimator and :batched?); with
+   :model-store, also :model-grads, its gradient with respect to the model's
+   store."
+  [model model-args observations q q-args store n {:keys [estimator] :as opts}]
+  (case (or estimator :score)
+    :score (score-elbo-gradient model model-args observations q q-args store n opts)
+    :reparam (reparam-elbo-gradient model model-args observations q q-args store n opts)
+    (throw (ex-info (str "The :estimator is :score or :reparam, not " (pr-str estimator)) {:estimator estimator}))))
 
 (defn vimco-gradient
   "One iteration's estimates for the K-sample bound: {:objective
@@ -210,10 +268,11 @@
 
 (defn black-box-vi
   "Fit q's store by ascending the ELBO (Gen.jl's black_box_vi!). Options:
-   :iters (1000), :samples per iteration (20), :baseline (nil or
-   :leave-one-out), :model-store and :model-optimizer (to train the
-   model's parameters too), :batched? (false: the draws one at a time),
-   :key."
+   :iters (1000), :samples per iteration (20), :estimator (:score, or
+   :reparam: ADVI's pathwise gradient), :baseline (nil or :leave-one-out;
+   the score estimator's), :model-store and :model-optimizer (to train the
+   model's parameters too), :batched? (false: the draws one at a time; the
+   score estimator's), :key."
   [model model-args observations q q-args store optimizer {:keys [samples] :or {samples 20} :as opts}]
   (fit (fn [store model-store key]
          (elbo-gradient model model-args observations q q-args store samples

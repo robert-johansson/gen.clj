@@ -317,3 +317,56 @@
     (let [{:keys [history]} (vi/black-box-vimco model [] observations family [] start (learn/adam {:lr 0.01})
                                                 {:iters 3 :samples 4 :estimates 5 :key (rng/key 12)})]
       (is (= 3 (count history))))))
+
+;; ---------------------------------------------------------------------------
+;; The pathwise (reparameterization) estimator, ADVI's (genclj-uiqm)
+;; ---------------------------------------------------------------------------
+
+;; Its mean is the exact ELBO gradient, as the score-function estimator's
+;; is, with a fraction of its variance. Planted (2026-10-24): the ELBO
+;; without log q (no entropy term) puts ∂/∂log-s at -5.49, eleven standard
+;; errors from the exact -4.44; the middleware's family check removed, a
+;; bernoulli in q no longer throws.
+(defn- variance [xs]
+  (let [[m _] (mean-and-se xs) n (count xs)]
+    (/ (reduce clojure.core/+ (map #(Math/pow (- % m) 2) xs)) (dec n))))
+
+(deftest ^:heavy the-pathwise-gradient-is-unbiased-with-less-variance
+  (let [exact {:m (- 1.3 (* 2 (:m start))) :log-s (- 1.0 (* 2 (Math/exp (* 2 (:log-s start)))))}
+        draws (fn [estimator]
+                (map #(:grads (vi/elbo-gradient model [] observations family [] start 20 {:estimator estimator :key %}))
+                     (rng/split (rng/key 40) 500)))
+        pathwise (draws :reparam)
+        score (draws :score)]
+    (doseq [k [:m :log-s]]
+      (is (agrees? (mean-and-se (map (comp ts/number k) pathwise)) [(exact k) 0.0])
+          (str k ": " (mean-and-se (map (comp ts/number k) pathwise)) " against " (exact k)))
+      (is (< (variance (map (comp ts/number k) pathwise)) (* 0.25 (variance (map (comp ts/number k) score))))
+          (str k ": the pathwise variance is under a quarter of the score-function estimator's")))))
+
+(deftest advi-finds-the-posterior
+  ;; the score-function fit's bands (black-box-vi-finds-the-posterior),
+  ;; which the pathwise estimator's smaller variance meets with room
+  (let [{:keys [store history]} (vi/black-box-vi model [] observations family [] start (learn/adam {:lr 0.02})
+                                                  {:iters 800 :samples 20 :estimator :reparam :key (rng/key 41)})]
+    (is (< (ts/abs (- (:m store) (:m posterior))) 0.21) (str store))
+    (is (< (ts/abs (- (:log-s store) (:log-s posterior))) 0.16) (str store))
+    (is (< (ts/abs (- (average-of-last 100 history) evidence)) 0.008) "the ELBO reaches the evidence")))
+
+(deftest the-pathwise-estimator-is-loud-where-it-does-not-apply
+  (testing "a choice of q from a family without a pathwise sampler"
+    (let [coin-model (gen [] (let [c (trace :c (d/bernoulli 0.5))] (trace :y (d/normal (if c 1.0 0.0) 1)) c))
+          coin-q (gen [] (trace :c (d/bernoulli (param :p))))]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"pathwise sampler.*the choice at \[:c\] is from bernoulli"
+                            (vi/elbo-gradient coin-model [] (cm/choicemap :y 1.0) coin-q [] {:p 0.3} 4
+                                              {:estimator :reparam :key (rng/key 42)})))))
+  (testing "a latent choice q does not propose"
+    (let [two (gen [] (let [a (trace :a (d/normal 0 1)) b (trace :b (d/normal 0 1))] (trace :y (d/normal (+ a b) 1))))]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"assess: no value for the choice at \[:b\]"
+                            (vi/elbo-gradient two [] observations (gen [] (trace :a (d/normal (param :m) 1))) [] {:m 0.0} 4
+                                              {:estimator :reparam :key (rng/key 43)})))))
+  (testing "batched draws, and an unknown estimator"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #":batched\? is not supported"
+                          (vi/elbo-gradient model [] observations family [] start 4 {:estimator :reparam :batched? true})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"The :estimator is :score or :reparam"
+                          (vi/elbo-gradient model [] observations family [] start 4 {:estimator :pathwise})))))

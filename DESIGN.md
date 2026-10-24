@@ -1994,6 +1994,24 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   one optimizer (as gen.learning allows), was dropped: it gives both stores
   one step size, where Gen.jl's minimal VAE trains q and the model at two
   (1e-4 and 0.002). (Approved under the owner's delegation, 2026-10-21.)
+- **The pathwise estimator, ADVI's (genclj-uiqm; the owner: before the
+  book's VI chapter, 2026-10-24).** `black-box-vi` and `elbo-gradient` take
+  `:estimator :reparam` beside the score-function estimator (the default,
+  Gen.jl's): z is q's sample for a fixed key, a differentiable function of
+  q's store through gen.array's tape, so the gradient of the ELBO estimate
+  itself is unbiased, its variance under a quarter of the score-function
+  estimator's on the conjugate test model. A family declares a pathwise
+  sampler with `^:pathwise` on `defdist` (`gen.dist.core/pathwise?`, false
+  by default): normal, uniform, exponential, laplace, cauchy, gumbel,
+  log-normal and logistic, whose samples are differentiable transforms of
+  noise drawn apart from their parameters. mvnormal waits for the tape's
+  Cholesky gradient; gamma and beta sample by rejection. Loud where it does
+  not apply: middleware on q's sites refuses a choice from another family
+  (whose pathwise gradient would silently be zero; a generative function q
+  calls keeps its own transitions, unchecked), the model is assessed on
+  the observations and q's choices so a latent q does not propose is
+  assess's loud error, and `:batched?` is not yet supported with it. An
+  automatic mean-field guide is left for later.
 - **Git:** the main repo is public-ready, with `.beans/`, `.beans.yml`,
   `.claude/` and `*.pdf` gitignored. Its remote is the private
   `robert-johansson/gen.clj` (the owner, 2026-10-21, at M4's close: private
