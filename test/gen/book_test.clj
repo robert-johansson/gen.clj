@@ -24,6 +24,9 @@
           (is (pos? regions) (str chapter " has code"))
           (is (pos? checks) (str chapter " checks results")))))))
 
+(deftest generated-pages-are-current
+  (book/check-generated))
+
 (defn- failures
   "The number of failures and errors f reports."
   [f]

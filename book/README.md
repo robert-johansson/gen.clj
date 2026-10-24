@@ -39,6 +39,10 @@ and its code is verified for real (DESIGN.md §9).
   - A region's lines are at most 80 characters, so they fit a printed
     page.
 
+Some pages are written from the code, not by hand: the appendix of
+distributions (`062-distributions.md`), from `gen.dist`. `sync` writes
+them too, and the test fails when one is stale.
+
 The mechanics are in `test/gen/book.clj`.
 
 ## Running
