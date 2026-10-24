@@ -8,7 +8,7 @@
 
 (def ^:private width 480)
 (def ^:private height 300)
-(def ^:private margin {:left 52 :right 16 :top 34 :bottom 40})
+(def ^:private margin {:left 52 :right 16 :bottom 40})
 
 (defn- host [x] (double (array/item x)))
 
@@ -33,7 +33,8 @@
   "The SVG of axes over the box [x0 x1] × [y0 y1], its marks inside: marks
    is a function of the data-to-pixel maps px and py."
   [{:keys [title x-label y-label]} [x0 x1] [y0 y1] marks]
-  (let [{:keys [left right top bottom]} margin
+  (let [{:keys [left right bottom]} margin
+        top (if title 34 14)
         pw (- width left right)
         ph (- height top bottom)
         px (fn [x] (+ left (* pw (/ (- (double x) x0) (- x1 x0)))))

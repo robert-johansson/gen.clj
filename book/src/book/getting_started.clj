@@ -33,8 +33,9 @@
 (def tr (gfi/simulate line-model [xs] (rng/key 1)))
 
 ;; book: same-key
-(= (mapv array/->clj (cm/values (:choices tr)))
-   (mapv array/->clj (cm/values (:choices (gfi/simulate line-model [xs] (rng/key 1))))))
+(let [again (gfi/simulate line-model [xs] (rng/key 1))]
+  (= (mapv array/->clj (cm/values (:choices tr)))
+     (mapv array/->clj (cm/values (:choices again)))))
 ;=> true
 
 ;; book: choices
@@ -53,14 +54,18 @@
 ;=> true
 
 ;; book: score
-(def score-by-hand
-  (let [[slope intercept] (:retval tr)]
-    (reduce + (+ (dc/log-prob (d/normal 0 2) slope)
+(defn score-by-hand
+  "The sum of the log densities of trace t's choices, with the slope's
+   prior given."
+  [slope-prior t]
+  (let [[slope intercept] (:retval t)
+        line (fn [x] (+ (* slope x) intercept))
+        y-term (fn [i x] (dc/log-prob (d/normal (line x) 1) (t [:y i])))]
+    (reduce + (+ (dc/log-prob slope-prior slope)
                  (dc/log-prob (d/normal 0 10) intercept))
-            (map-indexed (fn [i x] (dc/log-prob (d/normal (+ (* slope x) intercept) 1) (tr [:y i])))
-                         xs))))
+            (map-indexed y-term xs))))
 
-(array/allclose? (:score tr) score-by-hand)
+(array/allclose? (:score tr) (score-by-hand (d/normal 0 2) tr))
 ;=> true
 
 ;; book: data
@@ -71,7 +76,7 @@
 
 ;; book: prior-figure
 ;; figure: figures/011-prior-lines.svg
-(svg/lines xs ys prior-lines {:title "Five lines from the prior, and the data"})
+(svg/lines xs ys prior-lines)
 
 ;; book: observations
 (defn observations
@@ -102,15 +107,22 @@
 (:retval (peek chain))
 
 ;; book: exact
-(def exact
+(defn posterior
+  "The exact posterior of the line given points (xs, ys): its mean, the
+   standard deviations of the slope and the intercept, and their
+   correlation."
+  [xs ys]
   (let [X (array/array (mapv (fn [x] [x 1.0]) xs))
         Xt (array/transpose X)
-        precision (+ (array/diag (array/array [(/ 1.0 4.0) (/ 1.0 100.0)])) (array/matmul Xt X))
-        covariance (linalg/inv precision)
-        [[v-slope c] [_ v-intercept]] (array/->clj covariance)]
-    {:mean (array/->clj (array/matmul covariance (array/matmul Xt (array/array ys))))
+        prior-precision (array/diag (array/array [(/ 1.0 4.0) (/ 1.0 100.0)]))
+        covariance (linalg/inv (+ prior-precision (array/matmul Xt X)))
+        [[v-slope c] [_ v-intercept]] (array/->clj covariance)
+        mean (array/matmul covariance (array/matmul Xt (array/array ys)))]
+    {:mean (array/->clj mean)
      :sd [(Math/sqrt v-slope) (Math/sqrt v-intercept)]
      :correlation (/ c (Math/sqrt (* v-slope v-intercept)))}))
+
+(def exact (posterior xs ys))
 
 (:mean exact)
 ;=> [-1.979 10.143]
@@ -139,14 +151,15 @@
 
 ;; book: chain-figure
 ;; figure: figures/011-slope-chain.svg
-(svg/series (map #(% :slope) chain) {:title "The slope along the chain" :y-label "slope"})
+(svg/series (map #(% :slope) chain) {:y-label "slope"})
 
 ;; book: acceptance
 (defn acceptance
   "The fraction of sweeps that moved the choice at addr."
   [chain addr]
-  (/ (count (filter true? (map #(not= (array/->clj (%1 addr)) (array/->clj (%2 addr))) chain (rest chain))))
-     (double (dec (count chain)))))
+  (let [moved? (fn [a b] (not= (array/->clj (a addr)) (array/->clj (b addr))))]
+    (/ (count (filter true? (map moved? chain (rest chain))))
+       (double (dec (count chain))))))
 
 [(acceptance chain :slope) (acceptance chain :intercept)]
 
@@ -159,7 +172,7 @@
 
 ;; book: posterior-figure
 ;; figure: figures/011-posterior-lines.svg
-(svg/lines xs ys (mapv :retval (take-nth 40 burned)) {:title "Lines from the posterior"})
+(svg/lines xs ys (mapv :retval (take-nth 40 burned)))
 
 ;; book: solution-1
 (def line-model-2
@@ -170,22 +183,13 @@
         (trace [:y i] (d/normal (+ (* slope x) intercept) 1)))
       [slope intercept])))
 
-(let [t (gfi/simulate line-model-2 [xs] (rng/key 4))
-      [slope intercept] (:retval t)]
-  (array/allclose? (:score t)
-                   (reduce + (+ (dc/log-prob (d/normal 1 3) slope) (dc/log-prob (d/normal 0 10) intercept))
-                           (map-indexed (fn [i x] (dc/log-prob (d/normal (+ (* slope x) intercept) 1) (t [:y i]))) xs))))
+(let [t (gfi/simulate line-model-2 [xs] (rng/key 4))]
+  (array/allclose? (:score t) (score-by-hand (d/normal 1 3) t)))
 ;=> true
 
 ;; book: solution-2
-(defn exact-sd
-  "The exact posterior's standard deviations, from points xs."
-  [xs]
-  (let [X (array/array (mapv (fn [x] [x 1.0]) xs))
-        Xt (array/transpose X)]
-    (array/->clj (array/sqrt (array/diag (linalg/inv (+ (array/diag (array/array [0.25 0.01])) (array/matmul Xt X))))))))
-
-[(first (exact-sd (subvec xs 0 3))) (first (exact-sd xs))]
+[(first (:sd (posterior (subvec xs 0 3) (subvec ys 0 3))))
+ (first (:sd exact))]
 ;=> [0.661 0.1097]
 
 ;; book: solution-3
@@ -195,9 +199,10 @@
     (trace :intercept (d/normal (tr :intercept) 0.5))))
 
 (def walk-chain
-  (let [[k-start k-chain] (rng/split (rng/key 5))]
+  (let [[k-start k-chain] (rng/split (rng/key 5))
+        start (:trace (gfi/generate line-model [xs] (observations ys) k-start))]
     (vec (reductions (fn [tr k] (:trace (mh/mh tr random-walk [] k)))
-                     (:trace (gfi/generate line-model [xs] (observations ys) k-start))
+                     start
                      (rng/split k-chain 2000)))))
 
 (def walk-summary (diag/summary (diag/draws [(subvec walk-chain 200)] :slope)))
@@ -207,5 +212,6 @@
 ;=> [true true]
 
 ;; book: solution-3-check
-(< (abs (- (:mean walk-summary) (first (:mean exact)))) (* 5 (:mcse-mean walk-summary)))
+(< (abs (- (:mean walk-summary) (first (:mean exact))))
+   (* 5 (:mcse-mean walk-summary)))
 ;=> true

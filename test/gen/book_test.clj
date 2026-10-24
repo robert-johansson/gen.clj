@@ -56,6 +56,9 @@
     (is (= 2 (runs ";; error: Bad input\n(+ 1 2)"))))
   (testing "a source without an ns region fails"
     (is (= 1 (failures #(book/run-regions (book/regions ";; book: a\n(+ 1 2)\n"))))))
+  (testing "a line over 80 characters fails"
+    (is (zero? (failures #(book/check-lines (book/regions (source (apply str (repeat 80 "x"))))))))
+    (is (= 1 (failures #(book/check-lines (book/regions (source (apply str (repeat 81 "x")))))))))
   (testing "a region named twice is an error"
     (is (thrown? clojure.lang.ExceptionInfo (book/regions ";; book: a\n1\n;; book: a\n2\n")))))
 
