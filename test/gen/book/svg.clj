@@ -238,3 +238,42 @@
                                  "\" fill=\"" (or color "black") "\" fill-opacity=\"" (or opacity 1) "\"/>")))]
                 mark)
               ["</g>"])))))
+
+(defn paths
+  "Polylines in one box: trajectories, or rays from a point. A layer is a
+   map {:paths [[[x y] …] …]}, each path a seq of points joined in order,
+   with optional :color (default steelblue), :opacity (default 0.7),
+   :width (the line's stroke, default 1.5; 0 for no line) and :r (a dot
+   of that radius at every point; none by default). Options: :x-range and
+   :y-range (default: the points' span, padded), :title, :x-label,
+   :y-label. Marks are clipped to the box."
+  [layers & [opts]]
+  (let [layers (mapv (fn [l] (update l :paths (fn [ps] (mapv (fn [p] (mapv (fn [[x y]] [(host x) (host y)]) p)) ps))))
+                     layers)
+        pts (for [l layers p (:paths l) xy p] xy)
+        span (fn [vs] (padded (apply min vs) (apply max vs)))
+        [x0 x1] (mapv double (or (:x-range opts) (span (map first pts))))
+        [y0 y1] (mapv double (or (:y-range opts) (span (map second pts))))]
+    (frame (merge {:x-label "x" :y-label "y"} opts) [x0 x1] [y0 y1]
+           (fn [px py]
+             (concat
+              [(str "<clipPath id=\"paths-box\"><rect x=\"" (fmt (px x0)) "\" y=\"" (fmt (py y1))
+                    "\" width=\"" (fmt (- (px x1) (px x0))) "\" height=\"" (fmt (- (py y0) (py y1)))
+                    "\"/></clipPath>")
+               "<g clip-path=\"url(#paths-box)\">"]
+              (for [{:keys [paths color opacity width r]} layers
+                    :let [color (or color "steelblue")
+                          opacity (or opacity 0.7)
+                          width (or width 1.5)]
+                    p paths
+                    mark (concat
+                          (when (pos? width)
+                            [(str "<polyline fill=\"none\" stroke=\"" color "\" stroke-opacity=\"" opacity
+                                  "\" stroke-width=\"" width "\" points=\""
+                                  (str/join " " (map (fn [[x y]] (str (fmt (px x)) "," (fmt (py y)))) p)) "\"/>")])
+                          (when r
+                            (for [[x y] p]
+                              (str "<circle cx=\"" (fmt (px x)) "\" cy=\"" (fmt (py y)) "\" r=\"" r
+                                   "\" fill=\"" color "\" fill-opacity=\"" opacity "\"/>"))))]
+                mark)
+              ["</g>"])))))
