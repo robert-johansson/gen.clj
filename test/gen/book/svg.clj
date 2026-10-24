@@ -463,3 +463,45 @@
                                    "\" fill=\"" color "\" fill-opacity=\"" opacity "\"/>"))))]
                 mark)
               ["</g>"])))))
+
+(defn grid
+  "A table of marks: a row for each label of rows (on the left), a column
+   for each label of columns (slanted, above), and in the cell of row i and
+   column j a filled square when (get-in cells [i j]) is true, an empty one
+   when it is false: which laws each planted bug fails, say. Options:
+   :rules, the row indices after which a line divides the rows; :color,
+   the filled squares' (default steelblue)."
+  [rows columns cells & [opts]]
+  (let [{:keys [rules color] :or {color "steelblue"}} opts
+        char-w 5.6
+        cw 24.0
+        rh 18.0
+        longest (fn [labels] (* char-w (apply max 1 (map count labels))))
+        slant (* 0.7071 (longest columns))
+        left (+ 8.0 (longest rows))
+        top (+ 16.0 slant)
+        w (long (Math/ceil (+ left (* cw (count columns)) slant 8.0)))
+        h (long (Math/ceil (+ top (* rh (count rows)) 8.0)))
+        x (fn [j] (+ left (* cw j)))
+        y (fn [i] (+ top (* rh i)))]
+    (str/join
+     "\n"
+     (concat
+      [(str "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" w "\" height=\"" h
+            "\" viewBox=\"0 0 " w " " h "\" font-family=\"sans-serif\" font-size=\"11\">")
+       "<rect width=\"100%\" height=\"100%\" fill=\"white\"/>"]
+      (for [[j label] (map-indexed vector columns)]
+        (str "<text transform=\"translate(" (fmt (+ (x j) (/ cw 2.0))) " " (fmt (- top 6.0))
+             ") rotate(-45)\">" label "</text>"))
+      (for [[i label] (map-indexed vector rows)]
+        (str "<text x=\"" (fmt (- left 6.0)) "\" y=\"" (fmt (+ (y i) (* 0.7 rh)))
+             "\" text-anchor=\"end\">" label "</text>"))
+      (for [[i row] (map-indexed vector cells)
+            [j mark?] (map-indexed vector row)]
+        (str "<rect x=\"" (fmt (+ (x j) 3.0)) "\" y=\"" (fmt (+ (y i) 2.0)) "\" width=\"" (fmt (- cw 6.0))
+             "\" height=\"" (fmt (- rh 4.0)) "\" rx=\"2\" fill=\"" (if mark? color "white")
+             "\" stroke=\"" (if mark? color "#c8c8c8") "\"/>"))
+      (for [i rules]
+        (str "<line x1=\"4.0\" y1=\"" (fmt (y (inc i))) "\" x2=\"" (fmt (x (count columns)))
+             "\" y2=\"" (fmt (y (inc i))) "\" stroke=\"gray\"/>"))
+      ["</svg>"]))))
