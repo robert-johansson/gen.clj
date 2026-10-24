@@ -339,13 +339,15 @@
 ;; on MLX): no conversion fails "outside"; converting inside a body too
 ;; fails "inside".
 (deftest a-boolean-choice-reads-as-a-host-boolean-outside-a-body
-  (let [flip (gen [p] (trace :b (d/bernoulli p)) (trace :x (d/normal 0 1)))
-        tr (:trace (gfi/generate flip [0.5] (cm/choicemap :b false) (rng/key 1)))
+  ;; a sampled choice (a constrained one is the host value given), false
+  ;; for certain, which an array object would make true
+  (let [flip (gen [] (trace :b (d/bernoulli 0.0)) (trace :x (d/normal 0 1)))
+        tr (gfi/simulate flip [] (rng/key 1))
         seen (atom nil)]
     (testing "outside a body"
       (is (false? (tr :b)))
       (is (= :no (if (tr :b) :yes :no)))
-      (is (not (boolean? (tr :x))) "only booleans change"))
+      (is (= (ts/jvm?) (number? (tr :x))) "only booleans change: a number stays the backend's"))
     (testing "inside a body, the backend's value"
       (gfi/simulate (gen [t] (reset! seen (t :b)) nil) [tr] (rng/key 2))
       (is (if (ts/jvm?) (false? @seen) (array/backend-array? @seen))))))
