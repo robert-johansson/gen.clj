@@ -8,13 +8,21 @@
             [gen.book :as book]
             [gen.test-support :as ts]))
 
+(defn- run-here?
+  "Does the book run on this backend? The JVM backend is its gate (DESIGN.md
+   §9); elsewhere only when -Dgen.book.mlx=true asks, since its examples run
+   one model at a time, minutes on MLX for seconds on the JVM."
+  []
+  (or (ts/jvm?) (= "true" (System/getProperty "gen.book.mlx"))))
+
 (deftest every-chapter-runs
-  (let [chapters (book/chapters)]
-    (is (seq chapters) "the book has chapters")
-    (doseq [chapter chapters]
-      (let [{:keys [regions checks]} (book/run-chapter chapter)]
-        (is (pos? regions) (str chapter " has code"))
-        (is (pos? checks) (str chapter " checks results"))))))
+  (when (run-here?)
+    (let [chapters (book/chapters)]
+      (is (seq chapters) "the book has chapters")
+      (doseq [chapter chapters]
+        (let [{:keys [regions checks]} (book/run-chapter chapter)]
+          (is (pos? regions) (str chapter " has code"))
+          (is (pos? checks) (str chapter " checks results")))))))
 
 (defn- failures
   "The number of failures and errors f reports."

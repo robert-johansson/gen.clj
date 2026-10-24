@@ -460,6 +460,15 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   made by the book's own code, and a test fails when one is stale. (The
   first spike tested code blocks inline in the Markdown, as memo.clj's
   HANDBOOK.md does; the owner preferred code in .clj files, for the REPL.)
+  The JVM backend is the book's gate (owner, 2026-10-24): gen.book-test
+  runs the chapters there on every change (about 12 s for Part I), and on
+  another backend only with -Dgen.book.mlx=true. Part I took 19 minutes on
+  MLX's CPU and more on Metal, its examples running one model at a time.
+  gen.clj's correctness on MLX is the battery's business (the conformance
+  suite, the laws, the library's tests); the book's MLX run checks only
+  that its own code is backend-neutral, worth doing at milestones (1.0),
+  as information. Chapters stay written for every backend (; float64,
+  bands that hold in float32, booleans through array/truthy?).
   One book in five Parts (owner, 2026-10-24): I Foundations, II Inference,
   III Theory, IV The System, V Applications, and appendices, with Gen.jl's
   tutorials as worked chapters inside them, not a separate tutorial site.

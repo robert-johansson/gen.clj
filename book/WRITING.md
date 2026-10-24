@@ -116,8 +116,9 @@ Part II, Inference (`020-part-inference.md` holds its heading):
 
 ## Running on every backend
 
-The test runs every chapter on MLX too, where values are lazy arrays and
-floats are 32-bit. Part I's chapters needed these:
+The book's gate is the JVM backend, but a reader may run it on MLX, where
+values are lazy arrays and floats are 32-bit, and the book runs there at
+milestones. Part I's chapters needed these:
 
 - **Keep host numbers, not traces, in long loops.** Thousands of traces
   held at once exhaust MLX's buffers. `is/estimate` and
