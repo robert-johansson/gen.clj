@@ -238,3 +238,89 @@
                                  "\" fill=\"" (or color "black") "\" fill-opacity=\"" (or opacity 1) "\"/>")))]
                 mark)
               ["</g>"])))))
+(defn dag
+  "A directed acyclic graph in layers: a node with no inputs in the top
+   layer, spaced evenly in the order given, and any other one a layer below
+   its lowest input, under the mean position of its inputs (moved aside as
+   little as its neighbors need). An edge is an arrow from its source to its
+   target, straight, but bent around a node in a layer it crosses. nodes is
+   a seq of {:id, and optionally :label (default (str id)) and :shape
+   (:ellipse, :box, :diamond, :text or :circle; default :ellipse)}, edges a
+   seq of [from to] ids."
+  [nodes edges]
+  (let [ids (mapv :id nodes)
+        by-id (into {} (map (juxt :id identity)) nodes)
+        inputs (reduce (fn [m [a b]] (update m b (fnil conj []) a)) {} edges)
+        level (fn level [id] (if-let [ins (seq (inputs id))] (inc (apply max (map level ins))) 0))
+        levels (into {} (map (juxt identity level)) ids)
+        in-layer (group-by levels ids)
+        n-layers (inc (apply max 0 (vals levels)))
+        row 64.0
+        top 24.0
+        h (long (+ (* 2 top) (* row (dec n-layers))))
+        label-of (fn [id] (get-in by-id [id :label] (str id)))
+        half-w (fn [id] (/ (+ 14.0 (* 6.5 (count (label-of id)))) 2.0))
+        half-h (fn [id] (case (get-in by-id [id :shape] :ellipse) :box 10.0 :diamond 14.0 :text 7.0 :circle (half-w id) 11.0))
+        reach (fn [id] (+ (half-w id) (if (= :diamond (get-in by-id [id :shape])) 6.0 0.0)))
+        ;; a layer's nodes at their wanted x, in order, pushed apart to clear each other, and into the page
+        spread (fn [wanted]
+                 (let [placed (reduce (fn [out [id x]]
+                                        (let [[pid px] (peek out)]
+                                          (conj out [id (if pid (max x (+ px (reach pid) (reach id) 16.0)) x)])))
+                                      [] (sort-by second wanted))
+                       [lid lx] (peek placed)
+                       shift (max 0.0 (- (+ lx (reach lid) 4.0) width))]
+                   (map (fn [[id x]] [id (max (+ (reach id) 4.0) (- x shift))]) placed)))
+        xs (reduce (fn [xs l]
+                     (into xs (if (zero? l)
+                                (map-indexed (fn [i id] [id (* width (/ (+ i 0.5) (count (in-layer 0))))]) (in-layer 0))
+                                (spread (map (fn [id] [id (/ (reduce + (map xs (inputs id))) (count (inputs id)))])
+                                             (in-layer l))))))
+                   {} (range n-layers))
+        y-of (fn [id] (+ top (* row (levels id))))
+        ;; an edge's points: its source, where it crosses each layer between (straight, or beside a node it would
+        ;; meet there), its target
+        route (fn [[a b]]
+                (let [la (levels a)
+                      lb (levels b)
+                      y0 (+ (y-of a) (half-h a))
+                      y1 (- (y-of b) (half-h b) 2.0)
+                      ;; arrows into one node end spread along its top, by the side they come from
+                      x1 (+ (xs b) (max (* -0.6 (half-w b)) (min (* 0.6 (half-w b)) (* 0.15 (- (xs a) (xs b))))))
+                      between (for [l (range (inc la) lb)
+                                    :let [y (+ top (* row l))
+                                          x (+ (xs a) (* (- x1 (xs a)) (/ (- y y0) (- y1 y0))))
+                                          hit (first (filter #(< (Math/abs (double (- x (xs %)))) (+ (reach %) 6.0))
+                                                             (in-layer l)))]]
+                                [(if hit ((if (< x (xs hit)) - +) (xs hit) (+ (reach hit) 6.0)) x) y])]
+                  (concat [[(xs a) y0]] between [[x1 y1]])))
+        shape (fn [id]
+                (let [x (xs id) y (y-of id) w (half-w id) hh (half-h id)
+                      stroke "\" fill=\"white\" stroke=\"steelblue\"/>"
+                      mark (case (get-in by-id [id :shape] :ellipse)
+                             :ellipse (str "<ellipse cx=\"" (fmt x) "\" cy=\"" (fmt y) "\" rx=\"" (fmt w) "\" ry=\"" (fmt hh)
+                                           "\" fill=\"#dbe7f3\" stroke=\"steelblue\"/>")
+                             :box (str "<rect x=\"" (fmt (- x w)) "\" y=\"" (fmt (- y hh)) "\" width=\"" (fmt (* 2 w))
+                                       "\" height=\"" (fmt (* 2 hh)) "\" rx=\"3" stroke)
+                             :diamond (str "<polygon points=\"" (fmt (- x w 6.0)) "," (fmt y) " " (fmt x) "," (fmt (- y hh)) " "
+                                           (fmt (+ x w 6.0)) "," (fmt y) " " (fmt x) "," (fmt (+ y hh)) stroke)
+                             :circle (str "<circle cx=\"" (fmt x) "\" cy=\"" (fmt y) "\" r=\"" (fmt hh) stroke
+                                          "<circle cx=\"" (fmt x) "\" cy=\"" (fmt y) "\" r=\"" (fmt (- hh 3.0))
+                                          "\" fill=\"none\" stroke=\"steelblue\"/>")
+                             :text "")]
+                  (str "<g>" mark "<text x=\"" (fmt x) "\" y=\"" (fmt (+ y 4.0)) "\" text-anchor=\"middle\">"
+                       (label-of id) "</text></g>")))
+        arrow (fn [e]
+                (str "<polyline fill=\"none\" stroke=\"gray\" marker-end=\"url(#arrow)\" points=\""
+                     (str/join " " (map (fn [[x y]] (str (fmt x) "," (fmt y))) (route e))) "\"/>"))]
+    (str/join
+     "\n"
+     (concat
+      [(str "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" width "\" height=\"" h
+            "\" viewBox=\"0 0 " width " " h "\" font-family=\"sans-serif\" font-size=\"11\">")
+       "<rect width=\"100%\" height=\"100%\" fill=\"white\"/>"
+       (str "<defs><marker id=\"arrow\" viewBox=\"0 0 10 10\" refX=\"8\" refY=\"5\" markerWidth=\"6\""
+            " markerHeight=\"6\" orient=\"auto\"><path d=\"M0,0 L10,5 L0,10 Z\" fill=\"gray\"/></marker></defs>")]
+      (map arrow edges)
+      (map shape ids)
+      ["</svg>"]))))
