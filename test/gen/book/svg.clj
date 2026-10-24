@@ -96,3 +96,53 @@
              [(str "<polyline fill=\"none\" stroke=\"steelblue\" stroke-width=\"1\" points=\""
                    (str/join " " (map-indexed (fn [i v] (str (fmt (px i)) "," (fmt (py v)))) vs))
                    "\"/>")]))))
+
+(defn histogram
+  "Histograms of samples on one axis, each scaled to a density (its bars'
+   area is its weight in range over its total weight), each with an optional
+   density curve to compare it with. layers is a seq of {:values, and
+   optionally :weights (nonnegative, any scale), :density (a function of
+   x) and :label (shown in a legend)}. Options: :bins (default 40), :range
+   [lo hi] (default the values'), :x-label, :y-label."
+  [layers & [opts]]
+  (let [{:keys [bins range] :or {bins 40}} opts
+        colors ["steelblue" "darkorange" "seagreen" "firebrick"]
+        layers (mapv (fn [{:keys [values weights] :as l} color]
+                       (let [vs (mapv host values)]
+                         (assoc l :color color :vs vs
+                                :ws (if weights (mapv host weights) (vec (repeat (count vs) 1.0))))))
+                     layers colors)
+        all-vs (mapcat :vs layers)
+        [lo hi] (mapv double (or range [(apply min all-vs) (apply max all-vs)]))
+        step (/ (- hi lo) bins)
+        bin (fn [v] (if (== v hi) (dec bins) (long (Math/floor (/ (- v lo) step)))))
+        heights (fn [{:keys [vs ws]}]
+                  (let [total (reduce + ws)]
+                    (->> (map vector vs ws)
+                         (reduce (fn [acc [v w]] (if (<= lo v hi) (update acc (bin v) + w) acc))
+                                 (vec (repeat bins 0.0)))
+                         (mapv #(/ % (* total step))))))
+        curve (fn [f] (mapv (fn [i] (let [x (+ lo (* i (/ (- hi lo) 200.0)))] [x (host (f x))]))
+                            (clojure.core/range 201)))
+        layers (mapv #(cond-> (assoc % :heights (heights %)) (:density %) (assoc :curve (curve (:density %))))
+                     layers)
+        top (apply max (concat (mapcat :heights layers) (map second (mapcat :curve layers))))]
+    (frame (merge {:x-label "value" :y-label "density"} opts)
+           [lo hi] [0.0 (* 1.05 top)]
+           (fn [px py]
+             (concat
+              (for [{:keys [heights color]} layers]
+                (str "<path fill=\"" color "\" fill-opacity=\"0.25\" stroke=\"" color "\" stroke-width=\"1\" d=\"M"
+                     (fmt (px lo)) "," (fmt (py 0.0))
+                     (str/join (map-indexed (fn [i h] (str " L" (fmt (px (+ lo (* i step)))) "," (fmt (py h))
+                                                           " L" (fmt (px (+ lo (* (inc i) step)))) "," (fmt (py h))))
+                                            heights))
+                     " L" (fmt (px hi)) "," (fmt (py 0.0)) " Z\"/>"))
+              (for [{:keys [curve color]} layers :when curve]
+                (str "<polyline fill=\"none\" stroke=\"" color "\" stroke-width=\"2\" points=\""
+                     (str/join " " (map (fn [[x y]] (str (fmt (px x)) "," (fmt (py y)))) curve)) "\"/>"))
+              (for [[i {:keys [label color]}] (map-indexed vector (filter :label layers))
+                    :let [y (+ 30.0 (* 16.0 i))]]
+                (str "<rect x=\"" (- width 120) "\" y=\"" (fmt (- y 9.0)) "\" width=\"12\" height=\"10\" fill=\""
+                     color "\" fill-opacity=\"0.6\"/><text x=\"" (- width 102) "\" y=\"" (fmt y) "\">" label
+                     "</text>")))))))
