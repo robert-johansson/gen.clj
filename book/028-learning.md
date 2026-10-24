@@ -747,8 +747,10 @@ tutorial draws completions by importance sampling, and either resamples
 them or keeps them weighted. Here a point's completions are $k$ samples
 of $z$ from the model's internal proposal, the prior, kept with their
 normalized importance weights: the same `weighted-gradient`, given
-choice maps that constrain $y$ only. With 20 samples a point, the
-average of the logit lands within a few hundredths of the maximum:
+choice maps that constrain $y$ only. With 20 samples a point, the logit
+settles near the maximum but not on it: averaged over the last 200 steps
+of four runs, it is 0.02 below, more than five Monte Carlo standard
+errors (as for Polyak averaging above). That is a bias, not noise:
 
 <!-- code: sampled -->
 ```clojure
@@ -766,24 +768,30 @@ average of the logit lands within a few hundredths of the maximum:
         (ascend (learn/sgd {:lr 2.0}) store0 steps
                 (em-gradient (sampled ys k) k) key)))
 
-(def mc-20 (mc-em 20 300 (rng/key 14)))
+(def mc-20-runs (mapv #(mc-em 20 300 %) (rng/split (rng/key 14) 4)))
 
-(def mc-20-summary (diag/summary (subvec mc-20 100)))
+(def mc-20 (first mc-20-runs))
 
-[(:mean mc-20-summary) (:logit mle-mixture)]
-;=> [-0.686 -0.670] ; float64
+(def mc-20-summary (diag/summary (mapv #(subvec % 100) mc-20-runs)))
 
-(< (abs (- (:mean mc-20-summary) (:logit mle-mixture))) 0.05)
+[(:mean mc-20-summary) (:mcse-mean mc-20-summary) (:logit mle-mixture)]
+;=> [-0.6906 0.00175 -0.6702] ; float64
+
+(let [{:keys [mean mcse-mean]} mc-20-summary]
+  (< mean (- (:logit mle-mixture) (* 5 mcse-mean))))
 ;=> true
 ```
 
-With 5 it drifts away:
+With 5 it drifts away: after 300 steps the logit is below the maximum
+by more than five times its spread over runs (0.20, measured over ten
+runs):
 
 <!-- code: mc-em-5 -->
 ```clojure
 (def mc-5 (mc-em 5 300 (rng/key 15)))
 
-(< (peek mc-5) (- (:logit mle-mixture) 1.0))
+;; the last logit's spread over ten runs (keys 101 to 110): 0.20
+(< (peek mc-5) (- (:logit mle-mixture) (* 5 0.20)))
 ;=> true
 ```
 
@@ -801,10 +809,10 @@ With 5 it drifts away:
 ![The mixing logit along exact EM (black), and Monte Carlo EM with 20 samples a point (orange) and 5 (blue)](figures/028-em.svg)
 
 The weights are *self-normalized*: each point's are divided by their
-sum, which biases the weighted gradient for a finite $k$. Here the bias
-has a direction. A point whose $k$ samples all have $z = 0$ counts wholly
-for component 0, however close it lies to component 1, and that happens
-with probability $(1 - \pi)^k$:
+sum, which biases the weighted gradient for a finite $k$, and that is
+the gap at 20 samples. Here the bias has a direction. A point whose $k$
+samples all have $z = 0$ counts wholly for component 0, however close it
+lies to component 1, and that happens with probability $(1 - \pi)^k$:
 
 <!-- code: no-sample-rate -->
 ```clojure
@@ -922,7 +930,7 @@ whole dataset, with Adam:
 
 At the maximum the derivative in the noise's scale is zero:
 $n(\text{rms}^2/\sigma^2 - 1) = 0$, so the learned $\sigma$ is the
-residuals' root mean square. Both are close to that of the noise
+residuals' root mean square. Both are a little below that of the noise
 actually drawn:
 
 <!-- code: net-check -->
@@ -938,16 +946,36 @@ actually drawn:
 ;=> [0.0866 0.0871 0.0887] ; float64
 ```
 
-The learned $\sigma$ is within 0.002 of the residuals' root mean square,
-which is within 0.005 of the noise's, and the network's mean is within
-0.15 of $\sin x$ everywhere on the grid (0.043 at worst):
+A trained network's result depends on its data and its initial weights,
+so its checks take their bands from training it again: ten times, each
+with its own noise and initial weights, the spreads measured once and
+written beside the checks. The learned $\sigma$ is the residuals' root
+mean square within five times its spread, and the noise's true scale,
+0.1, within five times its spread over datasets: the noise drawn here
+happens to be small. The residuals are no larger than the noise, so the
+network leaves nothing of $\sin x$ unexplained (they are a little
+smaller, since it fits a little of the noise). And the network's mean is
+nearer $\sin x$ than the data are. Its root-mean-square distance from
+$\sin x$ is 0.019, a fifth of the noise's, and the gap is more than five
+times its spread:
 
 <!-- code: net-check-bands -->
 ```clojure
-[(< (abs (array/item (- (array/exp (:log-sigma trained)) rms))) 0.002)
- (< (abs (array/item (- rms noise-rms))) 0.005)
- (< (array/item (array/max (array/abs (- fitted-mean (array/sin grid))))) 0.15)]
-;=> [true true true]
+(def fit-error
+  (array/sqrt (array/mean (array/square (- fitted-mean (array/sin grid))))))
+
+fit-error
+;=> 0.0191 ; float64
+
+;; spreads over ten trainings, each with its own noise (keys 201 to 210)
+;; and initial weights (keys 101 to 110): 0.00033 of sigma - rms, 0.0066
+;; of sigma, 0.00073 of rms - noise-rms, 0.0060 of noise-rms - fit-error
+(let [sigma (array/item (array/exp (:log-sigma trained)))]
+  [(< (abs (- sigma (array/item rms))) (* 5 0.00033))
+   (< (abs (- sigma 0.1)) (* 5 0.0066))
+   (< (array/item (- rms noise-rms)) (* 5 0.00073))
+   (> (array/item (- noise-rms fit-error)) (* 5 0.0060))])
+;=> [true true true true]
 ```
 
 <!-- code: net-figure -->
@@ -1159,9 +1187,11 @@ expectation is largest where the proposal equals the posterior:
 ```
 
 The parameters wander with the minibatches of dreams. Averaged over the
-second half of the run, they come close to the best ones, and the
-proposal's probability of $z = 1$ agrees with the posterior's within
-0.05 at every data point (0.009 at worst):
+second half of the run, they come close to the best ones. The trained
+proposal is a learned function, so its band, like the network's, comes
+from training it again with ten other keys: at every data point, its
+probability of $z = 1$ agrees with the posterior's within five times
+the largest spread of that probability (0.009 apart at worst):
 
 <!-- code: sleep-check -->
 ```clojure
@@ -1173,10 +1203,12 @@ proposal's probability of $z = 1$ agrees with the posterior's within
 trained-q
 ;=> {:w 3.10 :c -1.86} ; float64
 
+;; the largest spread of the proposal's probability at a point of ys, over
+;; ten trainings (keys 101 to 110): 0.0078
 (let [y (array/array ys)
       prob (fn [{:keys [w c]}] (array/sigmoid (+ (* w y) c)))]
   (< (array/item (array/max (array/abs (- (prob trained-q) (prob best)))))
-     0.05))
+     (* 5 0.0078)))
 ;=> true
 ```
 
@@ -1270,10 +1302,13 @@ stores, nested in a map:
 ```
 
 From the same start, with the same 5 samples a point that made Monte
-Carlo EM collapse, it finds the maximum. The average of the second half
-of its run is within 0.05 of the maximum in every parameter, six times
-the spread of such averages across runs (0.008, measured over eight
-runs):
+Carlo EM collapse, it finds the maximum. In every parameter, the average
+over the second half of its run lies within five spreads of the maximum,
+the spread being that of such averages across ten runs. A run's own
+standard error would not do: the steps are so strongly autocorrelated
+that the naive one, $\text{sd}/\sqrt{n}$, is a fifth of the spread, and
+a Monte Carlo standard error from 300 steps is right on average but
+varies by half from run to run:
 
 <!-- code: rws-check -->
 ```clojure
@@ -1288,7 +1323,13 @@ runs):
 (second-half rws)
 ;=> {:mu0 -1.133 :mu1 1.911 :logit -0.671} ; float64
 
-(near? (second-half rws) mle-mixture 0.05)
+;; the spreads of these averages over ten runs (keys 101 to 110)
+(def rws-spreads {:mu0 0.0045 :mu1 0.0092 :logit 0.0090})
+
+(let [averages (second-half rws)]
+  (every? (fn [[k spread]]
+            (< (abs (- (averages k) (k mle-mixture))) (* 5 spread)))
+          rws-spreads))
 ;=> true
 ```
 
@@ -1432,7 +1473,8 @@ gradients:
 **4.** It does not collapse: a fair coin proposes $z = 1$ half the time,
 whatever the logit, so the drift cannot feed itself. But the weights are
 still self-normalized over 5 samples, and the answer is biased the other
-way: the logit too high, and `mu1` low by about a third:
+way: the logit too high by 0.21, and `mu1` too low by 0.36, each more
+than five times its spread over ten runs:
 
 <!-- code: solution-4 -->
 ```clojure
@@ -1458,7 +1500,8 @@ way: the logit too high, and `mu1` low by about a third:
 coin-gaps
 ;=> {:mu0 -0.014 :mu1 -0.357 :logit 0.209} ; float64
 
-[(< (abs (:logit coin-gaps)) 1.0) (> (abs (:mu1 coin-gaps)) 0.2)]
+;; the spread of either gap over ten runs (keys 101 to 110): 0.014
+[(> (:logit coin-gaps) (* 5 0.014)) (< (:mu1 coin-gaps) (* -5 0.014))]
 ;=> [true true]
 ```
 
