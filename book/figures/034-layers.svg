@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="496" viewBox="0 0 480 496" font-family="sans-serif" font-size="11">
+<rect width="100%" height="100%" fill="white"/>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 Z" fill="gray"/></marker></defs>
+<polyline fill="none" stroke="gray" marker-end="url(#arrow)" points="240.0,34.0 199.2,76.0"/>
+<polyline fill="none" stroke="gray" marker-end="url(#arrow)" points="240.0,34.0 368.4,76.0"/>
+<polyline fill="none" stroke="gray" marker-end="url(#arrow)" points="391.0,98.0 391.0,139.0"/>
+<polyline fill="none" stroke="gray" marker-end="url(#arrow)" points="192.0,98.0 192.0,140.0"/>
+<polyline fill="none" stroke="gray" marker-end="url(#arrow)" points="192.0,162.0 192.0,204.0"/>
+<polyline fill="none" stroke="gray" marker-end="url(#arrow)" points="192.0,226.0 192.0,268.0"/>
+<polyline fill="none" stroke="gray" marker-end="url(#arrow)" points="192.0,290.0 192.0,332.0"/>
+<polyline fill="none" stroke="gray" marker-end="url(#arrow)" points="192.0,354.0 192.0,396.0"/>
+<polyline fill="none" stroke="gray" marker-end="url(#arrow)" points="192.0,418.0 192.0,459.0"/>
+<polyline fill="none" stroke="gray" marker-end="url(#arrow)" points="192.0,418.0 278.3,459.0"/>
+<g><rect x="103.0" y="14.0" width="274.0" height="20.0" rx="3" fill="white" stroke="steelblue"/><text x="240.0" y="28.0" text-anchor="middle">LLM generative functions (gen.llm.token)</text></g>
+<g><rect x="94.0" y="78.0" width="196.0" height="20.0" rx="3" fill="white" stroke="steelblue"/><text x="192.0" y="92.0" text-anchor="middle">L5 inference (gen.inference)</text></g>
+<g><rect x="306.0" y="78.0" width="170.0" height="20.0" rx="3" fill="white" stroke="steelblue"/><text x="391.0" y="92.0" text-anchor="middle">LLM runtime (gen.llm.lm)</text></g>
+<g><rect x="81.0" y="142.0" width="222.0" height="20.0" rx="3" fill="white" stroke="steelblue"/><text x="192.0" y="156.0" text-anchor="middle">L4 combinators (gen.combinators)</text></g>
+<g><ellipse cx="391.0" cy="152.0" rx="36.3" ry="11.0" fill="#dbe7f3" stroke="steelblue"/><text x="391.0" y="156.0" text-anchor="middle">llama.cpp</text></g>
+<g><rect x="97.3" y="206.0" width="189.5" height="20.0" rx="3" fill="white" stroke="steelblue"/><text x="192.0" y="220.0" text-anchor="middle">L3 distributions (gen.dist)</text></g>
+<g><rect x="48.5" y="270.0" width="287.0" height="20.0" rx="3" fill="white" stroke="steelblue"/><text x="192.0" y="284.0" text-anchor="middle">L2 GFI (gen.gfi, gen.dynamic, gen.batched)</text></g>
+<g><rect x="74.5" y="334.0" width="235.0" height="20.0" rx="3" fill="white" stroke="steelblue"/><text x="192.0" y="348.0" text-anchor="middle">L1 data (gen.choicemap, gen.trace)</text></g>
+<g><rect x="77.8" y="398.0" width="228.5" height="20.0" rx="3" fill="white" stroke="steelblue"/><text x="192.0" y="412.0" text-anchor="middle">L0 arrays (gen.array, gen.random)</text></g>
+<g><ellipse cx="192.0" cy="472.0" rx="42.8" ry="11.0" fill="#dbe7f3" stroke="steelblue"/><text x="192.0" y="476.0" text-anchor="middle">JVM backend</text></g>
+<g><ellipse cx="293.5" cy="472.0" rx="42.8" ry="11.0" fill="#dbe7f3" stroke="steelblue"/><text x="293.5" y="476.0" text-anchor="middle">MLX backend</text></g>
+</svg>
