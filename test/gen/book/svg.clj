@@ -238,3 +238,228 @@
                                  "\" fill=\"" (or color "black") "\" fill-opacity=\"" (or opacity 1) "\"/>")))]
                 mark)
               ["</g>"])))))
+
+(defn dag
+  "A directed acyclic graph in layers: a node with no inputs in the top
+   layer, spaced evenly in the order given, and any other one a layer below
+   its lowest input, under the mean position of its inputs (moved aside as
+   little as its neighbors need). An edge is an arrow from its source to its
+   target, straight, but bent around a node in a layer it crosses. nodes is
+   a seq of {:id, and optionally :label (default (str id)) and :shape
+   (:ellipse, :box, :diamond, :text or :circle; default :ellipse)}, edges a
+   seq of [from to] ids."
+  [nodes edges]
+  (let [ids (mapv :id nodes)
+        by-id (into {} (map (juxt :id identity)) nodes)
+        inputs (reduce (fn [m [a b]] (update m b (fnil conj []) a)) {} edges)
+        level (fn level [id] (if-let [ins (seq (inputs id))] (inc (apply max (map level ins))) 0))
+        levels (into {} (map (juxt identity level)) ids)
+        in-layer (group-by levels ids)
+        n-layers (inc (apply max 0 (vals levels)))
+        row 64.0
+        top 24.0
+        h (long (+ (* 2 top) (* row (dec n-layers))))
+        label-of (fn [id] (get-in by-id [id :label] (str id)))
+        half-w (fn [id] (/ (+ 14.0 (* 6.5 (count (label-of id)))) 2.0))
+        half-h (fn [id] (case (get-in by-id [id :shape] :ellipse) :box 10.0 :diamond 14.0 :text 7.0 :circle (half-w id) 11.0))
+        reach (fn [id] (+ (half-w id) (if (= :diamond (get-in by-id [id :shape])) 6.0 0.0)))
+        ;; a layer's nodes at their wanted x, in order, pushed apart to clear each other, and into the page
+        spread (fn [wanted]
+                 (let [placed (reduce (fn [out [id x]]
+                                        (let [[pid px] (peek out)]
+                                          (conj out [id (if pid (max x (+ px (reach pid) (reach id) 16.0)) x)])))
+                                      [] (sort-by second wanted))
+                       [lid lx] (peek placed)
+                       shift (max 0.0 (- (+ lx (reach lid) 4.0) width))]
+                   (map (fn [[id x]] [id (max (+ (reach id) 4.0) (- x shift))]) placed)))
+        xs (reduce (fn [xs l]
+                     (into xs (if (zero? l)
+                                (map-indexed (fn [i id] [id (* width (/ (+ i 0.5) (count (in-layer 0))))]) (in-layer 0))
+                                (spread (map (fn [id] [id (/ (reduce + (map xs (inputs id))) (count (inputs id)))])
+                                             (in-layer l))))))
+                   {} (range n-layers))
+        y-of (fn [id] (+ top (* row (levels id))))
+        ;; an edge's points: its source, where it crosses each layer between (straight, or beside a node it would
+        ;; meet there), its target
+        route (fn [[a b]]
+                (let [la (levels a)
+                      lb (levels b)
+                      y0 (+ (y-of a) (half-h a))
+                      y1 (- (y-of b) (half-h b) 2.0)
+                      ;; arrows into one node end spread along its top, by the side they come from
+                      x1 (+ (xs b) (max (* -0.6 (half-w b)) (min (* 0.6 (half-w b)) (* 0.15 (- (xs a) (xs b))))))
+                      between (for [l (range (inc la) lb)
+                                    :let [y (+ top (* row l))
+                                          x (+ (xs a) (* (- x1 (xs a)) (/ (- y y0) (- y1 y0))))
+                                          hit (first (filter #(< (Math/abs (double (- x (xs %)))) (+ (reach %) 6.0))
+                                                             (in-layer l)))]]
+                                [(if hit ((if (< x (xs hit)) - +) (xs hit) (+ (reach hit) 6.0)) x) y])]
+                  (concat [[(xs a) y0]] between [[x1 y1]])))
+        shape (fn [id]
+                (let [x (xs id) y (y-of id) w (half-w id) hh (half-h id)
+                      stroke "\" fill=\"white\" stroke=\"steelblue\"/>"
+                      mark (case (get-in by-id [id :shape] :ellipse)
+                             :ellipse (str "<ellipse cx=\"" (fmt x) "\" cy=\"" (fmt y) "\" rx=\"" (fmt w) "\" ry=\"" (fmt hh)
+                                           "\" fill=\"#dbe7f3\" stroke=\"steelblue\"/>")
+                             :box (str "<rect x=\"" (fmt (- x w)) "\" y=\"" (fmt (- y hh)) "\" width=\"" (fmt (* 2 w))
+                                       "\" height=\"" (fmt (* 2 hh)) "\" rx=\"3" stroke)
+                             :diamond (str "<polygon points=\"" (fmt (- x w 6.0)) "," (fmt y) " " (fmt x) "," (fmt (- y hh)) " "
+                                           (fmt (+ x w 6.0)) "," (fmt y) " " (fmt x) "," (fmt (+ y hh)) stroke)
+                             :circle (str "<circle cx=\"" (fmt x) "\" cy=\"" (fmt y) "\" r=\"" (fmt hh) stroke
+                                          "<circle cx=\"" (fmt x) "\" cy=\"" (fmt y) "\" r=\"" (fmt (- hh 3.0))
+                                          "\" fill=\"none\" stroke=\"steelblue\"/>")
+                             :text "")]
+                  (str "<g>" mark "<text x=\"" (fmt x) "\" y=\"" (fmt (+ y 4.0)) "\" text-anchor=\"middle\">"
+                       (label-of id) "</text></g>")))
+        arrow (fn [e]
+                (str "<polyline fill=\"none\" stroke=\"gray\" marker-end=\"url(#arrow)\" points=\""
+                     (str/join " " (map (fn [[x y]] (str (fmt x) "," (fmt y))) (route e))) "\"/>"))]
+    (str/join
+     "\n"
+     (concat
+      [(str "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" width "\" height=\"" h
+            "\" viewBox=\"0 0 " width " " h "\" font-family=\"sans-serif\" font-size=\"11\">")
+       "<rect width=\"100%\" height=\"100%\" fill=\"white\"/>"
+       (str "<defs><marker id=\"arrow\" viewBox=\"0 0 10 10\" refX=\"8\" refY=\"5\" markerWidth=\"6\""
+            " markerHeight=\"6\" orient=\"auto\"><path d=\"M0,0 L10,5 L0,10 Z\" fill=\"gray\"/></marker></defs>")]
+      (map arrow edges)
+      (map shape ids)
+      ["</svg>"]))))
+
+(defn heatmap
+  "A table of values as a grid of shaded cells: a 2-d posterior. rows holds
+   a row of values for each of ys, the rows' centers from the bottom up,
+   and each row a value for each of xs, the columns' centers; both evenly
+   spaced. A cell's shade runs from white (0) to dark blue (the largest
+   value). Options: :labels? (each cell's value printed, to 3 decimals),
+   :mark [x y] (the true values: a red cross, or with labels, a red outline
+   of the cell holding them), :marginals? (bars of the column sums above the
+   grid and of the row sums to its right), :x-label, :y-label."
+  [xs ys rows & [opts]]
+  (let [{:keys [labels? mark marginals? x-label y-label]} opts
+        xs (mapv host xs)
+        ys (mapv host ys)
+        vs (mapv #(mapv host %) rows)
+        most (apply max 1e-300 (apply concat vs))
+        spacing (fn [cs] (if (> (count cs) 1) (- (cs 1) (cs 0)) 1.0))
+        dx (spacing xs)
+        dy (spacing ys)
+        [x0 x1] [(- (first xs) (/ dx 2.0)) (+ (peek xs) (/ dx 2.0))]
+        [y0 y1] [(- (first ys) (/ dy 2.0)) (+ (peek ys) (/ dy 2.0))]
+        strip (if marginals? 56.0 0.0)
+        h 400.0
+        left 52.0
+        top (+ 14.0 strip)
+        pw (- width left 16.0 strip)
+        ph (- h top 40.0)
+        px (fn [x] (+ left (* pw (/ (- x x0) (- x1 x0)))))
+        py (fn [y] (+ top (* ph (- 1.0 (/ (- y y0) (- y1 y0))))))
+        rect (fn [x y w hh fill]
+               (str "<rect x=\"" (fmt x) "\" y=\"" (fmt y) "\" width=\"" (fmt w) "\" height=\"" (fmt hh)
+                    "\" fill=\"" fill "\"/>"))
+        shade (fn [v] (let [t (/ v most)
+                            c (fn [hi lo] (Math/round (+ hi (* t (- lo hi)))))]
+                        (str "rgb(" (c 255.0 8.0) "," (c 255.0 48.0) "," (c 255.0 107.0) ")")))
+        cols (apply map + vs)
+        row-sums (map #(reduce + %) vs)]
+    (str/join
+     "\n"
+     (concat
+      [(str "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" width "\" height=\"" (long h)
+            "\" viewBox=\"0 0 " width " " (long h) "\" font-family=\"sans-serif\" font-size=\"11\">")
+       "<rect width=\"100%\" height=\"100%\" fill=\"white\"/>"]
+      (for [[j y] (map-indexed vector ys) [i x] (map-indexed vector xs)
+            :let [v (get-in vs [j i])
+                  cx (px (- x (/ dx 2.0)))
+                  cy (py (+ y (/ dy 2.0)))]]
+        (str (rect cx cy (- (px (+ x (/ dx 2.0))) cx) (- (py (- y (/ dy 2.0))) cy) (shade v))
+             (when labels?
+               (str "<text x=\"" (fmt (px x)) "\" y=\"" (fmt (+ (py y) 4.0)) "\" text-anchor=\"middle\" fill=\""
+                    (if (> (/ v most) 0.5) "white" "black") "\">"
+                    (String/format java.util.Locale/ROOT "%.3f" (object-array [v])) "</text>"))))
+      (when marginals?
+        (let [cmax (apply max 1e-300 cols)
+              rmax (apply max 1e-300 row-sums)]
+          (concat
+           (for [[x c] (map vector xs cols)
+                 :let [bh (* (- strip 8.0) (/ c cmax))]]
+             (rect (+ (px (- x (/ dx 2.0))) 0.5) (- top 4.0 bh) (max 0.0 (- (* dx (/ pw (- x1 x0))) 1.0)) bh
+                   "steelblue"))
+           (for [[y r] (map vector ys row-sums)
+                 :let [bw (* (- strip 8.0) (/ r rmax))]]
+             (rect (+ left pw 4.0) (+ (py (+ y (/ dy 2.0))) 0.5) bw (max 0.0 (- (* dy (/ ph (- y1 y0))) 1.0))
+                   "steelblue")))))
+      (for [t (ticks x0 x1)]
+        (str "<g><line x1=\"" (fmt (px t)) "\" y1=\"" (fmt (+ top ph)) "\" x2=\"" (fmt (px t)) "\" y2=\""
+             (fmt (+ top ph 4.0)) "\" stroke=\"black\"/><text x=\"" (fmt (px t)) "\" y=\"" (fmt (+ top ph 16.0))
+             "\" text-anchor=\"middle\">" (label t) "</text></g>"))
+      (for [t (ticks y0 y1)]
+        (str "<g><line x1=\"" (fmt (- left 4.0)) "\" y1=\"" (fmt (py t)) "\" x2=\"" (fmt left) "\" y2=\"" (fmt (py t))
+             "\" stroke=\"black\"/><text x=\"" (fmt (- left 7.0)) "\" y=\"" (fmt (+ (py t) 4.0))
+             "\" text-anchor=\"end\">" (label t) "</text></g>"))
+      [(str "<rect x=\"" (fmt left) "\" y=\"" (fmt top) "\" width=\"" (fmt pw) "\" height=\"" (fmt ph)
+            "\" fill=\"none\" stroke=\"black\"/>")]
+      (when x-label
+        [(str "<text x=\"" (fmt (+ left (/ pw 2.0))) "\" y=\"" (fmt (- h 6.0)) "\" text-anchor=\"middle\">"
+              x-label "</text>")])
+      (when y-label
+        [(str "<text transform=\"translate(14 " (fmt (+ top (/ ph 2.0))) ") rotate(-90)\" text-anchor=\"middle\">"
+              y-label "</text>")])
+      (when-let [[mx my] mark]
+        (let [mx (host mx)
+              my (host my)
+              x (px mx)
+              y (py my)
+              cross (fn [color w]
+                      (str "<path d=\"M" (fmt (- x 7.0)) "," (fmt (- y 7.0)) " L" (fmt (+ x 7.0)) "," (fmt (+ y 7.0))
+                           " M" (fmt (- x 7.0)) "," (fmt (+ y 7.0)) " L" (fmt (+ x 7.0)) "," (fmt (- y 7.0))
+                           "\" stroke=\"" color "\" stroke-width=\"" w "\"/>"))
+              ;; with labels, the outline of the cell holding the mark
+              nearest (fn [cs v] (apply min-key #(Math/abs (- (double %) v)) cs))
+              cx (nearest xs mx)
+              cy (nearest ys my)]
+          (if labels?
+            [(str "<rect x=\"" (fmt (+ (px (- cx (/ dx 2.0))) 1.5)) "\" y=\"" (fmt (+ (py (+ cy (/ dy 2.0))) 1.5))
+                  "\" width=\"" (fmt (- (* dx (/ pw (- x1 x0))) 3.0)) "\" height=\"" (fmt (- (* dy (/ ph (- y1 y0))) 3.0))
+                  "\" fill=\"none\" stroke=\"red\" stroke-width=\"3\"/>")]
+            [(cross "white" 4) (cross "red" 2)])))
+      ["</svg>"]))))
+
+(defn paths
+  "Polylines in one box: trajectories, or rays from a point. A layer is a
+   map {:paths [[[x y] …] …]}, each path a seq of points joined in order,
+   with optional :color (default steelblue), :opacity (default 0.7),
+   :width (the line's stroke, default 1.5; 0 for no line) and :r (a dot
+   of that radius at every point; none by default). Options: :x-range and
+   :y-range (default: the points' span, padded), :title, :x-label,
+   :y-label. Marks are clipped to the box."
+  [layers & [opts]]
+  (let [layers (mapv (fn [l] (update l :paths (fn [ps] (mapv (fn [p] (mapv (fn [[x y]] [(host x) (host y)]) p)) ps))))
+                     layers)
+        pts (for [l layers p (:paths l) xy p] xy)
+        span (fn [vs] (padded (apply min vs) (apply max vs)))
+        [x0 x1] (mapv double (or (:x-range opts) (span (map first pts))))
+        [y0 y1] (mapv double (or (:y-range opts) (span (map second pts))))]
+    (frame (merge {:x-label "x" :y-label "y"} opts) [x0 x1] [y0 y1]
+           (fn [px py]
+             (concat
+              [(str "<clipPath id=\"paths-box\"><rect x=\"" (fmt (px x0)) "\" y=\"" (fmt (py y1))
+                    "\" width=\"" (fmt (- (px x1) (px x0))) "\" height=\"" (fmt (- (py y0) (py y1)))
+                    "\"/></clipPath>")
+               "<g clip-path=\"url(#paths-box)\">"]
+              (for [{:keys [paths color opacity width r]} layers
+                    :let [color (or color "steelblue")
+                          opacity (or opacity 0.7)
+                          width (or width 1.5)]
+                    p paths
+                    mark (concat
+                          (when (pos? width)
+                            [(str "<polyline fill=\"none\" stroke=\"" color "\" stroke-opacity=\"" opacity
+                                  "\" stroke-width=\"" width "\" points=\""
+                                  (str/join " " (map (fn [[x y]] (str (fmt (px x)) "," (fmt (py y)))) p)) "\"/>")])
+                          (when r
+                            (for [[x y] p]
+                              (str "<circle cx=\"" (fmt (px x)) "\" cy=\"" (fmt (py y)) "\" r=\"" r
+                                   "\" fill=\"" color "\" fill-opacity=\"" opacity "\"/>"))))]
+                mark)
+              ["</g>"])))))
