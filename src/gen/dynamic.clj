@@ -25,7 +25,8 @@
    log probabilities exactly and project reads the trace without re-running
    the model."
   (:refer-clojure :exclude [+ -])
-  (:require [gen.array :as array :refer [+ -]]
+  (:require [clojure.string :as str]
+            [gen.array :as array :refer [+ -]]
             [gen.array.batch :as batch]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
@@ -550,6 +551,17 @@
         transition (volatile! (or (get (:transitions gf) mode) (site-transitions mode)))
         vol (volatile! (initial-state mode opts))
         ;; the n-th untraced draw's key is ω folded with n
+        ;; what (an untraced draw, a call that drew) makes the score an
+        ;; estimate; and each particle's ω must reproduce its own draws
+        estimate! (fn [what]
+                    (gfi/check-exact-density! what)
+                    (when (batch/batch-backend? array/*backend*)
+                      (throw (array/batched-branch (str (str/upper-case (subs what 0 1)) (subs what 1)
+                                                        " in a batched run")
+                                                   {}))))
+        ;; ω, and the number of keys drawn from it so far
+        omega-of (fn [state] [(or (:omega state) (rng/fold-in (:omega-key state) omega-salt))
+                              (long (:omega-count state))])
         untraced-fn (fn untraced
                       ([] (let [state @vol]
                             (when (::finished state)
@@ -557,12 +569,8 @@
                                                    " sequence escaped the body (realize it in the body, e.g. with mapv"
                                                    " or doall)")
                                               {})))
-                            (gfi/check-exact-density! "an untraced draw")
-                            ;; each particle's ω must reproduce its own draws
-                            (when (batch/batch-backend? array/*backend*)
-                              (throw (array/batched-branch "An untraced draw in a batched run" {})))
-                            (let [omega (or (:omega state) (rng/fold-in (:omega-key state) omega-salt))
-                                  n (long (:omega-count state))]
+                            (estimate! "an untraced draw")
+                            (let [[omega n] (omega-of state)]
                               (vreset! vol (assoc state :omega omega :omega-count (inc n)))
                               (rng/fold-in omega n))))
                       ([dist]
@@ -617,9 +625,21 @@
                             (finally (vreset! transition outer)))))
                       ;; trace calls in lazy arguments happen now, in this body (splice-at)
                       (let [[addr gf & args] xs] (first (splice-at addr gf args nil)))))
-        retval (realize! (if-let [st (:static gf)]
-                           (run-static st gf vol trace-fn splice-at args)
-                           (apply (:body-fn gf) trace-fn splice-fn read-param untraced-fn args)))]
+        ;; (gf & args) in the body: a run with the next key from ω, which
+        ;; it takes only when the callee drew (made choices, or used
+        ;; encapsulated randomness of its own), so a call that drew nothing
+        ;; leaves the score exact and the trace without ω (genclj-zxis)
+        plain-call (fn [gf args]
+                     (let [[omega n] (omega-of @vol)
+                           tr (gfi/simulate gf args (rng/fold-in omega n))]
+                       (when (or (not (cm/empty? (:choices tr))) (trace/omega-at tr))
+                         (estimate! "a plain call that made random choices")
+                         (vswap! vol assoc :omega omega :omega-count (inc n)))
+                       (:retval tr)))
+        retval (binding [trace/*body-call* plain-call]
+                 (realize! (if-let [st (:static gf)]
+                             (run-static st gf vol trace-fn splice-at args)
+                             (apply (:body-fn gf) trace-fn splice-fn read-param untraced-fn args))))]
     ;; the store in effect, which the next update compares with its own
     (vswap! vol assoc ::finished true ::params *params*)
     (assoc (finish @vol) :retval retval)))
@@ -899,7 +919,9 @@
    update or regenerate keeps it unless the change hints say something
    changed, or the store or generative function at the call did
    (gfi/revise): ω is then drawn afresh (DESIGN.md §9). Untraced values
-   must not decide which addresses are visited.
+   must not decide which addresses are visited. A plain call (gf & args)
+   in the body, Gen.jl's untraced call, runs gf with a key from ω: an
+   untraced draw when gf makes random choices, free when it makes none.
 
    (gen ^:static [args] (let [bindings…] ret)) is a static body (Gen.jl's
    @gen (static)): each binding a call at a constant address or a pure
