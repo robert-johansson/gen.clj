@@ -165,11 +165,12 @@ distribution's `log-prob`:
             (map-indexed (fn [i x] (dc/log-prob (d/normal (+ (* slope x) intercept) 1) (tr [:y i])))
                          xs))))
 
-(- (:score tr) score-by-hand)
-;=> 0.0
+(array/allclose? (:score tr) score-by-hand)
+;=> true
 ```
 
-They agree because they are the same computation. A more negative score
+They agree, up to the rounding of the backend's floats, because they are
+the same computation (`array/allclose?` compares within that rounding). A more negative score
 is a less probable run. Once we fix the $y$ values to observed ones, a
 difference of scores becomes a difference of evidence between lines: the
 currency of inference.
@@ -395,10 +396,10 @@ Each exercise has a tested solution at the end of the chapter.
 
 (let [t (gfi/simulate line-model-2 [xs] (rng/key 4))
       [slope intercept] (:retval t)]
-  (- (:score t)
-     (reduce + (+ (dc/log-prob (d/normal 1 3) slope) (dc/log-prob (d/normal 0 10) intercept))
-             (map-indexed (fn [i x] (dc/log-prob (d/normal (+ (* slope x) intercept) 1) (t [:y i]))) xs))))
-;=> 0.0
+  (array/allclose? (:score t)
+                   (reduce + (+ (dc/log-prob (d/normal 1 3) slope) (dc/log-prob (d/normal 0 10) intercept))
+                           (map-indexed (fn [i x] (dc/log-prob (d/normal (+ (* slope x) intercept) 1) (t [:y i]))) xs))))
+;=> true
 ```
 
 **2.** The posterior's precision is the prior's plus $X^\top X$, which

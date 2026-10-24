@@ -60,8 +60,8 @@
             (map-indexed (fn [i x] (dc/log-prob (d/normal (+ (* slope x) intercept) 1) (tr [:y i])))
                          xs))))
 
-(- (:score tr) score-by-hand)
-;=> 0.0
+(array/allclose? (:score tr) score-by-hand)
+;=> true
 
 ;; book: data
 (def ys [8.23 5.87 3.99 2.59 0.23 -0.66 -3.53 -6.91 -7.24 -9.90])
@@ -172,10 +172,10 @@
 
 (let [t (gfi/simulate line-model-2 [xs] (rng/key 4))
       [slope intercept] (:retval t)]
-  (- (:score t)
-     (reduce + (+ (dc/log-prob (d/normal 1 3) slope) (dc/log-prob (d/normal 0 10) intercept))
-             (map-indexed (fn [i x] (dc/log-prob (d/normal (+ (* slope x) intercept) 1) (t [:y i]))) xs))))
-;=> 0.0
+  (array/allclose? (:score t)
+                   (reduce + (+ (dc/log-prob (d/normal 1 3) slope) (dc/log-prob (d/normal 0 10) intercept))
+                           (map-indexed (fn [i x] (dc/log-prob (d/normal (+ (* slope x) intercept) 1) (t [:y i]))) xs))))
+;=> true
 
 ;; book: solution-2
 (defn exact-sd

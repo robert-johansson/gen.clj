@@ -20,7 +20,10 @@ and its code is verified for real (DESIGN.md §9).
   differs from its region. It then runs the namespace region by region and
   checks the results the code states:
   - `;=> value` after a form shows its result. A float checks to the digits
-    it shows, so one text holds on float64 and float32 backends.
+    it shows, so one text holds on float64 and float32 backends. Few
+    digits make a weak check: `;=> 0.0` accepts anything within 0.05. Where
+    two values must agree up to rounding (a score and its sum by hand),
+    state it so: `(array/allclose? a b)` and `;=> true`.
   - `;=> value ; float64` is checked only where the default float is
     float64. Sampled values carry it, since a key draws other values in
     float32.
