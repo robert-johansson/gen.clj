@@ -126,17 +126,56 @@
     (when (and (integer? i) (< -1 i (count subs)))
       [(subs i) (subvec p 1)])))
 
-(defn- elements-trace [gf args {:keys [subs choices retval score]}]
-  (assoc (trace/make-trace {:gen-fn gf :args args :choices choices :retval retval :score score})
-         ::subtraces subs))
+;; The score of a Map, Unfold or Scan trace is a running total of its
+;; elements' scores, so a change costs the elements it changes, as in
+;; Gen.jl. A plain one (score + new - old) gives -Inf + Inf = NaN once an
+;; element left its support and came back (genclj-awd0). So a total keeps
+;; the sum of the finite element scores beside two counts: of the scores not
+;; above -Inf, and of those not below +Inf. A NaN is in both, as -Inf + Inf
+;; is NaN, so the score is the IEEE sum of the elements' scores, what assess
+;; sums, the finite part rounded as a running total (genclj-ul72).
+
+(def ^:private no-total {:finite 0.0 :neg-inf 0 :pos-inf 0})
+
+(defn- tallied
+  "total with score s added (op +) or taken out (op -)."
+  [total op s]
+  (if (array/host? s)
+    (let [x (double s)]
+      (if (< ##-Inf x ##Inf)
+        (update total :finite op s)
+        (cond-> total
+          (not (> x ##-Inf)) (update :neg-inf op 1)
+          (not (< x ##Inf)) (update :pos-inf op 1))))
+    (let [above (array/> s ##-Inf)
+          below (array/< s ##Inf)]
+      (-> total
+          (update :finite op (array/where (array/logical-and above below) s 0.0))
+          (update :neg-inf op (array/where above 0 1))
+          (update :pos-inf op (array/where below 0 1))))))
+
+(defn- total-score
+  "The score of a total: its finite sum, -Inf with a score not above -Inf,
+   +Inf with one not below +Inf, and so NaN with both."
+  [{:keys [finite neg-inf pos-inf]}]
+  (if (and (array/host? neg-inf) (array/host? pos-inf))
+    (cond-> finite
+      (pos? (long neg-inf)) (+ ##-Inf)
+      (pos? (long pos-inf)) (+ ##Inf))
+    (+ (+ finite (array/where (array/> neg-inf 0) ##-Inf 0.0)) (array/where (array/> pos-inf 0) ##Inf 0.0))))
+
+(defn- elements-trace [gf args {:keys [subs choices retval total]}]
+  (assoc (trace/make-trace {:gen-fn gf :args args :choices choices :retval retval :score (total-score total)})
+         ::subtraces subs
+         ::total total))
 
 (def ^:private empty-acc
-  {:subs [] :choices cm/EMPTY :retval [] :score 0.0 :weight 0.0 :discard cm/EMPTY :retdiffs {}})
+  {:subs [] :choices cm/EMPTY :retval [] :total no-total :weight 0.0 :discard cm/EMPTY :retdiffs {}})
 
 (defn- trace-acc
   "An accumulator holding the elements of tr, to be changed in place."
   [tr]
-  (assoc empty-acc :subs (::subtraces tr) :choices (:choices tr) :retval (:retval tr) :score (:score tr)))
+  (assoc empty-acc :subs (::subtraces tr) :choices (:choices tr) :retval (:retval tr) :total (::total tr)))
 
 (defn- put-element
   "acc with sub as element i (replacing old, if given), its weight w added."
@@ -145,8 +184,7 @@
       (assoc-in [:subs i] sub)
       (update :choices assoc-element i (:choices sub))
       (assoc-in [:retval i] (:retval sub))
-      (update :score #(cond-> (+ % (:score sub)) old (- (:score old))))
-      (cond-> old (assoc :subtracted true))
+      (update :total #(cond-> (tallied % + (:score sub)) old (tallied - (:score old))))
       (update :weight + w)))
 
 (defn- put-update
@@ -172,38 +210,21 @@
     (-> (reduce (fn [acc [i sub]]
                   (cond-> (-> acc
                               (update :choices cm/remove-submap i)
-                              (update :score - (:score sub)))
+                              (update :total tallied - (:score sub)))
                     (= op :update) (-> (update :weight - (:score sub))
                                        (cond-> (not (cm/empty? (:choices sub)))
                                          (update :discard cm/set-submap i (:choices sub))))))
                 acc
                 (clojure.core/map vector (range n (count (:subs acc))) gone))
-        (cond-> (seq gone) (assoc :subtracted true))
         (update :subs keep-first n)
         (update :retval keep-first n))))
 
 (defn- retdiff [{:keys [retdiffs]} n prev-n]
   (if (and (= n prev-n) (empty? retdiffs)) diff/no-change (diff/vector-diff n prev-n retdiffs)))
 
-(defn- revised
-  "acc after an update or regenerate, its score checked. The score is a
-   running total: the old one plus the new elements' scores, less those of
-   the elements replaced or dropped. Less an element's -Inf (a choice out
-   of its support), that is -Inf + Inf = NaN where the density may be
-   finite (genclj-awd0). So where the update took an element's score out
-   and the total is NaN, the score is the sum of the elements' scores: on
-   the host only then, and per particle under the batch tracer
-   (array/where), which there sums them whenever an element was taken out."
-  [{:keys [score subs subtracted] :as acc}]
-  (let [summed #(reduce (fn [total sub] (+ total (:score sub))) 0.0 subs)]
-    (cond (not subtracted) acc
-          (array/host? score) (cond-> acc (Double/isNaN (double score)) (assoc :score (summed)))
-          :else (assoc acc :score (array/where (array/isnan score) (summed) score)))))
-
 (defn- incremental-result [gf args acc op n prev-n]
-  (let [acc (revised acc)]
-    (cond-> {:trace (elements-trace gf args acc) :weight (:weight acc) :retdiff (retdiff acc n prev-n)}
-      (= op :update) (assoc :discard (:discard acc)))))
+  (cond-> {:trace (elements-trace gf args acc) :weight (:weight acc) :retdiff (retdiff acc n prev-n)}
+    (= op :update) (assoc :discard (:discard acc))))
 
 (defn- project-elements [tr s]
   (let [subs (::subtraces tr)
@@ -1164,7 +1185,7 @@
         carry-diff (cond (== n prev-n) cdiff
                          (gfi/same-value? (first (:retval tr)) carry) diff/no-change
                          :else diff/unknown-change)]
-    (cond-> {:trace (scan-trace gf (vec args) carry (revised acc)) :weight (:weight acc)
+    (cond-> {:trace (scan-trace gf (vec args) carry acc) :weight (:weight acc)
              :retdiff (scan-retdiff carry-diff (retdiff acc n prev-n))}
       (= op :update) (assoc :discard (:discard acc)))))
 
