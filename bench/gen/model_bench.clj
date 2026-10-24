@@ -81,11 +81,20 @@
     (doseq [[label f] cases]
       (println (format "%-52s %10.2f µs" label (us-per-call f))))))
 
+(defn- settled
+  "f with its result's scores and weights evaluated: on a lazy backend
+   (MLX) a call computes only what is read."
+  [f]
+  (fn [] (let [r (f)]
+           (array/eval! [(-> r :trace :score) (:weight r) (-> r :particles :trace :score) (:weights r)])
+           r)))
+
 (defn- long-unfold
   "A 500-step Unfold, scalar and as 1000 batched particles: an update that
    revisits one step (its :y, so no later step), whose score changes by one
    step's, and an extension by one step (a particle filter's), against
-   generating every step. Batched runs without spot checks: the run alone."
+   generating every step. Batched runs without spot checks: the run alone.
+   On any backend (-J-Dgen.backend=mlx), the scores evaluated."
   []
   (println "\n== A 500-step Unfold: revisiting one step, extending by one ==")
   (binding [b/*spot-checks* 0]
@@ -103,7 +112,7 @@
                  ["×1000 batched: update one step's :y" #(b/update ps [n 0.0] same (cm/choicemap [250 :y] 0.3) k)]
                  ["×1000 batched: extend by one step" #(b/update ps [(inc n) 0.0] longer (cm/choicemap [n :y] 0.2) k)]]]
       (doseq [[label f] cases]
-        (println (format "  %-50s %10.2f µs" label (us-per-call f)))))))
+        (println (format "  %-50s %10.2f µs" label (us-per-call (settled f))))))))
 
 (defn -main [& [arg]]
   (case arg
