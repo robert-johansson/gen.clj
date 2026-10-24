@@ -2267,7 +2267,15 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       update revisiting one step, 650–714 µs before, 274–278 µs now (284
       before awd0); a batched extension by one step (a particle filter's)
       118 µs before, 132 µs now; batched generate and every scalar case
-      unchanged within noise.
+      unchanged within noise. On MLX, where even a scalar model's scores
+      are arrays, each run once (CPU / Metal): scalar generate 130 → 152 /
+      175 → 197 ms (+17% / +12%), scalar revisit 864 → 102 / 1367 → 286
+      µs, scalar extension +13% / +9%; batched generate +8% / +10%, batched
+      revisit 1785 → 924 / 2655 → 1331 µs, batched extension +13% / +4%.
+      array/compile would fuse the 9 ops on MLX's scalar path only (the
+      batch tracer runs uncompiled); a vectorized tally of a run's new
+      elements would round unlike the scalar handler, which spot checks
+      compare.
     - **The remedy it replaced (awd0's):** where an update or regenerate
       subtracted an element's score and the total was NaN, the score was
       the sum of the elements' scores: on the host only then, and per
