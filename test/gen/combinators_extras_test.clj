@@ -601,7 +601,9 @@
     (binding [b/*spot-checks* 0]
       (let [args [[0.4 0.6] 0.0]
             indices (fn [ps] (mapv #(ts/host (% :index)) (b/traces ps)))
-            ps (b/simulate mixed args 8 (rng/key 5))]
+            ;; a key whose particles' indices differ under float64's draws
+            ;; and float32's (key 5 drew all ones in float32)
+            ps (b/simulate mixed args 8 (rng/key 8))]
         (is (b/batched? ps))
         (is (nil? (b/fallback-reason ps)))
         (is (< 1 (count (distinct (indices ps)))) "the particles' indices differ")
