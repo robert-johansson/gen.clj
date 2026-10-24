@@ -1,0 +1,11 @@
+# The PDF edition's metadata (clojure -M:test -m gen.book pdf)
+title: The gen.clj Book
+subtitle: Probabilistic Programming in Clojure
+author: Robert Johansson
+documentclass: book
+classoption: [oneside]
+toc: true
+toc-depth: 1
+fontsize: 11pt
+geometry: margin=2.5cm
+colorlinks: true

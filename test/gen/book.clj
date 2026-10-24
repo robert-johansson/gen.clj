@@ -35,9 +35,12 @@
 
    A statistical claim is a check written in the code (a band from the
    estimator's standard error, `;=> true`), so it holds on every backend.
+   A region's lines are at most 80 characters, so they fit a printed page.
 
    (run-chapter \"book/011-getting-started.md\") runs one at the REPL;
-   gen.book-test runs them all."
+   gen.book-test runs them all. `clojure -M:test -m gen.book pdf` builds
+   the book as a PDF (target/book/gen-clj-book.pdf), with Pandoc, xelatex
+   and librsvg's rsvg-convert (for the SVG figures)."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [is testing]]
@@ -102,6 +105,18 @@
                    (let [code (or (by-name name)
                                   (throw (ex-info (str "No region " name " to include") {:region name})))]
                      (str "<!-- code: " name " -->\n```clojure\n" code "```\n"))))))
+
+(def max-line
+  "The longest line a region may have: what fits a printed page."
+  80)
+
+(defn check-lines
+  "Every line of every region fits in max-line characters."
+  [regions]
+  (doseq [{:keys [name line code]} regions
+          [i l] (map-indexed vector (str/split-lines code))
+          :when (> (count l) max-line)]
+    (is false (str "the region " name ", line " (+ line i 1) ": " (count l) " characters, over " max-line))))
 
 (defn check-includes
   "Every include names a region and holds its text, and every clojure
@@ -232,13 +247,40 @@
   [chapter]
   (testing chapter
     (let [rs (regions (slurp (source-file chapter)))]
+      (check-lines rs)
       (check-includes (slurp chapter) rs)
       (let [r (run-regions rs)]
         (check-figures (:figures r))
         r))))
 
+(def pdf-file "target/book/gen-clj-book.pdf")
+
+(defn pdf!
+  "Builds the book as a PDF with Pandoc: the chapters in order, with
+   book/metadata.yaml. Loud when an include is stale (sync first) or Pandoc
+   fails."
+  []
+  (let [stale (filter #(not= (slurp %) (synced (slurp %) (regions (slurp (source-file %))))) (chapters))]
+    (when (seq stale)
+      (throw (ex-info (str "Stale includes in " (str/join ", " stale) ": clojure -M:test -m gen.book sync")
+                      {:chapters (vec stale)}))))
+  (let [args (into ["pandoc" (str "--metadata-file=" dir "/metadata.yaml") "--top-level-division=chapter"
+                    "--pdf-engine=xelatex" "--syntax-highlighting=tango" (str "--resource-path=" dir)
+                    "-o" pdf-file]
+                   (chapters))
+        _ (io/make-parents pdf-file)
+        exit (try (-> (ProcessBuilder. ^java.util.List args) (.inheritIO) (.start) (.waitFor))
+                  (catch java.io.IOException e
+                    (throw (ex-info (str "Pandoc did not start (" (ex-message e) "): the PDF needs pandoc, xelatex"
+                                         " and rsvg-convert (librsvg)")
+                                    {:args args}))))]
+    (when-not (zero? exit)
+      (throw (ex-info (str "Pandoc failed, exit " exit) {:exit exit :args args})))
+    (println "wrote" pdf-file)))
+
 (defn -main
-  "sync: write every chapter's includes from its regions, and its figures."
+  "sync: write every chapter's includes from its regions, and its figures.
+   pdf: build the book as a PDF."
   [& [what]]
   (case what
     "sync" (doseq [chapter (chapters)
@@ -254,5 +296,6 @@
                  (io/make-parents f)
                  (spit f svg)
                  (println "wrote" (.getPath f)))))
-    (println "usage: clojure -M:test -m gen.book sync"))
+    "pdf" (pdf!)
+    (println "usage: clojure -M:test -m gen.book sync|pdf"))
   (shutdown-agents))

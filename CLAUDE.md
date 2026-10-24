@@ -35,6 +35,7 @@ clojure -X:test                       # every test in one JVM, ~7 min
 clojure -X:test:conformance           # the backend conformance suite (array level)
 clojure -X:test :nses '[gen.book-test]'   # the book (book/): every chapter's code run, its results checked
 clojure -M:test -m gen.book sync      # write the book's includes (from book/src) and figures
+clojure -M:test -m gen.book pdf       # the book as a PDF (pandoc, xelatex, rsvg-convert): target/book/
 clojure -X:test:commons-math          # also the Commons Math extension (ext/commons-math)
 clojure -J-Dgen.backend=mlx -X:test   # any suite on the MLX backend (add -J-Dgen.mlx.device=cpu|gpu, -J-Dgen.mlx.dtypes=64)
 clojure -M:bench -m gen.array-bench   # per-op costs; add :c2 to compare C2 with Graal's JIT

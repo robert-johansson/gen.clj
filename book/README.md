@@ -32,7 +32,9 @@ and its code is verified for real (DESIGN.md §9).
   - `;; error: message` as a region's first line shows a loud error.
   - `;; figure: figures/…` as a region's first line makes its last form an
     SVG figure (from `test/gen/book/svg.clj`). The test fails when the
-    committed file is stale.
+    committed file is stale. The Markdown's image text is its caption.
+  - A region's lines are at most 80 characters, so they fit a printed
+    page.
 
 The mechanics are in `test/gen/book.clj`.
 
@@ -42,7 +44,13 @@ The mechanics are in `test/gen/book.clj`.
 clojure -X:test :nses '[gen.book-test]'                       # every chapter
 clojure -J-Dgen.backend=mlx -X:test :nses '[gen.book-test]'   # on MLX
 clojure -M:test -m gen.book sync                              # write the includes and figures
+clojure -M:test -m gen.book pdf                               # the PDF: target/book/gen-clj-book.pdf
 ```
+
+The PDF is Pandoc's: every chapter in order, with `metadata.yaml` (title,
+contents, page layout). It needs pandoc, a TeX distribution with xelatex,
+and librsvg's `rsvg-convert` for the SVG figures (on macOS: `brew install
+pandoc librsvg` and MacTeX). It refuses to build from stale includes.
 
 At the REPL (`clojure -M:test:dev`), `(require 'book.getting-started
 :reload)` loads a chapter's namespace, and `(gen.book/run-chapter

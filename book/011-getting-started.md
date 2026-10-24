@@ -98,8 +98,9 @@ fixes where those come from.
 
 <!-- code: same-key -->
 ```clojure
-(= (mapv array/->clj (cm/values (:choices tr)))
-   (mapv array/->clj (cm/values (:choices (gfi/simulate line-model [xs] (rng/key 1))))))
+(let [again (gfi/simulate line-model [xs] (rng/key 1))]
+  (= (mapv array/->clj (cm/values (:choices tr)))
+     (mapv array/->clj (cm/values (:choices again)))))
 ;=> true
 ```
 
@@ -154,18 +155,23 @@ The body returned the line, the same two numbers as the trace's choices:
 The score is the log of the joint density of every choice the run made,
 given the arguments. It accumulates as the model runs: each `trace` adds
 its choice's log density. So it is a sum we can do by hand, with each
-distribution's `log-prob`:
+distribution's `log-prob`. The sum takes the slope's prior as an argument,
+for an exercise below:
 
 <!-- code: score -->
 ```clojure
-(def score-by-hand
-  (let [[slope intercept] (:retval tr)]
-    (reduce + (+ (dc/log-prob (d/normal 0 2) slope)
+(defn score-by-hand
+  "The sum of the log densities of trace t's choices, with the slope's
+   prior given."
+  [slope-prior t]
+  (let [[slope intercept] (:retval t)
+        line (fn [x] (+ (* slope x) intercept))
+        y-term (fn [i x] (dc/log-prob (d/normal (line x) 1) (t [:y i])))]
+    (reduce + (+ (dc/log-prob slope-prior slope)
                  (dc/log-prob (d/normal 0 10) intercept))
-            (map-indexed (fn [i x] (dc/log-prob (d/normal (+ (* slope x) intercept) 1) (tr [:y i])))
-                         xs))))
+            (map-indexed y-term xs))))
 
-(array/allclose? (:score tr) score-by-hand)
+(array/allclose? (:score tr) (score-by-hand (d/normal 0 2) tr))
 ;=> true
 ```
 
@@ -191,7 +197,7 @@ sees any data. Here are five of them, beside the data we fit below:
 <!-- code: prior-figure -->
 ```clojure
 ;; figure: figures/011-prior-lines.svg
-(svg/lines xs ys prior-lines {:title "Five lines from the prior, and the data"})
+(svg/lines xs ys prior-lines)
 ```
 
 ![Five lines from the prior, and the data](figures/011-prior-lines.svg)
@@ -258,15 +264,22 @@ variance. The posterior of $(\mu, b)$ then has precision $\Lambda =
 
 <!-- code: exact -->
 ```clojure
-(def exact
+(defn posterior
+  "The exact posterior of the line given points (xs, ys): its mean, the
+   standard deviations of the slope and the intercept, and their
+   correlation."
+  [xs ys]
   (let [X (array/array (mapv (fn [x] [x 1.0]) xs))
         Xt (array/transpose X)
-        precision (+ (array/diag (array/array [(/ 1.0 4.0) (/ 1.0 100.0)])) (array/matmul Xt X))
-        covariance (linalg/inv precision)
-        [[v-slope c] [_ v-intercept]] (array/->clj covariance)]
-    {:mean (array/->clj (array/matmul covariance (array/matmul Xt (array/array ys))))
+        prior-precision (array/diag (array/array [(/ 1.0 4.0) (/ 1.0 100.0)]))
+        covariance (linalg/inv (+ prior-precision (array/matmul Xt X)))
+        [[v-slope c] [_ v-intercept]] (array/->clj covariance)
+        mean (array/matmul covariance (array/matmul Xt (array/array ys)))]
+    {:mean (array/->clj mean)
      :sd [(Math/sqrt v-slope) (Math/sqrt v-intercept)]
      :correlation (/ c (Math/sqrt (* v-slope v-intercept)))}))
+
+(def exact (posterior xs ys))
 
 (:mean exact)
 ;=> [-1.979 10.143]
@@ -318,7 +331,7 @@ jumps.
 <!-- code: chain-figure -->
 ```clojure
 ;; figure: figures/011-slope-chain.svg
-(svg/series (map #(% :slope) chain) {:title "The slope along the chain" :y-label "slope"})
+(svg/series (map #(% :slope) chain) {:y-label "slope"})
 ```
 
 ![The slope along the chain](figures/011-slope-chain.svg)
@@ -328,8 +341,9 @@ jumps.
 (defn acceptance
   "The fraction of sweeps that moved the choice at addr."
   [chain addr]
-  (/ (count (filter true? (map #(not= (array/->clj (%1 addr)) (array/->clj (%2 addr))) chain (rest chain))))
-     (double (dec (count chain)))))
+  (let [moved? (fn [a b] (not= (array/->clj (a addr)) (array/->clj (b addr))))]
+    (/ (count (filter true? (map moved? chain (rest chain))))
+       (double (dec (count chain))))))
 
 [(acceptance chain :slope) (acceptance chain :intercept)]
 
@@ -359,7 +373,7 @@ the first 200:
 <!-- code: posterior-figure -->
 ```clojure
 ;; figure: figures/011-posterior-lines.svg
-(svg/lines xs ys (mapv :retval (take-nth 40 burned)) {:title "Lines from the posterior"})
+(svg/lines xs ys (mapv :retval (take-nth 40 burned)))
 ```
 
 ![Lines from the posterior](figures/011-posterior-lines.svg)
@@ -382,7 +396,7 @@ Each exercise has a tested solution at the end of the chapter.
 
 ## Solutions
 
-**1.** Only the slope's term changes:
+**1.** Only the slope's prior changes, which `score-by-hand` takes:
 
 <!-- code: solution-1 -->
 ```clojure
@@ -394,28 +408,19 @@ Each exercise has a tested solution at the end of the chapter.
         (trace [:y i] (d/normal (+ (* slope x) intercept) 1)))
       [slope intercept])))
 
-(let [t (gfi/simulate line-model-2 [xs] (rng/key 4))
-      [slope intercept] (:retval t)]
-  (array/allclose? (:score t)
-                   (reduce + (+ (dc/log-prob (d/normal 1 3) slope) (dc/log-prob (d/normal 0 10) intercept))
-                           (map-indexed (fn [i x] (dc/log-prob (d/normal (+ (* slope x) intercept) 1) (t [:y i]))) xs))))
+(let [t (gfi/simulate line-model-2 [xs] (rng/key 4))]
+  (array/allclose? (:score t) (score-by-hand (d/normal 1 3) t)))
 ;=> true
 ```
 
 **2.** The posterior's precision is the prior's plus $X^\top X$, which
 grows with every point. With three points close together the slope is far
-less certain:
+less certain. `posterior` takes the points:
 
 <!-- code: solution-2 -->
 ```clojure
-(defn exact-sd
-  "The exact posterior's standard deviations, from points xs."
-  [xs]
-  (let [X (array/array (mapv (fn [x] [x 1.0]) xs))
-        Xt (array/transpose X)]
-    (array/->clj (array/sqrt (array/diag (linalg/inv (+ (array/diag (array/array [0.25 0.01])) (array/matmul Xt X))))))))
-
-[(first (exact-sd (subvec xs 0 3))) (first (exact-sd xs))]
+[(first (:sd (posterior (subvec xs 0 3) (subvec ys 0 3))))
+ (first (:sd exact))]
 ;=> [0.661 0.1097]
 ```
 
@@ -431,9 +436,10 @@ MH move, because `mh/mh` weighs the proposal in both directions:
     (trace :intercept (d/normal (tr :intercept) 0.5))))
 
 (def walk-chain
-  (let [[k-start k-chain] (rng/split (rng/key 5))]
+  (let [[k-start k-chain] (rng/split (rng/key 5))
+        start (:trace (gfi/generate line-model [xs] (observations ys) k-start))]
     (vec (reductions (fn [tr k] (:trace (mh/mh tr random-walk [] k)))
-                     (:trace (gfi/generate line-model [xs] (observations ys) k-start))
+                     start
                      (rng/split k-chain 2000)))))
 
 (def walk-summary (diag/summary (diag/draws [(subvec walk-chain 200)] :slope)))
@@ -448,7 +454,8 @@ errors:
 
 <!-- code: solution-3-check -->
 ```clojure
-(< (abs (- (:mean walk-summary) (first (:mean exact)))) (* 5 (:mcse-mean walk-summary)))
+(< (abs (- (:mean walk-summary) (first (:mean exact))))
+   (* 5 (:mcse-mean walk-summary)))
 ;=> true
 ```
 
