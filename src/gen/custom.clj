@@ -29,7 +29,10 @@
    an array for an array or number, a tree of the argument's shape for a
    tree; it passes through a return value that is a float array or number. With a gradient, the
    function runs on the arguments' values (array/stop-gradient), so it may
-   use host arithmetic, a solver, anything (array/custom-vjp).
+   use host arithmetic, a solver, anything (array/custom-vjp). Without one,
+   a function that reads an argument being differentiated on the host
+   (array/item, array/->clj) or does host arithmetic on it is a loud error,
+   since that path's gradient would be lost: give it :gradient.
 
    Trainable parameters (Gen.jl's parameters of a CustomDetermGF) are
    named with :params and read from the store in effect: the store of the

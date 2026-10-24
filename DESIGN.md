@@ -1050,6 +1050,42 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   transformation and may not read values on the host, and inside
   `array/compile` a custom VJP under native gradients is an error (MLX's
   compiled graphs leave custom VJPs out).
+- **Reading a value being differentiated on the host is an error**
+  (2026-10-24, genclj-de4g; PROVISIONAL, the owner confirms it). Under
+  gen.array.tape, `array/item` or `array/->clj` of a tracked float throws
+  ex-info (`:shape`, `:dtype`) naming the ways out: compute with gen.array's
+  operators, give the function a custom gradient (gen.custom's `:gradient`,
+  `array/custom-vjp`), or read `(array/stop-gradient x)` to drop the
+  gradient on purpose. Until now the read returned the primal and the path
+  through it was missing from the gradient without a word: chapter 028
+  found d/dm of log N(m; 0, 1) + log N(3; 2m, 1) at m = 0.8 coming out
+  -0.8, the prior's term alone, instead of 2.0, through `item` in a body
+  and in a `custom/deterministic` without `:gradient`. Rule 6: PyTorch's
+  `.item()` detaches silently; gen.clj does not.
+  - Bools and ints have no gradient, and comparisons, floor and the other
+    zero-gradient ops give untracked values, so their reads stay allowed:
+    `if` on a comparison, `truthy?`, a Switch's index. Parameter checks
+    read comparisons (`all-true?` of `(> v 0)`), so they needed no change.
+  - gen.clj's own differentiation-neutral reads take the primal through
+    stop-gradient: a gen body's `=`, `case` and lookups on a 0-d value
+    (`gen.dynamic.core/host-value`), a distribution's printed parameters,
+    and mvnormal's jitter suggestion (found by the battery: gen.genjl's
+    dist DSL test of a singular covariance under a gradient).
+  - Host arithmetic on a tracked value (clojure.core's operators, `Math/…`,
+    `double`) was a raw ClassCastException. `value-and-grad` rethrows it as
+    the same kind of ex-info, the cast as its cause: caught at the
+    boundary, by the cast's message naming the tracked class, so host
+    arithmetic elsewhere costs nothing. (Guarding clojure.core's operators
+    in `gen` bodies would cover bodies only and tax their host arithmetic.)
+    A JIT that drops the message after many throws at one site
+    (OmitStackTraceInFastThrow) leaves the raw exception.
+  - A batched tracked value's read is the batched-branch error first, so a
+    batched run falls back, and the particle's run raises this error.
+  - Not covered: MLX's native gradients (`-Dgen.mlx.grad=native`, opt-in).
+    There the read still detaches silently (d/dx of x·item(x) at 1.5 comes
+    out 1.5, not 3.0; MLX's CPU, 2026-10-24): the differentiated values are
+    MLX's own arrays, and mlx-c does not expose MLX's `is_tracer`, which
+    would tell them from the others.
 - **Trace transforms** (M4, 2026-10-20): `gen.inference.transform`, Gen.jl's
   @transform as `(deftransform name [model-in aux-in model-out aux-out]
   body)`, the body calling `read`, `write` and `copy` with Gen.jl's tags

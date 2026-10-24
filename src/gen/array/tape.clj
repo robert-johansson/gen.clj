@@ -19,6 +19,13 @@
    divides by the input (NaN at zeros). First order only: differentiating
    inside a differentiated function is an error (bean genclj-hors).
 
+   Reading a tracked value on the host (array/item, array/->clj) is an
+   error, as is host arithmetic on one (clojure.core's operators, Math/…):
+   the result would carry no gradient, and the path through it would be
+   silently missing from the gradient. The untracked values above (bools,
+   ints, a comparison's, floor's) read freely, so branching on a value
+   works; (array/item (array/stop-gradient x)) reads a float on purpose.
+
    The wrapped backend may be the batch tracer (gen.array.batch), whose
    -value-and-grad is this one over itself: every primal and every rule
    then runs per particle, which makes the gradient vmap's."
@@ -272,6 +279,40 @@
 (defn- nested! []
   (throw (ex-info "Differentiating inside a differentiated function is not supported yet (bean genclj-hors)" {})))
 
+(def ^:private ways-out
+  (str "compute with gen.array's operators, give the function a custom gradient (gen.custom's :gradient,"
+       " array/custom-vjp), or read (array/stop-gradient x) to drop the gradient on purpose"))
+
+(defn- host-read-error
+  "Reading x, a float value being differentiated, on the host would drop
+   its gradient silently (DESIGN.md §9, 2026-10-24)."
+  [x]
+  (ex-info (str "Cannot read a value being differentiated on the host (array/item, array/->clj): its gradient"
+                " would be lost. To keep it, " ways-out)
+           {:shape (array/shape x) :dtype (array/dtype x)}))
+
+(defn- host-arithmetic-error?
+  "Is e the ClassCastException of host arithmetic (clojure.core's +, *,
+   Math/exp, double, …) on a tracked value?"
+  [^ClassCastException e]
+  (boolean (some-> (.getMessage e) (.contains (.getName Tracked)))))
+
+(defn- apply-taped
+  "(apply f args), with host arithmetic on a tracked value (which casts it
+   to a Number) a loud ex-info naming the ways out, not a
+   ClassCastException. Caught here, at the boundary, so that host
+   arithmetic elsewhere pays nothing."
+  [f args]
+  (try
+    (apply f args)
+    (catch ClassCastException e
+      (if (host-arithmetic-error? e)
+        (throw (ex-info (str "Host arithmetic (clojure.core's operators, Math/…, double) on a value being"
+                             " differentiated has no gradient. To keep it, " ways-out)
+                        {:op :host-arithmetic :message (.getMessage e)}
+                        e))
+        (throw e)))))
+
 (deftype TapeBackend [inner]
   p/IWrappingBackend
   (-inner [_] inner)
@@ -294,7 +335,13 @@
   (-native-ops [_] #{})
 
   (-from-host [_ values shape dtype] (p/-from-host inner values shape dtype))
-  (-to-host [_ x] (let [v (primal x)] (if (array/host? v) v (p/-to-host inner v))))
+  (-to-host [_ x]
+    (let [v (primal x)]
+      ;; a batch's read is the batched-branch error first (the batch tracer
+      ;; raises it), so that a batched run falls back, as for any read
+      (when (and (tracked? x) (differentiable? x) (not (instance? gen.array.protocols.IBatchedValue v)))
+        (throw (host-read-error x)))
+      (if (array/host? v) v (p/-to-host inner v))))
   (-eval! [_ xs] (p/-eval! inner (remove array/host? (map primal xs))))
 
   (-shape [_ x] (let [v (primal x)] (if (array/host? v) [] (p/-shape inner v))))
@@ -489,7 +536,7 @@
   (when (instance? TapeBackend inner) (nested!))
   (let [tape (->TapeBackend inner)
         args (reduce (fn [args i] (update args i #(array/tree-map (partial track-leaf tape) %))) (vec args) argnums)
-        out (apply f args)]
+        out (apply-taped f args)]
     (when-not (and (array/array? out) (= [] (array/shape out)))
       (throw (ex-info "value-and-grad needs a function returning a scalar"
                       {:shape (when (array/array? out) (array/shape out)) :value out})))

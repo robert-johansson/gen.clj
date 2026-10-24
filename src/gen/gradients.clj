@@ -20,6 +20,14 @@
    position, with nil for no cotangent (Gen.jl's nothing); another
    structure is a loud error. Selected choices must be continuous.
 
+   The model computes with the values being differentiated through
+   gen.array: reading one on the host (array/item, array/->clj) or host
+   arithmetic on it (clojure.core's operators, Math/…) is a loud error, as
+   its gradient would be lost. Branching on a comparison is fine (a bool
+   has no gradient); code differentiation cannot see through takes a
+   custom gradient (gen.custom's :gradient, array/custom-vjp); and
+   (array/stop-gradient x) reads a value on purpose, without its gradient.
+
    Given a particle collection (gen.batched) for the trace,
    choice-gradients takes every particle's at once: one batched gradient,
    where the model runs batched (gen.batched/map-particles), each particle's
@@ -119,7 +127,8 @@
    {:values the selected choices, :gradients a choice map of the same shape,
    :arg-grads one entry per argument, nil where not differentiated}.
    Differentiated arguments must be trees of floats, and the model must use
-   them through gen.array (host math on them cannot be differentiated).
+   them through gen.array (a host read or host math on them is an error:
+   see the namespace doc).
    For a particle collection (gen.batched) in place of the trace, every
    particle's, each value an array with the leading particle axis."
   ([trace selection] (choice-gradients trace selection nil nil))

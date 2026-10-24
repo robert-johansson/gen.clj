@@ -36,7 +36,8 @@
                             get contains? find get-in])
   (:require [gen.array :as array]
             [gen.array.batch :as batch]
-            [gen.array.dtype :as dt]))
+            [gen.array.dtype :as dt]
+            [gen.array.tape :as tape]))
 
 (set! *warn-on-reflection* true)
 
@@ -64,7 +65,9 @@
    differs across particles), anything else itself."
   [what x]
   (cond (batch/batched? x) (throw (branch-error what))
-        (scalar-array? x) (array/item x)
+        ;; branching, comparing and looking up have no gradient: a value
+        ;; being differentiated is read on purpose (gen.array.tape)
+        (scalar-array? x) (array/item (cond-> x (tape/tracked? x) array/stop-gradient))
         :else x))
 
 (defn- tested
