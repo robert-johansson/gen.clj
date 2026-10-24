@@ -51,21 +51,27 @@
 
 (def dir "book")
 
-(defn chapters
-  "The book's chapters, its numbered Markdown files (011-getting-started.md),
-   in order."
-  []
-  (->> (.listFiles (io/file dir))
-       (filter #(re-matches #"\d{3}-.*\.md" (.getName ^java.io.File %)))
-       (sort-by #(.getName ^java.io.File %))
-       (mapv #(.getPath ^java.io.File %))))
-
 (defn source-file
   "The namespace file of a chapter: book/011-getting-started.md's is
    book/src/book/getting_started.clj."
   [chapter]
   (let [[_ name] (re-matches #"\d{3}-(.*)\.md" (.getName (io/file chapter)))]
     (str dir "/src/book/" (str/replace name "-" "_") ".clj")))
+
+(defn book-files
+  "The book's numbered Markdown files, in order: its chapters, and the
+   pages without code (a part's heading, front matter)."
+  []
+  (->> (.listFiles (io/file dir))
+       (filter #(re-matches #"\d{3}-.*\.md" (.getName ^java.io.File %)))
+       (sort-by #(.getName ^java.io.File %))
+       (mapv #(.getPath ^java.io.File %))))
+
+(defn chapters
+  "The book's chapters: its numbered Markdown files with a namespace of
+   code (source-file), in order."
+  []
+  (filterv #(.exists (io/file (source-file %))) (book-files)))
 
 ;; ---------------------------------------------------------------------------
 ;; Regions and includes
@@ -287,7 +293,7 @@
   (let [args (into ["pandoc" (str "--metadata-file=" dir "/metadata.yaml") "--top-level-division=chapter"
                     "--pdf-engine=xelatex" "--syntax-highlighting=tango" (str "--resource-path=" dir)
                     "-o" pdf-file]
-                   (chapters))
+                   (book-files))
         _ (io/make-parents pdf-file)
         exit (try (-> (ProcessBuilder. ^java.util.List args) (.inheritIO) (.start) (.waitFor))
                   (catch java.io.IOException e

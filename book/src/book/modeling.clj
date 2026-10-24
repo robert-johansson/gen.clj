@@ -80,7 +80,7 @@
 
 ;; book: not-a-choice
 ;; error: trace at [:not-a-random-choice] needs a distribution
-(gfi/simulate (gen [x] (trace :not-a-random-choice (array/sin x)))
+#_(gfi/simulate (gen [x] (trace :not-a-random-choice (array/sin x)))
               [1.0] (rng/key 3))
 
 ;; book: line-model
@@ -330,7 +330,7 @@ spread
 
 ;; book: clash
 ;; error: Address [:y] is used twice
-(gfi/simulate (gen [] (splice foo) (splice foo)) [] (rng/key 15))
+#_(gfi/simulate (gen [] (splice foo) (splice foo)) [] (rng/key 15))
 
 ;; book: combined-model
 (def sine-model-fancy
@@ -518,7 +518,7 @@ line-probabilities
 
 ;; book: solution-1
 ;; error: Address [:x] is used twice
-(gfi/simulate (gen [] (trace :x (d/normal 0 1)) (trace :x (d/normal 0 1)))
+#_(gfi/simulate (gen [] (trace :x (d/normal 0 1)) (trace :x (d/normal 0 1)))
               [] (rng/key 28))
 
 ;; book: solution-2
