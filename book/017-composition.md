@@ -740,11 +740,11 @@ args)` draws an index from `(d/categorical weights)`, at the address
 
 (def mixed (gfi/simulate either [[0.3 0.7] xs2] (rng/key 16)))
 
-(take 3 (cm/addresses (:choices mixed)))
-;=> [[:component :curvature] [:component :intercept] [:component :slope]]
-
 (mixed :index)
 ;=> 1 ; float64
+
+(take 2 (cm/addresses (:choices mixed)))
+;=> [[:component :curvature] [:component :intercept]] ; float64
 ```
 
 GenMLX's Mix keeps its index at `:component-idx` and the component's
@@ -754,8 +754,9 @@ log probability plus the component's score:
 
 <!-- code: mix-score -->
 ```clojure
-(array/allclose? (:score mixed)
-                 (+ (Math/log 0.7) (:score (trace/subtrace mixed :component))))
+(let [weight (nth [0.3 0.7] (array/item (mixed :index)))
+      component (trace/subtrace mixed :component)]
+  (array/allclose? (:score mixed) (+ (Math/log weight) (:score component))))
 ;=> true
 ```
 

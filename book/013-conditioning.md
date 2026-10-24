@@ -591,8 +591,9 @@ errors of 0.1, and the kept runs' mean bias is within five of 4/7:
   "The traces, among n simulations of model on args, that agree with the
    observations."
   [model args observations n key]
-  (filterv #(agrees? % observations)
-           (mapv #(gfi/simulate model args %) (rng/split key n))))
+  (into [] (comp (map #(gfi/simulate model args %))
+                 (filter #(agrees? % observations)))
+        (rng/split key n)))
 
 (def kept (rejection coin [3] (observations :flip flips) 5000 (rng/key 13)))
 

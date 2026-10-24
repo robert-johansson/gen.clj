@@ -193,26 +193,30 @@ The inference program uses *importance resampling*. It runs the model `n`
 times with `gfi/generate`, each run constrained by the observations, and
 weighs each run by how probable it makes them. Then it draws one run in
 proportion to its weight. As `n` grows, that run's distribution approaches
-the posterior. With `:batched? true` the `n` runs execute as one batched
-execution of the model; a model whose control flow depends on its choices
-runs them one at a time instead.
+the posterior. The runs go one at a time, and only the one to be returned
+is kept, so `n` can be as large as the answer needs, for any model on any
+backend. With `{:batched? true}` the `n` runs execute as one batched
+execution of the model instead, which is faster for a model whose runs all
+visit the same addresses, as the line's do; *Speeding Up* explains it.
 
 <!-- code: do-inference -->
 ```clojure
 (defn do-inference
   "A trace of model on xs, approximately from the posterior given ys: one of
-   n importance samples, drawn in proportion to its weight."
-  [model xs ys n key]
+   n importance samples, drawn in proportion to its weight. opts may add
+   {:batched? true}."
+  [model xs ys n key & [opts]]
   (:trace (is/importance-resampling model [xs] (observations ys) n
-                                    {:key key :batched? true})))
+                                    (merge {:key key} opts))))
 
 (defn answers
   "k traces of model, each from its own inference on (xs, ys) with n
-   samples."
-  [model xs ys n k key]
-  (mapv #(do-inference model xs ys n %) (rng/split key k)))
+   samples. opts as do-inference's."
+  [model xs ys n k key & [opts]]
+  (mapv #(do-inference model xs ys n % opts) (rng/split key k)))
 
-(def line-answers (answers line-model xs ys 100 10 (rng/key 7)))
+(def line-answers
+  (answers line-model xs ys 100 10 (rng/key 7) {:batched? true}))
 ```
 
 <!-- code: posterior-figure -->
@@ -311,7 +315,7 @@ from $x = -5$ to $x = 10$, past the data:
   [model xs ys new-xs param-addrs num-traces n key]
   (mapv (fn [k]
           (let [[k-infer k-predict] (rng/split k)
-                tr (do-inference model xs ys n k-infer)]
+                tr (do-inference model xs ys n k-infer {:batched? true})]
             (predict-new-data model tr new-xs param-addrs k-predict)))
         (rng/split key num-traces)))
 
@@ -421,9 +425,12 @@ args…)`, Gen.jl's `{*} ~ f(args…)`, puts the callee's choices among the
 caller's own. `(splice addr f args…)`, Gen.jl's `{addr} ~ f(args…)`, puts
 them under `addr`. A nested address is a path: Gen.jl's `:z => :y` is
 `[:z :y]`, and a trace takes a path wherever it takes an address. A plain
-call, `(f args…)`, runs `f` untraced: its choices are lost to the caller,
-and it draws with a key from the implicit source, so the caller's run no
-longer repeats with its own key. Gen.jl advises against it too.
+call, `(f args…)`, runs `f` untraced: its choices are lost to the caller.
+Its key comes from the caller's own encapsulated randomness, so the
+caller's run still repeats with its key, but the caller's score no longer
+accounts for `f`'s choices: it is an estimate, which operations that need
+exact densities (gradients, HMC) refuse. Gen.jl advises against plain
+calls too.
 
 <!-- code: foo-bar -->
 ```clojure
@@ -452,7 +459,7 @@ longer repeats with its own key. Gen.jl advises against it too.
 ;=> []
 
 (apply = (repeatedly 2 #(:retval (gfi/simulate plain-call [] (rng/key 16)))))
-;=> false
+;=> true
 ```
 
 A splice without an address shares the caller's namespace, so splicing
@@ -506,11 +513,12 @@ is a line, since each answer is one draw from an approximation:
 
 ![Six answers of the combined model on the sine data](figures/012-combined.svg)
 
-Importance sampling's weights tell which model explains a data set.
-`is/importance-sampling` returns all `n` runs with their normalized log
-weights, and the share of the weight on runs with a line estimates the
-posterior probability of a line. The line explains the first data set,
-and the sine wave explains `ys-sine`:
+Importance sampling's weights tell which model explains a data set. The
+share of the weight on runs with a line estimates the posterior
+probability of a line. `is/estimate` computes such a weighted average of a
+function of the runs, here 1 for a line and 0 for a sine wave, keeping no
+runs. The line explains the first data set, and the sine wave explains
+`ys-sine`:
 
 <!-- code: probability -->
 ```clojure
@@ -519,10 +527,8 @@ and the sine wave explains `ys-sine`:
    holds of model's trace given ys: the share of n samples' weight on the
    traces where it does."
   [pred model xs ys n key]
-  (let [result (is/importance-sampling model [xs] (observations ys) n
-                                       {:key key :batched? true})]
-    (reduce + (map (fn [t log-w] (if (pred t) (Math/exp log-w) 0.0))
-                   (is/traces result) (:log-normalized-weights result)))))
+  (:estimate (is/estimate #(if (pred %) 1.0 0.0)
+                          model [xs] (observations ys) n {:key key})))
 
 (defn line?
   "Did trace t of combined-model choose the line?"
@@ -777,7 +783,7 @@ can no longer tell them apart:
         (for [n [1 10 100 1000 10000]]
           [n (mapv squared-distance
                    (answers line-model xs ys n 20
-                            (rng/fold-in (rng/key 29) n)))])))
+                            (rng/fold-in (rng/key 29) n) {:batched? true}))])))
 
 (update-vals errors-by-n #(Math/round (double (average %))))
 ;=> {1 47220, 10 3214, 100 318, 1000 40, 10000 4} ; float64
@@ -830,7 +836,7 @@ periods. Under gamma(5, 1), whose mean is 5, they have the long period:
   "The fraction of 40 answers of model on ys-sine whose period is over 3."
   [model key]
   (fraction #(> (array/item (% :period)) 3)
-            (answers model xs ys-sine 1000 40 key)))
+            (answers model xs ys-sine 1000 40 key {:batched? true})))
 
 (def fractions
   [(long-period-fraction sine-model (rng/key 30))

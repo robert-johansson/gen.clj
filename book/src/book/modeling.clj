@@ -157,18 +157,20 @@
 ;; book: do-inference
 (defn do-inference
   "A trace of model on xs, approximately from the posterior given ys: one of
-   n importance samples, drawn in proportion to its weight."
-  [model xs ys n key]
+   n importance samples, drawn in proportion to its weight. opts may add
+   {:batched? true}."
+  [model xs ys n key & [opts]]
   (:trace (is/importance-resampling model [xs] (observations ys) n
-                                    {:key key :batched? true})))
+                                    (merge {:key key} opts))))
 
 (defn answers
   "k traces of model, each from its own inference on (xs, ys) with n
-   samples."
-  [model xs ys n k key]
-  (mapv #(do-inference model xs ys n %) (rng/split key k)))
+   samples. opts as do-inference's."
+  [model xs ys n k key & [opts]]
+  (mapv #(do-inference model xs ys n % opts) (rng/split key k)))
 
-(def line-answers (answers line-model xs ys 100 10 (rng/key 7)))
+(def line-answers
+  (answers line-model xs ys 100 10 (rng/key 7) {:batched? true}))
 
 ;; book: posterior-figure
 ;; figure: figures/012-line-posterior.svg
@@ -230,7 +232,7 @@ spread
   [model xs ys new-xs param-addrs num-traces n key]
   (mapv (fn [k]
           (let [[k-infer k-predict] (rng/split k)
-                tr (do-inference model xs ys n k-infer)]
+                tr (do-inference model xs ys n k-infer {:batched? true})]
             (predict-new-data model tr new-xs param-addrs k-predict)))
         (rng/split key num-traces)))
 
@@ -326,7 +328,7 @@ spread
 ;=> []
 
 (apply = (repeatedly 2 #(:retval (gfi/simulate plain-call [] (rng/key 16)))))
-;=> false
+;=> true
 
 ;; book: clash
 ;; error: Address [:y] is used twice
@@ -366,10 +368,8 @@ spread
    holds of model's trace given ys: the share of n samples' weight on the
    traces where it does."
   [pred model xs ys n key]
-  (let [result (is/importance-sampling model [xs] (observations ys) n
-                                       {:key key :batched? true})]
-    (reduce + (map (fn [t log-w] (if (pred t) (Math/exp log-w) 0.0))
-                   (is/traces result) (:log-normalized-weights result)))))
+  (:estimate (is/estimate #(if (pred %) 1.0 0.0)
+                          model [xs] (observations ys) n {:key key})))
 
 (defn line?
   "Did trace t of combined-model choose the line?"
@@ -527,7 +527,7 @@ line-probabilities
         (for [n [1 10 100 1000 10000]]
           [n (mapv squared-distance
                    (answers line-model xs ys n 20
-                            (rng/fold-in (rng/key 29) n)))])))
+                            (rng/fold-in (rng/key 29) n) {:batched? true}))])))
 
 (update-vals errors-by-n #(Math/round (double (average %))))
 ;=> {1 47220, 10 3214, 100 318, 1000 40, 10000 4} ; float64
@@ -562,7 +562,7 @@ line-probabilities
   "The fraction of 40 answers of model on ys-sine whose period is over 3."
   [model key]
   (fraction #(> (array/item (% :period)) 3)
-            (answers model xs ys-sine 1000 40 key)))
+            (answers model xs ys-sine 1000 40 key {:batched? true})))
 
 (def fractions
   [(long-period-fraction sine-model (rng/key 30))
