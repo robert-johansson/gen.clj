@@ -284,6 +284,60 @@
               (is (every? true? (map #(close? %1 (:weight (gfi/assess gf (args-at 0.0) (:choices %2))))
                                      (array/->clj (b/scores back)) (b/traces back)))))))))))
 
+;; Element scores at +Inf (beta(a, 1) at 0 for a < 1) and NaN (+Inf beside
+;; a choice out of its support, in one element), in and out (genclj-ul72):
+;; the score is the IEEE sum of the element scores at every stage. Planted
+;; bugs (2026-10-24): the counts never decremented fails every kind's stages
+;; after a score left an infinity, on the host and per particle (and the
+;; test above); a NaN counted only as -Inf fails the stage with a NaN
+;; element.
+(deftest a-score-at-infinity-or-nan-is-the-sum-of-the-element-scores
+  (let [kinds [["Map" (comb/map (gen [a lo] (trace :p (d/beta a 1.0)) (trace :u (d/uniform lo (+ lo 1.0)))))
+                (fn [a lo0 lo1] [[a a] [lo0 lo1]])]
+               ["Unfold" (comb/unfold (gen [t _s a lo0 lo1]
+                                        (let [lo (if (zero? t) lo0 lo1)]
+                                          (trace :p (d/beta a 1.0))
+                                          (trace :u (d/uniform lo (+ lo 1.0))))))
+                (fn [a lo0 lo1] [2 0.0 a lo0 lo1])]
+               ["Scan" (comb/scan (gen [c lo a] (trace :p (d/beta a 1.0)) [c (trace :u (d/uniform lo (+ lo 1.0)))]))
+                (fn [a lo0 lo1] [0.0 [lo0 lo1] a])]]
+        ;; [a lo0 lo1] and the score, element 0's :p at 0 and element 1's at 0.5
+        stages [[[1.0 0.0 0.0] 0.0]
+                [[0.5 0.0 0.0] ##Inf]
+                [[0.5 5.0 0.0] ##NaN]
+                [[0.5 0.0 5.0] ##NaN]
+                [[1.0 0.0 5.0] ##-Inf]
+                [[1.0 0.0 0.0] 0.0]
+                [[0.5 0.0 0.0] ##Inf]]
+        same? #(ts/close? %1 %2 {:equal-nan? true})
+        unknown #(vec (repeat (count %) diff/unknown-change))]
+    (doseq [[label gf args-at] kinds
+            :let [at (fn [[a lo0 lo1]] (args-at a lo0 lo1))
+                  first-args (at (ffirst stages))]]
+      (testing label
+        (let [tr (:trace (gfi/generate gf first-args (cm/from-map {0 {:p 0.0 :u 0.5} 1 {:p 0.5 :u 0.5}}) (rng/key 1)))]
+          (reduce (fn [tr [params score]]
+                    (let [args (at params)
+                          t2 (:trace (gfi/update tr args (unknown args) cm/EMPTY (rng/key 2)))]
+                      (is (same? score (:score t2)) (str "at " params))
+                      (is (same? (:weight (gfi/assess gf args (:choices t2))) (:score t2)) (str "assessed, at " params))
+                      t2))
+                  tr stages))
+        (testing ", per particle"
+          ;; particle i's element 0 at :p 0 (even i) or 0.5 (odd)
+          (binding [b/*spot-checks* 0]
+            (let [own (mapv #(cm/from-map {0 {:p (if (even? %) 0.0 0.5) :u 0.5} 1 {:p 0.5 :u 0.5}}) (range 4))
+                  ps (:particles (b/generate gf first-args cm/EMPTY 4 (rng/key 3) {:per-particle own}))]
+              (reduce (fn [ps params]
+                        (let [args (at params)
+                              out (:particles (b/update ps args (unknown args) cm/EMPTY (rng/key 4)))]
+                          (is (b/batched? out))
+                          (is (every? true? (map #(same? %1 (:weight (gfi/assess gf args (:choices %2))))
+                                                 (array/->clj (b/scores out)) (b/traces out)))
+                              (str "at " params))
+                          out))
+                      ps (map first stages)))))))))
+
 ;; ---------------------------------------------------------------------------
 ;; Precise change hints give the same results as unknown-change (law 8)
 ;; ---------------------------------------------------------------------------

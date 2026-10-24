@@ -447,6 +447,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
 - **Namespace root: `gen`** (`gen.choicemap`, `gen.dynamic`, …). The collision
   with probcomp/Gen.clj's `gen.*` is accepted, since the two are never on one
   classpath. Maven coordinates are decided at first publish.
+- **A 1.0 for dependents** (owner, 2026-10-24): memo.clj's 1.0 should
+  probably wait for gen.clj's 1.0 rather than pin a commit. Until then
+  dependents pin a commit. The 1.0's scope (which surface it freezes, modules
+  first or not, the post-M5 fixes) is open: genclj-04h2.
 - **Indices are 0-based** (Clojure idiom, as in GenMLX; D2): Map's and
   Unfold's addresses, Recurse's nodes (root 0), categorical's values
   (categorical-logits' too: 0 to n - 1) and Switch's branch index (branch 0
@@ -2244,20 +2248,35 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     found; the remedy PROVISIONAL).** Map's, Unfold's and Scan's scores are
     running totals (score + new − old per changed element), as Gen.jl's.
     After a choice left its support and came back, the total was
-    −Inf + Inf = NaN where the density is finite, silently. Where an update
-    or regenerate subtracted an element's old score and the total is NaN,
-    the score is now the sum of the elements' scores: on the host only
-    then, and per particle under the batch tracer by a `where` (no host
-    read). A general law holds every kind to it: an updated or regenerated
-    trace's score is the assessed density of its choices, through chains
-    that leave a support and come back (models with bounded kernels
-    exercise it). The cost: nothing where nothing is subtracted (a
-    particle filter's extension); a batched Unfold of 1000 particles
-    revisiting one step of 500 went from 284 to 717 µs, since the where
-    sums every element. Alternatives: always recomputing (3× on the
-    batched extension); counts of infinite elements beside a finite part,
-    or a pairwise sum tree (O(log n) per change, its rounding unlike
-    assess's sequential sum), not built.
+    −Inf + Inf = NaN where the density is finite, silently. A general law
+    holds every kind to it: an updated or regenerated trace's score is the
+    assessed density of its choices, through chains that leave a support
+    and come back (models with bounded kernels exercise it).
+    - **The remedy: counts beside a finite sum (genclj-ul72, 2026-10-24,
+      PROVISIONAL, owner to confirm).** A trace keeps its total as three
+      numbers: the sum of the finite element scores, the count of scores
+      not above −Inf, and the count not below +Inf. A NaN is in both
+      counts, as −Inf + Inf is NaN. A change updates them in O(1), and the
+      score is their IEEE sum: what summing the element scores gives
+      (assess), so +Inf scores (beta(a, 1) at 0 for a < 1) and NaN ones
+      come and go exactly too. The finite part rounds as the running total
+      it was before awd0. Scalar runs branch on the host value (no array
+      ops); a batched or MLX run pays 9 ops per element added or taken out
+      and 6 per trace for the score. Measured (`gen.model-bench
+      long-unfold`, a 500-step Unfold, JVM backend, paired runs): a batched
+      update revisiting one step, 650–714 µs before, 274–278 µs now (284
+      before awd0); a batched extension by one step (a particle filter's)
+      118 µs before, 132 µs now; batched generate and every scalar case
+      unchanged within noise.
+    - **The remedy it replaced (awd0's):** where an update or regenerate
+      subtracted an element's score and the total was NaN, the score was
+      the sum of the elements' scores: on the host only then, and per
+      particle under the batch tracer by a `where`, which summed every
+      element whenever one was taken out. Free on the extension, but O(n)
+      per revisit under the batch tracer.
+    - Alternatives: always recomputing (3× on the batched extension); a
+      pairwise sum tree (O(log n) per change, its rounding unlike assess's
+      sequential sum).
   - **Conjugacy, and Kalman and HMM generative functions (genclj-702q;
     PROVISIONAL, owner to confirm).** Chosen by the user, never detected
     (§3.1's corollary).

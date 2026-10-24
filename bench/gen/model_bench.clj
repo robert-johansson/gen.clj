@@ -5,7 +5,8 @@
    tens of µs); and the cost per traced choice, linreg with K
    observations (against Gen.jl's dynamic DSL, docs/benchmarks.md).
    Run: clojure -M:bench -m gen.model-bench              (add :c2 to compare with C2)
-        clojure -M:bench -m gen.model-bench per-choice   (the cost per choice alone)"
+        clojure -M:bench -m gen.model-bench per-choice   (the cost per choice alone)
+        clojure -M:bench -m gen.model-bench long-unfold  (a 500-step Unfold's running total)"
   (:refer-clojure :exclude [+ *])
   (:require [criterium.core :as crit]
             [gen.array :as array :refer [+ *]]
@@ -80,7 +81,32 @@
     (doseq [[label f] cases]
       (println (format "%-52s %10.2f µs" label (us-per-call f))))))
 
+(defn- long-unfold
+  "A 500-step Unfold, scalar and as 1000 batched particles: an update that
+   revisits one step (its :y, so no later step), whose score changes by one
+   step's, and an extension by one step (a particle filter's), against
+   generating every step. Batched runs without spot checks: the run alone."
+  []
+  (println "\n== A 500-step Unfold: revisiting one step, extending by one ==")
+  (binding [b/*spot-checks* 0]
+    (let [n 500
+          k (rng/key 1)
+          obs (apply cm/choicemap (mapcat (fn [t] [[t :y] 0.1]) (range n)))
+          tr (:trace (gfi/generate unfolded [n 0.0] obs k))
+          ps (:particles (b/generate unfolded [n 0.0] obs 1000 k))
+          same [diff/no-change diff/no-change]
+          longer [diff/unknown-change diff/no-change]
+          cases [["scalar: generate" #(gfi/generate unfolded [n 0.0] obs k)]
+                 ["scalar: update one step's :y" #(gfi/update tr [n 0.0] same (cm/choicemap [250 :y] 0.3) k)]
+                 ["scalar: extend by one step" #(gfi/update tr [(inc n) 0.0] longer (cm/choicemap [n :y] 0.2) k)]
+                 ["×1000 batched: generate" #(b/generate unfolded [n 0.0] obs 1000 k)]
+                 ["×1000 batched: update one step's :y" #(b/update ps [n 0.0] same (cm/choicemap [250 :y] 0.3) k)]
+                 ["×1000 batched: extend by one step" #(b/update ps [(inc n) 0.0] longer (cm/choicemap [n :y] 0.2) k)]]]
+      (doseq [[label f] cases]
+        (println (format "  %-50s %10.2f µs" label (us-per-call f)))))))
+
 (defn -main [& [arg]]
   (case arg
     "per-choice" (per-choice)
+    "long-unfold" (long-unfold)
     (do (model-costs) (per-choice))))
