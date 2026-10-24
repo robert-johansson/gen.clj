@@ -288,6 +288,63 @@
         (check-figures (:figures r))
         r))))
 
+;; ---------------------------------------------------------------------------
+;; Pages written from the code
+;; ---------------------------------------------------------------------------
+
+(defn- first-paragraph [doc]
+  (-> (str/trim (or doc "")) (str/split #"\n\s*\n") first (str/replace #"\s*\n\s*" " ") (str/replace "*" "\\*")))
+
+(defn- flag?
+  "Does the multimethod mm answer true for the distribution family named
+   type-kw, whatever its parameters (a flag: ^:discrete, ^:pathwise)?"
+  [mm type-kw]
+  (boolean (when-let [m (get (methods mm) type-kw)]
+             (try (m {:type type-kw}) (catch Exception _ false)))))
+
+(defn distributions-page
+  "The appendix of distributions: every constructor of gen.dist, in source
+   order, with its parameters, whether its values are discrete, whether it
+   samples pathwise, and its docstring's first paragraph."
+  []
+  (require 'gen.dist 'gen.dist.core)
+  (let [constructor? #(get (meta %) (keyword "gen.dist.core" "constructor"))
+        ctors (->> (ns-publics 'gen.dist) vals (filter constructor?) (sort-by #(:line (meta %))))
+        discrete (resolve 'gen.dist.core/-discrete?)
+        pathwise (resolve 'gen.dist.core/-pathwise?)
+        entry (fn [v]
+                (let [{:keys [name arglists doc]} (meta v)
+                      type-kw (keyword "gen.dist" (str name))
+                      call (if-let [args (first arglists)]
+                             (str "(d/" name (apply str (map #(str " " %) args)) ")")
+                             (str "(d/" name " …)"))
+                      flags (cond-> [] (flag? @discrete type-kw) (conj "discrete") (flag? @pathwise type-kw) (conj "pathwise"))]
+                  (str "## " name "\n\n`" call "`" (when (seq flags) (str " · " (str/join ", " flags))) "\n\n"
+                       (first-paragraph doc) "\n")))]
+    (str "# The Distributions\n\n"
+         "Every distribution in `gen.dist`, in the order its source defines them, with its parameters and the first "
+         "paragraph of its docstring. The names and parameterizations are Gen.jl's; families Gen.jl does not have take "
+         "Distributions.jl's parameters. A *discrete* family has discrete values. A *pathwise* one samples by a "
+         "differentiable transform of noise drawn apart from its parameters, which variational inference's pathwise "
+         "estimator needs. `gen.dist.dsl/dist` defines more distributions as pushforwards, Gen.jl's `@dist`, and "
+         "`gen.dist.host` wraps host libraries' families.\n\n"
+         "This page is written from the code (`clojure -M:test -m gen.book sync`), and the book's test fails when it "
+         "is out of date.\n\n"
+         (str/join "\n" (map entry ctors)))))
+
+(def generated
+  "The book's pages written from the code: file name to a function of no
+   arguments giving its text."
+  {"062-distributions.md" distributions-page})
+
+(defn check-generated
+  "Every page written from the code holds what the code gives now."
+  []
+  (doseq [[file page] generated
+          :let [f (io/file dir file)]]
+    (testing file
+      (is (and (.exists f) (= (page) (slurp f))) (str (.getPath f) " is stale: clojure -M:test -m gen.book sync")))))
+
 (def pdf-file "target/book/gen-clj-book.pdf")
 
 (defn pdf!
@@ -315,11 +372,18 @@
 
 (defn -main
   "sync [chapter …]: write the chapters' includes from their regions, and
-   their figures (every chapter when none is named).
+   their figures (every chapter when none is named, and then the pages
+   written from the code too).
    check [chapter …]: run the chapters' checks, print a summary, and exit 1
    on a failure.
    pdf: build the book as a PDF."
   [& [what & named]]
+  (when (and (= what "sync") (empty? named))
+    (doseq [[file page] generated
+            :let [f (io/file dir file) text (page)]]
+      (when-not (and (.exists f) (= text (slurp f)))
+        (spit f text)
+        (println "wrote" (.getPath f)))))
   (case what
     "sync" (doseq [chapter (or (seq named) (chapters))
                    :let [rs (regions (slurp (source-file chapter)))
