@@ -146,3 +146,55 @@
                 (str "<rect x=\"" (- width 120) "\" y=\"" (fmt (- y 9.0)) "\" width=\"12\" height=\"10\" fill=\""
                      color "\" fill-opacity=\"0.6\"/><text x=\"" (- width 102) "\" y=\"" (fmt y) "\">" label
                      "</text>")))))))
+(defn tree
+  "The address tree of paths (a choice map's addresses, or any vectors of
+   addresses): a node for each distinct prefix, the root at the top, and the
+   paths' last addresses, the choices, shaded at the ends of their branches.
+   Children keep the order of the paths. Options: :root, the root's label
+   (default \"trace\")."
+  [paths & [opts]]
+  (let [root (get opts :root "trace")
+        ;; [[addr subtree] …] for paths sharing their first addresses
+        grow (fn grow [ps]
+               (let [ps (remove empty? ps)]
+                 (vec (for [a (distinct (map first ps))]
+                        [a (grow (map rest (filter #(= a (first %)) ps)))]))))
+        nodes (grow (map seq paths))
+        depth (fn depth [kids] (if (empty? kids) 0 (inc (apply max (map (comp depth second) kids)))))
+        levels (max 1 (depth nodes))
+        leaves (fn leaves [kids] (if (empty? kids) 1 (reduce + (map (comp leaves second) kids))))
+        n (leaves nodes)
+        row 56.0
+        h (long (+ 40.0 (* row levels)))
+        dx (/ (double width) n)
+        ;; [x y label leaf? parent-x parent-y] of every node below the root
+        place (fn place [kids first-leaf level px py]
+                (loop [kids kids i first-leaf out []]
+                  (if-let [[a sub] (first kids)]
+                    (let [k (leaves sub)
+                          x (* dx (+ i (/ k 2.0)))
+                          y (+ 20.0 (* row level))]
+                      (recur (rest kids) (+ i k)
+                             (into (conj out [x y (pr-str a) (empty? sub) px py])
+                                   (place sub i (inc level) x y))))
+                    out)))
+        rx (/ (double width) 2.0)
+        placed (place nodes 0 1 rx 20.0)
+        box (fn [x y label leaf?]
+              (let [w (+ 10.0 (* 6.5 (count label)))]
+                (str "<g><rect x=\"" (fmt (- x (/ w 2.0))) "\" y=\"" (fmt (- y 9.0)) "\" width=\"" (fmt w)
+                     "\" height=\"18\" rx=\"3\" fill=\"" (if leaf? "#dbe7f3" "white")
+                     "\" stroke=\"steelblue\"/><text x=\"" (fmt x) "\" y=\"" (fmt (+ y 4.0))
+                     "\" text-anchor=\"middle\">" label "</text></g>")))]
+    (str/join
+     "\n"
+     (concat
+      [(str "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" width "\" height=\"" h
+            "\" viewBox=\"0 0 " width " " h "\" font-family=\"sans-serif\" font-size=\"11\">")
+       "<rect width=\"100%\" height=\"100%\" fill=\"white\"/>"]
+      (for [[x y _ _ px py] placed]
+        (str "<line x1=\"" (fmt px) "\" y1=\"" (fmt (+ py 9.0)) "\" x2=\"" (fmt x) "\" y2=\"" (fmt (- y 9.0))
+             "\" stroke=\"gray\"/>"))
+      [(box rx 20.0 root false)]
+      (for [[x y label leaf?] placed] (box x y label leaf?))
+      ["</svg>"]))))
