@@ -447,6 +447,14 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
 - **Namespace root: `gen`** (`gen.choicemap`, `gen.dynamic`, …). The collision
   with probcomp/Gen.clj's `gen.*` is accepted, since the two are never on one
   classpath. Maven coordinates are decided at first publish.
+- **The book is Markdown whose code runs** (owner, 2026-10-24; genclj-ceds).
+  No Clerk and no notebooks. The chapters are Markdown files (`book/`), and
+  their code snippets are verified for real: a test runs every ```clojure
+  block of a chapter, in order, on every backend, as memo.clj's HANDBOOK.md
+  does. A `;=>` marker after a form checks its result, a number to the
+  digits it shows. A statistical claim is a check written in the snippet.
+  Figures are SVG files made by the book's own code, and a test fails when
+  one is stale.
 - **A 1.0 for dependents** (owner, 2026-10-24): memo.clj's 1.0 should
   probably wait for gen.clj's 1.0 rather than pin a commit. Until then
   dependents pin a commit. There is no rush for memo.clj: gen.clj's 1.0
