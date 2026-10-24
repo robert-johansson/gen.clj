@@ -1,8 +1,18 @@
 (ns gen.book
-  "The book (book/) is Markdown whose code runs (DESIGN.md §9). Every
-   ```clojure block of a chapter runs, in order, in one namespace (the first
-   block's ns form names it), with output discarded. Markers make a block a
-   check:
+  "The book (book/) is Markdown whose code runs (DESIGN.md §9).
+
+   A chapter book/NNN-name.md keeps its code in a namespace,
+   book/src/book/name.clj, written and run at the REPL. A line
+   `;; book: region` there starts a region, which runs to the next such
+   line. The Markdown includes a region with a line `<!-- code: region -->`
+   followed by a ```clojure block holding the region's text, which
+   `clojure -M:test -m gen.book sync` writes. Every ```clojure block of a
+   chapter is such an include, so no code in the book goes untested.
+
+   A chapter's test checks that every include holds its region's text,
+   then runs the namespace region by region, form by form, in one
+   namespace (the first region's ns form names it), output discarded.
+   Comments in the code make checks:
 
    - `;=> value` after a form: the form's result, read back as Clojure data
      (gen.array arrays by gen.array/->clj), equals value, which is read, not
@@ -12,20 +22,19 @@
    - `;=> value ; float64`: the same, checked only where the default float
      is float64 (the JVM backend; MLX with -Dgen.mlx.dtypes=64). For a
      sampled value: a key draws other values in float32.
-   - `;; error: message` as a block's first line: one of its forms throws an
-     ex-info whose message begins with message. The forms after it do not
-     run.
-   - a line `prints` right after a block, then a ```text block: what the
-     block printed, its lines trimmed.
-   - `;; figure: path` as a block's first line: its last form returns a
+   - `;; error: message` as a region's first line: one of its forms throws
+     an ex-info whose message begins with message. The forms after it do
+     not run.
+   - `;; figure: path` as a region's first line: its last form returns a
      figure's SVG text (gen.book.svg), which is the file book/path. On the
      JVM backend the test fails when the file differs (a stale figure);
-     `clojure -M:test -m gen.book figures` writes them.
+     sync writes it.
 
-   A statistical claim is a check written in the block (a band from the
+   A statistical claim is a check written in the code (a band from the
    estimator's standard error, `;=> true`), so it holds on every backend.
 
-   (run-chapter file) runs one at the REPL; gen.book-test runs them all."
+   (run-chapter \"book/011-getting-started.md\") runs one at the REPL;
+   gen.book-test runs them all."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [is testing]]
@@ -43,20 +52,74 @@
        (sort-by #(.getName ^java.io.File %))
        (mapv #(.getPath ^java.io.File %))))
 
-(defn blocks
-  "The clojure blocks of a Markdown text: {:line :code :printed}, line being
-   the opening fence's, and printed the text block after a line `prints`."
+(defn source-file
+  "The namespace file of a chapter: book/011-getting-started.md's is
+   book/src/book/getting_started.clj."
+  [chapter]
+  (let [[_ name] (re-matches #"\d{3}-(.*)\.md" (.getName (io/file chapter)))]
+    (str dir "/src/book/" (str/replace name "-" "_") ".clj")))
+
+;; ---------------------------------------------------------------------------
+;; Regions and includes
+;; ---------------------------------------------------------------------------
+
+(defn regions
+  "The regions of a chapter's source, in order: {:name :line :code}, line
+   being the `;; book:` line's. Text before the first is not a region."
   [text]
-  (let [m (re-matcher #"(?ms)^```clojure\n(.*?)^```\n(?:\nprints\n\n```text\n(.*?)^```\n)?" text)]
+  (let [lines (str/split-lines text)
+        starts (keep-indexed (fn [i l] (when-let [[_ n] (re-matches #";; book: (\S+)\s*" l)] [i n])) lines)
+        rs (mapv (fn [[i n] end]
+                   {:name n
+                    :line (inc i)
+                    :code (str (str/trimr (str/join "\n" (drop-while str/blank? (subvec lines (inc i) end)))) "\n")})
+                 starts
+                 (concat (map first (rest starts)) [(count lines)]))
+        repeated (keep (fn [[n c]] (when (> c 1) n)) (frequencies (map :name rs)))]
+    (when (seq repeated)
+      (throw (ex-info (str "Regions named more than once: " (str/join ", " repeated)) {:names (vec repeated)})))
+    rs))
+
+(def ^:private include-re #"(?ms)^<!-- code: (\S+) -->\n(?:```clojure\n(.*?)^```\n)?")
+
+(defn includes
+  "The includes of a chapter's Markdown: {:name :code}, code being the
+   block after the marker (nil when there is none)."
+  [md]
+  (let [m (re-matcher include-re md)]
     (loop [out []]
-      (if (.find m)
-        (recur (conj out {:line (inc (count (re-seq #"\n" (subs text 0 (.start m)))))
-                          :code (.group m 1)
-                          :printed (.group m 2)}))
-        out))))
+      (if (.find m) (recur (conj out {:name (.group m 1) :code (.group m 2)})) out))))
+
+(defn synced
+  "The Markdown with each include's block holding its region's text."
+  [md regions]
+  (let [by-name (into {} (map (juxt :name :code)) regions)]
+    (str/replace md include-re
+                 (fn [[_ name]]
+                   (let [code (or (by-name name)
+                                  (throw (ex-info (str "No region " name " to include") {:region name})))]
+                     (str "<!-- code: " name " -->\n```clojure\n" code "```\n"))))))
+
+(defn check-includes
+  "Every include names a region and holds its text, and every clojure
+   block of the Markdown is an include's."
+  [md regions]
+  (let [by-name (into {} (map (juxt :name :code)) regions)
+        incs (includes md)]
+    (doseq [{:keys [name code]} incs]
+      (testing (str "the include of " name)
+        (is (contains? by-name name) (str "no region " name))
+        (when (contains? by-name name)
+          (is (= (by-name name) code) "stale: clojure -M:test -m gen.book sync"))))
+    (is (= (count (re-seq #"(?m)^```clojure$" md)) (count (filter :code incs)))
+        "every clojure block is an include (<!-- code: region -->)")))
+
+;; ---------------------------------------------------------------------------
+;; Running the code
+;; ---------------------------------------------------------------------------
 
 (defn- forms
-  "A block's forms, each with the values its ;=> markers expect:
+  "A region's forms, each with the values its ;=> markers expect:
    {:form :expect [{:value :float64?}]}."
   [code]
   (let [marked (-> code
@@ -105,28 +168,18 @@
 
 (defn- marker [code re] (second (re-find re code)))
 
-(defn- lines [s] (mapv str/trimr (str/split-lines (str/trim s))))
-
-(defn- run-block
-  "Evaluates a block's forms: {:checks n} and, for a figure, {:figure [path svg]}."
-  [{:keys [line code printed]}]
-  (testing (str "the block at line " line)
+(defn- run-region
+  "Evaluates a region's forms: {:checks n} and, for a figure, {:figure [path svg]}."
+  [{:keys [name code]}]
+  (testing (str "the region " name)
     (let [fs (forms code)
           error (marker code #"^;; error: (.*)")
           figure (marker code #"^;; figure: (\S+)")]
-      (cond
-        printed
-        (let [out (with-out-str (doseq [{:keys [form]} fs] (eval form)))]
-          (is (= (lines printed) (lines out)) (str "it printed\n" out))
-          {:checks 1})
-
-        error
+      (if error
         (let [e (try (doseq [{:keys [form]} fs] (eval form)) nil (catch Throwable e e))]
           (is (some? e) "no form threw")
           (is (some-> e ex-message (str/starts-with? error)) (str "the message is " (some-> e ex-message)))
           {:checks 1})
-
-        :else
         (reduce (fn [acc {:keys [form expect]}]
                   (let [v (try (eval form) (catch Throwable e e))]
                     (if (instance? Throwable v)
@@ -139,24 +192,24 @@
                           figure (assoc :figure [figure v]))))))
                 {:checks 0} fs)))))
 
-(defn run-text
-  "Runs the clojure blocks of a Markdown text: {:blocks :checks :figures},
-   figures a map from path to SVG text."
-  [text]
-  (let [bs (blocks text)
-        first-form (some-> (first bs) :code forms first :form)
+(defn run-regions
+  "Runs a chapter's regions in order, in the namespace the first one's ns
+   form names: {:regions :checks :figures}, figures a map from path to SVG
+   text."
+  [regions]
+  (let [first-form (some-> (first regions) :code forms first :form)
         ns-name (when (and (seq? first-form) (= 'ns (first first-form))) (second first-form))]
-    (is (some? ns-name) "the first block is an ns form")
+    (is (some? ns-name) "the first region is an ns form")
     (when ns-name (remove-ns ns-name))
     (binding [*ns* (the-ns 'user)
               *out* (java.io.StringWriter.)
               *err* (java.io.StringWriter.)]
-      (reduce (fn [acc b]
-                (let [{:keys [checks figure]} (run-block b)]
+      (reduce (fn [acc r]
+                (let [{:keys [checks figure]} (run-region r)]
                   (cond-> (update acc :checks + checks)
                     figure (assoc-in [:figures (first figure)] (second figure)))))
-              {:blocks (count bs) :checks 0 :figures {}}
-              bs))))
+              {:regions (count regions) :checks 0 :figures {}}
+              regions))))
 
 (defn check-figures
   "Each figure (a map from path to SVG text) is SVG, and on the JVM backend
@@ -165,28 +218,38 @@
   (doseq [[path svg] figures
           :let [f (io/file dir path)]]
     (testing (str "the figure " path)
-      (is (and (string? svg) (str/starts-with? svg "<svg")) "a figure block returns SVG text")
+      (is (and (string? svg) (str/starts-with? svg "<svg")) "a figure region returns SVG text")
       (when (ts/jvm?)
         (is (and (.exists f) (= svg (slurp f)))
-            (str (.getPath f) " is stale: clojure -M:test -m gen.book figures"))))))
+            (str (.getPath f) " is stale: clojure -M:test -m gen.book sync"))))))
 
 (defn run-chapter
-  "Runs a chapter and checks its figures: {:blocks :checks :figures}."
-  [file]
-  (testing file
-    (let [r (run-text (slurp file))]
-      (check-figures (:figures r))
-      r)))
+  "Checks a chapter's includes, runs its namespace and checks its figures:
+   {:regions :checks :figures}."
+  [chapter]
+  (testing chapter
+    (let [rs (regions (slurp (source-file chapter)))]
+      (check-includes (slurp chapter) rs)
+      (let [r (run-regions rs)]
+        (check-figures (:figures r))
+        r))))
 
 (defn -main
-  "figures: run every chapter and write its figures under book/."
+  "sync: write every chapter's includes from its regions, and its figures."
   [& [what]]
   (case what
-    "figures" (doseq [file (chapters)
-                      [path svg] (:figures (run-text (slurp file)))
-                      :let [f (io/file dir path)]]
-                (io/make-parents f)
-                (spit f svg)
-                (println "wrote" (.getPath f)))
-    (println "usage: clojure -M:test -m gen.book figures"))
+    "sync" (doseq [chapter (chapters)
+                   :let [rs (regions (slurp (source-file chapter)))
+                         md (slurp chapter)
+                         md' (synced md rs)]]
+             (when (not= md md')
+               (spit chapter md')
+               (println "wrote" chapter))
+             (doseq [[path svg] (:figures (run-regions rs))
+                     :let [f (io/file dir path)]]
+               (when-not (and (.exists f) (= svg (slurp f)))
+                 (io/make-parents f)
+                 (spit f svg)
+                 (println "wrote" (.getPath f)))))
+    (println "usage: clojure -M:test -m gen.book sync"))
   (shutdown-agents))

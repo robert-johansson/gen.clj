@@ -449,12 +449,17 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   classpath. Maven coordinates are decided at first publish.
 - **The book is Markdown whose code runs** (owner, 2026-10-24; genclj-ceds).
   No Clerk and no notebooks. The chapters are Markdown files (`book/`), and
-  their code snippets are verified for real: a test runs every ```clojure
-  block of a chapter, in order, on every backend, as memo.clj's HANDBOOK.md
-  does. A `;=>` marker after a form checks its result, a number to the
-  digits it shows. A statistical claim is a check written in the snippet.
-  Figures are SVG files made by the book's own code, and a test fails when
-  one is stale.
+  their code snippets are verified for real. A chapter's code lives in its
+  own namespace (`book/src/book/…`), written and run at the REPL; the
+  Markdown includes its named regions (`;; book: name` in the source,
+  `<!-- code: name -->` in the Markdown), written in by `gen.book sync`. A
+  test runs each chapter's namespace form by form on every backend and
+  fails when an included block differs from its region. A `;=>` comment
+  after a form checks its result, a number to the digits it shows. A
+  statistical claim is a check written in the code. Figures are SVG files
+  made by the book's own code, and a test fails when one is stale. (The
+  first spike tested code blocks inline in the Markdown, as memo.clj's
+  HANDBOOK.md does; the owner preferred code in .clj files, for the REPL.)
 - **A 1.0 for dependents** (owner, 2026-10-24): memo.clj's 1.0 should
   probably wait for gen.clj's 1.0 rather than pin a commit. Until then
   dependents pin a commit. There is no rush for memo.clj: gen.clj's 1.0

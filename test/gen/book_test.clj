@@ -1,18 +1,20 @@
 (ns gen.book-test
-  "The book runs (gen.book): every chapter's blocks in order, their ;=>
-   values and figures checked. And the runner can fail: a wrong value, a
-   float past the digits it shows, a block that throws, an error that does
-   not come, wrong printed output and a stale figure each fail it."
+  "The book runs (gen.book): every chapter's includes hold their regions,
+   and its namespace runs with its ;=> values and figures checked. And the
+   runner can fail: a wrong value, a float past the digits it shows, a
+   throw, an error that does not come, a stale or missing include, a code
+   block outside an include and a stale figure each fail it."
   (:require [clojure.test :refer [deftest is testing]]
-            [gen.book :as book]))
+            [gen.book :as book]
+            [gen.test-support :as ts]))
 
 (deftest every-chapter-runs
   (let [chapters (book/chapters)]
-    (is (seq chapters) "the book has chapters with code")
-    (doseq [file chapters]
-      (let [{:keys [blocks checks]} (book/run-chapter file)]
-        (is (pos? blocks) (str file " has blocks"))
-        (is (pos? checks) (str file " checks results"))))))
+    (is (seq chapters) "the book has chapters")
+    (doseq [chapter chapters]
+      (let [{:keys [regions checks]} (book/run-chapter chapter)]
+        (is (pos? regions) (str chapter " has code"))
+        (is (pos? checks) (str chapter " checks results"))))))
 
 (defn- failures
   "The number of failures and errors f reports."
@@ -22,43 +24,64 @@
       (f))
     @n))
 
-(defn- chapter [& blocks]
-  (apply str "# A test\n\n```clojure\n(ns gen.book-test.chapter)\n```\n"
-         (map #(str "\n" % "\n") blocks)))
+(defn- source [& regions]
+  (apply str ";; book: ns\n(ns gen.book-test.chapter)\n"
+         (map-indexed (fn [i code] (str "\n;; book: r" i "\n" code "\n")) regions)))
 
-(defn- runs [& blocks] (failures #(book/run-text (apply chapter blocks))))
+(defn- runs [& regions] (failures #(book/run-regions (book/regions (apply source regions)))))
 
 (deftest the-runner-can-fail
   (testing "a right value passes, a wrong one fails"
-    (is (zero? (runs "```clojure\n(+ 1 2)\n;=> 3\n```")))
-    (is (= 1 (runs "```clojure\n(+ 1 2)\n;=> 4\n```"))))
+    (is (zero? (runs "(+ 1 2)\n;=> 3")))
+    (is (= 1 (runs "(+ 1 2)\n;=> 4"))))
   (testing "a float checks to the digits it shows"
-    (is (zero? (runs "```clojure\n(/ 2.0 3.0)\n;=> 0.667\n```")))
-    (is (= 1 (runs "```clojure\n(/ 2.0 3.0)\n;=> 0.668\n```")))
-    (is (= 1 (runs "```clojure\n(/ 2.0 3.0)\n;=> 0.6668\n```")) "a digit more is a tighter check")
-    (is (= 1 (runs "```clojure\n(+ 12 0.4)\n;=> 12\n```")) "an integer is exact"))
-  (testing "data compare element by element"
-    (is (zero? (runs "```clojure\n{:a [1.0 (/ 1.0 3.0)]}\n;=> {:a [1.0 0.333]}\n```")))
-    (is (= 1 (runs "```clojure\n{:a [1.0 (/ 1.0 3.0)]}\n;=> {:a [1.0 0.334]}\n```")))
-    (is (= 1 (runs "```clojure\n[1 2]\n;=> [1 2 3]\n```"))))
+    (is (zero? (runs "(/ 2.0 3.0)\n;=> 0.667")))
+    (is (= 1 (runs "(/ 2.0 3.0)\n;=> 0.668")))
+    (is (= 1 (runs "(/ 2.0 3.0)\n;=> 0.6668")) "a digit more is a tighter check")
+    (is (= 1 (runs "(+ 12 0.4)\n;=> 12")) "an integer is exact"))
   (testing "a float64 check runs where floats are float64, and only there"
-    (is (zero? (runs "```clojure\n(/ 2.0 3.0)\n;=> 0.667 ; float64\n```")))
-    (is (= (if (gen.test-support/f32?) 0 1) (runs "```clojure\n(/ 2.0 3.0)\n;=> 0.668 ; float64\n```"))))
-  (testing "definitions carry from block to block"
-    (is (zero? (runs "```clojure\n(def x 2)\n```" "```clojure\n(* x 3)\n;=> 6\n```"))))
-  (testing "a block that throws fails"
-    (is (= 1 (runs "```clojure\n(throw (ex-info \"no\" {}))\n```"))))
+    (is (zero? (runs "(/ 2.0 3.0)\n;=> 0.667 ; float64")))
+    (is (= (if (ts/f32?) 0 1) (runs "(/ 2.0 3.0)\n;=> 0.668 ; float64"))))
+  (testing "data compare element by element"
+    (is (zero? (runs "{:a [1.0 (/ 1.0 3.0)]}\n;=> {:a [1.0 0.333]}")))
+    (is (= 1 (runs "{:a [1.0 (/ 1.0 3.0)]}\n;=> {:a [1.0 0.334]}")))
+    (is (= 1 (runs "[1 2]\n;=> [1 2 3]"))))
+  (testing "definitions carry from region to region"
+    (is (zero? (runs "(def x 2)" "(* x 3)\n;=> 6"))))
+  (testing "a region that throws fails"
+    (is (= 1 (runs "(throw (ex-info \"no\" {}))"))))
   (testing "an error marker needs the error"
-    (is (zero? (runs "```clojure\n;; error: Bad input\n(throw (ex-info \"Bad input: 3\" {}))\n```")))
-    (is (= 1 (runs "```clojure\n;; error: Bad input\n(throw (ex-info \"Other\" {}))\n```")))
-    (is (= 2 (runs "```clojure\n;; error: Bad input\n(+ 1 2)\n```"))))
-  (testing "printed output is checked"
-    (is (zero? (runs "```clojure\n(println \"hi\")\n```\n\nprints\n\n```text\nhi\n```")))
-    (is (= 1 (runs "```clojure\n(println \"hi\")\n```\n\nprints\n\n```text\nho\n```"))))
-  (testing "a stale or missing figure fails, on the JVM backend"
-    (let [path "figures/011-prior-lines.svg"
-          current (slurp (str book/dir "/" path))]
-      (is (zero? (failures #(book/check-figures {path current}))))
-      (when (gen.test-support/jvm?)
-        (is (= 1 (failures #(book/check-figures {path (str current " ")}))))
-        (is (= 1 (failures #(book/check-figures {"figures/no-such.svg" "<svg/>"}))))))))
+    (is (zero? (runs ";; error: Bad input\n(throw (ex-info \"Bad input: 3\" {}))")))
+    (is (= 1 (runs ";; error: Bad input\n(throw (ex-info \"Other\" {}))")))
+    (is (= 2 (runs ";; error: Bad input\n(+ 1 2)"))))
+  (testing "a source without an ns region fails"
+    (is (= 1 (failures #(book/run-regions (book/regions ";; book: a\n(+ 1 2)\n"))))))
+  (testing "a region named twice is an error"
+    (is (thrown? clojure.lang.ExceptionInfo (book/regions ";; book: a\n1\n;; book: a\n2\n")))))
+
+(deftest includes-hold-their-regions
+  (let [rs (book/regions ";; book: ns\n(ns x)\n\n;; book: add\n(+ 1 2)\n;=> 3\n")
+        fresh "Text.\n\n<!-- code: add -->\n```clojure\n(+ 1 2)\n;=> 3\n```\n\nMore.\n"]
+    (testing "an include in step passes"
+      (is (zero? (failures #(book/check-includes fresh rs)))))
+    (testing "a stale include fails, and sync brings it back in step"
+      (let [stale (clojure.string/replace fresh "(+ 1 2)" "(+ 1 5)")]
+        (is (= 1 (failures #(book/check-includes stale rs))))
+        (is (= fresh (book/synced stale rs)))))
+    (testing "a marker without its block is written by sync"
+      (let [bare "Text.\n\n<!-- code: add -->\n\nMore.\n"]
+        (is (pos? (failures #(book/check-includes bare rs))) "nothing to compare is not in step")
+        (is (= fresh (book/synced bare rs)))))
+    (testing "an include of no region fails"
+      (is (= 1 (failures #(book/check-includes "<!-- code: nope -->\n```clojure\n1\n```\n" rs))))
+      (is (thrown? clojure.lang.ExceptionInfo (book/synced "<!-- code: nope -->\n" rs))))
+    (testing "a clojure block outside an include fails"
+      (is (= 1 (failures #(book/check-includes (str fresh "\n```clojure\n(+ 4 5)\n```\n") rs)))))))
+
+(deftest stale-figures-fail
+  (let [path "figures/011-prior-lines.svg"
+        current (slurp (str book/dir "/" path))]
+    (is (zero? (failures #(book/check-figures {path current}))))
+    (when (ts/jvm?)
+      (is (= 1 (failures #(book/check-figures {path (str current " ")}))))
+      (is (= 1 (failures #(book/check-figures {"figures/no-such.svg" "<svg/>"})))))))

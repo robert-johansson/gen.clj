@@ -19,6 +19,7 @@ differences are collected in the appendix *Coming from Gen.jl*.
 
 The chapter's code lives in one namespace:
 
+<!-- code: ns -->
 ```clojure
 (ns book.getting-started
   (:refer-clojure :exclude [+ - * /])
@@ -50,6 +51,7 @@ Distributions take Gen.jl's parameters, so `normal` takes a mean and a
 standard deviation. In gen.clj the model is a *generative function*, made
 by `gen`:
 
+<!-- code: model -->
 ```clojure
 (def line-model
   (gen [xs]
@@ -81,6 +83,7 @@ distribution, and returns a *trace*: a record of that one run. It takes
 the model, its arguments and a *key*. The arguments are a vector, and
 this model has one, the vector of $x$ values.
 
+<!-- code: simulate -->
 ```clojure
 (def xs [1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0 9.0 10.0])
 
@@ -93,6 +96,7 @@ gives this trace again. `rng/split` makes independent keys from one. At
 the REPL you can leave the key out, and gen.clj draws one; `gfi/seed!`
 fixes where those come from.
 
+<!-- code: same-key -->
 ```clojure
 (= (mapv array/->clj (cm/values (:choices tr)))
    (mapv array/->clj (cm/values (:choices (gfi/simulate line-model [xs] (rng/key 1))))))
@@ -102,6 +106,7 @@ fixes where those come from.
 A trace answers for its choices. Called with an address, it returns the
 choice there:
 
+<!-- code: choices -->
 ```clojure
 [(tr :slope) (tr :intercept) (tr [:y 0])]
 ;=> [1.432 -5.475 -5.395] ; float64
@@ -127,6 +132,7 @@ making, reading and revising traces.
 
 The choice map holds twelve choices, the line and one $y$ per $x$:
 
+<!-- code: addresses -->
 ```clojure
 (count (cm/addresses (:choices tr)))
 ;=> 12
@@ -137,6 +143,7 @@ The choice map holds twelve choices, the line and one $y$ per $x$:
 
 The body returned the line, the same two numbers as the trace's choices:
 
+<!-- code: retval -->
 ```clojure
 (= (:retval tr) [(tr :slope) (tr :intercept)])
 ;=> true
@@ -149,6 +156,7 @@ given the arguments. It accumulates as the model runs: each `trace` adds
 its choice's log density. So it is a sum we can do by hand, with each
 distribution's `log-prob`:
 
+<!-- code: score -->
 ```clojure
 (def score-by-hand
   (let [[slope intercept] (:retval tr)]
@@ -171,6 +179,7 @@ currency of inference.
 Simulating draws lines from the *prior*, what the model believes before it
 sees any data. Here are five of them, beside the data we fit below:
 
+<!-- code: data -->
 ```clojure
 (def ys [8.23 5.87 3.99 2.59 0.23 -0.66 -3.53 -6.91 -7.24 -9.90])
 
@@ -178,6 +187,7 @@ sees any data. Here are five of them, beside the data we fit below:
   (mapv #(:retval (gfi/simulate line-model [xs] %)) (rng/split (rng/key 2) 5)))
 ```
 
+<!-- code: prior-figure -->
 ```clojure
 ;; figure: figures/011-prior-lines.svg
 (svg/lines xs ys prior-lines {:title "Five lines from the prior, and the data"})
@@ -193,6 +203,7 @@ these lines was fitted to anything.
 To condition on data, we fix the $y$ values. A choice map of the
 observations is a set of *constraints*:
 
+<!-- code: observations -->
 ```clojure
 (defn observations
   "The choice map fixing each [:y i] to (ys i)."
@@ -208,6 +219,7 @@ Metropolis–Hastings proposes a new slope, here from its prior, as Gen.jl's
 probability that favours lines that make the data more probable. Then it
 does the same for the intercept.
 
+<!-- code: mh -->
 ```clojure
 (defn mh-sweep
   "One MH move on the slope, then one on the intercept."
@@ -230,6 +242,7 @@ does the same for the intercept.
 
 The last trace's line is the program's answer, as in Gen.jl's tutorial:
 
+<!-- code: answer -->
 ```clojure
 (:retval (peek chain))
 ```
@@ -242,6 +255,7 @@ exactly. Let $X$ be the matrix of rows $(x_i, 1)$, $\Sigma_0 =
 variance. The posterior of $(\mu, b)$ then has precision $\Lambda =
 \Sigma_0^{-1} + X^\top X$ and mean $\Lambda^{-1} X^\top y$.
 
+<!-- code: exact -->
 ```clojure
 (def exact
   (let [X (array/array (mapv (fn [x] [x 1.0]) xs))
@@ -264,6 +278,7 @@ The posterior is far narrower than the prior: the slope's standard
 deviation is about a twentieth of the prior's 2. The chain's last line is
 one draw, within a few posterior standard deviations of the exact mean:
 
+<!-- code: answer-check -->
 ```clojure
 (let [[slope intercept] (:retval (peek chain))
       [mu-slope mu-intercept] (:mean exact)
@@ -279,6 +294,7 @@ gives the average, its Monte Carlo standard error (MCSE) and the
 effective sample size (ESS), the number of independent draws the chain's
 correlated ones are worth:
 
+<!-- code: summary -->
 ```clojure
 (def burned (subvec chain 200))
 
@@ -289,6 +305,7 @@ correlated ones are worth:
 
 The 801 sweeps averaged are worth only a handful of independent draws:
 
+<!-- code: ess -->
 ```clojure
 (< (:ess-bulk slope-summary) 20)
 ;=> true
@@ -297,6 +314,7 @@ The 801 sweeps averaged are worth only a handful of independent draws:
 The slope's trace along the chain shows why. It moves rarely, and in
 jumps.
 
+<!-- code: chain-figure -->
 ```clojure
 ;; figure: figures/011-slope-chain.svg
 (svg/series (map #(% :slope) chain) {:title "The slope along the chain" :y-label "slope"})
@@ -304,6 +322,7 @@ jumps.
 
 ![The slope along the chain](figures/011-slope-chain.svg)
 
+<!-- code: acceptance -->
 ```clojure
 (defn acceptance
   "The fraction of sweeps that moved the choice at addr."
@@ -323,6 +342,7 @@ than one in ten. A second reason is the posterior's shape. The slope and
 the intercept are strongly correlated, because a steeper line fits the
 same points only with a higher intercept:
 
+<!-- code: correlation -->
 ```clojure
 (:correlation exact)
 ;=> -0.886
@@ -335,6 +355,7 @@ buys; later chapters go further with the gradient (MALA, HMC and NUTS).
 Lines from the chain fit the data. These are every fortieth sweep after
 the first 200:
 
+<!-- code: posterior-figure -->
 ```clojure
 ;; figure: figures/011-posterior-lines.svg
 (svg/lines xs ys (mapv :retval (take-nth 40 burned)) {:title "Lines from the posterior"})
@@ -362,6 +383,7 @@ Each exercise has a tested solution at the end of the chapter.
 
 **1.** Only the slope's term changes:
 
+<!-- code: solution-1 -->
 ```clojure
 (def line-model-2
   (gen [xs]
@@ -383,6 +405,7 @@ Each exercise has a tested solution at the end of the chapter.
 grows with every point. With three points close together the slope is far
 less certain:
 
+<!-- code: solution-2 -->
 ```clojure
 (defn exact-sd
   "The exact posterior's standard deviations, from points xs."
@@ -399,6 +422,7 @@ less certain:
 proposals land where the data are improbable. The move is still a valid
 MH move, because `mh/mh` weighs the proposal in both directions:
 
+<!-- code: solution-3 -->
 ```clojure
 (def random-walk
   (gen [tr]
@@ -421,6 +445,7 @@ MH move, because `mh/mh` weighs the proposal in both directions:
 Its average agrees with the exact mean, within five of its standard
 errors:
 
+<!-- code: solution-3-check -->
 ```clojure
 (< (abs (- (:mean walk-summary) (first (:mean exact)))) (* 5 (:mcse-mean walk-summary)))
 ;=> true
