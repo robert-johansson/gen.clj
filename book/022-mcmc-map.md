@@ -292,7 +292,7 @@ than the generator drew them:
     (+ (count (remove drawn called)) (count (remove called drawn)))))
 ```
 
-Importance resampling with 2000 samples, as Gen.jl does it, twenty times.
+Importance resampling with 2000 samples, as Gen.jl does it, a hundred times.
 `{:batched? true}` draws the 2000 samples as one batched execution:
 
 <!-- code: importance -->
@@ -301,7 +301,7 @@ Importance resampling with 2000 samples, as Gen.jl does it, twenty times.
   (mapv #(record (:trace (is/importance-resampling
                           regression-with-outliers [xs] (observations ys) 2000
                           {:batched? true :key %})))
-        (rng/split (rng/key 10) 20)))
+        (rng/split (rng/key 10) 100)))
 ```
 
 The batched run stays batched for this model. The same model written with
@@ -332,7 +332,7 @@ Gen.jl's `if` falls back to one trace at a time:
 ;=> [true false]
 ```
 
-The means of those twenty runs, with their standard errors, describe what
+The means of those hundred runs, with their standard errors, describe what
 importance sampling finds:
 
 <!-- code: mean-se -->
@@ -352,7 +352,7 @@ importance sampling finds:
 
 ((juxt #(mean-of :score %) #(mean-of :noise %) #(mean-of misclassified %))
  importance-runs)
-;=> [-69.0 1.85 6.15] ; float64
+;=> [-69.0 1.67 6.31] ; float64
 ```
 
 Here are the lines of ten of the runs:
@@ -374,7 +374,7 @@ Here are the lines of ten of the runs:
 ![The lines of ten importance-resampling runs](figures/022-importance.svg)
 
 Importance resampling has not failed outright: most of its lines run near
-the data. The details are wrong. Its noise averages 1.85 where the
+the data. The details are wrong. Its noise averages 1.67 where the
 generator's is 0.5, and it misclassifies six of the twenty points in a
 typical run. There are too many choices to get right at once, and 2000
 guesses at all of them together are not enough.
@@ -453,7 +453,7 @@ covers kernels in depth.
 
 A chain is a sequence of sweeps. We keep each sweep's record and only the
 last trace, so that a long chain holds host numbers rather than traces.
-We run ten chains of 200 sweeps, each from its own start:
+We run a hundred chains of 200 sweeps, each from its own start:
 
 <!-- code: run-chain -->
 ```clojure
@@ -477,11 +477,11 @@ We run ten chains of 200 sweeps, each from its own start:
         (rng/split key m)))
 
 (def resimulation-chains
-  (chains resimulation-sweep xs ys 10 200 (rng/key 11)))
+  (chains resimulation-sweep xs ys 100 200 (rng/key 11)))
 ```
 
 The chains' last traces classify the points far better than importance
-sampling did, two points wrong in twenty where it got six, but their
+sampling did, three points wrong in twenty where it got six, but their
 noise is still wide:
 
 <!-- code: finals -->
@@ -493,12 +493,16 @@ noise is still wide:
 
 ((juxt #(mean-of :score %) #(mean-of :noise %) #(mean-of misclassified %))
  (finals resimulation-chains))
-;=> [-57.5 1.65 2.1] ; float64
+;=> [-58.9 1.43 2.93] ; float64
 ```
 
 To call one algorithm better than another, we check that its mean beats
-the other's by more than three standard errors of the difference: with
-ten or twenty runs a side, a gap that size is not run-to-run noise.
+the other's by more than five standard errors of the difference, the band
+the book uses throughout: a gap that size is not run-to-run noise, and it
+holds on a backend that draws other values. That takes many runs here,
+because a few chains go wrong. Five of the hundred end misclassifying
+more than half the points. Ten chains would more often than not include
+none of them, and so understate the standard error.
 Block resimulation beats importance sampling on the classifications:
 
 <!-- code: gap -->
@@ -511,15 +515,18 @@ Block resimulation beats importance sampling on the classifications:
         b (mean-se bs)]
     (/ (- (:mean a) (:mean b)) (Math/hypot (:se a) (:se b)))))
 
+(count (filter #(> (misclassified %) 10) (finals resimulation-chains)))
+;=> 5 ; float64
+
 (> (gap (map misclassified importance-runs)
         (map misclassified (finals resimulation-chains)))
-   3)
+   5)
 ;=> true
 ```
 
 The chains keep changing their classifications but rarely change their
-line. The classification of some point changes in 80% of the sweeps; the
-line changes in 2% of them:
+line. The classification of some point changes in 81% of the sweeps; the
+line changes in 4% of them:
 
 <!-- code: changes -->
 ```clojure
@@ -535,7 +542,7 @@ line changes in 2% of them:
 
 [(changes resimulation-chains :slope)
  (changes resimulation-chains :outliers)]
-;=> [0.023 0.8] ; float64
+;=> [0.037 0.81] ; float64
 ```
 
 The line block proposes a slope, an intercept and a noise from the
@@ -702,18 +709,18 @@ its own:
     (k/mh (sel/select :noise))))
 
 (def drift-chains
-  (chains (gaussian-drift-update 20) xs ys 10 200 (rng/key 13)))
+  (chains (gaussian-drift-update 20) xs ys 100 200 (rng/key 13)))
 
 ((juxt #(mean-of :score %) #(mean-of :noise %) #(mean-of misclassified %))
  (finals drift-chains))
-;=> [-45.4 0.45 1.3] ; float64
+;=> [-45.3 0.47 1.02] ; float64
 
 (mapv #(changes drift-chains %) [:slope :noise :outliers])
-;=> [0.17 0.21 0.64] ; float64
+;=> [0.16 0.21 0.63] ; float64
 ```
 
-The line now moves in 17% of the sweeps, and the noise in 21%. The noise
-comes down to 0.45, close to the generator's 0.5, and about one point in
+The line now moves in 16% of the sweeps, and the noise in 21%. The noise
+comes down to 0.47, close to the generator's 0.5, and about one point in
 twenty is misclassified. A single trace's score varies from sweep to
 sweep, so we compare chains by the mean score of each chain's last 100
 sweeps. By that measure the drift chains beat the resimulation chains:
@@ -726,7 +733,7 @@ sweeps. By that measure the drift chains beat the resimulation chains:
   (mapv (fn [chain] (mean-of :score (take-last 100 (:sweeps chain))))
         chains))
 
-(> (gap (settled drift-chains) (settled resimulation-chains)) 3)
+(> (gap (settled drift-chains) (settled resimulation-chains)) 5)
 ;=> true
 ```
 
@@ -970,26 +977,27 @@ makes five updates:
           (let [[k-guess k-run] (rng/split key)]
             (ransac-inference xs ys (ransac-jump xs ys)
                               (ransac-start xs ys k-guess) k-run)))
-        (rng/split (rng/key 14) 10)))
+        (rng/split (rng/key 14) 40)))
 ```
 
 After five updates, a hundred sweeps, the runs score above where the
 resimulation chains settle after two hundred, their noise is near the
-generator's, and less than one point is misclassified in a typical run:
+generator's, and about one point is misclassified in a typical run:
 
 <!-- code: ransac-results -->
 ```clojure
 ((juxt #(mean-of :score %) #(mean-of :noise %) #(mean-of misclassified %))
  (finals ransac-runs))
-;=> [-43.8 0.42 0.7] ; float64
+;=> [-45.8 0.51 1.05] ; float64
 
-(> (gap (map :score (finals ransac-runs)) (settled resimulation-chains)) 3)
+(> (gap (map :score (finals ransac-runs)) (settled resimulation-chains)) 5)
 ;=> true
 ```
 
 The figure shows the three kernels sweep by sweep: the mean score of the
-ten resimulation chains (orange), of the ten drift chains (blue), and of
-the RANSAC runs after each update (green dots, every twenty sweeps).
+hundred resimulation chains (orange), of the hundred drift chains (blue),
+and of the forty RANSAC runs after each update (green dots, every twenty
+sweeps).
 
 <!-- code: scores-figure -->
 ```clojure
@@ -1131,8 +1139,8 @@ trace, a full step lands there:
 
 Twenty rounds of MAP from each RANSAC run's last trace raise the score of
 every run, and the optimized traces score above the drift chains' settled
-traces. MAP climbs deterministically: nine of the ten runs climb to the
-same peak, a score of −40.41, and one stops on a lower one.
+traces. MAP climbs deterministically: 38 of the 40 runs climb to the
+same peak, a score of −40.41, and two stop on lower ones.
 
 <!-- code: map-inference -->
 ```clojure
@@ -1143,17 +1151,17 @@ same peak, a score of −40.41, and one stops on a lower one.
 
 (def map-runs
   (mapv #(record (map-inference (:trace %1) %2))
-        ransac-runs (rng/split (rng/key 15) 10)))
+        ransac-runs (rng/split (rng/key 15) 40)))
 
 [(every? true? (map > (map :score map-runs) (map :score (finals ransac-runs))))
- (> (gap (map :score map-runs) (settled drift-chains)) 3)]
+ (> (gap (map :score map-runs) (settled drift-chains)) 5)]
 ;=> [true true]
 
 (mean-of :score map-runs)
-;=> -40.54 ; float64
+;=> -40.75 ; float64
 
 (count (filter #(< (abs (- (:score %) -40.41)) 0.01) map-runs))
-;=> 9 ; float64
+;=> 38 ; float64
 ```
 
 <!-- code: map-figure -->
@@ -1195,7 +1203,7 @@ drift chains call it an outlier in some sweeps and an inlier in others:
     (boolean (and (some true? calls) (some false? calls)))))
 
 (count (filter #(both-ways? % 7) drift-chains))
-;=> 10 ; float64
+;=> 98 ; float64
 
 (some #(both-ways? % 7) drift-chains)
 ;=> true
@@ -1262,11 +1270,11 @@ higher than plain RANSAC's, and lower, if anything:
         (rng/split (rng/key 51) 10)))
 
 (mapv #(mean-of :score (finals %)) [noise-ransac-runs ransac-runs])
-;=> [-50.3 -43.8] ; float64
+;=> [-50.3 -45.8] ; float64
 
 (< (gap (map :score (finals noise-ransac-runs))
         (map :score (finals ransac-runs)))
-   3)
+   5)
 ;=> true
 ```
 
