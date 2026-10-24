@@ -2252,8 +2252,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     holds every kind to it: an updated or regenerated trace's score is the
     assessed density of its choices, through chains that leave a support
     and come back (models with bounded kernels exercise it).
-    - **The remedy: counts beside a finite sum (genclj-ul72, 2026-10-24,
-      PROVISIONAL, owner to confirm).** A trace keeps its total as three
+    - **The remedy: counts beside a finite sum (genclj-ul72; the owner
+      kept it, 2026-10-24, after the MLX measurements below).** A trace
+      keeps its total as three
       numbers: the sum of the finite element scores, the count of scores
       not above −Inf, and the count not below +Inf. A NaN is in both
       counts, as −Inf + Inf is NaN. A change updates them in O(1), and the
