@@ -3,9 +3,18 @@
    importance_sampling and importance_resampling.
 
      (importance-sampling model args observations n)
-       → {:traces :log-normalized-weights :log-ml-estimate}
+       → {:traces :log-weights :log-normalized-weights :log-ml-estimate :ess}
      (importance-resampling model args observations n)
        → {:trace :log-ml-estimate}
+     (estimate f model args observations n)
+       → {:estimate :log-ml-estimate :ess}
+
+   Weights are host numbers, vectors of doubles: they are read here, at
+   the inference loop, one per sample ((array/array w) makes an array of
+   them). importance-resampling and estimate keep no traces but the one
+   they return, so n can be large on any backend: one sample at a time,
+   resampling keeps a sample with probability its share of the weight so
+   far (Gen.jl's), and estimate keeps (f trace) and the weight.
 
    The proposal is the model's internal proposal by default. With
    {:proposal q :proposal-args xs} each sample instead draws choices from q,
@@ -49,44 +58,97 @@
       (update result :weight - weight))
     (gfi/generate model args observations key)))
 
+(defn- sample-at
+  "weighted-sample, evaluated (one particle's graph at a time on a lazy
+   backend), its weight a host double."
+  [model args observations opts key]
+  (let [{t :trace wt :weight} (weighted-sample model args observations opts key)]
+    (gfi/eval-trace! t wt)
+    {:trace t :weight (double (array/item wt))}))
+
+(defn- weights-summary
+  "The log weights' raw and normalized vectors, the log marginal likelihood
+   estimate and the effective sample size."
+  [log-weights]
+  {:log-weights log-weights
+   :log-normalized-weights (:log-weights (w/normalize log-weights))
+   :log-ml-estimate (w/log-mean-exp log-weights)
+   :ess (w/ess log-weights)})
+
 (defn importance-sampling
-  "n traces of model on args, constrained by observations, with their
-   normalized log weights and the log marginal likelihood estimate: the log
-   of the mean importance weight, unbiased for p(observations) in exp space."
+  "n traces of model on args, constrained by observations, with their log
+   weights (raw, and normalized), the log marginal likelihood estimate (the
+   log of the mean importance weight, unbiased for p(observations) in exp
+   space) and the effective sample size."
   ([model args observations n] (importance-sampling model args observations n {}))
   ([model args observations n opts]
    (let [key (or (:key opts) (gfi/next-key))]
      (if (and (:batched? opts) (not (:proposal opts)))
-       (let [{ps :particles ws :weights} (batched/generate model args observations n key)
-             log-weights (array/->clj ws)]
-         {:particles ps
-          :log-normalized-weights (:log-weights (w/normalize log-weights))
-          :log-ml-estimate (w/log-mean-exp log-weights)})
-       (let [results (mapv (fn [k]
-                             ;; one particle's graph at a time on a lazy backend
-                             (let [r (weighted-sample model args observations opts k)]
-                               (gfi/eval-trace! (:trace r) (:weight r))
-                               r))
-                           (rng/split key n))
-             log-weights (mapv :weight results)]
-         {:traces (mapv :trace results)
-          :log-normalized-weights (:log-weights (w/normalize log-weights))
-          :log-ml-estimate (w/log-mean-exp log-weights)})))))
+       (let [{ps :particles ws :weights} (batched/generate model args observations n key)]
+         (assoc (weights-summary (mapv double (array/->clj ws))) :particles ps))
+       (let [results (mapv #(sample-at model args observations opts %) (rng/split key n))]
+         (assoc (weights-summary (mapv :weight results)) :traces (mapv :trace results)))))))
 
 (defn traces
   "The scalar traces of an importance-sampling result, batched or not."
   [result]
   (if-let [ps (:particles result)] (batched/traces ps) (:traces result)))
 
+(defn- impossible! [n]
+  (throw (ex-info (str "Every one of the " n " importance weights is -Inf: no sample is consistent with the"
+                       " observations")
+                  {:reason :impossible :n n})))
+
 (defn importance-resampling
   "One trace drawn in proportion to the weights of n importance samples
    (sampling importance resampling), with the log marginal likelihood
-   estimate. As n grows, the trace's distribution approaches the posterior."
+   estimate. As n grows, the trace's distribution approaches the posterior.
+   One sample at a time, each replaces the one kept with probability its
+   share of the weight so far, which draws the kept one in proportion to
+   the weights with no more than one trace held (Gen.jl's); batched, the
+   samples run as one batched execution and one is drawn from them."
   ([model args observations n] (importance-resampling model args observations n {}))
   ([model args observations n opts]
-   (let [[k-samples k-resample] (rng/split (or (:key opts) (gfi/next-key)))
-         {scalar-traces :traces :keys [particles log-normalized-weights log-ml-estimate]}
-         (importance-sampling model args observations n (assoc opts :key k-samples))
-         i (first (w/multinomial log-normalized-weights 1 k-resample))]
-     {:trace (if particles (first (batched/traces (batched/take particles [i]))) (scalar-traces i))
-      :log-ml-estimate log-ml-estimate})))
+   (let [[k-samples k-resample] (rng/split (or (:key opts) (gfi/next-key)))]
+     (if (and (:batched? opts) (not (:proposal opts)))
+       (let [{:keys [particles log-normalized-weights log-ml-estimate]}
+             (importance-sampling model args observations n (assoc opts :key k-samples))
+             i (first (w/multinomial log-normalized-weights 1 k-resample))]
+         {:trace (first (batched/traces (batched/take particles [i])))
+          :log-ml-estimate log-ml-estimate})
+       (let [{:keys [trace log-total]}
+             (reduce (fn [{:keys [log-total] :as kept} [k k-u]]
+                       (let [{t :trace lw :weight} (sample-at model args observations opts k)
+                             total (w/log-sum-exp [log-total lw])]
+                         (if (and (> lw ##-Inf)
+                                  (< (Math/log (double (array/item (rng/uniform k-u)))) (- lw total)))
+                           {:trace t :log-total total}
+                           (assoc kept :log-total total))))
+                     {:trace nil :log-total ##-Inf}
+                     (map vector (rng/split k-samples n) (rng/split k-resample n)))]
+         (when (== ##-Inf (double log-total)) (impossible! n))
+         {:trace trace :log-ml-estimate (- (double log-total) (Math/log n))})))))
+
+(defn estimate
+  "The self-normalized importance sampling estimate of the expected value of
+   (f trace) given the observations, Σ p_i f(t_i) over n samples with
+   normalized weights p_i, with the log marginal likelihood estimate and the
+   effective sample size. f returns a host number. No trace is kept: f is
+   applied to each sample as it is drawn (batched, to each particle's
+   rebuilt trace in turn)."
+  ([f model args observations n] (estimate f model args observations n {}))
+  ([f model args observations n opts]
+   (let [key (or (:key opts) (gfi/next-key))
+         [values log-weights]
+         (if (and (:batched? opts) (not (:proposal opts)))
+           (let [{ps :particles ws :weights} (batched/generate model args observations n key)]
+             [(mapv #(double (f (first (batched/traces (batched/take ps [%]))))) (range n))
+              (mapv double (array/->clj ws))])
+           (let [samples (map #(let [{t :trace lw :weight} (sample-at model args observations opts %)]
+                                 [(double (f t)) lw])
+                              (rng/split key n))]
+             [(mapv first samples) (mapv second samples)]))
+         {:keys [log-normalized-weights log-ml-estimate ess]} (weights-summary log-weights)]
+     {:estimate (reduce + 0.0 (map #(* %1 (Math/exp %2)) values log-normalized-weights))
+      :log-ml-estimate log-ml-estimate
+      :ess ess})))

@@ -608,3 +608,51 @@
                            (gfi/project (:trace (gfi/generate gf [] (cm/choicemap :y 1.5) (rng/key 31))) (sel/select :theta)))]]]
       (testing label
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"needs exact densities" (f)))))))
+
+;; ---------------------------------------------------------------------------
+;; Plain calls in a body (genclj-zxis)
+;; ---------------------------------------------------------------------------
+
+;; (gf & args) in a body ran gf with a key from the implicit source, so a run
+;; with a fixed key did not repeat, silently (found writing the book's
+;; chapter 012). The body makes the call now: with the next key from its ω,
+;; which it takes only when the callee drew. Planted (2026-10-24): the
+;; implicit key back fails "repeats with its key"; taking ω for every call
+;; fails "a call that draws nothing"; never taking it fails "an estimate"
+;; and "kept by an update".
+
+(def ^:private noise (gen [] (trace :z (d/normal 0 1))))
+
+(def ^:private noisy
+  "A plain call of a generative function that draws."
+  (gen [] (let [z (noise)] (trace :x (d/normal z 1)) z)))
+
+(def ^:private twice (gen [x] (* 2.0 x)))
+
+(def ^:private quiet
+  "A plain call of a generative function that draws nothing."
+  (gen [] (trace :x (d/normal (twice 1.5) 1))))
+
+(deftest plain-calls-in-a-body-draw-from-its-omega
+  (testing "a run with a plain call repeats with its key, and another key draws another value"
+    (let [run #(ts/host (:retval (gfi/simulate noisy [] (rng/key %))))]
+      (is (= (run 1) (run 1)))
+      (is (not= (run 1) (run 2)))))
+  (testing "a call that draws nothing costs nothing: no ω, an exact score, a batched run"
+    (let [tr (gfi/simulate quiet [] (rng/key 3))]
+      (is (nil? (:gen.trace/omega tr)))
+      (is (map? (grad/choice-gradients tr (sel/select :x))) "a gradient, which needs the exact density")
+      (is (nil? (batched/fallback-reason (batched/simulate quiet [] 4 (rng/key 4)))))))
+  (testing "a call that drew makes the score an estimate: ω kept, gradients loud, a batched run falls back"
+    (let [tr (gfi/simulate noisy [] (rng/key 5))]
+      (is (some? (:gen.trace/omega tr)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"needs exact densities, but a plain call that made random choices"
+                            (grad/choice-gradients tr (sel/select :x))))
+      (is (re-find #"plain call that made random choices in a batched run"
+                   (str (:message (batched/fallback-reason (batched/simulate noisy [] 4 (rng/key 6)))))))))
+  (testing "an update that changes nothing keeps ω, so the plain call draws the same"
+    (let [tr (gfi/simulate noisy [] (rng/key 7))
+          t2 (:trace (gfi/update tr [] [] cm/EMPTY (rng/key 8)))]
+      (is (= (ts/host (:retval tr)) (ts/host (:retval t2))))))
+  (testing "outside a body a plain call still runs, with a key from the implicit source"
+    (is (number? (ts/host (noise))))))

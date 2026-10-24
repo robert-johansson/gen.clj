@@ -19,13 +19,34 @@
    A trace of a generative function with encapsulated randomness (thesis
    §4.5) also holds that randomness, a key, under :gen.trace/omega, and its
    score is an estimate."
-  (:require [gen.choicemap :as cm]))
+  (:require [gen.array :as array]
+            [gen.array.batch :as batch]
+            [gen.choicemap :as cm]))
 
 (set! *warn-on-reflection* true)
 
-(declare subtrace)
+(declare subtrace trace?)
 
 (def ^:private none (Object.))
+
+(def ^:dynamic *body-call*
+  "While a generative function's body runs, the function (f gf args) that
+   makes a plain call (gf & args) in it (gen.dynamic binds it; see
+   gen.gfi/untraced-call); nil outside a body."
+  nil)
+
+(defn- for-host
+  "v as host code reads it. Outside a body, a 0-d boolean array is a host
+   boolean, so (if (tr :a) …) branches on its value on every backend, not
+   on an array object (always true); on a lazy backend the read evaluates
+   it, at what is an inference-loop boundary. Inside a body, values stay
+   arrays: gen's conditionals read them (array/truthy?). A batched value,
+   one per particle, stays one too."
+  [v]
+  (if (and (nil? *body-call*) (array/backend-array? v) (not (batch/batched? v))
+           (= :bool (array/dtype v)) (= [] (array/shape v)))
+    (array/truthy? v)
+    v))
 
 (defrecord Trace [gen-fn args choices retval score]
   clojure.lang.IFn
@@ -35,9 +56,27 @@
   (invoke [this addr not-found]
     (let [v (cm/get-choice choices addr none)]
       (if (identical? v none)
-        (let [s (subtrace this addr none)] (if (identical? s none) not-found (:retval s)))
-        v)))
+        (let [s (subtrace this addr none)] (if (identical? s none) not-found (for-host (:retval s))))
+        (for-host v))))
   (applyTo [this args] (clojure.lang.AFn/applyToHelper this args)))
+
+(def ^:private fields #{:gen-fn :args :choices :retval :score})
+
+(defn omega-at
+  "The path, through tr's fields, to a trace in it that keeps encapsulated
+   randomness (:gen.trace/omega): [] for tr itself, or a call's. nil when
+   there is none. A trace's calls are not listed, so this looks through
+   every field that a kind keeps them in, every map, vector and trace
+   beside a trace's own data."
+  [tr]
+  (letfn [(within [x at]
+            (cond (trace? x) (if (some? (::omega x))
+                               at
+                               (some (fn [[k v]] (when-not (fields k) (within v (conj at k)))) x))
+                  (and (map? x) (not (record? x))) (some (fn [[k v]] (within v (conj at k))) x)
+                  (vector? x) (some #(within (x %) (conj at %)) (range (count x)))
+                  :else nil))]
+    (within tr [])))
 
 (defn make-trace
   "A trace from a map with :gen-fn :args :choices :retval :score, made by
