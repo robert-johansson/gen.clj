@@ -129,7 +129,7 @@
 ;; Continuous distributions
 ;; ---------------------------------------------------------------------------
 
-(defdist ^:elementwise normal
+(defdist ^:elementwise ^:pathwise normal
   "normal(mu, std): the Gaussian with mean mu and standard deviation std.
    Array parameters give an array value whose log density is the sum over its
    elements (Gen.jl's broadcasted_normal)."
@@ -146,7 +146,7 @@
    too, as defdist marks its own."
   normal)
 
-(defdist ^:elementwise uniform
+(defdist ^:elementwise ^:pathwise uniform
   "uniform(low, high): uniform on [low, high]."
   [low high]
   (validate (when (every? array/concrete? [low high])
@@ -190,7 +190,7 @@
   (log-prob [v]
     (guard (> v 0) (- (* k (log theta)) (lgamma k) (* (+ k 1) (log v)) (/ theta v)))))
 
-(defdist ^:elementwise exponential
+(defdist ^:elementwise ^:pathwise exponential
   "exponential(rate): the exponential distribution with mean 1/rate."
   [rate]
   (validate (dc/check-positive "exponential" "rate" rate))
@@ -206,7 +206,7 @@
   ^double [dtype]
   (+ -1.0 (* 0.5 (:eps (dc/float-limits dtype)))))
 
-(defdist ^:elementwise laplace
+(defdist ^:elementwise ^:pathwise laplace
   "laplace(loc, scale): the Laplace (double exponential) distribution."
   [loc scale]
   (validate (dc/check-positive "laplace" "scale" scale))
@@ -219,7 +219,7 @@
   (log-prob [v]
     (- (+ (log (* 2 scale)) (/ (array/abs (- v loc)) scale)))))
 
-(defdist ^:elementwise cauchy
+(defdist ^:elementwise ^:pathwise cauchy
   "cauchy(x0, gamma): the Cauchy distribution with location x0 and scale gamma."
   [x0 scale]
   (validate (dc/check-positive "cauchy" "scale" scale))
@@ -459,7 +459,7 @@
       (guard in (- (+ (* 0.5 (+ (* nu1 (log nu1)) (* nu2 (log nu2)))) kernel)
                    (log-beta (/ nu1 2.0) (/ nu2 2.0)))))))
 
-(defdist ^:elementwise gumbel
+(defdist ^:elementwise ^:pathwise gumbel
   "gumbel(mu, theta): the Gumbel (maximum) distribution, location mu and
    scale theta (Gumbel)."
   [mu theta]
@@ -482,7 +482,7 @@
           d (stand-in in (- v mu) 1.0)]
       (guard in (- (* 0.5 (log (/ sigma (* 2.0 Math/PI)))) (* 1.5 (log d)) (/ sigma (* 2.0 d)))))))
 
-(defdist ^:elementwise log-normal
+(defdist ^:elementwise ^:pathwise log-normal
   "log-normal(mu, sigma): e^X for X normal(mu, sigma) (LogNormal)."
   [mu sigma]
   (validate (dc/check-positive "log-normal" "sigma" sigma))
@@ -493,7 +493,7 @@
           lx (log (stand-in in v 1.0))]
       (guard in (- (+ lx (log sigma) half-log-2pi (* 0.5 (square (/ (- lx mu) sigma)))))))))
 
-(defdist ^:elementwise logistic
+(defdist ^:elementwise ^:pathwise logistic
   "logistic(mu, theta): the logistic distribution, location mu and scale
    theta (Logistic)."
   [mu theta]
