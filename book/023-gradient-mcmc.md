@@ -786,23 +786,65 @@ The draws agree with the exact posterior:
 ;=> [[true true] [true true]]
 ```
 
-The metric is an estimate. The warmup's last window holds 500 draws,
-worth about a quarter of their number (the rate the draws' ESS shows). A
-variance estimated from $n$ effective draws has a relative standard error
-of $\sqrt{2/n}$, and the adapted variances are within five of those of the
-exact ones:
+The metric is an estimate, made from the draws of the warmup's last
+window, here 500 of them. A variance's relative standard error is twice
+that of the standard deviation, which `diag/mcse-sd` estimates from the
+1000 draws above; from $n$ draws that mix as these do, it is
+$\sqrt{1000/n}$ times as large. The default warmup's variances have a
+relative standard error of 11%:
 
 <!-- code: nuts-metric -->
 ```clojure
-(def ess-rate
-  "The fraction of the draws' number that their effective number is."
-  (/ (diag/ess-bulk (:slope nuts-draws)) 1000.0))
+(defn relative-se
+  "The relative standard error of a variance estimated from n draws that
+   mix as the draws xs do: twice that of their standard deviation, from
+   diag/mcse-sd, scaled from their number to n."
+  [xs n]
+  (let [{:keys [sd mcse-sd]} (diag/summary xs)]
+    (* 2 (/ mcse-sd sd) (Math/sqrt (/ (count xs) (double n))))))
 
-(let [ratios (map / (array/->clj (:inv-metric nuts-run))
-                  (array/->clj inv-metric))
-      relative-se (Math/sqrt (/ 2.0 (* 500 ess-rate)))]
-  (every? #(< (abs (- % 1.0)) (* 5 relative-se)) ratios))
-;=> true
+(defn window-se
+  "The larger of the metric's two relative standard errors, for a last
+   window of n draws."
+  [n]
+  (max (relative-se (:slope nuts-draws) n)
+       (relative-se (:intercept nuts-draws) n)))
+
+(window-se 500)
+;=> 0.108 ; float64
+```
+
+Five of those make a band of 54%, which a metric of half the variances
+would pass, so a check of this metric could not show that the adaptation
+is right. A longer warmup can. `nuts/adapt` runs the warmup alone, and
+with 6000 iterations its last window holds the draws from iteration 1650
+to 5949, 4300 of them. The band narrows to 18%, the adapted variances
+are within it, and a metric off by a factor of two either way would not
+be:
+
+<!-- code: nuts-metric-long -->
+```clojure
+(def long-warmup
+  (nuts/adapt (first starts) line {:warmup 6000} (rng/key 23)))
+
+(defn ratios
+  "Each adapted variance over the exact one."
+  [adapted]
+  (mapv / (array/->clj (:inv-metric adapted)) (array/->clj inv-metric)))
+
+(ratios long-warmup)
+;=> [0.998 0.987] ; float64
+
+(def metric-band (* 5 (window-se 4300)))
+
+metric-band
+;=> 0.184 ; float64
+
+;; Over 12 other keys (200-211), the long warmup's ratios had standard
+;; deviations of 0.041 and 0.038, as the standard error says (0.037).
+[(< metric-band 0.5)
+ (every? #(< (abs (- % 1.0)) metric-band) (ratios long-warmup))]
+;=> [true true]
 ```
 
 ### A diagonal metric cannot turn the ridge

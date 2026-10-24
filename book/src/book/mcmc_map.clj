@@ -170,7 +170,7 @@
   (mapv #(record (:trace (is/importance-resampling
                           regression-with-outliers [xs] (observations ys) 2000
                           {:batched? true :key %})))
-        (rng/split (rng/key 10) 20)))
+        (rng/split (rng/key 10) 100)))
 
 ;; book: batched
 (def regression-with-if
@@ -211,7 +211,7 @@
 
 ((juxt #(mean-of :score %) #(mean-of :noise %) #(mean-of misclassified %))
  importance-runs)
-;=> [-69.0 1.85 6.15] ; float64
+;=> [-69.0 1.67 6.31] ; float64
 
 ;; book: importance-figure
 ;; figure: figures/022-importance.svg
@@ -279,7 +279,7 @@
         (rng/split key m)))
 
 (def resimulation-chains
-  (chains resimulation-sweep xs ys 10 200 (rng/key 11)))
+  (chains resimulation-sweep xs ys 100 200 (rng/key 11)))
 
 ;; book: finals
 (defn finals
@@ -289,7 +289,7 @@
 
 ((juxt #(mean-of :score %) #(mean-of :noise %) #(mean-of misclassified %))
  (finals resimulation-chains))
-;=> [-57.5 1.65 2.1] ; float64
+;=> [-58.9 1.43 2.93] ; float64
 
 ;; book: gap
 (defn gap
@@ -300,9 +300,12 @@
         b (mean-se bs)]
     (/ (- (:mean a) (:mean b)) (Math/hypot (:se a) (:se b)))))
 
+(count (filter #(> (misclassified %) 10) (finals resimulation-chains)))
+;=> 5 ; float64
+
 (> (gap (map misclassified importance-runs)
         (map misclassified (finals resimulation-chains)))
-   3)
+   5)
 ;=> true
 
 ;; book: changes
@@ -318,7 +321,7 @@
 
 [(changes resimulation-chains :slope)
  (changes resimulation-chains :outliers)]
-;=> [0.023 0.8] ; float64
+;=> [0.037 0.81] ; float64
 
 ;; book: reference
 (defn line-choices
@@ -410,14 +413,14 @@
     (k/mh (sel/select :noise))))
 
 (def drift-chains
-  (chains (gaussian-drift-update 20) xs ys 10 200 (rng/key 13)))
+  (chains (gaussian-drift-update 20) xs ys 100 200 (rng/key 13)))
 
 ((juxt #(mean-of :score %) #(mean-of :noise %) #(mean-of misclassified %))
  (finals drift-chains))
-;=> [-45.4 0.45 1.3] ; float64
+;=> [-45.3 0.47 1.02] ; float64
 
 (mapv #(changes drift-chains %) [:slope :noise :outliers])
-;=> [0.17 0.21 0.64] ; float64
+;=> [0.16 0.21 0.63] ; float64
 
 ;; book: settled
 (defn settled
@@ -426,7 +429,7 @@
   (mapv (fn [chain] (mean-of :score (take-last 100 (:sweeps chain))))
         chains))
 
-(> (gap (settled drift-chains) (settled resimulation-chains)) 3)
+(> (gap (settled drift-chains) (settled resimulation-chains)) 5)
 ;=> true
 
 ;; book: line-posterior
@@ -591,14 +594,14 @@
           (let [[k-guess k-run] (rng/split key)]
             (ransac-inference xs ys (ransac-jump xs ys)
                               (ransac-start xs ys k-guess) k-run)))
-        (rng/split (rng/key 14) 10)))
+        (rng/split (rng/key 14) 40)))
 
 ;; book: ransac-results
 ((juxt #(mean-of :score %) #(mean-of :noise %) #(mean-of misclassified %))
  (finals ransac-runs))
-;=> [-43.8 0.42 0.7] ; float64
+;=> [-45.8 0.51 1.05] ; float64
 
-(> (gap (map :score (finals ransac-runs)) (settled resimulation-chains)) 3)
+(> (gap (map :score (finals ransac-runs)) (settled resimulation-chains)) 5)
 ;=> true
 
 ;; book: scores-figure
@@ -697,17 +700,17 @@
 
 (def map-runs
   (mapv #(record (map-inference (:trace %1) %2))
-        ransac-runs (rng/split (rng/key 15) 10)))
+        ransac-runs (rng/split (rng/key 15) 40)))
 
 [(every? true? (map > (map :score map-runs) (map :score (finals ransac-runs))))
- (> (gap (map :score map-runs) (settled drift-chains)) 3)]
+ (> (gap (map :score map-runs) (settled drift-chains)) 5)]
 ;=> [true true]
 
 (mean-of :score map-runs)
-;=> -40.54 ; float64
+;=> -40.75 ; float64
 
 (count (filter #(< (abs (- (:score %) -40.41)) 0.01) map-runs))
-;=> 9 ; float64
+;=> 38 ; float64
 
 ;; book: map-figure
 ;; figure: figures/022-map.svg
@@ -732,7 +735,7 @@
     (boolean (and (some true? calls) (some false? calls)))))
 
 (count (filter #(both-ways? % 7) drift-chains))
-;=> 10 ; float64
+;=> 98 ; float64
 
 (some #(both-ways? % 7) drift-chains)
 ;=> true
@@ -759,11 +762,11 @@
         (rng/split (rng/key 51) 10)))
 
 (mapv #(mean-of :score (finals %)) [noise-ransac-runs ransac-runs])
-;=> [-50.3 -43.8] ; float64
+;=> [-50.3 -45.8] ; float64
 
 (< (gap (map :score (finals noise-ransac-runs))
         (map :score (finals ransac-runs)))
-   3)
+   5)
 ;=> true
 
 ;; book: solution-2
