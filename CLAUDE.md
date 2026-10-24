@@ -27,8 +27,11 @@ All work is tracked in beans (`.beans/`, a private git repo synced by hooks; see
 ## Running
 
 ```
-clojure -X:test                       # every test (clojure.test + test.check), ~90 s
-clojure -X:test:fast                  # without the ^:slow statistical tests, ~25 s
+clojure -M:test:dev                   # a REPL with the test loop: (t) after each change (dev/user.clj)
+clojure -X:test:fast:par              # without the ^:slow statistical tests, in 5 JVMs, ~50 s
+clojure -X:test:par                   # every test (clojure.test + test.check), in 5 JVMs, ~2.5 min
+clojure -X:test:fast                  # the same in one JVM (also any backend), ~1.5 min
+clojure -X:test                       # every test in one JVM, ~7 min
 clojure -X:test:conformance           # the backend conformance suite (array level)
 clojure -X:test:commons-math          # also the Commons Math extension (ext/commons-math)
 clojure -J-Dgen.backend=mlx -X:test   # any suite on the MLX backend (add -J-Dgen.mlx.device=cpu|gpu, -J-Dgen.mlx.dtypes=64)
@@ -57,6 +60,15 @@ models (Qwen3-0.6B, Qwen3.5-0.8B and Gemma-3-270M, Q8_0 GGUFs). The llama.cpp
 tests take a model with `-J-Dgen.llama.test-model=<gguf>` and skip without
 one; run one model JVM at a time. Everything else in `gen.llm` runs on the
 pure-JVM toy engines (`test/gen/llm/toy_engine.clj`, `cell_engine.clj`).
+
+**The test loop.** Work test-first in a REPL (`clojure -M:test:dev`, or an
+editor's jack-in with the aliases `:test` and `:dev`): `(t)` reloads what
+changed and runs the tests it can break, usually in seconds; `(t 'ns)`,
+`(t #'ns/var)` or `(t #"regex")` run given ones, `(t :slow …)` with the
+`^:slow` tests. A change to a namespace most depend on (`gen.array`,
+`gen.gfi`) reaches most of the battery: run `-X:test:fast:par` then.
+`gen.parallel` (`:par`) runs the JVM backend only; MLX and llama.cpp runs
+stay one JVM (`-X:test`).
 
 **Test conventions.**
 - **Determinism.** Statistical tests use fixed keys, so they are deterministic. Their
