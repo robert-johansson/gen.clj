@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="300" viewBox="0 0 480 300" font-family="sans-serif" font-size="11">
+<rect width="100%" height="100%" fill="white"/>
+<text x="240.0" y="20" text-anchor="middle" font-size="13">Lines from the posterior</text>
+<g><line x1="112.3" y1="260.0" x2="112.3" y2="264.0" stroke="black"/><text x="112.3" y="276.0" text-anchor="middle">2</text></g>
+<g><line x1="195.6" y1="260.0" x2="195.6" y2="264.0" stroke="black"/><text x="195.6" y="276.0" text-anchor="middle">4</text></g>
+<g><line x1="278.8" y1="260.0" x2="278.8" y2="264.0" stroke="black"/><text x="278.8" y="276.0" text-anchor="middle">6</text></g>
+<g><line x1="362.0" y1="260.0" x2="362.0" y2="264.0" stroke="black"/><text x="362.0" y="276.0" text-anchor="middle">8</text></g>
+<g><line x1="445.3" y1="260.0" x2="445.3" y2="264.0" stroke="black"/><text x="445.3" y="276.0" text-anchor="middle">10</text></g>
+<g><line x1="48.0" y1="242.3" x2="52" y2="242.3" stroke="black"/><text x="45.0" y="246.3" text-anchor="end">-10</text></g>
+<g><line x1="48.0" y1="190.9" x2="52" y2="190.9" stroke="black"/><text x="45.0" y="194.9" text-anchor="end">-5</text></g>
+<g><line x1="48.0" y1="139.5" x2="52" y2="139.5" stroke="black"/><text x="45.0" y="143.5" text-anchor="end">0</text></g>
+<g><line x1="48.0" y1="88.0" x2="52" y2="88.0" stroke="black"/><text x="45.0" y="92.0" text-anchor="end">5</text></g>
+<g><line x1="48.0" y1="36.6" x2="52" y2="36.6" stroke="black"/><text x="45.0" y="40.6" text-anchor="end">10</text></g>
+<rect x="52" y="34" width="412" height="226" fill="none" stroke="black"/>
+<text x="258.0" y="294" text-anchor="middle">x</text>
+<text transform="translate(14 147.0) rotate(-90)" text-anchor="middle">y</text>
+<line x1="70.7" y1="69.6" x2="445.3" y2="237.4" stroke="steelblue" stroke-opacity="0.6" stroke-width="1.5"/>
+<line x1="70.7" y1="63.1" x2="445.3" y2="222.2" stroke="steelblue" stroke-opacity="0.6" stroke-width="1.5"/>
+<line x1="70.7" y1="64.0" x2="445.3" y2="231.3" stroke="steelblue" stroke-opacity="0.6" stroke-width="1.5"/>
+<line x1="70.7" y1="64.8" x2="445.3" y2="239.1" stroke="steelblue" stroke-opacity="0.6" stroke-width="1.5"/>
+<line x1="70.7" y1="57.4" x2="445.3" y2="233.5" stroke="steelblue" stroke-opacity="0.6" stroke-width="1.5"/>
+<line x1="70.7" y1="61.9" x2="445.3" y2="235.5" stroke="steelblue" stroke-opacity="0.6" stroke-width="1.5"/>
+<line x1="70.7" y1="62.2" x2="445.3" y2="238.6" stroke="steelblue" stroke-opacity="0.6" stroke-width="1.5"/>
+<line x1="70.7" y1="57.4" x2="445.3" y2="249.7" stroke="steelblue" stroke-opacity="0.6" stroke-width="1.5"/>
+<line x1="70.7" y1="52.9" x2="445.3" y2="239.7" stroke="steelblue" stroke-opacity="0.6" stroke-width="1.5"/>
+<line x1="70.7" y1="53.3" x2="445.3" y2="242.8" stroke="steelblue" stroke-opacity="0.6" stroke-width="1.5"/>
+<line x1="70.7" y1="52.8" x2="445.3" y2="238.1" stroke="steelblue" stroke-opacity="0.6" stroke-width="1.5"/>
+<line x1="70.7" y1="51.9" x2="445.3" y2="237.3" stroke="steelblue" stroke-opacity="0.6" stroke-width="1.5"/>
+<line x1="70.7" y1="54.9" x2="445.3" y2="244.6" stroke="steelblue" stroke-opacity="0.6" stroke-width="1.5"/>
+<line x1="70.7" y1="51.7" x2="445.3" y2="240.2" stroke="steelblue" stroke-opacity="0.6" stroke-width="1.5"/>
+<line x1="70.7" y1="51.7" x2="445.3" y2="240.2" stroke="steelblue" stroke-opacity="0.6" stroke-width="1.5"/>
+<line x1="70.7" y1="51.7" x2="445.3" y2="240.2" stroke="steelblue" stroke-opacity="0.6" stroke-width="1.5"/>
+<line x1="70.7" y1="49.9" x2="445.3" y2="235.7" stroke="steelblue" stroke-opacity="0.6" stroke-width="1.5"/>
+<line x1="70.7" y1="44.3" x2="445.3" y2="237.8" stroke="steelblue" stroke-opacity="0.6" stroke-width="1.5"/>
+<line x1="70.7" y1="54.3" x2="445.3" y2="237.3" stroke="steelblue" stroke-opacity="0.6" stroke-width="1.5"/>
+<line x1="70.7" y1="59.8" x2="445.3" y2="242.8" stroke="steelblue" stroke-opacity="0.6" stroke-width="1.5"/>
+<line x1="70.7" y1="46.1" x2="445.3" y2="237.7" stroke="steelblue" stroke-opacity="0.6" stroke-width="1.5"/>
+<circle cx="70.7" cy="54.8" r="3" fill="black"/>
+<circle cx="112.3" cy="79.1" r="3" fill="black"/>
+<circle cx="154.0" cy="98.4" r="3" fill="black"/>
+<circle cx="195.6" cy="112.8" r="3" fill="black"/>
+<circle cx="237.2" cy="137.1" r="3" fill="black"/>
+<circle cx="278.8" cy="146.3" r="3" fill="black"/>
+<circle cx="320.4" cy="175.8" r="3" fill="black"/>
+<circle cx="362.0" cy="210.6" r="3" fill="black"/>
+<circle cx="403.7" cy="213.9" r="3" fill="black"/>
+<circle cx="445.3" cy="241.3" r="3" fill="black"/>
+</svg>
