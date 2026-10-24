@@ -11,6 +11,7 @@
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
             [gen.inference.importance :as imp]
+            [gen.inference.weights :as w]
             [gen.random :as rng]))
 
 (def model
@@ -185,3 +186,67 @@
                                      (reduce clojure.core/+ (map #(clojure.core/* (Math/exp (ts/number %1)) (ts/number (:retval %2)))
                                                                  log-normalized-weights traces)))]
         (is (< (Math/abs (clojure.core/- estimate 7.0)) band) (str estimate))))))
+
+;; ---------------------------------------------------------------------------
+;; The result's weights; resampling and estimates that keep no traces
+;; (genclj-1t38)
+;; ---------------------------------------------------------------------------
+
+(deftest the-result-carries-raw-weights-and-an-ess
+  (doseq [batched? [false true]]
+    (testing (if batched? "batched" "one sample at a time")
+      (let [{:keys [log-weights log-normalized-weights ess]}
+            (imp/importance-sampling model [] observations 40 {:key (rng/key 70) :batched? batched?})
+            total (w/log-sum-exp log-weights)]
+        (is (every? #(instance? Double %) log-weights) "host doubles")
+        (is (every? true? (map #(ts/close? %1 (clojure.core/- %2 total)) log-normalized-weights log-weights)))
+        (is (ts/close? (w/ess log-weights) ess))))))
+
+;; A coin c, P(c = 1) = 1/2, and y ~ N(c, 1) observed at 1: sampling
+;; importance resampling with n samples keeps c = 1 with probability
+;; E[k w1 / (k w1 + (n - k) w0)], k ~ Binomial(n, 1/2), exactly. Planted
+;; (2026-10-24): one sample at a time never replacing the first fails that
+;; mode's frequency; batched, always the first sample fails batched's.
+(def ^:private coin (gen [] (let [c (trace :c (d/bernoulli 0.5))] (trace :y (d/normal (if c 1.0 0.0) 1)) c)))
+
+(defn- sir-probability [n]
+  (let [w1 (density 1 1 1.0) w0 (density 0 1 1.0)
+        choose (fn [n k] (reduce clojure.core/* 1.0 (map #(clojure.core// (clojure.core/- n %) (inc %)) (range k))))]
+    (reduce clojure.core/+ (for [k (range (inc n))
+                                 :let [pk (clojure.core/* (choose n k) (Math/pow 0.5 n))
+                                       num (clojure.core/* k w1)]]
+                             (if (zero? k) 0.0 (clojure.core/* pk (clojure.core// num (clojure.core/+ num (clojure.core/* (clojure.core/- n k) w0)))))))))
+
+(deftest ^:heavy resampling-keeps-a-sample-in-proportion-to-its-weight
+  (let [n 5 m 3000 p (sir-probability n) band (clojure.core/* 5 (Math/sqrt (clojure.core// (clojure.core/* p (clojure.core/- 1 p)) m)))
+        obs (cm/choicemap :y 1.0)]
+    (doseq [batched? [false true]]
+      (testing (if batched? "batched" "one sample at a time")
+        (let [hits (count (filter #(true? ((:trace (imp/importance-resampling coin [] obs n {:key % :batched? batched?})) :c))
+                                  (rng/split (rng/key 71) m)))]
+          (is (< (Math/abs (clojure.core/- (clojure.core// hits (double m)) p)) band)
+              (str hits " of " m " against " p)))))))
+
+(deftest resampling-is-loud-when-no-sample-is-possible
+  (let [bounded (gen [] (let [x (trace :x (d/uniform 0 1))] (trace :y (d/uniform x (+ x 1)))))]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Every one of the 10 importance weights is -Inf"
+                          (imp/importance-resampling bounded [] (cm/choicemap :y 5.0) 10 {:key (rng/key 72)})))))
+
+(deftest an-estimate-is-the-weighted-average-of-the-samples
+  ;; the same keys give the same samples, so the estimate is importance
+  ;; sampling's weighted average, with the same evidence and ESS
+  (doseq [batched? [false true]]
+    (testing (if batched? "batched" "one sample at a time")
+      (let [opts {:key (rng/key 73) :batched? batched?}
+            r (imp/importance-sampling model [] observations 60 opts)
+            by-hand (reduce clojure.core/+ (map #(clojure.core/* (ts/host (% :x)) (Math/exp %2))
+                                                (imp/traces r) (:log-normalized-weights r)))
+            e (imp/estimate #(ts/host (% :x)) model [] observations 60 opts)]
+        (is (ts/close? by-hand (:estimate e)))
+        (is (ts/close? (:log-ml-estimate r) (:log-ml-estimate e)))
+        (is (ts/close? (:ess r) (:ess e)))))))
+
+(deftest ^:heavy an-estimate-approaches-the-posterior-mean
+  (let [{:keys [estimate ess]} (imp/estimate #(ts/host (% :x)) model [] observations 4000 {:key (rng/key 74)})]
+    ;; the self-normalized estimate's standard error is about sd / √ESS
+    (is (< (Math/abs (clojure.core/- estimate (clojure.core// y 2))) (clojure.core/* 5 (Math/sqrt (clojure.core// 0.5 ess)))))))
