@@ -181,11 +181,15 @@ be ported is tracked as a deferred bean with a note on how to port it cleanly
 ## 4. Architecture
 
 ```
-modules (optional deps)   gen.llm.*  …later extras (deferred beans)
-L5  inference             importance, mh, kernels, hmc/mala/nuts/map, particle filter, diagnostics
-L4  combinators           map, unfold, switch (recurse in M4)
-L3  distributions         Distribution record, open multimethods, defdist
-L2  GFI                   protocols · handler transitions · runtime · dynamic (gen macro) · dispatch seam
+modules                   gen.llm.* (the LM runtime; token, potential, token-SMC generative functions)
+L5  inference             importance, mh, kernels, hmc/mala/nuts/map, particle filter, diagnostics,
+                          enumerative, proposal, transforms (involutive MCMC, SMCP3), trace kernels,
+                          vi, conjugate, laplace, particle MCMC; gradients, learning
+L4  combinators           map, unfold, switch, recurse, call-at, choice-at, scan, mix, dimap;
+                          custom (deterministic, custom gradients, estimated); state-space
+L3  distributions         Distribution record, open multimethods, defdist, dist (pushforwards), host families
+L2  GFI                   protocols · handler transitions · dynamic (gen macro, static language) ·
+                          batched · partition · serialize · dispatch seam
 L1  data algebra          choicemap · selection · trace · diff (argdiffs + retdiffs)
 L0  array API             backend-neutral ops, grad, PRNG keys
       ├─ JVM backend      pure Clojure: double[] arrays, tape AD, Threefry          (M1)
@@ -818,7 +822,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   elements are realized, Clojure's semantics, chunking included: `mapv`,
   `doseq` and `run!` are eager.
 - **Arrays are values:** JVM arrays compare by dtype, shape and (bitwise)
-  elements, so traces and choice maps holding them compare with `=`.
+  elements, so traces and choice maps holding them compare with `=`. MLX
+  arrays compare by dtype, shape and elements too, reading both on the host
+  (found by the book's chapter 034, 2026-10-25).
 - **Testing:** reference values come from scipy and JAX, generated once into
   committed EDN fixtures (`test/fixtures/`); the tests never need Python.
   Against GenMLX, deterministic quantities (log-densities, weights given fixed
