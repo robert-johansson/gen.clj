@@ -784,6 +784,16 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   was the fuzz's 32%). Seeds span 2^31 (`laws/seeds`; `gen/nat` drew 0–99
   only), and the fuzz's random models take an argument with alternatives,
   their label the spec.
+- **The test loop** (2026-10-24, genclj-elyc, the owner's go: a 7-minute
+  battery is not run after each change). A REPL helper, `(t)` in
+  `dev/user.clj` (`-M:test:dev`), reloads what changed with tools.namespace
+  (a `:dev` dependency only) and runs the tests the reload reached, without
+  `^:slow`. `gen.parallel` (`-X:test:par`, with any tier) runs the test
+  namespaces in 5 JVMs of 2 cores each, sharded by recorded times: the
+  fast tier 87 → ~50 s, the battery 408 → ~150 s on the M4. It refuses
+  MLX and llama.cpp runs (one GPU JVM at a time). Not taken: fewer cases
+  per property (less power), tests in parallel threads of one JVM
+  (`with-redefs` in nine files), C1-only JIT (the fast tier took 200 s).
 - **GFI signatures are Gen.jl-shaped** (§3.2). `generate` throws on
   constraints at unvisited addresses.
 - **Dtypes:** the JVM backend is float64 (the reference); MLX is float32. Core
