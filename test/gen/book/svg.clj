@@ -96,3 +96,33 @@
              [(str "<polyline fill=\"none\" stroke=\"steelblue\" stroke-width=\"1\" points=\""
                    (str/join " " (map-indexed (fn [i v] (str (fmt (px i)) "," (fmt (py v)))) vs))
                    "\"/>")]))))
+
+(defn histogram
+  "The values' histogram as a density (each bar's area is its fraction of
+   the values), with the curve of the density f across their range when f
+   is given (a function of a host double; nil for none). Options: :bins
+   (30), :title, :x-label, :y-label."
+  [values f & [opts]]
+  (let [vs (mapv host values)
+        bins (long (:bins opts 30))
+        lo (apply min vs)
+        hi (apply max vs)
+        step (/ (- hi lo) bins)
+        counts (reduce (fn [acc v] (update acc (min (dec bins) (long (/ (- v lo) step))) inc))
+                       (vec (repeat bins 0)) vs)
+        heights (mapv #(/ (double %) (* (count vs) step)) counts)
+        curve (when f
+                (mapv (fn [i] (let [x (+ lo (* (- hi lo) (/ i 100.0)))] [x (host (f x))])) (range 101)))
+        top (apply max (concat heights (map second curve)))]
+    (frame (merge {:x-label "value" :y-label "density"} opts)
+           (padded lo hi) [0.0 (* 1.05 top)]
+           (fn [px py]
+             (concat
+              (for [[i h] (map-indexed vector heights)
+                    :let [x0 (+ lo (* i step))]]
+                (str "<rect x=\"" (fmt (px x0)) "\" y=\"" (fmt (py h)) "\" width=\"" (fmt (- (px (+ x0 step)) (px x0)))
+                     "\" height=\"" (fmt (- (py 0.0) (py h))) "\" fill=\"steelblue\" fill-opacity=\"0.5\" stroke=\"white\"/>"))
+              (when curve
+                [(str "<polyline fill=\"none\" stroke=\"black\" stroke-width=\"1.5\" points=\""
+                      (str/join " " (map (fn [[x y]] (str (fmt (px x)) "," (fmt (py y)))) curve))
+                      "\"/>")]))))))
