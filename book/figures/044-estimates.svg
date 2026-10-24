@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="300" viewBox="0 0 480 300" font-family="sans-serif" font-size="11">
+<rect width="100%" height="100%" fill="white"/>
+<g><line x1="70.7" y1="260.0" x2="70.7" y2="264.0" stroke="black"/><text x="70.7" y="276.0" text-anchor="middle">0</text></g>
+<g><line x1="164.4" y1="260.0" x2="164.4" y2="264.0" stroke="black"/><text x="164.4" y="276.0" text-anchor="middle">0.25</text></g>
+<g><line x1="258.0" y1="260.0" x2="258.0" y2="264.0" stroke="black"/><text x="258.0" y="276.0" text-anchor="middle">0.5</text></g>
+<g><line x1="351.6" y1="260.0" x2="351.6" y2="264.0" stroke="black"/><text x="351.6" y="276.0" text-anchor="middle">0.75</text></g>
+<g><line x1="445.3" y1="260.0" x2="445.3" y2="264.0" stroke="black"/><text x="445.3" y="276.0" text-anchor="middle">1</text></g>
+<g><line x1="48.0" y1="248.8" x2="52" y2="248.8" stroke="black"/><text x="45.0" y="252.8" text-anchor="end">0</text></g>
+<g><line x1="48.0" y1="192.9" x2="52" y2="192.9" stroke="black"/><text x="45.0" y="196.9" text-anchor="end">0.25</text></g>
+<g><line x1="48.0" y1="137.0" x2="52" y2="137.0" stroke="black"/><text x="45.0" y="141.0" text-anchor="end">0.5</text></g>
+<g><line x1="48.0" y1="81.1" x2="52" y2="81.1" stroke="black"/><text x="45.0" y="85.1" text-anchor="end">0.75</text></g>
+<g><line x1="48.0" y1="25.2" x2="52" y2="25.2" stroke="black"/><text x="45.0" y="29.2" text-anchor="end">1</text></g>
+<rect x="52" y="14" width="412" height="246" fill="none" stroke="black"/>
+<text x="258.0" y="294" text-anchor="middle">exact probability π(x)</text>
+<text transform="translate(14 137.0) rotate(-90)" text-anchor="middle">estimate</text>
+<clipPath id="paths-box"><rect x="52.0" y="14.0" width="412.0" height="246.0"/></clipPath>
+<g clip-path="url(#paths-box)">
+<polyline fill="none" stroke="gray" stroke-opacity="0.7" stroke-width="1" points="70.7,248.8 445.3,25.2"/>
+<polyline fill="none" stroke="darkorange" stroke-opacity="0.7" stroke-width="1.5" points="106.9,85.1 106.9,59.2"/>
+<polyline fill="none" stroke="darkorange" stroke-opacity="0.7" stroke-width="1.5" points="68.2,249.3 68.2,241.6"/>
+<polyline fill="none" stroke="darkorange" stroke-opacity="0.7" stroke-width="1.5" points="400.3,218.8 400.3,193.9"/>
+<polyline fill="none" stroke="darkorange" stroke-opacity="0.7" stroke-width="1.5" points="67.0,249.9 67.0,245.5"/>
+<circle cx="106.9" cy="72.1" r="4" fill="darkorange" fill-opacity="1"/>
+<circle cx="68.2" cy="245.5" r="4" fill="darkorange" fill-opacity="1"/>
+<circle cx="400.3" cy="206.3" r="4" fill="darkorange" fill-opacity="1"/>
+<circle cx="67.0" cy="247.7" r="4" fill="darkorange" fill-opacity="1"/>
+<polyline fill="none" stroke="steelblue" stroke-opacity="0.7" stroke-width="1.5" points="114.4,226.6 114.4,224.6"/>
+<polyline fill="none" stroke="steelblue" stroke-opacity="0.7" stroke-width="1.5" points="75.7,248.4 75.7,247.8"/>
+<polyline fill="none" stroke="steelblue" stroke-opacity="0.7" stroke-width="1.5" points="407.8,53.1 407.8,28.0"/>
+<polyline fill="none" stroke="steelblue" stroke-opacity="0.7" stroke-width="1.5" points="74.5,248.8 74.5,248.8"/>
+<circle cx="114.4" cy="225.6" r="4" fill="steelblue" fill-opacity="1"/>
+<circle cx="75.7" cy="248.1" r="4" fill="steelblue" fill-opacity="1"/>
+<circle cx="407.8" cy="40.6" r="4" fill="steelblue" fill-opacity="1"/>
+<circle cx="74.5" cy="248.8" r="4" fill="steelblue" fill-opacity="1"/>
+</g>
+</svg>
