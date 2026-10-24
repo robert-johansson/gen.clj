@@ -38,6 +38,18 @@ Part II, Inference (`020-part-inference.md` holds its heading):
 | 028-learning.md | Learning | Gen.jl's Learning Generative Functions; GenMLX book 026 |
 | 029-speeding-up.md | Speeding Up | Gen.jl's Scaling with the SML; GenMLX book 025 |
 
+Part III, Theory (`030-part-theory.md` holds its heading). The thesis is
+`Marco Cusumano-Towner 2020 PhD thesis.pdf` in the repository's root
+(gitignored); cite its definitions and equations by number.
+
+| File | Chapter | Sources |
+|------|---------|---------|
+| 031-gfi.md | The Generative Function Interface | the thesis, ch. 2; GenMLX book 031 |
+| 032-inference-as-operations.md | Inference as Operations on the GFI | the thesis, ch. 3; GenMLX book 032 |
+| 033-trace-translators.md | Trace Translators and Involutive MCMC | the thesis, ch. 3; GenMLX book 033; the split/merge of Gen.jl's Reversible-Jump MCMC notebook |
+| 034-design.md | Design Rationale | DESIGN.md §3 and §9; GenMLX book 034 |
+| 035-verification.md | Verification: the Laws | test/gen/laws.clj, docs/research/law-audit.md, genjl-parity.md §3; GenMLX book 035 |
+
 ## Prose
 
 - **Plain and exact.** Short sentences, active voice, American spelling.
