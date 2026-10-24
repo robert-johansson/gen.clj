@@ -59,10 +59,10 @@ At the REPL (`clojure -M:test:dev`), `(require 'book.getting-started
 
 ## Chapters
 
-Numbered as the GenMLX book's: 00x front matter, 01x Part I
-(Foundations), 02x Part II (Inference), 03x Part III (Theory), 04x Part IV
-(The System), 05x Part V (Applications), 06x appendices. A chapter that
-ports one of the GenMLX book's takes its number.
+One book in five Parts: 01x Part I (Foundations), 02x Part II
+(Inference), 03x Part III (Theory), 04x Part IV (The System), 05x Part V
+(Applications), 06x appendices, numbered in order within each Part.
+`WRITING.md` has the plan of Part I and how a chapter is written.
 
 - `011-getting-started.md`: Getting Started: Linear Regression (Gen.jl's
   Getting Started with the GenMLX book's chapter 011).

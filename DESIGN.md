@@ -460,6 +460,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   made by the book's own code, and a test fails when one is stale. (The
   first spike tested code blocks inline in the Markdown, as memo.clj's
   HANDBOOK.md does; the owner preferred code in .clj files, for the REPL.)
+  One book in five Parts (owner, 2026-10-24): I Foundations, II Inference,
+  III Theory, IV The System, V Applications, and appendices, with Gen.jl's
+  tutorials as worked chapters inside them, not a separate tutorial site.
+  `gen.book pdf` builds it with Pandoc.
 - **A 1.0 for dependents** (owner, 2026-10-24): memo.clj's 1.0 should
   probably wait for gen.clj's 1.0 rather than pin a commit. Until then
   dependents pin a commit. There is no rush for memo.clj: gen.clj's 1.0
