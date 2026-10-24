@@ -50,6 +50,20 @@ Part III, Theory (`030-part-theory.md` holds its heading). The thesis is
 | 034-design.md | Design Rationale | DESIGN.md §3 and §9; GenMLX book 034 |
 | 035-verification.md | Verification: the Laws | test/gen/laws.clj, docs/research/law-audit.md, genjl-parity.md §3; GenMLX book 035 |
 
+Part IV, The System (`040-part-system.md` holds its heading). Not ported
+from the GenMLX book: its 041 (the compilation ladder, left out of gen.clj
+by design; Part II's *Speeding Up* has gen.clj's faster paths) and 044
+(program synthesis, M7's). The LLM chapters run on the toy engines
+(test/gen/llm/), so the gate needs no model.
+
+| File | Chapter | Sources |
+|------|---------|---------|
+| 041-arrays-backends.md | Arrays, Backends and Gradients | docs/array-api.md; DESIGN.md §5 |
+| 042-exact-structure.md | Exact Structure, Made Explicit | GenMLX book 042, reframed; gen.inference.conjugate, gen.state-space |
+| 043-llms.md | Language Models as Generative Functions | GenMLX book 043; gen.llm.lm, gen.llm.token |
+| 044-constrained-generation.md | Constrained Generation and Token SMC | gen.llm.potential, gen.llm.grammar, gen.llm.smc; docs/research/llm-*.md |
+| 045-extending.md | Extending gen.clj | GenMLX book 045; Gen.jl's five how-tos |
+
 ## Prose
 
 - **Plain and exact.** Short sentences, active voice, American spelling.
