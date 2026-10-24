@@ -198,3 +198,43 @@
       [(box rx 20.0 root false)]
       (for [[x y label leaf?] placed] (box x y label leaf?))
       ["</svg>"]))))
+(defn plot
+  "Layers of points and curves in one box: a model's traces over data. A
+   layer is a map, {:points [[x y] …]} for dots or {:curves [f …]} for the
+   graphs of functions of x across the box, with optional :color (default
+   black for dots, steelblue for curves), :opacity (default 1 for dots, 0.7
+   for curves), :r (a dot's radius, default 3) and :width (a curve's
+   stroke, default 1.5). Options: :x-range and :y-range (default: the dots'
+   span, padded, or the curves' when there are no dots), :title, :x-label,
+   :y-label. Marks are clipped to the box."
+  [layers & [opts]]
+  (let [dots (for [l layers [x y] (:points l)] [(host x) (host y)])
+        span (fn [vs] (padded (apply min vs) (apply max vs)))
+        [x0 x1] (mapv double (or (:x-range opts)
+                                 (some-> (seq (map first dots)) span)
+                                 (throw (ex-info "plot: curves without dots need an :x-range" {}))))
+        grid (mapv #(+ x0 (* (- x1 x0) (/ % 400.0))) (range 401))
+        graph (fn [f] (mapv (fn [x] [x (host (f x))]) grid))
+        layers (mapv #(assoc % ::graphs (mapv graph (:curves %))) layers)
+        [y0 y1] (mapv double (or (:y-range opts)
+                                 (span (or (seq (map second dots))
+                                           (for [l layers g (::graphs l) [_ y] g] y)))))]
+    (frame (merge {:x-label "x" :y-label "y"} opts) [x0 x1] [y0 y1]
+           (fn [px py]
+             (concat
+              [(str "<clipPath id=\"box\"><rect x=\"" (fmt (px x0)) "\" y=\"" (fmt (py y1))
+                    "\" width=\"" (fmt (- (px x1) (px x0))) "\" height=\"" (fmt (- (py y0) (py y1)))
+                    "\"/></clipPath>")
+               "<g clip-path=\"url(#box)\">"]
+              (for [{:keys [points color opacity r width] ::keys [graphs]} layers
+                    mark (concat
+                          (for [g graphs]
+                            (str "<polyline fill=\"none\" stroke=\"" (or color "steelblue")
+                                 "\" stroke-opacity=\"" (or opacity 0.7) "\" stroke-width=\"" (or width 1.5)
+                                 "\" points=\"" (str/join " " (map (fn [[x y]] (str (fmt (px x)) "," (fmt (py y)))) g))
+                                 "\"/>"))
+                          (for [[x y] points]
+                            (str "<circle cx=\"" (fmt (px (host x))) "\" cy=\"" (fmt (py (host y))) "\" r=\"" (or r 3)
+                                 "\" fill=\"" (or color "black") "\" fill-opacity=\"" (or opacity 1) "\"/>")))]
+                mark)
+              ["</g>"])))))
