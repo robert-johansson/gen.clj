@@ -447,6 +447,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
 - **Namespace root: `gen`** (`gen.choicemap`, `gen.dynamic`, …). The collision
   with probcomp/Gen.clj's `gen.*` is accepted, since the two are never on one
   classpath. Maven coordinates are decided at first publish.
+- **A 1.0 for dependents** (owner, 2026-10-24): memo.clj's 1.0 should
+  probably wait for gen.clj's 1.0 rather than pin a commit. Until then
+  dependents pin a commit. The 1.0's scope (which surface it freezes, modules
+  first or not, the post-M5 fixes) is open: genclj-04h2.
 - **Indices are 0-based** (Clojure idiom, as in GenMLX; D2): Map's and
   Unfold's addresses, Recurse's nodes (root 0), categorical's values
   (categorical-logits' too: 0 to n - 1) and Switch's branch index (branch 0
