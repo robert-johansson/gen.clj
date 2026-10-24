@@ -635,8 +635,8 @@ density:
 ```clojure
 ;; figure: figures/016-mh-histogram.svg
 (let [posterior (d/normal (:mean exact) (:sd exact))]
-  (svg/histogram (diag/draws (subvec by-hand 200) :mu)
-                 #(array/exp (dc/log-prob posterior %))
+  (svg/histogram [{:values (diag/draws (subvec by-hand 200) :mu)
+                   :density #(array/exp (dc/log-prob posterior %))}]
                  {:x-label "mu"}))
 ```
 

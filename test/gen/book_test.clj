@@ -59,6 +59,14 @@
   (testing "a line over 80 characters fails"
     (is (zero? (failures #(book/check-lines (book/regions (source (apply str (repeat 80 "x"))))))))
     (is (= 1 (failures #(book/check-lines (book/regions (source (apply str (repeat 81 "x")))))))))
+  (testing "an error region's forms run, and show, without their #_"
+    (let [rs (book/regions (source ";; error: Bad input\n#_(throw (ex-info \"Bad input: 3\" {}))"))]
+      (is (= ";; error: Bad input\n(throw (ex-info \"Bad input: 3\" {}))\n" (:code (peek rs))))
+      (is (zero? (failures #(book/run-regions rs))))
+      (is (zero? (failures #(book/check-error-regions rs))))))
+  (testing "an error region with a form not behind #_ fails: requiring the namespace would throw"
+    (is (= 1 (failures #(book/check-error-regions
+                         (book/regions (source ";; error: Bad input\n(throw (ex-info \"Bad input: 3\" {}))")))))))
   (testing "a region named twice is an error"
     (is (thrown? clojure.lang.ExceptionInfo (book/regions ";; book: a\n1\n;; book: a\n2\n")))))
 

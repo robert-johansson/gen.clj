@@ -74,20 +74,20 @@
 
 ;; book: splice-twice
 ;; error: Address [:reading] is used twice
-(def two-sensors
+#_(def two-sensors
   (gen [position]
     [(splice sensor position)
      (splice sensor position)]))
 
-(gfi/simulate two-sensors [5.0] (rng/key 3))
+#_(gfi/simulate two-sensors [5.0] (rng/key 3))
 
 ;; book: splice-flat-only-gen
 ;; error: A splice without an address needs a dynamic generative function
-(def many-sensors
+#_(def many-sensors
   (gen [positions]
     (splice (comb/map sensor) positions)))
 
-(gfi/simulate many-sensors [[1.0 2.0]] (rng/key 3))
+#_(gfi/simulate many-sensors [[1.0 2.0]] (rng/key 3))
 
 ;; book: map-model
 (def point
@@ -131,7 +131,7 @@
 
 ;; book: map-wrong-path
 ;; error: generate: the constraint at [:y] was not visited
-(gfi/generate points [xs] (cm/choicemap [:y 2] 7.0) (rng/key 6))
+#_(gfi/generate points [xs] (cm/choicemap [:y 2] 7.0) (rng/key 6))
 
 ;; book: hmm-model
 (def hmm-step

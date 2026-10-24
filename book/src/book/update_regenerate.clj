@@ -102,7 +102,7 @@
 
 ;; book: assess-missing
 ;; error: assess: no value for the choice at [:b]
-(gfi/assess coins [0.3] (cm/choicemap :a true :c true))
+#_(gfi/assess coins [0.3] (cm/choicemap :a true :c true))
 
 ;; book: update
 (def moved (gfi/update tr (cm/choicemap :slope -1.5) (rng/key 2)))

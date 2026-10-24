@@ -88,7 +88,9 @@ Part I, Foundations:
   code and shown as `;=> true`. Choose thresholds that hold on every
   backend, not ones that happen to pass.
 - `;; error: message` as a region's first line shows a loud error, where
-  the chapter wants the reader to see one.
+  the chapter wants the reader to see one. Write each of its forms behind
+  `#_` in the source, so that requiring the namespace does not throw; the
+  test runs them, and the Markdown shows them, without it.
 - **A check must be able to fail.** Before trusting a statistical check,
   plant a bug (a wrong prior, a skipped move) and see it fail; note what
   you planted in the chapter's bean.

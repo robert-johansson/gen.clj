@@ -73,7 +73,7 @@
 
 ;; book: assess-error
 ;; error: assess: no value for the choice at [:y]
-(gfi/assess two-normals [] (cm/choicemap :x 3.0) (rng/key 3))
+#_(gfi/assess two-normals [] (cm/choicemap :x 3.0) (rng/key 3))
 
 ;; book: watched
 (defn watched
@@ -175,12 +175,12 @@
 
 ;; book: twice-error
 ;; error: Address [:x] is used twice
-(gfi/simulate (gen [] (trace :x (d/normal 0 1)) (trace :x (d/normal 0 1)))
+#_(gfi/simulate (gen [] (trace :x (d/normal 0 1)) (trace :x (d/normal 0 1)))
               [] (rng/key 1))
 
 ;; book: unvisited-error
 ;; error: generate: the constraint at [:z] was not visited
-(gfi/generate two-normals [] (cm/choicemap :z 1.0) (rng/key 1))
+#_(gfi/generate two-normals [] (cm/choicemap :z 1.0) (rng/key 1))
 
 ;; book: one-key-per-site
 (let [k (rng/key 5)

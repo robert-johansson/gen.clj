@@ -385,4 +385,4 @@ a-estimate
 
 ;; book: unvisited
 ;; error: generate: the constraint at [:b] was not visited
-(gfi/generate foo [0.3] (cm/choicemap :a false :b true) (rng/key 3))
+#_(gfi/generate foo [0.3] (cm/choicemap :a false :b true) (rng/key 3))

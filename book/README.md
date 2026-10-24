@@ -29,7 +29,9 @@ and its code is verified for real (DESIGN.md §9).
     float32.
   - A statistical claim is a check in the code, with a band from the
     estimator's standard error, shown as `;=> true`.
-  - `;; error: message` as a region's first line shows a loud error.
+  - `;; error: message` as a region's first line shows a loud error. Its
+    forms are written behind `#_` in the source, so the namespace still
+    loads; the test runs them, and the Markdown shows them, without it.
   - `;; figure: figures/…` as a region's first line makes its last form an
     SVG figure (from `test/gen/book/svg.clj`). The test fails when the
     committed file is stale. The Markdown's image text is its caption.

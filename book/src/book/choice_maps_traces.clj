@@ -53,7 +53,7 @@
 
 ;; book: lookup-error
 ;; error: get-choice: no value at [:z]: nothing is there
-(cm/get-choice c :z)
+#_(cm/get-choice c :z)
 
 ;; book: lookups
 (defn reason
@@ -82,7 +82,7 @@
 
 ;; book: merge-error
 ;; error: merge: the choice maps overlap
-(cm/merge a (cm/choicemap :y 99.0 :z 3.0))
+#_(cm/merge a (cm/choicemap :y 99.0 :z 3.0))
 
 ;; book: override
 [(cm/to-map (cm/override a (cm/choicemap :y 99.0 :z 3.0))) (cm/to-map a)]
@@ -134,7 +134,7 @@
 
 ;; book: call-error
 ;; error: trace: no choice or call at [:noise]: nothing is there
-(tr :noise)
+#_(tr :noise)
 
 ;; book: self-contained
 (def same (gfi/update tr (:choices tr) (rng/key 2)))
@@ -191,11 +191,11 @@
 
 ;; book: read-trace-error
 ;; error: read-trace: the rebuilt score
-(def wide-sensor
+#_(def wide-sensor
   (gen [mu]
     (trace :value (d/normal mu 1.0))))
 
-(serialize/read-trace wide-sensor (serialize/write-trace a-trace))
+#_(serialize/read-trace wide-sensor (serialize/write-trace a-trace))
 
 ;; book: select
 (def s (sel/select :x :y))
