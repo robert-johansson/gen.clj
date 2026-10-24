@@ -610,10 +610,15 @@
 ;; ---------------------------------------------------------------------------
 
 (defn ^:no-doc untraced-call
-  "(gf & args), as in Gen.jl: the return value of a simulated run, with a
-   key from the implicit source."
+  "(gf & args), as in Gen.jl: the return value of a simulated run, its
+   choices untraced. Inside a running body the body makes the call
+   (gen.trace/*body-call*): with a key from its encapsulated randomness ω,
+   so the run repeats with its own key (genclj-zxis). Elsewhere the key
+   comes from the implicit source."
   [gf args]
-  (:retval (simulate gf args)))
+  (if-let [call trace/*body-call*]
+    (call gf args)
+    (:retval (simulate gf args))))
 
 (defn- ifn-methods
   "IFn's methods for a record whose call on args is (call this args): every
@@ -629,9 +634,10 @@
 (defmacro defgf
   "defrecord, for a generative function, plus untraced calls as in Gen.jl:
    (gf a b …), with any number of arguments, is the return value of a
-   simulated run (with a key from the implicit source). With :call f first
-   among the impls, (f gf args) is the call instead (a deterministic
-   function's, which needs no key)."
+   simulated run (untraced-call: in a running body with a key from its
+   encapsulated randomness, elsewhere from the implicit source). With :call
+   f first among the impls, (f gf args) is the call instead (a
+   deterministic function's, which needs no key)."
   [name fields & impls]
   (let [[call impls] (if (= :call (first impls)) [(second impls) (nnext impls)] [`untraced-call impls])]
     `(defrecord ~name ~fields

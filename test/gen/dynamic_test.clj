@@ -332,6 +332,26 @@
 (deftest untraced-calls
   (is (number? (ts/host (linreg [1.0 2.0]))) "calling a generative function runs it, like Gen.jl"))
 
+;; Host code that branches on a boolean choice, (if (tr :b) …), tested an
+;; MLX array object, always true, silently (genclj-x6ox). Outside a body, a
+;; trace's lookup now returns a 0-d boolean as a host boolean; inside one,
+;; values stay arrays, which gen's conditionals read. Planted (2026-10-24,
+;; on MLX): no conversion fails "outside"; converting inside a body too
+;; fails "inside".
+(deftest a-boolean-choice-reads-as-a-host-boolean-outside-a-body
+  ;; a sampled choice (a constrained one is the host value given), false
+  ;; for certain, which an array object would make true
+  (let [flip (gen [] (trace :b (d/bernoulli 0.0)) (trace :x (d/normal 0 1)))
+        tr (gfi/simulate flip [] (rng/key 1))
+        seen (atom nil)]
+    (testing "outside a body"
+      (is (false? (tr :b)))
+      (is (= :no (if (tr :b) :yes :no)))
+      (is (= (ts/jvm?) (number? (tr :x))) "only booleans change: a number stays the backend's"))
+    (testing "inside a body, the backend's value"
+      (gfi/simulate (gen [t] (reset! seen (t :b)) nil) [tr] (rng/key 2))
+      (is (if (ts/jvm?) (false? @seen) (array/backend-array? @seen))))))
+
 (defmacro ^:private calls
   "[n (gf 0 1 … n-1)] for n from 0 to 22: every invoke arity, the variadic
    one past twenty included, as a direct call compiles them."

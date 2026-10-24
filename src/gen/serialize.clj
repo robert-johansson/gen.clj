@@ -334,24 +334,6 @@
    constrained, and encapsulated randomness is refused."
   (rng/key 0))
 
-(def ^:private trace-fields #{:gen-fn :args :choices :retval :score})
-
-(defn- omega-at
-  "The path, through tr's fields, to a trace in it that keeps encapsulated
-   randomness (:gen.trace/omega): [] for tr itself, or a call's. nil when
-   there is none. gen.trace cannot list a trace's calls, so this looks
-   through every field that a kind keeps them in, every map, vector and
-   trace beside a trace's own data."
-  [tr]
-  (letfn [(within [x at]
-            (cond (trace/trace? x) (if (some? (::trace/omega x))
-                                     at
-                                     (some (fn [[k v]] (when-not (trace-fields k) (within v (conj at k)))) x))
-                  (and (map? x) (not (record? x))) (some (fn [[k v]] (within v (conj at k))) x)
-                  (vector? x) (some #(within (x %) (conj at %)) (range (count x)))
-                  :else nil))]
-    (within tr [])))
-
 (defn- same-number?
   "Are the 0-d arrays a and b the same number (a NaN the same as a NaN)?"
   [a b]
@@ -365,7 +347,7 @@
    (no choice proposed)."
   [op gf args choices]
   (let [{t :trace w :weight} (gfi/generate gf args choices rebuild-key)]
-    (when-let [at (omega-at t)]
+    (when-let [at (trace/omega-at t)]
       (throw (ex-info (str (name op) ": the rebuilt trace drew encapsulated randomness (:gen.trace/omega) at " at
                            ", which generate draws afresh (thesis §4.5), so it is not the written trace")
                       {:reason :encapsulated-randomness :path at})))
@@ -392,7 +374,7 @@
   (when-not (trace/trace? tr)
     (throw (ex-info (str "write-trace: takes a trace, not a " (.getName (class tr)))
                     {:reason :not-a-trace :class (class tr)})))
-  (when-let [at (omega-at tr)]
+  (when-let [at (trace/omega-at tr)]
     (throw (ex-info (str "write-trace: the trace keeps encapsulated randomness (:gen.trace/omega) at " at
                          ", which generate would draw afresh (thesis §4.5): such traces are not serializable yet")
                     {:reason :encapsulated-randomness :path at})))

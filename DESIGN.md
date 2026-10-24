@@ -1195,6 +1195,32 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     back to particles, since a particle's ω must reproduce its own draws.
     `untraced` and `untraced-key` are reserved in bodies as `trace` is:
     the macro refuses a body that would hide a var of either name.
+  - **Plain calls in a body (genclj-zxis, 2026-10-24; the owner: fix).**
+    `(gf & args)` in a body, Gen.jl's untraced call, ran gf with a key from
+    the implicit source, so a run with a fixed key did not repeat,
+    silently (found writing the book's chapter 012). The body makes the
+    call now (`gen.trace/*body-call*`, bound while it runs): gf runs with
+    the next key from ω, which the body takes only when gf drew (made
+    choices, or keeps encapsulated randomness of its own). So a call that
+    drew is an untraced draw in every respect: the run repeats with its
+    key, ω is kept by an update that changes nothing, the score is an
+    estimate (an error where exact densities are needed), and a batched
+    run falls back. A call that drew nothing costs nothing: the score stays
+    exact, the trace keeps no ω (gen.serialize writes it), and a batched run
+    stays batched. Outside a body a plain call still takes the implicit
+    key. The first recommendation, a loud error for plain calls, was
+    dropped: Gen.jl allows them, and ω already gives them a meaning.
+  - **Host code branching on a boolean choice (genclj-x6ox, 2026-10-24;
+    the owner: fix).** On MLX a 0-d boolean is an array object, which
+    Clojure's `if` takes as true, so `(if (tr :b) …)` in host code (an
+    inference loop, an analysis) took the true branch, silently. Outside a
+    body, a trace called with an address returns a 0-d boolean as a host
+    boolean (on a lazy backend the read evaluates it, at what is an
+    inference-loop boundary). Inside a body, and for batched values,
+    values stay arrays: gen's conditionals read them. Other host code that
+    branches on a boolean array uses `array/truthy?`. Making trace lookups
+    host values for every dtype was rejected: numbers branch alike on
+    every backend, and inside bodies a read would force evaluation.
   - **Estimators (§4.5.3),** `gen.custom/estimated`: `:addresses` (its
     choices), `:estimate` (fn [args choices key] → log ξ, ω drawn from the
     key, which the trace keeps) and an optional joint `:simulate`. generate
