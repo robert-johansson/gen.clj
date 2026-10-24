@@ -157,7 +157,7 @@
       (let [ps (b/simulate gf args n (rng/key seed))
             olds (b/traces ps)
             own (own-indices gf args (index-paths (first olds)) n (inc seed))
-            {ps' :particles ws :weights ds :discards} (b/update ps args [] cm/EMPTY (rng/key 2) {:per-particle own})]
+            {ps' :particles ws :weights ds :discards} (b/update ps args (diff/no-changes (count args)) cm/EMPTY (rng/key 2) {:per-particle own})]
         (and (b/batched? ps')
              (every? true?
                      (map (fn [old new w d c]
@@ -186,7 +186,7 @@
     (binding [b/*spot-checks* 0]
       (let [ps (b/simulate gf args n (rng/key seed))
             s (selected-parts (first (b/traces ps)) picks)
-            {ps' :particles ws :weights} (b/regenerate ps args [] s (rng/key 3))]
+            {ps' :particles ws :weights} (b/regenerate ps args (diff/no-changes (count args)) s (rng/key 3))]
         (and (b/batched? ps')
              (every? true?
                      (map (fn [old new w]
@@ -204,7 +204,7 @@
       (let [ps (b/simulate gf args n (rng/key seed))
             trs (b/traces ps)
             paths (index-paths (first trs))
-            qs (:particles (b/regenerate ps args [] (sel/from-paths paths) (rng/key 4)))
+            qs (:particles (b/regenerate ps args (diff/no-changes (count args)) (sel/from-paths paths) (rng/key 4)))
             idx (mapv #(mod % n) picks)
             keep (vec (take n mask))
             taken (b/take ps idx)
@@ -246,9 +246,9 @@
                                           olds (b/traces ps') (array/->clj ws))))
               [ps' ok?]
               (case op
-                :regenerate (let [{ps' :particles ws :weights} (b/regenerate ps args [] s (rng/key k))]
+                :regenerate (let [{ps' :particles ws :weights} (b/regenerate ps args (diff/no-changes (count args)) s (rng/key k))]
                               [ps' (obeys? ps' ws #(not (sel/selected? s %)))])
-                :select (let [qs (:particles (b/regenerate ps args [] s (rng/key k)))
+                :select (let [qs (:particles (b/regenerate ps args (diff/no-changes (count args)) s (rng/key k)))
                               keep (vec (take n (cycle picks)))
                               chosen (b/select keep ps qs)]
                           [chosen (= (mapv (fn [keep? p q] (if keep? (ts/host (:choices p)) (ts/host (:choices q)))) keep olds (b/traces qs))
@@ -257,7 +257,7 @@
                             idx (if (seq idx) idx [0])]
                         [(b/take ps idx) true])
                 :update (let [own (own-indices gf args (index-paths (first olds)) n (+ seed k))
-                              {ps' :particles ws :weights} (b/update ps args [] cm/EMPTY (rng/key k) {:per-particle own})]
+                              {ps' :particles ws :weights} (b/update ps args (diff/no-changes (count args)) cm/EMPTY (rng/key k) {:per-particle own})]
                           ;; the constrained indices and the fresh choices
                           ;; are not kept
                           [ps' (every? true? (map (fn [old new w c]

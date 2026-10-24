@@ -65,6 +65,10 @@ pure-JVM toy engines (`test/gen/llm/toy_engine.clj`, `cell_engine.clj`).
 - **Power.** A new test must be able to fail. Check a statistical or law test
   against a planted bug (a mutation) before trusting it, as the suites
   document in place.
+- **Laws.** A law returns `checks` (a failure names the check and its
+  values), and `vacuous` for a case it says nothing about; `deflaws` fails
+  a law whose cases are mostly vacuous. Draw keys' seeds from
+  `laws/seeds`, not `gen/nat` (bounded by test.check's size).
 - **Tiers.** Tag tests that run more than a few seconds `^:slow`. Tag
   scalar statistical tests that take minutes on MLX (one evaluation per read
   value) `^:heavy`; `-X:test:light` skips both, for quick MLX runs.

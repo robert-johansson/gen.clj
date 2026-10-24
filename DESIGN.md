@@ -775,6 +775,15 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   choices) must match exactly, and sampled quantities are compared
   statistically: the same seed cannot reproduce GenMLX's samples, because
   draws also depend on how keys are threaded through a run.
+- **Law results** (2026-10-24, genclj-4tjd, the owner's go). A law in
+  `gen.laws` returns a test.check result, not a boolean: its `checks` fail
+  naming the check and the values it compared, and a case the law says
+  nothing about (constraints another run made that this one cannot visit)
+  is `vacuous`. `deflaws` counts the vacuous cases and fails a law with
+  more than 60% of them (`laws/max-vacuous`: the highest share measured
+  was the fuzz's 32%). Seeds span 2^31 (`laws/seeds`; `gen/nat` drew 0–99
+  only), and the fuzz's random models take an argument with alternatives,
+  their label the spec.
 - **GFI signatures are Gen.jl-shaped** (§3.2). `generate` throws on
   constraints at unvisited addresses.
 - **Dtypes:** the JVM backend is float64 (the reference); MLX is float32. Core

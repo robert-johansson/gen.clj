@@ -36,9 +36,13 @@
         failed (first (remove :pass? (remove nil? [usual long-run])))
         secs (/ (- (System/nanoTime) t0) 1e9)]
     (if failed
-      [false (format "FAIL %s after %d cases (seed %d): smallest %s"
+      ;; a law that failed for its vacuous cases (gen.laws/check) has no
+      ;; smallest case, only its counts
+      [false (format "FAIL %s after %d cases (seed %d): %s"
                      (symbol v) (:num-tests failed) (:seed failed)
-                     (pr-str (get-in failed [:shrunk :smallest])))]
+                     (if-let [{:keys [smallest result-data]} (:shrunk failed)]
+                       (str "smallest " (pr-str smallest) (when result-data (str ", " (pr-str result-data))))
+                       (pr-str (:result-data failed))))]
       [true (format "ok   %s: %d + %d cases, %.1f s" (symbol v) (:num-tests usual) (:num-tests long-run) secs)])))
 
 (defn -main [& [factor ns-regex]]
