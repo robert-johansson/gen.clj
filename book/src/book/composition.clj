@@ -415,15 +415,16 @@ evidence
 
 (def mixed (gfi/simulate either [[0.3 0.7] xs2] (rng/key 16)))
 
-(take 3 (cm/addresses (:choices mixed)))
-;=> [[:component :curvature] [:component :intercept] [:component :slope]]
-
 (mixed :index)
 ;=> 1 ; float64
 
+(take 3 (cm/addresses (:choices mixed)))
+;=> [[:component :curvature] [:component :intercept] [:component :slope]] ; float64
+
 ;; book: mix-score
-(array/allclose? (:score mixed)
-                 (+ (Math/log 0.7) (:score (trace/subtrace mixed :component))))
+(let [weight (nth [0.3 0.7] (array/item (mixed :index)))]
+  (array/allclose? (:score mixed)
+                   (+ (Math/log weight) (:score (trace/subtrace mixed :component)))))
 ;=> true
 
 ;; book: mix-frequency
