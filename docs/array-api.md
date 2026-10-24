@@ -621,9 +621,16 @@ Code outside `gen` bodies is not guarded. Two mechanisms cover it
     and the checked particles are re-run on the JVM backend, the
     reference: microseconds each, where a scalar MLX run costs
     evaluations. The comparison is at the precision of the batched float.
-    A model that closes over the lazy backend's arrays cannot run on the
-    JVM, so it is checked on its own backend. *Added 2026-10-19, bean
-    genclj-w5y0.*
+    Agreement there is enough; a mismatch is re-run on the batch's own
+    backend, which decides. The reference computes in float64, so a
+    float32 batch of an ill-conditioned model differs from it by the
+    batch's rounding. The M2 review's regression (means near 4000, sd
+    0.01, 1000 observations) is 0.07 nats apart, against a tolerance of
+    0.034. Its checks then cost scalar MLX runs: 0.43 s for 8 particles,
+    where the fallback they used to cause cost 1.96 s. A model that
+    closes over the lazy backend's arrays cannot run on the JVM, so it
+    too is checked on its own backend. *Added 2026-10-19, bean
+    genclj-w5y0; the re-run on its own backend 2026-10-24, genclj-i8ui.*
   - Results are checked when read. The accessors (`traces`, `scores`,
     `choice`), the particle filter's estimate and a fallback all spot-check
     a collection whose last operations went unchecked

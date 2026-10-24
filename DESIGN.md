@@ -588,7 +588,16 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     and of a doubling schedule of updates, through the scalar handler, the
     ground truth. A mismatch falls back, or is a loud error after unchecked
     updates. Results read from a collection (its accessors, a particle
-    filter's estimate) are checked first.
+    filter's estimate) are checked first. On a lazy backend the re-runs
+    are first on the JVM backend, and only a mismatch there is re-run on
+    the batch's own, which decides (2026-10-24, genclj-i8ui, by the
+    agent). The JVM run is float64, and a float32 batch of an
+    ill-conditioned model differs from it by its rounding: the M2
+    review's regression (means near 4000, sd 0.01, 1000 observations)
+    fell back on MLX, 0.07 nats apart against a tolerance of 0.034. Not
+    taken: a tolerance from the sites' log-density terms. Their sum is
+    the score, but the error grows with |y|/sd (the cancellation in
+    y − μ), so no tolerance at the score's scale bounds it.
 
   What remains is probabilistic: in a plain helper, a `case` on a choice, a
   vector lookup keyed by one, or a raw `if` on a comparison also used

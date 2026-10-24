@@ -392,12 +392,6 @@
     (array/with-backend @reference (array/array (array/->clj x)))
     x))
 
-(defn- mixed-backends? [^Throwable e]
-  (loop [e e]
-    (cond (nil? e) false
-          (and (instance? clojure.lang.ExceptionInfo e) (:backends (ex-data e))) true
-          :else (recur (.getCause e)))))
-
 (defn- lazy-batch?
   "Is t, a batched trace, on a lazy backend (where each scalar re-run would
    cost evaluations)?"
@@ -408,12 +402,16 @@
 (defn- spot-check!
   "Throw unless the batched trace t of gf on args agrees with the scalar
    handler re-run on each spot-checked particle's choices, read on the host
-   for all of them at once. On a lazy backend the re-runs are on the JVM
-   backend (microseconds, where a scalar run on the lazy backend costs
-   evaluations), unless the model reaches arrays of the lazy backend that
-   the JVM run cannot mix with (it closes over them): then, as on other
-   backends, on the batch's own. With no particles to check (*spot-checks*
-   0) it reads nothing."
+   for all of them at once. On other backends the re-runs are on the
+   batch's own. On a lazy backend they are first on the JVM backend
+   (microseconds, where a scalar run on the lazy backend costs
+   evaluations), whose agreement is enough; a mismatch there is re-run on
+   the batch's own backend, which decides. The JVM run is float64: a
+   float32 batch of an ill-conditioned model (large values over a small
+   sd) differs from it by the batch's rounding, which no tolerance at the
+   score's scale bounds (the M2 review's finding 4); and a model that
+   reaches arrays of the lazy backend fails there (it closes over them).
+   With no particles to check (*spot-checks* 0) it reads nothing."
   [gf args n t]
   (let [idx (vec (spot-indices n))]
     (when (seq idx)
@@ -423,7 +421,7 @@
                        (try (array/with-backend @reference
                               (re-run! gf (array/tree-map on-reference args) idx reads true))
                             true
-                            (catch Exception e (if (mixed-backends? e) false (throw e)))))
+                            (catch clojure.lang.ExceptionInfo e (if (::mismatch (ex-data e)) false (throw e)))))
           (re-run! gf args idx reads false))))
     t))
 

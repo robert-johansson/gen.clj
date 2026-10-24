@@ -719,6 +719,42 @@
                       (trace :y (d/normal (if (= :float32 (array/dtype x)) 0.0 5.0) 1))))]
       (binding [b/*spot-checks* :all]
         (is (b/batched? (spot-checked-on false #(b/simulate m [] 8 (rng/key 58)))))))))
+
+(deftest float32-rounding-is-no-mismatch
+  ;; The M2 review's finding 4 (genclj-i8ui): a lazy backend's batch is
+  ;; checked against float64 re-runs on the JVM backend. A float32 batch of
+  ;; an ill-conditioned model (an intercept near 1, x = 1000..1999 as an
+  ;; argument, y near 2x + 1 with sd 0.01) rounds its means where those
+  ;; runs do not: on the JVM backend 0.03-0.56 nats apart at the 8 checked
+  ;; particles, against float32's tolerance of 0.034 (the JVM backend's
+  ;; prior draws float64, so its score is float64 and its tolerance 3e-5).
+  ;; The model computes in float32 on every backend (its arrays and the
+  ;; cast), and the JVM re-run is taken on every backend. Plant: the JVM
+  ;; re-run's mismatch taken as final, as before the fix: generate falls
+  ;; back, and the update that adds the observations, being unchecked,
+  ;; leaves a collection that diverges when read (on the JVM and MLX).
+  (let [f32 #(array/array % {:dtype :float32})
+        xs (f32 (mapv double (range 1000 2000)))
+        ys (f32 (mapv #(+ (* 2.0 %) 1.0 (* 0.01 (Math/sin %))) (range 1000 2000)))
+        mean (fn [b xs] (+ (array/astype b :float32) (* 2 xs)))]
+    (testing "a batched generate stays batched"
+      (let [m (gen [xs] (let [b (trace :b (d/normal (f32 [1.0]) 0.001))] (trace :y (d/normal (mean b xs) 0.01))))
+            {ps :particles} (spot-checked-on true #(b/generate m [xs] (cm/choicemap :y ys) 64 (rng/key 80)))]
+        (is (nil? (b/fallback-reason ps)))))
+    (testing "observations added by an unchecked update do not diverge"
+      ;; updates 1 and 2 are checked (one observation of b each, float64 on
+      ;; the JVM backend), 3 (the ill-conditioned observations) is not
+      (let [m (gen [xs k] (let [b (trace :b (d/normal (f32 [1.0]) 0.001))]
+                            (doseq [j (range k)]
+                              (if (= j 2)
+                                (trace [:y j] (d/normal (mean b xs) 0.01))
+                                (trace [:y j] (d/normal b 1.0))))))
+            step (fn [ps k] (:particles (b/update ps [xs k] [diff/no-change diff/unknown-change]
+                                                  (cm/choicemap [:y (dec k)] (if (= k 3) ys (f32 [1.0]))) (rng/key k))))
+            [ps error] (spot-checked-on true #(let [ps (reduce step (b/simulate m [xs 0] 64 (rng/key 81)) [1 2 3])]
+                                                [ps (try (b/scores ps) nil (catch clojure.lang.ExceptionInfo e (ex-message e)))]))]
+        (is (nil? (b/fallback-reason ps)))
+        (is (nil? error))))))
 ;; ---------------------------------------------------------------------------
 ;; Switches by partition (genclj-7tqw)
 ;; ---------------------------------------------------------------------------
