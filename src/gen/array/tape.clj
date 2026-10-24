@@ -281,7 +281,8 @@
 
 (def ^:private ways-out
   (str "compute with gen.array's operators, give the function a custom gradient (gen.custom's :gradient,"
-       " array/custom-vjp), or read (array/stop-gradient x) to drop the gradient on purpose"))
+       " array/custom-vjp), or read (array/stop-gradient x) to drop the gradient on purpose. To branch or"
+       " index, compare with gen.array's operators (array/<, …) or read (array/floor x): neither has a gradient"))
 
 (defn- host-read-error
   "Reading x, a float value being differentiated, on the host would drop

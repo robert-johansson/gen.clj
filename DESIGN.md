@@ -1051,12 +1051,17 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   `array/compile` a custom VJP under native gradients is an error (MLX's
   compiled graphs leave custom VJPs out).
 - **Reading a value being differentiated on the host is an error**
-  (2026-10-24, genclj-de4g; PROVISIONAL, the owner confirms it). Under
+  (2026-10-24, genclj-de4g; confirmed by the owner 2026-10-25: gen.clj's
+  decisions come first, and memo.clj, then GenGDT, adapt to them). Under
   gen.array.tape, `array/item` or `array/->clj` of a tracked float throws
   ex-info (`:shape`, `:dtype`) naming the ways out: compute with gen.array's
   operators, give the function a custom gradient (gen.custom's `:gradient`,
   `array/custom-vjp`), or read `(array/stop-gradient x)` to drop the
-  gradient on purpose. Until now the read returned the primal and the path
+  gradient on purpose; to branch or index, compare with gen.array's
+  operators or read `(array/floor x)`. A host read used only to branch or
+  index (`(int (array/item x))`) lost nothing before and is refused now:
+  the price of a rule that cannot tell it from a read that loses a
+  gradient. Until now the read returned the primal and the path
   through it was missing from the gradient without a word: chapter 028
   found d/dm of log N(m; 0, 1) + log N(3; 2m, 1) at m = 0.8 coming out
   -0.8, the prior's term alone, instead of 2.0, through `item` in a body

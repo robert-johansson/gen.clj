@@ -623,8 +623,9 @@ fit-error
     (cm/get-choice (:gradients (grad/choice-gradients t (sel/select :m)))
                    :m)))
 
-(m-gradient anomaly-plain)
-;=> -0.8
+;; book: anomaly-plain-error
+;; error: Cannot read a value being differentiated on the host
+#_(m-gradient anomaly-plain)
 
 ;; book: anomaly
 (def anomaly
