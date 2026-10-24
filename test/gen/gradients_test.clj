@@ -7,16 +7,20 @@
             [gen.test-support :as ts]
             [gen.array :as array :refer [+ - * /]]
             [gen.array.batch :as batch]
+            [gen.array.dtype :as dt]
             [gen.batched :as b]
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
+            [gen.custom :as custom]
             [gen.dist :as d]
             [gen.dist.core :as dc]
             [gen.dynamic :as dyn :refer [gen]]
             [gen.gfi :as gfi]
             [gen.gradients :as g]
             [gen.inference.enumerative :as enum]
+            [gen.inference.mcmc :as mcmc]
             [gen.inference.proposal :as prop]
+            [gen.inference.vi :as vi]
             [gen.learning :as learn]
             [gen.random :as rng]
             [gen.selection :as sel]))
@@ -185,6 +189,147 @@
                              [] cm/EMPTY 6 16)]
         (is (not (b/batched? ps)))
         (is (every-particle-s? ps (sel/select :x) nil nil))))))
+
+;; ---------------------------------------------------------------------------
+;; Reading a value being differentiated on the host (genclj-de4g): its
+;; gradient would be lost, so it is an error, not a silent zero
+;; ---------------------------------------------------------------------------
+
+(defmacro ^:private doubled-mean
+  "m ~ N(0, 1), y ~ N(mean, 1), mean computed from m by the form: d/dm of
+   the log density at m = 0.8, y = 3 is -0.8 + 2·(3 - 1.6) = 2.0 when the
+   mean is 2m and its gradient kept, -0.8 (the prior's term) when lost."
+  [m form]
+  `(gen [] (let [~m (~'trace :m (d/normal 0 1))] (~'trace :y (d/normal ~form 1)))))
+
+(def ^:private by-array (doubled-mean m (* 2.0 m)))
+(def ^:private by-item (doubled-mean m (* 2.0 (array/item m))))
+(def ^:private by-clj (doubled-mean m (* 2.0 (array/->clj m))))
+(def ^:private by-stop-gradient (doubled-mean m (* 2.0 (array/item (array/stop-gradient m)))))
+(def ^:private by-host-math (doubled-mean m (clojure.core/* 2.0 m)))
+(def ^:private by-comparisons
+  ;; a body's = reads m on the host (gen.dynamic.core/host-value), and a
+  ;; comparison is a bool: control flow keeps the branch's gradient
+  (doubled-mean m (if (and (array/> m 0) (array/item (array/> m 0)) (not= m 0.0)) (* 2.0 m) m)))
+
+(def ^:private doubled (custom/deterministic {:apply (fn [[m]] (* 2.0 (array/item m)))}))
+(def ^:private doubled-with-gradient
+  (custom/deterministic {:apply (fn [[m]] (* 2.0 (array/item m))) :gradient (fn [_ _ g] [(* 2.0 g)])}))
+(def ^:private by-deterministic (doubled-mean m (splice :f doubled m)))
+(def ^:private by-custom-gradient (doubled-mean m (splice :f doubled-with-gradient m)))
+
+(defn- gradient-at-m [model]
+  (let [tr (:trace (gfi/generate model [] (cm/choicemap :m 0.8 :y 3.0) (rng/key 0)))]
+    (cm/get-choice (:gradients (g/choice-gradients tr (sel/select :m))) :m)))
+
+(defn- read-error
+  "The ex-info thrown by (f), or nil."
+  [f]
+  (try (f) nil (catch clojure.lang.ExceptionInfo e e)))
+
+(deftest host-reads-of-differentiated-values-are-loud
+  ;; Planted bugs (2026-10-24): the read returning the primal again (the
+  ;; tape's throw removed, the old behaviour) fails 16 assertions and errors
+  ;; 3 here; without value-and-grad's catch, host arithmetic is a raw
+  ;; ClassCastException (an error); a body's = reading m without
+  ;; stop-gradient (gen.dynamic.core/host-value) errors by-comparisons
+  (testing "gen.array's operators, a custom gradient and control flow keep the gradient"
+    (is (ts/close? 2.0 (gradient-at-m by-array)))
+    (is (ts/close? 2.0 (gradient-at-m by-custom-gradient)))
+    (is (ts/close? 2.0 (gradient-at-m by-comparisons))))
+  (testing "a read of the value through stop-gradient drops its gradient on purpose"
+    (is (ts/close? -0.8 (gradient-at-m by-stop-gradient))))
+  (when-not (ts/native-grad?)
+    (testing "item and ->clj of a float being differentiated throw, naming the ways out"
+      (doseq [model [by-item by-clj by-deterministic]
+              :let [e (read-error #(gradient-at-m model))]]
+        (is (some? e))
+        (is (re-find #"gradient would be lost" (str (ex-message e))))
+        (is (re-find #"stop-gradient" (str (ex-message e))))
+        (is (re-find #"custom gradient" (str (ex-message e))))
+        (is (= [] (:shape (ex-data e))))
+        (is (= :float (dt/kind (:dtype (ex-data e)))))))
+    (testing "an array's read reports its shape"
+      (let [e (read-error #((array/grad (fn [x] (array/sum (array/array (array/->clj x))))) (array/array [1.0 2.0])))]
+        (is (= [2] (:shape (ex-data e))))))
+    (testing "bools and ints have no gradient: they read"
+      (is (ts/close? 2.0 ((array/grad (fn [x] (if (array/item (array/> x 0)) (* 2.0 x) x))) 1.5)))
+      (is (ts/close? 3.0 ((array/grad (fn [x] (* x (array/item (array/astype x :int32))))) 3.5)))
+      (is (ts/close? 1.0 ((array/grad (fn [x] (+ x (array/item (array/floor x))))) 1.5)) "floor's value is untracked"))
+    (testing "host arithmetic on a value being differentiated is loud, not a ClassCastException"
+      (let [e (read-error #((array/grad (fn [x] (clojure.core/* 2.0 x))) 3.0))]
+        (is (re-find #"Host arithmetic" (str (ex-message e))))
+        (is (re-find #"stop-gradient" (str (ex-message e))))
+        (is (instance? ClassCastException (ex-cause e))))
+      (when (ts/jvm?)
+        ;; on MLX a body's 0-d values are arrays, so host arithmetic fails
+        ;; on them outside gradients too
+        (is (re-find #"Host arithmetic" (str (ex-message (read-error #(gradient-at-m by-host-math))))))))))
+
+(def ^:private validated
+  "Parameters the distributions validate on the host, each a function of
+   the differentiated :x: positive (normal's std, gamma's scale, beta's,
+   dirichlet's), a probability (bernoulli's), probabilities (categorical's),
+   ordered bounds (uniform's, truncated-normal's) and a covariance
+   (mvnormal's). Their checks read comparisons, which have no gradient, so
+   gradients through them run."
+  (gen []
+    (let [x (trace :x (d/normal 0 1))
+          s (array/exp (* 0.5 x))
+          p (array/sigmoid x)]
+      (trace :a (d/normal x s))
+      (trace :b (d/bernoulli p))
+      (trace :c (d/categorical (array/stack [p (- 1.0 p)])))
+      (trace :g (d/gamma 2.0 s))
+      (trace :be (d/beta s 2.0))
+      (trace :di (d/dirichlet (array/stack [s 1.0])))
+      (trace :u (d/uniform (- x 5.0) (+ x 5.0)))
+      (trace :t (d/truncated-normal x s -3.0 3.0))
+      (trace :z (d/mvnormal (array/stack [x x]) (* s (array/eye 2))))
+      x)))
+
+(def ^:private validated-observations
+  (cm/choicemap :a 0.3 :b true :c 1 :g 1.5 :be 0.4 :di (array/array [0.3 0.7]) :u 0.5 :t 0.2
+                :z (array/array [0.2 0.4])))
+
+(def ^:private validated-family (gen [] (trace :x (d/normal (param :m) (array/exp (param :log-s))))))
+
+(deftest gradients-through-validated-parameters
+  ;; Planted bugs (2026-10-24): a check reading its parameter's floats
+  ;; (check-positive as (pos? (array/item (array/min v)))) errors every case
+  ;; of the first part with the host-read error; mvnormal's jitter
+  ;; suggestion reading the covariance being differentiated fails the
+  ;; second's two assertions, and a distribution's printed parameters read
+  ;; without stop-gradient error the third
+  (let [start (:trace (gfi/generate validated [] (cm/merge validated-observations (cm/choicemap :x 0.1)) (rng/key 0)))
+        x (sel/select :x)
+        moved? (fn [step] (some #(:accepted? (step %)) (rng/split (rng/key 1) 10)))]
+    (testing "choice gradients"
+      (is (grad-close? (cm/get-choice (:gradients (g/choice-gradients start x)) :x) (fd-choice start :x 0 nil))))
+    (testing "HMC, MALA and MAP move"
+      (is (moved? #(mcmc/hmc start x {:L 5 :eps 0.05} %)))
+      (is (moved? #(mcmc/mala start x 0.05 %)))
+      (is (not= (ts/number (start :x)) (ts/number ((mcmc/map-optimize start x) :x)))))
+    (testing "VI's reparameterized ELBO gradient, through the model's checks"
+      (let [{:keys [objective grads]} (vi/elbo-gradient validated [] validated-observations validated-family []
+                                                        {:m 0.0 :log-s -1.0} 4 {:estimator :reparam :key (rng/key 2)})]
+        (is (Double/isFinite (ts/number objective)))
+        (is (every? #(Double/isFinite (ts/number %)) (vals grads))))))
+  (when (array/concrete? (array/ones [2 2]))
+    (testing "a covariance failing its check under a gradient is the check's error, with its jitter"
+      ;; its suggestion reads the covariance's diagonal: on purpose, by stop-gradient
+      (let [e (read-error #((array/grad (fn [v] (dc/log-prob (d/mvnormal [0.0 0.0] (* v (array/ones [2 2]))) (array/zeros [2]))))
+                            2.0))]
+        (is (re-find #"positive definite" (str (ex-message e))))
+        (is (:suggested-jitter (ex-data e))))))
+  (testing "printing a distribution whose parameters are being differentiated shows their values"
+    (let [printed (atom nil)]
+      ((array/grad (fn [v] (let [dist (d/normal (* v (array/array [1.0 2.0])) v)]
+                             (reset! printed (pr-str dist))
+                             (array/sum (dc/log-prob dist (array/zeros [2]))))))
+       1.5)
+      (is (re-find #"normal" @printed))
+      (is (re-find #"1\.5" @printed)))))
 
 (deftest discrete-choices-are-rejected
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not continuous"

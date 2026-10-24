@@ -357,7 +357,9 @@
               dist-name (str param-name " must be symmetric") {:param param-name})
     (let [dtype (factored-dtype m)]
       (when-not (positive-definite? m dtype)
-        (let [jitter (suggested-jitter m dtype)]
+        ;; the suggestion reads m's diagonal on the host, which has no
+        ;; gradient: an m being differentiated is read on purpose
+        (let [jitter (suggested-jitter (array/stop-gradient m) dtype)]
           (throw (ex-info (cond-> (str dist-name ": " param-name " must be positive definite, and not singular at "
                                        (name dtype) " precision")
                             jitter (str "; adding a jitter of " jitter " to its diagonal passes"))

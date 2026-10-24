@@ -459,7 +459,11 @@
   (fn [d] (:type d)))
 
 (defmethod -printed-params :default [d]
-  (into {} (map (fn [[k v]] [k (if (and (array/array? v) (not (array/host? v))) (array/->clj v) v)])) (:params d)))
+  ;; printing has no gradient: a parameter being differentiated prints its value
+  (into {} (map (fn [[k v]] [k (if (and (array/array? v) (not (array/host? v)))
+                                 (array/->clj (array/stop-gradient v))
+                                 v)]))
+        (:params d)))
 
 (defmethod print-method Distribution [d ^java.io.Writer w]
   (.write w (str "#gen/dist[" (name (:type d)) " "))

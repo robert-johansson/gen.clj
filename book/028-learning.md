@@ -1032,9 +1032,8 @@ finds it:
 
 As a deterministic generative function it reads $m$ on the host, so
 differentiation cannot follow $m$ through it. In a model that observes
-$E$ with noise, $m$'s gradient is then its prior's term alone,
-$(1 - 1.2)/0.5^2 = -0.8$, and the likelihood's dependence on $m$ is lost.
-gen.clj does not detect this: the gradient is silently wrong.
+$E$ with noise, $m$'s gradient would then be its prior's term alone,
+$(1 - 1.2)/0.5^2 = -0.8$, with the likelihood's dependence on $m$ lost.
 
 <!-- code: anomaly-plain -->
 ```clojure
@@ -1058,9 +1057,16 @@ gen.clj does not detect this: the gradient is silently wrong.
                                 (cm/choicemap :m 1.2 :obs 1.9) (rng/key 21)))]
     (cm/get-choice (:gradients (grad/choice-gradients t (sel/select :m)))
                    :m)))
+```
 
+gen.clj does not let the gradient go wrong silently: reading a value
+being differentiated on the host is an error, and its message names the
+ways out.
+
+<!-- code: anomaly-plain-error -->
+```clojure
+;; error: Cannot read a value being differentiated on the host
 (m-gradient anomaly-plain)
-;=> -0.8
 ```
 
 A `:gradient` gives the derivative instead (Gen.jl's

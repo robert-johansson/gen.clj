@@ -270,8 +270,20 @@ needs, taken from GenMLX's measured call counts
   - VJP rules form a table keyed by the primitive op keywords of §6, and are
     written against the public API. Composites therefore need no rules, and the
     same tape works on any backend; it could even test MLX's native AD.
-  - `array/item` on a tracked value returns its primal. Data-dependent control flow
-    is fine (non-differentiable branches, as in Gen.jl).
+  - **Reading a tracked float on the host is an error** (2026-10-24,
+    genclj-de4g; DESIGN.md §9, PROVISIONAL). `array/item` and `array/->clj`
+    of one throw `ex-info` (`:shape`, `:dtype`) naming the ways out:
+    gen.array's operators, a custom gradient (`array/custom-vjp`,
+    gen.custom's `:gradient`), or `(array/item (array/stop-gradient x))`
+    to read it on purpose. Host arithmetic on one (clojure.core's
+    operators, `Math/…`) is the same error, rethrown by `value-and-grad`
+    from the ClassCastException. Until then `item` returned the primal,
+    and the path through it was missing from the gradient, silently. (MLX's
+    native gradients, below, still detach a read silently.)
+  - Data-dependent control flow is fine (non-differentiable branches, as
+    in Gen.jl): comparisons, floor and the like give untracked values, and
+    bools and ints read freely. A batched tracked value's read is the
+    batched-branch error first (§8b), so a batched run falls back.
   - Scope for M1 is first order. Nested AD (Hessians) is bean genclj-hors.
   - Under the batch tracer, gradients are vmap's (§8b, *Gradients*).
 - **MLX backend:** the same tape by default (§13). With
@@ -415,7 +427,8 @@ Two layers make this safe:
    - **Plain helper functions** outside `gen` get none of this. On MLX they
      see arrays, not numbers: clojure.core's `=` with a number is false and
      its arithmetic throws. A helper should use gen.array's operators or
-     `array/item`, or be `defn-guarded`.
+     `array/item` (not on a float being differentiated: §8), or be
+     `defn-guarded`.
    - A `catch` clause in a body raises the fallback first in a batched run:
      a caught exception may be thrown for some particles only. And a
      batched-branch error is logged when raised, so a run in which code
