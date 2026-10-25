@@ -460,7 +460,10 @@
         matching (array-map :slope 0.01 :intercept 100.0)
         result (fn [r] [(ts/number (:log-alpha r)) (ts/host (cm/to-map (:choices (:trace r))))])]
     (testing "labeled as given"
-      (is (= {:slope 0.01 :intercept 100.0} (ts/host (cm/to-map (mcmc/inv-metric tr slope-first matching)))))
+      (let [m (ts/host (cm/to-map (mcmc/inv-metric tr slope-first matching)))]
+        (is (= #{:slope :intercept} (set (keys m))))
+        (is (ts/close? 0.01 (:slope m)) "float32 holds 0.01 to its precision")
+        (is (ts/close? 100.0 (:intercept m))))
       (is (= {:slope 1.0 :intercept 1.0} (ts/host (cm/to-map (mcmc/inv-metric tr slope-first nil)))) "the identity")
       (is (= {:slope 2.0 :intercept 2.0} (ts/host (cm/to-map (mcmc/inv-metric tr slope-first 2.0)))) "one for all"))
     (testing "every form of the same metric makes the same move"

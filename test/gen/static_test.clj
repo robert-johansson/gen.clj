@@ -353,10 +353,13 @@
     (testing "the same body without ^:static reruns its code"
       ;; and its splice of the callee, whose argument is a number equal to
       ;; the last, is a no-change call (the ten decisions' tenth, DESIGN.md
-      ;; §9): the deterministic callee is not run again
+      ;; §9): the deterministic callee is not run again. On MLX the
+      ;; argument is a 0-d array, which the no-change test does not read
+      ;; (gfi/same-value?, DESIGN.md §9, D1), so the callee runs again
       (let [plain (assoc model :static nil)
             tp (gfi/simulate plain [0.5] (rng/key 1))]
-        (is (= {:compute 1} (counted #(gfi/update tp [0.5] [diff/no-change] (cm/choicemap :b 0.3) (rng/key 2)))))
+        (is (= (if (ts/jvm?) {:compute 1} {:compute 1 :callee 1})
+               (counted #(gfi/update tp [0.5] [diff/no-change] (cm/choicemap :b 0.3) (rng/key 2)))))
         (is (= {:compute 1 :callee 1} (counted #(gfi/update tp [0.5] [diff/no-change] (cm/choicemap :a 0.3) (rng/key 3))))
             "a changed argument runs it")))))
 

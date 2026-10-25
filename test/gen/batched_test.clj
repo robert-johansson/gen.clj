@@ -1305,10 +1305,13 @@
         (is (refused? #(b/generate branching [] cm/EMPTY 8 (rng/key 2))))
         (is (refused? #(b/update gps [] [] cm/EMPTY (rng/key 3))) "particles held one at a time")
         (is (refused? #(b/map-particles gps (fn [t _] (:score t)) nil))))))
-  (testing "host math's reason is written (029)"
-    (let [m (b/fallback (b/simulate host-math [] 4 (rng/key 6)))]
-      (is (written? m))
-      (is (re-find #"host math" m))))
+  (when (ts/jvm?)
+    ;; on MLX a 0-d value is an array too, so one particle's run refuses
+    ;; the host math as the batched one does: nothing to fall back to
+    (testing "host math's reason is written (029)"
+      (let [m (b/fallback (b/simulate host-math [] 4 (rng/key 6)))]
+        (is (written? m))
+        (is (re-find #"host math" m)))))
   (testing "the batched generate under an internal proposal (028)"
     (let [m (gen [] (let [z (trace :z (d/normal 0 1))] (trace :y (d/normal z 1))))
           q (gen [_cs] (trace :z (d/normal 0.5 1)))
