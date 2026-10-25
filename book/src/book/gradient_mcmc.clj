@@ -275,16 +275,17 @@ walk-r-hat
  (diag/ess-bulk (get-in mala-identity [:draws :slope]))]
 ;=> [0.615 20.0] ; float64
 
-;; book: metric-order
-(cm/addresses (grad/continuous-selection center line))
-;=> [[:intercept] [:slope]]
-
+;; book: labeled-metric
 (def inv-metric
   (let [[v-slope v-intercept] (array/->clj (array/diag (:cov exact)))]
-    (cm/to-array (cm/choicemap :slope v-slope :intercept v-intercept))))
+    (cm/choicemap :slope v-slope :intercept v-intercept)))
 
-(array/->clj inv-metric)
-;=> [0.4634 0.01204]
+(cm/to-map inv-metric)
+;=> {:slope 0.01204 :intercept 0.4634}
+
+;; book: unlabeled-metric
+;; error: :inv-metric as a vector or array leaves its order to guess
+#_(mcmc/mala center line 0.2 {:inv-metric [0.01204 0.4634] :key (rng/key 4)})
 
 ;; book: mala-metric
 (def mala-scaled
@@ -430,8 +431,8 @@ walk-r-hat
 ;; book: nuts
 (def nuts-run (nuts/sample (first starts) line {:samples 1000} (rng/key 7)))
 
-[(:eps nuts-run) (array/->clj (:inv-metric nuts-run))]
-;=> [0.309 [0.472 0.0124]] ; float64
+[(:eps nuts-run) (cm/to-map (:inv-metric nuts-run))]
+;=> [0.309 {:slope 0.0124 :intercept 0.472}] ; float64
 
 [(:divergences nuts-run) (:divergences (:warmup nuts-run))]
 ;=> [0 13] ; float64
@@ -480,12 +481,15 @@ walk-r-hat
   (nuts/adapt (first starts) line {:warmup 6000} (rng/key 23)))
 
 (defn ratios
-  "Each adapted variance over the exact one."
+  "Each adapted variance over the exact one, by address."
   [adapted]
-  (mapv / (array/->clj (:inv-metric adapted)) (array/->clj inv-metric)))
+  (into {} (for [addr [:slope :intercept]
+                 :let [variance #(array/item (cm/get-choice % addr))]]
+             [addr (/ (variance (:inv-metric adapted))
+                      (variance inv-metric))])))
 
 (ratios long-warmup)
-;=> [0.998 0.987] ; float64
+;=> {:slope 0.987 :intercept 0.998} ; float64
 
 (def metric-band (* 5 (window-se 4300)))
 
@@ -495,7 +499,7 @@ metric-band
 ;; Over 12 other keys (200-211), the long warmup's ratios had standard
 ;; deviations of 0.041 and 0.038, as the standard error says (0.037).
 [(< metric-band 0.5)
- (every? #(< (abs (- % 1.0)) metric-band) (ratios long-warmup))]
+ (every? #(< (abs (- % 1.0)) metric-band) (vals (ratios long-warmup)))]
 ;=> [true true]
 
 ;; book: tilt
@@ -821,14 +825,14 @@ mixture-exact
 ;=> true
 
 ;; book: solution-1
-(def selection-order
-  "The exact variances in the selection's order, slope first: the wrong
-   order for the metric."
-  (array/diag (:cov exact)))
+(def swapped-metric
+  "The exact variances, each at the other choice's address."
+  (cm/choicemap :slope (cm/get-choice inv-metric :intercept)
+                :intercept (cm/get-choice inv-metric :slope)))
 
-(def misordered
+(def swapped
   (run-particles #(mcmc/mala-particles %1 line 0.01
-                                       {:inv-metric selection-order :key %2})
+                                       {:inv-metric swapped-metric :key %2})
                  at-center [:slope :intercept]
                  {:samples 500 :burn 100 :key (rng/key 19)}))
 
@@ -842,23 +846,23 @@ mixture-exact
   [run addr]
   (mapv #(:sd (diag/summary %)) (get-in run [:draws addr])))
 
-[conditional-sd (sds misordered :slope) (sds misordered :intercept)]
+[conditional-sd (sds swapped :slope) (sds swapped :intercept)]
 ;=> [0.0509 [0.051 0.054 0.056 0.057] [0.087 0.128 0.075 0.087]] ; float64
 
 [(every? #(< (abs (- % conditional-sd)) (* 0.4 conditional-sd))
-         (sds misordered :slope))
- (every? #(< % (/ (exact-sd 1) 3)) (sds misordered :intercept))
- (> (diag/r-hat (get-in misordered [:draws :intercept])) 1.01)]
+         (sds swapped :slope))
+ (every? #(< % (/ (exact-sd 1) 3)) (sds swapped :intercept))
+ (> (diag/r-hat (get-in swapped [:draws :intercept])) 1.01)]
 ;=> [true true true]
 
-;; book: solution-1-ordered
-(def ordered
+;; book: solution-1-matched
+(def matched
   (run-particles #(mcmc/mala-particles %1 line 0.01
                                        {:inv-metric inv-metric :key %2})
                  at-center [:slope :intercept]
                  {:samples 500 :burn 100 :key (rng/key 19)}))
 
-(not-any? #(< % (/ (exact-sd 1) 3)) (sds ordered :intercept))
+(not-any? #(< % (/ (exact-sd 1) 3)) (sds matched :intercept))
 ;=> true
 
 ;; book: solution-2

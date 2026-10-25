@@ -565,6 +565,7 @@
  {elliptical-slice {:arglists ([trace addr mu cov] [trace addr mu cov key])}
   hmc {:arglists ([trace selection] [trace selection key-or-opts] [trace selection opts key])}
   hmc-particles {:arglists ([ps selection] [ps selection key-or-opts] [ps selection opts key])}
+  inv-metric {:arglists ([trace selection m])}
   mala {:arglists ([trace selection tau] [trace selection tau key-or-opts])}
   mala-particles {:arglists ([ps selection tau] [ps selection tau key-or-opts])}
   map-optimize {:arglists ([trace selection] [trace selection opts])}

@@ -33,6 +33,26 @@ newest first in each section.
 
 ### Changed
 
+- **Breaking. `:inv-metric` is labeled by address** (DESIGN §9, "Labeled
+  metrics"; genclj-qs62).
+  - `mcmc/hmc`, `mala` and `nuts`, their `-particles` kernels, the
+    kernels of gen.inference.kernel and `nuts/adapt` and `sample` take
+    a variance for each selected choice by its address: a choice map or
+    a map, `{:slope 0.012 :intercept 0.46}`, each a number or an array of
+    the choice's shape. One number for every value is unchanged.
+  - A vector or array of variances for a selection of more than one
+    choice is an error (`:unlabeled-inv-metric`). It followed the choice
+    map's flat order (addresses sorted), not the selection's, so
+    `{:inv-metric [0.012 0.46]}` with `(sel/select :slope :intercept)`
+    gave 0.012 to `:intercept`. Write the map in its place. For a
+    selection of one choice a vector is taken as before.
+  - `nuts/adapt` and `nuts/sample` return `:inv-metric` as a choice map
+    of variances by address, where it was a flat array in that order;
+    with no metric given or adapted, the identity as ones. Read
+    `(cm/get-choice (:inv-metric r) :slope)`; passing it back as
+    `:inv-metric` works as before.
+  - A metric that lacks a selected address, or holds one not selected,
+    is an error (`:invalid-inv-metric`).
 - **Breaking. Every kernel returns `{:trace :accepted? …}`** (DESIGN §9,
   "The 1.0's shape", kernels' shape; a509ad5, genclj-4hu0).
   - `mcmc/map-optimize` and `mcmc/elliptical-slice` return `{:trace
@@ -195,6 +215,11 @@ newest first in each section.
 
 ### Added
 
+- **`mcmc/inv-metric`: a metric labeled** (genclj-qs62). `(mcmc/inv-metric
+  trace selection m)` is the inverse metric the kernels read from the
+  `:inv-metric` option m (any form they take; nil the identity), as a
+  choice map of each selected choice's variances, the form `nuts/adapt`
+  returns.
 - **`array/vmap`: a function batched over a leading axis,** as JAX's
   vmap (DESIGN §9, "The 1.0's shape"; fbf0d21, genclj-t3ur).
   `((array/vmap f {:in-axes [0 nil]}) xs shared)` runs f once for the
@@ -246,7 +271,7 @@ newest first in each section.
     and memory, gen.random.threefry and gen.backend.mlx.exact (internal).
   - `test/fixtures/api-snapshot.edn` holds the stable surface: every
     public var but `^:no-doc` ones, with its arglists or its kind (32
-    namespaces, 666 vars with genclj-9efy's replacements, gfi/assess-backward, array/vmap and the kernel constructors). gen.api-test fails when the code differs. It
+    namespaces, 667 vars with genclj-9efy's replacements, gfi/assess-backward, array/vmap, the kernel constructors and mcmc/inv-metric). gen.api-test fails when the code differs. It
     names what was added, removed or changed, and calls out apart a var
     removed without a deprecation first. `clojure -M:test -m gen.api
     write` writes the snapshot after a deliberate change; `check` prints

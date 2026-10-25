@@ -25,11 +25,19 @@
    The selected choices must keep the trace's structure: HMC, MALA and NUTS
    move them jointly and leave every other choice alone. They take a
    diagonal metric, :inv-metric (Stan's inv_metric, the identity by
-   default): a variance for each selected value, in the order of
-   (cm/to-array (grad/continuous-selection trace selection)), or one number
-   for all. Momenta are drawn with those precisions and a position moves by
-   inv-metric ⊙ momentum, so variances that match the target's make its
-   scales alike (gen.inference.nuts adapts them). A proposal whose
+   default): one variance for all the selected values, or a variance for
+   each selected choice by its address, a choice map or a map
+   ({:slope 0.012 :intercept 0.46}, cm/from-map's), each a number or an
+   array of the choice's shape. A vector or array of variances is taken
+   only when the selected values are one choice, whose elements it follows
+   in order (flat, as cm/to-array flattens, or in the choice's shape): for
+   more choices its order would be a guess, so it is a loud error.
+   (inv-metric trace selection m) gives a metric labeled so, the form
+   gen.inference.nuts returns its adapted one in. A dense metric (planned)
+   will be a value of its own, a matrix with its addresses' order. Momenta
+   are drawn with those precisions and a position moves by inv-metric ⊙
+   momentum, so variances that match the target's make its scales alike
+   (gen.inference.nuts adapts them). A proposal whose
    position, momentum, gradient or energy turns non-finite, or where a
    distribution's parameter fails its check, diverged: it is rejected,
    with acceptance 0 (:log-alpha -Inf), and reported as :diverged?
@@ -116,23 +124,93 @@
   (let [z (/ (- x mu) sd)]
     (array/sum (- (* -0.5 (* z z)) (+ (array/log sd) (* 0.5 (Math/log (* 2.0 Math/PI))))))))
 
+(defn- one-number?
+  "Is x one variance for every value: a host number, or a 0-d array (a
+   computed scalar on a lazy backend)?"
+  [x]
+  (or (number? x) (and (array/backend-array? x) (empty? (array/shape x)))))
+
+(defn- choice-variances
+  "The variances s given for the selected choice x at path p, flat: one
+   number for each of its elements, or an array (or a vector) of x's shape
+   or flat with its size. Loud otherwise."
+  [s x p]
+  (let [m (if (sequential? s) (array/array s) s)
+        n (array/size x)]
+    (cond (one-number? m) (array/full [n] m)
+          (and (array/backend-array? m) (or (= (array/shape m) (array/shape x)) (= (array/shape m) [n])))
+          (array/flatten m)
+          :else (throw (ex-info (str ":inv-metric at " p " must be a variance, or an array of the choice's shape "
+                                     (array/shape x) ", not " (pr-str s))
+                                {:reason :invalid-inv-metric :path p :inv-metric s :shape (array/shape x)})))))
+
+(defn- address-key
+  "A path as a map key: its address when it has one, as a map of variances
+   writes it."
+  [p]
+  (if (= 1 (count p)) (first p) p))
+
+(defn- labeled-variances
+  "The variances of inv, a choice map or a map of them by address, for the
+   selected values (a choice map), flat in the values' order. Loud unless
+   inv has a variance at each selected address and at no other."
+  [inv values]
+  (let [m (cm/from-map inv)
+        want (cm/addresses values)
+        got (cm/addresses m)
+        missing (vec (remove (set got) want))
+        unexpected (vec (remove (set want) got))]
+    (when (or (seq missing) (seq unexpected))
+      (throw (ex-info (str ":inv-metric must hold a variance for each selected choice, at " want
+                           (when (seq missing) (str "; it has none at " missing))
+                           (when (seq unexpected) (str "; it has some at " unexpected ", which are not selected")))
+                      {:reason :invalid-inv-metric :addresses want :missing missing :unexpected unexpected})))
+    (array/concatenate (mapv (fn [[p x]] (choice-variances (cm/get-choice m p) x p)) (cm/leaves values)))))
+
 (defn- inverse-metric
-  "The :inv-metric option for the flat values v: the host number 1.0 (the
-   identity, under which hmc and mala move as they did without one) for
-   nil, a positive number, or a vector or array of v's shape. Loud unless
-   every variance is positive and finite."
-  [inv v]
+  "The :inv-metric option inv for the selected values (a choice map), flat
+   as v, their to-array: the host number 1.0 (the identity, under which
+   hmc and mala move as they did without one) for nil; one number for all
+   the values; for a choice map or a map, its variance at each address
+   (labeled-variances); for a vector or an array, the variances of the
+   only selected choice, and a loud error when there are more, whose order
+   it would leave to guess. Loud unless every variance is positive and
+   finite."
+  [inv values v]
   (let [m (cond (nil? inv) 1.0
-                (sequential? inv) (array/astype (array/array inv) (array/dtype v))
-                (array/backend-array? inv) (array/astype inv (array/dtype v))
-                :else inv)]
-    (when-not (and (array/array? m)
-                   (or (array/host? m) (= (array/shape m) (array/shape v)))
-                   (array/truthy? (array/all (array/logical-and (array/isfinite m) (array/> m 0)))))
-      (throw (ex-info (str ":inv-metric must be a positive variance, or one for each of the " (array/size v)
-                           " selected values, not " (pr-str inv))
-                      {:reason :invalid-inv-metric :inv-metric inv :shape (array/shape v)})))
+                (one-number? inv) inv
+                (map? inv) (labeled-variances inv values)
+                (or (sequential? inv) (array/backend-array? inv))
+                (let [ls (cm/leaves values)
+                      paths (mapv first ls)]
+                  (if (= 1 (count ls))
+                    (let [[p x] (first ls)] (choice-variances inv x p))
+                    (throw (ex-info (str ":inv-metric as a vector or array leaves its order to guess for the "
+                                         (count ls) " selected choices " paths
+                                         ": give a variance for each by address, as a choice map or a map"
+                                         (when (<= (count paths) 4)
+                                           (str " such as " (pr-str (apply array-map (mapcat (fn [p] [(address-key p) 1.0]) paths))))))
+                                    {:reason :unlabeled-inv-metric :inv-metric inv :addresses paths}))))
+                :else (throw (ex-info (str ":inv-metric is a number, or variances by address (a choice map or a map), not "
+                                           (pr-str inv))
+                                      {:reason :invalid-inv-metric :inv-metric inv})))
+        m (if (array/host? m) m (array/astype m (array/dtype v)))]
+    (when-not (array/truthy? (array/all (array/logical-and (array/isfinite m) (array/> m 0))))
+      (throw (ex-info (str ":inv-metric's variances must be positive and finite, not " (pr-str inv))
+                      {:reason :invalid-inv-metric :inv-metric inv})))
     m))
+
+(defn inv-metric
+  "The diagonal inverse metric that hmc, mala and nuts read from the
+   :inv-metric option m (any form they take, nil the identity) for the
+   selection at trace, labeled: a choice map with the selected choices'
+   addresses, each holding its variances in the choice's shape (a host
+   number for a scalar choice on the JVM backend). gen.inference.nuts
+   returns its metrics so. Loud for a metric the kernels refuse."
+  [trace selection m]
+  (let [[proto v] (flat-values trace selection)
+        inv (inverse-metric m proto v)]
+    (cm/from-array proto (if (array/host? inv) (array/full (array/shape v) inv {:dtype (array/dtype v)}) inv))))
 
 (def ^:private compiled-steps
   "Compiled kernel steps by kernel and settings, model, arguments and choice
@@ -286,7 +364,7 @@
   [trace selection tau {:keys [compile? inv-metric]} key]
   (let [[k-propose _ k-accept] (rng/split key 3)
         [proto v others] (flat-values trace selection)
-        inv (inverse-metric inv-metric v)
+        inv (inverse-metric inv-metric proto v)
         noise (rng/normal k-propose (array/shape v))
         build #(mala-proposal (:gen-fn trace) (:args trace) proto tau)
         ;; the proposal as a function of the selected values, compiled or not
@@ -356,7 +434,7 @@
   [trace selection {:keys [L eps compile? inv-metric] :or {L 10 eps 0.1}} key]
   (let [[k-momenta _ k-accept] (rng/split key 3)
         [proto v others] (flat-values trace selection)
-        inv (inverse-metric inv-metric v)
+        inv (inverse-metric inv-metric proto v)
         ;; the momenta's scale, √M
         sd (/ 1.0 (array/sqrt inv))
         kinetic (fn [p] (normal-lp p 0.0 sd))
@@ -583,7 +661,7 @@
                              {:reason :invalid-max-depth :max-depth max-depth})))
          [k-momenta k-tree k-update] (rng/split key 3)
          [proto v others] (flat-values trace selection)
-         inv (inverse-metric inv-metric v)
+         inv (inverse-metric inv-metric proto v)
          [lp g] ((array/value-and-grad (log-density (:gen-fn trace) (:args trace) proto)) v others)
          _ (check-start! "nuts" (finite lp g) trace selection)
          p (/ (rng/normal k-momenta (array/shape v)) (array/sqrt inv))

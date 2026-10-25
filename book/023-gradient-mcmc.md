@@ -447,24 +447,31 @@ step must be small in every direction because it must be small across the
 ridge.
 
 A *metric* rescales the choices. MALA, HMC and NUTS take one as
-`:inv-metric`, a variance for each selected value, and MALA's proposal becomes
+`:inv-metric`, a variance for each selected choice at its address, and
+MALA's proposal becomes
 $\mathcal{N}(\theta + \tau M^{-1} \nabla \log p,\ 2\tau M^{-1})$, so each
-choice steps in proportion to its spread. The variances go in the order
-of the selected values as one flat array, which is the choice map's order,
-not the selection's. Writing them as a choice map and flattening it with
-`cm/to-array` puts them in that order:
+choice steps in proportion to its spread. A choice map of the exact
+variances is one:
 
-<!-- code: metric-order -->
+<!-- code: labeled-metric -->
 ```clojure
-(cm/addresses (grad/continuous-selection center line))
-;=> [[:intercept] [:slope]]
-
 (def inv-metric
   (let [[v-slope v-intercept] (array/->clj (array/diag (:cov exact)))]
-    (cm/to-array (cm/choicemap :slope v-slope :intercept v-intercept))))
+    (cm/choicemap :slope v-slope :intercept v-intercept)))
 
-(array/->clj inv-metric)
-;=> [0.4634 0.01204]
+(cm/to-map inv-metric)
+;=> {:slope 0.01204 :intercept 0.4634}
+```
+
+A vector of the two would leave the kernel to guess their order: the
+selection's, slope first, or the choice map's, intercept first. A wrong
+guess mis-scales every move and raises no error (Exercise 1 measures by
+how much), so for more than one choice a vector is refused:
+
+<!-- code: unlabeled-metric -->
+```clojure
+;; error: :inv-metric as a vector or array leaves its order to guess
+(mcmc/mala center line 0.2 {:inv-metric [0.01204 0.4634] :key (rng/key 4)})
 ```
 
 With the exact variances as the metric and $\tau = 0.2$, the chains'
@@ -727,19 +734,20 @@ draws with what it learned. `nuts/sample` runs both, with Stan's defaults
 ```clojure
 (def nuts-run (nuts/sample (first starts) line {:samples 1000} (rng/key 7)))
 
-[(:eps nuts-run) (array/->clj (:inv-metric nuts-run))]
-;=> [0.309 [0.472 0.0124]] ; float64
+[(:eps nuts-run) (cm/to-map (:inv-metric nuts-run))]
+;=> [0.309 {:slope 0.0124 :intercept 0.472}] ; float64
 
 [(:divergences nuts-run) (:divergences (:warmup nuts-run))]
 ;=> [0 13] ; float64
 ```
 
-The step size it learned is 0.31, and its inverse metric is close to the
-exact variances, $[0.463, 0.0120]$ in the flat order, intercept first. A
-*divergence* is a trajectory whose energy error passed 1000 or turned
-non-finite: 13 of the warmup's iterations diverged, while its step size
-was still too large, and none of the draws did. Each draw took seven
-leapfrog steps on average, in trees of one to four doublings:
+The step size it learned is 0.31, and its inverse metric, a choice map
+like the one above, is close to the exact variances, 0.0120 for the slope
+and 0.463 for the intercept. A *divergence* is a trajectory whose energy
+error passed 1000 or turned non-finite: 13 of the warmup's iterations
+diverged, while its step size was still too large, and none of the draws
+did. Each draw took seven leapfrog steps on average, in trees of one to
+four doublings:
 
 <!-- code: nuts-stats -->
 ```clojure
@@ -809,12 +817,15 @@ be:
   (nuts/adapt (first starts) line {:warmup 6000} (rng/key 23)))
 
 (defn ratios
-  "Each adapted variance over the exact one."
+  "Each adapted variance over the exact one, by address."
   [adapted]
-  (mapv / (array/->clj (:inv-metric adapted)) (array/->clj inv-metric)))
+  (into {} (for [addr [:slope :intercept]
+                 :let [variance #(array/item (cm/get-choice % addr))]]
+             [addr (/ (variance (:inv-metric adapted))
+                      (variance inv-metric))])))
 
 (ratios long-warmup)
-;=> [0.998 0.987] ; float64
+;=> {:slope 0.987 :intercept 0.998} ; float64
 
 (def metric-band (* 5 (window-se 4300)))
 
@@ -824,7 +835,7 @@ metric-band
 ;; Over 12 other keys (200-211), the long warmup's ratios had standard
 ;; deviations of 0.041 and 0.038, as the standard error says (0.037).
 [(< metric-band 0.5)
- (every? #(< (abs (- % 1.0)) metric-band) (ratios long-warmup))]
+ (every? #(< (abs (- % 1.0)) metric-band) (vals (ratios long-warmup)))]
 ;=> [true true]
 ```
 
@@ -1355,10 +1366,10 @@ to check inference against the answer.
 
 Each exercise has a tested solution at the end of the chapter.
 
-1. **A metric out of order.** Give MALA ($\tau = 0.01$) the exact
-   variances in the selection's order, slope first, and run four chains
-   from the center. Predict each chain's standard deviations of the slope
-   and of the intercept, and what R-hat says.
+1. **A metric swapped.** Give MALA ($\tau = 0.01$) the exact variances
+   swapped, the intercept's at `:slope` and the slope's at `:intercept`,
+   and run four chains from the center. Predict each chain's standard
+   deviations of the slope and of the intercept, and what R-hat says.
 2. **Trajectory length.** With the exact variances as the metric and a
    step size of 0.3, run HMC with $L$ = 1, 3 and 10. Predict how the ESS
    changes. Can it exceed the number of draws?
@@ -1371,10 +1382,10 @@ Each exercise has a tested solution at the end of the chapter.
 
 ## Solutions
 
-**1.** The flat order is intercept first, so the intercept gets the
-slope's small variance and barely moves, while the slope gets the
-intercept's large one. Each chain then explores the slope's conditional
-distribution given its nearly fixed intercept, whose standard deviation is
+**1.** The intercept gets the slope's small variance and barely moves,
+while the slope gets the intercept's large one. Each chain then explores
+the slope's conditional distribution given its nearly fixed intercept,
+whose standard deviation is
 $\sqrt{\Sigma_{ss} - \Sigma_{sb}^2/\Sigma_{bb}} = 0.051$, not the
 posterior's 0.11. Each chain's slope spreads as that conditional does,
 and its intercept less than a third as far as the posterior's. Each chain
@@ -1382,14 +1393,14 @@ sits around its own intercept, and R-hat flags them:
 
 <!-- code: solution-1 -->
 ```clojure
-(def selection-order
-  "The exact variances in the selection's order, slope first: the wrong
-   order for the metric."
-  (array/diag (:cov exact)))
+(def swapped-metric
+  "The exact variances, each at the other choice's address."
+  (cm/choicemap :slope (cm/get-choice inv-metric :intercept)
+                :intercept (cm/get-choice inv-metric :slope)))
 
-(def misordered
+(def swapped
   (run-particles #(mcmc/mala-particles %1 line 0.01
-                                       {:inv-metric selection-order :key %2})
+                                       {:inv-metric swapped-metric :key %2})
                  at-center [:slope :intercept]
                  {:samples 500 :burn 100 :key (rng/key 19)}))
 
@@ -1403,28 +1414,28 @@ sits around its own intercept, and R-hat flags them:
   [run addr]
   (mapv #(:sd (diag/summary %)) (get-in run [:draws addr])))
 
-[conditional-sd (sds misordered :slope) (sds misordered :intercept)]
+[conditional-sd (sds swapped :slope) (sds swapped :intercept)]
 ;=> [0.0509 [0.051 0.054 0.056 0.057] [0.087 0.128 0.075 0.087]] ; float64
 
 [(every? #(< (abs (- % conditional-sd)) (* 0.4 conditional-sd))
-         (sds misordered :slope))
- (every? #(< % (/ (exact-sd 1) 3)) (sds misordered :intercept))
- (> (diag/r-hat (get-in misordered [:draws :intercept])) 1.01)]
+         (sds swapped :slope))
+ (every? #(< % (/ (exact-sd 1) 3)) (sds swapped :intercept))
+ (> (diag/r-hat (get-in swapped [:draws :intercept])) 1.01)]
 ;=> [true true true]
 ```
 
-With the metric in the right order, the intercepts spread far wider: no
-chain's stays within that third:
+With each variance at its own address, the intercepts spread far wider:
+no chain's stays within that third:
 
-<!-- code: solution-1-ordered -->
+<!-- code: solution-1-matched -->
 ```clojure
-(def ordered
+(def matched
   (run-particles #(mcmc/mala-particles %1 line 0.01
                                        {:inv-metric inv-metric :key %2})
                  at-center [:slope :intercept]
                  {:samples 500 :burn 100 :key (rng/key 19)}))
 
-(not-any? #(< % (/ (exact-sd 1) 3)) (sds ordered :intercept))
+(not-any? #(< % (/ (exact-sd 1) 3)) (sds matched :intercept))
 ;=> true
 ```
 

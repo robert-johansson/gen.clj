@@ -757,8 +757,8 @@ moves the step size toward an acceptance rate of 0.8, and windows of
 draws set the inverse metric to the variances they show. With `:kernel
 :hmc` the warmup runs HMC with a fixed number of leapfrog steps; the
 default kernel is NUTS (`nuts/sample` adapts and then draws, keeping the
-traces). The inverse metric is in the order of the selection's values,
-the intercept first. The chain then draws with what the warmup found:
+traces). The inverse metric is a choice map, a variance at each selected
+address. The chain then draws with what the warmup found:
 
 <!-- code: tight-hmc -->
 ```clojure
@@ -766,8 +766,8 @@ the intercept first. The chain then draws with what the warmup found:
   (nuts/adapt tight-start tight-line {:kernel :hmc :L 10 :warmup 300}
               (rng/key 17)))
 
-[(:eps adapted) (array/->clj (:inv-metric adapted))]
-;=> [0.340 [0.0284 0.00457]] ; float64
+[(:eps adapted) (cm/to-map (:inv-metric adapted))]
+;=> [0.340 {:slope 0.00457 :intercept 0.0284}] ; float64
 
 (def hmc-draws
   (run-chain (k/hmc tight-line

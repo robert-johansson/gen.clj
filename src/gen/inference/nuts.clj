@@ -31,7 +31,8 @@
      :jitter         0: each transition steps by eps·(1 + jitter·(2u - 1)),
                      u uniform (Stan's stepsize_jitter, in the warmup too),
                      eps the nominal step size dual averaging adapts
-     :inv-metric     the initial inverse metric (mcmc's; the identity)
+     :inv-metric     the initial inverse metric, in any form mcmc's
+                     kernels take (the identity)
      :adapt-metric?  true; false adapts the step size alone
      :target-accept  0.8 (Stan's delta); :gamma 0.05, :t0 10, :kappa 0.75
      :init-buffer 75, :term-buffer 50, :window 25: when they do not fit in
@@ -47,7 +48,10 @@
    {:accept-stat :n-leapfrog :accepted? :diverged? :eps}, the acceptance
    statistic min(1, α), :eps the step taken (jittered). The result counts
    the divergences after the warmup and in it. With :warmup 0, sample
-   draws at :eps and :inv-metric as given, such as an adapt's. The state is
+   draws at :eps and :inv-metric as given, such as an adapt's. The
+   inverse metric returned, adapted or given, is labeled: a choice map of
+   the selected choices' variances by address (mcmc/inv-metric), which
+   the kernels take as :inv-metric. The state is
    threaded through each iteration and every iteration takes its own key,
    so the same key gives the same result; omitting one draws from the
    implicit key source.
@@ -182,19 +186,20 @@
                 (recur (inc end) size (if (>= (+ next-end (* 2 size)) (inc last-end)) last-end next-end) acc)))))))))
 
 (defn- flat
-  "The trace's selected values as one flat array, in the inverse metric's
-   order."
+  "The trace's selected values as one flat array, in the order of the
+   labeled inverse metric's cm/to-array (canonical address order)."
   [trace selection]
   (cm/to-array (grad/continuous-selection trace selection)))
 
 (defn- window-variance
-  "Stan's var_adaptation at a window's end: the draws' sample variances,
+  "Stan's var_adaptation at a window's end: the draws' sample variances
+   (flat, as the draws and inv, the inverse metric so far, are),
    regularized toward 1e-3 as Stan's, (n/(n+5))·var + 1e-3·(5/(n+5)). With
    fewer than two draws Stan's estimator leaves the variances as they were,
    so inv is regularized. Loud when one is not finite, as Stan's."
   [draws inv]
   (let [n (double (count draws))
-        var (if (< n 2.0) (or inv 1.0) (array/variance (array/stack draws) {:axis 0 :ddof 1}))
+        var (if (< n 2.0) inv (array/variance (array/stack draws) {:axis 0 :ddof 1}))
         regularized (array/+ (array/* (/ n (+ n 5.0)) var) (* 1e-3 (/ 5.0 (+ n 5.0))))]
     (when-not (array/truthy? (array/all (array/isfinite regularized)))
       (throw (ex-info "The metric's adaptation overflowed: a variance of the window's draws is not finite (the posterior may be too wide, or improper)."
@@ -223,8 +228,9 @@
   "Stan's warmup from trace: :warmup iterations of the kernel adapting its
    step size and (unless :adapt-metric? is false) a diagonal inverse
    metric. Returns the adapted state, {:trace :eps :inv-metric :stats}: the
-   last trace, the step size and inverse metric to draw with, and each
-   iteration's statistics. See the namespace for the options."
+   last trace, the step size and inverse metric to draw with (a choice map
+   of variances by address, mcmc/inv-metric's), and each iteration's
+   statistics. See the namespace for the options."
   ([trace selection opts] (adapt trace selection opts nil))
   ([trace selection opts key]
    (let [{:keys [warmup eps inv-metric adapt-metric?] :as opts} (settings opts)
@@ -232,11 +238,13 @@
          ws (when adapt-metric? (windows warmup opts))
          window-end? (set (map second ws))
          in-window? (fn [i] (and (seq ws) (<= (long (ffirst ws)) (long i) (long (second (peek ws))))))
-         step-keys (if (pos? (long warmup)) (rng/split k-steps warmup) [])]
+         step-keys (if (pos? (long warmup)) (rng/split k-steps warmup) [])
+         ;; the metric labeled by address, as the kernels take it and adapt returns it
+         inv (mcmc/inv-metric trace selection inv-metric)]
      (loop [i 0
             trace trace
-            eps (initial-eps trace selection opts eps inv-metric k-init)
-            inv inv-metric
+            eps (initial-eps trace selection opts eps inv k-init)
+            inv inv
             da (dual-averaging (Math/log (* 10.0 (double (:eps opts)))))
             draws []
             stats (transient [])]
@@ -250,7 +258,7 @@
                draws (if (in-window? i) (conj draws (flat t selection)) draws)
                stats (conj! stats s)]
            (if (window-end? i)
-             (let [inv (window-variance draws inv)
+             (let [inv (cm/from-array (grad/continuous-selection t selection) (window-variance draws (cm/to-array inv)))
                    eps (initial-eps t selection opts (:eps da) inv k-init)]
                (recur (inc i) t eps inv (dual-averaging (Math/log (* 10.0 eps))) [] stats))
              (recur (inc i) t (:eps da) inv da draws stats))))))))
@@ -274,7 +282,8 @@
          [k-warmup k-draws] (rng/split (or key (:key opts) (gfi/next-key)))
          adapted (if (pos? (long warmup))
                    (adapt trace selection opts k-warmup)
-                   {:trace trace :eps (:eps opts) :inv-metric (:inv-metric opts) :stats []})
+                   {:trace trace :eps (:eps opts) :inv-metric (mcmc/inv-metric trace selection (:inv-metric opts))
+                    :stats []})
          {:keys [eps inv-metric]} adapted
          draw-keys (if (pos? (long samples)) (rng/split k-draws samples) [])]
      (loop [i 0 t (:trace adapted) kept (transient []) stats (transient [])]

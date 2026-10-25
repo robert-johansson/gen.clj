@@ -553,8 +553,8 @@ accepted
   (nuts/adapt tight-start tight-line {:kernel :hmc :L 10 :warmup 300}
               (rng/key 17)))
 
-[(:eps adapted) (array/->clj (:inv-metric adapted))]
-;=> [0.340 [0.0284 0.00457]] ; float64
+[(:eps adapted) (cm/to-map (:inv-metric adapted))]
+;=> [0.340 {:slope 0.00457 :intercept 0.0284}] ; float64
 
 (def hmc-draws
   (run-chain (k/hmc tight-line

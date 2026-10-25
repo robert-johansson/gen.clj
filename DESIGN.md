@@ -738,9 +738,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       place of `:traces`, host: (keep t) for each kept trace, or for a map
       of functions a map of such vectors.
     - NUTS: `:eps` the step size taken or adapted (host; per particle an
-      [n] array), `:inv-metric` (array), `:accept-stat`, `:tree-depth`,
-      `:n-leapfrog`, `:energy` (host), `:stats` (a map of them per
-      iteration), `:warmup` (the warmup's `:stats` and `:divergences`).
+      [n] array), `:inv-metric` (a choice map of variances by address),
+      `:accept-stat`, `:tree-depth`, `:n-leapfrog`, `:energy` (host),
+      `:stats` (a map of them per iteration), `:warmup` (the warmup's
+      `:stats` and `:divergences`).
     - `:fallback`: why a batched run went one particle at a time, a
       written message. `:result`: map-particles*'s or project*'s value
       beside it. A particle filter's state: `:parents` (each particle's
@@ -773,6 +774,26 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     each application. kernel/run and nuts/sample take `:keep`. `(kern []
     …)` and `(kern ^:trace [tr] …)` are the kernel itself, not a function
     of no arguments.
+  - **Labeled metrics** (the agent, 2026-10-25, provisional; genclj-qs62):
+    `:inv-metric` gives a variance to each selected choice by its
+    address, a choice map or a map (`cm/from-map`'s: `{:slope 0.012
+    :intercept 0.46}`), each a number or an array of the choice's shape
+    (or flat with its size); one number is still a variance for every
+    value. A vector or array is taken only when the selected values are
+    one choice, whose elements it follows in order; for more it is a loud
+    error (`:unlabeled-inv-metric`), since the flat order is the choice
+    map's (addresses sorted, intercept before slope), not the
+    selection's, and a wrong order mis-scales every move without an
+    error. A choice map lacking a selected address, or holding one not
+    selected, is loud. `nuts/adapt` and `nuts/sample` return
+    `:inv-metric` labeled so, adapted or given (the identity as ones),
+    and `mcmc/inv-metric` labels any form the kernels take. The dense
+    metric (genclj-q9ge, not built) is left room: it will be a value of
+    its own, a matrix with its addresses' order, so it takes neither the
+    number, the map nor the vector form. Alternative: a plain map only
+    (no choice map), or vectors in the selection's order, which a
+    selection of a subtree (several choices, one address) leaves
+    undefined.
 - **Indices are 0-based** (Clojure idiom, as in GenMLX; D2): Map's and
   Unfold's addresses, Recurse's nodes (root 0), categorical's values
   (categorical-logits' too: 0 to n - 1) and Switch's branch index (branch 0
