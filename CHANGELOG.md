@@ -18,6 +18,9 @@ From DESIGN.md §9, "The 1.0's shape" (owner, 2026-10-25):
   distributions are promised.
 - **Removals** wait for 2.0, after a deprecation cycle: `:deprecated`
   metadata and a docstring note, nothing printed.
+- **Not promised:** the text of error messages (an error stays loud and
+  keeps its meaning; its wording may improve), and anything in the
+  experimental and internal tiers.
 - **Three tiers,** marked on each namespace (`{:api :stable | :experimental
   | :internal}`). Experimental namespaces (gen.llm.* among them) ship
   outside the promise. Internal ones are not for dependents.

@@ -697,7 +697,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     assoc on traces); choice maps are callable as traces are, loud with a
     not-found arity (genclj-a2t8); training's history is the mean generate
     weight on held-out examples, as Gen.jl's train! (genclj-59cf).
-    As built (2026-10-25, the agent, provisional; genclj-a2t8): `(c
+    As built (2026-10-25, confirmed by the owner, 2026-10-25; genclj-a2t8): `(c
     addr)`, `(c path)` and `(c addr not-found)` are get-choice's lookups,
     loud in the same places. At nested choices the call is an error that
     points to get-submap, not the submap, as Gen.jl's `cm[addr]` (a
@@ -709,7 +709,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     stored. The body flag is gen.choicemap's `*in-body*` (no-doc), which
     gen.dynamic binds beside `*body-call*`: gen.choicemap cannot see
     gen.trace.
-    As built (2026-10-25, the agent, provisional; genclj-ufco):
+    As built (2026-10-25, confirmed by the owner, 2026-10-25; genclj-ufco):
     `(sel/union & ss)` and `(sel/intersection & ss)`, none and all of no
     selections. all and none absorb or drop out, hierarchical selections
     join or meet address by address (a union of selects is their select,
@@ -722,7 +722,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     Morgan's path by path and through get-selected (gen.selection-test);
     project-splits-the-score also over disjoint unions and De Morgan's
     intersection, on every kind (gen.laws).
-    Traces print compactly (2026-10-25, the agent, provisional;
+    Traces print compactly (2026-10-25, confirmed by the owner, 2026-10-25;
     genclj-qvnu, whose bean leaves readable-or-display to the owner):
     display only, as the bean recommends, `#gen/trace[maker {:args …
     :score … :choices …}]` with the choices as a nested map, and a batched
@@ -826,7 +826,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     each application. kernel/run and nuts/sample take `:keep`. `(kern []
     …)` and `(kern ^:trace [tr] …)` are the kernel itself, not a function
     of no arguments.
-  - **Kernels' batched form** (the agent, 2026-10-25, provisional;
+  - **Kernels' batched form** (the agent, 2026-10-25, confirmed by the owner, 2026-10-25, the spot check's delay included;
     genclj-xgz4): a kernel says it can run batched by carrying a batched
     form, `(fn [ps key])` → `{:particles …}` with the -particles moves'
     keys (`:accepted` per particle, `:fallback`): the Kernel record's
@@ -855,7 +855,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     field keeps a kernel one value, and a function stays a kernel); a
     table in the particle filter from kernels to -particles moves (closed
     to users' kernels).
-  - **Labeled metrics** (the agent, 2026-10-25, provisional; genclj-qs62):
+  - **Labeled metrics** (the agent, 2026-10-25, confirmed by the owner, 2026-10-25; genclj-qs62):
     `:inv-metric` gives a variance to each selected choice by its
     address, a choice map or a map (`cm/from-map`'s: `{:slope 0.012
     :intercept 0.46}`), each a number or an array of the choice's shape
@@ -875,7 +875,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     (no choice map), or vectors in the selection's order, which a
     selection of a subtree (several choices, one address) leaves
     undefined.
-  - **The transform API** (the agent, 2026-10-25, provisional;
+  - **The transform API** (the agent, 2026-10-25, confirmed by the owner, 2026-10-25; tf/involution keeps its proposal separate, as Gen.jl's mh(trace, proposal, args, involution);
     genclj-xsml), additions only:
     - `tf/run` takes `{:retained selection}`, the model choices the move
       keeps: their continuous reads, neither written nor copied, are
