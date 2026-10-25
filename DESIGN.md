@@ -685,6 +685,18 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     fallback (vmap asks for a batched run); draws per particle even from a
     shared key, as every batched run's; nesting and a gradient through a
     vmap refused loudly, a vmap of a gradient per particle.
+  - **Eight more, confirmed by the owner** (2026-10-25, on the lead's
+    recommendations): per-particle results use plural keys (`:log-alphas`,
+    `:accepted`, `:diverged`), not singular keys holding vectors; chains
+    take `:keep` and return `:draws`; `k/nuts` is its own reversal (NUTS's
+    transition satisfies detailed balance); NUTS's `:accepted?` means it
+    moved, so `k/run`'s acceptance rate is a move rate there (Stan's
+    accept_stat stays in nuts/sample's stats); `k/elliptical-slice` and
+    `k/map-optimize` stay; a trace's keyword lookup reads its record fields,
+    as documented, not loud (genclj-nhtx: a custom type would change every
+    assoc on traces); choice maps are callable as traces are, loud with a
+    not-found arity (genclj-a2t8); training's history is the mean generate
+    weight on held-out examples, as Gen.jl's train! (genclj-59cf).
   - **Before the tag:** the friction that changes shape lands (one
     result-key vocabulary, kernels returning {:trace :accepted?}, labeled
     metrics, matching batched return shapes, selections' union and
