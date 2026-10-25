@@ -55,6 +55,7 @@ clojure -X:test:fast :nses '[gen.book-test]'                  # includes in step
 clojure -J-Dgen.backend=mlx -J-Dgen.book.mlx=true -X:test :patterns '["gen.book.*"]'   # on MLX, at milestones
 clojure -M:test -m gen.book sync                              # write the includes and figures
 clojure -M:test -m gen.book pdf                               # the PDF: target/book/gen-clj-book.pdf
+python3 -I book/tools/prose-diff.py BASE HEAD 'book/02*.md'   # prose changes (outside code) since a commit
 ```
 
 The PDF is Pandoc's: every chapter in order, with `metadata.yaml` (title,
