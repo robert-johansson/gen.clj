@@ -799,7 +799,14 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     night, on the lead's recommendation): the full battery in float32, the
     light tier in float64, whose slow statistical tests run in float64 on
     the JVM backend and whose kernels the conformance suite checks against
-    it (a full float64 run did not fit in 4 h on the Thor).
+    it (a full float64 run did not fit in 4 h on the Thor). TF32 on CUDA
+    (owner, 2026-10-25 night, on the lead's recommendation, if the night's
+    rerun confirms it as the cause of the matrix failures): off for 1.0.
+    MLX runs float32 matrix products on CUDA in TF32 by default (a 10-bit
+    mantissa, about 1e-3 relative: a log density of 100 off by 0.1 nats),
+    so the gate's CUDA run sets MLX_ENABLE_TF32=0, the install page and the
+    CHANGELOG say CUDA needs it for float32 accuracy, and after 1.0 the
+    backend turns it off itself, with an opt-in (genclj-p3pr).
   - **The result keys** (the agent, 2026-10-25, confirmed by the owner; genclj-4jpw):
     one meaning per key across gen.inference, gen.gradients, gen.learning
     and gen.batched. A key that holds a log says so in its name, but for
