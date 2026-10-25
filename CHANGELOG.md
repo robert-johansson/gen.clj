@@ -148,7 +148,7 @@ newest first in each section.
 ### Added
 
 - **The API's tiers, the stable surface's snapshot and the API appendix**
-  (DESIGN §9, "The 1.0's shape"; genclj-dv8x).
+  (DESIGN §9, "The 1.0's shape"; e6f549f, genclj-dv8x).
   - Every namespace of `src/` and `ext/`, and gen.laws, carries `{:api
     :stable}`, `{:api :experimental}` or `{:api :internal}` in its ns form.
     Stable: gen.array, gen.array.linalg, gen.array.protocols, gen.random,
