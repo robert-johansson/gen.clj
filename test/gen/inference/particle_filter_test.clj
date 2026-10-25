@@ -336,7 +336,7 @@
                    {:atol (ts/tol 1e-12)}))
     (let [n 4000
           picks (map #(first (:parents (pf/dereplicate state 3 {:method :sample :key %}))) (rng/split (rng/key 54) n))
-          p (mapv #(Math/exp %) (:log-weights (w/normalize (subvec lw 0 3))))]
+          p (mapv #(Math/exp %) (:log-normalized-weights (w/normalize (subvec lw 0 3))))]
       (doseq [i (range 3)]
         (let [freq (/ (count (filter #{i} picks)) (double n))]
           (is (< (ts/abs (- freq (p i))) (* 5 (Math/sqrt (/ (* (p i) (- 1 (p i))) n)))) (str i ": " freq " against " (p i))))))))

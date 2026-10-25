@@ -292,8 +292,9 @@
    probability. {:log-ml :outliers :mean}"
   [priors ys]
   (let [parts (mapv #(given-flags priors ys %) configurations)
-        {:keys [log-total log-weights]} (w/normalize (mapv :log-p parts))
-        ps (mapv #(Math/exp %) log-weights)
+        {:keys [log-total log-normalized-weights]}
+        (w/normalize (mapv :log-p parts))
+        ps (mapv #(Math/exp %) log-normalized-weights)
         weighted (fn [f] (reduce + (map * ps (map f configurations parts))))]
     {:log-ml log-total
      :outliers (mapv (fn [i] (weighted (fn [c _] (if (c i) 1.0 0.0))))

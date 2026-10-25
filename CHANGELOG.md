@@ -33,6 +33,23 @@ newest first in each section.
 
 ### Changed
 
+- **Breaking. One meaning per result key** (DESIGN §9, "The 1.0's
+  shape", the result keys, a glossary of every key; genclj-4jpw).
+  - `weights/normalize` returns `{:log-total :log-normalized-weights}`.
+    Its `:log-weights` held the normalized logs, where importance
+    sampling's holds the raw ones and calls the normalized ones
+    `:log-normalized-weights`. Read `:log-normalized-weights` instead;
+    `:log-weights` is now always the raw logs.
+  - `mh/move` returns `{:trace :log-alpha}`, the key `mh/mh` gives the
+    same ratio, as a host double. It was `:weight`, an array.
+    `pf/reweighting`'s kernels still return `{:trace :weight}`.
+  - `mh/mh-particles`, `mcmc/hmc-particles` and `mcmc/mala-particles`
+    return the scalar kernels' keys in the plural, one value per particle,
+    as gen.batched's `:weights` are generate's `:weight`: `:accepted` for
+    `:accepted?`, `:log-alphas` for `:log-alpha` and `:diverged` for
+    `:diverged?`. A vector under `:accepted?` was always truthy.
+  - Unchanged: gen.batched's `{:particles :weights :discards}`, which
+    mirror gfi's `{:trace :weight :discard}`.
 - **Breaking. An invalid proposal is a loud error again** (the owner's
   second ruling on decision 5; genclj-ocxs). When a move's new trace is
   possible but the backward proposal gives the move's reverse choices

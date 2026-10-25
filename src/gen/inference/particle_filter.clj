@@ -238,7 +238,7 @@
         _ (when (> n n-old)
             (throw (ex-info (str "Optimal resampling cannot add particles: " n " from " n-old)
                             {:n n :particles n-old})))
-        lw-normal (:log-weights (w/normalize lw))
+        lw-normal (:log-normalized-weights (w/normalize lw))
         p (mapv #(Math/exp %) lw-normal)
         ;; a particle of weight 0 is never kept nor drawn
         order (vec (sort-by p (filter #(pos? (p %)) (range n-old))))
@@ -279,13 +279,13 @@
          n-old (count lw)
          n (or n n-old)
          key (or key (gfi/next-key))
-         {lw-n :log-weights log-total :log-total} (w/normalize lw)
+         {lw-n :log-normalized-weights log-total :log-total} (w/normalize lw)
          [parents log-weights]
          (if (= method :optimal)
            (if priority
              (throw (ex-info "Optimal resampling takes no :priority" {:method method}))
              (optimal-parents lw n key))
-           (let [lp-n (if priority (:log-weights (w/normalize (mapv double (priority lw)))) lw-n)
+           (let [lp-n (if priority (:log-normalized-weights (w/normalize (mapv double (priority lw)))) lw-n)
                  _ (when (some (fn [i] (and (== ##-Inf (lp-n i)) (> (lw i) ##-Inf))) (range n-old))
                      (throw (ex-info "A priority of 0 for a particle of positive weight would bias the estimate"
                                      {:log-weights lw})))
@@ -316,7 +316,8 @@
 (defn reweighting
   "A move-reweight kernel (GenParticleFilters' move_reweight): (fn [trace
    key] → {:trace trace' :weight w}), w the move's log importance weight,
-   log p(t')/p(t) - log q_fwd(u; t) + log q_bwd(u'; t').
+   log p(t')/p(t) - log q_fwd(u; t) + log q_bwd(u'; t'): the ratio MH
+   accepts by (mh/move's :log-alpha), here a weight.
    - (reweighting selection): regenerate the selection from the internal
      proposal; w is regenerate's weight.
    - (reweighting proposal proposal-args): propose choices from
@@ -333,8 +334,9 @@
   ([proposal proposal-args] (reweighting proposal proposal-args {}))
   ([proposal proposal-args opts]
    (fn [trace key]
-     (let [[k-propose k-update] (rng/split key)]
-       (mh/move trace proposal proposal-args opts k-propose k-update)))))
+     (let [[k-propose k-update] (rng/split key)
+           {t :trace la :log-alpha} (mh/move trace proposal proposal-args opts k-propose k-update)]
+       {:trace t :weight la}))))
 
 (defn move-reweight
   "Each particle's trace moved by a reweighting kernel (see reweighting),
@@ -423,7 +425,7 @@
             :log-weights (into (mapv #(+ % log-ml) (:log-weights state)) (:log-weights fresh))
             :log-ml 0.0))))
 
-(defn- probabilities [state] (mapv #(Math/exp %) (:log-weights (w/normalize (:log-weights state)))))
+(defn- probabilities [state] (mapv #(Math/exp %) (:log-normalized-weights (w/normalize (:log-weights state)))))
 
 (defn mean
   "The weighted mean of (f trace) over the particles."

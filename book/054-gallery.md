@@ -636,7 +636,8 @@ update leave the others alone (*Composition* shows it):
 (defn filtered-mean
   "The weighted mean of the particle filter state's z at step t."
   [{ps :particles lws :log-weights} t]
-  (let [p (array/exp (array/array (:log-weights (weights/normalize lws))))]
+  (let [p (array/exp (array/array (:log-normalized-weights
+                                    (weights/normalize lws))))]
     (array/item (array/sum (* p (batched/choice ps [t :z]))))))
 
 (defn run-filter

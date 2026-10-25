@@ -570,8 +570,8 @@ proposal $q$ that *Getting Started* ran:
         by-hand (+ (- (:score (:trace swapped)) (:score tr))
                    (- (log-density (d/gamma 2 0.5) 0.7)
                       (log-density (d/gamma 2 0.5) v')))]
-    [(array/allclose? (:weight swapped) by-hand)
-     (array/allclose? (:weight swapped) (:weight plain))]))
+    [(array/allclose? (:log-alpha swapped) by-hand)
+     (array/allclose? (:log-alpha swapped) (:log-alpha plain))]))
 ;=> [[true true] [true true] [true true]]
 ```
 
@@ -659,7 +659,7 @@ given the same keys, in the proposed trace and in $\log \alpha$:
         mine (log-alpha tr log-step scale u k2)
         library (mh/move tr log-step [] {:involution (tf/involution scale)}
                          k1 k2)]
-    [(array/allclose? (:log-alpha mine) (:weight library))
+    [(array/allclose? (:log-alpha mine) (:log-alpha library))
      (tf/same-choices? (:choices (:trace mine))
                        (:choices (:trace library)))]))
 ;=> [[true true] [true true] [true true] [true true]]
@@ -841,7 +841,7 @@ $\log \alpha$ for the direction it draws, from every level.
         (for [tr level-traces
               key (rng/split (rng/key 11) 3)]
           (let [[k1 k2] (rng/split key)
-                {tr' :trace w :weight}
+                {tr' :trace w :log-alpha}
                 (mh/move tr direction [] {:involution (tf/involution step)}
                          k1 k2)
                 u (cm/choicemap :up? (> (array/item (tr' :k))

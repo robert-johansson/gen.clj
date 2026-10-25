@@ -390,7 +390,7 @@ mean weight, and resampling. Four samples with weights proportional to
 ```clojure
 (def toy-log-weights (mapv #(Math/log %) [10.0 6.0 3.0 1.0]))
 
-(mapv #(Math/exp %) (:log-weights (w/normalize toy-log-weights)))
+(mapv #(Math/exp %) (:log-normalized-weights (w/normalize toy-log-weights)))
 ;=> [0.5 0.3 0.15 0.05]
 
 [(w/ess toy-log-weights) (w/log-mean-exp toy-log-weights) (Math/log 5.0)]
@@ -1140,7 +1140,7 @@ makes the assignments:
   "The exact posterior mean of (f z) over the assignments z."
   [f]
   (reduce + (map (fn [z lw] (* (Math/exp lw) (f z)))
-                 assignments (:log-weights posterior-z))))
+                 assignments (:log-normalized-weights posterior-z))))
 
 (defn group-one?
   "1 when the assignment z puts reading i in the group around 2, else 0."

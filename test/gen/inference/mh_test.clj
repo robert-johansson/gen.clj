@@ -29,7 +29,7 @@
   [model observations states]
   (let [lps (mapv #(:weight (gfi/assess model [] (cm/merge observations %))) states)]
     {:model model :observations observations :states states
-     :posterior (mapv #(Math/exp %) (:log-weights (w/normalize lps)))}))
+     :posterior (mapv #(Math/exp %) (:log-normalized-weights (w/normalize lps)))}))
 
 (def main (enumerated model observations (vec (for [a [false true] b [0 1 2]] (cm/choicemap :a a :b b)))))
 
@@ -135,6 +135,14 @@
           rs (map #(mh/mh tr b-proposal [] %) (rng/split (rng/key 4) 50))]
       (is (every? #(or (:accepted? %) (identical? tr (:trace %))) rs))
       (is (some (complement :accepted?) rs))))
+  (testing "mh/move's ratio is mh/mh's, under the same key: :log-alpha, a host double (genclj-4jpw)"
+    (let [tr (trace-at main (cm/choicemap :a true :b 2))]
+      (doseq [key (rng/split (rng/key 5) 5)
+              :let [[k-propose k-update] (rng/split key 3)
+                    moved (mh/move tr b-proposal [] {} k-propose k-update)]]
+        (is (= #{:trace :log-alpha} (set (keys moved))))
+        (is (double? (:log-alpha moved)))
+        (is (= (:log-alpha (mh/mh tr b-proposal [] key)) (:log-alpha moved))))))
   (testing "proposal arguments must be a vector"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"vector" (mh/mh (trace-at main (cm/choicemap :a true :b 0)) b-proposal (rng/key 1)))))
   (testing "a keyword is neither a selection nor a proposal"

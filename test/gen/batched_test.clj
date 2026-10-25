@@ -1132,7 +1132,7 @@
   (testing "MH chains reject the particles' moves outside the support"
     (let [m (gen [] (let [a (trace :a (d/uniform 0 1)) b (trace :b (d/uniform 0 a))] (trace :c (d/normal b 1.0)) b))
           ps (:particles (b/generate m [] (cm/choicemap :a 0.9 :b 0.6 :c 0.0) 16 (rng/key 6)))
-          {out :particles acc :accepted? la :log-alpha} (mh/mh-particles ps (sel/select :a) (rng/key 7))
+          {out :particles acc :accepted la :log-alphas} (mh/mh-particles ps (sel/select :a) (rng/key 7))
           la (array/->clj la)]
       (is (b/batched? out))
       (is (some #(= ##-Inf %) la) "some a below b")

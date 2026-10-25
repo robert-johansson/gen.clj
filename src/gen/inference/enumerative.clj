@@ -212,10 +212,10 @@
      (let [run (if batched?
                  (in-batches model args observations points (or chunk-size (count points)) key (= :required batched?))
                  (one-at-a-time model args observations points key))
-           {:keys [log-total log-weights]} (w/normalize (:weights run))]
+           {:keys [log-total log-normalized-weights]} (w/normalize (:weights run))]
        (-> run
            (dissoc :weights)
-           (assoc :log-normalized-weights log-weights :log-ml-estimate log-total))))))
+           (assoc :log-normalized-weights log-normalized-weights :log-ml-estimate log-total))))))
 
 (defn traces
   "The scalar traces of an enumerative-inference result in grid order,

@@ -551,10 +551,10 @@
         check (fn [r xs log-alphas key]
                 (let [us (drawn #(rng/uniform (nth (rng/split key 3) 2)))]
                   (is (b/batched? (:particles r)))
-                  (is (= #{true false} (set (:accepted? r))) "some accepted, some not")
-                  (is (ts/close? (array/array log-alphas) (:log-alpha r) {:atol (ts/tol 1e-9)}))
-                  (is (= (mapv #(or (>= %1 0.0) (< (Math/log %2) %1)) log-alphas us) (:accepted? r)))
-                  (is (ts/close? (array/array (mapv #(if %1 %2 %3) (:accepted? r) xs x0s)) (b/choice (:particles r) :x)))))]
+                  (is (= #{true false} (set (:accepted r))) "some accepted, some not")
+                  (is (ts/close? (array/array log-alphas) (:log-alphas r) {:atol (ts/tol 1e-9)}))
+                  (is (= (mapv #(or (>= %1 0.0) (< (Math/log %2) %1)) log-alphas us) (:accepted r)))
+                  (is (ts/close? (array/array (mapv #(if %1 %2 %3) (:accepted r) xs x0s)) (b/choice (:particles r) :x)))))]
     (testing "HMC"
       (let [key (rng/key 95) eps 1.2 half (clojure.core// eps 2)
             p0s (map first (drawn #(rng/normal (first (rng/split key 3)) [1])))
@@ -594,9 +594,9 @@
   [ps step scalar key]
   (let [r (step ps key)
         each (map scalar (b/traces ps) (rng/split key (b/size ps)))]
-    (and (= (mapv :accepted? each) (:accepted? r))
-         (= (mapv :diverged? each) (:diverged? r))
-         (agree? (mapv :log-alpha each) (ts/host (:log-alpha r)))
+    (and (= (mapv :accepted? each) (:accepted r))
+         (= (mapv :diverged? each) (:diverged r))
+         (agree? (mapv :log-alpha each) (ts/host (:log-alphas r)))
          (agree? (mapv #(ts/host (cm/to-array (:choices (:trace %)))) each)
                  (mapv #(ts/host (cm/to-array (:choices %))) (b/traces (:particles r)))))))
 
@@ -624,7 +624,7 @@
             ps (chains-from scaled (cm/choicemap :v 0.0 :y 1.0) 40)
             s (sel/select :v)
             r (mcmc/hmc-particles ps s {:L 1 :eps 1000.0} (rng/key 98))]
-        (is (< 0 (count (filter true? (:diverged? r))) 40) "some diverge, not all")
+        (is (< 0 (count (filter true? (:diverged r))) 40) "some diverge, not all")
         (is (each-chain-s? ps #(mcmc/hmc-particles %1 s {:L 1 :eps 1000.0} %2) #(mcmc/hmc %1 s {:L 1 :eps 1000.0} %2) (rng/key 98)))))))
 
 (deftest jittered-particle-steps

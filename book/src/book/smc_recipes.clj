@@ -113,7 +113,7 @@
 (defn probabilities
   "The normalized weights of the log weights lw."
   [lw]
-  (mapv #(Math/exp %) (:log-weights (weights/normalize lw))))
+  (mapv #(Math/exp %) (:log-normalized-weights (weights/normalize lw))))
 
 (def exact-moving
   "P(moving at t | ys) for each t: the posterior weight of the sequences

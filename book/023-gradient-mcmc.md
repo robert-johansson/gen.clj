@@ -427,7 +427,7 @@ batched gradient per step for all the chains, each accepted on its own.
         {:draws (update-vals rows #(apply mapv vector %))
          :acceptance (/ (count (filter true? accepted))
                         (double (count accepted)))}
-        (let [{ps' :particles moved :accepted?} (k ps (step-keys i))
+        (let [{ps' :particles moved :accepted} (k ps (step-keys i))
               keep? (>= i burn)
               read (fn [m addr]
                      (update m addr conj

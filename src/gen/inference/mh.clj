@@ -46,9 +46,10 @@
                     {:proposal-args proposal-args}))))
 
 (defn move
-  "A proposed move and its log acceptance ratio, {:trace trace' :weight w}
-   (also a move-reweight weight, gen.inference.particle-filter). Forward
-   choices u come from (proposal trace args…) drawn with k-propose. With
+  "A proposed move and its log acceptance ratio, {:trace trace'
+   :log-alpha w}, w a host double (also a move-reweight weight:
+   gen.inference.particle-filter/reweighting). Forward choices u come
+   from (proposal trace args…) drawn with k-propose. With
    :involution, (involution trace u retval args k-update) gives trace', the
    backward choices u' and the move's weight (k-update for its update,
    which draws a model's encapsulated randomness afresh); otherwise the
@@ -68,10 +69,10 @@
                              (let [r (gfi/update trace fwd k-update)]
                                [(:trace r) (:weight r) (:discard r)]))]
     (if (gfi/impossible? weight)
-      {:trace moved :weight ##-Inf}
+      {:trace moved :log-alpha ##-Inf}
       (let [{bwd-weight :weight} (gfi/assess-backward trace moved (or backward proposal)
                                                       (if backward backward-args proposal-args) bwd k-propose)]
-        {:trace moved :weight (+ (- weight fwd-weight) bwd-weight)}))))
+        {:trace moved :log-alpha (double (array/item (+ (- weight fwd-weight) bwd-weight)))}))))
 
 (defn- proposal-mh
   "Gen.jl's MH with a custom proposal: propose forward choices from
@@ -84,8 +85,8 @@
                     {:value proposal})))
   (check-proposal-args proposal-args)
   (let [[k-propose k-update k-accept] (rng/split key 3)
-        {proposed :trace w :weight} (move trace proposal proposal-args {} k-propose k-update)]
-    (accept trace proposed w k-accept)))
+        {proposed :trace la :log-alpha} (move trace proposal proposal-args {} k-propose k-update)]
+    (accept trace proposed la k-accept)))
 
 (defn mh
   "One Metropolis-Hastings move: with a selection, regenerate it; with a
@@ -118,14 +119,15 @@
    (check-proposal-args proposal-args)
    ;; split's i-th key does not depend on n: the involution's is a third
    (let [[k-propose k-accept k-update] (rng/split key 3)
-         {proposed :trace w :weight} (move trace proposal proposal-args {:involution involution} k-propose k-update)]
-     (accept trace proposed w k-accept))))
+         {proposed :trace la :log-alpha} (move trace proposal proposal-args {:involution involution} k-propose k-update)]
+     (accept trace proposed la k-accept))))
 
 (defn mh-particles
   "One selection-MH move for each of n particles (n independent chains,
-   gen.batched), accepted or rejected per particle. Returns {:particles
-   :accepted? (n booleans) :log-alpha (an [n] array)}, and :fallback, why
-   the move ran one particle at a time, when it did (gen.batched)."
+   gen.batched), accepted or rejected per particle. Returns mh's keys in
+   the plural, one value per particle: {:particles, :accepted (n
+   booleans), :log-alphas (an [n] array)}, and :fallback, why the move ran
+   one particle at a time, when it did (gen.batched)."
   ([ps selection] (mh-particles ps selection (gfi/next-key)))
   ([ps selection key]
    (let [[k-move k-accept] (rng/split key)
@@ -133,11 +135,11 @@
          (batched/regenerate ps (:args ps) (vec (repeat (count (:args ps)) diff/no-change)) selection k-move)
          las (mapv double (array/->clj la))
          _ (when (some #(Double/isNaN %) las)
-             (throw (ex-info "An MH acceptance ratio is NaN" {:log-alpha las})))
+             (throw (ex-info "An MH acceptance ratio is NaN" {:log-alphas las})))
          us (array/->clj (rng/uniform k-accept [(batched/size ps)]))
          accepted (mapv (fn [l u] (or (>= l 0.0) (< (Math/log u) l))) las us)
          selected (batched/select accepted proposed ps)
          m (or m (batched/fallback selected))]
      (cond-> {:particles (cond-> selected (and m (not (batched/fallback selected))) (assoc :fallback m))
-              :accepted? accepted :log-alpha la}
+              :accepted accepted :log-alphas la}
        m (assoc :fallback m)))))

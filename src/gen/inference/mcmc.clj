@@ -11,8 +11,8 @@
      (map-optimize trace selection opts)       → trace
      (elliptical-slice trace addr mu cov)      → trace
 
-     (hmc-particles ps selection opts)          → {:particles :accepted? :log-alpha :diverged?}
-     (mala-particles ps selection tau)          → {:particles :accepted? :log-alpha :diverged?}
+     (hmc-particles ps selection opts)          → {:particles :accepted :log-alphas :diverged}
+     (mala-particles ps selection tau)          → {:particles :accepted :log-alphas :diverged}
      (map-optimize-particles ps selection opts) → particles
 
    The selected choices must keep the trace's structure: HMC, MALA and NUTS
@@ -41,7 +41,9 @@
    kernel on the batched trace, under the batch tracer
    (gen.batched/map-particles); where the model does not run batched, each
    particle's move is the scalar kernel's, from its own key (the key split n
-   ways)."
+   ways). Their results hold the scalar kernel's keys in the plural, one
+   value per particle, as gen.batched's :weights hold generate's :weight:
+   :accepted and :diverged (n booleans each), :log-alphas (an [n] array)."
   {:api :stable}
   (:refer-clojure :exclude [+ - * / < >=])
   (:require [gen.array :as array :refer [+ - * / < >=]]
@@ -685,16 +687,16 @@
   "Every particle's move (move, of a trace and a key, as hmc-move) at once,
    by gen.batched/map-particles (and :fallback, why they ran one at a
    time, if they did), each accepted on its own: {:particles,
-   :accepted? and :diverged? (n booleans each), :log-alpha (an [n] array)},
+   :accepted and :diverged (n booleans each), :log-alphas (an [n] array)},
    and :eps (an [n] array) when the moves report their step sizes."
   [kernel ps selection move key]
   (let [{{:keys [values accepted? log-alpha diverged? start-ok eps]} :result m :fallback} (batched/map-particles* ps move key)
         accepted (mapv true? (array/->clj accepted?))]
     (check-starts! kernel start-ok selection)
     (cond-> {:particles (if (some true? accepted) (batched/set-choices ps values) ps)
-             :accepted? accepted
-             :log-alpha log-alpha
-             :diverged? (mapv true? (array/->clj diverged?))}
+             :accepted accepted
+             :log-alphas log-alpha
+             :diverged (mapv true? (array/->clj diverged?))}
       eps (assoc :eps eps)
       m (assoc :fallback m))))
 
@@ -704,7 +706,7 @@
    of them, where the model runs batched. Arguments as hmc's, without
    :compile?; with :jitter each chain's step size is jittered by its own u,
    as its own hmc's would be (DESIGN §9, PROVISIONAL). Returns {:particles,
-   :accepted? and :diverged? (n booleans each), :log-alpha (an [n] array)},
+   :accepted and :diverged (n booleans each), :log-alphas (an [n] array)},
    and with :jitter :eps, the steps taken (an [n] array); a start that is
    not finite is an error, as hmc's."
   ([ps selection] (hmc-particles ps selection nil))

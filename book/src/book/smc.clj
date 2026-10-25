@@ -321,7 +321,7 @@
                    (rng/key 9)))
 
 (def resimulation-rate
-  (/ (count (filter true? (:accepted? final-resimulation))) 5000.0))
+  (/ (count (filter true? (:accepted final-resimulation))) 5000.0))
 
 resimulation-rate
 ;=> 0.0008 ; float64

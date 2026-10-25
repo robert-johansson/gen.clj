@@ -72,12 +72,14 @@
 
 (defn normalize
   "Gen.jl's normalize_weights: {:log-total log Σ exp(w),
-   :log-weights the normalized log weights, a vector}."
+   :log-normalized-weights the log weights less log-total, a vector of
+   host doubles whose exponentials sum to 1}. :log-weights, wherever a
+   result holds it, is the raw log weights."
   [log-weights]
   (let [w (host-weights log-weights)
         t (log-total w)]
     {:log-total t
-     :log-weights (mapv #(- (double %) t) w)}))
+     :log-normalized-weights (mapv #(- (double %) t) w)}))
 
 (defn log-mean-exp
   "log((1/n) Σ exp(w)): the log marginal likelihood estimate of n importance

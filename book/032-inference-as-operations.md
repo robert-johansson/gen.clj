@@ -335,7 +335,7 @@ algorithm's total is four times as large:
 
 [(array/allclose? (log-ml toy-log-weights) (w/log-mean-exp toy-log-weights))
  (array/allclose? (array/array (:weights (normalize toy-log-weights)))
-                  (array/exp (array/array (:log-weights
+                  (array/exp (array/array (:log-normalized-weights
                                            (w/normalize toy-log-weights)))))]
 ;=> [true true]
 ```
