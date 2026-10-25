@@ -336,11 +336,20 @@
   (rng/key 0))
 
 (defn- same-number?
-  "Are the 0-d arrays a and b the same number (a NaN the same as a NaN)?"
+  "Are the 0-d arrays a and b the same number up to the rounding of a sum
+   taken in another order (a NaN the same as a NaN)? A score and a weight
+   are sums of the same terms, but a running total (gen.combinators') and
+   the handler's weight round differently (genclj-s5fj): relative 1e-9 in
+   float64, 1e-4 in float32, of the larger magnitude and at least 1. A
+   proposed choice adds a log density, not a last bit."
   [a b]
   (let [x (double (array/item a))
-        y (double (array/item b))]
-    (or (== x y) (and (Double/isNaN x) (Double/isNaN y)))))
+        y (double (array/item b))
+        rtol (if (= :float64 (array/dtype a)) 1e-9 1e-4)]
+    (or (== x y)
+        (and (Double/isNaN x) (Double/isNaN y))
+        (and (Double/isFinite x) (Double/isFinite y)
+             (<= (Math/abs (- x y)) (* rtol (max 1.0 (Math/abs x) (Math/abs y))))))))
 
 (defn- rebuild
   "gf's trace on args by generate, every choice constrained, checked to
@@ -354,7 +363,7 @@
                       {:reason :encapsulated-randomness :path at})))
     (when-not (same-number? w (:score t))
       (throw (ex-info (str (name op) ": generate's weight " (array/item w) " is not its score " (array/item (:score t))
-                           ": the choices are not all of the trace's, and generate proposed the others")
+                           " beyond rounding: the choices are not all of the trace's, and generate proposed the others")
                       {:reason :choices-missing :weight w :score (:score t)})))
     t))
 
