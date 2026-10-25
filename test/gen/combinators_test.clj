@@ -297,6 +297,24 @@
               (is (every? true? (map #(close? %1 (:weight (gfi/assess gf (args-at 0.0) (:choices %2))))
                                      (array/->clj (b/scores back)) (b/traces back)))))))))))
 
+;; The running total stays the elements' sum through a long chain of
+;; updates that take a large score in and out of a small total: element 0
+;; swings between x near 1000 (score near -5e5) and x near 0, and after
+;; 1000 updates the score is assess's to round-off. Planted bug
+;; (2026-10-25): the plain running total (no compensation) drifts 2.9e-11
+;; from assess's -2.82 after 1000 updates, past the float64 tolerance; the
+;; walk laws found it, by chance, on long update chains.
+(deftest a-running-total-does-not-drift-from-the-sum
+  (when (ts/jvm?)
+    (let [m (comb/map (gen [_] (trace :x (d/normal 0.0 1.0))))
+          args [[nil nil nil]]
+          tr0 (:trace (gfi/generate m args (cm/choicemap [0 :x] 0.1 [1 :x] 0.2 [2 :x] 0.3) (rng/key 0)))
+          tr (reduce (fn [tr i]
+                       (:trace (gfi/update tr (cm/choicemap [0 :x] (if (even? i) (+ 1000.0 (* 1e-3 i)) (* 1e-6 i)))
+                                           (rng/key i))))
+                     tr0 (range 1000))]
+      (is (ts/close? (:score tr) (:weight (gfi/assess m args (:choices tr))))))))
+
 ;; Element scores at +Inf (beta(a, 1) at 0 for a < 1) and NaN (+Inf beside
 ;; -Inf), in and out (genclj-ul72): the score is the IEEE sum of the
 ;; element scores at every stage. A choice out of its support stops its

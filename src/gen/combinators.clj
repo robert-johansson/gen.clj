@@ -167,9 +167,29 @@
 ;; the sum of the finite element scores beside two counts: of the scores not
 ;; above -Inf, and of those not below +Inf. A NaN is in both, as -Inf + Inf
 ;; is NaN, so the score is the IEEE sum of the elements' scores, what assess
-;; sums, the finite part rounded as a running total (genclj-ul72).
+;; sums, the finite part rounded as a running total (genclj-ul72). The
+;; finite part is a compensated (Neumaier) sum, :finite and its rounding
+;; error :comp: a plain running total drifts from the elements' sum by the
+;; rounding of every step it took, past the laws' float64 tolerance after a
+;; long chain of updates that take large scores in and out of a small total.
 
-(def ^:private no-total {:finite 0.0 :neg-inf 0 :pos-inf 0})
+(def ^:private no-total {:finite 0.0 :comp 0.0 :neg-inf 0 :pos-inf 0})
+
+(defn- compensated
+  "[finite comp] with x added: Neumaier's two-sum, so finite + comp holds
+   the exact sum up to one rounding."
+  [finite comp x]
+  (let [t (+ finite x)]
+    (if (and (array/host? t) (array/host? x) (array/host? finite))
+      (let [f (double finite) y (double x) t (double t)]
+        [t (+ (double comp) (if (>= (Math/abs f) (Math/abs y)) (+ (- f t) y) (+ (- y t) f)))])
+      [t (+ comp (array/where (array/>= (array/abs finite) (array/abs x)) (+ (- finite t) x) (+ (- x t) finite)))])))
+
+(defn- add-finite
+  "total with finite score x added to its compensated sum."
+  [total x]
+  (let [[f c] (compensated (:finite total) (:comp total 0.0) x)]
+    (assoc total :finite f :comp c)))
 
 (defn- tallied
   "total with score s added (op +) or taken out (op -)."
@@ -177,26 +197,27 @@
   (if (array/host? s)
     (let [x (double s)]
       (if (< ##-Inf x ##Inf)
-        (update total :finite op s)
+        (add-finite total (if (= op +) s (- s)))
         (cond-> total
           (not (> x ##-Inf)) (update :neg-inf op 1)
           (not (< x ##Inf)) (update :pos-inf op 1))))
     (let [above (array/> s ##-Inf)
           below (array/< s ##Inf)]
       (-> total
-          (update :finite op (array/where (array/logical-and above below) s 0.0))
+          (add-finite (let [f (array/where (array/logical-and above below) s 0.0)] (if (= op +) f (- f))))
           (update :neg-inf op (array/where above 0 1))
           (update :pos-inf op (array/where below 0 1))))))
 
 (defn- total-score
   "The score of a total: its finite sum, -Inf with a score not above -Inf,
    +Inf with one not below +Inf, and so NaN with both."
-  [{:keys [finite neg-inf pos-inf]}]
-  (if (and (array/host? neg-inf) (array/host? pos-inf))
-    (cond-> finite
-      (pos? (long neg-inf)) (+ ##-Inf)
-      (pos? (long pos-inf)) (+ ##Inf))
-    (+ (+ finite (array/where (array/> neg-inf 0) ##-Inf 0.0)) (array/where (array/> pos-inf 0) ##Inf 0.0))))
+  [{:keys [neg-inf pos-inf] :as total}]
+  (let [finite (+ (:finite total) (:comp total 0.0))]
+    (if (and (array/host? neg-inf) (array/host? pos-inf))
+      (cond-> finite
+        (pos? (long neg-inf)) (+ ##-Inf)
+        (pos? (long pos-inf)) (+ ##Inf))
+      (+ (+ finite (array/where (array/> neg-inf 0) ##-Inf 0.0)) (array/where (array/> pos-inf 0) ##Inf 0.0)))))
 
 (defn- elements-trace [gf args {:keys [subs choices retval total]}]
   (assoc (trace/make-trace {:gen-fn gf :args args :choices choices :retval retval :score (total-score total)})

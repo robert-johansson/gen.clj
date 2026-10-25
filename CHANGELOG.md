@@ -272,6 +272,13 @@ newest first in each section.
 
 ### Fixed
 
+- **Map's, Unfold's and Scan's running totals no longer drift** (genclj-ul72's
+  totals; found by the walk laws). The finite part of a total is a
+  compensated (Neumaier) sum, so a long chain of updates that take large
+  scores in and out of a small total keeps the score at assess's sum to
+  round-off; a plain running total drifted 2.9e-11 from -2.82 after 1000
+  updates. Scores differ from before in the last bits.
+
 - **Map's, Unfold's and Scan's scores never turn NaN** (−Inf + Inf) after a
   choice leaves its support and comes back. A general law now holds every
   kind's updated score to the assessed density through such chains. The
