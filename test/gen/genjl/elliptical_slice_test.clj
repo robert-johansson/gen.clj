@@ -22,4 +22,4 @@
 (deftest elliptical-slice
   ;; elliptical_slice.jl:1: runs without error
   (let [tr (:trace (gfi/generate foo [] (cm/choicemap :y (array/array [1.0 1.0])) (rng/key 1)))]
-    (is (trace/trace? (mcmc/elliptical-slice tr :x mu cov (rng/key 2))))))
+    (is (trace/trace? (:trace (mcmc/elliptical-slice tr :x mu cov (rng/key 2)))))))

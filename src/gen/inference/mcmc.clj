@@ -6,14 +6,21 @@
 
      (hmc trace selection {:L 10 :eps 0.1})    → {:trace :accepted? :log-alpha :diverged?}
      (mala trace selection tau)                → {:trace :accepted? :log-alpha :diverged?}
-     (nuts trace selection {:eps 0.1})         → {:trace :accept-stat :tree-depth :n-leapfrog
-                                                  :diverged? :energy :eps}
-     (map-optimize trace selection opts)       → trace
-     (elliptical-slice trace addr mu cov)      → trace
+     (nuts trace selection {:eps 0.1})         → {:trace :accepted? :accept-stat :tree-depth
+                                                  :n-leapfrog :diverged? :energy :eps}
+     (map-optimize trace selection opts)       → {:trace :accepted?}
+     (elliptical-slice trace addr mu cov)      → {:trace :accepted?}
 
      (hmc-particles ps selection opts)          → {:particles :accepted :log-alphas :diverged}
      (mala-particles ps selection tau)          → {:particles :accepted :log-alphas :diverged}
-     (map-optimize-particles ps selection opts) → particles
+     (map-optimize-particles ps selection opts) → {:particles :accepted}
+
+   Each returns a kernel's result (gen.inference.kernel), :accepted?
+   whether it took its move: for NUTS, whether it drew a state other than
+   the start; for map-optimize, whether its line search found a step; for
+   elliptical slice sampling, always (it shrinks its bracket until it
+   accepts). gen.inference.kernel's hmc, mala, nuts, elliptical-slice and
+   map-optimize make them kernels.
 
    The selected choices must keep the trace's structure: HMC, MALA and NUTS
    move them jointly and leave every other choice alone. They take a
@@ -555,8 +562,9 @@
    hmc's, the tree's logic on the host). The trace is updated once, at the
    end.
 
-   Returns {:trace :accept-stat :tree-depth :n-leapfrog :diverged? :energy
-   :eps}, Stan's statistics: the mean over every step taken of
+   Returns {:trace :accepted? :accept-stat :tree-depth :n-leapfrog
+   :diverged? :energy :eps}: whether the state drawn is other than the
+   start, and Stan's statistics: the mean over every step taken of
    min(1, e^(h0 - h)) (the statistic step-size adaptation targets), the
    number of doublings kept, the leapfrog steps (each one gradient, plus
    one at the start), whether a step diverged (an energy error over 1000,
@@ -594,6 +602,7 @@
                   {:v v :p p :g g :sharp sharp :h (if (Double/isNaN h) ##Inf h)}))
          {:keys [sample tree-depth n-leapfrog accept-sum diverged?]} (trajectory step z0 max-depth k-tree)]
      {:trace (if (identical? sample z0) trace (first (move-to trace proto (:v sample) k-update)))
+      :accepted? (not (identical? sample z0))
       :accept-stat (/ (double accept-sum) (long n-leapfrog))
       :tree-depth tree-depth :n-leapfrog n-leapfrog :diverged? diverged? :energy (:h sample) :eps eps})))
 
@@ -622,18 +631,24 @@
 (defn map-optimize
   "One step of gradient ascent on the log density of the selected choices,
    with backtracking: try the step size max-step-size, shrinking it by tau
-   until the score does not decrease (Gen.jl's map_optimize). Options:
-   :max-step-size (0.1), :tau (0.5), :min-step-size (1e-16)."
+   until the score does not decrease (Gen.jl's map_optimize). Returns
+   {:trace :accepted?}, the trace moved by the step found, or the trace
+   itself, :accepted? false, when no step down to the least improves it.
+   Options: :max-step-size (0.1), :tau (0.5), :min-step-size (1e-16)."
   ([trace selection] (map-optimize trace selection nil))
   ([trace selection opts]
    (let [{:keys [values moved?]} (map-move trace selection opts)]
-     (if (array/truthy? moved?) (:trace (gfi/update trace values (rng/key 0))) trace))))
+     (if (array/truthy? moved?)
+       {:trace (:trace (gfi/update trace values (rng/key 0))) :accepted? true}
+       {:trace trace :accepted? false}))))
 
 (defn elliptical-slice
   "Elliptical slice sampling (Murray, Adams and MacKay 2010) of the choice at
    addr, whose prior is N(mu, cov): a new value on the ellipse through the
    current one and a prior draw, accepted on the slice of the likelihood (the
-   update weight less the prior's own ratio, which the ellipse accounts for)."
+   update weight less the prior's own ratio, which the ellipse accounts for).
+   Returns {:trace :accepted? true}: the bracket shrinks until a point is
+   accepted."
   ([trace addr mu cov] (elliptical-slice trace addr mu cov (gfi/next-key)))
   ([trace addr mu cov key]
    (let [mu (dc/->array mu)
@@ -656,7 +671,7 @@
             hi theta]
        (let [[t log-lik-ratio] (at theta)]
          (if (> log-lik-ratio log-u)
-           t
+           {:trace t :accepted? true}
            (let [[lo hi] (if (neg? theta) [theta hi] [lo theta])
                  u (double (array/item (rng/uniform (rng/fold-in k-theta (inc i)))))]
              (recur (inc i) (+ lo (* u (- hi lo))) lo hi))))))))
@@ -735,10 +750,15 @@
   "map-optimize on every particle of a gen.batched collection, each with
    its own line search: one batched gradient, and one batched score per
    step size tried, for all of them where the model runs batched. Options
-   as map-optimize's. Returns the particles, with :fallback (why the line
-   searches ran one particle at a time) when they did."
+   as map-optimize's. Returns {:particles, :accepted (n booleans, whether
+   each particle's search found a step)}, and :fallback, why the line
+   searches ran one particle at a time, when they did (the particles hold
+   it too)."
   ([ps selection] (map-optimize-particles ps selection nil))
   ([ps selection opts]
-   (let [{{:keys [values moved?]} :result m :fallback} (batched/map-particles* ps (fn [t _] (map-move t selection opts)) nil)]
-     (cond-> (if (array/any-true? moved?) (batched/set-choices ps values) ps)
+   (let [{{:keys [values moved?]} :result m :fallback} (batched/map-particles* ps (fn [t _] (map-move t selection opts)) nil)
+         accepted (mapv true? (array/->clj moved?))]
+     (cond-> {:particles (cond-> (if (some true? accepted) (batched/set-choices ps values) ps)
+                           m (assoc :fallback m))
+              :accepted accepted}
        m (assoc :fallback m)))))

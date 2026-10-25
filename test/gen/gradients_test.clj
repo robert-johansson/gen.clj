@@ -309,7 +309,7 @@
     (testing "HMC, MALA and MAP move"
       (is (moved? #(mcmc/hmc start x {:L 5 :eps 0.05} %)))
       (is (moved? #(mcmc/mala start x 0.05 %)))
-      (is (not= (ts/number (start :x)) (ts/number ((mcmc/map-optimize start x) :x)))))
+      (is (not= (ts/number (start :x)) (ts/number ((:trace (mcmc/map-optimize start x)) :x)))))
     (testing "VI's reparameterized ELBO gradient, through the model's checks"
       (let [{:keys [objective grads]} (vi/elbo-gradient validated [] validated-observations validated-family []
                                                         {:m 0.0 :log-s -1.0} 4 {:estimator :reparam :key (rng/key 2)})]

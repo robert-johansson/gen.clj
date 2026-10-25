@@ -716,13 +716,20 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       filter's resamplings have moved out of its weights, host. `:ess`: the
       weights' effective sample size, 1/Σp², host. `:estimate`: is/estimate's
       self-normalized expectation, host.
-    - `:accepted?`: whether a kernel took its move, a boolean. `:accepted`:
-      a vector of them, a combinator's moves in order or one per particle.
-      `:log-alpha`: the log MH acceptance ratio (mh, mh/move, hmc, mala),
-      host; `:log-alphas` per particle, an [n] array. `:diverged?`: an HMC,
-      MALA or NUTS proposal diverged; `:diverged` per particle;
-      `:divergences`: how many did (a count). `:acceptance-rate`:
-      kernel/run's fraction of moves accepted, host or nil.
+    - `:accepted?`: whether a kernel took its move, a boolean, in every
+      kernel's result: MH's, HMC's and MALA's accept decision; NUTS's,
+      whether it drew a state other than the start; map-optimize's,
+      whether its line search found a step; elliptical slice's and
+      particle Gibbs's, always; a combinator's, whether any of its moves
+      did. `:accepted`: a vector of them, a combinator's moves in order or
+      one per particle. `:log-alpha`: the log MH acceptance ratio (mh,
+      mh/move, hmc, mala), host; `:log-alphas` per particle, an [n] array.
+      `:diverged?`: an HMC, MALA or NUTS proposal diverged; `:diverged`
+      per particle; `:divergences`: how many did (a count).
+      `:acceptance-rate`: kernel/run's fraction of moves accepted, host or
+      nil. `:draws`: what kernel/run's and nuts/sample's `:keep` kept in
+      place of `:traces`, host: (keep t) for each kept trace, or for a map
+      of functions a map of such vectors.
     - NUTS: `:eps` the step size taken or adapted (host; per particle an
       [n] array), `:inv-metric` (array), `:accept-stat`, `:tree-depth`,
       `:n-leapfrog`, `:energy` (host), `:stats` (a map of them per
@@ -745,6 +752,20 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     and `:diverged`. gen.batched's `{:particles :weights}` stays: it
     mirrors gfi/generate's `{:trace :weight}`, as b/simulate's particles
     mirror gfi/simulate's trace.
+  - **Kernels' shape** (the agent, 2026-10-25, provisional; genclj-4hu0):
+    a kernel is (fn [trace key]) → `{:trace :accepted? …}`, and every
+    kernel of the library returns that map: mcmc's map-optimize and
+    elliptical-slice too (map-optimize-particles `{:particles
+    :accepted}`). A result without `:trace`, such as a bare trace, is a
+    loud error in kernel/run, the combinators and pf/rejuvenate, where it
+    carried nil on. gen.inference.kernel's hmc, mala, nuts and
+    elliptical-slice make mcmc's moves kernels, each its own reversal (as
+    the MH kernels are; NUTS's transition keeps detailed balance), and
+    map-optimize a kernel without one, since it leaves no distribution
+    unchanged; their options take no `:key`, which the kernel takes at
+    each application. kernel/run and nuts/sample take `:keep`. `(kern []
+    …)` and `(kern ^:trace [tr] …)` are the kernel itself, not a function
+    of no arguments.
 - **Indices are 0-based** (Clojure idiom, as in GenMLX; D2): Map's and
   Unfold's addresses, Recurse's nodes (root 0), categorical's values
   (categorical-logits' too: 0 to n - 1) and Switch's branch index (branch 0

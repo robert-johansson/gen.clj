@@ -33,6 +33,25 @@ newest first in each section.
 
 ### Changed
 
+- **Breaking. Every kernel returns `{:trace :accepted? …}`** (DESIGN §9,
+  "The 1.0's shape", kernels' shape; genclj-4hu0).
+  - `mcmc/map-optimize` and `mcmc/elliptical-slice` return `{:trace
+    :accepted?}` where they returned the trace: read `:trace`.
+    map-optimize's `:accepted?` is whether its line search found a step,
+    elliptical slice's always true. `mcmc/map-optimize-particles` returns
+    `{:particles :accepted}` (and `:fallback`) where it returned the
+    particles: read `:particles`.
+  - `mcmc/nuts` adds `:accepted?`, whether the state drawn is other than
+    the start, and so does each of `nuts/sample`'s `:stats`.
+    `particle-mcmc/particle-gibbs` adds `:accepted? true`. A combinator
+    adds `:accepted?`, whether any of its moves was accepted, beside
+    `:accepted`.
+  - A kernel's result without `:trace`, such as a bare trace, is a loud
+    error in `kernel/run`, the combinators and `pf/rejuvenate`, where it
+    carried nil on as the trace.
+- **Breaking. `(kernel/kern [] …)` and `(kernel/kern ^:trace [tr] …)` are
+  the kernel** (genclj-4hu0), where they were functions of no arguments
+  that returned it: drop the extra call, `((kern [] …))`.
 - **Breaking. One meaning per result key** (DESIGN §9, "The 1.0's
   shape", the result keys, a glossary of every key; genclj-4jpw).
   - `weights/normalize` returns `{:log-total :log-normalized-weights}`.
@@ -176,6 +195,20 @@ newest first in each section.
 
 ### Added
 
+- **Kernels for mcmc's moves, and chains that keep host values**
+  (genclj-4hu0).
+  - `kernel/hmc`, `kernel/mala`, `kernel/nuts` and
+    `kernel/elliptical-slice` make `gen.inference.mcmc`'s moves kernels,
+    as `kernel/mh` does MH's: `(k/hmc selection opts)`, `(k/mala selection
+    tau opts)`, `(k/nuts selection opts)` (one transition, at given `:eps`
+    and `:inv-metric`, such as `nuts/adapt`'s), `(k/elliptical-slice addr
+    mu cov)`. Each is its own reversal. `kernel/map-optimize` is a step of
+    `mcmc/map-optimize` as a kernel, with no reversal. Options take no
+    `:key` (loud): the kernel takes one at each application.
+  - `kernel/run` and `nuts/sample` take `:keep`, a function of a trace or
+    a map of them: the result holds `:draws`, `(keep t)` for each kept
+    trace with its arrays read on the host (a map of vectors for a map),
+    in place of `:traces`, and the chain holds its current trace alone.
 - **The API's tiers, the stable surface's snapshot and the API appendix**
   (DESIGN §9, "The 1.0's shape"; e6f549f, genclj-dv8x).
   - Every namespace of `src/` and `ext/`, and gen.laws, carries `{:api

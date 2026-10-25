@@ -1,13 +1,24 @@
 (ns gen.inference.kernel
   "MCMC kernels and their combinators.
 
-   A kernel is a function (kernel trace key) → {:trace trace' ...}: Gen.jl's
-   (trace, metadata), as a map. The MH kernels add :accepted? and :log-alpha.
-   A Kernel value can also carry its reversal, the kernel that undoes it in
-   distribution (Gen.jl's reversal). MH-family kernels are reversible, so
-   they are their own reversals. Combinators of kernels with reversals have
-   reversals too: the reversal of a chain is the chain of the reversals, in
-   reverse order.
+   A kernel is a function (kernel trace key) → {:trace trace' :accepted? …}:
+   Gen.jl's (trace, metadata), as a map, :accepted? whether it took its
+   move. Every kernel of the library returns it: MH's and the gradient
+   kernels' with :log-alpha, NUTS's beside its statistics, and a
+   combinator's (did any of its moves). A function that returns a bare
+   trace is not a kernel, and running one is a loud error. A Kernel value
+   can also carry its reversal, the kernel that undoes it in distribution
+   (Gen.jl's reversal). MH-family kernels are reversible, so they are their
+   own reversals. Combinators of kernels with reversals have reversals too:
+   the reversal of a chain is the chain of the reversals, in reverse order.
+
+     (mh selection), (mh proposal args), (involutive-mh proposal args h)
+     (hmc selection opts), (mala selection tau opts), (nuts selection opts),
+     (elliptical-slice addr mu cov)
+                           gen.inference.mh's and mcmc's moves as kernels,
+                           each its own reversal
+     (map-optimize selection opts)
+                           a step of gradient ascent, with no reversal
 
      (chain k1 k2 k3)      k1, then k2, then k3
      (repeat n k)          k, n times
@@ -16,22 +27,27 @@
      (checked k observations)  k, then check that it left the observations alone
      (kern [args] stmt …)  Gen.jl's @kern: statements, loops and branches over
                            the arguments, as one chain with its reversal
+                           (with no arguments, (kern [] stmt …) is the
+                           kernel itself)
      (kern ^:trace [tr args] stmt …)
                            the same, reading the trace in its loops,
                            branches, lets and kernels' arguments, with the
                            thesis's invariant checked after each
 
-   A combinator's result reports the accept decisions of the MH moves it
-   made, in order, as :accepted (a vector of booleans) when they all report
-   one, and how many of its proposals diverged (gen.inference.mcmc's
-   :diverged?) as :divergences, when any did.
+   A combinator's result reports the accept decisions of the moves it
+   made, in order, as :accepted (a vector of booleans) and :accepted? (any
+   of them) when they all report one, and how many of its proposals
+   diverged (gen.inference.mcmc's :diverged?) as :divergences, when any
+   did.
 
-   (run kernel trace opts) runs a chain and collects samples."
+   (run kernel trace opts) runs a chain and collects samples: its traces,
+   or with :keep a function of each, read on the host."
   {:api :stable}
   (:refer-clojure :exclude [repeat cycle reversible?])
   (:require [gen.array :as array]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
+            [gen.inference.mcmc :as mcmc]
             [gen.inference.mh :as mh]
             [gen.random :as rng]))
 
@@ -67,6 +83,17 @@
   [k]
   (if (instance? Kernel k) (:f k) k))
 
+(defn ^:no-doc step-result
+  "r, a kernel's result, when it is one ({:trace …}); a loud error
+   otherwise, such as for a bare trace."
+  [r]
+  (if (and (map? r) (contains? r :trace))
+    r
+    (throw (ex-info (str "A kernel returns {:trace …}, not " (if (nil? r) "nil" (.getName (class r)))
+                         ": a function f of a trace and a key that returns the trace alone is the kernel"
+                         " (fn [t key] {:trace (f t key)})")
+                    {:result-type (some-> r class .getName)}))))
+
 (defn- with-reversals
   "A kernel built by combine from the step fns of ks, reversible when every
    k is: its reversal is combine over the reversals in reverse-order."
@@ -90,15 +117,23 @@
         (:diverged? r) 1
         :else 0))
 
+(defn- combined
+  "A combinator's result: the trace t, and the moves' accept decisions as
+   :accepted and :accepted? (any of them) when every move reported one."
+  [t moves diverged]
+  (cond-> {:trace t}
+    moves (assoc :accepted? (boolean (some true? moves)) :accepted moves)
+    (pos? diverged) (assoc :divergences diverged)))
+
 (defn- sequence-fn [fs]
   (fn [trace key]
     (let [[t moves diverged] (reduce (fn [[t moves diverged] [f k]]
-                                       (let [r (f t k)]
+                                       (let [r (step-result (f t k))]
                                          [(:trace r) (when moves (some->> (accepted-moves r) (into moves)))
                                           (+ diverged (divergences r))]))
                                      [trace [] 0]
                                      (map vector fs (rng/split key (count fs))))]
-      (cond-> {:trace t} moves (assoc :accepted moves) (pos? diverged) (assoc :divergences diverged)))))
+      (combined t moves diverged))))
 
 (defn chain
   "The kernels applied in sequence."
@@ -133,8 +168,9 @@
       `(checked-kernel ~form '~form))))
 
 (defn ^:no-doc control-value
-  "A value a (kern ^:trace …) body's control flow read, on the host: an
-   array read at the inference loop's boundary, in collections too."
+  "A value on the host (what a (kern ^:trace …) body's control flow read,
+   or what run's :keep keeps): an array read at the inference loop's
+   boundary, in collections too."
   [v]
   (cond (array/array? v) (array/->clj v)
         (sequential? v) (mapv control-value v)
@@ -230,7 +266,7 @@
                   moves (volatile! [])
                   diverged (volatile! 0)
                   apply! (fn [k]
-                           (let [r ((step-fn (if reversal? (reversal k) k)) @t (rng/fold-in key @n))]
+                           (let [r (step-result ((step-fn (if reversal? (reversal k) k)) @t (rng/fold-in key @n)))]
                              (vswap! n inc)
                              (vswap! moves #(when % (some->> (accepted-moves r) (into %))))
                              (vswap! diverged + (divergences r))
@@ -250,7 +286,7 @@
                                                          (pr-str was) ", then " (pr-str is))
                                                     {:form form :read read :again again}))))))]
               (body t apply! construct)
-              (cond-> {:trace @t} @moves (assoc :accepted @moves) (pos? @diverged) (assoc :divergences @diverged))))]
+              (combined @t @moves @diverged)))]
     (->Kernel (fn [trace key] (run forward false trace key)) (fn [trace key] (run backward true trace key)))))
 
 (declare traced-statements)
@@ -302,7 +338,8 @@
 
 (defmacro kern
   "Gen.jl's @kern: (kern [args] statement …) is a function of args returning
-   one kernel, the statements' kernels in order. A statement is a kernel, or
+   one kernel, the statements' kernels in order; with no arguments,
+   (kern [] statement …) is that kernel. A statement is a kernel, or
    doseq/for, if/when or let over statements; their conditions and ranges
    are computed from the arguments when the kernel is made, never from the
    trace, so the result is a chain and its reversal is automatic: every
@@ -326,7 +363,8 @@
    closed-over values, so a kernel built again from the same values is
    the same). A later statement may change what an earlier one read, as
    the thesis's p. 102 kernel does. Conditions are Clojure's truthiness of
-   host values (an array is read on the host).
+   host values (an array is read on the host). With tr alone,
+   (kern ^:trace [tr] statement …) is the kernel itself.
 
      (kern ^:trace [tr]
        (doseq [i (range (inc (array/item (tr :degree))))] (mh (sel/select [:coeff i])))
@@ -336,10 +374,10 @@
   (if (:trace (meta params))
     (let [[tr & args] params
           t (gensym "t") apply! (gensym "apply") construct (gensym "construct")]
-      `(fn [~@args]
-         (trace-kernel (fn [~t ~apply! ~construct] ~(traced-statements body tr t apply! construct false))
-                       (fn [~t ~apply! ~construct] ~(traced-statements body tr t apply! construct true)))))
-    `(fn ~params ~(statements body))))
+      (let [k `(trace-kernel (fn [~t ~apply! ~construct] ~(traced-statements body tr t apply! construct false))
+                             (fn [~t ~apply! ~construct] ~(traced-statements body tr t apply! construct true)))]
+        (if (seq args) `(fn [~@args] ~k) k)))
+    (if (seq params) `(fn ~params ~(statements body)) (statements body))))
 
 (defn repeat
   "The kernel applied n times."
@@ -380,7 +418,7 @@
    the observations (Gen.jl's check=true, observations=…)."
   [kernel observations]
   (let [check (fn [f] (fn [trace key]
-                        (let [r (f trace key)]
+                        (let [r (step-result (f trace key))]
                           (check-observations! (:trace r) observations)
                           r)))]
     (->Kernel (check (step-fn kernel))
@@ -402,36 +440,114 @@
   (symmetric (fn [trace key] (mh/involutive-mh trace proposal proposal-args involution key))))
 
 ;; ---------------------------------------------------------------------------
+;; Gradient kernels (gen.inference.mcmc)
+;; ---------------------------------------------------------------------------
+
+(defn- kernel-opts
+  "A gradient kernel's options, an options map or nil, without :key: the
+   kernel takes a key at each application."
+  [what opts]
+  (when-not (or (nil? opts) (map? opts))
+    (throw (ex-info (str what " takes an options map, not " (pr-str opts)) {:value opts})))
+  (when (contains? opts :key)
+    (throw (ex-info (str what ": a kernel takes its key at each application, not in its options")
+                    {:key (:key opts)})))
+  opts)
+
+(defn hmc
+  "The HMC kernel of a selection, with mcmc/hmc's options (:L, :eps,
+   :inv-metric, :jitter, :compile?). Reversible: its own reversal."
+  ([selection] (hmc selection nil))
+  ([selection opts]
+   (let [opts (kernel-opts "hmc" opts)]
+     (symmetric (fn [trace key] (mcmc/hmc trace selection opts key))))))
+
+(defn mala
+  "The MALA kernel of a selection and a step size tau, with mcmc/mala's
+   options (:inv-metric, :compile?). Reversible: its own reversal."
+  ([selection tau] (mala selection tau nil))
+  ([selection tau opts]
+   (let [opts (kernel-opts "mala" opts)]
+     (symmetric (fn [trace key] (mcmc/mala trace selection tau (assoc opts :key key)))))))
+
+(defn nuts
+  "The NUTS kernel of a selection: one transition of mcmc/nuts, with its
+   options (:eps, :max-depth, :inv-metric, :jitter, :compile?), such as an
+   adapted state's: (nuts s (select-keys adapted [:eps :inv-metric])),
+   adapted from gen.inference.nuts/adapt. Reversible (the transition keeps
+   detailed balance): its own reversal."
+  ([selection] (nuts selection nil))
+  ([selection opts]
+   (let [opts (kernel-opts "nuts" opts)]
+     (symmetric (fn [trace key] (mcmc/nuts trace selection opts key))))))
+
+(defn elliptical-slice
+  "The elliptical slice sampling kernel of the choice at addr, whose prior
+   is N(mu, cov) (mcmc/elliptical-slice). Reversible: its own reversal."
+  [addr mu cov]
+  (symmetric (fn [trace key] (mcmc/elliptical-slice trace addr mu cov key))))
+
+(defn map-optimize
+  "A step of mcmc/map-optimize on a selection, with its options, as a
+   kernel (its key unused). It climbs toward a mode and leaves no
+   distribution unchanged, so it declares no reversal."
+  ([selection] (map-optimize selection nil))
+  ([selection opts]
+   (let [opts (kernel-opts "map-optimize" opts)]
+     (kernel (fn [trace _key] (mcmc/map-optimize trace selection opts))))))
+
+;; ---------------------------------------------------------------------------
 ;; Running a chain
 ;; ---------------------------------------------------------------------------
+
+(defn ^:no-doc keeping
+  "run's and gen.inference.nuts/sample's :keep, checked: [read finish],
+   read giving what a kept trace keeps, (keep trace) with its arrays read
+   on the host (control-value), and finish the vector of those as :draws.
+   For a map of functions, read gives a map and finish a map of vectors."
+  [keep]
+  (cond (fn? keep) [#(control-value (keep %)) identity]
+        (and (map? keep) (seq keep) (every? fn? (vals keep)))
+        [(fn [t] (update-vals keep #(control-value (% t))))
+         (fn [kept] (into {} (map (fn [k] [k (mapv #(get % k) kept)])) (keys keep)))]
+        :else (throw (ex-info (str ":keep is a function of a trace, or a map of them, not " (pr-str keep))
+                              {:keep keep}))))
 
 (defn run
   "Apply the kernel repeatedly from trace and collect samples. opts:
    :samples (required), :burn (steps discarded first, 0), :thin (steps per
-   sample, 1), :key. Returns {:traces [...] :acceptance-rate r
-   :divergences n}: the rate over every MH move of every step (a
-   combinator's steps make several), or nil when the kernel does not report
-   its accept decisions, and how many proposals diverged (HMC's and MALA's
-   :diverged?, rejected, as Stan counts them)."
-  [kernel trace {:keys [samples burn thin key] :or {burn 0 thin 1}}]
+   sample, 1), :key, :keep. Returns {:traces [...] :acceptance-rate r
+   :divergences n}: the rate over every move of every step (a combinator's
+   steps make several), or nil when the kernel does not report its accept
+   decisions, and how many proposals diverged (HMC's, MALA's and NUTS's
+   :diverged?, as Stan counts them). With :keep, a function of a trace,
+   the result holds :draws in place of :traces: (keep t) for each kept
+   trace t, its arrays read on the host, so that the chain holds its
+   current trace alone (a long chain on MLX, say). (run k t {:samples
+   1000 :keep #(% :x)}) gives :x's draws as host numbers, which
+   gen.inference.diagnostics reads. :keep may be a map of such functions,
+   and :draws is then a map of their vectors: {:keep {:x #(% :x) :y #(%
+   :y)}}."
+  [kernel trace {:keys [samples burn thin key keep] :or {burn 0 thin 1}}]
   (when-not (and (nat-int? samples) (nat-int? burn) (pos-int? thin))
     (throw (ex-info "run needs :samples ≥ 0, :burn ≥ 0 and :thin ≥ 1" {:samples samples :burn burn :thin thin})))
   (let [f (step-fn kernel)
+        [read finish] (if (some? keep) (keeping keep) [identity nil])
         steps (+ burn (* samples thin))
         step-keys (if (pos? steps) (rng/split (or key (gfi/next-key)) steps) [])]
-    (loop [i 0 t trace traces (transient []) accepted 0 moves 0 reported? true diverged 0]
+    (loop [i 0 t trace kept (transient []) accepted 0 moves 0 reported? true diverged 0]
       (if (< i steps)
-        (let [r (f t (step-keys i))
+        (let [r (step-result (f t (step-keys i)))
               i' (inc i)
               ;; one iteration's graph at a time on a lazy backend
               t' (gfi/eval-trace! (:trace r))
               keep? (and (> i' burn) (zero? (mod (- i' burn) thin)))
               ms (accepted-moves r)]
-          (recur i' t' (if keep? (conj! traces t') traces)
+          (recur i' t' (if keep? (conj! kept (read t')) kept)
                  (+ accepted (count (filter true? ms)))
                  (+ moves (count ms))
                  (and reported? (some? ms))
                  (+ diverged (divergences r))))
-        {:traces (persistent! traces)
-         :acceptance-rate (when (and reported? (pos? moves)) (/ (double accepted) moves))
-         :divergences diverged}))))
+        (assoc (if finish {:draws (finish (persistent! kept))} {:traces (persistent! kept)})
+               :acceptance-rate (when (and reported? (pos? moves)) (/ (double accepted) moves))
+               :divergences diverged)))))

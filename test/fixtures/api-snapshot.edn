@@ -543,16 +543,21 @@
   checked {:arglists ([kernel observations])}
   checked-kernel {:arglists ([k form])}
   cycle {:arglists ([kernels] [n kernels])}
+  elliptical-slice {:arglists ([addr mu cov])}
+  hmc {:arglists ([selection] [selection opts])}
   involutive-mh {:arglists ([proposal proposal-args involution])}
   kern {:kind :macro, :arglists ([params & body])}
   kernel {:arglists ([f] [f reverse-f])}
+  mala {:arglists ([selection tau] [selection tau opts])}
   map->Kernel {:arglists ([m])}
+  map-optimize {:arglists ([selection] [selection opts])}
   mh {:arglists ([selection] [proposal proposal-args])}
   mix {:arglists ([kernels weights])}
+  nuts {:arglists ([selection] [selection opts])}
   repeat {:arglists ([n kernel])}
   reversal {:arglists ([k])}
   reversible? {:arglists ([k])}
-  run {:arglists ([kernel trace {:keys [samples burn thin key], :or {burn 0, thin 1}}])}
+  run {:arglists ([kernel trace {:keys [samples burn thin key keep], :or {burn 0, thin 1}}])}
   symmetric {:arglists ([f])}}
 
  gen.inference.mcmc
