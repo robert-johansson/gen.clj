@@ -8,6 +8,7 @@
    gen.choicemap: selected?, get-subselection and set-subselection take
    either, and the empty path is the root. A selection implements
    ISelection one address at a time."
+  {:api :stable}
   (:refer-clojure :exclude [complement])
   (:require [gen.array :as array]
             [gen.array.batch :as batch]

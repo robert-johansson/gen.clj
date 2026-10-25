@@ -8,7 +8,8 @@
 
    Host numbers are weakly typed: they adopt the dtype of the arrays they meet
    and only raise the kind (a host float meeting an int array gives the
-   backend's default float).")
+   backend's default float)."
+  {:api :internal})
 
 (def dtypes #{:bool :int32 :int64 :uint32 :float16 :bfloat16 :float32 :float64})
 

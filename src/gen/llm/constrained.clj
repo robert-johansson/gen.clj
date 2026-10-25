@@ -39,6 +39,7 @@
    context of positive weight where the potential allows no token (a
    grammar complete there, with no end token to end the completion) is a
    loud error."
+  {:api :experimental}
   (:require [gen.llm.lm :as lm]
             [gen.llm.potential :as potential]))
 

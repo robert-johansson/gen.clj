@@ -56,6 +56,7 @@
    (default native/build/llama/<platform>/lib, gen.llama.LlamaRuntime).
    tokenize, token-bytes and detokenize use the GGUF's own vocabulary;
    tokenizer gathers them as the LM protocol's tokenizer (gen.llm.lm)."
+  {:api :experimental}
   (:require [gen.array.memory :as reservations]
             [gen.llm.branching :as br]
             [gen.llm.host :as host]

@@ -4,8 +4,13 @@
    checked (Parts II-V run in gen.book.part2-test … part5-test, ^:slow).
    And the runner can fail: a wrong value, a float past the digits it
    shows, a throw, an error that does not come, a stale or missing include,
-   a code block outside an include and a stale figure each fail it."
-  (:require [clojure.test :refer [deftest is testing]]
+   a code block outside an include, a stale figure and a stale page
+   written from the code each fail it. The API appendix follows the tiers
+   (gen.api): the stable namespaces in full, the experimental ones by
+   name, no internal one."
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
+            [gen.api :as api]
             [gen.book :as book]
             [gen.book.svg :as svg]
             [gen.test-support :as ts]))
@@ -19,6 +24,20 @@
 
 (deftest generated-pages-are-current
   (book/check-generated))
+
+(deftest the-api-page-follows-the-tiers
+  (let [page (book/api-page)
+        tier (fn [t] (map :ns (filter #(= t (:tier %)) (api/namespaces))))]
+    (doseq [n (tier :stable)]
+      (is (str/includes? page (str "\n### " n "\n")) (str "the stable " n " has a section")))
+    (is (str/includes? page "- `(simulate gf args)`, `(simulate gf args key)`: ") "a stable var with its calls")
+    (doseq [n (tier :experimental)]
+      (is (re-find (re-pattern (str "\n- `" (java.util.regex.Pattern/quote (str n)) "`")) page)
+          (str "the experimental " n " is named")))
+    (doseq [n (tier :internal)]
+      (is (not (str/includes? page (str "\n- `" n "`"))) (str "the internal " n " is left out"))
+      (is (not (str/includes? page (str "### " n "\n"))) (str "the internal " n " is left out")))
+    (is (every? #(<= (count %) book/max-line) (str/split-lines page)) "its lines fit a printed page")))
 
 (defn- failures
   "The number of failures and errors f reports."
@@ -114,3 +133,8 @@
     (when (ts/jvm?)
       (is (= 1 (failures #(book/check-figures {path (str current " ")}))))
       (is (= 1 (failures #(book/check-figures {"figures/no-such.svg" "<svg/>"})))))))
+
+(deftest stale-pages-fail
+  (let [[file page] (first book/generated)]
+    (is (zero? (failures #(book/check-generated {file page}))))
+    (is (= 1 (failures #(book/check-generated {file (fn [] (str (page) " "))}))))))

@@ -55,6 +55,7 @@
    and a bulk ESS of 100 a chain, as Vehtari et al. 2021 advise), and make
    a hierarchical scale non-centered, x = σ·z with z ~ N(0, 1) traced, as
    Stan's guide does."
+  {:api :stable}
   (:require [gen.array :as array]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]

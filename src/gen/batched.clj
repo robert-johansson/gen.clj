@@ -75,6 +75,7 @@
    gen.array.batch/Parts value), which the accessors read per particle.
    choice reads through it where every particle makes the choice; select
    joins traces whose particles took other branches."
+  {:api :stable}
   (:refer-clojure :exclude [take update])
   (:require [gen.array :as array]
             [gen.array.batch :as batch]

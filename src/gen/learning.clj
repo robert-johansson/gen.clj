@@ -22,6 +22,7 @@
    lecture! and lecture_batched!): the proposal's log density of the
    latent choices of the model's own traces, with its gradient, to train a
    proposal toward the model's posterior."
+  {:api :stable}
   (:refer-clojure :exclude [+ - * /])
   (:require [gen.array :as array :refer [+ - * /]]
             [gen.dynamic :as dyn]

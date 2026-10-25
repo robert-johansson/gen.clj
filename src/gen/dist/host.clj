@@ -27,6 +27,7 @@
 
    gen.dist.commons-math (the :commons-math alias) makes families of Apache
    Commons Math's distributions."
+  {:api :experimental}
   (:require [gen.array :as array]
             [gen.array.batch :as batch]
             [gen.array.shape :as sh]

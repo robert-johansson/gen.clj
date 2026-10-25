@@ -32,7 +32,8 @@
              position, and :tail, kept in cell i, the cell holding
              sequence i's state (-1 for none)
    and after a decode :n-rs (the cells it gathered) and :taken (the cell
-   each of its sequences took, before the gather moved them).")
+   each of its sequences took, before the gather moved them)."
+  {:api :experimental})
 
 (set! *warn-on-reflection* true)
 (set! *unchecked-math* :warn-on-boxed)

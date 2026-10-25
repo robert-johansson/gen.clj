@@ -41,6 +41,7 @@
    flags, possessive quantifiers, \\p classes, nested classes and &&
    (java.util.regex's), and an unescaped ] { } outside a class or [ inside
    one."
+  {:api :experimental}
   (:refer-clojure :exclude [cat chars complement repeat])
   (:require [clojure.set :as set]
             [gen.llm.dfa :as dfa])

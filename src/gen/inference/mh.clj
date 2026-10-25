@@ -14,6 +14,7 @@
    started at an impossible trace) is a loud error. A move that takes a
    choice outside its support is rejected: the operation stops there with
    weight -Inf (DESIGN.md §9), before anything downstream runs."
+  {:api :stable}
   (:refer-clojure :exclude [+ -])
   (:require [gen.array :as array :refer [+ -]]
             [gen.batched :as batched]

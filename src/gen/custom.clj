@@ -74,6 +74,7 @@
    and it cannot resample some of the choices only (there is no proposal
    density to weigh them by), a loud error. project takes all of the
    choices or none."
+  {:api :stable}
   (:refer-clojure :exclude [-])
   (:require [gen.array :as array :refer [-]]
             [gen.array.batch :as batch]

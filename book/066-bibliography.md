@@ -12,8 +12,9 @@ paper its authors ask users to cite, where there is one, and the version
 the book was written against, where that matters.
 
 Not listed: programming languages, the tools that build the book
-(*Installing and Running* has them), the repository's own documents, and
-eponyms such as Jensen's inequality or the Kalman filter.
+(*Installing and Running* has them), the repository's own documents,
+eponyms such as Jensen's inequality or the Kalman filter, and the works
+that only docstrings cite, which *The Public API* quotes.
 
 ## The thesis and Gen's papers
 
@@ -311,9 +312,10 @@ nothing else:
             [clojure.string :as str]))
 ```
 
-The pages that can cite are every numbered page but a Part's heading and
-this appendix. The checks read a page's prose, without its code, and its
-title, by which the entries name it:
+The pages that can cite are every numbered page but a Part's heading,
+*The Public API*, whose text is the docstrings' and cites as the code
+does, and this appendix. The checks read a page's prose, without its
+code, and its title, by which the entries name it:
 
 <!-- code: pages -->
 ```clojure
@@ -336,11 +338,12 @@ title, by which the entries name it:
 
 (def pages
   "The pages that cite, in the book's order, as {:title :text}: every
-   numbered Markdown file but a Part's heading and this appendix."
+   numbered Markdown file but a Part's heading, The Public API (the
+   docstrings', which cite as the code does) and this appendix."
   (->> (.listFiles (io/file "book"))
        (map #(.getName ^java.io.File %))
        (filter #(re-matches #"\d{3}-.*\.md" %))
-       (remove #(re-matches #"\d\d0-.*|066-.*" %))
+       (remove #(re-matches #"\d\d0-.*|063-.*|066-.*" %))
        sort
        (mapv (fn [file]
                (let [md (slurp (str "book/" file))]

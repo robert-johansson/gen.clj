@@ -15,6 +15,7 @@
      (genclj-y0mp). Half-float sums there accumulate in their own
      precision (10^5 terms of 10^-5: 1 - 0.75 in float16, 1 - 0.998 in
      bfloat16), so they are summed in float32 and cast back, as JAX's."
+  {:api :internal}
   (:refer-clojure :exclude [+ - * / < > >= ==])
   (:require [gen.array :as array :refer [+ - * / < > >= ==]]
             [gen.array.special :as special]))

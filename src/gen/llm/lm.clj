@@ -36,6 +36,7 @@
    and the functions :token-bytes (token → a new byte array), :encode
    ((text opts) → tokens) and :decode (tokens → text). gen.llm.llama's
    tokenizer gives the GGUF's own."
+  {:api :experimental}
   (:require [gen.llm.branching :as br]
             [gen.llm.cache :as cache]))
 

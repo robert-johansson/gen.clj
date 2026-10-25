@@ -45,6 +45,7 @@
 
    The constructor validates as defdist's do, and builds the draw, so
    (shifted-exponential -1 0) fails as (d/exponential -1) does."
+  {:api :stable}
   (:refer-clojure :exclude [+ - * /])
   (:require [gen.array :as array :refer [+ - * /]]
             [gen.dist.core :as dc]

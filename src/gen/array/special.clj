@@ -3,7 +3,8 @@
    JVM backend's kernels. lgamma and digamma are composites in gen.array, so
    they are differentiable and identical on every backend; the ones here are
    their host paths, the composites' double operations in their order, so
-   equal to them bit for bit (genclj-rayh).")
+   equal to them bit for bit (genclj-rayh)."
+  {:api :internal})
 
 (set! *warn-on-reflection* true)
 (set! *unchecked-math* :warn-on-boxed)

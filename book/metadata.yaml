@@ -44,6 +44,10 @@ header-includes: |
   \newunicodechar{∂}{\ensuremath{\partial}}
   \newunicodechar{∝}{\ensuremath{\propto}}
   \newunicodechar{∑}{\ensuremath{\sum}}
+  \newunicodechar{∇}{\ensuremath{\nabla}}
+  \newunicodechar{≥}{\ensuremath{\geq}}
+  \newunicodechar{⟨}{\ensuremath{\langle}}
+  \newunicodechar{⟩}{\ensuremath{\rangle}}
   \newunicodechar{⁰}{\textsuperscript{0}}
   \newunicodechar{¹}{\textsuperscript{1}}
   \newunicodechar{²}{\textsuperscript{2}}

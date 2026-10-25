@@ -16,7 +16,8 @@
    where paths part. A path stays only while it leads to an entry, so the
    trie holds no more tokens than its entries' contexts. Tokens compare with
    =, so a context may hold longs or integers. remove-entry takes the
-   tokens of an entry the trie holds (:no-entry otherwise).")
+   tokens of an entry the trie holds (:no-entry otherwise)."
+  {:api :experimental})
 
 (set! *warn-on-reflection* true)
 (set! *unchecked-math* :warn-on-boxed)

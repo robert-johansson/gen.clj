@@ -26,6 +26,7 @@
    order, so -0.0 is not 0.0 and a list is not a vector, and bounded, so a
    value past its budget, or a lazy one not yet realized, counts as
    changed."
+  {:api :stable}
   (:require [gen.array :as array]
             [gen.array.dtype :as dt]))
 

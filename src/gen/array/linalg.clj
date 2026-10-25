@@ -2,6 +2,7 @@
   "Decompositions and solves over the last two axes of arrays, batched over the
    leading axes. A right-hand side that is 1-d, or has one axis fewer than the
    matrix, is a vector (batch); otherwise it is [.. n k]."
+  {:api :stable}
   (:refer-clojure :exclude [+ *])
   (:require [gen.array :as array :refer [+ * log sum]]
             [gen.array.dtype :as dt]

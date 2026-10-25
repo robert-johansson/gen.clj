@@ -7,6 +7,7 @@
    primitive, -random-uniform, using JAX's transforms. On the float64 JVM
    backend, uniform draws are bit-identical to JAX's, and normal, gumbel and
    exponential draws match JAX to rounding."
+  {:api :stable}
   (:refer-clojure :exclude [key + - * / < > <= >= ==])
   (:require [gen.array :as array :refer [+ - * / < > <= >= ==]]
             [gen.array.dtype :as dt]

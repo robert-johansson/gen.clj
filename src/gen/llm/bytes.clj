@@ -26,6 +26,7 @@
      (prefix-logprob b prompt text)       → log P(the text after prompt begins with text)
      (text-logprob b prompt text)         → log P(the text is text, then ends)
      (next-byte-logprobs b prompt text)   → each next byte's, and the end's"
+  {:api :experimental}
   (:require [gen.llm.lm :as lm]))
 
 (set! *warn-on-reflection* true)

@@ -5,6 +5,7 @@
      backend those (docs/array-api.md §10);
    - the math of host scalars, every elementwise op and reduction as
      gen.array computes them on the host, shared with the tape."
+  {:api :internal}
   (:require [gen.array.dtype :as dt]
             [gen.array.special :as special]))
 

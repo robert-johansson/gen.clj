@@ -46,6 +46,7 @@
    makes that case an error.
 
    Keys are an optional last argument (or :key in an options map)."
+  {:api :stable}
   (:refer-clojure :exclude [-])
   (:require [gen.array :as array :refer [-]]
             [gen.batched :as batched]

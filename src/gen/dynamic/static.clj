@@ -39,6 +39,7 @@
      (lint ns …)           per generative function var of the namespaces
                            (the current one by default): {:var :static?
                            :reason}, the flagged ones as {:already true}"
+  {:api :internal}
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.choicemap :as cm]

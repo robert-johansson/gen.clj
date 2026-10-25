@@ -58,6 +58,7 @@
                            CPU device (cpu-compiles?)
      gen.mlx.lib           the directory of libmlxc (default
                            native/build/<platform>/lib; MlxRuntime)"
+  {:api :internal}
   (:require [gen.array.dtype :as dt]
             [gen.array.memory :as reservations]
             [gen.array.protocols :as p]

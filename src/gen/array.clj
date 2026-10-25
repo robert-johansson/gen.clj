@@ -10,6 +10,7 @@
    The arithmetic operators extend Clojure's to arrays and are meant to be
    referred (excluding clojure.core's): on numbers they agree with Clojure math,
    except that / never returns a Ratio and integer overflow wraps."
+  {:api :stable}
   (:refer-clojure :exclude [+ - * / < > <= >= == max min mod abs take flatten compile])
   (:require [clojure.core :as c]
             [gen.array.dtype :as dt]

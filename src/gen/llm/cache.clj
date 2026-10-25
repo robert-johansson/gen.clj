@@ -26,6 +26,7 @@
      program's results repeat bit for bit.
 
    Not thread-safe: gen.llm.lm serializes the calls."
+  {:api :experimental}
   (:require [gen.llm.branching :as br]
             [gen.llm.cells :as cells]
             [gen.llm.trie :as trie]))

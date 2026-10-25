@@ -21,6 +21,7 @@
    They keep a generative function as it is, and anything that holds no
    batched value, its identity too (a static update checks a generative
    function's, and a store's)."
+  {:api :experimental}
   (:require [gen.array :as array]
             [gen.array.batch :as batch]
             [gen.array.protocols :as p]

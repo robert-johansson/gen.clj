@@ -18,6 +18,7 @@
 
    Resamplers return a vector of n indices. They take the key as an optional
    last argument; omitting it draws one from the implicit key source."
+  {:api :stable}
   (:require [gen.array :as array]
             [gen.gfi :as gfi]
             [gen.random :as rng]))

@@ -15,6 +15,7 @@
    (get-choice c :x nil). The questions has-value? and has-submap? never
    throw. Clojure's get on a choice map reads the record's fields, not
    addresses."
+  {:api :stable}
   (:refer-clojure :exclude [empty? merge to-array])
   (:require [gen.array :as array]))
 

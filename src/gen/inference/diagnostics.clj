@@ -56,6 +56,7 @@
                       1e±77 for mcse-sd)
      :invalid-prob    (summary) a quantile's probability is not in [0, 1]
      :non-scalar      (draws) a value is not a number, boolean or 0-d array"
+  {:api :stable}
   (:require [gen.array :as array]
             [gen.array.special :as special]
             [gen.trace :as trace])

@@ -69,6 +69,7 @@
    effective sample size falls below :ess-threshold (n/2 by default), by
    :method (:systematic by default; any of gen.inference.weights'), and
    moves the weights' mean into :log-ml."
+  {:api :experimental}
   (:require [gen.dist.core :as dc]
             [gen.gfi :as gfi]
             [gen.llm.constrained :as constrained]

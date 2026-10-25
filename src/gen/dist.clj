@@ -13,6 +13,7 @@
    branch-free function of its key: rejection samplers run a fixed number of
    vectorized rounds rather than a data-dependent loop, so they batch and never
    force evaluation."
+  {:api :stable}
   (:refer-clojure :exclude [+ - * / < > <= >= ==])
   (:require [gen.array :as array :refer [+ - * / < > <= >= == log log1p exp sqrt square where
                                      lgamma log-beta xlogy xlog1py logical-and logical-or]]

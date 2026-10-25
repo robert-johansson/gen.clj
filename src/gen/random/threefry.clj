@@ -16,7 +16,8 @@
    repeat a key (DESIGN.md §9).
 
    Everything is pure and index-local, so element i of any draw depends only on
-   the key and i. 32-bit words are held in longs, masked to 32 bits.")
+   the key and i. 32-bit words are held in longs, masked to 32 bits."
+  {:api :internal})
 
 (set! *warn-on-reflection* true)
 (set! *unchecked-math* :warn-on-boxed)

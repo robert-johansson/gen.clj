@@ -75,7 +75,7 @@ the appendices (`060-appendices.md`):
 | 054-gallery.md | A Gallery of Models | GenMLX's examples/genmlx |
 | 061-from-genjl.md | Appendix: Coming from Gen.jl | DESIGN.md §9; bean genclj-dvgt |
 | 062-distributions.md | Appendix: The Distributions | generated from gen.dist |
-| 063-api.md | Appendix: The Public API | generated from the public namespaces' docstrings |
+| 063-api.md | Appendix: The Public API | generated from the namespaces' tiers and docstrings (gen.api) |
 | 064-notation.md | Appendix: Notation | the thesis's notation, with gen.clj's names |
 | 065-installing.md | Appendix: Installing and Running | CLAUDE.md's Running; native/ |
 | 066-bibliography.md | Appendix: Bibliography | the thesis, Gen.jl's papers, GenMLX's, the sources cited |

@@ -13,6 +13,7 @@
 
    The library computes some quantiles by a solver, to an absolute accuracy
    of about 1e-9 (its default), so such draws are that close to exact."
+  {:api :experimental}
   (:require [gen.dist.core :as dc]
             [gen.dist.host :as host])
   (:import [org.apache.commons.math3.distribution

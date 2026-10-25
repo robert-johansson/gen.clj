@@ -43,6 +43,7 @@
    are not bijections (a constant output, randomness thrown away, a value
    overwritten); here they make the matrix non-square or singular, a loud
    error."
+  {:api :experimental}
   (:refer-clojure :exclude [+ -])
   (:require [gen.array :as array :refer [+ -]]
             [gen.array.linalg :as la]

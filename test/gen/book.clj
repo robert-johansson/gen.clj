@@ -46,6 +46,7 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [is testing]]
+            [gen.api :as api]
             [gen.array :as array]
             [gen.test-support :as ts]))
 
@@ -376,18 +377,175 @@
          "is out of date.\n\n"
          (str/join "\n" (map entry ctors)))))
 
+(def ^:private layers
+  "The API appendix's layers, in order: a title, and the names of the
+   namespaces it holds."
+  [["Arrays and randomness" #"gen\.(array|random|backend)(\..+)?"]
+   ["Choice maps, selections, traces and diffs" #"gen\.(choicemap|selection|trace|diff)"]
+   ["The generative function interface" #"gen\.(gfi|dynamic|serialize|batched|partition|laws)(\..+)?"]
+   ["Distributions" #"gen\.dist(\..+)?"]
+   ["Combinators" #"gen\.(combinators|custom|state-space)"]
+   ["Inference" #"gen\.(inference\..+|gradients|learning)"]
+   ["Language models" #"gen\.llm\..+"]])
+
+(defn- layer-of [n]
+  (or (some (fn [[title re]] (when (re-matches re (str n)) title)) layers)
+      (throw (ex-info (str "The API appendix has no layer for " n ": add it to gen.book's layers") {:ns n}))))
+
+(defn- paragraph
+  "A docstring's first paragraph on one line: its lines up to a blank one,
+   a list's item (- …) or a table's row (columns aligned by spaces), a
+   closing colon (before such an example) made a period."
+  [doc]
+  (let [[line & more] (str/split-lines (str/trim (or doc "")))
+        prose (take-while #(not (or (str/blank? %) (re-find #"^\s*[-*] |\S\s{3,}\S" %))) more)]
+    (-> (str/join " " (map str/trim (cons line prose))) (str/replace #":$" "."))))
+
+(defn- sentence
+  "A docstring's first sentence: its first paragraph up to the first
+   period before a capital letter, or question or exclamation mark before
+   a capital letter or a parenthesis."
+  [doc]
+  (let [p (paragraph doc)]
+    (or (second (re-find #"^(.*?(?:\.(?=\s+[A-Z])|[?!](?=\s+[A-Z(])))" p)) p)))
+
+(defn- escape
+  "Text that Markdown shows as written: the punctuation it would read
+   (emphasis, a link's bracket, raw HTML, math, super- and subscripts, a
+   citation) escaped, but in code spans (when the backquotes pair up)."
+  [s]
+  (let [plain #(-> %
+                   (str/replace #"[\\*\[$^~@]" (fn [c] (str "\\" c)))
+                   (str/replace #"(?<![A-Za-z0-9])_|_(?![A-Za-z0-9])" "\\\\_")
+                   (str/replace #"<(?=[A-Za-z/!?])" "\\\\<"))]
+    (if (even? (count (filter #{\`} s)))
+      (apply str (map #(if (str/starts-with? % "`") % (plain %)) (re-seq #"`[^`]*`|[^`]+" s)))
+      (str/replace (plain s) "`" "\\`"))))
+
+(def ^:private width
+  "The longest line of a page written from the code."
+  79)
+
+(defn- wrap
+  "Markdown text as lines of at most width characters (a longer word on a
+   line of its own), the first starting with lead and the rest indented as
+   far. A word Markdown would read as a block's marker at a line's start
+   (a list's, a heading's) stays on the line before."
+  [lead text]
+  (let [marker? #(or (re-matches #"[-+:#=|]+|#\.|\(?(\d+|[a-zA-Z]|[ivxlcdmIVXLCDM]+)[.)]|\(@\w*\)" %)
+                     (str/starts-with? % ">"))
+        words (reduce (fn [ws w] (if (and (seq ws) (marker? w)) (conj (pop ws) (str (peek ws) " " w)) (conj ws w)))
+                      [] (str/split (str/trim text) #"\s+"))
+        indent (apply str (repeat (count lead) " "))]
+    (->> words
+         (reduce (fn [lines w]
+                   (let [line (peek lines)]
+                     (cond (= line lead) (conj (pop lines) (str line w))
+                           (> (+ (count line) 1 (count w)) width) (conj lines (str indent w))
+                           :else (conj (pop lines) (str line " " w)))))
+                 [lead])
+         (str/join "\n"))))
+
+(defn- shown-args
+  "An arglist as the appendix shows it: a destructured map by its :as name,
+   or else by its :keys, without defaults; no commas."
+  [args]
+  (let [show (fn show [x]
+               (cond (and (map? x) (:as x)) (str (:as x))
+                     (and (map? x) (:keys x)) (str "{:keys [" (str/join " " (:keys x)) "]}")
+                     (map? x) (str "{" (str/join " " (map (fn [[k v]] (str (show k) " " (show v))) x)) "}")
+                     (vector? x) (str "[" (str/join " " (map show x)) "]")
+                     :else (pr-str x)))]
+    (str/join " " (map show args))))
+
+(defn- var-item
+  "A stable var's line in the API appendix: its calls or its kind, and its
+   docstring's first sentence."
+  [n s {:keys [kind arglists methods dynamic deprecated]}]
+  (let [doc (some-> (meta (ns-resolve n s)) :doc
+                    ;; defrecord's factories: the class by its simple name, which fits a line
+                    (str/replace #"^((?:Positional f|F)actory function for class )[\w.]+\.(\w+)" "$1$2"))
+        calls (if (seq arglists)
+                (str/join ", " (map #(str "`(" s (when (seq %) " ") (shown-args %) ")`") arglists))
+                (str "`" s "`"))
+        tags (cond-> []
+               (#{:macro :multimethod} kind) (conj (name kind))
+               (= :protocol kind) (conj (str "protocol: " (str/join ", " (map #(str "`" % "`") methods))))
+               dynamic (conj "dynamic")
+               deprecated (conj (if (string? deprecated) (str "deprecated in " deprecated) "deprecated")))]
+    (wrap "- " (str calls (when (seq tags) (str " (" (str/join ", " tags) ")"))
+                    (when doc (str ": " (escape (sentence doc))))))))
+
+(defn- by-layer
+  "Namespaces (gen.api/namespaces' maps) grouped by layer, in the layers'
+   order and the namespaces' names' within each: [[title infos] …]."
+  [infos]
+  (let [groups (group-by (comp layer-of :ns) infos)]
+    (for [[title] layers :when (groups title)]
+      [title (sort-by (comp str :ns) (groups title))])))
+
+(defn api-page
+  "The appendix of the public API: the stable namespaces by layer, each
+   with its public vars' calls and their docstrings' first sentences, as
+   gen.api's snapshot records them; then the experimental namespaces by
+   name and docstring. The internal ones are left out."
+  []
+  (let [infos (api/namespaces)
+        surface (api/surface)
+        tier (fn [t] (filter #(= t (:tier %)) infos))
+        stable-ns (fn [{n :ns :keys [doc attrs]}]
+                    (str "### " n "\n\n"
+                         (wrap "" (escape (paragraph doc))) "\n\n"
+                         (when-let [note (:implementers attrs)]
+                           (str (wrap "" (str "*For implementers:* " (escape note) ".")) "\n\n"))
+                         (str/join "\n" (map (fn [[s e]] (var-item n s e)) (sort-by (comp str key) (surface n))))
+                         "\n"))
+        experimental-ns (fn [{n :ns :keys [doc file]}]
+                          (let [home (second (re-matches #"(.*?)/gen/.*" file))]
+                            (wrap "- " (str "`" n "`" (when (not= "src" home) (str " (in " home ")"))
+                                            ": " (escape (paragraph doc))))))]
+    (str "# The Public API\n\n"
+         (wrap "" (str "Each of gen.clj's namespaces carries a tier in its ns form: `{:api :stable}`, "
+                       "`{:api :experimental}` or `{:api :internal}` (DESIGN.md §9). Through the 1.x releases a "
+                       "stable namespace keeps its names, arities, result-map keys and documented semantics; minor "
+                       "releases add to them. A removal waits for 2.0, after a deprecation: `:deprecated` metadata "
+                       "and a note in the docstring, nothing printed. An experimental namespace ships outside that "
+                       "promise, and an internal one is not for code built on gen.clj, which this appendix leaves "
+                       "out."))
+         "\n\n"
+         (wrap "" (str "The stable namespaces come first, by layer: each with the first paragraph of its "
+                       "docstring, and every public function, macro and var with the first sentence of its own. A "
+                       "protocol names its methods, which are listed as functions too. Where a namespace's "
+                       "protocols are for other code to implement, a note says so: through 1.x such a protocol "
+                       "keeps its methods and gains none. The experimental namespaces follow, each by name and the "
+                       "first paragraph of its docstring. A committed snapshot of the stable surface "
+                       "(`test/fixtures/api-snapshot.edn`) fails a test when the surface changes, and `"
+                       api/write-command "` writes it after a deliberate change."))
+         "\n\n"
+         (wrap "" (str "This page is written from the code (`clojure -M:test -m gen.book sync`), and the book's "
+                       "test fails when it is out of date."))
+         "\n\n"
+         (str/join "\n" (for [[title nses] (by-layer (tier :stable))]
+                          (str "## " title "\n\n" (str/join "\n" (map stable-ns nses)))))
+         "\n## The experimental namespaces\n\n"
+         (str/join "\n" (for [[title nses] (by-layer (tier :experimental))]
+                          (str "### " title "\n\n" (str/join "\n" (map experimental-ns nses)) "\n"))))))
+
 (def generated
   "The book's pages written from the code: file name to a function of no
    arguments giving its text."
-  {"062-distributions.md" distributions-page})
+  {"062-distributions.md" distributions-page
+   "063-api.md" api-page})
 
 (defn check-generated
-  "Every page written from the code holds what the code gives now."
-  []
-  (doseq [[file page] generated
-          :let [f (io/file dir file)]]
-    (testing file
-      (is (and (.exists f) (= (page) (slurp f))) (str (.getPath f) " is stale: clojure -M:test -m gen.book sync")))))
+  "Every page written from the code (generated, or pages in its shape)
+   holds what the code gives now."
+  ([] (check-generated generated))
+  ([pages]
+   (doseq [[file page] pages
+           :let [f (io/file dir file)]]
+     (testing file
+       (is (and (.exists f) (= (page) (slurp f))) (str (.getPath f) " is stale: clojure -M:test -m gen.book sync"))))))
 
 (def pdf-file "target/book/gen-clj-book.pdf")
 

@@ -57,6 +57,7 @@
    observations (forward filtering, backward sampling): a function of the
    trace, as the states are no choices of it. kalman's states are in the
    prior's mean's shape; hmm's are state indices."
+  {:api :stable}
   (:refer-clojure :exclude [+ - * /])
   (:require [gen.array :as array :refer [+ - * /]]
             [gen.array.dtype :as dt]

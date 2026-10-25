@@ -14,7 +14,8 @@
      (share ledger id)                        one more branch with state id (a fork)
      (release ledger id)                      one branch fewer (consumed or disposed)
      (freed ledger id)                        the cells that release would free
-     (used ledger)                            the cells held")
+     (used ledger)                            the cells held"
+  {:api :experimental})
 
 (set! *warn-on-reflection* true)
 (set! *unchecked-math* :warn-on-boxed)

@@ -58,6 +58,7 @@
    (pair f g) makes two transforms each other's inverses and (involutive t)
    its own; :check? on a translator or an involution runs the inverse on the
    result and throws unless it gives back the input."
+  {:api :stable}
   (:refer-clojure :exclude [read + - * /])
   (:require [gen.array :as array :refer [+ - * /]]
             [gen.array.dtype :as dt]

@@ -7,7 +7,8 @@
    (gen.backend.mlx/budget) leaves the reservations out.
 
    Plain numbers: nothing here allocates or frees, and requiring it loads
-   no native library.")
+   no native library."
+  {:api :internal})
 
 (set! *warn-on-reflection* true)
 
