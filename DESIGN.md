@@ -712,6 +712,26 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     vacuous-on-unvisitable and unvisitable? are public, and vacuity stays
     decided by the error's message, documented: a hand-written generative
     function throws gfi/unvisited's error.
+  - **Provisional: the laws' names, for the owner's review** (2026-10-25
+    night; the lead, after a note the owner passed on). The owner confirmed
+    the module and its tier before it was built; the names and shapes the
+    agent chose are unseen: `verify` (models first, as deflaws), `check`,
+    `failure-of`, the sets `implementation` and `estimated`, and
+    `identity-update-reports-no-change` leaving forward-sampling. Stable,
+    they hold through 1.x, so the v1.0.0 tag waits for the owner's word,
+    and memo.clj adopts ext/laws on a branch only until then. The lead's
+    recommendations: keep `verify` (`(is (= {} (laws/verify models)))`
+    reads as what it does), `failure-of`, `estimated` and the move (the
+    thesis does not ask for precise retdiffs, and unknown-change is always
+    correct). Rename `check` to `quick-check`: it is test.check's
+    quick-check that also counts vacuous cases, and one letter from
+    `checks`, which does something else. Rename `implementation` to
+    `conventions`: gen.clj's habits, not laws, which a user's generative
+    function need not keep. State what stability means for a law set: a
+    minor release may add a law to one (a CHANGELOG line, since a
+    dependent's suite may then fail); renaming or removing a law is
+    breaking. The snapshot also makes stable each law's var (35), `cases`,
+    `close?` with its tolerances, `across`, `max-vacuous` and `seeds`.
   - **Eight more, confirmed by the owner** (2026-10-25, on the lead's
     recommendations): per-particle results use plural keys (`:log-alphas`,
     `:accepted`, `:diverged`), not singular keys holding vectors; chains
