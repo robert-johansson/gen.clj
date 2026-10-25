@@ -160,11 +160,11 @@ newest first in each section.
 ### Added
 
 - **`array/vmap`: a function batched over a leading axis,** as JAX's
-  vmap (DESIGN §9, "The 1.0's shape"; genclj-t3ur). `((array/vmap f
-  {:in-axes [0 nil]}) xs shared)` runs f once for the rows of `xs` under
-  the batch tracer and returns its value (an array, a host number, or
-  maps and vectors of them) with the leading batch axis, a shared leaf
-  broadcast. An in-axis is 0 (the default) or nil; the batched arrays
+  vmap (DESIGN §9, "The 1.0's shape"; fbf0d21, genclj-t3ur).
+  `((array/vmap f {:in-axes [0 nil]}) xs shared)` runs f once for the
+  rows of `xs` under the batch tracer and returns its value (an array, a
+  host number, or maps and vectors of them) with the leading batch axis,
+  a shared leaf broadcast. An in-axis is 0 (the default) or nil; the batched arrays
   must agree on the batch size. Gradients inside are per particle. A
   gradient through a vmap, a nested vmap, a host read of a batched value
   and a batched comparison nothing read (a raw if) are loud, and nothing
