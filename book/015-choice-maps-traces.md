@@ -9,7 +9,7 @@ are small enough to read in full, and they are the vocabulary of
 inference: update, regenerate, MCMC and SMC all take them and return
 them.
 
-This chapter ports chapter 14 of *The GenMLX Book*, *Choice Maps, Traces,
+This chapter ports chapter 14 of the GenMLX book, *Choice Maps, Traces,
 and Selections*, and adds what gen.clj does its own way: loud lookups,
 Gen.jl's `merge`, traces called with an address, and traces written as
 EDN. The code lives in one namespace:

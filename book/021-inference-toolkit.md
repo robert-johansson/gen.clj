@@ -175,7 +175,7 @@ raises an alarm.
 
 How many should they be worth? As $n$ grows, $\mathrm{ESS}/n$ tends to
 $1/\int p^2/q$, for $q$ the proposal and $p$ the posterior: the
-*efficiency* of the proposal (Kong, 1992). For a normal prior with
+*efficiency* of the proposal (Kong 1992). For a normal prior with
 precision $\Lambda_0$ and a normal posterior with precision $\Lambda$ and
 mean $m$, the integral is Gaussian:
 

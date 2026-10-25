@@ -13,9 +13,9 @@ sampling with the prior as the proposal. With enough computation it is
 correct, but it is often slow, and the chapter shows where it works and
 where it fails. The next chapter, *Conditioning*, takes it apart.
 
-This chapter ports Gen.jl's *Introduction to Modeling*, with its exercises
-as the Workshop. Its code lives in one namespace, beside a few helpers:
-`(addresses t)` lists the addresses of trace `t`, and `average`,
+This chapter ports Gen.jl's *Introduction to Modeling in Gen*, with its
+exercises as the Workshop. Its code lives in one namespace, beside a few
+helpers: `(addresses t)` lists the addresses of trace `t`, and `average`,
 `standard-error` and `fraction` summarize numbers.
 
 <!-- code: ns -->

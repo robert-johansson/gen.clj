@@ -853,8 +853,8 @@ estimate of the marginal likelihood of the constraints (the thesis's
 §4.1; law 3 in the parity list's §3),
 
 $$
-\mathbb{E}_{\upsilon \sim q(\cdot;\, x, \sigma)}\bigl[e^{w}\bigr]
-= p(\sigma; x).
+\mathbb{E}_{\upsilon \sim q(\cdot;\, x, \sigma)}\bigl[w\bigr]
+= \bar p(\sigma; x).
 $$
 
 The measurement model has it in closed form: $y$'s marginal is
@@ -960,7 +960,7 @@ The running means show both, and the band narrowing as the draws grow:
              {:x-label "generates" :y-label "estimate of p(y = 0)"}))
 ```
 
-![The running mean of $e^w$ for the correct sampler (blue) and the wide one (red), the exact $p(y = 0)$ (black), and five standard errors around it (gray)](figures/035-evidence.svg)
+![The running mean of $w$ for the correct sampler (blue) and the wide one (red), the exact $\bar p(\{y \mapsto 0\})$ (black), and five standard errors around it (gray)](figures/035-evidence.svg)
 
 Statistical laws are not in `gen.laws`, whose properties hold case by
 case. They are tests in each suite, against an exact answer: a closed
@@ -1005,7 +1005,7 @@ Two more audits followed on 2026-10-20. They found:
   (`consistent?`), and catches a stale score wherever it arises.
 - **Errata in the thesis.** Alg. 5 (p. 92) swaps the forward and backward
   proposal terms of custom-proposal MH; the acceptance probability 0.6 in
-  the example of pp. 148–149 should be 1; and the "log w = 1" of p. 146
+  the example of pp. 148–149 should be 1; and the $\log w = 1$ of p. 146
   should be 0. gen.clj follows the corrected forms.
 
 `docs/research/genjl-parity.md` §3 lists twenty laws of the interface,
@@ -1228,12 +1228,12 @@ Each exercise has a tested solution at the end of the chapter.
    both the sampler and the density of the hand-written function. Predict
    which laws fail. Does the statistical law against the closed form
    catch it?
-4. **A statistical law without a closed form.** Compute $p(y = 0)$ from
-   the generative function's own `assess`, by summing the joint density
-   of $x$ and $y = 0$ over a grid of $x$. Check it against the closed
-   form, and use it in place of the closed form in the statistical law.
-   Which of the plants of exercise 3 and of the wide sampler does it
-   catch?
+4. **A statistical law without a closed form.** Compute $\bar p(\{y
+   \mapsto 0\})$ from the generative function's own `assess`, by summing
+   the joint density of $x$ and $y = 0$ over a grid of $x$. Check it
+   against the closed form, and use it in place of the closed form in the
+   statistical law. Which of the plants of exercise 3 and of the wide
+   sampler does it catch?
 
 ## Solutions
 

@@ -36,7 +36,7 @@ key:
 | $\mathbf{t}$.UPDATE($x', \delta, \sigma$) | `(gfi/update t x' δ σ key)`: `{:trace :weight :retdiff :discard}` |
 | $\mathbf{t}$.CHOICES(), $\mathbf{t}$.LOGPDF() | `(:choices t)`, `(:score t)` |
 | $\mathbf{t}[a]$ | `(t a)` |
-| $\mathbf{t}$.GRADIENT($A$, 0) | `(grad/choice-gradients t A)` |
+| $\mathbf{t}$.GRADIENT($B$, 0) | `(grad/choice-gradients t B)` |
 | $\mathcal{Q}$.SIMULATE, then $\mathbf{s}$.LOGPDF() | `(gfi/propose Q x key)`: `{:choices :weight :retval}` |
 | $\mathcal{Q}$.GENERATE($x, \sigma$), every choice in $\sigma$ | `(gfi/assess Q x σ)`: `{:weight :retval}` |
 
@@ -1862,7 +1862,7 @@ Each exercise has a tested solution at the end of the chapter.
 1. **Break Eq. 3.3.** Give `squares` a proposal that goes on with
    probability 0.7 for its first three steps and stops at the fourth.
    Predict what regular importance sampling converges to.
-2. **Forget the reverse move.** Accept Algorithm 5's moves on `log w`
+2. **Forget the reverse move.** Accept Algorithm 5's moves on $\log w$
    alone, without the two proposal densities. Predict whether the switch
    kernel still leaves the posterior unchanged, and whether the random
    walk's would.

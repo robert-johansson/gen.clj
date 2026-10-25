@@ -12,7 +12,7 @@ the principles, and §9's entries, the conventions and decisions, by their
 titles. Where DESIGN records a decision without a reason, the chapter
 states the decision and gives none. Each principle comes with a small
 example, run and checked like the rest of the book. The chapter follows
-the plan of *The GenMLX Book*'s *Design Rationale*. gen.clj is a reboot
+the plan of the GenMLX book's *Design Rationale*. gen.clj is a reboot
 of GenMLX, not a port line by line, and where the two decided
 differently, the chapter says so.
 
@@ -854,8 +854,8 @@ weight could not be exact, and generate says so:
 
 With `{:check-exact? false}` the weight is an importance weight. It
 changes with the key, but it is still correct: the mean of its
-exponential is $p(y)$, which 10,000 keys confirm within five standard
-errors:
+exponential is the marginal likelihood $\bar p(\sigma)$ of the
+observations, which 10,000 keys confirm within five standard errors:
 
 <!-- code: solution-2 -->
 ```clojure

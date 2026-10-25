@@ -160,16 +160,15 @@ reference of the entry *Gen.jl*, with the systems.
 The chapters cite Gen.jl's tutorials and how-to guides by these titles.
 Three are notebooks of gen-quickstart, in its `tutorials` folder, rather
 than pages of Gen.jl's documentation, which are in its `docs/src`
-folder. Where a source titles itself otherwise, the source column gives
-its own title.
+folder.
 
 | Tutorial | Source | Cited in |
 |---------------------------|--------------------------------------------------|-----------------------|
 | *Getting Started* | Gen.jl, `tutorials/getting_started.md` | *Getting Started* |
-| *Introduction to Modeling* | Gen.jl, `tutorials/modeling_in_gen.md`: Introduction to Modeling in Gen | *Introduction to Modeling* |
-| *A Bottom-up Introduction to Gen* | gen-quickstart, `A Bottom-Up Introduction to Gen.ipynb` | *Conditioning* |
-| *Reasoning about Regenerate* | gen-quickstart, `Reasoning About Regenerate.ipynb` | *Update and Regenerate* |
-| *Basics of Iterative Inference: MCMC and MAP* | Gen.jl, `tutorials/mcmc_map.md`: Basics of MCMC and MAP Inference | *MCMC and MAP* |
+| *Introduction to Modeling in Gen* | Gen.jl, `tutorials/modeling_in_gen.md` | *Introduction to Modeling* |
+| *A Bottom-Up Introduction to Gen* | gen-quickstart, `A Bottom-Up Introduction to Gen.ipynb` | *Conditioning* |
+| *Reasoning About Regenerate* | gen-quickstart, `Reasoning About Regenerate.ipynb` | *Update and Regenerate* |
+| *Basics of MCMC and MAP Inference* | Gen.jl, `tutorials/mcmc_map.md` | *MCMC and MAP* |
 | *Debugging Models with Enumerative Inference* | Gen.jl, `tutorials/enumerative.md` | *Debugging with Enumeration* |
 | *Object Tracking with Sequential Monte Carlo* | Gen.jl, `tutorials/smc.md` | *Sequential Monte Carlo* |
 | *Variational Inference in Gen* | Gen.jl, `tutorials/vi.md` | *Variational Inference* |
@@ -440,14 +439,13 @@ in its last column:
     [t (set (map second (re-seq #"\*([^*]+)\*" cited)))]))
 ```
 
-A chapter can also cite a work without a year: *Trace Translators and
-Involutive MCMC* follows the thesis's argument "after Tierney", and *The
-Distributions* draws von Mises values "by Best and Fisher's rejection".
-So a page cites an entry where it writes one of the entry's names, too:
-an author-year entry's authors, as written, a system's name in either
-case (the GenMLX book, genlm), and an alias (the thesis). Longer names
-are found first, so that a name inside a longer one does not count
-twice:
+A page can also cite a work without a year: *The Distributions*, written
+from gen.dist's docstrings, draws von Mises values "by Best and Fisher's
+rejection". So a page cites an entry where it writes one of the entry's
+names, too: an author-year entry's authors, as written, a system's name
+in either case (the GenMLX book, genlm), and an alias (the thesis).
+Longer names are found first, so that a name inside a longer one does not
+count twice:
 
 <!-- code: names -->
 ```clojure

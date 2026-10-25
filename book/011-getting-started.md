@@ -13,7 +13,7 @@ inference program's answer against the exact one, which this model happens
 to have.
 
 This chapter merges Gen.jl's *Getting Started* with the first chapter of
-*The GenMLX Book*. Every code block in it runs, in order, in the book's
+the GenMLX book. Every code block in it runs, in order, in the book's
 tests, and every result shown is checked there. Coming from Gen.jl? The
 differences are collected in the appendix *Coming from Gen.jl*.
 
