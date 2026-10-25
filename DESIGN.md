@@ -238,8 +238,8 @@ The backend contract is `src/gen/array/protocols.clj`.
 - **Linear algebra:** hand-written Cholesky and triangular solves (EJML only if
   LU, QR or eig become necessary).
 - **Special functions:** lgamma, digamma, erf, erfinv, Bessel.
-- **PRNG:** Threefry2x32 (as MLX and JAX). Stretch goal: bit-compatible with
-  MLX, so both backends produce identical traces for the same key.
+- **PRNG:** Threefry2x32 (as MLX and JAX), bit-compatible with MLX: a key
+  draws the same uniforms on both backends (§5.3; genclj-ldpy).
 - **Performance:** for scalar-heavy models (most PPL models) it is likely
   *faster* than MLX, with no FFI and no ~tens-of-µs eval floor. Large batched
   workloads are what the GPU is for.
