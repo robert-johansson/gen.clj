@@ -299,6 +299,36 @@
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"inside a differentiated"
                             ((array/grad (fn [x] ((array/grad (fn [y] (array/* x y))) x))) 1.0))))))
 
+(deftest tracked-values
+  ;; array/tracked?, gen.array's own (the tape's internal predicate is
+  ;; tape/tracked?). Planted (2026-10-25): true of every backend array fails
+  ;; the untracked cases; false of all fails the tracked ones
+  (let [seen (fn [f & args]
+               ;; f's values, each tested inside the differentiated function
+               (let [out (volatile! nil)]
+                 (apply (array/grad (fn [& xs] (let [vs (apply f xs)]
+                                                 (vreset! out (mapv array/tracked? vs))
+                                                 (array/sum (first vs)))))
+                        args)
+                 @out))]
+    (if (ts/native-grad?)
+      (is (= [false false] (seen (fn [x] [x (array/* x 2.0)]) (array/array [1.0 2.0])))
+          "MLX's native gradients track their own arrays: none is the tape's")
+      (do
+        (testing "the differentiated argument, and the floats computed from it"
+          (is (= [true true true] (seen (fn [x] [x (array/exp x) (array/sum (array/* x 2.0))]) (array/array [1.0 2.0]))))
+          (is (= [true true] (seen (fn [x] [x (array/* x 2.0)]) 3.0)) "a host number's too"))
+        (testing "what has no gradient"
+          (is (= [true false false false false]
+                 (seen (fn [x] [x (array/< x 1.5) (array/floor x) (array/stop-gradient x) (array/array [1.0 2.0])])
+                       (array/array [1.0 2.0])))))
+        (testing "an argument not differentiated"
+          (let [out (volatile! nil)]
+            ((array/grad (fn [x y] (vreset! out [(array/tracked? x) (array/tracked? y)]) (array/* x y)) {:argnums 1}) 2.0 3.0)
+            (is (= [false true] @out))))))
+    (testing "outside a differentiated function"
+      (is (not-any? array/tracked? [1.0 2 true (array/array [1.0]) :x nil])))))
+
 (deftest custom-vjps
   (let [square (array/custom-vjp (fn [x] (array/* x x)) (fn [[x] _ g] [(array/* 2.0 (array/* g x))]))
         tripled (array/custom-vjp (fn [x] (array/* x x)) (fn [_ _ g] [(array/* 3.0 g)]))

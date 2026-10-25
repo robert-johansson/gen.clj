@@ -181,6 +181,22 @@ newest first in each section.
     from the tiers and docstrings: the stable namespaces by layer with
     their vars, the experimental ones by name. The book's test fails when
     it is stale.
+- **Public replacements for the internals memo.clj uses,** in gen.array
+  (DESIGN §9, "The 1.0's shape"; b509bce, genclj-9efy). memo.clj can move
+  off the internals, which stay as they are, marked internal.
+  `tracked?` replaces gen.array.tape/tracked?. `(broadcast-shapes & shapes)`,
+  NumPy's broadcast_shapes, replaces gen.array.shape/broadcast; shapes that
+  do not broadcast are a loud error naming them all. `dtype-kind` gives a
+  dtype keyword's :bool, :int or :float (of an array, `(dtype-kind (dtype
+  x))`) and replaces gen.array.dtype/kind; anything else is a loud error. A
+  batched value's particles replace gen.array.batch's batched?, value and
+  inner-backend: `batched?` (true of a value being differentiated whose
+  primal is batched), `batch-shape`, `particle-backend` (the backend the
+  batch wraps), `(particle x i)` and `(particles x idx)`. These gather
+  unbatched arrays without reading on the host, and refuse a value being
+  differentiated with a batched primal, whose particles would carry no
+  gradient. gen.array.protocols adds `ITrackedValue`, which the tape's
+  values implement.
 - **This changelog,** kept from 2026-10-25 (DESIGN §9, "The 1.0's shape";
   genclj-6g66).
 - **VI's pathwise estimator, ADVI's.** `black-box-vi` and `elbo-gradient`

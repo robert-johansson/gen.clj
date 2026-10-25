@@ -45,6 +45,11 @@
   "A value that holds one value per particle of a batch (gen.array.batch)."
   (-all-particles [x] "The array of every particle's value, batch axes first."))
 
+(defprotocol ITrackedValue
+  "A value being differentiated on a tape (gen.array.tape), which gen.array
+   recognizes without depending on the tape."
+  (-primal [x] "The value it tracks: an array of the backend the tape wraps, or a host scalar."))
+
 (defprotocol IWrappingBackend
   "A backend whose arrays build on another backend's, such as the tape of
    reverse-mode autodiff: an op mixing its arrays with the inner backend's

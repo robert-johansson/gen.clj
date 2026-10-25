@@ -42,7 +42,10 @@
 
 (deftype Tracked [primal parents vjp tape]
   p/IArray
-  (-backend [_] tape))
+  (-backend [_] tape)
+
+  p/ITrackedValue
+  (-primal [_] primal))
 
 (defmethod print-method Tracked [x ^java.io.Writer w]
   (.write w "#gen/tracked[") (print-method (.-primal ^Tracked x) w) (.write w "]"))
