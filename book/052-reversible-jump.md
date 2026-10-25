@@ -1652,7 +1652,7 @@ never makes. The move back has density 0:
 (let [{merged :trace back :bwd-choices}
       (split-merge-move lopsided
                         (cm/choicemap :split? false :index 0 :new-value 0.5)
-                        nil [] (rng/key 0))]
+                        (rng/key 0))]
   [(cm/get-choice back :split-percentage)
    (:weight (gfi/assess split-merge-proposal [merged middle-share] back
                         (rng/key 0)))])
