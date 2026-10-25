@@ -55,6 +55,34 @@ newest first in each section.
     middleware left an unqualified key the state does not have, or a key
     of gen.trace's. `:constraints` stays writable. Writing the totals
     (`:choices :scores :score :weight :discard`) is unsupported.
+- **Breaking. gen.laws moved to the module ext/laws** (DESIGN §9, "The
+  laws for users"; 4a910bf, genclj-u6je).
+  - Its file is `ext/laws/src/gen/laws.clj`, its namespace still
+    `gen.laws`, and it needs nothing of gen.clj's `test/`. A dependent
+    takes it as a git dependency on gen.clj's repository,
+    `{:git/url … :git/sha … :deps/root "ext/laws"}` at the commit of the
+    gen.clj it uses: its deps.edn brings test.check, and gen.clj from the
+    same checkout unless the dependent names `gen.clj/gen.clj` itself.
+    gen.clj's `test/` on the classpath no longer gives it. In gen.clj's
+    repository `:test` and `:laws` (`clojure -M:laws`) include it.
+  - **Breaking.** `identity-update-reports-no-change`, a convention of
+    gen.clj's that a correct generative function may fail, left
+    `laws/forward-sampling` (7 laws now, `laws/all` 22) for
+    `laws/conventions`, so `deflaws` over the default set or over
+    `laws/encapsulated` no longer runs it. gen.clj's own suites run
+    `(merge laws/all laws/conventions)`.
+  - A `deflaws` spec prints nothing: it printed each run's result map
+    through defspec's reporter. It draws a fresh seed at each run, as
+    before and now documented in its docstring; `(spec n :seed s)` fixes
+    it. Its law set may be any expression of sets, evaluated when the
+    `deflaws` compiles: `(merge laws/all laws/fixed-support)`.
+  - `propose-weight-is-the-assessed-density` and `dispatch-matches-handler`
+    give assess the case's key, where they drew one from the implicit
+    source, so a law's run is a function of its seed (a generative function
+    with untraced randomness failed them differently at each run).
+  - Loud: models that are not model entries (`laws/cases`), options that
+    are not a number or a map of known keys (a law set in their place),
+    and a law set that is not a map of laws.
 - **Breaking. Draws. A batched particle filter stays batched through
   rejuvenation** (DESIGN §9, "Kernels' batched form"; af25c97,
   genclj-xgz4).
@@ -304,6 +332,42 @@ newest first in each section.
 
 ### Added
 
+- **The laws for your own generative functions** (gen.laws in ext/laws,
+  stable; DESIGN §9, "The laws for users"; genclj-u6je).
+  - `(laws/verify models)`, `(laws/verify models opts)` and
+    `(laws/verify models opts laws)`, deflaws' arguments but the prefix:
+    every law of the set (`laws/all` by default) over cases of the model
+    entries, returning a sorted map from each law that failed to what it
+    says: `:check` and `:values` (or what the check's explain gives), or
+    `:error`, `:data` and `:exception`, or `{:vacuous :of :max-vacuous}`;
+    with `:case` `{:model :key-seed :picks :alt?}` (test.check's smallest,
+    the model by its label) and the run's `:seed`. `{}` when every law
+    holds. opts is the number of cases (100) or a map of it and `:seed`,
+    `:max-size`, `:max-vacuous`. `laws/failure-of` reads a result of
+    `laws/quick-check` the same way.
+  - **Breaking.** `laws/check` is `laws/quick-check` (owner, 2026-10-25:
+    one letter from `checks`, which does something else). It takes
+    `(quick-check property)` and `(quick-check n property)`, and its
+    options as keywords or a map (it required the map).
+  - `laws/estimated`: `laws/encapsulated` without
+    `:score-is-assessed-on-the-same-key`, for an estimated density with a
+    joint sampler (gen.custom/estimated with `:simulate`).
+  - `laws/conventions`: `identity-update-reports-no-change` (Changed,
+    below), gen.clj's habits that a user's generative function need not
+    keep.
+  - A law set may gain a law in a minor release, and `laws/close?`'s
+    tolerances may change, each with a line here and its reason, since a
+    dependent's suite may then fail; renaming or removing a law is
+    breaking (owner, 2026-10-25).
+  - `laws/checks`, `laws/vacuous?`, `laws/vacuous-on-unvisitable` and
+    `laws/unvisitable?` are public, for a law of your own. Vacuity is
+    documented: a case is vacuous when its operation's error says a
+    constraint was not visited (or is a nested choice map or a single value
+    where the other belongs), so a hand-written generative function throws
+    `gfi/unvisited`'s error.
+  - Every law has a docstring, and gen.laws joins the stable snapshot and
+    the API appendix.
+
 - **Batched MH with a proposal, and a batched filter's accessor**
   (af25c97, genclj-xgz4).
   - `(mh/mh-particles ps proposal proposal-args key)`, as `mh/mh`'s
@@ -467,8 +531,8 @@ newest first in each section.
     gen.dist.commons-math (experimental), gen.array.special, host, tree
     and memory, gen.random.threefry and gen.backend.mlx.exact (internal).
   - `test/fixtures/api-snapshot.edn` holds the stable surface: every
-    public var but `^:no-doc` ones, with its arglists or its kind (32
-    namespaces and 686 vars with dyn/initial-state; it
+    public var but `^:no-doc` ones, with its arglists or its kind (33
+    namespaces and 743 vars with gen.laws; it
     grows with each deliberate addition). gen.api-test fails when
     the code differs. It
     names what was added, removed or changed, and calls out apart a var

@@ -498,7 +498,7 @@ proposal cancels:
 ;=> true
 ```
 
-gen.clj's laws (`test/gen/laws.clj`) check Eq. 4.1 for every kind of
+gen.clj's laws (`gen.laws`) check Eq. 4.1 for every kind of
 generative function, by the retained choices and, for any internal
 proposal, by projections. Gen.jl 0.4.8's Switch combinator departs from
 it; see the appendix *Coming from Gen.jl*.

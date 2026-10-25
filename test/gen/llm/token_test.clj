@@ -102,7 +102,7 @@
    [:map (comb/map stops) [[prompt [95 41]] [3 2]] [[[prompt [95 41]] [1 4]] [[[3] [95 41]] [3 2]]]]
    [:turns turns [3 prompt] [[2 prompt] [4 prompt] [3 [95 41]]]]])
 
-(laws/deflaws completion models 100)
+(laws/deflaws completion models 100 (merge laws/all laws/conventions))
 
 ;; every token has a finite log-probability under the toy model
 (laws/deflaws completion models 100 laws/fixed-support)
@@ -138,7 +138,7 @@
 (laws/deflaws score-once
   [[:noisy noisy [prompt 4] [[prompt 2] [prompt 6] [[95 41] 4]]]
    [:small small [[0 1] 8] [[[0 1] 5] [[0 1] 10] [[2] 8]]]]
-  {:num-tests 40 :seed 2026})
+  {:num-tests 40 :seed 2026} (merge laws/all laws/conventions))
 
 ;; ---------------------------------------------------------------------------
 ;; One token

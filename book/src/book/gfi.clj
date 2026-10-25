@@ -459,10 +459,10 @@ burglary-given-calls
 
 (defn law
   "Checks a law of gen.laws over the models in n cases (from one seed):
-   whether it passed. laws/check fails a law most of whose cases were
+   whether it passed. laws/quick-check fails a law most of whose cases were
    vacuous."
   [law-fn models n]
-  (-> (laws/check n (law-fn (laws/cases models)) {:seed 31})
+  (-> (laws/quick-check n (law-fn (laws/cases models)) {:seed 31})
       (select-keys [:pass? :num-tests])))
 
 (law laws/score-is-the-assessed-density law-models 50)

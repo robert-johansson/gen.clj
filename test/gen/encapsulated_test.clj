@@ -132,7 +132,7 @@
    ["two-draws" two-draws [0.0] [[1.0]]]
    ["growing-noisy" growing-noisy [2] [[3] [4]]]])
 
-(laws/deflaws untraced untraced-models 100 laws/encapsulated)
+(laws/deflaws untraced untraced-models 100 (merge laws/encapsulated laws/conventions))
 
 ;; An estimated density: y given θ, with y ~ N(θ + z, 1) and z ~ N(0, 1), so
 ;; p(y; θ) = N(y; θ, √2), estimated by importance sampling over z from its
@@ -163,10 +163,9 @@
 ;; an estimator has no proposal density, so regenerate resamples its choices
 ;; all at once (its joint sampler) or not at all; these have one each. The
 ;; joint sampler draws ω otherwise than the estimate: no same-key score
-(def estimated-laws
-  (dissoc laws/encapsulated :score-is-assessed-on-the-same-key))
-
-(laws/deflaws estimated [["likelihood" likelihood [0.5] [[1.5]]] ["pm-model" pm-model [] []]] 60 estimated-laws)
+;; (laws/estimated)
+(laws/deflaws estimated [["likelihood" likelihood [0.5] [[1.5]]] ["pm-model" pm-model [] []]] 60
+  (merge laws/estimated laws/conventions))
 
 ;; ---------------------------------------------------------------------------
 ;; The keep-or-redraw rule

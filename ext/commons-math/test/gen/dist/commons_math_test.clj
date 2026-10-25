@@ -94,4 +94,4 @@
           z (trace :z (cm/zipf 6 1.1))]
       (trace :y (d/normal (array/+ k z) 1)))))
 
-(laws/deflaws commons-math [[:model model [] []]] 60)
+(laws/deflaws commons-math [[:model model [] []]] 60 (merge laws/all laws/conventions))

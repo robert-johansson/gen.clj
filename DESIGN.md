@@ -438,7 +438,7 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
 | Library | Verdict | Scope |
 |---|---|---|
 | Clojure 1.12 | yes | core |
-| test.check (official) | yes | `:test`. GFI laws as properties, run with clojure.test `defspec` |
+| test.check (official) | yes | `:test`, and `ext/laws` (`:laws`): the GFI laws as properties, run with clojure.test specs (`deflaws`) or `laws/verify` |
 | malli (official) | edges only | `gen.dev` instrumentation; LLM structured output (schema → grammar) |
 | clojure.spec | no | Overlaps malli; specs aren't data; spec2 has been alpha for years |
 | instaparse (official) | no (the owner, 2026-10-21: §9, grammar-constrained decoding) | our own regex → DFA engine (`gen.llm.regex`) |
@@ -638,7 +638,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     accessors of a batched run's values, in gen.array: genclj-9efy); stable for implementers, the GFI protocol and
     gen.array.protocols. Experimental (shipped, outside the promise):
     gen.llm.*, trace-kernel, conjugate, laplace, particle-mcmc, partition,
-    dist.host, and gen.laws until it moves to ext/laws. Internal: tape,
+    dist.host, and gen.laws until it moves to ext/laws (it has, and is
+    stable: "The laws for users", below). Internal: tape,
     batch, dtype, shape, the dynamic language's guard, static and core, the
     backends. Dependents that reach internals get public replacements
     (memo.clj: a per-particle accessor, and gen.array's own tracked?,
@@ -685,6 +686,56 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     fallback (vmap asks for a batched run); draws per particle even from a
     shared key, as every batched run's; nesting and a gradient through a
     vmap refused loudly, a vmap of a gradient per particle.
+  - **The laws for users, in ext/laws** (2026-10-25; genclj-u6je).
+    Confirmed by the owner (2026-10-25): gen.laws lives in the module
+    ext/laws and is `{:api :stable}`, with its user API: the check over
+    models, the law sets, deflaws, checks and vacuous. As built (the agent):
+    ext/laws/src/gen/laws.clj, its namespace unchanged, with its own
+    deps.edn (test.check, and gen.clj as `:local/root "../.."`, so a git
+    dependency with `:deps/root "ext/laws"` brings the gen.clj of the same
+    commit unless the dependent names gen.clj/gen.clj itself); in this
+    repository the `:laws` alias (ext/laws/src and test.check) and `:test`,
+    which includes ext/laws/src and its tests (ext/laws/test). It needs
+    nothing of test/: the few host helpers it took from gen.test-support
+    are its own. `(laws/verify models opts laws)`, deflaws' arguments but
+    the prefix, runs a law set (all by default) and returns a sorted map
+    of the laws that failed to what each says (the check and its values,
+    or the error, the smallest case by its model's label, the run's seed);
+    `{}` when all hold. Every run, verify's and a deflaws spec's, draws its
+    seed from the clock unless given `:seed`, as test.check's defspec
+    does, so the battery keeps meeting new cases, and a failure's `:seed`
+    reproduces it; nothing is printed. `identity-update-reports-no-change`
+    left forward-sampling for a set of its own, `laws/implementation`
+    (all is 22 laws), which gen.clj's suites run beside all on its own
+    kinds; `laws/estimated` is encapsulated without
+    `:score-is-assessed-on-the-same-key`. checks, vacuous?,
+    vacuous-on-unvisitable and unvisitable? are public, and vacuity stays
+    decided by the error's message, documented: a hand-written generative
+    function throws gfi/unvisited's error.
+  - **The laws' names, confirmed by the owner** (2026-10-25 night, "as
+    recommended", on the lead's review of the names the agent chose after
+    the tier was approved). Kept: `verify` (models first, as deflaws;
+    `(is (= {} (laws/verify models)))`), `failure-of`, `estimated`, and
+    `identity-update-reports-no-change` out of forward-sampling (the thesis
+    does not ask for precise retdiffs, and unknown-change is always
+    correct). Renamed: `check` to `quick-check` (test.check's quick-check
+    that also counts vacuous cases; `check` was one letter from `checks`,
+    which does something else), and `implementation` to `conventions`
+    (gen.clj's habits, not laws, which a user's generative function need
+    not keep). What stability means for a law set: a minor release may add
+    a law to one, with a CHANGELOG line, since a dependent's suite may then
+    fail; renaming or removing a law is breaking. Stable with the rest, as
+    the snapshot has them: each law's var (35), `cases`, `close?`,
+    `across`, `max-vacuous` and `seeds`. `close?`'s tolerances (float64: a
+    relative and an absolute 1e-12; float32: a relative 1e-4 and an
+    absolute 1e-3) were not in that answer: the lead had made no
+    recommendation and recorded them as confirmed with the rest, wrongly.
+    The owner then chose (2026-10-25 night, on the lead's recommendation)
+    that they may change in a minor release, with a CHANGELOG line and its
+    reason, as a law set's contents may: they encode float precision,
+    which a new backend or dtype may make us revisit. Its name and arity
+    are stable. The v1.0.0 tag waits for the night's checks, as the gate
+    has it (owner, the same answer).
   - **Eight more, confirmed by the owner** (2026-10-25, on the lead's
     recommendations): per-particle results use plural keys (`:log-alphas`,
     `:accepted`, `:diverged`), not singular keys holding vectors; chains

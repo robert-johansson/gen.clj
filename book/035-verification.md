@@ -14,16 +14,18 @@ watches which laws catch them.
 The chapter ports the structure of the GenMLX book's *Verification*
 chapter: the laws as runnable values, a taxonomy, and the mistakes caught
 before a model runs. The laws themselves are gen.clj's, from
-`test/gen/laws.clj`, audited against the thesis in
+`ext/laws/src/gen/laws.clj`, audited against the thesis in
 `docs/research/law-audit.md` and listed with their tests in
 `docs/research/genjl-parity.md` §3. GenMLX keeps its laws as data records
 that one function runs against a model. gen.clj's are test.check
 properties, so the same machinery that draws, shrinks and reports
 property tests draws their cases, shrinks a failing one and reports it.
 
-The laws live in the namespace `gen.laws`, on the `:test` classpath
-(`clojure -M:test`). They may move to a library of their own; their
-namespace will stay `gen.laws`.
+The laws live in the namespace `gen.laws`, in a module of gen.clj outside
+its core, `ext/laws`, which adds test.check to gen.clj's dependencies.
+`clojure -M:laws` puts it on the classpath, and so does `-M:test`. A
+project of your own takes it as a git dependency on gen.clj's repository,
+with `:deps/root "ext/laws"`.
 
 <!-- code: ns -->
 ```clojure
@@ -79,7 +81,7 @@ which the laws also update and regenerate.
 and a law is a function from cases to a test.check property. The law
 `score-is-the-assessed-density` is the thesis's trace consistency (Def.
 2.1.16): the score of a simulated trace is the log density `assess` gives
-its choices, and the two return values agree. `laws/check` runs a
+its choices, and the two return values agree. `laws/quick-check` runs a
 property on a number of cases, as test.check's `quick-check` does, and
 adds the count of *vacuous* cases, which a later section explains:
 
@@ -87,7 +89,8 @@ adds the count of *vacuous* cases, which a later section explains:
 ```clojure
 (def score-law (laws/score-is-the-assessed-density (laws/cases models)))
 
-(select-keys (laws/check 20 score-law {:seed 1}) [:pass? :num-tests :vacuous])
+(select-keys (laws/quick-check 20 score-law {:seed 1})
+             [:pass? :num-tests :vacuous])
 ;=> {:pass? true, :num-tests 20, :vacuous 0}
 ```
 
@@ -112,34 +115,30 @@ section on planted bugs.
 
 ## The sets of laws
 
-The laws come in maps from a name to a law. A helper runs every law of
-such a map on a few cases, and returns the names of those that fail:
+The laws come in maps from a name to a law. `laws/verify` runs every law
+of such a map over model entries, `laws/all` by default, and returns the
+failures: a map from each law that failed to what it says, `{}` when
+every law holds. Its options are the number of cases of each law and the
+seed they are drawn from, a fresh one at each run unless one is given.
+The chapter runs 20 cases from one seed:
 
-<!-- code: failures -->
+<!-- code: verify -->
 ```clojure
-(defn failures
-  "The names of the laws in law-set (a map of name to law) that fail on n
-   cases (20 by default) of models."
-  ([law-set models] (failures law-set models 20))
-  ([law-set models n]
-   (let [cases (laws/cases models)]
-     (into (sorted-set)
-           (keep (fn [[name law]]
-                   (when-not (:pass? (laws/check n (law cases) {:seed 1}))
-                     name)))
-           law-set))))
+(def few
+  "The chapter's runs of a law: 20 cases, from one seed."
+  {:num-tests 20 :seed 1})
+
+(laws/verify models few)
+;=> {}
 ```
 
-`laws/general` holds fifteen laws and `laws/forward-sampling` eight more;
-`laws/all` is both. The measurement model passes all 23:
+`laws/general` holds fifteen laws and `laws/forward-sampling` seven more;
+`laws/all`, which the measurement model passed, is both:
 
 <!-- code: sets -->
 ```clojure
 (mapv count [laws/general laws/forward-sampling laws/all])
-;=> [15 8 23]
-
-(failures laws/all models)
-;=> #{}
+;=> [15 7 22]
 ```
 
 The *general* laws state the thesis's definitions, so they hold for every
@@ -206,10 +205,14 @@ combinators do:
   Morgan's law) it adds up to the score.
 - `runs-are-pure-functions-of-the-key`: the same key makes the same
   choices.
-- `identity-update-reports-no-change`: an update without constraints
-  reports no change of the return value, unless the value holds an array.
-  This is a property of gen.clj's implementation, not of the thesis,
-  whose Def. 2.3.2 allows an unknown change at any time.
+
+One more property is gen.clj's, not the thesis's:
+`identity-update-reports-no-change`, an update without constraints
+reports no change of the return value, unless the value holds an array.
+The thesis's Def. 2.3.2 allows an unknown change at any time, so a
+correct generative function may fail it. It is the set
+`laws/conventions`, which gen.clj's suites run on its own generative
+functions beside `laws/all`.
 
 A generative function whose internal proposal is something else need
 satisfy only the general set. `proposal/with-internal-proposal` gives a
@@ -232,10 +235,10 @@ it open.
 
 (def guided-models [[:guided guided [0.0] [[1.5] [-2.0]]]])
 
-(failures laws/general guided-models)
-;=> #{}
+(laws/verify guided-models few laws/general)
+;=> {}
 
-(count (failures laws/forward-sampling guided-models))
+(count (laws/verify guided-models few laws/forward-sampling))
 ;=> 5
 ```
 
@@ -268,12 +271,12 @@ draw of that randomness. This mixture draws its component untraced:
 
 (def mixture-models [[:mixture mixture [] []]])
 
-(contains? (failures laws/general mixture-models)
+(contains? (laws/verify mixture-models few laws/general)
            :score-is-the-assessed-density)
 ;=> true
 
-(failures laws/encapsulated mixture-models)
-;=> #{}
+(laws/verify mixture-models few laws/encapsulated)
+;=> {}
 ```
 
 `assess` draws its own component from its own key, so its estimate
@@ -281,7 +284,10 @@ differs from the trace's, and the general set's comparisons between
 separate runs fail. `laws/encapsulated` keeps the laws that hold for one
 draw of the randomness, and compares `assess` with a trace's score on the
 same key. The rest hold only in expectation (the thesis's Eqs. 4.3–4.4),
-which statistical tests check.
+which statistical tests check. An estimated density whose sampler draws
+its randomness otherwise than its estimate fails that last comparison
+correctly, and `laws/estimated` is the set without it (*Extending
+gen.clj*).
 
 `laws/fixed-support` holds one law: for a model whose every address has a
 fixed support, constraints taken from a simulated trace are inside the
@@ -298,11 +304,12 @@ its precondition does not hold:
 
 (def nested-models [[:nested nested [] []]])
 
-(failures laws/all nested-models)
-;=> #{}
+(laws/verify nested-models few)
+;=> {}
 
-(failures laws/fixed-support nested-models 200)
-;=> #{:generate-weights-are-finite-on-a-fixed-support}
+(keys (laws/verify nested-models {:num-tests 200 :seed 1}
+                   laws/fixed-support))
+;=> (:generate-weights-are-finite-on-a-fixed-support)
 ```
 
 Constrained on `:y` alone, `generate` draws a new `:x`, which falls below
@@ -341,10 +348,11 @@ mean.
     (let [x (trace :x (d/normal (+ mu (param :shift)) 1))]
       (trace :y (d/normal x 0.5)))))
 
-(failures laws/across [[:stores (dyn/with-params shifted {:shift 0.0})
-                        [0.0] [[1.5] [-2.0]]
-                        (dyn/with-params shifted {:shift 1.0})]])
-;=> #{}
+(laws/verify [[:stores (dyn/with-params shifted {:shift 0.0})
+               [0.0] [[1.5] [-2.0]]
+               (dyn/with-params shifted {:shift 1.0})]]
+             few laws/across)
+;=> {}
 ```
 
 
@@ -534,11 +542,11 @@ the fixed-support law included:
                    (:weight (gfi/assess measurement [0.5] c))))
 ;=> true
 
-(failures laws/all [(entry :by-hand by-hand)])
-;=> #{}
+(laws/verify [(entry :by-hand by-hand)] few)
+;=> {}
 
-(failures laws/fixed-support [(entry :by-hand by-hand)])
-;=> #{}
+(laws/verify [(entry :by-hand by-hand)] few laws/fixed-support)
+;=> {}
 ```
 
 It is loud where gen.clj's own generative functions are. The laws rely on
@@ -555,24 +563,26 @@ says nothing about, as the section on vacuity shows.
 
 In a test namespace, `laws/deflaws` defines one test.check spec per law,
 named by a prefix and the law. Each runs as a `clojure.test` test with the
-given number of cases (`clojure -X:test`), or, called with a count, on
-that many:
+given number of cases (`clojure -X:test`), from a fresh seed at each run
+as test.check's specs do, or, called with a count and a seed, on those:
 
 <!-- code: deflaws -->
 ```clojure
 (laws/deflaws hand [(entry :by-hand by-hand)] 100)
 
 (count (filter (comp ::laws/law meta) (vals (ns-interns 'book.verification))))
-;=> 23
+;=> 22
 
 (select-keys (hand-update-weight-is-the-projection-change 10 :seed 1)
              [:pass? :num-tests])
 ;=> {:pass? true, :num-tests 10}
 ```
 
-A fourth argument names another set: `(laws/deflaws prefix models 100
-laws/fixed-support)`. The book runs each law on 20 cases. gen.clj's own
-suites run 100 per law over the dynamic models and over the combinators,
+A fourth argument names another set, or an expression of sets:
+`(laws/deflaws prefix models 100 (merge laws/all laws/fixed-support))`.
+The book runs each law on 20 cases. gen.clj's own suites run `laws/all`
+with `laws/conventions`, 100 cases per law over the dynamic models and
+over the combinators,
 200 over random dynamic models, and 300 for the static law over random
 static models; `gen.soak` runs every property again with ten times its
 cases and a fresh seed, before a milestone is signed off.
@@ -651,8 +661,9 @@ with keywords. Every law runs on each:
 ```clojure
 (def caught
   "For each planted bug, the laws that fail on it."
-  (into {} (for [[name k f] plants]
-             [name (failures laws/all [(entry name (planted by-hand k f))])])))
+  (into {} (for [[name k f] plants
+                 :let [models [(entry name (planted by-hand k f))]]]
+             [name (set (keys (laws/verify models few)))])))
 
 (mapv (comp count caught first) plants)
 ;=> [6 2 4 0 3]
@@ -673,8 +684,9 @@ with keywords. Every law runs on each:
 ![The laws (the general set above the line, the forward-sampling set below it) that fail on each planted bug](figures/035-planted.svg)
 
 **The score that forgets a term** fails six laws. test.check shrinks a
-failing case to a smallest one, here the seed 0 with no address picked,
-and the failure names the check that failed and the values it compared.
+failing case to a smallest one, which a failure shows with the model by
+its label: here the seed 0 of its keys with no address picked. The
+failure names the check that failed and the values it compared.
 The score is higher than the density `assess` gives the same choices, by
 $y$'s missing term:
 
@@ -683,16 +695,14 @@ $y$'s missing term:
 (def forgets-y (planted by-hand :simulate simulate-forgetting-y))
 
 (def score-failure
-  (laws/check 20 (laws/score-is-the-assessed-density
-                  (laws/cases [(entry :forgets-y forgets-y)]))
-              {:seed 1}))
+  (:score-is-the-assessed-density
+   (laws/verify [(entry :forgets-y forgets-y)] few)))
 
-(let [[[_ seed picks]] (get-in score-failure [:shrunk :smallest])]
-  [seed (not-any? true? picks)])
-;=> [0 true]
+(let [{:keys [model key-seed picks]} (:case score-failure)]
+  [model key-seed (not-any? true? picks)])
+;=> [:forgets-y 0 true]
 
-(let [{:keys [check score assessed]} (get-in score-failure
-                                             [:shrunk :result-data])]
+(let [{:keys [check score assessed]} score-failure]
   [check (> (array/item score) (array/item assessed))])
 ;=> [(consistent? (gfi/simulate gf args (rng/key seed))) true]
 ```
@@ -710,11 +720,11 @@ Without them, every law passes it:
 
 (def at-old-args (planted by-hand :update update-at-old-arguments))
 
-(failures laws/all [[:same-args at-old-args [0.0] []]])
-;=> #{}
+(laws/verify [[:same-args at-old-args [0.0] []]] few)
+;=> {}
 
-(failures laws/general [(entry :old-args at-old-args)])
-;=> #{:update-weight-is-the-projection-change}
+(keys (laws/verify [(entry :old-args at-old-args)] few laws/general))
+;=> (:update-weight-is-the-projection-change)
 ```
 
 In the general set one law catches it, and that law came late: the law
@@ -766,12 +776,12 @@ reversibility law are vacuous:
 (def reversible (laws/updates-are-reversible-with-exact-discards
                  (laws/cases coin-models)))
 
-(select-keys (laws/check 100 reversible {:seed 1}) [:pass? :vacuous])
+(select-keys (laws/quick-check 100 reversible {:seed 1}) [:pass? :vacuous])
 ;=> {:pass? true, :vacuous 6} ; float64
 ```
 
 Such a case gives `:b` to a trace whose `:a` is false, without changing
-`:a`:
+`:a`, and the error says the constraint was not visited:
 
 <!-- code: unvisitable -->
 ```clojure
@@ -781,12 +791,22 @@ Such a case gives `:b` to a trace whose `:a` is false, without changing
   (gfi/update t (cm/choicemap :b true) (rng/key 4)))
 ```
 
+The laws tell such a case by its error's message (`laws/unvisitable?`):
+a constraint not visited, or a nested choice map or a single value where
+the other belongs. So a generative function written by hand throws
+`gfi/unvisited`'s error for a constraint it does not visit, as
+`values-of` does; any other error fails the law. A law of your own wraps
+such an operation in `laws/vacuous-on-unvisitable`, which gives
+`laws/vacuous` in place of that error, and states its comparisons in
+`laws/checks`, which counts a case all of whose checks were vacuous.
+
 A vacuous case passes, which is right for one case and dangerous for
 many: a law all of whose cases are vacuous passes without testing
 anything. The keyword check is such a bug. It rejects every constraint as
 unvisited, so the update laws' cases are vacuous whenever they constrain
-anything. `laws/check`, and every spec `deflaws` defines, fails a law
-more than `laws/max-vacuous` of whose cases are vacuous:
+anything. `laws/quick-check`, which runs one law's property,
+`laws/verify` and every spec `deflaws` defines fail a law more than
+`laws/max-vacuous` of whose cases are vacuous:
 
 <!-- code: keyword-check -->
 ```clojure
@@ -796,10 +816,10 @@ more than `laws/max-vacuous` of whose cases are vacuous:
   (laws/update-weight-is-the-projection-change
    (laws/cases [(entry :keyword-check keyword-check)])))
 
-(:result-data (laws/check 20 keyword-law {:seed 1}))
+(:result-data (laws/quick-check 20 keyword-law {:seed 1}))
 ;=> {:vacuous 15, :of 20, :max-vacuous 0.6}
 
-(:pass? (laws/check 20 keyword-law {:seed 1 :max-vacuous 1.0}))
+(:pass? (laws/quick-check 20 keyword-law {:seed 1 :max-vacuous 1.0}))
 ;=> true
 ```
 
@@ -1012,8 +1032,8 @@ rounding, and a sound change of the return value.
           y (trace :y (d/normal x 0.5))]
       y)))
 
-(failures laws/static [(entry :static static-measurement)])
-;=> #{}
+(laws/verify [(entry :static static-measurement)] few laws/static)
+;=> {}
 ```
 
 A bug in the static path makes it compute another model than its body.
@@ -1030,8 +1050,8 @@ measurement noise is 1, not 0.5:
 
 (def grafted (assoc static-measurement :static (:static wider-noise)))
 
-(failures laws/static [(entry :grafted grafted)])
-;=> #{:static-matches-dynamic}
+(keys (laws/verify [(entry :grafted grafted)] few laws/static))
+;=> (:static-matches-dynamic)
 ```
 
 A law over a few hand-written models tests the paths those models take.
@@ -1067,7 +1087,7 @@ macros and rest arguments. The static law holds over twenty of them:
 ```clojure
 (def static-law (laws/static-matches-dynamic (laws/cases rsm/gen-model)))
 
-(select-keys (laws/check 20 static-law {:seed 1}) [:pass? :num-tests])
+(select-keys (laws/quick-check 20 static-law {:seed 1}) [:pass? :num-tests])
 ;=> {:pass? true, :num-tests 20}
 ```
 
@@ -1171,7 +1191,7 @@ trace's score.
     (let [x (trace :x (d/normal (+ mu (rand)) 1))]
       (trace :y (d/normal x 0.5)))))
 
-(every? (failures laws/all [(entry :with-rand with-rand)])
+(every? (laws/verify [(entry :with-rand with-rand)] few)
         [:runs-are-pure-functions-of-the-key :score-is-the-assessed-density])
 ;=> true
 ```
@@ -1230,8 +1250,9 @@ those that compare the score with `assess`:
   (log-density gf (first (:args tr)) (values-of :project (:choices tr))
                (filter #(and (= :x %) (sel/selected? selection %)) [:x :y])))
 
-(= (failures laws/all [(entry :project-forgets-y
-                              (planted by-hand :project project-forgetting-y))])
+(def project-forgets-y (planted by-hand :project project-forgetting-y))
+
+(= (set (keys (laws/verify [(entry :project-forgets-y project-forgets-y)] few)))
    #{:generate-weight-is-the-constrained-density
      :generate-weight-is-the-projection
      :project-of-everything-is-the-score
@@ -1243,8 +1264,10 @@ those that compare the score with `assess`:
 ;=> true
 ```
 
-**2.** The law destructures a case as `gen.laws`'s laws do, and compares
-the weight up to rounding with `laws/close?`:
+**2.** The law destructures a case as `gen.laws`'s laws do, compares
+the weight up to rounding with `laws/close?`, and states its comparisons
+in `laws/checks`, so that a failure names the one that failed. `holds?`
+runs it alone, as a law set of one:
 
 <!-- code: solution-2 -->
 ```clojure
@@ -1256,14 +1279,14 @@ the weight up to rounding with `laws/close?`:
     (let [tr (gfi/simulate gf args (rng/key seed))
           {t :trace w :weight discard :discard}
           (gfi/update tr (:choices tr) (rng/key (inc seed)))]
-      (and (laws/close? w 0.0)
-           (= (:choices tr) (:choices t))
-           (= (:choices tr) discard)))))
+      (laws/checks (laws/close? w 0.0)
+                   (= (:choices tr) (:choices t))
+                   (= (:choices tr) discard)))))
 
 (defn holds?
-  "Does the law hold on 20 cases of models?"
+  "Does the law hold on the chapter's cases of models?"
   [law models]
-  (:pass? (laws/check 20 (law (laws/cases models)) {:seed 1})))
+  (= {} (laws/verify models few {:own law})))
 
 [(holds? update-to-its-own-choices-changes-nothing models)
  (holds? update-to-its-own-choices-changes-nothing [(entry :by-hand by-hand)])]
@@ -1307,8 +1330,8 @@ meant catches it:
 (def noise-1
   (-> by-hand (planted :draw draw-1) (planted :log-densities log-densities-1)))
 
-(failures laws/all [(entry :noise-1 noise-1)])
-;=> #{}
+(laws/verify [(entry :noise-1 noise-1)] few)
+;=> {}
 
 (within-5-se? (evidence-draws noise-1 2000 (rng/key 10)) exact-evidence)
 ;=> false

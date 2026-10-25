@@ -36,7 +36,7 @@
         failed (first (remove :pass? (remove nil? [usual long-run])))
         secs (/ (- (System/nanoTime) t0) 1e9)]
     (if failed
-      ;; a law that failed for its vacuous cases (gen.laws/check) has no
+      ;; a law that failed for its vacuous cases (gen.laws/quick-check) has no
       ;; smallest case, only its counts
       [false (format "FAIL %s after %d cases (seed %d): %s"
                      (symbol v) (:num-tests failed) (:seed failed)

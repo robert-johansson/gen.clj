@@ -240,7 +240,7 @@
      [:hmm-categorical ss/hmm [3 c-init c-params] [[4 c-init c-params] [2 [0.2 0.3 0.5] c-params]]]
      [:hmm-normal ss/hmm [3 n-init n-params] [[2 n-init n-params] [3 n-init (assoc n-params :transition [[0.5 0.5] [0.5 0.5]])]]]]))
 
-(laws/deflaws state-space law-models 40)
+(laws/deflaws state-space law-models 40 (merge laws/all laws/conventions))
 (laws/deflaws state-space law-models 40 laws/fixed-support)
 
 ;; ---------------------------------------------------------------------------

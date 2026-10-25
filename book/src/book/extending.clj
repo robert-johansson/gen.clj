@@ -541,20 +541,12 @@
    regenerate with: other a and b, more draws, fewer draws."
   [[:urn urn [1.0 2.0 4] [[2.0 0.5 4] [1.0 2.0 6] [1.0 2.0 2]]]])
 
-(defn failures
-  "The names of the laws of law-set (a map of name to law) that fail on n
-   cases (20 by default) of models."
-  ([law-set models] (failures law-set models 20))
-  ([law-set models n]
-   (let [cases (laws/cases models)]
-     (into (sorted-set)
-           (keep (fn [[name law]]
-                   (when-not (:pass? (laws/check n (law cases) {:seed 1}))
-                     name)))
-           law-set))))
+(def few
+  "The chapter's runs of a law: 20 cases, from one seed."
+  {:num-tests 20 :seed 1})
 
-[(failures laws/all urn-models) (failures laws/fixed-support urn-models)]
-;=> [#{} #{}]
+[(laws/verify urn-models few) (laws/verify urn-models few laws/fixed-support)]
+;=> [{} {}]
 
 ;; book: urn-deflaws
 (laws/deflaws urn-law urn-models 100)
@@ -571,7 +563,7 @@
   (remove given (keys added)))
 
 (= (with-redefs [fresh-draws fresh-by-lookup]
-     (failures laws/all urn-models))
+     (set (keys (laws/verify urn-models few))))
    #{:assess-is-generate-with-every-choice
      :generate-weight-is-the-constrained-density
      :generate-weight-is-the-projection
@@ -865,8 +857,11 @@ exact-count
 ;; book: counts-laws
 (def counts-models [[:counts counts [1.5] [[0.5]]]])
 
-(failures laws/encapsulated counts-models)
-;=> #{:score-is-assessed-on-the-same-key}
+(keys (laws/verify counts-models few laws/encapsulated))
+;=> (:score-is-assessed-on-the-same-key)
+
+(laws/verify counts-models few laws/estimated)
+;=> {}
 
 ;; book: counts-model
 (def rate-model
@@ -1030,9 +1025,9 @@ exact-count
   (let [xs (mapv double (range 10))]
     [label model [xs] [[(assoc xs 3 7.5)]]]))
 
-[(failures laws/static [(entry :scaled scaled-noisy-sum)])
- (failures laws/static [(entry :doubled doubled-noisy-sum)])]
-;=> [#{} #{:static-matches-dynamic}]
+[(laws/verify [(entry :scaled scaled-noisy-sum)] few laws/static)
+ (keys (laws/verify [(entry :doubled doubled-noisy-sum)] few laws/static))]
+;=> [{} (:static-matches-dynamic)]
 
 ;; book: save-trace
 (def urn-model-gf (urn-model urn))
@@ -1146,8 +1141,8 @@ exact-count
     (walking-regenerate gf tr args selection key)))
 
 (with-redefs [regenerate-urn regenerate-urn-fast]
-  (failures laws/all urn-models))
-;=> #{}
+  (laws/verify urn-models few))
+;=> {}
 
 (defn regenerate-urn-stale
   "regenerate-urn-fast whose weight is 0 when it keeps every draw: the
@@ -1157,11 +1152,11 @@ exact-count
     (keeps-every-draw? tr n selection) (assoc :weight 0.0)))
 
 (with-redefs [regenerate-urn regenerate-urn-stale]
-  [(failures laws/all urn-models)
-   (= (failures laws/all urn-models 100)
+  [(laws/verify urn-models few)
+   (= (set (keys (laws/verify urn-models {:num-tests 100 :seed 1})))
       #{:regenerate-weight-is-the-retained-density-ratio
         :regenerate-weight-with-new-arguments-is-the-projection-ratio})])
-;=> [#{} true]
+;=> [{} true]
 
 ;; book: solution-5
 (def posterior-traces

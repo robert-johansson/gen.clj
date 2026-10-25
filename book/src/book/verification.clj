@@ -38,7 +38,8 @@
 ;; book: one-law
 (def score-law (laws/score-is-the-assessed-density (laws/cases models)))
 
-(select-keys (laws/check 20 score-law {:seed 1}) [:pass? :num-tests :vacuous])
+(select-keys (laws/quick-check 20 score-law {:seed 1})
+             [:pass? :num-tests :vacuous])
 ;=> {:pass? true, :num-tests 20, :vacuous 0}
 
 ;; book: a-case
@@ -46,25 +47,17 @@
   [label (int? seed) (count picks) (boolean? alt?)])
 ;=> [:measurement true 32 true]
 
-;; book: failures
-(defn failures
-  "The names of the laws in law-set (a map of name to law) that fail on n
-   cases (20 by default) of models."
-  ([law-set models] (failures law-set models 20))
-  ([law-set models n]
-   (let [cases (laws/cases models)]
-     (into (sorted-set)
-           (keep (fn [[name law]]
-                   (when-not (:pass? (laws/check n (law cases) {:seed 1}))
-                     name)))
-           law-set))))
+;; book: verify
+(def few
+  "The chapter's runs of a law: 20 cases, from one seed."
+  {:num-tests 20 :seed 1})
+
+(laws/verify models few)
+;=> {}
 
 ;; book: sets
 (mapv count [laws/general laws/forward-sampling laws/all])
-;=> [15 8 23]
-
-(failures laws/all models)
-;=> #{}
+;=> [15 7 22]
 
 ;; book: guided
 (defn open?
@@ -80,10 +73,10 @@
 
 (def guided-models [[:guided guided [0.0] [[1.5] [-2.0]]]])
 
-(failures laws/general guided-models)
-;=> #{}
+(laws/verify guided-models few laws/general)
+;=> {}
 
-(count (failures laws/forward-sampling guided-models))
+(count (laws/verify guided-models few laws/forward-sampling))
 ;=> 5
 
 ;; book: guided-weight
@@ -102,12 +95,12 @@
 
 (def mixture-models [[:mixture mixture [] []]])
 
-(contains? (failures laws/general mixture-models)
+(contains? (laws/verify mixture-models few laws/general)
            :score-is-the-assessed-density)
 ;=> true
 
-(failures laws/encapsulated mixture-models)
-;=> #{}
+(laws/verify mixture-models few laws/encapsulated)
+;=> {}
 
 ;; book: support
 (def nested
@@ -117,11 +110,12 @@
 
 (def nested-models [[:nested nested [] []]])
 
-(failures laws/all nested-models)
-;=> #{}
+(laws/verify nested-models few)
+;=> {}
 
-(failures laws/fixed-support nested-models 200)
-;=> #{:generate-weights-are-finite-on-a-fixed-support}
+(keys (laws/verify nested-models {:num-tests 200 :seed 1}
+                   laws/fixed-support))
+;=> (:generate-weights-are-finite-on-a-fixed-support)
 
 ;; book: support-quarter
 (defn out-of-support?
@@ -144,10 +138,11 @@
     (let [x (trace :x (d/normal (+ mu (param :shift)) 1))]
       (trace :y (d/normal x 0.5)))))
 
-(failures laws/across [[:stores (dyn/with-params shifted {:shift 0.0})
-                        [0.0] [[1.5] [-2.0]]
-                        (dyn/with-params shifted {:shift 1.0})]])
-;=> #{}
+(laws/verify [[:stores (dyn/with-params shifted {:shift 0.0})
+               [0.0] [[1.5] [-2.0]]
+               (dyn/with-params shifted {:shift 1.0})]]
+             few laws/across)
+;=> {}
 
 ;; book: record
 (defrecord HandWritten [parts]
@@ -284,11 +279,11 @@
                    (:weight (gfi/assess measurement [0.5] c))))
 ;=> true
 
-(failures laws/all [(entry :by-hand by-hand)])
-;=> #{}
+(laws/verify [(entry :by-hand by-hand)] few)
+;=> {}
 
-(failures laws/fixed-support [(entry :by-hand by-hand)])
-;=> #{}
+(laws/verify [(entry :by-hand by-hand)] few laws/fixed-support)
+;=> {}
 
 ;; book: by-hand-loud
 ;; error: generate: the constraint at [:z] was not visited
@@ -298,7 +293,7 @@
 (laws/deflaws hand [(entry :by-hand by-hand)] 100)
 
 (count (filter (comp ::laws/law meta) (vals (ns-interns 'book.verification))))
-;=> 23
+;=> 22
 
 (select-keys (hand-update-weight-is-the-projection-change 10 :seed 1)
              [:pass? :num-tests])
@@ -373,8 +368,9 @@
 ;; book: caught
 (def caught
   "For each planted bug, the laws that fail on it."
-  (into {} (for [[name k f] plants]
-             [name (failures laws/all [(entry name (planted by-hand k f))])])))
+  (into {} (for [[name k f] plants
+                 :let [models [(entry name (planted by-hand k f))]]]
+             [name (set (keys (laws/verify models few)))])))
 
 (mapv (comp count caught first) plants)
 ;=> [6 2 4 0 3]
@@ -393,16 +389,14 @@
 (def forgets-y (planted by-hand :simulate simulate-forgetting-y))
 
 (def score-failure
-  (laws/check 20 (laws/score-is-the-assessed-density
-                  (laws/cases [(entry :forgets-y forgets-y)]))
-              {:seed 1}))
+  (:score-is-the-assessed-density
+   (laws/verify [(entry :forgets-y forgets-y)] few)))
 
-(let [[[_ seed picks]] (get-in score-failure [:shrunk :smallest])]
-  [seed (not-any? true? picks)])
-;=> [0 true]
+(let [{:keys [model key-seed picks]} (:case score-failure)]
+  [model key-seed (not-any? true? picks)])
+;=> [:forgets-y 0 true]
 
-(let [{:keys [check score assessed]} (get-in score-failure
-                                             [:shrunk :result-data])]
+(let [{:keys [check score assessed]} score-failure]
   [check (> (array/item score) (array/item assessed))])
 ;=> [(consistent? (gfi/simulate gf args (rng/key seed))) true]
 
@@ -414,11 +408,11 @@
 
 (def at-old-args (planted by-hand :update update-at-old-arguments))
 
-(failures laws/all [[:same-args at-old-args [0.0] []]])
-;=> #{}
+(laws/verify [[:same-args at-old-args [0.0] []]] few)
+;=> {}
 
-(failures laws/general [(entry :old-args at-old-args)])
-;=> #{:update-weight-is-the-projection-change}
+(keys (laws/verify [(entry :old-args at-old-args)] few laws/general))
+;=> (:update-weight-is-the-projection-change)
 
 ;; book: by-score
 (= (caught :regenerate-by-score)
@@ -442,7 +436,7 @@
 (def reversible (laws/updates-are-reversible-with-exact-discards
                  (laws/cases coin-models)))
 
-(select-keys (laws/check 100 reversible {:seed 1}) [:pass? :vacuous])
+(select-keys (laws/quick-check 100 reversible {:seed 1}) [:pass? :vacuous])
 ;=> {:pass? true, :vacuous 6} ; float64
 
 ;; book: unvisitable
@@ -458,10 +452,10 @@
   (laws/update-weight-is-the-projection-change
    (laws/cases [(entry :keyword-check keyword-check)])))
 
-(:result-data (laws/check 20 keyword-law {:seed 1}))
+(:result-data (laws/quick-check 20 keyword-law {:seed 1}))
 ;=> {:vacuous 15, :of 20, :max-vacuous 0.6}
 
-(:pass? (laws/check 20 keyword-law {:seed 1 :max-vacuous 1.0}))
+(:pass? (laws/quick-check 20 keyword-law {:seed 1 :max-vacuous 1.0}))
 ;=> true
 
 ;; book: max-vacuous
@@ -552,8 +546,8 @@ exact-evidence
           y (trace :y (d/normal x 0.5))]
       y)))
 
-(failures laws/static [(entry :static static-measurement)])
-;=> #{}
+(laws/verify [(entry :static static-measurement)] few laws/static)
+;=> {}
 
 ;; book: grafted
 (def wider-noise
@@ -564,8 +558,8 @@ exact-evidence
 
 (def grafted (assoc static-measurement :static (:static wider-noise)))
 
-(failures laws/static [(entry :grafted grafted)])
-;=> #{:static-matches-dynamic}
+(keys (laws/verify [(entry :grafted grafted)] few laws/static))
+;=> (:static-matches-dynamic)
 
 ;; book: random-model
 (def random-model (tcg/generate rsm/gen-model 0 1))
@@ -584,7 +578,7 @@ exact-evidence
 ;; book: fuzz
 (def static-law (laws/static-matches-dynamic (laws/cases rsm/gen-model)))
 
-(select-keys (laws/check 20 static-law {:seed 1}) [:pass? :num-tests])
+(select-keys (laws/quick-check 20 static-law {:seed 1}) [:pass? :num-tests])
 ;=> {:pass? true, :num-tests 20}
 
 ;; book: lazy-error
@@ -633,7 +627,7 @@ exact-evidence
     (let [x (trace :x (d/normal (+ mu (rand)) 1))]
       (trace :y (d/normal x 0.5)))))
 
-(every? (failures laws/all [(entry :with-rand with-rand)])
+(every? (laws/verify [(entry :with-rand with-rand)] few)
         [:runs-are-pure-functions-of-the-key :score-is-the-assessed-density])
 ;=> true
 
@@ -644,8 +638,9 @@ exact-evidence
   (log-density gf (first (:args tr)) (values-of :project (:choices tr))
                (filter #(and (= :x %) (sel/selected? selection %)) [:x :y])))
 
-(= (failures laws/all [(entry :project-forgets-y
-                              (planted by-hand :project project-forgetting-y))])
+(def project-forgets-y (planted by-hand :project project-forgetting-y))
+
+(= (set (keys (laws/verify [(entry :project-forgets-y project-forgets-y)] few)))
    #{:generate-weight-is-the-constrained-density
      :generate-weight-is-the-projection
      :project-of-everything-is-the-score
@@ -665,14 +660,14 @@ exact-evidence
     (let [tr (gfi/simulate gf args (rng/key seed))
           {t :trace w :weight discard :discard}
           (gfi/update tr (:choices tr) (rng/key (inc seed)))]
-      (and (laws/close? w 0.0)
-           (= (:choices tr) (:choices t))
-           (= (:choices tr) discard)))))
+      (laws/checks (laws/close? w 0.0)
+                   (= (:choices tr) (:choices t))
+                   (= (:choices tr) discard)))))
 
 (defn holds?
-  "Does the law hold on 20 cases of models?"
+  "Does the law hold on the chapter's cases of models?"
   [law models]
-  (:pass? (laws/check 20 (law (laws/cases models)) {:seed 1})))
+  (= {} (laws/verify models few {:own law})))
 
 [(holds? update-to-its-own-choices-changes-nothing models)
  (holds? update-to-its-own-choices-changes-nothing [(entry :by-hand by-hand)])]
@@ -701,8 +696,8 @@ exact-evidence
 (def noise-1
   (-> by-hand (planted :draw draw-1) (planted :log-densities log-densities-1)))
 
-(failures laws/all [(entry :noise-1 noise-1)])
-;=> #{}
+(laws/verify [(entry :noise-1 noise-1)] few)
+;=> {}
 
 (within-5-se? (evidence-draws noise-1 2000 (rng/key 10)) exact-evidence)
 ;=> false

@@ -281,7 +281,7 @@
     [] []]
    [:labels-in-a-model labeled-model [] []]])
 
-(laws/deflaws pushforward models 60)
+(laws/deflaws pushforward models 60 (merge laws/all laws/conventions))
 
 (deftest misuse-is-loud
   (letfn [(definition-error [form]

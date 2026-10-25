@@ -253,9 +253,9 @@
 ;; update from another graph's trace was wrong before the review)
 (laws/deflaws static-callees [[:switch-of-static switch-of-static [0 0.5] [[1 0.5]]]
                               [:callee-changes callee-changes [0 0.5] [[1 0.5] [2 0.5]]]]
-  100)
+  100 (merge laws/all laws/conventions))
 
-(laws/deflaws static models 100)
+(laws/deflaws static models 100 (merge laws/all laws/conventions))
 (laws/deflaws static models 100 laws/static)
 ;; the rules model alone, often enough that a case with unchanged arguments,
 ;; one choice constrained and the element it moves unconstrained comes up
@@ -283,7 +283,7 @@
           _ (trace :y (d/normal x 1))]
       x)))
 
-(def omega-laws (merge laws/encapsulated laws/static))
+(def omega-laws (merge laws/encapsulated laws/conventions laws/static))
 
 (laws/deflaws static-omega [[:over-noise over-noise [0.0] [[1.0]]]] 60 omega-laws)
 

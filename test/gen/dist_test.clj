@@ -387,7 +387,7 @@
       (trace :x (mvnormal-mixture [0.4 0.6] (array/stack [(array/zeros [2]) (array/+ m (array/ones [2]))])
                                   [[[2.3 0.0] [0.0 2.3]] [[1.0 0.0] [0.0 1.0]]])))))
 
-(laws/deflaws mvnormal-mixture [[:model mvnormal-mixture-model [] []]] 100)
+(laws/deflaws mvnormal-mixture [[:model mvnormal-mixture-model [] []]] 100 (merge laws/all laws/conventions))
 
 (deftest mixtures-of-multivariate-families-batch
   ;; one run for every particle, each particle's score its scalar run's
@@ -603,7 +603,7 @@
           tri (trace :tri (d/triangular 0.0 2.0 0.5))]
       (trace :y (d/logistic (array/+ (array/+ t w) (array/+ l tri)) 1.0)))))
 
-(laws/deflaws further [[:model further-model [] []]] 100)
+(laws/deflaws further [[:model further-model [] []]] 100 (merge laws/all laws/conventions))
 
 (deftest the-further-families-batch
   (let [ps (batched/simulate further-model [] 8 (rng/key 97))]
@@ -1305,7 +1305,7 @@
       (trace :v (d/inv-wishart (array/+ df 1.0) s))
       (array/+ x w))))
 
-(laws/deflaws genmlx-families [[:model genmlx-families-model [] []]] 100)
+(laws/deflaws genmlx-families [[:model genmlx-families-model [] []]] 100 (merge laws/all laws/conventions))
 
 (deftest the-genmlx-families-batch
   ;; one run for every particle, each particle's score its scalar run's
