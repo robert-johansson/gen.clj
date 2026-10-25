@@ -168,18 +168,34 @@
      (draw (probabilities log-weights)
            (map-indexed (fn [j u] (/ (+ (double j) (double u)) n)) (uniforms key n))))))
 
+(defn- whole-copies
+  "residual's deterministic copies of a sample, for x = n·p_i: floor(x),
+   or ceil(x) when x lies within a relative 1e-9 below it (DESIGN.md §9,
+   the ten decisions' eighth). n·p_i is a rounded product, so floor alone
+   lost copies: 10 equal weights gave x = 0.9999999999999998 and no copy,
+   and residual resampling silently became multinomial. A sample rounded
+   up has a residual within that of 1, and the residuals sum to the
+   integer n - Σ floor(x), so no more than that many round up: the copies
+   stay at most n."
+  ^long [^double x]
+  (let [c (Math/ceil x)]
+    (long (if (<= (- c x) (* 1e-9 x)) c (Math/floor x)))))
+
 (defn residual
-  "floor(n·p_i) copies of each sample i, then the remaining indices drawn
-   multinomially in proportion to the residuals n·p_i - floor(n·p_i)."
+  "whole-copies of n·p_i of each sample i (floor(n·p_i), rounded up within
+   a relative 1e-9 of the next integer), then the remaining indices drawn
+   multinomially in proportion to the residuals n·p_i less those copies."
   ([log-weights n] (residual log-weights n (gfi/next-key)))
   ([log-weights n key]
    (let [p (probabilities log-weights)
          n (long n)
-         copies (mapv #(long (Math/floor (* n (double %)))) p)
+         copies (mapv #(whole-copies (* n (double %))) p)
          fixed (into [] (mapcat (fn [i c] (repeat c i)) (range) copies))
          r (- n (count fixed))]
+     (when (neg? r)
+       (throw (ex-info (str "residual: " (count fixed) " whole copies of " n " draws") {:copies copies :n n})))
      (if (pos? r)
-       (let [residuals (double-array (map (fn [pi c] (- (* n (double pi)) (double c))) p copies))]
+       (let [residuals (double-array (map (fn [pi c] (max 0.0 (- (* n (double pi)) (double c)))) p copies))]
          (into fixed (draw residuals (uniforms key r))))
        fixed))))
 

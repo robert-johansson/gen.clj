@@ -79,6 +79,33 @@
     (every? (fn [[c p]] (>= c (Math/floor (- (* n p) 1e-9))))
             (map vector (counts (count lws) (w/residual lws n (rng/key seed))) (probs lws)))))
 
+(deftest residual-rounds-a-whole-copy-up-within-its-tolerance
+  ;; genclj-tx1h (the ten decisions' eighth, DESIGN.md §9): n·p_i within a
+  ;; relative 1e-9 below an integer is that many copies. Planted bug
+  ;; (2026-10-25): the floor alone fails 22 checks, the 10 equal weights
+  ;; (which gave [1 4 5 8 2 7 5 2 4 0]), the case within the tolerance and
+  ;; most equal-weight counts; three thirds, whose product is exact, and
+  ;; the case outside pass either way.
+  (testing "10 equal weights give each index once"
+    (let [lws (vec (repeat 10 0.0))]
+      (is (< (* 10 (Math/exp (first (:log-weights (w/normalize lws))))) 1.0) "n·p is just below 1")
+      (doseq [k (range 5)]
+        (is (= (range 10) (w/residual lws 10 (rng/key k)))))))
+  (testing "three thirds"
+    (is (= [0 1 2] (w/residual (vec (repeat 3 0.0)) 3 (rng/key 1)))))
+  (testing "at the tolerance's edge: n·p_0 = 2(1 - e), relative gap e"
+    (let [lws (fn [e] [(Math/log (* 0.5 (- 1 e))) (Math/log (* 0.5 (+ 1 e)))])]
+      (is (= [0 0 1 1] (w/residual (lws 0.5e-9) 4 (rng/key 2))) "within it: two copies each, nothing drawn")
+      (is (= [0 1 1] (take 3 (w/residual (lws 2e-9) 4 (rng/key 2)))) "outside it: one copy, then a draw")))
+  (testing "the copies stay at most n"
+    (doseq [m (range 1 40)]
+      (let [lws (vec (repeat m 0.0))]
+        (doseq [n [1 m (* 3 m) 7]]
+          (is (= n (count (w/residual lws n (rng/key m)))))
+          (when (zero? (mod n m))
+            (is (= (sort (mapcat #(repeat (quot n m) %) (range m))) (sort (w/residual lws n (rng/key m))))
+                (str m " equal weights, " n " draws: n/m copies each"))))))))
+
 (defspec stratified-counts-are-within-two 200
   (prop/for-all [[lws n seed] gen-case]
     (every? (fn [[c p]] (< (Math/abs (- c (* n p))) 2.0))
