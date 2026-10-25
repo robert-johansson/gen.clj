@@ -595,6 +595,12 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   half, which 052 had shown still keeping the posterior by rejection) now
   stop with the error.
 
+  The invalid-proposal rule as built is wider than before decision 5: it
+  also throws where a proposal cannot reverse some moves although nothing
+  is left unvisited (such a chain rejects those moves and still targets the
+  posterior); confirmed by the owner (2026-10-25): loud, since the thesis
+  requires reversibility and such a proposal is almost always a mistake.
+
   Item 9 as implemented (2026-10-25, the agent; genclj-ynpc): the fallback
   is `gen.batched/fallback` of the particles (`fallback-reason` keeps its
   ex-data), and `:fallback` in the results of b/generate, update and
@@ -660,6 +666,18 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     gen.random.threefry and gen.backend.mlx.exact. The snapshot is
     test/fixtures/api-snapshot.edn, written by `clojure -M:test -m gen.api
     write` (gen.api documents it and deprecation).
+  - **Confirmed by the owner** (2026-10-25, on the lead's recommendations):
+    the protocols that implementers extend (gen.gfi's, gen.array.protocols)
+    keep their methods and gain none through 1.x; a new capability comes
+    as a new protocol with a fallback for implementations without it (as
+    gen.array's optional native ops do; Gen's edit would be an IEdit whose
+    fallback goes through update). The tier choices for namespaces this list
+    did not name stand as built (linalg, dist.core, proposal and nuts
+    stable; dist.commons-math experimental; array.special, host, tree,
+    memory, random.threefry and backend.mlx.exact internal); every gen.llm
+    namespace stays experimental. `array/vmap`, a public way to run a
+    function batched over a leading axis, joins the stable surface before
+    the tag (genclj-t3ur), so dependents and the book leave gen.array.batch.
   - **Before the tag:** the friction that changes shape lands (one
     result-key vocabulary, kernels returning {:trace :accepted?}, labeled
     metrics, matching batched return shapes, selections' union and
