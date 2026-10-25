@@ -148,8 +148,8 @@ newest first in each section.
 ### Added
 
 - **Public replacements for the internals memo.clj uses,** in gen.array
-  (DESIGN §9, "The 1.0's shape"; genclj-9efy). memo.clj can move off the
-  internals, which stay as they are until they are marked internal.
+  (DESIGN §9, "The 1.0's shape"; b509bce, genclj-9efy). memo.clj can move
+  off the internals, which stay as they are until they are marked internal.
   `tracked?` replaces gen.array.tape/tracked?. `(broadcast-shapes & shapes)`,
   NumPy's broadcast_shapes, replaces gen.array.shape/broadcast; shapes that
   do not broadcast are a loud error naming them all. `dtype-kind` gives a
