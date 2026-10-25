@@ -83,15 +83,18 @@ address per level of the tree. `[:params :slope]` is `:params`, then
 `:slope`; the observations of *Getting Started*, `[:y 0]` and on, are
 `:y`, then an integer, which Gen.jl writes `:y => 0`.
 
-`get-choice` follows an address or a path to a leaf and returns its value,
-`get-value` returns a leaf's value, and `cm/to-map` turns a choice map back
-into plain data. `cm/addresses` lists every leaf's path, and `cm/values`
-their values in the same order:
+`get-choice` follows an address or a path to a leaf and returns its value.
+So does the choice map itself, called with the address or path, as
+Gen.jl's `cm[addr]` and a trace called (below) do. `get-value` returns a
+leaf's value, and `cm/to-map` turns a choice map back into plain data.
+`cm/addresses` lists every leaf's path, and `cm/values` their values in
+the same order:
 
 <!-- code: read -->
 ```clojure
-[(cm/get-choice c [:params :slope]) (cm/get-value (cm/get-submap c :y0))]
-;=> [2.0 5.0]
+[(cm/get-choice c [:params :slope]) (c [:params :slope])
+ (cm/get-value (cm/get-submap c :y0))]
+;=> [2.0 2.0 5.0]
 
 (cm/to-map (cm/get-submap c :params))
 ;=> {:slope 2.0 :intercept 1.0}
@@ -133,8 +136,20 @@ Use those where a missing choice is expected rather than a mistake:
       [[:params :slope] :z :params [:y0 :a]])
 ;=> [:found :absent :node :through-value]
 
-[(cm/get-choice c :z nil) (cm/has-value? c :z) (cm/has-submap? c :params)]
+[(c :z nil) (cm/has-value? c :z) (cm/has-submap? c :params)]
 ;=> [nil false true]
+```
+
+A choice map called is loud in the same places. At `:params`, which holds
+nested choices, the call is an error that points to `get-submap`, rather
+than returning the submap: a call reads values, as Gen.jl's `cm[addr]`
+does, and a submap is a choice map. A call that answered with either
+would leave every caller to ask which it got.
+
+<!-- code: call-node -->
+```clojure
+;; error: choice map: no value at [:params]: nested choices are there
+(c :params)
 ```
 
 ## Choice maps are immutable
@@ -148,7 +163,7 @@ addresses are disjoint.
 ```clojure
 (def c2 (cm/set-choice c [:params :slope] 3.0))
 
-[(cm/get-choice c2 [:params :slope]) (cm/get-choice c [:params :slope])]
+[(c2 [:params :slope]) (c [:params :slope])]
 ;=> [3.0 2.0]
 
 (def a (cm/choicemap :x 1.0 :y 2.0))
@@ -241,12 +256,13 @@ and `project` read instead of running the model again.
 Traces have no print method yet, and one printed whole fills a screen, so
 this book shows their fields.
 
-A trace answers for its choices. Called with an address or a path, it
-returns the choice there, as Gen.jl's `trace[addr]` does, and at the empty
-path its return value. It takes a not-found value too. One lookup stays
-quiet: a trace is a record, so a keyword called on it, or `get`, reads the
-record's fields. `(:score tr)` is the score, but `(:slope tr)` is `nil`,
-whatever the trace holds at `:slope`. Call the trace instead:
+A trace answers for its choices, as its choice map does. Called with an
+address or a path, it returns the choice there, as Gen.jl's `trace[addr]`
+does, and at the empty path its return value. It takes a not-found value
+too. One lookup stays quiet: a trace is a record, so a keyword called on
+it, or `get`, reads the record's fields. `(:score tr)` is the score, but
+`(:slope tr)` is `nil`, whatever the trace holds at `:slope`. Call the
+trace instead:
 
 <!-- code: call -->
 ```clojure

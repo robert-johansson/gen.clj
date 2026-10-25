@@ -121,7 +121,7 @@ backend.
 | `get_args(tr)` | `(:args tr)` |
 | `get_gen_fn(tr)` | `(:gen-fn tr)` |
 | `choicemap((:a, 1.0))` | `(cm/choicemap :a 1.0)` |
-| `cm[:a]` | `(cm/get-choice cm :a)` |
+| `cm[:a]` | `(cm :a)`, `(cm/get-choice cm :a)` |
 | `get_submap(cm, :a)` | `(cm/get-submap cm :a)` |
 | `has_value(cm, :a)` | `(cm/has-value? cm :a)` |
 | `merge(a, b)` | `(cm/merge a b)` |
@@ -137,6 +137,28 @@ there, as `tr[addr]` does; at the empty path, its return value:
 ```clojure
 [(= model (:gen-fn tr)) (:args tr) (= (:retval tr) (tr []) (tr :mu))]
 ;=> [true [3] true]
+```
+
+A choice map called with an address returns the value there, as
+`cm[addr]` does, the trace's choices included; a not-found value goes
+second:
+
+<!-- code: choicemap-call -->
+```clojure
+(def readings (:choices tr))
+
+[(= (readings :mu) (tr :mu)) (some? (readings [:sensor 0 :reading]))
+ (readings [:sensor 7 :reading] nil)]
+;=> [true true nil]
+```
+
+Like `cm[addr]`, it is an error where the address holds nested choices,
+not the submap, which `cm/get-submap` returns:
+
+<!-- code: choicemap-call-node -->
+```clojure
+;; error: choice map: no value at [:sensor]: nested choices are there
+(readings :sensor)
 ```
 
 One lookup differs from Gen.jl. A keyword reads the record's fields, so
@@ -232,10 +254,11 @@ optimizer's state are values, passed on.
 ## Booleans in host code
 
 Inside a `gen` body, every `if` reads its test's value on any backend. In
-host code (an inference loop, an analysis), a trace called with an
-address returns a boolean choice as a host boolean. A value read another
-way (`cm/get-choice`, a return value) is a 0-d array on MLX, which
-Clojure's `if` takes as true: branch on it through `array/truthy?`.
+host code (an inference loop, an analysis), a trace or a choice map
+called with an address returns a boolean choice as a host boolean. A
+value read another way (`cm/get-choice`, a return value) is a 0-d array
+on MLX, which Clojure's `if` takes as true: branch on it through
+`array/truthy?`.
 
 <!-- code: booleans -->
 ```clojure
@@ -245,8 +268,9 @@ Clojure's `if` takes as true: branch on it through `array/truthy?`.
 
 [(ctr :heads)
  (if (ctr :heads) :yes :no)
+ (if ((:choices ctr) :heads) :yes :no)
  (if (array/truthy? (cm/get-choice (:choices ctr) :heads)) :yes :no)]
-;=> [false :no :no]
+;=> [false :no :no :no]
 ```
 
 ## Plain calls

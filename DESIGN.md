@@ -697,6 +697,18 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     assoc on traces); choice maps are callable as traces are, loud with a
     not-found arity (genclj-a2t8); training's history is the mean generate
     weight on held-out examples, as Gen.jl's train! (genclj-59cf).
+    As built (2026-10-25, the agent, provisional; genclj-a2t8): `(c
+    addr)`, `(c path)` and `(c addr not-found)` are get-choice's lookups,
+    loud in the same places. At nested choices the call is an error that
+    points to get-submap, not the submap, as Gen.jl's `cm[addr]` (a
+    KeyError) and a trace's call are: a call reads values, a submap is a
+    choice map, and a call that answered with either would leave every
+    caller to ask which. Like a trace's call, it reads a 0-d boolean as a
+    host boolean outside a body (genclj-x6ox; the lead's choice), so
+    `((:choices tr) a)` is `(tr a)`; get-choice returns the value as
+    stored. The body flag is gen.choicemap's `*in-body*` (no-doc), which
+    gen.dynamic binds beside `*body-call*`: gen.choicemap cannot see
+    gen.trace.
   - **Before the tag:** the friction that changes shape lands (one
     result-key vocabulary, kernels returning {:trace :accepted?}, labeled
     metrics, matching batched return shapes, selections' union and

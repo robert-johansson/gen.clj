@@ -42,8 +42,9 @@
 ;=> [true true]
 
 ;; book: read
-[(cm/get-choice c [:params :slope]) (cm/get-value (cm/get-submap c :y0))]
-;=> [2.0 5.0]
+[(cm/get-choice c [:params :slope]) (c [:params :slope])
+ (cm/get-value (cm/get-submap c :y0))]
+;=> [2.0 2.0 5.0]
 
 (cm/to-map (cm/get-submap c :params))
 ;=> {:slope 2.0 :intercept 1.0}
@@ -66,13 +67,17 @@
       [[:params :slope] :z :params [:y0 :a]])
 ;=> [:found :absent :node :through-value]
 
-[(cm/get-choice c :z nil) (cm/has-value? c :z) (cm/has-submap? c :params)]
+[(c :z nil) (cm/has-value? c :z) (cm/has-submap? c :params)]
 ;=> [nil false true]
+
+;; book: call-node
+;; error: choice map: no value at [:params]: nested choices are there
+#_(c :params)
 
 ;; book: immutable
 (def c2 (cm/set-choice c [:params :slope] 3.0))
 
-[(cm/get-choice c2 [:params :slope]) (cm/get-choice c [:params :slope])]
+[(c2 [:params :slope]) (c [:params :slope])]
 ;=> [3.0 2.0]
 
 (def a (cm/choicemap :x 1.0 :y 2.0))

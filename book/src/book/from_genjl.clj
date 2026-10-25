@@ -61,6 +61,17 @@
 [(= model (:gen-fn tr)) (:args tr) (= (:retval tr) (tr []) (tr :mu))]
 ;=> [true [3] true]
 
+;; book: choicemap-call
+(def readings (:choices tr))
+
+[(= (readings :mu) (tr :mu)) (some? (readings [:sensor 0 :reading]))
+ (readings [:sensor 7 :reading] nil)]
+;=> [true true nil]
+
+;; book: choicemap-call-node
+;; error: choice map: no value at [:sensor]: nested choices are there
+#_(readings :sensor)
+
 ;; book: record-field-trap
 [(:mu tr) (some? (tr :mu))]
 ;=> [nil true]
@@ -93,8 +104,9 @@
 
 [(ctr :heads)
  (if (ctr :heads) :yes :no)
+ (if ((:choices ctr) :heads) :yes :no)
  (if (array/truthy? (cm/get-choice (:choices ctr) :heads)) :yes :no)]
-;=> [false :no :no]
+;=> [false :no :no :no]
 
 ;; book: plain-call
 (def noise (gen [] (trace :z (d/normal 0 1))))

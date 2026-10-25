@@ -14,7 +14,18 @@
    a not-found value to give there instead, as nth does:
    (get-choice c :x nil). The questions has-value? and has-submap? never
    throw. Clojure's get on a choice map reads the record's fields, not
-   addresses."
+   addresses.
+
+   A choice map called on an address or path reads the value there, as a
+   trace called does (gen.trace) and Gen.jl's cm[addr]: (c :slope),
+   (c [:y 0]), and (c :b nil) with a not-found value. It is loud where
+   get-choice is, a node included: a call reads values, and a submap is a
+   choice map, which get-submap reads (Gen.jl's cm[addr] throws there too).
+   Answering with the submap instead would make every caller ask which of
+   the two it got. The call reads a value as a trace's call does, for host
+   code: outside a generative function's body a 0-d boolean comes back a
+   host boolean, so (if (c :b) …) branches on its value on every backend;
+   get-choice returns the value as stored."
   {:api :stable}
   (:refer-clojure :exclude [empty? merge to-array])
   (:require [gen.array :as array]))
@@ -27,12 +38,18 @@
   (-get-submap [cm addr])
   (-submaps [cm]))
 
+(declare ^:private call)
+
 (defrecord Value [v]
   IChoiceMap
   (-has-value? [_] true)
   (-get-value [_] v)
   (-get-submap [_ _] nil)
-  (-submaps [_] nil))
+  (-submaps [_] nil)
+  clojure.lang.IFn
+  (invoke [this addr] (call this addr))
+  (invoke [this addr not-found] (call this addr not-found))
+  (applyTo [this args] (clojure.lang.AFn/applyToHelper this args)))
 
 (defrecord Node [m]
   IChoiceMap
@@ -41,7 +58,11 @@
     (throw (ex-info (str "This choice map is a node, not a value. Addresses: " (vec (keys m)))
                     {:addresses (vec (keys m))})))
   (-get-submap [_ addr] (get m addr))
-  (-submaps [_] (seq m)))
+  (-submaps [_] (seq m))
+  clojure.lang.IFn
+  (invoke [this addr] (call this addr))
+  (invoke [this addr not-found] (call this addr not-found))
+  (applyTo [this args] (clojure.lang.AFn/applyToHelper this args)))
 
 (def EMPTY (->Node {}))
 
@@ -143,16 +164,18 @@
    of cm (what names the lookup and what it missed): an ex-info whose :reason
    is what cm holds at p (:absent, :value, :node or :through-value), with
    :path p and :at, the prefix of p that holds a value when p goes through
-   one."
-  [what cm p]
-  (let [[sub at] (walk cm p)
-        reason (cond at :through-value (has-value? sub) :value (empty? sub) :absent :else :node)]
-    (ex-info (str what " at " (pr-str p) ": " (case reason
-                                                 :absent "nothing is there"
-                                                 :value "a value is there"
-                                                 :node "nested choices are there"
-                                                 :through-value (str "the path goes through the value at " (pr-str at))))
-             {:reason reason :path p :at at})))
+   one. hints maps a reason to text the message ends with."
+  ([what cm p] (lookup-error what cm p nil))
+  ([what cm p hints]
+   (let [[sub at] (walk cm p)
+         reason (cond at :through-value (has-value? sub) :value (empty? sub) :absent :else :node)]
+     (ex-info (str what " at " (pr-str p) ": " (case reason
+                                                  :absent "nothing is there"
+                                                  :value "a value is there"
+                                                  :node "nested choices are there"
+                                                  :through-value (str "the path goes through the value at " (pr-str at)))
+                   (get hints reason))
+              {:reason reason :path p :at at}))))
 
 (def ^:private none (Object.))
 
@@ -181,6 +204,37 @@
    with not-found, it gives not-found there."
   ([cm] (if (has-value? cm) (-get-value cm) (throw (lookup-error "get-value: no value" cm []))))
   ([cm not-found] (if (has-value? cm) (-get-value cm) not-found)))
+
+(def ^:no-doc ^:dynamic *in-body*
+  "True while a generative function's body runs (gen.dynamic binds it,
+   beside gen.trace/*body-call*), false in host code: what for-host asks."
+  false)
+
+(defn ^:no-doc for-host
+  "v as a call of a choice map or a trace gives it (genclj-x6ox). Outside
+   a body, a 0-d boolean array is a host boolean, so (if (c :a) …) branches
+   on its value on every backend, not on an array object (always true); on
+   a lazy backend the read evaluates it, at what is an inference-loop
+   boundary. Inside a body, values stay arrays: gen's conditionals read
+   them. A batched value, one per particle, stays one too."
+  [v]
+  (if (and (not *in-body*) (array/backend-array? v) (not (array/batched? v))
+           (= :bool (array/dtype v)) (= [] (array/shape v)))
+    (array/truthy? v)
+    v))
+
+
+(defn- call
+  "A choice map called on an address or path: get-choice, read for host
+   code (for-host)."
+  ([cm addr]
+   (let [v (get-choice cm addr none)]
+     (if (identical? v none)
+       (throw (lookup-error "choice map: no value" cm (path addr) {:node "; get-submap reads a submap"}))
+       (for-host v))))
+  ([cm addr not-found]
+   (let [v (get-choice cm addr none)]
+     (if (identical? v none) not-found (for-host v)))))
 
 (defn has-submap?
   "Are there choices under the address or path: a node that holds values

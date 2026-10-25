@@ -338,19 +338,33 @@
 ;; values stay arrays, which gen's conditionals read. Planted (2026-10-24,
 ;; on MLX): no conversion fails "outside"; converting inside a body too
 ;; fails "inside".
+;; A choice map called reads as the trace called (genclj-a2t8): the same
+;; host boolean outside a body, the same array inside one, which
+;; gen.choicemap/*in-body* tells apart. Planted (2026-10-25): gen.dynamic
+;; not binding *in-body* fails "the flag" on every backend, and on MLX
+;; "inside a body"; the call without the conversion fails "outside" on MLX.
 (deftest a-boolean-choice-reads-as-a-host-boolean-outside-a-body
   ;; a sampled choice (a constrained one is the host value given), false
   ;; for certain, which an array object would make true
   (let [flip (gen [] (trace :b (d/bernoulli 0.0)) (trace :x (d/normal 0 1)))
         tr (gfi/simulate flip [] (rng/key 1))
+        c (:choices tr)
         seen (atom nil)]
     (testing "outside a body"
       (is (false? (tr :b)))
       (is (= :no (if (tr :b) :yes :no)))
-      (is (= (ts/jvm?) (number? (tr :x))) "only booleans change: a number stays the backend's"))
+      (is (= (ts/jvm?) (number? (tr :x))) "only booleans change: a number stays the backend's")
+      (is (false? (c :b)) "the choice map called, as the trace")
+      (is (= :no (if (c :b) :yes :no)))
+      (is (= (ts/jvm?) (number? (c :x))))
+      (is (= (ts/jvm?) (boolean? (cm/get-choice c :b))) "get-choice gives the value as stored"))
     (testing "inside a body, the backend's value"
-      (gfi/simulate (gen [t] (reset! seen (t :b)) nil) [tr] (rng/key 2))
-      (is (if (ts/jvm?) (false? @seen) (array/backend-array? @seen))))))
+      (gfi/simulate (gen [t] (reset! seen [(t :b) ((:choices t) :b)]) nil) [tr] (rng/key 2))
+      (is (every? #(if (ts/jvm?) (false? %) (array/backend-array? %)) @seen)))
+    (testing "the flag: set inside a body, not outside"
+      (gfi/simulate (gen [] (reset! seen cm/*in-body*) nil) [] (rng/key 3))
+      (is (true? @seen))
+      (is (false? cm/*in-body*)))))
 
 (defmacro ^:private calls
   "[n (gf 0 1 … n-1)] for n from 0 to 22: every invoke arity, the variadic

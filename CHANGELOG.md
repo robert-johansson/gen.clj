@@ -195,6 +195,17 @@ newest first in each section.
 
 ### Added
 
+- **Choice maps are callable, as traces are** (DESIGN §9, "The 1.0's
+  shape", the eight more; genclj-a2t8). `(c :slope)`, `(c [:y 0])` and
+  `(c :b nil)` read the value there as `cm/get-choice` does, loud in the
+  same places, with a not-found arity. At an address that holds nested
+  choices the call is an error that points to `cm/get-submap`, not the
+  submap, as Gen.jl's `cm[addr]` throws there. Like a trace's call, it
+  reads a 0-d boolean as a host boolean outside a body (genclj-x6ox), so
+  `((:choices tr) a)` is `(tr a)` for every choice on every backend;
+  `cm/get-choice` still returns the value as stored. A trace's call at
+  nested choices now ends its message with where to read them, and `ifn?`
+  is true of a choice map.
 - **`array/vmap`: a function batched over a leading axis,** as JAX's
   vmap (DESIGN §9, "The 1.0's shape"; fbf0d21, genclj-t3ur).
   `((array/vmap f {:in-axes [0 nil]}) xs shared)` runs f once for the
@@ -387,9 +398,9 @@ sections above in the commit that builds it.
     `dtype-kind` (memo.clj's).
   - Shape changes before the tag: one result-key vocabulary, kernels
     returning `{:trace :accepted?}`, labeled metrics, matching batched
-    return shapes, selections' union and intersection, callable choice maps,
-    trace keyword lookups, public handler state, an optimizer interface and
-    training callbacks, laws for users, particle-filter accessors, and the
+    return shapes, selections' union and intersection, trace keyword
+    lookups, public handler state, an optimizer interface and training
+    callbacks, laws for users, particle-filter accessors, and the
     transform API.
 
 ## History before Unreleased, by milestone

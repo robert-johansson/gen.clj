@@ -9,7 +9,9 @@
    own. (subtrace tr addr) is the call's trace (Gen.jl's
    get_call(tr, addr).subtrace). Both are loud where there is no such
    choice or call, and take a not-found value to give there instead, as
-   gen.choicemap's lookups do: (tr :b nil).
+   gen.choicemap's lookups do: (tr :b nil). A choice reads as the choice
+   map called reads it, ((:choices tr) :b): outside a body, a 0-d boolean
+   comes back a host boolean (gen.choicemap).
 
    A keyword reads the record's fields, not the choices: (:choices tr),
    (:score tr) and the others are the fields, and (:slope tr) is nil
@@ -26,7 +28,6 @@
    score is an estimate."
   {:api :stable}
   (:require [gen.array :as array]
-            [gen.array.batch :as batch]
             [gen.choicemap :as cm]))
 
 (set! *warn-on-reflection* true)
@@ -41,29 +42,19 @@
    gen.gfi/untraced-call); nil outside a body."
   nil)
 
-(defn- for-host
-  "v as host code reads it. Outside a body, a 0-d boolean array is a host
-   boolean, so (if (tr :a) …) branches on its value on every backend, not
-   on an array object (always true); on a lazy backend the read evaluates
-   it, at what is an inference-loop boundary. Inside a body, values stay
-   arrays: gen's conditionals read them (array/truthy?). A batched value,
-   one per particle, stays one too."
-  [v]
-  (if (and (nil? *body-call*) (array/backend-array? v) (not (batch/batched? v))
-           (= :bool (array/dtype v)) (= [] (array/shape v)))
-    (array/truthy? v)
-    v))
-
 (defrecord Trace [gen-fn args choices retval score]
   clojure.lang.IFn
   (invoke [this addr]
     (let [v (this addr none)]
-      (if (identical? v none) (throw (cm/lookup-error "trace: no choice or call" choices (cm/path addr))) v)))
+      (if (identical? v none)
+        (throw (cm/lookup-error "trace: no choice or call" choices (cm/path addr)
+                                {:node "; get-submap of its choices reads a submap"}))
+        v)))
   (invoke [this addr not-found]
     (let [v (cm/get-choice choices addr none)]
       (if (identical? v none)
-        (let [s (subtrace this addr none)] (if (identical? s none) not-found (for-host (:retval s))))
-        (for-host v))))
+        (let [s (subtrace this addr none)] (if (identical? s none) not-found (cm/for-host (:retval s))))
+        (cm/for-host v))))
   (applyTo [this args] (clojure.lang.AFn/applyToHelper this args)))
 
 (def ^:private fields #{:gen-fn :args :choices :retval :score})

@@ -90,6 +90,47 @@
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"get-choice: no value at \[:x :a\]: the path goes through the value at \[:x\]"
                             (cm/get-choice c [:x :a]))))))
 
+(deftest a-choice-map-called-reads-a-value
+  ;; DESIGN.md §9 (2026-10-25): choice maps are callable as traces are, loud
+  ;; with a not-found arity (genclj-a2t8). A node is an error naming
+  ;; get-submap, as Gen.jl's cm[addr] is. Planted (2026-10-25): a call that
+  ;; gave the submap at a node fails "at a node"; a not-found arity that
+  ;; gave nil fails "not-found"; a Value without the call fails "a value".
+  (let [c (cm/choicemap :x 1.0 [:y :z] 2.0 [:y :w] 3.0)]
+    (testing "an address or a path"
+      (is (= [1.0 2.0 3.0] [(c :x) (c [:y :z]) (c [:y :w])]))
+      (is (= [1.0 2.0] (map c [:x [:y :z]])) "a function of an address")
+      (is (= 1.0 (apply c [:x]))))
+    (testing "loud where get-choice is"
+      (is (= {:reason :absent :path [:v] :at nil} (ts/thrown-data (c :v))))
+      (is (= {:reason :through-value :path [:x :a] :at [:x]} (ts/thrown-data (c [:x :a]))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"^choice map: no value at \[:v\]: nothing is there$" (c :v))))
+    (testing "at a node, an error naming get-submap, not the submap"
+      (is (= {:reason :node :path [:y] :at nil} (ts/thrown-data (c :y))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"nested choices are there; get-submap reads a submap" (c :y)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"nested choices are there" (c [])) "the root of a node"))
+    (testing "not-found"
+      (is (= [::none ::none ::none 1.0 2.0] (map #(c % ::none) [:v :y [:x :a] :x [:y :z]]))))
+    (testing "a value, and the empty choice map"
+      (is (= 3.0 ((cm/->Value 3.0) [])) "a value at the root")
+      (is (= :through-value (:reason (ts/thrown-data ((cm/->Value 3.0) :x)))))
+      (is (= :absent (:reason (ts/thrown-data (cm/EMPTY :x)))))
+      (is (= ::none (cm/EMPTY :x ::none))))))
+
+(defspec calling-a-choice-map-is-get-choice 200
+  ;; the leaves hold no booleans, so the call gives get-choice's very value
+  ;; (dynamic_test has the booleans); at the addresses and at paths around
+  ;; them: a prefix (a node, or the root), one past a value, nowhere
+  (prop/for-all [c gen-choicemap]
+    (let [ps (cm/addresses c)
+          around (concat ps (map pop (remove empty? ps)) (map #(conj % :past) ps) [[] [:nowhere]])]
+      (every? (fn [p] (let [v (cm/get-choice c p ::none)]
+                        (and (identical? v (c p ::none))
+                             (if (identical? v ::none)
+                               (= (ts/thrown-data (cm/get-choice c p)) (ts/thrown-data (c p)))
+                               (identical? v (c p))))))
+              around))))
+
 (deftest a-choice-map-value-is-itself
   ;; nodes and values are records, so map? is true of them: choicemap and
   ;; from-map once read their fields as addresses ([:d :m :a :v]), the
@@ -254,6 +295,9 @@
     (is (trace/trace? tr))
     (is (= 2.0 (tr :slope)) "calling a trace on an address reads the choice, like trace[addr]")
     (is (= 1.0 (tr [:y 0])))
+    (is (= [2.0 1.0] (map (:choices tr) [:slope [:y 0]])) "as calling its choice map does")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"trace: no choice or call at \[:y\]: nested choices are there; get-submap of its choices reads a submap"
+                          (tr :y)))
     (is (= -1.5 (:score tr)))
     (is (= [1 2] (:args tr)))))
 
