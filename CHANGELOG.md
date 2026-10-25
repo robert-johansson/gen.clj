@@ -338,7 +338,8 @@ newest first in each section.
     and memory, gen.random.threefry and gen.backend.mlx.exact (internal).
   - `test/fixtures/api-snapshot.edn` holds the stable surface: every
     public var but `^:no-doc` ones, with its arglists or its kind (32
-    namespaces, 669 vars with genclj-9efy's replacements, gfi/assess-backward, array/vmap, the kernel constructors and genclj-xgz4's batched forms and accessor). gen.api-test fails when the code differs. It
+    namespaces and 675 vars when the data layer's additions landed; it
+    grows with each deliberate addition). gen.api-test fails when the code differs. It
     names what was added, removed or changed, and calls out apart a var
     removed without a deprecation first. `clojure -M:test -m gen.api
     write` writes the snapshot after a deliberate change; `check` prints
