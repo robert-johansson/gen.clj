@@ -1115,6 +1115,60 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   is an error naming `cm/from-map`, since it would read as no constraints at
   all. `nil` is the empty choice map. Selections and argument vectors are
   checked the same way.
+- **The handler's state and middleware** (owner, 2026-10-25, approved in
+  advance as recorded here; genclj-q6sc, found writing the book's chapter
+  014, whose middleware needed an outside atom to report anything):
+  - **The state** is public. `dyn/initial-state` (op, and opts: `:key`
+    and the operation's `:constraints`, `:prev`, `:argdiffs` and
+    `:selection`, nothing else) makes the state an operation starts
+    from, the same sixteen keys for every operation, each documented in
+    its docstring: the operation's inputs (`:mode :constraints :prev
+    :selection :argdiffs`), what the run has made so far (`:choices
+    :scores :subtraces :score :weight :discard`, written by the standard
+    transitions at sites and by the loop at calls), and the loop's own
+    (`:key :visited :omega :omega-key :omega-count`). Keys in
+    gen.dynamic's namespace are the handler's internals.
+  - **What middleware writes.** It reads every key. It writes keys of
+    its own namespace (qualified keywords outside gen.dynamic's and
+    gen.trace's) and `:constraints`, to condition the rest of the run on
+    values of its own, as gen.inference.conjugate's reference run and
+    proposal's replay already did; it changes the model through what it
+    hands the transition it wraps (a distribution, a key). After each of
+    middleware's transitions the loop checks, by identity and reading no
+    value, that the other inputs and the loop's keys are as they were,
+    that a choice was recorded at the path, and that the result is
+    [value state']; at the run's end an unqualified key the state does
+    not have, or one of gen.trace's, is an error. The totals (`:choices
+    :scores :score :weight :discard`) are the standard transitions' to
+    write: a middleware that writes one itself breaks the trace, and is
+    unsupported rather than checked, since checking a sum would read
+    values. A run without middleware pays one identity test per site and
+    one lookup per run.
+  - **Data out: middleware's own keys.** They ride the state from site
+    to site and the run returns them: on the trace it makes (simulate,
+    generate, update, regenerate), in the result of assess and propose,
+    which make none. They are data about the run: no operation reads
+    them, so they change no operation's meaning (§3.1). Chosen over one
+    channel key (`:middleware/out`): namespaced keys are how a Clojure
+    map is extended, middleware compose without sharing a channel, and
+    writing and reading them needs no new function. Not metadata: the
+    partition walks (resampling, a Switch by partition) go through a
+    trace's fields, not its metadata, so batched values there would go
+    stale.
+  - **In update and regenerate** each run starts without them: the trace
+    an update makes holds its own run's, and middleware that wants the
+    previous run's reads them on `(:prev state)`. So a chain of updates
+    does not accumulate data unless its middleware asks to.
+  - **In a batched run** the middleware runs once for all the particles,
+    under the batch tracer: it sees batched values, and what it writes
+    from them is batched. Its keys are one value on the collection's
+    batched trace (`gen.array.batch/unwrap` gives an [n …] array),
+    gathered with the trace by `batched/take` and `select`. A
+    collection that fell back holds each particle's own scalar run's.
+    `batched/traces` rebuilds a particle's trace by a scalar generate, so
+    that trace holds the generate's keys, not the batched run's. Spot
+    checks compare scores and return values, not these keys. A
+    dispatcher's result holds none, since no transition ran.
 - **Bernoulli values are booleans,** as in Gen.jl: 0/1 (GenMLX's) is an
   error, since a body's `if` takes 0 as true while the density scores it as
   false. NaN parameters and NaN constrained values are errors too.

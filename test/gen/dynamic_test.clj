@@ -7,6 +7,7 @@
             [clojure.test.check]
             [gen.array :as array :refer [+ - * /]]
             [gen.array.batch :as batch]
+            [gen.batched :as batched]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.combinators :as comb]
@@ -442,13 +443,12 @@
                           (gfi/simulate (gen [] (splice (d/normal 0 1))) [] (rng/key 5))))))
 
 (def doubled-site
-  "Middleware for simulate: every value drawn at :x is doubled (a different
-   model, as middleware may be)."
+  "Middleware for simulate: the value at :x, a normal(0, 1) draw, is drawn
+   from normal(0, 2), twice it under the same key (a different model, as
+   middleware may be: through the distribution it hands the transition,
+   so the trace scores what it holds)."
   (fn [state p dist k]
-    (let [[v s] ((dyn/site-transitions :simulate) state p dist k)]
-      (if (= p [:x])
-        [(* 2.0 v) (assoc-in s [:choices] (cm/set-choice (:choices s) p (* 2.0 v)))]
-        [v s]))))
+    ((dyn/site-transitions :simulate) state p (if (= p [:x]) (d/normal 0 2) dist) k)))
 
 (deftest middleware-of-a-callee-spliced-without-an-address-applies-to-its-body
   (let [inner (dyn/with-transitions (gen [] (trace :x (d/normal 0 1))) {:simulate doubled-site})
@@ -859,3 +859,267 @@
                           ["-0.0 after 0.0" (let [calls (atom 0)] (fn [_] (if (= 1 (swap! calls inc)) 0.0 -0.0)))]
                           ["a double after a long" (let [calls (atom 0)] (fn [_] (if (= 1 (swap! calls inc)) 1 1.0)))]]]
       (is (diff/unknown-change? (argdiff make)) label))))
+
+;; ---------------------------------------------------------------------------
+;; The handler's state, and middleware's own keys (DESIGN.md §9, "The
+;; handler's state and middleware"; genclj-q6sc)
+;; ---------------------------------------------------------------------------
+
+(def ^:private documented-keys
+  "The state's keys, as initial-state's docstring lists them."
+  #{:mode :constraints :prev :selection :argdiffs :choices :scores :subtraces :score :weight :discard
+    :key :visited :omega :omega-key :omega-count})
+
+(defn- watching
+  "model with middleware that keeps, under ::steps, one step for each site:
+   the state its transition received (:in), the path, distribution and key
+   it was handed, and the state the standard transition returned (:out)."
+  [model]
+  (dyn/with-transitions model
+    (into {} (for [[op t] dyn/site-transitions]
+               [op (fn [state p dist k]
+                     (let [[v out] (t state p dist k)]
+                       [v (update out ::steps (fnil conj []) {:in state :path p :dist dist :key k :out out})]))]))))
+
+(def ^:private one-call (gen [mu] (trace :z (d/normal mu 1))))
+
+(def ^:private every-kind
+  "A site, an untraced draw, a call, and a site after them."
+  (gen []
+    (let [a (trace :a (d/normal 0 1))
+          u (untraced (d/normal 0 1))
+          z (splice :c one-call a)]
+      (trace :b (d/normal (+ z (* 0.0 u)) 1)))))
+
+;; Planted bugs (2026-10-25): an undocumented key in the initial state
+;; fails the key set; ω folded from another key than the operation's fails
+;; :omega-key's case.
+(deftest initial-state-holds-the-documented-keys
+  (let [w (watching every-kind)
+        k (rng/key 1)
+        tr (gfi/simulate w [] (rng/key 0))
+        cs (cm/choicemap :a 0.5)]
+    (doseq [[op opts] [[:simulate {:key k}] [:generate {:key k :constraints cs}]
+                       [:assess {:key k :constraints (:choices tr)}]
+                       [:update {:key k :prev tr :argdiffs [] :constraints cs}]
+                       [:regenerate {:key k :prev tr :argdiffs [] :selection (sel/select :a)}]]]
+      (testing op
+        (let [state (dyn/initial-state op opts)
+              r (gfi/run-op w op [] opts)
+              first-in (:in (first (::steps (or (:trace r) r))))]
+          (is (= documented-keys (set (filter simple-keyword? (keys state)))) "the documented keys, and no other")
+          (is (every? #(= "gen.dynamic" (namespace %)) (filter qualified-keyword? (keys state)))
+              "the others are gen.dynamic's")
+          (is (= op (:mode state)))
+          (is (every? true? (map #(identical? (get opts % ({:constraints cm/EMPTY :selection sel/none} %)) (get state %))
+                                 [:key :constraints :prev :argdiffs :selection]))
+              "the operation's inputs")
+          (is (identical? k (:omega-key state)))
+          (is (= [nil 0] [(:omega state) (:omega-count state)]))
+          (is (= [cm/EMPTY {} {} 0.0 0.0 cm/EMPTY #{}]
+                 (mapv state [:choices :scores :subtraces :score :weight :discard :visited]))
+              "nothing made yet")
+          (is (= (dissoc state :key) (dissoc first-in :key)) "the run starts from it")
+          (is (= (rng/key-data (first (rng/split k))) (rng/key-data (:key first-in)))
+              "its first site has split the key"))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"is not an operation" (dyn/initial-state :propose)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not an operation's inputs"
+                          (dyn/initial-state :generate {:constraint cs})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"must be a choice map"
+                          (dyn/initial-state :generate {:constraints {:a 0.5}})))))
+
+;; What each key holds at the two sites of every-kind, around its untraced
+;; draw and call, in every operation. Planted bug (2026-10-25): a site's
+;; path added to :visited before its transition fails :visited's case.
+(deftest the-state's-keys-mean-what-initial-state-says
+  (let [w (watching every-kind)
+        k (rng/key 2)
+        tr (gfi/simulate w [] (rng/key 1))
+        n01 (d/normal 0 1)
+        old-a (tr :a)
+        old-z (tr [:c :z])
+        runs {:simulate {:trace (gfi/simulate w [] k)}
+              :generate (gfi/generate w [] (cm/choicemap :a 0.5 [:c :z] 0.2) k)
+              :assess (gfi/assess w [] (:choices tr) k)
+              :update (gfi/update tr (cm/choicemap :a 0.5) k)
+              :regenerate (gfi/regenerate tr (sel/select :a) k)}]
+    (doseq [[op r] runs
+            :let [made (:trace r)
+                  [a b] (::steps (or made r))
+                  va (cm/get-choice (:choices (:out a)) :a)
+                  vz (cm/get-choice (:choices (:in b)) [:c :z])
+                  lp-a (dc/log-prob n01 va)
+                  lp-z (dc/log-prob (d/normal va 1) vz)
+                  weights (mapv :weight [(:in a) (:out a) (:in b) (:out b)])]]
+      (testing op
+        (is (= [[:a] [:b]] (mapv :path [a b])))
+        (is (= [op op] (mapv (comp :mode :in) [a b])) ":mode")
+        (let [[after-call _] (rng/split (:key (:in a)))
+              [b-next k-b] (rng/split after-call)]
+          (is (= (mapv rng/key-data [b-next k-b]) (mapv rng/key-data [(:key (:in b)) (:key b)]))
+              ":key: the key that the call, then the site after it, split"))
+        (is (= {[:a] lp-a} (:scores (:out a))) ":scores")
+        (is (= #{[:a] [:b]} (set (keys (:scores (:out b))))) ":scores: a call's are in its trace")
+        (is (= #{[:a] [:c :z]} (set (cm/addresses (:choices (:in b))))) ":choices: the call's under its address")
+        (is (close? (:score (:in b)) (+ lp-a lp-z)) ":score: the sites' and the call's")
+        (is (close? (:score (:out b)) (+ (:score (:in b)) (get (:scores (:out b)) [:b]))))
+        (if (= op :assess)
+          (is (= {} (:subtraces (:in b))) ":subtraces: assess keeps none")
+          (is (close? lp-z (:score (get (:subtraces (:in b)) [:c]))) ":subtraces: the call's trace"))
+        (is (= [#{} #{} #{[:a] [:c]}] (mapv :visited [(:in a) (:out a) (:in b)]))
+            ":visited: the paths used before the site")
+        (is (= [0 1] (mapv (comp :omega-count :in) [a b])) ":omega-count: the untraced draw's")
+        (is (= (rng/key-data k) (rng/key-data (:omega-key (:in b)))) ":omega-key: the operation's key")
+        (is (nil? (:omega (:in a))) ":omega: nil before the first untraced draw (none kept)")
+        (when made
+          (is (= (rng/key-data (:omega (:in b))) (rng/key-data (::trace/omega made))) ":omega: the trace's ω"))
+        (is (identical? (:constraints (:in a)) (:constraints (:in b))))
+        (is (= [(boolean (#{:update :regenerate} op)) (= op :regenerate) (boolean (#{:update :regenerate} op))]
+               [(some? (:prev (:in a))) (not= sel/none (:selection (:in a))) (some? (:argdiffs (:in a)))])
+            ":prev, :selection and :argdiffs: the operations' that take them")
+        (when (:weight r) (is (close? (:weight r) (peek weights)) ":weight: the operation's at the end"))
+        (case op
+          :simulate (is (every? #(close? 0.0 %) weights) ":weight: 0.0 throughout simulate")
+          :generate (is (every? true? (map close? weights [0.0 lp-a (+ lp-a lp-z) (+ lp-a lp-z)]))
+                        ":weight: the constrained sites' and the call's")
+          :assess (is (every? true? (map close? weights (map :score [(:in a) (:out a) (:in b) (:out b)])))
+                      ":weight: every site's")
+          :update (let [d-a (- lp-a (dc/log-prob n01 old-a))
+                        d-z (- lp-z (dc/log-prob (d/normal old-a 1) old-z))]
+                    (is (every? true? (map close? weights [0.0 d-a (+ d-a d-z) (+ d-a d-z)]))
+                        ":weight: the changes in log density")
+                    (is (= {:a (ts/host old-a)} (ts/host (:discard (:out a)))) ":discard: the value replaced"))
+          :regenerate (let [d-z (- lp-z (dc/log-prob (d/normal old-a 1) old-z))]
+                        (is (every? true? (map close? weights [0.0 0.0 d-z d-z]))
+                            ":weight: the unselected choices' changes")))
+        (when-not (= op :update)
+          (is (cm/empty? (:discard (:out b))) ":discard: update's only"))))))
+
+;; Planted bugs (2026-10-25): a trace made without middleware's keys fails
+;; simulate's, generate's, update's and regenerate's cases; an update or
+;; regenerate that starts from the previous run's keys fails theirs.
+(deftest middleware's-own-keys-reach-every-operation's-result
+  (let [w (watching every-kind)
+        k (rng/key 3)
+        tr (gfi/simulate w [] (rng/key 1))
+        modes (fn [x] (mapv (comp :mode :in) (::steps x)))
+        u (:trace (gfi/update tr (cm/choicemap :a 0.5) k))
+        r (:trace (gfi/regenerate tr (sel/select :a) k))]
+    (is (= [:simulate :simulate] (modes tr)) "simulate: on its trace")
+    (is (= [:generate :generate] (modes (:trace (gfi/generate w [] (cm/choicemap :a 0.5) k)))) "generate: on its trace")
+    (is (= [:update :update] (modes u)) "update: on its trace, its own run's alone")
+    (is (= [:regenerate :regenerate] (modes r)) "regenerate: on its trace, its own run's alone")
+    (is (identical? (::steps tr) (::steps (:prev (:in (first (::steps u)))))) "the previous run's, on :prev")
+    (is (= [:assess :assess] (modes (gfi/assess w [] (:choices tr) k))) "assess: in its result")
+    (is (= [:simulate :simulate] (modes (gfi/propose w [] k))) "propose: in its result")
+    (is (nil? (::steps (gfi/simulate every-kind [] k))) "none without middleware")))
+
+;; Middleware that only keeps data runs the operation the standard
+;; transitions run. Planted bug (2026-10-25): a middleware's transition
+;; handed the state's next key in place of its site's fails every case
+;; that draws (assess draws nothing at its sites).
+(deftest middleware's-own-keys-change-no-operation's-meaning
+  (let [w (watching every-kind)
+        k (rng/key 4)
+        [tw t] (map #(gfi/simulate % [] (rng/key 1)) [w every-kind])
+        cs (cm/choicemap :a 0.5)
+        same (fn [label & xs] (is (apply = (map ts/host xs)) label))
+        parts (fn [r] (let [tr (:trace r)]
+                        (cond-> (dissoc r :trace ::steps)
+                          tr (assoc :choices (:choices tr) :score (:score tr) :retval (:retval tr)))))]
+    (same "simulate" (parts {:trace tw}) (parts {:trace t}))
+    (same "generate" (parts (gfi/generate w [] cs k)) (parts (gfi/generate every-kind [] cs k)))
+    (same "assess" (parts (gfi/assess w [] (:choices t) k)) (parts (gfi/assess every-kind [] (:choices t) k)))
+    (same "update" (parts (gfi/update tw cs k)) (parts (gfi/update t cs k)))
+    (same "regenerate" (parts (gfi/regenerate tw (sel/select :a) k)) (parts (gfi/regenerate t (sel/select :a) k)))))
+
+(defn- scoring
+  "model with middleware that keeps, under ::scores, [operation score] after
+   each site."
+  [model]
+  (dyn/with-transitions model
+    (into {} (for [[op t] dyn/site-transitions]
+               [op (fn [state p dist k]
+                     (let [[v out] (t state p dist k)]
+                       [v (update out ::scores (fnil conj []) [(:mode state) (:score out)])]))]))))
+
+;; A batched run's middleware sees batched values, and its keys are one
+;; value for every particle, on the batched trace. Planted bug
+;; (2026-10-25): a batched run that returns no keys of middleware's fails
+;; every batched case.
+(deftest middleware's-own-keys-reach-batched-results
+  (let [n 5
+        m (scoring (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal x 1)))))
+        kept (fn [tr n'] (mapv (fn [[op s]] [op (batch/unwrap s [n'])]) (::scores tr)))
+        agrees? (fn [ps op]
+                  (let [[[op1 s1] [op2 s2]] (kept (:trace ps) (batched/size ps))]
+                    (and (batched/batched? ps) (= [op op] [op1 op2])
+                         (close? s1 (dc/log-prob (d/normal 0 1) (batched/choice ps :x)))
+                         (close? s2 (batched/scores ps)))))
+        ps (batched/simulate m [] n (rng/key 1))]
+    (is (batch/batched? (second (first (::scores (:trace ps))))) "batched values, one per particle")
+    (is (agrees? ps :simulate) "simulate")
+    (is (agrees? (:particles (batched/generate m [] (cm/choicemap :y 0.5) n (rng/key 2))) :generate) "generate")
+    (is (agrees? (:particles (batched/update ps [] [] (cm/choicemap :y 0.3) (rng/key 3))) :update)
+        "update: its own run's alone")
+    (is (agrees? (:particles (batched/regenerate ps [] [] (sel/select :x) (rng/key 4))) :regenerate)
+        "regenerate: its own run's alone")
+    (is (agrees? (batched/take ps [3 0]) :simulate) "taken particles' values gathered with the trace")
+    (let [{tr :trace} (gfi/run-op m :simulate [] {:key (rng/key 5) :batch-shape [n]})]
+      (is (close? (second (peek (kept tr n))) (batch/unwrap (:score tr) [n])) "gfi/run-op, batched"))
+    (is (every? #(= [:generate :generate] (mapv first (::scores %))) (batched/traces ps))
+        "a rebuilt particle's trace holds the keys of the generate that rebuilt it")
+    (let [branching (scoring (gen [] (if (trace :s (d/bernoulli 0.5)) (trace :y (d/normal 1 1)) (trace :z (d/normal -1 1)))))
+          fell (batched/simulate branching [] 8 (rng/key 6))]
+      (is (not (batched/batched? fell)))
+      (is (every? #(and (= [:simulate :simulate] (mapv first (::scores %))) (close? (:score %) (second (peek (::scores %)))))
+                  (:traces fell))
+          "fallen back: each particle's run its own"))))
+
+;; Planted bugs (2026-10-25): with :selection out of the checked keys its
+;; case fails; without the check of a choice recorded at the path, the
+;; transition that returns the state it received passes.
+(deftest middleware-that-writes-a-handler-key-is-an-error
+  (let [t (dyn/site-transitions :simulate)
+        m (gen [] (trace :x (d/normal 0 1)))
+        run (fn [step] (gfi/simulate (dyn/with-transitions m {:simulate step}) [] (rng/key 1)))
+        writing (fn [k v] (fn [s p d key] (let [[x s'] (t s p d key)] [x (assoc s' k v)])))]
+    (doseq [k [:mode :prev :selection :argdiffs :key :visited :subtraces :omega :omega-key :omega-count
+               :gen.dynamic/above]]
+      (is (= {:path [:x] :key k} (ts/thrown-data (run (writing k ::changed)))) (str k " written")))
+    (is (= :key (:key (ts/thrown-data (run (fn [s p d key] (t (assoc s :key key) p d key))))))
+        "or handed to the transition it wraps")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"recorded no choice there" (run (fn [s _ _ _] [0.0 s]))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not \[value state'\]" (run (fn [s p d key] (first (t s p d key))))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"left the key :count" (run (writing :count 1)))
+        "an unqualified key of its own")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"left the key :gen.trace/omega" (run (writing ::trace/omega 1)))
+        "a key of gen.trace's, which would overwrite the trace's")))
+
+;; Planted bug (2026-10-25): with :constraints among the checked keys,
+;; the first generate throws.
+(deftest middleware-may-condition-on-values-of-its-own
+  (let [g (dyn/site-transitions :generate)
+        m (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal x 1))))
+        fixing (fn [path v] (dyn/with-transitions m {:generate (fn [s p d k]
+                                                                 (g (update s :constraints cm/set-choice path v) p d k))}))
+        {t :trace w :weight} (gfi/generate (fixing [:x] 0.5) [] cm/EMPTY (rng/key 1))]
+    (is (= 0.5 (ts/host (t :x))) "the value it gives is taken")
+    (is (close? w (dc/log-prob (d/normal 0 1) 0.5)) "and weighed as a constraint")
+    (is (= [[:nowhere]] (:paths (ts/thrown-data (gfi/generate (fixing [:nowhere] 1.0) [] cm/EMPTY (rng/key 1)))))
+        "one at a path the run never visits is the unvisited error")))
+
+;; Planted bug (2026-10-25): a run whose middleware ran only in a callee
+;; spliced without an address (its flag not on the caller's state) fails
+;; the second case.
+(deftest middleware's-own-keys-land-on-the-trace-of-their-run
+  (let [inner (watching (gen [] (trace :x (d/normal 0 1))))
+        tr (gfi/simulate (gen [] (splice :c inner) (splice inner)) [] (rng/key 1))
+        st (watching (gen ^:static [] (let [x (trace :x (d/normal 0 1)) y (trace :y (d/normal x 1))] y)))
+        st-tr (gfi/simulate st [] (rng/key 2))
+        paths #(mapv :path (::steps %))]
+    (is (= [[:x]] (paths (trace/subtrace tr :c))) "a call's, on its own trace")
+    (is (= [[:x]] (paths tr)) "a splice without an address runs its callee's body in the caller's run")
+    (is (= [[:x] [:y]] (paths st-tr) (paths (:trace (gfi/update st-tr (cm/choicemap :x 0.5) (rng/key 3)))))
+        "a static body's, every node rerun under middleware")
+    (is (= [[:x] [:y]] (paths (gfi/assess st [] (:choices st-tr) (rng/key 3)))) "a static body's assess runs the handler")))
