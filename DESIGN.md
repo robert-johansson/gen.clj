@@ -651,7 +651,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     fails a test when the stable surface changes; the API appendix (063)
     is generated from the tier marks; a CHANGELOG from now on. Maven or
     Clojars coordinates are decided at first publish.
-    As built (2026-10-25, the agent, provisional; genclj-dv8x): the mark is
+    As built (2026-10-25, confirmed by the owner; genclj-dv8x): the mark is
     the ns form's attribute map. "Stable for implementers" is `:stable`
     with an `:implementers` note (gen.gfi, gen.array.protocols), not a
     fourth tier: the promise and its check are the same, and gen.gfi holds
@@ -678,7 +678,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     namespace stays experimental. `array/vmap`, a public way to run a
     function batched over a leading axis, joins the stable surface before
     the tag (genclj-t3ur), so dependents and the book leave gen.array.batch.
-    As built (2026-10-25, the agent, provisional; docs/array-api.md §8b):
+    As built (2026-10-25, confirmed by the owner; docs/array-api.md §8b):
     `(array/vmap f {:in-axes [0 nil …]})`, in-axes 0 or nil only (another
     axis is a transpose away, and 1.x can add them); trees of arrays in and
     out, a shared result broadcast; a batched run's guards, with no
@@ -707,7 +707,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     merged and reviewed; the battery green on the JVM backend, MLX CPU and
     Metal, and once on CUDA; the book once on MLX; memo.clj and GenGDT
     passing against the release candidate.
-  - **The result keys** (the agent, 2026-10-25, provisional; genclj-4jpw):
+  - **The result keys** (the agent, 2026-10-25, confirmed by the owner; genclj-4jpw):
     one meaning per key across gen.inference, gen.gradients, gen.learning
     and gen.batched. A key that holds a log says so in its name, but for
     Gen.jl's `:weight` and `:score`. "Host" is a host number or a vector of
@@ -771,7 +771,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     and `:diverged`. gen.batched's `{:particles :weights}` stays: it
     mirrors gfi/generate's `{:trace :weight}`, as b/simulate's particles
     mirror gfi/simulate's trace.
-  - **Kernels' shape** (the agent, 2026-10-25, provisional; genclj-4hu0):
+  - **Kernels' shape** (the agent, 2026-10-25, confirmed by the owner; genclj-4hu0):
     a kernel is (fn [trace key]) → `{:trace :accepted? …}`, and every
     kernel of the library returns that map: mcmc's map-optimize and
     elliptical-slice too (map-optimize-particles `{:particles
@@ -2399,7 +2399,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   - Numeric edge semantics in the new code are the owner's (as always);
     while the round runs autonomously, each is recorded here PROVISIONAL
     with its alternatives and listed in the wave's report.
-  - **MCMC diagnostics (genclj-hfca; PROVISIONAL, owner to confirm).**
+  - **MCMC diagnostics (genclj-hfca; confirmed by the owner, 2026-10-25).**
     `gen.inference.diagnostics` computes bulk and tail ESS, the ESS of the
     mean, rank-normalized and split R-hat, the MCSE of the mean and sd, and
     summaries, as Vehtari et al. (2021) define them and ArviZ and Stan's
@@ -2422,7 +2422,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     - summary's sd divides by n − 1, its default quantiles are 5%, 50% and
       95% (posterior's); no MCSE of quantiles, which needs a beta quantile
       function.
-  - **Serialization (genclj-unjc; PROVISIONAL, owner to confirm).**
+  - **Serialization (genclj-unjc; confirmed by the owner, 2026-10-25).**
     `gen.serialize` writes EDN read by clojure.edn with gen.clj's tags only
     (`#gen/array {:dtype :shape :data}`, `#gen/choicemap`, `#gen/value`,
     `#gen/key`, `#gen/trace`), never eval; an unknown or malformed tag, or
@@ -2449,7 +2449,9 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       The MLX device is not recorded, so CPU and GPU float32 may differ as
       `:score-differs`.
     - read-trace checks its rebuild's score against the written one bit for
-      bit, and its weight against its score (no choice missing).
+      bit, and write-trace and read-trace check generate's weight against
+      its score up to rounding (relative 1e-9 in float64, 1e-4 in float32):
+      no choice missing (genclj-s5fj, 2026-10-25).
     - Traces with encapsulated randomness are not serializable yet (the
       lead's call): ω is kept per call, generate draws it afresh and
       fold-in is one-way, so write-trace refuses an ω anywhere. The hook
@@ -2469,7 +2471,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     hmc_nuts_diag_e_adapt, for nuts or (`:kernel :hmc`) hmc with L fixed.
     On a 10-d Gaussian NUTS costs about 2× the best-tuned HMC's gradients
     per effective draw, with no L to tune (`docs/benchmarks.md`).
-    PROVISIONAL (owner to confirm):
+    Confirmed by the owner (2026-10-25):
     - the names `:inv-metric` (Stan's, NumPyro's and BlackJAX's; not
       `:metric`, which leaves M against M⁻¹ unclear) and `:eps` everywhere
       (hmc's name), so an adapted state merges into the kernels' options;
@@ -2495,7 +2497,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       HMC at L 8 on the correlated Gaussian adapted eps 0.4913, L·eps 3.93
       on the fast mode's period 3.88, bulk ESS 23 (the JVM landed at
       0.642). The sampler jitters every transition, warmup included, and
-      dual averaging adapts the nominal step (Stan's choice; PROVISIONAL;
+      dual averaging adapts the nominal step (Stan's choice; confirmed 2026-10-25;
       the alternative, no jitter in the warmup, leaves the adapted step
       blind to the jitter's effect on acceptance).
   - **GenMLX's further distributions (genclj-z2gh).** `truncated-normal`,
@@ -2508,7 +2510,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     by two series omitting less than 1e-17; Wishart draws by Bartlett's
     decomposition, the inverse Wishart's by a triangular solve.
     mvnormal's covariance check is shared as `check-covariance`.
-    PROVISIONAL (owner to confirm):
+    Confirmed by the owner (2026-10-25):
     - invalid parameters are loud: lo ≥ hi (or both bounds infinite on
       one side), κ ≤ 0, ρ outside [0, 1), df ≤ p − 1, a scale that is not
       symmetric positive definite (alternatives: lo = hi as a point mass;
@@ -2535,7 +2537,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       (probability below 1e-15).
 
   - **Per-particle constraints and batched enumeration (genclj-7oc1;
-    PROVISIONAL, owner to confirm).** `gen.batched/generate` and `update`
+    confirmed by the owner, 2026-10-25).** `gen.batched/generate` and `update`
     take `{:per-particle cs}`, n choice maps, each particle's own
     constraints beside the shared ones (an overlap or a wrong count is
     loud). Which constraints are per particle is said, never read from a
@@ -2553,8 +2555,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     some tens of assignments, 0.6× at 10, 20× at 1000); inside a batched
     run, or with `:check-retval?`, it enumerates one assignment at a time.
     Measured 2.4× (100 grid points) to 44× (10^5).
-- **Gradients under the batch tracer (genclj-7dti; PROVISIONAL, owner to
-  confirm).** `array/value-and-grad` of batched arguments, or anywhere in a
+- **Gradients under the batch tracer (genclj-7dti; confirmed by the owner,
+  2026-10-25).** `array/value-and-grad` of batched arguments, or anywhere in a
   batched run, is vmap's: each particle gets the value and gradient of its
   own scalar run (docs/array-api.md §8b, *Gradients*).
   - **The tape wraps the tracer.** The tracer's `-value-and-grad` runs
@@ -2614,11 +2616,11 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     exactly its hmc's), reported as `:eps`, an [n] array. Alternatives: one
     shared u per transition (chains correlated through the step), or a
     loud error. `mala-particles` takes none, as `mala`.
-  - **Switches by partition (genclj-7tqw; PROVISIONAL where marked).** As
+  - **Switches by partition (genclj-7tqw; the marked choices confirmed by the owner, 2026-10-25).** As
     the owner decided, a Switch whose index differs across a batch's
     particles runs each branch batched on its own particles
     (`gen.partition`: gather, join, scatter). Each part's backend draws the
-    whole batch's draws at its rows (PROVISIONAL; a site in G groups draws
+    whole batch's draws at its rows (confirmed; a site in G groups draws
     G·n values), so a particle draws the same in any partition, bit for
     bit; the alternative, draws of the part's size from a key folded with
     the branch, would make a particle's draws depend on the others'
@@ -2629,7 +2631,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     to one branch together and join a branch's results, so there is one
     group per branch; `select` joins traces rather than rebuilding them.
     Gradients with respect to choices outside a partitioned Switch stay
-    batched; inside it they go per particle. Loud (PROVISIONAL): return
+    batched; inside it they go per particle. Loud (confirmed): return
     values that cannot be one batched value (shape, dtype or structure
     differing across branches, int against float); a partitioned trace
     revised by another generative function; a selection under choices
@@ -2638,7 +2640,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     mixture of structurally different components 3.8× (100 particles) to
     21.5× (10,000) faster than one particle at a time, an MH sweep of 1000
     chains between components 6.4×.
-  - **Scan, Mix and dimap (genclj-2gma; PROVISIONAL, owner to confirm).**
+  - **Scan, Mix and dimap (genclj-2gma; confirmed by the owner, 2026-10-25).**
     In gen.combinators, on the handler path, with the general,
     forward-sampling, fixed-support and across laws and the fuzzer.
     - `(comb/scan kernel)` is JAX's scan, built like Unfold: arguments
@@ -2671,7 +2673,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       {true gf false (gen [& _] v)})`, which batches per particle when v is
       a value of gf's return kind (with v nil it falls back, correctly).
   - **Running totals never NaN (genclj-awd0, a bug the static fuzzer
-    found; the remedy PROVISIONAL).** Map's, Unfold's and Scan's scores are
+    found; the remedy confirmed by the owner, 2026-10-25).** Map's, Unfold's and Scan's scores are
     running totals (score + new − old per changed element), as Gen.jl's.
     After a choice left its support and came back, the total was
     −Inf + Inf = NaN where the density is finite, silently. A general law
@@ -2812,7 +2814,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     - **gen.diff's +, −, inc and dec rules gave an int-diff through a
       float operand,** exact only up to rounding (an unsound retdiff under
       the laws). They now give one only when every operand is an integer
-      (PROVISIONAL: a host integer, or an array of an :int dtype kind; not
+      (confirmed by the owner, 2026-10-25: a host integer, or an array of an :int dtype kind; not
       an integral-valued float, which would be exact only below 2^53 and
       need a host read of an array); otherwise unknown-change.
     - **Map's and Unfold's scores turned NaN** (−Inf + Inf) when an update

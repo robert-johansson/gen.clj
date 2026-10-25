@@ -185,8 +185,7 @@ particle:
 
 The last check is gradients under the batch tracer: each particle gets
 the gradient of its own scalar run, as JAX's `vmap` would give it (§9,
-*Gradients under the batch tracer*, a provisional decision the owner
-has yet to confirm). No gradient code was written for
+*Gradients under the batch tracer*). No gradient code was written for
 batches, and no batched code for the model.
 
 Finally the static language. The same body under `gen ^:static` is
