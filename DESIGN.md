@@ -613,8 +613,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     gen.dist with defdist and gen.dist.dsl, gen.combinators, gen.custom,
     gen.state-space, gen.serialize, inference's core (importance, mh,
     kernel, mcmc, particle-filter, enumerative, transform, vi, diagnostics,
-    weights), gen.gradients, gen.learning, gen.batched (with a public
-    per-particle accessor); stable for implementers, the GFI protocol and
+    weights), gen.gradients, gen.learning, gen.batched (and the public
+    accessors of a batched run's values, in gen.array: genclj-9efy); stable for implementers, the GFI protocol and
     gen.array.protocols. Experimental (shipped, outside the promise):
     gen.llm.*, trace-kernel, conjugate, laplace, particle-mcmc, partition,
     dist.host, and gen.laws until it moves to ext/laws. Internal: tape,

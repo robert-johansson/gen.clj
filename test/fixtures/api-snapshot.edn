@@ -39,7 +39,10 @@
   backend-array? {:arglists ([x])}
   backend-name {:arglists ([b])}
   backend-named {:arglists ([k])}
+  batch-shape {:arglists ([x])}
   batched-branch {:arglists ([message data] [message data cause])}
+  batched? {:arglists ([x])}
+  broadcast-shapes {:arglists ([& shapes])}
   broadcast-to {:arglists ([x new-shape])}
   ceil {:arglists ([x])}
   clip {:arglists ([x lo hi])}
@@ -56,6 +59,7 @@
   diag {:arglists ([x])}
   digamma {:arglists ([x])}
   dtype {:arglists ([x])}
+  dtype-kind {:arglists ([dt])}
   effective-backend {:arglists ([b])}
   equal? {:arglists ([x y])}
   erf {:arglists ([x])}
@@ -101,6 +105,9 @@
   ones {:arglists ([shape] [shape {:keys [dtype]}])}
   ones-like {:arglists ([x])}
   outer {:arglists ([x y])}
+  particle {:arglists ([x i])}
+  particle-backend {:arglists ([x])}
+  particles {:arglists ([x idx])}
   pick {:arglists ([x idx])}
   pow {:arglists ([x y])}
   prod {:arglists ([x] [x opts])}
@@ -127,6 +134,7 @@
   take-along-axis {:arglists ([x indices axis])}
   tan {:arglists ([x])}
   tanh {:arglists ([x])}
+  tracked? {:arglists ([x])}
   transpose {:arglists ([x] [x perm])}
   tree-leaves {:arglists ([t])}
   tree-map {:arglists ([f t])}
@@ -173,6 +181,7 @@
   -name {:arglists ([b])}
   -native-grad? {:arglists ([b])}
   -native-ops {:arglists ([b])}
+  -primal {:arglists ([x])}
   -random-uniform {:arglists ([b key shape dtype])}
   -reduce {:arglists ([b op x axes keep-dims?])}
   -reshape {:arglists ([b x shape])}
@@ -191,6 +200,7 @@
   ICompiling {:kind :protocol, :methods [-compile]}
   ICustomVjp {:kind :protocol, :methods [-custom-vjp]}
   INativeGrad {:kind :protocol, :methods [-native-grad?]}
+  ITrackedValue {:kind :protocol, :methods [-primal]}
   IWrappingBackend {:kind :protocol, :methods [-inner]}
   lazy-backends? {:kind :var}}
 
