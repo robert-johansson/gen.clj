@@ -195,6 +195,27 @@ newest first in each section.
 
 ### Added
 
+- **`sel/union` and `sel/intersection`, and selections print as their
+  trees** (DESIGN §9, "The 1.0's shape", before the tag; genclj-ufco).
+  - `(sel/union s t …)` selects what any of the selections selects,
+    `(sel/intersection s t …)` what each does; `(sel/union)` is `sel/none`
+    and `(sel/intersection)` is `sel/all`, and a non-selection is a loud
+    error. all and none absorb or drop out, and hierarchical selections
+    join or meet address by address, so a union of selects is the select
+    of their paths (`=` to it). Others combine as `Union` and
+    `Intersection` records (`:parts`), which `root-selected?`,
+    `top-addresses` and every generative function read. De Morgan's laws
+    hold with `sel/complement`.
+  - A selection prints as `#gen/selection {:x all, :y {0 all}}`, with
+    `all`, `none`, `(complement …)`, `(union …)` and `(intersection …)`,
+    where it printed as its record. The form is for reading, not for the
+    reader.
+  - A complement's subselection is simplified: under an address that its
+    inner selection selects whole it is `sel/none`, where it was a
+    complement of `sel/all` (the same set).
+  - `gen.laws`'s `project-splits-the-score` also checks the projection on
+    the union of two disjoint selections, and on the intersection of their
+    complements, on every generative function it runs on.
 - **Choice maps are callable, as traces are** (DESIGN §9, "The 1.0's
   shape", the eight more; genclj-a2t8). `(c :slope)`, `(c [:y 0])` and
   `(c :b nil)` read the value there as `cm/get-choice` does, loud in the
@@ -398,10 +419,9 @@ sections above in the commit that builds it.
     `dtype-kind` (memo.clj's).
   - Shape changes before the tag: one result-key vocabulary, kernels
     returning `{:trace :accepted?}`, labeled metrics, matching batched
-    return shapes, selections' union and intersection, trace keyword
-    lookups, public handler state, an optimizer interface and training
-    callbacks, laws for users, particle-filter accessors, and the
-    transform API.
+    return shapes, trace keyword lookups, public handler state, an
+    optimizer interface and training callbacks, laws for users,
+    particle-filter accessors, and the transform API.
 
 ## History before Unreleased, by milestone
 

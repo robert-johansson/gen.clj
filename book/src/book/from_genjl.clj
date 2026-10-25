@@ -97,6 +97,18 @@
 ;; error: merge: the choice maps overlap
 #_(cm/merge (cm/choicemap :a 1.0) (cm/choicemap :a 2.0))
 
+;; book: selections
+(def latent (sel/complement (sel/select :sensor)))
+
+(def with-first (sel/union latent (sel/select [:sensor 0])))
+
+(def only-mu (sel/intersection latent (sel/select :mu :sensor)))
+
+[(sel/selected? with-first [:sensor 0 :reading])
+ (sel/selected? with-first [:sensor 1 :reading])
+ (sel/selected? only-mu :mu) (sel/selected? only-mu [:sensor 1])]
+;=> [true false true false]
+
 ;; book: booleans
 (def coin (gen [] (trace :heads (d/bernoulli 0.0))))
 

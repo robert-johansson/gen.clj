@@ -709,6 +709,19 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     stored. The body flag is gen.choicemap's `*in-body*` (no-doc), which
     gen.dynamic binds beside `*body-call*`: gen.choicemap cannot see
     gen.trace.
+    As built (2026-10-25, the agent, provisional; genclj-ufco):
+    `(sel/union & ss)` and `(sel/intersection & ss)`, none and all of no
+    selections. all and none absorb or drop out, hierarchical selections
+    join or meet address by address (a union of selects is their select,
+    =), others are Union and Intersection records of their parts, which
+    root-selected? and top-addresses read. A complement's subselection is
+    simplified (none where it was the complement of all). A selection
+    prints as its tree, `#gen/selection {:x all, :y {0 all}}`, with all,
+    none and (complement …), (union …), (intersection …) as names: for
+    reading, not readable back. The laws: union, intersection and De
+    Morgan's path by path and through get-selected (gen.selection-test);
+    project-splits-the-score also over disjoint unions and De Morgan's
+    intersection, on every kind (gen.laws).
   - **Before the tag:** the friction that changes shape lands (one
     result-key vocabulary, kernels returning {:trace :accepted?}, labeled
     metrics, matching batched return shapes, selections' union and

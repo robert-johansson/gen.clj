@@ -188,6 +188,23 @@ also takes a not-found value, as `nth` does:
 (cm/merge (cm/choicemap :a 1.0) (cm/choicemap :a 2.0))
 ```
 
+Selections add a union and an intersection to Gen.jl's, which has
+neither:
+
+<!-- code: selections -->
+```clojure
+(def latent (sel/complement (sel/select :sensor)))
+
+(def with-first (sel/union latent (sel/select [:sensor 0])))
+
+(def only-mu (sel/intersection latent (sel/select :mu :sensor)))
+
+[(sel/selected? with-first [:sensor 0 :reading])
+ (sel/selected? with-first [:sensor 1 :reading])
+ (sel/selected? only-mu :mu) (sel/selected? only-mu [:sensor 1])]
+;=> [true false true false]
+```
+
 ## The generative function interface
 
 The operations are Gen.jl's, with a key last and maps for results:

@@ -163,6 +163,14 @@
 
 (defn- picked [paths picks] (vec (keep (fn [[p pick?]] (when pick? p)) (map vector paths (cycle picks)))))
 
+(defn- picked-apart
+  "Two disjoint parts of paths: those picks picks, and of the rest those
+   picks picks one place on."
+  [paths picks]
+  (let [ps (map vector paths (cycle picks) (rest (cycle picks)))]
+    [(vec (keep (fn [[p a]] (when a p)) ps))
+     (vec (keep (fn [[p a b]] (when (and (not a) b) p)) ps))]))
+
 (defn- restrict [choices paths] (sel/get-selected choices (sel/from-paths paths)))
 
 (defn- lp
@@ -537,12 +545,31 @@
     (let [tr (gfi/simulate gf args (rng/key seed))]
       (checks (zero-weight? (:weight (gfi/regenerate tr sel/all (rng/key (inc seed)))))))))
 
-(defn project-splits-the-score [cases]
+(defn project-splits-the-score
+  "project splits the score over a partition of the choices: none projects
+   to zero, and a selection and its complement add up to the score; so do
+   two disjoint selections s and t, their union, and the rest, by De
+   Morgan's law the intersection of their complements. A union of selects
+   is one hierarchical selection; s with t less s is a union of kinds, and
+   the union less t an intersection of them, which every kind of
+   generative function reads through gen.selection (a Map's or Unfold's
+   top addresses, a distribution's root). Planted bug (2026-10-25): an
+   intersection whose top addresses are none when a part may select
+   anything fails it on the combinator models."
+  [cases]
   (prop/for-all [[[_ gf args] seed picks] cases]
     (let [tr (gfi/simulate gf args (rng/key seed))
-          s (sel/from-paths (picked (addrs tr) picks))]
-      (checks (zero-weight? (gfi/project tr sel/none))
-              (close? (+ (gfi/project tr s) (gfi/project tr (sel/complement s))) (:score tr))))))
+          p #(gfi/project tr %)
+          [ps pt] (picked-apart (addrs tr) picks)
+          s (sel/from-paths ps)
+          t (sel/from-paths pt)
+          both (sel/union s t)]
+      (checks (zero-weight? (p sel/none))
+              (close? (+ (p s) (p (sel/complement s))) (:score tr))
+              (close? (p both) (+ (p s) (p t)))
+              (close? (p (sel/union s (sel/intersection t (sel/complement s)))) (p both))
+              (close? (p (sel/intersection both (sel/complement t))) (p s))
+              (close? (+ (p both) (p (sel/intersection (sel/complement s) (sel/complement t)))) (:score tr))))))
 
 (defn runs-are-pure-functions-of-the-key [cases]
   (prop/for-all [[[_ gf args] seed] cases]

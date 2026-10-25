@@ -477,9 +477,45 @@ holds path by path, nested paths and selections included:
 Because selections combine by laws rather than by looking at a model, an
 algorithm can build one from pieces and hand it to any GFI operation.
 "Everything but the slope" is `(sel/complement (sel/select :slope))`,
-whatever else the model holds. gen.selection has no union or intersection
-of two selections; `select` makes the union of the addresses it names,
-which covers this book's uses. Exercise 3 adds the rest of the algebra.
+whatever else the model holds. `sel/union` and `sel/intersection`
+complete the algebra: what either selection selects, and what both do.
+Selects join into one select, address by address, and the three
+operations keep De Morgan's laws, path by path:
+
+<!-- code: union -->
+```clojure
+[(= (sel/union (sel/select :slope :intercept) (sel/select :y))
+    (sel/select :slope :intercept :y))
+ (= (sel/intersection (sel/select :x :y) (sel/select :y :z)) (sel/select :y))]
+;=> [true true]
+
+(defn de-morgan?
+  "Is the complement of the union of t and u the intersection of their
+   complements, at every path of some-paths?"
+  [t u]
+  (every? #(= (sel/selected? (sel/complement (sel/union t u)) %)
+              (sel/selected? (sel/intersection (sel/complement t)
+                                               (sel/complement u))
+                             %))
+          some-paths))
+
+(every? (fn [[t u]] (de-morgan? t u))
+        [[s slope-only] [sel/all s] [(sel/complement s) (sel/select :params)]])
+;=> true
+```
+
+A selection prints as its tree, the way a choice map does: each address
+with what is selected under it, `all` and `none` by name, and a
+complement, union or intersection around its parts:
+
+<!-- code: print-selection -->
+```clojure
+[(pr-str s) (pr-str sel/all)]
+;=> ["#gen/selection {:x all, :y all}" "#gen/selection all"]
+
+(pr-str (sel/union (sel/select :x) (sel/complement slope-only)))
+;=> "#gen/selection (union {:x all} (complement {:params {:slope all}}))"
+```
 
 ## The three types, working together
 
@@ -556,11 +592,12 @@ Each exercise has a tested solution at the end of the chapter.
    `(sel/complement (sel/select :y))`. Do they project `tr` the same? A
    later version of the model adds a noise level at `:noise`; which of
    the two selects it?
-3. **A union.** A selection is anything that implements the two methods
-   of `sel/ISelection`, `-selected?` and `-subselection`. Write the union
-   of two selections as a record, and their intersection by De Morgan's
-   law. Is the projection on the union of two disjoint selections the sum
-   of their projections?
+3. **A union of your own.** A selection is anything that implements the
+   two methods of `sel/ISelection`, `-selected?` and `-subselection`.
+   Write the union of two selections as a record, and their intersection
+   by De Morgan's law, and check them against `sel/union` and
+   `sel/intersection`. Is the projection on the union of two disjoint
+   selections the sum of their projections?
 
 ## Solutions
 
@@ -596,7 +633,7 @@ complement what to leave.
 subselection under an address is the union of theirs. The intersection is
 the complement of the union of the complements. `project` reads a
 selection only through the two methods, so it takes the new kind, and the
-projections add:
+projections add. The two agree with gen.selection's own:
 
 <!-- code: solution-3 -->
 ```clojure
@@ -619,5 +656,16 @@ projections add:
 (array/allclose? (gfi/project tr (->Union (sel/select :slope) (sel/select :y)))
                  (+ (gfi/project tr (sel/select :slope))
                     (gfi/project tr (sel/select :y))))
+;=> true
+
+(defn agree?
+  "Do selections f and g select the same paths of some-paths?"
+  [f g]
+  (every? #(= (sel/selected? f %) (sel/selected? g %)) some-paths))
+
+(every? (fn [[p q]] (and (agree? (->Union p q) (sel/union p q))
+                         (agree? (intersection p q) (sel/intersection p q))))
+        [[s (sel/select :y :z)] [slope-only (sel/select :params)]
+         [s (sel/complement slope-only)]])
 ;=> true
 ```

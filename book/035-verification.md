@@ -201,6 +201,9 @@ combinators do:
 - `regenerating-everything-has-weight-zero`.
 - `project-splits-the-score`: the projection on nothing is 0, and the
   projections on a selection and on its complement add up to the score.
+  The projection on the union of two disjoint selections is the sum of
+  theirs, and with the one on the intersection of their complements (De
+  Morgan's law) it adds up to the score.
 - `runs-are-pure-functions-of-the-key`: the same key makes the same
   choices.
 - `identity-update-reports-no-change`: an update without constraints
