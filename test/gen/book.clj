@@ -281,6 +281,42 @@
         (is (and (.exists f) (= svg (slurp f)))
             (str (.getPath f) " is stale: clojure -M:test -m gen.book sync"))))))
 
+(defn check-in-step
+  "The checks of a chapter that run none of its code: its includes hold
+   their regions, its lines fit, its error regions' forms sit behind #_."
+  [chapter]
+  (testing chapter
+    (let [rs (regions (slurp (source-file chapter)))]
+      (check-lines rs)
+      (check-error-regions rs)
+      (check-includes (slurp chapter) rs))))
+
+(defn part-chapters
+  "The chapters whose file names start with one of prefixes: \"02\" for
+   Part II, \"01\" \"06\" for Part I and the appendices."
+  [& prefixes]
+  (filterv (fn [c] (some #(str/starts-with? (.getName (io/file c)) %) prefixes)) (chapters)))
+
+(defn runs-here?
+  "Does the book run on this backend? The JVM backend is its gate (DESIGN.md
+   §9); elsewhere only when -Dgen.book.mlx=true asks, since its examples run
+   one model at a time, minutes on MLX for seconds on the JVM."
+  []
+  (or (ts/jvm?) (= "true" (System/getProperty "gen.book.mlx"))))
+
+(declare run-chapter)
+
+(defn check-chapters
+  "Runs chapters (run-chapter) where the book runs (runs-here?), each with
+   code and checks."
+  [chapters]
+  (when (runs-here?)
+    (is (seq chapters) "the part has chapters")
+    (doseq [chapter chapters]
+      (let [{:keys [regions checks]} (run-chapter chapter)]
+        (is (pos? regions) (str chapter " has code"))
+        (is (pos? checks) (str chapter " checks results"))))))
+
 (defn run-chapter
   "Checks a chapter's includes, runs its namespace and checks its figures:
    {:regions :checks :figures}. Failures print to the current *out*, so a

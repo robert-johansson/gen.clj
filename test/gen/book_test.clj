@@ -1,29 +1,21 @@
 (ns gen.book-test
-  "The book runs (gen.book): every chapter's includes hold their regions,
-   and its namespace runs with its ;=> values and figures checked. And the
-   runner can fail: a wrong value, a float past the digits it shows, a
-   throw, an error that does not come, a stale or missing include, a code
-   block outside an include and a stale figure each fail it."
+  "The book runs (gen.book): every chapter's includes hold their regions;
+   Part I's chapters and the appendices run, their ;=> values and figures
+   checked (Parts II-V run in gen.book.part2-test … part5-test, ^:slow).
+   And the runner can fail: a wrong value, a float past the digits it
+   shows, a throw, an error that does not come, a stale or missing include,
+   a code block outside an include and a stale figure each fail it."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.book :as book]
             [gen.book.svg :as svg]
             [gen.test-support :as ts]))
 
-(defn- run-here?
-  "Does the book run on this backend? The JVM backend is its gate (DESIGN.md
-   §9); elsewhere only when -Dgen.book.mlx=true asks, since its examples run
-   one model at a time, minutes on MLX for seconds on the JVM."
-  []
-  (or (ts/jvm?) (= "true" (System/getProperty "gen.book.mlx"))))
+(deftest every-chapter-is-in-step
+  (doseq [chapter (book/chapters)]
+    (book/check-in-step chapter)))
 
-(deftest every-chapter-runs
-  (when (run-here?)
-    (let [chapters (book/chapters)]
-      (is (seq chapters) "the book has chapters")
-      (doseq [chapter chapters]
-        (let [{:keys [regions checks]} (book/run-chapter chapter)]
-          (is (pos? regions) (str chapter " has code"))
-          (is (pos? checks) (str chapter " checks results")))))))
+(deftest foundations-and-appendices-run
+  (book/check-chapters (book/part-chapters "01" "06")))
 
 (deftest generated-pages-are-current
   (book/check-generated))

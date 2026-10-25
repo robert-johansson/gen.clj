@@ -38,7 +38,7 @@ The chapters are Markdown in `book/`, their code namespaces in
 `book/src/book/`, on the `:test` classpath:
 
 ```text
-clojure -X:test :nses '[gen.book-test]'    # every chapter, its results checked
+clojure -X:test :patterns '["gen.book.*"]'  # every chapter, its results checked
 clojure -M:test -m gen.book sync           # write the chapters' code and figures in
 clojure -M:test -m gen.book check book/011-getting-started.md   # one chapter
 clojure -M:test -m gen.book pdf            # this book, as target/book/gen-clj-book.pdf
