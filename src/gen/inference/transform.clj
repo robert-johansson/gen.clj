@@ -391,7 +391,8 @@
    log p-new(t') - log p(t) + log q-backward(u'; t', args…) - log q-forward(u; t)
    + log |det J|. :check? runs the inverse transform on (t', u') and throws
    unless it gives back (t, u), the old model's observations
-   (:prev-observations) merged into what it gives."
+   (:prev-observations) merged into what it gives. A q-backward that gives
+   u' density 0 at a possible t' is a loud error (gfi/assess-backward)."
   [{:keys [p-new p-new-args new-observations q-forward q-forward-args q-backward q-backward-args check?
            prev-observations]
     t :transform}]
@@ -410,7 +411,7 @@
                   (throw (ex-info (str "translator: the new trace has choices the transform did not write: " (vec extra))
                                   {:addresses (vec extra)})))
               bwd (if q-backward
-                    (:weight (gfi/assess q-backward (into [t'] q-backward-args) aux-out (gfi/backward-key k-generate)))
+                    (:weight (gfi/assess-backward trace t' q-backward q-backward-args aux-out k-generate))
                     (if (cm/empty? aux-out)
                       0.0
                       (throw (ex-info "translator: the transform writes auxiliary choices but there is no :q-backward"
@@ -482,9 +483,11 @@
    the update's constraints and the backward choices u'. Either way the
    weight is the update's + log q-backward(u'; t', args…) - log q-forward(u)
    + log |det J| (the continuous reads the update keeps count as unchanged
-   outputs). :check? runs the inverse (the transform's inverse, the
-   proposals swapped, back to the trace's arguments with
-   :prev-observations) and throws unless it gives back the trace and u."
+   outputs), and a q-backward that gives u' density 0 at a possible t' is a
+   loud error (gfi/assess-backward). :check? runs the inverse (the
+   transform's inverse, the proposals swapped, back to the trace's
+   arguments with :prev-observations) and throws unless it gives back the
+   trace and u."
   [{:keys [p-new-args p-argdiffs new-observations q-forward q-forward-args q-backward q-backward-args
            check? prev-observations]
     t :transform}]
@@ -504,7 +507,7 @@
               _ (some-> s (check-consumed! (fn [sp p] (or (= sp :aux-in) (not (left-alone? p))))))
               ldj (if t (log-abs-det t trace u s left-alone?) 0.0)
               u' (if t (get-in s [:outputs :aux-out]) discard)
-              bwd (cond q-backward (:weight (gfi/assess q-backward (into [t'] q-backward-args) u' (gfi/backward-key k-update)))
+              bwd (cond q-backward (:weight (gfi/assess-backward trace t' q-backward q-backward-args u' k-update))
                         (cm/empty? u') 0.0
                         :else (throw (ex-info "updating-translator: there are backward choices but no :q-backward"
                                               {:backward (cm/to-map u')})))]

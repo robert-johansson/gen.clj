@@ -580,6 +580,21 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     throws ex-info naming the proposal; this is a broken proposal, not the
     model leaving its support (genclj-ocxs).
 
+  The second ruling as implemented (2026-10-25, the agent; genclj-ocxs):
+  `gfi/assess-backward` weighs every move's backward proposal (MH with a
+  proposal, involutive MH, the translators, trace kernels and SMCP3, a
+  particle filter's step with a backward proposal; rejuvenation and
+  move-reweight through MH's move) and throws ex-info with `:proposal` and
+  `:reverse-choices` when the backward weight is -Inf while both traces'
+  scores are above -Inf, read on the host (a move is an inference-loop
+  boundary, so MLX checks too). A move from an impossible trace keeps the
+  first ruling's NaN error, which takes precedence. The rule also catches a
+  reverse choice of density 0 with nothing left unvisited, which was quiet
+  before decision 5 too: book 033's exercise 3 (a merge writing a share
+  above 1) and 052's exercise 2 (split shares restricted to the middle
+  half, which 052 had shown still keeping the posterior by rejection) now
+  stop with the error.
+
   Item 9 as implemented (2026-10-25, the agent; genclj-ynpc): the fallback
   is `gen.batched/fallback` of the particles (`fallback-reason` keeps its
   ex-data), and `:fallback` in the results of b/generate, update and

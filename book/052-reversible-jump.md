@@ -1604,7 +1604,7 @@ Each exercise has a tested solution at the end of the chapter.
 2. **A smarter split.** The notebook asks why splits restricted to
    promising places are invalid. Restrict the share to the middle half,
    $\mathcal{U}(0.25, 0.75)$. What is $\log q$ of the move back from a
-   merge of fractions $(0.1, 0.9)$? Is the chain still correct?
+   merge of fractions $(0.1, 0.9)$? What does the chain do with it?
 3. **A wrong period.** Write the periodic kernel with $\pi$ in place of
    $2\pi$. Which of the chapter's hand values change, and what period
    would a yearly kernel need?
@@ -1633,8 +1633,7 @@ matches:
 
 **2.** Merging two segments whose left one holds a share of 0.1 can
 only be undone by a split with share 0.1, which the restricted proposal
-never makes. The move back has density 0, so the merge's ratio is 0 and
-it is rejected:
+never makes. The move back has density 0:
 
 <!-- code: solution-2 -->
 ```clojure
@@ -1655,19 +1654,19 @@ it is rejected:
 ;=> [0.1 ##-Inf]
 ```
 
-Rejecting it is what the ratio says, not a fault: involutive MCMC accepts
-with the ratio of both directions' densities, and where one is 0 the
-kernel still leaves the posterior stationary. The notebook calls the
-restriction invalid because a hand-written ratio would not see the 0.
-The chain here still matches, through the fractions' own move, which
-reaches the shares splits cannot make:
+Read as a ratio, the 0 would only reject the merge. gen.clj reads it as
+the notebook does: the proposal cannot reverse its own move, which breaks
+the third requirement on an MH proposal (§3.4.2 of the thesis). So the
+chain stops at its first merge whose move back needs a share outside the
+middle half, with an error that names the proposal and the split the
+merge would need:
 
 <!-- code: solution-2-chain -->
 ```clojure
-(agrees? (segment-counts (rj-sweep (tf/involution split-merge) middle-share
-                                   xs-small ys-small)
-                         3000 (rng/key 8)))
-;=> true
+;; error: The backward proposal gives the move's reverse choices density 0
+(segment-counts (rj-sweep (tf/involution split-merge) middle-share
+                          xs-small ys-small)
+                3000 (rng/key 8))
 ```
 
 **3.** With $\pi$, $\sin^2(\pi d / p)$ repeats every $p$, so the

@@ -56,7 +56,9 @@
    (trace', args…). w = the move's weight - log q(u) + log q_bwd(u'). A
    move outside the support (its weight -Inf on the host,
    gfi/impossible?: the update stopped at a choice there, so trace' holds
-   the choices up to it) has w -Inf, its backward choices unassessed."
+   the choices up to it) has w -Inf, its backward choices unassessed. A
+   proposal that gives u' density 0 at a possible trace' cannot reverse
+   its own move: a loud error (gfi/assess-backward)."
   [trace proposal proposal-args {:keys [involution backward backward-args]} k-propose k-update]
   (let [{fwd :choices fwd-weight :weight fwd-retval :retval} (gfi/propose proposal (into [trace] proposal-args) k-propose)
         [moved weight bwd] (if involution
@@ -66,9 +68,8 @@
                                [(:trace r) (:weight r) (:discard r)]))]
     (if (gfi/impossible? weight)
       {:trace moved :weight ##-Inf}
-      (let [{bwd-weight :weight} (gfi/assess (or backward proposal)
-                                             (into [moved] (if backward backward-args proposal-args))
-                                             bwd (gfi/backward-key k-propose))]
+      (let [{bwd-weight :weight} (gfi/assess-backward trace moved (or backward proposal)
+                                                      (if backward backward-args proposal-args) bwd k-propose)]
         {:trace moved :weight (+ (- weight fwd-weight) bwd-weight)}))))
 
 (defn- proposal-mh

@@ -33,6 +33,18 @@ newest first in each section.
 
 ### Changed
 
+- **Breaking. An invalid proposal is a loud error again** (the owner's
+  second ruling on decision 5; genclj-ocxs). When a move's new trace is
+  possible but the backward proposal gives the move's reverse choices
+  density 0, the proposal cannot reverse its own move (the thesis's q3_mh,
+  p. 92). MH with a proposal, involutive MH, the translators, trace kernels
+  and SMCP3, and a particle filter's backward proposal, rejuvenation and
+  move-reweight throw ex-info with `:proposal` and `:reverse-choices`
+  (`gfi/assess-backward`), where decision 5 had made such a move a quiet
+  rejection. So does a reverse choice of density 0 with nothing left
+  unvisited, which was quiet before decision 5 too. A move to an impossible
+  trace is still rejected quietly, and a move from one still throws MH's
+  NaN error.
 - **Breaking. A choice outside its own support stops the run** (decision 5;
   9277423, genclj-q7cq, genclj-2870). When a site's log density or a call's
   score is −Inf, generate, update, regenerate and assess return weight −Inf

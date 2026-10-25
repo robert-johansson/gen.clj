@@ -141,3 +141,32 @@ From the final audit:
 - **Eq. 4.16 (p. 160):** with Alg 5's names (σ forward, σ' the discard) the
   ratio is q(σ'; x, τ')/q(σ; x, τ): σ and σ' are swapped (a different slip
   from Eq. 4.15's).
+
+## Gap J of the interim audit, after decision 5 (2026-10-25)
+
+The interim audit of 2026-10-20 (bean genclj-wtfr) named as gap J that
+the thesis's invalid proposals q2_mh and q3_mh (p. 92: Alg. 5's third
+requirement) must fail loudly, never move the chain or reject in silence
+(`the-thesis-invalid-proposals-are-loud`). Decision 5's implementation
+(9277423) made q3 quiet: its backward assess stops at the reverse choice
+a = T, of density 0, so MH rejected every move, and the test was changed
+to expect it. The owner's second ruling on decision 5 (DESIGN.md §9;
+genclj-ocxs) restores the error and states the rule: when a move's new
+trace is possible but the backward proposal gives the move's reverse
+choices density 0, the proposal cannot reverse its own move.
+`gfi/assess-backward` weighs every move's backward proposal and throws
+ex-info naming the proposal and the reverse choices: MH with a proposal,
+involutive MH, the translators (Def. 3.6.1, p. 110: the map must reach
+the extended space), trace kernels and SMCP3, and a particle filter's
+step with a backward proposal, rejuvenation and move-reweight. A move to
+an impossible trace is still rejected quietly, and one from an
+impossible trace keeps MH's NaN error (the first ruling). The rule is
+wider than gap J's test before decision 5, which caught q2 and q3 by b
+left unvisited: a reverse choice of density 0 with nothing unvisited
+(book 033's exercise 3, a merge writing a share above 1; 052's exercise
+2, split shares restricted to the middle half) was a quiet rejection
+then too. Tests: q3 loud again, with the proposal and the
+reverse choices in its data; `a-proposal-that-cannot-reverse-its-move-is-loud`
+(mh_test), `a-backward-proposal-that-cannot-reverse-the-move-is-loud`
+(transform_test), `a-kernel-that-cannot-reverse-its-move-is-loud`
+(trace_kernel_test); the plants are recorded in place.

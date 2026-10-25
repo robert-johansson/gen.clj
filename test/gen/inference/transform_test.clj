@@ -497,6 +497,45 @@
     (is (some string? outcomes))
     (is (every? #(or (= 0.8 %) (re-find #"observ" %)) outcomes) (str outcomes))))
 
+(def up-x
+  "Moves x up, never down: x' ~ U(x, x + 1), so the way back from x' has
+   density 0."
+  (gen [tr] (trace :x (d/uniform (tr :x) (+ (tr :x) 1.0)))))
+
+(def up-u (gen [tr] (trace :u (d/uniform (tr :x) (+ (tr :x) 1.0)))))
+
+(def positive-d (gen [_] (trace :d (d/exponential 1.0))))
+
+(defn- cannot-reverse? [f]
+  (try (f) false
+       (catch clojure.lang.ExceptionInfo e
+         (boolean (and (re-find #"cannot reverse its own move" (str (ex-message e))) (:proposal (ex-data e)))))))
+
+(deftest a-backward-proposal-that-cannot-reverse-the-move-is-loud
+  ;; gfi/assess-backward (DESIGN.md §9, the owner's second ruling on the ten
+  ;; decisions' fifth): a backward proposal or kernel that gives the move's
+  ;; reverse choices density 0 at a possible new trace cannot reverse the
+  ;; move (thesis §3.4.2 for MH; Def. 3.6.1, a translator's bijection onto
+  ;; the extended space), where every such move was a quiet -Inf. x is
+  ;; N(0, 1), so every move here is to a possible trace. Planted bug
+  ;; (2026-10-25): assess-backward without its check fails each testing.
+  (let [tr (:trace (gfi/generate scaled [] (cm/choicemap :x 0.3 :y 0.8) (rng/key 70)))]
+    (testing "involutive MH: the swap of x and u ~ U(x, x + 1) gives back u' = x below x'"
+      (is (cannot-reverse? #(mh/involutive-mh tr up-u [] (tf/involution swap) (rng/key 71)))))
+    (testing "a translator's q-backward: d = a - b < 0 under an exponential"
+      (let [translate (tf/translator {:p-new p-sum :q-backward positive-d :transform to-sum})
+            pair (fn [a b] (:trace (gfi/generate p-pair [] (cm/choicemap :a a :b b) (rng/key 72))))]
+        (is (cannot-reverse? #(translate (pair 0.2 0.7) (rng/key 73))))
+        (is (Double/isFinite (ts/number (:weight (translate (pair 0.7 0.2) (rng/key 73))))) "d > 0 weighs")))
+    (testing "an updating translator's q-backward"
+      (is (cannot-reverse? #((tf/updating-translator {:q-forward up-x :q-backward up-x}) tr (rng/key 74)))))
+    (testing "a particle filter: a step's backward proposal, rejuvenation and move-reweight with a proposal"
+      (let [state (pf/initialize scaled [] (cm/choicemap :y 0.8) 4 {:key (rng/key 75)})]
+        (is (cannot-reverse? #(pf/step state [] [] cm/EMPTY {:proposal up-x :proposal-args [] :backward up-x
+                                                            :backward-args [] :key (rng/key 76)})))
+        (is (cannot-reverse? #(pf/rejuvenate state (k/mh up-x []) (rng/key 77))))
+        (is (cannot-reverse? #(pf/move-reweight state (pf/reweighting up-x []) (rng/key 78))))))))
+
 (def p-sum-observed (gen [] (let [s (trace :s (d/normal 0 (Math/sqrt 2)))] (trace :o (d/normal s 1)))))
 (def p-pair-observed
   (gen [] (let [a (trace :a (d/normal 0 1)) b (trace :b (d/normal 0 1))]

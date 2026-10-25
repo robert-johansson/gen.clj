@@ -165,7 +165,8 @@
    With :backward and :backward-args, a backward proposal (GenParticleFilters'
    pf_update! with one), the proposal may change existing choices too: the
    discard is assessed under (backward trace' backward-args…) and its log
-   density added to the weight."
+   density added to the weight; density 0 at a possible trace' is a loud
+   error (gfi/assess-backward)."
   ([state args argdiffs observations] (step state args argdiffs observations {}))
   ([state args argdiffs observations {:keys [proposal proposal-args backward backward-args] :as opts}]
    (when (and backward (not proposal))
@@ -194,7 +195,7 @@
                           {:keys [choices weight]} (gfi/propose proposal (into [tr] proposal-args) k-propose)
                           r (gfi/update tr args argdiffs (cm/merge observations choices) k-update)]
                       (cond (gfi/impossible? (:weight r)) r
-                            backward (update r :weight + (- (:weight (gfi/assess backward (into [(:trace r)] backward-args) (:discard r) (gfi/backward-key k-update)))
+                            backward (update r :weight + (- (:weight (gfi/assess-backward tr (:trace r) backward backward-args (:discard r) k-update))
                                                             weight))
                             :else (do (check-discard (:discard r) i)
                                       (update r :weight - weight))))
