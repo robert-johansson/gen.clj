@@ -196,6 +196,11 @@ L0  array API             backend-neutral ops, grad, PRNG keys
       └─ MLX backend      generated Java statics (long handles) → libmlxc + libmlx  (M2)
 ```
 
+The layers order what each part builds on, not a strict order of requires:
+gen.dynamic (L2) requires gen.dist.core (L3), and gen.dist.core requires
+gen.gfi (L2) (owner, 2026-10-25: documented, not untangled; found by the
+book's chapter 034).
+
 Everything above L0 calls only the array API. No backend type escapes L0
 except the opaque array value. The same model and inference code runs on either
 backend.
