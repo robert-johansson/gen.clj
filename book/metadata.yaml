@@ -45,6 +45,7 @@ header-includes: |
   \newunicodechar{∝}{\ensuremath{\propto}}
   \newunicodechar{∑}{\ensuremath{\sum}}
   \newunicodechar{∇}{\ensuremath{\nabla}}
+  \newunicodechar{∖}{\ensuremath{\setminus}}
   \newunicodechar{≥}{\ensuremath{\geq}}
   \newunicodechar{⟨}{\ensuremath{\langle}}
   \newunicodechar{⟩}{\ensuremath{\rangle}}
