@@ -493,17 +493,22 @@
   (let [infos (api/namespaces)
         surface (api/surface)
         tier (fn [t] (filter #(= t (:tier %)) infos))
-        stable-ns (fn [{n :ns :keys [doc attrs]}]
+        ;; the directory a namespace's file is in, nil for the core's src/
+        ;; (an extension's module, ext/name)
+        home (fn [file] (let [h (second (re-matches #"(.*?)/gen/.*" file))]
+                          (when (not= "src" h) (str/replace h #"/src$" ""))))
+        stable-ns (fn [{n :ns :keys [doc attrs file]}]
                     (str "### " n "\n\n"
                          (wrap "" (escape (paragraph doc))) "\n\n"
+                         (when-let [h (home file)]
+                           (str (wrap "" (str "*In " h ",* a module beside the core with dependencies of its own.")) "\n\n"))
                          (when-let [note (:implementers attrs)]
                            (str (wrap "" (str "*For implementers:* " (escape note) ".")) "\n\n"))
                          (str/join "\n" (map (fn [[s e]] (var-item n s e)) (sort-by (comp str key) (surface n))))
                          "\n"))
         experimental-ns (fn [{n :ns :keys [doc file]}]
-                          (let [home (second (re-matches #"(.*?)/gen/.*" file))]
-                            (wrap "- " (str "`" n "`" (when (not= "src" home) (str " (in " home ")"))
-                                            ": " (escape (paragraph doc))))))]
+                          (wrap "- " (str "`" n "`" (when-let [h (home file)] (str " (in " h ")"))
+                                          ": " (escape (paragraph doc)))))]
     (str "# The Public API\n\n"
          (wrap "" (str "Each of gen.clj's namespaces carries a tier in its ns form: `{:api :stable}`, "
                        "`{:api :experimental}` or `{:api :internal}` (DESIGN.md §9). Through the 1.x releases a "

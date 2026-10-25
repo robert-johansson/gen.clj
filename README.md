@@ -110,7 +110,10 @@ clojure -X:test:fast     # without the slow statistical tests, ~25 s
 
 The GFI's laws are test.check properties, audited against the thesis
 (`docs/research/law-audit.md`). They run over hand-written models and over
-random generated programs. Inference is checked against exact answers:
+random generated programs. They are a module of their own, `ext/laws`
+(`gen.laws`), which a project of yours can take to check its generative
+functions: `(laws/verify models)` returns the laws that fail, each with
+what it says. Inference is checked against exact answers:
 - enumerated posteriors;
 - conjugate models;
 - the Kalman filter;

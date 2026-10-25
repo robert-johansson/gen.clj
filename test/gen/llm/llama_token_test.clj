@@ -57,7 +57,7 @@
     (let [{:keys [completion]} (setup)
           p (prompt)
           cases (laws/cases [[:llama completion [p 4] [[p 2] [p 6]]]])]
-      (doseq [[k law] laws/all]
+      (doseq [[k law] (merge laws/all laws/implementation)]
         (let [r (tc/quick-check 10 (law cases) :seed 20261021)]
           (is (:pass? r) (str k " " (pr-str (select-keys r [:fail :shrunk])))))))))
 

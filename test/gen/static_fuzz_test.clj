@@ -41,7 +41,7 @@
 ;; the general laws, slow, as each case evaluates a form (the static law
 ;; above caught every planted bug they did); and the static law at length,
 ;; for a bug whose case is rarer
-(laws/deflaws ^:slow static-random rsm/gen-model 100)
+(laws/deflaws ^:slow static-random rsm/gen-model 100 (merge laws/all laws/implementation))
 (defspec ^:slow static-random-static-matches-dynamic-at-length 1000
   (laws/static-matches-dynamic (laws/cases rsm/gen-model)))
 

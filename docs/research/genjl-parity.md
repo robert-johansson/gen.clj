@@ -326,8 +326,9 @@ q = internal proposal.
 
 ### Coverage matrix
 
-`gen.laws` holds the general and forward-sampling laws as properties over
-any models; each feature's suite instantiates them (`deflaws`). Status: ✓
+`gen.laws` (the module `ext/laws`) holds the general and forward-sampling
+laws as properties over any models; each feature's suite instantiates them
+(`deflaws`), and a user runs them with `laws/verify`. Status: ✓
 tested, ◐ partly, — not yet (the feature does not exist yet).
 
 | Law | Tests |

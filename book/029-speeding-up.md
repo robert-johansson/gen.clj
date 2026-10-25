@@ -499,7 +499,7 @@ the graph.
 ## The same chain
 
 Skipping must not change the chain. The *static law* in
-`test/gen/laws.clj`, which the tests run on every static model they
+`gen.laws`, which the tests run on every static model they
 build, requires the static and the dynamic function of one body to give
 the same choices under the same keys, with weights and scores equal up to
 rounding. Here it is for whole chains. Twenty sweeps of each model, from
