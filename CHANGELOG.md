@@ -33,6 +33,36 @@ newest first in each section.
 
 ### Changed
 
+- **Breaking. A choice outside its own support stops the run** (decision 5;
+  9277423, genclj-q7cq, genclj-2870). When a site's log density or a call's
+  score is −Inf, generate, update, regenerate and assess return weight −Inf
+  without running the rest of the body: the trace has score −Inf, the
+  choices up to and including the impossible one, and retval nil; an
+  update's discard restores the old trace. MH rejects such a move and
+  map-optimize's line search shrinks its step, where both used to throw in a
+  downstream parameter check. Code that reads a proposed trace before
+  accepting it can meet missing choices. Unfold, Scan and Recurse stop at a
+  stopped part. Batched, MLX and gradient runs cannot stop: they force the
+  particle's score and weight to −Inf. A move from an impossible trace to
+  another weighs NaN, which MH reports loudly. with-exact-proposal scores
+  its own runs' observations as 0, and an impossible observation inside a
+  call is a loud error there.
+- **Draws. Residual resampling keeps its whole copies through rounding**
+  (decision 8; 3fde123, genclj-tx1h): n·p_i rounds up within a relative 1e-9
+  below the next integer, so equal weights give each index once, where they
+  used to fall to the multinomial residual.
+- **A batched fallback is recorded** (decision 9; 8344a1e, genclj-ynpc).
+  Every batched entry point's result carries `:fallback`, a written
+  message, when the run went one particle at a time; `:batched? :required`
+  throws with that reason instead. map-particles and project keep returning
+  arrays; map-particles* and project* return `{:result :fallback}`.
+  `fallback-reason` still works. Nothing prints.
+- **A splice argument equal to the last is unchanged** (decision 10;
+  33fec66, genclj-nvo0): an identical value, or an equal host number,
+  boolean, keyword or string (−0.0 apart from 0.0), gives no-change, so a
+  callee is not rerun for an equal fresh number; collections and arrays
+  still compare by identity.
+
 - **Documented, behaviour unchanged.** Promotion follows JAX's rule where an
   integer meets a float (int64 + float32 is float32), as the code already
   did; docs/array-api.md §5 says so now (decision 6; ed51adf, genclj-7ndy).
@@ -207,24 +237,10 @@ Owner decisions in DESIGN §9 that dependents will see. Each moves to the
 sections above in the commit that builds it.
 
 - **From the book's friction** (2026-10-25; 797a269). Decisions 1–4 and 6
-  concern the book and the docs.
-  - A choice outside its own support stops the run: the operation returns
-    weight −Inf without running the rest of the body, so MH rejects and
-    map-optimize's line search shrinks its step. Every other parameter check
-    stays loud (decision 5; genclj-q7cq, genclj-2870).
-  - Residual resampling rounds n·p_i up when it is within a relative 1e-9 of
-    the next integer, so equal weights keep their copies (decision 8;
-    genclj-tx1h).
-  - A batched run that falls back to one particle at a time records why in
-    its result (`:fallback`, a written message), and `:batched? :required`
-    throws with that reason instead. Nothing prints (decision 9;
-    genclj-ynpc).
-  - `splice` treats an argument as unchanged when it is identical, or a host
-    scalar, keyword or string equal to the old one. Collections and arrays
-    compare by identity (decision 10; genclj-nvo0).
-  - No change: dynamic bodies keep passing unknown-change to splices, and
-    the docs will name the static language as the way to incremental
-    splices (decision 7; genclj-zszp).
+  concern the book and the docs; 5, 8, 9 and 10 are built (Changed, above);
+  7 changes nothing in the code (dynamic bodies keep passing unknown-change
+  to splices; gen.dynamic's docstring names the static language as the way
+  to incremental splices; 33fec66).
 - **The 1.0's shape** (2026-10-25; 872f04f; genclj-04h2).
   - Tier marks on every namespace. Stable: gen.array, gen.random, the data
     layer (choicemap, selection, trace, diff), gen.gfi, gen.dynamic,
