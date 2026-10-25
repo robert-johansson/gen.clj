@@ -1162,7 +1162,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   - **In a batched run** the middleware runs once for all the particles,
     under the batch tracer: it sees batched values, and what it writes
     from them is batched. Its keys are one value on the collection's
-    batched trace (`gen.array.batch/unwrap` gives an [n …] array),
+    batched trace (`array/particle` and `array/particles` read it),
     gathered with the trace by `batched/take` and `select`. A
     collection that fell back holds each particle's own scalar run's.
     `batched/traces` rebuilds a particle's trace by a scalar generate, so

@@ -468,7 +468,7 @@ newest first in each section.
     and memory, gen.random.threefry and gen.backend.mlx.exact (internal).
   - `test/fixtures/api-snapshot.edn` holds the stable surface: every
     public var but `^:no-doc` ones, with its arglists or its kind (32
-    namespaces and 685 vars with the optimizers, train and VI; it
+    namespaces and 686 vars with dyn/initial-state; it
     grows with each deliberate addition). gen.api-test fails when
     the code differs. It
     names what was added, removed or changed, and calls out apart a var
