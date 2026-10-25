@@ -510,3 +510,68 @@
         (str "<line x1=\"4.0\" y1=\"" (fmt (y (inc i))) "\" x2=\"" (fmt (x (count columns)))
              "\" y2=\"" (fmt (y (inc i))) "\" stroke=\"gray\"/>"))
       ["</svg>"]))))
+
+(defn shapes
+  "A map in a box with equal scales on both axes: filled polygons (a
+   scene's obstacles), polylines (paths through it) and dots, drawn in the
+   order of their layers. A layer is a map with any of :polygons [[[x y]
+   …] …], :paths [[[x y] …] …] (each joined in order) and :points [[x y]
+   …], and optionally :color (default gray for polygons, steelblue
+   otherwise), :opacity (default 1 for polygons, 0.7 otherwise), :width (a
+   path's stroke, default 1.5) and :r (a dot's radius, default 3).
+   Options: :x-range and :y-range (default [0 1] each), :size (the longer
+   side of the box in pixels, default 300), :x-label, :y-label. Marks are
+   clipped to the box."
+  [layers & [opts]]
+  (let [[x0 x1] (mapv double (get opts :x-range [0.0 1.0]))
+        [y0 y1] (mapv double (get opts :y-range [0.0 1.0]))
+        size (double (get opts :size 300))
+        scale (/ size (max (- x1 x0) (- y1 y0)))
+        pw (* scale (- x1 x0))
+        ph (* scale (- y1 y0))
+        left 52.0
+        top 10.0
+        w (long (Math/ceil (+ left pw 12.0)))
+        h (long (Math/ceil (+ top ph 38.0)))
+        px (fn [x] (+ left (* scale (- (host x) x0))))
+        py (fn [y] (+ top (* scale (- y1 (host y)))))
+        pts (fn [p] (str/join " " (map (fn [[x y]] (str (fmt (px x)) "," (fmt (py y)))) p)))]
+    (str/join
+     "\n"
+     (concat
+      [(str "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" w "\" height=\"" h
+            "\" viewBox=\"0 0 " w " " h "\" font-family=\"sans-serif\" font-size=\"11\">")
+       "<rect width=\"100%\" height=\"100%\" fill=\"white\"/>"
+       (str "<clipPath id=\"shapes-box\"><rect x=\"" (fmt left) "\" y=\"" (fmt top) "\" width=\"" (fmt pw)
+            "\" height=\"" (fmt ph) "\"/></clipPath>")
+       "<g clip-path=\"url(#shapes-box)\">"]
+      (for [{:keys [polygons paths points color opacity width r]} layers
+            mark (concat
+                  (for [p polygons]
+                    (str "<polygon points=\"" (pts p) "\" fill=\"" (or color "gray") "\" fill-opacity=\""
+                         (or opacity 1) "\"/>"))
+                  (for [p paths]
+                    (str "<polyline fill=\"none\" stroke=\"" (or color "steelblue") "\" stroke-opacity=\""
+                         (or opacity 0.7) "\" stroke-width=\"" (or width 1.5) "\" points=\"" (pts p) "\"/>"))
+                  (for [[x y] points]
+                    (str "<circle cx=\"" (fmt (px x)) "\" cy=\"" (fmt (py y)) "\" r=\"" (or r 3)
+                         "\" fill=\"" (or color "steelblue") "\" fill-opacity=\"" (or opacity 0.7) "\"/>")))]
+        mark)
+      ["</g>"]
+      (for [t (ticks x0 x1)]
+        (str "<g><line x1=\"" (fmt (px t)) "\" y1=\"" (fmt (+ top ph)) "\" x2=\"" (fmt (px t)) "\" y2=\""
+             (fmt (+ top ph 4.0)) "\" stroke=\"black\"/><text x=\"" (fmt (px t)) "\" y=\"" (fmt (+ top ph 16.0))
+             "\" text-anchor=\"middle\">" (esc (label t)) "</text></g>"))
+      (for [t (ticks y0 y1)]
+        (str "<g><line x1=\"" (fmt (- left 4.0)) "\" y1=\"" (fmt (py t)) "\" x2=\"" (fmt left) "\" y2=\""
+             (fmt (py t)) "\" stroke=\"black\"/><text x=\"" (fmt (- left 7.0)) "\" y=\"" (fmt (+ (py t) 4.0))
+             "\" text-anchor=\"end\">" (esc (label t)) "</text></g>"))
+      [(str "<rect x=\"" (fmt left) "\" y=\"" (fmt top) "\" width=\"" (fmt pw) "\" height=\"" (fmt ph)
+            "\" fill=\"none\" stroke=\"black\"/>")]
+      (when-let [l (:x-label opts)]
+        [(str "<text x=\"" (fmt (+ left (/ pw 2.0))) "\" y=\"" (fmt (- h 6.0)) "\" text-anchor=\"middle\">"
+              (esc l) "</text>")])
+      (when-let [l (:y-label opts)]
+        [(str "<text transform=\"translate(14 " (fmt (+ top (/ ph 2.0))) ") rotate(-90)\" text-anchor=\"middle\">"
+              (esc l) "</text>")])
+      ["</svg>"]))))
