@@ -21,7 +21,7 @@
             [gen.random-models :as rm]
             [gen.test-support :as ts]))
 
-(laws/deflaws random rm/gen-model 200 (merge laws/all laws/implementation))
+(laws/deflaws random rm/gen-model 200 (merge laws/all laws/conventions))
 
 (defspec batched-particles-of-random-models-are-their-scalar-traces 100
   ;; with spot checks off, so that the batched scores themselves are tested

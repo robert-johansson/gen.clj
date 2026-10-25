@@ -99,13 +99,13 @@
 (deftest check-has-arities
   (let [p (laws/score-is-the-assessed-density (laws/cases models))
         seen #(select-keys % [:pass? :num-tests :seed :vacuous])]
-    (is (= {:pass? true :num-tests 100 :vacuous 0} (dissoc (seen (laws/check p)) :seed)))
-    (is (= 10 (:num-tests (laws/check 10 p))))
+    (is (= {:pass? true :num-tests 100 :vacuous 0} (dissoc (seen (laws/quick-check p)) :seed)))
+    (is (= 10 (:num-tests (laws/quick-check 10 p))))
     (is (= {:pass? true :num-tests 10 :seed 3 :vacuous 0}
-           (seen (laws/check 10 p :seed 3))
-           (seen (laws/check 10 p {:seed 3}))))
+           (seen (laws/quick-check 10 p :seed 3))
+           (seen (laws/quick-check 10 p {:seed 3}))))
     (testing "and nothing printed"
-      (is (= "" (with-out-str (laws/check 10 p)))))))
+      (is (= "" (with-out-str (laws/quick-check 10 p)))))))
 
 (defn- unvisited-constraints
   "An update of a simulated trace with a constraint at an address the
@@ -165,13 +165,13 @@
   (testing "estimated is encapsulated without the same-key score"
     (is (= (dissoc laws/encapsulated :score-is-assessed-on-the-same-key) laws/estimated))
     (is (contains? laws/encapsulated :score-is-assessed-on-the-same-key)))
-  (testing "the identity update's no-change is gen.clj's implementation property, outside all"
-    (is (= [:identity-update-reports-no-change] (keys laws/implementation)))
+  (testing "the identity update's no-change is a convention of gen.clj's, outside all"
+    (is (= [:identity-update-reports-no-change] (keys laws/conventions)))
     (is (not-any? #(contains? % :identity-update-reports-no-change)
                   [laws/general laws/forward-sampling laws/all laws/encapsulated]))
     (is (= {} (laws/verify [[:forever forever [] []]] few)) "a correct generative function passes all")
-    (is (= [:identity-update-reports-no-change] (keys (laws/verify [[:forever forever [] []]] few laws/implementation)))
-        "and fails the implementation property")))
+    (is (= [:identity-update-reports-no-change] (keys (laws/verify [[:forever forever [] []]] few laws/conventions)))
+        "and fails the convention")))
 
 (deftest the-module-needs-no-test-code
   ;; ext/laws is a dependency of its own: gen.laws requires clojure's,

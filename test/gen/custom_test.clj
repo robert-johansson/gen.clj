@@ -63,7 +63,7 @@
    [:own-parameters (custom/with-params affine {:w 2.0 :b 1.0}) [3.0] [[4.0]]]
    [:the-model-s-parameters (dyn/with-params line {:w 2.0 :b 1.0}) [[1.0 2.0]] [[[1.0 3.0]] [[1.0]]]]])
 
-(laws/deflaws custom models 100 (merge laws/all laws/implementation))
+(laws/deflaws custom models 100 (merge laws/all laws/conventions))
 
 (deftest updates-reuse-the-state
   (let [tr (gfi/simulate sum-of-squares [[1.0 2.0 3.0]] (rng/key 1))]

@@ -39,14 +39,18 @@
    - across: an update or regenerate of a trace that another generative
      function made (gf under another store, say), which keeps only its
      choices (gfi/revise);
-   - implementation: properties of gen.clj's own generative functions that
+   - conventions: properties of gen.clj's own generative functions that
      the thesis does not require, so that a caller can skip work.
+
+   A minor release may add a law to a set, and the CHANGELOG says so,
+   since a dependent's suite may then fail; renaming or removing a law
+   waits for a major release.
 
    Writing a law. A law is a function from cases to a test.check property
    (prop/for-all over them) whose value is a test.check result: (checks …)
    of its comparisons names the one that failed and the values it
-   compared, and vacuous marks a case the law says nothing about. check
-   runs one law's property, counting its vacuous cases, and fails a law
+   compared, and vacuous marks a case the law says nothing about.
+   quick-check runs one law's property, counting its vacuous cases, and fails a law
    more than max-vacuous of whose cases were vacuous: it has stopped
    testing anything. A map {:name law} is a law set that verify and deflaws
    run as they run gen.clj's.
@@ -161,8 +165,8 @@
     (result-data [_] data)))
 
 (def vacuous
-  "The result of a case a law says nothing about: it passes, and check and
-   deflaws count it."
+  "The result of a case a law says nothing about: it passes, and quick-check
+   and deflaws count it."
   (reify results/Result
     (pass? [_] true)
     (result-data [_] {::vacuous true})))
@@ -1006,7 +1010,7 @@
    :regenerate-across-generative-functions regenerate-across-generative-functions})
 
 ;; ---------------------------------------------------------------------------
-;; gen.clj's implementation properties
+;; gen.clj's conventions
 ;; ---------------------------------------------------------------------------
 
 (defn- holds-array?
@@ -1027,7 +1031,7 @@
       (and (diff/unknown-change? rd) (holds-array? retval))))
 
 (defn identity-update-reports-no-change
-  "An implementation property, not a thesis law (Def 2.3.2 allows
+  "A convention of gen.clj's, not a thesis law (Def 2.3.2 allows
    unknown-change): an identity update's retdiff is no-change. A return
    value that holds a backend array may be unknown-change: a body run again
    builds a new array, and unchanged is gfi/same-value?, which reads no
@@ -1038,7 +1042,7 @@
           rd (:retdiff (gfi/update tr cm/EMPTY (rng/key (inc seed))))]
       (checks (no-change-unless-an-array? rd (:retval tr))))))
 
-(def implementation
+(def conventions
   "Properties of gen.clj's own generative functions that the thesis does
    not require: an identity update reports no-change (unless its return
    value holds an array), so that a caller can skip work. A correct
@@ -1051,7 +1055,8 @@
 ;; ---------------------------------------------------------------------------
 
 (def max-vacuous
-  "The share of a law's cases that may be vacuous before check fails it.
+  "The share of a law's cases that may be vacuous before quick-check fails
+   it.
    The highest share measured (2026-10-24, five runs of every law) was the
    fuzz's 0.32 of 200 cases, then Recurse's 0.23 of 100: 0.6 is 8 and 9
    standard errors above them."
@@ -1059,7 +1064,7 @@
 
 (defn ^:no-doc options
   "The options of verify and of a deflaws spec, opts being a number of
-   cases or a map of :num-tests and check's options: a map with
+   cases or a map of :num-tests and quick-check's options: a map with
    :num-tests (test.check's defspec count, 100, by default)."
   [opts]
   (let [known #{:num-tests :seed :max-size :max-vacuous :reporter-fn}]
@@ -1082,22 +1087,22 @@
     (throw (ex-info "laws: a law set is a map from a law's name to the law, a function of cases"
                     {:laws (if (map? laws) (vec (keys laws)) laws)}))))
 
-(defn check
-  "quick-check of a law's property over num-tests cases (100 by default),
-   with the count of its vacuous cases as :vacuous: a law more than
-   :max-vacuous (max-vacuous by default) of whose cases were vacuous fails,
-   its :result-data {:vacuous :of :max-vacuous}. Options are quick-check's
-   (:seed, :max-size, :reporter-fn), as keywords or a map. A run draws its
-   seed from the clock unless :seed is given, and its result's :seed
-   reproduces it. Nothing is printed.
+(defn quick-check
+  "test.check's quick-check of a law's property over num-tests cases (100
+   by default), with the count of its vacuous cases as :vacuous: a law
+   more than :max-vacuous (max-vacuous by default) of whose cases were
+   vacuous fails, its :result-data {:vacuous :of :max-vacuous}. Options
+   are test.check's (:seed, :max-size, :reporter-fn), as keywords or a
+   map. A run draws its seed from the clock unless :seed is given, and its
+   result's :seed reproduces it. Nothing is printed.
 
-     (laws/check 20 (laws/score-is-the-assessed-density (laws/cases models)) :seed 1)
+     (laws/quick-check 20 (laws/score-is-the-assessed-density (laws/cases models)) :seed 1)
 
    Planted bug (2026-10-24): an update that rejects every constraint as
    unvisited passed the dynamic and combinator suites' update-weight laws,
    their every case vacuous (only an error in a reverse update failed one
    other law); it fails them now."
-  ([property] (check ctc/*default-test-count* property))
+  ([property] (quick-check ctc/*default-test-count* property))
   ([num-tests property & {:as opts}]
    (let [{:keys [reporter-fn] :or {reporter-fn (fn [_])} :as opts} (merge {:max-vacuous max-vacuous} opts)
          n (volatile! 0)
@@ -1118,7 +1123,7 @@
   {:model label :key-seed seed :picks picks :alt? alt?})
 
 (defn failure-of
-  "What check's failing result r says, readably: the failing check's
+  "What quick-check's failing result r says, readably: the failing check's
    :check and :values (or what its explain gives), or the :error thrown
    (its message, ex-data as :data, and the :exception), or the counts of a
    law that failed for its vacuous cases; with the smallest failing case
@@ -1142,7 +1147,7 @@
    says (failure-of: the check that failed and the values it compared, or
    the error thrown, the smallest failing case and the run's seed); {} when
    every law holds. opts is the number of cases of each law (100 by
-   default), or a map of it (:num-tests) and check's options: :seed,
+   default), or a map of it (:num-tests) and quick-check's options: :seed,
    :max-size and :max-vacuous. Every law runs from one seed, drawn from the
    clock unless :seed is given, so a failure's :seed, given back,
    reproduces the run. The arguments are deflaws' but the prefix.
@@ -1157,23 +1162,23 @@
          cs (cases models)]
      (into (sorted-map)
            (keep (fn [[law-name law]]
-                   (let [r (check num-tests (vary-meta (law cs) assoc :name law-name) (dissoc opts :num-tests))]
+                   (let [r (quick-check num-tests (vary-meta (law cs) assoc :name law-name) (dissoc opts :num-tests))]
                      (when-not (:pass? r) [law-name (failure-of r)]))))
            (law-set! laws)))))
 
 (defmacro deflaws
   "A test.check spec per law of laws (all by default), named prefix-law,
    each over cases of models, with prefix's metadata (^:slow, say), run by
-   check. opts is the number of cases, or a map of it (:num-tests) and
-   check's options. laws is evaluated when the deflaws compiles: a law
+   quick-check. opts is the number of cases, or a map of it (:num-tests)
+   and quick-check's options. laws is evaluated when the deflaws compiles: a law
    set's var, a map, or an expression of them, such as (merge laws/all
    laws/fixed-support).
 
    A spec is a clojure.test test, and a function: (spec) runs its cases
    from a seed drawn from the clock, a fresh one at each call, as
    test.check's defspec does; (spec n :seed s) runs n cases from the seed
-   s, which a result's :seed reproduces. It returns check's result and
-   prints nothing; a failure is reported as clojure.test reports one."
+   s, which a result's :seed reproduces. It returns quick-check's
+   result and prints nothing; a failure is reported as clojure.test reports one."
   ([prefix models opts] `(deflaws ~prefix ~models ~opts all))
   ([prefix models opts laws]
    (let [laws-map (if (map? laws) laws (law-set! (eval laws)))
@@ -1183,7 +1188,7 @@
             ~ls ~laws]
         ~@(for [law (keys laws-map)
                 :let [spec-name (with-meta (symbol (str prefix "-" (name law))) (meta prefix))]]
-            ;; defspec's var, with check in place of quick-check
+            ;; defspec's var, with this quick-check in place of test.check's
             `(defn ~(vary-meta spec-name assoc ::ctc/defspec true ::law law
                                :doc (str "The law " law " over the models of (gen.laws/deflaws " prefix " …): ("
                                          spec-name ") runs its cases from a fresh seed, (" spec-name
@@ -1191,5 +1196,5 @@
                                :test `(fn [] (ctc/assert-check (assoc (~spec-name) :test-var (str '~spec-name)))))
                ([] (~spec-name (:num-tests (options ~opts))))
                ([times# & {:as check-opts#}]
-                (check times# (vary-meta ((get ~ls ~law) ~cs) assoc :name '~spec-name)
+                (quick-check times# (vary-meta ((get ~ls ~law) ~cs) assoc :name '~spec-name)
                        (merge (dissoc (options ~opts) :num-tests) check-opts#)))))))))

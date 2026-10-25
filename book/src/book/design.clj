@@ -335,7 +335,7 @@
   "The law dispatch-matches-handler over 30 cases of gf, a dispatched
    noisy-mean, with a fixed seed: test.check's result."
   [gf]
-  (laws/check 30
+  (laws/quick-check 30
               (laws/dispatch-matches-handler (laws/cases [["mean" gf [] []]]))
               {:seed 1}))
 

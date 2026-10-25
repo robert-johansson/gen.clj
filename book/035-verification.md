@@ -81,7 +81,7 @@ which the laws also update and regenerate.
 and a law is a function from cases to a test.check property. The law
 `score-is-the-assessed-density` is the thesis's trace consistency (Def.
 2.1.16): the score of a simulated trace is the log density `assess` gives
-its choices, and the two return values agree. `laws/check` runs a
+its choices, and the two return values agree. `laws/quick-check` runs a
 property on a number of cases, as test.check's `quick-check` does, and
 adds the count of *vacuous* cases, which a later section explains:
 
@@ -89,7 +89,8 @@ adds the count of *vacuous* cases, which a later section explains:
 ```clojure
 (def score-law (laws/score-is-the-assessed-density (laws/cases models)))
 
-(select-keys (laws/check 20 score-law {:seed 1}) [:pass? :num-tests :vacuous])
+(select-keys (laws/quick-check 20 score-law {:seed 1})
+             [:pass? :num-tests :vacuous])
 ;=> {:pass? true, :num-tests 20, :vacuous 0}
 ```
 
@@ -210,7 +211,7 @@ One more property is gen.clj's, not the thesis's:
 reports no change of the return value, unless the value holds an array.
 The thesis's Def. 2.3.2 allows an unknown change at any time, so a
 correct generative function may fail it. It is the set
-`laws/implementation`, which gen.clj's suites run on its own generative
+`laws/conventions`, which gen.clj's suites run on its own generative
 functions beside `laws/all`.
 
 A generative function whose internal proposal is something else need
@@ -580,7 +581,7 @@ as test.check's specs do, or, called with a count and a seed, on those:
 A fourth argument names another set, or an expression of sets:
 `(laws/deflaws prefix models 100 (merge laws/all laws/fixed-support))`.
 The book runs each law on 20 cases. gen.clj's own suites run `laws/all`
-with `laws/implementation`, 100 cases per law over the dynamic models and
+with `laws/conventions`, 100 cases per law over the dynamic models and
 over the combinators,
 200 over random dynamic models, and 300 for the static law over random
 static models; `gen.soak` runs every property again with ten times its
@@ -775,7 +776,7 @@ reversibility law are vacuous:
 (def reversible (laws/updates-are-reversible-with-exact-discards
                  (laws/cases coin-models)))
 
-(select-keys (laws/check 100 reversible {:seed 1}) [:pass? :vacuous])
+(select-keys (laws/quick-check 100 reversible {:seed 1}) [:pass? :vacuous])
 ;=> {:pass? true, :vacuous 6} ; float64
 ```
 
@@ -803,9 +804,9 @@ A vacuous case passes, which is right for one case and dangerous for
 many: a law all of whose cases are vacuous passes without testing
 anything. The keyword check is such a bug. It rejects every constraint as
 unvisited, so the update laws' cases are vacuous whenever they constrain
-anything. `laws/check`, which runs one law's property, `laws/verify` and
-every spec `deflaws` defines fail a law more than `laws/max-vacuous` of
-whose cases are vacuous:
+anything. `laws/quick-check`, which runs one law's property,
+`laws/verify` and every spec `deflaws` defines fail a law more than
+`laws/max-vacuous` of whose cases are vacuous:
 
 <!-- code: keyword-check -->
 ```clojure
@@ -815,10 +816,10 @@ whose cases are vacuous:
   (laws/update-weight-is-the-projection-change
    (laws/cases [(entry :keyword-check keyword-check)])))
 
-(:result-data (laws/check 20 keyword-law {:seed 1}))
+(:result-data (laws/quick-check 20 keyword-law {:seed 1}))
 ;=> {:vacuous 15, :of 20, :max-vacuous 0.6}
 
-(:pass? (laws/check 20 keyword-law {:seed 1 :max-vacuous 1.0}))
+(:pass? (laws/quick-check 20 keyword-law {:seed 1 :max-vacuous 1.0}))
 ;=> true
 ```
 
@@ -1086,7 +1087,7 @@ macros and rest arguments. The static law holds over twenty of them:
 ```clojure
 (def static-law (laws/static-matches-dynamic (laws/cases rsm/gen-model)))
 
-(select-keys (laws/check 20 static-law {:seed 1}) [:pass? :num-tests])
+(select-keys (laws/quick-check 20 static-law {:seed 1}) [:pass? :num-tests])
 ;=> {:pass? true, :num-tests 20}
 ```
 

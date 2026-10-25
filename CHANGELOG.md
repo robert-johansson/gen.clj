@@ -65,12 +65,12 @@ newest first in each section.
     same checkout unless the dependent names `gen.clj/gen.clj` itself.
     gen.clj's `test/` on the classpath no longer gives it. In gen.clj's
     repository `:test` and `:laws` (`clojure -M:laws`) include it.
-  - **Breaking.** `identity-update-reports-no-change`, an implementation
-    property a correct generative function may fail, left
+  - **Breaking.** `identity-update-reports-no-change`, a convention of
+    gen.clj's that a correct generative function may fail, left
     `laws/forward-sampling` (7 laws now, `laws/all` 22) for
-    `laws/implementation`, so `deflaws` over the default set or over
+    `laws/conventions`, so `deflaws` over the default set or over
     `laws/encapsulated` no longer runs it. gen.clj's own suites run
-    `(merge laws/all laws/implementation)`.
+    `(merge laws/all laws/conventions)`.
   - A `deflaws` spec prints nothing: it printed each run's result map
     through defspec's reporter. It draws a fresh seed at each run, as
     before and now documented in its docstring; `(spec n :seed s)` fixes
@@ -344,14 +344,20 @@ newest first in each section.
     the model by its label) and the run's `:seed`. `{}` when every law
     holds. opts is the number of cases (100) or a map of it and `:seed`,
     `:max-size`, `:max-vacuous`. `laws/failure-of` reads a result of
-    `laws/check` the same way.
-  - `laws/check` takes `(check property)` and `(check n property)`, and
-    its options as keywords or a map (it required the map).
+    `laws/quick-check` the same way.
+  - **Breaking.** `laws/check` is `laws/quick-check` (owner, 2026-10-25:
+    one letter from `checks`, which does something else). It takes
+    `(quick-check property)` and `(quick-check n property)`, and its
+    options as keywords or a map (it required the map).
   - `laws/estimated`: `laws/encapsulated` without
     `:score-is-assessed-on-the-same-key`, for an estimated density with a
     joint sampler (gen.custom/estimated with `:simulate`).
-  - `laws/implementation`: `identity-update-reports-no-change` (Changed,
-    below).
+  - `laws/conventions`: `identity-update-reports-no-change` (Changed,
+    below), gen.clj's habits that a user's generative function need not
+    keep.
+  - A law set may gain a law in a minor release, with a line here, since
+    a dependent's suite may then fail; renaming or removing a law is
+    breaking (owner, 2026-10-25).
   - `laws/checks`, `laws/vacuous?`, `laws/vacuous-on-unvisitable` and
     `laws/unvisitable?` are public, for a law of your own. Vacuity is
     documented: a case is vacuous when its operation's error says a

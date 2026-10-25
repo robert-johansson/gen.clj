@@ -96,7 +96,7 @@
           p (prompt "Call me at")
           gf (token/completion lm {:potential phone})
           cases (laws/cases [[:llama gf [p 4] [[p 2] [p 6]]]])]
-      (doseq [[k law] (merge laws/all laws/implementation)]
+      (doseq [[k law] (merge laws/all laws/conventions)]
         (let [r (tc/quick-check 10 (law cases) :seed 20261021)]
           (is (:pass? r) (str k " " (pr-str (select-keys r [:fail :shrunk])))))))))
 

@@ -108,7 +108,7 @@
 ;; regenerate-keeps-unselected-choices, by their retdiff checks); a skipped
 ;; Scan step whose carry is read from its output
 ;; (identity-update-changes-nothing, with the tests below).
-(laws/deflaws extras models 100 (merge laws/all laws/implementation))
+(laws/deflaws extras models 100 (merge laws/all laws/conventions))
 (laws/deflaws extras models 100 laws/fixed-support)
 
 (defn- consistent? [tr]

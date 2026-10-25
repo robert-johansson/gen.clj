@@ -666,9 +666,9 @@
   all {:kind :var}
   assess-is-generate-with-every-choice {:arglists ([cases])}
   cases {:arglists ([models])}
-  check {:arglists ([property] [num-tests property & {:as opts}])}
   checks {:kind :macro, :arglists ([& forms])}
   close? {:arglists ([x y])}
+  conventions {:kind :var}
   deflaws {:kind :macro, :arglists ([prefix models opts] [prefix models opts laws])}
   dispatch-matches-handler {:arglists ([cases])}
   encapsulated {:kind :var}
@@ -688,11 +688,11 @@
   identity-update-changes-nothing {:arglists ([cases])}
   identity-update-keeps-omega {:arglists ([cases])}
   identity-update-reports-no-change {:arglists ([cases])}
-  implementation {:kind :var}
   max-vacuous {:kind :var}
   project-of-everything-is-the-score {:arglists ([cases])}
   project-splits-the-score {:arglists ([cases])}
   propose-weight-is-the-assessed-density {:arglists ([cases])}
+  quick-check {:arglists ([property] [num-tests property & {:as opts}])}
   regenerate-across-generative-functions {:arglists ([cases])}
   regenerate-keeps-unselected-choices {:arglists ([cases])}
   regenerate-keeps-unselected-values {:arglists ([cases])}

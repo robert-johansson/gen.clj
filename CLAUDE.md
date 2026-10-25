@@ -143,7 +143,7 @@ Python.
    (`ext/laws/src`, on `:test`'s classpath; its law sets general,
    forward-sampling, all and others). Every new generative function kind
    instantiates them with `(laws/deflaws prefix models n (merge laws/all
-   laws/implementation))`, and the other sets that apply to it. Coverage is
+   laws/conventions))`, and the other sets that apply to it. Coverage is
    tracked in `docs/research/genjl-parity.md` §3.
    - Numerics are checked against fixtures.
    - Sampled quantities use fixed keys and variance-derived bands.

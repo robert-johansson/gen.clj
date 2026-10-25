@@ -38,7 +38,8 @@
 ;; book: one-law
 (def score-law (laws/score-is-the-assessed-density (laws/cases models)))
 
-(select-keys (laws/check 20 score-law {:seed 1}) [:pass? :num-tests :vacuous])
+(select-keys (laws/quick-check 20 score-law {:seed 1})
+             [:pass? :num-tests :vacuous])
 ;=> {:pass? true, :num-tests 20, :vacuous 0}
 
 ;; book: a-case
@@ -435,7 +436,7 @@
 (def reversible (laws/updates-are-reversible-with-exact-discards
                  (laws/cases coin-models)))
 
-(select-keys (laws/check 100 reversible {:seed 1}) [:pass? :vacuous])
+(select-keys (laws/quick-check 100 reversible {:seed 1}) [:pass? :vacuous])
 ;=> {:pass? true, :vacuous 6} ; float64
 
 ;; book: unvisitable
@@ -451,10 +452,10 @@
   (laws/update-weight-is-the-projection-change
    (laws/cases [(entry :keyword-check keyword-check)])))
 
-(:result-data (laws/check 20 keyword-law {:seed 1}))
+(:result-data (laws/quick-check 20 keyword-law {:seed 1}))
 ;=> {:vacuous 15, :of 20, :max-vacuous 0.6}
 
-(:pass? (laws/check 20 keyword-law {:seed 1 :max-vacuous 1.0}))
+(:pass? (laws/quick-check 20 keyword-law {:seed 1 :max-vacuous 1.0}))
 ;=> true
 
 ;; book: max-vacuous
@@ -577,7 +578,7 @@ exact-evidence
 ;; book: fuzz
 (def static-law (laws/static-matches-dynamic (laws/cases rsm/gen-model)))
 
-(select-keys (laws/check 20 static-law {:seed 1}) [:pass? :num-tests])
+(select-keys (laws/quick-check 20 static-law {:seed 1}) [:pass? :num-tests])
 ;=> {:pass? true, :num-tests 20}
 
 ;; book: lazy-error

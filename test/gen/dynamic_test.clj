@@ -125,7 +125,7 @@
 ;; Laws (gen.laws), and their checks on structure changes
 ;; ---------------------------------------------------------------------------
 
-(laws/deflaws dynamic models 100 (merge laws/all laws/implementation))
+(laws/deflaws dynamic models 100 (merge laws/all laws/conventions))
 
 ;; every address has a fixed support (the mixtures' union is the reals)
 (laws/deflaws dynamic (filterv (comp #{:linreg :shared-namespace :mixtures :spliced-distribution :p-mh :array-valued} first) models)
@@ -522,12 +522,12 @@
   (mapv (fn [[label m]] [label m [40] [[3] [45]]])
         [[:cons-onto-lazy cons-onto-lazy] [:conj-onto-lazy conj-onto-lazy] [:chunk-onto-lazy chunk-onto-lazy]
          [:repeated-lazy repeated-lazy] [:range-beside-cons range-beside-cons]])
-  100 (merge laws/all laws/implementation))
+  100 (merge laws/all laws/conventions))
 
 ;; The infinite kinds (genclj-54ix), which realize! takes 10,000 elements of:
 ;; iterate's (its draws in the steps f traces), cycle's past the chunk cycle
 ;; realizes, and an infinite repeat's. Every law of laws/all, but not
-;; laws/implementation's identity update reporting no-change: two infinite
+;; laws/conventions's identity update reporting no-change: two infinite
 ;; values exhaust same-value?'s budget, so an identity update reports
 ;; unknown-change, which is sound (Def 2.3.2). The laws compare a return value as far as a run
 ;; realizes it (gen.laws' same-retval?). Plants: an unbounded comparison in
@@ -824,7 +824,7 @@
   [[:nested-bounds nested-bounds [0.0] [[0.5] [-0.5]]]
    [:nested-bounds-static nested-bounds-static [0.0] [[0.5] [-0.5]]]
    [:nested-bounds-in-a-callee nested-bounds-in-a-callee [0.0] [[0.5] [-0.5]]]]
-  100 (merge laws/all laws/implementation))
+  100 (merge laws/all laws/conventions))
 
 ;; ---------------------------------------------------------------------------
 ;; A splice's argument equal to the last is unchanged (DESIGN.md §9, the ten
