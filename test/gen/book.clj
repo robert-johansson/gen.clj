@@ -575,15 +575,18 @@
 (defn sync!
   "Writes chapters' includes from their regions, and their figures: those
    named (paths like \"book/011-getting-started.md\"), or every chapter and
-   the pages written from the code when none is. For the REPL as for -main."
+   the pages written from the code when none is. A named page written from
+   the code (book/063-api.md) is written again. For the REPL as for -main."
   [& named]
-  (when (empty? named)
-    (doseq [[file page] generated
-            :let [f (io/file dir file) text (page)]]
-      (when-not (and (.exists f) (= text (slurp f)))
-        (spit f text)
-        (println "wrote" (.getPath f)))))
-  (doseq [chapter (or (seq named) (chapters))
+  (doseq [[file page] generated
+          :let [f (io/file dir file)]
+          :when (or (empty? named) (some #(= (.getName (io/file %)) file) named))
+          :let [text (page)]]
+    (when-not (and (.exists f) (= text (slurp f)))
+      (spit f text)
+      (println "wrote" (.getPath f))))
+  (doseq [chapter (or (seq (remove #(contains? generated (.getName (io/file %))) named))
+                      (when (empty? named) (chapters)))
           :let [rs (regions (slurp (source-file chapter)))
                 md (slurp chapter)
                 md' (synced md rs)]]
