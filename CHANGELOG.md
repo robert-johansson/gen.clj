@@ -278,6 +278,12 @@ newest first in each section.
   scores in and out of a small total keeps the score at assess's sum to
   round-off; a plain running total drifted 2.9e-11 from -2.82 after 1000
   updates. Scores differ from before in the last bits.
+- **write-trace accepts generate's weight up to rounding** (genclj-s5fj).
+  It required the weight to equal the trace's score bit for bit, and so
+  refused a hand-written generative function, or a running total, that sums
+  the same terms in another order, blaming missing choices. It now allows
+  relative 1e-9 (float64) or 1e-4 (float32), and the message says "beyond
+  rounding".
 
 - **Map's, Unfold's and Scan's scores never turn NaN** (−Inf + Inf) after a
   choice leaves its support and comes back. A general law now holds every
