@@ -159,6 +159,80 @@
     (is (batch/batched [n] (array/all-true? (array/< x 100.0))))
     (is (not (batch/batched [n] (array/all-true? (array/< x (array/max b3))))) "one particle's element fails")))
 
+(deftest particles-of-a-batched-value
+  ;; array/batched?, batch-shape, particle-backend, particle and particles:
+  ;; the public reach of a batched value's particles, as a host function
+  ;; spot-checked inside a batched run reads them (memo.clj's memo.lower,
+  ;; genclj-9efy). Planted (2026-10-25), each failing its case: batched? not
+  ;; seeing through the tape; a tracked particle read as its primal; a
+  ;; batch's axes counted column-major; particles' indices sorted; no index
+  ;; check; particle-backend giving *backend* (the tracer, in a run)
+  (let [x (batch/wrap b3 [n])
+        y (batch/batched [n] (array/* x 2.0))]
+    (testing "batched? and batch-shape"
+      (is (array/batched? x))
+      (is (array/batched? y) "a value the run computed")
+      (is (= [n] (array/batch-shape y)))
+      (is (not-any? array/batched? [s3 1.5 true :k nil (array/array [1.0])]))
+      (is (nil? (array/batch-shape s3))))
+    (testing "particle i: its own value, unbatched, of its own shape"
+      (doseq [i (range n)]
+        (let [p (array/particle y i)]
+          (is (not (array/batched? p)))
+          (is (= [3] (array/shape p)))
+          (is (ts/close? (array/* (array/take b3 i 0) 2.0) p) (str "particle " i))))
+      (is (identical? s3 (array/particle s3 2)) "a shared value as it is")
+      (is (= :k (array/particle :k 0)) "any value"))
+    (testing "particles: their values stacked, in their order, repeats allowed"
+      (is (ts/close? (array/take b3 (array/array [3 0 3]) 0) (array/particles x [3 0 3])))
+      (is (= [0 3] (array/shape (array/particles x []))))
+      (is (ts/close? (array/stack [s3 s3]) (array/particles s3 [1 2])) "a shared value broadcast"))
+    (testing "inside the run, where reading the batched value is the batched-branch error"
+      (is (= (ts/host (array/take b3 1 0)) (batch/batched [n] (array/->clj (array/particle (array/+ x 0.0) 1)))))
+      (is (= (ts/host (array/take b3 (array/array [2 1]) 0))
+             (batch/batched [n] (array/->clj (array/particles (array/+ x 0.0) [2 1]))))))
+    (testing "particle-backend: the backend the batch wraps, where code apart from the run draws unbatched"
+      (is (identical? (array/backend b3) (array/particle-backend y)))
+      (is (nil? (array/particle-backend s3)))
+      (batch/batched [n]
+        (is (array/batched? (rng/normal (rng/key 1) [2])) "in the run, a draw is per particle")
+        (is (not (array/batched? (array/with-backend (array/particle-backend x) (rng/normal (rng/key 1) [2])))))))
+    (testing "a batch of several axes counts its particles row-major"
+      (let [a (rand-array 7 [2 3 4])
+            z (batch/wrap a [2 3])]
+        (is (= [2 3] (array/batch-shape z)))
+        (doseq [i (range 6)]
+          (is (ts/close? (array/take (array/take a (quot i 3) 0) (rem i 3) 0) (array/particle z i)) (str "particle " i)))
+        (is (= [2 4] (array/shape (array/particles z [5 1]))))))
+    (testing "a lazily gathered value (resampling's)"
+      (let [g (batch/gather x (array/array [2 0]) [2])]
+        (is (= [2] (array/batch-shape g)))
+        (is (ts/close? (array/take b3 2 0) (array/particle g 0)))))
+    (testing "loud: an index that is no particle"
+      (doseq [i [n -1 1.0]]
+        (is (= {:op :particle :index i :particles n} (ts/thrown-data (array/particle x i))) (pr-str i)))
+      (is (= {:op :particles :index n :particles n} (ts/thrown-data (array/particles x [0 n]))))
+      (is (= {:op :particles :index -1 :particles nil} (ts/thrown-data (array/particles s3 [-1]))) "a shared value's too")
+      (is (= {:op :particles :value :k} (ts/thrown-data (array/particles :k [0]))) "a shared value that is no array"))
+    (when-not (ts/native-grad?)
+      (testing "a value being differentiated: batched when its primal is, its particles refused"
+        (let [seen (volatile! nil)]
+          (batch/batched [n]
+            ((array/grad (fn [t]
+                           (let [v (array/* t x)]
+                             (vreset! seen {:tracked? (array/tracked? v)
+                                            :batched? (array/batched? v)
+                                            :batch-shape (array/batch-shape v)
+                                            :particle (:op (ts/thrown-data (array/particle v 0)))
+                                            :particles (:op (ts/thrown-data (array/particles v [0])))
+                                            :primal (array/->clj (array/particle (array/stop-gradient v) 1))
+                                            :shared (identical? t (array/particle t 0))})
+                             (array/sum v))))
+             1.5))
+          (is (= {:tracked? true :batched? true :batch-shape [n] :particle :particle :particles :particles
+                  :primal (ts/host (array/* 1.5 (array/take b3 1 0))) :shared true}
+                 @seen)))))))
+
 (deftest host-reads-are-the-fallback-signal
   (let [x (batch/wrap bs [n])]
     (doseq [[label f] [[:item #(array/item x)] [:->clj #(array/->clj x)] [:truthy-of-a-bool #(array/truthy? (array/> x 0))]

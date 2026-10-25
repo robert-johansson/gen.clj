@@ -172,7 +172,7 @@ needs, taken from GenMLX's measured call counts
 | Group | Public functions (`array/…`) | Primitive op keywords → `IBackend` method | Composite |
 |---|---|---|---|
 | creation | `array` `scalar` `zeros` `ones` `full` `eye` `arange` `linspace` `*-like` | `-from-host` `-full` `-arange` | `eye`, `linspace` |
-| conversion | `astype` `item` `->clj` `eval!` `array?` `host?` `backend-array?` `shape` `ndim` `size` `dtype` | `-astype` `-to-host` `-eval!` `-shape` `-dtype` | `ndim`, `size` |
+| conversion | `astype` `item` `->clj` `eval!` `array?` `host?` `backend-array?` `shape` `ndim` `size` `dtype` `dtype-kind` | `-astype` `-to-host` `-eval!` `-shape` `-dtype` | `ndim`, `size`, `dtype-kind` |
 | arithmetic | `+ - * /` (variadic), `negate`, `pow`, `maximum` `minimum`, `mod` `floor-div`, `abs` `sign` | `:add :subtract :multiply :divide :power :maximum :minimum :remainder :floor-divide :negative :abs :sign` | — |
 | exp/log | `exp` `log` `expm1` `log1p` `sqrt` `square` `logaddexp` `xlogy` | `:exp :log :expm1 :log1p :sqrt` | `square`, `logaddexp` (native in MLX: one op, and its gradient is exact at ties under MLX's autodiff), `xlogy` |
 | trig | `sin` `cos` `tan` `tanh` `sinh` `cosh` `asin` `acos` `atan` `atan2` `sigmoid` `softplus` | `:sin :cos :tan :tanh :sinh :cosh :arcsin :arccos :arctan :arctan2` | `sigmoid`, `softplus` |
@@ -184,10 +184,10 @@ needs, taken from GenMLX's measured call counts
 | reductions | `sum` `prod` `max` `min` `argmax` `argmin` `all` `any` `mean` `variance` `std` `logsumexp` | `-reduce` with `:sum :prod :max :min :argmax :argmin :all :any` | `mean`, `variance`, `std`, `logsumexp` |
 | normalization | `softmax` `log-softmax` | — | both |
 | scans | `cumsum` `cumprod` `logcumsumexp` | `-scan` with `:cumsum :cumprod :cummax :cummin` | `logcumsumexp` |
-| shape | `reshape` `transpose` `squeeze` `expand-dims` `broadcast-to` `stack` `concatenate` `flatten` | `-reshape` `-transpose` `-broadcast-to` `-concatenate` | `squeeze`, `expand-dims`, `stack`, `flatten` |
+| shape | `reshape` `transpose` `squeeze` `expand-dims` `broadcast-to` `stack` `concatenate` `flatten` `broadcast-shapes` | `-reshape` `-transpose` `-broadcast-to` `-concatenate` | `squeeze`, `expand-dims`, `stack`, `flatten`; `broadcast-shapes` computes on shapes |
 | indexing | `slice` `take` `take-along-axis` `pick` `scatter-add` | `-slice` `-take` `-take-along-axis` `-scatter-add` | `pick` |
 | linear algebra | `matmul` `outer` `diag` · `la/cholesky` `la/solve-triangular` `la/solve` `la/inv` `la/slogdet` | `-matmul` `-linalg` | `outer`, `diag` |
-| gradients | `grad` `value-and-grad` `stop-gradient` | `-value-and-grad`, `:stop-gradient` | — |
+| gradients | `grad` `value-and-grad` `stop-gradient` `tracked?` | `-value-and-grad`, `:stop-gradient` | — |
 | trees | `tree-map` `tree-leaves` | — | both |
 
 **Naming conventions:**
@@ -501,6 +501,17 @@ like the AD tape:
 - **Reading on the host.** Reading a batched value on the host (`array/item`,
   `array/->clj`, `truthy?` of a boolean, `=`, hashing) raises the batched-branch
   error. So does host math on one, a `ClassCastException` naming `Batched`.
+- **Particles** (2026-10-25, genclj-9efy). Code that checks a batched
+  run against single particles (memo.clj spot-checks a vectorized host
+  function so) reads them through gen.array: `batched?` (a value being
+  differentiated is batched when its primal is), `batch-shape`,
+  `particle-backend` (the backend the batch wraps, to bind for code run
+  apart from the run), `(particle x i)` (an unbatched array, x itself when
+  every particle shares it) and `(particles x idx)` (stacked, one
+  gather). They gather without reading on the host, lazily on a lazy
+  backend. A value being differentiated with a batched primal is refused,
+  since its particles would carry no gradient: read those of
+  `(stop-gradient x)`.
 - **Gradients** (2026-10-23, bean genclj-7dti). `array/value-and-grad` of
   batched arguments, or anywhere in a batched run, is vmap's: each particle
   gets the value and gradient of its own scalar run, on every op the tape

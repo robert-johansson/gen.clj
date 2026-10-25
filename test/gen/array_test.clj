@@ -105,6 +105,67 @@
   (is (= [3.0 2.0 1.0] (array/->clj (array/- 4 (array/array [1.0 2.0 3.0])))))
   (is (:shapes (thrown-data #(array/+ (array/array [1 2 3]) (array/array [1 2]))))))
 
+(deftest broadcast-shapes-is-numpy-s
+  ;; NumPy 2.4's broadcast_shapes, run on each case (the first two are its
+  ;; documentation's examples). Planted (2026-10-25): shapes aligned at their
+  ;; first axes fails the second case; a mismatch resolved to the larger size
+  ;; fails the errors
+  (testing "NumPy's results"
+    (are [expected shapes] (= expected (apply array/broadcast-shapes shapes))
+      [3 2] [[1 2] [3 1] [3 2]]
+      [5 6 7] [[6 7] [5 6 1] [7] [5 1 7]]
+      [] []
+      [2 3] [[2 3]]
+      [0] [[0] [1]]
+      [2 0] [[2 0] [1 1] []]))
+  (testing "a vector of longs, whatever sequence of integers is given"
+    (is (= [2 3] (array/broadcast-shapes '(2 1) [(int 3)])))
+    (is (every? #(instance? Long %) (array/broadcast-shapes [(int 2) 1] [(int 3)]))))
+  (testing "the shape the elementwise ops give, on every backend"
+    (doseq [shapes [[[1 2] [3 1]] [[4 1 3] [2 1]] [[] [2]] [[0 3] [1 3]]]]
+      (is (= (apply array/broadcast-shapes shapes)
+             (array/shape (reduce array/+ (map array/zeros shapes))))
+          (pr-str shapes))))
+  (testing "loud: shapes that do not broadcast, named all, and what is no shape"
+    (are [shapes] (= {:op :broadcast-shapes :shapes shapes} (thrown-data #(apply array/broadcast-shapes shapes)))
+      [[3] [4]]
+      [[0] [2]]
+      [[1 4] [3 1] [5]])
+    (is (thrown-data #(array/+ (array/zeros [1 4]) (array/zeros [3 1]) (array/zeros [5]))) "as the ops are")
+    (are [s] (= {:op :broadcast-shapes :shape s} (thrown-data #(array/broadcast-shapes [2] s)))
+      [-1]
+      [1.5]
+      3
+      nil)))
+
+(deftest dtype-kinds
+  ;; the lattice's levels (docs/array-api.md §5). Planted (2026-10-25):
+  ;; uint32 taken for a float fails the table; an unknown dtype given no
+  ;; kind (nil) fails the errors
+  (testing "every dtype's kind"
+    (are [kind dts] (every? #(= kind (array/dtype-kind %)) dts)
+      :bool [:bool]
+      :int [:int32 :int64 :uint32]
+      :float [:float16 :bfloat16 :float32 :float64]))
+  (testing "an array's, through its dtype, on every backend"
+    (are [kind x] (= kind (array/dtype-kind (array/dtype x)))
+      :float (array/array [1.5])
+      :float (array/array [1.5] {:dtype :float32})
+      :int (array/array [1 2])
+      :bool (array/< (array/array [1 3]) 2)
+      :float 2.5
+      :int 2
+      :bool true))
+  (testing "loud: what is no dtype, an array among them"
+    (are [x] (= x (:value (thrown-data #(array/dtype-kind x))))
+      :float128
+      :float
+      "float32"
+      nil)
+    (is (re-find #"\(dtype-kind \(dtype x\)\)"
+                 (try (array/dtype-kind (array/array [1.0])) "" (catch clojure.lang.ExceptionInfo e (ex-message e))))
+        "an array: the message says how to take its kind")))
+
 (deftest dtype-promotion
   (testing "host numbers are weakly typed"
     (is (= :float32 (array/dtype (array/+ (array/array [1.5] {:dtype :float32}) 2.5))))

@@ -124,6 +124,19 @@
     (dt/host-dtype x)
     (p/-dtype (operand-backend :dtype x) x)))
 
+(defn dtype-kind
+  "The kind of the dtype dt, a level of the promotion lattice (docs/array-api.md
+   §5): :bool, :int (:int32, :int64, :uint32) or :float (:float16, :bfloat16,
+   :float32, :float64). It takes a dtype, not an array: an array's or a host
+   number's kind is (dtype-kind (dtype x)), so 2's is :int. Anything but a
+   dtype keyword is a loud error."
+  [dt]
+  (if (contains? dt/dtypes dt)
+    (dt/kind dt)
+    (throw (ex-info (str "dtype-kind: " (pr-str dt) " is not a dtype"
+                         (when (array? dt) "; an array x's kind is (dtype-kind (dtype x))"))
+                    {:op :dtype-kind :value dt :dtypes dt/dtypes}))))
+
 (defn shape
   "The shape of x as a vector of longs ([] for 0-d)."
   [x]
@@ -788,6 +801,26 @@
     (sh/check-broadcast-to (shape x) new-shape)
     (p/-broadcast-to b x new-shape)))
 
+(defn broadcast-shapes
+  "The shape arrays of the given shapes broadcast to, as NumPy's
+   broadcast_shapes and as the elementwise ops broadcast: the shapes aligned
+   at their last axes, a missing leading axis counting as 1, each axis is
+   the one size other than 1 there (1 where every size is 1). No shapes give
+   []. Shapes that do not broadcast (two sizes other than 1 on an axis, as
+   [3] and [4]) are a loud error naming them all, as is a shape that is no
+   vector of non-negative integers."
+  [& shapes]
+  (doseq [s shapes]
+    (when-not (and (sequential? s) (every? #(and (integer? %) (c/<= 0 %)) s))
+      (throw (ex-info (str "broadcast-shapes: " (pr-str s) " is not a shape (a vector of non-negative integers)")
+                      {:op :broadcast-shapes :shape s}))))
+  (let [shapes (mapv #(mapv long %) shapes)]
+    (try (sh/broadcast-all shapes)
+         (catch clojure.lang.ExceptionInfo e
+           (throw (ex-info (str "broadcast-shapes: the shapes " (apply pr-str shapes) " do not broadcast")
+                           {:op :broadcast-shapes :shapes shapes}
+                           e))))))
+
 (defn concatenate
   "Join arrays along an existing axis (default 0)."
   ([xs] (concatenate xs 0))
@@ -945,6 +978,19 @@
 ;; Differentiation (docs/array-api.md §8)
 ;; ---------------------------------------------------------------------------
 
+(defn tracked?
+  "Is x a value being differentiated: inside a function under value-and-grad
+   (or grad), an argument it differentiates or a float computed from one,
+   recorded on the tape (gen.array.tape)? Reading one on the host is an
+   error, so code that may meet one tests this and reads (stop-gradient x),
+   untracked, on purpose. Not tracked: values outside a differentiated
+   function, and what has no gradient (bools, ints, comparisons, floor,
+   stop-gradient's). Under MLX's native gradients (opt-in,
+   -Dgen.mlx.grad=native) no value is: MLX differentiates its own arrays. A
+   value can be both tracked and batched (batched?)."
+  [x]
+  (instance? gen.array.protocols.ITrackedValue x))
+
 (defn value-and-grad
   "A function of the same arguments as f returning [value gradient]: f's
    value (a 0-d array) and its gradient with respect to the argument at
@@ -1053,6 +1099,112 @@
                ;; apply first: the first call traces f, which records the output's structure
                (let [outs ((:g entry) ins)]
                  (tree/refill @(:out entry) outs))))))))))
+
+;; ---------------------------------------------------------------------------
+;; The particles of a batched value (docs/array-api.md §8b)
+;; ---------------------------------------------------------------------------
+
+(defn- batch-of
+  "x as a batched value (gen.array.batch), seen through the tape (its
+   primal, when x is being differentiated), or nil."
+  [x]
+  (let [v (if (tracked? x) (p/-primal x) x)]
+    (when (instance? gen.array.protocols.IBatchedValue v) v)))
+
+(defn batched?
+  "Does x hold one value per particle of a batched run (gen.array.batch, the
+   batch tracer)? A value of the run that every particle shares (a constant,
+   a creation function's, an argument given to all) does not. A value being
+   differentiated (tracked?) does when its primal does. To the code it flows
+   through, a batched value has its per-particle shape; particle reads one
+   particle's value."
+  [x]
+  (some? (batch-of x)))
+
+(defn batch-shape
+  "The batch axes of a batched value ([n] for a batch of n particles; a
+   batch may have several axes), or nil for a value that is not batched."
+  [x]
+  (when-let [v (batch-of x)]
+    (let [s (shape (p/-all-particles v))]
+      (subvec s 0 (c/- (count s) (count (shape v)))))))
+
+(defn particle-backend
+  "The backend a batched value's particles are arrays of: the one the batch
+   tracer wraps, where each particle's own run computes. Code run on
+   particles' values apart from the batched run binds it (with-backend), so
+   that what it creates or draws is unbatched too. nil for a value that is
+   not batched."
+  [x]
+  (when-let [v (batch-of x)]
+    (p/-inner (p/-backend v))))
+
+(defn- batch-to-read
+  "x's batched value for op to read its particles, or nil when x is not
+   batched; one being differentiated is refused, since its particles'
+   values, arrays apart from the run, would carry no gradient."
+  [op x]
+  (let [v (batch-of x)]
+    (when (and v (tracked? x))
+      (throw (ex-info (str (name op) ": the particles of a value being differentiated would carry no gradient;"
+                           " read those of (stop-gradient x) to drop it on purpose")
+                      {:op op :shape (shape x) :dtype (dtype x)})))
+    v))
+
+(defn- particle-rows
+  "A batched value's particles as an array of the backend it wraps, one
+   particle per row: its batch axes flattened, row-major."
+  [v]
+  (let [all (p/-all-particles v)
+        s (shape all)
+        k (c/- (count s) (count (shape v)))]
+    (if (== 1 k) all (reshape all (into [(sh/size (subvec s 0 k))] (subvec s k))))))
+
+(defn- check-particle
+  "Throws unless i is a particle of a batch of n (any non-negative integer
+   when n is nil: a shared value's)."
+  [op i n]
+  (when-not (and (integer? i) (c/<= 0 i) (or (nil? n) (c/< i n)))
+    (throw (ex-info (str (name op) ": " (pr-str i) " is not a particle"
+                         (when n (str " of a batch of " n)) " (a host integer from 0)")
+                    {:op op :index i :particles n}))))
+
+(defn particle
+  "Particle i's value of x, a value of a batched run (batched?): an
+   unbatched array of the backend the batch wraps (particle-backend), of x's
+   per-particle shape, the value particle i's own run would hold. The
+   particles of a batch of several axes count row-major. x itself when it is
+   not batched, which every particle shares (any value, an array or not).
+   It gathers, lazily on a lazy backend, and reads nothing on the host:
+   reading the particle (->clj) is the caller's, at an inference boundary.
+   Loud: i not a host integer in [0, n), and x being differentiated with a
+   batched primal, whose particle would carry no gradient (read those of
+   (stop-gradient x) to drop it on purpose)."
+  [x i]
+  (if-let [v (batch-to-read :particle x)]
+    (let [rows (particle-rows v)]
+      (check-particle :particle i (first (shape rows)))
+      (take rows (long i) 0))
+    x))
+
+(defn particles
+  "The values of x's particles at idx (host integers in [0, n), in their
+   order, repeats allowed), stacked: an unbatched array of shape
+   (count idx) followed by x's per-particle shape, of the backend the batch
+   wraps, particle's value of each from one gather. A value every particle
+   shares (not batched) is broadcast to as many rows. Loud as particle, and
+   for a shared x that is no array."
+  [x idx]
+  (let [idx (vec idx)]
+    (if-let [v (batch-to-read :particles x)]
+      (let [rows (particle-rows v)
+            n (first (shape rows))
+            inner (p/-inner (p/-backend v))]
+        (doseq [i idx] (check-particle :particles i n))
+        (take rows (with-backend inner (array (mapv long idx) {:dtype (:int (defaults inner))})) 0))
+      (do (when-not (array? x) (not-an-array :particles x))
+          (doseq [i idx] (check-particle :particles i nil))
+          (broadcast-to x (into [(count idx)] (shape x)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Validation across particles
