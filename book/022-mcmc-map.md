@@ -36,6 +36,7 @@ independent runs.
             [gen.dist.core :as dc]
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
+            [gen.gradients :as grad]
             [gen.inference.diagnostics :as diag]
             [gen.inference.importance :as is]
             [gen.inference.kernel :as k]
@@ -1127,14 +1128,29 @@ in Gen.jl:
 
 The noise takes smaller steps: its gradient grows like $1/\text{noise}^3$
 as the noise shrinks, and a full step can throw it far, or below zero.
-Below zero the normal's standard deviation is invalid, and `map-optimize`
-stops with an error rather than shrinking the step. From the reference
-trace, a full step lands there:
+Below zero the noise is outside its gamma prior's support, so a trial
+step's run stops there, with score $-\infty$, before the normal sees a
+negative standard deviation: a choice outside its support stops the run.
+The line search counts that step a failure and halves it. From the
+reference trace, a full step would land at $-8.3$; the search halves it
+seven times, to $1/128$ of it, where the score rises:
 
 <!-- code: map-noise-step -->
 ```clojure
-;; error: normal: std must be positive
-(mcmc/map-optimize reference (sel/select :noise) {:max-step-size 1.0})
+(def noise-gradient
+  (array/item (cm/get-choice (:gradients (grad/choice-gradients
+                                          reference (sel/select :noise)))
+                             :noise)))
+
+(def noise-step
+  (mcmc/map-optimize reference (sel/select :noise) {:max-step-size 1.0}))
+
+[(+ 0.5 noise-gradient) (array/item (noise-step :noise))]
+;=> [-8.301 0.4312]
+
+[(/ (- (array/item (noise-step :noise)) 0.5) noise-gradient)
+ (> (:score noise-step) (:score reference))]
+;=> [0.0078125 true]
 ```
 
 Twenty rounds of MAP from each RANSAC run's last trace raise the score of

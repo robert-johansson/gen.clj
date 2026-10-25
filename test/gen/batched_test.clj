@@ -1078,3 +1078,61 @@
           (is (close? (b/choice ps :intercept) (b/choice ps' :intercept)) "the other choices kept")
           (is (every? consistent? trs))
           (is (close? (b/scores ps') (array/stack (mapv :score trs)))))))))
+
+;; ---------------------------------------------------------------------------
+;; A particle outside its support (DESIGN.md §9, the ten decisions' fifth)
+;; ---------------------------------------------------------------------------
+
+;; A batched run cannot stop for one particle: it goes on, and the handler
+;; sets the score and weight of a particle whose choice left its support
+;; to -Inf at the end (gen.dynamic's weigh), what the particle's scalar run,
+;; which stops there, gives. What it computed after that choice is masked:
+;; here b's beta density at 0, +Inf, which with the -Inf would sum to NaN.
+;; Its trace holds the whole run's choices and their densities as computed
+;; (NaN where a parameter the impossible value made was invalid); b/traces
+;; rebuilds the scalar trace, which stops at the choice. Where a parameter check downstream
+;; reads the batch (the JVM's concrete arrays) and fails for such a
+;; particle, the run falls back to one particle at a time, which stops it.
+;; Planted bugs (2026-10-25): the mask read but not applied gives NaN
+;; weights for the particles outside, which the spot checks catch, so the
+;; run falls back, failing this test (and the Map's +Inf stages,
+;; gen.combinators-test); the mask never read is an unread batched
+;; comparison, which fails every batched run (gen.batched's guard).
+(deftest a-particle-outside-its-support-weighs-minus-infinity
+  (let [m (gen [lo] (let [a (trace :a (d/uniform lo (+ lo 1.0)))] (trace :b (d/beta 0.5 1.0)) a))
+        ;; the even particles' a leaves [0.5, 1.5], and their b is at 0
+        own (mapv #(if (even? %) (cm/choicemap :a 0.25 :b 0.0) (cm/choicemap :a 0.75 :b 0.5)) (range 6))
+        ps (:particles (b/generate m [0.0] cm/EMPTY 6 (rng/key 1) {:per-particle own}))
+        {out :particles ws :weights} (b/update ps [0.5] [diff/unknown-change] cm/EMPTY (rng/key 2))
+        ws (array/->clj ws)]
+    (is (b/batched? out) "it stays batched")
+    (is (every? #(= ##-Inf %) (take-nth 2 ws)) "a at 0.25 is outside [0.5, 1.5]")
+    (is (every? #(close? 0.0 %) (take-nth 2 (rest ws))) "a at 0.75 is inside")
+    (is (every? #(= ##-Inf %) (take-nth 2 (array/->clj (b/scores out)))))
+    (is (every? true? (map #(= (ts/number %1) (ts/number (:weight (gfi/update %2 [0.5] [diff/unknown-change] cm/EMPTY (rng/key 3)))))
+                           ws (b/traces ps)))
+        "each particle's weight is its scalar update's")
+    (when (ts/jvm?)
+      ;; (a lazy backend's scalar run goes on, gen.dynamic)
+      (is (every? #(= [[:a]] (cm/addresses (:choices %))) (take-nth 2 (b/traces out)))
+          "a particle outside is rebuilt as its scalar trace, which stops at a")))
+  (testing "a parameter check downstream that fails for such a particle falls back to one at a time"
+    (let [m (gen [] (let [s (trace :s (d/gamma 1 1))] (trace :y (d/normal 0 s))))
+          ps (:particles (b/generate m [] (cm/choicemap :y 0.1) 4 (rng/key 4)))
+          own (mapv #(cm/choicemap :s (if (even? %) -1.0 0.5)) (range 4))
+          {out :particles ws :weights} (b/update ps [] [] cm/EMPTY (rng/key 5) {:per-particle own})]
+      ;; (a lazy backend checks no parameter it would have to read)
+      (when (ts/jvm?)
+        (is (not (b/batched? out)))
+        (is (re-find #"std must be positive" (:message (b/fallback-reason out)))))
+      (is (= [##-Inf ##-Inf] (vec (take-nth 2 (array/->clj ws)))))
+      (is (every? ts/finite? (take-nth 2 (rest (array/->clj ws)))))))
+  (testing "MH chains reject the particles' moves outside the support"
+    (let [m (gen [] (let [a (trace :a (d/uniform 0 1)) b (trace :b (d/uniform 0 a))] (trace :c (d/normal b 1.0)) b))
+          ps (:particles (b/generate m [] (cm/choicemap :a 0.9 :b 0.6 :c 0.0) 16 (rng/key 6)))
+          {out :particles acc :accepted? la :log-alpha} (mh/mh-particles ps (sel/select :a) (rng/key 7))
+          la (array/->clj la)]
+      (is (b/batched? out))
+      (is (some #(= ##-Inf %) la) "some a below b")
+      (is (every? (fn [[l a?]] (or (not= ##-Inf l) (not a?))) (map vector la acc)))
+      (is (every? #(< (ts/number (% :b)) (ts/number (% :a))) (b/traces out))))))

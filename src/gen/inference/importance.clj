@@ -135,17 +135,22 @@
    normalized weights p_i, with the log marginal likelihood estimate and the
    effective sample size. f returns a host number. No trace is kept: f is
    applied to each sample as it is drawn (batched, to each particle's
-   rebuilt trace in turn)."
+   rebuilt trace in turn), but not to a sample of weight -Inf, outside the
+   support, whose trace holds its choices only up to the one outside it
+   (DESIGN.md §9): it counts nothing."
   ([f model args observations n] (estimate f model args observations n {}))
   ([f model args observations n opts]
    (let [key (or (:key opts) (gfi/next-key))
+         ;; (f (trace)) of a sample of log weight lw
+         value (fn [trace lw] (if (gfi/impossible? lw) 0.0 (double (f (trace)))))
          [values log-weights]
          (if (and (:batched? opts) (not (:proposal opts)))
-           (let [{ps :particles ws :weights} (batched/generate model args observations n key)]
-             [(mapv #(double (f (first (batched/traces (batched/take ps [%]))))) (range n))
-              (mapv double (array/->clj ws))])
+           (let [{ps :particles ws :weights} (batched/generate model args observations n key)
+                 lws (mapv double (array/->clj ws))]
+             [(mapv (fn [i] (value #(first (batched/traces (batched/take ps [i]))) (lws i))) (range n))
+              lws])
            (let [samples (map #(let [{t :trace lw :weight} (sample-at model args observations opts %)]
-                                 [(double (f t)) lw])
+                                 [(value (constantly t) lw) lw])
                               (rng/split key n))]
              [(mapv first samples) (mapv second samples)]))
          {:keys [log-normalized-weights log-ml-estimate ess]} (weights-summary log-weights)]

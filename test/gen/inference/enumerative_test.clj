@@ -296,6 +296,26 @@
         (let [{tr :trace w :weight} (gfi/generate g [] (cm/choicemap :y 0.4) (rng/key k))]
           (is (close-to w (dc/log-prob (d/normal (tr :x) 0.5) 0.4))))))))
 
+(deftest an-observation-impossible-under-an-assignment-still-weighs-the-rest
+  ;; h ~ Bern(0.6), a ~ categorical([0.4 0.6] if h, [1 0] if not), observed
+  ;; at 1, which h = false makes impossible; z ~ N(0, 1) unobserved after
+  ;; it, y ~ N(z + a, 1) observed. The weight is log Σ_h p(h, a, z, y) -
+  ;; log q(z), q's density of z the forward proposal's, Σ_h p(h) p(z) =
+  ;; p(z): log p(a = 1) + log N(y; z + 1, 1), p(a = 1) = 0.36. Under h =
+  ;; false the run stops at a (DESIGN.md §9), before z: the forward
+  ;; proposal's density of z there comes from a run that does not weigh the
+  ;; observations (unweighing). Planted bug (2026-10-25): without it, the
+  ;; enumeration's runs stop at a, and generate is a loud error.
+  (let [m (gen [] (let [h (trace :h (d/bernoulli 0.6))
+                        a (trace :a (d/categorical (if h [0.4 0.6] [1.0 0.0])))
+                        z (trace :z (d/normal 0 1))]
+                    (trace :y (d/normal (+ z a) 1.0))))
+        g (enum/with-exact-proposal m [:h])]
+    (doseq [k (range 8)]
+      (let [{tr :trace w :weight} (gfi/generate g [] (cm/choicemap :a 1 :y 0.4) (rng/key k))]
+        (is (true? (ts/host (tr :h))) "h = false is impossible")
+        (is (close-to w (+ (log 0.36) (dc/log-prob (d/normal (+ (tr :z) 1.0) 1.0) 0.4))))))))
+
 (deftest regenerating-the-enumerated-choices-is-gibbs
   (let [tr (:trace (gfi/generate exact [] observations (rng/key 4)))]
     (doseq [k (range 5)]

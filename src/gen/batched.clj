@@ -57,6 +57,14 @@
    a shared [n] array is one value of shape [n] for every particle. Weights
    are [n] arrays; :discards is a vector of n choice maps.
 
+   A batched run cannot stop for one particle whose choice leaves its
+   support, as its scalar run does (gen.dynamic; DESIGN.md §9): it goes on,
+   and that particle's score and weight are -Inf, what it computed after
+   the choice masked out of them. Its trace holds the whole run's choices,
+   and traces rebuilds its scalar trace, which stops at the choice. A
+   parameter check downstream that reads the batch and fails for such a
+   particle raises the fallback.
+
    A Switch whose index differs across the particles stays batched: each
    branch runs on its own particles (by partition, gen.partition), and the
    batched trace holds that call's choices by part (a

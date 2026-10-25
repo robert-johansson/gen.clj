@@ -1181,7 +1181,10 @@ within five Monte Carlo standard errors:
 the grid](figures/042-six.svg)
 
 The prior's proposals stay in $[0, 1]$, where the loaded die's
-probabilities are valid. The dice themselves, which the chain never
+probabilities are valid. A random walk on $p_6$ would do too: a proposal
+outside $[0, 1]$ has prior density 0, so its update stops at $p_6$, with
+weight $-\infty$, before the hidden Markov model sees a negative
+probability, and MH rejects it. The dice themselves, which the chain never
 sampled, come back given any of its draws. Take a trace with $p_6$ at the
 chain's last value; `ss/sample-states` on its call at `:rolls`, the
 hidden Markov generative function's part, draws the sixty dice given

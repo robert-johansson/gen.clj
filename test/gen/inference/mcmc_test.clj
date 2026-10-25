@@ -257,6 +257,23 @@
                      (range 300))]
       (is (array/allclose? (tr [:latent :z]) posterior-mean {:atol 1e-6})))))
 
+(deftest map-optimization-shrinks-a-step-outside-the-support
+  ;; genclj-2870: a trial step that takes s below 0 leaves gamma's support,
+  ;; which stops the trial's run (weight -Inf, DESIGN.md §9) before normal's
+  ;; check of its std: a failed step, which the line search halves. Planted
+  ;; bug (2026-10-25): the handler not stopping throws "normal: std must be
+  ;; positive" here, as it did.
+  (let [m (gen [] (let [s (trace :s (d/gamma 1 1))] (trace :y (d/normal 0 s))))
+        tr (:trace (gfi/generate m [] (cm/choicemap :s 0.5 :y 0.1) (rng/key 0)))
+        s-sel (sel/select :s)
+        g (ts/number (cm/get-choice (:gradients (grad/choice-gradients tr s-sel)) :s))
+        t2 (mcmc/map-optimize tr s-sel {:max-step-size 1.0})
+        step (/ (- (ts/number (t2 :s)) 0.5) g)]
+    (is (neg? (+ 0.5 g)) "a full step leaves the support")
+    (is (< 0.0 (ts/number (t2 :s))))
+    (is (some #(ts/close? step (Math/pow 0.5 %)) (range 1 20)) "the step taken is a halving of the full one")
+    (is (> (ts/number (:score t2)) (ts/number (:score tr))))))
+
 (deftest ^:slow elliptical-slice-targets-the-posterior
   (is (vector-converges? flat-vector-model (cm/choicemap :z (array/array [2.0 2.0]) :y y2)
                          #(% :z)

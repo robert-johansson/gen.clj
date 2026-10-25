@@ -23,7 +23,25 @@
    per-particle shapes and draws a batch axis. A trace records every choice's log
    probability and every spliced sub-trace, so regenerate weights use the old
    log probabilities exactly and project reads the trace without re-running
-   the model."
+   the model.
+
+   A choice outside its own support stops the run (DESIGN.md §9): when a
+   site's log density, or a call's score, is -Inf on the host
+   (gfi/impossible?), the operation returns weight -Inf without running
+   the rest of the body, so nothing downstream evaluates (a distribution
+   whose parameter that value makes invalid is never built). An update or
+   regenerate of a trace outside the support too weighs NaN: neither trace
+   is possible. The trace holds the choices and calls up to and including
+   that one, its score -Inf and its return value nil; an update's discard
+   holds the old choices it replaced or did not reach, and the constraints
+   after the stop are not checked (the run never reached them). Code that
+   reads such a trace's later choices must check its weight first, as MH
+   and the translators do. A run whose log densities are arrays, never read
+   here (batched, lazy on MLX, or traced for a gradient), cannot stop: it
+   goes on, its score and weight -Inf where a choice left its support (per
+   particle), and what it computes downstream is masked out of them. A
+   parameter check downstream that reads a batch and fails for such a
+   particle raises the fallback to one particle at a time (gen.batched)."
   (:refer-clojure :exclude [+ -])
   (:require [clojure.string :as str]
             [gen.array :as array :refer [+ -]]
@@ -98,13 +116,35 @@
 (defn- draw [_state dist k]
   (dc/sample dist k []))
 
+;; A choice outside its own support stops the run (DESIGN.md §9, the ten
+;; decisions' fifth): the operation returns weight -Inf without running the
+;; rest of the body, so nothing downstream evaluates (a distribution there
+;; cannot fail its parameter check), MH rejects and a line search shrinks.
+;; One rule, at the record of every site and call, so every operation and
+;; every kind of body has it: a log density of -Inf on the host stops the
+;; run; one that is an array, never read here (batched, lazy, or traced for
+;; a gradient), marks where it is -Inf, and the run goes on (a batched run
+;; cannot stop for one particle), its score and weight -Inf there at the end.
+
+(defn- weigh
+  "state with lp, the log density of the site or call just recorded, looked
+   at for -Inf: on the host (gfi/impossible?) it stops the run (::stopped,
+   which trace-fn and splice-at raise); an array marks the particles where
+   it is -Inf (::impossible), whose score and weight finish sets to -Inf."
+  [state lp]
+  (cond (gfi/impossible? lp) (assoc state ::stopped true)
+        (array/host? lp) state
+        :else (let [out (array/== lp ##-Inf)]
+                (assoc state ::impossible (if-let [m (::impossible state)] (array/logical-or m out) out)))))
+
 (defn- record
   "state with the choice v (log probability lp) at path p."
   [state p v lp]
   (-> state
       (update :choices cm/set-choice p v)
       (update :scores assoc p lp)
-      (update :score + lp)))
+      (update :score + lp)
+      (weigh lp)))
 
 (defn- add-weight [state w] (update state :weight + w))
 
@@ -225,7 +265,8 @@
   [state p tr]
   (cond-> (-> state
               (update :subtraces assoc p tr)
-              (update :score + (:score tr)))
+              (update :score + (:score tr))
+              (weigh (:score tr)))
     (not (cm/empty? (:choices tr))) (update :choices cm/set-choice p (:choices tr))))
 
 (declare dynamic-gf?)
@@ -284,7 +325,7 @@
         opts {:key k :at p}]
     (if (= mode :assess)
       (let [{w :weight rv :retval} (run-call gf :assess args (assoc opts :constraints cons))]
-        [rv (cond-> (-> state (update :score + w) (add-weight w))
+        [rv (cond-> (-> state (update :score + w) (add-weight w) (weigh w))
               (not (cm/empty? cons)) (update :choices cm/set-choice p cons))])
       (let [r (cond
                 (= mode :simulate) (run-call gf :simulate args opts)
@@ -314,14 +355,44 @@
     (when (seq missed)
       (throw (gfi/unvisited op missed)))))
 
+(def ^:private stop
+  "The signal that unwinds a body at a choice or call outside its support
+   (weigh): one instance, without a stack trace, which execute catches."
+  (doto ^Throwable (ex-info "A choice outside its support stopped the run" {::stop true})
+    (.setStackTrace (make-array StackTraceElement 0))))
+
+(defn- impossible-weight
+  "The weight of a run outside the support: -Inf, or for an update or
+   regenerate of a trace outside it too (its score -Inf), NaN: a move
+   between two impossible traces has no weight (-Inf - -Inf), so MH's NaN
+   check stays loud for a chain started at an impossible trace."
+  [state]
+  (if (#{:update :regenerate} (:mode state))
+    (- ##-Inf (:score (:prev state)))
+    ##-Inf))
+
+(defn- impossible-out
+  "state's score -Inf and weight impossible-weight where the run is
+   impossible: everywhere when it stopped, at the particles a batched or
+   lazy run marked."
+  [state]
+  (if (::stopped state)
+    (assoc state :score ##-Inf :weight (impossible-weight state))
+    (if-let [m (::impossible state)]
+      (cond-> (assoc state :score (array/where m ##-Inf (:score state)))
+        (not= :simulate (:mode state)) (assoc :weight (array/where m (impossible-weight state) (:weight state))))
+      state)))
+
 (defn- finish
   "Account for the choices and calls of the previous trace that this run no
-   longer visits, and check the constraints."
+   longer visits, and check the constraints, which a run that stopped did
+   not reach; then the score and weight of an impossible run."
   [state]
   (let [mode (:mode state)]
-    (when (#{:generate :update :assess} mode)
+    (when (and (#{:generate :update :assess} mode) (not (::stopped state)))
       (check-constraints-visited! state mode))
-    (if (= mode :update)
+    (impossible-out
+     (if (= mode :update)
       ;; gone by kind: a path that held a choice and now holds a call (or the
       ;; reverse) is visited, but its old record is still gone
       (let [prev (:prev state)
@@ -337,7 +408,7 @@
                                 (update :discard cm/set-choice p (:choices sub)))))
                   s gone-calls)))
       ;; regenerate: choices no longer visited cancel against the reverse move
-      state)))
+      state))))
 
 ;; ---------------------------------------------------------------------------
 ;; Encapsulated randomness: untraced draws (thesis §4.5)
@@ -398,11 +469,16 @@
         (map? x) (run! realize! (vals x)))
   x)
 
-(defn- check-running! [state p]
+(defn- check-running!
+  "Throws unless the run is in progress: a trace or splice after it
+   returned is an error, and one after it stopped (code in the body caught
+   the stop) stops it again."
+  [state p]
   (when (::finished state)
     (throw (ex-info (str "trace or splice at " p " after the generative function returned: a lazy"
                          " sequence escaped the body (realize it in the body, e.g. with mapv or doall)")
-                    {:path p}))))
+                    {:path p})))
+  (when (::stopped state) (throw stop)))
 
 (defn- check-arity!
   "args must fit gf's parameter vector (the body fn's own arity error would
@@ -482,7 +558,8 @@
             state (if (= kind :trace)
                     (let [[v lp] (prev-choice state p)] (record state p v lp))
                     (record-call state p (get (::subtraces (:prev state)) p)))]
-        (vreset! vol (visit state p)))))
+        (vreset! vol (visit state p))
+        (when (::stopped state) (throw stop)))))
   old)
 
 (defn- run-static
@@ -589,6 +666,7 @@
                      (let [[k-site state] (site-key state)
                            [v state] (@transition state p dist k-site)]
                        (vreset! vol (visit state p))
+                       (when (::stopped state) (throw stop))
                        v)))
         ;; a call at an address: [value retdiff], hints the arguments' argdiffs
         splice-at (fn [addr gf args hints]
@@ -605,6 +683,7 @@
                                                ": a function passed to the callee calls trace")
                                           {:path p})))
                         (vreset! vol (visit state' p))
+                        (when (::stopped state') (throw stop))
                         [v rd])))
         splice-fn (fn splice-fn [& xs]
                     (if (gfi/generative-function? (first xs))
@@ -636,13 +715,17 @@
                          (estimate! "a plain call that made random choices")
                          (vswap! vol assoc :omega omega :omega-count (inc n)))
                        (:retval tr)))
-        retval (binding [trace/*body-call* plain-call]
-                 (realize! (if-let [st (:static gf)]
-                             (run-static st gf vol trace-fn splice-at args)
-                             (apply (:body-fn gf) trace-fn splice-fn read-param untraced-fn args))))]
+        retval (try (binding [trace/*body-call* plain-call]
+                      (realize! (if-let [st (:static gf)]
+                                  (run-static st gf vol trace-fn splice-at args)
+                                  (apply (:body-fn gf) trace-fn splice-fn read-param untraced-fn args))))
+                    ;; a choice or call outside its support stopped the
+                    ;; run (weigh): it has no return value
+                    (catch clojure.lang.ExceptionInfo e
+                      (if (and (identical? e stop) (::stopped @vol)) nil (throw e))))]
     ;; the store in effect, which the next update compares with its own
     (vswap! vol assoc ::finished true ::params *params*)
-    (assoc (finish @vol) :retval retval)))
+    (assoc (finish @vol) :retval (when-not (::stopped @vol) retval))))
 
 (defn- make-trace [gf args state]
   (cond-> (assoc (trace/make-trace {:gen-fn gf :args args :choices (:choices state)
@@ -696,12 +779,26 @@
 
 (defn ^:no-doc static-site
   "[value log-density] of a static body's trace node at path p of choices,
-   with assess's checks."
+   with assess's checks; a log density of -Inf on the host stops the score
+   fn, as it stops the handler (weigh)."
   [dist choices p]
   (let [c (cm/get-submap choices p cm/EMPTY)]
     (when-not (cm/has-value? c)
       (throw (ex-info (str "assess: no value for the choice at " p) {:path p :missing-choice true})))
-    (given-value {:mode :assess} dist c)))
+    (let [[_ lp :as r] (given-value {:mode :assess} dist c)]
+      (when (gfi/impossible? lp) (throw stop))
+      r)))
+
+(defn ^:no-doc static-total
+  "A static body's weight, the sum of its terms (log densities of its
+   sites and calls), -Inf where one of them is: an array term is not read,
+   as the handler's (weigh)."
+  [terms]
+  (let [w (reduce + 0.0 terms)]
+    (if (array/host? w)
+      w
+      (array/where (reduce (fn [m t] (cond-> m (not (array/host? t)) (array/logical-or (array/== t ##-Inf)))) false terms)
+                   ##-Inf w))))
 
 (defn ^:no-doc static-call
   "[weight retval] of a static body's splice at path p: the callee's assess
@@ -711,11 +808,14 @@
   [p g args sub k]
   (when-not (gfi/generative-function? g)
     (throw (ex-info (str "splice at " p " needs a generative function") {:path p :value g})))
-  (let [args (realize! (vec args))]
-    (if (static-scored? g)
-      (try (static-score g args sub k)
-           (catch clojure.lang.ExceptionInfo e (throw (gfi/under e p))))
-      (let [r (run-call g :assess args {:key (or k (rng/key 0)) :constraints sub :at p})] [(:weight r) (:retval r)]))))
+  (let [args (realize! (vec args))
+        [w :as r] (if (static-scored? g)
+                    (try (static-score g args sub k)
+                         (catch clojure.lang.ExceptionInfo e (throw (gfi/under e p))))
+                    (let [r (run-call g :assess args {:key (or k (rng/key 0)) :constraints sub :at p})] [(:weight r) (:retval r)]))]
+    ;; a call outside its support stops the caller's score fn too
+    (when (gfi/impossible? w) (throw stop))
+    r))
 
 (defn ^:no-doc check-computed!
   "assess's check of a node at a computed address (a constant prefix and
@@ -750,8 +850,12 @@
   (check-arity! gf args)
   (let [st (:static gf)
         run #(do (check-static-choices! st choices)
-                 (let [[w rv] ((:score st) read-param (vec args) choices (when-not gfi/*exact-density* key))]
-                   [w (realize! rv)]))]
+                 ;; a site or call outside its support stops it (static-site):
+                 ;; weight -Inf, no return value
+                 (try (let [[w rv] ((:score st) read-param (vec args) choices (when-not gfi/*exact-density* key))]
+                        [w (realize! rv)])
+                      (catch clojure.lang.ExceptionInfo e
+                        (if (identical? e stop) [##-Inf nil] (throw e)))))]
     (with-store-of gf (run))))
 
 (defn- static-scored?

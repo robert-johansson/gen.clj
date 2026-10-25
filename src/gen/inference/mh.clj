@@ -11,7 +11,9 @@
    the move is rejected), whether it was accepted, and the log acceptance
    ratio. The key is an optional last argument; omitting it draws one from
    the implicit key source. A NaN acceptance ratio (for example from a chain
-   started at an impossible trace) is a loud error."
+   started at an impossible trace) is a loud error. A move that takes a
+   choice outside its support is rejected: the operation stops there with
+   weight -Inf (DESIGN.md §9), before anything downstream runs."
   (:refer-clojure :exclude [+ -])
   (:require [gen.array :as array :refer [+ -]]
             [gen.batched :as batched]
@@ -51,18 +53,23 @@
    which draws a model's encapsulated randomness afresh); otherwise the
    trace is updated with u (k-update) and u' is the discard. u' is assessed under
    :backward on (trace', :backward-args…), or under the proposal on
-   (trace', args…). w = the move's weight - log q(u) + log q_bwd(u')."
+   (trace', args…). w = the move's weight - log q(u) + log q_bwd(u'). A
+   move outside the support (its weight -Inf on the host,
+   gfi/impossible?: the update stopped at a choice there, so trace' holds
+   the choices up to it) has w -Inf, its backward choices unassessed."
   [trace proposal proposal-args {:keys [involution backward backward-args]} k-propose k-update]
   (let [{fwd :choices fwd-weight :weight fwd-retval :retval} (gfi/propose proposal (into [trace] proposal-args) k-propose)
         [moved weight bwd] (if involution
                              (let [r (involution trace fwd fwd-retval proposal-args k-update)]
                                [(:trace r) (:weight r) (:bwd-choices r)])
                              (let [r (gfi/update trace fwd k-update)]
-                               [(:trace r) (:weight r) (:discard r)]))
-        {bwd-weight :weight} (gfi/assess (or backward proposal)
-                                         (into [moved] (if backward backward-args proposal-args))
-                                         bwd (gfi/backward-key k-propose))]
-    {:trace moved :weight (+ (- weight fwd-weight) bwd-weight)}))
+                               [(:trace r) (:weight r) (:discard r)]))]
+    (if (gfi/impossible? weight)
+      {:trace moved :weight ##-Inf}
+      (let [{bwd-weight :weight} (gfi/assess (or backward proposal)
+                                             (into [moved] (if backward backward-args proposal-args))
+                                             bwd (gfi/backward-key k-propose))]
+        {:trace moved :weight (+ (- weight fwd-weight) bwd-weight)}))))
 
 (defn- proposal-mh
   "Gen.jl's MH with a custom proposal: propose forward choices from

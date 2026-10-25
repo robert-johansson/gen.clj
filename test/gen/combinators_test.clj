@@ -86,6 +86,11 @@
    leaves it, and comes back."
   (gen [lo] (trace :v (d/uniform lo (+ lo 1.0)))))
 
+(def bounded-walk
+  "A step in [s, s + 1] from the state s, and w's scale v - s, which a v
+   outside its support would make negative."
+  (gen [_t s] (let [v (trace :v (d/uniform s (+ s 1.0)))] (trace :w (d/normal 0 (- v s))) v)))
+
 ;; Map's and Unfold's alternative arguments change their length, so that
 ;; the exact-discard laws see elements and steps dropped and added (the
 ;; post-M5 review's P2-10 gap). A planted drop-elements that leaves a
@@ -115,6 +120,14 @@
 
 (laws/deflaws combinators models 100)
 (laws/deflaws combinators models 100 laws/fixed-support)
+
+;; A walk each of whose steps the last bounds (its supports are not
+;; fixed): a step that leaves its support stops the Unfold there (the ten
+;; decisions' fifth), as the next step's state would be its missing return
+;; value. Planted bug (2026-10-25): combinators that run on past a part
+;; that stopped (stopped? never true) fail these laws, and Scan's and
+;; Recurse's (gen.combinators-extras-test, the recurse suite above).
+(laws/deflaws walk [[:unfold-of-a-bounded-walk (comb/unfold bounded-walk) [3 0.0] [[3 0.5] [4 0.0] [2 0.0]]]] 100)
 
 ;; Recurse's own set: its trees change shape under update and regenerate
 (laws/deflaws recurse [[:recurse tree [0] [[1]]]
@@ -285,37 +298,43 @@
                                      (array/->clj (b/scores back)) (b/traces back)))))))))))
 
 ;; Element scores at +Inf (beta(a, 1) at 0 for a < 1) and NaN (+Inf beside
-;; a choice out of its support, in one element), in and out (genclj-ul72):
-;; the score is the IEEE sum of the element scores at every stage. Planted
-;; bugs (2026-10-24): the counts never decremented fails every kind's stages
+;; -Inf), in and out (genclj-ul72): the score is the IEEE sum of the
+;; element scores at every stage. A choice out of its support stops its
+;; element's run (the ten decisions' fifth, DESIGN.md §9): that element's
+;; score is -Inf, even beside a +Inf choice, Unfold and Scan stop at it
+;; (the last stage, which drops step 1), and Map runs on. So an element is
+;; NaN only as a sum of its own, a Map's (the Map of Maps). Planted bugs
+;; (2026-10-24): the counts never decremented fails every kind's stages
 ;; after a score left an infinity, on the host and per particle (and the
 ;; test above); a NaN counted only as -Inf fails the stage with a NaN
-;; element.
+;; element (2026-10-25: the Map of Maps' at [0.5 0.0 5.0]).
 (deftest a-score-at-infinity-or-nan-is-the-sum-of-the-element-scores
-  (let [kinds [["Map" (comb/map (gen [a lo] (trace :p (d/beta a 1.0)) (trace :u (d/uniform lo (+ lo 1.0)))))
-                (fn [a lo0 lo1] [[a a] [lo0 lo1]])]
+  (let [kernel (gen [a lo] (trace :p (d/beta a 1.0)) (trace :u (d/uniform lo (+ lo 1.0))))
+        kinds [["Map" (comb/map kernel) (fn [a lo0 lo1] [[a a] [lo0 lo1]]) identity]
                ["Unfold" (comb/unfold (gen [t _s a lo0 lo1]
                                         (let [lo (if (zero? t) lo0 lo1)]
                                           (trace :p (d/beta a 1.0))
                                           (trace :u (d/uniform lo (+ lo 1.0))))))
-                (fn [a lo0 lo1] [2 0.0 a lo0 lo1])]
+                (fn [a lo0 lo1] [2 0.0 a lo0 lo1]) identity]
                ["Scan" (comb/scan (gen [c lo a] (trace :p (d/beta a 1.0)) [c (trace :u (d/uniform lo (+ lo 1.0)))]))
-                (fn [a lo0 lo1] [0.0 [lo0 lo1] a])]]
+                (fn [a lo0 lo1] [0.0 [lo0 lo1] a]) identity]
+               ;; one element, a Map of the two: NaN where they are +Inf and -Inf
+               ["Map of Maps" (comb/map (comb/map kernel)) (fn [a lo0 lo1] [[[a 1.0]] [[lo0 lo1]]]) #(hash-map 0 %)]]
         ;; [a lo0 lo1] and the score, element 0's :p at 0 and element 1's at 0.5
         stages [[[1.0 0.0 0.0] 0.0]
                 [[0.5 0.0 0.0] ##Inf]
-                [[0.5 5.0 0.0] ##NaN]
                 [[0.5 0.0 5.0] ##NaN]
                 [[1.0 0.0 5.0] ##-Inf]
                 [[1.0 0.0 0.0] 0.0]
-                [[0.5 0.0 0.0] ##Inf]]
+                [[0.5 0.0 0.0] ##Inf]
+                [[0.5 5.0 0.0] ##-Inf]]
         same? #(ts/close? %1 %2 {:equal-nan? true})
         unknown #(vec (repeat (count %) diff/unknown-change))]
-    (doseq [[label gf args-at] kinds
+    (doseq [[label gf args-at nest] kinds
             :let [at (fn [[a lo0 lo1]] (args-at a lo0 lo1))
                   first-args (at (ffirst stages))]]
       (testing label
-        (let [tr (:trace (gfi/generate gf first-args (cm/from-map {0 {:p 0.0 :u 0.5} 1 {:p 0.5 :u 0.5}}) (rng/key 1)))]
+        (let [tr (:trace (gfi/generate gf first-args (cm/from-map (nest {0 {:p 0.0 :u 0.5} 1 {:p 0.5 :u 0.5}})) (rng/key 1)))]
           (reduce (fn [tr [params score]]
                     (let [args (at params)
                           t2 (:trace (gfi/update tr args (unknown args) cm/EMPTY (rng/key 2)))]
@@ -326,7 +345,7 @@
         (testing ", per particle"
           ;; particle i's element 0 at :p 0 (even i) or 0.5 (odd)
           (binding [b/*spot-checks* 0]
-            (let [own (mapv #(cm/from-map {0 {:p (if (even? %) 0.0 0.5) :u 0.5} 1 {:p 0.5 :u 0.5}}) (range 4))
+            (let [own (mapv #(cm/from-map (nest {0 {:p (if (even? %) 0.0 0.5) :u 0.5} 1 {:p 0.5 :u 0.5}})) (range 4))
                   ps (:particles (b/generate gf first-args cm/EMPTY 4 (rng/key 3) {:per-particle own}))]
               (reduce (fn [ps params]
                         (let [args (at params)
