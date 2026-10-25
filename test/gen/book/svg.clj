@@ -12,6 +12,11 @@
 
 (defn- host [x] (double (array/item x)))
 
+(defn- esc
+  "Text for an SVG element's content: &, < and > escaped."
+  [s]
+  (-> (str s) (str/replace "&" "&amp;") (str/replace "<" "&lt;") (str/replace ">" "&gt;")))
+
 (defn- fmt [^double x] (String/format java.util.Locale/ROOT "%.1f" (object-array [x])))
 
 (defn- ticks
@@ -45,16 +50,16 @@
       [(str "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" width "\" height=\"" height
             "\" viewBox=\"0 0 " width " " height "\" font-family=\"sans-serif\" font-size=\"11\">")
        "<rect width=\"100%\" height=\"100%\" fill=\"white\"/>"]
-      (when title [(str "<text x=\"" (fmt (/ width 2.0)) "\" y=\"20\" text-anchor=\"middle\" font-size=\"13\">" title "</text>")])
+      (when title [(str "<text x=\"" (fmt (/ width 2.0)) "\" y=\"20\" text-anchor=\"middle\" font-size=\"13\">" (esc title) "</text>")])
       (for [t (ticks x0 x1)]
         (str "<g><line x1=\"" (fmt (px t)) "\" y1=\"" (fmt (+ top ph)) "\" x2=\"" (fmt (px t)) "\" y2=\"" (fmt (+ top ph 4.0))
-             "\" stroke=\"black\"/><text x=\"" (fmt (px t)) "\" y=\"" (fmt (+ top ph 16.0)) "\" text-anchor=\"middle\">" (label t) "</text></g>"))
+             "\" stroke=\"black\"/><text x=\"" (fmt (px t)) "\" y=\"" (fmt (+ top ph 16.0)) "\" text-anchor=\"middle\">" (esc (label t)) "</text></g>"))
       (for [t (ticks y0 y1)]
         (str "<g><line x1=\"" (fmt (- left 4.0)) "\" y1=\"" (fmt (py t)) "\" x2=\"" left "\" y2=\"" (fmt (py t))
-             "\" stroke=\"black\"/><text x=\"" (fmt (- left 7.0)) "\" y=\"" (fmt (+ (py t) 4.0)) "\" text-anchor=\"end\">" (label t) "</text></g>"))
+             "\" stroke=\"black\"/><text x=\"" (fmt (- left 7.0)) "\" y=\"" (fmt (+ (py t) 4.0)) "\" text-anchor=\"end\">" (esc (label t)) "</text></g>"))
       [(str "<rect x=\"" left "\" y=\"" top "\" width=\"" pw "\" height=\"" ph "\" fill=\"none\" stroke=\"black\"/>")]
-      (when x-label [(str "<text x=\"" (fmt (+ left (/ pw 2.0))) "\" y=\"" (- height 6) "\" text-anchor=\"middle\">" x-label "</text>")])
-      (when y-label [(str "<text transform=\"translate(14 " (fmt (+ top (/ ph 2.0))) ") rotate(-90)\" text-anchor=\"middle\">" y-label "</text>")])
+      (when x-label [(str "<text x=\"" (fmt (+ left (/ pw 2.0))) "\" y=\"" (- height 6) "\" text-anchor=\"middle\">" (esc x-label) "</text>")])
+      (when y-label [(str "<text transform=\"translate(14 " (fmt (+ top (/ ph 2.0))) ") rotate(-90)\" text-anchor=\"middle\">" (esc y-label) "</text>")])
       (marks px py)
       ["</svg>"]))))
 
@@ -144,7 +149,7 @@
               (for [[i {:keys [label color]}] (map-indexed vector (filter :label layers))
                     :let [y (+ 30.0 (* 16.0 i))]]
                 (str "<rect x=\"" (- width 120) "\" y=\"" (fmt (- y 9.0)) "\" width=\"12\" height=\"10\" fill=\""
-                     color "\" fill-opacity=\"0.6\"/><text x=\"" (- width 102) "\" y=\"" (fmt y) "\">" label
+                     color "\" fill-opacity=\"0.6\"/><text x=\"" (- width 102) "\" y=\"" (fmt y) "\">" (esc label)
                      "</text>")))))))
 (defn tree
   "The address tree of paths (a choice map's addresses, or any vectors of
@@ -185,7 +190,7 @@
                 (str "<g><rect x=\"" (fmt (- x (/ w 2.0))) "\" y=\"" (fmt (- y 9.0)) "\" width=\"" (fmt w)
                      "\" height=\"18\" rx=\"3\" fill=\"" (if leaf? "#dbe7f3" "white")
                      "\" stroke=\"steelblue\"/><text x=\"" (fmt x) "\" y=\"" (fmt (+ y 4.0))
-                     "\" text-anchor=\"middle\">" label "</text></g>")))]
+                     "\" text-anchor=\"middle\">" (esc label) "</text></g>")))]
     (str/join
      "\n"
      (concat
@@ -310,7 +315,7 @@
                                           "\" fill=\"none\" stroke=\"steelblue\"/>")
                              :text "")]
                   (str "<g>" mark "<text x=\"" (fmt x) "\" y=\"" (fmt (+ y 4.0)) "\" text-anchor=\"middle\">"
-                       (label-of id) "</text></g>")))
+                       (esc (label-of id)) "</text></g>")))
         arrow (fn [e]
                 (str "<polyline fill=\"none\" stroke=\"gray\" marker-end=\"url(#arrow)\" points=\""
                      (str/join " " (map (fn [[x y]] (str (fmt x) "," (fmt y))) (route e))) "\"/>"))]
@@ -392,19 +397,19 @@
       (for [t (ticks x0 x1)]
         (str "<g><line x1=\"" (fmt (px t)) "\" y1=\"" (fmt (+ top ph)) "\" x2=\"" (fmt (px t)) "\" y2=\""
              (fmt (+ top ph 4.0)) "\" stroke=\"black\"/><text x=\"" (fmt (px t)) "\" y=\"" (fmt (+ top ph 16.0))
-             "\" text-anchor=\"middle\">" (label t) "</text></g>"))
+             "\" text-anchor=\"middle\">" (esc (label t)) "</text></g>"))
       (for [t (ticks y0 y1)]
         (str "<g><line x1=\"" (fmt (- left 4.0)) "\" y1=\"" (fmt (py t)) "\" x2=\"" (fmt left) "\" y2=\"" (fmt (py t))
              "\" stroke=\"black\"/><text x=\"" (fmt (- left 7.0)) "\" y=\"" (fmt (+ (py t) 4.0))
-             "\" text-anchor=\"end\">" (label t) "</text></g>"))
+             "\" text-anchor=\"end\">" (esc (label t)) "</text></g>"))
       [(str "<rect x=\"" (fmt left) "\" y=\"" (fmt top) "\" width=\"" (fmt pw) "\" height=\"" (fmt ph)
             "\" fill=\"none\" stroke=\"black\"/>")]
       (when x-label
         [(str "<text x=\"" (fmt (+ left (/ pw 2.0))) "\" y=\"" (fmt (- h 6.0)) "\" text-anchor=\"middle\">"
-              x-label "</text>")])
+              (esc x-label) "</text>")])
       (when y-label
         [(str "<text transform=\"translate(14 " (fmt (+ top (/ ph 2.0))) ") rotate(-90)\" text-anchor=\"middle\">"
-              y-label "</text>")])
+              (esc y-label) "</text>")])
       (when-let [[mx my] mark]
         (let [mx (host mx)
               my (host my)
@@ -492,10 +497,10 @@
        "<rect width=\"100%\" height=\"100%\" fill=\"white\"/>"]
       (for [[j label] (map-indexed vector columns)]
         (str "<text transform=\"translate(" (fmt (+ (x j) (/ cw 2.0))) " " (fmt (- top 6.0))
-             ") rotate(-45)\">" label "</text>"))
+             ") rotate(-45)\">" (esc label) "</text>"))
       (for [[i label] (map-indexed vector rows)]
         (str "<text x=\"" (fmt (- left 6.0)) "\" y=\"" (fmt (+ (y i) (* 0.7 rh)))
-             "\" text-anchor=\"end\">" label "</text>"))
+             "\" text-anchor=\"end\">" (esc label) "</text>"))
       (for [[i row] (map-indexed vector cells)
             [j mark?] (map-indexed vector row)]
         (str "<rect x=\"" (fmt (+ (x j) 3.0)) "\" y=\"" (fmt (+ (y i) 2.0)) "\" width=\"" (fmt (- cw 6.0))

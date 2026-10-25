@@ -196,9 +196,13 @@
         :else v))
 
 (defn- shown-tolerance
-  "Half a unit in the last place x shows, as Clojure prints it."
+  "Half a unit in the last place x shows, as Clojure prints it. In
+   E-notation the printed mantissa's padding zero is not a digit shown:
+   0.0007 prints 7.0E-4 and shows four decimals, as written."
   ^double [x]
-  (* 0.5 (Math/pow 10.0 (- (.scale (BigDecimal. (str x)))))))
+  (let [s (str x)
+        d (cond-> (BigDecimal. s) (str/includes? s "E") .stripTrailingZeros)]
+    (* 0.5 (Math/pow 10.0 (- (.scale d))))))
 
 (defn same?
   "Does the actual value match the expected one, a float to the digits it
@@ -208,9 +212,11 @@
     (and (integer? expected) (integer? actual)) (== expected actual)
     (and (number? expected) (number? actual))
     (let [e (double expected) a (double actual)]
-      (or (== e a)
-          (<= (Math/abs (- e a)) (+ (if (integer? expected) 0.0 (shown-tolerance expected))
-                                    (* 2e-5 (max 1.0 (Math/abs e)))))))
+      (if (or (Double/isNaN e) (Double/isInfinite e))
+        (or (== e a) (and (Double/isNaN e) (Double/isNaN a)))
+        (or (== e a)
+            (<= (Math/abs (- e a)) (+ (if (integer? expected) 0.0 (shown-tolerance expected))
+                                      (* 2e-5 (max 1.0 (Math/abs e))))))))
     (and (sequential? expected) (sequential? actual))
     (and (= (count expected) (count actual)) (every? true? (map same? expected actual)))
     (and (map? expected) (map? actual))
@@ -277,16 +283,18 @@
 
 (defn run-chapter
   "Checks a chapter's includes, runs its namespace and checks its figures:
-   {:regions :checks :figures}."
+   {:regions :checks :figures}. Failures print to the current *out*, so a
+   REPL connected after clojure.test loaded sees them."
   [chapter]
-  (testing chapter
-    (let [rs (regions (slurp (source-file chapter)))]
-      (check-lines rs)
-      (check-error-regions rs)
-      (check-includes (slurp chapter) rs)
-      (let [r (run-regions rs)]
-        (check-figures (:figures r))
-        r))))
+  (binding [clojure.test/*test-out* *out*]
+    (testing chapter
+      (let [rs (regions (slurp (source-file chapter)))]
+        (check-lines rs)
+        (check-error-regions rs)
+        (check-includes (slurp chapter) rs)
+        (let [r (run-regions rs)]
+          (check-figures (:figures r))
+          r)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Pages written from the code
@@ -370,34 +378,41 @@
       (throw (ex-info (str "Pandoc failed, exit " exit) {:exit exit :args args})))
     (println "wrote" pdf-file)))
 
-(defn -main
-  "sync [chapter …]: write the chapters' includes from their regions, and
-   their figures (every chapter when none is named, and then the pages
-   written from the code too).
-   check [chapter …]: run the chapters' checks, print a summary, and exit 1
-   on a failure.
-   pdf: build the book as a PDF."
-  [& [what & named]]
-  (when (and (= what "sync") (empty? named))
+(defn sync!
+  "Writes chapters' includes from their regions, and their figures: those
+   named (paths like \"book/011-getting-started.md\"), or every chapter and
+   the pages written from the code when none is. For the REPL as for -main."
+  [& named]
+  (when (empty? named)
     (doseq [[file page] generated
             :let [f (io/file dir file) text (page)]]
       (when-not (and (.exists f) (= text (slurp f)))
         (spit f text)
         (println "wrote" (.getPath f)))))
+  (doseq [chapter (or (seq named) (chapters))
+          :let [rs (regions (slurp (source-file chapter)))
+                md (slurp chapter)
+                md' (synced md rs)]]
+    (when (not= md md')
+      (spit chapter md')
+      (println "wrote" chapter))
+    (doseq [[path svg] (:figures (run-regions rs))
+            :let [f (io/file dir path)]]
+      (when-not (and (.exists f) (= svg (slurp f)))
+        (io/make-parents f)
+        (spit f svg)
+        (println "wrote" (.getPath f))))))
+
+(defn -main
+  "sync [chapter …]: write the chapters' includes from their regions, and
+   their figures (every chapter when none is named, and then the pages
+   written from the code too); `sync!` does it at the REPL.
+   check [chapter …]: run the chapters' checks, print a summary, and exit 1
+   on a failure.
+   pdf: build the book as a PDF."
+  [& [what & named]]
   (case what
-    "sync" (doseq [chapter (or (seq named) (chapters))
-                   :let [rs (regions (slurp (source-file chapter)))
-                         md (slurp chapter)
-                         md' (synced md rs)]]
-             (when (not= md md')
-               (spit chapter md')
-               (println "wrote" chapter))
-             (doseq [[path svg] (:figures (run-regions rs))
-                     :let [f (io/file dir path)]]
-               (when-not (and (.exists f) (= svg (slurp f)))
-                 (io/make-parents f)
-                 (spit f svg)
-                 (println "wrote" (.getPath f)))))
+    "sync" (apply sync! named)
     "check" (let [counters (binding [clojure.test/*report-counters* (ref clojure.test/*initial-report-counters*)]
                              (doseq [chapter (or (seq named) (chapters))]
                                (let [{:keys [regions checks]} (run-chapter chapter)]
