@@ -35,7 +35,7 @@ newest first in each section.
 
 - **Breaking. `learn/train` is Gen.jl's `train!`: epoch datasets, a
   held-out history, a callback and resumable state** (DESIGN §9, "The
-  1.0's shape", training's history; genclj-59cf).
+  1.0's shape", training's history; 56d81a3, genclj-59cf).
   - Each epoch generates `:epoch-size` examples once, from the data
     function, and each of its `:batches-per-epoch` minibatches draws
     `:batch-size` of them without replacement. Every example of every
@@ -223,7 +223,7 @@ newest first in each section.
 ### Added
 
 - **VI's fits return q's last draws and their optimizer state, and take
-  a callback,** as Gen.jl's (genclj-59cf). `black-box-vi` returns
+  a callback,** as Gen.jl's (56d81a3, genclj-59cf). `black-box-vi` returns
   `:traces`, q's draws in the last iteration (`:particles` with
   `:batched?`), and `black-box-vimco` one trace for each estimate,
   resampled from its K draws by their normalized weights. Both return
