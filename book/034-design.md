@@ -185,7 +185,8 @@ particle:
 
 The last check is gradients under the batch tracer: each particle gets
 the gradient of its own scalar run, as JAX's `vmap` would give it (§9,
-*Gradients under the batch tracer*). No gradient code was written for
+*Gradients under the batch tracer*, a provisional decision the owner
+has yet to confirm). No gradient code was written for
 batches, and no batched code for the model.
 
 Finally the static language. The same body under `gen ^:static` is
@@ -265,9 +266,10 @@ proposal*, which samples the latent from its exact conditional with the
 weight $\log \bar p(\sigma)$ (thesis §4.1, pp. 145–146), or an
 explicitly separate generative function with the latent summed out. The
 first is `with-conjugate-proposal` (§9, *Conjugacy, and Kalman and HMM
-generative functions*). `noisy-mean` is normal–normal, and its marginal
-likelihood has a closed form: the $y_i$ are jointly normal with mean 0
-and covariance $I + 4J$, $J$ a matrix of ones.
+generative functions*, provisional until the owner confirms it).
+`noisy-mean` is normal–normal, and its marginal likelihood has a closed
+form: the $y_i$ are jointly normal with mean 0 and covariance $I + 4J$,
+$J$ a matrix of ones.
 
 <!-- code: exact-marginal -->
 ```clojure
@@ -466,13 +468,14 @@ A `gen` body loads no combinator and no inference, where GenMLX's
 analytical elimination (§2). The closure does reach gen.clj's L3: the
 handler draws and scores through the distributions' record and
 multimethods, which live in `gen.dist.core`. The layers order what each
-part builds on; they are not a strict order of requires.
+part builds on, not a strict order of requires, as §4 says.
 
 ## Explicit models, immutable traces
 
-A trace is a value. DESIGN does not list it among the places where
-mutable state may live: the semantics reads such state only in one run's
-local cells, the implicit key source and native handles (§3.4). Arrays
+A trace is a value, a record no operation changes (§9, *Traces are
+values*). DESIGN does not list it among the places where mutable state
+may live: the semantics reads such state only in one run's local cells,
+the implicit key source and native handles (§3.4). Arrays
 are immutable values too (§5.1), and on the JVM backend they compare by
 value, so traces holding them compare with `=` (§9, *Arrays are
 values*). An operation that revises a trace returns a new one, in the
@@ -657,13 +660,12 @@ has, and the questions never throw:
 ;=> [nil false]
 ```
 
-Loudness has a limit, and three entries give the same reason for it: the
-check would read values on the host. On MLX an array is a node of a lazy
-graph, and reading it forces an evaluation. So a float cast to an
-integer type truncates toward zero, saturates at the type's range and
-takes NaN to 0, as Java's casts do, since "a loud error would need a
-host read of every cast on a lazy backend" (*Casts to integers are
-Java's*):
+Loudness has a limit where a check would read values on the host. On MLX
+an array is a node of a lazy graph, and reading it forces an evaluation.
+So a float cast to an integer type truncates toward zero, saturates at
+the type's range and takes NaN to 0, as Java's casts do, since "a loud
+error would need a host read of every cast on a lazy backend" (*Casts to
+integers are Java's*):
 
 <!-- code: casts -->
 ```clojure
@@ -671,13 +673,14 @@ Java's*):
 ;=> [2147483647 -2147483648 0 2 -2]
 ```
 
-For the same reason MLX clamps array indices rather than checking them,
-and a draw beyond the float range is +Inf with log density −Inf rather
-than an error (§9, *The MLX backend*; *A draw beyond the float range is
-+Inf*). One rule is an obligation on the user, as in the thesis and
-Gen.jl: values drawn with `untraced` must not decide which addresses a
-run visits, "since no sound check short of rerunning the body exists"
-(§9, *Encapsulated randomness*).
+MLX clamps array indices rather than checking them, an exception to
+NumPy's semantics that §5.3 documents. A draw beyond the float range is
++Inf with log density −Inf, for another reason: the value is exact for
+what is stored, as IEEE floats and Julia's Distributions in Float32 give
+(§9, *A draw beyond the float range is +Inf*). One rule is an obligation
+on the user, as in the thesis and Gen.jl: values drawn with `untraced`
+must not decide which addresses a run visits, "since no sound check
+short of rerunning the body exists" (§9, *Encapsulated randomness*).
 
 ## Laws are tests
 
