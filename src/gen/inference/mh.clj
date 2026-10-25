@@ -6,6 +6,9 @@
      (mh trace proposal proposal-args)    a custom proposal q, called on
                                           (trace, proposal-args...)
      (involutive-mh trace proposal proposal-args involution)
+     (mh-particles ps selection-or-proposal …)
+                                          mh on every particle of a
+                                          gen.batched collection at once
 
    Each returns {:trace :accepted? :log-alpha}: the new trace (the old one if
    the move is rejected), whether it was accepted, and the log acceptance
@@ -15,8 +18,8 @@
    choice outside its support is rejected: the operation stops there with
    weight -Inf (DESIGN.md §9), before anything downstream runs."
   {:api :stable}
-  (:refer-clojure :exclude [+ -])
-  (:require [gen.array :as array :refer [+ -]]
+  (:refer-clojure :exclude [+ - ==])
+  (:require [gen.array :as array :refer [+ - ==]]
             [gen.batched :as batched]
             [gen.diff :as diff]
             [gen.gfi :as gfi]
@@ -45,6 +48,32 @@
     (throw (ex-info "MH with a proposal needs its proposal arguments as a vector"
                     {:proposal-args proposal-args}))))
 
+(defn- weighed-move
+  "move as a function of the trace and keys with no host read, so that it
+   runs batched over particles too (gen.batched/move, mh-particles):
+   {:trace trace' :log-alpha w}, w an array. A scalar move outside the
+   support (impossible?, a host -Inf) is not weighed further. In a batched
+   run every particle goes on, and one whose move left the support (weight
+   -Inf) has w -Inf, whatever its backward weight."
+  [trace proposal proposal-args {:keys [involution backward backward-args]} k-propose k-update]
+  (let [{fwd :choices fwd-weight :weight fwd-retval :retval} (gfi/propose proposal (into [trace] proposal-args) k-propose)
+        [moved weight bwd] (if involution
+                             (let [r (involution trace fwd fwd-retval proposal-args k-update)]
+                               [(:trace r) (:weight r) (:bwd-choices r)])
+                             (let [r (gfi/update trace fwd k-update)]
+                               [(:trace r) (:weight r) (:discard r)]))]
+    (if (gfi/impossible? weight)
+      {:trace moved :log-alpha ##-Inf}
+      (let [{bwd-weight :weight} (gfi/assess-backward trace moved (or backward proposal)
+                                                      (if backward backward-args proposal-args) bwd k-propose)]
+        {:trace moved :log-alpha (array/where (== weight ##-Inf) ##-Inf (+ (- weight fwd-weight) bwd-weight))}))))
+
+(defn- check-proposal! [proposal]
+  (when-not (gfi/generative-function? proposal)
+    (throw (ex-info (str "MH takes a selection, such as (gen.selection/select :a), or a proposal generative"
+                         " function, not " (pr-str proposal))
+                    {:value proposal}))))
+
 (defn move
   "A proposed move and its log acceptance ratio, {:trace trace'
    :log-alpha w}, w a host double (also a move-reweight weight:
@@ -62,27 +91,16 @@
    proposal that gives u' density 0 at a possible trace' cannot reverse
    its own move: a loud error (gfi/assess-backward)."
   [trace proposal proposal-args {:keys [involution backward backward-args]} k-propose k-update]
-  (let [{fwd :choices fwd-weight :weight fwd-retval :retval} (gfi/propose proposal (into [trace] proposal-args) k-propose)
-        [moved weight bwd] (if involution
-                             (let [r (involution trace fwd fwd-retval proposal-args k-update)]
-                               [(:trace r) (:weight r) (:bwd-choices r)])
-                             (let [r (gfi/update trace fwd k-update)]
-                               [(:trace r) (:weight r) (:discard r)]))]
-    (if (gfi/impossible? weight)
-      {:trace moved :log-alpha ##-Inf}
-      (let [{bwd-weight :weight} (gfi/assess-backward trace moved (or backward proposal)
-                                                      (if backward backward-args proposal-args) bwd k-propose)]
-        {:trace moved :log-alpha (double (array/item (+ (- weight fwd-weight) bwd-weight)))}))))
+  (update (weighed-move trace proposal proposal-args {:involution involution :backward backward :backward-args backward-args}
+                        k-propose k-update)
+          :log-alpha #(double (array/item %))))
 
 (defn- proposal-mh
   "Gen.jl's MH with a custom proposal: propose forward choices from
    q(trace, args...), update the trace with them, and assess the discard
    under q(trace', args...) as the backward move."
   [trace proposal proposal-args key]
-  (when-not (gfi/generative-function? proposal)
-    (throw (ex-info (str "MH takes a selection, such as (gen.selection/select :a), or a proposal generative"
-                         " function, not " (pr-str proposal))
-                    {:value proposal})))
+  (check-proposal! proposal)
   (check-proposal-args proposal-args)
   (let [[k-propose k-update k-accept] (rng/split key 3)
         {proposed :trace la :log-alpha} (move trace proposal proposal-args {} k-propose k-update)]
@@ -122,24 +140,60 @@
          {proposed :trace la :log-alpha} (move trace proposal proposal-args {:involution involution} k-propose k-update)]
      (accept trace proposed la k-accept))))
 
+(defn- accept-particles
+  "Each of the moves from ps to proposed, by log acceptance ratios la (an
+   [n] array), accepted with probability min(1, exp(la)) by the uniforms
+   of key, as accept: mh-particles' result, with :fallback m (or the
+   accept step's own)."
+  [ps proposed la m key]
+  (let [las (mapv double (array/->clj la))
+        _ (when (some #(Double/isNaN %) las)
+            (throw (ex-info "An MH acceptance ratio is NaN" {:log-alphas las})))
+        us (array/->clj (rng/uniform key [(batched/size ps)]))
+        accepted (mapv (fn [l u] (or (>= l 0.0) (< (Math/log u) l))) las us)
+        selected (batched/select accepted proposed ps)
+        m (or m (batched/fallback selected))]
+    (cond-> {:particles (cond-> selected (and m (not (batched/fallback selected))) (assoc :fallback m))
+             :accepted accepted :log-alphas la}
+      m (assoc :fallback m))))
+
+(defn- selection-mh-particles [ps selection key]
+  (let [[k-move k-accept] (rng/split key)
+        {proposed :particles la :weights m :fallback}
+        (batched/regenerate ps (:args ps) (vec (repeat (count (:args ps)) diff/no-change)) selection k-move)]
+    (accept-particles ps proposed la m k-accept)))
+
+(defn- proposal-mh-particles
+  "MH with a proposal on every particle: the proposal, the update and the
+   backward assess run batched, as the model does (gen.batched/move), the
+   scalar move's own code under the batch tracer."
+  [ps proposal proposal-args key]
+  (check-proposal! proposal)
+  (check-proposal-args proposal-args)
+  (let [[k-move k-accept] (rng/split key)
+        {proposed :particles {la :log-alpha} :result m :fallback}
+        (batched/move ps (fn [t k] (let [[k-propose k-update] (rng/split k)]
+                                     (weighed-move t proposal proposal-args {} k-propose k-update)))
+                      k-move)]
+    (accept-particles ps proposed la m k-accept)))
+
 (defn mh-particles
-  "One selection-MH move for each of n particles (n independent chains,
-   gen.batched), accepted or rejected per particle. Returns mh's keys in
-   the plural, one value per particle: {:particles, :accepted (n
+  "One MH move for each of n particles (n independent chains,
+   gen.batched), accepted or rejected per particle, as mh's: of a
+   selection, or of a proposal generative function and its arguments.
+   With a selection it regenerates it (gen.batched/regenerate). With a
+   proposal, the proposal, the update and the backward proposal's assess
+   run batched, as the model does (gen.batched/move), and an invalid
+   proposal is the same loud error (gfi/assess-backward). Returns mh's
+   keys in the plural, one value per particle: {:particles, :accepted (n
    booleans), :log-alphas (an [n] array)}, and :fallback, why the move ran
-   one particle at a time, when it did (gen.batched)."
-  ([ps selection] (mh-particles ps selection (gfi/next-key)))
-  ([ps selection key]
-   (let [[k-move k-accept] (rng/split key)
-         {proposed :particles la :weights m :fallback}
-         (batched/regenerate ps (:args ps) (vec (repeat (count (:args ps)) diff/no-change)) selection k-move)
-         las (mapv double (array/->clj la))
-         _ (when (some #(Double/isNaN %) las)
-             (throw (ex-info "An MH acceptance ratio is NaN" {:log-alphas las})))
-         us (array/->clj (rng/uniform k-accept [(batched/size ps)]))
-         accepted (mapv (fn [l u] (or (>= l 0.0) (< (Math/log u) l))) las us)
-         selected (batched/select accepted proposed ps)
-         m (or m (batched/fallback selected))]
-     (cond-> {:particles (cond-> selected (and m (not (batched/fallback selected))) (assoc :fallback m))
-              :accepted accepted :log-alphas la}
-       m (assoc :fallback m)))))
+   one particle at a time, when it did (gen.batched). The key is an
+   optional last argument, as mh's."
+  ([ps selection-or-proposal]
+   (mh-particles ps selection-or-proposal (gfi/next-key)))
+  ([ps x y]
+   (if (sel/selection? x)
+     (selection-mh-particles ps x y)
+     (proposal-mh-particles ps x y (gfi/next-key))))
+  ([ps proposal proposal-args key]
+   (proposal-mh-particles ps proposal proposal-args key)))

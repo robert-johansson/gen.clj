@@ -19,7 +19,6 @@
             [gen.inference.diagnostics :as diag]
             [gen.inference.importance :as imp]
             [gen.inference.kernel :as kernel]
-            [gen.inference.mh :as mh]
             [gen.inference.particle-filter :as pf]
             [gen.inference.particle-mcmc :as pmcmc]
             [gen.inference.transform :as tf]
@@ -463,9 +462,8 @@ exact-count-error
   "How many distinct values of z_t the particles hold, for each of the
    first n-steps t."
   [state n-steps]
-  (let [trs (pf/traces state)]
-    (mapv (fn [t] (count (distinct (map #(array/item (% [t :z])) trs))))
-          (range n-steps))))
+  (mapv (fn [t] (count (distinct (array/->clj (pf/choice state [t :z])))))
+        (range n-steps)))
 
 (def long-200 (run-filter walk long-ys 200 {:key (rng/key 11)}))
 
@@ -502,32 +500,17 @@ exact-count-error
                            :key (rng/key 12)}))
 
 [(distinct-values always 8) (distinct-values moved 8)]
-;=> [[25 28 34 48 57 77 114 200] [148 167 177 183 176 182 187 200]] ; float64
+;=> [[25 28 34 48 57 77 114 200] [147 173 178 187 181 184 194 200]] ; float64
 
 (> (first (distinct-values moved 1)) (* 3 (first (distinct-values always 1))))
 ;=> true
 
 ;; book: batched-rejuvenation
-(defn batched-sweep
-  "The particles of a batched state after an MH move on each z_s, s < t,
-   from its prior: mh/mh-particles moves every particle at once."
-  [state t key]
-  (reduce (fn [state [s k]]
-            (update state :particles
-                    #(:particles (mh/mh-particles % (sel/select [s :z]) k))))
-          state
-          (map vector (range t) (rng/split key (max 1 t)))))
-
-(defn batched-resample-move
-  "resample-move, batched: run-filter's :advance."
-  [state params ys t key]
-  (let [[k-move k-step] (rng/split key)
-        moved (if (:resampled? state) (batched-sweep state t k-move) state)]
-    (bootstrap-step moved params ys t k-step)))
-
 (def long-moved
-  (run-filter walk long-ys 200 {:advance batched-resample-move
-                                :key (rng/key 11)}))
+  (run-filter walk long-ys 200 {:advance resample-move :key (rng/key 11)}))
+
+(:fallback long-moved)
+;=> nil
 
 (first (distinct-values long-moved 1))
 ;=> 117 ; float64

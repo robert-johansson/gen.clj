@@ -6,7 +6,6 @@
 (ns book.smc
   (:refer-clojure :exclude [+ - * /])
   (:require [gen.array :as array :refer [+ - * /]]
-            [gen.batched :as batched]
             [gen.book.svg :as svg]
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
@@ -281,9 +280,7 @@
 (defn values-at
   "Every particle's choice at addr, as host numbers."
   [state addr]
-  (if-let [ps (:particles state)]
-    (array/->clj (batched/choice ps addr))
-    (mapv #(array/item (% addr)) (pf/traces state))))
+  (array/->clj (pf/choice state addr)))
 
 (defn distinct-at
   "How many distinct values the particles hold at addr."
@@ -301,12 +298,12 @@
 (def initial-choices (sel/select :x0 :y0 :vx0 :vy0))
 
 (defn resimulate-start
-  "One MH move on the initial choices of every particle of a batched
-   filter, proposed from their prior, then resampling as before."
+  "One MH move on the initial choices of every particle, proposed from
+   their prior, then resampling as before."
   [state t key]
   (let [[k-move k-resample] (rng/split key)
-        moved (mh/mh-particles (:particles state) initial-choices k-move)]
-    (resample (assoc state :particles (:particles moved)) t k-resample)))
+        moved (pf/rejuvenate state (kernel/mh initial-choices) k-move)]
+    (resample moved t k-resample)))
 
 (def resimulated
   (particle-filter model zs 5000 resimulate-start {:batched? true}
@@ -363,13 +360,13 @@ resimulation-rate
 
 ;; book: perturb-acceptance
 (def perturbation-rate
-  (let [trs (pf/traces (:state perturbed))
-        moved (map #(mh/mh %1 perturbation (recent T) %2)
-                   trs (rng/split (rng/key 11) (count trs)))]
-    (/ (count (filter :accepted? moved)) (double (count trs)))))
+  (let [{:keys [accepted]} (mh/mh-particles (:particles (:state perturbed))
+                                            perturbation (recent T)
+                                            (rng/key 11))]
+    (/ (count (filter true? accepted)) 1000.0)))
 
 perturbation-rate
-;=> 0.176 ; float64
+;=> 0.084 ; float64
 
 (> perturbation-rate (* 10 resimulation-rate))
 ;=> true
@@ -385,7 +382,7 @@ perturbation-rate
 (def perturbed-diversity (diversity (:state perturbed)))
 
 [(plain-diversity 44) (perturbed-diversity 44)]
-;=> [94 222] ; float64
+;=> [94 129] ; float64
 
 ;; book: diversity-figure
 ;; figure: figures/025-diversity.svg
@@ -396,7 +393,7 @@ perturbation-rate
 
 ;; book: early-moves
 [(plain-diversity 0) (perturbed-diversity 0)]
-;=> [9 7] ; float64
+;=> [9 4] ; float64
 
 (< (max (plain-diversity 0) (perturbed-diversity 0)) 50)
 ;=> true
@@ -554,7 +551,7 @@ perturbation-rate
   (acceptance #(mh/mh %1 walk-start [] %2) final-traces (rng/key 23)))
 
 [resimulation-acceptance walk-acceptance]
-;=> [0.003 0.329] ; float64
+;=> [0.002 0.351] ; float64
 
 ;; book: solution-3-check
 (let [n (count final-traces)

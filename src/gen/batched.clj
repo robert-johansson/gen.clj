@@ -28,7 +28,7 @@
      re-run that fails, means the fallback (or, after unchecked updates, a
      loud error). Results are checked when read (check): the accessors
      below, and a fallback, check a collection whose last operations went
-     unchecked.
+     unchecked, once for its trace however often it is read.
 
    What no layer sees for certain is a plain helper function (outside gen
    bodies) that branches on a batched value in other ways: a raw if or case
@@ -48,6 +48,7 @@
      (select mask ps qs)      → particles: ps's where mask is true, qs's elsewhere
      (set-choices ps choices) → particles: each with its own values at choices' addresses
      (map-particles ps f key xs…) → (f trace key x…) of every particle, stacked
+     (move ps f key xs…)      → {:particles :result}: each trace moved by f (MCMC)
      (traces ps)              → the n scalar traces
      (choice ps addr)         → an [n …] array of the choice across particles
      (scores ps)              → an [n] array
@@ -514,10 +515,28 @@
    does a fallback, which starts from them."
   [ps]
   (when (and (batched? ps) (::unchecked? ps))
-    (try (spot-check! (trace/maker (:trace ps)) (:args ps) (:n ps) (:trace ps))
-         (catch clojure.lang.ExceptionInfo e
-           (throw (if (::mismatch (ex-data e)) (diverged e) e)))))
+    (let [{t :trace m :spot-checks v :check} (::verification ps)]
+      (try (if (and (identical? t (:trace ps)) (= m *spot-checks*))
+             @v
+             (spot-check! (trace/maker (:trace ps)) (:args ps) (:n ps) (:trace ps)))
+           (catch clojure.lang.ExceptionInfo e
+             (throw (if (::mismatch (ex-data e)) (diverged e) e))))))
   ps)
+
+(defn- marked
+  "ps, marked unchecked? or not (did operations since its last spot check
+   go unchecked?). An unchecked collection's trace is spot-checked once,
+   the first time check reads it, however often it is read: a delay of its
+   check, kept for that trace and *spot-checks*, the collection being a
+   value."
+  [ps unchecked?]
+  (if unchecked?
+    (let [{t :trace args :args n :n} ps
+          m *spot-checks*]
+      (assoc ps ::unchecked? true
+             ::verification {:trace t :spot-checks m
+                             :check (delay (binding [*spot-checks* m] (spot-check! (trace/maker t) args n t)))}))
+    (-> ps (assoc ::unchecked? false) (dissoc ::verification))))
 
 (defn- check-update?
   "Is the update of index k (from 0) on the spot-check schedule?"
@@ -534,7 +553,7 @@
       (try (spot-check! (:gen-fn ps) args (:n ps) t)
            (catch clojure.lang.ExceptionInfo e
              (throw (if (and (::unchecked? ps) (::mismatch (ex-data e))) (diverged e) e)))))
-    (assoc ps :trace t :args (vec args) :updates (inc k) ::unchecked? (or (::unchecked? ps) (not check?)))))
+    (marked (assoc ps :trace t :args (vec args) :updates (inc k)) (or (::unchecked? ps) (not check?)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Per-particle constraints
@@ -669,7 +688,8 @@
   (let [indices (vec indices)
         n' (count indices)]
     (if (batched? ps)
-      (assoc ps :n n' :trace (part/gather (:trace ps) indices))
+      (cond-> (assoc ps :n n' :trace (part/gather (:trace ps) indices))
+        (::unchecked? ps) (marked true))
       (assoc ps :n n' :traces (mapv (:traces ps) indices)))))
 
 (defn- joined-select
@@ -713,12 +733,12 @@
                                                                      (array/tree-map #(plain % n) (cm/get-choice cq path)))))
                            cm/EMPTY (cm/addresses cp))]
         ;; the rebuild is not checked
-        (batched-or (assoc ps :trace (assoc (rebuild maker (:args ps) n merged) :gen-fn (:gen-fn ps)) ::unchecked? true)
+        (batched-or (marked (assoc ps :trace (assoc (rebuild maker (:args ps) n merged) :gen-fn (:gen-fn ps))) true)
                     (fallback)))
 
       :else
-      (batched-or (assoc ps :trace (assoc (joined-select keep tp tq n) :gen-fn (:gen-fn ps))
-                         ::unchecked? (boolean (or (::unchecked? ps) (::unchecked? qs))))
+      (batched-or (marked (assoc ps :trace (assoc (joined-select keep tp tq n) :gen-fn (:gen-fn ps)))
+                          (boolean (or (::unchecked? ps) (::unchecked? qs))))
                   (fallback)))))
 
 (defn- by-part-at
@@ -854,6 +874,47 @@
   [ps f key & xs]
   (:result (apply map-particles* ps f key xs)))
 
+(defn- moved-result
+  "r, the result of move's f, when it holds a trace: {:trace …}; a loud
+   error otherwise."
+  [r]
+  (if (and (map? r) (contains? r :trace))
+    r
+    (throw (ex-info (str "move: f returns {:trace trace' …}, not " (if (nil? r) "nil" (.getName (class r))))
+                    {:result-type (some-> r class .getName)}))))
+
+(defn move
+  "Every particle's trace moved by f, (f trace key x …) → {:trace trace' …},
+   at once: an MCMC move run batched, as map-particles runs a function.
+   Where ps is batched, f's code runs once, on the batched trace under the
+   batch tracer, its draws made per particle; trace' is checked as an
+   update's (*verified-updates*). Where ps holds per-particle traces, or
+   the batched run fails (a branch on a batched value, a host read),
+   f runs on each trace with its own key (key split n ways; nil stays
+   nil), as map-particles does; *required* refuses that. Returns
+   {:particles (the trace's), :result (the rest of f's map, stacked as
+   map-particles' results)}, and :fallback, why f ran on each trace, when
+   it did. trace' is a trace of the same generative function, whose
+   arguments the particles take."
+  [ps f key & xs]
+  (let [n (:n ps)
+        rows (fn [i] (map (fn [x] (array/tree-map #(array/take % i 0) x)) xs))
+        each (fn [ps]
+               (let [rs (mapv (fn [i t k] (moved-result (apply f t k (rows i))))
+                              (range n) (traces ps) (if key (rng/split key n) (repeat nil)))]
+                 {:particles (per-particle (assoc ps :args (:args (:trace (first rs)) (:args ps))) (map :trace rs))
+                  :result (stacked (mapv #(dissoc % :trace) rs))}))]
+    (if (batched? ps)
+      ;; checked first, outside the batched run: its re-runs are scalar
+      (let [t (:trace (check ps))]
+        (batched-or
+         (let [r (moved-result (guarded n #(apply f t key (map (fn [x] (array/tree-map (fn [v] (batch/wrap v [n])) x)) xs))))
+               t' (:trace r)]
+           {:particles (spot-check-update! ps (:args t') t')
+            :result (array/tree-map #(if (array/array? %) (plain % n) %) (dissoc r :trace))})
+         (each (unbatched ps))))
+      (with-fallback (each (one-at-a-time ps))))))
+
 (defn set-choices
   "The particles with their choices at the addresses of choices set, each
    particle's to its own value (choices' leaves have the leading particle
@@ -871,6 +932,6 @@
       (let [t (:trace (check ps))
             maker (trace/maker t)
             merged (cm/override (plain-choices (:choices t) n) choices)]
-        (batched-or (assoc ps :trace (assoc (rebuild maker (:args ps) n merged) :gen-fn (:gen-fn ps)) ::unchecked? true)
+        (batched-or (marked (assoc ps :trace (assoc (rebuild maker (:args ps) n merged) :gen-fn (:gen-fn ps))) true)
                     (fallback ps)))
       (fallback ps))))

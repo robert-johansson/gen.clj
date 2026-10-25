@@ -7,6 +7,7 @@
      (step state args argdiffs observations)       → state
      (maybe-resample state)                        → state
      (log-ml-estimate state)                       → number
+     (choice state addr)                           → an [n …] array
 
    A state holds :traces, their unnormalized :log-weights, and :log-ml, the
    log marginal likelihood accumulated at earlier resamplings. A step extends
@@ -31,7 +32,14 @@
    :strata, which run one particle at a time, are errors. Nothing prints
    (DESIGN.md §9, the ten decisions' ninth). A custom proposal runs one particle at a time: at initialize it
    ignores :batched?, and a step with one turns a batched state into
-   per-particle traces. traces returns the scalar traces either way.
+   per-particle traces. Rejuvenation stays batched with a kernel that has
+   a batched form (gen.inference.kernel/batched-form: MH of a selection or
+   of a proposal, HMC, MALA, and chains of them); with another kernel it
+   moves one particle at a time, and records :fallback. traces returns
+   the scalar traces either way, rebuilt from a batched state's
+   collection; choice reads one address of every particle without
+   rebuilding them, and mean, variance and proportions run their function
+   once on the batched trace.
 
    From GenParticleFilters: stratified initialization (:strata, with
    choice-product), priority resampling and resize, rejuvenation by
@@ -302,19 +310,43 @@
   ([state n] (resize state n {}))
   ([state n opts] (resample state (assoc opts :n n))))
 
+(def ^:private no-batched-form
+  (str "The kernel has no batched form (gen.inference.kernel/batched-form), so pf/rejuvenate moved the particles"
+       " one at a time: kernel/mh, hmc, mala and map-optimize have one, and so do chains of them"))
+
 (defn rejuvenate
   "Each particle's trace moved by kernel, an MCMC kernel ((fn [trace key] →
    {:trace …}), gen.inference.kernel's, or mcmc's moves) that leaves the
    posterior invariant, so the weights stay as they are
    (GenParticleFilters' pf_move_accept!). A function that returns a bare
-   trace is a loud error. A batched state becomes one of scalar traces."
+   trace is a loud error. A batched state stays batched when the kernel
+   has a batched form (kernel/batched-form: MH of a selection or a
+   proposal, HMC, MALA, and chains of them), which moves every particle
+   at once, each as the kernel moves a trace; the state records
+   :fallback when that move ran one particle at a time. A kernel without
+   one moves each particle's trace, and the state becomes one of scalar
+   traces, with :fallback saying so; a :batched? :required filter throws
+   instead."
   ([state kernel] (rejuvenate state kernel (gfi/next-key)))
   ([state kernel key]
-   (let [state (unbatched state)
-         ;; one particle's graph at a time on a lazy backend, as in moved
-         traces (mapv (fn [tr k] (gfi/eval-trace! (:trace (kernel/step-result (kernel tr k)))))
-                      (:traces state) (rng/split key (count (:traces state))))]
-     (assoc state :traces traces))))
+   (let [move (kernel/batched-form kernel)
+         required? (= :required (:batched? state))]
+     (if-let [ps (and move (:particles state))]
+       (let [{ps' :particles m :fallback} (binding [batched/*required* required?]
+                                            (kernel/particles-result (move ps key)))]
+         (array/eval! (:trace ps'))
+         (cond-> (assoc state :particles ps')
+           m (assoc :fallback m)))
+       (let [batched-state? (contains? state :particles)
+             _ (when (and batched-state? required?)
+                 (throw (ex-info (str "pf/rejuvenate: the filter is :batched? :required, but " no-batched-form)
+                                 {:batched? :required :fallback no-batched-form})))
+             state (unbatched state)
+             ;; one particle's graph at a time on a lazy backend, as in moved
+             traces (mapv (fn [tr k] (gfi/eval-trace! (:trace (kernel/step-result (kernel tr k)))))
+                          (:traces state) (rng/split key (count (:traces state))))]
+         (cond-> (assoc state :traces traces)
+           batched-state? (assoc :fallback no-batched-form)))))))
 
 (defn reweighting
   "A move-reweight kernel (GenParticleFilters' move_reweight): (fn [trace
@@ -430,23 +462,66 @@
 
 (defn- probabilities [state] (mapv #(Math/exp %) (:log-normalized-weights (w/normalize (:log-weights state)))))
 
-(defn mean
-  "The weighted mean of (f trace) over the particles."
+(defn choice
+  "Every particle's choice at addr, an [n …] array in the order of the
+   particles (and of their log weights), as gen.batched/choice gives a
+   collection's: read from a batched state's collection directly, without
+   rebuilding its scalar traces, and stacked from a state's traces. Loud
+   when a particle makes no choice there."
+  [state addr]
+  (if-let [ps (:particles state)]
+    (batched/choice ps addr)
+    (array/stack (mapv #(% addr) (:traces state)))))
+
+(defn- values-of
+  "(f trace) of every particle of a batched state, an [n …] array: f runs
+   once, on the batched trace under the batch tracer
+   (gen.batched/map-particles), or on each particle's scalar trace when it
+   cannot run batched (it reads a value on the host, say), which a
+   :batched? :required filter refuses."
   [state f]
-  (reduce + (map #(* %1 (f %2)) (probabilities state) (traces state))))
+  (binding [batched/*required* (= :required (:batched? state))]
+    (batched/map-particles (:particles state) (fn [t _] (f t)) nil)))
+
+(defn- weighted
+  "Σ p_i x_i over the leading axis of xs, an [n …] array, p the n
+   particles' probabilities (host numbers)."
+  [p xs]
+  (let [shape (into [(count p)] (repeat (dec (array/ndim xs)) 1))]
+    (array/sum (* (array/reshape (array/array p) shape) xs) {:axis 0})))
+
+(defn mean
+  "The weighted mean of (f trace) over the particles. On a batched state f
+   runs once, on the batched trace (gen.batched/map-particles): every
+   particle's value at once, without rebuilding the scalar traces, so f
+   is best written with gen.array's operators, as a model is. Where it
+   cannot run batched (it reads a value on the host), it runs on each
+   particle's trace."
+  [state f]
+  (if (:particles state)
+    (weighted (probabilities state) (values-of state f))
+    (reduce + (map #(* %1 (f %2)) (probabilities state) (traces state)))))
 
 (defn variance
-  "The weighted variance of (f trace) over the particles."
+  "The weighted variance of (f trace) over the particles; on a batched
+   state as mean."
   [state f]
-  (let [m (mean state f)]
-    (reduce + (map #(* %1 (array/square (- (f %2) m))) (probabilities state) (traces state)))))
+  (if (:particles state)
+    (let [p (probabilities state)
+          xs (values-of state f)]
+      (weighted p (array/square (- xs (weighted p xs)))))
+    (let [m (mean state f)]
+      (reduce + (map #(* %1 (array/square (- (f %2) m))) (probabilities state) (traces state))))))
 
 (defn proportions
   "The total weight of each value of (f trace) (GenParticleFilters'
-   proportionmap): a map of host values to probabilities."
+   proportionmap): a map of host values to probabilities. On a batched
+   state as mean."
   [state f]
-  (reduce (fn [m [p tr]] (update m (array/->clj (f tr)) (fnil + 0.0) p))
-          {} (map vector (probabilities state) (traces state))))
+  (let [vs (if (:particles state)
+             (array/->clj (values-of state f))
+             (map #(array/->clj (f %)) (traces state)))]
+    (reduce (fn [m [p v]] (update m v (fnil + 0.0) p)) {} (map vector (probabilities state) vs))))
 
 (defn maybe-resample
   "Resample when the effective sample size is below :ess-threshold (n/2 by

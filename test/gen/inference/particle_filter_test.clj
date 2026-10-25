@@ -5,6 +5,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [gen.test-support :as ts]
             [gen.array :as array :refer [+ - * /]]
+            [gen.batched :as b]
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
             [gen.diff :as diff]
@@ -13,6 +14,7 @@
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
             [gen.inference.kernel :as k]
+            [gen.inference.mh :as mh]
             [gen.inference.particle-filter :as pf]
             [gen.inference.transform :as tf]
             [gen.inference.weights :as w]
@@ -214,6 +216,139 @@
     (is (= (:log-weights state) (:log-weights moved)))
     (is (== (pf/log-ml-estimate state) (pf/log-ml-estimate moved)))
     (is (some true? (map #(not= (% [t :x]) (%2 [t :x])) (pf/traces state) (pf/traces moved))) "some particles moved")))
+
+;; A batched filter stays batched through rejuvenation by a kernel with a
+;; batched form (genclj-xgz4), and its statistics read the collection
+;; without rebuilding its traces.
+
+(defn- batched-filter
+  "A batched filter of n particles after the first two observations."
+  [n seed]
+  (-> (pf/initialize model [1 0.0] (observation 0) n {:batched? true :key (rng/key seed)})
+      (pf/step [2 0.0] [diff/unknown-change diff/no-change] (observation 1) {:key (rng/key (inc seed))})))
+
+(defn- as-traces
+  "The same particles as scalar traces."
+  [state]
+  (-> state (dissoc :particles) (assoc :traces (pf/traces state))))
+
+(def drift
+  "An asymmetric proposal for x_0: x' ~ N(x/2 + 0.2, 0.7), its density back
+   from x' other than there."
+  (gen [tr] (trace [0 :x] (d/normal (+ (* 0.5 (tr [0 :x])) 0.2) 0.7))))
+
+(def batched-kernels
+  "Kernels with a batched form, and what they move."
+  {"MH of a selection" [(k/mh (sel/select [0 :x])) [0 :x]]
+   "MH with a proposal" [(k/mh drift []) [0 :x]]
+   "a chain" [(k/chain (k/mh (sel/select [1 :x])) (k/mh drift [])) [0 :x]]
+   "a kern" [(k/kern [] (doseq [t (range 2)] (k/mh (sel/select [t :x])))) [1 :x]]
+   "HMC" [(k/hmc (sel/select [0 :x] [1 :x]) {:L 3 :eps 0.3}) [1 :x]]
+   "MALA" [(k/mala (sel/select [0 :x] [1 :x]) 0.2) [1 :x]]})
+
+(deftest a-batched-filter-stays-batched-through-rejuvenation
+  ;; Planted bugs (2026-10-25): rejuvenate unbatching always fails every
+  ;; case; the batched form of kernel/mh of a selection dropped fails it, "a
+  ;; chain" and "a kern"; a chain's batched form making its first move only
+  ;; fails "a chain" and "a kern".
+  (let [state (batched-filter 40 60)]
+    (doseq [[label [kernel addr]] batched-kernels]
+      (testing label
+        (let [moved (pf/rejuvenate state kernel (rng/key 61))]
+          (is (b/batched? (:particles moved)))
+          (is (nil? (:fallback moved)))
+          (is (= (:log-weights state) (:log-weights moved)))
+          (is (== (pf/log-ml-estimate state) (pf/log-ml-estimate moved)))
+          (is (not= (ts/host (pf/choice state addr)) (ts/host (pf/choice moved addr))) "some particles moved"))))))
+
+(deftest a-kernel-without-a-batched-form-moves-one-particle-at-a-time
+  ;; Planted bug (2026-10-25): rejuvenate not recording the fallback fails
+  ;; the first; not refusing it under :required, the second.
+  (let [state (batched-filter 12 62)]
+    (doseq [[label kernel] {"NUTS" (k/nuts (sel/select [0 :x]) {:eps 0.3 :max-depth 3})
+                            "a function" (fn [tr key] (mh/mh tr (sel/select [0 :x]) key))
+                            "a mixture" (k/mix [(k/mh (sel/select [0 :x]))] [1.0])
+                            "a chain with one" (k/chain (k/mh (sel/select [1 :x])) (k/kern ^:trace [_tr] (k/mh (sel/select [0 :x]))))}]
+      (testing label
+        (let [moved (pf/rejuvenate state kernel (rng/key 63))]
+          (is (re-find #"no batched form" (str (:fallback moved))))
+          (is (= 12 (count (:traces moved))))
+          (is (not (contains? moved :particles)))
+          (is (= (:log-weights state) (:log-weights moved))))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #":batched\? :required.*no batched form"
+                              (pf/rejuvenate (assoc state :batched? :required) kernel (rng/key 63))))))
+    (testing "a batched form that cannot run batched records why"
+      (let [branching (gen [tr] (if (array/> (tr [0 :x]) 0.0)
+                                  (trace [0 :x] (d/normal (tr [0 :x]) 0.5))
+                                  (trace [0 :x] (d/normal (tr [0 :x]) 0.6))))
+            moved (pf/rejuvenate state (k/mh branching []) (rng/key 65))]
+        (is (nil? (:fallback state)))
+        (is (re-find #"Cannot branch" (:fallback moved)))
+        (is (not (b/batched? (:particles moved))))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #":batched\? :required"
+                              (pf/rejuvenate (assoc state :batched? :required) (k/mh branching []) (rng/key 65))))))))
+
+(defn- agree?
+  "Do the means of xs and ys, independent samples, agree within five
+   standard errors of their difference?"
+  [xs ys]
+  (let [[mx sx] (mean-and-error xs)
+        [my sy] (mean-and-error ys)]
+    (< (ts/abs (- mx my)) (+ 1e-12 (* 5 (Math/sqrt (+ (* sx sx) (* sy sy))))))))
+
+(deftest batched-and-scalar-rejuvenation-agree
+  ;; Each particle's batched move is distributed as its scalar move: from
+  ;; 3000 copies of one particle, the batched and the scalar rejuvenation's
+  ;; values agree in mean and in square, and in how many moved, at 5 SE.
+  ;; Planted bugs (2026-10-25): the batched MH accepting only moves with a
+  ;; ratio of at least 1 fails the MH cases; HMC's batched form given twice
+  ;; the step size fails "HMC", MALA's twice its tau "MALA".
+  (let [start (pf/replicate (pf/view (batched-filter 40 66) [0]) 3000)
+        scalar (as-traces start)]
+    (is (b/batched? (:particles start)))
+    (doseq [[label [kernel addr]] batched-kernels]
+      (testing label
+        (let [x0 (first (ts/host (pf/choice start addr)))
+              b (ts/host (pf/choice (pf/rejuvenate start kernel (rng/key 67)) addr))
+              s (ts/host (pf/choice (pf/rejuvenate scalar kernel (rng/key 68)) addr))
+              moved (fn [xs] (map #(if (== % x0) 0.0 1.0) xs))]
+          (is (agree? b s) "the means")
+          (is (agree? (map #(* % %) b) (map #(* % %) s)) "the second moments")
+          (is (agree? (moved b) (moved s)) "how many moved"))))))
+
+(deftest the-statistics-read-a-batched-state-without-rebuilding-it
+  ;; pf/choice, mean, variance and proportions of a batched state are its
+  ;; traces' own, read from the collection: with gen.batched/traces made to
+  ;; throw, they still run. Planted bug (2026-10-25): mean reading
+  ;; (traces state) fails the last two testing blocks.
+  (let [state (batched-filter 30 70)
+        scalar (as-traces state)
+        x1 #(% [1 :x])
+        positive #(array/> (% [1 :x]) 0.0)]
+    (testing "the values are the traces'"
+      (is (ts/close? (pf/choice state [1 :x]) (pf/choice scalar [1 :x])))
+      (is (= [30] (array/shape (pf/choice state [1 :x]))))
+      (is (ts/close? (pf/mean state x1) (pf/mean scalar x1)))
+      (is (ts/close? (pf/variance state x1) (pf/variance scalar x1)))
+      (is (= (set (keys (pf/proportions state positive))) (set (keys (pf/proportions scalar positive)))))
+      (is (every? true? (map ts/close? (vals (into (sorted-map) (pf/proportions state positive)))
+                             (vals (into (sorted-map) (pf/proportions scalar positive))))))
+      (is (ts/close? (pf/mean state #(array/stack [(% [0 :x]) (% [1 :x])]))
+                     (array/stack [(pf/mean scalar #(% [0 :x])) (pf/mean scalar x1)]))
+          "a vector-valued statistic"))
+    (testing "without rebuilding the traces"
+      (with-redefs [b/traces (fn [_] (throw (ex-info "rebuilt" {})))]
+        (is (ts/finite? (ts/number (pf/mean state x1))))
+        (is (ts/finite? (ts/number (pf/variance state x1))))
+        (is (map? (pf/proportions state positive)))
+        (is (= [30] (array/shape (pf/choice state [1 :x]))))))
+    (testing "a function that reads the host runs on each trace"
+      (is (ts/close? (pf/mean state #(array/item (% [1 :x]))) (pf/mean scalar x1)))
+      (let [up? #(pos? (array/item (% [1 :x])))]
+        (is (= (keys (pf/proportions scalar up?)) (keys (pf/proportions state up?))))
+        (is (every? true? (map ts/close? (vals (pf/proportions scalar up?)) (vals (pf/proportions state up?))))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #":batched\? :required"
+                            (pf/mean (assoc state :batched? :required) #(array/item (% [1 :x]))))))))
 
 (deftest each-particle-is-evaluated-as-it-is-moved
   ;; One evaluation per particle, as it is moved, so that a lazy backend holds
