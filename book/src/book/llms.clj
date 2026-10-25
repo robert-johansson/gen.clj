@@ -373,22 +373,10 @@ pair-summary
 ;=> true
 
 ;; book: laws
-(defn failures
-  "The names of the laws in law-set (a map of name to law) that fail on
-   n cases of models (gen.laws's entries)."
-  [law-set models n]
-  (let [cases (laws/cases models)]
-    (into (sorted-set)
-          (keep (fn [[name law]]
-                  (when-not (:pass? (laws/check n (law cases) {:seed 1}))
-                    name)))
-          law-set)))
-
-(failures laws/all
-          [[:complete complete [prompt 4] [[prompt 2] [an-prompt 4]]]
-           [:word word [prompt 4] [[prompt 6]]]]
-          30)
-;=> #{}
+(laws/verify [[:complete complete [prompt 4] [[prompt 2] [an-prompt 4]]]
+              [:word word [prompt 4] [[prompt 6]]]]
+             {:num-tests 30 :seed 1})
+;=> {}
 
 ;; book: author
 (def recipe (lm/encode toy-lm "Preheat the oven and add a "))

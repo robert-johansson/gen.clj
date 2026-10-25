@@ -37,6 +37,7 @@ clojure -X:test :patterns '["gen.book.*"]'   # the book (book/): every chapter r
 clojure -M:test -m gen.book sync      # write the book's includes (from book/src) and figures
 clojure -M:test -m gen.book pdf       # the book as a PDF (pandoc, xelatex, rsvg-convert): target/book/
 clojure -X:test:commons-math          # also the Commons Math extension (ext/commons-math)
+clojure -M:laws                       # a REPL with gen.clj and its laws (ext/laws, in :test too), as a dependent gets them
 clojure -J-Dgen.backend=mlx -X:test   # any suite on the MLX backend (add -J-Dgen.mlx.device=cpu|gpu, -J-Dgen.mlx.dtypes=64)
 clojure -M:bench -m gen.array-bench   # per-op costs; add :c2 to compare C2 with Graal's JIT
 clojure -M:bench -m gen.model-bench   # model-level costs (GFI ops, batching, gradients)
@@ -109,6 +110,7 @@ Python.
 | L5 inference | `gen.inference.weights`, `.importance`, `.mh`, `.kernel`, `.particle-filter`, `.mcmc` (HMC, MALA, NUTS, MAP, elliptical slice), `.nuts` (Stan's warmup and sampler), `.enumerative` (grids, exact proposals), `.proposal` (internal-proposal override), `.transform` (Gen.jl's @transform, trace translators, SMCP3), `.trace-kernel` (GenTraceKernelDSL), `.vi` (black-box VI, VIMCO), `.diagnostics` (ESS, R-hat, MCSE), `.conjugate` (conjugate proposals), `.laplace` (Hessians, Laplace, Fisher), `.particle-mcmc` (conditional SMC, particle Gibbs); `gen.gradients`, `gen.learning` |
 | LLM runtime | `gen.llm.branching` (the Branching protocol), `.slots` (slot engines on one thread), `.llama` (llama.cpp; Java binding in `src-java/gen/llama`), `gen.llm.lm` (the LM protocol), `.cache`, `.trie`, `.cells` (the LM's cache, prefix trie, KV-cell ledger) |
 | LLM generative functions | `gen.llm.token` (completions, the token distribution), `gen.llm.potential` (potentials), `gen.llm.smc` (token SMC) |
+| Laws (`ext/laws`) | `gen.laws` (the GFI's laws as test.check properties: the law sets, `verify`, `deflaws`, `checks`; test.check its one dependency) |
 
 ## Rules
 
@@ -137,10 +139,12 @@ Python.
 6. **Errors are loud.** Shape mismatches, unvisited constraints, repeated
    addresses and the like throw `ex-info` with data. Never let one degrade into
    NaN or a silent default.
-7. **Laws are tests.** The GFI laws live in `test/gen/laws.clj` (general and
-   forward-sampling sets); every new generative function kind instantiates them
-   with `(laws/deflaws prefix models n)`. Coverage is tracked in
-   `docs/research/genjl-parity.md` §3.
+7. **Laws are tests.** The GFI laws live in `gen.laws`, the module `ext/laws`
+   (`ext/laws/src`, on `:test`'s classpath; its law sets general,
+   forward-sampling, all and others). Every new generative function kind
+   instantiates them with `(laws/deflaws prefix models n (merge laws/all
+   laws/implementation))`, and the other sets that apply to it. Coverage is
+   tracked in `docs/research/genjl-parity.md` §3.
    - Numerics are checked against fixtures.
    - Sampled quantities use fixed keys and variance-derived bands.
    - Against GenMLX, compare statistics, never exact samples.

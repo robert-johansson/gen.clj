@@ -876,8 +876,9 @@ standard errors of its probability:
 
 The laws of *Verification* run on any generative function. The model
 entry gives the urn other arguments to update and regenerate with: other
-$a$ and $b$, more draws and fewer. It passes all 23 laws and the
-fixed-support law:
+$a$ and $b$, more draws and fewer. `laws/verify` runs a set of laws over
+it, `laws/all` by default, and returns the laws that fail, each with what
+it says. The urn passes all 22 laws and the fixed-support law:
 
 <!-- code: urn-laws -->
 ```clojure
@@ -886,20 +887,12 @@ fixed-support law:
    regenerate with: other a and b, more draws, fewer draws."
   [[:urn urn [1.0 2.0 4] [[2.0 0.5 4] [1.0 2.0 6] [1.0 2.0 2]]]])
 
-(defn failures
-  "The names of the laws of law-set (a map of name to law) that fail on n
-   cases (20 by default) of models."
-  ([law-set models] (failures law-set models 20))
-  ([law-set models n]
-   (let [cases (laws/cases models)]
-     (into (sorted-set)
-           (keep (fn [[name law]]
-                   (when-not (:pass? (laws/check n (law cases) {:seed 1}))
-                     name)))
-           law-set))))
+(def few
+  "The chapter's runs of a law: 20 cases, from one seed."
+  {:num-tests 20 :seed 1})
 
-[(failures laws/all urn-models) (failures laws/fixed-support urn-models)]
-;=> [#{} #{}]
+[(laws/verify urn-models few) (laws/verify urn-models few laws/fixed-support)]
+;=> [{} {}]
 ```
 
 In a test namespace `laws/deflaws` defines a spec per law, as
@@ -931,7 +924,7 @@ weights of `generate` and `update`:
   (remove given (keys added)))
 
 (= (with-redefs [fresh-draws fresh-by-lookup]
-     (failures laws/all urn-models))
+     (set (keys (laws/verify urn-models few))))
    #{:assess-is-generate-with-every-choice
      :generate-weight-is-the-constrained-density
      :generate-weight-is-the-projection
@@ -1349,21 +1342,26 @@ exact-count
 ![The running mean of the estimates (blue), the exact density (black) with five standard errors around it (gray), and the exponential of the running mean of their logs (red)](figures/045-estimates.svg)
 
 An estimated density is held to `laws/encapsulated`, the laws that hold
-for one draw of the estimator's randomness. It passes them but one:
+for one draw of the estimator's randomness. It passes them but one, and
+passes `laws/estimated`, which is the set without it:
 
 <!-- code: counts-laws -->
 ```clojure
 (def counts-models [[:counts counts [1.5] [[0.5]]]])
 
-(failures laws/encapsulated counts-models)
-;=> #{:score-is-assessed-on-the-same-key}
+(keys (laws/verify counts-models few laws/encapsulated))
+;=> (:score-is-assessed-on-the-same-key)
+
+(laws/verify counts-models few laws/estimated)
+;=> {}
 ```
 
 That law requires `assess` on a trace's key to reproduce its score, as
 an untraced draw does. A joint sampler draws its randomness otherwise:
 `simulate`'s estimate includes $y$'s own rate, `assess` draws five rates
-from the prior. gen.clj's own suite drops the law for estimated
-densities with a joint sampler.
+from the prior. `laws/estimated` is the set for an estimated density with
+a joint sampler, and gen.clj's own suite holds its estimated densities to
+it.
 
 An operation that needs exact densities refuses an estimate rather than
 fix one draw of it silently: a gradient, an exact enumeration, a
@@ -1595,9 +1593,9 @@ sum, and the law fails:
   (let [xs (mapv double (range 10))]
     [label model [xs] [[(assoc xs 3 7.5)]]]))
 
-[(failures laws/static [(entry :scaled scaled-noisy-sum)])
- (failures laws/static [(entry :doubled doubled-noisy-sum)])]
-;=> [#{} #{:static-matches-dynamic}]
+[(laws/verify [(entry :scaled scaled-noisy-sum)] few laws/static)
+ (keys (laws/verify [(entry :doubled doubled-noisy-sum)] few laws/static))]
+;=> [{} (:static-matches-dynamic)]
 ```
 
 ## Saving and loading
@@ -1822,8 +1820,8 @@ with the seed 1 they do. That is why gen.clj's suites run 100.
     (walking-regenerate gf tr args selection key)))
 
 (with-redefs [regenerate-urn regenerate-urn-fast]
-  (failures laws/all urn-models))
-;=> #{}
+  (laws/verify urn-models few))
+;=> {}
 
 (defn regenerate-urn-stale
   "regenerate-urn-fast whose weight is 0 when it keeps every draw: the
@@ -1833,11 +1831,11 @@ with the seed 1 they do. That is why gen.clj's suites run 100.
     (keeps-every-draw? tr n selection) (assoc :weight 0.0)))
 
 (with-redefs [regenerate-urn regenerate-urn-stale]
-  [(failures laws/all urn-models)
-   (= (failures laws/all urn-models 100)
+  [(laws/verify urn-models few)
+   (= (set (keys (laws/verify urn-models {:num-tests 100 :seed 1})))
       #{:regenerate-weight-is-the-retained-density-ratio
         :regenerate-weight-with-new-arguments-is-the-projection-ratio})])
-;=> [#{} true]
+;=> [{} true]
 ```
 
 **5.** The choices are data and go in the file; the generative function

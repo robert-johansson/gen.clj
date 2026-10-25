@@ -1,0 +1,14 @@
+;; gen.laws, the GFI's laws as test.check properties: a module of gen.clj
+;; outside its core (DESIGN.md §9, "The 1.0's shape"). A dependent takes it
+;; as a git dependency on gen.clj's repository with :deps/root "ext/laws",
+;; at the commit of the gen.clj it uses:
+;;
+;;   gen.clj/laws {:git/url "…gen.clj" :git/sha "…" :deps/root "ext/laws"}
+;;
+;; It brings gen.clj from the same checkout. A dependent that names gen.clj
+;; as gen.clj/gen.clj itself, at the top of its deps, keeps its own: tools.deps
+;; takes a top-level dependency over a transitive one. In gen.clj's own
+;; repository the :laws and :test aliases put ext/laws/src on the classpath.
+{:paths ["src"]
+ :deps {org.clojure/test.check {:mvn/version "1.1.3"}
+        gen.clj/gen.clj {:local/root "../.."}}}

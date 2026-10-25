@@ -2,8 +2,8 @@
   "The API's tiers and the stable surface's snapshot (DESIGN.md §9, \"The
    1.0's shape\").
 
-   Tiers. Every namespace of src/ and ext/, and gen.laws (test/, until it
-   moves to ext/laws), carries its tier in its ns form's attribute map:
+   Tiers. Every namespace of src/ and of ext/'s modules (ext/*/src, gen.laws
+   in ext/laws among them) carries its tier in its ns form's attribute map:
 
      (ns gen.trace \"…\" {:api :stable} (:require …))
 
@@ -66,12 +66,13 @@
 ;; ---------------------------------------------------------------------------
 
 (defn source-files
-  "The source files whose namespaces carry tiers: src/, every extension's
-   src/ (ext/*/src) and test/gen/laws.clj, in path order."
+  "The source files whose namespaces carry tiers: src/ and every
+   extension's src/ (ext/*/src: ext/laws' gen.laws among them), in path
+   order."
   []
   (let [clj? #(and (.isFile ^java.io.File %) (str/ends-with? (.getName ^java.io.File %) ".clj"))
         exts (->> (.listFiles (io/file "ext")) (map #(io/file % "src")) (filter #(.isDirectory ^java.io.File %)))]
-    (->> (concat (mapcat file-seq (cons (io/file "src") exts)) [(io/file "test/gen/laws.clj")])
+    (->> (mapcat file-seq (cons (io/file "src") exts))
          (filter clj?)
          (map #(.getPath ^java.io.File %))
          sort

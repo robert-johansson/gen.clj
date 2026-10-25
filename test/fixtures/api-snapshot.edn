@@ -660,6 +660,65 @@
   stratified {:arglists ([log-weights n] [log-weights n key])}
   systematic {:arglists ([log-weights n] [log-weights n key])}}
 
+ gen.laws
+ {across {:kind :var}
+  all {:kind :var}
+  assess-is-generate-with-every-choice {:arglists ([cases])}
+  cases {:arglists ([models])}
+  check {:arglists ([property] [num-tests property & {:as opts}])}
+  checks {:kind :macro, :arglists ([& forms])}
+  close? {:arglists ([x y])}
+  deflaws {:kind :macro, :arglists ([prefix models opts] [prefix models opts laws])}
+  dispatch-matches-handler {:arglists ([cases])}
+  encapsulated {:kind :var}
+  estimated {:kind :var}
+  failure-of {:arglists ([r])}
+  fixed-support {:kind :var}
+  forward-sampling {:kind :var}
+  general {:kind :var}
+  generate-weight-is-the-constrained-density {:arglists ([cases])}
+  generate-weight-is-the-projection {:arglists ([cases])}
+  generate-weights-are-finite-on-a-fixed-support {:arglists ([cases])}
+  generate-with-every-choice-is-deterministic {:arglists ([cases])}
+  generate-with-every-choice-weighs-its-score {:arglists ([cases])}
+  generate-without-constraints-has-weight-zero {:arglists ([cases])}
+  generated-traces-are-consistent {:arglists ([cases])}
+  generated-traces-keep-their-constraints {:arglists ([cases])}
+  identity-update-changes-nothing {:arglists ([cases])}
+  identity-update-keeps-omega {:arglists ([cases])}
+  identity-update-reports-no-change {:arglists ([cases])}
+  implementation {:kind :var}
+  max-vacuous {:kind :var}
+  project-of-everything-is-the-score {:arglists ([cases])}
+  project-splits-the-score {:arglists ([cases])}
+  propose-weight-is-the-assessed-density {:arglists ([cases])}
+  regenerate-across-generative-functions {:arglists ([cases])}
+  regenerate-keeps-unselected-choices {:arglists ([cases])}
+  regenerate-keeps-unselected-values {:arglists ([cases])}
+  regenerate-weight-is-the-projection-ratio {:arglists ([cases])}
+  regenerate-weight-is-the-retained-density-ratio {:arglists ([cases])}
+  regenerate-weight-with-new-arguments-is-the-projection-ratio {:arglists ([cases])}
+  regenerating-everything-has-weight-zero {:arglists ([cases])}
+  regenerating-nothing-changes-nothing {:arglists ([cases])}
+  runs-are-pure-functions-of-the-key {:arglists ([cases])}
+  score-is-assessed-on-the-same-key {:arglists ([cases])}
+  score-is-the-assessed-density {:arglists ([cases])}
+  seeds {:kind :var}
+  static {:kind :var}
+  static-matches-dynamic {:arglists ([cases])}
+  unvisitable? {:arglists ([e])}
+  update-across-generative-functions {:arglists ([cases])}
+  update-weight-is-the-projection-change {:arglists ([cases])}
+  update-weight-is-the-score-change-less-fresh {:arglists ([cases])}
+  update-weight-is-the-score-change-less-fresh-choices {:arglists ([cases])}
+  updates-and-regenerates-keep-the-assessed-score {:arglists ([cases])}
+  updates-are-reversible-with-exact-discards {:arglists ([cases])}
+  updates-restore-their-choices {:arglists ([cases])}
+  vacuous {:kind :var}
+  vacuous-on-unvisitable {:kind :macro, :arglists ([& body])}
+  vacuous? {:arglists ([r])}
+  verify {:arglists ([models] [models opts] [models opts laws])}}
+
  gen.learning
  {adam {:arglists ([{:keys [lr beta1 beta2 eps], :or {lr 0.001, beta1 0.9, beta2 0.999, eps 1.0E-8}}])}
   gradient-descent {:arglists ([{:keys [step-size-init step-size-beta]}])}

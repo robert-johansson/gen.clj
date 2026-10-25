@@ -1044,7 +1044,7 @@ changes nothing, with a weight of 0:
 ```
 
 These are instances of the GFI's laws, which gen.clj's tests check for
-every combinator (`test/gen/laws.clj`), and which Part III states. For a
+every combinator (`gen.laws`), and which Part III states. For a
 modeler, the point is the one every section of this chapter has made: the
 inference algorithms of Part II are written once, against the GFI, and run
 on any model these pieces build.

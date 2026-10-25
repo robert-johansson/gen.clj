@@ -124,7 +124,7 @@
 ;; Laws (gen.laws), and their checks on structure changes
 ;; ---------------------------------------------------------------------------
 
-(laws/deflaws dynamic models 100)
+(laws/deflaws dynamic models 100 (merge laws/all laws/implementation))
 
 ;; every address has a fixed support (the mixtures' union is the reals)
 (laws/deflaws dynamic (filterv (comp #{:linreg :shared-namespace :mixtures :spliced-distribution :p-mh :array-valued} first) models)
@@ -522,14 +522,14 @@
   (mapv (fn [[label m]] [label m [40] [[3] [45]]])
         [[:cons-onto-lazy cons-onto-lazy] [:conj-onto-lazy conj-onto-lazy] [:chunk-onto-lazy chunk-onto-lazy]
          [:repeated-lazy repeated-lazy] [:range-beside-cons range-beside-cons]])
-  100)
+  100 (merge laws/all laws/implementation))
 
 ;; The infinite kinds (genclj-54ix), which realize! takes 10,000 elements of:
 ;; iterate's (its draws in the steps f traces), cycle's past the chunk cycle
-;; realizes, and an infinite repeat's. Every law but the identity update's
-;; no-change, an implementation property: two infinite values exhaust
-;; same-value?'s budget, so an identity update reports unknown-change, which
-;; is sound (Def 2.3.2). The laws compare a return value as far as a run
+;; realizes, and an infinite repeat's. Every law of laws/all, but not
+;; laws/implementation's identity update reporting no-change: two infinite
+;; values exhaust same-value?'s budget, so an identity update reports
+;; unknown-change, which is sound (Def 2.3.2). The laws compare a return value as far as a run
 ;; realizes it (gen.laws' same-retval?). Plants: an unbounded comparison in
 ;; the retdiff (=) does not end (identity-update-changes-nothing timed out);
 ;; realize! forcing LazySeqs alone fails four of the 21 laws.
@@ -540,11 +540,9 @@
 
 (def repeated-forever (gen [n] (repeat (map #(trace [:x %] (d/normal 0 1)) (range n)))))
 
-(def ^:private infinite-laws (dissoc laws/all :identity-update-reports-no-change))
-
 (laws/deflaws lazy-returns-infinite
   [[:iterated iterated [5] [[3] [8]]] [:cycled cycled [40] [[3] [45]]] [:repeated-forever repeated-forever [5] [[3] [8]]]]
-  100 infinite-laws)
+  100 laws/all)
 
 (deftest every-lazy-kind-is-realized-during-the-run
   (let [draws (set (map #(vector :x %) (range 40)))]
@@ -826,7 +824,7 @@
   [[:nested-bounds nested-bounds [0.0] [[0.5] [-0.5]]]
    [:nested-bounds-static nested-bounds-static [0.0] [[0.5] [-0.5]]]
    [:nested-bounds-in-a-callee nested-bounds-in-a-callee [0.0] [[0.5] [-0.5]]]]
-  100)
+  100 (merge laws/all laws/implementation))
 
 ;; ---------------------------------------------------------------------------
 ;; A splice's argument equal to the last is unchanged (DESIGN.md §9, the ten

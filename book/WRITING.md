@@ -48,7 +48,7 @@ Part III, Theory (`030-part-theory.md` holds its heading). The thesis is
 | 032-inference-as-operations.md | Inference as Operations on the GFI | the thesis, ch. 3; GenMLX book 032 |
 | 033-trace-translators.md | Trace Translators and Involutive MCMC | the thesis, ch. 3; GenMLX book 033; the split/merge of Gen.jl's Reversible-Jump MCMC notebook |
 | 034-design.md | Design Rationale | DESIGN.md §3 and §9; GenMLX book 034 |
-| 035-verification.md | Verification: the Laws | test/gen/laws.clj, docs/research/law-audit.md, genjl-parity.md §3; GenMLX book 035 |
+| 035-verification.md | Verification: the Laws | ext/laws/src/gen/laws.clj, docs/research/law-audit.md, genjl-parity.md §3; GenMLX book 035 |
 
 Part IV, The System (`040-part-system.md` holds its heading). Not ported
 from the GenMLX book: its 041 (the compilation ladder, left out of gen.clj

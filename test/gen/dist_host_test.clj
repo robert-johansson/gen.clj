@@ -86,7 +86,7 @@
                 k (trace :k (geom 0.3 4))]
             (trace :y (d/normal (+ t k) 1)))))
 
-(laws/deflaws host [[:model model [] []]] 100)
+(laws/deflaws host [[:model model [] []]] 100 (merge laws/all laws/implementation))
 
 (deftest a-batched-run-falls-back-to-particles
   (let [k (rng/key 8)

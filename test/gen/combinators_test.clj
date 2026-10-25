@@ -118,7 +118,7 @@
    [:map-of-a-bounded-kernel (comb/map bounded) [[0.0 0.0]] [[[5.0 0.0]] [[0.0 -3.0]]]]
    [:unfold-of-a-bounded-step (comb/unfold (gen [_t _s lo] (splice :b bounded lo))) [2 0.0 0.0] [[2 0.0 5.0] [3 0.0 0.0]]]])
 
-(laws/deflaws combinators models 100)
+(laws/deflaws combinators models 100 (merge laws/all laws/implementation))
 (laws/deflaws combinators models 100 laws/fixed-support)
 
 ;; A walk each of whose steps the last bounds (its supports are not
@@ -127,12 +127,12 @@
 ;; value. Planted bug (2026-10-25): combinators that run on past a part
 ;; that stopped (stopped? never true) fail these laws, and Scan's and
 ;; Recurse's (gen.combinators-extras-test, the recurse suite above).
-(laws/deflaws walk [[:unfold-of-a-bounded-walk (comb/unfold bounded-walk) [3 0.0] [[3 0.5] [4 0.0] [2 0.0]]]] 100)
+(laws/deflaws walk [[:unfold-of-a-bounded-walk (comb/unfold bounded-walk) [3 0.0] [[3 0.5] [4 0.0] [2 0.0]]]] 100 (merge laws/all laws/implementation))
 
 ;; Recurse's own set: its trees change shape under update and regenerate
 (laws/deflaws recurse [[:recurse tree [0] [[1]]]
                        [:recurse-spliced (gen [d] (let [s (splice :t tree d)] (trace :y (d/normal s 1)))) [0] [[1]]]]
-  100)
+  100 (merge laws/all laws/implementation))
 
 ;; ---------------------------------------------------------------------------
 ;; Map
