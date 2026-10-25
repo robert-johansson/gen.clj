@@ -562,6 +562,22 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     impossible, so its runs give the observations at the model's own
     addresses density 0 (an observation inside a call that stops is a loud
     error there); its projection of an impossible trace is -Inf.
+
+  Item 9 as implemented (2026-10-25, the agent; genclj-ynpc): the fallback
+  is `gen.batched/fallback` of the particles (`fallback-reason` keeps its
+  ex-data), and `:fallback` in the results of b/generate, update and
+  regenerate, is/importance-sampling, importance-resampling and estimate,
+  pf's state (initialize and step), mh-particles, the -particles kernels,
+  choice-gradients of particles, VI's batched estimators and fits, and
+  batched enumerative-inference. map-particles and project return arrays,
+  so map-particles* and project* return {:result :fallback}. A raw
+  exception's reason is written (host math's ClassCastException is said
+  so). `:batched? :required` binds `gen.batched/*required*`: a run that
+  would fall back throws ex-info with the reason (`:fallback` in its
+  data), so does an operation on particles already held one at a time,
+  and a custom proposal or `:strata`, which run one at a time, are errors;
+  a particle filter keeps `:batched? :required` in its state for its
+  steps.
 - **A 1.0 for dependents** (owner, 2026-10-24): memo.clj's 1.0 should
   probably wait for gen.clj's 1.0 rather than pin a commit. Until then
   dependents pin a commit. There is no rush for memo.clj: gen.clj's 1.0

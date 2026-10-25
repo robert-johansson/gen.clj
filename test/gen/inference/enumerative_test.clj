@@ -185,10 +185,12 @@
   (doseq [[label m args obs grid batched?] enumeration-cases]
     (let [scalar (enum/enumerative-inference m args obs grid {:key (rng/key 20)})
           batched (enum/enumerative-inference m args obs grid {:key (rng/key 20) :batched? true})]
-      (is (= [:batches :log-ml-estimate :log-normalized-weights] (sort (keys batched))) (str label))
+      (is (= [:batches :log-ml-estimate :log-normalized-weights] (sort (remove #{:fallback} (keys batched)))) (str label))
       (is (same-results? scalar batched) (str label))
       (when (some? batched?)
-        (is (= batched? (every? b/batched? (:batches batched))) (str label))))))
+        (is (= batched? (every? b/batched? (:batches batched))) (str label))
+        ;; a fallback says why (DESIGN.md §9, the ten decisions' ninth)
+        (is (= batched? (nil? (:fallback batched))) (str label))))))
 
 (deftest batched-enumeration-is-exact-on-a-discrete-grid
   (let [{:keys [batches log-normalized-weights log-ml-estimate] :as result}

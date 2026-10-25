@@ -682,18 +682,20 @@
 
 (defn- particle-moves
   "Every particle's move (move, of a trace and a key, as hmc-move) at once,
-   by gen.batched/map-particles, each accepted on its own: {:particles,
+   by gen.batched/map-particles (and :fallback, why they ran one at a
+   time, if they did), each accepted on its own: {:particles,
    :accepted? and :diverged? (n booleans each), :log-alpha (an [n] array)},
    and :eps (an [n] array) when the moves report their step sizes."
   [kernel ps selection move key]
-  (let [{:keys [values accepted? log-alpha diverged? start-ok eps]} (batched/map-particles ps move key)
+  (let [{{:keys [values accepted? log-alpha diverged? start-ok eps]} :result m :fallback} (batched/map-particles* ps move key)
         accepted (mapv true? (array/->clj accepted?))]
     (check-starts! kernel start-ok selection)
     (cond-> {:particles (if (some true? accepted) (batched/set-choices ps values) ps)
              :accepted? accepted
              :log-alpha log-alpha
              :diverged? (mapv true? (array/->clj diverged?))}
-      eps (assoc :eps eps))))
+      eps (assoc :eps eps)
+      m (assoc :fallback m))))
 
 (defn hmc-particles
   "hmc on every particle of a gen.batched collection, n independent chains
@@ -730,8 +732,10 @@
   "map-optimize on every particle of a gen.batched collection, each with
    its own line search: one batched gradient, and one batched score per
    step size tried, for all of them where the model runs batched. Options
-   as map-optimize's. Returns the particles."
+   as map-optimize's. Returns the particles, with :fallback (why the line
+   searches ran one particle at a time) when they did."
   ([ps selection] (map-optimize-particles ps selection nil))
   ([ps selection opts]
-   (let [{:keys [values moved?]} (batched/map-particles ps (fn [t _] (map-move t selection opts)) nil)]
-     (if (array/any-true? moved?) (batched/set-choices ps values) ps))))
+   (let [{{:keys [values moved?]} :result m :fallback} (batched/map-particles* ps (fn [t _] (map-move t selection opts)) nil)]
+     (cond-> (if (array/any-true? moved?) (batched/set-choices ps values) ps)
+       m (assoc :fallback m)))))

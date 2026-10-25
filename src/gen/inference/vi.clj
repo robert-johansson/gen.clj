@@ -43,8 +43,9 @@
    gradient computed for all of them in one batched pass
    (gen.batched/map-particles; each draw's gradients its own, as vmap's),
    falling back to one draw at a time where q or the model cannot run
-   batched. For one key the draws differ from the unbatched ones, with the
-   same distribution."
+   batched, which the results record as :fallback (a written message);
+   :batched? :required throws with that reason instead. For one key the
+   draws differ from the unbatched ones, with the same distribution."
   (:refer-clojure :exclude [+ - * /])
   (:require [gen.array :as array :refer [+ - * /]]
             [gen.batched :as batched]
@@ -98,20 +99,25 @@
       model? (assoc :joint (grad/param-gradients mt) :own (own-draws-gradient mt constraints)))))
 
 (defn- draws
-  "n draws of q, weighed (each :lw a host double): one at a time, each from
-   its own key (key split n ways, then in two: q's and the model's), or with
-   batched?, all at once (gen.batched: q's n particles from key's first
-   split, the model's runs from its second)."
+  "{:runs n draws of q, weighed (each :lw a host double) :fallback}: one at
+   a time, each from its own key (key split n ways, then in two: q's and
+   the model's), or with batched?, all at once (gen.batched: q's n
+   particles from key's first split, the model's runs from its second),
+   :fallback why they ran one at a time, if they did; batched? :required
+   throws with that reason instead."
   [model model-args observations q q-args n model? batched? key]
   (if batched?
-    (let [[kq km] (rng/split key)
-          all (batched/map-particles (batched/simulate q q-args n kq) #(weighed model model-args observations model? %1 %2) km)]
-      (mapv (fn [i lw] (assoc (array/tree-map #(some-> % (array/take i 0)) all) :lw lw))
-            (range n) (map double (array/->clj (:lw all)))))
-    (mapv (fn [k]
-            (let [[kq km] (rng/split k)]
-              (update (weighed model model-args observations model? (gfi/simulate q q-args kq) km) :lw #(double (array/item %)))))
-          (rng/split key n))))
+    (binding [batched/*required* (= :required batched?)]
+      (let [[kq km] (rng/split key)
+            ps (batched/simulate q q-args n kq)
+            {all :result m :fallback} (batched/map-particles* ps #(weighed model model-args observations model? %1 %2) km)]
+        (cond-> {:runs (mapv (fn [i lw] (assoc (array/tree-map #(some-> % (array/take i 0)) all) :lw lw))
+                             (range n) (map double (array/->clj (:lw all))))}
+          (or (batched/fallback ps) m) (assoc :fallback (or (batched/fallback ps) m)))))
+    {:runs (mapv (fn [k]
+                   (let [[kq km] (rng/split k)]
+                     (update (weighed model model-args observations model? (gfi/simulate q q-args kq) km) :lw #(double (array/item %)))))
+                 (rng/split key n))}))
 
 (defn- model-gradients
   "Σ_i c_i ∇θ log w_i + Σ_i s_i ∇θ log f_θ(r_i) over the runs, the
@@ -187,7 +193,7 @@
     (throw (ex-info (str "A leave-one-out baseline needs at least 2 samples, given " n) {:samples n})))
   (let [q (dyn/with-params q store)
         model (model-under model model-store)
-        runs (draws model model-args observations q q-args n (some? model-store) batched? (or key (gfi/next-key)))
+        {runs :runs fallback :fallback} (draws model model-args observations q q-args n (some? model-store) batched? (or key (gfi/next-key)))
         lws (mapv :lw runs)
         total (reduce + lws)
         ;; log w less the mean log weight of the other draws
@@ -200,7 +206,8 @@
              :grads (grad/weighted-sum (map #(/ % n) signal) (map :q-grads runs))}
       ;; the model's own draws' score term takes the leave-one-out
       ;; baseline whenever there are two draws or more, whatever q's
-      model-store (assoc :model-grads (model-gradients (repeat n (/ 1.0 n)) (map #(/ % n) (or loo lws)) runs)))))
+      model-store (assoc :model-grads (model-gradients (repeat n (/ 1.0 n)) (map #(/ % n) (or loo lws)) runs))
+      fallback (assoc :fallback fallback))))
 
 (defn elbo-gradient
   "One iteration's estimates: {:objective the mean log weight (the ELBO),
@@ -208,7 +215,8 @@
    score-function estimator, or with :estimator :reparam the pathwise one
    (see the namespace doc for :baseline, :estimator and :batched?); with
    :model-store, also :model-grads, its gradient with respect to the model's
-   store."
+   store; with :batched?, :fallback, why the draws ran one at a time, if
+   they did (:batched? :required throws with it instead)."
   [model model-args observations q q-args store n {:keys [estimator] :as opts}]
   (case (or estimator :score)
     :score (score-elbo-gradient model model-args observations q q-args store n opts)
@@ -228,7 +236,7 @@
     (throw (ex-info (str "VIMCO's leave-one-out control variates need K of at least 2, given " k) {:samples k})))
   (let [q (dyn/with-params q store)
         model (model-under model model-store)
-        runs (draws model model-args observations q q-args k (some? model-store) batched? (or key (gfi/next-key)))
+        {runs :runs fallback :fallback} (draws model model-args observations q q-args k (some? model-store) batched? (or key (gfi/next-key)))
         lws (mapv :lw runs)
         bound (w/log-mean-exp lws)
         normalized (mapv #(Math/exp %) (:log-weights (w/normalize lws)))
@@ -243,28 +251,31 @@
         cs (mapv - signal normalized)]
     (cond-> {:objective bound
              :grads (grad/weighted-sum cs (map :q-grads runs))}
-      model-store (assoc :model-grads (model-gradients normalized signal runs)))))
+      model-store (assoc :model-grads (model-gradients normalized signal runs))
+      fallback (assoc :fallback fallback))))
 
 (defn- fit
   "Ascend from store (and model-store, given) along (estimate store
-   model-store key)'s :grads (and :model-grads)."
+   model-store key)'s :grads (and :model-grads); :fallback, the first
+   iteration's that fell back to one draw at a time."
   [estimate store optimizer {:keys [iters key model-store model-optimizer] :or {iters 1000}}]
   (when-not (= (some? model-store) (some? model-optimizer))
     (throw (ex-info "Training the model's parameters takes both :model-store and :model-optimizer"
                     {:model-store? (some? model-store) :model-optimizer? (some? model-optimizer)})))
   (loop [i 0 store store state (learn/init optimizer store)
          model-store model-store model-state (some->> model-store (learn/init model-optimizer))
-         history [] key (or key (gfi/next-key))]
+         history [] key (or key (gfi/next-key)) fallback nil]
     (if (< i iters)
       (let [[k k-next] (rng/split key)
-            {:keys [objective grads model-grads]} (estimate store model-store k)
+            {:keys [objective grads model-grads] m :fallback} (estimate store model-store k)
             [store state] (learn/step optimizer state store grads)
             [model-store model-state] (if model-store
                                         (learn/step model-optimizer model-state model-store model-grads)
                                         [nil nil])]
-        (recur (inc i) store state model-store model-state (conj history objective) k-next))
+        (recur (inc i) store state model-store model-state (conj history objective) k-next (or fallback m)))
       (cond-> {:store store :history history}
-        model-store (assoc :model-store model-store)))))
+        model-store (assoc :model-store model-store)
+        fallback (assoc :fallback fallback)))))
 
 (defn black-box-vi
   "Fit q's store by ascending the ELBO (Gen.jl's black_box_vi!). Options:
@@ -292,6 +303,7 @@
                                            (assoc opts :key % :model-store model-store))
                           (rng/split key estimates))]
            (cond-> {:objective (/ (reduce + (map :objective runs)) estimates)
-                    :grads (grad/mean (map :grads runs))}
+                    :grads (grad/mean (map :grads runs))
+                    :fallback (some :fallback runs)}
              model-store (assoc :model-grads (grad/mean (map :model-grads runs))))))
        store optimizer opts))

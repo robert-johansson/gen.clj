@@ -8,8 +8,12 @@
    When the code cannot treat the particles alike (it branches on a value
    that differs across them, compares or reads one on the host, or does host
    math on it), the batched run fails and the collection falls back to one
-   scalar trace per particle, which gives the scalar semantics; fallback-reason
-   says why. Three layers raise the fallback:
+   scalar trace per particle, which gives the scalar semantics. The result
+   records why, as a written message: (fallback ps), and :fallback in the
+   results of generate, update and regenerate and of the inference that
+   runs them (DESIGN.md §9, the ten decisions' ninth). Under *required*
+   (what :batched? :required binds) the failure is an error with that
+   reason instead. Nothing prints. Three layers raise the fallback:
    - Inside gen bodies the gen macro guards every if and case, and
      clojure.core's truthiness tests and lookups (not, filter, every?, get, …;
      gen.dynamic.core).
@@ -109,31 +113,89 @@
    a fallback: those updates' results may be wrong too."
   2)
 
-(defn fallback-reason
-  "Why ps fell back to per-particle traces: {:message :data} of the failure
-   of the batched run, or nil."
+(def ^:dynamic *required*
+  "When true, a batched run that cannot run batched throws ex-info with the
+   reason it would have fallen back for (its message, and :fallback in its
+   data) in place of falling back to one particle at a time: what
+   :batched? :required binds (gen.inference.importance,
+   gen.inference.particle-filter, …; DESIGN.md §9, the ten decisions'
+   ninth). false by default: the run falls back, and records why."
+  false)
+
+(defn fallback
+  "Why ps fell back to per-particle traces, a written message, or nil while
+   it runs batched. The results of generate, update and regenerate, and of
+   the inference that runs them batched, hold it as :fallback too."
   [ps]
-  (:fallback-reason ps))
+  (:fallback ps))
+
+(defn fallback-reason
+  "Why ps fell back to per-particle traces: {:message (fallback ps) :data
+   (the failure's ex-data)}, or nil."
+  [ps]
+  (when-let [m (:fallback ps)] {:message m :data (::fallback-data ps)}))
+
+(defn written
+  "The reason a batched run failed, e, as a written message: an ex-info's
+   own (gen.clj's errors are written ones: a branch on a value that differs
+   across particles, a failed spot check, a parameter's check); host math
+   on a batched value, which Java's cast rejects, said so; any other
+   exception named with its class."
+  ^String [^Throwable e]
+  (cond (instance? clojure.lang.ExceptionInfo e) (ex-message e)
+        (instance? ClassCastException e)
+        (str "Host code took a value that differs across the particles as one number (host math, such as"
+             " Math/exp, or a host collection's lookup): with gen.array's operators it runs batched")
+        :else (str "The batched run failed with a " (.getName (class e))
+                   (when-let [m (.getMessage e)] (str ": " m)))))
 
 (defn- fallen-back
   "The fallback result r (particles, or a map holding them) marked with the
-   failure e of the batched run."
+   failure e of the batched run: its written message at :fallback (on the
+   particles, and on a map holding them), its ex-data kept for
+   fallback-reason."
   [r ^Exception e]
-  (let [reason {:message (.getMessage e) :data (ex-data e)}]
+  (let [m (written e)
+        mark #(assoc % :fallback m ::fallback-data (ex-data e))]
     (if (particles? r)
-      (assoc r :fallback-reason reason)
-      (clojure.core/update r :particles assoc :fallback-reason reason))))
+      (mark r)
+      (-> r (clojure.core/update :particles mark) (assoc :fallback m)))))
+
+(defn refused
+  "The error of a batched run that failed (e) where *required* refuses the
+   fallback to one particle at a time, naming why."
+  [^Exception e]
+  (let [m (written e)]
+    (ex-info (str "The run cannot be batched (:batched? :required): " m) {:fallback m ::required true} e)))
+
+(defn- one-at-a-time
+  "ps, particles held one at a time (they fell back earlier, or were
+   made so), for an operation run on each: refused under *required*."
+  [ps]
+  (when *required*
+    (throw (ex-info (str "The run cannot be batched (:batched? :required): the particles run one at a time"
+                         (when-let [m (:fallback ps)] (str ", since " m)))
+                    {:fallback (:fallback ps) ::required true})))
+  ps)
+
+(defn- with-fallback
+  "r, a result map holding particles, with their :fallback, if any."
+  [r]
+  (if-let [m (:fallback (:particles r))] (assoc r :fallback m) r))
 
 (defmacro ^:private batched-or
   "batched, or fallback if the batched run fails. The usual cause is code
    that cannot treat the particles alike (the batched-branch error, host
    math or a host collection lookup on a batched value, a failed spot
    check); whatever the cause, the per-particle run gives the scalar
-   semantics, and a genuine error surfaces there."
+   semantics, and a genuine error surfaces there. The result records why
+   (fallen-back); under *required* the failure is an error instead."
   [batched fallback]
   `(try ~batched
         (catch Exception e#
-          (if (::diverged (ex-data e#)) (throw e#) (fallen-back ~fallback e#)))))
+          (cond (::diverged (ex-data e#)) (throw e#)
+                *required* (throw (refused e#))
+                :else (fallen-back ~fallback e#)))))
 
 (defn- handed-back
   "The batched values a batched run's result hands back, anywhere in it (its
@@ -574,7 +636,7 @@
            :weights (plain w n)
            :discards (if (cm/empty? d) (vec (repeat n cm/EMPTY)) (unstacked d n))})
         (fallback (unbatched (check ps))))
-       (fallback ps)))))
+       (with-fallback (fallback (one-at-a-time ps)))))))
 
 (defn regenerate
   "Every particle with the selection regenerated, at args."
@@ -592,7 +654,7 @@
              (run gen-fn :regenerate args n {:prev (:trace ps) :argdiffs argdiffs :selection selection :key key})]
          {:particles (spot-check-update! ps args t) :weights (plain w n)})
        (fallback (unbatched (check ps))))
-      (fallback ps))))
+      (with-fallback (fallback (one-at-a-time ps))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Particles as a population
@@ -709,19 +771,29 @@
     (plain (:score (:trace (check ps))) (:n ps))
     (stack-weights (map :score (:traces ps)) (:n ps))))
 
-(defn project
-  "The particles' log densities of the selected choices (gfi/project), an
-   [n] array: the batched trace's projection under the batch tracer, or
-   each particle's when that fails (a projection that runs code which
-   cannot treat the particles alike)."
+(defn project*
+  "project's {:result (the [n] array) :fallback (why it ran each
+   particle's projection, a written message, or nil)}."
   [ps selection]
   (gfi/check-selection :project selection)
   (let [n (:n ps)
         each #(stack-weights (map (fn [t] (gfi/project t selection)) (traces ps)) n)]
     (if (batched? ps)
-      (try (plain (batch/batched [n] (gfi/project (:trace (check ps)) selection)) n)
-           (catch Exception _ (each)))
-      (each))))
+      (try {:result (plain (batch/batched [n] (gfi/project (:trace (check ps)) selection)) n)}
+           (catch Exception e
+             (when *required* (throw (refused e)))
+             {:result (each) :fallback (written e)}))
+      (do (one-at-a-time ps)
+          {:result (each) :fallback (:fallback ps)}))))
+
+(defn project
+  "The particles' log densities of the selected choices (gfi/project), an
+   [n] array: the batched trace's projection under the batch tracer, or
+   each particle's when that fails (a projection that runs code which
+   cannot treat the particles alike), which *required* refuses. An array
+   has no place for why: project* returns it."
+  [ps selection]
+  (:result (project* ps selection)))
 
 ;; ---------------------------------------------------------------------------
 ;; Functions of every particle (gradient kernels: gen.inference.mcmc)
@@ -744,6 +816,27 @@
           (apply = rs) r
           :else (mismatched rs))))
 
+(defn map-particles*
+  "map-particles' {:result (f's results, stacked) :fallback (why f ran on
+   each trace, a written message, or nil)}, for the kernels that run f
+   (gen.inference.mcmc's -particles kernels, gen.gradients), which record
+   it in their results."
+  [ps f key & xs]
+  (let [n (:n ps)
+        rows (fn [i] (map (fn [x] (array/tree-map #(array/take % i 0) x)) xs))
+        each #(stacked (mapv (fn [i t k] (apply f t k (rows i))) (range n) (traces ps) (if key (rng/split key n) (repeat nil))))]
+    (if (batched? ps)
+      ;; checked first, outside the batched run: its re-runs are scalar
+      (let [t (:trace (check ps))]
+        (try {:result (array/tree-map #(if (array/array? %) (plain % n) %)
+                                      (guarded n #(apply f t key (map (fn [x] (array/tree-map (fn [v] (batch/wrap v [n])) x)) xs))))}
+             (catch Exception e
+               (cond (::diverged (ex-data e)) (throw e)
+                     *required* (throw (refused e))
+                     :else {:result (each) :fallback (written e)}))))
+      (do (one-at-a-time ps)
+          {:result (each) :fallback (:fallback ps)}))))
+
 (defn map-particles
   "(f trace key x …) of every particle at once, as vmap's: each x a tree of
    arrays with the leading particle axis, of which a particle is given its
@@ -754,19 +847,11 @@
    an unread batched comparison), f runs on each trace, with its own key
    (key split n ways; nil stays nil) and rows. f returns a tree of arrays:
    maps, vectors and choice maps of them. Every array leaf comes back with
-   the leading particle axis, a shared value broadcast to every particle."
+   the leading particle axis, a shared value broadcast to every particle.
+   Running f on each trace is a fallback, which *required* refuses; f's
+   results have no place for why: map-particles* returns it."
   [ps f key & xs]
-  (let [n (:n ps)
-        rows (fn [i] (map (fn [x] (array/tree-map #(array/take % i 0) x)) xs))
-        each #(stacked (mapv (fn [i t k] (apply f t k (rows i))) (range n) (traces ps) (if key (rng/split key n) (repeat nil))))]
-    (if (batched? ps)
-      ;; checked first, outside the batched run: its re-runs are scalar
-      (let [t (:trace (check ps))]
-        (try (array/tree-map #(if (array/array? %) (plain % n) %)
-                             (guarded n #(apply f t key (map (fn [x] (array/tree-map (fn [v] (batch/wrap v [n])) x)) xs))))
-             (catch Exception e
-               (if (::diverged (ex-data e)) (throw e) (each)))))
-      (each))))
+  (:result (apply map-particles* ps f key xs)))
 
 (defn set-choices
   "The particles with their choices at the addresses of choices set, each

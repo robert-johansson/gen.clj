@@ -161,15 +161,20 @@
 (defn- in-batches
   "The points generated in batched runs of at most chunk-size particles,
    particle i constrained by point i's choices: {:batches :weights}, one
-   particle collection per run."
-  [model args observations points chunk-size key]
+   particle collection per run, and :fallback, why the first run that fell
+   back to one point at a time did (required?: :batched? :required, which
+   throws with it instead)."
+  [model args observations points chunk-size key required?]
   (let [chunks (mapv vec (partition-all chunk-size points))
-        runs (mapv (fn [chunk k]
-                     (let [{ps :particles ws :weights}
-                           (batched/generate model args observations (count chunk) k {:per-particle (mapv first chunk)})]
-                       [ps (mapv #(+ (double %1) (double %2)) (array/->clj ws) (map second chunk))]))
-                   chunks (rng/split key (count chunks)))]
-    {:batches (mapv first runs) :weights (into [] (mapcat second) runs)}))
+        runs (binding [batched/*required* required?]
+               (mapv (fn [chunk k]
+                       (let [{ps :particles ws :weights}
+                             (batched/generate model args observations (count chunk) k {:per-particle (mapv first chunk)})]
+                         [ps (mapv #(+ (double %1) (double %2)) (array/->clj ws) (map second chunk))]))
+                     chunks (rng/split key (count chunks))))
+        m (some (comp batched/fallback first) runs)]
+    (cond-> {:batches (mapv first runs) :weights (into [] (mapcat second) runs)}
+      m (assoc :fallback m))))
 
 (defn enumerative-inference
   "Gen.jl's enumerative_inference: model generated once per point of grid
@@ -186,8 +191,10 @@
      scalar traces either way. The weights are the scalar loop's, point by
      point, when the observations and the grid give every choice (a model
      that cannot run batched, one that branches on a grid value say, falls
-     back to one point at a time); choices the grid leaves out are drawn
-     from the same distribution, but not as the scalar loop draws them;
+     back to one point at a time, and the result says why, :fallback;
+     with :batched? :required that throws instead); choices the grid
+     leaves out are drawn from the same distribution, but not as the
+     scalar loop draws them;
    - :chunk-size: with :batched?, at most this many points per batched run
      (and one collection per run), so that a run's working memory is that
      many particles' (the result holds every point's trace, as the scalar
@@ -202,7 +209,7 @@
      (when-not (or (nil? chunk-size) (pos-int? chunk-size))
        (throw (ex-info "enumerative-inference: :chunk-size is a positive integer" {:chunk-size chunk-size})))
      (let [run (if batched?
-                 (in-batches model args observations points (or chunk-size (count points)) key)
+                 (in-batches model args observations points (or chunk-size (count points)) key (= :required batched?))
                  (one-at-a-time model args observations points key))
            {:keys [log-total log-weights]} (w/normalize (:weights run))]
        (-> run

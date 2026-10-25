@@ -122,15 +122,20 @@
 (defn mh-particles
   "One selection-MH move for each of n particles (n independent chains,
    gen.batched), accepted or rejected per particle. Returns {:particles
-   :accepted? (n booleans) :log-alpha (an [n] array)}."
+   :accepted? (n booleans) :log-alpha (an [n] array)}, and :fallback, why
+   the move ran one particle at a time, when it did (gen.batched)."
   ([ps selection] (mh-particles ps selection (gfi/next-key)))
   ([ps selection key]
    (let [[k-move k-accept] (rng/split key)
-         {proposed :particles la :weights}
+         {proposed :particles la :weights m :fallback}
          (batched/regenerate ps (:args ps) (vec (repeat (count (:args ps)) diff/no-change)) selection k-move)
          las (mapv double (array/->clj la))
          _ (when (some #(Double/isNaN %) las)
              (throw (ex-info "An MH acceptance ratio is NaN" {:log-alpha las})))
          us (array/->clj (rng/uniform k-accept [(batched/size ps)]))
-         accepted (mapv (fn [l u] (or (>= l 0.0) (< (Math/log u) l))) las us)]
-     {:particles (batched/select accepted proposed ps) :accepted? accepted :log-alpha la})))
+         accepted (mapv (fn [l u] (or (>= l 0.0) (< (Math/log u) l))) las us)
+         selected (batched/select accepted proposed ps)
+         m (or m (batched/fallback selected))]
+     (cond-> {:particles (cond-> selected (and m (not (batched/fallback selected))) (assoc :fallback m))
+              :accepted? accepted :log-alpha la}
+       m (assoc :fallback m)))))
