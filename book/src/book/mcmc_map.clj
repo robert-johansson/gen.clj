@@ -413,14 +413,14 @@
     (k/mh (sel/select :noise))))
 
 (def drift-chains
-  (chains (gaussian-drift-update 20) xs ys 100 200 (rng/key 13)))
+  (chains (gaussian-drift-update 20) xs ys 150 200 (rng/key 13)))
 
 ((juxt #(mean-of :score %) #(mean-of :noise %) #(mean-of misclassified %))
  (finals drift-chains))
-;=> [-45.3 0.47 1.02] ; float64
+;=> [-45.2 0.47 0.96] ; float64
 
 (mapv #(changes drift-chains %) [:slope :noise :outliers])
-;=> [0.16 0.21 0.63] ; float64
+;=> [0.17 0.22 0.63] ; float64
 
 ;; book: settled
 (defn settled
@@ -594,12 +594,12 @@
           (let [[k-guess k-run] (rng/split key)]
             (ransac-inference xs ys (ransac-jump xs ys)
                               (ransac-start xs ys k-guess) k-run)))
-        (rng/split (rng/key 14) 40)))
+        (rng/split (rng/key 14) 60)))
 
 ;; book: ransac-results
 ((juxt #(mean-of :score %) #(mean-of :noise %) #(mean-of misclassified %))
  (finals ransac-runs))
-;=> [-45.8 0.51 1.05] ; float64
+;=> [-46.0 0.503 1.12] ; float64
 
 (> (gap (map :score (finals ransac-runs)) (settled resimulation-chains)) 5)
 ;=> true
@@ -700,17 +700,20 @@
 
 (def map-runs
   (mapv #(record (map-inference (:trace %1) %2))
-        ransac-runs (rng/split (rng/key 15) 40)))
+        ransac-runs (rng/split (rng/key 15) 60)))
 
 [(every? true? (map > (map :score map-runs) (map :score (finals ransac-runs))))
  (> (gap (map :score map-runs) (settled drift-chains)) 5)]
 ;=> [true true]
 
 (mean-of :score map-runs)
-;=> -40.75 ; float64
+;=> -40.73 ; float64
 
 (count (filter #(< (abs (- (:score %) -40.41)) 0.01) map-runs))
-;=> 38 ; float64
+;=> 54 ; float64
+
+(apply min (map :score map-runs))
+;=> -52.85 ; float64
 
 ;; book: map-figure
 ;; figure: figures/022-map.svg
@@ -735,7 +738,7 @@
     (boolean (and (some true? calls) (some false? calls)))))
 
 (count (filter #(both-ways? % 7) drift-chains))
-;=> 98 ; float64
+;=> 148 ; float64
 
 (some #(both-ways? % 7) drift-chains)
 ;=> true
@@ -762,7 +765,7 @@
         (rng/split (rng/key 51) 10)))
 
 (mapv #(mean-of :score (finals %)) [noise-ransac-runs ransac-runs])
-;=> [-50.3 -45.8] ; float64
+;=> [-50.3 -46.0] ; float64
 
 (< (gap (map :score (finals noise-ransac-runs))
         (map :score (finals ransac-runs)))

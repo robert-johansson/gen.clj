@@ -696,7 +696,8 @@ scored by `assess`, on the values the forward move overwrote.
 
 The drift sweep moves the line by drift, the classifications and the
 outlier probability by resimulation as before, and the noise in a block of
-its own:
+its own. We run 150 chains this time, since the comparison with MAP at the
+chapter's end needs more than a hundred:
 
 <!-- code: drift-update -->
 ```clojure
@@ -709,17 +710,17 @@ its own:
     (k/mh (sel/select :noise))))
 
 (def drift-chains
-  (chains (gaussian-drift-update 20) xs ys 100 200 (rng/key 13)))
+  (chains (gaussian-drift-update 20) xs ys 150 200 (rng/key 13)))
 
 ((juxt #(mean-of :score %) #(mean-of :noise %) #(mean-of misclassified %))
  (finals drift-chains))
-;=> [-45.3 0.47 1.02] ; float64
+;=> [-45.2 0.47 0.96] ; float64
 
 (mapv #(changes drift-chains %) [:slope :noise :outliers])
-;=> [0.16 0.21 0.63] ; float64
+;=> [0.17 0.22 0.63] ; float64
 ```
 
-The line now moves in 16% of the sweeps, and the noise in 21%. The noise
+The line now moves in 17% of the sweeps, and the noise in 22%. The noise
 comes down to 0.47, close to the generator's 0.5, and about one point in
 twenty is misclassified. A single trace's score varies from sweep to
 sweep, so we compare chains by the mean score of each chain's last 100
@@ -977,7 +978,7 @@ makes five updates:
           (let [[k-guess k-run] (rng/split key)]
             (ransac-inference xs ys (ransac-jump xs ys)
                               (ransac-start xs ys k-guess) k-run)))
-        (rng/split (rng/key 14) 40)))
+        (rng/split (rng/key 14) 60)))
 ```
 
 After five updates, a hundred sweeps, the runs score above where the
@@ -988,15 +989,15 @@ generator's, and about one point is misclassified in a typical run:
 ```clojure
 ((juxt #(mean-of :score %) #(mean-of :noise %) #(mean-of misclassified %))
  (finals ransac-runs))
-;=> [-45.8 0.51 1.05] ; float64
+;=> [-46.0 0.503 1.12] ; float64
 
 (> (gap (map :score (finals ransac-runs)) (settled resimulation-chains)) 5)
 ;=> true
 ```
 
 The figure shows the three kernels sweep by sweep: the mean score of the
-hundred resimulation chains (orange), of the hundred drift chains (blue),
-and of the forty RANSAC runs after each update (green dots, every twenty
+hundred resimulation chains (orange), of the 150 drift chains (blue), and of
+the 60 RANSAC runs after each update (green dots, every twenty
 sweeps).
 
 <!-- code: scores-figure -->
@@ -1139,8 +1140,12 @@ trace, a full step lands there:
 
 Twenty rounds of MAP from each RANSAC run's last trace raise the score of
 every run, and the optimized traces score above the drift chains' settled
-traces. MAP climbs deterministically: 38 of the 40 runs climb to the
-same peak, a score of −40.41, and two stop on lower ones.
+traces. MAP climbs deterministically: 54 of the 60 runs climb to the
+same peak, a score of −40.41, and six stop on lower ones, the lowest
+twelve points below it. Rare runs that far below the rest, here and among
+the drift chains, are why this comparison takes 60 runs and 150 chains: a
+smaller set can miss them, understate the standard error, and clear five
+standard errors by luck.
 
 <!-- code: map-inference -->
 ```clojure
@@ -1151,17 +1156,20 @@ same peak, a score of −40.41, and two stop on lower ones.
 
 (def map-runs
   (mapv #(record (map-inference (:trace %1) %2))
-        ransac-runs (rng/split (rng/key 15) 40)))
+        ransac-runs (rng/split (rng/key 15) 60)))
 
 [(every? true? (map > (map :score map-runs) (map :score (finals ransac-runs))))
  (> (gap (map :score map-runs) (settled drift-chains)) 5)]
 ;=> [true true]
 
 (mean-of :score map-runs)
-;=> -40.75 ; float64
+;=> -40.73 ; float64
 
 (count (filter #(< (abs (- (:score %) -40.41)) 0.01) map-runs))
-;=> 38 ; float64
+;=> 54 ; float64
+
+(apply min (map :score map-runs))
+;=> -52.85 ; float64
 ```
 
 <!-- code: map-figure -->
@@ -1203,7 +1211,7 @@ drift chains call it an outlier in some sweeps and an inlier in others:
     (boolean (and (some true? calls) (some false? calls)))))
 
 (count (filter #(both-ways? % 7) drift-chains))
-;=> 98 ; float64
+;=> 148 ; float64
 
 (some #(both-ways? % 7) drift-chains)
 ;=> true
@@ -1270,7 +1278,7 @@ higher than plain RANSAC's, and lower, if anything:
         (rng/split (rng/key 51) 10)))
 
 (mapv #(mean-of :score (finals %)) [noise-ransac-runs ransac-runs])
-;=> [-50.3 -45.8] ; float64
+;=> [-50.3 -46.0] ; float64
 
 (< (gap (map :score (finals noise-ransac-runs))
         (map :score (finals ransac-runs)))
