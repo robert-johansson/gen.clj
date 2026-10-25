@@ -237,6 +237,131 @@
     (is (< (Math/abs (- m 0.65)) (* 5 (Math/sqrt (/ 0.5 n)))))
     (is (< (Math/abs (- v 0.5)) 0.06))))
 
+(def leaning
+  "An asymmetric proposal for conjugate's x, x' ~ N(x/2 + 0.4, 0.8): its
+   density back from x' differs from the density there."
+  (gen [tr] (trace :x (d/normal (+ (* 0.5 (tr :x)) 0.4) 0.8))))
+
+(defn- mean-var [xs]
+  (let [n (count xs) m (/ (reduce + xs) n)]
+    [m (/ (reduce + (map #(* (- % m) (- % m)) xs)) (dec n))]))
+
+(defn- agree?
+  "Do the means of xs and ys, two independent samples, agree within five
+   standard errors of their difference?"
+  [xs ys]
+  (let [[mx vx] (mean-var xs) [my vy] (mean-var ys)]
+    (< (Math/abs (- mx my)) (+ 1e-12 (* 5 (Math/sqrt (+ (/ vx (count xs)) (/ vy (count ys)))))))))
+
+(deftest parallel-mh-chains-with-a-proposal
+  ;; MH with a proposal on every particle at once (genclj-xgz4): the
+  ;; proposal, the update and the backward assess run batched, the scalar
+  ;; move's code under the batch tracer (gen.batched/move). Planted bugs
+  ;; (2026-10-25): the backward weight dropped from the ratio fails the
+  ;; posterior's moments and each particle's ratio; one uniform shared by
+  ;; every particle's accept step fails the moments; accepting only ratios
+  ;; of at least 1 fails them and the acceptance against the scalar moves';
+  ;; gen.batched/move always falling back, or the backward check reading
+  ;; the weight on the host (which falls back), fails b/batched? here and in
+  ;; the next test.
+  (let [n 4000
+        start (b/take (:particles (b/generate conjugate [] (cm/choicemap :y y) 1 (rng/key 0))) (repeat n 0))]
+    (testing "the chains reach the posterior, N(0.65, 0.5), and stay batched"
+      (let [chains (reduce (fn [ps k] (:particles (mh/mh-particles ps leaning [] k))) start (rng/split (rng/key 13) 60))
+            [m v] (mean-var (array/->clj (b/choice chains :x)))]
+        (is (b/batched? chains))
+        (is (< (Math/abs (- m 0.65)) (* 5 (Math/sqrt (/ 0.5 n)))))
+        ;; the sample variance's standard error, sqrt(2 v^2/(n - 1))
+        (is (< (Math/abs (- v 0.5)) (* 5 (Math/sqrt (/ (* 2 0.25) (dec n))))))))
+    (testing "one move from the same start is distributed as the scalar move"
+      (let [{moved :particles accepted :accepted la :log-alphas m :fallback} (mh/mh-particles start leaning [] (rng/key 21))
+            scalar (mapv #(mh/mh %1 leaning [] %2) (b/traces start) (rng/split (rng/key 22) n))]
+        (is (nil? m))
+        (is (b/batched? moved))
+        (is (= [n] (array/shape la)))
+        (is (agree? (array/->clj (b/choice moved :x)) (mapv #(ts/number ((:trace %) :x)) scalar)))
+        (is (agree? (mapv #(if % 1.0 0.0) accepted) (mapv #(if (:accepted? %) 1.0 0.0) scalar)))
+        (is (agree? (array/->clj la) (mapv :log-alpha scalar)) "the log acceptance ratios")))
+    (testing "the ratio is each particle's: score' - score + log q(x | x') - log q(x' | x)"
+      (let [ps (:particles (b/generate conjugate [] (cm/choicemap :y y) 50 (rng/key 23)))
+            {moved :particles accepted :accepted la :log-alphas} (mh/mh-particles ps leaning [] (rng/key 24))
+            q (fn [from to] (ts/number (dc/log-prob (d/normal (+ (* 0.5 from) 0.4) 0.8) to)))]
+        (doseq [[t t' a l] (map vector (b/traces ps) (b/traces moved) accepted (array/->clj la))
+                :when a]
+          (let [x (ts/number (t :x)) x' (ts/number (t' :x))]
+            (is (ts/close? l (+ (- (ts/number (:score t')) (ts/number (:score t))) (- (q x' x) (q x x')))
+                           {:atol (ts/tol 1e-9)}))))))))
+
+(deftest batched-mh-with-a-proposal-keeps-the-scalar-rules
+  (let [ps (:particles (b/generate conjugate [] (cm/choicemap :y y) 8 (rng/key 30)))]
+    (testing "a proposal that cannot reverse its move is the same loud error"
+      (let [up (gen [tr] (trace :x (d/uniform (tr :x) (+ (tr :x) 1.0))))]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"cannot reverse its own move"
+                              (mh/mh-particles ps up [] (rng/key 31))))))
+    (testing "a move outside the support is rejected, its ratio -Inf, and the particles stay batched"
+      (let [m (gen [] (let [a (trace :a (d/uniform 0 1))] (trace :c (d/normal a 1.0))))
+            ps (:particles (b/generate m [] (cm/choicemap :c 0.0) 16 (rng/key 32)))
+            wide (gen [tr] (trace :a (d/normal (tr :a) 1.0)))
+            {out :particles acc :accepted la :log-alphas} (mh/mh-particles ps wide [] (rng/key 33))
+            la (array/->clj la)]
+        (is (b/batched? out))
+        (is (some #(= ##-Inf %) la) "some a outside [0, 1]")
+        (is (every? (fn [[l a?]] (or (not= ##-Inf l) (not a?))) (map vector la acc)))
+        (is (every? #(< 0.0 (ts/number (% :a)) 1.0) (b/traces out)))))
+    (testing "a proposal that branches on the particles falls back, and says why"
+      (let [branching (gen [tr] (if (array/> (tr :x) 0.0)
+                                  (trace :x (d/normal (tr :x) 0.5))
+                                  (trace :x (d/normal (tr :x) 0.6))))
+            r (mh/mh-particles ps branching [] (rng/key 34))]
+        (is (re-find #"Cannot branch" (:fallback r)))
+        (is (not (b/batched? (:particles r))))
+        (is (= 8 (count (:accepted r))))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #":batched\? :required"
+                              (binding [b/*required* true] (mh/mh-particles ps branching [] (rng/key 34)))))))
+    (testing "the arities are mh's: a selection or a proposal, the key optional"
+      (is (b/batched? (:particles (mh/mh-particles ps (sel/select :x)))))
+      (is (b/batched? (:particles (mh/mh-particles ps leaning []))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"selection.*or a proposal"
+                            (mh/mh-particles ps :x [] (rng/key 35)))))))
+
+(deftest move-runs-a-move-batched
+  (let [ps (:particles (b/generate conjugate [] (cm/choicemap :y y) 6 (rng/key 40)))
+        shift (fn [t _] {:trace (:trace (gfi/update t (cm/choicemap :x (+ (t :x) 1.0)) (rng/key 0)))
+                         :before (t :x)})]
+    (testing "f's trace becomes the particles', the rest of its result stacked"
+      (let [{out :particles {before :before} :result m :fallback} (b/move ps shift nil)]
+        (is (nil? m))
+        (is (b/batched? out))
+        (is (ts/close? (b/choice out :x) (+ (b/choice ps :x) 1.0)))
+        (is (ts/close? before (b/choice ps :x)))
+        (is (ts/close? (b/scores out) (array/array (mapv #(ts/number (:score %)) (b/traces out)))))))
+    (testing "per particle when f cannot run batched, each with its own key, and said so"
+      (let [host (fn [t k] {:trace (:trace (gfi/update t (cm/choicemap :x (+ (array/item (t :x)) 1.0)) k))})
+            {out :particles m :fallback} (b/move ps host (rng/key 41))]
+        (is (string? m))
+        (is (not (b/batched? out)))
+        (is (ts/close? (b/choice out :x) (+ (b/choice ps :x) 1.0)))))
+    (testing "f must return a trace"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"move: f returns \{:trace" (b/move ps (fn [t _] t) nil))))))
+
+(deftest an-unchecked-collection-is-checked-once-however-often-it-is-read
+  ;; A collection is a value: the spot check of its trace, which a read
+  ;; makes when its last operations went unchecked (b/check), is made once
+  ;; (genclj-xgz4: a filter's statistics read the same state many times).
+  ;; Planted bug (2026-10-25): check ignoring the memo re-runs the spot
+  ;; check's 8 particles on the second read too.
+  (let [ps (:particles (b/generate conjugate [] (cm/choicemap :y y) 40 (rng/key 50)))
+        selected (b/select (vec (repeat 40 true)) ps ps)
+        runs (atom 0)
+        generate gfi/generate
+        reads (fn [f] (reset! runs 0) (f) @runs)]
+    (with-redefs [gfi/generate (fn [& args] (swap! runs inc) (apply generate args))]
+      (is (= 8 (reads #(b/choice selected :x))) "the first read checks 8 particles")
+      (is (= 0 (reads #(b/choice selected :x))) "a second read checks none")
+      (is (= 0 (reads #(b/scores selected))))
+      (is (= 40 (reads #(binding [b/*spot-checks* :all] (b/choice selected :x)))) "another *spot-checks* checks again")
+      (is (= 8 (reads #(b/choice (b/take selected (range 40)) :x))) "a new trace, by take, is checked again"))))
+
 ;; ---------------------------------------------------------------------------
 ;; Per-particle constraints
 ;; ---------------------------------------------------------------------------

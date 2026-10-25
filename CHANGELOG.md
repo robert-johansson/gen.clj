@@ -33,6 +33,39 @@ newest first in each section.
 
 ### Changed
 
+- **Breaking. Draws. A batched particle filter stays batched through
+  rejuvenation** (DESIGN §9, "Kernels' batched form"; COMMIT,
+  genclj-xgz4).
+  - `pf/rejuvenate` of a batched state moves every particle at once when
+    its kernel has a batched form (`kernel/batched-form`: `kernel/mh` of a
+    selection or of a proposal, `hmc`, `mala`, `map-optimize`, and
+    `chain`, `repeat`, `cycle` and `kern` of them), and the state keeps
+    `:particles`. It returned a state of `:traces`: read the particles
+    with `pf/traces` or `pf/choice`. The draws for a key change, from the
+    same distribution. With another kernel (`nuts`, `elliptical-slice`,
+    `involutive-mh`, `mix`, `checked`, `kern ^:trace`, a function) it
+    moves one particle at a time as before, and the state records
+    `:fallback`, saying so; a `:batched? :required` filter throws instead.
+  - `pf/mean`, `pf/variance` and `pf/proportions` of a batched state run
+    their function once, on the batched trace (`gen.batched/map-particles`),
+    where they rebuilt every scalar trace on each call. Forty batched
+    filters of chapter 053's model (100 particles, 10 steps, MH
+    rejuvenation, ten means each) took 3.3 s, 2.9 s of it rebuilding, and
+    take 0.23 s now, against 0.5 s for its scalar filters.
+    A function that cannot run batched (it reads a value on the host)
+    runs on each trace, and a `:batched? :required` filter throws. Their
+    sums may differ from before in the last bits.
+  - `kernel/->Kernel` takes four fields, `[f reverse-f particles
+    reverse-particles]`, the last two the batched forms (nil for none):
+    `kernel/kernel` and `kernel/symmetric` build kernels as before.
+  - `gfi/assess-backward`'s check reads every particle of a batched move
+    as a validation (`array/any-true?`), where its host read made the
+    move fall back to one particle at a time. A particle that fails it
+    fails the batched run, and its scalar run raises the same error.
+  - An unchecked gen.batched collection (after `select`, `set-choices` or
+    an unchecked update) is spot-checked once, however often it is read:
+    every read re-ran the spot check's particles, 0.75 ms of each
+    `pf/mean` of chapter 053's filters. The errors are the same.
 - **Breaking. Every kernel returns `{:trace :accepted? …}`** (DESIGN §9,
   "The 1.0's shape", kernels' shape; a509ad5, genclj-4hu0).
   - `mcmc/map-optimize` and `mcmc/elliptical-slice` return `{:trace
@@ -195,6 +228,25 @@ newest first in each section.
 
 ### Added
 
+- **Batched MH with a proposal, and a batched filter's accessor**
+  (COMMIT, genclj-xgz4).
+  - `(mh/mh-particles ps proposal proposal-args key)`, as `mh/mh`'s
+    arities (a selection or a proposal, the key optional): the proposal,
+    the update and the backward proposal's assess run batched, as the
+    model does, the scalar move's own code under the batch tracer.
+    Chapter 025's filter of 1000 particles over 50 bearings, with a
+    random-walk rejuvenation at each step, takes 0.6 s (0.2 s without
+    it), where it took 6.6 s one particle at a time.
+  - `gen.batched/move`: `(move ps f key & xs)`, every particle's trace
+    moved by `(f trace key x …)` → `{:trace trace' …}` at once, as
+    `map-particles` runs a function: `{:particles :result}`, and
+    `:fallback` when f ran on each trace.
+  - `kernel/batched-form`: a kernel's batched form, `(fn [ps key])` →
+    `{:particles …}`, or nil. `(kernel/kernel f reverse-f {:particles p
+    :reverse-particles rp})` and `(kernel/symmetric f p)` declare one.
+  - `pf/choice`: `(choice state addr)`, every particle's choice at addr,
+    an `[n …]` array, read from a batched state's collection without
+    rebuilding its traces (as `gen.batched/choice`).
 - **`array/vmap`: a function batched over a leading axis,** as JAX's
   vmap (DESIGN §9, "The 1.0's shape"; fbf0d21, genclj-t3ur).
   `((array/vmap f {:in-axes [0 nil]}) xs shared)` runs f once for the
@@ -246,7 +298,7 @@ newest first in each section.
     and memory, gen.random.threefry and gen.backend.mlx.exact (internal).
   - `test/fixtures/api-snapshot.edn` holds the stable surface: every
     public var but `^:no-doc` ones, with its arglists or its kind (32
-    namespaces, 666 vars with genclj-9efy's replacements, gfi/assess-backward, array/vmap and the kernel constructors). gen.api-test fails when the code differs. It
+    namespaces, 669 vars with genclj-9efy's replacements, gfi/assess-backward, array/vmap, the kernel constructors and genclj-xgz4's batched forms and accessor). gen.api-test fails when the code differs. It
     names what was added, removed or changed, and calls out apart a var
     removed without a deprecation first. `clojure -M:test -m gen.api
     write` writes the snapshot after a deliberate change; `check` prints

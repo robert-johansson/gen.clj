@@ -220,6 +220,7 @@
   map->Particles {:arglists ([m])}
   map-particles {:arglists ([ps f key & xs])}
   map-particles* {:arglists ([ps f key & xs])}
+  move {:arglists ([ps f key & xs])}
   particles? {:arglists ([x])}
   project {:arglists ([ps selection])}
   project* {:arglists ([ps selection])}
@@ -539,7 +540,8 @@
   weighted-sample {:arglists ([model args observations {:keys [proposal proposal-args]} key])}}
 
  gen.inference.kernel
- {->Kernel {:arglists ([f reverse-f])}
+ {->Kernel {:arglists ([f reverse-f particles reverse-particles])}
+  batched-form {:arglists ([k])}
   chain {:arglists ([& kernels])}
   checked {:arglists ([kernel observations])}
   checked-kernel {:arglists ([k form])}
@@ -548,7 +550,7 @@
   hmc {:arglists ([selection] [selection opts])}
   involutive-mh {:arglists ([proposal proposal-args involution])}
   kern {:kind :macro, :arglists ([params & body])}
-  kernel {:arglists ([f] [f reverse-f])}
+  kernel {:arglists ([f] [f reverse-f] [f reverse-f opts])}
   mala {:arglists ([selection tau] [selection tau opts])}
   map->Kernel {:arglists ([m])}
   map-optimize {:arglists ([selection] [selection opts])}
@@ -559,7 +561,7 @@
   reversal {:arglists ([k])}
   reversible? {:arglists ([k])}
   run {:arglists ([kernel trace {:keys [samples burn thin key keep], :or {burn 0, thin 1}}])}
-  symmetric {:arglists ([f])}}
+  symmetric {:arglists ([f] [f particles])}}
 
  gen.inference.mcmc
  {elliptical-slice {:arglists ([trace addr mu cov] [trace addr mu cov key])}
@@ -575,7 +577,7 @@
  {accept {:arglists ([trace proposed log-alpha key])}
   involutive-mh {:arglists ([trace proposal proposal-args involution] [trace proposal proposal-args involution key])}
   mh {:arglists ([trace selection-or-proposal] [trace x y] [trace proposal proposal-args key])}
-  mh-particles {:arglists ([ps selection] [ps selection key])}
+  mh-particles {:arglists ([ps selection-or-proposal] [ps x y] [ps proposal proposal-args key])}
   move {:arglists ([trace proposal proposal-args {:keys [involution backward backward-args]} k-propose k-update])}}
 
  gen.inference.nuts
@@ -583,7 +585,8 @@
   sample {:arglists ([trace selection opts] [trace selection opts key])}}
 
  gen.inference.particle-filter
- {choice-product {:arglists ([address-values])}
+ {choice {:arglists ([state addr])}
+  choice-product {:arglists ([address-values])}
   coalesce {:arglists ([state] [state {:keys [by], :or {by host-choices}}])}
   dereplicate {:arglists ([state k] [state k {:keys [layout method key], :or {layout :contiguous, method :keepfirst}}])}
   ess {:arglists ([state])}

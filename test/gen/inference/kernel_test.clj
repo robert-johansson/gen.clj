@@ -3,12 +3,14 @@
   (:require [clojure.test :refer [deftest is testing]]
             [gen.test-support :as ts]
             [gen.array :as array :refer [+ - * /]]
+            [gen.batched :as b]
             [gen.choicemap :as cm]
             [gen.dist :as d]
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
             [gen.inference.kernel :as k]
             [gen.inference.mcmc :as mcmc]
+            [gen.inference.mh :as mh]
             [gen.inference.particle-filter :as pf]
             [gen.random :as rng]
             [gen.selection :as sel]))
@@ -516,3 +518,41 @@
       (doseq [bad [3 {} {:a 3} [:a]]]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #":keep is a function" (k/run kernel start (assoc opts :keep bad)))
             (pr-str bad))))))
+
+(deftest kernels-declare-their-batched-forms
+  ;; A kernel's batched form moves every particle of a gen.batched
+  ;; collection at once (genclj-xgz4); pf/rejuvenate keeps a batched filter
+  ;; batched with it. Planted bugs (2026-10-25): a chain given a batched form
+  ;; when one of its kernels has none fails the second; reversal dropping
+  ;; the reversal's batched form fails the third; the chain's moves given
+  ;; the same key fails the fourth's choices.
+  (let [x (sel/select :x)
+        walk (gen [tr] (trace :x (d/normal (tr :x) 0.5)))
+        batched [(k/mh x) (k/mh walk []) (k/hmc x {:L 2 :compile? true}) (k/mala x 0.1) (k/map-optimize x)
+                 (k/chain (k/mh x) (k/hmc x)) (k/repeat 2 (k/mh x)) (k/cycle 3 [(k/mh x) (k/mala x 0.1)])
+                 (k/kern [] (k/mh x) (k/mh walk [])) (k/kern [n] (doseq [_ (range n)] (k/mh x)))]
+        unbatched [(k/nuts x) (k/elliptical-slice :z [0.0] [[1.0]]) (k/involutive-mh walk [] (fn [& _]))
+                   (k/mix [(k/mh x)] [1.0]) (k/checked (k/mh x) cm/EMPTY) (k/kern ^:trace [_tr] (k/mh x))
+                   (k/kernel (fn [t _] {:trace t})) (fn [t _] {:trace t}) (k/chain (k/mh x) (k/nuts x))]]
+    (is (every? k/batched-form (update batched 9 #(% 2))))
+    (is (not-any? k/batched-form unbatched))
+    (testing "a reversal's batched form is the reversals'"
+      (is (k/batched-form (k/reversal (k/chain (k/mh x) (k/hmc x)))))
+      (let [move (k/mh x)]
+        (is (= (k/batched-form move) (k/batched-form (k/reversal move))) "MH is its own reversal")))
+    (testing "a chain's batched form makes its moves in order, each with its own key, and reports whether any took each particle"
+      (let [ps (:particles (b/generate line [] (cm/choicemap :y 1.3) 20 (rng/key 40)))
+            r ((k/batched-form (k/chain (k/mh x) (k/mh walk []))) ps (rng/key 41))
+            [k1 k2] (rng/split (rng/key 41) 2)
+            r1 (mh/mh-particles ps x k1)
+            r2 (mh/mh-particles (:particles r1) walk [] k2)]
+        (is (b/batched? (:particles r)))
+        (is (ts/close? (b/choice (:particles r2) :x) (b/choice (:particles r) :x)))
+        (is (= (mapv #(or %1 %2) (:accepted r1) (:accepted r2)) (:accepted r)))
+        (is (nil? (:fallback r)))))
+    (testing "a hand-made kernel declares one with kernel's options; others are loud"
+      (let [f (fn [t _] {:trace t})
+            p (fn [ps _] {:particles ps})]
+        (is (= p (k/batched-form (k/kernel f nil {:particles p}))))
+        (is (= p (k/batched-form (k/symmetric f p))))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"unknown options" (k/kernel f nil {:batched p})))))))

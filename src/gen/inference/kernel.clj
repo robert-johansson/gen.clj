@@ -40,6 +40,15 @@
    diverged (gen.inference.mcmc's :diverged?) as :divergences, when any
    did.
 
+   A kernel may also carry a batched form (batched-form), which moves
+   every particle of a gen.batched collection at once, as its -particles
+   move does (mh/mh-particles, mcmc/hmc-particles, mala-particles,
+   map-optimize-particles): the mh, hmc, mala and map-optimize kernels
+   have one, and chain, repeat, cycle and kern (without ^:trace) have one
+   when each of their kernels does. A batched particle filter's
+   rejuvenation stays batched with such a kernel
+   (gen.inference.particle-filter/rejuvenate).
+
    (run kernel trace opts) runs a chain and collects samples: its traces,
    or with :keep a function of each, read on the host."
   {:api :stable}
@@ -53,30 +62,58 @@
 
 (set! *warn-on-reflection* true)
 
-(defrecord Kernel [f reverse-f]
+(defrecord Kernel [f reverse-f particles reverse-particles]
   clojure.lang.IFn
   (invoke [_ trace] (f trace (gfi/next-key)))
   (invoke [_ trace key] (f trace key))
   (applyTo [this args] (clojure.lang.AFn/applyToHelper this args)))
 
 (defn kernel
-  "A kernel from (fn [trace key] → {:trace …}), with its reversal when given."
-  ([f] (->Kernel f nil))
-  ([f reverse-f] (->Kernel f reverse-f)))
+  "A kernel from (fn [trace key] → {:trace …}), with its reversal when
+   given. Options: :particles and :reverse-particles, the batched forms of
+   the kernel and of its reversal (batched-form)."
+  ([f] (->Kernel f nil nil nil))
+  ([f reverse-f] (->Kernel f reverse-f nil nil))
+  ([f reverse-f opts]
+   (when-let [unknown (seq (remove #{:particles :reverse-particles} (keys opts)))]
+     (throw (ex-info (str "kernel: unknown options " (vec unknown) "; the options are :particles and :reverse-particles")
+                     {:unknown (vec unknown)})))
+   (->Kernel f reverse-f (:particles opts) (:reverse-particles opts))))
 
 (defn symmetric
-  "A kernel that is its own reversal."
-  [f]
-  (->Kernel f f))
+  "A kernel that is its own reversal; with particles, its batched form,
+   which is its reversal's too."
+  ([f] (->Kernel f f nil nil))
+  ([f particles] (->Kernel f f particles particles)))
 
 (defn reversible? [k] (and (instance? Kernel k) (some? (:reverse-f k))))
 
 (defn reversal
-  "The declared reversal of a kernel."
+  "The declared reversal of a kernel (with the reversal's batched form,
+   when the kernel declares one)."
   [k]
   (if (reversible? k)
-    (->Kernel (:reverse-f k) (:f k))
+    (->Kernel (:reverse-f k) (:f k) (:reverse-particles k) (:particles k))
     (throw (ex-info "The kernel has no declared reversal" {:kernel k}))))
+
+(defn batched-form
+  "k's batched form, or nil: (fn [ps key] → {:particles ps' …}), the
+   kernel applied to every particle of a gen.batched collection at once,
+   n independent chains, each particle's move distributed as k's on its
+   trace. gen.inference.particle-filter/rejuvenate moves a batched filter
+   by it, and one particle at a time when k has none (recording
+   :fallback). The library's kernels have one where a -particles move
+   exists: mh (of a selection, or of a proposal: mh/mh-particles), hmc
+   and mala (mcmc/hmc-particles and mala-particles, which drop
+   :compile?: a batched step runs under the batch tracer) and
+   map-optimize; and chain, repeat, cycle and kern (without ^:trace) when
+   every kernel they combine has one. Its result holds the -particles
+   moves' keys: {:particles}, :accepted (n booleans: did any of its moves
+   take each particle) when every move reports them, and :fallback, why a
+   move ran one particle at a time, when one did. involutive-mh, nuts,
+   elliptical-slice, mix, checked and (kern ^:trace …) have none."
+  [k]
+  (when (instance? Kernel k) (:particles k)))
 
 (defn- step-fn
   "The (fn [trace key]) of a kernel or a plain function."
@@ -94,13 +131,29 @@
                          " (fn [t key] {:trace (f t key)})")
                     {:result-type (some-> r class .getName)}))))
 
+(defn ^:no-doc particles-result
+  "r, a batched form's result, when it is one ({:particles …}); a loud
+   error otherwise."
+  [r]
+  (if (and (map? r) (contains? r :particles))
+    r
+    (throw (ex-info (str "A kernel's batched form returns {:particles …}, not "
+                         (if (nil? r) "nil" (.getName (class r))))
+                    {:result-type (some-> r class .getName)}))))
+
 (defn- with-reversals
   "A kernel built by combine from the step fns of ks, reversible when every
-   k is: its reversal is combine over the reversals in reverse-order."
-  [combine ks reverse-order]
-  (->Kernel (combine (mapv step-fn ks))
-            (when (every? reversible? ks)
-              (combine (mapv (comp step-fn reversal) (reverse-order ks))))))
+   k is: its reversal is combine over the reversals in reverse-order. With
+   combine-particles, its batched form combines the ks' batched forms, when
+   every k has one (and the reversal's, the reversals')."
+  [combine combine-particles ks reverse-order]
+  (let [rs (when (every? reversible? ks) (mapv reversal (reverse-order ks)))
+        batched (fn [ks] (when (and combine-particles (every? batched-form ks))
+                           (combine-particles (mapv batched-form ks))))]
+    (->Kernel (combine (mapv step-fn ks))
+              (when rs (combine (mapv step-fn rs)))
+              (batched ks)
+              (when rs (batched rs)))))
 
 (defn- accepted-moves
   "The accept decisions a kernel result reports: one for an MH step, a
@@ -135,10 +188,29 @@
                                      (map vector fs (rng/split key (count fs))))]
       (combined t moves diverged))))
 
+(defn- particles-sequence-fn
+  "The batched forms pfs applied in sequence, the i-th with the key's i-th
+   split, as sequence-fn applies its moves: {:particles}, :accepted (did
+   any move take each particle) when every move reports it, and the first
+   :fallback."
+  [pfs]
+  (fn [ps key]
+    (let [[ps accepted m] (reduce (fn [[ps accepted m] [pf k]]
+                                    (let [r (particles-result (pf ps k))]
+                                      [(:particles r)
+                                       (when (and accepted (:accepted r)) (mapv #(or %1 %2) accepted (:accepted r)))
+                                       (or m (:fallback r))]))
+                                  [ps (vec (clojure.core/repeat (:n ps) false)) nil]
+                                  (map vector pfs (rng/split key (count pfs))))]
+      (cond-> {:particles ps}
+        accepted (assoc :accepted accepted)
+        m (assoc :fallback m)))))
+
 (defn chain
-  "The kernels applied in sequence."
+  "The kernels applied in sequence; batched when each of them is
+   (batched-form)."
   [& kernels]
-  (with-reversals sequence-fn (vec kernels) reverse))
+  (with-reversals sequence-fn particles-sequence-fn (vec kernels) reverse))
 
 (declare kern-form)
 
@@ -287,7 +359,7 @@
                                                     {:form form :read read :again again}))))))]
               (body t apply! construct)
               (combined @t @moves @diverged)))]
-    (->Kernel (fn [trace key] (run forward false trace key)) (fn [trace key] (run backward true trace key)))))
+    (kernel (fn [trace key] (run forward false trace key)) (fn [trace key] (run backward true trace key)))))
 
 (declare traced-statements)
 
@@ -402,6 +474,7 @@
                       (fn [trace key]
                         (let [[k-choose k-step] (rng/split key)]
                           ((fs (array/item (rng/categorical k-choose logits))) trace k-step))))
+                    nil
                     (vec kernels)
                     identity)))
 
@@ -422,16 +495,20 @@
                           (check-observations! (:trace r) observations)
                           r)))]
     (->Kernel (check (step-fn kernel))
-              (when (reversible? kernel) (check (:reverse-f kernel))))))
+              (when (reversible? kernel) (check (:reverse-f kernel)))
+              nil nil)))
 
 ;; ---------------------------------------------------------------------------
 ;; MH kernels
 ;; ---------------------------------------------------------------------------
 
 (defn mh
-  "The MH kernel of a selection, or of a proposal and its arguments."
-  ([selection] (symmetric (fn [trace key] (mh/mh trace selection key))))
-  ([proposal proposal-args] (symmetric (fn [trace key] (mh/mh trace proposal proposal-args key)))))
+  "The MH kernel of a selection, or of a proposal and its arguments;
+   batched, mh/mh-particles."
+  ([selection] (symmetric (fn [trace key] (mh/mh trace selection key))
+                          (fn [ps key] (mh/mh-particles ps selection key))))
+  ([proposal proposal-args] (symmetric (fn [trace key] (mh/mh trace proposal proposal-args key))
+                                       (fn [ps key] (mh/mh-particles ps proposal proposal-args key)))))
 
 (defn involutive-mh
   "The involutive MCMC kernel of a proposal, its arguments and an
@@ -459,16 +536,20 @@
    :inv-metric, :jitter, :compile?). Reversible: its own reversal."
   ([selection] (hmc selection nil))
   ([selection opts]
-   (let [opts (kernel-opts "hmc" opts)]
-     (symmetric (fn [trace key] (mcmc/hmc trace selection opts key))))))
+   (let [opts (kernel-opts "hmc" opts)
+         batched-opts (dissoc opts :compile?)]
+     (symmetric (fn [trace key] (mcmc/hmc trace selection opts key))
+                (fn [ps key] (mcmc/hmc-particles ps selection batched-opts key))))))
 
 (defn mala
   "The MALA kernel of a selection and a step size tau, with mcmc/mala's
    options (:inv-metric, :compile?). Reversible: its own reversal."
   ([selection tau] (mala selection tau nil))
   ([selection tau opts]
-   (let [opts (kernel-opts "mala" opts)]
-     (symmetric (fn [trace key] (mcmc/mala trace selection tau (assoc opts :key key)))))))
+   (let [opts (kernel-opts "mala" opts)
+         batched-opts (dissoc opts :compile?)]
+     (symmetric (fn [trace key] (mcmc/mala trace selection tau (assoc opts :key key)))
+                (fn [ps key] (mcmc/mala-particles ps selection tau (assoc batched-opts :key key)))))))
 
 (defn nuts
   "The NUTS kernel of a selection: one transition of mcmc/nuts, with its
@@ -494,7 +575,9 @@
   ([selection] (map-optimize selection nil))
   ([selection opts]
    (let [opts (kernel-opts "map-optimize" opts)]
-     (kernel (fn [trace _key] (mcmc/map-optimize trace selection opts))))))
+     (kernel (fn [trace _key] (mcmc/map-optimize trace selection opts))
+             nil
+             {:particles (fn [ps _key] (mcmc/map-optimize-particles ps selection opts))}))))
 
 ;; ---------------------------------------------------------------------------
 ;; Running a chain

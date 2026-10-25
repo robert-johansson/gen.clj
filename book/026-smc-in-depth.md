@@ -37,7 +37,6 @@ the effective sample size, and kernels.
             [gen.inference.diagnostics :as diag]
             [gen.inference.importance :as imp]
             [gen.inference.kernel :as kernel]
-            [gen.inference.mh :as mh]
             [gen.inference.particle-filter :as pf]
             [gen.inference.particle-mcmc :as pmcmc]
             [gen.inference.transform :as tf]
@@ -764,9 +763,8 @@ observations:
   "How many distinct values of z_t the particles hold, for each of the
    first n-steps t."
   [state n-steps]
-  (let [trs (pf/traces state)]
-    (mapv (fn [t] (count (distinct (map #(array/item (% [t :z])) trs))))
-          (range n-steps))))
+  (mapv (fn [t] (count (distinct (array/->clj (pf/choice state [t :z])))))
+        (range n-steps)))
 
 (def long-200 (run-filter walk long-ys 200 {:key (rng/key 11)}))
 
@@ -825,40 +823,27 @@ the early states several times over:
                            :key (rng/key 12)}))
 
 [(distinct-values always 8) (distinct-values moved 8)]
-;=> [[25 28 34 48 57 77 114 200] [148 167 177 183 176 182 187 200]] ; float64
+;=> [[25 28 34 48 57 77 114 200] [147 173 178 187 181 184 194 200]] ; float64
 
 (> (first (distinct-values moved 1)) (* 3 (first (distinct-values always 1))))
 ;=> true
 ```
 
 A sweep at step $t$ makes $t$ moves for each particle, so a run of $T$
-steps makes up to about $T^2/2$ of them, and `pf/rejuvenate` moves one
-particle at a time, leaving a batched filter unbatched. On the hundred
-observations the same sweep is affordable batched: `mh/mh-particles` makes
-one MH move for every particle at once.
+steps makes up to about $T^2/2$ of them. The filter is batched, and so is
+the sweep: a chain of MH kernels of selections has a batched form
+(`kernel/batched-form`), each move made for every particle at once
+(`mh/mh-particles`), so `pf/rejuvenate` keeps the filter batched. On the
+hundred observations the same sweep is affordable, and nothing ran one
+particle at a time (the state's `:fallback` would say why):
 
 <!-- code: batched-rejuvenation -->
 ```clojure
-(defn batched-sweep
-  "The particles of a batched state after an MH move on each z_s, s < t,
-   from its prior: mh/mh-particles moves every particle at once."
-  [state t key]
-  (reduce (fn [state [s k]]
-            (update state :particles
-                    #(:particles (mh/mh-particles % (sel/select [s :z]) k))))
-          state
-          (map vector (range t) (rng/split key (max 1 t)))))
-
-(defn batched-resample-move
-  "resample-move, batched: run-filter's :advance."
-  [state params ys t key]
-  (let [[k-move k-step] (rng/split key)
-        moved (if (:resampled? state) (batched-sweep state t k-move) state)]
-    (bootstrap-step moved params ys t k-step)))
-
 (def long-moved
-  (run-filter walk long-ys 200 {:advance batched-resample-move
-                                :key (rng/key 11)}))
+  (run-filter walk long-ys 200 {:advance resample-move :key (rng/key 11)}))
+
+(:fallback long-moved)
+;=> nil
 
 (first (distinct-values long-moved 1))
 ;=> 117 ; float64
@@ -1351,7 +1336,7 @@ The remedies combine; a filter usually uses several at once.
 | Sequential data, any model | the bootstrap filter: `pf/initialize`, `pf/step`, `pf/maybe-resample` |
 | Uneven weights | resampling below an ESS threshold (`:ess-threshold`, $n/2$ by default) |
 | Least noise from resampling | `:method :systematic` |
-| Early states collapsed to a few ancestors | rejuvenation: `pf/rejuvenate`, or a batched sweep of `mh/mh-particles` |
+| Early states collapsed to a few ancestors | rejuvenation: `pf/rejuvenate`, batched with a kernel that has a batched form |
 | Precise observations | a proposal that looks at the data: `pf/step`'s `:proposal`, or an SMCP3 step (`tf/updating-translator` with `pf/move-reweight`) |
 | Unknown static parameters | PMMH (MH on `custom/estimated`) or particle Gibbs (`pmcmc/particle-gibbs`) |
 | A linear-Gaussian model or a hidden Markov model | the exact answer, `gen.state-space/kalman` or `hmm`, to use and to check the rest |

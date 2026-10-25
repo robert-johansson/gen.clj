@@ -633,11 +633,11 @@
 ;; A move's backward proposal
 ;; ---------------------------------------------------------------------------
 
-(defn- read-possible?
-  "Is score, read on the host (a lazy one evaluated, where impossible?
-   reads no array), above -Inf: neither -Inf nor NaN?"
+(defn- possible
+  "Is score above -Inf, neither -Inf nor NaN? A bool array, per particle
+   in a batched run."
   [score]
-  (< ##-Inf (double (array/item score))))
+  (array/< ##-Inf score))
 
 (defn assess-backward
   "A move's backward weight: the backward proposal q, called on (t' args…),
@@ -654,14 +654,19 @@
    fifth, the owner's second ruling). A move to an impossible t' is
    rejected before it is weighed (impossible?), and one from an impossible
    t keeps its NaN, MH's own loud error. The weight is read on the host
-   for the check: a move is an inference-loop boundary."
+   for the check: a move is an inference-loop boundary. In a batched run
+   (gen.batched/move) the check reads every particle, as a validation
+   does (array/any-true?), so the move stays batched, and a particle that
+   fails it fails the batched run: its scalar run then raises the error."
   [t t' q args u' k]
   (let [r (assess q (into [t'] args) u' (backward-key k))]
-    (when (and (== ##-Inf (double (array/item (:weight r)))) (read-possible? (:score t')) (read-possible? (:score t)))
-      (throw (ex-info (str "The backward proposal gives the move's reverse choices density 0, though the new"
-                           " trace is possible: the proposal cannot reverse its own move (thesis §3.4.2, p. 92)."
-                           " Reverse choices: " (pr-str (cm/to-map u')))
-                      {:proposal q :reverse-choices (cm/to-map u')})))
+    (when (array/any-true? (array/logical-and (array/== (:weight r) ##-Inf)
+                                              (array/logical-and (possible (:score t')) (possible (:score t)))))
+      (let [reverse-choices (array/tree-map array/all-particles (cm/to-map u'))]
+        (throw (ex-info (str "The backward proposal gives the move's reverse choices density 0, though the new"
+                             " trace is possible: the proposal cannot reverse its own move (thesis §3.4.2, p. 92)."
+                             " Reverse choices: " (pr-str reverse-choices))
+                        {:proposal q :reverse-choices reverse-choices}))))
     r))
 
 ;; ---------------------------------------------------------------------------

@@ -773,6 +773,35 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     each application. kernel/run and nuts/sample take `:keep`. `(kern []
     …)` and `(kern ^:trace [tr] …)` are the kernel itself, not a function
     of no arguments.
+  - **Kernels' batched form** (the agent, 2026-10-25, provisional;
+    genclj-xgz4): a kernel says it can run batched by carrying a batched
+    form, `(fn [ps key])` → `{:particles …}` with the -particles moves'
+    keys (`:accepted` per particle, `:fallback`): the Kernel record's
+    fields `particles` and `reverse-particles` (`kernel/batched-form`;
+    `kernel/kernel`'s options, `symmetric`'s second argument). mh (of a
+    selection or a proposal), hmc and mala (without `:compile?`: a batched
+    step runs under the batch tracer) and map-optimize have one; chain,
+    repeat, cycle and kern without ^:trace combine their kernels' when
+    each has one (a reversal's from the reversals'), reporting whether
+    any move took each particle. nuts, elliptical-slice, involutive-mh
+    (its involution is user code that often reads the host), mix (it
+    chooses per particle), checked, kern ^:trace and plain functions have
+    none: pf/rejuvenate moves a batched filter one particle at a time with
+    them, the state becoming one of traces with `:fallback` saying so, and
+    `:batched? :required` throws (decision 9). MH with a proposal runs
+    batched by gen.batched/move, the scalar move's own code (propose,
+    update, assess-backward) under the batch tracer; assess-backward's
+    invalid-proposal check reads every particle as a validation
+    (`array/any-true?`), so the move stays batched, and a particle that
+    fails it fails the batched run, whose scalar run raises the error.
+    pf/mean, variance and proportions of a batched state run f once on
+    the batched trace (map-particles); pf/choice reads one address of
+    every particle (batched/choice). An unchecked collection's spot check
+    is made once for its trace (a delay kept on the collection, a value),
+    however often it is read. Alternatives: a protocol on kernels (a
+    field keeps a kernel one value, and a function stays a kernel); a
+    table in the particle filter from kernels to -particles moves (closed
+    to users' kernels).
 - **Indices are 0-based** (Clojure idiom, as in GenMLX; D2): Map's and
   Unfold's addresses, Recurse's nodes (root 0), categorical's values
   (categorical-logits' too: 0 to n - 1) and Switch's branch index (branch 0
