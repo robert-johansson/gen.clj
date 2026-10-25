@@ -725,8 +725,17 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     not keep). What stability means for a law set: a minor release may add
     a law to one, with a CHANGELOG line, since a dependent's suite may then
     fail; renaming or removing a law is breaking. Stable with the rest, as
-    the snapshot has them: each law's var (35), `cases`, `close?` with its
-    documented tolerances, `across`, `max-vacuous` and `seeds`.
+    the snapshot has them: each law's var (35), `cases`, `close?`,
+    `across`, `max-vacuous` and `seeds`. `close?`'s tolerances (float64: a
+    relative and an absolute 1e-12; float32: a relative 1e-4 and an
+    absolute 1e-3) were not in that answer: the lead had made no
+    recommendation and recorded them as confirmed with the rest, wrongly.
+    The owner then chose (2026-10-25 night, on the lead's recommendation)
+    that they may change in a minor release, with a CHANGELOG line and its
+    reason, as a law set's contents may: they encode float precision,
+    which a new backend or dtype may make us revisit. Its name and arity
+    are stable. The v1.0.0 tag waits for the night's checks, as the gate
+    has it (owner, the same answer).
   - **Eight more, confirmed by the owner** (2026-10-25, on the lead's
     recommendations): per-particle results use plural keys (`:log-alphas`,
     `:accepted`, `:diverged`), not singular keys holding vectors; chains

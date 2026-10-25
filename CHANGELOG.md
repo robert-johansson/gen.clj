@@ -355,8 +355,9 @@ newest first in each section.
   - `laws/conventions`: `identity-update-reports-no-change` (Changed,
     below), gen.clj's habits that a user's generative function need not
     keep.
-  - A law set may gain a law in a minor release, with a line here, since
-    a dependent's suite may then fail; renaming or removing a law is
+  - A law set may gain a law in a minor release, and `laws/close?`'s
+    tolerances may change, each with a line here and its reason, since a
+    dependent's suite may then fail; renaming or removing a law is
     breaking (owner, 2026-10-25).
   - `laws/checks`, `laws/vacuous?`, `laws/vacuous-on-unvisitable` and
     `laws/unvisitable?` are public, for a law of your own. Vacuity is

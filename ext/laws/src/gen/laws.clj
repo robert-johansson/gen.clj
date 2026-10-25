@@ -42,9 +42,9 @@
    - conventions: properties of gen.clj's own generative functions that
      the thesis does not require, so that a caller can skip work.
 
-   A minor release may add a law to a set, and the CHANGELOG says so,
-   since a dependent's suite may then fail; renaming or removing a law
-   waits for a major release.
+   A minor release may add a law to a set or change close?'s tolerances,
+   and the CHANGELOG says so, since a dependent's suite may then fail;
+   renaming or removing a law waits for a major release.
 
    Writing a law. A law is a function from cases to a test.check property
    (prop/for-all over them) whose value is a test.check result: (checks …)
@@ -93,7 +93,9 @@
    float64's round-off (a relative and an absolute 1e-12), or, on a float32
    backend, a relative 1e-4 and an absolute 1e-3: a weight is a difference
    of scores, so its error scales with the scores rather than with it, a
-   few ulps of scores of up to ~100."
+   few ulps of scores of up to ~100. A minor release may change these
+   tolerances, with a CHANGELOG line and its reason, as it may add a law
+   to a set."
   [x y]
   (array/allclose? x y (if (f32?) {:rtol 1e-4 :atol 1e-3} {:rtol 1e-12 :atol 1e-12})))
 
