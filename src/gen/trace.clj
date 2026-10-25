@@ -11,6 +11,11 @@
    choice or call, and take a not-found value to give there instead, as
    gen.choicemap's lookups do: (tr :b nil).
 
+   A keyword reads the record's fields, not the choices: (:choices tr),
+   (:score tr) and the others are the fields, and (:slope tr) is nil
+   whatever the trace holds at :slope. Read a choice by calling the trace,
+   (tr :slope) (DESIGN.md §9: kept, documented, not loud).
+
    A trace also records its maker, the generative function that made it
    (maker). Giving a trace another :gen-fn, (assoc tr :gen-fn g), keeps the
    maker, so update and regenerate see that g did not make it
