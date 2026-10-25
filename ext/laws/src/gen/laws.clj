@@ -1176,7 +1176,7 @@
    prints nothing; a failure is reported as clojure.test reports one."
   ([prefix models opts] `(deflaws ~prefix ~models ~opts all))
   ([prefix models opts laws]
-   (let [laws-map (if (map? laws) laws (eval laws))
+   (let [laws-map (if (map? laws) laws (law-set! (eval laws)))
          cs (gensym "cases")
          ls (gensym "laws")]
      `(let [~cs (cases ~models)

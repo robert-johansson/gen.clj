@@ -89,9 +89,12 @@
                           (laws/verify models laws/general)))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"options are a number of cases or a map"
                           (laws/verify models :many))))
-  (testing "a law set that is not a map of laws"
+  (testing "a law set that is not a map of laws, to verify or deflaws"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"a law set is a map from a law's name to the law"
-                          (laws/verify models few laws/score-is-the-assessed-density)))))
+                          (laws/verify models few laws/score-is-the-assessed-density)))
+    (let [e (try (macroexpand '(gen.laws/deflaws one-law models 10 gen.laws/score-is-the-assessed-density))
+                 (catch Exception e e))]
+      (is (some #(re-find #"a law set is a map" (or (ex-message %) "")) [e (ex-cause e)])))))
 
 (deftest check-has-arities
   (let [p (laws/score-is-the-assessed-density (laws/cases models))
