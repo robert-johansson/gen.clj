@@ -256,7 +256,7 @@ its own title.
   *Reversible-Jump MCMC and Structure Learning*, *Coming from Gen.jl* and
   *Installing and Running*.
 - **NumPy**. Travis E. Oliphant et al. NumPy. <https://numpy.org>. Cited in
-  *Arrays, Backends and Gradients*.
+  *Design Rationale* and *Arrays, Backends and Gradients*.
 - **PyTorch**. Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James
   Bradbury, Gregory Chanan, Trevor Killeen, Zeming Lin, Natalia
   Gimelshein, Luca Antiga, et al. PyTorch: an imperative style,
