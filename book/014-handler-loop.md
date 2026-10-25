@@ -85,13 +85,14 @@ It takes the handler's *state*, an immutable map, with the site's path,
 distribution and key, and returns the value the body gets, with a new
 state. The standard transitions, one per operation, are in the public map
 `dyn/site-transitions`, so that middleware can wrap them (below). We can
-call one outside any model, on a state we build by hand:
+call one outside any model, on the state that a simulate starts from,
+which `dyn/initial-state` makes:
 
 <!-- code: transition -->
 ```clojure
 (def simulate-site (dyn/site-transitions :simulate))
 
-(def empty-state {:choices cm/EMPTY :scores {} :score 0.0})
+(def empty-state (dyn/initial-state :simulate))
 
 (def step (simulate-site empty-state [:x] (d/normal 0 1) (rng/key 2)))
 
@@ -135,8 +136,7 @@ it calls simulate's transition:
 (def generate-site (dyn/site-transitions :generate))
 
 (def observing-x
-  (assoc empty-state :mode :generate :weight 0.0
-         :constraints (cm/choicemap :x 3.0)))
+  (dyn/initial-state :generate {:constraints (cm/choicemap :x 3.0)}))
 
 (let [[x state'] (generate-site observing-x [:x] (d/normal 0 1) (rng/key 2))]
   [x (:weight state')])
@@ -183,49 +183,119 @@ a silent draw:
 To look at the states the real handler threads, we wrap a transition in
 *middleware*: a map from operation to transition, which a model given it
 by `dyn/with-transitions` uses in place of the standard one. This one
-keeps each state it receives in an atom of ours:
+keeps each state it receives under `::seen`, a key of the chapter's own
+namespace. The handler carries such keys from site to site and returns
+them with the run's result, here on the trace that generate makes:
 
 <!-- code: watched -->
 ```clojure
 (defn watched
-  "model with the transition of op wrapped to keep, in the atom seen, each
-   state it receives. The atom is ours, for looking; the transition it
-   wraps is the handler's own."
-  [model op seen]
-  (let [transition (dyn/site-transitions op)]
-    (dyn/with-transitions model
-      {op (fn [state p dist k]
-            (swap! seen conj state)
-            (transition state p dist k))})))
-
-(def seen (atom []))
+  "model with every operation's transition wrapped to keep each state it
+   receives, in order, under ::seen, a key of this namespace, which the
+   run returns on its trace. The transitions it wraps are the handler's
+   own."
+  [model]
+  (dyn/with-transitions model
+    (into {} (for [[op transition] dyn/site-transitions]
+               [op (fn [state p dist k]
+                     (let [[v state'] (transition state p dist k)]
+                       [v (update state' ::seen (fnil conj []) state)]))]))))
 
 (def watched-run
-  (gfi/generate (watched two-normals :generate seen) []
-                (cm/choicemap :x 3.0) (rng/key 1)))
+  (gfi/generate (watched two-normals) [] (cm/choicemap :x 3.0) (rng/key 1)))
 
-(mapv (juxt :mode :score :weight) @seen)
+(def seen (::seen (:trace watched-run)))
+
+(mapv (juxt :mode :score :weight) seen)
 ;=> [[:generate 0.0 0.0] [:generate -5.4189 -5.4189]]
 ```
 
 The second site received the score and the weight of the constrained
 `:x`: each state carries on where the last left off. Every operation
-starts from a map with the same keys, where GenMLX gives each operation
-its own. `:mode` names the operation, `:key` is the key the next site
-splits, `:choices`, `:scores` and `:score` hold the choices so far, their
-log densities and their sum, and `:weight` the weight so far. The rest
-are for some operations only: the constraints (generate, update,
-assess), the previous trace (update, regenerate), the selection
-(regenerate), the replaced choices (update), the traces of the calls,
-and the paths used so far, for the address checks:
+starts from a map with the same keys, which `dyn/initial-state` makes;
+GenMLX gives each operation its own. `:mode` names the operation,
+`:key` is the key the next site splits, `:choices`, `:scores` and
+`:score` hold the choices so far, their log densities and their sum, and
+`:weight` the weight so far. The rest are for some operations only: the
+constraints (generate, update, assess), the previous trace and the
+argdiffs (update, regenerate), the selection (regenerate), the replaced
+choices (update), the traces of the calls, the paths used so far, for
+the address checks, and the encapsulated randomness that plain calls
+draw from (*Introduction to Modeling*):
 
 <!-- code: state-keys -->
 ```clojure
-(every? (set (keys (first @seen)))
-        [:mode :key :choices :scores :score :weight :constraints
-         :prev :selection :discard :subtraces :visited])
+(= (set (filter simple-keyword? (keys (first seen))))
+   #{:mode :key :choices :scores :score :weight :constraints :prev
+     :selection :argdiffs :discard :subtraces :visited
+     :omega :omega-key :omega-count})
+;=> true
+
+(= (set (keys (first seen))) (set (keys (dyn/initial-state :generate))))
 ;=> true
 ```
+
+Middleware reads every key of the state but writes only two kinds: keys
+of its own, qualified with its namespace as `::seen` is, and
+`:constraints`, to condition the rest of the run on a value of its own.
+Its own keys are
+data about the run. No operation reads them, so a run computes the same
+choices and weight with them as without, and each run starts without
+them: the trace an update makes holds its own run's states, and the
+generate's are still on the previous trace, which the update's states
+hold as `:prev`:
+
+<!-- code: own-keys -->
+```clojure
+(let [plain (gfi/generate two-normals [] (cm/choicemap :x 3.0) (rng/key 1))]
+  [(= (:choices (:trace plain)) (:choices (:trace watched-run)))
+   (= (:weight plain) (:weight watched-run))])
+;=> [true true]
+
+(def updated
+  (:trace (gfi/update (:trace watched-run) (cm/choicemap :y 1.0)
+                      (rng/key 2))))
+
+(mapv :mode (::seen updated))
+;=> [:update :update]
+
+(identical? (:trace watched-run) (:prev (first (::seen updated))))
+;=> true
+```
+
+Middleware changes the model only through what it hands the transition
+it wraps, a distribution, say. The other keys are the handler's. After
+each of middleware's transitions the loop checks that the operation's
+other inputs and the loop's own keys are as they were, and at the end of
+the run it refuses an unqualified key it does not know, so that data
+does not go silently astray:
+
+<!-- code: handler-key-error -->
+```clojure
+;; error: The transition at [:x] changed the handler's :key
+(gfi/simulate
+   (dyn/with-transitions two-normals
+     {:simulate (fn [state p dist k]
+                  (let [[v state'] (simulate-site state p dist k)]
+                    [v (update state' :key #(first (rng/split %)))]))})
+   [] (rng/key 1))
+```
+
+<!-- code: own-keys-error -->
+```clojure
+;; error: Middleware left the key :seen in the handler's state
+(gfi/simulate
+   (dyn/with-transitions two-normals
+     {:simulate (fn [state p dist k]
+                  (let [[v state'] (simulate-site state p dist k)]
+                    [v (assoc state' :seen p)]))})
+   [] (rng/key 1))
+```
+
+The totals, `:choices`, `:scores`, `:score`, `:weight` and `:discard`,
+are the standard transitions' to write. A middleware that wrote them
+itself would make a trace whose score is not the sum of the log
+densities it records; `dyn/with-transitions` has the rules in full.
 
 ## The score is a fold
 
@@ -321,9 +391,9 @@ simulate gives, exactly, and the same for generate:
          (array/equal? (:retval a) (:retval b)))))
 
 (let [k (rng/key 1)
-      start (assoc empty-state :key k)
+      start (dyn/initial-state :simulate {:key k})
       obs (cm/choicemap :x 3.0)
-      observing (assoc start :mode :generate :weight 0.0 :constraints obs)]
+      observing (dyn/initial-state :generate {:key k :constraints obs})]
   [(same-run? (run-body simulate-site start two-normals-body)
               (gfi/simulate two-normals [] k))
    (same-run? (run-body generate-site observing two-normals-body)
@@ -680,8 +750,8 @@ another value.
 
 (let [k (rng/key 5)
       t (gfi/simulate two-normals [] k)
-      start (assoc empty-state :key k :mode :generate :weight 0.0
-                   :constraints (cm/choicemap :x (t :x)))]
+      start (dyn/initial-state :generate
+                               {:key k :constraints (cm/choicemap :x (t :x))})]
   (mapv (fn [run]
           (let [state (run generate-site start two-normals-body)]
             (array/equal? (t :y) (cm/get-choice (:choices state) :y))))

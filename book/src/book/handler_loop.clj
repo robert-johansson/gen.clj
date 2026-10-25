@@ -37,7 +37,7 @@
 ;; book: transition
 (def simulate-site (dyn/site-transitions :simulate))
 
-(def empty-state {:choices cm/EMPTY :scores {} :score 0.0})
+(def empty-state (dyn/initial-state :simulate))
 
 (def step (simulate-site empty-state [:x] (d/normal 0 1) (rng/key 2)))
 
@@ -57,8 +57,7 @@
 (def generate-site (dyn/site-transitions :generate))
 
 (def observing-x
-  (assoc empty-state :mode :generate :weight 0.0
-         :constraints (cm/choicemap :x 3.0)))
+  (dyn/initial-state :generate {:constraints (cm/choicemap :x 3.0)}))
 
 (let [[x state'] (generate-site observing-x [:x] (d/normal 0 1) (rng/key 2))]
   [x (:weight state')])
@@ -77,30 +76,68 @@
 
 ;; book: watched
 (defn watched
-  "model with the transition of op wrapped to keep, in the atom seen, each
-   state it receives. The atom is ours, for looking; the transition it
-   wraps is the handler's own."
-  [model op seen]
-  (let [transition (dyn/site-transitions op)]
-    (dyn/with-transitions model
-      {op (fn [state p dist k]
-            (swap! seen conj state)
-            (transition state p dist k))})))
-
-(def seen (atom []))
+  "model with every operation's transition wrapped to keep each state it
+   receives, in order, under ::seen, a key of this namespace, which the
+   run returns on its trace. The transitions it wraps are the handler's
+   own."
+  [model]
+  (dyn/with-transitions model
+    (into {} (for [[op transition] dyn/site-transitions]
+               [op (fn [state p dist k]
+                     (let [[v state'] (transition state p dist k)]
+                       [v (update state' ::seen (fnil conj []) state)]))]))))
 
 (def watched-run
-  (gfi/generate (watched two-normals :generate seen) []
-                (cm/choicemap :x 3.0) (rng/key 1)))
+  (gfi/generate (watched two-normals) [] (cm/choicemap :x 3.0) (rng/key 1)))
 
-(mapv (juxt :mode :score :weight) @seen)
+(def seen (::seen (:trace watched-run)))
+
+(mapv (juxt :mode :score :weight) seen)
 ;=> [[:generate 0.0 0.0] [:generate -5.4189 -5.4189]]
 
 ;; book: state-keys
-(every? (set (keys (first @seen)))
-        [:mode :key :choices :scores :score :weight :constraints
-         :prev :selection :discard :subtraces :visited])
+(= (set (filter simple-keyword? (keys (first seen))))
+   #{:mode :key :choices :scores :score :weight :constraints :prev
+     :selection :argdiffs :discard :subtraces :visited
+     :omega :omega-key :omega-count})
 ;=> true
+
+(= (set (keys (first seen))) (set (keys (dyn/initial-state :generate))))
+;=> true
+
+;; book: own-keys
+(let [plain (gfi/generate two-normals [] (cm/choicemap :x 3.0) (rng/key 1))]
+  [(= (:choices (:trace plain)) (:choices (:trace watched-run)))
+   (= (:weight plain) (:weight watched-run))])
+;=> [true true]
+
+(def updated
+  (:trace (gfi/update (:trace watched-run) (cm/choicemap :y 1.0)
+                      (rng/key 2))))
+
+(mapv :mode (::seen updated))
+;=> [:update :update]
+
+(identical? (:trace watched-run) (:prev (first (::seen updated))))
+;=> true
+
+;; book: handler-key-error
+;; error: The transition at [:x] changed the handler's :key
+#_(gfi/simulate
+   (dyn/with-transitions two-normals
+     {:simulate (fn [state p dist k]
+                  (let [[v state'] (simulate-site state p dist k)]
+                    [v (update state' :key #(first (rng/split %)))]))})
+   [] (rng/key 1))
+
+;; book: own-keys-error
+;; error: Middleware left the key :seen in the handler's state
+#_(gfi/simulate
+   (dyn/with-transitions two-normals
+     {:simulate (fn [state p dist k]
+                  (let [[v state'] (simulate-site state p dist k)]
+                    [v (assoc state' :seen p)]))})
+   [] (rng/key 1))
 
 ;; book: fold
 (defn site-states
@@ -164,9 +201,9 @@
          (array/equal? (:retval a) (:retval b)))))
 
 (let [k (rng/key 1)
-      start (assoc empty-state :key k)
+      start (dyn/initial-state :simulate {:key k})
       obs (cm/choicemap :x 3.0)
-      observing (assoc start :mode :generate :weight 0.0 :constraints obs)]
+      observing (dyn/initial-state :generate {:key k :constraints obs})]
   [(same-run? (run-body simulate-site start two-normals-body)
               (gfi/simulate two-normals [] k))
    (same-run? (run-body generate-site observing two-normals-body)
@@ -313,8 +350,8 @@
 
 (let [k (rng/key 5)
       t (gfi/simulate two-normals [] k)
-      start (assoc empty-state :key k :mode :generate :weight 0.0
-                   :constraints (cm/choicemap :x (t :x)))]
+      start (dyn/initial-state :generate
+                               {:key k :constraints (cm/choicemap :x (t :x))})]
   (mapv (fn [run]
           (let [state (run generate-site start two-normals-body)]
             (array/equal? (t :y) (cm/get-choice (:choices state) :y))))

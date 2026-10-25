@@ -445,6 +445,7 @@
   dynamic-gf? {:arglists ([x])}
   gen {:kind :macro, :arglists ([params & body])}
   guarded-fn {:kind :macro, :arglists ([& fn-tail])}
+  initial-state {:arglists ([op] [op opts])}
   make-gen-fn {:arglists ([body-fn source] [body-fn source static])}
   map->DynamicGF {:arglists ([m])}
   site-transitions {:kind :var}

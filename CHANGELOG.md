@@ -33,6 +33,25 @@ newest first in each section.
 
 ### Changed
 
+- **Breaking. The handler's state and middleware are public API** (DESIGN
+  §9, "The handler's state and middleware"; genclj-q6sc).
+  - `(dyn/initial-state op)`, `(dyn/initial-state op opts)`: the state an
+    operation starts from, its sixteen keys documented in the docstring,
+    for calling a transition directly. An unknown op or input is an error.
+  - Middleware's own keys reach the result: a transition that writes a
+    qualified key of its own namespace (`::seen`) finds it on the trace
+    the run makes (simulate, generate, update, regenerate) or in the
+    result of assess and propose. Each run starts without them; a
+    batched run's are on its batched trace, batched where computed from
+    batched values. A trace made under such middleware holds those keys,
+    so it is no longer `=` to one made without it.
+  - Breaking: middleware is checked. A transition that changes `:mode`,
+    `:prev`, `:selection`, `:argdiffs`, `:key`, `:visited`, `:subtraces`
+    or the ω keys, records no choice at its path, or returns other than
+    `[value state']` throws, naming the path and key; so does a run whose
+    middleware left an unqualified key the state does not have, or a key
+    of gen.trace's. `:constraints` stays writable. Writing the totals
+    (`:choices :scores :score :weight :discard`) is unsupported.
 - **Breaking. Draws. A batched particle filter stays batched through
   rejuvenation** (DESIGN §9, "Kernels' batched form"; af25c97,
   genclj-xgz4).

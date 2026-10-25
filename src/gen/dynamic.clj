@@ -33,7 +33,9 @@
    per-particle shapes and draws a batch axis. A trace records every choice's log
    probability and every spliced sub-trace, so regenerate weights use the old
    log probabilities exactly and project reads the trace without re-running
-   the model.
+   the model. Middleware (with-transitions) wraps the transitions: it reads
+   the handler's state, whose keys initial-state documents, and returns
+   data of its own, under keys of its own namespace, on the run's result.
 
    A choice outside its own support stops the run (DESIGN.md §9): when a
    site's log density, or a call's score, is -Inf on the host
@@ -226,7 +228,8 @@
 ;; generate with part of a trace's choices and that trace's key reproduces it.
 (def site-transitions
   "The standard handler transitions, one per operation: (fn [state path dist
-   key] → [value state']). Middleware (with-transitions) wraps them."
+   key] → [value state']). Middleware (with-transitions) wraps them; one
+   called directly takes a state that initial-state makes."
   {:simulate simulate-site :generate generate-site :assess assess-site
    :update update-site :regenerate regenerate-site})
 
@@ -455,7 +458,10 @@
          :regenerate (= sel/none selection)
          false)))
 
-(defn- initial-state [mode {:keys [key constraints prev selection argdiffs] :as opts}]
+(defn- start-state
+  "initial-state's state, from the opts a run is given (which may hold
+   more: a call's :at, a revise's mark)."
+  [mode {:keys [key constraints prev selection argdiffs] :as opts}]
   {:mode mode :key key :argdiffs argdiffs
    :choices cm/EMPTY :scores {} :subtraces {} :score 0.0 :weight 0.0
    :constraints (or constraints cm/EMPTY) :prev prev :selection (or selection sel/none)
@@ -463,6 +469,65 @@
    ;; ω: the previous trace's when kept, else folded from the key at the first
    ;; untraced draw
    :omega (when (keeps-omega? mode opts) (::trace/omega prev)) :omega-key key :omega-count 0})
+
+(def ^:private operation-inputs
+  "The inputs an operation's initial state is made from."
+  #{:key :constraints :prev :argdiffs :selection})
+
+(defn initial-state
+  "The handler state that the operation op (:simulate :generate :assess
+   :update or :regenerate) starts from, given its inputs opts: :key, and
+   per operation :constraints (assess's choices), :prev, :argdiffs and
+   :selection. A transition (site-transitions) called directly takes it.
+
+   The state is a map, the same keys for every operation. The operation's
+   inputs, set here:
+     :mode         the operation
+     :constraints  generate's and update's constraints, assess's choices;
+                   empty for simulate and regenerate
+     :prev         the previous trace (update, regenerate), else nil
+     :selection    regenerate's selection, else sel/none
+     :argdiffs     the argdiffs (update, regenerate), else nil
+   What the run has made so far, by the transitions at each site and the
+   loop at each call:
+     :choices      each site's value at its path, each call's choices
+                   under its address
+     :scores       each site's log density, by path (a call's are in its
+                   trace)
+     :subtraces    each call's trace, by path (the loop's; assess keeps
+                   none)
+     :score        the log density so far: the sites' and the calls'
+     :weight       the operation's weight so far, 0.0 throughout simulate
+     :discard      update's discard so far: the old values the
+                   constraints replaced, the calls' discards (the old
+                   choices the run leaves are added at its end); else empty
+   The loop's own:
+     :key          the key the next site or call splits (a transition is
+                   handed its own site's key as an argument)
+     :visited      the paths used so far, for the address checks: a site's
+                   is added after its transition
+     :omega        the encapsulated randomness ω (thesis §4.5): the
+                   previous trace's when an update or regenerate keeps it,
+                   else nil until the first untraced draw folds it from
+                   :omega-key
+     :omega-key    the operation's key, which ω is folded from
+     :omega-count  the number of keys drawn from ω so far
+   Keys in gen.dynamic's namespace are the handler's internals. Middleware
+   adds keys of its own namespace, and with-transitions says which keys it
+   may write."
+  ([op] (initial-state op {}))
+  ([op opts]
+   (when-not (contains? site-transitions op)
+     (throw (ex-info (str "initial-state: " (pr-str op) " is not an operation (:simulate :generate :assess"
+                          " :update :regenerate)")
+                     {:op op})))
+   (when-let [other (seq (remove operation-inputs (keys opts)))]
+     (throw (ex-info (str "initial-state: the keys " (pr-str (vec other)) " are not an operation's inputs (:key"
+                          " :constraints :prev :argdiffs :selection)")
+                     {:op op :keys (vec other)})))
+   (start-state op (cond-> opts
+                     (contains? opts :constraints) (update :constraints #(gfi/check-choice-map op "the constraints" %))
+                     (:selection opts) (update :selection #(gfi/check-selection op %))))))
 
 (defn- read-param
   "(param name) in a body: the parameter's value in the store in effect."
@@ -475,6 +540,65 @@
       v)))
 
 (declare run-handler)
+
+;; ---------------------------------------------------------------------------
+;; Middleware: what a transition other than the standard one may write
+;; ---------------------------------------------------------------------------
+
+(def ^:private loop-keys
+  "The state's keys that no transition writes: the operation's inputs but
+   the constraints, and the loop's. A middleware transition that changes
+   one is an error (checked-step)."
+  [:mode :prev :selection :argdiffs :key :visited :subtraces :omega :omega-key :omega-count
+   ::above ::finished ::params ::node-values ::retdiff ::middleware])
+
+(defn- checked-step
+  "r, what a middleware transition returned at path p from state, checked:
+   [value state'], state' holding a choice at p (the transition it wraps
+   recorded one) and the loop's keys as state had them; state' marked as
+   a run under middleware."
+  [state p r]
+  (when-not (and (vector? r) (== 2 (count r)) (map? (nth r 1)))
+    (throw (ex-info (str "The transition at " p " returned a " (if (nil? r) "nil" (.getName (class r)))
+                         ", not [value state']")
+                    {:path p :returned (type r)})))
+  (let [[v state'] r]
+    (when-let [k (some #(when-not (identical? (get state %) (get state' %)) %) loop-keys)]
+      (throw (ex-info (str "The transition at " p " changed the handler's " k ": middleware writes only"
+                           " :constraints and keys of its own namespace (with-transitions)")
+                      {:path p :key k})))
+    (when-not (contains? (:scores state') p)
+      (throw (ex-info (str "The transition at " p " recorded no choice there: middleware returns the state"
+                           " that the transition it wraps returned (with-transitions)")
+                      {:path p})))
+    [v (cond-> state' (not (::middleware state')) (assoc ::middleware true))]))
+
+(def ^:private handler-keys
+  "The state's unqualified keys (initial-state's), and the final state's
+   :retval."
+  (into #{:retval} (filter simple-keyword?) (keys (start-state :simulate {}))))
+
+(defn- own-key?
+  "Is k a key of middleware's own, which a run returns: a qualified keyword
+   outside gen.dynamic's namespace (the state's internals) and gen.trace's
+   (the trace's own keys)?"
+  [k]
+  (and (qualified-keyword? k) (not (#{"gen.dynamic" "gen.trace"} (namespace k)))))
+
+(defn- middleware-out
+  "The keys of its own that middleware left in state, a run's final state,
+   as a map (nil when there are none): what the run returns. A key of
+   gen.trace's namespace, which would overwrite the trace's own, or a key
+   the state does not have that is no qualified keyword, is an error."
+  [state]
+  (reduce-kv (fn [out k v]
+               (cond (own-key? k) (assoc out k v)
+                     (or (contains? handler-keys k) (and (qualified-keyword? k) (= "gen.dynamic" (namespace k)))) out
+                     :else (throw (ex-info (str "Middleware left the key " (pr-str k) " in the handler's state: its own"
+                                                " keys are qualified keywords of its namespace, such as :my.lib/seen,"
+                                                " outside gen.trace's (with-transitions)")
+                                           {:key k}))))
+             nil state))
 
 (defn- realize!
   "Force the lazy sequences in a body's return value (and in the vectors,
@@ -645,10 +769,11 @@
    :retval."
   [gf mode args opts]
   (check-arity! gf args)
-  (let [;; the transition in effect: a splice without an address swaps in its
+  (let [standard (site-transitions mode)
+        ;; the transition in effect: a splice without an address swaps in its
         ;; callee's middleware for the callee's body
-        transition (volatile! (or (get (:transitions gf) mode) (site-transitions mode)))
-        vol (volatile! (initial-state mode opts))
+        transition (volatile! (or (get (:transitions gf) mode) standard))
+        vol (volatile! (start-state mode opts))
         ;; the n-th untraced draw's key is ω folded with n
         ;; what (an untraced draw, a call that drew) makes the score an
         ;; estimate; and each particle's ω must reproduce its own draws
@@ -686,7 +811,11 @@
                                        {:path p :value dist})))
                      (check-address! state p)
                      (let [[k-site state] (site-key state)
-                           [v state] (@transition state p dist k-site)]
+                           t @transition
+                           ;; middleware's step is checked (with-transitions)
+                           [v state] (if (identical? t standard)
+                                       (t state p dist k-site)
+                                       (checked-step state p (t state p dist k-site)))]
                        (vreset! vol (visit state p))
                        (when (::stopped state) (throw stop))
                        v)))
@@ -720,7 +849,7 @@
                         (check-arity! sub args)
                         (let [outer @transition
                               run-body #(apply (:body-fn sub) trace-fn splice-fn read-param untraced-fn args)]
-                          (vreset! transition (or (get (:transitions sub) mode) (site-transitions mode)))
+                          (vreset! transition (or (get (:transitions sub) mode) standard))
                           (try
                             (with-store-of sub (run-body))
                             (finally (vreset! transition outer)))))
@@ -749,14 +878,18 @@
     (vswap! vol assoc ::finished true ::params *params*)
     (assoc (finish @vol) :retval (when-not (::stopped @vol) retval))))
 
-(defn- make-trace [gf args state]
+(defn- make-trace
+  "The trace of gf on args that the run's final state describes, with out,
+   middleware's own keys (middleware-out)."
+  [gf args state out]
   (cond-> (assoc (trace/make-trace {:gen-fn gf :args args :choices (:choices state)
                                     :retval (:retval state) :score (:score state)})
                  ::scores (:scores state)
                  ::subtraces (:subtraces state))
     (pos? (long (:omega-count state))) (assoc ::trace/omega (:omega state))
     (::node-values state) (assoc ::node-values (::node-values state))
-    (::params state) (assoc ::params (::params state))))
+    (::params state) (assoc ::params (::params state))
+    out (into out)))
 
 (defn- retdiff
   "A static body's propagated retdiff when it knows better than
@@ -783,14 +916,16 @@
       (run-handler gf op args opts)))
 
 (defn- run-handler [gf op args opts]
-  (let [state (with-store-of gf (execute gf op args opts))]
+  (let [state (with-store-of gf (execute gf op args opts))
+        ;; middleware's own keys, returned on the trace (assess's result)
+        out (when (::middleware state) (middleware-out state))]
     (case op
-      :simulate {:trace (make-trace gf args state)}
-      :generate {:trace (make-trace gf args state) :weight (:weight state)}
-      :assess {:weight (:weight state) :retval (:retval state)}
-      :update {:trace (make-trace gf args state) :weight (:weight state)
+      :simulate {:trace (make-trace gf args state out)}
+      :generate {:trace (make-trace gf args state out) :weight (:weight state)}
+      :assess (into {:weight (:weight state) :retval (:retval state)} out)
+      :update {:trace (make-trace gf args state out) :weight (:weight state)
                :retdiff (retdiff (:prev opts) state) :discard (:discard state)}
-      :regenerate {:trace (make-trace gf args state) :weight (:weight state)
+      :regenerate {:trace (make-trace gf args state out) :weight (:weight state)
                    :retdiff (retdiff (:prev opts) state)})))
 
 ;; ---------------------------------------------------------------------------
@@ -914,9 +1049,10 @@
     (if (static-scored? gf)
       (let [[w rv] (static-score gf args choices key)] {:weight w :retval rv})
       (run gf :assess args {:key key :constraints choices})))
+  ;; with the keys middleware returned on the trace
   (-propose [gf args key]
     (let [tr (:trace (run gf :simulate args {:key key}))]
-      {:choices (:choices tr) :weight (:score tr) :retval (:retval tr)}))
+      (into {:choices (:choices tr) :weight (:score tr) :retval (:retval tr)} (filter (fn [[k _]] (own-key? k))) tr)))
   ;; under gf's own store, as its run: a callee's project may run its model
   (-project [gf tr selection]
     (with-store-of gf (project* tr selection)))
@@ -1001,7 +1137,40 @@
    Middleware may change the model (e.g. masking a distribution); an
    optimization must not (see with-dispatch). A call whose store or
    generative function changed (gfi/revise) still runs the operation asked
-   for, so update middleware sees it."
+   for, so update middleware sees it.
+
+   A transition reads every key of the state (initial-state lists them);
+   in a batched run the choices, scores and weight are batched, one value
+   per particle. It changes the model through what it hands the
+   transition it wraps (a distribution, a key), returns the value and the
+   state that transition returned, and writes in that state only:
+   - Keys of its own namespace (::seen, :my.lib/count), which the run
+     carries from site to site and returns: on the trace it makes
+     (simulate, generate, update, regenerate), in the result of assess and
+     propose, which make none. They are data about the run, not part of
+     what the operation means: no operation reads them. Each run starts
+     without them, so an update's or a regenerate's are its own (the
+     previous run's are on (:prev state)). A batched run's are one value
+     for all its particles, batched where computed from batched values, on
+     the batched trace and gathered with it (gen.batched/take); a
+     particle's trace that gen.batched/traces rebuilds holds those of the
+     generate that rebuilt it. A dispatcher's result has none. A key of
+     gen.trace's namespace, or another that is no qualified keyword, is an
+     error.
+   - :constraints, to condition the rest of the run on values of its own
+     (as gen.inference.conjugate's reference run does): a constraint
+     reaches the sites after it, and generate, update and assess check at
+     the end that the run visited every one.
+   Every other key is the handler's. After each of middleware's
+   transitions the loop checks that it returned [value state'], that the
+   operation's other inputs and the loop's keys (:mode :prev :selection
+   :argdiffs :key :visited :subtraces :omega :omega-key :omega-count) are
+   as they were, and that a choice was recorded at the path. The totals
+   (:choices :scores :score :weight :discard) are the standard
+   transitions' to write: a middleware that writes one itself breaks the
+   trace (its score would no longer be the sum of the log densities it
+   records, which update, regenerate and project read), and is
+   unsupported, not checked, since checking a sum would read values."
   [gf transitions]
   (check-dynamic! "with-transitions" gf)
   (assoc gf :transitions transitions))
