@@ -730,6 +730,11 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     loudly (its #gen/trace is write-trace's map) and stays the round trip.
     clojure.pprint prints records as maps whatever their print method, so
     pprint still shows a trace's fields (choice maps' too).
+  - **Approved in advance by the owner** (2026-10-25): `ext/laws`' user
+    API (the check over models, the law sets, deflaws, checks and vacuous)
+    joins the stable tier once gen.laws lives there (genclj-u6je); and the
+    public handler-state design as its agent records it (genclj-q6sc),
+    with any surprising point brought back to the owner.
   - **Before the tag:** the friction that changes shape lands (one
     result-key vocabulary, kernels returning {:trace :accepted?}, labeled
     metrics, matching batched return shapes, selections' union and
@@ -915,7 +920,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       translator's "The inverse transform …" as before; a transform made
       by tf/transform without an inverse is "The anonymous transform
       (tf/transform)", where its name printed empty.
-  - **The optimizer interface** (the agent, 2026-10-25, provisional;
+  - **The optimizer interface** (the agent, 2026-10-25, confirmed by the owner, 2026-10-25;
     genclj-y2ab): an optimizer stays a map with a `:kind`, and the
     multimethods `learning/-init` and `learning/-step` dispatch on it, as
     gen.dist.core's do on a distribution's `:type` (a protocol on records
@@ -930,7 +935,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     rates at least 0 (a negative rate, a descent, is an error), momenta,
     decays and betas in [0, 1), eps and max-norm above 0. Learning-rate
     schedules are not built in.
-  - **Training's and VI's shapes** (the agent, 2026-10-25, provisional, on
+  - **Training's and VI's shapes** (the agent, 2026-10-25, confirmed by the owner, 2026-10-25, descent as an error included; on
     the owner's decision of the history; genclj-59cf): train has Gen.jl's
     options and defaults (`:epoch-size` 1, `:batch-size` 1,
     `:batches-per-epoch` 1, `:evaluation-size` the epoch's size); a
