@@ -33,7 +33,7 @@ newest first in each section.
 
 ### Changed
 
-- **The transform checks' messages say what ran** (genclj-xsml). An
+- **The transform checks' messages say what ran** (2e3f9d6, genclj-xsml). An
   involution's `:check?` throws "The involution applied twice does not
   give back the trace" (or "the forward choices"), where it said "The
   inverse transform does not give back …", which a translator's check
@@ -41,7 +41,7 @@ newest first in each section.
   one throws "The anonymous transform (tf/transform) has no inverse …",
   where the name printed empty.
 - **Breaking. `:inv-metric` is labeled by address** (DESIGN §9, "Labeled
-  metrics"; genclj-qs62).
+  metrics"; f04ef86, genclj-qs62).
   - `mcmc/hmc`, `mala` and `nuts`, their `-particles` kernels, the
     kernels of gen.inference.kernel and `nuts/adapt` and `sample` take
     a variance for each selected choice by its address: a choice map or
@@ -223,7 +223,7 @@ newest first in each section.
 ### Added
 
 - **The trace-transform API's missing pieces** (DESIGN §9, "The
-  transform API"; genclj-xsml).
+  transform API"; 2e3f9d6, genclj-xsml).
   - `tf/run` takes options: `:retained`, a selection of the model
     choices the move keeps, whose continuous reads (neither written nor
     copied) count as unchanged outputs of the Jacobian, as an
@@ -246,7 +246,7 @@ newest first in each section.
     and constant to the Jacobian, for a move's structure such as a path.
     An involution's check of a transform that reads it needs the
     proposal, `{:check? true :proposal q}`.
-- **`mcmc/inv-metric`: a metric labeled** (genclj-qs62). `(mcmc/inv-metric
+- **`mcmc/inv-metric`: a metric labeled** (f04ef86, genclj-qs62). `(mcmc/inv-metric
   trace selection m)` is the inverse metric the kernels read from the
   `:inv-metric` option m (any form they take; nil the identity), as a
   choice map of each selected choice's variances, the form `nuts/adapt`
