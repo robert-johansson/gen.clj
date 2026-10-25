@@ -21,6 +21,7 @@
   (:refer-clojure :exclude [+ - ==])
   (:require [gen.array :as array :refer [+ - ==]]
             [gen.batched :as batched]
+            [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.gfi :as gfi]
             [gen.random :as rng]
@@ -48,6 +49,18 @@
     (throw (ex-info "MH with a proposal needs its proposal arguments as a vector"
                     {:proposal-args proposal-args}))))
 
+(defn- given-forward
+  "The forward choices u given, as propose would give them: {:choices u
+   :weight log q(u; trace) :retval}, by assess with key. Loud when q gives
+   u density 0, from which no move starts."
+  [trace proposal proposal-args u key]
+  (let [{w :weight r :retval} (gfi/assess proposal (into [trace] proposal-args) u key)]
+    (when (== ##-Inf (double (array/item w)))
+      (throw (ex-info (str "mh/move: the proposal gives the forward choices density 0, so no move starts from them: "
+                           (pr-str (cm/to-map u)))
+                      {:proposal proposal :fwd-choices (cm/to-map u)})))
+    {:choices u :weight w :retval r}))
+
 (defn- weighed-move
   "move as a function of the trace and keys with no host read, so that it
    runs batched over particles too (gen.batched/move, mh-particles):
@@ -55,8 +68,11 @@
    support (impossible?, a host -Inf) is not weighed further. In a batched
    run every particle goes on, and one whose move left the support (weight
    -Inf) has w -Inf, whatever its backward weight."
-  [trace proposal proposal-args {:keys [involution backward backward-args]} k-propose k-update]
-  (let [{fwd :choices fwd-weight :weight fwd-retval :retval} (gfi/propose proposal (into [trace] proposal-args) k-propose)
+  [trace proposal proposal-args {:keys [involution backward backward-args fwd-choices] :as opts} k-propose k-update]
+  (let [{fwd :choices fwd-weight :weight fwd-retval :retval}
+        (if (contains? opts :fwd-choices)
+          (given-forward trace proposal proposal-args fwd-choices k-propose)
+          (gfi/propose proposal (into [trace] proposal-args) k-propose))
         [moved weight bwd] (if involution
                              (let [r (involution trace fwd fwd-retval proposal-args k-update)]
                                [(:trace r) (:weight r) (:bwd-choices r)])
@@ -78,20 +94,23 @@
   "A proposed move and its log acceptance ratio, {:trace trace'
    :log-alpha w}, w a host double (also a move-reweight weight:
    gen.inference.particle-filter/reweighting). Forward choices u come
-   from (proposal trace args…) drawn with k-propose. With
-   :involution, (involution trace u retval args k-update) gives trace', the
-   backward choices u' and the move's weight (k-update for its update,
-   which draws a model's encapsulated randomness afresh); otherwise the
-   trace is updated with u (k-update) and u' is the discard. u' is assessed under
-   :backward on (trace', :backward-args…), or under the proposal on
-   (trace', args…). w = the move's weight - log q(u) + log q_bwd(u'). A
-   move outside the support (its weight -Inf on the host,
+   from (proposal trace args…) drawn with k-propose, or with :fwd-choices
+   u are given: assessed under the proposal (with k-propose), so that w is
+   the move's log alpha for that u (thesis Eq. 3.17), as enumerating the
+   auxiliary choices needs; a u of density 0 under the proposal is a loud
+   error. With :involution, (involution trace u retval args k-update)
+   gives trace', the backward choices u' and the move's weight (k-update
+   for its update, which draws a model's encapsulated randomness afresh);
+   otherwise the trace is updated with u (k-update) and u' is the discard.
+   u' is assessed under :backward on (trace', :backward-args…), or under
+   the proposal on (trace', args…). w = the move's weight - log q(u) + log
+   q_bwd(u'). A move outside the support (its weight -Inf on the host,
    gfi/impossible?: the update stopped at a choice there, so trace' holds
    the choices up to it) has w -Inf, its backward choices unassessed. A
    proposal that gives u' density 0 at a possible trace' cannot reverse
    its own move: a loud error (gfi/assess-backward)."
-  [trace proposal proposal-args {:keys [involution backward backward-args]} k-propose k-update]
-  (update (weighed-move trace proposal proposal-args {:involution involution :backward backward :backward-args backward-args}
+  [trace proposal proposal-args {:keys [involution backward backward-args fwd-choices] :as opts} k-propose k-update]
+  (update (weighed-move trace proposal proposal-args (select-keys opts [:involution :backward :backward-args :fwd-choices])
                         k-propose k-update)
           :log-alpha #(double (array/item %))))
 
@@ -127,10 +146,12 @@
    involution is (fn [trace fwd-choices fwd-retval proposal-args key]) and
    returns {:trace trace' :bwd-choices u' :weight w}, with w = log p(trace')
    - log p(trace) + log |det J| (the update weight plus the log Jacobian, 0
-   for discrete moves). Applying it twice must give back (trace, u). Gen.jl's
-   involution takes no key; gen.clj's takes one for its update, as every
-   operation does, which draws a model's encapsulated randomness afresh (a
-   pseudo-marginal move)."
+   for discrete moves; gen.inference.transform/involution's result holds
+   it as :log-abs-det too). Applying it twice must give back (trace, u).
+   mh/move with :fwd-choices gives log α for given auxiliary choices.
+   Gen.jl's involution takes no key; gen.clj's takes one for its update, as
+   every operation does, which draws a model's encapsulated randomness
+   afresh (a pseudo-marginal move)."
   ([trace proposal proposal-args involution]
    (involutive-mh trace proposal proposal-args involution (gfi/next-key)))
   ([trace proposal proposal-args involution key]

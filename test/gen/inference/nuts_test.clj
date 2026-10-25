@@ -203,7 +203,7 @@
   ;; step size of 0.6, an acceptance of 0.92, they were within 3)
   (let [n 1500
         starts (map (fn [[x y]] (start-at correlated [] (cm/choicemap :x x :y y))) (correlated-draws n (rng/key 14)))
-        step (fn [[tr stats] key] (let [r (mcmc/nuts tr xy {:eps 1.0 :inv-metric [3.0 0.006]} key)]
+        step (fn [[tr stats] key] (let [r (mcmc/nuts tr xy {:eps 1.0 :inv-metric {:x 3.0 :y 0.006}} key)]
                                     [(:trace r) (conj stats (:accept-stat r))]))
         runs (map (fn [tr key] (reduce step [tr []] (rng/split key 2))) starts (rng/split (rng/key 15) n))
         moved (map (fn [[tr]] [(value tr :x) (value tr :y)]) runs)
@@ -241,15 +241,16 @@
       (is (> 5.0 (deviation (map #(* (- %1 1.0) (- %2 0.02)) xs ys) 0.08))))
     (testing "the adapted metric is the last window's variances: 500 draws, so within 5 standard errors of those"
       ;; the standard error of a variance from the sampling chain's
-      ;; squared deviations, scaled to the window's 500 draws
-      (is (and (array/backend-array? inv-metric) (= [2] (array/shape inv-metric))))
-      (doseq [[i vs truth] [[0 xs 4.0] [1 ys 0.0041]]
-              :when (array/backend-array? inv-metric)]
+      ;; squared deviations, scaled to the window's 500 draws. Labeled by
+      ;; address (genclj-qs62): planted (2026-10-25), the variances labeled
+      ;; in the reverse of their order fail both
+      (is (= [[:x] [:y]] (cm/addresses inv-metric)))
+      (doseq [[addr vs truth] [[:x xs 4.0] [:y ys 0.0041]]]
         (let [sq (map #(let [c (- % (mean vs))] (* c c)) vs)
               se (* (dg/mcse-mean (vec sq)) (Math/sqrt (/ (count sq) 500.0)))
               n 500.0
-              variance (/ (- (ts/number (array/take inv-metric i)) (* 1e-3 (/ 5.0 (+ n 5.0)))) (/ n (+ n 5.0)))]
-          (is (< (Math/abs (double (- variance truth))) (* 5.0 se)) (str i ": " variance)))))
+              variance (/ (- (ts/number (cm/get-choice inv-metric addr)) (* 1e-3 (/ 5.0 (+ n 5.0)))) (/ n (+ n 5.0)))]
+          (is (< (Math/abs (double (- variance truth))) (* 5.0 se)) (str addr ": " variance)))))
     (testing "the metric shortens the trajectories, against adapting the step size alone"
       ;; about 5 steps against 30. Planted bug (2026-10-23): no window's
       ;; variances taken (the identity kept) runs as long as the step size
@@ -344,7 +345,7 @@
   ;; standard errors). Planted bug (2026-10-23): s̄'s update with the sign
   ;; flipped drives the acceptance to 0
   (let [{:keys [stats]} (nuts/adapt (start-at correlated [] (cm/choicemap :x 0.0 :y 0.0)) xy
-                                    {:warmup 1500 :adapt-metric? false :inv-metric [4.0 0.004]} (rng/key 21))
+                                    {:warmup 1500 :adapt-metric? false :inv-metric {:x 4.0 :y 0.004}} (rng/key 21))
         as (map :accept-stat (drop 750 stats))]
     (is (> 5.0 (deviation as 0.8)) (str (mean as)))))
 
@@ -442,7 +443,7 @@
     (is (> 5.0 (deviation (map #(* % %) jittered) 1.0)))
     (testing "the correlated Gaussian at the step adaptive HMC took on Metal"
       (let [{:keys [traces stats]} (nuts/sample (start-at correlated [] (cm/choicemap :x 0.0 :y 0.0)) xy
-                                                {:kernel :hmc :L 8 :eps 0.485 :inv-metric [4.0 0.0041] :jitter 0.2
+                                                {:kernel :hmc :L 8 :eps 0.485 :inv-metric {:x 4.0 :y 0.0041} :jitter 0.2
                                                  :warmup 0 :samples 2000}
                                                 (rng/key 36))
             steps (map :eps stats)]
@@ -472,11 +473,16 @@
 
 (deftest a-sample-without-warmup-draws-as-given
   (let [start (start-at correlated [] (cm/choicemap :x 0.0 :y 0.0))
-        r (nuts/sample start xy {:samples 4 :warmup 0 :eps 0.25 :inv-metric [4.0 0.004] :max-depth 3} (rng/key 29))]
+        r (nuts/sample start xy {:samples 4 :warmup 0 :eps 0.25 :inv-metric {:x 4.0 :y 0.004} :max-depth 3} (rng/key 29))]
     (is (= 0.25 (:eps r)))
     (is (every? #(= 0.25 (:eps %)) (:stats r)))
     (is (every? #(<= (:tree-depth %) 3) (:stats r)))
-    (is (= {:stats [] :divergences 0} (:warmup r)))))
+    (is (= {:stats [] :divergences 0} (:warmup r)))
+    (testing "the metric it drew with, labeled by address (genclj-qs62)"
+      (is (= [[:x] [:y]] (cm/addresses (:inv-metric r))))
+      (is (ts/close? (array/array [4.0 0.004]) (cm/to-array (:inv-metric r))))
+      (is (= {:x 1.0 :y 1.0} (ts/host (cm/to-map (:inv-metric (nuts/sample start xy {:samples 1 :warmup 0} (rng/key 29))))))
+          "the identity, when none is given"))))
 
 (deftest a-sample-keeps-a-function-of-each-draw
   ;; :keep keeps (f trace) for each draw in place of its trace, read on the
@@ -501,7 +507,7 @@
   ;; Planted bug (2026-10-23): the jitter ignored leaves one step among 20,
   ;; and 31 among the sampler's 35 draws
   (let [start (start-at correlated [] (cm/choicemap :x 0.3 :y 0.1))
-        opts {:eps 0.5 :inv-metric [4.0 0.004]}]
+        opts {:eps 0.5 :inv-metric {:x 4.0 :y 0.004}}]
     (doseq [[kernel f] [[:hmc mcmc/hmc] [:nuts mcmc/nuts]]]
       (testing (name kernel)
         (let [steps (map #(:eps (f start xy (assoc opts :jitter 0.3) %)) (rng/split (rng/key 37) 20))]
@@ -522,7 +528,7 @@
         latent (gen [] (trace :z (d/mvnormal [0.0 0.0] [[1.0 0.5] [0.5 1.0]])))
         vector-model (gen [] (let [z (splice :latent latent)] (trace :y (d/mvnormal z [[0.5 0.0] [0.0 0.5]]))))]
     (doseq [[label gf observations selection inv]
-            [["the correlated Gaussian, with a metric" correlated (cm/choicemap :x 0.3 :y 0.1) xy [4.0 0.004]]
+            [["the correlated Gaussian, with a metric" correlated (cm/choicemap :x 0.3 :y 0.1) xy {:x 4.0 :y 0.004}]
              ["an array-valued latent in a splice" vector-model (cm/choicemap :y (array/array [1.0 -0.5]))
               (sel/select [:latent :z]) nil]
              ["a model that branches on a value (falls back)" branching (cm/choicemap :y 1.3) (sel/select :x) nil]]
@@ -553,13 +559,20 @@
 
 (deftest options-are-checked
   (let [start (start-at correlated [] (cm/choicemap :x 0.0 :y 0.0))]
-    (testing "the inverse metric: one positive variance, or one per selected value"
-      (doseq [[label inv] [["a length" [1.0]] ["a zero" [1.0 0.0]] ["a NaN" [1.0 ##NaN]] ["a negative number" -1.0]
-                           ["an array of another shape" (array/ones [3])]]
+    (testing "the inverse metric: one positive variance, or one for each selected choice by address"
+      (doseq [[label inv reason] [["a choice missing" {:x 1.0} :invalid-inv-metric]
+                                  ["a choice not selected" {:x 1.0 :y 1.0 :z 1.0} :invalid-inv-metric]
+                                  ["a zero" {:x 1.0 :y 0.0} :invalid-inv-metric]
+                                  ["a NaN" (cm/choicemap :x 1.0 :y ##NaN) :invalid-inv-metric]
+                                  ["a negative number" -1.0 :invalid-inv-metric]
+                                  ["an array of another shape" {:x 1.0 :y (array/ones [3])} :invalid-inv-metric]
+                                  ["a string" "1.0" :invalid-inv-metric]
+                                  ["a vector, for two choices" [4.0 0.004] :unlabeled-inv-metric]
+                                  ["an array, for two choices" (array/array [4.0 0.004]) :unlabeled-inv-metric]]
               [kernel f] [[:nuts #(mcmc/nuts start xy {:inv-metric %} (rng/key 32))]
                           [:hmc #(mcmc/hmc start xy {:inv-metric %} (rng/key 32))]
                           [:mala #(mcmc/mala start xy 0.1 {:inv-metric % :key (rng/key 32)})]]]
-        (is (= :invalid-inv-metric (:reason (ts/thrown-data (f inv)))) (str kernel ", " label)))
+        (is (= reason (:reason (ts/thrown-data (f inv)))) (str kernel ", " label)))
       (is (some? (mcmc/nuts start xy {:inv-metric 2.0} (rng/key 32))) "one variance for all"))
     (testing "the transition's"
       (is (= :invalid-eps (:reason (ts/thrown-data (mcmc/nuts start xy {:eps 0.0} (rng/key 33))))))

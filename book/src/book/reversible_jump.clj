@@ -233,7 +233,7 @@
 ;; book: split-twice
 (def split-merge-move (tf/involution split-merge {:check? true}))
 
-(def four (:trace (split-merge-move three split-choices nil [] (rng/key 0))))
+(def four (:trace (split-merge-move three split-choices (rng/key 0))))
 
 (let [merged (tf/run split-merge four (:aux split))]
   [(tf/same-choices? (:aux merged) split-choices)
@@ -276,10 +276,10 @@
           (tf/copy model-in [:segments j] model-out [:segments (dec j)]))))))
 
 ;; book: notebook-check
-;; error: The inverse transform does not give back the forward choices
+;; error: The involution applied twice does not give back the forward choices
 #_(def notebook-move (tf/involution notebook-split-merge {:check? true}))
 
-#_(notebook-move three split-choices nil [] (rng/key 0))
+#_(notebook-move three split-choices (rng/key 0))
 
 
 ;; book: subsets
@@ -498,8 +498,9 @@
   [t]
   (let [move (tf/involution t)]
     (fn [tr u retval args key]
-      (update (move tr u retval args key) :weight -
-              (:log-abs-det (tf/run t tr u))))))
+      (let [{:keys [log-abs-det] :as moved} (move tr u retval args key)]
+        ;; a move outside the support is not weighed, and has no Jacobian
+        (cond-> moved log-abs-det (update :weight - log-abs-det))))))
 
 (def notebook-counts
   (segment-counts (rj-sweep (without-jacobian split-merge) uniform-share
@@ -696,23 +697,11 @@ suggested
       path)))
 
 ;; book: subtree-swap
-(defn node-path
-  "The model address of the node that the auxiliary choices at :path pick,
-   read in a transform's body: :tree, then :left or :right at each step."
-  [aux-in]
-  (loop [at [:path] path [:tree]]
-    (if (tf/read aux-in (conj at :stop) :discrete)
-      path
-      (recur (conj at :rest-of-path)
-             (conj path (if (tf/read aux-in (conj at :left) :discrete)
-                          :left
-                          :right))))))
-
 (tf/deftransform subtree-swap
   "The subtree at the picked node exchanged with the new subtree. The path
    is kept, so that the move back picks the same node."
   [model-in aux-in model-out aux-out]
-  (let [path (node-path aux-in)]
+  (let [path (into [:tree] (tf/retval aux-in))]
     (tf/copy aux-in :path aux-out :path)
     (tf/copy aux-in :new-subtree model-out path)
     (tf/copy model-in path aux-out :new-subtree)))
@@ -735,8 +724,17 @@ suggested
                 [:new-subtree :kernel-type] :periodic
                 [:new-subtree :scale] 0.5 [:new-subtree :period] 0.4))
 
-(def swapped ((tf/involution subtree-swap {:check? true})
-              example-trace regrow nil [] (rng/key 0)))
+(def regrow-path
+  "The path the proposal returns for regrow's choices."
+  (:retval (gfi/assess regenerate-subtree [example-trace uniform-period]
+                       regrow (rng/key 0))))
+
+regrow-path
+;=> [:right]
+
+(def swapped
+  ((tf/involution subtree-swap {:check? true :proposal regenerate-subtree})
+   example-trace regrow regrow-path [uniform-period] (rng/key 0)))
 
 (:retval (:trace swapped))
 ;=> [:plus [:linear 0.72] [:periodic 0.5 0.4]]
@@ -1122,7 +1120,7 @@ last-year
 (let [{merged :trace back :bwd-choices}
       (split-merge-move lopsided
                         (cm/choicemap :split? false :index 0 :new-value 0.5)
-                        nil [] (rng/key 0))]
+                        (rng/key 0))]
   [(cm/get-choice back :split-percentage)
    (:weight (gfi/assess split-merge-proposal [merged middle-share] back
                         (rng/key 0)))])

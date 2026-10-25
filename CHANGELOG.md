@@ -66,6 +66,33 @@ newest first in each section.
     an unchecked update) is spot-checked once, however often it is read:
     every read re-ran the spot check's particles, 0.75 ms of each
     `pf/mean` of chapter 053's filters. The errors are the same.
+- **The transform checks' messages say what ran** (2e3f9d6, genclj-xsml). An
+  involution's `:check?` throws "The involution applied twice does not
+  give back the trace" (or "the forward choices"), where it said "The
+  inverse transform does not give back …", which a translator's check
+  still says. `tf/inverse` of a transform made by `tf/transform` without
+  one throws "The anonymous transform (tf/transform) has no inverse …",
+  where the name printed empty.
+- **Breaking. `:inv-metric` is labeled by address** (DESIGN §9, "Labeled
+  metrics"; f04ef86, genclj-qs62).
+  - `mcmc/hmc`, `mala` and `nuts`, their `-particles` kernels, the
+    kernels of gen.inference.kernel and `nuts/adapt` and `sample` take
+    a variance for each selected choice by its address: a choice map or
+    a map, `{:slope 0.012 :intercept 0.46}`, each a number or an array of
+    the choice's shape. One number for every value is unchanged.
+  - A vector or array of variances for a selection of more than one
+    choice is an error (`:unlabeled-inv-metric`). It followed the choice
+    map's flat order (addresses sorted), not the selection's, so
+    `{:inv-metric [0.012 0.46]}` with `(sel/select :slope :intercept)`
+    gave 0.012 to `:intercept`. Write the map in its place. For a
+    selection of one choice a vector is taken as before.
+  - `nuts/adapt` and `nuts/sample` return `:inv-metric` as a choice map
+    of variances by address, where it was a flat array in that order;
+    with no metric given or adapted, the identity as ones. Read
+    `(cm/get-choice (:inv-metric r) :slope)`; passing it back as
+    `:inv-metric` works as before.
+  - A metric that lacks a selected address, or holds one not selected,
+    is an error (`:invalid-inv-metric`).
 - **Breaking. Every kernel returns `{:trace :accepted? …}`** (DESIGN §9,
   "The 1.0's shape", kernels' shape; a509ad5, genclj-4hu0).
   - `mcmc/map-optimize` and `mcmc/elliptical-slice` return `{:trace
@@ -287,6 +314,35 @@ newest first in each section.
   on every backend; `cm/get-choice` still returns the value as stored. A
   trace's call at nested choices now ends its message with where to read
   them, and `ifn?` is true of a choice map.
+- **The trace-transform API's missing pieces** (DESIGN §9, "The
+  transform API"; 2e3f9d6, genclj-xsml).
+  - `tf/run` takes options: `:retained`, a selection of the model
+    choices the move keeps, whose continuous reads (neither written nor
+    copied) count as unchanged outputs of the Jacobian, as an
+    involution's update keeps them, so `tf/run` inspects a move that
+    reads x to move y and keeps x, where it threw "maps 3 dimensions to
+    2"; and `:aux-retval`, aux-in's return value for `tf/retval`.
+  - The results of `tf/involution`'s involutions and of every translator
+    hold `:log-abs-det` beside `:weight`, which still includes it. A move
+    outside the support has weight -Inf and no `:log-abs-det`.
+  - `mh/move` takes `:fwd-choices u`: the move's `:log-alpha` for given
+    auxiliary choices, assessed under the proposal, in place of drawing
+    them; a u the proposal gives density 0 is an error.
+  - An involution from `tf/involution` is also called `(h trace u key)`
+    or `(h trace u)`, without the two placeholders of `(h trace u nil []
+    key)`.
+  - `(tf/retval space)` in a transform's body: the return value of what
+    made an input space's choices (a trace's for model-in; for aux-in
+    the proposal's: an involution's fwd-retval, a translator's
+    q-forward's, in a check the backward proposal's), read on the host
+    and constant to the Jacobian, for a move's structure such as a path.
+    An involution's check of a transform that reads it needs the
+    proposal, `{:check? true :proposal q}`.
+- **`mcmc/inv-metric`: a metric labeled** (f04ef86, genclj-qs62). `(mcmc/inv-metric
+  trace selection m)` is the inverse metric the kernels read from the
+  `:inv-metric` option m (any form they take; nil the identity), as a
+  choice map of each selected choice's variances, the form `nuts/adapt`
+  returns.
 - **`array/vmap`: a function batched over a leading axis,** as JAX's
   vmap (DESIGN §9, "The 1.0's shape"; fbf0d21, genclj-t3ur).
   `((array/vmap f {:in-axes [0 nil]}) xs shared)` runs f once for the
@@ -340,6 +396,7 @@ newest first in each section.
     public var but `^:no-doc` ones, with its arglists or its kind (32
     namespaces and 675 vars when the data layer's additions landed; it
     grows with each deliberate addition). gen.api-test fails when the code differs. It
+    namespaces, 668 vars with genclj-9efy's replacements, gfi/assess-backward, array/vmap, the kernel constructors, mcmc/inv-metric and tf/retval). gen.api-test fails when the code differs. It
     names what was added, removed or changed, and calls out apart a var
     removed without a deprecation first. `clojure -M:test -m gen.api
     write` writes the snapshot after a deliberate change; `check` prints

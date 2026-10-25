@@ -783,9 +783,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       place of `:traces`, host: (keep t) for each kept trace, or for a map
       of functions a map of such vectors.
     - NUTS: `:eps` the step size taken or adapted (host; per particle an
-      [n] array), `:inv-metric` (array), `:accept-stat`, `:tree-depth`,
-      `:n-leapfrog`, `:energy` (host), `:stats` (a map of them per
-      iteration), `:warmup` (the warmup's `:stats` and `:divergences`).
+      [n] array), `:inv-metric` (a choice map of variances by address),
+      `:accept-stat`, `:tree-depth`, `:n-leapfrog`, `:energy` (host),
+      `:stats` (a map of them per iteration), `:warmup` (the warmup's
+      `:stats` and `:divergences`).
     - `:fallback`: why a batched run went one particle at a time, a
       written message. `:result`: map-particles*'s or project*'s value
       beside it. A particle filter's state: `:parents` (each particle's
@@ -793,8 +794,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     - Gradients and learning: `:values` (the selected choices, a choice
       map), `:gradients` (theirs, the same shape), `:arg-grads`, `:store`,
       `:grads` and `:model-grads` (store-shaped arrays), `:objective`
-      (host), `:history`. Transforms: `:log-abs-det` (log, array), `:model`
-      and `:aux` (choice maps), `:bwd-choices`.
+      (host), `:history`. Transforms: `:log-abs-det` (log, array:
+      tf/run's, and beside `:weight`, which includes it, an involution's
+      and a translator's), `:model` and `:aux` (choice maps),
+      `:bwd-choices`.
     Renamed for it: w/normalize's `:log-weights` (it meant the normalized
     logs there, the raw ones elsewhere) to `:log-normalized-weights`;
     mh/move's `:weight` to `:log-alpha` (mh/mh's name for the same ratio),
@@ -847,6 +850,66 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     field keeps a kernel one value, and a function stays a kernel); a
     table in the particle filter from kernels to -particles moves (closed
     to users' kernels).
+  - **Labeled metrics** (the agent, 2026-10-25, provisional; genclj-qs62):
+    `:inv-metric` gives a variance to each selected choice by its
+    address, a choice map or a map (`cm/from-map`'s: `{:slope 0.012
+    :intercept 0.46}`), each a number or an array of the choice's shape
+    (or flat with its size); one number is still a variance for every
+    value. A vector or array is taken only when the selected values are
+    one choice, whose elements it follows in order; for more it is a loud
+    error (`:unlabeled-inv-metric`), since the flat order is the choice
+    map's (addresses sorted, intercept before slope), not the
+    selection's, and a wrong order mis-scales every move without an
+    error. A choice map lacking a selected address, or holding one not
+    selected, is loud. `nuts/adapt` and `nuts/sample` return
+    `:inv-metric` labeled so, adapted or given (the identity as ones),
+    and `mcmc/inv-metric` labels any form the kernels take. The dense
+    metric (genclj-q9ge, not built) is left room: it will be a value of
+    its own, a matrix with its addresses' order, so it takes neither the
+    number, the map nor the vector form. Alternative: a plain map only
+    (no choice map), or vectors in the selection's order, which a
+    selection of a subtree (several choices, one address) leaves
+    undefined.
+  - **The transform API** (the agent, 2026-10-25, provisional;
+    genclj-xsml), additions only:
+    - `tf/run` takes `{:retained selection}`, the model choices the move
+      keeps: their continuous reads, neither written nor copied, are
+      unchanged outputs of the Jacobian, as an involution's update keeps
+      them. Without it every read is consumed, as before: tf/run updates
+      nothing, so it cannot tell a kept choice from a discarded one.
+    - An involution's result and every translator's hold `:log-abs-det`
+      beside `:weight`, which still includes it (the glossary's
+      meaning). A move outside the support is not weighed: weight -Inf
+      and no `:log-abs-det`, where 0 would claim a volume it never
+      measured.
+    - `mh/move` takes `:fwd-choices u`: u given, assessed under the
+      proposal with k-propose, so `:log-alpha` is the move's ratio for
+      that u (what enumerating auxiliary choices needs); a u of density 0
+      under the proposal is loud. Alternative: a separate function, with
+      the same result.
+    - tf/involution's function is also `(h trace u key)` and `(h trace
+      u)` (the implicit key), beside mh/move's `(h trace u retval args
+      key)`, Gen.jl's four arguments and a key; the short forms have no
+      forward return value.
+    - `(tf/retval space)` in a body: the return value of what made an
+      input space's choices, model-in's the trace's (none for a choice
+      map), aux-in's the proposal's (an involution's fwd-retval, a
+      translator's q-forward's, in a check the backward proposal's,
+      tf/run's `:aux-retval`). Read on the host and constant to the
+      Jacobian, for structure such as a path (chapter 052's subtree
+      move, as the notebook's involution takes its path). An involution's
+      check applies the transform again to the backward choices, where
+      that value is the backward proposal's, which the involution does
+      not hold (mh/involutive-mh does): `{:check? true :proposal q}`
+      gives it, and a check that needs it without one is loud.
+      Alternative, the owner's call: tf/involution holding its proposal
+      always, as Gen.jl's SymmetricTraceTranslator(q, args, h) does, so
+      that q is given once.
+    - Messages: an involution's check says "The involution applied twice
+      does not give back the trace" (or "the forward choices"), a
+      translator's "The inverse transform …" as before; a transform made
+      by tf/transform without an inverse is "The anonymous transform
+      (tf/transform)", where its name printed empty.
 - **Indices are 0-based** (Clojure idiom, as in GenMLX; D2): Map's and
   Unfold's addresses, Recurse's nodes (root 0), categorical's values
   (categorical-logits' too: 0 to n - 1) and Switch's branch index (branch 0

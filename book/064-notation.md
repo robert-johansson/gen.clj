@@ -250,7 +250,7 @@ A splice at an address puts the callee's choices in its namespace:
 | $\alpha$ | the acceptance probability of a move | its log ratio: `:log-alpha`; `mh/move` | Operations |
 | $h$ | a trace transform, a bijection between spaces of choice maps | `tf/deftransform`, applied by `tf/run` | Translators |
 | $h^{-1}$; $h = h^{-1}$ | the inverse of $h$; an *involution*, its own inverse | `tf/inverse`; `tf/involution` | Translators |
-| $\lvert J_h \rvert$ | the absolute determinant of the Jacobian of $h$ | its log: `:log-abs-det` | Translators |
+| $\lvert J_h \rvert$ | the absolute determinant of the Jacobian of $h$ | its log: `:log-abs-det`, from `tf/run`, and beside `:weight` in a translator's or an involution's result | Translators |
 | $\mathcal{Q}_1, \mathcal{Q}_2$ | the auxiliary generative functions of a trace translator | the proposals of `tf/translator` | Translators |
 | $\sigma, \sigma'$; $u, u'$ | auxiliary choices, before and after a move | the forward and backward choices of `mh/involutive-mh` | Translators |
 

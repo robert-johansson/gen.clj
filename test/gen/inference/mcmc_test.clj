@@ -443,6 +443,57 @@
         (is (ts/close? log-alpha (:log-alpha r) {:atol (ts/tol 1e-9)}))
         (is (ts/close? (if (:accepted? r) x x0) (moved r)))))))
 
+(def ^:private unequal-scales
+  "slope ~ N(0, 0.1), intercept ~ N(0, 10): canonical order intercept
+   first, the selection's below slope first."
+  (gen [] (trace :slope (d/normal 0 0.1)) (trace :intercept (d/normal 0 10))))
+
+(deftest a-metric-is-labeled-by-address
+  ;; genclj-qs62: :inv-metric's variances go to the addresses they name,
+  ;; whatever the order they are written or selected in, and a vector is
+  ;; refused for more than one choice. Planted bugs (2026-10-25): the
+  ;; variances taken in a map's own order (vals) fail the agreement of the
+  ;; forms and the scales' acceptance; a vector of two taken in the flat
+  ;; order fails the refusal
+  (let [tr (:trace (gfi/generate unequal-scales [] (cm/choicemap :slope 0.0 :intercept 0.0) (rng/key 0)))
+        slope-first (sel/select :slope :intercept)
+        matching (array-map :slope 0.01 :intercept 100.0)
+        result (fn [r] [(ts/number (:log-alpha r)) (ts/host (cm/to-map (:choices (:trace r))))])]
+    (testing "labeled as given"
+      (is (= {:slope 0.01 :intercept 100.0} (ts/host (cm/to-map (mcmc/inv-metric tr slope-first matching)))))
+      (is (= {:slope 1.0 :intercept 1.0} (ts/host (cm/to-map (mcmc/inv-metric tr slope-first nil)))) "the identity")
+      (is (= {:slope 2.0 :intercept 2.0} (ts/host (cm/to-map (mcmc/inv-metric tr slope-first 2.0)))) "one for all"))
+    (testing "every form of the same metric makes the same move"
+      (doseq [key (rng/split (rng/key 80) 3)]
+        (let [move (fn [s m] (result (mcmc/mala tr s 0.5 {:inv-metric m :key key})))
+              expected (move slope-first matching)]
+          (doseq [[label s m] [["the other order" slope-first (array-map :intercept 100.0 :slope 0.01)]
+                               ["a choice map" slope-first (cm/choicemap :slope 0.01 :intercept 100.0)]
+                               ["the selection in the other order" (sel/select :intercept :slope) matching]]]
+            (is (= expected (move s m)) label)))))
+    (testing "the variances scale the moves at their addresses"
+      ;; MALA at tau 0.5: with the target's variances it proposes within
+      ;; each scale and accepts most moves; swapped, the slope's proposals
+      ;; are a hundred of its standard deviations wide
+      (let [acceptance (fn [m] (/ (count (filter :accepted? (map #(mcmc/mala tr slope-first 0.5 {:inv-metric m :key %})
+                                                                (rng/split (rng/key 81) 40))))
+                                  40.0))]
+        (is (< 0.6 (acceptance matching)) "matching")
+        (is (> 0.1 (acceptance {:slope 100.0 :intercept 0.01})) "swapped")))
+    (testing "a vector or array leaves the order to guess for two choices"
+      (doseq [m [[0.01 100.0] (array/array [0.01 100.0])]]
+        (is (= :unlabeled-inv-metric (:reason (ts/thrown-data (mcmc/mala tr slope-first 0.5 {:inv-metric m :key (rng/key 82)})))))))
+    (testing "and not for one: an array-valued choice's elements in order, flat or in its shape"
+      (let [tr (:trace (gfi/generate vector-model [] (cm/choicemap :y y2) (rng/key 1)))
+            z (sel/select [:latent :z])
+            move (fn [m] (result (mcmc/hmc tr z {:L 3 :eps 0.2 :inv-metric m} (rng/key 83))))
+            expected (move {[:latent :z] [0.5 2.0]})]
+        (doseq [m [[0.5 2.0] (array/array [0.5 2.0]) {:latent {:z (array/array [0.5 2.0])}}
+                   (cm/choicemap [:latent :z] (array/array [0.5 2.0]))]]
+          (is (= expected (move m)) (pr-str m)))
+        (is (= (move 2.0) (move {[:latent :z] 2.0})) "a number for each of its elements")
+        (is (= :invalid-inv-metric (:reason (ts/thrown-data (move [0.5 2.0 1.0])))) "another size")))))
+
 (deftest a-move-that-changes-the-structure-is-named
   ;; :extra exists only for x > 0, and the moves carry x across 0 (review 3:
   ;; the error named assess, not the kernel's requirement)
