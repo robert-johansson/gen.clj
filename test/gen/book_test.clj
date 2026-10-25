@@ -6,6 +6,7 @@
    block outside an include and a stale figure each fail it."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.book :as book]
+            [gen.book.svg :as svg]
             [gen.test-support :as ts]))
 
 (defn- run-here?
@@ -49,7 +50,15 @@
     (is (zero? (runs "(/ 2.0 3.0)\n;=> 0.667")))
     (is (= 1 (runs "(/ 2.0 3.0)\n;=> 0.668")))
     (is (= 1 (runs "(/ 2.0 3.0)\n;=> 0.6668")) "a digit more is a tighter check")
-    (is (= 1 (runs "(+ 12 0.4)\n;=> 12")) "an integer is exact"))
+    (is (= 1 (runs "(+ 12 0.4)\n;=> 12")) "an integer is exact")
+    (is (zero? (runs "(* 7.4 1e-4)\n;=> 0.0007")) "0.0007 prints as 7.0E-4 but shows four decimals")
+    (is (= 1 (runs "(* 7.8 1e-4)\n;=> 0.0007"))))
+  (testing "NaN and infinities check exactly, as one check each"
+    (is (zero? (runs "(/ 0.0 0.0)\n;=> ##NaN")))
+    (is (= 1 (runs "1.0\n;=> ##NaN")))
+    (is (= 1 (runs "(/ 0.0 0.0)\n;=> 1.0")))
+    (is (zero? (runs "(/ 1.0 0.0)\n;=> ##Inf")))
+    (is (= 1 (runs "1e300\n;=> ##Inf"))))
   (testing "a float64 check runs where floats are float64, and only there"
     (is (zero? (runs "(/ 2.0 3.0)\n;=> 0.667 ; float64")))
     (is (= (if (ts/f32?) 0 1) (runs "(/ 2.0 3.0)\n;=> 0.668 ; float64"))))
@@ -99,6 +108,12 @@
       (is (thrown? clojure.lang.ExceptionInfo (book/synced "<!-- code: nope -->\n" rs))))
     (testing "a clojure block outside an include fails"
       (is (= 1 (failures #(book/check-includes (str fresh "\n```clojure\n(+ 4 5)\n```\n") rs)))))))
+
+(deftest figure-text-is-escaped
+  (let [svg (svg/tree [["</s>" "a & \"b\""]])]
+    (is (not (re-find #"<text[^>]*></s>" svg)) "a label's < is not markup")
+    (is (re-find #"&lt;/s&gt;" svg))
+    (is (re-find #"a &amp; " svg))))
 
 (deftest stale-figures-fail
   (let [path "figures/011-prior-lines.svg"
