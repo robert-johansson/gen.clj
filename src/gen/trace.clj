@@ -25,7 +25,14 @@
 
    A trace of a generative function with encapsulated randomness (thesis
    §4.5) also holds that randomness, a key, under :gen.trace/omega, and its
-   score is an estimate."
+   score is an estimate.
+
+   A trace prints compactly, for reading: #gen/trace[maker {:args …
+   :score … :choices …}], its choices as a nested map, its calls' traces
+   left out; a batched trace (gen.batched's, one value per particle) as
+   #gen/trace[maker {:args … :batch-shape [n]}]. The printed form is not
+   read back: gen.serialize's write-trace and read-trace are the round
+   trip."
   {:api :stable}
   (:require [gen.array :as array]
             [gen.choicemap :as cm]))
@@ -127,3 +134,23 @@
        (if-let [[sub more] (-call (maker tr) tr p)]
          (recur sub more)
          not-found)))))
+
+;; ---------------------------------------------------------------------------
+;; Printing
+;; ---------------------------------------------------------------------------
+
+(defn- shown
+  "What a trace's printed form shows of tr, after its maker: its arguments,
+   score and choices (a nested map, as a choice map prints); for a batched
+   trace (one value per particle), its arguments and batch shape."
+  [tr]
+  (if-let [batch-shape (array/batch-shape (:score tr))]
+    (array-map :args (:args tr) :batch-shape batch-shape)
+    (array-map :args (:args tr) :score (:score tr) :choices (cm/to-map (:choices tr)))))
+
+(defmethod print-method Trace [tr ^java.io.Writer w]
+  (.write w "#gen/trace[")
+  (print-method (maker tr) w)
+  (.write w " ")
+  (print-method (shown tr) w)
+  (.write w "]"))

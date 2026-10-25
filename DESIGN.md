@@ -722,6 +722,14 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     Morgan's path by path and through get-selected (gen.selection-test);
     project-splits-the-score also over disjoint unions and De Morgan's
     intersection, on every kind (gen.laws).
+    Traces print compactly (2026-10-25, the agent, provisional;
+    genclj-qvnu, whose bean leaves readable-or-display to the owner):
+    display only, as the bean recommends, `#gen/trace[maker {:args …
+    :score … :choices …}]` with the choices as a nested map, and a batched
+    trace's `{:args … :batch-shape [n]}`; gen.serialize refuses the form
+    loudly (its #gen/trace is write-trace's map) and stays the round trip.
+    clojure.pprint prints records as maps whatever their print method, so
+    pprint still shows a trace's fields (choice maps' too).
   - **Before the tag:** the friction that changes shape lands (one
     result-key vocabulary, kernels returning {:trace :accepted?}, labeled
     metrics, matching batched return shapes, selections' union and

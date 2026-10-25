@@ -127,6 +127,12 @@
 (every? qualified-keyword? (drop 5 (keys tr)))
 ;=> true
 
+;; book: print-trace
+(def unit (gen [] (trace :u (d/uniform 0 1))))
+
+(pr-str (:trace (gfi/generate unit [] (cm/choicemap :u 0.25) (rng/key 5))))
+;=> "#gen/trace[#gen/fn[] {:args [], :score 0.0, :choices {:u 0.25}}]" ; float64
+
 ;; book: call
 [(tr :slope) (tr [:y 0])]
 ;=> [1.432 -5.395] ; float64

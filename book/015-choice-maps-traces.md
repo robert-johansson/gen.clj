@@ -253,8 +253,18 @@ and `project` read instead of running the model again.
 ;=> true
 ```
 
-Traces have no print method yet, and one printed whole fills a screen, so
-this book shows their fields.
+A trace prints compactly: its maker, then its arguments, score and
+choices. The other fields, each call's trace among them, would fill a
+screen, so they stay out. Here a uniform choice is constrained to 0.25,
+and its score is log 1:
+
+<!-- code: print-trace -->
+```clojure
+(def unit (gen [] (trace :u (d/uniform 0 1))))
+
+(pr-str (:trace (gfi/generate unit [] (cm/choicemap :u 0.25) (rng/key 5))))
+;=> "#gen/trace[#gen/fn[] {:args [], :score 0.0, :choices {:u 0.25}}]" ; float64
+```
 
 A trace answers for its choices, as its choice map does. Called with an
 address or a path, it returns the choice there, as Gen.jl's `trace[addr]`

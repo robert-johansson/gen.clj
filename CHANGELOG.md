@@ -195,6 +195,13 @@ newest first in each section.
 
 ### Added
 
+- **Traces print compactly** (genclj-qvnu). A trace prints as
+  `#gen/trace[#gen/fn[xs] {:args … :score … :choices {…}}]`: its maker,
+  arguments, score and choices as a nested map, where it printed its
+  whole record, every call's trace included (a 500-step Unfold's trace
+  printed 500 subtraces). A batched trace prints `{:args …
+  :batch-shape [n]}`. The form is for reading: gen.serialize refuses it
+  loudly, and `write-trace` and `read-trace` remain the round trip.
 - **`sel/union` and `sel/intersection`, and selections print as their
   trees** (DESIGN §9, "The 1.0's shape", before the tag; genclj-ufco).
   - `(sel/union s t …)` selects what any of the selections selects,
