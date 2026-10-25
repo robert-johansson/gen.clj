@@ -42,8 +42,9 @@
 ;=> [true true]
 
 ;; book: read
-[(cm/get-choice c [:params :slope]) (cm/get-value (cm/get-submap c :y0))]
-;=> [2.0 5.0]
+[(cm/get-choice c [:params :slope]) (c [:params :slope])
+ (cm/get-value (cm/get-submap c :y0))]
+;=> [2.0 2.0 5.0]
 
 (cm/to-map (cm/get-submap c :params))
 ;=> {:slope 2.0 :intercept 1.0}
@@ -66,13 +67,17 @@
       [[:params :slope] :z :params [:y0 :a]])
 ;=> [:found :absent :node :through-value]
 
-[(cm/get-choice c :z nil) (cm/has-value? c :z) (cm/has-submap? c :params)]
+[(c :z nil) (cm/has-value? c :z) (cm/has-submap? c :params)]
 ;=> [nil false true]
+
+;; book: call-node
+;; error: choice map: no value at [:params]: nested choices are there
+#_(c :params)
 
 ;; book: immutable
 (def c2 (cm/set-choice c [:params :slope] 3.0))
 
-[(cm/get-choice c2 [:params :slope]) (cm/get-choice c [:params :slope])]
+[(c2 [:params :slope]) (c [:params :slope])]
 ;=> [3.0 2.0]
 
 (def a (cm/choicemap :x 1.0 :y 2.0))
@@ -121,6 +126,12 @@
 
 (every? qualified-keyword? (drop 5 (keys tr)))
 ;=> true
+
+;; book: print-trace
+(def unit (gen [] (trace :u (d/uniform 0 1))))
+
+(pr-str (:trace (gfi/generate unit [] (cm/choicemap :u 0.25) (rng/key 5))))
+;=> "#gen/trace[#gen/fn[] {:args [], :score 0.0, :choices {:u 0.25}}]" ; float64
 
 ;; book: call
 [(tr :slope) (tr [:y 0])]
@@ -238,6 +249,33 @@
 (every? negated? [sel/all sel/none s slope-only (sel/select :params)])
 ;=> true
 
+;; book: union
+[(= (sel/union (sel/select :slope :intercept) (sel/select :y))
+    (sel/select :slope :intercept :y))
+ (= (sel/intersection (sel/select :x :y) (sel/select :y :z)) (sel/select :y))]
+;=> [true true]
+
+(defn de-morgan?
+  "Is the complement of the union of t and u the intersection of their
+   complements, at every path of some-paths?"
+  [t u]
+  (every? #(= (sel/selected? (sel/complement (sel/union t u)) %)
+              (sel/selected? (sel/intersection (sel/complement t)
+                                               (sel/complement u))
+                             %))
+          some-paths))
+
+(every? (fn [[t u]] (de-morgan? t u))
+        [[s slope-only] [sel/all s] [(sel/complement s) (sel/select :params)]])
+;=> true
+
+;; book: print-selection
+[(pr-str s) (pr-str sel/all)]
+;=> ["#gen/selection {:x all, :y all}" "#gen/selection all"]
+
+(pr-str (sel/union (sel/select :x) (sel/complement slope-only)))
+;=> "#gen/selection (union {:x all} (complement {:params {:slope all}}))"
+
 ;; book: project
 [(array/allclose? (gfi/project tr sel/none) 0.0)
  (array/allclose? (gfi/project tr sel/all) (:score tr))
@@ -305,4 +343,15 @@
 (array/allclose? (gfi/project tr (->Union (sel/select :slope) (sel/select :y)))
                  (+ (gfi/project tr (sel/select :slope))
                     (gfi/project tr (sel/select :y))))
+;=> true
+
+(defn agree?
+  "Do selections f and g select the same paths of some-paths?"
+  [f g]
+  (every? #(= (sel/selected? f %) (sel/selected? g %)) some-paths))
+
+(every? (fn [[p q]] (and (agree? (->Union p q) (sel/union p q))
+                         (agree? (intersection p q) (sel/intersection p q))))
+        [[s (sel/select :y :z)] [slope-only (sel/select :params)]
+         [s (sel/complement slope-only)]])
 ;=> true

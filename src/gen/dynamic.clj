@@ -737,7 +737,7 @@
                          (estimate! "a plain call that made random choices")
                          (vswap! vol assoc :omega omega :omega-count (inc n)))
                        (:retval tr)))
-        retval (try (binding [trace/*body-call* plain-call]
+        retval (try (binding [trace/*body-call* plain-call cm/*in-body* true]
                       (realize! (if-let [st (:static gf)]
                                   (run-static st gf vol trace-fn splice-at args)
                                   (apply (:body-fn gf) trace-fn splice-fn read-param untraced-fn args))))

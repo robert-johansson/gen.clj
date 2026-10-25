@@ -83,15 +83,18 @@ address per level of the tree. `[:params :slope]` is `:params`, then
 `:slope`; the observations of *Getting Started*, `[:y 0]` and on, are
 `:y`, then an integer, which Gen.jl writes `:y => 0`.
 
-`get-choice` follows an address or a path to a leaf and returns its value,
-`get-value` returns a leaf's value, and `cm/to-map` turns a choice map back
-into plain data. `cm/addresses` lists every leaf's path, and `cm/values`
-their values in the same order:
+`get-choice` follows an address or a path to a leaf and returns its value.
+So does the choice map itself, called with the address or path, as
+Gen.jl's `cm[addr]` and a trace called (below) do. `get-value` returns a
+leaf's value, and `cm/to-map` turns a choice map back into plain data.
+`cm/addresses` lists every leaf's path, and `cm/values` their values in
+the same order:
 
 <!-- code: read -->
 ```clojure
-[(cm/get-choice c [:params :slope]) (cm/get-value (cm/get-submap c :y0))]
-;=> [2.0 5.0]
+[(cm/get-choice c [:params :slope]) (c [:params :slope])
+ (cm/get-value (cm/get-submap c :y0))]
+;=> [2.0 2.0 5.0]
 
 (cm/to-map (cm/get-submap c :params))
 ;=> {:slope 2.0 :intercept 1.0}
@@ -133,8 +136,20 @@ Use those where a missing choice is expected rather than a mistake:
       [[:params :slope] :z :params [:y0 :a]])
 ;=> [:found :absent :node :through-value]
 
-[(cm/get-choice c :z nil) (cm/has-value? c :z) (cm/has-submap? c :params)]
+[(c :z nil) (cm/has-value? c :z) (cm/has-submap? c :params)]
 ;=> [nil false true]
+```
+
+A choice map called is loud in the same places. At `:params`, which holds
+nested choices, the call is an error that points to `get-submap`, rather
+than returning the submap: a call reads values, as Gen.jl's `cm[addr]`
+does, and a submap is a choice map. A call that answered with either
+would leave every caller to ask which it got.
+
+<!-- code: call-node -->
+```clojure
+;; error: choice map: no value at [:params]: nested choices are there
+(c :params)
 ```
 
 ## Choice maps are immutable
@@ -148,7 +163,7 @@ addresses are disjoint.
 ```clojure
 (def c2 (cm/set-choice c [:params :slope] 3.0))
 
-[(cm/get-choice c2 [:params :slope]) (cm/get-choice c [:params :slope])]
+[(c2 [:params :slope]) (c [:params :slope])]
 ;=> [3.0 2.0]
 
 (def a (cm/choicemap :x 1.0 :y 2.0))
@@ -238,15 +253,26 @@ and `project` read instead of running the model again.
 ;=> true
 ```
 
-Traces have no print method yet, and one printed whole fills a screen, so
-this book shows their fields.
+A trace prints compactly: its maker, then its arguments, score and
+choices. The other fields, each call's trace among them, would fill a
+screen, so they stay out. Here a uniform choice is constrained to 0.25,
+and its score is log 1:
 
-A trace answers for its choices. Called with an address or a path, it
-returns the choice there, as Gen.jl's `trace[addr]` does, and at the empty
-path its return value. It takes a not-found value too. One lookup stays
-quiet: a trace is a record, so a keyword called on it, or `get`, reads the
-record's fields. `(:score tr)` is the score, but `(:slope tr)` is `nil`,
-whatever the trace holds at `:slope`. Call the trace instead:
+<!-- code: print-trace -->
+```clojure
+(def unit (gen [] (trace :u (d/uniform 0 1))))
+
+(pr-str (:trace (gfi/generate unit [] (cm/choicemap :u 0.25) (rng/key 5))))
+;=> "#gen/trace[#gen/fn[] {:args [], :score 0.0, :choices {:u 0.25}}]" ; float64
+```
+
+A trace answers for its choices, as its choice map does. Called with an
+address or a path, it returns the choice there, as Gen.jl's `trace[addr]`
+does, and at the empty path its return value. It takes a not-found value
+too. One lookup stays quiet: a trace is a record, so a keyword called on
+it, or `get`, reads the record's fields. `(:score tr)` is the score, but
+`(:slope tr)` is `nil`, whatever the trace holds at `:slope`. Call the
+trace instead:
 
 <!-- code: call -->
 ```clojure
@@ -461,9 +487,45 @@ holds path by path, nested paths and selections included:
 Because selections combine by laws rather than by looking at a model, an
 algorithm can build one from pieces and hand it to any GFI operation.
 "Everything but the slope" is `(sel/complement (sel/select :slope))`,
-whatever else the model holds. gen.selection has no union or intersection
-of two selections; `select` makes the union of the addresses it names,
-which covers this book's uses. Exercise 3 adds the rest of the algebra.
+whatever else the model holds. `sel/union` and `sel/intersection`
+complete the algebra: what either selection selects, and what both do.
+Selects join into one select, address by address, and the three
+operations keep De Morgan's laws, path by path:
+
+<!-- code: union -->
+```clojure
+[(= (sel/union (sel/select :slope :intercept) (sel/select :y))
+    (sel/select :slope :intercept :y))
+ (= (sel/intersection (sel/select :x :y) (sel/select :y :z)) (sel/select :y))]
+;=> [true true]
+
+(defn de-morgan?
+  "Is the complement of the union of t and u the intersection of their
+   complements, at every path of some-paths?"
+  [t u]
+  (every? #(= (sel/selected? (sel/complement (sel/union t u)) %)
+              (sel/selected? (sel/intersection (sel/complement t)
+                                               (sel/complement u))
+                             %))
+          some-paths))
+
+(every? (fn [[t u]] (de-morgan? t u))
+        [[s slope-only] [sel/all s] [(sel/complement s) (sel/select :params)]])
+;=> true
+```
+
+A selection prints as its tree, the way a choice map does: each address
+with what is selected under it, `all` and `none` by name, and a
+complement, union or intersection around its parts:
+
+<!-- code: print-selection -->
+```clojure
+[(pr-str s) (pr-str sel/all)]
+;=> ["#gen/selection {:x all, :y all}" "#gen/selection all"]
+
+(pr-str (sel/union (sel/select :x) (sel/complement slope-only)))
+;=> "#gen/selection (union {:x all} (complement {:params {:slope all}}))"
+```
 
 ## The three types, working together
 
@@ -540,11 +602,12 @@ Each exercise has a tested solution at the end of the chapter.
    `(sel/complement (sel/select :y))`. Do they project `tr` the same? A
    later version of the model adds a noise level at `:noise`; which of
    the two selects it?
-3. **A union.** A selection is anything that implements the two methods
-   of `sel/ISelection`, `-selected?` and `-subselection`. Write the union
-   of two selections as a record, and their intersection by De Morgan's
-   law. Is the projection on the union of two disjoint selections the sum
-   of their projections?
+3. **A union of your own.** A selection is anything that implements the
+   two methods of `sel/ISelection`, `-selected?` and `-subselection`.
+   Write the union of two selections as a record, and their intersection
+   by De Morgan's law, and check them against `sel/union` and
+   `sel/intersection`. Is the projection on the union of two disjoint
+   selections the sum of their projections?
 
 ## Solutions
 
@@ -580,7 +643,7 @@ complement what to leave.
 subselection under an address is the union of theirs. The intersection is
 the complement of the union of the complements. `project` reads a
 selection only through the two methods, so it takes the new kind, and the
-projections add:
+projections add. The two agree with gen.selection's own:
 
 <!-- code: solution-3 -->
 ```clojure
@@ -603,5 +666,16 @@ projections add:
 (array/allclose? (gfi/project tr (->Union (sel/select :slope) (sel/select :y)))
                  (+ (gfi/project tr (sel/select :slope))
                     (gfi/project tr (sel/select :y))))
+;=> true
+
+(defn agree?
+  "Do selections f and g select the same paths of some-paths?"
+  [f g]
+  (every? #(= (sel/selected? f %) (sel/selected? g %)) some-paths))
+
+(every? (fn [[p q]] (and (agree? (->Union p q) (sel/union p q))
+                         (agree? (intersection p q) (sel/intersection p q))))
+        [[s (sel/select :y :z)] [slope-only (sel/select :params)]
+         [s (sel/complement slope-only)]])
 ;=> true
 ```

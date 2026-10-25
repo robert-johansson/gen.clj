@@ -9,7 +9,9 @@
    own. (subtrace tr addr) is the call's trace (Gen.jl's
    get_call(tr, addr).subtrace). Both are loud where there is no such
    choice or call, and take a not-found value to give there instead, as
-   gen.choicemap's lookups do: (tr :b nil).
+   gen.choicemap's lookups do: (tr :b nil). A choice reads as the choice
+   map called reads it, ((:choices tr) :b): outside a body, a 0-d boolean
+   comes back a host boolean (gen.choicemap).
 
    A keyword reads the record's fields, not the choices: (:choices tr),
    (:score tr) and the others are the fields, and (:slope tr) is nil
@@ -23,10 +25,16 @@
 
    A trace of a generative function with encapsulated randomness (thesis
    §4.5) also holds that randomness, a key, under :gen.trace/omega, and its
-   score is an estimate."
+   score is an estimate.
+
+   A trace prints compactly, for reading: #gen/trace[maker {:args …
+   :score … :choices …}], its choices as a nested map, its calls' traces
+   left out; a batched trace (gen.batched's, one value per particle) as
+   #gen/trace[maker {:args … :batch-shape [n]}]. The printed form is not
+   read back: gen.serialize's write-trace and read-trace are the round
+   trip."
   {:api :stable}
   (:require [gen.array :as array]
-            [gen.array.batch :as batch]
             [gen.choicemap :as cm]))
 
 (set! *warn-on-reflection* true)
@@ -41,29 +49,19 @@
    gen.gfi/untraced-call); nil outside a body."
   nil)
 
-(defn- for-host
-  "v as host code reads it. Outside a body, a 0-d boolean array is a host
-   boolean, so (if (tr :a) …) branches on its value on every backend, not
-   on an array object (always true); on a lazy backend the read evaluates
-   it, at what is an inference-loop boundary. Inside a body, values stay
-   arrays: gen's conditionals read them (array/truthy?). A batched value,
-   one per particle, stays one too."
-  [v]
-  (if (and (nil? *body-call*) (array/backend-array? v) (not (batch/batched? v))
-           (= :bool (array/dtype v)) (= [] (array/shape v)))
-    (array/truthy? v)
-    v))
-
 (defrecord Trace [gen-fn args choices retval score]
   clojure.lang.IFn
   (invoke [this addr]
     (let [v (this addr none)]
-      (if (identical? v none) (throw (cm/lookup-error "trace: no choice or call" choices (cm/path addr))) v)))
+      (if (identical? v none)
+        (throw (cm/lookup-error "trace: no choice or call" choices (cm/path addr)
+                                {:node "; get-submap of its choices reads a submap"}))
+        v)))
   (invoke [this addr not-found]
     (let [v (cm/get-choice choices addr none)]
       (if (identical? v none)
-        (let [s (subtrace this addr none)] (if (identical? s none) not-found (for-host (:retval s))))
-        (for-host v))))
+        (let [s (subtrace this addr none)] (if (identical? s none) not-found (cm/for-host (:retval s))))
+        (cm/for-host v))))
   (applyTo [this args] (clojure.lang.AFn/applyToHelper this args)))
 
 (def ^:private fields #{:gen-fn :args :choices :retval :score})
@@ -136,3 +134,23 @@
        (if-let [[sub more] (-call (maker tr) tr p)]
          (recur sub more)
          not-found)))))
+
+;; ---------------------------------------------------------------------------
+;; Printing
+;; ---------------------------------------------------------------------------
+
+(defn- shown
+  "What a trace's printed form shows of tr, after its maker: its arguments,
+   score and choices (a nested map, as a choice map prints); for a batched
+   trace (one value per particle), its arguments and batch shape."
+  [tr]
+  (if-let [batch-shape (array/batch-shape (:score tr))]
+    (array-map :args (:args tr) :batch-shape batch-shape)
+    (array-map :args (:args tr) :score (:score tr) :choices (cm/to-map (:choices tr)))))
+
+(defmethod print-method Trace [tr ^java.io.Writer w]
+  (.write w "#gen/trace[")
+  (print-method (maker tr) w)
+  (.write w " ")
+  (print-method (shown tr) w)
+  (.write w "]"))

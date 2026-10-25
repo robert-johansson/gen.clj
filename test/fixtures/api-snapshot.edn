@@ -687,7 +687,9 @@
  {->All {:arglists ([])}
   ->Complement {:arglists ([inner])}
   ->Hierarchical {:arglists ([m])}
+  ->Intersection {:arglists ([parts])}
   ->None {:arglists ([])}
+  ->Union {:arglists ([parts])}
   -selected? {:arglists ([s addr])}
   -subselection {:arglists ([s addr])}
   ISelection {:kind :protocol, :methods [-selected? -subselection]}
@@ -698,17 +700,21 @@
   get-selected {:arglists ([choices s])}
   get-subselection {:arglists ([s addr])}
   hierarchical {:arglists ([& kvs])}
+  intersection {:arglists ([& ss])}
   map->All {:arglists ([m])}
   map->Complement {:arglists ([m])}
   map->Hierarchical {:arglists ([m])}
+  map->Intersection {:arglists ([m])}
   map->None {:arglists ([m])}
+  map->Union {:arglists ([m])}
   none {:kind :var}
   root-selected? {:arglists ([s])}
   select {:arglists ([& addrs])}
   selected? {:arglists ([s addr])}
   selection? {:arglists ([x])}
   set-subselection {:arglists ([s addr sub])}
-  top-addresses {:arglists ([s])}}
+  top-addresses {:arglists ([s])}
+  union {:arglists ([& ss])}}
 
  gen.serialize
  {->Written {:arglists ([form])}

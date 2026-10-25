@@ -697,6 +697,39 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     assoc on traces); choice maps are callable as traces are, loud with a
     not-found arity (genclj-a2t8); training's history is the mean generate
     weight on held-out examples, as Gen.jl's train! (genclj-59cf).
+    As built (2026-10-25, the agent, provisional; genclj-a2t8): `(c
+    addr)`, `(c path)` and `(c addr not-found)` are get-choice's lookups,
+    loud in the same places. At nested choices the call is an error that
+    points to get-submap, not the submap, as Gen.jl's `cm[addr]` (a
+    KeyError) and a trace's call are: a call reads values, a submap is a
+    choice map, and a call that answered with either would leave every
+    caller to ask which. Like a trace's call, it reads a 0-d boolean as a
+    host boolean outside a body (genclj-x6ox; the lead's choice), so
+    `((:choices tr) a)` is `(tr a)`; get-choice returns the value as
+    stored. The body flag is gen.choicemap's `*in-body*` (no-doc), which
+    gen.dynamic binds beside `*body-call*`: gen.choicemap cannot see
+    gen.trace.
+    As built (2026-10-25, the agent, provisional; genclj-ufco):
+    `(sel/union & ss)` and `(sel/intersection & ss)`, none and all of no
+    selections. all and none absorb or drop out, hierarchical selections
+    join or meet address by address (a union of selects is their select,
+    =), others are Union and Intersection records of their parts, which
+    root-selected? and top-addresses read. A complement's subselection is
+    simplified (none where it was the complement of all). A selection
+    prints as its tree, `#gen/selection {:x all, :y {0 all}}`, with all,
+    none and (complement …), (union …), (intersection …) as names: for
+    reading, not readable back. The laws: union, intersection and De
+    Morgan's path by path and through get-selected (gen.selection-test);
+    project-splits-the-score also over disjoint unions and De Morgan's
+    intersection, on every kind (gen.laws).
+    Traces print compactly (2026-10-25, the agent, provisional;
+    genclj-qvnu, whose bean leaves readable-or-display to the owner):
+    display only, as the bean recommends, `#gen/trace[maker {:args …
+    :score … :choices …}]` with the choices as a nested map, and a batched
+    trace's `{:args … :batch-shape [n]}`; gen.serialize refuses the form
+    loudly (its #gen/trace is write-trace's map) and stays the round trip.
+    clojure.pprint prints records as maps whatever their print method, so
+    pprint still shows a trace's fields (choice maps' too).
   - **Before the tag:** the friction that changes shape lands (one
     result-key vocabulary, kernels returning {:trace :accepted?}, labeled
     metrics, matching batched return shapes, selections' union and
