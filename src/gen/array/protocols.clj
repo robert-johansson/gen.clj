@@ -29,7 +29,9 @@
      - host data is parsed: a shape, its values, and a dtype.
    A backend that wraps another (the batch tracer, the tape) keeps these
    when it calls the backend it wraps: its shapes are the checked ones,
-   lifted.")
+   lifted."
+  {:api :stable
+   :implementers "the backend contract, which a new array backend implements"})
 
 (defonce ^{:doc "true once a lazy backend (-lazy? true) has been made: a backend
    sets it, so that gen.array/eval! walks nothing where all are eager."}

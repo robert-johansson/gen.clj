@@ -57,6 +57,7 @@
    (:not-a-maximum), and a climb that stops rising (:no-progress) or runs
    out of iterations (:not-converged). The density must be exact
    (gen.gfi/with-exact-density)."
+  {:api :experimental}
   (:refer-clojure :exclude [+ - * /])
   (:require [gen.array :as array :refer [+ - * /]]
             [gen.array.linalg :as la]

@@ -44,6 +44,7 @@
    entries, 0 for each allowed token and, last, for the end when the
    context accepts. A context that is no prefix has no next weights
    (:zero-prefix, as gen.llm.potential's dense ones)."
+  {:api :experimental}
   (:require [gen.llm.bytes :as bytes]
             [gen.llm.dfa :as dfa]
             [gen.llm.lm :as lm]

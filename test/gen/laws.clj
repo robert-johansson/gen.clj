@@ -30,6 +30,7 @@
    nothing about (constraints another run made that this one cannot visit)
    is vacuous. deflaws counts the vacuous cases, and a law most of whose
    cases are vacuous fails: it has stopped testing anything."
+  {:api :experimental}
   (:refer-clojure :exclude [+ -])
   (:require [clojure.test.check :as tc]
             [clojure.test.check.clojure-test :as ctc]

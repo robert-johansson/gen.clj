@@ -19,6 +19,7 @@
    A trace of a generative function with encapsulated randomness (thesis
    §4.5) also holds that randomness, a key, under :gen.trace/omega, and its
    score is an estimate."
+  {:api :stable}
   (:require [gen.array :as array]
             [gen.array.batch :as batch]
             [gen.choicemap :as cm]))

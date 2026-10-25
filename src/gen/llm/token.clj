@@ -66,6 +66,7 @@
    trace's importance weight for that. Its scores are its sites' log q, from the
    LM's rows at their contexts (one read for each, as the normalizer needs
    every token's)."
+  {:api :experimental}
   (:require [gen.array :as array]
             [gen.array.batch :as batch]
             [gen.choicemap :as cm]

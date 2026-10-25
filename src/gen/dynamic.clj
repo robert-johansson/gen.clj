@@ -52,6 +52,7 @@
    particle), and what it computes downstream is masked out of them. A
    parameter check downstream that reads a batch and fails for such a
    particle raises the fallback to one particle at a time (gen.batched)."
+  {:api :stable}
   (:refer-clojure :exclude [+ -])
   (:require [clojure.string :as str]
             [gen.array :as array :refer [+ -]]

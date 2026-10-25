@@ -10,6 +10,7 @@
      (default-threads)      → the default size: the system property
                               gen.llm.host-threads, or half the processors up to 4
      (in-order pool f xs)   → (mapv f xs), the calls on pool"
+  {:api :experimental}
   (:import [java.util Collection]
            [java.util.concurrent ExecutionException ExecutorService Executors Future]))
 

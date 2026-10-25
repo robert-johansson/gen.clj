@@ -27,6 +27,7 @@
    :diverged?) as :divergences, when any did.
 
    (run kernel trace opts) runs a chain and collects samples."
+  {:api :stable}
   (:refer-clojure :exclude [repeat cycle reversible?])
   (:require [gen.array :as array]
             [gen.choicemap :as cm]

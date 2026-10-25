@@ -26,11 +26,12 @@
 
 (def pages
   "The pages that cite, in the book's order, as {:title :text}: every
-   numbered Markdown file but a Part's heading and this appendix."
+   numbered Markdown file but a Part's heading, The Public API (the
+   docstrings', which cite as the code does) and this appendix."
   (->> (.listFiles (io/file "book"))
        (map #(.getName ^java.io.File %))
        (filter #(re-matches #"\d{3}-.*\.md" %))
-       (remove #(re-matches #"\d\d0-.*|066-.*" %))
+       (remove #(re-matches #"\d\d0-.*|063-.*|066-.*" %))
        sort
        (mapv (fn [file]
                (let [md (slurp (str "book/" file))]

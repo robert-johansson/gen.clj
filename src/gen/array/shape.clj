@@ -1,6 +1,7 @@
 (ns gen.array.shape
   "Shape arithmetic shared by gen.array and the backends. A shape is a vector
    of longs; [] is 0-d. Arrays are row-major and contiguous."
+  {:api :internal}
   (:require [clojure.string :as str]))
 
 (set! *warn-on-reflection* true)

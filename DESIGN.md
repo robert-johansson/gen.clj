@@ -630,6 +630,21 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     fails a test when the stable surface changes; the API appendix (063)
     is generated from the tier marks; a CHANGELOG from now on. Maven or
     Clojars coordinates are decided at first publish.
+    As built (2026-10-25, the agent, provisional; genclj-dv8x): the mark is
+    the ns form's attribute map. "Stable for implementers" is `:stable`
+    with an `:implementers` note (gen.gfi, gen.array.protocols), not a
+    fourth tier: the promise and its check are the same, and gen.gfi holds
+    the user API beside its protocols; through 1.x such a protocol keeps
+    its methods and gains none. Namespaces the list does not name: stable
+    gen.array.linalg (array-api.md §2's `la`), gen.dist.core (defdist,
+    and the multimethods a distribution extends), gen.inference.proposal
+    (internal proposals, under enumerative's with-exact-proposal and
+    gen.learning) and gen.inference.nuts (Stan's warmup for mcmc's nuts);
+    experimental every gen.llm namespace and gen.dist.commons-math (over
+    dist.host); internal gen.array.special, .host, .tree and .memory,
+    gen.random.threefry and gen.backend.mlx.exact. The snapshot is
+    test/fixtures/api-snapshot.edn, written by `clojure -M:test -m gen.api
+    write` (gen.api documents it and deprecation).
   - **Before the tag:** the friction that changes shape lands (one
     result-key vocabulary, kernels returning {:trace :accepted?}, labeled
     metrics, matching batched return shapes, selections' union and

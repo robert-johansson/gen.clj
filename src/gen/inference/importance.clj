@@ -34,6 +34,7 @@
 
    The options map also takes :key; omitting it draws one from the implicit
    key source."
+  {:api :stable}
   (:refer-clojure :exclude [-])
   (:require [gen.array :as array :refer [-]]
             [gen.batched :as batched]

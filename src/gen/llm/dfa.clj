@@ -19,6 +19,7 @@
    same language are equal (=), and the empty language's has no states, its
    start -1. table gives the transitions, for the hot loops of
    gen.llm.grammar: state s's successor on byte b at s * 256 + b."
+  {:api :experimental}
   (:import (java.nio IntBuffer)
            (java.util Arrays)))
 

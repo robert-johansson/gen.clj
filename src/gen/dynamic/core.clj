@@ -26,6 +26,7 @@
    up on it: = and not=, case (gen.dynamic.guard/case-key), the lookups,
    nth and the representation tests. So a body written with plain Clojure
    behaves alike on every backend. Reading the value evaluates it, as truthy? does."
+  {:api :internal}
   (:refer-clojure :exclude [not boolean true? false? identical? = not= nth
                             class type instance? number? integer? int? float? double? boolean? nat-int? pos-int?
                             neg-int? rational? ratio? decimal? coll? seqable? sequential? seq? map? vector? list?

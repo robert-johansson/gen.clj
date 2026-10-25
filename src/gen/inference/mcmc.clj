@@ -42,6 +42,7 @@
    (gen.batched/map-particles); where the model does not run batched, each
    particle's move is the scalar kernel's, from its own key (the key split n
    ways)."
+  {:api :stable}
   (:refer-clojure :exclude [+ - * / < >=])
   (:require [gen.array :as array :refer [+ - * / < >=]]
             [gen.array.batch :as batch]

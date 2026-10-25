@@ -33,6 +33,7 @@
      error never leaves a branch half-advanced: llama.cpp aborts the
      process on some misuse (an out-of-range sequence id, a batch over
      n_batch), so nothing reaches it unchecked."
+  {:api :experimental}
   (:require [gen.llm.branching :as br])
   (:import [gen.llm.branching Branch]
            [java.lang.ref Cleaner Cleaner$Cleanable PhantomReference ReferenceQueue]

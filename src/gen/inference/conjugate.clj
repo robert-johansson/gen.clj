@@ -67,6 +67,7 @@
    weight, but not exact. gf's densities must be exact (no encapsulated
    randomness). regenerate keeps every unselected choice
    (gen.inference.proposal)."
+  {:api :experimental}
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.string :as str]
             [gen.array :as array :refer [+ - * /]]

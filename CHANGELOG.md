@@ -147,6 +147,40 @@ newest first in each section.
 
 ### Added
 
+- **The API's tiers, the stable surface's snapshot and the API appendix**
+  (DESIGN §9, "The 1.0's shape"; e6f549f, genclj-dv8x).
+  - Every namespace of `src/` and `ext/`, and gen.laws, carries `{:api
+    :stable}`, `{:api :experimental}` or `{:api :internal}` in its ns form.
+    Stable: gen.array, gen.array.linalg, gen.array.protocols, gen.random,
+    gen.choicemap, gen.selection, gen.trace, gen.diff, gen.gfi,
+    gen.dynamic, gen.serialize, gen.batched, gen.dist, gen.dist.core,
+    gen.dist.dsl, gen.combinators, gen.custom, gen.state-space,
+    gen.inference's importance, mh, kernel, mcmc, nuts, particle-filter,
+    enumerative, proposal, transform, vi, diagnostics and weights,
+    gen.gradients and gen.learning. gen.gfi and gen.array.protocols add an
+    `:implementers` note: through 1.x their protocols keep their methods
+    and gain none. Experimental: every gen.llm namespace, gen.inference's
+    trace-kernel, conjugate, laplace and particle-mcmc, gen.partition,
+    gen.dist.host, gen.dist.commons-math and gen.laws. Internal: gen.array's
+    tape, batch, dtype, shape, special, host, tree and memory,
+    gen.random.threefry, gen.dynamic's guard, static and core, and the
+    backends. Of these, DESIGN's list did not name gen.array.linalg,
+    gen.dist.core (defdist's), gen.inference.proposal and nuts (stable),
+    gen.dist.commons-math (experimental), gen.array.special, host, tree
+    and memory, gen.random.threefry and gen.backend.mlx.exact (internal).
+  - `test/fixtures/api-snapshot.edn` holds the stable surface: every
+    public var but `^:no-doc` ones, with its arglists or its kind (32
+    namespaces, 649 vars). gen.api-test fails when the code differs. It
+    names what was added, removed or changed, and calls out apart a var
+    removed without a deprecation first. `clojure -M:test -m gen.api
+    write` writes the snapshot after a deliberate change; `check` prints
+    the differences.
+  - Deprecation is `:deprecated` metadata (the version) and a docstring
+    note naming the replacement, nothing printed. The snapshot records it.
+  - The book's appendix C, *The Public API* (`book/063-api.md`), is written
+    from the tiers and docstrings: the stable namespaces by layer with
+    their vars, the experimental ones by name. The book's test fails when
+    it is stale.
 - **This changelog,** kept from 2026-10-25 (DESIGN §9, "The 1.0's shape";
   genclj-6g66).
 - **VI's pathwise estimator, ADVI's.** `black-box-vi` and `elbo-gradient`
@@ -241,23 +275,11 @@ sections above in the commit that builds it.
   7 changes nothing in the code (dynamic bodies keep passing unknown-change
   to splices; gen.dynamic's docstring names the static language as the way
   to incremental splices; 33fec66).
-- **The 1.0's shape** (2026-10-25; 872f04f; genclj-04h2).
-  - Tier marks on every namespace. Stable: gen.array, gen.random, the data
-    layer (choicemap, selection, trace, diff), gen.gfi, gen.dynamic,
-    gen.dist with defdist and gen.dist.dsl, gen.combinators, gen.custom,
-    gen.state-space, gen.serialize, inference's core (importance, mh,
-    kernel, mcmc, particle-filter, enumerative, transform, vi, diagnostics,
-    weights), gen.gradients, gen.learning and gen.batched; for implementers,
-    the GFI protocol and gen.array.protocols. Experimental: gen.llm.*,
-    trace-kernel, conjugate, laplace, particle-mcmc, partition, dist.host,
-    and gen.laws until it moves to ext/laws. Internal: tape, batch, dtype,
-    shape, the dynamic language's guard, static and core, and the backends.
+- **The 1.0's shape** (2026-10-25; 872f04f; genclj-04h2). The tier marks,
+  the snapshot and the API appendix are built (Added, above).
   - Public replacements for internals that dependents reach: a per-particle
     accessor in gen.batched, and gen.array's own `tracked?`, `broadcast` and
     `dtype-kind` (memo.clj's).
-  - A committed snapshot of the stable vars and arglists, which fails a test
-    when the stable surface changes, and the API appendix generated from
-    the tier marks.
   - Shape changes before the tag: one result-key vocabulary, kernels
     returning `{:trace :accepted?}`, labeled metrics, matching batched
     return shapes, selections' union and intersection, callable choice maps,

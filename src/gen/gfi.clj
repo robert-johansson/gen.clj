@@ -40,6 +40,8 @@
    A choice outside its own support stops the run that makes it: the
    operation's weight is -Inf, and its trace (score -Inf) holds the choices
    up to that one (impossible?, gen.dynamic; DESIGN.md §9)."
+  {:api :stable
+   :implementers "IGenerativeFunction, IRevisable and IStores, which a new kind of generative function implements"}
   (:refer-clojure :exclude [update -])
   (:require [gen.array :as array :refer [-]]
             [gen.array.batch :as batch]

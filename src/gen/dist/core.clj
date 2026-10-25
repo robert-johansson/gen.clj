@@ -9,6 +9,7 @@
    Shapes: (sample d key batch-shape) draws a value of the distribution's
    shape broadcast against batch-shape. [] is one draw; [N] is one draw per
    particle. log-prob broadcasts the same way."
+  {:api :stable}
   (:refer-clojure :exclude [- < > <= >= ==])
   (:require [gen.array :as array :refer [- < > <= >= ==]]
             [gen.array.dtype :as dt]

@@ -2,7 +2,8 @@
   "Trees of arrays: nested maps, vectors and seqs whose leaves are arrays or
    numbers. gen.array's tree-leaves and tree-map are these, and compile and
    the MLX backend take trees apart and refill them with them. Below
-   gen.array and the backends, so a backend requires it statically.")
+   gen.array and the backends, so a backend requires it statically."
+  {:api :internal})
 
 (set! *warn-on-reflection* true)
 

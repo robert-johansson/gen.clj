@@ -35,6 +35,7 @@
    an error when it is made. check-end-tokens is the one check, where a
    potential meets a completion's end tokens (token/completion, and token
    SMC's :potential)."
+  {:api :experimental}
   (:require [gen.llm.branching :as br]))
 
 (set! *warn-on-reflection* true)

@@ -39,6 +39,7 @@
    kernels of reweighting), replicate and dereplicate, coalesce, introduce,
    the weighted statistics mean, variance and proportions, and substate
    views (view, and update-view to run any of these on some particles)."
+  {:api :stable}
   (:refer-clojure :exclude [+ - * replicate])
   (:require [gen.array :as array :refer [+ - *]]
             [gen.batched :as batched]

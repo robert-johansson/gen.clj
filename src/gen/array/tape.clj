@@ -29,6 +29,7 @@
    The wrapped backend may be the batch tracer (gen.array.batch), whose
    -value-and-grad is this one over itself: every primal and every rule
    then runs per particle, which makes the gradient vmap's."
+  {:api :internal}
   (:refer-clojure :exclude [+ - * / < > <= >= ==])
   (:require [gen.array :as array :refer [+ - * / < > <= >= ==]]
             [gen.array.dtype :as dt]

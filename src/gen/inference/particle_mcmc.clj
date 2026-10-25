@@ -55,6 +55,7 @@
 
    Not here yet: ancestor sampling (Lindsten, Jordan and Schön 2014), and
    conditional forms of the other resampling schemes."
+  {:api :experimental}
   (:refer-clojure :exclude [+ -])
   (:require [gen.array :as array :refer [+ -]]
             [gen.choicemap :as cm]

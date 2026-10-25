@@ -1,0 +1,719 @@
+;; gen.clj's stable surface (DESIGN.md §9, "The 1.0's shape"): every public
+;; var, but ^:no-doc ones, of every namespace marked {:api :stable}, with its
+;; arglists, or its kind where they do not apply. gen.api-test fails when the
+;; code differs. A change of the surface is deliberate: write this file with
+;;   clojure -M:test -m gen.api write
+;; and commit it with the change and its CHANGELOG line. A stable var is
+;; deprecated (:deprecated metadata, a docstring note) before it is removed.
+{gen.array
+ {!= {:arglists ([x y])}
+  * {:arglists ([] [x] [x y] [x y & more])}
+  *backend* {:kind :var, :dynamic true}
+  + {:arglists ([] [x] [x y] [x y & more])}
+  - {:arglists ([x] [x y] [x y & more])}
+  ->clj {:arglists ([x])}
+  / {:arglists ([x] [x y] [x y & more])}
+  < {:arglists ([x y])}
+  <= {:arglists ([x y])}
+  == {:arglists ([x y])}
+  > {:arglists ([x y])}
+  >= {:arglists ([x y])}
+  abs {:arglists ([x])}
+  acos {:arglists ([x])}
+  all {:arglists ([x] [x opts])}
+  all-particles {:arglists ([x])}
+  all-true? {:arglists ([x])}
+  allclose? {:arglists ([x y] [x y {:keys [rtol atol equal-nan?], :or {rtol 1.0E-5, atol 1.0E-8}}])}
+  any {:arglists ([x] [x opts])}
+  any-true? {:arglists ([x])}
+  arange {:arglists ([stop] [start stop] [start stop step] [start stop step {:keys [dtype]}])}
+  argmax {:arglists ([x] [x opts])}
+  argmin {:arglists ([x] [x opts])}
+  array {:arglists ([data] [data {:keys [dtype]}])}
+  array? {:arglists ([x])}
+  asin {:arglists ([x])}
+  astype {:arglists ([x dtype])}
+  atan {:arglists ([x])}
+  atan2 {:arglists ([x y])}
+  backend {:arglists ([x])}
+  backend-array? {:arglists ([x])}
+  backend-name {:arglists ([b])}
+  backend-named {:arglists ([k])}
+  batched-branch {:arglists ([message data] [message data cause])}
+  broadcast-to {:arglists ([x new-shape])}
+  ceil {:arglists ([x])}
+  clip {:arglists ([x lo hi])}
+  common-backend {:arglists ([xs])}
+  compile {:arglists ([f] [f opts])}
+  concatenate {:arglists ([xs] [xs axis])}
+  concrete? {:arglists ([x])}
+  cos {:arglists ([x])}
+  cosh {:arglists ([x])}
+  cumprod {:arglists ([x] [x opts])}
+  cumsum {:arglists ([x] [x opts])}
+  custom-vjp {:arglists ([f vjp])}
+  defaults {:arglists ([b])}
+  diag {:arglists ([x])}
+  digamma {:arglists ([x])}
+  dtype {:arglists ([x])}
+  effective-backend {:arglists ([b])}
+  equal? {:arglists ([x y])}
+  erf {:arglists ([x])}
+  erfinv {:arglists ([x])}
+  eval! {:arglists ([t])}
+  exp {:arglists ([x])}
+  expand-dims {:arglists ([x axes])}
+  expm1 {:arglists ([x])}
+  eye {:arglists ([n] [n {dt :dtype}])}
+  flatten {:arglists ([x])}
+  floor {:arglists ([x])}
+  floor-div {:arglists ([x y])}
+  full {:arglists ([shape value] [shape value {dt :dtype}])}
+  full-like {:arglists ([x value] [x value {dt :dtype}])}
+  grad {:arglists ([f] [f opts])}
+  host? {:arglists ([x])}
+  isfinite {:arglists ([x])}
+  isinf {:arglists ([x])}
+  isnan {:arglists ([x])}
+  item {:arglists ([x])}
+  lgamma {:arglists ([x])}
+  linspace {:arglists ([start stop n])}
+  log {:arglists ([x])}
+  log-beta {:arglists ([a b])}
+  log-softmax {:arglists ([x] [x {:keys [axis], :or {axis -1}}])}
+  log1p {:arglists ([x])}
+  logaddexp {:arglists ([x y])}
+  logcumsumexp {:arglists ([x] [x {:keys [axis], :or {axis -1}, :as opts}])}
+  logging-branches {:arglists ([f])}
+  logical-and {:arglists ([x y])}
+  logical-not {:arglists ([x])}
+  logical-or {:arglists ([x y])}
+  logsumexp {:arglists ([x] [x {:keys [keep-dims?], :as opts}])}
+  matmul {:arglists ([x y])}
+  max {:arglists ([x] [x opts])}
+  maximum {:arglists ([x y])}
+  mean {:arglists ([x] [x opts])}
+  min {:arglists ([x] [x opts])}
+  minimum {:arglists ([x y])}
+  mod {:arglists ([x y])}
+  ndim {:arglists ([x])}
+  negate {:arglists ([x])}
+  ones {:arglists ([shape] [shape {:keys [dtype]}])}
+  ones-like {:arglists ([x])}
+  outer {:arglists ([x y])}
+  pick {:arglists ([x idx])}
+  pow {:arglists ([x y])}
+  prod {:arglists ([x] [x opts])}
+  reshape {:arglists ([x new-shape])}
+  round {:arglists ([x])}
+  scatter-add {:arglists ([x indices updates axis])}
+  shape {:arglists ([x])}
+  sigmoid {:arglists ([x])}
+  sign {:arglists ([x])}
+  sin {:arglists ([x])}
+  sinh {:arglists ([x])}
+  size {:arglists ([x])}
+  slice {:arglists ([x axis start stop] [x axis start stop step])}
+  softmax {:arglists ([x] [x {:keys [axis], :or {axis -1}}])}
+  softplus {:arglists ([x])}
+  sqrt {:arglists ([x])}
+  square {:arglists ([x])}
+  squeeze {:arglists ([x] [x axes])}
+  stack {:arglists ([xs] [xs axis])}
+  std {:arglists ([x] [x opts])}
+  stop-gradient {:arglists ([x])}
+  sum {:arglists ([x] [x opts])}
+  take {:arglists ([x indices] [x indices axis])}
+  take-along-axis {:arglists ([x indices axis])}
+  tan {:arglists ([x])}
+  tanh {:arglists ([x])}
+  transpose {:arglists ([x] [x perm])}
+  tree-leaves {:arglists ([t])}
+  tree-map {:arglists ([f t])}
+  truthy? {:arglists ([x])}
+  value-and-grad {:arglists ([f] [f {:keys [argnums], :or {argnums 0}}])}
+  variance {:arglists ([x] [x {:keys [ddof], :or {ddof 0}, :as opts}])}
+  weak-dtype {:arglists ([x] [x b])}
+  where {:arglists ([c x y])}
+  with-backend {:kind :macro, :arglists ([b & body])}
+  xlog1py {:arglists ([x y])}
+  xlogy {:arglists ([x y])}
+  zeros {:arglists ([shape] [shape {:keys [dtype]}])}
+  zeros-like {:arglists ([x])}}
+
+ gen.array.linalg
+ {cholesky {:arglists ([a])}
+  cholesky-logdet {:arglists ([l])}
+  det {:arglists ([m])}
+  diagonal {:arglists ([m])}
+  inv {:arglists ([m])}
+  slogdet {:arglists ([m])}
+  solve {:arglists ([m rhs])}
+  solve-triangular {:arglists ([t rhs] [t rhs {:keys [lower? transpose?], :or {lower? true}}])}}
+
+ gen.array.protocols
+ {-all-particles {:arglists ([x])}
+  -arange {:arglists ([b start stop step dtype])}
+  -astype {:arglists ([b x dtype])}
+  -backend {:arglists ([x])}
+  -broadcast-to {:arglists ([b x shape])}
+  -compile {:arglists ([b f opts])}
+  -concatenate {:arglists ([b xs axis])}
+  -custom-vjp {:arglists ([b f vjp args])}
+  -defaults {:arglists ([b])}
+  -dtype {:arglists ([b x])}
+  -elementwise {:arglists ([b op args dtype])}
+  -eval! {:arglists ([b xs])}
+  -from-host {:arglists ([b values shape dtype])}
+  -full {:arglists ([b shape value dtype])}
+  -inner {:arglists ([b])}
+  -lazy? {:arglists ([b])}
+  -linalg {:arglists ([b op args])}
+  -matmul {:arglists ([b x y])}
+  -name {:arglists ([b])}
+  -native-grad? {:arglists ([b])}
+  -native-ops {:arglists ([b])}
+  -random-uniform {:arglists ([b key shape dtype])}
+  -reduce {:arglists ([b op x axes keep-dims?])}
+  -reshape {:arglists ([b x shape])}
+  -scan {:arglists ([b op x axis reverse?])}
+  -scatter-add {:arglists ([b x indices updates axis])}
+  -shape {:arglists ([b x])}
+  -slice {:arglists ([b x starts stops steps])}
+  -take {:arglists ([b x indices axis])}
+  -take-along-axis {:arglists ([b x indices axis])}
+  -to-host {:arglists ([b x])}
+  -transpose {:arglists ([b x perm])}
+  -value-and-grad {:arglists ([b f args argnums])}
+  IArray {:kind :protocol, :methods [-backend]}
+  IBackend {:kind :protocol, :methods [-arange -astype -broadcast-to -concatenate -defaults -dtype -elementwise -eval! -from-host -full -lazy? -linalg -matmul -name -native-ops -random-uniform -reduce -reshape -scan -scatter-add -shape -slice -take -take-along-axis -to-host -transpose -value-and-grad]}
+  IBatchedValue {:kind :protocol, :methods [-all-particles]}
+  ICompiling {:kind :protocol, :methods [-compile]}
+  ICustomVjp {:kind :protocol, :methods [-custom-vjp]}
+  INativeGrad {:kind :protocol, :methods [-native-grad?]}
+  IWrappingBackend {:kind :protocol, :methods [-inner]}
+  lazy-backends? {:kind :var}}
+
+ gen.batched
+ {*required* {:kind :var, :dynamic true}
+  *spot-checks* {:kind :var, :dynamic true}
+  *verified-updates* {:kind :var, :dynamic true}
+  ->Particles {:arglists ([n gen-fn args trace traces])}
+  ->Read {:arglists ([batched? v dtype host])}
+  batched? {:arglists ([ps])}
+  check {:arglists ([ps])}
+  choice {:arglists ([ps addr])}
+  fallback {:arglists ([ps])}
+  fallback-reason {:arglists ([ps])}
+  generate {:arglists ([gf args constraints n key] [gf args constraints n key opts])}
+  map->Particles {:arglists ([m])}
+  map-particles {:arglists ([ps f key & xs])}
+  map-particles* {:arglists ([ps f key & xs])}
+  particles? {:arglists ([x])}
+  project {:arglists ([ps selection])}
+  project* {:arglists ([ps selection])}
+  refused {:arglists ([e])}
+  regenerate {:arglists ([ps args argdiffs selection key])}
+  scores {:arglists ([ps])}
+  select {:arglists ([mask ps qs])}
+  set-choices {:arglists ([ps choices])}
+  simulate {:arglists ([gf args n key])}
+  size {:arglists ([ps])}
+  take {:arglists ([ps indices])}
+  traces {:arglists ([ps])}
+  update {:arglists ([ps args argdiffs constraints key] [ps args argdiffs constraints key opts])}
+  written {:arglists ([e])}}
+
+ gen.choicemap
+ {->Node {:arglists ([m])}
+  ->Value {:arglists ([v])}
+  -get-submap {:arglists ([cm addr])}
+  -get-value {:arglists ([cm])}
+  -has-value? {:arglists ([cm])}
+  -submaps {:arglists ([cm])}
+  EMPTY {:kind :var}
+  IChoiceMap {:kind :protocol, :methods [-get-submap -get-value -has-value? -submaps]}
+  addresses {:arglists ([cm])}
+  choicemap {:arglists ([& kvs])}
+  choicemap? {:arglists ([x])}
+  empty? {:arglists ([cm])}
+  from-array {:arglists ([proto arr])}
+  from-map {:arglists ([m])}
+  get-choice {:arglists ([cm addr] [cm addr not-found])}
+  get-submap {:arglists ([cm addr] [cm addr not-found])}
+  get-value {:arglists ([cm] [cm not-found])}
+  has-submap? {:arglists ([cm addr])}
+  has-value? {:arglists ([cm] [cm addr])}
+  leaves {:arglists ([cm])}
+  map->Node {:arglists ([m])}
+  map->Value {:arglists ([m])}
+  merge {:arglists ([] [x] [x y] [x y & more])}
+  override {:arglists ([x y])}
+  pair {:arglists ([a b key-a key-b])}
+  path {:arglists ([addr])}
+  remove-path {:arglists ([cm addr])}
+  remove-submap {:arglists ([cm addr])}
+  set-choice {:arglists ([cm addr v])}
+  set-submap {:arglists ([cm addr sub])}
+  set-value {:arglists ([cm addr v])}
+  stack {:arglists ([cms])}
+  submaps {:arglists ([cm])}
+  submaps-shallow {:arglists ([cm])}
+  to-array {:arglists ([cm])}
+  to-map {:arglists ([cm])}
+  unpair {:arglists ([c key-a key-b])}
+  unstack {:arglists ([cm n])}
+  values {:arglists ([cm])}
+  values-shallow {:arglists ([cm])}}
+
+ gen.combinators
+ {->DimapGF {:arglists ([inner pre post])}
+  ->MapGF {:arglists ([kernel])}
+  ->MixGF {:arglists ([components logits? body])}
+  ->RecurseGF {:arglists ([production aggregation max-branch])}
+  ->ScanGF {:arglists ([kernel])}
+  ->SwitchGF {:arglists ([branches])}
+  ->UnfoldGF {:arglists ([kernel])}
+  call-at {:arglists ([gf])}
+  choice-at {:arglists ([dist])}
+  contramap {:arglists ([gf f])}
+  dimap {:arglists ([gf f g])}
+  get-child {:arglists ([parent j max-branch])}
+  get-child-num {:arglists ([child max-branch])}
+  get-parent {:arglists ([child max-branch])}
+  map {:arglists ([kernel])}
+  map->DimapGF {:arglists ([m])}
+  map->MapGF {:arglists ([m])}
+  map->MixGF {:arglists ([m])}
+  map->RecurseGF {:arglists ([m])}
+  map->ScanGF {:arglists ([m])}
+  map->SwitchGF {:arglists ([m])}
+  map->UnfoldGF {:arglists ([m])}
+  map-retval {:arglists ([gf g])}
+  mix {:arglists ([& components])}
+  mix-logits {:arglists ([& components])}
+  recurse {:arglists ([production aggregation max-branch])}
+  scan {:arglists ([kernel])}
+  switch {:arglists ([& gfs])}
+  unfold {:arglists ([kernel])}}
+
+ gen.custom
+ {->DeterministicGF {:arglists ([apply-with-state update-with-state gradient param-names param-gradient params])}
+  ->EstimatedGF {:arglists ([estimate simulate retval addresses])}
+  deterministic {:arglists ([{:keys [apply-with-state update-with-state gradient gradient-with-state params param-gradient-with-state], :as spec}])}
+  deterministic? {:arglists ([f])}
+  estimated {:arglists ([{:keys [estimate simulate retval addresses], :as spec}])}
+  map->DeterministicGF {:arglists ([m])}
+  map->EstimatedGF {:arglists ([m])}
+  with-params {:arglists ([f params])}}
+
+ gen.diff
+ {->DictDiff {:arglists ([added deleted updated])}
+  ->IntDiff {:arglists ([amount])}
+  ->NoChange {:arglists ([])}
+  ->SetDiff {:arglists ([added deleted])}
+  ->UnknownChange {:arglists ([])}
+  ->VectorDiff {:arglists ([new-length prev-length updated])}
+  changed? {:arglists ([d])}
+  compute {:arglists ([prev now])}
+  consistent? {:arglists ([prev new d])}
+  dict-diff {:arglists ([added deleted updated])}
+  dict-diff? {:arglists ([d])}
+  element-changed? {:arglists ([d i])}
+  int-diff {:arglists ([amount])}
+  int-diff? {:arglists ([d])}
+  map->DictDiff {:arglists ([m])}
+  map->IntDiff {:arglists ([m])}
+  map->NoChange {:arglists ([m])}
+  map->SetDiff {:arglists ([m])}
+  map->UnknownChange {:arglists ([m])}
+  map->VectorDiff {:arglists ([m])}
+  no-change {:kind :var}
+  no-change? {:arglists ([d])}
+  no-changes {:arglists ([n])}
+  propagate {:kind :multimethod}
+  set-diff {:arglists ([added deleted])}
+  set-diff? {:arglists ([d])}
+  unknown-change {:kind :var}
+  unknown-change? {:arglists ([d])}
+  vector-diff {:arglists ([new-length prev-length updated])}
+  vector-diff? {:arglists ([d])}}
+
+ gen.dist
+ {bernoulli {:arglists ([p])}
+  beta {:arglists ([a b])}
+  beta-uniform {:arglists ([theta a b])}
+  binom {:arglists ([n p])}
+  broadcasted-normal {:kind :fn}
+  categorical {:arglists ([probs])}
+  categorical-logits {:arglists ([logits])}
+  cauchy {:arglists ([x0 scale])}
+  chi-squared {:arglists ([nu])}
+  dirichlet {:arglists ([alpha])}
+  exponential {:arglists ([rate])}
+  f-dist {:arglists ([nu1 nu2])}
+  gamma {:arglists ([k theta])}
+  geometric {:arglists ([p])}
+  gumbel {:arglists ([mu theta])}
+  heterogeneous-mixture {:arglists ([families])}
+  homogeneous-mixture {:arglists ([family] [family dims])}
+  inv-gamma {:arglists ([k theta])}
+  inv-wishart {:arglists ([df scale])}
+  laplace {:arglists ([loc scale])}
+  levy {:arglists ([mu sigma])}
+  log-normal {:arglists ([mu sigma])}
+  logistic {:arglists ([mu theta])}
+  mvnormal {:arglists ([mu cov])}
+  nakagami {:arglists ([m omega])}
+  neg-binom {:arglists ([r p])}
+  normal {:arglists ([mu std])}
+  pareto {:arglists ([alpha theta])}
+  piecewise-uniform {:arglists ([bounds probs])}
+  poisson {:arglists ([lam])}
+  product {:arglists ([& families])}
+  student-t {:arglists ([nu])}
+  triangular {:arglists ([a b c])}
+  truncated-normal {:arglists ([mu sigma lo hi])}
+  uniform {:arglists ([low high])}
+  uniform-discrete {:arglists ([low high])}
+  von-mises {:arglists ([mu kappa])}
+  weibull {:arglists ([alpha theta])}
+  wishart {:arglists ([df scale])}
+  wrapped-cauchy {:arglists ([mu rho])}
+  wrapped-normal {:arglists ([mu sigma])}}
+
+ gen.dist.core
+ {->Distribution {:arglists ([type params])}
+  ->array {:arglists ([p])}
+  ->checkable {:arglists ([p])}
+  -discrete? {:kind :multimethod}
+  -log-prob {:kind :multimethod}
+  -pathwise? {:kind :multimethod}
+  -printed-params {:kind :multimethod}
+  -sample {:kind :multimethod}
+  -support {:kind :multimethod}
+  -value-shape {:kind :multimethod}
+  backend-of {:arglists ([& params])}
+  check {:arglists ([ok dist-name message data])}
+  check-increasing {:arglists ([dist-name param-name v])}
+  check-integer {:arglists ([dist-name param-name v min])}
+  check-non-negative {:arglists ([dist-name param-name v])}
+  check-not-nan {:arglists ([op v])}
+  check-numeric {:arglists ([dist-name param-name v])}
+  check-param-not-nan {:arglists ([dist-name param-name v])}
+  check-positive {:arglists ([dist-name param-name v])}
+  check-probabilities {:arglists ([dist-name param-name ps])}
+  check-probability {:arglists ([dist-name param-name v])}
+  check-value-shape {:arglists ([d v])}
+  defdist {:kind :macro, :arglists ([dist-name & body])}
+  discrete? {:arglists ([d])}
+  elementwise-shape {:arglists ([batch-shape & params])}
+  elementwise-value-shape {:arglists ([d])}
+  enumerable-support {:arglists ([d])}
+  float-dtype {:arglists ([b])}
+  float-limits {:arglists ([dtype])}
+  host-data? {:arglists ([p])}
+  int-dtype {:arglists ([b])}
+  log-prob {:arglists ([d v])}
+  map->Distribution {:arglists ([m])}
+  pathwise? {:arglists ([d])}
+  probability-tolerance {:arglists ([k dtype])}
+  sample {:arglists ([d key] [d key batch-shape])}
+  support {:arglists ([d])}
+  support-bound {:arglists ([v])}
+  value-shape {:arglists ([d])}}
+
+ gen.dist.dsl
+ {dist {:kind :macro, :arglists ([dist-name & more])}}
+
+ gen.dynamic
+ {*params* {:kind :var, :dynamic true}
+  ->DynamicGF {:arglists ([body-fn source params transitions dispatch static])}
+  defn-guarded {:kind :macro, :arglists ([fname & more])}
+  dynamic-gf? {:arglists ([x])}
+  gen {:kind :macro, :arglists ([params & body])}
+  guarded-fn {:kind :macro, :arglists ([& fn-tail])}
+  make-gen-fn {:arglists ([body-fn source] [body-fn source static])}
+  map->DynamicGF {:arglists ([m])}
+  site-transitions {:kind :var}
+  with-dispatch {:arglists ([gf dispatch])}
+  with-params {:arglists ([gf params])}
+  with-transitions {:arglists ([gf transitions])}}
+
+ gen.gfi
+ {*exact-density* {:kind :var, :dynamic true}
+  -assess {:arglists ([gf args choices key])}
+  -generate {:arglists ([gf args constraints key])}
+  -project {:arglists ([gf trace selection])}
+  -propose {:arglists ([gf args key])}
+  -regenerate {:arglists ([gf trace args argdiffs selection key])}
+  -revise {:arglists ([gf op args opts project-old])}
+  -same-gen-fn? {:arglists ([gf other budget])}
+  -simulate {:arglists ([gf args key])}
+  -stores {:arglists ([gf])}
+  -update {:arglists ([gf trace args argdiffs constraints key])}
+  -with-stores {:arglists ([gf stores])}
+  IGenerativeFunction {:kind :protocol, :methods [-assess -generate -project -propose -regenerate -simulate -update]}
+  IRevisable {:kind :protocol, :methods [-revise -same-gen-fn?]}
+  IStores {:kind :protocol, :methods [-stores -with-stores]}
+  assess {:arglists ([gf args choices] [gf args choices key])}
+  backward-key {:arglists ([k])}
+  check-argdiffs {:arglists ([op args argdiffs])}
+  check-args {:arglists ([op args])}
+  check-choice-map {:arglists ([op what x])}
+  check-exact-density! {:arglists ([what])}
+  check-selection {:arglists ([op x])}
+  defgf {:kind :macro, :arglists ([name fields & impls])}
+  eval-trace! {:arglists ([tr] [tr also])}
+  generate {:arglists ([gf args constraints] [gf args constraints key])}
+  generate-again {:arglists ([gf op args {:keys [prev constraints selection key]} project-old])}
+  generative-function? {:arglists ([x])}
+  implicit-seed {:arglists ([])}
+  impossible? {:arglists ([x])}
+  next-key {:arglists ([])}
+  project {:arglists ([trace selection])}
+  project-by-maker {:arglists ([tr selection])}
+  propose {:arglists ([gf args] [gf args key])}
+  regenerate {:arglists ([trace selection] [trace selection key] [trace args argdiffs selection] [trace args argdiffs selection key])}
+  revise {:arglists ([gf op args opts] [gf op args opts project-old])}
+  run-op {:arglists ([gf op args {:keys [key constraints prev argdiffs selection batch-shape], :as opts}])}
+  same-gen-fn? {:arglists ([a b])}
+  same-value? {:arglists ([a b] [a b budget])}
+  seed! {:arglists ([seed])}
+  simulate {:arglists ([gf args] [gf args key])}
+  stores {:arglists ([gf])}
+  under {:arglists ([e at])}
+  unvisited {:arglists ([op paths] [op paths detail])}
+  update {:arglists ([trace constraints] [trace constraints key] [trace args argdiffs constraints] [trace args argdiffs constraints key])}
+  with-exact-density {:kind :macro, :arglists ([op & body])}
+  with-stores {:arglists ([gf stores])}}
+
+ gen.gradients
+ {choice-gradients {:arglists ([trace selection] [trace selection retgrad] [trace selection retgrad {:keys [argnums], :as opts}])}
+  continuous-selection {:arglists ([trace selection])}
+  continuous? {:arglists ([v])}
+  flattened {:arglists ([values])}
+  jacobian {:arglists ([f x m])}
+  log-abs-det-jacobian {:arglists ([f x])}
+  mean {:arglists ([gs])}
+  param-gradients {:arglists ([trace] [trace retgrad])}
+  weighted-sum {:arglists ([cs gs])}}
+
+ gen.inference.diagnostics
+ {draws {:arglists ([traces addr])}
+  ess-bulk {:arglists ([draws])}
+  ess-mean {:arglists ([draws])}
+  ess-tail {:arglists ([draws])}
+  mcse-mean {:arglists ([draws])}
+  mcse-sd {:arglists ([draws])}
+  r-hat {:arglists ([draws])}
+  split-r-hat {:arglists ([draws])}
+  summary {:arglists ([draws] [draws {:keys [probs], :or {probs [0.05 0.5 0.95]}}])}}
+
+ gen.inference.enumerative
+ {->ExactProposalGF {:arglists ([gf paths limit check-retval? batched?])}
+  choice-vol-grid {:arglists ([& specs])}
+  enumerative-inference {:arglists ([model args observations grid] [model args observations grid {:keys [key batched? chunk-size]}])}
+  map->ExactProposalGF {:arglists ([m])}
+  marginal {:arglists ([result addr])}
+  traces {:arglists ([result])}
+  with-exact-proposal {:arglists ([gf addrs] [gf addrs {:keys [max-assignments check-retval? batched?], :or {max-assignments 100000}}])}}
+
+ gen.inference.importance
+ {estimate {:arglists ([f model args observations n] [f model args observations n opts])}
+  importance-resampling {:arglists ([model args observations n] [model args observations n opts])}
+  importance-sampling {:arglists ([model args observations n] [model args observations n opts])}
+  traces {:arglists ([result])}
+  weighted-sample {:arglists ([model args observations {:keys [proposal proposal-args]} key])}}
+
+ gen.inference.kernel
+ {->Kernel {:arglists ([f reverse-f])}
+  chain {:arglists ([& kernels])}
+  checked {:arglists ([kernel observations])}
+  checked-kernel {:arglists ([k form])}
+  cycle {:arglists ([kernels] [n kernels])}
+  involutive-mh {:arglists ([proposal proposal-args involution])}
+  kern {:kind :macro, :arglists ([params & body])}
+  kernel {:arglists ([f] [f reverse-f])}
+  map->Kernel {:arglists ([m])}
+  mh {:arglists ([selection] [proposal proposal-args])}
+  mix {:arglists ([kernels weights])}
+  repeat {:arglists ([n kernel])}
+  reversal {:arglists ([k])}
+  reversible? {:arglists ([k])}
+  run {:arglists ([kernel trace {:keys [samples burn thin key], :or {burn 0, thin 1}}])}
+  symmetric {:arglists ([f])}}
+
+ gen.inference.mcmc
+ {elliptical-slice {:arglists ([trace addr mu cov] [trace addr mu cov key])}
+  hmc {:arglists ([trace selection] [trace selection key-or-opts] [trace selection opts key])}
+  hmc-particles {:arglists ([ps selection] [ps selection key-or-opts] [ps selection opts key])}
+  mala {:arglists ([trace selection tau] [trace selection tau key-or-opts])}
+  mala-particles {:arglists ([ps selection tau] [ps selection tau key-or-opts])}
+  map-optimize {:arglists ([trace selection] [trace selection opts])}
+  map-optimize-particles {:arglists ([ps selection] [ps selection opts])}
+  nuts {:arglists ([trace selection] [trace selection key-or-opts] [trace selection opts key])}}
+
+ gen.inference.mh
+ {accept {:arglists ([trace proposed log-alpha key])}
+  involutive-mh {:arglists ([trace proposal proposal-args involution] [trace proposal proposal-args involution key])}
+  mh {:arglists ([trace selection-or-proposal] [trace x y] [trace proposal proposal-args key])}
+  mh-particles {:arglists ([ps selection] [ps selection key])}
+  move {:arglists ([trace proposal proposal-args {:keys [involution backward backward-args]} k-propose k-update])}}
+
+ gen.inference.nuts
+ {adapt {:arglists ([trace selection opts] [trace selection opts key])}
+  sample {:arglists ([trace selection opts] [trace selection opts key])}}
+
+ gen.inference.particle-filter
+ {choice-product {:arglists ([address-values])}
+  coalesce {:arglists ([state] [state {:keys [by], :or {by host-choices}}])}
+  dereplicate {:arglists ([state k] [state k {:keys [layout method key], :or {layout :contiguous, method :keepfirst}}])}
+  ess {:arglists ([state])}
+  initialize {:arglists ([model args observations n] [model args observations n {:keys [proposal batched? strata layout], :or {layout :contiguous}, :as opts}])}
+  introduce {:arglists ([state observations n] [state observations n {:keys [model args], :as opts}])}
+  log-ml-estimate {:arglists ([state])}
+  log-weights {:arglists ([state])}
+  maybe-resample {:arglists ([state] [state {:keys [ess-threshold], :as opts}])}
+  mean {:arglists ([state f])}
+  move-reweight {:arglists ([state kernel] [state kernel key])}
+  proportions {:arglists ([state f])}
+  rejuvenate {:arglists ([state kernel] [state kernel key])}
+  replicate {:arglists ([state k] [state k {:keys [layout], :or {layout :contiguous}}])}
+  resample {:arglists ([state] [state {:keys [method key priority n], :or {method :multinomial}}])}
+  resize {:arglists ([state n] [state n opts])}
+  reweighting {:arglists ([selection] [proposal proposal-args] [proposal proposal-args opts])}
+  sample-unweighted-traces {:arglists ([state n] [state n key])}
+  step {:arglists ([state args argdiffs observations] [state args argdiffs observations {:keys [proposal proposal-args backward backward-args], :as opts}])}
+  traces {:arglists ([state])}
+  update-view {:arglists ([state idx f & args])}
+  variance {:arglists ([state f])}
+  view {:arglists ([state idx])}}
+
+ gen.inference.proposal
+ {->InternalProposalGF {:arglists ([gf q])}
+  choices-of {:arglists ([q qargs choices])}
+  map->InternalProposalGF {:arglists ([m])}
+  regenerate-under {:arglists ([generate weight tr args argdiffs selection key])}
+  update-under {:arglists ([wrapper-name this generate tr args argdiffs constraints key])}
+  with-internal-proposal {:arglists ([gf q])}}
+
+ gen.inference.transform
+ {->Transform {:arglists ([name body inverse])}
+  copy {:arglists ([from-space from-addr to-space to-addr])}
+  deftransform {:kind :macro, :arglists ([tname & more])}
+  deterministic-translator {:arglists ([{:keys [q-forward q-backward], :as opts}])}
+  extending-translator {:arglists ([{:keys [p-new-args p-argdiffs new-observations q-forward q-forward-args], t :transform}])}
+  inverse {:arglists ([t])}
+  involution {:arglists ([t] [t {:keys [check?]}])}
+  involutive {:arglists ([t])}
+  map->Transform {:arglists ([m])}
+  new-arguments {:arglists ([trace p-new-args p-argdiffs])}
+  pair {:arglists ([f g])}
+  read {:arglists ([space addr tag])}
+  run {:arglists ([t model-in aux-in])}
+  same-choices? {:arglists ([a b])}
+  tcall {:arglists ([t])}
+  transform {:kind :macro, :arglists ([spaces & body])}
+  transform? {:arglists ([x])}
+  translator {:arglists ([{:keys [p-new p-new-args new-observations q-forward q-forward-args q-backward q-backward-args check? prev-observations], t :transform}])}
+  unconstrained-additions {:arglists ([old-choices constraints discard new-choices])}
+  updating-translator {:arglists ([{:keys [p-new-args p-argdiffs new-observations q-forward q-forward-args q-backward q-backward-args check? prev-observations], t :transform}])}
+  write {:arglists ([space addr value tag])}}
+
+ gen.inference.vi
+ {black-box-vi {:arglists ([model model-args observations q q-args store optimizer {:keys [samples], :or {samples 20}, :as opts}])}
+  black-box-vimco {:arglists ([model model-args observations q q-args store optimizer {:keys [samples estimates], :or {samples 10, estimates 1}, :as opts}])}
+  elbo-gradient {:arglists ([model model-args observations q q-args store n {:keys [estimator], :as opts}])}
+  vimco-gradient {:arglists ([model model-args observations q q-args store k {:keys [baseline key model-store batched?], :or {baseline :geometric}}])}}
+
+ gen.inference.weights
+ {ess {:arglists ([log-weights])}
+  log-mean-exp {:arglists ([log-weights])}
+  log-sum-exp {:arglists ([log-weights])}
+  multinomial {:arglists ([log-weights n] [log-weights n key])}
+  normalize {:arglists ([log-weights])}
+  resample {:arglists ([method log-weights n] [method log-weights n key])}
+  residual {:arglists ([log-weights n] [log-weights n key])}
+  stratified {:arglists ([log-weights n] [log-weights n key])}
+  systematic {:arglists ([log-weights n] [log-weights n key])}}
+
+ gen.learning
+ {adam {:arglists ([{:keys [lr beta1 beta2 eps], :or {lr 0.001, beta1 0.9, beta2 0.999, eps 1.0E-8}}])}
+  gradient-descent {:arglists ([{:keys [step-size-init step-size-beta]}])}
+  init {:arglists ([{:keys [kind]} store])}
+  lecture {:arglists ([model model-args proposal store q-args-fn key])}
+  lecture-batched {:arglists ([model model-args proposal store q-args-fn n key])}
+  sgd {:arglists ([{:keys [lr]}])}
+  step {:arglists ([{:keys [kind lr beta1 beta2 eps], :as optimizer} state store grads])}
+  train {:arglists ([gf store optimizer data-fn gradients-fn {:keys [epochs batches-per-epoch batch-size key], :or {epochs 1, batches-per-epoch 1, batch-size 1}}])}}
+
+ gen.random
+ {bernoulli {:arglists ([key p] [key p shape] [key p shape opts])}
+  categorical {:arglists ([key logits] [key logits shape] [key logits shape opts])}
+  exponential {:arglists ([key] [key shape] [key shape opts])}
+  fold-in {:arglists ([k data])}
+  gamma {:arglists ([key alpha] [key alpha shape] [key alpha shape opts])}
+  gumbel {:arglists ([key] [key shape] [key shape opts])}
+  key {:arglists ([seed])}
+  key-data {:arglists ([k])}
+  key? {:arglists ([x])}
+  normal {:arglists ([key] [key shape] [key shape opts])}
+  randint {:arglists ([key low high] [key low high shape] [key low high shape opts])}
+  split {:arglists ([k] [k n])}
+  uniform {:arglists ([key] [key shape] [key shape {:keys [low high], :as opts}])}}
+
+ gen.selection
+ {->All {:arglists ([])}
+  ->Complement {:arglists ([inner])}
+  ->Hierarchical {:arglists ([m])}
+  ->None {:arglists ([])}
+  -selected? {:arglists ([s addr])}
+  -subselection {:arglists ([s addr])}
+  ISelection {:kind :protocol, :methods [-selected? -subselection]}
+  all {:kind :var}
+  complement {:arglists ([s])}
+  from-choicemap {:arglists ([choices])}
+  from-paths {:arglists ([paths])}
+  get-selected {:arglists ([choices s])}
+  get-subselection {:arglists ([s addr])}
+  hierarchical {:arglists ([& kvs])}
+  map->All {:arglists ([m])}
+  map->Complement {:arglists ([m])}
+  map->Hierarchical {:arglists ([m])}
+  map->None {:arglists ([m])}
+  none {:kind :var}
+  root-selected? {:arglists ([s])}
+  select {:arglists ([& addrs])}
+  selected? {:arglists ([s addr])}
+  selection? {:arglists ([x])}
+  set-subselection {:arglists ([s addr sub])}
+  top-addresses {:arglists ([s])}}
+
+ gen.serialize
+ {->Written {:arglists ([form])}
+  read {:arglists ([s])}
+  read-trace {:arglists ([gf s])}
+  read-trace-data {:arglists ([s])}
+  write {:arglists ([x])}
+  write-trace {:arglists ([tr])}}
+
+ gen.state-space
+ {->FilterStep {:arglists ([kind observe])}
+  hmm {:kind :var}
+  kalman {:kind :var}
+  map->FilterStep {:arglists ([m])}
+  sample-states {:arglists ([tr] [tr key])}}
+
+ gen.trace
+ {*body-call* {:kind :var, :dynamic true}
+  ->Trace {:arglists ([gen-fn args choices retval score])}
+  -call {:arglists ([gf tr path])}
+  ICalls {:kind :protocol, :methods [-call]}
+  as-made-by {:arglists ([tr gf])}
+  make-trace {:arglists ([m])}
+  maker {:arglists ([tr])}
+  map->Trace {:arglists ([m])}
+  omega-at {:arglists ([tr])}
+  subtrace {:arglists ([tr addr] [tr addr not-found])}
+  trace? {:arglists ([x])}}}

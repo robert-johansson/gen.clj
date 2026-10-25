@@ -119,6 +119,12 @@ random generated programs. Inference is checked against exact answers:
 Every VJP is checked against finite differences. `docs/research/genjl-parity.md`
 §3 maps each law to its tests.
 
+Each namespace carries a tier, `{:api :stable | :experimental | :internal}`
+(DESIGN.md §9). The stable surface is a committed snapshot,
+`test/fixtures/api-snapshot.edn`: `gen.api-test` fails when it changes, and
+`clojure -M:test -m gen.api write` writes it after a deliberate change
+(`gen.api`'s docstring has the rules, deprecation among them).
+
 ## Requirements
 
 A JDK (developed on Oracle GraalVM 25) and the Clojure CLI. The core

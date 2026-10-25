@@ -50,6 +50,7 @@
    draws what the batch's own run would for its particles, gather-into
    takes their rows of the batch's values into it, and join and scatter
    put parts' values back together. Parts holds a batch's data by part."
+  {:api :internal}
   (:require [gen.array :as array]
             [gen.array.dtype :as dt]
             [gen.array.protocols :as p]

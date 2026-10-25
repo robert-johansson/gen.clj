@@ -72,6 +72,7 @@
    sum of the parts that ran. A dimap does not map such a part's return
    value. Map runs every element (they pass nothing on), and a dynamic
    caller stops at the call's score."
+  {:api :stable}
   (:refer-clojure :exclude [map + -])
   (:require [gen.array :as array :refer [+ -]]
             [gen.array.batch :as batch]

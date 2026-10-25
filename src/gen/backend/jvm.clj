@@ -9,6 +9,7 @@
      are rounded to their type, so the backend can mirror MLX's float32 numerics.
    - Arrays are immutable: no operation writes to an array it did not create,
      which is what lets reshape share data."
+  {:api :internal}
   (:require [gen.array.dtype :as dt]
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]

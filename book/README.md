@@ -41,8 +41,9 @@ and its code is verified for real (DESIGN.md §9).
     page.
 
 Some pages are written from the code, not by hand: the appendix of
-distributions (`062-distributions.md`), from `gen.dist`. `sync` writes
-them too, and the test fails when one is stale.
+distributions (`062-distributions.md`), from `gen.dist`, and the public
+API (`063-api.md`), from the namespaces' tiers and docstrings (`gen.api`).
+`sync` writes them too, and the test fails when one is stale.
 
 The mechanics are in `test/gen/book.clj`.
 

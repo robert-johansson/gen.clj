@@ -46,6 +46,7 @@
    batched, which the results record as :fallback (a written message);
    :batched? :required throws with that reason instead. For one key the
    draws differ from the unbatched ones, with the same distribution."
+  {:api :stable}
   (:refer-clojure :exclude [+ - * /])
   (:require [gen.array :as array :refer [+ - * /]]
             [gen.batched :as batched]

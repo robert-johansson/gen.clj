@@ -32,6 +32,7 @@
    choice-gradients takes every particle's at once: one batched gradient,
    where the model runs batched (gen.batched/map-particles), each particle's
    its own (an argument's too: gen.array.batch)."
+  {:api :stable}
   (:refer-clojure :exclude [+ *])
   (:require [gen.array :as array :refer [+ *]]
             [gen.array.dtype :as dt]

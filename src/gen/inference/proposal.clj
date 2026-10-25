@@ -27,6 +27,7 @@
    replayed, which is a loud error (trace those choices in q itself).
    with-exact-proposal (gen.inference.enumerative) is the special case of the
    exact conditional of finite choices."
+  {:api :stable}
   (:refer-clojure :exclude [+ -])
   (:require [gen.array :as array :refer [+ -]]
             [gen.choicemap :as cm]

@@ -34,6 +34,7 @@
    Engines are confined to one thread each: every operation runs on the
    engine's thread, called from any thread (the caller waits), so
    concurrent callers are serialized."
+  {:api :experimental}
   (:refer-clojure :exclude [extend]))
 
 (set! *warn-on-reflection* true)

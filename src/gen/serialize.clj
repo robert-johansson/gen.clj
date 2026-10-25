@@ -69,6 +69,7 @@
    Out of scope: gen.batched particle collections (write the scalar traces
    that (gen.batched/traces ps) gives), LLM completion traces, and generative
    functions themselves."
+  {:api :stable}
   (:refer-clojure :exclude [read])
   (:require [clojure.edn :as edn]
             [gen.array :as array]

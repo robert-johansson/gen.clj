@@ -9,6 +9,7 @@
    used) is a compile error. It knows nothing of the handler: gen.dynamic's
    macros call it, and gen.dynamic.static guards the static graph's code
    with it."
+  {:api :internal}
   (:require [gen.array :as array]
             [gen.array.batch :as batch]
             [gen.dynamic.core]))
