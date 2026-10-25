@@ -1,0 +1,403 @@
+# Changelog
+
+What changed in gen.clj that code built on it (memo.clj, GenGDT) must know
+about. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). gen.clj has no
+release yet. Until 1.0, dependents pin a commit (DESIGN.md §9, "A 1.0 for
+dependents"), and each entry names the commits on main that carry its
+change and the bean that tracks it.
+
+## What 1.0 will promise
+
+From DESIGN.md §9, "The 1.0's shape" (owner, 2026-10-25):
+
+- **Kept through 1.x:** the names, arities, result-map keys and documented
+  semantics (the GFI and its laws) of the stable namespaces. Minor
+  releases add to them.
+- **Not promised across releases:** the exact draws for a key. Their
+  distributions are promised.
+- **Removals** wait for 2.0, after a deprecation cycle: `:deprecated`
+  metadata and a docstring note, nothing printed.
+- **Three tiers,** marked on each namespace (`{:api :stable | :experimental
+  | :internal}`). Experimental namespaces (gen.llm.* among them) ship
+  outside the promise. Internal ones are not for dependents.
+
+In the entries, **Breaking** marks a change that can make working code
+fail (throw, or read another shape or result), and **Draws** one that gives
+other values for the same key, from the same distribution.
+
+## [Unreleased]
+
+Changes on main since the post-M5 review's fixes (bd6b8b4, 2026-10-22),
+newest first in each section.
+
+### Changed
+
+- **Documented, behaviour unchanged.** Promotion follows JAX's rule where an
+  integer meets a float (int64 + float32 is float32), as the code already
+  did; docs/array-api.md §5 says so now (decision 6; ed51adf, genclj-7ndy).
+  MLX arrays compare with `=` by dtype, shape and elements, reading both on
+  the host, as JVM arrays do (b925210, genclj-aa3s).
+- **Breaking. Reading a value being differentiated on the host is a loud
+  error.** Under the tape, `array/item` and `array/->clj` of a tracked float
+  throw ex-info (`:shape`, `:dtype`). Before, they returned the primal, and
+  the path through it was missing from the gradient without a word. Host
+  arithmetic on a tracked value (clojure.core's operators, `Math/…`,
+  `double`) throws the same kind of ex-info, where it was a raw
+  ClassCastException. Booleans and integers read freely (comparisons,
+  `array/floor`), so `if` on a comparison works, but a read only to branch
+  or index, `(int (array/item x))`, is refused too. The ways out:
+  gen.array's operators, a custom gradient (gen.custom's `:gradient`,
+  `array/custom-vjp`), `(array/stop-gradient x)` to drop the gradient on
+  purpose, or `(array/floor x)` to index. MLX's opt-in native gradients
+  still detach such a read silently. (c510d2a, genclj-de4g)
+- **Draws. Unbatched `importance-resampling` keeps a different trace for
+  the same key;** the distribution is unchanged. One sample at a time, each
+  replaces the kept one with probability its share of the weight so far
+  (Gen.jl's), so it holds one trace whatever n. When every weight is −Inf it
+  throws (`:reason :impossible`). The batched path is unchanged. (6b0b2c7,
+  genclj-1t38)
+- **Draws. A plain call in a body draws from the body's ω.** `(gf & args)`
+  inside a `gen` body ran gf with a key from the implicit source, so a run
+  with a fixed key did not repeat. Now gf runs with the next key from the
+  body's encapsulated randomness ω, which the body takes only when gf draws
+  (makes choices, or keeps an ω of its own). Such a call is an untraced
+  draw: the trace keeps ω, the score is an estimate, operations that need
+  exact densities (gradients, HMC, MALA, MAP, VI, elliptical slice) refuse
+  it loudly, and a batched run falls back to one particle at a time. A call
+  that draws nothing changes nothing. Outside a body a plain call still
+  takes the implicit key. (4646203, genclj-zxis)
+- **A boolean choice reads as a host boolean outside a body.** On MLX a 0-d
+  boolean is an array object, which Clojure's `if` takes as true, so
+  `(if (tr :b) …)` in host code always took the true branch. Outside a
+  body, a trace called with an address now returns a 0-d boolean as a host
+  boolean (evaluating it on a lazy backend). Inside a body, and for batched
+  values, values stay arrays. Other host code that branches on a boolean
+  array uses `array/truthy?`. (4646203, genclj-x6ox)
+- **Map's, Unfold's and Scan's scores are a finite sum beside two counts**
+  of infinite element scores. After any chain of updates the score is the
+  IEEE sum of the element scores, as assess computes it, +Inf and NaN
+  included. Measured: a batched update revisiting one step of a 500-step
+  Unfold is about 2.4× faster, a batched extension by one step costs 12%
+  more, and on MLX a scalar generate costs 12–17% more. (ec8e777, kept by
+  the owner in 2682118; genclj-ul72)
+- **Spot checks on a lazy backend decide on the batch's own backend.** The
+  JVM re-run (float64) agreeing is enough. A mismatch there is re-run on the
+  batch's backend, which decides. So a float32 batch of an ill-conditioned
+  model on MLX stays batched, where it fell back to one particle at a time,
+  or, after unchecked updates, threw the divergence error on a correct
+  model. (4704394, genclj-i8ui)
+- **Breaking. gen.laws' laws return test.check results** (gen.laws is
+  under `test/`, outside the core). A failing law's `checks` name the check
+  and the values it compared, and a case the law says nothing about is
+  `vacuous`. `deflaws` fails a law whose cases are more than 60% vacuous
+  (`laws/max-vacuous`), so a law set that passed vacuously can fail now.
+  Keys come from `laws/seeds` (2^31 seeds, where `gen/nat` drew 0–99), and
+  the fuzz's random models take an argument with alternatives. (2cd752a,
+  genclj-4tjd)
+- **Draws. A Switch whose index differs across a batch's particles runs
+  batched, by partition** (`gen.partition`): each branch runs over its own
+  particles and the results are scattered back, where the whole batch fell
+  back to one particle at a time. A particle draws the same in any
+  partition. Loud: branch return values that cannot be one batched value
+  (shape, dtype or structure differing, an int against a float), a
+  partitioned trace revised by another generative function, a selection
+  under choices held by part, and constraints by part whose particles span
+  groups. `gen.batched/select` checks its mask's length.
+  (dd63174, 249855b; genclj-7tqw)
+- **HMC's and MALA's acceptance ratio comes from the trajectory's log
+  densities** (assess at both ends) rather than an update's weight, which
+  agrees up to rounding. The trace is updated only when a move is accepted.
+  (f2a61fa, genclj-7dti)
+- **MLX's CPU sums float32 in blocks of 32,** not 256, for sums of more
+  than 256 terms. An iterated computation compounded the larger blocks'
+  error: memo.clj's empowerment demo missed float64 by 1.89e-5, and by
+  5.1e-6 now. A long sum takes 1.3–1.5× as long. Shorter sums, Metal and
+  CUDA are unchanged. (73f22a0, 3022944; genclj-v3uw)
+
+### Added
+
+- **This changelog,** kept from 2026-10-25 (DESIGN §9, "The 1.0's shape";
+  genclj-6g66).
+- **VI's pathwise estimator, ADVI's.** `black-box-vi` and `elbo-gradient`
+  take `:estimator :reparam` beside the score-function estimator (the
+  default, Gen.jl's). On the conjugate test model its variance is under a
+  quarter of the score-function estimator's. A family declares a pathwise
+  sampler with `^:pathwise` on `defdist` (`gen.dist.core/pathwise?`):
+  normal, uniform, exponential, laplace, cauchy, gumbel, log-normal and
+  logistic. Loud: a choice of q's from another family, a latent q does not
+  propose, and `:batched?`. (a0f3358, genclj-uiqm)
+- **Importance sampling's raw weights, ESS and estimate.**
+  `importance-sampling`'s result adds `:log-weights` (raw) and `:ess`, and
+  its weights are host doubles on every backend. `is/estimate` gives the
+  self-normalized estimate of E[(f trace)] with `:log-ml-estimate` and
+  `:ess`, keeping no traces, so n can be large on any backend. (6b0b2c7,
+  genclj-1t38)
+- **`gen.trace/omega-at`,** the path to a trace's encapsulated randomness
+  (private in gen.serialize before). (4646203, genclj-zxis)
+- **Conjugacy and state-space models, chosen by the user.**
+  `gen.inference.conjugate/with-conjugate-proposal` makes one latent's
+  exact posterior, given its observed children, a model's internal proposal
+  (normal–normal, mvnormal–mvnormal, beta–bernoulli, beta–binomial,
+  gamma–poisson, dirichlet–categorical). `gen.state-space/kalman` and `hmm`
+  are generative functions with exact marginal likelihoods, and
+  `sample-states` draws their states by forward filtering, backward
+  sampling. (aaa7a75, genclj-702q)
+- **Particle MCMC.** `gen.inference.particle-mcmc/conditional-smc`, a
+  particle filter conditioned on a trace's reference trajectory, and
+  `particle-gibbs`, its move as a kernel. PMMH is MH on a
+  `gen.custom/estimated` density whose estimate runs a particle filter.
+  (d2e5c1a, genclj-gcus)
+- **Laplace approximations and Fisher information.** `gen.inference.laplace`:
+  `hessian` and `param-hessian` (central differences of the gradient),
+  `choice-mode` and `param-mode` (Newton's method), `laplace` and its
+  `proposal`, `observed-fisher`, `natural-gradient` and `bic`. (17ffbae,
+  genclj-xg1j)
+- **Scan, Mix and dimap.** `comb/scan` (JAX's scan, built like Unfold),
+  `comb/mix` and `mix-logits` (a categorical at `:index` and a Switch at
+  `:component`), and `comb/dimap`, `contramap` and `map-retval`. (19a7f0f,
+  genclj-2gma)
+- **Gradients under the batch tracer** are vmap's: each particle gets the
+  value and gradient of its own scalar run. On them: `gen.batched`'s
+  `map-particles` and `set-choices`, `choice-gradients` of a particle
+  collection, `mcmc/hmc-particles`, `mala-particles` and
+  `map-optimize-particles` (n chains, each accepted on its own), and
+  black-box VI's `:batched?`. (7399000, e24c1d8; genclj-7dti)
+- **Per-particle constraints and batched enumeration.** `gen.batched`'s
+  `generate` and `update` take `{:per-particle cs}`, and `gen.batched/project`
+  gives the particles' projections. `enumerative-inference` takes
+  `:batched?` and `:chunk-size` (a batched result holds `:batches` in place
+  of `:traces`), and `with-exact-proposal` takes `:batched?`. (24323fd,
+  genclj-7oc1)
+- **NUTS and Stan's warmup.** `mcmc/nuts` is Stan's base_nuts transition,
+  and `gen.inference.nuts` (`adapt`, `sample`) is Stan's windowed warmup
+  with a diagonal metric, for NUTS or for HMC with L fixed. `hmc`, `mala`
+  and `nuts` take `:inv-metric`, and `hmc` and `nuts` take Stan's
+  `:jitter`. The defaults (the identity metric, no jitter) leave hmc's and
+  mala's moves bit-identical. (18c7b09, 3466f2a; genclj-tvc0)
+- **GenMLX's further distributions:** `truncated-normal`, `von-mises`,
+  `wrapped-cauchy`, `wrapped-normal`, `wishart` and `inv-wishart`, exact at
+  their extremes. Circular values lie in [−π, π). (808ac58, genclj-z2gh)
+- **Serialization as EDN.** `gen.serialize` (`write`, `read`,
+  `write-trace`, `read-trace`, `read-trace-data`) writes choice maps, arrays
+  and traces with gen.clj's tags only, never eval. A trace is rebuilt by
+  generate and checked exact. It records the backend and float dtype it was
+  written under, and `read-trace` refuses another (`:other-numerics`).
+  Traces with encapsulated randomness are refused for now.
+  `array/backend-name` names a backend. (9566fdd, genclj-unjc)
+- **MCMC diagnostics.** `gen.inference.diagnostics`: bulk and tail ESS, the
+  ESS of the mean, rank-normalized and split R-hat, the MCSE of the mean and sd,
+  and `summary`, as Vehtari et al. (2021) and ArviZ define them. (82e8241,
+  genclj-hfca)
+
+### Fixed
+
+- **Map's, Unfold's and Scan's scores never turn NaN** (−Inf + Inf) after a
+  choice leaves its support and comes back. A general law now holds every
+  kind's updated score to the assessed density through such chains. The
+  remedy is now genclj-ul72's, above. (a3e7276, genclj-awd0)
+- **gen.diff's `+`, `-`, `inc` and `dec` rules** give an int-diff only when
+  every operand is an integer. Through a float operand the result rounds,
+  and the int-diff was an unsound retdiff; it is unknown-change now.
+  (fc428f7, genclj-y0ij)
+
+### Decided, not yet in the code
+
+Owner decisions in DESIGN §9 that dependents will see. Each moves to the
+sections above in the commit that builds it.
+
+- **From the book's friction** (2026-10-25; 797a269). Decisions 1–4 and 6
+  concern the book and the docs.
+  - A choice outside its own support stops the run: the operation returns
+    weight −Inf without running the rest of the body, so MH rejects and
+    map-optimize's line search shrinks its step. Every other parameter check
+    stays loud (decision 5; genclj-q7cq, genclj-2870).
+  - Residual resampling rounds n·p_i up when it is within a relative 1e-9 of
+    the next integer, so equal weights keep their copies (decision 8;
+    genclj-tx1h).
+  - A batched run that falls back to one particle at a time records why in
+    its result (`:fallback`, a written message), and `:batched? :required`
+    throws with that reason instead. Nothing prints (decision 9;
+    genclj-ynpc).
+  - `splice` treats an argument as unchanged when it is identical, or a host
+    scalar, keyword or string equal to the old one. Collections and arrays
+    compare by identity (decision 10; genclj-nvo0).
+  - No change: dynamic bodies keep passing unknown-change to splices, and
+    the docs will name the static language as the way to incremental
+    splices (decision 7; genclj-zszp).
+- **The 1.0's shape** (2026-10-25; 872f04f; genclj-04h2).
+  - Tier marks on every namespace. Stable: gen.array, gen.random, the data
+    layer (choicemap, selection, trace, diff), gen.gfi, gen.dynamic,
+    gen.dist with defdist and gen.dist.dsl, gen.combinators, gen.custom,
+    gen.state-space, gen.serialize, inference's core (importance, mh,
+    kernel, mcmc, particle-filter, enumerative, transform, vi, diagnostics,
+    weights), gen.gradients, gen.learning and gen.batched; for implementers,
+    the GFI protocol and gen.array.protocols. Experimental: gen.llm.*,
+    trace-kernel, conjugate, laplace, particle-mcmc, partition, dist.host,
+    and gen.laws until it moves to ext/laws. Internal: tape, batch, dtype,
+    shape, the dynamic language's guard, static and core, and the backends.
+  - Public replacements for internals that dependents reach: a per-particle
+    accessor in gen.batched, and gen.array's own `tracked?`, `broadcast` and
+    `dtype-kind` (memo.clj's).
+  - A committed snapshot of the stable vars and arglists, which fails a test
+    when the stable surface changes, and the API appendix generated from
+    the tier marks.
+  - Shape changes before the tag: one result-key vocabulary, kernels
+    returning `{:trace :accepted?}`, labeled metrics, matching batched
+    return shapes, selections' union and intersection, callable choice maps,
+    trace keyword lookups, public handler state, an optimizer interface and
+    training callbacks, laws for users, particle-filter accessors, and the
+    transform API.
+
+## History before Unreleased, by milestone
+
+gen.clj was built in milestones before this file began. These summaries
+are for orientation. DESIGN.md (§1 and §9) and the milestone beans have the
+detail.
+
+### The book (2026-10-24 to 2026-10-25, in progress; genclj-ceds)
+
+The GenMLX book ported, with Gen.jl's tutorials as its worked chapters, in
+`book/`: five Parts and appendices. A chapter's code lives in its own
+namespace (`book/src/book/…`), and the Markdown includes its regions, so
+every listing is code that runs. A result shown after `;=>` is checked, and
+a statistical claim passes at 5 standard errors (genclj-fblt).
+`gen.book sync` writes the includes and the SVG figures, `gen.book pdf`
+builds a PDF with Pandoc, and `gen.book-test` with `gen.book.part2-test` to
+`part5-test` runs the chapters on the JVM backend (on MLX with
+`-Dgen.book.mlx=true`). Merged so far: Parts I (011–017), II (021–029), III
+(031–035) and IV (041–045), Part V's gallery (054), and the appendices
+Coming from Gen.jl, The Distributions (generated from gen.dist), Notation,
+and Installing and Running. Writing it found genclj-zxis, x6ox, 1t38 and
+de4g, and the ten decisions (Unreleased, above).
+
+### The post-M5 review (2026-10-22; genclj-ta2i)
+
+Eight fresh-context reviewers read every line of `src/`, four for idiom and
+four for PPL soundness, and eight verifiers confirmed 84 of the 86 findings
+(docs/research/review-post-m5/). Its fix batches, 36 beans, are on main at
+bd6b8b4. What a dependent sees:
+
+- **Draws.** `fold-in` hashes all 64 bits of its data: keys are unchanged
+  below 2^32 and distinct beyond, so Recurse's deep nodes no longer share
+  keys. Negative or fractional data is a loud error.
+- **Draws.** Every beta and dirichlet draw changes for a given key (drawn
+  from their gammas' logs). A gamma, beta or dirichlet draw that underflows
+  to 0 is floored, and a beta draw that rounds to 1 is clamped below 1.
+- "Unchanged" (retdiffs, `diff/compute`, `diff/consistent?`) means
+  `gfi/same-value?`, so −0.0 differs from 0.0 and a vector from a list. A
+  change in the number of arguments is a change.
+- A diverging HMC or MALA trajectory is a rejected proposal, counted
+  (`:diverged?`, `:divergences`), where it threw. So is a parameter check
+  failing at a tried position. A start whose log density or gradient is not
+  finite is a loud error.
+- **Breaking.** Loud now: a mixture of a discrete and a continuous family,
+  a boolean given as a numeric parameter, ±Inf given as a count, token SMC
+  given a constrained completion, a product of potentials whose end tokens
+  disagree, and `constrained/conditional-weight` of anything but a
+  completion's trace.
+- VI's model gradient adds the score-function term for latents the model
+  samples itself, without which it was biased.
+- Numerics: lgamma and digamma at their edges are SciPy's, a log mass of 0
+  has gradient 0 (not NaN), probabilities must sum to 1 within a tolerance
+  set by their dtype and number, and MLX's CPU sums float32 in blocks and
+  half floats in float32.
+
+### M5 — Gen.jl's own test suite passes (2026-10-20 to 2026-10-22; genclj-xxuc)
+
+Gen.jl 0.4.8's test suite, ported file by file to `test/gen/genjl/` (37
+namespaces, each test citing its source line), passes on the JVM backend
+and on MLX. Of 1,699 assertion sites, 1,418 port and 239 are not
+applicable, each with its reason (docs/research/genjl-test-suite.md).
+Gen.jl itself writes the oracle's EDN fixtures (`test/fixtures/genjl/`), so
+the tests never need Julia. The gaps the port found were built:
+
+- **Breaking. Lookups are loud.** `(tr a)`, `cm/get-choice`, `cm/get-value`
+  and `trace/subtrace` throw ex-info (`{:reason :path :at}`) where nothing
+  is, as Gen.jl throws KeyError. Pass a not-found value, `(tr :b nil)`, or
+  ask `cm/has-value?` first.
+- **Breaking.** A vector is a path everywhere, selections included
+  (`sel/selected?`, `sel/get-subselection`, `sel/set-subselection`,
+  `cm/set-submap`), and `array/full` with an array fill is a loud error.
+- `trace/subtrace` and `(tr addr)` give a call's trace and return value;
+  `cm/merge` takes 0 to n choice maps; Recurse has `get-child`,
+  `get-child-num` and `get-parent`.
+- The static language takes computed addresses, nested calls (hoisted) and
+  macros in its bindings.
+- `param-gradients` reaches through combinators' traces (`gfi/stores`,
+  `gfi/with-stores`), a custom deterministic function names its `:params`,
+  and VI trains the model's parameters too (`:model-store`,
+  `:model-optimizer`).
+- `learn/step` evaluates what it returns, so a hand-written training loop
+  no longer grows a graph on a lazy backend.
+
+The documented differences from Gen.jl (more precise retdiffs, Eq. 4.1's
+regenerate weight under a Switch, no default positional arguments, and
+others) are in DESIGN §9 and the mapping.
+
+### M4 — Gen.jl parity (2026-10-19 to 2026-10-21; genclj-wcga)
+
+Everything gen.clj targets in Gen.jl 0.4.8's core and its core-adjacent
+ecosystem (GenParticleFilters, GenSMCP3, GenTraceKernelDSL), each law the
+thesis states for them a test (docs/research/genjl-parity.md §1, §3):
+
+- the static modeling language, `(gen ^:static …)`, with compiled scores
+  and a lint, and change hints (`int-diff`, `set-diff`, `dict-diff`,
+  `diff/propagate`);
+- call-at, choice-at and Recurse; encapsulated randomness (`untraced`,
+  `gen.custom/estimated`), with assess taking a key; deterministic
+  functions with custom gradients (`array/custom-vjp`);
+- `gen.dist.dsl/dist` (Gen.jl's `@dist`), host-library families
+  (`gen.dist.host`, with Commons Math in `ext/commons-math`) and
+  Distributions.jl's further continuous families;
+- exact enumeration (`gen.inference.enumerative`, built early for GenGDT),
+  the internal-proposal override, `kern` with `^:trace`, trace transforms
+  and translators, SMCP3, trace kernels, GenParticleFilters' operations,
+  black-box VI and VIMCO, and wake-sleep.
+
+The owner's decisions then: booleans count in arithmetic as in Julia, casts
+to integers are Java's, a draw beyond the float range is +Inf, and a
+covariance singular in floating point is an error at every precision.
+
+### M3 — Local LLMs as generative functions (2026-10-20 to 2026-10-21; genclj-vjfd)
+
+A local LLM is a generative function. The stack: the Branching protocol
+(`gen.llm.branching`) with llama.cpp v0.7.0 as its engine (`gen.llm.llama`);
+the LM protocol (`gen.llm.lm`) with its cache, prefix trie and KV-cell
+ledger; the token generative function (`gen.llm.token/completion`), every
+GFI operation over token sites; potentials (`gen.llm.potential`) and token
+SMC with fork-on-resample (`gen.llm.smc`); grammar-constrained decoding on
+gen.clj's own regex and DFA engine (`gen.llm.grammar`,
+`gen.llm.constrained`); and a memory budget that MLX and native engines
+share (`gen.array.memory`). Engines never sample: tokens are drawn by
+gen.random with each site's key. Verified on Metal (five models) and CUDA
+(an RTX PRO 6000, seven models), with bands by device.
+
+### M2 — The MLX backend (2026-10-19 to 2026-10-20; genclj-rtif)
+
+The same code on MLX, through mlx-c v0.7.0 (MLX v0.32.2) and Java's FFM
+API, with a binding generated from the headers. It is chosen by
+`-Dgen.backend=mlx`, `-Dgen.mlx.device=cpu|gpu`, `-Dgen.mlx.dtypes=32|64`
+or `array/with-backend`. It passes the backend conformance suite against
+the float64 JVM backend, and the full battery on Metal, on MLX's CPU and on
+CUDA (a Jetson AGX Thor, MLX built from source). A key draws the same
+uniforms on both backends. Where MLX's semantics differ from NumPy's the
+backend follows NumPy's, except that Metal flushes float32 subnormals and
+array indices are clamped. Memory is bounded by default, and native
+gradients are opt-in (`-Dgen.mlx.grad=native`).
+
+### M1 — The core on the JVM (2026-10-18 to 2026-10-19; genclj-r2vy)
+
+gen.clj's core on a pure-JVM backend that needs nothing but a JDK: the
+backend-neutral array API (`gen.array`) with tape autodiff and JAX's
+Threefry PRNG; the data layer (choice maps, selections, traces, diffs); the
+Gen.jl-shaped GFI with the `gen` macro and DynamicGF, every operation taking
+an explicit key; Gen.jl's distributions, mixtures and products; Map, Unfold
+and Switch with incremental updates; batched execution of the same code
+under a batch tracer, with spot checks and a fallback; and the inference
+library (importance sampling, MH in its forms, kernel combinators, the
+particle filter, HMC, MALA, MAP, elliptical slice, gradients, and learning
+with an explicit parameter store). It set the conventions kept since:
+0-based indices, Gen.jl's names and parameterizations, booleans as
+bernoulli's values, constraints as choice maps (a plain map is an error),
+and bodies that run to completion. The GFI laws are test.check properties.

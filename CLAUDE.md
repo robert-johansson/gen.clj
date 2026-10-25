@@ -146,6 +146,9 @@ Python.
    - Against GenMLX, compare statistics, never exact samples.
 8. **Minimal dependencies.** The core is Clojure only. Test and benchmark tools
    live in aliases.
+9. **Changes dependents see go in `CHANGELOG.md`.** A change of behaviour,
+   names, result keys, errors or the draws for a key gets a line under
+   Unreleased in the same commit.
 
 ## JVM performance notes (the JVM backend)
 
