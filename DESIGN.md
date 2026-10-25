@@ -900,6 +900,11 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   used (2026-10-19). Elsewhere a lazy sequence's trace calls run when its
   elements are realized, Clojure's semantics, chunking included: `mapv`,
   `doseq` and `run!` are eager.
+- **Traces are values** (owner, 2026-10-25, from the book's chapter 034): a
+  trace is an immutable record (gen.trace's `Trace`); every operation that
+  revises one returns a new trace and leaves the old one as it was, so a
+  rejected move needs no undo and old traces can be kept, compared and
+  shared.
 - **Arrays are values:** JVM arrays compare by dtype, shape and (bitwise)
   elements, so traces and choice maps holding them compare with `=`. MLX
   arrays compare by dtype, shape and elements too, reading both on the host
