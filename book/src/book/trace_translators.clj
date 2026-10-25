@@ -984,17 +984,15 @@ split-pieces
 #_(checked-ratio one-trace (cm/choicemap :dof 0.4) nil [] (rng/key 0))
 
 ;; book: solution-3-chain
+;; error: The backward proposal gives the move's reverse choices density 0
+#_(run-sweeps (jump-sweep branch-proposal ratio-split-merge) 4000
+            (rng/key 12))
+
+;; book: solution-3-jacobian
 (let [two-trace (branch-trace :z true :m1 1.0 :m2 1.3)
       log-jacobian #(:log-abs-det (tf/run % two-trace cm/EMPTY))]
   (Math/exp (- (log-jacobian ratio-split-merge) (log-jacobian split-merge))))
 ;=> 3.13
-
-(def ratio-two
-  (two-fraction (run-sweeps (jump-sweep branch-proposal ratio-split-merge)
-                            4000 (rng/key 12))))
-
-(> (- p-two (:mean ratio-two)) (* 5 (:mcse-mean ratio-two)))
-;=> true
 
 ;; book: solution-4
 (def drifting-probabilities

@@ -630,6 +630,41 @@
   (project-by-maker trace (check-selection :project selection)))
 
 ;; ---------------------------------------------------------------------------
+;; A move's backward proposal
+;; ---------------------------------------------------------------------------
+
+(defn- read-possible?
+  "Is score, read on the host (a lazy one evaluated, where impossible?
+   reads no array), above -Inf: neither -Inf nor NaN?"
+  [score]
+  (< ##-Inf (double (array/item score))))
+
+(defn assess-backward
+  "A move's backward weight: the backward proposal q, called on (t' args…),
+   assesses u', the choices that reverse the move from trace t to t', with
+   (backward-key k); {:weight :retval}, as assess. MH with a proposal,
+   involutive MH, the translators, trace kernels and a particle filter's
+   backward proposal weigh their moves so.
+
+   A q that gives u' density 0 though t and t' are both possible cannot
+   reverse its own move: it breaks the third requirement on an MH proposal
+   (thesis §3.4.2, p. 92), and a translator's map leaves the extended
+   space it must biject (Def. 3.6.1, p. 110). That is a loud error naming
+   q and u', never a quiet rejection (DESIGN.md §9, the ten decisions'
+   fifth, the owner's second ruling). A move to an impossible t' is
+   rejected before it is weighed (impossible?), and one from an impossible
+   t keeps its NaN, MH's own loud error. The weight is read on the host
+   for the check: a move is an inference-loop boundary."
+  [t t' q args u' k]
+  (let [r (assess q (into [t'] args) u' (backward-key k))]
+    (when (and (== ##-Inf (double (array/item (:weight r)))) (read-possible? (:score t')) (read-possible? (:score t)))
+      (throw (ex-info (str "The backward proposal gives the move's reverse choices density 0, though the new"
+                           " trace is possible: the proposal cannot reverse its own move (thesis §3.4.2, p. 92)."
+                           " Reverse choices: " (pr-str (cm/to-map u')))
+                      {:proposal q :reverse-choices (cm/to-map u')})))
+    r))
+
+;; ---------------------------------------------------------------------------
 ;; Defining generative functions
 ;; ---------------------------------------------------------------------------
 

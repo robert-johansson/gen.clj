@@ -195,17 +195,80 @@
 (deftest the-thesis-invalid-proposals-are-loud
   ;; Alg. 5, requirement 3 (pp. 92-93; law audit gap J): q2 and q3 cannot
   ;; propose b's value back, so a move from a = T to a = F, which discards
-  ;; b, cannot be weighed: never a silent move. q2's backward assess leaves
-  ;; b unvisited, a loud error. q3's gives a = T density 0, which stops it
-  ;; there (the ten decisions' fifth, DESIGN.md §9): the reverse move is
-  ;; impossible, so the move is rejected, and q3 never moves the chain.
-  (let [two (:trace (gfi/generate p-mh [] (cm/choicemap :a true :b false :c true) (rng/key 1)))]
-    (doseq [[label q expected] [[:q2-mh q2-mh :loud] [:q3-mh q3-mh :stayed]]]
-      (let [outcomes (map #(try (let [r (mh/mh two q [] %)] (if ((:trace r) :a) :stayed :moved))
-                                (catch clojure.lang.ExceptionInfo _ :loud))
-                          (rng/split (rng/key 2) 12))]
+  ;; b, cannot be weighed: a loud error, never a silent move. q2's backward
+  ;; assess leaves b unvisited. q3's gives the reverse choice a = T density
+  ;; 0 at a possible trace: the proposal cannot reverse its own move
+  ;; (gfi/assess-backward; DESIGN.md §9, the owner's second ruling on the
+  ;; ten decisions' fifth), where the stop at a had made every such move a
+  ;; quiet rejection (9277423). On a lazy backend the assess does not stop
+  ;; at a, and b unvisited is the error. Planted bug (2026-10-25):
+  ;; assess-backward without its check, q3 never moves and is never loud.
+  (let [two (:trace (gfi/generate p-mh [] (cm/choicemap :a true :b false :c true) (rng/key 1)))
+        outcome (fn [q key] (try (let [r (mh/mh two q [] key)] (if ((:trace r) :a) :stayed :moved))
+                                 (catch clojure.lang.ExceptionInfo e e)))]
+    (doseq [[label q] [[:q2-mh q2-mh] [:q3-mh q3-mh]]]
+      (let [outcomes (map #(outcome q %) (rng/split (rng/key 2) 12))]
         (is (not-any? #{:moved} outcomes) (str label " " (frequencies outcomes)))
-        (is (some #{expected} outcomes) (str label " " (frequencies outcomes)))))))
+        (is (some #(instance? clojure.lang.ExceptionInfo %) outcomes) (str label " " (frequencies outcomes)))))
+    (testing "q3 always proposes a = F: every move is loud, naming q3 and the reverse choices"
+      (doseq [key (rng/split (rng/key 3) 6)]
+        (let [e (outcome q3-mh key)]
+          (is (instance? clojure.lang.ExceptionInfo e) (str e))
+          (when (ts/jvm?)
+            (is (re-find #"cannot reverse its own move" (str (ex-message e))))
+            (is (identical? q3-mh (:proposal (ex-data e))))
+            (is (= {:a true :b false} (:reverse-choices (ex-data e))))))))))
+
+(def unit-a (gen [] (let [a (trace :a (d/uniform 0 1))] (trace :y (d/normal a 0.2)))))
+
+(def upward
+  "Moves a up, never down: from a, a' ~ U(a, 1), so the way back from a'
+   has density 0 (§3.4.2's third requirement broken), wherever a' is."
+  (gen [tr] (trace :a (d/uniform (tr :a) 1.0))))
+
+(def wide
+  "A valid proposal that leaves [0, 1] at times: from a in it, a' ~
+   U(a - 0.5, a + 0.5), whose way back has density 1. From an a outside
+   [0, 1], an impossible trace, a' ~ U(5, 6), so the way back from a move
+   there has density 0: the third requirement holds where p(t') > 0, and
+   asks nothing of a move to an impossible trace."
+  (gen [tr] (let [a (tr :a)]
+              (if (array/<= (array/abs (- a 0.5)) 0.5)
+                (trace :a (d/uniform (- a 0.5) (+ a 0.5)))
+                (trace :a (d/uniform 5.0 6.0))))))
+
+;; Planted bugs (2026-10-25), gfi/assess-backward: without its check, the
+;; first testing fails (upward's moves rejected, never loud), as do q3's
+;; above and transform-test's and trace-kernel-test's; throwing whatever
+;; the new trace, the third fails on every backend (and the second on a
+;; lazy one, whose update does not stop before the backward assess);
+;; throwing whatever the old trace, the fourth fails, its NaN error
+;; replaced by this one.
+(deftest a-proposal-that-cannot-reverse-its-move-is-loud
+  (let [tr (:trace (gfi/generate unit-a [] (cm/choicemap :a 0.5 :y 0.6) (rng/key 0)))]
+    (testing "every move of upward is to a possible trace, and none can be reversed"
+      (doseq [key (rng/split (rng/key 1) 6)]
+        (let [e (try (mh/mh tr upward [] key) (catch clojure.lang.ExceptionInfo e e))]
+          (is (instance? clojure.lang.ExceptionInfo e) (str e))
+          (is (re-find #"cannot reverse its own move" (str (ex-message e))))
+          (is (identical? upward (:proposal (ex-data e))))
+          (is (ts/close? 0.5 (get-in (ex-data e) [:reverse-choices :a]))))))
+    (testing "a valid proposal's moves outside the support are rejected quietly"
+      (let [near-one (:trace (gfi/generate unit-a [] (cm/choicemap :a 0.9 :y 0.6) (rng/key 2)))
+            rs (map #(mh/mh near-one wide [] %) (rng/split (rng/key 3) 30))]
+        (is (some #(= ##-Inf (:log-alpha %)) rs) "some proposals left [0, 1]")
+        (is (every? #(or (not= ##-Inf (:log-alpha %)) (not (:accepted? %))) rs))
+        (is (some :accepted? rs))))
+    (testing "gfi/assess-backward is quiet for a move to an impossible trace"
+      (let [outside (:trace (gfi/generate unit-a [] (cm/choicemap :a 5.5 :y 0.6) (rng/key 4)))]
+        (is (= ##-Inf (ts/number (:weight (gfi/assess-backward tr outside wide [] (cm/choicemap :a 0.5) (rng/key 5))))))))
+    (testing "a chain at an impossible trace keeps MH's NaN error (the owner's first ruling)"
+      ;; from a = 1.5 to a' in [0, 1] weighs +Inf, and U(0, 1) gives the way
+      ;; back density 0: +Inf - Inf is NaN
+      (let [unit (gen [] (trace :a (d/uniform 0 1)))
+            impossible (:trace (gfi/generate unit [] (cm/choicemap :a 1.5) (rng/key 6)))
+            anywhere (gen [_] (trace :a (d/uniform 0 1)))]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"NaN" (mh/mh impossible anywhere [] (rng/key 7))))))))
 
 (deftest the-thesis-s-exact-acceptances
   (testing "p. 148: from {a T b T c T}, regenerating {a} weighs 0 whichever a it draws"

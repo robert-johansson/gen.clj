@@ -161,6 +161,23 @@
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"unwritten"
                               (tk/mh one (gen [tr] [(cm/choicemap :two? true) (cm/choicemap)]) [] (rng/key 18))))))))
 
+(def up
+  "x → x + u with u ~ Exp(1), u → -u: the way back needs u' = -u < 0, which
+   the kernel gives density 0."
+  (gen [tr] (let [u (trace :u (d/exponential 1.0))]
+              [(cm/choicemap :x (+ (tr :x) u)) (cm/choicemap :u (array/negate u))])))
+
+(deftest a-kernel-that-cannot-reverse-its-move-is-loud
+  ;; gfi/assess-backward (DESIGN.md §9, the owner's second ruling on the ten
+  ;; decisions' fifth): x is N(0, 1), so the new trace is possible, and the
+  ;; kernel's (or l's) backward choices have density 0. Planted bug
+  ;; (2026-10-25): assess-backward without its check, tk/mh rejects the
+  ;; move quietly and the SMCP3 step weighs -Inf.
+  (let [tr (:trace (gfi/generate tt/scaled [] (cm/choicemap :x 0.3 :y 0.8) (rng/key 80)))]
+    (doseq [[label run] [[:mh #(tk/mh tr up [] (rng/key 81))]
+                         [:smcp3 #((tk/smcp3 {:k up :l up}) tr (rng/key 82))]]]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"cannot reverse its own move" (run)) (str label)))))
+
 (defn- ldj-is?
   "Is the kernel's log |det J| at its proposal (f u), u its choice?"
   [f kernel tr key]

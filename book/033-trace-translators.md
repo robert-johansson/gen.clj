@@ -1490,8 +1490,7 @@ Each exercise has a tested solution at the end of the chapter.
    rate, has density $p(\mathit{rate} \mid \rho)/\mathit{rate}$.)
 3. **A wrong reverse move.** Let a merge write $m_1/m_2$ as the share,
    in place of $m_1/(m_1 + m_2)$, and keep the split as it is. Does
-   `:check? true` notice? Which way does the chain's posterior of two
-   means go?
+   `:check? true` notice? What does the chain do without it?
 4. **Drifting picks.** Let the walk on levels go up from level $k$ with
    probability $(5 - k)/5$. Predict whether detailed balance still holds,
    and how $\log \alpha$ of the step up from level 1 changes.
@@ -1612,24 +1611,29 @@ with mean $0.75$, not 1.
 (checked-ratio one-trace (cm/choicemap :dof 0.4) nil [] (rng/key 0))
 ```
 
-Without the check, the chain runs and is wrong. The merge's Jacobian is
-now about three times too large near the data, so merges are accepted too
-often, and the chain finds two means far less often than the exact
-posterior says:
+Without the check, MH stops the chain at its first merge of $m_1 >
+m_2$. That merge writes a share $m_1/m_2$ above 1, where the split's
+uniform share has density 0, so the proposal cannot make the move back.
+That breaks the third requirement on an MH proposal (§3.4.2 of the
+thesis), and MH says so rather than reject the merge quietly:
 
 <!-- code: solution-3-chain -->
+```clojure
+;; error: The backward proposal gives the move's reverse choices density 0
+(run-sweeps (jump-sweep branch-proposal ratio-split-merge) 4000
+            (rng/key 12))
+```
+
+The merges of $m_1 < m_2$ are wrong too. Near the data the merge's
+Jacobian is about three times too large, so the chain would accept merges
+too often and find two means less often than the exact posterior says:
+
+<!-- code: solution-3-jacobian -->
 ```clojure
 (let [two-trace (branch-trace :z true :m1 1.0 :m2 1.3)
       log-jacobian #(:log-abs-det (tf/run % two-trace cm/EMPTY))]
   (Math/exp (- (log-jacobian ratio-split-merge) (log-jacobian split-merge))))
 ;=> 3.13
-
-(def ratio-two
-  (two-fraction (run-sweeps (jump-sweep branch-proposal ratio-split-merge)
-                            4000 (rng/key 12))))
-
-(> (- p-two (:mean ratio-two)) (* 5 (:mcse-mean ratio-two)))
-;=> true
 ```
 
 **4.** The acceptance probability holds the picks' ratio, so any picks

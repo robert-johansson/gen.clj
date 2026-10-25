@@ -136,7 +136,9 @@
 (defn mh
   "An MH move with trace kernel k (on (trace, args…)) as its own reverse:
    {:trace :accepted? :log-alpha}. The update may sample nothing: every new
-   choice comes from the kernel's update, a loud error otherwise."
+   choice comes from the kernel's update, a loud error otherwise. A kernel
+   that gives its backward choices density 0 at a possible new trace
+   cannot reverse its own move: a loud error (gfi/assess-backward)."
   ([trace kernel args] (mh trace kernel args (gfi/next-key)))
   ([trace kernel args key]
    (let [[k-propose k-update k-accept] (rng/split key 3)
@@ -149,7 +151,7 @@
        (let [_ (when-let [extra (seq (tf/unconstrained-additions (:choices trace) update discard (:choices t')))]
                  (throw (ex-info (str "trace-kernel/mh: the kernel's update leaves new choices unwritten: " (vec extra))
                                  {:addresses (vec extra)})))
-             {bwd :weight} (gfi/assess kernel (into [t'] args) backward (gfi/backward-key k-update))]
+             {bwd :weight} (gfi/assess-backward trace t' kernel args backward k-update)]
          (mh/accept trace t' (+ (- w fwd) bwd (log-abs-det kernel trace args kc ret (kept-by discard))) k-accept))))))
 
 (defn mh-kernel
@@ -168,7 +170,8 @@
    are k's and l's update restores the trace (with :prev-observations). A
    step outside the support (the update stopped at a choice there,
    gfi/impossible?) weighs -Inf, l unrun on trace', which holds the choices
-   up to that one."
+   up to that one. An l that gives backward density 0 at a possible trace'
+   is a loud error (gfi/assess-backward)."
   [{:keys [p-new-args p-argdiffs new-observations k k-args l l-args check? prev-observations]}]
   (fn [trace key]
     (let [[k-propose k-update k-check] (rng/split key 3)
@@ -177,7 +180,7 @@
           {t' :trace w :weight discard :discard} (gfi/update trace args argdiffs (cm/merge update new-observations) k-update)]
       (if (gfi/impossible? w)
         {:trace t' :weight ##-Inf}
-        (let [{bwd :weight [l-update l-backward] :retval} (gfi/assess l (into [t'] l-args) backward (gfi/backward-key k-update))]
+        (let [{bwd :weight [l-update l-backward] :retval} (gfi/assess-backward trace t' l l-args backward k-update)]
           (when check?
             (let [{t'' :trace} (gfi/update t' (:args trace) (vec (repeat (count (:args trace)) diff/unknown-change))
                                            (cm/merge l-update prev-observations) k-check)]
