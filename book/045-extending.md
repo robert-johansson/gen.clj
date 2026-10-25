@@ -1178,23 +1178,36 @@ check. A gradient that doubles $y$'s share fails it:
 
 The second half of Gen.jl's *Customizing Gradients* adds an update rule
 for trainable parameters, with `FixedStepGradientDescent` as its
-example. That rule is `gen.learning/sgd`, which *Learning* used.
-gen.learning's optimizers are data with a `:kind` its functions
-dispatch on, closed to these three:
-
-<!-- code: optimizer-kinds -->
-```clojure
-;; error: An optimizer's :kind is :sgd, :gradient-descent or :adam
-(learning/init {:kind :momentum :lr 0.05 :beta 0.9} {:mu 0.0})
-```
-
-So a new rule cannot yet go through `learning/step` or `learning/train`.
-It can be written with the same contract, `[store' state']`, as a pure
-function of a store and its gradients, and stepped in a loop of one's
-own. Momentum fits a mean to five numbers, whose maximum-likelihood
-estimate is their average:
+example. That rule is `gen.learning/sgd`, which *Learning* used. A rule
+in Gen.jl implements two functions, `init_update_state` and
+`apply_update!`. gen.learning's optimizers are maps with a `:kind`, and
+two multimethods dispatch on it: `-init`, the rule's initial state for a
+store, and `-step`, a pure function from the state, the store and its
+gradients to `[store' state']`. So a new rule is two methods, in any
+namespace. `learning/update-given` walks the gradients' tree, so a step
+updates nested stores, and only the parameters it is given gradients
+for, as the built-in steps do. Momentum keeps a velocity of the store's
+shape:
 
 <!-- code: momentum -->
+```clojure
+(defmethod learning/-init ::momentum [_ store]
+  (array/tree-map array/zeros-like store))
+
+(defmethod learning/-step ::momentum [{:keys [lr beta]} velocity store grads]
+  ;; v' = βv + g, then θ' = θ + lr·v'
+  (let [v (learning/update-given (fn [v g] (+ (* beta v) g)) velocity grads)]
+    [(learning/update-given (fn [theta _ v] (+ theta (* lr v))) store grads v)
+     v]))
+```
+
+`learning/step` evaluates what `-step` returns, and `learning/train`
+and the VI fits step the new rule as they step the built-in ones.
+Momentum fits a mean to five numbers, whose maximum-likelihood estimate
+is their average. The data is one example, all five numbers, so every
+step is along the full gradient:
+
+<!-- code: momentum-fit -->
 ```clojure
 (def mean-model
   (gen [n]
@@ -1204,33 +1217,29 @@ estimate is their average:
 
 (def ys [1.2 0.4 2.1 1.7 0.9])
 
-(defn data-gradients
-  "The gradient of mean-model's log density of ys in its parameters, with
-   the store given."
-  [store]
-  (let [constraints (apply cm/choicemap
-                           (mapcat (fn [i y] [[:y i] y]) (range) ys))
-        model (dyn/with-params mean-model store)]
-    (grad/param-gradients
-     (:trace (gfi/generate model [(count ys)] constraints (rng/key 13))))))
+(def example
+  "The five numbers as one example: mean-model's arguments and
+   constraints."
+  [[(count ys)] (apply cm/choicemap (mapcat (fn [i y] [[:y i] y]) (range) ys))])
 
-(defn momentum-step
-  "[store' velocity']: one step of gradient ascent with momentum, as
-   gen.learning's steps are, over stores of names to numbers: v' = βv + g,
-   then θ' = θ + lr·v'."
-  [{:keys [lr beta]} velocity store gradients]
-  (let [v (merge-with (fn [v g] (+ (* beta v) g)) velocity gradients)]
-    [(merge-with (fn [theta v] (+ theta (* lr v))) store v) v]))
+(defn fit
+  "mean-model's store after 200 steps of optimizer from mu = 0."
+  [optimizer]
+  (:store (learning/train mean-model {:mu 0.0} optimizer (constantly example)
+                          grad/param-gradients {:batches-per-epoch 200})))
 
-(def fitted
-  (loop [store {:mu 0.0} velocity {:mu 0.0} i 0]
-    (if (= i 200)
-      store
-      (let [[store velocity] (momentum-step {:lr 0.05 :beta 0.5} velocity store
-                                            (data-gradients store))]
-        (recur store velocity (inc i))))))
+(def fitted (fit {:kind ::momentum :lr 0.05 :beta 0.5}))
 
 (array/allclose? (:mu fitted) (/ (reduce + ys) (count ys)))
+;=> true
+```
+
+gen.learning has momentum built in, and the two fits agree:
+
+<!-- code: momentum-builtin -->
+```clojure
+(array/allclose? (:mu fitted)
+                 (:mu (fit (learning/momentum {:lr 0.05 :momentum 0.5}))))
 ;=> true
 ```
 

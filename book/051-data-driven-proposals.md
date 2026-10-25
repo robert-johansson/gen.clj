@@ -932,9 +932,10 @@ the model simulates were really heading to.
 The training data are runs of the model whose planning succeeded, each
 the proposal's arguments and the destination as constraints. Gen.jl's
 `train!` takes a data generator; `learn/train` takes a function of a key
-that returns one example. Simulating the model plans a path each time,
-so we simulate 500 examples once, and `picker` draws from them, where
-the tutorial simulates fresh ones every epoch. Two hundred more are held
+that returns one example. Both call it for each epoch's examples.
+Simulating the model plans a path each time, so we simulate 500 examples
+once, and `picker` draws from them, where the tutorial simulates fresh
+ones every epoch. Two hundred more are held
 out to judge the proposals:
 
 <!-- code: examples -->
@@ -987,37 +988,43 @@ example:
        (count examples)))
 ```
 
-One hundred steps of Adam, each on 50 examples:
+One hundred steps of Adam, each on 50 examples: twenty epochs, each
+drawing 250 examples from the training set and taking five minibatches
+of 50 from them:
 
 <!-- code: train-score-high -->
 ```clojure
 (def score-high-fit
   (learn/train trainable-dest {:log-score-high 0.0} (learn/adam {:lr 0.05})
                (picker training) grad/param-gradients
-               {:epochs 100 :batch-size 50 :key (rng/key 13)}))
+               {:epochs 20 :epoch-size 250 :batches-per-epoch 5 :batch-size 50
+                :key (rng/key 13)}))
 
 (def learned-score-high
   (Math/exp (array/item (:log-score-high (:store score-high-fit)))))
 
 learned-score-high
-;=> 11.77 ; float64
+;=> 11.0 ; float64
 ```
 
-`learn/train`'s history holds the mean log density of each epoch's last
-batch; here an epoch is one step. It climbs from 0, the uniform
-proposal's, since the score starts at $e^0 = 1$, and levels off after
-about forty steps, as noisy as a batch of 50 examples makes it:
+`learn/train`'s history is Gen.jl's: after each epoch, the mean log
+density of fresh draws of the data function, here 250 of them. They are
+draws of the training examples, so the history tracks the training
+objective; the 200 held-out examples judge the proposals below. It
+climbs from 0.18 after the first epoch's five steps (the uniform
+proposal, where the score starts at $e^0 = 1$, has 0) and levels off
+after about ten epochs, fifty steps, as noisy as 250 examples make it:
 
 <!-- code: training-figure -->
 ```clojure
 ;; figure: figures/051-training.svg
 (svg/series (:history score-high-fit)
-            {:x-label "step" :y-label "mean log density of a batch"})
+            {:x-label "epoch" :y-label "mean log density of 250 examples"})
 ```
 
-![The mean log density of each step's batch of 50 examples, while the heuristic's score trains](figures/051-training.svg)
+![The mean log density of 250 draws of the training examples after each epoch, while the heuristic's score trains](figures/051-training.svg)
 
-The learned score is 11.77, larger than the tutorial's 5. On the
+The learned score is 11.0, larger than the tutorial's 5. On the
 held-out examples, the uniform proposal (score 1) has mean log density
 0, since its density is 1 throughout the scene; the guess of 5 has
 0.80, and the trained score 0.89. A trained value depends on its data
@@ -1036,15 +1043,15 @@ held-out examples, each by more than five spreads:
 
 (mapv #(mean-log-density % held-out)
       [uniform-dest heuristic-dest trained-dest])
-;=> [0.0 0.8015 0.8897] ; float64
+;=> [0.0 0.8015 0.889] ; float64
 
 ;; spreads over ten trainings, each with its own 500 examples (keys 201
-;; to 210) and steps (keys 301 to 310): 1.28 of the learned score-high,
-;; 0.0019 of the trained proposal's held-out density
+;; to 210) and steps (keys 301 to 310): 1.03 of the learned score-high,
+;; 0.00075 of the trained proposal's held-out density
 (let [guess (mean-log-density heuristic-dest held-out)
       trained (mean-log-density trained-dest held-out)]
-  [(> (c/- learned-score-high 1.0) (c/* 5 1.28))
-   (> (c/- trained guess) (c/* 5 0.0019))])
+  [(> (c/- learned-score-high 1.0) (c/* 5 1.03))
+   (> (c/- trained guess) (c/* 5 0.00075))])
 ;=> [true true]
 ```
 
@@ -1106,31 +1113,34 @@ the proposal's parameters:
 ```
 
 The tutorial trains for about ten minutes, on 5000 examples. This
-network takes a thousand steps of Adam, each on 20 of the 500 examples:
+network takes a thousand steps of Adam, each on 20 examples: forty
+epochs, each drawing 500 of the training examples, with repeats, and
+taking 25 minibatches of 20 from them:
 
 <!-- code: train-network -->
 ```clojure
 (def network-fit
   (learn/train neural-dest (initial-weights 16 (rng/key 14))
                (learn/adam {:lr 0.03}) (picker training) grad/param-gradients
-               {:epochs 40 :batches-per-epoch 25 :batch-size 20
+               {:epochs 40 :epoch-size 500 :batches-per-epoch 25 :batch-size 20
                 :key (rng/key 15)}))
 
 (def network-proposal (dyn/with-params neural-dest (:store network-fit)))
 
 (mean-log-density network-proposal held-out)
-;=> 0.807 ; float64
+;=> 0.810 ; float64
 ```
 
 For the tutorial's measurements, the network gives the leftmost bin of
 $x$ a probability of 0.56, where the heuristic gave every bin 0.2, and
-the fourth bin of $y$ 0.54:
+the fourth bin of $y$ 0.35, beside 0.31 and 0.29 in the third and the
+fifth:
 
 <!-- code: network-probs -->
 ```clojure
 (mapv array/softmax (bin-logits (:store network-fit)
                                 (features measurements scene)))
-;=> [[0.561 0.308 0.081 0.030 0.021] [0.004 0.127 0.226 0.542 0.101]] ; float64
+;=> [[0.560 0.269 0.139 0.016 0.017] [0.004 0.041 0.314 0.353 0.288]] ; float64
 ```
 
 <!-- code: proposals-figure -->
@@ -1159,10 +1169,10 @@ the network does about as well as the hand-made heuristic: 0.81, against
 ```clojure
 (mapv #(mean-log-density % held-out)
       [heuristic-dest trained-dest network-proposal])
-;=> [0.8015 0.8897 0.8068] ; float64
+;=> [0.8015 0.889 0.8098] ; float64
 ```
 
-Its spread over ten trainings is large, 0.067, since each training draws
+Its spread over ten trainings is large, 0.078, since each training draws
 its own examples and initial weights. The network is far better than the
 uniform proposal, and within five spreads of the trained heuristic: from
 simulations alone, it learned about as much as the heuristic was written
@@ -1172,12 +1182,12 @@ to know.
 ```clojure
 ;; spreads over ten trainings, each with its own 500 examples (keys 201
 ;; to 210), initial weights (keys 401 to 410) and steps (keys 501 to
-;; 510): 0.067 of the network's held-out density, 0.067 of its gap to
+;; 510): 0.078 of the network's held-out density, 0.078 of its gap to
 ;; the trained heuristic's
 (let [trained (mean-log-density trained-dest held-out)
       network (mean-log-density network-proposal held-out)]
-  [(> network (c/* 5 0.067))
-   (< (abs (c/- network trained)) (c/* 5 0.067))])
+  [(> network (c/* 5 0.078))
+   (< (abs (c/- network trained)) (c/* 5 0.078))])
 ;=> [true true]
 ```
 
@@ -1191,16 +1201,18 @@ with the speed proposed as before:
         (rng/split (rng/key 18) 40)))
 
 (mean-se (map :ess network-runs))
-;=> {:mean 2.99 :se 0.24} ; float64
+;=> {:mean 3.15 :se 0.19} ; float64
 
 [(> (gap-in-se (map :ess network-runs) (map :ess prior-runs)) 5)
  (gap-in-se (map :ess network-runs) (map :ess heuristic-runs))]
-;=> [true 4.06] ; float64
+;=> [true 5.75] ; float64
 ```
 
-Its runs are worth 2.99 samples, against the prior's 1.02. They are
-worth more than the heuristic's too, by 4.1 standard errors of the
-difference, which is less than five: these runs do not establish it.
+Its runs are worth 3.15 samples, against the prior's 1.02. They are
+worth more than the heuristic's too, by 5.7 standard errors of the
+difference. That is this network's result: a network's held-out density
+spreads by 0.078 over trainings, so another training might not do as
+well.
 
 Gen.jl's tutorial closes on what the weights do with a proposal's bias.
 A proposal that strongly prefers one region proposes most of its samples

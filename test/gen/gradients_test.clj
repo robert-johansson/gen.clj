@@ -404,12 +404,14 @@
 
 (deftest training-on-generated-data
   ;; Gen.jl's train!: data drawn from a generator, averaged parameter
-  ;; gradients, a decaying-step optimizer
+  ;; gradients, a decaying-step optimizer; every choice constrained, so the
+  ;; held-out weight in the history is the log density
   (let [data-fn (fn [_] [[xs] data])
         {:keys [store history]} (learn/train regression {:w 0.0 :b 0.0}
                                              (learn/gradient-descent {:step-size-init 0.05 :step-size-beta 1000})
                                              data-fn g/param-gradients
-                                             {:epochs 20 :batches-per-epoch 20 :batch-size 2 :key (rng/key 9)})
+                                             {:epochs 20 :epoch-size 2 :batches-per-epoch 20 :batch-size 2
+                                              :key (rng/key 9)})
         mx (/ (reduce + xs) 4) my (/ (reduce + ys) 4)
         w (/ (reduce + (map #(* (- %1 mx) (- %2 my)) xs ys)) (reduce + (map #(* (- % mx) (- % mx)) xs)))]
     (is (= 20 (count history)))
@@ -721,9 +723,10 @@
 (deftest misnamed-optimizers-are-loud
   ;; the post-M5 review's I3-14: an unknown :kind names the kinds. Planted
   ;; bug (2026-10-22): the case without a default throws a bare
-  ;; IllegalArgumentException, "No matching clause"
-  (is (= [:sgd :gradient-descent :adam] (:kinds (ts/thrown-data (learn/init {:kind :rmsprop} {:w 1.0})))))
-  (is (= :rmsprop (:kind (ts/thrown-data (learn/step {:kind :rmsprop} nil {:w 1.0} {:w 0.1}))))))
+  ;; IllegalArgumentException, "No matching clause". The kinds are open
+  ;; now: gen.learning-test adds one
+  (is (every? (set (:kinds (ts/thrown-data (learn/init {:kind :rmsprob} {:w 1.0})))) [:sgd :gradient-descent :adam]))
+  (is (= :rmsprob (:kind (ts/thrown-data (learn/step {:kind :rmsprob} nil {:w 1.0} {:w 0.1}))))))
 
 (deftest gradient-trees-add-leaf-by-leaf
   ;; the one sum behind train, lecture-batched and VI's estimators: nested

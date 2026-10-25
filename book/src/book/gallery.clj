@@ -723,23 +723,15 @@ guide-moments
 
 (defn train
   "The weights after steps of Adam on sine-fit's log likelihood of
-   sin(train-xs), from initial weights drawn with key."
+   sin(train-xs), from initial weights drawn with key: one example, all
+   50 points, so each step is along the full gradient."
   [steps key]
   (let [[k-init k-steps] (rng/split key)
-        targets (cm/choicemap :ys (array/sin train-xs))
-        optimizer (learn/adam {:lr 0.01})
-        gradient (fn [store k]
-                   (grad/param-gradients
-                    (:trace (gfi/generate (dyn/with-params sine-fit store)
-                                          [train-xs] targets k))))]
-    (loop [store (initial-weights 16 k-init)
-           state (learn/init optimizer store)
-           ks (rng/split k-steps steps)]
-      (if-let [[k & more] (seq ks)]
-        (let [[store state] (learn/step optimizer state store
-                                        (gradient store k))]
-          (recur store state more))
-        store))))
+        example [[train-xs] (cm/choicemap :ys (array/sin train-xs))]]
+    (:store (learn/train sine-fit (initial-weights 16 k-init)
+                         (learn/adam {:lr 0.01}) (constantly example)
+                         grad/param-gradients
+                         {:batches-per-epoch steps :key k-steps}))))
 
 (def weights (train 1000 (rng/key 21)))
 

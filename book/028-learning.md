@@ -318,9 +318,12 @@ with a step of 0.4 reaches the closed form in 150 steps:
 
 gen.learning has Gen.jl's three update rules, as data: `sgd`
 (Gen.jl's `FixedStepGradientDescent`), `gradient-descent`
-(`GradientDescent`, whose step decays) and `adam`. All three ascend,
-since the objective is a log density. They differ in how far a step
-goes. Take one step from 0 along a gradient whose second coordinate is a
+(`GradientDescent`, whose step decays) and `adam`. It also has the
+common rules that GenFluxOptimizers brings to Gen.jl: `momentum` (with
+Nesterov's variant), `rmsprop`, `adagrad` and `adamw`, and `clip-norm`,
+which clips the gradients before another rule's step. *Extending
+gen.clj* adds a rule of its own. Every rule ascends, since the objective
+is a log density. They differ in how far a step goes. Take one step from 0 along a gradient whose second coordinate is a
 hundredth of its first:
 
 <!-- code: one-step -->
@@ -443,8 +446,9 @@ gradients for, which exercise 3 uses.
 A gradient over the whole dataset costs a pass over it. Stochastic
 gradient ascent uses a *minibatch* instead: a few examples drawn at
 random, whose mean gradient estimates the full one without bias.
-`learn/train` is Gen.jl's `train!`: each step draws a minibatch from a
-*data function* and takes one optimizer step along its mean gradient.
+`learn/train` is Gen.jl's `train!`: each step draws a minibatch of the
+examples a *data function* generates and takes one optimizer step along
+its mean gradient.
 
 Maximum likelihood also trains *discriminative* models, whose arguments
 differ from example to example. Gen.jl's minimal one regresses $y$ on
@@ -474,33 +478,66 @@ Ours draws one from the dataset:
      (cm/choicemap :y (cm/get-choice choices :y))]))
 ```
 
-`train` runs epochs of minibatches and returns the store with a history.
-We call it one epoch at a time, ten minibatches of ten examples, to see
-the store after each:
+`train` runs epochs. Each generates `:epoch-size` examples once, from
+the data function, and takes `:batches-per-epoch` steps, each along the
+mean gradient of `:batch-size` examples drawn from the epoch's without
+replacement. `train` returns the store, a history and the optimizer's
+state, and it takes the state back as `:state`, so training resumes where
+it stopped. We run one epoch at a time, each a hundred examples in ten
+minibatches of ten, to keep the store after each:
 
 <!-- code: train -->
 ```clojure
 (def epochs
   (vec (reductions
-        (fn [{:keys [store]} key]
+        (fn [{:keys [store state]} key]
           (learn/train disc-model store (learn/sgd {:lr 0.05})
                        example grad/param-gradients
-                       {:epochs 1 :batches-per-epoch 10 :batch-size 10
-                        :key key}))
+                       {:epochs 1 :epoch-size 100 :batches-per-epoch 10
+                        :batch-size 10 :state state :key key}))
         {:store {:a 0.0 :b 0.0}}
         (rng/split (rng/key 9) 400))))
 
 (:history (peek epochs))
-;=> [-1.346] ; float64
+;=> [-1.263] ; float64
 ```
 
-`train` differs from Gen.jl's `train!` in two ways.
-It calls the data function for every example of every minibatch, where
-Gen.jl draws an epoch's examples once and takes the minibatches from
-them. And its history holds each epoch's mean score of its last
-minibatch, where Gen.jl's holds the mean log density of fresh held-out
-examples. The gradients are the same; the histories measure different
-things, and gen.clj's is noisier.
+SGD has no state, so resuming changes nothing here; Adam's moments would
+carry over. A `:callback`, which `train` calls after every step with the
+epoch, the minibatch, the minibatch's objective and the new store, is
+the other way to watch training.
+
+The history is Gen.jl's. After each epoch, `train` generates
+`:evaluation-size` fresh examples (by default as many as the epoch's),
+held out from training, and records their mean generate weight under the
+epoch's final store. Every choice of `disc-model` is constrained, so a
+weight is the log density of an example's $y$ given its $x$. Our data
+function draws from the dataset, so the held-out examples are new draws
+of the same hundred points: the history estimates the training objective
+at each epoch's store, not the fit to new data. Its entries differ from
+that objective, computed exactly, by noise that averages to zero within
+five standard errors:
+
+<!-- code: history -->
+```clojure
+(defn conditional-objective
+  "The mean log density of the dataset's y's given their x's under store:
+   what the history estimates, since the held-out examples are draws from
+   the dataset."
+  [{:keys [a b]}]
+  (let [x (column dataset :x)]
+    (array/item (array/mean (dc/log-prob (d/normal (+ (* a x) b) 1)
+                                         (column dataset :y))))))
+
+(def gaps
+  "Each epoch's history less the objective at its store."
+  (mapv (fn [{[h] :history store :store}] (- h (conditional-objective store)))
+        (rest epochs)))
+
+(let [{:keys [mean mcse-mean]} (diag/summary gaps)]
+  (< (abs mean) (* 5 mcse-mean)))
+;=> true
+```
 
 With a fixed step, SGD on minibatches does not settle. Each minibatch's
 gradient points to that minibatch's own maximum, so the store keeps
@@ -535,7 +572,7 @@ as *Getting Started* did a chain's:
 (def b-summary (diag/summary (settled :b)))
 
 [(:sd a-summary) (:sd b-summary)]
-;=> [0.047 0.044] ; float64
+;=> [0.052 0.054] ; float64
 
 (mapv (fn [s k]
         (< (abs (- (:mean s) (array/item (k exact)))) (* 5 (:mcse-mean s))))

@@ -798,6 +798,11 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       tf/run's, and beside `:weight`, which includes it, an involution's
       and a translator's), `:model` and `:aux` (choice maps),
       `:bwd-choices`.
+      `:grads` and `:model-grads` (store-shaped arrays), `:state` and
+      `:model-state` (an optimizer's state, which the option of the same
+      name takes back), `:objective` (host), `:history` (host: train's
+      held-out weight by epoch, VI's estimate by iteration). Transforms: `:log-abs-det` (log, array), `:model`
+      and `:aux` (choice maps), `:bwd-choices`.
     Renamed for it: w/normalize's `:log-weights` (it meant the normalized
     logs there, the raw ones elsewhere) to `:log-normalized-weights`;
     mh/move's `:weight` to `:log-alpha` (mh/mh's name for the same ratio),
@@ -910,6 +915,38 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       translator's "The inverse transform …" as before; a transform made
       by tf/transform without an inverse is "The anonymous transform
       (tf/transform)", where its name printed empty.
+  - **The optimizer interface** (the agent, 2026-10-25, provisional;
+    genclj-y2ab): an optimizer stays a map with a `:kind`, and the
+    multimethods `learning/-init` and `learning/-step` dispatch on it, as
+    gen.dist.core's do on a distribution's `:type` (a protocol on records
+    would make optimizers values that print and compare less plainly).
+    `-step` is pure, `[store' state']`; `learning/step` checks that shape
+    and evaluates it. `learning/update-given` (the gradient-tree walk) is
+    public, for a user's `-step`. The built-ins follow PyTorch's update
+    rules and defaults, ascending: momentum (`:nesterov?`), rmsprop
+    (`:decay`, PyTorch's alpha), adagrad, adamw; `clip-norm` wraps another
+    optimizer and clips by the global norm (optax's clip_by_global_norm),
+    its state the wrapped one's. Constructors check their options loudly:
+    rates at least 0 (a negative rate, a descent, is an error), momenta,
+    decays and betas in [0, 1), eps and max-norm above 0. Learning-rate
+    schedules are not built in.
+  - **Training's and VI's shapes** (the agent, 2026-10-25, provisional, on
+    the owner's decision of the history; genclj-59cf): train has Gen.jl's
+    options and defaults (`:epoch-size` 1, `:batch-size` 1,
+    `:batches-per-epoch` 1, `:evaluation-size` the epoch's size); a
+    minibatch larger than its epoch is loud, where Gen.jl's randperm
+    fails. Its `:callback` takes a map, `{:epoch :minibatch :objective
+    :store}`, counted from 0, after each step, where Gen.jl passes
+    (epoch, minibatch, objective): a store is a value here, so the
+    callback needs it to watch training, and a map lets 1.x add keys. VI's
+    fits return `:traces`, q's draws of the last iteration (with
+    `:batched?` `:particles`; VIMCO's one per estimate, resampled, as
+    Gen.jl's), and call `:callback` after each iteration's step with
+    `{:iter :objective :traces :store}`; Gen.jl calls it before the step.
+    train and VI return `:state` and take it back to resume. The book's
+    ADVI (027, 054) still restarts Adam at its lower rate: resuming the
+    state left the structured guide's KL at 0.06 to 0.11 after the same
+    2000 iterations, against 0.0015 to 0.022 restarted (keys 11 to 18).
 - **Indices are 0-based** (Clojure idiom, as in GenMLX; D2): Map's and
   Unfold's addresses, Recurse's nodes (root 0), categorical's values
   (categorical-logits' too: 0 to n - 1) and Switch's branch index (branch 0

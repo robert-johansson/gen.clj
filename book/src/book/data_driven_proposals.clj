@@ -626,18 +626,19 @@ pinned
 (def score-high-fit
   (learn/train trainable-dest {:log-score-high 0.0} (learn/adam {:lr 0.05})
                (picker training) grad/param-gradients
-               {:epochs 100 :batch-size 50 :key (rng/key 13)}))
+               {:epochs 20 :epoch-size 250 :batches-per-epoch 5 :batch-size 50
+                :key (rng/key 13)}))
 
 (def learned-score-high
   (Math/exp (array/item (:log-score-high (:store score-high-fit)))))
 
 learned-score-high
-;=> 11.77 ; float64
+;=> 11.0 ; float64
 
 ;; book: training-figure
 ;; figure: figures/051-training.svg
 (svg/series (:history score-high-fit)
-            {:x-label "step" :y-label "mean log density of a batch"})
+            {:x-label "epoch" :y-label "mean log density of 250 examples"})
 
 ;; book: score-high-checks
 (def trained-dest (dyn/with-params trainable-dest (:store score-high-fit)))
@@ -647,15 +648,15 @@ learned-score-high
 
 (mapv #(mean-log-density % held-out)
       [uniform-dest heuristic-dest trained-dest])
-;=> [0.0 0.8015 0.8897] ; float64
+;=> [0.0 0.8015 0.889] ; float64
 
 ;; spreads over ten trainings, each with its own 500 examples (keys 201
-;; to 210) and steps (keys 301 to 310): 1.28 of the learned score-high,
-;; 0.0019 of the trained proposal's held-out density
+;; to 210) and steps (keys 301 to 310): 1.03 of the learned score-high,
+;; 0.00075 of the trained proposal's held-out density
 (let [guess (mean-log-density heuristic-dest held-out)
       trained (mean-log-density trained-dest held-out)]
-  [(> (c/- learned-score-high 1.0) (c/* 5 1.28))
-   (> (c/- trained guess) (c/* 5 0.0019))])
+  [(> (c/- learned-score-high 1.0) (c/* 5 1.03))
+   (> (c/- trained guess) (c/* 5 0.00075))])
 ;=> [true true]
 
 ;; book: network
@@ -705,18 +706,18 @@ learned-score-high
 (def network-fit
   (learn/train neural-dest (initial-weights 16 (rng/key 14))
                (learn/adam {:lr 0.03}) (picker training) grad/param-gradients
-               {:epochs 40 :batches-per-epoch 25 :batch-size 20
+               {:epochs 40 :epoch-size 500 :batches-per-epoch 25 :batch-size 20
                 :key (rng/key 15)}))
 
 (def network-proposal (dyn/with-params neural-dest (:store network-fit)))
 
 (mean-log-density network-proposal held-out)
-;=> 0.807 ; float64
+;=> 0.810 ; float64
 
 ;; book: network-probs
 (mapv array/softmax (bin-logits (:store network-fit)
                                 (features measurements scene)))
-;=> [[0.561 0.308 0.081 0.030 0.021] [0.004 0.127 0.226 0.542 0.101]] ; float64
+;=> [[0.560 0.269 0.139 0.016 0.017] [0.004 0.041 0.314 0.353 0.288]] ; float64
 
 ;; book: proposals-figure
 ;; figure: figures/051-proposals.svg
@@ -733,17 +734,17 @@ learned-score-high
 ;; book: held-out
 (mapv #(mean-log-density % held-out)
       [heuristic-dest trained-dest network-proposal])
-;=> [0.8015 0.8897 0.8068] ; float64
+;=> [0.8015 0.889 0.8098] ; float64
 
 ;; book: network-checks
 ;; spreads over ten trainings, each with its own 500 examples (keys 201
 ;; to 210), initial weights (keys 401 to 410) and steps (keys 501 to
-;; 510): 0.067 of the network's held-out density, 0.067 of its gap to
+;; 510): 0.078 of the network's held-out density, 0.078 of its gap to
 ;; the trained heuristic's
 (let [trained (mean-log-density trained-dest held-out)
       network (mean-log-density network-proposal held-out)]
-  [(> network (c/* 5 0.067))
-   (< (abs (c/- network trained)) (c/* 5 0.067))])
+  [(> network (c/* 5 0.078))
+   (< (abs (c/- network trained)) (c/* 5 0.078))])
 ;=> [true true]
 
 ;; book: network-runs
@@ -752,11 +753,11 @@ learned-score-high
         (rng/split (rng/key 18) 40)))
 
 (mean-se (map :ess network-runs))
-;=> {:mean 2.99 :se 0.24} ; float64
+;=> {:mean 3.15 :se 0.19} ; float64
 
 [(> (gap-in-se (map :ess network-runs) (map :ess prior-runs)) 5)
  (gap-in-se (map :ess network-runs) (map :ess heuristic-runs))]
-;=> [true 4.06] ; float64
+;=> [true 5.75] ; float64
 
 ;; book: solution-1
 (def dest-only
