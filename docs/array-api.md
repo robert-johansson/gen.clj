@@ -134,9 +134,15 @@ A distribution body, compared with GenMLX:
   - MLX: `{:float :float32 :int :int32}`.
 
   Core code never names a dtype unless it must (e.g. indices are ints).
-- **Promotion:** NumPy's table, plus weak numbers, except for booleans in
-  arithmetic (below). It is implemented once, in `gen.array`, so every backend
-  promotes identically. Backends only see operands that already share a dtype.
+- **Promotion:** JAX's lattice, plus weak numbers, except for booleans in
+  arithmetic (below). It is implemented once, in `gen.array.dtype`, so every
+  backend promotes identically, and backends only see operands that already
+  share a dtype. bool < ints < floats: mixed ints give `:int64`; an int
+  meeting a float gives that float, so int64 + float32 is float32 where
+  NumPy gives float64 (owner, 2026-10-25: float32 models stay float32, as
+  they must on MLX's GPU, where float64 is not available); differing floats
+  meet at `:float32` unless one is `:float64`. Host numbers are weak: they
+  take the dtype of the arrays they meet and only raise the kind.
 - **Comparisons return `:bool`,** and so do `bernoulli` samples. That matches
   Gen.jl's `Bool`. GenMLX returned 0/1 floats, which `where`-based code then had
   to compare against `ONE`. Bool arrays work in `array/where` and promote to int or
