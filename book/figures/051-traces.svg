@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="364" height="348" viewBox="0 0 364 348" font-family="sans-serif" font-size="11">
+<rect width="100%" height="100%" fill="white"/>
+<clipPath id="shapes-box"><rect x="52.0" y="10.0" width="300.0" height="300.0"/></clipPath>
+<g clip-path="url(#shapes-box)">
+<polygon points="127.0,265.0 157.0,265.0 157.0,235.0 127.0,235.0" fill="gray" fill-opacity="1"/>
+<polygon points="286.0,85.0 316.0,85.0 316.0,55.0 286.0,55.0" fill="gray" fill-opacity="1"/>
+<polygon points="277.0,205.0 307.0,205.0 307.0,175.0 277.0,175.0" fill="gray" fill-opacity="1"/>
+<polygon points="112.0,190.0 232.0,190.0 232.0,184.0 112.0,184.0" fill="gray" fill-opacity="1"/>
+<polygon points="232.0,190.0 238.0,190.0 238.0,70.0 232.0,70.0" fill="gray" fill-opacity="1"/>
+<polygon points="187.0,70.0 238.0,70.0 238.0,64.0 187.0,64.0" fill="gray" fill-opacity="1"/>
+<polygon points="112.0,70.0 157.0,70.0 157.0,64.0 112.0,64.0" fill="gray" fill-opacity="1"/>
+<polygon points="112.0,190.0 118.0,190.0 118.0,70.0 112.0,70.0" fill="gray" fill-opacity="1"/>
+<polyline fill="none" stroke="darkorange" stroke-opacity="0.7" stroke-width="1.5" points="82.0,280.0 103.6,277.2 130.1,272.5 187.0,257.3 302.8,106.6"/>
+<polyline fill="none" stroke="darkorange" stroke-opacity="0.7" stroke-width="1.5" points="82.0,280.0 92.8,194.0 98.0,149.6 103.2,108.8 107.3,87.0 111.9,62.7 223.3,19.9"/>
+<polyline fill="none" stroke="darkorange" stroke-opacity="0.7" stroke-width="1.5" points="82.0,280.0 157.3,265.7 190.0,230.4"/>
+<polyline fill="none" stroke="darkorange" stroke-opacity="0.7" stroke-width="1.5" points="82.0,280.0 100.2,218.3"/>
+<polyline fill="none" stroke="darkorange" stroke-opacity="0.7" stroke-width="1.5" points="82.0,280.0 152.7,203.3"/>
+<polyline fill="none" stroke="darkorange" stroke-opacity="0.7" stroke-width="1.5" points="82.0,280.0 71.0,288.7"/>
+<circle cx="83.9" cy="277.9" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="107.4" cy="282.1" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="133.6" cy="274.7" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="151.5" cy="261.4" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="185.2" cy="259.8" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="195.5" cy="244.8" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="208.1" cy="222.3" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="225.2" cy="197.5" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="249.0" cy="185.9" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="253.0" cy="163.8" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="81.2" cy="280.5" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="85.1" cy="262.1" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="87.5" cy="233.5" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="87.4" cy="209.1" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="91.0" cy="190.0" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="93.8" cy="163.8" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="100.0" cy="138.5" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="104.0" cy="117.8" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="100.9" cy="91.3" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="109.0" cy="77.4" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="79.4" cy="282.7" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="103.4" cy="275.7" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="127.8" cy="276.1" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="151.2" cy="266.9" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="172.2" cy="248.2" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="182.8" cy="228.7" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="190.7" cy="231.2" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="186.4" cy="230.2" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="191.5" cy="227.3" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="194.1" cy="231.8" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="84.4" cy="285.2" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="89.7" cy="270.1" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="87.1" cy="258.0" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="94.7" cy="248.1" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="101.2" cy="233.0" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="99.8" cy="223.6" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="96.9" cy="215.2" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="100.2" cy="225.3" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="101.5" cy="219.1" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="94.5" cy="217.9" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="77.6" cy="277.4" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="94.5" cy="274.9" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="93.1" cy="260.7" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="104.1" cy="262.0" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="110.5" cy="250.2" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="117.7" cy="245.9" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="123.8" cy="236.2" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="133.5" cy="225.0" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="140.7" cy="213.3" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="154.2" cy="211.6" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="85.7" cy="274.3" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="67.9" cy="286.0" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="69.9" cy="287.3" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="65.8" cy="290.7" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="73.0" cy="288.7" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="65.9" cy="285.8" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="69.9" cy="281.8" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="72.9" cy="289.4" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="71.0" cy="291.0" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="72.4" cy="291.5" r="1.5" fill="black" fill-opacity="0.7"/>
+<circle cx="302.8" cy="106.6" r="4" fill="red" fill-opacity="0.7"/>
+<circle cx="223.3" cy="19.9" r="4" fill="red" fill-opacity="0.7"/>
+<circle cx="190.0" cy="230.4" r="4" fill="red" fill-opacity="0.7"/>
+<circle cx="100.2" cy="218.3" r="4" fill="red" fill-opacity="0.7"/>
+<circle cx="152.7" cy="203.3" r="4" fill="red" fill-opacity="0.7"/>
+<circle cx="71.0" cy="288.7" r="4" fill="red" fill-opacity="0.7"/>
+<circle cx="82.0" cy="280.0" r="4" fill="steelblue" fill-opacity="0.7"/>
+</g>
+<g><line x1="52.0" y1="310.0" x2="52.0" y2="314.0" stroke="black"/><text x="52.0" y="326.0" text-anchor="middle">0</text></g>
+<g><line x1="112.0" y1="310.0" x2="112.0" y2="314.0" stroke="black"/><text x="112.0" y="326.0" text-anchor="middle">0.2</text></g>
+<g><line x1="172.0" y1="310.0" x2="172.0" y2="314.0" stroke="black"/><text x="172.0" y="326.0" text-anchor="middle">0.4</text></g>
+<g><line x1="232.0" y1="310.0" x2="232.0" y2="314.0" stroke="black"/><text x="232.0" y="326.0" text-anchor="middle">0.6</text></g>
+<g><line x1="292.0" y1="310.0" x2="292.0" y2="314.0" stroke="black"/><text x="292.0" y="326.0" text-anchor="middle">0.8</text></g>
+<g><line x1="352.0" y1="310.0" x2="352.0" y2="314.0" stroke="black"/><text x="352.0" y="326.0" text-anchor="middle">1</text></g>
+<g><line x1="48.0" y1="310.0" x2="52.0" y2="310.0" stroke="black"/><text x="45.0" y="314.0" text-anchor="end">0</text></g>
+<g><line x1="48.0" y1="250.0" x2="52.0" y2="250.0" stroke="black"/><text x="45.0" y="254.0" text-anchor="end">0.2</text></g>
+<g><line x1="48.0" y1="190.0" x2="52.0" y2="190.0" stroke="black"/><text x="45.0" y="194.0" text-anchor="end">0.4</text></g>
+<g><line x1="48.0" y1="130.0" x2="52.0" y2="130.0" stroke="black"/><text x="45.0" y="134.0" text-anchor="end">0.6</text></g>
+<g><line x1="48.0" y1="70.0" x2="52.0" y2="70.0" stroke="black"/><text x="45.0" y="74.0" text-anchor="end">0.8</text></g>
+<g><line x1="48.0" y1="10.0" x2="52.0" y2="10.0" stroke="black"/><text x="45.0" y="14.0" text-anchor="end">1</text></g>
+<rect x="52.0" y="10.0" width="300.0" height="300.0" fill="none" stroke="black"/>
+</svg>
