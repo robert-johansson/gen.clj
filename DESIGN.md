@@ -759,8 +759,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       source index), `:resampled?`.
     - Gradients and learning: `:values` (the selected choices, a choice
       map), `:gradients` (theirs, the same shape), `:arg-grads`, `:store`,
-      `:grads` and `:model-grads` (store-shaped arrays), `:objective`
-      (host), `:history`. Transforms: `:log-abs-det` (log, array), `:model`
+      `:grads` and `:model-grads` (store-shaped arrays), `:state` and
+      `:model-state` (an optimizer's state, which the option of the same
+      name takes back), `:objective` (host), `:history` (host: train's
+      held-out weight by epoch, VI's estimate by iteration). Transforms: `:log-abs-det` (log, array), `:model`
       and `:aux` (choice maps), `:bwd-choices`.
     Renamed for it: w/normalize's `:log-weights` (it meant the normalized
     logs there, the raw ones elsewhere) to `:log-normalized-weights`;
@@ -800,6 +802,23 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     rates at least 0 (a negative rate, a descent, is an error), momenta,
     decays and betas in [0, 1), eps and max-norm above 0. Learning-rate
     schedules are not built in.
+  - **Training's and VI's shapes** (the agent, 2026-10-25, provisional, on
+    the owner's decision of the history; genclj-59cf): train has Gen.jl's
+    options and defaults (`:epoch-size` 1, `:batch-size` 1,
+    `:batches-per-epoch` 1, `:evaluation-size` the epoch's size); a
+    minibatch larger than its epoch is loud, where Gen.jl's randperm
+    fails. Its `:callback` takes a map, `{:epoch :minibatch :objective
+    :store}`, counted from 0, after each step, where Gen.jl passes
+    (epoch, minibatch, objective): a store is a value here, so the
+    callback needs it to watch training, and a map lets 1.x add keys. VI's
+    fits return `:traces`, q's draws of the last iteration (with
+    `:batched?` `:particles`; VIMCO's one per estimate, resampled, as
+    Gen.jl's), and call `:callback` after each iteration's step with
+    `{:iter :objective :traces :store}`; Gen.jl calls it before the step.
+    train and VI return `:state` and take it back to resume. The book's
+    ADVI (027, 054) still restarts Adam at its lower rate: resuming the
+    state left the structured guide's KL at 0.06 to 0.11 after the same
+    2000 iterations, against 0.0015 to 0.022 restarted (keys 11 to 18).
 - **Indices are 0-based** (Clojure idiom, as in GenMLX; D2): Map's and
   Unfold's addresses, Recurse's nodes (root 0), categorical's values
   (categorical-logits' too: 0 to n - 1) and Switch's branch index (branch 0

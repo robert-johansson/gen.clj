@@ -104,16 +104,21 @@
      12 keys), 60 sd past them.
    - On MLX, where every scalar is an array, 30 epochs of the same steps
      (340,000 array operations, counted on the JVM, where Gen.jl's run makes
-     22 million): |θ| = 1.25 (1.25 to 1.27, sd at most 0.035 over 20 keys),
-     so 1.07 is 5 sd inside it. θ1 is stationary after 30 steps as after
-     2,000 (0.875³⁰ = 0.02)."
+     22 million; the history's 50 held-out examples an epoch, Gen.jl's
+     evaluation_size, take a third more time on the JVM): |θ| = 1.25 (1.25
+     to 1.27, sd at most 0.035 over 20 keys), so 1.07 is 5 sd inside it.
+     θ1 is stationary after 30 steps as after 2,000 (0.875³⁰ = 0.02).
+   Each epoch's 50 examples are its one minibatch, as in Gen.jl's run
+   (epoch_size = minibatch_size = 50), so a step sees 50 fresh examples as
+   before epochs had datasets."
   (if (ts/jvm?) {:epochs 2000 :threshold 5.0} {:epochs 30 :threshold 1.07}))
 
 (deftest ^:slow ^:heavy sgd-learns-the-teacher
   ;; train.jl:109
   (let [{:keys [epochs threshold]} sgd-run
         {:keys [store]} (learn/train student start sgd teacher-data grad/param-gradients
-                                     {:epochs epochs :batches-per-epoch 1 :batch-size 50 :key (rng/key 3)})]
+                                     {:epochs epochs :epoch-size 50 :batches-per-epoch 1 :batch-size 50
+                                      :key (rng/key 3)})]
     ;; p(x | z = 0) = p(x | z = 1) = 0.5
     (is (genjl/approx? (:theta1 store) 0.0 {:atol (* 5 theta1-sd)}))
     ;; y | z, x = xor(x, z)

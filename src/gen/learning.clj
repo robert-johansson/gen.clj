@@ -38,10 +38,12 @@
    update-given walks the gradients' tree, so such a step updates nested
    stores and the parameters given gradients, as the built-in ones do.
 
-   lecture and lecture-batched are the sleep phase of wake-sleep (Gen.jl's
-   lecture! and lecture_batched!): the proposal's log density of the
-   latent choices of the model's own traces, with its gradient, to train a
-   proposal toward the model's posterior."
+   train is Gen.jl's train!: epochs of minibatches drawn from each epoch's
+   generated examples, and a history of the mean generate weight on
+   held-out ones. lecture and lecture-batched are the sleep phase of
+   wake-sleep (Gen.jl's lecture! and lecture_batched!): the proposal's log
+   density of the latent choices of the model's own traces, with its
+   gradient, to train a proposal toward the model's posterior."
   {:api :stable}
   (:refer-clojure :exclude [+ - * /])
   (:require [gen.array :as array :refer [+ - * /]]
@@ -279,32 +281,83 @@
 ;; Training
 ;; ---------------------------------------------------------------------------
 
+(defn- check-sizes [{:keys [epochs epoch-size batches-per-epoch batch-size evaluation-size]}]
+  (doseq [[k x] [[:epochs epochs] [:epoch-size epoch-size] [:batches-per-epoch batches-per-epoch]
+                 [:batch-size batch-size] [:evaluation-size evaluation-size]]]
+    (when-not (if (= k :epochs) (nat-int? x) (pos-int? x))
+      (throw (ex-info (str "train's " k " is a " (if (= k :epochs) "non-negative" "positive") " integer, not " (pr-str x))
+                      {:option k :value x}))))
+  (when (clojure.core/> batch-size epoch-size)
+    (throw (ex-info (str "train draws each minibatch of " batch-size " examples from the epoch's " epoch-size
+                         " without replacement: :batch-size is at most :epoch-size")
+                    {:batch-size batch-size :epoch-size epoch-size}))))
+
+(defn- subset
+  "b distinct indices below n, uniform (the first b of a uniform random
+   permutation, Gen.jl's randperm(n)[1:b])."
+  [key n b]
+  (->> (array/->clj (rng/uniform key [n]))
+       (map-indexed vector)
+       (sort-by peek)
+       (map first)
+       (clojure.core/take b)))
+
+(defn- mean-weight
+  "The mean of the generate weights, a host double."
+  [runs]
+  (/ (reduce + (map #(double (array/item (:weight %))) runs)) (count runs)))
+
 (defn train
-  "Fit the trainable parameters of gf by maximizing the log density of
-   generated data (Gen.jl's train!): each of :epochs epochs takes
-   :batches-per-epoch steps, each step drawing :batch-size examples
-   [args constraints] from (data-fn key), averaging their param-gradients
-   (through gradients-fn, gen.gradients/param-gradients) and taking one
-   optimizer step from store. Returns {:store :history}, the history holding
-   each epoch's mean log density of the last batch. Options also take :key."
+  "Fit the trainable parameters of gf by maximizing the expected
+   conditional log density of generated data, as Gen.jl's train!. Each of
+   :epochs epochs generates :epoch-size examples [args constraints] once,
+   from (data-fn key), then takes :batches-per-epoch steps of the
+   optimizer from store, each along the mean of the param-gradients
+   (through gradients-fn, gen.gradients/param-gradients) of :batch-size
+   examples drawn from the epoch's without replacement. After the epoch it
+   generates :evaluation-size fresh examples (default :epoch-size), held
+   out from training, and the epoch's entry in the history is their mean
+   generate weight under the new store: the log density of the
+   constraints when they hold every choice, otherwise a log importance
+   weight, whose mean is a lower bound on it (Gen.jl's objective too).
+
+   Returns {:store :state :history}, :state the optimizer's, which :state
+   takes to resume (init's when absent). :callback, given, is called after
+   each step with {:epoch :minibatch :objective :store}: the epoch and the
+   minibatch within it (from 0), the minibatch's mean generate weight
+   before the step and the store after it; its value is ignored.
+   Defaults: 1 epoch of 1 minibatch of 1 example (Gen.jl's). Options also
+   take :key."
   [gf store optimizer data-fn gradients-fn
-   {:keys [epochs batches-per-epoch batch-size key] :or {epochs 1 batches-per-epoch 1 batch-size 1}}]
-  (loop [epoch 0 store store state (init optimizer store) history [] key (or key (gfi/next-key))]
-    (if (< epoch epochs)
-      (let [[k-epoch k-next] (rng/split key)
-            [store state score]
-            (reduce (fn [[store state _] k-batch]
-                      (let [traces (mapv (fn [k]
-                                           (let [[k-data k-gen] (rng/split k)
-                                                 [args constraints] (data-fn k-data)]
-                                             (:trace (gfi/generate (dyn/with-params gf store) args constraints k-gen))))
-                                         (rng/split k-batch batch-size))
-                            [store state] (step optimizer state store (grad/mean (map gradients-fn traces)))]
-                        [store state (/ (reduce + (map #(double (array/item (:score %))) traces)) batch-size)]))
-                    [store state nil]
-                    (rng/split k-epoch batches-per-epoch))]
-        (recur (inc epoch) store state (conj history score) k-next))
-      {:store store :history history})))
+   {:keys [epochs epoch-size batches-per-epoch batch-size evaluation-size callback state key]
+    :or {epochs 1 epoch-size 1 batches-per-epoch 1 batch-size 1}}]
+  (let [evaluation-size (or evaluation-size epoch-size)]
+    (check-sizes {:epochs epochs :epoch-size epoch-size :batches-per-epoch batches-per-epoch
+                  :batch-size batch-size :evaluation-size evaluation-size})
+    (loop [epoch 0 store store state (if (some? state) state (init optimizer store)) history []
+           key (or key (gfi/next-key))]
+      (if (< epoch epochs)
+        (let [[k-data k-batches k-evaluation k-next] (rng/split key 4)
+              examples (mapv data-fn (rng/split k-data epoch-size))
+              minibatch (fn [[store state] [b k]]
+                          (let [[k-pick k-generate] (rng/split k)
+                                model (dyn/with-params gf store)
+                                runs (mapv (fn [i k] (let [[args constraints] (examples i)]
+                                                       (gfi/generate model args constraints k)))
+                                           (subset k-pick epoch-size batch-size)
+                                           (rng/split k-generate batch-size))
+                                [store' state'] (step optimizer state store (grad/mean (map (comp gradients-fn :trace) runs)))]
+                            (when callback
+                              (callback {:epoch epoch :minibatch b :objective (mean-weight runs) :store store'}))
+                            [store' state']))
+              [store state] (reduce minibatch [store state] (map-indexed vector (rng/split k-batches batches-per-epoch)))
+              model (dyn/with-params gf store)
+              held-out (mapv (fn [k] (let [[k-data k-generate] (rng/split k)
+                                           [args constraints] (data-fn k-data)]
+                                       (gfi/generate model args constraints k-generate)))
+                             (rng/split k-evaluation evaluation-size))]
+          (recur (inc epoch) store state (conj history (mean-weight held-out)) k-next))
+        {:store store :state state :history history}))))
 
 ;; ---------------------------------------------------------------------------
 ;; Wake-sleep's sleep phase

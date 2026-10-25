@@ -404,12 +404,14 @@
 
 (deftest training-on-generated-data
   ;; Gen.jl's train!: data drawn from a generator, averaged parameter
-  ;; gradients, a decaying-step optimizer
+  ;; gradients, a decaying-step optimizer; every choice constrained, so the
+  ;; held-out weight in the history is the log density
   (let [data-fn (fn [_] [[xs] data])
         {:keys [store history]} (learn/train regression {:w 0.0 :b 0.0}
                                              (learn/gradient-descent {:step-size-init 0.05 :step-size-beta 1000})
                                              data-fn g/param-gradients
-                                             {:epochs 20 :batches-per-epoch 20 :batch-size 2 :key (rng/key 9)})
+                                             {:epochs 20 :epoch-size 2 :batches-per-epoch 20 :batch-size 2
+                                              :key (rng/key 9)})
         mx (/ (reduce + xs) 4) my (/ (reduce + ys) 4)
         w (/ (reduce + (map #(* (- %1 mx) (- %2 my)) xs ys)) (reduce + (map #(* (- % mx) (- % mx)) xs)))]
     (is (= 20 (count history)))

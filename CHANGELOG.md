@@ -33,8 +33,27 @@ newest first in each section.
 
 ### Changed
 
+- **Breaking. `learn/train` is Gen.jl's `train!`: epoch datasets, a
+  held-out history, a callback and resumable state** (DESIGN §9, "The
+  1.0's shape", training's history; genclj-59cf).
+  - Each epoch generates `:epoch-size` examples once, from the data
+    function, and each of its `:batches-per-epoch` minibatches draws
+    `:batch-size` of them without replacement. Every example of every
+    minibatch was drawn fresh. The defaults are Gen.jl's, 1 each, and a
+    `:batch-size` above `:epoch-size` is an error, so a call that passed
+    `:batch-size` alone passes `:epoch-size` too (at least as large).
+  - The history holds each epoch's mean generate weight on
+    `:evaluation-size` fresh examples (default `:epoch-size`), held out
+    from training and scored under the epoch's final store. It held the
+    mean score of the epoch's last minibatch, which measures another
+    quantity when the constraints leave choices open.
+  - It returns `{:store :state :history}`: `:state` is the optimizer's,
+    which the option `:state` takes back to resume training. `:callback`
+    is called after every step with `{:epoch :minibatch :objective
+    :store}`.
+  - **Draws.** Training's draws for a key differ.
 - **Breaking. Optimizers' options are checked when they are made**
-  (genclj-y2ab). A missing or non-numeric option, a negative rate or
+  (ccd6b7e, genclj-y2ab). A missing or non-numeric option, a negative rate or
   weight decay, a momentum, decay or beta outside [0, 1), and an eps or
   max-norm of 0 or less throw ex-info naming the option (`{:option
   :value}`). A missing rate failed at the first step with a
@@ -203,8 +222,19 @@ newest first in each section.
 
 ### Added
 
+- **VI's fits return q's last draws and their optimizer state, and take
+  a callback,** as Gen.jl's (genclj-59cf). `black-box-vi` returns
+  `:traces`, q's draws in the last iteration (`:particles` with
+  `:batched?`), and `black-box-vimco` one trace for each estimate,
+  resampled from its K draws by their normalized weights. Both return
+  `:state` (and `:model-state`), which the options of those names take
+  back to resume a fit, and call `:callback` after each iteration with
+  `{:iter :objective :traces :store}` (and `:model-store`).
+  `elbo-gradient` and `vimco-gradient` take `:traces? true` for the draws
+  (VIMCO's with their `:log-normalized-weights`). The draws for a key are
+  unchanged. A negative `:iters` is an error.
 - **An open optimizer interface, and the common optimizers** (DESIGN §9,
-  "The 1.0's shape", the optimizer interface; genclj-y2ab).
+  "The 1.0's shape", the optimizer interface; ccd6b7e, genclj-y2ab).
   - An optimizer is a map with a `:kind`, which the multimethods
     `learn/-init` (its initial state for a store) and `learn/-step` (a
     pure `[store' state']`) dispatch on, so any namespace adds one with two
@@ -410,9 +440,9 @@ sections above in the commit that builds it.
   - Shape changes before the tag: one result-key vocabulary, kernels
     returning `{:trace :accepted?}`, labeled metrics, matching batched
     return shapes, selections' union and intersection, callable choice maps,
-    trace keyword lookups, public handler state, training callbacks, laws
-    for users, particle-filter accessors, and the transform API. (The
-    optimizer interface is built: Added, above.)
+    trace keyword lookups, public handler state, laws for users,
+    particle-filter accessors, and the transform API. (The optimizer
+    interface and training callbacks are built: above.)
 
 ## History before Unreleased, by milestone
 

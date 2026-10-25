@@ -6,7 +6,9 @@
    log p(y). The estimators' means are checked against exact gradients (the
    ELBO's in closed form, the K-sample bound's by reparameterization), which
    carries the power; the fits check that the loops ascend. Each estimate
-   also with its draws batched (:batched?)."
+   also with its draws batched (:batched?). The last section checks the
+   fits' results: q's last draws, the callback, and resuming from an
+   optimizer state."
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array :refer [+ - * /]]
@@ -15,6 +17,7 @@
             [gen.dist :as d]
             [gen.dist.core :as dc]
             [gen.dynamic :refer [gen]]
+            [gen.gfi :as gfi]
             [gen.inference.vi :as vi]
             [gen.learning :as learn]
             [gen.random :as rng]
@@ -370,3 +373,71 @@
                           (vi/elbo-gradient model [] observations family [] start 4 {:estimator :reparam :batched? true})))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"The :estimator is :score or :reparam"
                           (vi/elbo-gradient model [] observations family [] start 4 {:estimator :pathwise})))))
+
+;; ---------------------------------------------------------------------------
+;; VI's traces, callback and state
+;; ---------------------------------------------------------------------------
+
+(defn- log-weight [tr]
+  (- (:weight (gfi/assess model [] (cm/merge observations (:choices tr)))) (:score tr)))
+
+(defn- mean-log-weight [traces] (clojure.core// (reduce clojure.core/+ (map (comp ts/number log-weight) traces)) (count traces)))
+
+(deftest vi-returns-the-last-iterations-draws
+  ;; the draws whose log weights made the last ELBO estimate: their mean is
+  ;; it. Planted bug (2026-10-25): the reparameterization's traces drawn
+  ;; again with fresh keys fail it
+  (doseq [opts [{} {:baseline :leave-one-out} {:estimator :reparam}]]
+    (let [{:keys [traces history]} (vi/black-box-vi model [] observations family [] start (learn/adam {:lr 0.05})
+                                                    (merge {:iters 20 :samples 6 :key (rng/key 9)} opts))]
+      (is (= 6 (count traces)) (str opts))
+      (is (ts/close? (peek history) (mean-log-weight traces)) (str opts))))
+  (testing "batched: particles"
+    (let [{:keys [particles history traces]} (vi/black-box-vi model [] observations family [] start
+                                                              (learn/adam {:lr 0.05})
+                                                              {:iters 20 :samples 6 :batched? true :key (rng/key 9)})]
+      (is (nil? traces))
+      (is (= 6 (b/size particles)))
+      (is (ts/close? (peek history) (mean-log-weight (b/traces particles))))))
+  (testing "VIMCO: one trace for each estimate, resampled from its K draws"
+    (doseq [batched? [false true]]
+      (let [{:keys [traces]} (vi/black-box-vimco model [] observations family [] start (learn/adam {:lr 0.05})
+                                                 {:iters 5 :samples 4 :estimates 3 :batched? batched? :key (rng/key 10)})]
+        (is (= 3 (count traces)))
+        (is (every? #(ts/finite? (log-weight %)) traces))))
+    (let [{:keys [traces log-normalized-weights objective]}
+          (vi/vimco-gradient model [] observations family [] start 4 {:traces? true :key (rng/key 11)})]
+      (is (= 4 (count traces)))
+      (is (ts/close? objective (clojure.core/- (array/item (array/logsumexp (array/array (mapv (comp ts/number log-weight) traces))))
+                                    (Math/log 4))))
+      (is (ts/close? 1.0 (reduce clojure.core/+ (map #(Math/exp %) log-normalized-weights)))))))
+
+(deftest vi-callbacks-see-each-iteration
+  ;; the callback sees every iteration, and changes nothing: the fit with
+  ;; one is the fit without. Planted bug (2026-10-25): the draws' key taken
+  ;; apart only when a callback asks for traces fails the last check
+  (doseq [fit [#(vi/black-box-vi model [] observations family [] start (learn/adam {:lr 0.05})
+                                 (merge {:iters 12 :samples 4 :key (rng/key 12)} %))
+               #(vi/black-box-vimco model [] observations family [] start (learn/adam {:lr 0.05})
+                                    (merge {:iters 12 :samples 4 :key (rng/key 12)} %))]]
+    (let [seen (atom [])
+          with (fit {:callback #(swap! seen conj %)})
+          without (fit {})]
+      (is (= (range 12) (map :iter @seen)))
+      (is (= (:history with) (mapv :objective @seen)))
+      (is (= (ts/host (:store with)) (ts/host (:store (peek @seen)))) "the store after the step")
+      (is (every? (comp seq :traces) @seen))
+      (is (= (:history with) (:history without)))
+      (is (= (ts/host (:store with)) (ts/host (:store without)))))))
+
+(deftest vi-resumes-from-its-state
+  ;; one iteration from a given state is that state's step along the
+  ;; iteration's estimate. Planted bug (2026-10-25): ignoring :state fails it
+  (let [opt (learn/adam {:lr 0.05})
+        {:keys [store state]} (vi/black-box-vi model [] observations family [] start opt {:iters 7 :samples 4 :key (rng/key 13)})
+        resumed (vi/black-box-vi model [] observations family [] store opt {:iters 1 :samples 4 :state state :key (rng/key 14)})
+        {:keys [grads]} (vi/elbo-gradient model [] observations family [] store 4 {:key (first (rng/split (rng/key 14)))})
+        [store' state'] (learn/step opt state store grads)]
+    (is (= 7 (:t state)))
+    (is (= (ts/host store') (ts/host (:store resumed))))
+    (is (= (ts/host state') (ts/host (:state resumed))))))

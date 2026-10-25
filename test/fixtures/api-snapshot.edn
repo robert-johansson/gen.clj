@@ -642,7 +642,7 @@
  {black-box-vi {:arglists ([model model-args observations q q-args store optimizer {:keys [samples], :or {samples 20}, :as opts}])}
   black-box-vimco {:arglists ([model model-args observations q q-args store optimizer {:keys [samples estimates], :or {samples 10, estimates 1}, :as opts}])}
   elbo-gradient {:arglists ([model model-args observations q q-args store n {:keys [estimator], :as opts}])}
-  vimco-gradient {:arglists ([model model-args observations q q-args store k {:keys [baseline key model-store batched?], :or {baseline :geometric}}])}}
+  vimco-gradient {:arglists ([model model-args observations q q-args store k {:keys [baseline key model-store batched? traces?], :or {baseline :geometric}}])}}
 
  gen.inference.weights
  {ess {:arglists ([log-weights])}
@@ -670,7 +670,7 @@
   rmsprop {:arglists ([{:keys [lr decay eps], :or {lr 0.01, decay 0.99, eps 1.0E-8}}])}
   sgd {:arglists ([{:keys [lr]}])}
   step {:arglists ([optimizer state store grads])}
-  train {:arglists ([gf store optimizer data-fn gradients-fn {:keys [epochs batches-per-epoch batch-size key], :or {epochs 1, batches-per-epoch 1, batch-size 1}}])}
+  train {:arglists ([gf store optimizer data-fn gradients-fn {:keys [epochs epoch-size batches-per-epoch batch-size evaluation-size callback state key], :or {epochs 1, epoch-size 1, batches-per-epoch 1, batch-size 1}}])}
   update-given {:arglists ([f x g & more])}}
 
  gen.random

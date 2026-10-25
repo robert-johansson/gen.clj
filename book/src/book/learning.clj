@@ -273,16 +273,35 @@ lr-max
 ;; book: train
 (def epochs
   (vec (reductions
-        (fn [{:keys [store]} key]
+        (fn [{:keys [store state]} key]
           (learn/train disc-model store (learn/sgd {:lr 0.05})
                        example grad/param-gradients
-                       {:epochs 1 :batches-per-epoch 10 :batch-size 10
-                        :key key}))
+                       {:epochs 1 :epoch-size 100 :batches-per-epoch 10
+                        :batch-size 10 :state state :key key}))
         {:store {:a 0.0 :b 0.0}}
         (rng/split (rng/key 9) 400))))
 
 (:history (peek epochs))
-;=> [-1.346] ; float64
+;=> [-1.263] ; float64
+
+;; book: history
+(defn conditional-objective
+  "The mean log density of the dataset's y's given their x's under store:
+   what the history estimates, since the held-out examples are draws from
+   the dataset."
+  [{:keys [a b]}]
+  (let [x (column dataset :x)]
+    (array/item (array/mean (dc/log-prob (d/normal (+ (* a x) b) 1)
+                                         (column dataset :y))))))
+
+(def gaps
+  "Each epoch's history less the objective at its store."
+  (mapv (fn [{[h] :history store :store}] (- h (conditional-objective store)))
+        (rest epochs)))
+
+(let [{:keys [mean mcse-mean]} (diag/summary gaps)]
+  (< (abs mean) (* 5 mcse-mean)))
+;=> true
 
 ;; book: polyak
 (defn settled
@@ -295,7 +314,7 @@ lr-max
 (def b-summary (diag/summary (settled :b)))
 
 [(:sd a-summary) (:sd b-summary)]
-;=> [0.047 0.044] ; float64
+;=> [0.052 0.054] ; float64
 
 (mapv (fn [s k]
         (< (abs (- (:mean s) (array/item (k exact)))) (* 5 (:mcse-mean s))))

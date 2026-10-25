@@ -1,6 +1,7 @@
 (ns gen.learning-test
-  "gen.learning's optimizers against reference trajectories, and its open
-   interface.
+  "gen.learning's optimizers against reference trajectories, its open
+   interface, and train as Gen.jl's train! (VI's fits' traces, callback
+   and state are gen.inference.vi-test's).
 
    The references are PyTorch's update rules (torch.optim's documented
    algorithms; optax's clip_by_global_norm), written here in host doubles
@@ -17,6 +18,7 @@
             [gen.array :as array :refer [+ - * /]]
             [gen.choicemap :as cm]
             [gen.dist :as d]
+            [gen.dist.core :as dc]
             [gen.dynamic :as dyn :refer [gen]]
             [gen.gradients :as grad]
             [gen.inference.vi :as vi]
@@ -237,7 +239,7 @@
   (let [ours {:kind ::heavy-ball :lr 0.05 :mu 0.8}
         builtin (learn/momentum {:lr 0.05 :momentum 0.8})
         fit #(learn/train line {:a 0.0 :b 0.0} % line-data grad/param-gradients
-                          {:epochs 5 :batches-per-epoch 4 :batch-size 5 :key (rng/key 1)})]
+                          {:epochs 5 :epoch-size 20 :batches-per-epoch 4 :batch-size 5 :key (rng/key 1)})]
     (is (= (ts/host (:store (fit builtin))) (ts/host (:store (fit ours)))) "train")
     (is (= (:history (fit builtin)) (:history (fit ours)))))
   (let [model (gen [] (let [mu (trace :mu (d/normal 0 1))] (trace :y (d/normal mu 1))))
@@ -256,3 +258,110 @@
     (is (= :rmsprob (:kind (ts/thrown-data (learn/step {:kind :rmsprob} nil {:w 1.0} {:w 0.1})))))
     (is (= :rmsprob (:kind (ts/thrown-data (learn/init (learn/clip-norm {:kind :rmsprob} {:max-norm 1.0}) {:w 1.0}))))
         "a wrapped one too")))
+
+;; ---------------------------------------------------------------------------
+;; train as Gen.jl's train!
+;; ---------------------------------------------------------------------------
+
+;; x ~ N(θ, 1), y ~ N(x, 1), with only y observed: generate's weight is
+;; log N(y; x, 1) for x from the prior, where the score adds log N(x; θ, 1)
+(def ^:private latent (gen [] (let [x (trace :x (d/normal (param :theta) 1))] (trace :y (d/normal x 1)))))
+
+(defn- y-data
+  "y ~ N(1, 0.5)."
+  [key]
+  [[] (cm/choicemap :y (+ 1.0 (* 0.5 (rng/normal key))))])
+
+(def ^:private expected-weight
+  "E[weight] = -½ log 2π - ½ E[(y - x)²], y - x ~ N(1 - θ, 0.5² + 1), at
+   θ = 0; its sd is ½ √(2σ⁴ + 4m²σ²), m = 1 and σ² = 1.25. Gen.jl 0.4.8's
+   train! on this model (FixedStepGradientDescent(0.0), 4000 epochs of 10
+   evaluation examples, run locally on 2026-10-25) gave a mean history of
+   -2.0525 ± 0.0072, this value within 1.2 standard errors; the mean
+   score would be -3.4629."
+  {:mean (c/- (c/* -0.5 (Math/log (c/* 2 Math/PI))) (c/* 0.5 (c/+ 0.25 1.0 1.0)))
+   :sd (c/* 0.5 (Math/sqrt (c/+ (c/* 2 1.25 1.25) (c/* 4 1.0 1.25))))})
+
+(deftest ^:slow the-history-is-the-held-out-generate-weight
+  ;; at a fixed store (lr 0), each epoch's entry is the mean weight of 20
+  ;; fresh examples. Planted bugs (2026-10-25): the history of the scores
+  ;; (gen.clj's before) is 1.42 below, 63 standard errors; held-out
+  ;; examples taken from the epoch's, not fresh, fail the count of
+  ;; data-fn's calls
+  (let [calls (atom 0)
+        epochs 200
+        {:keys [history]} (learn/train latent {:theta 0.0} (learn/sgd {:lr 0.0}) #(do (swap! calls inc) (y-data %))
+                                       grad/param-gradients
+                                       {:epochs epochs :epoch-size 10 :batches-per-epoch 3 :batch-size 4
+                                        :evaluation-size 20 :key (rng/key 3)})
+        se (c// (:sd expected-weight) (Math/sqrt (c/* epochs 20)))]
+    (is (= epochs (count history)))
+    (is (c/< (Math/abs (c/- (c// (reduce c/+ history) epochs) (:mean expected-weight))) (c/* 5 se))
+        (str (c// (reduce c/+ history) epochs) " against " (:mean expected-weight) " ± " se))
+    (is (= (c/* epochs (c/+ 10 20)) @calls) "each epoch generates its 10 examples and 20 held-out ones")))
+
+(def ^:private observed
+  "y ~ N(θ, 1), y always observed: generate's weight is log N(y; θ, 1)."
+  (gen [] (trace :y (d/normal (param :theta) 1))))
+
+(deftest minibatches-come-from-the-epochs-examples
+  ;; every choice constrained and lr 0, so a minibatch's objective is the
+  ;; mean log density of its examples. With :batch-size = :epoch-size each
+  ;; minibatch is the epoch's whole dataset: an epoch's objectives agree,
+  ;; and are that dataset's mean. Planted bugs (2026-10-25): fresh data for
+  ;; each minibatch (gen.clj's before) and drawing with replacement each
+  ;; fail the agreement
+  (let [seen (atom [])
+        data (fn [key] [[] (cm/choicemap :y (rng/normal key))])
+        _ (learn/train observed {:theta 0.0} (learn/sgd {:lr 0.0}) data grad/param-gradients
+                       {:epochs 3 :epoch-size 6 :batches-per-epoch 4 :batch-size 6 :key (rng/key 4)
+                        :callback #(swap! seen conj %)})
+        by-epoch (group-by :epoch @seen)]
+    (is (= [[0 0] [0 1] [0 2] [0 3] [1 0] [1 1] [1 2] [1 3] [2 0] [2 1] [2 2] [2 3]] (mapv (juxt :epoch :minibatch) @seen)))
+    (is (= #{:epoch :minibatch :objective :store} (set (keys (first @seen)))))
+    (doseq [[_ calls] by-epoch]
+      (is (every? #(ts/close? (:objective (first calls)) (:objective %)) calls)))
+    (is (not= (:objective (first (by-epoch 0))) (:objective (first (by-epoch 1)))) "each epoch its own data")
+    (testing "the first epoch's examples, from its key's first split"
+      (let [[k-data] (rng/split (rng/key 4) 4)
+            ys (map #(cm/get-choice (second (data %)) :y) (rng/split k-data 6))]
+        (is (ts/close? (c// (reduce c/+ (map #(ts/number (dc/log-prob (d/normal 0.0 1) %)) ys)) 6)
+                       (:objective (first (by-epoch 0)))))))
+    (testing "a smaller minibatch draws distinct examples of the epoch's"
+      ;; Planted bug: drawing with replacement makes some minibatch of 5
+      ;; from 6 repeat an example, whose mean then differs from every
+      ;; leave-one-out mean of the epoch's
+      (let [seen (atom [])]
+        (learn/train observed {:theta 0.0} (learn/sgd {:lr 0.0}) data grad/param-gradients
+                     {:epochs 1 :epoch-size 6 :batches-per-epoch 30 :batch-size 5 :key (rng/key 4)
+                      :callback #(swap! seen conj %)})
+        (let [[k-data] (rng/split (rng/key 4) 4)
+              lps (mapv #(ts/number (dc/log-prob (d/normal 0.0 1) (cm/get-choice (second (data %)) :y)))
+                        (rng/split k-data 6))
+              total (reduce c/+ lps)
+              leave-one-out (map #(c// (c/- total %) 5) lps)]
+          (is (every? (fn [{:keys [objective]}] (some #(ts/close? objective %) leave-one-out)) @seen)))))))
+
+(deftest training-resumes-from-its-state
+  ;; every choice constrained, so a step does not depend on its key: two
+  ;; epochs in one call are one epoch and then another from its store and
+  ;; state. Planted bug (2026-10-25): ignoring :state (Adam restarting from
+  ;; zero moments, chapter 028's loss) fails it
+  (let [data (constantly [[1.5] (cm/choicemap :y 2.0)])
+        opt (learn/adam {:lr 0.1})
+        run (fn [store opts] (learn/train line store opt data grad/param-gradients (merge {:batches-per-epoch 3} opts)))
+        both (run {:a 0.0 :b 0.0} {:epochs 2 :key (rng/key 6)})
+        first-epoch (run {:a 0.0 :b 0.0} {:epochs 1 :key (rng/key 7)})
+        second-epoch (run (:store first-epoch) {:epochs 1 :state (:state first-epoch) :key (rng/key 8)})]
+    (is (= 6 (:t (:state both))))
+    (is (= (ts/host (:store both)) (ts/host (:store second-epoch))))
+    (is (= (ts/host (:state both)) (ts/host (:state second-epoch))))
+    (is (not= (ts/host (:store both)) (ts/host (:store (run (:store first-epoch) {:epochs 1 :key (rng/key 8)}))))
+        "without the state, Adam starts again")))
+
+(deftest train-sizes-are-checked
+  (let [train #(learn/train line {:a 0.0 :b 0.0} (learn/sgd {:lr 0.1}) line-data grad/param-gradients %)]
+    (is (= {:batch-size 4 :epoch-size 3} (ts/thrown-data (train {:epoch-size 3 :batch-size 4}))) "without replacement")
+    (is (= {:option :evaluation-size :value 0} (ts/thrown-data (train {:evaluation-size 0}))))
+    (is (= {:option :epochs :value -1} (ts/thrown-data (train {:epochs -1}))))
+    (is (= [] (:history (train {:epochs 0}))))))
