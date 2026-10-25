@@ -795,7 +795,11 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     keep the shape may follow in 1.x. The gate: the book's Parts I-V
     merged and reviewed; the battery green on the JVM backend, MLX CPU and
     Metal, and once on CUDA; the book once on MLX; memo.clj and GenGDT
-    passing against the release candidate.
+    passing against the release candidate. On MLX's CPU (owner, 2026-10-25
+    night, on the lead's recommendation): the full battery in float32, the
+    light tier in float64, whose slow statistical tests run in float64 on
+    the JVM backend and whose kernels the conformance suite checks against
+    it (a full float64 run did not fit in 4 h on the Thor).
   - **The result keys** (the agent, 2026-10-25, confirmed by the owner; genclj-4jpw):
     one meaning per key across gen.inference, gen.gradients, gen.learning
     and gen.batched. A key that holds a log says so in its name, but for
