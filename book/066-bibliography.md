@@ -29,7 +29,8 @@ reference of the entry *Gen.jl*, with the systems.
   and Regenerate*, *Speeding Up*, *The Generative Function Interface*,
   *Inference as Operations on the GFI*, *Trace Translators and Involutive
   MCMC*, *Design Rationale*, *Verification*, *Exact Structure, Made
-  Explicit*, *Extending gen.clj*, *Data-Driven Proposals* and *Notation*.
+  Explicit*, *Extending gen.clj*, *Data-Driven Proposals*, *Reversible-Jump
+  MCMC and Structure Learning* and *Notation*.
 - **Cusumano-Towner and Mansinghka 2018**. Marco F. Cusumano-Towner and
   Vikash K. Mansinghka. Using probabilistic programs as proposals.
   arXiv:1801.03612, 2018. Cited in *MCMC and MAP*.
