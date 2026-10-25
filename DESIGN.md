@@ -532,6 +532,45 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   comes when its remaining work is done (owner, 2026-10-24). The 1.0's
   scope (which surface it freezes, modules first or not, the post-M5
   fixes, the book's Parts I–III first) is open: genclj-04h2.
+  **The 1.0's shape** (owner, 2026-10-25, on the lead's proposal):
+  - **The promise:** names, arities, result-map keys and documented
+    semantics (the GFI and its laws) stay put through 1.x; minor releases
+    add; removals wait for 2.0, after a deprecation cycle (`:deprecated`
+    metadata and a docstring note, nothing printed). The exact draws for a
+    key are not promised across releases, only their distributions.
+  - **Three tiers, marked in code** (`{:api :stable | :experimental |
+    :internal}` on each namespace). Stable: gen.array, gen.random, the data
+    layer (choicemap, selection, trace, diff), gen.gfi, gen.dynamic,
+    gen.dist with defdist and gen.dist.dsl, gen.combinators, gen.custom,
+    gen.state-space, gen.serialize, inference's core (importance, mh,
+    kernel, mcmc, particle-filter, enumerative, transform, vi, diagnostics,
+    weights), gen.gradients, gen.learning, gen.batched (with a public
+    per-particle accessor); stable for implementers, the GFI protocol and
+    gen.array.protocols. Experimental (shipped, outside the promise):
+    gen.llm.*, trace-kernel, conjugate, laplace, particle-mcmc, partition,
+    dist.host, and gen.laws until it moves to ext/laws. Internal: tape,
+    batch, dtype, shape, the dynamic language's guard, static and core, the
+    backends. Dependents that reach internals get public replacements
+    (memo.clj: a per-particle accessor, and gen.array's own tracked?,
+    broadcast and dtype-kind).
+  - **One artifact:** gen.llm ships inside it, marked experimental;
+    optional dependencies stay in ext/ (ext/commons-math, ext/laws).
+    Namespace names are what the promise freezes, so a later split only
+    adds a coordinate.
+  - **Enforced:** a committed snapshot of the stable vars and arglists
+    fails a test when the stable surface changes; the API appendix (063)
+    is generated from the tier marks; a CHANGELOG from now on. Maven or
+    Clojars coordinates are decided at first publish.
+  - **Before the tag:** the friction that changes shape lands (one
+    result-key vocabulary, kernels returning {:trace :accepted?}, labeled
+    metrics, matching batched return shapes, selections' union and
+    intersection, callable choice maps, trace keyword lookups, public
+    handler state, an optimizer interface and training callbacks, laws for
+    users, particle-filter accessors, the transform API); bug fixes that
+    keep the shape may follow in 1.x. The gate: the book's Parts I-V
+    merged and reviewed; the battery green on the JVM backend, MLX CPU and
+    Metal, and once on CUDA; the book once on MLX; memo.clj and GenGDT
+    passing against the release candidate.
 - **Indices are 0-based** (Clojure idiom, as in GenMLX; D2): Map's and
   Unfold's addresses, Recurse's nodes (root 0), categorical's values
   (categorical-logits' too: 0 to n - 1) and Switch's branch index (branch 0
