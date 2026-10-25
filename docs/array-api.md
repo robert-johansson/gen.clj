@@ -30,7 +30,7 @@ specification, implemented by the JVM backend in M1 (bean genclj-a0qg).*
 | `gen.array.linalg` | `la` | distributions, inference | cholesky, triangular solve, solve, inv, slogdet |
 | `gen.random` | `rng` | handler, distributions | keys (pure Clojure) and samplers built on one backend primitive |
 | `gen.array.protocols` | `p` | backend implementers | `IArray`, `IBackend` |
-| `gen.array.tape` | — | the JVM backend | generic reverse-mode AD over the public API |
+| `gen.array.tape` | — | every backend (the default; MLX's native AD is opt-in) | generic reverse-mode AD over the public API |
 | `gen.backend.jvm` | — | — | M1 backend |
 | `gen.backend.mlx` | — | — | M2 backend |
 
@@ -236,10 +236,10 @@ needs, taken from GenMLX's measured call counts
   - beta and dirichlet: via gamma, from the gammas' logs (a sigmoid, a
     softmax), which do not underflow.
   - Because the algorithms are shared, the backends sample from identical laws.
-- **Stretch goal (bean genclj-ldpy):** make the JVM backend's float32 mode
-  bit-identical to MLX's `random.uniform`. The two backends would then produce
-  identical traces for the same key, which makes an extremely strong
-  cross-backend test.
+- **Bit-identical uniforms (bean genclj-ldpy, done; §13):** the same key
+  draws bit-identical uniforms on the JVM backend and on MLX, in float32 and
+  float64 alike, an extremely strong cross-backend test. Samplers built on
+  them agree up to the rounding of each op.
 - **Shapes broadcast with parameters.** Batched sampling is just a larger shape.
 - **Keys never live in metadata, and nothing silently invents one.** The GFI's
   optional key (DESIGN.md §3.5) is the only implicit source. It is a documented,
@@ -271,7 +271,7 @@ needs, taken from GenMLX's measured call counts
     written against the public API. Composites therefore need no rules, and the
     same tape works on any backend; it could even test MLX's native AD.
   - **Reading a tracked float on the host is an error** (2026-10-24,
-    genclj-de4g; DESIGN.md §9, PROVISIONAL). `array/item` and `array/->clj`
+    genclj-de4g; DESIGN.md §9; confirmed by the owner 2026-10-25). `array/item` and `array/->clj`
     of one throw `ex-info` (`:shape`, `:dtype`) naming the ways out:
     gen.array's operators, a custom gradient (`array/custom-vjp`,
     gen.custom's `:gradient`), or `(array/item (array/stop-gradient x))`
@@ -919,7 +919,7 @@ The decisions are §12 items 15–18, for the owner's review.*
 MLX's uint32 ops. The same key draws bit-identical uniforms on MLX and on
 the JVM backend, in float32 and float64 alike. Since every sampler is a
 composite over this primitive, the two backends sample identically up to
-the rounding of each op (bean genclj-ldpy's stretch goal).
+the rounding of each op (bean genclj-ldpy).
 
 **Gradients.** The backend-generic tape (`gen.array.tape`) by default;
 MLX's own with `-Dgen.mlx.grad=native` (§8).
