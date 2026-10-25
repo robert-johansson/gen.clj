@@ -661,27 +661,23 @@ newest first in each section.
 ### Decided, not yet in the code
 
 Owner decisions in DESIGN §9 that dependents will see. Each moves to the
-sections above in the commit that builds it.
+sections above in the commit that builds it. None is waiting now:
 
 - **From the book's friction** (2026-10-25; 797a269). Decisions 1–4 and 6
   concern the book and the docs; 5, 8, 9 and 10 are built (Changed, above);
   7 changes nothing in the code (dynamic bodies keep passing unknown-change
   to splices; gen.dynamic's docstring names the static language as the way
   to incremental splices; 33fec66).
-- **The 1.0's shape** (2026-10-25; 872f04f; genclj-04h2). The tier marks,
-  the snapshot and the API appendix are built (Added, above).
-  - Public replacements for internals that dependents reach: a per-particle
-    accessor in gen.batched, and gen.array's own `tracked?`, `broadcast` and
-    `dtype-kind` (memo.clj's).
-  - Shape changes before the tag: one result-key vocabulary, kernels
-    returning `{:trace :accepted?}`, labeled metrics, matching batched
-    return shapes, trace keyword lookups, public handler state, an
-    optimizer interface and training callbacks, laws for users,
-    particle-filter accessors, and the transform API.
-    return shapes, selections' union and intersection, callable choice maps,
-    trace keyword lookups, public handler state, laws for users,
-    particle-filter accessors, and the transform API. (The optimizer
-    interface and training callbacks are built: above.)
+- **The 1.0's shape** (2026-10-25; 872f04f; genclj-04h2). Built, each with
+  its entry above: the tier marks, the snapshot and the API appendix; the
+  public replacements for internals (gen.array's `tracked?`,
+  `broadcast-shapes`, `dtype-kind` and a batched value's `particle` and
+  `particles`); one result-key vocabulary; kernels returning `{:trace
+  :accepted?}`; labeled metrics; matching batched return shapes;
+  selections' union and intersection; callable choice maps; trace keyword
+  lookups (kept and documented); public handler state; an optimizer
+  interface and training callbacks; laws for users (ext/laws); the
+  particle filter's accessors; and the transform API.
 
 ## History before Unreleased, by milestone
 
@@ -689,7 +685,7 @@ gen.clj was built in milestones before this file began. These summaries
 are for orientation. DESIGN.md (§1 and §9) and the milestone beans have the
 detail.
 
-### The book (2026-10-24 to 2026-10-25, in progress; genclj-ceds)
+### The book (2026-10-24 to 2026-10-25; genclj-ceds)
 
 The GenMLX book ported, with Gen.jl's tutorials as its worked chapters, in
 `book/`: five Parts and appendices. A chapter's code lives in its own
@@ -699,10 +695,11 @@ a statistical claim passes at 5 standard errors (genclj-fblt).
 `gen.book sync` writes the includes and the SVG figures, `gen.book pdf`
 builds a PDF with Pandoc, and `gen.book-test` with `gen.book.part2-test` to
 `part5-test` runs the chapters on the JVM backend (on MLX with
-`-Dgen.book.mlx=true`). Merged so far: Parts I (011–017), II (021–029), III
-(031–035) and IV (041–045), Part V's gallery (054), and the appendices
-Coming from Gen.jl, The Distributions (generated from gen.dist), Notation,
-and Installing and Running. Writing it found genclj-zxis, x6ox, 1t38 and
+`-Dgen.book.mlx=true`). All of it is merged and approved by the owner:
+Parts I (011–017), II (021–029), III (031–035), IV (041–045) and V
+(051–054), and the appendices Coming from Gen.jl, The Distributions
+(generated from gen.dist), The Public API (generated from the tiers),
+Notation, Installing and Running, and the Bibliography. Writing it found genclj-zxis, x6ox, 1t38 and
 de4g, and the ten decisions (Unreleased, above).
 
 ### The post-M5 review (2026-10-22; genclj-ta2i)
