@@ -16,8 +16,9 @@ and its code is verified for real (DESIGN.md §9).
   (and the figures). Every ```clojure block in a chapter is an include,
   so no code in the book goes untested. Regions the text does not include
   (setup, helpers) still run.
-- **The test** (`gen.book-test`, its gate the JVM backend; on MLX only when
-  asked, `-Dgen.book.mlx=true`) fails when an include
+- **The test** (`gen.book-test` and `gen.book.part2-test` … `part5-test`,
+  its gate the JVM backend; on MLX only when asked, `-Dgen.book.mlx=true`)
+  fails when an include
   differs from its region. It then runs the namespace region by region and
   checks the results the code states:
   - `;=> value` after a form shows its result. A float checks to the digits
@@ -48,8 +49,9 @@ The mechanics are in `test/gen/book.clj`.
 ## Running
 
 ```
-clojure -X:test :nses '[gen.book-test]'                       # every chapter
-clojure -J-Dgen.backend=mlx -J-Dgen.book.mlx=true -X:test :nses '[gen.book-test]'   # on MLX, at milestones
+clojure -X:test :patterns '["gen.book.*"]'                   # every chapter (Parts II-V are ^:slow)
+clojure -X:test:fast :nses '[gen.book-test]'                  # includes in step; Part I and the appendices run
+clojure -J-Dgen.backend=mlx -J-Dgen.book.mlx=true -X:test :patterns '["gen.book.*"]'   # on MLX, at milestones
 clojure -M:test -m gen.book sync                              # write the includes and figures
 clojure -M:test -m gen.book pdf                               # the PDF: target/book/gen-clj-book.pdf
 ```
