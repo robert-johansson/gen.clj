@@ -568,6 +568,18 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     addresses density 0 (an observation inside a call that stops is a loud
     error there); its projection of an impossible trace is -Inf.
 
+  Item 5, the owner's two rulings on the implementation (2026-10-25):
+  - A move from an impossible trace to another impossible one weighs NaN,
+    not -Inf (−Inf − −Inf is undefined), and MH's NaN check stays loud: a
+    chain at an impossible trace is the caller's mistake, which -Inf would
+    hide by rejecting every move forever.
+  - An invalid proposal stays loud (the law audit's gap J). When a move's
+    new trace is possible but the backward proposal gives the move's
+    reverse choices density 0, the proposal cannot reverse its own move
+    (the thesis's third requirement for MH proposals, §3.4.2), so MH
+    throws ex-info naming the proposal; this is a broken proposal, not the
+    model leaving its support (genclj-ocxs).
+
   Item 9 as implemented (2026-10-25, the agent; genclj-ynpc): the fallback
   is `gen.batched/fallback` of the particles (`fallback-reason` keeps its
   ex-data), and `:fallback` in the results of b/generate, update and
