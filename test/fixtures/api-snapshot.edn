@@ -467,6 +467,7 @@
   IRevisable {:kind :protocol, :methods [-revise -same-gen-fn?]}
   IStores {:kind :protocol, :methods [-stores -with-stores]}
   assess {:arglists ([gf args choices] [gf args choices key])}
+  assess-backward {:arglists ([t t' q args u' k])}
   backward-key {:arglists ([k])}
   check-argdiffs {:arglists ([op args argdiffs])}
   check-args {:arglists ([op args])}
