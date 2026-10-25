@@ -17,7 +17,7 @@ Metropolis–Hastings moves of three kinds for it: blocks resampled from the
 prior, a random walk on the line, and jumps proposed by a data-driven
 heuristic. Then we optimize it.
 
-The chapter ports Gen.jl's *Basics of Iterative Inference: MCMC and MAP*.
+The chapter ports Gen.jl's *Basics of MCMC and MAP Inference*.
 Every claim is checked. Where a block of the model has a closed-form
 posterior given the rest, a move is checked against it exactly; where
 algorithms are compared, the comparison is a band of standard errors over

@@ -1132,10 +1132,10 @@ errors:
 ## The airline data
 
 The data are the monthly counts of international airline passengers from
-1949 to 1960, in thousands: Box and Jenkins' AirPassengers series. The
-notebook ships them as `airline.csv`, less their mean; the book keeps the
-counts themselves, which adding the mean back recovers exactly, at
-`book/data/airpassengers.edn`:
+1949 to 1960, in thousands: the AirPassengers series of Box and Jenkins
+(1976). The notebook ships them as `airline.csv`, less their mean; the
+book keeps the counts themselves, which adding the mean back recovers
+exactly, at `book/data/airpassengers.edn`:
 
 <!-- code: airline -->
 ```clojure

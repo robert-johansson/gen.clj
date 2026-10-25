@@ -9,8 +9,8 @@ cell. Its smallness is why the rest of the book composes as it does:
 nested models, batched execution and faster paths all plug into the same
 slot.
 
-This chapter ports *How It Works: The Handler Loop* from *The GenMLX
-Book*. gen.clj's handler follows GenMLX's design and differs from it in a
+This chapter ports *How It Works: The Handler Loop* from the GenMLX
+book. gen.clj's handler follows GenMLX's design and differs from it in a
 few places, noted where they come up. The chapter's code lives in one
 namespace:
 

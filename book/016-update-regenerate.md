@@ -10,7 +10,7 @@ other two. At the end we build Metropolis–Hastings from `regenerate` and
 check it against an exact posterior.
 
 The chapter ports the GenMLX book's *Updating and Regenerating* and merges
-in Gen.jl's *Reasoning about Regenerate*, whose three-choice model has
+in Gen.jl's *Reasoning About Regenerate*, whose three-choice model has
 every probability in closed form. Every weight the text states is checked
 against densities computed by hand.
 

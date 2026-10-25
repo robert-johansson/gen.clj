@@ -18,10 +18,10 @@ Part I, Foundations:
 |------|---------|---------|
 | 011-getting-started.md | Getting Started: Linear Regression | Gen.jl's Getting Started; GenMLX book 011 |
 | 012-modeling.md | Introduction to Modeling | Gen.jl's Introduction to Modeling |
-| 013-conditioning.md | Conditioning | Gen.jl's A Bottom-up Introduction; GenMLX book 012 |
+| 013-conditioning.md | Conditioning | Gen.jl's A Bottom-Up Introduction; GenMLX book 012 |
 | 014-handler-loop.md | The Handler Loop | GenMLX book 013 |
 | 015-choice-maps-traces.md | Choice Maps, Traces and Selections | GenMLX book 014 |
-| 016-update-regenerate.md | Update and Regenerate | GenMLX book 015; Gen.jl's Reasoning about Regenerate |
+| 016-update-regenerate.md | Update and Regenerate | GenMLX book 015; Gen.jl's Reasoning About Regenerate |
 | 017-composition.md | Composition | GenMLX book 016 |
 
 Part II, Inference (`020-part-inference.md` holds its heading):
@@ -29,7 +29,7 @@ Part II, Inference (`020-part-inference.md` holds its heading):
 | File | Chapter | Sources |
 |------|---------|---------|
 | 021-inference-toolkit.md | The Inference Toolkit | GenMLX book 021 |
-| 022-mcmc-map.md | MCMC and MAP | Gen.jl's Basics of Iterative Inference: MCMC and MAP |
+| 022-mcmc-map.md | MCMC and MAP | Gen.jl's Basics of MCMC and MAP Inference |
 | 023-gradient-mcmc.md | Gradient-Based MCMC | GenMLX book 022 |
 | 024-enumeration.md | Debugging with Enumeration | Gen.jl's Debugging with Enumeration |
 | 025-smc.md | Sequential Monte Carlo: Object Tracking | Gen.jl's SMC tutorial |
@@ -97,8 +97,8 @@ the appendices (`060-appendices.md`):
 - **Refer to other chapters by title** ("as *Conditioning* showed"), not
   by number.
 - **Open with what the chapter does and why**, and name its sources in one
-  sentence ("This chapter ports Gen.jl's *Introduction to Modeling* …").
-  Close the main text where the next chapter picks up.
+  sentence ("This chapter ports Gen.jl's *Introduction to Modeling in
+  Gen* …"). Close the main text where the next chapter picks up.
 
 ## Porting the sources
 

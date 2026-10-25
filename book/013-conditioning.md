@@ -9,7 +9,7 @@ the observed values, keeps those choices at their values, and returns one
 number besides the trace, the *weight*. Every inference algorithm in this
 book is built on that number.
 
-This chapter ports Gen.jl's *A Bottom-up Introduction to Gen* (choice
+This chapter ports Gen.jl's *A Bottom-Up Introduction to Gen* (choice
 maps and their probabilities, `generate`'s internal proposal, importance
 sampling by hand) and the GenMLX book's chapter on conditioning (the
 weight, `project`, the marginal likelihood, prior against posterior,

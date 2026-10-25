@@ -745,9 +745,10 @@ stratified variance.
 gen.clj's default is multinomial, as Gen.jl's is; GenMLX defaulted to
 systematic. `pf/maybe-resample` and `pf/resample` take `:method` (and
 `run-filter` passes it on): `:multinomial`, `:systematic`, `:stratified`,
-`:residual`, or `:optimal`, Fearnhead and Clifford's, which keeps each
-particle at most once and leaves the weights unequal. Exercise 1 shows
-that systematic resampling's noise also depends on the particles' order.
+`:residual`, or `:optimal`, Fearnhead and Clifford's (2003), which keeps
+each particle at most once and leaves the weights unequal. Exercise 1
+shows that systematic resampling's noise also depends on the particles'
+order.
 
 ## Path degeneracy and rejuvenation
 
