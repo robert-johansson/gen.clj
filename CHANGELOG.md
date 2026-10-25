@@ -34,7 +34,7 @@ newest first in each section.
 ### Changed
 
 - **Breaking. Draws. A batched particle filter stays batched through
-  rejuvenation** (DESIGN §9, "Kernels' batched form"; COMMIT,
+  rejuvenation** (DESIGN §9, "Kernels' batched form"; af25c97,
   genclj-xgz4).
   - `pf/rejuvenate` of a batched state moves every particle at once when
     its kernel has a batched form (`kernel/batched-form`: `kernel/mh` of a
@@ -229,7 +229,7 @@ newest first in each section.
 ### Added
 
 - **Batched MH with a proposal, and a batched filter's accessor**
-  (COMMIT, genclj-xgz4).
+  (af25c97, genclj-xgz4).
   - `(mh/mh-particles ps proposal proposal-args key)`, as `mh/mh`'s
     arities (a selection or a proposal, the key optional): the proposal,
     the update and the backward proposal's assess run batched, as the
