@@ -47,9 +47,10 @@ reference of the entry *Gen.jl*, with the systems.
 
 ### Importance sampling and diagnostics
 
-- **Kong 1992**. The efficiency of importance sampling, $1/\int p^2/q$
-  for a proposal $q$ and a target $p$, the measure behind the effective
-  sample size. Cited in *The Inference Toolkit*.
+- **Kong 1992**. Augustine Kong. A note on importance sampling using
+  standardized weights. Technical Report 348, Department of Statistics,
+  University of Chicago, 1992. The measure behind the effective sample
+  size. Cited in *The Inference Toolkit*.
 - **Vehtari et al. 2021**. Aki Vehtari, Andrew Gelman, Daniel Simpson,
   Bob Carpenter and Paul-Christian Bürkner. Rank-normalization, folding,
   and localization: an improved $\widehat{R}$ for assessing convergence
@@ -63,7 +64,7 @@ reference of the entry *Gen.jl*, with the systems.
   82(4):711–732, 1995. Cited in *Trace Translators and Involutive MCMC*.
 - **Hoffman and Gelman 2014**. Matthew D. Hoffman and Andrew Gelman. The
   No-U-Turn Sampler: adaptively setting path lengths in Hamiltonian Monte
-  Carlo. *Journal of Machine Learning Research* 15:1593–1623, 2014. Cited
+  Carlo. *Journal of Machine Learning Research* 15(47):1593–1623, 2014. Cited
   in *Gradient-Based MCMC*.
 - **Murray, Adams and MacKay 2010**. Iain Murray, Ryan Adams and David
   MacKay. Elliptical slice sampling. In *Proceedings of the Thirteenth
@@ -104,23 +105,31 @@ reference of the entry *Gen.jl*, with the systems.
 
 ### Variational inference and learning
 
-- **ADEV**. Lew et al. ADEV: sound automatic differentiation of expected
-  values of probabilistic programs. POPL 2023. doi:10.1145/3571198.
+- **ADEV**. Alexander K. Lew, Mathieu Huot, Sam Staton and Vikash K.
+  Mansinghka. ADEV: sound automatic differentiation of expected values of
+  probabilistic programs. *Proceedings of the ACM on Programming
+  Languages* 7(POPL), article 5, 2023. doi:10.1145/3571198.
   Cited in *Variational Inference*.
 - **Bornschein and Bengio 2015**. Jörg Bornschein and Yoshua Bengio.
   Reweighted wake-sleep. ICLR 2015. arXiv:1406.2751. Cited in *Learning*.
-- **Burda, Grosse and Salakhutdinov 2016**. Y. Burda, R. Grosse and R.
-  Salakhutdinov. Importance weighted autoencoders. ICLR 2016. Cited in
-  *Variational Inference*.
-- **Kucukelbir et al. 2017**. Automatic differentiation variational
-  inference (ADVI): variational inference with the reparameterization
-  estimator of the ELBO's gradient. Cited in *Variational Inference*.
-- **Mnih and Rezende 2016**. A. Mnih and D. J. Rezende. Variational
-  inference for Monte Carlo objectives. ICML 2016. arXiv:1602.06725.
+- **Burda, Grosse and Salakhutdinov 2016**. Yuri Burda, Roger Grosse and
+  Ruslan Salakhutdinov. Importance weighted autoencoders. *International
+  Conference on Learning Representations* (ICLR 2016). arXiv:1509.00519.
   Cited in *Variational Inference*.
-- **Roeder, Wu and Duvenaud 2017**. Sticking the landing: a gradient
-  estimator for variational inference whose noise vanishes at the
-  optimum. Cited in *Variational Inference*.
+- **Kucukelbir et al. 2017**. Alp Kucukelbir, Dustin Tran, Rajesh
+  Ranganath, Andrew Gelman and David M. Blei. Automatic differentiation
+  variational inference. *Journal of Machine Learning Research*
+  18(14):1–45, 2017. Cited in *Variational Inference*.
+- **Mnih and Rezende 2016**. Andriy Mnih and Danilo J. Rezende.
+  Variational inference for Monte Carlo objectives. In *Proceedings of the
+  33rd International Conference on Machine Learning* (ICML 2016), PMLR
+  48:2188–2196, 2016. arXiv:1602.06725.
+  Cited in *Variational Inference*.
+- **Roeder, Wu and Duvenaud 2017**. Geoffrey Roeder, Yuhuai Wu and David
+  Duvenaud. Sticking the landing: simple, lower-variance gradient
+  estimators for variational inference. In *Advances in Neural Information
+  Processing Systems 30* (NeurIPS 2017), 6925–6934. Cited in *Variational
+  Inference*.
 
 ### Other algorithms
 
@@ -279,9 +288,11 @@ its own title.
 
 ## Data
 
-- **Box and Jenkins 1976**. The AirPassengers series of Box and Jenkins
-  (1976): monthly totals of international airline passengers, in
-  thousands, January 1949 to December 1960. *Reversible-Jump MCMC and
+- **Box and Jenkins 1976**. George E. P. Box and Gwilym M. Jenkins. *Time
+  Series Analysis: Forecasting and Control*, revised edition. Holden-Day,
+  San Francisco, 1976. The AirPassengers series: monthly totals of
+  international airline passengers, in thousands, January 1949 to
+  December 1960. *Reversible-Jump MCMC and
   Structure Learning* reads it from gen-quickstart's
   `tutorials/airline.csv`, which holds the series less its mean. Cited in
   *Reversible-Jump MCMC and Structure Learning*.
