@@ -350,10 +350,15 @@
       (is (= {} (counted #(gfi/update tr [0.9] [diff/unknown-change] cm/EMPTY (rng/key 4))))))
     (testing "regenerating d alone"
       (is (= {} (counted #(gfi/regenerate tr (sel/select :d) (rng/key 5))))))
-    (testing "the same body without ^:static reruns everything"
+    (testing "the same body without ^:static reruns its code"
+      ;; and its splice of the callee, whose argument is a number equal to
+      ;; the last, is a no-change call (the ten decisions' tenth, DESIGN.md
+      ;; §9): the deterministic callee is not run again
       (let [plain (assoc model :static nil)
             tp (gfi/simulate plain [0.5] (rng/key 1))]
-        (is (= {:compute 1 :callee 1} (counted #(gfi/update tp [0.5] [diff/no-change] (cm/choicemap :b 0.3) (rng/key 2)))))))))
+        (is (= {:compute 1} (counted #(gfi/update tp [0.5] [diff/no-change] (cm/choicemap :b 0.3) (rng/key 2)))))
+        (is (= {:compute 1 :callee 1} (counted #(gfi/update tp [0.5] [diff/no-change] (cm/choicemap :a 0.3) (rng/key 3))))
+            "a changed argument runs it")))))
 
 (deftest a-store-keeps-its-identity-and-its-skipping
   ;; with no outer store a gf's own is not copied, so the next update finds

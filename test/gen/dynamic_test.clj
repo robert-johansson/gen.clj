@@ -813,3 +813,35 @@
    [:nested-bounds-static nested-bounds-static [0.0] [[0.5] [-0.5]]]
    [:nested-bounds-in-a-callee nested-bounds-in-a-callee [0.0] [[0.5] [-0.5]]]]
   100)
+
+;; ---------------------------------------------------------------------------
+;; A splice's argument equal to the last is unchanged (DESIGN.md §9, the ten
+;; decisions' tenth; genclj-nvo0)
+;; ---------------------------------------------------------------------------
+
+;; no-change when identical, or a host scalar, keyword or string equal to
+;; the previous call's; a collection or array by identity. Planted bug
+;; (2026-10-25): identity alone fails the fresh number's and string's
+;; cases (a keyword is interned, and a boolean canonical, so they are
+;; identical either way).
+(deftest a-splice-argument-equal-to-the-last-is-unchanged
+  (let [seen (atom nil)
+        callee (dyn/with-dispatch (gen [_x] (trace :z (d/normal 0 1)))
+                 (fn [_ op _ opts] (when (= op :update) (reset! seen (:argdiffs opts))) nil))
+        argdiff (fn [make]
+                  (let [g (gen [n] (splice :c callee (make n)))
+                        tr (gfi/simulate g [1] (rng/key 0))]
+                    (reset! seen nil)
+                    (gfi/update tr [1] [diff/unknown-change] cm/EMPTY (rng/key 1))
+                    (first @seen)))]
+    (doseq [[label make] [["a fresh equal double" #(+ % 0.5)]
+                          ["a keyword" #(keyword (str "k" %))]
+                          ["a string" #(str "k" %)]
+                          ["the same map" (let [m {:a 1}] (fn [_] m))]]]
+      (is (diff/no-change? (argdiff make)) label))
+    (doseq [[label make] [["an equal map built afresh" #(hash-map :a %)]
+                          ["an equal vector built afresh" #(vector % 2)]
+                          ["an equal array built afresh" #(array/array [% 2.0])]
+                          ["-0.0 after 0.0" (let [calls (atom 0)] (fn [_] (if (= 1 (swap! calls inc)) 0.0 -0.0)))]
+                          ["a double after a long" (let [calls (atom 0)] (fn [_] (if (= 1 (swap! calls inc)) 1 1.0)))]]]
+      (is (diff/unknown-change? (argdiff make)) label))))

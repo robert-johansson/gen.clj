@@ -10,7 +10,17 @@
 
    Inside a body, (trace addr dist) makes a random choice at an address (or a
    vector path), and (splice addr gf & args) calls another generative
-   function, its choices nested under addr. (param name) reads a trainable
+   function, its choices nested under addr. An update or regenerate updates
+   a splice's call incrementally, by its argdiffs: a dynamic body has no
+   change hints of its own (the ten decisions' seventh, DESIGN.md §9), so
+   it passes unknown-change for each argument, unless the argument is the
+   previous call's: identical, or a host number or boolean, keyword or
+   string equal to it, which is no-change (the tenth). Collections and
+   arrays compare by identity, since comparing an array would read it (to
+   the host on MLX): to keep a call unchanged, pass the same value on
+   rather than an equal one built afresh. The static language (gen
+   ^:static) propagates precise argdiffs to its splices: it is the way to
+   incremental splices of arguments that change. (param name) reads a trainable
    parameter from the store in effect (with-params). Conditionals branch on
    the values of 0-d arrays (docs/array-api.md §8a).
 
@@ -250,13 +260,24 @@
      (binding [*params* (with-store ps#)] ~@body)
      (do ~@body)))
 
+(defn- same-arg?
+  "Is a, a splice's argument, its previous call's pa unchanged (DESIGN.md
+   §9, the ten decisions' tenth): identical, or a host scalar (a number or
+   a boolean), keyword or string equal to it, by .equals (so of one class,
+   and -0.0 apart from 0.0)? A collection or an array compares by identity:
+   comparing an array would read it, to the host on MLX, and a large
+   collection would cost its size. Each O(1)."
+  [a pa]
+  (or (identical? a pa)
+      (and (some? pa) (or (array/host? a) (keyword? a) (string? a)) (.equals ^Object a pa))))
+
 (defn- arg-diffs
   "Argdiffs for a splice's new args against its previous call's: no-change
-   for an identical argument (sound, and O(1)), else the hint given (the
-   static language's propagated diffs), else unknown-change."
+   for an argument that is the previous one (same-arg?), else the hint
+   given (the static language's propagated diffs), else unknown-change."
   ([prev-args args] (arg-diffs prev-args args nil))
   ([prev-args args hints]
-   (mapv (fn [a pa h] (cond (identical? a pa) diff/no-change h h :else diff/unknown-change))
+   (mapv (fn [a pa h] (cond (same-arg? a pa) diff/no-change h h :else diff/unknown-change))
          args (concat prev-args (repeat nil)) (concat hints (repeat nil)))))
 
 (defn- record-call
@@ -311,7 +332,7 @@
   "Call gf at path p under the run's operation, scalar or batched (through
    run-call), nesting its choices and recording its sub-trace: [retval
    state' retdiff]. hints are argdiffs for the arguments that are not
-   identical to the previous call's. The previous call's sub-trace is
+   the previous call's (same-arg?). The previous call's sub-trace is
    revised whatever gf is (another generative function by gfi/revise), so
    the addresses both make keep their values (Def 2.3.1)."
   [state p gf args & [hints]]
