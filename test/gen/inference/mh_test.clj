@@ -12,7 +12,8 @@
             [gen.inference.mh :as mh]
             [gen.inference.weights :as w]
             [gen.random :as rng]
-            [gen.selection :as sel]))
+            [gen.selection :as sel]
+            [gen.state-space :as ss]))
 
 (def model
   (gen []
@@ -194,14 +195,17 @@
 (deftest the-thesis-invalid-proposals-are-loud
   ;; Alg. 5, requirement 3 (pp. 92-93; law audit gap J): q2 and q3 cannot
   ;; propose b's value back, so a move from a = T to a = F, which discards
-  ;; b, cannot be weighed: a loud error, never a silent move
+  ;; b, cannot be weighed: never a silent move. q2's backward assess leaves
+  ;; b unvisited, a loud error. q3's gives a = T density 0, which stops it
+  ;; there (the ten decisions' fifth, DESIGN.md §9): the reverse move is
+  ;; impossible, so the move is rejected, and q3 never moves the chain.
   (let [two (:trace (gfi/generate p-mh [] (cm/choicemap :a true :b false :c true) (rng/key 1)))]
-    (doseq [[label q] [[:q2-mh q2-mh] [:q3-mh q3-mh]]]
+    (doseq [[label q expected] [[:q2-mh q2-mh :loud] [:q3-mh q3-mh :stayed]]]
       (let [outcomes (map #(try (let [r (mh/mh two q [] %)] (if ((:trace r) :a) :stayed :moved))
                                 (catch clojure.lang.ExceptionInfo _ :loud))
                           (rng/split (rng/key 2) 12))]
         (is (not-any? #{:moved} outcomes) (str label " " (frequencies outcomes)))
-        (is (some #{:loud} outcomes) (str label " " (frequencies outcomes)))))))
+        (is (some #{expected} outcomes) (str label " " (frequencies outcomes)))))))
 
 (deftest the-thesis-s-exact-acceptances
   (testing "p. 148: from {a T b T c T}, regenerating {a} weighs 0 whichever a it draws"
@@ -219,3 +223,61 @@
         (let [[k0 k1] (rng/split k)
               tr (:trace (gfi/generate model [] (cm/choicemap :y 1.3) k0))]
           (is (ts/close? 0.0 (:log-alpha (mh/mh tr exact [] k1)))))))))
+
+;; ---------------------------------------------------------------------------
+;; A move outside the support is rejected (DESIGN.md §9, the ten decisions'
+;; fifth; genclj-q7cq)
+;; ---------------------------------------------------------------------------
+
+(def unknown-six
+  "Chapter 042's casino with the loaded die's probability of a six p6
+   unknown, over ten rolls: p6 outside [0, 1] makes the HMM's emission
+   probabilities invalid, which categorical refuses."
+  (let [switches (array/array [[0.95 0.05] [0.1 0.9]])
+        start (array/array [0.5 0.5])]
+    (gen [n]
+      (let [p6 (trace :p6 (d/uniform 0 1))
+            others (array/full [5] (/ (- 1.0 p6) 5.0))]
+        (splice :rolls ss/hmm n start
+                {:transition switches
+                 :emission (d/categorical (array/stack [(array/full [6] (/ 1.0 6))
+                                                        (array/concatenate [others (array/reshape p6 [1])])]))})
+        p6))))
+
+(def rolls (apply cm/choicemap (mapcat (fn [t r] [[:rolls t] r]) (range) [5 5 2 0 1 3 2 5 0 5])))
+
+(def p6-walk (gen [tr] (trace :p6 (d/normal (tr :p6) 0.3))))
+
+;; Planted bugs (2026-10-25): the handler not stopping (weigh never setting
+;; ::stopped) fails this test, its update throwing "categorical: probs must
+;; be probabilities" (and q3's moves above are loud again); MH's move
+;; weighing the backward proposal on such a trace fails it too: the
+;; stopped update's discard holds the rolls it did not reach, which the
+;; walk's assess leaves unvisited.
+(deftest a-move-outside-the-support-is-rejected
+  (let [tr (:trace (gfi/generate unknown-six [10] (cm/set-choice rolls :p6 0.9) (rng/key 0)))]
+    (testing "the update to p6 = 1.2 weighs -Inf, the HMM never reached"
+      (let [{t2 :trace w :weight} (gfi/update tr (cm/choicemap :p6 1.2) (rng/key 1))]
+        (is (= ##-Inf (ts/number w)))
+        ;; (a lazy backend's run goes on, its weight -Inf all the same)
+        (when (ts/jvm?) (is (= [[:p6]] (cm/addresses (:choices t2)))))))
+    (testing "random-walk MH on p6 rejects every proposal outside [0, 1]"
+      (let [steps (reductions (fn [{tr :trace} k] (mh/mh tr p6-walk [] k)) {:trace tr} (rng/split (rng/key 2) 60))
+            rs (rest steps)
+            outside (filter #(= ##-Inf (:log-alpha %)) rs)]
+        (is (seq outside) "some proposals left [0, 1]")
+        (is (every? (complement :accepted?) outside))
+        (is (every? #(<= 0.0 (ts/number ((:trace %) :p6)) 1.0) rs))
+        (is (some :accepted? rs))))))
+
+(deftest a-backward-proposal-is-not-weighed-on-a-trace-outside-the-support
+  ;; the update stops at a, so the new trace lacks b, which the proposal
+  ;; reads: MH's move rejects it unweighed (gen.inference.mh/move). Planted
+  ;; bug (2026-10-25): the backward assess run on that trace throws "no
+  ;; value at [:b]".
+  (let [m (gen [] (let [a (trace :a (d/uniform 0 1))] (trace :b (d/normal a 0.2))))
+        near-b (gen [tr] (trace :a (d/normal (tr :b) 1.0)))
+        tr (:trace (gfi/generate m [] (cm/choicemap :a 0.5 :b 0.5) (rng/key 0)))
+        rs (map #(mh/mh tr near-b [] %) (rng/split (rng/key 1) 30))]
+    (is (some #(= ##-Inf (:log-alpha %)) rs) "some proposals left [0, 1]")
+    (is (every? #(or (not= ##-Inf (:log-alpha %)) (identical? tr (:trace %))) rs))))

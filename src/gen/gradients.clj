@@ -130,12 +130,14 @@
    them through gen.array (a host read or host math on them is an error:
    see the namespace doc).
    For a particle collection (gen.batched) in place of the trace, every
-   particle's, each value an array with the leading particle axis."
+   particle's, each value an array with the leading particle axis, and
+   :fallback, why they ran one particle at a time, when they did."
   ([trace selection] (choice-gradients trace selection nil nil))
   ([trace selection retgrad] (choice-gradients trace selection retgrad nil))
   ([trace selection retgrad {:keys [argnums] :as opts}]
    (if (batched/particles? trace)
-     (batched/map-particles trace (fn [t _] (choice-gradients t selection retgrad opts)) nil)
+     (let [{r :result m :fallback} (batched/map-particles* trace (fn [t _] (choice-gradients t selection retgrad opts)) nil)]
+       (cond-> r m (assoc :fallback m)))
      (trace-gradients trace selection retgrad argnums))))
 
 (defn param-gradients

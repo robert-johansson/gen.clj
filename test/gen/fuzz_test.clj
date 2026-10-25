@@ -35,7 +35,11 @@
 
 ;; per particle: w = score' - score - log p(fresh), and the discard is
 ;; exactly what the constraint overwrote or removed (fresh draws may differ
-;; from a scalar run's, so the law, not equality with one, is the check)
+;; from a scalar run's, so the law, not equality with one, is the check).
+;; A particle the update takes outside its support has w -Inf, and the
+;; batched run, which cannot stop for it (gen.dynamic), discards what the
+;; whole run overwrote, where its rebuilt scalar trace (b/traces) stops at
+;; that choice (DESIGN.md §9): its discard is not compared.
 (defn- obeys-the-update-law?
   "Does the update of old to new under the constraints sigma, with weight w
    and discard d, obey the law?"
@@ -48,7 +52,7 @@
         expected-d (sel/get-selected (:choices old)
                                      (sel/from-paths (filter #(or (constrained %) (not (now %))) was)))]
     (and (laws/close? w (- (- (:score new) (:score old)) fresh-lp))
-         (= expected-d d))))
+         (or (gfi/impossible? (double w)) (= expected-d d)))))
 
 (defspec batched-updates-of-random-models-obey-the-update-law 100
   (prop/for-all [[_ gf args] rm/gen-model
@@ -151,7 +155,9 @@
   ;; each particle given its own new indices, which moves particles between
   ;; branches: its scalar update, with the choices the batched one drew
   ;; afresh constrained too, makes its choices and discard, and its weight
-  ;; less those fresh choices' density
+  ;; less those fresh choices' density (a particle the update takes outside
+  ;; its support, w -Inf, has the whole batched run's discard: see
+  ;; obeys-the-update-law?)
   (prop/for-all [[[_ gf args] seed n] switch-case]
     (binding [b/*spot-checks* 0]
       (let [ps (b/simulate gf args n (rng/key seed))
@@ -166,7 +172,7 @@
                                   sigma (cm/merge c (sel/get-selected (:choices new) (sel/from-paths fresh)))
                                   r (gfi/update old sigma (rng/key 0))]
                               (and (= (ts/host (:choices new)) (ts/host (:choices (:trace r))))
-                                   (= (ts/host d) (ts/host (:discard r)))
+                                   (or (gfi/impossible? (double w)) (= (ts/host d) (ts/host (:discard r))))
                                    (laws/close? (:weight r) (+ w (if (seq fresh) (gfi/project new (sel/from-paths fresh)) 0.0))))))
                           olds (b/traces ps') (array/->clj ws) ds own)))))))
 

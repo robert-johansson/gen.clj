@@ -35,7 +35,11 @@
 
    update and regenerate of a trace by a generative function that does not
    compute as the trace's maker (same-gen-fn?), such as a trace given
-   another :gen-fn, keep nothing of it but its choices (revise)."
+   another :gen-fn, keep nothing of it but its choices (revise).
+
+   A choice outside its own support stops the run that makes it: the
+   operation's weight is -Inf, and its trace (score -Inf) holds the choices
+   up to that one (impossible?, gen.dynamic; DESIGN.md §9)."
   (:refer-clojure :exclude [update -])
   (:require [gen.array :as array :refer [-]]
             [gen.array.batch :as batch]
@@ -84,6 +88,22 @@
   (or (instance? gen.gfi.IGenerativeFunction x)
       (and (some? x) (not (keyword? x)) (not (vector? x)) (not (number? x))
            (satisfies? IGenerativeFunction x))))
+
+;; ---------------------------------------------------------------------------
+;; Choices outside their support
+;; ---------------------------------------------------------------------------
+
+(defn impossible?
+  "Is x, a log density, score or weight, -Inf on the host? A choice whose
+   log density is so stops the run that makes it (DESIGN.md §9, the ten
+   decisions' fifth): the operation returns weight -Inf, and its trace,
+   score -Inf, holds the choices and calls up to that one, which is
+   recorded with them. A combinator stops at a part whose score is so, and
+   a dynamic body at a call's. An array (batched, lazy, or traced for a
+   gradient) is never read here, and is not impossible?: such a run goes
+   on, and gives -Inf per particle (gen.dynamic)."
+  [x]
+  (and (instance? Double x) (== ##-Inf (double x))))
 
 ;; ---------------------------------------------------------------------------
 ;; Unvisited constraints
@@ -348,7 +368,9 @@
         [{t :trace w :weight}] (binding [*revising* {:constraints constraints :prefix []}]
                                  (generate-dropping #(-generate gf args % key) sigma []))
         new (:choices t)]
-    (when-let [missed (seq (remove #(cm/has-value? new %) (cm/addresses constraints)))]
+    ;; a run that stopped at a choice outside its support (impossible?)
+    ;; never reached the constraints after it
+    (when-let [missed (and (not (impossible? (:score t))) (seq (remove #(cm/has-value? new %) (cm/addresses constraints))))]
       (throw (unvisited op missed)))
     (if (= op :update)
       (let [kept (set (survivors old new constraints))]

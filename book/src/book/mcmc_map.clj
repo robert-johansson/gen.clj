@@ -14,6 +14,7 @@
             [gen.dist.core :as dc]
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
+            [gen.gradients :as grad]
             [gen.inference.diagnostics :as diag]
             [gen.inference.importance :as is]
             [gen.inference.kernel :as k]
@@ -668,8 +669,20 @@
 ;=> true
 
 ;; book: map-noise-step
-;; error: normal: std must be positive
-#_(mcmc/map-optimize reference (sel/select :noise) {:max-step-size 1.0})
+(def noise-gradient
+  (array/item (cm/get-choice (:gradients (grad/choice-gradients
+                                          reference (sel/select :noise)))
+                             :noise)))
+
+(def noise-step
+  (mcmc/map-optimize reference (sel/select :noise) {:max-step-size 1.0}))
+
+[(+ 0.5 noise-gradient) (array/item (noise-step :noise))]
+;=> [-8.301 0.4312]
+
+[(/ (- (array/item (noise-step :noise)) 0.5) noise-gradient)
+ (> (:score noise-step) (:score reference))]
+;=> [0.0078125 true]
 
 ;; book: map-update
 (defn outlier-fraction

@@ -348,7 +348,8 @@
    [weight retval]): the body's bindings in order as locals, a trace node's
    value from choices with its log density, a splice's callee assessed on
    its sub-map, keys split as the handler's assess splits them (none when
-   key is nil)."
+   key is nil). A site or call outside its support stops it, as it stops
+   the handler (gen.dynamic/static-site, static-call, static-total)."
   [st params coercions locals]
   (let [args (gensym "args") choices (gensym "choices") key (gensym "key")
         {:keys [bindings terms]}
@@ -381,7 +382,7 @@
     (guard/guard-branches
      `(fn [~'param ~args ~choices ~key]
         (let [~params ~args ~@coercions ~@bindings]
-          [(reduce array/+ 0.0 [~@terms]) ~(:expr (:ret st))]))
+          [(gen.dynamic/static-total [~@terms]) ~(:expr (:ret st))]))
      locals)))
 
 (defn ^:no-doc static-form

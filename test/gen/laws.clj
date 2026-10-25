@@ -180,6 +180,20 @@
 
 (defn- in-support? [tr] (finite? (:score tr)))
 
+(defn- outside?
+  "Is t2, a move's new trace, outside the support (its score -Inf)? The
+   move then weighs -Inf (the ten decisions' fifth, DESIGN.md §9), which is
+   all the weight laws check of it: a run that stops there holds the
+   choices up to it, but a batched or lazy one (MLX) cannot stop, and its
+   densities after that choice are what it computed (NaN where it made a
+   parameter invalid), so no projection of them is a weight. Planted bug
+   (2026-10-25): the weight laws comparing projections there too fail the
+   out-of-support models on MLX's CPU."
+  [t2]
+  (= ##-Inf (ts/number (:score t2))))
+
+(defn- minus-infinity? [w] (= ##-Inf (ts/number w)))
+
 (defn- same-retval?
   "Are return values a and b equal (=), two seqs on the part of them a run
    realizes, their first gfi/realize-limit elements? = would walk an
@@ -269,12 +283,23 @@
         constrained (set (cm/addresses sigma))]
     (restrict (:choices tr) (filter #(or (constrained %) (not (now %))) (addrs tr)))))
 
+(defn- reached
+  "sigma, the constraints of an update to t2: those t2 holds when its run
+   stopped at a choice outside its support (its score -Inf on the host,
+   gfi/impossible?), which leaves the constraints after it unvisited (the
+   ten decisions' fifth, DESIGN.md §9). Planted bug (2026-10-25): an update
+   that goes on past such a choice (gen.dynamic's weigh never stopping)
+   throws in a model's downstream parameter check and fails the dynamic
+   suite's out-of-support laws."
+  [sigma t2]
+  (if (gfi/impossible? (:score t2)) (restrict sigma (addrs t2)) sigma))
+
 (defn- applied?
-  "Does t2, an update of tr with sigma, hold sigma's values, and tr's
-   unconstrained choices that remain unchanged?"
+  "Does t2, an update of tr with sigma, hold sigma's values (those it
+   reached), and tr's unconstrained choices that remain unchanged?"
   [tr t2 sigma]
   (let [now (set (addrs t2))
-        constrained (set (cm/addresses sigma))]
+        constrained (set (cm/addresses (reached sigma t2)))]
     (and (every? #(= (cm/get-choice sigma %) (cm/get-choice (:choices t2) %)) constrained)
          (every? #(= (cm/get-choice (:choices tr) %) (cm/get-choice (:choices t2) %))
                  (remove constrained (filter now (addrs tr)))))))
@@ -304,7 +329,7 @@
         (let [{g :trace w :weight} r]
           (checks (consistent? g)
                   (not (array/truthy? (array/isnan w)))
-                  (every? #(= (cm/get-choice sigma %) (cm/get-choice (:choices g) %)) (cm/addresses sigma))))))))
+                  (every? #(= (cm/get-choice sigma %) (cm/get-choice (:choices g) %)) (cm/addresses (reached sigma g)))))))))
 
 (defn identity-update-changes-nothing [cases]
   (prop/for-all [[[_ gf args] seed] cases]
@@ -322,9 +347,10 @@
                 (applied? tr t2 sigma)
                 (= (exact-discard tr t2 sigma) disc)
                 ;; Prop 2.3.1: updating back with the discard restores the trace,
-                ;; and discards σ with the freshly proposed choices
+                ;; and discards σ (as far as t2 reached it) with the freshly
+                ;; proposed choices
                 (= (:choices tr) (:choices t3))
-                (= (cm/merge sigma (restrict (:choices t2) (fresh tr t2 sigma))) disc3)))
+                (= (cm/merge (reached sigma t2) (restrict (:choices t2) (fresh tr t2 sigma))) disc3)))
       vacuous)))
 
 (defn regenerate-keeps-unselected-choices [cases]
@@ -382,7 +408,9 @@
           {t2 :trace w :weight} (gfi/regenerate tr (sel/from-paths chosen) (rng/key (inc seed)))
           now (set (addrs t2))
           retained (sel/from-paths (filter #(and (now %) (not (chosen %))) (addrs tr)))]
-      (checks (close? w (- (gfi/project t2 retained) (gfi/project tr retained)))))))
+      (checks (if (outside? t2)
+                (minus-infinity? w)
+                (close? w (- (gfi/project t2 retained) (gfi/project tr retained))))))))
 
 (defn update-weight-is-the-projection-change
   "update's weight is the projection of the new trace on its choices that
@@ -394,7 +422,9 @@
   [cases]
   (prop/for-all [[model seed picks alt?] cases]
     (if-let [{:keys [tr sigma] {t2 :trace w :weight} :result} (update-case model seed picks alt?)]
-      (checks (close? w (- (gfi/project t2 (sel/from-paths (kept tr t2 sigma))) (:score tr))))
+      (checks (if (outside? t2)
+                (minus-infinity? w)
+                (close? w (- (gfi/project t2 (sel/from-paths (kept tr t2 sigma))) (:score tr)))))
       vacuous)))
 
 (defn regenerate-weight-with-new-arguments-is-the-projection-ratio
@@ -415,7 +445,9 @@
         (let [{t2 :trace w :weight} r
               now (set (addrs t2))
               retained (sel/from-paths (filter #(and (now %) (not (chosen %))) (addrs tr)))]
-          (checks (close? w (- (gfi/project t2 retained) (gfi/project tr retained)))))))))
+          (checks (if (outside? t2)
+                    (minus-infinity? w)
+                    (close? w (- (gfi/project t2 retained) (gfi/project tr retained))))))))))
 
 (defn propose-weight-is-the-assessed-density [cases]
   (prop/for-all [[[_ gf args] seed] cases]
@@ -480,7 +512,7 @@
     (if-let [{:keys [tr sigma] {t2 :trace w :weight disc :discard} :result} (update-case model seed picks alt?)]
       (let [fresh-lp (lp t2 (fresh tr t2 sigma))
             {w3 :weight} (gfi/update t2 (:args tr) (unknown-diffs (:args tr)) disc (rng/key seed))]
-        (checks (close? w (- (- (:score t2) (:score tr)) fresh-lp))
+        (checks (if (outside? t2) (minus-infinity? w) (close? w (- (- (:score t2) (:score tr)) fresh-lp)))
                 ;; the reverse weight is defined only inside the support (Def
                 ;; 4.1.1): a move to density 0 has w = -Inf and no finite reverse
                 (if (in-support? t2) (checks (close? (+ w w3) (array/negate fresh-lp))) true)))
@@ -497,7 +529,7 @@
           now (set (addrs t2))
           ;; Eq 4.1, Alg 18: selected, fresh and removed choices cancel
           retained (remove selected (filter now (addrs tr)))]
-      (checks (close? w (- (lp t2 retained) (lp tr retained)))))))
+      (checks (if (outside? t2) (minus-infinity? w) (close? w (- (lp t2 retained) (lp tr retained))))))))
 
 (defn regenerating-everything-has-weight-zero [cases]
   (prop/for-all [[[_ gf args] seed] cases]
@@ -678,7 +710,7 @@
         r
         (let [{g :trace w :weight} r]
           (checks (not (array/truthy? (array/isnan w)))
-                  (every? #(= (cm/get-choice sigma %) (cm/get-choice (:choices g) %)) (cm/addresses sigma))))))))
+                  (every? #(= (cm/get-choice sigma %) (cm/get-choice (:choices g) %)) (cm/addresses (reached sigma g)))))))))
 
 (defn updates-restore-their-choices
   "Prop 2.3.1 for the choices: the discards of an update, given back,
@@ -709,7 +741,7 @@
 (defn update-weight-is-the-score-change-less-fresh [cases]
   (prop/for-all [[model seed picks alt?] cases]
     (if-let [{:keys [tr sigma] {t2 :trace w :weight} :result} (update-case model seed picks alt?)]
-      (checks (close? w (- (- (:score t2) (:score tr)) (lp t2 (fresh tr t2 sigma)))))
+      (checks (if (outside? t2) (minus-infinity? w) (close? w (- (- (:score t2) (:score tr)) (lp t2 (fresh tr t2 sigma))))))
       vacuous)))
 
 (defn score-is-assessed-on-the-same-key
@@ -772,7 +804,7 @@
         (checks (gfi/same-gen-fn? gf' (trace/maker t2))
                 (assessed? gf' t2)
                 (applied? tr t2 sigma)
-                (close? w (- kept-lp (:score tr)))
+                (if (outside? t2) (minus-infinity? w) (close? w (- kept-lp (:score tr))))
                 (= (exact-discard tr t2 sigma) disc)
                 (= (:choices tr) (:choices t3))
                 (assessed? gf t3)
@@ -799,7 +831,9 @@
           (checks (gfi/same-gen-fn? gf' (trace/maker t2))
                   (assessed? gf' t2)
                   (every? #(= (cm/get-choice (:choices tr) %) (cm/get-choice (:choices t2) %)) retained)
-                  (close? w (- (gfi/project t2 (sel/from-paths retained)) (gfi/project tr (sel/from-paths retained))))))))))
+                  (if (outside? t2)
+                    (minus-infinity? w)
+                    (close? w (- (gfi/project t2 (sel/from-paths retained)) (gfi/project tr (sel/from-paths retained)))))))))))
 
 (def across
   "For pairs of generative functions: models [label gf args alt-args gf'],

@@ -373,6 +373,15 @@
     (gfi/propose q (into [trace] args) key)
     {:choices cm/EMPTY :weight 0.0}))
 
+(defn- outside-support
+  "The result of a move to t', a trace outside the support: its run stopped
+   at a choice there (gfi/impossible?, DESIGN.md §9), so t' holds the
+   choices up to that one. Weight -Inf, rejected, without weighing its
+   backward choices or checking the move, which would read choices t' does
+   not hold."
+  [t']
+  {:trace t' :weight ##-Inf})
+
 (defn translator
   "Gen.jl's GeneralTraceTranslator: (translator trace key) → {:trace :weight}.
    Auxiliary choices u come from (q-forward trace q-forward-args…) (none
@@ -394,25 +403,27 @@
           model-out (get-in s [:outputs :model-out])
           aux-out (get-in s [:outputs :aux-out])
           constraints (cm/merge model-out new-observations)
-          {t' :trace} (gfi/generate p-new (vec p-new-args) constraints k-generate)
-          _ (when-let [extra (seq (unconstrained-additions cm/EMPTY constraints cm/EMPTY (:choices t')))]
-              (throw (ex-info (str "translator: the new trace has choices the transform did not write: " (vec extra))
-                              {:addresses (vec extra)})))
-          bwd (if q-backward
-                (:weight (gfi/assess q-backward (into [t'] q-backward-args) aux-out (gfi/backward-key k-generate)))
-                (if (cm/empty? aux-out)
-                  0.0
-                  (throw (ex-info "translator: the transform writes auxiliary choices but there is no :q-backward"
-                                  {:aux (cm/to-map aux-out)}))))
-          ;; the old trace's observations are unknown here, so only u is checked
-          _ (check-consumed! s (fn [sp _] (= sp :aux-in)))
-          ldj (log-abs-det t trace u s (constantly false))]
-      (when check?
-        (let [back (execute (inverse t) t' aux-out nil)]
-          (check-round-trip! "model choices" (:choices trace)
-                             (cm/merge (get-in back [:outputs :model-out]) prev-observations))
-          (check-round-trip! "auxiliary choices" u (get-in back [:outputs :aux-out]))))
-      {:trace t' :weight (+ (- (:score t') (:score trace)) (- bwd fwd) ldj)})))
+          {t' :trace} (gfi/generate p-new (vec p-new-args) constraints k-generate)]
+      (if (gfi/impossible? (:score t'))
+        (outside-support t')
+        (let [_ (when-let [extra (seq (unconstrained-additions cm/EMPTY constraints cm/EMPTY (:choices t')))]
+                  (throw (ex-info (str "translator: the new trace has choices the transform did not write: " (vec extra))
+                                  {:addresses (vec extra)})))
+              bwd (if q-backward
+                    (:weight (gfi/assess q-backward (into [t'] q-backward-args) aux-out (gfi/backward-key k-generate)))
+                    (if (cm/empty? aux-out)
+                      0.0
+                      (throw (ex-info "translator: the transform writes auxiliary choices but there is no :q-backward"
+                                      {:aux (cm/to-map aux-out)}))))
+              ;; the old trace's observations are unknown here, so only u is checked
+              _ (check-consumed! s (fn [sp _] (= sp :aux-in)))
+              ldj (log-abs-det t trace u s (constantly false))]
+          (when check?
+            (let [back (execute (inverse t) t' aux-out nil)]
+              (check-round-trip! "model choices" (:choices trace)
+                                 (cm/merge (get-in back [:outputs :model-out]) prev-observations))
+              (check-round-trip! "auxiliary choices" u (get-in back [:outputs :aux-out]))))
+          {:trace t' :weight (+ (- (:score t') (:score trace)) (- bwd fwd) ldj)})))))
 
 (defn deterministic-translator
   "Gen.jl's DeterministicTraceTranslator: a translator whose transform maps
@@ -453,11 +464,14 @@
           [args argdiffs] (new-arguments trace p-new-args p-argdiffs)
           {t' :trace w :weight discard :discard}
           (gfi/update trace args argdiffs (cm/merge new-observations (if t (get-in s [:outputs :model-out]) u)) k-update)]
-      (when-not (cm/empty? discard)
-        (throw (ex-info "extending-translator: the update changed or removed choices; it may only add them"
-                        {:discard (cm/to-map discard)})))
-      (some-> s (check-consumed! (constantly true)))
-      {:trace t' :weight (+ (- w fwd) (if t (log-abs-det t u nil s (constantly false)) 0.0))})))
+      ;; a stopped update discards the old choices it did not reach
+      (if (gfi/impossible? w)
+        (outside-support t')
+        (do (when-not (cm/empty? discard)
+              (throw (ex-info "extending-translator: the update changed or removed choices; it may only add them"
+                              {:discard (cm/to-map discard)})))
+            (some-> s (check-consumed! (constantly true)))
+            {:trace t' :weight (+ (- w fwd) (if t (log-abs-det t u nil s (constantly false)) 0.0))})))))
 
 (defn updating-translator
   "GenParticleFilters' UpdatingTraceTranslator. Forward choices u come from
@@ -481,26 +495,28 @@
           [args argdiffs] (new-arguments trace p-new-args p-argdiffs)
           s (when t (execute t trace u nil))
           {t' :trace w :weight discard :discard}
-          (gfi/update trace args argdiffs (cm/merge (if t (get-in s [:outputs :model-out]) u) new-observations) k-update)
-          ;; an observation the new ones replace is data, not part of the
-          ;; move: neither consumed nor an input that is lost
-          left-alone? (fn [p] (or (not (cm/has-value? discard p)) (cm/has-value? new-observations p)))
-          _ (some-> s (check-consumed! (fn [sp p] (or (= sp :aux-in) (not (left-alone? p))))))
-          ldj (if t (log-abs-det t trace u s left-alone?) 0.0)
-          u' (if t (get-in s [:outputs :aux-out]) discard)
-          bwd (cond q-backward (:weight (gfi/assess q-backward (into [t'] q-backward-args) u' (gfi/backward-key k-update)))
-                    (cm/empty? u') 0.0
-                    :else (throw (ex-info "updating-translator: there are backward choices but no :q-backward"
-                                          {:backward (cm/to-map u')})))]
-      (when check?
-        (let [s-back (when t (execute (inverse t) t' u' nil))
-              back-args (:args trace)
-              {t'' :trace} (gfi/update t' back-args (vec (repeat (count back-args) diff/unknown-change))
-                                     (cm/merge (if t (get-in s-back [:outputs :model-out]) u') prev-observations)
-                                     k-check)]
-          (check-round-trip! "trace" (:choices trace) (:choices t''))
-          (when t (check-round-trip! "forward choices" u (get-in s-back [:outputs :aux-out])))))
-      {:trace t' :weight (+ w (- bwd fwd) ldj)})))
+          (gfi/update trace args argdiffs (cm/merge (if t (get-in s [:outputs :model-out]) u) new-observations) k-update)]
+      (if (gfi/impossible? w)
+        (outside-support t')
+        (let [;; an observation the new ones replace is data, not part of the
+              ;; move: neither consumed nor an input that is lost
+              left-alone? (fn [p] (or (not (cm/has-value? discard p)) (cm/has-value? new-observations p)))
+              _ (some-> s (check-consumed! (fn [sp p] (or (= sp :aux-in) (not (left-alone? p))))))
+              ldj (if t (log-abs-det t trace u s left-alone?) 0.0)
+              u' (if t (get-in s [:outputs :aux-out]) discard)
+              bwd (cond q-backward (:weight (gfi/assess q-backward (into [t'] q-backward-args) u' (gfi/backward-key k-update)))
+                        (cm/empty? u') 0.0
+                        :else (throw (ex-info "updating-translator: there are backward choices but no :q-backward"
+                                              {:backward (cm/to-map u')})))]
+          (when check?
+            (let [s-back (when t (execute (inverse t) t' u' nil))
+                  back-args (:args trace)
+                  {t'' :trace} (gfi/update t' back-args (vec (repeat (count back-args) diff/unknown-change))
+                                         (cm/merge (if t (get-in s-back [:outputs :model-out]) u') prev-observations)
+                                         k-check)]
+              (check-round-trip! "trace" (:choices trace) (:choices t''))
+              (when t (check-round-trip! "forward choices" u (get-in s-back [:outputs :aux-out])))))
+          {:trace t' :weight (+ w (- bwd fwd) ldj)})))))
 
 (defn involution
   "Transform t as the involution of involutive MCMC (Gen.jl's
@@ -522,17 +538,19 @@
            ;; every new choice is constrained; the key draws a model's
            ;; encapsulated randomness afresh, a pseudo-marginal refresh
            {t' :trace w :weight discard :discard} (gfi/update trace model-out key)
-           _ (when-let [extra (seq (unconstrained-additions (:choices trace) model-out discard (:choices t')))]
-               (throw (ex-info (str "involution: the updated trace has new choices the transform did not write: "
-                                    (vec extra))
-                               {:addresses (vec extra)})))
-           retained? (fn [p] (not (cm/has-value? discard p)))
-           _ (check-consumed! s (fn [sp p] (or (= sp :aux-in) (not (retained? p)))))
-           ldj (log-abs-det t trace fwd-choices s retained?)
            bwd (get-in s [:outputs :aux-out])]
-       (when check?
-         (let [back (execute t t' bwd nil)
-               {t'' :trace} (gfi/update t' (get-in back [:outputs :model-out]) (rng/key 0))]
-           (check-round-trip! "trace" (:choices trace) (:choices t''))
-           (check-round-trip! "forward choices" fwd-choices (get-in back [:outputs :aux-out]))))
-       {:trace t' :bwd-choices bwd :weight (+ w ldj)}))))
+       (if (gfi/impossible? w)
+         (assoc (outside-support t') :bwd-choices bwd)
+         (let [_ (when-let [extra (seq (unconstrained-additions (:choices trace) model-out discard (:choices t')))]
+                   (throw (ex-info (str "involution: the updated trace has new choices the transform did not write: "
+                                        (vec extra))
+                                   {:addresses (vec extra)})))
+               retained? (fn [p] (not (cm/has-value? discard p)))
+               _ (check-consumed! s (fn [sp p] (or (= sp :aux-in) (not (retained? p)))))
+               ldj (log-abs-det t trace fwd-choices s retained?)]
+           (when check?
+             (let [back (execute t t' bwd nil)
+                   {t'' :trace} (gfi/update t' (get-in back [:outputs :model-out]) (rng/key 0))]
+               (check-round-trip! "trace" (:choices trace) (:choices t''))
+               (check-round-trip! "forward choices" fwd-choices (get-in back [:outputs :aux-out]))))
+           {:trace t' :bwd-choices bwd :weight (+ w ldj)}))))))

@@ -140,12 +140,16 @@
   ([trace kernel args key]
    (let [[k-propose k-update k-accept] (rng/split key 3)
          {kc :choices fwd :weight [update backward :as ret] :retval} (gfi/propose kernel (into [trace] args) k-propose)
-         {t' :trace w :weight discard :discard} (gfi/update trace update k-update)
-         _ (when-let [extra (seq (tf/unconstrained-additions (:choices trace) update discard (:choices t')))]
-             (throw (ex-info (str "trace-kernel/mh: the kernel's update leaves new choices unwritten: " (vec extra))
-                             {:addresses (vec extra)})))
-         {bwd :weight} (gfi/assess kernel (into [t'] args) backward (gfi/backward-key k-update))]
-     (mh/accept trace t' (+ (- w fwd) bwd (log-abs-det kernel trace args kc ret (kept-by discard))) k-accept))))
+         {t' :trace w :weight discard :discard} (gfi/update trace update k-update)]
+     ;; a move outside the support (gfi/impossible?: the update stopped at a
+     ;; choice there) is rejected, unweighed: t' holds the choices up to it
+     (if (gfi/impossible? w)
+       (mh/accept trace t' ##-Inf k-accept)
+       (let [_ (when-let [extra (seq (tf/unconstrained-additions (:choices trace) update discard (:choices t')))]
+                 (throw (ex-info (str "trace-kernel/mh: the kernel's update leaves new choices unwritten: " (vec extra))
+                                 {:addresses (vec extra)})))
+             {bwd :weight} (gfi/assess kernel (into [t'] args) backward (gfi/backward-key k-update))]
+         (mh/accept trace t' (+ (- w fwd) bwd (log-abs-det kernel trace args kc ret (kept-by discard))) k-accept))))))
 
 (defn mh-kernel
   "The MH move of trace kernel k as a gen.inference.kernel kernel."
@@ -160,23 +164,28 @@
    the backward kernel l on (trace', l-args…) assesses backward and returns
    [its update, its backward choices]. The weight is the update's
    + log l - log k + log |det J|. :check? throws unless l's backward choices
-   are k's and l's update restores the trace (with :prev-observations)."
+   are k's and l's update restores the trace (with :prev-observations). A
+   step outside the support (the update stopped at a choice there,
+   gfi/impossible?) weighs -Inf, l unrun on trace', which holds the choices
+   up to that one."
   [{:keys [p-new-args p-argdiffs new-observations k k-args l l-args check? prev-observations]}]
   (fn [trace key]
     (let [[k-propose k-update k-check] (rng/split key 3)
           {kc :choices fwd :weight [update backward :as ret] :retval} (gfi/propose k (into [trace] k-args) k-propose)
           [args argdiffs] (tf/new-arguments trace p-new-args p-argdiffs)
-          {t' :trace w :weight discard :discard} (gfi/update trace args argdiffs (cm/merge update new-observations) k-update)
-          {bwd :weight [l-update l-backward] :retval} (gfi/assess l (into [t'] l-args) backward (gfi/backward-key k-update))]
-      (when check?
-        (let [{t'' :trace} (gfi/update t' (:args trace) (vec (repeat (count (:args trace)) diff/unknown-change))
-                                       (cm/merge l-update prev-observations) k-check)]
-          (when-not (tf/same-choices? kc l-backward)
-            (throw (ex-info "smcp3: the backward kernel does not give back the forward kernel's choices"
-                            {:forward (cm/to-map kc) :given-back (cm/to-map l-backward)})))
-          (when-not (tf/same-choices? (:choices trace) (:choices t''))
-            (throw (ex-info "smcp3: the backward kernel's update does not restore the trace"
-                            {:trace (cm/to-map (:choices trace)) :restored (cm/to-map (:choices t''))})))))
-      ;; an observation the new ones replace is data, not part of the move
-      {:trace t' :weight (+ w (- bwd fwd) (log-abs-det k trace k-args kc ret #(or ((kept-by discard) %)
-                                                                                   (cm/has-value? new-observations %))))})))
+          {t' :trace w :weight discard :discard} (gfi/update trace args argdiffs (cm/merge update new-observations) k-update)]
+      (if (gfi/impossible? w)
+        {:trace t' :weight ##-Inf}
+        (let [{bwd :weight [l-update l-backward] :retval} (gfi/assess l (into [t'] l-args) backward (gfi/backward-key k-update))]
+          (when check?
+            (let [{t'' :trace} (gfi/update t' (:args trace) (vec (repeat (count (:args trace)) diff/unknown-change))
+                                           (cm/merge l-update prev-observations) k-check)]
+              (when-not (tf/same-choices? kc l-backward)
+                (throw (ex-info "smcp3: the backward kernel does not give back the forward kernel's choices"
+                                {:forward (cm/to-map kc) :given-back (cm/to-map l-backward)})))
+              (when-not (tf/same-choices? (:choices trace) (:choices t''))
+                (throw (ex-info "smcp3: the backward kernel's update does not restore the trace"
+                                {:trace (cm/to-map (:choices trace)) :restored (cm/to-map (:choices t''))})))))
+          ;; an observation the new ones replace is data, not part of the move
+          {:trace t' :weight (+ w (- bwd fwd) (log-abs-det k trace k-args kc ret #(or ((kept-by discard) %)
+                                                                                       (cm/has-value? new-observations %))))})))))

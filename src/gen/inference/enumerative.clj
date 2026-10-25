@@ -161,15 +161,20 @@
 (defn- in-batches
   "The points generated in batched runs of at most chunk-size particles,
    particle i constrained by point i's choices: {:batches :weights}, one
-   particle collection per run."
-  [model args observations points chunk-size key]
+   particle collection per run, and :fallback, why the first run that fell
+   back to one point at a time did (required?: :batched? :required, which
+   throws with it instead)."
+  [model args observations points chunk-size key required?]
   (let [chunks (mapv vec (partition-all chunk-size points))
-        runs (mapv (fn [chunk k]
-                     (let [{ps :particles ws :weights}
-                           (batched/generate model args observations (count chunk) k {:per-particle (mapv first chunk)})]
-                       [ps (mapv #(+ (double %1) (double %2)) (array/->clj ws) (map second chunk))]))
-                   chunks (rng/split key (count chunks)))]
-    {:batches (mapv first runs) :weights (into [] (mapcat second) runs)}))
+        runs (binding [batched/*required* required?]
+               (mapv (fn [chunk k]
+                       (let [{ps :particles ws :weights}
+                             (batched/generate model args observations (count chunk) k {:per-particle (mapv first chunk)})]
+                         [ps (mapv #(+ (double %1) (double %2)) (array/->clj ws) (map second chunk))]))
+                     chunks (rng/split key (count chunks))))
+        m (some (comp batched/fallback first) runs)]
+    (cond-> {:batches (mapv first runs) :weights (into [] (mapcat second) runs)}
+      m (assoc :fallback m))))
 
 (defn enumerative-inference
   "Gen.jl's enumerative_inference: model generated once per point of grid
@@ -186,8 +191,10 @@
      scalar traces either way. The weights are the scalar loop's, point by
      point, when the observations and the grid give every choice (a model
      that cannot run batched, one that branches on a grid value say, falls
-     back to one point at a time); choices the grid leaves out are drawn
-     from the same distribution, but not as the scalar loop draws them;
+     back to one point at a time, and the result says why, :fallback;
+     with :batched? :required that throws instead); choices the grid
+     leaves out are drawn from the same distribution, but not as the
+     scalar loop draws them;
    - :chunk-size: with :batched?, at most this many points per batched run
      (and one collection per run), so that a run's working memory is that
      many particles' (the result holds every point's trace, as the scalar
@@ -202,7 +209,7 @@
      (when-not (or (nil? chunk-size) (pos-int? chunk-size))
        (throw (ex-info "enumerative-inference: :chunk-size is a positive integer" {:chunk-size chunk-size})))
      (let [run (if batched?
-                 (in-batches model args observations points (or chunk-size (count points)) key)
+                 (in-batches model args observations points (or chunk-size (count points)) key (= :required batched?))
                  (one-at-a-time model args observations points key))
            {:keys [log-total log-weights]} (w/normalize (:weights run))]
        (-> run
@@ -294,23 +301,75 @@
 
 (defn- checked
   "tr, the run under the assignment c, unless it made other choices than
-   the n given."
-  [tr c n]
-  (when-not (= n (count (cm/addresses (:choices tr))))
-    (throw (structure-error c nil)))
+   the n given, or (a run stopped at a choice outside its support,
+   gfi/impossible?) others than those given: unconstrained, the
+   unconstrained ones of those (base's less sigma's, and c's), must all be
+   there unless one of them stopped it (its projection on them -Inf), or
+   the forward proposal's density r of them is not known (a constraint
+   inside a call that stopped the run, which unweighing cannot reach)."
+  [tr c n given unconstrained]
+  (let [made (cm/addresses (:choices tr))]
+    (if (gfi/impossible? (:score tr))
+      (do (when-not (every? #(cm/has-value? given %) made)
+            (throw (structure-error c nil)))
+          (when-not (or (every? #(cm/has-value? (:choices tr) %) unconstrained)
+                        (gfi/impossible? (gfi/project tr (sel/from-paths unconstrained))))
+            (throw (ex-info (str "with-exact-proposal: under " (pr-str c) " a constraint inside a call is outside its"
+                                 " support, so the forward proposal's density of the choices after it is unknown:"
+                                 " observe it at the model's own address")
+                            {:assignment c}))))
+      (when-not (= n (count made))
+        (throw (structure-error c nil)))))
   tr)
 
+;; A choice of sigma, the constraints, with log density 0: the forward
+;; proposal's own density, which weighs only the other choices. A run stops
+;; at a choice outside its support (DESIGN.md §9), but the forward
+;; proposal's density of the other choices is defined where sigma is
+;; impossible, and the enumeration needs it there (r_c of an assignment c
+;; under which sigma is impossible: its share of logsumexp(r)).
+(defmethod dc/-log-prob ::unweighed [_ _] 0.0)
+(defmethod dc/-sample ::unweighed [d key batch-shape] (dc/-sample (:of (:params d)) key batch-shape))
+(defmethod dc/-value-shape ::unweighed [d] (dc/value-shape (:of (:params d))))
+(defmethod dc/-discrete? ::unweighed [d] (dc/discrete? (:of (:params d))))
+(defmethod dc/-support ::unweighed [d] (dc/enumerable-support (:of (:params d))))
+
+(defn- unweighing
+  "g, a dynamic generative function, whose generate gives each of its own
+   choices that sigma constrains log density 0, and adds the choice's own
+   to lps (a volatile number): the run's score is then the trace's less
+   those, which lps holds, and a choice of sigma outside its support stops
+   no run. (sigma's choices in a call keep their densities.)"
+  [g sigma lps]
+  (let [t (or (get (:transitions g) :generate) (dyn/site-transitions :generate))]
+    (dyn/with-transitions g
+      (assoc (:transitions g) :generate
+             (fn [state p dist key]
+               (if (cm/has-value? sigma p)
+                 (let [lp (dc/log-prob dist (cm/get-choice sigma p))]
+                   (vswap! lps array/+ (if (pos? (array/ndim lp)) (array/sum lp) lp))
+                   (t state p (dc/->Distribution ::unweighed {:of dist}) key))
+                 (t state p dist key)))))))
+
 (defn- one-run-each
-  "g's traces on args, one run under each assignment of cs with the other
-   choices base, checked to make the n given choices."
-  [g args base cs n]
-  (mapv (fn [c]
-          (let [tr (try (:trace (gfi/with-exact-density "with-exact-proposal" (gfi/generate g args (assigned base c) (rng/key 0))))
-                        (catch clojure.lang.ExceptionInfo e
-                          ;; a choice of the other run goes unused under c
-                          (throw (if (:unvisited (ex-data e)) (structure-error c e) e))))]
-            (checked tr c n)))
-        cs))
+  "s, r and the return values of g on args, one run under each assignment
+   of cs with the other choices base, sigma's unweighed (unweighing):
+   checked to make the n given choices, the unconstrained ones (base's less
+   sigma's, and the free paths) all of them unless the run stopped there."
+  [g args base sigma free cs n]
+  (let [unconstrained (into (vec (remove #(cm/has-value? sigma %) (cm/addresses base))) free)
+        runs (mapv (fn [c]
+                     (let [lps (volatile! 0.0)
+                           given (assigned base c)
+                           tr (try (:trace (gfi/with-exact-density "with-exact-proposal"
+                                             (gfi/generate (unweighing g sigma lps) args given (rng/key 0))))
+                                   (catch clojure.lang.ExceptionInfo e
+                                     ;; a choice of the other run goes unused under c
+                                     (throw (if (:unvisited (ex-data e)) (structure-error c e) e))))]
+                       (checked tr c n given unconstrained)
+                       {:s (array/+ (:score tr) @lps) :r (gfi/project tr (sel/from-paths unconstrained)) :retval (:retval tr)}))
+                   cs)]
+    {:assignments cs :s (array/stack (mapv :s runs)) :r (array/stack (mapv :r runs)) :retvals (mapv :retval runs)}))
 
 (defn- one-batch
   "g's particles on args, one per assignment of cs (per-particle
@@ -328,25 +387,24 @@
    others (the other choices): s_c, the log density of the trace, and r_c,
    the log density of gf's forward proposal for others and c given sigma
    (project on the unconstrained addresses; finite where s_c is -Inf
-   because sigma is impossible under c). Every choice is given, so the
-   runs are deterministic. {:assignments :s :r :retvals}, with s and r
-   stacked. batched? enumerates in one batched run, without :retvals. Its
-   structure is then one for every assignment, so that of the run whose
-   choices it was given (an assignment among them), and its choices need
-   no check; a run that falls back is checked one assignment at a time."
+   because sigma is impossible under c, which a run that stops there does
+   not reach: unweighing). Every choice is given, so the runs are
+   deterministic. {:assignments :s :r :retvals}, with s and r stacked.
+   batched? enumerates in one batched run, without :retvals, which does not
+   stop for one particle (gen.dynamic): its scores are -Inf where sigma is
+   impossible, and its projections the forward proposal's. Its structure is
+   then one for every assignment, so that of the run whose choices it was
+   given (an assignment among them), and its choices need no check; a run
+   that falls back is run again one assignment at a time."
   [g args sigma others free seen limit batched?]
   (let [base (cm/merge sigma others)
         cs (assignments free seen limit)
         n (+ (count (cm/addresses base)) (count free))
         unconstrained (sel/complement (sel/from-choicemap sigma))
-        of-traces (fn [trs] {:assignments cs :s (array/stack (mapv :score trs))
-                             :r (array/stack (mapv #(gfi/project % unconstrained) trs)) :retvals (mapv :retval trs)})]
-    (if-let [ps (when batched? (one-batch g args base cs))]
-      (if (batched/batched? ps)
-        {:assignments cs :s (batched/scores ps) :r (batched/project ps unconstrained)}
-        ;; it fell back to one run per assignment
-        (of-traces (mapv #(checked %1 %2 n) (batched/traces ps) cs)))
-      (of-traces (one-run-each g args base cs n)))))
+        ps (when batched? (one-batch g args base cs))]
+    (if (and ps (batched/batched? ps))
+      {:assignments cs :s (batched/scores ps) :r (batched/project ps unconstrained)}
+      (one-run-each g args base sigma free cs n))))
 
 (defn- check-retval!
   "Throw unless the return value is the same under every assignment with
@@ -387,8 +445,11 @@
    constraints, outside the revise."
   [{:keys [gf paths limit check-retval?] :as egf} args sigma key]
   (let [[k-forward k-pick k-final] (rng/split key 3)
+        ;; the forward proposal's run, sigma unweighed, so that it does not
+        ;; stop where sigma is impossible under the choices it draws
         forward (fn [sigma] (let [seen (volatile! {})]
-                              {:trace (:trace (gfi/-generate (watching gf (set paths) seen) args sigma k-forward))
+                              {:trace (:trace (gfi/-generate (unweighing (watching gf (set paths) seen) sigma (volatile! 0.0))
+                                                             args sigma k-forward))
                                :seen seen}))
         [{t0 :trace seen :seen} sigma] (if gfi/*revising* (gfi/rerun-without-drops forward sigma) [(forward sigma) sigma])
         g (watching gf (set paths) seen)
@@ -405,16 +466,20 @@
 
 (defn- exact-weight
   "The weight exact-generate gives for producing the trace tr of gf on args
-   from sigma, tr's choices at some addresses."
+   from sigma, tr's choices at some addresses: -Inf for a trace outside the
+   support, whose run stopped at a choice there (gfi/impossible?, DESIGN.md
+   §9), so that it holds its choices only up to that one."
   [{:keys [gf paths limit] :as egf} args sigma tr]
-  (let [seen (volatile! {})
-        g (watching gf (set paths) seen)
-        ;; the supports, from a run with every choice given
-        _ (gfi/with-exact-density "with-exact-proposal" (gfi/generate g args (:choices tr) (rng/key 0)))
-        free (free-paths paths sigma)
-        _ (check-visited! free seen (:choices tr))
-        {s :s r :r} (enumerated g args sigma (others-of (:choices tr) sigma free) free seen limit (batch-enumeration? egf))]
-    (- (array/logsumexp s) (array/logsumexp r))))
+  (if (gfi/impossible? (:score tr))
+    ##-Inf
+    (let [seen (volatile! {})
+          g (watching gf (set paths) seen)
+          ;; the supports, from a run with every choice given
+          _ (gfi/with-exact-density "with-exact-proposal" (gfi/generate g args (:choices tr) (rng/key 0)))
+          free (free-paths paths sigma)
+          _ (check-visited! free seen (:choices tr))
+          {s :s r :r} (enumerated g args sigma (others-of (:choices tr) sigma free) free seen limit (batch-enumeration? egf))]
+      (- (array/logsumexp s) (array/logsumexp r)))))
 
 (gfi/defgf ExactProposalGF [gf paths limit check-retval? batched?]
   gfi/IGenerativeFunction

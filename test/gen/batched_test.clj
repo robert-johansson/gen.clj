@@ -25,6 +25,8 @@
             [gen.inference.mcmc :as mcmc]
             [gen.inference.mh :as mh]
             [gen.inference.particle-filter :as pf]
+            [gen.inference.proposal :as proposal]
+            [gen.inference.vi :as vi]
             [gen.laws :refer [close?]]
             [gen.random :as rng]
             [gen.selection :as sel]))
@@ -1078,3 +1080,156 @@
           (is (close? (b/choice ps :intercept) (b/choice ps' :intercept)) "the other choices kept")
           (is (every? consistent? trs))
           (is (close? (b/scores ps') (array/stack (mapv :score trs)))))))))
+
+;; ---------------------------------------------------------------------------
+;; A particle outside its support (DESIGN.md §9, the ten decisions' fifth)
+;; ---------------------------------------------------------------------------
+
+;; A batched run cannot stop for one particle: it goes on, and the handler
+;; sets the score and weight of a particle whose choice left its support
+;; to -Inf at the end (gen.dynamic's weigh), what the particle's scalar run,
+;; which stops there, gives. What it computed after that choice is masked:
+;; here b's beta density at 0, +Inf, which with the -Inf would sum to NaN.
+;; Its trace holds the whole run's choices and their densities as computed
+;; (NaN where a parameter the impossible value made was invalid); b/traces
+;; rebuilds the scalar trace, which stops at the choice. Where a parameter check downstream
+;; reads the batch (the JVM's concrete arrays) and fails for such a
+;; particle, the run falls back to one particle at a time, which stops it.
+;; Planted bugs (2026-10-25): the mask read but not applied gives NaN
+;; weights for the particles outside, which the spot checks catch, so the
+;; run falls back, failing this test (and the Map's +Inf stages,
+;; gen.combinators-test); the mask never read is an unread batched
+;; comparison, which fails every batched run (gen.batched's guard).
+(deftest a-particle-outside-its-support-weighs-minus-infinity
+  (let [m (gen [lo] (let [a (trace :a (d/uniform lo (+ lo 1.0)))] (trace :b (d/beta 0.5 1.0)) a))
+        ;; the even particles' a leaves [0.5, 1.5], and their b is at 0
+        own (mapv #(if (even? %) (cm/choicemap :a 0.25 :b 0.0) (cm/choicemap :a 0.75 :b 0.5)) (range 6))
+        ps (:particles (b/generate m [0.0] cm/EMPTY 6 (rng/key 1) {:per-particle own}))
+        {out :particles ws :weights} (b/update ps [0.5] [diff/unknown-change] cm/EMPTY (rng/key 2))
+        ws (array/->clj ws)]
+    (is (b/batched? out) "it stays batched")
+    (is (every? #(= ##-Inf %) (take-nth 2 ws)) "a at 0.25 is outside [0.5, 1.5]")
+    (is (every? #(close? 0.0 %) (take-nth 2 (rest ws))) "a at 0.75 is inside")
+    (is (every? #(= ##-Inf %) (take-nth 2 (array/->clj (b/scores out)))))
+    (is (every? true? (map #(= (ts/number %1) (ts/number (:weight (gfi/update %2 [0.5] [diff/unknown-change] cm/EMPTY (rng/key 3)))))
+                           ws (b/traces ps)))
+        "each particle's weight is its scalar update's")
+    (when (ts/jvm?)
+      ;; (a lazy backend's scalar run goes on, gen.dynamic)
+      (is (every? #(= [[:a]] (cm/addresses (:choices %))) (take-nth 2 (b/traces out)))
+          "a particle outside is rebuilt as its scalar trace, which stops at a")))
+  (testing "a parameter check downstream that fails for such a particle falls back to one at a time"
+    (let [m (gen [] (let [s (trace :s (d/gamma 1 1))] (trace :y (d/normal 0 s))))
+          ps (:particles (b/generate m [] (cm/choicemap :y 0.1) 4 (rng/key 4)))
+          own (mapv #(cm/choicemap :s (if (even? %) -1.0 0.5)) (range 4))
+          {out :particles ws :weights} (b/update ps [] [] cm/EMPTY (rng/key 5) {:per-particle own})]
+      ;; (a lazy backend checks no parameter it would have to read)
+      (when (ts/jvm?)
+        (is (not (b/batched? out)))
+        (is (re-find #"std must be positive" (:message (b/fallback-reason out)))))
+      (is (= [##-Inf ##-Inf] (vec (take-nth 2 (array/->clj ws)))))
+      (is (every? ts/finite? (take-nth 2 (rest (array/->clj ws)))))))
+  (testing "MH chains reject the particles' moves outside the support"
+    (let [m (gen [] (let [a (trace :a (d/uniform 0 1)) b (trace :b (d/uniform 0 a))] (trace :c (d/normal b 1.0)) b))
+          ps (:particles (b/generate m [] (cm/choicemap :a 0.9 :b 0.6 :c 0.0) 16 (rng/key 6)))
+          {out :particles acc :accepted? la :log-alpha} (mh/mh-particles ps (sel/select :a) (rng/key 7))
+          la (array/->clj la)]
+      (is (b/batched? out))
+      (is (some #(= ##-Inf %) la) "some a below b")
+      (is (every? (fn [[l a?]] (or (not= ##-Inf l) (not a?))) (map vector la acc)))
+      (is (every? #(< (ts/number (% :b)) (ts/number (% :a))) (b/traces out))))))
+
+;; ---------------------------------------------------------------------------
+;; A fallback is recorded, and :batched? :required refuses it (DESIGN.md §9,
+;; the ten decisions' ninth; genclj-ynpc)
+;; ---------------------------------------------------------------------------
+
+;; Every site that runs particles batched and may fall back to one at a
+;; time records why in its result, :fallback, a written message (never a
+;; raw exception's), and under :batched? :required throws ex-info with it
+;; instead. Nothing prints. Planted bugs (2026-10-25): fallen-back
+;; recording no message fails 17 of the checks here; batched-or ignoring
+;; *required* fails the :required checks of the sites that run through it
+;; (8); host math's reason left raw fails its check.
+
+(def host-math
+  "Host math on a choice: Math/exp takes a batched value as one number,
+   which Java's cast refuses (029's report)."
+  (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (Math/exp x) 1)))))
+
+(defn- written? [m] (and (string? m) (not (re-find #"class |cannot be cast" m))))
+
+(defn- refused? [f]
+  (try (f) false
+       (catch clojure.lang.ExceptionInfo e
+         (boolean (and (re-find #"cannot be batched \(:batched\? :required\)" (ex-message e)) (written? (:fallback (ex-data e))))))))
+
+(deftest a-fallback-is-recorded-and-required-refuses-it
+  (testing "gen.batched's operations"
+    (let [ps (b/simulate branching [] 8 (rng/key 1))
+          {gps :particles :as g} (b/generate branching [] cm/EMPTY 8 (rng/key 2))
+          u (b/update gps [] [] (cm/choicemap :switch true) (rng/key 3))
+          r (b/regenerate gps [] [] (sel/select :switch) (rng/key 4))]
+      (is (re-find #"Cannot branch on a batched value" (b/fallback ps)))
+      (is (= (b/fallback gps) (:fallback g)))
+      (is (= (b/fallback gps) (:fallback u) (:fallback r)) "carried on by the operations after it")
+      (is (= {:message (b/fallback ps)} (select-keys (b/fallback-reason ps) [:message])))
+      (is (nil? (b/fallback (b/simulate (gen [] (trace :x (d/normal 0 1))) [] 8 (rng/key 5)))) "nil while batched")
+      (binding [b/*required* true]
+        (is (refused? #(b/simulate branching [] 8 (rng/key 1))))
+        (is (refused? #(b/generate branching [] cm/EMPTY 8 (rng/key 2))))
+        (is (refused? #(b/update gps [] [] cm/EMPTY (rng/key 3))) "particles held one at a time")
+        (is (refused? #(b/map-particles gps (fn [t _] (:score t)) nil))))))
+  (testing "host math's reason is written (029)"
+    (let [m (b/fallback (b/simulate host-math [] 4 (rng/key 6)))]
+      (is (written? m))
+      (is (re-find #"host math" m))))
+  (testing "the batched generate under an internal proposal (028)"
+    (let [m (gen [] (let [z (trace :z (d/normal 0 1))] (trace :y (d/normal z 1))))
+          q (gen [_cs] (trace :z (d/normal 0.5 1)))
+          {ps :particles g :fallback} (b/generate (proposal/with-internal-proposal m q) [] (cm/choicemap :y 0.3) 6 (rng/key 7))]
+      (is (= g (b/fallback ps)))
+      (is (written? g))))
+  (testing "importance sampling"
+    (let [obs cm/EMPTY]
+      (doseq [[label f] [["importance-sampling" #(imp/importance-sampling branching [] obs 8 %)]
+                         ["importance-resampling" #(imp/importance-resampling branching [] obs 8 %)]
+                         ["estimate" #(imp/estimate (fn [t] (if (ts/host (t :switch)) 1.0 0.0)) branching [] obs 8 %)]]]
+        (testing label
+          (is (re-find #"Cannot branch" (:fallback (f {:batched? true :key (rng/key 8)}))))
+          (is (refused? #(f {:batched? :required :key (rng/key 8)})))
+          (is (nil? (:fallback (f {:key (rng/key 8)}))) "one at a time by request records nothing"))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"a custom proposal runs one sample at a time"
+                          (imp/importance-sampling branching [] cm/EMPTY 4 {:batched? :required :proposal (gen [] nil)})))
+    (is (nil? (:fallback (imp/importance-sampling (gen [] (trace :x (d/normal 0 1))) [] cm/EMPTY 8 {:batched? :required :key (rng/key 9)})))
+        "a model that runs batched passes :required"))
+  (testing "the particle filter: initialize, and a step that branches on particles"
+    (let [m (gen [t] (let [x (trace :x (d/normal 0 1))]
+                       (when (> t 1) (if (trace :b (d/bernoulli 0.5)) (trace :c (d/normal x 1)) (trace :d (d/normal 0 1))))))
+          s0 (pf/initialize m [1] cm/EMPTY 6 {:batched? true :key (rng/key 10)})
+          s1 (pf/step s0 [2] [diff/unknown-change] cm/EMPTY {:key (rng/key 11)})]
+      (is (nil? (:fallback s0)))
+      (is (re-find #"Cannot branch" (:fallback s1)))
+      (is (re-find #"Cannot branch" (:fallback (pf/initialize branching [] cm/EMPTY 6 {:batched? true :key (rng/key 12)})))))
+    (let [m (gen [t] (let [x (trace :x (d/normal 0 1))]
+                       (when (> t 1) (if (trace :b (d/bernoulli 0.5)) (trace :c (d/normal x 1)) (trace :d (d/normal 0 1))))))
+          s0 (pf/initialize m [1] cm/EMPTY 6 {:batched? :required :key (rng/key 10)})]
+      (is (= :required (:batched? s0)))
+      (is (refused? #(pf/step s0 [2] [diff/unknown-change] cm/EMPTY {:key (rng/key 11)})))
+      (is (refused? #(pf/initialize branching [] cm/EMPTY 6 {:batched? :required :key (rng/key 12)})))))
+  (testing "MH, HMC and MAP on particles, gradients, VI, enumeration"
+    (let [m (gen [] (let [x (trace :x (d/normal 0 1))] (if (array/> x 0.0) (trace :y (d/normal x 1)) (trace :y (d/normal (- x) 1)))))
+          ps (b/simulate (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal x 1)))) [] 6 (rng/key 13))
+          bps (b/simulate m [] 6 (rng/key 13))]
+      (is (written? (:fallback (mh/mh-particles bps (sel/select :x) (rng/key 14)))))
+      (is (nil? (:fallback (mh/mh-particles ps (sel/select :x) (rng/key 14)))))
+      (is (written? (:fallback (mcmc/hmc-particles bps (sel/select :x) {:eps 0.1 :L 2 :key (rng/key 15)}))))
+      (is (written? (b/fallback (mcmc/map-optimize-particles bps (sel/select :x)))))
+      (is (written? (:fallback (grad/choice-gradients bps (sel/select :x)))))
+      (is (nil? (:fallback (grad/choice-gradients ps (sel/select :x)))))
+      (let [q (gen [] (trace :x (d/normal (param :m) 1.0)))]
+        (is (written? (:fallback (vi/elbo-gradient m [] (cm/choicemap :y 0.5) q [] {:m 0.0} 4 {:batched? true :key (rng/key 16)}))))
+        (is (refused? #(vi/elbo-gradient m [] (cm/choicemap :y 0.5) q [] {:m 0.0} 4 {:batched? :required :key (rng/key 16)}))))
+      (let [grid (enum/choice-vol-grid [:switch [true false]])]
+        (is (re-find #"Cannot branch" (:fallback (enum/enumerative-inference branching [] cm/EMPTY grid {:batched? true :key (rng/key 17)}))))
+        (is (refused? #(enum/enumerative-inference branching [] cm/EMPTY grid {:batched? :required :key (rng/key 17)})))))))

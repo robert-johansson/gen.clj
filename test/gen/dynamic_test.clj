@@ -696,3 +696,152 @@
           t0 (System/nanoTime)]
       (dotimes [i 20] (gfi/simulate m [] (rng/key i)))
       (is (< (/ (- (System/nanoTime) t0) 1e6) 400.0) "under 20 ms a run"))))
+
+;; ---------------------------------------------------------------------------
+;; A choice outside its own support stops the run (DESIGN.md §9, the ten
+;; decisions' fifth; genclj-q7cq, genclj-2870)
+;; ---------------------------------------------------------------------------
+
+;; The operation returns weight -Inf without running the rest of the body,
+;; so a distribution downstream whose parameter the impossible value makes
+;; invalid is never built: its check cannot throw. The trace holds the
+;; choices and calls up to that one (recorded with them), its score -Inf
+;; and its return value nil; an update discards the old choices it did not
+;; reach. Planted bug (2026-10-25): weigh never stopping, the old behaviour,
+;; fails every model below with the downstream parameter error (normal's
+;; std, mvnormal's covariance), and the outside-support laws with it.
+
+(def scale-then-normal
+  (gen [] (let [s (trace :s (d/gamma 1 1))] (trace :y (d/normal 0 s)))))
+
+(def scale-then-normal-static
+  (gen ^:static [] (let [s (trace :s (d/gamma 1 1)) y (trace :y (d/normal 0 s))] y)))
+
+(def scale-in-a-callee
+  "The scale made by a call: the callee stops, and the caller stops at the
+   call (it never sees the callee's missing return value)."
+  (gen [] (let [s (splice :inner (gen [] (trace :s (d/gamma 1 1))))] (trace :y (d/normal 0 s)))))
+
+(def length-scale-then-mvnormal
+  "A covariance scaled by a length scale l (chapter 052's case, a GP's
+   leaf): mvnormal's check refuses it where l is below 0."
+  (gen [] (let [l (trace :l (d/gamma 2 1))]
+            (trace :f (d/mvnormal (array/zeros [2]) (* l (array/array [[1.0 0.5] [0.5 1.0]])))))))
+
+(defn- stops?
+  "Does a scalar run stop at a choice outside its support? On the JVM its
+   log densities are host numbers, so it does; on a lazy backend (MLX) they
+   are arrays, never read, so it goes on, its score and weight -Inf all
+   the same (gen.dynamic), and its trace whole."
+  []
+  (ts/jvm?))
+
+(deftest a-choice-outside-its-support-stops-the-run
+  (doseq [[label gf p others] [["a dynamic body" scale-then-normal [:s] {:y 0.1}]
+                               ["a static body" scale-then-normal-static [:s] {:y 0.1}]
+                               ["a callee" scale-in-a-callee [:inner :s] {:y 0.1}]
+                               ["mvnormal downstream" length-scale-then-mvnormal [:l] {:f (array/array [0.1 -0.2])}]]]
+    (testing label
+      (let [given (reduce-kv (fn [c k v] (cm/set-choice c [k] v)) (cm/set-choice cm/EMPTY p 0.5) others)
+            impossible (cm/set-choice given p -1.0)
+            tr (:trace (gfi/generate gf [] given (rng/key 0)))
+            {t2 :trace w :weight disc :discard rd :retdiff} (gfi/update tr (cm/set-choice cm/EMPTY p -1.0) (rng/key 1))]
+        (is (ts/finite? (:score tr)))
+        (is (= ##-Inf (ts/number w)) "update")
+        (is (= ##-Inf (ts/number (:score t2))))
+        (is (= -1.0 (ts/number (t2 p))))
+        (is (= ##-Inf (ts/number (:weight (gfi/generate gf [] impossible (rng/key 2))))) "generate")
+        (is (= ##-Inf (ts/number (:weight (gfi/assess gf [] impossible)))) "assess")
+        (when (stops?)
+          (is (= [p] (cm/addresses (:choices t2))) "the choices up to the impossible one")
+          (is (nil? (:retval t2)))
+          (is (diff/unknown-change? rd))
+          (is (= (set (cm/addresses given)) (set (cm/addresses disc))) "the old choices replaced or not reached")
+          (is (nil? (:retval (gfi/assess gf [] impossible))))
+          (is (= ##-Inf (ts/number (:weight (gfi/assess gf [] (cm/set-choice cm/EMPTY p -1.0)))))
+              "assess of the choices up to it: the rest is never asked for"))
+        (testing ", and back into the support"
+          (let [{t3 :trace w3 :weight} (gfi/update t2 [] [] disc (rng/key 3))]
+            (is (= (ts/host (cm/to-map (:choices tr))) (ts/host (cm/to-map (:choices t3)))))
+            (is (close? (:score tr) (:score t3)))
+            ;; (a lazy run's downstream density was NaN at the impossible value)
+            (when (stops?) (is (= ##Inf (ts/number w3))))))
+        (testing ", and a move between two impossible traces has no weight (NaN, as MH's check expects)"
+          (is (Double/isNaN (ts/number (:weight (gfi/update t2 (cm/set-choice cm/EMPTY p -2.0) (rng/key 4))))))))))
+  (testing "regenerate: a kept choice whose support the regenerated one moves"
+    (let [m (gen [] (let [a (trace :a (d/uniform 0 1)) b (trace :b (d/uniform 0 a))] (trace :c (d/normal 0 (- a b)))))
+          tr (:trace (gfi/generate m [] (cm/choicemap :a 0.9 :b 0.6 :c 0.0) (rng/key 0)))
+          rs (map #(gfi/regenerate tr (sel/select :a) %) (rng/split (rng/key 5) 40))]
+      (is (some #(= ##-Inf (ts/number (:weight %))) rs) "a below b")
+      (is (some #(ts/finite? (:weight %)) rs) "a above b")
+      (when (stops?)
+        (is (every? #(= (ts/finite? (:weight %)) (cm/has-value? (:choices (:trace %)) [:c])) rs)))))
+  (testing "simulate, generate and assess within the support are unchanged, and other checks stay loud"
+    (is (ts/finite? (:score (gfi/simulate scale-then-normal [] (rng/key 6)))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"std must be positive"
+                          (gfi/simulate (gen [] (trace :y (d/normal 0 -1.0))) [] (rng/key 7)))
+        "a parameter no choice outside its support made invalid")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not visited"
+                          (gfi/generate scale-then-normal [] (cm/choicemap :s 0.5 :z 1.0) (rng/key 8)))
+        "an unvisited constraint of a run that did not stop")))
+
+(def nested-bounds
+  "b's support ends at a, and c's scale is a - b: an update that takes a
+   below b (a constraint, or lo, the arguments) takes b outside its support,
+   and c's scale below 0, which the run never reaches."
+  (gen [lo] (let [a (trace :a (d/uniform lo (+ lo 1.0)))
+                  b (trace :b (d/uniform lo a))]
+              (trace :c (d/normal 0 (- a b))))))
+
+(def nested-bounds-static
+  (gen ^:static [lo] (let [a (trace :a (d/uniform lo (+ lo 1.0)))
+                           b (trace :b (d/uniform lo a))
+                           c (trace :c (d/normal 0 (- a b)))]
+                       c)))
+
+(def nested-bounds-in-a-callee
+  (gen [lo] (let [[a b] (splice :ab (gen [lo] (let [a (trace :a (d/uniform lo (+ lo 1.0)))]
+                                                [a (trace :b (d/uniform lo a))]))
+                                lo)]
+              (trace :c (d/normal 0 (- a b))))))
+
+;; Models whose updates and regenerates go outside the support: the laws
+;; hold of the traces they return (gen.laws' reached: an update that stops
+;; reaches the constraints up to the choice that stops it).
+(laws/deflaws outside-support
+  [[:nested-bounds nested-bounds [0.0] [[0.5] [-0.5]]]
+   [:nested-bounds-static nested-bounds-static [0.0] [[0.5] [-0.5]]]
+   [:nested-bounds-in-a-callee nested-bounds-in-a-callee [0.0] [[0.5] [-0.5]]]]
+  100)
+
+;; ---------------------------------------------------------------------------
+;; A splice's argument equal to the last is unchanged (DESIGN.md §9, the ten
+;; decisions' tenth; genclj-nvo0)
+;; ---------------------------------------------------------------------------
+
+;; no-change when identical, or a host scalar, keyword or string equal to
+;; the previous call's; a collection or array by identity. Planted bug
+;; (2026-10-25): identity alone fails the fresh number's and string's
+;; cases (a keyword is interned, and a boolean canonical, so they are
+;; identical either way).
+(deftest a-splice-argument-equal-to-the-last-is-unchanged
+  (let [seen (atom nil)
+        callee (dyn/with-dispatch (gen [_x] (trace :z (d/normal 0 1)))
+                 (fn [_ op _ opts] (when (= op :update) (reset! seen (:argdiffs opts))) nil))
+        argdiff (fn [make]
+                  (let [g (gen [n] (splice :c callee (make n)))
+                        tr (gfi/simulate g [1] (rng/key 0))]
+                    (reset! seen nil)
+                    (gfi/update tr [1] [diff/unknown-change] cm/EMPTY (rng/key 1))
+                    (first @seen)))]
+    (doseq [[label make] [["a fresh equal double" #(+ % 0.5)]
+                          ["a keyword" #(keyword (str "k" %))]
+                          ["a string" #(str "k" %)]
+                          ["the same map" (let [m {:a 1}] (fn [_] m))]]]
+      (is (diff/no-change? (argdiff make)) label))
+    (doseq [[label make] [["an equal map built afresh" #(hash-map :a %)]
+                          ["an equal vector built afresh" #(vector % 2)]
+                          ["an equal array built afresh" #(array/array [% 2.0])]
+                          ["-0.0 after 0.0" (let [calls (atom 0)] (fn [_] (if (= 1 (swap! calls inc)) 0.0 -0.0)))]
+                          ["a double after a long" (let [calls (atom 0)] (fn [_] (if (= 1 (swap! calls inc)) 1 1.0)))]]]
+      (is (diff/unknown-change? (argdiff make)) label))))

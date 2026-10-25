@@ -526,6 +526,63 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
      arrays compare by identity (comparing arrays would read them to the
      host on MLX), and the docs give the idiom: reuse the same value
      (genclj-nvo0).
+
+  Item 5 as implemented (2026-10-25, the agent; genclj-q7cq, genclj-2870):
+  - One rule at the record of every site and call (gen.dynamic's weigh,
+    and the static score fn's static-site): a log density or call score of
+    -Inf on the host (`gfi/impossible?`) stops the run, in every operation,
+    simulate included. A dynamic caller stops at a callee's -Inf score.
+  - The result: weight -Inf, or NaN for an update or regenerate of a trace
+    that is impossible too (neither trace is possible, so MH's NaN check
+    stays loud for a chain started at an impossible trace). The trace holds
+    the choices and calls up to and including the impossible one, score
+    -Inf, return value nil. An update's discard holds the old choices it
+    replaced or did not reach (Def 2.3.1 with the partial trace's
+    addresses), so updating back with it restores the old trace. The
+    constraints after the stop are not checked: the run never reached
+    them. assess of the partial choices stops at the same choice, so the
+    trace is consistent with assess, and the laws hold with σ restricted to
+    what the run reached (gen.laws' reached).
+  - Combinators: Unfold, Scan and Recurse pass a part's return value on, so
+    they stop at a part whose score is -Inf (drop the parts after it, an
+    update discarding them); dimap maps no such return value. Map and Switch
+    pass nothing on and are unchanged; their scores keep genclj-ul72's IEEE
+    sums (a Map of a +Inf element and an impossible one is NaN).
+  - Batched, lazy (MLX) and differentiated runs, whose log densities are
+    arrays never read here, cannot stop: they go on, and the handler sets
+    score and weight to -Inf where a site was -Inf (per particle), whatever
+    ran after it gave (NaN from a parameter made invalid, +Inf). Their
+    traces hold the whole run's choices, and its sites' densities as
+    computed (zeroing them would corrupt the static language's reuse of
+    recorded densities); gen.batched/traces rebuilds a particle's scalar
+    trace, which stops. So the weight laws check only w = -Inf for a move
+    outside the support (gen.laws' outside?). A downstream parameter check
+    that reads a concrete batch (the JVM) and fails for such a particle
+    raises the fallback, which stops it.
+  - Callers that read the new trace before accepting (MH's backward
+    proposal, the translators and the trace-kernel DSL, a particle filter's
+    discard check and backward proposal, is/estimate's f) skip that work for
+    a move of weight -Inf. with-exact-proposal's enumeration needs the
+    forward proposal's density of the other choices where an observation is
+    impossible, so its runs give the observations at the model's own
+    addresses density 0 (an observation inside a call that stops is a loud
+    error there); its projection of an impossible trace is -Inf.
+
+  Item 9 as implemented (2026-10-25, the agent; genclj-ynpc): the fallback
+  is `gen.batched/fallback` of the particles (`fallback-reason` keeps its
+  ex-data), and `:fallback` in the results of b/generate, update and
+  regenerate, is/importance-sampling, importance-resampling and estimate,
+  pf's state (initialize and step), mh-particles, the -particles kernels,
+  choice-gradients of particles, VI's batched estimators and fits, and
+  batched enumerative-inference. map-particles and project return arrays,
+  so map-particles* and project* return {:result :fallback}. A raw
+  exception's reason is written (host math's ClassCastException is said
+  so). `:batched? :required` binds `gen.batched/*required*`: a run that
+  would fall back throws ex-info with the reason (`:fallback` in its
+  data), so does an operation on particles already held one at a time,
+  and a custom proposal or `:strata`, which run one at a time, are errors;
+  a particle filter keeps `:batched? :required` in its state for its
+  steps.
 - **A 1.0 for dependents** (owner, 2026-10-24): memo.clj's 1.0 should
   probably wait for gen.clj's 1.0 rather than pin a commit. Until then
   dependents pin a commit. There is no rush for memo.clj: gen.clj's 1.0

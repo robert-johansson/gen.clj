@@ -25,7 +25,11 @@
    execution (gen.batched): the state holds :particles, a particle
    collection, in place of :traces, and every later step stays batched
    (falling back to one particle at a time if the model branches on particle
-   values). A custom proposal runs one particle at a time: at initialize it
+   values, which the state records as :fallback, a written message). With
+   {:batched? :required} a run that would fall back throws with that reason
+   instead, at initialize and at every later step, and a custom proposal or
+   :strata, which run one particle at a time, are errors. Nothing prints
+   (DESIGN.md §9, the ten decisions' ninth). A custom proposal runs one particle at a time: at initialize it
    ignores :batched?, and a step with one turns a batched state into
    per-particle traces. traces returns the scalar traces either way.
 
@@ -91,9 +95,18 @@
    ignores :batched?."
   ([model args observations n] (initialize model args observations n {}))
   ([model args observations n {:keys [proposal batched? strata layout] :or {layout :contiguous} :as opts}]
+   (when (and (= :required batched?) (or proposal strata))
+     (throw (ex-info (str "initialize: :batched? :required, but " (if proposal "a custom proposal" ":strata")
+                          " runs one particle at a time")
+                     {:batched? batched?})))
    (if (and batched? (not proposal) (not strata))
-     (let [{ps :particles ws :weights} (batched/generate model args observations n (or (:key opts) (gfi/next-key)))]
-       {:particles ps :log-weights (vec (array/->clj ws)) :log-ml 0.0})
+     (let [required? (= :required batched?)
+           {ps :particles ws :weights m :fallback}
+           (binding [batched/*required* required?]
+             (batched/generate model args observations n (or (:key opts) (gfi/next-key))))]
+       (cond-> {:particles ps :log-weights (vec (array/->clj ws)) :log-ml 0.0}
+         required? (assoc :batched? :required)
+         m (assoc :fallback m)))
      (let [particle #(imp/weighted-sample model args %1 opts %2)
            ;; one particle's graph at a time on a lazy backend, as in moved
            evaluated (fn [{:keys [trace weight] :as r}] (gfi/eval-trace! trace weight) r)
@@ -157,26 +170,36 @@
   ([state args argdiffs observations {:keys [proposal proposal-args backward backward-args] :as opts}]
    (when (and backward (not proposal))
      (throw (ex-info "A step's :backward proposal weighs a forward :proposal's changes; there is no :proposal" {})))
+   (when (and proposal (:particles state) (= :required (:batched? state)))
+     (throw (ex-info "step: a custom proposal runs one particle at a time, but the filter is :batched? :required"
+                     {:batched? :required})))
    (if-let [ps (and (not proposal) (:particles state))]
-     (let [{ps' :particles ws :weights ds :discards}
-           (batched/update ps args argdiffs observations (or (:key opts) (gfi/next-key)))]
-       (doseq [[i d] (map-indexed vector ds)] (check-discard d i))
+     (let [{ps' :particles ws :weights ds :discards m :fallback}
+           (binding [batched/*required* (= :required (:batched? state))]
+             (batched/update ps args argdiffs observations (or (:key opts) (gfi/next-key))))
+           ws (mapv double (array/->clj ws))]
+       (doseq [[i d] (map-indexed vector ds)] (when-not (gfi/impossible? (ws i)) (check-discard d i)))
        (array/eval! (:trace ps'))
-       (assoc state :particles ps' :log-weights (mapv + (:log-weights state) (array/->clj ws))))
+       (cond-> (assoc state :particles ps' :log-weights (mapv + (:log-weights state) ws))
+         m (assoc :fallback m)))
      (let [state (unbatched state)
            n (count (:traces state))
+           ;; a particle the update takes outside the support (weight -Inf:
+           ;; it stopped at a choice there, gfi/impossible?) has the old
+           ;; choices it did not reach in its discard, and its trace holds
+           ;; the choices up to that one: it is weighed -Inf, unchecked
            move (fn [i tr key]
                   (if proposal
                     (let [[k-propose k-update] (rng/split key)
                           {:keys [choices weight]} (gfi/propose proposal (into [tr] proposal-args) k-propose)
                           r (gfi/update tr args argdiffs (cm/merge observations choices) k-update)]
-                      (if backward
-                        (update r :weight + (- (:weight (gfi/assess backward (into [(:trace r)] backward-args) (:discard r) (gfi/backward-key k-update)))
-                                               weight))
-                        (do (check-discard (:discard r) i)
-                            (update r :weight - weight))))
+                      (cond (gfi/impossible? (:weight r)) r
+                            backward (update r :weight + (- (:weight (gfi/assess backward (into [(:trace r)] backward-args) (:discard r) (gfi/backward-key k-update)))
+                                                            weight))
+                            :else (do (check-discard (:discard r) i)
+                                      (update r :weight - weight))))
                     (let [r (gfi/update tr args argdiffs observations key)]
-                      (check-discard (:discard r) i)
+                      (when-not (gfi/impossible? (:weight r)) (check-discard (:discard r) i))
                       r)))
            results (mapv (fn [i tr lw k] (moved (move i tr k) lw))
                          (range n) (:traces state) (:log-weights state) (particle-keys opts n))]

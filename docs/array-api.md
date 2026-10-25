@@ -553,7 +553,9 @@ Running a generative function's scalar code under the batch backend runs it
 batched (`gfi/run-op` with `:batch-shape`). Every generative function
 therefore has a batched form. It has the same meaning for code inside `gen`
 bodies, which the macro guards (§8a). Any batched run that fails falls back
-to one particle at a time, and `gen.batched/fallback-reason` says why. For
+to one particle at a time, and records why, a written message
+(`gen.batched/fallback`, and `:fallback` in the results; `:batched?
+:required` makes it an error instead). For
 one key, a batched run draws other samples than a scalar run (the draws are
 made per site for all particles at once), with the same distribution.
 
