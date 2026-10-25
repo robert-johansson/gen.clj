@@ -486,6 +486,41 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   takes 5× a spread measured over 8–10 training keys, the spread written
   beside the check; a check whose band is too wide to catch a plausible
   error (023's metric) gets more draws, or claims only what it can show.
+- **Ten decisions from the book's friction** (owner, 2026-10-25, on the
+  lead's recommendations; each bean names its decision):
+  1. 022's "MAP beats drift" ordering gets the runs to clear 5 SE with a
+     margin, at about 135 s of chapter time (genclj-fblt).
+  2. The book test splits into one namespace per Part, so `gen.parallel`
+     spreads them; Part I and the appendices stay in the fast tier, Parts
+     II–V are `^:slow`, as statistical tests are.
+  3. 028's ESS thresholds are stated at 5 standard errors of the ESS
+     estimate (genclj-fblt).
+  4. The layers of §4 order what builds on what, not a strict order of
+     requires (gen.dynamic, L2, requires gen.dist.core, L3, which requires
+     gen.gfi, L2): documented, not untangled (genclj-aa3s).
+  5. A choice outside its own support stops the run: when a choice's
+     log-density is −Inf, the operation returns weight −Inf without
+     running the rest of the body, so MH rejects and map-optimize's line
+     search shrinks its step. Every other parameter check stays loud
+     (genclj-q7cq, genclj-2870).
+  6. Promotion follows JAX's rule when an integer meets a float (int64 +
+     float32 is float32), so float32 models stay float32 (float64 is
+     CPU-only on MLX); docs/array-api.md §5 states it (genclj-7ndy).
+  7. Dynamic bodies keep passing unknown-change to splices; the static
+     language is the way to incremental splices, and the docs say so
+     (genclj-zszp).
+  8. Residual resampling rounds n·p_i up when it is within a relative 1e-9
+     of the next integer, so equal weights keep their copies; the copies
+     stay at most n (genclj-tx1h).
+  9. A batched run that falls back to one particle at a time records why
+     in its result (`:fallback`, a written message, never a raw exception);
+     `:batched? :required` throws with that reason instead. Nothing prints
+     (genclj-ynpc).
+  10. `splice` treats an argument as unchanged when it is identical, or a
+     host scalar, keyword or string equal to the old one; collections and
+     arrays compare by identity (comparing arrays would read them to the
+     host on MLX), and the docs give the idiom: reuse the same value
+     (genclj-nvo0).
 - **A 1.0 for dependents** (owner, 2026-10-24): memo.clj's 1.0 should
   probably wait for gen.clj's 1.0 rather than pin a commit. Until then
   dependents pin a commit. There is no rush for memo.clj: gen.clj's 1.0
