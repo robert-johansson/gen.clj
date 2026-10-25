@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="300" viewBox="0 0 480 300" font-family="sans-serif" font-size="11">
+<rect width="100%" height="100%" fill="white"/>
+<g><line x1="70.7" y1="260.0" x2="70.7" y2="264.0" stroke="black"/><text x="70.7" y="276.0" text-anchor="middle">0</text></g>
+<g><line x1="154.0" y1="260.0" x2="154.0" y2="264.0" stroke="black"/><text x="154.0" y="276.0" text-anchor="middle">2</text></g>
+<g><line x1="237.2" y1="260.0" x2="237.2" y2="264.0" stroke="black"/><text x="237.2" y="276.0" text-anchor="middle">4</text></g>
+<g><line x1="320.4" y1="260.0" x2="320.4" y2="264.0" stroke="black"/><text x="320.4" y="276.0" text-anchor="middle">6</text></g>
+<g><line x1="403.7" y1="260.0" x2="403.7" y2="264.0" stroke="black"/><text x="403.7" y="276.0" text-anchor="middle">8</text></g>
+<g><line x1="48.0" y1="220.4" x2="52" y2="220.4" stroke="black"/><text x="45.0" y="224.4" text-anchor="end">0</text></g>
+<g><line x1="48.0" y1="129.4" x2="52" y2="129.4" stroke="black"/><text x="45.0" y="133.4" text-anchor="end">1</text></g>
+<g><line x1="48.0" y1="38.4" x2="52" y2="38.4" stroke="black"/><text x="45.0" y="42.4" text-anchor="end">2</text></g>
+<rect x="52" y="14" width="412" height="246" fill="none" stroke="black"/>
+<text x="258.0" y="294" text-anchor="middle">step t</text>
+<text transform="translate(14 137.0) rotate(-90)" text-anchor="middle">y</text>
+<clipPath id="paths-box"><rect x="52.0" y="14.0" width="412.0" height="246.0"/></clipPath>
+<g clip-path="url(#paths-box)">
+<polyline fill="none" stroke="steelblue" stroke-opacity="0.7" stroke-width="1.5" points="70.7,221.1 112.3,220.2 154.0,221.2 195.6,219.6 237.2,219.6 278.8,244.7 320.4,184.7 362.0,94.6 403.7,54.4 445.3,103.5"/>
+<circle cx="70.7" cy="210.2" r="3" fill="black" fill-opacity="0.7"/>
+<circle cx="112.3" cy="222.9" r="3" fill="black" fill-opacity="0.7"/>
+<circle cx="154.0" cy="227.1" r="3" fill="black" fill-opacity="0.7"/>
+<circle cx="195.6" cy="222.7" r="3" fill="black" fill-opacity="0.7"/>
+<circle cx="237.2" cy="234.9" r="3" fill="black" fill-opacity="0.7"/>
+<circle cx="278.8" cy="248.8" r="3" fill="black" fill-opacity="0.7"/>
+<circle cx="320.4" cy="181.2" r="3" fill="black" fill-opacity="0.7"/>
+<circle cx="362.0" cy="110.1" r="3" fill="black" fill-opacity="0.7"/>
+<circle cx="403.7" cy="25.2" r="3" fill="black" fill-opacity="0.7"/>
+<circle cx="445.3" cy="127.3" r="3" fill="black" fill-opacity="0.7"/>
+</g>
+</svg>
