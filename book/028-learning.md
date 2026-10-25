@@ -1322,8 +1322,8 @@ gave one more than twenty standard errors below it:
 
 Monte Carlo EM failed with 5 samples a point because its proposal, the
 prior, ignores the observation. *Reweighted wake-sleep* (Bornschein and
-Bengio, in Gen.jl's list) learns the proposal along with the model. Each
-round, a wake step moves the model along the weighted gradient of
+Bengio 2015, in Gen.jl's list) learns the proposal along with the model.
+Each round, a wake step moves the model along the weighted gradient of
 completions drawn from the proposal, and a sleep step moves the proposal
 toward the current model's posterior. One optimizer step takes both
 stores, nested in a map:

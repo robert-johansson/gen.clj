@@ -18,10 +18,10 @@ Part I, Foundations:
 |------|---------|---------|
 | 011-getting-started.md | Getting Started: Linear Regression | Gen.jl's Getting Started; GenMLX book 011 |
 | 012-modeling.md | Introduction to Modeling | Gen.jl's Introduction to Modeling |
-| 013-conditioning.md | Conditioning | Gen.jl's A Bottom-up Introduction; GenMLX book 012 |
+| 013-conditioning.md | Conditioning | Gen.jl's A Bottom-Up Introduction; GenMLX book 012 |
 | 014-handler-loop.md | The Handler Loop | GenMLX book 013 |
 | 015-choice-maps-traces.md | Choice Maps, Traces and Selections | GenMLX book 014 |
-| 016-update-regenerate.md | Update and Regenerate | GenMLX book 015; Gen.jl's Reasoning about Regenerate |
+| 016-update-regenerate.md | Update and Regenerate | GenMLX book 015; Gen.jl's Reasoning About Regenerate |
 | 017-composition.md | Composition | GenMLX book 016 |
 
 Part II, Inference (`020-part-inference.md` holds its heading):
@@ -29,7 +29,7 @@ Part II, Inference (`020-part-inference.md` holds its heading):
 | File | Chapter | Sources |
 |------|---------|---------|
 | 021-inference-toolkit.md | The Inference Toolkit | GenMLX book 021 |
-| 022-mcmc-map.md | MCMC and MAP | Gen.jl's Basics of Iterative Inference: MCMC and MAP |
+| 022-mcmc-map.md | MCMC and MAP | Gen.jl's Basics of MCMC and MAP Inference |
 | 023-gradient-mcmc.md | Gradient-Based MCMC | GenMLX book 022 |
 | 024-enumeration.md | Debugging with Enumeration | Gen.jl's Debugging with Enumeration |
 | 025-smc.md | Sequential Monte Carlo: Object Tracking | Gen.jl's SMC tutorial |
@@ -46,7 +46,7 @@ Part III, Theory (`030-part-theory.md` holds its heading). The thesis is
 |------|---------|---------|
 | 031-gfi.md | The Generative Function Interface | the thesis, ch. 2; GenMLX book 031 |
 | 032-inference-as-operations.md | Inference as Operations on the GFI | the thesis, ch. 3; GenMLX book 032 |
-| 033-trace-translators.md | Trace Translators and Involutive MCMC | the thesis, ch. 3; GenMLX book 033; the split/merge of Gen.jl's Reversible-Jump MCMC notebook |
+| 033-trace-translators.md | Trace Translators and Involutive MCMC | the thesis, ch. 3; GenMLX book 033; the split/merge of Gen.jl's Reversible-Jump MCMC in Gen notebook |
 | 034-design.md | Design Rationale | DESIGN.md §3 and §9; GenMLX book 034 |
 | 035-verification.md | Verification: the Laws | ext/laws/src/gen/laws.clj, docs/research/law-audit.md, genjl-parity.md §3; GenMLX book 035 |
 
@@ -70,7 +70,7 @@ the appendices (`060-appendices.md`):
 | File | Chapter | Sources |
 |------|---------|---------|
 | 051-data-driven-proposals.md | Data-Driven Proposals: Inverse Planning | Gen.jl's Data-Driven Proposals; gen-quickstart's inverse-planning code, ported |
-| 052-reversible-jump.md | Reversible-Jump MCMC and Structure Learning | Gen.jl's Reversible-Jump MCMC notebook (piecewise-constant regression; GP kernel programs on airline data) |
+| 052-reversible-jump.md | Reversible-Jump MCMC and Structure Learning | Gen.jl's Reversible-Jump MCMC in Gen notebook (piecewise-constant regression; GP kernel programs on airline data) |
 | 053-smc-recipes.md | SMC Recipes | GenParticleFilters' example; GenSMCP3's examples |
 | 054-gallery.md | A Gallery of Models | GenMLX's examples/genmlx |
 | 061-from-genjl.md | Appendix: Coming from Gen.jl | DESIGN.md §9; bean genclj-dvgt |
@@ -97,8 +97,8 @@ the appendices (`060-appendices.md`):
 - **Refer to other chapters by title** ("as *Conditioning* showed"), not
   by number.
 - **Open with what the chapter does and why**, and name its sources in one
-  sentence ("This chapter ports Gen.jl's *Introduction to Modeling* …").
-  Close the main text where the next chapter picks up.
+  sentence ("This chapter ports Gen.jl's *Introduction to Modeling in
+  Gen* …"). Close the main text where the next chapter picks up.
 
 ## Porting the sources
 

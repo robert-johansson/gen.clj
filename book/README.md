@@ -82,12 +82,12 @@ Part I, Foundations:
 - `011-getting-started.md`: Getting Started: Linear Regression (Gen.jl's
   Getting Started with the GenMLX book's chapter 011).
 - `012-modeling.md`: Introduction to Modeling (Gen.jl's).
-- `013-conditioning.md`: Conditioning (Gen.jl's A Bottom-up Introduction
+- `013-conditioning.md`: Conditioning (Gen.jl's A Bottom-Up Introduction
   with the GenMLX book's 012).
 - `014-handler-loop.md`: The Handler Loop (the GenMLX book's 013, as
   gen.clj's handler works).
 - `015-choice-maps-traces.md`: Choice Maps, Traces and Selections (the
   GenMLX book's 014).
 - `016-update-regenerate.md`: Update and Regenerate (the GenMLX book's
-  015 with Gen.jl's Reasoning about Regenerate).
+  015 with Gen.jl's Reasoning About Regenerate).
 - `017-composition.md`: Composition (the GenMLX book's 016).

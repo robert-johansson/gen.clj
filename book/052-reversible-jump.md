@@ -11,7 +11,7 @@ it to work on two models of real size. A piecewise-constant regression
 splits and merges segments, and a grammar of Gaussian-process kernels is
 searched by regenerating subtrees of a program.
 
-The chapter ports Gen.jl's *Reversible-Jump MCMC* notebook
+The chapter ports Gen.jl's *Reversible-Jump MCMC in Gen* notebook
 (gen-quickstart), whose second half follows Saad et al.'s *Bayesian
 Synthesis of Probabilistic Programs for Automatic Data Modeling* (POPL
 2019). Two details of the notebook do not survive the port. Its split
@@ -1132,10 +1132,10 @@ errors:
 ## The airline data
 
 The data are the monthly counts of international airline passengers from
-1949 to 1960, in thousands: Box and Jenkins' AirPassengers series. The
-notebook ships them as `airline.csv`, less their mean; the book keeps the
-counts themselves, which adding the mean back recovers exactly, at
-`book/data/airpassengers.edn`:
+1949 to 1960, in thousands: the AirPassengers series of Box and Jenkins
+(1976). The notebook ships them as `airline.csv`, less their mean; the
+book keeps the counts themselves, which adding the mean back recovers
+exactly, at `book/data/airpassengers.edn`:
 
 <!-- code: airline -->
 ```clojure

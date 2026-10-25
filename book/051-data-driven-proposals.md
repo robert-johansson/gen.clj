@@ -182,7 +182,7 @@ its left is clear, and so is one through the door:
 
 ## A planner
 
-The planner builds a *rapidly exploring random tree* (RRT; LaValle,
+The planner builds a *rapidly exploring random tree* (RRT; LaValle
 1998) from the start. Each iteration draws a uniform point of the scene
 and steps from the tree's nearest node toward it, by at most `:rrt-step`;
 the step joins the tree unless an obstacle blocks it. A node records its

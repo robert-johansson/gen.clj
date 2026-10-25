@@ -17,11 +17,11 @@ The chapter follows §3.6 and §3.7 of Cusumano-Towner's thesis (2020),
 whose definitions, equations and algorithms it cites by number, and ports
 the GenMLX book's *Trace Translators and Involutive MCMC*. Its
 reversible-jump example is the split/merge move of the thesis's §3.7.4,
-which Gen.jl's *Reversible-Jump MCMC* notebook also builds; the notebook's
-own models, a piecewise-constant regression and kernel programs for
-airline data, are Part V's. *Gradient-Based MCMC* deferred involutive MCMC
-to this chapter, which builds it from the interface, one operation at a
-time, and checks it against the library's kernel.
+which Gen.jl's *Reversible-Jump MCMC in Gen* notebook also builds; the
+notebook's own models, a piecewise-constant regression and kernel
+programs for airline data, are Part V's. *Gradient-Based MCMC* deferred
+involutive MCMC to this chapter, which builds it from the interface, one
+operation at a time, and checks it against the library's kernel.
 
 The thesis writes $\upsilon$ for a trace's latent choices, $\rho$ for its
 observations, $\sigma$ for auxiliary choices and $\oplus$ for the union
@@ -286,7 +286,7 @@ log density, less the old one's, plus $\log r$:
 Why this weight? `polar` has no observations, so $\rho_1 = \{\}$ and
 $\upsilon_1$ comes from $p_1$ itself. Then the weight's expectation is
 $\int p_2(h(\upsilon_1) \oplus \rho_2) \lvert J_h \rvert(\upsilon_1)\,
-d\upsilon_1 = \int p_2(\upsilon_2 \oplus \rho_2)\, d\upsilon_2 =
+d\upsilon_1 = \int p_2(\upsilon_2 \oplus \rho_2)\, d\upsilon_2 = \bar
 p_2(\rho_2)$, by the change of variables $\upsilon_2 = h(\upsilon_1)$: the
 average weight estimates `cartesian`'s evidence, and `polar` serves as an
 importance sampler's proposal. The evidence is known: $x$ and $y$ are
@@ -589,7 +589,7 @@ $$
 $$
 
 else keep the old one. The thesis's argument for its stationarity (pp.
-122–123, after Tierney): on the extended space of $\upsilon \oplus
+122–123, after Tierney 1998): on the extended space of $\upsilon \oplus
 \sigma$, accepting or rejecting an involution with this probability keeps
 the distribution $\pi(\upsilon \oplus \sigma) = p(\upsilon \mid \rho)\,
 q(\sigma; \upsilon)$. If $\upsilon \sim p(\cdot \mid \rho)$, then drawing
@@ -1347,9 +1347,10 @@ The SMCP3 step of *SMC in Depth* is an *updating translator*
 the trace is updated to new arguments and observations, with constraints
 that a transform writes from the trace and forward choices $u$, and a
 backward kernel scores the transform's auxiliary output $u'$. Its weight
-is $w_{\text{update}} + \log q_{\text{bwd}}(u') - \log q_{\text{fwd}}(u)
-+ \log \lvert \det J \rvert$. That chapter's step only added a choice.
-This one revises one, so its backward kernel has work to do.
+is $\log w_{\text{update}} + \log q_{\text{bwd}}(u') - \log
+q_{\text{fwd}}(u) + \log \lvert \det J \rvert$. That chapter's step only
+added a choice. This one revises one, so its backward kernel has work to
+do.
 
 A mean $\mu \sim \mathcal{N}(0, 1)$ is observed with unit noise, one
 observation per step. After $t$ observations its posterior is normal,
