@@ -723,29 +723,36 @@ trained-q
 ;=> true
 
 ;; book: amortized
-(defn mean-ess
-  "The mean effective sample size, as a fraction of k, of k importance
-   samples of m given each of ys, generated as one batch."
+(defn ess-fractions
+  "The effective sample size, as a fraction of k, of k importance samples
+   of m given each of ys, generated as one batch: a fraction a point."
   [m ys k key]
   (let [n (count ys)
         {:keys [weights]} (batched/generate m [] cm/EMPTY (* n k) key
                                             {:per-particle (sampled ys k)})
         p (array/softmax (array/reshape weights [n k]))]
-    (array/item (array/mean (/ 1.0 (* k (array/sum (* p p) {:axis 1})))))))
+    (array/->clj (/ 1.0 (* k (array/sum (* p p) {:axis 1}))))))
 
 (def new-ys
   (mapv #(:retval (gfi/simulate learned-model [] %))
         (rng/split (rng/key 24) 100)))
 
-(def ess-prior (mean-ess learned-model new-ys 20 (rng/key 25)))
+(def ess-prior
+  (mean-and-error (ess-fractions learned-model new-ys 20 (rng/key 25))))
 
 (def ess-trained
-  (mean-ess (guided mle-mixture trained-q) new-ys 20 (rng/key 26)))
+  (mean-and-error (ess-fractions (guided mle-mixture trained-q) new-ys 20
+                                 (rng/key 26))))
 
 [ess-prior ess-trained]
-;=> [0.619 0.9999] ; float64
+;=> [[0.619 0.02] [0.9999 2.3E-5]] ; float64
 
-[(< ess-prior 0.8) (> ess-trained 0.99)]
+;; each point's fraction is an independent draw (its own y and samples),
+;; so the standard error is mean-and-error's; the prior's means over 140
+;; such sets of draws (keys 301 to 440, each split in three: the points,
+;; the prior's samples, the proposal's) spread 0.022, against its 0.020
+(let [[[prior prior-se] [trained trained-se]] [ess-prior ess-trained]]
+  [(< (+ prior (* 5 prior-se)) 0.8) (> (- trained (* 5 trained-se)) 0.99)])
 ;=> [true true]
 
 ;; book: amortized-bias
