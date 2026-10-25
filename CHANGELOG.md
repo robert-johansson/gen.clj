@@ -195,7 +195,7 @@ newest first in each section.
 
 ### Added
 
-- **Traces print compactly** (genclj-qvnu). A trace prints as
+- **Traces print compactly** (4a13162, genclj-qvnu). A trace prints as
   `#gen/trace[#gen/fn[xs] {:args … :score … :choices {…}}]`: its maker,
   arguments, score and choices as a nested map, where it printed its
   whole record, every call's trace included (a 500-step Unfold's trace
@@ -203,7 +203,8 @@ newest first in each section.
   :batch-shape [n]}`. The form is for reading: gen.serialize refuses it
   loudly, and `write-trace` and `read-trace` remain the round trip.
 - **`sel/union` and `sel/intersection`, and selections print as their
-  trees** (DESIGN §9, "The 1.0's shape", before the tag; genclj-ufco).
+  trees** (DESIGN §9, "The 1.0's shape", before the tag; 13ad2b3,
+  genclj-ufco).
   - `(sel/union s t …)` selects what any of the selections selects,
     `(sel/intersection s t …)` what each does; `(sel/union)` is `sel/none`
     and `(sel/intersection)` is `sel/all`, and a non-selection is a loud
@@ -224,16 +225,16 @@ newest first in each section.
     the union of two disjoint selections, and on the intersection of their
     complements, on every generative function it runs on.
 - **Choice maps are callable, as traces are** (DESIGN §9, "The 1.0's
-  shape", the eight more; genclj-a2t8). `(c :slope)`, `(c [:y 0])` and
-  `(c :b nil)` read the value there as `cm/get-choice` does, loud in the
-  same places, with a not-found arity. At an address that holds nested
-  choices the call is an error that points to `cm/get-submap`, not the
-  submap, as Gen.jl's `cm[addr]` throws there. Like a trace's call, it
-  reads a 0-d boolean as a host boolean outside a body (genclj-x6ox), so
-  `((:choices tr) a)` is `(tr a)` for every choice on every backend;
-  `cm/get-choice` still returns the value as stored. A trace's call at
-  nested choices now ends its message with where to read them, and `ifn?`
-  is true of a choice map.
+  shape", the eight more; 2797a1d, genclj-a2t8). `(c :slope)`,
+  `(c [:y 0])` and `(c :b nil)` read the value there as `cm/get-choice`
+  does, loud in the same places, with a not-found arity. At an address
+  that holds nested choices the call is an error that points to
+  `cm/get-submap`, not the submap, as Gen.jl's `cm[addr]` throws there.
+  Like a trace's call, it reads a 0-d boolean as a host boolean outside a
+  body (genclj-x6ox), so `((:choices tr) a)` is `(tr a)` for every choice
+  on every backend; `cm/get-choice` still returns the value as stored. A
+  trace's call at nested choices now ends its message with where to read
+  them, and `ifn?` is true of a choice map.
 - **`array/vmap`: a function batched over a leading axis,** as JAX's
   vmap (DESIGN §9, "The 1.0's shape"; fbf0d21, genclj-t3ur).
   `((array/vmap f {:in-axes [0 nil]}) xs shared)` runs f once for the
