@@ -1077,18 +1077,21 @@ conditional probability is above one half.
 The line is continuous. `mcmc/map-optimize`, Gen.jl's `map_optimize`,
 takes one step of gradient ascent on the selected choices' log density,
 with a backtracking line search: it tries `:max-step-size` times the
-gradient, and halves the step until the score does not decrease. Given
-the classifications and the noise, the line's posterior is Gaussian, so
-its maximum is its mean. A hundred steps from the reference trace reach
-it:
+gradient, and halves the step until the score does not decrease. It
+returns what a kernel does, the trace under `:trace` and whether the
+search found a step as `:accepted?`, so it chains with MCMC kernels
+(`k/map-optimize`). Given the classifications and the noise, the line's
+posterior is Gaussian, so its maximum is its mean. A hundred steps from
+the reference trace reach it:
 
 <!-- code: map-optimize -->
 ```clojure
 (def line-selection (sel/select :slope :intercept))
 
 (def optimized
-  (nth (iterate #(mcmc/map-optimize % line-selection
-                                    {:max-step-size 1.0 :min-step-size 1e-5})
+  (nth (iterate #(:trace (mcmc/map-optimize
+                          % line-selection
+                          {:max-step-size 1.0 :min-step-size 1e-5}))
                 reference)
        100))
 
@@ -1120,8 +1123,10 @@ in Gen.jl:
         tr (-> tr
                (mcmc/map-optimize line-selection
                                   {:max-step-size 1.0 :min-step-size 1e-5})
+               :trace
                (mcmc/map-optimize (sel/select :noise)
                                   {:max-step-size 1e-2 :min-step-size 1e-5})
+               :trace
                (outlier-map-update k-classify))
         prob (min 0.5 (max 0.05 (outlier-fraction tr)))]
     (:trace (gfi/update tr (cm/choicemap :prob-outlier prob) k-prob))))
@@ -1144,7 +1149,8 @@ seven times, to $1/128$ of it, where the score rises:
                              :noise)))
 
 (def noise-step
-  (mcmc/map-optimize reference (sel/select :noise) {:max-step-size 1.0}))
+  (:trace (mcmc/map-optimize reference (sel/select :noise)
+                             {:max-step-size 1.0})))
 
 [(+ 0.5 noise-gradient) (array/item (noise-step :noise))]
 ;=> [-8.301 0.4312]

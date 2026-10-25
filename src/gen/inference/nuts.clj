@@ -6,6 +6,7 @@
      (adapt trace selection opts key)   → {:trace :eps :inv-metric :stats}
      (sample trace selection opts key)  → {:traces :stats :eps :inv-metric :divergences
                                            :warmup {:stats :divergences}}
+                                           (:draws for :traces with :keep)
 
    The warmup is Stan's (hmc_nuts_diag_e_adapt):
    - The step size starts from Stan's heuristic: double or halve it until
@@ -37,8 +38,11 @@
                      the warmup, 15%, 10% and the rest, as Stan's; a warmup
                      under 20 iterations adapts the step size alone
      :compile?       mcmc's (each leapfrog step compiled), :key
+     :keep           sample's: a function of a trace, or a map of them,
+                     kept for each draw in place of its trace, as
+                     gen.inference.kernel/run's :keep
 
-   Each draw's statistics are its kernel's: nuts's {:accept-stat
+   Each draw's statistics are its kernel's: nuts's {:accepted? :accept-stat
    :tree-depth :n-leapfrog :diverged? :energy :eps}, and for :hmc
    {:accept-stat :n-leapfrog :accepted? :diverged? :eps}, the acceptance
    statistic min(1, α), :eps the step taken (jittered). The result counts
@@ -60,6 +64,7 @@
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
             [gen.gradients :as grad]
+            [gen.inference.kernel :as kernel]
             [gen.inference.mcmc :as mcmc]
             [gen.random :as rng]))
 
@@ -255,24 +260,30 @@
    adapted step size and inverse metric. Returns {:traces :stats :eps
    :inv-metric :divergences :warmup}: the draws' traces and statistics, the
    step size and inverse metric they used, how many diverged, and the
-   warmup's statistics and divergences. See the namespace for the options."
+   warmup's statistics and divergences. With :keep, :draws in place of
+   :traces: (keep trace) for each draw, its arrays read on the host, so
+   that the sampler holds its current trace alone (or a map of vectors,
+   for a map of functions; gen.inference.kernel/run's :keep). See the
+   namespace for the options."
   ([trace selection opts] (sample trace selection opts nil))
   ([trace selection opts key]
-   (let [{:keys [samples warmup] :as opts} (settings opts)
+   (let [{:keys [samples warmup keep] :as opts} (settings opts)
          _ (when-not (nat-int? samples)
              (throw (ex-info (str "sample needs :samples ≥ 0, not " (pr-str samples)) {:reason :invalid-option :samples samples})))
+         [read finish] (if (some? keep) (kernel/keeping keep) [identity nil])
          [k-warmup k-draws] (rng/split (or key (:key opts) (gfi/next-key)))
          adapted (if (pos? (long warmup))
                    (adapt trace selection opts k-warmup)
                    {:trace trace :eps (:eps opts) :inv-metric (:inv-metric opts) :stats []})
          {:keys [eps inv-metric]} adapted
          draw-keys (if (pos? (long samples)) (rng/split k-draws samples) [])]
-     (loop [i 0 t (:trace adapted) traces (transient []) stats (transient [])]
+     (loop [i 0 t (:trace adapted) kept (transient []) stats (transient [])]
        (if (= i samples)
          (let [stats (persistent! stats)]
-           {:traces (persistent! traces) :stats stats :eps eps :inv-metric inv-metric
-            :divergences (divergences stats)
-            :warmup {:stats (:stats adapted) :divergences (divergences (:stats adapted))}})
+           (assoc (if finish {:draws (finish (persistent! kept))} {:traces (persistent! kept)})
+                  :stats stats :eps eps :inv-metric inv-metric
+                  :divergences (divergences stats)
+                  :warmup {:stats (:stats adapted) :divergences (divergences (:stats adapted))}))
          (let [[t s] (transition t selection opts eps inv-metric (draw-keys i))
                t (gfi/eval-trace! t)]
-           (recur (inc i) t (conj! traces t) (conj! stats s))))))))
+           (recur (inc i) t (conj! kept (read t)) (conj! stats s))))))))

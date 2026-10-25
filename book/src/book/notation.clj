@@ -153,7 +153,7 @@ log-p
   "The keys of results the tables name."
   [:gen-fn :args :choices :retval :score :source :trace :weight :discard
    :retdiff :gradients :arg-grads :log-weights :log-ml-estimate :ess
-   :log-total :log-alpha :log-abs-det])
+   :log-normalized-weights :log-total :log-alpha :log-abs-det])
 
 (def carried
   "The keys the results carry: a trace's fields, a generative function's

@@ -37,8 +37,8 @@ size (ESS) and the Monte Carlo standard error (MCSE).
             [gen.inference.diagnostics :as diag]
             [gen.inference.enumerative :as enum]
             [gen.inference.importance :as is]
+            [gen.inference.kernel :as k]
             [gen.inference.mcmc :as mcmc]
-            [gen.inference.mh :as mh]
             [gen.inference.nuts :as nuts]
             [gen.random :as rng]
             [gen.selection :as sel]))
@@ -155,38 +155,20 @@ near the current one (standard deviation 0.1) and an intercept near the
 current one (0.5), and accept by MH. Its steps are scaled to the two
 choices' spreads, but not to the tilt.
 
-The chains of this chapter run through one helper. `run-chain` applies a
-*kernel*, a function of a trace and a key that returns `{:trace …}` (*The
-Inference Toolkit*), and keeps only host numbers: the values at a few
-addresses, and each step's report without its trace. So a long chain
-holds one trace at a time, on any backend:
+The chains of this chapter run through `k/run`, which applies a *kernel*,
+a function of a trace and a key that returns `{:trace …}` (*The
+Inference Toolkit*). With `:keep`, a function of a trace or a map of
+them, it keeps only their values, as host numbers under `:draws`, so a
+long chain holds one trace at a time, on any backend. The chains here keep
+the values at a few addresses:
 
-<!-- code: run-chain -->
+<!-- code: values-at -->
 ```clojure
-(defn run-chain
-  "A chain of the kernel k (a function of a trace and a key that returns
-   {:trace …}) from the trace t: burn steps, then samples steps kept.
-   Returns {:draws {addr [x …]} :steps [r …]}, the values at addrs as host
-   numbers and each kept step's result without its trace. Only the
-   current trace is held."
-  [k t addrs {:keys [samples burn key] :or {burn 0}}]
-  (let [step-keys (rng/split key (+ burn samples))]
-    (loop [i 0, t t, draws (zipmap addrs (repeat [])), steps []]
-      (if (= i (count step-keys))
-        {:draws draws :steps steps}
-        (let [r (k t (step-keys i))
-              ;; one step's graph at a time on a lazy backend
-              t' (gfi/eval-trace! (:trace r))
-              keep? (>= i burn)
-              read (fn [m a] (update m a conj (array/->clj (t' a))))]
-          (recur (inc i) t'
-                 (if keep? (reduce read draws addrs) draws)
-                 (if keep? (conj steps (dissoc r :trace)) steps)))))))
-
-(defn acceptance
-  "The fraction of a chain's kept steps that accepted their move."
-  [{:keys [steps]}]
-  (/ (count (filter :accepted? steps)) (double (count steps))))
+(defn values-at
+  "What a chain keeps of each trace: the values at addrs, a function for
+   each (k/run's :keep)."
+  [addrs]
+  (into {} (map (fn [a] [a #(% a)])) addrs))
 ```
 
 The chains start from four traces that `generate` draws from the prior.
@@ -217,15 +199,14 @@ then keeps 500:
     (trace :slope (d/normal (tr :slope) 0.1))
     (trace :intercept (d/normal (tr :intercept) 0.5))))
 
-(defn walk
-  "One MH move by the random walk."
-  [t key]
-  (mh/mh t random-walk [] key))
+(def walk
+  "The MH kernel of the random walk."
+  (k/mh random-walk []))
 
 (def walk-chains
-  (mapv (fn [t k]
-          (run-chain walk t [:slope :intercept]
-                     {:samples 500 :burn 200 :key k}))
+  (mapv (fn [t key]
+          (k/run walk t {:samples 500 :burn 200 :key key
+                         :keep (values-at [:slope :intercept])}))
         starts (rng/split (rng/key 3) 4)))
 
 (defn chains
@@ -233,8 +214,8 @@ then keeps 500:
   [runs addr]
   (mapv #(get-in % [:draws addr]) runs))
 
-(mapv acceptance walk-chains)
-;=> [0.412 0.388 0.348 0.428] ; float64
+(mapv :acceptance-rate walk-chains)
+;=> [0.424 0.41 0.393 0.453] ; float64
 ```
 
 About two moves in five are accepted. But the draws are worth few
@@ -427,7 +408,7 @@ batched gradient per step for all the chains, each accepted on its own.
         {:draws (update-vals rows #(apply mapv vector %))
          :acceptance (/ (count (filter true? accepted))
                         (double (count accepted)))}
-        (let [{ps' :particles moved :accepted?} (k ps (step-keys i))
+        (let [{ps' :particles moved :accepted} (k ps (step-keys i))
               keep? (>= i burn)
               read (fn [m addr]
                      (update m addr conj
@@ -719,8 +700,8 @@ HMC accepts nothing:
   "HMC's acceptance from the trace center with L = 20 steps of size eps,
    over 100 moves."
   [eps]
-  (acceptance (run-chain #(mcmc/hmc %1 line {:L 20 :eps eps} %2) center
-                         [:slope] {:samples 100 :key (rng/key 6)})))
+  (:acceptance-rate (k/run (k/hmc line {:L 20 :eps eps}) center
+                           {:samples 100 :key (rng/key 6)})))
 
 [(acceptance-at (* 1.8 width)) (acceptance-at (* 2.2 width))]
 ;=> [0.66 0.0] ; float64
@@ -994,8 +975,9 @@ observation toward its neighbors:
 
 NUTS moves the twenty states at once. Here the warmup and the draws are
 separate: `nuts/adapt` returns the warmup's last trace with the step size
-and metric it learned, and `mcmc/nuts` draws with them, through
-`run-chain`. Each draw takes about 13 leapfrog steps:
+and metric it learned, and `nuts/sample`, its warmup 0, draws with them,
+keeping the states' values (`:keep`, as `k/run`'s). Each draw takes about
+13 leapfrog steps:
 
 <!-- code: hmm-nuts -->
 ```clojure
@@ -1005,17 +987,18 @@ and metric it learned, and `mcmc/nuts` draws with them, through
 (def hmm-adapted (nuts/adapt hmm-start states {:warmup 300} (rng/key 9)))
 
 (def hmm-run
-  (run-chain #(mcmc/nuts %1 states (select-keys hmm-adapted
-                                                [:eps :inv-metric]) %2)
-             (:trace hmm-adapted) (for [t (range n)] [t :z])
-             {:samples 500 :key (rng/key 10)}))
+  (nuts/sample (:trace hmm-adapted) states
+               (assoc (select-keys hmm-adapted [:eps :inv-metric])
+                      :samples 500 :warmup 0
+                      :keep (values-at (for [t (range n)] [t :z])))
+               (rng/key 10)))
 
-(mean-of (map :n-leapfrog (:steps hmm-run)))
-;=> 13.2 ; float64
+(mean-of (map :n-leapfrog (:stats hmm-run)))
+;=> 13.05 ; float64
 ```
 
 Every state's mean agrees with the exact one within five Monte Carlo
-standard errors, and the least-mixed state's 500 draws are worth 275
+standard errors, and the least-mixed state's 500 draws are worth 337
 independent ones:
 
 <!-- code: hmm-check -->
@@ -1029,7 +1012,7 @@ independent ones:
 ;=> true
 
 (apply min (map :ess-bulk hmm-summaries))
-;=> 275.5 ; float64
+;=> 337.5 ; float64
 ```
 
 <!-- code: hmm-figure -->
@@ -1076,7 +1059,7 @@ in most of them. In 5000 steps it accepts a third of its proposals, and
 its worst state's draws are worth about nine independent ones. Counting a
 run of the model per proposal and a gradient per leapfrog step, NUTS gets
 more than four times as many effective draws for each, here about
-twenty-five times:
+thirty times:
 
 <!-- code: hmm-walk -->
 ```clojure
@@ -1086,15 +1069,15 @@ twenty-five times:
       (trace [t :z] (d/normal (tr [t :z]) 0.15)))))
 
 (def hmm-walk
-  (run-chain #(mh/mh %1 block-walk [] %2) hmm-start
-             (for [t (range n)] [t :z])
-             {:samples 5000 :burn 1000 :key (rng/key 12)}))
+  (k/run (k/mh block-walk []) hmm-start
+         {:samples 5000 :burn 1000 :key (rng/key 12)
+          :keep (values-at (for [t (range n)] [t :z]))}))
 
 (def walk-min-ess
   (apply min (map #(diag/ess-bulk (get-in hmm-walk [:draws [% :z]]))
                   (range n))))
 
-[(acceptance hmm-walk) walk-min-ess]
+[(:acceptance-rate hmm-walk) walk-min-ess]
 ;=> [0.34 8.59] ; float64
 
 (def per-evaluation
@@ -1102,10 +1085,10 @@ twenty-five times:
    NUTS."
   [(/ walk-min-ess 5000)
    (/ (apply min (map :ess-bulk hmm-summaries))
-      (* 500 (mean-of (map :n-leapfrog (:steps hmm-run)))))])
+      (* 500 (mean-of (map :n-leapfrog (:stats hmm-run)))))])
 
 per-evaluation
-;=> [0.0017 0.0417] ; float64
+;=> [0.0017 0.0517] ; float64
 
 (< (* 4 (first per-evaluation)) (second per-evaluation))
 ;=> true
@@ -1166,21 +1149,19 @@ Gibbs move, of weight 0:
 ```
 
 So an MH move on $z$ is a Gibbs move, and HMC moves $x$ given $z$. A
-kernel that makes one move and then the other leaves the posterior
-invariant, since each does:
+kernel that makes one move and then the other, their chain (`k/chain`),
+leaves the posterior invariant, since each does:
 
 <!-- code: gibbs -->
 ```clojure
-(defn gibbs-hmc
+(def gibbs-hmc
   "A Gibbs move on z, then an HMC move on x."
-  [t key]
-  (let [[k-z k-x] (rng/split key)
-        t (:trace (mh/mh t (sel/select :z) k-z))]
-    (mcmc/hmc t (sel/select :x) {:L 5 :eps 0.3} k-x)))
+  (k/chain (k/mh (sel/select :z)) (k/hmc (sel/select :x) {:L 5 :eps 0.3})))
 
 (def mixture-run
-  (run-chain gibbs-hmc gibbs-start [:z :x]
-             {:samples 3000 :burn 100 :key (rng/key 16)}))
+  (k/run gibbs-hmc gibbs-start
+         {:samples 3000 :burn 100 :key (rng/key 16)
+          :keep (values-at [:z :x])}))
 ```
 
 The exact posterior follows from two Gaussian facts. Given $z$, $y$ is
@@ -1287,19 +1268,19 @@ covariance, makes an example. Each value is observed with noise 0.5:
 ```
 
 `mcmc/elliptical-slice` takes the choice's address and its prior's mean
-and covariance. Every one of its 2000 moves lands somewhere new:
+and covariance, and `k/elliptical-slice` makes it a kernel. Every one of
+its 2000 moves lands somewhere new:
 
 <!-- code: elliptical -->
 ```clojure
 (defn slice
   "The kernel of elliptical slice moves of f, under the prior N(0, cov)."
   [cov]
-  (fn [t key]
-    {:trace (mcmc/elliptical-slice t :f (array/zeros [gp-n]) cov key)}))
+  (k/elliptical-slice :f (array/zeros [gp-n]) cov))
 
 (def gp-run
-  (run-chain (slice gp-cov) gp-start [:f]
-             {:samples 2000 :burn 100 :key (rng/key 18)}))
+  (k/run (slice gp-cov) gp-start
+         {:samples 2000 :burn 100 :key (rng/key 18) :keep (values-at [:f])}))
 
 (def fs (get-in gp-run [:draws :f]))
 
@@ -1498,8 +1479,9 @@ model shows where it falls behind:
 <!-- code: solution-3 -->
 ```clojure
 (def long-walks
-  (mapv (fn [t k]
-          (run-chain walk t [:slope] {:samples 10500 :burn 200 :key k}))
+  (mapv (fn [t key]
+          (k/run walk t {:samples 10500 :burn 200 :key key
+                         :keep (values-at [:slope])}))
         starts (rng/split (rng/key 21) 4)))
 
 (def long-walk-slopes (chains long-walks :slope))
@@ -1523,8 +1505,8 @@ given prior shapes only the ellipses, and so how fast the chain mixes:
 <!-- code: solution-4 -->
 ```clojure
 (def wide-run
-  (run-chain (slice (* 4 gp-cov)) gp-start [:f]
-             {:samples 2000 :burn 100 :key (rng/key 22)}))
+  (k/run (slice (* 4 gp-cov)) gp-start
+         {:samples 2000 :burn 100 :key (rng/key 22) :keep (values-at [:f])}))
 
 (within-five? (get-in wide-run [:draws :f]) gp-exact-mean)
 ;=> true

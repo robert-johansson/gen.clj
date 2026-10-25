@@ -14,14 +14,14 @@
   (try (f) nil (catch clojure.lang.ExceptionInfo e (::w/invalid-weights (ex-data e)))))
 
 (deftest normalization
-  (let [{:keys [log-total log-weights]} (w/normalize [0.0 (Math/log 3.0)])]
+  (let [{:keys [log-total log-normalized-weights]} (w/normalize [0.0 (Math/log 3.0)])]
     (is (close? (Math/log 4.0) log-total))
-    (is (close? (Math/log 0.25) (first log-weights)))
-    (is (close? (Math/log 0.75) (second log-weights))))
+    (is (close? (Math/log 0.25) (first log-normalized-weights)))
+    (is (close? (Math/log 0.75) (second log-normalized-weights))))
   (testing "shifting every weight changes only the total"
     (let [ws [-1.0 2.5 0.3]
           shifted (mapv #(+ % 1000.0) ws)]
-      (is (every? true? (map close? (:log-weights (w/normalize ws)) (:log-weights (w/normalize shifted)))))
+      (is (every? true? (map close? (:log-normalized-weights (w/normalize ws)) (:log-normalized-weights (w/normalize shifted)))))
       (is (close? (+ 1000.0 (:log-total (w/normalize ws))) (:log-total (w/normalize shifted))))))
   (testing "arrays and seqs give the same result"
     (is (= (w/normalize [0.5 -0.5 ##-Inf]) (w/normalize (array/array [0.5 -0.5 ##-Inf]))))))
@@ -31,7 +31,7 @@
   (is (close? (Math/log 2.0) (w/log-mean-exp [0.0 (Math/log 3.0)])))
   (is (close? 4.0 (w/ess [0 0 0 0])) "equal weights: n")
   (is (close? 1.0 (w/ess [0.0 ##-Inf ##-Inf])) "one sample carries all the weight: 1")
-  (is (close? (w/ess [0.0 1.0 2.0]) (w/ess (:log-weights (w/normalize [0.0 1.0 2.0]))))
+  (is (close? (w/ess [0.0 1.0 2.0]) (w/ess (:log-normalized-weights (w/normalize [0.0 1.0 2.0]))))
       "normalized or not"))
 
 (deftest invalid-weights-fail-loudly
@@ -56,7 +56,7 @@
 
 (def gen-case (gen/tuple gen-log-weights (gen/choose 0 40) gen/nat))
 
-(defn- probs [lws] (mapv #(Math/exp %) (:log-weights (w/normalize lws))))
+(defn- probs [lws] (mapv #(Math/exp %) (:log-normalized-weights (w/normalize lws))))
 
 (defn- counts [n-samples indices]
   (let [f (frequencies indices)] (mapv #(get f % 0) (range n-samples))))
@@ -88,7 +88,7 @@
   ;; the case outside pass either way.
   (testing "10 equal weights give each index once"
     (let [lws (vec (repeat 10 0.0))]
-      (is (< (* 10 (Math/exp (first (:log-weights (w/normalize lws))))) 1.0) "n·p is just below 1")
+      (is (< (* 10 (Math/exp (first (:log-normalized-weights (w/normalize lws))))) 1.0) "n·p is just below 1")
       (doseq [k (range 5)]
         (is (= (range 10) (w/residual lws 10 (rng/key k)))))))
   (testing "three thirds"

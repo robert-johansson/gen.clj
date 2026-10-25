@@ -18,7 +18,6 @@
             [gen.inference.enumerative :as enum]
             [gen.inference.importance :as imp]
             [gen.inference.kernel :as k]
-            [gen.inference.mcmc :as mcmc]
             [gen.inference.weights :as w]
             [gen.random :as rng]
             [gen.selection :as sel]))
@@ -235,7 +234,7 @@ slope-estimate
 ;; book: weights
 (def toy-log-weights (mapv #(Math/log %) [10.0 6.0 3.0 1.0]))
 
-(mapv #(Math/exp %) (:log-weights (w/normalize toy-log-weights)))
+(mapv #(Math/exp %) (:log-normalized-weights (w/normalize toy-log-weights)))
 ;=> [0.5 0.3 0.15 0.05]
 
 [(w/ess toy-log-weights) (w/log-mean-exp toy-log-weights) (Math/log 5.0)]
@@ -408,9 +407,8 @@ spreads
   "The slope's draws from a chain of the kernel from start (20100 steps,
    the first 100 dropped, then every tenth kept), with the acceptance rate."
   [kernel key]
-  (let [{:keys [traces acceptance-rate]}
-        (k/run kernel start {:samples 2000 :burn 100 :thin 10 :key key})]
-    {:draws (diag/draws traces :slope) :acceptance-rate acceptance-rate}))
+  (k/run kernel start
+         {:samples 2000 :burn 100 :thin 10 :key key :keep #(% :slope)}))
 
 (def by-prior (slope-draws slope-move (rng/key 5)))
 
@@ -485,10 +483,7 @@ picks
 ;=> [true false] ; float64
 
 ;; book: hmc
-(def hmc-move
-  (k/symmetric (fn [tr key]
-                 (mcmc/hmc tr (sel/select :slope :intercept) {:L 10 :eps 0.1}
-                           key))))
+(def hmc-move (k/hmc (sel/select :slope :intercept) {:L 10 :eps 0.1}))
 
 (sort (keys (hmc-move start (rng/key 15))))
 ;=> (:accepted? :diverged? :log-alpha :trace)
@@ -571,10 +566,12 @@ hundreds
 ;; book: chains
 (defn run-draws
   "The draws at addrs of a chain of the kernel from start, run with opts:
-   a map from address to draws, the traces dropped."
+   a map from address to draws, kept as the chain runs, each read as
+   diag/draws reads it (a boolean as 0 or 1)."
   [kernel start opts addrs]
-  (let [{:keys [traces]} (k/run kernel start opts)]
-    (into {} (map (fn [addr] [addr (diag/draws traces addr)])) addrs)))
+  (let [draw (fn [a] #(first (diag/draws [%] a)))
+        readers (into {} (map (juxt identity draw)) addrs)]
+    (:draws (k/run kernel start (assoc opts :keep readers)))))
 
 (def starts
   (mapv #(:trace (gfi/generate line-model [xs] (observations :y ys) %))
@@ -694,7 +691,7 @@ stuck-rate
   "The exact posterior mean of (f z) over the assignments z."
   [f]
   (reduce + (map (fn [z lw] (* (Math/exp lw) (f z)))
-                 assignments (:log-weights posterior-z))))
+                 assignments (:log-normalized-weights posterior-z))))
 
 (defn group-one?
   "1 when the assignment z puts reading i in the group around 2, else 0."

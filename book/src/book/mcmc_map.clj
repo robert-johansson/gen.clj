@@ -657,8 +657,9 @@
 (def line-selection (sel/select :slope :intercept))
 
 (def optimized
-  (nth (iterate #(mcmc/map-optimize % line-selection
-                                    {:max-step-size 1.0 :min-step-size 1e-5})
+  (nth (iterate #(:trace (mcmc/map-optimize
+                          % line-selection
+                          {:max-step-size 1.0 :min-step-size 1e-5}))
                 reference)
        100))
 
@@ -675,7 +676,8 @@
                              :noise)))
 
 (def noise-step
-  (mcmc/map-optimize reference (sel/select :noise) {:max-step-size 1.0}))
+  (:trace (mcmc/map-optimize reference (sel/select :noise)
+                             {:max-step-size 1.0})))
 
 [(+ 0.5 noise-gradient) (array/item (noise-step :noise))]
 ;=> [-8.301 0.4312]
@@ -699,8 +701,10 @@
         tr (-> tr
                (mcmc/map-optimize line-selection
                                   {:max-step-size 1.0 :min-step-size 1e-5})
+               :trace
                (mcmc/map-optimize (sel/select :noise)
                                   {:max-step-size 1e-2 :min-step-size 1e-5})
+               :trace
                (outlier-map-update k-classify))
         prob (min 0.5 (max 0.05 (outlier-fraction tr)))]
     (:trace (gfi/update tr (cm/choicemap :prob-outlier prob) k-prob))))

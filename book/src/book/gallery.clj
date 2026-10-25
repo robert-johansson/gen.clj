@@ -45,8 +45,7 @@
             [gen.inference.diagnostics :as diag]
             [gen.inference.enumerative :as enum]
             [gen.inference.importance :as is]
-            [gen.inference.mcmc :as mcmc]
-            [gen.inference.mh :as mh]
+            [gen.inference.kernel :as k]
             [gen.inference.nuts :as nuts]
             [gen.inference.particle-filter :as pf]
             [gen.inference.vi :as vi]
@@ -88,19 +87,12 @@
   (Math/sqrt (- (/ 1.0 ess) (/ 1.0 n))))
 
 (defn run-chain
-  "The host values at addrs along a chain of the kernel k (a function of a
-   trace and a key that returns {:trace …}) from the trace t: burn steps,
-   then samples steps kept, as {addr [x …]}. Only the current trace is
-   held."
-  [k t addrs {:keys [samples burn key] :or {burn 0}}]
-  (let [step-keys (rng/split key (+ burn samples))]
-    (loop [i 0, t t, draws (zipmap addrs (repeat []))]
-      (if (= i (count step-keys))
-        draws
-        (let [t (gfi/eval-trace! (:trace (k t (step-keys i))))
-              read (fn [m a] (update m a conj (array/->clj (t a))))]
-          (recur (inc i) t
-                 (if (>= i burn) (reduce read draws addrs) draws)))))))
+  "The host values at addrs along a chain of the kernel from the trace t,
+   run by k/run with opts, as {addr [x …]}: k/run keeps them (:keep), and
+   holds the current trace alone."
+  [kernel t addrs opts]
+  (:draws (k/run kernel t
+                 (assoc opts :keep (into {} (map (fn [a] [a #(% a)])) addrs)))))
 
 ;; book: gaussian-posterior
 (defn gaussian-posterior
@@ -179,7 +171,7 @@ line-evidence
 
 ;; book: line-mala
 (def mala-draws
-  (run-chain #(mcmc/mala %1 (sel/select :slope :level) 0.01 %2)
+  (run-chain (k/mala (sel/select :slope :level) 0.01)
              (:trace (gfi/generate centered-model [xs] (observations ys)
                                    (rng/key 3)))
              [:slope :level] {:samples 1000 :burn 100 :key (rng/key 4)}))
@@ -271,7 +263,7 @@ walk-evidence
 (def state-addrs (mapv #(vector % :z) (range 6)))
 
 (def walk-draws
-  (run-chain #(mcmc/hmc %1 (sel/from-paths state-addrs) {:L 10 :eps 0.1} %2)
+  (run-chain (k/hmc (sel/from-paths state-addrs) {:L 10 :eps 0.1})
              (:trace (gfi/generate walk [6 0.0] walk-observations
                                    (rng/key 7)))
              state-addrs {:samples 400 :burn 100 :key (rng/key 41)}))
@@ -465,7 +457,8 @@ drift-evidence
 (defn filtered-mean
   "The weighted mean of the particle filter state's z at step t."
   [{ps :particles lws :log-weights} t]
-  (let [p (array/exp (array/array (:log-weights (weights/normalize lws))))]
+  (let [p (array/exp (array/array (:log-normalized-weights
+                                    (weights/normalize lws))))]
     (array/item (array/sum (* p (batched/choice ps [t :z]))))))
 
 (defn run-filter
@@ -541,7 +534,7 @@ drift-evidence
 
 ;; book: tight-mh
 (def mh-draws
-  (run-chain #(mh/mh %1 tight-line %2) tight-start [:slope :intercept]
+  (run-chain (k/mh tight-line) tight-start [:slope :intercept]
              {:samples 1000 :key (rng/key 16)}))
 
 (def accepted
@@ -564,9 +557,8 @@ accepted
 ;=> [0.340 [0.0284 0.00457]] ; float64
 
 (def hmc-draws
-  (run-chain #(mcmc/hmc %1 tight-line
-                        (assoc (select-keys adapted [:eps :inv-metric]) :L 10)
-                        %2)
+  (run-chain (k/hmc tight-line
+                    (assoc (select-keys adapted [:eps :inv-metric]) :L 10))
              (:trace adapted) [:slope :intercept]
              {:samples 2000 :key (rng/key 18)}))
 
@@ -792,7 +784,7 @@ net-error
   (:trace (gfi/generate noisy-sine [sine-xs] sine-observed (rng/key 24))))
 
 (def sigmas
-  (let [draws (run-chain #(mh/mh %1 (sel/select :log-sigma) %2) sine-start
+  (let [draws (run-chain (k/mh (sel/select :log-sigma)) sine-start
                          [:log-sigma]
                          {:samples 2000 :burn 100 :key (rng/key 25)})]
     (mapv #(Math/exp %) (:log-sigma draws))))
@@ -947,9 +939,8 @@ eight-evidence
               (sel/select :mu) {:warmup 300} (rng/key 31)))
 
 (def uniform-draws
-  (:mu (run-chain #(mcmc/nuts %1 (sel/select :mu)
-                              (select-keys uniform-adapted [:eps :inv-metric])
-                              %2)
+  (:mu (run-chain (k/nuts (sel/select :mu)
+                          (select-keys uniform-adapted [:eps :inv-metric]))
                   (:trace uniform-adapted) [:mu]
                   {:samples 1000 :key (rng/key 32)})))
 

@@ -243,16 +243,16 @@
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"square matrix of its size" (d/mvnormal [0.0 0.0] (array/eye 3)))))
     (testing "elliptical slice takes Clojure vectors, as distributions do"
       (let [tr (start-at flat-vector-model (cm/choicemap :z (array/array [0.5 0.5]) :y y2))]
-        (is (= [2] (array/shape ((mcmc/elliptical-slice tr :z [0.0 0.0] [[1.0 0.5] [0.5 1.0]] (rng/key 2)) :z))))))
+        (is (= [2] (array/shape ((:trace (mcmc/elliptical-slice tr :z [0.0 0.0] [[1.0 0.5] [0.5 1.0]] (rng/key 2))) :z))))))
     (testing "elliptical slice of a missing address"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no choice at :nope"
                             (mcmc/elliptical-slice tr :nope (array/array [0.0]) (array/eye 1) (rng/key 1)))))))
 
 (deftest map-optimization-finds-the-mode
-  (let [tr (reduce (fn [tr _] (mcmc/map-optimize tr x-sel)) (start-at scalar (cm/choicemap :x -2.0 :y 1.3)) (range 200))]
+  (let [tr (reduce (fn [tr _] (:trace (mcmc/map-optimize tr x-sel))) (start-at scalar (cm/choicemap :x -2.0 :y 1.3)) (range 200))]
     (is (< (ts/abs (- (tr :x) 0.65)) 1e-6)))
   (testing "a vector mode behind a splice"
-    (let [tr (reduce (fn [tr _] (mcmc/map-optimize tr (sel/select [:latent :z]) {:max-step-size 0.3}))
+    (let [tr (reduce (fn [tr _] (:trace (mcmc/map-optimize tr (sel/select [:latent :z]) {:max-step-size 0.3})))
                      (start-at vector-model (cm/choicemap [:latent :z] (array/array [2.0 2.0]) :y y2))
                      (range 300))]
       (is (array/allclose? (tr [:latent :z]) posterior-mean {:atol 1e-6})))))
@@ -267,7 +267,7 @@
         tr (:trace (gfi/generate m [] (cm/choicemap :s 0.5 :y 0.1) (rng/key 0)))
         s-sel (sel/select :s)
         g (ts/number (cm/get-choice (:gradients (grad/choice-gradients tr s-sel)) :s))
-        t2 (mcmc/map-optimize tr s-sel {:max-step-size 1.0})
+        t2 (:trace (mcmc/map-optimize tr s-sel {:max-step-size 1.0}))
         step (/ (- (ts/number (t2 :s)) 0.5) g)]
     (is (neg? (+ 0.5 g)) "a full step leaves the support")
     (is (< 0.0 (ts/number (t2 :s))))
@@ -277,7 +277,7 @@
 (deftest ^:slow elliptical-slice-targets-the-posterior
   (is (vector-converges? flat-vector-model (cm/choicemap :z (array/array [2.0 2.0]) :y y2)
                          #(% :z)
-                         (fn [tr key] (mcmc/elliptical-slice tr :z (array/array [0.0 0.0]) prior-cov key)))))
+                         (fn [tr key] (:trace (mcmc/elliptical-slice tr :z (array/array [0.0 0.0]) prior-cov key))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Involutive MH with a Jacobian
@@ -551,10 +551,10 @@
         check (fn [r xs log-alphas key]
                 (let [us (drawn #(rng/uniform (nth (rng/split key 3) 2)))]
                   (is (b/batched? (:particles r)))
-                  (is (= #{true false} (set (:accepted? r))) "some accepted, some not")
-                  (is (ts/close? (array/array log-alphas) (:log-alpha r) {:atol (ts/tol 1e-9)}))
-                  (is (= (mapv #(or (>= %1 0.0) (< (Math/log %2) %1)) log-alphas us) (:accepted? r)))
-                  (is (ts/close? (array/array (mapv #(if %1 %2 %3) (:accepted? r) xs x0s)) (b/choice (:particles r) :x)))))]
+                  (is (= #{true false} (set (:accepted r))) "some accepted, some not")
+                  (is (ts/close? (array/array log-alphas) (:log-alphas r) {:atol (ts/tol 1e-9)}))
+                  (is (= (mapv #(or (>= %1 0.0) (< (Math/log %2) %1)) log-alphas us) (:accepted r)))
+                  (is (ts/close? (array/array (mapv #(if %1 %2 %3) (:accepted r) xs x0s)) (b/choice (:particles r) :x)))))]
     (testing "HMC"
       (let [key (rng/key 95) eps 1.2 half (clojure.core// eps 2)
             p0s (map first (drawn #(rng/normal (first (rng/split key 3)) [1])))
@@ -594,9 +594,9 @@
   [ps step scalar key]
   (let [r (step ps key)
         each (map scalar (b/traces ps) (rng/split key (b/size ps)))]
-    (and (= (mapv :accepted? each) (:accepted? r))
-         (= (mapv :diverged? each) (:diverged? r))
-         (agree? (mapv :log-alpha each) (ts/host (:log-alpha r)))
+    (and (= (mapv :accepted? each) (:accepted r))
+         (= (mapv :diverged? each) (:diverged r))
+         (agree? (mapv :log-alpha each) (ts/host (:log-alphas r)))
          (agree? (mapv #(ts/host (cm/to-array (:choices (:trace %)))) each)
                  (mapv #(ts/host (cm/to-array (:choices %))) (b/traces (:particles r)))))))
 
@@ -624,7 +624,7 @@
             ps (chains-from scaled (cm/choicemap :v 0.0 :y 1.0) 40)
             s (sel/select :v)
             r (mcmc/hmc-particles ps s {:L 1 :eps 1000.0} (rng/key 98))]
-        (is (< 0 (count (filter true? (:diverged? r))) 40) "some diverge, not all")
+        (is (< 0 (count (filter true? (:diverged r))) 40) "some diverge, not all")
         (is (each-chain-s? ps #(mcmc/hmc-particles %1 s {:L 1 :eps 1000.0} %2) #(mcmc/hmc %1 s {:L 1 :eps 1000.0} %2) (rng/key 98)))))))
 
 (deftest jittered-particle-steps
@@ -660,19 +660,56 @@
   ;; every better one) fails
   (let [cauchy (gen [] (trace :x (d/cauchy 0 1)))
         ps (b/set-choices (chains-from cauchy (cm/choicemap :x 0.0) 6) (cm/choicemap :x (array/array [-3.0 -1.0 -0.5 0.5 1.0 3.0])))
-        moved (mcmc/map-optimize-particles ps x-sel {:max-step-size 4.0})]
+        moved (:particles (mcmc/map-optimize-particles ps x-sel {:max-step-size 4.0}))]
     (is (b/batched? moved))
-    (is (ts/close? (array/stack (mapv #((mcmc/map-optimize % x-sel {:max-step-size 4.0}) :x) (b/traces ps))) (b/choice moved :x))))
+    (is (ts/close? (array/stack (mapv #((:trace (mcmc/map-optimize % x-sel {:max-step-size 4.0})) :x) (b/traces ps))) (b/choice moved :x))))
   (let [ps (:particles (b/generate scalar [] (cm/choicemap :y 1.3) 6 (rng/key 99)))]
     (testing "to the mode, from every start"
-      (let [ps (reduce (fn [ps _] (mcmc/map-optimize-particles ps x-sel)) ps (range 200))]
+      (let [ps (reduce (fn [ps _] (:particles (mcmc/map-optimize-particles ps x-sel))) ps (range 200))]
         (is (b/batched? ps))
         (is (ts/close? (array/full [6] 0.65) (b/choice ps :x) {:atol 1e-6}))))
     (testing "a vector mode behind a splice"
-      (let [ps (reduce (fn [ps _] (mcmc/map-optimize-particles ps (sel/select [:latent :z]) {:max-step-size 0.3}))
+      (let [ps (reduce (fn [ps _] (:particles (mcmc/map-optimize-particles ps (sel/select [:latent :z]) {:max-step-size 0.3})))
                        (:particles (b/generate vector-model [] (cm/choicemap :y y2) 3 (rng/key 100)))
                        (range 300))]
         (is (ts/close? (array/broadcast-to posterior-mean [3 2]) (b/choice ps [:latent :z]) {:atol 1e-6}))))))
+
+;; ---------------------------------------------------------------------------
+;; Kernel-shaped results: {:trace :accepted? …} (genclj-4hu0)
+;; ---------------------------------------------------------------------------
+
+(deftest every-move-reports-whether-it-moved
+  ;; NUTS's :accepted? is whether it drew a state other than the start,
+  ;; map-optimize's whether its line search found a step, and elliptical
+  ;; slice's always true. Planted (2026-10-25): NUTS's :accepted? always
+  ;; true, and map-optimize's true whatever its search found, each fail
+  (let [t (start-at scalar (cm/choicemap :x -1.0 :y 1.3))]
+    (testing "NUTS"
+      (let [rs (map #(mcmc/nuts t x-sel {:eps 1.5 :max-depth 1} %) (rng/split (rng/key 110) 40))]
+        (is (every? #(= (:accepted? %) (not (identical? t (:trace %)))) rs))
+        (is (some :accepted? rs))
+        (is (some (complement :accepted?) rs))))
+    (testing "map-optimize"
+      (is (= {:accepted? true} (dissoc (mcmc/map-optimize t x-sel) :trace)))
+      ;; from x = -1 every step from 100 down to 50 overshoots the mode
+      (let [r (mcmc/map-optimize t x-sel {:max-step-size 100.0 :min-step-size 50.0})]
+        (is (false? (:accepted? r)))
+        (is (identical? t (:trace r)))))
+    (testing "elliptical slice"
+      (let [z (start-at flat-vector-model (cm/choicemap :z (array/array [0.5 0.5]) :y y2))]
+        (is (every? #(true? (:accepted? (mcmc/elliptical-slice z :z [0.0 0.0] prior-cov %)))
+                    (rng/split (rng/key 111) 5))))))
+  (testing "map-optimize-particles reports each particle's"
+    ;; on a Cauchy density with steps of 4 down to 3, the particles at ±3
+    ;; and ±1 find a step and those at ±0.5 overshoot
+    (let [cauchy (gen [] (trace :x (d/cauchy 0 1)))
+          opts {:max-step-size 4.0 :min-step-size 3.0}
+          ps (b/set-choices (chains-from cauchy (cm/choicemap :x 0.0) 6)
+                            (cm/choicemap :x (array/array [-3.0 -1.0 -0.5 0.5 1.0 3.0])))
+          {:keys [accepted particles]} (mcmc/map-optimize-particles ps x-sel opts)]
+      (is (= (mapv #(:accepted? (mcmc/map-optimize % x-sel opts)) (b/traces ps)) accepted))
+      (is (= #{true false} (set accepted)))
+      (is (b/batched? particles)))))
 
 (deftest particle-kernel-errors
   (let [ps (chains-from scalar (cm/choicemap :x 0.2 :y 1.3) 3)]

@@ -240,7 +240,7 @@ A splice at an address puts the callee's choices in its namespace:
 | $g$ | a test function | a function of a trace | Operations |
 | $\tau^{(i)}$, $n$ | the $i$-th of $n$ samples, from $i = 1$ | `(nth samples i)`, from $i = 0$ | Operations |
 | $w^{(i)}$ | the importance weight of the $i$-th sample | its log: `:log-weights` of `imp/importance-sampling` | Operations |
-| NORMALIZE | the weights normalized, and their total | `w/normalize`: `:log-weights`, `:log-total` | Operations |
+| NORMALIZE | the weights normalized, and their total | `w/normalize`: `:log-normalized-weights`, `:log-total` | Operations |
 | $\hat z$ | the estimate of $\bar p(\rho)$: the mean of the weights | its log: `:log-ml-estimate`, `w/log-mean-exp` | Operations |
 | ESS | the effective sample size | `w/ess`; `:ess` | Operations |
 | $\theta$ | a proposal's parameters | an argument, whose gradient is in `:arg-grads` | Operations |
@@ -339,9 +339,11 @@ no run visits, which the thesis's GENERATE ignores.
 **Weights are logs.** The thesis writes $w$ for a weight and $\log w$ for
 its logarithm. gen.clj's results hold only logs: `:weight` is $\log w$,
 `:score` is $\log p(\tau; x)$, and `:log-weights`, `:log-ml-estimate`,
-`:log-alpha` and `:log-abs-det` say so in their names. The exponential of
-the weight `assess` returned above is $p(\tau; x)$, the product of two
-normal densities:
+`:log-alpha` and `:log-abs-det` say so in their names. A key has one
+meaning wherever it appears: `:log-weights` are always the raw logs, the
+normalized ones `:log-normalized-weights`. The exponential of the weight
+`assess` returned above is $p(\tau; x)$, the product of two normal
+densities:
 
 <!-- code: log-scale -->
 ```clojure
@@ -383,7 +385,7 @@ inference functions above hold them all:
   "The keys of results the tables name."
   [:gen-fn :args :choices :retval :score :source :trace :weight :discard
    :retdiff :gradients :arg-grads :log-weights :log-ml-estimate :ess
-   :log-total :log-alpha :log-abs-det])
+   :log-normalized-weights :log-total :log-alpha :log-abs-det])
 
 (def carried
   "The keys the results carry: a trace's fields, a generative function's

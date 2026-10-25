@@ -222,7 +222,8 @@ mean, with a standard error from the weights:
    its standard error, about sqrt(Σ w^2 (f - mean)^2), w the normalized
    weights: {:mean :se}."
   [f traces lws]
-  (let [ws (mapv #(Math/exp %) (:log-weights (weights/normalize lws)))
+  (let [ws (mapv #(Math/exp %)
+                 (:log-normalized-weights (weights/normalize lws)))
         xs (mapv #(array/item (f %)) traces)
         mean (reduce + (map * ws xs))
         sq (fn [w x] (let [e (* w (- x mean))] (* e e)))]
@@ -556,7 +557,8 @@ estimate of $z_0$'s mean, the weighted mean of the particles:
 
 (def probabilities
   (mapv #(Math/exp %)
-        (:log-weights (weights/normalize (pf/log-weights population)))))
+        (:log-normalized-weights
+         (weights/normalize (pf/log-weights population)))))
 
 (def weighted-mean (reduce + (map * probabilities z0s)))
 
@@ -660,7 +662,8 @@ particle's copies fall from what it deserves:
 
 (def expected
   "Each particle's expected number of copies, N p_i."
-  (mapv #(* 20 (Math/exp %)) (:log-weights (weights/normalize geometric))))
+  (mapv #(* 20 (Math/exp %))
+        (:log-normalized-weights (weights/normalize geometric))))
 
 (defn count-error
   "The mean squared difference between the copies each particle gets from
@@ -1135,7 +1138,7 @@ the prior times it, normalized, is the exact posterior:
   (let [log-joint #(+ (dc/log-prob phi-prior %)
                       (:log-ml (exact (ar-params %) ar-ys)))]
     (mapv #(Math/exp %)
-          (:log-weights (weights/normalize (mapv log-joint grid))))))
+          (:log-normalized-weights (weights/normalize (mapv log-joint grid))))))
 
 (def phi-mean (reduce + (map * grid grid-posterior)))
 

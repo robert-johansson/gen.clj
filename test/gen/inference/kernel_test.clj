@@ -8,6 +8,8 @@
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
             [gen.inference.kernel :as k]
+            [gen.inference.mcmc :as mcmc]
+            [gen.inference.particle-filter :as pf]
             [gen.random :as rng]
             [gen.selection :as sel]))
 
@@ -61,7 +63,13 @@
       (is (= [true false true false] (:accepted ((k/cycle 4 [accept reject]) 0 (rng/key 2)))))
       (is (= [true false true false] (:accepted ((k/repeat 2 (k/chain accept reject)) 0 (rng/key 2)))) "nested")
       (is (nil? (:accepted ((k/chain accept (fn [t _] {:trace t})) 0 (rng/key 2)))) "unless a move reports none")
-      (is (= 0.25 (:acceptance-rate (k/run (k/chain accept reject reject reject) 0 {:samples 5 :key (rng/key 3)})))))))
+      (is (= 0.25 (:acceptance-rate (k/run (k/chain accept reject reject reject) 0 {:samples 5 :key (rng/key 3)}))))
+      (testing "and :accepted?, whether any move was accepted (every kernel reports it)"
+        ;; planted (2026-10-25): :accepted? from the last move alone fails the first
+        (is (true? (:accepted? ((k/chain accept reject) 0 (rng/key 2)))))
+        (is (false? (:accepted? ((k/chain reject reject) 0 (rng/key 2)))))
+        (is (true? (:accepted? ((k/kern [] (k/chain reject) (when true accept)) 0 (rng/key 2)))))
+        (is (not (contains? ((k/chain accept (fn [t _] {:trace t})) 0 (rng/key 2)) :accepted?)))))))
 
 (def model
   (gen []
@@ -145,7 +153,7 @@
     ;; a loop is a chain of its iterations, each a chain of its statements
     (let [step #(k/chain (k/mh (sel/select :a)) (k/mh (sel/select :b)))
           by-hand (k/chain (step) (step))
-          kerned ((k/kern [] (doseq [_ (range 2)] (k/mh (sel/select :a)) (k/mh (sel/select :b)))))
+          kerned (k/kern [] (doseq [_ (range 2)] (k/mh (sel/select :a)) (k/mh (sel/select :b))))
           tr (:trace (gfi/generate model [] observations (rng/key 5)))]
       (doseq [key (rng/split (rng/key 6) 6)]
         (let [a (by-hand tr key) b (kerned tr key)]
@@ -153,7 +161,7 @@
           (is (= (:accepted a) (:accepted b)) "the same decisions, so the same keys")))))
   (testing "a statement that is not a kernel is loud"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not a kernel"
-                          ((k/kern [] (k/mh (sel/select :a)) (when-not true (k/mh (sel/select :b)))))))))
+                          (k/kern [] (k/mh (sel/select :a)) (when-not true (k/mh (sel/select :b))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Kernels that read the trace (kern ^:trace; the owner, after the final law
@@ -199,24 +207,24 @@
   (testing "a kernel's arguments see the trace as the statements before it left it"
     (let [seen (atom [])
           set-x (k/symmetric (fn [tr key] {:trace (:trace (gfi/update tr (cm/choicemap :x 5.0) key))}))
-          kernel ((k/kern ^:trace [tr] set-x (recording seen (host-of tr :x)) set-x))
+          kernel (k/kern ^:trace [tr] set-x (recording seen (host-of tr :x)) set-x)
           tr (:trace (gfi/generate counted [] (cm/choicemap :n 1 :x 0.5) (rng/key 6)))]
       (kernel tr (rng/key 7))
       (is (= [5.0] @seen))))
   (let [tr (:trace (gfi/generate counted [] (cm/choicemap :n 1) (rng/key 8)))]
     (testing "a body that changes what its construct read is loud (the reversal would not undo it)"
-      (doseq [kernel [((k/kern ^:trace [tr] (doseq [_ (range (host-of tr :n))] (k/symmetric set-n))))
-                      ((k/kern ^:trace [tr] (when (= 1 (host-of tr :n)) (k/symmetric set-n))))
-                      ((k/kern ^:trace [tr] (if (= 1 (host-of tr :n)) (k/symmetric set-n) (k/chain))))
-                      ((k/kern ^:trace [tr] (let [n (host-of tr :n)] (k/symmetric set-n))))
-                      (k/reversal ((k/kern ^:trace [tr] (doseq [_ (range (host-of tr :n))] (k/kernel stay set-n)))))]]
+      (doseq [kernel [(k/kern ^:trace [tr] (doseq [_ (range (host-of tr :n))] (k/symmetric set-n)))
+                      (k/kern ^:trace [tr] (when (= 1 (host-of tr :n)) (k/symmetric set-n)))
+                      (k/kern ^:trace [tr] (if (= 1 (host-of tr :n)) (k/symmetric set-n) (k/chain)))
+                      (k/kern ^:trace [tr] (let [n (host-of tr :n)] (k/symmetric set-n)))
+                      (k/reversal (k/kern ^:trace [tr] (doseq [_ (range (host-of tr :n))] (k/kernel stay set-n))))]]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"changed what it reads" (kernel tr (rng/key 9))))))
     (testing "a later statement may change what an earlier one read, as the thesis's p. 102 kernel does"
       (let [log (atom [])
-            kernel ((k/kern ^:trace [tr]
-                      (doseq [i (range (host-of tr :n))] (recording log [:loop i]))
-                      (k/symmetric set-n)
-                      (recording log [:n (host-of tr :n)])))]
+            kernel (k/kern ^:trace [tr]
+                     (doseq [i (range (host-of tr :n))] (recording log [:loop i]))
+                     (k/symmetric set-n)
+                     (recording log [:n (host-of tr :n)]))]
         (is (= 2 (host-of (:trace (kernel tr (rng/key 10))) :n)))
         (is (= [[:loop 0] [:n 2]] @log))
         (reset! log [])
@@ -225,7 +233,7 @@
   (testing "every application gets its own key, also in loops and in the reversal"
     (let [keys-seen (atom [])
           record-key (k/symmetric (fn [tr key] (swap! keys-seen conj key) {:trace tr}))
-          kernel ((k/kern ^:trace [tr] record-key (doseq [_ (range (host-of tr :n))] record-key) record-key))
+          kernel (k/kern ^:trace [tr] record-key (doseq [_ (range (host-of tr :n))] record-key) record-key)
           tr (:trace (gfi/generate counted [] (cm/choicemap :n 2) (rng/key 14)))]
       (kernel tr (rng/key 15))
       ((k/reversal kernel) tr (rng/key 15))
@@ -233,7 +241,7 @@
       (is (= 4 (count (set (take 4 @keys-seen)))))
       (is (= 4 (count (set (drop 4 @keys-seen)))))))
   (testing "a statement without a reversal makes the reversal loud"
-    (let [kernel ((k/kern ^:trace [_tr] (k/kernel stay)))
+    (let [kernel (k/kern ^:trace [_tr] (k/kernel stay))
           tr (gfi/simulate counted [] (rng/key 12))]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no declared reversal" ((k/reversal kernel) tr (rng/key 13)))))))
 
@@ -253,13 +261,13 @@
   (let [from-false (:trace (gfi/generate flags [] (cm/choicemap :flag false) (rng/key 20)))
         line (:trace (gfi/generate (gen [] (trace :x (d/normal 0 1))) [] (cm/choicemap :x 0.0) (rng/key 21)))]
     (testing "a kernel that moves what its arguments read is loud, forward and reversed"
-      (doseq [kernel [((k/kern ^:trace [tr] (k/mh (sel/select (if (host-of tr :flag) :x :flag)))))
-                      (k/reversal ((k/kern ^:trace [tr] (k/mh (sel/select (if (host-of tr :flag) :x :flag))))))]]
+      (doseq [kernel [(k/kern ^:trace [tr] (k/mh (sel/select (if (host-of tr :flag) :x :flag))))
+                      (k/reversal (k/kern ^:trace [tr] (k/mh (sel/select (if (host-of tr :flag) :x :flag)))))]]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"changed what its arguments read" (run-of kernel from-false 22))))
-      (let [data (ts/thrown-data (run-of ((k/kern ^:trace [tr] (k/mh walk [(+ 1.0 (* (tr :x) (tr :x)))]))) line 23))]
+      (let [data (ts/thrown-data (run-of (k/kern ^:trace [tr] (k/mh walk [(+ 1.0 (* (tr :x) (tr :x)))])) line 23))]
         (is (= '(k/mh walk [(+ 1.0 (* (tr :x) (tr :x)))]) (:form data)))))
     (testing "one that leaves them alone passes: flag picks which of x and y moves"
-      (let [kernel ((k/kern ^:trace [tr] (k/mh (sel/select (if (host-of tr :flag) :x :y)))))]
+      (let [kernel (k/kern ^:trace [tr] (k/mh (sel/select (if (host-of tr :flag) :x :y))))]
         (is (= 50 (count (:traces (run-of kernel from-false 24)))))
         (is (= 50 (count (:traces (run-of (k/reversal kernel) from-false 25)))))))))
 
@@ -271,16 +279,16 @@
   ;; gfi/same-value? (its 256-value budget) makes the large collections loud
   (let [tr (:trace (gfi/generate flags [] (cm/choicemap :flag false) (rng/key 26)))
         n (fn [tr] (if (host-of tr :flag) 300 1000))]
-    (doseq [[label kernel] [["a kernel bound in a let" ((k/kern ^:trace [_tr] (let [step (k/mh (sel/select :x))] step step)))]
+    (doseq [[label kernel] [["a kernel bound in a let" (k/kern ^:trace [_tr] (let [step (k/mh (sel/select :x))] step step))]
                             ["kernels built in a loop's collection"
-                             ((k/kern ^:trace [_tr] (doseq [step (mapv k/mh [(sel/select :x) (sel/select :y)])] step)))]
-                            ["a let of a large collection" ((k/kern ^:trace [tr] (let [xs (vec (range (n tr)))] (k/mh (sel/select (if (= 1000 (count xs)) :x :y))))))]
-                            ["a loop over one" ((k/kern ^:trace [tr] (doseq [_ (range (n tr))] (k/chain)) (k/mh (sel/select :x))))]]]
+                             (k/kern ^:trace [_tr] (doseq [step (mapv k/mh [(sel/select :x) (sel/select :y)])] step))]
+                            ["a let of a large collection" (k/kern ^:trace [tr] (let [xs (vec (range (n tr)))] (k/mh (sel/select (if (= 1000 (count xs)) :x :y)))))]
+                            ["a loop over one" (k/kern ^:trace [tr] (doseq [_ (range (n tr))] (k/chain)) (k/mh (sel/select :x)))]]]
       (testing label
         (is (= 50 (count (:traces (run-of kernel tr 27)))))
         (is (= 50 (count (:traces (run-of (k/reversal kernel) tr 28))))))))
   (testing "a kernel built from another value is another kernel"
-    (let [kernel ((k/kern ^:trace [tr] (let [step (k/mh (sel/select (if (host-of tr :flag) :x :flag)))] step)))]
+    (let [kernel (k/kern ^:trace [tr] (let [step (k/mh (sel/select (if (host-of tr :flag) :x :flag)))] step))]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"changed what it reads"
                             (run-of kernel (:trace (gfi/generate flags [] (cm/choicemap :flag false) (rng/key 29))) 30))))))
 
@@ -298,10 +306,10 @@
   ;; differs. Planted bug (2026-10-22): no cycle guard overflows the stack
   ;; in both cases
   (let [tr (:trace (gfi/generate flags [] (cm/choicemap :flag false) (rng/key 64)))]
-    (is (= 50 (count (:traces (run-of ((k/kern ^:trace [_tr] (let [step (looping 2)] step))) tr 65)))))
+    (is (= 50 (count (:traces (run-of (k/kern ^:trace [_tr] (let [step (looping 2)] step)) tr 65)))))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"changed what it reads"
-                          (run-of ((k/kern ^:trace [tr] (let [step (looping (if (host-of tr :flag) 1 2))]
-                                                          (k/mh (sel/select :flag)))))
+                          (run-of (k/kern ^:trace [tr] (let [step (looping (if (host-of tr :flag) 1 2))]
+                                                         (k/mh (sel/select :flag))))
                                   tr 66)))))
 
 ;; ---------------------------------------------------------------------------
@@ -390,6 +398,121 @@
                                                      (clojure.core/* 5 (Math/sqrt (clojure.core// (clojure.core/* p (clojure.core/- 1 p)) n))))
                                      (str c ": " f " against " p))))))]
     (testing "the kernel, from the posterior with c0 forgotten"
-      (at-the-posterior (polynomial-kernel) [:coeff 0] 12))
+      (at-the-posterior polynomial-kernel [:coeff 0] 12))
     (testing "its reversal, from the posterior with the noise forgotten"
-      (at-the-posterior (k/reversal (polynomial-kernel)) :noise 13))))
+      (at-the-posterior (k/reversal polynomial-kernel) :noise 13))))
+
+;; ---------------------------------------------------------------------------
+;; Kernels without arguments, the gradient kernels, results that are not a
+;; kernel's, and chains that keep a function of each trace (genclj-4hu0)
+;; ---------------------------------------------------------------------------
+
+(deftest kern-without-arguments-is-the-kernel
+  ;; planted (2026-10-25): the macro's function of no arguments, as before,
+  ;; fails each
+  (let [log (atom [])
+        plain (k/kern [] (recording log :a) (recording log :b))
+        traced (k/kern ^:trace [_tr] (recording log :c))
+        tr (gfi/simulate model [] (rng/key 16))]
+    (is (and (k/reversible? plain) (k/reversible? traced)))
+    (plain tr (rng/key 17))
+    (traced tr (rng/key 18))
+    ((k/reversal plain) tr (rng/key 19))
+    (is (= [:a :b :c :b :a] @log))))
+
+(def ^:private line
+  "x ~ N(0, 1), y ~ N(x, 1): with y = 1.3, x | y ~ N(0.65, √½)."
+  (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal x 1)))))
+
+(defn- line-at [x] (:trace (gfi/generate line [] (cm/choicemap :x x :y 1.3) (rng/key 0))))
+
+(def ^:private plane
+  (gen [] (let [z (trace :z (d/mvnormal [0.0 0.0] [[1.0 0.0] [0.0 1.0]]))]
+            (trace :y (d/mvnormal z [[0.5 0.0] [0.0 0.5]])))))
+
+(deftest the-gradient-kernels-are-mcmc-s-moves
+  ;; each constructor's kernel is the move it names, with its options and
+  ;; the key it is applied with. Planted (2026-10-25): hmc's options
+  ;; dropped, mala's key drawn from the implicit source, and nuts's
+  ;; :max-depth dropped each fail
+  (let [x (sel/select :x)
+        t (line-at -1.0)]
+    (doseq [key (rng/split (rng/key 20) 4)
+            [label kernel move] [["hmc" (k/hmc x {:L 3 :eps 0.4}) #(mcmc/hmc t x {:L 3 :eps 0.4} key)]
+                                 ["mala" (k/mala x 0.3 {:inv-metric 0.5}) #(mcmc/mala t x 0.3 {:inv-metric 0.5 :key key})]
+                                 ["nuts" (k/nuts x {:eps 0.6 :max-depth 2}) #(mcmc/nuts t x {:eps 0.6 :max-depth 2} key)]
+                                 ["map-optimize" (k/map-optimize x {:max-step-size 1.0})
+                                  #(mcmc/map-optimize t x {:max-step-size 1.0})]]]
+      (testing label
+        (let [r (kernel t key)
+              expected (move)]
+          (is (= (:choices (:trace expected)) (:choices (:trace r))))
+          (is (= (dissoc expected :trace) (dissoc r :trace)))
+          (is (boolean? (:accepted? r))))))
+    (testing "elliptical-slice"
+      (let [z (:trace (gfi/generate plane [] (cm/choicemap :y (array/array [1.0 -0.5])) (rng/key 21)))
+            cov [[1.0 0.0] [0.0 1.0]]
+            r ((k/elliptical-slice :z [0.0 0.0] cov) z (rng/key 22))]
+        (is (= (:choices (:trace (mcmc/elliptical-slice z :z [0.0 0.0] cov (rng/key 22)))) (:choices (:trace r))))
+        (is (true? (:accepted? r))))))
+  (testing "the MCMC kernels are their own reversals; map-optimize, which leaves no distribution unchanged, has none"
+    (is (every? k/reversible? [(k/hmc (sel/select :x)) (k/mala (sel/select :x) 0.1) (k/nuts (sel/select :x))
+                               (k/elliptical-slice :z [0.0] [[1.0]])]))
+    (is (not (k/reversible? (k/map-optimize (sel/select :x))))))
+  (testing "options are a map without a key: the kernel takes one at each application"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"takes its key" (k/hmc (sel/select :x) {:key (rng/key 4)})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"options map" (k/nuts (sel/select :x) (rng/key 4))))))
+
+(deftest the-library-s-moves-compose-as-kernels
+  ;; every move returns {:trace :accepted? …}, so each runs in a chain, in
+  ;; run (which counts its decisions) and in a particle filter's
+  ;; rejuvenation
+  (let [x (sel/select :x)
+        moves [(k/map-optimize x) (k/hmc x {:L 3 :eps 0.4}) (k/nuts x {:eps 0.6}) (k/mala x 0.3) (k/mh x)]
+        r ((apply k/chain moves) (line-at -1.0) (rng/key 23))]
+    (is (= 5 (count (:accepted r))))
+    (is (= (boolean (some true? (:accepted r))) (:accepted? r)))
+    (is (number? (:acceptance-rate (k/run (apply k/chain moves) (line-at -1.0) {:samples 10 :key (rng/key 24)})))))
+  (let [state (pf/initialize line [] (cm/choicemap :y 1.3) 8 {:key (rng/key 25)})
+        moved (pf/rejuvenate state (k/hmc (sel/select :x) {:L 3 :eps 0.4}) (rng/key 26))]
+    (is (not= (mapv #(ts/host (% :x)) (pf/traces state)) (mapv #(ts/host (% :x)) (pf/traces moved))))))
+
+(deftest a-function-that-returns-a-bare-trace-is-not-a-kernel
+  ;; chapter 032's remark: a kernel written by hand naturally returns the
+  ;; trace. Planted (2026-10-25): without the check, run and a chain carry
+  ;; nil on as the trace, pf/rejuvenate keeps it, and each fails
+  (let [bare (fn [t key] (:trace (mcmc/hmc t (sel/select :x) {:L 3 :eps 0.4} key)))
+        t (line-at -1.0)]
+    (doseq [[label f] [["run" #(k/run bare t {:samples 2 :key (rng/key 27)})]
+                       ["a chain" #((k/chain (k/mh (sel/select :x)) bare) t (rng/key 28))]
+                       ["kern" #((k/kern ^:trace [_tr] bare) t (rng/key 29))]
+                       ["checked" #((k/checked bare (cm/choicemap :y 1.3)) t (rng/key 30))]
+                       ["pf/rejuvenate" #(pf/rejuvenate (pf/initialize line [] (cm/choicemap :y 1.3) 2 {:key (rng/key 31)})
+                                                        bare (rng/key 32))]]]
+      (testing label
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"A kernel returns \{:trace" (f)))))))
+
+(deftest a-chain-keeps-a-function-of-each-trace
+  ;; :keep keeps (f t) for the traces run would keep, read on the host.
+  ;; Planted (2026-10-25): :keep given the trace before each step, and
+  ;; keeping every step's, burned ones too, each fail the first two;
+  ;; arrays left unread fail the fourth
+  (is (= [50 80 110 140] (:draws (k/run (fn [n _] {:trace (inc n)}) 0 {:samples 4 :burn 2 :thin 3 :keep #(* 10 %)}))))
+  (let [kernel (k/mh (sel/select :a :b))
+        start (:trace (gfi/generate model [] observations (rng/key 33)))
+        opts {:samples 6 :burn 3 :thin 2 :key (rng/key 34)}
+        full (k/run kernel start opts)
+        kept (k/run kernel start (assoc opts :keep #(% :b)))]
+    (is (= (mapv #(ts/host (% :b)) (:traces full)) (:draws kept)))
+    (is (= (dissoc full :traces) (dissoc kept :draws)) "the same acceptance and divergences")
+    (testing "a map of functions keeps a vector for each"
+      (is (= {:a (mapv #(ts/host (% :a)) (:traces full)) :b (mapv #(ts/host (% :b)) (:traces full))}
+             (:draws (k/run kernel start (assoc opts :keep {:a #(% :a) :b #(% :b)}))))))
+    (testing "arrays are read on the host"
+      (let [draws (:draws (k/run kernel start (assoc opts :keep #(array/stack [(% :b) (% :b)]))))]
+        (is (every? vector? draws))
+        (is (= (mapv #(let [b (ts/host (% :b))] [b b]) (:traces full)) draws))))
+    (testing "a :keep that is neither a function nor a map of them is loud"
+      (doseq [bad [3 {} {:a 3} [:a]]]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #":keep is a function" (k/run kernel start (assoc opts :keep bad)))
+            (pr-str bad))))))

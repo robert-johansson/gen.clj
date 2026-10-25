@@ -366,7 +366,8 @@ scale-evidence
 ;; book: gibbs-exact
 (def s-posterior
   "The posterior probabilities of s-grid's points."
-  (mapv #(Math/exp %) (:log-weights (weights/normalize s-log-posterior))))
+  (mapv #(Math/exp %)
+        (:log-normalized-weights (weights/normalize s-log-posterior))))
 
 (def exact-means
   "E[s | ys], and E[mu | ys]: E[mu | ys, s], Σy/s^2 over the precision
@@ -542,7 +543,8 @@ ar-exact
 drift-evidence
 ;=> -11.4555
 
-(mapv #(Math/exp %) (:log-weights (weights/normalize drift-log-likelihoods)))
+(mapv #(Math/exp %)
+      (:log-normalized-weights (weights/normalize drift-log-likelihoods)))
 ;=> [0.0 0.0364 0.9636]
 
 ;; book: filters
@@ -712,7 +714,7 @@ smoothed
                     (:weight (gfi/assess ss/hmm [60 start (casino-with %)]
                                          (series rolls))))
                   p6-grid)]
-    (mapv #(Math/exp %) (:log-weights (weights/normalize lls)))))
+    (mapv #(Math/exp %) (:log-normalized-weights (weights/normalize lls)))))
 
 (def p6-mean (reduce + (map * p6-posterior p6-grid)))
 

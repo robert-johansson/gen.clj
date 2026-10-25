@@ -478,6 +478,23 @@
     (is (every? #(<= (:tree-depth %) 3) (:stats r)))
     (is (= {:stats [] :divergences 0} (:warmup r)))))
 
+(deftest a-sample-keeps-a-function-of-each-draw
+  ;; :keep keeps (f trace) for each draw in place of its trace, read on the
+  ;; host, as k/run's (genclj-4hu0). Planted (2026-10-25): f of the trace
+  ;; before each transition fails the first; the statistics without
+  ;; :accepted? fail the third
+  (let [start (start-at correlated [] (cm/choicemap :x 0.0 :y 0.0))
+        opts {:samples 6 :warmup 20}
+        full (nuts/sample start xy opts (rng/key 40))
+        kept (nuts/sample start xy (assoc opts :keep #(% :x)) (rng/key 40))]
+    (is (= (mapv #(ts/host (% :x)) (:traces full)) (:draws kept)))
+    (is (= (dissoc full :traces) (dissoc kept :draws)) "the same statistics, step size and metric")
+    (let [states (mapv #(ts/host (cm/to-map (:choices %))) (:traces full))]
+      (is (= (rest (map :accepted? (:stats full))) (map not= (rest states) states))
+          "each transition's :accepted? says whether it moved"))
+    (is (= {:x (mapv #(ts/host (% :x)) (:traces full)) :y (mapv #(ts/host (% :y)) (:traces full))}
+           (:draws (nuts/sample start xy (assoc opts :keep {:x #(% :x) :y #(% :y)}) (rng/key 40)))))))
+
 (deftest a-jittered-transition-reports-its-step
   ;; each transition steps by eps·(1 + jitter·(2u - 1)); with no jitter
   ;; nothing is drawn and the result is the one without the option.

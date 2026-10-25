@@ -695,6 +695,84 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     merged and reviewed; the battery green on the JVM backend, MLX CPU and
     Metal, and once on CUDA; the book once on MLX; memo.clj and GenGDT
     passing against the release candidate.
+  - **The result keys** (the agent, 2026-10-25, provisional; genclj-4jpw):
+    one meaning per key across gen.inference, gen.gradients, gen.learning
+    and gen.batched. A key that holds a log says so in its name, but for
+    Gen.jl's `:weight` and `:score`. "Host" is a host number or a vector of
+    them, read at the inference loop; "array" a gen.array value (a 0-d
+    one is a host number on the JVM backend). A result about n particles
+    holds the scalar keys in the plural, one value per particle
+    (`:weights` for `:weight`), with `:particles` for `:trace`.
+    - `:trace`, `:traces`: a trace (a kernel's next one, the one drawn, a
+      chain's last); a vector of scalar traces. `:particles`: a
+      gen.batched collection; `:batches`, a vector of them.
+    - `:weight`: a log weight, array: Gen.jl's of generate, update,
+      regenerate, assess and propose, and a translator's, an involution's
+      or a move-reweight kernel's (its incremental importance weight).
+      `:weights`, `:discards`: gen.batched's per particle, an [n] array and
+      a vector of n choice maps.
+    - `:log-weights`: a weighted collection's raw log importance weights
+      (importance sampling, a particle filter's state), host.
+      `:log-normalized-weights`: the same less their log-sum-exp, so that
+      their exponentials sum to 1 (w/normalize, importance sampling,
+      enumeration), host. `:log-total`: their log-sum-exp (w/normalize),
+      host.
+    - `:log-ml-estimate`: the log of an estimate of the marginal
+      likelihood (importance sampling's log-mean-exp, enumeration's
+      log-sum-exp over a grid, Laplace's), host. `:log-ml`: what a particle
+      filter's resamplings have moved out of its weights, host. `:ess`: the
+      weights' effective sample size, 1/Σp², host. `:estimate`: is/estimate's
+      self-normalized expectation, host.
+    - `:accepted?`: whether a kernel took its move, a boolean, in every
+      kernel's result: MH's, HMC's and MALA's accept decision; NUTS's,
+      whether it drew a state other than the start; map-optimize's,
+      whether its line search found a step; elliptical slice's and
+      particle Gibbs's, always; a combinator's, whether any of its moves
+      did. `:accepted`: a vector of them, a combinator's moves in order or
+      one per particle. `:log-alpha`: the log MH acceptance ratio (mh,
+      mh/move, hmc, mala), host; `:log-alphas` per particle, an [n] array.
+      `:diverged?`: an HMC, MALA or NUTS proposal diverged; `:diverged`
+      per particle; `:divergences`: how many did (a count).
+      `:acceptance-rate`: kernel/run's fraction of moves accepted, host or
+      nil. `:draws`: what kernel/run's and nuts/sample's `:keep` kept in
+      place of `:traces`, host: (keep t) for each kept trace, or for a map
+      of functions a map of such vectors.
+    - NUTS: `:eps` the step size taken or adapted (host; per particle an
+      [n] array), `:inv-metric` (array), `:accept-stat`, `:tree-depth`,
+      `:n-leapfrog`, `:energy` (host), `:stats` (a map of them per
+      iteration), `:warmup` (the warmup's `:stats` and `:divergences`).
+    - `:fallback`: why a batched run went one particle at a time, a
+      written message. `:result`: map-particles*'s or project*'s value
+      beside it. A particle filter's state: `:parents` (each particle's
+      source index), `:resampled?`.
+    - Gradients and learning: `:values` (the selected choices, a choice
+      map), `:gradients` (theirs, the same shape), `:arg-grads`, `:store`,
+      `:grads` and `:model-grads` (store-shaped arrays), `:objective`
+      (host), `:history`. Transforms: `:log-abs-det` (log, array), `:model`
+      and `:aux` (choice maps), `:bwd-choices`.
+    Renamed for it: w/normalize's `:log-weights` (it meant the normalized
+    logs there, the raw ones elsewhere) to `:log-normalized-weights`;
+    mh/move's `:weight` to `:log-alpha` (mh/mh's name for the same ratio),
+    a host double now; the -particles kernels' `:accepted?`, `:log-alpha`
+    and `:diverged?` (per-particle values under scalar names, and a
+    vector under a `?` key is always truthy) to `:accepted`, `:log-alphas`
+    and `:diverged`. gen.batched's `{:particles :weights}` stays: it
+    mirrors gfi/generate's `{:trace :weight}`, as b/simulate's particles
+    mirror gfi/simulate's trace.
+  - **Kernels' shape** (the agent, 2026-10-25, provisional; genclj-4hu0):
+    a kernel is (fn [trace key]) → `{:trace :accepted? …}`, and every
+    kernel of the library returns that map: mcmc's map-optimize and
+    elliptical-slice too (map-optimize-particles `{:particles
+    :accepted}`). A result without `:trace`, such as a bare trace, is a
+    loud error in kernel/run, the combinators and pf/rejuvenate, where it
+    carried nil on. gen.inference.kernel's hmc, mala, nuts and
+    elliptical-slice make mcmc's moves kernels, each its own reversal (as
+    the MH kernels are; NUTS's transition keeps detailed balance), and
+    map-optimize a kernel without one, since it leaves no distribution
+    unchanged; their options take no `:key`, which the kernel takes at
+    each application. kernel/run and nuts/sample take `:keep`. `(kern []
+    …)` and `(kern ^:trace [tr] …)` are the kernel itself, not a function
+    of no arguments.
 - **Indices are 0-based** (Clojure idiom, as in GenMLX; D2): Map's and
   Unfold's addresses, Recurse's nodes (root 0), categorical's values
   (categorical-logits' too: 0 to n - 1) and Switch's branch index (branch 0

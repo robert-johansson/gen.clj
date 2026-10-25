@@ -198,4 +198,5 @@
     (fn [trace key]
       (let [[k-filter k-draw] (rng/split key)
             state (conditional-smc trace selection (if (fn? steps) (steps trace) steps) n (assoc opts :key k-filter))]
-        {:trace (first (pf/sample-unweighted-traces state 1 k-draw))})))))
+        ;; a Gibbs move always takes its draw
+        {:trace (first (pf/sample-unweighted-traces state 1 k-draw)) :accepted? true})))))

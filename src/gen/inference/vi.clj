@@ -240,7 +240,7 @@
         {runs :runs fallback :fallback} (draws model model-args observations q q-args k (some? model-store) batched? (or key (gfi/next-key)))
         lws (mapv :lw runs)
         bound (w/log-mean-exp lws)
-        normalized (mapv #(Math/exp %) (:log-weights (w/normalize lws)))
+        normalized (mapv #(Math/exp %) (:log-normalized-weights (w/normalize lws)))
         loo (fn [j] (let [others (keep-indexed #(when (not= j %1) %2) lws)
                           stand-in (case baseline
                                      :geometric (/ (reduce + others) (dec k))

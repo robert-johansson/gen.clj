@@ -40,8 +40,7 @@ The chapter's code lives in one namespace:
             [gen.inference.diagnostics :as diag]
             [gen.inference.enumerative :as enum]
             [gen.inference.importance :as is]
-            [gen.inference.mcmc :as mcmc]
-            [gen.inference.mh :as mh]
+            [gen.inference.kernel :as k]
             [gen.inference.nuts :as nuts]
             [gen.inference.particle-filter :as pf]
             [gen.inference.vi :as vi]
@@ -58,9 +57,11 @@ The chapter's code lives in one namespace:
             [gen.state-space :as ss]))
 ```
 
-A few helpers recur. `run-chain` runs a Markov chain and keeps the host
-values it reads, not the traces, so a long chain holds one trace at a time
-on any backend:
+A few helpers recur. `run-chain` runs a Markov chain with `k/run`, which
+keeps the values at some addresses as host numbers (`:keep`), not the
+traces, so a long chain holds one trace at a time on any backend; its
+kernels are `gen.inference.kernel`'s (`k/mh`, `k/hmc`, `k/mala`,
+`k/nuts`):
 
 <!-- code: helpers -->
 ```clojure
@@ -89,19 +90,12 @@ on any backend:
   (Math/sqrt (- (/ 1.0 ess) (/ 1.0 n))))
 
 (defn run-chain
-  "The host values at addrs along a chain of the kernel k (a function of a
-   trace and a key that returns {:trace …}) from the trace t: burn steps,
-   then samples steps kept, as {addr [x …]}. Only the current trace is
-   held."
-  [k t addrs {:keys [samples burn key] :or {burn 0}}]
-  (let [step-keys (rng/split key (+ burn samples))]
-    (loop [i 0, t t, draws (zipmap addrs (repeat []))]
-      (if (= i (count step-keys))
-        draws
-        (let [t (gfi/eval-trace! (:trace (k t (step-keys i))))
-              read (fn [m a] (update m a conj (array/->clj (t a))))]
-          (recur (inc i) t
-                 (if (>= i burn) (reduce read draws addrs) draws)))))))
+  "The host values at addrs along a chain of the kernel from the trace t,
+   run by k/run with opts, as {addr [x …]}: k/run keeps them (:keep), and
+   holds the current trace alone."
+  [kernel t addrs opts]
+  (:draws (k/run kernel t
+                 (assoc opts :keep (into {} (map (fn [a] [a #(% a)])) addrs)))))
 ```
 
 Three pages fit Gaussian linear models, whose posterior and evidence have
@@ -229,7 +223,7 @@ posterior of the line's height at $x = 10$, a prediction:
 <!-- code: line-mala -->
 ```clojure
 (def mala-draws
-  (run-chain #(mcmc/mala %1 (sel/select :slope :level) 0.01 %2)
+  (run-chain (k/mala (sel/select :slope :level) 0.01)
              (:trace (gfi/generate centered-model [xs] (observations ys)
                                    (rng/key 3)))
              [:slope :level] {:samples 1000 :burn 100 :key (rng/key 4)}))
@@ -360,7 +354,7 @@ which suits states that move together:
 (def state-addrs (mapv #(vector % :z) (range 6)))
 
 (def walk-draws
-  (run-chain #(mcmc/hmc %1 (sel/from-paths state-addrs) {:L 10 :eps 0.1} %2)
+  (run-chain (k/hmc (sel/from-paths state-addrs) {:L 10 :eps 0.1})
              (:trace (gfi/generate walk [6 0.0] walk-observations
                                    (rng/key 7)))
              state-addrs {:samples 400 :burn 100 :key (rng/key 41)}))
@@ -636,7 +630,8 @@ update leave the others alone (*Composition* shows it):
 (defn filtered-mean
   "The weighted mean of the particle filter state's z at step t."
   [{ps :particles lws :log-weights} t]
-  (let [p (array/exp (array/array (:log-weights (weights/normalize lws))))]
+  (let [p (array/exp (array/array (:log-normalized-weights
+                                    (weights/normalize lws))))]
     (array/item (array/sum (* p (batched/choice ps [t :z]))))))
 
 (defn run-filter
@@ -734,14 +729,14 @@ correlated posterior:
 (def tight-line (sel/select :slope :intercept))
 ```
 
-Metropolis–Hastings with proposals from the prior, what `mh/mh` does
+Metropolis–Hastings with proposals from the prior, what `k/mh` does
 with a selection, almost never lands on the ridge. In a thousand steps it
 moves three times:
 
 <!-- code: tight-mh -->
 ```clojure
 (def mh-draws
-  (run-chain #(mh/mh %1 tight-line %2) tight-start [:slope :intercept]
+  (run-chain (k/mh tight-line) tight-start [:slope :intercept]
              {:samples 1000 :key (rng/key 16)}))
 
 (def accepted
@@ -775,9 +770,8 @@ the intercept first. The chain then draws with what the warmup found:
 ;=> [0.340 [0.0284 0.00457]] ; float64
 
 (def hmc-draws
-  (run-chain #(mcmc/hmc %1 tight-line
-                        (assoc (select-keys adapted [:eps :inv-metric]) :L 10)
-                        %2)
+  (run-chain (k/hmc tight-line
+                    (assoc (select-keys adapted [:eps :inv-metric]) :L 10))
              (:trace adapted) [:slope :intercept]
              {:samples 2000 :key (rng/key 18)}))
 ```
@@ -1090,7 +1084,7 @@ Metropolis–Hastings on the log of the noise, from the prior:
   (:trace (gfi/generate noisy-sine [sine-xs] sine-observed (rng/key 24))))
 
 (def sigmas
-  (let [draws (run-chain #(mh/mh %1 (sel/select :log-sigma) %2) sine-start
+  (let [draws (run-chain (k/mh (sel/select :log-sigma)) sine-start
                          [:log-sigma]
                          {:samples 2000 :burn 100 :key (rng/key 25)})]
     (mapv #(Math/exp %) (:log-sigma draws))))
@@ -1301,9 +1295,8 @@ $\pm 10$, fifteen standard deviations away:
               (sel/select :mu) {:warmup 300} (rng/key 31)))
 
 (def uniform-draws
-  (:mu (run-chain #(mcmc/nuts %1 (sel/select :mu)
-                              (select-keys uniform-adapted [:eps :inv-metric])
-                              %2)
+  (:mu (run-chain (k/nuts (sel/select :mu)
+                          (select-keys uniform-adapted [:eps :inv-metric]))
                   (:trace uniform-adapted) [:mu]
                   {:samples 1000 :key (rng/key 32)})))
 

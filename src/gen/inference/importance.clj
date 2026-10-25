@@ -94,7 +94,7 @@
    estimate and the effective sample size."
   [log-weights]
   {:log-weights log-weights
-   :log-normalized-weights (:log-weights (w/normalize log-weights))
+   :log-normalized-weights (:log-normalized-weights (w/normalize log-weights))
    :log-ml-estimate (w/log-mean-exp log-weights)
    :ess (w/ess log-weights)})
 

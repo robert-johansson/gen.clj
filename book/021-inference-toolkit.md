@@ -37,7 +37,6 @@ return a weight in place of an accept decision.
             [gen.inference.enumerative :as enum]
             [gen.inference.importance :as imp]
             [gen.inference.kernel :as k]
-            [gen.inference.mcmc :as mcmc]
             [gen.inference.weights :as w]
             [gen.random :as rng]
             [gen.selection :as sel]))
@@ -390,7 +389,7 @@ mean weight, and resampling. Four samples with weights proportional to
 ```clojure
 (def toy-log-weights (mapv #(Math/log %) [10.0 6.0 3.0 1.0]))
 
-(mapv #(Math/exp %) (:log-weights (w/normalize toy-log-weights)))
+(mapv #(Math/exp %) (:log-normalized-weights (w/normalize toy-log-weights)))
 ;=> [0.5 0.3 0.15 0.05]
 
 [(w/ess toy-log-weights) (w/log-mean-exp toy-log-weights) (Math/log 5.0)]
@@ -663,9 +662,10 @@ $\sum_i x_i (y_i - b)$ over the precision:
 ```
 
 Two kernels on the slope, one from the prior and one a random walk, run
-20 100 steps each from the start. `k/run` collects a chain; its options
-come below. The prior proposal is accepted once in a hundred steps, the
-random walk about once in four:
+20 100 steps each from the start. `k/run` collects a chain, here the
+slope's draws as host numbers (`:keep`); its options come below. The
+prior proposal is accepted once in a hundred steps, the random walk about
+once in four:
 
 <!-- code: conditional-chains -->
 ```clojure
@@ -673,9 +673,8 @@ random walk about once in four:
   "The slope's draws from a chain of the kernel from start (20100 steps,
    the first 100 dropped, then every tenth kept), with the acceptance rate."
   [kernel key]
-  (let [{:keys [traces acceptance-rate]}
-        (k/run kernel start {:samples 2000 :burn 100 :thin 10 :key key})]
-    {:draws (diag/draws traces :slope) :acceptance-rate acceptance-rate}))
+  (k/run kernel start
+         {:samples 2000 :burn 100 :thin 10 :key key :keep #(% :slope)}))
 
 (def by-prior (slope-draws slope-move (rng/key 5)))
 
@@ -793,19 +792,19 @@ reports the accept decision of each MH move it made, in order, as
 ;=> [true false] ; float64
 ```
 
-Any function of a trace and a key that returns `{:trace …}` is a kernel,
-so the library's other moves compose with these. `gen.inference.mcmc`'s
-Hamiltonian Monte Carlo, the subject of *Gradient-Based MCMC*, returns
-the same map, with whether its trajectory diverged; `k/symmetric` declares
-it its own reversal. Chained after the random walks, it still targets the
+Any function of a trace and a key that returns `{:trace …}` is a kernel
+(one that returns the trace alone is not, and a combinator says so
+loudly), so the library's other moves compose with these.
+`gen.inference.mcmc`'s Hamiltonian Monte Carlo, the subject of
+*Gradient-Based MCMC*, returns the same map, with whether its trajectory
+diverged, and `k/hmc` makes it a kernel, its own reversal, as `k/mh` does
+for MH (`k/mala`, `k/nuts`, `k/elliptical-slice` and `k/map-optimize`
+do for the rest). Chained after the random walks, it still targets the
 posterior:
 
 <!-- code: hmc -->
 ```clojure
-(def hmc-move
-  (k/symmetric (fn [tr key]
-                 (mcmc/hmc tr (sel/select :slope :intercept) {:L 10 :eps 0.1}
-                           key))))
+(def hmc-move (k/hmc (sel/select :slope :intercept) {:L 10 :eps 0.1}))
 
 (sort (keys (hmc-move start (rng/key 15))))
 ;=> (:accepted? :diverged? :log-alpha :trace)
@@ -834,9 +833,10 @@ each step, that the trace still holds the observations, as Gen.jl's
 
 `k/run` applies a kernel again and again from a trace. Its options are
 `:samples`, the number of traces to keep; `:burn`, the steps dropped first
-(0 by default); `:thin`, the steps per kept trace (1); and `:key`. It
-returns the kept traces, the acceptance rate and the number of diverged
-proposals. The same key makes the same chain, draw for draw:
+(0 by default); `:thin`, the steps per kept trace (1); `:key`; and
+`:keep`, below. It returns the kept traces, the acceptance rate and the
+number of diverged proposals. The same key makes the same chain, draw for
+draw:
 
 <!-- code: run -->
 ```clojure
@@ -930,9 +930,13 @@ hundreds
 ![The slope along the first 300 steps of the chain, from a poor
 start](figures/021-burn-in.svg)
 
-`k/run` holds every kept trace. On the MLX backend thousands of traces
-held at once exhaust its buffers, so the code below keeps host numbers:
-`run-draws` reads the draws it needs and drops the traces.
+`k/run` holds every kept trace, and on the MLX backend thousands of
+traces held at once exhaust its buffers. With `:keep`, a function of a
+trace or a map of such functions, it keeps their values instead, read on
+the host, under `:draws` in place of `:traces`, and holds only the current
+trace. The code below keeps host numbers: `run-draws` keeps the values at
+some addresses, a map from address to draws, each read as `diag/draws`
+reads a trace's (a boolean as 0 or 1).
 
 ## Diagnostics
 
@@ -954,10 +958,12 @@ from the prior are far apart:
 ```clojure
 (defn run-draws
   "The draws at addrs of a chain of the kernel from start, run with opts:
-   a map from address to draws, the traces dropped."
+   a map from address to draws, kept as the chain runs, each read as
+   diag/draws reads it (a boolean as 0 or 1)."
   [kernel start opts addrs]
-  (let [{:keys [traces]} (k/run kernel start opts)]
-    (into {} (map (fn [addr] [addr (diag/draws traces addr)])) addrs)))
+  (let [draw (fn [a] #(first (diag/draws [%] a)))
+        readers (into {} (map (juxt identity draw)) addrs)]
+    (:draws (k/run kernel start (assoc opts :keep readers)))))
 
 (def starts
   (mapv #(:trace (gfi/generate line-model [xs] (observations :y ys) %))
@@ -1140,7 +1146,7 @@ makes the assignments:
   "The exact posterior mean of (f z) over the assignments z."
   [f]
   (reduce + (map (fn [z lw] (* (Math/exp lw) (f z)))
-                 assignments (:log-weights posterior-z))))
+                 assignments (:log-normalized-weights posterior-z))))
 
 (defn group-one?
   "1 when the assignment z puts reading i in the group around 2, else 0."
@@ -1272,7 +1278,7 @@ Later chapters take up the rest.
 |-----------|------------|-------|
 | A prior that is a fair proposal | `imp/importance-sampling`, `imp/estimate` | this chapter, *Conditioning* |
 | A peaked posterior over a few continuous choices | `k/mh` with random walks, chained | this chapter, *MCMC and MAP* |
-| Many correlated continuous choices | HMC, MALA and NUTS (`gen.inference.mcmc`) | *Gradient-Based MCMC* |
+| Many correlated continuous choices | HMC, MALA and NUTS (`gen.inference.mcmc`; as kernels, `k/hmc`, `k/mala`, `k/nuts`) | *Gradient-Based MCMC* |
 | Discrete choices with small supports | `enum/with-exact-proposal`: Gibbs moves | this chapter, *Debugging with Enumeration* |
 | Data that arrive in sequence | `gen.inference.particle-filter` | *Sequential Monte Carlo* |
 | The marginal likelihood, to compare models | `:log-ml-estimate` of importance sampling or a particle filter | this chapter, *SMC in Depth* |

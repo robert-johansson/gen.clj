@@ -23,6 +23,12 @@
      (let [runs (mapv #(kernel/run k (start %) {:samples 1000 :key %}) keys)]
        (summary (draws (map :traces runs) :x)))
 
+   or, keeping the draws as the chains run (kernel/run's :keep):
+
+     (summary (mapv (fn [key] (:draws (kernel/run k (start key)
+                                                  {:samples 1000 :key key :keep #(% :x)})))
+                    keys))
+
    These effective sample sizes are of a chain's autocorrelated draws: not
    the effective sample size of weighted samples (gen.inference.weights/ess
    and gen.inference.particle-filter/ess), which are independent but

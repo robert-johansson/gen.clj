@@ -18,4 +18,4 @@
 (deftest map-optimize
   ;; map_optimize.jl:1: runs without error
   (let [tr (:trace (gfi/generate foo [] cm/EMPTY (rng/key 1)))]
-    (is (trace/trace? (mcmc/map-optimize tr (sel/select :x))))))
+    (is (trace/trace? (:trace (mcmc/map-optimize tr (sel/select :x)))))))
