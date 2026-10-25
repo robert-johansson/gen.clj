@@ -159,6 +159,20 @@ newest first in each section.
 
 ### Added
 
+- **`array/vmap`: a function batched over a leading axis,** as JAX's
+  vmap (DESIGN §9, "The 1.0's shape"; genclj-t3ur). `((array/vmap f
+  {:in-axes [0 nil]}) xs shared)` runs f once for the rows of `xs` under
+  the batch tracer and returns its value (an array, a host number, or
+  maps and vectors of them) with the leading batch axis, a shared leaf
+  broadcast. An in-axis is 0 (the default) or nil; the batched arrays
+  must agree on the batch size. Gradients inside are per particle. A
+  gradient through a vmap, a nested vmap, a host read of a batched value
+  and a batched comparison nothing read (a raw if) are loud, and nothing
+  falls back to one row at a time. Draws are per particle, even from a
+  shared key. It replaces gen.array.batch's batched, wrap and unwrap,
+  which stay internal: `(batch/unwrap (batch/batched [n] (f (batch/wrap
+  xs [n]))) [n])` is `((array/vmap f) xs)`. The book's chapter 041 uses
+  it.
 - **The API's tiers, the stable surface's snapshot and the API appendix**
   (DESIGN §9, "The 1.0's shape"; e6f549f, genclj-dv8x).
   - Every namespace of `src/` and `ext/`, and gen.laws, carries `{:api
@@ -182,7 +196,7 @@ newest first in each section.
     and memory, gen.random.threefry and gen.backend.mlx.exact (internal).
   - `test/fixtures/api-snapshot.edn` holds the stable surface: every
     public var but `^:no-doc` ones, with its arglists or its kind (32
-    namespaces, 660 vars with genclj-9efy's replacements and gfi/assess-backward). gen.api-test fails when the code differs. It
+    namespaces, 661 vars with genclj-9efy's replacements, gfi/assess-backward and array/vmap). gen.api-test fails when the code differs. It
     names what was added, removed or changed, and calls out apart a var
     removed without a deprecation first. `clojure -M:test -m gen.api
     write` writes the snapshot after a deliberate change; `check` prints

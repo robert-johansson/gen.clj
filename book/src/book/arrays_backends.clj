@@ -3,7 +3,6 @@
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.edn :as edn]
             [gen.array :as array :refer [+ - * /]]
-            [gen.array.batch :as batch]
             [gen.array.dtype :as dtype]
             [gen.array.protocols :as p]
             [gen.book.svg :as svg]
@@ -461,34 +460,37 @@ table
 ;; book: batched
 (def points (array/with-backend jvm (array/array [0.0 1.0 2.0])))
 
-(def particles (batch/wrap points [3]))
-
-[(array/shape points) (array/shape particles)
- (array/backend-name (array/backend particles))]
-;=> [[3] [] :batch]
-
 (defn standard-log-density
   "The log density of x under the standard normal."
   [x]
   (dc/log-prob (d/normal 0 1) x))
 
-(array/allclose? (batch/unwrap (standard-log-density particles) [3])
-                 (standard-log-density points))
+(def seen (atom nil))
+
+(def densities
+  ((array/vmap (fn [x] (reset! seen x) (standard-log-density x)))
+   points))
+
+[(array/shape points) (array/shape @seen)
+ (array/backend-name (array/backend @seen)) (array/shape densities)]
+;=> [[3] [] :batch [3]]
+
+(array/allclose? densities (standard-log-density points))
 ;=> true
 
 ;; book: per-particle
 (def shared (array/with-backend jvm (array/array [10.0 20.0 30.0])))
 
-(batch/unwrap (+ particles shared) [3])
+((array/vmap + {:in-axes [0 nil]}) points shared)
 ;=> [[10.0 20.0 30.0] [11.0 21.0 31.0] [12.0 22.0 32.0]]
-
-;; book: two-batches
-;; error: add: arrays from different backends (:batch and :batch)
-#_(+ particles (batch/wrap (array/with-backend jvm (array/array [1.0 2.0])) [2]))
 
 ;; book: batched-read
 ;; error: Cannot read on the host a batched value
-#_(array/item particles)
+#_((array/vmap array/item) points)
+
+;; book: nested-vmap
+;; error: vmap inside a batched run
+#_((array/vmap (fn [x] ((array/vmap #(+ x %)) shared))) points)
 
 ;; book: wrapped
 (defn wrapped
@@ -501,12 +503,12 @@ table
 (def chain-seen (atom nil))
 
 (def slopes
-  ((array/grad (fn [x]
-                 (reset! chain-seen (wrapped (array/backend x)))
-                 (standard-log-density x)))
-   particles))
+  ((array/vmap (array/grad (fn [x]
+                             (reset! chain-seen (wrapped (array/backend x)))
+                             (standard-log-density x))))
+   points))
 
-[(batch/unwrap slopes [3]) @chain-seen]
+[slopes @chain-seen]
 ;=> [[-0.0 -1.0 -2.0] (:tape :batch :jvm)]
 
 ;; book: solution-1
@@ -567,11 +569,7 @@ table
   (dc/log-prob (d/normal mu 2.0) x))
 
 (def per-reading
-  (array/with-backend jvm
-    (let [xs (batch/wrap readings [4])
-          slopes (batch/batched [4]
-                   ((array/grad reading-density) 1.0 xs))]
-      (batch/unwrap slopes [4]))))
+  ((array/vmap (array/grad reading-density) {:in-axes [nil 0]}) 1.0 readings))
 
 per-reading
 ;=> [-0.5 -0.125 0.25 0.625]

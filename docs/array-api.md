@@ -189,6 +189,7 @@ needs, taken from GenMLX's measured call counts
 | linear algebra | `matmul` `outer` `diag` · `la/cholesky` `la/solve-triangular` `la/solve` `la/inv` `la/slogdet` | `-matmul` `-linalg` | `outer`, `diag` |
 | gradients | `grad` `value-and-grad` `stop-gradient` `tracked?` | `-value-and-grad`, `:stop-gradient` | — |
 | trees | `tree-map` `tree-leaves` | — | both |
+| batching | `vmap` · `batched?` `batch-shape` `particle-backend` `particle` `particles` `all-particles` | — (the batch tracer, a wrapping backend: §8b) | all |
 
 **Naming conventions:**
 - Arithmetic uses Clojure's symbols (`+`, `<`, `==`, `!=`), referred per §2.
@@ -512,6 +513,50 @@ like the AD tape:
   backend. A value being differentiated with a batched primal is refused,
   since its particles would carry no gradient: read those of
   `(stop-gradient x)`.
+- **`array/vmap`** (2026-10-25, genclj-t3ur; the owner approved the
+  sketch, and the choices below are the agent's, provisional). The public
+  way to run a function batched, as JAX's `vmap`: `((array/vmap f
+  {:in-axes [0 nil]}) xs shared)` runs f once for the rows of `xs` on the
+  tracer over their backend, and gives back f's value with a leading batch
+  axis. gen.array.batch, which it runs on, is internal.
+  - *In-axes* are 0 (batched along the leading axis: an array, or maps and
+    vectors of arrays that all have it) or nil (shared: any value, an
+    option map or a function too). By default every argument is batched.
+    JAX allows any axis. Here another one is a transpose away, and an
+    option a 1.x release adds breaks nothing, where one it removed would.
+    The batched arrays agree on the batch size; a host number, a 0-d
+    array or a non-array cannot be batched; a call with no batched array
+    says so. All loud.
+  - *The value* is an array, a host number, or maps and vectors of them.
+    Each leaf comes back with the batch axis: the particles' values, or a
+    shared value broadcast (a host number weakly typed, as everywhere). Any
+    other leaf is loud.
+  - *The guards* are a batched run's (`gen.batched`'s): a batched-branch
+    error raised in f, even one f catches, and a batched comparison that
+    nothing read and the value does not hand back (a raw `if` on it) are
+    errors. *Nothing falls back:* vmap asks for a batched run, as
+    `:batched? :required` does, and JAX's vmap raises on a value-dependent
+    branch too. A per-row loop is the caller's to write.
+  - *Draws* inside f are per particle, even from a shared key: n
+    independent draws, as every batched run's sites draw. JAX's vmap gives
+    every row the same draw from a shared key.
+  - *Nesting is refused.* The tracer does not nest: a batch backend over
+    another one misaligns the per-particle axes (tried 2026-10-25: a shape
+    error, where the right answer was a broadcast). A vmap inside a batched
+    run (another vmap's function, a batched generative function), or of a
+    value of one, is the batched-branch error, so a generative function's
+    batched run around it falls back to one particle at a time, where the
+    vmap runs.
+  - *Gradients.* A vmap of a gradient is per particle (*Gradients*,
+    below): `((array/vmap (array/grad g)) xs)` is each row's gradient. A
+    gradient through a vmap, the tape outside the tracer, is refused: an
+    argument being differentiated is loud, and so is an op of f that meets
+    a differentiated value f closed over, named as such. Differentiate
+    inside and sum: `(array/sum ((array/vmap (array/grad g) {:in-axes [nil
+    0]}) theta xs) {:axis 0})` is the gradient of the rows' total in a
+    shared theta. Under MLX's native gradients no value is tracked, so the
+    refusal cannot see one; MLX differentiates the vmap's ops (untested).
+  - Nothing is evaluated: on a lazy backend the value is lazy.
 - **Gradients** (2026-10-23, bean genclj-7dti). `array/value-and-grad` of
   batched arguments, or anywhere in a batched run, is vmap's: each particle
   gets the value and gradient of its own scalar run, on every op the tape

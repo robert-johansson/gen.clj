@@ -27,7 +27,7 @@
   ;; minutes on a lazy backend (every value read is an MLX evaluation)
   :light {:exec-args {:excludes [:slow :heavy]}}
   :conformance {:exec-args {:nses [gen.array-test gen.array-props-test gen.special-test gen.linalg-test
-                                   gen.random-test gen.array.tape-test gen.array.batch-test gen.dist-test gen.reference-test]}}
+                                   gen.random-test gen.array.tape-test gen.array.batch-test gen.array.vmap-test gen.dist-test gen.reference-test]}}
 
   ;; clojure -M:bench …     (criterium; add :c2 to compare C2 against the Graal JIT;
   ;;                         test/ for the LLM benches, which measure the

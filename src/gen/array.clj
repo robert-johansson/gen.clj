@@ -1208,6 +1208,74 @@
           (broadcast-to x (into [(count idx)] (shape x)))))))
 
 ;; ---------------------------------------------------------------------------
+;; A function batched over a leading axis (docs/array-api.md §8b)
+;; ---------------------------------------------------------------------------
+
+(def ^:private call-batched
+  ;; the batch tracer requires gen.array: resolved at the first call
+  (delay (requiring-resolve 'gen.array.batch/call-batched)))
+
+(defn vmap
+  "f batched over a leading axis, as JAX's vmap: a function of the same
+   arguments that runs f once for the n particles of a batch, under the
+   batch tracer (docs/array-api.md §8b).
+   - :in-axes has one entry per argument: 0 for an argument batched along
+     its leading axis (an array, or maps and vectors of arrays that all
+     have it), nil for one every particle shares (any value). By default
+     every argument is batched. The batched arrays agree on n, the size of
+     their leading axis. Another axis is a transpose away
+     (array/transpose), so an in-axis is 0 or nil.
+   - Inside f, a batched argument has the shape of one row, and every op
+     acts per particle. Shared values meet batched ones by their
+     per-particle axes: a per-particle scalar plus a shared vector is the
+     vector plus each particle's own value. Draws are per particle, n
+     independent draws, even from a shared key. f runs on the tracer over
+     the batched arrays' backend, which creation functions use.
+   - f's value is an array, a host number, or maps and vectors of them.
+     Each leaf comes back with a leading axis of n: the particles' values,
+     or a shared value (one no batched value reached) broadcast.
+   - Gradients inside f are per particle, as value-and-grad's in a batched
+     run: ((vmap (grad g)) xs) is each row's gradient. A shared argument's
+     gradient is per particle too; summed over the particles, it is the
+     gradient of their total.
+   Nothing falls back to one particle at a time, as gen.batched's runs of
+   generative functions do. These are loud:
+   - f reading a batched value on the host (item, ->clj, truthy? of a
+     comparison, =), the batched-branch error (:gen.array/batched-branch);
+   - a batched comparison that nothing read: a raw if or when on it took
+     one branch for every particle (pick with where);
+   - batched arguments without a leading axis or disagreeing on n, and
+     in-axes of another length than the arguments;
+   - a vmap inside a batched run, since batching does not nest (the
+     batched-branch error, so a batched run around it falls back);
+   - a vmap of a value being differentiated, a gradient through a vmap
+     (differentiate inside it);
+   - a value of f that is no tree of arrays.
+   Nothing is evaluated (eval!): on a lazy backend the result is lazy."
+  ([f] (vmap f nil))
+  ([f opts]
+   (when-not (ifn? f)
+     (throw (ex-info (str "vmap: f must be a function, not " (pr-str f)) {:op :vmap :value f})))
+   (when-not (or (nil? opts) (map? opts))
+     (throw (ex-info (str "vmap: the options are a map, {:in-axes …}, not " (pr-str opts)) {:op :vmap :value opts})))
+   (let [{:keys [in-axes]} opts]
+     (when-let [unknown (seq (remove #{:in-axes} (keys opts)))]
+       (throw (ex-info (str "vmap: unknown options " (vec unknown) "; the option is :in-axes")
+                       {:op :vmap :unknown (vec unknown)})))
+     (when-not (or (nil? in-axes)
+                   (and (vector? in-axes) (every? #(or (nil? %) (and (integer? %) (zero? (long %)))) in-axes)))
+       (throw (ex-info (str "vmap: :in-axes is a vector of 0 (batched along the leading axis) or nil (shared) per"
+                            " argument, not " (pr-str in-axes) "; move another axis to the front with array/transpose")
+                       {:op :vmap :in-axes in-axes})))
+     (fn [& args]
+       (let [args (vec args)]
+         (when (and in-axes (not= (count in-axes) (count args)))
+           (throw (ex-info (str "vmap: :in-axes " (pr-str in-axes) " names " (count in-axes) " arguments; the call gives "
+                                (count args))
+                           {:op :vmap :in-axes in-axes :arguments (count args)})))
+         (@call-batched f (or in-axes (vec (repeat (count args) 0))) args))))))
+
+;; ---------------------------------------------------------------------------
 ;; Validation across particles
 ;; ---------------------------------------------------------------------------
 
