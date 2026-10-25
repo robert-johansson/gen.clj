@@ -20,10 +20,10 @@ with its source, and shown where it can be by code that is a no-op on
 the JVM backend.
 
 The chapter's code lives in one namespace. Besides the aliases of the
-earlier chapters, it uses four of the namespaces underneath:
+earlier chapters, it uses three of the namespaces underneath:
 `gen.array.protocols`, the backend contract; `gen.array.dtype`, the
-dtypes and their promotion; `gen.array.batch`, the batch tracer; and
-`gen.random.threefry`, the generator behind the keys.
+dtypes and their promotion; and `gen.random.threefry`, the generator
+behind the keys.
 
 <!-- code: ns -->
 ```clojure
@@ -31,7 +31,6 @@ dtypes and their promotion; `gen.array.batch`, the batch tracer; and
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.edn :as edn]
             [gen.array :as array :refer [+ - * /]]
-            [gen.array.batch :as batch]
             [gen.array.dtype :as dtype]
             [gen.array.protocols :as p]
             [gen.book.svg :as svg]
@@ -1023,43 +1022,50 @@ table keyed by the same keywords, and the conformance suite iterates
 over the operations.
 
 Two of gen.clj's backends are not hardware. The tape is one, a backend
-that wraps the real one. The batch tracer, `gen.array.batch`, is the
-other: the backend under batched execution. Its values hold one value
-per particle, with leading batch axes, and present to the code they flow
-through the shape of one particle. `batch/wrap` makes three particles of
-a vector of three, and a function written for one value runs on all
-three at once:
+that wraps the real one. The batch tracer is the other: the backend
+under batched execution. Its values hold one value per particle, with
+leading batch axes, and present to the code they flow through the shape
+of one particle. The tracer itself, `gen.array.batch`, is internal.
+`array/vmap` is the public way to run a function on it, as JAX's `vmap`
+is. Given a vector of three, it makes three particles of it, runs a
+function written for one value on all three at once, and returns the
+particles' values on a leading axis:
 
 <!-- code: batched -->
 ```clojure
 (def points (array/with-backend jvm (array/array [0.0 1.0 2.0])))
-
-(def particles (batch/wrap points [3]))
-
-[(array/shape points) (array/shape particles)
- (array/backend-name (array/backend particles))]
-;=> [[3] [] :batch]
 
 (defn standard-log-density
   "The log density of x under the standard normal."
   [x]
   (dc/log-prob (d/normal 0 1) x))
 
-(array/allclose? (batch/unwrap (standard-log-density particles) [3])
-                 (standard-log-density points))
+(def seen (atom nil))
+
+(def densities
+  ((array/vmap (fn [x] (reset! seen x) (standard-log-density x)))
+   points))
+
+[(array/shape points) (array/shape @seen)
+ (array/backend-name (array/backend @seen)) (array/shape densities)]
+;=> [[3] [] :batch [3]]
+
+(array/allclose? densities (standard-log-density points))
 ;=> true
 ```
 
-The tracer aligns batched and shared values by their per-particle axes,
-as JAX's vmap does. A per-particle scalar meeting a shared vector of
-three gives each particle that vector plus its own value, although the
-batch has three particles too:
+`:in-axes` says which arguments are batched along their leading axis
+(0) and which every particle shares (nil). The tracer aligns batched and
+shared values by their per-particle axes, as JAX's vmap does. A
+per-particle scalar meeting a shared vector of three gives each particle
+that vector plus its own value, although the batch has three particles
+too:
 
 <!-- code: per-particle -->
 ```clojure
 (def shared (array/with-backend jvm (array/array [10.0 20.0 30.0])))
 
-(batch/unwrap (+ particles shared) [3])
+((array/vmap + {:in-axes [0 nil]}) points shared)
 ;=> [[10.0 20.0 30.0] [11.0 21.0 31.0] [12.0 22.0 32.0]]
 ```
 
@@ -1068,31 +1074,36 @@ was GenMLX's way and gen.clj's first. It cannot tell a per-particle
 scalar of shape $[N]$ from a shared vector of length $N$, and it added
 the two element by element (docs/array-api.md §8b).
 
-Values of two backends never meet in one operation, and no operation
-moves a value between backends: read it with `array/->clj` and make the
-array again on the other (docs/array-api.md §3). Two batched runs of
-different sizes are two batch backends, and their particles cannot meet:
-
-<!-- code: two-batches -->
-```clojure
-;; error: add: arrays from different backends (:batch and :batch)
-(+ particles (batch/wrap (array/with-backend jvm (array/array [1.0 2.0])) [2]))
-```
-
 Reading a batched value on the host cannot give one answer for every
 particle. That is the batched-branch error, which makes a batched run
-fall back to one particle at a time, as *Speeding Up* showed:
+of a generative function fall back to one particle at a time, as
+*Speeding Up* showed. `array/vmap` asks for a batched run, so it does
+not fall back, and the error is its own:
 
 <!-- code: batched-read -->
 ```clojure
 ;; error: Cannot read on the host a batched value
-(array/item particles)
+((array/vmap array/item) points)
+```
+
+Values of two backends never meet in one operation, and no operation
+moves a value between backends: read it with `array/->clj` and make the
+array again on the other (docs/array-api.md §3). Two batched runs are
+two batch backends, and the tracer does not nest one in the other, so a
+vmap inside a batched run is refused, with the batched-branch error
+again. Inside a generative function's batched run, that error makes the
+run fall back to one particle at a time, where the vmap runs:
+
+<!-- code: nested-vmap -->
+```clojure
+;; error: vmap inside a batched run
+((array/vmap (fn [x] ((array/vmap #(+ x %)) shared))) points)
 ```
 
 The wrapping backends compose. A gradient under the tracer is vmap's:
 each particle gets the gradient of its own scalar run, by one backward
-pass (docs/array-api.md §8b). Inside it, a value belongs to the tape, which wraps
-the tracer, which wraps the JVM backend:
+pass (docs/array-api.md §8b). In a vmap of a gradient, a value belongs
+to the tape, which wraps the tracer, which wraps the JVM backend:
 
 <!-- code: wrapped -->
 ```clojure
@@ -1106,14 +1117,18 @@ the tracer, which wraps the JVM backend:
 (def chain-seen (atom nil))
 
 (def slopes
-  ((array/grad (fn [x]
-                 (reset! chain-seen (wrapped (array/backend x)))
-                 (standard-log-density x)))
-   particles))
+  ((array/vmap (array/grad (fn [x]
+                             (reset! chain-seen (wrapped (array/backend x)))
+                             (standard-log-density x))))
+   points))
 
-[(batch/unwrap slopes [3]) @chain-seen]
+[slopes @chain-seen]
 ;=> [[-0.0 -1.0 -2.0] (:tape :batch :jvm)]
 ```
+
+The other order, a gradient through a vmap, would put the tape outside
+the tracer, and it is refused, loudly: differentiate inside the vmap,
+and sum the particles' gradients where a total's is wanted (Exercise 5).
 
 So a model or a distribution that named a backend, by computing with
 the JVM backend's arrays or with clojure.core's arithmetic on its
@@ -1151,11 +1166,12 @@ Each exercise has a tested solution at the end of the chapter.
    identity's gradient with `array/custom-vjp`, the straight-through
    estimator of quantized networks, and compare the gradients of
    $\operatorname{round}(x)^2$ at 1.3 with and without it.
-5. **A shared parameter, batched.** Under the tracer, take the gradient
-   in $\mu$ of a reading's log density, $\log\mathcal{N}(x; \mu, 2)$,
-   for four readings at once, with $\mu = 1$ shared by all four. Predict
-   what it holds, check it against four scalar gradients, and check that
-   its sum is the gradient of the four readings' total log density.
+5. **A shared parameter, batched.** With `array/vmap`, take the
+   gradient in $\mu$ of a reading's log density,
+   $\log\mathcal{N}(x; \mu, 2)$, for four readings at once, with
+   $\mu = 1$ shared by all four. Predict what it holds, check it against
+   four scalar gradients, and check that its sum is the gradient of the
+   four readings' total log density.
 
 ## Solutions
 
@@ -1238,10 +1254,11 @@ $\operatorname{round}(x)^2$ is $2\operatorname{round}(x) = 2$:
 ;=> [0.0 2.0]
 ```
 
-**5.** Under the tracer a shared argument's gradient is per particle, as
-vmap's: four values, $(x_i - \mu)/4$. They are the four scalar
-gradients, and their sum is the gradient of the total, which is what a
-shared parameter's learning needs:
+**5.** In-axes `[nil 0]` share $\mu$ and batch the readings. A shared
+argument's gradient is per particle, as JAX's vmap gives it: four
+values, $(x_i - \mu)/4$. They are the four scalar gradients, and their
+sum is the gradient of the total, which is what a shared parameter's
+learning needs:
 
 <!-- code: solution-5 -->
 ```clojure
@@ -1253,11 +1270,7 @@ shared parameter's learning needs:
   (dc/log-prob (d/normal mu 2.0) x))
 
 (def per-reading
-  (array/with-backend jvm
-    (let [xs (batch/wrap readings [4])
-          slopes (batch/batched [4]
-                   ((array/grad reading-density) 1.0 xs))]
-      (batch/unwrap slopes [4]))))
+  ((array/vmap (array/grad reading-density) {:in-axes [nil 0]}) 1.0 readings))
 
 per-reading
 ;=> [-0.5 -0.125 0.25 0.625]

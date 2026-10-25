@@ -49,7 +49,10 @@
    differs across them, gen.partition): a part's backend (part-backend)
    draws what the batch's own run would for its particles, gather-into
    takes their rows of the batch's values into it, and join and scatter
-   put parts' values back together. Parts holds a batch's data by part."
+   put parts' values back together. Parts holds a batch's data by part.
+
+   The public way to run a function batched is gen.array/vmap, whose call
+   is call-batched here: wrap, run and unwrap, under a batched run's guards."
   {:api :internal}
   (:require [gen.array :as array]
             [gen.array.dtype :as dt]
@@ -480,6 +483,126 @@
    every particle."
   [x batch-shape]
   (with-batch-axes (array/backend x) x batch-shape))
+
+;; ---------------------------------------------------------------------------
+;; A function run batched: gen.array/vmap
+;; ---------------------------------------------------------------------------
+
+(defn- refuse-nested
+  "Throws the batched-branch error when vmap's call would nest in a batched
+   run: under one (another vmap's function, a batched generative function),
+   or given a value of one. The tracer does not nest (backend-for), and the
+   batched-branch error makes a batched run around the call fall back to
+   one particle at a time, where it runs unnested."
+  [args]
+  (let [b array/*backend*]
+    (when (instance? BatchBackend b)
+      (throw (array/batched-branch (str "vmap inside a batched run (another vmap's function, or a batched generative"
+                                        " function): batching does not nest")
+                                   {:op :vmap :outer (.-batch-shape ^BatchBackend b)}))))
+  (doseq [[i arg] (map-indexed vector args)]
+    (when (some array/batched? (tree/leaves arg))
+      (throw (array/batched-branch (str "vmap of a value of a batched run (argument " i "): batching does not nest")
+                                   {:op :vmap :argument i})))))
+
+(def ^:private differentiate-inside
+  (str "a gradient through a vmap is not supported (docs/array-api.md §8b). Differentiate inside it,"
+       " ((array/vmap (array/grad f)) xs), and sum a shared argument's per-particle gradients"))
+
+(defn- refuse-tracked
+  "Throws when an argument holds a value being differentiated: a gradient
+   through a vmap, the tape outside the tracer."
+  [args]
+  (doseq [[i arg] (map-indexed vector args)]
+    (when (some array/tracked? (tree/leaves arg))
+      (throw (ex-info (str "vmap of a value being differentiated (argument " i "): " differentiate-inside)
+                      {:op :vmap :argument i})))))
+
+(defn- batched-leaf
+  "leaf, of argument i, batched (in-axis 0): checked to have a leading axis."
+  [i leaf]
+  (cond (not (array/backend-array? leaf))
+        (throw (ex-info (str "vmap: argument " i " is batched (in-axis 0), and " (pr-str leaf) " in it is "
+                             (if (array/host? leaf) "a host scalar" "no array") ", with no leading axis to batch over;"
+                             " give the argument in-axis nil to share it")
+                        {:op :vmap :argument i :value leaf}))
+        (empty? (array/shape leaf))
+        (throw (ex-info (str "vmap: argument " i " is batched (in-axis 0), and an array in it is 0-d, with no"
+                             " leading axis to batch over; give the argument in-axis nil to share it")
+                        {:op :vmap :argument i :shape []}))
+        :else leaf))
+
+(defn- batch-size
+  "[n inner]: the size of the leading axis that every leaf of the batched
+   arguments (in-axis 0) shares, and the backend of their arrays."
+  [args in-axes]
+  (let [leaves (vec (for [[i arg axis] (map vector (range) args in-axes)
+                          :when (some? axis)
+                          leaf (tree/leaves arg)]
+                      [i (batched-leaf i leaf)]))
+        sizes (vec (distinct (map (fn [[i leaf]] [i (first (array/shape leaf))]) leaves)))]
+    (cond (empty? leaves)
+          (throw (ex-info "vmap needs a batched argument (in-axis 0) holding an array, whose leading axis is the batch"
+                          {:op :vmap :in-axes in-axes}))
+          (next (distinct (map second sizes)))
+          (throw (ex-info (str "vmap: the batched arguments disagree on the batch size, their leading axis: "
+                               (apply str (interpose ", " (map (fn [[i n]] (str "argument " i " has " n)) sizes))))
+                          {:op :vmap :sizes sizes}))
+          :else [(long (second (first sizes))) (array/common-backend (map second leaves))])))
+
+(defn- run-traced
+  "(apply f in) under the batch backend b. An op that meets a value being
+   differentiated outside the vmap (a tape's, which does not wrap the
+   tracer) names the cause: a gradient through a vmap."
+  [b f in]
+  (try (array/with-backend b (apply f in))
+       (catch clojure.lang.ExceptionInfo e
+         (if (= #{:tape :batch} (set (:backends (ex-data e))))
+           (throw (ex-info (str "vmap: f met a value being differentiated outside it (" (ex-message e) "): "
+                                differentiate-inside)
+                           {:op :vmap} e))
+           (throw e)))))
+
+(defn- result
+  "A leaf of f's value with the leading batch axis of n: a value of the run
+   b as its particles, a shared one broadcast to every particle (a host
+   number as an array of inner, weakly typed)."
+  [b inner n x]
+  (cond (batched? x) (if (identical? b (.-backend ^Batched x))
+                       (value x)
+                       (throw (ex-info "vmap: f returned a value of another batched run"
+                                       {:op :vmap :batch-shape (array/batch-shape x)})))
+        (array/array? x) (with-batch-axes (if (array/host? x) inner (array/backend x)) x [n])
+        :else (throw (ex-info (str "vmap: f's value must be an array, a host number, or vectors and maps of them;"
+                                   " it holds " (pr-str x))
+                              {:op :vmap :value x}))))
+
+(defn call-batched
+  "gen.array/vmap's call: (apply f args), run batched over the leading axis
+   of the arguments whose in-axis is 0 (every leaf of a batched argument's
+   tree), the others shared, under a batched run's guards (gen.batched's):
+   a batched-branch error raised in f, caught or not, or a batched
+   comparison that nothing read and the value does not hand back (a raw if
+   on it), is an error. f's value comes back as a tree of arrays with the
+   leading batch axis."
+  [f in-axes args]
+  (refuse-nested args)
+  (refuse-tracked args)
+  (let [[n inner] (batch-size args in-axes)
+        b (backend inner [n])
+        in (mapv (fn [arg axis] (if (some? axis) (tree/map-leaves #(Batched. % b false) arg) arg)) args in-axes)
+        [[r bools] branch] (array/logging-branches #(unread-bools (fn [] (run-traced b f in))))]
+    ;; a batched-branch error that f caught still means the particles differ
+    (when branch (throw branch))
+    (when (seq bools)
+      (let [kept (java.util.Collections/newSetFromMap (java.util.IdentityHashMap.))]
+        (run! #(.add kept %) (filter batched? (tree/leaves r)))
+        (when-not (every? #(.contains kept %) bools)
+          (throw (array/batched-branch (str "vmap: a batched comparison was never read. Either a raw if, when or case on"
+                                            " it took one branch for every particle (compute both values and pick with"
+                                            " array/where), or it is unused")
+                                       {:op :vmap ::unread-comparison true})))))
+    (tree/map-leaves #(result b inner n %) r)))
 
 ;; ---------------------------------------------------------------------------
 ;; Parts of a batch

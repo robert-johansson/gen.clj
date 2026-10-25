@@ -141,6 +141,7 @@
   truthy? {:arglists ([x])}
   value-and-grad {:arglists ([f] [f {:keys [argnums], :or {argnums 0}}])}
   variance {:arglists ([x] [x {:keys [ddof], :or {ddof 0}, :as opts}])}
+  vmap {:arglists ([f] [f opts])}
   weak-dtype {:arglists ([x] [x b])}
   where {:arglists ([c x y])}
   with-backend {:kind :macro, :arglists ([b & body])}

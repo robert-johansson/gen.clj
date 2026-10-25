@@ -678,6 +678,13 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     namespace stays experimental. `array/vmap`, a public way to run a
     function batched over a leading axis, joins the stable surface before
     the tag (genclj-t3ur), so dependents and the book leave gen.array.batch.
+    As built (2026-10-25, the agent, provisional; docs/array-api.md §8b):
+    `(array/vmap f {:in-axes [0 nil …]})`, in-axes 0 or nil only (another
+    axis is a transpose away, and 1.x can add them); trees of arrays in and
+    out, a shared result broadcast; a batched run's guards, with no
+    fallback (vmap asks for a batched run); draws per particle even from a
+    shared key, as every batched run's; nesting and a gradient through a
+    vmap refused loudly, a vmap of a gradient per particle.
   - **Before the tag:** the friction that changes shape lands (one
     result-key vocabulary, kernels returning {:trace :accepted?}, labeled
     metrics, matching batched return shapes, selections' union and
