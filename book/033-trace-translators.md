@@ -45,7 +45,8 @@ code:
             [gen.inference.mh :as mh]
             [gen.inference.particle-filter :as pf]
             [gen.inference.transform :as tf]
-            [gen.random :as rng]))
+            [gen.random :as rng]
+            [gen.selection :as sel]))
 ```
 
 ## Trace transforms
@@ -665,12 +666,35 @@ given the same keys, in the proposed trace and in $\log \alpha$:
 ;=> [[true true] [true true] [true true] [true true]]
 ```
 
-The library's involution does two things `tf/run` does not. `tf/run`
-treats every continuous read as consumed by the move; a transform may
-also read a choice it keeps (to compute another), and the library counts
-that read as an unchanged output of the Jacobian. And the library checks
-that every continuous input the move consumes was read, since one it
-ignores would be lost, and the map would not be a bijection.
+The library's involution does two things `log-alpha` leaves out. A
+transform may read a choice it keeps, to compute another; the
+involution's update keeps it, and the involution counts the read as an
+unchanged output of the Jacobian. `tf/run`, which updates nothing,
+treats every continuous read as consumed unless `:retained` names the
+choices the move keeps. Told so, it gives the same Jacobian, here
+$e^{xu}$ for $(x, y, u) \mapsto (x, y e^{xu}, -u)$:
+
+<!-- code: kept-read -->
+```clojure
+(tf/deftransform tilt
+  "(x, y, u) to (x, y·exp(x·u), -u): y moves by an amount x sets, and x
+   stays."
+  [model-in aux-in model-out aux-out]
+  (let [x (tf/read model-in :x :continuous)
+        y (tf/read model-in :y :continuous)
+        u (tf/read aux-in :u :continuous)]
+    (tf/write model-out :y (* y (array/exp (* x u))) :continuous)
+    (tf/write aux-out :u (- u) :continuous)))
+
+(:log-abs-det (tf/run tilt (cm/choicemap :x 0.5 :y 2.0) (cm/choicemap :u 0.6)
+                      {:retained (sel/select :x)}))
+;=> 0.3
+```
+
+The library also checks that every continuous input the move consumes
+was read, since one it ignores would be lost, and the map would not be a
+bijection. Its result holds the Jacobian apart too, as `:log-abs-det`
+beside the `:weight` that includes it.
 
 ## A move in other coordinates
 
@@ -762,7 +786,8 @@ The space is small enough to enumerate. The exact posterior over levels
 is each trace's score, normalized. The kernel's transition matrix sums,
 over each direction the auxiliary function can pick, its probability
 times the acceptance probability, and puts the rejected mass on the
-diagonal:
+diagonal. `mh/move` gives the move and its $\log \alpha$ for auxiliary
+choices it is given (`:fwd-choices`) in place of drawing them:
 
 <!-- code: enumerate -->
 ```clojure
@@ -783,6 +808,13 @@ diagonal:
   [q tr u]
   (Math/exp (array/item (:weight (gfi/assess q [tr] u (rng/key 0))))))
 
+(defn move-given
+  "The involutive move of q and h from trace tr with the auxiliary choices
+   u, given rather than drawn: mh/move's {:trace :log-alpha}."
+  [tr q h u]
+  (mh/move tr q [] {:involution (tf/involution h) :fwd-choices u}
+           (rng/key 0) (rng/key 0)))
+
 (defn transitions
   "The kernel's transition matrix: row i holds the probabilities of a move
    from level i to each level, summed over the auxiliary choices q can
@@ -793,8 +825,7 @@ diagonal:
                    (let [p (probability q tr u)]
                      (if (zero? p)
                        row
-                       (let [{tr' :trace la :log-alpha}
-                             (log-alpha tr q h u (rng/key 0))
+                       (let [{tr' :trace la :log-alpha} (move-given tr q h u)
                              a (min 1.0 (Math/exp la))]
                          (-> row
                              (update (long (array/item (tr' :k))) + (* p a))
@@ -832,22 +863,19 @@ $\pi K = \pi$:
 ;=> [true true]
 ```
 
-The enumeration's ratios are the library's: `mh/move` gives the same
-$\log \alpha$ for the direction it draws, from every level.
+The library's ratios are the interface's: `log-alpha`, built above from
+`assess`, `tf/run` and `update`, gives the same $\log \alpha$ for each
+direction the walk can pick, from every level.
 
 <!-- code: library-agrees -->
 ```clojure
 (every? true?
         (for [tr level-traces
-              key (rng/split (rng/key 11) 3)]
-          (let [[k1 k2] (rng/split key)
-                {tr' :trace w :log-alpha}
-                (mh/move tr direction [] {:involution (tf/involution step)}
-                         k1 k2)
-                u (cm/choicemap :up? (> (array/item (tr' :k))
-                                        (array/item (tr :k))))]
-            (array/allclose? w (:log-alpha (log-alpha tr direction step u
-                                                      (rng/key 0)))))))
+              u [(cm/choicemap :up? true) (cm/choicemap :up? false)]
+              :when (pos? (probability direction tr u))]
+          (array/allclose? (:log-alpha (move-given tr direction step u))
+                           (:log-alpha (log-alpha tr direction step u
+                                                  (rng/key 0))))))
 ;=> true
 ```
 
@@ -863,8 +891,8 @@ has probability $\frac12$, so the step up is accepted with $\alpha =
 (defn step-up
   "log α of the step up from level k."
   [k]
-  (:log-alpha (log-alpha (level-traces k) direction step
-                         (cm/choicemap :up? true) (rng/key 0))))
+  (:log-alpha (move-given (level-traces k) direction step
+                          (cm/choicemap :up? true))))
 
 (defn log-odds
   "log π(j)/π(i)."
@@ -900,7 +928,7 @@ choices:
 
 <!-- code: no-flip -->
 ```clojure
-;; error: The inverse transform does not give back the trace
+;; error: The involution applied twice does not give back the trace
 (tf/deftransform step-no-flip
   "A step up or down, with the direction kept: not an involution."
   [model-in aux-in model-out aux-out]
@@ -911,7 +939,7 @@ choices:
 
 (def checked-no-flip (tf/involution step-no-flip {:check? true}))
 
-(checked-no-flip (level-traces 2) (cm/choicemap :up? true) nil [] (rng/key 0))
+(checked-no-flip (level-traces 2) (cm/choicemap :up? true) (rng/key 0))
 ```
 
 ## Reversible jump
@@ -1143,8 +1171,8 @@ priors and of the likelihoods, and the Jacobian:
                          (- (log-prior m1 m2) (log-prior 1.15))
                          (- (log-likelihood m1 m2) (log-likelihood 1.15 1.15))
                          split-log-jacobian)
-      {la :log-alpha} (log-alpha one-trace branch-proposal split-merge
-                                 (cm/choicemap :dof 0.4) (rng/key 0))]
+      {la :log-alpha} (move-given one-trace branch-proposal split-merge
+                                  (cm/choicemap :dof 0.4))]
   [(array/allclose? reversible-jump la)
    (array/allclose? la (reduce + (vals split-pieces)))])
 ;=> [true true]
@@ -1464,7 +1492,7 @@ interface yet (bean genclj-ob44); its translators are built from
 | A transform and its inverse | `tf/pair`, `tf/inverse` |
 | Trace translator (Def. 3.6.1, Eqs. 3.12 and 3.13, Alg. 9) | `tf/translator`, `tf/deterministic-translator` |
 | Symmetric trace translator (Def. 3.7.1, Eq. 3.15, Alg. 11) | `tf/involution` |
-| Involutive MCMC (Alg. 12, Eq. 3.17) | `mh/involutive-mh`; `mh/move` for the move and its ratio |
+| Involutive MCMC (Alg. 12, Eq. 3.17) | `mh/involutive-mh`; `mh/move` for the move and its ratio, its auxiliary choices drawn or given |
 | SMC with trace translators (Alg. 10) | `pf/move-reweight` with a translator; `tf/updating-translator` for SMCP3 |
 
 The weight of every construct in this chapter came from the same
@@ -1605,10 +1633,10 @@ with mean $0.75$, not 1.
 
 <!-- code: solution-3-check -->
 ```clojure
-;; error: The inverse transform does not give back the forward choices
+;; error: The involution applied twice does not give back the forward choices
 (def checked-ratio (tf/involution ratio-split-merge {:check? true}))
 
-(checked-ratio one-trace (cm/choicemap :dof 0.4) nil [] (rng/key 0))
+(checked-ratio one-trace (cm/choicemap :dof 0.4) (rng/key 0))
 ```
 
 Without the check, MH stops the chain at its first merge of $m_1 >
@@ -1655,8 +1683,8 @@ has probability 0.4, so $\log \alpha$ falls by $\log 2$:
   [(balanced? posterior-levels kernel) (stationary? posterior-levels kernel)])
 ;=> [true true]
 
-(mapv #(:log-alpha (log-alpha (level-traces 1) % step (cm/choicemap :up? true)
-                              (rng/key 0)))
+(mapv #(:log-alpha (move-given (level-traces 1) % step
+                               (cm/choicemap :up? true)))
       [direction drifting])
 ;=> [1.9 1.2069]
 ```

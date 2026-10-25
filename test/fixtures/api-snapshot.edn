@@ -577,7 +577,7 @@
   involutive-mh {:arglists ([trace proposal proposal-args involution] [trace proposal proposal-args involution key])}
   mh {:arglists ([trace selection-or-proposal] [trace x y] [trace proposal proposal-args key])}
   mh-particles {:arglists ([ps selection] [ps selection key])}
-  move {:arglists ([trace proposal proposal-args {:keys [involution backward backward-args]} k-propose k-update])}}
+  move {:arglists ([trace proposal proposal-args {:keys [involution backward backward-args fwd-choices], :as opts} k-propose k-update])}}
 
  gen.inference.nuts
  {adapt {:arglists ([trace selection opts] [trace selection opts key])}
@@ -623,13 +623,14 @@
   deterministic-translator {:arglists ([{:keys [q-forward q-backward], :as opts}])}
   extending-translator {:arglists ([{:keys [p-new-args p-argdiffs new-observations q-forward q-forward-args], t :transform}])}
   inverse {:arglists ([t])}
-  involution {:arglists ([t] [t {:keys [check?]}])}
+  involution {:arglists ([t] [t {:keys [check? proposal]}])}
   involutive {:arglists ([t])}
   map->Transform {:arglists ([m])}
   new-arguments {:arglists ([trace p-new-args p-argdiffs])}
   pair {:arglists ([f g])}
   read {:arglists ([space addr tag])}
-  run {:arglists ([t model-in aux-in])}
+  retval {:arglists ([space])}
+  run {:arglists ([t model-in aux-in] [t model-in aux-in {:keys [retained aux-retval], :as opts}])}
   same-choices? {:arglists ([a b])}
   tcall {:arglists ([t])}
   transform {:kind :macro, :arglists ([spaces & body])}

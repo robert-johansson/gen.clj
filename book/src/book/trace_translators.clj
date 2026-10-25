@@ -18,7 +18,8 @@
             [gen.inference.mh :as mh]
             [gen.inference.particle-filter :as pf]
             [gen.inference.transform :as tf]
-            [gen.random :as rng]))
+            [gen.random :as rng]
+            [gen.selection :as sel]))
 
 ;; book: plane-models
 (def polar
@@ -385,6 +386,21 @@
                        (:choices (:trace library)))]))
 ;=> [[true true] [true true] [true true] [true true]]
 
+;; book: kept-read
+(tf/deftransform tilt
+  "(x, y, u) to (x, y·exp(x·u), -u): y moves by an amount x sets, and x
+   stays."
+  [model-in aux-in model-out aux-out]
+  (let [x (tf/read model-in :x :continuous)
+        y (tf/read model-in :y :continuous)
+        u (tf/read aux-in :u :continuous)]
+    (tf/write model-out :y (* y (array/exp (* x u))) :continuous)
+    (tf/write aux-out :u (- u) :continuous)))
+
+(:log-abs-det (tf/run tilt (cm/choicemap :x 0.5 :y 2.0) (cm/choicemap :u 0.6)
+                      {:retained (sel/select :x)}))
+;=> 0.3
+
 ;; book: scale-jacobian
 (let [{:keys [log-abs-det]} (tf/run scale (cm/choicemap :rate 0.7)
                                     (cm/choicemap :u 0.4))
@@ -448,6 +464,13 @@
   [q tr u]
   (Math/exp (array/item (:weight (gfi/assess q [tr] u (rng/key 0))))))
 
+(defn move-given
+  "The involutive move of q and h from trace tr with the auxiliary choices
+   u, given rather than drawn: mh/move's {:trace :log-alpha}."
+  [tr q h u]
+  (mh/move tr q [] {:involution (tf/involution h) :fwd-choices u}
+           (rng/key 0) (rng/key 0)))
+
 (defn transitions
   "The kernel's transition matrix: row i holds the probabilities of a move
    from level i to each level, summed over the auxiliary choices q can
@@ -458,8 +481,7 @@
                    (let [p (probability q tr u)]
                      (if (zero? p)
                        row
-                       (let [{tr' :trace la :log-alpha}
-                             (log-alpha tr q h u (rng/key 0))
+                       (let [{tr' :trace la :log-alpha} (move-given tr q h u)
                              a (min 1.0 (Math/exp la))]
                          (-> row
                              (update (long (array/item (tr' :k))) + (* p a))
@@ -493,23 +515,19 @@
 ;; book: library-agrees
 (every? true?
         (for [tr level-traces
-              key (rng/split (rng/key 11) 3)]
-          (let [[k1 k2] (rng/split key)
-                {tr' :trace w :log-alpha}
-                (mh/move tr direction [] {:involution (tf/involution step)}
-                         k1 k2)
-                u (cm/choicemap :up? (> (array/item (tr' :k))
-                                        (array/item (tr :k))))]
-            (array/allclose? w (:log-alpha (log-alpha tr direction step u
-                                                      (rng/key 0)))))))
+              u [(cm/choicemap :up? true) (cm/choicemap :up? false)]
+              :when (pos? (probability direction tr u))]
+          (array/allclose? (:log-alpha (move-given tr direction step u))
+                           (:log-alpha (log-alpha tr direction step u
+                                                  (rng/key 0))))))
 ;=> true
 
 ;; book: boundary
 (defn step-up
   "log α of the step up from level k."
   [k]
-  (:log-alpha (log-alpha (level-traces k) direction step
-                         (cm/choicemap :up? true) (rng/key 0))))
+  (:log-alpha (move-given (level-traces k) direction step
+                          (cm/choicemap :up? true))))
 
 (defn log-odds
   "log π(j)/π(i)."
@@ -531,7 +549,7 @@
              {:labels? true :x-label "to level" :y-label "from level"})
 
 ;; book: no-flip
-;; error: The inverse transform does not give back the trace
+;; error: The involution applied twice does not give back the trace
 #_(tf/deftransform step-no-flip
   "A step up or down, with the direction kept: not an involution."
   [model-in aux-in model-out aux-out]
@@ -542,7 +560,7 @@
 
 #_(def checked-no-flip (tf/involution step-no-flip {:check? true}))
 
-#_(checked-no-flip (level-traces 2) (cm/choicemap :up? true) nil [] (rng/key 0))
+#_(checked-no-flip (level-traces 2) (cm/choicemap :up? true) (rng/key 0))
 
 ;; book: branching-model
 (def branching-model
@@ -691,8 +709,8 @@ split-pieces
                          (- (log-prior m1 m2) (log-prior 1.15))
                          (- (log-likelihood m1 m2) (log-likelihood 1.15 1.15))
                          split-log-jacobian)
-      {la :log-alpha} (log-alpha one-trace branch-proposal split-merge
-                                 (cm/choicemap :dof 0.4) (rng/key 0))]
+      {la :log-alpha} (move-given one-trace branch-proposal split-merge
+                                  (cm/choicemap :dof 0.4))]
   [(array/allclose? reversible-jump la)
    (array/allclose? la (reduce + (vals split-pieces)))])
 ;=> [true true]
@@ -978,10 +996,10 @@ split-pieces
       (tf/write model-out :m2 m2 :continuous))))
 
 ;; book: solution-3-check
-;; error: The inverse transform does not give back the forward choices
+;; error: The involution applied twice does not give back the forward choices
 #_(def checked-ratio (tf/involution ratio-split-merge {:check? true}))
 
-#_(checked-ratio one-trace (cm/choicemap :dof 0.4) nil [] (rng/key 0))
+#_(checked-ratio one-trace (cm/choicemap :dof 0.4) (rng/key 0))
 
 ;; book: solution-3-chain
 ;; error: The backward proposal gives the move's reverse choices density 0
@@ -1007,8 +1025,8 @@ split-pieces
   [(balanced? posterior-levels kernel) (stationary? posterior-levels kernel)])
 ;=> [true true]
 
-(mapv #(:log-alpha (log-alpha (level-traces 1) % step (cm/choicemap :up? true)
-                              (rng/key 0)))
+(mapv #(:log-alpha (move-given (level-traces 1) % step
+                               (cm/choicemap :up? true)))
       [direction drifting])
 ;=> [1.9 1.2069]
 

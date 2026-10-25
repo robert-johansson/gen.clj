@@ -33,6 +33,13 @@ newest first in each section.
 
 ### Changed
 
+- **The transform checks' messages say what ran** (genclj-xsml). An
+  involution's `:check?` throws "The involution applied twice does not
+  give back the trace" (or "the forward choices"), where it said "The
+  inverse transform does not give back …", which a translator's check
+  still says. `tf/inverse` of a transform made by `tf/transform` without
+  one throws "The anonymous transform (tf/transform) has no inverse …",
+  where the name printed empty.
 - **Breaking. `:inv-metric` is labeled by address** (DESIGN §9, "Labeled
   metrics"; genclj-qs62).
   - `mcmc/hmc`, `mala` and `nuts`, their `-particles` kernels, the
@@ -215,6 +222,30 @@ newest first in each section.
 
 ### Added
 
+- **The trace-transform API's missing pieces** (DESIGN §9, "The
+  transform API"; genclj-xsml).
+  - `tf/run` takes options: `:retained`, a selection of the model
+    choices the move keeps, whose continuous reads (neither written nor
+    copied) count as unchanged outputs of the Jacobian, as an
+    involution's update keeps them, so `tf/run` inspects a move that
+    reads x to move y and keeps x, where it threw "maps 3 dimensions to
+    2"; and `:aux-retval`, aux-in's return value for `tf/retval`.
+  - The results of `tf/involution`'s involutions and of every translator
+    hold `:log-abs-det` beside `:weight`, which still includes it. A move
+    outside the support has weight -Inf and no `:log-abs-det`.
+  - `mh/move` takes `:fwd-choices u`: the move's `:log-alpha` for given
+    auxiliary choices, assessed under the proposal, in place of drawing
+    them; a u the proposal gives density 0 is an error.
+  - An involution from `tf/involution` is also called `(h trace u key)`
+    or `(h trace u)`, without the two placeholders of `(h trace u nil []
+    key)`.
+  - `(tf/retval space)` in a transform's body: the return value of what
+    made an input space's choices (a trace's for model-in; for aux-in
+    the proposal's: an involution's fwd-retval, a translator's
+    q-forward's, in a check the backward proposal's), read on the host
+    and constant to the Jacobian, for a move's structure such as a path.
+    An involution's check of a transform that reads it needs the
+    proposal, `{:check? true :proposal q}`.
 - **`mcmc/inv-metric`: a metric labeled** (genclj-qs62). `(mcmc/inv-metric
   trace selection m)` is the inverse metric the kernels read from the
   `:inv-metric` option m (any form they take; nil the identity), as a
@@ -271,7 +302,7 @@ newest first in each section.
     and memory, gen.random.threefry and gen.backend.mlx.exact (internal).
   - `test/fixtures/api-snapshot.edn` holds the stable surface: every
     public var but `^:no-doc` ones, with its arglists or its kind (32
-    namespaces, 667 vars with genclj-9efy's replacements, gfi/assess-backward, array/vmap, the kernel constructors and mcmc/inv-metric). gen.api-test fails when the code differs. It
+    namespaces, 668 vars with genclj-9efy's replacements, gfi/assess-backward, array/vmap, the kernel constructors, mcmc/inv-metric and tf/retval). gen.api-test fails when the code differs. It
     names what was added, removed or changed, and calls out apart a var
     removed without a deprecation first. `clojure -M:test -m gen.api
     write` writes the snapshot after a deliberate change; `check` prints

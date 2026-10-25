@@ -334,7 +334,7 @@ determinants cancel:
 ```clojure
 (def split-merge-move (tf/involution split-merge {:check? true}))
 
-(def four (:trace (split-merge-move three split-choices nil [] (rng/key 0))))
+(def four (:trace (split-merge-move three split-choices (rng/key 0))))
 
 (let [merged (tf/run split-merge four (:aux split))]
   [(tf/same-choices? (:aux merged) split-choices)
@@ -392,10 +392,10 @@ auxiliary choices do not come back:
 
 <!-- code: notebook-check -->
 ```clojure
-;; error: The inverse transform does not give back the forward choices
+;; error: The involution applied twice does not give back the forward choices
 (def notebook-move (tf/involution notebook-split-merge {:check? true}))
 
-(notebook-move three split-choices nil [] (rng/key 0))
+(notebook-move three split-choices (rng/key 0))
 ```
 
 The exchange happens not to change the acceptance ratio, since the split
@@ -683,7 +683,9 @@ standard errors, for $k$ from 1 to 4:
 With the notebook's weight, the chain is wrong. A split of fraction $f_i$
 is accepted $1/f_i$ times too often and a merge too rarely, and the
 segments multiply: after 1500 sweeps, the fraction with two segments is
-far below the exact 0.6944:
+far below the exact 0.6944. The involution's result holds $\log \lvert
+\det J \rvert$ apart as `:log-abs-det`, so the notebook's weight is its
+`:weight` less that:
 
 <!-- code: without-jacobian -->
 ```clojure
@@ -693,8 +695,9 @@ far below the exact 0.6944:
   [t]
   (let [move (tf/involution t)]
     (fn [tr u retval args key]
-      (update (move tr u retval args key) :weight -
-              (:log-abs-det (tf/run t tr u))))))
+      (let [{:keys [log-abs-det] :as moved} (move tr u retval args key)]
+        ;; a move outside the support is not weighed, and has no Jacobian
+        (cond-> moved log-abs-det (update :weight - log-abs-det))))))
 
 (def notebook-counts
   (segment-counts (rj-sweep (without-jacobian split-merge) uniform-share
@@ -1023,31 +1026,20 @@ The proposal draws a path and a new subtree:
 ```
 
 The transform exchanges the subtree at the path with the new one. It
-does not see the proposal's return value, so it reads the path back from
-the choices that made it. It keeps the path, so that the move back picks
-the same node, and returns the old subtree as the move back's new one.
-Every write is a copy, so the move has no continuous part and its
-Jacobian is 1:
+reads the path from the proposal's return value, `tf/retval` of the
+auxiliary space, as the notebook's involution takes it; a return value
+gives a move its structure, and the Jacobian holds it constant. The
+transform keeps the path, so that the move back picks the same node, and
+returns the old subtree as the move back's new one. Every write is a
+copy, so the move has no continuous part and its Jacobian is 1:
 
 <!-- code: subtree-swap -->
 ```clojure
-(defn node-path
-  "The model address of the node that the auxiliary choices at :path pick,
-   read in a transform's body: :tree, then :left or :right at each step."
-  [aux-in]
-  (loop [at [:path] path [:tree]]
-    (if (tf/read aux-in (conj at :stop) :discrete)
-      path
-      (recur (conj at :rest-of-path)
-             (conj path (if (tf/read aux-in (conj at :left) :discrete)
-                          :left
-                          :right))))))
-
 (tf/deftransform subtree-swap
   "The subtree at the picked node exchanged with the new subtree. The path
    is kept, so that the move back picks the same node."
   [model-in aux-in model-out aux-out]
-  (let [path (node-path aux-in)]
+  (let [path (into [:tree] (tf/retval aux-in))]
     (tf/copy aux-in :path aux-out :path)
     (tf/copy aux-in :new-subtree model-out path)
     (tf/copy model-in path aux-out :new-subtree)))
@@ -1055,7 +1047,11 @@ Jacobian is 1:
 
 On a sum of a linear and a constant kernel, regenerating the right
 subtree as a periodic kernel gives the new program, and the old constant
-comes back as the move back's new subtree:
+comes back as the move back's new subtree. Called directly, the
+involution takes the proposal's return value for those choices and the
+proposal's arguments, as `mh/involutive-mh` passes them; its check,
+which applies it again to the backward choices, takes the proposal
+itself (`:proposal`), to compute the path the move back reads:
 
 <!-- code: subtree-example -->
 ```clojure
@@ -1076,8 +1072,17 @@ comes back as the move back's new subtree:
                 [:new-subtree :kernel-type] :periodic
                 [:new-subtree :scale] 0.5 [:new-subtree :period] 0.4))
 
-(def swapped ((tf/involution subtree-swap {:check? true})
-              example-trace regrow nil [] (rng/key 0)))
+(def regrow-path
+  "The path the proposal returns for regrow's choices."
+  (:retval (gfi/assess regenerate-subtree [example-trace uniform-period]
+                       regrow (rng/key 0))))
+
+regrow-path
+;=> [:right]
+
+(def swapped
+  ((tf/involution subtree-swap {:check? true :proposal regenerate-subtree})
+   example-trace regrow regrow-path [uniform-period] (rng/key 0)))
 
 (:retval (:trace swapped))
 ;=> [:plus [:linear 0.72] [:periodic 0.5 0.4]]
@@ -1585,7 +1590,7 @@ months lie within two predictive standard deviations.
 | `involution`, a Julia function with weight `get_score(t') - get_score(t)` | `tf/deftransform split-merge`, its Jacobian $f_i$ by automatic differentiation; `tf/involution` |
 | `mh(tr, randomness, (), involution)` | `mh/involutive-mh` |
 | `covariance_prior`, recursive | `kernel-grammar`, a recursive `gen` with `splice` |
-| `random_node_path`, `subtree_involution` | `random-node-path`, `tf/deftransform subtree-swap` (copies only) |
+| `random_node_path`, `subtree_involution` | `random-node-path`, `tf/deftransform subtree-swap` (copies only, the path from `tf/retval`) |
 | `predict_ys` with a jitter of $10^{-6}$ | `predict`, the noise floor of 0.01 as its jitter |
 
 The split/merge chain matched an exact posterior, and the notebook's

@@ -19,6 +19,7 @@
             [gen.inference.particle-filter :as pf]
             [gen.inference.transform :as tf :refer [deftransform read write copy]]
             [gen.random :as rng]
+            [gen.selection :as sel]
             [gen.test-support :as ts]))
 
 (defn- lp [d v] (ts/number (dc/log-prob d v)))
@@ -287,16 +288,28 @@
 
 (def two-latents (gen [] (trace :x (d/normal 0 1)) (trace :y (d/normal 0 1))))
 
+(def ^:private tilt
+  "(x, y, u) → (x, y·e^{xu}, -u), x read and kept: |det J| = e^{xu}."
+  (tf/transform [model-in aux-in model-out aux-out]
+    (let [x (read model-in :x :continuous) y (read model-in :y :continuous) u (read aux-in :u :continuous)]
+      (write model-out :y (* y (array/exp (* x u))) :continuous)
+      (write aux-out :u (array/negate u) :continuous))))
+
 (deftest a-read-the-update-keeps-is-an-output
-  ;; (x, y, u) → (x, y·e^{xu}, -u), x read and kept: |det J| = e^{xu}
-  (let [t (tf/transform [model-in aux-in model-out aux-out]
-            (let [x (read model-in :x :continuous) y (read model-in :y :continuous) u (read aux-in :u :continuous)]
-              (write model-out :y (* y (array/exp (* x u))) :continuous)
-              (write aux-out :u (array/negate u) :continuous)))
-        tr (:trace (gfi/generate two-latents [] (cm/choicemap :x 0.5 :y 2.0) (rng/key 20)))
-        {t' :trace w :weight} ((tf/involution t) tr (cm/choicemap :u 0.6) nil nil (rng/key 0))]
+  (let [tr (:trace (gfi/generate two-latents [] (cm/choicemap :x 0.5 :y 2.0) (rng/key 20)))
+        {t' :trace w :weight ldj :log-abs-det} ((tf/involution tilt) tr (cm/choicemap :u 0.6) nil nil (rng/key 0))]
     (is (ts/close? 0.5 (t' :x)))
-    (is (ts/close? (+ (- (:score t') (:score tr)) (* 0.5 0.6)) w))))
+    (is (ts/close? (* 0.5 0.6) ldj) "the involution's :log-abs-det")
+    (is (ts/close? (+ (- (:score t') (:score tr)) (* 0.5 0.6)) w))
+    (testing "tf/run told which choices the move keeps (genclj-xsml)"
+      ;; planted (2026-10-25): :retained ignored throws "maps 3 dimensions
+      ;; to 2", as tf/run did for every such move
+      (let [run (fn [opts] (tf/run tilt (cm/choicemap :x 0.5 :y 2.0) (cm/choicemap :u 0.6) opts))]
+        (is (ts/close? ldj (:log-abs-det (run {:retained (sel/select :x)}))))
+        (is (ts/close? ldj (:log-abs-det (run {:retained (sel/select :x :y)}))) "a written choice is no kept input")
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"maps 3 dimensions to 2" (run nil)) "consumed by default")
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"takes :retained" (run {:retain (sel/select :x)})))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"is a selection" (run {:retained [:x]})))))))
 
 (deftest the-involution-check
   (let [tr (exact-posterior-trace (rng/key 18))
@@ -448,6 +461,35 @@
           moved (:trace (gfi/update tr (cm/choicemap :x x') (rng/key 0)))]
       (is (ts/close? (+ (- (:score moved) (:score tr)) (- (lp (d/normal 0.3 0.5) x')) (lp (d/normal x' 0.5) 0.3)) la)))))
 
+(def ^:private walk-x (gen [tr] (trace :x (d/normal (tr :x) 0.5))))
+
+(deftest a-move-s-log-alpha-for-given-auxiliary-choices
+  ;; genclj-xsml: mh/move with :fwd-choices gives log α for the u it is
+  ;; given: the swap's closed form (Eq. 3.16) at u's no key drew, and with
+  ;; the u a key draws, the drawn move's. Planted (2026-10-25): u drawn in
+  ;; place of the given one fails the closed forms; the forward weight left
+  ;; out fails them and the drawn move's
+  (let [tr (:trace (gfi/generate scaled [] (cm/choicemap :x 0.3 :y 0.8) (rng/key 41)))
+        swap-move (tf/involution swap)]
+    (doseq [x' [-0.4 0.5 1.2]]
+      (let [moved (:trace (gfi/update tr (cm/choicemap :x x') (rng/key 0)))
+            {t' :trace la :log-alpha} (mh/move tr walk-u [] {:involution swap-move :fwd-choices (cm/choicemap :u x')}
+                                               (rng/key 0) (rng/key 0))]
+        (is (ts/close? x' (t' :x)))
+        (is (ts/close? (+ (- (:score moved) (:score tr)) (- (lp (d/normal 0.3 0.5) x')) (lp (d/normal x' 0.5) 0.3)) la))))
+    (doseq [key (rng/split (rng/key 40) 3)]
+      (let [[k-propose k-update] (rng/split key)
+            u (:choices (gfi/propose walk-u [tr] k-propose))]
+        (is (= (:log-alpha (mh/move tr walk-u [] {:involution swap-move} k-propose k-update))
+               (:log-alpha (mh/move tr walk-u [] {:involution swap-move :fwd-choices u} k-propose k-update))))))
+    (testing "without an involution, the trace updated with u: a symmetric walk's ratio is the scores'"
+      (let [{t' :trace la :log-alpha} (mh/move tr walk-x [] {:fwd-choices (cm/choicemap :x 0.9)} (rng/key 0) (rng/key 0))]
+        (is (ts/close? (- (:score t') (:score tr)) la))))
+    (testing "a u the proposal cannot draw is loud"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"density 0, so no move starts"
+                            (mh/move tr (gen [tr] (trace :u (d/uniform (tr :x) (+ (tr :x) 1.0)))) []
+                                     {:involution swap-move :fwd-choices (cm/choicemap :u -1.0)} (rng/key 0) (rng/key 0)))))))
+
 (def gamma-a (gen [] (trace :a (d/gamma 1 1))))
 
 (deftransform reciprocal [model-in aux-in model-out aux-out]
@@ -593,3 +635,117 @@
                     (rng/split (rng/key 60) n))
         frac (/ (count (filter #(% :two?) after)) (double n))]
     (is (< (Math/abs (- frac p-two)) (* 5 (Math/sqrt (/ (* p-two (- 1 p-two)) n)))) (str frac " against " p-two))))
+
+;; ---------------------------------------------------------------------------
+;; The API's shape (genclj-xsml)
+;; ---------------------------------------------------------------------------
+
+(deftest every-translator-reports-its-log-abs-det
+  ;; genclj-xsml: :log-abs-det beside :weight, which holds it. Planted
+  ;; (2026-10-25): an involution's :log-abs-det taken as the update weight
+  ;; fails the first two; a translator's as 0 fails the third
+  (let [one (:trace (gfi/generate two-means [] (cm/choicemap :two? false :mu 0.7 :y1 y1 :y2 y2) (rng/key 15)))
+        {split :trace w :weight ldj :log-abs-det} ((tf/involution split-merge) one (cm/choicemap :u 0.2) (rng/key 0))]
+    (is (ts/close? (Math/log 2.0) ldj) "a split doubles the volume")
+    (is (ts/close? (+ (- (:score split) (:score one)) ldj) w))
+    (let [[to-pair _] (tf/pair to-pair to-sum)
+          r ((tf/translator {:p-new p-pair :q-forward difference :transform to-pair}) (gfi/simulate p-sum [] (rng/key 3))
+             (rng/key 4))]
+      (is (ts/close? (Math/log 0.5) (:log-abs-det r)) "(s, d) → ((s + d)/2, (s - d)/2)"))
+    (let [tr (:trace (gfi/generate growing [1] (cm/choicemap [:y 0] 0.4) (rng/key 8)))
+          extend (tf/extending-translator {:p-new-args [2] :new-observations (cm/choicemap [:y 1] 1.1)
+                                           :q-forward conditional :q-forward-args [1.1]})]
+      (is (= 0.0 (:log-abs-det (extend tr (rng/key 9)))) "no transform, no volume change"))
+    (testing "a move outside the support is not weighed"
+      (let [{w :weight :as r} ((tf/involution reciprocal) (:trace (gfi/generate gamma-a [] (cm/choicemap :a 2.0) (rng/key 0)))
+                               cm/EMPTY (rng/key 0))]
+        (is (Double/isFinite (ts/number w)))
+        (is (contains? r :log-abs-det)))
+      (let [negate (tf/involutive (tf/transform [mi ai mo ao] (write mo :a (array/negate (read mi :a :continuous)) :continuous)))
+            r ((tf/involution negate) (:trace (gfi/generate gamma-a [] (cm/choicemap :a 2.0) (rng/key 0))) cm/EMPTY (rng/key 0))]
+        (is (= ##-Inf (ts/number (:weight r))))
+        (is (not (contains? r :log-abs-det)))))))
+
+(deftest involutions-are-called-without-placeholders
+  ;; genclj-xsml: (h trace u key) and (h trace u) beside mh/move's (h trace
+  ;; u retval args key). Planted (2026-10-25): without the 3-arity, this
+  ;; and four other tests' calls throw
+  (let [tr (:trace (gfi/generate scaled [] (cm/choicemap :x 0.3 :y 0.8) (rng/key 41)))
+        h (tf/involution (tf/involutive scale-move))
+        u (cm/choicemap :u 0.4)
+        summary (fn [r] [(ts/host (cm/to-map (:choices (:trace r)))) (ts/number (:weight r)) (ts/host (cm/to-map (:bwd-choices r)))])
+        long-form (summary (h tr u nil [] (rng/key 7)))]
+    (is (= long-form (summary (h tr u (rng/key 7)))))
+    (is (= long-form (summary (h tr u))) "a key from the implicit source: the update draws nothing")))
+
+(deftest the-checks-name-what-they-ran
+  ;; genclj-xsml: an involution's check applies the involution again, a
+  ;; translator's the inverse transform; an anonymous transform says so.
+  ;; Planted (2026-10-25): the old messages fail each
+  (let [tr (exact-posterior-trace (rng/key 18))
+        u (if (tr :two?) cm/EMPTY (cm/choicemap :u 0.4))
+        doubling (tf/transform [model-in aux-in model-out aux-out]
+                 (write model-out :x (* 2.0 (read model-in :x :continuous)) :continuous))]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"^The involution applied twice does not give back the trace"
+                          ((tf/involution (tf/involutive doubling) {:check? true})
+                           (:trace (gfi/generate scaled [] (cm/choicemap :x 0.3 :y 0.8) (rng/key 41))) cm/EMPTY (rng/key 0))))
+    (is (map? ((tf/involution split-merge {:check? true}) tr u (rng/key 0))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"^The anonymous transform \(tf/transform\) has no inverse"
+                          (tf/inverse doubling)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"^The transform scale-move has no inverse" (tf/inverse scale-move)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"^The anonymous transform"
+                          ((tf/updating-translator {:q-forward standard-u :q-backward standard-u :check? true
+                                                    :transform (tf/transform [mi ai mo ao]
+                                                                 (write mo :mu (read ai :u :continuous) :continuous)
+                                                                 (write ao :u (read mi :mu :continuous) :continuous))})
+                           (:trace (gfi/generate mu-y [] (cm/choicemap :mu 0.3 :y 0.8) (rng/key 50))) (rng/key 51))))))
+
+(def ^:private three-xs (gen [] (doseq [i (range 3)] (trace [:x i] (d/normal 0 1)))))
+
+(def ^:private pick
+  "Picks a coordinate i and a step u; returns i."
+  (gen [_] (let [i (trace :i (d/uniform-discrete 0 2))] (trace :u (d/normal 0 0.5)) i)))
+
+(defn- scale-at
+  "x_i·e^u at the coordinate i, -u back, i kept: i from (index aux-in)."
+  [index]
+  (tf/involutive
+   (tf/transform [model-in aux-in model-out aux-out]
+     (let [i (index aux-in) u (read aux-in :u :continuous)]
+       (write model-out [:x i] (* (read model-in [:x i] :continuous) (array/exp u)) :continuous)
+       (write aux-out :u (array/negate u) :continuous)
+       (copy aux-in :i aux-out :i)))))
+
+(deftest a-transform-reads-the-proposal-s-return-value
+  ;; genclj-xsml: tf/retval, the path or index a proposal returns, for the
+  ;; move's structure: (x_i, u) → (x_i·e^u, -u), |det J| = e^u.
+  ;; Planted (2026-10-25): the Jacobian's runs without the return values
+  ;; fail the agreement (a loud retval error); the involution giving its
+  ;; fwd-retval to model-in fails it too
+  (let [by-retval (scale-at tf/retval)
+        by-read (scale-at #(read % :i :discrete))
+        tr (gfi/simulate three-xs [] (rng/key 90))]
+    (testing "the same moves as reading the choice that made it"
+      (doseq [key (rng/split (rng/key 91) 4)]
+        (let [move (fn [h] (let [r (mh/involutive-mh tr pick [] (tf/involution h) key)]
+                             [(:log-alpha r) (ts/host (cm/to-map (:choices (:trace r))))]))]
+          (is (= (move by-read) (move by-retval))))))
+    (testing "the check gives it the backward proposal's, given the proposal"
+      (is (some? (mh/involutive-mh tr pick [] (tf/involution by-retval {:check? true :proposal pick}) (rng/key 92))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"give the proposal"
+                            (mh/involutive-mh tr pick [] (tf/involution by-retval {:check? true}) (rng/key 92)))))
+    (testing "where there is none it is loud"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"aux-in has no return value"
+                            ((tf/involution by-retval) tr (cm/choicemap :i 1 :u 0.2) (rng/key 0))))
+      (is (ts/close? 0.2 (:log-abs-det (tf/run by-retval tr (cm/choicemap :i 1 :u 0.2) {:aux-retval 1})))
+          "tf/run's :aux-retval")
+      (let [model-retval (tf/transform [mi ai mo ao] (write mo :r (tf/retval mi) :discrete))]
+        (is (= [0 1] (cm/get-choice (:model (tf/run model-retval (gfi/simulate (gen [] [0 (array/array 1)]) [] (rng/key 0)) nil)) :r))
+            "a trace's own, read on the host")
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"model-in has no return value"
+                              (tf/run model-retval (cm/choicemap :x 1.0) nil)))))
+    (testing "a translator's: q-forward's, and in the check q-backward's"
+      (let [step (tf/updating-translator {:q-forward pick :q-backward pick :transform by-retval :check? true})
+            reads (tf/updating-translator {:q-forward pick :q-backward pick :transform by-read})]
+        (doseq [key (rng/split (rng/key 93) 3)]
+          (is (= (ts/number (:weight (reads tr key))) (ts/number (:weight (step tr key))))))))))
