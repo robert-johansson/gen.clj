@@ -168,7 +168,7 @@
 ;; above -Inf, and of those not below +Inf. A NaN is in both, as -Inf + Inf
 ;; is NaN, so the score is the IEEE sum of the elements' scores, what assess
 ;; sums, the finite part rounded as a running total (genclj-ul72). The
-;; finite part is a compensated (Neumaier) sum, :finite and its rounding
+;; finite part is a compensated sum (Knuth's two-sum), :finite and its rounding
 ;; error :comp: a plain running total drifts from the elements' sum by the
 ;; rounding of every step it took, past the laws' float64 tolerance after a
 ;; long chain of updates that take large scores in and out of a small total.
@@ -176,14 +176,12 @@
 (def ^:private no-total {:finite 0.0 :comp 0.0 :neg-inf 0 :pos-inf 0})
 
 (defn- compensated
-  "[finite comp] with x added: Neumaier's two-sum, so finite + comp holds
-   the exact sum up to one rounding."
+  "[finite comp] with x added: Knuth's two-sum, branch-free, so finite +
+   comp holds the exact sum up to one rounding."
   [finite comp x]
-  (let [t (+ finite x)]
-    (if (and (array/host? t) (array/host? x) (array/host? finite))
-      (let [f (double finite) y (double x) t (double t)]
-        [t (+ (double comp) (if (>= (Math/abs f) (Math/abs y)) (+ (- f t) y) (+ (- y t) f)))])
-      [t (+ comp (array/where (array/>= (array/abs finite) (array/abs x)) (+ (- finite t) x) (+ (- x t) finite)))])))
+  (let [t (+ finite x)
+        b (- t finite)]
+    [t (+ comp (+ (- finite (- t b)) (- x b)))]))
 
 (defn- add-finite
   "total with finite score x added to its compensated sum."

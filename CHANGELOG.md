@@ -274,7 +274,7 @@ newest first in each section.
 
 - **Map's, Unfold's and Scan's running totals no longer drift** (genclj-ul72's
   totals; found by the walk laws). The finite part of a total is a
-  compensated (Neumaier) sum, so a long chain of updates that take large
+  compensated sum (Knuth's two-sum), so a long chain of updates that take large
   scores in and out of a small total keeps the score at assess's sum to
   round-off; a plain running total drifted 2.9e-11 from -2.82 after 1000
   updates. Scores differ from before in the last bits.
