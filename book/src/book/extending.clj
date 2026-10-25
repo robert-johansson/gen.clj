@@ -745,11 +745,17 @@ exact-m
 (agrees-with-differences? my-wrong-plus)
 ;=> [true false]
 
-;; book: optimizer-kinds
-;; error: An optimizer's :kind is :sgd, :gradient-descent or :adam
-#_(learning/init {:kind :momentum :lr 0.05 :beta 0.9} {:mu 0.0})
-
 ;; book: momentum
+(defmethod learning/-init ::momentum [_ store]
+  (array/tree-map array/zeros-like store))
+
+(defmethod learning/-step ::momentum [{:keys [lr beta]} velocity store grads]
+  ;; v' = βv + g, then θ' = θ + lr·v'
+  (let [v (learning/update-given (fn [v g] (+ (* beta v) g)) velocity grads)]
+    [(learning/update-given (fn [theta _ v] (+ theta (* lr v))) store grads v)
+     v]))
+
+;; book: momentum-fit
 (def mean-model
   (gen [n]
     (let [mu (param :mu)]
@@ -758,33 +764,25 @@ exact-m
 
 (def ys [1.2 0.4 2.1 1.7 0.9])
 
-(defn data-gradients
-  "The gradient of mean-model's log density of ys in its parameters, with
-   the store given."
-  [store]
-  (let [constraints (apply cm/choicemap
-                           (mapcat (fn [i y] [[:y i] y]) (range) ys))
-        model (dyn/with-params mean-model store)]
-    (grad/param-gradients
-     (:trace (gfi/generate model [(count ys)] constraints (rng/key 13))))))
+(def example
+  "The five numbers as one example: mean-model's arguments and
+   constraints."
+  [[(count ys)] (apply cm/choicemap (mapcat (fn [i y] [[:y i] y]) (range) ys))])
 
-(defn momentum-step
-  "[store' velocity']: one step of gradient ascent with momentum, as
-   gen.learning's steps are, over stores of names to numbers: v' = βv + g,
-   then θ' = θ + lr·v'."
-  [{:keys [lr beta]} velocity store gradients]
-  (let [v (merge-with (fn [v g] (+ (* beta v) g)) velocity gradients)]
-    [(merge-with (fn [theta v] (+ theta (* lr v))) store v) v]))
+(defn fit
+  "mean-model's store after 200 steps of optimizer from mu = 0."
+  [optimizer]
+  (:store (learning/train mean-model {:mu 0.0} optimizer (constantly example)
+                          grad/param-gradients {:batches-per-epoch 200})))
 
-(def fitted
-  (loop [store {:mu 0.0} velocity {:mu 0.0} i 0]
-    (if (= i 200)
-      store
-      (let [[store velocity] (momentum-step {:lr 0.05 :beta 0.5} velocity store
-                                            (data-gradients store))]
-        (recur store velocity (inc i))))))
+(def fitted (fit {:kind ::momentum :lr 0.05 :beta 0.5}))
 
 (array/allclose? (:mu fitted) (/ (reduce + ys) (count ys)))
+;=> true
+
+;; book: momentum-builtin
+(array/allclose? (:mu fitted)
+                 (:mu (fit (learning/momentum {:lr 0.05 :momentum 0.5}))))
 ;=> true
 
 ;; book: counts

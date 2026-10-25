@@ -721,9 +721,10 @@
 (deftest misnamed-optimizers-are-loud
   ;; the post-M5 review's I3-14: an unknown :kind names the kinds. Planted
   ;; bug (2026-10-22): the case without a default throws a bare
-  ;; IllegalArgumentException, "No matching clause"
-  (is (= [:sgd :gradient-descent :adam] (:kinds (ts/thrown-data (learn/init {:kind :rmsprop} {:w 1.0})))))
-  (is (= :rmsprop (:kind (ts/thrown-data (learn/step {:kind :rmsprop} nil {:w 1.0} {:w 0.1}))))))
+  ;; IllegalArgumentException, "No matching clause". The kinds are open
+  ;; now: gen.learning-test adds one
+  (is (every? (set (:kinds (ts/thrown-data (learn/init {:kind :rmsprob} {:w 1.0})))) [:sgd :gradient-descent :adam]))
+  (is (= :rmsprob (:kind (ts/thrown-data (learn/step {:kind :rmsprob} nil {:w 1.0} {:w 0.1}))))))
 
 (deftest gradient-trees-add-leaf-by-leaf
   ;; the one sum behind train, lecture-batched and VI's estimators: nested

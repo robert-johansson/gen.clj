@@ -656,14 +656,22 @@
   systematic {:arglists ([log-weights n] [log-weights n key])}}
 
  gen.learning
- {adam {:arglists ([{:keys [lr beta1 beta2 eps], :or {lr 0.001, beta1 0.9, beta2 0.999, eps 1.0E-8}}])}
+ {-init {:kind :multimethod}
+  -step {:kind :multimethod}
+  adagrad {:arglists ([{:keys [lr eps], :or {lr 0.01, eps 1.0E-10}}])}
+  adam {:arglists ([{:keys [lr beta1 beta2 eps], :or {lr 0.001, beta1 0.9, beta2 0.999, eps 1.0E-8}}])}
+  adamw {:arglists ([{:keys [lr beta1 beta2 eps weight-decay], :or {lr 0.001, beta1 0.9, beta2 0.999, eps 1.0E-8, weight-decay 0.01}}])}
+  clip-norm {:arglists ([optimizer {:keys [max-norm]}])}
   gradient-descent {:arglists ([{:keys [step-size-init step-size-beta]}])}
-  init {:arglists ([{:keys [kind]} store])}
+  init {:arglists ([optimizer store])}
   lecture {:arglists ([model model-args proposal store q-args-fn key])}
   lecture-batched {:arglists ([model model-args proposal store q-args-fn n key])}
+  momentum {:arglists ([{:keys [lr momentum nesterov?], :or {momentum 0.9, nesterov? false}}])}
+  rmsprop {:arglists ([{:keys [lr decay eps], :or {lr 0.01, decay 0.99, eps 1.0E-8}}])}
   sgd {:arglists ([{:keys [lr]}])}
-  step {:arglists ([{:keys [kind lr beta1 beta2 eps], :as optimizer} state store grads])}
-  train {:arglists ([gf store optimizer data-fn gradients-fn {:keys [epochs batches-per-epoch batch-size key], :or {epochs 1, batches-per-epoch 1, batch-size 1}}])}}
+  step {:arglists ([optimizer state store grads])}
+  train {:arglists ([gf store optimizer data-fn gradients-fn {:keys [epochs batches-per-epoch batch-size key], :or {epochs 1, batches-per-epoch 1, batch-size 1}}])}
+  update-given {:arglists ([f x g & more])}}
 
  gen.random
  {bernoulli {:arglists ([key p] [key p shape] [key p shape opts])}

@@ -785,6 +785,21 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     each application. kernel/run and nuts/sample take `:keep`. `(kern []
     …)` and `(kern ^:trace [tr] …)` are the kernel itself, not a function
     of no arguments.
+  - **The optimizer interface** (the agent, 2026-10-25, provisional;
+    genclj-y2ab): an optimizer stays a map with a `:kind`, and the
+    multimethods `learning/-init` and `learning/-step` dispatch on it, as
+    gen.dist.core's do on a distribution's `:type` (a protocol on records
+    would make optimizers values that print and compare less plainly).
+    `-step` is pure, `[store' state']`; `learning/step` checks that shape
+    and evaluates it. `learning/update-given` (the gradient-tree walk) is
+    public, for a user's `-step`. The built-ins follow PyTorch's update
+    rules and defaults, ascending: momentum (`:nesterov?`), rmsprop
+    (`:decay`, PyTorch's alpha), adagrad, adamw; `clip-norm` wraps another
+    optimizer and clips by the global norm (optax's clip_by_global_norm),
+    its state the wrapped one's. Constructors check their options loudly:
+    rates at least 0 (a negative rate, a descent, is an error), momenta,
+    decays and betas in [0, 1), eps and max-norm above 0. Learning-rate
+    schedules are not built in.
 - **Indices are 0-based** (Clojure idiom, as in GenMLX; D2): Map's and
   Unfold's addresses, Recurse's nodes (root 0), categorical's values
   (categorical-logits' too: 0 to n - 1) and Switch's branch index (branch 0

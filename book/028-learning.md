@@ -318,9 +318,12 @@ with a step of 0.4 reaches the closed form in 150 steps:
 
 gen.learning has Gen.jl's three update rules, as data: `sgd`
 (Gen.jl's `FixedStepGradientDescent`), `gradient-descent`
-(`GradientDescent`, whose step decays) and `adam`. All three ascend,
-since the objective is a log density. They differ in how far a step
-goes. Take one step from 0 along a gradient whose second coordinate is a
+(`GradientDescent`, whose step decays) and `adam`. It also has the
+common rules that GenFluxOptimizers brings to Gen.jl: `momentum` (with
+Nesterov's variant), `rmsprop`, `adagrad` and `adamw`, and `clip-norm`,
+which clips the gradients before another rule's step. *Extending
+gen.clj* adds a rule of its own. Every rule ascends, since the objective
+is a log density. They differ in how far a step goes. Take one step from 0 along a gradient whose second coordinate is a
 hundredth of its first:
 
 <!-- code: one-step -->

@@ -33,6 +33,14 @@ newest first in each section.
 
 ### Changed
 
+- **Breaking. Optimizers' options are checked when they are made**
+  (genclj-y2ab). A missing or non-numeric option, a negative rate or
+  weight decay, a momentum, decay or beta outside [0, 1), and an eps or
+  max-norm of 0 or less throw ex-info naming the option (`{:option
+  :value}`). A missing rate failed at the first step with a
+  NullPointerException, and a negative rate stepped downhill. An unknown
+  `:kind` names every kind that has a `-step`, those added outside
+  gen.learning too, in `:kinds` (sorted by name).
 - **Breaking. Every kernel returns `{:trace :accepted? …}`** (DESIGN §9,
   "The 1.0's shape", kernels' shape; a509ad5, genclj-4hu0).
   - `mcmc/map-optimize` and `mcmc/elliptical-slice` return `{:trace
@@ -195,6 +203,20 @@ newest first in each section.
 
 ### Added
 
+- **An open optimizer interface, and the common optimizers** (DESIGN §9,
+  "The 1.0's shape", the optimizer interface; genclj-y2ab).
+  - An optimizer is a map with a `:kind`, which the multimethods
+    `learn/-init` (its initial state for a store) and `learn/-step` (a
+    pure `[store' state']`) dispatch on, so any namespace adds one with two
+    methods, and `learn/step`, `learn/train` and VI's fits step it.
+    `learn/update-given`, the walk of a gradient tree that the built-in
+    steps use, is public for a user's `-step`.
+  - `learn/momentum` (`:nesterov? true` for Nesterov's), `learn/rmsprop`,
+    `learn/adagrad` and `learn/adamw`, as PyTorch's update rules and
+    defaults, ascending; `learn/clip-norm` wraps another optimizer and
+    scales each step's gradients to a global norm of at most `:max-norm`
+    (optax's clip_by_global_norm). The book's chapter 045 adds momentum
+    through the interface, where it stepped its own loop.
 - **`array/vmap`: a function batched over a leading axis,** as JAX's
   vmap (DESIGN §9, "The 1.0's shape"; fbf0d21, genclj-t3ur).
   `((array/vmap f {:in-axes [0 nil]}) xs shared)` runs f once for the
@@ -388,9 +410,9 @@ sections above in the commit that builds it.
   - Shape changes before the tag: one result-key vocabulary, kernels
     returning `{:trace :accepted?}`, labeled metrics, matching batched
     return shapes, selections' union and intersection, callable choice maps,
-    trace keyword lookups, public handler state, an optimizer interface and
-    training callbacks, laws for users, particle-filter accessors, and the
-    transform API.
+    trace keyword lookups, public handler state, training callbacks, laws
+    for users, particle-filter accessors, and the transform API. (The
+    optimizer interface is built: Added, above.)
 
 ## History before Unreleased, by milestone
 
