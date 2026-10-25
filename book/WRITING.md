@@ -46,7 +46,7 @@ Part III, Theory (`030-part-theory.md` holds its heading). The thesis is
 |------|---------|---------|
 | 031-gfi.md | The Generative Function Interface | the thesis, ch. 2; GenMLX book 031 |
 | 032-inference-as-operations.md | Inference as Operations on the GFI | the thesis, ch. 3; GenMLX book 032 |
-| 033-trace-translators.md | Trace Translators and Involutive MCMC | the thesis, ch. 3; GenMLX book 033; the split/merge of Gen.jl's Reversible-Jump MCMC notebook |
+| 033-trace-translators.md | Trace Translators and Involutive MCMC | the thesis, ch. 3; GenMLX book 033; the split/merge of Gen.jl's Reversible-Jump MCMC in Gen notebook |
 | 034-design.md | Design Rationale | DESIGN.md §3 and §9; GenMLX book 034 |
 | 035-verification.md | Verification: the Laws | ext/laws/src/gen/laws.clj, docs/research/law-audit.md, genjl-parity.md §3; GenMLX book 035 |
 
@@ -70,7 +70,7 @@ the appendices (`060-appendices.md`):
 | File | Chapter | Sources |
 |------|---------|---------|
 | 051-data-driven-proposals.md | Data-Driven Proposals: Inverse Planning | Gen.jl's Data-Driven Proposals; gen-quickstart's inverse-planning code, ported |
-| 052-reversible-jump.md | Reversible-Jump MCMC and Structure Learning | Gen.jl's Reversible-Jump MCMC notebook (piecewise-constant regression; GP kernel programs on airline data) |
+| 052-reversible-jump.md | Reversible-Jump MCMC and Structure Learning | Gen.jl's Reversible-Jump MCMC in Gen notebook (piecewise-constant regression; GP kernel programs on airline data) |
 | 053-smc-recipes.md | SMC Recipes | GenParticleFilters' example; GenSMCP3's examples |
 | 054-gallery.md | A Gallery of Models | GenMLX's examples/genmlx |
 | 061-from-genjl.md | Appendix: Coming from Gen.jl | DESIGN.md §9; bean genclj-dvgt |

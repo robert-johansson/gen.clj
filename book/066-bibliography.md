@@ -175,7 +175,7 @@ folder.
 | *Learning Generative Functions* | Gen.jl, `tutorials/learning_gen_fns.md` | *Learning* |
 | *Speeding Up Inference with the Static Modeling Language* | Gen.jl, `tutorials/scaling_with_sml.md` | *Speeding Up* |
 | *Improving Inference using Data-Driven Custom Proposals* | Gen.jl, `tutorials/data_driven_proposals.md` | *Data-Driven Proposals* |
-| *Reversible-Jump MCMC* | gen-quickstart, `Reversible-Jump MCMC in Gen.ipynb` | *Trace Translators and Involutive MCMC*, *Reversible-Jump MCMC and Structure Learning* |
+| *Reversible-Jump MCMC in Gen* | gen-quickstart, `Reversible-Jump MCMC in Gen.ipynb` | *Trace Translators and Involutive MCMC*, *Reversible-Jump MCMC and Structure Learning* |
 | *Adding New Distributions* | Gen.jl, `how_to/custom_distributions.md` | *Extending gen.clj* |
 | *Adding New Types of Generative Functions* | Gen.jl, `how_to/custom_gen_fns.md` | *Extending gen.clj* |
 | *Customizing Gradients* | Gen.jl, `how_to/custom_gradients.md` | *Extending gen.clj* |

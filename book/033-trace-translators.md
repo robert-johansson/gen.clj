@@ -17,11 +17,11 @@ The chapter follows §3.6 and §3.7 of Cusumano-Towner's thesis (2020),
 whose definitions, equations and algorithms it cites by number, and ports
 the GenMLX book's *Trace Translators and Involutive MCMC*. Its
 reversible-jump example is the split/merge move of the thesis's §3.7.4,
-which Gen.jl's *Reversible-Jump MCMC* notebook also builds; the notebook's
-own models, a piecewise-constant regression and kernel programs for
-airline data, are Part V's. *Gradient-Based MCMC* deferred involutive MCMC
-to this chapter, which builds it from the interface, one operation at a
-time, and checks it against the library's kernel.
+which Gen.jl's *Reversible-Jump MCMC in Gen* notebook also builds; the
+notebook's own models, a piecewise-constant regression and kernel
+programs for airline data, are Part V's. *Gradient-Based MCMC* deferred
+involutive MCMC to this chapter, which builds it from the interface, one
+operation at a time, and checks it against the library's kernel.
 
 The thesis writes $\upsilon$ for a trace's latent choices, $\rho$ for its
 observations, $\sigma$ for auxiliary choices and $\oplus$ for the union
