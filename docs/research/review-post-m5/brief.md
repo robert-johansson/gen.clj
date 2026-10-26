@@ -42,7 +42,7 @@ real findings beat 40 plausible ones, and a refuted finding is noise.
   worth saying.
 - **Known open work** lives in beans (an issue tracker). You may search it,
   read-only, from the main checkout (the snapshot has no beans):
-  `cd /Users/robert/code/gen.clj && beans list -S "<term>"` and `beans show
+  `cd ~/code/gen.clj && beans list -S "<term>"` and `beans show
   <id>`. If a finding is already an open bean, give the bean's id rather
   than presenting it as new.
 

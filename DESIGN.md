@@ -2666,7 +2666,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   `.claude/` and `*.pdf` gitignored. Its remote is the private
   `robert-johansson/gen.clj` (the owner, 2026-10-21, at M4's close: private
   until gen.clj has a license); main is pushed at a milestone's close or with
-  the owner's go-ahead. `.beans/` is its own private repo
+  the owner's go-ahead. The license (owner, 2026-10-26; genclj-fhdz): MIT,
+  `LICENSE`. The ports of Gen.jl 0.4.8's test suite (`test/gen/genjl/`)
+  derive from Gen.jl's and keep its Apache License 2.0, a copy beside
+  them, as its section 4 asks. `.beans/` is its own private repo
   (`robert-johansson/gen.clj-beans`), synced by SessionStart/PreCompact/Stop
   hooks (see `.beans/hooks/README.txt`).
 - **GenMLX extras, round 1 (owner, 2026-10-23; epic genclj-0qds).** Twelve
