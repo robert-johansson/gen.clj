@@ -1,4 +1,6 @@
-<p align="center"><img src="docs/logo.png" alt="gen.clj" width="480"></p>
+<p align="center">
+  <img src="genclj.png" alt="gen.clj" width="528">
+</p>
 
 Probabilistic programming in Clojure on the JVM: a port of GenMLX
 (ClojureScript on MLX), shaped by [Gen.jl](https://www.gen.dev) and Marco
