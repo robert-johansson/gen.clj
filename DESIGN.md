@@ -810,15 +810,16 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     so the gate's CUDA run sets MLX_ENABLE_TF32=0, the install page and the
     CHANGELOG say CUDA needs it for float32 accuracy, and after 1.0 the
     backend turns it off itself, with an opt-in (genclj-p3pr).
-    PROVISIONAL (the lead, 2026-10-26 night, under the owner's "tag v1.0
-    without asking me questions"): half-float sums on CUDA, which fail
-    backend conformance's long-half-float-sums (MLX accumulates them in
-    their own precision there, as on its CPU before genclj-y0mp), are a
-    known issue of 1.0.0 (CHANGELOG), not fixed before the tag: routing
-    them through half-sum on CUDA is a backend change only another CUDA
-    run could verify (genclj-tblx). The book's MLX run, information by the
-    rule above, was stopped after Part II's failures (genclj-ac70) to free
-    the MLX slot for the gate's checks.
+    Confirmed by the owner (2026-10-26 morning; the lead's decision of the
+    night, under the owner's "tag v1.0 without asking me questions"):
+    half-float sums on CUDA, which fail backend conformance's
+    long-half-float-sums (MLX accumulates them in their own precision
+    there, as on its CPU before genclj-y0mp), are a known issue of 1.0.0
+    (CHANGELOG), not fixed before the tag: routing them through half-sum
+    on CUDA is a backend change only another CUDA run could verify
+    (genclj-tblx). The book's MLX run, information by the rule above, was
+    stopped after Part II's failures (genclj-ac70) to free the MLX slot
+    for the gate's checks.
   - **The result keys** (the agent, 2026-10-25, confirmed by the owner; genclj-4jpw):
     one meaning per key across gen.inference, gen.gradients, gen.learning
     and gen.batched. A key that holds a log says so in its name, but for
@@ -3010,6 +3011,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       pairwise sum tree (O(log n) per change, its rounding unlike assess's
       sequential sum).
   - **Conjugacy, and Kalman and HMM generative functions (genclj-702q;
+    Kalman and HMM confirmed by the owner, 2026-10-26, with
+    gen.state-space in the stable tier; conjugacy, experimental,
     PROVISIONAL, owner to confirm).** Chosen by the user, never detected
     (§3.1's corollary).
     - `gen.inference.conjugate/with-conjugate-proposal gf latent children`
