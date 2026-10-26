@@ -32,7 +32,7 @@ For each finding:
    different model, the law stated directly, the number derived by hand. A
    claim you can't reproduce is not confirmed.
 3. Check DESIGN §9, the test-suite mapping and beans (`cd
-   /Users/robert/code/gen.clj && beans list -S "<term>"`) for a decision or
+   ~/code/gen.clj && beans list -S "<term>"`) for a decision or
    an open bean.
 4. Give a verdict:
    - **CONFIRMED:** you reproduced it, or the code plainly says so.

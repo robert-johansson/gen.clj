@@ -199,7 +199,7 @@
         (println (format "| what the grammar adds to a token | %.0f |" (/ (- sim-under sim-plain) n)))))))
 
 (defn -main [& [dir]]
-  (let [dir (File. (str (or dir "/Users/robert/gen-clj-models")))
+  (let [dir (File. (str (or dir (str (System/getProperty "user.home") "/gen-clj-models"))))
         files (filter #(.endsWith (.getName ^File %) ".gguf") (or (seq (.listFiles dir)) []))]
     (if (seq files)
       (doseq [f (sort files)]

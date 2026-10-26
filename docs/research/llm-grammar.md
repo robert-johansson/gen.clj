@@ -163,7 +163,7 @@ grammar holds the text.
 
 `clojure -M:bench -m gen.grammar-bench` on the Mac mini M4 (pure JVM,
 Graal JIT), alone on a quiet machine (2026-10-21, m3-round3 764469e),
-with the vocabularies of the three GGUF files in `/Users/robert/gen-clj-models`
+with the vocabularies of the three GGUF files in `~/gen-clj-models`
 (read from their headers; llama.cpp not loaded): Qwen3's byte-level BPE
 (151,936 tokens; its trie 333,802 nodes, built in 185 ms), Qwen3.5's
 (248,320; 592,346 nodes, 224 ms) and Gemma 3's SentencePiece (262,144;
