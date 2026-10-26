@@ -214,7 +214,10 @@ compiler (`native/pjrt_offsets.c`). The CUDA plugin is
 jax-cuda13-plugin's `xla_cuda_plugin.so` (here from the owner's
 genjax-parity venv on fenrir), with the client's BFC allocator growing on
 demand (XLA preallocates 75 % of the card by default, wrong on a shared
-host).
+host): the process held 578–586 MiB. A minimal CompileOptionsProto (one
+replica, one partition) is enough, and XLA needs no ptxas or libdevice
+setup (float64 exp, log, tanh and log1p compile and agree with the JVM
+to 1 ulp). The binding's own cost is about 6 µs of a 37 µs execute.
 
 ### What stages, and what does not
 
