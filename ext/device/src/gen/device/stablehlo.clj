@@ -9,6 +9,7 @@
    (broadcast_in_dim, NumPy's alignment), host numbers become constants,
    and a scan is a stablehlo.while whose operands are its counter, its
    carries, its outputs' buffers, its inputs and what its body captures."
+  {:api :internal}
   (:require [clojure.string :as str]))
 
 (set! *warn-on-reflection* true)

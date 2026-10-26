@@ -12,6 +12,7 @@
    cm/to-array), :accepted [steps], :start [d]}. The draws are the
    handler's: the same Threefry bits from the same keys; only rounding
    differs (float32 on the device)."
+  {:api :internal}
   (:require [gen.array :as array]
             [gen.array.batch :as batch]
             [gen.batched]
@@ -127,3 +128,46 @@
                     v0 (step-words k1 steps) steps)]
        {:values vs :accepted accepted :diverged diverged :start-ok start-ok :start v0}))
    (st/key-spec)))
+
+;; ---------------------------------------------------------------------------
+;; Counted chains: each step's key derived in the loop from the counter, so
+;; a program holds no [steps 2] array of keys (a thread's program, gen.device.cuda)
+
+(defn key-at
+  "(rng/split key n)'s key at the staged counter t (an int32 scalar, below
+   n): Threefry of the counter [0 t], as fold-in's."
+  [key t]
+  (st/->StagedKey (array/reshape (st/threefry-words (p/-key-words key) (array/reshape (array/astype t :uint32) [1])) [2])))
+
+(defn- counted-program
+  "run-program's program, its steps' keys derived in the loop."
+  [model args observations selection steps move]
+  (st/stage
+   (fn [key]
+     (let [[k0 k1] (rng/split key 2)
+           tr (:trace (gfi/generate model (st/constants args) (st/constants observations) k0))
+           others (sel/get-selected (:choices tr) (sel/complement selection))
+           proto (grad/continuous-selection tr selection)
+           v0 (cm/to-array proto)
+           [_ [vs accepted]]
+           (st/scan (fn [v t]
+                      (let [tr' (assoc tr :choices (cm/merge others (cm/from-array proto v)))
+                            {:keys [values accepted?]} (move tr' (key-at k1 t))
+                            v' (cm/to-array values)]
+                        [v' [v' accepted?]]))
+                    v0 nil steps)]
+       {:values vs :accepted accepted :start v0}))
+   (st/key-spec)))
+
+(defn hmc-chain
+  "hmc-run's program with its steps' keys derived in the loop (the same
+   draws): one chain's, for a thread of gen.device.cuda."
+  [model args observations selection {:keys [L eps] :or {L 10 eps 0.1} :as opts} steps]
+  (counted-program model args observations selection steps
+                   (fn [t k] (hmc-move t selection (assoc opts :L L :eps eps) k))))
+
+(defn mala-chain
+  "mala-run's program with its steps' keys derived in the loop."
+  [model args observations selection tau steps]
+  (counted-program model args observations selection steps
+                   (fn [t k] (mala-move t selection tau {} k))))

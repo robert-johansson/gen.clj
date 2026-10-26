@@ -24,6 +24,7 @@
    Reading a staged value on the host (truthy?, item, ->clj) is a loud
    error, as in array/compile: the program is staged once and run many
    times."
+  {:api :internal}
   (:refer-clojure :exclude [+ - * / < > <= >= ==])
   (:require [gen.array :as array :refer [+ - * / < > <= >= ==]]
             [gen.array.dtype :as dt]
@@ -345,18 +346,13 @@
      :outputs outs
      :out-tree (tree/skeleton out)}))
 
-(defn scan
-  "lax.scan on the staging backend: (f carry x) → [carry' y], run once on
-   staged values for a loop of n steps over xs (a tree of staged arrays
-   with a leading axis of n, or nil); returns [the last carry, the ys
-   stacked on a leading axis of n]. carry is a tree of staged values or
-   host numbers (made constants), and carry' must keep its shapes and
-   dtypes. Values of enclosing graphs that f reads are captured."
+(defn- scan*
+  "scan over xs (or over nothing, xs nil, f's x nil)."
   [f carry xs n]
   (let [outer (current)
         g (graph outer)
         carry-leaves (vec (leaves carry))
-        x-leaves (vec (leaves xs))
+        x-leaves (if (nil? xs) [] (vec (leaves xs)))
         carry-leaves (mapv #(if (array/host? %) (array/array % {:dtype (array/weak-dtype % backend)}) %) carry-leaves)
         cparams (binding [*graph* g] (mapv (fn [x i] (add-node! g :param [] (array/shape x) (array/dtype x) {:index i}))
                                            carry-leaves (range)))
@@ -391,3 +387,19 @@
           [cr yr] (split-at (count carry-leaves) results)]
       [(tree/refill (tree/skeleton carry') (vec cr))
        (tree/refill (tree/skeleton y) (vec yr))])))
+
+(defn scan
+  "lax.scan on the staging backend: (f carry x) → [carry' y], run once on
+   staged values for a loop of n steps over xs (a tree of staged arrays
+   with a leading axis of n); returns [the last carry, the ys stacked on a
+   leading axis of n]. With xs nil, f's x is the loop counter, an int32
+   scalar from 0 to n - 1 (carried beside carry). carry is a tree of
+   staged values or host numbers (made constants), and carry' must keep
+   its shapes and dtypes. Values of enclosing graphs that f reads are
+   captured."
+  [f carry xs n]
+  (if (some? xs)
+    (scan* f carry xs n)
+    (let [[[c _] y] (scan* (fn [[c t] _] (let [[c' y] (f c t)] [[c' (array/+ t 1)] y]))
+                           [carry (array/array 0 {:dtype :int32})] nil n)]
+      [c y])))

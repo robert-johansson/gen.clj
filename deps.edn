@@ -62,7 +62,9 @@
 
   ;; The device-program research prototype (bean genclj-a1hu), outside the
   ;; core: a staging backend, its StableHLO, and XLA's PJRT C API by FFM.
-  ;; PJRT needs a plugin: -Dgen.xla.plugin=<xla_cuda_plugin.so>
+  ;; PJRT needs a plugin: -Dgen.xla.plugin=<xla_cuda_plugin.so>; the CUDA C
+  ;; target NVRTC and the driver: -Dgen.cuda.nvrtc=<libnvrtc.so>. Its benches
+  ;; and gen.device.cuda-test read gen.parity-bench: add :bench.
   :device {:extra-paths ["ext/device/src" "ext/device/test"]
            :jvm-opts ["--enable-native-access=ALL-UNNAMED"]}
 

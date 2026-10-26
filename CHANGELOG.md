@@ -39,6 +39,10 @@ other values for the same key, from the same distribution.
 - **gen.clj is under the MIT license** (`LICENSE`). The ports of Gen.jl's
   test suite in `test/gen/genjl/` keep Gen.jl's Apache License 2.0, a copy
   beside them (owner, 2026-10-26; genclj-fhdz).
+- **Research branch `device-programs` only, not on main** (genclj-a1hu):
+  `gen.random/key?` is also true of a staged key (a device program's,
+  `gen.array.protocols/IStagedKey`, `^:no-doc`), whose split and fold-in
+  are its staging backend's. Host keys are unchanged.
 
 ## [1.0.0] - 2026-10-26
 
