@@ -8,15 +8,21 @@ every chapter of this book runs with nothing else installed. The MLX
 backend and the llama.cpp engine are optional, and each needs native
 libraries built once (below).
 
-gen.clj is used as a git dependency. In a project's `deps.edn`:
+gen.clj is used as a git dependency, a release by its tag. In a
+project's `deps.edn`:
 
 ```edn
 {:deps {gen.clj/gen.clj {:git/url "https://github.com/robert-johansson/gen.clj"
-                         :git/sha "…"}}}
+                         :git/tag "v1.0.0" :git/sha "…"}}}
 ```
 
-As a git dependency, `clojure -X:deps prep` compiles the Java binding the
-native backends load; the pure-Clojure backend does not need it.
+`:git/sha` is the tag's commit, or its first seven characters. The laws
+(*Verification: the Laws*), to check generative functions of your own,
+are the module ext/laws at the same tag: `gen.clj/laws {:git/url …
+:git/tag "v1.0.0" :git/sha "…" :deps/root "ext/laws"}`, which brings
+test.check. As a git dependency, `clojure -X:deps prep` compiles the Java
+binding the native backends load; the pure-Clojure backend does not
+need it.
 
 ## The REPL and the tests
 
@@ -66,6 +72,11 @@ clojure -J-Dgen.backend=mlx -X:test:light                          # Metal
 clojure -J-Dgen.backend=mlx -J-Dgen.mlx.device=cpu -X:test:light   # MLX's CPU backend
 clojure -J-Dgen.backend=mlx -J-Dgen.mlx.dtypes=64 …                # float64 (CPU only)
 ```
+
+On CUDA, set `MLX_ENABLE_TF32=0` in the environment: by default MLX
+computes float32 matrix products there in TF32, a 10-bit mantissa, which
+puts a matrix model's log density and gradients off by about 1e-3
+relative.
 
 MLX computes in float32 by default, and its arrays are lazy: an inference
 loop evaluates them once per iteration. A model that runs one particle at

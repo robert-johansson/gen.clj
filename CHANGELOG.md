@@ -2,12 +2,14 @@
 
 What changed in gen.clj that code built on it (memo.clj, GenGDT) must know
 about. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). gen.clj has no
-release yet. Until 1.0, dependents pin a commit (DESIGN.md §9, "A 1.0 for
-dependents"), and each entry names the commits on main that carry its
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions
+keep the promise below. gen.clj is a git dependency: a release is a tag,
+taken as `{:git/url … :git/tag "v1.0.0" :git/sha …}` (ext/laws at the same
+tag, with `:deps/root "ext/laws"`); between releases a dependent may pin
+a commit on main. Each entry names the commits on main that carry its
 change and the bean that tracks it.
 
-## What 1.0 will promise
+## What 1.x promises
 
 From DESIGN.md §9, "The 1.0's shape" (owner, 2026-10-25):
 
@@ -24,6 +26,9 @@ From DESIGN.md §9, "The 1.0's shape" (owner, 2026-10-25):
 - **Three tiers,** marked on each namespace (`{:api :stable | :experimental
   | :internal}`). Experimental namespaces (gen.llm.* among them) ship
   outside the promise. Internal ones are not for dependents.
+- **gen.laws:** a minor release may add a law to a set or change
+  `laws/close?`'s tolerances, each with a line here and its reason;
+  renaming or removing a law waits for 2.0 (owner, 2026-10-25).
 
 In the entries, **Breaking** marks a change that can make working code
 fail (throw, or read another shape or result), and **Draws** one that gives
@@ -31,8 +36,44 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [1.0.0] - 2026-10-26
+
+The first release, tag `v1.0.0` (the release gate, genclj-v97q).
+Checked before the tag: on the JVM backend, the battery and the whole
+book; on Metal and on MLX's CPU in float32, the full battery (1981 tests,
+0 failures each); on MLX's CPU in float64, the light tier; on CUDA (an RTX
+PRO 6000), the full battery, its failing and unreached namespaces again
+with `MLX_ENABLE_TF32=0`, all passing but one half-float sum (Known
+issues); and memo.clj (JVM and Metal) and GenGDT on the release
+candidate.
+
+### Known issues
+
+- **CUDA: set `MLX_ENABLE_TF32=0`.** MLX computes float32 matrix products
+  on CUDA in TF32 by default, a 10-bit mantissa (about 1e-3 relative): a
+  log density of 100 can be off by 0.1 nats. On the release run it failed
+  the matrix families' gradients, batched matrix VJPs, a vmapped matmul,
+  and Cholesky and solve checks; with `MLX_ENABLE_TF32=0` in the
+  environment they pass. gen.clj will turn TF32 off itself, with an
+  opt-in (DESIGN §9, owner, 2026-10-25; genclj-p3pr).
+- **CUDA: half-float sums** accumulate in their own precision, as MLX's
+  CPU did before genclj-y0mp: a long float16 or bfloat16 sum may lose
+  precision (backend conformance's long-half-float-sums fails there). Sum
+  in float32 (genclj-tblx). Metal and MLX's CPU are unaffected.
+- **CUDA: the JVM aborts at exit** with "Destroy(handle_) failed: driver
+  shutting down" when MLX comes from its CUDA wheel, after the program's
+  work is done, so the exit status is not the result (genclj-codn).
+  native/build-mlx.sh's source build (`cuda13-source`) applies MLX
+  v0.32.3's fix for it.
+- **The book on MLX:** some chapters of Part II do host math on results
+  and fail on the MLX backend (genclj-ac70). The book's gate is the JVM
+  backend, where every chapter passes.
+
 Changes on main since the post-M5 review's fixes (bd6b8b4, 2026-10-22),
-newest first in each section.
+newest first in each section; the milestones before them are summarized
+at the end.
 
 ### Changed
 
@@ -679,7 +720,7 @@ sections above in the commit that builds it. None is waiting now:
   interface and training callbacks; laws for users (ext/laws); the
   particle filter's accessors; and the transform API.
 
-## History before Unreleased, by milestone
+## History before 1.0.0, by milestone
 
 gen.clj was built in milestones before this file began. These summaries
 are for orientation. DESIGN.md (§1 and §9) and the milestone beans have the
@@ -700,7 +741,7 @@ Parts I (011–017), II (021–029), III (031–035), IV (041–045) and V
 (051–054), and the appendices Coming from Gen.jl, The Distributions
 (generated from gen.dist), The Public API (generated from the tiers),
 Notation, Installing and Running, and the Bibliography. Writing it found genclj-zxis, x6ox, 1t38 and
-de4g, and the ten decisions (Unreleased, above).
+de4g, and the ten decisions (1.0.0, above).
 
 ### The post-M5 review (2026-10-22; genclj-ta2i)
 

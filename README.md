@@ -9,15 +9,23 @@ Generative Function Interface (GFI): `simulate`, `generate`, `update`,
 `regenerate`, `assess`, `propose` and `project`, each a pure function of its
 arguments and an explicit random key.
 
-**Status: M1, M2 and most of M4 are done.** The core runs on the JVM,
-CPU-only, with nothing but a JDK: a pure-Clojure array backend with
-reverse-mode autodiff. An MLX backend (M2) runs the same code on Apple's GPU
-(Metal), on MLX's CPU backend and on CUDA (verified on a Jetson AGX Thor):
-it passes the backend conformance suite and the test battery on each. Gen.jl
-parity (M4) covers the core, with the static modeling language, its change
-hints and encapsulated randomness, and GenParticleFilters, GenSMCP3 and
-GenTraceKernelDSL. Local LLMs as generative functions (M3) come next. See
-`DESIGN.md`.
+**Status: 1.0.0** (2026-10-26). The core runs on the JVM, CPU-only, with
+nothing but a JDK: a pure-Clojure array backend with reverse-mode autodiff.
+An MLX backend runs the same code on Apple's GPU (Metal), on MLX's CPU
+backend and on CUDA (an RTX PRO 6000, earlier a Jetson AGX Thor): the
+test battery passes on Metal and MLX's CPU, and on CUDA, with
+`MLX_ENABLE_TF32=0`, all but one half-float sum (CHANGELOG, known
+issues). Gen.jl parity covers the core, the static modeling language with
+its change hints, encapsulated randomness, GenParticleFilters, GenSMCP3 and
+GenTraceKernelDSL, and Gen.jl's own test suite passes. Local LLMs run as
+generative functions through llama.cpp (experimental). The book, `book/`,
+teaches it with code that runs. Through 1.x the stable namespaces keep
+their names, arities, result keys and documented semantics
+(`CHANGELOG.md`); `DESIGN.md` has the design.
+
+gen.clj is a git dependency, a release by its tag:
+`{gen.clj/gen.clj {:git/url "https://github.com/robert-johansson/gen.clj"
+:git/tag "v1.0.0" :git/sha "…"}}`.
 
 ## A model and two kinds of inference
 
@@ -149,11 +157,15 @@ clojure -J-Dgen.backend=mlx -J-Dgen.mlx.device=cpu -X:test:light  # MLX's CPU ba
 clojure -J-Dgen.backend=mlx -J-Dgen.mlx.device=cpu -J-Dgen.mlx.dtypes=64 -X:test:light
 ```
 
+On CUDA, set `MLX_ENABLE_TF32=0`: by default MLX computes float32 matrix
+products there in TF32 (about 1e-3 relative), which gen.clj's densities and
+gradients do not tolerate (CHANGELOG, known issues).
+
 MLX is float32 by default (float64 only on its CPU backend). Arrays are lazy:
 inference loops evaluate once per iteration. `docs/array-api.md` §13
 describes the backend and the few ways it differs from the JVM backend.
 
-## Local LLMs (optional; M3, in progress)
+## Local LLMs (optional; experimental)
 
 `native/build-llama.sh` builds llama.cpp v0.7.0's libraries (with Metal on
 macOS) into `native/build/llama/`, and `clojure -T:build java` compiles the
