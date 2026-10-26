@@ -400,6 +400,60 @@ step is large arrays (big data, matrix products, GPs: cuBLAS and
 fusion), and takes any program the staging backend makes, including
 gathers and scatters.
 
+### Large shared data: ndreg (genclj-4zmv)
+
+The parity suite's ndreg_is spec asks the other question: importance
+sampling, 1000 particles, on D-dimensional regression over M
+observations (w ~ N(0, 10²) [D], y ~ N(X·w, 1) [M]), each particle a
+matrix-vector product with the shared X (up to 10⁷ multiply-adds per
+particle, 10¹⁰ per call). The CUDA C generator gained arrays in memory
+for it (data inputs as device pointers, arrays past 256 elements as a
+particle's scratch filled by loops) and lanes per particle (a warp: loops
+split across 32 lanes, reductions by shuffles); host-checked against the
+handler particle by particle (≤ 1.1e-6), and on the GPU the warp's
+weights equal the single thread's to ≤ 5.5e-6. The XLA program takes X
+and y as inputs held on the device; MLX's and the XLA program's log-ML
+estimates agree to every printed digit (both draw gen.batched's way).
+Medians, ms:
+
+| D × M | CUDA C, a thread per particle | CUDA C, a warp per particle | XLA program | GenJAX | MLX | JVM backend |
+|---|---|---|---|---|---|---|
+| 10 × 1000 | 0.92 | 0.065 | 0.90 | 0.020 | 13.9 | 25 |
+| 100 × 1000 | 1.32 | 0.16 | 0.27 | 0.038 | 21.6 | 184 |
+| 1000 × 1000 | 76.7 | 2.17 | 0.66 | 0.097 | 154 | 1880 |
+| 10 × 10000 | 10.2 | 0.38 | 0.31 | 0.159 | 40 | 212 |
+| 100 × 10000 | 18.1 | 1.37 | 0.29 | 0.229 | 182 | 1816 |
+| 1000 × 10000 | 446 | 17.8 | 1.35 | 0.194 | 1565 | 19 000 |
+
+(fenrir `~/mlx/gen-clj-logs/a1hu/ndreg-{cuda-0854,xla-0846,mlx-0847,jvm-0847}.edn`.)
+
+- **One thread per particle loses from the first cell,** its M·D loop
+  serial in each thread. **A warp per particle** wins only where XLA's
+  call floor is the cost (10 × 1000: 0.065 against 0.9 ms, still 3×
+  GenJAX) and loses from about D·M = 10⁵ on.
+- **The reason is memory traffic, not arithmetic.** Each particle reads
+  the shared X itself: N·D·M·4 bytes per call, 40 GB at the largest cell,
+  where the warp version's 17.8 ms is about 2.2 TB/s, bandwidth-bound.
+  The N particles' products together are one matrix product, [N D]·[D
+  M], which cuBLAS (XLA's lowering) tiles so that X is read a few times,
+  not N. A kernel per particle cannot reuse data across particles.
+- **So the regime decides the target:** per-particle state that fits a
+  thread (the MCMC cells: CUDA C, 14–18× GenJAX) against large data
+  shared by every particle (ndreg: XLA, or a GEMM phase). A lowering
+  could choose per node: a product of the particle axis with a large
+  shared operand as a GEMM (cuBLAS), the rest per particle; that is what
+  XLA does for the whole program.
+- **GenJAX's matrix products are probably TF32** (JAX's default float32
+  precision on this GPU), 5–8× faster than float32 on tensor cores;
+  gen.clj's are full float32 (HIGHEST, DESIGN §9's TF32 rule). Its
+  0.19 ms at the largest cell against the XLA program's 1.35 (about 0.3
+  of which is the binding's call floor) is partly that: genclj-nlqg
+  measures JAX at HIGHEST beside it.
+- The CUDA C version also does no loop fusion: every [M] intermediate is
+  written to the particle's scratch (0.8 MB a particle at the largest
+  cell). Fusion would cut the traffic per particle, not the N-fold
+  reading of X.
+
 ## 5. Recommendation
 
 1. **Take the graph into the core, at L0.** The staging backend
@@ -422,10 +476,12 @@ gathers and scatters.
 3. **Generated CUDA C as the NVIDIA target for small particles** (an
    extension, `ext/cuda`): libnvrtc and the driver, both of which MLX's
    CUDA build already links (`libnvrtc.so.13`, `libcuda.so.1`), so no
-   new dependency. Extend it with gathers
-   (resampling, so SMC), a reduction across threads (IS's log-ML,
-   resampling's weights) and the batched semantics, then SMC and
-   many-chain kernels.
+   new dependency. Not for large data shared across particles (ndreg,
+   §4): a kernel per particle reads the shared data once per particle,
+   where a matrix product (XLA's cuBLAS) reads it once per tile. Extend
+   it with gathers (resampling, so SMC), a reduction across threads
+   (IS's log-ML, resampling's weights) and the batched semantics
+   (genclj-optl), then SMC and many-chain kernels.
 4. **XLA via PJRT as the target for large arrays** (an extension,
    `ext/xla`): the PJRT plugin (jax-cuda13-plugin's .so, 321 MB) is the
    cost, beside the CUDA pip libraries it loads (cuBLAS, cuDNN, NCCL:
