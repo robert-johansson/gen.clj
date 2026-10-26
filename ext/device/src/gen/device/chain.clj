@@ -198,3 +198,22 @@
                (array/tree-map spec-of args)
                (mapv spec-of obs-values))
      :inputs (into (vec (array/tree-leaves args)) obs-values)}))
+
+(defn weight-program
+  "One particle's constrained generate as a program of a key and the data:
+   (program key args-leaves… obs-leaves…) → {:weight}, the model's
+   arguments and the observations' values inputs, as importance-program's.
+   A thread's (or a lane group's) program in gen.device.cuda: n particles
+   are n of them, each on (rng/split key n)[i]. Returns {:program :inputs}."
+  [model args observations]
+  (let [leaves (cm/leaves observations)
+        paths (mapv first leaves)
+        obs-values (mapv second leaves)]
+    {:program (st/stage
+               (fn [key args obs-vals]
+                 (let [obs (reduce (fn [m [p v]] (cm/set-choice m p v)) cm/EMPTY (map vector paths obs-vals))]
+                   {:weight (:weight (gfi/generate model args obs key))}))
+               (st/key-spec)
+               (array/tree-map spec-of args)
+               (mapv spec-of obs-values))
+     :inputs (into (vec (array/tree-leaves args)) obs-values)}))

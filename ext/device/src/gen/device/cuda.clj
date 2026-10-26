@@ -23,10 +23,20 @@
    host. The libraries: -Dgen.cuda.nvrtc=<libnvrtc.so>,
    -Dgen.cuda.driver=<libcuda.so.1> (default /usr/lib/x86_64-linux-gnu).
 
+   Arrays past gen.cuda.max-elements (256 by default) and the program's
+   data inputs (its inputs after the key: X and y of a regression, held on
+   the device and shared by every particle) are arrays in memory, not
+   scalarized: a data input its pointer, a computed array a slice of the
+   particle's scratch (global memory, (scratch k n) bytes in all), filled
+   by a loop. A particle may have several lanes (gen.cuda.lanes, 1 by
+   default, a power of two up to 32: a warp per particle): the loops over
+   an array are split across its lanes, reductions combined by warp
+   shuffles, and the scalar code run by every lane alike; lane 0 writes the
+   outputs (bean genclj-4zmv).
+
    Refused, loudly, by node: scatter-add (pads replace the slices'
    gradients), take, a scan over xs (counted scans only), a nested scan, a
-   scan's ys read in the thread, float64, batched matmul, and arrays past
-   a per-node size limit (gen.cuda.max-elements, 4096 elements)."
+   scan's ys read in the thread, float64, and batched matmul."
   {:api :internal}
   (:refer-clojure :exclude [compile])
   (:require [clojure.string :as str])
@@ -188,7 +198,9 @@ __device__ __forceinline__ void g_threefry(unsigned int k0, unsigned int k1, uns
     :min (str "g_min(" a ", " b ")")
     (let [[l m r] (reducers op)] (str l a m b r))))
 
-(defn- max-elements ^long [] (Long/getLong "gen.cuda.max-elements" 4096))
+(defn- max-elements ^long [] (Long/getLong "gen.cuda.max-elements" 256))
+
+(defn- lanes-default ^long [] (Long/getLong "gen.cuda.lanes" 1))
 
 (declare emit-graph! emit-scan!)
 
@@ -220,13 +232,10 @@ __device__ __forceinline__ void g_threefry(unsigned int k0, unsigned int k1, uns
                              (reduce (fn [acc i] (bind! em out-dtype (reduce-expr op acc (nth el i)))) (nth el (first is)) (rest is)))))
                  (range (size kept))))))
 
-(defn- emit-node!
+(defn- emit-small-node!
   "env with node's value: {:shape :dtype :el} (C expressions), or a scan's
    or its ys result's own entry."
   [em env {:keys [id op args shape dtype attrs] :as node} ctx]
-  (when (and shape (> (size shape) (max-elements)))
-    (throw (ex-info (str "CUDA C: " op " makes " (size shape) " elements in a thread, past gen.cuda.max-elements")
-                    {:node (dissoc node :attrs) :limit (max-elements)})))
   (let [in (:in attrs)
         put #(assoc env id %)
         arg (fn [i d] (operand env (nth args i) d))]
@@ -301,6 +310,226 @@ __device__ __forceinline__ void g_threefry(unsigned int k0, unsigned int k1, uns
                               {:shape shape :dtype dtype :ys (- i (:n-carry s)) :scan (first args)})))
       :else (throw (ex-info (str "CUDA C: no lowering of " op " yet") {:node (dissoc node :attrs)})))))
 
+
+;; ---------------------------------------------------------------------------
+;; Arrays in memory: data inputs and arrays past max-elements, filled by
+;; loops split across a particle's lanes (genclj-4zmv)
+
+(defn- buf? [v] (contains? v :buf))
+
+(defn- lanes ^long [ctx] (long (:lanes ctx 1)))
+
+(defn- sync! [em ctx] (when (> (lanes ctx) 1) (line! em "__syncwarp();")))
+
+(defn- fresh [em prefix] (str prefix (vswap! (:n em) inc)))
+
+(defn- read-at
+  "The C expression of buffer s's element i (a C expression) of dtype."
+  [s i dtype]
+  (if (= dtype :bool) (str "(" s "[" i "] != 0)") (str s "[" i "]")))
+
+(defn- buf-value [shape dtype s] {:shape (vec shape) :dtype dtype :buf s})
+
+(defn- local-array!
+  "v, an :el value, as a local C array declared here: its name."
+  [em {:keys [dtype el]}]
+  (let [a (fresh em "l")]
+    (line! em (str (ctype dtype) " " a "[" (count el) "] = {" (str/join ", " el) "};"))
+    a))
+
+(defn- accessor
+  "A function of a flat index (a C expression) giving v's element there,
+   declared here (an :el value of several elements becomes a local array)."
+  [em v]
+  (cond (buf? v) (fn [i] (read-at (:buf v) i (:dtype v)))
+        (= 1 (count (:el v))) (let [e (first (:el v))] (fn [_] e))
+        :else (let [a (local-array! em v)] (fn [i] (str a "[" i "]")))))
+
+(defn- bidx
+  "The flat index into an operand of in-shape that NumPy's broadcasting
+   pairs with the element at flat index i (a C expression) of out-shape."
+  [i out-shape in-shape]
+  (if (= (vec out-shape) (vec in-shape))
+    i
+    (let [k (- (count out-shape) (count in-shape))
+          os (strides out-shape)
+          is (strides in-shape)
+          terms (keep (fn [j] (let [d (nth in-shape j) oj (+ k j)]
+                                (when (not= 1 d)
+                                  (str "((" i " / " (nth os oj) ") % " (nth out-shape oj) ") * " (nth is j)))))
+                      (range (count in-shape)))]
+      (if (empty? terms) "0" (str "(" (str/join " + " terms) ")")))))
+
+(defn- coords
+  "C expressions of the coordinates of flat index i (a C expression) in shape."
+  [i shape]
+  (mapv (fn [st d] (str "((" i " / " st ") % " d ")")) (strides shape) shape))
+
+(defn- flat
+  "The flat index of coordinates cs (C expressions) in shape."
+  [cs shape]
+  (if (empty? cs) "0" (str "(" (str/join " + " (map (fn [c st] (str c " * " st)) cs (strides shape))) ")")))
+
+(def ^:private stypes {:float32 "float" :uint32 "unsigned int" :int32 "int" :bool "unsigned char"})
+
+(defn- scratch!
+  "A slice of the particle's scratch for n elements of dtype: its C name."
+  [em ctx n dtype]
+  (let [off @(:scratch ctx)
+        bytes (* 4 (quot (+ (* (long n) (long (buffer-bytes dtype))) 3) 4))
+        s (fresh em "s")]
+    (vswap! (:scratch ctx) + bytes)
+    (line! em (str (stypes dtype) "* " s " = (" (stypes dtype) "*)(scratch + " off ");"))
+    s))
+
+(defn- as-small
+  "A buffer of at most max-elements elements as an :el value (its elements
+   read from memory), a larger one as it is."
+  [{:keys [shape dtype buf] :as v}]
+  (if (and buf (<= (size shape) (max-elements)))
+    (value shape dtype (mapv #(read-at buf % dtype) (range (size shape))))
+    v))
+
+(defn- fill!
+  "A new array of shape and dtype whose element i is (f i), filled by its
+   lanes' loop."
+  [em ctx shape dtype f]
+  (let [n (size shape) s (scratch! em ctx n dtype) i (fresh em "i")]
+    (line! em (str "for (int " i " = ln; " i " < " n "; " i " += " (lanes ctx) ") " s "[" i "] = " (f i) ";"))
+    (sync! em ctx)
+    (as-small (buf-value shape dtype s))))
+
+(def ^:private reduce-init {:sum 0 :prod 1 :max Double/NEGATIVE_INFINITY :min Double/POSITIVE_INFINITY :all true :any false})
+
+(defn- combine-lanes!
+  "acc (a C variable of dtype) combined across the particle's lanes by op,
+   every lane left with the total."
+  [em ctx op acc dtype]
+  (when (> (lanes ctx) 1)
+    (let [o (fresh em "o")
+          t (if (= dtype :bool) "int" (ctype dtype))]
+      (line! em (str "for (int " o " = " (quot (lanes ctx) 2) "; " o " > 0; " o " >>= 1) " acc " = "
+                     (reduce-expr op acc (str "(" (ctype dtype) ")__shfl_xor_sync(0xffffffffu, (" t ")" acc ", " o ")")) ";")))))
+
+(defn- reduce-big!
+  "op of operand v over axes, shaped out-shape: across the lanes when it
+   makes one value, over the outputs' lanes otherwise."
+  [em ctx v op axes out-shape dtype]
+  (when-not (contains? reduce-init op) (throw (ex-info (str "CUDA C: no reduction " op " yet") {:op op})))
+  (let [in-shape (:shape v)
+        axes (set axes)
+        kept (vec (keep-indexed (fn [k d] (when-not (axes k) d)) in-shape))
+        red (vec (keep-indexed (fn [k d] (when (axes k) d)) in-shape))
+        x (accessor em v)
+        idx (fn [o r] (let [ko (coords o kept) ro (coords r red)]
+                        (flat (loop [k 0 ko ko ro ro out []]
+                                (if (= k (count in-shape)) out
+                                    (if (axes k) (recur (inc k) ko (rest ro) (conj out (first ro)))
+                                        (recur (inc k) (rest ko) ro (conj out (first ko))))))
+                              in-shape)))
+        init (lit (reduce-init op) dtype)]
+    (if (= 1 (size kept))
+      (let [acc (fresh em "a") r (fresh em "r")]
+        (line! em (str (ctype dtype) " " acc " = " init ";"))
+        (line! em (str "for (int " r " = ln; " r " < " (size red) "; " r " += " (lanes ctx) ") " acc " = "
+                       (reduce-expr op acc (x (idx "0" r))) ";"))
+        (combine-lanes! em ctx op acc dtype)
+        (value out-shape dtype [acc]))
+      (let [s (scratch! em ctx (size kept) dtype) o (fresh em "o") r (fresh em "r") acc (fresh em "a")]
+        (line! em (str "for (int " o " = ln; " o " < " (size kept) "; " o " += " (lanes ctx) ") { " (ctype dtype) " " acc " = " init
+                       "; for (int " r " = 0; " r " < " (size red) "; ++" r ") " acc " = " (reduce-expr op acc (x (idx o r)))
+                       "; " s "[" o "] = " acc "; }"))
+        (sync! em ctx)
+        (as-small (buf-value out-shape dtype s))))))
+
+(defn- matmul-big!
+  "x · y for vectors and matrices, an output element per lane-loop step."
+  [em ctx x y out-shape dtype]
+  (let [[sx sy] [(:shape x) (:shape y)]
+        _ (when (or (> (count sx) 2) (> (count sy) 2)) (throw (ex-info "CUDA C: batched matmul" {:shapes [sx sy]})))
+        [_ k] (if (= 1 (count sx)) [1 (first sx)] sx)
+        c (if (= 1 (count sy)) 1 (second sy))
+        xa (accessor em x) ya (accessor em y)
+        o (fresh em "o") j (fresh em "j") acc (fresh em "a")
+        s (scratch! em ctx (size out-shape) dtype)]
+    (line! em (str "for (int " o " = ln; " o " < " (size out-shape) "; " o " += " (lanes ctx) ") { float " acc " = 0.0f; "
+                   "for (int " j " = 0; " j " < " k "; ++" j ") " acc " += " (xa (str "(" o " / " c ") * " k " + " j))
+                   " * " (ya (str j " * " c " + " o " % " c)) "; " s "[" o "] = " acc "; }"))
+    (sync! em ctx)
+    (as-small (buf-value out-shape dtype s))))
+
+(defn- emit-big-node!
+  "node over arrays in memory: data inputs, or arrays past max-elements."
+  [em env {:keys [id op args shape dtype attrs] :as node} ctx]
+  (let [in (:in attrs)
+        put #(assoc env id %)
+        arg (fn [i d] (operand env (nth args i) d))
+        ew (fn [operands f] (let [as (mapv #(accessor em %) operands)]
+                              (put (fill! em ctx shape dtype
+                                          (fn [i] (apply f (map (fn [o a] (a (bidx i shape (:shape o)))) operands as)))))))]
+    (cond
+      (= op :constant) (let [vs (:values attrs)]
+                         (if (apply = vs)
+                           (put (fill! em ctx shape dtype (constantly (lit (first vs) dtype))))
+                           (let [g (fresh em "g")]
+                             (swap! (:globals ctx) conj (str "__device__ const " (stypes dtype) " " g "[" (count vs) "] = {"
+                                                             (str/join ", " (map #(lit % dtype) vs)) "};"))
+                             (put (as-small (buf-value shape dtype g))))))
+      (= op :iota) (put (fill! em ctx shape dtype (fn [i] (str "(" (ctype dtype) ")" i))))
+      (= op :broadcast) (ew [(arg 0 dtype)] identity)
+      (= op :convert) (let [o (arg 0 nil)]
+                        (ew [o] (fn [e] (if (= dtype :bool) (str "(" e " != 0)") (str "(" (ctype dtype) ")(" e ")")))))
+      (= op :bitcast) (let [o (arg 0 nil)
+                            f (case [(:dtype o) dtype] [:uint32 :float32] "__uint_as_float" [:float32 :uint32] "__float_as_uint"
+                                    (throw (ex-info "CUDA C: a bitcast other than uint32 ↔ float32" {:node node})))]
+                        (ew [o] (fn [e] (str f "(" e ")"))))
+      (= op :stop-gradient) (put (assoc (arg 0 in) :shape shape))
+      (unary-ops op) (ew [(arg 0 in)] #(unary-expr op in %))
+      (bit-ops op) (ew [(arg 0 :uint32) (arg 1 :uint32)] #(binary-expr op :uint32 %1 %2))
+      (comparisons op) (ew [(arg 0 in) (arg 1 in)] #(binary-expr op in %1 %2))
+      (binary-ops op) (ew [(arg 0 in) (arg 1 in)] #(binary-expr op in %1 %2))
+      (= op :where) (ew [(arg 0 :bool) (arg 1 in) (arg 2 in)] #(str "(" %1 " ? " %2 " : " %3 ")"))
+      (= op :reduce) (put (reduce-big! em ctx (arg 0 nil) (:op attrs) (:axes attrs) shape dtype))
+      (= op :reshape) (let [o (arg 0 nil)] (put (if (buf? o) (as-small (assoc o :shape shape)) (assoc o :shape shape))))
+      (= op :transpose) (let [o (arg 0 nil) a (accessor em o) perm (:perm attrs)]
+                          (put (fill! em ctx shape dtype
+                                      (fn [i] (let [oc (coords i shape)
+                                                    ic (reduce (fn [v k] (assoc v (nth perm k) (nth oc k))) (vec (repeat (count shape) "0")) (range (count shape)))]
+                                                (a (flat ic (:shape o))))))))
+      (= op :slice) (let [o (arg 0 nil) a (accessor em o) {:keys [starts steps]} attrs]
+                      (put (fill! em ctx shape dtype
+                                  (fn [i] (a (flat (map (fn [st k c] (str "(" st " + " k " * " c ")")) starts steps (coords i shape)) (:shape o)))))))
+      (= op :concatenate) (let [ax (:axis attrs)
+                                os (mapv #(operand env % dtype) args)
+                                as (mapv #(accessor em %) os)
+                                offsets (vec (reductions + 0 (map #(nth (:shape %) ax) os)))]
+                            (put (fill! em ctx shape dtype
+                                        (fn [i] (let [cs (coords i shape) p (nth cs ax)]
+                                                  (reduce (fn [e k] (let [o (nth os k)
+                                                                          v ((nth as k) (flat (assoc cs ax (str "(" p " - " (nth offsets k) ")")) (:shape o)))]
+                                                                      (if e (str "(" p " < " (nth offsets (inc k)) " ? " v " : " e ")") v)))
+                                                          nil (reverse (range (count os)))))))))
+      (= op :pad) (let [o (arg 0 nil) a (accessor em o) {:keys [axis low interior]} attrs
+                        m (nth (:shape o) axis) z (lit 0 dtype)]
+                    (put (fill! em ctx shape dtype
+                                (fn [i] (let [cs (coords i shape)
+                                              p (str "(" (nth cs axis) " - " low ")")
+                                              j (str "(" p " / " (inc interior) ")")]
+                                          (str "((" p " >= 0 && " p " % " (inc interior) " == 0 && " j " < " m ") ? "
+                                               (a (flat (assoc cs axis j) (:shape o))) " : " z ")"))))))
+      (= op :matmul) (put (matmul-big! em ctx (arg 0 dtype) (arg 1 dtype) shape dtype))
+      :else (throw (ex-info (str "CUDA C: no lowering of " op " over arrays in memory yet") {:node (dissoc node :attrs)})))))
+
+(defn- emit-node!
+  "env with node's value: scalarized ({:el}), an array in memory ({:buf}),
+   or a scan's or its ys result's own entry."
+  [em env {:keys [op args shape] :as node} ctx]
+  (if (and (not (#{:param :scan :result} op))
+           (or (> (size (or shape [])) (max-elements))
+               (some #(and (not (map? %)) (buf? (get env % {}))) args)))
+    (emit-big-node! em env node ctx)
+    (emit-small-node! em env node ctx)))
+
 (defn- emit-scan!
   "A counted scan as a for loop: {:carries [values after the loop]
    :n-carry}. ys the program returns are written to their outputs in the
@@ -311,6 +540,7 @@ __device__ __forceinline__ void g_threefry(unsigned int k0, unsigned int k1, uns
         {:keys [graph carries captures carry-out y-out]} body]
     (when (pos? n-x) (throw (ex-info "CUDA C: a scan over xs (use a counted scan, xs nil)" {:n-x n-x})))
     (let [inits (mapv #(env %) (subvec args 0 n-carry))
+          _ (when (some buf? inits) (throw (ex-info "CUDA C: a scan carrying an array in memory, not yet" {})))
           caps (mapv #(env %) (subvec args (+ n-carry n-x)))
           vars (mapv (fn [{:keys [shape dtype el]}]
                        (value shape dtype (mapv (fn [e] (let [v (str "c" (vswap! (:n em) inc))]
@@ -326,9 +556,10 @@ __device__ __forceinline__ void g_threefry(unsigned int k0, unsigned int k1, uns
       (doseq [[j y] (map-indexed vector y-out)
               :let [k (get ys-out [id j])]
               :when k
-              :let [{:keys [shape el]} (benv y) n (size shape)]]
+              :let [{:keys [shape el] :as v} (benv y) n (size shape)]]
+        (when (buf? v) (throw (ex-info "CUDA C: a scan's ys as an array in memory, not yet" {})))
         (doseq [[e x] (map-indexed vector el)]
-          (line! em (str "out" k "[(long long)tid * " (* length n) " + (long long)" it " * " n " + " e "] = " x ";"))))
+          (line! em (str "if (ln == 0 && act) out" k "[(long long)tid * " (* length n) " + (long long)" it " * " n " + " e "] = " x ";"))))
       (let [outs (mapv #(:el (benv %)) carry-out)
             tmps (mapv (fn [v o] (mapv (fn [e] (bind! em (:dtype v) (str "(" e ")"))) o)) vars outs)]
         (doseq [[v t] (map vector vars tmps) [c x] (map vector (:el v) t)]
@@ -342,43 +573,73 @@ __device__ __forceinline__ void g_threefry(unsigned int k0, unsigned int k1, uns
 
 (defn source
   "The CUDA C++ text of the kernel `chains` for program (gen.device.stage's,
-   of one key): (chains r0 r1 n out0 out1 …), thread i running program on
-   (rng/split [r0 r1] n)[i]. Returns {:source :outputs [{:shape :dtype}
-   per output, without the thread axis]}."
-  [{:keys [graph inputs outputs]}]
-  (when-not (= inputs [[[2] :uint32]])
-    (throw (ex-info "CUDA C: a program of one key only" {:inputs inputs})))
-  (let [em (emitter)
-        by-id (into {} (map (juxt :id identity) graph))
-        ;; ys a program returns: [scan id, ys index] → output
-        ys-out (into {} (keep-indexed (fn [k o] (let [{:keys [op args attrs]} (by-id o)]
-                                                  (when (= op :result)
-                                                    (let [s (by-id (first args)) nc (get-in s [:attrs :n-carry])]
-                                                      (when (>= (:index attrs) nc) [[(:id s) (- (:index attrs) nc)] k])))))
-                                      outputs))
-        param (first (filter #(= :param (:op %)) graph))
-        env (emit-graph! em graph {(:id param) (value [2] :uint32 ["key0" "key1"])} {:ys-out ys-out})
-        outs (mapv env outputs)
-        body (.toString ^StringBuilder (:out em))
-        tail (str/join (for [[k {:keys [shape el ys]}] (map-indexed vector outs)
-                             :when (nil? ys)
-                             [e x] (map-indexed vector el)]
-                         (str "  out" k "[(long long)tid * " (size shape) " + " e "] = " x ";\n")))
-        sig (str/join ", " (map-indexed (fn [k {:keys [dtype]}] (str (buffer-types dtype) "* out" k)) outs))]
-    {:source (str prelude
-                  "\n__device__ __forceinline__ void chain(int tid, unsigned int key0, unsigned int key1, " sig ") {\n"
-                  body tail "}\n\n"
-                  "#ifdef __CUDACC_RTC__\n"
-                  "extern \"C\" __global__ void chains(unsigned int r0, unsigned int r1, int n, " sig ") {\n"
-                  "  int tid = blockIdx.x * blockDim.x + threadIdx.x;\n"
-                  "  if (tid >= n) return;\n"
-                  "  unsigned int key0, key1;\n"
-                  "  g_threefry(r0, r1, 0u, (unsigned int)tid, &key0, &key1);\n"
-                  "  chain(tid, key0, key1, " (str/join ", " (map #(str "out" %) (range (count outs)))) ");\n"
-                  "}\n#endif\n")
-     :outputs (mapv (fn [{:keys [shape dtype ys]} o]
-                      {:shape (if ys (:shape (by-id o)) shape) :dtype dtype})
-                    outs outputs)}))
+   of a key and data inputs): (chains r0 r1 n scratch sbytes in1 … out0 …),
+   particle p running program on (rng/split [r0 r1] n)[p] with lanes
+   threads (opts :lanes, gen.cuda.lanes). Returns {:source :outputs
+   [{:shape :dtype} per output, without the particle axis] :inputs (the
+   data inputs' [shape dtype]) :scratch-bytes (per particle) :lanes}."
+  ([program] (source program nil))
+  ([{:keys [graph inputs outputs]} {:keys [lanes] :or {lanes (lanes-default)}}]
+   (when-not (= (first inputs) [[2] :uint32])
+     (throw (ex-info "CUDA C: a program of a key, then its data" {:inputs inputs})))
+   (when-not (and (pos? lanes) (<= lanes 32) (zero? (bit-and lanes (dec lanes))))
+     (throw (ex-info (str "CUDA C: lanes a power of two up to 32, not " lanes) {:lanes lanes})))
+   (let [em (emitter)
+         by-id (into {} (map (juxt :id identity) graph))
+         ;; ys a program returns: [scan id, ys index] → output
+         ys-out (into {} (keep-indexed (fn [k o] (let [{:keys [op args attrs]} (by-id o)]
+                                                   (when (= op :result)
+                                                     (let [s (by-id (first args)) nc (get-in s [:attrs :n-carry])]
+                                                       (when (>= (:index attrs) nc) [[(:id s) (- (:index attrs) nc)] k])))))
+                                       outputs))
+         params (filter #(= :param (:op %)) graph)
+         data (vec (rest inputs))
+         env0 (into {} (map (fn [{:keys [id attrs]}]
+                              (let [i (:index attrs)]
+                                (if (zero? i)
+                                  [id (value [2] :uint32 ["key0" "key1"])]
+                                  (let [[shape dtype] (nth inputs i)] [id (as-small (buf-value shape dtype (str "in" i)))]))))
+                            params))
+         ctx {:ys-out ys-out :lanes lanes :scratch (volatile! 0) :globals (atom [])}
+         env (emit-graph! em graph env0 ctx)
+         outs (mapv env outputs)
+         body (.toString ^StringBuilder (:out em))
+         tail (str/join (for [[k {:keys [shape el ys buf dtype]}] (map-indexed vector outs)
+                              :when (nil? ys)]
+                          (if buf
+                            (str "  for (int w = ln; w < " (size shape) "; w += " lanes ") if (act) out" k
+                                 "[(long long)tid * " (size shape) " + w] = " (read-at buf "w" dtype) ";\n")
+                            (str/join (for [[e x] (map-indexed vector el)]
+                                        (str "  if (ln == 0 && act) out" k "[(long long)tid * " (size shape) " + " e "] = " x ";\n"))))))
+         sig-in (str/join (map-indexed (fn [k [_ dtype]] (str ", const " (stypes dtype) "* __restrict__ in" (inc k))) data))
+         sig-out (str/join (map-indexed (fn [k {:keys [dtype]}] (str ", " (buffer-types dtype) "* out" k)) outs))
+         sbytes @(:scratch ctx)]
+     {:source (str prelude
+                   (str/join "\n" @(:globals ctx)) "\n"
+                   "\n__device__ __forceinline__ void chain(int tid, int ln, bool act, unsigned int key0, unsigned int key1,"
+                   " char* scratch" sig-in sig-out ") {\n"
+                   body tail "}\n\n"
+                   "#ifdef __CUDACC_RTC__\n"
+                   "extern \"C\" __global__ void chains(unsigned int r0, unsigned int r1, int n, char* scratch_all,"
+                   " long long sbytes" sig-in sig-out ") {\n"
+                   "  long long g = (long long)blockIdx.x * blockDim.x + threadIdx.x;\n"
+                   "  int p = (int)(g / " lanes "), ln = (int)(g % " lanes ");\n"
+                   "  bool act = p < n;\n"
+                   ;; an inactive particle runs on the last one's key, its own scratch, writing nothing:
+                   ;; a warp's lanes stay converged for __syncwarp
+                   "  int q = act ? p : n - 1;\n"
+                   "  unsigned int key0, key1;\n"
+                   "  g_threefry(r0, r1, 0u, (unsigned int)q, &key0, &key1);\n"
+                   "  chain(q, ln, act, key0, key1, scratch_all + (long long)p * sbytes"
+                   (str/join (map #(str ", in" (inc %)) (range (count data))))
+                   (str/join (map #(str ", out" %) (range (count outs)))) ");\n"
+                   "}\n#endif\n")
+      :outputs (mapv (fn [{:keys [shape dtype ys]} o]
+                       {:shape (if ys (:shape (by-id o)) shape) :dtype dtype})
+                     outs outputs)
+      :inputs data
+      :scratch-bytes sbytes
+      :lanes lanes})))
 
 ;; ---------------------------------------------------------------------------
 ;; NVRTC and the driver API, by FFM
@@ -429,6 +690,7 @@ __device__ __forceinline__ void g_threefry(unsigned int k0, unsigned int k1, uns
              :cuMemAllocHost (handle cu "cuMemAllocHost_v2" I A J)
              :cuMemFreeHost (handle cu "cuMemFreeHost" I A)
              :cuMemcpyDtoH (handle cu "cuMemcpyDtoH_v2" I A J J)
+             :cuMemcpyHtoD (handle cu "cuMemcpyHtoD_v2" I J A J)
              :cuLaunchKernel (handle cu "cuLaunchKernel" I A I I I I I I I A A A)
              :cuCtxSynchronize (handle cu "cuCtxSynchronize" I)
              :cuGetErrorString (handle cu "cuGetErrorString" I I A)}]
@@ -472,7 +734,7 @@ __device__ __forceinline__ void g_threefry(unsigned int k0, unsigned int k1, uns
   "Compiles the kernel of (source program) with NVRTC for the device and
    loads it: {:function :module :outputs :log (NVRTC's, with ptxas's
    report) :registers :local-bytes :compile-ms}."
-  [{:keys [source outputs]}]
+  [{:keys [source outputs inputs scratch-bytes lanes]}]
   (current!)
   (let [arch (System/getProperty "gen.cuda.arch" "sm_120")
         t0 (System/nanoTime)]
@@ -503,7 +765,8 @@ __device__ __forceinline__ void g_threefry(unsigned int k0, unsigned int k1, uns
               _ (cu! :cuModuleGetFunction f module (.allocateFrom arena "chains"))
               function (.get f A 0)
               attr (fn [k] (let [v (.allocate arena I)] (cu! :cuFuncGetAttribute v (int k) function) (.get v I 0)))]
-          {:function function :module module :outputs outputs :log log
+          {:function function :module module :outputs outputs :inputs inputs
+           :scratch-bytes (or scratch-bytes 0) :lanes (or lanes 1) :log log
            :registers (attr 4) :local-bytes (attr 3)
            :compile-ms (/ (- (System/nanoTime) t0) 1e6)})))))
 
@@ -529,29 +792,70 @@ __device__ __forceinline__ void g_threefry(unsigned int k0, unsigned int k1, uns
     (cu! :cuMemFree (long device))
     (cu! :cuMemFreeHost host)))
 
+(def ^:private block-size 128)
+
+(defn- grid ^long [n lanes] (quot (+ (* (long n) (long lanes)) (dec block-size)) block-size))
+
+(defn scratch
+  "The device scratch for n particles of k (every launched thread's
+   particle, so the last block's spare ones too): {:device :bytes}, or nil
+   when k needs none. Free with free-device."
+  [{:keys [scratch-bytes lanes]} n]
+  (when (pos? (long scratch-bytes))
+    (current!)
+    (with-open [arena (Arena/ofConfined)]
+      (let [particles (quot (* (grid n lanes) block-size) (long lanes))
+            bytes (* particles (long scratch-bytes))
+            d (.allocate arena J)]
+        (cu! :cuMemAlloc d (long bytes))
+        {:device (.get d J 0) :bytes bytes}))))
+
+(defn upload
+  "A float array copied to the device: {:device :bytes}. Free with
+   free-device."
+  [^floats xs]
+  (current!)
+  (with-open [arena (Arena/ofConfined)]
+    (let [bytes (* 4 (alength xs))
+          d (.allocate arena J)
+          h (.allocateFrom arena ValueLayout/JAVA_FLOAT xs)]
+      (cu! :cuMemAlloc d (long (max 4 bytes)))
+      (cu! :cuMemcpyHtoD (.get d J 0) h (long bytes))
+      {:device (.get d J 0) :bytes bytes})))
+
+(defn free-device [{:keys [device]}]
+  (when device (current!) (cu! :cuMemFree (long device))))
+
 (defn launch!
-  "Launches n threads of k on the root key words [r0 r1], waits, and
-   copies every output to its pinned host buffer (bufs, from buffers).
-   Returns bufs. :copy? false skips the copies (the kernel alone)."
-  ([k bufs n key-words] (launch! k bufs n key-words true))
-  ([{:keys [function]} bufs n [r0 r1] copy?]
-   (current!)
-   (with-open [arena (Arena/ofConfined)]
-     (let [block (min 128 (long n))
-           grid (quot (+ (long n) (dec block)) block)
-           vals (into [(doto (.allocate arena I) (.set I 0 (unchecked-int (long r0))))
+  "Launches n particles of k (k's lanes threads each) on the root key words
+   [r0 r1], waits, and copies every output to its pinned host buffer (bufs,
+   from buffers). opts: :inputs (the data inputs' device buffers, from
+   upload), :scratch (from scratch), :copy? (true; false times the kernel
+   alone). Returns bufs."
+  ([k bufs n key-words] (launch! k bufs n key-words {}))
+  ([k bufs n key-words opts]
+   (let [{:keys [function scratch-bytes lanes]} k
+         {:keys [inputs scratch copy?] :or {copy? true}} (if (map? opts) opts {:copy? opts})
+         [r0 r1] key-words]
+     (current!)
+     (with-open [arena (Arena/ofConfined)]
+       (let [ptr (fn [v] (doto (.allocate arena J) (.set J 0 (long v))))
+             vals (-> [(doto (.allocate arena I) (.set I 0 (unchecked-int (long r0))))
                        (doto (.allocate arena I) (.set I 0 (unchecked-int (long r1))))
-                       (doto (.allocate arena I) (.set I 0 (int n)))]
-                      (map (fn [{:keys [device]}] (doto (.allocate arena J) (.set J 0 (long device)))) bufs))
-           params (.allocate arena A (count vals))]
-       (doseq [[i v] (map-indexed vector vals)] (.setAtIndex params A (long i) ^MemorySegment v))
-       (cu! :cuLaunchKernel function (int grid) (int 1) (int 1) (int block) (int 1) (int 1) (int 0)
-            MemorySegment/NULL params MemorySegment/NULL)
-       (cu! :cuCtxSynchronize)
-       (when copy?
-         (doseq [{:keys [device host bytes]} bufs]
-           (cu! :cuMemcpyDtoH host (long device) (long bytes))))
-       bufs))))
+                       (doto (.allocate arena I) (.set I 0 (int n)))
+                       (ptr (or (:device scratch) 0))
+                       (ptr (or scratch-bytes 0))]
+                      (into (map (comp ptr :device) inputs))
+                      (into (map (comp ptr :device) bufs)))
+             params (.allocate arena A (count vals))]
+         (doseq [[i v] (map-indexed vector vals)] (.setAtIndex params A (long i) ^MemorySegment v))
+         (cu! :cuLaunchKernel function (int (grid n (or lanes 1))) (int 1) (int 1) (int block-size) (int 1) (int 1) (int 0)
+              MemorySegment/NULL params MemorySegment/NULL)
+         (cu! :cuCtxSynchronize)
+         (when copy?
+           (doseq [{:keys [device host bytes]} bufs]
+             (cu! :cuMemcpyDtoH host (long device) (long bytes))))
+         bufs)))))
 
 (defn read-floats
   "The floats of a float32 buffer's host copy (row-major, [n …])."
