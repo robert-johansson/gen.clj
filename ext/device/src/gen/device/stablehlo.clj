@@ -150,6 +150,24 @@
     (line! em indent (str "}) {dimensions = " (i64s axes) "} : (" (ty shape dtype) ", " st ") -> " (ty out-shape dtype)))
     [r out-shape]))
 
+(def ^:private small-reducers
+  {:sum "stablehlo.add" :prod "stablehlo.multiply" :max "stablehlo.maximum" :min "stablehlo.minimum"
+   :all "stablehlo.and" :any "stablehlo.or"})
+
+(defn- small-reduce!
+  "The whole of v (n ≤ 16 elements) reduced by op as a chain of its
+   elements, shaped out-shape (all ones, or [])."
+  [em indent op v shape dtype out-shape]
+  (let [n (reduce * 1 shape)
+        flat (if (= [n] (vec shape)) v (op-line! em indent "stablehlo.reshape" [v] [(ty shape dtype)] (ty [n] dtype)))
+        elems (mapv (fn [i] (let [sl (op-line! em indent "stablehlo.slice" [flat] [(ty [n] dtype)] (ty [1] dtype)
+                                              (str "start_indices = " (i64s [i]) ", limit_indices = " (i64s [(inc i)])
+                                                   ", strides = " (i64s [1])))]
+                              (op-line! em indent "stablehlo.reshape" [sl] [(ty [1] dtype)] (ty [] dtype))))
+                    (range n))
+        r (reduce (fn [a b] (op-line! em indent (small-reducers op) [a b] [(ty [] dtype) (ty [] dtype)] (ty [] dtype))) elems)]
+    (if (empty? out-shape) r (op-line! em indent "stablehlo.reshape" [r] [(ty [] dtype)] (ty out-shape dtype)))))
+
 (defn- matmul! [em indent [x y] [sx sy] dtype out-shape]
   (let [rx (count sx) ry (count sy)]
     (when (or (> rx 2) (> ry 2))
@@ -299,8 +317,20 @@
                       (put (op-line! em indent "stablehlo.select" [c x y] [(ty shape :bool) (ty shape in) (ty shape in)] (ty shape dtype))))
       (= op :reduce) (let [[v s d] (env (first args))
                            {rop :op axes :axes keep :keep-dims?} attrs
-                           [r rs] (reducer em indent rop v s d axes)]
-                       (put (if keep (op-line! em indent "stablehlo.reshape" [r] [(ty rs dtype)] (ty shape dtype)) r)))
+                           n (reduce * 1 s)]
+                       (if (and (= (count axes) (count s)) (<= 1 n 16) (small-reducers rop))
+                         ;; a whole small array: an elementwise chain, which
+                         ;; fuses with its producers and consumers
+                         (put (small-reduce! em indent rop v s d shape))
+                         (let [[r rs] (reducer em indent rop v s d axes)]
+                           (put (if keep (op-line! em indent "stablehlo.reshape" [r] [(ty rs dtype)] (ty shape dtype)) r)))))
+      (= op :pad) (let [[v s d] (env (first args)) {:keys [axis low high interior]} attrs
+                        r (count s)
+                        at (fn [k] (i64s (map #(if (= % axis) k 0) (range r))))
+                        z (constant! em indent [0] [] d)]
+                    (put (op-line! em indent "stablehlo.pad" [v z] [(ty s d) (ty [] d)] (ty shape dtype)
+                                   (str "edge_padding_low = " (at low) ", edge_padding_high = " (at high)
+                                        ", interior_padding = " (at interior)))))
       (= op :reshape) (let [[v s d] (env (first args))]
                         (put (if (= s shape) v (op-line! em indent "stablehlo.reshape" [v] [(ty s d)] (ty shape dtype)))))
       (= op :transpose) (let [[v s d] (env (first args))]

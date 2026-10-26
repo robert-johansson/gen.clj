@@ -177,6 +177,43 @@
                        " times, so a value read now would be the same in every run")
                   {:op :host-read})))
 
+(defn- node-of [^Staged x] (.get ^java.util.ArrayList (.-nodes ^Graph (.-g x)) (.-id x)))
+
+(defn- const-arg [a] (when (map? a) (:const a)))
+
+(defn- strided-range
+  "[start step] when indices (staged) are start + step·j along axis, j the
+   position, broadcast over every other axis (the tape's indices-along: a
+   broadcast of a reshape of an affine iota), else nil."
+  [indices axis]
+  (when (staged? indices)
+    (let [^Graph g (.-g ^Staged indices)
+          node (fn [id] (.get ^java.util.ArrayList (.-nodes g) id))
+          strip (fn [{:keys [op args] :as n}]
+                  (if (and (#{:broadcast :reshape :convert} op) (number? (first args))) (recur (node (first args))) n))
+          affine (fn affine [{:keys [op args] :as n}]
+                   (case op
+                     :iota [0 1]
+                     :multiply (let [[a b] args
+                                     [c other] (if (const-arg a) [(const-arg a) b] [(const-arg b) a])]
+                                 (when (and c (number? other))
+                                   (when-let [[s0 s1] (affine (strip (node other)))] [(* c s0) (* c s1)])))
+                     :add (let [[a b] args
+                                [c other] (if (const-arg a) [(const-arg a) b] [(const-arg b) a])]
+                            (when (and c (number? other))
+                              (when-let [[s0 s1] (affine (strip (node other)))] [(+ c s0) s1])))
+                     nil))
+          b (node-of indices)
+          r (when (and (= :broadcast (:op b)) (number? (first (:args b)))) (node (first (:args b))))
+          rank (count (:shape b))
+          ;; the iota must run along axis: the reshape puts its length there
+          ;; and 1 on every other axis
+          along? (and r (= :reshape (:op r)) (= rank (count (:shape r)))
+                      (every? (fn [k] (or (= k axis) (= 1 (nth (:shape r) k)))) (range rank)))]
+      (when along?
+        (when-let [[start step] (affine (strip r))]
+          (when (and (integer? start) (integer? step) (pos? step) (>= start 0)) [(long start) (long step)]))))))
+
 (deftype StageBackend []
   p/IBackend
   (-name [_] :stage)
@@ -219,7 +256,15 @@
 
   (-take [_ _ _ _] (throw (ex-info "The staging backend has no take yet" {})))
   (-take-along-axis [_ _ _ _] (throw (ex-info "The staging backend has no take-along-axis yet" {})))
-  (-scatter-add [_ x indices updates axis] (op! :scatter-add [x indices updates] (shape-of x) (array/dtype x) {:axis axis}))
+  (-scatter-add [_ x indices updates axis]
+    (if-let [[start step] (strided-range indices axis)]
+      ;; a strided slice's gradient (the tape's unslice): updates padded into
+      ;; place, which a compiler fuses, where a scatter is a kernel of its own
+      (let [n (nth (shape-of x) axis)
+            m (nth (shape-of updates) axis)
+            high (- n (+ start (* step (dec m))) 1)]
+        (array/+ x (op! :pad [updates] (shape-of x) (array/dtype x) {:axis axis :low start :high high :interior (dec step)})))
+      (op! :scatter-add [x indices updates] (shape-of x) (array/dtype x) {:axis axis})))
 
   (-matmul [_ x y] (op! :matmul [x y] (sh/matmul-shape (shape-of x) (shape-of y)) (array/dtype x)))
   (-linalg [_ op _] (throw (ex-info (str "The staging backend has no " op " yet") {:op op})))
