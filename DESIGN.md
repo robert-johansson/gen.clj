@@ -3121,6 +3121,17 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       need a host read of an array); otherwise unknown-change.
     - **Map's and Unfold's scores turned NaN** (−Inf + Inf) when an update
       returned an element to its support (genclj-awd0, fixed in wave 2).
+- **Device programs: the prototype before the note's review (owner,
+  2026-10-26; genclj-a1hu).** The research into the fastest gen.clj on
+  CUDA builds its XLA prototype alongside the design note rather than
+  after the owner's review of it, and the prototype may change the core
+  on its research branch (`device-programs`) where it needs to. Its two
+  core changes: keys whose words are a staging backend's array
+  (`p/IStagedKey`, which `gen.random`'s split and fold-in dispatch on;
+  still values, rule 2), and a loop (`scan`, in `ext/device` for now; a
+  core `array/scan` is the design question). Neither reaches main until
+  the research's recommendation is decided; that decision is recorded
+  here when it is made.
 
 ## 10. Deferred (tracked, not forgotten)
 
