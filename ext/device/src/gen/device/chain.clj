@@ -171,3 +171,30 @@
   [model args observations selection tau steps]
   (counted-program model args observations selection steps
                    (fn [t k] (mala-move t selection tau {} k))))
+
+;; ---------------------------------------------------------------------------
+;; Data as inputs: a program of a key and the data, which a device holds once
+;; (genclj-4zmv: ndreg's X is 10^7 floats, too many for a constant)
+
+(defn- spec-of [x] [(array/shape x) (if (= :float (array/dtype-kind (array/dtype x))) :float32 (array/dtype x))])
+
+(defn importance-program
+  "importance-run's program with the model's array arguments and the
+   observations' values as inputs, after the key: (program key args-leaves…
+   obs-leaves…), args a vector whose leaves are arrays, observations a
+   choice map. Returns {:program, :inputs (the host arrays to upload, in
+   input order after the key)}."
+  [model args observations n]
+  (let [leaves (cm/leaves observations)
+        paths (mapv first leaves)
+        obs-values (mapv second leaves)]
+    {:program (st/stage
+               (fn [key args obs-vals]
+                 (let [obs (reduce (fn [m [p v]] (cm/set-choice m p v)) cm/EMPTY (map vector paths obs-vals))
+                       {w :weight} (batched-run model :generate args n {:key key :constraints obs})
+                       w (batch/unwrap w [n])]
+                   {:log-ml-estimate (array/- (array/logsumexp w) (Math/log n)) :log-weights w}))
+               (st/key-spec)
+               (array/tree-map spec-of args)
+               (mapv spec-of obs-values))
+     :inputs (into (vec (array/tree-leaves args)) obs-values)}))

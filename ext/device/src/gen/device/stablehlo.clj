@@ -169,13 +169,52 @@
         r (reduce (fn [a b] (op-line! em indent (small-reducers op) [a b] [(ty [] dtype) (ty [] dtype)] (ty [] dtype))) elems)]
     (if (empty? out-shape) r (op-line! em indent "stablehlo.reshape" [r] [(ty [] dtype)] (ty out-shape dtype)))))
 
-(defn- matmul! [em indent [x y] [sx sy] dtype out-shape]
-  (let [rx (count sx) ry (count sy)]
-    (when (or (> rx 2) (> ry 2))
-      (throw (ex-info "StableHLO: matmul of batched matrices not yet" {:shapes [sx sy]})))
-    (op-line! em indent "stablehlo.dot_general" [x y] [(ty sx dtype) (ty sy dtype)] (ty out-shape dtype)
-              (str "dot_dimension_numbers = #stablehlo.dot<lhs_contracting_dimensions = [" (dec rx)
-                   "], rhs_contracting_dimensions = [" (if (= ry 1) 0 (- ry 2)) "]>"))))
+(def ^:private highest
+  "Float matrix products at full precision: never TF32 (DESIGN §9, TF32 off
+   for densities)."
+  "precision_config = [#stablehlo<precision HIGHEST>, #stablehlo<precision HIGHEST>]")
+
+(defn- dot! [em indent x y sx sy dtype out-shape {:keys [lb rb lc rc]}]
+  (op-line! em indent "stablehlo.dot_general" [x y] [(ty sx dtype) (ty sy dtype)] (ty out-shape dtype)
+            (str "dot_dimension_numbers = #stablehlo.dot<"
+                 (when (seq lb) (str "lhs_batching_dimensions = [" (str/join ", " lb) "], "
+                                     "rhs_batching_dimensions = [" (str/join ", " rb) "], "))
+                 "lhs_contracting_dimensions = [" lc "], rhs_contracting_dimensions = [" rc "]>, " highest)))
+
+(defn- matmul!
+  "NumPy's matmul: vectors and matrices as they are; batched matrices with
+   equal batch axes by dot_general's batching; one side's batch axes all 1
+   (an unbatched operand meeting a batched one, as the batch tracer lifts
+   it) contracted without them, never broadcast to the other's batch (at
+   ndreg's largest, 10^10 elements)."
+  [em indent [x y] [sx sy] dtype out-shape]
+  (let [rx (count sx) ry (count sy)
+        reshape (fn [v from to] (if (= from to) v (op-line! em indent "stablehlo.reshape" [v] [(ty from dtype)] (ty to dtype))))]
+    (cond
+      (and (<= rx 2) (<= ry 2))
+      (dot! em indent x y sx sy dtype out-shape {:lc (dec rx) :rc (if (= ry 1) 0 (- ry 2))})
+
+      (and (= rx ry) (= (subvec sx 0 (- rx 2)) (subvec sy 0 (- ry 2))))
+      (dot! em indent x y sx sy dtype out-shape {:lb (range (- rx 2)) :rb (range (- rx 2)) :lc (dec rx) :rc (- ry 2)})
+
+      ;; x unbatched: [1… m k] · [B… k n] → [m B… n] → [B… m n]
+      (and (= rx ry) (every? #(= 1 %) (subvec sx 0 (- rx 2))))
+      (let [mk (subvec sx (- rx 2))
+            x' (reshape x sx mk)
+            bs (subvec sy 0 (- ry 2))
+            n (peek sy)
+            raw (into [(first mk)] (conj bs n))
+            d (dot! em indent x' y mk sy dtype raw {:lc 1 :rc (- ry 2)})
+            perm (vec (concat (range 1 (inc (count bs))) [0] [(inc (count bs))]))]
+        (op-line! em indent "stablehlo.transpose" [d] [(ty raw dtype)] (ty out-shape dtype)
+                  (str "permutation = " (i64s perm))))
+
+      ;; y unbatched: [B… m k] · [1… k n] → [B… m n]
+      (and (= rx ry) (every? #(= 1 %) (subvec sy 0 (- ry 2))))
+      (let [kn (subvec sy (- ry 2))]
+        (dot! em indent x (reshape y sy kn) sx kn dtype out-shape {:lc (dec rx) :rc 0}))
+
+      :else (throw (ex-info "StableHLO: this batched matmul's broadcasting, not yet" {:shapes [sx sy]})))))
 
 (defn- scatter-add!
   "x with updates added at indices along axis (indices and updates of one
