@@ -25,7 +25,13 @@
   [seed]
   (threefry/seed->key seed))
 
-(defn key? [x] (instance? gen.random.threefry.Key x))
+(defn key?
+  "Is x a key: a host key, or a staged one (a device program's,
+   p/IStagedKey)?"
+  [x]
+  (or (instance? gen.random.threefry.Key x) (instance? gen.array.protocols.IStagedKey x)))
+
+(defn- staged-key? [k] (instance? gen.array.protocols.IStagedKey k))
 
 (defn- check-key [k]
   (if (key? k)
@@ -35,7 +41,7 @@
 (defn split
   "n new, independent keys from k (two by default)."
   ([k] (split k 2))
-  ([k n] (threefry/split (check-key k) n)))
+  ([k n] (if (staged-key? k) (p/-split-key k n) (threefry/split (check-key k) n))))
 
 (defn fold-in
   "A new key from k and a non-negative integer (64 bits), e.g. to derive one
@@ -47,7 +53,7 @@
   (when-not (and (integer? data) (clojure.core/<= 0 data Long/MAX_VALUE))
     (throw (ex-info (str "fold-in takes a non-negative 64-bit integer, not " (pr-str data))
                     {:reason :invalid-data :data data})))
-  (threefry/fold-in (check-key k) data))
+  (if (staged-key? k) (p/-fold-in-key k data) (threefry/fold-in (check-key k) data)))
 
 (defn key-data
   "The two uint32 words of a key."

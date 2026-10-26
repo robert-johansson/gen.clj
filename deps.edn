@@ -60,6 +60,12 @@
                  :extra-deps {org.apache.commons/commons-math3 {:mvn/version "3.6.1"}}
                  :exec-args {:dirs ["test" "ext/laws/test" "ext/commons-math/test"]}}
 
+  ;; The device-program research prototype (bean genclj-a1hu), outside the
+  ;; core: a staging backend, its StableHLO, and XLA's PJRT C API by FFM.
+  ;; PJRT needs a plugin: -Dgen.xla.plugin=<xla_cuda_plugin.so>
+  :device {:extra-paths ["ext/device/src" "ext/device/test"]
+           :jvm-opts ["--enable-native-access=ALL-UNNAMED"]}
+
   ;; the MLX backend as the default (creation functions); the device is
   ;; -Dgen.mlx.device=cpu|gpu (default gpu when there is one)
   :mlx {:jvm-opts ["-Dgen.backend=mlx"]}

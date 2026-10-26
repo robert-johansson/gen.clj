@@ -71,6 +71,15 @@
    the tape wraps it."
   (-native-grad? [b] "Does -value-and-grad differentiate natively?"))
 
+(defprotocol IStagedKey
+  "A key whose words are an array of a staging backend, not host values: a
+   device program's key (bean genclj-a1hu, ext/device). gen.random splits
+   and folds it by that backend's ops, the same Threefry as a host key's,
+   and a draw on it is the backend's (-random-uniform receives the key)."
+  (-split-key [k n] "n keys from k, a vector.")
+  (-fold-in-key [k data] "k folded with the non-negative integer data.")
+  (-key-words [k] "The key's words: a uint32 array of shape [2]."))
+
 (defprotocol ICompiling
   "A backend that compiles functions of its arrays (MLX: mlx_compile)."
   (-compile [b f opts]
