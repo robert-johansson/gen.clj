@@ -39,6 +39,15 @@ other values for the same key, from the same distribution.
 - **gen.clj is under the MIT license** (`LICENSE`). The ports of Gen.jl's
   test suite in `test/gen/genjl/` keep Gen.jl's Apache License 2.0, a copy
   beside them (owner, 2026-10-26; genclj-fhdz).
+- **A shared matrix times per-particle vectors is one matrix product in
+  batched runs** (`gen.array.batch`): the particles' vectors as the rows of
+  one product with the matrix, which reads it once, where the broadcast
+  product read it once per particle (on MLX, one GEMV per particle).
+  Batched importance sampling on the parity suite's ndreg cells (1000
+  particles, D × M = 1000 × 10000) takes 6.8 → 4.3 s on the JVM backend
+  and 102 → 23 ms on MLX's GPU (M4, without spot checks). The JVM
+  backend's values are bit-identical; MLX's can differ at float32
+  rounding (genclj-c8gl).
 
 ## [1.0.0] - 2026-10-26
 

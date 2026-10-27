@@ -33,6 +33,8 @@
 (def bs (rand-array 3 [n]))        ; a per-particle scalar
 (def s3 (rand-array 4 [3]))        ; a shared vector
 (def s33 (rand-array 5 [3 3]))
+(def s23 (rand-array 6 [2 3]))     ; a shared 2×3 matrix
+(def s423 (rand-array 7 [4 2 3]))  ; a shared stack of them
 (def spd (array/+ (array/matmul s33 (array/transpose s33)) (array/* 3.0 (array/eye 3))))
 (def bspd (array/+ (array/* (array/reshape (array/abs bs) [n 1 1]) (array/eye 3)) spd))
 
@@ -95,12 +97,50 @@
   (is (vmap-matches? array/matmul [b23 s3] #{0}) "a per-particle matrix times a shared vector")
   (is (vmap-matches? array/matmul [s3 b3] #{1}) "vector · vector")
   (is (vmap-matches? array/matmul [b3 s33] #{0}) "a per-particle vector times a shared matrix")
+  (is (vmap-matches? array/matmul [s23 b3] #{1}) "a shared matrix times per-particle vectors")
+  (is (vmap-matches? array/matmul [s423 b3] #{1}) "a shared stack of matrices times per-particle vectors")
   (is (vmap-matches? #(array/matmul %1 (array/transpose %1)) [b23] #{0}))
   (is (vmap-matches? la/cholesky [bspd] #{0}))
   (is (vmap-matches? #(la/solve %1 %2) [bspd s3] #{0}) "a per-particle matrix, a shared right-hand side")
   (is (vmap-matches? #(la/solve %1 %2) [spd b3] #{1}) "a shared matrix, a per-particle right-hand side")
   (is (vmap-matches? #(la/solve-triangular (la/cholesky %1) %2) [bspd b3] #{0 1}))
   (is (vmap-matches? #(second (la/slogdet %)) [bspd] #{0})))
+
+(defmacro ^:private recording
+  "A backend wrapping inner that passes it every call, and each -matmul's
+   operand shapes to record as well."
+  [inner record]
+  (let [b (gensym "inner")]
+    `(let [~b ~inner]
+       (reify
+         p/IWrappingBackend
+         (~'-inner [~'_] ~b)
+         p/IBackend
+         ~@(for [{:keys [name arglists]} (vals (:sigs p/IBackend))
+                 :let [args (vec (repeatedly (dec (count (first arglists))) #(gensym "a")))]]
+             `(~name [~'_ ~@args]
+               ~@(when (= '-matmul name) [`(~record (mapv (fn [x#] (p/-shape ~b x#)) ~args))])
+               (~(symbol "gen.array.protocols" (str name)) ~b ~@args)))))))
+
+(deftest a-shared-matrix-times-per-particle-vectors-is-one-product
+  ;; X·w per particle with X shared reads X once: the particles' vectors as
+  ;; the rows of one product with X's rows. The broadcast product [1 M D] ·
+  ;; [B D 1] read X once per particle (MLX runs it as B GEMVs), 11× slower
+  ;; on the M4's GPU at ndreg's largest cell (genclj-c8gl). Planted
+  ;; (2026-10-27): the broadcast product fails "of matrices" in every case,
+  ;; and x's rows reshaped, not transposed, fail the values of the matrices
+  ;; here and in matrices.
+  (doseq [[x batch-shape] [[s23 [n]] [s423 [n]] [s3 [n]] [s23 [2 2]]]]
+    (testing (str "x " (array/shape x) ", batch " batch-shape)
+      (let [calls (atom [])
+            inner (recording array/*backend* #(swap! calls conj %))
+            w (rand-array 8 (conj batch-shape 3))
+            out (array/matmul x (gen.array.batch.Batched. w (batch/backend inner batch-shape) false))
+            per (mapv #(array/matmul x (particle (array/reshape w [-1 3]) %)) (range (reduce * batch-shape)))
+            expected (array/reshape (array/stack per) (into batch-shape (array/shape (first per))))]
+        (is (ts/close? (batch/unwrap out batch-shape) expected))
+        (is (= 1 (count @calls)) "one product")
+        (is (every? #(<= (count %) 2) (first @calls)) "of matrices, not stacks")))))
 
 (deftest shape-errors-name-the-model-s-shapes
   ;; gen.array and gen.array.linalg check shapes before they call a backend
