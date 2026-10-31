@@ -571,6 +571,34 @@ __device__ __forceinline__ void g_threefry(unsigned int k0, unsigned int k1, uns
 (defn- emit-graph! [em nodes env ctx]
   (reduce (fn [env node] (emit-node! em env node ctx)) env nodes))
 
+(def ^:private log-mean-exp-kernel
+  "A second kernel of every module: log mean exp of n float32 weights, the
+   log-ML estimate of importance sampling, on the device. One block of 1024
+   threads: a strided max and a tree; then a strided sum of exp(w - max)
+   in double and a tree; one double out. The order is fixed, so the result
+   is the same on every run for the same weights. NaN propagates; all
+   weights -Inf give -Inf."
+  "
+extern \"C\" __global__ void log_mean_exp(const float* w, int n, double* out) {
+  __shared__ float smax[1024];
+  __shared__ double ssum[1024];
+  int t = threadIdx.x, T = blockDim.x;
+  float m = __int_as_float(0xff800000);
+  for (int i = t; i < n; i += T) m = g_max(m, w[i]);
+  smax[t] = m;
+  __syncthreads();
+  for (int s = T / 2; s > 0; s >>= 1) { if (t < s) smax[t] = g_max(smax[t], smax[t + s]); __syncthreads(); }
+  float M = smax[0];
+  bool finite = (M == M) && (M != __int_as_float(0xff800000)) && (M != __int_as_float(0x7f800000));
+  double acc = 0.0;
+  if (finite) for (int i = t; i < n; i += T) acc += (double) expf(w[i] - M);
+  ssum[t] = acc;
+  __syncthreads();
+  for (int s = T / 2; s > 0; s >>= 1) { if (t < s) ssum[t] += ssum[t + s]; __syncthreads(); }
+  if (t == 0) out[0] = finite ? (double) M + log(ssum[0]) - log((double) n) : (double) M;
+}
+")
+
 (defn source
   "The CUDA C++ text of the kernel `chains` for program (gen.device.stage's,
    of a key and data inputs): (chains r0 r1 n scratch sbytes in1 … out0 …),
@@ -633,7 +661,9 @@ __device__ __forceinline__ void g_threefry(unsigned int k0, unsigned int k1, uns
                    "  chain(q, ln, act, key0, key1, scratch_all + (long long)p * sbytes"
                    (str/join (map #(str ", in" (inc %)) (range (count data))))
                    (str/join (map #(str ", out" %) (range (count outs)))) ");\n"
-                   "}\n#endif\n")
+                   "}\n"
+                   log-mean-exp-kernel
+                   "#endif\n")
       :outputs (mapv (fn [{:keys [shape dtype ys]} o]
                        {:shape (if ys (:shape (by-id o)) shape) :dtype dtype})
                      outs outputs)
@@ -764,8 +794,13 @@ __device__ __forceinline__ void g_threefry(unsigned int k0, unsigned int k1, uns
               f (.allocate arena A)
               _ (cu! :cuModuleGetFunction f module (.allocateFrom arena "chains"))
               function (.get f A 0)
+              rf (.allocate arena A)
+              _ (cu! :cuModuleGetFunction rf module (.allocateFrom arena "log_mean_exp"))
+              reduce-out (.allocate arena J)
+              _ (cu! :cuMemAlloc reduce-out (long 8))
               attr (fn [k] (let [v (.allocate arena I)] (cu! :cuFuncGetAttribute v (int k) function) (.get v I 0)))]
           {:function function :module module :outputs outputs :inputs inputs
+           :reduce-function (.get rf A 0) :reduce-out (.get reduce-out J 0)
            :scratch-bytes (or scratch-bytes 0) :lanes (or lanes 1) :log log
            :registers (attr 4) :local-bytes (attr 3)
            :compile-ms (/ (- (System/nanoTime) t0) 1e6)})))))
@@ -857,6 +892,28 @@ __device__ __forceinline__ void g_threefry(unsigned int k0, unsigned int k1, uns
              (cu! :cuMemcpyDtoH host (long device) (long bytes))))
          bufs)))))
 
+(defn log-mean-exp!
+  "log mean exp of the n float32 values of output buffer k-th of bufs (on
+   the device, from launch!): importance sampling's log-ML estimate,
+   reduced on the device by the module's log_mean_exp kernel and returned
+   as a double (8 bytes copied back). Launch with :copy? false to keep the
+   weights on the device."
+  ^double [{:keys [reduce-function reduce-out]} bufs n output]
+  (current!)
+  (with-open [arena (Arena/ofConfined)]
+    (let [{:keys [device]} (nth bufs output)
+          vals [(doto (.allocate arena J) (.set J 0 (long device)))
+                (doto (.allocate arena I) (.set I 0 (int n)))
+                (doto (.allocate arena J) (.set J 0 (long reduce-out)))]
+          params (.allocate arena A (count vals))
+          host (.allocate arena ValueLayout/JAVA_DOUBLE)]
+      (doseq [[i v] (map-indexed vector vals)] (.setAtIndex params A (long i) ^MemorySegment v))
+      (cu! :cuLaunchKernel reduce-function (int 1) (int 1) (int 1) (int 1024) (int 1) (int 1) (int 0)
+           MemorySegment/NULL params MemorySegment/NULL)
+      (cu! :cuCtxSynchronize)
+      (cu! :cuMemcpyDtoH host (long reduce-out) (long 8))
+      (.get host ValueLayout/JAVA_DOUBLE 0))))
+
 (defn read-floats
   "The floats of a float32 buffer's host copy (row-major, [n …])."
   ^floats [{:keys [^MemorySegment host bytes]}]
@@ -868,7 +925,8 @@ __device__ __forceinline__ void g_threefry(unsigned int k0, unsigned int k1, uns
   (.toArray (.asSlice host 0 (long bytes)) ValueLayout/JAVA_BYTE))
 
 (defn unload!
-  "Unloads k's module."
-  [{:keys [module]}]
+  "Unloads k's module (and frees its reduction's output)."
+  [{:keys [module reduce-out]}]
   (current!)
+  (when reduce-out (cu! :cuMemFree (long reduce-out)))
   (cu! :cuModuleUnload module))

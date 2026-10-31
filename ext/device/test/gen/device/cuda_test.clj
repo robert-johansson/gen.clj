@@ -69,3 +69,23 @@
                   (is (= (mapv (fn [t] (not= (nth draws t) (if (zero? t) (read tr) (nth draws (dec t))))) (range steps))
                          (subvec acc (* i steps) (* (inc i) steps)))))))))
         (finally (cuda/unload! k))))))
+
+(deftest the-log-ml-reduced-on-the-device-is-the-hosts
+  (if-not gpu?
+    (println "gen.device.cuda-test: no -Dgen.cuda.nvrtc, the reduction test skips")
+    (let [[model args obs] (pb/models :vector)
+          k (cuda/compile (cuda/source (ch/weight-run model args obs)))]
+      (try
+        (doseq [n [1 7 1000 1025 100000]]
+          (let [bufs (cuda/buffers k n)]
+            (try
+              (cuda/launch! k bufs n (rng/key-data (rng/key n)))
+              (let [^floats w (cuda/read-floats (first bufs))
+                    m (reduce max (map double w))
+                    host (- (+ m (Math/log (reduce + (map #(Math/exp (- (double %) m)) w)))) (Math/log n))
+                    dev (cuda/log-mean-exp! k bufs n 0)]
+                (is (< (Math/abs (- dev host)) (* 1e-6 (+ 1.0 (Math/abs host)))) [n dev host])
+                (testing "the same weights, the same result"
+                  (is (== dev (cuda/log-mean-exp! k bufs n 0)))))
+              (finally (cuda/free-buffers bufs)))))
+        (finally (cuda/unload! k))))))
