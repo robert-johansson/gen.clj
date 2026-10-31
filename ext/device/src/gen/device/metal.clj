@@ -105,10 +105,15 @@
     [:float32 :uint32] (str "as_type<uint>(" a ")")
     (throw (ex-info "Metal lowering: a bitcast other than uint32 ↔ float32" {:from from :to to}))))
 
+(defn- read-expr
+  "A buffer's element: scratch buffers (b<n>) hold bools as uint."
+  [b dtype i]
+  (if (and (= dtype :bool) (re-matches #"b[0-9]+" b)) (str "(" b "[" i "] != 0u)") (str b "[" i "]")))
+
 (def dialect
   "Metal's expressions (gen.device.scalar's dialect)."
   {:name "Metal lowering" :lit lit :simple? simple? :unary unary-expr :binary binary-expr
-   :convert convert-expr :bitcast bitcast-expr})
+   :convert convert-expr :bitcast bitcast-expr :read read-expr})
 
 (def ^:private header
   "Helpers every kernel uses: Threefry for the threads' keys, and the ops
@@ -165,9 +170,20 @@ inline void g_threefry(uint k0, uint k1, uint c0, uint c1, thread uint& w0, thre
 ;; The kernel's text
 ;; ---------------------------------------------------------------------------
 
+(defn- scratch-layout
+  "Each buffer's slice of a thread's scratch: {:float [{:name :dtype :n
+   :offset}…] :uint […] :float-size :uint-size} (float32 in the float
+   scratch; uint32, int32 and bool in the uint one)."
+  [buffers]
+  (let [lay (fn [bs] (reduce (fn [[acc off] {:keys [n] :as b}] [(conj acc (assoc b :offset off)) (+ off n)]) [[] 0] bs))
+        [fs fsize] (lay (filter #(= :float32 (:dtype %)) buffers))
+        [us usize] (lay (remove #(= :float32 (:dtype %)) buffers))]
+    {:float fs :uint us :float-size fsize :uint-size usize}))
+
 (defn- body-text
-  "The statements as Metal, run p's outputs at p·size."
-  [stmts out-specs]
+  "The statements as Metal, run p's outputs at p·size, its buffers slices
+   of the thread's scratch."
+  [stmts out-specs layout]
   (let [sb (StringBuilder.)
         line (fn [indent s] (.append sb (apply str (repeat indent "  "))) (.append sb ^String s) (.append sb "\n"))
         emit (fn emit [indent stmts]
@@ -176,6 +192,11 @@ inline void g_threefry(uint k0, uint k1, uint c0, uint c1, thread uint& w0, thre
                    :decl (line indent (str (mtype a) " " b " = " c ";"))
                    :set (line indent (str a " = " b ";"))
                    :store (line indent (str "out" a "[p * " (sc/size (:shape (nth out-specs a))) "u + " b "] = " c ";"))
+                   :bset (line indent (str a "[" b "] = " c ";"))
+                   :for (let [[_ i n body] s]
+                          (line indent (str "for (int " i " = 0; " i " < " n "; ++" i ") {"))
+                          (emit (inc indent) body)
+                          (line indent "}"))
                    :loop (let [[_ it length body] s]
                            (line indent (str "for (uint " it " = 0; " it " < " length "u; ++" it ") {"))
                            (emit (inc indent) body)
@@ -184,17 +205,27 @@ inline void g_threefry(uint k0, uint k1, uint c0, uint c1, thread uint& w0, thre
     (line 0 "if (p >= nn[0]) return;")
     (line 0 "uint key0, key1;")
     (line 0 "g_threefry(root[0], root[1], 0u, p, key0, key1);")
+    (doseq [{:keys [name offset]} (:float layout)]
+      (line 0 (str "device float* " name " = scratchf + p * " (:float-size layout) "u + " offset "u;")))
+    (doseq [{:keys [name dtype offset]} (:uint layout)]
+      (line 0 (str (if (= dtype :int32) "device int* " "device uint* ") name " = "
+                   (if (= dtype :int32) "(device int*)(" "(") "scratchu + p * " (:uint-size layout) "u + " offset "u);")))
     (emit 0 stmts)
     (.toString sb)))
 
 (defn source
-  "The Metal kernel of program (gen.device.stage's, of one key):
-   {:source (its body) :header :outputs [{:shape :dtype} per run]
-   :statements}. Thread p runs program on (rng/split [root0 root1] n)[p]
-   (inputs root, uint32 [2], and nn, uint32 [1] holding n)."
+  "The Metal kernel of program (gen.device.stage's, of a key and data
+   inputs): {:source (its body) :header :outputs [{:shape :dtype} per run]
+   :inputs :constants :scratch (the layout) :statements}. Thread p runs
+   program on (rng/split [root0 root1] n)[p] (inputs root, uint32 [2], and
+   nn, uint32 [1] holding n; then the data inputs in1 …, then the large
+   constants k…); its buffers are slices of the outputs scratchf and
+   scratchu, after the program's outputs."
   [program]
-  (let [{:keys [stmts outputs statements]} (sc/scalarize program dialect)]
-    {:source (body-text stmts outputs) :header header :outputs outputs :statements statements}))
+  (let [{:keys [stmts outputs statements buffers inputs constants]} (sc/scalarize program dialect)
+        layout (scratch-layout buffers)]
+    {:source (body-text stmts outputs layout) :header header :outputs outputs :inputs inputs :constants constants
+     :scratch layout :statements statements}))
 
 ;; ---------------------------------------------------------------------------
 ;; Running through MLX
@@ -216,14 +247,19 @@ inline void g_threefry(uint k0, uint k1, uint c0, uint c1, thread uint& w0, thre
    :header :statements :name}. MLX compiles the source on the kernel's
    first run."
   [program]
-  (let [{:keys [source header outputs] :as src} (source program)
+  (let [{:keys [source header outputs inputs constants scratch] :as src} (source program)
         name (str "gen_program_" (swap! counter inc))
-        ins (strings ["root" "nn"])
-        outs (strings (map #(str "out" %) (range (count outputs))))]
+        ins (strings (concat ["root" "nn"] (map :name inputs) (map :name constants)))
+        outs (strings (concat (map #(str "out" %) (range (count outputs)))
+                              (when (pos? (:float-size scratch)) ["scratchf"])
+                              (when (pos? (:uint-size scratch)) ["scratchu"])))]
     (try
       (with-open [arena (Arena/ofConfined)]
         (assoc src
                :name name
+               :constant-arrays (mapv (fn [{:keys [dtype values]}]
+                                        (array/array (mapv #(if (boolean? %) % (double %)) values) {:dtype dtype}))
+                                      constants)
                :kernel (Mlx/mlx_fast_metal_kernel_new (.allocateFrom arena ^String name) ins outs
                                                       (.allocateFrom arena ^String source) (.allocateFrom arena ^String header)
                                                       true false)))
@@ -232,9 +268,10 @@ inline void g_threefry(uint k0, uint k1, uint c0, uint c1, thread uint& w0, thre
 (defn run
   "n threads of k on root's words: the outputs as MLX arrays of the MLX
    backend b ([n …] each), unevaluated. opts: :thread-group (threads per
-   group, 64 by default)."
+   group, 64 by default), :inputs (the data inputs, MLX arrays of the
+   program's input dtypes)."
   ([k n root-words] (run k n root-words {}))
-  ([{:keys [kernel outputs]} n [r0 r1] {:keys [thread-group backend] :or {thread-group 64}}]
+  ([{:keys [kernel outputs scratch constant-arrays]} n [r0 r1] {:keys [thread-group backend inputs] :or {thread-group 64}}]
    (let [b (or backend array/*backend*)
          n (long n)
          root (array/array [(bit-and (long r0) 0xFFFFFFFF) (bit-and (long r1) 0xFFFFFFFF)] {:dtype :uint32})
@@ -245,15 +282,20 @@ inline void g_threefry(uint k0, uint k1, uint c0, uint c1, thread uint& w0, thre
          (doseq [{:keys [shape dtype]} outputs]
            (let [shp (into [n] shape)]
              (Mlx/mlx_fast_metal_kernel_config_add_output_arg cfg (.allocateFrom arena ValueLayout/JAVA_INT (int-array (map int shp)))
-                                                              (long (count shp)) (int (dtype-code dtype))))))
+                                                              (long (count shp)) (int (dtype-code dtype)))))
+         (doseq [[size dtype] [[(:float-size scratch) :float32] [(:uint-size scratch) :uint32]] :when (pos? size)]
+           (Mlx/mlx_fast_metal_kernel_config_add_output_arg cfg (.allocateFrom arena ValueLayout/JAVA_INT (int-array [(int (* n size))]))
+                                                            1 (int (dtype-code dtype)))))
        (Mlx/mlx_fast_metal_kernel_config_set_grid cfg (int n) 1 1)
        (Mlx/mlx_fast_metal_kernel_config_set_thread_group cfg (int (min n thread-group)) 1 1)
-       (let [in (MlxRuntime/vectorOf (long-array [(.-h ^gen.backend.mlx.MlxArray root) (.-h ^gen.backend.mlx.MlxArray nn)]))]
+       (let [in (MlxRuntime/vectorOf (long-array (map #(.-h ^gen.backend.mlx.MlxArray %) (concat [root nn] inputs constant-arrays))))]
          (try
            (let [out (Mlx/mlx_fast_metal_kernel_apply kernel in cfg (stream-of b))]
-             (try (mapv #(wrap b %) (MlxRuntime/vectorArrays out))
+             (try (vec (take (count outputs) (mapv #(wrap b %) (MlxRuntime/vectorArrays out))))
                   (finally (MlxRaw/mlx_vector_array_free out))))
            (finally (MlxRaw/mlx_vector_array_free in)
                     (java.lang.ref.Reference/reachabilityFence root)
-                    (java.lang.ref.Reference/reachabilityFence nn))))
+                    (java.lang.ref.Reference/reachabilityFence nn)
+                    (java.lang.ref.Reference/reachabilityFence inputs)
+                    (java.lang.ref.Reference/reachabilityFence constant-arrays))))
        (finally (Mlx/mlx_fast_metal_kernel_config_free cfg))))))

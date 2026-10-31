@@ -22,8 +22,8 @@
     (testing "a scan over xs: only counted scans"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"scan over xs"
                             (jvm/source (ch/mala-run model args obs pb/selection pb/tau 5) "P"))))
-    (testing "a program of anything but one key"
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"one key"
+    (testing "a program of anything but a key, then its data"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"a program of a key"
                             (jvm/source (st/stage (fn [x] (array/exp x)) [[2] :float32]) "P"))))))
 
 (def ^:private kernels
@@ -138,3 +138,48 @@
                   ref (is/importance-sampling model args obs n {:key key})]
               (is (= (:log-weights ref) (vec w)))
               (is (== (:log-ml-estimate ref) (- lse (Math/log n)))))))))))
+
+(defn- regression-data
+  "The vector model's arguments and observations on n points."
+  [n]
+  (let [xs (mapv #(/ (double %) (max 1 (dec n)) 0.1) (range n))
+        ys (mapv #(+ (* 2.0 %) -1.0 (Math/sin (* 7.0 %))) xs)]
+    [[(array/array xs)] (cm/choicemap :ys (array/array ys))]))
+
+(deftest data-of-any-size-are-inputs-and-the-code-does-not-grow
+  (if-not (= :jvm (array/backend-name array/*backend*))
+    (println "gen.device.jvm-test: not the JVM backend, the large-data comparison skips")
+    (let [sizes (atom [])]
+      (doseq [n [100 1000]]
+        (testing n
+          (let [[args obs] (regression-data n)
+                model pb/vector-model
+                {:keys [program inputs]} (binding [st/*float* :float64] (ch/weight-program model args obs))
+                k (jvm/compile program)
+                jin (mapv #(jvm/input-array % :float64) inputs)
+                key (rng/key 5)
+                {[w] :outputs} (jvm/run-many k 30 (rng/key-data key) {:inputs jin})]
+            (swap! sizes conj (:statements k))
+            (is (= (:log-weights (is/importance-sampling model args obs 30 {:key key})) (vec w)))
+            (testing "a MALA chain, the data its inputs"
+              (let [{cp :program cin :inputs} (binding [st/*float* :float64] (ch/chain-program model args obs pb/selection [:mala 1e-4] 4))
+                    [vs acc] ((:run (jvm/compile cp)) (rng/key-data key) (mapv #(jvm/input-array % :float64) cin))
+                    [k0 k1] (rng/split key 2)
+                    tr (:trace (gfi/generate model args obs k0))
+                    addrs (mapv first (cm/leaves (grad/continuous-selection tr pb/selection)))
+                    read (fn [t] (mapv #(double (array/->clj (cm/get-choice (:choices t) %))) addrs))
+                    {:keys [draws]} (kernel/run (kernel/mala pb/selection 1e-4) tr {:samples 4 :key k1 :keep read})]
+                (is (= (vec (apply concat draws)) (vec vs)))
+                (is (= (mapv (fn [t] (not= (nth draws t) (if (zero? t) (read tr) (nth draws (dec t))))) (range 4)) (vec acc))))))))
+      (testing "the code's size does not depend on the data's"
+        (is (apply = @sizes) @sizes)))))
+
+(deftest large-constants-are-passed-not-written
+  (if-not (= :jvm (array/backend-name array/*backend*))
+    (println "gen.device.jvm-test: not the JVM backend, the large-constant comparison skips")
+    (let [[args obs] (regression-data 500)
+          k (jvm/compile (binding [st/*float* :float64] (ch/weight-run pb/vector-model args obs)))
+          key (rng/key 6)
+          {[w] :outputs} (jvm/run-many k 10 (rng/key-data key) {})]
+      (is (= 2 (count (:constants k))))
+      (is (= (:log-weights (is/importance-sampling pb/vector-model args obs 10 {:key key})) (vec w))))))

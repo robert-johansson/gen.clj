@@ -25,8 +25,8 @@
     (testing "float64: Metal has none"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Metal lowering: no :float64"
                             (metal/source (binding [st/*float* :float64] (ch/weight-run model args obs))))))
-    (testing "a program of anything but one key"
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"one key"
+    (testing "a program of anything but a key, then its data"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"a program of a key"
                             (metal/source (st/stage (fn [x] (array/exp x)) [[2] :float32])))))))
 
 (deftest a-thread-is-kernel-runs-chain
@@ -68,5 +68,21 @@
               key (rng/key 21) n 200
               [w] (mapv array/->clj (metal/run k n (rng/key-data key)))
               ref (is/importance-sampling model args obs n {:key key})]
+          (doseq [[i ref-w] (map-indexed vector (:log-weights ref))]
+            (is (< (Math/abs (- (nth w i) ref-w)) (* 1e-4 (+ 1.0 (Math/abs ref-w)))) [i (nth w i) ref-w])))))))
+
+(deftest data-of-any-size-are-inputs
+  (if-not gpu?
+    (println "gen.device.metal-test: not MLX on the GPU, the large-data test skips")
+    (doseq [n [100 2000]]
+      (testing n
+        (let [xs (mapv #(/ (double %) (max 1 (dec n)) 0.1) (range n))
+              ys (mapv #(+ (* 2.0 %) -1.0 (Math/sin (* 7.0 %))) xs)
+              args [(array/array xs)] obs (cm/choicemap :ys (array/array ys))
+              {:keys [program inputs]} (ch/weight-program pb/vector-model args obs)
+              k (metal/compile program)
+              key (rng/key 5)
+              [w] (mapv array/->clj (metal/run k 64 (rng/key-data key) {:inputs inputs}))
+              ref (is/importance-sampling pb/vector-model args obs 64 {:key key})]
           (doseq [[i ref-w] (map-indexed vector (:log-weights ref))]
             (is (< (Math/abs (- (nth w i) ref-w)) (* 1e-4 (+ 1.0 (Math/abs ref-w)))) [i (nth w i) ref-w])))))))

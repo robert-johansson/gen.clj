@@ -149,6 +149,24 @@
   [key t]
   (st/->StagedKey (array/reshape (st/threefry-words (p/-key-words key) (array/reshape (array/astype t :uint32) [1])) [2])))
 
+(defn- counted-chain
+  "A counted chain's body on a key, the model's arguments and observations
+   (staged values or constants): generate, then steps of (move trace key)."
+  [model key args observations selection steps move]
+  (let [[k0 k1] (rng/split key 2)
+        tr (:trace (gfi/generate model args observations k0))
+        others (sel/get-selected (:choices tr) (sel/complement selection))
+        proto (grad/continuous-selection tr selection)
+        v0 (cm/to-array proto)
+        [_ [vs accepted]]
+        (st/scan (fn [v t]
+                   (let [tr' (assoc tr :choices (cm/merge others (cm/from-array proto v)))
+                         {:keys [values accepted?]} (move tr' (key-at k1 t))
+                         v' (cm/to-array values)]
+                     [v' [v' accepted?]]))
+                 v0 nil steps)]
+    {:values vs :accepted accepted :start v0}))
+
 (defn- counted-program
   "run-program's program, its steps' keys derived in the loop."
   [model args observations selection steps move]
@@ -186,7 +204,29 @@
 ;; Data as inputs: a program of a key and the data, which a device holds once
 ;; (genclj-4zmv: ndreg's X is 10^7 floats, too many for a constant)
 
-(defn- spec-of [x] [(array/shape x) (if (= :float (array/dtype-kind (array/dtype x))) :float32 (array/dtype x))])
+(defn- spec-of [x] [(array/shape x) (if (= :float (array/dtype-kind (array/dtype x))) st/*float* (array/dtype x))])
+
+(defn chain-program
+  "A counted chain (mala-chain's or hmc-chain's) with the model's array
+   arguments and the observations' values as inputs after the key, as
+   importance-program's: {:program :inputs}. kernel: [:mala tau] or
+   [:hmc opts]."
+  [model args observations selection kernel steps]
+  (let [leaves (cm/leaves observations)
+        paths (mapv first leaves)
+        obs-values (mapv second leaves)
+        [kind k-opts] kernel
+        move (case kind
+               :mala (fn [t k] (mala-move t selection k-opts {} k))
+               :hmc (fn [t k] (hmc-move t selection (merge {:L 10 :eps 0.1} k-opts) k)))]
+    {:program (st/stage
+               (fn [key args obs-vals]
+                 (let [obs (reduce (fn [m [p v]] (cm/set-choice m p v)) cm/EMPTY (map vector paths obs-vals))]
+                   (counted-chain model key args obs selection steps move)))
+               (st/key-spec)
+               (array/tree-map spec-of args)
+               (mapv spec-of obs-values))
+     :inputs (into (vec (array/tree-leaves args)) obs-values)}))
 
 (defn importance-program
   "importance-run's program with the model's array arguments and the
