@@ -28,6 +28,7 @@
             [gen.array :as array]
             [gen.choicemap :as cm]
             [gen.codegen.candidate :as candidate]
+            [gen.codegen.explain :as explain]
             [gen.codegen.grade :as grade]
             [gen.codegen.tasks :as tasks]
             [gen.gfi :as gfi]
@@ -109,7 +110,10 @@
                           nil forms))]
           {:text (str note (when (seq (str out)) (str "printed: " (clip (str out) 400) "\n")) "=> " (show v))})
         (catch Throwable e
-          {:text (str note (when (seq (str out)) (str "printed: " (clip (str out) 400) "\n")) "error: " (message e))})))))
+          (let [lint (explain/lint code (str/join "\n\n" (:program (session id))))]
+            {:text (str note (when (seq (str out)) (str "printed: " (clip (str out) 400) "\n"))
+                        "error: " (explain/explain e (the-ns ns))
+                        (when lint (str "\nclj-kondo on this code:\n" lint)))}))))))
 
 (defn- resolve-gf [id name]
   (let [v (in-session id #(ns-resolve *ns* (symbol name)))]
