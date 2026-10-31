@@ -121,7 +121,7 @@
   (.markRead x)
   (let [v (.-v x)] (if (delay? v) @v v)))
 
-(declare backend lift full-batch made value-and-grad-inside by-kind)
+(declare backend lift full-batch made shared-times-vectors value-and-grad-inside by-kind)
 
 ;; draws is nil, or [shape rows] for a part of a batch (part-backend): the
 ;; draws of the batch of shape at rows, an int array of the wrapped backend.
@@ -246,7 +246,11 @@
       (p/-scatter-add inner x indices updates axis)))
 
   (-matmul [b x y]
-    (if (or (batched? x) (batched? y))
+    (cond
+      (and (batched? y) (not (batched? x)) (== 1 (count (p/-shape b y))))
+      (shared-times-vectors b x y)
+
+      (or (batched? x) (batched? y))
       ;; per-particle NumPy matmul: a per-particle vector becomes a matrix,
       ;; and its added axis is removed from the product
       (let [sx (p/-shape b x)
@@ -264,7 +268,8 @@
                      xv? (conj (subvec t 0 (- n 2)) (peek t))
                      :else t)]
         (if (= t t') out (p/-reshape b out t')))
-      (p/-matmul inner x y)))
+
+      :else (p/-matmul inner x y)))
 
   (-linalg [b op args]
     (let [arrays (vec (remove map? args))
@@ -346,6 +351,22 @@
       (array/host? x) x
       :else (let [s (p/-shape inner x)]
               (p/-reshape inner x (-> [] (into (repeat (+ (count bs) (- r (count s))) 1)) (into s)))))))
+
+(defn- shared-times-vectors
+  "x · y for an unbatched x ([D] or [… M D]) and per-particle vectors y
+   ([D]): the particles' vectors as the rows of one product with x's rows,
+   which reads x once. Per particle, x · y would read it once per particle
+   (MLX runs the broadcast product as one GEMV per particle; genclj-c8gl)."
+  [^BatchBackend b x y]
+  (let [inner (.-inner b)
+        v (value y)
+        sv (p/-shape inner v)
+        sx (p/-shape inner x)
+        x-rows (p/-reshape inner x [(sh/size (pop sx)) (peek sx)])
+        out (p/-matmul inner
+                       (p/-reshape inner v [(sh/size (pop sv)) (peek sv)])
+                       (p/-transpose inner x-rows [1 0]))]
+    (made (p/-reshape inner out (into (pop sv) (pop sx))) b)))
 
 (defn- with-batch-axes
   "x as an array of backend inner with the leading batch axes of
