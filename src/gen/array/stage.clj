@@ -202,6 +202,13 @@
         lo (op! :convert [(bit :shift-right-logical w1 12)] [n] :float64)]
     (array/reshape (* (+ (* hi (Math/pow 2.0 20)) lo) (Math/pow 2.0 -52)) shape)))
 
+(defn key-at
+  "(rng/split key n)'s key at the staged index t (an int32 scalar below n):
+   Threefry of the counter [0 t] under key's words, as split's, so a loop's
+   step t draws what (nth (rng/split key n) t) draws on the host."
+  [key t]
+  (->StagedKey (array/reshape (threefry-words (p/-key-words key) (array/reshape (array/astype t :uint32) [1])) [2])))
+
 (defn key-spec
   "A staged key's place among stage's argument specs."
   []

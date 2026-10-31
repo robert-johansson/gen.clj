@@ -380,7 +380,7 @@
 (def ^:private layers
   "The API appendix's layers, in order: a title, and the names of the
    namespaces it holds."
-  [["Arrays and randomness" #"gen\.(array|random|backend)(\..+)?"]
+  [["Arrays and randomness" #"gen\.(array|random|backend|device)(\..+)?"]
    ["Choice maps, selections, traces and diffs" #"gen\.(choicemap|selection|trace|diff)"]
    ["The generative function interface" #"gen\.(gfi|dynamic|serialize|batched|partition|laws)(\..+)?"]
    ["Distributions" #"gen\.dist(\..+)?"]

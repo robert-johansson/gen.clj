@@ -72,6 +72,26 @@ other values for the same key, from the same distribution.
   `{:api :experimental}` is outside the surface and the promise.
 - **gen.random takes staged keys** (`split`, `fold-in`; `key?` is true of
   them): a staged key is a value too (rule 2). Host keys are unchanged.
+- **Experimental: `:device` on `kernel/run` and importance sampling**
+  (`gen.inference.device`; the lowerings' entry point `gen.device` in
+  ext/device; outside the 1.x promise; DESIGN §9, genclj-fpnf).
+  `{:device :jvm}` stages the run once from gen.clj's own code (kernel/run's
+  chain as one scan of the kernel's step, importance sampling's particle as
+  one constrained generate), compiles it with the device lowerings and runs
+  it. The result is the handler's (bit for bit on the JVM backend in
+  float64) with `:device` added, and its traces are whole: an update from
+  one is the handler's. `:metal` runs importance sampling's particles on
+  the GPU. A run that does not stage or lower (a branch on a draw the chain
+  moves, a generative function made anew each run, an op a lowering lacks,
+  ext/device absent) runs on the handler, its result saying why in
+  `:device-fallback {:device :reason}`. A compiled program is reused by a
+  run with a kernel of the same kind and parameters, the same model and
+  argument arrays and the same length. On the parity suite's linear
+  regression (M4, JVM backend), kernel/run's MALA for 1000 steps takes
+  113.6 → 5.5 ms (the static model's 226 → 12.9 ms) and importance
+  sampling of 1000 particles 9.1 → 3.8 ms. kernel/mala and kernel/hmc
+  carry their step for it (`:device-f`, `:device-key`), and kernel/run's
+  arglist names `:device`.
 
 ## [1.0.0] - 2026-10-26
 

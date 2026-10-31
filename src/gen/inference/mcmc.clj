@@ -70,7 +70,8 @@
             [gen.gfi :as gfi]
             [gen.gradients :as grad]
             [gen.random :as rng]
-            [gen.selection :as sel]))
+            [gen.selection :as sel]
+            [gen.trace]))
 
 (set! *warn-on-reflection* true)
 
@@ -500,6 +501,48 @@
      (check-start! "hmc" (:start-ok move) trace selection)
      (cond-> (moved trace move (second (rng/split key 3)))
        (pos? (double jitter)) (assoc :eps step)))))
+
+;; ---------------------------------------------------------------------------
+;; The device forms of MALA's and HMC's steps (gen.inference.device): the
+;; handler's move and update on the same keys, the next trace chosen leaf by
+;; leaf by where in place of moved's if, so a step is a function of arrays
+;; and keys that stages. The same traces and decisions as mala's and hmc's.
+;; ---------------------------------------------------------------------------
+
+(defn- chosen
+  "updated where accepted, trace where not, leaf by leaf (every leaf of the
+   trace: choices, score, return value, per-site scores, subtraces):
+   moved's branch as a function of arrays. The two must share a structure;
+   a host integer or boolean they share stays itself (a count of the
+   arguments that host code reads)."
+  [trace updated accepted]
+  (let [[sk old] (gen.trace/as-leaves trace)
+        [sk' new] (gen.trace/as-leaves updated)
+        shared? (fn [a b] (and (or (integer? a) (boolean? a)) (= (class a) (class b)) (= a b)))]
+    (when-not (= sk sk')
+      (throw (ex-info (gen.trace/structure-change sk sk') {})))
+    (gen.trace/from-leaves sk (mapv #(if (shared? %1 %2) %1 (array/where accepted %1 %2)) new old) (:args trace))))
+
+(defn- device-result [trace move key]
+  (let [updated (:trace (gfi/update trace (:values move) (second (rng/split key 3))))]
+    {:trace (chosen trace updated (:accepted? move)) :accepted? (:accepted? move) :diverged? (:diverged? move)
+     :start-ok (:start-ok move)}))
+
+(defn ^:no-doc mala-step
+  "mala's step as a function of arrays and keys (the device form): the same
+   trace and decisions, with :start-ok, which mala checks on the host."
+  [trace selection tau opts key]
+  (device-result trace (mala-move trace selection tau (dissoc opts :compile?) key) key))
+
+(defn ^:no-doc hmc-step
+  "hmc's step as a function of arrays and keys (the device form): the same
+   trace and decisions, with :start-ok. Without jitter (its step size is
+   read on the host)."
+  [trace selection opts key]
+  (let [{:keys [jitter] :or {jitter 0} :as opts} (options opts)]
+    (when-not (zero? (double jitter))
+      (throw (ex-info "hmc's :jitter under :device, not yet (its step size is read on the host)" {:jitter jitter})))
+    (device-result trace (hmc-move trace selection (dissoc opts :compile?) key) key)))
 
 ;; ---------------------------------------------------------------------------
 ;; NUTS

@@ -34,7 +34,8 @@
    read back: gen.serialize's write-trace and read-trace are the round
    trip."
   {:api :stable}
-  (:require [gen.array :as array]
+  (:require [clojure.walk :as walk]
+            [gen.array :as array]
             [gen.choicemap :as cm]))
 
 (set! *warn-on-reflection* true)
@@ -154,3 +155,87 @@
   (.write w " ")
   (print-method (shown tr) w)
   (.write w "]"))
+
+;; ---------------------------------------------------------------------------
+;; A trace as leaves (device programs, gen.inference.device): its arrays,
+;; numbers and booleans (choices, score, return value, per-site scores and
+;; node values, the subtraces of its calls) and a skeleton, so that a staged
+;; loop carries whole traces, a step picks between two traces leaf by leaf,
+;; and a compiled run's outputs rebuild the traces every GFI operation reads
+;; intact. Models and other records are static; so are the top trace's
+;; arguments. Maps walk in a canonical key order, so two equal traces have
+;; one skeleton whatever order their maps were built in.
+;; ---------------------------------------------------------------------------
+
+(defn- leaf? [x] (or (array/backend-array? x) (number? x) (boolean? x)))
+
+(defn- key-order
+  "A total order on the keys of a trace's maps (fields, sites, address
+   paths), so that its walk does not depend on the order they were built
+   in: paths element by element, other keys in choice maps' address order."
+  [x y]
+  (if (and (vector? x) (vector? y))
+    (let [c (compare (count x) (count y))]
+      (if (zero? c) (or (first (remove zero? (map key-order x y))) 0) c))
+    (cm/address-order x y)))
+
+(defn- entries [m] (sort-by key key-order m))
+
+(defn- flatten* [x leaves top?]
+  (let [walk #(flatten* % leaves false)]
+    (cond (leaf? x) (do (conj! leaves x) ::leaf)
+          (instance? Trace x)
+          {::trace (mapv (fn [[k v]] [k (cond (= k :gen-fn) v
+                                              (and top? (= k :args)) ::args
+                                              :else (walk v))])
+                         (entries x))}
+          (cm/choicemap? x) {::choices (mapv (fn [[p v]] [p (walk v)]) (cm/leaves x))}
+          (record? x) x
+          (map? x) {::map (mapv (fn [[k v]] [k (walk v)]) (entries x))}
+          (vector? x) (mapv walk x)
+          :else x)))
+
+(defn ^:no-doc as-leaves
+  "[skeleton leaves] of a trace t, or of a choice map (experimental): its
+   arrays, numbers and booleans in walk order, and the rest of its
+   structure."
+  [t]
+  (let [leaves (transient [])
+        sk (flatten* t leaves true)]
+    [sk (persistent! leaves)]))
+
+(defn- by-code
+  "Skeleton sk with each record's function fields as their classes: two
+   generative functions of one code, closures made apart, alike."
+  [sk]
+  (walk/postwalk (fn [v] (if (and (record? v) (not (instance? Trace v)))
+                           (into {::record (class v)} (map (fn [[k f]] [k (if (fn? f) (class f) f)])) v)
+                           v))
+                 sk))
+
+(defn ^:no-doc structure-change
+  "Why two traces of skeletons sk and sk' (as-leaves') do not share a
+   structure, a sentence (experimental): a callee the model makes anew
+   each run, or a change of structure."
+  [sk sk']
+  (if (= (by-code sk) (by-code sk'))
+    (str "the model makes a generative function anew each run (a gen inside its body), so no two runs share a "
+         "structure: define it once, outside the model")
+    "the step's update changed the trace's structure"))
+
+(defn ^:no-doc from-leaves
+  "The trace (or choice map) of skeleton sk (as-leaves') with leaves in
+   walk order, args the top trace's arguments (experimental)."
+  [sk leaves args]
+  (let [i (volatile! -1)
+        walk (fn walk [s]
+               (cond (= s ::leaf) (nth leaves (vswap! i inc))
+                     (= s ::args) args
+                     (and (map? s) (contains? s ::trace)) (map->Trace (into {} (map (fn [[k v]] [k (walk v)])) (::trace s)))
+                     (and (map? s) (contains? s ::choices))
+                     (reduce (fn [m [p v]] (cm/set-choice m p (walk v))) cm/EMPTY (::choices s))
+                     (and (map? s) (contains? s ::map)) (into {} (map (fn [[k v]] [k (walk v)])) (::map s))
+                     (vector? s) (mapv walk s)
+                     :else s))]
+    (walk sk)))
+
