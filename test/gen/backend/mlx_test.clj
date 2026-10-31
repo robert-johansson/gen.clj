@@ -809,3 +809,26 @@
           (finally
             ((requiring-resolve 'gen.backend.mlx/collect!))
             ((requiring-resolve 'gen.backend.mlx/clear-cache!))))))))
+
+;; ---------------------------------------------------------------------------
+;; = on a 0-d array and a host value is loud (DESIGN §9, genclj-8rdm)
+;; ---------------------------------------------------------------------------
+
+(deftest equality-with-a-host-value-is-loud
+  (when-mlx
+    (array/with-backend (mlx)
+      (let [k (array/array 0 {:dtype :int32})
+            x (array/array 3.0)]
+        (testing "a 0-d array and a host number or boolean throw, naming the fix"
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"array/==" (= k 0)))
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"0-d MLX array" (= x 3.0)))
+          (is (thrown? clojure.lang.ExceptionInfo (= (array/array true) true))))
+        (testing "every other comparison as before"
+          (is (= x (array/array 3.0)))
+          (is (not= x (array/array 4.0)))
+          (is (= x x))
+          (is (not= x nil))
+          (is (not= x :missing))
+          (is (not= (array/array [1.0 2.0]) 1.0))
+          (is (array/truthy? (array/== k 0))))))))
+
