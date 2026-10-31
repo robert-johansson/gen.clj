@@ -481,9 +481,9 @@
                 outs (:outputs src)
                 objects (class (object-array 0))
                 lookup (MethodHandles/publicLookup)
-                ^MethodHandle h (.findStatic lookup cls "run" (MethodType/methodType Void/TYPE ^java.util.List [Integer/TYPE Integer/TYPE objects objects]))
+                ^MethodHandle h (.findStatic lookup cls "run" (MethodType/methodType Void/TYPE ^"[Ljava.lang.Class;" (into-array Class [Integer/TYPE Integer/TYPE objects objects])))
                 ^MethodHandle range-h (.findStatic lookup cls "runRange"
-                                                    (MethodType/methodType Void/TYPE ^java.util.List [Integer/TYPE Integer/TYPE Integer/TYPE Integer/TYPE objects objects]))
+                                                    (MethodType/methodType Void/TYPE ^"[Ljava.lang.Class;" (into-array Class [Integer/TYPE Integer/TYPE Integer/TYPE Integer/TYPE objects objects])))
                 ctor (.getConstructor cls (into-array Class [Integer/TYPE]))]
             (when (seq (:constants src))
               (let [^MethodHandle init (.findStatic lookup cls "init" (MethodType/methodType Void/TYPE (class (object-array 0))))
