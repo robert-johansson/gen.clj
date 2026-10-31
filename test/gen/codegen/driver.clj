@@ -22,7 +22,7 @@
 
      cd ~/code/gen.clj
      tmp/guard.sh 40 3600 -- clojure -J-Dcodegen.model=<gguf> -J-Dcodegen.out=tmp/codegen-36 \\
-       -J-Dcodegen.grader='clojure -M:test -m gen.codegen.server' -M:test -m gen.codegen.driver
+       -J-Dcodegen.grader='clojure -M:test:codegen -m gen.codegen.server' -M:test -m gen.codegen.driver
 
    Options, as system properties: codegen.model (a GGUF), codegen.out (a
    directory), codegen.grader (the grader's command, split at spaces),
@@ -297,7 +297,7 @@
 (defn -main [& _]
   (let [model (prop "model" nil)
         out (io/file (prop "out" "tmp/codegen"))
-        command (str/split (prop "grader" "clojure -M:test -m gen.codegen.server") #" ")
+        command (str/split (prop "grader" "clojure -M:test:codegen -m gen.codegen.server") #" ")
         opts {:k (parse-long (prop "k" "4")) :rounds (parse-long (prop "rounds" "3"))
               :max-tokens (parse-long (prop "max-tokens" "2048")) :seed (parse-long (prop "seed" "1"))
               :sampling {:temp (parse-double (prop "temp" (str (:temp default-sampling))))
