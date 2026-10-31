@@ -102,16 +102,25 @@
   "n traces of model on args, constrained by observations, with their log
    weights (raw, and normalized), the log marginal likelihood estimate (the
    log of the mean importance weight, unbiased for p(observations) in exp
-   space) and the effective sample size."
+   space) and the effective sample size. :device :jvm or :metal
+   (experimental, gen.inference.device): the n particles as one compiled
+   program, particle i on (rng/split key n)[i] as without :batched?, the
+   same result with :device added, or the handler's with :device-fallback
+   {:device :reason} when it does not compile."
   ([model args observations n] (importance-sampling model args observations n {}))
   ([model args observations n opts]
-   (let [key (or (:key opts) (gfi/next-key))]
-     (if (batched-run? "importance-sampling" opts)
+   (let [key (or (:key opts) (gfi/next-key))
+         unbatched #(let [results (mapv (fn [k] (sample-at model args observations opts k)) (rng/split key n))]
+                      (assoc (weights-summary (mapv :weight results)) :traces (mapv :trace results)))]
+     (cond
+       (:device opts)
+       ((requiring-resolve 'gen.inference.device/importance-sampling) model args observations n (assoc opts :key key)
+        weights-summary unbatched)
+       (batched-run? "importance-sampling" opts)
        (let [{ps :particles ws :weights m :fallback} (batched-generate model args observations n key opts)]
          (cond-> (assoc (weights-summary (mapv double (array/->clj ws))) :particles ps)
            m (assoc :fallback m)))
-       (let [results (mapv #(sample-at model args observations opts %) (rng/split key n))]
-         (assoc (weights-summary (mapv :weight results)) :traces (mapv :trace results)))))))
+       :else (unbatched)))))
 
 (defn traces
   "The scalar traces of an importance-sampling result, batched or not."

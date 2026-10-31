@@ -1,0 +1,152 @@
+(ns gen.device.run-test
+  "kernel/run's and importance sampling's :device option (gen.inference.device)
+   through the lowerings (gen.device): on the JVM backend in float64 the
+   results are the handler's bit for bit, their traces whole (an update from
+   one is the handler's); a model that does not stage falls back to the
+   handler with the reason; a compiled program is reused."
+  (:require [clojure.test :refer [deftest is testing]]
+            [gen.array :as array]
+            [gen.choicemap :as cm]
+            [gen.combinators :as comb]
+            [gen.dist :as d]
+            [gen.dynamic :refer [gen]]
+            [gen.gfi :as gfi]
+            [gen.inference.device :as device]
+            [gen.inference.importance :as is]
+            [gen.inference.kernel :as kernel]
+            [gen.parity-bench :as pb]
+            [gen.random :as rng]
+            [gen.selection :as sel]))
+
+(def ^:private jvm? (= :jvm (array/backend-name array/*backend*)))
+
+(defn- leaves-of [t] (mapv (fn [[p v]] [p (array/->clj v)]) (cm/leaves (:choices t))))
+
+(deftest kernel-run-on-device-is-the-handlers
+  (if-not jvm?
+    (println "gen.device.run-test: the comparison runs on the JVM backend")
+    (doseq [m [:vector :static]
+            [kname k] [[:mala (kernel/mala pb/selection pb/tau)] [:hmc (kernel/hmc pb/selection {:L 8 :eps pb/eps})]]]
+      (testing [m kname]
+        (let [[model args obs] (pb/models m)
+              tr (:trace (gfi/generate model args obs (rng/key 0)))
+              opts {:samples 40 :burn 7 :thin 3 :key (rng/key 3)}
+              h (kernel/run k tr opts)
+              dv (kernel/run k tr (assoc opts :device :jvm))]
+          (is (= :jvm (:device dv)) (:device-fallback dv))
+          (is (= (map leaves-of (:traces h)) (map leaves-of (:traces dv))))
+          (is (= (map :score (:traces h)) (map :score (:traces dv))))
+          (is (= (:acceptance-rate h) (:acceptance-rate dv)))
+          (is (= (:divergences h) (:divergences dv)))
+          (testing ":keep"
+            (is (= (:draws (kernel/run k tr (assoc opts :keep #(% :slope))))
+                   (:draws (kernel/run k tr (assoc opts :keep #(% :slope) :device :jvm))))))
+          (testing "a returned trace is whole: an update from it is the handler's"
+            (let [c (cm/choicemap :slope 1.5)
+                  uh (gfi/update (last (:traces h)) c (rng/key 9))
+                  ud (gfi/update (last (:traces dv)) c (rng/key 9))]
+              (is (= (:weight uh) (:weight ud)))
+              (is (= (:score (:trace uh)) (:score (:trace ud)))))))))))
+
+(deftest importance-sampling-on-device-is-the-handlers
+  (if-not jvm?
+    (println "gen.device.run-test: the comparison runs on the JVM backend")
+    (doseq [m [:vector :static]]
+      (testing m
+        (let [[model args obs] (pb/models m)
+              h (is/importance-sampling model args obs 100 {:key (rng/key 5)})
+              dv (is/importance-sampling model args obs 100 {:key (rng/key 5) :device :jvm})]
+          (is (= :jvm (:device dv)) (:device-fallback dv))
+          (is (= (:log-weights h) (:log-weights dv)))
+          (is (= (:log-ml-estimate h) (:log-ml-estimate dv)))
+          (is (= (:ess h) (:ess dv)))
+          (is (= (map leaves-of (:traces h)) (map leaves-of (:traces dv))))
+          (is (= (:score (:trace (gfi/update (first (:traces h)) (cm/choicemap :slope 0.5) (rng/key 1))))
+                 (:score (:trace (gfi/update (first (:traces dv)) (cm/choicemap :slope 0.5) (rng/key 1)))))))))))
+
+(def ^:private point (gen ^:static [x slope] (let [y (trace :y (d/normal (array/* slope x) 1))] y)))
+
+(def ^:private linreg
+  ;; n, a host count of the arguments, is a node value the static language
+  ;; reads on update: a staged chain keeps it a constant
+  (gen ^:static [xs]
+    (let [slope (trace :slope (d/normal 0 2))
+          n (count xs)
+          ys (splice :ys (comb/map point) xs (vec (repeat n slope)))]
+      ys)))
+
+(deftest a-host-count-in-the-trace-stays-a-constant
+  (when jvm?
+    (let [xs [1.0 2.0 3.0]
+          obs (reduce (fn [m [i y]] (cm/set-choice m [:ys i :y] y)) cm/EMPTY (map-indexed vector [2.1 3.9 6.2]))
+          tr (:trace (gfi/generate linreg [xs] obs (rng/key 0)))
+          k (kernel/mala (sel/select :slope) 0.05)
+          opts {:samples 8 :key (rng/key 3)}
+          h (kernel/run k tr opts)
+          dv (kernel/run k tr (assoc opts :device :jvm))
+          ih (is/importance-sampling linreg [xs] obs 20 {:key (rng/key 5)})
+          iv (is/importance-sampling linreg [xs] obs 20 {:key (rng/key 5) :device :jvm})]
+      (is (= :jvm (:device dv)) (:device-fallback dv))
+      (is (= (map leaves-of (:traces h)) (map leaves-of (:traces dv))))
+      (is (= (map :score (:traces h)) (map :score (:traces dv))))
+      (is (= :jvm (:device iv)) (:device-fallback iv))
+      (is (= (:log-weights ih) (:log-weights iv))))))
+
+(def ^:private branching
+  (gen []
+    (let [b (trace :b (d/bernoulli 0.4))]
+      (if b (trace :x (d/normal 0 1)) (trace :x (d/normal 3 1))))))
+
+(def ^:private branching-on-x
+  (gen []
+    (let [x (trace :x (d/normal 0 1))]
+      (if (array/truthy? (array/> x 0)) (trace :y (d/normal 1 1)) (trace :y (d/normal -1 1))))))
+
+(deftest a-model-that-does-not-stage-falls-back-to-the-handler
+  (let [tr (:trace (gfi/generate branching-on-x [] (cm/choicemap :y 0.5) (rng/key 1)))
+        k (kernel/mala (sel/select :x) 0.1)
+        opts {:samples 6 :key (rng/key 2)}
+        r (kernel/run k tr (assoc opts :device :jvm))]
+    (is (= :jvm (:device (:device-fallback r))))
+    (is (re-find #"staged value" (:reason (:device-fallback r))))
+    (is (nil? (:device r)))
+    (is (= (map leaves-of (:traces (kernel/run k tr opts))) (map leaves-of (:traces r))))))
+
+(deftest a-callee-made-anew-each-run-falls-back-with-the-reason
+  (let [model (gen []
+                (let [x (trace :x (d/normal 0 1))
+                      inner (gen [m] (trace :y (d/normal m 1)))]
+                  (splice :sub inner x)))
+        tr (:trace (gfi/generate model [] (cm/choicemap [:sub :y] 0.5) (rng/key 1)))
+        r (kernel/run (kernel/mala (sel/select :x) 0.1) tr {:samples 4 :key (rng/key 2) :device :jvm})]
+    (is (re-find #"anew each run" (:reason (:device-fallback r))))))
+
+(deftest a-branch-on-a-boolean-the-chain-does-not-move-runs-on-the-device
+  (when jvm?
+    (let [tr (:trace (gfi/generate branching [] (cm/choicemap :b true) (rng/key 1)))
+          k (kernel/mala (sel/select :x) 0.1)
+          opts {:samples 6 :key (rng/key 2)}
+          r (kernel/run k tr (assoc opts :device :jvm))]
+      (is (= :jvm (:device r)) (:device-fallback r))
+      (is (= (map leaves-of (:traces (kernel/run k tr opts))) (map leaves-of (:traces r)))))))
+
+(deftest a-compiled-program-is-reused
+  (when jvm?
+    (device/clear-cache!)
+    (let [[model args obs] (pb/models :vector)
+          tr (:trace (gfi/generate model args obs (rng/key 0)))
+          programs #(count @@#'gen.inference.device/cache)
+          run #(kernel/run %1 %2 {:samples %3 :key (rng/key 1) :device :jvm})]
+      (run (kernel/mala pb/selection pb/tau) tr 5)
+      (is (= 1 (programs)))
+      (run (kernel/mala pb/selection pb/tau) tr 5)
+      (is (= 1 (programs)) "a kernel rebuilt with the same parameters: one program")
+      (run (kernel/mala pb/selection pb/tau) (:trace (gfi/generate model (into [] args) obs (rng/key 4))) 5)
+      (is (= 1 (programs)) "a new argument vector around the same arrays: one program")
+      (run (kernel/mala pb/selection (* 2 pb/tau)) tr 5)
+      (is (= 2 (programs)) "another step size, another program")
+      (run (kernel/mala pb/selection pb/tau) tr 6)
+      (is (= 3 (programs)) "another length, another program")
+      (is (= :jvm (:device (run (kernel/hmc pb/selection {:L 8 :eps pb/eps}) tr 5))))
+      (run (kernel/hmc pb/selection {:L 8 :eps pb/eps}) tr 5)
+      (is (= 4 (programs)) "an HMC kernel rebuilt alike: one program"))))

@@ -531,6 +531,15 @@
                     {:key (:key opts)})))
   opts)
 
+(defn- device-key
+  "A gradient kernel's key in the :device program cache: its kind and
+   parameters, so a kernel rebuilt alike reuses its compiled program; nil
+   when a parameter is a backend array, which has no value equality (the
+   kernel's identity keys it then)."
+  [kind selection & params]
+  (when-not (some array/backend-array? (mapcat #(if (map? %) (vals %) [%]) params))
+    (into [kind selection] params)))
+
 (defn hmc
   "The HMC kernel of a selection, with mcmc/hmc's options (:L, :eps,
    :inv-metric, :jitter, :compile?). Reversible: its own reversal."
@@ -538,8 +547,11 @@
   ([selection opts]
    (let [opts (kernel-opts "hmc" opts)
          batched-opts (dissoc opts :compile?)]
-     (symmetric (fn [trace key] (mcmc/hmc trace selection opts key))
-                (fn [ps key] (mcmc/hmc-particles ps selection batched-opts key))))))
+     (assoc (symmetric (fn [trace key] (mcmc/hmc trace selection opts key))
+                       (fn [ps key] (mcmc/hmc-particles ps selection batched-opts key)))
+            ;; the step as a function of arrays and keys, for :device
+            :device-f (fn [trace key] (mcmc/hmc-step trace selection opts key))
+            :device-key (device-key :hmc selection opts)))))
 
 (defn mala
   "The MALA kernel of a selection and a step size tau, with mcmc/mala's
@@ -548,8 +560,10 @@
   ([selection tau opts]
    (let [opts (kernel-opts "mala" opts)
          batched-opts (dissoc opts :compile?)]
-     (symmetric (fn [trace key] (mcmc/mala trace selection tau (assoc opts :key key)))
-                (fn [ps key] (mcmc/mala-particles ps selection tau (assoc batched-opts :key key)))))))
+     (assoc (symmetric (fn [trace key] (mcmc/mala trace selection tau (assoc opts :key key)))
+                       (fn [ps key] (mcmc/mala-particles ps selection tau (assoc batched-opts :key key))))
+            :device-f (fn [trace key] (mcmc/mala-step trace selection tau opts key))
+            :device-key (device-key :mala selection tau opts)))))
 
 (defn nuts
   "The NUTS kernel of a selection: one transition of mcmc/nuts, with its
@@ -596,6 +610,8 @@
         :else (throw (ex-info (str ":keep is a function of a trace, or a map of them, not " (pr-str keep))
                               {:keep keep}))))
 
+(declare run-on-handler)
+
 (defn run
   "Apply the kernel repeatedly from trace and collect samples. opts:
    :samples (required), :burn (steps discarded first, 0), :thin (steps per
@@ -610,14 +626,29 @@
    1000 :keep #(% :x)}) gives :x's draws as host numbers, which
    gen.inference.diagnostics reads. :keep may be a map of such functions,
    and :draws is then a map of their vectors: {:keep {:x #(% :x) :y #(%
-   :y)}}."
-  [kernel trace {:keys [samples burn thin key keep] :or {burn 0 thin 1}}]
+   :y)}}. :device :jvm or :metal (experimental, gen.inference.device): the
+   chain as one compiled program, the same result with :device added, or
+   the handler's with :device-fallback {:device :reason} when it does not
+   compile. The program is cached: a run with a kernel of the same kind and
+   parameters, the same model and argument arrays and the same number of
+   steps reuses it, so make the model's data arrays once."
+  [kernel trace {:keys [samples burn thin key keep device] :or {burn 0 thin 1} :as opts}]
   (when-not (and (nat-int? samples) (nat-int? burn) (pos-int? thin))
     (throw (ex-info "run needs :samples ≥ 0, :burn ≥ 0 and :thin ≥ 1" {:samples samples :burn burn :thin thin})))
+  (let [steps (+ burn (* samples thin))
+        key (when (pos? steps) (or key (gfi/next-key)))
+        handler #(run-on-handler kernel trace opts steps key)]
+    (if (and device (pos? steps))
+      ((requiring-resolve 'gen.inference.device/run-kernel) kernel trace (assoc opts :key key) handler)
+      (handler))))
+
+(defn- run-on-handler
+  "run's loop on the handler, steps of kernel from trace on (rng/split key
+   steps)'s keys."
+  [kernel trace {:keys [burn thin keep] :or {burn 0 thin 1}} steps key]
   (let [f (step-fn kernel)
         [read finish] (if (some? keep) (keeping keep) [identity nil])
-        steps (+ burn (* samples thin))
-        step-keys (if (pos? steps) (rng/split (or key (gfi/next-key)) steps) [])]
+        step-keys (if (pos? steps) (rng/split key steps) [])]
     (loop [i 0 t trace kept (transient []) accepted 0 moves 0 reported? true diverged 0]
       (if (< i steps)
         (let [r (step-result (f t (step-keys i)))

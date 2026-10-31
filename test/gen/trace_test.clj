@@ -4,9 +4,11 @@
    trace printed its 500 subtraces); a batched trace as its maker,
    arguments and batch shape. The printed form is for reading:
    gen.serialize, which reads #gen/trace as write-trace writes it, refuses
-   it loudly."
+   it loudly. A trace as leaves (as-leaves, from-leaves: the device
+   programs') has one skeleton whatever order its maps were built in."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
+            [gen.array :as array]
             [gen.batched :as batched]
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
@@ -15,6 +17,7 @@
             [gen.gfi :as gfi]
             [gen.random :as rng]
             [gen.serialize :as serialize]
+            [gen.test-support :as ts]
             [gen.trace :as trace]))
 
 (def ^:private unit (gen [] (trace :u (d/uniform 0 1))))
@@ -75,3 +78,22 @@
     (let [parts (juxt :args :choices :retval :score)]
       (is (= (parts tr) (parts (serialize/read-trace unit (serialize/write-trace tr))))
           "gen.serialize is the round trip"))))
+
+(def ^:private line
+  (gen ^:static [x]
+    (let [slope (trace :slope (d/normal 0 1))]
+      (trace :y (d/normal (array/* slope x) 1)))))
+
+(deftest a-trace-as-leaves
+  (let [t (:trace (gfi/generate line [2.0] (cm/choicemap :y 1.0) (rng/key 0)))
+        [sk leaves] (trace/as-leaves t)
+        r (trace/from-leaves sk leaves [2.0])
+        skeleton #(first (trace/as-leaves %))]
+    (testing "one skeleton whatever order a trace's maps were built in: the rebuilt trace's, an update's of it"
+      (is (= sk (skeleton r)))
+      (is (= sk (skeleton (:trace (gfi/update r (cm/choicemap :slope (r :slope)) (rng/key 1)))))))
+    (testing "from-leaves rebuilds the trace: its choices, score and updates"
+      (let [w #(ts/host (:weight (gfi/update % (cm/choicemap :slope 0.3) (rng/key 2))))]
+        (is (= (map first (cm/leaves (:choices t))) (map first (cm/leaves (:choices r)))))
+        (is (= (ts/host (:score t)) (ts/host (:score r))))
+        (is (= (w t) (w r)))))))

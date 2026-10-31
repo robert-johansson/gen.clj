@@ -312,12 +312,10 @@
          {:keys [methods order]} (chunks stmts chunk)
          fs (fields methods)
          ks (range (count out-specs))
-         sig-in (str/join (map (fn [{:keys [name dtype]}] (str ", " (array-types dtype) " " name)) inputs))
-         sig (str sig-in (str/join (map (fn [k {:keys [dtype]}] (str ", " (array-types dtype) " out" k)) ks out-specs)))
-         ins-args (str/join (map-indexed (fn [j {:keys [dtype]}] (str ", (" (array-types dtype) ") ins[" j "]")) inputs))
-         outs-args (str/join (map #(str ", out" %) ks))
-         set-outs (str (str/join (map (fn [{:keys [name]}] (str "    p." name " = " name ";\n")) inputs))
-                       (str/join (map #(str "    p.out" % " = out" % ";\n") ks))
+         ;; inputs and outputs travel as two Object[] (a method takes at
+         ;; most 255 parameters), each cast once into its field
+         set-outs (str (str/join (map-indexed (fn [j {:keys [name dtype]}] (str "    p." name " = (" (array-types dtype) ") ins[" j "];\n")) inputs))
+                       (str/join (map (fn [k {:keys [dtype]}] (str "    p.out" k " = (" (array-types dtype) ") outs[" k "];\n")) ks out-specs))
                        (when (seq buffers) "    p.alloc();\n"))
          calls (fn [indent]
                  (str/join (for [o order]
@@ -333,7 +331,7 @@
                    helpers threefry
                    (str/join (map (fn [k {:keys [shape]}] (str "  static final int SIZE" k " = " (sc/size shape) ";\n")) ks out-specs))
                    "  int key0, key1, i, n;\n"
-                   (when (seq inputs) "  public Object[] ins;\n")
+                   "  public Object[] ins = new Object[0];\n"
                    (str/join (map (fn [{:keys [name dtype]}] (str "  " (array-types dtype) " " name ";\n")) inputs))
                    (str/join (map (fn [{:keys [name dtype]}] (str "  static " (array-types dtype) " " name ";\n")) constants))
                    (str/join (map (fn [{:keys [name dtype]}] (str "  " (array-types dtype) " " name ";\n")) buffers))
@@ -352,15 +350,15 @@
                    "  public " class-name "(int n) {\n    this.n = n;\n"
                    (str/join (map (fn [k o] (str "    out" k " = " (new-array o k) ";\n")) ks out-specs))
                    "  }\n"
-                   "  public void accept(long root) { runRange((int) (root >>> 32), (int) root, 0, n" ins-args outs-args "); }\n"
+                   "  public void accept(long root) { runRange((int) (root >>> 32), (int) root, 0, n, ins, get()); }\n"
                    "  public Object[] get() { return new Object[] {" (str/join ", " (map #(str "out" %) ks)) "}; }\n"
-                   "  public static void run(int key0, int key1" sig ") {\n"
+                   "  public static void run(int key0, int key1, Object[] ins, Object[] outs) {\n"
                    "    " class-name " p = new " class-name "();\n"
                    "    p.key0 = key0; p.key1 = key1;\n"
                    set-outs
                    (calls "    ")
                    "  }\n"
-                   "  public static void runRange(int r0, int r1, int from, int to" sig ") {\n"
+                   "  public static void runRange(int r0, int r1, int from, int to, Object[] ins, Object[] outs) {\n"
                    "    " class-name " p = new " class-name "();\n"
                    set-outs
                    "    for (int i = from; i < to; ++i) {\n"
@@ -449,7 +447,7 @@
    error flag checked and dropped."
   [{:keys [^MethodHandle handle outputs error-output program]} kw inputs]
   (let [arrays (mapv new-array outputs)]
-    (let [^java.util.List args (-> [(unchecked-int (long (first kw))) (unchecked-int (long (second kw)))] (into inputs) (into arrays))]
+    (let [^java.util.List args [(unchecked-int (long (first kw))) (unchecked-int (long (second kw))) (object-array inputs) (object-array arrays)]]
       (.invokeWithArguments handle args))
     (if error-output
       (do (when (aget ^booleans (nth arrays error-output) 0) (sc/raise-run-error! program (sc/words->key kw) 0))
@@ -459,10 +457,6 @@
 (def ^:private huge-method
   "HotSpot compiles no method of more bytecode than this (DontCompileHugeMethods)."
   8000)
-
-(defn- array-class [dtype]
-  (case dtype :float32 (class (float-array 0)) :float64 (class (double-array 0)) (:uint32 :int32) (class (int-array 0))
-        :int64 (class (long-array 0)) :bool (class (boolean-array 0))))
 
 (defn compile
   "program (gen.array.stage's, of a key and data inputs) as a loaded JVM
@@ -485,12 +479,11 @@
           (recur (quot chunk 2))
           (let [^Class cls (.defineClass (clojure.lang.DynamicClassLoader.) class-name bytes nil)
                 outs (:outputs src)
-                ins (map (comp array-class :dtype) (:inputs src))
-                arrays (concat ins (map (comp array-class :dtype) outs))
+                objects (class (object-array 0))
                 lookup (MethodHandles/publicLookup)
-                ^MethodHandle h (.findStatic lookup cls "run" (MethodType/methodType Void/TYPE ^java.util.List (into [Integer/TYPE Integer/TYPE] arrays)))
+                ^MethodHandle h (.findStatic lookup cls "run" (MethodType/methodType Void/TYPE ^java.util.List [Integer/TYPE Integer/TYPE objects objects]))
                 ^MethodHandle range-h (.findStatic lookup cls "runRange"
-                                                    (MethodType/methodType Void/TYPE ^java.util.List (into [Integer/TYPE Integer/TYPE Integer/TYPE Integer/TYPE] arrays)))
+                                                    (MethodType/methodType Void/TYPE ^java.util.List [Integer/TYPE Integer/TYPE Integer/TYPE Integer/TYPE objects objects]))
                 ctor (.getConstructor cls (into-array Class [Integer/TYPE]))]
             (when (seq (:constants src))
               (let [^MethodHandle init (.findStatic lookup cls "init" (MethodType/methodType Void/TYPE (class (object-array 0))))
@@ -557,7 +550,7 @@
         tasks (vec (for [from (range 0 n block)]
                      (let [to (min n (+ from block))]
                        (fn []
-                         (let [^java.util.List args (-> [r0 r1 (int from) (int to)] (into inputs) (into arrays))]
+                         (let [^java.util.List args [r0 r1 (int from) (int to) (object-array inputs) (object-array arrays)]]
                            (.invokeWithArguments range-handle args))
                          (when lse (block-lse (nth arrays lse) from to))))))
         parts (if (= 1 threads)

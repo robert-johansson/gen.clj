@@ -244,7 +244,7 @@
   (let [sub (get-submap cm addr nil)]
     (and (not (has-value? sub)) (not (empty? sub)))))
 
-(def ^:private address-order
+(def ^:no-doc address-order
   "A total order on addresses: comparable values of one class by value,
    otherwise by class name."
   (fn [x y]
