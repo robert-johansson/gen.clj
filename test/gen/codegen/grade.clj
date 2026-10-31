@@ -1,0 +1,167 @@
+(ns gen.codegen.grade
+  "Grading a generated model against a task (the codegen bake-off,
+   genclj-ihc4): stages in order, the grading stopping at the first that
+   fails.
+
+     :read          the code reads (gen.codegen.candidate/read-forms)
+     :safe          it uses no forbidden name (candidate/forbidden)
+     :evaluates     it evaluates under the prelude and defines model, a
+                    generative function
+     :simulates     model simulates on the task's arguments, its scores finite
+     :accepts-data  generate with the task's observations: every observed
+                    address visited (an unvisited one throws), the weight finite
+     :laws          gen.laws's laws (laws/all) on the task's arguments, the
+                    model's return value dropped (comb/dimap: a closure is
+                    never = another). Advisory: a failure is a warning, the
+                    grading goes on, until gen.laws' close? scales with
+                    scores (correct models with scores in the thousands fail
+                    it by 1e-11; genclj-ihc4's notes)
+     :explains      its log marginal likelihood of the data, by importance
+                    sampling from the prior, is within the task's tolerance
+                    below the reference's (the task's answer, graded alike);
+                    when either estimate spreads more than max-spread nats
+                    across its repeats, the gap is reported with a warning,
+                    not compared (the changepoint task's prior is too far from
+                    its posterior: data-tempered SMC is the remedy)
+
+   (grade task code) → {:task :passed (the stages passed, of 7) :stages
+   [{:stage :ok :ms :error :warnings} …] :warnings (the laws that failed)
+   :log-ml {:candidate :reference :gap} :tainted? (a stage timed out and its
+   thread may still run: start another JVM)}.
+
+   Every draw is from a fixed key, so a grading repeats. The log marginal
+   likelihood is the median of :repeats estimates, each from :particles
+   particles (their spread is in :estimates), batched when the model runs
+   under the batch tracer and one by one when not, the same estimator
+   either way: a model's choices are drawn from its prior, so a model whose
+   posterior is far from its prior gets a noisy estimate; the reference
+   pays the same.
+
+   Run the grader in a JVM of its own, never the LLM's: a candidate is
+   evaluated in this JVM (gen.codegen.candidate), so one that loops is
+   abandoned, not stopped, and one that exhausts memory ends the JVM."
+  (:require [gen.array :as array]
+            [gen.codegen.candidate :as candidate]
+            [gen.codegen.tasks :as tasks]
+            [gen.combinators :as comb]
+            [gen.gfi :as gfi]
+            [gen.inference.importance :as is]
+            [gen.laws :as laws]
+            [gen.random :as rng]))
+
+(def defaults
+  {:timeout-ms 300000 :particles 20000 :repeats 3 :law-tests 10 :seed 1})
+
+(def max-spread
+  "Nats: estimates of a log marginal likelihood that spread more than this
+   (the largest less the smallest) are too unreliable to compare."
+  2.0)
+
+(defn- host [x] (double (if (array/backend-array? x) (array/item x) x)))
+
+(defn- finite? [x] (Double/isFinite (host x)))
+
+(defn- message [^Throwable e]
+  (let [m (or (ex-message e) (str (class e)))]
+    (subs m 0 (min 400 (count m)))))
+
+(defn- median [xs] (nth (sort xs) (quot (count xs) 2)))
+
+(defn log-ml
+  "The log marginal likelihood of task's data under model: {:median
+   :estimates :spread :batched?}, :repeats importance-sampling estimates of
+   :particles particles each (the task's :particles, if it has them), from
+   keys fold-in'd from :seed: batched, or one by one when the model does
+   not run batched. :spread is the largest estimate less the smallest."
+  [model task {:keys [particles repeats seed]}]
+  (let [n (or (:particles task) particles)
+        run (fn [batched? r]
+              (host (:log-ml-estimate
+                     (is/importance-sampling model (:args task) (:observations task) n
+                                             {:key (rng/fold-in (rng/key seed) r) :batched? batched?}))))
+        first-batched (try (run true 0) (catch Exception _ nil))
+        batched? (some? first-batched)
+        estimates (into [(or first-batched (run false 0))] (map #(run batched? %)) (range 1 repeats))]
+    {:median (median estimates) :estimates estimates :spread (- (apply max estimates) (apply min estimates))
+     :batched? batched? :particles n}))
+
+(declare grade)
+
+(def ^:private references (atom {}))
+
+(defn reference-log-ml
+  "The log marginal likelihood of task's data under its answer (cached by
+   task and options)."
+  [task opts]
+  (let [k [(:id task) (select-keys opts [:particles :repeats :seed])]]
+    (or (get @references k)
+        (let [g (grade task (:answer task) (assoc opts ::reference? true))
+              v (or (get-in g [:log-ml :candidate])
+                    (throw (ex-info (str "the answer of " (:id task) " does not grade: " (pr-str (:stages g))) g)))]
+          (swap! references assoc k v)
+          v))))
+
+(defn- stage
+  "Runs check (a function of no arguments returning a map merged into the
+   stage, or throwing) as stage name within timeout-ms."
+  [name timeout-ms check]
+  (let [t0 (System/nanoTime)
+        r (try (merge {:ok true} (candidate/within timeout-ms check))
+               (catch Throwable e
+                 {:ok false :error (message e)
+                  :timeout? (boolean (::candidate/timeout (ex-data e)))}))]
+    (assoc r :stage name :ms (/ (- (System/nanoTime) t0) 1e6))))
+
+(defn grade
+  "Grades code (a reply's code, a string) against task; opts override
+   defaults. See the namespace's docstring."
+  ([task code] (grade task code nil))
+  ([task code opts]
+   (let [{:keys [timeout-ms law-tests seed] :as opts} (merge defaults opts)
+         {:keys [args observations]} task
+         state (volatile! {})
+         stages [[:read #(do (vswap! state assoc :forms (candidate/read-forms code)) {})]
+                 [:safe #(let [f (candidate/forbidden (:forms @state))]
+                           (when (seq f) (throw (ex-info (str "forbidden names: " (pr-str f)) {})))
+                           {})]
+                 [:evaluates #(let [[n model] (candidate/evaluate (:forms @state))]
+                                (vswap! state assoc :ns n :model model)
+                                (when-not (gfi/generative-function? model)
+                                  (throw (ex-info (str "model is not a generative function: " (class model)) {})))
+                                {})]
+                 [:simulates #(let [scores (mapv (fn [k] (:score (gfi/simulate (:model @state) args (rng/key k)))) (range 3))]
+                                (when-not (every? finite? scores)
+                                  (throw (ex-info (str "simulate's scores are not finite: " (mapv host scores)) {})))
+                                {})]
+                 [:accepts-data #(let [{:keys [weight]} (gfi/generate (:model @state) args observations (rng/key seed))]
+                                   (when-not (finite? weight)
+                                     (throw (ex-info (str "generate's weight is not finite: " (host weight)) {})))
+                                   {})]
+                 [:laws #(let [dropped (comb/dimap (:model @state) vector (constantly nil))
+                               failures (laws/verify [[:candidate dropped args [args]]]
+                                                     {:num-tests law-tests :seed seed})]
+                           (if (seq failures) {:warnings (vec (keys failures))} {}))]
+                 [:explains #(let [c (log-ml (:model @state) task opts)]
+                               (if (::reference? opts)
+                                 (do (vswap! state assoc :log-ml {:candidate c}) {})
+                                 (let [r (reference-log-ml task opts)
+                                       gap (- (:median c) (:median r))
+                                       reliable? (<= (max (:spread c) (:spread r)) max-spread)]
+                                   (vswap! state assoc :log-ml {:candidate c :reference r :gap gap :reliable? reliable?})
+                                   (cond (not reliable?)
+                                         {:warnings [(format "the log marginal likelihoods (gap %.1f nats) spread %.1f and %.1f nats: not compared"
+                                                             gap (:spread c) (:spread r))]}
+                                         (< gap (- (tasks/tolerance task)))
+                                         (throw (ex-info (format "explains the data %.1f nats worse than the reference" (- gap)) {}))
+                                         :else {}))))]]
+         results (reduce (fn [done [name check]]
+                           (let [r (stage name timeout-ms check)]
+                             (if (:ok r) (conj done r) (reduced (conj done r)))))
+                         [] stages)]
+     (when-let [n (:ns @state)] (candidate/discard! n))
+     {:task (:id task)
+      :passed (count (filter :ok results))
+      :stages results
+      :warnings (vec (mapcat :warnings results))
+      :log-ml (:log-ml @state)
+      :tainted? (boolean (some :timeout? results))})))
