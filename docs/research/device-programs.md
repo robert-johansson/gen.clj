@@ -510,6 +510,8 @@ Medians, ms:
    kernel/run's, what CUDA C does naturally) or gen.batched's one key
    with a particle axis (what the XLA programs do)? Both are valid; the
    choice decides which handler run a device run equals.
+   **Decided (owner, 2026-10-31): per-particle keys,** `(rng/split key
+   n)[i]` for particle or chain i (DESIGN §9).
 4. CUDA C (ext/cuda) first, XLA (ext/xla) second? (Recommended; XLA's
    plugin size is the main cost.)
 5. Rounding: device programs are float32 and fuse differently from the

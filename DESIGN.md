@@ -3132,6 +3132,19 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   core `array/scan` is the design question). Neither reaches main until
   the research's recommendation is decided; that decision is recorded
   here when it is made.
+- **Device programs: per-particle keys (owner, 2026-10-31; the device
+  note's decision 3, genclj-a1hu, genclj-8x5p).** A device run of n
+  particles or chains from a root key runs particle (or chain) i on
+  `(rng/split key n)[i]`, so it equals the handler's unbatched runs:
+  importance sampling without `:batched?`, and kernel/run's chain per
+  key. It does not equal a `gen.batched` run from the same key (one key
+  per site with a particle axis); the two agree in distribution. Why:
+  every lowering runs one particle's scalar program per thread, lane or
+  loop step (the JVM lowering, CUDA C, SIMD lanes), and the per-particle
+  form is checkable bit for bit against the handler (float64 on the JVM
+  backend) or to float32 rounding. The XLA prototype's many-chain
+  program (`chain/mala-chains-run`, gen.batched's draws) moves to
+  per-chain keys if that target is taken up.
 
 ## 10. Deferred (tracked, not forgotten)
 
