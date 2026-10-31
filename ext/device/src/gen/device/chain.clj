@@ -206,6 +206,12 @@
 
 (defn- spec-of [x] [(array/shape x) (if (= :float (array/dtype-kind (array/dtype x))) st/*float* (array/dtype x))])
 
+(defn- with-replay
+  "{:program :inputs} whose program can be run on the handler from a key
+   (:replay), its data the host arguments it was staged from."
+  [{:keys [program] :as m} args obs-values]
+  (assoc-in m [:program :replay] (fn [key] ((:f program) key args obs-values))))
+
 (defn chain-program
   "A counted chain (mala-chain's or hmc-chain's) with the model's array
    arguments and the observations' values as inputs after the key, as
@@ -219,14 +225,16 @@
         move (case kind
                :mala (fn [t k] (mala-move t selection k-opts {} k))
                :hmc (fn [t k] (hmc-move t selection (merge {:L 10 :eps 0.1} k-opts) k)))]
-    {:program (st/stage
+    (with-replay
+     {:program (st/stage
                (fn [key args obs-vals]
                  (let [obs (reduce (fn [m [p v]] (cm/set-choice m p v)) cm/EMPTY (map vector paths obs-vals))]
                    (counted-chain model key args obs selection steps move)))
                (st/key-spec)
                (array/tree-map spec-of args)
                (mapv spec-of obs-values))
-     :inputs (into (vec (array/tree-leaves args)) obs-values)}))
+     :inputs (into (vec (array/tree-leaves args)) obs-values)}
+     args obs-values)))
 
 (defn importance-program
   "importance-run's program with the model's array arguments and the
@@ -238,7 +246,8 @@
   (let [leaves (cm/leaves observations)
         paths (mapv first leaves)
         obs-values (mapv second leaves)]
-    {:program (st/stage
+    (with-replay
+     {:program (st/stage
                (fn [key args obs-vals]
                  (let [obs (reduce (fn [m [p v]] (cm/set-choice m p v)) cm/EMPTY (map vector paths obs-vals))
                        {w :weight} (batched-run model :generate args n {:key key :constraints obs})
@@ -247,7 +256,8 @@
                (st/key-spec)
                (array/tree-map spec-of args)
                (mapv spec-of obs-values))
-     :inputs (into (vec (array/tree-leaves args)) obs-values)}))
+     :inputs (into (vec (array/tree-leaves args)) obs-values)}
+     args obs-values)))
 
 (defn weight-program
   "One particle's constrained generate as a program of a key and the data:
@@ -259,11 +269,13 @@
   (let [leaves (cm/leaves observations)
         paths (mapv first leaves)
         obs-values (mapv second leaves)]
-    {:program (st/stage
+    (with-replay
+     {:program (st/stage
                (fn [key args obs-vals]
                  (let [obs (reduce (fn [m [p v]] (cm/set-choice m p v)) cm/EMPTY (map vector paths obs-vals))]
                    {:weight (:weight (gfi/generate model args obs key))}))
                (st/key-spec)
                (array/tree-map spec-of args)
                (mapv spec-of obs-values))
-     :inputs (into (vec (array/tree-leaves args)) obs-values)}))
+     :inputs (into (vec (array/tree-leaves args)) obs-values)}
+     args obs-values)))

@@ -86,3 +86,23 @@
               ref (is/importance-sampling pb/vector-model args obs 64 {:key key})]
           (doseq [[i ref-w] (map-indexed vector (:log-weights ref))]
             (is (< (Math/abs (- (nth w i) ref-w)) (* 1e-4 (+ 1.0 (Math/abs ref-w)))) [i (nth w i) ref-w])))))))
+
+(def ^:private past-the-end
+  "A categorical draw of 0, 1 or 2 indexing a table of two (index 2 is out
+   of range)."
+  (gen.dynamic/gen []
+    (let [k (trace :k (gen.dist/categorical [0.2 0.3 0.5]))]
+      (trace :y (gen.dist/normal (array/take (array/array [-1.0 0.0]) k) 1.0)))))
+
+(deftest an-index-out-of-range-is-loud
+  (if-not gpu?
+    (println "gen.device.metal-test: not MLX on the GPU, the index-error test skips")
+    (let [k (metal/compile (st/stage (fn [key] {:score (:score (gfi/simulate past-the-end [] key))}) (st/key-spec)))
+          in-range? (fn [s] (try (gfi/simulate past-the-end [] (nth (rng/split (rng/key s) 1) 0)) true
+                                 (catch clojure.lang.ExceptionInfo _ false)))
+          good (first (filter in-range? (range 100)))]
+      (testing "a launch with a run out of range throws before returning"
+        (is (thrown? clojure.lang.ExceptionInfo (metal/run k 40 (rng/key-data (rng/key 3))))))
+      (testing "an in-range run returns its score alone"
+        (let [outs (metal/run k 1 (rng/key-data (rng/key good)))]
+          (is (= 1 (count outs))))))))

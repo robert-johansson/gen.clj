@@ -23,7 +23,8 @@
   (:refer-clojure :exclude [compile])
   (:require [gen.array :as array]
             [gen.backend.mlx]
-            [gen.device.scalar :as sc])
+            [gen.device.scalar :as sc]
+            [gen.random :as rng])
   (:import [gen.mlx Mlx MlxRaw MlxRuntime]
            [java.lang.foreign Arena ValueLayout]))
 
@@ -227,10 +228,10 @@ inline void g_threefry(uint k0, uint k1, uint c0, uint c1, thread uint& w0, thre
    constants k…); its buffers are slices of the outputs scratchf and
    scratchu, after the program's outputs."
   [program]
-  (let [{:keys [stmts outputs statements buffers inputs constants]} (sc/scalarize program dialect)
+  (let [{:keys [stmts outputs statements buffers inputs constants error-output]} (sc/scalarize program dialect)
         layout (scratch-layout buffers)]
     {:source (body-text stmts outputs layout) :header header :outputs outputs :inputs inputs :constants constants
-     :scratch layout :statements statements}))
+     :scratch layout :statements statements :error-output error-output}))
 
 ;; ---------------------------------------------------------------------------
 ;; Running through MLX
@@ -261,6 +262,7 @@ inline void g_threefry(uint k0, uint k1, uint c0, uint c1, thread uint& w0, thre
     (try
       (with-open [arena (Arena/ofConfined)]
         (assoc src
+               :program program
                :name name
                :constant-arrays (mapv (fn [{:keys [dtype values]}]
                                         (array/array (mapv #(if (boolean? %) % (double %)) values) {:dtype dtype}))
@@ -276,7 +278,7 @@ inline void g_threefry(uint k0, uint k1, uint c0, uint c1, thread uint& w0, thre
    group, 64 by default), :inputs (the data inputs, MLX arrays of the
    program's input dtypes)."
   ([k n root-words] (run k n root-words {}))
-  ([{:keys [kernel outputs scratch constant-arrays]} n [r0 r1] {:keys [thread-group backend inputs] :or {thread-group 64}}]
+  ([{:keys [kernel outputs scratch constant-arrays error-output program]} n [r0 r1 :as root-words] {:keys [thread-group backend inputs] :or {thread-group 64}}]
    (let [b (or backend array/*backend*)
          n (long n)
          root (array/array [(bit-and (long r0) 0xFFFFFFFF) (bit-and (long r1) 0xFFFFFFFF)] {:dtype :uint32})
@@ -296,7 +298,14 @@ inline void g_threefry(uint k0, uint k1, uint c0, uint c1, thread uint& w0, thre
        (let [in (MlxRuntime/vectorOf (long-array (map #(.-h ^gen.backend.mlx.MlxArray %) (concat [root nn] inputs constant-arrays))))]
          (try
            (let [out (Mlx/mlx_fast_metal_kernel_apply kernel in cfg (stream-of b))]
-             (try (vec (take (count outputs) (mapv #(wrap b %) (MlxRuntime/vectorArrays out))))
+             (try (let [arrays (vec (take (count outputs) (mapv #(wrap b %) (MlxRuntime/vectorArrays out))))]
+                    (if error-output
+                      ;; the flags read (evaluating the run) before anything is returned
+                      (let [flags (array/->clj (nth arrays error-output))]
+                        (when-let [i (first (keep-indexed (fn [i f] (when f i)) flags))]
+                          (sc/raise-run-error! program (nth (rng/split (sc/words->key root-words) n) i) i))
+                        (subvec arrays 0 error-output))
+                      arrays))
                   (finally (MlxRaw/mlx_vector_array_free out))))
            (finally (MlxRaw/mlx_vector_array_free in)
                     (java.lang.ref.Reference/reachabilityFence root)

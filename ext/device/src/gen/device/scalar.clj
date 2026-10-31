@@ -20,7 +20,9 @@
    (large, updated through a temporary).
 
    (scalarize program dialect) returns {:stmts :outputs :buffers :inputs
-   :constants :statements}. Statements:
+   :constants :statements :error-output}: a program that gathers has one
+   more output than the program, last, a bool per run set when an index
+   fell outside its axis (:error-output its position; nil otherwise). Statements:
      [:decl dtype name expr]     a value (inside a :for, local to its body)
      [:set name expr]            a carry's or an accumulator's update
      [:store k index-expr expr]  output k's element index-expr in one run
@@ -43,7 +45,8 @@
    each throwing for what it cannot write. Names: v<n> values, c<n> carries,
    it<n> scan counters, i<n> array loops, b<n> buffers, k<n> constants,
    in<n> inputs; the key's words are key0 and key1. Indices are int."
-  {:api :internal})
+  {:api :internal}
+  (:require [gen.random.threefry]))
 
 (set! *warn-on-reflection* true)
 
@@ -195,12 +198,25 @@
 
 (defn- index-expr
   "The int index at expression e (of dtype) against a dimension of size d,
-   bound in em."
+   bound in em. An index outside [0, d) after normalization sets the run's
+   error flag (em's :flag), and is clamped meanwhile so that the read stays
+   in bounds (DESIGN §9, genclj-i2c4)."
   [em dtype e d]
-  (let [{:keys [convert]} (:dialect em)
+  (let [{:keys [convert binary unary]} (:dialect em)
         i (bind! em :int32 (if (#{:int32} dtype) e (convert dtype :int32 e)))
         i (bind! em :int32 (str "(" i " < 0 ? " i " + " d " : " i ")"))]
+    (when-let [f (:flag em)]
+      (let [ok (bind! em :bool (str "(" i " >= 0 && " i " < " d ")"))]
+        (stmt! em [:set f (binary :logical-or :bool f (unary :logical-not :bool ok))])))
     (bind! em :int32 (str "(" i " < 0 ? 0 : (" i " > " (dec d) " ? " (dec d) " : " i "))"))))
+
+(defn- gathers?
+  "Does graph (or a scan body in it) gather?"
+  [graph]
+  (some (fn [{:keys [op attrs]}]
+          (or (#{:take :take-along-axis} op)
+              (and (= op :scan) (gathers? (get-in attrs [:body :graph])))))
+        graph))
 
 (defn- select-chain
   "The expression choosing (candidates k) where i (an int expression) is k."
@@ -638,6 +654,11 @@
   (when-not (= (first inputs) [[2] :uint32])
     (throw (ex-info (str (:name dialect) ": a program of a key, then its data") {:inputs inputs})))
   (let [em (assoc (emitter dialect) :uses (uses graph outputs))
+        ;; a program that gathers carries an error flag, false at the start
+        ;; of every run, stored as a last, hidden output
+        flag (when (gathers? graph)
+               (let [c (fresh em "c")] (stmt! em [:decl :bool c ((:lit dialect) false :bool)]) c))
+        em (assoc em :flag flag)
         by-id (into {} (map (juxt :id identity) graph))
         ys-out (into {} (keep-indexed (fn [k o] (let [{:keys [op args attrs]} (by-id o)]
                                                   (when (= op :result)
@@ -661,9 +682,12 @@
             (if (large? v)
               (for! em (size shape) (fn [bem w] (stmt! bem [:store k w ((:at v) bem w)])))
               (doseq [[e x] (map-indexed vector (:el v))] (stmt! em [:store k (str e) x]))))
+        _ (when flag (stmt! em [:store (count outputs) "0" flag]))
         stmts @(:stmts em)]
     {:stmts stmts
-     :outputs (mapv (fn [{:keys [shape dtype ys]} o] {:shape (if ys (:shape (by-id o)) shape) :dtype dtype}) outs outputs)
+     :outputs (cond-> (mapv (fn [{:keys [shape dtype ys]} o] {:shape (if ys (:shape (by-id o)) shape) :dtype dtype}) outs outputs)
+                flag (conj {:shape [] :dtype :bool}))
+     :error-output (when flag (count outputs))
      :buffers @(:buffers em)
      :inputs data
      :constants @(:constants em)
@@ -675,3 +699,19 @@
   [^String e]
   (cond (re-matches #"0x[0-9a-f]{8}u?" e) (Long/parseLong (subs e 2 10) 16)
         (re-matches #"-?[0-9]+" e) (Long/parseLong e)))
+
+(defn words->key "A key of the two uint32 words [k0 k1]." [[k0 k1]] (gen.random.threefry.Key. (long k0) (long k1)))
+
+(defn raise-run-error!
+  "Run `run` of program read an array at an index out of range (its error
+   flag set): its staged function run on the handler from key raises the
+   handler's own error; when it does not (their rounding differs), a
+   generic one (DESIGN §9, genclj-i2c4). An entry point calls it after the
+   run, before returning anything."
+  [program key run]
+  (when-let [replay (or (:replay program) (when (= 1 (count (:inputs program))) (:f program)))]
+    (replay key))
+  (throw (ex-info (str "Device program: run " run " read an array at an index out of range (its run on the handler from"
+                       " the same key did not throw: their rounding differs)")
+                  {:reason :index-out-of-range :run run})))
+

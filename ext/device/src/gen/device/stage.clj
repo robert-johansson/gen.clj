@@ -394,7 +394,7 @@
    argument per spec; a spec is a tree of [shape dtype] leaves and
    (key-spec) keys): {:graph (the nodes), :inputs (the params' [shape
    dtype] in order), :outputs (node ids of f's result's leaves),
-   :out-tree (its skeleton)}."
+   :out-tree (its skeleton), :f (f)}."
   [f & specs]
   (let [g (graph nil)
         args (binding [*graph* g] (vec (fill-specs (vec specs) #(spec-param g %1 %2))))
@@ -403,7 +403,10 @@
     {:graph (vec (.-nodes ^Graph g))
      :inputs (mapv (fn [s] (if (= s ::key) [[2] :uint32] s)) (spec-leaves (vec specs)))
      :outputs outs
-     :out-tree (tree/skeleton out)}))
+     :out-tree (tree/skeleton out)
+     ;; the staged function itself: an entry point runs it on the handler
+     ;; to raise a run's error (DESIGN §9, genclj-i2c4)
+     :f f}))
 
 (defn- scan*
   "scan over xs (or over nothing, xs nil, f's x nil)."

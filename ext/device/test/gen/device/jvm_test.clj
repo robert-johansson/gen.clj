@@ -220,3 +220,29 @@
     (is (some? (st/stage (fn [key] (let [k (array/argmax (gen.random/uniform key [3]))]
                                      {:x (if (or (= k :missing) (= k nil)) 1.0 2.0)}))
                          (st/key-spec))))))
+
+(def ^:private past-the-end
+  "A categorical draw of 0, 1 or 2 indexing a table of two: index 2 is out of
+   range, which the handler raises."
+  (gen.dynamic/gen []
+    (let [k (trace :k (gen.dist/categorical [0.2 0.3 0.5]))]
+      (trace :y (gen.dist/normal (array/take (array/array [-1.0 0.0]) k) 1.0)))))
+
+(deftest an-index-out-of-range-is-the-handlers-error
+  (if-not (= :jvm (array/backend-name array/*backend*))
+    (println "gen.device.jvm-test: not the JVM backend, the index-error test skips")
+    (let [handler-error (fn [s] (try (gfi/simulate past-the-end [] (rng/key s)) nil (catch clojure.lang.ExceptionInfo e (ex-message e))))
+          bad (first (filter handler-error (range 100)))
+          good (first (remove handler-error (range 100)))
+          k (jvm/compile (binding [st/*float* :float64]
+                           (st/stage (fn [key] {:score (:score (gfi/simulate past-the-end [] key))}) (st/key-spec))))]
+      (testing "a run whose draw is out of range raises the handler's own error"
+        (is (some? bad))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo (re-pattern (java.util.regex.Pattern/quote (handler-error bad)))
+                              ((:run k) (rng/key-data (rng/key bad))))))
+      (testing "an in-range run returns its score, the flag's output dropped"
+        (let [outs ((:run k) (rng/key-data (rng/key good)))]
+          (is (= 1 (count outs)))
+          (is (= (:score (gfi/simulate past-the-end [] (rng/key good))) (aget ^doubles (first outs) 0)))))
+      (testing "many runs: the first bad one's error"
+        (is (thrown? clojure.lang.ExceptionInfo (jvm/run-many k 40 (rng/key-data (rng/key 3)) {})))))))

@@ -34,7 +34,8 @@
   (:refer-clojure :exclude [compile])
   (:require [clojure.string :as str]
             [gen.array :as array]
-            [gen.device.scalar :as sc])
+            [gen.device.scalar :as sc]
+            [gen.random :as rng])
   (:import [java.io ByteArrayOutputStream]
            [java.lang.invoke MethodHandle MethodHandles MethodType]
            [java.net URI]
@@ -307,7 +308,7 @@
    method (gen.jvm.chunk, 600 by default)."
   ([program class-name] (source program class-name (chunk-size)))
   ([program class-name chunk]
-   (let [{:keys [stmts statements buffers inputs constants] out-specs :outputs} (sc/scalarize program dialect)
+   (let [{:keys [stmts statements buffers inputs constants error-output] out-specs :outputs} (sc/scalarize program dialect)
          {:keys [methods order]} (chunks stmts chunk)
          fs (fields methods)
          ks (range (count out-specs))
@@ -370,6 +371,7 @@
                    "  }\n}\n")
       :class-name class-name
       :outputs out-specs
+      :error-output error-output
       :inputs inputs
       :constants constants
       :buffers buffers
@@ -443,12 +445,16 @@
   (array-of dtype (flatten [(if (or (sequential? x) (number? x)) x (array/->clj x))])))
 
 (defn- run-once
-  "One run through run's handle h: the outputs as new Java arrays."
-  [^MethodHandle h outs kw inputs]
-  (let [arrays (mapv new-array outs)]
+  "One run through run's handle h: the outputs as new Java arrays, the
+   error flag checked and dropped."
+  [{:keys [^MethodHandle handle outputs error-output program]} kw inputs]
+  (let [arrays (mapv new-array outputs)]
     (let [^java.util.List args (-> [(unchecked-int (long (first kw))) (unchecked-int (long (second kw)))] (into inputs) (into arrays))]
-      (.invokeWithArguments h args))
-    arrays))
+      (.invokeWithArguments handle args))
+    (if error-output
+      (do (when (aget ^booleans (nth arrays error-output) 0) (sc/raise-run-error! program (sc/words->key kw) 0))
+          (subvec arrays 0 error-output))
+      arrays)))
 
 (def ^:private huge-method
   "HotSpot compiles no method of more bytecode than this (DontCompileHugeMethods)."
@@ -501,9 +507,10 @@
                                ([n inputs] (let [inst (.newInstance ^java.lang.reflect.Constructor ctor (object-array [(int n)]))]
                                              (.set (.getField cls "ins") inst (object-array inputs))
                                              inst)))
+                   :program program
                    :run (fn
-                          ([kw] (run-once h outs kw []))
-                          ([kw inputs] (run-once h outs kw inputs))))))))))
+                          ([kw] (run-once {:handle h :outputs outs :error-output (:error-output src) :program program} kw []))
+                          ([kw inputs] (run-once {:handle h :outputs outs :error-output (:error-output src) :program program} kw inputs))))))))))
 
 (defn key-long
   "A key's two words as one long, an instance's accept takes."
@@ -542,7 +549,7 @@
    offset i·size], :log-sum-exp (with :lse k: log Σ exp of output k, a
    float32 [1] per run, combined from the blocks in order, so the same
    for any number of threads)}."
-  [{:keys [outputs ^MethodHandle range-handle]} n [r0 r1] {:keys [block threads lse inputs]}]
+  [{:keys [outputs ^MethodHandle range-handle error-output program]} n [r0 r1 :as root] {:keys [block threads lse inputs]}]
   (let [n (long n)
         block (long (or block (max 1 (quot n 64))))
         arrays (mapv (fn [{:keys [shape dtype]}] (new-array {:shape (into [n] shape) :dtype dtype})) outputs)
@@ -556,5 +563,9 @@
         parts (if (= 1 threads)
                 (mapv #(%) tasks)
                 (mapv #(.get ^java.util.concurrent.Future %) (.invokeAll ^java.util.concurrent.ForkJoinPool @pool ^java.util.Collection tasks)))]
-    (cond-> {:outputs arrays}
+    (when error-output
+      (let [^booleans flags (nth arrays error-output)]
+        (when-let [i (first (filter #(aget flags (int %)) (range n)))]
+          (sc/raise-run-error! program (nth (rng/split (sc/words->key root) n) i) i))))
+    (cond-> {:outputs (if error-output (subvec arrays 0 error-output) arrays)}
       lse (assoc :log-sum-exp (combine-lse parts)))))
