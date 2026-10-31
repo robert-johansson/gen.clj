@@ -38,6 +38,16 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Experimental: tempered SMC** (`gen.inference.tempering/smc`, outside
+  the 1.x promise; DESIGN §9, genclj-87x1): the log marginal likelihood
+  of observations under any generative function, and posterior
+  particles, by adaptive annealing from the prior to the posterior with
+  Metropolis-Hastings moves on each tempered target (regenerations from
+  the prior, random walks for continuous latents). It works where
+  importance sampling from the prior fails (a posterior far narrower than
+  the prior) and for models whose structure varies. Checked against
+  exact values: a conjugate normal model, a branch on a draw, a Kalman
+  random walk, an enumerated HMM.
 - **Breaking: = on a 0-d MLX array and a host number or boolean throws**
   (gen.backend.mlx). It answered false, so plain Clojure outside a gen
   body, (= k 0) on a draw, took the other branch on every run where the
