@@ -59,11 +59,22 @@
 
 (declare backend)
 
+(declare host-read!)
+
 (deftype Staged [^Graph g ^long id shape dtype]
   p/IArray
   (-backend [_] backend)
   Object
-  (toString [_] (str "#staged[" id " " dtype " " shape "]")))
+  (toString [_] (str "#staged[" id " " dtype " " shape "]"))
+  ;; clojure.core/= on a staged value and a number is a host read in
+  ;; disguise: (= k 0) in plain Clojure would answer false for every run
+  ;; (genclj-ryg0's census found one), so it is loud. Two staged values
+  ;; compare by identity, as the graph's own maps need.
+  (equals [this o]
+    (cond (identical? this o) true
+          (instance? Staged o) false
+          :else (host-read! "clojure.core/= on a staged value")))
+  (hashCode [this] (System/identityHashCode this)))
 
 (defmethod print-method Staged [^Staged x ^java.io.Writer w] (.write w (.toString x)))
 
@@ -236,6 +247,23 @@
         (when-let [[start step] (affine (strip r))]
           (when (and (integer? start) (integer? step) (pos? step) (>= start 0)) [(long start) (long step)]))))))
 
+(defn- staged-dtype
+  "The staging backend's dtype for another backend's: its float (*float*)
+   for a float, int32 for int64 (the JVM backend's default int)."
+  [dtype]
+  (cond (= :float (dt/kind dtype)) *float*
+        (= :int64 dtype) :int32
+        :else dtype))
+
+(defn- staged
+  "x as a value of the graph being staged: a staged value or host number as
+   it is, an array of another backend (a constant table, indices made on
+   the host) a constant node."
+  [x]
+  (if (or (staged? x) (array/host? x))
+    x
+    (op! :constant [] (array/shape x) (staged-dtype (array/dtype x)) {:values (vec (flatten [(array/->clj x)]))})))
+
 (deftype StageBackend []
   p/IBackend
   (-name [_] :stage)
@@ -276,8 +304,14 @@
     (op! :slice [x] (mapv (fn [a b s] (max 0 (long (Math/ceil (/ (- (double b) (double a)) (double s)))))) starts stops steps)
          (array/dtype x) {:starts (vec starts) :stops (vec stops) :steps (vec steps)}))
 
-  (-take [_ _ _ _] (throw (ex-info "The staging backend has no take yet" {})))
-  (-take-along-axis [_ _ _ _] (throw (ex-info "The staging backend has no take-along-axis yet" {})))
+  (-take [_ x indices axis]
+    (let [x (staged x) indices (staged indices)
+          sx (shape-of x)]
+      (op! :take [x indices] (vec (concat (subvec sx 0 axis) (shape-of indices) (subvec sx (inc axis)))) (array/dtype x) {:axis axis})))
+  (-take-along-axis [_ x indices axis]
+    (let [x (staged x) indices (staged indices)]
+      (op! :take-along-axis [x indices] (mapv (fn [k a b] (if (= k axis) b (max (long a) (long b)))) (range) (shape-of x) (shape-of indices))
+           (array/dtype x) {:axis axis})))
   (-scatter-add [_ x indices updates axis]
     (if-let [[start step] (strided-range indices axis)]
       ;; a strided slice's gradient (the tape's unslice): updates padded into
@@ -344,7 +378,7 @@
    and observations, made on the JVM backend."
   [x]
   (let [c (fn [a] (if (and (array/backend-array? a) (not (staged? a)))
-                    (op! :constant [] (array/shape a) (if (= :float (dt/kind (array/dtype a))) *float* (array/dtype a))
+                    (op! :constant [] (array/shape a) (staged-dtype (array/dtype a))
                          {:values (vec (flatten [(array/->clj a)]))})
                     a))]
     (if (cm/choicemap? x)

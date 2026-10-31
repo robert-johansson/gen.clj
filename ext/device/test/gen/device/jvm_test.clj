@@ -183,3 +183,36 @@
           {[w] :outputs} (jvm/run-many k 10 (rng/key-data key) {})]
       (is (= 2 (count (:constants k))))
       (is (= (:log-weights (is/importance-sampling pb/vector-model args obs 10 {:key key})) (vec w))))))
+
+(def ^:private indexed-mean
+  "A categorical draw indexing a table of means (a gather on a draw)."
+  (gen.dynamic/gen []
+    (let [k (trace :k (gen.dist/categorical [0.2 0.3 0.5]))]
+      (trace :y (gen.dist/normal (array/take (array/array [-1.0 0.0 2.0]) k) 1.0)))))
+
+(def ^:private two-component
+  (gen.dynamic/gen [x]
+    (trace :m ((gen.dist/homogeneous-mixture gen.dist/normal) [0.4 0.6] (array/stack [x (array/+ x 2.0)] -1) [1.0 0.5]))))
+
+(deftest gathers-and-categoricals-are-the-handlers
+  (if-not (= :jvm (array/backend-name array/*backend*))
+    (println "gen.device.jvm-test: not the JVM backend, the gather comparison skips")
+    (doseq [[label model args obs] [[:indexed-mean-free indexed-mean [] cm/EMPTY]
+                                    [:indexed-mean-k indexed-mean [] (cm/choicemap :k 2)]
+                                    [:indexed-mean-y indexed-mean [] (cm/choicemap :y 1.5)]
+                                    [:mixture-free two-component [-0.8] cm/EMPTY]
+                                    [:mixture-observed two-component [-0.8] (cm/choicemap :m 2.2)]]]
+      (testing label
+        (let [k (jvm/compile (binding [st/*float* :float64]
+                               (st/stage (fn [key] (let [{:keys [trace weight]} (gfi/generate model (st/constants args) (st/constants obs) key)]
+                                                     {:weight weight :score (:score trace)}))
+                                         (st/key-spec))))]
+          (doseq [s (range 20)]
+            (let [key (rng/key s)
+                  [w sc] ((:run k) (rng/key-data key))
+                  {:keys [trace weight]} (gfi/generate model args obs key)]
+              (is (= [weight (:score trace)] [(aget ^doubles w 0) (aget ^doubles sc 0)]) s))))))))
+
+(deftest equality-on-a-staged-value-is-loud
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"clojure.core/= on a staged value"
+                        (st/stage (fn [key] {:x (if (= (array/argmax (gen.random/uniform key [3])) 0) 1.0 2.0)}) (st/key-spec)))))

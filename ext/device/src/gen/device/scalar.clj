@@ -187,6 +187,53 @@
   (value shape dtype (mapv f (range (size shape)))))
 
 ;; ---------------------------------------------------------------------------
+;; Gathers: an index read at run time, normalized as the JVM backend does
+;; (truncated, negative from the end), then clamped into [0, d) so that a
+;; read stays in bounds (the handler throws for an index out of range; the
+;; code cannot, genclj-ryg0)
+;; ---------------------------------------------------------------------------
+
+(defn- index-expr
+  "The int index at expression e (of dtype) against a dimension of size d,
+   bound in em."
+  [em dtype e d]
+  (let [{:keys [convert]} (:dialect em)
+        i (bind! em :int32 (if (#{:int32} dtype) e (convert dtype :int32 e)))
+        i (bind! em :int32 (str "(" i " < 0 ? " i " + " d " : " i ")"))]
+    (bind! em :int32 (str "(" i " < 0 ? 0 : (" i " > " (dec d) " ? " (dec d) " : " i "))"))))
+
+(defn- select-chain
+  "The expression choosing (candidates k) where i (an int expression) is k."
+  [i candidates]
+  (reduce (fn [e k] (str "(" i " == " k " ? " (nth candidates k) " : " e ")"))
+          (peek candidates) (range (- (count candidates) 2) -1 -1)))
+
+;; ---------------------------------------------------------------------------
+;; argmax and argmin: the first extreme, the first NaN winning (the JVM
+;; backend's, NumPy's)
+;; ---------------------------------------------------------------------------
+
+(defn- arg-step!
+  "[best-index best-value] after considering element v at index k (an int
+   expression), op :argmax or :argmin, values of dtype, bound in em (or set
+   when vars, [index-var value-var], are given)."
+  [em op dtype [bk bv] k v]
+  (let [{:keys [unary binary]} (:dialect em)
+        better (bind! em :bool (binary :logical-and :bool (unary :logical-not :bool (unary :isnan dtype bv))
+                                       (binary :logical-or :bool (unary :isnan dtype v)
+                                               (binary (if (= op :argmax) :greater :less) dtype v bv))))]
+    [(str "(" better " ? " k " : " bk ")") (str "(" better " ? " v " : " bv ")")]))
+
+(defn- arg-reduce-small
+  "argmax/argmin of the expressions es (in the reduced axes' order): an
+   int32 expression."
+  [em op dtype es]
+  (first (reduce (fn [[bk bv] k]
+                   (let [[nk nv] (arg-step! em op dtype [bk bv] (str k) (nth es k))]
+                     [(bind! em :int32 nk) (bind! em dtype nv)]))
+                 ["0" (first es)] (range 1 (count es)))))
+
+;; ---------------------------------------------------------------------------
 ;; Nodes
 ;; ---------------------------------------------------------------------------
 
@@ -228,8 +275,15 @@
     (value shape dtype (mapv (fn [i] (bind! em dtype (apply f (map (fn [o m] (nth (:el o) (nth m i))) operands maps))))
                              (range (size shape))))))
 
-(defn- reduce-small [em {:keys [shape el]} op axes out-shape out-dtype]
-  (when-not (contains? reduce-init op) (fail! em (str "no reduction " op " yet") {:op op}))
+(defn- reduce-small [em {:keys [shape el dtype]} op axes out-shape out-dtype]
+  (when-not (or (contains? reduce-init op) (#{:argmax :argmin} op)) (fail! em (str "no reduction " op " yet") {:op op}))
+  (if (#{:argmax :argmin} op)
+    (let [axes (set axes)
+          groups (group-by (fn [i] (let [idx (unravel i shape)] (vec (keep-indexed (fn [k x] (when-not (axes k) x)) idx))))
+                           (range (size shape)))
+          kept (vec (keep-indexed (fn [k d] (when-not (axes k) d)) shape))]
+      (value out-shape out-dtype (mapv (fn [o] (arg-reduce-small em op dtype (mapv #(nth el %) (get groups (unravel o kept)))))
+                                       (range (size kept)))))
   (let [{:keys [lit binary]} (:dialect em)
         axes (set axes)
         groups (group-by (fn [i] (let [idx (unravel i shape)] (vec (keep-indexed (fn [k x] (when-not (axes k) x)) idx))))
@@ -241,7 +295,7 @@
                              (lit (reduce-init op) out-dtype)
                              (reduce (fn [acc i] (bind! em out-dtype (binary (reduce-op op) out-dtype acc (nth el i))))
                                      (nth el (first is)) (rest is)))))
-                 (range (size kept))))))
+                 (range (size kept)))))))
 
 (defn- permuted-index
   "The flat index into the operand (in-shape) of a transpose by perm at flat
@@ -309,6 +363,22 @@
                                      (reduce (fn [acc j] (bind! em dtype (str "(" acc " + " (nth (:el x) (+ (* a k) j)) " * " (nth (:el y) (+ (* j c) b)) ")")))
                                              (bind! em dtype (str "(" (nth (:el x) (* a k)) " * " (nth (:el y) b) ")"))
                                              (range 1 k))))))
+      (= op :take) (let [x (arg 0 dtype) ind (arg 1 :int32) ax (:axis attrs)
+                         sx (:shape x) si (:shape ind) d (nth sx ax)
+                         idx (mapv #(index-expr em (:dtype ind) % d) (:el ind))]
+                     (put (small-from shape dtype
+                                      (fn [i] (let [c (unravel i shape)
+                                                    pre (subvec c 0 ax) j (ravel (subvec c ax (+ ax (count si))) si) post (subvec c (+ ax (count si)))]
+                                                (bind! em dtype (select-chain (nth idx j)
+                                                                              (mapv #(nth (:el x) (ravel (concat pre [%] post) sx)) (range d)))))))))
+      (= op :take-along-axis) (let [x (arg 0 dtype) ind (arg 1 :int32) ax (:axis attrs)
+                                    sx (:shape x) si (:shape ind) d (nth sx ax)
+                                    imap (broadcast-map (assoc shape ax (nth si ax)) si)]
+                                (put (small-from shape dtype
+                                                 (fn [i] (let [c (unravel i shape)
+                                                               k (index-expr em (:dtype ind) (nth (:el ind) (nth imap i)) d)
+                                                               xc (fn [a] (ravel (map-indexed (fn [kk dim] (cond (= kk ax) a (= 1 dim) 0 :else (nth c kk))) sx) sx))]
+                                                           (bind! em dtype (select-chain k (mapv #(nth (:el x) (xc %)) (range d)))))))))
       :else (fail! em (str "no lowering of " op " yet") {:node (dissoc node :attrs)}))))
 
 ;; large arrays: accessors and loops
@@ -328,8 +398,9 @@
   "op over axes of v (any size), shaped out-shape: loops, sequential in the
    reduced axes' row-major order."
   [em v op axes out-shape out-dtype]
-  (when-not (contains? reduce-init op) (fail! em (str "no reduction " op " yet") {:op op}))
+  (when-not (or (contains? reduce-init op) (#{:argmax :argmin} op)) (fail! em (str "no reduction " op " yet") {:op op}))
   (let [{:keys [lit binary]} (:dialect em)
+        arg? (#{:argmax :argmin} op)
         v (loopable em v)
         in-shape (:shape v)
         axes (set axes)
@@ -341,12 +412,23 @@
                                       (if (axes k) (recur (inc k) ko (rest ro) (conj out (first ro)))
                                           (recur (inc k) (rest ko) ro (conj out (first ko))))))
                                 in-shape)))
-        init (lit (reduce-start op out-dtype) out-dtype)
+        init (when-not arg? (lit (reduce-start op out-dtype) out-dtype))
         accumulate (fn [em o]
-                     (let [acc (fresh em "v")]
-                       (stmt! em [:decl out-dtype acc init])
-                       (for! em (size red) (fn [bem r] (stmt! bem [:set acc (binary (reduce-op op) out-dtype acc ((:at v) bem (index o r)))])))
-                       acc))]
+                     (if arg?
+                       (let [bk (fresh em "v") bv (fresh em "v")]
+                         (stmt! em [:decl :int32 bk "0"])
+                         (stmt! em [:decl (:dtype v) bv ((:at v) em (index o "0"))])
+                         (for! em (dec (size red))
+                               (fn [bem r]
+                                 (let [k (bind! bem :int32 (str "(" r " + 1)"))
+                                       [nk nv] (arg-step! bem op (:dtype v) [bk bv] k ((:at v) bem (index o k)))]
+                                   (stmt! bem [:set bk nk])
+                                   (stmt! bem [:set bv nv]))))
+                         bk)
+                       (let [acc (fresh em "v")]
+                         (stmt! em [:decl out-dtype acc init])
+                         (for! em (size red) (fn [bem r] (stmt! bem [:set acc (binary (reduce-op op) out-dtype acc ((:at v) bem (index o r)))])))
+                         acc)))]
     (if (large-shape? out-shape)
       (let [b (buffer! em out-dtype (size kept))]
         (for! em (size kept) (fn [bem o] (stmt! bem [:bset b o (accumulate bem o)])))
@@ -455,6 +537,25 @@
                                                            x ((:at o) bem (in-range in? (flat (assoc cs ax (str "(" p " - " lo ")")) (:shape o))))]
                                                        (if e (bind! bem dtype (str "(" in? " ? " x " : " e ")")) x)))
                                                    nil (range (count os))))))))
+      (= op :take) (let [x (loopable em (arg 0 dtype)) ind (loopable em (arg 1 :int32)) ax (:axis attrs)
+                         sx (:shape x) si (:shape ind) d (nth sx ax)
+                         read (fn [bem i]
+                                (let [c (coords i shape)
+                                      j (flat (subvec c ax (+ ax (count si))) si)
+                                      k (index-expr bem (:dtype ind) ((:at ind) bem j) d)]
+                                  ((:at x) bem (flat (concat (subvec c 0 ax) [k] (subvec c (+ ax (count si)))) sx))))]
+                     (put (if small-out?
+                            (small-from shape dtype #(read em (str %)))
+                            (lazy shape dtype read))))
+      (= op :take-along-axis) (let [x (loopable em (arg 0 dtype)) ind (loopable em (arg 1 :int32)) ax (:axis attrs)
+                                    sx (:shape x) si (:shape ind) d (nth sx ax)
+                                    read (fn [bem i]
+                                           (let [c (coords i shape)
+                                                 k (index-expr bem (:dtype ind) ((:at ind) bem (bidx i (assoc (vec shape) ax (nth si ax)) si)) d)]
+                                             ((:at x) bem (flat (map-indexed (fn [kk dim] (cond (= kk ax) k (= 1 dim) "0" :else (nth c kk))) sx) sx))))]
+                                (put (if small-out?
+                                       (small-from shape dtype #(read em (str %)))
+                                       (lazy shape dtype read))))
       :else (fail! em (str "no lowering of " op " over large arrays yet") {:node (dissoc node :attrs)}))))
 
 (defn- emit-node!

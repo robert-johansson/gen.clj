@@ -33,7 +33,7 @@
 ;; Metal's expressions
 ;; ---------------------------------------------------------------------------
 
-(def ^:private mtypes {:float32 "float" :uint32 "uint" :int32 "int" :bool "bool"})
+(def ^:private mtypes {:float32 "float" :uint32 "uint" :int32 "int" :int64 "long" :bool "bool"})
 
 (defn- mtype [dtype]
   (or (mtypes dtype) (throw (ex-info (str "Metal lowering: no " dtype " (float32, uint32, int32 and bool only)") {:dtype dtype}))))
@@ -46,6 +46,7 @@
                  (str (Float/toString f) "f")))
     :uint32 (format "0x%08xu" (bit-and (long (if (boolean? v) (if v 1 0) v)) 0xFFFFFFFF))
     :int32 (str (long (if (boolean? v) (if v 1 0) v)))
+    :int64 (str (long (if (boolean? v) (if v 1 0) v)) "L")
     :bool (str (if (boolean? v) v (not (zero? (double v)))))
     (mtype dtype)))
 
@@ -129,6 +130,10 @@ inline uint g_max(uint a, uint b) { return a > b ? a : b; }
 inline uint g_min(uint a, uint b) { return a < b ? a : b; }
 inline float g_sign(float a) { return a > 0.0f ? 1.0f : (a < 0.0f ? -1.0f : a); }
 inline int g_sign(int a) { return (a > 0) - (a < 0); }
+inline long g_sign(long a) { return (long)(a > 0) - (long)(a < 0); }
+inline long g_mod(long a, long b) { long r = a % b; return (r != 0 && ((r < 0) != (b < 0))) ? r + b : r; }
+inline long g_max(long a, long b) { return a > b ? a : b; }
+inline long g_min(long a, long b) { return a < b ? a : b; }
 inline float g_mod(float a, float b) { float r = metal::fmod(a, b); return (r != 0.0f && ((r < 0.0f) != (b < 0.0f))) ? r + b : r; }
 inline int g_mod(int a, int b) { int r = a % b; return (r != 0 && ((r < 0) != (b < 0))) ? r + b : r; }
 inline uint g_shl(uint x, uint s) { return s < 32u ? x << s : 0u; }

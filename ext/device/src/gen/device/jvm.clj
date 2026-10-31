@@ -47,12 +47,12 @@
 ;; Java text
 ;; ---------------------------------------------------------------------------
 
-(def ^:private jtypes {:float32 "float" :float64 "double" :uint32 "int" :int32 "int" :bool "boolean"})
+(def ^:private jtypes {:float32 "float" :float64 "double" :uint32 "int" :int32 "int" :int64 "long" :bool "boolean"})
 
 (defn- jtype [dtype]
-  (or (jtypes dtype) (throw (ex-info (str "JVM lowering: no " dtype " (float32, float64, uint32, int32 and bool only)") {:dtype dtype}))))
+  (or (jtypes dtype) (throw (ex-info (str "JVM lowering: no " dtype " (float32, float64, uint32, int32, int64 and bool only)") {:dtype dtype}))))
 
-(def ^:private array-types {:float32 "float[]" :float64 "double[]" :uint32 "int[]" :int32 "int[]" :bool "boolean[]"})
+(def ^:private array-types {:float32 "float[]" :float64 "double[]" :uint32 "int[]" :int32 "int[]" :int64 "long[]" :bool "boolean[]"})
 
 (def ^:private float-type? #{:float32 :float64})
 
@@ -70,6 +70,7 @@
                  (Double/toString d)))
     :uint32 (format "0x%08x" (bit-and (long (if (boolean? v) (if v 1 0) v)) 0xFFFFFFFF))
     :int32 (str (long (if (boolean? v) (if v 1 0) v)))
+    :int64 (str (long (if (boolean? v) (if v 1 0) v)) "L")
     :bool (str (if (boolean? v) v (not (zero? (double v)))))
     (jtype dtype)))
 
@@ -84,6 +85,8 @@
   static final clojure.lang.IFn.DD ERFINV = (clojure.lang.IFn.DD) ((clojure.lang.IDeref) clojure.java.api.Clojure.var(\"gen.array.special\", \"erfinv\")).deref();
   static final clojure.lang.IFn.DD ERF = (clojure.lang.IFn.DD) ((clojure.lang.IDeref) clojure.java.api.Clojure.var(\"gen.array.special\", \"erf\")).deref();
   static int g_sign(int a) { return (a > 0 ? 1 : 0) - (a < 0 ? 1 : 0); }
+  static long g_sign(long a) { return (a > 0 ? 1L : 0L) - (a < 0 ? 1L : 0L); }
+  static long g_mod(long a, long b) { long r = a % b; return (r != 0 && ((r < 0) != (b < 0))) ? r + b : r; }
   static float g_mod(float a, float b) { float r = a % b; return (r != 0.0f && ((r < 0.0f) != (b < 0.0f))) ? r + b : r; }
   static int g_mod(int a, int b) { int r = a % b; return (r != 0 && ((r < 0) != (b < 0))) ? r + b : r; }
   static int g_umax(int a, int b) { return Integer.compareUnsigned(a, b) >= 0 ? a : b; }
@@ -178,10 +181,10 @@
   (cond (= from to) a
         (= to :bool) (str "(" a (case from :float32 " != 0.0f)" :float64 " != 0.0)" " != 0)"))
         (= from :bool) (str "(" a (case to :float32 " ? 1.0f : 0.0f)" :float64 " ? 1.0 : 0.0)" " ? 1 : 0)"))
-        (and (float-type? from) (= to :int32)) (str "((int) " a ")")
+        (and (float-type? from) (#{:int32 :int64} to)) (str "((" (jtype to) ") " a ")")
         (and (float-type? from) (= to :uint32)) (str "((int) (long) " a ")")
-        (= from :int32) (str "((" (jtype to) ") " a ")")
-        (= from :uint32) (str "((" (jtype to) ") (" a " & 0xFFFFFFFFL))")
+        (#{:int32 :int64} from) (if (and (= from :int32) (= to :uint32)) a (str "((" (jtype to) ") " a ")"))
+        (= from :uint32) (if (= to :int32) a (str "((" (jtype to) ") (" a " & 0xFFFFFFFFL))"))
         (and (float-type? from) (float-type? to)) (str "((" (jtype to) ") " a ")")
         (#{[:int32 :uint32] [:uint32 :int32]} [from to]) a
         :else (throw (ex-info (str "JVM lowering: no conversion from " from " to " to) {:from from :to to}))))
@@ -421,6 +424,7 @@
     :float32 (float-array (map #(if (boolean? %) (if % 1.0 0.0) (double %)) values))
     :float64 (double-array (map #(if (boolean? %) (if % 1.0 0.0) (double %)) values))
     (:uint32 :int32) (int-array (map #(unchecked-int (long (if (boolean? %) (if % 1 0) %))) values))
+    :int64 (long-array (map #(long (if (boolean? %) (if % 1 0) %)) values))
     :bool (boolean-array (map #(if (boolean? %) % (not (zero? (double %)))) values))))
 
 (defn- new-array [{:keys [shape dtype]}]
@@ -429,6 +433,7 @@
       :float32 (float-array n)
       :float64 (double-array n)
       (:uint32 :int32) (int-array n)
+      :int64 (long-array n)
       :bool (boolean-array n))))
 
 (defn input-array
@@ -451,7 +456,7 @@
 
 (defn- array-class [dtype]
   (case dtype :float32 (class (float-array 0)) :float64 (class (double-array 0)) (:uint32 :int32) (class (int-array 0))
-        :bool (class (boolean-array 0))))
+        :int64 (class (long-array 0)) :bool (class (boolean-array 0))))
 
 (defn compile
   "program (gen.device.stage's, of a key and data inputs) as a loaded JVM
