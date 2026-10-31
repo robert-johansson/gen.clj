@@ -117,7 +117,9 @@
                       ;; a vector value enters later parameters as its sum
                       (assoc env addr (if (= family :vector) (array/sum v) v)))
               :select (let [k (trace [addr :k] (d/categorical [0.3 0.7]))]
-                        (assoc env addr (trace [addr :v] (d/normal (if (= k 0) -2.0 2.0) 1.0))))
+                        ;; gen.array's ==: this is a plain function, outside the
+                        ;; gen macro's guarded = (genclj-8rdm)
+                        (assoc env addr (trace [addr :v] (d/normal (if (array/truthy? (array/== k 0)) -2.0 2.0) 1.0))))
               :branch (let [[then else] more]
                         ;; truthy? as the gen macro would insert: a batch of values is loud
                         (if (array/truthy? (trace addr (d/bernoulli 0.5)))

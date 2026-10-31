@@ -36,6 +36,13 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Breaking: = on a 0-d MLX array and a host number or boolean throws**
+  (gen.backend.mlx). It answered false, so plain Clojure outside a gen
+  body, (= k 0) on a draw, took the other branch on every run where the
+  JVM backend compares values. Compare draws with gen.array
+  (array/== k 0), or inside a gen body. Other comparisons are unchanged.
+  The test generator's :select sites compared that way: on MLX they took
+  the second branch always (DESIGN §9, owner, 2026-10-31; genclj-8rdm).
 - **gen.clj is under the MIT license** (`LICENSE`). The ports of Gen.jl's
   test suite in `test/gen/genjl/` keep Gen.jl's Apache License 2.0, a copy
   beside them (owner, 2026-10-26; genclj-fhdz).

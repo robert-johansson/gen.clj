@@ -115,12 +115,20 @@
   ;; values: equal when dtype, shape and elements are (as the JVM backend's);
   ;; comparing reads both arrays on the host
   Object
+  ;; a 0-d array and a host number or boolean: the JVM backend's 0-d arrays
+  ;; are host values, which = compares, so a silent false here would take
+  ;; the other branch of plain Clojure (DESIGN §9, genclj-8rdm)
   (equals [this o]
-    (or (identical? this o)
-        (and (instance? MlxArray o)
-             (= dtype (.-dtype ^MlxArray o))
-             (= shape (.-shape ^MlxArray o))
-             (= (to-host this) (to-host o)))))
+    (cond (identical? this o) true
+          (instance? MlxArray o) (and (= dtype (.-dtype ^MlxArray o))
+                                      (= shape (.-shape ^MlxArray o))
+                                      (= (to-host this) (to-host o)))
+          (and (= [] shape) (or (instance? Number o) (instance? Boolean o)))
+          (throw (ex-info (str "= on a 0-d MLX array and the host value " (pr-str o) ": plain Clojure cannot compare them"
+                               " (on the JVM backend the array would be a host value). Compare with gen.array"
+                               " (array/== x v), or inside a gen body, whose = reads the array.")
+                          {:reason :host-comparison :value o :dtype dtype}))
+          :else false))
   (hashCode [this] (hash [shape (to-host this)]))
 
   clojure.lang.IHashEq
