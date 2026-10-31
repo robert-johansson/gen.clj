@@ -130,6 +130,13 @@
                   :timeout? (boolean (::candidate/timeout (ex-data e)))}))]
     (assoc r :stage name :ms (/ (- (System/nanoTime) t0) 1e6))))
 
+(defn grade-model
+  "Grades model, a generative function already evaluated (a REPL session's,
+   gen.codegen.repl), against task: grade's stages from :simulates on, the
+   code's three passed as given (:given)."
+  ([task model] (grade-model task model nil))
+  ([task model opts] (grade task nil (assoc opts ::model model))))
+
 (defn grade
   "Grades code (a reply's code, a string) against task; opts override
    defaults. See the namespace's docstring."
@@ -183,8 +190,13 @@
                                          (let [m (format "explains the data %.1f nats worse than the reference" (- gap))]
                                            (if (:gate-explains? opts) (throw (ex-info m {})) {:warnings [m]}))
                                          :else {}))))]]
+         ;; a model given as a value (grade-model) passes the code's stages as given
+         given (::model opts)
+         _ (when given (vswap! state assoc :model given))
          results (reduce (fn [done [name check]]
-                           (let [r (stage name timeout-ms check)]
+                           (let [r (if (and given (#{:read :safe :evaluates} name))
+                                     {:stage name :ok true :ms 0.0 :given true}
+                                     (stage name timeout-ms check))]
                              (if (:ok r) (conj done r) (reduced (conj done r)))))
                          [] stages)]
      (when-let [n (:ns @state)] (candidate/discard! n))

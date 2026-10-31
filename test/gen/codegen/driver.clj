@@ -29,7 +29,10 @@
    codegen.k (4), codegen.rounds (3), codegen.max-tokens (2048),
    codegen.tasks (task ids, comma-separated; all by default), codegen.seed
    (1), codegen.n-ctx (16384), codegen.temp, codegen.top-p and
-   codegen.top-k (default-sampling's)."
+   codegen.top-k (default-sampling's). codegen.mode repl runs the REPL
+   agent (run-repl-task, genclj-t1xh): codegen.episodes (2), codegen.turns
+   (30), codegen.turn-tokens (1024), codegen.evidence (true; false leaves
+   out the evidence tool and check's log marginal likelihood)."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -129,23 +132,31 @@
               (:ready (try (edn/read-string l) (catch Exception _ nil))) {:process p :in in :out out}
               :else (recur))))))
 
-(defn- grade!
-  "The grading of code for task by the grader in g (an atom), restarting it
-   when the grading is tainted, times out (timeout-ms) or the grader dies."
-  [g command log task-id code timeout-ms]
+(defn- request!
+  "request's response from the grader process in g (an atom), restarting it
+   when the response is tainted, times out (timeout-ms) or the grader dies:
+   then :restarted, and a REPL session it held is gone."
+  [g command log request timeout-ms]
   (let [id (str (random-uuid))
         {:keys [in out]} @g
         restart! #(do (kill! (:process @g)) (reset! g (start-grader command log)))]
-    (.write ^java.io.Writer out (str (pr-str {:id id :task task-id :code code}) "\n"))
+    (.write ^java.io.Writer out (str (pr-str (assoc request :id id)) "\n"))
     (.flush ^java.io.Writer out)
     (let [f (future (loop []
                       (when-let [l (.readLine ^java.io.BufferedReader in)]
                         (let [m (try (edn/read-string l) (catch Exception _ nil))]
                           (if (and (map? m) (= id (:id m))) m (recur))))))
           r (deref f timeout-ms ::timeout)]
-      (cond (= r ::timeout) (do (future-cancel f) (restart!) {:task task-id :error "the grading timed out" :tainted? true})
-            (nil? r) (do (restart!) {:task task-id :error "the grader exited"})
-            :else (do (when (:tainted? r) (restart!)) (dissoc r :id))))))
+      (cond (= r ::timeout) (do (future-cancel f) (restart!)
+                                {:error "timed out" :text "error: timed out" :tainted? true :restarted true})
+            (nil? r) (do (restart!) {:error "the grader exited" :text "error: the grader exited" :restarted true})
+            :else (do (when (:tainted? r) (restart!)) (cond-> (dissoc r :id) (:tainted? r) (assoc :restarted true)))))))
+
+(defn- grade!
+  "The grading of code for task by the grader process."
+  [g command log task-id code timeout-ms]
+  (let [r (request! g command log {:task task-id :code code} timeout-ms)]
+    (cond-> (dissoc r :text :restarted) (:error r) (assoc :task task-id))))
 
 ;; ---------------------------------------------------------------------------
 ;; The run
@@ -199,6 +210,90 @@
             (recur branch entry (inc round))))))
     (br/dispose! base)))
 
+(defn- clip [s n] (if (> (count s) n) (str (subs s 0 n) "…") s))
+
+(defn run-repl-task
+  "The REPL agent's episodes for task (genclj-t1xh): each opens a session
+   in the grader's process and runs turns until the model submits or the
+   turn budget ends (then model, if the session defines it, is submitted).
+   A turn: the reply sampled after an empty think block, its tool calls run
+   in order, their responses the next user turn. call sends a request to
+   the grader process; record! takes each episode's entry."
+  [e task {:keys [episodes turns turn-tokens seed eog sampling evidence?]} call record!]
+  (let [tok (fn [text] (llama/tokenize e text {:add-special? false :parse-special? true}))
+        think (tok "<think>\n\n</think>\n\n")
+        head (tok (prompt/repl-head task evidence?))
+        base (br/open e head)
+        task-key (rng/fold-in (rng/key seed) (.indexOf ^java.util.List (mapv :id tasks/tasks) (:id task)))]
+    (doseq [episode (range episodes)]
+      (let [key (rng/fold-in task-key (+ 1000 episode))
+            sid (:session (call {:op :open :task (:id task)}))
+            run-tool (fn [{:keys [name params]}]
+                       (let [p #(get params %)
+                             req (case name
+                                   "eval" {:op :eval :code (p "code")}
+                                   "simulate" {:op :simulate :name (p "name") :args (p "args")}
+                                   "check" {:op :check :name (p "name") :ml? evidence?}
+                                   "evidence" (when evidence? {:op :evidence :name (p "name")})
+                                   "submit" {:op :submit :name (p "name")}
+                                   nil)]
+                         (if req
+                           (call (assoc req :session sid))
+                           {:text (str "error: there is no tool " name)})))
+            t0 (System/nanoTime)]
+        (loop [conv (br/fork base) turn 1 log [] llm-s 0.0 tool-s 0.0 tokens 0]
+          (let [t1 (System/nanoTime)
+                g (:branch (br/extend (br/fork conv) think))
+                [r] (try (generate g 1 turn-tokens eog sampling (rng/fold-in key turn)) (finally (br/dispose! g)))
+                text (llama/detokenize e (:tokens r))
+                t2 (System/nanoTime)
+                calls (vec (prompt/tool-calls text))
+                responses (loop [cs calls acc []]
+                            (if-let [c (first cs)]
+                              (let [resp (run-tool c)]
+                                (if (or (:grading resp) (:restarted resp)) (conj acc resp) (recur (rest cs) (conj acc resp))))
+                              acc))
+                t3 (System/nanoTime)
+                llm-s (+ llm-s (/ (- t2 t1) 1e9))
+                tool-s (+ tool-s (/ (- t3 t2) 1e9))
+                tokens (+ tokens (count (:tokens r)))
+                log (conj log {:turn turn :reply (clip text 1500)
+                               :calls (mapv (fn [c resp] {:tool (:name c) :params (update-vals (:params c) #(clip % 600))
+                                                          :response (clip (str (:text resp)) 600)})
+                                            calls responses)})
+                submitted (some #(when (:grading %) %) responses)
+                lost (some :restarted responses)
+                finish (fn [submission why]
+                         (when (br/live? conv) (br/dispose! conv))
+                         (when-not (or (:grading submission) (= why :session-lost))
+                           (call {:op :close :session sid}))
+                         (let [entry {:task (:id task) :mode :repl :reply episode :round 0 :evidence? evidence?
+                                      :turns turn :tokens tokens :stop why
+                                      :seconds llm-s :tool-seconds tool-s :wall-seconds (/ (- (System/nanoTime) t0) 1e9)
+                                      :prompt-tokens (count head) :sampling sampling
+                                      :text (str/join "\n\n" (map :reply log)) :log log
+                                      :program (:program submission)
+                                      :grading (or (:grading submission) {:task (:id task) :error (str "not submitted: " why)})}]
+                           (record! entry)
+                           (println (format "%s: episode %d, %s after %d turns (%.0f s LLM, %.0f s tools): %s"
+                                            (name (:id task)) episode (clojure.core/name why) turn llm-s tool-s
+                                            (let [st (first (remove :ok (:stages (:grading entry))))]
+                                              (if (:grading submission) (or (:stage st) :passed) (:error (:grading entry))))))))]
+            (cond submitted (finish submitted :submitted)
+                  lost (finish nil :session-lost)
+                  (>= turn turns) (let [s (call {:op :submit :session sid :name "model"})]
+                                    (finish (when (:grading s) s) :turns))
+                  :else
+                  (let [texts (if (seq calls)
+                                (mapv :text responses)
+                                ["No tool call in your reply: call one of the tools."])
+                        next-conv (try (:branch (br/extend conv (-> think (into (:tokens r)) (into (tok (prompt/tool-turn texts))))))
+                                       (catch Exception ex {::error (ex-message ex)}))]
+                    (if (::error next-conv)
+                      (finish nil :context-full)
+                      (recur next-conv (inc turn) log llm-s tool-s tokens))))))))
+    (br/dispose! base)))
+
 (defn -main [& _]
   (let [model (prop "model" nil)
         out (io/file (prop "out" "tmp/codegen"))
@@ -218,7 +313,13 @@
     (with-open [e (llama/engine {:model model :n-ctx (parse-long (prop "n-ctx" "16384")) :max-branches 8})]
       (let [opts (assoc opts :eog (set (:eog (llama/tokenizer e))))]
         (doseq [id ids]
-          (run-task e (tasks/by-id id) opts #(grade! g command log %1 %2 900000) record!))))
+          (if (= "repl" (prop "mode" "one-shot"))
+            (run-repl-task e (tasks/by-id id)
+                           (assoc opts :episodes (parse-long (prop "episodes" "2")) :turns (parse-long (prop "turns" "30"))
+                                  :turn-tokens (parse-long (prop "turn-tokens" "1024"))
+                                  :evidence? (not= "false" (prop "evidence" "true")))
+                           #(request! g command log % 900000) record!)
+            (run-task e (tasks/by-id id) opts #(grade! g command log %1 %2 900000) record!)))))
     (kill! (:process @g))
     (println "done:" (str results))
     (shutdown-agents)

@@ -134,3 +134,97 @@ students; student s of class c is observed at [:class c :students s :score]."
   [messages]
   (str (str/join (map (fn [[role text]] (str "<|im_start|>" (name role) "\n" (str/trim text) "<|im_end|>\n")) messages))
        "<|im_start|>assistant\n<think>\n\n</think>\n\n"))
+
+;; ---------------------------------------------------------------------------
+;; The REPL agent's prompt (genclj-t1xh): tools in Qwen's format
+;; ---------------------------------------------------------------------------
+
+(def tools
+  "The REPL session's tools (gen.codegen.repl), as Qwen's chat template
+   takes function definitions: [name description {parameter description}
+   required]."
+  [["eval" "Evaluate Clojure forms in the session's namespace (the prelude's names; args and observations are defined). Define one or two small things at a time. Returns the last form's value, or the error."
+    [["code" "One or a few Clojure forms."]] ["code"]]
+   ["simulate" "Run the generative function name on arguments and show a sampled trace: its score, its choices and its return value. Use it to see what a piece does."
+    [["name" "The name of a generative function defined in the session."]
+     ["args" "A Clojure vector of its arguments, such as [] or [2.0]; the task's arguments when left out (args)."]] ["name"]]
+   ["check" "Run the generative function name on the task's arguments with the task's data as observations: whether it takes the data and, for the particle that explains the data best, its latent choices and its worst-explained observations."
+    [["name" "The name of the model, a generative function defined in the session."]] ["name"]]
+   ["evidence" "The log marginal likelihood of the task's data under the generative function name: higher explains the data better. Use it to compare variants."
+    [["name" "The name of the model."]] ["name"]]
+   ["submit" "Submit the generative function name as the model. This ends the session."
+    [["name" "The name of the model."]] ["name"]]])
+
+(defn- json
+  "x as JSON, Python's json.dumps spacing (as the template's tojson writes
+   it): strings, keywords as strings, maps and vectors."
+  [x]
+  (cond (string? x) (str "\"" (-> x (str/replace "\\" "\\\\") (str/replace "\"" "\\\"") (str/replace "\n" "\\n")) "\"")
+        (keyword? x) (json (name x))
+        (map? x) (str "{" (str/join ", " (map (fn [[k v]] (str (json k) ": " (json v))) x)) "}")
+        (sequential? x) (str "[" (str/join ", " (map json x)) "]")
+        :else (str x)))
+
+(defn- tool-json [[n description params required]]
+  (json (array-map :type "function"
+                   :function (array-map :name n :description description
+                                        :parameters (array-map :type "object"
+                                                               :properties (into (array-map) (map (fn [[p d]] [p (array-map :type "string" :description d)])) params)
+                                                               :required required)))))
+
+(def ^:private tools-header
+  "The template's tools section, verbatim but for the definitions."
+  [(str "# Tools\n\nYou have access to the following functions:\n\n<tools>")
+   (str "\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>")])
+
+(defn repl-system-message
+  "The REPL agent's instructions; without evidence? the evidence tool is
+   not mentioned (nor offered: repl-head)."
+  [evidence?]
+  (str "You build a probabilistic model in gen.clj at a REPL, step by step, by calling the tools. Work as a careful "
+       "developer does: define one small piece at a time with eval (the priors, one observation's likelihood, a helper), "
+       "simulate it to see what it does, check the model against the data"
+       (when evidence? ", compare variants with evidence")
+       ", and submit the model when it explains the data. Keep each eval to one or two definitions, and make one tool "
+       "call a reply.\n\n"
+       "The model is a generative function whose parameters are the task's arguments; in the session, args holds them "
+       "(simulate and check use them) and observations holds the data. Trace each observation at its address. The "
+       "session's namespace is this one:\n\n```clojure\n" (candidate/prelude-text) "\n```\n\n"
+       cheat-sheet
+       "\n\nTwo worked examples.\n\n"
+       (str/join "\n\n" (map-indexed (fn [i [d code]] (str "Example " (inc i) ". " d "\n\n```clojure\n" code "\n```"))
+                                     examples))))
+
+(defn tools-for
+  "The tools offered: all, or all but evidence. Without it, check gives no
+   log marginal likelihood either (the grader's measure stays unseen, as
+   in one shot and repair)."
+  [evidence?]
+  (if evidence? tools (vec (remove #(= "evidence" (first %)) tools))))
+
+(defn repl-head
+  "The REPL agent's conversation up to its first turn: the system message
+   with the tools as the template writes them, the task, and the
+   assistant's turn begun (the think block not yet)."
+  [task evidence?]
+  (str "<|im_start|>system\n" (first tools-header) (str/join (map #(str "\n" (tool-json %)) (tools-for evidence?))) (second tools-header)
+       "\n\n" (str/trim (repl-system-message evidence?)) "<|im_end|>\n"
+       "<|im_start|>user\n"
+       (str/trim (str/replace (task-message task) #"Write the model\.$" "Build the model with the tools, then submit it."))
+       "<|im_end|>\n<|im_start|>assistant\n"))
+
+(defn tool-turn
+  "Tool responses as the template writes them: one user turn of
+   <tool_response> blocks, then the assistant's turn begun."
+  [texts]
+  (str "<|im_end|>\n<|im_start|>user" (str/join (map #(str "\n<tool_response>\n" % "\n</tool_response>") texts))
+       "<|im_end|>\n<|im_start|>assistant\n"))
+
+(defn tool-calls
+  "The tool calls in a reply: [{:name :params {name value}}], in order."
+  [text]
+  (for [[_ n body] (re-seq #"(?s)<tool_call>\s*<function=([^>\s]+)>(.*?)</function>\s*</tool_call>" text)]
+    {:name n
+     :params (into {} (map (fn [[_ p v]] [p (-> v (str/replace #"^\n" "") (str/replace #"\n$" ""))]))
+                   (re-seq #"(?s)<parameter=([^>\s]+)>(.*?)</parameter>" body))}))
+
