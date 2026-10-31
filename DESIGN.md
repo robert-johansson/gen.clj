@@ -3170,6 +3170,28 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   the error is the handler's own; when the handler does not throw, a
   generic error names the run. A run that hit a bad index returns no
   results.
+- **Device programs: the note's decisions 1, 2, 4 and 5 (owner,
+  2026-10-31; genclj-a1hu, genclj-8x5p).**
+  1. The staging backend, array/scan and staged keys move into the core
+     at L0, marked {:api :experimental}, outside the 1.x promise while
+     they settle; rule 2 reads "a staged key is a value too". The
+     lowerings (JVM, Metal, CUDA C) are extensions.
+  2. Users ask with a :device option on the existing entry points
+     (kernel/run, importance sampling, then the particle filter):
+     {:device :jvm | :metal | :cuda}, the result shaped as today's. A
+     model that does not stage runs on the handler with the reason
+     recorded (this section, "every model, sustainably").
+  4. GPU targets: generated CUDA C (NVRTC, no new dependency) and Metal
+     through MLX first; the all-particles form for large shared data
+     next (a library GEMM or MLX's matmul); XLA through PJRT only if
+     that falls short.
+  5. Equivalence (rule 1): a float64 program on the JVM equals the
+     handler bit for bit; a float32 program (and the GPUs) equals it to
+     a float32 band, its accept decisions equal except where log-alpha
+     lies within rounding of log u, the tests counting such flips
+     against their expected number; statistics checked against the
+     handler. Whether the JVM path runs float64 by default is the
+     epic's decision 7, still open.
 ## 10. Deferred (tracked, not forgotten)
 
 `beans list --tag deferred-port` lists every GenMLX area left out of M1–M4, each

@@ -502,10 +502,13 @@ Medians, ms:
 
 1. Adopt the staging backend, `array/scan` and staged keys into the
    core (L0), with rule 2's wording amended? (Recommended.)
+   **Decided (owner, 2026-10-31): yes, as {:api :experimental}** (DESIGN §9).
 2. The device-run API: an option of kernel/run, importance-sampling and
    the particle filter (`:device :cuda`), or a namespace of its own
    (`gen.device/run`)? And its fallback: loud by default, or the
    handler's path with the reason recorded?
+   **Decided (owner, 2026-10-31): a :device option on the existing entry
+   points; the handler's path with the reason recorded** (DESIGN §9).
 3. Many-chain draws on a device: per-chain keys (`(rng/split key n)[i]`,
    kernel/run's, what CUDA C does naturally) or gen.batched's one key
    with a particle axis (what the XLA programs do)? Both are valid; the
@@ -514,7 +517,12 @@ Medians, ms:
    n)[i]` for particle or chain i (DESIGN §9).
 4. CUDA C (ext/cuda) first, XLA (ext/xla) second? (Recommended; XLA's
    plugin size is the main cost.)
+   **Decided (owner, 2026-10-31): CUDA C and Metal first, the
+   all-particles form next, XLA only if that falls short** (DESIGN §9).
 5. Rounding: device programs are float32 and fuse differently from the
    handler; accept decisions can flip where log-alpha is within rounding
    of log u, after which chains part. The tests compare draws to a band
    and flips to a count; is that the equivalence rule 1 asks for?
+   **Decided (owner, 2026-10-31): float64 on the JVM bit for bit; float32
+   and GPUs to a band, flips counted against their expected number**
+   (DESIGN §9).
