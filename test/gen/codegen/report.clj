@@ -4,9 +4,11 @@
 
      clojure -M:test -m gen.codegen.report <results.edn> …
 
-   A reply is correct when it passes every hard stage (it reads, is safe,
-   evaluates, simulates and takes the data); its gap is its log marginal
-   likelihood less the reference's (nats; reliable or not, as graded).
+   A reply runs when it passes every hard stage (it reads, is safe,
+   evaluates, simulates and takes the data), and explains the data when,
+   besides, its gap (its log marginal likelihood less the reference's,
+   nats) is reliable and within the task's tolerance: running is not being
+   the right model.
    One shot: how many of the K replies are correct, and the seconds of
    their decoding (together). Repair: the round the chain from the first
    reply became correct at (0: it was), or that it never did. Seconds per
@@ -34,21 +36,38 @@
 
 (defn- gap [entry] (get-in entry [:grading :log-ml :gap]))
 
+(defn- reliable? [entry] (get-in entry [:grading :log-ml :reliable?] false))
+
+(defn close?
+  "Does a correct reply also explain the data: a reliable gap within the
+   task's tolerance below the reference? nil when its gap is unreliable."
+  [entry]
+  (when (and (correct? entry) (gap entry) (reliable? entry))
+    (>= (gap entry) (- (tasks/tolerance (tasks/by-id (:task entry)))))))
+
 (defn- fmt [x] (if (number? x) (format "%.1f" (double x)) "–"))
+
+(defn- gap-text
+  "A correct reply's gap: its nats, ? when unreliable."
+  [entry]
+  (str (fmt (gap entry)) (when-not (reliable? entry) "?")))
 
 (defn- task-row [entries]
   (let [one (filter #(= :one-shot (:mode %)) entries)
         chain (sort-by :round (cons (first (filter #(zero? (:reply %)) one)) (filter #(= :repair (:mode %)) entries)))
-        fixed-at (some #(when (correct? %) (:round %)) chain)
-        gaps (keep #(when (correct? %) (gap %)) one)]
+        fixed (first (filter correct? chain))]
     {:task (:task (first entries))
-     :one-shot (str (count (filter correct? one)) "/" (count one))
+     :runs (count (filter correct? one)) :n (count one)
+     :close (count (filter close? one))
+     :gaps (mapv gap-text (filter correct? one))
      :one-shot-s (some :seconds one)
      :failures (frequencies (remove #{:correct} (map (comp reached :grading) one)))
-     :repair (cond (nil? fixed-at) (str "no (" (dec (count chain)) " rounds)") (zero? fixed-at) "first reply" :else (str "round " fixed-at))
+     :repair (cond (nil? fixed) (str "no (" (dec (count chain)) " rounds)")
+                   (zero? (:round fixed)) "first reply"
+                   :else (str "round " (:round fixed)))
+     :repair-gap (when fixed (gap-text fixed))
+     :repair-close? (when fixed (close? fixed))
      :repair-s (reduce + (keep :seconds (filter #(= :repair (:mode %)) entries)))
-     :gap (when (seq gaps) (nth (sort gaps) (quot (count gaps) 2)))
-     :reliable? (every? #(get-in % [:grading :log-ml :reliable?] true) (filter correct? one))
      :tokens (when (seq one) (Math/round (double (/ (reduce + (map :tokens one)) (count one)))))}))
 
 (defn summary
@@ -58,21 +77,27 @@
         rows (keep #(some-> (by-task (:id %)) task-row) tasks/tasks)
         one (filter #(= :one-shot (:mode %)) entries)
         one-s (reduce + (keep :one-shot-s rows))
-        repair-s (reduce + (map :repair-s rows))
-        chains-fixed (count (filter #(not (str/starts-with? (:repair %) "no")) rows))]
-    (str "Model: " (:model (first entries)) "\n\n"
-         "| task | one shot correct | its decoding s | tokens a reply | failures | repair chain correct at | repair s | gap (nats, median) |\n"
-         "|---|---|---|---|---|---|---|---|\n"
+        runs (count (filter correct? one))
+        close (count (filter close? one))
+        unreliable (count (filter #(and (correct? %) (not (reliable? %))) one))]
+    (str "Model: " (:model (first entries)) "; sampling " (pr-str (:sampling (first entries))) "\n\n"
+         "A reply runs when it reads, is safe, evaluates, simulates and takes the data; it explains the data when, "
+         "besides, its log marginal likelihood is reliably within the task's tolerance (5 nats) below the book "
+         "model's. Gaps in nats; ? marks an unreliable estimate.\n\n"
+         "| task | one shot: runs | explains | gaps of those that run | decoding s | tokens a reply | failures | repair chain runs at | its gap | repair s |\n"
+         "|---|---|---|---|---|---|---|---|---|---|\n"
          (str/join (for [r rows]
-                     (format "| %s | %s | %s | %s | %s | %s | %s | %s%s |\n" (name (:task r)) (:one-shot r) (fmt (:one-shot-s r))
-                             (or (:tokens r) "–") (if (seq (:failures r)) (pr-str (:failures r)) "") (:repair r) (fmt (:repair-s r))
-                             (fmt (:gap r)) (if (:reliable? r) "" " (unreliable)"))))
+                     (format "| %s | %d/%d | %d | %s | %s | %s | %s | %s | %s | %s |\n" (name (:task r)) (:runs r) (:n r) (:close r)
+                             (str/join " " (:gaps r)) (fmt (:one-shot-s r)) (or (:tokens r) "–")
+                             (if (seq (:failures r)) (pr-str (:failures r)) "") (:repair r) (or (:repair-gap r) "–")
+                             (fmt (:repair-s r)))))
          "\n"
-         (format "One shot: %d of %d replies correct; %.0f s decoding, %.1f s a correct model.\n"
-                 (count (filter correct? one)) (count one) one-s
-                 (let [c (count (filter correct? one))] (if (pos? c) (/ one-s c) Double/NaN)))
-         (format "Repair: %d of %d chains correct (the first reply, or after up to 3 rounds); %.0f s decoding in rounds.\n"
-                 chains-fixed (count rows) repair-s))))
+         (format "One shot: %d of %d replies run, %d of them explain the data (%d unreliable to judge); %.0f s decoding: %.1f s a running model, %s a model that explains the data.\n"
+                 runs (count one) close unreliable one-s (if (pos? runs) (/ one-s runs) Double/NaN)
+                 (if (pos? close) (format "%.1f s" (/ one-s close)) "–"))
+         (format "Repair: %d of %d chains run (the first reply, or after up to 3 rounds), %d of them explain the data.\n"
+                 (count (filter #(not (str/starts-with? (:repair %) "no")) rows)) (count rows)
+                 (count (filter :repair-close? rows))))))
 
 (defn -main [& files]
   (doseq [f files]
