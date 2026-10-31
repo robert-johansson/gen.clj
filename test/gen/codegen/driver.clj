@@ -224,6 +224,7 @@
         think (tok "<think>\n\n</think>\n\n")
         head (tok (prompt/repl-head task evidence?))
         base (br/open e head)
+        n-ctx (long (:n-ctx (br/info e)))
         task-key (rng/fold-in (rng/key seed) (.indexOf ^java.util.List (mapv :id tasks/tasks) (:id task)))]
     (doseq [episode (range episodes)]
       (let [key (rng/fold-in task-key (+ 1000 episode))
@@ -243,8 +244,14 @@
             t0 (System/nanoTime)]
         (loop [conv (br/fork base) turn 1 log [] llm-s 0.0 tool-s 0.0 tokens 0]
           (let [t1 (System/nanoTime)
-                g (:branch (br/extend (br/fork conv) think))
-                [r] (try (generate g 1 turn-tokens eog sampling (rng/fold-in key turn)) (finally (br/dispose! g)))
+                ;; a turn's reply gets at most the room left in the context
+                budget (min (long turn-tokens) (- n-ctx (br/position conv) (count think) 16))
+                [r] (if (< budget 128)
+                      [{:tokens [] :stop :context-full}]
+                      (let [g (:branch (br/extend (br/fork conv) think))]
+                        (try (generate g 1 budget eog sampling (rng/fold-in key turn))
+                             (catch Exception _ [{:tokens [] :stop :context-full}])
+                             (finally (when (br/live? g) (br/dispose! g))))))
                 text (llama/detokenize e (:tokens r))
                 t2 (System/nanoTime)
                 calls (vec (prompt/tool-calls text))
@@ -279,7 +286,10 @@
                                             (name (:id task)) episode (clojure.core/name why) turn llm-s tool-s
                                             (let [st (first (remove :ok (:stages (:grading entry))))]
                                               (if (:grading submission) (or (:stage st) :passed) (:error (:grading entry))))))))]
-            (cond submitted (finish submitted :submitted)
+            (cond (= :context-full (:stop r))
+                  (let [s (call {:op :submit :session sid :name "model"})]
+                    (finish (when (:grading s) s) :context-full))
+                  submitted (finish submitted :submitted)
                   lost (finish nil :session-lost)
                   (>= turn turns) (let [s (call {:op :submit :session sid :name "model"})]
                                     (finish (when (:grading s) s) :turns))
@@ -290,7 +300,8 @@
                         next-conv (try (:branch (br/extend conv (-> think (into (:tokens r)) (into (tok (prompt/tool-turn texts))))))
                                        (catch Exception ex {::error (ex-message ex)}))]
                     (if (::error next-conv)
-                      (finish nil :context-full)
+                      (let [s (call {:op :submit :session sid :name "model"})]
+                        (finish (when (:grading s) s) :context-full))
                       (recur next-conv (inc turn) log llm-s tool-s tokens))))))))
     (br/dispose! base)))
 
