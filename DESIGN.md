@@ -3151,9 +3151,13 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   parity benchmarks. Arrays stay arrays (small ones in registers, large
   ones in memory under loops, data as inputs, so code does not grow with
   data); each missing op is added once, for every model; coverage is
-  measured over the battery's models (a census: on 2026-10-31, 158 of 286
-  stage and equal the handler bit for bit in float64, 71 need gathers, 57
-  branch on a draw), never over hand-picked ones; and a model that does
+  measured over the battery's models, for simulate, a constrained
+  generate and MALA's gradients and accepts (a census: on 2026-10-31,
+  of 286 models, simulate 158, generate 174 and MALA 94 of the 194 with
+  continuous latents stage and equal the handler bit for bit in float64,
+  149 all three; no mismatch; the rest need gathers or branch on a draw,
+  and a few need argmax or cholesky), never over hand-picked ones; and a
+  model that does
   not stage runs on the handler with its reason recorded, never with
   another result.
 
