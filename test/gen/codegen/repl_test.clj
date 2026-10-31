@@ -6,7 +6,9 @@
    said to be; a model that misses the data's addresses is told which."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [gen.codegen.repl :as repl]))
+            [gen.codegen.grade]
+            [gen.codegen.repl :as repl]
+            [gen.codegen.tasks]))
 
 (deftest ^:slow a-model-built-in-steps
   (let [{id :session :as o} (repl/open! :line)]
@@ -22,8 +24,8 @@
     (testing "the model, checked against the data and compared"
       (repl/eval! id "(def line
   (gen [xs]
-    (let [slope (trace :slope (d/normal 0 5))
-          intercept (trace :intercept (d/normal 0 5))]
+    (let [slope (trace :slope (d/normal 0 10))
+          intercept (trace :intercept (d/normal 0 10))]
       (doseq [[i x] (map-indexed vector xs)]
         (trace [:y i] (d/normal (+ (* slope x) intercept) 0.3))))))")
       (let [c (:text (repl/check! id "line"))]
@@ -37,5 +39,8 @@
     (testing "submitted: graded as the reference is, with the session's program"
       (let [{:keys [grading program]} (repl/submit! id "line")]
         (is (= 7 (:passed grading)) (pr-str (:stages grading)))
+        (is (= (get-in (gen.codegen.grade/grade (gen.codegen.tasks/by-id :line) (:answer (gen.codegen.tasks/by-id :line))) [:log-ml :candidate :median])
+               (get-in grading [:log-ml :reference :median]))
+            "the reference is the task's answer, not the submitted model")
         (is (str/includes? program "(def model line)"))
         (is (thrown? Exception (repl/eval! id "1")) "the session is closed")))))

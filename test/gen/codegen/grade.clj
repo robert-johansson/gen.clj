@@ -113,7 +113,8 @@
   [task opts]
   (let [k [(:id task) (select-keys opts [:particles :repeats :seed])]]
     (or (get @references k)
-        (let [g (grade task (:answer task) (assoc opts ::reference? true))
+        ;; the answer graded as code: never a candidate's model (grade-model's ::model)
+        (let [g (grade task (:answer task) (-> opts (dissoc ::model) (assoc ::reference? true)))
               v (or (get-in g [:log-ml :candidate])
                     (throw (ex-info (str "the answer of " (:id task) " does not grade: " (pr-str (:stages g))) g)))]
           (swap! references assoc k v)
