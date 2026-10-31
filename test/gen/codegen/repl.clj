@@ -141,6 +141,37 @@
                 (when (> (count leaves) 40) (str "\n… " (- (count leaves) 40) " more"))
                 "\nreturn value: " (show (:retval tr)))}))
 
+(defn- verdict
+  "Does any observation stand out, explained far worse (more than 5 nats
+   below the median) than the rest under the best particle? The stopping
+   rule's signal."
+  [scores]
+  (let [sorted (sort scores)
+        median (nth sorted (quot (count sorted) 2))
+        bad (count (filter #(< % (- median 5.0)) sorted))]
+    (if (zero? bad)
+      "No observation stands out: the model explains every observation about as well as the rest. Submit it, unless you have a reason in the description to change it."
+      (str bad " observation(s) are explained far worse than the rest (more than 5 nats below the median): the model misses something there."))))
+
+(defn evidence!
+  "The log marginal likelihood of the task's data under name, by the
+   grader's estimator."
+  [id name]
+  (let [gf (resolve-gf id name)
+        {:keys [median spread]} (grade/log-ml gf (:task (session id)) grade/defaults)]
+    {:text (str "log marginal likelihood " (show median) " (estimates spread " (show spread) " nats)")}))
+
+(defn submit!
+  "name graded as the task's model, the session's program kept, and the
+   session closed: {:text :grading :program}."
+  [id name]
+  (let [gf (resolve-gf id name)
+        {:keys [task program]} (session id)
+        g (grade/grade-model task gf)
+        program (str (str/join "\n\n" program) "\n\n(def model " name ")\n")]
+    (close! id)
+    {:text "submitted" :grading g :program program}))
+
 (defn check!
   "name run with the task's data as observations: importance sampling of
    1000 particles from its prior, the best particle's latent choices and
@@ -162,23 +193,5 @@
                  (when (> (count latents) 20) (str "\n… " (- (count latents) 20) " more"))
                  "\nIts worst-explained observations (log-probability, observed value):\n"
                  (str/join "\n" (map (fn [[p s]] (str (pr-str p) " " (show s) " (observed " (show (cm/get-choice observations p)) ")"))
-                                     (take 5 scored))))})))
-
-(defn evidence!
-  "The log marginal likelihood of the task's data under name, by the
-   grader's estimator."
-  [id name]
-  (let [gf (resolve-gf id name)
-        {:keys [median spread]} (grade/log-ml gf (:task (session id)) grade/defaults)]
-    {:text (str "log marginal likelihood " (show median) " (estimates spread " (show spread) " nats)")}))
-
-(defn submit!
-  "name graded as the task's model, the session's program kept, and the
-   session closed: {:text :grading :program}."
-  [id name]
-  (let [gf (resolve-gf id name)
-        {:keys [task program]} (session id)
-        g (grade/grade-model task gf)
-        program (str (str/join "\n\n" program) "\n\n(def model " name ")\n")]
-    (close! id)
-    {:text "submitted" :grading g :program program}))
+                                     (take 5 scored)))
+                 "\n" (verdict (map second scored)))})))

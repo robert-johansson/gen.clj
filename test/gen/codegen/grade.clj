@@ -57,12 +57,13 @@
             [gen.combinators :as comb]
             [gen.gfi :as gfi]
             [gen.inference.importance :as is]
+            [gen.inference.tempering :as tempering]
             [gen.laws :as laws]
             [gen.random :as rng]))
 
 (def defaults
   {:timeout-ms 300000 :particles 20000 :repeats 3 :law-tests 10 :seed 1 :gate-explains? false
-   :repair-delimiters? true :device nil})
+   :repair-delimiters? true :device nil :estimator :auto :tempered-particles 200})
 
 (def max-spread
   "Nats: estimates of a log marginal likelihood that spread more than this
@@ -86,7 +87,33 @@
 
 (defn- median [xs] (nth (sort xs) (quot (count xs) 2)))
 
+(defn- tempered-log-ml
+  "The log marginal likelihood by tempered SMC (gen.inference.tempering):
+   :repeats runs of :tempered-particles particles."
+  [model task {:keys [repeats seed tempered-particles]}]
+  (let [estimates (mapv (fn [r]
+                          (:log-ml-estimate (tempering/smc model (:args task) (:observations task)
+                                                           {:particles tempered-particles
+                                                            :key (rng/fold-in (rng/key seed) (+ 100 r))})))
+                        (range repeats))]
+    {:median (median estimates) :estimates estimates :spread (- (apply max estimates) (apply min estimates))
+     :path :tempered :particles tempered-particles}))
+
+(declare importance-log-ml)
+
 (defn log-ml
+  "The log marginal likelihood of task's data under model, by :estimator:
+   :importance (importance-log-ml), :tempered (tempered-log-ml), or :auto
+   (importance sampling, then tempered SMC when its estimates spread more
+   than max-spread)."
+  [model task {:keys [estimator] :or {estimator :auto} :as opts}]
+  (case estimator
+    :importance (importance-log-ml model task opts)
+    :tempered (tempered-log-ml model task opts)
+    :auto (let [r (importance-log-ml model task opts)]
+            (if (> (:spread r) max-spread) (tempered-log-ml model task opts) r))))
+
+(defn importance-log-ml
   "The log marginal likelihood of task's data under model: {:median
    :estimates :spread :path :particles}, :repeats importance-sampling
    estimates of :particles particles each (the task's :particles, if it
@@ -125,7 +152,7 @@
   "The log marginal likelihood of task's data under its answer (cached by
    task and options)."
   [task opts]
-  (let [k [(:id task) (select-keys opts [:particles :repeats :seed :device])]]
+  (let [k [(:id task) (select-keys opts [:particles :repeats :seed :device :estimator :tempered-particles])]]
     (or (get @references k)
         ;; the answer graded as code: never a candidate's model (grade-model's ::model)
         (let [g (grade task (:answer task) (-> opts (dissoc ::model) (assoc ::reference? true)))

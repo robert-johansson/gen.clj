@@ -31,7 +31,7 @@
    (1), codegen.n-ctx (16384), codegen.temp, codegen.top-p and
    codegen.top-k (default-sampling's). codegen.mode repl runs the REPL
    agent (run-repl-task, genclj-t1xh): codegen.episodes (2), codegen.turns
-   (30), codegen.turn-tokens (1024), codegen.evidence (true; false leaves
+   (40; the last five turns are told how many are left), codegen.turn-tokens (1024), codegen.evidence (true; false leaves
    out the evidence tool and check's log marginal likelihood)."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
@@ -294,9 +294,12 @@
                   (>= turn turns) (let [s (call {:op :submit :session sid :name "model"})]
                                     (finish (when (:grading s) s) :turns))
                   :else
-                  (let [texts (if (seq calls)
-                                (mapv :text responses)
-                                ["No tool call in your reply: call one of the tools."])
+                  (let [left (- turns turn)
+                        texts (cond-> (if (seq calls)
+                                        (mapv :text responses)
+                                        ["No tool call in your reply: call one of the tools."])
+                                (<= left 5) (conj (str left " turn" (when (not= 1 left) "s") " left: submit your best model "
+                                                       (if (<= left 2) "now." "soon."))))
                         next-conv (try (:branch (br/extend conv (-> think (into (:tokens r)) (into (tok (prompt/tool-turn texts))))))
                                        (catch Exception ex {::error (ex-message ex)}))]
                     (if (::error next-conv)
@@ -326,7 +329,7 @@
         (doseq [id ids]
           (if (= "repl" (prop "mode" "one-shot"))
             (run-repl-task e (tasks/by-id id)
-                           (assoc opts :episodes (parse-long (prop "episodes" "2")) :turns (parse-long (prop "turns" "30"))
+                           (assoc opts :episodes (parse-long (prop "episodes" "2")) :turns (parse-long (prop "turns" "40"))
                                   :turn-tokens (parse-long (prop "turn-tokens" "1024"))
                                   :evidence? (not= "false" (prop "evidence" "true")))
                            #(request! g command log % 900000) record!)
