@@ -66,14 +66,16 @@
   (-backend [_] backend)
   Object
   (toString [_] (str "#staged[" id " " dtype " " shape "]"))
-  ;; clojure.core/= on a staged value and a number is a host read in
-  ;; disguise: (= k 0) in plain Clojure would answer false for every run
-  ;; (genclj-ryg0's census found one), so it is loud. Two staged values
-  ;; compare by identity, as the graph's own maps need.
+  ;; clojure.core/= on a 0-d staged value and a host number or boolean is
+  ;; a host read in disguise: (= k 0) in plain Clojure would answer false
+  ;; for every run (genclj-ryg0's census found one), so it is loud, as for
+  ;; a 0-d MLX array (DESIGN §9, genclj-8rdm). Every other comparison is
+  ;; false; two staged values compare by identity, as the graph's maps need.
   (equals [this o]
     (cond (identical? this o) true
-          (instance? Staged o) false
-          :else (host-read! "clojure.core/= on a staged value")))
+          (and (= [] shape) (or (instance? Number o) (instance? Boolean o)))
+          (host-read! "clojure.core/= on a staged value")
+          :else false))
   (hashCode [this] (System/identityHashCode this)))
 
 (defmethod print-method Staged [^Staged x ^java.io.Writer w] (.write w (.toString x)))

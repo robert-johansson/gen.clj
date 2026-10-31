@@ -215,4 +215,8 @@
 
 (deftest equality-on-a-staged-value-is-loud
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"clojure.core/= on a staged value"
-                        (st/stage (fn [key] {:x (if (= (array/argmax (gen.random/uniform key [3])) 0) 1.0 2.0)}) (st/key-spec)))))
+                        (st/stage (fn [key] {:x (if (= (array/argmax (gen.random/uniform key [3])) 0) 1.0 2.0)}) (st/key-spec))))
+  (testing "a keyword or nil is unequal, as on the JVM backend"
+    (is (some? (st/stage (fn [key] (let [k (array/argmax (gen.random/uniform key [3]))]
+                                     {:x (if (or (= k :missing) (= k nil)) 1.0 2.0)}))
+                         (st/key-spec))))))
