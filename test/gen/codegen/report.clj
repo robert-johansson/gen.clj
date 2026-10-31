@@ -115,7 +115,36 @@
                  (count (filter #(not (str/starts-with? (:repair %) "no")) rows)) (count rows)
                  (count (filter :repair-close? rows))))))
 
+(defn repl-summary
+  "The REPL agent's episodes (genclj-t1xh), as Markdown: per task, how
+   many episodes submitted a model that runs and one that explains the
+   data, their gaps, turns and seconds (the LLM's, the tools')."
+  [entries]
+  (let [eps (filter #(= :repl (:mode %)) entries)
+        rows (for [t tasks/tasks :let [es (filter #(= (:id t) (:task %)) eps)] :when (seq es)]
+               {:task (:id t) :n (count es)
+                :runs (count (filter correct? es)) :close (count (filter close? es))
+                :gaps (mapv gap-text (filter correct? es))
+                :turns (mapv :turns es) :stops (mapv :stop es)
+                :llm-s (reduce + (map :seconds es)) :tool-s (reduce + (map :tool-seconds es))
+                :failures (frequencies (remove #{:correct} (map (comp reached :grading) es)))})]
+    (when (seq rows)
+      (str "REPL agent: evidence tool " (if (:evidence? (first eps)) "on" "off") "; sampling " (pr-str (:sampling (first eps))) "\n\n"
+           "| task | episodes run | explain | gaps | turns | how they ended | LLM s | tool s | failures |\n"
+           "|---|---|---|---|---|---|---|---|---|\n"
+           (str/join (for [r rows]
+                       (format "| %s | %d/%d | %d | %s | %s | %s | %s | %s | %s |\n" (name (:task r)) (:runs r) (:n r) (:close r)
+                               (str/join " " (:gaps r)) (str/join " " (:turns r)) (str/join " " (map name (:stops r)))
+                               (fmt (:llm-s r)) (fmt (:tool-s r)) (if (seq (:failures r)) (pr-str (:failures r)) ""))))
+           (let [runs (reduce + (map :runs rows)) close (reduce + (map :close rows)) n (reduce + (map :n rows))
+                 s (reduce + (map :llm-s rows))]
+             (format "\n%d of %d episodes run, %d explain the data; %.0f s of LLM time, %s an explaining model.\n"
+                     runs n close s (if (pos? close) (format "%.0f s" (/ s close)) "–")))))))
+
 (defn -main [& files]
-  (doseq [f files]
-    (println (summary (read-results f))))
+  (doseq [f files
+          :let [entries (read-results f)]]
+    (if (some #(= :repl (:mode %)) entries)
+      (println (repl-summary entries))
+      (println (summary entries))))
   (shutdown-agents))
