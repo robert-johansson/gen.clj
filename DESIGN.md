@@ -3205,6 +3205,22 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
      against their expected number; statistics checked against the
      handler. Whether the JVM path runs float64 by default is the
      epic's decision 7, still open.
+- **Tempered SMC, a log marginal likelihood for any model (proposed
+  2026-11-01, at the owner's request; genclj-87x1).** A new experimental
+  namespace, gen.inference.tempering, built on the GFI alone (no new
+  combinator): targets p(x) L(x)^β, L the observations' density read by
+  project; β chosen adaptively (half the effective sample size kept);
+  systematic resampling every step; moves by single-site
+  Metropolis-Hastings on the tempered target, each move's weight less
+  (1 - β) Δ log L: regenerations from the prior (global, discrete) and,
+  for continuous latents, normal random walks scaled by the address's
+  spread across the particles (a walk that changes the structure is
+  rejected). Prior regenerations alone were measured to fail a
+  posterior 45000 times narrower than its prior. One particle at a time
+  for now. Why: importance sampling from the prior cannot judge a model
+  whose posterior is far from its prior (the codegen bake-off's
+  changepoint), and comparing synthesized models by evidence needs it
+  (genclj-zjz7).
 ## 10. Deferred (tracked, not forgotten)
 
 `beans list --tag deferred-port` lists every GenMLX area left out of M1–M4, each

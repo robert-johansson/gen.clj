@@ -1,0 +1,190 @@
+(ns gen.inference.tempering
+  "Tempered sequential Monte Carlo, adaptive annealing from the prior to the
+   posterior: the log marginal likelihood of observations under a
+   generative function, and particles of its posterior. It works where
+   importance sampling from the prior fails (a posterior far from the
+   prior) and for models whose structure varies (regenerate handles fresh
+   and discarded choices).
+
+     (smc model args observations)          → {:log-ml-estimate :traces :betas …}
+     (smc model args observations opts)
+
+   The targets are π_β(x) ∝ p(x) L(x)^β for β from 0 to 1, L the
+   observations' density (gfi/project with their selection): π_0 is the
+   latent choices' prior, π_1 their posterior. The particles start as
+   generate's traces with the observations. Each step
+   - picks the next β by bisection, so that the incremental weights
+     (β' - β) log L keep :target-ess of the particles' effective sample
+     size (all the way to 1 when they can);
+   - adds their log mean to the estimate, and resamples (systematic);
+   - moves every particle by :sweeps sweeps of single-site
+     Metropolis-Hastings on π_β', each move's weight less (1 - β') Δ log L,
+     which leaves π_β' invariant: each latent address of the particle's
+     trace regenerated from its prior (global moves, discrete choices),
+     and a continuous one also moved by a normal random walk whose scale
+     is that address's spread across the particles (local moves, which a
+     posterior far narrower than its prior needs); a walk that would
+     change the trace's structure is rejected.
+   The estimate's exponential, the marginal likelihood, is unbiased.
+
+   opts: :particles (200), :sweeps (2), :target-ess (0.5, a fraction of the
+   particles), :max-steps (1000; a loud error past it), :key. The result
+   also holds :steps, :ess (each step's effective sample size before it
+   resamples) and :acceptance (each step's acceptance rate of the moves).
+
+   A particle runs one at a time (the moves are regenerates of traces);
+   the weights are read on the host at each step, the inference loop's
+   boundary."
+  {:api :experimental}
+  (:require [gen.array :as array]
+            [gen.choicemap :as cm]
+            [gen.gfi :as gfi]
+            [gen.inference.weights :as w]
+            [gen.random :as rng]
+            [gen.selection :as sel]))
+
+(set! *warn-on-reflection* true)
+
+(defn- host ^double [x] (double (array/item x)))
+
+(defn- uniform ^double [key] (host (rng/uniform key)))
+
+(defn- step-weights
+  "Each particle's log weight lw plus (b - beta) log L."
+  [lw ls ^double beta ^double b]
+  (let [d (- b beta)]
+    (mapv (fn [^double lwi ^double l] (if (zero? d) lwi (+ lwi (* d l)))) lw ls)))
+
+(defn- next-beta
+  "The largest b in (beta, 1] whose incremental weights keep target of the
+   n particles' effective sample size; 1 when it does."
+  ^double [lw ls ^double beta ^double target]
+  (let [ok? (fn [^double b] (>= (w/ess (step-weights lw ls beta b)) target))]
+    (if (ok? 1.0)
+      1.0
+      (loop [lo beta hi 1.0 i 0]
+        (if (or (= i 60) (< (- hi lo) 1e-12))
+          (max lo (+ beta 1e-12))
+          (let [mid (* 0.5 (+ lo hi))]
+            (if (ok? mid) (recur mid hi (inc i)) (recur lo mid (inc i)))))))))
+
+(defn- latents
+  "The paths of a trace's choices that are not observed."
+  [trace observed]
+  (into [] (comp (map first) (remove observed)) (cm/leaves (:choices trace))))
+
+(defn- addresses [trace] (into #{} (map first) (cm/leaves (:choices trace))))
+
+(defn- continuous? [v]
+  (or (float? v) (and (array/backend-array? v) (= :float (array/dtype-kind (array/dtype v))))))
+
+(defn- scales
+  "Each continuous latent address's random-walk scale: the spread of its
+   values across the particles that have it (elementwise for an array),
+   floored at 1e-6."
+  [traces observed]
+  (let [values (reduce (fn [m t]
+                         (reduce (fn [m [p v]] (if (and (not (observed p)) (continuous? v)) (update m p (fnil conj []) v) m))
+                                 m (cm/leaves (:choices t))))
+                       {} traces)]
+    (into {} (keep (fn [[p vs]]
+                     (when (and (>= (count vs) 2) (apply = (map array/shape vs)))
+                       [p (array/maximum (array/std (array/stack vs) {:axis 0}) 1e-6)])))
+          values)))
+
+(defn- accept?
+  "Metropolis-Hastings on π_beta: the move's log weight w (log p ratio less
+   the proposal's), less (1 - beta) times its change in log L."
+  [w l l' beta key]
+  (let [a (- (host w) (* (- 1.0 (double beta)) (- (double l') (double l))))]
+    (and (not (Double/isNaN a)) (< (Math/log (uniform key)) a))))
+
+(defn- regenerate-move
+  "The latent at a resampled from the model's internal proposal (its
+   prior): [trace l accepted?]."
+  [t l beta obs-sel a key]
+  (let [[k1 k2] (rng/split key)
+        {t' :trace wt :weight} (gfi/regenerate t (sel/from-paths [a]) k1)
+        l' (host (gfi/project t' obs-sel))]
+    (if (accept? wt l l' beta k2) [t' l' true] [t l false])))
+
+(defn- walk-move
+  "The continuous latent at a moved by a normal random walk of scale eps (a
+   symmetric proposal, so the update's weight is the log p ratio); a move
+   that changes the trace's structure is rejected, which keeps the kernel
+   reversible: [trace l accepted?]."
+  [t l beta obs-sel a eps key]
+  (let [[k1 k2 k3] (rng/split key 3)
+        x (cm/get-choice (:choices t) a)
+        x' (array/+ x (array/* eps (rng/normal k1 (array/shape x))))
+        {t' :trace wt :weight} (gfi/update t (cm/set-choice cm/EMPTY a x') k2)]
+    (if (not= (addresses t) (addresses t'))
+      [t l false]
+      (let [l' (host (gfi/project t' obs-sel))]
+        (if (accept? wt l l' beta k3) [t' l' true] [t l false])))))
+
+(defn- move
+  "One particle's sweeps on π_beta, from trace with observations' log
+   density l: each latent address regenerated from its prior, and a
+   continuous one also moved by a random walk of its scale in eps (when it
+   has one): [trace l accepted proposed]."
+  [trace l beta observed obs-sel eps sweeps key]
+  (reduce
+   (fn [[t l acc tried] [s j a]]
+     (if-not (contains? (addresses t) a)
+       [t l acc tried]
+       (let [k (rng/fold-in (rng/fold-in key s) j)
+             [k1 k2] (rng/split k)
+             [t l ok1] (regenerate-move t l beta obs-sel a k1)
+             e (when (continuous? (cm/get-choice (:choices t) a)) (eps a))
+             [t l ok2] (if e (walk-move t l beta obs-sel a e k2) [t l nil])]
+         [t l (+ acc (if ok1 1 0) (if ok2 1 0)) (+ tried 1 (if e 1 0))])))
+   [trace (double l) 0 0]
+   (for [s (range sweeps) [j a] (map-indexed vector (latents trace observed))] [s j a])))
+
+(defn smc
+  "Tempered SMC of model on args, conditioned on observations (a choice
+   map): {:log-ml-estimate :traces :betas :steps :ess :acceptance}. See
+   the namespace's docstring."
+  ([model args observations] (smc model args observations nil))
+  ([model args observations {:keys [particles sweeps target-ess max-steps key]
+                             :or {particles 200 sweeps 2 target-ess 0.5 max-steps 1000}}]
+   (let [n (long particles)
+         key (or key (gfi/next-key))
+         observed (set (map first (cm/leaves observations)))
+         obs-sel (sel/from-paths observed)
+         _ (when (empty? observed)
+             (throw (ex-info "tempering/smc: no observations; the marginal likelihood is 1" {})))
+         starts (mapv #(gfi/generate model args observations %) (rng/split (rng/fold-in key 0) n))
+         traces (mapv :trace starts)
+         ls (mapv #(host (gfi/project % obs-sel)) traces)
+         ;; generate's weight less log L: zero for a model that samples its
+         ;; latent choices from their prior, as gen does
+         lw (mapv (fn [{:keys [weight]} ^double l] (- (host weight) l)) starts ls)
+         _ (when (every? #(== ##-Inf %) ls)
+             (throw (ex-info "tempering/smc: every particle gives the observations probability 0" {:particles n})))
+         target (* (double target-ess) n)]
+     (loop [step 1 beta 0.0 traces traces ls ls lw lw
+            log-z (- (w/log-sum-exp lw) (Math/log n)) betas [0.0] ess [] acceptance []]
+       (when (> step max-steps)
+         (throw (ex-info (str "tempering/smc: β reached only " beta " after " max-steps " steps") {:beta beta :steps max-steps})))
+       (let [b (next-beta lw ls beta target)
+             inc-w (step-weights lw ls beta b)
+             log-z (+ log-z (- (w/log-sum-exp inc-w) (w/log-sum-exp lw)))
+             step-key (rng/fold-in key step)
+             [k-resample k-move] (rng/split step-key)
+             idx (w/resample :systematic inc-w n k-resample)
+             traces (mapv traces idx)
+             ls (mapv ls idx)
+             eps (scales traces observed)
+             moved (mapv (fn [i t l] (move t l b observed obs-sel eps sweeps (rng/fold-in k-move i))) (range n) traces ls)
+             tried (reduce + (map #(nth % 3) moved))
+             accepted (reduce + (map #(nth % 2) moved))
+             traces (mapv first moved)
+             ls (mapv second moved)
+             betas (conj betas b)
+             ess (conj ess (w/ess inc-w))
+             acceptance (conj acceptance (if (pos? tried) (/ (double accepted) tried) 0.0))]
+         (if (>= b 1.0)
+           {:log-ml-estimate log-z :traces traces :betas betas :steps step :ess ess :acceptance acceptance}
+           (recur (inc step) b traces ls (vec (repeat n 0.0)) log-z betas ess acceptance)))))))
