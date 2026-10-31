@@ -3161,6 +3161,15 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   not stage runs on the handler with its reason recorded, never with
   another result.
 
+- **Device programs: an out-of-range gather index is the handler's error
+  (owner, 2026-10-31; genclj-8x5p).** Compiled code cannot throw in the
+  middle of a run, so each run records a flag when a gather's index falls
+  outside its axis (reading a clamped index meanwhile, to stay in bounds),
+  and the entry point checks the flags after the run: it runs the first
+  flagged run's staged function on the handler from that run's key, so
+  the error is the handler's own; when the handler does not throw, a
+  generic error names the run. A run that hit a bad index returns no
+  results.
 ## 10. Deferred (tracked, not forgotten)
 
 `beans list --tag deferred-port` lists every GenMLX area left out of M1–M4, each
