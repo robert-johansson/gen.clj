@@ -45,6 +45,18 @@
   (when (and (correct? entry) (gap entry) (reliable? entry))
     (>= (gap entry) (- (tasks/tolerance (tasks/by-id (:task entry)))))))
 
+(defn wilson
+  "The 95% Wilson interval of k successes of n, as percentages [low high].
+   Replies to one task succeed or fail together more than independent
+   draws would, so the interval is narrower than the truth."
+  [k n]
+  (if (zero? n)
+    [0 100]
+    (let [z 1.96 p (/ (double k) n) d (+ 1 (/ (* z z) n))
+          c (/ (+ p (/ (* z z) (* 2 n))) d)
+          h (/ (* z (Math/sqrt (+ (/ (* p (- 1 p)) n) (/ (* z z) (* 4 n n))))) d)]
+      [(Math/round (* 100 (- c h))) (Math/round (* 100 (+ c h)))])))
+
 (defn- fmt [x] (if (number? x) (format "%.1f" (double x)) "–"))
 
 (defn- gap-text
@@ -94,8 +106,9 @@
                              (if (seq (:failures r)) (pr-str (:failures r)) "") (:repair r) (or (:repair-gap r) "–")
                              (fmt (:repair-s r)))))
          "\n"
-         (format "One shot: %d of %d replies run, %d of them explain the data (%d unreliable to judge); %.0f s decoding: %.1f s a running model, %s a model that explains the data.\n"
-                 runs (count one) close unreliable one-s (if (pos? runs) (/ one-s runs) Double/NaN)
+         (format "One shot: %d of %d replies run (95%% interval %s%%), %d of them explain the data (%s%%; %d unreliable to judge); %.0f s decoding: %.1f s a running model, %s a model that explains the data. The intervals treat replies as independent: replies to one task are not, so they are too narrow.\n"
+                 runs (count one) (str/join "–" (wilson runs (count one))) close (str/join "–" (wilson close (count one)))
+                 unreliable one-s (if (pos? runs) (/ one-s runs) Double/NaN)
                  (if (pos? close) (format "%.1f s" (/ one-s close)) "–"))
          (format "Of the one-shot replies that run, %d did so with their delimiters rebuilt from their indentation.\n" repaired)
          (format "Repair: %d of %d chains run (the first reply, or after up to 3 rounds), %d of them explain the data.\n"
