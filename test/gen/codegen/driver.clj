@@ -11,7 +11,7 @@
    not fed back (gen.codegen.grade's :gate-explains?, off).
 
    Tokens are sampled as Qwen's GGUFs say (temperature 1, top-k 20, top-p
-   0.95), from the Branching protocol's next-token log-probabilities, with
+   0.95) unless the options say otherwise, from the Branching protocol's next-token log-probabilities, with
    gen.random keys: the run is a function of its seed (and llama.cpp's
    float noise). The prompt is read once per task: its branch is forked
    for each reply, and a repair turn extends the conversation's tokens
@@ -28,7 +28,8 @@
    directory), codegen.grader (the grader's command, split at spaces),
    codegen.k (4), codegen.rounds (3), codegen.max-tokens (1024),
    codegen.tasks (task ids, comma-separated; all by default), codegen.seed
-   (1), codegen.n-ctx (16384)."
+   (1), codegen.n-ctx (16384), codegen.temp, codegen.top-p and
+   codegen.top-k (default-sampling's)."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -42,7 +43,12 @@
 
 (set! *warn-on-reflection* true)
 
-(def sampling {:temp 1.0 :top-k 20 :top-p 0.95})
+(def default-sampling
+  "Qwen's GGUFs' (general.sampling): its thinking mode's. Its model card
+   has thinking off at temperature 0.7, top-p 0.8, top-k 20 (and a
+   presence penalty of 1.5, not applied: it lowers every token already
+   used, closing parentheses among them)."
+  {:temp 1.0 :top-k 20 :top-p 0.95})
 
 (def hard-stages #{:read :safe :evaluates :simulates :accepts-data})
 
@@ -86,7 +92,7 @@
   "n replies continuing branch base (left live), each up to max-tokens,
    decoded together, reply i's draws from (fold-in (split key n)[i] step):
    [{:tokens (without the end token) :stop (:end or :max)}]."
-  [base n max-tokens eog key]
+  [base n max-tokens eog sampling key]
   (let [ks (rng/split key n)]
     (loop [live (mapv vector (range n) (br/fork base n)) toks (vec (repeat n [])) stops {} step 0]
       (if (empty? live)
@@ -150,7 +156,7 @@
 
 (defn run-task
   "One task's replies and gradings, each passed to record!."
-  [e task {:keys [k rounds max-tokens seed eog]} grade record!]
+  [e task {:keys [k rounds max-tokens seed eog sampling]} grade record!]
   (let [tok (fn [text] (llama/tokenize e text {:add-special? false :parse-special? true}))
         think-text "<think>\n\n</think>\n\n"
         chat (prompt/chat [[:system (prompt/system-message)] [:user (prompt/task-message task)]])
@@ -164,13 +170,13 @@
         reply (fn [branch n key]
                 (let [t0 (System/nanoTime)
                       g (:branch (br/extend (br/fork branch) think))
-                      rs (try (generate g n max-tokens eog key) (finally (br/dispose! g)))]
+                      rs (try (generate g n max-tokens eog sampling key) (finally (br/dispose! g)))]
                   (mapv #(assoc % :seconds (/ (- (System/nanoTime) t0) 1e9)) rs)))
         graded (fn [mode i round r]
                  (let [text (llama/detokenize e (:tokens r))
                        grading (grade (:id task) (candidate/code-of text))
                        entry {:task (:id task) :mode mode :reply i :round round :tokens (count (:tokens r))
-                              :prompt-tokens (count head) :stop (:stop r) :seconds (:seconds r) :text text
+                              :prompt-tokens (count head) :sampling sampling :stop (:stop r) :seconds (:seconds r) :text text
                               :grading grading}]
                    (record! entry)
                    (assoc entry :ids (:tokens r))))
@@ -197,7 +203,10 @@
         out (io/file (prop "out" "tmp/codegen"))
         command (str/split (prop "grader" "clojure -M:test -m gen.codegen.server") #" ")
         opts {:k (parse-long (prop "k" "4")) :rounds (parse-long (prop "rounds" "3"))
-              :max-tokens (parse-long (prop "max-tokens" "1024")) :seed (parse-long (prop "seed" "1"))}
+              :max-tokens (parse-long (prop "max-tokens" "1024")) :seed (parse-long (prop "seed" "1"))
+              :sampling {:temp (parse-double (prop "temp" (str (:temp default-sampling))))
+                         :top-p (parse-double (prop "top-p" (str (:top-p default-sampling))))
+                         :top-k (parse-long (prop "top-k" (str (:top-k default-sampling))))}}
         ids (if-let [t (prop "tasks" nil)] (mapv keyword (str/split t #",")) (mapv :id tasks/tasks))
         _ (.mkdirs out)
         results (io/file out "results.edn")
