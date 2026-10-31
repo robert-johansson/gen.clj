@@ -3145,6 +3145,17 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   backend) or to float32 rounding. The XLA prototype's many-chain
   program (`chain/mala-chains-run`, gen.batched's draws) moves to
   per-chain keys if that target is taken up.
+- **Device programs work for every model, sustainably (owner,
+  2026-10-31; genclj-8x5p).** "We want something that really works in a
+  sustainable way for all models": the device path is not tuned to the
+  parity benchmarks. Arrays stay arrays (small ones in registers, large
+  ones in memory under loops, data as inputs, so code does not grow with
+  data); each missing op is added once, for every model; coverage is
+  measured over the battery's models (a census: on 2026-10-31, 158 of 286
+  stage and equal the handler bit for bit in float64, 71 need gathers, 57
+  branch on a draw), never over hand-picked ones; and a model that does
+  not stage runs on the handler with its reason recorded, never with
+  another result.
 
 ## 10. Deferred (tracked, not forgotten)
 
