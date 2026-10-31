@@ -157,7 +157,7 @@
         ;; the conversation up to the assistant's turn, without its think block
         head (tok (subs chat 0 (- (count chat) (count think-text))))
         think (tok think-text)
-        key (rng/fold-in (rng/key seed) (hash (:id task)))
+        key (rng/fold-in (rng/key seed) (.indexOf ^java.util.List (mapv :id tasks/tasks) (:id task)))
         t0 (System/nanoTime)
         base (br/open e head)
         read-s (/ (- (System/nanoTime) t0) 1e9)
