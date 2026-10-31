@@ -57,7 +57,16 @@
 (deftest ^:slow a-planted-fault-stops-at-its-stage
   (doseq [[stage id code] planted]
     (testing [stage code]
-      (is (= stage (stopped-at (g/grade (tasks/by-id id) code))))))
+      (is (= stage (stopped-at (g/grade (tasks/by-id id) code {:gate-explains? true}))))))
+  (testing "a leading ns form (the prelude copied) is dropped"
+    (let [r (g/grade (tasks/by-id :line) (str "(ns candidate (:require [gen.dist :as d]))\n" line))]
+      (is (= 7 (:passed r)))
+      (is (:dropped-ns (first (:stages r))))))
+  (testing "without the gate, a model that explains the data badly passes with a warning"
+    (let [r (g/grade (tasks/by-id :line) (str/replace line "(+ (* slope x) intercept)" "intercept"))]
+      (is (= 7 (:passed r)))
+      (is (some #(re-find #"nats worse" %) (:warnings r)))
+      (is (< (:gap (:log-ml r)) -100))))
   (testing "an impure model (clojure.core's rand) passes on with law warnings"
     (let [t (tasks/by-id :spread)
           r (g/grade t (str/replace (:answer t) "(d/normal mu " "(d/normal (+ mu (rand)) "))]

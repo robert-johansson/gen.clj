@@ -3,7 +3,9 @@
    genclj-ihc4): stages in order, the grading stopping at the first that
    fails.
 
-     :read          the code reads (gen.codegen.candidate/read-forms)
+     :read          the code reads (gen.codegen.candidate/read-forms); a
+                    leading ns form is dropped (:dropped-ns), the prelude
+                    being the namespace
      :safe          it uses no forbidden name (candidate/forbidden)
      :evaluates     it evaluates under the prelude and defines model, a
                     generative function
@@ -17,8 +19,13 @@
                     scores (correct models with scores in the thousands fail
                     it by 1e-11; genclj-ihc4's notes)
      :explains      its log marginal likelihood of the data, by importance
-                    sampling from the prior, is within the task's tolerance
-                    below the reference's (the task's answer, graded alike);
+                    sampling from the prior, against the reference's (the
+                    task's answer, graded alike): the gap is reported, and
+                    falling more than the task's tolerance below is a
+                    warning, or a failure with :gate-explains? (off by
+                    default: a marginal likelihood also falls with wider
+                    priors, ~0.7 nats a well-measured parameter whose range
+                    doubles, so the cutoff is the owner's to set);
                     when either estimate spreads more than max-spread nats
                     across its repeats, the gap is reported with a warning,
                     not compared (the changepoint task's prior is too far from
@@ -50,7 +57,7 @@
             [gen.random :as rng]))
 
 (def defaults
-  {:timeout-ms 300000 :particles 20000 :repeats 3 :law-tests 10 :seed 1})
+  {:timeout-ms 300000 :particles 20000 :repeats 3 :law-tests 10 :seed 1 :gate-explains? false})
 
 (def max-spread
   "Nats: estimates of a log marginal likelihood that spread more than this
@@ -120,7 +127,11 @@
    (let [{:keys [timeout-ms law-tests seed] :as opts} (merge defaults opts)
          {:keys [args observations]} task
          state (volatile! {})
-         stages [[:read #(do (vswap! state assoc :forms (candidate/read-forms code)) {})]
+         stages [[:read #(let [forms (candidate/read-forms code)
+                               ns? (and (seq? (first forms)) (= 'ns (ffirst forms)))]
+                           ;; a leading ns form, the prelude copied, is dropped: the prelude is the namespace
+                           (vswap! state assoc :forms (if ns? (vec (rest forms)) forms))
+                           (if ns? {:dropped-ns true} {}))]
                  [:safe #(let [f (candidate/forbidden (:forms @state))]
                            (when (seq f) (throw (ex-info (str "forbidden names: " (pr-str f)) {})))
                            {})]
@@ -152,7 +163,8 @@
                                          {:warnings [(format "the log marginal likelihoods (gap %.1f nats) spread %.1f and %.1f nats: not compared"
                                                              gap (:spread c) (:spread r))]}
                                          (< gap (- (tasks/tolerance task)))
-                                         (throw (ex-info (format "explains the data %.1f nats worse than the reference" (- gap)) {}))
+                                         (let [m (format "explains the data %.1f nats worse than the reference" (- gap))]
+                                           (if (:gate-explains? opts) (throw (ex-info m {})) {:warnings [m]}))
                                          :else {}))))]]
          results (reduce (fn [done [name check]]
                            (let [r (stage name timeout-ms check)]
