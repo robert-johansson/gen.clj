@@ -28,8 +28,8 @@ All work is tracked in beans (`.beans/`, a private git repo synced by hooks; see
 
 ```
 clojure -M:test:dev                   # a REPL with the test loop: (t) after each change (dev/user.clj)
-clojure -X:test:fast:par              # without the ^:slow statistical tests, in 5 JVMs, ~50 s
-clojure -X:test:par                   # every test (clojure.test + test.check), in 5 JVMs, ~2.5 min
+clojure -X:test:fast:par              # without the ^:slow statistical tests, in 5 JVMs, ~1 min
+clojure -X:test:par                   # every test (clojure.test + test.check, the book), in 5 JVMs, ~6 min
 clojure -X:test:fast                  # the same in one JVM (also any backend), ~1.5 min
 clojure -X:test                       # every test in one JVM, ~7 min
 clojure -X:test:conformance           # the backend conformance suite (array level)
@@ -37,6 +37,8 @@ clojure -X:test :patterns '["gen.book.*"]'   # the book (book/): every chapter r
 clojure -M:test -m gen.book sync      # write the book's includes (from book/src) and figures
 clojure -M:test -m gen.book pdf       # the book as a PDF (pandoc, xelatex, rsvg-convert): target/book/
 clojure -X:test:commons-math          # also the Commons Math extension (ext/commons-math)
+clojure -X:test:bench:device :dirs '["ext/device/test"]'   # the device lowerings (ext/device: JVM code; Metal with -J-Dgen.backend=mlx; CUDA C with -J-Dgen.cuda.nvrtc=<libnvrtc.so>)
+clojure -M:test:bench:device -i ext/device/test/gen/device/census.clj   # the device census: every law-test model staged, lowered and compared with the handler
 clojure -M:laws                       # a REPL with gen.clj and its laws (ext/laws, in :test too), as a dependent gets them
 clojure -J-Dgen.backend=mlx -X:test   # any suite on the MLX backend (add -J-Dgen.mlx.device=cpu|gpu, -J-Dgen.mlx.dtypes=64)
 clojure -M:bench -m gen.array-bench   # per-op costs; add :c2 to compare C2 with Graal's JIT
@@ -102,7 +104,7 @@ Python.
 
 | Layer | Namespaces |
 |---|---|
-| L0 arrays | `gen.array` (public API), `.dtype`, `.shape`, `.special`, `.linalg`, `.tape` (autodiff), `.batch` (batching tracer), `.protocols`; `gen.backend.jvm`; `gen.backend.mlx` (+ `.exact`; Java binding in `src-java/gen/mlx`); `gen.random`, `gen.random.threefry` |
+| L0 arrays | `gen.array` (public API), `.dtype`, `.shape`, `.special`, `.linalg`, `.tape` (autodiff), `.batch` (batching tracer), `.stage` (staging: programs for the device lowerings, experimental), `.protocols`; `gen.backend.jvm`; `gen.backend.mlx` (+ `.exact`; Java binding in `src-java/gen/mlx`); `gen.random`, `gen.random.threefry` |
 | L1 data | `gen.choicemap`, `gen.selection`, `gen.trace`, `gen.diff` |
 | L2 GFI | `gen.gfi` (protocol + API), `gen.serialize` (choice maps, arrays and traces as EDN), `gen.dynamic` (handler, DynamicGF, `gen`), `gen.dynamic.guard` (the `gen` body rewriter), `gen.dynamic.static` (the static language's graph and its code), `gen.dynamic.core` (guarded clojure.core fns for `gen` bodies), `gen.batched` (particle collections under the batch tracer), `gen.partition` (a batched run's particles in parts: a Switch by partition) |
 | L3 distributions | `gen.dist.core` (record, `defdist`), `gen.dist`, `gen.dist.dsl` (`dist`: pushforwards, Gen.jl's `@dist`), `gen.dist.host` (host-library families, GenDistributions; `gen.dist.commons-math` in `ext/`) |
@@ -122,6 +124,7 @@ Python.
 2. **Randomness is purely functional.** Every operation takes a key, and every
    site consumes one key. The implicit key source (`gfi/seed!`,
    `gfi/implicit-seed`) is the only impure point. Keys never go in metadata.
+   A staged key (gen.array.stage's) is a value too.
 3. **Core code calls only `gen.array`, never a backend.**
    - No `eval!` inside models, handlers or distributions: only at
      inference-loop boundaries.

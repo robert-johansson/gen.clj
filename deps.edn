@@ -60,6 +60,13 @@
                  :extra-deps {org.apache.commons/commons-math3 {:mvn/version "3.6.1"}}
                  :exec-args {:dirs ["test" "ext/laws/test" "ext/commons-math/test"]}}
 
+  ;; The device lowerings (ext/device, experimental): a staged program
+  ;; (gen.array.stage) as generated JVM code, a Metal kernel through MLX, or
+  ;; CUDA C (NVRTC and the driver: -Dgen.cuda.nvrtc=<libnvrtc.so>). Its tests
+  ;; and benches read gen.parity-bench: add :bench.
+  :device {:extra-paths ["ext/device/src" "ext/device/test"]
+           :jvm-opts ["--enable-native-access=ALL-UNNAMED"]}
+
   ;; the MLX backend as the default (creation functions); the device is
   ;; -Dgen.mlx.device=cpu|gpu (default gpu when there is one)
   :mlx {:jvm-opts ["-Dgen.backend=mlx"]}

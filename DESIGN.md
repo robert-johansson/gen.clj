@@ -3121,6 +3121,45 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       need a host read of an array); otherwise unknown-change.
     - **Map's and Unfold's scores turned NaN** (−Inf + Inf) when an update
       returned an element to its support (genclj-awd0, fixed in wave 2).
+- **Device programs: the prototype before the note's review (owner,
+  2026-10-26; genclj-a1hu).** The research into the fastest gen.clj on
+  CUDA builds its XLA prototype alongside the design note rather than
+  after the owner's review of it, and the prototype may change the core
+  on its research branch (`device-programs`) where it needs to. Its two
+  core changes: keys whose words are a staging backend's array
+  (`p/IStagedKey`, which `gen.random`'s split and fold-in dispatch on;
+  still values, rule 2), and a loop (`scan`, in `ext/device` for now; a
+  core `array/scan` is the design question). Neither reaches main until
+  the research's recommendation is decided; that decision is recorded
+  here when it is made.
+- **Device programs: per-particle keys (owner, 2026-10-31; the device
+  note's decision 3, genclj-a1hu, genclj-8x5p).** A device run of n
+  particles or chains from a root key runs particle (or chain) i on
+  `(rng/split key n)[i]`, so it equals the handler's unbatched runs:
+  importance sampling without `:batched?`, and kernel/run's chain per
+  key. It does not equal a `gen.batched` run from the same key (one key
+  per site with a particle axis); the two agree in distribution. Why:
+  every lowering runs one particle's scalar program per thread, lane or
+  loop step (the JVM lowering, CUDA C, SIMD lanes), and the per-particle
+  form is checkable bit for bit against the handler (float64 on the JVM
+  backend) or to float32 rounding. The XLA prototype's many-chain
+  program (`chain/mala-chains-run`, gen.batched's draws) moves to
+  per-chain keys if that target is taken up.
+- **Device programs work for every model, sustainably (owner,
+  2026-10-31; genclj-8x5p).** "We want something that really works in a
+  sustainable way for all models": the device path is not tuned to the
+  parity benchmarks. Arrays stay arrays (small ones in registers, large
+  ones in memory under loops, data as inputs, so code does not grow with
+  data); each missing op is added once, for every model; coverage is
+  measured over the battery's models, for simulate, a constrained
+  generate and MALA's gradients and accepts (a census: on 2026-10-31,
+  of 286 models, simulate 158, generate 174 and MALA 94 of the 194 with
+  continuous latents stage and equal the handler bit for bit in float64,
+  149 all three; no mismatch; the rest need gathers or branch on a draw,
+  and a few need argmax or cholesky), never over hand-picked ones; and a
+  model that does
+  not stage runs on the handler with its reason recorded, never with
+  another result.
 - **= on a 0-d MLX array and a host value is loud (owner, 2026-10-31;
   genclj-8rdm).** clojure.core/= on a 0-d MLX array and a host number or
   boolean throws. It answered false, where the JVM backend (whose 0-d
@@ -3135,6 +3174,37 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   (array/==), or inside a gen body. The device programs' staged values
   follow the same rule (genclj-ryg0).
 
+- **Device programs: an out-of-range gather index is the handler's error
+  (owner, 2026-10-31; genclj-8x5p).** Compiled code cannot throw in the
+  middle of a run, so each run records a flag when a gather's index falls
+  outside its axis (reading a clamped index meanwhile, to stay in bounds),
+  and the entry point checks the flags after the run: it runs the first
+  flagged run's staged function on the handler from that run's key, so
+  the error is the handler's own; when the handler does not throw, a
+  generic error names the run. A run that hit a bad index returns no
+  results.
+- **Device programs: the note's decisions 1, 2, 4 and 5 (owner,
+  2026-10-31; genclj-a1hu, genclj-8x5p).**
+  1. The staging backend, array/scan and staged keys move into the core
+     at L0, marked {:api :experimental}, outside the 1.x promise while
+     they settle; rule 2 reads "a staged key is a value too". The
+     lowerings (JVM, Metal, CUDA C) are extensions.
+  2. Users ask with a :device option on the existing entry points
+     (kernel/run, importance sampling, then the particle filter):
+     {:device :jvm | :metal | :cuda}, the result shaped as today's. A
+     model that does not stage runs on the handler with the reason
+     recorded (this section, "every model, sustainably").
+  4. GPU targets: generated CUDA C (NVRTC, no new dependency) and Metal
+     through MLX first; the all-particles form for large shared data
+     next (a library GEMM or MLX's matmul); XLA through PJRT only if
+     that falls short.
+  5. Equivalence (rule 1): a float64 program on the JVM equals the
+     handler bit for bit; a float32 program (and the GPUs) equals it to
+     a float32 band, its accept decisions equal except where log-alpha
+     lies within rounding of log u, the tests counting such flips
+     against their expected number; statistics checked against the
+     handler. Whether the JVM path runs float64 by default is the
+     epic's decision 7, still open.
 ## 10. Deferred (tracked, not forgotten)
 
 `beans list --tag deferred-port` lists every GenMLX area left out of M1–M4, each
