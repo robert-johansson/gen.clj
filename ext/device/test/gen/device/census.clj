@@ -10,7 +10,7 @@
 ;;             there are none).
 ;; Run: clojure -M:test:bench:device -i ext/device/test/gen/device/census.clj
 (require '[clojure.string :as str] '[clojure.test.check.generators :as gen]
-         '[gen.array :as array] '[gen.choicemap :as cm] '[gen.device.chain :as ch] '[gen.device.jvm :as jvm] '[gen.device.stage :as st]
+         '[gen.array :as array] '[gen.choicemap :as cm] '[gen.device.chain :as ch] '[gen.device.jvm :as jvm] '[gen.array.stage :as st]
          '[gen.gfi :as gfi] '[gen.gradients :as grad] '[gen.inference.kernel :as kernel] '[gen.random :as rng] '[gen.selection :as sel])
 (def sets
   {"dynamic" 'gen.dynamic-test/models "static" 'gen.static-test/models "combinators" 'gen.combinators-test/models

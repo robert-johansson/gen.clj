@@ -1,5 +1,5 @@
 (ns gen.device.jvm
-  "A staged program (gen.device.stage) as JVM code: the third lowering of
+  "A staged program (gen.array.stage) as JVM code: the third lowering of
    bean genclj-a1hu, beside CUDA C and StableHLO (bean genclj-wbm7,
    research prototype, ext/device).
 
@@ -23,7 +23,7 @@
    other transcendental functions are Math's double functions rounded to
    float, and erfinv is Giles' single-precision approximation, so float32
    draws equal the handler's to float32 rounding, not bit for bit. A
-   float64 program (staged under gen.device.stage/*float* :float64) is
+   float64 program (staged under gen.array.stage/*float* :float64) is
    computed as the JVM backend computes: Math's functions, and erfinv and
    erf the backend's own (gen.array.special).
 
@@ -465,7 +465,7 @@
         :int64 (class (long-array 0)) :bool (class (boolean-array 0))))
 
 (defn compile
-  "program (gen.device.stage's, of a key and data inputs) as a loaded JVM
+  "program (gen.array.stage's, of a key and data inputs) as a loaded JVM
    class: {:run (fn [key-words] or [key-words inputs]) → the outputs as Java
    arrays (inputs: Java arrays, input-array's), :handle (run's static
    method), :range-handle, :instance, :source, :outputs, :inputs,

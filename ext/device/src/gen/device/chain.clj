@@ -1,7 +1,7 @@
 (ns gen.device.chain
   "Whole MCMC runs as one device program (bean genclj-a1hu, research
    prototype): a model's constrained generate and an S-step chain of a
-   gradient kernel, staged (gen.device.stage) from gen.clj's own code, the
+   gradient kernel, staged (gen.array.stage) from gen.clj's own code, the
    handler's generate and gen.inference.mcmc's move, and looped by a scan.
 
    (hmc-run model args observations selection opts steps) is the staged
@@ -18,7 +18,7 @@
             [gen.batched]
             [gen.choicemap :as cm]
             [gen.array.protocols :as p]
-            [gen.device.stage :as st]
+            [gen.array.stage :as st]
             [gen.gfi :as gfi]
             [gen.gradients :as grad]
             [gen.inference.mcmc]
@@ -51,7 +51,7 @@
            proto (grad/continuous-selection tr selection)
            v0 (cm/to-array proto)
            [_ [vs accepted]]
-           (st/scan (fn [v w]
+           (array/scan (fn [v w]
                       (let [t (assoc tr :choices (cm/merge others (cm/from-array proto v)))
                             {:keys [values accepted?]} (move t (st/->StagedKey w))
                             v' (cm/to-array values)]
@@ -127,7 +127,7 @@
            {t :trace} (batched-run model :generate args n {:key k0 :constraints observations})
            v0 (batch/unwrap (cm/to-array (grad/continuous-selection t selection)) [n])
            [_ [vs accepted diverged start-ok]]
-           (st/scan (fn [v w]
+           (array/scan (fn [v w]
                       (let [k (st/->StagedKey w)
                             [v' acc div ok] ((array/vmap (fn [v] (let [{:keys [values accepted? diverged? start-ok]}
                                                                        (mala-move (flat-trace model args observations proto v)
@@ -159,7 +159,7 @@
         proto (grad/continuous-selection tr selection)
         v0 (cm/to-array proto)
         [_ [vs accepted]]
-        (st/scan (fn [v t]
+        (array/scan (fn [v t]
                    (let [tr' (assoc tr :choices (cm/merge others (cm/from-array proto v)))
                          {:keys [values accepted?]} (move tr' (key-at k1 t))
                          v' (cm/to-array values)]
@@ -178,7 +178,7 @@
            proto (grad/continuous-selection tr selection)
            v0 (cm/to-array proto)
            [_ [vs accepted]]
-           (st/scan (fn [v t]
+           (array/scan (fn [v t]
                       (let [tr' (assoc tr :choices (cm/merge others (cm/from-array proto v)))
                             {:keys [values accepted?]} (move tr' (key-at k1 t))
                             v' (cm/to-array values)]

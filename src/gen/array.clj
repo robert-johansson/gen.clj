@@ -1051,6 +1051,43 @@
             (apply f args)))))))
 
 ;; ---------------------------------------------------------------------------
+;; Loops (experimental, outside the 1.x promise: DESIGN §9, genclj-yuau)
+;; ---------------------------------------------------------------------------
+
+(defn- step-x
+  "xs' slice i along its leading axis (a tree), or the step index i."
+  [xs i]
+  (if (nil? xs)
+    (array i {:dtype :int32})
+    (tree-map #(take % i 0) xs)))
+
+(defn ^{:api :experimental} scan
+  "A loop of n steps, lax.scan's: (f carry x) returns [carry' y]; scan
+   returns [the last carry, the ys stacked on a new leading axis of n] (a
+   tree as y is). x is xs' slice along its leading axis of n (xs a tree of
+   arrays), or with xs nil the step's index, an int32 scalar from 0 to
+   n - 1. carry' must keep carry's structure, shapes and dtypes.
+   On the staging backend (gen.array.stage) the loop is one node, f
+   staged once; on every other backend a host loop, f called n times.
+   Experimental: outside the 1.x promise (DESIGN §9)."
+  [f carry xs n]
+  (let [n (long n)
+        b (backend-of :scan (concat (filter backend-array? (tree-leaves carry))
+                                    (when xs (filter backend-array? (tree-leaves xs)))))]
+    (if (satisfies? p/ILooping b)
+      (p/-scan-loop b f carry xs n)
+      (loop [i 0 c carry ys []]
+        (if (< i n)
+          (let [[c' y] (f c (step-x xs i))]
+            (recur (inc i) c' (conj ys y)))
+          (let [y0 (if (seq ys) (first ys) (second (f carry (step-x xs 0))))
+                sk (tree/skeleton y0)
+                columns (apply map vector (map tree-leaves (if (seq ys) ys [y0])))]
+            [c (tree/refill sk (vec (if (seq ys)
+                                      (map #(stack (vec %) 0) columns)
+                                      (map #(zeros (into [0] (shape %)) {:dtype (dtype %)}) (tree-leaves y0)))))]))))))
+
+;; ---------------------------------------------------------------------------
 ;; Compilation (docs/array-api.md §8)
 ;; ---------------------------------------------------------------------------
 

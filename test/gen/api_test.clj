@@ -66,6 +66,8 @@
   (testing "^:no-doc and private vars are not on the surface"
     (is (not (api/published? #'gen.gfi/realize-limit)))
     (is (not (api/published? #'gen.api/as-edn)))
+    (testing "a var marked experimental itself is outside the surface"
+      (is (not (api/published? #'gen.array/scan))))
     (is (api/published? #'gen.gfi/simulate))))
 
 (deftest the-snapshot-check-can-fail

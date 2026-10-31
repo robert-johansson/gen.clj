@@ -9,7 +9,7 @@
             [gen.choicemap :as cm]
             [gen.device.chain :as ch]
             [gen.device.jvm :as jvm]
-            [gen.device.stage :as st]
+            [gen.array.stage :as st]
             [gen.gfi :as gfi]
             [gen.gradients :as grad]
             [gen.inference.importance :as is]

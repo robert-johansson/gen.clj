@@ -1,5 +1,5 @@
 (ns gen.device.metal
-  "A staged program (gen.device.stage) as one Metal kernel run through MLX
+  "A staged program (gen.array.stage) as one Metal kernel run through MLX
    (mlx_fast_metal_kernel): thread i runs the per-particle program on
    (rng/split root n)[i], its key derived in the thread, the whole run
    (a chain's steps, a particle's generate) one dispatch. The Metal target
@@ -220,7 +220,7 @@ inline void g_threefry(uint k0, uint k1, uint c0, uint c1, thread uint& w0, thre
     (.toString sb)))
 
 (defn source
-  "The Metal kernel of program (gen.device.stage's, of a key and data
+  "The Metal kernel of program (gen.array.stage's, of a key and data
    inputs): {:source (its body) :header :outputs [{:shape :dtype} per run]
    :inputs :constants :scratch (the layout) :statements}. Thread p runs
    program on (rng/split [root0 root1] n)[p] (inputs root, uint32 [2], and

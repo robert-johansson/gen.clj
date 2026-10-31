@@ -1,30 +1,40 @@
-(ns gen.device.stage
+(ns gen.array.stage
   "A staging backend: gen.array's operations recorded as a graph instead of
    computed, so that code written against gen.array (a model's density, a
    kernel's move, gen.random's draws, the tape's gradients) becomes a
-   program for another compiler: the device program of bean genclj-a1hu.
-   Research prototype, outside the core (ext/device).
+   program another compiler runs: the device programs (DESIGN §9; the
+   lowerings, to JVM code, Metal and CUDA C, are the extension ext/device).
+   Experimental: outside the 1.x promise.
 
-   (stage f arg-specs) runs f once on staged parameters, one per leaf of
-   arg-specs (trees of [shape dtype] pairs, or of staged keys' specs from
-   key-spec), and returns the program: {:graph :inputs :outputs}, where
-   the outputs are f's result's leaves. Every gen.array op on a staged value
-   adds a node; the tape (gen.array.tape) wraps this backend as it wraps
-   the JVM's, so value-and-grad records the gradient's nodes in the same
-   graph, and gen.random's draws on a staged key record Threefry's.
+   (stage f & arg-specs) runs f once on staged parameters, one per leaf of
+   arg-specs (trees of [shape dtype] pairs, or (key-spec) for a key), and
+   returns the program: {:graph :inputs :outputs :out-tree :f}, the outputs
+   f's result's leaves. Every gen.array op on a staged value adds a node;
+   the tape (gen.array.tape) wraps this backend as it wraps the JVM's, so
+   value-and-grad records the gradient's nodes in the same graph; the batch
+   tracer wraps it as it wraps MLX; gen.random's draws on a staged key (a
+   value too, rule 2) record Threefry's, so a program draws the host's
+   bits for the same key. *float* stages float32 (every device) or float64
+   programs. gen.array/scan is one loop node here.
+
+   (evaluate program inputs) replays a program on an eager backend, by the
+   same protocol calls staging recorded (Threefry's uint32 words on the
+   host): the reference for every lowering, and the proof that staging is
+   observational (on the JVM backend in float64, a replay equals the run of
+   f itself, bit for bit).
 
    Nodes: {:id :op :args :shape :dtype :attrs}. :args are node ids or host
-   numbers as {:const x}. Ops: gen.array's elementwise op keywords; :param, :constant,
-   :iota, :convert, :reduce, :reshape, :transpose, :broadcast,
-   :concatenate, :slice, :matmul; the bit ops :bit-xor, :bit-or,
-   :shift-left, :shift-right-logical and :bitcast (the draws' Threefry);
-   :scan, a loop whose body is a graph of its own, and :result, one of a
-   scan's results.
+   numbers as {:const x}. Ops: gen.array's elementwise op keywords; :param,
+   :constant, :iota, :convert, :reduce, :reshape, :transpose, :broadcast,
+   :concatenate, :slice, :pad, :matmul, :take, :take-along-axis,
+   :scatter-add; the bit ops :bit-xor, :bit-or, :shift-left,
+   :shift-right-logical and :bitcast (Threefry's); :scan, a loop whose body
+   is a graph of its own, and :result, one of a scan's results.
 
-   Reading a staged value on the host (truthy?, item, ->clj) is a loud
-   error, as in array/compile: the program is staged once and run many
-   times."
-  {:api :internal}
+   Reading a staged value on the host (truthy?, item, ->clj, = with a
+   number or boolean) is a loud error: the program is staged once and run
+   many times."
+  {:api :experimental}
   (:refer-clojure :exclude [+ - * / < > <= >= ==])
   (:require [gen.array :as array :refer [+ - * / < > <= >= ==]]
             [gen.array.dtype :as dt]
@@ -90,7 +100,7 @@
     (Staged. g id (vec shape) dtype)))
 
 (defn- current ^Graph []
-  (or *graph* (throw (ex-info "A staged op outside stage: the staging backend runs inside gen.device.stage/stage" {}))))
+  (or *graph* (throw (ex-info "A staged op outside stage: the staging backend runs inside gen.array.stage/stage" {}))))
 
 (defn- ancestor? [^Graph a ^Graph g]
   (loop [^Graph g (.-parent g)] (and g (or (identical? a g) (recur (.-parent g))))))
@@ -266,7 +276,12 @@
     x
     (op! :constant [] (array/shape x) (staged-dtype (array/dtype x)) {:values (vec (flatten [(array/->clj x)]))})))
 
+(declare scan)
+
 (deftype StageBackend []
+  p/ILooping
+  (-scan-loop [_ f carry xs n] (scan f carry xs n))
+
   p/IBackend
   (-name [_] :stage)
   (-defaults [_] {:float *float* :int :int32})
@@ -465,3 +480,177 @@
     (let [[[c _] y] (scan* (fn [[c t] _] (let [[c' y] (f c t)] [[c' (array/+ t 1)] y]))
                            [carry (array/array 0 {:dtype :int32})] nil n)]
       [c y])))
+
+;; ---------------------------------------------------------------------------
+;; Replay: a program on an eager backend, by the protocol calls staging
+;; recorded (the reference every lowering is held to). uint32 values,
+;; Threefry's words, are computed on the host: eager backends need not
+;; hold uint32.
+;; ---------------------------------------------------------------------------
+
+(defrecord ^:private U32 [shape v])
+
+(defn- u32? [x] (instance? U32 x))
+
+(def ^:private mask32 0xFFFFFFFF)
+
+(defn- strides [shape] (vec (reverse (reductions clojure.core/* 1 (reverse (rest shape))))))
+
+(defn- unravel [^long i shape] (mapv (fn [s d] (mod (quot i (long s)) (long d))) (strides shape) shape))
+
+(defn- ravel ^long [idx shape] (reduce clojure.core/+ 0 (map clojure.core/* idx (strides shape))))
+
+(defn- u32-of
+  "x (a host number or a backend array) as host uint32 words."
+  [x]
+  (if (u32? x)
+    x
+    (->U32 (vec (array/shape x)) (mapv #(bit-and (long %) mask32) (flatten [(array/->clj x)])))))
+
+(defn- u32->array
+  "x's words as an array of dtype on the current backend."
+  [x dtype]
+  (array/reshape (array/array (:v x) {:dtype dtype}) (:shape x)))
+
+(defn- u32-index
+  "A uint32 value of shape whose element at each index is x's at (f idx)."
+  [x shape f]
+  (->U32 (vec shape) (mapv #(nth (:v x) (ravel (f (unravel % shape)) (:shape x))) (range (sh/size shape)))))
+
+(defn- u32-binary [op a b]
+  (case op
+    :add (bit-and (clojure.core/+ a b) mask32)
+    :subtract (bit-and (clojure.core/- a b) mask32)
+    :multiply (bit-and (unchecked-multiply (long a) (long b)) mask32)
+    :bit-xor (bit-xor a b)
+    :bit-or (bit-or a b)
+    :bit-and (bit-and a b)
+    :shift-left (if (clojure.core/< b 32) (bit-and (bit-shift-left a b) mask32) 0)
+    :shift-right-logical (if (clojure.core/< b 32) (unsigned-bit-shift-right a b) 0)
+    (throw (ex-info (str "evaluate: no uint32 " op) {:op op}))))
+
+(defn- u32-elementwise [op shape args]
+  (let [args (mapv u32-of args)
+        shape (vec shape)
+        n (sh/size shape)
+        k (count shape)
+        at (fn [x i] (let [s (:shape x) o (unravel i shape) off (clojure.core/- k (count s))]
+                       (nth (:v x) (ravel (map-indexed (fn [j d] (if (== 1 d) 0 (nth o (clojure.core/+ off j)))) s) s))))]
+    (when-not (= 2 (count args)) (throw (ex-info (str "evaluate: no uint32 " op) {:op op})))
+    (->U32 shape (mapv (fn [i] (u32-binary op (at (first args) i) (at (second args) i))) (range n)))))
+
+(defn- constant-array [values shape dtype]
+  (if (and (= 1 (count values)) (not= [] shape) (clojure.core/> (sh/size shape) 1))
+    (array/full shape (first values) {:dtype dtype})
+    (array/reshape (array/array (vec values) {:dtype dtype}) shape)))
+
+(declare run-graph)
+
+(defn- slice-at [x i]
+  (if (u32? x)
+    (let [inner (vec (rest (:shape x))) k (sh/size inner)]
+      (->U32 inner (subvec (:v x) (clojure.core/* i k) (clojure.core/* (inc i) k))))
+    (array/take x i 0)))
+
+(defn- stack-steps [ys]
+  (if (u32? (first ys))
+    (->U32 (into [(count ys)] (:shape (first ys))) (vec (mapcat :v ys)))
+    (array/stack (vec ys) 0)))
+
+(defn- eval-scan [b env {:keys [args attrs]}]
+  (let [{:keys [body length n-carry n-x]} attrs
+        {:keys [graph carries xs captures carry-out y-out]} body
+        vals (mapv #(if (map? %) (:const %) (env %)) args)
+        cinit (subvec vals 0 n-carry)
+        xvals (subvec vals n-carry (clojure.core/+ n-carry n-x))
+        caps (subvec vals (clojure.core/+ n-carry n-x))]
+    (loop [i 0 cs cinit ys []]
+      (if (clojure.core/< i length)
+        (let [benv (run-graph b graph (merge (zipmap carries cs) (zipmap xs (map #(slice-at % i) xvals)) (zipmap captures caps)))]
+          (recur (inc i) (mapv benv carry-out) (conj ys (mapv benv y-out))))
+        {:results (into cs (map #(stack-steps (map (fn [y] (nth y %)) ys)) (range (count y-out))))}))))
+
+(defn- eval-node [b env {:keys [id op args shape dtype attrs] :as node}]
+  (let [arg (fn [i] (let [a (nth args i)] (if (map? a) (:const a) (env a))))
+        all-args (fn [] (mapv #(if (map? %) (:const %) (env %)) args))
+        in (:in attrs)
+        v (case op
+            :param (if (contains? env id) (env id) (throw (ex-info "evaluate: an unbound param" {:node (dissoc node :attrs)})))
+            :constant (if (= dtype :uint32)
+                        (let [vs (mapv #(bit-and (long %) mask32) (:values attrs)) n (sh/size shape)]
+                          (->U32 (vec shape) (if (= 1 (count vs)) (vec (repeat n (first vs))) vs)))
+                        (constant-array (:values attrs) shape dtype))
+            :iota (if (= dtype :uint32) (->U32 (vec shape) (vec (range (first shape)))) (array/arange 0 (first shape) 1 {:dtype dtype}))
+            :broadcast (let [x (arg 0)]
+                         (cond (= dtype :uint32) (let [x (u32-of x) k (clojure.core/- (count shape) (count (:shape x)))]
+                                                   (u32-index x shape (fn [o] (map-indexed (fn [j d] (if (== 1 d) 0 (nth o (clojure.core/+ k j)))) (:shape x)))))
+                               (array/host? x) (array/full shape x {:dtype dtype})
+                               :else (p/-broadcast-to b x shape)))
+            :convert (let [x (arg 0)]
+                       (cond (= dtype :uint32) (u32-of x)
+                             (u32? x) (u32->array x dtype)
+                             :else (p/-astype b x dtype)))
+            :bitcast (let [x (arg 0)]
+                       (case [(if (u32? x) :uint32 :float32) dtype]
+                         [:uint32 :float32] (array/reshape (array/array (mapv #(double (Float/intBitsToFloat (unchecked-int (long %)))) (:v x)) {:dtype :float32}) (:shape x))
+                         [:float32 :uint32] (->U32 (vec (array/shape x)) (mapv #(bit-and (long (Float/floatToRawIntBits (float %))) mask32) (flatten [(array/->clj x)])))
+                         (throw (ex-info (str "evaluate: no bitcast to " dtype) {:node (dissoc node :attrs)}))))
+            :stop-gradient (arg 0)
+            :reduce (p/-reduce b (:op attrs) (arg 0) (:axes attrs) (:keep-dims? attrs))
+            :reshape (let [x (arg 0)] (if (u32? x) (assoc x :shape (vec shape)) (p/-reshape b x shape)))
+            :transpose (let [x (arg 0) perm (:perm attrs)]
+                         (if (u32? x)
+                           (u32-index x shape (fn [o] (reduce (fn [v k] (assoc v (nth perm k) (nth o k))) (vec (repeat (count shape) 0)) (range (count shape)))))
+                           (p/-transpose b x perm)))
+            :concatenate (let [xs (all-args) ax (:axis attrs)]
+                           (if (some u32? xs)
+                             (let [xs (mapv u32-of xs)
+                                   offs (vec (reductions clojure.core/+ 0 (map #(nth (:shape %) ax) xs)))]
+                               (->U32 (vec shape) (mapv (fn [i] (let [o (unravel i shape) p (nth o ax)
+                                                                      k (count (take-while #(clojure.core/<= % p) (rest offs)))
+                                                                      x (nth xs k)]
+                                                                  (nth (:v x) (ravel (assoc o ax (clojure.core/- p (nth offs k))) (:shape x)))))
+                                                        (range (sh/size shape)))))
+                             (p/-concatenate b xs ax)))
+            :slice (let [x (arg 0) {:keys [starts stops steps]} attrs]
+                     (if (u32? x)
+                       (u32-index x shape (fn [o] (map (fn [s k c] (clojure.core/+ s (clojure.core/* k c))) starts steps o)))
+                       (p/-slice b x starts stops steps)))
+            :pad (let [x (arg 0) {:keys [axis low interior]} attrs
+                       m (nth (array/shape x) axis)]
+                   (p/-scatter-add b (array/zeros shape {:dtype dtype})
+                                   (array/array (mapv #(clojure.core/+ low (clojure.core/* % (inc interior))) (range m)) {:dtype :int64})
+                                   x axis))
+            :scatter-add (p/-scatter-add b (arg 0) (arg 1) (arg 2) (:axis attrs))
+            :matmul (p/-matmul b (arg 0) (arg 1))
+            :take (p/-take b (arg 0) (arg 1) (:axis attrs))
+            :take-along-axis (p/-take-along-axis b (arg 0) (arg 1) (:axis attrs))
+            :scan (eval-scan b env node)
+            :result (nth (:results (env (first args))) (:index attrs))
+            ;; elementwise: gen.array's op keyword on the computing dtype
+            (let [xs (all-args)]
+              (cond (= dtype :uint32) (u32-elementwise op shape xs)
+                    (some u32? xs) (p/-elementwise b op (mapv #(if (u32? %) (u32->array % :int64) %) xs) in)
+                    :else (p/-elementwise b op xs in))))]
+    (assoc env id v)))
+
+(defn- run-graph [b nodes env]
+  (reduce (fn [env node] (eval-node b env node)) env nodes))
+
+(defn evaluate
+  "program (stage's) replayed on backend b (default array/*backend*, an
+   eager one) from inputs, the program's input leaves in order: a key
+   (gen.random's) for each key spec, arrays or host numbers for the rest.
+   Returns f's result's structure. The same protocol calls run as staging
+   recorded, so on the JVM backend a float64 program's replay equals f run
+   directly, bit for bit (uint32 outputs come back as int64 arrays)."
+  ([program inputs] (evaluate program inputs array/*backend*))
+  ([{:keys [graph outputs out-tree]} inputs b]
+   (let [params (filter #(and (= :param (:op %)) (not (:capture (:attrs %)))) graph)
+         env0 (into {} (for [{:keys [id attrs]} params
+                             :let [v (nth inputs (:index attrs))]]
+                         [id (if (instance? gen.random.threefry.Key v)
+                               (let [^gen.random.threefry.Key k v] (->U32 [2] [(.-k0 k) (.-k1 k)]))
+                               v)]))
+         env (run-graph b graph env0)]
+     (tree/refill out-tree (mapv #(let [v (env %)] (if (u32? v) (u32->array v :int64) v)) outputs)))))

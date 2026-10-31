@@ -1,5 +1,5 @@
 (ns gen.device.scalar
-  "A staged program (gen.device.stage) as statements, the shared core of the
+  "A staged program (gen.array.stage) as statements, the shared core of the
    per-particle lowerings (gen.device.jvm, gen.device.metal; research
    prototype, ext/device, beans genclj-wbm7, genclj-h8rn, genclj-2vj1).
 
@@ -646,7 +646,7 @@
   (reduce + (map (fn [[kind & xs :as s]] (if (#{:loop :for} kind) (inc (count-statements (last s))) 1)) stmts)))
 
 (defn scalarize
-  "program (gen.device.stage's: a key, then data inputs) as statements in
+  "program (gen.array.stage's: a key, then data inputs) as statements in
    dialect: {:stmts :outputs [{:shape :dtype} per output, a scan's ys
    [length …]] :buffers :inputs :constants :statements (their count, loop
    bodies included)}. Each non-ys output's elements are stored at the end."

@@ -25,7 +25,7 @@
                             (cuda/source (ch/mala-run model args obs pb/selection pb/tau 5)))))
     (testing "a program of anything but a key, then its data"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"a program of a key"
-                            (cuda/source (gen.device.stage/stage (fn [x] (array/exp x)) [[2] :float32])))))))
+                            (cuda/source (gen.array.stage/stage (fn [x] (array/exp x)) [[2] :float32])))))))
 
 (defn- launch
   "The outputs [values accepted] of n threads of k on root, as host vectors."

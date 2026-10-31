@@ -1056,3 +1056,25 @@ same data and dtypes:
 - **Results.** It passes on Metal, on the CPU in float32 and on the CPU in
   float64, at 400 trials per property. Two planted bugs were caught: a
   swapped `<`/`<=`, and a reversed `cumsum` direction.
+
+## 14. Loops and staging (experimental, outside the 1.x promise)
+
+Added 2026-10-31 (DESIGN §9, the device programs; genclj-yuau).
+
+- `(array/scan f carry xs n)`: a loop of n steps, lax.scan's. `(f carry x)`
+  returns `[carry' y]`; scan returns `[last-carry ys]`, the ys stacked on a
+  new leading axis of n. `x` is xs' slice along its leading axis, or with
+  `xs` nil the step's index (int32, 0 to n - 1). carry' keeps carry's
+  structure, shapes and dtypes. An eager backend runs a host loop; a
+  backend implementing `ILooping` (the staging backend) records one loop.
+- `gen.array.stage`: a backend that records operations instead of
+  computing them. `(stage f & specs)` runs `f` once on staged parameters
+  and returns the program (a graph of the backend protocol's calls);
+  `(evaluate program inputs)` replays it on an eager backend.
+  Staging is observational: on the JVM backend, a float64 program's replay
+  equals `f` run directly, bit for bit. Reading a staged value on the host
+  (`truthy?`, `item`, `->clj`, `=` with a number) throws: a program is
+  staged once and run many times. A staged key is a value (rule 2), so
+  `gen.random` splits, folds and draws on it with the host's Threefry.
+- The lowerings of programs (JVM code, Metal, CUDA C) are the extension
+  `ext/device`.

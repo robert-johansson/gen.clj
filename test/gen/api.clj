@@ -140,11 +140,14 @@
                      (pr-str x))))
 
 (defn published?
-  "Is v a var of the surface: public, not ^:no-doc, and not the var proxy
-   interns to hold its class (gen.gfi.proxy$java.lang.ClassValue$…)?"
+  "Is v a var of the surface: public, not ^:no-doc, not marked outside it
+   itself ({:api :experimental} or :internal on the var: an experimental
+   function of a stable namespace, as gen.array/scan; DESIGN §9), and not
+   the var proxy interns to hold its class (gen.gfi.proxy$java.lang.ClassValue$…)?"
   [v]
   (let [m (meta v)]
-    (not (or (:private m) (:no-doc m) (str/includes? (str (:name m)) "proxy$")))))
+    (not (or (:private m) (:no-doc m) (#{:experimental :internal} (:api m))
+             (str/includes? (str (:name m)) "proxy$")))))
 
 (defn- arglists
   "Arglists as EDN, a macro's generated names (defrecord's map->'s

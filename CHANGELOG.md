@@ -25,7 +25,9 @@ From DESIGN.md §9, "The 1.0's shape" (owner, 2026-10-25):
   experimental and internal tiers.
 - **Three tiers,** marked on each namespace (`{:api :stable | :experimental
   | :internal}`). Experimental namespaces (gen.llm.* among them) ship
-  outside the promise. Internal ones are not for dependents.
+  outside the promise. Internal ones are not for dependents. A var of a
+  stable namespace may carry its own `{:api :experimental}` (gen.array's
+  `scan`): it too is outside the promise.
 - **gen.laws:** a minor release may add a law to a set or change
   `laws/close?`'s tolerances, each with a line here and its reason;
   renaming or removing a law waits for 2.0 (owner, 2026-10-25).
@@ -55,10 +57,21 @@ other values for the same key, from the same distribution.
   and 102 → 23 ms on MLX's GPU (M4, without spot checks). The JVM
   backend's values are bit-identical; MLX's can differ at float32
   rounding (genclj-c8gl).
-- **Research branch `device-programs` only, not on main** (genclj-a1hu):
-  `gen.random/key?` is also true of a staged key (a device program's,
-  `gen.array.protocols/IStagedKey`, `^:no-doc`), whose split and fold-in
-  are its staging backend's. Host keys are unchanged.
+- **Experimental: staging, the core of the device programs**
+  (`gen.array.stage`, outside the 1.x promise; DESIGN §9, genclj-yuau).
+  `stage` runs a function once on a backend that records gen.array's
+  operations as a graph (gradients through the tape, particles through the
+  batch tracer, draws through Threefry on staged keys) and returns the
+  program; `evaluate` replays a program on an eager backend, equal on the
+  JVM backend in float64 to the function run directly, bit for bit.
+  `*float*` stages float32 or float64 programs. The lowerings (generated
+  JVM code, Metal through MLX, CUDA C) are the extension `ext/device`.
+- **Experimental: `gen.array/scan`**, a loop of n steps, `(f carry x)` →
+  `[carry' y]`: a host loop on an eager backend, one loop node when staged.
+  A var may now carry its own tier: a stable namespace's var marked
+  `{:api :experimental}` is outside the surface and the promise.
+- **gen.random takes staged keys** (`split`, `fold-in`; `key?` is true of
+  them): a staged key is a value too (rule 2). Host keys are unchanged.
 
 ## [1.0.0] - 2026-10-26
 

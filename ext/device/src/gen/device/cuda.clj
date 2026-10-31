@@ -1,5 +1,5 @@
 (ns gen.device.cuda
-  "A staged program (gen.device.stage) as one CUDA C kernel, one thread
+  "A staged program (gen.array.stage) as one CUDA C kernel, one thread
    per chain: the CUDA C target of bean genclj-a1hu (research prototype,
    ext/device), beside StableHLO.
 
@@ -600,7 +600,7 @@ extern \"C\" __global__ void log_mean_exp(const float* w, int n, double* out) {
 ")
 
 (defn source
-  "The CUDA C++ text of the kernel `chains` for program (gen.device.stage's,
+  "The CUDA C++ text of the kernel `chains` for program (gen.array.stage's,
    of a key and data inputs): (chains r0 r1 n scratch sbytes in1 … out0 …),
    particle p running program on (rng/split [r0 r1] n)[p] with lanes
    threads (opts :lanes, gen.cuda.lanes). Returns {:source :outputs

@@ -148,7 +148,7 @@ a whole run as one program.
 
 The device program is not a second implementation of a kernel or a model.
 It is gen.clj's own code run once against a backend that records
-instead of computing: `gen.device.stage`, an L0 backend like the JVM's.
+instead of computing: `gen.array.stage`, an L0 backend like the JVM's.
 Every `gen.array` op on a staged value adds a node `{:op :args :shape
 :dtype :attrs}`; host numbers in an op are constants. Because the backend
 contract is the one the JVM and MLX backends implement, the layers above
