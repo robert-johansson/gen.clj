@@ -229,7 +229,10 @@
       ;; draws from the implicit source, and the moves differ
       (let [moves (repeatedly 4 #((:trace (mcmc/hmc tr x-sel (rng/key 7))) :x))]
         (is (apply = moves))
-        (is (not= (first moves) 0.2) "it moved"))
+        ;; read through ts/host: on MLX the value is a 0-d array, which = no
+        ;; longer compares with a number (genclj-8rdm); this assertion was
+        ;; vacuous there before
+        (is (not (ts/close? (ts/host (first moves)) (ts/host (tr :x)))) "it moved"))
       (is (= ((:trace (mcmc/hmc tr x-sel (rng/key 7))) :x) ((:trace (mcmc/hmc tr x-sel {} (rng/key 7))) :x)))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"options map" (mcmc/hmc tr x-sel (rng/key 7) (rng/key 8))))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"key or an options map" (mcmc/hmc tr x-sel 7)))

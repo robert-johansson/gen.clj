@@ -3121,6 +3121,19 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       need a host read of an array); otherwise unknown-change.
     - **Map's and Unfold's scores turned NaN** (−Inf + Inf) when an update
       returned an element to its support (genclj-awd0, fixed in wave 2).
+- **= on a 0-d MLX array and a host value is loud (owner, 2026-10-31;
+  genclj-8rdm).** clojure.core/= on a 0-d MLX array and a host number or
+  boolean throws. It answered false, where the JVM backend (whose 0-d
+  arrays are host values) compares values, so plain Clojure outside a
+  gen body (whose guarded = reads the value) took the other branch on
+  every run: the device census found a random test model doing it, and
+  the GFI laws, which check self-consistency, could not. Every other
+  comparison is unchanged: two MLX arrays by value; nil, keywords,
+  collections and arrays of other shapes unequal. The reversed form
+  (= 0 k) cannot be caught (clojure.core/= dispatches on its first
+  argument), so the advice stands: compare draws with gen.array
+  (array/==), or inside a gen body. The device programs' staged values
+  follow the same rule (genclj-ryg0).
 
 ## 10. Deferred (tracked, not forgotten)
 
