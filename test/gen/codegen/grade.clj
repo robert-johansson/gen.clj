@@ -3,9 +3,11 @@
    genclj-ihc4): stages in order, the grading stopping at the first that
    fails.
 
-     :read          the code reads (gen.codegen.candidate/read-forms); a
-                    leading ns form is dropped (:dropped-ns), the prelude
-                    being the namespace
+     :read          the code reads (gen.codegen.candidate/read-forms), or,
+                    with :repair-delimiters? (on), reads once its delimiters
+                    are rebuilt from its indentation (parinfer's indent
+                    mode: :repaired-delimiters); a leading ns form is
+                    dropped (:dropped-ns), the prelude being the namespace
      :safe          it uses no forbidden name (candidate/forbidden)
      :evaluates     it evaluates under the prelude and defines model, a
                     generative function
@@ -58,7 +60,8 @@
             [gen.random :as rng]))
 
 (def defaults
-  {:timeout-ms 300000 :particles 20000 :repeats 3 :law-tests 10 :seed 1 :gate-explains? false})
+  {:timeout-ms 300000 :particles 20000 :repeats 3 :law-tests 10 :seed 1 :gate-explains? false
+   :repair-delimiters? true})
 
 (def max-spread
   "Nats: estimates of a log marginal likelihood that spread more than this
@@ -135,11 +138,17 @@
    (let [{:keys [timeout-ms law-tests seed] :as opts} (merge defaults opts)
          {:keys [args observations]} task
          state (volatile! {})
-         stages [[:read #(let [forms (candidate/read-forms code)
+         stages [[:read #(let [[forms repaired?] (try [(candidate/read-forms code) false]
+                                                      (catch Exception e
+                                                        (if (:repair-delimiters? opts)
+                                                          (let [fixed (try (candidate/read-forms (candidate/repair-delimiters code))
+                                                                           (catch Exception _ (throw e)))]
+                                                            [fixed true])
+                                                          (throw e))))
                                ns? (and (seq? (first forms)) (= 'ns (ffirst forms)))]
                            ;; a leading ns form, the prelude copied, is dropped: the prelude is the namespace
                            (vswap! state assoc :forms (if ns? (vec (rest forms)) forms))
-                           (if ns? {:dropped-ns true} {}))]
+                           (cond-> {} ns? (assoc :dropped-ns true) repaired? (assoc :repaired-delimiters true)))]
                  [:safe #(let [f (candidate/forbidden (:forms @state))]
                            (when (seq f) (throw (ex-info (str "forbidden names: " (pr-str f)) {})))
                            {})]

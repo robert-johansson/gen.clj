@@ -10,8 +10,8 @@
    replies again, up to R rounds. The explains stage's gap is recorded,
    not fed back (gen.codegen.grade's :gate-explains?, off).
 
-   Tokens are sampled as Qwen's GGUFs say (temperature 1, top-k 20, top-p
-   0.95) unless the options say otherwise, from the Branching protocol's next-token log-probabilities, with
+   Tokens are sampled as Qwen's model card says for thinking off
+   (default-sampling) unless the options say otherwise, from the Branching protocol's next-token log-probabilities, with
    gen.random keys: the run is a function of its seed (and llama.cpp's
    float noise). The prompt is read once per task: its branch is forked
    for each reply, and a repair turn extends the conversation's tokens
@@ -26,7 +26,7 @@
 
    Options, as system properties: codegen.model (a GGUF), codegen.out (a
    directory), codegen.grader (the grader's command, split at spaces),
-   codegen.k (4), codegen.rounds (3), codegen.max-tokens (1024),
+   codegen.k (4), codegen.rounds (3), codegen.max-tokens (2048),
    codegen.tasks (task ids, comma-separated; all by default), codegen.seed
    (1), codegen.n-ctx (16384), codegen.temp, codegen.top-p and
    codegen.top-k (default-sampling's)."
@@ -44,11 +44,12 @@
 (set! *warn-on-reflection* true)
 
 (def default-sampling
-  "Qwen's GGUFs' (general.sampling): its thinking mode's. Its model card
-   has thinking off at temperature 0.7, top-p 0.8, top-k 20 (and a
-   presence penalty of 1.5, not applied: it lowers every token already
-   used, closing parentheses among them)."
-  {:temp 1.0 :top-k 20 :top-p 0.95})
+  "Qwen's model card's for thinking off: temperature 0.7, top-p 0.8, top-k
+   20 (its presence penalty of 1.5 not applied: it lowers every token
+   already used, closing parentheses among them). The GGUFs carry its
+   thinking mode's (temperature 1, top-p 0.95), under which the 3.6 wrote
+   5 running models of 40 where these gave 11 (genclj-ihc4)."
+  {:temp 0.7 :top-k 20 :top-p 0.8})
 
 (def hard-stages #{:read :safe :evaluates :simulates :accepts-data})
 
@@ -203,7 +204,7 @@
         out (io/file (prop "out" "tmp/codegen"))
         command (str/split (prop "grader" "clojure -M:test -m gen.codegen.server") #" ")
         opts {:k (parse-long (prop "k" "4")) :rounds (parse-long (prop "rounds" "3"))
-              :max-tokens (parse-long (prop "max-tokens" "1024")) :seed (parse-long (prop "seed" "1"))
+              :max-tokens (parse-long (prop "max-tokens" "2048")) :seed (parse-long (prop "seed" "1"))
               :sampling {:temp (parse-double (prop "temp" (str (:temp default-sampling))))
                          :top-p (parse-double (prop "top-p" (str (:top-p default-sampling))))
                          :top-k (parse-long (prop "top-k" (str (:top-k default-sampling))))}}

@@ -6,6 +6,7 @@
 
      (code-of reply)        → the code in a reply (its last fenced block)
      (read-forms text)      → its forms, read with *read-eval* false
+     (repair-delimiters code) → its delimiters rebuilt from its indentation
      (forbidden forms)      → the forbidden names it uses, sorted
      (evaluate forms)       → [namespace model]: the forms evaluated, model their var's value
      (discard! namespace)   → removes the namespace
@@ -41,11 +42,26 @@
        (str/replace (pr-str requires) #"\] \[" "]\n             [") ")"))
 
 (defn code-of
-  "The code in a reply: its last fenced block (```clojure or ```), else the
-   whole reply."
+  "The code in a reply: its last fenced block (```clojure or ```; one cut
+   off before its closing fence runs to the reply's end), else the whole
+   reply."
   [reply]
-  (let [blocks (re-seq #"(?s)```[a-zA-Z]*\n(.*?)```" reply)]
-    (if (seq blocks) (second (last blocks)) reply)))
+  (let [blocks (loop [lines (str/split-lines reply) block nil blocks []]
+                 (if-let [[l & more] (seq lines)]
+                   (cond (and (nil? block) (re-matches #"\s*```[a-zA-Z]*\s*" l)) (recur more [] blocks)
+                         (nil? block) (recur more nil blocks)
+                         (re-matches #"\s*```\s*" l) (recur more nil (conj blocks block))
+                         :else (recur more (conj block l) blocks))
+                   (cond-> blocks block (conj block))))]
+    (if (seq blocks) (str (str/join "\n" (peek blocks)) "\n") reply)))
+
+(defn repair-delimiters
+  "code's delimiters rebuilt from its indentation (parinfer's indent mode,
+   parinferish): what clojure-mcp-light's hook does for an LLM's edits."
+  [code]
+  (let [parse (requiring-resolve 'parinferish.core/parse)
+        flat (requiring-resolve 'parinferish.core/flatten)]
+    (flat (parse code {:mode :indent}))))
 
 (defn read-forms
   "The forms of text, read with *read-eval* false (#= refused) and no

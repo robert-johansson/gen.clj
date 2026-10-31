@@ -117,7 +117,9 @@ students; student s of class c is observed at [:class c :students s :score]."
   "A failed grading as the next user turn, nil when nothing failed."
   [grading]
   (when-let [{:keys [stage error]} (first (remove :ok (:stages grading)))]
-    (str (if (= :explains stage)
+    (str (when (:repaired-delimiters (first (:stages grading)))
+           "Your code's parentheses and brackets did not balance; they were rebuilt from its indentation.\n\n")
+         (if (= :explains stage)
            (str "The model runs, but " error " (its log marginal likelihood of the data). Reconsider its "
                 "structure and its priors against the description.")
            (str (stage-text stage) ": " error))

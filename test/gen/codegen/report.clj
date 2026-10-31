@@ -59,6 +59,7 @@
     {:task (:task (first entries))
      :runs (count (filter correct? one)) :n (count one)
      :close (count (filter close? one))
+     :repaired (count (filter #(and (correct? %) (get-in % [:grading :stages 0 :repaired-delimiters])) one))
      :gaps (mapv gap-text (filter correct? one))
      :one-shot-s (some :seconds one)
      :failures (frequencies (remove #{:correct} (map (comp reached :grading) one)))
@@ -79,7 +80,8 @@
         one-s (reduce + (keep :one-shot-s rows))
         runs (count (filter correct? one))
         close (count (filter close? one))
-        unreliable (count (filter #(and (correct? %) (not (reliable? %))) one))]
+        unreliable (count (filter #(and (correct? %) (not (reliable? %))) one))
+        repaired (reduce + (map :repaired rows))]
     (str "Model: " (:model (first entries)) "; sampling " (pr-str (:sampling (first entries))) "\n\n"
          "A reply runs when it reads, is safe, evaluates, simulates and takes the data; it explains the data when, "
          "besides, its log marginal likelihood is reliably within the task's tolerance (5 nats) below the book "
@@ -95,6 +97,7 @@
          (format "One shot: %d of %d replies run, %d of them explain the data (%d unreliable to judge); %.0f s decoding: %.1f s a running model, %s a model that explains the data.\n"
                  runs (count one) close unreliable one-s (if (pos? runs) (/ one-s runs) Double/NaN)
                  (if (pos? close) (format "%.1f s" (/ one-s close)) "–"))
+         (format "Of the one-shot replies that run, %d did so with their delimiters rebuilt from their indentation.\n" repaired)
          (format "Repair: %d of %d chains run (the first reply, or after up to 3 rounds), %d of them explain the data.\n"
                  (count (filter #(not (str/starts-with? (:repair %) "no")) rows)) (count rows)
                  (count (filter :repair-close? rows))))))

@@ -20,7 +20,9 @@
 
 (deftest a-reply's-code-is-its-last-fenced-block
   (is (= "(def model 2)\n" (c/code-of "Here:\n```clojure\n(def model 1)\n```\nbetter:\n```\n(def model 2)\n```\n")))
-  (is (= "(def model 1)" (c/code-of "(def model 1)"))))
+  (is (= "(def model 1)" (c/code-of "(def model 1)")))
+  (is (= "(def model\n  (gen []\n" (c/code-of "Here it is:\n```clojure\n(def model\n  (gen []\n"))
+      "a block cut off before its closing fence runs to the reply's end"))
 
 (deftest forbidden-names-are-named
   (is (= [] (c/forbidden (c/read-forms (:answer (tasks/by-id :changepoint))))))
@@ -57,10 +59,17 @@
 (deftest ^:slow a-planted-fault-stops-at-its-stage
   (doseq [[stage id code] planted]
     (testing [stage code]
-      (is (= stage (stopped-at (g/grade (tasks/by-id id) code {:gate-explains? true}))))))
+      (is (= stage (stopped-at (g/grade (tasks/by-id id) code {:gate-explains? true :repair-delimiters? false}))))))
   (testing "an evaluation error names its cause, not only where it happened"
     (let [r (g/grade (tasks/by-id :line) (str/replace line "(d/normal 0 5)" "(d/point 0.3)"))]
       (is (re-find #"Syntax error compiling.*Caused by: .*d/point" (:error (first (remove :ok (:stages r))))))))
+  (testing "delimiters rebuilt from the indentation: a closing parenthesis short, or one too many"
+    (doseq [code [(subs line 0 (dec (count line))) (str line ")")]]
+      (let [r (g/grade (tasks/by-id :line) code)]
+        (is (= 7 (:passed r)))
+        (is (:repaired-delimiters (first (:stages r)))))))
+  (testing "without the repair, they do not read"
+    (is (= :read (stopped-at (g/grade (tasks/by-id :line) (subs line 0 (dec (count line))) {:repair-delimiters? false})))))
   (testing "a leading ns form (the prelude copied) is dropped"
     (let [r (g/grade (tasks/by-id :line) (str "(ns candidate (:require [gen.dist :as d]))\n" line))]
       (is (= 7 (:passed r)))

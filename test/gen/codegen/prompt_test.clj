@@ -37,6 +37,11 @@
                                                   {:stage :accepts-data :ok false
                                                    :error "generate: the constraint at [:y 3] was not visited"}]}))))
 
+(deftest feedback-after-a-delimiter-repair-says-so
+  (is (re-find #"^Your code's parentheses and brackets did not balance.*\n\nEvaluating the code failed: x"
+               (prompt/feedback-message {:stages [{:stage :read :ok true :repaired-delimiters true}
+                                                  {:stage :evaluates :ok false :error "x"}]}))))
+
 (deftest the-chat-template
   (is (= "<|im_start|>system\nS<|im_end|>\n<|im_start|>user\nU<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
          (prompt/chat [[:system "S"] [:user "U\n"]]))))
