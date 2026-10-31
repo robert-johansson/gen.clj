@@ -94,6 +94,16 @@
        {:log-ml-estimate (array/- (array/logsumexp w) (Math/log n)) :log-weights w}))
    (st/key-spec)))
 
+(defn weight-run
+  "One particle's constrained generate as a program of a key, the model's
+   arguments and the observations staged as constants: {:weight}. n runs
+   on (rng/split key n)[i] are scalar importance sampling's n particles
+   (gen.inference.importance without :batched?)."
+  [model args observations]
+  (st/stage
+   (fn [key] {:weight (:weight (gfi/generate model (st/constants args) (st/constants observations) key))})
+   (st/key-spec)))
+
 (defn- flat-trace
   "A trace of model on args whose choices are observations and the selected
    values v, flat in proto's order: what a move reads (its model,

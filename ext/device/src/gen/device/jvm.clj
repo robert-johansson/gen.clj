@@ -19,15 +19,17 @@
    (float32 a float[], uint32 and int32 an int[], bool a boolean[]), each
    laid out flat in row-major order, a scan's ys [length …].
 
-   The arithmetic is float32 as Java defines it (no fused multiply-add);
-   exp, log and the other transcendental functions are Math's double
-   functions rounded to float, and erfinv is Giles' single-precision
-   approximation, so draws equal the handler's to float32 rounding, not
-   bit for bit.
+   float32 arithmetic is Java's (no fused multiply-add); exp, log and the
+   other transcendental functions are Math's double functions rounded to
+   float, and erfinv is Giles' single-precision approximation, so float32
+   draws equal the handler's to float32 rounding, not bit for bit. A
+   float64 program (staged under gen.device.stage/*float* :float64) is
+   computed as the JVM backend computes: Math's functions, and erfinv and
+   erf the backend's own (gen.array.special).
 
    Refused, loudly: data inputs (a program of one key only), arrays past
    gen.jvm.max-elements (4096), a scan over xs or inside a scan, a scan's
-   ys read in the program, float64, batched matmul, erf."
+   ys read in the program, batched matmul, float32 erf."
   {:api :internal}
   (:refer-clojure :exclude [compile])
   (:require [clojure.string :as str])
@@ -67,12 +69,14 @@
 ;; Java text
 ;; ---------------------------------------------------------------------------
 
-(def ^:private jtypes {:float32 "float" :uint32 "int" :int32 "int" :bool "boolean"})
+(def ^:private jtypes {:float32 "float" :float64 "double" :uint32 "int" :int32 "int" :bool "boolean"})
 
 (defn- jtype [dtype]
-  (or (jtypes dtype) (throw (ex-info (str "JVM lowering: no " dtype " (float32, uint32, int32 and bool only)") {:dtype dtype}))))
+  (or (jtypes dtype) (throw (ex-info (str "JVM lowering: no " dtype " (float32, float64, uint32, int32 and bool only)") {:dtype dtype}))))
 
-(def ^:private array-types {:float32 "float[]" :uint32 "int[]" :int32 "int[]" :bool "boolean[]"})
+(def ^:private array-types {:float32 "float[]" :float64 "double[]" :uint32 "int[]" :int32 "int[]" :bool "boolean[]"})
+
+(def ^:private float-type? #{:float32 :float64})
 
 (defn- lit
   "A host value as a Java literal of dtype, exactly."
@@ -82,6 +86,10 @@
                (if (or (Float/isNaN f) (Float/isInfinite f))
                  (format "Float.intBitsToFloat(0x%08x)" (Float/floatToRawIntBits f))
                  (str (Float/toString f) "f")))
+    :float64 (let [d (if (boolean? v) (if v 1.0 0.0) (double v))]
+               (if (or (Double/isNaN d) (Double/isInfinite d))
+                 (format "Double.longBitsToDouble(0x%016xL)" (Double/doubleToRawLongBits d))
+                 (Double/toString d)))
     :uint32 (format "0x%08x" (bit-and (long (if (boolean? v) (if v 1 0) v)) 0xFFFFFFFF))
     :int32 (str (long (if (boolean? v) (if v 1 0) v)))
     :bool (str (if (boolean? v) v (not (zero? (double v)))))
@@ -98,6 +106,11 @@
    not have gen.array's semantics, and erfinv."
   "
   static float g_sign(float a) { return a > 0.0f ? 1.0f : (a < 0.0f ? -1.0f : a); }
+  static double g_sign(double a) { return a > 0.0 ? 1.0 : (a < 0.0 ? -1.0 : a); }
+  static double g_mod(double a, double b) { double r = a % b; return (r != 0.0 && ((r < 0.0) != (b < 0.0))) ? r + b : r; }
+  // float64's erfinv and erf: the JVM backend's own (gen.array.special), so draws can be its bit for bit
+  static final clojure.lang.IFn.DD ERFINV = (clojure.lang.IFn.DD) ((clojure.lang.IDeref) clojure.java.api.Clojure.var(\"gen.array.special\", \"erfinv\")).deref();
+  static final clojure.lang.IFn.DD ERF = (clojure.lang.IFn.DD) ((clojure.lang.IDeref) clojure.java.api.Clojure.var(\"gen.array.special\", \"erf\")).deref();
   static int g_sign(int a) { return (a > 0 ? 1 : 0) - (a < 0 ? 1 : 0); }
   static float g_mod(float a, float b) { float r = a % b; return (r != 0.0f && ((r < 0.0f) != (b < 0.0f))) ? r + b : r; }
   static int g_mod(int a, int b) { int r = a % b; return (r != 0 && ((r < 0) != (b < 0))) ? r + b : r; }
@@ -126,6 +139,21 @@
   }
 ")
 
+(def ^:private threefry
+  "Threefry-2x32-20 of the counter [c0 c1] under the key [k0 k1], the two
+   words packed in a long (gen.random.threefry's scheme, unrolled)."
+  (let [rot [13 15 26 6 17 29 16 24]
+        ks ["k0" "k1" "k2"]]
+    (str "  static long g_threefry(int k0, int k1, int c0, int c1) {\n"
+         "    int k2 = k0 ^ k1 ^ 0x1BD11BDA;\n"
+         "    int x0 = c0 + k0, x1 = c1 + k1;\n"
+         (apply str (for [i (range 5)]
+                      (str (apply str (for [j (range 4)]
+                                        (str "    x0 += x1; x1 = Integer.rotateLeft(x1, " (nth rot (+ (* (mod i 2) 4) j)) ") ^ x0;\n")))
+                           "    x0 += " (nth ks (mod (inc i) 3)) "; x1 += " (nth ks (mod (+ i 2) 3)) " + " (inc i) ";\n")))
+         "    return ((long) x0 << 32) | (x1 & 0xFFFFFFFFL);\n"
+         "  }\n")))
+
 (def ^:private float-unary
   {:exp "Math.exp" :log "Math.log" :expm1 "Math.expm1" :log1p "Math.log1p" :sqrt "Math.sqrt" :sin "Math.sin"
    :cos "Math.cos" :tan "Math.tan" :tanh "Math.tanh" :sinh "Math.sinh" :cosh "Math.cosh" :arcsin "Math.asin"
@@ -135,11 +163,17 @@
   (cond (= op :negative) (str "(- " a ")")
         (= op :logical-not) (str "(!" a ")")
         (= op :sign) (str "g_sign(" a ")")
-        (= op :isnan) (if (= dtype :float32) (str "(" a " != " a ")") "false")
-        (= op :isinf) (if (= dtype :float32) (str "(Math.abs(" a ") == Float.POSITIVE_INFINITY)") "false")
+        (= op :isnan) (if (float-type? dtype) (str "(" a " != " a ")") "false")
+        (= op :isinf) (case dtype
+                        :float32 (str "(Math.abs(" a ") == Float.POSITIVE_INFINITY)")
+                        :float64 (str "(Math.abs(" a ") == Double.POSITIVE_INFINITY)")
+                        "false")
         (= op :abs) (if (= dtype :uint32) a (str "Math.abs(" a ")"))
         (and (= op :erfinv) (= dtype :float32)) (str "g_erfinv(" a ")")
+        (and (= op :erfinv) (= dtype :float64)) (str "ERFINV.invokePrim(" a ")")
+        (and (= op :erf) (= dtype :float64)) (str "ERF.invokePrim(" a ")")
         (and (float-unary op) (= dtype :float32)) (str "((float) " (float-unary op) "(" a "))")
+        (and (float-unary op) (= dtype :float64)) (str (float-unary op) "(" a ")")
         (#{:floor :ceil :round} op) a
         :else (throw (ex-info (str "JVM lowering: no " op " on " dtype " yet") {:op op :dtype dtype}))))
 
@@ -164,16 +198,19 @@
                 :else "0"))
         (and (= op :power) (= dtype :float32)) (str "((float) Math.pow(" a ", " b "))")
         (and (= op :arctan2) (= dtype :float32)) (str "((float) Math.atan2(" a ", " b "))")
+        (and (= op :power) (= dtype :float64)) (str "Math.pow(" a ", " b ")")
+        (and (= op :arctan2) (= dtype :float64)) (str "Math.atan2(" a ", " b ")")
         :else (throw (ex-info (str "JVM lowering: no " op " on " dtype " yet") {:op op :dtype dtype}))))
 
 (defn- convert-expr [from to a]
   (cond (= from to) a
-        (= to :bool) (str "(" a (if (= from :float32) " != 0.0f)" " != 0)"))
-        (= from :bool) (str "(" a (if (= to :float32) " ? 1.0f : 0.0f)" " ? 1 : 0)"))
-        (= [from to] [:float32 :int32]) (str "((int) " a ")")
-        (= [from to] [:float32 :uint32]) (str "((int) (long) " a ")")
-        (= [from to] [:int32 :float32]) (str "((float) " a ")")
-        (= [from to] [:uint32 :float32]) (str "((float) (" a " & 0xFFFFFFFFL))")
+        (= to :bool) (str "(" a (case from :float32 " != 0.0f)" :float64 " != 0.0)" " != 0)"))
+        (= from :bool) (str "(" a (case to :float32 " ? 1.0f : 0.0f)" :float64 " ? 1.0 : 0.0)" " ? 1 : 0)"))
+        (and (float-type? from) (= to :int32)) (str "((int) " a ")")
+        (and (float-type? from) (= to :uint32)) (str "((int) (long) " a ")")
+        (= from :int32) (str "((" (jtype to) ") " a ")")
+        (= from :uint32) (str "((" (jtype to) ") (" a " & 0xFFFFFFFFL))")
+        (and (float-type? from) (float-type? to)) (str "((" (jtype to) ") " a ")")
         (#{[:int32 :uint32] [:uint32 :int32]} [from to]) a
         :else (throw (ex-info (str "JVM lowering: no conversion from " from " to " to) {:from from :to to}))))
 
@@ -211,7 +248,7 @@
 (defn- fresh [em prefix] (str prefix (vswap! (:n em) inc)))
 
 (defn- simple? [^String e]
-  (boolean (re-matches #"[A-Za-z_][A-Za-z0-9_]*|-?[0-9][0-9.eE+xa-f-]*f?|Float\.intBitsToFloat\(0x[0-9a-f]+\)" e)))
+  (boolean (re-matches #"[A-Za-z_][A-Za-z0-9_]*|-?[0-9][0-9.eE+xa-f-]*f?|Float\.intBitsToFloat\(0x[0-9a-f]+\)|Double\.longBitsToDouble\(0x[0-9a-f]+L\)" e)))
 
 (defn- bind!
   "A Java name for the expression e of dtype (e itself when it is a name or
@@ -424,63 +461,92 @@
       (.append sb ^String (case kind
                             :decl (if (contains? fields b) (str b " = " c ";") (str (jtype a) " " b " = " c ";"))
                             :set (str a " = " b ";")
-                            :store (str "out" a "[" b "] = " c ";")))
+                            :store (str "out" a "[i * SIZE" a " + " b "] = " c ";")))
       (.append sb "\n"))
     (.append sb "  }\n")
     (.toString sb)))
 
 (defn source
   "The Java text of a class (named class-name) running program (gen.device.
-   stage's, of one key) on a key's two words: (run key0 key1 out0 …).
+   stage's, of one key):
+   - (run key0 key1 out0 …): one run on the key's words;
+   - (runRange r0 r1 from to out0 …): runs from ≤ i < to, run i on
+     (rng/split [r0 r1] n)[i] (Threefry of the counter [0 i] under the
+     root, derived in the loop), its outputs at offset i·SIZEk of each
+     outk;
+   - an instance, (new class n), is a LongConsumer whose accept(root) is
+     runRange over all n on its own arrays, and a Supplier of them.
    Returns {:source :class-name :outputs [{:shape :dtype} per output, a
    scan's ys [length …]] :methods (their count) :statements}. chunk: the
    statements per method (gen.jvm.chunk, 600 by default)."
   ([program class-name] (source program class-name (chunk-size)))
   ([{:keys [graph inputs outputs]} class-name chunk]
-  (when-not (= inputs [[[2] :uint32]])
-    (throw (ex-info "JVM lowering: a program of one key (data inputs not yet)" {:inputs inputs})))
-  (let [em (emitter)
-        by-id (into {} (map (juxt :id identity) graph))
-        ys-out (into {} (keep-indexed (fn [k o] (let [{:keys [op args attrs]} (by-id o)]
-                                                  (when (= op :result)
-                                                    (let [s (by-id (first args)) nc (get-in s [:attrs :n-carry])]
-                                                      (when (>= (:index attrs) nc) [[(:id s) (- (:index attrs) nc)] k])))))
-                                      outputs))
-        env0 (into {} (map (fn [{:keys [id]}] [id (value [2] :uint32 ["key0" "key1"])]) (filter #(= :param (:op %)) graph)))
-        env (emit-graph! em graph env0 {:ys-out ys-out})
-        outs (mapv env outputs)
-        _ (doseq [[k {:keys [ys el]}] (map-indexed vector outs) :when (nil? ys) [e x] (map-indexed vector el)]
-            (stmt! em [:store k (str e) x]))
-        stmts @(:stmts em)
-        {:keys [methods order]} (chunks stmts chunk)
-        fs (fields methods)
-        out-specs (mapv (fn [{:keys [shape dtype ys]} o] {:shape (if ys (:shape (by-id o)) shape) :dtype dtype}) outs outputs)
-        sig (str/join (map-indexed (fn [k {:keys [dtype]}] (str ", " (array-types dtype) " out" k)) out-specs))
-        calls (str/join (for [o order]
-                          (if (string? o)
-                            (str "    p." o "();\n")
-                            (let [[_ it length ms] o]
-                              (str "    for (int " it " = 0; " it " < " length "; ++" it ") {\n"
-                                   (str/join (map #(str "      p." % "(" it ");\n") ms))
-                                   "    }\n")))))]
-    {:source (str "public final class " class-name " {\n"
-                  helpers
-                  "  int key0, key1;\n"
-                  (str/join (map-indexed (fn [k {:keys [dtype]}] (str "  " (array-types dtype) " out" k ";\n")) out-specs))
-                  (str/join (map (fn [[v dtype]] (str "  " (jtype dtype) " " v ";\n")) (sort-by key fs)))
-                  (str/join (map #(java-method % fs) methods))
-                  "  public static void run(int key0, int key1" sig ") {\n"
-                  "    " class-name " p = new " class-name "();\n"
-                  "    p.key0 = key0; p.key1 = key1;\n"
-                  (str/join (map #(str "    p.out" % " = out" % ";\n") (range (count out-specs))))
-                  calls
-                  "  }\n}\n")
-     :class-name class-name
-     :outputs out-specs
-     :methods (count methods)
-     :fields (count fs)
-     :chunk chunk
-     :statements (reduce + (map #(if (= :loop (first %)) (count (nth % 3)) 1) stmts))})))
+   (when-not (= inputs [[[2] :uint32]])
+     (throw (ex-info "JVM lowering: a program of one key (data inputs not yet)" {:inputs inputs})))
+   (let [em (emitter)
+         by-id (into {} (map (juxt :id identity) graph))
+         ys-out (into {} (keep-indexed (fn [k o] (let [{:keys [op args attrs]} (by-id o)]
+                                                   (when (= op :result)
+                                                     (let [s (by-id (first args)) nc (get-in s [:attrs :n-carry])]
+                                                       (when (>= (:index attrs) nc) [[(:id s) (- (:index attrs) nc)] k])))))
+                                       outputs))
+         env0 (into {} (map (fn [{:keys [id]}] [id (value [2] :uint32 ["key0" "key1"])]) (filter #(= :param (:op %)) graph)))
+         env (emit-graph! em graph env0 {:ys-out ys-out})
+         outs (mapv env outputs)
+         _ (doseq [[k {:keys [ys el]}] (map-indexed vector outs) :when (nil? ys) [e x] (map-indexed vector el)]
+             (stmt! em [:store k (str e) x]))
+         stmts @(:stmts em)
+         {:keys [methods order]} (chunks stmts chunk)
+         fs (fields methods)
+         out-specs (mapv (fn [{:keys [shape dtype ys]} o] {:shape (if ys (:shape (by-id o)) shape) :dtype dtype}) outs outputs)
+         ks (range (count out-specs))
+         sig (str/join (map (fn [k {:keys [dtype]}] (str ", " (array-types dtype) " out" k)) ks out-specs))
+         outs-args (str/join (map #(str ", out" %) ks))
+         set-outs (str/join (map #(str "    p.out" % " = out" % ";\n") ks))
+         calls (fn [indent]
+                 (str/join (for [o order]
+                             (if (string? o)
+                               (str indent "p." o "();\n")
+                               (let [[_ it length ms] o]
+                                 (str indent "for (int " it " = 0; " it " < " length "; ++" it ") {\n"
+                                      (str/join (map #(str indent "  p." % "(" it ");\n") ms))
+                                      indent "}\n"))))))
+         new-array (fn [{:keys [dtype]} k] (str "new " (str/replace (array-types dtype) "[]" "") "[n * SIZE" k "]"))]
+     {:source (str "public final class " class-name
+                   " implements java.util.function.LongConsumer, java.util.function.Supplier<Object[]> {\n"
+                   helpers threefry
+                   (str/join (map (fn [k {:keys [shape]}] (str "  static final int SIZE" k " = " (size shape) ";\n")) ks out-specs))
+                   "  int key0, key1, i, n;\n"
+                   (str/join (map (fn [k {:keys [dtype]}] (str "  " (array-types dtype) " out" k ";\n")) ks out-specs))
+                   (str/join (map (fn [[v dtype]] (str "  " (jtype dtype) " " v ";\n")) (sort-by key fs)))
+                   (str/join (map #(java-method % fs) methods))
+                   "  public " class-name "() {}\n"
+                   "  public " class-name "(int n) {\n    this.n = n;\n"
+                   (str/join (map (fn [k o] (str "    out" k " = " (new-array o k) ";\n")) ks out-specs))
+                   "  }\n"
+                   "  public void accept(long root) { runRange((int) (root >>> 32), (int) root, 0, n" outs-args "); }\n"
+                   "  public Object[] get() { return new Object[] {" (str/join ", " (map #(str "out" %) ks)) "}; }\n"
+                   "  public static void run(int key0, int key1" sig ") {\n"
+                   "    " class-name " p = new " class-name "();\n"
+                   "    p.key0 = key0; p.key1 = key1;\n"
+                   set-outs
+                   (calls "    ")
+                   "  }\n"
+                   "  public static void runRange(int r0, int r1, int from, int to" sig ") {\n"
+                   "    " class-name " p = new " class-name "();\n"
+                   set-outs
+                   "    for (int i = from; i < to; ++i) {\n"
+                   "      long k = g_threefry(r0, r1, 0, i);\n"
+                   "      p.i = i; p.key0 = (int) (k >>> 32); p.key1 = (int) k;\n"
+                   (calls "      ")
+                   "    }\n"
+                   "  }\n}\n")
+      :class-name class-name
+      :outputs out-specs
+      :methods (count methods)
+      :fields (count fs)
+      :chunk chunk
+      :statements (reduce + (map #(if (= :loop (first %)) (count (nth % 3)) 1) stmts))})))
 
 ;; ---------------------------------------------------------------------------
 ;; Compiling in memory
@@ -525,6 +591,7 @@
   (let [n (size shape)]
     (case dtype
       :float32 (float-array n)
+      :float64 (double-array n)
       (:uint32 :int32) (int-array n)
       :bool (boolean-array n))))
 
@@ -533,7 +600,8 @@
   8000)
 
 (defn- array-class [dtype]
-  (case dtype :float32 (class (float-array 0)) (:uint32 :int32) (class (int-array 0)) :bool (class (boolean-array 0))))
+  (case dtype :float32 (class (float-array 0)) :float64 (class (double-array 0)) (:uint32 :int32) (class (int-array 0))
+        :bool (class (boolean-array 0))))
 
 (defn compile
   "program (gen.device.stage's, of one key) as a loaded JVM class:
@@ -552,16 +620,74 @@
             sizes (method-sizes bytes)]
         (if (and (> (long (apply max (vals sizes))) (long huge-method)) (> chunk 50))
           (recur (quot chunk 2))
-          (let [cls (.defineClass (clojure.lang.DynamicClassLoader.) class-name bytes nil)
+          (let [^Class cls (.defineClass (clojure.lang.DynamicClassLoader.) class-name bytes nil)
                 outs (:outputs src)
-                mt (MethodType/methodType Void/TYPE ^java.util.List (into [Integer/TYPE Integer/TYPE] (map (comp array-class :dtype) outs)))
-                ^MethodHandle h (.findStatic (MethodHandles/publicLookup) cls "run" mt)]
+                arrays (map (comp array-class :dtype) outs)
+                lookup (MethodHandles/publicLookup)
+                ^MethodHandle h (.findStatic lookup cls "run" (MethodType/methodType Void/TYPE ^java.util.List (into [Integer/TYPE Integer/TYPE] arrays)))
+                ^MethodHandle range-h (.findStatic lookup cls "runRange"
+                                                    (MethodType/methodType Void/TYPE ^java.util.List (into [Integer/TYPE Integer/TYPE Integer/TYPE Integer/TYPE] arrays)))
+                ctor (.getConstructor cls (into-array Class [Integer/TYPE]))]
             (assoc src
                    :bytes bytes
                    :method-sizes sizes
                    :ms {:generate (/ (- t1 t0) 1e6) :javac (/ (- t2 t1) 1e6)}
                    :handle h
+                   :range-handle range-h
+                   :instance (fn [n] (.newInstance ^java.lang.reflect.Constructor ctor (object-array [(int n)])))
                    :run (fn [[k0 k1]]
                           (let [arrays (mapv new-array outs)]
                             (.invokeWithArguments h ^java.util.List (into [(unchecked-int (long k0)) (unchecked-int (long k1))] arrays))
                             arrays)))))))))
+
+(defn key-long
+  "A key's two words as one long, an instance's accept takes."
+  ^long [[k0 k1]]
+  (bit-or (bit-shift-left (long k0) 32) (bit-and (long k1) 0xFFFFFFFF)))
+
+(defonce ^:private pool
+  (delay (java.util.concurrent.ForkJoinPool. (.availableProcessors (Runtime/getRuntime)))))
+
+(defn- block-lse
+  "[max, sum of exp(w - max)] of w[from, to), w a float[] or a double[]."
+  [w ^long from ^long to]
+  (let [at (if (instance? (Class/forName "[F") w)
+             (let [^floats w w] (fn ^double [^long j] (double (aget w j))))
+             (let [^doubles w w] (fn ^double [^long j] (aget w j))))
+        m (loop [j from m Double/NEGATIVE_INFINITY] (if (< j to) (recur (inc j) (Math/max m (.invokePrim ^clojure.lang.IFn$LD at j))) m))
+        s (if (== m Double/NEGATIVE_INFINITY)
+            0.0
+            (loop [j from s 0.0] (if (< j to) (recur (inc j) (+ s (Math/exp (- (.invokePrim ^clojure.lang.IFn$LD at j) m)))) s)))]
+    [m s]))
+
+(defn- combine-lse
+  "log(sum exp) of blocks' [max sum] partials, in block order."
+  ^double [parts]
+  (let [m (reduce max Double/NEGATIVE_INFINITY (map first parts))]
+    (if (== m Double/NEGATIVE_INFINITY)
+      m
+      (+ m (Math/log (reduce + (map (fn [[bm bs]] (* (double bs) (Math/exp (- (double bm) m)))) parts)))))))
+
+(defn run-many
+  "n runs of k on the keys (rng/split root n)[i] (root's words), in
+   contiguous blocks of opts :block runs (by default n/64, at least 1, so
+   the blocks depend on n only) spread over a pool of every core (:threads
+   1 runs them in this thread). Returns {:outputs [arrays, run i's at
+   offset i·size], :log-sum-exp (with :lse k: log Σ exp of output k, a
+   float32 [1] per run, combined from the blocks in order, so the same
+   for any number of threads)}."
+  [{:keys [outputs ^MethodHandle range-handle]} n [r0 r1] {:keys [block threads lse]}]
+  (let [n (long n)
+        block (long (or block (max 1 (quot n 64))))
+        arrays (mapv (fn [{:keys [shape dtype]}] (new-array {:shape (into [n] shape) :dtype dtype})) outputs)
+        r0 (unchecked-int (long r0)) r1 (unchecked-int (long r1))
+        tasks (vec (for [from (range 0 n block)]
+                     (let [to (min n (+ from block))]
+                       (fn []
+                         (.invokeWithArguments range-handle ^java.util.List (into [r0 r1 (int from) (int to)] arrays))
+                         (when lse (block-lse (nth arrays lse) from to))))))
+        parts (if (= 1 threads)
+                (mapv #(%) tasks)
+                (mapv #(.get ^java.util.concurrent.Future %) (.invokeAll ^java.util.concurrent.ForkJoinPool @pool ^java.util.Collection tasks)))]
+    (cond-> {:outputs arrays}
+      lse (assoc :log-sum-exp (combine-lse parts)))))

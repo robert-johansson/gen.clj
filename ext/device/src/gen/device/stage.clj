@@ -46,6 +46,13 @@
 
 (defn- graph [parent] (Graph. parent (java.util.ArrayList.) (java.util.LinkedHashMap.)))
 
+(def ^:dynamic *float*
+  "The staging backend's float dtype: its default (so a model's draws and
+   arguments), its reductions' and its constants'. :float32 (every
+   device), or :float64 (the JVM lowering: the JVM backend's default, whose
+   draws it then makes)."
+  :float32)
+
 (def ^:dynamic *graph*
   "The graph that ops record into (the innermost one being staged)."
   nil)
@@ -158,6 +165,20 @@
         f (op! :bitcast [bits] [n] :float32)]
     (array/reshape (- f 1.0) shape)))
 
+(defn- uniform-doubles
+  "float64 uniforms in [0, 1) of shape from the staged key words: the top 52
+   bits of the 64-bit word w0·2^32 + w1, as gen.random.threefry/
+   uniform-doubles, built exactly in float64 as (w0·2^20 + (w1 >>> 12))·2^-52
+   (no 64-bit integers on the staging backend)."
+  [words shape]
+  (let [n (sh/size shape)
+        ws (threefry-words words (array/arange 0 n 1 {:dtype :uint32}))
+        w0 (array/reshape (array/slice ws 1 0 1) [n])
+        w1 (array/reshape (array/slice ws 1 1 2) [n])
+        hi (op! :convert [w0] [n] :float64)
+        lo (op! :convert [(bit :shift-right-logical w1 12)] [n] :float64)]
+    (array/reshape (* (+ (* hi (Math/pow 2.0 20)) lo) (Math/pow 2.0 -52)) shape)))
+
 (defn key-spec
   "A staged key's place among stage's argument specs."
   []
@@ -218,7 +239,7 @@
 (deftype StageBackend []
   p/IBackend
   (-name [_] :stage)
-  (-defaults [_] {:float :float32 :int :int32})
+  (-defaults [_] {:float *float* :int :int32})
   (-lazy? [_] true)
   (-native-ops [_] #{})
 
@@ -243,7 +264,7 @@
     (op! op args (elementwise-shape args) (dt/result-dtype op dtype) {:in dtype}))
   (-reduce [_ op x axes keep-dims?]
     (op! :reduce [x] (reduced-shape (shape-of x) axes keep-dims?)
-         (dt/reduce-result-dtype op (.-dtype ^Staged x) {:float :float32 :int :int32})
+         (dt/reduce-result-dtype op (.-dtype ^Staged x) {:float *float* :int :int32})
          {:op op :axes (vec axes) :keep-dims? keep-dims?}))
   (-scan [_ op _ _ _] (throw (ex-info (str "The staging backend has no " op " yet") {:op op})))
 
@@ -271,12 +292,14 @@
   (-linalg [_ op _] (throw (ex-info (str "The staging backend has no " op " yet") {:op op})))
 
   (-random-uniform [_ key shape dtype]
-    (when-not (= dtype :float32)
-      (throw (ex-info (str "Staged draws are float32 only (asked " dtype ")") {:dtype dtype})))
-    (if (instance? StagedKey key)
-      (uniform-floats (.-words ^StagedKey key) (vec shape))
-      ;; a host key: its draws are constants, the JVM backend's
-      (op! :constant [] shape :float32 {:values (vec (threefry/uniform-floats key (sh/size shape)))})))
+    (when-not (#{:float32 :float64} dtype)
+      (throw (ex-info (str "Staged draws are float32 or float64 (asked " dtype ")") {:dtype dtype})))
+    (cond (not (instance? StagedKey key))
+          ;; a host key: its draws are constants, the JVM backend's
+          (op! :constant [] shape dtype {:values (vec ((if (= dtype :float64) threefry/uniform-doubles threefry/uniform-floats)
+                                                        key (sh/size shape)))})
+          (= dtype :float64) (uniform-doubles (.-words ^StagedKey key) (vec shape))
+          :else (uniform-floats (.-words ^StagedKey key) (vec shape))))
   (-value-and-grad [b f args argnums] ((requiring-resolve 'gen.array.tape/value-and-grad) b f args argnums)))
 
 (def backend (StageBackend.))
@@ -321,7 +344,7 @@
    and observations, made on the JVM backend."
   [x]
   (let [c (fn [a] (if (and (array/backend-array? a) (not (staged? a)))
-                    (op! :constant [] (array/shape a) (if (= :float (dt/kind (array/dtype a))) :float32 (array/dtype a))
+                    (op! :constant [] (array/shape a) (if (= :float (dt/kind (array/dtype a))) *float* (array/dtype a))
                          {:values (vec (flatten [(array/->clj a)]))})
                     a))]
     (if (cm/choicemap? x)

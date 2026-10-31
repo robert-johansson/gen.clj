@@ -23,8 +23,8 @@
     (testing "a scan over xs: only counted scans run in a thread"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"scan over xs"
                             (cuda/source (ch/mala-run model args obs pb/selection pb/tau 5)))))
-    (testing "a program of anything but one key"
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"one key"
+    (testing "a program of anything but a key, then its data"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"a program of a key"
                             (cuda/source (gen.device.stage/stage (fn [x] (array/exp x)) [[2] :float32])))))))
 
 (defn- launch
