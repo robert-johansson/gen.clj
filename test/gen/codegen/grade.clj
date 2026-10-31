@@ -47,7 +47,8 @@
    Run the grader in a JVM of its own, never the LLM's: a candidate is
    evaluated in this JVM (gen.codegen.candidate), so one that loops is
    abandoned, not stopped, and one that exhausts memory ends the JVM."
-  (:require [gen.array :as array]
+  (:require [clojure.string :as str]
+            [gen.array :as array]
             [gen.codegen.candidate :as candidate]
             [gen.codegen.tasks :as tasks]
             [gen.combinators :as comb]
@@ -68,9 +69,16 @@
 
 (defn- finite? [x] (Double/isFinite (host x)))
 
-(defn- message [^Throwable e]
-  (let [m (or (ex-message e) (str (class e)))]
-    (subs m 0 (min 400 (count m)))))
+(defn- message
+  "e's message and its causes', joined: a compiler error's own message
+   names only where it happened (Syntax error compiling at (5:25).), its
+   cause what (No such var: d/point), and the repair loop sends both."
+  [^Throwable e]
+  (let [m (->> (take-while some? (iterate ex-cause e))
+               (map #(or (ex-message %) (str (class %))))
+               distinct
+               (str/join " Caused by: "))]
+    (subs m 0 (min 500 (count m)))))
 
 (defn- median [xs] (nth (sort xs) (quot (count xs) 2)))
 

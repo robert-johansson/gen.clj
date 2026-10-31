@@ -58,6 +58,9 @@
   (doseq [[stage id code] planted]
     (testing [stage code]
       (is (= stage (stopped-at (g/grade (tasks/by-id id) code {:gate-explains? true}))))))
+  (testing "an evaluation error names its cause, not only where it happened"
+    (let [r (g/grade (tasks/by-id :line) (str/replace line "(d/normal 0 5)" "(d/point 0.3)"))]
+      (is (re-find #"Syntax error compiling.*Caused by: .*d/point" (:error (first (remove :ok (:stages r))))))))
   (testing "a leading ns form (the prelude copied) is dropped"
     (let [r (g/grade (tasks/by-id :line) (str "(ns candidate (:require [gen.dist :as d]))\n" line))]
       (is (= 7 (:passed r)))
