@@ -63,7 +63,7 @@
 
 (def defaults
   {:timeout-ms 300000 :particles 20000 :repeats 3 :law-tests 10 :seed 1 :gate-explains? false
-   :repair-delimiters? true :device nil :estimator :auto :tempered-particles 200})
+   :repair-delimiters? true :device nil :estimator :checked :tempered-particles 200})
 
 (def max-spread
   "Nats: estimates of a log marginal likelihood that spread more than this
@@ -103,15 +103,30 @@
 
 (defn log-ml
   "The log marginal likelihood of task's data under model, by :estimator:
-   :importance (importance-log-ml), :tempered (tempered-log-ml), or :auto
+   :importance (importance-log-ml), :tempered (tempered-log-ml), :auto
    (importance sampling, then tempered SMC when its estimates spread more
-   than max-spread)."
-  [model task {:keys [estimator] :or {estimator :auto} :as opts}]
+   than max-spread), or :checked (both: tempered SMC's when its estimates
+   agree, else importance sampling's when its do, else tempered SMC's,
+   unreliable; :tempered and :importance their medians, :disagree? when
+   both are reliable and differ by more than max-spread: importance
+   sampling's repeats can agree and be wrong alike, as on the outliers
+   task, 4 nats low)."
+  [model task {:keys [estimator] :or {estimator :checked} :as opts}]
   (case estimator
     :importance (importance-log-ml model task opts)
     :tempered (tempered-log-ml model task opts)
     :auto (let [r (importance-log-ml model task opts)]
-            (if (> (:spread r) max-spread) (tempered-log-ml model task opts) r))))
+            (if (> (:spread r) max-spread) (tempered-log-ml model task opts) r))
+    :checked (let [t (tempered-log-ml model task opts)
+                   i (importance-log-ml model task opts)
+                   reliable? #(<= (:spread %) max-spread)
+                   ;; tempered SMC when it is reliable; else importance sampling
+                   ;; when it is (a discrete switch between structures, which
+                   ;; single-site moves cross rarely); else tempered, unreliable
+                   chosen (cond (reliable? t) t (reliable? i) i :else t)]
+               (assoc chosen :tempered (:median t) :importance (:median i)
+                      :disagree? (and (reliable? i) (reliable? t)
+                                      (> (abs (- (:median t) (:median i))) max-spread))))))
 
 (defn importance-log-ml
   "The log marginal likelihood of task's data under model: {:median
