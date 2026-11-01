@@ -662,7 +662,8 @@
   systematic {:arglists ([log-weights n] [log-weights n key])}}
 
  gen.laws
- {across {:kind :var}
+ {*score-scale* {:kind :var, :dynamic true}
+  across {:kind :var}
   all {:kind :var}
   assess-is-generate-with-every-choice {:arglists ([cases])}
   cases {:arglists ([models])}

@@ -756,11 +756,12 @@
           tr (gfi/simulate plain args k)
           sigma (restrict (:choices tr) (picked (addrs tr) picks))
           s (sel/from-paths (picked (addrs tr) picks))]
-      (checks (= (:choices (gfi/simulate gf args k)) (:choices tr))
-              (same? (gfi/generate gf args sigma k) (gfi/generate plain args sigma k))
-              (scaled [tr] (close? (:weight (gfi/assess gf args (:choices tr) k)) (:weight (gfi/assess plain args (:choices tr) k))))
-              (same? (gfi/update (assoc tr :gen-fn gf) sigma k) (gfi/update tr sigma k))
-              (same? (gfi/regenerate (assoc tr :gen-fn gf) s k) (gfi/regenerate tr s k))))))
+      (scaled [tr]
+        (checks (= (:choices (gfi/simulate gf args k)) (:choices tr))
+                (same? (gfi/generate gf args sigma k) (gfi/generate plain args sigma k))
+                (close? (:weight (gfi/assess gf args (:choices tr) k)) (:weight (gfi/assess plain args (:choices tr) k)))
+                (same? (gfi/update (assoc tr :gen-fn gf) sigma k) (gfi/update tr sigma k))
+                (same? (gfi/regenerate (assoc tr :gen-fn gf) s k) (gfi/regenerate tr s k)))))))
 
 (def general
   "The laws of every generative function: the thesis's definitions (Def
@@ -852,14 +853,15 @@
           s (sel/from-paths (picked (addrs tr) picks))
           both (fn [f] (let [r1 (vacuous-on-unvisitable (f gf tr)) r2 (vacuous-on-unvisitable (f plain tp))]
                          (if (and (vacuous? r1) (vacuous? r2)) true (checks (same? r1 r2)))))]
-      (checks (same-trace? tr tp)
-              (both (fn [g _] (gfi/generate g args (restrict (:choices tr) (picked (addrs tr) picks)) (rng/fold-in k 2))))
-              (scaled [tr] (close? (:weight (gfi/assess gf args (:choices tr) k)) (:weight (gfi/assess plain args (:choices tr) k))))
-              (both (fn [_ t] (gfi/update t args' diffs sigma (rng/fold-in k 3))))
-              (both (fn [_ t] (gfi/update t args' precise sigma (rng/fold-in k 3))))
-              (both (fn [_ t] (gfi/regenerate t args' precise s (rng/fold-in k 6))))
-              (both (fn [_ t] (gfi/update t cm/EMPTY (rng/fold-in k 4))))
-              (both (fn [_ t] (gfi/regenerate t args' diffs s (rng/fold-in k 5))))))))
+      (scaled [tr tp]
+        (checks (same-trace? tr tp)
+                (both (fn [g _] (gfi/generate g args (restrict (:choices tr) (picked (addrs tr) picks)) (rng/fold-in k 2))))
+                (close? (:weight (gfi/assess gf args (:choices tr) k)) (:weight (gfi/assess plain args (:choices tr) k)))
+                (both (fn [_ t] (gfi/update t args' diffs sigma (rng/fold-in k 3))))
+                (both (fn [_ t] (gfi/update t args' precise sigma (rng/fold-in k 3))))
+                (both (fn [_ t] (gfi/regenerate t args' precise s (rng/fold-in k 6))))
+                (both (fn [_ t] (gfi/update t cm/EMPTY (rng/fold-in k 4))))
+                (both (fn [_ t] (gfi/regenerate t args' diffs s (rng/fold-in k 5)))))))))
 
 (def static
   "For a static generative function (gen ^:static)."
@@ -996,14 +998,15 @@
       (let [kept-lp (gfi/project t2 (sel/from-paths (kept tr t2 sigma)))
             {t3 :trace w3 :weight} (gfi/update (assoc t2 :gen-fn gf) (:args tr) (unknown-diffs (:args tr)) disc
                                                (rng/fold-in (rng/key seed) 3))]
-        (checks (gfi/same-gen-fn? gf' (trace/maker t2))
-                (assessed? gf' t2)
-                (applied? tr t2 sigma)
-                (scaled [tr t2] (if (outside? t2) (minus-infinity? w) (close? w (- kept-lp (:score tr)))))
-                (= (exact-discard tr t2 sigma) disc)
-                (= (:choices tr) (:choices t3))
-                (assessed? gf t3)
-                (if (in-support? t2) (scaled [tr t2 t3] (checks (close? (+ w w3) (- kept-lp (:score t2))))) true)))
+        (scaled [tr t2 t3]
+          (checks (gfi/same-gen-fn? gf' (trace/maker t2))
+                  (assessed? gf' t2)
+                  (applied? tr t2 sigma)
+                  (if (outside? t2) (minus-infinity? w) (close? w (- kept-lp (:score tr))))
+                  (= (exact-discard tr t2 sigma) disc)
+                  (= (:choices tr) (:choices t3))
+                  (assessed? gf t3)
+                  (if (in-support? t2) (checks (close? (+ w w3) (- kept-lp (:score t2)))) true))))
       vacuous)))
 
 (defn regenerate-across-generative-functions
@@ -1023,12 +1026,13 @@
         (let [{t2 :trace w :weight} r
               now (set (addrs t2))
               retained (filter #(and (now %) (not (chosen %))) (addrs tr))]
-          (checks (gfi/same-gen-fn? gf' (trace/maker t2))
-                  (assessed? gf' t2)
-                  (every? #(= (cm/get-choice (:choices tr) %) (cm/get-choice (:choices t2) %)) retained)
-                  (if (outside? t2)
-                    (minus-infinity? w)
-                    (scaled [tr t2] (close? w (- (gfi/project t2 (sel/from-paths retained)) (gfi/project tr (sel/from-paths retained))))))))))))
+          (scaled [tr t2]
+            (checks (gfi/same-gen-fn? gf' (trace/maker t2))
+                    (assessed? gf' t2)
+                    (every? #(= (cm/get-choice (:choices tr) %) (cm/get-choice (:choices t2) %)) retained)
+                    (if (outside? t2)
+                      (minus-infinity? w)
+                      (close? w (- (gfi/project t2 (sel/from-paths retained)) (gfi/project tr (sel/from-paths retained))))))))))))
 
 (def across
   "For pairs of generative functions: models [label gf args alt-args gf'],

@@ -56,7 +56,9 @@ other values for the same key, from the same distribution.
   importance sampling from the prior fails (a posterior far narrower than
   the prior) and for models whose structure varies. Checked against
   exact values: a conjugate normal model, a branch on a draw, a Kalman
-  random walk, an enumerated HMM.
+  random walk, an enumerated HMM. The estimate is consistent; with
+  `:betas` and `:scales`, a previous run's, nothing adapts and its
+  exponential is unbiased.
 - **Breaking: = on a 0-d MLX array and a host number or boolean throws**
   (gen.backend.mlx). It answered false, so plain Clojure outside a gen
   body, (= k 0) on a draw, took the other branch on every run where the

@@ -137,6 +137,18 @@
         r (within-band? (runs hmm args obs {:particles 200}) exact)]
     (is (:ok r) (pr-str r))))
 
+(deftest a-run-fixed-in-advance
+  ;; a run given a previous run's schedule and scales adapts nothing (its
+  ;; estimate's exponential is then unbiased); on the same key it repeats
+  ;; the previous run exactly
+  (let [r (tempering/smc branching [] (cm/choicemap :y 2.2) {:particles 100 :key (rng/key 3)})
+        fixed (tempering/smc branching [] (cm/choicemap :y 2.2)
+                             {:particles 100 :key (rng/key 3) :betas (:betas r) :scales (:scales r)})]
+    (is (= (:log-ml-estimate r) (:log-ml-estimate fixed)))
+    (is (= (:betas r) (:betas fixed)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"rise from 0 to 1"
+                          (tempering/smc branching [] (cm/choicemap :y 2.2) {:key (rng/key 3) :betas [0.0 0.7 0.5 1.0] :scales [{} {} {}]})))))
+
 (deftest loud-errors
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no observations"
                         (tempering/smc conjugate [3] cm/EMPTY {:key (rng/key 1)}))))

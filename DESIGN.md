@@ -3217,10 +3217,21 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   spread across the particles (a walk that changes the structure is
   rejected). Prior regenerations alone were measured to fail a
   posterior 45000 times narrower than its prior. One particle at a time
-  for now. Why: importance sampling from the prior cannot judge a model
+  for now. The schedule and the walks' scales adapt to the particles, so
+  the estimate is consistent, not unbiased; a run given a previous run's
+  :betas and :scales adapts nothing, and its exponential is unbiased. Why: importance sampling from the prior cannot judge a model
   whose posterior is far from its prior (the codegen bake-off's
   changepoint), and comparing synthesized models by evidence needs it
   (genclj-zjz7).
+- **gen.laws' tolerance scales with the scores (owner, 2026-11-01;
+  genclj-6txl).** close? compared weights within a fixed absolute 1e-12
+  (float64), which assumed scores up to ~100: correct models whose
+  traces score in the thousands failed laws by ~1e-11 (the codegen
+  grader found it on four book models). The absolute tolerance becomes
+  1e-12 × max(1, |score|) over the traces a check's weights come from,
+  and float32's 1e-3 alike; the relative tolerances stay. A planted
+  error of 1e-6 still fails for scores below ~1e5. A CHANGELOG line, as
+  gen.laws' policy requires for a tolerance change.
 ## 10. Deferred (tracked, not forgotten)
 
 `beans list --tag deferred-port` lists every GenMLX area left out of M1–M4, each
