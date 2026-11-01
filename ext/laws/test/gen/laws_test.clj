@@ -96,6 +96,18 @@
                  (catch Exception e e))]
       (is (some #(re-find #"a law set is a map" (or (ex-message %) "")) [e (ex-cause e)])))))
 
+(deftest close-scales-with-the-scores
+  ;; owner, 2026-11-01 (genclj-6txl): the absolute tolerance is 1e-12 (float32's
+  ;; 1e-3) times the magnitude of the scores the weights come from
+  (let [f32? (= :float32 (:float (array/defaults array/*backend*)))
+        atol (if f32? 1e-3 1e-12)]
+    (testing "round-off of scores in the thousands passes once the law names its scores"
+      (is (not (laws/close? (* 7 atol) 0.0)))
+      (is (binding [laws/*score-scale* 1000.0] (laws/close? (* 7 atol) 0.0))))
+    (testing "a real error still fails: 1e-6 of scores up to ~1e5 (float64)"
+      (when-not f32?
+        (is (not (binding [laws/*score-scale* 1e5] (laws/close? 1e-6 0.0))))))))
+
 (deftest check-has-arities
   (let [p (laws/score-is-the-assessed-density (laws/cases models))
         seen #(select-keys % [:pass? :num-tests :seed :vacuous])]

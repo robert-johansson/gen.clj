@@ -38,6 +38,15 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **gen.laws: close?'s absolute tolerance scales with the scores** (owner,
+  2026-11-01; DESIGN §9, genclj-6txl). It was 1e-12 in float64 (float32's
+  1e-3), which assumed scores up to ~100: correct models whose traces
+  score in the thousands failed update and regenerate laws by ~1e-11 (the
+  codegen grader found it on four of the book's models). It is now that
+  times the largest |score| of the traces a check's weights come from
+  (`laws/*score-scale*`, which each law binds; 1 outside a law, so a
+  reader's own `(close? x y)` is unchanged), the relative tolerances as
+  before. A planted error of 1e-6 still fails for scores below ~1e5.
 - **Experimental: tempered SMC** (`gen.inference.tempering/smc`, outside
   the 1.x promise; DESIGN §9, genclj-87x1): the log marginal likelihood
   of observations under any generative function, and posterior

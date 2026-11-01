@@ -16,10 +16,9 @@
                     address visited (an unvisited one throws), the weight finite
      :laws          gen.laws's laws (laws/all) on the task's arguments, the
                     model's return value dropped (comb/dimap: a closure is
-                    never = another). Advisory: a failure is a warning, the
-                    grading goes on, until gen.laws' close? scales with
-                    scores (correct models with scores in the thousands fail
-                    it by 1e-11; genclj-ihc4's notes)
+                    never = another); close? scales with the scores (owner,
+                    2026-11-01, genclj-6txl), so correct models whose scores
+                    reach the thousands pass, and an impure one (rand) fails
      :explains      its log marginal likelihood of the data, by importance
                     sampling from the prior, against the reference's (the
                     task's answer, graded alike): the gap is reported, and
@@ -239,7 +238,11 @@
                  [:laws #(let [dropped (comb/dimap (:model @state) vector (constantly nil))
                                failures (laws/verify [[:candidate dropped args [args]]]
                                                      {:num-tests law-tests :seed seed})]
-                           (if (seq failures) {:warnings (vec (keys failures))} {}))]
+                           (when (seq failures)
+                             (throw (ex-info (str "laws fail: " (vec (keys failures))
+                                                  " (the model's operations disagree: randomness outside trace, say rand)")
+                                             {})))
+                           {})]
                  [:explains #(let [c (log-ml (:model @state) task opts)]
                                (if (::reference? opts)
                                  (do (vswap! state assoc :log-ml {:candidate c}) {})

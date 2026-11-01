@@ -54,7 +54,7 @@
    5 running models of 40 where these gave 11 (genclj-ihc4)."
   {:temp 0.7 :top-k 20 :top-p 0.8})
 
-(def hard-stages #{:read :safe :evaluates :simulates :accepts-data})
+(def hard-stages #{:read :safe :evaluates :simulates :accepts-data :laws})
 
 ;; ---------------------------------------------------------------------------
 ;; Sampling

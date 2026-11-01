@@ -88,16 +88,41 @@
   []
   (= :float32 (:float (array/defaults array/*backend*))))
 
+(def ^:dynamic *score-scale*
+  "The magnitude of the scores the weights a check compares come from, at
+   least 1: close?'s absolute tolerance scales with it. A law binds it to
+   its traces' (scaled); outside one it is 1."
+  1.0)
+
+(defn- score-magnitude
+  "|x|'s largest finite element: a trace's score, or a number; 0 for an
+   infinite or NaN one (a trace outside the support)."
+  ^double [x]
+  (let [v (if (and (map? x) (contains? x :score)) (:score x) x)]
+    (if (nil? v)
+      0.0
+      (reduce (fn [^double m e] (let [e (Math/abs (double e))] (if (Double/isFinite e) (Math/max m e) m)))
+              0.0 (flatten [(array/->clj v)])))))
+
+(defmacro ^:private scaled
+  "body with *score-scale* the largest |score| of xs (traces, or numbers),
+   at least 1."
+  [xs & body]
+  `(binding [*score-scale* (reduce max 1.0 (map score-magnitude ~xs))] ~@body))
+
 (defn close?
   "Are weights x and y equal within the backend's precision? Within
-   float64's round-off (a relative and an absolute 1e-12), or, on a float32
-   backend, a relative 1e-4 and an absolute 1e-3: a weight is a difference
-   of scores, so its error scales with the scores rather than with it, a
-   few ulps of scores of up to ~100. A minor release may change these
-   tolerances, with a CHANGELOG line and its reason, as it may add a law
-   to a set."
+   float64's round-off, a relative 1e-12 and an absolute 1e-12 times the
+   magnitude of the scores the weights come from (*score-scale*, which a
+   law binds to its traces'), or, on a float32 backend, a relative 1e-4
+   and an absolute 1e-3 times it alike: a weight is a difference of
+   scores, so its error scales with the scores rather than with it
+   (owner, 2026-11-01; the fixed 1e-12 failed correct models whose scores
+   reach the thousands). A minor release may change these tolerances,
+   with a CHANGELOG line and its reason, as it may add a law to a set."
   [x y]
-  (array/allclose? x y (if (f32?) {:rtol 1e-4 :atol 1e-3} {:rtol 1e-12 :atol 1e-12})))
+  (let [s (double *score-scale*)]
+    (array/allclose? x y (if (f32?) {:rtol 1e-4 :atol (* 1e-3 s)} {:rtol 1e-12 :atol (* 1e-12 s)}))))
 
 (defn- number
   "The host double of a 0-d (or one-element) array or number."
@@ -334,7 +359,7 @@
   {::explain assessment}
   [gf tr]
   (let [{:keys [score assessed retval assessed-retval]} (assessment gf tr)]
-    (and (close? score assessed) (same-retval? retval assessed-retval))))
+    (and (scaled [score assessed] (close? score assessed)) (same-retval? retval assessed-retval))))
 
 (defn- consistent?
   "Trace consistency (Def 2.1.16): tr's score and return value are those its
@@ -430,7 +455,7 @@
   (prop/for-all [[[_ gf args] seed] cases]
     (let [tr (gfi/simulate gf args (rng/key seed))
           {g :trace w :weight} (gfi/generate gf args (:choices tr) (rng/key (inc seed)))]
-      (checks (= (:choices tr) (:choices g)) (close? w (:score tr))))))
+      (scaled [tr g] (checks (= (:choices tr) (:choices g)) (close? w (:score tr)))))))
 
 (defn generated-traces-are-consistent
   "generate constrained on some of a trace's choices keeps them and makes
@@ -507,7 +532,7 @@
   [cases]
   (prop/for-all [[[_ gf args] seed] cases]
     (let [tr (gfi/simulate gf args (rng/key seed))]
-      (checks (close? (gfi/project tr sel/all) (:score tr))))))
+      (scaled [tr] (checks (close? (gfi/project tr sel/all) (:score tr)))))))
 
 (defn generate-weight-is-the-projection
   "generate's weight given sigma is the projection of its trace on sigma's
@@ -524,7 +549,7 @@
       (if-let [{tr :trace w :weight} (try (gfi/generate gf args sigma k)
                                           (catch clojure.lang.ExceptionInfo e
                                             (when-not (re-find #"was not visited" (ex-message e)) (throw e))))]
-        (checks (close? w (gfi/project tr (sel/from-paths (cm/addresses sigma)))))
+        (scaled [tr] (checks (close? w (gfi/project tr (sel/from-paths (cm/addresses sigma))))))
         vacuous))))
 
 (defn regenerate-weight-is-the-projection-ratio
@@ -538,9 +563,9 @@
           {t2 :trace w :weight} (gfi/regenerate tr (sel/from-paths chosen) (rng/key (inc seed)))
           now (set (addrs t2))
           retained (sel/from-paths (filter #(and (now %) (not (chosen %))) (addrs tr)))]
-      (checks (if (outside? t2)
-                (minus-infinity? w)
-                (close? w (- (gfi/project t2 retained) (gfi/project tr retained))))))))
+      (scaled [tr t2] (checks (if (outside? t2)
+                                (minus-infinity? w)
+                                (close? w (- (gfi/project t2 retained) (gfi/project tr retained)))))))))
 
 (defn update-weight-is-the-projection-change
   "update's weight is the projection of the new trace on its choices that
@@ -552,9 +577,9 @@
   [cases]
   (prop/for-all [[model seed picks alt?] cases]
     (if-let [{:keys [tr sigma] {t2 :trace w :weight} :result} (update-case model seed picks alt?)]
-      (checks (if (outside? t2)
-                (minus-infinity? w)
-                (close? w (- (gfi/project t2 (sel/from-paths (kept tr t2 sigma))) (:score tr)))))
+      (scaled [tr t2] (checks (if (outside? t2)
+                                (minus-infinity? w)
+                                (close? w (- (gfi/project t2 (sel/from-paths (kept tr t2 sigma))) (:score tr))))))
       vacuous)))
 
 (defn regenerate-weight-with-new-arguments-is-the-projection-ratio
@@ -575,16 +600,16 @@
         (let [{t2 :trace w :weight} r
               now (set (addrs t2))
               retained (sel/from-paths (filter #(and (now %) (not (chosen %))) (addrs tr)))]
-          (checks (if (outside? t2)
-                    (minus-infinity? w)
-                    (close? w (- (gfi/project t2 retained) (gfi/project tr retained))))))))))
+          (scaled [tr t2] (checks (if (outside? t2)
+                                    (minus-infinity? w)
+                                    (close? w (- (gfi/project t2 retained) (gfi/project tr retained)))))))))))
 
 (defn propose-weight-is-the-assessed-density
   "propose's weight is the density assess gives the choices it proposed."
   [cases]
   (prop/for-all [[[_ gf args] seed] cases]
     (let [{c :choices w :weight} (gfi/propose gf args (rng/key seed))]
-      (checks (close? w (:weight (gfi/assess gf args c (rng/key (inc seed)))))))))
+      (scaled [w] (checks (close? w (:weight (gfi/assess gf args c (rng/key (inc seed))))))))))
 
 (defn assess-is-generate-with-every-choice
   "assess's weight is generate's on the same choices and key: the key draws
@@ -593,7 +618,7 @@
   (prop/for-all [[[_ gf args] seed] cases]
     (let [tr (gfi/simulate gf args (rng/key seed))
           k (rng/key (inc seed))]
-      (checks (close? (:weight (gfi/assess gf args (:choices tr) k)) (:weight (gfi/generate gf args (:choices tr) k)))))))
+      (scaled [tr] (checks (close? (:weight (gfi/assess gf args (:choices tr) k)) (:weight (gfi/generate gf args (:choices tr) k))))))))
 
 (defn updates-and-regenerates-keep-the-assessed-score
   "Def 2.1.16 after chains of moves: a trace updated to other arguments and
@@ -642,8 +667,8 @@
           sigma (restrict (:choices tr) (picked (addrs tr) picks))
           {g :trace w :weight} (gfi/generate gf args sigma k)]
       ;; one key per site: the unconstrained draws are the same as tr's
-      (checks (= (:choices tr) (:choices g))
-              (close? w (lp g (cm/addresses sigma)))))))
+      (scaled [tr g] (checks (= (:choices tr) (:choices g))
+                             (close? w (lp g (cm/addresses sigma))))))))
 
 (defn update-weight-is-the-score-change-less-fresh-choices
   "Forward sampling: update's weight is the change of score less the log
@@ -654,10 +679,10 @@
     (if-let [{:keys [tr sigma] {t2 :trace w :weight disc :discard} :result} (update-case model seed picks alt?)]
       (let [fresh-lp (lp t2 (fresh tr t2 sigma))
             {w3 :weight} (gfi/update t2 (:args tr) (unknown-diffs (:args tr)) disc (rng/key seed))]
-        (checks (if (outside? t2) (minus-infinity? w) (close? w (- (- (:score t2) (:score tr)) fresh-lp)))
-                ;; the reverse weight is defined only inside the support (Def
-                ;; 4.1.1): a move to density 0 has w = -Inf and no finite reverse
-                (if (in-support? t2) (checks (close? (+ w w3) (array/negate fresh-lp))) true)))
+        (scaled [tr t2] (checks (if (outside? t2) (minus-infinity? w) (close? w (- (- (:score t2) (:score tr)) fresh-lp)))
+                                ;; the reverse weight is defined only inside the support (Def
+                                ;; 4.1.1): a move to density 0 has w = -Inf and no finite reverse
+                                (if (in-support? t2) (checks (close? (+ w w3) (array/negate fresh-lp))) true))))
       vacuous)))
 
 (defn regenerate-weight-is-the-retained-density-ratio
@@ -674,7 +699,7 @@
           now (set (addrs t2))
           ;; Eq 4.1, Alg 18: selected, fresh and removed choices cancel
           retained (remove selected (filter now (addrs tr)))]
-      (checks (if (outside? t2) (minus-infinity? w) (close? w (- (lp t2 retained) (lp tr retained))))))))
+      (scaled [tr t2] (checks (if (outside? t2) (minus-infinity? w) (close? w (- (lp t2 retained) (lp tr retained)))))))))
 
 (defn regenerating-everything-has-weight-zero
   "Forward sampling: a regenerate of every choice has weight 0."
@@ -702,12 +727,12 @@
           s (sel/from-paths ps)
           t (sel/from-paths pt)
           both (sel/union s t)]
-      (checks (zero-weight? (p sel/none))
-              (close? (+ (p s) (p (sel/complement s))) (:score tr))
-              (close? (p both) (+ (p s) (p t)))
-              (close? (p (sel/union s (sel/intersection t (sel/complement s)))) (p both))
-              (close? (p (sel/intersection both (sel/complement t))) (p s))
-              (close? (+ (p both) (p (sel/intersection (sel/complement s) (sel/complement t)))) (:score tr))))))
+      (scaled [tr] (checks (zero-weight? (p sel/none))
+                           (close? (+ (p s) (p (sel/complement s))) (:score tr))
+                           (close? (p both) (+ (p s) (p t)))
+                           (close? (p (sel/union s (sel/intersection t (sel/complement s)))) (p both))
+                           (close? (p (sel/intersection both (sel/complement t))) (p s))
+                           (close? (+ (p both) (p (sel/intersection (sel/complement s) (sel/complement t)))) (:score tr)))))))
 
 (defn runs-are-pure-functions-of-the-key
   "The same key makes the same choices."
@@ -726,14 +751,14 @@
           k (rng/key seed)
           same? (fn [r1 r2] (and (= (:choices (:trace r1)) (:choices (:trace r2)))
                                  (= (:retval (:trace r1)) (:retval (:trace r2)))
-                                 (close? (or (:weight r1) 0.0) (or (:weight r2) 0.0))
+                                 (scaled [(:trace r1) (:trace r2)] (close? (or (:weight r1) 0.0) (or (:weight r2) 0.0)))
                                  (= (:discard r1) (:discard r2))))
           tr (gfi/simulate plain args k)
           sigma (restrict (:choices tr) (picked (addrs tr) picks))
           s (sel/from-paths (picked (addrs tr) picks))]
       (checks (= (:choices (gfi/simulate gf args k)) (:choices tr))
               (same? (gfi/generate gf args sigma k) (gfi/generate plain args sigma k))
-              (close? (:weight (gfi/assess gf args (:choices tr) k)) (:weight (gfi/assess plain args (:choices tr) k)))
+              (scaled [tr] (close? (:weight (gfi/assess gf args (:choices tr) k)) (:weight (gfi/assess plain args (:choices tr) k))))
               (same? (gfi/update (assoc tr :gen-fn gf) sigma k) (gfi/update tr sigma k))
               (same? (gfi/regenerate (assoc tr :gen-fn gf) s k) (gfi/regenerate tr s k))))))
 
@@ -808,12 +833,12 @@
           tr (gfi/simulate gf args k)
           tp (gfi/simulate plain args k)
           host-choices #(host (cm/to-map (:choices %)))
-          same-trace? (fn [t1 t2] (and (= (host-choices t1) (host-choices t2)) (close? (:score t1) (:score t2))
+          same-trace? (fn [t1 t2] (and (= (host-choices t1) (host-choices t2)) (scaled [t1 t2] (close? (:score t1) (:score t2)))
                                        (= (host (:retval t1)) (host (:retval t2)))))
           ;; the static retdiff may be more precise than the dynamic one (a
           ;; propagated diff), so it need only be sound
           same? (fn [r1 r2] (and (same-trace? (:trace r1) (:trace r2))
-                                 (close? (or (:weight r1) 0.0) (or (:weight r2) 0.0))
+                                 (scaled [(:trace r1) (:trace r2)] (close? (or (:weight r1) 0.0) (or (:weight r2) 0.0)))
                                  (= (some-> (:discard r1) cm/to-map host) (some-> (:discard r2) cm/to-map host))
                                  (or (nil? (:retdiff r1)) (sound-retdiff? tr r1))))
           args' (next-args model seed alt?)
@@ -829,7 +854,7 @@
                          (if (and (vacuous? r1) (vacuous? r2)) true (checks (same? r1 r2)))))]
       (checks (same-trace? tr tp)
               (both (fn [g _] (gfi/generate g args (restrict (:choices tr) (picked (addrs tr) picks)) (rng/fold-in k 2))))
-              (close? (:weight (gfi/assess gf args (:choices tr) k)) (:weight (gfi/assess plain args (:choices tr) k)))
+              (scaled [tr] (close? (:weight (gfi/assess gf args (:choices tr) k)) (:weight (gfi/assess plain args (:choices tr) k))))
               (both (fn [_ t] (gfi/update t args' diffs sigma (rng/fold-in k 3))))
               (both (fn [_ t] (gfi/update t args' precise sigma (rng/fold-in k 3))))
               (both (fn [_ t] (gfi/regenerate t args' precise s (rng/fold-in k 6))))
@@ -851,7 +876,7 @@
   (prop/for-all [[[_ gf args] seed] cases]
     (let [tr (gfi/simulate gf args (rng/key seed))
           {g :trace w :weight} (gfi/generate gf args (:choices tr) (rng/key (inc seed)))]
-      (checks (= (:choices tr) (:choices g)) (close? w (:score g))))))
+      (scaled [tr g] (checks (= (:choices tr) (:choices g)) (close? w (:score g)))))))
 
 (defn generated-traces-keep-their-constraints
   "Encapsulated randomness: generate keeps its constraints, and its weight
@@ -902,7 +927,7 @@
   [cases]
   (prop/for-all [[model seed picks alt?] cases]
     (if-let [{:keys [tr sigma] {t2 :trace w :weight} :result} (update-case model seed picks alt?)]
-      (checks (if (outside? t2) (minus-infinity? w) (close? w (- (- (:score t2) (:score tr)) (lp t2 (fresh tr t2 sigma))))))
+      (scaled [tr t2] (checks (if (outside? t2) (minus-infinity? w) (close? w (- (- (:score t2) (:score tr)) (lp t2 (fresh tr t2 sigma)))))))
       vacuous)))
 
 (defn score-is-assessed-on-the-same-key
@@ -913,7 +938,7 @@
   (prop/for-all [[[_ gf args] seed] cases]
     (let [k (rng/key seed)
           tr (gfi/simulate gf args k)]
-      (checks (close? (:score tr) (:weight (gfi/assess gf args (:choices tr) k)))))))
+      (scaled [tr] (checks (close? (:score tr) (:weight (gfi/assess gf args (:choices tr) k))))))))
 
 (defn identity-update-keeps-omega
   "An update that changes nothing keeps ω and the score (DESIGN.md §9)."
@@ -974,11 +999,11 @@
         (checks (gfi/same-gen-fn? gf' (trace/maker t2))
                 (assessed? gf' t2)
                 (applied? tr t2 sigma)
-                (if (outside? t2) (minus-infinity? w) (close? w (- kept-lp (:score tr))))
+                (scaled [tr t2] (if (outside? t2) (minus-infinity? w) (close? w (- kept-lp (:score tr)))))
                 (= (exact-discard tr t2 sigma) disc)
                 (= (:choices tr) (:choices t3))
                 (assessed? gf t3)
-                (if (in-support? t2) (checks (close? (+ w w3) (- kept-lp (:score t2)))) true)))
+                (if (in-support? t2) (scaled [tr t2 t3] (checks (close? (+ w w3) (- kept-lp (:score t2))))) true)))
       vacuous)))
 
 (defn regenerate-across-generative-functions
@@ -1003,7 +1028,7 @@
                   (every? #(= (cm/get-choice (:choices tr) %) (cm/get-choice (:choices t2) %)) retained)
                   (if (outside? t2)
                     (minus-infinity? w)
-                    (close? w (- (gfi/project t2 (sel/from-paths retained)) (gfi/project tr (sel/from-paths retained)))))))))))
+                    (scaled [tr t2] (close? w (- (gfi/project t2 (sel/from-paths retained)) (gfi/project tr (sel/from-paths retained))))))))))))
 
 (def across
   "For pairs of generative functions: models [label gf args alt-args gf'],
