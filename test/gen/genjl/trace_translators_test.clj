@@ -1,5 +1,8 @@
 (ns gen.genjl.trace-translators-test
-  "Gen.jl 0.4.8's test/inference/trace_translators.jl, ported: the
+  "Gen.jl 0.4.9's test/inference/trace_translators.jl, ported (0.4.9 adds
+   the general translator's weight and its inverse, whose forward proposal
+   makes random choices: PR #571, a sign gen.clj had right from its port;
+   flipping it back fails both): the
    extending, symmetric and general trace translators, with their
    transforms checked (gen.inference.transform), and the deterministic
    one. Steps are 0-based (D2)."
@@ -134,8 +137,9 @@
 (tr/deftransform ^:private to-cells [p1 _q1 p2 q2]
   (let [x (tr/read p1 :x :continuous)
         y (tr/read p1 :y :continuous)
-        i (array/ceil (* x 10))
-        j (array/ceil (* y 10))]
+        ;; integers, as Gen.jl's ceil(Int, …): the cells' choices are discrete
+        i (array/astype (array/ceil (* x 10)) :int64)
+        j (array/astype (array/ceil (* y 10)) :int64)]
     (tr/write p2 :i i :discrete)
     (tr/write p2 :j j :discrete)
     (tr/write q2 :dx (- x (/ (- i 1) 10.0)) :continuous)
@@ -157,6 +161,25 @@
                                    :q-backward offsets :q-backward-args []
                                    :transform f :check? true})
         t1 (:trace (gfi/generate unit-square [] (cm/choicemap :x 0.05 :y 0.95) (rng/key 1)))
-        {t2 :trace} (translator t1 (rng/key 2))]
-    (is (and (== 1 (array/item (t2 :i))) (== 10 (array/item (t2 :j)))))))
+        {t2 :trace w :weight} (translator t1 (rng/key 2))]
+    (is (and (== 1 (array/item (t2 :i))) (== 10 (array/item (t2 :j)))))
+    ;; 0.4.9: log 1/100 - 0 + log 10² - 0 + 0
+    (is (< (abs (array/item w)) 1e-12))))
+
+(deftest general-trace-translator-backwards
+  ;; 0.4.9 (PR #571): the inverse translator, whose forward proposal makes
+  ;; random choices (the offsets): its score is subtracted from the weight,
+  ;; log 1 - log 1/100 + 0 - log 10² + 0 = 0 (0.4.8 added it: 2 log 100)
+  (let [[_ f-inv] (tr/pair to-cells from-cells)
+        translator (tr/translator {:p-new unit-square :p-new-args [] :new-observations cm/EMPTY
+                                   :q-forward offsets :q-forward-args []
+                                   :q-backward no-offsets :q-backward-args []
+                                   :transform f-inv :check? true})
+        t2 (:trace (gfi/generate cells [] (cm/choicemap :i 1 :j 10) (rng/key 1)))
+        {t1 :trace w :weight} (translator t2 (rng/key 2))
+        x (array/item (t1 :x))
+        y (array/item (t1 :y))]
+    (is (<= 0.0 x 0.1))
+    (is (<= 0.9 y 1.0))
+    (is (< (abs (array/item w)) 1e-12) (pr-str w))))
 
