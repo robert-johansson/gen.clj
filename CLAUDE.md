@@ -46,6 +46,8 @@ clojure -M:bench -m gen.model-bench   # model-level costs (GFI ops, batching, gr
 clojure -J-Dgen.llama.lib=<lib> -J-Dgen.llama.test-model=<gguf> -X:test :nses '[gen.llm.llama-test gen.llm.llama-lm-test gen.llm.llama-token-test gen.llm.llama-smc-test]'
 clojure -J-Dgen.llama.lib=<lib> -M:bench -m gen.llama-noise <gguf>              # llama.cpp's float noise and costs
 clojure -J-Dgen.llama.lib=<lib> -M:test:bench -m gen.llama-long-noise <gguf>    # the same past a sliding window
+clojure -J-Dcodegen.model=<gguf> -M:test:codegen -m gen.codegen.driver         # the codegen bake-off: a local LLM writes gen.clj models (codegen.* options in test/gen/codegen/driver.clj; codegen.mode=repl for the REPL agent)
+clojure -M:test:codegen -m gen.codegen.report <results.edn>                    # its report
 ```
 
 **The MLX backend** needs its native libraries and Java binding, built once:
