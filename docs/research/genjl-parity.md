@@ -5,6 +5,28 @@ release: 0.4.8 added enumerative inference, 0.4.7 added `ProductDistribution`,
 and 0.4.6 removed the need for `@load_generated_functions`
 (https://github.com/probcomp/Gen.jl/releases).*
 
+*Gen.jl **0.4.9** (2026-10-31), checked 2026-11-01 (genclj-u420):*
+- *#571 fixes two bugs of 0.4.8: GeneralTraceTranslator added the forward
+  proposal's score to the log weight (it is subtracted), and
+  elliptical_slice compared update's whole weight with log u (the
+  threshold is the likelihood ratio). gen.clj had both right from its port
+  (gen.inference.transform's translators subtract the forward score;
+  mcmc/elliptical-slice takes the update's weight less the prior's own
+  ratio). 0.4.9's new tests are ported (test/gen/genjl:
+  trace_translators_test's backwards general translator and weight,
+  elliptical_slice_test's constant-likelihood and stationary checks);
+  each fails with its 0.4.8 bug planted.*
+- *#559 adds hmc's metric (the momentum covariance M: identity, vector,
+  Diagonal or dense), in momentum sampling and the kinetic energy; its
+  diff leaves the leapfrog's position update unchanged (to confirm in the
+  source: then the metric changes the momenta's distribution, not the
+  dynamics). gen.clj has Stan's diagonal :inv-metric, used in the
+  momenta, the kinetic energy and the position update alike. Not yet:
+  a dense metric, and Gen.jl's :metric convention (M, the inverse of
+  :inv-metric).*
+- *#569 (ReverseDiff thread safety), #562 (renames), #555 (README), #564
+  (Dependabot): no gen.clj counterpart.*
+
 *Sources:*
 - *Gen.jl reference pages under https://www.gen.dev/docs/stable/ref/:
   `core/{gfi,choice_maps,selections,change_hints}`,
