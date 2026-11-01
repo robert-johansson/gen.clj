@@ -13,14 +13,15 @@
             [gen.codegen.prompt :as prompt]
             [gen.codegen.tasks :as tasks]
             [gen.gfi :as gfi]
-            [gen.random :as rng]))
+            [gen.random :as rng]
+            [gen.test-support :as ts]))
 
 (deftest the-worked-examples-run
   (doseq [[[_ code] args] (map vector prompt/examples [[[0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0]] [[3 2 4]]])]
     (let [[n model] (c/evaluate (c/read-forms code))
           tr (gfi/simulate model args (rng/key 1))]
-      (is (Double/isFinite (double (:score tr))))
-      (is (Double/isFinite (double (:weight (gfi/generate model args (:choices tr) (rng/key 2))))))
+      (is (Double/isFinite (double (ts/host (:score tr)))))
+      (is (Double/isFinite (double (ts/host (:weight (gfi/generate model args (:choices tr) (rng/key 2)))))))
       (c/discard! n))))
 
 (deftest the-system-message

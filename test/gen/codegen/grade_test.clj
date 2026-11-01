@@ -79,12 +79,14 @@
       (is (= 7 (:passed r)))
       (is (some #(re-find #"nats worse" %) (:warnings r)))
       (is (< (:gap (:log-ml r)) -100))))
-  (testing "an impure model (clojure.core's rand) passes on with law warnings"
+  (testing "an impure model (clojure.core's rand) stops at the laws"
     (let [t (tasks/by-id :spread)
           r (g/grade t (str/replace (:answer t) "(d/normal mu " "(d/normal (+ mu (rand)) "))]
-      (is (empty? (:warnings (g/grade t (:answer t)))) "the answer draws none")
-      (is (seq (:warnings r)))
-      (is (some #{:score-is-the-assessed-density} (:warnings r))))))
+      (is (= :laws (stopped-at r)))
+      (is (re-find #"score-is-the-assessed-density" (:error (first (remove :ok (:stages r))))))))
+  (testing "every answer passes the laws, the large-score ones included"
+    (doseq [id [:line :sine :line-or-sine :outliers]]
+      (is (not= :laws (stopped-at (g/grade (tasks/by-id id) (:answer (tasks/by-id id)) {:law-tests 10}))) id))))
 
 (defn- series [ys] (apply cm/choicemap (interleave (range) ys)))
 

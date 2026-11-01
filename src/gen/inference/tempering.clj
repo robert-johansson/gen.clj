@@ -25,12 +25,20 @@
      is that address's spread across the particles (local moves, which a
      posterior far narrower than its prior needs); a walk that would
      change the trace's structure is rejected.
-   The estimate's exponential, the marginal likelihood, is unbiased.
+   The estimate is consistent: it converges to the log marginal likelihood
+   as :particles grows. Its exponential is an unbiased estimate of the
+   marginal likelihood only when the schedule of βs and the moves' scales
+   are fixed in advance, and here both adapt to the particles (a small
+   bias in practice). For an unbiased run, give a previous run's :betas
+   and :scales: the run then adapts nothing.
 
    opts: :particles (200), :sweeps (2), :target-ess (0.5, a fraction of the
-   particles), :max-steps (1000; a loud error past it), :key. The result
-   also holds :steps, :ess (each step's effective sample size before it
-   resamples) and :acceptance (each step's acceptance rate of the moves).
+   particles), :max-steps (1000; a loud error past it), :key; :betas (the
+   schedule, from 0 to 1) and :scales (each step's random-walk scales, a
+   vector of maps from address to scale), a previous run's, to fix them.
+   The result also holds :steps, :ess (each step's effective sample size
+   before it resamples), :acceptance (each step's acceptance rate of the
+   moves) and :scales.
 
    A particle runs one at a time (the moves are regenerates of traces);
    the weights are read on the host at each step, the inference loop's
@@ -78,7 +86,7 @@
 (defn- continuous? [v]
   (or (float? v) (and (array/backend-array? v) (= :float (array/dtype-kind (array/dtype v))))))
 
-(defn- scales
+(defn- scales-of
   "Each continuous latent address's random-walk scale: the spread of its
    values across the particles that have it (elementwise for an array),
    floored at 1e-6."
@@ -147,7 +155,7 @@
    map): {:log-ml-estimate :traces :betas :steps :ess :acceptance}. See
    the namespace's docstring."
   ([model args observations] (smc model args observations nil))
-  ([model args observations {:keys [particles sweeps target-ess max-steps key]
+  ([model args observations {:keys [particles sweeps target-ess max-steps key betas scales]
                              :or {particles 200 sweeps 2 target-ess 0.5 max-steps 1000}}]
    (let [n (long particles)
          key (or key (gfi/next-key))
@@ -163,12 +171,17 @@
          lw (mapv (fn [{:keys [weight]} ^double l] (- (host weight) l)) starts ls)
          _ (when (every? #(== ##-Inf %) ls)
              (throw (ex-info "tempering/smc: every particle gives the observations probability 0" {:particles n})))
-         target (* (double target-ess) n)]
+         target (* (double target-ess) n)
+         _ (when (and betas (not (and (= 0.0 (double (first betas))) (= 1.0 (double (peek (vec betas))))
+                                      (apply < (map double betas)))))
+             (throw (ex-info "tempering/smc: :betas rise from 0 to 1" {:betas betas})))
+         _ (when (and scales (not= (count scales) (dec (count betas))))
+             (throw (ex-info "tempering/smc: :scales holds one map a step of :betas" {:steps (dec (count betas)) :scales (count scales)})))]
      (loop [step 1 beta 0.0 traces traces ls ls lw lw
-            log-z (- (w/log-sum-exp lw) (Math/log n)) betas [0.0] ess [] acceptance []]
+            log-z (- (w/log-sum-exp lw) (Math/log n)) taken [0.0] ess [] acceptance [] used []]
        (when (> step max-steps)
          (throw (ex-info (str "tempering/smc: β reached only " beta " after " max-steps " steps") {:beta beta :steps max-steps})))
-       (let [b (next-beta lw ls beta target)
+       (let [b (if betas (double (nth betas step)) (next-beta lw ls beta target))
              inc-w (step-weights lw ls beta b)
              log-z (+ log-z (- (w/log-sum-exp inc-w) (w/log-sum-exp lw)))
              step-key (rng/fold-in key step)
@@ -176,15 +189,16 @@
              idx (w/resample :systematic inc-w n k-resample)
              traces (mapv traces idx)
              ls (mapv ls idx)
-             eps (scales traces observed)
+             eps (if scales (nth scales (dec step)) (scales-of traces observed))
              moved (mapv (fn [i t l] (move t l b observed obs-sel eps sweeps (rng/fold-in k-move i))) (range n) traces ls)
              tried (reduce + (map #(nth % 3) moved))
              accepted (reduce + (map #(nth % 2) moved))
              traces (mapv first moved)
              ls (mapv second moved)
-             betas (conj betas b)
+             taken (conj taken b)
              ess (conj ess (w/ess inc-w))
-             acceptance (conj acceptance (if (pos? tried) (/ (double accepted) tried) 0.0))]
+             acceptance (conj acceptance (if (pos? tried) (/ (double accepted) tried) 0.0))
+             used (conj used eps)]
          (if (>= b 1.0)
-           {:log-ml-estimate log-z :traces traces :betas betas :steps step :ess ess :acceptance acceptance}
-           (recur (inc step) b traces ls (vec (repeat n 0.0)) log-z betas ess acceptance)))))))
+           {:log-ml-estimate log-z :traces traces :betas taken :steps step :ess ess :acceptance acceptance :scales used}
+           (recur (inc step) b traces ls (vec (repeat n 0.0)) log-z taken ess acceptance used)))))))
