@@ -3411,6 +3411,39 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       asked for batched, its result holds `:particles` (a gen.batched
       collection over the program's outputs, as the batched handler's
       result does) in place of n scalar traces; draws stay per particle.
+      As built (2026-11-04, the lead; experimental, for the owner's look):
+      `(device/run-chains kernel traces opts)` returns `{:traces` (or
+      `:draws`) `:acceptance-rates :divergences}`, one entry per chain,
+      plural keys as the 1.0 review's. The lowerings gained per-run
+      inputs (a program's `:per-run` data inputs, run r's at r times the
+      input's size: each chain's start), in gen.device.scalar for both
+      dialects. Because a function `:keep` makes a trace per kept step
+      (4096 chains of 1000 steps are four million traces: seconds on the
+      JVM backend, past Metal's buffer limit on MLX), run-chains also
+      takes `:keep-choices [address …]`: those choices read from the
+      program's outputs as host values, no trace made, equal to a `:keep`
+      of `{address #(% address)}` (its handler fallback runs exactly
+      that). Not `:keep` with an address: a keyword is a function, and on
+      a trace it reads the record's fields. A carried leaf that is one
+      object in every chain's start (the observations, typically) is one
+      input the chains share, so large data costs no copy per chain and
+      no fallback (a side agent's note, 2026-11-04; the owner: "not
+      interested in solutions that give us much longer time / large
+      difference compared to GenJAX"); a large per-run input is copied
+      into its run's scratch buffer. `:metal`'s outputs are copied into
+      Java arrays (one copy, nothing boxed) when first read, and a 0-d
+      input goes to Metal as [1] (MLX hands a kernel a 0-d array as a
+      scalar, which the generated code cannot index: the static parity
+      model's Metal failure, genclj-649c). **The fallback is batched**
+      (owner, 2026-11-04, on the lead's recommendation after a side
+      agent's note): a model the device cannot run (about 4 in 10 of the
+      census's continuous models for MALA) runs as one batched run of the
+      kernel's batched form, about a hundred times faster than chain by
+      chain (4096 HMC chains of 1000 steps: ~1.6 h chain by chain on the
+      JVM backend). Its draws are the batched run's, not the device's
+      chains (the same distribution), and `:device-fallback` says so,
+      until per-particle keys (genclj-asog) make them the same; a kernel
+      with no batched form runs chain by chain.
     - **GenLM's gaps (owner, 2026-11-04):** the survey's top five become
       beans for after 1.1.0 (an epic): a critic at the drawn token in
       token SMC, AWRS for constraints without a mask, the potential

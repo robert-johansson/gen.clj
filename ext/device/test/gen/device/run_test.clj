@@ -6,6 +6,7 @@
    handler with the reason; a compiled program is reused."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
+            [gen.batched :as b]
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
             [gen.dist :as d]
@@ -135,6 +136,191 @@
                 (is (every? true? (map close? (flatten (map leaf-values (:traces dv))) (flatten (map leaf-values (:traces h))))))
                 (is (close? (array/->clj (:weight (gfi/update (first (:traces dv)) (cm/choicemap :slope 0.5) (rng/key 1))))
                             (array/->clj (:weight (gfi/update (first (:traces h)) (cm/choicemap :slope 0.5) (rng/key 1)))))))))))))
+
+(def ^:private chain-kernels
+  [[:mala (kernel/mala pb/selection pb/tau)]
+   [:hmc (kernel/hmc pb/selection {:L 8 :eps pb/eps})]
+   [:hmc-dense (kernel/hmc pb/selection {:L 8 :eps pb/eps :inv-metric dense-metric})]])
+
+(defn- chain-starts
+  "n traces of model from the prior on their own keys: the chains' starts."
+  [[model args obs] n]
+  (mapv #(:trace (gfi/generate model args obs (rng/key (+ 40 %)))) (range n)))
+
+(defn- by-chain
+  "kernel/run on the handler per chain, chain i on (rng/split key n)[i]."
+  [k starts opts]
+  (mapv #(kernel/run k %1 (assoc opts :key %2)) starts (rng/split (:key opts) (count starts))))
+
+(deftest run-chains-are-kernel-runs-per-chain
+  ;; every chain from its own start (a per-run input of the program),
+  ;; equal to its kernel/run on the handler bit for bit on the JVM backend
+  (if-not jvm?
+    (println "gen.device.run-test: the run-chains comparison runs on the JVM backend")
+    (doseq [m [:vector :static]
+            [kname k] chain-kernels]
+      (testing [m kname]
+        (let [starts (chain-starts (pb/models m) 5)
+              opts {:samples 20 :burn 3 :thin 2 :key (rng/key 7)}
+              h (by-chain k starts opts)
+              dv (device/run-chains k starts (assoc opts :device :jvm))]
+          (is (= :jvm (:device dv)) (:device-fallback dv))
+          (is (= (mapv #(map leaves-of (:traces %)) h) (mapv #(map leaves-of %) (:traces dv))))
+          (is (= (mapv #(map :score (:traces %)) h) (mapv #(map :score %) (:traces dv))))
+          (is (= (mapv :acceptance-rate h) (:acceptance-rates dv)))
+          (is (= (mapv :divergences h) (:divergences dv)))
+          (testing ":keep"
+            (is (= (mapv :draws (by-chain k starts (assoc opts :keep #(% :slope))))
+                   (:draws (device/run-chains k starts (assoc opts :keep #(% :slope) :device :jvm))))))
+          (testing "without :device, kernel/run per chain"
+            (is (= (mapv :acceptance-rate h) (:acceptance-rates (device/run-chains k starts opts))))))))))
+
+(deftest run-chains-on-a-float32-backend
+  (if-not (= :float32 (:float (array/defaults array/*backend*)))
+    (println "gen.device.run-test: the backend draws float64, the float32 run-chains comparison skips")
+    (doseq [m [:vector]
+            [kname k] chain-kernels
+            device [:jvm :metal]]
+      (testing [m kname device]
+        (let [starts (chain-starts (pb/models m) 6)
+              opts {:samples 20 :burn 3 :thin 2 :key (rng/key 7)}
+              h (by-chain k starts opts)
+              dv (device/run-chains k starts (assoc opts :device device))]
+          (is (= device (:device dv)) (:device-fallback dv))
+          (is (= (mapv :acceptance-rate h) (:acceptance-rates dv)))
+          (is (= (mapv #(map leaf-specs (:traces %)) h) (mapv #(map leaf-specs %) (:traces dv))))
+          (is (every? true? (map close? (flatten (mapv #(map leaf-values (:traces %)) h))
+                                 (flatten (mapv #(map leaf-values %) (:traces dv)))))))))))
+
+(deftest run-chains-keep-choices-without-traces
+  ;; :keep-choices reads the kept choices from the program's outputs, as
+  ;; :keep {address #(% address)} reads them from traces: a latent choice
+  ;; (an output), an observation (the start's, no step changes it)
+  (let [[model args obs] (pb/models :vector)
+        starts (chain-starts (pb/models :vector) 4)
+        opts {:samples 15 :burn 2 :thin 2 :key (rng/key 9)}
+        addrs [:slope :intercept :ys]
+        expected (mapv :draws (by-chain (kernel/hmc pb/selection {:L 8 :eps pb/eps}) starts
+                                        (assoc opts :keep (into {} (map (fn [a] [a #(% a)])) addrs))))]
+    (doseq [device (if jvm? [:jvm] [:jvm :metal])]
+      (testing device
+        (let [r (device/run-chains (kernel/hmc pb/selection {:L 8 :eps pb/eps}) starts
+                                   (assoc opts :keep-choices addrs :device device))]
+          (is (= device (:device r)) (:device-fallback r))
+          (if jvm?
+            (is (= expected (:draws r)))
+            (doseq [a addrs]
+              (is (every? true? (map close? (flatten (mapv a (:draws r))) (flatten (mapv a expected)))) (str a))))))))
+  (testing "loud: an address with no choice, or both :keep and :keep-choices"
+    (let [starts (chain-starts (pb/models :vector) 2)
+          k (kernel/mala pb/selection pb/tau)]
+      (is (thrown? clojure.lang.ExceptionInfo (device/run-chains k starts {:samples 3 :key (rng/key 1) :keep-choices [:nope] :device :jvm})))
+      (is (= :keep-and-keep-choices
+             (:reason (ex-data (try (device/run-chains k starts {:samples 3 :key (rng/key 1) :keep identity :keep-choices [:slope]})
+                                    (catch clojure.lang.ExceptionInfo e e)))))))))
+
+(def ^:private wide
+  "A latent of 100 values (past gen.device.scalar's 64: a large per-run
+   input, each chain's own)."
+  (gen [] (let [z (trace :z (d/normal (array/zeros [100]) 1.0))] (trace :y (d/normal (array/sum z) 3.0)))))
+
+(def ^:private big-data
+  "200 observations (a large input): shared by every chain when they are
+   one object, each chain's own otherwise."
+  (gen [xs] (let [slope (trace :slope (d/normal 0 1))] (trace :ys (d/normal (array/* slope xs) 1.0)))))
+
+(def ^:private xs200 (array/array (mapv #(* 0.01 %) (range 200))))
+
+(defn- compare-chains
+  "run-chains on device against kernel/run per chain: bit for bit on the
+   JVM backend (float64), else to float32 rounding with the same
+   acceptance."
+  [k starts opts device]
+  (let [h (by-chain k starts opts)
+        dv (device/run-chains k starts (assoc opts :device device))]
+    (is (= device (:device dv)) (:device-fallback dv))
+    (is (= (mapv :acceptance-rate h) (:acceptance-rates dv)))
+    (if jvm?
+      (is (= (mapv #(map leaves-of (:traces %)) h) (mapv #(map leaves-of %) (:traces dv))))
+      (is (every? true? (map close? (flatten (mapv #(map leaf-values (:traces %)) h))
+                             (flatten (mapv #(map leaf-values %) (:traces dv)))))))))
+
+(deftest run-chains-with-large-inputs
+  (let [opts {:samples 6 :burn 1 :thin 1 :key (rng/key 11)}
+        devices (if jvm? [:jvm] [:jvm :metal])]
+    (doseq [device devices]
+      (testing [device "a large latent, each chain's own start (copied into the run's scratch)"]
+        (compare-chains (kernel/mala (sel/select :z) 0.02)
+                        (mapv #(:trace (gfi/generate wide [] (cm/choicemap :y 2.0) (rng/key (+ 60 %)))) (range 4))
+                        opts device))
+      (testing [device "large data, one object every chain shares"]
+        (let [obs (cm/choicemap :ys (array/* 1.5 xs200))]
+          (compare-chains (kernel/hmc (sel/select :slope) {:L 4 :eps 0.02})
+                          (mapv #(:trace (gfi/generate big-data [xs200] obs (rng/key (+ 70 %)))) (range 4))
+                          opts device)))
+      (testing [device "large data, each chain its own copy (per run)"]
+        (compare-chains (kernel/hmc (sel/select :slope) {:L 4 :eps 0.02})
+                        (mapv #(:trace (gfi/generate big-data [xs200] (cm/choicemap :ys (array/* 1.5 xs200)) (rng/key (+ 80 %)))) (range 4))
+                        opts device)))))
+
+(deftest run-chains-of-other-structures-fall-back
+  (let [[model args obs] (pb/models :vector)
+        [static-model sargs sobs] (pb/models :static)
+        starts [(:trace (gfi/generate model args obs (rng/key 1))) (:trace (gfi/generate static-model sargs sobs (rng/key 2)))]
+        k (kernel/mala pb/selection pb/tau)
+        r (device/run-chains k starts {:samples 5 :key (rng/key 3) :device :jvm})]
+    (is (nil? (:device r)))
+    (is (re-find #"different generative functions" (:reason (:device-fallback r))))
+    (is (= :chain-by-chain (:ran (:device-fallback r))) "two models: no one batched run")
+    (is (= 2 (count (:acceptance-rates r))))))
+
+(def ^:private two-observed
+  "Two observed arrays of one shape, other values: one array each, never
+   one input (aliasing holds only for one array a trace holds twice)."
+  (gen [xs] (let [slope (trace :slope (d/normal 0 1))]
+              (trace :ya (d/normal (array/* slope xs) 1.0))
+              (trace :yb (d/normal (array/* (array/negate slope) xs) 1.0)))))
+
+(deftest leaves-of-one-shape-are-not-aliased
+  (let [xs (array/array [0.0 1.0 2.0])
+        obs (cm/choicemap :ya (array/array [0.1 1.9 4.2]) :yb (array/array [-0.2 -2.1 -3.8]))
+        k (kernel/mala (sel/select :slope) 0.05)
+        starts (mapv #(:trace (gfi/generate two-observed [xs] obs (rng/key (+ 50 %)))) (range 3))
+        opts {:samples 8 :key (rng/key 6)}]
+    (doseq [device (if jvm? [:jvm] [:jvm :metal])]
+      (testing device
+        (compare-chains k starts opts device)
+        (when jvm?
+          (let [h (kernel/run k (first starts) (assoc opts :key (rng/key 6)))
+                dv (kernel/run k (first starts) (assoc opts :key (rng/key 6) :device device))]
+            (is (= (map leaves-of (:traces h)) (map leaves-of (:traces dv))))))))))
+
+(def ^:private unstaged
+  "z ~ mvnormal: its density's Cholesky is not staged (the staging backend
+   has no :cholesky), so the chains fall back; it runs batched."
+  (gen [] (let [z (trace :z (d/mvnormal [0.0 0.0] [[1.0 0.5] [0.5 1.0]]))]
+            (trace :y (d/normal (array/sum z) 1.0)))))
+
+(deftest run-chains-fall-back-to-one-batched-run
+  ;; a model the device cannot run: the kernel's batched form over every
+  ;; chain at once (owner, 2026-11-04), its draws the batched run's: equal
+  ;; to stepping the batched form by hand on (rng/split key steps)
+  (let [k (kernel/mala (sel/select :z) 0.3)
+        starts (mapv #(:trace (gfi/generate unstaged [] (cm/choicemap :y 1.0) (rng/key (+ 30 %)))) (range 5))
+        opts {:samples 6 :burn 1 :thin 2 :key (rng/key 4)}
+        r (device/run-chains k starts (assoc opts :device :jvm :keep-choices [:z]))
+        bf (kernel/batched-form k)
+        steps 13
+        by-hand (reduce (fn [[ps kept] [i key]]
+                          (let [ps' (:particles (bf ps key))]
+                            [ps' (if (and (> (inc i) 1) (zero? (mod (- (inc i) 1) 2))) (conj kept (array/->clj (b/choice ps' :z))) kept)]))
+                        [(:particles (b/generate unstaged [] cm/EMPTY 5 (rng/key 0) {:per-particle (mapv :choices starts)})) []]
+                        (map vector (range steps) (rng/split (rng/key 4) steps)))]
+    (is (nil? (:device r)))
+    (is (= :batched (:ran (:device-fallback r))) (:device-fallback r))
+    (is (re-find #"cholesky" (:reason (:device-fallback r))))
+    (is (= (mapv (fn [c] {:z (mapv #(nth % c) (second by-hand))}) (range 5)) (:draws r)))
+    (is (every? #(<= 0.0 % 1.0) (:acceptance-rates r)))))
 
 (def ^:private point (gen ^:static [x slope] (let [y (trace :y (d/normal (array/* slope x) 1))] y)))
 
