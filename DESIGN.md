@@ -3286,6 +3286,21 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   with-exact-proposal honours, would have left the other three. Marked
   Breaking in the CHANGELOG: user middleware that changes the model now
   changes it at those sites too.
+- **MLX's gathers keep clamping in 1.1.0 (2026-11-04, genclj-d05w;
+  PROVISIONAL, the lead's while the owner was away; the owner decides
+  what follows).** An out-of-range array index throws on the JVM backend
+  and is clamped on MLX (a negative one counted from the end first),
+  because a lazy backend cannot check without evaluating. That is
+  gen.array/take's documented contract (docs/array-api.md §13, decision
+  17), so making MLX loud changes a stable function's documented
+  behaviour: Breaking, not a consolidation release's fix. 1.1.0 keeps it,
+  and the conformance suite now names it (out-of-range-array-indices:
+  eager throws, lazy clamps; planted, a clamping JVM backend fails it).
+  The owner's options after 1.1.0: keep it; an opt-in check on MLX that
+  reads each gather's bounds (loud, at a read per gather, for debugging);
+  or loud by default through an error flag computed in the graph and
+  raised at the next evaluation, as the device programs do (genclj-i2c4),
+  which rule 6 favours but which is Breaking.
 - **A weight that is 0 compares as weights do (2026-11-04, genclj-s5fj;
   PROVISIONAL, the lead's while the owner was away, owner to confirm).**
   Five checks asked for exactly 0 (generate without constraints, update

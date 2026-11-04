@@ -640,3 +640,23 @@
     (testing "MLX errors become ex-info, and the JVM keeps running"
       (is (thrown? clojure.lang.ExceptionInfo
                    (array/with-backend tested (array/->clj (la/cholesky (array/array [[1.0 2.0 3.0]] {:dtype float-dt})))))))))
+
+(deftest out-of-range-array-indices
+  ;; gen.array/take's contract (docs/array-api.md §13; genclj-d05w, kept in
+  ;; 1.1.0, PROVISIONAL): an eager backend throws on an out-of-range array
+  ;; index; a lazy one, which cannot check without evaluating, counts a
+  ;; negative index from the end and clamps the rest. Host indices are
+  ;; checked on every backend (errors, above).
+  (let [x (array/array [10.0 20.0 30.0] {:dtype float-dt})
+        idx (array/array [-1 0 7 -9] {:dtype :int32})
+        rows (array/array [[1.0 2.0] [3.0 4.0]] {:dtype float-dt})
+        ridx (array/array [[0 5] [-1 1]] {:dtype :int32})]
+    (if (p/-lazy? tested)
+      (testing "a lazy backend clamps"
+        (is (= [30.0 10.0 30.0 10.0] (ts/host (array/take x idx))))
+        (is (= [[1.0 2.0] [4.0 4.0]] (ts/host (array/take-along-axis rows ridx 1)))))
+      (testing "an eager backend throws"
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"out of bounds" (array/take x idx)))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"out of bounds" (array/take-along-axis rows ridx 1)))))
+    (testing "an index in range gathers alike on every backend"
+      (is (= [30.0 10.0] (ts/host (array/take x (array/array [-1 0] {:dtype :int32}))))))))
