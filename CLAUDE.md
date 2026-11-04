@@ -30,7 +30,7 @@ All work is tracked in beans (`.beans/`, a private git repo synced by hooks; see
 clojure -M:test:dev                   # a REPL with the test loop: (t) after each change (dev/user.clj)
 clojure -X:test:fast:par              # without the ^:slow statistical tests, in 5 JVMs, ~1 min
 clojure -X:test:par                   # every test (clojure.test + test.check, the book), in 5 JVMs, ~6 min
-clojure -X:test:fast                  # the same in one JVM (also any backend), ~1.5 min
+clojure -X:test:fast                  # the same in one JVM (also any backend), ~2 min
 clojure -X:test                       # every test in one JVM, ~7 min
 clojure -X:test:conformance           # the backend conformance suite (array level)
 clojure -X:test :patterns '["gen.book.*"]'   # the book (book/): every chapter run, its results checked (Parts II-V ^:slow)

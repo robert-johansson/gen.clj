@@ -21,7 +21,9 @@ issues). Gen.jl parity covers the core, the static modeling language with
 its change hints, encapsulated randomness, GenParticleFilters, GenSMCP3 and
 GenTraceKernelDSL, and Gen.jl's own test suite passes. Local LLMs run as
 generative functions through llama.cpp (experimental). The book, `book/`,
-teaches it with code that runs. Through 1.x the stable namespaces keep
+teaches it with code that runs; its appendix *Coming from Gen.jl*
+(`book/061-from-genjl.md`) maps Gen.jl's names and conventions to
+gen.clj's. Through 1.x the stable namespaces keep
 their names, arities, result keys and documented semantics
 (`CHANGELOG.md`); `DESIGN.md` has the design.
 
@@ -114,9 +116,16 @@ gen.clj is a git dependency, a release by its tag:
 ## Tests
 
 ```
-clojure -X:test          # everything, ~90 s
-clojure -X:test:fast     # without the slow statistical tests, ~25 s
+clojure -X:test:fast:par   # without the slow statistical tests, in 5 JVMs, ~1 min
+clojure -X:test:par        # every test and the book, in 5 JVMs, ~6 min
+clojure -X:test:fast       # the fast tests in one JVM (any backend), ~2 min
+clojure -X:test            # every test in one JVM (any backend)
+clojure -M:test:dev        # a REPL with the test loop: (t) after each change
 ```
+
+The times are the JVM backend's on an M4 Mac mini (2,052 tests and
+the book's chapters, 2026-11-04). `CLAUDE.md` lists the other suites
+(MLX, the device lowerings, llama.cpp, the book's PDF).
 
 The GFI's laws are test.check properties, audited against the thesis
 (`docs/research/law-audit.md`). They run over hand-written models and over
