@@ -186,21 +186,22 @@
         host (process/start command {:log (str (io/file out "grader.log"))})
         record! (fn [entry] (spit results (str (pr-str (assoc entry :model model)) "\n") :append true))]
     (println "grader ready; model" model)
-    (with-open [e (llama/engine {:model model :n-ctx (parse-long (prop "n-ctx" "16384")) :max-branches 8})
-                m (lm/lm e (llama/tokenizer e) {:max-branches 8})]
-      (doseq [id ids]
-        (if (= "repl" (prop "mode" "one-shot"))
-          (run-repl-task m (tasks/by-id id)
-                         (assoc opts :episodes (parse-long (prop "episodes" "2")) :turns (parse-long (prop "turns" "40"))
-                                :turn-tokens (parse-long (prop "turn-tokens" "1024"))
-                                :evidence? (not= "false" (prop "evidence" "true")))
-                         #(process/call host % 900000) record!)
-          (run-task m (tasks/by-id id) opts
-                    (fn [task-id code]
-                      (let [r (process/call host {:task task-id :code code} 900000)]
-                        (cond-> (dissoc r :text :restarted) (:error r) (assoc :task task-id))))
-                    record!))))
-    (process/stop host)
+    (try
+      (with-open [e (llama/engine {:model model :n-ctx (parse-long (prop "n-ctx" "16384")) :max-branches 8})
+                  m (lm/lm e (llama/tokenizer e) {:max-branches 8})]
+        (doseq [id ids]
+          (if (= "repl" (prop "mode" "one-shot"))
+            (run-repl-task m (tasks/by-id id)
+                           (assoc opts :episodes (parse-long (prop "episodes" "2")) :turns (parse-long (prop "turns" "40"))
+                                  :turn-tokens (parse-long (prop "turn-tokens" "1024"))
+                                  :evidence? (not= "false" (prop "evidence" "true")))
+                           #(process/call host % 900000) record!)
+            (run-task m (tasks/by-id id) opts
+                      (fn [task-id code]
+                        (let [r (process/call host {:task task-id :code code} 900000)]
+                          (cond-> (dissoc r :text :restarted) (:error r) (assoc :task task-id))))
+                      record!))))
+      (finally (process/stop host)))
     (println "done:" (str results))
     (shutdown-agents)
     (System/exit 0)))
