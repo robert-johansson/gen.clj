@@ -29,7 +29,9 @@
    :concatenate, :slice, :pad, :matmul, :take, :take-along-axis,
    :scatter-add; the bit ops :bit-xor, :bit-or, :shift-left,
    :shift-right-logical and :bitcast (Threefry's); :scan, a loop whose body
-   is a graph of its own, and :result, one of a scan's results.
+   is a graph of its own, and :result, one of a scan's results. A where
+   whose branches are one staged value of its result's shape and dtype
+   records no node: where(c, x, x) is x.
 
    Reading a staged value on the host (truthy?, item, ->clj, = with a
    number or boolean) is a loud error: the program is staged once and run
@@ -132,6 +134,17 @@
     (add-node! g op (mapv #(operand g %) args) shape dtype attrs)))
 
 (defn- shape-of [x] (if (staged? x) (.-shape ^Staged x) []))
+
+(defn- same-branches
+  "where's [c x y] branch x when y is the same staged value and the result
+   is x's shape and dtype: where(c, x, x) is x for every c, so no node is
+   recorded, and a value a select passes on stays the value it was (a
+   chain's observations, which kernel/run's device path then does not
+   write out every step)."
+  [[_ x y] shape dtype]
+  (when (and (staged? x) (identical? x y)
+             (= shape (.-shape ^Staged x)) (= dtype (.-dtype ^Staged x)))
+    x))
 
 ;; ---------------------------------------------------------------------------
 ;; Draws: Threefry-2x32-20 on staged keys, as gen.random.threefry on host ones
@@ -313,7 +326,10 @@
   (-astype [_ x dtype] (op! :convert [x] (shape-of x) dtype))
 
   (-elementwise [_ op args dtype]
-    (op! op args (elementwise-shape args) (dt/result-dtype op dtype) {:in dtype}))
+    (let [shape (elementwise-shape args)
+          out (dt/result-dtype op dtype)]
+      (or (when (= :where op) (same-branches args shape out))
+          (op! op args shape out {:in dtype}))))
   (-reduce [_ op x axes keep-dims?]
     (op! :reduce [x] (reduced-shape (shape-of x) axes keep-dims?)
          (dt/reduce-result-dtype op (.-dtype ^Staged x) {:float *float* :int :int32})

@@ -141,6 +141,20 @@ other values for the same key, from the same distribution.
   sampling of 1000 particles 9.1 → 3.8 ms. kernel/mala and kernel/hmc
   carry their step for it (`:device-f`, `:device-key`), and kernel/run's
   arglist names `:device`.
+- **Experimental: kernel/run's `:device` path costs little beyond its
+  program** (`gen.inference.device`, `gen.array.stage`; DESIGN §9, owner,
+  2026-11-04; genclj-rtcd). Its result is built on the host from the
+  program's outputs: each kept step's trace from that step's rows alone,
+  0-d leaves made from their values, where it made a backend array of
+  every output and sliced it; a leaf the chain never changes (the
+  observations) is the start's in every trace and no longer an output of
+  every step. gen.array.stage records where(c, x, x) as x, no node. One
+  chain of 1000 steps on the M4, `{:device :jvm}`: HMC L=32 4.4 → 2.4 ms
+  on the JVM backend; on MLX 7.2 → 4.7 ms, and 139 → 4.9 ms with a
+  `:keep` per step (each kept value was a lazy slice, a GPU evaluation
+  to read). The results are as before: the handler's bit for bit on the
+  JVM backend in float64, to float32 rounding with the same accepts on
+  MLX (a test of its own now).
 
 ## [1.0.0] - 2026-10-26
 
