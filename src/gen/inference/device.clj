@@ -31,6 +31,7 @@
   {:api :experimental}
   (:require [gen.array :as array]
             [gen.array.dtype :as dt]
+            [gen.array.protocols :as p]
             [gen.array.stage :as st]
             [gen.array.tree :as tree]
             [gen.batched :as batched]
@@ -496,6 +497,13 @@
       keep (assoc :draws (mapv (fn [c] (finish (per-chain c))) (range n)))
       (not (or keep keep-choices)) (assoc :traces (mapv per-chain (range n))))))
 
+(def ^:private trace-limit
+  "The most traces run-chains makes (a trace a kept step and chain) on a
+   lazy backend, MLX, whose every array is a Metal buffer: past it, a
+   loud error that names :keep-choices (Metal holds about 499,000 buffers
+   at once, and a trace holds several)."
+  50000)
+
 (defn run-chains
   "n chains of kernel (gen.inference.kernel's), chain i from (traces i) on
    the key (rng/split key n)[i], each kernel/run's from its trace on that
@@ -504,8 +512,11 @@
    a pool; :metal, every chain a GPU thread of one kernel). :keep-choices,
    a vector of addresses, keeps those choices as a :keep of
    {address #(% address)} would, but read from the program's outputs with
-   no trace made: what many chains of many steps want (a trace a kept step
-   is millions of traces there). Returns {:traces (or :draws with :keep or
+   no trace made: what many chains of many steps want. A :keep function,
+   or no :keep, makes a trace a kept step and chain (four million at 4096
+   chains of 1000 steps): seconds on the JVM backend, and on MLX past what
+   Metal holds, so there past 50,000 traces a loud error naming
+   :keep-choices. Returns {:traces (or :draws with :keep or
    :keep-choices) :acceptance-rates :divergences}, one entry per chain, as
    kernel/run's per chain, with :device. Without :device, kernel/run per
    chain. Where the chains do not stage or lower on the device (traces of
@@ -529,6 +540,13 @@
       (throw (ex-info "run-chains: :keep or :keep-choices, not both" {:reason :keep-and-keep-choices})))
     (when (and keep-choices (not (and (sequential? keep-choices) (seq keep-choices))))
       (throw (ex-info "run-chains: :keep-choices is a vector of addresses" {:reason :invalid-keep-choices :keep-choices keep-choices})))
+    (let [made (* (count traces) (long (:samples opts 0)))]
+      (when (and (not keep-choices) (p/-lazy? array/*backend*) (> made (long trace-limit)))
+        (throw (ex-info (str "run-chains: " (count traces) " chains of " (:samples opts) " kept steps make " made
+                             " traces, each a few MLX arrays, past what Metal holds at once: keep values with"
+                             " :keep-choices [address …] (read from the program's outputs, no trace made),"
+                             " or keep fewer steps (:thin) or chains")
+                        {:reason :too-many-traces :traces made :limit trace-limit}))))
     (if-not device
       (on-handler)
       (try (assoc (device-chains kernel traces opts) :device device)

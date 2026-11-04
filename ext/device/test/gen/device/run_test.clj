@@ -6,6 +6,7 @@
    handler with the reason; a compiled program is reused."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
+            [gen.array.protocols]
             [gen.batched :as b]
             [gen.choicemap :as cm]
             [gen.combinators :as comb]
@@ -18,7 +19,8 @@
             [gen.inference.mcmc :as mcmc]
             [gen.parity-bench :as pb]
             [gen.random :as rng]
-            [gen.selection :as sel]))
+            [gen.selection :as sel]
+            [gen.test-support :as ts]))
 
 (def ^:private jvm? (= :jvm (array/backend-name array/*backend*)))
 
@@ -262,6 +264,18 @@
         (compare-chains (kernel/hmc (sel/select :slope) {:L 4 :eps 0.02})
                         (mapv #(:trace (gfi/generate big-data [xs200] (cm/choicemap :ys (array/* 1.5 xs200)) (rng/key (+ 80 %)))) (range 4))
                         opts device)))))
+
+(deftest run-chains-on-mlx-refuse-millions-of-traces
+  ;; on a lazy backend (MLX), a trace a kept step and chain past 50,000 is
+  ;; a loud error naming :keep-choices, which reads values with no trace
+  (if-not (gen.array.protocols/-lazy? array/*backend*)
+    (println "gen.device.run-test: an eager backend makes any number of traces, the trace limit skips")
+    (let [starts (chain-starts (pb/models :vector) 200)
+          k (kernel/mala pb/selection pb/tau)
+          opts {:samples 300 :key (rng/key 2) :device :jvm}]
+      (is (= :too-many-traces (:reason (ts/thrown-data (device/run-chains k starts opts)))))
+      (is (= :too-many-traces (:reason (ts/thrown-data (device/run-chains k starts (assoc opts :keep #(% :slope)))))))
+      (is (= 200 (count (:draws (device/run-chains k starts (assoc opts :keep-choices [:slope])))))))))
 
 (deftest run-chains-of-other-structures-fall-back
   (let [[model args obs] (pb/models :vector)
