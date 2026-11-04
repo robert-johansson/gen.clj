@@ -131,42 +131,51 @@
 
 (defn- chain-program
   "kernel's chain of steps from a trace of skeleton sk (on args) whose
-   leaves are constants (position to host value) and carried ones (specs),
-   as a program of a key and the carried leaves, its outputs each step's
-   {:c carried leaves} (and :acc, :div, :ok when the kernel reports them).
-   Throws ::carry, the constants' positions a step computes."
+   leaves are constants (position to host value) and carried ones (specs):
+   {:program :unchanged}, a program of a key and the carried leaves whose
+   outputs are each step's {:c carried leaves} (and :acc, :div, :ok when
+   the kernel reports them), and the indices of the carried leaves a step
+   passes on as it got them (the observations, say), which :c leaves out:
+   every step holds the start's. Throws ::carry, the constants' positions
+   a step computes."
   [kernel sk args n constants specs steps fl]
-  (let [f (or (:device-f kernel) (if (map? kernel) (:f kernel) kernel))]
-    (binding [st/*float* fl]
-      (st/stage
-       (fn [k cs]
-         (let [args (st/constants args)
-               [_ ys] (array/scan
-                       (fn [c t]
-                         (let [res (kernel/step-result (f (trace/from-leaves sk (merged n constants c) args) (st/key-at k t)))
-                               [sk' out] (trace/as-leaves (:trace res))
-                               computed (into #{} (keep (fn [[i _]] (when (array/backend-array? (out i)) i))) constants)]
-                           (when (contains? res :accepted)
-                             (throw (ex-info "the kernel reports several accept decisions a step (a combinator's)" {})))
-                           (when-not (= sk sk')
-                             (throw (ex-info (trace/structure-change sk sk') {})))
-                           (when (seq computed)
-                             (throw (ex-info "a step computes a leaf held as a constant" {::carry computed})))
-                           (when-not (every? (fn [[i v]] (same-host? v (out i))) constants)
-                             (throw (ex-info "the kernel changes a host integer or boolean of the trace" {})))
-                           [(carried constants out)
-                            (cond-> {:c (carried constants out)}
-                              (contains? res :accepted?) (assoc :acc (:accepted? res))
-                              (contains? res :diverged?) (assoc :div (:diverged? res))
-                              (contains? res :start-ok) (assoc :ok (:start-ok res)))]))
-                       cs nil steps)]
-           ys))
-       (st/key-spec) specs))))
+  (let [f (or (:device-f kernel) (if (map? kernel) (:f kernel) kernel))
+        unchanged (volatile! #{})
+        program
+        (binding [st/*float* fl]
+          (st/stage
+           (fn [k cs]
+             (let [args (st/constants args)
+                   [_ ys] (array/scan
+                           (fn [c t]
+                             (let [res (kernel/step-result (f (trace/from-leaves sk (merged n constants c) args) (st/key-at k t)))
+                                   [sk' out] (trace/as-leaves (:trace res))
+                                   out-c (carried constants out)
+                                   computed (into #{} (keep (fn [[i _]] (when (array/backend-array? (out i)) i))) constants)]
+                               (when (contains? res :accepted)
+                                 (throw (ex-info "the kernel reports several accept decisions a step (a combinator's)" {})))
+                               (when-not (= sk sk')
+                                 (throw (ex-info (trace/structure-change sk sk') {})))
+                               (when (seq computed)
+                                 (throw (ex-info "a step computes a leaf held as a constant" {::carry computed})))
+                               (when-not (every? (fn [[i v]] (same-host? v (out i))) constants)
+                                 (throw (ex-info "the kernel changes a host integer or boolean of the trace" {})))
+                               ;; a leaf the step returns as it got it: the staged value itself
+                               (vreset! unchanged (into #{} (keep-indexed (fn [j [a b]] (when (identical? a b) j))) (map vector c out-c)))
+                               [out-c
+                                (cond-> {:c (into [] (keep-indexed (fn [j v] (when-not (@unchanged j) v))) out-c)}
+                                  (contains? res :accepted?) (assoc :acc (:accepted? res))
+                                  (contains? res :diverged?) (assoc :div (:diverged? res))
+                                  (contains? res :start-ok) (assoc :ok (:start-ok res)))]))
+                           cs nil steps)]
+               ys))
+           (st/key-spec) specs))]
+    {:program program :unchanged @unchanged}))
 
 (defn- chain
-  "chain-program's program and its constants: the start's host integers
-   and booleans, but for those a step computes (a running count), carried
-   instead, the chain staged again."
+  "chain-program's {:program :unchanged} and its constants: the start's
+   host integers and booleans, but for those a step computes (a running
+   count), carried instead, the chain staged again."
   [kernel sk args leaves steps fl]
   (loop [constants (into {} (keep-indexed (fn [i v] (when (constant? v) [i v]))) leaves)]
     (let [r (try (chain-program kernel sk args (count leaves) constants
@@ -177,12 +186,67 @@
                      (throw e))))]
       (if-let [c (::carry r)]
         (recur (apply dissoc constants c))
-        {:program r :constants constants}))))
+        (assoc r :constants constants)))))
+
+(defn- host-element
+  "Element i of a flat Java array as a host number or boolean: a float as a
+   double, a boolean as Boolean/TRUE or Boolean/FALSE (reflect.Array's
+   are new Booleans, and Clojure's if takes any Boolean but FALSE as true)."
+  [data ^long i]
+  (let [v (java.lang.reflect.Array/get data (int i))]
+    (cond (instance? Float v) (.doubleValue ^Float v)
+          (instance? Boolean v) (Boolean/valueOf (.booleanValue ^Boolean v))
+          :else v)))
+
+(defn- element-reader
+  "A function of i giving element i of a flat Java array as a host number
+   or boolean (a float as a double, an int as a long)."
+  [data]
+  (condp instance? data
+    double/1 (let [^doubles a data] (fn [^long i] (aget a i)))
+    float/1 (let [^floats a data] (fn [^long i] (double (aget a i))))
+    long/1 (let [^longs a data] (fn [^long i] (aget a i)))
+    int/1 (let [^ints a data] (fn [^long i] (long (aget a i))))
+    boolean/1 (let [^booleans a data] (fn [^long i] (aget a i)))
+    (fn [^long i] (host-element data i))))
+
+(defn- row-reader
+  "A function of i giving row i of a host output of the lowerings ({:data
+   :shape :dtype}, gen.device's run-one: its rows along the leading axis)
+   as an array of the current backend, made from that row alone: a 0-d one
+   from its value."
+  [{:keys [data shape dtype]}]
+  (let [row (vec (rest shape))
+        m (long (reduce * 1 row))
+        elem (element-reader data)
+        opts {:dtype dtype}]
+    (if (empty? row)
+      (fn [^long i] (array/array (elem i) opts))
+      (fn [^long i] (array/reshape (array/array (mapv #(elem (+ (* i m) (long %))) (range m)) opts) row)))))
+
+(defn- host-trues
+  "How many elements of a host output are true."
+  ^long [{:keys [data]}]
+  (let [n (java.lang.reflect.Array/getLength data)]
+    (loop [i 0 c 0]
+      (if (< i n) (recur (inc i) (if (true? (host-element data i)) (inc c) c)) c))))
+
+(defn- step-carried
+  "The carried leaves after a step: the start's where the step passes a
+   leaf on unchanged (indices), the step's rows, in order, at the others."
+  [start unchanged rows]
+  (loop [j 0 rs (seq rows) out (transient [])]
+    (cond (= j (count start)) (persistent! out)
+          (contains? unchanged j) (recur (inc j) rs (conj! out (start j)))
+          :else (recur (inc j) (next rs) (conj! out (first rs))))))
 
 (defn run-kernel
   "kernel/run's :device path: kernel's chain from trace as a compiled
    program, its result kernel/run's (handler, a function of no arguments,
-   runs it on the handler for the fallback). opts are run's, :key given."
+   runs it on the handler for the fallback). opts are run's, :key given.
+   The result is made on the host from the program's outputs: a kept
+   step's trace from its rows alone, the leaves a step does not change
+   the start's."
   [kernel trace {:keys [samples burn thin key keep device] :or {burn 0 thin 1} :as opts} handler]
   (with-fallback device handler
     (let [steps (+ burn (* samples thin))
@@ -193,20 +257,21 @@
           ;; a host integer or boolean may be a constant of the program: its value keys it
           k [:kernel device fl (or (and (map? kernel) (:device-key kernel)) (Id. kernel)) (Id. gen-fn) (args-key args) sk
              (mapv #(if (constant? %) [(class %) %] (spec-of fl %)) leaves) steps]
-          {:keys [program constants run]} (cached k (fn [] (let [c (chain kernel sk args leaves steps fl)]
-                                                              (assoc c :run (compile-program device (:program c))))))
-          outs (tree/refill (:out-tree program) ((:run-one run) (rng/key-data key) (carried constants leaves)))
-          _ (when (and (:ok outs) (not-every? true? (array/->clj (:ok outs))))
-              ;; the handler throws there (a log density not finite at the start)
-              (throw (ex-info "a step's start was not finite" {})))
+          {:keys [program unchanged constants run]} (cached k (fn [] (let [c (chain kernel sk args leaves steps fl)]
+                                                                        (assoc c :run (compile-program device (:program c))))))
+          start (carried constants leaves)
+          outs (tree/refill (:out-tree program) ((:run-one run) (rng/key-data key) start))
+          _ (when-let [ok (:ok outs)]
+              (when (< (host-trues ok) (java.lang.reflect.Array/getLength (:data ok)))
+                ;; the handler throws there (a log density not finite at the start)
+                (throw (ex-info "a step's start was not finite" {}))))
           kept (filterv #(let [i' (inc %)] (and (> i' burn) (zero? (mod (- i' burn) thin)))) (range steps))
-          traces (mapv (fn [i] (trace/from-leaves sk (merged n constants (mapv #(row % i) (:c outs))) args)) kept)
-          [read finish] (if (some? keep) (kernel/keeping keep) [identity nil])
-          acc (some-> (:acc outs) array/->clj)
-          div (some-> (:div outs) array/->clj)]
-      (assoc (if finish {:draws (finish (mapv read traces))} {:traces traces})
-             :acceptance-rate (when (and acc (pos? steps)) (/ (double (count (filter true? acc))) steps))
-             :divergences (count (filter true? div))))))
+          readers (mapv row-reader (:c outs))
+          trace-at (fn [i] (trace/from-leaves sk (merged n constants (step-carried start unchanged (mapv #(% i) readers))) args))
+          [read finish] (if (some? keep) (kernel/keeping keep) [identity nil])]
+      (assoc (if finish {:draws (finish (mapv (comp read trace-at) kept))} {:traces (mapv trace-at kept)})
+             :acceptance-rate (when (and (:acc outs) (pos? steps)) (/ (double (host-trues (:acc outs))) steps))
+             :divergences (if (:div outs) (host-trues (:div outs)) 0)))))
 
 ;; ---------------------------------------------------------------------------
 ;; importance sampling

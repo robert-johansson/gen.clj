@@ -64,6 +64,47 @@
           (is (= (:score (:trace (gfi/update (first (:traces h)) (cm/choicemap :slope 0.5) (rng/key 1))))
                  (:score (:trace (gfi/update (first (:traces dv)) (cm/choicemap :slope 0.5) (rng/key 1)))))))))))
 
+(defn- close?
+  "jvm-test's band for a float32 chain against the handler's: within 1e-4
+   of 1 + |ref|."
+  [dev ref]
+  (< (Math/abs (- (double dev) (double ref))) (* 1e-4 (+ 1.0 (Math/abs (double ref))))))
+
+(defn- leaf-specs [t] (mapv (fn [[p v]] [p (array/dtype v) (array/shape v)]) (cm/leaves (:choices t))))
+
+(defn- leaf-values [t] (mapv (fn [[_ v]] (array/->clj v)) (cm/leaves (:choices t))))
+
+(deftest kernel-run-on-device-is-the-handlers-to-float32-rounding
+  ;; where the backend draws float32 (MLX): the device result is built on
+  ;; the host from the program's outputs, as arrays of the backend
+  (if-not (= :float32 (:float (array/defaults array/*backend*)))
+    (println "gen.device.run-test: the backend draws float64, the float32 comparison skips (-Dgen.backend=mlx runs it)")
+    (doseq [m [:vector :static]
+            [kname k] [[:mala (kernel/mala pb/selection pb/tau)] [:hmc (kernel/hmc pb/selection {:L 8 :eps pb/eps})]]]
+      (testing [m kname]
+        (let [[model args obs] (pb/models m)
+              tr (:trace (gfi/generate model args obs (rng/key 0)))
+              opts {:samples 40 :burn 7 :thin 3 :key (rng/key 3)}
+              h (kernel/run k tr opts)
+              dv (kernel/run k tr (assoc opts :device :jvm))]
+          (is (= :jvm (:device dv)) (:device-fallback dv))
+          (testing "the same accept decisions"
+            (is (= (:acceptance-rate h) (:acceptance-rate dv)))
+            (is (= (:divergences h) (:divergences dv))))
+          (testing "the traces hold the handler's kinds of arrays, its values to float32 rounding"
+            (is (= (map leaf-specs (:traces h)) (map leaf-specs (:traces dv))))
+            (is (every? true? (map close? (flatten (map leaf-values (:traces dv))) (flatten (map leaf-values (:traces h))))))
+            (is (every? true? (map #(close? (array/->clj (:score %1)) (array/->clj (:score %2))) (:traces dv) (:traces h)))))
+          (testing ":keep, read on the host"
+            (let [kh (:draws (kernel/run k tr (assoc opts :keep #(% :slope))))
+                  kd (:draws (kernel/run k tr (assoc opts :keep #(% :slope) :device :jvm)))]
+              (is (every? number? kd))
+              (is (every? true? (map close? kd kh)))))
+          (testing "a returned trace is whole: an update from it is the handler's"
+            (let [c (cm/choicemap :slope 1.5)]
+              (is (close? (array/->clj (:weight (gfi/update (last (:traces dv)) c (rng/key 9))))
+                          (array/->clj (:weight (gfi/update (last (:traces h)) c (rng/key 9)))))))))))))
+
 (def ^:private point (gen ^:static [x slope] (let [y (trace :y (d/normal (array/* slope x) 1))] y)))
 
 (def ^:private linreg
