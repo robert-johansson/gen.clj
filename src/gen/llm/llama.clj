@@ -179,7 +179,7 @@
   "gen.llama.split-recurrent, read once: does a recurrent or hybrid model's
    engine split its steps? true or false, or nil when it is not set: then
    only on Metal (the owner, DESIGN §9), where a split step of
-   Qwen3.5-0.8B cost a quarter to a third of one decode; on CUDA (fenrir,
+   Qwen3.5-0.8B cost a quarter to a third of one decode; on CUDA (the RTX-6000 machine,
    2026-10-21) about twice one decode."
   []
   (let [v (System/getProperty "gen.llama.split-recurrent")]

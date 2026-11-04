@@ -26,7 +26,7 @@
             [gen.device.scalar :as sc]
             [gen.random :as rng])
   (:import [gen.mlx Mlx MlxRaw MlxRuntime]
-           [java.lang.foreign Arena ValueLayout]))
+           [java.lang.foreign Arena MemorySegment ValueLayout]))
 
 (set! *warn-on-reflection* true)
 
@@ -115,7 +115,7 @@
 (def dialect
   "Metal's expressions (gen.device.scalar's dialect)."
   {:name "Metal lowering" :lit lit :simple? simple? :unary unary-expr :binary binary-expr
-   :convert convert-expr :bitcast bitcast-expr :read read-expr})
+   :convert convert-expr :bitcast bitcast-expr :read read-expr :run-index "p"})
 
 (def ^:private header
   "Helpers every kernel uses: Threefry for the threads' keys, and the ops
@@ -313,3 +313,36 @@ inline void g_threefry(uint k0, uint k1, uint c0, uint c1, thread uint& w0, thre
                     (java.lang.ref.Reference/reachabilityFence inputs)
                     (java.lang.ref.Reference/reachabilityFence constant-arrays))))
        (finally (Mlx/mlx_fast_metal_kernel_config_free cfg))))))
+
+;; ---------------------------------------------------------------------------
+;; Outputs on the host
+;; ---------------------------------------------------------------------------
+
+(defn- data-segment
+  "The data pointer p of an evaluated array, as a segment of bytes bytes."
+  ^MemorySegment [^MemorySegment p ^long bytes]
+  (when (= MemorySegment/NULL p)
+    (throw (MlxRuntime/error "mlx_array_data")))
+  (.reinterpret p bytes))
+
+(defn host-array
+  "x, an MLX array a kernel wrote (float32, int32, uint32 or bool), as a
+   flat Java array in row-major order: float[], int[] (uint32's words as
+   ints) or boolean[]. One copy of its buffer, nothing boxed. Evaluates x."
+  [x]
+  (array/eval! [x])
+  (let [^gen.backend.mlx.MlxArray x x
+        h (.-h x)
+        n (long (reduce * 1 (array/shape x)))]
+    (try
+      (when-not (Mlx/_mlx_array_is_row_contiguous h)
+        (throw (ex-info "Metal lowering: an output is not row-contiguous" {:shape (array/shape x)})))
+      (case (array/dtype x)
+        :float32 (.toArray (data-segment (Mlx/mlx_array_data_float32 h) (* 4 n)) ValueLayout/JAVA_FLOAT)
+        :int32 (.toArray (data-segment (Mlx/mlx_array_data_int32 h) (* 4 n)) ValueLayout/JAVA_INT)
+        :uint32 (.toArray (data-segment (Mlx/mlx_array_data_uint32 h) (* 4 n)) ValueLayout/JAVA_INT)
+        :bool (let [^bytes bs (.toArray (data-segment (Mlx/mlx_array_data_bool h) n) ValueLayout/JAVA_BYTE)
+                    out (boolean-array n)]
+                (dotimes [i n] (aset out i (not (zero? (aget bs i)))))
+                out))
+      (finally (java.lang.ref.Reference/reachabilityFence x)))))

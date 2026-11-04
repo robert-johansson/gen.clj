@@ -348,7 +348,7 @@ evaluate code?
   agent in gen.llm.agent. The 3.6's one-shot and REPL results from
   genclj-ihc4 and genclj-t1xh are the first numbers; they are rerun on
   the same seeds when the harness changes.
-- **Models:** Qwen3.6-35B-A3B (the MacBook, or fenrir), and Qwen3.5-0.8B
+- **Models:** Qwen3.6-35B-A3B (the MacBook, or the RTX-6000 machine), and Qwen3.5-0.8B
   for development on the 32 GB Mac.
 
 ### 10.5 Stages
@@ -402,4 +402,4 @@ At the spike's end the integration's home is decided (genclj-wqka): stay
 - A coding agent's file tools and bash in a research loop: each sample
   gets its own working directory, and runs go on hosts the owner grants.
 - Memory: a 35B model, kmet and a grader JVM at once. These runs go on the
-  MacBook or fenrir, never the 32 GB Mac.
+  MacBook or the RTX-6000 machine, never the 32 GB Mac.

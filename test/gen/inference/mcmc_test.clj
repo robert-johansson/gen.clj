@@ -632,6 +632,18 @@
                          ["an address twice" (mcmc/dense-inv-metric [:x :x] [[1.0 0.0] [0.0 1.0]]) :invalid-inv-metric]
                          ["a bare matrix for two choices" [[1.0 0.9] [0.9 1.0]] :unlabeled-inv-metric]]]
       (is (= r (reason m)) label))
+    (testing "symmetric within its dtype's rounding and its scale (owner, 2026-11-04)"
+      ;; a float32 metric off-symmetric by a rounding step (as la/inv
+      ;; makes one) is taken, and moves as its symmetric part; float64
+      ;; keeps Stan's 1e-8, relative to the largest entry
+      (let [off (array/array [[1.0 0.3] [0.3000001 2.0]] {:dtype :float32})
+            sym (array/* 0.5 (array/+ off (array/transpose off)))
+            move (fn [m] (let [r (mcmc/hmc tr xy {:L 3 :eps 0.3 :inv-metric (mcmc/dense-inv-metric [:x :y] m)} (rng/key 90))]
+                           [(:accepted? r) (ts/host (cm/to-map (:choices (:trace r))))]))]
+        (is (= (move sym) (move off)) "float32, a rounding step off")
+        (is (= :invalid-inv-metric (reason (mcmc/dense-inv-metric [:x :y] (array/array [[1.0 0.3] [0.3000001 2.0]] {:dtype :float64}))))
+            "float64, the same step: past Stan's 1e-8")
+        (is (nil? (reason (mcmc/dense-inv-metric [:x :y] [[1e6 1.0] [1.005 1e6]]))) "float64, within 1e-8 of a large scale")))
     (testing "the refusal of a bare matrix names the dense form"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"dense-inv-metric"
                             (mcmc/hmc tr xy {:inv-metric [[1.0 0.9] [0.9 1.0]]} (rng/key 88)))))

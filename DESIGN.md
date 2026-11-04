@@ -354,7 +354,7 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
   `gen.llm.llama` is llama.cpp's. On Metal the same read from the same
   state is bit-identical, while different batch shapes give a token's
   log-probability differing by up to 5e-2 nats (median 2e-3 to 4e-3).
-- **Quantized weights off Metal (measured 2026-10-21, fenrir; genclj-kw88).**
+- **Quantized weights off Metal (measured 2026-10-21, the RTX-6000 machine; genclj-kw88).**
   With Q8_0 weights, llama.cpp's x86 CPU and CUDA builds give log-probabilities
   about 0.22 nats a token (median; up to about 2) from Metal's, which agrees
   with an f32 forward pass within 0.008. The CPU build is batch-invariant;
@@ -365,7 +365,7 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
   on those backends). So on CUDA and x86 CPU, exact inference (scores, SMC
   weights, comparisons across devices) wants float (F16/BF16) weights;
   quantized ones are for speed.
-- **Float weights on CUDA (measured 2026-10-21, fenrir; genclj-kw88).** Two
+- **Float weights on CUDA (measured 2026-10-21, the RTX-6000 machine; genclj-kw88).** Two
   computations of one distribution differ by at most 0.13 (Qwen3-0.6B f16),
   0.15 (Qwen3.5-0.8B BF16) and 0.26 (Gemma-3-270M F16; 0.078 as F32,
   converted from the F16 file without loss); branches without a sliding
@@ -804,7 +804,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     (owner, 2026-10-25 night, on the lead's recommendation; the night's
     rerun confirmed it as the cause: with MLX_ENABLE_TF32=0 the matrix
     families' gradients, the batched matrix VJPs, the vmapped matmul and
-    the Cholesky and solve checks pass on fenrir's RTX PRO 6000): off for
+    the Cholesky and solve checks pass on the RTX-6000 machine): off for
     1.0.
     MLX runs float32 matrix products on CUDA in TF32 by default (a 10-bit
     mantissa, about 1e-3 relative: a log density of 100 off by 0.1 nats),
@@ -1255,7 +1255,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   this, the backends disagreed on NaN, ±Inf and out-of-range values. The
   JVM backend threw on ±Inf and did not clamp int32. MLX's GPU saturated
   but took NaN to MIN for int64. MLX's x86 CPU gave MIN for all of them
-  (the M2 review, finding 11, confirmed on fenrir). A loud error would need
+  (the M2 review, finding 11, confirmed on the RTX-6000 machine). A loud error would need
   a host read of every cast on a lazy backend.
 - **Booleans in arithmetic count, as in Julia** (owner, 2026-10-20;
   genclj-6pnx): `+`, `-`, `*` and `negate` on booleans give integers,
@@ -2273,7 +2273,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     (`llama_memory_seq_pos_min`) disagrees with it, loudly on System.err.
     Where a state sits changes no result, only the cost.
   - **Default by device (owner, 2026-10-21; genclj-kw88):** the split is on
-    only where the model's weights are on Metal. On CUDA (fenrir's RTX PRO
+    only where the model's weights are on Metal. On CUDA (the RTX-6000 machine's RTX PRO
     6000, shared) a split step of Qwen3.5-0.8B cost about twice one decode
     (52 against 24 ms), an extra decode costing more there than the copies
     it saves; genclj-mxi9 measures CUDA and the CPU properly. The property
@@ -3277,7 +3277,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     assistant when it can evaluate code? It is measured on the codegen
     bake-off's tasks and memo.clj's, against fixed baselines at matched
     compute: one shot, best-of-K, and the REPL agent.
-  - **Models.** Qwen3.6-35B-A3B on the MacBook or fenrir; Qwen3.5-0.8B for
+  - **Models.** Qwen3.6-35B-A3B on the MacBook or the RTX-6000 machine; Qwen3.5-0.8B for
     development on this Mac.
   - **Where.** An `ext/kmet` module in gen.clj for the spike, with kmet as a
     git dependency at the pinned commit (EPL-2.0, a dependency, never
@@ -3319,8 +3319,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   - **Off the critical path:** the device programs (experimental, landing
     on main for a later 1.x) and kmet's stages (each on the owner's go).
   - **The gate, lighter than 1.0's** (genclj-w2pg): every test on the JVM
-    backend, on MLX's CPU and on Metal; CUDA once, on the Thor (fenrir
-    runs on the CPU only for now, owner, 2026-11-04) or on fenrir when its
+    backend, on MLX's CPU and on Metal; CUDA once, on the Thor (the RTX-6000 machine
+    runs on the CPU only for now, owner, 2026-11-04) or on the RTX-6000 machine when its
     GPU is back; the book on the JVM backend; memo.clj (its ext/synth
     too) and GenGDT green against the release candidate. The release
     notes lead with the Breaking `=` on 0-d MLX arrays: gen.backend.mlx
@@ -3348,7 +3348,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       HMC chain, L=32, through kernel/run 2.4 ms on the JVM backend and
       4.7 on MLX). A Metal kernel runs 1 to 1024 chains in the same 22
       ms, so one chain's time is one instruction stream's latency, and
-      GenJAX's GPU is slower still there (101 ms on fenrir).
+      GenJAX's GPU is slower still there (101 ms on the RTX-6000 machine).
   - **1.1.0's GPU work, the dense metric and the order (owner, 2026-11-04,
     "go with your recommendations"; genclj-qsa2).**
     - **GPU speed is many chains and many particles on Metal,** where the
@@ -3381,8 +3381,14 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       n]` matrix only for one selected choice of n elements (unless the
       choice has that shape: its variances), so a Gen.jl model with a
       matrix over several choices meets a loud error naming the dense
-      form. Refused unless finite, symmetric within Stan's
-      check_symmetric (1e-8, absolute) and positive definite. The
+      form. Refused unless finite, symmetric and positive definite.
+      Symmetric (owner, 2026-11-04, on the lead's recommendation after a
+      side agent's note): |m - mᵀ| ≤ ε·max(1, max|m|), ε 1e-8 in float64
+      (Stan's check_symmetric, in practice) and 1e-5 in float32 (about a
+      hundred rounding steps: a metric computed in float32, by la/inv
+      say, is off-symmetric by its rounding), and the kernels then use
+      (m + mᵀ)/2, exactly symmetric. Stan's absolute 1e-8 as first built
+      refused such float32 metrics. The
       factors (L with M⁻¹ = L·Lᵀ, and L⁻¹) are computed once a move on
       the matrix's own backend, then made arrays of the current one, so a
       staged, batched or compiled step takes them as constants (a device
@@ -3411,6 +3417,39 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       asked for batched, its result holds `:particles` (a gen.batched
       collection over the program's outputs, as the batched handler's
       result does) in place of n scalar traces; draws stay per particle.
+      As built (2026-11-04, the lead; experimental, for the owner's look):
+      `(device/run-chains kernel traces opts)` returns `{:traces` (or
+      `:draws`) `:acceptance-rates :divergences}`, one entry per chain,
+      plural keys as the 1.0 review's. The lowerings gained per-run
+      inputs (a program's `:per-run` data inputs, run r's at r times the
+      input's size: each chain's start), in gen.device.scalar for both
+      dialects. Because a function `:keep` makes a trace per kept step
+      (4096 chains of 1000 steps are four million traces: seconds on the
+      JVM backend, past Metal's buffer limit on MLX), run-chains also
+      takes `:keep-choices [address …]`: those choices read from the
+      program's outputs as host values, no trace made, equal to a `:keep`
+      of `{address #(% address)}` (its handler fallback runs exactly
+      that). Not `:keep` with an address: a keyword is a function, and on
+      a trace it reads the record's fields. A carried leaf that is one
+      object in every chain's start (the observations, typically) is one
+      input the chains share, so large data costs no copy per chain and
+      no fallback (a side agent's note, 2026-11-04; the owner: "not
+      interested in solutions that give us much longer time / large
+      difference compared to GenJAX"); a large per-run input is copied
+      into its run's scratch buffer. `:metal`'s outputs are copied into
+      Java arrays (one copy, nothing boxed) when first read, and a 0-d
+      input goes to Metal as [1] (MLX hands a kernel a 0-d array as a
+      scalar, which the generated code cannot index: the static parity
+      model's Metal failure, genclj-649c). **The fallback is batched**
+      (owner, 2026-11-04, on the lead's recommendation after a side
+      agent's note): a model the device cannot run (about 4 in 10 of the
+      census's continuous models for MALA) runs as one batched run of the
+      kernel's batched form, about a hundred times faster than chain by
+      chain (4096 HMC chains of 1000 steps: ~1.6 h chain by chain on the
+      JVM backend). Its draws are the batched run's, not the device's
+      chains (the same distribution), and `:device-fallback` says so,
+      until per-particle keys (genclj-asog) make them the same; a kernel
+      with no batched form runs chain by chain.
     - **GenLM's gaps (owner, 2026-11-04):** the survey's top five become
       beans for after 1.1.0 (an epic): a critic at the drawn token in
       token SMC, AWRS for constraints without a mask, the potential

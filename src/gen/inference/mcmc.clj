@@ -190,8 +190,9 @@
    row-major order as cm/to-array gives them. An address is a choice's
    address or its path ([:latent :z]). matrix is an array or nested
    vectors. The kernels refuse it loudly unless its addresses are the
-   selected choices' and it is finite, symmetric (to Stan's 1e-8) and
-   positive definite."
+   selected choices' and it is finite, symmetric (within 1e-8 of its largest
+   entry in float64, Stan's, and 1e-5 in float32, its rounding) and
+   positive definite; they use its symmetric part, (m + mᵀ)/2."
   [addresses matrix]
   (when-not (and (sequential? addresses) (seq addresses))
     (throw (ex-info (str "dense-inv-metric: the addresses are the selected choices' in the matrix's order, a vector, not "
@@ -233,10 +234,13 @@
       (let [i (array/with-backend (array/backend matrix) (array/array idx {:dtype :int32}))]
         (array/take (array/take matrix i 0) i 1)))))
 
-(def ^:private symmetry-tolerance
-  "How far a dense metric's entries may be from its transpose's: Stan's
-   check_symmetric (CONSTRAINT_TOLERANCE)."
-  1e-8)
+(defn- symmetry-tolerance
+  "How far a dense metric m's entries may be from its transpose's, relative
+   to max(1, its largest |entry|), by m's dtype: Stan's check_symmetric's
+   1e-8 in float64, about a hundred rounding steps in float32, where a
+   computed metric is off-symmetric by its rounding (owner, 2026-11-04)."
+  ^double [m]
+  (if (= :float64 (array/dtype m)) 1e-8 1e-5))
 
 (defn- dense-metric
   "The dense inverse metric m (a matrix in the selected values' order) as
@@ -244,8 +248,9 @@
    M⁻¹ = L·Lᵀ, so that momenta from N(0, M) are L⁻ᵀ·z. Computed on m's own
    backend, then arrays of the current one: constants of a compiled,
    staged or batched step. Loud unless m
-   is d×d for the d selected values, finite, symmetric and positive
-   definite."
+   is d×d for the d selected values, finite, symmetric (within
+   symmetry-tolerance) and positive definite; m's symmetric part,
+   (m + mᵀ)/2, is the one used."
   [m v given]
   (let [d (long (array/size v))
         dtype (array/dtype v)
@@ -258,9 +263,12 @@
      (array/with-backend (array/backend m)
        (when-not (= [d d] shape) (refuse (str d "×" d " for the " d " selected values, not of shape " shape)))
        (when-not (array/truthy? (array/all (array/isfinite m))) (refuse "finite"))
-       (when-not (array/truthy? (array/<= (array/max (array/abs (- m (array/transpose m)))) symmetry-tolerance))
-         (refuse (str "symmetric (to " symmetry-tolerance ")")))
-       (let [m (array/astype m dtype)
+       (let [eps (symmetry-tolerance m)
+             scale (max 1.0 (double (array/item (array/max (array/abs m)))))]
+         (when-not (array/truthy? (array/<= (array/max (array/abs (- m (array/transpose m)))) (* eps scale)))
+           (refuse (str "symmetric (to " eps " of its largest entry)"))))
+       ;; its symmetric part, exactly symmetric (a symmetric m unchanged: (a + a)/2 = a)
+       (let [m (array/astype (* 0.5 (+ m (array/transpose m))) dtype)
              l (la/cholesky m)]
          (when-not (array/truthy? (array/all (array/logical-and (array/isfinite l) (array/> (la/diagonal l) 0))))
            (refuse "positive definite"))

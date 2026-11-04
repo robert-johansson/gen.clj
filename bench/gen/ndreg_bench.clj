@@ -3,7 +3,7 @@
    sampling, 1000 particles from the prior, on D-dimensional Bayesian linear
    regression with M observations, w ~ N(0, 10²) [D] and y ~ N(X·w, 1) [M],
    one vector site each, for the cells (D, M) in {10, 100, 1000} × {1000,
-   10000}. The data are the spec's frozen files (fenrir's
+   10000}. The data are the spec's frozen files (the RTX-6000 machine's
    ~/mlx/genjax-parity/data, X [M D], y [M] as float32 safetensors), read
    from -Dgen.ndreg.dir.
 

@@ -42,6 +42,8 @@
      :bitcast  (fn [from to a])
      :read     (fn [buffer dtype index]) a buffer's element (optional;
                buffer[index] by default)
+     :run-index the name of the run's index (i, a GPU thread's p), by
+               which a per-run input is read
    each throwing for what it cannot write. Names: v<n> values, c<n> carries,
    it<n> scan counters, i<n> array loops, b<n> buffers, k<n> constants,
    in<n> inputs; the key's words are key0 and key1. Indices are int."
@@ -649,8 +651,13 @@
   "program (gen.array.stage's: a key, then data inputs) as statements in
    dialect: {:stmts :outputs [{:shape :dtype} per output, a scan's ys
    [length …]] :buffers :inputs :constants :statements (their count, loop
-   bodies included)}. Each non-ys output's elements are stored at the end."
-  [{:keys [graph inputs outputs]} dialect]
+   bodies included)}. Each non-ys output's elements are stored at the end.
+   The data inputs whose indices (from 0, after the key) are in the
+   program's :per-run set are each run's own: their buffers hold every
+   run's, run r's at r times the input's size (a large one copied into a
+   scratch buffer of the run; marked :per-run? in :inputs); the others
+   every run shares."
+  [{:keys [graph inputs outputs per-run]} dialect]
   (when-not (= (first inputs) [[2] :uint32])
     (throw (ex-info (str (:name dialect) ": a program of a key, then its data") {:inputs inputs})))
   (let [em (assoc (emitter dialect) :uses (uses graph outputs))
@@ -665,16 +672,31 @@
                                                     (let [s (by-id (first args)) nc (get-in s [:attrs :n-carry])]
                                                       (when (>= (:index attrs) nc) [[(:id s) (- (:index attrs) nc)] k])))))
                                       outputs))
-        data (vec (map-indexed (fn [i [shape dtype]] {:name (str "in" (inc i)) :shape (vec shape) :dtype dtype}) (rest inputs)))
+        data (vec (map-indexed (fn [i [shape dtype]]
+                                 (cond-> {:name (str "in" (inc i)) :shape (vec shape) :dtype dtype}
+                                   (contains? per-run i) (assoc :per-run? true)))
+                               (rest inputs)))
         env0 (into {} (map (fn [{:keys [id attrs]}]
                              (let [i (:index attrs)]
                                [id (if (zero? i)
                                      (value [2] :uint32 ["key0" "key1"])
-                                     (let [{:keys [name shape dtype]} (nth data (dec i))]
-                                       (if (large-shape? shape)
-                                         (buffer-value em shape dtype name)
+                                     (let [{:keys [name shape dtype per-run?]} (nth data (dec i))
+                                           n (size shape)
+                                           ;; a per-run input's run r at r times its size
+                                           at (if per-run?
+                                                (let [r (or (:run-index dialect) (fail! em "a per-run input in a dialect without a run index" {}))]
+                                                  #(str r " * " n " + " %))
+                                                str)]
+                                       (cond
+                                         ;; a large per-run input: the run's own slice copied
+                                         ;; into a scratch buffer of its run
+                                         (and per-run? (large-shape? shape))
+                                         (let [b (buffer! em dtype n)]
+                                           (for! em n (fn [bem w] (stmt! bem [:bset b w (read-expr em name dtype (at w))])))
+                                           (buffer-value em shape dtype b))
+                                         (large-shape? shape) (buffer-value em shape dtype name)
                                          ;; a small input read once into values
-                                         (value shape dtype (mapv #(bind! em dtype (read-expr em name dtype (str %))) (range (size shape)))))))]))
+                                         :else (value shape dtype (mapv #(bind! em dtype (read-expr em name dtype (at %))) (range n))))))]))
                            (filter #(and (= :param (:op %)) (not (:capture (:attrs %)))) graph)))
         env (emit-graph! em graph env0 {:ys-out ys-out})
         outs (mapv env outputs)

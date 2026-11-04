@@ -202,7 +202,7 @@
 (def dialect
   "Java's expressions (gen.device.scalar's dialect)."
   {:name "JVM lowering" :lit lit :simple? simple? :unary unary-expr :binary binary-expr
-   :convert convert-expr :bitcast bitcast-expr})
+   :convert convert-expr :bitcast bitcast-expr :run-index "i"})
 
 ;; ---------------------------------------------------------------------------
 ;; Methods: statements cut into chunks, values crossing chunks as fields

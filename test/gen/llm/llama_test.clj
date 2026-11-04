@@ -376,7 +376,7 @@
   ;; 123.1 in one decode (0.32; 0.32 again in a second run). Mutations
   ;; checked there: no split fails the counts and the ratio (1.00); a
   ;; group's rows put back reversed fail the band by 4.2 to 17 nats. The
-  ;; split is on by default only on Metal (DESIGN §9: on CUDA, fenrir,
+  ;; split is on by default only on Metal (DESIGN §9: on CUDA, the RTX-6000 machine,
   ;; 2026-10-21, it cost about twice one decode), so the test turns it on,
   ;; and asks for the saving only there.
   (when-llama

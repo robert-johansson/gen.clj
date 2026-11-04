@@ -1,5 +1,5 @@
 (ns gen.parity-bench
-  "GenMLX's GenJAX parity workloads (~/mlx/genjax-parity on fenrir, its
+  "GenMLX's GenJAX parity workloads (~/mlx/genjax-parity on the RTX-6000 machine, its
    specs linreg_is, linreg_mala, linreg_hmc and linreg_mala_manychain) on
    gen.clj, to set gen.clj's costs beside GenJAX's on the same card (bean
    genclj-a1hu). The model is Bayesian linear regression on the specs' ten

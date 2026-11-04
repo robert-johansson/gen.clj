@@ -52,8 +52,10 @@ other values for the same key, from the same distribution.
   selected. Momenta come from N(0, M) as L⁻ᵀ·z (M⁻¹ = L·Lᵀ) and
   positions move by M⁻¹·p; MALA proposes from N(v + tau·M⁻¹∇,
   2 tau·M⁻¹). A dense metric that is not finite, not symmetric (within
-  Stan's 1e-8), not positive definite or not the selected choices' is
-  refused (`:invalid-inv-metric`), and a bare matrix for several choices
+  1e-8 of its largest entry in float64, Stan's, and 1e-5 in float32, a
+  computed metric's rounding; its symmetric part is the one used), not
+  positive definite or not the selected choices' is refused
+  (`:invalid-inv-metric`), and a bare matrix for several choices
   names the dense form in its error. `mcmc/inv-metric` returns a dense
   metric labeled in the selection's order. gen.inference.nuts' warmup
   adapts a diagonal metric only: it refuses a dense `:inv-metric` unless
@@ -180,6 +182,29 @@ other values for the same key, from the same distribution.
   to read). The results are as before: the handler's bit for bit on the
   JVM backend in float64, to float32 rounding with the same accepts on
   MLX (a test of its own now).
+- **Experimental: `gen.inference.device/run-chains`, many chains in one
+  call** (DESIGN §9, owner, 2026-11-04; genclj-ke07). n chains of a
+  kernel, chain i from its own trace on `(rng/split key n)[i]`, each
+  `kernel/run`'s: `{:device :jvm}` runs them on every core, `:metal` as
+  one Metal kernel (a GPU thread a chain); without `:device`, `kernel/run`
+  per chain. `:keep-choices [address …]` keeps choices straight from the
+  program's outputs, no trace made (a function `:keep` makes a trace a
+  kept step: millions for many chains). Returns `{:traces` or `:draws`,
+  `:acceptance-rates :divergences}`, one entry per chain. A model the
+  device cannot run falls back to one batched run of the kernel's batched
+  form (`:device-fallback {:ran :batched}`; its draws the batched run's,
+  the same distribution), chain by chain for a kernel without one. The
+  device lowerings gained per-run inputs (each chain's start), one shared
+  input for what every chain holds (the observations), and one input for
+  an array a trace holds twice (a model whose return value is its
+  observation, which every step wrote out: past a Java array's length at
+  4096 chains of a 2000-observation model); outputs too large for a Java
+  array are a loud error before anything is allocated. `:metal`'s outputs
+  are copied into Java arrays when first read, and a 0-d input goes to
+  Metal as [1] (MLX hands a kernel a 0-d array as a scalar): the static
+  parity model's importance sampling runs on `:metal` now (genclj-649c).
+  4096 MALA chains of 1000 steps on the M4 with `:keep-choices`: 0.30 s
+  on `:jvm`, against GenJAX's 0.89 s on the M4's CPU.
 - **Experimental: importance sampling's `:device` result built on the
   host** (`gen.inference.device`, ext/device's `gen.device`; genclj-m5o6).
   `gen.device`'s run-many gives its outputs on the host (`:metal`'s read
