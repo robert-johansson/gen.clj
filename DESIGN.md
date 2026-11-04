@@ -3406,6 +3406,16 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     too) and GenGDT green against the release candidate. The release
     notes lead with the Breaking `=` on 0-d MLX arrays: gen.backend.mlx
     is internal, but the change reaches user code that compares draws.
+  - **As the release went (owner, 2026-11-04 evening).** The owner's
+    review of Part V and the appendices (genclj-7yjc) comes after 1.1.0
+    ("maybe this can come after"): the tag waits for the gate's checks
+    only. MLX's gathers stay clamped in 1.1.0 rather than becoming loud
+    (above; genclj-08un decides what follows). CUDA ran twice: the full
+    battery on the Thor, and on the owner's go a short check on the
+    RTX-6000 machine (its GPU back), because the Thor's matrix suites
+    pass even with TF32 forced on. The MLX CPU float64 light tier ran on
+    the MacBook (owner, "can we run some of the tests on the macbook"),
+    beside the Mac's Metal and float32 runs.
   - **One chain fast on MLX, and GPU speed (owner, 2026-11-04, "go with
     option 1", on the lead's recommendation; genclj-fpnf, genclj-h8rn).**
     One HMC chain (L=32, 1000 steps) ran in 21.9 ms as a Metal program (one
