@@ -203,8 +203,13 @@ other values for the same key, from the same distribution.
   are copied into Java arrays when first read, and a 0-d input goes to
   Metal as [1] (MLX hands a kernel a 0-d array as a scalar): the static
   parity model's importance sampling runs on `:metal` now (genclj-649c).
-  4096 MALA chains of 1000 steps on the M4 with `:keep-choices`: 0.30 s
-  on `:jvm`, against GenJAX's 0.89 s on the M4's CPU.
+  On the M4 with `:keep-choices`, 1000 steps: 4096 MALA chains 0.38 s on
+  `:jvm` and 0.18 s on `:metal` (32768: 1.5 s), 4096 HMC chains of L=32
+  0.82 s and 0.22 s (32768: 1.9 s), against GenJAX's 0.89 s for the 4096
+  MALA chains on the M4's CPU, its device there. A `:keep` function, or no
+  `:keep`, makes a trace a kept step and chain: on MLX past 50,000 traces
+  that is a loud error naming `:keep-choices` (Metal holds about 499,000
+  arrays at once).
 - **Experimental: importance sampling's `:device` result built on the
   host** (`gen.inference.device`, ext/device's `gen.device`; genclj-m5o6).
   `gen.device`'s run-many gives its outputs on the host (`:metal`'s read
