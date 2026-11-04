@@ -38,6 +38,12 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Fixed: half-float sums on CUDA in float32** (gen.backend.mlx;
+  genclj-tblx). A float16 or bfloat16 sum on CUDA accumulated in its own
+  precision (1.0.0's known issue: a long sum lost precision), as MLX's CPU
+  did before it summed them in float32 (DESIGN §9): CUDA now does too.
+  Metal, which accumulates them in float32, is unchanged.
+
 - **Draws: MLX's float32 matrix products are full float32 by default**
   (gen.backend.mlx's MlxRuntime; DESIGN §9; genclj-p3pr). MLX computes them
   on CUDA in TF32 unless `MLX_ENABLE_TF32=0` is set (a 10-bit mantissa,
