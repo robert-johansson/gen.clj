@@ -25,7 +25,8 @@ Clojure on the JVM. In order:
    ported file by file to gen.clj tests, each citing its source. A table
    marks each as ported or not applicable, with a reason (Julia-only
    machinery). Gen.jl itself, installed on this Mac (Gen 0.4.8 on Julia
-   1.12.6; its suite passes here, `docs/research/genjl-test-suite.md`), is
+   1.12.6, 0.4.9 since 2026-11-04 in the oracle's project; its suite passes
+   here, `docs/research/genjl-test-suite.md`), is
    the oracle for expected values, written as EDN fixtures as scipy's and
    JAX's are, so the tests never need Julia. Its seeded statistical tests
    are compared by their statistics, as for GenMLX. A port that fails is a
@@ -2668,7 +2669,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   2026-10-21: until gen.clj has a license), public since 2026-10-26 (the
   owner); main is pushed at a milestone's close or with the owner's
   go-ahead. The license (owner, 2026-10-26; genclj-fhdz): MIT, `LICENSE`.
-  The ports of Gen.jl 0.4.8's test suite (`test/gen/genjl/`) derive from
+  The ports of Gen.jl's test suite (0.4.8's, and 0.4.9's new tests;
+  `test/gen/genjl/`) derive from
   Gen.jl's and keep its Apache License 2.0, a copy beside them, as its
   section 4 asks. `.beans/` is its own private repo
   (`robert-johansson/gen.clj-beans`), synced by SessionStart/PreCompact/Stop

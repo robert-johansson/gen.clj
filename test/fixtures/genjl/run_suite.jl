@@ -1,4 +1,4 @@
-# Run Gen.jl 0.4.8's own test suite once, from the installed copy, through a
+# Run Gen.jl's own test suite once (0.4.9; 0.4.8 for M5), from the installed copy, through a
 # recording test set, and write each testset's pass/fail/error counts as EDN.
 #
 #   env JULIA_PKG_OFFLINE=true JULIA_NUM_THREADS=1 JULIA_DEPOT_PATH=<scratch depot>:~/.julia \
@@ -6,6 +6,9 @@
 #
 # runtests.jl, then inference/enumerative.jl (which runtests.jl never includes).
 using Test
+import Gen
+
+const GEN = "Gen.jl $(pkgversion(Gen))"
 
 const TESTDIR = abspath(ARGS[1])
 const OUTDIR = abspath(ARGS[2])
@@ -83,7 +86,7 @@ end
 
 # --- the run -----------------------------------------------------------------
 cd(TESTDIR)
-top = @testset RecTS "Gen.jl 0.4.8" begin
+top = @testset RecTS "$GEN" begin
     @testset RecTS "runtests.jl" begin
         include(joinpath(TESTDIR, "runtests.jl"))
     end
@@ -94,7 +97,7 @@ end
 
 rs = rows(top)
 open(joinpath(OUTDIR, "upstream-run.edn"), "w") do io
-    println(io, ";; Gen.jl 0.4.8's test suite, run once from ", TESTDIR)
+    println(io, ";; ", GEN, "'s test suite, run once from ", TESTDIR)
     println(io, ";; Julia ", VERSION, ", ", Sys.MACHINE, ", ", Base.Sys.cpu_info()[1].model)
     println(io, ";; each row: a testset's own results (children separate)")
     println(io, "[", join(map(edn, rs), "\n "), "]")

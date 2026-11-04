@@ -1,6 +1,6 @@
 ;; Gen.jl's logpdf(beta, x, alpha, beta) at and next to 0 and 1 (D6): finite at an endpoint
 ;; where the density is infinite, "as if x = eps/e" (src/modeling_library/distributions/beta.jl).
-;; Written by test/fixtures/genjl/generate.jl: Gen 0.4.8, Julia 1.12.6, arm64-apple-darwin25.4.0.
+;; Written by test/fixtures/genjl/generate.jl: Gen 0.4.9, Julia 1.12.6, arm64-apple-darwin25.4.0.
 [{:alpha 0.5
  :beta 0.5
  :log-prob 17.377096808709176

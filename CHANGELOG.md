@@ -38,6 +38,12 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Parity with Gen.jl 0.4.9** (genclj-u420). Its fixes (#571: the
+  general trace translator's forward score, elliptical slice's threshold)
+  were gen.clj's from the port, and its new tests are ported; its hmc
+  metric (#559) is the dense metric below. The oracle's fixtures
+  (`test/fixtures/genjl`) come from Gen 0.4.9 now, with the same values
+  as 0.4.8's, and Gen.jl 0.4.9's own suite passes here.
 - **A dense metric for hmc, mala and nuts** (`gen.inference.mcmc`, Gen.jl
   0.4.9's #559; DESIGN §9, owner, 2026-11-04; genclj-q9ge).
   `:inv-metric` takes a dense M⁻¹ (Stan's dense inv_metric):

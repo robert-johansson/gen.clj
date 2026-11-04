@@ -181,6 +181,7 @@ clojure -J-Dgen.llama.test-model=Qwen3-0.6B-Q8_0.gguf -X:test :nses '[gen.llm.ll
 
 ## License
 
-MIT (`LICENSE`). The ports of Gen.jl 0.4.8's test suite in
+MIT (`LICENSE`). The ports of Gen.jl's test suite (0.4.8's, and 0.4.9's
+new tests) in
 `test/gen/genjl/` derive from Gen.jl, which is under the Apache License
 2.0; its license is beside them, in `test/gen/genjl/LICENSE`.

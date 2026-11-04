@@ -1,4 +1,4 @@
-# Gen.jl 0.4.8's values for gen.clj's ports of its tests (M5's oracle,
+# Gen.jl's values (0.4.9; 0.4.8 for M5, the same) for gen.clj's ports of its tests (M5's oracle,
 # docs/research/genjl-test-suite.md §5), as EDN in gen.clj's terms:
 # keywords for addresses and names (- for _), and Switch's branch index
 # 0-based (Gen.jl's - 1). Tests read them through gen.genjl.oracle and never
@@ -12,7 +12,8 @@
 #   weights switch.jl:85-94 and :288-294 assert (U1);
 # - beta-endpoints.edn: beta's log density at and next to 0 and 1 (D6);
 # - statistics.edn: the statistical testsets' quantities over 20 seeds.
-# The models and the testsets' bodies are Gen.jl's (test/, at 0.4.8).
+# The models and the testsets' bodies are Gen.jl's (test/, at 0.4.8; 0.4.9
+# changed none of them).
 using Gen, Random, Statistics
 
 include("edn.jl")
