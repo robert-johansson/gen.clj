@@ -50,8 +50,8 @@ other values for the same key, from the same distribution.
   generated code.
 - **A module, ext/codegen** (`gen.codegen`; a git dependency with
   `:deps/root "ext/codegen"`, as ext/laws): what evaluates LLM-written
-  code, a namespace session with read, repair, vet and explain hooks
-  (`gen.codegen.session`) and tools in a JVM of their own
+  code, a namespace session with read, repair, vet and explain hooks, and
+  `:each?` to show every form's value (`gen.codegen.session`) and tools in a JVM of their own
   (`gen.codegen.process`), both experimental; and the codegen bake-off's
   harness (internal), moved from test/gen/codegen. Its dependencies
   (clj-kondo, parinferish) left the :test alias for :codegen, which puts

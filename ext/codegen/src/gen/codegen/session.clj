@@ -5,7 +5,7 @@
    it. With gen.llm.agent it makes an eval tool (eval-tool).
 
      (open opts)                 → a session
-     (eval! session code)        → {:text :ok? :value :forms :repaired? :printed}
+     (eval! session code)        → {:text :ok? :value :values :forms :repaired? :printed}
      (eval! session code hooks)
      (lookup session sym)        → the value of a var the session defined, or nil
      (program session)           → the code of every form that evaluated, in order
@@ -28,8 +28,12 @@
      :explain  (fn [throwable ns forms] → text): an evaluation error as the
                model reads it, given the session's namespace and the forms
                (default: the message and its causes')
-     :show     (fn [value] → text): the last form's value as the model reads
-               it (default: printed, cut to 300 characters)
+     :show     (fn [value] → text): a value as the model reads it (default:
+               printed, cut to 300 characters)
+     :each?    every form's value, each after its form (cut to 60
+               characters), not only the last's; on an error, the values
+               of the forms before it, then the error (false: a model may
+               take the last value for the only one)
      :timeout-ms  each eval's limit (30000; nil for none, the caller keeping
                its own); past it the eval is abandoned, its thread
                interrupted (it may go on: the JVM is then tainted, and
@@ -103,10 +107,11 @@
 
 (defn eval!
   "code's forms read, vetted and evaluated in the session, in order: the
-   last one's value, or the first error (the forms before it stay). See the
-   namespace's docstring."
+   last one's value (:each?, every one's), or the first error (the forms
+   before it stay). :values holds the value of every form evaluated. See
+   the namespace's docstring."
   ([session code] (eval! session code nil))
-  ([{n :ns :keys [program]} code {:keys [read repair vet explain show timeout-ms]
+  ([{n :ns :keys [program]} code {:keys [read repair vet explain show each? timeout-ms]
                                   :or {read read-forms timeout-ms 30000}}]
    (let [[forms repaired? read-error]
          (try [(read code) false nil]
@@ -120,16 +125,26 @@
        (if-let [refusal (when vet (vet forms))]
          {:text (str note "error: " refusal) :ok? false :forms forms :repaired? repaired?}
          (let [out (java.io.StringWriter.)
-               printed #(let [s (str out)] (when (seq s) (str "printed: " (clip s 400) "\n")))]
+               printed #(let [s (str out)] (when (seq s) (str "printed: " (clip s 400) "\n")))
+               shown #(if show (show %) (clip (pr-str %) 300))
+               ;; [form value] of each form evaluated, in order
+               done (atom [])
+               each-text #(str/join "\n" (map (fn [[f v]] (str (clip (pr-str f) 60) "\n=> " (shown v))) @done))]
            (try
              (let [run #(binding [*ns* (the-ns n) *out* out]
-                          (reduce (fn [_ f] (let [v (eval f)] (swap! program conj (pr-str f)) v)) nil forms))
-                   v (if timeout-ms (within timeout-ms run) (run))]
-               {:text (str note (printed) "=> " (if show (show v) (clip (pr-str v) 300))) :ok? true :value v :forms forms
+                          (doseq [f forms]
+                            (let [v (eval f)]
+                              (swap! program conj (pr-str f))
+                              (swap! done conj [f v]))))
+                   _ (if timeout-ms (within timeout-ms run) (run))
+                   v (second (peek @done))]
+               {:text (str note (printed) (if (and each? (seq @done)) (each-text) (str "=> " (shown v))))
+                :ok? true :value v :values (mapv second @done) :forms forms
                 :repaired? repaired? :printed (str out)})
              (catch Throwable e
-               {:text (str note (printed) "error: " (if explain (explain e (the-ns n) forms) (causes e)))
-                :ok? false :forms forms :repaired? repaired? :printed (str out)
+               {:text (str note (printed) (when (and each? (seq @done)) (str (each-text) "\n"))
+                           "error: " (if explain (explain e (the-ns n) forms) (causes e)))
+                :ok? false :values (mapv second @done) :forms forms :repaired? repaired? :printed (str out)
                 :timeout? (boolean (::timeout (ex-data e)))}))))))))
 
 (defn eval-tool
@@ -139,7 +154,8 @@
    :timeout? stay in the log beside :text."
   ([] (eval-tool nil))
   ([hooks]
-   {:description "Evaluate Clojure forms in the session's namespace. Define one or two small things at a time. Returns the last form's value, or the error."
+   {:description (str "Evaluate Clojure forms in the session's namespace. Define one or two small things at a time. Returns "
+                      (if (:each? hooks) "each form's value" "the last form's value") ", or the error.")
     :params [{:name "code" :description "One or a few Clojure forms."}]
     :fn (fn [{:strs [code]} state]
           (let [s (if (and (map? state) (:session state)) (:session state) state)]

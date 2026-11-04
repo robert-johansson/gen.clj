@@ -4,8 +4,10 @@
    by :explain, given the throwable, the namespace and the forms, the forms
    before it kept; code that does not read refused, or repaired and said
    to be; :vet refusing before any form runs; :show; what the code
-   printed; a timeout reported, not waited for; #= refused; the eval tool
-   on a session or a state holding one; close! removing the namespace."
+   printed; a timeout reported, not waited for; #= refused; :each?, every
+   form's value (and before an error, the values that came first), the
+   default the last value alone; the eval tool on a session or a state
+   holding one; close! removing the namespace."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [gen.codegen.session :as session]))
@@ -60,6 +62,28 @@
         (is (:timeout? r))
         (is (str/includes? (:text r) "timed out after 100 ms"))
         (is (< (/ (- (System/nanoTime) t0) 1e6) 2000) "not waited for")))))
+
+(deftest each-forms-value
+  (with-session
+    (fn [s]
+      (let [n (:ns s)
+            r (session/eval! s "(def a 1) (+ a 2)" {:each? true})]
+        (is (= (str "(def a 1)\n=> #'" n "/a\n(+ a 2)\n=> 3") (:text r)))
+        (is (= [(resolve (symbol (str n) "a")) 3] (:values r)))
+        (is (= 3 (:value r))))
+      (testing "the default: the last value alone"
+        (is (= "=> 3" (:text (session/eval! s "(def a 1) (+ a 2)")))))
+      (testing "before an error, the values that came first"
+        (let [r (session/eval! s "(def b 2) (nope) (def c 3)" {:each? true :explain (fn [_ _ _] "no nope")})]
+          (is (= (str "(def b 2)\n=> #'" (:ns s) "/b\nerror: no nope") (:text r)))
+          (is (= 1 (count (:values r))))
+          (is (nil? (session/lookup s 'c)))))
+      (testing "a long form cut, its value shown by :show"
+        (is (= (str "(def long-name-for-a-value (+ 1 2 3 4 5 6 7 8 9 10 11 12 13 …\n=> #'" (:ns s)
+                    "/long-name-for-a-value\nlong-name-for-a-value\n=> <171>")
+               (:text (session/eval! s "(def long-name-for-a-value (+ 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18)) long-name-for-a-value"
+                                     {:each? true :show #(if (number? %) (str "<" % ">") (str %))})))
+            "…")))))
 
 (deftest the-eval-tool
   (with-session
