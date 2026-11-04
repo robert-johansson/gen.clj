@@ -5,8 +5,11 @@
    keys logged; submit (:done) ending the episode; a reply without a call
    answered; the turn budget's :on-budget and the countdown notes; a tool
    that throws answered with its error; K candidates and :choose; with
-   thinking, :reasoning logged and a reply cut inside its think block a
-   loud error, the session closed either way."
+   thinking, :reasoning logged and a reply cut inside its think block by
+   :turn-tokens a loud error, the session closed either way; a reply cut
+   by the room left in the context ending the episode as :context-full
+   with :on-budget's result, thinking or not, after its complete tool
+   calls."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [gen.llm.agent :as agent]
@@ -104,3 +107,38 @@
                                            {:thinking? true :key (rng/key 5)
                                             :complete (scripted m ["still thinking and thinking"] (atom []))})))
           (is @closed))))))
+
+(defn- cut-off
+  "A :complete whose replies are text cut at the :max-tokens it is given
+   (stop :max)."
+  [m text]
+  (fn [_ contexts {:keys [max-tokens]}]
+    (let [toks (vec (take max-tokens (lm/encode m text {:add-special? false})))]
+      (mapv (fn [_] {:tokens toks :stop :max :logprob 0.0}) contexts))))
+
+(def ^:private filler (apply str (repeat 2000 "and so on ")))
+
+(deftest a-reply-cut-by-the-room-left
+  (with-lm
+    (fn [m]
+      (testing "thinking: the context fills inside the think block, a full context, not an error"
+        (let [closed (atom false)
+              r (agent/run m {:task "Go." :tools tools :open (fn [] :s) :close (fn [_] (reset! closed true))
+                              :on-budget (fn [_] :fallback)}
+                           {:thinking? true :key (rng/key 6) :complete (cut-off m (str "Let me think " filler))})]
+          (is (= {:result :fallback :stop :context-full :turns 1} (select-keys r [:result :stop :turns])))
+          (is (str/starts-with? (:reasoning (first (:log r))) "Let me think"))
+          (is (= "" (:reply (first (:log r)))))
+          (is @closed)))
+      (testing "thinking: cut by :turn-tokens, with room left, is the loud error"
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"cut inside its think block"
+                              (agent/run m {:task "Go." :tools tools}
+                                         {:thinking? true :turn-tokens 100 :key (rng/key 7)
+                                          :complete (cut-off m (str "Let me think " filler))}))))
+      (testing "thinking off: the reply's complete calls run, then the episode ends"
+        (let [done (atom [])
+              r (agent/run m {:task "Go." :tools tools :open (fn [] done) :on-budget (fn [_] :fallback)}
+                           {:key (rng/key 8) :turn-tokens 8192
+                            :complete (cut-off m (str (call "add" "a" "1" "b" "2") "\n" filler))})]
+          (is (= {:result :fallback :stop :context-full :turns 1} (select-keys r [:result :stop :turns])))
+          (is (= [[:add "1" "2"]] @done)))))))

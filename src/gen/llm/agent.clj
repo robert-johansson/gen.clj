@@ -32,10 +32,14 @@
      :turn-tokens  the most tokens a reply draws (1024; 8192 with thinking:
                    Qwen3.6's think blocks run to several thousand tokens)
      :thinking?    the model thinks before it answers (false); a reply cut
-                   inside its think block is a loud error
+                   inside its think block by :turn-tokens is a loud error
      :context      the context's tokens (the LM's :max-cells, else 32768): a
-                   reply gets at most the room left, and a context too full
-                   for a reply ends the episode
+                   reply gets at most the room left; a reply cut by that
+                   room (after its complete tool calls run), or a context
+                   too full for a reply, ends the episode as :context-full.
+                   With thinking, Qwen's template keeps every turn's think
+                   block after the task, so a context of thousands of
+                   thinking tokens a turn fills in a few turns
      :sampling     gen.llm.sample's (its default-sampling)
      :key          turn t's draws from (fold-in key t)
      :candidates   replies drawn a turn (1); with more, :choose
@@ -112,11 +116,15 @@
                    cands (mapv (fn [{:keys [tokens logprob] :as d}] (assoc d :text (lm/decode lm tokens) :logprob logprob)) drawn)
                    chosen (cands (if (= 1 candidates) 0 (choose cands state)))
                    llm-s (+ llm-s (seconds t0))
+                   ;; cut by the room left in the context, not by :turn-tokens
+                   full? (and (= :max (:stop chosen)) (< (long room) turn-tokens))
                    [reasoning content] (if thinking? (chat/split-reasoning (:text chosen)) [nil (:text chosen)])
-                   _ (when (and thinking? (nil? reasoning))
+                   in-thinking? (and thinking? (nil? reasoning))
+                   _ (when (and in-thinking? (not full?))
                        (throw (ex-info (str "agent/run: turn " turn "'s reply was cut inside its think block ("
                                             (count (:tokens chosen)) " tokens): give :turn-tokens room for the thinking")
                                        {:reason :cut-in-thinking :turn turn :tokens (count (:tokens chosen)) :log log})))
+                   [reasoning content] (if in-thinking? [(:text chosen) ""] [reasoning content])
                    calls (chat/tool-calls content)
                    t1 (System/nanoTime)
                    results (loop [cs calls acc []]
@@ -136,8 +144,11 @@
                    note (when notes (notes turn left))
                    responses (cond-> (if (seq calls) (mapv (fn [[_ r]] (:text r)) results) [no-call-text])
                                note (conj note))]
-               (if done
-                 {:result (:done done) :stop :done :turns turn :log log :tokens tokens :seconds {:llm llm-s :tools tool-s}}
+               (cond
+                 done {:result (:done done) :stop :done :turns turn :log log :tokens tokens :seconds {:llm llm-s :tools tool-s}}
+                 full? {:result (when on-budget (on-budget state)) :stop :context-full :turns turn :log log :tokens tokens
+                        :seconds {:llm llm-s :tools tool-s}}
+                 :else
                  (recur (inc turn)
                         (-> messages
                             (conj (cond-> {:role :assistant :content content} reasoning (assoc :reasoning reasoning)))
