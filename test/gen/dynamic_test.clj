@@ -1121,3 +1121,35 @@
     (is (= [[:x] [:y]] (paths st-tr) (paths (:trace (gfi/update st-tr (cm/choicemap :x 0.5) (rng/key 3)))))
         "a static body's, every node rerun under middleware")
     (is (= [[:x] [:y]] (paths (gfi/assess st [] (:choices st-tr) (rng/key 3)))) "a static body's assess runs the handler")))
+
+;; genclj-u23m: the sites of a callee spliced without an address are its
+;; caller's, so the caller's middleware runs there, as gen.inference's
+;; middleware (exact, conjugate and internal proposals) needs. Planted bug
+;; (2026-11-04): such a callee's body run under the standard transitions
+;; when it has no middleware of its own (the rule before) fails the first
+;; two cases.
+(deftest a-caller's-middleware-runs-over-a-splice-without-an-address
+  (let [leaf (gen [mu] (trace :x (d/normal mu 1)))
+        middle (gen [] (let [x (splice leaf 0.0)] (trace :y (d/normal x 1))))
+        own (dyn/with-transitions (gen [] (trace :x (d/normal 0 1))) {:simulate (dyn/site-transitions :simulate)})
+        seen (fn [op body]
+               (let [m (watching body)
+                     tr (if (= op :simulate) (gfi/simulate m [] (rng/key 3)) (:trace (gfi/generate m [] cm/EMPTY (rng/key 3))))]
+                 (mapv :path (::steps tr))))]
+    (is (= [[:x] [:y] [:z]] (seen :simulate (gen [] (splice middle) (trace :z (d/normal 0 1)))))
+        "every site of the run, a nested splice's too")
+    (is (= [[:x] [:z]] (seen :generate (gen [] (splice own) (trace :z (d/normal 0 1)))))
+        "a callee's middleware for another operation leaves the caller's")
+    (is (= [[:z]] (seen :simulate (gen [] (splice own) (trace :z (d/normal 0 1)))))
+        "a callee's own middleware runs over its body, and the caller's again after it")
+    (is (= [[:z]] (seen :simulate (gen [] (splice :c leaf 0.0) (trace :z (d/normal 0 1)))))
+        "a call at an address runs its callee's transitions")))
+
+;; genclj-u23m. Planted bug (2026-11-04): the message before, which named
+;; no fix, fails it.
+(deftest a-splice-without-an-address-of-another-kind-names-the-fix
+  (doseq [g [(d/normal 0 1) (comb/map shared-body) (enum/with-exact-proposal shared-body [:more])]]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                          #"^A splice without an address needs a dynamic generative function \(gen\), not a \S+: give the splice an address, \(splice addr gf & args\)$"
+                          (gfi/simulate (gen [] (splice g [0.0])) [] (rng/key 1)))
+        (pr-str g))))

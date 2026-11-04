@@ -270,13 +270,29 @@
                      (vswap! seen assoc p s))))
                (t state p dist key))))))
 
-(defn- check-visited! [free seen choices]
+(defn- call-address
+  "The address of the call in tr that made the choice at path p, if a call
+   did."
+  [tr p]
+  (some #(let [a (subvec p 0 %)] (when (trace/subtrace tr a nil) a)) (range 1 (inc (count p)))))
+
+(defn- check-visited!
+  "Throw unless the run whose trace is tr visited every free path at a
+   site of its own (seen). A choice it made elsewhere was made by a call at
+   an address, which runs its own transitions, or under the middleware of
+   a callee spliced without an address, which runs in place of the exact
+   proposal's (gen.dynamic/with-transitions)."
+  [free seen tr]
   (doseq [p free]
     (when-not (contains? @seen p)
       (throw (ex-info (str "with-exact-proposal: the choice at " p
-                           (if (cm/has-value? choices p)
-                             " is made by a generative function the model calls at an address; wrap that one"
-                             " was not visited"))
+                           (if-not (cm/has-value? (:choices tr) p)
+                             " was not visited"
+                             (if-let [a (call-address tr p)]
+                               (str " is made by a generative function the model calls at " a "; wrap that one")
+                               (str " is made by a callee spliced without an address that has middleware of its"
+                                    " own (with-transitions), which runs in place of the exact proposal's: give"
+                                    " that splice an address and wrap the callee"))))
                       {:path p})))))
 
 (defn- assignments
@@ -455,7 +471,7 @@
         [{t0 :trace seen :seen} sigma] (if gfi/*revising* (gfi/rerun-without-drops forward sigma) [(forward sigma) sigma])
         g (watching gf (set paths) seen)
         free (free-paths paths sigma)
-        _ (check-visited! free seen (:choices t0))
+        _ (check-visited! free seen t0)
         others (others-of (:choices t0) sigma free)
         {cs :assignments s :s r :r rvs :retvals} (enumerated g args sigma others free seen limit (batch-enumeration? egf))
         _ (when check-retval? (check-retval! cs s rvs))
@@ -478,7 +494,7 @@
           ;; the supports, from a run with every choice given
           _ (gfi/with-exact-density "with-exact-proposal" (gfi/generate g args (:choices tr) (rng/key 0)))
           free (free-paths paths sigma)
-          _ (check-visited! free seen (:choices tr))
+          _ (check-visited! free seen tr)
           {s :s r :r} (enumerated g args sigma (others-of (:choices tr) sigma free) free seen limit (batch-enumeration? egf))]
       (- (array/logsumexp s) (array/logsumexp r)))))
 
@@ -505,7 +521,8 @@
 
 (defn with-exact-proposal
   "gf with the exact conditional as its internal proposal for the finite
-   choices at addrs (addresses or paths of gf's own body): the same
+   choices at addrs (addresses or paths of gf's own body, the bodies of
+   the callees it splices without an address among them): the same
    distribution and traces, but generate draws those choices given every
    other choice, enumerating their supports (from the distributions). Its
    weight is then log p(observations) exactly when the other choices are
