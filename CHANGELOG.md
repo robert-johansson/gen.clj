@@ -38,6 +38,26 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Experimental: an LLM's sampling, chat and agent loop in gen.llm**
+  (outside the 1.x promise; DESIGN §9, owner, 2026-11-04; genclj-uw7w).
+  `gen.llm.sample`: temperature, top-k and top-p, and n completions of
+  contexts drawn in lockstep over the LM protocol, a loud error when they
+  would not fit the LM's cache. `gen.llm.chat`: Qwen's chat template
+  (thinking on or off, tools in its format) and the tool-call parser.
+  `gen.llm.agent`: a tool-using agent's episodes (turn and context
+  budgets, K candidates and a chooser, a reply cut inside its think block
+  a loud error), its tools the caller's functions. The core evaluates no
+  generated code.
+- **A module, ext/codegen** (`gen.codegen`; a git dependency with
+  `:deps/root "ext/codegen"`, as ext/laws): what evaluates LLM-written
+  code, a namespace session with read, repair, vet and explain hooks
+  (`gen.codegen.session`) and tools in a JVM of their own
+  (`gen.codegen.process`), both experimental; and the codegen bake-off's
+  harness (internal), moved from test/gen/codegen. Its dependencies
+  (clj-kondo, parinferish) left the :test alias for :codegen, which puts
+  the module on the classpath: `clojure -X:test:codegen` runs its tests
+  too.
+
 - **gen.laws: close?'s absolute tolerance scales with the scores** (owner,
   2026-11-01; DESIGN §9, genclj-6txl). It was 1e-12 in float64 (float32's
   1e-3), which assumed scores up to ~100: correct models whose traces

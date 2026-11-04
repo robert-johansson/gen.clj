@@ -1,16 +1,17 @@
 (ns gen.codegen.candidate
   "A generated model's code, from an LLM's reply to a model (the codegen
-   bake-off, genclj-ihc4): its text read without evaluation, checked
-   against a list of forbidden names, and evaluated in a namespace of its
-   own under the prelude every candidate is written against.
+   bake-off, genclj-ihc4): its text read without evaluation (with
+   gen.codegen.session/read-forms), checked against a list of forbidden
+   names, and evaluated in a namespace of its own under the prelude every
+   candidate is written against.
 
      (code-of reply)        → the code in a reply (its last fenced block)
-     (read-forms text)      → its forms, read with *read-eval* false
      (repair-delimiters code) → its delimiters rebuilt from its indentation
      (forbidden forms)      → the forbidden names it uses, sorted
+     (vet forms)            → nil, or the text refusing forbidden names (a
+                              session's :vet)
      (evaluate forms)       → [namespace model]: the forms evaluated, model their var's value
      (discard! namespace)   → removes the namespace
-     (within ms f)          → (f), or an ex-info with ::timeout after ms
 
    The check is a guard against accidents, not a sandbox: a local model's
    code runs on this JVM, with names that reach files, processes,
@@ -18,6 +19,7 @@
    leaves its thread running (the JVM is then tainted: the driver starts
    another). SCI is the sandbox to come (GenMLX's codegen/eval,
    genclj-0izr)."
+  {:api :internal}
   (:require [clojure.string :as str]))
 
 (def prelude
@@ -63,16 +65,6 @@
         flat (requiring-resolve 'parinferish.core/flatten)]
     (flat (parse code {:mode :indent}))))
 
-(defn read-forms
-  "The forms of text, read with *read-eval* false (#= refused) and no
-   default tagged-literal reader."
-  [text]
-  (binding [*read-eval* false *default-data-reader-fn* nil]
-    (let [r (clojure.lang.LineNumberingPushbackReader. (java.io.StringReader. text))]
-      (loop [forms []]
-        (let [f (read {:eof ::eof} r)]
-          (if (= f ::eof) forms (recur (conj forms f))))))))
-
 (def ^:private forbidden-names
   "Names a model has no use for that reach past it: evaluation and loading,
    namespaces and vars, files and processes, threads, Java classes."
@@ -108,18 +100,12 @@
        (sort-by str)
        vec))
 
-(defn within
-  "(f) on another thread (dynamic bindings conveyed), or an ex-info with
-   ::timeout when it takes more than ms (its thread is interrupted, and may
-   go on). An exception f throws is rethrown."
-  [ms f]
-  (let [fut (future-call f)
-        v (try (deref fut ms ::timeout)
-               (catch java.util.concurrent.ExecutionException e (throw (or (.getCause e) e))))]
-    (if (= v ::timeout)
-      (do (future-cancel fut)
-          (throw (ex-info (str "timed out after " ms " ms") {::timeout ms})))
-      v)))
+(defn vet
+  "nil when forms use no forbidden name, else the text that refuses them:
+   a session's :vet (gen.codegen.session)."
+  [forms]
+  (when-let [f (seq (forbidden forms))]
+    (str "forbidden names: " (pr-str (vec f)))))
 
 (defn evaluate
   "forms evaluated in a new namespace under the prelude: [the namespace's

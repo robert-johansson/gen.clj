@@ -1,6 +1,6 @@
 (ns gen.codegen.repl
-  "REPL sessions for the codegen agent (genclj-t1xh): a namespace that
-   persists across an LLM's turns, under the bake-off's prelude
+  "REPL sessions for the codegen agent (genclj-t1xh): a session
+   (gen.codegen.session) under the bake-off's prelude
    (gen.codegen.candidate), holding args (the task's arguments) and
    observations (its data), and the tools the LLM calls on it. Sessions
    live in the grader's process (gen.codegen.server), never the LLM's JVM.
@@ -21,15 +21,18 @@
      (close! id)
 
    Each returns {:text …}, what the LLM is shown, and the tools' results as
-   data where they have them. Code is read with delimiter repair, checked
-   for forbidden names, and kept when it evaluates: the session's program
-   is its successful forms in order."
+   data where they have them. eval! is the session's with the bake-off's
+   hooks (hooks): delimiter repair, the forbidden names refused, errors
+   explained with clj-kondo's findings; the session's program is its
+   successful forms in order."
+  {:api :internal}
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.choicemap :as cm]
             [gen.codegen.candidate :as candidate]
             [gen.codegen.explain :as explain]
             [gen.codegen.grade :as grade]
+            [gen.codegen.session :as session]
             [gen.codegen.tasks :as tasks]
             [gen.gfi :as gfi]
             [gen.inference.importance :as is]
@@ -38,15 +41,8 @@
 
 (defonce ^:private sessions (atom {}))
 
-(defn- session [id]
+(defn- entry [id]
   (or (@sessions id) (throw (ex-info (str "no session " id) {}))))
-
-(defn- message [^Throwable e]
-  (let [m (->> (take-while some? (iterate ex-cause e))
-               (map #(or (ex-message %) (str (class %))))
-               distinct
-               (str/join " Caused by: "))]
-    (subs m 0 (min 600 (count m)))))
 
 (defn- clip [s n] (if (> (count s) n) (str (subs s 0 n) "…") s))
 
@@ -64,68 +60,63 @@
         (gfi/generative-function? v) "<generative function>"
         :else (clip (pr-str v) 300)))
 
+(defn hooks
+  "The bake-off's eval hooks for a session s and the code about to be
+   evaluated: delimiter repair, the forbidden names refused, an error
+   explained (gen.codegen.explain) with clj-kondo's findings on the code
+   after the session's program, values shown as show does. No time limit:
+   the grader's process sets its own."
+  [s code]
+  {:repair candidate/repair-delimiters
+   :vet candidate/vet
+   :explain (fn [e ns _] (let [lint (explain/lint code (session/program s))]
+                           (str (explain/explain e ns) (when lint (str "\nclj-kondo on this code:\n" lint)))))
+   :show show
+   :timeout-ms nil})
+
 (defn open!
   "A new session for task-id."
   [task-id]
   (let [task (or (tasks/by-id task-id) (throw (ex-info (str "no task " task-id) {})))
-        n (gensym "gen.codegen.session-")
-        id (str n)]
-    (binding [*ns* *ns*]
-      (eval (list 'ns n candidate/prelude candidate/requires)))
-    (intern n 'args (:args task))
-    (intern n 'observations (:observations task))
-    (swap! sessions assoc id {:ns n :task task :program [] :draws 0})
+        s (session/open {:prelude [candidate/prelude candidate/requires]
+                         :vars {'args (:args task) 'observations (:observations task)}})
+        id (str (:ns s))]
+    (swap! sessions assoc id {:session s :task task :draws 0})
     {:text (str "Session open. args = " (:args-text task) "; observations holds the data.") :session id}))
 
 (defn close! [id]
-  (when-let [{n :ns} (@sessions id)]
-    (remove-ns n)
+  (when-let [{s :session} (@sessions id)]
+    (session/close! s)
     (swap! sessions dissoc id))
   {:text "closed"})
-
-(defn- in-session [id f]
-  (binding [*ns* (the-ns (:ns (session id)))] (f)))
 
 (defn eval!
   "code's forms evaluated in the session, in order: the last one's value,
    with what they printed, or the first error (the forms before it stay
    evaluated)."
   [id code]
-  (let [{:keys [ns]} (session id)
-        [forms repaired?] (try [(candidate/read-forms code) false]
-                               (catch Exception e
-                                 (try [(candidate/read-forms (candidate/repair-delimiters code)) true]
-                                      (catch Exception _ (throw e)))))
-        forbidden (candidate/forbidden forms)]
-    (when (seq forbidden)
-      (throw (ex-info (str "forbidden names: " (pr-str forbidden)) {})))
-    (let [out (java.io.StringWriter.)
-          note (when repaired? "(The delimiters did not balance; they were rebuilt from the indentation.)\n")]
-      (try
-        (let [v (binding [*ns* (the-ns ns) *out* out]
-                  (reduce (fn [_ f]
-                            (let [v (eval f)]
-                              (swap! sessions update-in [id :program] conj (pr-str f))
-                              v))
-                          nil forms))]
-          {:text (str note (when (seq (str out)) (str "printed: " (clip (str out) 400) "\n")) "=> " (show v))})
-        (catch Throwable e
-          (let [lint (explain/lint code (str/join "\n\n" (:program (session id))))]
-            {:text (str note (when (seq (str out)) (str "printed: " (clip (str out) 400) "\n"))
-                        "error: " (explain/explain e (the-ns ns))
-                        (when lint (str "\nclj-kondo on this code:\n" lint)))}))))))
+  (let [{s :session} (entry id)]
+    {:text (:text (session/eval! s code (hooks s code)))}))
 
 (defn- resolve-gf [id name]
-  (let [v (in-session id #(ns-resolve *ns* (symbol name)))]
-    (when-not v (throw (ex-info (str "no var " name " in the session: define it with eval") {})))
-    (when-not (gfi/generative-function? @v)
-      (throw (ex-info (str name " is not a generative function") {})))
-    @v))
+  (let [v (session/lookup (:session (entry id)) name)]
+    (cond (nil? v) (throw (ex-info (str "no var " name " in the session: define it with eval") {}))
+          (not (gfi/generative-function? v)) (throw (ex-info (str name " is not a generative function") {}))
+          :else v)))
 
 (defn- next-key [id]
-  (let [k (:draws (session id))]
+  (let [k (:draws (entry id))]
     (swap! sessions update-in [id :draws] inc)
     (rng/fold-in (rng/key 4242) k)))
+
+(defn- evaluate-in
+  "The value of code's first form in the session (not kept in its
+   program), its names vetted."
+  [id code]
+  (let [n (:ns (:session (entry id)))
+        [form :as forms] (session/read-forms code)]
+    (when-let [refusal (candidate/vet forms)] (throw (ex-info refusal {})))
+    (binding [*ns* (the-ns n)] (eval form))))
 
 (defn simulate!
   "A trace of the generative function name on the arguments args-code
@@ -133,7 +124,7 @@
    (the first 40) and its return value."
   [id name args-code]
   (let [gf (resolve-gf id name)
-        args (in-session id #(eval (read-string (if (str/blank? args-code) "args" args-code))))
+        args (evaluate-in id (if (str/blank? args-code) "args" args-code))
         tr (gfi/simulate gf args (next-key id))
         leaves (cm/leaves (:choices tr))]
     {:text (str "score " (show (:score tr)) "; " (count leaves) " choices:\n"
@@ -158,7 +149,7 @@
    grader's estimator."
   [id name]
   (let [gf (resolve-gf id name)
-        {:keys [median spread]} (grade/log-ml gf (:task (session id)) grade/defaults)]
+        {:keys [median spread]} (grade/log-ml gf (:task (entry id)) grade/defaults)]
     {:text (str "log marginal likelihood " (show median) " (estimates spread " (show spread) " nats)")}))
 
 (defn submit!
@@ -166,9 +157,9 @@
    session closed: {:text :grading :program}."
   [id name]
   (let [gf (resolve-gf id name)
-        {:keys [task program]} (session id)
+        {:keys [task] s :session} (entry id)
         g (grade/grade-model task gf)
-        program (str (str/join "\n\n" program) "\n\n(def model " name ")\n")]
+        program (str (session/program s) "\n\n(def model " name ")\n")]
     (close! id)
     {:text "submitted" :grading g :program program}))
 
@@ -180,7 +171,7 @@
   ([id name] (check! id name true))
   ([id name ml?]
    (let [gf (resolve-gf id name)
-         {:keys [args observations]} (:task (session id))
+         {:keys [args observations]} (:task (entry id))
          r (is/importance-sampling gf args observations 1000 {:key (next-key id)})
          ws (:log-weights r)
          best (nth (:traces r) (first (apply max-key second (map-indexed vector ws))))

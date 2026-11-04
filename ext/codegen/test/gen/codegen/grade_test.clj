@@ -14,6 +14,7 @@
             [gen.choicemap :as cm]
             [gen.codegen.candidate :as c]
             [gen.codegen.grade :as g]
+            [gen.codegen.session :as session]
             [gen.codegen.tasks :as tasks]
             [gen.gfi :as gfi]
             [gen.state-space :as ss]))
@@ -25,11 +26,11 @@
       "a block cut off before its closing fence runs to the reply's end"))
 
 (deftest forbidden-names-are-named
-  (is (= [] (c/forbidden (c/read-forms (:answer (tasks/by-id :changepoint))))))
+  (is (= [] (c/forbidden (session/read-forms (:answer (tasks/by-id :changepoint))))))
   (is (= '[.exec Runtime/getRuntime slurp]
-         (c/forbidden (c/read-forms "(def x (slurp \"f\")) (.exec (Runtime/getRuntime) \"ls\")"))))
-  (is (= '[java.io.File. spit] (c/forbidden (c/read-forms "(spit (java.io.File. \"f\") 1)"))))
-  (is (thrown? RuntimeException (c/read-forms "#=(+ 1 2)")) "no read-time evaluation"))
+         (c/forbidden (session/read-forms "(def x (slurp \"f\")) (.exec (Runtime/getRuntime) \"ls\")"))))
+  (is (= '[java.io.File. spit] (c/forbidden (session/read-forms "(spit (java.io.File. \"f\") 1)"))))
+  (is (thrown? RuntimeException (session/read-forms "#=(+ 1 2)")) "no read-time evaluation"))
 
 (defn- stopped-at
   "The stage a grading stopped at, :none when every stage passed."
@@ -105,7 +106,7 @@
                                                 [16 {:mean (first controls) :cov 0.25}
                                                  (mapv #(assoc walk-params :transition-offset %) controls)]
                                                 (series ys)))))
-      :hmm (let [[_ model] (c/evaluate (c/read-forms (:answer t)))
+      :hmm (let [[_ model] (c/evaluate (session/read-forms (:answer t)))
                  paths (reduce (fn [ps _] (for [p ps s [0 1]] (conj p s))) [[]] ys)
                  joint (fn [path] (reduce (fn [m [i s]] (cm/set-choice m [i :z] s)) (:observations t) (map-indexed vector path)))]
              (array/item (array/logsumexp (array/array (mapv #(array/item (:weight (gfi/assess model (:args t) (joint %)))) paths))))))))
@@ -115,7 +116,7 @@
   (doseq [id [:walk :hmm :drift]]
     (testing id
       (let [t (tasks/by-id id)
-            [_ model] (c/evaluate (c/read-forms (:answer t)))
+            [_ model] (c/evaluate (session/read-forms (:answer t)))
             {:keys [median estimates]} (g/log-ml model t g/defaults)
             m (/ (reduce + estimates) (count estimates))
             sd (Math/sqrt (/ (reduce + (map #(let [d (- % m)] (* d d)) estimates)) (dec (count estimates))))

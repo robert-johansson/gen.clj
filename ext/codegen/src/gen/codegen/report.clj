@@ -14,6 +14,7 @@
    reply became correct at (0: it was), or that it never did. Seconds per
    correct model: every second of decoding the mode spent, over its
    correct models."
+  {:api :internal}
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
