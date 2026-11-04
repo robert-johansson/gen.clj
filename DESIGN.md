@@ -3415,7 +3415,13 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       beans for after 1.1.0 (an epic): a critic at the drawn token in
       token SMC, AWRS for constraints without a mask, the potential
       contract as laws, potential combinators, and context-free grammar
-      potentials (docs/research/genlm-survey-2026-11-04.md).
+      potentials (docs/research/genlm-survey-2026-11-04.md). The owner then
+      made that epic **GenLM parity** (genclj-ygbm): every bean whose main
+      purpose is a GenLM counterpart moves under it (token SMC's
+      rejuvenation and batched potentials, the byte-level generative
+      function, structured output, sampling filters, constrained codegen,
+      instaparse grammars as constraints); related beans whose purpose is
+      elsewhere (LLM training, engine speed, M7) stay and are listed there.
 
 ## 10. Deferred (tracked, not forgotten)
 
