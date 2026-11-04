@@ -3342,6 +3342,42 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       sharing a step's data-parallel work and its sums, and fewer
       statements a leapfrog step. The owner would like a very good GPU
       speed in 1.1.0, and is prepared to skip it.
+    - **As measured** (2026-11-04): option 1 is built (genclj-rtcd: one
+      HMC chain, L=32, through kernel/run 2.4 ms on the JVM backend and
+      4.7 on MLX). A Metal kernel runs 1 to 1024 chains in the same 22
+      ms, so one chain's time is one instruction stream's latency, and
+      GenJAX's GPU is slower still there (101 ms on fenrir).
+  - **1.1.0's GPU work, the dense metric and the order (owner, 2026-11-04,
+    "go with your recommendations"; genclj-qsa2).**
+    - **GPU speed is many chains and many particles on Metal,** where the
+      GPU is already far ahead but reachable only through ext/device's
+      internal API. First importance sampling's `:metal` result built on
+      the host (as kernel/run's, genclj-rtcd). Then
+      **`kernel/run-particles`**, a new stable function beside the
+      `*-particles` moves (not kernel/run taking a collection, whose
+      result would change shape with its argument): S steps of the
+      kernel's batched form over every particle of a gen.batched
+      collection, returning `:particles` (the last), with `:keep` `:draws`
+      per chain (what gen.inference.diagnostics reads), and
+      `:acceptance-rates` and `:divergences` per chain; `{:device
+      :metal}` runs every chain in one kernel. Chain i runs on `(rng/split
+      key n)[i]`, as device runs do (decision 3), so Metal equals the
+      handler's chains to float32 rounding; if the batched form draws
+      otherwise, the lead brings it back. If it grows, 1.1.0 ships
+      without it. One chain's GPU latency (lanes, genclj-98s2) waits
+      until after 1.1.0.
+    - **The dense metric** (genclj-q9ge, Gen.jl 0.4.9's #559): the stable
+      `:inv-metric` (Stan's M⁻¹) takes a dense matrix too; no `:metric`
+      option. Gen.jl's `metric` is M: appendix 061 and the docstrings say
+      so. The kernels only (HMC, MALA, NUTS); Stan's dense_e warmup
+      adaptation and MALA's step-size adaptation are beans of their own,
+      after 1.1.0.
+    - **Gen.jl's position step** (its hmc leaves M⁻¹ out, genclj-u420):
+      the lead drafts a note with the line and a small example; the owner
+      posts it.
+    - **The order:** the dense metric; importance sampling's host result,
+      then kernel/run-particles on Metal; the book's bugs in stable
+      namespaces; the CUDA known issues on the Thor; the docs; the gate.
 
 ## 10. Deferred (tracked, not forgotten)
 
