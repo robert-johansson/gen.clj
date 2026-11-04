@@ -61,10 +61,18 @@
 (def ^:private ys-observed (reduce (fn [m [i y]] (cm/set-choice m [:y i] y)) cm/EMPTY (map-indexed vector ys)))
 
 (def ^:private conjugate-exact
-  "log N(ys; 0, 0.01 I + 10000 11ᵀ)."
-  (let [n (count ys)
-        cov (array/+ (array/* 0.01 (array/eye n)) (array/full [n n] 10000.0))]
-    (ts/host (dc/log-prob (d/mvnormal (array/zeros [n]) cov) (array/array ys)))))
+  "log N(ys; 0, s2 I + t2 11ᵀ), s2 = 0.01 and t2 = 10000, in closed form
+   on the host in float64: det = s2^(n-1) (s2 + n t2), and the inverse is
+   (I - t2/(s2 + n t2) 11ᵀ)/s2. The covariance's condition number is about
+   2e7, so mvnormal's log density in a backend's float32 is off by up to
+   0.7 nats (CUDA, 2026-11-04: 15.07 against 14.359); the reference must
+   not depend on the backend."
+  (let [n (count ys) s2 0.01 t2 10000.0
+        sy (reduce + ys)
+        syy (reduce + (map #(* % %) ys))
+        quad (/ (- syy (/ (* t2 sy sy) (+ s2 (* n t2)))) s2)
+        logdet (+ (* (dec n) (Math/log s2)) (Math/log (+ s2 (* n t2))))]
+    (* -0.5 (+ (* n (Math/log (* 2 Math/PI))) logdet quad))))
 
 (def ^:private conjugate-posterior-mean
   (let [n (count ys) prec (+ (/ 1 10000.0) (/ n 0.01))]
