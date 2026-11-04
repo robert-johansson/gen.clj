@@ -2,11 +2,13 @@
   "The host side of gen.array, below the backends:
    - host data, parsed once for every backend: gen.array/array reads nested
      vectors into a shape and row-major values, checked, and gives the
-     backend those (docs/array-api.md §10);
+     backend those (docs/array-api.md §10), and a backend array prints as
+     gen.serialize writes it (print-array);
    - the math of host scalars, every elementwise op and reduction as
      gen.array computes them on the host, shared with the tape."
   {:api :internal}
-  (:require [gen.array.dtype :as dt]
+  (:require [clojure.string :as str]
+            [gen.array.dtype :as dt]
             [gen.array.special :as special]))
 
 (set! *warn-on-reflection* true)
@@ -57,6 +59,22 @@
         (some #(or (instance? Double %) (instance? Float %) (ratio? %) (decimal? %)) values) (:float defaults)
         (every? #(instance? Boolean %) values) :bool
         :else (:int defaults)))
+
+(defn print-array
+  "Print a backend array to the writer w as gen.serialize writes it, so
+   that the text reads back (gen.serialize/read): #gen/array {:dtype
+   dtype, :shape shape, :data [...]}, the elements row-major. data is the
+   array's host data as the backend's -to-host gives it (nested vectors of
+   doubles, longs or booleans; a host value for 0-d), and a double prints
+   as the shortest decimal that reads back as it, as gen.serialize writes
+   a float. The elements print as a vector does, so *print-length*
+   shortens them."
+  [dtype shape data ^java.io.Writer w]
+  (let [rank (count shape)
+        elements (if (zero? rank) [data] (nth (iterate #(into [] cat %) data) (dec rank)))]
+    (.write w (str "#gen/array {:dtype " dtype ", :shape [" (str/join " " shape) "], :data "))
+    (print-method elements w)
+    (.write w "}")))
 
 ;; ---------------------------------------------------------------------------
 ;; Host math: the semantics of every elementwise op on host scalars

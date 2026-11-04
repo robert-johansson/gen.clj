@@ -177,6 +177,41 @@
           (testing "without :device, kernel/run per chain"
             (is (= (mapv :acceptance-rate h) (:acceptance-rates (device/run-chains k starts opts))))))))))
 
+(deftest a-device-run-counts-the-handlers-divergences
+  ;; genclj-gqd3: an HMC or MALA proposal whose energy error passes 1000
+  ;; diverged (gen.inference.mcmc's verdict), and a device chain counts
+  ;; the :diverged? its kernel's step returns. At the leapfrog's limit
+  ;; here (an eps near 0.117, twice the posterior's narrowest standard
+  ;; deviation) some transitions' energy errors pass 1000, finite, which
+  ;; no rule counted before. Planted bugs (2026-11-04): the rule gone fails
+  ;; the counts' positivity; the device's :div output dropped
+  ;; (gen.inference.device) fails the device's counts
+  (if-not jvm?
+    (println "gen.device.run-test: the divergence comparison runs on the JVM backend")
+    (doseq [m [:vector :static]
+            [kname k] [[:hmc (kernel/hmc pb/selection {:L 8 :eps 0.117})]
+                       [:mala (kernel/mala pb/selection (/ (* 0.1172 0.1172) 2.0))]]]
+      (testing [m kname]
+        (let [[model args obs] (pb/models m)
+              tr (:trace (gfi/generate model args obs (rng/key 0)))
+              opts {:samples 40 :burn 7 :thin 3 :key (rng/key 3)}
+              h (kernel/run k tr opts)
+              dv (kernel/run k tr (assoc opts :device :jvm))]
+          (is (= :jvm (:device dv)) (:device-fallback dv))
+          (is (< 0 (:divergences h) 127) "some transitions diverge, not all")
+          (is (= (:divergences h) (:divergences dv)))
+          (is (= (:acceptance-rate h) (:acceptance-rate dv)))
+          (is (= (map leaves-of (:traces h)) (map leaves-of (:traces dv))))
+          (testing "run-chains"
+            (let [starts (chain-starts (pb/models m) 5)
+                  opts {:samples 20 :burn 3 :thin 2 :key (rng/key 7)}
+                  h (by-chain k starts opts)
+                  dv (device/run-chains k starts (assoc opts :device :jvm))]
+              (is (= :jvm (:device dv)) (:device-fallback dv))
+              (is (pos? (reduce + (map :divergences h))))
+              (is (= (mapv :divergences h) (:divergences dv)))
+              (is (= (mapv :acceptance-rate h) (:acceptance-rates dv))))))))))
+
 (deftest run-chains-on-a-float32-backend
   (if-not (= :float32 (:float (array/defaults array/*backend*)))
     (println "gen.device.run-test: the backend draws float64, the float32 run-chains comparison skips")

@@ -11,6 +11,7 @@
      which is what lets reshape share data."
   {:api :internal}
   (:require [gen.array.dtype :as dt]
+            [gen.array.host :as host]
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]
             [gen.array.special :as special]
@@ -846,8 +847,5 @@
 (def backend (JvmBackend.))
 
 (defmethod print-method JvmArray [^JvmArray x ^java.io.Writer w]
-  (.write w "#gen/array[")
-  (print-method (.-dtype x) w)
-  (.write w " ")
-  (print-method (to-host x) w)
-  (.write w "]"))
+  ;; as gen.serialize writes it, so that the text reads back
+  (host/print-array (.-dtype x) (.-shape x) (to-host x) w))

@@ -20,6 +20,12 @@
      #gen/key [k0 k1]                a gen.random key
      #gen/trace {:numerics :args :choices :score}   a trace, for read-trace
 
+   Arrays, choice maps and keys print (pr-str) in these forms, a backend
+   array as write writes it, so printed text reads back with read too: a
+   choice map's addresses then in the order it printed them, where write's
+   are in canonical order. A printed trace (#gen/trace[...]) does not:
+   write-trace and read-trace are its round trip.
+
    Values round-trip exactly:
    - A float is written as the shortest decimal of its double, which every
      float32, float16 and bfloat16 value is exactly, so it reads back bit for
