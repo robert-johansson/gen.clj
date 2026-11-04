@@ -1744,6 +1744,18 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     as Stan refuses a log(0) start. Otherwise every proposal from it
     counted as a divergence, and the chain never moved: 40 of 40 on both.
     MH and the other kernels may still start there.
+  - *One divergence rule for HMC, MALA and NUTS* (genclj-gqd3,
+    PROVISIONAL, 2026-11-04): a transition whose energy error H' − H
+    passes 1000 diverged, Stan's max_deltaH, which NUTS already used. For
+    HMC the energy error is −log α; MALA is one leapfrog step of size
+    √(2τ), so its −log α is that step's. Before, HMC and MALA counted only
+    non-finite energies: the book's chapter 023 saw an energy error of
+    1e28 at eps 0.11 rejected but not counted. The -particles kernels and
+    the device chains read the same verdict. Accept decisions change only
+    where a uniform of exactly 0 accepted such a proposal (`:log-alpha`
+    reads −Inf there now). The alternative for MALA, its rule kept
+    (non-finite only), would have counted a step HMC counts as a
+    divergence as none.
 - **Kernels that read the trace, `(kern ^:trace [tr & args] …)`** (owner,
   2026-10-20, after the final law audit): Gen.jl's `@kern` reads the trace
   in its loops, branches and lets, as the thesis's p. 102 kernel loops over

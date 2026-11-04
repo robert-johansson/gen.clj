@@ -148,6 +148,56 @@
       (is (= (second (by-hand 100 2))
              (:divergences (k/run (k/chain (k/kernel step) (k/kernel step)) start {:samples 100 :key (rng/key 4)})))))))
 
+(deftest an-energy-error-past-1000-is-a-divergence
+  ;; genclj-gqd3 (the book's chapter 023: at eps 0.11 an energy error of
+  ;; 1e28, finite, so rejected but not counted): one rule for HMC, MALA and
+  ;; NUTS, Stan's max_deltaH, a transition whose energy error H' - H passes
+  ;; 1000 diverged (DESIGN §9, PROVISIONAL). On N(0, 1) from x = 0, one
+  ;; leapfrog step of size eps with momentum z has the energy error
+  ;; z²·eps⁴/8, so eps is chosen for 900 or 1100. MALA at tau = eps²/2 is
+  ;; that step (its noise z, drawn from the key as hmc's momentum), and so
+  ;; is NUTS at :max-depth 1, forwards or backwards (from 0 the same
+  ;; error). Planted bugs (2026-11-04): the rule gone (hmc's and mala's
+  ;; verdict as before) fails the 1100 cases of HMC and MALA and the run
+  ;; below (0 divergences); a threshold of 1e4 fails the 1100 cases; one of
+  ;; 100 the 900 cases
+  (let [at-0 (start-at (gen [] (trace :x (d/normal 0 1))) (cm/choicemap :x 0.0))
+        momentum (fn [key] (ts/number (array/take (rng/normal (first (rng/split key 3)) [1]) 0)))]
+    (doseq [i (range 4)
+            err [900.0 1100.0]]
+      (let [key (rng/key (clojure.core/+ 300 i))
+            z (momentum key)
+            eps (Math/pow (clojure.core// (clojure.core/* 8.0 err) (clojure.core/* z z)) 0.25)
+            h (mcmc/hmc at-0 x-sel {:L 1 :eps eps} key)
+            m (mcmc/mala at-0 x-sel (clojure.core// (clojure.core/* eps eps) 2.0) key)
+            n (mcmc/nuts at-0 x-sel {:eps eps :max-depth 1} key)]
+        (testing (str "an energy error of " err " (z " z ", eps " eps ")")
+          (if (clojure.core/> err 1000.0)
+            (do (is (= {:trace at-0 :accepted? false :log-alpha ##-Inf :diverged? true} h) "HMC")
+                (is (= {:trace at-0 :accepted? false :log-alpha ##-Inf :diverged? true} m) "MALA"))
+            (do (is (and (false? (:diverged? h)) (ts/close? (clojure.core/- err) (:log-alpha h))) "HMC: log alpha is -900")
+                (is (and (false? (:diverged? m)) (ts/close? (clojure.core/- err) (:log-alpha m))) "MALA: log alpha is -900")))
+          (is (= (clojure.core/> err 1000.0) (:diverged? n)) "NUTS")))))
+  (testing "the book's case: finite energy errors far past 1000, every proposal rejected and counted"
+    ;; N(0, 1) from x = 0.3 by 20 steps of 2.2, past the leapfrog's limit
+    ;; of 2: each step multiplies the energy by about 2.4²; the chain never
+    ;; moves, so each step's energy error is the start's, by hand
+    (let [start (start-at (gen [] (trace :x (d/normal 0 1))) (cm/choicemap :x 0.3))
+          energy-error (fn [key]
+                         (let [p0 (ts/number (array/take (rng/normal (first (rng/split key 3)) [1]) 0))
+                               [x p] (loop [i 0 x 0.3 p p0]
+                                       (if (clojure.core/< i 20)
+                                         (let [p (clojure.core/- p (clojure.core/* 1.1 x))
+                                               x (clojure.core/+ x (clojure.core/* 2.2 p))]
+                                           (recur (inc i) x (clojure.core/- p (clojure.core/* 1.1 x))))
+                                         [x p]))]
+                           (clojure.core/* 0.5 (clojure.core/- (clojure.core/+ (clojure.core/* x x) (clojure.core/* p p))
+                                                               (clojure.core/+ 0.09 (clojure.core/* p0 p0))))))
+          errors (map energy-error (rng/split (rng/key 4) 50))]
+      (is (every? #(and (Double/isFinite %) (clojure.core/> % 1e6)) errors) (str (apply min errors)))
+      (is (= {:acceptance-rate 0.0 :divergences 50}
+             (dissoc (k/run (k/hmc x-sel {:L 20 :eps 2.2}) start {:samples 50 :key (rng/key 4)}) :traces))))))
+
 (deftest a-parameter-check-failing-mid-trajectory-is-a-divergence
   ;; DESIGN §9 (PROVISIONAL, 2026-10-22): at the funnel's L 3, eps 20, a
   ;; finite v near -1500 underflows exp(v/2) to a std of 0, which the JVM
@@ -832,6 +882,30 @@
                        x0s zs)]
         (check (mcmc/mala-particles ps x-sel tau key) (mapv first moves) (mapv second moves) key)))))
 
+(deftest particle-moves-diverge-by-the-same-rule
+  ;; genclj-gqd3: each particle's energy error past 1000 is its divergence,
+  ;; as the scalar kernels' (an-energy-error-past-1000-is-a-divergence's
+  ;; step: from x = 0 on N(0, 1), z²·eps⁴/8, here 1000·z², with z each
+  ;; particle's own draw). Planted bug (2026-11-04): the rule gone fails
+  ;; both kernels' :diverged and :log-alphas
+  (let [n 16
+        ps (chains-from (gen [] (trace :x (d/normal 0 1))) (cm/choicemap :x 0.0) n)
+        key (rng/key 310)
+        eps (Math/pow 8000.0 0.25)
+        zs (map first (ts/host (batch/unwrap (batch/batched [n] (rng/normal (first (rng/split key 3)) [1])) [n])))
+        errors (mapv #(clojure.core/* 1000.0 % %) zs)
+        past (mapv #(clojure.core/> % 1000.0) errors)]
+    (is (every? #(clojure.core/> (Math/abs (clojure.core/- % 1000.0)) 10.0) errors) "no error at the threshold")
+    (is (= #{true false} (set past)) "some past it, some not")
+    (doseq [[kname r] [["HMC" (mcmc/hmc-particles ps x-sel {:L 1 :eps eps} key)]
+                       ["MALA" (mcmc/mala-particles ps x-sel (clojure.core// (clojure.core/* eps eps) 2.0) key)]]]
+      (testing kname
+        (is (b/batched? (:particles r)) "one batched move")
+        (is (= past (:diverged r)))
+        (is (every? true? (map (fn [past? err log-alpha] (if past? (= ##-Inf log-alpha) (ts/close? (clojure.core/- err) log-alpha)))
+                               past errors (ts/host (:log-alphas r))))
+            "-Inf where diverged, minus the energy error elsewhere")))))
+
 (defn- agree?
   "Are the host values xs and ys (vectors of numbers, or of vectors) equal:
    exactly in float64, within a few ulps in float32? A jittered step is
@@ -871,15 +945,17 @@
   ;; batched, with draws other than the chains' own keys'
   (when (ts/jvm?)
     (testing "a parameter failing its check at some particles' positions: each chain's divergence its own"
-      ;; v ~ N(0, 1000), y ~ N(0, e^v): one step of eps 1000 from v = 0 moves
-      ;; v to 1000·p, past exp's range for some momenta (a scale of 0, which
-      ;; fails its check)
-      (let [scaled (gen [] (let [v (trace :v (d/normal 0 1000))] (trace :y (d/normal 0 (array/exp v)))))
-            ps (chains-from scaled (cm/choicemap :v 0.0 :y 1.0) 40)
+      ;; v ~ N(1, 1), y ~ N(0, v): one step of eps 1 from v = 1, where the
+      ;; gradient is 0, moves v to 1 + p, a scale of at most 0 (which fails
+      ;; its check) for momenta p of at most -1: 5 of 40 here. (Its model
+      ;; was N(0, e^v) at eps 1000, whose other moves an energy error past
+      ;; 1000 diverges too since genclj-gqd3, every one of the 40.)
+      (let [positive (gen [] (let [v (trace :v (d/normal 1 1))] (trace :y (d/normal 0 v))))
+            ps (chains-from positive (cm/choicemap :v 1.0 :y 1.0) 40)
             s (sel/select :v)
-            r (mcmc/hmc-particles ps s {:L 1 :eps 1000.0} (rng/key 98))]
+            r (mcmc/hmc-particles ps s {:L 1 :eps 1.0} (rng/key 98))]
         (is (< 0 (count (filter true? (:diverged r))) 40) "some diverge, not all")
-        (is (each-chain-s? ps #(mcmc/hmc-particles %1 s {:L 1 :eps 1000.0} %2) #(mcmc/hmc %1 s {:L 1 :eps 1000.0} %2) (rng/key 98)))))))
+        (is (each-chain-s? ps #(mcmc/hmc-particles %1 s {:L 1 :eps 1.0} %2) #(mcmc/hmc %1 s {:L 1 :eps 1.0} %2) (rng/key 98)))))))
 
 (deftest jittered-particle-steps
   ;; :jitter jitters each chain's step by its own u, as its own hmc's

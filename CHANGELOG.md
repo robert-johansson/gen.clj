@@ -38,6 +38,17 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Draws: HMC and MALA count an energy error past 1000 as a divergence**
+  (`gen.inference.mcmc`, as NUTS does: Stan's max_deltaH; DESIGN §9,
+  genclj-gqd3). hmc, mala, hmc-particles, mala-particles and the device
+  chains counted only non-finite energies, so a finite energy error of
+  1e28 (the book's chapter 023, at eps 0.11) was rejected but reported
+  with `:diverged? false` and not counted in `:divergences`. A proposal
+  whose −log α (HMC's H′ − H; MALA's, which is one leapfrog step's)
+  passes 1000 now diverges: `:diverged? true`, `:log-alpha` −Inf,
+  counted by kernel/run, nuts/sample's `:kernel :hmc` and run-chains.
+  Its acceptance probability was below e^-1000, so an accept decision
+  changes only where the uniform drawn was exactly 0, which accepted it.
 - **Arrays print as gen.serialize writes them, so printed text reads
   back** (the backends' print methods, gen.choicemap; genclj-5k7q). A
   backend array printed as `#gen/array[:float64 [[1.0 2.0]]]`, under the

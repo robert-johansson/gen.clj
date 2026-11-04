@@ -41,13 +41,14 @@
    a position moves by M⁻¹·momentum (inv-metric ⊙ momentum for a diagonal
    one), so a metric that matches the target's covariance makes its
    scales and correlations alike (gen.inference.nuts adapts a diagonal
-   one). A proposal whose
-   position, momentum, gradient or energy turns non-finite, or where a
-   distribution's parameter fails its check, diverged: it is rejected,
-   with acceptance 0 (:log-alpha -Inf), and reported as :diverged?
-   (gen.inference.kernel/run counts them), as Stan treats a divergence;
-   NUTS's trajectory also diverges at an energy error over 1000, as
-   Stan's. A starting trace whose log density or gradient is not finite
+   one). A proposal whose position, momentum, gradient or energy turns
+   non-finite, where a distribution's parameter fails its check, or whose
+   energy error H' - H passes 1000 (Stan's max_deltaH; -log alpha for
+   HMC, and for MALA, which is one leapfrog step of size √(2 tau))
+   diverged: it is rejected, with acceptance 0 (:log-alpha -Inf), and
+   reported as :diverged? (gen.inference.kernel/run counts them), as Stan
+   treats a divergence. A NUTS trajectory diverges by the same rule at
+   each step. A starting trace whose log density or gradient is not finite
    (NaN, or a probability of 0) is an error, as Stan refuses such a start.
    Keys are an optional last argument (or :key in an options map); omitting
    one draws from the implicit key source.
@@ -84,6 +85,12 @@
   "The result of a proposal that diverged: rejected, with acceptance 0."
   [trace]
   {:trace trace :accepted? false :log-alpha ##-Inf :diverged? true})
+
+(def ^:private max-energy-error
+  "The energy error H' - H past which a transition diverged (Stan's
+   max_deltaH): an HMC or MALA proposal's -log alpha, a NUTS step's
+   energy over the trajectory's initial one."
+  1000.0)
 
 (defn- finite
   "Are the elements of xs all finite? A boolean array, read on the host only
@@ -444,11 +451,13 @@
   "A move's proposal v' from v (flat values shaped by proto) as a function
    of arrays only, so per particle in a batched run: {:values the selected
    choices at v' if accepted, at v if not, :accepted?, :log-alpha (-Inf
-   when diverged), :diverged? (also when log-alpha is not finite: an energy
-   that overflowed, or NaN), :start-ok}. Accepted with probability
+   when diverged), :diverged? (also when log-alpha is not finite, an
+   energy that overflowed or NaN, or is below -max-energy-error, an energy
+   error past it), :start-ok}. Accepted with probability
    min(1, exp(log-alpha)) by the uniform of key, as mh/accept."
   [proto v v' log-alpha diverged start-ok key]
-  (let [diverged (array/logical-or diverged (array/logical-not (array/isfinite log-alpha)))
+  (let [diverged (array/logical-or diverged (array/logical-or (array/logical-not (array/isfinite log-alpha))
+                                                              (< log-alpha (- max-energy-error))))
         accepted (array/logical-and (array/logical-not diverged)
                                     (array/logical-or (>= log-alpha 0.0) (< (array/log (rng/uniform key)) log-alpha)))]
     {:values (cm/from-array proto (array/where accepted v' v))
@@ -715,11 +724,6 @@
 ;; ---------------------------------------------------------------------------
 ;; NUTS
 ;; ---------------------------------------------------------------------------
-
-(def ^:private max-energy-error
-  "The energy error past which a NUTS trajectory diverged (Stan's
-   max_deltaH)."
-  1000.0)
 
 (defn- energy
   "The Hamiltonian at log density lp, momentum p and velocity sharp (inv ⊙
