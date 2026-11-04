@@ -643,7 +643,7 @@
 
 (deftest out-of-range-array-indices
   ;; gen.array/take's contract (docs/array-api.md §13; genclj-d05w, kept in
-  ;; 1.1.0, PROVISIONAL): an eager backend throws on an out-of-range array
+  ;; 1.1.0, owner): an eager backend throws on an out-of-range array
   ;; index; a lazy one, which cannot check without evaluating, counts a
   ;; negative index from the end and clamps the rest. Host indices are
   ;; checked on every backend (errors, above).

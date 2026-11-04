@@ -152,7 +152,7 @@
   ;; genclj-gqd3 (the book's chapter 023: at eps 0.11 an energy error of
   ;; 1e28, finite, so rejected but not counted): one rule for HMC, MALA and
   ;; NUTS, Stan's max_deltaH, a transition whose energy error H' - H passes
-  ;; 1000 diverged (DESIGN §9, PROVISIONAL). On N(0, 1) from x = 0, one
+  ;; 1000 diverged (DESIGN §9, owner, 2026-11-04). On N(0, 1) from x = 0, one
   ;; leapfrog step of size eps with momentum z has the energy error
   ;; z²·eps⁴/8, so eps is chosen for 900 or 1100. MALA at tau = eps²/2 is
   ;; that step (its noise z, drawn from the key as hmc's momentum), and so

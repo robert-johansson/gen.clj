@@ -154,7 +154,7 @@
     (if (sel/selected? selection [:x]) (:score tr) (off (:score tr)))))
 
 (deftest the-zero-weights-allow-rounding
-  ;; genclj-s5fj (PROVISIONAL, 2026-11-04): a weight that is 0 in exact
+  ;; genclj-s5fj (owner, 2026-11-04): a weight that is 0 in exact
   ;; arithmetic compares with 0 as weights compare, up to rounding at the
   ;; scale of the scores: a hand-written generate may compute it as the
   ;; score less the log density of what it drew. Planted: a real error

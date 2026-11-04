@@ -1639,7 +1639,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   2026-11-04, in 1.1's scope). Regenerate now follows Eq. 4.1: σ = τ|_{S^c},
   q proposes given all of σ, the new run drops the choices of σ it leaves
   unvisited (B ⊆ A_σ), and the reverse move proposes given σ' = τ'|_{S^c}.
-  **PROVISIONAL, owner to confirm:** q sees all of σ, the dropped choices
+  **Confirmed by the owner (2026-11-04 evening):** q sees all of σ, the dropped choices
   included, and the reverse move all of σ', as the equation reads, so
   selection MH stays stationary whatever q reads. The ratio of projections
   (the general law) is that weight when q reads only the constraints its
@@ -1759,7 +1759,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     counted as a divergence, and the chain never moved: 40 of 40 on both.
     MH and the other kernels may still start there.
   - *One divergence rule for HMC, MALA and NUTS* (genclj-gqd3,
-    PROVISIONAL, 2026-11-04): a transition whose energy error H' − H
+    2026-11-04, MALA's threshold included; confirmed by the owner that evening): a transition whose energy error H' − H
     passes 1000 diverged, Stan's max_deltaH, which NUTS already used. For
     HMC the energy error is −log α; MALA is one leapfrog step of size
     √(2τ), so its −log α is that step's. Before, HMC and MALA counted only
@@ -2786,7 +2786,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       (`:omegas` for generate, an ICalls `-calls`) is genclj-t8uj.
     - `gen.array/backend-name` is public, for the recorded numerics.
     - One `#gen/array` form for printing and writing (genclj-5k7q,
-      PROVISIONAL, 2026-11-04): a backend array prints as `write` writes
+      2026-11-04; confirmed by the owner that evening): a backend array prints as `write` writes
       it, and a choice map's leaf whose value is a map prints tagged
       `#gen/value`, so printed text reads back. The map form was kept over
       the printed `#gen/array[:float64 [[…]]]`, whose nested vectors lose
@@ -3269,8 +3269,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   error of 1e-6 still fails for scores below ~1e5. A CHANGELOG line, as
   gen.laws' policy requires for a tolerance change.
 - **An address-less splice runs under its caller's middleware
-  (2026-11-04, genclj-u23m; PROVISIONAL, the lead's on an agent's fix
-  while the owner was away, owner to confirm).** (splice gf & args) is
+  (2026-11-04, genclj-u23m; the lead's on an agent's fix while the
+  owner was away, confirmed by the owner that evening).** (splice gf & args) is
   Gen.jl's {*} ~ gf(args): the callee's choices are the caller's, so the
   caller's with-transitions middleware runs at the callee's sites too,
   unless the callee has middleware of its own for the operation, which
@@ -3287,8 +3287,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   Breaking in the CHANGELOG: user middleware that changes the model now
   changes it at those sites too.
 - **MLX's gathers keep clamping in 1.1.0 (2026-11-04, genclj-d05w;
-  PROVISIONAL, the lead's while the owner was away; the owner decides
-  what follows).** An out-of-range array index throws on the JVM backend
+  the lead's while the owner was away, confirmed by the owner that evening; what follows
+  is the owner's call after 1.1.0, genclj-08un).** An out-of-range array index throws on the JVM backend
   and is clamped on MLX (a negative one counted from the end first),
   because a lazy backend cannot check without evaluating. That is
   gen.array/take's documented contract (docs/array-api.md §13, decision
@@ -3302,7 +3302,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   raised at the next evaluation, as the device programs do (genclj-i2c4),
   which rule 6 favours but which is Breaking.
 - **A weight that is 0 compares as weights do (2026-11-04, genclj-s5fj;
-  PROVISIONAL, the lead's while the owner was away, owner to confirm).**
+  the lead's while the owner was away, confirmed by the owner that evening).**
   Five checks asked for exactly 0 (generate without constraints, update
   without constraints, regenerate of nothing and of everything, project
   on nothing); they now use close? at the scale of the trace's scores.
