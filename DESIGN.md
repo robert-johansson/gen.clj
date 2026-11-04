@@ -3416,6 +3416,12 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     pass even with TF32 forced on. The MLX CPU float64 light tier ran on
     the MacBook (owner, "can we run some of the tests on the macbook"),
     beside the Mac's Metal and float32 runs.
+  - **1.1.0, then 1.2.0 with memo.clj (owner, 2026-11-04 night).** "We
+    push v1.1.0 of gen.clj first, and then add more features to v1.2.0
+    of gen.clj - then let memo.clj v1.2.0 depend on that gen.clj": this
+    release stays 1.1.0 (a relayed request to renumber it 1.2.0, to match
+    memo.clj, was withdrawn); gen.clj 1.2.0 is a later release with more
+    features, which memo.clj 1.2.0 (memoclj-s3wr) pins.
   - **One chain fast on MLX, and GPU speed (owner, 2026-11-04, "go with
     option 1", on the lead's recommendation; genclj-fpnf, genclj-h8rn).**
     One HMC chain (L=32, 1000 steps) ran in 21.9 ms as a Metal program (one
