@@ -57,7 +57,9 @@
    tokenize, token-bytes and detokenize use the GGUF's own vocabulary;
    tokenizer gathers them as the LM protocol's tokenizer (gen.llm.lm)."
   {:api :experimental}
-  (:require [gen.array.memory :as reservations]
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
+            [gen.array.memory :as reservations]
             [gen.llm.branching :as br]
             [gen.llm.host :as host]
             [gen.llm.llama.recurrent :as recurrent]
@@ -367,6 +369,38 @@
     (not (Llama/llama_model_has_decoder m)) (throw (llama-failure "the model has no decoder" {:reason :unsupported-model}))
     (Llama/llama_model_is_diffusion m) (throw (llama-failure "diffusion models are not supported" {:reason :unsupported-model}))))
 
+(defn- cpu-list
+  "The CPUs a Linux cpulist names (\"0-7,16\" → 0 to 7 and 16)."
+  [^String s]
+  (into [] (mapcat (fn [part]
+                     (let [[a b] (str/split (str/trim part) #"-")]
+                       (range (parse-long a) (inc (parse-long (or b a)))))))
+        (remove str/blank? (str/split (str/trim s) #","))))
+
+(defn ^:no-doc performance-cores
+  "On a Linux hybrid CPU (Intel's P- and E-cores), the number of physical
+   performance cores: the CPUs /sys/devices/cpu_core/cpus lists, counted by
+   their (package, core) pairs, so that hyper-threads count once. nil on
+   any other machine. root is sysfs's mount (\"/sys\")."
+  ([] (performance-cores "/sys"))
+  ([root]
+   (let [f (io/file root "devices" "cpu_core" "cpus")]
+     (when (.isFile f)
+       (let [cpus (cpu-list (slurp f))
+             topo (fn [cpu name] (let [g (io/file root "devices" "system" "cpu" (str "cpu" cpu) "topology" name)]
+                                   (when (.isFile g) (str/trim (slurp g)))))
+             cores (into #{} (map (fn [c] [(topo c "physical_package_id") (or (topo c "core_id") (str "cpu" c))])) cpus)]
+         (when (seq cpus) (count cores)))))))
+
+(defn- default-threads
+  "llama.cpp's threads when the caller gives none: the physical performance
+   cores on a Linux hybrid CPU, whose all-cores default decodes several
+   times slower (genclj-xe8c: 8.9 against 38.9 tokens/s on a Core Ultra 9
+   285K, 24 cores against its 8 P-cores); nil, llama.cpp's own default,
+   elsewhere."
+  []
+  (try (performance-cores) (catch Exception _ nil)))
+
 (defn- new-context
   "A context of m: n-slots sequences in one unified cache of n-ctx cells."
   ^MemorySegment [^Arena arena ^MemorySegment m {:keys [n-ctx n-batch n-slots swa-full threads]}]
@@ -380,7 +414,7 @@
       (llama_context_params/n_rs_seq (int 0))
       (llama_context_params/swa_full (boolean swa-full))
       (llama_context_params/no_perf true))
-    (when threads
+    (when-let [threads (or threads (default-threads))]
       (llama_context_params/n_threads params (int threads))
       (llama_context_params/n_threads_batch params (int threads)))
     (let [ctx (Llama/llama_init_from_model m params)]
@@ -515,7 +549,8 @@
      :n-batch       tokens per decode (default 512, at least
                     :max-branches + 1); longer reads take several
      :gpu-layers    layers offloaded to the GPU (default -1, all)
-     :threads       CPU threads (default llama.cpp's)
+     :threads       CPU threads (default: on a Linux hybrid CPU its physical
+                    performance cores, else llama.cpp's own)
      :swa-full      a full-size cache for sliding-window layers (default true)"
   ^java.io.Closeable [opts]
   (slots/engine #(open-slots opts) "llama.cpp"))

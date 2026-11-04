@@ -38,6 +38,15 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Draws: llama.cpp's default threads on a Linux hybrid CPU are its
+  physical performance cores** (`gen.llm.llama`, genclj-xe8c). Without
+  `:threads`, llama.cpp used every core, and on a Core Ultra 9 285K (8
+  P-cores, 16 E-cores) the 3.6-35B decoded 4.4 times slower than on the
+  8 P-cores alone (8.9 against 38.9 tokens/s, measured by memo.clj's
+  session). The engine now passes the P-cores' count, read from
+  /sys/devices/cpu_core/cpus; elsewhere nothing changes. Another thread
+  count can change llama.cpp's float noise, so the draws for a key on
+  such a machine may differ.
 - **gen.laws: close?'s absolute tolerance scales with the scores** (owner,
   2026-11-01; DESIGN §9, genclj-6txl). It was 1e-12 in float64 (float32's
   1e-3), which assumed scores up to ~100: correct models whose traces
