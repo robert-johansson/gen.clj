@@ -440,6 +440,41 @@ evidence:
 So DESIGN §8's row becomes: instaparse, **no** (confirmed by the owner,
 2026-10-21).
 
+### Addendum (2026-11-04): instaparse grammars as constraints, through our engine
+
+The "no" above is for instaparse's parser as the engine. Its *grammars*
+constrain sampling well when compiled into ours (the owner's question,
+2026-11-04; beans genclj-h5rb and the regular subset's). An instaparse
+parser's grammar is data: `(:grammar parser)` maps each rule to a combinator
+(`{:tag :cat :parsers […]}`; `:alt`, `:ord` with `:parser1` `:parser2`,
+`:string`, `:string-ci`, `:regexp`, `:nt`, `:opt`, `:star`, `:plus`, `:rep`,
+`:epsilon`; `:look` and `:neg` for lookahead), with `:start-production`. A
+grammar without recursion is a regular language, and its combinators map
+one to one onto gen.llm.regex's terms (`text`, `parse` of a regex
+terminal's pattern, `cat`, `alt`, `opt`, `star`, `plus`, `repeat`, a rule
+inlined); `:ord` only ranks parses, so as a language it is `alt`; a
+recursive rule unrolls to a depth bound, as recursive schemas do.
+Lookahead is regular too (intersection and complement with the rest of the
+text) but needs the rest of the text as the compiler's continuation; the
+prototype refuses it.
+
+A prototype (50 lines, a scratch JVM, instaparse 1.5.0, the M4; the token
+vocabulary Qwen3's 151,936 tokens from its GGUF, sampling on the toy engine
+under the grammar's potential, each text then parsed by instaparse):
+
+| Grammar (instaparse EBNF) | DFA states | Term, DFA, every mask | Sampled texts instaparse parses |
+|---|---:|---|---|
+| A tool call: name from three, arguments as key-value pairs | 119 | 6 ms, 57 ms, 226 ms | 20 of 20 |
+| An ISO 8601 date-time | 31 | 1 ms, 4 ms, 161 ms | 20 of 20 |
+| Nested lists, recursion unrolled 3 levels | 14 | 2 ms, 1 ms, 89 ms | 20 of 20 |
+
+The masks are made once per grammar; a token under it then costs what any
+DFA grammar's does (a table read and the site's renormalization, tens of
+µs, above). So the fast subset is the grammars a user writes for tool
+calls, formats and bounded nesting, in a notation Clojure users know;
+unbounded recursion (code, recursive JSON) is the Earley engine's
+(genclj-h5rb), behind the same front end.
+
 
 ## Decisions
 
