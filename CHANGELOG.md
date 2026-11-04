@@ -38,6 +38,17 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Draws: MLX's float32 matrix products are full float32 by default**
+  (gen.backend.mlx's MlxRuntime; DESIGN §9; genclj-p3pr). MLX computes them
+  on CUDA in TF32 unless `MLX_ENABLE_TF32=0` is set (a 10-bit mantissa,
+  about 1e-3 relative, which failed the matrix families' gradients, the
+  batched matrix VJPs and the Cholesky and solve checks: 1.0.0's known
+  issue). gen.clj now sets it to 0 when MLX loads, unless the environment
+  sets it, and `-Dgen.mlx.tf32=true` (or `false`) decides over both. On
+  CUDA a matrix model's values for a key change, to full float32's; on the
+  M4 nothing changes; a Mac whose Metal runs float32 products through its
+  neural accelerators keeps full float32 too.
+
 - **Parity with Gen.jl 0.4.9** (genclj-u420). Its fixes (#571: the
   general trace translator's forward score, elliptical slice's threshold)
   were gen.clj's from the port, and its new tests are ported; its hmc

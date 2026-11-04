@@ -56,6 +56,12 @@
                            4096; each holds one buffer)
      gen.mlx.cpu-compile   true or false: skip the probe of compile on the
                            CPU device (cpu-compiles?)
+     gen.mlx.tf32          true: MLX's float32 matrix products in TF32 on
+                           CUDA (and through Metal's neural accelerators
+                           where a Mac has them), faster and about 1e-3
+                           relative; default false, full float32 (MlxRuntime
+                           sets MLX_ENABLE_TF32=0 unless the environment
+                           sets it; the property decides over it)
      gen.mlx.lib           the directory of libmlxc (default
                            native/build/<platform>/lib; MlxRuntime)"
   {:api :internal}
