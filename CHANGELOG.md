@@ -52,8 +52,10 @@ other values for the same key, from the same distribution.
   selected. Momenta come from N(0, M) as L⁻ᵀ·z (M⁻¹ = L·Lᵀ) and
   positions move by M⁻¹·p; MALA proposes from N(v + tau·M⁻¹∇,
   2 tau·M⁻¹). A dense metric that is not finite, not symmetric (within
-  Stan's 1e-8), not positive definite or not the selected choices' is
-  refused (`:invalid-inv-metric`), and a bare matrix for several choices
+  1e-8 of its largest entry in float64, Stan's, and 1e-5 in float32, a
+  computed metric's rounding; its symmetric part is the one used), not
+  positive definite or not the selected choices' is refused
+  (`:invalid-inv-metric`), and a bare matrix for several choices
   names the dense form in its error. `mcmc/inv-metric` returns a dense
   metric labeled in the selection's order. gen.inference.nuts' warmup
   adapts a diagonal metric only: it refuses a dense `:inv-metric` unless

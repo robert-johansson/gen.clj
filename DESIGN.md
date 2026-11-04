@@ -3381,8 +3381,14 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       n]` matrix only for one selected choice of n elements (unless the
       choice has that shape: its variances), so a Gen.jl model with a
       matrix over several choices meets a loud error naming the dense
-      form. Refused unless finite, symmetric within Stan's
-      check_symmetric (1e-8, absolute) and positive definite. The
+      form. Refused unless finite, symmetric and positive definite.
+      Symmetric (owner, 2026-11-04, on the lead's recommendation after a
+      side agent's note): |m - mᵀ| ≤ ε·max(1, max|m|), ε 1e-8 in float64
+      (Stan's check_symmetric, in practice) and 1e-5 in float32 (about a
+      hundred rounding steps: a metric computed in float32, by la/inv
+      say, is off-symmetric by its rounding), and the kernels then use
+      (m + mᵀ)/2, exactly symmetric. Stan's absolute 1e-8 as first built
+      refused such float32 metrics. The
       factors (L with M⁻¹ = L·Lᵀ, and L⁻¹) are computed once a move on
       the matrix's own backend, then made arrays of the current one, so a
       staged, batched or compiled step takes them as constants (a device
