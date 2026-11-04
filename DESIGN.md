@@ -3394,6 +3394,28 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     - **The order:** the dense metric; importance sampling's host result,
       then kernel/run-particles on Metal; the book's bugs in stable
       namespaces; the CUDA known issues on the Thor; the docs; the gate.
+    - **Revised: many chains experimental first, and a batched device
+      result (owner, 2026-11-04, on the lead's recommendations).** The
+      keys question came back as the lead said it might: a gen.batched
+      run draws one key per site with the particle axis inside the draw
+      (decision 3), so the kernels' batched forms cannot draw a device
+      run's chains, `(rng/split key n)[i]` each. So 1.1.0 ships an
+      experimental `gen.inference.device/run-chains`: n chains from n
+      traces, chain i on `(rng/split key n)[i]`, `:metal` in one kernel
+      and `:jvm` on every core, falling back to kernel/run per chain, so
+      it equals per-chain kernel/run (bit for bit on the JVM backend in
+      float64, to float32 rounding on the GPU). The stable
+      kernel/run-particles waits until after 1.1.0, for per-particle keys
+      in the batch tracer, so that its batched handler draws the device's
+      chains. And importance sampling with `:device` follows `:batched?`:
+      asked for batched, its result holds `:particles` (a gen.batched
+      collection over the program's outputs, as the batched handler's
+      result does) in place of n scalar traces; draws stay per particle.
+    - **GenLM's gaps (owner, 2026-11-04):** the survey's top five become
+      beans for after 1.1.0 (an epic): a critic at the drawn token in
+      token SMC, AWRS for constraints without a mask, the potential
+      contract as laws, potential combinators, and context-free grammar
+      potentials (docs/research/genlm-survey-2026-11-04.md).
 
 ## 10. Deferred (tracked, not forgotten)
 
