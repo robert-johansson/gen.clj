@@ -273,7 +273,8 @@ folder.
   Ben Goodrich, Michael Betancourt, Marcus Brubaker, Jiqiang Guo, Peter Li
   and Allen Riddell. Stan: a probabilistic programming language. *Journal
   of Statistical Software* 76(1):1–32, 2017. Cited in *The Inference
-  Toolkit*, *Gradient-Based MCMC* and *A Gallery of Models*.
+  Toolkit*, *Gradient-Based MCMC*, *A Gallery of Models* and *Coming from
+  Gen.jl*.
 
 ### Language models
 

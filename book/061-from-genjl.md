@@ -257,6 +257,7 @@ optimizer's state are values, passed on.
 |--------|---------|
 | `metropolis_hastings`, `mh` | `mh/mh` |
 | `hmc`, `mala` | `mcmc/hmc`, `mcmc/mala` (and `mcmc/nuts`) |
+| `hmc(…; metric=M)` | `{:inv-metric …}`, the inverse M⁻¹ (Stan's): variances by address, `{:x 0.5 :y 2.0}`, or `(mcmc/dense-inv-metric [:x :y] m)` for a dense one |
 | `elliptical_slice` | `mcmc/elliptical-slice` |
 | `map_optimize` | `mcmc/map-optimize` |
 | `importance_sampling` | `is/importance-sampling` (with `:log-weights` and `:ess`) |
@@ -267,6 +268,13 @@ optimizer's state are values, passed on.
 | `train!` | `learning/train` (it draws fresh data per batch) |
 | `choice_gradients` | `gradients/choice-gradients` |
 | `accumulate_param_gradients!`, `apply!` | `gradients/param-gradients`, `learning/step` |
+
+Gen.jl's `metric` is the momenta's covariance M, in the order its
+selection's values take in `to_array`. gen.clj takes the inverse, as
+Stan does, and names the order: variances by address, or a dense
+matrix with its addresses. A bare vector or matrix is taken only when
+one choice is selected, whose elements it follows; for more, the order
+would be a guess, and the kernels refuse it.
 
 ## Booleans in host code
 

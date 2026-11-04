@@ -32,7 +32,8 @@
                      u uniform (Stan's stepsize_jitter, in the warmup too),
                      eps the nominal step size dual averaging adapts
      :inv-metric     the initial inverse metric, in any form mcmc's
-                     kernels take (the identity)
+                     kernels take (the identity); a dense one
+                     (mcmc/dense-inv-metric) with :adapt-metric? false
      :adapt-metric?  true; false adapts the step size alone
      :target-accept  0.8 (Stan's delta); :gamma 0.05, :t0 10, :kappa 0.75
      :init-buffer 75, :term-buffer 50, :window 25: when they do not fit in
@@ -240,7 +241,11 @@
          in-window? (fn [i] (and (seq ws) (<= (long (ffirst ws)) (long i) (long (second (peek ws))))))
          step-keys (if (pos? (long warmup)) (rng/split k-steps warmup) [])
          ;; the metric labeled by address, as the kernels take it and adapt returns it
-         inv (mcmc/inv-metric trace selection inv-metric)]
+         inv (mcmc/inv-metric trace selection inv-metric)
+         _ (when (and adapt-metric? (instance? gen.inference.mcmc.DenseInvMetric inv))
+             (throw (ex-info (str "nuts: the warmup adapts a diagonal metric (Stan's diag_e); a dense :inv-metric is kept "
+                                  "as given with :adapt-metric? false (dense_e is not built yet)")
+                             {:reason :dense-metric-adaptation :inv-metric inv})))]
      (loop [i 0
             trace trace
             eps (initial-eps trace selection opts eps inv k-init)
