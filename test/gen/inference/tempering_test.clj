@@ -71,9 +71,15 @@
     (/ (/ (reduce + ys) 0.01) prec)))
 
 (deftest ^:slow a-tight-likelihood
-  (testing "importance sampling from the prior falls far short at 2000 particles"
-    (is (< (ts/host (:log-ml-estimate (is/importance-sampling conjugate [20] ys-observed 2000 {:key (rng/key 1)})))
-           (- conjugate-exact 3))))
+  (testing "importance sampling from the prior falls far short at the same 200 particles"
+    ;; the median of 9 keys' shortfalls, so no key's luck decides it: a
+    ;; prior draw within a few of the posterior's sd 0.022 is likely enough
+    ;; at 2000 particles (17 keys of 40 short by > 3 nats on the JVM), and
+    ;; the one-key claim there failed on Metal's float32 draws (2026-11-04);
+    ;; at 200, 39 of 40, the median 150 nats
+    (let [shortfalls (mapv #(- conjugate-exact (ts/host (:log-ml-estimate (is/importance-sampling conjugate [20] ys-observed 200 {:key (rng/key %)}))))
+                           (range 1 10))]
+      (is (< 3 (nth (sort shortfalls) 4)) (pr-str shortfalls))))
   (testing "tempered SMC agrees with the exact value"
     (let [r (within-band? (runs conjugate [20] ys-observed {:particles 200}) conjugate-exact)]
       (is (:ok r) (pr-str r))))
