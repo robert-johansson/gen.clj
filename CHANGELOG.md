@@ -73,6 +73,22 @@ other values for the same key, from the same distribution.
   over both. On CUDA a matrix model's values for a key change, to full
   float32's; on the M4 nothing changes; a Mac whose Metal runs float32
   products through its neural accelerators keeps full float32 too.
+- **with-internal-proposal's regenerate drops the choices its new run
+  leaves** (`gen.inference.proposal`, the thesis's Eq. 4.1; 746095e;
+  genclj-bnlx).
+  A selected choice that decides whether an unselected one exists (the
+  thesis's abc, regenerating a alone of {a T b F c T}) threw "regenerate
+  leaves an unselected choice unvisited", where Eq. 4.1 drops b
+  (B ⊆ A_σ); the laws regenerate-weight-is-the-projection-ratio and
+  regenerate-keeps-unselected-choices failed by exception on such an
+  override. The move now drops it, with Eq. 4.1's weight: q proposes
+  given every unselected choice (σ) and the reverse move given
+  σ' = τ'|_{S^c} (PROVISIONAL, DESIGN §9). A move that drops nothing
+  keeps its draws, and its weight unless the reverse move's q reads a
+  choice the move added unselected (σ' holds it now).
+  `with-exact-proposal` and `with-conjugate-proposal` still throw on a
+  move that drops a choice. The book's *The Generative Function
+  Interface* no longer lists it as a departure from the thesis.
 - **Parity with Gen.jl 0.4.9** (genclj-u420). Its fixes (#571: the
   general trace translator's forward score, elliptical slice's threshold)
   were gen.clj's from the port, and its new tests are ported; its hmc

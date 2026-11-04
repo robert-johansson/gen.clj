@@ -551,7 +551,10 @@
 (defn regenerate-weight-is-the-projection-ratio
   "regenerate's weight is the ratio of the projections of the new and the
    old trace on the retained choices (Eq. 4.1): with forward sampling, the
-   retained density ratio; for any internal proposal, its correction."
+   retained density ratio; for any internal proposal, its correction. In
+   a move that drops an unselected choice, Eq. 4.1's q is given that
+   choice, and the projections give its weight for a proposal that reads
+   only the constraints its run keeps, as forward sampling does."
   [cases]
   (prop/for-all [[[_ gf args] seed picks] cases]
     (let [tr (gfi/simulate gf args (rng/key seed))

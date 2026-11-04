@@ -782,8 +782,22 @@ burglary-given-calls
 ;=> [-2.0794 -2.3026]
 
 ;; book: abc-drop
-;; error: regenerate leaves an unselected choice unvisited
-#_(mapv #(gfi/regenerate abc-t (sel/select :a) %) (rng/split (rng/key 16) 30))
+(def drops-b
+  (first (filter #(false? ((:trace %) :a))
+                 (map #(gfi/regenerate abc-t (sel/select :a) %)
+                      (rng/split (rng/key 16) 30)))))
+
+[(dict (:trace drops-b)) (:weight drops-b)]
+;=> [{:a false :c true} -1.674]
+
+(array/allclose? (:weight drops-b) (:weight to-a-false))
+;=> true
+
+;; book: abc-laws
+(def abc-models [["abc*" abc* [] []]])
+
+(law laws/regenerate-weight-is-the-projection-ratio abc-models 50)
+;=> {:pass? true :num-tests 50}
 
 ;; book: optimal
 (def sprinkler

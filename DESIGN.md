@@ -1632,10 +1632,24 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   generate's weight is the projection on the constraints, and regenerate's
   is the ratio of projections on the retained choices (Eq. 4.1). Before
   them the general set checked project only on everything, which missed a
-  planted bug. Regenerate keeps every unselected choice of the trace, so a
-  selected choice that decides structure cannot drop one: such a move is a
-  loud error, as with `with-exact-proposal` (the review, 2026-10-20; kept
-  by the owner the same day).
+  planted bug. Regenerate kept every unselected choice of the trace, a
+  move that would drop one a loud error (the review, 2026-10-20; kept by
+  the owner the same day), until the book's chapter 031 showed the laws
+  failing by exception on the thesis's own example (genclj-bnlx,
+  2026-11-04, in 1.1's scope). Regenerate now follows Eq. 4.1: σ = τ|_{S^c},
+  q proposes given all of σ, the new run drops the choices of σ it leaves
+  unvisited (B ⊆ A_σ), and the reverse move proposes given σ' = τ'|_{S^c}.
+  **PROVISIONAL, owner to confirm:** q sees all of σ, the dropped choices
+  included, and the reverse move all of σ', as the equation reads, so
+  selection MH stays stationary whatever q reads. The ratio of projections
+  (the general law) is that weight when q reads only the constraints its
+  run keeps (forward sampling, the thesis's example); for a q that reads a
+  choice the move drops it is not, and the law does not hold
+  (proposal-test's reads-what-it-drops). A revise (`gfi/generate-again`)
+  still reruns q without the drops, as before. `with-exact-proposal` and
+  `with-conjugate-proposal` keep the loud error; their proposals read only
+  the constraints their runs visit, so their reverse weight leaves out the
+  choices of σ' the old trace lacks.
 - **Custom gradients, `array/custom-vjp`** (M4, 2026-10-20; one of §8's
   reserved names): `(array/custom-vjp f vjp)` is f, differentiated through
   by `(vjp args out g)`, one cotangent per argument. It is an optional

@@ -483,13 +483,17 @@
 
 (defn- exact-weight
   "The weight exact-generate gives for producing the trace tr of gf on args
-   from sigma, tr's choices at some addresses: -Inf for a trace outside the
-   support, whose run stopped at a choice there (gfi/impossible?, DESIGN.md
-   §9), so that it holds its choices only up to that one."
+   from sigma, which agrees with tr's choices where both have one: -Inf for
+   a trace outside the support, whose run stopped at a choice there
+   (gfi/impossible?, DESIGN.md §9), so that it holds its choices only up to
+   that one. A choice of sigma that tr lacks (regenerate's reverse move,
+   Eq. 4.1) is left out: the enumerated choices do not decide the
+   structure, so the proposal reads only the constraints its run visits."
   [{:keys [gf paths limit] :as egf} args sigma tr]
   (if (gfi/impossible? (:score tr))
     ##-Inf
-    (let [seen (volatile! {})
+    (let [sigma (sel/get-selected sigma (sel/from-choicemap (:choices tr)))
+          seen (volatile! {})
           g (watching gf (set paths) seen)
           ;; the supports, from a run with every choice given
           _ (gfi/with-exact-density "with-exact-proposal" (gfi/generate g args (:choices tr) (rng/key 0)))

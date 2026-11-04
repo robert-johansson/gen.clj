@@ -428,25 +428,29 @@
 
 (defn- conjugate-weight
   "The weight conjugate-generate gives for producing the trace tr on args
-   from sigma, tr's choices at some addresses: tr's score less the density
-   of its unobserved children, of the proposal of the other choices and of
-   the posterior at its latent. tr is run again for the checks generate
-   makes."
+   from sigma, which agrees with tr's choices where both have one: tr's
+   score less the density of its unobserved children, of the proposal of
+   the other choices and of the posterior at its latent. tr is run again
+   for the checks generate makes. A choice of sigma that tr lacks
+   (regenerate's reverse move, Eq. 4.1) is left out: the latent does not
+   decide the structure, so the proposal reads only the constraints its
+   run visits."
   [{:keys [gf latent] :as cgf} args sigma tr]
-  (if (latent-given? cgf sigma)
-    (gfi/with-exact-density op-name (gfi/-project gf tr (sel/from-paths (cm/addresses sigma))))
-    (let [[ref] (reference cgf args (cm/merge sigma (others-of cgf (:choices tr) sigma)) (rng/key 0))
-          rs (:sites ref)
-          replay (run gfi/generate cgf args (:choices tr) (rng/key 0) false)
-          fs (sites cgf replay)
-          unobserved (remove #(cm/has-value? sigma %) (keys (:children fs)))]
-      (check-same! cgf ref rs replay fs)
-      ;; the model's projection: tr's maker is the wrapper, whose own
-      ;; projection this is
-      (- (:score tr)
-         (gfi/-project gf tr (sel/from-paths unobserved))
-         (others-density cgf ref rs sigma)
-         (site-log-prob (posterior rs) (cm/get-choice (:choices tr) latent))))))
+  (let [sigma (sel/get-selected sigma (sel/from-choicemap (:choices tr)))]
+    (if (latent-given? cgf sigma)
+      (gfi/with-exact-density op-name (gfi/-project gf tr (sel/from-paths (cm/addresses sigma))))
+      (let [[ref] (reference cgf args (cm/merge sigma (others-of cgf (:choices tr) sigma)) (rng/key 0))
+            rs (:sites ref)
+            replay (run gfi/generate cgf args (:choices tr) (rng/key 0) false)
+            fs (sites cgf replay)
+            unobserved (remove #(cm/has-value? sigma %) (keys (:children fs)))]
+        (check-same! cgf ref rs replay fs)
+        ;; the model's projection: tr's maker is the wrapper, whose own
+        ;; projection this is
+        (- (:score tr)
+           (gfi/-project gf tr (sel/from-paths unobserved))
+           (others-density cgf ref rs sigma)
+           (site-log-prob (posterior rs) (cm/get-choice (:choices tr) latent)))))))
 
 (gfi/defgf ConjugateProposalGF [gf latent children check-exact? check-retval?]
   gfi/IGenerativeFunction
