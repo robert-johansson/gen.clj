@@ -1,0 +1,22 @@
+;; gen.codegen: code that evaluates LLM-written code, a module of gen.clj
+;; outside its core (DESIGN.md §9, "Codegen as a library: the core gets no
+;; code evaluation", 2026-11-04). gen.llm's sample, chat and agent are the
+;; core's; this module adds a namespace session with pluggable read,
+;; repair, vet and explain hooks (gen.codegen.session), a tool host in
+;; another JVM (gen.codegen.process), and gen.clj's codegen harness (the
+;; bake-off's tasks, grader and REPL tools).
+;;
+;; A dependent takes it as a git dependency on gen.clj's repository with
+;; :deps/root "ext/codegen", at the commit of the gen.clj it uses:
+;;
+;;   gen.clj/codegen {:git/url "…gen.clj" :git/sha "…" :deps/root "ext/codegen"}
+;;
+;; In gen.clj's own repository the :codegen alias (with :test) puts it on
+;; the classpath.
+{:paths ["src"]
+ :deps {gen.clj/gen.clj {:local/root "../.."}
+        gen.clj/laws {:local/root "../laws"}
+        ;; the errors an LLM reads: static analysis of its code
+        clj-kondo/clj-kondo {:mvn/version "2026.08.04"}
+        ;; delimiters rebuilt from indentation (parinfer's indent mode; public domain)
+        parinferish/parinferish {:mvn/version "0.8.0"}}}

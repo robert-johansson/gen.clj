@@ -386,7 +386,7 @@
    ["Distributions" #"gen\.dist(\..+)?"]
    ["Combinators" #"gen\.(combinators|custom|state-space)"]
    ["Inference" #"gen\.(inference\..+|gradients|learning)"]
-   ["Language models" #"gen\.llm\..+"]])
+   ["Language models" #"gen\.(llm|codegen)\..+"]])
 
 (defn- layer-of [n]
   (or (some (fn [[title re]] (when (re-matches re (str n)) title)) layers)

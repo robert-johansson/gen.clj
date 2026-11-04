@@ -1,24 +1,25 @@
 (ns gen.codegen.prompt-test
-  "The codegen bake-off's prompts and sampler (genclj-ihc4): the worked
-   examples the prompt teaches run (simulate, and generate with their own
-   draws as data); the system message holds the prelude and no task's
-   answer; a failed grading becomes feedback and a passing one none; the
-   chat is Qwen's template with thinking off; and the sampler keeps to the
-   top-k tokens and the top-p mass."
+  "The codegen bake-off's prompts (genclj-ihc4): the worked examples the
+   prompt teaches run (simulate, and generate with their own draws as
+   data); the system message holds the prelude and no task's answer; a
+   failed grading becomes feedback and a passing one none; the REPL
+   agent's prompt offers its tools in Qwen's template (gen.llm.chat),
+   evidence only when asked, and its task asks for the tools."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [gen.choicemap :as cm]
             [gen.codegen.candidate :as c]
-            [gen.codegen.driver :as driver]
             [gen.codegen.prompt :as prompt]
+            [gen.codegen.session :as session]
             [gen.codegen.tasks :as tasks]
             [gen.gfi :as gfi]
+            [gen.llm.chat :as chat]
             [gen.random :as rng]
             [gen.test-support :as ts]))
 
 (deftest the-worked-examples-run
   (doseq [[[_ code] args] (map vector prompt/examples [[[0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0]] [[3 2 4]]])]
-    (let [[n model] (c/evaluate (c/read-forms code))
+    (let [[n model] (c/evaluate (session/read-forms code))
           tr (gfi/simulate model args (rng/key 1))]
       (is (Double/isFinite (double (ts/host (:score tr)))))
       (is (Double/isFinite (double (ts/host (:weight (gfi/generate model args (:choices tr) (rng/key 2)))))))
@@ -43,16 +44,15 @@
                (prompt/feedback-message {:stages [{:stage :read :ok true :repaired-delimiters true}
                                                   {:stage :evaluates :ok false :error "x"}]}))))
 
-(deftest the-chat-template
-  (is (= "<|im_start|>system\nS<|im_end|>\n<|im_start|>user\nU<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-         (prompt/chat [[:system "S"] [:user "U\n"]]))))
-
-(deftest the-sampler-keeps-to-top-k-and-top-p
-  (let [lp (float-array (map #(Math/log %) [0.5 0.3 0.1 0.05 0.05]))]
-    (testing "top-p 0.95 keeps the four most likely of five (0.95 of the mass)"
-      (is (= #{0 1 2 3} (set (map #(driver/pick lp {:temp 1.0 :top-k 20 :top-p 0.95} %) (map #(/ % 100.0) (range 100)))))))
-    (testing "top-k 2 keeps two"
-      (is (= #{0 1} (set (map #(driver/pick lp {:temp 1.0 :top-k 2 :top-p 1.0} %) (map #(/ % 100.0) (range 100)))))))
-    (testing "the draws follow the kept mass: token 0 for u below 0.5 / 0.95"
-      (is (= 0 (driver/pick lp {:temp 1.0 :top-k 20 :top-p 0.95} 0.52)))
-      (is (= 1 (driver/pick lp {:temp 1.0 :top-k 20 :top-p 0.95} 0.54))))))
+(deftest the-repl-agents-prompt
+  (let [task (tasks/by-id :line)
+        render #(chat/render [{:role :system :content (prompt/repl-system-message %)}
+                              {:role :user :content (prompt/repl-task-message task)}]
+                             {:tools (prompt/tools-for %)})
+        with (render true) without (render false)]
+    (is (str/starts-with? with "<|im_start|>system\n# Tools\n"))
+    (is (str/includes? with "\"name\": \"evidence\""))
+    (is (not (str/includes? without "\"name\": \"evidence\"")) "evidence off: not offered")
+    (is (not (str/includes? without "compare variants with evidence")) "nor mentioned")
+    (is (str/includes? with "\"required\": [\"name\"]}") "simulate's args optional")
+    (is (str/ends-with? with "Build the model with the tools, then submit it.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"))))

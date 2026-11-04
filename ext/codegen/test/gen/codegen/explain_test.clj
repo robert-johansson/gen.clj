@@ -9,13 +9,14 @@
             [clojure.test :refer [deftest is testing]]
             [gen.codegen.candidate :as c]
             [gen.codegen.explain :as x]
+            [gen.codegen.session :as session]
             [gen.gfi :as gfi]
             [gen.random :as rng]))
 
 (defn- error-of
   "The explained error of evaluating code and simulating its model, or nil."
   [code]
-  (try (let [[_ m] (c/evaluate (c/read-forms code))]
+  (try (let [[_ m] (c/evaluate (session/read-forms code))]
          (gfi/simulate m [] (rng/key 1))
          nil)
        (catch Throwable e (x/explain e nil))))

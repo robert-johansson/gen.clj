@@ -3,7 +3,7 @@
    genclj-ihc4): stages in order, the grading stopping at the first that
    fails.
 
-     :read          the code reads (gen.codegen.candidate/read-forms), or,
+     :read          the code reads (gen.codegen.session/read-forms), or,
                     with :repair-delimiters? (on), reads once its delimiters
                     are rebuilt from its indentation (parinfer's indent
                     mode: :repaired-delimiters); a leading ns form is
@@ -48,10 +48,12 @@
    Run the grader in a JVM of its own, never the LLM's: a candidate is
    evaluated in this JVM (gen.codegen.candidate), so one that loops is
    abandoned, not stopped, and one that exhausts memory ends the JVM."
+  {:api :internal}
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.codegen.candidate :as candidate]
             [gen.codegen.explain :as explain]
+            [gen.codegen.session :as session]
             [gen.codegen.tasks :as tasks]
             [gen.combinators :as comb]
             [gen.gfi :as gfi]
@@ -181,11 +183,11 @@
    (gen.codegen.explain) in the namespace ns, when there is one."
   [name timeout-ms check ns]
   (let [t0 (System/nanoTime)
-        r (try (merge {:ok true} (candidate/within timeout-ms check))
+        r (try (merge {:ok true} (session/within timeout-ms check))
                (catch Throwable e
                  {:ok false :error (let [m (if (::explained (ex-data e)) (ex-message e) (explain/explain e (some-> ns find-ns)))]
                                      (subs m 0 (min 1600 (count m))))
-                  :timeout? (boolean (::candidate/timeout (ex-data e)))}))]
+                  :timeout? (boolean (::session/timeout (ex-data e)))}))]
     (assoc r :stage name :ms (/ (- (System/nanoTime) t0) 1e6))))
 
 (defn grade-model
@@ -203,10 +205,10 @@
    (let [{:keys [timeout-ms law-tests seed] :as opts} (merge defaults opts)
          {:keys [args observations]} task
          state (volatile! {})
-         stages [[:read #(let [[forms repaired?] (try [(candidate/read-forms code) false]
+         stages [[:read #(let [[forms repaired?] (try [(session/read-forms code) false]
                                                       (catch Exception e
                                                         (if (:repair-delimiters? opts)
-                                                          (let [fixed (try (candidate/read-forms (candidate/repair-delimiters code))
+                                                          (let [fixed (try (session/read-forms (candidate/repair-delimiters code))
                                                                            (catch Exception _ (throw e)))]
                                                             [fixed true])
                                                           (throw e))))

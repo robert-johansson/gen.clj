@@ -25,6 +25,7 @@
    reference with key 22, whose period and amplitude are 5.5 and 1.2) and
    the changepoint task's readings (the book's ys-complex, computed once on
    the JVM backend, at three decimals)."
+  {:api :internal}
   (:require [gen.array :as array]
             [gen.choicemap :as cm]))
 

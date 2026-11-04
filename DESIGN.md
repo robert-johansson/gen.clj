@@ -3232,6 +3232,27 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   and float32's 1e-3 alike; the relative tolerances stay. A planted
   error of 1e-6 still fails for scores below ~1e5. A CHANGELOG line, as
   gen.laws' policy requires for a tolerance change.
+- **Codegen as a library: the core gets no code evaluation (owner,
+  2026-11-04; genclj-uw7w).** gen.clj's core, gen.llm, experimental, no new
+  dependencies: gen.llm.sample (sampling with temperature, top-k and top-p;
+  n completions in lockstep over the LM protocol), gen.llm.chat (Qwen's
+  chat template, thinking on or off, the tool-call format and parser),
+  gen.llm.agent (the episode loop: tools are functions the caller supplies,
+  with a session, submit and budgets). Everything that evaluates
+  LLM-written code (a namespace session, an eval tool with repair and
+  vetting, a subprocess runner) goes in a module, ext/codegen, with the
+  gen.clj codegen harness (tasks, grader, clj-kondo, parinferish), which
+  leaves test/. The core never executes generated code. The owner first
+  chose all three in gen.llm, then, the eval helpers made explicit, this
+  split. memo.clj's synthesis module builds on both (its REPL agent,
+  memoclj-pcw0); memo.clj's core depends on neither. Built as
+  gen.codegen.session (a namespace kept across turns; :read, :repair,
+  :vet, :explain given the throwable, namespace and forms, :show) and
+  gen.codegen.process (tools in a JVM of their own, restarted when a
+  response is tainted, late or lost), both experimental; the harness's
+  REPL tools, grader and driver run on them and on gen.llm's three, its
+  prompts rendered as before, character for character.
+
 ## 10. Deferred (tracked, not forgotten)
 
 `beans list --tag deferred-port` lists every GenMLX area left out of M1–M4, each

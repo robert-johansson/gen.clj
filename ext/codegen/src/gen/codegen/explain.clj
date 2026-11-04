@@ -14,7 +14,8 @@
                                  failure of a macro (let, defn) as one line
                                  a problem
 
-   clj-kondo is on the :test alias; without it lint returns nil."
+   clj-kondo is ext/codegen's dependency; without it lint returns nil."
+  {:api :internal}
   (:require [clojure.java.io :as io]
             [clojure.string :as str]))
 

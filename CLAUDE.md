@@ -46,7 +46,8 @@ clojure -M:bench -m gen.model-bench   # model-level costs (GFI ops, batching, gr
 clojure -J-Dgen.llama.lib=<lib> -J-Dgen.llama.test-model=<gguf> -X:test :nses '[gen.llm.llama-test gen.llm.llama-lm-test gen.llm.llama-token-test gen.llm.llama-smc-test]'
 clojure -J-Dgen.llama.lib=<lib> -M:bench -m gen.llama-noise <gguf>              # llama.cpp's float noise and costs
 clojure -J-Dgen.llama.lib=<lib> -M:test:bench -m gen.llama-long-noise <gguf>    # the same past a sliding window
-clojure -J-Dcodegen.model=<gguf> -M:test:codegen -m gen.codegen.driver         # the codegen bake-off: a local LLM writes gen.clj models (codegen.* options in test/gen/codegen/driver.clj; codegen.mode=repl for the REPL agent)
+clojure -X:test:codegen :dirs '["ext/codegen/test"]'   # ext/codegen's tests (the eval session, tool processes, the bake-off's harness)
+clojure -J-Dcodegen.model=<gguf> -M:test:codegen -m gen.codegen.driver         # the codegen bake-off: a local LLM writes gen.clj models (codegen.* options in ext/codegen/src/gen/codegen/driver.clj; codegen.mode=repl for the REPL agent)
 clojure -M:test:codegen -m gen.codegen.report <results.edn>                    # its report
 ```
 
@@ -114,6 +115,8 @@ Python.
 | L5 inference | `gen.inference.weights`, `.importance`, `.mh`, `.kernel`, `.particle-filter`, `.mcmc` (HMC, MALA, NUTS, MAP, elliptical slice), `.nuts` (Stan's warmup and sampler), `.enumerative` (grids, exact proposals), `.proposal` (internal-proposal override), `.transform` (Gen.jl's @transform, trace translators, SMCP3), `.trace-kernel` (GenTraceKernelDSL), `.vi` (black-box VI, VIMCO), `.diagnostics` (ESS, R-hat, MCSE), `.conjugate` (conjugate proposals), `.laplace` (Hessians, Laplace, Fisher), `.particle-mcmc` (conditional SMC, particle Gibbs); `gen.gradients`, `gen.learning` |
 | LLM runtime | `gen.llm.branching` (the Branching protocol), `.slots` (slot engines on one thread), `.llama` (llama.cpp; Java binding in `src-java/gen/llama`), `gen.llm.lm` (the LM protocol), `.cache`, `.trie`, `.cells` (the LM's cache, prefix trie, KV-cell ledger) |
 | LLM generative functions | `gen.llm.token` (completions, the token distribution), `gen.llm.potential` (potentials), `gen.llm.smc` (token SMC) |
+| LLM agents | `gen.llm.sample` (temperature, top-k, top-p; completions in lockstep), `gen.llm.chat` (Qwen's template, tool calls), `gen.llm.agent` (a tool-using agent's episodes; it evaluates nothing) |
+| Codegen (`ext/codegen`) | `gen.codegen.session` (a REPL session for LLM-written code: read, repair, vet, explain hooks), `.process` (tools in a JVM of their own); the bake-off's harness (`.driver`, `.grade`, `.repl`, `.server`, `.tasks`, …); clj-kondo and parinferish its dependencies |
 | Laws (`ext/laws`) | `gen.laws` (the GFI's laws as test.check properties: the law sets, `verify`, `deflaws`, `checks`; test.check its one dependency) |
 
 ## Rules
