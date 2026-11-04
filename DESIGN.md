@@ -3252,6 +3252,45 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   response is tainted, late or lost), both experimental; the harness's
   REPL tools, grader and driver run on them and on gen.llm's three, its
   prompts rendered as before, character for character.
+- **The kmet integration's plan: plan now, couple thinly (owner,
+  2026-11-04, "write the plan with your suggestions"; genclj-ytew,
+  docs/research/kmet-integration.md §10).**
+  - **Why now.** kmet (upstream a4f7102d) has the seam M6 lacked: the
+    `:llm` composition row, replaceable by a classpath plugin. What it
+    still lacks is optional for gen.clj: log-probabilities (gen.clj keeps
+    them), persistent eval (ext/codegen's sessions, or `clojure_eval` into
+    an nREPL), and subagents (agent handles and server mode).
+  - **Coupling.** The integration couples to kmet only through the `:llm`
+    contract (`kmet.ai.llm/send-message`'s options and callbacks) and
+    composition rows, never through kmet's internal namespaces or its
+    extension API. kmet stays at a pinned commit, bumped deliberately with
+    its JVM tests.
+  - **Roles.** Research runs in gen.llm.agent (exact keys,
+    log-probabilities, K candidates); kmet is the shell a person uses.
+    gen.clj owns the machinery. memo.clj supplies a language, its hooks
+    and its models through its synthesis module; its core stays free of
+    LLM code.
+  - **The question.** Does a small local model become a useful modelling
+    assistant when it can evaluate code? It is measured on the codegen
+    bake-off's tasks and memo.clj's, against fixed baselines at matched
+    compute: one shot, best-of-K, and the REPL agent.
+  - **Models.** Qwen3.6-35B-A3B on the MacBook or fenrir; Qwen3.5-0.8B for
+    development on this Mac.
+  - **Where.** An `ext/kmet` module in gen.clj for the spike, with kmet as a
+    git dependency at the pinned commit (EPL-2.0, a dependency, never
+    copied); the final home is decided at the spike's end (genclj-wqka).
+  - **The probe's model endpoint is local:** llama.cpp's server, rebuilt
+    from the pinned v0.7.0 with its tools on, serving the same GGUF. No
+    hosted model unless the owner chooses one.
+  - **Stages,** each gated on beating the one before at matched compute:
+    0. the question, tasks and baselines;
+    1. a zero-code probe (kmet's agent, `clojure_eval` into an nREPL
+       holding gen.clj and memo.clj);
+    2. the `:llm` plugin spike;
+    3. a gen.clj eval tool row;
+    4. best-of-K with verifiers;
+    5. repair and SMC.
+  - Nothing is built until the owner's go on the stages.
 
 ## 10. Deferred (tracked, not forgotten)
 

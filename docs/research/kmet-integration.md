@@ -268,3 +268,138 @@ Port the ideas, not the code (the owner's bar).
   - rendering parity;
   - the costs;
   - what kmet would need from upstream.
+
+## 10. The plan (owner, 2026-11-04; DESIGN §9)
+
+*"Write the plan with your suggestions." kmet upstream at a4f7102d; gen.clj
+main at 8c30bb4. Every stage below is gated: it starts on the owner's go,
+and the next starts only if it answers its question.*
+
+### 10.1 Why now, and what we do not wait for
+
+The seam §4 asked upstream for exists: the `:llm` row
+(`kmet.app.llm/plugin`, service `{:send-message (fn [opts] …)}`) is
+replaced by a profile patch naming a plugin var, and on the JVM such a var
+may be any compiled namespace on the classpath. Three things kmet still
+lacks are optional:
+
+- **Log-probabilities.** As the `:llm` plugin, gen.clj draws every token
+  itself, so it holds each token's log-probability and the key it was
+  drawn with. It records them beside kmet's session, keyed by kmet's
+  message or turn id; kmet needs only the text and tool calls.
+- **Persistent eval.** kmet's planned `eval` is a per-agent SCI context.
+  SCI cannot load gen.clj (deftypes, the FFM bindings: §2), so it would
+  not run gen.clj models even once built. gen.clj's own route is
+  ext/codegen's session in a gen.codegen.process host, mounted as a tool
+  row, or kmet's `clojure_eval` into an nREPL that holds gen.clj and
+  memo.clj.
+- **Subagents.** M7 needs many independent agents, not agents spawning
+  agents. kmet2's handles and server mode (a connection is an agent, with
+  its own session and working directory) give that, and within one turn
+  the plugin can draw K candidates itself.
+
+### 10.2 Coupling rules
+
+- Only through the `:llm` contract and composition rows (profiles,
+  `--patch`, rows naming host-classpath plugins). Never through kmet's
+  internal namespaces or its extension API, which moves (it was
+  "unfrozen" on 2026-10-30).
+- kmet at a pinned commit (a git dependency in `ext/kmet/deps.edn`),
+  bumped deliberately after kmet's `bb test-jvm` passes at the new commit.
+- Nothing is changed in `~/code/kmet-agent`. Anything offered upstream is
+  the owner's to send, without Claude's attribution trailers (kmet's CI
+  rejects them).
+- License: kmet is EPL-2.0 and gen.clj MIT. The module depends on kmet and
+  copies none of its code.
+
+### 10.3 Roles
+
+- **gen.clj** owns the machinery:
+  - the local model, sampling and chat format;
+  - the keys that make a session replay exactly;
+  - code evaluation (ext/codegen);
+  - the integration (ext/kmet);
+  - and M7's inference, where a trajectory is a generative function.
+- **gen.llm.agent** is the research harness, where keys, log-probabilities
+  and K candidates are exact. **kmet** is the shell a person uses: its
+  TUI, sessions, file tools and bash.
+- **memo.clj** supplies:
+  - a language the agent writes;
+  - its hooks (errors explained, vetting) and tasks, through its
+    synthesis module, as its REPL agent (memoclj-pcw0) does;
+  - models the agent may reason with (ask or act, the user's intent).
+  memo.clj's core takes no LLM code.
+
+### 10.4 The question and the measure
+
+Does a small local model become a useful modelling assistant when it can
+evaluate code?
+
+- **Tasks:** the codegen bake-off's ten (ext/codegen, gen.codegen.tasks)
+  and memo.clj's synthesis tasks.
+- **Measure:** the bake-off's grader:
+  - the hard stages (reads, safe, evaluates, simulates, takes the data,
+    keeps the laws);
+  - explains the data (the log marginal likelihood's gap to the
+    reference, by the :checked estimator);
+  - Wilson intervals.
+- **Baselines,** at matched compute (tokens and seconds): one shot,
+  best-of-K with the grader's hard stages as the verifier, and the REPL
+  agent in gen.llm.agent. The 3.6's one-shot and REPL results from
+  genclj-ihc4 and genclj-t1xh are the first numbers; they are rerun on
+  the same seeds when the harness changes.
+- **Models:** Qwen3.6-35B-A3B (the MacBook, or fenrir), and Qwen3.5-0.8B
+  for development on the 32 GB Mac.
+
+### 10.5 Stages
+
+0. **The question, tasks and baselines** (no kmet). memo.clj's tasks join
+   the bake-off's driver as a task set, and the baselines are recorded.
+1. **A zero-code probe.**
+   - kmet's agent at the pinned commit, with its clojure extension's
+     `clojure_eval`, works a few tasks against an nREPL JVM holding gen.clj
+     and memo.clj.
+   - The model is served by llama.cpp's own server (v0.7.0 rebuilt with
+     its tools on, the same GGUF), as kmet's custom provider
+     `:api :openai-completions`.
+   - The question: what does a general coding agent do with a live REPL
+     on these tasks, and where does it fail? This gives qualitative
+     notes, not a score.
+2. **The `:llm` plugin spike** (genclj-kaa8), in `ext/kmet`:
+   - a plugin that takes kmet's messages and tools, renders them with
+     gen.llm.chat, samples with gen.llm.sample, parses tool calls, and
+     answers through the callbacks;
+   - each turn's tokens, log-probabilities and key recorded;
+   - a profile that mounts it.
+   - **Done means:** one kmet turn served in-process from a local Qwen;
+     replaying from its key gives the same turn; the recorded
+     log-probabilities equal lm/score's.
+3. **A gen.clj eval tool row.** A kmet tool whose calls evaluate in an
+   ext/codegen session in a gen.codegen.process host. Its prelude and
+   hooks (gen.clj's, or memo.clj's from its synthesis module) come as the
+   row's config. **Done means:** kmet's agent, on gen.clj's model, builds
+   and checks a bake-off model through it.
+4. **Best-of-K with verifiers** (M7's first stage, genclj-tw4p).
+   - K candidates per turn, drawn by the plugin or by gen.llm.agent;
+   - chosen by a verifier (the grader's stages, memo's laws);
+   - one isolated working directory per sample (kmet's server mode gives
+     one per connection).
+   - **Gate:** beats the REPL agent at matched compute.
+5. **Repair and SMC over trajectories,** only if stage 4's gains leave room:
+   - MH or regenerate from a turn boundary;
+   - SMC weighted by verifiers;
+   - the probability of success by importance sampling.
+
+At the spike's end the integration's home is decided (genclj-wqka): stay
+`ext/kmet`, or become its own repository.
+
+### 10.6 Risks
+
+- kmet's pace (517 commits in two weeks). Mitigated by the coupling rules
+  and the pin.
+- The `send-message` contract could change. It is pi parity and the
+  builtin's own contract, so it is the most stable seam kmet has.
+- A coding agent's file tools and bash in a research loop: each sample
+  gets its own working directory, and runs go on hosts the owner grants.
+- Memory: a 35B model, kmet and a grader JVM at once. These runs go on the
+  MacBook or fenrir, never the 32 GB Mac.
