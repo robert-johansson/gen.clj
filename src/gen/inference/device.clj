@@ -93,8 +93,6 @@
   (let [d (array/dtype x)]
     [(vec (array/shape x)) (case (dt/kind d) :float fl :int (if (= :uint32 d) :uint32 :int32) d)]))
 
-(defn- row "x's element i along its leading axis." [x i] (array/take x i 0))
-
 (defmacro ^:private with-fallback
   "body's value with :device device, or, when it throws, (handler)'s with
    :device-fallback {:device :reason}."
@@ -212,17 +210,27 @@
 
 (defn- row-reader
   "A function of i giving row i of a host output of the lowerings ({:data
-   :shape :dtype}, gen.device's run-one: its rows along the leading axis)
-   as an array of the current backend, made from that row alone: a 0-d one
-   from its value."
+   :shape :dtype}, gen.device's: its rows along the leading axis, :data a
+   flat Java array or nested vectors) as an array of the current backend,
+   made from that row alone: a 0-d one from its value."
   [{:keys [data shape dtype]}]
   (let [row (vec (rest shape))
-        m (long (reduce * 1 row))
-        elem (element-reader data)
         opts {:dtype dtype}]
-    (if (empty? row)
-      (fn [^long i] (array/array (elem i) opts))
-      (fn [^long i] (array/reshape (array/array (mapv #(elem (+ (* i m) (long %))) (range m)) opts) row)))))
+    (if (vector? data)
+      (fn [^long i] (array/array (nth data i) opts))
+      (let [m (long (reduce * 1 row))
+            elem (element-reader data)]
+        (if (empty? row)
+          (fn [^long i] (array/array (elem i) opts))
+          (fn [^long i] (array/reshape (array/array (mapv #(elem (+ (* i m) (long %))) (range m)) opts) row)))))))
+
+(defn- host-doubles
+  "A host output's elements as a vector of doubles."
+  [{:keys [data]}]
+  (if (vector? data)
+    (mapv double data)
+    (let [elem (element-reader data)]
+      (mapv #(double (elem %)) (range (java.lang.reflect.Array/getLength data))))))
 
 (defn- host-trues
   "How many elements of a host output are true."
@@ -290,19 +298,31 @@
           [osk ovals] (trace/as-leaves observations)
           ospecs (mapv #(spec-of fl %) ovals)
           k [:importance device fl (Id. model) (args-key args) osk ospecs]
-          {:keys [program run sk]}
+          {:keys [program run sk observed]}
           (cached k (fn []
                       (let [info (volatile! nil)
+                            observed (volatile! {})
                             p (binding [st/*float* fl]
                                 (st/stage
                                  (fn [kk os]
                                    (let [{:keys [trace weight]} (gfi/generate model (st/constants args) (trace/from-leaves osk os nil) kk)
-                                         [sk leaves] (trace/as-leaves trace)]
+                                         [sk leaves] (trace/as-leaves trace)
+                                         ;; a leaf that is an observation as given: every
+                                         ;; particle holds it, so it is not an output
+                                         at (into {} (keep-indexed (fn [i l] (when-let [j (first (keep-indexed (fn [j o] (when (identical? l o) j)) os))] [i j]))) leaves)]
                                      (vreset! info sk)
-                                     {:w weight :c leaves}))
+                                     (vreset! observed at)
+                                     {:w weight :c (into [] (keep-indexed (fn [i l] (when-not (contains? at i) l))) leaves)}))
                                  (st/key-spec) ospecs))]
-                        {:sk @info :program p :run (compile-program device p)})))
+                        {:sk @info :observed @observed :program p :run (compile-program device p)})))
           outs (tree/refill (:out-tree program) ((:run-many run) n (rng/key-data key) ovals))
-          weights (mapv double (array/->clj (:w outs)))]
-      (assoc (summary weights)
-             :traces (mapv (fn [i] (trace/from-leaves sk (mapv #(row % i) (:c outs)) args)) (range n))))))
+          readers (mapv row-reader (:c outs))
+          n-leaves (+ (count readers) (count observed))
+          ;; an observation as given, as the handler's trace holds it
+          obs (into {} (map (fn [[i j]] [i (ovals j)])) observed)
+          leaves-at (fn [i] (loop [p 0 rs (seq readers) out (transient [])]
+                              (cond (= p n-leaves) (persistent! out)
+                                    (contains? obs p) (recur (inc p) rs (conj! out (obs p)))
+                                    :else (recur (inc p) (next rs) (conj! out ((first rs) i))))))]
+      (assoc (summary (host-doubles (:w outs)))
+             :traces (mapv (fn [i] (trace/from-leaves sk (leaves-at i) args)) (range n))))))

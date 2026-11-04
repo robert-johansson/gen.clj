@@ -114,6 +114,28 @@
               (is (close? (array/->clj (:weight (gfi/update (last (:traces dv)) c (rng/key 9))))
                           (array/->clj (:weight (gfi/update (last (:traces h)) c (rng/key 9)))))))))))))
 
+(deftest importance-sampling-on-device-is-the-handlers-to-float32-rounding
+  ;; where the backend draws float32 (MLX): weights and traces made on the
+  ;; host from the program's outputs (:metal's read once from the GPU), the
+  ;; observations the given arrays, every trace as the handler's
+  (if-not (= :float32 (:float (array/defaults array/*backend*)))
+    (println "gen.device.run-test: the backend draws float64, the float32 importance-sampling comparison skips")
+    (doseq [m [:vector :static]
+            device [:jvm :metal]]
+      (testing [m device]
+        (let [[model args obs] (pb/models m)
+              h (is/importance-sampling model args obs 50 {:key (rng/key 5)})
+              dv (is/importance-sampling model args obs 50 {:key (rng/key 5) :device device})]
+          (if (and (= :metal device) (:device-fallback dv))
+            (println "gen.device.run-test: :metal fell back (" (:reason (:device-fallback dv)) "), its comparison skips")
+            (do (is (= device (:device dv)) (:device-fallback dv))
+                (is (every? true? (map close? (:log-weights dv) (:log-weights h))))
+                (is (close? (:log-ml-estimate dv) (:log-ml-estimate h)))
+                (is (= (map leaf-specs (:traces h)) (map leaf-specs (:traces dv))))
+                (is (every? true? (map close? (flatten (map leaf-values (:traces dv))) (flatten (map leaf-values (:traces h))))))
+                (is (close? (array/->clj (:weight (gfi/update (first (:traces dv)) (cm/choicemap :slope 0.5) (rng/key 1))))
+                            (array/->clj (:weight (gfi/update (first (:traces h)) (cm/choicemap :slope 0.5) (rng/key 1)))))))))))))
+
 (def ^:private point (gen ^:static [x slope] (let [y (trace :y (d/normal (array/* slope x) 1))] y)))
 
 (def ^:private linreg
