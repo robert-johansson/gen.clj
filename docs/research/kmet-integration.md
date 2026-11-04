@@ -11,6 +11,20 @@ is upstream itself, which now runs on the JVM. §2, §4, §7 and §8 are
 rewritten against upstream master at febc5aa7 (2026-10-21), from a
 read-only survey of its code; file:line references are to that commit.*
 
+*Revised 2026-11-04 (upstream at a4f7102d; the integration is paused, see
+genclj-ytew's revision for the details):*
+- *kmet2 has landed: agent handles, composition rows, and a server mode
+  where a connection is an agent.*
+- *The in-process provider seam of §4 now exists: the `:llm` row
+  (`kmet.app.llm`, `{:send-message …}`) is replaced by a profile patch
+  naming a host-classpath plugin, so compiled gen.clj can serve kmet's
+  turns without an upstream change. Log-probabilities are still absent in
+  kmet, so gen.clj keeps them.*
+- *kmet's clojure extension evaluates in a running nREPL (`clojure_eval`).*
+- *A per-agent persistent `eval` tool is planned upstream.*
+- *gen.clj has since gained the chat template, sampler, agent loop and
+  ext/codegen (genclj-uw7w), and is MIT-licensed.*
+
 ## 1. The idea
 
 GenMLX treats a local LLM as a generative function. pi is a coding agent:
