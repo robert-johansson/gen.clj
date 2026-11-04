@@ -3206,7 +3206,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
      handler. Whether the JVM path runs float64 by default is the
      epic's decision 7, still open.
 - **Tempered SMC, a log marginal likelihood for any model (proposed
-  2026-11-01, at the owner's request; genclj-87x1).** A new experimental
+  2026-11-01, at the owner's request; shipped as built, experimental, in
+  1.1.0's scope, owner, 2026-11-04; genclj-87x1).** A new experimental
   namespace, gen.inference.tempering, built on the GFI alone (no new
   combinator): targets p(x) L(x)^β, L the observations' density read by
   project; β chosen adaptively (half the effective sample size kept);
@@ -3291,6 +3292,37 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     4. best-of-K with verifiers;
     5. repair and SMC.
   - Nothing is built until the owner's go on the stages.
+- **gen.clj 1.1.0: a consolidation release (owner, 2026-11-04, "yes to
+  all three", on the lead's recommendation; genclj-qsa2).**
+  - **1.1.0, not 1.0.1.** The stable surface grew since v1.0.0
+    (the snapshot: kernel/run's `:device`, `laws/*score-scale*`), and
+    `laws/close?`'s tolerance change is a minor release's ("The laws'
+    names", above). A maintenance branch off v1.0.0 would carry nothing a
+    dependent waits for. memo.clj's ext/synth pins main for gen.llm.agent
+    and ext/codegen while memo.clj's core and GenGDT pin v1.0.0: the tag
+    puts them on one coordinate again.
+  - **Its scope, in order.** (1) The work in progress closed: tempered
+    SMC (its changepoint question moved under genclj-zjz7), the REPL
+    codegen's report, the Metal device programs' parity cells, the book's
+    appendices 061, 062 and 065. (2) Gen.jl 0.4.9 parity: the dense metric
+    for HMC, MALA and NUTS is the release's addition, and the local oracle
+    moves to Gen 0.4.9 (the download approved). (3) The book's bugs in
+    stable namespaces, fixes that keep the shape: serialize's round trips,
+    exact proposals through an address-less splice,
+    with-internal-proposal's regenerate, MLX's gathers loud on an
+    out-of-range index, HMC's missed divergence. (4) 1.0.0's CUDA known
+    issues: TF32 off by default, the abort at exit, half-float sums.
+    (5) Docs: the README's times, the API appendix 063, the owner's review
+    of Part V and the appendices.
+  - **Off the critical path:** the device programs (experimental, landing
+    on main for a later 1.x) and kmet's stages (each on the owner's go).
+  - **The gate, lighter than 1.0's** (genclj-w2pg): every test on the JVM
+    backend, on MLX's CPU and on Metal; CUDA once, on the Thor (fenrir
+    runs on the CPU only for now, owner, 2026-11-04) or on fenrir when its
+    GPU is back; the book on the JVM backend; memo.clj (its ext/synth
+    too) and GenGDT green against the release candidate. The release
+    notes lead with the Breaking `=` on 0-d MLX arrays: gen.backend.mlx
+    is internal, but the change reaches user code that compares draws.
 
 ## 10. Deferred (tracked, not forgotten)
 
