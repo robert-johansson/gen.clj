@@ -73,10 +73,12 @@ clojure -J-Dgen.backend=mlx -J-Dgen.mlx.device=cpu -X:test:light   # MLX's CPU b
 clojure -J-Dgen.backend=mlx -J-Dgen.mlx.dtypes=64 …                # float64 (CPU only)
 ```
 
-On CUDA, set `MLX_ENABLE_TF32=0` in the environment: by default MLX
-computes float32 matrix products there in TF32, a 10-bit mantissa, which
+Matrix products are full float32 on every device. By default MLX
+computes float32 matrix products on CUDA in TF32, a 10-bit mantissa, which
 puts a matrix model's log density and gradients off by about 1e-3
-relative.
+relative, so gen.clj turns it off when MLX loads (`MLX_ENABLE_TF32=0`,
+unless the environment sets it). `-Dgen.mlx.tf32=true` turns it on, for
+speed.
 
 MLX computes in float32 by default, and its arrays are lazy: an inference
 loop evaluates them once per iteration. A model that runs one particle at

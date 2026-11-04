@@ -56,6 +56,12 @@
                            4096; each holds one buffer)
      gen.mlx.cpu-compile   true or false: skip the probe of compile on the
                            CPU device (cpu-compiles?)
+     gen.mlx.tf32          true: MLX's float32 matrix products in TF32 on
+                           CUDA (and through Metal's neural accelerators
+                           where a Mac has them), faster and about 1e-3
+                           relative; default false, full float32 (MlxRuntime
+                           sets MLX_ENABLE_TF32=0 unless the environment
+                           sets it; the property decides over it)
      gen.mlx.lib           the directory of libmlxc (default
                            native/build/<platform>/lib; MlxRuntime)"
   {:api :internal}
@@ -845,6 +851,16 @@
   (and (= dtype :float32) (= :cpu (device b))
        (> (sh/size (mapv #(nth (shape-of x) %) axes)) (long (:blocked-above @exact-fns)))))
 
+
+(def ^:private mac?
+  "Does this JVM run on macOS (MLX's GPU Metal there, CUDA elsewhere)?"
+  (delay (.contains (.toLowerCase (System/getProperty "os.name")) "mac")))
+
+(defn- cuda?
+  "Is b's device a CUDA GPU (MLX's GPU off macOS)?"
+  [b]
+  (and (= :gpu (device b)) (not @mac?)))
+
 (defn- reduce-op [b op x axes keep-dims?]
   (let [s (stream b)
         dtype (dtype-on b x)]
@@ -857,8 +873,9 @@
       ;; MLX's CPU accumulates a float32 sum sequentially (DESIGN §9)
       ((:sum @exact-fns) (as-array b x dtype) axes keep-dims?)
 
-      (and (= op :sum) (#{:float16 :bfloat16} dtype) (= :cpu (device b)))
-      ;; and a half-float sum in its own precision: in float32 instead
+      (and (= op :sum) (#{:float16 :bfloat16} dtype) (or (= :cpu (device b)) (cuda? b)))
+      ;; and a half-float sum in its own precision, on MLX's CPU and on CUDA
+      ;; (genclj-tblx): in float32 instead; Metal accumulates them in float32
       ((:half-sum @exact-fns) (as-array b x dtype) axes keep-dims?)
 
       :else

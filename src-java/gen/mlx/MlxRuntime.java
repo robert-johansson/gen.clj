@@ -31,25 +31,36 @@ public final class MlxRuntime {
   // ---- the library ------------------------------------------------------------
 
   static final Linker LINKER = Linker.nativeLinker();
-  static { cudaDefaults(); }
+  static { defaults(); }
   static final SymbolLookup LIB = load();
 
-  /** On Linux, MLX's CUDA graphs off unless the environment says otherwise
-   *  (MLX_USE_CUDA_GRAPHS, read once when the CUDA backend starts): MLX 0.32
-   *  counts graph-cache misses since the process began and throws "Cache
-   *  thrashing is happening" once they pass twice the cache's capacity (400
-   *  by default), so a long run of varied shapes always failed in the end,
-   *  whatever MLX_CUDA_GRAPH_CACHE_SIZE (the Jetson Thor, 2026-10-19).
-   *  Without graphs every kernel is launched on its own: slower launches,
-   *  the same values. Set MLX_USE_CUDA_GRAPHS=1 (and a cache size) to opt
-   *  in. Set through libc's setenv, before MLX is loaded, never overwriting. */
-  private static void cudaDefaults() {
-    if (System.getProperty("os.name").toLowerCase().contains("mac")) return;
+  /** MLX's settings that gen.clj chooses, set through libc's setenv before
+   *  MLX is loaded (MLX reads each once, when it first needs it):
+   *  - MLX_ENABLE_TF32, 0 (full float32 matrix products: MLX's default, 1,
+   *    computes them in TF32 on CUDA, a 10-bit mantissa, about 1e-3
+   *    relative, and on Macs with neural accelerators through them), unless
+   *    the environment sets it; the system property gen.mlx.tf32 (true or
+   *    false) decides it over the environment.
+   *  - On Linux, MLX_USE_CUDA_GRAPHS, 0 unless the environment says
+   *    otherwise: MLX 0.32 counts graph-cache misses since the process
+   *    began and throws "Cache thrashing is happening" once they pass twice
+   *    the cache's capacity (400 by default), so a long run of varied
+   *    shapes always failed in the end, whatever MLX_CUDA_GRAPH_CACHE_SIZE
+   *    (the Jetson Thor, 2026-10-19). Without graphs every kernel is
+   *    launched on its own: slower launches, the same values. Set
+   *    MLX_USE_CUDA_GRAPHS=1 (and a cache size) to opt in. */
+  private static void defaults() {
     try (Arena a = Arena.ofConfined()) {
       MethodHandle setenv = LINKER.downcallHandle(
           LINKER.defaultLookup().find("setenv").orElseThrow(),
           FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, JAVA_INT));
-      int ignored = (int) setenv.invokeExact(a.allocateFrom("MLX_USE_CUDA_GRAPHS"), a.allocateFrom("0"), 0);
+      String tf32 = System.getProperty("gen.mlx.tf32");
+      int ignored = (tf32 == null)
+          ? (int) setenv.invokeExact(a.allocateFrom("MLX_ENABLE_TF32"), a.allocateFrom("0"), 0)
+          : (int) setenv.invokeExact(a.allocateFrom("MLX_ENABLE_TF32"), a.allocateFrom(Boolean.parseBoolean(tf32) ? "1" : "0"), 1);
+      if (!System.getProperty("os.name").toLowerCase().contains("mac")) {
+        ignored = (int) setenv.invokeExact(a.allocateFrom("MLX_USE_CUDA_GRAPHS"), a.allocateFrom("0"), 0);
+      }
     } catch (Throwable t) {
       throw new ExceptionInInitializerError(t);
     }

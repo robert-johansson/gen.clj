@@ -832,3 +832,45 @@
           (is (not= (array/array [1.0 2.0]) 1.0))
           (is (array/truthy? (array/== k 0))))))))
 
+
+(defn- process-env
+  "The process's environment variable name as libc's getenv sees it now
+   (System/getenv keeps the JVM's start), or nil."
+  [name]
+  (let [linker (java.lang.foreign.Linker/nativeLinker)
+        getenv (.downcallHandle linker (.orElseThrow (.find (.defaultLookup linker) "getenv"))
+                                (java.lang.foreign.FunctionDescriptor/of java.lang.foreign.ValueLayout/ADDRESS
+                                                                         (into-array java.lang.foreign.MemoryLayout [java.lang.foreign.ValueLayout/ADDRESS]))
+                                (into-array java.lang.foreign.Linker$Option []))]
+    (with-open [arena (java.lang.foreign.Arena/ofConfined)]
+      (let [^java.lang.foreign.MemorySegment p (.invokeWithArguments ^java.lang.invoke.MethodHandle getenv [(.allocateFrom arena ^String name)])]
+        (when-not (= java.lang.foreign.MemorySegment/NULL p) (.getString (.reinterpret p 64) 0))))))
+
+(defn- tf32-in-a-fresh-jvm
+  "MLX_ENABLE_TF32 as MLX would read it in a new JVM on this classpath,
+   started with the environment's value env (nil: unset) and the property
+   gen.mlx.tf32 prop (nil: unset), once MlxRuntime has loaded. A fresh
+   process: the JVM takes its environment's snapshot on first use, which
+   in this one may come after MlxRuntime's setenv."
+  [env prop]
+  (let [java (str (System/getProperty "java.home") "/bin/java")
+        code (str "(require 'gen.backend.mlx-test) (Class/forName \"gen.mlx.MlxRuntime\")"
+                  " (println (or (@(resolve 'gen.backend.mlx-test/process-env) \"MLX_ENABLE_TF32\") \"unset\"))")
+        cmd (cond-> [java "--enable-native-access=ALL-UNNAMED" "-cp" (System/getProperty "java.class.path")]
+              prop (conj (str "-Dgen.mlx.tf32=" prop))
+              true (into ["clojure.main" "-e" code]))
+        pb (ProcessBuilder. ^java.util.List cmd)
+        _ (if env (.put (.environment pb) "MLX_ENABLE_TF32" env) (.remove (.environment pb) "MLX_ENABLE_TF32"))
+        p (.start (.redirectErrorStream pb false))
+        out (slurp (.getInputStream p))]
+    (.waitFor p)
+    (last (clojure.string/split-lines (clojure.string/trim out)))))
+
+(deftest ^:slow tf32-is-off-unless-asked-for
+  ;; MlxRuntime sets MLX_ENABLE_TF32 before MLX reads it: full float32
+  ;; matrix products by default (owner, 2026-10-25; genclj-p3pr), the
+  ;; environment's value kept, gen.mlx.tf32 deciding over both. Planted
+  ;; (2026-11-04): the default 1 fails the first case
+  (when-mlx
+    (doseq [[env prop expected] [[nil nil "0"] ["1" nil "1"] [nil "true" "1"] ["1" "false" "0"]]]
+      (is (= expected (tf32-in-a-fresh-jvm env prop)) (pr-str {:env env :property prop})))))

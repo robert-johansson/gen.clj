@@ -3483,6 +3483,17 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       chains (the same distribution), and `:device-fallback` says so,
       until per-particle keys (genclj-asog) make them the same; a kernel
       with no batched form runs chain by chain.
+    - **TF32 off by default, as built (2026-11-04; genclj-p3pr):**
+      MlxRuntime, which already set MLX_USE_CUDA_GRAPHS=0 through libc's
+      setenv before MLX loads, sets MLX_ENABLE_TF32=0 too, without
+      overwriting the environment's value; `-Dgen.mlx.tf32=true|false`
+      decides over both. MLX reads the variable once, at its first matrix
+      product. It gates TF32 on CUDA and, on Macs with neural accelerators
+      (MLX's NAX), Metal's reduced-precision float32 products as well:
+      **PROVISIONAL (the lead, the owner away): full float32 on every
+      device**, the M4 unaffected, a newer Mac slower but agreeing with
+      CUDA and the CPU. The test starts fresh JVMs (the JVM's environment
+      snapshot may come after the setenv).
     - **GenLM's gaps (owner, 2026-11-04):** the survey's top five become
       beans for after 1.1.0 (an epic): a critic at the drawn token in
       token SMC, AWRS for constraints without a mask, the potential
