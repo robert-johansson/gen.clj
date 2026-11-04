@@ -1,7 +1,7 @@
 ;; Gen.jl's Switch regenerate (U1, docs/research/genjl-test-suite.md §4.3): for each case, a
 ;; simulated trace, then 10 regenerations of it. :old and :new hold the arguments (the
 ;; branch index 0-based), choices and scores; :weight is Gen.jl's.
-;; Written by test/fixtures/genjl/generate.jl: Gen 0.4.8, Julia 1.12.6, arm64-apple-darwin25.4.0.
+;; Written by test/fixtures/genjl/generate.jl: Gen 0.4.9, Julia 1.12.6, arm64-apple-darwin25.4.0.
 [{:selection [[:z]]
  :case :bare-same
  :line "switch.jl:85"

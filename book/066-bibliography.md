@@ -149,7 +149,7 @@ reference of the entry *Gen.jl*, with the systems.
 ### Gen and its relatives
 
 - **Gen.jl**. Marco Cusumano-Towner and contributors. Gen.jl, version
-  0.4.8, with its documentation. <https://github.com/probcomp/Gen.jl>. Its
+  0.4.9, with its documentation. <https://github.com/probcomp/Gen.jl>. Its
   paper: Marco F. Cusumano-Towner, Feras A. Saad, Alexander K. Lew and
   Vikash K. Mansinghka. Gen: a general-purpose probabilistic programming
   system with programmable inference. In *Proceedings of the 40th ACM

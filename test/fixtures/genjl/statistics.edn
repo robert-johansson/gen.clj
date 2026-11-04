@@ -1,7 +1,7 @@
 ;; The quantities Gen.jl's statistical testsets assert, each over seeds 1 to 20 (Random.seed!,
 ;; as the testsets' seed!(1); seed 1 is Gen.jl's own run): {:values, :mean, :sd (n - 1)}
 ;; by testset (Gen.jl's file and line) and quantity.
-;; Written by test/fixtures/genjl/generate.jl: Gen 0.4.8, Julia 1.12.6, arm64-apple-darwin25.4.0.
+;; Written by test/fixtures/genjl/generate.jl: Gen 0.4.9, Julia 1.12.6, arm64-apple-darwin25.4.0.
 {:seeds [1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20]
  :testsets {"particle_filter.jl:96" {:log-ml {:values [-4.88311474765116 -4.87849336190337 -4.884304856017463 -4.870161274759226 -4.8931899969005705 -4.869228204266639 -4.877766859619708 -4.8682886810055965 -4.865478005602473 -4.876875961478342 -4.8679876808765705 -4.878713076251083 -4.884137758355289 -4.871783059702311 -4.880586427321427 -4.882863510982872 -4.878752888184348 -4.886733859080975 -4.884118096748372 -4.8816657356195226]
  :mean -4.878212202116365

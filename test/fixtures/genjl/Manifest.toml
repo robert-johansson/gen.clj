@@ -1,8 +1,8 @@
 # This file is machine-generated - editing it directly is not advised
 
-julia_version = "1.12.5"
+julia_version = "1.12.6"
 manifest_format = "2.0"
-project_hash = "2e57bae5ac0f850d75876f40dfd2383c4e022106"
+project_hash = "1ccef40a6f03bb4fefd3644a0b3ce93eb75a6c0d"
 
 [[deps.AliasTables]]
 deps = ["PtrArrays", "Random"]
@@ -134,9 +134,9 @@ version = "0.5.0"
 
 [[deps.Gen]]
 deps = ["Compat", "DataStructures", "Distributions", "ForwardDiff", "FunctionalCollections", "JSON", "LinearAlgebra", "MacroTools", "Parameters", "Random", "ReverseDiff", "SpecialFunctions"]
-git-tree-sha1 = "2c87c7885d3ea7637847e3b7682abefde6eae45e"
+git-tree-sha1 = "411ea741a189d77257882d7d517ffaba26be748b"
 uuid = "ea4f424c-a589-11e8-07c0-fd5c91b9da4a"
-version = "0.4.8"
+version = "0.4.9"
 
 [[deps.HypergeometricFunctions]]
 deps = ["LinearAlgebra", "OpenLibm_jll", "SpecialFunctions"]

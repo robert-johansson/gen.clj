@@ -1,6 +1,6 @@
 (ns gen.genjl.oracle
-  "Gen.jl 0.4.8's values for the ports that compare with Gen.jl (M5's
-   oracle, docs/research/genjl-test-suite.md §5), from the fixtures
+  "Gen.jl's values for the ports that compare with Gen.jl (M5's oracle,
+   0.4.8's, and 0.4.9's since 2026-11-04, the same values; docs/research/genjl-test-suite.md §5), from the fixtures
    test/fixtures/genjl/generate.jl writes, in gen.clj's terms: keyword
    addresses, and Switch's branch index 0-based.
 

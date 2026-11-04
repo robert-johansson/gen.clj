@@ -1,7 +1,8 @@
 # Gen.jl parity checklist and GenMLX mapping
 
-*Research notes, 2026-10-18. The baseline is Gen.jl **0.4.8**, the latest
-release: 0.4.8 added enumerative inference, 0.4.7 added `ProductDistribution`,
+*Research notes, 2026-10-18. The baseline was Gen.jl **0.4.8**, then the
+latest release, and is **0.4.9** since 2026-11-04 (below): 0.4.8 added
+enumerative inference, 0.4.7 added `ProductDistribution`,
 and 0.4.6 removed the need for `@load_generated_functions`
 (https://github.com/probcomp/Gen.jl/releases).*
 
@@ -20,12 +21,23 @@ and 0.4.6 removed the need for `@load_generated_functions`
   Diagonal or dense), in momentum sampling and the kinetic energy; its
   diff leaves the leapfrog's position update unchanged (to confirm in the
   source: then the metric changes the momenta's distribution, not the
-  dynamics). gen.clj has Stan's diagonal :inv-metric, used in the
-  momenta, the kinetic energy and the position update alike. Not yet:
-  a dense metric, and Gen.jl's :metric convention (M, the inverse of
-  :inv-metric).*
+  dynamics). Confirmed in the source (2026-11-04: src/inference/hmc.jl:102,
+  `values += eps * momenta`): a valid MCMC, not preconditioned (a note for
+  Gen.jl, genclj-6ud3). gen.clj's answer (owner, 2026-11-04;
+  genclj-q9ge): the stable :inv-metric takes a dense M⁻¹ too,
+  `(mcmc/dense-inv-metric addresses matrix)`, used in the momenta, the
+  kinetic energy and the position update alike (Stan's dense_e); no
+  :metric option. 0.4.9's metric tests are ported (test/gen/genjl/hmc_test),
+  Gen.jl's M given as M⁻¹.*
 - *#569 (ReverseDiff thread safety), #562 (renames), #555 (README), #564
-  (Dependabot): no gen.clj counterpart.*
+  (Dependabot): no gen.clj counterpart (the 0.4.8...0.4.9 diff read again
+  2026-11-04: renames of locals and test variables only).*
+- *The oracle moved to 0.4.9 (2026-11-04): test/fixtures/genjl's project
+  pins Gen 0.4.9, and generate.jl's fixtures came out with the same values
+  as 0.4.8's (their headers aside); every port passes on them (201 tests,
+  2042 assertions). Gen.jl 0.4.9's own suite passes here: 1,891 pass, 0
+  fail, 0 error, 216 testsets (`test/fixtures/genjl/upstream-run-0.4.9.edn`;
+  0.4.8's 1,863 stay in `upstream-run.edn`).*
 
 *Sources:*
 - *Gen.jl reference pages under https://www.gen.dev/docs/stable/ref/:
