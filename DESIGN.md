@@ -3235,6 +3235,24 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   and float32's 1e-3 alike; the relative tolerances stay. A planted
   error of 1e-6 still fails for scores below ~1e5. A CHANGELOG line, as
   gen.laws' policy requires for a tolerance change.
+- **An address-less splice runs under its caller's middleware
+  (2026-11-04, genclj-u23m; PROVISIONAL, the lead's on an agent's fix
+  while the owner was away, owner to confirm).** (splice gf & args) is
+  Gen.jl's {*} ~ gf(args): the callee's choices are the caller's, so the
+  caller's with-transitions middleware runs at the callee's sites too,
+  unless the callee has middleware of its own for the operation, which
+  runs there instead (a callee at an address runs its own transitions,
+  as before). This was M1's rule (63483e4); the third review (a5b0219)
+  switched the callee's body to the standard transitions, listing
+  inheritance among its "Likely" bugs with no reason given and no test.
+  That made every middleware in gen.inference miss those choices:
+  with-exact-proposal and with-conjugate-proposal threw "wrap that one"
+  for a choice they could not wrap, with-internal-proposal's project and
+  regenerate threw, and the reparameterization estimator silently used a
+  choice without a pathwise sampler. The alternative, a private flag only
+  with-exact-proposal honours, would have left the other three. Marked
+  Breaking in the CHANGELOG: user middleware that changes the model now
+  changes it at those sites too.
 - **A weight that is 0 compares as weights do (2026-11-04, genclj-s5fj;
   PROVISIONAL, the lead's while the owner was away, owner to confirm).**
   Five checks asked for exactly 0 (generate without constraints, update
