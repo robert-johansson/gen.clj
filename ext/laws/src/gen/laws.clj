@@ -140,12 +140,6 @@
         (seq? x) (doall (map host x))
         :else x))
 
-(defn- zero-weight?
-  "Is the weight w exactly zero (a host number, or a 0-d array of any
-   backend)?"
-  [w]
-  (== 0.0 (number w)))
-
 ;; ---------------------------------------------------------------------------
 ;; Cases
 ;; ---------------------------------------------------------------------------
@@ -474,13 +468,14 @@
                   (every? #(= (cm/get-choice sigma %) (cm/get-choice (:choices g) %)) (cm/addresses (reached sigma g)))))))))
 
 (defn identity-update-changes-nothing
-  "An update without constraints has weight 0, keeps every choice,
-   discards nothing, and reports a sound change of its return value."
+  "An update without constraints has weight 0 (up to rounding, close?),
+   keeps every choice, discards nothing, and reports a sound change of
+   its return value."
   [cases]
   (prop/for-all [[[_ gf args] seed] cases]
     (let [tr (gfi/simulate gf args (rng/key seed))
           {t2 :trace w :weight disc :discard :as r} (gfi/update tr cm/EMPTY (rng/key (inc seed)))]
-      (checks (zero-weight? w) (= (:choices tr) (:choices t2)) (cm/empty? disc) (sound-retdiff? tr r)))))
+      (scaled [tr t2] (checks (close? w 0.0) (= (:choices tr) (:choices t2)) (cm/empty? disc) (sound-retdiff? tr r))))))
 
 (defn updates-are-reversible-with-exact-discards
   "An update with constraints from another run, on other arguments, makes
@@ -520,12 +515,13 @@
                       (remove selected (filter now (addrs tr))))))))
 
 (defn regenerating-nothing-changes-nothing
-  "A regenerate with nothing selected has weight 0 and keeps the choices."
+  "A regenerate with nothing selected has weight 0 (up to rounding,
+   close?) and keeps the choices."
   [cases]
   (prop/for-all [[[_ gf args] seed] cases]
     (let [tr (gfi/simulate gf args (rng/key seed))
           {t2 :trace w :weight} (gfi/regenerate tr sel/none (rng/key (inc seed)))]
-      (checks (zero-weight? w) (= (:choices tr) (:choices t2))))))
+      (scaled [tr t2] (checks (close? w 0.0) (= (:choices tr) (:choices t2)))))))
 
 (defn project-of-everything-is-the-score
   "A trace projected on every address gives its score."
@@ -651,10 +647,13 @@
 ;; ---------------------------------------------------------------------------
 
 (defn generate-without-constraints-has-weight-zero
-  "Forward sampling: generate without constraints has weight 0."
+  "Forward sampling: generate without constraints has weight 0 (up to
+   rounding, close?: a hand-written generate may compute it as the score
+   less the log density of the choices it drew)."
   [cases]
   (prop/for-all [[[_ gf args] seed] cases]
-    (checks (zero-weight? (:weight (gfi/generate gf args cm/EMPTY (rng/key seed)))))))
+    (let [{g :trace w :weight} (gfi/generate gf args cm/EMPTY (rng/key seed))]
+      (scaled [g] (checks (close? w 0.0))))))
 
 (defn generate-weight-is-the-constrained-density
   "Forward sampling: generate's weight is the log density of the
@@ -702,11 +701,13 @@
       (scaled [tr t2] (checks (if (outside? t2) (minus-infinity? w) (close? w (- (lp t2 retained) (lp tr retained)))))))))
 
 (defn regenerating-everything-has-weight-zero
-  "Forward sampling: a regenerate of every choice has weight 0."
+  "Forward sampling: a regenerate of every choice has weight 0 (up to
+   rounding, close?)."
   [cases]
   (prop/for-all [[[_ gf args] seed] cases]
-    (let [tr (gfi/simulate gf args (rng/key seed))]
-      (checks (zero-weight? (:weight (gfi/regenerate tr sel/all (rng/key (inc seed)))))))))
+    (let [tr (gfi/simulate gf args (rng/key seed))
+          {t2 :trace w :weight} (gfi/regenerate tr sel/all (rng/key (inc seed)))]
+      (scaled [tr t2] (checks (close? w 0.0))))))
 
 (defn project-splits-the-score
   "project splits the score over a partition of the choices: none projects
@@ -727,7 +728,7 @@
           s (sel/from-paths ps)
           t (sel/from-paths pt)
           both (sel/union s t)]
-      (scaled [tr] (checks (zero-weight? (p sel/none))
+      (scaled [tr] (checks (close? (p sel/none) 0.0)
                            (close? (+ (p s) (p (sel/complement s))) (:score tr))
                            (close? (p both) (+ (p s) (p t)))
                            (close? (p (sel/union s (sel/intersection t (sel/complement s)))) (p both))

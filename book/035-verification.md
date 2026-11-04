@@ -972,11 +972,13 @@ exact posterior invariant, and with encapsulated randomness the expected
 estimate is the density (Eq. 4.3).
 
 In all, the laws compare in four ways. Choices, discards and return values
-compare exactly, with `=`, and a weight that must be 0 must be exactly 0.
-Weights and scores compare up to rounding, with `laws/close?`: within
-float64's round-off, or, on a float32 backend, a relative $10^{-4}$ and
-an absolute $10^{-3}$, since a weight is a difference of scores and
-carries their error. Statistical laws compare within five standard
+compare exactly, with `=`. Weights and scores compare up to rounding,
+with `laws/close?`: within float64's round-off, or, on a float32 backend,
+a relative $10^{-4}$ and an absolute $10^{-3}$, the absolute part times
+the magnitude of the scores the weights come from, since a weight is a
+difference of scores and carries their error. A weight that must be 0
+compares the same way: a hand-written `generate` may compute it as the
+score less the density of what it drew. Statistical laws compare within five standard
 errors. And a case may be vacuous, which counts against a law only in
 numbers.
 

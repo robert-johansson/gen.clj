@@ -451,13 +451,10 @@
     (let [given (draws-in :generate constraints n)
           {:keys [draws lps k]} (walk args given 0 0 key)
           t (urn-trace gf args (choices-of draws) k)]
-      ;; without constraints, simulate's weight, 0; with them,
-      ;; log p(draws) - log q(fresh draws), the score itself when every
-      ;; draw is given
+      ;; log p(draws) - log q(fresh draws): 0 up to rounding without
+      ;; constraints, the score itself when every draw is given
       {:trace t
-       :weight (if (empty? given)
-                 0.0
-                 (- (:score t) (total (map lps (fresh-draws draws given)))))}))
+       :weight (- (:score t) (total (map lps (fresh-draws draws given))))}))
   (-update [gf tr args _ constraints key]
     (update-urn gf tr args constraints key))
   (-regenerate [gf tr args _ selection key]

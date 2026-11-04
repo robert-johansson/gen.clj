@@ -12,12 +12,15 @@
             [clojure.test.check.properties :as prop]
             [gen.array :as array]
             [gen.choicemap :as cm]
+            [gen.diff :as diff]
             [gen.dist :as d]
+            [gen.dist.core :as dc]
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
             [gen.laws :as laws]
             [gen.random :as rng]
-            [gen.selection :as sel]))
+            [gen.selection :as sel]
+            [gen.trace :as trace]))
 
 (def ^:private measurement
   (gen [mu]
@@ -107,6 +110,69 @@
     (testing "a real error still fails: 1e-6 of scores up to ~1e5 (float64)"
       (when-not f32?
         (is (not (binding [laws/*score-scale* 1e5] (laws/close? 1e-6 0.0))))))))
+
+;; A hand-written generative function of one draw, x ~ normal(mu, 1), whose
+;; weights that are 0 in exact arithmetic (generate without constraints, an
+;; update without them, a regenerate of nothing or of x, project on nothing)
+;; are (off score) instead.
+
+(defn- one-draw [gf [mu :as args] x]
+  (trace/make-trace {:gen-fn gf :args args :choices (cm/choicemap :x x) :retval x
+                     :score (dc/log-prob (d/normal mu 1) x)}))
+
+(gfi/defgf OffDraw [off]
+  gfi/IGenerativeFunction
+  (-simulate [gf [mu :as args] key]
+    (one-draw gf args (dc/sample (d/normal mu 1) key)))
+  (-generate [gf args constraints key]
+    (if-some [x (cm/get-choice constraints :x nil)]
+      (let [t (one-draw gf args x)] {:trace t :weight (:score t)})
+      (let [t (gfi/simulate gf args key)] {:trace t :weight (off (:score t))})))
+  (-update [gf tr args _ constraints _]
+    (let [x (cm/get-choice constraints :x nil)
+          t (one-draw gf args (if (some? x) x (:retval tr)))
+          same? (and (nil? x) (= args (:args tr)))]
+      {:trace t
+       :weight (if same? (off (:score t)) (- (:score t) (:score tr)))
+       :retdiff (if same? diff/no-change diff/unknown-change)
+       :discard (if (some? x) (cm/choicemap :x (:retval tr)) cm/EMPTY)}))
+  (-regenerate [gf tr args _ selection key]
+    (if (sel/selected? selection [:x])
+      (let [t (gfi/simulate gf args key)] {:trace t :weight (off (:score t)) :retdiff diff/unknown-change})
+      (let [t (one-draw gf args (:retval tr))
+            same? (= args (:args tr))]
+        {:trace t
+         :weight (if same? (off (:score t)) (- (:score t) (:score tr)))
+         :retdiff (if same? diff/no-change diff/unknown-change)})))
+  (-assess [_ [mu] choices _]
+    (let [x (cm/get-choice choices :x)]
+      {:weight (dc/log-prob (d/normal mu 1) x) :retval x}))
+  (-propose [gf args key]
+    (let [t (gfi/simulate gf args key)]
+      {:choices (:choices t) :weight (:score t) :retval (:retval t)}))
+  (-project [_ tr selection]
+    (if (sel/selected? selection [:x]) (:score tr) (off (:score tr)))))
+
+(deftest the-zero-weights-allow-rounding
+  ;; genclj-s5fj (PROVISIONAL, 2026-11-04): a weight that is 0 in exact
+  ;; arithmetic compares with 0 as weights compare, up to rounding at the
+  ;; scale of the scores: a hand-written generate may compute it as the
+  ;; score less the log density of what it drew. Planted: a real error
+  ;; fails each of the five laws.
+  (let [f32? (= :float32 (:float (array/defaults array/*backend*)))
+        zero-laws (select-keys laws/all [:identity-update-changes-nothing
+                                         :regenerating-nothing-changes-nothing
+                                         :generate-without-constraints-has-weight-zero
+                                         :regenerating-everything-has-weight-zero
+                                         :project-splits-the-score])
+        ulps (fn [s] (let [s (array/item s)] (* 4 (if f32? (Math/ulp (float s)) (Math/ulp (double s))))))
+        error (fn [_] (if f32? 0.1 1e-6))
+        failing (fn [off] (set (keys (laws/verify [[:off (->OffDraw off) [0.0] [[1.5]]]] few zero-laws))))]
+    (is (= 5 (count zero-laws)))
+    (testing "a few ulps of the score pass"
+      (is (= #{} (failing ulps))))
+    (testing "an error fails each law"
+      (is (= (set (keys zero-laws)) (failing error))))))
 
 (deftest check-has-arities
   (let [p (laws/score-is-the-assessed-density (laws/cases models))

@@ -3235,6 +3235,21 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
   and float32's 1e-3 alike; the relative tolerances stay. A planted
   error of 1e-6 still fails for scores below ~1e5. A CHANGELOG line, as
   gen.laws' policy requires for a tolerance change.
+- **A weight that is 0 compares as weights do (2026-11-04, genclj-s5fj;
+  PROVISIONAL, the lead's while the owner was away, owner to confirm).**
+  Five checks asked for exactly 0 (generate without constraints, update
+  without constraints, regenerate of nothing and of everything, project
+  on nothing); they now use close? at the scale of the trace's scores.
+  Why: the GFI's weights are mathematical quantities, and a hand-written
+  generate whose weight is the score less the log density of what it drew
+  is 0 only up to rounding; chapter 045's urn had to special-case "no
+  constraints" for the law alone, and every other weight check already
+  allowed rounding. The cost: a bug that leaves a weight of order the
+  rounding is no longer caught there (a planted 1e-6 still fails in
+  float64, 0.1 in float32). Under gen.laws' policy, a tolerance change
+  in a minor release with a CHANGELOG line. The alternative, exact zero
+  with a documented reason, keeps the urn's special case and asks every
+  hand-written generative function for one.
 - **Codegen as a library: the core gets no code evaluation (owner,
   2026-11-04; genclj-uw7w).** gen.clj's core, gen.llm, experimental, no new
   dependencies: gen.llm.sample (sampling with temperature, top-k and top-p;

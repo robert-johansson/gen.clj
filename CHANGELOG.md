@@ -102,6 +102,15 @@ other values for the same key, from the same distribution.
   (`laws/*score-scale*`, which each law binds; 1 outside a law, so a
   reader's own `(close? x y)` is unchanged), the relative tolerances as
   before. A planted error of 1e-6 still fails for scores below ~1e5.
+- **gen.laws: a weight that is 0 compares as weights do** (DESIGN §9,
+  PROVISIONAL, 2026-11-04; genclj-s5fj). Five checks asked for exactly 0:
+  generate without constraints, an update without constraints, a
+  regenerate of nothing and of everything, and project on nothing. A
+  hand-written generate that computes its weight as the score less the
+  log density of what it drew is 0 only up to rounding, so it had to
+  special-case "no constraints" (chapter 045's urn did). They now use
+  `laws/close?` at the scale of the trace's scores, as every other weight
+  check; a planted error of 1e-6 still fails in float64 (0.1 in float32).
 - **Experimental: tempered SMC** (`gen.inference.tempering/smc`, outside
   the 1.x promise; DESIGN §9, genclj-87x1): the log marginal likelihood
   of observations under any generative function, and posterior

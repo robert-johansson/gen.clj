@@ -743,12 +743,13 @@ forward sampling:
 
 `gfi/defgf` is `defrecord` for a generative function, with Gen.jl's
 untraced call besides: `(urn a b n)` is the return value of a fresh run,
-as for a `gen` function. Two details of `generate`'s weight matter. With
-no constraints it is exactly 0, as `simulate`'s. With every draw given it
-is exactly the score: `gen.serialize` rebuilds a saved trace with
-`generate` and checks that its weight is its score, bit for bit. A
-weight that summed the draws' predictive log probabilities, equal to the
-score only up to rounding, made `write-trace` refuse the urn's traces.
+as for a `gen` function. `generate`'s weight is the score less the log
+probabilities of the draws it made afresh. With no constraints that is 0
+only up to rounding: the score's closed form and the sum of the draws'
+predictive log probabilities round differently, and the laws compare a
+weight that should be 0 as they compare any weight, up to rounding at
+the scale of the scores. With every draw given it is the score, which
+`gen.serialize` checks when it rebuilds a saved trace with `generate`.
 
 <!-- code: urn -->
 ```clojure
@@ -761,13 +762,10 @@ score only up to rounding, made `write-trace` refuse the urn's traces.
     (let [given (draws-in :generate constraints n)
           {:keys [draws lps k]} (walk args given 0 0 key)
           t (urn-trace gf args (choices-of draws) k)]
-      ;; without constraints, simulate's weight, 0; with them,
-      ;; log p(draws) - log q(fresh draws), the score itself when every
-      ;; draw is given
+      ;; log p(draws) - log q(fresh draws): 0 up to rounding without
+      ;; constraints, the score itself when every draw is given
       {:trace t
-       :weight (if (empty? given)
-                 0.0
-                 (- (:score t) (total (map lps (fresh-draws draws given)))))}))
+       :weight (- (:score t) (total (map lps (fresh-draws draws given))))}))
   (-update [gf tr args _ constraints key]
     (update-urn gf tr args constraints key))
   (-regenerate [gf tr args _ selection key]
