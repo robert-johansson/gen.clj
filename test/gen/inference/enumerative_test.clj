@@ -14,7 +14,7 @@
             [gen.diff :as diff]
             [gen.dist :as d]
             [gen.dist.core :as dc]
-            [gen.dynamic :refer [gen]]
+            [gen.dynamic :as dyn :refer [gen]]
             [gen.gfi :as gfi]
             [gen.inference.enumerative :as enum]
             [gen.inference.importance :as imp]
@@ -510,6 +510,42 @@
                                           [n 0.0 q] (step-observations tr n) (rng/key 1)))))))
 
 ;; ---------------------------------------------------------------------------
+;; A callee spliced without an address: its choices are the caller's, as if
+;; its body were written in place (genclj-u23m)
+;; ---------------------------------------------------------------------------
+
+(def given-a
+  "batchable's :b and :obs given its :a: a callee to splice without an
+   address"
+  (gen [a]
+    (let [b (trace :b (d/categorical (array/where a (array/array [0.6 0.3 0.1]) (array/array [0.2 0.3 0.5]))))]
+      (trace :obs (d/bernoulli (array/take (array/array [0.1 0.5 0.9]) b))))))
+
+(def spliced
+  "batchable, its :b and :obs made by given-a spliced without an address"
+  (gen [] (splice given-a (trace :a (d/bernoulli 0.3)))))
+
+;; Planted bug (2026-11-04): a callee spliced without an address run under
+;; the standard transitions, not its caller's middleware (the rule
+;; before), fails every case: the exact proposal never sees its choices.
+(deftest a-callee-spliced-without-an-address-is-enumerated-in-place
+  (doseq [opts [nil {:batched? true}]
+          :let [egf (enum/with-exact-proposal spliced [:a :b] opts)
+                in-place (enum/with-exact-proposal batchable [:a :b] opts)]
+          k (range 4)]
+    (testing (str (pr-str opts) ", key " k)
+      (let [{tr :trace w :weight} (gfi/generate egf [] observations (rng/key k))
+            t' (:trace (gfi/generate in-place [] observations (rng/key k)))]
+        (is (close-to w (log evidence)) "the weight is the exact marginal likelihood")
+        (is (= (ts/host [(t' :a) (t' :b)]) (ts/host [(tr :a) (tr :b)])) "the draws are the body's written in place")
+        (is (close-to (:score tr) (log (joint (ts/host [(tr :a) (tr :b)])))))
+        (is (close-to 0.0 (:weight (gfi/regenerate tr (sel/select :a :b) (rng/key 9)))) "regenerate on them is Gibbs"))))
+  (testing "the callee's choices alone"
+    (let [coin (gen [] (trace :o (d/bernoulli 0.5)))]
+      (is (close-to 0.0 (:weight (gfi/generate (enum/with-exact-proposal (gen [] (splice coin)) [:o]) [] cm/EMPTY
+                                               (rng/key 0))))))))
+
+;; ---------------------------------------------------------------------------
 ;; The GFI laws (the general set: the internal proposal is not forward sampling)
 ;; ---------------------------------------------------------------------------
 
@@ -525,6 +561,10 @@
                          [:z] opts)
     [1.0] [[2.0]]]
    [:unfold (comb/unfold (enum/with-exact-proposal step [:h] opts)) [3 0.0 0.6] [[4 0.0 0.6] [2 0.0 0.3]]]
+   ;; choices of callees spliced without an address (genclj-u23m)
+   [:address-less-splice (enum/with-exact-proposal spliced [:a :b] opts) [] []]
+   [:address-less-splice-of-the-arguments (enum/with-exact-proposal (gen [m] (splice continuous-latent m)) [:z] opts)
+    [1.0] [[2.0]]]
    ;; an update to more arguments makes fresh choices, which the exact
    ;; proposal's generate samples given the enumerated one (genclj-nqsm:
    ;; update-under, shared with with-internal-proposal; fewer arguments
@@ -539,9 +579,9 @@
 (def law-models (law-models-with nil))
 
 (def batched-law-models
-  "law-models enumerating in one batched run (their models branch with if,
-   so it falls back to one assignment at a time), and models whose
-   enumerations run batched."
+  "law-models enumerating in one batched run (a model that branches with if
+   falls back to one assignment at a time), and models whose enumerations
+   run batched."
   (into (law-models-with {:batched? true})
         [[:discrete-batched (enum/with-exact-proposal batchable [:a :b] {:batched? true}) [] []]
          [:continuous-latent-batched (enum/with-exact-proposal continuous-latent [:z] {:batched? true}) [1.0] [[2.0]]]]))
@@ -569,10 +609,20 @@
     (testing "a continuous choice"
       (gen-err (enum/with-exact-proposal (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal x 1)))) [:x])
                #"not finite"))
+    ;; genclj-u23m. Planted bugs (2026-11-04): with-exact-proposal's
+    ;; message before (a call's, at no address, for every choice it did not
+    ;; see) fails the next two cases; the splice's message before, the third.
     (testing "a choice made inside a callee at an address"
       (let [inner (gen [] (trace :z (d/bernoulli 0.5)))]
         (gen-err (enum/with-exact-proposal (gen [] (splice :in inner) (trace :y (d/normal 0 1))) [[:in :z]])
-                 #"wrap that one")))
+                 #"the model calls at \[:in\]; wrap that one")))
+    (testing "a choice made under the own middleware of a callee spliced without an address"
+      (let [own (dyn/with-transitions (gen [] (trace :z (d/bernoulli 0.5))) {:generate (dyn/site-transitions :generate)})]
+        (gen-err (enum/with-exact-proposal (gen [] (splice own) (trace :y (d/normal 0 1))) [:z])
+                 #"spliced without an address that has middleware of its own .*: give that splice an address")))
+    (testing "a wrapped callee spliced without an address: it takes an address (or wrap the caller)"
+      (gen-err (gen [] (splice (enum/with-exact-proposal (gen [] (trace :z (d/bernoulli 0.5))) [:z])) (trace :y (d/normal 0 1)))
+               #"give the splice an address"))
     (testing "an address the model does not visit"
       (gen-err (enum/with-exact-proposal (gen [] (trace :y (d/normal 0 1))) [:nope]) #"not visited"))
     (testing "a structure that depends on the enumerated choice"

@@ -38,6 +38,27 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **A callee spliced without an address runs under its caller's
+  middleware** (`gen.dynamic/with-transitions`; genclj-u23m). Its choices
+  are the caller's, so the caller's middleware now runs at its sites too,
+  unless the callee has middleware of its own for the operation, which
+  runs there as before; such a callee's body ran under the standard
+  transitions. So gen.inference's middleware reaches those choices:
+  `enum/with-exact-proposal` enumerates them, and
+  `conj/with-conjugate-proposal` finds a latent or child there, where both
+  threw "… is made by a generative function the model calls at an
+  address; wrap that one";
+  `with-internal-proposal`'s project and regenerate replay a proposal's own
+  address-less splices, where they threw; and the reparameterization
+  estimator (`gen.inference.vi`) refuses a choice there from a family
+  without a pathwise sampler, which it used silently. Middleware of your
+  own that changes the model changes it at those sites too. The errors
+  now say what applies: with-exact-proposal's names the address of the
+  call that made the choice, or the spliced callee's own middleware, and
+  an address-less splice of a generative function that is not a `gen`
+  (a combinator, a distribution, a wrapper) says to give the splice an
+  address.
+
 - **Parity with Gen.jl 0.4.9** (genclj-u420). Its fixes (#571: the
   general trace translator's forward score, elliptical slice's threshold)
   were gen.clj's from the port, and its new tests are ported; its hmc

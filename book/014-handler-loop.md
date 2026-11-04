@@ -439,10 +439,11 @@ exercise 2 builds that loop and watches it happen.
 
 Second, gen.clj's loop keeps two cells: the state, and the transition
 in effect. A splice without an address, Gen.jl's `{*} ~`, runs its
-callee's body under the caller's loop, and the second cell swaps in the
-callee's middleware for that body. Both cells are made when a run starts
-and dropped when it returns. They never escape into a trace and never
-cross a thread, since a body runs synchronously, start to finish.
+callee's body under the caller's loop and the caller's middleware, unless
+the callee has middleware of its own, which the second cell swaps in for
+that body. Both cells are made when a run starts and dropped when it
+returns. They never escape into a trace and never cross a thread, since
+a body runs synchronously, start to finish.
 
 ## The `gen` macro
 

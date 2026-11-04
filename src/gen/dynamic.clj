@@ -770,8 +770,9 @@
   [gf mode args opts]
   (check-arity! gf args)
   (let [standard (site-transitions mode)
-        ;; the transition in effect: a splice without an address swaps in its
-        ;; callee's middleware for the callee's body
+        ;; the transition in effect: a splice without an address runs its
+        ;; callee's body under it, the callee's sites being this run's, or
+        ;; under the callee's own middleware when it has some
         transition (volatile! (or (get (:transitions gf) mode) standard))
         vol (volatile! (start-state mode opts))
         ;; the n-th untraced draw's key is ω folded with n
@@ -840,16 +841,18 @@
                     (if (gfi/generative-function? (first xs))
                       ;; (splice gf & args): Gen.jl's {*} ~ gf(args), the callee's choices in
                       ;; this namespace. Its body runs under this handler, so constraints,
-                      ;; previous choices, selections and address checks apply unchanged.
+                      ;; previous choices, selections, address checks and the
+                      ;; caller's middleware apply unchanged (genclj-u23m).
                       (let [[sub & args] xs
                             args (realize! (vec args))]
                         (when-not (dynamic-gf? sub)
-                          (throw (ex-info "A splice without an address needs a dynamic generative function (others take an address)"
+                          (throw (ex-info (str "A splice without an address needs a dynamic generative function (gen), not a "
+                                               (.getName (class sub)) ": give the splice an address, (splice addr gf & args)")
                                           {:gen-fn (type sub)})))
                         (check-arity! sub args)
                         (let [outer @transition
                               run-body #(apply (:body-fn sub) trace-fn splice-fn read-param untraced-fn args)]
-                          (vreset! transition (or (get (:transitions sub) mode) standard))
+                          (when-let [t (get (:transitions sub) mode)] (vreset! transition t))
                           (try
                             (with-store-of sub (run-body))
                             (finally (vreset! transition outer)))))
@@ -1138,6 +1141,12 @@
    optimization must not (see with-dispatch). A call whose store or
    generative function changed (gfi/revise) still runs the operation asked
    for, so update middleware sees it.
+
+   The middleware runs at every site of gf's run: those of its body, and
+   those of the body of a callee it splices without an address, whose
+   choices are gf's, unless that callee has middleware of its own for the
+   operation, which runs there instead. A callee at an address runs its
+   own transitions.
 
    A transition reads every key of the state (initial-state lists them);
    in a batched run the choices, scores and weight are batched, one value
