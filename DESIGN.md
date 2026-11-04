@@ -3323,6 +3323,25 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     too) and GenGDT green against the release candidate. The release
     notes lead with the Breaking `=` on 0-d MLX arrays: gen.backend.mlx
     is internal, but the change reaches user code that compares draws.
+  - **One chain fast on MLX, and GPU speed (owner, 2026-11-04, "go with
+    option 1", on the lead's recommendation; genclj-fpnf, genclj-h8rn).**
+    One HMC chain (L=32, 1000 steps) ran in 21.9 ms as a Metal program (one
+    GPU thread, 32,000 dependent leapfrog steps), 5.2 s on the handler on
+    MLX, against GenJAX's 5.82 on the M4's CPU; the JVM lowering's program
+    runs it in under 1 ms, but kernel/run's `{:device :jvm}` took 4.4 ms on
+    the JVM backend and 7.2 (139 with a :keep per step) on MLX.
+    - **In 1.1.0 (option 1):** a single chain runs on a CPU core (the JVM
+      lowering) whatever the backend, and kernel/run's device path costs
+      little beyond its program: its entry and its result (traces and
+      kept values) built on the host, MLX arrays made only where the
+      result needs them. Whether a run picks its device itself (the
+      epic's decision 5) stays open: the owner's call, with the lead's
+      recommendation once the fast path is measured.
+    - **Explored, in 1.1.0 if it is ready, else after (option 2):** the
+      Metal program faster for few chains: a simdgroup of lanes per chain
+      sharing a step's data-parallel work and its sums, and fewer
+      statements a leapfrog step. The owner would like a very good GPU
+      speed in 1.1.0, and is prepared to skip it.
 
 ## 10. Deferred (tracked, not forgotten)
 
