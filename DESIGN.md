@@ -3373,7 +3373,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       adaptation and MALA's step-size adaptation are beans of their own,
       after 1.1.0.
       As built (2026-11-04, the lead; the constructor's name and
-      arguments wait for the owner's confirmation, as a new stable var):
+      arguments confirmed by the owner the same day, a new stable var):
       `(mcmc/dense-inv-metric addresses matrix)`, a record whose factories
       are ^:no-doc, its addresses (or paths) the rows' order; a bare `[n
       n]` matrix only for one selected choice of n elements (unless the
