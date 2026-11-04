@@ -300,7 +300,7 @@ same tokens stepped differ by up to 0.46 nats (Gemma at 600 tokens; Qwen3
 0.17), while same shapes agree exactly. CPU and CUDA builds need bands
 of their own: measure them with the benches before using these.
 
-**CUDA, measured (fenrir's RTX PRO 6000, sm_120, 2026-10-21;
+**CUDA, measured (the RTX-6000 machine, sm_120, 2026-10-21;
 genclj-kw88).** Quantized weights vary with batch composition by about 0.2
 nats a token (up to about 1), so the noise checks skip there. Float
 weights stay small: at most 0.13 (Qwen3-0.6B f16), 0.15 (Qwen3.5-0.8B
@@ -489,7 +489,7 @@ the replay's), 31 with Qwen3 and with Gemma.
 
 **Not measured.**
 - CUDA and CPU builds, whose copy and decode costs differ, so the fixed
-  cost of 6 needs checking there (Thor, fenrir).
+  cost of 6 needs checking there (Thor, the RTX-6000 machine).
 - Models other than Qwen3.5-0.8B.
 
 **For m3-lm (cache.clj, a recommendation).** With (E) nothing is needed.
@@ -548,7 +548,7 @@ first.
 - **genclj-zztc (shared memory budget):** built, below (The shared memory
   budget).
 - **Not done here:** Linux CUDA and CPU builds (written, not run; since
-  run on fenrir, 2026-10-21, genclj-kw88), MLX and
+  run on the RTX-6000 machine, 2026-10-21, genclj-kw88), MLX and
   llama.cpp in one test JVM (the spike showed it), the 8B and 30B models,
   and a fatal decode on Metal (only the CPU backend honours an abort, and
   no other deterministic way exists without a `GGML_ASSERT`).
