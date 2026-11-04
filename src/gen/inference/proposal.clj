@@ -17,9 +17,16 @@
    proposes every value the posterior allows. The distribution, simulate
    and assess are gf's: only the internal proposal changes.
 
-   regenerate keeps every unselected choice (they are the constraints of
-   both moves, Eq. 4.1): when the selected choices, or new arguments, would
-   leave one unvisited, it throws; select the choices they decide too.
+   regenerate follows Eq. 4.1 (thesis §4.1.2). The trace's unselected
+   choices σ = τ|_{S^c} are the constraints: q proposes given all of them,
+   and the new run τ' = υ ⊕ σ|_B keeps those it visits and drops the rest
+   (B ⊆ A_σ), as when a selected choice decides that another one no longer
+   exists. The reverse move's constraints are σ' = τ'|_{S^c}, which may
+   hold choices the old trace lacks, and υ' is the rest of τ. With q(υ; σ)
+   the internal proposal's density (q's choices' and the forward-sampled
+   ones'), the weight is
+
+     log p(τ'; x') - log q(υ; x', σ) - log p(τ; x) + log q(υ'; x, σ').
 
    project replays q against a trace: q runs with each choice taken from the
    trace, which gives its log density and the addresses it would propose. A
@@ -82,24 +89,34 @@
 
 (defn- proposal-generate
   "generate under q: q's choices given the constraints sigma, then gf's
-   forward sampling for the rest. In a revise, gf's calls drop the old
-   choices they leave, never q's (gfi/constraining), and the whole run
-   repeats without them, so that q proposes given the final constraints
-   (gfi/rerun-without-drops)."
-  [{:keys [gf q] :as pgf} args sigma key]
+   forward sampling for the rest. With drop?, regenerate's (Eq. 4.1),
+   sigma is a trace's unselected choices: q proposes given every one of
+   them, and gf's run drops those it leaves unvisited, at its own sites
+   and in its calls (gfi/generate-dropping), never q's. In a revise,
+   gf's calls drop the old choices they leave, never q's
+   (gfi/constraining), and the whole run repeats without them, so that q
+   proposes given the final constraints (gfi/rerun-without-drops)."
+  [{:keys [gf q] :as pgf} args sigma key drop?]
   (let [[k-q k-gen] (rng/split key)
         attempt (fn [sigma]
                   (let [{q-choices :choices q-weight :weight} (gfi/propose q (into [sigma] args) k-q)
                         _ (check-open sigma (cm/addresses q-choices))
-                        {tr :trace w :weight} (gfi/constraining q-choices
-                                                                #(gfi/-generate gf args (cm/merge sigma q-choices) k-gen))]
+                        constraints (cm/merge sigma q-choices)
+                        {tr :trace w :weight}
+                        (if drop?
+                          ;; q's choices are the run's constraints; sigma's, old choices it may drop
+                          (binding [gfi/*revising* {:constraints q-choices :prefix []}]
+                            (first (gfi/generate-dropping #(gfi/-generate gf args % k-gen) constraints [])))
+                          (gfi/constraining q-choices #(gfi/-generate gf args constraints k-gen)))]
                     {:trace (trace/as-made-by tr pgf) :weight (- w q-weight)}))]
-    (if gfi/*revising* (first (gfi/rerun-without-drops attempt sigma)) (attempt sigma))))
+    (if (and gfi/*revising* (not drop?)) (first (gfi/rerun-without-drops attempt sigma)) (attempt sigma))))
 
 (defn- proposal-weight
   "The weight proposal-generate gives for producing the trace tr of gf on
-   args from sigma, tr's choices at some addresses: +Inf when q could not
-   have proposed tr's choices."
+   args from sigma, which agrees with tr's choices where both have one:
+   +Inf when q could not have proposed tr's choices. q proposes given all
+   of sigma; a choice of sigma that tr lacks is one the run drops
+   (regenerate's reverse move, Eq. 4.1), outside the projection."
   [{:keys [gf q]} args sigma tr]
   (if-let [[lq q-paths] (replay q (into [sigma] args) (:choices tr))]
     (do (check-open sigma q-paths)
@@ -136,38 +153,45 @@
 
 (defn regenerate-under
   "regenerate for a generative function with an internal proposal
-   (Eq. 4.1): the unselected choices of tr are the constraints of both
-   moves, the new trace from (generate args sigma key) and the old one
-   weighed by (weight (:args tr) sigma tr), both returning the internal
-   proposal's generate weight. A selection or new arguments that would leave
-   an unselected choice unvisited is a loud error. tr is kept when nothing
-   is selected and no argument changed, nor their number. (A trace the
-   generative function did not make, or a call whose store changed, is
-   gfi/revise's.) Shared by with-internal-proposal and
-   gen.inference.enumerative/with-exact-proposal."
+   (Eq. 4.1): the new trace τ' from (generate args sigma key), sigma the
+   unselected choices of tr, and the old one weighed by
+   (weight (:args tr) sigma' tr), sigma' the unselected choices of τ',
+   both returning the internal proposal's generate weight. A generate
+   that drops the unselected choices its run leaves unvisited follows
+   Eq. 4.1 (B ⊆ A_σ), and sigma' then lacks them; for one that throws on
+   them (with-exact-proposal's, with-conjugate-proposal's), a selection or
+   new arguments that would leave an unselected choice unvisited is a loud
+   error. tr is kept when nothing is selected and no argument changed, nor
+   their number. (A trace the generative function did not make, or a call
+   whose store changed, is gfi/revise's.) Shared by with-internal-proposal,
+   gen.inference.enumerative/with-exact-proposal and
+   gen.inference.conjugate/with-conjugate-proposal."
   [generate weight tr args argdiffs selection key]
   (if (and (cm/empty? (sel/get-selected (:choices tr) selection))
            (== (count args) (count (:args tr))) (every? diff/no-change? argdiffs))
     {:trace tr :weight 0.0 :retdiff diff/no-change}
-    (let [sigma (sel/get-selected (:choices tr) (sel/complement selection))
+    (let [unselected #(sel/get-selected (:choices %) (sel/complement selection))
           {t2 :trace w :weight}
-          (try (generate args sigma key)
+          (try (generate args (unselected tr) key)
                (catch clojure.lang.ExceptionInfo e
                  (if (:unvisited (ex-data e))
                    (throw (ex-info (str "regenerate leaves an unselected choice unvisited (" (ex-message e)
                                         "); select the choices the selection or the new arguments decide")
                                    {:selection selection} e))
                    (throw e))))]
-      {:trace t2 :weight (- w (weight (:args tr) sigma tr)) :retdiff diff/unknown-change})))
+      ;; Eq. 4.1: the reverse move keeps σ' = τ'|_{S^c}, and draws
+      ;; υ' = τ|_{((A_τ ∩ A_τ') ∖ S)^c} from q(·; x, σ')
+      {:trace t2 :weight (- w (weight (:args tr) (unselected t2) tr)) :retdiff diff/unknown-change})))
 
 (gfi/defgf InternalProposalGF [gf q]
   gfi/IGenerativeFunction
   (-simulate [this args key] (trace/as-made-by (gfi/-simulate gf args key) this))
-  (-generate [this args constraints key] (proposal-generate this args constraints key))
+  (-generate [this args constraints key] (proposal-generate this args constraints key false))
   (-update [this tr args argdiffs constraints key]
-    (update-under "with-internal-proposal" this #(proposal-generate this %1 %2 %3) tr args argdiffs constraints key))
+    (update-under "with-internal-proposal" this #(proposal-generate this %1 %2 %3 false) tr args argdiffs constraints key))
+  ;; Eq. 4.1: the run drops the unselected choices it leaves unvisited
   (-regenerate [this tr args argdiffs selection key]
-    (regenerate-under #(proposal-generate this %1 %2 %3) #(proposal-weight this %1 %2 %3)
+    (regenerate-under #(proposal-generate this %1 %2 %3 true) #(proposal-weight this %1 %2 %3)
                       tr args argdiffs selection key))
   ;; generate gives the model the second of its key's split: assess, the same
   (-assess [_ args choices key] (gfi/-assess gf args choices (second (rng/split key))))

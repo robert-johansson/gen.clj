@@ -2,8 +2,8 @@
   "The internal-proposal override: the general GFI laws over models whose
    proposals make some, all, or a structure-deciding part of the open
    choices, and over models that splice one; exactness with the exact
-   posterior as the proposal; the worked examples of pp. 143-144; loud
-   errors."
+   posterior as the proposal; the worked examples of pp. 143-144;
+   regenerate's drops (Eq. 4.1); loud errors."
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array :refer [+ - * /]]
@@ -74,9 +74,12 @@
     [] []]
    [:proposal-reads-the-arguments proposal-reads-the-arguments [1.0] [[2.0]]]
    ;; an update to more arguments makes fresh choices, which the proposal
-   ;; draws (genclj-nqsm: update-under, shared with with-exact-proposal);
-   ;; fewer arguments would leave an unselected choice to regenerate unvisited
-   [:proposes-what-the-arguments-add proposes-what-n-adds [1] [[2] [3]]]])
+   ;; draws (genclj-nqsm: update-under, shared with with-exact-proposal)
+   [:proposes-what-the-arguments-add proposes-what-n-adds [1] [[2] [3]]]
+   ;; fewer arguments leave an unselected choice unvisited, which regenerate
+   ;; drops (Eq. 4.1, genclj-bnlx); it threw before, so the laws with new
+   ;; arguments said nothing about such a move
+   [:drops-what-fewer-arguments-leave proposes-what-n-adds [3] [[1] [2]]]])
 
 (laws/deflaws internal-proposal law-models 60 laws/general)
 ;; every address has a fixed support: Def. 4.1.1 has content for a proposal
@@ -175,6 +178,98 @@
         (doseq [{t :trace w :weight} rs]
           (is (ts/close? (expected (outcome t)) w) (str (outcome t))))))))
 
+;; genclj-bnlx, found by the book's chapter 031: a selected :a that turns
+;; false leaves the unselected :b unvisited, and regenerate threw where
+;; Eq. 4.1 drops it (B ⊆ A_σ). The general laws over the thesis's example,
+;; and the retained density ratio, whose densities the override's
+;; projections are. Planted bugs (2026-11-04): the old loud error fails
+;; regenerate-keeps-unselected-choices and the two ratio laws by exception;
+;; the reverse move proposing given σ, the forward move's unselected
+;; choices, in place of σ' = τ'|_{S^c} fails the ratio laws, with new
+;; arguments too
+(def structure-models
+  [[:decides-the-structure (prop/with-internal-proposal abc abc-proposal) [] []]])
+
+(laws/deflaws structure-deciding-internal-proposal structure-models 100
+  (merge laws/general laws/fixed-support
+         (select-keys laws/forward-sampling [:regenerate-weight-is-the-retained-density-ratio])))
+
+(def reads-what-it-drops
+  "abc-proposal, but a's proposal reads b: Bern(0.9) when σ gives b, else
+   Bern(0.6). Regenerating :a alone of {a T b F c T}, q proposes given b,
+   which the move to a = F drops; the reverse move proposes given
+   σ' = {c T}."
+  (gen [sigma] (let [a (if (open? sigma :a) (trace :a (d/bernoulli (if (open? sigma :b) 0.6 0.9))) (given sigma :a))]
+                 (when (and a (open? sigma :b)) (trace :b (d/bernoulli 0.5)))
+                 (when (open? sigma :c) (trace :c (d/bernoulli 0.5))))))
+
+(defn- regenerate-outcomes
+  "{outcome [weight …]} of regenerating :a alone of the trace of pgf at tau
+   over 40 keys: an outcome is [a] or [a b]."
+  [pgf tau seed]
+  (let [tr (:trace (gfi/generate pgf [] (cm/from-map tau) (rng/key 0)))
+        outcome (fn [t] (if (ts/host (t :a)) [true (ts/host (t :b))] [false]))]
+    (reduce (fn [m {t :trace w :weight}] (update m (outcome t) (fnil conj []) (ts/number w)))
+            {} (map #(gfi/regenerate tr (sel/select :a) %) (rng/split (rng/key seed) 40)))))
+
+(deftest regenerate-drops-what-the-new-run-leaves
+  ;; Eq. 4.1: w = p(τ'; x') q(υ'; x, σ') / (p(τ; x) q(υ; x', σ)),
+  ;; σ = τ|_{S^c} and σ' = τ'|_{S^c}, with S = {a}. Planted bugs
+  ;; (2026-11-04): the old loud error fails every case; the reverse move
+  ;; given σ fails the drops; given σ' restricted to τ's choices (the
+  ;; projections' form), or the forward move given σ less the choices it
+  ;; drops (a revise's), fails reads-what-it-drops alone: its q reads b
+  (let [log #(Math/log %)
+        check (fn [pgf tau seed expected]
+                (let [outcomes (regenerate-outcomes pgf tau seed)]
+                  (is (= (set (keys expected)) (set (keys outcomes))) (str tau ": every outcome drawn"))
+                  (doseq [[o ws] outcomes, w ws]
+                    (is (ts/close? (expected o) w) (str tau " to " o)))))]
+    (testing "the thesis's q: a move to a = F drops b, with p. 144's weight"
+      (let [pgf (prop/with-internal-proposal abc abc-proposal)]
+        (check pgf {:a true :b false :c true} 11
+               {[false] (log (/ (* 0.05 0.3) (* 0.2 0.4))) [true false] 0.0})
+        ;; the reverse moves: q's fresh b is unselected, so σ' holds it
+        (check pgf {:a false :c true} 12
+               {[false] 0.0
+                [true false] (log (/ (* 0.2 0.4) (* 0.05 0.3)))
+                [true true] (log (/ (* 0.125 0.4) (* 0.05 0.3)))})))
+    (testing "a q that reads the choice the move drops: q(υ; σ) given b, q(υ'; σ') without it"
+      (let [pgf (prop/with-internal-proposal abc reads-what-it-drops)]
+        (check pgf {:a true :b false :c true} 13
+               {[false] (log (/ (* 0.05 0.3) (* 0.2 0.1))) [true false] 0.0})
+        (check pgf {:a false :c true} 14
+               {[false] 0.0
+                [true false] (log (/ (* 0.2 0.1) (* 0.05 0.3)))
+                [true true] (log (/ (* 0.125 0.1) (* 0.05 0.3)))})))))
+
+(deftest ^:heavy mh-that-drops-a-choice-keeps-the-posterior
+  ;; Eq. 4.1's weight makes selection MH on :a alone stationary for the
+  ;; posterior given c = T, {a F}: 0.05, {a T b F}: 0.2, {a T b T}: 0.125
+  ;; over 0.375, whatever the proposal reads: from 4000 exact posterior
+  ;; draws, one move each under reads-what-it-drops leaves each state's
+  ;; frequency within 5 standard errors. Planted bug (2026-11-04): the
+  ;; forward move proposing given σ less the choices it drops (a revise's
+  ;; rerun) gives {a F} a frequency of 0.082 for 0.133, 9 standard errors
+  ;; off. (The reverse move given σ' restricted to τ's choices moves the
+  ;; frequencies by about one standard error: that plant is
+  ;; regenerate-drops-what-the-new-run-leaves's to catch.)
+  (let [pgf (prop/with-internal-proposal abc reads-what-it-drops)
+        states [{:a false :c true} {:a true :b false :c true} {:a true :b true :c true}]
+        posterior (mapv #(clojure.core// % 0.375) [0.05 0.2 0.125])
+        n 4000
+        moved (mapv (fn [k] (let [[k0 k1 k2] (rng/split k 3)
+                                  start (states (long (ts/number (dc/sample (d/categorical posterior) k0))))
+                                  tr (:trace (gfi/generate pgf [] (cm/from-map start) k1))
+                                  t (:trace (mh/mh tr (sel/select :a) k2))]
+                              (ts/host (cm/to-map (:choices t)))))
+                    (rng/split (rng/key 15) n))
+        counts (frequencies moved)]
+    (doseq [[state p] (map vector states posterior)]
+      (is (< (Math/abs (clojure.core/- (clojure.core// (get counts state 0) n) p))
+             (clojure.core/* 5 (Math/sqrt (clojure.core// (clojure.core/* p (clojure.core/- 1 p)) n))))
+          (str state ": " (get counts state 0) " of " n)))))
+
 (deftest the-distribution-is-the-model's
   (let [pgf (prop/with-internal-proposal normal-normal (gen [sigma] (trace :mu (d/normal 5 0.1))))
         choices (cm/choicemap :mu 0.2 :y 1.0)]
@@ -258,23 +353,28 @@
     (is (ts/close? (- (dc/log-prob (d/normal 0.0 1.0) 0.0) (dc/log-prob (d/normal 2.0 1.0) 0.0)) (:weight r)))))
 
 (deftest regenerating-a-structure-deciding-choice
+  ;; b's proposal is its prior, so every move weighs 0 (Eq. 4.1). A new b
+  ;; that drops :x was a loud error before genclj-bnlx. Planted bug
+  ;; (2026-11-04): the reverse move given σ, :x included, weighs the drop
+  ;; -log N(0.4; 0, 1)
   (let [pgf (prop/with-internal-proposal gated propose-b)
         tr (:trace (gfi/generate pgf [] (cm/choicemap :b true :x 0.4 :y 1.0) (rng/key 1)))
-        outcomes (map #(try (let [{t' :trace w :weight} (gfi/regenerate tr (gen.selection/select :b) %)]
-                              [(t' :b) (t' :x) w])
-                            (catch clojure.lang.ExceptionInfo e (ex-message e)))
+        outcomes (map #(let [{t' :trace w :weight} (gfi/regenerate tr (sel/select :b) %)]
+                         [(ts/host (t' :b)) (:choices t') w])
                       (rng/split (rng/key 2) 12))]
-    (testing "a new b that keeps :x keeps its value, with the projection ratio as weight"
-      (is (seq (filter vector? outcomes)))
-      (doseq [[b x w] (filter vector? outcomes)]
-        (is (true? (ts/host b)))
-        (is (ts/close? 0.4 x) "the unselected :x is kept")
-        (is (ts/close? 0.0 w) "b's proposal is its prior: the weight is 0")))
-    (testing "a new b that drops :x is a loud error"
-      (is (seq (remove vector? outcomes)))
-      (is (every? #(re-find #"leaves an unselected choice unvisited" %) (remove vector? outcomes))))
+    (testing "a new b that keeps :x keeps its value"
+      (is (seq (filter first outcomes)))
+      (doseq [[_ choices w] (filter first outcomes)]
+        (is (ts/close? 0.4 (cm/get-choice choices :x)) "the unselected :x is kept")
+        (is (ts/close? 0.0 w))))
+    (testing "a new b that drops :x drops it, and keeps :y"
+      (is (seq (remove first outcomes)))
+      (doseq [[_ choices w] (remove first outcomes)]
+        (is (= #{[:b] [:y]} (set (cm/addresses choices))))
+        (is (ts/close? 1.0 (cm/get-choice choices :y)))
+        (is (ts/close? 0.0 w))))
     (testing "selecting what b decides works"
-      (let [{t' :trace} (gfi/regenerate tr (gen.selection/select :b :x) (rng/key 3))]
+      (let [{t' :trace} (gfi/regenerate tr (sel/select :b :x) (rng/key 3))]
         (is (some? (t' :b)))))))
 
 (deftest ^:slow generate-under-an-override-is-unbiased
