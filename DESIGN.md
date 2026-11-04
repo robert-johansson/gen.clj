@@ -3538,9 +3538,11 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       decides over both. MLX reads the variable once, at its first matrix
       product. It gates TF32 on CUDA and, on Macs with neural accelerators
       (MLX's NAX), Metal's reduced-precision float32 products as well:
-      **PROVISIONAL (the lead, the owner away): full float32 on every
-      device**, the M4 unaffected, a newer Mac slower but agreeing with
-      CUDA and the CPU. The test starts fresh JVMs (the JVM's environment
+      **full float32 on every device** (the lead's while the owner was
+      away, confirmed by the owner, 2026-11-04 evening), the M4
+      unaffected, a newer Mac slower but agreeing with CUDA and the CPU.
+      The owner left conjugacy, Laplace and particle MCMC (experimental)
+      provisional until they move into the stable tier. The test starts fresh JVMs (the JVM's environment
       snapshot may come after the setenv).
     - **GenLM's gaps (owner, 2026-11-04):** the survey's top five become
       beans for after 1.1.0 (an epic): a critic at the drawn token in
