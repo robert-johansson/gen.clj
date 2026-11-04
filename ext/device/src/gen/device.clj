@@ -6,14 +6,14 @@
    for kernel/run's and importance sampling's :device option (DESIGN §9).
 
    (compile-program device program) returns {:run-one (fn [key-words
-   inputs]) :run-many (fn [n root-words inputs])}. run-one gives the
-   program's outputs (in its :outputs order) on the host, each {:data
-   :shape :dtype}: a flat Java array in row-major order (float[],
-   double[], int[], long[] or boolean[]), its shape and the dtype of the
-   gen.array array it stands for, so a caller makes arrays of the parts it
-   keeps and no others. run-many gives them as gen.array arrays of the
-   current backend, n runs' [n shape]. inputs are the program's data
-   inputs after its key, in order. A device or form a lowering lacks
+   inputs]) :run-many (fn [n root-words inputs])}, which give the
+   program's outputs (in its :outputs order) on the host, a run's [shape]
+   or n runs' [n shape], each {:data :shape :dtype}: :data a flat Java
+   array in row-major order (float[], double[], int[], long[] or
+   boolean[]; :jvm's) or nested vectors (gen.array/->clj's, read once
+   from the GPU: :metal's), :dtype the gen.array dtype it stands for, so a
+   caller makes arrays of the parts it keeps and no others. inputs are the
+   program's data inputs after its key, in order. A device or form a lowering lacks
    throws (the caller falls back to the handler)."
   {:api :experimental}
   (:require [gen.array :as array]
@@ -27,11 +27,6 @@
   [dtype]
   (case dtype (:uint32 :int64) :int64 dtype))
 
-(defn- java->array
-  "A Java array of a lowering's outputs as a gen.array array of shape."
-  [a shape dtype]
-  (array/reshape (array/array (vec a) {:dtype (array-dtype dtype)}) shape))
-
 (defmulti compile-program
   "program compiled for device: {:run-one :run-many}."
   (fn [device _] device))
@@ -44,7 +39,7 @@
                 (mapv (fn [a {:keys [shape dtype]}] {:data a :shape shape :dtype (array-dtype dtype)})
                       ((:run k) key-words (java-inputs inputs)) outs))
      :run-many (fn [n root-words inputs]
-                 (mapv (fn [a {:keys [shape dtype]}] (java->array a (into [n] shape) dtype))
+                 (mapv (fn [a {:keys [shape dtype]}] {:data a :shape (into [n] shape) :dtype (array-dtype dtype)})
                        (:outputs (jvm/run-many k n root-words {:inputs (java-inputs inputs)})) outs))}))
 
 (defmethod compile-program :metal [_ program]
@@ -53,7 +48,10 @@
         k (compile program)]
     {:run-one (fn [_ _] (throw (ex-info "Device :metal runs many particles (one GPU thread a particle); a single chain runs on :jvm"
                                         {:reason :unsupported :device :metal})))
-     :run-many (fn [n root-words inputs] (run k n root-words {:inputs (mapv #(if (array/backend-array? %) % (array/array %)) inputs)}))}))
+     :run-many (fn [n root-words inputs]
+                 (let [xs (run k n root-words {:inputs (mapv #(if (array/backend-array? %) % (array/array %)) inputs)})]
+                   (array/eval! xs)
+                   (mapv (fn [x] {:data (array/->clj x) :shape (vec (array/shape x)) :dtype (array/dtype x)}) xs)))}))
 
 (defmethod compile-program :default [device _]
   (throw (ex-info (str "No device lowering " (pr-str device) " (the lowerings are :jvm and :metal)")

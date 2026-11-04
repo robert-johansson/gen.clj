@@ -180,6 +180,18 @@ other values for the same key, from the same distribution.
   to read). The results are as before: the handler's bit for bit on the
   JVM backend in float64, to float32 rounding with the same accepts on
   MLX (a test of its own now).
+- **Experimental: importance sampling's `:device` result built on the
+  host** (`gen.inference.device`, ext/device's `gen.device`; genclj-m5o6).
+  `gen.device`'s run-many gives its outputs on the host (`:metal`'s read
+  once from the GPU), and each particle's trace is made from its rows; an
+  observation is the value as given, as the handler's trace holds it (on
+  MLX it was a float32 array of the program's), and no longer an output of
+  every particle. On MLX a trace's leaves were lazy slices of the
+  outputs, each read a GPU evaluation: 3000 particles with every trace's
+  slope read took 423 → 13 ms, 30000 took 4.6 → 0.39 s, and `:metal`
+  completes now. On the JVM backend 30000 particles take 91 → 34 ms.
+  Results otherwise as before: the handler's bit for bit on the JVM
+  backend, to float32 rounding on MLX (a test of its own now).
 
 ## [1.0.0] - 2026-10-26
 
