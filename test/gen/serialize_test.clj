@@ -12,6 +12,9 @@
    - Non-numeric and map-valued choices, keys and EDN data round-trip, and
      the text of a choice map is a function of its value.
    - Encapsulated randomness is refused at write and at read.
+   - Printed text reads back too: an array prints as it is written, and a
+     choice map, a key and EDN data holding them print as text that reads
+     back as them.
    - Loud errors: unprintable values with their paths, unknown tags,
      malformed tags and text, and rebuilds that are not exact.
    Each property was checked against a planted bug, noted in place."
@@ -106,16 +109,34 @@
           (#{:int32 :int64 :uint32} dtype) (long (.nextInt r))
           :else (.nextGaussian r))))
 
-(defspec arrays-round-trip-bit-for-bit 200
-  (prop/for-all [dtype (tcg/elements (dtypes))
-                 shape (tcg/vector (tcg/choose 0 3) 0 3)
-                 seed tcg/nat]
+(def ^:private gen-array
+  "An array of a dtype the backend has, of rank 0 to 3 and sizes 0 to 3,
+   its values random-value's."
+  (tcg/let [dtype (tcg/elements (dtypes))
+            shape (tcg/vector (tcg/choose 0 3) 0 3)
+            seed tcg/nat]
     (let [r (java.util.Random. seed)
-          data (vec (repeatedly (reduce clojure.core/* 1 shape) #(random-value r dtype)))
-          x (if (empty? shape)
-              (array/array (first data) {:dtype dtype})
-              (array/reshape (array/array data {:dtype dtype}) shape))]
-      (same? x (round-trip x)))))
+          data (vec (repeatedly (reduce clojure.core/* 1 shape) #(random-value r dtype)))]
+      (if (empty? shape)
+        (array/array (first data) {:dtype dtype})
+        (array/reshape (array/array data {:dtype dtype}) shape)))))
+
+(defspec arrays-round-trip-bit-for-bit 200
+  (prop/for-all [x gen-array]
+    (same? x (round-trip x))))
+
+;; genclj-5k7q (the book's chapter 015): an array printed as
+;; #gen/array[:float64 [...]], under the tag that read takes as a map of
+;; :dtype, :shape and :data, so a printed choice map with an array leaf did
+;; not read back. Planted bug (2026-11-04): the old print method fails
+;; this, the printed choice maps and EDN data below (2 failures, 6
+;; errors).
+(defspec printed-arrays-read-back-bit-for-bit 200
+  (prop/for-all [x gen-array]
+    (and (same? x (serialize/read (pr-str x)))
+         ;; one form: a backend array prints as it is written (a host
+         ;; number, the JVM backend's 0-d array, as EDN's number)
+         (or (not (array/backend-array? x)) (= (serialize/write x) (pr-str x))))))
 
 (deftest special-floats-round-trip-in-every-float-dtype
   (doseq [dtype (filter #{:float16 :bfloat16 :float32 :float64} (dtypes))]
@@ -156,8 +177,12 @@
 
 (deftest an-array-is-written-with-its-dtype-and-shape
   (let [x (array/array [[1 2 3] [4 5 6]] {:dtype :int32})]
-    (is (= "#gen/array {:dtype :int32, :shape [2 3], :data [1 2 3 4 5 6]}" (serialize/write x))))
-  (is (= [0 3] (array/shape (round-trip (array/zeros [0 3])))) "an empty array keeps its shape"))
+    (is (= "#gen/array {:dtype :int32, :shape [2 3], :data [1 2 3 4 5 6]}" (serialize/write x)))
+    (is (= (serialize/write x) (pr-str x)) "and prints so")
+    (is (= "#gen/array {:dtype :int32, :shape [2 3], :data [1 2 3 ...]}" (binding [*print-length* 3] (pr-str x)))
+        "*print-length* shortens the printed elements, not the shape"))
+  (is (= [0 3] (array/shape (round-trip (array/zeros [0 3])))) "an empty array keeps its shape")
+  (is (= [0 3] (array/shape (serialize/read (pr-str (array/zeros [0 3]))))) "printed too"))
 
 ;; ---------------------------------------------------------------------------
 ;; Choice maps and EDN data
@@ -169,7 +194,8 @@
   (prop/for-all [[_ gf args] rm/gen-model
                  seed tcg/nat]
     (let [c (:choices (gfi/simulate gf args (rng/key seed)))]
-      (same? c (round-trip c)))))
+      (and (same? c (round-trip c))
+           (same? c (serialize/read (pr-str c)))))))
 
 (dist labeled [labels probs] (nth labels (d/categorical probs)))
 
@@ -190,10 +216,16 @@
              (cm/set-choice cm/EMPTY [] {:a 1})
              (cm/choicemap [:y 0] 1 [:y 1] 2 "s" 3 'sym 4 1.5 5)
              (cm/choicemap :pair [(array/array [1.0 2.0]) true] :v (array/array [0.5 -0.0]))
-             (cm/set-submap (cm/choicemap :x 1.0) :empty cm/EMPTY)]]
-    (is (same? c (round-trip c)) (pr-str c)))
+             (cm/set-submap (cm/choicemap :x 1.0) :empty cm/EMPTY)
+             (cm/choicemap [:a :b :c] (array/array [[1 2] [3 4]] {:dtype :int32}) [:a :d] (array/array [true false])
+                           [:a :b :e] (array/array 0.25) :k (rng/key 5))]]
+    (is (same? c (round-trip c)) (pr-str c))
+    (is (same? c (serialize/read (pr-str c))) (str "printed: " (pr-str c))))
+  ;; Planted bug (2026-11-04): a node printed as its to-map, its leaf's
+  ;; map untagged, fails the printed round trip of :m above, and this
   (testing "a leaf whose value is a map is tagged, so it reads back as a value"
     (is (= "#gen/choicemap {:m #gen/value {:a 1}}" (serialize/write (cm/choicemap :m (cm/->Value {:a 1})))))
+    (is (= "#gen/choicemap {:m #gen/value {:a 1}}" (pr-str (cm/choicemap :m (cm/->Value {:a 1})))) "printed so too")
     (is (cm/has-value? (cm/get-submap (round-trip (cm/choicemap :m (cm/->Value {:a 1}))) :m)))))
 
 ;; Planted bug (2026-10-23): a node's entries in the map's own order, not
@@ -213,6 +245,7 @@
            :array (array/array [[1.0 2.0]])}
         y (round-trip x)]
     (is (same? x y))
+    (is (same? x (serialize/read (pr-str x))) "printed")
     (is (list? (:list y)))
     (is (rng/key? (:key y)))
     (is (= (rng/key-data (:key x)) (rng/key-data (:key y))))

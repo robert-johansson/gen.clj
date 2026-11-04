@@ -475,9 +475,19 @@
 ;; Printing
 ;; ---------------------------------------------------------------------------
 
+(defn- printed
+  "The node cm as the nested map it prints as, to-map's but that a leaf
+   whose value is a map stays a Value, printed tagged #gen/value, as
+   gen.serialize writes it: untagged, its text would read back as a node."
+  [cm]
+  (into {} (map (fn [[k v]] [k (cond (not (has-value? v)) (printed v)
+                                     (map? (-get-value v)) v
+                                     :else (-get-value v))]))
+        (-submaps cm)))
+
 (defmethod print-method Node [cm ^java.io.Writer w]
   (.write w "#gen/choicemap ")
-  (print-method (to-map cm) w))
+  (print-method (printed cm) w))
 
 (defmethod print-method Value [cm ^java.io.Writer w]
   (.write w "#gen/value ")

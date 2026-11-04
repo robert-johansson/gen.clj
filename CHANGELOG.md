@@ -38,6 +38,16 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Arrays print as gen.serialize writes them, so printed text reads
+  back** (the backends' print methods, gen.choicemap; genclj-5k7q). A
+  backend array printed as `#gen/array[:float64 [[1.0 2.0]]]`, under the
+  tag that `serialize/read` takes as a map, so `(serialize/read (pr-str
+  c))` threw on a choice map with an array leaf. It prints as
+  `#gen/array {:dtype :float64, :shape [1 2], :data [1.0 2.0]}`, write's
+  text (its elements row-major, which `*print-length*` shortens), and a
+  choice map's leaf whose value is a map prints tagged `#gen/value`, as
+  written, where it printed as a node. A printed array, choice map or key
+  reads back. gen.serialize's text is unchanged.
 - **Parity with Gen.jl 0.4.9** (genclj-u420). Its fixes (#571: the
   general trace translator's forward score, elliptical slice's threshold)
   were gen.clj's from the port, and its new tests are ported; its hmc

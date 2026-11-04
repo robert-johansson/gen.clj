@@ -60,6 +60,7 @@
                            native/build/<platform>/lib; MlxRuntime)"
   {:api :internal}
   (:require [gen.array.dtype :as dt]
+            [gen.array.host :as host]
             [gen.array.memory :as reservations]
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]
@@ -1621,8 +1622,5 @@
   (first (swap-vals! budget-limits merge (select-keys limits [:bytes :headroom]))))
 
 (defmethod print-method MlxArray [^MlxArray x ^java.io.Writer w]
-  (.write w "#gen/array[")
-  (print-method (.-dtype x) w)
-  (.write w " ")
-  (print-method (to-host x) w)
-  (.write w "]"))
+  ;; as gen.serialize writes it, so that the text reads back
+  (host/print-array (.-dtype x) (.-shape x) (to-host x) w))

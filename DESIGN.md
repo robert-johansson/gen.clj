@@ -2759,6 +2759,13 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       fold-in is one-way, so write-trace refuses an ω anywhere. The hook
       (`:omegas` for generate, an ICalls `-calls`) is genclj-t8uj.
     - `gen.array/backend-name` is public, for the recorded numerics.
+    - One `#gen/array` form for printing and writing (genclj-5k7q,
+      PROVISIONAL, 2026-11-04): a backend array prints as `write` writes
+      it, and a choice map's leaf whose value is a map prints tagged
+      `#gen/value`, so printed text reads back. The map form was kept over
+      the printed `#gen/array[:float64 [[…]]]`, whose nested vectors lose
+      the shape of an empty array ([0 3] prints as []), and so files
+      written before read unchanged.
   - **NUTS and Stan's warmup (genclj-tvc0).** `mcmc/nuts` is one
     transition of Stan's base_nuts: multinomial sampling within subtrees,
     biased progressive sampling between each new subtree and the
