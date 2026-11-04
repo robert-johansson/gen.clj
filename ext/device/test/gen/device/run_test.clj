@@ -14,6 +14,7 @@
             [gen.inference.device :as device]
             [gen.inference.importance :as is]
             [gen.inference.kernel :as kernel]
+            [gen.inference.mcmc :as mcmc]
             [gen.parity-bench :as pb]
             [gen.random :as rng]
             [gen.selection :as sel]))
@@ -22,11 +23,18 @@
 
 (defn- leaves-of [t] (mapv (fn [[p v]] [p (array/->clj v)]) (cm/leaves (:choices t))))
 
+(def ^:private dense-metric
+  "A dense inverse metric for the parity model's slope and intercept: a
+   staged chain takes its factors as constants."
+  (mcmc/dense-inv-metric [:slope :intercept] [[0.004 -0.01] [-0.01 0.05]]))
+
 (deftest kernel-run-on-device-is-the-handlers
   (if-not jvm?
     (println "gen.device.run-test: the comparison runs on the JVM backend")
     (doseq [m [:vector :static]
-            [kname k] [[:mala (kernel/mala pb/selection pb/tau)] [:hmc (kernel/hmc pb/selection {:L 8 :eps pb/eps})]]]
+            [kname k] [[:mala (kernel/mala pb/selection pb/tau)] [:hmc (kernel/hmc pb/selection {:L 8 :eps pb/eps})]
+                       [:hmc-dense (kernel/hmc pb/selection {:L 8 :eps pb/eps :inv-metric dense-metric})]
+                       [:mala-dense (kernel/mala pb/selection pb/tau {:inv-metric dense-metric})]]]
       (testing [m kname]
         (let [[model args obs] (pb/models m)
               tr (:trace (gfi/generate model args obs (rng/key 0)))
@@ -80,7 +88,8 @@
   (if-not (= :float32 (:float (array/defaults array/*backend*)))
     (println "gen.device.run-test: the backend draws float64, the float32 comparison skips (-Dgen.backend=mlx runs it)")
     (doseq [m [:vector :static]
-            [kname k] [[:mala (kernel/mala pb/selection pb/tau)] [:hmc (kernel/hmc pb/selection {:L 8 :eps pb/eps})]]]
+            [kname k] [[:mala (kernel/mala pb/selection pb/tau)] [:hmc (kernel/hmc pb/selection {:L 8 :eps pb/eps})]
+                       [:hmc-dense (kernel/hmc pb/selection {:L 8 :eps pb/eps :inv-metric dense-metric})]]]
       (testing [m kname]
         (let [[model args obs] (pb/models m)
               tr (:trace (gfi/generate model args obs (rng/key 0)))

@@ -3372,6 +3372,20 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       so. The kernels only (HMC, MALA, NUTS); Stan's dense_e warmup
       adaptation and MALA's step-size adaptation are beans of their own,
       after 1.1.0.
+      As built (2026-11-04, the lead; the constructor's name and
+      arguments confirmed by the owner the same day, a new stable var):
+      `(mcmc/dense-inv-metric addresses matrix)`, a record whose factories
+      are ^:no-doc, its addresses (or paths) the rows' order; a bare `[n
+      n]` matrix only for one selected choice of n elements (unless the
+      choice has that shape: its variances), so a Gen.jl model with a
+      matrix over several choices meets a loud error naming the dense
+      form. Refused unless finite, symmetric within Stan's
+      check_symmetric (1e-8, absolute) and positive definite. The
+      factors (L with M⁻¹ = L·Lᵀ, and L⁻¹) are computed once a move on
+      the matrix's own backend, then made arrays of the current one, so a
+      staged, batched or compiled step takes them as constants (a device
+      run with a dense metric is the handler's bit for bit). nuts' warmup
+      refuses a dense metric unless `:adapt-metric?` is false.
     - **Gen.jl's position step** (its hmc leaves M⁻¹ out, genclj-u420):
       the lead drafts a note with the line and a small example; the owner
       posts it.

@@ -18,6 +18,7 @@
             [gen.inference.kernel :as k]
             [gen.inference.mcmc :as mcmc]
             [gen.inference.mh :as mh]
+            [gen.inference.nuts :as nuts]
             [gen.random :as rng]
             [gen.selection :as sel]))
 
@@ -499,6 +500,190 @@
           (is (= expected (move m)) (pr-str m)))
         (is (= (move 2.0) (move {[:latent :z] 2.0})) "a number for each of its elements")
         (is (= :invalid-inv-metric (:reason (ts/thrown-data (move [0.5 2.0 1.0])))) "another size")))))
+
+;; ---------------------------------------------------------------------------
+;; A dense metric (genclj-q9ge; Gen.jl 0.4.9's metric, Stan's dense_e)
+;; ---------------------------------------------------------------------------
+
+(def ^:private dense-a
+  "A dense inverse metric M⁻¹ for vector-model's z, correlated."
+  (array/array [[0.6 0.2] [0.2 0.3]]))
+
+(def ^:private z-sel (sel/select [:latent :z]))
+
+(defn- vector-lp-grad
+  "vector-model's log density of z given y2, up to its constant, and its
+   gradient: -½ zᵀΣ0⁻¹z - ½ (y - z)ᵀΣ1⁻¹(y - z)."
+  []
+  (let [p0i (la/inv prior-cov) n1i (la/inv noise-cov)]
+    [(fn [z] (let [r (- y2 z)] (* -0.5 (+ (array/sum (* z (array/matmul p0i z))) (array/sum (* r (array/matmul n1i r)))))))
+     (fn [z] (+ (array/negate (array/matmul p0i z)) (array/matmul n1i (- y2 z))))]))
+
+(deftest one-step-by-hand-with-a-dense-metric
+  ;; HMC's momenta from N(0, M) as L⁻ᵀ·z (M⁻¹ = L·Lᵀ), positions moving by
+  ;; M⁻¹·p, kinetic energy ½ pᵀM⁻¹p; MALA's proposal N(v + tau·M⁻¹∇, 2
+  ;; tau·M⁻¹) with its densities' quadratic forms. Planted (2026-11-04):
+  ;; momenta L·z, Gen.jl 0.4.9's position step without M⁻¹, and MALA's
+  ;; quadratic form without L⁻¹ each fail
+  (let [z0 (array/array [0.4 -0.3])
+        tr (start-at vector-model (cm/choicemap [:latent :z] z0 :y y2))
+        [lp grad] (vector-lp-grad)
+        l (la/cholesky dense-a)
+        moved (fn [r] ((:trace r) [:latent :z]))]
+    (testing "HMC"
+      (let [key (rng/key 77) eps 0.35 half (/ eps 2)
+            p0 (la/solve-triangular l (rng/normal (first (rng/split key 3)) [2]) {:transpose? true})
+            [z p] (loop [i 0 z z0 p p0]
+                    (if (clojure.core/< i 3)
+                      (let [p (+ p (* half (grad z)))
+                            z (+ z (* eps (array/matmul dense-a p)))]
+                        (recur (inc i) z (+ p (* half (grad z)))))
+                      [z p]))
+            kinetic (fn [p] (* 0.5 (array/sum (* p (array/matmul dense-a p)))))
+            log-alpha (+ (- (lp z) (lp z0)) (- (kinetic p0) (kinetic p)))
+            r (mcmc/hmc tr z-sel {:L 3 :eps eps :inv-metric dense-a} key)]
+        (is (ts/close? log-alpha (:log-alpha r) {:atol (ts/tol 1e-9)}))
+        (is (ts/close? (if (:accepted? r) z z0) (moved r)))))
+    (testing "MALA"
+      (let [key (rng/key 78) tau 0.25
+            noise (rng/normal (first (rng/split key 3)) [2])
+            fwd (+ z0 (* tau (array/matmul dense-a (grad z0))))
+            z (+ fwd (* (Math/sqrt (* 2 tau)) (array/matmul l noise)))
+            bwd (+ z (* tau (array/matmul dense-a (grad z))))
+            ai (la/inv dense-a)
+            q (fn [x mu] (let [r (- x mu)] (* (/ -1.0 (* 4 tau)) (array/sum (* r (array/matmul ai r))))))
+            log-alpha (+ (- (lp z) (lp z0)) (- (q z0 bwd) (q z fwd)))
+            r (mcmc/mala tr z-sel tau {:inv-metric dense-a :key key})]
+        (is (ts/close? log-alpha (:log-alpha r) {:atol (ts/tol 1e-9)}))
+        (is (ts/close? (if (:accepted? r) z z0) (moved r)))))))
+
+(def ^:private correlated
+  "x ~ N(0, 1), y ~ N(0.9x, √0.19): (x, y) ~ N(0, [[1 0.9] [0.9 1]])."
+  (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal (* 0.9 x) (Math/sqrt 0.19))))))
+
+(deftest a-dense-metric-is-labeled-by-address
+  (let [tr (start-at correlated (cm/choicemap :x 0.3 :y -0.2))
+        xy (sel/select :x :y)
+        sigma [[1.0 0.9] [0.9 1.0]]
+        result (fn [r] [(:accepted? r) (some-> (:log-alpha r) ts/number) (ts/host (cm/to-map (:choices (:trace r))))])]
+    (testing "every form of one dense metric makes the same move"
+      (doseq [key (rng/split (rng/key 84) 3)
+              [kname move] [[:hmc (fn [s m] (mcmc/hmc tr s {:L 4 :eps 0.4 :inv-metric m} key))]
+                            [:mala (fn [s m] (mcmc/mala tr s 0.3 {:inv-metric m :key key}))]
+                            [:nuts (fn [s m] (mcmc/nuts tr s {:eps 0.4 :max-depth 4 :inv-metric m} key))]]]
+        (let [expected (result (move xy (mcmc/dense-inv-metric [:x :y] sigma)))]
+          (doseq [[label s m] [["the addresses in the other order" xy (mcmc/dense-inv-metric [:y :x] [[1.0 0.9] [0.9 1.0]])]
+                               ["an array" xy (mcmc/dense-inv-metric [:x :y] (array/array sigma))]
+                               ["paths" xy (mcmc/dense-inv-metric [[:x] [:y]] sigma)]
+                               ["the selection in the other order" (sel/select :y :x) (mcmc/dense-inv-metric [:x :y] sigma)]]]
+            (is (= expected (result (move s m))) [kname label])))))
+    (testing "the order is the addresses', not the selection's"
+      (let [unequal (gen [] (trace :x (d/normal 0 1)) (trace :y (d/normal 0 0.1)))
+            tr (start-at unequal (cm/choicemap :x 0.3 :y -0.02))
+            ;; the diagonal's kinetic energy is a normal's log density, the
+            ;; dense one's a quadratic form: log-alpha agrees to rounding
+            move (fn [m] (result (mcmc/hmc tr xy {:L 4 :eps 0.4 :inv-metric m} (rng/key 85))))
+            [acc la choices] (move {:x 1.0 :y 0.01})
+            [acc' la' choices'] (move (mcmc/dense-inv-metric [:y :x] [[0.01 0.0] [0.0 1.0]]))]
+        (is (= [acc choices] [acc' choices']))
+        (is (ts/close? la la'))
+        (is (not= choices (nth (move (mcmc/dense-inv-metric [:x :y] [[0.01 0.0] [0.0 1.0]])) 2)))))
+    (testing "inv-metric labels it in the selection's order"
+      (let [m (mcmc/inv-metric tr (sel/select :x :y) (mcmc/dense-inv-metric [:y :x] [[2.0 0.5] [0.5 1.0]]))]
+        (is (= [[:x] [:y]] (:addresses m)))
+        (is (ts/close? (array/array [[1.0 0.5] [0.5 2.0]]) (:matrix m)))))
+    (testing "a bare matrix for one choice of n elements, as its dense-inv-metric"
+      (let [tr (start-at vector-model (cm/choicemap [:latent :z] (array/array [0.4 -0.3]) :y y2))
+            move (fn [m] (result (mcmc/hmc tr z-sel {:L 3 :eps 0.3 :inv-metric m} (rng/key 86))))
+            expected (move (mcmc/dense-inv-metric [[:latent :z]] dense-a))]
+        (is (= expected (move dense-a)))
+        (is (= expected (move (array/->clj dense-a))))
+        (is (not= expected (move [0.6 0.3])) "a vector of n: variances")))))
+
+(deftest a-dense-metric-with-no-correlation-moves-as-the-diagonal-one
+  ;; the same draws, positions and decisions as the diagonal metric of its
+  ;; diagonal: momenta L⁻ᵀ·z = z/√inv, velocity M⁻¹·p = inv ⊙ p. Gen.jl
+  ;; 0.4.9's position step without M⁻¹ (planted, 2026-11-04) fails it
+  (let [unequal (gen [] (trace :slope (d/normal 0 0.1)) (trace :intercept (d/normal 0 10)))
+        tr (start-at unequal (cm/choicemap :slope 0.05 :intercept 3.0))
+        s (sel/select :slope :intercept)
+        diag {:slope 0.01 :intercept 100.0}
+        dense (mcmc/dense-inv-metric [:slope :intercept] [[0.01 0.0] [0.0 100.0]])
+        read (fn [r] [(:accepted? r) (ts/host (cm/to-array (:choices (:trace r))))])]
+    (doseq [key (rng/split (rng/key 87) 4)
+            [kname move] [[:hmc (fn [m] (mcmc/hmc tr s {:L 5 :eps 0.5 :inv-metric m} key))]
+                          [:mala (fn [m] (mcmc/mala tr s 0.4 {:inv-metric m :key key}))]
+                          [:nuts (fn [m] (mcmc/nuts tr s {:eps 0.5 :max-depth 5 :inv-metric m} key))]]]
+      (let [[acc-d xs-d] (read (move diag))
+            [acc-m xs-m] (read (move dense))]
+        (is (= acc-d acc-m) (str kname))
+        (is (ts/close? (array/array xs-d) (array/array xs-m)) (str kname))))))
+
+(deftest a-dense-metric-is-checked
+  (let [tr (start-at correlated (cm/choicemap :x 0.3 :y -0.2))
+        xy (sel/select :x :y)
+        reason (fn [m] (:reason (ts/thrown-data (mcmc/hmc tr xy {:inv-metric m} (rng/key 88)))))]
+    (doseq [[label m r] [["not symmetric" (mcmc/dense-inv-metric [:x :y] [[1.0 0.5] [0.4 1.0]]) :invalid-inv-metric]
+                         ["not positive definite" (mcmc/dense-inv-metric [:x :y] [[1.0 2.0] [2.0 1.0]]) :invalid-inv-metric]
+                         ["not finite" (mcmc/dense-inv-metric [:x :y] [[1.0 ##NaN] [##NaN 1.0]]) :invalid-inv-metric]
+                         ["another size" (mcmc/dense-inv-metric [:x :y] [[1.0 0.0 0.0] [0.0 1.0 0.0] [0.0 0.0 1.0]]) :invalid-inv-metric]
+                         ["an address missing" (mcmc/dense-inv-metric [:x] [[1.0]]) :invalid-inv-metric]
+                         ["an address not selected" (mcmc/dense-inv-metric [:x :y :w] [[1.0 0.0 0.0] [0.0 1.0 0.0] [0.0 0.0 1.0]]) :invalid-inv-metric]
+                         ["an address twice" (mcmc/dense-inv-metric [:x :x] [[1.0 0.0] [0.0 1.0]]) :invalid-inv-metric]
+                         ["a bare matrix for two choices" [[1.0 0.9] [0.9 1.0]] :unlabeled-inv-metric]]]
+      (is (= r (reason m)) label))
+    (testing "the refusal of a bare matrix names the dense form"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"dense-inv-metric"
+                            (mcmc/hmc tr xy {:inv-metric [[1.0 0.9] [0.9 1.0]]} (rng/key 88)))))
+    (testing "dense-inv-metric's own arguments"
+      (is (= :invalid-inv-metric (:reason (ts/thrown-data (mcmc/dense-inv-metric [:x :y] [1.0 2.0])))) "not a matrix")
+      (is (= :invalid-inv-metric (:reason (ts/thrown-data (mcmc/dense-inv-metric :x [[1.0]])))) "not a vector of addresses"))
+    (testing "Stan's warmup adapts a diagonal metric: a dense one is kept as given, or refused"
+      (let [m (mcmc/dense-inv-metric [:x :y] [[1.0 0.9] [0.9 1.0]])]
+        (is (= :dense-metric-adaptation (:reason (ts/thrown-data (nuts/adapt tr xy {:warmup 30 :inv-metric m} (rng/key 89))))))
+        (let [r (nuts/adapt tr xy {:warmup 30 :inv-metric m :adapt-metric? false} (rng/key 89))]
+          (is (instance? gen.inference.mcmc.DenseInvMetric (:inv-metric r)))
+          (is (ts/close? (array/array [[1.0 0.9] [0.9 1.0]]) (:matrix (:inv-metric r)))))))))
+
+(deftest compiled-kernels-move-as-plain-ones-with-a-dense-metric
+  (let [tr (start-at vector-model (cm/choicemap [:latent :z] (array/array [0.4 -0.3]) :y y2))]
+    (doseq [[kname move] [[:hmc (fn [opts key] (mcmc/hmc tr z-sel (merge {:L 4 :eps 0.3 :inv-metric dense-a} opts) key))]
+                          [:mala (fn [opts key] (mcmc/mala tr z-sel 0.3 (assoc opts :key key :inv-metric dense-a)))]
+                          [:nuts (fn [opts key] (mcmc/nuts tr z-sel (merge {:eps 0.3 :max-depth 4 :inv-metric dense-a} opts) key))]]
+            k (range 4)]
+      (let [plain (move nil (rng/key k))
+            compiled (move {:compile? true} (rng/key k))]
+        (is (= (:accepted? plain) (:accepted? compiled)) (str kname))
+        (is (ts/close? (:score (:trace plain)) (:score (:trace compiled))) (str kname))))))
+
+(defn- vector-stationary?
+  "Does one step of step from 4000 exact posterior draws of vector-model's
+   z keep both coordinates' posterior?"
+  [step]
+  (let [n 4000
+        [k1 k2] (rng/split (rng/key 24))
+        draws (array/->clj (+ posterior-mean (array/matmul (rng/normal k1 [n 2]) (array/transpose (la/cholesky posterior-cov)))))
+        ends (map (fn [z key] (array/->clj ((step (start-at vector-model (cm/choicemap [:latent :z] (array/array z) :y y2)) key)
+                                            [:latent :z])))
+                  draws (rng/split k2 n))]
+    (every? true? (for [i [0 1]]
+                    (matches? (map #(nth % i) ends)
+                              (array/item (array/take posterior-mean i))
+                              (array/item (array/take (array/take posterior-cov i) i)))))))
+
+(deftest ^:slow a-dense-metric-targets-the-posterior
+  ;; M⁻¹ the posterior's covariance: chains from a fixed start reach it, and
+  ;; one step from it keeps it. Planted (2026-11-04): momenta L·z in place
+  ;; of L⁻ᵀ·z fails HMC's and NUTS's; MALA's quadratic form without L⁻¹
+  ;; fails MALA's
+  (let [m (array/->clj posterior-cov)
+        start (cm/choicemap [:latent :z] (array/array [2.0 2.0]) :y y2)]
+    (doseq [[kname step] [[:hmc (fn [tr key] (:trace (mcmc/hmc tr z-sel {:L 5 :eps 0.5 :inv-metric m} key)))]
+                          [:mala (fn [tr key] (:trace (mcmc/mala tr z-sel 0.4 {:inv-metric m :key key})))]
+                          [:nuts (fn [tr key] (:trace (mcmc/nuts tr z-sel {:eps 0.5 :max-depth 5 :inv-metric m} key)))]]]
+      (testing (str kname)
+        (is (vector-stationary? step) "stationary")
+        (is (vector-converges? vector-model start #(% [:latent :z]) step) "converges")))))
 
 (deftest a-move-that-changes-the-structure-is-named
   ;; :extra exists only for x > 0, and the moves carry x across 0 (review 3:

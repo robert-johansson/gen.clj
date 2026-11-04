@@ -33,11 +33,15 @@
    in order (flat, as cm/to-array flattens, or in the choice's shape): for
    more choices its order would be a guess, so it is a loud error.
    (inv-metric trace selection m) gives a metric labeled so, the form
-   gen.inference.nuts returns its adapted one in. A dense metric (planned)
-   will be a value of its own, a matrix with its addresses' order. Momenta
-   are drawn with those precisions and a position moves by inv-metric ⊙
-   momentum, so variances that match the target's make its scales alike
-   (gen.inference.nuts adapts them). A proposal whose
+   gen.inference.nuts returns its adapted one in. A dense metric is a
+   value of its own, (dense-inv-metric addresses matrix): the matrix M⁻¹
+   with its rows in the addresses' order (Stan's dense inv_metric; Gen.jl's
+   hmc takes M itself as metric); a bare matrix only when one choice is
+   selected, whose elements it follows. Momenta are drawn from N(0, M) and
+   a position moves by M⁻¹·momentum (inv-metric ⊙ momentum for a diagonal
+   one), so a metric that matches the target's covariance makes its
+   scales and correlations alike (gen.inference.nuts adapts a diagonal
+   one). A proposal whose
    position, momentum, gradient or energy turns non-finite, or where a
    distribution's parameter fails its check, diverged: it is rejected,
    with acceptance 0 (:log-alpha -Inf), and reported as :diverged?
@@ -63,6 +67,7 @@
   (:refer-clojure :exclude [+ - * / < >=])
   (:require [gen.array :as array :refer [+ - * / < >=]]
             [gen.array.batch :as batch]
+            [gen.array.linalg :as la]
             [gen.batched :as batched]
             [gen.choicemap :as cm]
             [gen.dist :as d]
@@ -168,15 +173,135 @@
                       {:reason :invalid-inv-metric :addresses want :missing missing :unexpected unexpected})))
     (array/concatenate (mapv (fn [[p x]] (choice-variances (cm/get-choice m p) x p)) (cm/leaves values)))))
 
-(defn- inverse-metric
-  "The :inv-metric option inv for the selected values (a choice map), flat
-   as v, their to-array: the host number 1.0 (the identity, under which
-   hmc and mala move as they did without one) for nil; one number for all
-   the values; for a choice map or a map, its variance at each address
-   (labeled-variances); for a vector or an array, the variances of the
-   only selected choice, and a loud error when there are more, whose order
-   it would leave to guess. Loud unless every variance is positive and
-   finite."
+(defrecord DenseInvMetric [addresses matrix])
+
+;; dense-inv-metric is the way in, which checks its arguments: the record's
+;; factories stay out of the public surface
+(alter-meta! #'->DenseInvMetric assoc :no-doc true)
+(alter-meta! #'map->DenseInvMetric assoc :no-doc true)
+
+(defn- as-path [a] (if (vector? a) a [a]))
+
+(defn dense-inv-metric
+  "A dense inverse metric for hmc, mala and nuts (their :inv-metric): the
+   matrix M⁻¹ (Stan's dense inv_metric, M the momenta's covariance; Gen.jl's
+   hmc takes M itself as its metric), its rows and columns the selected
+   choices at addresses, in that order, each address's elements flat in
+   row-major order as cm/to-array gives them. An address is a choice's
+   address or its path ([:latent :z]). matrix is an array or nested
+   vectors. The kernels refuse it loudly unless its addresses are the
+   selected choices' and it is finite, symmetric (to Stan's 1e-8) and
+   positive definite."
+  [addresses matrix]
+  (when-not (and (sequential? addresses) (seq addresses))
+    (throw (ex-info (str "dense-inv-metric: the addresses are the selected choices' in the matrix's order, a vector, not "
+                         (pr-str addresses))
+                    {:reason :invalid-inv-metric :addresses addresses})))
+  (let [m (if (array/backend-array? matrix) matrix (array/array matrix))
+        shape (vec (array/shape m))]
+    (when-not (and (= 2 (count shape)) (= (first shape) (second shape)))
+      (throw (ex-info (str "dense-inv-metric: the matrix is square, not of shape " shape)
+                      {:reason :invalid-inv-metric :shape shape})))
+    (->DenseInvMetric (mapv as-path addresses) m)))
+
+(defn- in-values-order
+  "A dense-inv-metric's matrix with its rows and columns in the selected
+   values' order (flat as cm/to-array). Loud unless its addresses are the
+   selected choices', each once, and its size is theirs."
+  [{:keys [addresses matrix]} values]
+  (let [ls (cm/leaves values)
+        want (mapv first ls)
+        repeated (vec (keep (fn [[a n]] (when (clojure.core/> n 1) a)) (frequencies addresses)))
+        missing (vec (remove (set addresses) want))
+        unexpected (vec (remove (set want) addresses))
+        _ (when (or (seq repeated) (seq missing) (seq unexpected))
+            (throw (ex-info (str "A dense :inv-metric's addresses must be the selected choices " want ", each once"
+                                 (when (seq missing) (str "; it lacks " missing))
+                                 (when (seq unexpected) (str "; it has " unexpected ", which are not selected"))
+                                 (when (seq repeated) (str "; it repeats " repeated)))
+                            {:reason :invalid-inv-metric :addresses want :missing missing :unexpected unexpected :repeated repeated})))
+        size-of (into {} (map (fn [[p x]] [p (long (array/size x))])) ls)
+        d (reduce clojure.core/+ 0 (vals size-of))
+        shape (vec (array/shape matrix))
+        _ (when-not (= [d d] shape)
+            (throw (ex-info (str "A dense :inv-metric for the selected choices " want " is " d "×" d ", not " shape)
+                            {:reason :invalid-inv-metric :shape shape :size d})))
+        start (zipmap addresses (reductions clojure.core/+ 0 (map size-of addresses)))
+        idx (vec (mapcat (fn [[p _]] (range (start p) (clojure.core/+ (long (start p)) (long (size-of p))))) ls))]
+    (if (= idx (vec (range d)))
+      matrix
+      (let [i (array/with-backend (array/backend matrix) (array/array idx {:dtype :int32}))]
+        (array/take (array/take matrix i 0) i 1)))))
+
+(def ^:private symmetry-tolerance
+  "How far a dense metric's entries may be from its transpose's: Stan's
+   check_symmetric (CONSTRAINT_TOLERANCE)."
+  1e-8)
+
+(defn- dense-metric
+  "The dense inverse metric m (a matrix in the selected values' order) as
+   the kernels use it, in v's dtype: {:inv M⁻¹ :chol L :chol-inv L⁻¹},
+   M⁻¹ = L·Lᵀ, so that momenta from N(0, M) are L⁻ᵀ·z. Computed on m's own
+   backend, then arrays of the current one: constants of a compiled,
+   staged or batched step. Loud unless m
+   is d×d for the d selected values, finite, symmetric and positive
+   definite."
+  [m v given]
+  (let [d (long (array/size v))
+        dtype (array/dtype v)
+        shape (vec (array/shape m))
+        refuse (fn [why] (throw (ex-info (str "A dense :inv-metric must be " why) {:reason :invalid-inv-metric :inv-metric given})))
+        ;; a factor as an array of the current backend: as it is, or made
+        ;; from its values where the step runs elsewhere (a staged constant)
+        here (fn [x] (if (identical? (array/backend x) array/*backend*) x (array/array (array/->clj x) {:dtype dtype})))]
+    (update-vals
+     (array/with-backend (array/backend m)
+       (when-not (= [d d] shape) (refuse (str d "×" d " for the " d " selected values, not of shape " shape)))
+       (when-not (array/truthy? (array/all (array/isfinite m))) (refuse "finite"))
+       (when-not (array/truthy? (array/<= (array/max (array/abs (- m (array/transpose m)))) symmetry-tolerance))
+         (refuse (str "symmetric (to " symmetry-tolerance ")")))
+       (let [m (array/astype m dtype)
+             l (la/cholesky m)]
+         (when-not (array/truthy? (array/all (array/logical-and (array/isfinite l) (array/> (la/diagonal l) 0))))
+           (refuse "positive definite"))
+         {:inv m :chol l :chol-inv (la/solve-triangular l (array/eye d {:dtype dtype}))}))
+     here)))
+
+(defn- dense-form
+  "The dense inverse metric inv gives for the selected values (a choice
+   map), as a matrix in their order, or nil when it is not dense: a
+   dense-inv-metric's matrix in the values' order; or, when one choice of
+   n elements is selected, a bare matrix of shape [n n] (an array or nested
+   vectors), unless the choice itself has that shape (its variances then)."
+  [inv values]
+  (cond (instance? DenseInvMetric inv) (in-values-order inv values)
+        (or (sequential? inv) (array/backend-array? inv))
+        (let [ls (cm/leaves values)]
+          (when (= 1 (count ls))
+            (let [[_ x] (first ls)
+                  n (long (array/size x))
+                  a (if (sequential? inv) (array/array inv) inv)]
+              (when (and (= [n n] (vec (array/shape a))) (not= [n n] (vec (array/shape x))))
+                a))))
+        :else nil))
+
+(defn- dense? "Is inv (inverse-metric's) a dense metric?" [inv] (map? inv))
+
+(defn- velocity
+  "The velocity of momentum (or gradient) p under the inverse metric inv:
+   inv ⊙ p for a diagonal one, M⁻¹·p for a dense one."
+  [inv p]
+  (if (dense? inv) (array/matmul (:inv inv) p) (* inv p)))
+
+(defn- dense-momenta
+  "Momenta from N(0, M) under a dense inverse metric: L⁻ᵀ·z, z standard
+   normal, M⁻¹ = L·Lᵀ."
+  [inv z]
+  (array/matmul (array/transpose (:chol-inv inv)) z))
+
+(defn- diagonal-metric
+  "inverse-metric for a diagonal metric: its variances flat as v, or one
+   number for every value."
   [inv values v]
   (let [m (cond (nil? inv) 1.0
                 (one-number? inv) inv
@@ -189,6 +314,8 @@
                     (throw (ex-info (str ":inv-metric as a vector or array leaves its order to guess for the "
                                          (count ls) " selected choices " paths
                                          ": give a variance for each by address, as a choice map or a map"
+                                         (when (= 2 (count (array/shape (if (sequential? inv) (array/array inv) inv))))
+                                           ", or a dense metric with its addresses' order, (mcmc/dense-inv-metric addresses matrix)")
                                          (when (<= (count paths) 4)
                                            (str " such as " (pr-str (apply array-map (mapcat (fn [p] [(address-key p) 1.0]) paths))))))
                                     {:reason :unlabeled-inv-metric :inv-metric inv :addresses paths}))))
@@ -201,17 +328,36 @@
                       {:reason :invalid-inv-metric :inv-metric inv})))
     m))
 
+(defn- inverse-metric
+  "The :inv-metric option inv for the selected values (a choice map), flat
+   as v, their to-array: the host number 1.0 (the identity, under which
+   hmc and mala move as they did without one) for nil; one number for all
+   the values; for a choice map or a map, its variance at each address
+   (labeled-variances); for a vector or an array, the variances of the
+   only selected choice, and a loud error when there are more, whose order
+   it would leave to guess. Loud unless every variance is positive and
+   finite. A dense metric (a dense-inv-metric, or a bare [n n] matrix for
+   one choice of n elements) is dense-metric's map instead."
+  [inv values v]
+  (if-let [m (dense-form inv values)]
+    (dense-metric m v inv)
+    (diagonal-metric inv values v)))
+
 (defn inv-metric
-  "The diagonal inverse metric that hmc, mala and nuts read from the
-   :inv-metric option m (any form they take, nil the identity) for the
-   selection at trace, labeled: a choice map with the selected choices'
-   addresses, each holding its variances in the choice's shape (a host
-   number for a scalar choice on the JVM backend). gen.inference.nuts
-   returns its metrics so. Loud for a metric the kernels refuse."
+  "The inverse metric that hmc, mala and nuts read from the :inv-metric
+   option m (any form they take, nil the identity) for the selection at
+   trace, labeled: for a diagonal one, a choice map with the selected
+   choices' addresses, each holding its variances in the choice's shape (a
+   host number for a scalar choice on the JVM backend), the form
+   gen.inference.nuts returns its metrics in; for a dense one, a
+   dense-inv-metric with the selected choices' paths in their order. Loud
+   for a metric the kernels refuse."
   [trace selection m]
   (let [[proto v] (flat-values trace selection)
         inv (inverse-metric m proto v)]
-    (cm/from-array proto (if (array/host? inv) (array/full (array/shape v) inv {:dtype (array/dtype v)}) inv))))
+    (if (dense? inv)
+      (->DenseInvMetric (mapv first (cm/leaves proto)) (:inv inv))
+      (cm/from-array proto (if (array/host? inv) (array/full (array/shape v) inv {:dtype (array/dtype v)}) inv)))))
 
 (def ^:private compiled-steps
   "Compiled kernel steps by kernel and settings, model, arguments and choice
@@ -316,7 +462,7 @@
   "MALA's proposal as a function of arrays only: [v noise inv others] →
    [v' log q(v | v') - log q(v' | v) diverged start-ok lp lp'],
    preconditioned by the inverse metric inv (v' ~ N(v + tau·inv ⊙ ∇,
-   2 tau·inv)), diverged true when v', the gradients or the densities are
+   2 tau·inv); a dense one, N(v + tau·M⁻¹∇, 2 tau·M⁻¹)), diverged true when v', the gradients or the densities are
    not finite (or a parameter fails its check at v', tried), start-ok
    whether the log density and its gradient at v are, lp and lp' the log
    densities at v and v'. The reverse gradient is taken at v' only when v'
@@ -328,15 +474,23 @@
         tried-value-and-grad (tried value-and-grad nan-value-and-grad)
         root-2tau (Math/sqrt (* 2.0 (double tau)))]
     (fn [v noise inv others]
-      (let [sd (* root-2tau (array/sqrt inv))
+      (let [dense (dense? inv)
+            sd (when-not dense (* root-2tau (array/sqrt inv)))
+            ;; N(0, 2 tau·M⁻¹): sd ⊙ noise, or √(2 tau)·L·noise with M⁻¹ = L·Lᵀ
+            step (if dense (* root-2tau (array/matmul (:chol inv) noise)) (* sd noise))
+            ;; log N(x; mu, 2 tau·M⁻¹), dense up to the constant both directions share
+            q-lp (if dense
+                   (let [scale (/ -1.0 (* 4.0 (double tau)))]
+                     (fn [x mu] (let [r (array/matmul (:chol-inv inv) (- x mu))] (* scale (array/sum (* r r))))))
+                   (fn [x mu] (normal-lp x mu sd)))
             [lp g] (value-and-grad v others)
-            fwd-mu (+ v (* tau (* inv g)))
-            v' (+ fwd-mu (* sd noise))
+            fwd-mu (+ v (* tau (velocity inv g)))
+            v' (+ fwd-mu step)
             ok (finite g v')
             v' (array/where ok v' v)
             [lp' g'] (tried-value-and-grad v' others)
-            bwd-mu (+ v' (* tau (* inv g')))
-            log-q (- (normal-lp v bwd-mu sd) (normal-lp v' fwd-mu sd))]
+            bwd-mu (+ v' (* tau (velocity inv g')))
+            log-q (- (q-lp v bwd-mu) (q-lp v' fwd-mu))]
         [v' log-q (array/logical-not (array/logical-and ok (finite g' log-q))) (finite lp g) lp lp']))))
 
 (defn- options
@@ -377,7 +531,8 @@
   "Metropolis-adjusted Langevin: propose v' ~ N(v + tau·∇, √(2 tau)) for the
    selected choices v, with the reverse move's density from the gradient at
    v'. The last argument is a key or an options map: :key, :inv-metric (the
-   identity; with variances M⁻¹, v' ~ N(v + tau·M⁻¹∇, 2 tau·M⁻¹)), and
+   identity; with variances M⁻¹, or a dense M⁻¹ (dense-inv-metric),
+   v' ~ N(v + tau·M⁻¹∇, 2 tau·M⁻¹)), and
    :compile? (false) to compute the proposal and its densities as one
    compiled function, as hmc's."
   ([trace selection tau] (mala trace selection tau nil))
@@ -401,7 +556,7 @@
     (fn [v p g eps inv others]
       (let [half (/ eps 2.0)
             p-half (+ p (* half g))
-            v' (+ v (* eps (* inv p-half)))
+            v' (+ v (* eps (velocity inv p-half)))
             ok (finite p-half v')
             v' (array/where ok v' v)
             [lp g'] (value-and-grad v' others)
@@ -436,10 +591,14 @@
   (let [[k-momenta _ k-accept] (rng/split key 3)
         [proto v others] (flat-values trace selection)
         inv (inverse-metric inv-metric proto v)
-        ;; the momenta's scale, √M
-        sd (/ 1.0 (array/sqrt inv))
-        kinetic (fn [p] (normal-lp p 0.0 sd))
-        p0 (* sd (rng/normal k-momenta (array/shape v)))
+        z (rng/normal k-momenta (array/shape v))
+        ;; momenta from N(0, M) and their log density: √M ⊙ z for a
+        ;; diagonal metric, L⁻ᵀ·z for a dense one (whose density's constant
+        ;; cancels in the accept ratio)
+        [p0 kinetic] (if (dense? inv)
+                       [(dense-momenta inv z) (fn [p] (* -0.5 (array/sum (* p (velocity inv p)))))]
+                       (let [sd (/ 1.0 (array/sqrt inv))]
+                         [(* sd z) (fn [p] (normal-lp p 0.0 sd))]))
         build #(leapfrogs (:gen-fn trace) (:args trace) proto L)
         ;; the L steps as a function of the selected values, compiled or
         ;; not: a trace is updated once, at the end
@@ -480,7 +639,8 @@
 (defn hmc
   "Hamiltonian Monte Carlo on the selected choices: L leapfrog steps of size
    eps, with momenta drawn from N(0, M), M the inverse of :inv-metric (the
-   identity by default: standard normal momenta). The third argument is an
+   identity by default: standard normal momenta; diagonal, or dense with
+   dense-inv-metric, a position then moving by M⁻¹·momentum). The third argument is an
    options map or a key, and a key may follow the options. Options: :L
    (10), :eps (0.1), :inv-metric, :jitter (0): each transition steps by
    eps·(1 + jitter·(2u - 1)), u uniform, Stan's step-size jitter, which
@@ -568,7 +728,7 @@
   (let [step (leapfrog (array/value-and-grad (log-density gf args proto)))]
     (fn [v p g eps inv others]
       (let [[v p g lp ok] (step v p g eps inv others)
-            sharp (* inv p)]
+            sharp (velocity inv p)]
         [v p g sharp (array/where ok (energy lp p sharp) ##Inf)]))))
 
 (defn- continuing?
@@ -678,7 +838,8 @@
    progressive sampling, which favours the new subtree. A subtree that
    diverges or turns within itself is left out. The third argument is an
    options map or a key, and a key may follow the options. Options: :eps
-   (0.1), :max-depth (10), :inv-metric, :jitter (0, as hmc's), :key,
+   (0.1), :max-depth (10), :inv-metric (diagonal or dense, as hmc's),
+   :jitter (0, as hmc's), :key,
    :compile? (false): run each leapfrog step as one compiled function (as
    hmc's, the tree's logic on the host). The trace is updated once, at the
    end.
@@ -707,8 +868,9 @@
          inv (inverse-metric inv-metric proto v)
          [lp g] ((array/value-and-grad (log-density (:gen-fn trace) (:args trace) proto)) v others)
          _ (check-start! "nuts" (finite lp g) trace selection)
-         p (/ (rng/normal k-momenta (array/shape v)) (array/sqrt inv))
-         sharp (* inv p)
+         z (rng/normal k-momenta (array/shape v))
+         p (if (dense? inv) (dense-momenta inv z) (/ z (array/sqrt inv)))
+         sharp (velocity inv p)
          z0 {:v v :p p :g g :sharp sharp :h (double (array/item (energy lp p sharp)))}
          build #(nuts-step (:gen-fn trace) (:args trace) proto)
          plain (build)

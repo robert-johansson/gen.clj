@@ -38,6 +38,25 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **A dense metric for hmc, mala and nuts** (`gen.inference.mcmc`, Gen.jl
+  0.4.9's #559; DESIGN §9, owner, 2026-11-04; genclj-q9ge).
+  `:inv-metric` takes a dense M⁻¹ (Stan's dense inv_metric):
+  `(mcmc/dense-inv-metric addresses matrix)` names the order of its rows,
+  and a bare `[n n]` matrix is taken when one choice of n elements is
+  selected. Momenta come from N(0, M) as L⁻ᵀ·z (M⁻¹ = L·Lᵀ) and
+  positions move by M⁻¹·p; MALA proposes from N(v + tau·M⁻¹∇,
+  2 tau·M⁻¹). A dense metric that is not finite, not symmetric (within
+  Stan's 1e-8), not positive definite or not the selected choices' is
+  refused (`:invalid-inv-metric`), and a bare matrix for several choices
+  names the dense form in its error. `mcmc/inv-metric` returns a dense
+  metric labeled in the selection's order. gen.inference.nuts' warmup
+  adapts a diagonal metric only: it refuses a dense `:inv-metric` unless
+  `:adapt-metric?` is false (`:dense-metric-adaptation`), and then keeps
+  it. The diagonal path is unchanged, bit for bit. Gen.jl's `metric` is
+  M and gen.clj's option its inverse; Gen.jl 0.4.9's hmc also leaves M⁻¹
+  out of its position step, so with a metric its moves differ from
+  gen.clj's, though both target the same distribution.
+
 - **Experimental: an LLM's sampling, chat and agent loop in gen.llm**
   (outside the 1.x promise; DESIGN §9, owner, 2026-11-04; genclj-uw7w).
   `gen.llm.sample`: temperature, top-k and top-p, and n completions of
