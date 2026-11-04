@@ -691,9 +691,12 @@
             move (fn [m] (let [r (mcmc/hmc tr xy {:L 3 :eps 0.3 :inv-metric (mcmc/dense-inv-metric [:x :y] m)} (rng/key 90))]
                            [(:accepted? r) (ts/host (cm/to-map (:choices (:trace r))))]))]
         (is (= (move sym) (move off)) "float32, a rounding step off")
-        (is (= :invalid-inv-metric (reason (mcmc/dense-inv-metric [:x :y] (array/array [[1.0 0.3] [0.3000001 2.0]] {:dtype :float64}))))
-            "float64, the same step: past Stan's 1e-8")
-        (is (nil? (reason (mcmc/dense-inv-metric [:x :y] [[1e6 1.0] [1.005 1e6]]))) "float64, within 1e-8 of a large scale")))
+        ;; MLX's GPUs have no float64
+        (when (ts/float64?)
+          (is (= :invalid-inv-metric (reason (mcmc/dense-inv-metric [:x :y] (array/array [[1.0 0.3] [0.3000001 2.0]] {:dtype :float64}))))
+              "float64, the same step: past Stan's 1e-8")
+          (is (nil? (reason (mcmc/dense-inv-metric [:x :y] (array/array [[1e6 1.0] [1.005 1e6]] {:dtype :float64}))))
+              "float64, within 1e-8 of a large scale"))))
     (testing "the refusal of a bare matrix names the dense form"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"dense-inv-metric"
                             (mcmc/hmc tr xy {:inv-metric [[1.0 0.9] [0.9 1.0]]} (rng/key 88)))))
