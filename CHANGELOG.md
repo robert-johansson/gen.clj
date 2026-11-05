@@ -38,9 +38,67 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-05
+
+A consolidation release (DESIGN §9, "gen.clj 1.1.0"; genclj-qsa2): Gen.jl
+0.4.9 parity, the bugs the book found in stable namespaces, 1.0.0's CUDA
+known issues, and what main gained since v1.0.0. Every change to the
+stable API is an addition (the API snapshot: `kernel/run`'s `:device`,
+`mcmc/dense-inv-metric`, `laws/*score-scale*`).
+
+Read first, two **Breaking** changes:
+
+- `=` on a 0-d MLX array and a host number or boolean throws, where it
+  answered false: compare draws with `array/==`, or inside a `gen` body.
+- A callee spliced without an address runs under its caller's
+  middleware: middleware of your own on such a model now changes those
+  sites too.
+
+The **Draws** lines change the values for a key, not their distribution:
+full float32 matrix products on CUDA, HMC's and MALA's divergence rule,
+llama.cpp's threads on a Linux hybrid CPU.
+
+Checked before the tag (genclj-w2pg), on code identical to the tag's
+(only tests and docs changed after the runs began): on the JVM backend,
+every test and the whole book (2,052 tests, 25,167 assertions); on Metal,
+the full battery (2,053 tests, 20,005 assertions); on MLX's CPU, the full
+battery in float32 (2,053 tests, 20,021 assertions) and the light tier in
+float64 (1,935 tests, 17,327 assertions, on an M2 Max); on CUDA, the full
+battery on a Jetson AGX Thor (MLX built from source), every namespace
+once across five JVMs side by side; on an RTX PRO 6000 (MLX's CUDA wheel),
+the namespaces that failed under TF32 at 1.0 with conformance and the MLX
+backend's tests (222 tests), and with TF32 forced on, 1.0's 29 failures
+again; memo.clj (230 tests on the JVM backend, 231 on Metal), its
+ext/synth (11) and GenGDT (15) on the release candidate. The runs
+found three faults, all in tests (a dense-metric test making float64
+arrays on a GPU; tempering-test's importance-sampling claim resting on one
+key's luck, and its exact value computed in float32), each fixed and
+rerun on every backend; none in gen.clj.
+
+### Known issues
+
+- **CUDA: the JVM may abort at exit** with "Destroy(handle_) failed:
+  driver shutting down" when MLX comes from its CUDA wheel, after the
+  program's work is done (5 runs of 10 on an RTX PRO 6000), so the exit
+  status is not the result. The source
+  build (`native/build-mlx.sh cuda13-source`) carries MLX v0.32.3's fix; a
+  later MLX pin will bring it to the wheel (genclj-4lzg).
+- **MLX clamps an out-of-range array index** in a gather, where the JVM
+  backend throws: `gen.array/take`'s documented contract for a lazy
+  backend (docs/array-api.md §13), which the conformance suite now checks.
+  Whether MLX should be loud is the owner's call after 1.1.0
+  (genclj-d05w, genclj-08un).
+- **The book on MLX:** some chapters of Parts II-V do host math on results
+  and fail on the MLX backend (genclj-ac70). The book's gate is the JVM
+  backend, where every chapter passes.
+
+### Changes
+
+On main since v1.0.0.
+
 - **Breaking: a callee spliced without an address runs under its caller's
-  middleware** (`gen.dynamic/with-transitions`; d6ca867; DESIGN §9,
-  PROVISIONAL; genclj-u23m). Its choices are the caller's, so the caller's
+  middleware** (`gen.dynamic/with-transitions`; d6ca867; DESIGN §9;
+  genclj-u23m). Its choices are the caller's, so the caller's
   middleware now runs at its sites too, unless the callee has middleware
   of its own for the operation, which runs there as before; such a
   callee's body ran under the standard transitions. So gen.inference's
@@ -83,7 +141,7 @@ other values for the same key, from the same distribution.
   regenerate-keeps-unselected-choices failed by exception on such an
   override. The move now drops it, with Eq. 4.1's weight: q proposes
   given every unselected choice (σ) and the reverse move given
-  σ' = τ'|_{S^c} (PROVISIONAL, DESIGN §9). A move that drops nothing
+  σ' = τ'|_{S^c} (DESIGN §9). A move that drops nothing
   keeps its draws, and its weight unless the reverse move's q reads a
   choice the move added unselected (σ' holds it now).
   `with-exact-proposal` and `with-conjugate-proposal` still throw on a
@@ -176,7 +234,7 @@ other values for the same key, from the same distribution.
   reader's own `(close? x y)` is unchanged), the relative tolerances as
   before. A planted error of 1e-6 still fails for scores below ~1e5.
 - **gen.laws: a weight that is 0 compares as weights do** (DESIGN §9,
-  PROVISIONAL, 2026-11-04; genclj-s5fj). Five checks asked for exactly 0:
+  2026-11-04; genclj-s5fj). Five checks asked for exactly 0:
   generate without constraints, an update without constraints, a
   regenerate of nothing and of everything, and project on nothing. A
   hand-written generate that computes its weight as the score less the

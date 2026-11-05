@@ -13,16 +13,18 @@ project's `deps.edn`:
 
 ```edn
 {:deps {gen.clj/gen.clj {:git/url "https://github.com/robert-johansson/gen.clj"
-                         :git/tag "v1.0.0" :git/sha "…"}}}
+                         :git/tag "v1.1.0" :git/sha "…"}}}
 ```
 
 `:git/sha` is the tag's commit, or its first seven characters. The laws
 (*Verification: the Laws*), to check generative functions of your own,
 are the module ext/laws at the same tag: `gen.clj/laws {:git/url …
-:git/tag "v1.0.0" :git/sha "…" :deps/root "ext/laws"}`, which brings
-test.check. As a git dependency, `clojure -X:deps prep` compiles the Java
-binding the native backends load; the pure-Clojure backend does not
-need it.
+:git/tag "v1.1.0" :git/sha "…" :deps/root "ext/laws"}`, which brings
+test.check. The module ext/codegen (`gen.codegen`: a REPL session for
+LLM-written code, and gen.clj's codegen harness) comes the same way,
+with `:deps/root "ext/codegen"`, and brings clj-kondo and parinferish.
+As a git dependency, `clojure -X:deps prep` compiles the Java binding
+the native backends load; the pure-Clojure backend does not need it.
 
 ## The REPL and the tests
 

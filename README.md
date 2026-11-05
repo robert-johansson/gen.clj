@@ -11,25 +11,25 @@ Generative Function Interface (GFI): `simulate`, `generate`, `update`,
 `regenerate`, `assess`, `propose` and `project`, each a pure function of its
 arguments and an explicit random key.
 
-**Status: 1.0.0** (2026-10-26). The core runs on the JVM, CPU-only, with
+**Status: 1.1.0** (2026-11-05). The core runs on the JVM, CPU-only, with
 nothing but a JDK: a pure-Clojure array backend with reverse-mode autodiff.
 An MLX backend runs the same code on Apple's GPU (Metal), on MLX's CPU
-backend and on CUDA (an RTX PRO 6000, earlier a Jetson AGX Thor): the
-test battery passes on Metal and MLX's CPU, and on CUDA, with
-`MLX_ENABLE_TF32=0`, all but one half-float sum (CHANGELOG, known
-issues). Gen.jl parity covers the core, the static modeling language with
-its change hints, encapsulated randomness, GenParticleFilters, GenSMCP3 and
-GenTraceKernelDSL, and Gen.jl's own test suite passes. Local LLMs run as
-generative functions through llama.cpp (experimental). The book, `book/`,
-teaches it with code that runs; its appendix *Coming from Gen.jl*
-(`book/061-from-genjl.md`) maps Gen.jl's names and conventions to
-gen.clj's. Through 1.x the stable namespaces keep
-their names, arities, result keys and documented semantics
+backend and on CUDA: the test battery passes on Metal, on MLX's CPU and on
+CUDA (a Jetson AGX Thor; on an RTX PRO 6000, its precision-sensitive
+suites), with full float32 matrix products by default (the CHANGELOG lists
+what each release checked, and its known issues). Gen.jl parity covers the
+core, the static modeling language with its change hints, encapsulated
+randomness, GenParticleFilters, GenSMCP3 and GenTraceKernelDSL, and
+Gen.jl's own test suite passes. Local LLMs run as generative functions
+through llama.cpp (experimental). The book, `book/`, teaches it with code
+that runs; its appendix *Coming from Gen.jl* (`book/061-from-genjl.md`)
+maps Gen.jl's names and conventions to gen.clj's. Through 1.x the stable
+namespaces keep their names, arities, result keys and documented semantics
 (`CHANGELOG.md`); `DESIGN.md` has the design.
 
 gen.clj is a git dependency, a release by its tag:
 `{gen.clj/gen.clj {:git/url "https://github.com/robert-johansson/gen.clj"
-:git/tag "v1.0.0" :git/sha "…"}}`.
+:git/tag "v1.1.0" :git/sha "…"}}`.
 
 ## A model and two kinds of inference
 
