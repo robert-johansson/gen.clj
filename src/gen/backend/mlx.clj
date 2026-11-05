@@ -986,17 +986,38 @@
             n (t (Mlx/mlx_where neg wrapped i32 s))]
         (Mlx/mlx_clip n zero top s)))))
 
+(def ^:no-doc ^:dynamic *check-gathers*
+  "Whether a gather's array indices are read on the host and checked, loud
+   when one is out of range (as the JVM backend's are), in place of the
+   documented clamp: one evaluation per gather, for debugging. Set by
+   -Dgen.mlx.check-gathers=true (genclj-08un, DESIGN §9); off by default.
+   A gather inside mlx_compile's trace cannot be read, and is not checked."
+  (Boolean/parseBoolean (System/getProperty "gen.mlx.check-gathers" "false")))
+
+(declare ^:private tracing-compile?)
+
+(defn- check-indices!
+  "With *check-gathers*, the array indices read and each checked against a
+   dimension of size d (negative from the end), as host-index checks a
+   host index."
+  [indices ^long d]
+  (when (and *check-gathers* (mlx-array? indices) (not (tracing-compile?)))
+    (doseq [v (flatten [(to-host indices)])]
+      (host-index v d))))
+
 (defn- take-op [b x indices axis]
   (let [d (long (nth (shape-of x) axis))]
     (if (host? indices)
       (let [i (host-index indices d)]
         (with-operands b :take [h x nil hi i :int32]
           (wrap b (Mlx/mlx_take_axis h hi (int axis) (stream b)))))
-      (with-operands b :take [h x nil hi indices nil]
-        (with-temps [t]
-          (wrap b (Mlx/mlx_take_axis h (t (safe-indices b hi d)) (int axis) (stream b))))))))
+      (do (check-indices! indices d)
+          (with-operands b :take [h x nil hi indices nil]
+            (with-temps [t]
+              (wrap b (Mlx/mlx_take_axis h (t (safe-indices b hi d)) (int axis) (stream b)))))))))
 
 (defn- take-along-axis [b x indices axis]
+  (check-indices! indices (nth (shape-of x) axis))
   (with-operands b :take-along-axis [h x nil hi indices nil]
     (with-temps [t]
       (wrap b (Mlx/mlx_take_along_axis h (t (safe-indices b hi (nth (shape-of x) axis))) (int axis) (stream b))))))
@@ -1142,6 +1163,8 @@
   false)
 
 (defn- custom-vjps? [] (and (= grad-mode :native) (not *tracing-compile*)))
+
+(defn- tracing-compile? [] *tracing-compile*)
 
 (def ^:private ^:dynamic *differentiating*
   "True while native-value-and-grad runs its function: a custom VJP left out

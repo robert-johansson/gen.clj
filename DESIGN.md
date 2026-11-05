@@ -3498,6 +3498,18 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     the first, greedy match), and instaparse 1.5.0's counted repeat of a
     parser that matches the empty text rejects the empty text, which the
     language has.
+  - **MLX's gathers: the clamp kept, an opt-in check added (2026-11-05;
+    genclj-08un; PROVISIONAL, the owner's call under 1.2.0's autonomy).**
+    The owner's options: keep the documented clamp; an opt-in check (a
+    system property, a read per gather); or loud by default through an
+    error flag raised at the next evaluation (rule 6's choice, Breaking).
+    Chosen: the second, `-Dgen.mlx.check-gathers=true`, beside the clamp,
+    since it is small, reversible and breaks no dependent, and makes a
+    suspected out-of-range gather findable now; loud by default is left
+    for 2.0 (or a later 1.x with a Breaking line), when the device
+    programs' error flags (genclj-i2c4) can carry it without a read per
+    gather. Not checked inside mlx_compile's trace, where nothing can be
+    read.
   - **Arrays are no Clojure collections: get, nth and count are loud
     (2026-11-05; genclj-fzez; PROVISIONAL, the owner's call, recorded
     under the autonomy of 1.2.0).** The owner's options were loud

@@ -1035,7 +1035,10 @@ kernels fail on. New native ops must keep that rule.
   doubles and saturates; MLX multiplies exactly and wraps.
 - **Indices.** An out-of-range array index is clamped, not an error. A lazy
   backend cannot check it without evaluating. The JVM backend is the one
-  that checks.
+  that checks. On MLX, `-Dgen.mlx.check-gathers=true` reads each gather's
+  array indices and checks them, loud out of range, at an evaluation per
+  gather: for debugging (1.2.0, genclj-08un; not inside `mlx_compile`'s
+  trace).
 - **Degenerate linear algebra** gives non-finite values on both backends,
   but not always the same ones: NaN on MLX where the JVM's substitutions
   give ±Inf.

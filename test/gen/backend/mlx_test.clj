@@ -100,6 +100,25 @@
       (catch gen.mlx.MlxException _ nil)
       (finally (gen.mlx.Mlx/mlx_device_free dev)))))
 
+(deftest gathers-are-checked-on-request
+  ;; genclj-08un (DESIGN §9): -Dgen.mlx.check-gathers=true (its var here)
+  ;; reads each gather's array indices and is loud out of range, as the
+  ;; JVM backend is; off, the documented clamp. Host indices are checked
+  ;; either way.
+  (when-mlx
+    (binding [array/*backend* (mlx)]
+      (let [check (requiring-resolve 'gen.backend.mlx/*check-gathers*)
+            x (array/array [10.0 20.0 30.0])
+            idx (array/array [-1 0 7] {:dtype :int32})
+            rows (array/array [[1.0 2.0] [3.0 4.0]])
+            ridx (array/array [[0 5] [-1 1]] {:dtype :int32})]
+        (is (= [30.0 10.0 30.0] (array/->clj (array/take x idx))) "clamped by default")
+        (with-bindings {check true}
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"out of bounds" (array/take x idx)))
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"out of bounds" (array/take-along-axis rows ridx 1)))
+          (is (= [30.0 10.0] (array/->clj (array/take x (array/array [-1 0] {:dtype :int32}))))
+              "in range: the same gather"))))))
+
 (deftest the-array-cap-is-metals-buffer-limit
   ;; the cap was read in MlxRuntime's initializer, which the backend's first
   ;; mlx-c call reaches from inside that call's half-initialized binding

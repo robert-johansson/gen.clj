@@ -38,6 +38,12 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Added: an opt-in check of MLX's gathers** (gen.backend.mlx;
+  genclj-08un; DESIGN §9, PROVISIONAL). With
+  `-Dgen.mlx.check-gathers=true`, `gen.array/take` and `take-along-axis`
+  read their array indices and throw on one out of range, as the JVM
+  backend does, at an evaluation per gather. Off by default: the
+  documented clamp is unchanged.
 - **Breaking: `get`, `nth` and `count` on an array are loud** (gen.array's
   arrays on every backend, the tape's values, staged and batched values;
   genclj-fzez; DESIGN §9, PROVISIONAL). `(get a 1)` answered nil, a
