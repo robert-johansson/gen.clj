@@ -38,12 +38,6 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
-- **Added: an opt-in check of MLX's gathers** (gen.backend.mlx;
-  genclj-08un; DESIGN §9, PROVISIONAL). With
-  `-Dgen.mlx.check-gathers=true`, `gen.array/take` and `take-along-axis`
-  read their array indices and throw on one out of range, as the JVM
-  backend does, at an evaluation per gather. Off by default: the
-  documented clamp is unchanged.
 - **Breaking: `get`, `nth` and `count` on an array are loud** (gen.array's
   arrays on every backend, the tape's values, staged and batched values;
   genclj-fzez; DESIGN §9, PROVISIONAL). `(get a 1)` answered nil, a
@@ -53,6 +47,12 @@ other values for the same key, from the same distribution.
   (an index on the backend); a batched value raises the batched-branch
   error. Code that used `get` on an array and relied on nil must read the
   array first. A 0-d array on the JVM backend is a host number, as before.
+- **Added: an opt-in check of MLX's gathers** (gen.backend.mlx;
+  genclj-08un; DESIGN §9, PROVISIONAL). With
+  `-Dgen.mlx.check-gathers=true`, `gen.array/take` and `take-along-axis`
+  read their array indices and throw on one out of range, as the JVM
+  backend does, at an evaluation per gather. Off by default: the
+  documented clamp is unchanged.
 - **Added: the potential contract as laws** (`gen.laws.potential`, in
   ext/laws, experimental as gen.llm.potential is; genclj-uxf6). Four laws
   over a potential's weights, run as gen.laws runs the GFI's
