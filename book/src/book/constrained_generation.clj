@@ -10,6 +10,7 @@
             [gen.llm.constrained :as constrained]
             [gen.llm.dfa :as dfa]
             [gen.llm.grammar :as grammar]
+            [gen.llm.instaparse :as ip]
             [gen.llm.lm :as lm]
             [gen.llm.potential :as potential]
             [gen.llm.regex :as regex]
@@ -268,6 +269,31 @@ z
 ;; book: inexpressible
 ;; error: grammar: no sequence of the vocabulary's tokens spells
 #_(grammar/grammar m "nope")
+
+;; book: instaparse
+(def answer-grammar
+  "answer = word (<' '> word)?
+   word = 'yes' | 'no'")
+
+(def one-or-two (ip/grammar m answer-grammar))
+
+(mapv #(regex/matches? (ip/term answer-grammar) %)
+      ["yes" "no yes" "yes  no" "maybe"])
+;=> [true true false false]
+
+[(allowed-after one-or-two []) (allowed-after one-or-two [3])]
+;=> [["y" "yes" "n" "no"] [" "]]
+
+;; book: instaparse-depth
+(def nested "pair = 'y' pair? 'n'")
+
+(mapv #(regex/matches? (ip/term nested {:max-depth 2}) %)
+      ["yn" "yynn" "yyynnn"])
+;=> [true true false]
+
+;; book: instaparse-recursive
+;; error: instaparse: the rule :pair is recursive
+#_(ip/term nested)
 
 ;; book: constrained
 (def yes-or-no (token/completion m {:potential yes-no}))

@@ -77,6 +77,13 @@ other values for the same key, from the same distribution.
   mass as the weight (Lipkin et al., COLM 2025). The recursive (default)
   and geometric estimators, each with an optional budget of rejections
   (`:awrs {:method :max-rejects :max-accepts}`).
+- **Added: instaparse grammars as constraints** (`gen.llm.instaparse`, a
+  new module `ext/instaparse`, experimental; genclj-kb88; DESIGN §9). An
+  instaparse grammar (EBNF text or a parser) read as a regular language,
+  `(ip/term g)`, and as a grammar over a vocabulary, `(ip/grammar m g)`,
+  with gen.llm.grammar's exact masks; recursion unrolled to `:max-depth`.
+  A dependent takes it with `:deps/root "ext/instaparse"`; it brings
+  instaparse 1.5.0. In gen.clj's repository the `:test` alias has it.
 - **Fixed: a boxed-math warning on loading gen.llm.llama** (genclj-tpvn).
   A new test loads every source namespace in a JVM of its own and fails
   on any reflection or boxed-math warning.

@@ -41,6 +41,7 @@ Generative Functions*, so it needs no model file.
             [gen.llm.constrained :as constrained]
             [gen.llm.dfa :as dfa]
             [gen.llm.grammar :as grammar]
+            [gen.llm.instaparse :as ip]
             [gen.llm.lm :as lm]
             [gen.llm.potential :as potential]
             [gen.llm.regex :as regex]
@@ -493,6 +494,60 @@ point:
 ;; error: grammar: no sequence of the vocabulary's tokens spells
 (grammar/grammar m "nope")
 ```
+
+### Grammars in instaparse's notation
+
+A grammar can also come in the notation of instaparse, Clojure's parser
+library: rules in EBNF, each a name, `=`, and a body of strings, regexes,
+alternatives and repetitions. `gen.llm.instaparse` (the module
+`ext/instaparse`, which brings instaparse) reads a grammar's rules into
+the same terms `regex/parse` makes, so it holds a completion through the
+same exact masks. A hidden part, `<…>`, is still text; only instaparse's
+parse tree leaves it out:
+
+<!-- code: instaparse -->
+```clojure
+(def answer-grammar
+  "answer = word (<' '> word)?
+   word = 'yes' | 'no'")
+
+(def one-or-two (ip/grammar m answer-grammar))
+
+(mapv #(regex/matches? (ip/term answer-grammar) %)
+      ["yes" "no yes" "yes  no" "maybe"])
+;=> [true true false false]
+
+[(allowed-after one-or-two []) (allowed-after one-or-two [3])]
+;=> [["y" "yes" "n" "no"] [" "]]
+```
+
+A rule that refers to itself can describe text no DFA holds, balanced
+brackets say, so `ip/term` unrolls such a rule only as deep as
+`:max-depth` lets it nest:
+
+<!-- code: instaparse-depth -->
+```clojure
+(def nested "pair = 'y' pair? 'n'")
+
+(mapv #(regex/matches? (ip/term nested {:max-depth 2}) %)
+      ["yn" "yynn" "yyynnn"])
+;=> [true true false]
+```
+
+and without a depth it refuses the grammar:
+
+<!-- code: instaparse-recursive -->
+```clojure
+;; error: instaparse: the rule :pair is recursive
+(ip/term nested)
+```
+
+Its text differs from instaparse's own parses in one way: a regex
+terminal stands here for every string its regex matches, where
+instaparse takes the regex's first match only, greedily, so `#'a+' 'a'`
+parses no text there. At Qwen3's 151,936 tokens a tool-call grammar of
+405 DFA states takes a quarter of a second to make, every mask included;
+a token under it then costs what any grammar's does.
 
 ## Constrained completions
 

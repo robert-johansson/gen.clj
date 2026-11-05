@@ -477,6 +477,34 @@ calls, formats and bounded nesting, in a notation Clojure users know;
 unbounded recursion (code, recursive JSON) is the Earley engine's
 (genclj-h5rb), behind the same front end.
 
+**Built (2026-11-05, genclj-kb88):** `gen.llm.instaparse` in the module
+`ext/instaparse` (instaparse 1.5.0 its dependency): `(term g opts)` and
+`(grammar vocab g opts)`, for an instaparse parser or its EBNF text,
+`:max-depth` for recursion (refused without it). Tested against
+instaparse's own whole-text parses on 200 random grammars without
+recursion (strings, case-insensitive strings, one-character regexes,
+every combinator but lookahead, hidden rules, references), each on 20
+random texts and every text of up to three characters; completions under
+a tool-call grammar on the toy engine all parse with instaparse. Planted:
+ordered choice as its first branch, a case-insensitive string as its own
+case; each fails. Two differences from instaparse's parser, found on the
+way and documented: a regex terminal here is every string its regex
+matches, where instaparse matches it once, greedily (`#'a+' 'a'` rejects
+"aaa" there); and instaparse 1.5.0's counted repeat (`:rep`, from the
+combinators or ABNF) of a parser that matches the empty text rejects the
+empty text past one repetition (`(rep 2 2 (opt (string "a")))` on ""),
+which the language has. At Qwen3's 151,936 tokens
+(`clojure -M:test:bench -m gen.instaparse-bench`, the M4):
+
+| Grammar (instaparse EBNF) | DFA states | term, DFA, grammar (every mask), ms | logw-next, µs | the site's distribution, µs |
+|---|---:|---|---:|---:|
+| A tool call (JSON-like, three names, key-value arguments) | 405 | 12, 170, 232 | 17 | 243 |
+| An ISO 8601 date-time | 31 | 23, 19, 140 | 17 | 243 |
+| Nested lists, 3 deep | 16 | 14, 12, 183 | 17 | 243 |
+
+The per-token costs are a dense row's passes over the vocabulary, the same
+for every grammar (Decisions, 10: a sparse row would cut them).
+
 
 ## Decisions
 

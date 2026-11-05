@@ -442,7 +442,7 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
 | test.check (official) | yes | `:test`, and `ext/laws` (`:laws`): the GFI laws as properties, run with clojure.test specs (`deflaws`) or `laws/verify` |
 | malli (official) | edges only | `gen.dev` instrumentation; LLM structured output (schema → grammar) |
 | clojure.spec | no | Overlaps malli; specs aren't data; spec2 has been alpha for years |
-| instaparse (official) | no (the owner, 2026-10-21: §9, grammar-constrained decoding) | our own regex → DFA engine (`gen.llm.regex`) |
+| instaparse (official) | no as the engine (the owner, 2026-10-21: §9, grammar-constrained decoding); yes as a grammar front end in `ext/instaparse`, on `:test` (2026-11-05, PROVISIONAL: §9, instaparse grammars as constraints) | our own regex → DFA engine (`gen.llm.regex`) |
 | promesa | no | The core is synchronous; JVM tokenizers are synchronous; virtual threads cover concurrency |
 | SCI | later | Sandboxed eval of LLM-generated code (program synthesis) |
 | clojure.math (built in) | yes | Replaces GenMLX's ~370 `js/Math` calls |
@@ -3481,6 +3481,23 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     draw, a second for the phantoms), and the checks, potential calls, run
     on the calling thread. Def. 2's two-loop AWRS is left out: the
     geometric estimator unbounded is its alternative form (App. H.3.2).
+  - **instaparse grammars as constraints (2026-11-05; genclj-kb88;
+    PROVISIONAL, the owner to confirm where it lives).** The bean left
+    the place to the owner: the converter reads only instaparse's grammar
+    data, so it could sit in gen.llm with no dependency, but reading
+    EBNF text, and testing against instaparse's parser, need instaparse.
+    Chosen: a module, `ext/instaparse` (`gen.llm.instaparse`: `term`,
+    `grammar`), with instaparse 1.5.0 (EPL 1.0) its one dependency, as a
+    git dependency with `:deps/root "ext/instaparse"`, and on the `:test`
+    alias (its tests run in the battery, and the book's chapter 044 uses
+    it). The core's dependencies are unchanged. Recursion unrolls only
+    to an explicit `:max-depth` (refused without one); lookahead is
+    refused; ordered choice is a union, as instaparse's is. Two
+    differences from instaparse's parser are documented, not hidden: a
+    regex terminal is every string its regex matches (instaparse takes
+    the first, greedy match), and instaparse 1.5.0's counted repeat of a
+    parser that matches the empty text rejects the empty text, which the
+    language has.
   - **One chain fast on MLX, and GPU speed (owner, 2026-11-04, "go with
     option 1", on the lead's recommendation; genclj-fpnf, genclj-h8rn).**
     One HMC chain (L=32, 1000 steps) ran in 21.9 ms as a Metal program (one

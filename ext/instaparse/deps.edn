@@ -1,0 +1,16 @@
+;; gen.llm.instaparse: instaparse grammars as constraints on sampling, a
+;; module of gen.clj outside its core (DESIGN.md §9, "instaparse grammars
+;; as constraints"). It reads an instaparse parser's grammar (EBNF or ABNF,
+;; or the combinators) into gen.llm.regex's terms, so gen.llm.grammar's
+;; exact masks apply; instaparse (EPL 1.0) is its one dependency.
+;;
+;; A dependent takes it as a git dependency on gen.clj's repository with
+;; :deps/root "ext/instaparse", at the commit of the gen.clj it uses:
+;;
+;;   gen.clj/instaparse {:git/url "…gen.clj" :git/sha "…" :deps/root "ext/instaparse"}
+;;
+;; In gen.clj's own repository the :test alias puts it on the classpath
+;; (the book's constrained-generation chapter uses it).
+{:paths ["src"]
+ :deps {gen.clj/gen.clj {:local/root "../.."}
+        instaparse/instaparse {:mvn/version "1.5.0"}}}

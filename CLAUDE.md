@@ -114,10 +114,11 @@ Python.
 | L4 combinators | `gen.combinators` (map, unfold, switch, recurse, call-at, choice-at, scan, mix, dimap), `gen.custom` (deterministic generative functions, custom gradients, estimated densities), `gen.state-space` (Kalman and HMM generative functions with exact marginal likelihoods) |
 | L5 inference | `gen.inference.weights`, `.importance`, `.mh`, `.kernel`, `.particle-filter`, `.mcmc` (HMC, MALA, NUTS, MAP, elliptical slice), `.nuts` (Stan's warmup and sampler), `.enumerative` (grids, exact proposals), `.proposal` (internal-proposal override), `.transform` (Gen.jl's @transform, trace translators, SMCP3), `.trace-kernel` (GenTraceKernelDSL), `.vi` (black-box VI, VIMCO), `.diagnostics` (ESS, R-hat, MCSE), `.conjugate` (conjugate proposals), `.laplace` (Hessians, Laplace, Fisher), `.particle-mcmc` (conditional SMC, particle Gibbs); `gen.gradients`, `gen.learning` |
 | LLM runtime | `gen.llm.branching` (the Branching protocol), `.slots` (slot engines on one thread), `.llama` (llama.cpp; Java binding in `src-java/gen/llama`), `gen.llm.lm` (the LM protocol), `.cache`, `.trie`, `.cells` (the LM's cache, prefix trie, KV-cell ledger) |
-| LLM generative functions | `gen.llm.token` (completions, the token distribution), `gen.llm.potential` (potentials), `gen.llm.smc` (token SMC) |
+| LLM generative functions | `gen.llm.token` (completions, the token distribution), `gen.llm.potential` (potentials and their combinators), `gen.llm.smc` (token SMC: a critic, the :awrs proposal), `gen.llm.awrs` (adaptive weighted rejection sampling) |
 | LLM agents | `gen.llm.sample` (temperature, top-k, top-p; completions in lockstep), `gen.llm.chat` (Qwen's template, tool calls), `gen.llm.agent` (a tool-using agent's episodes; it evaluates nothing) |
 | Codegen (`ext/codegen`) | `gen.codegen.session` (a REPL session for LLM-written code: read, repair, vet, explain hooks), `.process` (tools in a JVM of their own); the bake-off's harness (`.driver`, `.grade`, `.repl`, `.server`, `.tasks`, …); clj-kondo and parinferish its dependencies |
-| Laws (`ext/laws`) | `gen.laws` (the GFI's laws as test.check properties: the law sets, `verify`, `deflaws`, `checks`; test.check its one dependency) |
+| Laws (`ext/laws`) | `gen.laws` (the GFI's laws as test.check properties: the law sets, `verify`, `deflaws`, `checks`; test.check its one dependency), `gen.laws.potential` (the potential contract's laws) |
+| Instaparse (`ext/instaparse`) | `gen.llm.instaparse` (an instaparse grammar as a regular language and a gen.llm.grammar; instaparse its one dependency, on `:test`) |
 
 ## Rules
 
