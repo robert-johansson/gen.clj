@@ -40,7 +40,7 @@ other values for the same key, from the same distribution.
 
 - **Breaking: `get`, `nth` and `count` on an array are loud** (gen.array's
   arrays on every backend, the tape's values, staged and batched values;
-  genclj-fzez; DESIGN §9, PROVISIONAL). `(get a 1)` answered nil, a
+  genclj-fzez; DESIGN §9). `(get a 1)` answered nil, a
   silent wrong value (rule 6), and `nth` and `vec` threw messages that
   said nothing. Now each throws `ex-info` with `:reason :not-a-collection`,
   naming `gen.array/->clj` (host values), `item` (one element) and `take`
@@ -63,7 +63,7 @@ other values for the same key, from the same distribution.
   (new functions; distributed groups' signatures, which gen.clj does not
   call).
 - **Added: an opt-in check of MLX's gathers** (gen.backend.mlx;
-  genclj-08un; DESIGN §9, PROVISIONAL). With
+  genclj-08un; DESIGN §9). With
   `-Dgen.mlx.check-gathers=true`, `gen.array/take` and `take-along-axis`
   read their array indices and throw on one out of range, as the JVM
   backend does, at an evaluation per gather. Off by default: the

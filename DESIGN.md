@@ -443,7 +443,7 @@ engines                    llama.cpp (llama.h via our own filtered jextract FFM)
 | test.check (official) | yes | `:test`, and `ext/laws` (`:laws`): the GFI laws as properties, run with clojure.test specs (`deflaws`) or `laws/verify` |
 | malli (official) | edges only | `gen.dev` instrumentation; LLM structured output (schema → grammar) |
 | clojure.spec | no | Overlaps malli; specs aren't data; spec2 has been alpha for years |
-| instaparse (official) | no as the engine (the owner, 2026-10-21: §9, grammar-constrained decoding); yes as a grammar front end in `ext/instaparse`, on `:test` (2026-11-05, PROVISIONAL: §9, instaparse grammars as constraints) | our own regex → DFA engine (`gen.llm.regex`) |
+| instaparse (official) | no as the engine (the owner, 2026-10-21: §9, grammar-constrained decoding); yes as a grammar front end in `ext/instaparse`, on `:test` (2026-11-05, approved by the owner the same day: §9, instaparse grammars as constraints) | our own regex → DFA engine (`gen.llm.regex`) |
 | promesa | no | The core is synchronous; JVM tokenizers are synchronous; virtual threads cover concurrency |
 | SCI | later | Sandboxed eval of LLM-generated code (program synthesis) |
 | clojure.math (built in) | yes | Replaces GenMLX's ~370 `js/Math` calls |
@@ -3448,12 +3448,18 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     machines if needed - but I prefer the fenrir only". So CUDA goes to
     fenrir's RTX PRO 6000, the Thor only if fenrir cannot serve. Pushes
     still wait for a go.
-  - **Potential combinators (2026-11-05; genclj-f3dv; PROVISIONAL,
-    owner to confirm the marked choices).** gen.llm.potential gains
+    Approved (owner, 2026-11-05 afternoon, "I approve all the provisional
+    decisions"): the seven the milestone made, each marked below
+    (genclj-fzez's loud lookups, genclj-08un's opt-in gather check,
+    temper's kept zeros and after's unclosed sequences of genclj-f3dv,
+    AWRS's recursive default, ext/instaparse on :test, the CFG's
+    byte-level liveness).
+  - **Potential combinators (2026-11-05; genclj-f3dv; the marked choices
+    approved by the owner, 2026-11-05: "I approve all the provisional decisions").** gen.llm.potential gains
     genlm-control's combinators, each checked by gen.laws.potential:
     `temper` (weights times a finite beta of either sign; a zero weight
     stays zero, so the support is kept and beta 0 is the indicator:
-    PROVISIONAL, genlm's power is p^beta with no rule for negative beta),
+    approved, genlm's power is p^beta with no rule for negative beta),
     `normalize` (next weights less log Z, Z over the tokens and the end
     but the potential's end tokens, for which a completion's end stands;
     prefix the sum along the context), `prompted` (an LM's
@@ -3463,13 +3469,13 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     per byte prefix of weight; end tokens hold no text and a context
     holding one has no weight, as a grammar's), and `after` (a potential
     over the tokens after the first close token, those before free; a
-    sequence that never closes has no weight as a whole: PROVISIONAL, the
+    sequence that never closes has no weight as a whole: approved, the
     alternative weighs an unclosed sequence as an empty answer). Temperature
     and the tempered sampler are compositions (`temper` of `prompted`,
     `normalize` of that), not functions of their own; genclj-paid keeps
     the samplers.
   - **AWRS in token SMC (2026-11-05; genclj-oigp; the default
-    PROVISIONAL).** `gen.llm.awrs` ports the paper's bounded-cost
+    approved by the owner, 2026-11-05: "I approve all the provisional decisions").** `gen.llm.awrs` ports the paper's bounded-cost
     estimators (Lipkin et al., COLM 2025, App. H.3): recursive (Def. 10,
     the default: never more checks than the geometric's on our measure,
     App. H.3.4) and geometric (Def. 9, read through its with-replacement
@@ -3482,8 +3488,8 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     draw, a second for the phantoms), and the checks, potential calls, run
     on the calling thread. Def. 2's two-loop AWRS is left out: the
     geometric estimator unbounded is its alternative form (App. H.3.2).
-  - **instaparse grammars as constraints (2026-11-05; genclj-kb88;
-    PROVISIONAL, the owner to confirm where it lives).** The bean left
+  - **instaparse grammars as constraints (2026-11-05; genclj-kb88; where
+    it lives approved by the owner, 2026-11-05: "I approve all the provisional decisions").** The bean left
     the place to the owner: the converter reads only instaparse's grammar
     data, so it could sit in gen.llm with no dependency, but reading
     EBNF text, and testing against instaparse's parser, need instaparse.
@@ -3500,7 +3506,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     parser that matches the empty text rejects the empty text, which the
     language has.
   - **MLX's gathers: the clamp kept, an opt-in check added (2026-11-05;
-    genclj-08un; PROVISIONAL, the owner's call under 1.2.0's autonomy).**
+    genclj-08un; the owner's call, approved by the owner, 2026-11-05: "I approve all the provisional decisions").**
     The owner's options: keep the documented clamp; an opt-in check (a
     system property, a read per gather); or loud by default through an
     error flag raised at the next evaluation (rule 6's choice, Breaking).
@@ -3512,8 +3518,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     gather. Not checked inside mlx_compile's trace, where nothing can be
     read.
   - **Arrays are no Clojure collections: get, nth and count are loud
-    (2026-11-05; genclj-fzez; PROVISIONAL, the owner's call, recorded
-    under the autonomy of 1.2.0).** The owner's options were loud
+    (2026-11-05; genclj-fzez; the owner's call, approved by the owner, 2026-11-05: "I approve all the provisional decisions").** The owner's options were loud
     everywhere, or reads that work where an array is concrete. Chosen:
     loud everywhere, on every array kind (JvmArray, MlxArray, the tape's
     Tracked, Staged; Batched by its batched-branch error), as ILookup and
@@ -3526,7 +3531,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     use of it. memo.clj's side: memoclj-fksr (its Qwen3.8 agent read
     arrays with get).
   - **Context-free grammars by Earley (2026-11-05; genclj-h5rb;
-    PROVISIONAL, the owner to confirm byte-level liveness).**
+    byte-level liveness approved by the owner, 2026-11-05: "I approve all the provisional decisions").**
     `gen.llm.cfg`, in the core with no dependency: rules over bytes
     (keywords, strings, `(cfg/regex r)` inlined as right-linear rules from
     its minimal DFA), unproductive rules dropped so a non-empty Earley set
