@@ -161,6 +161,21 @@ most) is enumerated and Z computed exactly:
   40 runs' Ẑ (50 particles) is within 5 standard errors of Z; so is the
   unnormalized estimate of a test function's integral, and Ẑ with a
   `:critic` (alone, beside a masked constraint, a constraint as critic).
+- **AWRS** (2026-11-05, genclj-oigp): `gen.llm.awrs-test` checks proper
+  weighting directly, on a six-token row: for the recursive estimator
+  (unbounded, budgets 1 and 2) and the geometric (2 and 3 accepts, a
+  budget of 2), the mean of Ẑ·exp(w(x))·f(x) over 4,000 keys is within 5
+  standard errors of Σ p(t)·exp(w(t))·f(t) over the accepted tokens, for
+  f each token's indicator and 1, under four conditions (most of the mass,
+  a rare token, all, a soft weight); Z = 0 gives Ẑ = 0; budgets bound the
+  checks. In token SMC, Ẑ is unbiased against enumeration for every
+  estimator, under a constraint, a soft twist and an impossible one, and a
+  step checks far fewer tokens than the vocabulary. Planted: the
+  recursive estimate m_n for a rejected extra draw; the geometric
+  (s - 1)/(n + 1) (a misreading of the paper's Def. 8: the unbiased one
+  is (s - 1)/(n - 1), checked by hand at R = L = 1); phantoms uncounted;
+  SMC's weight without log Ẑ; an end token weighed by its prefix. Each
+  fails.
 - **The critic** (2026-11-05, genclj-di22): applied at the drawn token
   only (Loula et al.: cheap potentials propose, expensive ones criticize),
   one call a particle and step; under the bootstrap a particle's weight is

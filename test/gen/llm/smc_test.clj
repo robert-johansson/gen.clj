@@ -10,7 +10,8 @@
      every step, adaptively or never; and so is the unnormalized estimate of
      a test function's integral, and Ẑ with a critic (alone, beside a
      masked constraint, a constraint as critic), whose cost is one call a
-     particle and step.
+     particle and step, and Ẑ under the :awrs proposal's random weights,
+     for each estimator and budget, which checks only the tokens it draws.
    - Exact identities: no potential gives Ẑ = 1 (the toy's ledger is its
      rows), max-tokens 0 gives exp(complete([])), a masked constraint's
      particles all satisfy it.
@@ -126,6 +127,35 @@
     (testing [pname (if (fn? proposal) :uniform proposal) rname]
       (let [zs (estimates {:potential p :proposal proposal :ess-threshold threshold} 50 40)]
         (is (within-5-se? zs (exact-z p)) (str "mean " (mean zs) " exact " (exact-z p)))))))
+
+(deftest awrs-weighs-unbiasedly
+  ;; the :awrs proposal's random weights: Ẑ against enumeration for each
+  ;; estimator, under a constraint and a soft twist (whose zeros are the
+  ;; condition), resampling adaptively; a budget of one rejection too,
+  ;; whose particles may die (Ẑ = 0 at a step) and still weigh unbiasedly
+  (doseq [[pname p] [[:constraint no-repeats] [:soft soft] [:nothing nothing]]
+          awrs [{} {:method :geometric} {:method :geometric :max-accepts 3} {:max-rejects 1}
+                {:method :geometric :max-rejects 2}]]
+    (testing [pname awrs]
+      (let [zs (estimates {:potential p :proposal :awrs :awrs awrs} 50 40)
+            z (exact-z p)]
+        (if (zero? z)
+          (is (every? zero? zs) "nothing satisfies it: Ẑ = 0")
+          (is (within-5-se? zs z) (str "mean " (mean zs) " exact " z)))))))
+
+(deftest awrs-checks-only-what-it-draws
+  ;; a potential that counts its prefix calls: a step's checks are far
+  ;; fewer than the masked proposal's sweep of every token (5 a particle)
+  (let [calls (atom 0)
+        counted (potential/potential n-vocab {:prefix #(do (swap! calls inc) (potential/prefix soft %))
+                                              :complete #(potential/complete soft %)
+                                              :logw-next (fn [_] (throw (ex-info "AWRS reads no row" {})))})
+        s0 (smc/initialize completion args 40 {:potential counted :proposal :awrs :key (rng/key 5)})]
+    (reset! calls 0)
+    (smc/step s0)
+    ;; soft accepts every token: a base prefix, the drawn token's and the
+    ;; extra draw's, or fewer (an end token's complete is no prefix call)
+    (is (<= @calls (* 3 40)) (str @calls " prefix calls for 40 particles"))))
 
 (deftest a-test-functions-integral-is-unbiased
   ;; exp(log-ml) · (1/n) Σ exp(w_i) f(x_i) estimates Σ p(x)·exp(complete(x))·f(x)
@@ -326,6 +356,11 @@
            ["bad arguments" #(smc/initialize completion [prompt] 4) :invalid-args]
            ["an empty prompt" #(smc/initialize completion [[] 3] 4) :no-tokens]
            ["a masked proposal without a potential" #(smc/initialize completion args 4 {:proposal :masked}) :invalid-option]
+           ["an awrs proposal without a potential" #(smc/initialize completion args 4 {:proposal :awrs}) :invalid-option]
+           ["awrs options without the awrs proposal"
+            #(smc/initialize completion args 4 {:potential soft :awrs {}}) :invalid-option]
+           ["bad awrs options"
+            #(smc/initialize completion args 4 {:potential soft :proposal :awrs :awrs {:method :best}}) :invalid-option]
            ["an unknown proposal" #(smc/initialize completion args 4 {:proposal :best}) :invalid-option]
            ["a potential of another vocabulary"
             #(smc/step (smc/initialize completion args 4 {:potential (potential/potential 3 {:prefix (constantly 0.0)

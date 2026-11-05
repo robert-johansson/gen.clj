@@ -47,7 +47,7 @@
    sequence out is no error, an estimate of Z = 0.
 
    opts at initialize: :potential (none: weight 1), :critic (none), :proposal,
-   :key, :host-pool.
+   :awrs, :key, :host-pool.
    - :lm (the default), the bootstrap: tokens drawn from the LM's row.
    - :masked, the LM's row times the potential's next-token weights,
      renormalized (for a constraint, the row masked to its allowed tokens;
@@ -56,9 +56,19 @@
    - a function (fn [context row] → q), q a float array of the next
      token's log-probabilities (normalized), given the context (the prompt
      and the tokens so far) and the LM's row.
+   - :awrs, adaptive weighted rejection sampling (gen.llm.awrs; Lipkin et
+     al., COLM 2025), for a potential with no cheap row (a parser or a
+     reader on partial text): the LM's row restricted to the tokens of
+     finite twist, drawn by rejection, checking only the tokens it draws
+     (a prefix call each, never a sweep of the vocabulary), with an
+     unbiased estimate Ẑ of their mass. The weight is random: log Ẑ plus
+     the token's twist, an unbiased estimate of the masked proposal's.
+     :awrs, a map of gen.llm.awrs/sample's options (:method :recursive or
+     :geometric, :max-rejects, :max-accepts), chooses the estimator. Its
+     draws and checks run on the calling thread.
    A token's weight is log p - log q + its twist, with p the LM's score for
    it (its ledger's, as the completion's, so a particle's log p is its
-   trace's score) and q the proposal's.
+   trace's score) and q the proposal's (:awrs's: the row's, less log Ẑ).
 
    One read a step: the live particles' contexts go to
    lm/batch-next-logprobs together, so with :max-branches at least the
@@ -83,6 +93,7 @@
   {:api :experimental}
   (:require [gen.dist.core :as dc]
             [gen.gfi :as gfi]
+            [gen.llm.awrs :as awrs]
             [gen.llm.constrained :as constrained]
             [gen.llm.host :as host]
             [gen.inference.weights :as w]
@@ -150,12 +161,12 @@
 (defn- check-proposal [proposal potential]
   (cond
     (= :lm proposal) proposal
-    (= :masked proposal) (if potential
-                           proposal
-                           (throw (ex-info "smc: the :masked proposal needs a :potential"
-                                           {:reason :invalid-option :proposal proposal})))
+    (#{:masked :awrs} proposal) (if potential
+                                  proposal
+                                  (throw (ex-info (str "smc: the " proposal " proposal needs a :potential")
+                                                  {:reason :invalid-option :proposal proposal})))
     (fn? proposal) proposal
-    :else (throw (ex-info (str "smc: the proposal is :lm, :masked or a function, not " (pr-str proposal))
+    :else (throw (ex-info (str "smc: the proposal is :lm, :masked, :awrs or a function, not " (pr-str proposal))
                           {:reason :invalid-option :proposal proposal}))))
 
 (defn initialize
@@ -165,7 +176,7 @@
    function), :key and :host-pool (see the namespace's docstring; never a
    pool whose own task runs this SMC)."
   ([completion args n] (initialize completion args n {}))
-  ([completion args n {:keys [potential critic proposal key] :or {proposal :lm} :as opts}]
+  ([completion args n {:keys [potential critic proposal key awrs] :or {proposal :lm} :as opts}]
    (let [args (token/check-args :smc (check-completion completion) args)]
      ;; only the end tokens: a potential that rules every sequence out is
      ;; an estimate of Z = 0, not an error
@@ -190,6 +201,11 @@
         :potential potential
         :critic critic
         :proposal (check-proposal proposal potential)
+        :awrs (when (contains? opts :awrs)
+                (when-not (= :awrs proposal)
+                  (throw (ex-info "smc: the :awrs options are the :awrs proposal's"
+                                  {:reason :invalid-option :proposal proposal})))
+                (awrs/check-options awrs))
         :key (or key (gfi/next-key))
         :host-pool (pool-of opts)
         :t 0
@@ -241,26 +257,54 @@
                  f-row)]
     [q (long (dc/sample (token/dist q) key))]))
 
+(defn- row-twist
+  "Token t's twist, from the potential's next-token weights ws (0 without
+   a potential): its entry (the end's for an end token), and for a
+   particle stopped at max-tokens the whole sequence's weight in place of
+   the prefix's (a token of weight 0 stays 0)."
+  ^double [state particle ws ^long t]
+  (let [{:keys [completion potential]} state
+        tokens (conj (:tokens particle) t)
+        end? (contains? (:end-tokens completion) t)
+        capped? (and (not end?) (== (count tokens) (long (second (:args state)))))
+        twist (if ws (double (aget ^floats ws (int (end-entry completion t)))) 0.0)]
+    (if (and potential capped? (not (Double/isInfinite twist)))
+      (+ twist (- (potential/complete potential tokens) (potential/prefix potential tokens)))
+      twist)))
+
+(defn- weigher
+  "The twist of each next token of particle, from the potential's prefix
+   and complete weights (no row): prefix(tokens ++ [t]) less its prefix
+   of the tokens so far, complete for an end token (once for all of them)
+   and at max-tokens. :awrs's condition: a token of twist -Inf is
+   rejected."
+  [state particle]
+  (let [{:keys [completion potential]} state
+        tokens (:tokens particle)
+        base (potential/prefix potential tokens)
+        ended (delay (- (potential/complete potential tokens) base))
+        max-tokens (long (second (:args state)))]
+    (fn [t]
+      (let [t (long t)]
+        (cond (contains? (:end-tokens completion) t) @ended
+              (== (inc (count tokens)) max-tokens) (- (potential/complete potential (conj tokens t)) base)
+              :else (- (potential/prefix potential (conj tokens t)) base))))))
+
 (defn- moved
-  "particle (live, at context) moved by token t, drawn from proposal row q,
-   and its log weight's increment: [the particle, the increment]; a
-   particle of weight 0 if the potential allows no token (nil for [q t])."
-  [state particle context ws [q t]]
-  (if (nil? q)
+  "particle (live, at context) moved by a draw {:t the token, :log-q its
+   proposal's log-probability, :twist}, and its log weight's increment:
+   [the particle, the increment]; a particle of weight 0 for no draw (nil:
+   the proposal had no token to draw)."
+  [state particle context draw]
+  (if (nil? draw)
     [(assoc particle :done? true :dead? true) Double/NEGATIVE_INFINITY]
-    (let [{:keys [completion potential]} state
-          t (long t)
+    (let [{:keys [completion]} state
+          t (long (:t draw))
           log-p (double (first (lm/score (:lm completion) context [t])))
           tokens (conj (:tokens particle) t)
           end? (contains? (:end-tokens completion) t)
           capped? (and (not end?) (== (count tokens) (long (second (:args state)))))
-          twist (if ws (double (aget ^floats ws (int (end-entry completion t)))) 0.0)
-          ;; stopped at max-tokens: the whole sequence's weight replaces the
-          ;; prefix's (a particle of weight 0 stays 0)
-          twist (if (and potential capped? (not (Double/isInfinite twist)))
-                  (+ twist (- (potential/complete potential tokens) (potential/prefix potential tokens)))
-                  twist)
-          dw (+ (- log-p (double (aget ^floats q (int t)))) twist)
+          dw (+ (- log-p (double (:log-q draw))) (double (:twist draw)))
           ;; the critic, where the particle still has weight: its weight of
           ;; the tokens now (as the whole sequence at an end or at
           ;; max-tokens), less its prefix weight of those before
@@ -275,14 +319,23 @@
          dead? (assoc :dead? true))
        dw])))
 
+(defn- awrs-draw
+  "particle's draw by AWRS from the LM's row with key: the token, its
+   log-probability under the proposal (the row's less log Ẑ) and its
+   twist; nil where Ẑ is 0 (no token of finite twist, or a budget spent)."
+  [state particle ^floats row key]
+  (let [{:keys [token weight log-z]} (awrs/sample row (weigher state particle) key (or (:awrs state) {}))]
+    (when-not (== Double/NEGATIVE_INFINITY (double log-z))
+      {:t token :log-q (- (double (aget row (int token))) (double log-z)) :twist weight})))
+
 (defn step
   "Every live particle one token further: their contexts read in one
    lm/batch-next-logprobs, a token drawn from each one's proposal, and each
    one's log weight increased by log p - log q plus the twist. The
    proposal rows (:lm's, :masked's) and the draws run on the state's host
-   pool; the LM's and the potential's calls, and a proposal function's,
-   on the calling thread. Finished particles are kept as they are. opts:
-   :key (by default the state's, folded with the step)."
+   pool; the LM's and the potential's calls, a proposal function's and
+   :awrs's draws, on the calling thread. Finished particles are kept as
+   they are. opts: :key (by default the state's, folded with the step)."
   ([state] (step state {}))
   ([state {:keys [key]}]
    (let [{:keys [completion potential proposal particles t]} state
@@ -290,13 +343,19 @@
          live (into [] (remove #(:done? (particles %))) (range (count particles)))
          contexts (mapv #(into prompt (:tokens (particles %))) live)
          rows (when (seq live) (lm/batch-next-logprobs (:lm completion) contexts))
-         twists (mapv #(when potential (twist-row state (:tokens (particles %)))) live)
-         f-rows (if (fn? proposal) (mapv #(function-row proposal %1 %2) contexts rows) (repeat nil))
          draws (or key (step-key state 0))
-         drawn (host/in-order (:host-pool state)
-                         (fn [[i row ws f-row]] (proposed state row ws f-row (rng/fold-in draws i)))
-                         (map vector live rows twists f-rows))
-         moves (mapv #(moved state (particles %1) %2 %3 %4) live contexts twists drawn)]
+         drawn (if (= :awrs proposal)
+                 (mapv (fn [i row] (awrs-draw state (particles i) row (rng/fold-in draws i))) live rows)
+                 (let [twists (mapv #(when potential (twist-row state (:tokens (particles %)))) live)
+                       f-rows (if (fn? proposal) (mapv #(function-row proposal %1 %2) contexts rows) (repeat nil))
+                       proposals (host/in-order (:host-pool state)
+                                                (fn [[i row ws f-row]] (proposed state row ws f-row (rng/fold-in draws i)))
+                                                (map vector live rows twists f-rows))]
+                   (mapv (fn [i ws [q t]]
+                           (when q
+                             {:t t :log-q (aget ^floats q (int t)) :twist (row-twist state (particles i) ws t)}))
+                         live twists proposals)))
+         moves (mapv #(moved state (particles %1) %2 %3) live contexts drawn)]
      (assoc (reduce (fn [s [i [p dw]]]
                       (-> s
                           (assoc-in [:particles i] p)

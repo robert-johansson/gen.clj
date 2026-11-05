@@ -69,6 +69,14 @@ other values for the same key, from the same distribution.
   step, and the target gains the critic's weight. The proposal never
   reads it: cheap potentials propose, expensive ones (a code check, a
   classifier) criticize.
+- **Added: AWRS, adaptive weighted rejection sampling** (`gen.llm.awrs`,
+  and token SMC's `:proposal :awrs`; genclj-oigp; DESIGN §9). For a
+  potential with no cheap row (a parser, a reader on partial text): a
+  token drawn from the LM's row restricted to the tokens of finite twist,
+  checking only the tokens it draws, with an unbiased estimate of their
+  mass as the weight (Lipkin et al., COLM 2025). The recursive (default)
+  and geometric estimators, each with an optional budget of rejections
+  (`:awrs {:method :max-rejects :max-accepts}`).
 - **Fixed: a boxed-math warning on loading gen.llm.llama** (genclj-tpvn).
   A new test loads every source namespace in a JVM of its own and fails
   on any reflection or boxed-math warning.

@@ -3467,6 +3467,20 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     and the tempered sampler are compositions (`temper` of `prompted`,
     `normalize` of that), not functions of their own; genclj-paid keeps
     the samplers.
+  - **AWRS in token SMC (2026-11-05; genclj-oigp; the default
+    PROVISIONAL).** `gen.llm.awrs` ports the paper's bounded-cost
+    estimators (Lipkin et al., COLM 2025, App. H.3): recursive (Def. 10,
+    the default: never more checks than the geometric's on our measure,
+    App. H.3.4) and geometric (Def. 9, read through its with-replacement
+    equivalent, Clipped WRS's (s - 1)/(n - 1) and s/(n - 1)), each with an
+    optional :max-rejects. Token SMC's `:proposal :awrs` takes the
+    potential's twist as the condition (a token of twist -Inf is
+    rejected), so a soft potential works too: the weight is log Ẑ plus
+    the accepted token's twist, an unbiased estimate of the masked
+    proposal's. Draws are on the host from the step's key (one uniform per
+    draw, a second for the phantoms), and the checks, potential calls, run
+    on the calling thread. Def. 2's two-loop AWRS is left out: the
+    geometric estimator unbounded is its alternative form (App. H.3.2).
   - **One chain fast on MLX, and GPU speed (owner, 2026-11-04, "go with
     option 1", on the lead's recommendation; genclj-fpnf, genclj-h8rn).**
     One HMC chain (L=32, 1000 steps) ran in 21.9 ms as a Metal program (one
