@@ -2,7 +2,9 @@
   "Qwen's chat template (ChatML), as the Qwen3.5, 3.6 and 3.8 GGUFs carry
    it: messages rendered to the text a model continues, thinking on or
    off, tools offered in the template's format, and the model's tool calls
-   parsed back.
+   parsed back. Qwen3.8's differs (:template :qwen3.8): a reasoning-effort
+   sentence opens its system turn when thinking is on, and every assistant
+   turn keeps its think block.
 
      (render messages)                 → text ending in the assistant's turn
      (render messages opts)
@@ -25,11 +27,20 @@
                           empty think block, as enable_thinking=false writes
                           it; true: it opens with \"<think>\\n\"
      :generation-prompt?  true (default): the assistant's turn begun
+     :template            :qwen3.5 (default; Qwen3.5's and 3.6's) or :qwen3.8
+     :reasoning-effort    Qwen3.8's, with thinking on: :xhigh (default),
+                          :medium or :low; its sentence (none for :medium)
+                          opens the system turn, before the tools
+     :preserve-thinking?  Qwen3.8's preserve_thinking: true (its default)
+                          keeps every assistant turn's think block (empty
+                          when it has no :reasoning), false keeps only those
+                          after the last user message, as Qwen3.5's
 
    As the template: an assistant turn after the last user message (one
    that is not tool responses) keeps its think block, an earlier one loses
-   it, so a new user message re-renders the turns before it; tool turns
-   extend the text (continuation). Text holds the special tokens as text:
+   it (but under Qwen3.8's preserve-thinking), so a new user message
+   re-renders the turns before it; tool turns extend the text
+   (continuation). Text holds the special tokens as text:
    encode it with the tokenizer's :parse-special? true."
   {:api :experimental}
   (:require [clojure.string :as str]))
@@ -88,17 +99,53 @@
     (when (and (= :system role) (pos? i))
       (throw (ex-info "chat: a :system message comes first" {:index i})))))
 
-(defn- system-turn [messages tools]
-  (let [system (when (= :system (:role (first messages))) (str/trim (:content (first messages))))]
-    (cond (seq tools) (str "<|im_start|>system\n" tools-head (str/join (map #(str "\n" (tool-json %)) tools)) tools-tail
+(def ^:private reasoning-sentences
+  "Qwen3.8's reasoning-effort sentences, by effort (none for :medium)."
+  {:xhigh (str "Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions,"
+               " consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.")
+   :medium nil
+   :low (str "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion"
+             " without unnecessary elaboration.")})
+
+(defn- template-options
+  "opts with the template's defaults, checked: the reasoning sentence (or
+   nil) as :reasoning, and :preserve-thinking?."
+  [{:keys [template thinking?] :or {template :qwen3.5} :as opts}]
+  (case template
+    :qwen3.5 (do (when (some #(contains? opts %) [:reasoning-effort :preserve-thinking?])
+                   (throw (ex-info "chat: :reasoning-effort and :preserve-thinking? are Qwen3.8's (:template :qwen3.8)"
+                                   {:reason :invalid-option :template template})))
+                 (assoc opts :reasoning nil :preserve-thinking? false :empty-system-turn? true))
+    :qwen3.8 (let [effort (get opts :reasoning-effort :xhigh)]
+               (when-not (contains? reasoning-sentences effort)
+                 (throw (ex-info (str "chat: :reasoning-effort is :xhigh, :medium or :low, not " (pr-str effort))
+                                 {:reason :invalid-option :reasoning-effort effort})))
+               (assoc opts
+                      :reasoning (when thinking? (reasoning-sentences effort))
+                      :preserve-thinking? (get opts :preserve-thinking? true)
+                      :empty-system-turn? false))
+    (throw (ex-info (str "chat: :template is :qwen3.5 or :qwen3.8, not " (pr-str template))
+                    {:reason :invalid-option :template template}))))
+
+(defn- system-turn
+  "The system turn: the reasoning sentence, the tools, the system message.
+   An empty system message makes an empty turn where empty-turn? (Qwen3.5's
+   rendering here), none otherwise (Qwen3.8's template)."
+  [messages tools reasoning empty-turn?]
+  (let [system (when (= :system (:role (first messages))) (str/trim (:content (first messages))))
+        system (when (or empty-turn? (seq system)) system)
+        opening (when reasoning (str reasoning "\n\n"))]
+    (cond (seq tools) (str "<|im_start|>system\n" opening tools-head (str/join (map #(str "\n" (tool-json %)) tools)) tools-tail
                            (when (seq system) (str "\n\n" system)) "<|im_end|>\n")
-          system (str "<|im_start|>system\n" system "<|im_end|>\n")
+          (and reasoning (empty? system)) (str "<|im_start|>system\n" reasoning "<|im_end|>\n")
+          system (str "<|im_start|>system\n" opening system "<|im_end|>\n")
           :else "")))
 
 (defn- turn
   "Message i of messages, rendered (the tool turns' grouping by their
-   neighbours)."
-  [messages i lq]
+   neighbours); an assistant turn keeps its think block after the last
+   user message lq, or always when preserve?."
+  [messages i lq preserve?]
   (let [{:keys [role content reasoning]} (messages i)
         prev (when (pos? i) (messages (dec i)))
         nxt (when (< (inc i) (count messages)) (messages (inc i)))]
@@ -106,7 +153,7 @@
       :system ""
       :user (str "<|im_start|>user\n" (str/trim content) "<|im_end|>\n")
       :assistant (str "<|im_start|>assistant\n"
-                      (when (> i lq) (str "<think>\n" (str/trim (or reasoning "")) "\n</think>\n\n"))
+                      (when (or preserve? (> i lq)) (str "<think>\n" (str/trim (or reasoning "")) "\n</think>\n\n"))
                       (str/trim content) "<|im_end|>\n")
       :tool (str (when-not (and prev (tool-response? prev)) "<|im_start|>user")
                  "\n<tool_response>\n" (str/trim content) "\n</tool_response>"
@@ -118,12 +165,14 @@
 (defn render
   "messages in Qwen's chat template. See the namespace's docstring."
   ([messages] (render messages nil))
-  ([messages {:keys [tools thinking? generation-prompt?] :or {generation-prompt? true}}]
-   (let [messages (vec messages)
+  ([messages opts]
+   (let [{:keys [tools thinking? generation-prompt? reasoning preserve-thinking? empty-system-turn?] :or {generation-prompt? true}}
+         (template-options opts)
+         messages (vec messages)
          _ (check-messages messages)
          lq (last-query messages)]
-     (str (system-turn messages tools)
-          (str/join (map #(turn messages % lq) (range (count messages))))
+     (str (system-turn messages tools reasoning empty-system-turn?)
+          (str/join (map #(turn messages % lq preserve-thinking?) (range (count messages))))
           (when generation-prompt? (generation-prompt thinking?))))))
 
 (defn continuation

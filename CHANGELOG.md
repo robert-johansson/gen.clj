@@ -92,6 +92,14 @@ other values for the same key, from the same distribution.
   JSON, brackets, code's nesting. `gen.llm.instaparse/cfg` reads an
   instaparse grammar into one, recursion and all. In gen.llm.bytes,
   `sweep-with` (a mask from any recognizer's state carried down the trie).
+- **Added: Qwen3.8's chat template** (gen.llm.chat, experimental;
+  genclj-6m7t). `(chat/render messages {:template :qwen3.8})`: with
+  thinking on, the reasoning-effort sentence opens the system turn
+  (`:reasoning-effort` :xhigh by default, :medium, :low), and every
+  assistant turn keeps its think block (`:preserve-thinking?`, true by
+  default), as the template Qwen3.8's model files carry; checked against
+  its own renderings. Qwen3.5's and 3.6's rendering (the default) is
+  unchanged.
 - **Fixed: a boxed-math warning on loading gen.llm.llama** (genclj-tpvn).
   A new test loads every source namespace in a JVM of its own and fails
   on any reflection or boxed-math warning.

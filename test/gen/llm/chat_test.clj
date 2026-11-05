@@ -5,9 +5,16 @@
    assistant turn's think block kept after the last user message and lost
    before it; consecutive tool responses as one user turn; the tools
    section; continuation of tool turns (and its refusal of a user turn);
-   the tool-call parser and the think-block split."
-  (:require [clojure.string :as str]
+   the tool-call parser and the think-block split. Qwen3.8's (:template
+   :qwen3.8) against its template's own renderings by jinja2
+   (test/fixtures/qwen38-chat.edn, from test/fixtures/qwen_chat.py): the
+   reasoning-effort sentences, preserve_thinking on and off, tools, an
+   empty system message."
+  (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
+            [gen.llm.branching-contract :as bc]
             [gen.llm.chat :as chat]))
 
 (deftest turns-and-the-generation-prompt
@@ -64,3 +71,54 @@
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #":role" (chat/render [{:role :bot :content "x"}])))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"comes first"
                         (chat/render [{:role :user :content "U"} {:role :system :content "S"}]))))
+
+;; ---------------------------------------------------------------------------
+;; Qwen3.8 (genclj-6m7t), against its template's renderings
+;; ---------------------------------------------------------------------------
+
+(def ^:private qwen38 (edn/read-string (slurp (io/file "test/fixtures/qwen38-chat.edn"))))
+
+(def ^:private eval-tool {:name "eval" :description "Eval \"it\"." :params [{:name "code" :description "Forms."}]})
+
+(def ^:private conversation
+  [{:role :user :content "Q1"}
+   {:role :assistant :content "A1" :reasoning "r1"}
+   {:role :user :content "Q2"}
+   {:role :assistant :content "A2" :reasoning "r2"}
+   {:role :tool :content "T1"}
+   {:role :tool :content "T2"}])
+
+(deftest qwen38-renders-as-its-template
+  (let [su [{:role :system :content "S"} {:role :user :content "U"}]
+        u [{:role :user :content "U"}]
+        r (fn [messages opts] (chat/render messages (assoc opts :template :qwen3.8)))]
+    (doseq [[case text] {:user-thinking (r u {:thinking? true})
+                         :user-default-effort (r u {:thinking? true :reasoning-effort :xhigh})
+                         :system-low (r su {:thinking? true :reasoning-effort :low})
+                         :system-medium (r su {:thinking? true :reasoning-effort :medium})
+                         :system-xhigh (r su {:thinking? true})
+                         :empty-system-thinking (r [{:role :system :content "  "} {:role :user :content "U"}] {:thinking? true})
+                         :user-off (r u {})
+                         :system-off (r [{:role :system :content "S"} {:role :user :content "U\n"}] {})
+                         :tools-thinking (r su {:thinking? true :tools [eval-tool]})
+                         :tools-off (r su {:tools [eval-tool]})
+                         :conversation-thinking (r conversation {:thinking? true})
+                         :conversation-off (r conversation {})
+                         :conversation-not-preserved (r conversation {:thinking? true :preserve-thinking? false})
+                         :no-generation-prompt (r u {:thinking? true :generation-prompt? false})}]
+      (is (= (qwen38 case) text) (name case)))))
+
+(deftest qwen38-and-qwen35-differ-only-where-the-templates-do
+  ;; thinking off, one user turn: the same text; a conversation keeps its
+  ;; earlier think blocks under Qwen3.8 only
+  (is (= (chat/render [{:role :user :content "U"}]) (chat/render [{:role :user :content "U"}] {:template :qwen3.8})))
+  (is (not= (chat/render conversation) (chat/render conversation {:template :qwen3.8})))
+  (is (= (chat/render conversation {:thinking? true})
+         (chat/render conversation {:template :qwen3.8 :preserve-thinking? false :reasoning-effort :medium :thinking? true}))))
+
+(deftest qwen38-options-are-checked
+  (doseq [[what opts] [["an unknown template" {:template :qwen4}]
+                       ["an unknown effort" {:template :qwen3.8 :reasoning-effort :max}]
+                       ["Qwen3.8's options on Qwen3.5" {:reasoning-effort :low}]
+                       ["preserve-thinking on Qwen3.5" {:preserve-thinking? true}]]]
+    (is (= :invalid-option (bc/reason #(chat/render [{:role :user :content "U"}] opts))) what)))
