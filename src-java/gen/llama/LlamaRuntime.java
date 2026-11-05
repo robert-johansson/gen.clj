@@ -25,7 +25,7 @@ public final class LlamaRuntime {
   /** The llama.cpp release the binding was generated from. Struct layouts
    *  (passed by value) change between releases, so another version is
    *  refused rather than called. */
-  public static final String VERSION = "0.7.0";
+  public static final String VERSION = "0.9.0";
 
   // ---- the library ------------------------------------------------------------
 
