@@ -84,6 +84,14 @@ other values for the same key, from the same distribution.
   with gen.llm.grammar's exact masks; recursion unrolled to `:max-depth`.
   A dependent takes it with `:deps/root "ext/instaparse"`; it brings
   instaparse 1.5.0. In gen.clj's repository the `:test` alias has it.
+- **Added: context-free grammars as potentials** (`gen.llm.cfg`,
+  experimental; genclj-h5rb; DESIGN §9). Rules over bytes (rules,
+  strings, regexes), recognized by Earley's algorithm byte by byte:
+  `cfg/recognizes?`, `cfg/prefix?`, and `cfg/potential` (prefix and
+  complete weights, masks by a sweep of the token trie) for recursive
+  JSON, brackets, code's nesting. `gen.llm.instaparse/cfg` reads an
+  instaparse grammar into one, recursion and all. In gen.llm.bytes,
+  `sweep-with` (a mask from any recognizer's state carried down the trie).
 - **Fixed: a boxed-math warning on loading gen.llm.llama** (genclj-tpvn).
   A new test loads every source namespace in a JVM of its own and fails
   on any reflection or boxed-math warning.

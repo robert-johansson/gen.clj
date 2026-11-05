@@ -38,6 +38,7 @@ Generative Functions*, so it needs no model file.
             [gen.gfi :as gfi]
             [gen.llm.byte-tokenizer :as bt]
             [gen.llm.bytes :as bytes]
+            [gen.llm.cfg :as cfg]
             [gen.llm.constrained :as constrained]
             [gen.llm.dfa :as dfa]
             [gen.llm.grammar :as grammar]
@@ -541,6 +542,36 @@ and without a depth it refuses the grammar:
 ;; error: instaparse: the rule :pair is recursive
 (ip/term nested)
 ```
+
+Without a depth, the same rules are a context-free grammar, which
+`gen.llm.cfg` recognizes byte by byte with Earley's algorithm: its state
+after a text is a chart that the next byte extends, as a DFA's state is,
+so it is a potential too. `ip/cfg` reads an instaparse grammar into one,
+recursion and all:
+
+<!-- code: instaparse-cfg -->
+```clojure
+(def pairs (ip/cfg nested))
+
+(mapv #(cfg/recognizes? pairs %) ["yn" "yyyyynnnnn" "yyn"])
+;=> [true true false]
+
+(mapv #(cfg/prefix? pairs %) ["yyyy" "yyyyn" "yn" "n"])
+;=> [true true true false]
+
+(def nested-pairs (cfg/potential m pairs))
+
+[(potential/prefix nested-pairs [1 1 1])
+ (potential/complete nested-pairs [1 4])]
+;=> [0.0 0.0]
+```
+
+A text is a prefix while some string of the language begins with it;
+the masks come from the same sweep of the token trie, an Earley chart
+carried down each depth in place of a DFA state. Its liveness is the
+bytes', not the tokens': a vocabulary that lacks a byte the language
+needs could reach a prefix no token sequence completes, which a byte
+vocabulary like this chapter's, or a byte-level BPE's, never does.
 
 Its text differs from instaparse's own parses in one way: a regex
 terminal stands here for every string its regex matches, where

@@ -313,24 +313,41 @@
   [d]
   (map first (vals (group-by (fn [x] (mapv #(dfa/step d % x) (range (dfa/size d)))) (range 256)))))
 
-(defn- distinguished?
-  "Do states s and t have different languages (a breadth-first search over
-   pairs for a string one accepts and the other not)?"
-  [d reps s t]
-  (loop [seen #{[s t]} queue [[s t]]]
-    (when-let [[a b] (first queue)]
-      (if (not= (dfa/accepting? d a) (dfa/accepting? d b))
-        true
-        (let [next (distinct (for [x reps] [(dfa/step d a x) (dfa/step d b x)]))
-              new (remove seen next)]
-          (recur (into seen new) (into (subvec queue 1) new)))))))
+(defn- classes
+  "The classes of states 0 … n-1 (and -1, dead) that no string tells
+   apart, by Moore's partition refinement over the byte classes reps:
+   start from accepting or not, split by the classes each byte leads to,
+   until no class splits. A vector of class numbers by state, -1's last.
+   Polynomial in n, where a search over pairs of states for a string
+   that tells them apart is quartic and hung the suite on a random regex
+   of a few hundred states (2026-11-05)."
+  [n accepting? step reps]
+  (let [states (conj (vec (range n)) -1)]
+    (loop [class-of (zipmap states (map #(if (accepting? %) 1 0) states))]
+      (let [signature (fn [s] (into [(class-of s)] (map #(class-of (step s %))) reps))
+            numbered (zipmap (distinct (map signature states)) (range))
+            class-of' (zipmap states (map #(numbered (signature %)) states))]
+        (if (= (count (set (vals class-of'))) (count (set (vals class-of))))
+          (mapv class-of states)
+          (recur class-of'))))))
+
+(defn- minimal?
+  "Are states 0 … n-1 pairwise distinguishable?"
+  [n accepting? step reps]
+  (let [cs (classes n accepting? step reps)]
+    (= n (count (set (take n cs))))))
+
+(deftest the-minimality-check-finds-equivalent-states
+  ;; a DFA for a*, by hand, with a twin of its one state: not minimal
+  (let [twins {0 1 1 0}
+        step (fn [s b] (if (and (<= 0 s) (= b 97)) (twins s) -1))]
+    (is (not (minimal? 2 #(<= 0 %) step [97 98])))
+    (is (minimal? 1 #(<= 0 %) (fn [s b] (if (and (<= 0 s) (= b 97)) 0 -1)) [97 98]))))
 
 (defspec dfas-are-minimal 100
   (prop/for-all [t gen-tree]
-    (let [d (regex/dfa (render t))
-          n (dfa/size d)
-          reps (byte-reps d)]
-      (every? true? (for [s (range n) u (range (inc s) n)] (boolean (distinguished? d reps s u)))))))
+    (let [d (regex/dfa (render t))]
+      (minimal? (dfa/size d) #(dfa/accepting? d %) #(dfa/step d %1 %2) (byte-reps d)))))
 
 (deftest equal-languages-have-equal-dfas
   (doseq [[a b] [["a|b" "[ab]"] ["(a|b)*" "[ab]*"] ["a*a*" "a*"] ["(ab)*a" "a(ba)*"] ["a{2,}" "aaa*"]
@@ -352,11 +369,9 @@
 (defspec a-transition-map-keeps-its-language 200
   (prop/for-all [spec gen-transition-map
                  strings (gen/vector (gen/vector (gen/choose 0 3) 0 6) 40)]
-    (let [d (dfa/dfa spec)
-          n (dfa/size d)
-          reps (byte-reps d)]
+    (let [d (dfa/dfa spec)]
       (and (every? #(= (map-accepts? spec %) (dfa/matches? d (byte-array (map unchecked-byte %)))) strings)
-           (every? true? (for [s (range n) u (range (inc s) n)] (boolean (distinguished? d reps s u))))
+           (minimal? (dfa/size d) #(dfa/accepting? d %) #(dfa/step d %1 %2) (byte-reps d))
            (= d (dfa/dfa (dfa/->data d)))))))
 
 (deftest every-state-is-live-and-reached

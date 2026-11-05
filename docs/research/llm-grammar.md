@@ -393,8 +393,16 @@ by byte; `toolcall.cljs` built a regex over the declared tools. Here:
   dead node's subtree skipped. For context-free grammars proper, an Earley
   or pushdown recognizer whose state advances byte by byte fits the sweep
   directly (its state at each trie depth, as the DFA's is), which is how
-  llguidance and XGrammar make CFG masks cheap. Neither is built; both are
-  potentials, so nothing above them changes.
+  llguidance and XGrammar make CFG masks cheap. Both are potentials, so
+  nothing above them changes. **Built (2026-11-05, genclj-h5rb):**
+  `gen.llm.cfg`, Earley over bytes with regex elements inlined as
+  right-linear rules, its masks by `gen.llm.bytes/sweep-with`; tested
+  against an independent oracle (each rule's language and prefix language
+  up to five characters, by fixpoints over string sets) on 200 random
+  grammars, against gen.llm.grammar's masks on a regular language, under
+  the potential laws, and (`gen.llm.instaparse/cfg`) against instaparse's
+  parses on 150 random recursive grammars. At Qwen3's vocabulary a JSON
+  grammar's mask takes 0.1-0.7 ms (`gen.instaparse-bench`).
 
 
 ## The dependency: our own engine, not instaparse

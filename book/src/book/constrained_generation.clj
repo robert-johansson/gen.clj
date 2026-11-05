@@ -7,6 +7,7 @@
             [gen.gfi :as gfi]
             [gen.llm.byte-tokenizer :as bt]
             [gen.llm.bytes :as bytes]
+            [gen.llm.cfg :as cfg]
             [gen.llm.constrained :as constrained]
             [gen.llm.dfa :as dfa]
             [gen.llm.grammar :as grammar]
@@ -294,6 +295,21 @@ z
 ;; book: instaparse-recursive
 ;; error: instaparse: the rule :pair is recursive
 #_(ip/term nested)
+
+;; book: instaparse-cfg
+(def pairs (ip/cfg nested))
+
+(mapv #(cfg/recognizes? pairs %) ["yn" "yyyyynnnnn" "yyn"])
+;=> [true true false]
+
+(mapv #(cfg/prefix? pairs %) ["yyyy" "yyyyn" "yn" "n"])
+;=> [true true true false]
+
+(def nested-pairs (cfg/potential m pairs))
+
+[(potential/prefix nested-pairs [1 1 1])
+ (potential/complete nested-pairs [1 4])]
+;=> [0.0 0.0]
 
 ;; book: constrained
 (def yes-or-no (token/completion m {:potential yes-no}))

@@ -8,6 +8,8 @@
                                     gen.llm.lm/byte-vocab's), but excluded's
                                     (end tokens)
      (token-bytes trie t)         → token t's bytes (do not write them)
+     (sweep-with trie s0 advance) → the tokens whose bytes advance from s0 (a
+                                    recognizer's state carried down the trie)
      (weigh trie root-row row-of) → every token's weight from its bytes' (a
                                     byte potential's rows, read through the trie)
      (vocab-bytes what vocab)     → an LM's byte vocabulary, or vocab's
@@ -194,6 +196,42 @@
                           (aset mask w (bit-or (aget mask w) (bit-shift-left 1 (bit-and t 63))))
                           (recur (inc j)))))))
                 (recur (inc i)))))))
+    mask))
+
+(defn sweep-with
+  "The tokens whose bytes lead from state s0 through advance, a function of
+   a state and a byte (0-255) to the next state or nil (no way on): a
+   bitset over the vocabulary, as sweep's. advance is called once for each
+   trie node whose parent's state is not nil, in the trie's preorder, so a
+   dead prefix's subtree is skipped. The bare tokens are in it (s0 is
+   theirs); nil for s0 is the empty set."
+  ^longs [^ByteTrie trie s0 advance]
+  (let [^bytes edge (.-edge trie)
+        ^ints depth (.-depth trie)
+        ^ints end (.-end trie)
+        ^ints offsets (.-offsets trie)
+        ^ints tokens (.-tokens trie)
+        n-nodes (alength depth)
+        mask (long-array (quot (+ (.-n-vocab trie) 63) 64))
+        ^objects states (object-array (inc (.-max-depth trie)))
+        mark (fn [^long t]
+               (let [w (bit-shift-right t 6)]
+                 (aset mask w (bit-or (aget mask w) (bit-shift-left 1 (bit-and t 63))))))]
+    (when (some? s0)
+      (aset states 0 s0)
+      (doseq [t (.-bare trie)] (mark (long t)))
+      (loop [i 1]
+        (when (< i n-nodes)
+          (let [d (aget depth i)
+                s (advance (aget states (dec d)) (bit-and (long (aget edge i)) 0xff))]
+            (if (nil? s)
+              (recur (aget end i))
+              (do (aset states d s)
+                  (loop [j (aget offsets i)]
+                    (when (< j (aget offsets (inc i)))
+                      (mark (aget tokens j))
+                      (recur (inc j))))
+                  (recur (inc i))))))))
     mask))
 
 ;; ---------------------------------------------------------------------------

@@ -3498,6 +3498,25 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     the first, greedy match), and instaparse 1.5.0's counted repeat of a
     parser that matches the empty text rejects the empty text, which the
     language has.
+  - **Context-free grammars by Earley (2026-11-05; genclj-h5rb;
+    PROVISIONAL, the owner to confirm byte-level liveness).**
+    `gen.llm.cfg`, in the core with no dependency: rules over bytes
+    (keywords, strings, `(cfg/regex r)` inlined as right-linear rules from
+    its minimal DFA), unproductive rules dropped so a non-empty Earley set
+    is an exact viable prefix, Aycock and Horspool's nullable handling;
+    `cfg/potential` weighs contexts 0/-Inf and its masks sweep the token
+    trie with an Earley chart per depth (`gen.llm.bytes/sweep-with`).
+    Decided: liveness is the bytes', not the tokens' (a vocabulary
+    lacking a byte the language needs can strand a completion), since
+    token-level exactness over a context-free language has no finite
+    exploration as the DFA's has; a byte-level BPE vocabulary never
+    strands. No state between calls: prefix and complete recognize from
+    the start (pure, rule 3), at a cost that grows with the text
+    (stateful potentials are genclj-9dvz's). Measured at Qwen3's
+    vocabulary: a JSON grammar's mask in 0.1-0.7 ms, a prefix of 661
+    bytes in 0.6 ms (`gen.instaparse-bench`). `gen.llm.instaparse/cfg`
+    reads any instaparse grammar without lookahead into one (the
+    llguidance-style lexer/parser split was not needed at these costs).
   - **One chain fast on MLX, and GPU speed (owner, 2026-11-04, "go with
     option 1", on the lead's recommendation; genclj-fpnf, genclj-h8rn).**
     One HMC chain (L=32, 1000 steps) ran in 21.9 ms as a Metal program (one

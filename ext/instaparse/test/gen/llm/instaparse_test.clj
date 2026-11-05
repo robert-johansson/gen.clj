@@ -7,6 +7,10 @@
      epsilon, hidden rules, references to later rules), instaparse's own
      whole-text parse and the term's regex/matches? agree on 20 random
      texts over a, A, b, B each, and on every text of up to three of them.
+   - The context-free reading (cfg): for 150 random grammars with
+     recursion (left, mutual, rules that derive nothing), instaparse's
+     parse and gen.llm.cfg/recognizes? agree as above; an empty language
+     is one instaparse parses nothing of.
    - Sampling: completions under a tool-call grammar's potential, on the
      toy engine over pieces of the grammar's text, all parse with
      instaparse.
@@ -26,6 +30,7 @@
             [clojure.test.check.properties :as prop]
             [gen.gfi :as gfi]
             [gen.llm.branching-contract :as bc]
+            [gen.llm.cfg :as cfg]
             [gen.llm.byte-tokenizer :as bt]
             [gen.llm.instaparse :as ip]
             [gen.llm.lm :as lm]
@@ -94,6 +99,24 @@
     (let [parser (insta/parser rules :start :r0)
           term (ip/term parser)]
       (every? #(= (parses? parser %) (regex/matches? term %)) (concat texts short-texts)))))
+
+(def ^:private gen-recursive-grammar
+  "Rules :r0 … :rk, each referring to any (itself and earlier ones too:
+   left recursion, mutual recursion, rules that derive nothing)."
+  (gen/let [k (gen/choose 1 3)
+            names (gen/return (mapv #(keyword (str "r" %)) (range k)))
+            rules (apply gen/tuple (repeat k (gen/scale #(min % 6) (gen-combinator names))))]
+    (zipmap names rules)))
+
+(defspec instaparse-and-the-cfg-agree 150
+  (prop/for-all [rules gen-recursive-grammar
+                 texts (gen/vector gen-text 20)]
+    (let [parser (insta/parser rules :start :r0)
+          texts (concat texts short-texts)
+          g (try (ip/cfg parser) (catch clojure.lang.ExceptionInfo e (:reason (ex-data e))))]
+      (if (= :empty-language g)
+        (not-any? #(parses? parser %) texts)
+        (every? #(= (parses? parser %) (cfg/recognizes? g %)) texts)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Completions under a grammar parse

@@ -7,6 +7,12 @@
      (term grammar), (term grammar opts)     → its language, a regex term
      (grammar vocab grammar opts)            → a gen.llm.grammar of it over
                                                vocab (an LM or a byte vocabulary)
+     (cfg grammar), (cfg grammar opts)       → its language as a context-free
+                                               grammar (gen.llm.cfg), recursion and all
+
+   term and grammar hold the regular subset, through a DFA's exact masks;
+   cfg any grammar without lookahead, through Earley's recognizer
+   (gen.llm.cfg/potential), at a cost per byte that grows with the text.
 
    grammar is an instaparse parser, or the text of one in instaparse's
    notation (EBNF; (insta/parser text :input-format :abnf) for ABNF). opts:
@@ -36,7 +42,8 @@
    gen.llm.regex's syntax has it, where java.util.regex's default also
    excludes \\r and Unicode's line separators."
   {:api :experimental}
-  (:require [gen.llm.grammar :as grammar]
+  (:require [gen.llm.cfg :as cfg]
+            [gen.llm.grammar :as grammar]
             [gen.llm.regex :as regex]
             [instaparse.core :as insta])
   (:import (java.util.regex Pattern)))
@@ -163,3 +170,60 @@
    (let [language (term g (select-keys opts [:start :max-depth]))
          d (regex/dfa language (select-keys opts [:max-states]))]
      (grammar/grammar vocab d (select-keys opts [:end-tokens])))))
+
+;; ---------------------------------------------------------------------------
+;; Context-free: the rules as gen.llm.cfg's
+;; ---------------------------------------------------------------------------
+
+(defn cfg
+  "The language of grammar (an instaparse parser or its text) as a
+   gen.llm.cfg grammar: each rule a rule, recursion and all, each nested
+   combinator a rule of its own (a star right-recursive), terminals as
+   term reads them. opts: :start (default the parser's start production).
+   Lookahead is refused (:unsupported-combinator)."
+  ([grammar] (cfg grammar {}))
+  ([grammar {:keys [start]}]
+   (let [parser (parser-of grammar)
+         rules (:grammar parser)
+         start (or start (:start-production parser))
+         out (atom {})
+         fresh (let [n (atom 0)] (fn [] (keyword "gen.llm.instaparse" (str "r" (swap! n inc)))))]
+     (when-not (contains? rules start)
+       (throw (ex-info (str "instaparse: no rule " start) {:reason :invalid-grammar :rule start})))
+     (letfn [(define [alts] (let [k (fresh)] (swap! out assoc k alts) k))
+             ;; p as the elements of one alternative
+             (elements [p]
+               (case (:tag p)
+                 :string [(:string p)]
+                 (:string-ci :regexp) [(cfg/regex (node-term p))]
+                 :epsilon []
+                 :cat (into [] (mapcat elements) (:parsers p))
+                 :nt (do (when-not (contains? rules (:keyword p))
+                           (throw (ex-info (str "instaparse: no rule " (:keyword p)) {:reason :invalid-grammar :rule (:keyword p)})))
+                         [(:keyword p)])
+                 [(define (alternatives p))]))
+             ;; p as a rule's alternatives
+             (alternatives [p]
+               (case (:tag p)
+                 :alt (mapv elements (:parsers p))
+                 :ord [(elements (:parser1 p)) (elements (:parser2 p))]
+                 :opt [(elements (:parser p)) []]
+                 :star (let [k (fresh)] (swap! out assoc k [[] (conj (elements (:parser p)) k)]) [[k]])
+                 :plus (let [k (fresh) e (elements (:parser p))] (swap! out assoc k [e (conj e k)]) [[k]])
+                 :rep (let [e (elements (:parser p))
+                            lo (long (:min p))
+                            hi (:max p)
+                            ;; lo copies, then hi - lo optional ones, or any more
+                            more (if (or (nil? hi) (and (number? hi) (Double/isInfinite (double hi))))
+                                   (let [k (fresh)] (swap! out assoc k [[] (conj e k)]) [k])
+                                   (let [k (define [[] e])] (repeat (- (long hi) lo) k)))]
+                        [(into (vec (apply concat (repeat lo e))) more)])
+                 (:look :neg) (throw (ex-info (str "instaparse: lookahead (" (name (:tag p)) ") is not supported")
+                                              {:reason :unsupported-combinator :combinator (:tag p)}))
+                 [(elements p)]))
+             (node-term [p]
+               (case (:tag p)
+                 :string-ci (string-ci (:string p))
+                 :regexp (regexp (:regexp p))))]
+       (doseq [[k p] rules] (swap! out assoc k (alternatives p)))
+       (cfg/cfg {:start start :rules @out})))))

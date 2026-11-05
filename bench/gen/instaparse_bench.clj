@@ -4,12 +4,15 @@
    gen.grammar-bench reads it; llama.cpp is not loaded): the term, the DFA
    and every mask once per grammar, then the per-token costs, a mask row
    (logw-next) and the site's distribution (the row times the mask,
-   renormalized).
+   renormalized). And a recursive grammar (JSON values) read by Earley
+   (gen.llm.instaparse/cfg, gen.llm.cfg): a prefix weight of a text, and a
+   mask (logw-next's trie sweep), at the start and inside a string.
 
    Run: clojure -M:test:bench -m gen.instaparse-bench [Qwen3 GGUF]"
   (:require [criterium.core :as crit]
             [gen.grammar-bench]
             [gen.llm.constrained :as constrained]
+            [gen.llm.cfg :as cfg]
             [gen.llm.dfa :as dfa]
             [gen.llm.grammar :as grammar]
             [gen.llm.instaparse :as ip]
@@ -38,7 +41,8 @@
 (defn- us [f] (* 1e6 (first (:mean (crit/quick-benchmark* f {})))))
 
 (defn -main [& [gguf]]
-  (let [f (File. ^String (or gguf (str (System/getProperty "user.home") "/gen-clj-models/Qwen3-0.6B-Q8_0.gguf")))
+  (let [path (or gguf (str (System/getProperty "user.home") "/gen-clj-models/Qwen3-0.6B-Q8_0.gguf"))
+        f (File. ^String path)
         vocab (if (.exists f)
                 (#'gen.grammar-bench/gguf-vocab f)
                 (do (println "no GGUF at" (str f) "- a synthetic vocabulary of 151,936 tokens")
@@ -57,4 +61,23 @@
             ctx (if (zero? (potential/prefix @g ctx)) ctx [])]
         (println (format "| %s | %d | %.0f, %.0f, %.0f | %.0f | %.0f |" label (dfa/size @d) term-ms dfa-ms grammar-ms
                          (us #(potential/logw-next @g ctx))
-                         (us #(constrained/site-row @g #{} row ctx))))))))
+                         (us #(constrained/site-row @g #{} row ctx))))))
+    (let [json "value = object | array | string | number | 'true' | 'false' | 'null'
+                object = <'{'> (pair (<', '> pair)*)? <'}'>
+                pair = string <': '> value
+                array = <'['> (value (<', '> value)*)? <']'>
+                string = #'\"[a-z ]*\"'
+                number = #'-?[0-9]+'"
+          g (ip/cfg json)
+          p (cfg/potential vocab g {:end-tokens #{}})
+          encode (fn [^String text]
+                   ;; a text as single-byte tokens: Qwen3's first 256 are the bytes
+                   (let [index (into {} (keep-indexed (fn [t ^bytes bs] (when (== 1 (alength bs)) [(aget bs 0) t]))) vocab)]
+                     (mapv #(index (byte %)) (.getBytes text "UTF-8"))))
+          short-text (encode "{\"a\": [1, 2, {\"b\": ")
+          long-text (encode (apply str "[" (repeat 20 "{\"key\": [1, -2, \"text here\"]}, ")))]
+      (println "\n## A recursive grammar (JSON values) by Earley\n")
+      (println "| Context | prefix, µs | logw-next (every token), µs |")
+      (println "|---|---:|---:|")
+      (doseq [[label ctx] [["empty" []] ["22 bytes, inside a value" short-text] ["661 bytes, inside the array" long-text]]]
+        (println (format "| %s | %.0f | %.0f |" label (us #(potential/prefix p ctx)) (us #(potential/logw-next p ctx))))))))
