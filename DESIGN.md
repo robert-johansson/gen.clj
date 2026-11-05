@@ -3432,8 +3432,10 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     Earley), Qwen3.8's thinking template, and the small decisions and
     fixes after 1.1.0 (get on arrays, MLX's gathers, the MLX pin, the
     owner's book review). The device programs keep landing as
-    experimental and do not gate it. To settle before the work starts:
-    memo.clj 1.2.0's needs from gen.clj, as the scope's floor.
+    experimental and do not gate it: the owner confirmed the theme and
+    that speed is not part of 1.2.0's milestone ("ok with speed not part
+    of the 1.2.0 milestone"). To settle before the work starts: memo.clj
+    1.2.0's needs from gen.clj, as the scope's floor.
   - **One chain fast on MLX, and GPU speed (owner, 2026-11-04, "go with
     option 1", on the lead's recommendation; genclj-fpnf, genclj-h8rn).**
     One HMC chain (L=32, 1000 steps) ran in 21.9 ms as a Metal program (one
