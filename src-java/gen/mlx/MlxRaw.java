@@ -6,7 +6,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.invoke.MethodHandle;
 import static java.lang.foreign.ValueLayout.*;
 
-/** Raw mlx-c: one static method per C function (665 of 674). Handles are
+/** Raw mlx-c: one static method per C function (671 of 680). Handles are
  *  longs; pointers are MemorySegments; statuses are returned. */
 public final class MlxRaw {
   private MlxRaw() {}
@@ -2603,6 +2603,18 @@ public final class MlxRaw {
     }
   }
 
+  private static final class mlx_distributed_clear_backends {
+    static final MethodHandle H = MlxRuntime.downcall("mlx_distributed_clear_backends", FunctionDescriptor.of(JAVA_INT));
+  }
+
+  public static int mlx_distributed_clear_backends() {
+    try {
+      return (int) mlx_distributed_clear_backends.H.invokeExact();
+    } catch (Throwable t) {
+      throw MlxRuntime.unreachable(t);
+    }
+  }
+
   private static final class mlx_distributed_group_free {
     static final MethodHandle H = MlxRuntime.downcall("mlx_distributed_group_free", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
   }
@@ -2615,6 +2627,30 @@ public final class MlxRaw {
     }
   }
 
+  private static final class mlx_distributed_group_get_rank {
+    static final MethodHandle H = MlxRuntime.downcall("mlx_distributed_group_get_rank", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
+  }
+
+  public static int mlx_distributed_group_get_rank(MemorySegment res, long group) {
+    try {
+      return (int) mlx_distributed_group_get_rank.H.invokeExact(res, group);
+    } catch (Throwable t) {
+      throw MlxRuntime.unreachable(t);
+    }
+  }
+
+  private static final class mlx_distributed_group_get_size {
+    static final MethodHandle H = MlxRuntime.downcall("mlx_distributed_group_get_size", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
+  }
+
+  public static int mlx_distributed_group_get_size(MemorySegment res, long group) {
+    try {
+      return (int) mlx_distributed_group_get_size.H.invokeExact(res, group);
+    } catch (Throwable t) {
+      throw MlxRuntime.unreachable(t);
+    }
+  }
+
   private static final class mlx_distributed_group_new {
     static final MethodHandle H = MlxRuntime.downcall("mlx_distributed_group_new", FunctionDescriptor.of(JAVA_LONG));
   }
@@ -2622,30 +2658,6 @@ public final class MlxRaw {
   public static long mlx_distributed_group_new() {
     try {
       return (long) mlx_distributed_group_new.H.invokeExact();
-    } catch (Throwable t) {
-      throw MlxRuntime.unreachable(t);
-    }
-  }
-
-  private static final class mlx_distributed_group_rank {
-    static final MethodHandle H = MlxRuntime.downcall("mlx_distributed_group_rank", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
-  }
-
-  public static int mlx_distributed_group_rank(long group) {
-    try {
-      return (int) mlx_distributed_group_rank.H.invokeExact(group);
-    } catch (Throwable t) {
-      throw MlxRuntime.unreachable(t);
-    }
-  }
-
-  private static final class mlx_distributed_group_size {
-    static final MethodHandle H = MlxRuntime.downcall("mlx_distributed_group_size", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
-  }
-
-  public static int mlx_distributed_group_size(long group) {
-    try {
-      return (int) mlx_distributed_group_size.H.invokeExact(group);
     } catch (Throwable t) {
       throw MlxRuntime.unreachable(t);
     }
@@ -2670,6 +2682,18 @@ public final class MlxRaw {
   public static int mlx_distributed_init(MemorySegment res, boolean strict, MemorySegment bk) {
     try {
       return (int) mlx_distributed_init.H.invokeExact(res, strict, bk);
+    } catch (Throwable t) {
+      throw MlxRuntime.unreachable(t);
+    }
+  }
+
+  private static final class mlx_distributed_init_with_all_gather {
+    static final MethodHandle H = MlxRuntime.downcall("mlx_distributed_init_with_all_gather", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_BOOLEAN, ADDRESS, ADDRESS, ADDRESS, ADDRESS));
+  }
+
+  public static int mlx_distributed_init_with_all_gather(MemorySegment res, boolean strict, MemorySegment bk, MemorySegment all_gather, MemorySegment payload, MemorySegment dtor) {
+    try {
+      return (int) mlx_distributed_init_with_all_gather.H.invokeExact(res, strict, bk, all_gather, payload, dtor);
     } catch (Throwable t) {
       throw MlxRuntime.unreachable(t);
     }
@@ -3102,6 +3126,18 @@ public final class MlxRaw {
   public static long mlx_fast_cuda_kernel_new(MemorySegment name, long input_names, long output_names, MemorySegment source, MemorySegment header, boolean ensure_row_contiguous, int shared_memory) {
     try {
       return (long) mlx_fast_cuda_kernel_new.H.invokeExact(name, input_names, output_names, source, header, ensure_row_contiguous, shared_memory);
+    } catch (Throwable t) {
+      throw MlxRuntime.unreachable(t);
+    }
+  }
+
+  private static final class mlx_fast_gated_delta_update {
+    static final MethodHandle H = MlxRuntime.downcall("mlx_fast_gated_delta_update", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+  }
+
+  public static int mlx_fast_gated_delta_update(MemorySegment res, long queries, long keys, long values, long gates, long beta_, long initial_state, long mask, long s) {
+    try {
+      return (int) mlx_fast_gated_delta_update.H.invokeExact(res, queries, keys, values, gates, beta_, initial_state, mask, s);
     } catch (Throwable t) {
       throw MlxRuntime.unreachable(t);
     }
@@ -3696,12 +3732,12 @@ public final class MlxRaw {
   }
 
   private static final class mlx_gather_qmm {
-    static final MethodHandle H = MlxRuntime.downcall("mlx_gather_qmm", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_BOOLEAN, MlxRuntime.OPTIONAL_INT, MlxRuntime.OPTIONAL_INT, ADDRESS, JAVA_BOOLEAN, JAVA_LONG));
+    static final MethodHandle H = MlxRuntime.downcall("mlx_gather_qmm", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_BOOLEAN, MlxRuntime.OPTIONAL_INT, MlxRuntime.OPTIONAL_INT, ADDRESS, JAVA_LONG, JAVA_BOOLEAN, JAVA_LONG));
   }
 
-  public static int mlx_gather_qmm(MemorySegment res, long x, long w, long scales, long biases, long lhs_indices, long rhs_indices, boolean transpose, MemorySegment group_size, MemorySegment bits, MemorySegment mode, boolean sorted_indices, long s) {
+  public static int mlx_gather_qmm(MemorySegment res, long x, long w, long scales, long biases, long lhs_indices, long rhs_indices, boolean transpose, MemorySegment group_size, MemorySegment bits, MemorySegment mode, long global_scale, boolean sorted_indices, long s) {
     try {
-      return (int) mlx_gather_qmm.H.invokeExact(res, x, w, scales, biases, lhs_indices, rhs_indices, transpose, group_size, bits, mode, sorted_indices, s);
+      return (int) mlx_gather_qmm.H.invokeExact(res, x, w, scales, biases, lhs_indices, rhs_indices, transpose, group_size, bits, mode, global_scale, sorted_indices, s);
     } catch (Throwable t) {
       throw MlxRuntime.unreachable(t);
     }
@@ -3738,6 +3774,18 @@ public final class MlxRaw {
   public static int mlx_get_active_memory(MemorySegment res) {
     try {
       return (int) mlx_get_active_memory.H.invokeExact(res);
+    } catch (Throwable t) {
+      throw MlxRuntime.unreachable(t);
+    }
+  }
+
+  private static final class mlx_get_array_buffer_size {
+    static final MethodHandle H = MlxRuntime.downcall("mlx_get_array_buffer_size", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
+  }
+
+  public static int mlx_get_array_buffer_size(MemorySegment res, long arrays) {
+    try {
+      return (int) mlx_get_array_buffer_size.H.invokeExact(res, arrays);
     } catch (Throwable t) {
       throw MlxRuntime.unreachable(t);
     }
@@ -4974,6 +5022,18 @@ public final class MlxRaw {
   public static int mlx_matmul(MemorySegment res, long a, long b, long s) {
     try {
       return (int) mlx_matmul.H.invokeExact(res, a, b, s);
+    } catch (Throwable t) {
+      throw MlxRuntime.unreachable(t);
+    }
+  }
+
+  private static final class mlx_matrix_transpose {
+    static final MethodHandle H = MlxRuntime.downcall("mlx_matrix_transpose", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG, JAVA_LONG));
+  }
+
+  public static int mlx_matrix_transpose(MemorySegment res, long a, long s) {
+    try {
+      return (int) mlx_matrix_transpose.H.invokeExact(res, a, s);
     } catch (Throwable t) {
       throw MlxRuntime.unreachable(t);
     }
@@ -7158,6 +7218,18 @@ public final class MlxRaw {
   public static int mlx_unflatten(MemorySegment res, long a, int axis, MemorySegment shape, long shape_num, long s) {
     try {
       return (int) mlx_unflatten.H.invokeExact(res, a, axis, shape, shape_num, s);
+    } catch (Throwable t) {
+      throw MlxRuntime.unreachable(t);
+    }
+  }
+
+  private static final class mlx_unique {
+    static final MethodHandle H = MlxRuntime.downcall("mlx_unique", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG, JAVA_INT, JAVA_BOOLEAN, JAVA_BOOLEAN, JAVA_BOOLEAN, JAVA_LONG, JAVA_LONG));
+  }
+
+  public static int mlx_unique(MemorySegment res, long a, int size, boolean return_index, boolean return_inverse, boolean return_counts, long fill_value, long s) {
+    try {
+      return (int) mlx_unique.H.invokeExact(res, a, size, return_index, return_inverse, return_counts, fill_value, s);
     } catch (Throwable t) {
       throw MlxRuntime.unreachable(t);
     }

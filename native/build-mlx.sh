@@ -202,7 +202,8 @@ done
 # $ORIGIN/../../nvidia/<name>/lib (pip's layout). The system's are used
 # where it has them (a CUDA or JetPack install matches its driver); only the
 # missing ones are fetched, from their PyPI wheels at pinned versions (those
-# current with MLX 0.32.2's requirements, 2026-10-19).
+# current with MLX 0.32.2's requirements, 2026-10-19; to recheck against
+# 0.32.4's on the next CUDA build).
 fetch_nvidia() {
   local pkg=$1 ver=$2 w s u
   read -r w s u < <(curl -sSf "https://pypi.org/pypi/$pkg/$ver/json" |

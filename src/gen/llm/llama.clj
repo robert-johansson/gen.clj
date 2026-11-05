@@ -2,7 +2,9 @@
   "The llama.cpp engine (DESIGN.md §6): a Branching engine (gen.llm.branching)
    over one llama.cpp context, through the generated binding of llama.h
    (src-java/gen/llama/ffi, from native/jextract-llama.sh) and the libraries
-   of native/build-llama.sh, both pinned to llama.cpp v0.7.0.
+   of native/build-llama.sh, both pinned to llama.cpp v0.9.0 (the binding
+   generated from v0.7.0's llama.h, which v0.9.0's changes only by an ftype
+   and a #define).
 
      (with-open [e (llama/engine {:model \"Qwen3-0.6B-Q8_0.gguf\"})]
        (let [b (br/open e (llama/tokenize e \"The capital of Sweden is\"))]
@@ -209,7 +211,7 @@
 (defn- replay-checked!
   "After an operation on slots: the replay and llama.cpp agree on each
    one's state position (llama_memory_seq_pos_min: a recurrent state's
-   position, -1 for none, for a hybrid model too; v0.7.0 tells no cell's
+   position, -1 for none, for a hybrid model too; llama.cpp tells no cell's
    index). A disagreement stops the replay, loudly on System.err."
   [splits ^MemorySegment mem slots what]
   (when-let [st (some-> splits deref :cells)]
@@ -337,7 +339,7 @@
   (when-let [ks (seq (remove option-checks (keys opts)))]
     (throw (ex-info (str "llama/engine: unknown options " (vec ks)) {:reason :invalid-option :unknown (vec ks)})))
   (let [{:keys [model max-branches] :as opts} (merge defaults opts)
-        ;; LLAMA_MAX_SEQ, 256 in v0.7.0
+        ;; LLAMA_MAX_SEQ, 256 in v0.7.0 and v0.9.0
         max-seq (Llama/llama_max_parallel_sequences)]
     (doseq [[k ok?] option-checks
             :when (not (ok? (get opts k)))]
@@ -446,7 +448,7 @@
       (if (neg? n) "" (.getString buf 0)))))
 
 (def ^:private buffer-line
-  ;; llama.cpp v0.7.0 reports each buffer it allocates, at info level:
+  ;; llama.cpp (v0.7.0 to v0.9.0) reports each buffer it allocates, at info level:
   ;; "load_tensors:   Metal_Mapped model buffer size =   604.15 MiB",
   ;; "llama_kv_cache:      Metal KV buffer size =   448.00 MiB", and the
   ;; recurrent state's (RS), output and compute buffers alike

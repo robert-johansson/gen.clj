@@ -864,8 +864,9 @@ How to read these numbers:
 The decisions are §12 items 15–18, for the owner's review.*
 
 **The binding.** mlx-c over FFM (DESIGN.md §5.3):
-- `native/build-mlx.sh` builds libmlxc v0.7.0 against the official MLX
-  0.32.2 wheel, which mlx-c pins (checked by sha256). No Metal compiler is
+- `native/build-mlx.sh` builds libmlxc v0.8.0 against the official MLX
+  0.32.4 wheel, which mlx-c pins (checked by sha256; v0.7.0 and 0.32.2
+  until 1.2.0). No Metal compiler is
   needed.
 - `native/bindgen.clj` generates the Java layer from the mlx-c headers:
   - `MlxRaw` has one `invokeExact` static per C function (665 of 674);

@@ -154,8 +154,8 @@ depends on Clojure alone.
 
 ## The MLX backend (optional)
 
-`native/build-mlx.sh` fetches the official MLX 0.32.2 wheel (no Metal
-compiler needed), builds mlx-c v0.7.0 against it, and puts the libraries in
+`native/build-mlx.sh` fetches the official MLX 0.32.4 wheel (no Metal
+compiler needed), builds mlx-c v0.8.0 against it, and puts the libraries in
 `native/build/`; `clojure -T:build java` compiles the Java binding. For CUDA
 on a GPU the wheels do not cover (the Thor's sm_110),
 `native/build-mlx.sh cuda13-source` builds MLX from source; point
@@ -179,7 +179,7 @@ describes the backend and the few ways it differs from the JVM backend.
 
 ## Local LLMs (optional; experimental)
 
-`native/build-llama.sh` builds llama.cpp v0.7.0's libraries (with Metal on
+`native/build-llama.sh` builds llama.cpp v0.9.0's libraries (with Metal on
 macOS) into `native/build/llama/`, and `clojure -T:build java` compiles the
 binding. `gen.llm.llama/engine` loads a GGUF model, and `gen.llm.branching`
 forks, advances, scores and resamples its branches

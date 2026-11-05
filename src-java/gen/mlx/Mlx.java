@@ -7,7 +7,7 @@ import java.lang.invoke.MethodHandle;
 import static java.lang.foreign.ValueLayout.*;
 
 /** Checked mlx-c: the status is checked (MlxException on failure) and out-parameters
- *  are return values (558 functions); the other 107 delegate to MlxRaw. */
+ *  are return values (566 functions); the other 105 delegate to MlxRaw. */
 public final class Mlx {
   private Mlx() {}
 
@@ -1445,22 +1445,36 @@ public final class Mlx {
     return out$.get(JAVA_LONG, 0);
   }
 
+  public static void mlx_distributed_clear_backends() {
+    MlxRuntime.Scratch scratch$ = MlxRuntime.scratch();
+    int status$ = MlxRaw.mlx_distributed_clear_backends();
+    if (status$ != 0) throw MlxRuntime.error("mlx_distributed_clear_backends");
+  }
+
   public static void mlx_distributed_group_free(long group) {
     MlxRuntime.Scratch scratch$ = MlxRuntime.scratch();
     int status$ = MlxRaw.mlx_distributed_group_free(group);
     if (status$ != 0) throw MlxRuntime.error("mlx_distributed_group_free");
   }
 
+  public static int mlx_distributed_group_get_rank(long group) {
+    MlxRuntime.Scratch scratch$ = MlxRuntime.scratch();
+    MemorySegment out$ = scratch$.out(1);
+    int status$ = MlxRaw.mlx_distributed_group_get_rank(out$, group);
+    if (status$ != 0) throw MlxRuntime.error("mlx_distributed_group_get_rank");
+    return out$.get(JAVA_INT, 0);
+  }
+
+  public static int mlx_distributed_group_get_size(long group) {
+    MlxRuntime.Scratch scratch$ = MlxRuntime.scratch();
+    MemorySegment out$ = scratch$.out(1);
+    int status$ = MlxRaw.mlx_distributed_group_get_size(out$, group);
+    if (status$ != 0) throw MlxRuntime.error("mlx_distributed_group_get_size");
+    return out$.get(JAVA_INT, 0);
+  }
+
   public static long mlx_distributed_group_new() {
     return MlxRaw.mlx_distributed_group_new();
-  }
-
-  public static int mlx_distributed_group_rank(long group) {
-    return MlxRaw.mlx_distributed_group_rank(group);
-  }
-
-  public static int mlx_distributed_group_size(long group) {
-    return MlxRaw.mlx_distributed_group_size(group);
   }
 
   public static long mlx_distributed_group_split(long group, int color, int key) {
@@ -1477,6 +1491,15 @@ public final class Mlx {
     MemorySegment bk$ = scratch$.string(bk);
     int status$ = MlxRaw.mlx_distributed_init(out$, strict, bk$);
     if (status$ != 0) throw MlxRuntime.error("mlx_distributed_init");
+    return out$.get(JAVA_LONG, 0);
+  }
+
+  public static long mlx_distributed_init_with_all_gather(boolean strict, String bk, MemorySegment all_gather, MemorySegment payload, MemorySegment dtor) {
+    MlxRuntime.Scratch scratch$ = MlxRuntime.scratch();
+    MemorySegment out$ = scratch$.out(1);
+    MemorySegment bk$ = scratch$.string(bk);
+    int status$ = MlxRaw.mlx_distributed_init_with_all_gather(out$, strict, bk$, all_gather, payload, dtor);
+    if (status$ != 0) throw MlxRuntime.error("mlx_distributed_init_with_all_gather");
     return out$.get(JAVA_LONG, 0);
   }
 
@@ -1724,6 +1747,14 @@ public final class Mlx {
 
   public static long mlx_fast_cuda_kernel_new(MemorySegment name, long input_names, long output_names, MemorySegment source, MemorySegment header, boolean ensure_row_contiguous, int shared_memory) {
     return MlxRaw.mlx_fast_cuda_kernel_new(name, input_names, output_names, source, header, ensure_row_contiguous, shared_memory);
+  }
+
+  public static long mlx_fast_gated_delta_update(long queries, long keys, long values, long gates, long beta_, long initial_state, long mask, long s) {
+    MlxRuntime.Scratch scratch$ = MlxRuntime.scratch();
+    MemorySegment out$ = scratch$.out(1);
+    int status$ = MlxRaw.mlx_fast_gated_delta_update(out$, queries, keys, values, gates, beta_, initial_state, mask, s);
+    if (status$ != 0) throw MlxRuntime.error("mlx_fast_gated_delta_update");
+    return out$.get(JAVA_LONG, 0);
   }
 
   public static long mlx_fast_layer_norm(long x, long weight, long bias, float eps, long s) {
@@ -2104,13 +2135,13 @@ public final class Mlx {
     return out$.get(JAVA_LONG, 0);
   }
 
-  public static long mlx_gather_qmm(long x, long w, long scales, long biases, long lhs_indices, long rhs_indices, boolean transpose, Integer group_size, Integer bits, String mode, boolean sorted_indices, long s) {
+  public static long mlx_gather_qmm(long x, long w, long scales, long biases, long lhs_indices, long rhs_indices, boolean transpose, Integer group_size, Integer bits, String mode, long global_scale, boolean sorted_indices, long s) {
     MlxRuntime.Scratch scratch$ = MlxRuntime.scratch();
     MemorySegment out$ = scratch$.out(1);
     MemorySegment group_size$ = scratch$.optional(group_size == null ? 0 : group_size, group_size != null);
     MemorySegment bits$ = scratch$.optional(bits == null ? 0 : bits, bits != null);
     MemorySegment mode$ = scratch$.string(mode);
-    int status$ = MlxRaw.mlx_gather_qmm(out$, x, w, scales, biases, lhs_indices, rhs_indices, transpose, group_size$, bits$, mode$, sorted_indices, s);
+    int status$ = MlxRaw.mlx_gather_qmm(out$, x, w, scales, biases, lhs_indices, rhs_indices, transpose, group_size$, bits$, mode$, global_scale, sorted_indices, s);
     if (status$ != 0) throw MlxRuntime.error("mlx_gather_qmm");
     return out$.get(JAVA_LONG, 0);
   }
@@ -2140,6 +2171,14 @@ public final class Mlx {
     MemorySegment out$ = scratch$.out(1);
     int status$ = MlxRaw.mlx_get_active_memory(out$);
     if (status$ != 0) throw MlxRuntime.error("mlx_get_active_memory");
+    return out$.get(JAVA_LONG, 0);
+  }
+
+  public static long mlx_get_array_buffer_size(long arrays) {
+    MlxRuntime.Scratch scratch$ = MlxRuntime.scratch();
+    MemorySegment out$ = scratch$.out(1);
+    int status$ = MlxRaw.mlx_get_array_buffer_size(out$, arrays);
+    if (status$ != 0) throw MlxRuntime.error("mlx_get_array_buffer_size");
     return out$.get(JAVA_LONG, 0);
   }
 
@@ -2942,6 +2981,14 @@ public final class Mlx {
     MemorySegment out$ = scratch$.out(1);
     int status$ = MlxRaw.mlx_matmul(out$, a, b, s);
     if (status$ != 0) throw MlxRuntime.error("mlx_matmul");
+    return out$.get(JAVA_LONG, 0);
+  }
+
+  public static long mlx_matrix_transpose(long a, long s) {
+    MlxRuntime.Scratch scratch$ = MlxRuntime.scratch();
+    MemorySegment out$ = scratch$.out(1);
+    int status$ = MlxRaw.mlx_matrix_transpose(out$, a, s);
+    if (status$ != 0) throw MlxRuntime.error("mlx_matrix_transpose");
     return out$.get(JAVA_LONG, 0);
   }
 
@@ -4389,6 +4436,14 @@ public final class Mlx {
     MemorySegment shape$ = scratch$.ints(shape);
     int status$ = MlxRaw.mlx_unflatten(out$, a, axis, shape$, (long) shape.length, s);
     if (status$ != 0) throw MlxRuntime.error("mlx_unflatten");
+    return out$.get(JAVA_LONG, 0);
+  }
+
+  public static long mlx_unique(long a, int size, boolean return_index, boolean return_inverse, boolean return_counts, long fill_value, long s) {
+    MlxRuntime.Scratch scratch$ = MlxRuntime.scratch();
+    MemorySegment out$ = scratch$.out(1);
+    int status$ = MlxRaw.mlx_unique(out$, a, size, return_index, return_inverse, return_counts, fill_value, s);
+    if (status$ != 0) throw MlxRuntime.error("mlx_unique");
     return out$.get(JAVA_LONG, 0);
   }
 

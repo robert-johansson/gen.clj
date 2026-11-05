@@ -1,12 +1,16 @@
 (ns gen.llm.llama.recurrent
   "Where llama.cpp keeps a recurrent or hybrid model's states, replayed:
    the bookkeeping of llama_memory_recurrent (src/llama-memory-recurrent.cpp
-   at llama.cpp 620d222, which v0.7.0 builds: seq_cp, seq_rm, find_slot),
+   at llama.cpp cd959ba, which v0.9.0 builds: seq_cp, seq_rm, find_slot),
    fed every memory operation of the engine, so that gen.llm.llama can
    split a step whose sequences would land far apart. Internal to
    gen.llm.llama. Pinned to that commit: gen.llama.LlamaRuntime refuses
-   any libllama but v0.7.0, and a change of version needs this file read
-   against the new llama-memory-recurrent.cpp.
+   any libllama but v0.9.0, and a change of version needs this file read
+   against the new llama-memory-recurrent.cpp. Read for v0.9.0
+   (2026-11-05): since v0.7.0 only a partial rollback's bound moved (a
+   cell's rs_max, from its last ubatch, where n_rs_seq was), and the
+   engine keeps no snapshots (n_rs_seq 0), so none was possible before
+   or since; seq_cp and find_slot's placement are unchanged.
 
    Why: a decode gathers the states of every cell from the lowest to the
    highest its sequences land on (n_rs of them, build_rs in

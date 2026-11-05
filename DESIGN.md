@@ -252,7 +252,8 @@ The backend contract is `src/gen/array/protocols.clj`.
 
 ### 5.3 MLX backend (M2): mlx-c via Panama FFM
 
-**Decision.** Bind MLX's official C API (mlx-c v0.7.0, which pins MLX v0.32.2)
+**Decision.** Bind MLX's official C API (mlx-c v0.7.0, which pins MLX v0.32.2;
+since 1.2.0 mlx-c v0.8.0 and MLX v0.32.4)
 with Java's Foreign Function & Memory API (final since JDK 22). This is the only
 option that gives, from **one** API: CPU (macOS arm64 and Linux x86_64/arm64),
 Metal, CUDA, grad/vjp/jvp/custom_function, vmap, compile, splittable PRNG keys,
