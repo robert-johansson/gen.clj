@@ -374,7 +374,7 @@
   [^String s]
   (into [] (mapcat (fn [part]
                      (let [[a b] (str/split (str/trim part) #"-")]
-                       (range (parse-long a) (inc (parse-long (or b a)))))))
+                       (range (parse-long a) (inc (long (parse-long (or b a))))))))
         (remove str/blank? (str/split (str/trim s) #","))))
 
 (defn ^:no-doc performance-cores
