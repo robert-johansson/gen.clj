@@ -45,7 +45,17 @@
   (-backend [_] tape)
 
   p/ITrackedValue
-  (-primal [_] primal))
+  (-primal [_] primal)
+
+  ;; get, nth and count are loud (rule 6; genclj-fzez): an array is no
+  ;; Clojure collection, and get would answer nil
+  clojure.lang.ILookup
+  (valAt [this _] (throw (p/not-a-collection "get" this)))
+  (valAt [this _ _] (throw (p/not-a-collection "get" this)))
+  clojure.lang.Indexed
+  (nth [this _] (throw (p/not-a-collection "nth" this)))
+  (nth [this _ _] (throw (p/not-a-collection "nth" this)))
+  (count [this] (throw (p/not-a-collection "count" this))))
 
 (defmethod print-method Tracked [x ^java.io.Writer w]
   (.write w "#gen/tracked[") (print-method (.-primal ^Tracked x) w) (.write w "]"))

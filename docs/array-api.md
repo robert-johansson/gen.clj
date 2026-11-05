@@ -90,6 +90,12 @@ A distribution body, compared with GenMLX:
   - a backend array (anything implementing `IArray`).
 
   Numbers and booleans are **0-d arrays that belong to no backend.**
+- **A backend array is no Clojure collection.** `get`, `nth` and `count`
+  on one (the backend's, the tape's, a staged or a batched value) are a
+  loud `:not-a-collection` error (a batched value's, the batched-branch
+  error), where `get` answered nil until 1.2.0 (genclj-fzez, DESIGN §9).
+  Read host values with `->clj` (one element `item`), index on the
+  backend with `take`.
 - **Host math.** An op whose operands are all numbers or booleans runs on the
   host and returns a number or boolean. There is no backend involvement and no
   allocation (3.8 ns per `add`, measured, §11).

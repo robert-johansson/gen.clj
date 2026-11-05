@@ -88,7 +88,17 @@
           (and (= [] shape) (or (instance? Number o) (instance? Boolean o)))
           (host-read! "clojure.core/= on a staged value")
           :else false))
-  (hashCode [this] (System/identityHashCode this)))
+  (hashCode [this] (System/identityHashCode this))
+
+  ;; get, nth and count are loud (rule 6; genclj-fzez): an array is no
+  ;; Clojure collection, and get would answer nil
+  clojure.lang.ILookup
+  (valAt [this _] (throw (p/not-a-collection "get" this)))
+  (valAt [this _ _] (throw (p/not-a-collection "get" this)))
+  clojure.lang.Indexed
+  (nth [this _] (throw (p/not-a-collection "nth" this)))
+  (nth [this _ _] (throw (p/not-a-collection "nth" this)))
+  (count [this] (throw (p/not-a-collection "count" this))))
 
 (defmethod print-method Staged [^Staged x ^java.io.Writer w] (.write w (.toString x)))
 

@@ -104,7 +104,15 @@
   (cons [_ _] (branch! "extend"))
   (empty [_] (branch! "empty"))
   (equiv [this o] (or (identical? this o) (branch! "compare")))
-  (seq [_] (branch! "iterate")))
+  (seq [_] (branch! "iterate"))
+
+  ;; and get and nth, which would answer nil or say nothing (genclj-fzez)
+  clojure.lang.ILookup
+  (valAt [_ _] (branch! "look up"))
+  (valAt [_ _ _] (branch! "look up"))
+  clojure.lang.Indexed
+  (nth [_ _] (branch! "index"))
+  (nth [_ _ _] (branch! "index")))
 
 (defmethod print-method Batched [x ^java.io.Writer w]
   (.write w "#gen/batched[") (print-method (value x) w) (.write w "]"))

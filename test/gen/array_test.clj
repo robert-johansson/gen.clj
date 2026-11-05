@@ -2,12 +2,28 @@
   (:require [gen.test-support :as ts]
             [clojure.test :refer [deftest is testing are]]
             [gen.array :as array]
+            [gen.array.stage :as stage]
             [gen.random]))
 
 (defn- thrown-data
   "ex-data of the exception thrown by (f), or nil."
   [f]
   (try (f) nil (catch clojure.lang.ExceptionInfo e (ex-data e))))
+
+(deftest arrays-are-not-collections
+  ;; get, nth and count are loud on every kind of array, where get
+  ;; answered nil (genclj-fzez, DESIGN §9): the backend's arrays, the
+  ;; tape's, staged and batched values (the batched-branch error). A 0-d
+  ;; array on the JVM backend is a host number, which they leave alone.
+  (let [x (array/array [1.0 2.0 3.0])
+        loud? (fn [f] (= :not-a-collection (:reason (thrown-data f))))]
+    (doseq [[what f] {"get" #(get x 1) "get with a default" #(get x 1 :none) "nth" #(nth x 1)
+                      "nth with a default" #(nth x 1 nil) "count" #(count x) "get-in" #(get-in {:a x} [:a 0])}]
+      (is (loud? f) what))
+    (is (loud? #((array/grad (fn [y] (get y 0) (array/sum y))) x)) "on the tape")
+    (is (loud? #(stage/stage (fn [y] (get y 0)) [[3] (ts/float-dtype)])) "staged")
+    (is (thrown? clojure.lang.ExceptionInfo ((array/vmap (fn [y] (get y 0))) (array/array [[1.0 2.0] [3.0 4.0]])))
+        "batched")))
 
 (deftest host-math
   (testing "number-only ops stay on the host and follow NumPy semantics, but booleans count in arithmetic, as in Julia (DESIGN.md §9)"

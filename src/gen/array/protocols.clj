@@ -41,6 +41,18 @@
 (defprotocol IArray
   (-backend [x] "The IBackend this array belongs to."))
 
+(defn ^:no-doc not-a-collection
+  "The error for clojure.core's collection functions on an array (get, nth,
+   count), which would otherwise answer nil or a message that says
+   nothing: an array is no Clojure collection (rule 6). Its host values
+   are gen.array/->clj's, one element gen.array/item's, and an index on
+   the backend gen.array/take's."
+  [op x]
+  (ex-info (str op " on an array (" (.getSimpleName (class x)) "): arrays are not Clojure collections."
+                " Read host values with gen.array/->clj (one element: gen.array/item),"
+                " or index on the backend with gen.array/take")
+           {:reason :not-a-collection :op op}))
+
 (defprotocol IBatchedValue
   "A value that holds one value per particle of a batch (gen.array.batch)."
   (-all-particles [x] "The array of every particle's value, batch axes first."))

@@ -3498,6 +3498,20 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     the first, greedy match), and instaparse 1.5.0's counted repeat of a
     parser that matches the empty text rejects the empty text, which the
     language has.
+  - **Arrays are no Clojure collections: get, nth and count are loud
+    (2026-11-05; genclj-fzez; PROVISIONAL, the owner's call, recorded
+    under the autonomy of 1.2.0).** The owner's options were loud
+    everywhere, or reads that work where an array is concrete. Chosen:
+    loud everywhere, on every array kind (JvmArray, MlxArray, the tape's
+    Tracked, Staged; Batched by its batched-branch error), as ILookup and
+    Indexed whose methods throw `:not-a-collection` naming `->clj`,
+    `item` and `take`. Why: rule 6 (get answered nil), one behaviour on
+    every backend and inside gen bodies (a working read on concrete
+    arrays would make code pass on the JVM backend and fail staged or
+    batched), and no host reads that look like collection access. Breaking
+    in 1.x's CHANGELOG (get's nil was a behaviour); the battery had no
+    use of it. memo.clj's side: memoclj-fksr (its Qwen3.8 agent read
+    arrays with get).
   - **Context-free grammars by Earley (2026-11-05; genclj-h5rb;
     PROVISIONAL, the owner to confirm byte-level liveness).**
     `gen.llm.cfg`, in the core with no dependency: rules over bytes
