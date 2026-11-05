@@ -250,6 +250,15 @@ stay inside it, with the same determinism:
 | Qwen3.5-0.8B Q8_0 (hybrid) | 1.6e-2 | 1.0e-3 | 1.6e-2 | 0 |
 | Gemma-3-270M Q8_0 (SWA) | 2.3e-2 | 4.7e-3 | 3.0e-2 | 0 |
 
+**llama.cpp v0.9.0 (2026-11-05, genclj-adsl; the M4, Metal).** The same
+bench, top-64 maxima: Qwen3-0.6B 3.8e-2 overall (fork vs fresh 3.8e-2,
+batched vs alone 2.8e-2), Qwen3.5-0.8B 1.5e-2, Gemma-3-270M 2.5e-2, all
+inside the 0.1 band and under v0.7.0's. The same read from the same state
+stays exactly equal, and so now does the same tokens re-read while the
+first read is live (0 at every prompt, 4.6e-3 median under v0.7.0 on the
+M2 Max): whether v0.9.0's unified cache (flash_attn_ext_rows) or the
+machine made it so is not separated here.
+
 Branches past a sliding window (`bench/gen/llama_long_noise.clj`: the
 contract's own comparisons, for four long texts at 600, 800, 1,000 and
 1,400 tokens and a continuation across 512; the engine of the long-branch
