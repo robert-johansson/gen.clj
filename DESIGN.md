@@ -3434,8 +3434,19 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     owner's book review). The device programs keep landing as
     experimental and do not gate it: the owner confirmed the theme and
     that speed is not part of 1.2.0's milestone ("ok with speed not part
-    of the 1.2.0 milestone"). To settle before the work starts: memo.clj
-    1.2.0's needs from gen.clj, as the scope's floor.
+    of the 1.2.0 milestone"). memo.clj 1.2.0's needs from gen.clj, as
+    the scope's floor: its tracker names the tag and llama.cpp v0.9.0
+    (memoclj-s3wr, memoclj-670y); asking its session waits (owner,
+    2026-11-05).
+  - **1.2.0 worked autonomously, CUDA on fenrir (owner, 2026-11-05).**
+    "keep working on the entire milestone v1.2.0 autonomously", after the
+    lead's plan (tpvn, then the potential laws, the GenLM core in order;
+    "decisions sound good"): decisions that come up are PROVISIONAL here,
+    listed in the report. The milestone's GPU runs, its gate's CUDA
+    battery included: "I grant the gpu run on the fenrir and other
+    machines if needed - but I prefer the fenrir only". So CUDA goes to
+    fenrir's RTX PRO 6000, the Thor only if fenrir cannot serve. Pushes
+    still wait for a go.
   - **One chain fast on MLX, and GPU speed (owner, 2026-11-04, "go with
     option 1", on the lead's recommendation; genclj-fpnf, genclj-h8rn).**
     One HMC chain (L=32, 1000 steps) ran in 21.9 ms as a Metal program (one
