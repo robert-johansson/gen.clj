@@ -202,8 +202,10 @@ done
 # $ORIGIN/../../nvidia/<name>/lib (pip's layout). The system's are used
 # where it has them (a CUDA or JetPack install matches its driver); only the
 # missing ones are fetched, from their PyPI wheels at pinned versions (those
-# current with MLX 0.32.2's requirements, 2026-10-19; to recheck against
-# 0.32.4's on the next CUDA build).
+# current with MLX 0.32.2's requirements, 2026-10-19; MLX 0.32.4 adds
+# cuSOLVER, with cuSPARSE and nvJitLink under it, pinned to CUDA 13.4's
+# family, 2026-11-05). A fetched library can need others (cuSOLVER needs
+# cuSPARSE), so the check runs until nothing is missing.
 fetch_nvidia() {
   local pkg=$1 ver=$2 w s u
   read -r w s u < <(curl -sSf "https://pypi.org/pypi/$pkg/$ver/json" |
@@ -221,17 +223,24 @@ print(fs[0]['filename'], fs[0]['digests']['sha256'], fs[0]['url']) if fs else No
   unzip -q -o "$build/dl/$w" 'nvidia/*' -d "$build"
 }
 if [ "$variant" = cuda13 ] || [ "$variant" = cuda13-source ]; then
-  for lib in $(ldd "$out/lib/libmlx.so" | awk '/not found/ {print $1}'); do
-    case "$lib" in
-      libnccl.so.*) fetch_nvidia nvidia-nccl-cu13 2.32.3 ;;
-      libcudnn*) fetch_nvidia nvidia-cudnn-cu13 9.27.0.42 ;;
-      libcublas*) fetch_nvidia nvidia-cublas 13.8.1.7 ;;
-      libcufft*) fetch_nvidia nvidia-cufft 12.4.0.43 ;;
-      libnvrtc*) fetch_nvidia nvidia-cuda-nvrtc 13.4.92 ;;
-      libcudart*) fetch_nvidia nvidia-cuda-runtime 13.4.92 ;;
-      libcuda.so.*) echo "libcuda.so.1 not found: the NVIDIA driver is missing" >&2; exit 1 ;;
-      *) echo "libmlx needs $lib, which this script does not know how to fetch" >&2; exit 1 ;;
-    esac
+  for round in 1 2 3; do
+    missing="$(ldd "$out/lib/libmlx.so" | awk '/not found/ {print $1}')"
+    [ -n "$missing" ] || break
+    for lib in $missing; do
+      case "$lib" in
+        libnccl.so.*) fetch_nvidia nvidia-nccl-cu13 2.32.3 ;;
+        libcudnn*) fetch_nvidia nvidia-cudnn-cu13 9.27.0.42 ;;
+        libcublas*) fetch_nvidia nvidia-cublas 13.8.1.7 ;;
+        libcufft*) fetch_nvidia nvidia-cufft 12.4.0.43 ;;
+        libcusolver*) fetch_nvidia nvidia-cusolver 12.3.5.3 ;;
+        libcusparse*) fetch_nvidia nvidia-cusparse 12.8.6.72 ;;
+        libnvJitLink*) fetch_nvidia nvidia-nvjitlink 13.4.92 ;;
+        libnvrtc*) fetch_nvidia nvidia-cuda-nvrtc 13.4.92 ;;
+        libcudart*) fetch_nvidia nvidia-cuda-runtime 13.4.92 ;;
+        libcuda.so.*) echo "libcuda.so.1 not found: the NVIDIA driver is missing" >&2; exit 1 ;;
+        *) echo "libmlx needs $lib, which this script does not know how to fetch" >&2; exit 1 ;;
+      esac
+    done
   done
   missing="$(ldd "$out/lib/libmlx.so" | awk '/not found/ {print $1}')"
   [ -z "$missing" ] || { echo "still missing: $missing" >&2; exit 1; }
