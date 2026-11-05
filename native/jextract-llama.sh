@@ -18,7 +18,9 @@
 #   include-dir defaults to native/build/llama/<platform>/include. jextract
 #   25 is $JEXTRACT, or jextract on the PATH (https://jdk.java.net/jextract/).
 #   Generated 2026-10-20 with jextract 25 (JDK 25+37, libclang 13) on macOS
-#   arm64, from llama.cpp v0.7.0.
+#   arm64, from llama.cpp v0.7.0; v0.9.0's llama.h (the pinned release since
+#   1.2.0) adds only LLAMA_FTYPE_MOSTLY_F8_E4M3 and a #define, so that
+#   generation stands.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"

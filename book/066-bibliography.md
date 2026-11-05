@@ -249,7 +249,7 @@ folder.
 - **MLX**. Awni Hannun, Jagrit Digani, Angelos Katharopoulos and Ronan
   Collobert. MLX: efficient and flexible machine learning on Apple
   silicon. 2023. <https://github.com/ml-explore>. gen.clj's MLX backend
-  pins MLX 0.32.2, through mlx-c 0.7.0. Cited in *Getting Started*, *The
+  pins MLX 0.32.4, through mlx-c 0.8.0. Cited in *Getting Started*, *The
   Handler Loop*, *The Inference Toolkit*, *Gradient-Based MCMC*,
   *Speeding Up*, *The Generative Function Interface*, *Design Rationale*,
   *Arrays, Backends and Gradients*, *Exact Structure, Made Explicit*,
@@ -283,7 +283,7 @@ folder.
   <https://github.com/genlm/genlm-backend>, and genlm-control,
   <https://github.com/genlm/genlm-control>. Cited in *Language Models as
   Generative Functions* and *Constrained Generation and Token SMC*.
-- **llama.cpp**. llama.cpp, release v0.7.0, which `gen.llm.llama` runs.
+- **llama.cpp**. llama.cpp, release v0.9.0, which `gen.llm.llama` runs.
   <https://github.com/ggml-org/llama.cpp>. Cited in *The Handler Loop*,
   *Design Rationale*, *Language Models as Generative Functions* and
   *Installing and Running*.

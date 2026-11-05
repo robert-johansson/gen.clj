@@ -31,9 +31,9 @@
 # compiler.
 set -euo pipefail
 
-LLAMA_VERSION=0.7.0
+LLAMA_VERSION=0.9.0
 LLAMA_TAG=v$LLAMA_VERSION
-LLAMA_COMMIT=620d2225cc436ab0b001e3200e590e3b286ef9ab
+LLAMA_COMMIT=cd959bae99ff4bed22bef2604f45241c09bbb8c8
 
 here="$(cd "$(dirname "$0")" && pwd)"
 if command -v ninja >/dev/null 2>&1; then generator="-G Ninja"; else generator=""; fi
@@ -77,8 +77,8 @@ if [ "$commit" != "$LLAMA_COMMIT" ]; then
 fi
 
 # only the library: no common utilities, tools, examples, server or tests;
-# a release build, whose llama_version() is "0.7.0" (a dev build's is
-# "0.7.0-dev", as on every commit after the tag)
+# a release build, whose llama_version() is "0.9.0" (a dev build's is
+# "0.9.0-dev", as on every commit after the tag)
 cmake -S "$src" -B "$build/cmake-llama-$platform" $generator \
   -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_SHARED_LIBS=ON \

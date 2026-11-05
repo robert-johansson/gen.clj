@@ -47,6 +47,21 @@ other values for the same key, from the same distribution.
   (an index on the backend); a batched value raises the batched-branch
   error. Code that used `get` on an array and relied on nil must read the
   array first. A 0-d array on the JVM backend is a host number, as before.
+- **Changed: llama.cpp v0.9.0** (from v0.7.0; genclj-adsl). Rebuild with
+  `native/build-llama.sh` and `clojure -T:build java`: `gen.llama.LlamaRuntime`
+  refuses any other libllama. Its unified KV cache serves multi-sequence
+  work (token SMC, lockstep sampling) better; llama.h changed only by an
+  ftype and a `#define`, so the binding stands, and gen.llm.llama's
+  recurrent replay holds (read against v0.9.0's
+  llama-memory-recurrent.cpp). Log-probabilities may differ from v0.7.0's
+  within llama.cpp's float noise.
+- **Changed: MLX 0.32.4 with mlx-c 0.8.0** (from 0.32.2 and 0.7.0;
+  genclj-4lzg). Rebuild with `native/build-mlx.sh` and `clojure -T:build
+  java`. MLX's CUDA wheel no longer aborts the JVM at exit (1.1.0's known
+  issue: the fix is upstream from 0.32.3), so the source build drops its
+  backported patch. The binding is regenerated from mlx-c 0.8.0's headers
+  (new functions; distributed groups' signatures, which gen.clj does not
+  call).
 - **Added: an opt-in check of MLX's gathers** (gen.backend.mlx;
   genclj-08un; DESIGN §9, PROVISIONAL). With
   `-Dgen.mlx.check-gathers=true`, `gen.array/take` and `take-along-axis`

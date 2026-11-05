@@ -60,11 +60,11 @@ native/bindgen.clj`. The backend conformance suite
 without the native libraries the MLX tests skip.
 
 **llama.cpp** (the local-LLM engine, `gen.llm.llama`) needs its libraries,
-built once: `native/build-llama.sh` builds the pinned release (v0.7.0; Metal
+built once: `native/build-llama.sh` builds the pinned release (v0.9.0; Metal
 on macOS, `cpu` or `cuda` on Linux) into `native/build/llama/<platform>`,
 then `clojure -T:build java`. The JVM finds them with
 `-J-Dgen.llama.lib=<dir>/lib` (default: that build directory). On the M4 Mac
-they are installed at `~/gen-clj-models/llama-v0.7.0`, beside the test
+they are installed at `~/gen-clj-models/llama-v0.9.0` (v0.7.0's beside them), beside the test
 models (Qwen3-0.6B, Qwen3.5-0.8B and Gemma-3-270M, Q8_0 GGUFs). The llama.cpp
 tests take a model with `-J-Dgen.llama.test-model=<gguf>` and skip without
 one; run one model JVM at a time. Everything else in `gen.llm` runs on the
