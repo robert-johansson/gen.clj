@@ -8,6 +8,9 @@
                                     gen.llm.lm/byte-vocab's), but excluded's
                                     (end tokens)
      (token-bytes trie t)         → token t's bytes (do not write them)
+     (weigh trie root-row row-of) → every token's weight from its bytes' (a
+                                    byte potential's rows, read through the trie)
+     (vocab-bytes what vocab)     → an LM's byte vocabulary, or vocab's
      (root trie), (child trie node b), (depth trie node)
      (tokens-at trie node)        → the tokens whose bytes end at node
      (tokens-under trie node)     → those whose bytes begin with node's path
@@ -192,6 +195,62 @@
                           (recur (inc j)))))))
                 (recur (inc i)))))))
     mask))
+
+;; ---------------------------------------------------------------------------
+;; Weighing every token by its bytes
+;; ---------------------------------------------------------------------------
+
+(defn weigh
+  "The weight of each token by its bytes, from the next byte's weights: a
+   new float array of n-vocab entries, token t's the sum along its bytes
+   b_1 … b_k of (row-of [b_1 … b_i-1])[b_i], each row a float array of 256
+   log weights or more (a potential's over bytes: its end, last, is not
+   read). root-row is (row-of []), which the caller holds. A token past a
+   byte of weight -Inf weighs -Inf (its subtree is skipped), as do the
+   tokens the trie excludes; the bare ones weigh 0. row-of is called once
+   for each node of weight above -Inf that has children, with its path's
+   bytes (0-255), in the trie's preorder."
+  ^floats [^ByteTrie trie ^floats root-row row-of]
+  (let [^bytes edge (.-edge trie)
+        ^ints depth (.-depth trie)
+        ^ints end (.-end trie)
+        ^ints offsets (.-offsets trie)
+        ^ints tokens (.-tokens trie)
+        n-nodes (alength depth)
+        max-depth (.-max-depth trie)
+        out (float-array (.-n-vocab trie) Float/NEGATIVE_INFINITY)
+        weights (double-array (inc max-depth))
+        ^objects rows (object-array (inc max-depth))
+        path (long-array max-depth)]
+    (aset rows 0 root-row)
+    (doseq [t (.-bare trie)] (aset out (long t) (float 0.0)))
+    (loop [i 1]
+      (when (< i n-nodes)
+        (let [d (aget depth i)
+              b (bit-and (long (aget edge i)) 0xff)
+              w (+ (aget weights (dec d)) (double (aget ^floats (aget rows (dec d)) b)))]
+          (if (== w Double/NEGATIVE_INFINITY)
+            (recur (aget end i))
+            (do (aset weights d w)
+                (aset path (dec d) b)
+                (loop [j (aget offsets i)]
+                  (when (< j (aget offsets (inc i)))
+                    (aset out (aget tokens j) (unchecked-float w))
+                    (recur (inc j))))
+                (when (< (inc i) (aget end i))
+                  (aset rows d (row-of (vec (java.util.Arrays/copyOf path d)))))
+                (recur (inc i)))))))
+    out))
+
+(defn vocab-bytes
+  "vocab's bytes, by token: an LM's (gen.llm.lm/byte-vocab), or vocab
+   itself when it is a vector of byte arrays. what names the caller in the
+   error (:invalid-vocab)."
+  [what vocab]
+  (cond (satisfies? lm/LM vocab) (lm/byte-vocab vocab)
+        (and (sequential? vocab) (seq vocab) (every? bytes? vocab)) vocab
+        :else (throw (ex-info (str what ": the vocabulary is an LM or a vector of byte arrays, by token")
+                              {:reason :invalid-vocab :vocab vocab}))))
 
 ;; ---------------------------------------------------------------------------
 ;; A text's probability, over its tokenizations

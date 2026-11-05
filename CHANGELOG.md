@@ -51,6 +51,17 @@ other values for the same key, from the same distribution.
   replaces the test-only `gen.llm.potential-contract` check, which was
   never part of a release's API. `gen.laws/failure-of` takes a second
   argument, a function that describes a case of another shape.
+- **Added: potential combinators** (gen.llm.potential, experimental;
+  genclj-f3dv; DESIGN §9). `temper` (weights times beta, zeros kept),
+  `normalize` (next weights as a distribution at every context),
+  `prompted` (an LM's log-probabilities after a prompt: prompt
+  intersection under another completion, a temperature when tempered),
+  `coerce` (a potential over bytes read through a vocabulary, as a
+  grammar over a byte vocabulary through an LM's tokens) and `after` (a
+  potential over the tokens after a close token, for a think block), with
+  `potential?`. `product` checks its factors are potentials when it is
+  made. In gen.llm.bytes, `weigh` (every token's weight from its bytes')
+  and `vocab-bytes`.
 - **Fixed: a boxed-math warning on loading gen.llm.llama** (genclj-tpvn).
   A new test loads every source namespace in a JVM of its own and fails
   on any reflection or boxed-math warning.

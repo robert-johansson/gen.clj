@@ -79,12 +79,6 @@
 
 (defn grammar? [x] (instance? Grammar x))
 
-(defn- byte-vocab-of [vocab]
-  (cond (satisfies? lm/LM vocab) (lm/byte-vocab vocab)
-        (and (sequential? vocab) (every? bytes? vocab)) vocab
-        :else (throw (ex-info "grammar: the vocabulary is an LM or a vector of byte arrays, by token"
-                              {:reason :invalid-vocab :vocab vocab}))))
-
 (defn- dfa-of [language]
   (if (dfa/dfa? language) language (regex/dfa language)))
 
@@ -135,7 +129,7 @@
    text tokens spells a string of it (:inexpressible)."
   ([vocab language] (grammar vocab language {}))
   ([vocab language opts]
-   (let [byte-vocab (byte-vocab-of vocab)
+   (let [byte-vocab (bytes/vocab-bytes "grammar" vocab)
          end-tokens (end-tokens-of vocab byte-vocab opts)
          d (dfa-of language)
          _ (when (zero? (dfa/size d))

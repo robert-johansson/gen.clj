@@ -3447,6 +3447,26 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     machines if needed - but I prefer the fenrir only". So CUDA goes to
     fenrir's RTX PRO 6000, the Thor only if fenrir cannot serve. Pushes
     still wait for a go.
+  - **Potential combinators (2026-11-05; genclj-f3dv; PROVISIONAL,
+    owner to confirm the marked choices).** gen.llm.potential gains
+    genlm-control's combinators, each checked by gen.laws.potential:
+    `temper` (weights times a finite beta of either sign; a zero weight
+    stays zero, so the support is kept and beta 0 is the indicator:
+    PROVISIONAL, genlm's power is p^beta with no rule for negative beta),
+    `normalize` (next weights less log Z, Z over the tokens and the end
+    but the potential's end tokens, for which a completion's end stands;
+    prefix the sum along the context), `prompted` (an LM's
+    log-probabilities after a prompt; the end is log Σ over its end tokens,
+    default the LM's :eog, which it declares), `coerce` (a potential over
+    the 256 bytes read through a vocabulary's byte trie, one next-byte row
+    per byte prefix of weight; end tokens hold no text and a context
+    holding one has no weight, as a grammar's), and `after` (a potential
+    over the tokens after the first close token, those before free; a
+    sequence that never closes has no weight as a whole: PROVISIONAL, the
+    alternative weighs an unclosed sequence as an empty answer). Temperature
+    and the tempered sampler are compositions (`temper` of `prompted`,
+    `normalize` of that), not functions of their own; genclj-paid keeps
+    the samplers.
   - **One chain fast on MLX, and GPU speed (owner, 2026-11-04, "go with
     option 1", on the lead's recommendation; genclj-fpnf, genclj-h8rn).**
     One HMC chain (L=32, 1000 steps) ran in 21.9 ms as a Metal program (one
