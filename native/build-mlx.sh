@@ -5,8 +5,8 @@
 #   libmlx    MLX, from the official wheel of the matching version
 #   (macOS) libjaccl and mlx.metallib, which libmlx loads from its own directory
 #
-# mlx-c depends on MLX's C++ ABI, so the two must match exactly: mlx-c v0.7.0
-# pins MLX v0.32.2, and this script takes MLX from that version's wheel on
+# mlx-c depends on MLX's C++ ABI, so the two must match exactly: mlx-c v0.8.0
+# pins MLX v0.32.4, and this script takes MLX from that version's wheel on
 # PyPI (checked against its sha256). Building MLX itself is not needed, so no
 # Metal compiler is either.
 #
@@ -31,10 +31,10 @@
 # compiler, shasum or sha256sum.
 set -euo pipefail
 
-MLX_VERSION=0.32.2
-MLX_C_TAG=v0.7.0
-MLX_C_COMMIT=a341b4925024b88b2c593468f16e12f5e17315da
-MLX_COMMIT=1f8e74e3f12f31365464a6867c6579f0e9b29d85
+MLX_VERSION=0.32.4
+MLX_C_TAG=v0.8.0
+MLX_C_COMMIT=a26f2d584a14ec619ae8db9a09be03becd47598a
+MLX_COMMIT=36969c094354086e15d2a327a9c50feb20b9cf11
 
 here="$(cd "$(dirname "$0")" && pwd)"
 # Ninja when it is installed, else CMake's default generator (make; a
@@ -44,20 +44,20 @@ os="$(uname -s)"
 arch="$(uname -m)"
 variant="${1:-cpu}"
 
-# wheel file name and sha256, by platform (from https://pypi.org/pypi/<name>/0.32.2/json)
+# wheel file name and sha256, by platform (from https://pypi.org/pypi/<name>/0.32.4/json)
 case "$os-$arch" in
   Darwin-arm64)
     platform=macos-arm64
     major="$(sw_vers -productVersion | cut -d. -f1)"
     if [ "$major" -ge 26 ]; then
       wheel=mlx_metal-$MLX_VERSION-py3-none-macosx_26_0_arm64.whl
-      sha=e6abeac9ac5265830c9c1541b6f96e9be37a85c2446763a46ad466c63a3837ab
+      sha=514df92d41a286895d2564b4b18f4da45096bd7a4a0c47e1042f345ad5a7f936
     elif [ "$major" -ge 15 ]; then
       wheel=mlx_metal-$MLX_VERSION-py3-none-macosx_15_0_arm64.whl
-      sha=55a369250d220b2cf10213a87a2ac1b1a420608c5b35b1df4e7147ac8e32f121
+      sha=9f0a3cc26d89724434d9684932fc6f3e4e83669d2a895d858ed2c8a55eb84e8b
     else
       wheel=mlx_metal-$MLX_VERSION-py3-none-macosx_14_0_arm64.whl
-      sha=3825fff379dbc107dd3413e564a06caeaa24819910ec49c0439e454c06a1b9b8
+      sha=8019b2db622599267d66cc168b2f0dbf5af929790a6c3b3913e00eabc42a7947
     fi
     package=mlx-metal
     ;;
