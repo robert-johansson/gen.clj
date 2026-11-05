@@ -675,7 +675,7 @@
   dispatch-matches-handler {:arglists ([cases])}
   encapsulated {:kind :var}
   estimated {:kind :var}
-  failure-of {:arglists ([r])}
+  failure-of {:arglists ([r] [r describe])}
   fixed-support {:kind :var}
   forward-sampling {:kind :var}
   general {:kind :var}

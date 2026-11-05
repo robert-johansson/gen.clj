@@ -9,9 +9,10 @@
      tokens, liveness and reachability equal brute force's, which walks
      every token from every state and finds the states tokens can complete
      by a fixed point.
-   - The potential's weights: along random constrained walks, logw-next is
-     prefix(ctx ++ [t]) - prefix(ctx) at every token, complete - prefix at
-     the end, and complete is the language's membership of the text.
+   - The potential's weights: the potential contract's laws
+     (gen.laws.potential) over random grammars, and along random
+     constrained walks, prefix is 0, complete is the language's membership
+     of the text and the grammar's state is the DFA's.
    - A random language whose DFA passes :max-states is skipped, as a
      grammar that cannot be built is.
    - Misuse is loud: an empty language, a vocabulary that cannot spell the
@@ -25,10 +26,10 @@
             [clojure.test.check.properties :as prop]
             [gen.llm.branching-contract :as bc]
             [gen.llm.bytes :as bytes]
+            [gen.laws.potential :as potential-laws]
             [gen.llm.dfa :as dfa]
             [gen.llm.grammar :as grammar]
             [gen.llm.potential :as potential]
-            [gen.llm.potential-contract :as contract]
             [gen.llm.regex :as regex])
   (:import (java.nio.charset StandardCharsets)))
 
@@ -227,45 +228,51 @@
           (let [t (ts (.nextInt rnd (count ts)))]
             (recur (conj ctx t) (grammar/advance g s t))))))))
 
-(defn- weights-consistent?
-  "The potential's weights of r's grammar over vocab, along walks from
-   seed, against its prefix and complete scores and the DFA."
+(defn- grammar-of
+  "r's grammar over vocab, or nil when r has no DFA within :max-states or
+   the grammar cannot be built (the vocabulary cannot spell the language)."
+  [r vocab]
+  (when-let [d (dfa-within-limit r)]
+    (try (grammar/grammar vocab d) (catch clojure.lang.ExceptionInfo _ nil))))
+
+(def ^:private gen-grammars
+  "Entries [label grammar n-vocab] of the potential laws: random languages
+   over random text vocabularies, those whose grammars can be built (about
+   nine in ten), labelled by the language and the vocabulary's bytes."
+  (gen/such-that some?
+                 (gen/fmap (fn [[r vocab]]
+                             (when-let [g (grammar-of r vocab)]
+                               [{:language r :vocab (mapv vec vocab)} g (count vocab)]))
+                           (gen/tuple gen-char-term gen-text-vocab))
+                 50))
+
+;; the potential contract: the weights are 0 and -Inf, so the laws'
+;; tolerance does not matter
+(potential-laws/deflaws grammar-weights gen-grammars 200)
+
+(defn- weights-are-the-language?
+  "Along walks from seed, the grammar of r over vocab: prefix 0, complete
+   the language's membership of the text, the state the DFA's."
   [r vocab seed]
   (let [d (dfa-within-limit r)
-        g (when d (try (grammar/grammar vocab d) (catch clojure.lang.ExceptionInfo _ nil)))
+        g (when d (grammar-of r vocab))
         contexts (when g (map #(walk-allowed g % (+ seed %)) (range 6)))]
     (or (nil? g)
-        (and
-         ;; the potential contract's check, exact (the weights are 0 and -Inf)
-         (empty? (contract/check-consistent g (count vocab) contexts 0.0))
-         ;; and the autoregressive factorization: complete(x) - prefix([]) is
-         ;; the sum of the next-token weights along x and the end's
-         (every? (fn [ctx]
-                   (= (- (potential/complete g ctx) (potential/prefix g []))
-                      (+ (reduce + (map-indexed (fn [i t] (double (aget ^floats (potential/logw-next g (subvec ctx 0 i)) (int t))))
-                                                ctx))
-                         (double (aget ^floats (potential/logw-next g ctx) (count vocab))))))
-                 contexts)
-         (every? (fn [ctx]
-                   (let [p (potential/prefix g ctx)
-                         ^floats row (potential/logw-next g ctx)
-                         n (count vocab)]
-                     (and (= 0.0 p)
-                          (= (potential/complete g ctx) (if (dfa/matches? d (concat-bytes vocab ctx)) 0.0 Double/NEGATIVE_INFINITY))
-                          (= (inc n) (alength row))
-                          (every? #(= (double (aget row %)) (- (potential/prefix g (conj ctx %)) p)) (range n))
-                          (= (double (aget row n)) (- (potential/complete g ctx) p))
-                          (= (grammar/state g ctx) (dfa/walk d (dfa/start d) (concat-bytes vocab ctx))))))
-                 contexts)))))
+        (every? (fn [ctx]
+                  (and (= 0.0 (potential/prefix g ctx))
+                       (= (potential/complete g ctx) (if (dfa/matches? d (concat-bytes vocab ctx)) 0.0 Double/NEGATIVE_INFINITY))
+                       (= (grammar/state g ctx) (dfa/walk d (dfa/start d) (concat-bytes vocab ctx)))))
+                contexts))))
 
 (def ^:private weights-property
   (prop/for-all [r gen-char-term vocab gen-text-vocab seed gen/nat]
-    (weights-consistent? r vocab seed)))
+    (weights-are-the-language? r vocab seed)))
 
-(defspec the-weights-are-consistent 200 weights-property)
+(defspec the-weights-are-the-language 200 weights-property)
 
 (deftest a-language-past-max-states-is-an-expected-outcome
-  ;; genclj-z4jy: the-weights-are-consistent drew a term whose DFA passes
+  ;; genclj-z4jy: the-weights-are-consistent (now the-weights-are-the-
+  ;; language and the grammar-weights laws) drew a term whose DFA passes
   ;; :max-states (the shrunk one below: 25,292 derivatives, 3,397 states
   ;; minimal), and the uncaught :too-many-states failed the suite at
   ;; random, at 3 seeds in 400 of its 200 trials; text-masks-match-brute-
@@ -278,7 +285,7 @@
                              2 4)]
     (is (= :too-many-states (bc/reason #(regex/dfa shrunk))) "the term still passes the limit")
     (is (nil? (dfa-within-limit shrunk)))
-    (is (weights-consistent? shrunk [(utf8 "a")] 0))
+    (is (weights-are-the-language? shrunk [(utf8 "a")] 0))
     (is (:pass? (tc/quick-check 61 weights-property :seed 128)))))
 
 (deftest a-dead-context-has-no-next-weights

@@ -1164,17 +1164,32 @@
    law that failed for its vacuous cases; with the smallest failing case
    test.check shrank it to (:case, {:model :key-seed :picks :alt?}: the
    model by its label, the seed of the case's keys, as cases has them),
-   and the run's :seed, test.check's."
-  [r]
-  (let [{:keys [seed shrunk fail result-data]} r
-        data (if shrunk (:result-data shrunk) result-data)
-        error (::prop/error data)
-        smallest (first (or (:smallest shrunk) fail))]
-    (cond-> (dissoc data ::prop/error)
-      error (assoc :error (or (ex-message error) (.getName ^Class (class error))) :exception error)
-      (ex-data error) (assoc :data (ex-data error))
-      smallest (assoc :case (the-case smallest))
-      true (assoc :seed seed))))
+   and the run's :seed, test.check's. describe, a function of a case, says
+   what :case shows for cases of another shape (another module's laws)."
+  ([r] (failure-of r the-case))
+  ([r describe]
+   (let [{:keys [seed shrunk fail result-data]} r
+         data (if shrunk (:result-data shrunk) result-data)
+         error (::prop/error data)
+         smallest (first (or (:smallest shrunk) fail))]
+     (cond-> (dissoc data ::prop/error)
+       error (assoc :error (or (ex-message error) (.getName ^Class (class error))) :exception error)
+       (ex-data error) (assoc :data (ex-data error))
+       smallest (assoc :case (describe smallest))
+       true (assoc :seed seed)))))
+
+(defn ^:no-doc verify-cases
+  "verify over the cases cs, a generator, with describe (failure-of's) to
+   show a failing case: for another module's laws, whose cases have
+   another shape."
+  [cs opts laws describe]
+  (let [{:keys [num-tests] :as opts} (options opts)
+        opts (update opts :seed #(or % (System/currentTimeMillis)))]
+    (into (sorted-map)
+          (keep (fn [[law-name law]]
+                  (let [r (quick-check num-tests (vary-meta (law cs) assoc :name law-name) (dissoc opts :num-tests))]
+                    (when-not (:pass? r) [law-name (failure-of r describe)]))))
+          (law-set! laws))))
 
 (defn verify
   "Runs every law of laws (all by default) over cases of models, and
@@ -1191,15 +1206,7 @@
      (laws/verify models {:num-tests 20 :seed 1} laws/general)"
   ([models] (verify models nil all))
   ([models opts] (verify models opts all))
-  ([models opts laws]
-   (let [{:keys [num-tests] :as opts} (options opts)
-         opts (update opts :seed #(or % (System/currentTimeMillis)))
-         cs (cases models)]
-     (into (sorted-map)
-           (keep (fn [[law-name law]]
-                   (let [r (quick-check num-tests (vary-meta (law cs) assoc :name law-name) (dissoc opts :num-tests))]
-                     (when-not (:pass? r) [law-name (failure-of r)]))))
-           (law-set! laws)))))
+  ([models opts laws] (verify-cases (cases models) opts laws the-case)))
 
 (defmacro deflaws
   "A test.check spec per law of laws (all by default), named prefix-law,
@@ -1215,21 +1222,26 @@
    s, which a result's :seed reproduces. It returns quick-check's
    result and prints nothing; a failure is reported as clojure.test reports one."
   ([prefix models opts] `(deflaws ~prefix ~models ~opts all))
-  ([prefix models opts laws]
-   (let [laws-map (if (map? laws) laws (law-set! (eval laws)))
-         cs (gensym "cases")
-         ls (gensym "laws")]
-     `(let [~cs (cases ~models)
-            ~ls ~laws]
-        ~@(for [law (keys laws-map)
-                :let [spec-name (with-meta (symbol (str prefix "-" (name law))) (meta prefix))]]
-            ;; defspec's var, with this quick-check in place of test.check's
-            `(defn ~(vary-meta spec-name assoc ::ctc/defspec true ::law law
-                               :doc (str "The law " law " over the models of (gen.laws/deflaws " prefix " …): ("
-                                         spec-name ") runs its cases from a fresh seed, (" spec-name
-                                         " n :seed s) n cases from the seed s.")
-                               :test `(fn [] (ctc/assert-check (assoc (~spec-name) :test-var (str '~spec-name)))))
-               ([] (~spec-name (:num-tests (options ~opts))))
-               ([times# & {:as check-opts#}]
-                (quick-check times# (vary-meta ((get ~ls ~law) ~cs) assoc :name '~spec-name)
-                       (merge (dissoc (options ~opts) :num-tests) check-opts#)))))))))
+  ([prefix models opts laws] `(defspecs ~prefix (cases ~models) ~opts ~laws)))
+
+(defmacro ^:no-doc defspecs
+  "deflaws over the cases cases-form evaluates to, a generator: for another
+   module's laws, whose cases have another shape."
+  [prefix cases-form opts laws]
+  (let [laws-map (if (map? laws) laws (law-set! (eval laws)))
+        cs (gensym "cases")
+        ls (gensym "laws")]
+    `(let [~cs ~cases-form
+           ~ls ~laws]
+       ~@(for [law (keys laws-map)
+               :let [spec-name (with-meta (symbol (str prefix "-" (name law))) (meta prefix))]]
+           ;; defspec's var, with this quick-check in place of test.check's
+           `(defn ~(vary-meta spec-name assoc ::ctc/defspec true ::law law
+                              :doc (str "The law " law " over the cases of (deflaws " prefix " …): ("
+                                        spec-name ") runs its cases from a fresh seed, (" spec-name
+                                        " n :seed s) n cases from the seed s.")
+                              :test `(fn [] (ctc/assert-check (assoc (~spec-name) :test-var (str '~spec-name)))))
+              ([] (~spec-name (:num-tests (options ~opts))))
+              ([times# & {:as check-opts#}]
+               (quick-check times# (vary-meta ((get ~ls ~law) ~cs) assoc :name '~spec-name)
+                      (merge (dissoc (options ~opts) :num-tests) check-opts#))))))))

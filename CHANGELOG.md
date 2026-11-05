@@ -38,6 +38,23 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Added: the potential contract as laws** (`gen.laws.potential`, in
+  ext/laws, experimental as gen.llm.potential is; genclj-uxf6). Four laws
+  over a potential's weights, run as gen.laws runs the GFI's
+  (`potential-laws/verify`, `potential-laws/deflaws`): the next-token
+  weights are the prefixes' differences (and complete less prefix at the
+  end), the weights factor autoregressively, a context of zero prefix
+  weight has zero-weight extensions and no complete weight, and the
+  weights are pure functions of the context (a stateful potential's state
+  must not leak). Cases are random walks over the tokens of finite weight;
+  `:tokens` samples the tokens compared, for a large vocabulary. It
+  replaces the test-only `gen.llm.potential-contract` check, which was
+  never part of a release's API. `gen.laws/failure-of` takes a second
+  argument, a function that describes a case of another shape.
+- **Fixed: a boxed-math warning on loading gen.llm.llama** (genclj-tpvn).
+  A new test loads every source namespace in a JVM of its own and fails
+  on any reflection or boxed-math warning.
+
 ## [1.1.0] - 2026-11-05
 
 A consolidation release (DESIGN §9, "gen.clj 1.1.0"; genclj-qsa2): Gen.jl

@@ -227,9 +227,11 @@ A grammar implements `gen.llm.potential`'s protocol, after genlm-control's
 the state after the context is live and -Inf otherwise, `complete` log 1
 when it accepts, and `logw-next` the mask, a new float row of n-vocab + 1
 entries (0 for an allowed token, the end last). The potential contract's
-check (`gen.llm.potential-contract`) holds exactly; so does the
-autoregressive factorization (complete(x) - prefix([]) is the sum of the
-next-token weights along x and the end's).
+laws (`gen.laws.potential`, in ext/laws) hold: the next weights are the
+prefixes' differences, the autoregressive factorization (complete(x) -
+prefix([]) is the sum of the next-token weights along x and the end's), a
+zero prefix's extensions have zero weight, and the weights are pure
+functions of the context.
 
 ## The middleware: a completion under a potential
 
@@ -566,9 +568,11 @@ split one.
   that split them; brute force walks every token from every state and
   finds the live states by a fixed point (no trie, no sweep). About a
   sixth of the text cases reach states that bytes can complete and tokens
-  cannot. **The potential contract** (`gen.llm.potential-contract`)
-  exactly, and the autoregressive factorization, along random constrained
-  walks. Masks over vocabularies of more than 64 tokens (every word of the
+  cannot. **The potential contract's laws** (`gen.laws.potential`) over
+  random grammars, and along random constrained walks the language's
+  membership and the DFA's states. Planted (2026-11-05): logw-next's end
+  0 whether or not the context is complete, and the mask's first word
+  (tokens 0-63) dropped, each fail two of the laws. Masks over vocabularies of more than 64 tokens (every word of the
   bitset). **Misuse**: an empty language, an inexpressible one, bad
   vocabularies.
 - `gen.llm.bytes-test`. **Exact against brute force**: prefix and text

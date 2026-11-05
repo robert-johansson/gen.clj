@@ -1,12 +1,12 @@
 (ns gen.llm.potential-test
-  "Potentials (gen.llm.potential) and the contract check
-   (gen.llm.potential-contract) other potentials use: the dense next-token
-   weights, products, the end tokens a potential declares, misuse; and the
-   check's power, against planted inconsistencies."
+  "Potentials (gen.llm.potential): the dense next-token weights and
+   products under the potential contract's laws (gen.laws.potential,
+   whose own tests hold their planted bugs), the end tokens a potential
+   declares, misuse."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.llm.branching-contract :as bc]
-            [gen.llm.potential :as potential]
-            [gen.llm.potential-contract :as contract]))
+            [gen.laws.potential :as potential-laws]
+            [gen.llm.potential :as potential]))
 
 (def ^:private n 6)
 
@@ -22,11 +22,13 @@
   (potential/potential n {:prefix (fn [ctx] (* -0.1 (reduce + 0 ctx)))
                           :complete (fn [ctx] (- (* -0.1 (reduce + 0 ctx)) 1.0))}))
 
-(def ^:private contexts [[] [1] [1 2] [3 3] [0 5 2]])
+(potential-laws/deflaws dense [[:no-repeats no-repeats n] [:product (potential/product no-repeats by-length) n]] 100)
 
-(deftest dense-next-weights-are-consistent
-  (doseq [p [no-repeats by-length (potential/product no-repeats by-length)]]
-    (is (= [] (contract/check-consistent p n contexts 1e-6))))
+;; a soft potential has no zero prefixes, so no cases of that law
+(potential-laws/deflaws soft [[:by-length by-length n]] 100
+  (dissoc potential-laws/all :a-zero-prefix-has-zero-extensions))
+
+(deftest dense-next-weights
   (let [w (potential/logw-next no-repeats [1 2])]
     (is (= ##-Inf (aget w 2)) "repeating 2")
     (is (= 0.0 (double (aget w 3))))
@@ -37,15 +39,6 @@
     (is (= (+ (potential/prefix no-repeats [1 2]) (potential/prefix by-length [1 2])) (potential/prefix p [1 2])))
     (is (= ##-Inf (potential/prefix p [3 3])))
     (is (= -1.3 (potential/complete p [1 2])))))
-
-(deftest the-check-catches-inconsistent-potentials
-  ;; planted: a logw-next off by 0.5 at one token, at the end, or short
-  (doseq [[what bad] {"one token" (fn [ctx] (let [^floats w (potential/logw-next by-length ctx)] (aset w 3 (float (+ 0.5 (aget w 3)))) w))
-                      "the end" (fn [ctx] (let [^floats w (potential/logw-next by-length ctx)] (aset w n (float 0.0)) w))
-                      "too short" (fn [ctx] (java.util.Arrays/copyOf ^floats (potential/logw-next by-length ctx) (int n)))}]
-    (let [p (potential/potential n {:prefix #(potential/prefix by-length %) :complete #(potential/complete by-length %)
-                                    :logw-next bad})]
-      (is (seq (contract/check-consistent p n contexts 1e-6)) what))))
 
 ;; A potential declares the end tokens it reads contexts with, or has no
 ;; opinion (DESIGN §9, "A potential declares its end tokens"): a product

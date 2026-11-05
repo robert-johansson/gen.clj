@@ -11,7 +11,7 @@ the owner's are marked **Recommendation**; the owner confirmed them all on
 | Piece | Where |
 |---|---|
 | Potentials: weights of token sequences (prefix, complete, the next token's), after genlm-control's `Potential`; built from functions; products | `gen.llm.potential` (a83022f, shared with the grammar work) |
-| The potential contract as a check any potential runs (`check-consistent`) | `test/gen/llm/potential_contract.clj` |
+| The potential contract as laws any potential runs (`gen.laws.potential`: verify, deflaws) | `ext/laws/src/gen/laws/potential.clj` |
 | Token SMC over a completion, twisted by a potential | `gen.llm.smc` |
 | Tests on an enumerable toy vocabulary | `test/gen/llm/potential_test.clj`, `test/gen/llm/smc_test.clj` |
 | The same over llama.cpp, a lipogram as the potential (skipped without `-J-Dgen.llama.test-model`) | `test/gen/llm/llama_smc_test.clj` |
