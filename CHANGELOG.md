@@ -62,6 +62,13 @@ other values for the same key, from the same distribution.
   `potential?`. `product` checks its factors are potentials when it is
   made. In gen.llm.bytes, `weigh` (every token's weight from its bytes')
   and `vocab-bytes`.
+- **Added: a critic in token SMC** (gen.llm.smc's `:critic`;
+  genclj-di22). A second potential applied at the drawn token only: a
+  particle's weight gains the critic's prefix weight difference (its
+  complete weight at an end or at max-tokens), one call a particle and
+  step, and the target gains the critic's weight. The proposal never
+  reads it: cheap potentials propose, expensive ones (a code check, a
+  classifier) criticize.
 - **Fixed: a boxed-math warning on loading gen.llm.llama** (genclj-tpvn).
   A new test loads every source namespace in a JVM of its own and fails
   on any reflection or boxed-math warning.

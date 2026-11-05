@@ -8,7 +8,9 @@
      standard errors of Z, for each proposal (the LM's rows, the masked
      rows, a caller's uniform), a constraint and a soft twist, resampling at
      every step, adaptively or never; and so is the unnormalized estimate of
-     a test function's integral.
+     a test function's integral, and Ẑ with a critic (alone, beside a
+     masked constraint, a constraint as critic), whose cost is one call a
+     particle and step.
    - Exact identities: no potential gives Ẑ = 1 (the toy's ledger is its
      rows), max-tokens 0 gives exp(complete([])), a masked constraint's
      particles all satisfy it.
@@ -134,6 +136,49 @@
                         (mean (map (fn [x lw] (* (Math/exp lw) (f x))) (smc/particles s) (:log-weights s))))))
                  (range 40))]
     (is (within-5-se? zs (exact-z soft f)))))
+
+(deftest a-critic-weighs-each-particle-at-its-drawn-token
+  ;; the bootstrap without a potential weighs log p - log q = 0 a token
+  ;; (the toy's ledger is its rows), so a particle's log weight is the
+  ;; critic's alone: its prefix weight of the tokens so far, and at the
+  ;; end its complete weight of the sequence (the tokens before an end
+  ;; token, or all at max-tokens). Planted bug (2026-11-05): the critic's
+  ;; prefix one token late (of the context before the token), whose final
+  ;; weights still telescope right (Ẑ stays unbiased), fails the steps'
+  (loop [s (smc/initialize completion args 30 {:critic soft :key (rng/key 4)})]
+    (doseq [[{:keys [tokens done?]} lw] (map vector (:particles s) (:log-weights s))]
+      (is (laws/close? (if done? (potential/complete soft (body tokens)) (potential/prefix soft tokens)) lw)
+          (str "step " (:t s) ", " tokens)))
+    (when-not (smc/done? s) (recur (smc/step s)))))
+
+(deftest a-critic-weighs-at-the-drawn-token-unbiasedly
+  ;; the target gains the critic's complete weight: Z of the product of
+  ;; potential and critic, by enumeration
+  (doseq [[what opts] [[:critic-alone {:critic soft}]
+                       [:masked-constraint-and-critic {:potential no-repeats :critic soft :proposal :masked}]
+                       [:soft-potential-constraint-critic {:potential soft :critic no-repeats}]]]
+    (testing what
+      (let [zs (estimates opts 50 40)
+            z (exact-z (apply potential/product (keep opts [:potential :critic])))]
+        (is (within-5-se? zs z) (str "mean " (mean zs) " exact " z))))))
+
+(deftest a-critic-costs-one-call-a-particle-and-step
+  (let [calls (atom 0)
+        counted (potential/potential n-vocab {:prefix #(do (swap! calls inc) (potential/prefix soft %))
+                                              :complete #(do (swap! calls inc) (potential/complete soft %))
+                                              :logw-next (fn [_] (throw (ex-info "a critic's row is never read" {})))})
+        s0 (smc/initialize completion args 10 {:critic counted :key (rng/key 3)})]
+    (reset! calls 0)
+    (loop [s s0]
+      (when-not (smc/done? s)
+        (let [live (count (remove :done? (:particles s)))
+              before @calls
+              s' (smc/step s)]
+          (is (= live (- @calls before)) (str "step " (:t s)))
+          (recur s'))))
+    (testing "no tokens: the empty sequence's complete weights"
+      (let [s (smc/run completion [prompt 0] 5 {:potential no-repeats :critic soft :key (rng/key 1)})]
+        (is (laws/close? (+ (potential/complete no-repeats []) (potential/complete soft [])) (smc/log-ml-estimate s)))))))
 
 (deftest particles-draw-independently
   ;; the first tokens of 400 particles, by the prompt's row within 5 standard errors
@@ -288,6 +333,11 @@
             :invalid-potential]
            ["a proposal that returns no row" #(smc/step (smc/initialize completion args 4 {:proposal (constantly [0.0])}))
             :invalid-row]
+           ["a critic that is no potential" #(smc/initialize completion args 4 {:critic :best}) :invalid-option]
+           ["a critic of other end tokens"
+            #(smc/initialize completion args 4 {:critic (potential/potential n-vocab {:prefix (constantly 0.0) :complete (constantly 0.0)
+                                                                                      :end-tokens #{1}})})
+            :mismatched-end-tokens]
            ["a pool of no threads" #(smc/host-pool 0) :invalid-args]
            ["a host pool that is no executor" #(smc/initialize completion args 4 {:host-pool 3}) :invalid-option]
            ["resampling particles all of weight 0"

@@ -48,7 +48,7 @@ completion stands for it. Weights are floats, as an LM's rows (Clojure's
 
 | Function | Meaning |
 |---|---|
-| `(initialize completion [prompt max-tokens] n opts)` | n particles, no tokens yet; opts `:potential`, `:proposal`, `:key` |
+| `(initialize completion [prompt max-tokens] n opts)` | n particles, no tokens yet; opts `:potential`, `:critic`, `:proposal`, `:key` |
 | `(step state)`, `(step state {:key k})` | every live particle one token further, one LM read |
 | `(maybe-resample state opts)`, `(resample state opts)` | ESS-gated (`:ess-threshold`, n/2 by default), `:method` (`:systematic` by default) |
 | `(run completion args n opts)` | initialize, then step and maybe-resample until every particle has finished |
@@ -159,7 +159,15 @@ most) is enumerated and Z computed exactly:
 - **Unbiasedness in exp space**: for the three proposals × a constraint and
   a soft twist × resampling at every step, adaptively or never, the mean of
   40 runs' Ẑ (50 particles) is within 5 standard errors of Z; so is the
-  unnormalized estimate of a test function's integral.
+  unnormalized estimate of a test function's integral, and Ẑ with a
+  `:critic` (alone, beside a masked constraint, a constraint as critic).
+- **The critic** (2026-11-05, genclj-di22): applied at the drawn token
+  only (Loula et al.: cheap potentials propose, expensive ones criticize),
+  one call a particle and step; under the bootstrap a particle's weight is
+  exactly the critic's prefix of its tokens, and at the end its complete
+  weight. Planted: the critic's prefix one token late, which still
+  telescopes to the right final weights (Ẑ stays unbiased), fails the
+  per-step weights.
 - **Exact identities**: with no potential the bootstrap's weights are 0 and
   Ẑ = 1; max-tokens 0 weighs the empty sequence; a masked constraint's
   particles all satisfy it, from the first step; particles that all fall

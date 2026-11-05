@@ -26,6 +26,17 @@
    with a 0/-Inf potential (a constraint), the probability that a
    completion satisfies it.
 
+   A :critic is a second potential, applied at the drawn token only (Loula
+   et al., ICLR 2025: cheap potentials in the proposal, expensive ones as
+   critics): after a particle draws token t, its weight gains the critic's
+   prefix(ctx ++ [t]) - prefix(ctx), or complete(ctx) - prefix(ctx) for an
+   end token, complete less prefix at max-tokens: one critic call per
+   particle and step (its prefix of the tokens so far is kept), where the
+   potential's twist reads a whole next-token row. The target gains its
+   weight: π(x) ∝ p(x) · exp(complete(x) + critic-complete(x)), and Z
+   with it. A critic whose prefix weights are all 0 weighs at the end
+   only. The proposal never reads it.
+
    The completion is one without a potential of its own: SMC draws and
    weighs by the LM's rows, so a constrained completion is refused
    (:constrained-completion). Its target, the LM's completions held to the
@@ -35,8 +46,8 @@
    declare the completion's (:mismatched-end-tokens); one that rules every
    sequence out is no error, an estimate of Z = 0.
 
-   opts at initialize: :potential (none: weight 1), :proposal, :key,
-   :host-pool.
+   opts at initialize: :potential (none: weight 1), :critic (none), :proposal,
+   :key, :host-pool.
    - :lm (the default), the bootstrap: tokens drawn from the LM's row.
    - :masked, the LM's row times the potential's next-token weights,
      renormalized (for a constraint, the row masked to its allowed tokens;
@@ -84,10 +95,12 @@
 (set! *warn-on-reflection* true)
 (set! *unchecked-math* :warn-on-boxed)
 
-;; A state: {:completion :args [prompt max-tokens] :potential :proposal
-;; :key :host-pool (an ExecutorService or false) :t (steps so far)
-;; :particles [{:tokens :done? :log-p}] :log-weights :log-ml :resampled?}. :log-p is a particle's log p(tokens), its trace's
-;; score; a particle whose weight fell to 0 stops, :dead?. Step t draws
+;; A state: {:completion :args [prompt max-tokens] :potential :critic
+;; :proposal :key :host-pool (an ExecutorService or false) :t (steps so
+;; far) :particles [{:tokens :done? :log-p :critic}] :log-weights :log-ml
+;; :resampled?}. :log-p is a particle's log p(tokens), its trace's score;
+;; :critic, with a critic, the critic's prefix weight of its tokens; a
+;; particle whose weight fell to 0 stops, :dead?. Step t draws
 ;; with (fold-in (fold-in key t) 0) and resamples with (fold-in (fold-in
 ;; key t) 1).
 
@@ -147,30 +160,41 @@
 
 (defn initialize
   "n particles of the completion on [prompt max-tokens], none drawn yet,
-   their log weights the potential's prefix weight of no tokens. opts:
-   :potential, :proposal (:lm, :masked or a function), :key and
-   :host-pool (see the namespace's docstring; never a pool whose own task
-   runs this SMC)."
+   their log weights the potential's (and the critic's) prefix weight of
+   no tokens. opts: :potential, :critic, :proposal (:lm, :masked or a
+   function), :key and :host-pool (see the namespace's docstring; never a
+   pool whose own task runs this SMC)."
   ([completion args n] (initialize completion args n {}))
-  ([completion args n {:keys [potential proposal key] :or {proposal :lm} :as opts}]
+  ([completion args n {:keys [potential critic proposal key] :or {proposal :lm} :as opts}]
    (let [args (token/check-args :smc (check-completion completion) args)]
      ;; only the end tokens: a potential that rules every sequence out is
      ;; an estimate of Z = 0, not an error
      (when potential (potential/check-end-tokens "smc" potential (:end-tokens completion)))
+     (when critic
+       (when-not (potential/potential? critic)
+         (throw (ex-info (str "smc: the :critic is a potential (gen.llm.potential), not " (pr-str critic))
+                         {:reason :invalid-option :critic critic})))
+       (potential/check-end-tokens "smc's :critic" critic (:end-tokens completion)))
      (when-not (pos-int? n)
        (throw (ex-info (str "smc: the number of particles is a positive integer, not " (pr-str n))
                        {:reason :invalid-args :n n})))
-     (let [w0 (if potential (potential/prefix potential []) 0.0)
-           done? (zero? (long (second args)))]
+     (let [done? (zero? (long (second args)))
+           ;; the empty context's weights, as a prefix (or as the whole
+           ;; sequence, when max-tokens is 0)
+           weight-of (fn [p] (cond (nil? p) 0.0
+                                   done? (potential/complete p [])
+                                   :else (potential/prefix p [])))
+           c0 (when critic (potential/prefix critic []))]
        {:completion completion
         :args args
         :potential potential
+        :critic critic
         :proposal (check-proposal proposal potential)
         :key (or key (gfi/next-key))
         :host-pool (pool-of opts)
         :t 0
-        :particles (vec (repeat n {:tokens [] :done? done? :log-p 0.0}))
-        :log-weights (vec (repeat n (if done? (if potential (potential/complete potential []) 0.0) w0)))
+        :particles (vec (repeat n (cond-> {:tokens [] :done? done? :log-p 0.0} critic (assoc :critic c0))))
+        :log-weights (vec (repeat n (+ (double (weight-of potential)) (double (weight-of critic)))))
         :log-ml 0.0
         :resampled? false}))))
 
@@ -237,8 +261,17 @@
                   (+ twist (- (potential/complete potential tokens) (potential/prefix potential tokens)))
                   twist)
           dw (+ (- log-p (double (aget ^floats q (int t)))) twist)
+          ;; the critic, where the particle still has weight: its weight of
+          ;; the tokens now (as the whole sequence at an end or at
+          ;; max-tokens), less its prefix weight of those before
+          critic-w (when (and (:critic state) (not (Double/isInfinite dw)))
+                     (cond end? (potential/complete (:critic state) (:tokens particle))
+                           capped? (potential/complete (:critic state) tokens)
+                           :else (potential/prefix (:critic state) tokens)))
+          dw (if critic-w (+ dw (- (double critic-w) (double (:critic particle)))) dw)
           dead? (Double/isInfinite dw)]
       [(cond-> {:tokens tokens :done? (or end? capped? dead?) :log-p (+ (double (:log-p particle)) log-p)}
+         critic-w (assoc :critic critic-w)
          dead? (assoc :dead? true))
        dw])))
 
