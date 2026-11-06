@@ -872,6 +872,88 @@
       (let [[v g] ((array/value-and-grad lp) (array/array at))]
         (is (= [##-Inf 0.0] [(ts/number v) (ts/number g)]) label)))))
 
+;; ---------------------------------------------------------------------------
+;; Gradients with a value outside the support
+;; ---------------------------------------------------------------------------
+
+(dsl/dist scaled-gamma
+  "Twice a gamma(k, 1) draw: a pushforward whose draw is outside its
+   support where the value is."
+  [k]
+  (array/* 2.0 (d/gamma k 1.0)))
+
+(def ^:private outside-the-support
+  "[label family params inside outside]: a family, a value in its support
+   and one outside it."
+  [["uniform" d/uniform [0.0 2.0] 0.5 -1.0]
+   ["beta below 0" d/beta [1.5 2.0] 0.3 -0.5] ["beta above 1" d/beta [1.5 2.0] 0.3 1.5]
+   ["gamma" d/gamma [1.5 2.0] 1.0 -1.0] ["inv-gamma" d/inv-gamma [1.5 2.0] 1.0 -1.0]
+   ["exponential" d/exponential [1.5] 1.0 -1.0]
+   ["beta-uniform below 0" d/beta-uniform [0.5 1.5 2.0] 0.3 -0.5]
+   ["beta-uniform above 1" d/beta-uniform [0.5 1.5 2.0] 0.3 1.5]
+   ["piecewise-uniform" d/piecewise-uniform [[0.0 1.0 2.0] [0.4 0.6]] 0.5 -1.0]
+   ["dirichlet" d/dirichlet [[1.5 2.0 3.0]] [0.2 0.3 0.5] [-0.2 0.7 0.5]]
+   ["chi-squared" d/chi-squared [3.0] 1.0 -1.0] ["f-dist" d/f-dist [3.0 4.0] 1.0 -1.0]
+   ["levy" d/levy [0.0 1.5] 1.0 -1.0] ["log-normal" d/log-normal [0.0 0.5] 1.0 -1.0]
+   ["nakagami" d/nakagami [1.5 2.0] 1.0 -1.0] ["pareto" d/pareto [1.5 2.0] 3.0 1.0]
+   ["triangular" d/triangular [0.0 2.0 0.5] 0.3 -1.0] ["weibull" d/weibull [1.5 2.0] 1.0 -1.0]
+   ["truncated-normal" d/truncated-normal [0.0 1.5 -1.0 1.0] 0.3 2.0]
+   ["von-mises" d/von-mises [0.0 2.0] 0.3 4.0] ["wrapped-cauchy" d/wrapped-cauchy [0.0 0.5] 0.3 4.0]
+   ["wrapped-normal" d/wrapped-normal [0.0 0.5] 0.3 4.0]
+   ["wishart" d/wishart [5.0 [[1.0 0.3] [0.3 1.0]]] [[2.0 0.3] [0.3 1.0]] [[2.0 1.0] [0.3 1.0]]]
+   ["inv-wishart" d/inv-wishart [5.0 [[1.0 0.3] [0.3 1.0]]] [[2.0 0.3] [0.3 1.0]] [[2.0 1.0] [0.3 1.0]]]
+   ["categorical" d/categorical [[0.2 0.3 0.5]] 1 5] ["categorical-logits" d/categorical-logits [[0.2 0.3 0.5]] 1 5]
+   ["geometric" d/geometric [0.5] 1 -1] ["poisson" d/poisson [2.0] 1 -1]
+   ["binom" d/binom [5 0.3] 1 7] ["neg-binom" d/neg-binom [2.0 0.5] 1 -1]
+   ["a pushforward of gamma" scaled-gamma [1.5] 2.0 -2.0]])
+
+(deftest a-value-outside-the-support-sends-no-gradient
+  ;; genclj-zkbw: a value outside the support has log density -Inf through
+  ;; a guard (a where), but gamma's xlogy(k - 1, v) at v < 0 was NaN, so
+  ;; the shape's gradient was 0·NaN = NaN, and one such lane of a batch
+  ;; made a shared parameter's whole gradient NaN: gamma, inv-gamma, beta,
+  ;; chi-squared, nakagami and dirichlet, and beta-uniform and pushforwards
+  ;; of them through theirs. Each family here scores a batch of two values,
+  ;; one outside its support, and the gradient of the sum, by each
+  ;; parameter that is a float, is the inside value's alone. Planted: each
+  ;; family's stand-in dropped fails its rows.
+  (doseq [[label make params inside outside] outside-the-support
+          i (range (count params))
+          :when (or (float? (params i)) (vector? (params i)))]
+    (let [lp (fn [v] #(array/sum (dc/log-prob (apply make (assoc params i %)) (array/array v))))
+          p (array/array (params i))
+          both ((array/grad (lp [inside outside])) p)]
+      (is (ts/close? ((array/grad (lp inside)) p) both) (str label " d/dparam" i ": " (ts/host both))))))
+
+(deftest an-infinite-value-has-log-density-minus-infinity
+  ;; genclj-zkbw's survey: at +Inf, gamma's xlogy(k - 1, v) - v/theta was
+  ;; Inf - Inf = NaN (chi-squared's, nakagami's, weibull's for a shape
+  ;; above 1, poisson's and neg-binom's alike), at -Inf gumbel's z + e^-z
+  ;; and logistic's z + 2·log(1 + e^-z); and where the log density was
+  ;; right, a guard's other branch had infinite partials there, so a
+  ;; parameter's gradient was 0·Inf = NaN (beta, exponential, cauchy,
+  ;; f-dist, student-t, triangular, the truncated normal, the circular
+  ;; families, geometric, binom). An infinite value is no real number: its
+  ;; log density is -Inf, and its gradient is never NaN (normal's is the
+  ;; limit, ±Inf). Planted: each family's isfinite or stand-in dropped
+  ;; fails its rows.
+  (doseq [[label make params inside] (into outside-the-support
+                                           [["normal" d/normal [0.0 1.5] 0.3] ["laplace" d/laplace [0.0 1.5] 0.3]
+                                            ["cauchy" d/cauchy [0.0 1.5] 0.3] ["gumbel" d/gumbel [0.0 1.5] 0.3]
+                                            ["logistic" d/logistic [0.0 1.5] 0.3] ["student-t" d/student-t [3.0] 0.3]
+                                            ["mvnormal" d/mvnormal [[0.0 1.0] [[1.0 0.3] [0.3 1.0]]] [0.3 0.5]]])
+          inf [##Inf ##-Inf]
+          ;; a matrix, a vector or a scalar with an infinite element
+          :let [v (cond (not (vector? inside)) inf
+                        (vector? (first inside)) [[inf 0.3] [0.3 1.0]]
+                        :else (assoc (vec (repeat (count inside) 0.0)) 0 inf))]]
+    (is (= ##-Inf (ts/number (dc/log-prob (apply make params) (array/array v)))) (str label " at " v))
+    (doseq [i (range (count params))
+            :when (or (float? (params i)) (vector? (params i)))
+            :let [g (ts/host ((array/grad #(array/sum (dc/log-prob (apply make (assoc params i %)) (array/array v))))
+                              (array/array (params i))))]]
+      (is (not-any? #(Double/isNaN %) (flatten [g])) (str label " at " v " d/dparam" i ": " g)))))
+
 (deftest float-limits-by-dtype
   ;; m3-grammar's cross-review: half floats took float64's constants, so
   ;; largest-float's cap was Inf in float16 (a mixture's weight of 0 then

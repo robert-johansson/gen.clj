@@ -38,6 +38,20 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Fixed: a value outside a distribution's support sends no NaN
+  gradient** (gen.dist, gen.dist.dsl; genclj-zkbw). gamma, inv-gamma,
+  beta, chi-squared, nakagami and dirichlet guarded their log density with
+  a where whose other branch was NaN outside the support, so a parameter's
+  gradient was 0·NaN = NaN there, and one such value in a batch made a
+  shared parameter's whole gradient NaN (beta-uniform's and a
+  pushforward's through them too). Each now scores a stand-in value
+  there, as geometric and weibull did. A value at ±Inf has log density
+  -Inf in every family, where gamma, chi-squared, nakagami, weibull,
+  poisson and neg-binom gave NaN at +Inf and gumbel and logistic at -Inf,
+  and its gradient is never NaN; a pushforward's value outside exp's range
+  (at or below 0) sends no gradient either. Log densities elsewhere are
+  unchanged (logistic's is computed in |z|, within rounding).
+
 ## [1.2.0] - 2026-11-06
 
 A language-model release (DESIGN §9, "1.2.0's theme"; genclj-ucfg),

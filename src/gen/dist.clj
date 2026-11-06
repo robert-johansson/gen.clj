@@ -9,7 +9,9 @@
    wrapped-normal). Discrete values are 0-based integers; bernoulli values
    are booleans; circular values are angles in [-π, π).
 
-   Every log-prob is -Inf outside the support. Every sampler is a pure,
+   Every log-prob is -Inf outside the support and at an infinite value,
+   where its gradient is never NaN (a guard's other branch scores a
+   stand-in value, of finite slopes). Every sampler is a pure,
    branch-free function of its key: rejection samplers run a fixed number of
    vectorized rounds rather than a data-dependent loop, so they batch and never
    force evaluation."
@@ -169,8 +171,11 @@
           [k1 k2] (rng/split key)]
       (below-one (floored (array/sigmoid (- (log-gamma-draw k1 a s (opts a b)) (log-gamma-draw k2 b s (opts a b))))))))
   (log-prob [v]
-    (guard (logical-and (>= v 0) (<= v 1))
-           (- (+ (xlogy (- a 1) v) (xlog1py (- b 1) (- v))) (log-beta a b)))))
+    ;; a stand-in value outside the support: xlogy's and xlog1py's would be
+    ;; NaN there, and so would a parameter's gradient through the guard
+    (let [in (logical-and (>= v 0) (<= v 1))
+          x (stand-in in v 0.5)]
+      (guard in (- (+ (xlogy (- a 1) x) (xlog1py (- b 1) (- x))) (log-beta a b))))))
 
 (defdist ^:elementwise gamma
   "gamma(shape, scale): the gamma distribution with mean shape·scale."
@@ -179,7 +184,10 @@
   (sample [key shape]
     (floored (* theta (rng/gamma key k (dc/elementwise-shape shape k theta) (opts k theta)))))
   (log-prob [v]
-    (guard (>= v 0) (- (xlogy (- k 1) v) (/ v theta) (lgamma k) (* k (log theta))))))
+    ;; +Inf is no value (xlogy's Inf less v/theta's: NaN)
+    (let [in (logical-and (>= v 0) (< v ##Inf))
+          x (stand-in in v 1.0)]
+      (guard in (- (xlogy (- k 1) x) (/ x theta) (lgamma k) (* k (log theta)))))))
 
 (defdist ^:elementwise inv-gamma
   "inv_gamma(shape, scale): the inverse gamma distribution (1/X for X with
@@ -189,7 +197,9 @@
   (sample [key shape]
     (/ theta (rng/gamma key k (dc/elementwise-shape shape k theta) (opts k theta))))
   (log-prob [v]
-    (guard (> v 0) (- (* k (log theta)) (lgamma k) (* (+ k 1) (log v)) (/ theta v)))))
+    (let [in (logical-and (> v 0) (< v ##Inf))
+          x (stand-in in v 1.0)]
+      (guard in (- (* k (log theta)) (lgamma k) (* (+ k 1) (log x)) (/ theta x))))))
 
 (defdist ^:elementwise ^:pathwise exponential
   "exponential(rate): the exponential distribution with mean 1/rate."
@@ -198,7 +208,8 @@
   (sample [key shape]
     (/ (rng/exponential key (dc/elementwise-shape shape rate) (opts rate)) rate))
   (log-prob [v]
-    (guard (>= v 0) (- (log rate) (* rate v)))))
+    (let [in (>= v 0)]
+      (guard in (- (log rate) (* rate (stand-in in v 0.0)))))))
 
 (defn- above-minus-one
   "The float of dtype next above -1: a uniform's low bound for laplace's
@@ -229,7 +240,9 @@
                          (assoc (opts x0 scale) :low (Math/ulp 1.0) :high 1.0))]
       (+ x0 (* scale (array/tan (* Math/PI (- u 0.5)))))))
   (log-prob [v]
-    (- (+ (log (* Math/PI scale)) (log1p (square (/ (- v x0) scale)))))))
+    ;; an infinite value through a stand-in: log1p(z²)'s slope there is Inf/Inf
+    (let [in (array/isfinite v)]
+      (guard in (- (+ (log (* Math/PI scale)) (log1p (square (/ (- (stand-in in v x0) x0) scale)))))))))
 
 (defdist ^:elementwise beta-uniform
   "beta_uniform(theta, alpha, beta): with probability theta a beta(alpha, beta)
@@ -388,16 +401,19 @@
   (log-prob [v]
     (let [d (peek (array/shape mu))
           l (la/cholesky cov)
-          diff (- v mu)
+          ;; a value with an infinite element stands in as mu: its solve's
+          ;; slopes are NaN
+          in (array/all (array/isfinite v) {:axis -1})
+          diff (stand-in (array/expand-dims in -1) (- v mu) 0.0)
           ;; one column right-hand side per batch element: the batch of the
           ;; value and of the factor broadcast together
           batch (sh/broadcast (pop (array/shape diff)) (pop (pop (array/shape l))))
           z (array/squeeze (la/solve-triangular (array/broadcast-to l (into batch [d d]))
                                                 (array/broadcast-to (array/expand-dims diff -1) (into batch [d 1])))
                            -1)]
-      (- (* -0.5 (array/sum (square z) {:axis -1}))
-         (* 0.5 (la/cholesky-logdet l))
-         (* d half-log-2pi))))
+      (guard in (- (* -0.5 (array/sum (square z) {:axis -1}))
+                   (* 0.5 (la/cholesky-logdet l))
+                   (* d half-log-2pi)))))
   ;; a vector, batched over mu's and cov's leading axes
   (value-shape [] (conj (sh/broadcast (pop (array/shape mu)) (pop (pop (array/shape cov)))) (peek (array/shape mu)))))
 
@@ -414,11 +430,15 @@
           lg (log-gamma-draw key alpha (sh/broadcast (conj shape k) (array/shape alpha)) (opts alpha))]
       (floored (array/softmax lg {:axis -1}))))
   (log-prob [v]
-    (guard (logical-and (array/all (>= v 0) {:axis -1})
-                        (<= (array/abs (- (array/sum v {:axis -1}) 1))
-                            (dc/probability-tolerance (peek (array/shape v)) (array/dtype v))))
-           (- (array/sum (xlogy (- alpha 1) v) {:axis -1})
-              (- (array/sum (lgamma alpha) {:axis -1}) (lgamma (array/sum alpha {:axis -1}))))))
+    ;; a value outside the simplex stands in as its center, so xlogy's NaN
+    ;; at a negative or infinite component (and its -Inf slope at a 0)
+    ;; reaches no gradient through the guard
+    (let [k (peek (array/shape v))
+          in (logical-and (array/all (>= v 0) {:axis -1})
+                          (<= (array/abs (- (array/sum v {:axis -1}) 1)) (dc/probability-tolerance k (array/dtype v))))
+          x (stand-in (array/expand-dims in -1) v (/ 1.0 k))]
+      (guard in (- (array/sum (xlogy (- alpha 1) x) {:axis -1})
+                   (- (array/sum (lgamma alpha) {:axis -1}) (lgamma (array/sum alpha {:axis -1})))))))
   (value-shape [] (array/shape alpha)))
 
 ;; ---------------------------------------------------------------------------
@@ -436,8 +456,10 @@
   (validate (dc/check-positive "chi-squared" "nu" nu))
   (sample [key shape] (* 2.0 (floored (rng/gamma key (/ nu 2.0) (dc/elementwise-shape shape nu) (opts nu)))))
   (log-prob [v]
-    (let [k (/ nu 2.0)]
-      (guard (>= v 0) (- (xlogy (- k 1) v) (/ v 2.0) (lgamma k) (* k log-2))))))
+    (let [k (/ nu 2.0)
+          in (logical-and (>= v 0) (< v ##Inf))
+          x (stand-in in v 1.0)]
+      (guard in (- (xlogy (- k 1) x) (/ x 2.0) (lgamma k) (* k log-2))))))
 
 (defdist ^:elementwise f-dist
   "f-dist(nu1, nu2): Fisher's F distribution, the ratio of χ² draws over
@@ -452,7 +474,7 @@
   (log-prob [v]
     ;; above 1, (nu1/2 - 1) log x - (nu1+nu2)/2 log(nu2 + nu1 x) as
     ;; -(nu2/2 + 1) log x - (nu1+nu2)/2 log(nu1 + nu2/x): -Inf at Inf, not Inf - Inf
-    (let [in (>= v 0)
+    (let [in (logical-and (>= v 0) (< v ##Inf))
           x (stand-in in v 1.0)
           big (> x 1.0)
           xb (stand-in big x 2.0)
@@ -469,8 +491,10 @@
   (validate (dc/check-positive "gumbel" "theta" theta))
   (sample [key shape] (+ mu (* theta (rng/gumbel key (dc/elementwise-shape shape mu theta) (opts mu theta)))))
   (log-prob [v]
-    (let [z (/ (- v mu) theta)]
-      (- (+ (log theta) z (exp (- z)))))))
+    ;; -Inf through a stand-in: z + e^-z there is -Inf + Inf
+    (let [in (> v ##-Inf)
+          z (/ (- (stand-in in v mu) mu) theta)]
+      (guard in (- (+ (log theta) z (exp (- z))))))))
 
 (defdist ^:elementwise levy
   "levy(mu, sigma): the Lévy distribution, location mu and scale sigma,
@@ -507,8 +531,10 @@
           [k1 k2] (rng/split key)]
       (+ mu (* theta (- (rng/gumbel k1 s (opts mu theta)) (rng/gumbel k2 s (opts mu theta)))))))
   (log-prob [v]
-    (let [z (/ (- v mu) theta)]
-      (- (+ z (log theta) (* 2.0 (array/logaddexp 0.0 (- z))))))))
+    ;; symmetric in z: |z| + 2·log(1 + e^-|z|), whose terms are finite or
+    ;; +Inf (z + 2·log(1 + e^-z) was -Inf + Inf at -Inf)
+    (let [z (array/abs (/ (- v mu) theta))]
+      (- (+ z (log theta) (* 2.0 (log1p (exp (- z)))))))))
 
 (defdist ^:elementwise nakagami
   "nakagami(m, omega): the Nakagami distribution, shape m and spread omega,
@@ -519,8 +545,10 @@
   (sample [key shape]
     (sqrt (* (/ omega m) (floored (rng/gamma key m (dc/elementwise-shape shape m omega) (opts m omega))))))
   (log-prob [v]
-    (guard (>= v 0) (- (+ log-2 (* m (log m)) (xlogy (- (* 2.0 m) 1) v))
-                       (lgamma m) (* m (log omega)) (/ (* m (square v)) omega)))))
+    (let [in (logical-and (>= v 0) (< v ##Inf))
+          x (stand-in in v 1.0)]
+      (guard in (- (+ log-2 (* m (log m)) (xlogy (- (* 2.0 m) 1) x))
+                   (lgamma m) (* m (log omega)) (/ (* m (square x)) omega))))))
 
 (defdist ^:elementwise pareto
   "pareto(alpha, theta): the Pareto distribution, shape alpha and scale
@@ -545,8 +573,10 @@
           g (rng/gamma k2 (/ nu 2.0) s (opts nu))]
       (* (rng/normal k1 s (opts nu)) (sqrt (/ nu (* 2.0 (floored g)))))))
   (log-prob [v]
-    (- (lgamma (/ (+ nu 1) 2.0)) (lgamma (/ nu 2.0)) (* 0.5 (log (* nu Math/PI)))
-       (* (/ (+ nu 1) 2.0) (log1p (/ (square v) nu))))))
+    ;; an infinite value through a stand-in, as cauchy's
+    (let [in (array/isfinite v)]
+      (guard in (- (lgamma (/ (+ nu 1) 2.0)) (lgamma (/ nu 2.0)) (* 0.5 (log (* nu Math/PI)))
+                   (* (/ (+ nu 1) 2.0) (log1p (/ (square (stand-in in v 0.0)) nu))))))))
 
 (defdist ^:elementwise triangular
   "triangular(a, b, c): the triangular distribution on [a, b] with mode c
@@ -564,15 +594,16 @@
   (log-prob [v]
     (let [w (- b a)
           left (> (- c a) 0)
-          right (> (- b c) 0)]
+          right (> (- b c) 0)
+          in (logical-and (>= v a) (<= v b))
+          ;; the mode outside [a, b], so an infinite value's slopes are finite
+          x (stand-in in v c)]
       ;; the mode separately: at c = b (or c = a) one side has no width
-      (where (== v c)
-             (log (/ 2.0 w))
-             (where (logical-and (>= v a) (< v c))
-                    (log (/ (* 2.0 (- v a)) (* w (stand-in left (- c a) 1.0))))
-                    (where (logical-and (> v c) (<= v b))
-                           (log (/ (* 2.0 (- b v)) (* w (stand-in right (- b c) 1.0))))
-                           ##-Inf))))))
+      (guard in (where (== x c)
+                       (log (/ 2.0 w))
+                       (where (< x c)
+                              (log (/ (* 2.0 (- x a)) (* w (stand-in left (- c a) 1.0))))
+                              (log (/ (* 2.0 (- b x)) (* w (stand-in right (- b c) 1.0))))))))))
 
 (defdist ^:elementwise weibull
   "weibull(alpha, theta): the Weibull distribution, shape alpha and scale
@@ -583,7 +614,7 @@
   (sample [key shape]
     (* theta (floored (array/pow (rng/exponential key (dc/elementwise-shape shape alpha theta) (opts alpha theta)) (/ 1.0 alpha)))))
   (log-prob [v]
-    (let [in (>= v 0)
+    (let [in (logical-and (>= v 0) (< v ##Inf))
           x (/ (stand-in in v theta) theta)]
       (guard in (- (+ (log (/ alpha theta)) (xlogy (- alpha 1) x)) (array/pow x alpha))))))
 
@@ -715,9 +746,11 @@
       ;; within [lo, hi] also where mu + sigma·z rounds past a bound
       (array/clip (+ mu (* sigma z)) lo hi)))
   (log-prob [v]
-    (let [{:keys [log-mass]} (normal-interval (standardized lo mu sigma) (standardized hi mu sigma))]
-      (guard (logical-and (>= v lo) (<= v hi))
-             (- (+ half-log-2pi (log sigma) (* 0.5 (square (/ (- v mu) sigma))) log-mass))))))
+    ;; an infinite value is outside also at an infinite bound, through a
+    ;; stand-in, so its slopes are finite
+    (let [{:keys [log-mass]} (normal-interval (standardized lo mu sigma) (standardized hi mu sigma))
+          in (logical-and (logical-and (>= v lo) (<= v hi)) (array/isfinite v))]
+      (guard in (- (+ half-log-2pi (log sigma) (* 0.5 (square (/ (- (stand-in in v mu) mu) sigma))) log-mass))))))
 
 ;; --- Circular families ----------------------------------------------------
 
@@ -825,9 +858,10 @@
   (sample [key shape]
     (wrap-angle (+ mu (von-mises-angle key kappa (dc/elementwise-shape shape mu kappa) (opts mu kappa)))))
   (log-prob [v]
-    ;; κ(cos d - 1) as -2κ·sin²(d/2), exact at a large kappa
-    (guard (on-circle? v)
-           (- (* -2.0 kappa (square (array/sin (* 0.5 (- v mu))))) log-2pi (log-i0e kappa)))))
+    ;; κ(cos d - 1) as -2κ·sin²(d/2), exact at a large kappa; mu stands in
+    ;; off the circle, where an infinite value's sine is NaN
+    (let [in (on-circle? v)]
+      (guard in (- (* -2.0 kappa (square (array/sin (* 0.5 (- (stand-in in v mu) mu))))) log-2pi (log-i0e kappa))))))
 
 (defdist ^:elementwise wrapped-cauchy
   "wrapped-cauchy(mu, rho): cauchy(mu, -log rho) wrapped onto the circle
@@ -846,11 +880,13 @@
     (let [u (rng/uniform key (dc/elementwise-shape shape mu rho) (opts mu rho))]
       (wrap-angle (+ mu (* 2.0 (array/atan (* (/ (- 1.0 rho) (+ 1.0 rho)) (array/tan (* Math/PI (- u 0.5))))))))))
   (log-prob [v]
-    ;; 1 + ρ² - 2ρ·cos d as (1 - ρ)² + 4ρ·sin²(d/2), exact as rho nears 1
-    (guard (on-circle? v)
-           (- (+ (log1p (- rho)) (log1p rho))
-              log-2pi
-              (log (+ (square (- 1.0 rho)) (* 4.0 rho (square (array/sin (* 0.5 (- v mu)))))))))))
+    ;; 1 + ρ² - 2ρ·cos d as (1 - ρ)² + 4ρ·sin²(d/2), exact as rho nears 1;
+    ;; mu stands in off the circle, as von-mises's
+    (let [in (on-circle? v)
+          d (- (stand-in in v mu) mu)]
+      (guard in (- (+ (log1p (- rho)) (log1p rho))
+                   log-2pi
+                   (log (+ (square (- 1.0 rho)) (* 4.0 rho (square (array/sin (* 0.5 d)))))))))))
 
 (def ^:private wrapped-normal-switch
   "The sigma at which wrapped-normal's log density changes series. Below
@@ -1098,9 +1134,12 @@
   (log-prob [v]
     ;; p = 1 puts all the mass at 0: elsewhere -Inf through a stand-in p, as
     ;; log-mass, since xlog1py's derivative at -1 is infinite
-    (let [some-mass (array/logical-not (logical-and (== p 1) (> v 0)))
+    ;; and a value outside the support stands in as 0, whose slopes are finite
+    (let [in (logical-and (logical-and (>= v 0) (< v ##Inf)) (integral? v))
+          x (stand-in in v 0)
+          some-mass (array/logical-not (logical-and (== p 1) (> x 0)))
           q (stand-in some-mass p 0.5)]
-      (guard (logical-and (logical-and (>= v 0) (integral? v)) some-mass) (+ (log q) (xlog1py v (- q)))))))
+      (guard (logical-and in some-mass) (+ (log q) (xlog1py x (- q)))))))
 
 ;; --- Poisson and binomial samplers: inversion for small means, Hörmann's
 ;; transformed rejection (PTRS, BTRS) otherwise, each with fixed rounds ------
@@ -1190,9 +1229,12 @@
   (log-prob [v]
     ;; lambda = 0 puts all the mass at 0: elsewhere -Inf through a stand-in,
     ;; as log-mass, since xlogy's derivative at 0 is infinite
-    (let [some-mass (array/logical-not (logical-and (== lam 0) (> v 0)))
+    ;; (and at a value outside the support, as geometric's)
+    (let [in (logical-and (logical-and (>= v 0) (< v ##Inf)) (integral? v))
+          x (stand-in in v 0)
+          some-mass (array/logical-not (logical-and (== lam 0) (> x 0)))
           l (stand-in some-mass lam 1.0)]
-      (guard (logical-and (logical-and (>= v 0) (integral? v)) some-mass) (- (xlogy v l) l (lgamma (+ v 1)))))))
+      (guard (logical-and in some-mass) (- (xlogy x l) l (lgamma (+ x 1)))))))
 
 (defdist ^:elementwise ^:discrete binom
   "binom(n, p): the number of successes in n trials with success probability p."
@@ -1203,11 +1245,14 @@
   (log-prob [v]
     ;; p at 0 or 1 puts all the mass at 0 or n: elsewhere -Inf through a
     ;; stand-in p, as log-mass, since xlogy's derivative at 0 is infinite
-    (let [some-mass (array/logical-not (logical-or (logical-and (== p 0) (> v 0)) (logical-and (== p 1) (< v n))))
+    ;; (and at a value outside the support, as geometric's)
+    (let [in (logical-and (logical-and (>= v 0) (<= v n)) (integral? v))
+          x (stand-in in v 0)
+          some-mass (array/logical-not (logical-or (logical-and (== p 0) (> x 0)) (logical-and (== p 1) (< x n))))
           q (stand-in some-mass p 0.5)]
-      (guard (logical-and (logical-and (logical-and (>= v 0) (<= v n)) (integral? v)) some-mass)
-             (+ (- (lgamma (+ n 1)) (lgamma (+ v 1)) (lgamma (+ (- n v) 1)))
-                (xlogy v q) (xlog1py (- n v) (- q))))))
+      (guard (logical-and in some-mass)
+             (+ (- (lgamma (+ n 1)) (lgamma (+ x 1)) (lgamma (+ (- n x) 1)))
+                (xlogy x q) (xlog1py (- n x) (- q))))))
   (support [] (some->> (dc/support-bound n) inc range vec)))
 
 (defdist ^:elementwise ^:discrete neg-binom
@@ -1222,11 +1267,14 @@
       (poisson-sample k2 lam s)))
   (log-prob [v]
     ;; p = 1 puts all the mass at 0, as geometric's
-    (let [some-mass (array/logical-not (logical-and (== p 1) (> v 0)))
+    ;; (and at a value outside the support, as geometric's)
+    (let [in (logical-and (logical-and (>= v 0) (< v ##Inf)) (integral? v))
+          x (stand-in in v 0)
+          some-mass (array/logical-not (logical-and (== p 1) (> x 0)))
           q (stand-in some-mass p 0.5)]
-      (guard (logical-and (logical-and (>= v 0) (integral? v)) some-mass)
-             (+ (- (lgamma (+ v r)) (lgamma r) (lgamma (+ v 1)))
-                (* r (log q)) (xlog1py v (- q)))))))
+      (guard (logical-and in some-mass)
+             (+ (- (lgamma (+ x r)) (lgamma r) (lgamma (+ x 1)))
+                (* r (log q)) (xlog1py x (- q)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Mixtures and products: Gen.jl's HomogeneousMixture, HeterogeneousMixture

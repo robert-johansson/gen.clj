@@ -300,6 +300,27 @@
   (testing "the draw's own checks, at construction"
     (is (thrown? clojure.lang.ExceptionInfo (shifted-exponential -1.0 0.0)))))
 
+(dist exp-gamma [k] (array/exp (d/gamma k 1.0)))
+(dist reciprocal-gamma [k] (/ 1.0 (d/gamma k 1.0)))
+
+(deftest a-value-outside-the-body-s-range-sends-no-gradient
+  ;; genclj-zkbw: a value at or below 0 is outside exp's range, and its
+  ;; inverse, log v, was NaN or -Inf, so the draw's log density there and
+  ;; a parameter's gradient were NaN; one such value in a batch made the
+  ;; whole gradient NaN. Its log density is -Inf (it was), and the gradient
+  ;; of a batch's sum is the other values' alone. The reciprocal's 0 has
+  ;; an infinite inverse, outside gamma's support. Planted: exp's step
+  ;; without its stand-in fails the first three.
+  (doseq [[label make at inside outside] [["log-normal below 0" #(log-normal % 0.7) 0.2 1.5 -1.0]
+                                         ["log-normal at 0" #(log-normal % 0.7) 0.2 1.5 0.0]
+                                         ["log-normal's sd" #(log-normal 0.2 %) 0.7 1.5 -1.0]
+                                         ["exp of a gamma below 0" exp-gamma 1.5 2.0 -1.0]
+                                         ["the reciprocal of a gamma at 0" reciprocal-gamma 1.5 2.0 0.0]]]
+    (let [lp (fn [v] #(array/sum (dc/log-prob (make %) (array/array v))))
+          both ((array/grad (lp [inside outside])) (array/array at))]
+      (is (= ##-Inf (ts/number (dc/log-prob (make at) outside))) label)
+      (is (ts/close? ((array/grad (lp inside)) (array/array at)) both) (str label ": " (ts/host both))))))
+
 (deftest an-alias-of-a-constructor-is-a-draw
   (let [mu (array/array [0.0 1.0])
         sigma (array/array [1.0 2.0])
