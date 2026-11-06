@@ -3593,7 +3593,7 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     (genclj-z1gj: no consumer, its tests skipped by name), DESIGN's §9 log
     in a file of its own (genclj-vp8u), Batched's read flag volatile
     (genclj-vajv), the git deletions done (genclj-wg76: merged branches
-    only, the stash kept as a patch in its bean first), memo.clj told and
+    only, the stale stash saved as a patch first), memo.clj told and
     asked through its session (genclj-fshl, genclj-e3q9).
   - **One chain fast on MLX, and GPU speed (owner, 2026-11-04, "go with
     option 1", on the lead's recommendation; genclj-fpnf, genclj-h8rn).**
