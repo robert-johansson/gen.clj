@@ -73,27 +73,27 @@
    value. Map runs every element (they pass nothing on), and a dynamic
    caller stops at the call's score."
   {:api :stable}
-  (:refer-clojure :exclude [map + -])
-  (:require [gen.array :as array :refer [+ -]]
-            [gen.array.batch :as batch]
-            [gen.choicemap :as cm]
+  (:refer-clojure :exclude [map])
+  (:require [gen.combinators.chain :as chain]
+            [gen.combinators.elements :as el]
+            [gen.combinators.recurse :as recurse]
+            [gen.combinators.switch :as switch]
+            [gen.combinators.wrap :as wrap]
             [gen.diff :as diff]
-            [gen.dist :as d]
-            [gen.dist.core :as dc]
             [gen.dynamic :as dyn]
             [gen.gfi :as gfi]
             [gen.partition :as part]
-            [gen.random :as rng]
-            [gen.selection :as sel]
             [gen.trace :as trace]))
 
 (set! *warn-on-reflection* true)
 
-;; ---------------------------------------------------------------------------
-;; Indexed elements (Map and Unfold)
-;; ---------------------------------------------------------------------------
-
-(defn- element-key [key i] (rng/fold-in key i))
+;; The kinds, their constructors and their printing. Each kind's operations
+;; are its namespace's: Map's gen.combinators.elements (the indexed calls
+;; Unfold and Scan share), Unfold's and Scan's gen.combinators.chain,
+;; Switch's gen.combinators.switch, Recurse's gen.combinators.recurse, and
+;; Mix's body and dimap's gen.combinators.wrap; their calls, the keys of
+;; indexed calls and a stop at a choice outside its support are
+;; gen.combinators.calls'.
 
 (defn- check-gen-fn
   "gf, checked to be a generative function: every constructor's argument,
@@ -104,324 +104,8 @@
                     {:reason :not-a-generative-function :value gf})))
   gf)
 
-;; Kernel calls, through dyn/run-call (a batched run is this same code
-;; under the batch tracer); at is the call's address, its choices' place in
-;; the combinator's (nil for a Switch's branch).
-(defn- simulate-at [gf args key] (:trace (dyn/run-call gf :simulate args {:key key})))
-(defn- generate-at [gf args cs key at] (dyn/run-call gf :generate args {:constraints cs :key key :at at}))
-(defn- assess-at [gf args choices key at]
-  (dyn/run-call gf :assess args {:constraints choices :key key :at at}))
-(defn- update-at [gf old args argdiffs cs key at]
-  (dyn/run-call gf :update args {:prev old :argdiffs argdiffs :constraints cs :key key :at at}))
-(defn- regenerate-at [gf old args argdiffs s key at]
-  (dyn/run-call gf :regenerate args {:prev old :argdiffs argdiffs :selection s :key key :at at}))
-
-;; A choice outside its support stops the run that makes it (DESIGN.md §9,
-;; the ten decisions' fifth; gfi/impossible?): its trace's score is -Inf on
-;; the host, and the kernel's return value is not there. Unfold, Scan and
-;; Recurse pass a part's return value on to the next part, so they stop at
-;; such a part: the parts after it are not run (an update discards their
-;; old choices), and the trace holds the parts up to it. A dimap does not
-;; map such a return value. Map's elements, and a Switch's branch, pass
-;; nothing on: Map runs every element, and a caller stops at its score.
-;; Batched or lazy scores are arrays, never read: such a run goes on, -Inf
-;; per particle (gen.dynamic).
-
-(defn- stopped?
-  "Did the run of a part (a kernel's trace, or an assess's weight) stop at
-   a choice outside its support?"
-  [tr-or-weight]
-  (gfi/impossible? (if (map? tr-or-weight) (:score tr-or-weight) tr-or-weight)))
-
-(defn- last-stopped
-  "The index of the last of subs, the steps of an old trace, when its run
-   stopped there, else nil: a later update that keeps it as it is stops
-   there too."
-  [subs]
-  (let [n (count subs)]
-    (when (and (pos? n) (stopped? (subs (dec n)))) (dec n))))
-
-(defn- assoc-element [choices i sub]
-  (if (cm/empty? sub) (cm/remove-submap choices i) (cm/set-submap choices i sub)))
-
-(defn- indices
-  "The top-level addresses of choices, checked to be indices below n, as a
-   sorted set."
-  [op choices n]
-  (when (cm/has-value? choices)
-    (throw (gfi/unvisited op [[]] "a single value was given where indexed choices belong")))
-  (let [addrs (clojure.core/map first (cm/submaps choices))]
-    (when-let [outside (seq (remove #(and (integer? %) (< -1 % n)) addrs))]
-      (throw (gfi/unvisited op (mapv vector outside) (str "the indices are 0 to " (dec n)))))
-    (into (sorted-set) (clojure.core/map long) addrs)))
-
-(defn- selected-indices
-  "The indices a selection may select something under: :all, or a sorted
-   set. An index past the elements selects nothing (they may be there at
-   another length), but a negative one is no element's, nor a node's: a
-   loud error in every kind that numbers its calls (genclj-kdau)."
-  [s]
-  (let [as (sel/top-addresses s)]
-    (if (= :all as)
-      :all
-      (let [is (filter integer? as)]
-        (when-let [neg (seq (sort (filter neg? is)))]
-          (throw (ex-info (str "selection: a negative index " (pr-str (vec neg))
-                               ", where elements and nodes are numbered from 0")
-                          {:reason :negative-index :indices (vec neg)})))
-        (into (sorted-set) is)))))
-
-(defn- element-call
-  "Map's or Unfold's call at path p: element (p 0)'s trace."
-  [tr p]
-  (let [subs (::subtraces tr)
-        i (p 0)]
-    (when (and (integer? i) (< -1 i (count subs)))
-      [(subs i) (subvec p 1)])))
-
-;; The score of a Map, Unfold or Scan trace is a running total of its
-;; elements' scores, so a change costs the elements it changes, as in
-;; Gen.jl. A plain one (score + new - old) gives -Inf + Inf = NaN once an
-;; element left its support and came back (genclj-awd0). So a total keeps
-;; the sum of the finite element scores beside two counts: of the scores not
-;; above -Inf, and of those not below +Inf. A NaN is in both, as -Inf + Inf
-;; is NaN, so the score is the IEEE sum of the elements' scores, what assess
-;; sums, the finite part rounded as a running total (genclj-ul72). The
-;; finite part is a compensated sum (Knuth's two-sum), :finite and its rounding
-;; error :comp: a plain running total drifts from the elements' sum by the
-;; rounding of every step it took, past the laws' float64 tolerance after a
-;; long chain of updates that take large scores in and out of a small total.
-
-(def ^:private no-total {:finite 0.0 :comp 0.0 :neg-inf 0 :pos-inf 0})
-
-(defn- compensated
-  "[finite comp] with x added: Knuth's two-sum, branch-free, so finite +
-   comp holds the exact sum up to one rounding."
-  [finite comp x]
-  (let [t (+ finite x)
-        b (- t finite)]
-    [t (+ comp (+ (- finite (- t b)) (- x b)))]))
-
-(defn- add-finite
-  "total with finite score x added to its compensated sum."
-  [total x]
-  (let [[f c] (compensated (:finite total) (:comp total 0.0) x)]
-    (assoc total :finite f :comp c)))
-
-(defn- tallied
-  "total with score s added (op +) or taken out (op -)."
-  [total op s]
-  (if (array/host? s)
-    (let [x (double s)]
-      (if (< ##-Inf x ##Inf)
-        (add-finite total (if (= op +) s (- s)))
-        (cond-> total
-          (not (> x ##-Inf)) (update :neg-inf op 1)
-          (not (< x ##Inf)) (update :pos-inf op 1))))
-    (let [above (array/> s ##-Inf)
-          below (array/< s ##Inf)]
-      (-> total
-          (add-finite (let [f (array/where (array/logical-and above below) s 0.0)] (if (= op +) f (- f))))
-          (update :neg-inf op (array/where above 0 1))
-          (update :pos-inf op (array/where below 0 1))))))
-
-(defn- total-score
-  "The score of a total: its finite sum, -Inf with a score not above -Inf,
-   +Inf with one not below +Inf, and so NaN with both."
-  [{:keys [neg-inf pos-inf] :as total}]
-  (let [finite (+ (:finite total) (:comp total 0.0))]
-    (if (and (array/host? neg-inf) (array/host? pos-inf))
-      (cond-> finite
-        (pos? (long neg-inf)) (+ ##-Inf)
-        (pos? (long pos-inf)) (+ ##Inf))
-      (+ (+ finite (array/where (array/> neg-inf 0) ##-Inf 0.0)) (array/where (array/> pos-inf 0) ##Inf 0.0)))))
-
-(defn- elements-trace [gf args {:keys [subs choices retval total]}]
-  (assoc (trace/make-trace {:gen-fn gf :args args :choices choices :retval retval :score (total-score total)})
-         ::subtraces subs
-         ::total total))
-
-(def ^:private empty-acc
-  {:subs [] :choices cm/EMPTY :retval [] :total no-total :weight 0.0 :discard cm/EMPTY :retdiffs {}})
-
-(defn- trace-acc
-  "An accumulator holding the elements of tr, to be changed in place."
-  [tr]
-  (assoc empty-acc :subs (::subtraces tr) :choices (:choices tr) :retval (:retval tr) :total (::total tr)))
-
-(defn- put-element
-  "acc with sub as element i (replacing old, if given), its weight w added."
-  [acc i sub old w]
-  (-> acc
-      (assoc-in [:subs i] sub)
-      (update :choices assoc-element i (:choices sub))
-      (assoc-in [:retval i] (:retval sub))
-      (update :total #(cond-> (tallied % + (:score sub)) old (tallied - (:score old))))
-      (update :weight + w)))
-
-(defn- put-update
-  "acc with element i updated: the result of update or regenerate."
-  [acc i old {sub :trace w :weight d :discard rd :retdiff}]
-  (cond-> (put-element acc i sub old w)
-    (and d (not (cm/empty? d))) (update :discard cm/set-submap i d)
-    (diff/changed? rd) (assoc-in [:retdiffs i] rd)))
-
-(defn- keep-first
-  "v's first n elements, as v itself when they are all of it: a vector of
-   v's class, so a return value nothing changed is the same value
-   (gfi/same-value?), and no subvec holds on to dropped elements."
-  [v n]
-  (if (== n (count v)) v (into [] (take n) v)))
-
-(defn- drop-elements
-  "acc without the elements from n on. update discards them and subtracts
-   their scores from the weight; in regenerate they cancel against the
-   reverse move."
-  [acc n op]
-  (let [gone (subvec (:subs acc) n)]
-    (-> (reduce (fn [acc [i sub]]
-                  (cond-> (-> acc
-                              (update :choices cm/remove-submap i)
-                              (update :total tallied - (:score sub)))
-                    (= op :update) (-> (update :weight - (:score sub))
-                                       (cond-> (not (cm/empty? (:choices sub)))
-                                         (update :discard cm/set-submap i (:choices sub))))))
-                acc
-                (clojure.core/map vector (range n (count (:subs acc))) gone))
-        (update :subs keep-first n)
-        (update :retval keep-first n))))
-
-(defn- retdiff [{:keys [retdiffs]} n prev-n]
-  (if (and (= n prev-n) (empty? retdiffs)) diff/no-change (diff/vector-diff n prev-n retdiffs)))
-
-(defn- incremental-result
-  "An update's or regenerate's result from acc, the steps of a run that
-   stopped (stopped?) at its last one with an unknown retdiff."
-  [gf args acc op n prev-n stopped]
-  (cond-> {:trace (elements-trace gf args acc) :weight (:weight acc)
-           :retdiff (if stopped diff/unknown-change (retdiff acc n prev-n))}
-    (= op :update) (assoc :discard (:discard acc))))
-
-(defn- project-elements [tr s]
-  (let [subs (::subtraces tr)
-        is (selected-indices s)]
-    (reduce (fn [w i] (let [sub (subs i)] (+ w (gfi/-project (:gen-fn sub) sub (sel/get-subselection s i)))))
-            0.0
-            (if (= :all is) (range (count subs)) (filter #(< % (count subs)) is)))))
-
 (defn- propose-from-trace [tr]
   {:choices (:choices tr) :weight (:score tr) :retval (:retval tr)})
-
-;; ---------------------------------------------------------------------------
-;; Map
-;; ---------------------------------------------------------------------------
-
-(defn- map-args
-  "Map's arguments as vectors: each is a sequential collection, one element
-   per application."
-  [args]
-  (when-let [bad (first (remove sequential? args))]
-    (throw (ex-info (str "Map's arguments are vectors, one element per application, not " (pr-str bad)) {:arg bad})))
-  (mapv vec args))
-
-(defn- map-length [args]
-  (when (empty? args)
-    (throw (ex-info "Map needs at least one argument vector" {})))
-  (let [ns (mapv count args)]
-    (when-not (apply = ns)
-      (throw (ex-info "Map's argument vectors must have one length" {:lengths ns})))
-    (first ns)))
-
-(defn- element-args [args i] (mapv #(nth % i) args))
-
-(defn- unknown-diffs [args] (vec (repeat (count args) diff/unknown-change)))
-
-(defn- element-diff
-  "The diff of element i of a vector whose diff is d."
-  [d i]
-  (cond (diff/no-change? d) diff/no-change
-        (diff/vector-diff? d) (get (:updated d) i diff/no-change)
-        :else diff/unknown-change))
-
-(defn- element-argdiffs
-  "The kernel's argdiffs for element i, from Map's argdiffs."
-  [argdiffs i]
-  (mapv #(element-diff % i) argdiffs))
-
-(defn- changed-elements
-  "The indices whose arguments may have changed: :all, or a sorted set. A
-   change in the number of arguments changes every element's (DESIGN.md §9,
-   G3: no argdiff can say one went or came)."
-  [argdiffs same-count?]
-  (if (and same-count? (every? #(or (diff/no-change? %) (diff/vector-diff? %)) argdiffs))
-    (into (sorted-set) (mapcat #(when (diff/vector-diff? %) (keys (:updated %)))) argdiffs)
-    :all))
-
-(defn- visits
-  "The retained indices below kept to revisit: those in either set (or every
-   one, if either is :all)."
-  [xs ys kept]
-  (if (or (= :all xs) (= :all ys)) (range kept) (subseq (into xs ys) < kept)))
-
-(defn- map-generate [gf args constraints key]
-  (let [args (map-args args)
-        n (map-length args)
-        kernel (:kernel gf)]
-    (when constraints (indices :generate constraints n))
-    (let [acc (reduce (fn [acc i]
-                        (let [ea (element-args args i)
-                              k (element-key key i)]
-                          (if constraints
-                            (let [{sub :trace w :weight} (generate-at kernel ea (cm/get-submap constraints i cm/EMPTY) k [i])]
-                              (put-element acc i sub nil w))
-                            (put-element acc i (simulate-at kernel ea k) nil 0.0))))
-                      empty-acc
-                      (range n))]
-      {:trace (elements-trace gf args acc) :weight (:weight acc)})))
-
-(defn- map-revise
-  "update (op :update, with constraints) or regenerate (op :regenerate, with
-   a selection) of a Map trace."
-  [gf tr args argdiffs op cs key]
-  (let [args (map-args args)
-        n (map-length args)
-        kernel (:kernel gf)
-        old-subs (::subtraces tr)
-        prev-n (count old-subs)
-        kept (min n prev-n)
-        targets (if (= op :update) (indices :update cs n) (selected-indices cs))
-        acc (reduce (fn [acc i]
-                      (let [old (old-subs i)
-                            ea (element-args args i)
-                            ead (element-argdiffs argdiffs i)
-                            k (element-key key i)]
-                        (put-update acc i old
-                                    (if (= op :update)
-                                      (update-at kernel old ea ead (cm/get-submap cs i cm/EMPTY) k [i])
-                                      (regenerate-at kernel old ea ead (sel/get-subselection cs i) k [i])))))
-                    (trace-acc tr)
-                    (visits (changed-elements argdiffs (== (count args) (count (:args tr)))) targets kept))
-        acc (drop-elements acc kept op)
-        acc (reduce (fn [acc i]
-                      (let [ea (element-args args i)
-                            k (element-key key i)]
-                        (if (= op :update)
-                          (let [{sub :trace w :weight} (generate-at kernel ea (cm/get-submap cs i cm/EMPTY) k [i])]
-                            (put-element acc i sub nil w))
-                          (put-element acc i (simulate-at kernel ea k) nil 0.0))))
-                    acc
-                    (range kept n))]
-    (incremental-result gf args acc op n prev-n false)))
-
-(defn- map-assess [gf args choices key]
-  (let [args (map-args args)
-        n (map-length args)]
-    (indices :assess choices n)
-    (reduce (fn [{:keys [weight retval]} i]
-              (let [r (assess-at (:kernel gf) (element-args args i) (cm/get-submap choices i cm/EMPTY) (element-key key i) [i])]
-                {:weight (+ weight (:weight r)) :retval (conj retval (:retval r))}))
-            {:weight 0.0 :retval []}
-            (range n))))
 
 ;; A combinator's trainable-parameter stores (gfi/IStores): its callees',
 ;; keyed as it holds them, a Map's and an Unfold's those of their one kernel
@@ -439,20 +123,24 @@
   [callees stores]
   (reduce-kv (fn [cs k s] (assoc cs k (gfi/with-stores (get cs k) s))) callees stores))
 
+;; ---------------------------------------------------------------------------
+;; Map
+;; ---------------------------------------------------------------------------
+
 (gfi/defgf MapGF [kernel]
   gfi/IStores
   (-stores [gf] (gfi/stores (:kernel gf)))
   (-with-stores [gf stores] (assoc gf :kernel (gfi/with-stores (:kernel gf) stores)))
   gfi/IGenerativeFunction
-  (-simulate [gf args key] (:trace (map-generate gf args nil key)))
-  (-generate [gf args constraints key] (map-generate gf args constraints key))
-  (-update [gf tr args argdiffs constraints key] (map-revise gf tr args argdiffs :update constraints key))
-  (-regenerate [gf tr args argdiffs selection key] (map-revise gf tr args argdiffs :regenerate selection key))
-  (-assess [gf args choices key] (map-assess gf args choices key))
-  (-propose [gf args key] (propose-from-trace (:trace (map-generate gf args nil key))))
-  (-project [_ tr selection] (project-elements tr selection))
+  (-simulate [gf args key] (:trace (el/map-generate gf args nil key)))
+  (-generate [gf args constraints key] (el/map-generate gf args constraints key))
+  (-update [gf tr args argdiffs constraints key] (el/map-revise gf tr args argdiffs :update constraints key))
+  (-regenerate [gf tr args argdiffs selection key] (el/map-revise gf tr args argdiffs :regenerate selection key))
+  (-assess [gf args choices key] (el/map-assess gf args choices key))
+  (-propose [gf args key] (propose-from-trace (:trace (el/map-generate gf args nil key))))
+  (-project [_ tr selection] (el/project tr selection))
   trace/ICalls
-  (-call [_ tr p] (element-call tr p)))
+  (-call [_ tr p] (el/element-call tr p)))
 
 (defn map
   "Gen.jl's Map combinator: the kernel applied independently to each element
@@ -464,121 +152,20 @@
 ;; Unfold
 ;; ---------------------------------------------------------------------------
 
-(defn- check-steps
-  "The number of steps as a host integer (a one-element array is read; a
-   number that differs across a batch's particles raises the batched-branch
-   error, so batched inference falls back)."
-  [n]
-  (let [n (if (array/backend-array? n) (array/item n) n)]
-    (when-not (nat-int? n)
-      (throw (ex-info "Unfold's first argument, the number of steps, must be a non-negative integer" {:n n})))
-    n))
-
-(defn- step-args [t state params] (into [t state] params))
-
-(defn- unfold-generate [gf [n init & params :as args] constraints key]
-  (let [n (check-steps n)
-        kernel (:kernel gf)]
-    (when constraints (indices :generate constraints n))
-    (let [acc (loop [t 0 state init acc empty-acc]
-                (if (< t n)
-                  (let [sa (step-args t state params)
-                        k (element-key key t)
-                        [sub w] (if constraints
-                                  (let [r (generate-at kernel sa (cm/get-submap constraints t cm/EMPTY) k [t])]
-                                    [(:trace r) (:weight r)])
-                                  [(simulate-at kernel sa k) 0.0])
-                        acc (put-element acc t sub nil w)]
-                    (if (stopped? sub) acc (recur (inc t) (:retval sub) acc)))
-                  acc))]
-      {:trace (elements-trace gf (vec args) acc) :weight (:weight acc)})))
-
-(defn- unfold-revise
-  "update or regenerate of an Unfold trace. Walks the retained steps,
-   revisiting a step when its state input, the parameters, its constraints or
-   its selection may have changed, and skipping straight to the next
-   targeted step otherwise; then extends or truncates."
-  [gf tr [n init & params :as args] argdiffs op cs key]
-  (let [n (check-steps n)
-        kernel (:kernel gf)
-        [_ dinit & dparams] argdiffs
-        ;; a change in their number is a change (DESIGN.md §9, G3)
-        params-changed? (or (not= (count args) (count (:args tr))) (some diff/changed? dparams))
-        old-subs (::subtraces tr)
-        prev-n (count old-subs)
-        kept (min n prev-n)
-        old-stop (last-stopped old-subs)
-        targets (if (= op :update) (indices :update cs n) (selected-indices cs))
-        target? (fn [t] (or (= :all targets) (contains? targets t)))
-        next-target (fn [t] (if (= :all targets) t (or (first (subseq targets >= t)) kept)))
-        ;; stop: the step at which the run stopped (stopped?), or nil
-        [state acc stop]
-        (loop [t 0 state init sdiff dinit acc (trace-acc tr)]
-          (cond
-            (>= t kept) [state acc nil]
-
-            (or params-changed? (diff/changed? sdiff) (target? t))
-            (let [old (old-subs t)
-                  sa (step-args t state params)
-                  sad (into [diff/no-change sdiff] dparams)
-                  k (element-key key t)
-                  r (if (= op :update)
-                      (update-at kernel old sa sad (cm/get-submap cs t cm/EMPTY) k [t])
-                      (regenerate-at kernel old sa sad (sel/get-subselection cs t) k [t]))
-                  acc (put-update acc t old r)]
-              (if (stopped? (:trace r))
-                [nil acc t]
-                (recur (inc t) (:retval (:trace r)) (:retdiff r) acc)))
-
-            :else
-            (let [t' (min (next-target t) kept)]
-              ;; a kept step that stopped the old run stops this one
-              (if (and old-stop (<= t old-stop) (< old-stop t'))
-                [nil acc old-stop]
-                (recur (long t') (nth (:retval acc) (dec t')) diff/no-change acc)))))
-        acc (drop-elements acc (if stop (inc stop) kept) op)
-        [acc stop] (if stop
-                     [acc stop]
-                     (loop [t kept state state acc acc]
-                       (if (< t n)
-                         (let [sa (step-args t state params)
-                               k (element-key key t)
-                               [sub w] (if (= op :update)
-                                         (let [r (generate-at kernel sa (cm/get-submap cs t cm/EMPTY) k [t])] [(:trace r) (:weight r)])
-                                         [(simulate-at kernel sa k) 0.0])
-                               acc (put-element acc t sub nil w)]
-                           (if (stopped? sub) [acc t] (recur (inc t) (:retval sub) acc)))
-                         [acc nil])))]
-    (incremental-result gf (vec args) acc op n prev-n stop)))
-
-(defn- unfold-assess [gf [n init & params] choices key]
-  (let [n (check-steps n)]
-    (indices :assess choices n)
-    ;; weight starts boxed: it accumulates arrays on array backends
-    (loop [t 0 state init weight (Double/valueOf 0.0) retval []]
-      (if (< t n)
-        (let [r (assess-at (:kernel gf) (step-args t state params) (cm/get-submap choices t cm/EMPTY) (element-key key t) [t])
-              weight (+ weight (:weight r))
-              retval (conj retval (:retval r))]
-          (if (stopped? (:weight r))
-            {:weight weight :retval retval}
-            (recur (inc t) (:retval r) weight retval)))
-        {:weight weight :retval retval}))))
-
 (gfi/defgf UnfoldGF [kernel]
   gfi/IStores
   (-stores [gf] (gfi/stores (:kernel gf)))
   (-with-stores [gf stores] (assoc gf :kernel (gfi/with-stores (:kernel gf) stores)))
   gfi/IGenerativeFunction
-  (-simulate [gf args key] (:trace (unfold-generate gf args nil key)))
-  (-generate [gf args constraints key] (unfold-generate gf args constraints key))
-  (-update [gf tr args argdiffs constraints key] (unfold-revise gf tr args argdiffs :update constraints key))
-  (-regenerate [gf tr args argdiffs selection key] (unfold-revise gf tr args argdiffs :regenerate selection key))
-  (-assess [gf args choices key] (unfold-assess gf args choices key))
-  (-propose [gf args key] (propose-from-trace (:trace (unfold-generate gf args nil key))))
-  (-project [_ tr selection] (project-elements tr selection))
+  (-simulate [gf args key] (:trace (chain/unfold-generate gf args nil key)))
+  (-generate [gf args constraints key] (chain/unfold-generate gf args constraints key))
+  (-update [gf tr args argdiffs constraints key] (chain/unfold-revise gf tr args argdiffs :update constraints key))
+  (-regenerate [gf tr args argdiffs selection key] (chain/unfold-revise gf tr args argdiffs :regenerate selection key))
+  (-assess [gf args choices key] (chain/unfold-assess gf args choices key))
+  (-propose [gf args key] (propose-from-trace (:trace (chain/unfold-generate gf args nil key))))
+  (-project [_ tr selection] (el/project tr selection))
   trace/ICalls
-  (-call [_ tr p] (element-call tr p)))
+  (-call [_ tr p] (el/element-call tr p)))
 
 (defn unfold
   "Gen.jl's Unfold combinator: a state-space chain of n kernel steps."
@@ -589,255 +176,24 @@
 ;; Switch
 ;; ---------------------------------------------------------------------------
 
-(declare own-constraints)
-
-(defn- branch-index
-  "The branch index as a host value: a one-element array is read. (A
-   batched one runs by partition: index-keys.)"
-  [idx]
-  (if (array/backend-array? idx) (array/item idx) idx))
-
-(defn- branch [gf k]
-  (or (get (:branches gf) k)
-      (throw (ex-info (str "Switch has no branch " (pr-str k)) {:index k :branches (count (:branches gf))}))))
-
-(defn- switch-trace [gf args k sub]
-  (assoc (trace/make-trace {:gen-fn gf :args args :choices (:choices sub) :retval (:retval sub) :score (:score sub)})
-         ::branch k
-         ::subtrace sub))
-
-(defn- generate-branch
-  "generate (constraints, or nil to simulate) of a Switch on args by its
-   branch k."
-  [gf args k constraints key]
-  (let [b (branch gf k)
-        bargs (vec (rest args))]
-    (if constraints
-      (let [{sub :trace w :weight} (generate-at b bargs (own-constraints constraints array/*backend*) key nil)]
-        {:trace (switch-trace gf args k sub) :weight w})
-      {:trace (switch-trace gf args k (simulate-at b bargs key)) :weight 0.0})))
-
-(defn- revise-branch
-  "update or regenerate of a Switch trace by the branch k: the branch at the
-   new index runs against the old branch's trace, another branch by
-   gfi/revise, so the addresses both make keep their values (Def 2.3.1), as
-   the equivalent if would and as Gen.jl does."
-  [gf tr args argdiffs op cs key k]
-  (let [bargs (vec (rest args))
-        b (branch gf k)
-        sub (::subtrace tr)
-        bdiffs (if (= k (::branch tr)) (vec (rest argdiffs)) (unknown-diffs bargs))
-        r (if (= op :update)
-            (update-at b sub bargs bdiffs (own-constraints cs array/*backend*) key nil)
-            (regenerate-at b sub bargs bdiffs cs key nil))]
-    (assoc r :trace (switch-trace gf args k (:trace r)))))
-
-;; A Switch whose index differs across the particles of a batched run runs
-;; by partition (DESIGN.md §9): the particles are grouped by branch, each
-;; branch runs batched over its group under a part's backend, which draws
-;; for a particle what the batch's own run would, and the results are
-;; scattered back (gen.partition). The trace holds each group's branch, rows
-;; and subtrace (::parts, a gen.array.batch/Parts), and its choices by
-;; group, a Parts value at the call's address, which gen.batched reads per
-;; particle. An update or regenerate runs together each old group's
-;; particles that go to one branch (a cell), against their old subtraces,
-;; and joins a branch's cells (gen.partition/merge-groups). Every particle
-;; in one branch is the plain trace.
-
-(defn- index-keys
-  "The branch indices of the particles of the batch in effect, host values
-   (as branch-index reads one), from a batched index."
-  [idx]
-  (let [s (array/shape idx)
-        v (batch/value idx)]
-    (when-not (== 1 (reduce * 1 s))
-      (throw (ex-info (str "A Switch's index is one value, not an array of shape " s) {:shape s})))
-    (array/->clj (array/reshape v [(first (array/shape v))]))))
-
-(defn- one-key? [ks] (every? #(= (first ks) %) ks))
-
-(defn- choices-by-part
-  "The choices of groups whose data are choice maps: a Parts value, or EMPTY
-   when there are none."
-  [groups]
-  (if (every? (comp cm/empty? :data) groups) cm/EMPTY (cm/->Value (batch/->Parts groups))))
-
-(defn- parts-trace
-  "The trace of a Switch on args whose particles ran in groups ({:key :rows
-   :data}, data the group's subtrace), with its score and return value."
-  [gf args groups score retval]
-  (assoc (trace/make-trace {:gen-fn gf :args args :score score :retval retval
-                            :choices (choices-by-part (mapv #(update % :data :choices) groups))})
-         ::parts (batch/->Parts groups)))
-
-(defn- scattered-trace
-  "parts-trace, its score and return value scattered back from the groups'
-   onto the batch backend b."
-  [gf args groups b]
-  (let [rows (mapv :rows groups)
-        subs (mapv :data groups)]
-    (parts-trace gf args groups (batch/scatter (mapv :score subs) rows b) (part/scatter (mapv :retval subs) rows b))))
-
-(defn- in-order
-  "The order taking particles held at rows to the batch's own: nil when
-   they are in it."
-  [rows]
-  (when-not (= rows (range (count rows)))
-    (let [inv (long-array (count rows))]
-      (dotimes [j (count rows)] (aset inv (long (rows j)) (long j)))
-      (vec inv))))
-
-(defn- own-constraints
-  "constraints, for a run of the batch backend b's particles: choices held
-   by part (a Parts value: a batched trace's choices given back, as a
-   gradient's assess or a rebuild gives them) whose particles are all in
-   one group are that group's, taken into b; any other as they are (where
-   the particles' choices differ in structure, the branch's run fails,
-   loudly)."
-  [constraints b]
-  (let [v (cm/get-value constraints nil)]
-    (if (and (batch/parts? v) (== 1 (count (:groups v))))
-      (let [{rows :rows data :data} (first (:groups v))]
-        (part/gather-into data (in-order rows) b))
-      constraints)))
-
-(defn- in-part
-  "(f pb) under pb, the part backend of the particles at rows of the batch
-   backend b."
-  [b rows f]
-  (let [pb (batch/part-backend b rows)]
-    (array/with-backend pb (f pb))))
-
-(defn- generate-parts
-  "generate (constraints, or nil to simulate) of a Switch on args whose
-   index keys ks differ across the particles: each branch on its group."
-  [gf args ks constraints key]
-  (let [b array/*backend*
-        gs (part/groups ks)
-        rs (mapv (fn [[k rows]]
-                   (in-part b rows
-                            (fn [pb]
-                              (let [bargs (part/gather-into (vec (rest args)) rows pb)]
-                                (if constraints
-                                  (generate-at (branch gf k) bargs (own-constraints (part/gather-into constraints rows pb) pb) key nil)
-                                  {:trace (simulate-at (branch gf k) bargs key) :weight 0.0})))))
-                 gs)]
-    {:trace (scattered-trace gf args (mapv (fn [[k rows] r] {:key k :rows rows :data (:trace r)}) gs rs) b)
-     :weight (batch/scatter (mapv :weight rs) (mapv second gs) b)}))
-
-(defn- old-groups
-  "The groups of a Switch trace of m particles: its ::parts, or its one
-   branch's."
-  [tr m]
-  (if-let [ps (::parts tr)] (:groups ps) [{:key (::branch tr) :rows (vec (range m)) :data (::subtrace tr)}]))
-
-(defn- revise-parts
-  "update or regenerate of a Switch trace whose particles' branches differ,
-   before or after: each cell, the particles of an old group that go to one
-   branch, revised by that branch against their old subtraces (another
-   branch's by gfi/revise, as revise-branch), and a branch's cells joined."
-  [gf tr args argdiffs op cs key ks]
-  (let [b array/*backend*
-        bargs (vec (rest args))
-        cells (vec (for [{old :key rows :rows data :data} (old-groups tr (count ks))
-                         [k places] (part/groups (mapv ks rows))]
-                     {:key k :old old :rows (mapv rows places) :data data
-                      :places (when-not (= places (range (count rows))) places)}))
-        rs (mapv (fn [{k :key old :old rows :rows data :data places :places}]
-                   (in-part b rows
-                            (fn [pb]
-                              (let [prev (part/gather-into data places pb)
-                                    ba (part/gather-into bargs rows pb)
-                                    bdiffs (if (= k old) (vec (rest argdiffs)) (unknown-diffs bargs))]
-                                (if (= op :update)
-                                  (update-at (branch gf k) prev ba bdiffs (own-constraints (part/gather-into cs rows pb) pb) key nil)
-                                  (regenerate-at (branch gf k) prev ba bdiffs cs key nil))))))
-                 cells)
-        groups (part/merge-groups (mapv (fn [c r] {:key (:key c) :rows (:rows c) :data (:trace r)}) cells rs) b)
-        t (if (== 1 (count groups))
-            (let [{k :key rows :rows data :data} (first groups)]
-              (switch-trace gf args k (part/gather-into data (in-order rows) b)))
-            (scattered-trace gf args groups b))]
-    (cond-> {:trace t
-             :weight (batch/scatter (mapv :weight rs) (mapv :rows cells) b)
-             :retdiff (if (every? #(diff/no-change? (:retdiff %)) rs) diff/no-change diff/unknown-change)}
-      (= op :update) (assoc :discard (choices-by-part (mapv (fn [c r] {:key [(:old c) (:key c)] :rows (:rows c) :data (:discard r)})
-                                                            cells rs))))))
-
-(defn- switch-generate [gf [idx :as args] constraints key]
-  (let [args (vec args)]
-    (if (batch/batched? idx)
-      (let [ks (index-keys idx)]
-        (if (one-key? ks)
-          (generate-branch gf args (first ks) constraints key)
-          (generate-parts gf args ks constraints key)))
-      (generate-branch gf args (branch-index idx) constraints key))))
-
-(defn- switch-revise
-  "update or regenerate of a Switch trace: by its branch, or by partition
-   when the particles' branches differ, before or after."
-  [gf tr [idx :as args] argdiffs op cs key]
-  (let [args (vec args)
-        ks (when (batch/batched? idx) (index-keys idx))]
-    (if (or (::parts tr) (and ks (not (one-key? ks))))
-      (revise-parts gf tr args argdiffs op cs key
-                    (or ks (vec (repeat (batch/size array/*backend*) (branch-index idx)))))
-      (revise-branch gf tr args argdiffs op cs key (if ks (first ks) (branch-index idx))))))
-
-(defn- switch-assess [gf [idx & bargs] choices key]
-  (let [bargs (vec bargs)
-        ks (when (batch/batched? idx) (index-keys idx))]
-    (if (and ks (not (one-key? ks)))
-      (let [b array/*backend*
-            gs (part/groups ks)
-            rs (mapv (fn [[k rows]]
-                       (in-part b rows #(gfi/-assess (branch gf k) (part/gather-into bargs rows %)
-                                                     (own-constraints (part/gather-into choices rows %) %) key)))
-                     gs)]
-        {:weight (batch/scatter (mapv :weight rs) (mapv second gs) b)
-         :retval (part/scatter (mapv :retval rs) (mapv second gs) b)})
-      (gfi/-assess (branch gf (if ks (first ks) (branch-index idx))) bargs (own-constraints choices array/*backend*) key))))
-
-(defn- switch-project [tr selection]
-  (if-let [ps (::parts tr)]
-    (let [b array/*backend*
-          gs (:groups ps)]
-      (batch/scatter (mapv (fn [{rows :rows sub :data}]
-                             (array/with-backend (part/trace-backend sub (count rows) b)
-                               (gfi/-project (:gen-fn sub) sub selection)))
-                           gs)
-                     (mapv :rows gs) b))
-    (let [sub (::subtrace tr)] (gfi/-project (:gen-fn sub) sub selection))))
-
-(defn- switch-join
-  "Switch traces of consecutive parts of a batch as one (gen.partition's
-   IJoin): their groups merged by branch, the plain trace when every
-   particle is in one."
-  [gf trs ns b]
-  (let [groups (part/merge-groups (part/consecutive (mapv old-groups trs ns) ns) b)
-        args (part/join (mapv :args trs) ns b)]
-    (if (== 1 (count groups))
-      (let [{k :key data :data} (first groups)] (switch-trace gf args k data))
-      (parts-trace gf args groups (part/join (mapv :score trs) ns b) (part/join (mapv :retval trs) ns b)))))
-
 (gfi/defgf SwitchGF [branches]
   gfi/IStores
   (-stores [gf] (callee-stores (:branches gf)))
   (-with-stores [gf stores] (update gf :branches with-callee-stores stores))
   gfi/IGenerativeFunction
-  (-simulate [gf args key] (:trace (switch-generate gf args nil key)))
-  (-generate [gf args constraints key] (switch-generate gf args constraints key))
-  (-update [gf tr args argdiffs constraints key] (switch-revise gf tr args argdiffs :update constraints key))
-  (-regenerate [gf tr args argdiffs selection key] (switch-revise gf tr args argdiffs :regenerate selection key))
-  (-assess [gf args choices key] (switch-assess gf args choices key))
-  (-propose [gf args key] (propose-from-trace (:trace (switch-generate gf args nil key))))
-  (-project [_ tr selection] (switch-project tr selection))
+  (-simulate [gf args key] (:trace (switch/generate gf args nil key)))
+  (-generate [gf args constraints key] (switch/generate gf args constraints key))
+  (-update [gf tr args argdiffs constraints key] (switch/revise gf tr args argdiffs :update constraints key))
+  (-regenerate [gf tr args argdiffs selection key] (switch/revise gf tr args argdiffs :regenerate selection key))
+  (-assess [gf args choices key] (switch/assess gf args choices key))
+  (-propose [gf args key] (propose-from-trace (:trace (switch/generate gf args nil key))))
+  (-project [_ tr selection] (switch/project tr selection))
   ;; the branch's addresses are the switch's (a trace by partition has no
   ;; one call)
   trace/ICalls
   (-call [_ tr p] (when-let [sub (::subtrace tr)] (trace/-call (trace/maker sub) sub p)))
   part/IJoin
-  (-join [gf trs ns b] (switch-join gf trs ns b)))
+  (-join [gf trs ns b] (switch/join gf trs ns b)))
 
 (defn switch
   "Gen.jl's Switch combinator: (switch gf0 gf1 …) is called with a branch
@@ -855,12 +211,6 @@
 ;; Recurse
 ;; ---------------------------------------------------------------------------
 
-(defn- child-of
-  "The node number of child j of node node, unchecked: Recurse's own
-   loops, whose max-branch and number of children are checked already."
-  [node j max-branch]
-  (clojure.core/+ (* node max-branch) j 1))
-
 (defn- check-numbering
   "Loud unless every number is a natural number, max-branch positive."
   [f max-branch & numbers]
@@ -875,7 +225,7 @@
   (check-numbering "get-child" max-branch parent j)
   (when-not (< j max-branch)
     (throw (ex-info (str "get-child: child " j " of at most " max-branch) {:j j :max-branch max-branch})))
-  (child-of parent j max-branch))
+  (recurse/child-of parent j max-branch))
 
 (defn- check-not-root [f child]
   (when (zero? child)
@@ -896,227 +246,21 @@
   (check-not-root "get-parent" child)
   (quot (dec child) max-branch))
 
-(defn- put-part
-  "choices with sub at [node part], unless sub is empty."
-  [choices node part sub]
-  (if (cm/empty? sub) choices (cm/set-choice choices [node part] sub)))
-
-(defn- production-output
-  "The production kernel's return value at node, checked."
-  [gf node {out :retval}]
-  (when-not (and (map? out) (contains? out :value) (sequential? (:children out)))
-    (throw (ex-info (str "Recurse's production kernel returns {:value v :children [inputs …]}, not " (pr-str out)
-                         " (node " node ")")
-                    {:node node :retval out})))
-  (when (> (count (:children out)) (:max-branch gf))
-    (throw (ex-info (str "Recurse: node " node " has " (count (:children out)) " children, more than max-branch "
-                         (:max-branch gf))
-                    {:node node :children (count (:children out)) :max-branch (:max-branch gf)})))
-  out)
-
-(defn- recurse-targets
-  "The nodes the constraints (update, generate) or the selection
-   (regenerate) reach: {node #{:production :aggregation}}, or :all."
-  [op cs]
-  (cond
-    (nil? cs) {}
-    (= op :regenerate)
-    (let [is (selected-indices cs)]
-      (if (= :all is) :all (into {} (clojure.core/map (fn [i] [i #{:production :aggregation}])) is)))
-    :else
-    (do (when (cm/has-value? cs)
-          (throw (gfi/unvisited op [[]] "a single value was given where Recurse's nodes belong")))
-        (into {} (clojure.core/map (fn [[i sub]]
-                                     (when-not (nat-int? i)
-                                       (throw (gfi/unvisited op [[i]] "Recurse's addresses are node indices")))
-                                     (when (cm/has-value? sub)
-                                       (throw (gfi/unvisited op [[i]] (str "a value at node " i
-                                                                           ": a node has :production and :aggregation"))))
-                                     (let [parts (set (clojure.core/map first (cm/submaps sub)))]
-                                       (when-let [bad (seq (remove #{:production :aggregation} parts))]
-                                         (throw (gfi/unvisited op (mapv #(vector i %) bad) "a node has :production and :aggregation")))
-                                       [i parts])))
-              (cm/submaps cs)))))
-
-(defn- targeted? [targets node part]
-  (or (= :all targets) (contains? (get targets node) part)))
-
-(defn- node-cs [op cs node part]
-  (when cs (if (= op :regenerate) (sel/get-subselection cs [node part]) (cm/get-submap cs [node part] cm/EMPTY))))
-
-(defn- run-node
-  "One kernel run at node: revised from old when given (update or
-   regenerate), else new (generate, or simulate for regenerate and
-   unconstrained runs). {:trace :weight :retdiff :discard}."
-  [op kernel old args argdiffs cs key at]
-  (cond
-    old (if (= op :regenerate)
-          (regenerate-at kernel old args argdiffs cs key at)
-          (update-at kernel old args argdiffs cs key at))
-    (and cs (not= op :regenerate)) (assoc (generate-at kernel args cs key at) :retdiff diff/unknown-change)
-    :else {:trace (simulate-at kernel args key) :weight 0.0 :retdiff diff/unknown-change}))
-
-(defn- production-phase
-  "The productions from the root, in node order (parents before children):
-   a retained node is revisited only when its input may have changed or it
-   is targeted. {:prods :p-diffs :weight :discard :stopped}, :stopped true
-   when a production stopped the run (stopped?): no node after it runs."
-  [{:keys [gf old-p targets op cs node-key]} input input-diff]
-  (let [{:keys [production max-branch]} gf]
-    ;; weight starts boxed: it accumulates arrays on array backends
-    (loop [todo (sorted-map 0 [input input-diff]) prods {} p-diffs {} weight (Double/valueOf 0.0) discard cm/EMPTY]
-      (if-let [[node [in d]] (first todo)]
-        (let [old (old-p node)
-              revisit? (or (nil? old) (diff/changed? d) (targeted? targets node :production))
-              r (if revisit?
-                  (run-node op production old [in] [d] (node-cs op cs node :production) (node-key node :production)
-                            [node :production])
-                  {:trace old :weight 0.0 :retdiff diff/no-change})
-              prods (assoc prods node (:trace r))
-              p-diffs (assoc p-diffs node (:retdiff r))
-              weight (+ weight (:weight r))
-              discard (put-part discard node :production (:discard r))]
-          (if (stopped? (:trace r))
-            {:prods prods :p-diffs p-diffs :weight weight :discard discard :stopped true}
-            (let [out (production-output gf node (:trace r))
-                  child-diff (if (diff/changed? (:retdiff r)) diff/unknown-change diff/no-change)]
-              (recur (into (dissoc todo node)
-                           (map-indexed (fn [j c] [(child-of node j max-branch) [c child-diff]]) (:children out)))
-                     prods p-diffs weight discard))))
-        {:prods prods :p-diffs p-diffs :weight weight :discard discard :stopped false}))))
-
-(defn- aggregation-phase
-  "The aggregations from the leaves (children before parents): a retained
-   node is revisited when its value, its children or its target may have
-   changed. {:aggs :a-diffs :weight :discard :stopped}, the weight and
-   discard continuing the production phase's; none runs after a production
-   phase that stopped, nor after an aggregation that stops the run."
-  [{:keys [gf old-a targets op cs node-key]} {:keys [prods p-diffs weight discard stopped]}]
-  (let [{:keys [aggregation max-branch]} gf
-        start {:aggs {} :a-diffs {} :weight weight :discard discard :stopped stopped}]
-    (if stopped
-      start
-      (reduce (fn [{:keys [aggs a-diffs weight discard]} node]
-                (let [{v :value children :children} (:retval (prods node))
-                      kids (clojure.core/map #(child-of node % max-branch) (range (count children)))
-                      old (old-a node)
-                      v-changed? (diff/changed? (p-diffs node))
-                      ws-changed? (or (nil? old) (not= (count children) (count (second (:args old))))
-                                      (some #(diff/changed? (a-diffs %)) kids))
-                      r (if (or (nil? old) v-changed? ws-changed? (targeted? targets node :aggregation))
-                          (run-node op aggregation old [v (mapv #(:retval (aggs %)) kids)]
-                                    [(if v-changed? diff/unknown-change diff/no-change)
-                                     (if ws-changed? diff/unknown-change diff/no-change)]
-                                    (node-cs op cs node :aggregation) (node-key node :aggregation) [node :aggregation])
-                          {:trace old :weight 0.0 :retdiff diff/no-change})
-                      acc {:aggs (assoc aggs node (:trace r)) :a-diffs (assoc a-diffs node (:retdiff r))
-                           :weight (+ weight (:weight r)) :discard (put-part discard node :aggregation (:discard r))
-                           :stopped false}]
-                  (if (stopped? (:trace r)) (reduced (assoc acc :stopped true)) acc)))
-              start
-              (sort > (keys prods))))))
-
-(defn- node-choices [choices node p a]
-  (-> choices (put-part node :production (:choices p)) (put-part node :aggregation (:choices a))))
-
-(defn- node-key [key node part] (element-key (element-key key node) (if (= part :production) 0 1)))
-
-(defn- recurse-run
-  "generate (tr nil), update or regenerate of a Recurse trace: the
-   production phase, then the aggregation phase. Nodes no longer reached
-   are dropped: update discards them and subtracts their scores; in
-   regenerate they cancel against the reverse move."
-  [gf tr [input] [input-diff] op cs key]
-  (let [ctx {:gf gf :old-p (::productions tr {}) :old-a (::aggregations tr {}) :targets (recurse-targets op cs)
-             :op op :cs cs
-             :node-key (partial node-key key)}
-        {:keys [prods] :as produced} (production-phase ctx input input-diff)
-        ;; a run that stopped (stopped?) never reached the nodes after it
-        _ (when (and cs (not= op :regenerate) (not (:stopped produced)))
-            (doseq [node (keys (:targets ctx))]
-              (when-not (contains? prods node)
-                (throw (gfi/unvisited op [[node]] (str "the tree has nodes " (vec (sort (keys prods)))))))))
-        {:keys [aggs a-diffs weight discard stopped]} (aggregation-phase ctx produced)
-        {:keys [old-p old-a]} ctx
-        ;; every node has both parts, unless the run stopped before a part
-        gone-p (remove prods (keys old-p))
-        gone-a (remove aggs (keys old-a))
-        [weight discard] (if (= op :update)
-                           [(as-> weight w
-                              (reduce (fn [w node] (- w (:score (old-p node)))) w gone-p)
-                              (reduce (fn [w node] (- w (:score (old-a node)))) w gone-a))
-                            (as-> discard d
-                              (reduce #(put-part %1 %2 :production (:choices (old-p %2))) d gone-p)
-                              (reduce #(put-part %1 %2 :aggregation (:choices (old-a %2))) d gone-a))]
-                           [weight discard])
-        nodes (sort (keys prods))
-        t (assoc (trace/make-trace {:gen-fn gf :args [input]
-                                    :choices (reduce #(node-choices %1 %2 (prods %2) (aggs %2)) cm/EMPTY nodes)
-                                    :retval (:retval (aggs 0))
-                                    :score (reduce + 0.0 (concat (clojure.core/map :score (vals prods))
-                                                                 (clojure.core/map :score (vals aggs))))})
-                 ::productions prods ::aggregations aggs)]
-    (cond-> {:trace t :weight weight}
-      (not= op :generate) (assoc :retdiff (if (and tr (not stopped)) (a-diffs 0) diff/unknown-change))
-      (= op :update) (assoc :discard discard))))
-
-(defn- recurse-args [args]
-  (when-not (= 1 (count args))
-    (throw (ex-info (str "Recurse takes one argument, the root's input; given " (count args)) {:args args})))
-  (vec args))
-
-(defn- recurse-assess [gf [input] choices key]
-  (let [{:keys [production aggregation max-branch]} gf
-        targets (recurse-targets :assess choices)
-        ;; stopped: a part stopped the run (stopped?), and nothing after it runs
-        [ps weight stopped] (loop [todo (sorted-map 0 input) ps {} weight (Double/valueOf 0.0)]
-                              (if-let [[node in] (first todo)]
-                                (let [r (assess-at production [in] (cm/get-submap choices [node :production] cm/EMPTY)
-                                                   (node-key key node :production) [node :production])
-                                      weight (+ weight (:weight r))]
-                                  (if (stopped? (:weight r))
-                                    [ps weight true]
-                                    (let [out (production-output gf node r)]
-                                      (recur (into (dissoc todo node)
-                                                   (map-indexed (fn [j c] [(child-of node j max-branch) c]) (:children out)))
-                                             (assoc ps node out) weight))))
-                                [ps weight false]))
-        _ (when-not stopped
-            (doseq [node (keys targets)]
-              (when-not (contains? ps node)
-                (throw (gfi/unvisited :assess [[node]] (str "the tree has nodes " (vec (sort (keys ps)))))))))
-        [as weight] (if stopped
-                      [{} weight]
-                      (reduce (fn [[as weight] node]
-                                (let [{v :value children :children} (ps node)
-                                      ws (mapv #(as (child-of node % max-branch)) (range (count children)))
-                                      r (assess-at aggregation [v ws] (cm/get-submap choices [node :aggregation] cm/EMPTY)
-                                                   (node-key key node :aggregation) [node :aggregation])
-                                      acc [(assoc as node (:retval r)) (+ weight (:weight r))]]
-                                  (if (stopped? (:weight r)) (reduced [{} (second acc)]) acc)))
-                              [{} weight] (sort > (keys ps))))]
-    {:weight weight :retval (as 0)}))
-
-(defn- recurse-project [tr s]
-  (selected-indices s) ; for its check: a negative node is loud, as in regenerate
-  (let [part (fn [subs part]
-               (reduce (fn [w [node sub]]
-                         (+ w (gfi/-project (:gen-fn sub) sub (sel/get-subselection s [node part]))))
-                       0.0 subs))]
-    (+ (part (::productions tr) :production) (part (::aggregations tr) :aggregation))))
-
 (gfi/defgf RecurseGF [production aggregation max-branch]
   gfi/IStores
   (-stores [gf] (callee-stores (select-keys gf [:production :aggregation])))
   (-with-stores [gf stores] (with-callee-stores gf stores))
   gfi/IGenerativeFunction
-  (-simulate [gf args key] (:trace (recurse-run gf nil (recurse-args args) [diff/unknown-change] :generate nil key)))
-  (-generate [gf args constraints key] (recurse-run gf nil (recurse-args args) [diff/unknown-change] :generate constraints key))
-  (-update [gf tr args argdiffs constraints key] (recurse-run gf tr (recurse-args args) argdiffs :update constraints key))
-  (-regenerate [gf tr args argdiffs selection key] (recurse-run gf tr (recurse-args args) argdiffs :regenerate selection key))
-  (-assess [gf args choices key] (recurse-assess gf (recurse-args args) choices key))
+  (-simulate [gf args key] (:trace (recurse/run gf nil (recurse/check-args args) [diff/unknown-change] :generate nil key)))
+  (-generate [gf args constraints key]
+    (recurse/run gf nil (recurse/check-args args) [diff/unknown-change] :generate constraints key))
+  (-update [gf tr args argdiffs constraints key]
+    (recurse/run gf tr (recurse/check-args args) argdiffs :update constraints key))
+  (-regenerate [gf tr args argdiffs selection key]
+    (recurse/run gf tr (recurse/check-args args) argdiffs :regenerate selection key))
+  (-assess [gf args choices key] (recurse/assess gf (recurse/check-args args) choices key))
   (-propose [gf args key] (propose-from-trace (gfi/-simulate gf args key)))
-  (-project [_ tr selection] (recurse-project tr selection))
+  (-project [_ tr selection] (recurse/project tr selection))
   ;; node i's production at [i :production], its aggregation at [i :aggregation]
   trace/ICalls
   (-call [_ tr p]
@@ -1133,22 +277,6 @@
     (throw (ex-info "Recurse's max-branch is a positive integer" {:max-branch max-branch})))
   (->RecurseGF (check-gen-fn "recurse's production" production) (check-gen-fn "recurse's aggregation" aggregation)
                max-branch))
-
-;; ---------------------------------------------------------------------------
-;; Printing
-;; ---------------------------------------------------------------------------
-
-(defmethod print-method RecurseGF [_ ^java.io.Writer w]
-  (.write w "#gen/recurse"))
-
-(defmethod print-method MapGF [gf ^java.io.Writer w]
-  (.write w "#gen/map[") (print-method (:kernel gf) w) (.write w "]"))
-
-(defmethod print-method UnfoldGF [gf ^java.io.Writer w]
-  (.write w "#gen/unfold[") (print-method (:kernel gf) w) (.write w "]"))
-
-(defmethod print-method SwitchGF [gf ^java.io.Writer w]
-  (.write w "#gen/switch") (print-method (:branches gf) w))
 
 ;; ---------------------------------------------------------------------------
 ;; call-at, choice-at
@@ -1179,180 +307,20 @@
 ;; Scan
 ;; ---------------------------------------------------------------------------
 
-(defn- scan-inputs
-  "Scan's inputs, its second argument, as a vector of one per step."
-  [args]
-  (when (< (count args) 2)
-    (throw (ex-info (str "Scan takes (init xs & params), the initial carry and the inputs; given " (count args)
-                         " arguments")
-                    {:args (count args)})))
-  (let [xs (second args)]
-    (when-not (sequential? xs)
-      (throw (ex-info (str "Scan's second argument is its inputs, a vector of one per step, not " (pr-str xs))
-                      {:xs xs})))
-    (vec xs)))
-
-(defn- step-output
-  "Step t's kernel return value, checked to be [carry y]."
-  [t out]
-  (when-not (and (vector? out) (== 2 (count out)))
-    (throw (ex-info (str "Scan's kernel returns [carry y], not " (pr-str out) " (step " t ")") {:step t :retval out})))
-  out)
-
-(defn- put-step
-  "acc with step t's run r ({:trace :weight}, and update's :discard) in
-   place of old (if given): its output y among the outputs, y's diff yd."
-  [acc t old {sub :trace w :weight d :discard} y yd]
-  (cond-> (assoc-in (put-element acc t sub old w) [:retval t] y)
-    (and d (not (cm/empty? d))) (update :discard cm/set-submap t d)
-    (diff/changed? yd) (assoc-in [:retdiffs t] yd)))
-
-(defn- fresh-steps
-  "[carry acc stop]: acc with the steps from from on run afresh after
-   carry, generated (op :generate with constraints cs, or :update) or
-   simulated, until one stops the run (stopped?): stop is its index (the
-   carry nil, its output nil), or nil."
-  [kernel xs params from carry acc op cs key]
-  (loop [t from carry carry acc acc]
-    (if (< t (count xs))
-      (let [sa (into [carry (xs t)] params)
-            k (element-key key t)
-            r (if (or (= op :update) (and cs (= op :generate)))
-                (generate-at kernel sa (cm/get-submap cs t cm/EMPTY) k [t])
-                {:trace (simulate-at kernel sa k) :weight 0.0})]
-        (if (stopped? (:trace r))
-          [nil (put-step acc t nil r nil diff/no-change) t]
-          (let [[c y] (step-output t (:retval (:trace r)))]
-            (recur (inc t) c (put-step acc t nil r y diff/no-change)))))
-      [carry acc nil])))
-
-(defn- scan-trace [gf args carry acc]
-  (elements-trace gf args (assoc acc :retval [carry (:retval acc)])))
-
-(defn- scan-generate [gf [init _ & params :as args] constraints key]
-  (let [xs (scan-inputs args)]
-    (when constraints (indices :generate constraints (count xs)))
-    (let [[carry acc] (fresh-steps (:kernel gf) xs params 0 init empty-acc :generate constraints key)]
-      {:trace (scan-trace gf (vec args) carry acc) :weight (:weight acc)})))
-
-(defn- changed-steps
-  "The steps whose input may have changed, by the inputs' argdiff d: a
-   sorted set, or :all."
-  [d]
-  (cond (diff/no-change? d) (sorted-set)
-        (diff/vector-diff? d) (into (sorted-set) (keys (:updated d)))
-        :else :all))
-
-(defn- among? [steps t] (or (= :all steps) (contains? steps t)))
-
-(defn- next-among
-  "The first of steps (a sorted set, or :all) from t on, else end."
-  [steps t end]
-  (if (= :all steps) t (or (first (subseq steps >= t)) end)))
-
-(defn- part-diff
-  "The diff of part i (0 the carry, 1 the output) of a step's [carry y],
-   prev before and now after, from the kernel's retdiff rd: the part's own
-   (from a vector-diff), or no-change when it is the same value
-   (gfi/same-value?), so that a changed output alone leaves the next step
-   be."
-  [rd prev now i]
-  (let [d (element-diff rd i)]
-    (if (and (diff/changed? d) (gfi/same-value? (nth prev i) (nth now i))) diff/no-change d)))
-
-(defn- scan-retdiff
-  "The diff of [carry ys] from its parts'."
-  [carry-diff ys-diff]
-  (if (and (diff/no-change? carry-diff) (diff/no-change? ys-diff))
-    diff/no-change
-    (diff/vector-diff 2 2 (cond-> {}
-                            (diff/changed? carry-diff) (assoc 0 carry-diff)
-                            (diff/changed? ys-diff) (assoc 1 ys-diff)))))
-
-(defn- scan-revise
-  "update or regenerate of a Scan trace, as Unfold's: walks the retained
-   steps, revisiting a step when its carry, its input, the parameters, its
-   constraints or its selection may have changed, and skipping straight to
-   the next such step otherwise; then extends or truncates."
-  [gf tr [init _ & params :as args] argdiffs op cs key]
-  (let [xs (scan-inputs args)
-        n (count xs)
-        kernel (:kernel gf)
-        [dinit dxs & dparams] argdiffs
-        ;; a change in their number is a change (DESIGN.md §9, G3)
-        params-changed? (or (not= (count args) (count (:args tr))) (some diff/changed? dparams))
-        old-subs (::subtraces tr)
-        prev-n (count old-subs)
-        kept (min n prev-n)
-        targets (if (= op :update) (indices :update cs n) (selected-indices cs))
-        inputs (changed-steps dxs)
-        old-stop (last-stopped old-subs)
-        ;; stop: the step at which the run stopped (stopped?), or nil
-        [carry cdiff acc stop]
-        (loop [t 0 carry init cdiff dinit acc (assoc (trace-acc tr) :retval (second (:retval tr)))]
-          (cond
-            (>= t kept) [carry cdiff acc nil]
-
-            (or params-changed? (diff/changed? cdiff) (among? inputs t) (among? targets t))
-            (let [old (old-subs t)
-                  sa (into [carry (xs t)] params)
-                  sad (into [cdiff (element-diff dxs t)] dparams)
-                  k (element-key key t)
-                  r (if (= op :update)
-                      (update-at kernel old sa sad (cm/get-submap cs t cm/EMPTY) k [t])
-                      (regenerate-at kernel old sa sad (sel/get-subselection cs t) k [t]))]
-              (if (stopped? (:trace r))
-                [nil diff/unknown-change (put-step acc t old r nil diff/unknown-change) t]
-                (let [[c y :as out] (step-output t (:retval (:trace r)))
-                      rd (:retdiff r)]
-                  (recur (inc t) c (part-diff rd (:retval old) out 0)
-                         (put-step acc t old r y (part-diff rd (:retval old) out 1))))))
-
-            :else
-            (let [t' (long (min (next-among targets t kept) (next-among inputs t kept) kept))]
-              ;; a kept step that stopped the old run stops this one
-              (if (and old-stop (<= t old-stop) (< old-stop t'))
-                [nil diff/unknown-change acc old-stop]
-                (recur t' (first (:retval ((:subs acc) (dec t')))) diff/no-change acc)))))
-        [carry acc stop] (if stop
-                           [carry (drop-elements acc (inc stop) op) stop]
-                           (fresh-steps kernel xs params kept carry (drop-elements acc kept op) op cs key))
-        ;; the last carry is another step's when the length changed
-        carry-diff (cond (== n prev-n) cdiff
-                         (gfi/same-value? (first (:retval tr)) carry) diff/no-change
-                         :else diff/unknown-change)]
-    (cond-> {:trace (scan-trace gf (vec args) carry acc) :weight (:weight acc)
-             :retdiff (if stop diff/unknown-change (scan-retdiff carry-diff (retdiff acc n prev-n)))}
-      (= op :update) (assoc :discard (:discard acc)))))
-
-(defn- scan-assess [gf [init _ & params :as args] choices key]
-  (let [xs (scan-inputs args)]
-    (indices :assess choices (count xs))
-    ;; weight starts boxed: it accumulates arrays on array backends
-    (loop [t 0 carry init weight (Double/valueOf 0.0) ys []]
-      (if (< t (count xs))
-        (let [r (assess-at (:kernel gf) (into [carry (xs t)] params) (cm/get-submap choices t cm/EMPTY)
-                           (element-key key t) [t])]
-          (if (stopped? (:weight r))
-            {:weight (+ weight (:weight r)) :retval [nil (conj ys nil)]}
-            (let [[c y] (step-output t (:retval r))]
-              (recur (inc t) c (+ weight (:weight r)) (conj ys y)))))
-        {:weight weight :retval [carry ys]}))))
-
 (gfi/defgf ScanGF [kernel]
   gfi/IStores
   (-stores [gf] (gfi/stores (:kernel gf)))
   (-with-stores [gf stores] (assoc gf :kernel (gfi/with-stores (:kernel gf) stores)))
   gfi/IGenerativeFunction
-  (-simulate [gf args key] (:trace (scan-generate gf args nil key)))
-  (-generate [gf args constraints key] (scan-generate gf args constraints key))
-  (-update [gf tr args argdiffs constraints key] (scan-revise gf tr args argdiffs :update constraints key))
-  (-regenerate [gf tr args argdiffs selection key] (scan-revise gf tr args argdiffs :regenerate selection key))
-  (-assess [gf args choices key] (scan-assess gf args choices key))
-  (-propose [gf args key] (propose-from-trace (:trace (scan-generate gf args nil key))))
-  (-project [_ tr selection] (project-elements tr selection))
+  (-simulate [gf args key] (:trace (chain/scan-generate gf args nil key)))
+  (-generate [gf args constraints key] (chain/scan-generate gf args constraints key))
+  (-update [gf tr args argdiffs constraints key] (chain/scan-revise gf tr args argdiffs :update constraints key))
+  (-regenerate [gf tr args argdiffs selection key] (chain/scan-revise gf tr args argdiffs :regenerate selection key))
+  (-assess [gf args choices key] (chain/scan-assess gf args choices key))
+  (-propose [gf args key] (propose-from-trace (:trace (chain/scan-generate gf args nil key))))
+  (-project [_ tr selection] (el/project tr selection))
   trace/ICalls
-  (-call [_ tr p] (element-call tr p)))
+  (-call [_ tr p] (el/element-call tr p)))
 
 (defn scan
   "JAX's scan as a combinator (GenMLX's Scan): Unfold with inputs and
@@ -1367,24 +335,6 @@
 ;; ---------------------------------------------------------------------------
 ;; Mix
 ;; ---------------------------------------------------------------------------
-
-(defn- mix-body
-  "Mix's model, a dynamic function: the component index a choice at :index,
-   from (categorical weights) (or categorical-logits), and the component a
-   Switch's branch, its choices under :component."
-  [components logits?]
-  (let [sw (->SwitchGF components)
-        n (count components)
-        index (if logits? d/categorical-logits d/categorical)]
-    (dyn/gen [weights & args]
-      (let [i (index weights)
-            batch (dc/value-shape i)
-            k (count (dc/support i))]
-        (when-not (and (empty? batch) (== n k))
-          (throw (ex-info (str "Mix's weights are a vector of one per component (" n "), not " k
-                               (when (seq batch) (str " in a batch of shape " batch)))
-                          {:components n :weights k :batch batch})))
-        (apply splice :component sw (trace :index i) args)))))
 
 (declare mix-of)
 
@@ -1419,7 +369,7 @@
     (when (empty? components)
       (throw (ex-info "Mix needs at least one component" {})))
     (run! #(check-gen-fn "mix" %) components)
-    (->MixGF components logits? (mix-body components logits?))))
+    (->MixGF components logits? (wrap/mix-body (->SwitchGF components) (count components) logits?))))
 
 (defn mix
   "GenMLX's Mix, a mixture of generative functions: ((mix gf0 gf1 …)
@@ -1442,82 +392,17 @@
 ;; dimap, contramap, map-retval
 ;; ---------------------------------------------------------------------------
 
-(defn- inner-args
-  "The inner's arguments: (apply pre args) as a vector, args without pre."
-  [{:keys [pre]} args]
-  (if pre
-    (let [a (apply pre args)]
-      (when-not (sequential? a)
-        (throw (ex-info (str "dimap's argument map returns the inner's arguments, a vector, not " (pr-str a))
-                        {:value a})))
-      (vec a))
-    args))
-
-(defn- outer-retval
-  "The return value v of the inner's run mapped by post; a run that
-   stopped (stopped?, given its score or weight s) has none to map."
-  ([{:keys [post]} v] (if post (post v) v))
-  ([gf v s] (if (stopped? s) nil (outer-retval gf v))))
-
-(defn- dimap-trace [gf args sub retval]
-  (assoc (trace/make-trace {:gen-fn gf :args args :choices (:choices sub) :retval retval :score (:score sub)})
-         ::subtrace sub))
-
-(defn- dimap-generate [gf args constraints key]
-  (let [args (vec args)
-        ia (inner-args gf args)
-        {sub :trace :as r} (if constraints
-                             (generate-at (:inner gf) ia constraints key nil)
-                             {:trace (simulate-at (:inner gf) ia key) :weight 0.0})]
-    (assoc r :trace (dimap-trace gf args sub (outer-retval gf (:retval sub) (:score sub))))))
-
-(def ^:private absent (Object.))
-
-(defn- inner-call
-  "[arguments argdiffs] of the inner's call, from args and argdiffs. Without
-   an argument map, the same. With one, which change hints cannot see
-   through: when no argument changed (nor their number), the previous
-   call's arguments, unchanged; otherwise the mapped ones, each no-change
-   when it is identical to the previous call's, else unknown-change."
-  [gf tr args argdiffs]
-  (let [prev (:args (::subtrace tr))]
-    (cond (nil? (:pre gf)) [args argdiffs]
-          (and (== (count args) (count (:args tr))) (every? diff/no-change? argdiffs)) [prev (diff/no-changes (count prev))]
-          :else (let [ia (inner-args gf args)]
-                  [ia (vec (map-indexed (fn [i a] (if (identical? a (nth prev i absent)) diff/no-change diff/unknown-change))
-                                        ia))]))))
-
-(defn- dimap-revise
-  "update or regenerate of a dimap trace: the inner's (inner-call). The
-   return value is mapped again only when the inner's may have changed,
-   and is no-change when it is the same value (gfi/same-value?)."
-  [gf tr args argdiffs op cs key]
-  (let [args (vec args)
-        sub (::subtrace tr)
-        [ia iad] (inner-call gf tr args argdiffs)
-        {sub' :trace rd :retdiff :as r} (if (= op :update)
-                                          (update-at (:inner gf) sub ia iad cs key nil)
-                                          (regenerate-at (:inner gf) sub ia iad cs key nil))
-        [v vd] (cond (nil? (:post gf)) [(:retval sub') rd]
-                     (stopped? sub') [nil diff/unknown-change]
-                     (diff/no-change? rd) [(:retval tr) diff/no-change]
-                     :else (let [v (outer-retval gf (:retval sub'))]
-                             [v (if (gfi/same-value? (:retval tr) v) diff/no-change diff/unknown-change)]))]
-    (assoc r :trace (dimap-trace gf args sub' v) :retdiff vd)))
-
 (gfi/defgf DimapGF [inner pre post]
   gfi/IStores
   (-stores [gf] (gfi/stores (:inner gf)))
   (-with-stores [gf stores] (assoc gf :inner (gfi/with-stores (:inner gf) stores)))
   gfi/IGenerativeFunction
-  (-simulate [gf args key] (:trace (dimap-generate gf args nil key)))
-  (-generate [gf args constraints key] (dimap-generate gf args constraints key))
-  (-update [gf tr args argdiffs constraints key] (dimap-revise gf tr args argdiffs :update constraints key))
-  (-regenerate [gf tr args argdiffs selection key] (dimap-revise gf tr args argdiffs :regenerate selection key))
-  (-assess [gf args choices key]
-    (let [r (assess-at (:inner gf) (inner-args gf (vec args)) choices key nil)]
-      (assoc r :retval (outer-retval gf (:retval r) (:weight r)))))
-  (-propose [gf args key] (propose-from-trace (:trace (dimap-generate gf args nil key))))
+  (-simulate [gf args key] (:trace (wrap/dimap-generate gf args nil key)))
+  (-generate [gf args constraints key] (wrap/dimap-generate gf args constraints key))
+  (-update [gf tr args argdiffs constraints key] (wrap/dimap-revise gf tr args argdiffs :update constraints key))
+  (-regenerate [gf tr args argdiffs selection key] (wrap/dimap-revise gf tr args argdiffs :regenerate selection key))
+  (-assess [gf args choices key] (wrap/dimap-assess gf args choices key))
+  (-propose [gf args key] (propose-from-trace (:trace (wrap/dimap-generate gf args nil key))))
   (-project [_ tr selection] (let [sub (::subtrace tr)] (gfi/-project (:gen-fn sub) sub selection)))
   ;; the inner's addresses are the wrapper's
   trace/ICalls
@@ -1555,6 +440,22 @@
   (check-gen-fn "map-retval" gf)
   (check-fn "map-retval" g)
   (->DimapGF gf nil g))
+
+;; ---------------------------------------------------------------------------
+;; Printing
+;; ---------------------------------------------------------------------------
+
+(defmethod print-method MapGF [gf ^java.io.Writer w]
+  (.write w "#gen/map[") (print-method (:kernel gf) w) (.write w "]"))
+
+(defmethod print-method UnfoldGF [gf ^java.io.Writer w]
+  (.write w "#gen/unfold[") (print-method (:kernel gf) w) (.write w "]"))
+
+(defmethod print-method SwitchGF [gf ^java.io.Writer w]
+  (.write w "#gen/switch") (print-method (:branches gf) w))
+
+(defmethod print-method RecurseGF [_ ^java.io.Writer w]
+  (.write w "#gen/recurse"))
 
 (defmethod print-method ScanGF [gf ^java.io.Writer w]
   (.write w "#gen/scan[") (print-method (:kernel gf) w) (.write w "]"))
