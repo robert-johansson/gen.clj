@@ -76,8 +76,11 @@
 
 ;; v is the wrapped array, or a delay of it (a lazily gathered value: see
 ;; gather); value derefs it once and caches it. read? records whether any op
-;; has read the value (see unread-bools).
-(deftype Batched [v backend ^:unsynchronized-mutable read?]
+;; has read the value (see unread-bools). It is volatile: a value read on
+;; another thread (a future inside a vmapped function) is seen as read by
+;; the check at the end of vmap (genclj-vajv), where an unsynchronized
+;; field could raise a false "unread comparison" error.
+(deftype Batched [v backend ^:volatile-mutable read?]
   IRead
   (markRead [_] (set! read? true) nil)
   (wasRead [_] read?)
