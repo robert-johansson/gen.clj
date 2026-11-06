@@ -170,7 +170,7 @@ wrapped-cauchy(mu, rho): cauchy(mu, -log rho) wrapped onto the circle (scipy's w
 
 `(d/wrapped-normal mu sigma)`
 
-wrapped-normal(mu, sigma): normal(mu, sigma) wrapped onto the circle, density Σₖ N(x + 2πk; μ, σ), values in [-π, π). The sum is two series, each truncated where its omitted terms are below 1e-17 of the total. From sigma = 9 on, its draws are the uniform's, which it then is to float64's precision.
+wrapped-normal(mu, sigma): normal(mu, sigma) wrapped onto the circle, density Σₖ N(x + 2πk; μ, σ), values in [-π, π). The sum is two series, each truncated where its omitted terms are below 1e-17 of the total. From sigma = 9 on, its draws are the uniform's, which it then is to float64's precision; sigma may be +Inf, the uniform itself.
 
 ## wishart
 
