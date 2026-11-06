@@ -518,7 +518,11 @@
                           (gfi/generate scanned [0.0 [1.0] 0.5] (cm/choicemap [3 :s] 1.0) k)))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not visited"
                           (gfi/generate scanned [0.0 [1.0] 0.5] (cm/choicemap [:oops :s] 1.0) k)))
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"generative function" (comb/scan 3)))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"generative function" (comb/scan 3)))
+    (testing "a negative index in a selection (genclj-kdau: it was skipped silently)"
+      (let [tr (gfi/simulate scanned [0.0 [1.0 2.0] 0.5] k)]
+        (is (= :negative-index (:reason (ts/thrown-data (gfi/regenerate tr (sel/select -1) k)))))
+        (is (= :negative-index (:reason (ts/thrown-data (gfi/project tr (sel/select [-1 :s]))))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Stores and identity

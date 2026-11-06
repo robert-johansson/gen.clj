@@ -49,6 +49,19 @@ other values for the same key, from the same distribution.
   `:binding :parameter` or `:local`) naming the rename. A gen nested in a
   body reads its own names, as before, and a body may still bind one of
   them in a `let` of its own.
+- **Fixed: Map, Unfold, Switch and Recurse refuse what is not a
+  generative function when they are made** (gen.combinators;
+  genclj-8326). They took anything and failed at its first call; Scan, Mix
+  and Dimap checked already. Each throws `ex-info` with `:reason
+  :not-a-generative-function` and the `:value`.
+- **Breaking: a negative index in a selection is a loud error in every
+  combinator that numbers its calls** (gen.combinators: Map, Unfold, Scan
+  and Recurse, in regenerate and project; genclj-kdau). Map threw a raw
+  IndexOutOfBoundsException, and the kinds disagreed: some threw it,
+  others skipped the index silently, so the selection selected less than
+  it named (code that relied on that was silently wrong). Now each throws
+  `ex-info` with `:reason :negative-index` and the `:indices`. An index
+  past the elements still selects nothing, as an absent address does.
 
 ## [1.2.0] - 2026-11-06
 
