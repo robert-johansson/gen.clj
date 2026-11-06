@@ -1,12 +1,14 @@
 (ns gen.llm.sample-test
   "Sampling in lockstep (gen.llm.sample) on a toy engine: pick keeps to the
-   top-k tokens and the top-p mass; complete is a function of its key,
+   top-k tokens and the top-p mass, and draws from the tempered
+   distribution at temperatures 0.5 and 2; complete is a function of its key,
    honours each completion's :max-tokens and end tokens, reports each
    completion's log-probability as the LM scores its tokens (so its rows
    are the completion's own: planted, a completion reading another's row
    fails it), and refuses loudly, before reading, completions that do not
    fit the LM's cells or branches."
   (:require [clojure.test :refer [deftest is testing]]
+            [gen.array :as array]
             [gen.llm.byte-tokenizer :as bt]
             [gen.llm.lm :as lm]
             [gen.llm.sample :as sample]
@@ -27,6 +29,29 @@
     (is (= 0 (sample/pick lp {:temp 1.0 :top-k 20 :top-p 0.95} 0.52)))
     (is (= 1 (sample/pick lp {:temp 1.0 :top-k 20 :top-p 0.95} 0.54)))
     (is (thrown? clojure.lang.ExceptionInfo (sample/pick lp {:temp 0 :top-k 20 :top-p 0.9} 0.5)))))
+
+(def ^:private jvm (array/backend-named :jvm))
+
+(deftest pick-draws-from-the-tempered-distribution
+  ;; genclj-w867: at temperature T (top-k and top-p wide open), pick draws
+  ;; token t with probability p(t)^(1/T) / Σ p^(1/T). Each token's frequency
+  ;; over 20,000 uniforms from a fixed key is within 5 standard errors,
+  ;; sqrt(p (1 - p) / n), of it. Planted (2026-11-06): the division by the
+  ;; temperature dropped fails both temperatures, on every token.
+  (let [ps [0.5 0.3 0.1 0.05 0.05]
+        lp (float-array (map #(Math/log %) ps))
+        n 20000
+        us (array/->clj (rng/uniform (rng/key 12) [n] {:backend jvm :dtype :float64}))]
+    (doseq [temp [0.5 2.0]]
+      (let [ws (map #(Math/pow % (/ 1.0 temp)) ps)
+            tempered (mapv #(/ % (reduce + ws)) ws)
+            counts (frequencies (map #(sample/pick lp {:temp temp :top-k 20 :top-p 1.0} (double %)) us))]
+        (doseq [t (range (count ps))]
+          (let [p (double (tempered t))
+                f (/ (double (get counts t 0)) n)
+                band (* 5 (Math/sqrt (/ (* p (- 1.0 p)) n)))]
+            (is (<= (Math/abs (- f p)) band)
+                (str "temperature " temp ", token " t ": frequency " f ", tempered " p ", band " band))))))))
 
 (deftest complete-in-lockstep
   (with-lm {:max-branches 8}
