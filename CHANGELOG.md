@@ -64,6 +64,39 @@ other values for the same key, from the same distribution.
   arrays (Metal buffers on MLX). And a Metal kernel's handle
   (gen.device.metal) is freed once its compiled program is unreachable;
   it never was.
+- **Fixed: run-chains' batched fallback counts as kernel/run does**
+  (gen.inference.device, experimental; genclj-qucg). The device refuses a
+  combinator's kernel, so such chains always ran as one batched run,
+  where `:acceptance-rates` was the share of steps in which any move was
+  accepted and `:divergences` always 0 (the batched moves' `:diverged`
+  was dropped). Now they are kernel/run's per chain: accepted moves over
+  every move, and the proposals that diverged. And only the device's own
+  refusals fall back: a chain whose device run found an error (an index
+  out of range, a start whose density is not finite) runs on the
+  handler, and its error is thrown, as kernel/run per chain throws it,
+  where the batched run, on other draws, could return.
+- **Added: a combinator's batched form reports each move**
+  (gen.inference.kernel/batched-form of chain, repeat, cycle and kern;
+  genclj-qucg). Beside `:accepted` (did any move take each particle), its
+  result holds `:accepted-moves` (each move's n decisions, in order) and,
+  when any proposal diverged, `:divergences` (n counts).
+- **Breaking: importance sampling with `:device` follows `:batched?`**
+  (gen.inference.importance, its experimental `:device`; genclj-cxrx;
+  DESIGN §9). `:batched?` was ignored under `:device`, so code asking for
+  a batched run got n traces, and `:batched? :required` was dropped
+  silently: only such code, already wrong, changes. Batched, the result
+  holds `:particles`, a gen.batched collection over the program's outputs
+  (its draws still per particle, the unbatched run's), in place of
+  `:traces` (`importance/traces` reads either); a model the device cannot
+  run falls back to the batched run, which `:required` refuses where it
+  cannot batch. A trace's host values (a count, a flag) are now its
+  handler's, not arrays made from the program's outputs.
+- **Fixed: one chain on `{:device :metal}` runs on a CPU core**
+  (gen.inference.kernel/run, gen.inference.device; genclj-cxrx; DESIGN §9,
+  option 1). It ran on the handler (Metal's kernel runs many chains and
+  refused one), slowly; now the JVM lowering runs it, as with `{:device
+  :jvm}`, and its result's `:device` is `:jvm`. Many chains on the GPU
+  stay run-chains'.
 
 ## [1.2.0] - 2026-11-06
 

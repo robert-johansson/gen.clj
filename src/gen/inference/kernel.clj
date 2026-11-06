@@ -45,9 +45,13 @@
    move does (mh/mh-particles, mcmc/hmc-particles, mala-particles,
    map-optimize-particles): the mh, hmc, mala and map-optimize kernels
    have one, and chain, repeat, cycle and kern (without ^:trace) have one
-   when each of their kernels does. A batched particle filter's
-   rejuvenation stays batched with such a kernel
-   (gen.inference.particle-filter/rejuvenate).
+   when each of their kernels does. A combinator's batched form reports
+   its moves' decisions as the -particles moves do, per particle:
+   :accepted (did any of its moves take each particle) and
+   :accepted-moves (each move's n decisions, in order), and how many of
+   each particle's proposals diverged as :divergences (n counts), when any
+   did. A batched particle filter's rejuvenation stays batched with such a
+   kernel (gen.inference.particle-filter/rejuvenate).
 
    (run kernel trace opts) runs a chain and collects samples: its traces,
    or with :keep a function of each, read on the host."
@@ -110,8 +114,12 @@
    every kernel they combine has one. Its result holds the -particles
    moves' keys: {:particles}, :accepted (n booleans: did any of its moves
    take each particle) when every move reports them, and :fallback, why a
-   move ran one particle at a time, when one did. involutive-mh, nuts,
-   elliptical-slice, mix, checked and (kern ^:trace …) have none."
+   move ran one particle at a time, when one did; a combinator's also
+   :accepted-moves (each move's :accepted, in order), when every move
+   reports them, and :divergences (n counts: how many of each particle's
+   proposals diverged, as hmc-particles' and mala-particles' :diverged
+   report them), when any did. involutive-mh, nuts, elliptical-slice, mix,
+   checked and (kern ^:trace …) have none."
   [k]
   (when (instance? Kernel k) (:particles k)))
 
@@ -188,22 +196,44 @@
                                      (map vector fs (rng/split key (count fs))))]
       (combined t moves diverged))))
 
+(defn ^:no-doc particle-moves
+  "The accept decisions a batched form's result reports, move by move,
+   each n booleans: a -particles move's :accepted as one move, a
+   combinator's :accepted-moves; nil when it reports none."
+  [r]
+  (cond (contains? r :accepted-moves) (:accepted-moves r)
+        (contains? r :accepted) [(:accepted r)]))
+
+(defn ^:no-doc particle-divergences
+  "How many proposals of each of the n particles a batched form's result
+   reports diverged, n counts: a -particles move's :diverged (n booleans),
+   a combinator's :divergences."
+  [r n]
+  (cond (contains? r :divergences) (:divergences r)
+        (contains? r :diverged) (mapv #(if % 1 0) (:diverged r))
+        :else (vec (clojure.core/repeat n 0))))
+
 (defn- particles-sequence-fn
   "The batched forms pfs applied in sequence, the i-th with the key's i-th
    split, as sequence-fn applies its moves: {:particles}, :accepted (did
-   any move take each particle) when every move reports it, and the first
-   :fallback."
+   any move take each particle) and :accepted-moves (each move's
+   decisions) when every move reports them, :divergences (each particle's
+   count) when any diverged, and the first :fallback."
   [pfs]
   (fn [ps key]
-    (let [[ps accepted m] (reduce (fn [[ps accepted m] [pf k]]
-                                    (let [r (particles-result (pf ps k))]
-                                      [(:particles r)
-                                       (when (and accepted (:accepted r)) (mapv #(or %1 %2) accepted (:accepted r)))
-                                       (or m (:fallback r))]))
-                                  [ps (vec (clojure.core/repeat (:n ps) false)) nil]
-                                  (map vector pfs (rng/split key (count pfs))))]
+    (let [n (:n ps)
+          [ps moves diverged m] (reduce (fn [[ps moves diverged m] [pf k]]
+                                          (let [r (particles-result (pf ps k))]
+                                            [(:particles r)
+                                             (when moves (some->> (particle-moves r) (into moves)))
+                                             (mapv + diverged (particle-divergences r n))
+                                             (or m (:fallback r))]))
+                                        [ps [] (vec (clojure.core/repeat n 0)) nil]
+                                        (map vector pfs (rng/split key (count pfs))))]
       (cond-> {:particles ps}
-        accepted (assoc :accepted accepted)
+        moves (assoc :accepted (mapv (fn [i] (boolean (some #(true? (nth % i)) moves))) (range n))
+                     :accepted-moves moves)
+        (some pos? diverged) (assoc :divergences diverged)
         m (assoc :fallback m)))))
 
 (defn chain
@@ -610,6 +640,13 @@
         :else (throw (ex-info (str ":keep is a function of a trace, or a map of them, not " (pr-str keep))
                               {:keep keep}))))
 
+(defn ^:no-doc kept?
+  "Does a run of burn and thin keep step i (from 0)? Every thin-th step
+   after the burn: run's, and gen.inference.device's chains'."
+  [burn thin i]
+  (let [i' (inc (long i))]
+    (and (> i' (long burn)) (zero? (mod (- i' (long burn)) (long thin))))))
+
 (declare run-on-handler)
 
 (defn run
@@ -627,11 +664,15 @@
    gen.inference.diagnostics reads. :keep may be a map of such functions,
    and :draws is then a map of their vectors: {:keep {:x #(% :x) :y #(%
    :y)}}. :device :jvm or :metal (experimental, gen.inference.device): the
-   chain as one compiled program, the same result with :device added, or
-   the handler's with :device-fallback {:device :reason} when it does not
-   compile. The program is cached: a run with a kernel of the same kind and
-   parameters, the same model and argument arrays and the same number of
-   steps reuses it, so make the model's data arrays once."
+   chain as one compiled program, the same result with :device added (the
+   lowering that ran it), or the handler's with :device-fallback {:device
+   :reason} when it does not compile. One chain runs on a CPU core, the
+   JVM lowering, whatever the device (:metal too: a GPU thread's latency
+   is a CPU core's many times; DESIGN §9, option 1), so its :device is
+   :jvm; many chains on the GPU are gen.inference.device/run-chains'. The
+   program is cached: a run with a kernel of the same kind and parameters,
+   the same model and argument arrays and the same number of steps reuses
+   it, so make the model's data arrays once."
   [kernel trace {:keys [samples burn thin key keep device] :or {burn 0 thin 1} :as opts}]
   (when-not (and (nat-int? samples) (nat-int? burn) (pos-int? thin))
     (throw (ex-info "run needs :samples ≥ 0, :burn ≥ 0 and :thin ≥ 1" {:samples samples :burn burn :thin thin})))
@@ -655,7 +696,7 @@
               i' (inc i)
               ;; one iteration's graph at a time on a lazy backend
               t' (gfi/eval-trace! (:trace r))
-              keep? (and (> i' burn) (zero? (mod (- i' burn) thin)))
+              keep? (kept? burn thin i)
               ms (accepted-moves r)]
           (recur i' t' (if keep? (conj! kept (read t')) kept)
                  (+ accepted (count (filter true? ms)))
