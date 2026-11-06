@@ -23,7 +23,8 @@
    evaluation order, so the static graph draws what the body draws (DESIGN.md
    §9). This namespace checks a body at macroexpansion and builds its graph
    as data, with the code of its nodes and its score fn (static-form,
-   guarded by gen.dynamic.guard); gen.dynamic's handler runs them.
+   guarded by gen.dynamic.guard); gen.dynamic's handler runs them, the
+   nodes by the graph's walk (run), which skips what did not change.
 
      (ir gf)    the graph: the arguments, the nodes in order ({:kind :trace,
                 :splice or :compute, :addr, :names, :inputs, :form, and
@@ -43,8 +44,10 @@
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.choicemap :as cm]
+            [gen.diff :as diff]
             [gen.dynamic.guard :as guard]
-            [gen.random :as rng]))
+            [gen.random :as rng]
+            [gen.selection :as sel]))
 
 (def ^:private effects
   "The body's own calls, which a static body makes only at a binding's head."
@@ -442,6 +445,107 @@
       ;; (its score fn checks the rest: check-computed!)
       :paths ~(when (some #(vector? (:addr %)) (:nodes st))
                 (vec (keep #(when-some [a (:addr %)] [(if (:keys %) :splice (:kind %)) (cm/path* a)]) (:nodes st))))}))
+
+;; ---------------------------------------------------------------------------
+;; The run: a walk of the graph that skips what did not change
+;; ---------------------------------------------------------------------------
+
+(defn- arg-name-diffs
+  "Each argument name's diff: an argument bound to a symbol takes its
+   argdiff; a destructured one's names no-change or unknown-change. Every
+   name unknown-change without argdiffs. The rest parameter's names are
+   no-change only when the number of arguments is the previous call's
+   (same-count?) and the argdiffs past the fixed ones are: a change in the
+   number of arguments is a change, whatever the argdiffs say (DESIGN.md
+   §9, G3)."
+  [{:keys [fixed rest]} params argdiffs same-count?]
+  (let [d-of (fn [d] (if (diff/no-change? d) diff/no-change diff/unknown-change))
+        positional (map (fn [names form i]
+                          (let [d (if argdiffs (nth argdiffs i diff/unknown-change) diff/unknown-change)]
+                            (if (symbol? form) {form d} (zipmap names (repeat (d-of d))))))
+                        fixed params (range))
+        rest-d (if (and argdiffs same-count? (every? diff/no-change? (drop (count fixed) argdiffs)))
+                 diff/no-change
+                 diff/unknown-change)]
+    ;; in binding order: a name bound again (by a later parameter, or the
+    ;; rest parameter) holds its last binding, as in let
+    (apply merge (concat positional [(zipmap rest (repeat rest-d))]))))
+
+(defn- spec-diff
+  "An argument's diff from its spec: its slot's, none for a constant, or
+   unknown-change unless every slot its expression reads is unchanged."
+  [diffs {:keys [slot constant in]}]
+  (cond slot (nth diffs slot)
+        constant diff/no-change
+        (every? #(diff/no-change? (nth diffs %)) in) diff/no-change
+        :else diff/unknown-change))
+
+(defn- computed
+  "[value diff] of a compute node or the return expression on env, param
+   the body's: one call of a var gets its diff from gen.diff/propagate."
+  [{:keys [f rule args-f arg-specs alias]} param env diffs old skip?]
+  (cond
+    alias [(nth env alias) (if skip? (nth diffs alias) diff/unknown-change)]
+    ;; the value from the node's guarded fn, as the body computes it; the
+    ;; rule sees the arguments only for the diff
+    rule
+    (let [v (f param env)]
+      [v (if skip? (diff/propagate rule (args-f param env) (mapv #(spec-diff diffs %) arg-specs)) diff/unknown-change)])
+    :else
+    (let [v (f param env)]
+      [v (if (and skip? (identical? v old)) diff/no-change diff/unknown-change)])))
+
+(defn ^:no-doc run
+  "A static body's run on args, node by node: st is its runtime graph
+   (static-form's), state the handler's initial state (its :mode, :prev,
+   :constraints, :selection and :argdiffs), and h the handler's
+   operations: (:trace h) p dist → the choice's value, (:splice h) p gf
+   args hints → [value retdiff], (:keep h) kind p, which keeps the
+   previous site or call at p as it is, and (:param h), the body's param.
+   In update and regenerate, given values, the previous run's node values
+   when the handler finds them this graph's (else nil, and every node
+   runs), a node keeps its value, score and sub-trace when its inputs'
+   diffs are all no-change and no constraint or selection reaches it.
+   Diffs come from the argdiffs, from a callee's retdiff, from
+   gen.diff/propagate for a binding that is one call, and a splice hands
+   its callee its arguments' diffs. {:retval :retdiff :values}, values
+   every node's, for the next update."
+  [{:keys [nodes ret args-bind params slots size] :as st} args {:keys [mode prev constraints selection argdiffs]}
+   values {trace-at :trace splice-at :splice keep! :keep param :param}]
+  (let [skip? (some? values)
+        reached? (fn [kind p]
+                   (cond (= mode :update) (not (cm/empty? (cm/get-submap constraints p cm/EMPTY)))
+                         (= kind :trace) (sel/selected? selection p)
+                         :else (not= sel/none (sel/get-subselection selection p))))
+        unchanged? (fn [diffs in] (every? #(diff/no-change? (nth diffs %)) in))
+        [env diffs vals]
+        (reduce (fn [[env diffs vals] [i {:keys [kind addr keys-f in out f bind symbol? arg-specs] :as n}]]
+                  (let [old (when skip? (nth values i))
+                        ;; a computed address's path, from the inputs (the
+                        ;; previous one when the node is kept)
+                        p (when (some? addr) (if keys-f (into (cm/path* addr) (keys-f param env)) (cm/path* addr)))
+                        keep? (and skip? (unchanged? diffs in) (not (and p (reached? kind p))))
+                        [v d] (cond
+                                keep? (do (when-not (= kind :compute) (keep! kind p)) [old diff/no-change])
+                                (= kind :trace) (let [v (trace-at p (f param env))]
+                                                  [v (if (and skip? (identical? v old)) diff/no-change diff/unknown-change)])
+                                (= kind :splice) (let [[g as] (f param env)]
+                                                   (splice-at p g as (when skip? (mapv #(spec-diff diffs %) arg-specs))))
+                                :else (computed n param env diffs old skip?))]
+                    [(bind env v)
+                     (let [d (if (or symbol? (diff/no-change? d)) d diff/unknown-change)]
+                       (reduce #(assoc %1 %2 d) diffs out))
+                     (conj vals v)]))
+                [(args-bind args)
+                 (reduce-kv (fn [ds x d] (assoc ds (slots x) d))
+                            (vec (repeat size diff/no-change))
+                            (if skip? (arg-name-diffs (:args st) params argdiffs (== (count args) (count (:args prev)))) {}))
+                 []]
+                (map-indexed vector nodes))]
+    (if (and skip? (unchanged? diffs (:in ret)))
+      {:retval (:retval prev) :retdiff diff/no-change :values vals}
+      (let [[v d] (computed ret param env diffs (:retval prev) skip?)]
+        {:retval v :retdiff d :values vals}))))
 
 ;; ---------------------------------------------------------------------------
 ;; The graph as data
