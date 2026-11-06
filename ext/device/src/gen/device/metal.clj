@@ -339,11 +339,13 @@ inline void g_threefry(uint k0, uint k1, uint c0, uint c1, thread uint& w0, thre
 ;; ---------------------------------------------------------------------------
 
 (defn- data-segment
-  "The data pointer p of an evaluated array, as a segment of bytes bytes."
-  ^MemorySegment [^MemorySegment p ^long bytes]
+  "The data pointer p of an evaluated array, as a segment of bytes bytes.
+   (bytes is not hinted long: with a primitive parameter the return hint
+   did not reach the callers, whose .toArray reflected.)"
+  ^MemorySegment [^MemorySegment p bytes]
   (when (= MemorySegment/NULL p)
     (throw (MlxRuntime/error "mlx_array_data")))
-  (.reinterpret p bytes))
+  (.reinterpret p (long bytes)))
 
 (defn host-array
   "x, an MLX array a kernel wrote (float32, int32, uint32 or bool), as a
