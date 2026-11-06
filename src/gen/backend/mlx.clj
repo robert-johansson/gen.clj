@@ -1175,8 +1175,9 @@
               (let [[lu piv] (mapv t (Mlx/mlx_linalg_lu_factor h cpu))
                     u (diag-of-temp t lu cpu)
                     n (peek sa)
-                    ;; the results wrapped as they are made: the Cleaner owns
-                    ;; logabs while the handles after it are made
+                    ;; the results wrapped as they are made: logabs's MlxArray
+                    ;; owns its handle (its phantom reference frees it) while
+                    ;; the handles after it are made
                     logabs (wrap b (Mlx/mlx_sum_axis (t (Mlx/mlx_log (t (Mlx/mlx_abs u cpu)) cpu)) (int -1) false cpu))
                     idx (t (Mlx/mlx_arange 0.0 (double n) 1.0 (int (code :uint32)) cpu))
                     swaps (t (Mlx/mlx_sum_axis (t (Mlx/mlx_astype (t (Mlx/mlx_not_equal piv idx cpu)) (int (code :int32)) cpu))
