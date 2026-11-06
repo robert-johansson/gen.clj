@@ -1,0 +1,50 @@
+;; clj-kondo's view of gen.clj (CLAUDE.md, Running), clean over src and ext:
+;;   clojure -M:codegen -m clj-kondo.main --lint src ext/device/src ext/laws/src ext/instaparse/src ext/codegen/src ext/commons-math/src
+;;
+;; gen.clj's own macros. One of a core shape is linted as that form; the
+;; rest expand by the hooks in hooks/gen/, each a sketch of the macro's
+;; expansion: the vars it defines, with their arities, and its body in the
+;; scope of the names it binds (those the body may ignore marked used,
+;; hooks.gen.util/used). defguard and kern rewrite nodes (:analyze-call),
+;; to keep what a macroexpand hook's form loses: a syntax quote's unquotes,
+;; and the parameters' ^:trace. Macros whose arguments are all evaluated
+;; expressions need neither, clj-kondo analysing their calls as calls:
+;; with-backend, batched, with-store-of, batched-or, outside-revise,
+;; with-exact-density, the laws' scaled and vacuous-on-unvisitable,
+;; special's horner, tape's grads, threefry's add32, rotl32 and unrolled,
+;; dtype's case-table, the MLX backend's guarded and evaluating, and
+;; device's with-fallback. deflaws defines its specs from the law set,
+;; which only evaluation knows: a call of one by name is unresolved.
+{:lint-as {gen.dist.dsl/dist clojure.core/defn
+           gen.dynamic/defn-guarded clojure.core/defn
+           gen.dynamic/guarded-fn clojure.core/fn
+           gen.laws/checks clojure.core/and}
+ :hooks {:analyze-call {gen.dynamic.core/defguard hooks.gen.dynamic.core/defguard
+                        gen.inference.kernel/kern hooks.gen.inference/kern}
+         :macroexpand {gen.array/defunary hooks.gen.array/defunary
+                       gen.array/defbinary hooks.gen.array/defbinary
+                       gen.backend.jvm/defunary hooks.gen.backend.jvm/defunary
+                       gen.backend.jvm/defbinary hooks.gen.backend.jvm/defbinary
+                       gen.backend.jvm/defreduce hooks.gen.backend.jvm/defreduce
+                       gen.backend.jvm/defscan hooks.gen.backend.jvm/defscan
+                       gen.backend.jvm/fold-range hooks.gen.backend.jvm/fold-range
+                       gen.backend.jvm/at hooks.gen.backend.jvm/at
+                       gen.backend.mlx/export hooks.gen.backend.mlx/export
+                       gen.backend.mlx/mlx-fn hooks.gen.backend.mlx/mlx-fn
+                       gen.backend.mlx.operands/with-temps hooks.gen.backend.mlx/with-temps
+                       gen.backend.mlx.operands/with-operands hooks.gen.backend.mlx/with-operands
+                       gen.dist.core/defdist hooks.gen.dist.core/defdist
+                       gen.dynamic/gen hooks.gen.dynamic/gen
+                       gen.dynamic.core/def-representation-tests hooks.gen.dynamic.core/def-representation-tests
+                       gen.gfi/defgf hooks.gen.gfi/defgf
+                       gen.inference.transform/transform hooks.gen.inference/transform
+                       gen.inference.transform/deftransform hooks.gen.inference/deftransform
+                       gen.laws/deflaws hooks.gen.laws/deflaws
+                       gen.laws/defspecs hooks.gen.laws/defspecs
+                       gen.laws.potential/deflaws hooks.gen.laws/deflaws
+                       gen.llm.constrained/fold-weights hooks.gen.llm/fold-weights}}
+ ;; House style (CLAUDE.md, rule 4) excludes clojure.core's operators from a
+ ;; namespace written in gen.array's, whether or not it uses each, so that
+ ;; core's can never be called by mistake: an excluded operator left unused
+ ;; is the rule, not a finding.
+ :linters {:unused-excluded-var {:level :off}}}
