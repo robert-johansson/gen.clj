@@ -47,6 +47,16 @@ other values for the same key, from the same distribution.
   tau (`:invalid-tau`). Only code that was silently wrong throws: `:eps 0`
   or `:L 0` "accepted" every move as a no-op (an acceptance rate of 1),
   `:L 2.5` ran 2 steps, and a negative tau made every move a divergence.
+- **Fixed: tempered SMC from starts the observations rule out**
+  (gen.inference.tempering, experimental; genclj-dm71). A start that
+  gives the observations density 0 (a likelihood whose support depends on
+  a latent: truncation, uniform noise, a hard constraint) had the log
+  weight -Inf - -Inf = NaN, and `smc` threw "A log weight is NaN"; such a
+  start now weighs 0 from the first step on, and the estimate is
+  unchanged by it, whatever the internal proposal. A move's NaN
+  acceptance ratio, which the moves rejected silently, is a loud error
+  (`:reason :nan-log-alpha`), but for a move to a trace the observations
+  rule out, rejected as before.
 
 ## [1.2.0] - 2026-11-06
 

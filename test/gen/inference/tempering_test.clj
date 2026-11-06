@@ -23,6 +23,7 @@
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
             [gen.inference.importance :as is]
+            [gen.inference.proposal :as prop]
             [gen.inference.tempering :as tempering]
             [gen.random :as rng]
             [gen.state-space :as ss]
@@ -162,6 +163,54 @@
     (is (= (:betas r) (:betas fixed)))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"rise from 0 to 1"
                           (tempering/smc branching [] (cm/choicemap :y 2.2) {:key (rng/key 3) :betas [0.0 0.7 0.5 1.0] :scales [{} {} {}]})))))
+
+;; ---------------------------------------------------------------------------
+;; Impossible starts: a likelihood whose support depends on a latent
+;; (genclj-dm71)
+;; ---------------------------------------------------------------------------
+
+(def ^:private truncating
+  "z ~ U(0, 2), y ~ U(0, z): y = 1.5 is possible only for z > 1.5, which
+   three starts in four miss."
+  (gen [] (let [z (trace :z (d/uniform 0 2))] (trace :y (d/uniform 0 z)))))
+
+(def ^:private truncating-exact
+  "log p(y = 1.5) = log ∫ ½ · 1/z dz over (1.5, 2) = log(½ log(4/3))."
+  (Math/log (* 0.5 (Math/log (/ 4.0 3.0)))))
+
+(deftest impossible-starts
+  ;; Before 1.2.1 a start that gives the observations density 0 had the log
+  ;; weight -Inf - -Inf = NaN, and smc threw "A log weight is NaN" (the
+  ;; health check's probe: 4 of 6 starts impossible). Every step's β is
+  ;; positive, so such a start's incremental weight is -Inf whatever its
+  ;; weight at β = 0, and the estimate does not read it. The second case
+  ;; starts from another internal proposal (half its starts impossible),
+  ;; where the path runs from it to the posterior: generate's weight less
+  ;; the projection is 0 there too, by the GFI's laws
+  (testing "latents from their prior"
+    (let [r (within-band? (runs truncating [] (cm/choicemap :y 1.5) {:particles 200}) truncating-exact)]
+      (is (:ok r) (pr-str r))))
+  (testing "latents from another internal proposal"
+    (let [q (gen [_] (trace :z (d/uniform 1 2)))
+          r (within-band? (runs (prop/with-internal-proposal truncating q) [] (cm/choicemap :y 1.5) {:particles 200})
+                          truncating-exact)]
+      (is (:ok r) (pr-str r))))
+  (testing "the posterior particles are possible ones"
+    (let [{:keys [traces]} (tempering/smc truncating [] (cm/choicemap :y 1.5) {:particles 50 :key (rng/key 9)})]
+      (is (every? #(< 1.5 (ts/host (% :z)) 2.0) traces)))))
+
+(deftest a-move-s-acceptance
+  ;; accept? (private: the moves' rule) rejects a move to a trace where the
+  ;; observations have density 0, whose ratio w - (1 - β)(l' - l) would be
+  ;; -Inf + Inf, and is loud for any other NaN, as MH's (gen.inference.mh):
+  ;; before 1.2.1 it rejected every NaN silently
+  (let [accept? #'tempering/accept?
+        key (rng/key 4)]
+    (is (false? (accept? ##-Inf -1.2 ##-Inf 0.5 key)) "an impossible trace")
+    (is (false? (accept? -3.0 -1.2 ##-Inf 0.5 key)) "an impossible trace, whatever w")
+    (is (true? (accept? 0.0 -1.2 -1.2 0.5 key)) "a ratio of 1")
+    (doseq [[w l l'] [[##NaN -1.2 -1.0] [0.1 -1.2 ##NaN] [##Inf -1.2 ##Inf]]]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"NaN" (accept? w l l' 0.5 key)) (pr-str [w l l'])))))
 
 (deftest loud-errors
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no observations"

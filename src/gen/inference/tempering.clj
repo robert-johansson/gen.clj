@@ -11,8 +11,13 @@
 
    The targets are π_β(x) ∝ p(x) L(x)^β for β from 0 to 1, L the
    observations' density (gfi/project with their selection): π_0 is the
-   latent choices' prior, π_1 their posterior. The particles start as
-   generate's traces with the observations. Each step
+   latent choices' prior, π_1 their posterior. (With another internal
+   proposal q, π_β(x) ∝ q(x) L(x)^β, L then generate's weight, which
+   gfi/project gives by the GFI's laws: from q to the same posterior.)
+   The particles start as generate's traces with the observations; a
+   start that gives them density 0 (a likelihood whose support depends on
+   a latent) weighs 0 from the first step on, and a run where every start
+   does is a loud error. Each step
    - picks the next β by bisection, so that the incremental weights
      (β' - β) log L keep :target-ess of the particles' effective sample
      size (all the way to 1 when they can);
@@ -101,11 +106,19 @@
           values)))
 
 (defn- accept?
-  "Metropolis-Hastings on π_beta: the move's log weight w (log p ratio less
-   the proposal's), less (1 - beta) times its change in log L."
+  "Metropolis-Hastings on π_beta (beta > 0): the move's log weight w (log p
+   ratio less the proposal's), less (1 - beta) times its change in log L,
+   from l to l'. A move to a trace where the observations have density 0
+   (l' -Inf, and w with it) is rejected, since π_beta is 0 there: its ratio
+   would be -Inf + Inf. Any other NaN ratio is a loud error, as MH's."
   [w l l' beta key]
-  (let [a (- (host w) (* (- 1.0 (double beta)) (- (double l') (double l))))]
-    (and (not (Double/isNaN a)) (< (Math/log (uniform key)) a))))
+  (let [l' (double l')]
+    (and (not (== ##-Inf l'))
+         (let [a (- (host w) (* (- 1.0 (double beta)) (- l' (double l))))]
+           (when (Double/isNaN a)
+             (throw (ex-info "tempering/smc: a move's MH acceptance ratio is NaN"
+                             {:reason :nan-log-alpha :weight (host w) :log-likelihood l :proposed-log-likelihood l'})))
+           (< (Math/log (uniform key)) a)))))
 
 (defn- regenerate-move
   "The latent at a resampled from the model's internal proposal (its
@@ -166,9 +179,15 @@
          starts (mapv #(gfi/generate model args observations %) (rng/split (rng/fold-in key 0) n))
          traces (mapv :trace starts)
          ls (mapv #(host (gfi/project % obs-sel)) traces)
-         ;; generate's weight less log L: zero for a model that samples its
-         ;; latent choices from their prior, as gen does
-         lw (mapv (fn [{:keys [weight]} ^double l] (- (host weight) l)) starts ls)
+         ;; generate's weight less log L: 0 up to rounding, whatever the
+         ;; internal proposal, by the GFI's law that generate's weight is
+         ;; the projection on the constraints (gen.laws'
+         ;; generate-weight-is-the-projection). A start that gives the
+         ;; observations density 0 has both -Inf, so 0, the law's value; its
+         ;; lw is never read anyway: every step's β is above 0, so the first
+         ;; step weighs it lw + β·(-Inf) = -Inf, and the estimate after it,
+         ;; log-sum-exp(lw + β·l) - log n, does not read it
+         lw (mapv (fn [{:keys [weight]} ^double l] (if (== ##-Inf l) 0.0 (- (host weight) l))) starts ls)
          _ (when (every? #(== ##-Inf %) ls)
              (throw (ex-info "tempering/smc: every particle gives the observations probability 0" {:particles n})))
          target (* (double target-ess) n)
