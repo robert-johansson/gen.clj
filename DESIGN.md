@@ -3627,6 +3627,29 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       prompted LM's prompt is read at construction (genclj-kdau); the GC's
       two branching tests retry System/gc for up to 60 s under a new tag
       `^:gc` (genclj-n2ia).
+    - *The GFI's* (genclj-k3xn, -7y8r, -kdau, -8326, -vjbo): gen refuses a
+      reserved name as a parameter (destructured too) and as an enclosing
+      local the body reads (`:reserved-name`); gen's own bindings are
+      marked for gen.dynamic.guard, so nested gens still read theirs. The
+      address order: numbers by value whatever their class (NaN last),
+      Comparable values of one class by value, the rest by class name, a
+      tie by class, then equality, printed form and hash. A negative
+      selection index throws in every kind (Recurse's project too); one
+      past the elements still selects nothing. Every Switch branch is
+      checked. gen.serialize keeps the 1e-4 float32 tolerance of its score
+      check (`:numerics` names a backend, not a device, and MLX's CPU and
+      GPU round differently), its docstring corrected; `sample-states` of
+      an impossible trace throws (`:impossible`) where it returned fewer
+      states.
+    - *Inference's* (genclj-mhgn, -dm71, -vjbo, -i1jl): `:invalid-eps`,
+      `:invalid-L` and `:invalid-tau`; an impossible start's tempered weight
+      is 0 by generate's projection law, whatever the internal proposal;
+      tempering's accept rejects a -Inf target and throws on any other NaN
+      (`:nan-log-alpha`); tempering's per-step keys renamed `:ess-by-step`
+      and `:acceptance-rates` (experimental); `kernel/checked-kernel`
+      `^:no-doc` (the var stays); the metric parsing in
+      gen.inference.mcmc.metric (internal), its record still
+      gen.inference.mcmc's.
   - **One chain fast on MLX, and GPU speed (owner, 2026-11-04, "go with
     option 1", on the lead's recommendation; genclj-fpnf, genclj-h8rn).**
     One HMC chain (L=32, 1000 steps) ran in 21.9 ms as a Metal program (one
