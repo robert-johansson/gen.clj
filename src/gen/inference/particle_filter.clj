@@ -124,9 +124,10 @@
        (cond-> {:particles ps :log-weights (vec (array/->clj ws)) :log-ml 0.0}
          required? (assoc :batched? :required)
          m (assoc :fallback m)))
-     (let [;; a particle and its weight, evaluated (moved's evaluated)
-           particle (fn [observations key & [shift]]
-                      (let [{:keys [trace weight]} (imp/weighted-sample model args observations opts key)]
+     (let [;; a particle generated with constraints, its weight (plus
+           ;; shift) read as moved's are
+           particle (fn [constraints key & [shift]]
+                      (let [{:keys [trace weight]} (imp/weighted-sample model args constraints opts key)]
                         (evaluated trace (cond-> weight shift (+ shift)))))
            results (if strata
                      (let [strata (vec strata)
