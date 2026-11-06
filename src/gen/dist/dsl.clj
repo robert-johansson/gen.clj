@@ -7,8 +7,11 @@
      (dist labeled [probs labels] (array/take labels (d/categorical probs)))
      (dist labeled-cat [labels probs] (nth labels (d/categorical probs)))
 
-   The body has exactly one call of a distribution constructor (the draw);
-   the rest of it is gen.array code on the parameters and constants,
+   The body has exactly one call of a distribution constructor (the draw),
+   which is made outside the body (in the constructor and each method), so
+   its arguments name the parameters and what is defined outside the body:
+   a name the body binds (a let's) is an error at the definition. The rest
+   of the body is gen.array code on the parameters and constants,
    elementwise, so a batch of draws maps to a batch of values (an if on the
    draw is not: use array/where). A sample evaluates the body with the draw
    made. The log density comes from the draw's (dc/discrete? says which
@@ -73,6 +76,58 @@
         :else [form []]))
 
 (defn- draws [env form] (second (walk-draws env form identity)))
+
+(defn- scoped
+  "(visit form locals) at each form that is a draw or a symbol in form,
+   macroexpanded, with the names form binds around it (a let's, a loop's, a
+   fn's, a letfn's, a catch's) added to locals, concatenated."
+  [env form locals visit]
+  (let [in (fn [ls forms] (mapcat #(scoped env % ls visit) forms))]
+    (cond
+      (or (draw? env form) (symbol? form)) (visit form locals)
+      (seq? form)
+      (let [head (first form)
+            expanded (if (and (symbol? head) (not (contains? locals head))) (macroexpand-1 form) form)]
+        (if-not (identical? expanded form)
+          (scoped env expanded locals visit)
+          (case head
+            quote []
+            (let* loop*) (let [[_ bindings & body] form
+                               [found ls] (reduce (fn [[found ls] [sym init]] [(into found (in ls [init])) (conj ls sym)])
+                                                  [[] locals] (partition 2 bindings))]
+                           (into found (in ls body)))
+            fn* (let [[_ & more] form
+                      [fname more] (if (symbol? (first more)) [(first more) (rest more)] [nil more])
+                      ls (cond-> locals fname (conj fname))]
+                  (mapcat (fn [[params & body]] (in (into ls (remove #{'&} params)) body))
+                          (if (vector? (first more)) [more] more)))
+            letfn* (let [[_ bindings & body] form
+                         ls (into locals (take-nth 2 bindings))]
+                     (in ls (concat (take-nth 2 (rest bindings)) body)))
+            catch (let [[_ _ sym & body] form] (in (conj locals sym) body))
+            (in locals form))))
+      (coll? form) (in locals form)
+      :else [])))
+
+(defn- check-draw-scope
+  "Throw when the draw names a local the body binds around it: the draw is
+   made outside the body (in the constructor and in each method), where
+   that name is unbound or is another value (a parameter's, a var's)."
+  [dist-name env body]
+  (doseq [[draw bound] (scoped env body #{}
+                               (fn [form body-locals]
+                                 (when (seq? form)
+                                   ;; the body's names the draw's arguments use
+                                   ;; and do not bind again themselves
+                                   (let [outer (set body-locals)]
+                                     [[form (vec (distinct (scoped env (vec (rest form)) #{}
+                                                                   (fn [x ls] (when (and (symbol? x) (outer x) (not (ls x)))
+                                                                                [x])))))]]))))
+          :when (seq bound)]
+    (throw (ex-info (str "dist " dist-name ": the draw " (pr-str draw) " names " (pr-str bound) ", which the body"
+                         " binds; the draw is made outside the body, so its arguments name only the parameters"
+                         " and what is defined outside the body")
+                    {:dist (str dist-name) :draw draw :bound bound}))))
 
 (def ^:private invertible
   "The gen.array functions a draw may pass through on the way to the body's
@@ -243,6 +298,7 @@
             (throw (ex-info (str "dist " dist-name ": the body must make exactly one random draw, it makes "
                                  (count found) " (" (pr-str (vec found)) ")")
                             {:draws (vec found)})))
+        _ (check-draw-scope dist-name &env body)
         draw (first found)
         v (gensym "v")
         dd (gensym "d")

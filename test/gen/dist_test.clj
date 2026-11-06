@@ -522,10 +522,26 @@
                           '(gen.dist.core/defdist v-twice [x] (sample [k s] 1.0) (log-prob [v] 0.0) (log-prob [v] 1.0))
                           {:flag-and-clause '[value-shape]}
                           '(gen.dist.core/defdist ^:elementwise v-both [x] (sample [k s] 1.0) (log-prob [v] 0.0)
-                             (value-shape [] []))}]
+                             (value-shape [] []))
+                          ;; genclj-8326: a parameter named as a clause's
+                          ;; argument shadowed it there, silently (sample's
+                          ;; key was the parameter), and a repeated one the
+                          ;; first (planted: neither checked)
+                          {:shadowed '[key]}
+                          '(gen.dist.core/defdist v-key [key] (sample [key shape] key) (log-prob [v] 0.0))
+                          {:shadowed '[shape v]}
+                          '(gen.dist.core/defdist v-shape [shape v] (sample [key shape] 1.0) (log-prob [v] 0.0))
+                          {:shadowed '[t]}
+                          '(gen.dist.core/defdist v-destructured [t] (sample [k [s t]] 1.0) (log-prob [v] 0.0))
+                          {:repeated-params '[x]}
+                          '(gen.dist.core/defdist v-twice-x [x x] (sample [k s] 1.0) (log-prob [v] 0.0))}]
     (is (= problem (dissoc (ts/thrown-data (try (eval form) (catch clojure.lang.Compiler$CompilerException e (throw (ex-cause e)))))
                            :dist))
-        (pr-str form))))
+        (pr-str form)))
+  (testing "a parameter of a clause argument's usual name, where the clause names its argument otherwise"
+    (eval '(gen.dist.core/defdist key-named [key] (sample [k s] (gen.array/+ key 1.0)) (log-prob [x] key)))
+    (is (= [3.0 2.0] (mapv ts/number [(dc/sample ((resolve 'key-named) 2.0) (rng/key 1))
+                                      (dc/log-prob ((resolve 'key-named) 2.0) 0.5)])))))
 
 (deftest the-distribution-layer-calls-only-gen-array
   ;; rule 3, genclj-z6iy (I3-11): gen.dist and gen.dist.core called

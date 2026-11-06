@@ -68,6 +68,20 @@ other values for the same key, from the same distribution.
   `categorical-logits` stays a zero probability; +Inf, or a row of -Infs,
   is refused. Added: `gen.dist.core/check-finite`, for a family of one's
   own.
+- **Breaking: `defdist` refuses a parameter that shadows a clause's
+  argument, and `dist` a draw that names a local of its body**
+  (gen.dist.core, gen.dist.dsl; genclj-8326). Each is an error when the
+  definition expands, and only a definition that was already wrong meets
+  it. A `defdist` parameter named as one of `sample`'s or `log-prob`'s
+  arguments (`key`, `shape`, `v`, whatever the clause calls them) was
+  bound around the clause's body, so the body read the parameter in place
+  of the key, the batch shape or the value, silently; a parameter named
+  twice shadowed the first likewise (`:shadowed`, `:repeated-params` in
+  the error's data). `dist` makes its draw outside the body, so a draw
+  naming a name the body binds (a `let`'s) failed to compile when the name
+  was unbound elsewhere and read the other value when a parameter or a var
+  had it, silently; now it is an error naming the draw and the names
+  (`:bound`).
 
 ## [1.2.0] - 2026-11-06
 
