@@ -1279,6 +1279,50 @@ proposal. AWRS pays where a row is costly: a parser's or a reader's
 prefix calls, one for each of 151,936 tokens at Qwen3's vocabulary, or a
 context-free grammar's mask, a sweep of its token byte trie.
 
+### On a real model
+
+The book's tests run on the toy engine, so what follows is measured, not
+checked: `bench/gen/llama_genlm_bench.clj` on Qwen3-0.6B (Q8_0, through
+llama.cpp v0.9.0 on a Mac mini M4's GPU, its 151,936 tokens). Asked in
+its chat template for a fictional person as a JSON object, the LM alone
+answered eight times with the object inside a Markdown code fence seven
+times: one text in eight was a JSON object. Under a JSON grammar by
+Earley (`gen.llm.cfg`, strings and numbers as lexemes), every text was:
+
+| How | texts | ms a token | JSON objects |
+|---|---:|---:|---:|
+| the LM alone | 8 | 9.0 | 1 |
+| a completion under the grammar (a mask a token) | 8 | 9.8 | 8 |
+| token SMC, 8 particles, `:masked` | 16 | 2.1 | 16 |
+| token SMC, 8 particles, `:awrs` | 16 | 4.0 | 16 |
+
+The grammar's mask costs 0.1 to 0.3 ms at this vocabulary, so it adds
+about 0.8 ms to a token of 9; SMC's particles share each step's decode,
+so a token costs less there. SMC's $\hat Z$ was $e^{-1.74} = 0.18$ in
+three runs of four ($e^{-1.87}$ in the fourth, by AWRS): the LM's
+probability of opening its reply with `{` and not with a code fence,
+since after that it rarely needs the mask. AWRS was the slower proposal
+here: this grammar's mask is cheap, and AWRS draws and checks on the
+calling thread, where the masked proposal's draws run on a pool.
+
+A critic on the same model: sixteen particles write a sentence about the
+sea, with the LM after a prompt for a sentence about a cat as the critic,
+and as the potential (the `:masked` proposal, a row a particle and step):
+
+| How | ms a step | $\log \hat Z$ (two runs) | texts that mention a cat |
+|---|---:|---:|---:|
+| plain SMC | 16-17 | 0, 0 | 0 and 0 of 16 |
+| the cat's prompt as a critic | 52-60 | -38.1, -35.3 | 0 and 0 of 16 |
+| the cat's prompt as the potential | 52-63 | -53.8, -61.0 | 0 and 12 of 16 |
+
+Here the critic costs what the twist does, since each of its calls is
+an LM read of its own, as each row is. It reweighs what the proposal
+draws, and the proposal, the sea's LM, drew no cat; the potential in the
+proposal steers the draws, and one run of two found the cats. Both
+estimate the same $Z$, but at sixteen particles their $\log \hat Z$
+differ by 15 to 25 nats: the weights are heavy-tailed, and the log of
+their mean falls short of $\log Z$ the more, the heavier they are.
+
 ## What comes later
 
 Three pieces are planned, each in a bean of its own:

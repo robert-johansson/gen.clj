@@ -595,6 +595,57 @@ at this vocabulary; the lexemes' masks add little: about 10 states).
 masks made eagerly when the potential is (as gen.llm.grammar's are), their
 memory a bitset of the vocabulary per lexeme state (19 KB at Qwen3's).
 
+### Addendum (2026-11-06): the GenLM tools on Qwen3-0.6B (genclj-e3q9)
+
+1.2.0's potentials, critic and AWRS had run only on the toy engines. Run
+on a real model (`clojure -J-Dgen.llama.lib=<lib> -M:test:bench -m
+gen.llama-genlm-bench <gguf>`: Qwen3-0.6B Q8_0, llama.cpp v0.9.0, the M4's
+GPU, shared with other agents' JVMs; book chapter 044's *On a real model*
+quotes it):
+
+**(a) A JSON object.** The user turn (Qwen's template, thinking off):
+"Describe a fictional person as a JSON object with the keys name, age,
+city and hobbies. Reply with the JSON only." The grammar: a JSON object
+(RFC 8259's values; strings, numbers and whitespace as lexemes) by
+gen.llm.cfg, its potential made in 175 ms; at most 160 tokens. Validity
+by an instaparse JSON parser that shares nothing with gen.llm.cfg:
+
+| How | texts | ms a token | ended | JSON objects | tokens a text |
+|---|---:|---:|---:|---:|---:|
+| the LM alone | 8 | 9.0 | 8 | 1 | 47 |
+| a completion under the grammar (a mask a token) | 8 | 9.8 | 8 | 8 | 44 |
+| token SMC, 8 particles, :masked (2 runs) | 16 | 2.1 | 16 | 16 | 45 |
+| token SMC, 8 particles, :awrs (2 runs) | 16 | 4.0 | 16 | 16 | 44 |
+
+The LM alone fences its JSON in a Markdown code block (seven of eight).
+The masks (0.09-0.31 ms at contexts of this grammar, measured on the CPU
+the same day) add 0.8 ms to a 9 ms token. SMC's log Ẑ was -1.74 in three
+runs and -1.87 in one (AWRS's): the probability of opening with `{`
+rather than a fence. AWRS is the slower proposal against a mask this
+cheap: its draws and checks run on the calling thread (each a pass over
+the row), the masked proposal's draws on the host pool.
+
+**(b) A critic.** Sixteen particles, at most 32 tokens, a sentence about
+the sea (the user turn "Write one short sentence about the sea."), the
+critic the same LM after "Write one short sentence about a cat."
+(`potential/prompted`: the target the two prompts' product); two keys:
+
+| How | ms a step | log Ẑ | texts mentioning a cat |
+|---|---:|---:|---:|
+| plain SMC (the LM alone) | 15.8-16.6 | 0.00, 0.00 | 0, 0 of 16 |
+| the cat's prompt as :critic | 51.5-59.6 | -38.09, -35.28 | 0, 0 of 16 |
+| the cat's prompt as :potential, :masked | 52.0-62.7 | -53.76, -61.02 | 0, 12 of 16 |
+
+An LM critic costs what its twist does (each call an LM read of its own,
+as each row is; neither is batched with the step's decode). The critic
+cannot steer: the sea's LM proposes no cat, and the critic only reweighs
+what it proposes; the potential in the proposal found the cats in one run
+of two. The two log Ẑ differ by 15-25 nats at sixteen particles, from
+heavy-tailed weights (on the toy vocabulary both are unbiased within one
+standard error over 1,000 runs, the same day). A critic pays where a row
+costs much more than a call: a parser's or a reader's potential, or a
+grammar's mask where it is not this cheap.
+
 
 ## Decisions
 
