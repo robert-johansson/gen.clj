@@ -43,7 +43,10 @@
    measured over keys 101 to 140 on the JVM (2026-11-06; their means were
    within 2 standard errors of the exact values, as the estimator's low
    bias of about σ²/2 allows)."
-  {:conjugate 0.29 :branching 0.14 :walk 0.13 :hmm 0.25})
+  {:conjugate 0.29 :branching 0.14 :walk 0.13 :hmm 0.25
+   ;; genclj-dm71's model, from its prior and from the proposal U(1, 2)
+   ;; (keys 101 to 140; means -1.952 and -1.933 against -1.939)
+   :truncating 0.12 :truncating-q 0.064})
 
 (defn- within-band?
   "Are the estimates' mean within five standard errors of exact, σ/√n for
@@ -196,12 +199,12 @@
   ;; where the path runs from it to the posterior: generate's weight less
   ;; the projection is 0 there too, by the GFI's laws
   (testing "latents from their prior"
-    (let [r (within-band? (runs truncating [] (cm/choicemap :y 1.5) {:particles 200}) truncating-exact)]
+    (let [r (within-band? (runs truncating [] (cm/choicemap :y 1.5) {:particles 200}) truncating-exact :truncating)]
       (is (:ok r) (pr-str r))))
   (testing "latents from another internal proposal"
     (let [q (gen [_] (trace :z (d/uniform 1 2)))
           r (within-band? (runs (prop/with-internal-proposal truncating q) [] (cm/choicemap :y 1.5) {:particles 200})
-                          truncating-exact)]
+                          truncating-exact :truncating-q)]
       (is (:ok r) (pr-str r))))
   (testing "the posterior particles are possible ones"
     (let [{:keys [traces]} (tempering/smc truncating [] (cm/choicemap :y 1.5) {:particles 50 :key (rng/key 9)})]

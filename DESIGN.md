@@ -3663,6 +3663,32 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
       `^:no-doc` (the var stays); the metric parsing in
       gen.inference.mcmc.metric (internal), its record still
       gen.inference.mcmc's.
+    - *The device path's* (genclj-qucg, -cxrx, -ri2d, -z1gj, -2j7v):
+      kernel/run `{:device :metal}` for one chain runs the JVM lowering
+      and reports `:device :jvm`; CUDA parked as its tests skipping by name
+      (`-Dgen.cuda.parked=false` runs them), its manual frees documented;
+      the parity models in test/ (gen.parity-models), shared by the bench
+      and ext/device's tests; one bounded LRU cache of 64 compiled
+      programs (gen.inference.cache, internal) for mcmc and the device,
+      where each emptied its own whole; a run error the device finds is
+      replayed on the handler for that chain, the handler's error thrown,
+      else a fallback (the difference is rounding); importance sampling's
+      `:batched?` with `:device` returns gen.batched particles.
+    - *The tests'* (genclj-7z2s, -k3a8, -ruh8): one set of 5-SE helpers
+      in gen.test-support; HMC's and NUTS's negative controls planted
+      with with-redefs-fn on gen.inference.mcmc's private normal-lp and
+      energy (no public input plants them: a wrong gradient leaves HMC
+      exact); `-Dgen.require-native=mlx,llama` counts skips per test and
+      fails a run where a named suite skipped one or ran none
+      (gen.test-runner, :test's exec-fn).
+    - *CFG masks* (genclj-jq2d): all three options built together (regex
+      elements as lexemes scanned by their DFA, Earley sets as a lazy DFA,
+      masks made in parts per lexeme state), exact; see the Earley entry
+      above. An Earley item is an origin and a numbered position, so an
+      alternative has no length limit (genclj-mkos). llama.cpp v0.9.0
+      measured against v0.7.0 on the M4: no gain for lockstep and SMC
+      branches, 5-16% slower at 4-16 branches after a long prompt
+      (genclj-ajse; 1.2.0's claim corrected in the CHANGELOG).
   - **One chain fast on MLX, and GPU speed (owner, 2026-11-04, "go with
     option 1", on the lead's recommendation; genclj-fpnf, genclj-h8rn).**
     One HMC chain (L=32, 1000 steps) ran in 21.9 ms as a Metal program (one

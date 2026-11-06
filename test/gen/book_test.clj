@@ -89,7 +89,10 @@
       (is (zero? (runs "(defmacro refuses [] (throw (ex-info \"Bad form: 3\" {})))"
                        ";; error: Bad form\n(refuses)")))
       (is (= 1 (runs "(defmacro refuses [] (throw (ex-info \"Other\" {})))"
-                     ";; error: Bad form\n(refuses)")))))
+                     ";; error: Bad form\n(refuses)")))
+      (is (zero? (runs "(defmacro refuses [] (throw (ex-info \"Bad form: 3\" {})))"
+                       ";; error: Syntax error\n(refuses)"))
+          "or by the compiler's, as the chapters' regions read it before 1.2.1")))
   (testing "a source without an ns region fails"
     (is (= 1 (failures #(book/run-regions (book/regions ";; book: a\n(+ 1 2)\n"))))))
   (testing "a line over 80 characters fails"
