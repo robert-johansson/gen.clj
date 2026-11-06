@@ -47,8 +47,8 @@ own conventions, 1.2.0's LLM work with no consumer and its llama.cpp
 claim unmeasured, the device path out of a dependent's reach, and docs
 drift. All 43 of its beans are done. The owner asked for the release to
 be worked autonomously, so its calls are PROVISIONAL, for the owner to
-confirm (docs/decisions.md, "1.2.1's owner calls"), but for its scope,
-which the owner confirmed before the tag.
+confirm (docs/decisions.md, "1.2.1's owner calls"), but for its scope
+and its numeric edge rules, which the owner approved before the tag.
 
 Read first, the **Breaking** changes. Each makes code throw that was
 already silently wrong (it scored NaN, recorded nothing, or read another

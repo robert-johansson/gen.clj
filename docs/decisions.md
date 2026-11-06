@@ -3699,8 +3699,18 @@ the owner's call in genclj-uzxp with the lead's recommendation.
 asked after a side agent's note that a patch release breaks nothing):
 "Keep as built": every bean under the milestone in 1.2.1, the changes
 that make code throw labelled Breaking (only code that was already
-silently wrong), unknown option keys in 1.3.0. The other calls stay
-PROVISIONAL.*
+silently wrong), unknown option keys in 1.3.0.*
+*Items 1-8, the numeric edges, approved by the owner (2026-11-06, before
+the tag, after a side agent's note listing them: "I am fine with these
+if they are based on good decisions"), on the grounds the lead gave:
+floor-div as Python, NumPy and JAX (the only rule that keeps x = y*q + r
+with mod); int64 overflow loud where the JVM backend already threw raw;
+empty extrema refused as NumPy, JAX and MLX refuse them; an infinite
+value -Inf in every family (every proper density's limit); randint exact
+(the float formula left its range). The arithmetic calls under them,
+listed below (randint's bits, NumPy's int arange, the infinite value
+outside every support, the parameters kept at their limits), with them.
+The rest below stay PROVISIONAL.*
 The owner, 2026-11-06: "work on the 44 beans under the milestone,
 genclj-9mq3 - work fully autonomous and cross them all off and then
 release v1.2.1". Taken as the answer to the scope (item 9): every bean
