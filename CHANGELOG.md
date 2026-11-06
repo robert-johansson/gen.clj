@@ -61,6 +61,30 @@ other values for the same key, from the same distribution.
   IllegalArgumentException on the JVM backend and MLX's own error; MLX has
   no bool arange, and the JVM backend's held fractions past its second
   element (NumPy's fails there). Compare an int arange for bools.
+- **Changed: float `floor-div` is NumPy's** (gen.array, every backend;
+  DESIGN §9, 1.2.1's owner calls). It was floor(x / y), which disagreed
+  with `mod`: `(floor-div 1.0 0.1)` was 10.0 beside `(mod 1.0 0.1)`'s
+  0.0999…, so x = y·q + r failed. Now NumPy's `npy_floor_divide`: (x -
+  fmod(x, y)) / y, one less where fmod's sign is not y's, snapped to an
+  integer, so `(floor-div 1.0 0.1)` is 9.0. Other values that change: an
+  infinite dividend gives NaN (was ±Inf), `(floor-div -1.0 ##Inf)` -1.0
+  (was -0.0). A zero divisor still gives x / y; int `floor-div` is
+  unchanged.
+- **Breaking: `max`, `min`, `argmax` and `argmin` over an empty axis are
+  loud** (gen.array, every backend; DESIGN §9): `ex-info` with `:reason
+  :empty-reduction`, as NumPy and JAX raise. The JVM backend gave -Inf and
+  +Inf for a float max and min (and a raw IllegalArgumentException for an
+  int dtype), MLX its own error. An empty result (an empty axis that is
+  not reduced) is no error, now on MLX too for argmax and argmin;
+  `logsumexp` over an empty axis is still -Inf and `softmax` of one an
+  empty array. Code that read ∓Inf from an empty max on the JVM backend
+  must test for the empty axis.
+- **Fixed: int64 overflow is an `ex-info` on the JVM backend**
+  (gen.backend.jvm; DESIGN §9): `:reason :overflow` where an int64 result
+  leaves the range, at the op. The JVM backend holds int64 values in
+  doubles, and one past 2^63 threw a raw IllegalArgumentException when it
+  was read. MLX wraps, as host numbers do on every backend (documented,
+  docs/array-api.md §13).
 
 ## [1.2.0] - 2026-11-06
 

@@ -431,3 +431,70 @@
                           ["a NaN start" #(array/arange ##NaN 3 1) :invalid-args]
                           ["a bool dtype" #(array/arange 0 3 1 {:dtype :bool}) :invalid-dtype]]]
     (is (= want (reason f)) label)))
+
+(deftest extrema-of-an-empty-axis-are-loud
+  ;; DESIGN §9, 1.2.1's owner calls, item 4, as NumPy and JAX raise: the
+  ;; JVM backend gave -Inf and +Inf (and an IllegalArgumentException for
+  ;; an int dtype), MLX an ex-info of its own
+  (doseq [[label f] [["max over an empty axis" #(array/max (array/zeros [0 3]) {:axis 0})]
+                     ["min over an empty axis" #(array/min (array/zeros [3 0]) {:axis 1})]
+                     ["max of an empty array" #(array/max (array/zeros [0]))]
+                     ["an int dtype's min" #(array/min (array/zeros [0] {:dtype (ts/int-dtype)}))]
+                     ["several axes, one empty" #(array/max (array/zeros [2 0 3]) {:axis [1 2]})]
+                     ["argmax of an empty array" #(array/argmax (array/zeros [0]))]
+                     ["argmin over an empty axis" #(array/argmin (array/zeros [2 0]) {:axis 1})]]]
+    (is (= :empty-reduction (reason f)) label))
+  (testing "an empty result is no empty reduction"
+    (is (= [0] (array/shape (array/max (array/zeros [0 3]) {:axis 1}))))
+    (is (= [0] (array/shape (array/argmin (array/zeros [0 3]) {:axis 1})))))
+  (testing "logsumexp and softmax keep their values over an empty axis: log 0, and an empty array"
+    (is (= ##-Inf (ts/host (array/logsumexp (array/zeros [0])))))
+    (is (= [##-Inf ##-Inf] (ts/host (array/logsumexp (array/zeros [2 0]) {:axis 1}))))
+    (is (= [0 3] (array/shape (array/logsumexp (array/zeros [1 0 3]) {:axis 0}))) "an empty result")
+    (is (= [3 0] (array/shape (array/softmax (array/zeros [3 0])))))
+    (is (= [3 0] (array/shape (array/log-softmax (array/zeros [3 0])))))))
+
+(defn- same-double?
+  "a and b the same double: NaN as NaN, -0.0 apart from 0.0."
+  [a b]
+  (if (Double/isNaN (double b)) (Double/isNaN (double a)) (.equals (Double/valueOf (double a)) (Double/valueOf (double b)))))
+
+(deftest float-floor-division-is-numpy-s
+  ;; DESIGN §9, 1.2.1's owner calls, item 3: NumPy's floor((x - mod(x, y))
+  ;; / y), snapped to an integer, so that x = y·q + mod(x, y) holds;
+  ;; floor(x / y) made (floor-div 1.0 0.1) 10.0 beside mod's 0.0999… The
+  ;; values are np.floor_divide's (NumPy 2.4.2), in float64 and float32
+  (let [xs [1.0 -1.0 7.5 -7.5 1.0 -1.0 0.0 1.0 -1.0 ##Inf ##NaN -0.0 0.3 5.0 1e-20 -1e-20 6.0 -6.0 0.0 1.0 ##-Inf 2.5 1e10 -0.7]
+        ys [0.1 0.1 2.0 2.0 0.0 0.0 0.0 ##Inf ##Inf 2.0 1.0 3.0 -0.1 -0.0 -1.0 1.0 3.0 3.0 -3.0 ##-Inf 2.0 0.5 3.0 0.25]
+        f64 [9.0 -10.0 3.0 -4.0 ##Inf ##-Inf ##NaN 0.0 -1.0 ##NaN ##NaN -0.0 -3.0 ##-Inf -1.0 -1.0 2.0 -2.0 -0.0 -1.0 ##NaN 5.0 3333333333.0 -3.0]
+        f32 (assoc f64 12 -4.0 22 3333333248.0)
+        agree (fn [got want] (and (= (count got) (count want)) (every? true? (map same-double? got want))))]
+    (testing "host numbers, in float64"
+      (is (agree (mapv array/floor-div xs ys) f64)))
+    (testing "arrays of the backend's float"
+      (let [got (ts/host (array/floor-div (array/array xs) (array/array ys)))]
+        (is (agree got (if (ts/f32?) f32 f64)) (pr-str got))))
+    (when (ts/float64?)
+      (testing "float64 arrays"
+        (is (agree (ts/host (array/floor-div (array/array xs {:dtype :float64}) (array/array ys {:dtype :float64}))) f64))))
+    (testing "x = y·q + mod(x, y), where it was off by y"
+      (is (array/allclose? 1.0 (array/+ (array/* 0.1 (array/floor-div 1.0 0.1)) (array/mod 1.0 0.1)))))
+    (testing "ints are unchanged: floor division, 0 for a zero divisor"
+      (is (= [-4 3 0 -2] (ts/host (array/floor-div (array/array [-7 7 5 -6]) (array/array [2 2 0 3]))))))))
+
+(deftest int64-overflow
+  ;; DESIGN §9, 1.2.1's owner calls, item 2: the JVM backend, which holds
+  ;; int64 values in doubles, throws where an int64 result leaves the
+  ;; range, where it threw an IllegalArgumentException once the value was
+  ;; read. MLX wraps, as Java's long arithmetic and host numbers do
+  ;; (docs/array-api.md §13)
+  (let [big (array/array [4611686018427387904 3] {:dtype :int64})
+        top (array/array [9223372036854775807 -9223372036854775808] {:dtype :int64})]
+    (if (ts/jvm?)
+      (do (is (= :overflow (reason #(array/* big 4))) "a product past 2^63")
+          (is (= :overflow (reason #(array/sum (array/array [9223372036854775807 9223372036854775807] {:dtype :int64}))))
+              "a 0-d result")
+          (is (= :overflow (reason #(array/- (array/negate big) (array/* big 2)))) "below -2^63")
+          (is (= [9223372036854775807 -9223372036854775808] (ts/host (array/+ top 0))) "the range's ends are no overflow"))
+      (is (= [0 12] (ts/host (array/* big 4))) "MLX wraps"))
+    (is (= 0 (array/* 4611686018427387904 4)) "host numbers wrap on every backend")))

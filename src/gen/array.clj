@@ -247,7 +247,10 @@
 (defbinary maximum :maximum "Elementwise maximum (NaN propagates).")
 (defbinary minimum :minimum "Elementwise minimum (NaN propagates).")
 (defbinary mod :remainder "Elementwise remainder with the sign of the divisor, like clojure.core/mod.")
-(defbinary floor-div :floor-divide "Elementwise floor division.")
+(defbinary floor-div :floor-divide
+  "Elementwise floor division, NumPy's: ints floored (0 for a zero divisor);
+   floats so that x = y·q + (mod x y), q an integer, as NumPy rounds it
+   ((floor-div 1.0 0.1) is 9.0), and x/y for a zero divisor.")
 (defunary abs :abs "Elementwise absolute value.")
 (defunary sign :sign "Elementwise sign: -1, 0 or 1 (NaN for NaN).")
 
@@ -659,8 +662,14 @@
     (do (sh/axes axis 0)
         (host/reduction op x))
     (let [b (operand-backend op x)
-          axes (sh/axes axis (count (p/-shape b x)))
+          s (p/-shape b x)
+          axes (sh/axes axis (count s))
           d (dt/reduce-input-dtype op (p/-dtype b x) (defaults b))]
+      ;; an extremum of nothing is no number: loud on every backend, as
+      ;; NumPy and JAX raise (DESIGN §9, 1.2.1's owner calls, item 4)
+      (when (and (#{:max :min :argmax :argmin} op) (some #(zero? (long (nth s %))) axes))
+        (throw (ex-info (str (name op) " over an empty axis: shape " s ", axes " axes)
+                        {:reason :empty-reduction :op op :shapes [s] :axes axes})))
       (p/-reduce b op (cast-to b x d) axes (boolean keep-dims?)))))
 
 (defn sum "Sum over :axis (one or several; all by default). Options: :axis, :keep-dims?."
@@ -720,16 +729,20 @@
    Options: :axis, :keep-dims?."
   ([x] (logsumexp x nil))
   ([x {:keys [keep-dims?] :as opts}]
-   (let [kd (assoc opts :keep-dims? true)
-         m (stop-gradient (max x kd))
-         m (where (isfinite m) m 0.0)
-         r (+ (log (sum (exp (- x m)) kd)) m)]
-     (if keep-dims? r (squeeze r (sh/axes (:axis opts) (ndim x)))))))
+   (if (zero? (reduced-count x (:axis opts)))
+     ;; an empty sum, log 0 = -inf, where max of nothing is loud
+     (log (sum (exp x) opts))
+     (let [kd (assoc opts :keep-dims? true)
+           m (stop-gradient (max x kd))
+           m (where (isfinite m) m 0.0)
+           r (+ (log (sum (exp (- x m)) kd)) m)]
+       (if keep-dims? r (squeeze r (sh/axes (:axis opts) (ndim x))))))))
 
 (defn softmax "exp(x) normalized along :axis (default -1)."
   ([x] (softmax x nil))
   ([x {:keys [axis] :or {axis -1}}]
-   (let [m (stop-gradient (max x {:axis axis :keep-dims? true}))
+   ;; an empty axis has no max (and no values to shift)
+   (let [m (if (zero? (reduced-count x axis)) 0.0 (stop-gradient (max x {:axis axis :keep-dims? true})))
          e (exp (- x (where (isfinite m) m 0.0)))]
      (/ e (sum e {:axis axis :keep-dims? true})))))
 

@@ -146,19 +146,41 @@
 ;; Host scalars
 ;; ---------------------------------------------------------------------------
 
+(defn- fmod
+  "C's fmod (the sign of x), exact: from the exact IEEEremainder
+   (clojure.core/rem throws on zero and is inexact for large quotients)."
+  ^double [^double x ^double y]
+  (let [r (Math/IEEEremainder x y)]
+    (if (and (not (== r 0.0)) (not= (neg? r) (neg? x))) (+ r (Math/copySign y x)) r)))
+
 (defn floor-mod
   "Remainder with the sign of the divisor (NumPy and Python semantics): NaN for
-   a zero divisor, x - y·floor(x/y) otherwise. Built on the exact
-   IEEEremainder (clojure.core/rem throws on zero and is inexact for large
-   quotients)."
+   a zero divisor, x - y·floor(x/y) otherwise, exactly."
   ^double [^double x ^double y]
-  (let [r (Math/IEEEremainder x y)
-        ;; C's fmod (sign of x), exact
-        m (if (and (not (== r 0.0)) (not= (neg? r) (neg? x))) (+ r (Math/copySign y x)) r)]
+  (let [m (fmod x y)]
     (cond (Double/isNaN m) m
           (== m 0.0) (Math/copySign 0.0 y)
           (not= (neg? m) (neg? y)) (+ m y)
           :else m)))
+
+(defn floor-div
+  "Floor division of floats as NumPy's (npy_floor_divide), so that x =
+   y·q + floor-mod(x, y) holds: x/y for a zero y; otherwise (x - fmod(x,
+   y)) / y, one less where fmod's sign is not y's, snapped to the nearest
+   integer (NumPy's rounding), and a zero quotient signed as x/y. Not
+   floor(x/y): (floor-div 1.0 0.1) is 9.0, as mod's 0.0999… says (DESIGN
+   §9, 1.2.1's owner calls)."
+  ^double [^double x ^double y]
+  (if (== y 0.0)
+    (/ x y)
+    (let [m (fmod x y)
+          q (/ (- x m) y)
+          ;; NaN is no zero, and NaN < 0 is false: as NumPy's tests
+          q (if (and (not (== m 0.0)) (not= (< y 0.0) (< m 0.0))) (- q 1.0) q)]
+      (if (== q 0.0)
+        (Math/copySign 0.0 (/ x y))
+        (let [f (Math/floor q)]
+          (if (> (- q f) 0.5) (+ f 1.0) f))))))
 
 (defn truthy?
   "Host truthiness: booleans as themselves, numbers when nonzero (NaN is true)."

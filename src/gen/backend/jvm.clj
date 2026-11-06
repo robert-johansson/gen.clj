@@ -83,12 +83,24 @@
     :int (long v)
     :bool (not (== v 0.0))))
 
+(defn- int64-overflow [^double v]
+  (ex-info (str "int64 overflow: a result of " v " is outside int64's range. The JVM backend holds int64 values"
+                " in doubles and refuses one past 2^63; MLX wraps (docs/array-api.md §13)")
+           {:reason :overflow :dtype :int64 :value v}))
+
 (defn- conform!
-  "Round freshly computed data to dtype in place (only for 32-bit dtypes)."
+  "Round freshly computed data to dtype in place (the 32-bit dtypes), and
+   refuse an int64 value past the range (DESIGN §9, 1.2.1's owner calls):
+   as a double it read back as a raw IllegalArgumentException. 2^63, the
+   double nearest Long/MAX_VALUE, is in range."
   ^doubles [^doubles a dtype]
   (case dtype
     :float32 (dotimes [i (alength a)] (aset a i (double (float (aget a i)))))
     :int32   (dotimes [i (alength a)] (aset a i (double (unchecked-int (long (aget a i))))))
+    :int64   (dotimes [i (alength a)]
+               (let [v (aget a i)]
+                 (when (or (> v 9.223372036854775807E18) (< v -9.223372036854775808E18))
+                   (throw (int64-overflow v)))))
     nil)
   a)
 
@@ -215,7 +227,7 @@
 (defbinary b-minimum [x y] (Math/min x y))
 (defbinary b-remainder [x y] (dt/floor-mod x y))
 (defbinary b-remainder-int [x y] (if (== y 0.0) 0 (Math/floorMod (long x) (long y))))
-(defbinary b-floor-divide [x y] (Math/floor (/ x y)))
+(defbinary b-floor-divide [x y] (dt/floor-div x y))
 (defbinary b-floor-divide-int [x y] (if (== y 0.0) 0 (Math/floorDiv (long x) (long y))))
 (defbinary b-arctan2 [x y] (Math/atan2 x y))
 (defbinary b-less [x y] (if (< x y) 1.0 0.0))
