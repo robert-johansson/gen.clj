@@ -38,6 +38,14 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Fixed: Earley items past 2047 symbols** (gen.llm.cfg; genclj-mkos).
+  An item packed its dot in 11 bits, so an alternative longer than 2047
+  symbols (a long string, an instaparse counted repeat) overflowed into
+  its rule: a literal of 2048 bytes was refused, its prefix plus another
+  rule's byte taken, or an index went out of bounds. An item is now its
+  origin and its position, a number for each rule and dot, so no
+  alternative's length is bounded.
+
 ## [1.2.0] - 2026-11-06
 
 A language-model release (DESIGN §9, "1.2.0's theme"; genclj-ucfg),

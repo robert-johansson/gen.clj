@@ -12,6 +12,8 @@
      read through a vocabulary of pieces; on a regular language, the same
      weights as gen.llm.grammar's exact masks (a vocabulary with every
      byte); completions under balanced brackets are balanced.
+   - Alternatives longer than 2047 symbols (an item's dot once overflowed
+     into its rule there, genclj-mkos).
    - Misuse is loud.
 
    Planted bugs (2026-11-05, each applied, the suite run, reverted): no
@@ -124,6 +126,22 @@
       (is (every? #(cfg/recognizes? sums %) ["1" "12+3" "1+2+30"]))
       (is (not-any? #(cfg/recognizes? sums %) ["" "+" "1+" "1++2"]))
       (is (cfg/prefix? sums "1+")))))
+
+(deftest long-alternatives
+  ;; an item's dot once overflowed past 2047 symbols into its rule
+  ;; (genclj-mkos): the literal was refused and the literal plus b taken
+  (let [a-run (apply str (repeat 5000 "a"))]
+    (doseq [n [2047 2048 2049 5000]
+            :let [lit (subs a-run 0 n)
+                  g (cfg/cfg {:start :s :rules {:s [[lit] [:t]] :t [["b"]]}})
+                  alone (cfg/cfg {:start :s :rules {:s [[lit "c"]]}})]]
+      (is (cfg/recognizes? g lit) (str n " symbols"))
+      (is (cfg/prefix? g (subs lit 0 (dec n))))
+      (is (not (cfg/prefix? g (str lit "b"))))
+      (is (not (cfg/recognizes? g (str lit "a"))))
+      (is (cfg/recognizes? g "b"))
+      (is (cfg/recognizes? alone (str lit "c")) (str n " symbols, one rule"))
+      (is (not (cfg/recognizes? alone lit))))))
 
 ;; ---------------------------------------------------------------------------
 ;; As a potential

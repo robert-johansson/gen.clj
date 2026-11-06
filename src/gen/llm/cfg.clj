@@ -64,10 +64,17 @@
   (->Regex (if (dfa/dfa? r) r (regex/dfa r))))
 
 ;; A compiled grammar: nonterminals 0 … n-1 (n-1 the augmented start, its
-;; one rule 0: start' → start); terminals byte sets (long[4] bitsets);
-;; rules as lhs (int) and rhs (int[]: a nonterminal k ≥ 0, a terminal j as
-;; -(j + 1)); by-lhs the rules of each nonterminal; nullable.
-(deftype Grammar [^ints lhs ^objects rhs ^objects by-lhs ^booleans nullable ^objects terminals ^long n-rules names]
+;; one rule start' → start); terminals byte sets (long[4] bitsets). An
+;; Earley item's rule and dot are one number, a position: the rules'
+;; dotted positions numbered rule by rule from 0 (start' → • start), a
+;; rule of k symbols holding k + 1 (before each symbol, and its end), so
+;; moving the dot is adding 1 and no rule's length is bounded. sym is the
+;; symbol after each position (a nonterminal k ≥ 0, a terminal j as -(j +
+;; 1), or end), lhs-at its rule's nonterminal, starts the first positions
+;; of each nonterminal's rules; nullable by nonterminal.
+(def ^:private ^:const end Integer/MIN_VALUE)
+
+(deftype Grammar [^ints sym ^ints lhs-at ^objects starts ^booleans nullable ^objects terminals ^long n-rules names]
   Object
   (toString [_] (str "#<CFG " (count names) " rules, " n-rules " productions>")))
 
@@ -176,9 +183,17 @@
         prods (into [[start' [(index (:start g))]]]
                     (for [k names, alt (rules k)] [(index k) (mapv symbol alt)]))
         n (inc start')
-        lhs (int-array (map first prods))
-        rhs (object-array (map #(int-array (second %)) prods))
-        by-lhs (object-array (for [k (range n)] (int-array (keep-indexed (fn [r [l]] (when (== (long l) (long k)) r)) prods))))
+        ;; positions: rule r's first is at (offsets r), its end k after it
+        offsets (vec (reductions + 0 (map #(inc (count (second %))) prods)))
+        sym (int-array (peek offsets))
+        lhs-at (int-array (peek offsets))
+        _ (doseq [[[l alt] o] (map vector prods offsets)
+                  :let [o (long o)]]
+            (dotimes [j (inc (count alt))]
+              (aset sym (+ o j) (int (if (< j (count alt)) (long (nth alt j)) end)))
+              (aset lhs-at (+ o j) (int l))))
+        starts (object-array (for [k (range n)]
+                               (int-array (keep (fn [[[l] o]] (when (== (long l) (long k)) o)) (map vector prods offsets)))))
         nullable (boolean-array n)]
     ;; nullable: a fixpoint over the productions
     (loop []
@@ -188,18 +203,17 @@
                                 changed))
                             false prods)]
         (when changed (recur))))
-    (Grammar. lhs rhs by-lhs nullable (.toArray terminals) (count prods) names)))
+    (Grammar. sym lhs-at starts nullable (.toArray terminals) (count prods) names)))
 
 ;; ---------------------------------------------------------------------------
 ;; Earley sets
 ;; ---------------------------------------------------------------------------
 
-;; An item: origin (32 bits) | rule (20) | dot (11), as a long.
-(defn- item ^long [^long origin ^long rule ^long dot]
-  (bit-or (bit-shift-left origin 31) (bit-shift-left rule 11) dot))
-(defn- origin-of ^long [^long it] (unsigned-bit-shift-right it 31))
-(defn- rule-of ^long [^long it] (bit-and (unsigned-bit-shift-right it 11) 0xFFFFF))
-(defn- dot-of ^long [^long it] (bit-and it 0x7FF))
+;; An item: its origin (the high 32 bits) and its position (the low 32), as
+;; a long; the item past its next symbol is (inc it).
+(defn- item ^long [^long origin ^long pos] (bit-or (bit-shift-left origin 32) pos))
+(defn- origin-of ^long [^long it] (unsigned-bit-shift-right it 32))
+(defn- pos-of ^long [^long it] (bit-and it 0xFFFFFFFF))
 
 ;; A set: its items, those waiting for each nonterminal (a map from the
 ;; nonterminal to a long array), those before a terminal, and whether the
@@ -210,9 +224,9 @@
   "Earley set i from its seed items (scanned), the chart before it: the
    closure by prediction and completion."
   ^EarleySet [^Grammar g chart ^long i seeds]
-  (let [^ints lhs (.-lhs g)
-        ^objects rhs (.-rhs g)
-        ^objects by-lhs (.-by-lhs g)
+  (let [^ints sym (.-sym g)
+        ^ints lhs-at (.-lhs-at g)
+        ^objects starts (.-starts g)
         ^booleans nullable (.-nullable g)
         seen (HashSet.)
         queue (ArrayList.)
@@ -224,36 +238,33 @@
     (loop [k 0]
       (when (< k (.size queue))
         (let [it (long (.get queue k))
-              r (rule-of it)
-              d (dot-of it)
-              ^ints body (aget rhs r)]
-          (if (== d (alength body))
+              p (pos-of it)
+              s (aget sym p)]
+          (cond
             ;; complete: advance the items of its origin's set waiting for its lhs
-            (let [o (origin-of it)]
-              (when-not (== o i)
-                (let [^EarleySet at (nth chart o)]
-                  (when-let [^longs ws (.get ^HashMap (.-waiting at) (aget lhs r))]
-                    (dotimes [j (alength ws)] (add (inc (aget ws j))))))))
-            (let [s (aget body d)]
-              (if (neg? s)
-                (.add scannable it)
-                (do (let [^ArrayList l (or (.get waiting s) (let [l (ArrayList.)] (.put waiting s l) l))]
-                      (.add l it))
-                    (when (.add predicted s)
-                      (let [^ints rs (aget by-lhs s)]
-                        (dotimes [j (alength rs)] (add (item i (aget rs j) 0)))))
-                    ;; Aycock and Horspool: a nullable nonterminal is also skipped
-                    (when (aget nullable s) (add (inc it)))))))
+            (== s end) (let [o (origin-of it)]
+                         (when-not (== o i)
+                           (let [^EarleySet at (nth chart o)]
+                             (when-let [^longs ws (.get ^HashMap (.-waiting at) (aget lhs-at p))]
+                               (dotimes [j (alength ws)] (add (inc (aget ws j))))))))
+            (neg? s) (.add scannable it)
+            :else (do (let [^ArrayList l (or (.get waiting s) (let [l (ArrayList.)] (.put waiting s l) l))]
+                        (.add l it))
+                      (when (.add predicted s)
+                        (let [^ints ps (aget starts s)]
+                          (dotimes [j (alength ps)] (add (item i (aget ps j))))))
+                      ;; Aycock and Horspool: a nullable nonterminal is also skipped
+                      (when (aget nullable s) (add (inc it)))))
           (recur (inc k)))))
     (let [frozen (HashMap.)]
       (doseq [[s ^ArrayList l] waiting] (.put frozen s (long-array (map long l))))
       (EarleySet. (long-array (map long queue)) frozen (long-array (map long scannable))
-                  (.contains seen (item 0 0 1))))))
+                  (.contains seen (item 0 1))))))
 
 (defn- start-chart
   "The chart of the empty text."
   [^Grammar g]
-  [(build g [] 0 [(item 0 0 0)])])
+  [(build g [] 0 [(item 0 0)])])
 
 (defn- advance
   "The chart after one more byte b, or nil when no item takes it (the text
@@ -261,12 +272,12 @@
   [^Grammar g chart ^long b]
   (let [^EarleySet last-set (peek chart)
         ^longs scannable (.-scannable last-set)
-        ^objects rhs (.-rhs g)
+        ^ints sym (.-sym g)
         ^objects terminals (.-terminals g)
         seeds (ArrayList.)]
     (dotimes [j (alength scannable)]
       (let [it (aget scannable j)
-            s (aget ^ints (aget rhs (rule-of it)) (dot-of it))]
+            s (aget sym (pos-of it))]
         (when (holds? (aget terminals (- (inc s))) b)
           (.add seeds (inc it)))))
     (when-not (.isEmpty seeds)
