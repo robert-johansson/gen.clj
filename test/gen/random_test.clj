@@ -210,7 +210,10 @@
                                 (gen/fmap #(bit-shift-left 1 %) (gen/choose 0 52))])
                  lo (gen/choose -500 500)
                  arrays? gen/boolean]
-    (let [r (long (if (= :int32 (ts/int-dtype)) (min r 2147483147) r))
+    ;; r capped so that low + r stays within 2^53, the integers the JVM
+    ;; backend's doubles hold, where the arithmetic is exact (found at
+    ;; r = 2^53, low 13: its bounds' doubles round)
+    (let [r (long (if (= :int32 (ts/int-dtype)) (min r 2147483147) (min r (- 9007199254740992 500))))
           f64? (= :float64 (ts/float-dtype))
           calls (atom 0)
           got (with-redefs [rng/uniform (fn [_ shape {:keys [dtype]}]
