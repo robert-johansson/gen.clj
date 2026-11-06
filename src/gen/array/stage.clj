@@ -329,10 +329,14 @@
   (-full [_ shape value dtype] (op! :broadcast [(dt/host-cast value dtype)] shape dtype {:shape (vec shape)}))
   (-arange [_ start stop step dtype]
     (let [n (max 0 (long (Math/ceil (/ (- (double stop) (double start)) (double step)))))
-          i (op! :iota [] [n] dtype)]
-      (if (and (zero? (double start)) (= 1.0 (double step)))
+          i (op! :iota [] [n] dtype)
+          ;; an int dtype's values are NumPy's, as the backends' (genclj-06ba)
+          [v0 dv] (if (= :int (dt/kind dtype))
+                    (dt/int-arange start step dtype)
+                    [(dt/host-cast start dtype) (dt/host-cast step dtype)])]
+      (if (and (zero? (double v0)) (clojure.core/== 1.0 (double dv)))
         i
-        (array/+ (array/* i (dt/host-cast step dtype)) (dt/host-cast start dtype)))))
+        (array/+ (array/* i dv) v0))))
   (-astype [_ x dtype] (op! :convert [x] (shape-of x) dtype))
 
   (-elementwise [_ op args dtype]

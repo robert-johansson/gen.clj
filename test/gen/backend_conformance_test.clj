@@ -275,6 +275,19 @@
   (is (conforms? exact #(array/astype % int-dt)
                  {:data [##NaN ##Inf ##-Inf 1e20 -1e20 2.7 -2.7 -0.5 2147483648.0 -2147483648.0 4294967296.0] :dtype float-dt})))
 
+(deftest int-aranges
+  ;; genclj-06ba: NumPy's values on every backend (the first value start
+  ;; cast, the step dtype(start + step) - dtype(start)), which MLX's own
+  ;; arange computes; the JVM backend stored start + i·step unrounded,
+  ;; which read as ints but computed as fractions. With what they compute.
+  ;; In the default int, which the reference's results are read as (an
+  ;; int64 arange on a 32-bit backend: gen.array-test)
+  (doseq [[start stop step] [[0.5 3 1] [0 3 0.5] [0.5 3 0.7] [-2.5 3 1] [3 0.5 -0.7] [0 7 2] [-4 4 1.5] [0 0 1]]]
+    (is (conforms? exact (fn [] (let [a (array/arange start stop step {:dtype int-dt})] [a (array/+ a a) (array/== a 0)])))
+        (str [start stop step])))
+  (testing "no bool arange on any backend (MLX has none)"
+    (is (conforms? exact #(array/arange 0 3 1 {:dtype :bool})))))
+
 (defspec mixed-dtypes-promote trials
   (prop/for-all [op (gen/elements [array/+ array/* array/maximum array/<])
                  x gen-any-spec

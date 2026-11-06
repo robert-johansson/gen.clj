@@ -389,3 +389,45 @@
     (testing "keys are not arguments: the trace would replay their draws"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"key's draws"
                             ((array/compile (fn [k x] x)) (gen.random/key 1) x))))))
+
+;; ---------------------------------------------------------------------------
+;; 1.2.1's edges (the health check of 2026-11-06): NumPy's values where the
+;; backends disagreed, and loud errors where a raw exception or a silent
+;; value was (rule 6)
+;; ---------------------------------------------------------------------------
+
+(defn- reason [f] (:reason (thrown-data f)))
+
+(deftest an-int-arange-is-numpy-s
+  ;; genclj-06ba: the JVM backend stored start + i·step unrounded under an
+  ;; int dtype, so (arange 0.5 3 1 {:dtype :int64}) read [0 1 2] but added
+  ;; to itself gave [1 3 5] and equalled 0 nowhere. Every backend gives
+  ;; NumPy's values, which MLX's own arange computes: the first value is
+  ;; start cast to the dtype, and the step dtype(start + step) -
+  ;; dtype(start). The values are np.arange's (NumPy 2.4.2)
+  (doseq [dt (distinct [(ts/int-dtype) :int32 :int64])
+          [args want] [[[0.5 3 1] [0 1 2]]
+                       [[0 3 0.5] [0 0 0 0 0 0]]
+                       [[0.5 3 0.7] [0 1 2 3]]
+                       [[-2.5 3 1] [-2 -1 0 1 2 3]]
+                       [[3 0.5 -0.7] [3 2 1 0]]
+                       [[-3.5 -0.2 0.9] [-3 -2 -1 0]]
+                       [[0 7 2] [0 2 4 6]]]]
+    (let [a (apply array/arange (conj args {:dtype dt}))
+          label (str args " " dt)]
+      (is (= dt (array/dtype a)) label)
+      (is (= want (ts/host a)) label)
+      (is (= (mapv #(* 2 %) want) (ts/host (array/+ a a))) (str label ": its values are the ones it reads"))
+      (is (= (mapv zero? want) (ts/host (array/== a 0))) label))))
+
+(deftest arange-refuses-what-it-cannot-make
+  ;; genclj-kdau: a zero step threw an IllegalArgumentException (Infinity)
+  ;; on the JVM backend and MLX's own error elsewhere; genclj-06ba: a bool
+  ;; arange stored fractions on the JVM backend, and MLX has none (NumPy's
+  ;; fails past two elements)
+  (doseq [[label f want] [["a zero step" #(array/arange 0 5 0) :invalid-args]
+                          ["a zero float step" #(array/arange 0 5 0.0) :invalid-args]
+                          ["an infinite stop" #(array/arange 0 ##Inf) :invalid-args]
+                          ["a NaN start" #(array/arange ##NaN 3 1) :invalid-args]
+                          ["a bool dtype" #(array/arange 0 3 1 {:dtype :bool}) :invalid-dtype]]]
+    (is (= want (reason f)) label)))

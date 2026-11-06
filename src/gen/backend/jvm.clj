@@ -827,10 +827,16 @@
       (make (doto (double-array (sh/cells shape)) (java.util.Arrays/fill v)) shape dtype)))
   (-arange [_ start stop step dtype]
     (check-dtype dtype)
-    (let [start (double start) stop (double stop) step (double step)
-          n (sh/cells [(max 0 (long (Math/ceil (/ (- stop start) step))))])
+    (let [n (sh/cells [(max 0 (long (Math/ceil (/ (- (double stop) (double start)) (double step)))))])
           out (double-array n)]
-      (dotimes [i n] (aset out i (+ start (* i step))))
+      (if (= :int (dt/kind dtype))
+        ;; NumPy's values, as MLX's (genclj-06ba): start + i·step unrounded
+        ;; read as ints but computed as the fractions they were
+        (let [[v0 dv] (dt/int-arange start step dtype)
+              v0 (long v0) dv (long dv)]
+          (dotimes [i n] (aset out i (double (dt/int->int (+ v0 (* i dv)) dtype)))))
+        (let [start (double start) step (double step)]
+          (dotimes [i n] (aset out i (+ start (* i step))))))
       (make out [n] dtype)))
   (-astype [_ x dtype] (astype x dtype))
 

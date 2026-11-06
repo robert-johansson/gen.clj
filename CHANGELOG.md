@@ -45,6 +45,22 @@ other values for the same key, from the same distribution.
   times one basis vector) and a `[2 3 3]` batch threw. The identity is now
   broadcast to the matrices' shape, as the tape's rules do; one matrix's
   inverse is unchanged. `la/solve`'s rule stays as documented (DESIGN §9).
+- **Fixed: an int `arange` holds NumPy's values on every backend**
+  (gen.backend.jvm, gen.array.stage; genclj-06ba). The JVM backend stored
+  start + i·step unrounded under an int dtype: `(arange 0.5 3 1 {:dtype
+  :int64})` read `[0 1 2]` but added to itself gave `[1 3 5]` and equalled
+  0 nowhere. Its values, and the stager's, are now MLX's and NumPy's: the
+  first value is start cast to the dtype, the step dtype(start + step) -
+  dtype(start), so a fractional step may repeat a value (`(arange 0 3 0.5
+  {:dtype :int64})` is six zeros). Integral arguments, the common case,
+  give what they gave.
+- **Breaking: `arange` refuses a bool dtype, a zero step and non-finite
+  arguments** (gen.array, every backend; genclj-06ba, genclj-kdau):
+  `ex-info` with `:reason :invalid-dtype` or `:invalid-args`. Only code
+  that was already wrong meets it: a zero step threw a raw
+  IllegalArgumentException on the JVM backend and MLX's own error; MLX has
+  no bool arange, and the JVM backend's held fractions past its second
+  element (NumPy's fails there). Compare an int arange for bools.
 
 ## [1.2.0] - 2026-11-06
 

@@ -199,6 +199,19 @@
     :int32 (long (unchecked-int x))
     :uint32 (bit-and x 0xFFFFFFFF)))
 
+(declare host-cast)
+
+(defn int-arange
+  "[first step] of an arange of the int dtype, as NumPy computes one: the
+   first value start cast to dtype, the step dtype(start + step) -
+   dtype(start), not step itself (MLX's arange does the same). Integers
+   as they are."
+  [start step dtype]
+  (let [v0 (long (host-cast start dtype))]
+    (if (and (integer? start) (integer? step))
+      [v0 (long (host-cast step dtype))]
+      [v0 (- (long (host-cast (+ (double start) (double step)) dtype)) v0)])))
+
 (defn host-cast
   "Convert a host scalar to the host representation of dtype: a Double for
    float dtypes (rounded to float32 precision for :float32), a Long for ints

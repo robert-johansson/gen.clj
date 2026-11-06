@@ -568,12 +568,25 @@
 (defn ones-like "Ones of x's shape, backend and dtype." [x] (full-like x 1))
 
 (defn arange
-  "A 1-d array [start, stop) by step. Integral arguments give the default int
-   dtype, otherwise the default float. Options (4-arity): :dtype."
+  "A 1-d array [start, stop) by step, ceil((stop - start) / step) values:
+   finite host numbers, step nonzero. Integral arguments give the default
+   int dtype, otherwise the default float. Under an int dtype the values are
+   NumPy's: the first is start cast to the dtype, the step dtype(start +
+   step) - dtype(start) (so a fractional step of an int dtype may repeat
+   one value). Options (4-arity): :dtype (not :bool)."
   ([stop] (arange 0 stop 1 nil))
   ([start stop] (arange start stop 1 nil))
   ([start stop step] (arange start stop step nil))
   ([start stop step {:keys [dtype]}]
+   (doseq [[what v] [[:start start] [:stop stop] [:step step]]]
+     (when-not (and (number? v) (Double/isFinite (double v)))
+       (throw (ex-info (str "arange: the " (name what) " must be a finite number, not " (pr-str v))
+                       {:reason :invalid-args what v}))))
+   (when (c/== 0.0 (double step))
+     (throw (ex-info "arange: the step must not be zero" {:reason :invalid-args :step step})))
+   (when (= :bool dtype)
+     ;; MLX has no bool arange, and NumPy's fails past two elements
+     (throw (ex-info "arange: no bool dtype (compare an int arange instead)" {:reason :invalid-dtype :dtype dtype})))
    (let [b *backend*
          d (or dtype
                (if (every? #(= :int (dt/kind (dt/host-dtype %))) [start stop step])
