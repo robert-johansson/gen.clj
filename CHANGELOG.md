@@ -51,6 +51,23 @@ other values for the same key, from the same distribution.
   and its gradient is never NaN; a pushforward's value outside exp's range
   (at or below 0) sends no gradient either. Log densities elsewhere are
   unchanged (logistic's is computed in |z|, within rounding).
+- **Breaking: an infinite parameter is refused where its family gave NaN**
+  (gen.dist, gen.dist.core; DESIGN §9, 1.2.1's owner calls, item 1). Only
+  NaN was refused, and `check-positive` takes +Inf, so `(normal ##Inf 1)`,
+  `(normal 0 ##Inf)` and `(exponential ##Inf)` constructed and their draws
+  scored NaN; 30 other families scored NaN at an infinite parameter, or
+  drew NaN or a meaningless point (`(log-normal ##-Inf 0.5)`'s zeros).
+  Each throws at construction now (`ex-info` naming `:distribution` and
+  `:param`, `:reason :non-finite`), for a host value and for an array's
+  elements when `array/concrete?` (Clojure data on every backend), as the
+  other parameter checks do; an HMC or MALA step that meets one counts a
+  divergence, as for any parameter check. Code that constructed such a
+  distribution only ever scored NaN. A family whose code computes the limit
+  keeps it: the truncated normal's infinite bounds and wrapped-normal's
+  infinite sigma (the uniform on the circle). A -Inf logit of
+  `categorical-logits` stays a zero probability; +Inf, or a row of -Infs,
+  is refused. Added: `gen.dist.core/check-finite`, for a family of one's
+  own.
 
 ## [1.2.0] - 2026-11-06
 

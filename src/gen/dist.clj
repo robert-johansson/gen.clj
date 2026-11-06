@@ -49,6 +49,13 @@
   (dc/check (<= 1 (array/ndim v)) dist-name (str param-name " must be a vector (its last axis), got a scalar")
             {:param param-name :shape (array/shape v)}))
 
+(defn- check-finite-positive
+  "A parameter must be positive and finite (dc/check-positive and
+   dc/check-finite): the family's code gives NaN at +Inf."
+  [dist-name param-name v]
+  (dc/check-positive dist-name param-name v)
+  (dc/check-finite dist-name param-name v))
+
 (defn- largest-float
   "The largest finite float of x's dtype."
   ^double [x]
@@ -137,7 +144,7 @@
    Array parameters give an array value whose log density is the sum over its
    elements (Gen.jl's broadcasted_normal)."
   [mu std]
-  (validate (dc/check-positive "normal" "std" std))
+  (validate (dc/check-finite "normal" "mu" mu) (check-finite-positive "normal" "std" std))
   (sample [key shape]
     (+ mu (* std (rng/normal key (dc/elementwise-shape shape mu std) (opts mu std)))))
   (log-prob [v]
@@ -152,7 +159,8 @@
 (defdist ^:elementwise ^:pathwise uniform
   "uniform(low, high): uniform on [low, high]."
   [low high]
-  (validate (when (every? array/concrete? [low high])
+  (validate (dc/check-finite "uniform" "low" low) (dc/check-finite "uniform" "high" high)
+            (when (every? array/concrete? [low high])
               (dc/check (array/all-true? (< low high)) "uniform" "low must be below high" {:low low :high high})))
   (sample [key shape]
     (rng/uniform key (dc/elementwise-shape shape low high) (assoc (opts low high) :low low :high high)))
@@ -162,7 +170,7 @@
 (defdist ^:elementwise beta
   "beta(alpha, beta): the beta distribution on [0, 1]."
   [a b]
-  (validate (dc/check-positive "beta" "alpha" a) (dc/check-positive "beta" "beta" b))
+  (validate (check-finite-positive "beta" "alpha" a) (check-finite-positive "beta" "beta" b))
   (sample [key shape]
     ;; x/(x + y) for gamma draws x and y, from their logs: either may
     ;; underflow at a small shape (0/0 when both do), and the quotient rounds
@@ -180,7 +188,7 @@
 (defdist ^:elementwise gamma
   "gamma(shape, scale): the gamma distribution with mean shape·scale."
   [k theta]
-  (validate (dc/check-positive "gamma" "shape" k) (dc/check-positive "gamma" "scale" theta))
+  (validate (check-finite-positive "gamma" "shape" k) (check-finite-positive "gamma" "scale" theta))
   (sample [key shape]
     (floored (* theta (rng/gamma key k (dc/elementwise-shape shape k theta) (opts k theta)))))
   (log-prob [v]
@@ -193,7 +201,7 @@
   "inv_gamma(shape, scale): the inverse gamma distribution (1/X for X with
    gamma(shape, 1/scale))."
   [k theta]
-  (validate (dc/check-positive "inv-gamma" "shape" k) (dc/check-positive "inv-gamma" "scale" theta))
+  (validate (check-finite-positive "inv-gamma" "shape" k) (check-finite-positive "inv-gamma" "scale" theta))
   (sample [key shape]
     (/ theta (rng/gamma key k (dc/elementwise-shape shape k theta) (opts k theta))))
   (log-prob [v]
@@ -204,7 +212,7 @@
 (defdist ^:elementwise ^:pathwise exponential
   "exponential(rate): the exponential distribution with mean 1/rate."
   [rate]
-  (validate (dc/check-positive "exponential" "rate" rate))
+  (validate (check-finite-positive "exponential" "rate" rate))
   (sample [key shape]
     (/ (rng/exponential key (dc/elementwise-shape shape rate) (opts rate)) rate))
   (log-prob [v]
@@ -221,7 +229,7 @@
 (defdist ^:elementwise ^:pathwise laplace
   "laplace(loc, scale): the Laplace (double exponential) distribution."
   [loc scale]
-  (validate (dc/check-positive "laplace" "scale" scale))
+  (validate (dc/check-finite "laplace" "loc" loc) (check-finite-positive "laplace" "scale" scale))
   (sample [key shape]
     (let [o (opts loc scale)
           dtype (dc/float-dtype (:backend o))
@@ -234,7 +242,7 @@
 (defdist ^:elementwise ^:pathwise cauchy
   "cauchy(x0, gamma): the Cauchy distribution with location x0 and scale gamma."
   [x0 scale]
-  (validate (dc/check-positive "cauchy" "scale" scale))
+  (validate (dc/check-finite "cauchy" "x0" x0) (check-finite-positive "cauchy" "scale" scale))
   (sample [key shape]
     (let [u (rng/uniform key (dc/elementwise-shape shape x0 scale)
                          (assoc (opts x0 scale) :low (Math/ulp 1.0) :high 1.0))]
@@ -249,8 +257,8 @@
    draw, otherwise a uniform draw on [0, 1]."
   [theta a b]
   (validate (dc/check-probability "beta-uniform" "theta" theta)
-            (dc/check-positive "beta-uniform" "alpha" a)
-            (dc/check-positive "beta-uniform" "beta" b))
+            (check-finite-positive "beta-uniform" "alpha" a)
+            (check-finite-positive "beta-uniform" "beta" b))
   (sample [key shape]
     (let [s (dc/elementwise-shape shape theta a b)
           [k1 k2 k3] (rng/split key 3)]
@@ -276,6 +284,7 @@
                            " (no batch of bin layouts yet)")
                       {:bounds (array/shape bounds) :probs (array/shape probs)})
             (dc/check-probabilities "piecewise-uniform" "probs" probs)
+            (dc/check-finite "piecewise-uniform" "bounds" bounds)
             (dc/check-increasing "piecewise-uniform" "bounds" bounds)
             (dc/check (= (peek (array/shape bounds)) (inc (peek (array/shape probs)))) "piecewise-uniform"
                       "needs one more bound than probabilities" {:bounds (array/shape bounds) :probs (array/shape probs)}))
@@ -392,6 +401,8 @@
                       "mvnormal" (str "mu must be a vector and cov a square matrix of its size, got shapes "
                                       (array/shape mu) " and " (array/shape cov))
                       {:mu-shape (array/shape mu) :cov-shape (array/shape cov)})
+            (dc/check-finite "mvnormal" "mu" mu)
+            (dc/check-finite "mvnormal" "cov" cov)
             (check-covariance "mvnormal" "cov" cov))
   (sample [key shape]
     (let [d (peek (array/shape mu))
@@ -422,7 +433,7 @@
    axis of alpha."
   [alpha]
   (validate (check-vector "dirichlet" "alpha" alpha)
-            (dc/check-positive "dirichlet" "alpha" alpha))
+            (check-finite-positive "dirichlet" "alpha" alpha))
   (sample [key shape]
     ;; g/Σg for gamma draws g, from their logs (a draw underflows to 0 at a
     ;; small alpha), floored where the normalized value still does
@@ -453,7 +464,7 @@
 (defdist ^:elementwise chi-squared
   "chi-squared(nu): the χ² distribution with nu degrees of freedom (Chisq)."
   [nu]
-  (validate (dc/check-positive "chi-squared" "nu" nu))
+  (validate (check-finite-positive "chi-squared" "nu" nu))
   (sample [key shape] (* 2.0 (floored (rng/gamma key (/ nu 2.0) (dc/elementwise-shape shape nu) (opts nu)))))
   (log-prob [v]
     (let [k (/ nu 2.0)
@@ -465,7 +476,7 @@
   "f-dist(nu1, nu2): Fisher's F distribution, the ratio of χ² draws over
    their degrees of freedom (FDist)."
   [nu1 nu2]
-  (validate (dc/check-positive "f-dist" "nu1" nu1) (dc/check-positive "f-dist" "nu2" nu2))
+  (validate (check-finite-positive "f-dist" "nu1" nu1) (check-finite-positive "f-dist" "nu2" nu2))
   (sample [key shape]
     (let [s (dc/elementwise-shape shape nu1 nu2)
           [k1 k2] (rng/split key)]
@@ -488,7 +499,7 @@
   "gumbel(mu, theta): the Gumbel (maximum) distribution, location mu and
    scale theta (Gumbel)."
   [mu theta]
-  (validate (dc/check-positive "gumbel" "theta" theta))
+  (validate (dc/check-finite "gumbel" "mu" mu) (check-finite-positive "gumbel" "theta" theta))
   (sample [key shape] (+ mu (* theta (rng/gumbel key (dc/elementwise-shape shape mu theta) (opts mu theta)))))
   (log-prob [v]
     ;; -Inf through a stand-in: z + e^-z there is -Inf + Inf
@@ -500,7 +511,7 @@
   "levy(mu, sigma): the Lévy distribution, location mu and scale sigma,
    mu + sigma/Z² for a standard normal Z (Levy)."
   [mu sigma]
-  (validate (dc/check-positive "levy" "sigma" sigma))
+  (validate (dc/check-finite "levy" "mu" mu) (check-finite-positive "levy" "sigma" sigma))
   (sample [key shape]
     (let [z (rng/normal key (dc/elementwise-shape shape mu sigma) (opts mu sigma))]
       (+ mu (/ sigma (floored (square z))))))
@@ -512,7 +523,7 @@
 (defdist ^:elementwise ^:pathwise log-normal
   "log-normal(mu, sigma): e^X for X normal(mu, sigma) (LogNormal)."
   [mu sigma]
-  (validate (dc/check-positive "log-normal" "sigma" sigma))
+  (validate (dc/check-finite "log-normal" "mu" mu) (check-finite-positive "log-normal" "sigma" sigma))
   (sample [key shape]
     (exp (+ mu (* sigma (rng/normal key (dc/elementwise-shape shape mu sigma) (opts mu sigma))))))
   (log-prob [v]
@@ -524,7 +535,7 @@
   "logistic(mu, theta): the logistic distribution, location mu and scale
    theta (Logistic)."
   [mu theta]
-  (validate (dc/check-positive "logistic" "theta" theta))
+  (validate (dc/check-finite "logistic" "mu" mu) (check-finite-positive "logistic" "theta" theta))
   ;; the difference of two standard Gumbel draws is standard logistic
   (sample [key shape]
     (let [s (dc/elementwise-shape shape mu theta)
@@ -541,7 +552,7 @@
    the root of a gamma(m, omega/m) draw (Nakagami; m > 0, as
    Distributions.jl's, where Commons Math asks m >= 1/2)."
   [m omega]
-  (validate (dc/check-positive "nakagami" "m" m) (dc/check-positive "nakagami" "omega" omega))
+  (validate (check-finite-positive "nakagami" "m" m) (check-finite-positive "nakagami" "omega" omega))
   (sample [key shape]
     (sqrt (* (/ omega m) (floored (rng/gamma key m (dc/elementwise-shape shape m omega) (opts m omega))))))
   (log-prob [v]
@@ -555,7 +566,7 @@
    (minimum) theta (Pareto). For a small alpha some draws lie beyond the
    float range: +Inf, of log density -Inf."
   [alpha theta]
-  (validate (dc/check-positive "pareto" "alpha" alpha) (dc/check-positive "pareto" "theta" theta))
+  (validate (check-finite-positive "pareto" "alpha" alpha) (check-finite-positive "pareto" "theta" theta))
   (sample [key shape]
     (* theta (exp (/ (rng/exponential key (dc/elementwise-shape shape alpha theta) (opts alpha theta)) alpha))))
   (log-prob [v]
@@ -566,7 +577,7 @@
   "student-t(nu): Student's t distribution with nu degrees of freedom, a
    standard normal over the root of a χ²/nu draw (TDist)."
   [nu]
-  (validate (dc/check-positive "student-t" "nu" nu))
+  (validate (check-finite-positive "student-t" "nu" nu))
   (sample [key shape]
     (let [s (dc/elementwise-shape shape nu)
           [k1 k2] (rng/split key)
@@ -582,7 +593,8 @@
   "triangular(a, b, c): the triangular distribution on [a, b] with mode c
    (TriangularDist)."
   [a b c]
-  (validate (when (every? array/concrete? [a b c])
+  (validate (dc/check-finite "triangular" "a" a) (dc/check-finite "triangular" "b" b) (dc/check-finite "triangular" "c" c)
+            (when (every? array/concrete? [a b c])
               (dc/check (array/all-true? (logical-and (< a b) (logical-and (<= a c) (<= c b))))
                         "triangular" "needs a < b and a <= c <= b" {:a a :b b :c c})))
   (sample [key shape]
@@ -610,7 +622,7 @@
    theta (Weibull). For a small alpha some draws lie beyond the float range
    (in float32, for alpha below about 0.03): +Inf, of log density -Inf."
   [alpha theta]
-  (validate (dc/check-positive "weibull" "alpha" alpha) (dc/check-positive "weibull" "theta" theta))
+  (validate (check-finite-positive "weibull" "alpha" alpha) (check-finite-positive "weibull" "theta" theta))
   (sample [key shape]
     (* theta (floored (array/pow (rng/exponential key (dc/elementwise-shape shape alpha theta) (opts alpha theta)) (/ 1.0 alpha)))))
   (log-prob [v]
@@ -737,7 +749,8 @@
    work in log Φ, so they stay exact far into either tail (on
    [μ + 50σ, μ + 51σ], say): a draw inverts the CDF by Newton steps."
   [mu sigma lo hi]
-  (validate (dc/check-positive "truncated-normal" "sigma" sigma)
+  (validate (dc/check-finite "truncated-normal" "mu" mu) (check-finite-positive "truncated-normal" "sigma" sigma)
+            ;; infinite bounds are its limits, which it computes
             (when (every? array/concrete? [lo hi])
               (dc/check (array/all-true? (< lo hi)) "truncated-normal" "lo must be below hi" {:lo lo :hi hi})))
   (sample [key shape]
@@ -854,7 +867,7 @@
    in [μ - π, μ + π]: the same density, on another period). Exact at any
    kappa, its draws by Best and Fisher's rejection."
   [mu kappa]
-  (validate (dc/check-positive "von-mises" "kappa" kappa))
+  (validate (dc/check-finite "von-mises" "mu" mu) (check-finite-positive "von-mises" "kappa" kappa))
   (sample [key shape]
     (wrap-angle (+ mu (von-mises-angle key kappa (dc/elementwise-shape shape mu kappa) (opts mu kappa)))))
   (log-prob [v]
@@ -869,7 +882,8 @@
    (1 - ρ²)/(2π·(1 + ρ² - 2ρ·cos(x - μ))), values in [-π, π); 0 <= rho < 1,
    and rho = 0 is the uniform on the circle."
   [mu rho]
-  (validate (dc/check-probability "wrapped-cauchy" "rho" rho)
+  (validate (dc/check-finite "wrapped-cauchy" "mu" mu)
+            (dc/check-probability "wrapped-cauchy" "rho" rho)
             (when (array/concrete? rho)
               (dc/check (array/all-true? (< rho 1)) "wrapped-cauchy" "rho must be below 1 (1 is a point mass)"
                         {:param "rho"})))
@@ -925,9 +939,9 @@
    density Σₖ N(x + 2πk; μ, σ), values in [-π, π). The sum is two series,
    each truncated where its omitted terms are below 1e-17 of the total.
    From sigma = 9 on, its draws are the uniform's, which it then is to
-   float64's precision."
+   float64's precision; sigma may be +Inf, the uniform itself."
   [mu sigma]
-  (validate (dc/check-positive "wrapped-normal" "sigma" sigma))
+  (validate (dc/check-finite "wrapped-normal" "mu" mu) (dc/check-positive "wrapped-normal" "sigma" sigma))
   (sample [key shape]
     (let [s (dc/elementwise-shape shape mu sigma)
           o (opts mu sigma)
@@ -950,6 +964,8 @@
         p (peek s)]
     (dc/check (and (<= 2 (count s)) (= p (peek (pop s)))) dist-name
               (str "scale must be a square matrix (its last two axes), got shape " s) {:param "scale" :shape s})
+    (dc/check-finite dist-name "df" df)
+    (dc/check-finite dist-name "scale" scale)
     (check-covariance dist-name "scale" scale)
     (when (array/concrete? df)
       (dc/check (array/all-true? (> df (dec p))) dist-name (str "df must be above the dimension minus one, " (dec p))
@@ -1099,11 +1115,23 @@
   (support [] (vec (range (peek (array/shape probs)))))
   (value-shape [] (pop (array/shape probs))))
 
+(defn- check-logits
+  "Concrete logits must be below +Inf, and some logit of each row above
+   -Inf: log-softmax is NaN at a +Inf logit and over a row of -Infs. A -Inf
+   logit is a zero probability."
+  [logits]
+  (when (and (array/concrete? logits) (= :float (dt/kind (array/dtype logits))))
+    (dc/check (array/all-true? (< logits ##Inf)) "categorical-logits" "logits must be below +Inf"
+              {:param "logits" :reason :non-finite})
+    (dc/check (array/all-true? (array/any (> logits ##-Inf) {:axis -1})) "categorical-logits"
+              "logits must have one above -Inf in each row (every value has probability 0 otherwise)"
+              {:param "logits" :reason :non-finite})))
+
 (defdist ^:discrete categorical-logits
   "categorical-logits(logits): index i (0-based) with probability
    softmax(logits)[i]. Any finite logits; the form LLM token sites use."
   [logits]
-  (validate (check-vector "categorical-logits" "logits" logits))
+  (validate (check-vector "categorical-logits" "logits" logits) (check-logits logits))
   (sample [key shape] (rng/categorical key logits (sh/broadcast shape (pop (array/shape logits))) (opts logits)))
   (log-prob [v] (pick-guarded identity (array/log-softmax logits) v))
   (support [] (vec (range (peek (array/shape logits)))))
@@ -1224,7 +1252,7 @@
 (defdist ^:elementwise ^:discrete poisson
   "poisson(lambda): the Poisson distribution with mean lambda."
   [lam]
-  (validate (dc/check-non-negative "poisson" "lambda" lam))
+  (validate (dc/check-non-negative "poisson" "lambda" lam) (dc/check-finite "poisson" "lambda" lam))
   (sample [key shape] (poisson-sample key lam (dc/elementwise-shape shape lam)))
   (log-prob [v]
     ;; lambda = 0 puts all the mass at 0: elsewhere -Inf through a stand-in,
@@ -1259,7 +1287,7 @@
   "neg_binom(r, p): the number of failures before the r-th success (r may be
    real)."
   [r p]
-  (validate (dc/check-positive "neg-binom" "r" r) (dc/check-probability "neg-binom" "p" p) (dc/check-positive "neg-binom" "p" p))
+  (validate (check-finite-positive "neg-binom" "r" r) (dc/check-probability "neg-binom" "p" p) (dc/check-positive "neg-binom" "p" p))
   (sample [key shape]
     (let [s (dc/elementwise-shape shape r p)
           [k1 k2] (rng/split key)

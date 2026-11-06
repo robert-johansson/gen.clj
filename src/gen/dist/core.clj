@@ -194,6 +194,18 @@
         (array/concrete? v)
         (check (array/all-true? (> v 0)) dist-name (str param-name " must be positive") {:param param-name})))
 
+(defn check-finite
+  "Parameters must be finite, as check-positive: for a family whose log
+   density or draws are NaN at an infinite parameter (DESIGN §9, 1.2.1's
+   owner calls). A family whose code computes the limit there keeps it."
+  [dist-name param-name v]
+  (cond (array/host? v)
+        (check (or (not (float? v)) (Double/isFinite (double v))) dist-name (str param-name " must be finite, got " v)
+               {:param param-name :value v :reason :non-finite})
+        (and (array/concrete? v) (= :float (dt/kind (array/dtype v))))
+        (check (array/all-true? (array/isfinite v)) dist-name (str param-name " must be finite")
+               {:param param-name :reason :non-finite})))
+
 (defn check-probability
   "Parameters must be probabilities in [0, 1], as check-positive."
   [dist-name param-name v]

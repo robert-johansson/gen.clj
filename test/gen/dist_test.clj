@@ -954,6 +954,82 @@
                               (array/array (params i))))]]
       (is (not-any? #(Double/isNaN %) (flatten [g])) (str label " at " v " d/dparam" i ": " g)))))
 
+;; ---------------------------------------------------------------------------
+;; Infinite parameters
+;; ---------------------------------------------------------------------------
+
+(def ^:private scalar-families
+  "[label family params]: every family of scalar parameters, at valid ones."
+  [["normal" d/normal [0.0 1.0]] ["uniform" d/uniform [0.0 2.0]] ["beta" d/beta [1.5 2.0]]
+   ["gamma" d/gamma [1.5 2.0]] ["inv-gamma" d/inv-gamma [1.5 2.0]] ["exponential" d/exponential [1.5]]
+   ["laplace" d/laplace [0.0 1.0]] ["cauchy" d/cauchy [0.0 1.0]] ["beta-uniform" d/beta-uniform [0.5 1.5 2.0]]
+   ["chi-squared" d/chi-squared [3.0]] ["f-dist" d/f-dist [3.0 4.0]] ["gumbel" d/gumbel [0.0 1.0]]
+   ["levy" d/levy [0.0 1.5]] ["log-normal" d/log-normal [0.0 0.5]] ["logistic" d/logistic [0.0 1.0]]
+   ["nakagami" d/nakagami [1.5 2.0]] ["pareto" d/pareto [1.5 2.0]] ["student-t" d/student-t [3.0]]
+   ["triangular" d/triangular [0.0 2.0 0.5]] ["weibull" d/weibull [1.5 2.0]]
+   ["truncated-normal" d/truncated-normal [0.0 1.5 -1.0 1.0]] ["von-mises" d/von-mises [0.0 2.0]]
+   ["wrapped-cauchy" d/wrapped-cauchy [0.0 0.5]] ["wrapped-normal" d/wrapped-normal [0.0 0.5]]
+   ["geometric" d/geometric [0.5]] ["poisson" d/poisson [2.0]] ["binom" d/binom [5 0.3]]
+   ["neg-binom" d/neg-binom [2.0 0.5]] ["uniform-discrete" d/uniform-discrete [0 3]] ["bernoulli" d/bernoulli [0.5]]])
+
+(def ^:private infinite-limits
+  "The infinite parameters whose family computes its limit: [label index
+   infinity]."
+  #{["truncated-normal" 2 ##-Inf] ["truncated-normal" 3 ##Inf] ["wrapped-normal" 1 ##Inf]})
+
+(deftest an-infinite-parameter-is-refused-where-its-family-gives-nan
+  ;; genclj-uzxp's item 1 (DESIGN §9, 1.2.1's owner calls): check-param-not-nan
+  ;; refused only NaN, and check-positive takes +Inf, so (normal ##Inf 1),
+  ;; (normal 0 ##Inf) and (exponential ##Inf) constructed, and their draws
+  ;; scored NaN, as did 30 other families' at an infinite parameter (or drew
+  ;; NaN, or a meaningless point: (log-normal ##-Inf 0.5)'s 0s). Each is
+  ;; refused at construction, naming the parameter (planted: a family's
+  ;; check-finite dropped fails its rows). A family whose code computes the
+  ;; limit keeps it: the truncated normal's infinite bounds, wrapped-normal's
+  ;; infinite sigma (the uniform on the circle).
+  (doseq [[label make params] scalar-families
+          i (range (count params))
+          inf [##Inf ##-Inf]
+          :when (not (infinite-limits [label i inf]))]
+    (is (thrown? clojure.lang.ExceptionInfo (apply make (assoc params i inf))) (str label " " (assoc params i inf))))
+  (testing "the error names the parameter"
+    (is (= {:distribution "normal" :param "mu" :value ##Inf :reason :non-finite} (ts/thrown-data (d/normal ##Inf 1.0))))
+    (is (= {:distribution "exponential" :param "rate" :value ##Inf :reason :non-finite} (ts/thrown-data (d/exponential ##Inf))))
+    (is (= {:distribution "normal" :param "std" :reason :non-finite} (ts/thrown-data (d/normal 0.0 [1.0 ##Inf])))
+        "array data, checked on the host on every backend")
+    (let [mu (array/array [0.0 ##-Inf])]
+      (if (array/concrete? mu)
+        (is (= {:distribution "normal" :param "mu" :reason :non-finite} (ts/thrown-data (d/normal mu 1.0))))
+        (is (some? (d/normal mu 1.0)) "a lazy backend's array is not read"))))
+  (testing "array parameters of the vector and matrix families"
+    (doseq [[label f] {"categorical-logits +Inf" #(d/categorical-logits [0.0 ##Inf 1.0])
+                       "categorical-logits, every logit -Inf" #(d/categorical-logits [[0.0 1.0] [##-Inf ##-Inf]])
+                       "dirichlet" #(d/dirichlet [1.0 ##Inf 2.0])
+                       "piecewise-uniform" #(d/piecewise-uniform [##-Inf 0.0 1.0] [0.5 0.5])
+                       "mvnormal mu" #(d/mvnormal [0.0 ##Inf] [[1.0 0.0] [0.0 1.0]])
+                       "mvnormal cov" #(d/mvnormal [0.0 0.0] [[1.0 0.0] [0.0 ##Inf]])
+                       "wishart df" #(d/wishart ##Inf [[1.0 0.0] [0.0 1.0]])
+                       "inv-wishart df" #(d/inv-wishart ##Inf [[1.0 0.0] [0.0 1.0]])}]
+      (is (thrown? clojure.lang.ExceptionInfo (f)) label))
+    ;; a mixture's parameters are the backend's arrays, read when concrete
+    (when (array/concrete? (array/array [0.0]))
+      (is (thrown? clojure.lang.ExceptionInfo ((d/homogeneous-mixture d/normal) [0.5 0.5] [0.0 ##Inf] 1.0))
+          "a mixture's component")))
+  (testing "the limits kept"
+    (let [n 2000
+          host (fn [x] (map ts/number (array/->clj x)))
+          tn (d/truncated-normal 0.0 1.0 ##-Inf ##Inf)
+          wn (d/wrapped-normal 0.3 ##Inf)]
+      (is (every? #(Double/isFinite %) (host (dc/sample tn (rng/key 5) [n]))))
+      (is (ts/close? (dc/log-prob (d/normal 0.0 1.0) 0.7) (dc/log-prob tn 0.7)))
+      (is (every? #(<= (- Math/PI) % Math/PI) (host (dc/sample wn (rng/key 5) [n]))))
+      (is (ts/close? (- (Math/log (* 2 Math/PI))) (dc/log-prob wn 2.0)) "the uniform on the circle")))
+  (testing "a -Inf logit is a zero probability"
+    (let [c (d/categorical-logits [0.0 ##-Inf 1.0])]
+      (is (= ##-Inf (ts/number (dc/log-prob c 1))))
+      (is (ts/close? (- 1.0 (Math/log (+ 1.0 Math/E))) (dc/log-prob c 2)))
+      (is (not-any? #{1} (map ts/number (array/->clj (dc/sample c (rng/key 6) [200]))))))))
+
 (deftest float-limits-by-dtype
   ;; m3-grammar's cross-review: half floats took float64's constants, so
   ;; largest-float's cap was Inf in float16 (a mixture's weight of 0 then

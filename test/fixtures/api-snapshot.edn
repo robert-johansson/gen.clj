@@ -407,6 +407,7 @@
   -value-shape {:kind :multimethod}
   backend-of {:arglists ([& params])}
   check {:arglists ([ok dist-name message data])}
+  check-finite {:arglists ([dist-name param-name v])}
   check-increasing {:arglists ([dist-name param-name v])}
   check-integer {:arglists ([dist-name param-name v min])}
   check-non-negative {:arglists ([dist-name param-name v])}
