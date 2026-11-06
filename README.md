@@ -154,6 +154,33 @@ Each namespace carries a tier, `{:api :stable | :experimental | :internal}`
 A JDK (developed on Oracle GraalVM 25) and the Clojure CLI. The core
 depends on Clojure alone.
 
+## Modules (optional)
+
+Parts of gen.clj live outside the core, each a module in `ext/` with a
+`deps.edn` of its own and dependencies the core does not take. A project
+takes a module as a git dependency on gen.clj's repository with
+`:deps/root`, at the tag (or commit) of the gen.clj it uses; each brings
+gen.clj from the same checkout:
+
+```clojure
+{:deps {gen.clj/gen.clj {:git/url "https://github.com/robert-johansson/gen.clj"
+                         :git/tag "v1.2.1" :git/sha "…"}
+        gen.clj/device  {:git/url "https://github.com/robert-johansson/gen.clj"
+                         :git/tag "v1.2.1" :git/sha "…" :deps/root "ext/device"}}}
+```
+
+| Module | `:deps/root` | What it adds | Its dependencies |
+|---|---|---|---|
+| `gen.clj/laws` | `ext/laws` | `gen.laws`: the GFI's laws as test.check properties | test.check |
+| `gen.clj/device` | `ext/device` | the device lowerings (experimental), which `kernel/run`'s and importance sampling's `:device` and `gen.inference.device/run-chains` run; without them a `:device` run falls back to the handler and says so | none: the JDK's compiler; Metal needs the MLX backend (below) and `--enable-native-access=ALL-UNNAMED` |
+| `gen.clj/commons-math` | `ext/commons-math` | `gen.dist.commons-math` (experimental): Apache Commons Math 3's distributions | Commons Math 3.6.1 |
+| `gen.clj/instaparse` | `ext/instaparse` | `gen.llm.instaparse`: instaparse grammars as constraints | instaparse 1.5.0 |
+| `gen.clj/codegen` | `ext/codegen` | `gen.codegen`: a session for LLM-written code, and the codegen bake-off's harness | clj-kondo, parinferish, `gen.clj/laws` |
+
+In gen.clj's own repository an alias puts each on the classpath: `:laws`
+and `:test` (ext/laws and ext/instaparse), `:device`, `:commons-math`,
+`:codegen`.
+
 ## The MLX backend (optional)
 
 `native/build-mlx.sh` fetches the official MLX 0.32.4 wheel (no Metal

@@ -1,7 +1,6 @@
 (ns gen.device.jvm
-  "A staged program (gen.array.stage) as JVM code: the third lowering of
-   bean genclj-a1hu, beside CUDA C and StableHLO (bean genclj-wbm7,
-   research prototype, ext/device).
+  "A staged program (gen.array.stage) as JVM code (beans genclj-a1hu and
+   genclj-wbm7, research prototype, ext/device), beside the Metal lowering.
 
    (source program) scalarizes the program (gen.device.scalar: an array is
    a vector of scalar expressions, so reshapes, broadcasts and slices cost
@@ -13,11 +12,14 @@
    used only in its own method is a local, any other a field of the run's
    state object, and a loop calls its body's methods in order.
 
-   (compile src) compiles the class in memory with the JDK's compiler
-   (javax.tools, no dependency) and returns {:run (fn [key-words]) ...}:
-   one run of the program on a key's two words, its outputs as Java arrays
-   (float32 a float[], uint32 and int32 an int[], bool a boolean[]), each
-   laid out flat in row-major order, a scan's ys [length …].
+   (compile program) compiles the class in memory with the JDK's compiler
+   (javax.tools, no dependency) and returns {:run (fn [key-words inputs])
+   ...}: one run of the program on a key's two words and its data inputs
+   (Java arrays, input-array's), its outputs as Java arrays (float32 a
+   float[], float64 a double[], uint32 and int32 an int[], int64 a long[],
+   bool a boolean[]), each laid out flat in row-major order, a scan's ys
+   [length …]; run-many runs it n times on every core. Arrays of any size
+   are lowered (gen.device.scalar's small values and large buffers).
 
    float32 arithmetic is Java's (no fused multiply-add); exp, log and the
    other transcendental functions are Math's double functions rounded to
@@ -27,9 +29,8 @@
    computed as the JVM backend computes: Math's functions, and erfinv and
    erf the backend's own (gen.array.special).
 
-   Refused, loudly: data inputs (a program of one key only), arrays past
-   gen.device.max-elements (4096), a scan over xs or inside a scan, a scan's
-   ys read in the program, batched matmul, float32 erf."
+   Refused, loudly: a scan over xs or inside a scan, a scan's ys read in
+   the program, batched matmul, float32 erf."
   {:api :internal}
   (:refer-clojure :exclude [compile])
   (:require [clojure.string :as str]

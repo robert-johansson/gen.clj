@@ -37,8 +37,8 @@ clojure -X:test :patterns '["gen.book.*"]'   # the book (book/): every chapter r
 clojure -M:test -m gen.book sync      # write the book's includes (from book/src) and figures
 clojure -M:test -m gen.book pdf       # the book as a PDF (pandoc, xelatex, rsvg-convert): target/book/
 clojure -X:test:commons-math          # also the Commons Math extension (ext/commons-math)
-clojure -X:test:bench:device :dirs '["ext/device/test"]'   # the device lowerings (ext/device: JVM code; Metal with -J-Dgen.backend=mlx; CUDA C with -J-Dgen.cuda.nvrtc=<libnvrtc.so>)
-clojure -M:test:bench:device -i ext/device/test/gen/device/census.clj   # the device census: every law-test model staged, lowered and compared with the handler
+clojure -X:test:device :dirs '["ext/device/test"]'   # the device lowerings (ext/device: JVM code; Metal with -J-Dgen.backend=mlx; CUDA C parked, its device tests skipped)
+clojure -M:test:device -i ext/device/test/gen/device/census.clj   # the device census: every law-test model staged, lowered and compared with the handler
 clojure -M:laws                       # a REPL with gen.clj and its laws (ext/laws, in :test too), as a dependent gets them
 clojure -J-Dgen.backend=mlx -X:test   # any suite on the MLX backend (add -J-Dgen.mlx.device=cpu|gpu, -J-Dgen.mlx.dtypes=64)
 clojure -M:bench -m gen.array-bench   # per-op costs; add :c2 to compare C2 with Graal's JIT

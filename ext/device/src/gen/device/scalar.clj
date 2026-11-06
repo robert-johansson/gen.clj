@@ -316,14 +316,15 @@
                  (range (size kept)))))))
 
 (defn- permuted-index
-  "The flat index into the operand (in-shape) of a transpose by perm at flat
-   index i of shape: a function of integers or of expressions."
-  [shape perm in-shape]
+  "The coordinates in the operand of a transpose by perm of the
+   coordinates cs of its result (of shape): a function of integers or of
+   expressions."
+  [shape perm]
   (fn [cs] (reduce (fn [v k] (assoc v (nth perm k) (nth cs k))) (vec (repeat (count shape) 0)) (range (count shape)))))
 
 (defn- emit-small!
   "A node whose operands and result are small."
-  [em env {:keys [id op args shape dtype attrs] :as node} ctx]
+  [em env {:keys [id op args shape dtype attrs] :as node} _ctx]
   (let [{:keys [lit unary binary convert bitcast]} (:dialect em)
         in (:in attrs)
         put #(assoc env id %)
@@ -348,7 +349,7 @@
       (= op :where) (put (elementwise em shape dtype [(arg 0 :bool) (arg 1 in) (arg 2 in)] #(str "(" %1 " ? " %2 " : " %3 ")")))
       (= op :reduce) (put (reduce-small em (arg 0 nil) (:op attrs) (:axes attrs) shape dtype))
       (= op :reshape) (put (assoc (arg 0 nil) :shape shape))
-      (= op :transpose) (let [o (arg 0 nil) pi (permuted-index shape (:perm attrs) (:shape o))]
+      (= op :transpose) (let [o (arg 0 nil) pi (permuted-index shape (:perm attrs))]
                           (put (small-from shape dtype (fn [i] (nth (:el o) (ravel (pi (unravel i shape)) (:shape o)))))))
       (= op :concatenate) (let [ax (:axis attrs)
                                 os (mapv #(operand em env % dtype) args)
@@ -486,7 +487,7 @@
 
 (defn- emit-large!
   "A node with a large operand or result."
-  [em env {:keys [id op args shape dtype attrs] :as node} ctx]
+  [em env {:keys [id op args shape dtype attrs] :as node} _ctx]
   (let [{:keys [lit unary binary convert bitcast]} (:dialect em)
         in (:in attrs)
         arg (fn [i d] (operand em env (nth args i) (or d in dtype)))
@@ -520,7 +521,7 @@
       (= op :reduce) (put (reduce-large em (arg 0 nil) (:op attrs) (:axes attrs) shape dtype))
       (= op :matmul) (put (matmul-large em node (arg 0 dtype) (arg 1 dtype) shape dtype))
       (= op :transpose) (let [o (loopable em (arg 0 nil))
-                              pi (permuted-index shape (:perm attrs) (:shape o))
+                              pi (permuted-index shape (:perm attrs))
                               index (fn [i] (flat (pi (coords i shape)) (:shape o)))]
                           (put (if small-out?
                                  (small-from shape dtype (fn [i] (elt em o (ravel (pi (unravel i shape)) (:shape o)))))
@@ -645,7 +646,7 @@
   (reduce (fn [env node] (emit-node! em env node ctx)) env nodes))
 
 (defn- count-statements [stmts]
-  (reduce + (map (fn [[kind & xs :as s]] (if (#{:loop :for} kind) (inc (count-statements (last s))) 1)) stmts)))
+  (reduce + (map (fn [[kind :as s]] (if (#{:loop :for} kind) (inc (count-statements (last s))) 1)) stmts)))
 
 (defn scalarize
   "program (gen.array.stage's: a key, then data inputs) as statements in
@@ -736,4 +737,3 @@
   (throw (ex-info (str "Device program: run " run " read an array at an index out of range (its run on the handler from"
                        " the same key did not throw: their rounding differs)")
                   {:reason :index-out-of-range :run run})))
-

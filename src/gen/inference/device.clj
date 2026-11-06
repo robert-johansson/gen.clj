@@ -11,12 +11,13 @@
    arguments are constants of the program; the trace's choices, score and
    return value, or the observations, are its inputs.
 
-   Programs are cached. A kernel of kernel/mala or kernel/hmc is keyed by
-   its kind and parameters (another kernel by its identity), the model by
-   its identity, its arguments one by one (host scalars by value, a double
-   by its bits; arrays and the rest by identity) and the chain by its
-   length: a run alike reuses the program, a run on new data arrays or of
-   another length compiles anew.
+   Programs are cached (gen.inference.cache: the 64 most recently used of
+   them and of mcmc's compiled steps). A kernel of kernel/mala or
+   kernel/hmc is keyed by its kind and parameters (another kernel by its
+   identity), the model by its identity, its arguments one by one (host
+   scalars by value, a double by its bits; arrays and the rest by
+   identity) and the chain by its length: a run alike reuses the program,
+   a run on new data arrays or of another length compiles anew.
 
    The run is the handler's (decision 5): in float64 on the JVM backend bit
    for bit, else to float32 rounding. Programs stage at the current
@@ -24,19 +25,30 @@
    sampling's particle i runs on (rng/split key n)[i], the unbatched run's
    draws (decision 3).
 
+   One chain runs on a CPU core, the JVM lowering, whatever the device
+   asked (DESIGN §9, option 1): kernel/run's {:device :metal} runs :jvm.
+   Importance sampling with :device follows :batched?: batched, its result
+   holds :particles, a gen.batched collection over the program's outputs,
+   in place of n traces, its draws still per particle.
+
    A run that does not stage or lower (a branch on a draw, an op a
    lowering lacks, ext/device absent, a kernel reporting no single accept)
-   runs on the handler instead, its result carrying :device-fallback
-   {:device :reason}: never another result."
+   runs on the handler instead (importance sampling's batched handler
+   under :batched?), its result carrying :device-fallback {:device
+   :reason}: never another result, and a handler run from the same keys
+   raises the handler's own errors. run-chains' fallback is batched, so
+   there a chain the device found in error runs on the handler first, and
+   its error, if it raises one, is thrown."
   {:api :experimental}
   (:require [gen.array :as array]
+            [gen.array.batch :as batch]
             [gen.array.dtype :as dt]
-            [gen.array.protocols :as p]
             [gen.array.stage :as st]
             [gen.array.tree :as tree]
             [gen.batched :as batched]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
+            [gen.inference.cache :as cache]
             [gen.inference.kernel :as kernel]
             [gen.random :as rng]
             [gen.trace :as trace]))
@@ -52,18 +64,11 @@
   (equals [_ x] (and (instance? Id x) (identical? o (.-o ^Id x))))
   (hashCode [_] (System/identityHashCode o)))
 
-(defonce ^:private cache (atom {}))
-
-(def ^:private cache-limit 64)
-
 (defn- cached
-  "The value at k in the program cache, made by (make) when absent (the
-   cache emptied past cache-limit entries)."
+  "The program at k, made by (make) when absent: in the bounded cache of
+   compiled code that mcmc's compiled steps share (gen.inference.cache)."
   [k make]
-  (or (get @cache k)
-      (let [v (make)]
-        (swap! cache (fn [c] (assoc (if (>= (count c) cache-limit) {} c) k v)))
-        v)))
+  (cache/cached [::program k] make))
 
 (defn- arg-key
   "An argument's part of a program's key: a host scalar by value (a double
@@ -77,9 +82,10 @@
 (defn- args-key [args] (mapv arg-key args))
 
 (defn ^:no-doc clear-cache!
-  "Forget every compiled program."
+  "Forget every compiled program (and mcmc's compiled steps: the cache is
+   gen.inference.cache's)."
   []
-  (reset! cache {}))
+  (cache/clear!))
 
 (defn- compile-program [device program]
   (let [f (try (requiring-resolve 'gen.device/compile-program)
@@ -96,13 +102,16 @@
   (let [d (array/dtype x)]
     [(vec (array/shape x)) (case (dt/kind d) :float fl :int (if (= :uint32 d) :uint32 :int32) d)]))
 
+(defn- reason [^Throwable e] (or (ex-message e) (str (class e))))
+
 (defmacro ^:private with-fallback
   "body's value with :device device, or, when it throws, (handler)'s with
-   :device-fallback {:device :reason}."
+   :device-fallback {:device :reason} (a handler run from the same key
+   raises the handler's own error, where the device's run found one)."
   [device handler & body]
   `(try (assoc (do ~@body) :device ~device)
         (catch Exception e#
-          (assoc (~handler) :device-fallback {:device ~device :reason (or (ex-message e#) (str (class e#)))}))))
+          (assoc (~handler) :device-fallback {:device ~device :reason (reason e#)}))))
 
 ;; ---------------------------------------------------------------------------
 ;; kernel/run
@@ -343,14 +352,14 @@
    start (the representatives' values). With :sources (choice-sources')
    its :draws are the kept choices read from the outputs as host values,
    no trace made. Loud when a step's start was not finite (the handler
-   throws there)."
+   throws there), naming the run (::run)."
   [{:keys [sk args n constants unchanged rep reps steps burn thin keep sources host-readers]} outs readers offset start]
   (let [steps (long steps)
         base (* (long offset) steps)
         _ (when-let [ok (:ok outs)]
             (when (< (count-true ok base (+ base steps)) steps)
-              (throw (ex-info "a step's start was not finite" {}))))
-        kept (filterv #(let [i' (inc (long %))] (and (> i' (long burn)) (zero? (mod (- i' (long burn)) (long thin))))) (range steps))
+              (throw (ex-info "a step's start was not finite" {::run offset}))))
+        kept (filterv #(kernel/kept? burn thin %) (range steps))
         at (zipmap reps (range))
         expand (fn [vs] (mapv #(vs (at (rep %))) (range (count rep))))
         trace-at (fn [i] (trace/from-leaves sk (merged n constants (expand (step-carried start unchanged (mapv #(% (+ base (long i))) readers)))) args))
@@ -371,31 +380,41 @@
   [kernel]
   (or (and (map? kernel) (:device-key kernel)) (Id. kernel)))
 
+(defn- one-chain-device
+  "The lowering one chain runs on: the JVM's, a CPU core, for :metal too (a
+   GPU thread's latency is many steps of a CPU core's; DESIGN §9, option
+   1), another device as asked."
+  [device]
+  (if (= :metal device) :jvm device))
+
 (defn run-kernel
   "kernel/run's :device path: kernel's chain from trace as a compiled
    program, its result kernel/run's (handler, a function of no arguments,
    runs it on the handler for the fallback). opts are run's, :key given.
    The result is made on the host from the program's outputs: a kept
    step's trace from its rows alone, the leaves a step does not change
-   the start's, a leaf the trace holds twice (one array) read once."
+   the start's, a leaf the trace holds twice (one array) read once. One
+   chain runs on the JVM lowering whatever the device (:metal too; DESIGN
+   §9, option 1)."
   [kernel trace {:keys [samples burn thin key device] :or {burn 0 thin 1} :as opts} handler]
-  (with-fallback device handler
-    (let [steps (+ burn (* samples thin))
-          {:keys [gen-fn args]} trace
-          [sk leaves] (trace/as-leaves trace)
-          fl (float-dtype opts)
-          ;; a host integer or boolean may be a constant of the program: its value keys it
-          k [:kernel device fl (kernel-key kernel) (Id. gen-fn) (args-key args) sk
-             (mapv #(if (constant? %) [(class %) %] (spec-of fl %)) leaves) steps
-             (aliases [(carried (into {} (keep-indexed (fn [i v] (when (constant? v) [i v]))) leaves) leaves)])]
-          {:keys [program unchanged constants rep reps run]}
-          (cached k (fn [] (let [c (chain kernel sk args leaves steps fl)]
-                             (assoc c :run (compile-program device (:program c))))))
-          start (mapv (carried constants leaves) reps)
-          outs (tree/refill (:out-tree program) ((:run-one run) (rng/key-data key) start))]
-      (chain-result (assoc opts :sk sk :args args :n (count leaves) :constants constants :unchanged unchanged
-                           :rep rep :reps reps :steps steps :burn burn :thin thin)
-                    outs (mapv row-reader (:c outs)) 0 start))))
+  (let [device (one-chain-device device)]
+    (with-fallback device handler
+      (let [steps (+ burn (* samples thin))
+            {:keys [gen-fn args]} trace
+            [sk leaves] (trace/as-leaves trace)
+            fl (float-dtype opts)
+            ;; a host integer or boolean may be a constant of the program: its value keys it
+            k [:kernel device fl (kernel-key kernel) (Id. gen-fn) (args-key args) sk
+               (mapv #(if (constant? %) [(class %) %] (spec-of fl %)) leaves) steps
+               (aliases [(carried (into {} (keep-indexed (fn [i v] (when (constant? v) [i v]))) leaves) leaves)])]
+            {:keys [program unchanged constants rep reps run]}
+            (cached k (fn [] (let [c (chain kernel sk args leaves steps fl)]
+                               (assoc c :run (compile-program device (:program c))))))
+            start (mapv (carried constants leaves) reps)
+            outs (tree/refill (:out-tree program) ((:run-one run) (rng/key-data key) start))]
+        (chain-result (assoc opts :sk sk :args args :n (count leaves) :constants constants :unchanged unchanged
+                             :rep rep :reps reps :steps steps :burn burn :thin thin)
+                      outs (mapv row-reader (:c outs)) 0 start)))))
 
 ;; ---------------------------------------------------------------------------
 ;; many chains
@@ -471,28 +490,40 @@
    particle of one batched run (the traces' choices its per-particle
    constraints), stepped by bf on the keys (rng/split key steps); its
    draws the batched run's, not the device's chains (the same
-   distribution; DESIGN §9, owner, 2026-11-04)."
+   distribution; DESIGN §9, owner, 2026-11-04). Its statistics are
+   kernel/run's per chain: the accepted moves over every move (a
+   combinator's steps make several), nil where a move reports none, and
+   the proposals that diverged."
   [bf traces {:keys [samples burn thin key keep keep-choices] :or {burn 0 thin 1}}]
   (let [n (count traces)
         {:keys [gen-fn args]} (first traces)
         ps0 (:particles (batched/generate gen-fn args cm/EMPTY n (rng/key 0) {:per-particle (mapv :choices traces)}))
         steps (+ burn (* samples thin))
-        kept? (fn [i] (let [i' (inc (long i))] (and (> i' (long burn)) (zero? (mod (- i' (long burn)) (long thin))))))
         [read finish] (when keep (kernel/keeping keep))
         record (fn [ps] (cond keep-choices (let [cols (mapv #(array/->clj (batched/choice ps %)) keep-choices)]
                                               (mapv (fn [i] (zipmap keep-choices (map #(nth % i) cols))) (range n)))
                               keep (mapv read (batched/traces ps))
                               :else (batched/traces ps)))
-        count-in (fn [counts flags] (if flags (mapv #(if %2 (inc (long %1)) %1) counts flags) counts))
-        [_ acc div kept]
-        (reduce (fn [[ps acc div kept] [i k]]
+        ;; each chain's accepted moves (nil once a move reports none), the
+        ;; moves made, each chain's divergences
+        tally (fn [{:keys [accepted moves diverged]} r]
+                (let [ms (kernel/particle-moves r)]
+                  {:accepted (when (and accepted ms)
+                               (reduce (fn [acc m] (mapv #(if %2 (inc (long %1)) %1) acc m)) accepted ms))
+                   :moves (+ (long moves) (count ms))
+                   :diverged (mapv + diverged (kernel/particle-divergences r n))}))
+        zeros (vec (repeat n 0))
+        [_ {:keys [accepted moves diverged]} kept]
+        (reduce (fn [[ps stats kept] [i k]]
                   (let [r (kernel/particles-result (bf ps k))]
-                    [(:particles r) (count-in acc (:accepted r)) (count-in div (:diverged r))
-                     (if (kept? i) (conj kept (record (:particles r))) kept)]))
-                [ps0 (vec (repeat n 0)) (vec (repeat n 0)) []]
-                (map vector (range steps) (rng/split key steps)))
+                    [(:particles r) (tally stats r) (if (kernel/kept? burn thin i) (conj kept (record (:particles r))) kept)]))
+                [ps0 {:accepted zeros :moves 0 :diverged zeros} []]
+                (map vector (range steps) (if (pos? steps) (rng/split key steps) [])))
         per-chain (fn [c] (mapv #(nth % c) kept))]
-    (cond-> {:acceptance-rates (mapv #(/ (double %) steps) acc) :divergences div}
+    (cond-> {:acceptance-rates (if (and accepted (pos? (long moves)))
+                                 (mapv #(/ (double %) (long moves)) accepted)
+                                 (vec (repeat n nil)))
+             :divergences diverged}
       keep-choices (assoc :draws (mapv (fn [c] (into {} (map (fn [a] [a (mapv #(get % a) (per-chain c))])) keep-choices)) (range n)))
       keep (assoc :draws (mapv (fn [c] (finish (per-chain c))) (range n)))
       (not (or keep keep-choices)) (assoc :traces (mapv per-chain (range n))))))
@@ -503,6 +534,14 @@
    loud error that names :keep-choices (Metal holds about 499,000 buffers
    at once, and a trace holds several)."
   50000)
+
+(defn- run-in-error
+  "The run a device run found in error, or nil: one that read an array at
+   an index out of range (gen.device's :index-out-of-range), or whose step
+   started where the density was not finite (chain-result's)."
+  [e]
+  (let [d (ex-data e)]
+    (or (::run d) (when (and (= :index-out-of-range (:reason d)) (contains? d :run)) (:run d)))))
 
 (defn run-chains
   "n chains of kernel (gen.inference.kernel's), chain i from (traces i) on
@@ -520,29 +559,41 @@
    :keep-choices) :acceptance-rates :divergences}, one entry per chain, as
    kernel/run's per chain, with :device. Without :device, kernel/run per
    chain. Where the chains do not stage or lower on the device (traces of
-   other structures, a kernel or model it cannot run), one batched run of
-   the kernel's batched form (its draws the batched run's, the same
-   distribution; chain by chain for a kernel with none), with
-   :device-fallback {:device :reason :ran (:batched or :chain-by-chain)}.
-   The chains' traces share their generative function, arguments and
-   structure. Experimental (DESIGN §9, genclj-ke07)."
+   other structures, a kernel or model it cannot run, a combinator's
+   kernel), one batched run of the kernel's batched form (its draws the
+   batched run's, the same distribution, its statistics kernel/run's: the
+   accepted moves over every move, and the divergences; chain by chain for
+   a kernel with none), with :device-fallback {:device :reason :ran
+   (:batched or :chain-by-chain)}. Only the device's own refusals fall
+   back: where a chain's run on the device found an error (an index out
+   of range, a start whose density is not finite), that chain runs on the
+   handler, and the handler's error, if it raises one, is thrown, as
+   kernel/run per chain would. The chains' traces share their generative
+   function, arguments and structure. Experimental (DESIGN §9,
+   genclj-ke07)."
   [kernel traces {:keys [key device keep keep-choices] :as opts}]
   (let [traces (vec traces)
+        n (count traces)
         key (or key (gfi/next-key))
         opts (assoc opts :key key)
         ;; kernel/run's :keep for the handler: {address #(% address)}
         run-opts (cond-> (dissoc opts :device :keep-choices)
                    keep-choices (assoc :keep (into {} (map (fn [a] [a #(% a)])) keep-choices)))
-        on-handler (fn [] (gathered (mapv (fn [t k] (kernel/run kernel t (assoc run-opts :key k)))
-                                          traces (rng/split key (count traces)))))]
+        chain-keys (delay (rng/split key n))
+        on-chain (fn [c] (kernel/run kernel (traces c) (assoc run-opts :key (@chain-keys c))))
+        on-handler (fn [] (gathered (mapv on-chain (range n))))]
     (when (empty? traces) (throw (ex-info "run-chains: no traces" {:reason :no-chains})))
     (when (and keep keep-choices)
       (throw (ex-info "run-chains: :keep or :keep-choices, not both" {:reason :keep-and-keep-choices})))
     (when (and keep-choices (not (and (sequential? keep-choices) (seq keep-choices))))
       (throw (ex-info "run-chains: :keep-choices is a vector of addresses" {:reason :invalid-keep-choices :keep-choices keep-choices})))
-    (let [made (* (count traces) (long (:samples opts 0)))]
-      (when (and (not keep-choices) (p/-lazy? array/*backend*) (> made (long trace-limit)))
-        (throw (ex-info (str "run-chains: " (count traces) " chains of " (:samples opts) " kept steps make " made
+    (doseq [a keep-choices]
+      (when-not (cm/has-value? (:choices (first traces)) a)
+        (throw (ex-info (str "run-chains :keep-choices: no choice at " (pr-str a)) {:reason :no-choice :address a}))))
+    (let [made (* n (long (:samples opts 0)))]
+      ;; the traces' arrays lazy: MLX's, each a Metal buffer
+      (when (and (not keep-choices) (not (array/concrete? (:score (first traces)))) (> made (long trace-limit)))
+        (throw (ex-info (str "run-chains: " n " chains of " (:samples opts) " kept steps make " made
                              " traces, each a few MLX arrays, past what Metal holds at once: keep values with"
                              " :keep-choices [address …] (read from the program's outputs, no trace made),"
                              " or keep fewer steps (:thin) or chains")
@@ -551,56 +602,83 @@
       (on-handler)
       (try (assoc (device-chains kernel traces opts) :device device)
            (catch Exception e
-             (let [reason (or (ex-message e) (str (class e)))
-                   bf (kernel/batched-form kernel)
+             ;; the chain on the handler: its error, if it raises one, is thrown
+             (when-let [c (run-in-error e)] (on-chain c))
+             (let [bf (kernel/batched-form kernel)
                    {:keys [gen-fn args]} (first traces)]
                ;; one batched run needs one generative function on the same arguments
                (if (and bf (every? #(and (identical? gen-fn (:gen-fn %)) (= (args-key args) (args-key (:args %)))) traces))
-                 (assoc (batched-chains bf traces opts) :device-fallback {:device device :reason reason :ran :batched})
-                 (assoc (on-handler) :device-fallback {:device device :reason reason :ran :chain-by-chain}))))))))
+                 (assoc (batched-chains bf traces opts) :device-fallback {:device device :reason (reason e) :ran :batched})
+                 (assoc (on-handler) :device-fallback {:device device :reason (reason e) :ran :chain-by-chain}))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; importance sampling
 ;; ---------------------------------------------------------------------------
 
+(defn- whole-array
+  "A host output of the lowerings ({:data :shape :dtype}) as one array of
+   the current backend, of its shape."
+  [{:keys [shape dtype] :as o}]
+  (let [data (data-of o)]
+    (if (vector? data)
+      (array/array data {:dtype dtype})
+      (let [flat (if (instance? (Class/forName "[D") data)
+                   data
+                   (let [elem (element-reader data)] (mapv elem (range (java.lang.reflect.Array/getLength data)))))]
+        (array/reshape (array/array flat {:dtype dtype}) shape)))))
+
 (defn importance-sampling
   "importance-sampling's :device path: n particles of model's constrained
    generate as a compiled program, particle i on (rng/split key n)[i], the
-   result importance-sampling's unbatched one (summary, a function of the
-   log weights, gives its weights' part; handler runs it on the handler for
-   the fallback)."
-  [model args observations n {:keys [key device proposal] :as opts} summary handler]
+   result importance-sampling's (summary, a function of the log weights,
+   gives its weights' part; handler runs it on the handler for the
+   fallback): n traces, or with :batched? (true, its value for
+   importance-sampling) :particles, a gen.batched collection whose batched
+   trace holds the program's outputs, one value per particle, the
+   observations and the host values every particle shares as they are."
+  [model args observations n {:keys [key device proposal batched?] :as opts} summary handler]
   (with-fallback device handler
     (when proposal (throw (ex-info "a :proposal under :device, not yet" {})))
     (let [fl (float-dtype opts)
           [osk ovals] (trace/as-leaves observations)
           ospecs (mapv #(spec-of fl %) ovals)
           k [:importance device fl (Id. model) (args-key args) osk ospecs]
-          {:keys [program run sk observed]}
+          {:keys [program run sk shared]}
           (cached k (fn []
                       (let [info (volatile! nil)
-                            observed (volatile! {})
+                            shared (volatile! {})
                             p (binding [st/*float* fl]
                                 (st/stage
                                  (fn [kk os]
                                    (let [{:keys [trace weight]} (gfi/generate model (st/constants args) (trace/from-leaves osk os nil) kk)
                                          [sk leaves] (trace/as-leaves trace)
-                                         ;; a leaf that is an observation as given: every
-                                         ;; particle holds it, so it is not an output
-                                         at (into {} (keep-indexed (fn [i l] (when-let [j (first (keep-indexed (fn [j o] (when (identical? l o) j)) os))] [i j]))) leaves)]
+                                         ;; a leaf every particle holds alike, not an output: an
+                                         ;; observation as given ([:observation j]), or a host
+                                         ;; value ([:host v]: a count, a flag)
+                                         alike (into {} (keep-indexed
+                                                         (fn [i l]
+                                                           (if-let [j (first (keep-indexed (fn [j o] (when (identical? l o) j)) os))]
+                                                             [i [:observation j]]
+                                                             (when-not (array/backend-array? l) [i [:host l]]))))
+                                                     leaves)]
                                      (vreset! info sk)
-                                     (vreset! observed at)
-                                     {:w weight :c (into [] (keep-indexed (fn [i l] (when-not (contains? at i) l))) leaves)}))
+                                     (vreset! shared alike)
+                                     {:w weight :c (into [] (keep-indexed (fn [i l] (when-not (contains? alike i) l))) leaves)}))
                                  (st/key-spec) ospecs))]
-                        {:sk @info :observed @observed :program p :run (compile-program device p)})))
+                        {:sk @info :shared @shared :program p :run (compile-program device p)})))
           outs (tree/refill (:out-tree program) ((:run-many run) n (rng/key-data key) ovals))
-          readers (mapv row-reader (:c outs))
-          n-leaves (+ (count readers) (count observed))
-          ;; an observation as given, as the handler's trace holds it
-          obs (into {} (map (fn [[i j]] [i (ovals j)])) observed)
-          leaves-at (fn [i] (loop [p 0 rs (seq readers) out (transient [])]
-                              (cond (= p n-leaves) (persistent! out)
-                                    (contains? obs p) (recur (inc p) rs (conj! out (obs p)))
-                                    :else (recur (inc p) (next rs) (conj! out ((first rs) i))))))]
-      (assoc (summary (host-doubles (:w outs)))
-             :traces (mapv (fn [i] (trace/from-leaves sk (leaves-at i) args)) (range n))))))
+          n-leaves (+ (count (:c outs)) (count shared))
+          shared-value (fn [[kind x]] (if (= :observation kind) (ovals x) x))
+          ;; every leaf of a particle's trace in order: the shared ones as
+          ;; they are, the outputs' through (out c)
+          leaves (fn [out] (loop [p 0 c 0 acc (transient [])]
+                             (cond (= p n-leaves) (persistent! acc)
+                                   (contains? shared p) (recur (inc p) c (conj! acc (shared-value (shared p))))
+                                   :else (recur (inc p) (inc c) (conj! acc (out c))))))
+          weights (summary (host-doubles (:w outs)))]
+      (if batched?
+        (let [args (gfi/check-args :generate args)
+              rows (mapv #(batch/wrap (whole-array %) [n]) (:c outs))]
+          (assoc weights :particles (batched/->Particles n model args (trace/from-leaves sk (leaves rows) args) nil)))
+        (let [readers (mapv row-reader (:c outs))]
+          (assoc weights :traces (mapv (fn [i] (trace/from-leaves sk (leaves (fn [c] ((readers c) i))) args)) (range n))))))))

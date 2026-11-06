@@ -66,15 +66,18 @@
          :extra-deps {org.clojure/test.check {:mvn/version "1.1.3"}}}
 
   ;; Apache Commons Math's distributions (gen.dist.commons-math), outside
-  ;; the core's dependencies: clojure -X:test:commons-math runs its tests too
+  ;; the core's dependencies (a dependent's with ext/commons-math/deps.edn,
+  ;; whose Commons Math this is): clojure -X:test:commons-math runs its
+  ;; tests too
   :commons-math {:extra-paths ["ext/commons-math/src" "ext/commons-math/test"]
                  :extra-deps {org.apache.commons/commons-math3 {:mvn/version "3.6.1"}}
                  :exec-args {:dirs ["test" "ext/laws/test" "ext/instaparse/test" "ext/commons-math/test"]}}
 
-  ;; The device lowerings (ext/device, experimental): a staged program
-  ;; (gen.array.stage) as generated JVM code, a Metal kernel through MLX, or
-  ;; CUDA C (NVRTC and the driver: -Dgen.cuda.nvrtc=<libnvrtc.so>). Its tests
-  ;; and benches read gen.parity-bench: add :bench.
+  ;; The device lowerings (ext/device, experimental; a dependent's with
+  ;; ext/device/deps.edn): a staged program (gen.array.stage) as generated
+  ;; JVM code or a Metal kernel through MLX (CUDA C parked). Its tests read
+  ;; test/ (gen.test-support, gen.parity-models): add :test; its benches
+  ;; read bench/ too: add :bench.
   :device {:extra-paths ["ext/device/src" "ext/device/test"]
            :jvm-opts ["--enable-native-access=ALL-UNNAMED"]}
 

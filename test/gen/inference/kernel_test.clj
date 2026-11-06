@@ -550,6 +550,22 @@
         (is (ts/close? (b/choice (:particles r2) :x) (b/choice (:particles r) :x)))
         (is (= (mapv #(or %1 %2) (:accepted r1) (:accepted r2)) (:accepted r)))
         (is (nil? (:fallback r)))))
+    (testing "and each move's decisions, and how many of each particle's proposals diverged"
+      ;; genclj-qucg: run-chains counts a chain's accepted moves over its
+      ;; moves and its divergences, as kernel/run does, from these. Planted
+      ;; bugs (2026-11-06): the moves' :diverged dropped (1.2.0's) fails
+      ;; the counts; the moves' decisions out of order fails the first
+      (let [ps (:particles (b/generate line [] (cm/choicemap :y 1.3) 20 (rng/key 40)))
+            wild {:L 4 :eps 5.0}
+            r ((k/batched-form (k/chain (k/hmc x wild) (k/mh x) (k/hmc x wild))) ps (rng/key 42))
+            [k1 k2 k3] (rng/split (rng/key 42) 3)
+            r1 (mcmc/hmc-particles ps x wild k1)
+            r2 (mh/mh-particles (:particles r1) x k2)
+            r3 (mcmc/hmc-particles (:particles r2) x wild k3)
+            ones #(mapv (fn [d] (if d 1 0)) %)]
+        (is (= [(:accepted r1) (:accepted r2) (:accepted r3)] (:accepted-moves r)))
+        (is (= (mapv + (ones (:diverged r1)) (ones (:diverged r3))) (:divergences r)))
+        (is (pos? (reduce + (:divergences r))) "eps 5 on a unit scale diverges")))
     (testing "a hand-made kernel declares one with kernel's options; others are loud"
       (let [f (fn [t _] {:trace t})
             p (fn [ps _] {:particles ps})]
