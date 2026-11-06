@@ -1183,7 +1183,7 @@ A potential as SMC's `:potential` twists every step: a step reads its
 next-token weights, a whole row, for each particle, and the `:masked`
 proposal draws from the LM's row times it. A potential with no cheap
 row (a parser, a second LM, a reader of partial text) costs a row's worth
-of calls a step. Loula and others (2025) put such potentials into the
+of calls a step. Loula et al. (2025) put such potentials into the
 weights only, as *critics*: after a particle draws a token, its weight
 gains the critic's $\text{prefix}(x_{1:t}) - \text{prefix}(x_{1:t-1})$,
 one call for the token drawn, and its complete weight at the end. The
@@ -1248,7 +1248,7 @@ a reader, a row is a call for every token of the vocabulary.
 ### Adaptive weighted rejection sampling
 
 The `:masked` proposal needs the potential's row too, and a grammar's row
-is a mask over the whole vocabulary. Lipkin and others (2025) draw from
+is a mask over the whole vocabulary. Lipkin et al. (2025) draw from
 the masked row by rejection instead: a token from the LM's row, checked
 by a prefix call, kept if the potential allows it, removed from the row
 and drawn again if not. *Adaptive weighted rejection sampling* (AWRS)
