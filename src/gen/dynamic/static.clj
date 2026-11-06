@@ -42,7 +42,6 @@
                            :reason}, the flagged ones as {:already true}"
   {:api :internal}
   (:require [clojure.string :as str]
-            [gen.array :as array]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.dynamic.guard :as guard]
@@ -409,7 +408,6 @@
         keys-fn (fn [{:keys [inputs] ks :keys}]
                   (guard/guard-branches `(fn [~(guard/own 'param) ~env] (let ~(reads inputs) [~@ks]))
                                         (into locals inputs)))
-        param? (fn [expr] (boolean (some #{'param} (tree-seq coll? seq expr))))
         spec (fn [{:keys [symbol constant inputs]}]
                (cond (and symbol (contains? slots symbol)) {:slot (slots symbol)}
                      (or symbol constant) {:constant true}
@@ -429,15 +427,13 @@
                   (merge `{:kind ~(:kind n) :addr ~(:addr n) :names '~(:names n) :inputs '~(:inputs n) :form '~(:form n)
                            :in ~(mapv slots (:inputs n)) :out ~(mapv slots (:names n))
                            :symbol? ~(symbol? (:binding n))
-                           :param? ~(param? [(:expr n) (:keys n)])
                            :f ~(node-fn n)
                            :keys-f ~(when (:keys n) (keys-fn n))
                            :bind (fn [~env ~v] (let [~(:binding n) ~v] (-> ~env ~@(map (fn [x] `(assoc ~(slots x) ~x)) (:names n)))))}
                          (when (= :splice (:kind n)) {:arg-specs (mapv spec (:arg-specs n))})
                          (when (:keys n) {:keys (list 'quote (:keys n))})
                          (call n)))]
-      :ret ~(merge {:inputs `'~(:inputs (:ret st)) :in (mapv slots (:inputs (:ret st)))
-                    :param? (param? (:expr (:ret st))) :f (node-fn (:ret st))}
+      :ret ~(merge {:inputs `'~(:inputs (:ret st)) :in (mapv slots (:inputs (:ret st))) :f (node-fn (:ret st))}
                    (call (:ret st)))
       :score ~(score-form st params coercions locals)
       :roots ~(set (keep #(when-some [a (:addr %)] (first (cm/path* a))) (:nodes st)))

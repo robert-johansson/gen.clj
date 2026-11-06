@@ -71,7 +71,7 @@
    input."
   {:api :stable}
   (:refer-clojure :exclude [read + - * /])
-  (:require [gen.array :as array :refer [+ - * /]]
+  (:require [gen.array :as array :refer [+ -]]
             [gen.array.dtype :as dt]
             [gen.choicemap :as cm]
             [gen.diff :as diff]

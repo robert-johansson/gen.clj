@@ -224,7 +224,7 @@
   particles? {:arglists ([x])}
   project {:arglists ([ps selection])}
   project* {:arglists ([ps selection])}
-  refused {:arglists ([e])}
+  refused {:arglists ([e]), :deprecated "1.2.1"}
   regenerate {:arglists ([ps args argdiffs selection key])}
   scores {:arglists ([ps])}
   select {:arglists ([mask ps qs])}
@@ -234,7 +234,7 @@
   take {:arglists ([ps indices])}
   traces {:arglists ([ps])}
   update {:arglists ([ps args argdiffs constraints key] [ps args argdiffs constraints key opts])}
-  written {:arglists ([e])}}
+  written {:arglists ([e]), :deprecated "1.2.1"}}
 
  gen.choicemap
  {->Node {:arglists ([m])}

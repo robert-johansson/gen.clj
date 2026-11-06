@@ -106,10 +106,10 @@
                               (swap! compiled assoc [b skel] e)
                               e))
                   ins (array/with-backend b (mapv #(if (array/host? %) (array/array % {:dtype (array/weak-dtype % b)}) %)
-                                                  (tree/leaves-in (:in entry) args)))]
-              ;; apply first: the first call traces f, which records the output's structure
-              (let [outs ((:g entry) ins)]
-                (tree/refill @(:out entry) outs)))))))))
+                                                  (tree/leaves-in (:in entry) args)))
+                  ;; apply first: the first call traces f, which records the output's structure
+                  outs ((:g entry) ins)]
+              (tree/refill @(:out entry) outs))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The particles of a batched value (docs/array-api.md §8b)

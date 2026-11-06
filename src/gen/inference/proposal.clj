@@ -36,7 +36,7 @@
    exact conditional of finite choices."
   {:api :stable}
   (:refer-clojure :exclude [+ -])
-  (:require [gen.array :as array :refer [+ -]]
+  (:require [gen.array :as array :refer [-]]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.dynamic :as dyn]

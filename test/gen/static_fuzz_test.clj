@@ -160,13 +160,14 @@
   (let [models (for [size (range 0 200 2) seed (range 3)] (tcg/generate rsm/gen-model size (+ seed (* 3 size))))
         nodes (mapcat (fn [[_ gf]] (:nodes (:static gf))) models)
         symbols (set (mapcat (fn [[label]] (filter symbol? (tree-seq coll? seq (:form label)))) models))
-        hoisted? (fn [{[name] :names}] (and name (re-find #"^(trace|splice)__" (str name))))]
+        hoisted? (fn [{[name] :names}] (and name (re-find #"^(trace|splice)__" (str name))))
+        param? (fn [{:keys [form]}] (some #{'param} (tree-seq coll? seq form)))]
     (is (= {:kinds #{:trace :splice :compute} :computed-address true :destructured true :hoisted true :param true}
            {:kinds (set (map :kind nodes))
             :computed-address (boolean (some :keys nodes))
             :destructured (boolean (some (comp not :symbol?) nodes))
             :hoisted (boolean (some hoisted? nodes))
-            :param (boolean (some :param? nodes))}))
+            :param (boolean (some param? nodes))}))
     (is (= #{} (set/difference '#{clojure.core/conj clojure.core/assoc clojure.core/vec clojure.core/nth clojure.core/get
                                   clojure.core/count clojure.core/inc clojure.core/identity gen.array/+ gen.array/-}
                                (set (keep #(some-> (:rule %) symbol) nodes))))

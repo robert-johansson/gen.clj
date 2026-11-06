@@ -124,8 +124,6 @@
     (:compare :logic :predicate) :bool
     in))
 
-(def reduce-ops #{:sum :prod :max :min :argmax :argmin :all :any})
-
 (defn reduce-input-dtype
   "The dtype a reduction's operand is converted to."
   [op dtype defaults]

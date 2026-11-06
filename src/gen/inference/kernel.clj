@@ -476,10 +476,10 @@
   [params & body]
   (if (:trace (meta params))
     (let [[tr & args] params
-          t (gensym "t") apply! (gensym "apply") construct (gensym "construct")]
-      (let [k `(trace-kernel (fn [~t ~apply! ~construct] ~(traced-statements body tr t apply! construct false))
-                             (fn [~t ~apply! ~construct] ~(traced-statements body tr t apply! construct true)))]
-        (if (seq args) `(fn [~@args] ~k) k)))
+          t (gensym "t") apply! (gensym "apply") construct (gensym "construct")
+          k `(trace-kernel (fn [~t ~apply! ~construct] ~(traced-statements body tr t apply! construct false))
+                           (fn [~t ~apply! ~construct] ~(traced-statements body tr t apply! construct true)))]
+      (if (seq args) `(fn [~@args] ~k) k))
     (if (seq params) `(fn ~params ~(statements body)) (statements body))))
 
 (defn repeat
@@ -674,7 +674,8 @@
    program is cached: a run with a kernel of the same kind and parameters,
    the same model and argument arrays and the same number of steps reuses
    it, so make the model's data arrays once."
-  [kernel trace {:keys [samples burn thin key keep device] :or {burn 0 thin 1} :as opts}]
+  ;; keep is named for the arglists: run-on-handler reads it from opts
+  [kernel trace {:keys [samples burn thin key #_{:clj-kondo/ignore [:unused-binding]} keep device] :or {burn 0 thin 1} :as opts}]
   (when-not (and (nat-int? samples) (nat-int? burn) (pos-int? thin))
     (throw (ex-info "run needs :samples ≥ 0, :burn ≥ 0 and :thin ≥ 1" {:samples samples :burn burn :thin thin})))
   (let [steps (+ burn (* samples thin))

@@ -660,33 +660,32 @@
   "LU-decompose (with partial pivoting) the n×n matrix at offset off of m, in
    place. Fills perm with the row permutation; returns the permutation's sign."
   ^double [^doubles m ^long off ^long n ^longs perm]
-  (do
-    (dotimes [i n] (aset perm i i))
-    (loop [col 0 sign 1.0]
-      (if (== col n)
-        sign
-        (let [p (long (fold-range [r (inc col) n] [best col]
-                        (if (> (Math/abs (aget m (at r col))) (Math/abs (aget m (at (long best) col)))) r best)))
-              sign (if (== p col)
-                     sign
-                     (do (dotimes [j n]
-                           (let [t (aget m (at col j))]
-                             (aset m (at col j) (aget m (at p j)))
-                             (aset m (at p j) t)))
-                         (let [t (aget perm col)] (aset perm col (aget perm p)) (aset perm p t))
-                         (- sign)))
-              pivot (aget m (at col col))]
-          (when-not (== pivot 0.0)
-            (loop [r (inc col)]
-              (when (< r n)
-                (let [f (/ (aget m (at r col)) pivot)]
-                  (aset m (at r col) f)
-                  (loop [j (inc col)]
-                    (when (< j n)
-                      (aset m (at r j) (- (aget m (at r j)) (* f (aget m (at col j)))))
-                      (recur (inc j)))))
-                (recur (inc r)))))
-          (recur (inc col) sign))))))
+  (dotimes [i n] (aset perm i i))
+  (loop [col 0 sign 1.0]
+    (if (== col n)
+      sign
+      (let [p (long (fold-range [r (inc col) n] [best col]
+                      (if (> (Math/abs (aget m (at r col))) (Math/abs (aget m (at (long best) col)))) r best)))
+            sign (if (== p col)
+                   sign
+                   (do (dotimes [j n]
+                         (let [t (aget m (at col j))]
+                           (aset m (at col j) (aget m (at p j)))
+                           (aset m (at p j) t)))
+                       (let [t (aget perm col)] (aset perm col (aget perm p)) (aset perm p t))
+                       (- sign)))
+            pivot (aget m (at col col))]
+        (when-not (== pivot 0.0)
+          (loop [r (inc col)]
+            (when (< r n)
+              (let [f (/ (aget m (at r col)) pivot)]
+                (aset m (at r col) f)
+                (loop [j (inc col)]
+                  (when (< j n)
+                    (aset m (at r j) (- (aget m (at r j)) (* f (aget m (at col j)))))
+                    (recur (inc j)))))
+              (recur (inc r)))))
+        (recur (inc col) sign)))))
 
 (defn- solve [a b]
   (let [sa (shape-of a) sb (shape-of b)

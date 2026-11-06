@@ -4,7 +4,7 @@
    matrix, is a vector (batch); otherwise it is [.. n k]."
   {:api :stable}
   (:refer-clojure :exclude [+ *])
-  (:require [gen.array :as array :refer [+ * log sum]]
+  (:require [gen.array :as array :refer [* log sum]]
             [gen.array.dtype :as dt]
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]))

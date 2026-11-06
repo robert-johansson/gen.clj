@@ -42,6 +42,7 @@ clojure -X:test:commons-math          # also the Commons Math extension (ext/com
 clojure -X:test:device :dirs '["ext/device/test"]'   # the device lowerings (ext/device: JVM code; Metal with -J-Dgen.backend=mlx; CUDA C parked, its device tests skipped)
 clojure -M:test:device -i ext/device/test/gen/device/census.clj   # the device census: every law-test model staged, lowered and compared with the handler
 clojure -M:laws                       # a REPL with gen.clj and its laws (ext/laws, in :test too), as a dependent gets them
+clojure -M:codegen -m clj-kondo.main --lint src ext/device/src ext/laws/src ext/instaparse/src ext/codegen/src ext/commons-math/src   # clj-kondo, clean (.clj-kondo/config.edn and its hooks know gen.clj's macros)
 clojure -J-Dgen.backend=mlx -X:test   # any suite on the MLX backend (add -J-Dgen.mlx.device=cpu|gpu, -J-Dgen.mlx.dtypes=64)
 clojure -M:bench -m gen.array-bench   # per-op costs; add :c2 to compare C2 with Graal's JIT
 clojure -M:bench -m gen.model-bench   # model-level costs (GFI ops, batching, gradients)
