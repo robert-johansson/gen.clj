@@ -14,14 +14,14 @@
             [gen.gradients :as grad]
             [gen.inference.importance :as is]
             [gen.inference.kernel :as kernel]
-            [gen.parity-bench :as pb]
+            [gen.parity-models :as pm]
             [gen.random :as rng]))
 
 (def ^:private gpu?
   (and (= :mlx (array/backend-name array/*backend*)) (not= "cpu" (System/getProperty "gen.mlx.device"))))
 
 (deftest the-generator-refuses-what-it-does-not-lower
-  (let [[model args obs] (pb/models :vector)]
+  (let [[model args obs] (pm/models :vector)]
     (testing "float64: Metal has none"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Metal lowering: no :float64"
                             (metal/source (binding [st/*float* :float64] (ch/weight-run model args obs))))))
@@ -33,15 +33,15 @@
   (if-not gpu?
     (println "gen.device.metal-test: not MLX on the GPU, the kernel tests skip (-Dgen.backend=mlx runs them)")
     (doseq [m [:vector :static]
-            [kname program kern] [[:mala #(ch/mala-chain %1 %2 %3 pb/selection pb/tau %4) (kernel/mala pb/selection pb/tau)]
-                                  [:hmc #(ch/hmc-chain %1 %2 %3 pb/selection {:L 8 :eps pb/eps} %4) (kernel/hmc pb/selection {:L 8 :eps pb/eps})]]]
+            [kname program kern] [[:mala #(ch/mala-chain %1 %2 %3 pm/selection pm/tau %4) (kernel/mala pm/selection pm/tau)]
+                                  [:hmc #(ch/hmc-chain %1 %2 %3 pm/selection {:L 8 :eps pm/eps} %4) (kernel/hmc pm/selection {:L 8 :eps pm/eps})]]]
       (testing [m kname]
-        (let [[model args obs] (pb/models m)
+        (let [[model args obs] (pm/models m)
               steps 30 d 2 n 3
               k (metal/compile (program model args obs steps))
               root (rng/key 7)
               [vs acc] (mapv array/->clj (metal/run k n (rng/key-data root)))
-              proto (grad/continuous-selection (:trace (gfi/generate model args obs (rng/key 0))) pb/selection)
+              proto (grad/continuous-selection (:trace (gfi/generate model args obs (rng/key 0))) pm/selection)
               addrs (mapv first (cm/leaves proto))]
           (testing "thread i does not depend on the launch's size"
             (let [[vs5 acc5] (mapv array/->clj (metal/run k 5 (rng/key-data root)))]
@@ -63,7 +63,7 @@
     (println "gen.device.metal-test: not MLX on the GPU, the importance-sampling test skips")
     (doseq [m [:vector :static]]
       (testing m
-        (let [[model args obs] (pb/models m)
+        (let [[model args obs] (pm/models m)
               k (metal/compile (ch/weight-run model args obs))
               key (rng/key 21) n 200
               [w] (mapv array/->clj (metal/run k n (rng/key-data key)))
@@ -79,11 +79,11 @@
         (let [xs (mapv #(/ (double %) (max 1 (dec n)) 0.1) (range n))
               ys (mapv #(+ (* 2.0 %) -1.0 (Math/sin (* 7.0 %))) xs)
               args [(array/array xs)] obs (cm/choicemap :ys (array/array ys))
-              {:keys [program inputs]} (ch/weight-program pb/vector-model args obs)
+              {:keys [program inputs]} (ch/weight-program pm/vector-model args obs)
               k (metal/compile program)
               key (rng/key 5)
               [w] (mapv array/->clj (metal/run k 64 (rng/key-data key) {:inputs inputs}))
-              ref (is/importance-sampling pb/vector-model args obs 64 {:key key})]
+              ref (is/importance-sampling pm/vector-model args obs 64 {:key key})]
           (doseq [[i ref-w] (map-indexed vector (:log-weights ref))]
             (is (< (Math/abs (- (nth w i) ref-w)) (* 1e-4 (+ 1.0 (Math/abs ref-w)))) [i (nth w i) ref-w])))))))
 

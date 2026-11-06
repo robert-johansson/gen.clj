@@ -38,6 +38,19 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+### Changes
+
+- **Added: ext/device and ext/commons-math as dependencies** (their
+  `deps.edn`; genclj-ri2d). A dependent takes the device lowerings with
+  `:deps/root "ext/device"`, so kernel/run's and importance sampling's
+  `:device` and `gen.inference.device/run-chains` reach them (1.2.0's
+  dependent could not put ext/device on its classpath, and always got
+  `:device-fallback`, "not on the classpath"), and gen.dist.commons-math
+  with `:deps/root "ext/commons-math"` (with Commons Math 3.6.1); each
+  brings gen.clj from the same checkout. The README lists every module and
+  how a project takes it. ext/device's tests no longer read bench/: the
+  parity bench's models are `gen.parity-models`, in test/.
+
 ## [1.2.0] - 2026-11-06
 
 A language-model release (DESIGN §9, "1.2.0's theme"; genclj-ucfg),

@@ -14,25 +14,25 @@
             [gen.gradients :as grad]
             [gen.inference.importance :as is]
             [gen.inference.kernel :as kernel]
-            [gen.parity-bench :as pb]
+            [gen.parity-models :as pm]
             [gen.random :as rng]))
 
 (deftest the-generator-refuses-what-it-does-not-lower
-  (let [[model args obs] (pb/models :vector)]
+  (let [[model args obs] (pm/models :vector)]
     (testing "a scan over xs: only counted scans"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"scan over xs"
-                            (jvm/source (ch/mala-run model args obs pb/selection pb/tau 5) "P"))))
+                            (jvm/source (ch/mala-run model args obs pm/selection pm/tau 5) "P"))))
     (testing "a program of anything but a key, then its data"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"a program of a key"
                             (jvm/source (st/stage (fn [x] (array/exp x)) [[2] :float32]) "P"))))))
 
 (def ^:private kernels
   "Each chain: its staged program of S steps, and kernel/run's kernel."
-  {:mala [#(ch/mala-chain %1 %2 %3 pb/selection pb/tau %4) (kernel/mala pb/selection pb/tau)]
-   :hmc [#(ch/hmc-chain %1 %2 %3 pb/selection {:L 8 :eps pb/eps} %4) (kernel/hmc pb/selection {:L 8 :eps pb/eps})]})
+  {:mala [#(ch/mala-chain %1 %2 %3 pm/selection pm/tau %4) (kernel/mala pm/selection pm/tau)]
+   :hmc [#(ch/hmc-chain %1 %2 %3 pm/selection {:L 8 :eps pm/eps} %4) (kernel/hmc pm/selection {:L 8 :eps pm/eps})]})
 
 (deftest a-run-is-a-function-of-its-key
-  (let [[model args obs] (pb/models :vector)
+  (let [[model args obs] (pm/models :vector)
         k (jvm/compile ((first (kernels :mala)) model args obs 20))
         run #(mapv vec ((:run k) (rng/key-data (rng/key %))))]
     (is (= (run 7) (run 7)))
@@ -41,7 +41,7 @@
       (is (every? #(<= % 8000) (vals (:method-sizes k))) (:method-sizes k)))))
 
 (deftest a-cut-into-smaller-methods-runs-the-same-program
-  (let [[model args obs] (pb/models :static)
+  (let [[model args obs] (pm/models :static)
         p ((first (kernels :hmc)) model args obs 10)
         k (jvm/compile p)
         small (binding [] (System/setProperty "gen.jvm.chunk" "40") (try (jvm/compile p) (finally (System/clearProperty "gen.jvm.chunk"))))
@@ -56,10 +56,10 @@
     (doseq [m [:vector :static]
             [kname [program kern]] kernels]
       (testing [m kname]
-        (let [[model args obs] (pb/models m)
+        (let [[model args obs] (pm/models m)
               steps 50 d 2
               k (jvm/compile (program model args obs steps))
-              proto (grad/continuous-selection (:trace (gfi/generate model args obs (rng/key 0))) pb/selection)
+              proto (grad/continuous-selection (:trace (gfi/generate model args obs (rng/key 0))) pm/selection)
               addrs (mapv first (cm/leaves proto))]
           (doseq [s (range 3)]
             (let [key (rng/key (+ 100 s))
@@ -75,7 +75,7 @@
                      (vec acc))))))))))
 
 (deftest run-i-of-many-is-the-run-on-split-key-i
-  (let [[model args obs] (pb/models :vector)
+  (let [[model args obs] (pm/models :vector)
         k (jvm/compile ((first (kernels :mala)) model args obs 10))
         root (rng/key 11) n 7
         {[vs acc] :outputs} (jvm/run-many k n (rng/key-data root) {:block 2})]
@@ -89,7 +89,7 @@
         (is (= (vec vs) (vec (first (.get ^java.util.function.Supplier inst)))))))))
 
 (deftest many-runs-do-not-depend-on-the-threads
-  (let [[model args obs] (pb/models :vector)
+  (let [[model args obs] (pm/models :vector)
         k (jvm/compile (ch/weight-run model args obs))
         root (rng/key-data (rng/key 5))
         one (jvm/run-many k 1000 root {:threads 1 :lse 0})
@@ -102,7 +102,7 @@
     (println "gen.device.jvm-test: the backend draws float64, the comparison with importance sampling skips")
     (doseq [m [:vector :static]]
       (testing m
-        (let [[model args obs] (pb/models m)
+        (let [[model args obs] (pm/models m)
               k (jvm/compile (ch/weight-run model args obs))
               key (rng/key 21) n 200
               {[w] :outputs lse :log-sum-exp} (jvm/run-many k n (rng/key-data key) {:lse 0})
@@ -116,8 +116,8 @@
     (println "gen.device.jvm-test: not the JVM backend, the float64 comparison skips")
     (doseq [m [:vector :static]]
       (testing m
-        (let [[model args obs] (pb/models m)
-              proto (grad/continuous-selection (:trace (gfi/generate model args obs (rng/key 0))) pb/selection)
+        (let [[model args obs] (pm/models m)
+              proto (grad/continuous-selection (:trace (gfi/generate model args obs (rng/key 0))) pm/selection)
               addrs (mapv first (cm/leaves proto))
               key (rng/key 31) steps 30
               [k0 k1] (rng/split key 2)
@@ -153,7 +153,7 @@
       (doseq [n [100 1000]]
         (testing n
           (let [[args obs] (regression-data n)
-                model pb/vector-model
+                model pm/vector-model
                 {:keys [program inputs]} (binding [st/*float* :float64] (ch/weight-program model args obs))
                 k (jvm/compile program)
                 jin (mapv #(jvm/input-array % :float64) inputs)
@@ -162,13 +162,13 @@
             (swap! sizes conj (:statements k))
             (is (= (:log-weights (is/importance-sampling model args obs 30 {:key key})) (vec w)))
             (testing "a MALA chain, the data its inputs"
-              (let [{cp :program cin :inputs} (binding [st/*float* :float64] (ch/chain-program model args obs pb/selection [:mala 1e-4] 4))
+              (let [{cp :program cin :inputs} (binding [st/*float* :float64] (ch/chain-program model args obs pm/selection [:mala 1e-4] 4))
                     [vs acc] ((:run (jvm/compile cp)) (rng/key-data key) (mapv #(jvm/input-array % :float64) cin))
                     [k0 k1] (rng/split key 2)
                     tr (:trace (gfi/generate model args obs k0))
-                    addrs (mapv first (cm/leaves (grad/continuous-selection tr pb/selection)))
+                    addrs (mapv first (cm/leaves (grad/continuous-selection tr pm/selection)))
                     read (fn [t] (mapv #(double (array/->clj (cm/get-choice (:choices t) %))) addrs))
-                    {:keys [draws]} (kernel/run (kernel/mala pb/selection 1e-4) tr {:samples 4 :key k1 :keep read})]
+                    {:keys [draws]} (kernel/run (kernel/mala pm/selection 1e-4) tr {:samples 4 :key k1 :keep read})]
                 (is (= (vec (apply concat draws)) (vec vs)))
                 (is (= (mapv (fn [t] (not= (nth draws t) (if (zero? t) (read tr) (nth draws (dec t))))) (range 4)) (vec acc))))))))
       (testing "the code's size does not depend on the data's"
@@ -178,11 +178,11 @@
   (if-not (= :jvm (array/backend-name array/*backend*))
     (println "gen.device.jvm-test: not the JVM backend, the large-constant comparison skips")
     (let [[args obs] (regression-data 500)
-          k (jvm/compile (binding [st/*float* :float64] (ch/weight-run pb/vector-model args obs)))
+          k (jvm/compile (binding [st/*float* :float64] (ch/weight-run pm/vector-model args obs)))
           key (rng/key 6)
           {[w] :outputs} (jvm/run-many k 10 (rng/key-data key) {})]
       (is (= 2 (count (:constants k))))
-      (is (= (:log-weights (is/importance-sampling pb/vector-model args obs 10 {:key key})) (vec w))))))
+      (is (= (:log-weights (is/importance-sampling pm/vector-model args obs 10 {:key key})) (vec w))))))
 
 (def ^:private indexed-mean
   "A categorical draw indexing a table of means (a gather on a draw)."

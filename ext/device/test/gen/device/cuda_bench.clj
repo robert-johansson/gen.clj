@@ -16,7 +16,7 @@
             [gen.device.cuda :as cuda]
             [gen.gfi :as gfi]
             [gen.gradients :as grad]
-            [gen.parity-bench :as pb]
+            [gen.parity-models :as pm]
             [gen.random :as rng]))
 
 (defn- ms [^long t0] (/ (- (System/nanoTime) t0) 1e6))
@@ -73,16 +73,16 @@
   (let [kinds (set (or (seq kinds) ["mala" "hmc"]))
         chains [1 8 64 512 4096 65536]]
     (doseq [m (model-names)
-            :let [[model args obs] (pb/models m)
-                  proto (grad/continuous-selection (:trace (gfi/generate model args obs (rng/key 0))) pb/selection)
+            :let [[model args obs] (pm/models m)
+                  proto (grad/continuous-selection (:trace (gfi/generate model args obs (rng/key 0))) pm/selection)
                   d (count (cm/leaves proto))
                   si (first (keep-indexed (fn [i [p _]] (when (= p [:slope]) i)) (cm/leaves proto)))]
             [kind build steps] (concat (when (kinds "mala")
                                          (for [s [10 100 1000]]
-                                           [{:spec :linreg_mala} #(ch/mala-chain model args obs pb/selection pb/tau s) s]))
+                                           [{:spec :linreg_mala} #(ch/mala-chain model args obs pm/selection pm/tau s) s]))
                                        (when (kinds "hmc")
                                          (for [l [8 32] s [10 100 1000]]
-                                           [{:spec :linreg_hmc :L l} #(ch/hmc-chain model args obs pb/selection {:L l :eps pb/eps} s) s])))
+                                           [{:spec :linreg_hmc :L l} #(ch/hmc-chain model args obs pm/selection {:L l :eps pm/eps} s) s])))
             :let [t0 (System/nanoTime)
                   src (cuda/source (build))
                   stage-ms (ms t0)

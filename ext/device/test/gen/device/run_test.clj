@@ -17,7 +17,7 @@
             [gen.inference.importance :as is]
             [gen.inference.kernel :as kernel]
             [gen.inference.mcmc :as mcmc]
-            [gen.parity-bench :as pb]
+            [gen.parity-models :as pm]
             [gen.random :as rng]
             [gen.selection :as sel]
             [gen.test-support :as ts]))
@@ -35,11 +35,11 @@
   (if-not jvm?
     (println "gen.device.run-test: the comparison runs on the JVM backend")
     (doseq [m [:vector :static]
-            [kname k] [[:mala (kernel/mala pb/selection pb/tau)] [:hmc (kernel/hmc pb/selection {:L 8 :eps pb/eps})]
-                       [:hmc-dense (kernel/hmc pb/selection {:L 8 :eps pb/eps :inv-metric dense-metric})]
-                       [:mala-dense (kernel/mala pb/selection pb/tau {:inv-metric dense-metric})]]]
+            [kname k] [[:mala (kernel/mala pm/selection pm/tau)] [:hmc (kernel/hmc pm/selection {:L 8 :eps pm/eps})]
+                       [:hmc-dense (kernel/hmc pm/selection {:L 8 :eps pm/eps :inv-metric dense-metric})]
+                       [:mala-dense (kernel/mala pm/selection pm/tau {:inv-metric dense-metric})]]]
       (testing [m kname]
-        (let [[model args obs] (pb/models m)
+        (let [[model args obs] (pm/models m)
               tr (:trace (gfi/generate model args obs (rng/key 0)))
               opts {:samples 40 :burn 7 :thin 3 :key (rng/key 3)}
               h (kernel/run k tr opts)
@@ -64,7 +64,7 @@
     (println "gen.device.run-test: the comparison runs on the JVM backend")
     (doseq [m [:vector :static]]
       (testing m
-        (let [[model args obs] (pb/models m)
+        (let [[model args obs] (pm/models m)
               h (is/importance-sampling model args obs 100 {:key (rng/key 5)})
               dv (is/importance-sampling model args obs 100 {:key (rng/key 5) :device :jvm})]
           (is (= :jvm (:device dv)) (:device-fallback dv))
@@ -91,10 +91,10 @@
   (if-not (= :float32 (:float (array/defaults array/*backend*)))
     (println "gen.device.run-test: the backend draws float64, the float32 comparison skips (-Dgen.backend=mlx runs it)")
     (doseq [m [:vector :static]
-            [kname k] [[:mala (kernel/mala pb/selection pb/tau)] [:hmc (kernel/hmc pb/selection {:L 8 :eps pb/eps})]
-                       [:hmc-dense (kernel/hmc pb/selection {:L 8 :eps pb/eps :inv-metric dense-metric})]]]
+            [kname k] [[:mala (kernel/mala pm/selection pm/tau)] [:hmc (kernel/hmc pm/selection {:L 8 :eps pm/eps})]
+                       [:hmc-dense (kernel/hmc pm/selection {:L 8 :eps pm/eps :inv-metric dense-metric})]]]
       (testing [m kname]
-        (let [[model args obs] (pb/models m)
+        (let [[model args obs] (pm/models m)
               tr (:trace (gfi/generate model args obs (rng/key 0)))
               opts {:samples 40 :burn 7 :thin 3 :key (rng/key 3)}
               h (kernel/run k tr opts)
@@ -126,7 +126,7 @@
     (doseq [m [:vector :static]
             device [:jvm :metal]]
       (testing [m device]
-        (let [[model args obs] (pb/models m)
+        (let [[model args obs] (pm/models m)
               h (is/importance-sampling model args obs 50 {:key (rng/key 5)})
               dv (is/importance-sampling model args obs 50 {:key (rng/key 5) :device device})]
           (if (and (= :metal device) (:device-fallback dv))
@@ -140,9 +140,9 @@
                             (array/->clj (:weight (gfi/update (first (:traces h)) (cm/choicemap :slope 0.5) (rng/key 1)))))))))))))
 
 (def ^:private chain-kernels
-  [[:mala (kernel/mala pb/selection pb/tau)]
-   [:hmc (kernel/hmc pb/selection {:L 8 :eps pb/eps})]
-   [:hmc-dense (kernel/hmc pb/selection {:L 8 :eps pb/eps :inv-metric dense-metric})]])
+  [[:mala (kernel/mala pm/selection pm/tau)]
+   [:hmc (kernel/hmc pm/selection {:L 8 :eps pm/eps})]
+   [:hmc-dense (kernel/hmc pm/selection {:L 8 :eps pm/eps :inv-metric dense-metric})]])
 
 (defn- chain-starts
   "n traces of model from the prior on their own keys: the chains' starts."
@@ -162,7 +162,7 @@
     (doseq [m [:vector :static]
             [kname k] chain-kernels]
       (testing [m kname]
-        (let [starts (chain-starts (pb/models m) 5)
+        (let [starts (chain-starts (pm/models m) 5)
               opts {:samples 20 :burn 3 :thin 2 :key (rng/key 7)}
               h (by-chain k starts opts)
               dv (device/run-chains k starts (assoc opts :device :jvm))]
@@ -189,10 +189,10 @@
   (if-not jvm?
     (println "gen.device.run-test: the divergence comparison runs on the JVM backend")
     (doseq [m [:vector :static]
-            [kname k] [[:hmc (kernel/hmc pb/selection {:L 8 :eps 0.117})]
-                       [:mala (kernel/mala pb/selection (/ (* 0.1172 0.1172) 2.0))]]]
+            [kname k] [[:hmc (kernel/hmc pm/selection {:L 8 :eps 0.117})]
+                       [:mala (kernel/mala pm/selection (/ (* 0.1172 0.1172) 2.0))]]]
       (testing [m kname]
-        (let [[model args obs] (pb/models m)
+        (let [[model args obs] (pm/models m)
               tr (:trace (gfi/generate model args obs (rng/key 0)))
               opts {:samples 40 :burn 7 :thin 3 :key (rng/key 3)}
               h (kernel/run k tr opts)
@@ -203,7 +203,7 @@
           (is (= (:acceptance-rate h) (:acceptance-rate dv)))
           (is (= (map leaves-of (:traces h)) (map leaves-of (:traces dv))))
           (testing "run-chains"
-            (let [starts (chain-starts (pb/models m) 5)
+            (let [starts (chain-starts (pm/models m) 5)
                   opts {:samples 20 :burn 3 :thin 2 :key (rng/key 7)}
                   h (by-chain k starts opts)
                   dv (device/run-chains k starts (assoc opts :device :jvm))]
@@ -219,7 +219,7 @@
             [kname k] chain-kernels
             device [:jvm :metal]]
       (testing [m kname device]
-        (let [starts (chain-starts (pb/models m) 6)
+        (let [starts (chain-starts (pm/models m) 6)
               opts {:samples 20 :burn 3 :thin 2 :key (rng/key 7)}
               h (by-chain k starts opts)
               dv (device/run-chains k starts (assoc opts :device device))]
@@ -233,15 +233,15 @@
   ;; :keep-choices reads the kept choices from the program's outputs, as
   ;; :keep {address #(% address)} reads them from traces: a latent choice
   ;; (an output), an observation (the start's, no step changes it)
-  (let [[model args obs] (pb/models :vector)
-        starts (chain-starts (pb/models :vector) 4)
+  (let [[model args obs] (pm/models :vector)
+        starts (chain-starts (pm/models :vector) 4)
         opts {:samples 15 :burn 2 :thin 2 :key (rng/key 9)}
         addrs [:slope :intercept :ys]
-        expected (mapv :draws (by-chain (kernel/hmc pb/selection {:L 8 :eps pb/eps}) starts
+        expected (mapv :draws (by-chain (kernel/hmc pm/selection {:L 8 :eps pm/eps}) starts
                                         (assoc opts :keep (into {} (map (fn [a] [a #(% a)])) addrs))))]
     (doseq [device (if jvm? [:jvm] [:jvm :metal])]
       (testing device
-        (let [r (device/run-chains (kernel/hmc pb/selection {:L 8 :eps pb/eps}) starts
+        (let [r (device/run-chains (kernel/hmc pm/selection {:L 8 :eps pm/eps}) starts
                                    (assoc opts :keep-choices addrs :device device))]
           (is (= device (:device r)) (:device-fallback r))
           (if jvm?
@@ -249,8 +249,8 @@
             (doseq [a addrs]
               (is (every? true? (map close? (flatten (mapv a (:draws r))) (flatten (mapv a expected)))) (str a))))))))
   (testing "loud: an address with no choice, or both :keep and :keep-choices"
-    (let [starts (chain-starts (pb/models :vector) 2)
-          k (kernel/mala pb/selection pb/tau)]
+    (let [starts (chain-starts (pm/models :vector) 2)
+          k (kernel/mala pm/selection pm/tau)]
       (is (thrown? clojure.lang.ExceptionInfo (device/run-chains k starts {:samples 3 :key (rng/key 1) :keep-choices [:nope] :device :jvm})))
       (is (= :keep-and-keep-choices
              (:reason (ex-data (try (device/run-chains k starts {:samples 3 :key (rng/key 1) :keep identity :keep-choices [:slope]})
@@ -305,18 +305,18 @@
   ;; a loud error naming :keep-choices, which reads values with no trace
   (if-not (gen.array.protocols/-lazy? array/*backend*)
     (println "gen.device.run-test: an eager backend makes any number of traces, the trace limit skips")
-    (let [starts (chain-starts (pb/models :vector) 200)
-          k (kernel/mala pb/selection pb/tau)
+    (let [starts (chain-starts (pm/models :vector) 200)
+          k (kernel/mala pm/selection pm/tau)
           opts {:samples 300 :key (rng/key 2) :device :jvm}]
       (is (= :too-many-traces (:reason (ts/thrown-data (device/run-chains k starts opts)))))
       (is (= :too-many-traces (:reason (ts/thrown-data (device/run-chains k starts (assoc opts :keep #(% :slope)))))))
       (is (= 200 (count (:draws (device/run-chains k starts (assoc opts :keep-choices [:slope])))))))))
 
 (deftest run-chains-of-other-structures-fall-back
-  (let [[model args obs] (pb/models :vector)
-        [static-model sargs sobs] (pb/models :static)
+  (let [[model args obs] (pm/models :vector)
+        [static-model sargs sobs] (pm/models :static)
         starts [(:trace (gfi/generate model args obs (rng/key 1))) (:trace (gfi/generate static-model sargs sobs (rng/key 2)))]
-        k (kernel/mala pb/selection pb/tau)
+        k (kernel/mala pm/selection pm/tau)
         r (device/run-chains k starts {:samples 5 :key (rng/key 3) :device :jvm})]
     (is (nil? (:device r)))
     (is (re-find #"different generative functions" (:reason (:device-fallback r))))
@@ -440,20 +440,20 @@
 (deftest a-compiled-program-is-reused
   (when jvm?
     (device/clear-cache!)
-    (let [[model args obs] (pb/models :vector)
+    (let [[model args obs] (pm/models :vector)
           tr (:trace (gfi/generate model args obs (rng/key 0)))
           programs #(count @@#'gen.inference.device/cache)
           run #(kernel/run %1 %2 {:samples %3 :key (rng/key 1) :device :jvm})]
-      (run (kernel/mala pb/selection pb/tau) tr 5)
+      (run (kernel/mala pm/selection pm/tau) tr 5)
       (is (= 1 (programs)))
-      (run (kernel/mala pb/selection pb/tau) tr 5)
+      (run (kernel/mala pm/selection pm/tau) tr 5)
       (is (= 1 (programs)) "a kernel rebuilt with the same parameters: one program")
-      (run (kernel/mala pb/selection pb/tau) (:trace (gfi/generate model (into [] args) obs (rng/key 4))) 5)
+      (run (kernel/mala pm/selection pm/tau) (:trace (gfi/generate model (into [] args) obs (rng/key 4))) 5)
       (is (= 1 (programs)) "a new argument vector around the same arrays: one program")
-      (run (kernel/mala pb/selection (* 2 pb/tau)) tr 5)
+      (run (kernel/mala pm/selection (* 2 pm/tau)) tr 5)
       (is (= 2 (programs)) "another step size, another program")
-      (run (kernel/mala pb/selection pb/tau) tr 6)
+      (run (kernel/mala pm/selection pm/tau) tr 6)
       (is (= 3 (programs)) "another length, another program")
-      (is (= :jvm (:device (run (kernel/hmc pb/selection {:L 8 :eps pb/eps}) tr 5))))
-      (run (kernel/hmc pb/selection {:L 8 :eps pb/eps}) tr 5)
+      (is (= :jvm (:device (run (kernel/hmc pm/selection {:L 8 :eps pm/eps}) tr 5))))
+      (run (kernel/hmc pm/selection {:L 8 :eps pm/eps}) tr 5)
       (is (= 4 (programs)) "an HMC kernel rebuilt alike: one program"))))

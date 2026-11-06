@@ -5,7 +5,10 @@
    Distributions.jl families against Commons Math's own, wrapped with real,
    two independent implementations (log densities, and the means of draws
    from each). Run with clojure -X:test:commons-math."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
+            [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
             [gen.dist :as d]
             [gen.dist.commons-math :as cm]
@@ -95,3 +98,27 @@
       (trace :y (d/normal (array/+ k z) 1)))))
 
 (laws/deflaws commons-math [[:model model [] []]] 60 (merge laws/all laws/conventions))
+
+(deftest the-module-as-a-dependent-takes-it
+  ;; genclj-ri2d: a git dependency with :deps/root "ext/commons-math" gets
+  ;; gen.clj from the same checkout and the Commons Math the
+  ;; :commons-math alias tests, and the module's code needs no test code.
+  ;; Planted bugs (2026-11-06): the alias's version moved fails the first;
+  ;; a require of gen.test-support in the module fails the second
+  (testing "its deps.edn pins the Commons Math the :commons-math alias gives the tests"
+    (let [module (edn/read-string (slurp "ext/commons-math/deps.edn"))
+          root (edn/read-string (slurp "deps.edn"))
+          version #(get-in % ['org.apache.commons/commons-math3 :mvn/version])]
+      (is (= ["src"] (:paths module)))
+      (is (some? (version (:deps module))))
+      (is (= (version (:deps module)) (version (get-in root [:aliases :commons-math :extra-deps]))))
+      (is (= {:local/root "../.."} (get-in module [:deps 'gen.clj/gen.clj])))
+      (is (= #{'gen.clj/gen.clj 'org.apache.commons/commons-math3} (set (keys (:deps module)))))))
+  (testing "its namespace requires clojure's and gen.clj's src/ namespaces only"
+    (let [[_ _ & clauses] (with-open [r (java.io.PushbackReader. (io/reader "ext/commons-math/src/gen/dist/commons_math.clj"))] (read r))
+          required (for [clause clauses :when (and (seq? clause) (= :require (first clause)))
+                         spec (rest clause)]
+                     (if (vector? spec) (first spec) spec))
+          in-src? #(.exists (io/file "src" (str (-> (name %) (str/replace "." "/") (str/replace "-" "_")) ".clj")))]
+      (is (seq required))
+      (is (empty? (remove #(or (str/starts-with? (name %) "clojure.") (in-src? %)) required))))))

@@ -1,0 +1,20 @@
+;; gen.device: the device lowerings (experimental), a module of gen.clj
+;; outside its core (DESIGN.md §9, the device decisions). A staged program
+;; (gen.array.stage) as generated JVM code (gen.device.jvm) or as one Metal
+;; kernel through MLX (gen.device.metal): what kernel/run's and importance
+;; sampling's :device option and gen.inference.device/run-chains run when
+;; it is on the classpath. Without it a :device run falls back to the
+;; handler and says so (:device-fallback). gen.clj is its one dependency:
+;; the JVM lowering compiles with the JDK's own compiler (javax.tools: a
+;; JDK, not a JRE); Metal needs the MLX backend (its native libraries and
+;; binding, README) and the JVM option --enable-native-access=ALL-UNNAMED.
+;;
+;; A dependent takes it as a git dependency on gen.clj's repository with
+;; :deps/root "ext/device", at the commit of the gen.clj it uses:
+;;
+;;   gen.clj/device {:git/url "…gen.clj" :git/sha "…" :deps/root "ext/device"}
+;;
+;; It brings gen.clj from the same checkout. In gen.clj's own repository
+;; the :device alias puts it on the classpath (with :test for its tests).
+{:paths ["src"]
+ :deps {gen.clj/gen.clj {:local/root "../.."}}}

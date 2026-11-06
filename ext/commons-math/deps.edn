@@ -1,0 +1,17 @@
+;; gen.dist.commons-math: Apache Commons Math 3's univariate distributions
+;; as gen.clj distributions (experimental), GenDistributions' role, a
+;; module of gen.clj outside its core (DESIGN.md §9, "Apache Commons Math
+;; 3 is the JVM's Distributions.jl"). Commons Math (Apache License 2.0) is
+;; its one dependency beside gen.clj.
+;;
+;; A dependent takes it as a git dependency on gen.clj's repository with
+;; :deps/root "ext/commons-math", at the commit of the gen.clj it uses:
+;;
+;;   gen.clj/commons-math {:git/url "…gen.clj" :git/sha "…" :deps/root "ext/commons-math"}
+;;
+;; It brings gen.clj from the same checkout. In gen.clj's own repository
+;; the :commons-math alias puts it on the classpath (with :test for its
+;; tests), at the Commons Math this pins.
+{:paths ["src"]
+ :deps {gen.clj/gen.clj {:local/root "../.."}
+        org.apache.commons/commons-math3 {:mvn/version "3.6.1"}}}

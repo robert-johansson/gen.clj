@@ -13,16 +13,16 @@
             [gen.gfi :as gfi]
             [gen.gradients :as grad]
             [gen.inference.kernel :as kernel]
-            [gen.parity-bench :as pb]
+            [gen.parity-models :as pm]
             [gen.random :as rng]))
 
 (def ^:private gpu? (some? (System/getProperty "gen.cuda.nvrtc")))
 
 (deftest the-generator-refuses-what-it-does-not-lower
-  (let [[model args obs] (pb/models :vector)]
+  (let [[model args obs] (pm/models :vector)]
     (testing "a scan over xs: only counted scans run in a thread"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"scan over xs"
-                            (cuda/source (ch/mala-run model args obs pb/selection pb/tau 5)))))
+                            (cuda/source (ch/mala-run model args obs pm/selection pm/tau 5)))))
     (testing "a program of anything but a key, then its data"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"a program of a key"
                             (cuda/source (gen.array.stage/stage (fn [x] (array/exp x)) [[2] :float32])))))))
@@ -39,9 +39,9 @@
 (deftest a-thread-is-its-own-chain
   (if-not gpu?
     (println "gen.device.cuda-test: no -Dgen.cuda.nvrtc, the kernel tests skip")
-    (let [[model args obs] (pb/models :vector)
+    (let [[model args obs] (pm/models :vector)
           steps 20 d 2
-          k (cuda/compile (cuda/source (ch/mala-chain model args obs pb/selection pb/tau steps)))
+          k (cuda/compile (cuda/source (ch/mala-chain model args obs pm/selection pm/tau steps)))
           root (rng/key 7)]
       (try
         (let [[v3 a3] (launch k 3 root)
@@ -56,13 +56,13 @@
           (testing "thread i is kernel/run's chain from (split key n)[i]"
             (let [n 3
                   [vs acc] (launch k n root)
-                  proto (grad/continuous-selection (:trace (gfi/generate model args obs (rng/key 0))) pb/selection)
+                  proto (grad/continuous-selection (:trace (gfi/generate model args obs (rng/key 0))) pm/selection)
                   addrs (mapv first (cm/leaves proto))]
               (doseq [i (range n)]
                 (let [[k0 k1] (rng/split (nth (rng/split root n) i) 2)
                       tr (:trace (gfi/generate model args obs k0))
                       read (fn [t] (mapv #(double (array/->clj (cm/get-choice (:choices t) %))) addrs))
-                      {:keys [draws]} (kernel/run (kernel/mala pb/selection pb/tau) tr {:samples steps :key k1 :keep read})]
+                      {:keys [draws]} (kernel/run (kernel/mala pm/selection pm/tau) tr {:samples steps :key k1 :keep read})]
                   (doseq [t (range steps) j (range d)]
                     (let [dev (nth vs (+ (* i steps d) (* t d) j)) ref (nth (nth draws t) j)]
                       (is (< (Math/abs (- dev ref)) (* 1e-4 (+ 1.0 (Math/abs ref)))) [i t j dev ref])))
@@ -73,7 +73,7 @@
 (deftest the-log-ml-reduced-on-the-device-is-the-hosts
   (if-not gpu?
     (println "gen.device.cuda-test: no -Dgen.cuda.nvrtc, the reduction test skips")
-    (let [[model args obs] (pb/models :vector)
+    (let [[model args obs] (pm/models :vector)
           k (cuda/compile (cuda/source (ch/weight-run model args obs)))]
       (try
         (doseq [n [1 7 1000 1025 100000]]
