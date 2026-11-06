@@ -701,13 +701,17 @@
                  (str (try (eval '(gen.dynamic/gen [xs] (->> xs (map-indexed (fn [i x] (trace [:y i] (gen.dist/normal x 1))))) nil))
                            nil (catch Throwable e (.getMessage ^Throwable (or (.getCause e) e))))))))
   (testing "B7: an infinite lazy return value costs little"
-    ;; the handler forces only the first 10,000 elements; they are host
-    ;; numbers, so the cost is the walk's, not 10,000 backend ops' (which
-    ;; on MLX would measure the machine: 50 ms a run on the Jetson's cores)
-    (let [m (gen [] (let [s (trace :s (d/normal 0 1))] (map #(if (zero? %) s (inc %)) (range))))
-          t0 (System/nanoTime)]
-      (dotimes [i 20] (gfi/simulate m [] (rng/key i)))
-      (is (< (/ (- (System/nanoTime) t0) 1e6) 400.0) "under 20 ms a run"))))
+    ;; the handler forces only its first gfi/realize-limit (10,000)
+    ;; elements, chunks of 32 at a time: counted, not timed (genclj-n2ia: 20
+    ;; runs under 400 ms of wall clock failed a loaded machine's, :par's
+    ;; five JVMs beside it); the minute is a hang's guard, no claim of
+    ;; speed. Planted (2026-11-06): realize! forcing twice the limit fails it
+    (let [forced (atom 0)
+          m (gen [] (let [s (trace :s (d/normal 0 1))]
+                      (map #(do (swap! forced inc) (if (zero? %) s (inc %))) (range))))
+          tr (ts/within 60000 #(gfi/simulate m [] (rng/key 0)))]
+      (is (not= ::ts/timed-out tr))
+      (is (<= gfi/realize-limit @forced (+ gfi/realize-limit 32)) (str @forced " elements forced")))))
 
 ;; ---------------------------------------------------------------------------
 ;; A choice outside its own support stops the run (DESIGN.md §9, the ten
