@@ -11,14 +11,19 @@
      most of the mass, a rare token, every token, and a soft weight.
    - Nothing accepted: Ẑ = 0 at every key. Everything accepted: the
      recursive estimate is 1 exactly, with two checks.
-   - Budgets: at most R + 1 checks (recursive), R + max-accepts
-     (geometric); determinism by the key; misuse is loud.
+   - Budgets: at most R checks (recursive), R + max-accepts - 1
+     (geometric), and some run makes that many; determinism by the key;
+     misuse is loud.
 
    Planted bugs (2026-11-05, each applied, the suite run, reverted): the
    recursive estimate m_n where the extra draw is rejected (in place of
    p(x_n)); the geometric estimate (s - 1)/(n + 1) (a reading of the
    paper's Def. 8 that is biased); phantoms not counted. Each fails the
-   proper-weighting test."
+   proper-weighting test. And (2026-11-06, genclj-0d00) the budgets off by
+   one: the recursive base case a draw late ((>= i max-rejects)) or early
+   ((>= (+ i 2) max-rejects)), the geometric stop a rejection late (> in
+   place of >= at both its checks of max-rejects) or an accept late ((> s
+   max-accepts)); each fails budgets-bound-the-checks-exactly."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.llm.awrs :as awrs]
             [gen.llm.branching-contract :as bc]
@@ -89,10 +94,16 @@
   (testing "everything accepted: the recursive estimate is 1, after two checks"
     (is (every? #(and (< (Math/abs (:log-z %)) 1e-6) (= 2 (:checks %))) (runs (:all conditions) {})))))
 
-(deftest budgets-bound-the-checks
-  (doseq [[opts most] [[{:max-rejects 1} 1] [{:max-rejects 3} 4]
-                       [{:method :geometric :max-rejects 2} 4] [{:method :geometric :max-rejects 2 :max-accepts 3} 5]]]
-    (is (every? #(<= (:checks %) most) (runs (:rare conditions) opts)) (pr-str opts))))
+(deftest budgets-bound-the-checks-exactly
+  ;; the most checks a budget of R rejections allows, made by some run: R
+  ;; for the recursive estimator (its R-th draw is the base case, and an
+  ;; accept before it costs one more draw), R + max-accepts - 1 for the
+  ;; geometric (it stops at its R-th rejection or its last accept, whichever
+  ;; comes first; :most, for distinct accepted tokens to check)
+  (doseq [[cname opts most] [[:rare {:max-rejects 1} 1] [:rare {:max-rejects 3} 3]
+                             [:rare {:method :geometric :max-rejects 2} 3]
+                             [:most {:method :geometric :max-rejects 2 :max-accepts 3} 4]]]
+    (is (= most (reduce max (map :checks (runs (conditions cname) opts)))) (pr-str cname opts))))
 
 (deftest runs-are-pure-functions-of-the-key
   (doseq [[_ opts] estimators]

@@ -45,6 +45,15 @@ other values for the same key, from the same distribution.
   Qwen3.8 template could not be reached through the agent, which rendered
   Qwen3.5's always. Options the template refuses are refused as
   `chat/render` refuses them (`:invalid-option`), before the session opens.
+- **Changed: AWRS exponentiates its row once** (gen.llm.awrs,
+  experimental; genclj-0d00). A sample computed `exp` over the whole row
+  two or three times a draw; it now makes one pass a sample and sums the
+  masses after: at 151,936 tokens (Qwen's vocabulary) 2.5 ms becomes 1.0
+  ms with every token accepted, 7.0 ms becomes 1.8 with one token in
+  seven (the M4). The draws for a key are unchanged, bit for bit. The
+  docstring's budget is corrected to what the code does: at most R checks
+  for `:recursive` and R + `:max-accepts` - 1 for `:geometric`, where it
+  said R + 1 and R + `:max-accepts`.
 
 ## [1.2.0] - 2026-11-06
 
