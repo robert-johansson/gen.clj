@@ -9,7 +9,7 @@
    exponential draws match JAX to rounding."
   {:api :stable}
   (:refer-clojure :exclude [key + - * / < > <= >= ==])
-  (:require [gen.array :as array :refer [+ - * / < > <= >= ==]]
+  (:require [gen.array :as array :refer [+ - * / < > ==]]
             [gen.array.dtype :as dt]
             [gen.array.protocols :as p]
             [gen.random.threefry :as threefry]))

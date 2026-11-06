@@ -42,7 +42,6 @@
                            :reason}, the flagged ones as {:already true}"
   {:api :internal}
   (:require [clojure.string :as str]
-            [gen.array :as array]
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.dynamic.guard :as guard]

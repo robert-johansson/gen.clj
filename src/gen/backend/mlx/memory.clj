@@ -136,6 +136,9 @@
 ;; MLX's limits and memory
 ;; ---------------------------------------------------------------------------
 
+;; never read: defined for its effect (clj-kondo's unused-private-var does
+;; not apply)
+#_{:clj-kondo/ignore [:unused-private-var]}
 (defonce ^:private memory-bounds
   ;; once per process, before any array: set-cache-limit! and
   ;; set-memory-limit! change them later

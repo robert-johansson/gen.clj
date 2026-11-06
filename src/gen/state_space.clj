@@ -67,7 +67,7 @@
    prior's mean's shape; hmm's are state indices."
   {:api :stable}
   (:refer-clojure :exclude [+ - * /])
-  (:require [gen.array :as array :refer [+ - * /]]
+  (:require [gen.array :as array :refer [+ - *]]
             [gen.array.dtype :as dt]
             [gen.array.linalg :as la]
             [gen.choicemap :as cm]

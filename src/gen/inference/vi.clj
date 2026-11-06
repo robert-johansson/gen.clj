@@ -58,7 +58,7 @@
    resampled traces, drawn from several runs, stay :traces."
   {:api :stable}
   (:refer-clojure :exclude [+ - * /])
-  (:require [gen.array :as array :refer [+ - * /]]
+  (:require [gen.array :as array :refer [+ - /]]
             [gen.batched :as batched]
             [gen.choicemap :as cm]
             [gen.dist.core :as dc]

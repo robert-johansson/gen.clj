@@ -38,7 +38,7 @@
    many times."
   {:api :experimental}
   (:refer-clojure :exclude [+ - * / < > <= >= ==])
-  (:require [gen.array :as array :refer [+ - * / < > <= >= ==]]
+  (:require [gen.array :as array :refer [+ - * / >= ==]]
             [gen.array.dtype :as dt]
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]
@@ -254,7 +254,7 @@
           node (fn [id] (.get ^java.util.ArrayList (.-nodes g) id))
           strip (fn [{:keys [op args] :as n}]
                   (if (and (#{:broadcast :reshape :convert} op) (number? (first args))) (recur (node (first args))) n))
-          affine (fn affine [{:keys [op args] :as n}]
+          affine (fn affine [{:keys [op args]}]
                    (case op
                      :iota [0 1]
                      :multiply (let [[a b] args

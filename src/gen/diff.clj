@@ -174,7 +174,7 @@
 
 (defn- unchanged-or [diffs f] (if (every? no-change? diffs) no-change (f)))
 
-(defmethod propagate #'clojure.core/count [_ [coll] [d :as diffs]]
+(defmethod propagate #'clojure.core/count [_ [_coll] [d :as diffs]]
   (unchanged-or diffs #(cond (vector-diff? d) (int-diff (- (:new-length d) (:prev-length d)))
                              (set-diff? d) (int-diff (- (count (:added d)) (count (:deleted d))))
                              (dict-diff? d) (int-diff (- (count (:added d)) (count (:deleted d))))
@@ -215,7 +215,7 @@
                          (element-diff coll d k)
                          unknown-change)))
 
-(defmethod propagate #'clojure.core/conj [_ [coll x :as args] [d dx :as diffs]]
+(defmethod propagate #'clojure.core/conj [_ [coll _x :as args] [d dx :as diffs]]
   ;; on a vector whose length did not change, both results hold x last
   (unchanged-or diffs #(let [n (count coll)]
                          (cond (not (and (= 2 (count args)) (vector? coll))) unknown-change
@@ -224,7 +224,7 @@
                                (vector-diff (inc n) (inc n) (cond-> (:updated d) (changed? dx) (assoc n dx)))
                                :else unknown-change))))
 
-(defmethod propagate #'clojure.core/assoc [_ [coll k x :as args] [d dk dx :as diffs]]
+(defmethod propagate #'clojure.core/assoc [_ [coll k _x :as args] [d dk dx :as diffs]]
   ;; with coll and k unchanged, both results hold k: only its value changed
   (unchanged-or diffs #(cond (not (and (= 3 (count args)) (no-change? d) (no-change? dk))) unknown-change
                              (backend-key? k) unknown-change

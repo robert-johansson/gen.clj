@@ -49,8 +49,7 @@
    evaluated in this JVM (gen.codegen.candidate), so one that loops is
    abandoned, not stopped, and one that exhausts memory ends the JVM."
   {:api :internal}
-  (:require [clojure.string :as str]
-            [gen.array :as array]
+  (:require [gen.array :as array]
             [gen.codegen.candidate :as candidate]
             [gen.codegen.explain :as explain]
             [gen.codegen.session :as session]
@@ -74,17 +73,6 @@
 (defn- host [x] (double (if (array/backend-array? x) (array/item x) x)))
 
 (defn- finite? [x] (Double/isFinite (host x)))
-
-(defn- message
-  "e's message and its causes', joined: a compiler error's own message
-   names only where it happened (Syntax error compiling at (5:25).), its
-   cause what (No such var: d/point), and the repair loop sends both."
-  [^Throwable e]
-  (let [m (->> (take-while some? (iterate ex-cause e))
-               (map #(or (ex-message %) (str (class %))))
-               distinct
-               (str/join " Caused by: "))]
-    (subs m 0 (min 500 (count m)))))
 
 (defn- median [xs] (nth (sort xs) (quot (count xs) 2)))
 
