@@ -224,6 +224,15 @@
    :erfinv (fn [g _ out need] (grads need (* g (* (/ sqrt-pi 2.0) (array/exp (* out out))))))
    :where (fn [g [c] _ need] (grads need nil (array/where c g 0.0) (array/where c 0.0 g)))})
 
+(defn elementwise-vjp
+  "The cotangents of an elementwise op's operands (where need, a vector of
+   booleans, says) from the cotangent g of its result out, the operands as
+   values (primals), before unbroadcasting: the tape's rule for op. The MLX
+   backend gives MLX these for its exact routes (gen.backend.mlx.exact) in
+   its native mode."
+  [op g primals out need]
+  ((elementwise-rules op) g primals out need))
+
 (defn- matmul-vjp
   "Cotangents of x and y from g, for NumPy matmul (1-d operands are vectors)."
   [g x y need]

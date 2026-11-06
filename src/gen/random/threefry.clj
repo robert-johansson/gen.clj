@@ -16,7 +16,12 @@
    repeat a key (DESIGN.md §9).
 
    Everything is pure and index-local, so element i of any draw depends only on
-   the key and i. 32-bit words are held in longs, masked to 32 bits."
+   the key and i. 32-bit words are held in longs, masked to 32 bits.
+
+   The schedule (rounds, rotations and key injections) is written once, as
+   data: hash2x32 unrolls it on host longs, and hash-words runs it in the
+   uint32 ops of an array backend (the MLX backend's and the staging
+   backend's draws), so that a key draws the same bits everywhere."
   {:api :internal})
 
 (set! *warn-on-reflection* true)
@@ -39,33 +44,59 @@
   `(bit-and (bit-or (bit-shift-left ~x ~r) (unsigned-bit-shift-right ~x (- 32 ~r)))
             0xFFFFFFFF))
 
-(defmacro ^:private rounds
-  "Unrolled Threefry rounds on locals x0, x1 with rotations rs, then body."
-  [x0 x1 rs & body]
-  (if (empty? rs)
-    `(do ~@body)
-    `(let [~x0 (add32 ~x0 ~x1)
-           ~x1 (bit-xor (rotl32 ~x1 ~(first rs)) ~x0)]
-       (rounds ~x0 ~x1 ~(rest rs) ~@body))))
+(def ^:private rotations
+  "Threefry-2x32-20's schedule: five groups of four rounds, each round
+   x0 += x1, x1 = rotl(x1, r) ^ x0 for its rotation r, and a key injection
+   after each group (injection)."
+  [[13 15 26 6] [17 29 16 24] [13 15 26 6] [17 29 16 24] [13 15 26 6]])
+
+(def ^:private ^:const parity
+  "The key schedule's parity: the third key word is k0 ^ k1 ^ parity."
+  0x1BD11BDA)
+
+(defn- injection
+  "The key injection after group i (from 1): which key word of [k0 k1 k2]
+   is added to x0, and which to x1, with i itself."
+  [^long i]
+  [(rem i 3) (rem (inc i) 3)])
+
+(defmacro ^:private unrolled
+  "The schedule on the long locals x0 and x1 under the key words ks (three
+   locals), unrolled, then the output words packed: hash2x32's body."
+  [x0 x1 ks]
+  `(let [~@(mapcat (fn [i rs]
+                     (let [[a b] (injection i)]
+                       (concat (mapcat (fn [r] [x0 `(add32 ~x0 ~x1) x1 `(bit-xor (rotl32 ~x1 ~r) ~x0)]) rs)
+                               [x0 `(add32 ~x0 ~(ks a)) x1 `(add32 ~x1 (add32 ~(ks b) ~i))])))
+                   (iterate inc 1) rotations)]
+     (bit-or (bit-shift-left ~x0 32) ~x1)))
 
 (defn hash2x32
   "Threefry-2x32-20 of counter [c0 c1] under key [k0 k1] (uint32 values in
    longs). Returns both output words packed as (w0 << 32) | w1."
   ^long [^long k0 ^long k1 ^long c0 ^long c1]
-  (let [k2 (bit-xor k0 k1 0x1BD11BDA)
+  (let [k2 (bit-xor k0 k1 parity)
         x0 (add32 c0 k0)
         x1 (add32 c1 k1)]
-    (rounds x0 x1 [13 15 26 6]
-      (let [x0 (add32 x0 k1) x1 (add32 x1 (add32 k2 1))]
-        (rounds x0 x1 [17 29 16 24]
-          (let [x0 (add32 x0 k2) x1 (add32 x1 (add32 k0 2))]
-            (rounds x0 x1 [13 15 26 6]
-              (let [x0 (add32 x0 k0) x1 (add32 x1 (add32 k1 3))]
-                (rounds x0 x1 [17 29 16 24]
-                  (let [x0 (add32 x0 k1) x1 (add32 x1 (add32 k2 4))]
-                    (rounds x0 x1 [13 15 26 6]
-                      (let [x0 (add32 x0 k2) x1 (add32 x1 (add32 k0 5))]
-                        (bit-or (bit-shift-left x0 32) x1)))))))))))))
+    (unrolled x0 x1 [k0 k1 k2])))
+
+(defn hash-words
+  "Threefry-2x32-20 of the counters [0 c] under the key words k0 and k1, as
+   hash2x32, in a vocabulary of uint32 words given as functions: (add x y)
+   (wrapping at 2^32) and (xor x y) of words, (rotl x r) by a host count r,
+   (word v) of a host uint32 v, and (zeros c) a zero word of c's shape.
+   Returns [w0 w1]. The schedule is hash2x32's, op for op, for words that
+   are arrays: the MLX backend's handles and the staging backend's values,
+   whose counters (split's and the draws') are below 2^32."
+  [{:keys [add xor rotl word zeros]} k0 k1 c]
+  (let [ks [k0 k1 (xor (xor k0 k1) (word parity))]
+        round (fn [[x0 x1] r] (let [x0 (add x0 x1)] [x0 (xor (rotl x1 r) x0)]))]
+    (reduce (fn [xs [i rs]]
+              (let [[x0 x1] (reduce round xs rs)
+                    [a b] (injection i)]
+                [(add x0 (ks a)) (add x1 (add (ks b) (word i)))]))
+            [(add (zeros c) k0) (add c k1)]
+            (map vector (iterate inc 1) rotations))))
 
 (defn- hash-at
   "The packed Threefry output for flat index i under key."

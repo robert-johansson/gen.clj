@@ -64,25 +64,31 @@
         (pos? x) (erfc-nonneg x)
         :else (- 2.0 (erfc-nonneg (- x)))))
 
+(def erfinv-coefficients
+  "Giles' single-precision approximation of erfinv (|x| < 1): x·p(w) for
+   w = -log((1 - x)(1 + x)), p a polynomial (coefficients from the highest
+   degree) in w - 2.5 below w = 5 (:central) and in √w - 3 from there
+   (:tail). The starting point of Halley's method here (erfinv) and in
+   MLX's exact erfinv (gen.backend.mlx.exact)."
+  {:central [2.81022636e-08 3.43273939e-07 -3.5233877e-06 -4.39150654e-06 0.00021858087
+             -0.00125372503 -0.00417768164 0.246640727 1.50140941]
+   :tail [-0.000200214257 0.000100950558 0.00134934322 -0.00367342844 0.00573950773
+          -0.0076224613 0.00943887047 1.00167406 2.83297682]})
+
+(defmacro ^:private horner
+  "erfinv-coefficients' polynomial k at w, unrolled: (c0·w + c1)·w + …"
+  [k w]
+  (reduce (fn [acc c] `(+ (* ~acc ~w) ~c)) (first (erfinv-coefficients k)) (rest (erfinv-coefficients k))))
+
 (defn- erfinv-guess
-  "Giles' single-precision approximation of erfinv (|x| < 1), the starting
-   point for Halley's method."
+  "Giles' approximation of erfinv (|x| < 1), the starting point for
+   Halley's method."
   ^double [^double x]
   (let [w (- (Math/log (* (- 1.0 x) (+ 1.0 x))))]
     (* x
        (if (< w 5.0)
-         (let [w (- w 2.5)]
-           (-> 2.81022636e-08
-               (* w) (+ 3.43273939e-07) (* w) (+ -3.5233877e-06)
-               (* w) (+ -4.39150654e-06) (* w) (+ 0.00021858087)
-               (* w) (+ -0.00125372503) (* w) (+ -0.00417768164)
-               (* w) (+ 0.246640727) (* w) (+ 1.50140941)))
-         (let [w (- (Math/sqrt w) 3.0)]
-           (-> -0.000200214257
-               (* w) (+ 0.000100950558) (* w) (+ 0.00134934322)
-               (* w) (+ -0.00367342844) (* w) (+ 0.00573950773)
-               (* w) (+ -0.0076224613) (* w) (+ 0.00943887047)
-               (* w) (+ 1.00167406) (* w) (+ 2.83297682)))))))
+         (let [w (- w 2.5)] (horner :central w))
+         (let [w (- (Math/sqrt w) 3.0)] (horner :tail w))))))
 
 (defn- halley-step
   "x - d/(1 + x·d), with d the Newton correction (erf(x) - ay)/erf'(x), since

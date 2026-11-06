@@ -71,7 +71,7 @@
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]
             [gen.array.tree :as tree]
-            [gen.random.threefry])
+            [gen.random.threefry :as threefry])
   (:import [gen.mlx Mlx MlxRaw MlxRuntime MlxException]
            [gen.random.threefry Key]
            [java.lang.foreign Arena MemorySegment ValueLayout]
@@ -1267,43 +1267,10 @@
       (if (= op :slogdet) outs (first outs)))))
 
 ;; ---------------------------------------------------------------------------
-;; Randomness: JAX's partitionable Threefry-2x32 (gen.random.threefry) in
-;; MLX's uint32 ops, so a key draws the same bits as on the JVM backend
+;; Randomness: JAX's partitionable Threefry-2x32 (gen.random.threefry's
+;; schedule) in MLX's uint32 ops, so a key draws the same bits as on the JVM
+;; backend
 ;; ---------------------------------------------------------------------------
-
-(defn- threefry-words
-  "[w0 w1] handles of Threefry-2x32-20 of the counters [c0 c1] (uint32
-   handles) under the key words k0 and k1 (uint32 handles of shape [1]), as
-   gen.random.threefry/hash2x32. Everything else is a shared constant, so a
-   pending draw pins only its key's buffer. t registers each handle made
-   (with-temps)."
-  [b k0 k1 c0 c1 t konst]
-  (let [s (stream b)
-        u (fn ^long [v] (long (konst v :uint32)))
-        add (fn ^long [^long x ^long y] (t (Mlx/mlx_add x y s)))
-        rotl (fn ^long [^long x r]
-               (t (Mlx/mlx_bitwise_or (t (Mlx/mlx_left_shift x (u r) s))
-                                      (t (Mlx/mlx_right_shift x (u (- 32 (long r))) s))
-                                      s)))
-        k2 (t (Mlx/mlx_bitwise_xor (t (Mlx/mlx_bitwise_xor k0 k1 s)) (u 0x1BD11BDA) s))
-        ks [k0 k1 k2]
-        rounds (fn [[x0 x1] rs]
-                 (reduce (fn [[x0 x1] r]
-                           (let [x0 (add x0 x1)]
-                             [x0 (t (Mlx/mlx_bitwise_xor (rotl x1 r) x0 s))]))
-                         [x0 x1] rs))
-        inject (fn [[x0 x1] i]
-                 ;; after round group i: x0 += ks[i mod 3], x1 += ks[i+1 mod 3] + i
-                 [(add x0 (nth ks (mod i 3)))
-                  (add x1 (add (nth ks (mod (inc i) 3)) (u i)))])
-        rs-a [13 15 26 6]
-        rs-b [17 29 16 24]]
-    (-> [(add c0 k0) (add c1 k1)]
-        (rounds rs-a) (inject 1)
-        (rounds rs-b) (inject 2)
-        (rounds rs-a) (inject 3)
-        (rounds rs-b) (inject 4)
-        (rounds rs-a) (inject 5))))
 
 (defn- random-uniform [b ^Key key shape dtype]
   (when-not (#{:float32 :float64} dtype)
@@ -1323,9 +1290,20 @@
             k0 (t (Mlx/mlx_slice kw (int-array [0]) (int-array [1]) (int-array [1]) s))
             k1 (t (Mlx/mlx_slice kw (int-array [1]) (int-array [2]) (int-array [1]) s))
             ;; counters [hi32(i) lo32(i)] = [0 i]
-            c1 (t (Mlx/mlx_arange 0.0 (double n) 1.0 (int (code :uint32)) s))
-            c0 (t (Mlx/mlx_zeros (int-array [n]) (int (code :uint32)) s))
-            [w0 w1] (threefry-words b k0 k1 c0 c1 t konst)
+            c (t (Mlx/mlx_arange 0.0 (double n) 1.0 (int (code :uint32)) s))
+            ;; Threefry in MLX's uint32 ops: everything but the key a shared
+            ;; constant, so a pending draw pins only its key's buffer
+            word (fn ^long [v] (long (konst v :uint32)))
+            [w0 w1] (threefry/hash-words
+                     {:add (fn ^long [^long x ^long y] (t (Mlx/mlx_add x y s)))
+                      :xor (fn ^long [^long x ^long y] (t (Mlx/mlx_bitwise_xor x y s)))
+                      :rotl (fn ^long [^long x r]
+                              (t (Mlx/mlx_bitwise_or (t (Mlx/mlx_left_shift x (word r) s))
+                                                     (t (Mlx/mlx_right_shift x (word (- 32 (long r))) s))
+                                                     s)))
+                      :word word
+                      :zeros (fn ^long [_] (t (Mlx/mlx_zeros (int-array [n]) (int (code :uint32)) s)))}
+                     k0 k1 c)
             u (case dtype
                 ;; 23 mantissa bits of w0 ^ w1, as gen.random.threefry/uniform-floats
                 :float32 (let [bits (t (Mlx/mlx_bitwise_xor w0 w1 s))

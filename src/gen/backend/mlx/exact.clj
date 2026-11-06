@@ -6,7 +6,10 @@
    - float64: MLX's CPU kernels for exp, sin, cos, erf and erfinv are float32
      approximations whatever the dtype (about 1e-6 relative error for exp,
      1e-4 for sin and cos). These go through its exact ones (expm1, tan, log,
-     division).
+     division). erf and erfinv are gen.array.special's, step for step and
+     from its coefficients, but branch-free (where for its branches, a fixed
+     seven Halley steps for its adaptive loop): the host's are scalar
+     kernels of the JVM backend, so the two bodies stay.
    - expm1 on the GPU: Metal's is off by up to ~660 float32 ulps (4e-5
      relative); Kahan's formula from exp and log is within a few.
    - float32 sums on the CPU: MLX's accumulate sequentially, so their error
@@ -18,7 +21,8 @@
   {:api :internal}
   (:refer-clojure :exclude [+ - * / < > >= ==])
   (:require [gen.array :as array :refer [+ - * / < > >= ==]]
-            [gen.array.special :as special]))
+            [gen.array.special :as special]
+            [gen.array.tape :as tape]))
 
 (set! *warn-on-reflection* true)
 
@@ -78,11 +82,9 @@
         special? (array/logical-or (array/logical-or (array/isnan y) (>= ay 1.0)) (== ay 0.0))
         q (array/where special? 0.5 ay)
         w (array/negate (array/log (* (- 1.0 q) (+ 1.0 q))))
-        horner (fn [v cs] (reduce (fn [acc c] (+ (* acc v) c)) (first cs) (rest cs)))
-        central (horner (- w 2.5) [2.81022636e-08 3.43273939e-07 -3.5233877e-06 -4.39150654e-06
-                                   0.00021858087 -0.00125372503 -0.00417768164 0.246640727 1.50140941])
-        tail (horner (- (array/sqrt w) 3.0) [-0.000200214257 0.000100950558 0.00134934322 -0.00367342844
-                                             0.00573950773 -0.0076224613 0.00943887047 1.00167406 2.83297682])
+        horner (fn [v k] (let [cs (special/erfinv-coefficients k)] (reduce (fn [acc c] (+ (* acc v) c)) (first cs) (rest cs))))
+        central (horner (- w 2.5) :central)
+        tail (horner (- (array/sqrt w) 3.0) :tail)
         x0 (* q (array/where (< w 5.0) central tail))
         halley (fn [x]
                  (let [scale (* special/sqrt-pi-over-two (exp (* x x)))
@@ -197,18 +199,15 @@
 (defn vjp
   "The cotangents of a route's arguments xs from the cotangent g of its
    result out: the functions' derivatives, which MLX's autodiff takes for
-   these composites in native mode."
+   these composites in native mode. Those of the functions are the tape's
+   rules (gen.array.tape/elementwise-vjp), one definition for both."
   [op xs g out]
-  (let [[x y] xs]
-    (case op
-      :exp [(* g out)]
-      :sin [(* g (array/cos x))]
-      :cos [(array/negate (* g (array/sin x)))]
-      :erf [(* g (* (/ 2.0 (Math/sqrt Math/PI)) (array/exp (array/negate (* x x)))))]
-      :erfinv [(* g (* (/ (Math/sqrt Math/PI) 2.0) (array/exp (* out out))))]
-      :expm1 [(* g (+ out 1.0))]
-      ;; ∂/∂x log(eˣ + eʸ) = eˣ⁻ᵒᵘᵗ, exact at ties
-      :logaddexp [(* g (array/exp (- x out))) (* g (array/exp (- y out)))])))
+  (if (= op :logaddexp)
+    ;; ∂/∂x log(eˣ + eʸ) = eˣ⁻ᵒᵘᵗ, exact at ties (logaddexp is a composite
+    ;; on the tape, which has no rule for it)
+    (let [[x y] xs]
+      [(* g (array/exp (- x out))) (* g (array/exp (- y out)))])
+    (tape/elementwise-vjp op g xs out [true])))
 
 (defn float64-unary
   "op (:exp :sin :cos :erf or :erfinv) of the float64 MLX array x."
