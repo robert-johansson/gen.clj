@@ -38,6 +38,58 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-06
+
+A language-model release (DESIGN §9, "1.2.0's theme"; genclj-ucfg),
+which memo.clj 1.2.0 pins: GenLM parity's core (the potential contract as
+laws, potential combinators, a critic in token SMC, adaptive weighted
+rejection sampling, instaparse grammars as constraints, context-free
+grammars by Earley), Qwen3.8's chat template, llama.cpp v0.9.0 and MLX
+0.32.4. The LLM layers are experimental; the stable API changes by one
+Breaking change and additions.
+
+Read first, the **Breaking** change: `get`, `nth` and `count` on an array
+throw (`:not-a-collection`), where `get` answered nil. Code that looked up
+an array's elements with `get` reads them with `gen.array/->clj` or `item`
+first.
+
+The owner approved the milestone's decisions (DESIGN §9, 2026-11-05):
+loud lookups on arrays; MLX's gathers keep the documented clamp, with an
+opt-in check; `temper` keeps zero weights for every beta, and `after`
+gives a sequence that never closes its think block no weight; AWRS's
+recursive estimator by default; instaparse in the module `ext/instaparse`
+(on the `:test` alias), the core's dependencies unchanged; context-free
+masks exact for the text's bytes.
+
+Rebuild the native libraries after updating: `native/build-llama.sh`,
+`native/build-mlx.sh`, then `clojure -T:build java` (each library's version
+is checked when it loads).
+
+Checked before the tag: every test on the JVM backend, the book
+included (2,145 tests, 25,866 assertions); on the Mac mini M4 the
+full battery on Metal (2,145 tests, 20,685 assertions), on MLX's CPU in
+float32 (2,145, 20,701) and its light tier in float64 (2,027, 18,007);
+on CUDA, an RTX PRO 6000 with MLX 0.32.4's CUDA 13 wheel, the full battery
+in parallel JVMs (all 2,145 tests; the slow MCMC suite in eight JVMs), and
+ten exits with none of 1.1.0's abort; llama.cpp v0.9.0's tests on its three
+test models on Metal and on CUDA, its float noise inside the tests' band,
+and Qwen3.8-27B loading and scoring on CUDA; memo.clj (231 tests), its
+ext/synth (17) and GenGDT (15) against the candidate. None failed.
+
+### Known issues
+
+- **MLX clamps an out-of-range array index** in a gather by default, where
+  the JVM backend throws (docs/array-api.md §13): `-Dgen.mlx.check-gathers=true`
+  checks each gather's indices, at an evaluation per gather.
+- **The book on MLX:** some chapters of Parts II-V do host math on results
+  and fail on the MLX backend (genclj-ac70). The book's gate is the JVM
+  backend, where every chapter passes.
+- **Context-free masks** are exact for the text's bytes, not its tokens: a
+  vocabulary without a byte the language needs can reach a prefix that no
+  token sequence completes (byte-level BPE vocabularies have every byte).
+
+### Changes
+
 - **Breaking: `get`, `nth` and `count` on an array are loud** (gen.array's
   arrays on every backend, the tape's values, staged and batched values;
   genclj-fzez; DESIGN §9). `(get a 1)` answered nil, a
