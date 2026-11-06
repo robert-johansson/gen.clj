@@ -23,7 +23,12 @@
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is]]))
 
-(def ^:private source-file "src/gen/backend/mlx.clj")
+(def ^:private source-files
+  "gen.backend.mlx and its parts that make handles (all but
+   gen.backend.mlx.exact, written in gen.array's ops)."
+  (into ["src/gen/backend/mlx.clj"]
+        (for [f (sort (.list (java.io.File. "src/gen/backend/mlx"))) :when (not= f "exact.clj")]
+          (str "src/gen/backend/mlx/" f))))
 
 (defn- forms
   "The top-level forms of a Clojure source file, read as data."
@@ -81,21 +86,21 @@
    operand's own definition: [the form's name, the read]."
   [all]
   (for [form all
-        :when (not (and (call? form "defn-") (named? (second form) "operand")))
+        :when (not (and (or (call? form "defn") (call? form "defn-")) (named? (second form) "operand")))
         [h ancestors] (occurrences form handle-read?)
         :let [s (fenced-symbol h ancestors)]
         :when (not (and s (fenced-after? s ancestors)))]
     [(second form) h]))
 
 (deftest every-handle-passed-to-mlx-is-fenced
-  (let [all (forms source-file)]
+  (let [all (mapcat forms source-files)]
     (is (< 5 (count (mapcat #(occurrences % (fn [x] (call? x ".-h"))) all))) "the check sees the handle reads")
     (is (empty? (unfenced-reads all)))))
 
 (deftest with-operands-fences-its-operands
   ;; the macro's template calls operand for each binding and fences each
   ;; operand in a finally
-  (let [[macro] (filter #(and (call? % "defmacro") (named? (second %) "with-operands")) (forms source-file))]
+  (let [[macro] (filter #(and (call? % "defmacro") (named? (second %) "with-operands")) (mapcat forms source-files))]
     (is macro)
     (is (seq (occurrences macro #(named? % "operand"))))
     (is (seq (occurrences macro #(named? % "finally"))))

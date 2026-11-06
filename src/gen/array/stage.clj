@@ -43,7 +43,6 @@
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]
             [gen.array.tree :as tree]
-            [gen.choicemap :as cm]
             [gen.random.threefry :as threefry]))
 
 (set! *warn-on-reflection* true)
@@ -172,32 +171,21 @@
 
 (defn- bit [op x y] (op! op [x y] (sh/broadcast (shape-of x) (shape-of y)) :uint32))
 
-(defn- add32 [x y] (array/+ x y))
-
-(defn- rotl32 [x r] (bit :bit-or (bit :shift-left x (long r)) (bit :shift-right-logical x (long (- 32 r)))))
-
-(defn- rounds [[x0 x1] rs]
-  (reduce (fn [[x0 x1] r] (let [x0 (add32 x0 x1)] [x0 (bit :bit-xor (rotl32 x1 r) x0)])) [x0 x1] rs))
-
 (defn threefry-words
   "Threefry-2x32-20 of the counters [0 c] (c a uint32 array) under the
    staged key words (uint32 [2]): the words, [.. 2] (the last axis w0, w1),
    for counters below 2^32, as gen.random.threefry/split's."
   [words c]
-  (let [k0 (array/reshape (array/slice words 0 0 1) [])
-        k1 (array/reshape (array/slice words 0 1 2) [])
-        u (fn [v] (array/array v {:dtype :uint32}))
-        k2 (bit :bit-xor (bit :bit-xor k0 k1) (u 0x1BD11BDA))
-        x0 (add32 (array/zeros-like c) k0)
-        x1 (add32 c k1)
-        [x0 x1] (rounds [x0 x1] [13 15 26 6])
-        [x0 x1] (rounds [(add32 x0 k1) (add32 x1 (add32 k2 (u 1)))] [17 29 16 24])
-        [x0 x1] (rounds [(add32 x0 k2) (add32 x1 (add32 k0 (u 2)))] [13 15 26 6])
-        [x0 x1] (rounds [(add32 x0 k0) (add32 x1 (add32 k1 (u 3)))] [17 29 16 24])
-        [x0 x1] (rounds [(add32 x0 k1) (add32 x1 (add32 k2 (u 4)))] [13 15 26 6])
-        x0 (add32 x0 k2)
-        x1 (add32 x1 (add32 k0 (u 5)))]
-    (array/stack [x0 x1] -1)))
+  (let [[w0 w1] (threefry/hash-words
+                 {:add array/+
+                  :xor #(bit :bit-xor %1 %2)
+                  :rotl (fn [x r] (bit :bit-or (bit :shift-left x (long r)) (bit :shift-right-logical x (long (- 32 r)))))
+                  :word #(array/array % {:dtype :uint32})
+                  :zeros array/zeros-like}
+                 (array/reshape (array/slice words 0 0 1) [])
+                 (array/reshape (array/slice words 0 1 2) [])
+                 c)]
+    (array/stack [w0 w1] -1)))
 
 (defn- uniform-floats
   "float32 uniforms in [0, 1) of shape from the staged key words: 23 random
@@ -433,17 +421,16 @@
         :else (throw (ex-info (str "A staged function returned " (pr-str x) ", not an array") {:value x}))))
 
 (defn constants
-  "x with every array of another backend in it (a tree, or a choice map's
-   leaves) made a constant of the graph being staged: a model's arguments
-   and observations, made on the JVM backend."
+  "x with every array of another backend in it made a constant of the graph
+   being staged: a model's arguments and observations, made on the JVM
+   backend. x is a tree (array/tree-map's: maps, records among them, and
+   vectors), so a choice map too, whose nodes and values are records."
   [x]
-  (let [c (fn [a] (if (and (array/backend-array? a) (not (staged? a)))
-                    (op! :constant [] (array/shape a) (staged-dtype (array/dtype a))
-                         {:values (vec (flatten [(array/->clj a)]))})
-                    a))]
-    (if (cm/choicemap? x)
-      (reduce (fn [m [path v]] (cm/set-choice m path (c v))) x (cm/leaves x))
-      (array/tree-map c x))))
+  (array/tree-map (fn [a] (if (and (array/backend-array? a) (not (staged? a)))
+                            (op! :constant [] (array/shape a) (staged-dtype (array/dtype a))
+                                 {:values (vec (flatten [(array/->clj a)]))})
+                            a))
+                  x))
 
 (defn- leaves [t] (if (instance? StagedKey t) [(.-words ^StagedKey t)] (array/tree-leaves t)))
 
