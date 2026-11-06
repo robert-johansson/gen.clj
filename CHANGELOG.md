@@ -58,6 +58,14 @@ other values for the same key, from the same distribution.
   bytes); making a potential costs about its token trie's time. Added to
   gen.llm.bytes: `sweep-into!`, `sweep-roots!`, `sweep-split` and
   `bare-mask`.
+- **Fixed: 1.2.0's claim for llama.cpp v0.9.0's branches** (genclj-ajse).
+  1.2.0's entry said v0.9.0's unified KV cache serves multi-sequence work
+  (token SMC, lockstep sampling) better; it was not measured. Measured
+  since on the M4 with Qwen3-0.6B (`bench/gen/llama_branches_bench.clj`,
+  docs/research/llm-branching.md), it brings no gain: after a short
+  prompt the two builds tie up to 8 branches and v0.9.0 is about 7%
+  faster at 16; after an 843-token prompt it is 5-16% slower at 4 to 16
+  branches. Nothing in gen.clj changes.
 
 ## [1.2.0] - 2026-11-06
 

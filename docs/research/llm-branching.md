@@ -351,6 +351,58 @@ measurable cost: 13.8 ms for an advance of 15); with the default heap of a
 64 GB machine (16 GB, 8 MB regions) none is, and with 4 GB (2 MB regions)
 Gemma's are. Forks and resampled children share their parent's array.
 
+### Branches, llama.cpp v0.7.0 against v0.9.0 (2026-11-06, genclj-ajse)
+
+genclj-adsl ticked "measure lockstep sampling and token SMC branches
+against v0.7.0" without a measurement. `bench/gen/llama_branches_bench.clj`
+measures them: tokens a second of n sequences of 64 tokens decoded
+together past one prompt, as the engine's batch alone
+(`lm/batch-next-logprobs` of n distinct contexts a step), lockstep
+sampling (`gen.llm.sample/complete`, n completions of one context) and
+token SMC (n particles), each measurement on an LM of its own, the
+prompt read untimed before each run (so a run reads only its own tokens:
+0.92 to 1.00 tokens read a token made), the median of three runs after a
+warm one. The same file runs on gen.clj 1.1.0 (v0.7.0's binding; a
+worktree at v1.1.0, whose gen.llm.cache, lm, sample, token and slots are
+1.2.0's, and llama.clj only its comments) and on 1.2.0 (v0.9.0). Both
+already open llama.cpp's cache unified (`kv_unified`); v0.9.0 changes its
+kernels (`flash_attn_ext_rows`). Qwen3-0.6B Q8_0, the M4's GPU, two
+rounds in opposite orders (v0.7.0 then v0.9.0, then v0.9.0 then
+v0.7.0), the machine shared with other agents' CPU-bound JVMs. The batch
+alone, tokens a second (round 1, round 2):
+
+| prompt | branches | v0.7.0 | v0.9.0 |
+|---|---:|---|---|
+| 13 tokens | 1 | 104, 70 | 101, 97 |
+| | 4 | 352, 224 | 347, 344 |
+| | 8 | 576, 330 | 575, 571 |
+| | 16 | 758, 535 | 813, 814 |
+| 843 tokens | 1 | 98, 99 | 98, 74 |
+| | 4 | 289, 315 | 277, 267 |
+| | 8 | 494, 495 | 416, 416 |
+| | 16 | 640, 639 | 541, 537 |
+
+Lockstep sampling and SMC follow the batch within a few percent (16
+branches, short prompt: lockstep 641 and 786 against 791 and 793, SMC
+756 and 793 against 809 and 806; long prompt: lockstep 644 and 653
+against 535 and 536, SMC 627 and 632 against 532 and 228, the last a
+load spike, as are round 2's short rows for v0.7.0). So, on this machine
+and model, **v0.9.0 brought gen.clj's branches no measured gain**: with a
+short shared prefix the two builds tie up to 8 branches and v0.9.0 is
+about 7% faster at 16; with an 843-token prefix v0.9.0 is about 5% slower
+at 4 branches and 16% slower at 8 and 16, in both rounds. Either way 16
+branches decode 6.5 to 8 times a single branch's tokens. CUDA (fenrir)
+and the larger models memo.clj runs were not measured.
+
+Two of the cache's behaviours showed on the way, the same under both
+builds: the cache forks a context from a live branch whose context is a
+prefix of it, so n contexts that part right after a shared prompt that is
+no branch's context each read the prompt (a first version of the bench
+read 16 copies of the 843 tokens a run, past the 8,192 cells, and
+thrashed); and it keeps a branch for each context it is asked, so a
+lockstep run of four completions over 64 steps forks about 250 branches
+and, at 160, evicts the prompt's, which the next batch reads again.
+
 ## Recurrent states and split steps (2026-10-21)
 
 *m3-lm's bench (07ea7ac) found the LM protocol's batched one-token reads on
