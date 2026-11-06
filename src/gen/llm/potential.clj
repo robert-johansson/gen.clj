@@ -381,13 +381,19 @@
    byte of weight 0. opts: :end-tokens, the tokens that end a text and
    hold none of it (default an LM's :eog, none for a byte vocabulary),
    which are its end tokens; a context holding one has no weight. p
-   declares no end tokens of its own (over bytes they mean nothing)."
+   declares no end tokens of its own (over bytes they mean nothing). p's
+   vocabulary is checked when coerce is made, from its next weights at the
+   empty context (256 bytes and the end; :invalid-potential otherwise),
+   unless it has no weight there: then it has none anywhere, whatever its
+   vocabulary."
   ([p vocab] (coerce p vocab {}))
   ([p vocab opts]
    (check-potential "coerce" p)
    (when (seq (end-tokens p))
      (throw (ex-info (str "coerce: a potential over bytes has no end tokens, not " (end-tokens p))
                      {:reason :mismatched-end-tokens :end-tokens (end-tokens p)})))
+   (when-not (== Double/NEGATIVE_INFINITY (double (-prefix p [])))
+     (byte-row p []))
    (let [byte-vocab (bytes/vocab-bytes "coerce" vocab)
          n (count byte-vocab)
          ends (lm/end-tokens-option "coerce" opts (if (satisfies? lm/LM vocab) (:eog (lm/vocab vocab)) #{}) n)
@@ -427,27 +433,32 @@
    1, log 0), a close weighs as p's empty context, and from there p weighs
    the tokens after it. A sequence that never closes has no weight as a
    whole (complete -Inf): p's answer must come. Its end tokens are p's.
-   Loud when p has no weight at the empty context (:invalid-potential)."
+   Loud when p has no weight at the empty context (:invalid-potential), or
+   when a close is no token of p's vocabulary (:invalid-token): checked
+   when it is made, from p's next weights at the empty context."
   [closes p]
   (check-potential "after" p)
   (when-not (and (set? closes) (seq closes) (every? #(and (int? %) (not (neg? (long %)))) closes))
     (throw (ex-info (str "after: closes is a non-empty set of tokens, not " (pr-str closes))
                     {:reason :invalid-token :closes closes})))
   (let [start (double (-prefix p []))
+        _ (when (== start Double/NEGATIVE_INFINITY)
+            (throw (ex-info "after: the potential has no weight at the empty context" {:reason :invalid-potential})))
+        n-vocab (dec (alength ^floats (-logw-next p [])))
         closes (into #{} (map long) closes)
-        n-vocab (delay (dec (alength ^floats (-logw-next p []))))
+        _ (when-let [past (seq (sort (remove #(< (long %) n-vocab) closes)))]
+            (throw (ex-info (str "after: the closes " (vec past) " are no tokens of the potential's vocabulary ("
+                                 n-vocab " tokens): a sequence would never close")
+                            {:reason :invalid-token :closes closes :n-vocab n-vocab})))
         open-row (fn []
-                   (let [n (long @n-vocab)
-                         out (float-array (inc n))]
-                     (doseq [t closes :when (< (long t) n)] (aset out (int t) (unchecked-float start)))
-                     (aset out n Float/NEGATIVE_INFINITY)
+                   (let [out (float-array (inc n-vocab))]
+                     (doseq [t closes] (aset out (int t) (unchecked-float start)))
+                     (aset out n-vocab Float/NEGATIVE_INFINITY)
                      out))
         ;; the tokens after the first close, or nil when there is none
         answer (fn [context]
                  (when-let [i (first (keep-indexed (fn [i t] (when (contains? closes t) i)) context))]
                    (subvec context (inc (long i)))))]
-    (when (== start Double/NEGATIVE_INFINITY)
-      (throw (ex-info "after: the potential has no weight at the empty context" {:reason :invalid-potential})))
     (reify
       EndTokens
       (-end-tokens [_] (end-tokens p))
