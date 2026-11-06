@@ -426,12 +426,14 @@ source file:
           (in? "gen.llm") :llm)))
 ```
 
-The only namespace that requires a backend is `gen.array`:
+Outside the backends themselves (MLX's is in parts that require one
+another), the only namespace that requires a backend is `gen.array`:
 
 <!-- code: backend-rule -->
 ```clojure
 (set (for [[n libs] requires
-           :when (some #(str/starts-with? (str %) "gen.backend") libs)]
+           :when (and (not (under? (str n) "gen.backend"))
+                      (some #(str/starts-with? (str %) "gen.backend") libs))]
        n))
 ;=> #{gen.array}
 ```

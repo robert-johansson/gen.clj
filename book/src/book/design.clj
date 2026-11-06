@@ -212,7 +212,8 @@
 
 ;; book: backend-rule
 (set (for [[n libs] requires
-           :when (some #(str/starts-with? (str %) "gen.backend") libs)]
+           :when (and (not (under? (str n) "gen.backend"))
+                      (some #(str/starts-with? (str %) "gen.backend") libs))]
        n))
 ;=> #{gen.array}
 
