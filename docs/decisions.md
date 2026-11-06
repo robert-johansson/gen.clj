@@ -3695,6 +3695,12 @@ the owner's call in genclj-uzxp with the lead's recommendation.
 ### 1.2.1's owner calls
 
 (PROVISIONAL, owner to confirm; genclj-uzxp).
+*Item 9, the scope, confirmed by the owner (2026-11-06, before the tag,
+asked after a side agent's note that a patch release breaks nothing):
+"Keep as built": every bean under the milestone in 1.2.1, the changes
+that make code throw labelled Breaking (only code that was already
+silently wrong), unknown option keys in 1.3.0. The other calls stay
+PROVISIONAL.*
 The owner, 2026-11-06: "work on the 44 beans under the milestone,
 genclj-9mq3 - work fully autonomous and cross them all off and then
 release v1.2.1". Taken as the answer to the scope (item 9): every bean
