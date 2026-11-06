@@ -29,15 +29,38 @@
 
 (set! *warn-on-reflection* true)
 
+(defn ^:no-doc accept?
+  "MH's accept rule, the one gen.inference's kernels share (accept, the
+   -particles kernels, tempered SMC's moves; mcmc's HMC, MALA and NUTS
+   through its form on arrays, accepts): is a move of log acceptance ratio
+   la (a host number) taken by u, a uniform draw on [0, 1) (a host number)?
+   With probability min(1, e^la): la ≥ 0, or log u < la. A NaN la is a
+   loud error, data merged into its ex-data (:reason :nan-log-alpha): no
+   probability is NaN. A kernel with a reason to reject such a move does
+   so before the rule: tempering/smc's move to a trace the observations
+   rule out, mcmc's divergence."
+  [la u data]
+  (let [la (double la)]
+    (when (Double/isNaN la)
+      (throw (ex-info "The MH acceptance ratio is NaN" (merge {:reason :nan-log-alpha :log-alpha la} data))))
+    (or (>= la 0.0) (< (Math/log (double u)) la))))
+
+(defn ^:no-doc accepts
+  "accept?'s rule on arrays, elementwise, for a move that reads nothing on
+   the host (batched, compiled or staged: mcmc's verdict): la ≥ 0, or
+   log u < la, u uniform on [0, 1). A NaN la is false here, never reached:
+   the caller makes a ratio that is not finite a divergence first (Stan's
+   rule, reported as :diverged?)."
+  [la u]
+  (array/logical-or (array/>= la 0.0) (array/< (array/log u) la)))
+
 (defn accept
   "Accept proposed with probability min(1, exp(log-alpha)): {:trace
    :accepted? :log-alpha}."
   [trace proposed log-alpha key]
-  (let [la (double (array/item log-alpha))]
-    (when (Double/isNaN la)
-      (throw (ex-info "The MH acceptance ratio is NaN" {:log-alpha la :score (:score trace)})))
-    (let [accepted? (or (>= la 0.0) (< (Math/log (double (array/item (rng/uniform key)))) la))]
-      {:trace (if accepted? proposed trace) :accepted? accepted? :log-alpha la})))
+  (let [la (double (array/item log-alpha))
+        accepted? (accept? la (array/item (rng/uniform key)) {:score (:score trace)})]
+    {:trace (if accepted? proposed trace) :accepted? accepted? :log-alpha la}))
 
 (defn- selection-mh [trace selection key]
   (let [[k-move k-accept] (rng/split key)
@@ -168,10 +191,8 @@
    accept step's own)."
   [ps proposed la m key]
   (let [las (mapv double (array/->clj la))
-        _ (when (some #(Double/isNaN %) las)
-            (throw (ex-info "An MH acceptance ratio is NaN" {:log-alphas las})))
         us (array/->clj (rng/uniform key [(batched/size ps)]))
-        accepted (mapv (fn [l u] (or (>= l 0.0) (< (Math/log u) l))) las us)
+        accepted (mapv (fn [i l u] (accept? l u {:particle i :log-alphas las})) (range) las us)
         selected (batched/select accepted proposed ps)
         m (or m (batched/fallback selected))]
     (cond-> {:particles (cond-> selected (and m (not (batched/fallback selected))) (assoc :fallback m))

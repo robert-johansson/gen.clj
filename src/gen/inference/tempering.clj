@@ -55,6 +55,7 @@
   (:require [gen.array :as array]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
+            [gen.inference.mh :as mh]
             [gen.inference.weights :as w]
             [gen.random :as rng]
             [gen.selection :as sel]))
@@ -113,15 +114,13 @@
    ratio less the proposal's), less (1 - beta) times its change in log L,
    from l to l'. A move to a trace where the observations have density 0
    (l' -Inf, and w with it) is rejected, since π_beta is 0 there: its ratio
-   would be -Inf + Inf. Any other NaN ratio is a loud error, as MH's."
+   would be -Inf + Inf. Otherwise MH's rule (mh/accept?), loud for a NaN
+   ratio."
   [w l l' beta key]
   (let [l' (double l')]
     (and (not (== ##-Inf l'))
-         (let [a (- (host w) (* (- 1.0 (double beta)) (- l' (double l))))]
-           (when (Double/isNaN a)
-             (throw (ex-info "tempering/smc: a move's MH acceptance ratio is NaN"
-                             {:reason :nan-log-alpha :weight (host w) :log-likelihood l :proposed-log-likelihood l'})))
-           (< (Math/log (uniform key)) a)))))
+         (mh/accept? (- (host w) (* (- 1.0 (double beta)) (- l' (double l)))) (uniform key)
+                     {:kernel :tempering :weight (host w) :log-likelihood l :proposed-log-likelihood l'}))))
 
 (defn- regenerate-move
   "The latent at a resampled from the model's internal proposal (its

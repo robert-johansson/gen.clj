@@ -75,6 +75,7 @@
             [gen.dist.core :as dc]
             [gen.gfi :as gfi]
             [gen.gradients :as grad]
+            [gen.inference.mh :as mh]
             [gen.random :as rng]
             [gen.selection :as sel]
             [gen.trace]))
@@ -454,12 +455,12 @@
    when diverged), :diverged? (also when log-alpha is not finite, an
    energy that overflowed or NaN, or is below -max-energy-error, an energy
    error past it), :start-ok}. Accepted with probability
-   min(1, exp(log-alpha)) by the uniform of key, as mh/accept."
+   min(1, exp(log-alpha)) by the uniform of key, MH's rule on arrays
+   (mh/accepts), unless it diverged."
   [proto v v' log-alpha diverged start-ok key]
   (let [diverged (array/logical-or diverged (array/logical-or (array/logical-not (array/isfinite log-alpha))
                                                               (< log-alpha (- max-energy-error))))
-        accepted (array/logical-and (array/logical-not diverged)
-                                    (array/logical-or (>= log-alpha 0.0) (< (array/log (rng/uniform key)) log-alpha)))]
+        accepted (array/logical-and (array/logical-not diverged) (mh/accepts log-alpha (rng/uniform key)))]
     {:values (cm/from-array proto (array/where accepted v' v))
      :accepted? accepted
      :log-alpha (array/where diverged ##-Inf log-alpha)
