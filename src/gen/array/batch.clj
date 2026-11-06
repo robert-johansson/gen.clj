@@ -283,14 +283,13 @@
       :else (p/-matmul inner x y)))
 
   (-linalg [b op args]
-    (let [arrays (vec (remove map? args))
-          opts (first (filter map? args))]
+    (let [[arrays opts] (p/linalg-operands op args)]
       (if (some batched? arrays)
         (let [r (reduce max 0 (map #(count (p/-shape b %)) arrays))
               ;; the operands aligned on their per-particle axes; the wrapped
               ;; backend broadcasts the batch axes
               vs (mapv #(lift b % r) arrays)
-              out (p/-linalg inner op (cond-> vs opts (conj opts)))]
+              out (p/-linalg inner op (into vs opts))]
           (if (= op :slogdet) (mapv #(made % b) out) (made out b)))
         (p/-linalg inner op args))))
 

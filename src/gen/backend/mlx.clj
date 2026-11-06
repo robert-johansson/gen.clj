@@ -1255,15 +1255,14 @@
 (defn- linalg [b op args]
   (if-not (custom-vjps?)
     (linalg* b op args)
-    (let [n-arrays (if (#{:cholesky :slogdet} op) 1 2)
-          opts (drop n-arrays args)
+    (let [[arrays opts] (p/linalg-operands op args)
           rule (:linalg-vjp @tape-fns)
           outs (custom-vjp b
                            (fn [xs] (let [r (linalg* b op (into xs opts))] (if (vector? r) r [r])))
                            (fn [ps cs os]
                              (let [[out g] (if (= op :slogdet) [(second os) (second cs)] [(first os) (first cs)])]
-                               (rule b op (into ps opts) out g (vec (repeat n-arrays true)))))
-                           (mapv #(as-array b % nil) (take n-arrays args)))]
+                               (rule b op (into ps opts) out g (mapv (constantly true) arrays))))
+                           (mapv #(as-array b % nil) arrays))]
       (if (= op :slogdet) outs (first outs)))))
 
 ;; ---------------------------------------------------------------------------

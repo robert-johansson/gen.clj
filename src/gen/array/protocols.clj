@@ -55,6 +55,17 @@
                 " or index on the backend with gen.array/take")
            {:reason :not-a-collection :op op}))
 
+(defn ^:no-doc linalg-operands
+  "[arrays options] of a -linalg op's args, as -linalg's doc lists them:
+   its array arguments (one for :cholesky and :slogdet, two for :solve and
+   :solve-triangular), and what follows (:solve-triangular's options).
+   For backends that treat the arrays apart: the batch tracer lifts them,
+   MLX's native gradients make them a custom VJP's inputs."
+  [op args]
+  (let [args (vec args)
+        n (case op (:cholesky :slogdet) 1 (:solve :solve-triangular) 2)]
+    [(subvec args 0 n) (subvec args n)]))
+
 (defprotocol IBatchedValue
   "A value that holds one value per particle of a batch (gen.array.batch)."
   (-all-particles [x] "The array of every particle's value, batch axes first."))
