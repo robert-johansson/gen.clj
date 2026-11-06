@@ -18,7 +18,6 @@
   (:refer-clojure :exclude [complement])
   (:require [clojure.set :as set]
             [gen.array :as array]
-            [gen.array.batch :as batch]
             [gen.choicemap :as cm]))
 
 (set! *warn-on-reflection* true)
@@ -243,13 +242,24 @@
   [choices]
   (from-paths (cm/addresses choices)))
 
+(defprotocol ^:no-doc IHeldByPart
+  "Choice values held by part: a batched run's choices that differ in
+   structure across its particles (a Switch's whose index differs across
+   them), which a selection takes whole or not at all. gen.partition
+   extends it to them (gen.array.batch/Parts); every other value has the
+   default, false."
+  (^:no-doc -held-by-part? [v] "Is v a batched run's choices held by part?"))
+
+(extend-protocol IHeldByPart
+  Object (-held-by-part? [_] false)
+  nil (-held-by-part? [_] false))
+
 (defn- under-parts!
   "The batched-branch error: s reaches under a batched run's choices held
-   by part (a Switch whose index differs across the particles,
-   gen.array.batch/Parts), where which choices it selects differs across
+   by part (IHeldByPart), where which choices it selects differs across
    the particles."
   [choices s]
-  (when (batch/parts? (cm/get-value choices))
+  (when (-held-by-part? (cm/get-value choices))
     (throw (array/batched-branch "A selection reaches under choices that differ in structure across the particles"
                                  {:selection s}))))
 

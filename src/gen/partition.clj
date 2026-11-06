@@ -24,12 +24,18 @@
   {:api :experimental}
   (:require [gen.array :as array]
             [gen.array.batch :as batch]
-            [gen.array.protocols :as p]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
+            [gen.selection :as sel]
             [gen.trace :as trace]))
 
 (set! *warn-on-reflection* true)
+
+;; A batch's choices held by part, a selection takes whole or not at all
+;; (gen.selection/get-selected)
+(extend-protocol sel/IHeldByPart
+  gen.array.batch.Parts
+  (-held-by-part? [_] true))
 
 (defn groups
   "The particles by key: [[key rows] …] for ks, a key per particle, in the
@@ -141,7 +147,7 @@
    the same addresses?"
   [cs]
   (or (every? cm/has-value? cs)
-      (and (not-any? cm/has-value? cs) (apply = (map #(set (keys (:m %))) cs)))))
+      (and (not-any? cm/has-value? cs) (apply = (map #(set (map first (cm/submaps %))) cs)))))
 
 (defn- joint
   "The data xs of parts walked in step, as one datum, by the fns of f:
@@ -219,7 +225,7 @@
                 (let [ns (mapv (comp count :rows) gs)]
                   {:key k
                    :rows (into [] (mapcat :rows) gs)
-                   :data (join (mapv :data gs) ns (batch/backend (p/-inner b) [(reduce + ns)]))}))))
+                   :data (join (mapv :data gs) ns (batch/backend (batch/wrapped-backend b) [(reduce + ns)]))}))))
           (distinct (map :key groups)))))
 
 (defn trace-backend
@@ -228,7 +234,7 @@
    when the score is shared, the interned one of m particles."
   [tr m b]
   (let [s (:score tr)]
-    (if (batch/batched? s) (array/backend s) (batch/backend (p/-inner b) [m]))))
+    (if (batch/batched? s) (array/backend s) (batch/backend (batch/wrapped-backend b) [m]))))
 
 (defn scatter
   "The data xs of parts that partition the particles of a batch, (xs j)
