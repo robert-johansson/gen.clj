@@ -109,7 +109,9 @@ A distribution body, compared with GenMLX:
   no transfer op: read the values (`->clj`) and make the array again under
   the other backend.
 - **No `=` on arrays.** Compare with `array/equal?` (exact) or `array/allclose?`.
-  Numbers still compare with `=`, but core code doesn't rely on that.
+  Numbers still compare with `=`, but core code doesn't rely on that. Where
+  `=` does reach arrays (a `gen` body's, a map that holds them), its answer
+  differs by backend (§13).
 - **Trees.** Nested maps and vectors whose leaves are arrays are first-class
   inputs to `eval!`, `grad` and `tree-map`. Traces and choicemaps are trees in
   this sense.
@@ -163,6 +165,12 @@ A distribution body, compared with GenMLX:
 - **JVM storage:** every dtype is stored in a `double[]`. int64 values are exact
   up to 2^53, which is ample for counts and indices; bool is 0/1. One storage
   type keeps the backend small. The dtype tag carries the semantics.
+- **int64 overflow** (DESIGN §9, 1.2.1's owner calls): an int64 result
+  outside the range is an `ex-info` (`:reason :overflow`) on the JVM
+  backend, where its double read back as a raw IllegalArgumentException.
+  MLX wraps, as Java's `long` arithmetic does, and so do host numbers on
+  every backend: `(array/* 4611686018427387904 4)` is 0 (§13). int32
+  wraps on every backend.
 
 ## 6. Op surface v1
 
@@ -196,6 +204,33 @@ needs, taken from GenMLX's measured call counts
 | gradients | `grad` `value-and-grad` `stop-gradient` `tracked?` | `-value-and-grad`, `:stop-gradient` | — |
 | trees | `tree-map` `tree-leaves` | — | both |
 | batching | `vmap` · `batched?` `batch-shape` `particle-backend` `particle` `particles` `all-particles` | — (the batch tracer, a wrapping backend: §8b) | all |
+
+**Semantics at the edges** (1.2.1, from the health check of v1.2.0; DESIGN §9,
+"1.2.1's owner calls"), the same on every backend:
+- **Float `floor-div` is NumPy's** (`npy_floor_divide`): `(x - fmod(x, y)) / y`,
+  one less where fmod's sign is not y's, snapped to the nearest integer,
+  so that `x = y·q + (mod x y)` holds: `(floor-div 1.0 0.1)` is 9.0, where
+  `floor(x / y)` gave 10.0 beside `mod`'s 0.0999…; `x / y` for a zero
+  divisor, and NaN for an infinite dividend, as NumPy. Int `floor-div` floors
+  (0 for a zero divisor), as before.
+- **`max`, `min`, `argmax` and `argmin` over an empty axis are loud**
+  (`:reason :empty-reduction`), as NumPy and JAX raise, where the JVM
+  backend gave ∓Inf. An empty result (an empty axis kept) is no error.
+  `logsumexp` over an empty axis is still -Inf (log 0) and `softmax` of an
+  empty axis an empty array.
+- **`arange`** takes finite host numbers and a nonzero step (`:invalid-args`;
+  a zero step threw a raw exception). Under an int dtype its values are
+  NumPy's, as MLX's own: the first is start cast to the dtype, the step
+  dtype(start + step) - dtype(start), so `(arange 0 3 0.5 {:dtype :int64})`
+  is six zeros. There is no bool arange (`:invalid-dtype`; MLX has none,
+  NumPy's fails past two elements).
+- **Shapes and axes:** a negative dimension is `:invalid-shape` (the JVM
+  backend made an array of shape `[-2 0]`), and `expand-dims` at a repeated
+  axis `:repeated-axis`, as NumPy (a set dropped one).
+- **`la/inv`** inverts each matrix of a batch `[.. n n]` (genclj-l0n4).
+  `la/solve`'s rule stays as documented: a right-hand side with one axis
+  fewer than the matrix is a batch of vectors, where NumPy 2 reads only a
+  1-d one as a vector; revisited for 2.0.
 
 **Naming conventions:**
 - Arithmetic uses Clojure's symbols (`+`, `<`, `==`, `!=`), referred per §2.
@@ -248,6 +283,17 @@ needs, taken from GenMLX's measured call counts
     dist.cljs:410-445);
   - beta and dirichlet: via gamma, from the gammas' logs (a sigmoid, a
     softmax), which do not underflow.
+  - randint (uniform-discrete's): exact integer arithmetic on the default
+    float's uniforms (genclj-psgi, 1.2.1), low + floor(k·r / 2^b) for r =
+    high - low: in float64 k is one uniform's 52 random bits (b = 52, so
+    floor(u·r) exactly), in float32 three uniforms' 23 bits each (b = 69).
+    It runs in int64 by limbs of r, so that nothing passes 2^53 (the JVM
+    backend's exact ints) for r below 2^53. So it never reaches high, where
+    `floor(low + u·r)` in the default float did in float32, and it gives
+    the same integers on every backend of the same default float. Each
+    integer is drawn with probability within a relative r / 2^b of 1/r. An
+    empty range is loud (`:empty-range`) when its bounds can be read; one
+    that cannot (a lazy backend's arrays) gives low.
   - Because the algorithms are shared, the backends sample from identical laws.
 - **Bit-identical uniforms (bean genclj-ldpy, done; §13):** the same key
   draws bit-identical uniforms on the JVM backend and on MLX, in float32 and
@@ -1003,6 +1049,9 @@ conformance suite.
 | `sign(NaN)` is 0 | NaN, as NumPy |
 | `argmax`/`argmin` skip NaN; indices are uint32 | the first NaN wins; the default int dtype |
 | integer `floor_divide` truncates toward 0 | floors: `(x - x mod y) / y` |
+| float `floor_divide` is floor(x / y) | NumPy's rule (§6), from MLX's remainder of \|x\| and \|y\|, which is fmod's magnitude there |
+| `arange` of an int dtype follows NumPy (start cast, step dtype(start + step) - dtype(start)) | kept; the JVM backend and staging now do the same (genclj-06ba) |
+| `max` and `min` over an empty axis, `arange` with a zero step or a bool dtype, and a negative dimension raise MLX's own errors | gen.array raises its own first, with a `:reason` (§6) |
 | integer division by 0 is undefined (a trap on x86) | 0, as the JVM backend |
 | negative-step slices read a stop of -1 from the end | NumPy's bounds |
 | float64 `exp`, `sin`, `cos`, `erf`, `erfinv` on the CPU are float32 approximations (up to 1e-4 relative) | exact routes via `expm1`, `tan`, `log` (`gen.backend.mlx.exact`), within a few ulps |
@@ -1034,6 +1083,31 @@ kernels fail on. New native ops must keep that rule.
   become arrays, on every backend.
 - **Integer overflow in `power`.** The JVM backend computes through
   doubles and saturates; MLX multiplies exactly and wraps.
+- **int64 overflow** (1.2.1, DESIGN §9): MLX wraps, as Java's `long`
+  arithmetic and host numbers do; the JVM backend, which holds int64 values
+  in doubles, throws `:reason :overflow` where a result leaves the range
+  (§5). Its int64 values are exact up to 2^53, so between 2^53 and 2^63 it
+  rounds where MLX is exact.
+- **`=` on arrays** (1.2.1, DESIGN §9: documented, not aligned). The JVM
+  backend's is bitwise, as `java.util.Arrays/equals`: NaN equals NaN, 0.0
+  differs from -0.0, and the dtypes and shapes must match. MLX's reads
+  both on the host and compares their values numerically (dtypes and
+  shapes too): NaN differs from NaN, 0.0 equals -0.0. A
+  `gen` body's `=` reaches both; compare with `array/equal?` or
+  `array/allclose?`, the same everywhere.
+- **`counted?` and `indexed?`** answer true for every backend's arrays
+  (1.2.1, DESIGN §9, genclj-fzez's design kept): they implement `Indexed`
+  (which extends `Counted`) so that `nth` and `count` are loud, which
+  these predicates read as support. Generic code that branches on them
+  then meets the `:not-a-collection` error; `array/array?` is the test for
+  an array.
+- **`la/solve`'s vector rule** stays (1.2.1, DESIGN §9): a right-hand side
+  with one axis fewer than the matrix is a batch of vectors, so a shared
+  `[n n]` right-hand side beside `[b n n]` matrices is read as n vectors
+  (a `[b n]` result when b is n, a broadcasting error otherwise), where
+  NumPy 2 reads only a 1-d right-hand side as a vector. Broadcast a shared
+  matrix right-hand side to `[b n n]` first, as `la/inv` now does its
+  identity (§6). Revisited for 2.0.
 - **Indices.** An out-of-range array index is clamped, not an error. A lazy
   backend cannot check it without evaluating. The JVM backend is the one
   that checks. On MLX, `-Dgen.mlx.check-gathers=true` reads each gather's
