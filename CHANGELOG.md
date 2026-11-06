@@ -62,6 +62,15 @@ other values for the same key, from the same distribution.
   it named (code that relied on that was silently wrong). Now each throws
   `ex-info` with `:reason :negative-index` and the `:indices`. An index
   past the elements still selects nothing, as an absent address does.
+- **Fixed: choice maps' address order is total** (gen.choicemap;
+  genclj-7y8r). 1 and 1.0 tied, and so did two addresses of one class
+  without an order of their own (lists, maps, sets), so the leaf order
+  (`addresses`, `leaves`, `to-array`) followed the order the map was built
+  in; a nil address beside another threw a NullPointerException. A tie
+  now breaks by class name, then by printed form. The order of such
+  addresses may change, and so may that of numbers of classes other than
+  Long and Double (BigInt, Ratio, BigDecimal) beside other kinds of
+  address: every number now sorts among the numbers, by value.
 
 ## [1.2.0] - 2026-11-06
 

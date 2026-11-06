@@ -244,14 +244,40 @@
   (let [sub (get-submap cm addr nil)]
     (and (not (has-value? sub)) (not (empty? sub)))))
 
+(defn- class-name ^String [x] (if (nil? x) "" (.getName ^Class (class x))))
+
+(defn- sort-class
+  "The class name an address sorts under: one name for every number, so
+   that numbers sort among themselves by value, where Long's and Double's
+   names put them among the other classes."
+  ^String [x]
+  (if (number? x) "java.lang.Number" (class-name x)))
+
+(defn- nan? [x]
+  (or (and (instance? Double x) (.isNaN ^Double x)) (and (instance? Float x) (.isNaN ^Float x))))
+
+(defn- tie-break
+  "The order of two addresses the order proper ties (1 and 1.0, two values
+   of one class without an order of their own): by class name, then 0 for
+   equal values, else by printed form, then by hash."
+  [x y]
+  (let [c (compare (class-name x) (class-name y))]
+    (cond (not (zero? c)) c
+          (= x y) 0
+          :else (let [c (compare (pr-str x) (pr-str y))]
+                  (if (zero? c) (compare (hash x) (hash y)) c)))))
+
 (def ^:no-doc address-order
-  "A total order on addresses: comparable values of one class by value,
-   otherwise by class name."
+  "A total order on addresses (genclj-7y8r), so that the leaf order never
+   depends on the order a map was built in: numbers by value whatever
+   their class (NaN last), comparable values of one class by value,
+   otherwise by class name (every number's being one, java.lang.Number);
+   a tie broken by class name, then by value (tie-break)."
   (fn [x y]
-    (if (and (= (class x) (class y)) (instance? Comparable x))
-      (compare x y)
-      (let [nx (and (number? x) (number? y))]
-        (if nx (compare x y) (compare (.getName ^Class (class x)) (.getName ^Class (class y))))))))
+    (let [c (cond (and (number? x) (number? y)) (let [c (compare x y)] (if (zero? c) (compare (nan? x) (nan? y)) c))
+                  (and (identical? (class x) (class y)) (instance? Comparable x)) (compare x y)
+                  :else (compare (sort-class x) (sort-class y)))]
+      (if (zero? c) (tie-break x y) c))))
 
 (defn submaps
   "The [address child] pairs of a node, in canonical address order."
