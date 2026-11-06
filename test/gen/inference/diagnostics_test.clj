@@ -86,11 +86,6 @@
                              (rest es))))
           (array/->clj (rng/normal key [m n] {:backend jvm})))))
 
-(defn- mean-sd [xs]
-  (let [n (count xs)
-        m (/ (reduce + xs) n)]
-    [m (Math/sqrt (/ (reduce + (map #(* (- % m) (- % m)) xs)) (dec n)))]))
-
 (deftest ar1-ess-is-known
   ;; The ESS of n draws of an AR(1) chain is n(1 - ρ)/(1 + ρ) as n grows,
   ;; for the mean, and for the bulk too: rank normalization leaves a
@@ -104,10 +99,10 @@
           expected (/ (- 1.0 rho) (+ 1.0 rho))
           chains (mapv #(ar1 rho m n %) (rng/split (rng/key seed) runs))]
       (doseq [[label f] [["ess-mean" dg/ess-mean] ["ess-bulk" dg/ess-bulk]]]
-        (let [[mean sd] (mean-sd (map #(/ (f %) (* m n)) chains))]
-          (is (< (Math/abs (- mean expected)) (* 5 (/ sd (Math/sqrt runs))))
-              (str label " at ρ = " rho ": " mean " per draw, expected " expected
-                   ", band " (* 5 (/ sd (Math/sqrt runs))))))))))
+        (let [per-draw (map #(/ (f %) (* m n)) chains)]
+          (is (ts/within-5-se? per-draw expected)
+              (str label " at ρ = " rho ": " (ts/mean per-draw) " per draw, expected " expected
+                   ", band " (* 5 (ts/se per-draw)))))))))
 
 (deftest split-r-hat-of-shifted-chains-is-known
   ;; Chains of independent N(μ_c, 1) draws: the split R-hat's square is
@@ -121,10 +116,9 @@
     (let [runs 16 n 2000
           r-hats (for [key (rng/split (rng/key seed) runs)]
                    (dg/split-r-hat (mapv (fn [mu chain] (mapv #(+ mu %) chain))
-                                         offsets (ar1 0.0 4 n key))))
-          [mean sd] (mean-sd r-hats)]
-      (is (< (Math/abs (- mean expected)) (* 5 (/ sd (Math/sqrt runs))))
-          (str "means " offsets ": " mean ", expected " expected)))))
+                                         offsets (ar1 0.0 4 n key))))]
+      (is (ts/within-5-se? r-hats expected)
+          (str "means " offsets ": " (ts/mean r-hats) ", expected " expected)))))
 
 (deftest rank-diagnostics-are-invariant-to-monotone-maps
   ;; ranks, and which draws lie below a quantile, are the same after any

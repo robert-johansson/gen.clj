@@ -88,16 +88,13 @@
 (defn- mean-and-error
   "The mean of xs and its standard error, from their own spread."
   [xs]
-  (let [n (count xs)
-        m (/ (reduce + xs) n)]
-    [m (/ (Math/sqrt (/ (reduce + (map #(* (- % m) (- % m)) xs)) (dec n))) (Math/sqrt n))]))
+  [(ts/mean xs) (ts/se xs)])
 
 (defn- mean-near?
   "Is the mean of xs within five standard errors of mu (and 1e-9, for xs
    without spread)?"
   [xs mu]
-  (let [[m se] (mean-and-error xs)]
-    (< (ts/abs (- m mu)) (+ 1e-9 (* 5 se)))))
+  (< (ts/abs (- (ts/mean xs) mu)) (+ 1e-9 (* 5 (ts/se xs)))))
 
 (deftest the-estimate-approaches-the-exact-marginal-likelihood
   (let [state (run-filter 2000 (rng/key 1))]
@@ -288,14 +285,6 @@
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #":batched\? :required"
                               (pf/rejuvenate (assoc state :batched? :required) (k/mh branching []) (rng/key 65))))))))
 
-(defn- agree?
-  "Do the means of xs and ys, independent samples, agree within five
-   standard errors of their difference?"
-  [xs ys]
-  (let [[mx sx] (mean-and-error xs)
-        [my sy] (mean-and-error ys)]
-    (< (ts/abs (- mx my)) (+ 1e-12 (* 5 (Math/sqrt (+ (* sx sx) (* sy sy))))))))
-
 (deftest batched-and-scalar-rejuvenation-agree
   ;; Each particle's batched move is distributed as its scalar move: from
   ;; 3000 copies of one particle, the batched and the scalar rejuvenation's
@@ -312,9 +301,9 @@
               b (ts/host (pf/choice (pf/rejuvenate start kernel (rng/key 67)) addr))
               s (ts/host (pf/choice (pf/rejuvenate scalar kernel (rng/key 68)) addr))
               moved (fn [xs] (map #(if (== % x0) 0.0 1.0) xs))]
-          (is (agree? b s) "the means")
-          (is (agree? (map #(* % %) b) (map #(* % %) s)) "the second moments")
-          (is (agree? (moved b) (moved s)) "how many moved"))))))
+          (is (ts/means-agree? b s) "the means")
+          (is (ts/means-agree? (map #(* % %) b) (map #(* % %) s)) "the second moments")
+          (is (ts/means-agree? (moved b) (moved s)) "how many moved"))))))
 
 (deftest the-statistics-read-a-batched-state-without-rebuilding-it
   ;; pf/choice, mean, variance and proportions of a batched state are its

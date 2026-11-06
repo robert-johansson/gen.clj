@@ -50,7 +50,8 @@
             [gen.llm.toy-engine :as toy]
             [gen.llm.toy-tokenizer :as tt]
             [gen.random :as rng]
-            [gen.selection :as sel]))
+            [gen.selection :as sel]
+            [gen.test-support :as ts]))
 
 (def ^:private n-vocab 97)
 
@@ -527,8 +528,9 @@
                     t1 (range n-vocab)]
                 (* (Math/exp (+ (aget r0 t0) (aget r1 t1))) (double (f t0 t1)))))))
 
-(defn- mean ^double [xs] (/ (reduce + 0.0 xs) (count xs)))
-(defn- sd ^double [xs] (let [mu (mean xs)] (Math/sqrt (/ (reduce + (map #(Math/pow (- % mu) 2) xs)) (dec (count xs))))))
+;; the battery's sample statistics
+(def ^:private mean ts/mean)
+(def ^:private sd ts/sd)
 
 (deftest importance-sampling-estimates-the-marginal
   ;; the estimate, exp(log-ml-estimate), within 5 standard errors of the

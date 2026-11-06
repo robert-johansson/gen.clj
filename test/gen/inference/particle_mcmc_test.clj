@@ -91,8 +91,6 @@
               j (gain a p)]
           (recur (dec t) (conj xs (+ m (* j (- (first xs) (* a m))) (* (Math/sqrt (- p (* j a p))) (zs t))))))))))
 
-(defn- mean [xs] (/ (reduce + xs) (count xs)))
-
 ;; ---------------------------------------------------------------------------
 ;; Conditional SMC on the states
 ;; ---------------------------------------------------------------------------
@@ -144,7 +142,7 @@
   (let [[ms vs cs] (smoothed a ys)
         n (count draws)
         near (fn [what f mu v]
-               (let [m (mean (map f draws))]
+               (let [m (ts/mean (map f draws))]
                  (is (< (ts/abs (- m mu)) (* 5 (Math/sqrt (/ v n)))) (str what ": " m " against " mu))))]
     (doseq [t (range n-steps)
             :let [mu (ms t) v (vs t)]]
@@ -289,7 +287,7 @@
     (is (> (diag/ess-bulk draws) 400) "the chains mix")
     (doseq [i (range 3)
             :let [indicator (mapv (fn [chain] (mapv #(if (== i %) 1.0 0.0) chain)) draws)
-                  m (mean (flatten indicator))
+                  m (ts/mean (flatten indicator))
                   mcse (diag/mcse-mean indicator)]]
       (is (< (ts/abs (- m (grid-posterior i))) (* 5 mcse))
           (str "p(i = " i " | y): " m " against " (grid-posterior i) ", mcse " mcse)))))

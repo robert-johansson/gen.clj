@@ -40,14 +40,6 @@
   (let [ws (map #(ts/number (:weight (gfi/generate gf args obs %))) keys)]
     (clojure.core/- (apply max ws) (apply min ws))))
 
-(defn- mean [xs] (/ (reduce clojure.core/+ xs) (count xs)))
-
-(defn- within-5-se?
-  "Is the mean of the draws xs within 5 standard errors of mu, for draws of
-   variance v?"
-  [xs mu v]
-  (< (Math/abs (clojure.core/- (mean xs) mu)) (* 5 (Math/sqrt (/ v (count xs))))))
-
 ;; ---------------------------------------------------------------------------
 ;; The pairs, with their evidence by hand
 ;; ---------------------------------------------------------------------------
@@ -214,7 +206,7 @@
                             (rng/split (rng/key 20) 2000))]]
     (testing (str name)
       (doseq [[i [m v]] (map-indexed vector (posterior-moments name))]
-        (is (within-5-se? (map #(if (number? %) % (% i)) draws) m v) (str "element " i "'s mean"))))))
+        (is (ts/within-5-se? (map #(if (number? %) % (% i)) draws) m v) (str "element " i "'s mean"))))))
 
 (deftest regenerating-the-latent-is-gibbs
   (doseq [[name gf args obs] pairs
@@ -260,12 +252,12 @@
                     (partition 2 (rng/split (rng/key 21) 4000)))
         thetas (map second draws)
         n (count draws)
-        mt (mean thetas)
-        mm (mean (map first draws))
+        mt (ts/mean thetas)
+        mm (ts/mean (map first draws))
         c (/ (reduce clojure.core/+ (map (fn [[x y]] (* (clojure.core/- x mm) (clojure.core/- y mt))) draws)) (dec n))
         [[vmu c-exact] [_ vtheta]] cov]
-    (is (within-5-se? thetas (m 1) vtheta))
-    (is (within-5-se? (map #(let [d (clojure.core/- % (m 1))] (* d d)) thetas) vtheta (* 2 vtheta vtheta)))
+    (is (ts/within-5-se? thetas (m 1) vtheta))
+    (is (ts/within-5-se? (map #(let [d (clojure.core/- % (m 1))] (* d d)) thetas) vtheta (* 2 vtheta vtheta)))
     (is (< (Math/abs (clojure.core/- c c-exact)) (* 5 (Math/sqrt (/ (clojure.core/+ (* vmu vtheta) (* c-exact c-exact)) n)))))))
 
 (deftest ^:slow ^:heavy a-long-chain-finds-the-posterior
@@ -283,14 +275,13 @@
                      (recur tr (rest ks) (conj out [(ts/number (tr :mu)) (ts/number (tr :theta)) gibbs?])))
                    out))
         kept (drop burn-in states)
-        batch-means (fn [xs] (map mean (partition (quot (count xs) batches) xs)))]
+        batch-means (fn [xs] (map ts/mean (partition (quot (count xs) batches) xs)))]
     (is (zero? (count (remove #(% 2) states))) "every Gibbs move is accepted")
     (doseq [[i label] [[0 "mu"] [1 "theta"]]
             :let [bm (batch-means (map #(% i) kept))
-                  mb (mean bm)
-                  se (Math/sqrt (/ (/ (reduce clojure.core/+ (map #(Math/pow (clojure.core/- % mb) 2) bm)) (dec (count bm)))
-                                   (count bm)))]]
-      (is (< (Math/abs (clojure.core/- (mean (map #(% i) kept)) (m i))) (* 5 se)) label))))
+                  se (ts/se bm)]]
+      ;; the batch means' standard error
+      (is (< (Math/abs (clojure.core/- (ts/mean (map #(% i) kept)) (m i))) (* 5 se)) label))))
 
 ;; ---------------------------------------------------------------------------
 ;; Other choices
@@ -472,10 +463,9 @@
         evidence (* h (reduce clojure.core/+ (map #(density (* h %)) (range -80000 80001))))
         ratios (mapv #(Math/exp (clojure.core/- (ts/number (:weight (gfi/generate g [] obs %))) (Math/log evidence)))
                      (rng/split (rng/key 30) 4000))
-        m (mean ratios)
-        v (/ (reduce clojure.core/+ (map #(Math/pow (clojure.core/- % m) 2) ratios)) (dec (count ratios)))]
+        v (ts/variance ratios)]
     (is (< 1e-4 v) "the weights vary: not exact")
-    (is (within-5-se? ratios 1.0 v))))
+    (is (ts/within-5-se? ratios 1.0 v))))
 
 (deftest genmlx-su6q-every-element-of-a-vector-latent-is-checked
   ;; GenMLX probed a vector latent along the diagonal only. Here a child's

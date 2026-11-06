@@ -22,7 +22,8 @@
   (:require [clojure.test :refer [deftest is testing]]
             [gen.llm.awrs :as awrs]
             [gen.llm.branching-contract :as bc]
-            [gen.random :as rng]))
+            [gen.random :as rng]
+            [gen.test-support :as ts]))
 
 (def ^:private row
   "Six tokens' log-probabilities, normalized in double then stored as
@@ -55,11 +56,9 @@
    :geometric-3-accepts {:method :geometric :max-accepts 3}
    :geometric-budget-2 {:method :geometric :max-rejects 2}})
 
-(defn- mean ^double [xs] (/ (reduce + 0.0 xs) (count xs)))
-
-(defn- se ^double [xs]
-  (let [mu (mean xs)]
-    (Math/sqrt (/ (/ (reduce + (map #(Math/pow (- (double %) mu) 2) xs)) (dec (count xs))) (count xs)))))
+;; the battery's sample statistics: a mean and its standard error
+(def ^:private mean ts/mean)
+(def ^:private se ts/se)
 
 (def ^:private n-keys 4000)
 

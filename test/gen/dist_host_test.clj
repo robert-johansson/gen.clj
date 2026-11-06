@@ -41,11 +41,6 @@
                                (if (<= 0 x n) (clojure.core/- (clojure.core/* x (Math/log1p (- p))) (Math/log z)) ##-Inf))
                 :support (fn [{:keys [n]}] (range (inc n)))}))
 
-(defn- mean-sd [xs]
-  (let [n (count xs)
-        m (clojure.core// (reduce clojure.core/+ xs) n)]
-    [m (Math/sqrt (clojure.core// (reduce clojure.core/+ (map #(let [e (clojure.core/- % m)] (clojure.core/* e e)) xs)) (dec n)))]))
-
 (deftest draws-are-quantiles-of-the-key-s-uniforms
   (let [e (expo 2.0)]
     (testing "a pure function of the key, element i of a batch the same as alone"
@@ -56,10 +51,11 @@
       (is (= [2 3] (array/shape (dc/sample e (rng/key 4) [2 3])))))
     (testing "the mean and the variance of 4000 draws (1/r, 1/r²), within five standard errors"
       (let [xs (mapv ts/number (array/->clj (dc/sample e (rng/key 5) [4000])))
-            [m s] (mean-sd xs)]
-        (is (< (Math/abs (clojure.core/- m 0.5)) (clojure.core/* 5 (clojure.core// 0.5 (Math/sqrt 4000)))))
-        ;; the sample variance's sd is about √((μ4 - σ⁴)/n), μ4 = 9/r⁴ for the exponential
-        (is (< (Math/abs (clojure.core/- (clojure.core/* s s) 0.25)) (clojure.core/* 5 (Math/sqrt (clojure.core// (clojure.core/- (clojure.core// 9.0 16) 0.0625) 4000)))))))
+            v (ts/variance xs)]
+        (is (ts/within-5-se? xs 0.5 0.25))
+        ;; the sample variance's sd is about √((μ4 - σ⁴)/n), μ4 = 9/r⁴ for
+        ;; the exponential (exact, where ts/variance-se reads m4 from the draws)
+        (is (< (Math/abs (clojure.core/- v 0.25)) (clojure.core/* 5 (Math/sqrt (clojure.core// (clojure.core/- (clojure.core// 9.0 16) 0.0625) 4000)))))))
     (testing "log densities, as gen.dist's exponential's, elementwise over arrays"
       (is (ts/close? (dc/log-prob (d/exponential 2.0) 0.3) (dc/log-prob e 0.3)))
       (is (ts/close? (dc/log-prob (d/exponential 2.0) (array/array [0.1 0.7])) (dc/log-prob e (array/array [0.1 0.7]))))

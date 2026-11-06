@@ -31,11 +31,7 @@
 (def start {:m -1.0 :log-s 0.5})
 (def evidence (ts/number (dc/log-prob (d/normal 0 (Math/sqrt 2)) 1.3)))
 
-(defn- mean-and-se [xs]
-  (let [xs (mapv double xs)
-        n (count xs)
-        mu (/ (reduce clojure.core/+ xs) n)]
-    [mu (Math/sqrt (/ (reduce clojure.core/+ (map #(Math/pow (- % mu) 2) xs)) (* n (dec n))))]))
+(defn- mean-and-se [xs] [(ts/mean xs) (ts/se xs)])
 
 (defn- agrees?
   "Do two estimates [mean se] agree within five standard errors?"
@@ -330,10 +326,6 @@
 ;; without log q (no entropy term) puts ∂/∂log-s at -5.49, eleven standard
 ;; errors from the exact -4.44; the middleware's family check removed, a
 ;; bernoulli in q no longer throws.
-(defn- variance [xs]
-  (let [[m _] (mean-and-se xs) n (count xs)]
-    (/ (reduce clojure.core/+ (map #(Math/pow (- % m) 2) xs)) (dec n))))
-
 (deftest ^:heavy the-pathwise-gradient-is-unbiased-with-less-variance
   (let [exact {:m (- 1.3 (* 2 (:m start))) :log-s (- 1.0 (* 2 (Math/exp (* 2 (:log-s start)))))}
         draws (fn [estimator]
@@ -344,7 +336,7 @@
     (doseq [k [:m :log-s]]
       (is (agrees? (mean-and-se (map (comp ts/number k) pathwise)) [(exact k) 0.0])
           (str k ": " (mean-and-se (map (comp ts/number k) pathwise)) " against " (exact k)))
-      (is (< (variance (map (comp ts/number k) pathwise)) (* 0.25 (variance (map (comp ts/number k) score))))
+      (is (< (ts/variance (map (comp ts/number k) pathwise)) (* 0.25 (ts/variance (map (comp ts/number k) score))))
           (str k ": the pathwise variance is under a quarter of the score-function estimator's")))))
 
 (deftest advi-finds-the-posterior

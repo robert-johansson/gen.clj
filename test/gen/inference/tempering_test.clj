@@ -4,16 +4,20 @@
    than its prior (where importance sampling from the prior fails, checked
    here), a model whose structure varies (a branch on a draw picks the
    mean), a random walk (Kalman filtering) and a two-state HMM
-   (enumeration of its 64 paths). Bands: 5 standard errors of the mean of
-   five runs' estimates (fixed keys), floored at 0.05 nats, and the runs'
-   standard deviation below max-sd (a precision the estimator must have:
-   a band from its own spread grows with a bug that scatters it). The posterior
+   (enumeration of its 64 paths). Bands: the mean of five runs' estimates
+   (fixed keys) within 5 standard errors of the exact value, σ/√5 for the
+   estimator's measured spread σ (spread), and the runs' standard
+   deviation below 2.5σ (a precision the estimator must have: a band from
+   the runs' own spread, a t statistic on 4 degrees of freedom, grew with a
+   bug that scatters them, to 2.2 nats; genclj-7z2s). The posterior
    particles' mean of the conjugate model's latent agrees with the exact
    posterior mean. Planted against the moves (2026-11-01): dropping their
    (1 - β) correction (the moves then target the posterior at every step)
    fails the tests, as does leaving out the random-walk moves (the prior
    regenerations alone scatter the conjugate model's estimates from -0.3
-   to 11.6 nats against an exact 14.4)."
+   to 11.6 nats against an exact 14.4). The first again on the measured
+   bands (2026-11-06): it fails the conjugate model's (by 3.2 nats), the
+   branching one's and the HMM's; the random walk's passes it."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
             [gen.choicemap :as cm]
@@ -33,18 +37,23 @@
   [model args observations opts]
   (mapv #(:log-ml-estimate (tempering/smc model args observations (assoc opts :key (rng/key %)))) (range 1 6)))
 
-(def ^:private max-sd
-  "Nats: the five runs' standard deviation must stay below this, five times
-   the conjugate model's measured 0.2, so that a high-variance estimator
-   cannot pass on the width of its own band."
-  1.0)
+(def ^:private spread
+  "Nats: each model's estimator's standard deviation at 200 particles,
+   measured over keys 101 to 140 on the JVM (2026-11-06; their means were
+   within 2 standard errors of the exact values, as the estimator's low
+   bias of about σ²/2 allows)."
+  {:conjugate 0.29 :branching 0.14 :walk 0.13 :hmm 0.25})
 
-(defn- within-band? [estimates exact]
-  (let [n (count estimates)
-        m (/ (reduce + estimates) n)
-        sd (Math/sqrt (/ (reduce + (map #(let [d (- % m)] (* d d)) estimates)) (dec n)))
-        band (max 0.05 (* 5 (/ sd (Math/sqrt n))))]
-    {:ok (and (< (abs (- m exact)) band) (< sd max-sd)) :mean m :sd sd :exact exact :band band :estimates estimates}))
+(defn- within-band?
+  "Are the estimates' mean within five standard errors of exact, σ/√n for
+   the model's measured spread σ, and their standard deviation below 2.5σ
+   (for an estimator of spread σ, n = 5 runs exceed it with probability
+   P(χ²₄ > 25) = 5e-5, a normal's past 4 standard errors)?"
+  [estimates exact model]
+  (let [sigma (double (spread model))
+        sd (ts/sd estimates)]
+    {:ok (and (ts/within-5-se? estimates exact (* sigma sigma)) (< sd (* 2.5 sigma)))
+     :mean (ts/mean estimates) :sd sd :exact exact :band (* 5 (/ sigma (Math/sqrt (count estimates)))) :estimates estimates}))
 
 ;; ---------------------------------------------------------------------------
 ;; Conjugate normal: mu ~ N(0, 100), y_i ~ N(mu, 0.1), twenty of them
@@ -89,15 +98,14 @@
                            (range 1 10))]
       (is (< 3 (nth (sort shortfalls) 4)) (pr-str shortfalls))))
   (testing "tempered SMC agrees with the exact value"
-    (let [r (within-band? (runs conjugate [20] ys-observed {:particles 200}) conjugate-exact)]
+    (let [r (within-band? (runs conjugate [20] ys-observed {:particles 200}) conjugate-exact :conjugate)]
       (is (:ok r) (pr-str r))))
   (testing "its particles are the posterior's"
     (let [{:keys [traces]} (tempering/smc conjugate [20] ys-observed {:particles 400 :key (rng/key 7)})
           mus (mapv #(ts/host (% :mu)) traces)
-          m (/ (reduce + mus) (count mus))
-          post-sd (Math/sqrt (/ 1 (+ (/ 1 10000.0) (/ 20 0.01))))]
-      (is (< (abs (- m conjugate-posterior-mean)) (* 5 (/ post-sd (Math/sqrt 400))))
-          (pr-str {:mean m :exact conjugate-posterior-mean})))))
+          post-var (/ 1 (+ (/ 1 10000.0) (/ 20 0.01)))]
+      (is (true? (ts/within-5-se? mus conjugate-posterior-mean post-var))
+          (pr-str {:mean (ts/mean mus) :exact conjugate-posterior-mean})))))
 
 ;; ---------------------------------------------------------------------------
 ;; A structure that varies: a branch on a draw picks the mean
@@ -115,7 +123,7 @@
         sd (Math/sqrt 1.01)
         exact (Math/log (+ (* 0.3 (Math/exp (ts/host (dc/log-prob (d/normal 0 sd) y))))
                            (* 0.7 (Math/exp (ts/host (dc/log-prob (d/normal 3 sd) y))))))
-        r (within-band? (runs branching [] (cm/choicemap :y y) {:particles 200}) exact)]
+        r (within-band? (runs branching [] (cm/choicemap :y y) {:particles 200}) exact :branching)]
     (is (:ok r) (pr-str r))))
 
 ;; ---------------------------------------------------------------------------
@@ -132,7 +140,7 @@
                                                        {:transition 1.0 :transition-cov 0.25 :emission 1.0 :emission-cov 1.0}]
                                             (apply cm/choicemap (interleave (range) walk-ys)))))
         obs (reduce (fn [m [t y]] (cm/set-choice m [t :y] y)) cm/EMPTY (map-indexed vector walk-ys))
-        r (within-band? (runs walk [6 0.0] obs {:particles 200}) exact)]
+        r (within-band? (runs walk [6 0.0] obs {:particles 200}) exact :walk)]
     (is (:ok r) (pr-str r))))
 
 (def ^:private hmm
@@ -148,7 +156,7 @@
         paths (reduce (fn [ps _] (for [p ps s [0 1]] (conj p s))) [[]] ys)
         joint (fn [path] (reduce (fn [m [t s]] (cm/set-choice m [t :z] s)) obs (map-indexed vector path)))
         exact (ts/host (array/logsumexp (array/array (mapv #(ts/host (:weight (gfi/assess hmm args (joint %)))) paths))))
-        r (within-band? (runs hmm args obs {:particles 200}) exact)]
+        r (within-band? (runs hmm args obs {:particles 200}) exact :hmm)]
     (is (:ok r) (pr-str r))))
 
 (deftest a-run-fixed-in-advance
