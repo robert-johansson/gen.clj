@@ -11,6 +11,8 @@
      beginning with a string agree with prefix-logprob within 5 standard
      errors: the marginal is the token generative function's.
    - A beam gives lower bounds, rising with its width to the exact value.
+   - A lexeme's tokens split (sweep-split, sweep-roots!) as walks of each
+     token's bytes through the DFA say, from every state of six DFAs.
    - Misuse is loud.
 
    Mutations checked: see docs/research/llm-grammar.md, Tests."
@@ -19,7 +21,9 @@
             [gen.llm.branching-contract :as bc]
             [gen.llm.byte-tokenizer :as bt]
             [gen.llm.bytes :as bytes]
+            [gen.llm.dfa :as dfa]
             [gen.llm.lm :as lm]
+            [gen.llm.regex :as regex]
             [gen.llm.token :as token]
             [gen.llm.toy-engine :as toy]
             [gen.random :as rng])
@@ -133,6 +137,38 @@
     (is (close? (bytes/prefix-logprob bm [bos] "</s>") Double/NEGATIVE_INFINITY) "the end token ends the text")
     (is (< Double/NEGATIVE_INFINITY (bytes/prefix-logprob no-ends [bos] "</s>")) "unless it is no end")
     (is (= Double/NEGATIVE_INFINITY (bytes/text-logprob no-ends [bos] "ab")) "no end, no complete text")))
+
+(deftest a-lexeme-s-tokens-split
+  ;; sweep-split against a walk of each token's bytes through the DFA:
+  ;; live, the tokens it keeps in some state to their end; the roots'
+  ;; subtrees, those that pass an accepting state after the first byte and
+  ;; then die. sweep-roots! with the DFA as advance marks the roots'
+  ;; subtrees' live tokens (none: they die), so through a recognizer of
+  ;; any text it marks every token under them
+  (let [vocab (mapv #(.getBytes ^String % StandardCharsets/UTF_8)
+                    ["a" "b" "ab" "ba" "aab" "abab" "bba" "bab" "abba" "c" "ac" "abc" "bbb" "aaaa"])
+        trie (bytes/byte-trie vocab)
+        bits (fn [^longs m] (set (filter #(bit-test (aget m (quot (long %) 64)) (mod (long %) 64)) (range (count vocab)))))]
+    (doseq [re ["a*" "ab" "(ab)*" "b(ab)*" "a+b?" "[ab]*c"]
+            :let [d (regex/dfa re)
+                  table (dfa/table d)
+                  accept (boolean-array (map #(dfa/accepting? d %) (range (dfa/size d))))]
+            q (range (dfa/size d))]
+      (let [[live roots] (bytes/sweep-split trie table accept q)
+            walk (fn [^bytes bs] (reductions (fn [s b] (if (neg? (long s)) -1 (dfa/step d s b))) q (seq bs)))
+            expect-live (set (filter #(not-any? neg? (walk (vocab %))) (range (count vocab))))
+            expect-ended (set (filter (fn [t] (let [ss (vec (walk (vocab t)))
+                                                    death (first (keep-indexed #(when (neg? (long %2)) %1) ss))]
+                                                (and death (some #(dfa/accepting? d %) (subvec ss 1 death)))))
+                                      (range (count vocab))))
+            under (set (mapcat #(bytes/tokens-under trie %) roots))]
+        (is (= expect-live (bits live)) (str re " from " q ": live"))
+        (is (= expect-ended under) (str re " from " q ": the roots' tokens"))
+        (is (= under (bits (bytes/sweep-roots! (long-array 1) trie roots :any (fn [s _] s))))
+            (str re " from " q ": sweep-roots! through every text"))
+        (is (empty? (bits (bytes/sweep-roots! (long-array 1) trie roots q
+                                              (fn [s b] (let [s' (dfa/step d s b)] (when-not (neg? s') s'))))))
+            (str re " from " q ": through the DFA, the roots' tokens die"))))))
 
 (deftest misuse-is-loud
   (is (= :zero-prefix (bc/reason #(bytes/next-byte-logprobs bm [bos] "z"))))

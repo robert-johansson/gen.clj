@@ -45,6 +45,19 @@ other values for the same key, from the same distribution.
   rule's byte taken, or an index went out of bounds. An item is now its
   origin and its position, a number for each rule and dot, so no
   alternative's length is bounded.
+- **Changed: context-free masks inside a string** (gen.llm.cfg,
+  gen.llm.bytes; genclj-jq2d; DESIGN §9, PROVISIONAL). A JSON grammar's
+  mask at Qwen3's vocabulary took 238-363 ms with the context inside a
+  string (nearly every token allowed: each trie node visited built an
+  Earley set), where most of a JSON text's bytes are; now 0.2 ms, about
+  what one at a value's start costs. A regex element is a lexeme its DFA
+  scans, the Earley sets are a lazy DFA (successors kept, equal sets
+  shared), and the potential makes, for each state of each lexeme, the
+  tokens that stay inside it, so a mask sweeps only the tokens that end a
+  lexeme. Weights and masks are those of before (exact for the text's
+  bytes); making a potential costs about its token trie's time. Added to
+  gen.llm.bytes: `sweep-into!`, `sweep-roots!`, `sweep-split` and
+  `bare-mask`.
 
 ## [1.2.0] - 2026-11-06
 

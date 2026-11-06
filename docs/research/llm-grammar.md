@@ -402,7 +402,11 @@ by byte; `toolcall.cljs` built a regex over the declared tools. Here:
   grammars, against gen.llm.grammar's masks on a regular language, under
   the potential laws, and (`gen.llm.instaparse/cfg`) against instaparse's
   parses on 150 random recursive grammars. At Qwen3's vocabulary a JSON
-  grammar's mask takes 0.1-0.7 ms (`gen.instaparse-bench`).
+  grammar's mask took 0.1-0.7 ms (`gen.instaparse-bench`) at a value's
+  start; inside a string, which the bench did not reach then, 40-360 ms
+  (the 2026-11-06 health check). **Rebuilt (2026-11-06, genclj-jq2d):**
+  regex elements as lexemes and the sets as a lazy DFA, masks in parts;
+  inside a string 0.2 ms (the addendum below).
 
 
 ## The dependency: our own engine, not instaparse
@@ -512,6 +516,84 @@ which the language has. At Qwen3's 151,936 tokens
 
 The per-token costs are a dense row's passes over the vocabulary, the same
 for every grammar (Decisions, 10: a sparse row would cut them).
+
+### Addendum (2026-11-06): context-free masks inside a string (genclj-jq2d)
+
+The health check of v1.2.0 measured what `gen.instaparse-bench` promised
+and did not reach: a JSON grammar's mask (`logw-next`, every token) with
+the context inside a string. Most bytes of a JSON text are. The bench now
+measures both, with the bench's strings (`[a-z ]*`) and JSON's (`[^"]*`,
+any character but a quote, as one lexeme `#'"[^"]*"'` or three elements
+`'"' #'[^"]*' '"'`), at Qwen3's 151,936 tokens (`clojure -M:test:bench
+-m gen.instaparse-bench <gguf> cfg`, the M4, shared with seven other
+agents' JVMs: about 1.5 times a quiet machine's times, by the health
+check's 238-256 ms against these 358-363). Before, as 1.2.0 built it
+(regex elements as right-linear rules, an Earley set of HashSets and
+maps built at every trie node visited):
+
+| String | Context | prefix, µs | mask, µs | tokens allowed |
+|---|---|---:|---:|---:|
+| `[a-z ]*` | a value's start (empty, 22, 661 bytes) | 2, 25, 910 | 189, 276, 1,120 | 90-94 |
+| `[a-z ]*` | inside a string (23, 32, 677 bytes) | 27, 33, 730 | 73,175, 58,196, 78,840 | 41,759 |
+| `[^"]*` | a value's start | 2, 46, 942 | 790, 1,114, 1,820 | 436-440 |
+| `[^"]*` | inside a string | 38, 42, 968 | 362,120, 363,379, 358,290 | 150,612 |
+
+Inside a string nearly every token is allowed, so a sweep visits nearly
+every one of the trie's 333,802 nodes, and each visit built a set. The
+options (the bean's): (1) a regular terminal swept over the trie by its
+DFA, as gen.llm.grammar does; (2) Earley sets cached per state; (3)
+llguidance's lexer/parser split. Built, all three in one, since each
+alone left the floor where it was:
+
+1. **Lexemes.** A regex element is one terminal, scanned by its minimal
+   DFA: an item before it carries the DFA's state while the lexeme's bytes
+   go by, and moves past it wherever the DFA accepts. A string's body adds
+   no items (as right-linear rules it added an item and a set a byte).
+2. **The sets as a lazy DFA.** A set keeps its successor by each byte once
+   built, and a successor built from the same items over the same chart
+   is the same set (a canon per chart). The chart holds only the sets that
+   predict (anchors), the only ones a completion reads; a set that
+   predicts nothing is no origin, so its successors share its chart. A
+   string's body is then one set that loops on itself: a byte there is an
+   array read. With (1) and (2) the mask inside a string is a sweep of the
+   whole trie at a table read a node, 2.3-3.5 ms; the DFA sweep alone
+   (`bytes/sweep`, every token but those holding a quote) takes 1.7 ms, the
+   floor of any sweep.
+3. **Masks in parts (the split).** With the token trie, the potential makes
+   for every state of every lexeme's DFA the tokens that stay inside the
+   lexeme (`bytes/sweep-split`: the DFA live to the token's end) and the
+   subtrees of the tokens that pass an accepting state and then leave it
+   (those may end the lexeme and go on). A mask is then: those masks for
+   the set's lexing items, or'ed; a sweep, by the sets, of only the
+   subtrees that end a lexeme (`bytes/sweep-roots!`, the roots' paths read
+   once each); and a sweep under each byte an item waits for. A token's
+   first byte is taken by an item before a byte, by a lexing item, or by
+   none, and a lexing item's token either keeps its lexeme live (its pair
+   keeps the set non-empty) or ends it before leaving it, so the mask is
+   exact (the tests: brute force against `prefix?`, the potential laws,
+   the oracle, gen.llm.grammar's masks on a regular language; mutations
+   in cfg-test's docstring).
+
+After (the same machine and load):
+
+| String | Context | prefix, µs | mask, µs | tokens allowed |
+|---|---|---:|---:|---:|
+| `[a-z ]*` | a value's start (empty, 22, 661 bytes) | 1, 19, 413 | 61, 92, 772 | 90-94 |
+| `[a-z ]*` | inside a string (23, 32, 677 bytes) | 20, 17, 593 | 112, 114, 758 | 41,759 |
+| `[^"]*` | a value's start | 1, 19, 605 | 59, 119, 571 | 436-440 |
+| `[^"]*` | inside a string | 21, 27, 566 | 240, 220, 638 | 150,612 |
+| `'"' [^"]* '"'` | a value's start | 1, 19, 500 | 146, 196, 773 | 436-440 |
+| `'"' [^"]* '"'` | inside a string | 25, 24, 516 | 219, 196, 678 | 150,612 |
+
+So a mask inside a string costs about what one at a value's start does
+(0.2 against 0.06-0.2 ms), 1,500 times less than before; past a few
+hundred bytes the context's recognition (prefix, from the start every
+call: no state between calls) is most of a mask's cost, 0.4-0.6 ms at
+661 bytes. Making the potential takes what the trie does (130-300 ms
+at this vocabulary; the lexemes' masks add little: about 10 states).
+**PROVISIONAL (the owner's call, genclj-jq2d):** the three together, the
+masks made eagerly when the potential is (as gen.llm.grammar's are), their
+memory a bitset of the vocabulary per lexeme state (19 KB at Qwen3's).
 
 
 ## Decisions
