@@ -3595,6 +3595,38 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     (genclj-vajv), the git deletions done (genclj-wg76: merged branches
     only, the stale stash saved as a patch first), memo.clj told and
     asked through its session (genclj-fshl, genclj-e3q9).
+    The calls made while building them, PROVISIONAL the same way (each in
+    its bean):
+    - *randint* (genclj-psgi): exact integers, low + floor(k*r / 2^b) in
+      int64, k from the default float's uniforms (one float64's 52 bits;
+      three float32s' 23 bits each). Integers agree across backends that
+      share a default float, as every sampler's draws do; the JVM's
+      float64 draws are unchanged (the book's checked values with them),
+      float32's change. An empty range, a fractional host bound and a host
+      bound past int32 on an int32 backend are loud.
+    - *Integer arange* follows NumPy (and MLX), a bool arange is refused on
+      every backend (genclj-06ba); an int64 result past +-2^63 throws
+      `:overflow` on the JVM backend, 2^63 itself (the double nearest
+      Long/MAX_VALUE) accepted; `rng/key` refuses any float, 2.0 too, as
+      JAX's PRNGKey does; `rng/key-data` of a staged key is loud
+      (genclj-kdau). Empty extrema are refused in gen.array before any
+      backend, argmax and argmin with them; logsumexp keeps -Inf and
+      softmax an empty array.
+    - *Infinite values* are outside every distribution's support: log
+      density -Inf, gradient never NaN (normal's stays its +-Inf limit)
+      (genclj-zkbw); the DSL's exp step stands in 0.5 outside its domain.
+      The non-finite parameters kept: truncated-normal's infinite bounds,
+      wrapped-normal's +Inf sigma (the uniform on the circle), a -Inf
+      logit (item 1). defdist also refuses a repeated parameter
+      (genclj-8326). genclj-tggk: no change, the gains measured at 1-12%
+      against a new defdist mechanism; the real cost (mvnormal's
+      positive-definite? check) is a bean of its own.
+    - *agent/run* takes the template's options in its opts, beside
+      `:thinking?` (genclj-fshl); `coerce` and `after` read the
+      potential's next weights at the empty context when made, so a
+      prompted LM's prompt is read at construction (genclj-kdau); the GC's
+      two branching tests retry System/gc for up to 60 s under a new tag
+      `^:gc` (genclj-n2ia).
   - **One chain fast on MLX, and GPU speed (owner, 2026-11-04, "go with
     option 1", on the lead's recommendation; genclj-fpnf, genclj-h8rn).**
     One HMC chain (L=32, 1000 steps) ran in 21.9 ms as a Metal program (one
