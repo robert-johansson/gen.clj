@@ -87,6 +87,26 @@ sha256() {
   if command -v shasum >/dev/null; then shasum -a 256 "$1" | cut -d' ' -f1; else sha256sum "$1" | cut -d' ' -f1; fi
 }
 
+# NVIDIA's libraries from their PyPI wheels (pip's layout, in $build/nvidia),
+# checked against their sha256: for libmlx's run time below, and for
+# cuda13-source's build when the CUDA toolkit lacks one
+fetch_nvidia() {
+  local pkg=$1 ver=$2 w s u
+  read -r w s u < <(curl -sSf "https://pypi.org/pypi/$pkg/$ver/json" |
+    python3 -I -c "
+import json, sys
+fs = [f for f in json.load(sys.stdin)['urls'] if f['filename'].endswith('.whl') and '$arch' in f['filename']]
+print(fs[0]['filename'], fs[0]['digests']['sha256'], fs[0]['url']) if fs else None
+")
+  [ -n "${w:-}" ] || { echo "no $pkg $ver wheel for $arch" >&2; exit 1; }
+  if [ ! -f "$build/dl/$w" ]; then
+    echo "downloading $w"
+    curl -sSfL -o "$build/dl/$w.part" "$u" && mv "$build/dl/$w.part" "$build/dl/$w"
+  fi
+  [ "$(sha256 "$build/dl/$w")" = "$s" ] || { echo "sha256 mismatch for $w" >&2; exit 1; }
+  unzip -q -o "$build/dl/$w" 'nvidia/*' -d "$build"
+}
+
 # --- MLX: built from source, or the wheel ---------------------------------------
 if [ "$variant" = cuda13-source ]; then
   msrc="$build/src/mlx"
@@ -112,10 +132,27 @@ if [ "$variant" = cuda13-source ]; then
   # fetched below when the system lacks them), and MLX_EXTRA_RPATH (a BLAS
   # outside the system's, say)
   rpath='$ORIGIN/../../nvidia/cu13/lib:$ORIGIN/../../nvidia/cudnn/lib:$ORIGIN/../../nvidia/nccl/lib'
+  # MLX 0.32.4 links cuSOLVER (and cuSPARSE and nvJitLink under it) when it
+  # is built, and a toolkit from pip's packages (nvcc, cudart, cuBLAS) need
+  # not have them (fenrir's, 2026-11-06): fetch the missing ones' wheels and
+  # point CMake's FindCUDAToolkit at them, their headers included
+  toolkit="${CUDAToolkit_ROOT:-$(dirname "$(dirname "$(command -v nvcc)")")}"
+  extra=()
+  for spec in cusolver:nvidia-cusolver:12.3.5.3 cusparse:nvidia-cusparse:12.8.6.72 nvJitLink:nvidia-nvjitlink:13.4.92; do
+    IFS=: read -r lib pkg ver <<< "$spec"
+    if ! ls "$toolkit"/lib/lib$lib.so* "$toolkit"/lib64/lib$lib.so* "$toolkit"/targets/*/lib/lib$lib.so* >/dev/null 2>&1; then
+      fetch_nvidia "$pkg" "$ver"
+      found="$(ls "$build"/nvidia/cu13/lib/lib$lib.so.* | head -1)"
+      extra+=("-DCUDA_${lib}_LIBRARY=$found")
+    fi
+  done
+  if [ ${#extra[@]} -gt 0 ]; then
+    extra+=("-DCMAKE_CXX_FLAGS=-isystem $build/nvidia/cu13/include" "-DCMAKE_CUDA_FLAGS=-isystem $build/nvidia/cu13/include")
+  fi
   cmake -S "$msrc" -B "$build/cmake-mlx-$platform" $generator -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
     -DMLX_BUILD_CUDA=ON -DMLX_CUDA_ARCHITECTURES="$archs" -DMLX_BUILD_TESTS=OFF -DMLX_BUILD_EXAMPLES=OFF \
     -DMLX_BUILD_BENCHMARKS=OFF -DMLX_BUILD_PYTHON_BINDINGS=OFF -DCMAKE_INSTALL_PREFIX="$build/mlx-$platform" \
-    -DCMAKE_INSTALL_RPATH="$rpath${MLX_EXTRA_RPATH:+:$MLX_EXTRA_RPATH}"
+    -DCMAKE_INSTALL_RPATH="$rpath${MLX_EXTRA_RPATH:+:$MLX_EXTRA_RPATH}" ${extra[@]+"${extra[@]}"}
   cmake --build "$build/cmake-mlx-$platform"
   cmake --install "$build/cmake-mlx-$platform"
   mlx_root="$build/mlx-$platform"
@@ -206,22 +243,6 @@ done
 # cuSOLVER, with cuSPARSE and nvJitLink under it, pinned to CUDA 13.4's
 # family, 2026-11-05). A fetched library can need others (cuSOLVER needs
 # cuSPARSE), so the check runs until nothing is missing.
-fetch_nvidia() {
-  local pkg=$1 ver=$2 w s u
-  read -r w s u < <(curl -sSf "https://pypi.org/pypi/$pkg/$ver/json" |
-    python3 -I -c "
-import json, sys
-fs = [f for f in json.load(sys.stdin)['urls'] if f['filename'].endswith('.whl') and '$arch' in f['filename']]
-print(fs[0]['filename'], fs[0]['digests']['sha256'], fs[0]['url']) if fs else None
-")
-  [ -n "${w:-}" ] || { echo "no $pkg $ver wheel for $arch" >&2; exit 1; }
-  if [ ! -f "$build/dl/$w" ]; then
-    echo "downloading $w"
-    curl -sSfL -o "$build/dl/$w.part" "$u" && mv "$build/dl/$w.part" "$build/dl/$w"
-  fi
-  [ "$(sha256 "$build/dl/$w")" = "$s" ] || { echo "sha256 mismatch for $w" >&2; exit 1; }
-  unzip -q -o "$build/dl/$w" 'nvidia/*' -d "$build"
-}
 if [ "$variant" = cuda13 ] || [ "$variant" = cuda13-source ]; then
   for round in 1 2 3; do
     missing="$(ldd "$out/lib/libmlx.so" | awk '/not found/ {print $1}')"

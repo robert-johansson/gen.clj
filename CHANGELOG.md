@@ -38,6 +38,14 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Fixed: `native/build-mlx.sh cuda13-source` with a toolkit from pip**
+  (genclj-ajse). MLX 0.32.4 links cuSOLVER (with cuSPARSE and nvJitLink
+  under it) when it is built, and CMake stopped at "CUDA::cusolver not
+  found" on a CUDA toolkit made of NVIDIA's pip packages (fenrir's). The
+  script fetches the missing libraries' wheels before configuring, as it
+  already did for the wheel variant's run time, and points CMake at them.
+  1.2.0's source build was never rebuilt after its backported patch was
+  dropped; it builds and runs again (sm_120).
 - **Added: the chat template's options in agent/run** (gen.llm.agent,
   experimental; genclj-fshl). `agent/run`'s opts take `:template`
   (`:qwen3.8` for Qwen3.8's), `:reasoning-effort` and
