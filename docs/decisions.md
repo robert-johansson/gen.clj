@@ -3829,3 +3829,9 @@ its bean):
   options to their own argument waits for 2.0. gen.array.stage no
   longer requires gen.choicemap: its constants follow the map's own
   order (the program's values unchanged).
+- *memo.clj's needs* (genclj-e3q9; memo-clj-96's answer, 2026-11-06):
+  none of 1.2.0's GenLM tools is used by memo.clj, a floor of zero; its
+  one candidate with evidence is a bracket-balance or CFG constraint over
+  an agent tool call's code (a draft bean under genclj-p55l, the owner's
+  call). The lead's recommendation stands: no new GenLM features until a
+  consumer uses one.
