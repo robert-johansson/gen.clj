@@ -45,12 +45,31 @@
     (is (every? #(< (ts/abs (- % (- (Math/log n)))) (ts/tol 1e-12)) log-normalized-weights))
     (is (< (ts/abs (- log-ml-estimate log-evidence)) (ts/tol 1e-12)))))
 
+(defn- evidence-ok?
+  "Is a prior proposal's estimate of n samples within five standard errors
+   of the evidence, √(relative-variance/n)?"
+  [log-ml-estimate n]
+  (< (ts/abs (- log-ml-estimate log-evidence)) (* 5 (Math/sqrt (/ relative-variance n)))))
+
 (deftest the-prior-proposal-estimates-the-evidence
   (let [n 10000
         {:keys [log-ml-estimate log-normalized-weights]}
         (imp/importance-sampling model [] observations n {:key (rng/key 2)})]
     (is (= n (count log-normalized-weights)))
-    (is (< (ts/abs (- log-ml-estimate log-evidence)) (* 5 (Math/sqrt (/ relative-variance n)))))))
+    (is (evidence-ok? log-ml-estimate n))))
+
+(deftest the-evidence-check-fails-a-wrong-proposal-density
+  ;; a negative control (genclj-k3a8): the prior's draws through a custom
+  ;; proposal, whose weights p(y | x)·N(x; 0, 1)/q(x) are the prior
+  ;; proposal's when q reports N(0, 1)'s density, and pass; with q's density
+  ;; misreported as N(0, 1.5)'s they are biased by about log 1.21 = 0.19
+  ;; (0.194 here; the band is 0.036), and the same check must fail
+  (let [n 10000
+        estimate (fn [sd'] (:log-ml-estimate (imp/importance-sampling model [] observations n
+                                                                      {:proposal (gen [] (trace :x (ts/misreported-normal 0.0 1.0 sd')))
+                                                                       :proposal-args [] :key (rng/key 2)})))]
+    (is (evidence-ok? (estimate 1.0) n) "the density reported right")
+    (is (not (evidence-ok? (estimate 1.5) n)) "the density misreported")))
 
 (deftest ^:heavy the-estimate-is-unbiased-in-exp-space
   ;; law 20: E[exp(log-ml-estimate)] = p(y), even for few samples, where the

@@ -99,6 +99,16 @@
                            #(% [:latent :z])
                            (fn [tr key] (:trace (mcmc/hmc tr (sel/select [:latent :z]) {:L 5 :eps 0.25} key)))))))
 
+(deftest hmc-s-check-fails-a-planted-bug
+  ;; a negative control (genclj-k3a8): hmc-targets-the-posterior's
+  ;; stationary check, run on the library's HMC with its momenta's density
+  ;; (the kinetic energy in the acceptance ratio, mcmc's normal-lp) planted
+  ;; as 0, must fail. A wrong gradient would not do: the leapfrog stays
+  ;; volume-preserving and reversible under any force field, so HMC with
+  ;; one stays exact, only slower.
+  (let [step (fn [tr key] (:trace (mcmc/hmc tr x-sel {:L 5 :eps 0.3} key)))]
+    (is (not (with-redefs-fn {#'mcmc/normal-lp (fn [_ _ _] 0.0)} #(scalar-stationary? step))))))
+
 (deftest ^:slow mala-targets-the-posterior
   (let [step (fn [tr key] (:trace (mcmc/mala tr x-sel 0.3 key)))]
     (is (scalar-stationary? step))

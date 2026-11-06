@@ -16,11 +16,15 @@
      variance-within-5-se?, moments-match?, means-agree?, log-ml-se,
      self-normalized-se: sample statistics and their bands of five
      standard errors (CLAUDE.md's Test conventions), one copy for the
-     battery."
+     battery.
+   - misreported-normal: a planted bug for negative controls, a normal
+     whose density is another's."
   (:refer-clojure :exclude [abs])
   (:require [gen.array :as array]
             [gen.array.protocols :as p]
-            [gen.choicemap :as cm]))
+            [gen.array.special :as special]
+            [gen.choicemap :as cm]
+            [gen.dist.host :as host]))
 
 (defn backend-name [] (p/-name array/*backend*))
 
@@ -225,3 +229,19 @@
         x (host-doubles xs)
         m (reduce + (map * w x))]
     (Math/sqrt (reduce + (map (fn [^double wi ^double xi] (* wi wi (- xi m) (- xi m))) w x)))))
+
+;; ---------------------------------------------------------------------------
+;; Planted bugs for negative controls
+;; ---------------------------------------------------------------------------
+
+(def misreported-normal
+  "(misreported-normal mu sd sd'): draws from N(mu, sd), and reports the log
+   density of N(mu, sd'), a proposal whose density is wrong unless sd' is
+   sd (genclj-k3a8: a statistical check run against it must fail). Its
+   parameters are host numbers, or 0-d arrays read on the host."
+  (host/family {:name "misreported-normal"
+                :make (fn [mu sd sd'] [(double mu) (double sd) (double sd')])
+                :quantile (fn [[mu sd _] u] (+ mu (* sd (Math/sqrt 2.0) (special/erfinv (- (* 2.0 u) 1.0)))))
+                :log-density (fn [[mu _ sd'] x]
+                               (let [z (/ (- x mu) sd')]
+                                 (- (* -0.5 z z) (Math/log sd') (* 0.5 (Math/log (* 2.0 Math/PI))))))}))

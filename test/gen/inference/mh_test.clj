@@ -114,8 +114,9 @@
     (is (< (converged? main step (cm/choicemap :a true :b 0)) (threshold main)) (str label " does not converge"))))
 
 (deftest a-proposal-that-ignores-the-backward-move-is-caught
-  ;; the same custom move, but accepting with the update weight alone: the
-  ;; test above must be able to tell
+  ;; a negative control (genclj-k3a8's MH): the same custom move, but
+  ;; accepting with the update weight alone: the test above must be able to
+  ;; tell
   (let [wrong (fn [tr key]
                 (let [[k1 k2 k3] (rng/split key 3)
                       {fwd :choices} (gfi/propose b-proposal [tr] k1)

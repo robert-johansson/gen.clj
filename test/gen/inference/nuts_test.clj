@@ -186,27 +186,46 @@
 ;; Exact posteriors
 ;; ---------------------------------------------------------------------------
 
-(deftest ^:slow ^:heavy nuts-leaves-the-target-invariant
-  ;; Exact draws of the correlated Gaussian, each moved by two transitions
-  ;; at a fixed step size and inverse metric, against fresh exact draws:
-  ;; the means of x, y, x², y² and xy, each a two-sample z within 5. A
-  ;; chain that stays put would pass, so the transitions must move: a step
-  ;; size this large (their acceptance statistic is 0.67) weighs the
-  ;; trajectory's points unequally, where a bug in their weights shows.
-  ;; Planted bugs (2026-10-23): the energy without the metric (½ p·p), |z|
-  ;; up to 17; weights e^(h - h0) in place of e^(h0 - h), |z| up to 17 (at a
-  ;; step size of 0.6, an acceptance of 0.92, they were within 3)
-  (let [n 1500
-        starts (map (fn [[x y]] (start-at correlated [] (cm/choicemap :x x :y y))) (correlated-draws n (rng/key 14)))
+(defn- moved-against-fresh
+  "n exact draws of the correlated Gaussian, each moved by two transitions
+   at a fixed step size and inverse metric, against n fresh exact draws:
+   {:zs the two-sample z of the means of x, y, x², y² and xy, by label,
+   :acceptance the transitions' mean acceptance statistic}."
+  [n]
+  (let [starts (map (fn [[x y]] (start-at correlated [] (cm/choicemap :x x :y y))) (correlated-draws n (rng/key 14)))
         step (fn [[tr stats] key] (let [r (mcmc/nuts tr xy {:eps 1.0 :inv-metric {:x 3.0 :y 0.006}} key)]
                                     [(:trace r) (conj stats (:accept-stat r))]))
         runs (map (fn [tr key] (reduce step [tr []] (rng/split key 2))) starts (rng/split (rng/key 15) n))
         moved (map (fn [[tr]] [(value tr :x) (value tr :y)]) runs)
         fresh (correlated-draws n (rng/key 16))]
-    (is (< 0.5 (ts/mean (mapcat second runs))) "the transitions move")
-    (doseq [[label f] [["x" first] ["y" second] ["x²" #(* (first %) (first %))] ["y²" #(* (second %) (second %))]
-                       ["xy" #(* (first %) (second %))]]]
-      (is (< (Math/abs (double (z (map f moved) (map f fresh)))) 5.0) label))))
+    {:acceptance (ts/mean (mapcat second runs))
+     :zs (into {} (for [[label f] [["x" first] ["y" second] ["x²" #(* (first %) (first %))] ["y²" #(* (second %) (second %))]
+                                   ["xy" #(* (first %) (second %))]]]
+                    [label (double (z (map f moved) (map f fresh)))]))}))
+
+(deftest ^:slow ^:heavy nuts-leaves-the-target-invariant
+  ;; The means of x, y, x², y² and xy of moved and fresh draws, each a
+  ;; two-sample z within 5. A chain that stays put would pass, so the
+  ;; transitions must move: a step size this large (their acceptance
+  ;; statistic is 0.67) weighs the trajectory's points unequally, where a
+  ;; bug in their weights shows. Planted bugs (2026-10-23): the energy
+  ;; without the metric (½ p·p), |z| up to 17; weights e^(h - h0) in place
+  ;; of e^(h0 - h), |z| up to 17 (at a step size of 0.6, an acceptance of
+  ;; 0.92, they were within 3); the first is
+  ;; nuts-s-check-fails-a-planted-bug
+  (let [{:keys [acceptance zs]} (moved-against-fresh 1500)]
+    (is (< 0.5 acceptance) "the transitions move")
+    (doseq [[label z] zs]
+      (is (< (Math/abs z) 5.0) label))))
+
+(deftest nuts-s-check-fails-a-planted-bug
+  ;; a negative control (genclj-k3a8): nuts-leaves-the-target-invariant's
+  ;; check, on 300 draws, run on the library's NUTS with the energy planted
+  ;; without the metric (½ p·p for ½ p·M⁻¹p, mcmc's energy), must fail: some
+  ;; |z| of 5 or more
+  (let [{:keys [zs]} (with-redefs-fn {#'mcmc/energy (fn [lp p _] (- (* 0.5 (array/sum (* p p))) lp))}
+                       #(moved-against-fresh 300))]
+    (is (some #(<= 5.0 (Math/abs (double %))) (vals zs)) (pr-str zs))))
 
 (deftest ^:slow ^:heavy nuts-samples-a-conjugate-posterior
   ;; Planted bug (2026-10-23): the energy without the metric freezes the

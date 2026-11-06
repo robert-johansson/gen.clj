@@ -96,11 +96,17 @@
   [xs mu]
   (< (ts/abs (- (ts/mean xs) mu)) (+ 1e-9 (* 5 (ts/se xs)))))
 
+(defn- lml-near?
+  "Is a filter's estimate of 2000 particles, from the internal proposal,
+   near the exact log marginal likelihood? Its sd is about sqrt(12.6/n) for
+   this model and filter (from the variance of runs of 20 particles): five
+   of them at n = 2000 is 0.40."
+  [state]
+  (< (ts/abs (- (pf/log-ml-estimate state) (exact-lml))) 0.40))
+
 (deftest the-estimate-approaches-the-exact-marginal-likelihood
   (let [state (run-filter 2000 (rng/key 1))]
-    ;; the estimate's sd is about sqrt(12.6/n) for this model and filter (from
-    ;; the variance of runs of 20 particles): five of them at n = 2000 is 0.40
-    (is (< (ts/abs (- (pf/log-ml-estimate state) (exact-lml))) 0.40))
+    (is (lml-near? state))
     (testing "the filtering mean of 2000 resampled draws, against the Kalman posterior's"
       ;; the draws come from the filter's approximation, so its own error
       ;; adds to theirs: the statistic's sd is 0.020 over 300 filters and
@@ -110,6 +116,21 @@
       (let [xs (map #(% [(dec (count ys)) :x]) (pf/sample-unweighted-traces state 2000 (rng/key 2)))
             [_ m _] (last kalman)]
         (is (< (ts/abs (- (/ (reduce + xs) 2000) m)) (* 5 0.0225)))))))
+
+(defn- misreported-proposals
+  "The internal proposal, x_t ~ N(a·x_{t-1}, q), as custom proposals whose
+   density reports N(a·x_{t-1}, q·s)'s: the right one at s = 1."
+  [s]
+  {:initial (gen [_] (trace [0 :x] (ts/misreported-normal 0.0 q (* q s))))
+   :proposal (gen [tr t _] (trace [t :x] (ts/misreported-normal (* a-coef (tr [(dec t) :x])) q (* q s))))})
+
+(deftest the-estimate-s-check-fails-a-wrong-proposal-density
+  ;; a negative control (genclj-k3a8): the internal proposal's draws as
+  ;; custom proposals pass lml-near? (0.009 off); with their density
+  ;; misreported, sd 1.3 for 1, the estimate is 0.86 nats off (the band is
+  ;; 0.40), and the same check must fail
+  (is (lml-near? (run-filter 2000 (rng/key 1) (misreported-proposals 1.0))) "the density reported right")
+  (is (not (lml-near? (run-filter 2000 (rng/key 1) (misreported-proposals 1.3)))) "the density misreported"))
 
 (defn- unbiased? [proposal?]
   ;; law 20: E[exp(estimate)] = p(y), checked against the runs' own spread
