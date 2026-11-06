@@ -13,14 +13,17 @@
 
    MLX and llama.cpp runs are refused: one GPU JVM at a time on this
    machine (two MLX JVMs exhausted its memory, 2026-10-19). Each shard's
-   output prints when it ends, then the totals; failures exit 1, as
+   output prints when it ends, then the totals and the native suites' line
+   (gen.test-runner, -Dgen.require-native); failures exit 1, as
    cognitect's runner."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :as test]
             [clojure.tools.namespace.find :as find]
-            [cognitect.test-runner :as runner])
+            [cognitect.test-runner :as runner]
+            [gen.test-runner :as test-runner]
+            [gen.test-support :as ts])
   (:import (java.lang ProcessHandle)
            (java.lang.management ManagementFactory)))
 
@@ -67,7 +70,8 @@
     ;; the line run reads back
     (binding [*print-namespace-maps* false]
       (prn {::summary (select-keys summary [:test :pass :fail :error])
-            ::times (merge-with + loads @runs)}))
+            ::times (merge-with + loads @runs)
+            ::native (ts/native-counts)}))
     (shutdown-agents)
     (System/exit 0)))
 
@@ -177,6 +181,9 @@
                      (:test totals) (+ (:pass totals) (:fail totals) (:error totals)) (:fail totals) (:error totals)
                      (if (seq died) (str "\nNot run, their JVM died: " (str/join " " died)) "")
                      (count shards) (secs t0)))
-    (shutdown-agents)
-    (when (or (seq died) (pos? (+ (:fail totals) (:error totals))))
-      (throw (ex-info "Test failures or errors occurred." {:died (vec died)})))))
+    (let [native (try (test-runner/check-shards! (keep ::native results)) nil
+                      (catch clojure.lang.ExceptionInfo e e))]
+      (shutdown-agents)
+      (when (or (seq died) (pos? (+ (:fail totals) (:error totals))))
+        (throw (ex-info "Test failures or errors occurred." {:died (vec died)})))
+      (when native (throw native)))))

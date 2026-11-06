@@ -5,7 +5,8 @@
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
             [gen.array.memory :as reservations]
-            [gen.array.protocols :as p]))
+            [gen.array.protocols :as p]
+            [gen.test-support :as ts]))
 
 (def available?
   (delay
@@ -13,12 +14,17 @@
       (Class/forName "gen.mlx.MlxRuntime")
       true
       (catch Throwable t
-        (println "Skipping the MLX tests:" (or (ex-message t) (.getName (class t)))
-                 "(build with native/build-mlx.sh and clojure -T:build java)")
+        (let [why (str (or (ex-message t) (.getName (class t)))
+                       " (build with native/build-mlx.sh and clojure -T:build java)")]
+          (println "Skipping the MLX tests:" why)
+          (ts/native-unavailable! :mlx why))
         false))))
 
-(defmacro ^:private when-mlx [& body]
-  `(when @available? ~@body))
+(defmacro ^:private when-mlx
+  "body when the MLX binding loads, else a skipped test, counted
+   (gen.test-support/when-native)."
+  [& body]
+  `(ts/when-native :mlx available? ~@body))
 
 (defn- mlx [] @(requiring-resolve 'gen.backend.mlx/backend))
 

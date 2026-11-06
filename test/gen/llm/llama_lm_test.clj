@@ -17,7 +17,8 @@
             [gen.llm.branching-contract :as bc]
             [gen.llm.lm :as lm]
             [gen.llm.lm-contract :as contract]
-            [gen.llm.toy-engine :as toy]))
+            [gen.llm.toy-engine :as toy]
+            [gen.test-support :as ts]))
 
 (def ^:private model-path
   (or (System/getProperty "gen.llama.test-model") (System/getenv "GEN_LLAMA_TEST_MODEL")))
@@ -30,7 +31,7 @@
 
 (def ^:private available?
   (delay
-    (let [skip (fn [why] (println "Skipping the llama.cpp LM tests:" why) false)]
+    (let [skip (fn [why] (println "Skipping the llama.cpp LM tests:" why) (ts/native-unavailable! :llama why) false)]
       (cond
         (nil? model-path) (skip "no model (-J-Dgen.llama.test-model=<a GGUF file>, or GEN_LLAMA_TEST_MODEL)")
         (not (.isFile (java.io.File. ^String model-path))) (skip (str "no model file at " model-path))
@@ -70,7 +71,7 @@
    :band (:band (bands/bands (br/info e)))})
 
 (deftest the-contract-holds-within-the-noise
-  (when @available?
+  (ts/when-native :llama available?
     (let [{:keys [engine] :as s} (setup)]
       (doseq [[k check] contract/checks]
         (testing k
@@ -80,7 +81,7 @@
       (is (zero? (:live (br/info engine))) "every check closes what it makes"))))
 
 (deftest the-gguf-tokenizer-is-the-lms
-  (when @available?
+  (ts/when-native :llama available?
     (let [e (engine)
           t0 (System/nanoTime)
           tok ((llama 'tokenizer) e)

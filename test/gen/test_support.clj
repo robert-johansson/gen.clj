@@ -18,9 +18,14 @@
      standard errors (CLAUDE.md's Test conventions), one copy for the
      battery.
    - misreported-normal: a planted bug for negative controls, a normal
-     whose density is another's."
+     whose density is another's.
+   - when-native, native-unavailable!, native-report, native-missing: the
+     native suites' (MLX's binding, llama.cpp's) tests counted as run or
+     skipped, which gen.test-runner prints at a run's end and
+     -Dgen.require-native turns into a failure."
   (:refer-clojure :exclude [abs])
-  (:require [gen.array :as array]
+  (:require [clojure.string :as str]
+            [gen.array :as array]
             [gen.array.protocols :as p]
             [gen.array.special :as special]
             [gen.choicemap :as cm]
@@ -245,3 +250,70 @@
                 :log-density (fn [[mu _ sd'] x]
                                (let [z (/ (- x mu) sd')]
                                  (- (* -0.5 z z) (Math/log sd') (* 0.5 (Math/log (* 2.0 Math/PI))))))}))
+
+;; ---------------------------------------------------------------------------
+;; Native suites: run, skipped, required (genclj-ruh8)
+;; ---------------------------------------------------------------------------
+;; The MLX binding's and llama.cpp's tests pass with no assertions where
+;; their library (or test model) is missing. Each counts its tests here, so
+;; that a run says how many skipped, and a release gate run with
+;; -Dgen.require-native=mlx,llama fails instead (gen.test-runner).
+
+(defonce ^:private native (atom {}))
+
+(defn ^:no-doc native-ran! [suite]
+  (swap! native update-in [suite :ran] (fnil inc 0)))
+
+(defn ^:no-doc native-skipped! [suite ns-name]
+  (swap! native (fn [m] (-> m (update-in [suite :skipped] (fnil inc 0)) (update-in [suite :nses] (fnil conj (sorted-set)) ns-name)))))
+
+(defn native-unavailable!
+  "Record why the native suite (:mlx or :llama) cannot run: its library,
+   binding or test model missing."
+  [suite why]
+  (swap! native update-in [suite :why] #(or % why)))
+
+(defmacro when-native
+  "body when the native suite's availability (a delay of a boolean) holds;
+   nil otherwise, the test counted as skipped. Counted either way, so a run
+   tells a suite that ran from one that skipped or never ran."
+  [suite available & body]
+  `(if (deref ~available)
+     (do (native-ran! ~suite) ~@body)
+     (native-skipped! ~suite '~(ns-name *ns*))))
+
+(defn native-counts
+  "{suite {:ran :skipped :nses :why}} of this JVM's run so far."
+  []
+  @native)
+
+(defn required-native
+  "The suites -Dgen.require-native names (comma-separated: mlx, llama)."
+  []
+  (into #{} (comp (map str/trim) (remove str/blank?) (map keyword))
+        (str/split (or (System/getProperty "gen.require-native") "") #",")))
+
+(defn native-report
+  "A line on the native suites counts reached ({suite {:ran :skipped :nses
+   :why}}), or nil when none was."
+  [counts]
+  (when (seq counts)
+    (str "Native suites: "
+         (str/join "; " (for [[suite {:keys [ran skipped nses why]}] (sort-by key counts)]
+                          (str (name suite) " ran " (or ran 0) " tests"
+                               (when skipped
+                                 (str ", skipped " skipped " (" (str/join " " nses) ")"
+                                      (when why (str ": " why)))))))
+         (when (some (comp :skipped val) counts)
+           " (-J-Dgen.require-native=mlx,llama fails a run that skips them)"))))
+
+(defn native-missing
+  "The required suites (required-native) that skipped a test or ran none,
+   by the counts: {suite why}."
+  [counts required]
+  (into (sorted-map)
+        (for [suite required
+              :let [{:keys [ran skipped why]} (get counts suite)]
+              :when (or skipped (not ran))]
+          [suite (cond skipped (str "skipped " skipped " tests" (when why (str ": " why)))
+                       :else "no test of it ran")])))

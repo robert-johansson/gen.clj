@@ -20,7 +20,8 @@
             [gen.llm.lm :as lm]
             [gen.llm.potential :as potential]
             [gen.llm.token :as token]
-            [gen.random :as rng]))
+            [gen.random :as rng]
+            [gen.test-support :as ts]))
 
 (def ^:private model-path
   (or (System/getProperty "gen.llama.test-model") (System/getenv "GEN_LLAMA_TEST_MODEL")))
@@ -29,7 +30,7 @@
 
 (def ^:private available?
   (delay
-    (let [skip (fn [why] (println "Skipping the llama.cpp grammar tests:" why) false)]
+    (let [skip (fn [why] (println "Skipping the llama.cpp grammar tests:" why) (ts/native-unavailable! :llama why) false)]
       (cond
         (nil? model-path) (skip "no model (-J-Dgen.llama.test-model=<a GGUF file>, or GEN_LLAMA_TEST_MODEL)")
         (not (.isFile (java.io.File. ^String model-path))) (skip (str "no model file at " model-path))
@@ -73,7 +74,7 @@
 (defn- text-of [gf tokens] (lm/decode (:lm gf) (pop-end gf tokens)))
 
 (deftest completions-stay-in-their-languages
-  (when @available?
+  (ts/when-native :llama available?
     (let [{:keys [lm phone answer json engine]} (setup)]
       (doseq [[g p n re] [[phone (prompt "Call me at") 12 #" ?[0-9]{3}-[0-9]{4}"]
                           [answer (prompt "Is Stockholm the capital of Sweden? Answer:") 4 #" ?(yes|no)"]
@@ -91,7 +92,7 @@
       (is (zero? (:collections (br/info engine))) "no GC backstop"))))
 
 (deftest the-laws-hold-within-one-lm
-  (when @available?
+  (ts/when-native :llama available?
     (let [{:keys [lm phone]} (setup)
           p (prompt "Call me at")
           gf (token/completion lm {:potential phone})
@@ -109,7 +110,7 @@
   0.1)
 
 (deftest a-text-is-at-least-as-likely-as-its-tokenization
-  (when @available?
+  (ts/when-native :llama available?
     (let [{:keys [lm]} (setup)
           p (prompt "The capital of Sweden is")
           stockholm (lm/encode lm " Stockholm" {:add-special? false})

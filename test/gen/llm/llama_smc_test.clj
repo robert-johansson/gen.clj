@@ -18,7 +18,8 @@
             [gen.llm.potential :as potential]
             [gen.llm.smc :as smc]
             [gen.llm.token :as token]
-            [gen.random :as rng]))
+            [gen.random :as rng]
+            [gen.test-support :as ts]))
 
 (def ^:private model-path
   (or (System/getProperty "gen.llama.test-model") (System/getenv "GEN_LLAMA_TEST_MODEL")))
@@ -27,7 +28,7 @@
 
 (def ^:private available?
   (delay
-    (let [skip (fn [why] (println "Skipping the llama.cpp token SMC tests:" why) false)]
+    (let [skip (fn [why] (println "Skipping the llama.cpp token SMC tests:" why) (ts/native-unavailable! :llama why) false)]
       (cond
         (nil? model-path) (skip "no model (-J-Dgen.llama.test-model=<a GGUF file>, or GEN_LLAMA_TEST_MODEL)")
         (not (.isFile (java.io.File. ^String model-path))) (skip (str "no model file at " model-path))
@@ -75,7 +76,7 @@
   (not (.contains ^String (lm/decode m (vec (remove (:eog (lm/vocab m)) tokens))) "e")))
 
 (deftest a-lipogram-holds-for-every-particle
-  (when @available?
+  (ts/when-native :llama available?
     (let [{:keys [lm completion engine]} (setup)
           args [(prompt) 12]
           pot (lipogram lm)]
@@ -100,7 +101,7 @@
   ;; proposal: every particle stays alive and ends, its text a string of
   ;; the language; the estimate (the probability that the LM's completion
   ;; is a date) is finite; the particles' log p are their traces' scores
-  (when @available?
+  (ts/when-native :llama available?
     (let [{:keys [lm completion engine]} (setup)
           date #" ?[0-9]{4}-[0-9]{2}-[0-9]{2}"
           g (grammar/grammar lm (str date))
@@ -122,7 +123,7 @@
       (is (zero? (:collections (br/info engine))) "no GC backstop"))))
 
 (deftest a-step-after-the-first-is-one-read
-  (when @available?
+  (ts/when-native :llama available?
     (let [{:keys [lm completion]} (setup)
           reads #(:reads (lm/info lm))
           s1 (smc/step (smc/initialize completion [(prompt) 8] 32 {:potential (lipogram lm) :proposal :masked

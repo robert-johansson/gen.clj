@@ -53,7 +53,8 @@
             [gen.llm.llama.recurrent :as recurrent]
             [gen.llm.long-texts :as long-texts]
             [gen.llm.slots :as slots]
-            [gen.llm.toy-engine :as toy])
+            [gen.llm.toy-engine :as toy]
+            [gen.test-support :as ts])
   (:import [java.lang.foreign Arena FunctionDescriptor Linker Linker$Option MemoryLayout MemorySegment
             SymbolLookup ValueLayout]
            [java.lang.invoke MethodHandles MethodType]
@@ -71,7 +72,7 @@
 
 (def available?
   (delay
-    (let [skip (fn [why] (println "Skipping the llama.cpp tests:" why) false)]
+    (let [skip (fn [why] (println "Skipping the llama.cpp tests:" why) (ts/native-unavailable! :llama why) false)]
       (cond
         (nil? model-path)
         (skip "no model (-J-Dgen.llama.test-model=<a GGUF file>, or GEN_LLAMA_TEST_MODEL)")
@@ -87,8 +88,11 @@
             (skip (str (or (ex-message t) (.getName (class t)))
                        " (build with native/build-llama.sh and clojure -T:build java)"))))))))
 
-(defmacro ^:private when-llama [& body]
-  `(when @available? ~@body))
+(defmacro ^:private when-llama
+  "body when llama.cpp and the test model load, else a skipped test,
+   counted (gen.test-support/when-native)."
+  [& body]
+  `(ts/when-native :llama available? ~@body))
 
 (def ^:private engine-opts {:max-branches 12 :n-ctx 2048})
 
