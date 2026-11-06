@@ -302,7 +302,7 @@
          (str/join "; " (for [[suite {:keys [ran skipped nses why]}] (sort-by key counts)]
                           (str (name suite) " ran " (or ran 0) " tests"
                                (when skipped
-                                 (str ", skipped " skipped " (" (str/join " " nses) ")"
+                                 (str ", skipped " skipped " (" (str/join " " (sort nses)) ")"
                                       (when why (str ": " why)))))))
          (when (some (comp :skipped val) counts)
            " (-J-Dgen.require-native=mlx,llama fails a run that skips them)"))))
