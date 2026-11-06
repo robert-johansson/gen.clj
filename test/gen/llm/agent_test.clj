@@ -9,11 +9,15 @@
    :turn-tokens a loud error, the session closed either way; a reply cut
    by the room left in the context ending the episode as :context-full
    with :on-budget's result, thinking or not, after its complete tool
-   calls."
+   calls; the chat template's options (Qwen3.8's, its reasoning effort)
+   rendered as gen.llm.chat renders them, and refused as it refuses them,
+   before the session opens."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [gen.llm.agent :as agent]
+            [gen.llm.branching-contract :as bc]
             [gen.llm.byte-tokenizer :as bt]
+            [gen.llm.chat :as chat]
             [gen.llm.lm :as lm]
             [gen.llm.toy-engine :as toy]
             [gen.random :as rng]))
@@ -107,6 +111,47 @@
                                            {:thinking? true :key (rng/key 5)
                                             :complete (scripted m ["still thinking and thinking"] (atom []))})))
           (is @closed))))))
+
+(deftest the-chat-template-and-its-options
+  ;; genclj-fshl: run renders every turn as gen.llm.chat renders the
+  ;; conversation with run's :template, :reasoning-effort and
+  ;; :preserve-thinking?, checked as chat checks them, before the session opens
+  (with-lm
+    (fn [m]
+      (testing "Qwen3.8's template, its reasoning effort low"
+        (let [render-opts {:template :qwen3.8 :reasoning-effort :low :thinking? true}
+              seen (atom [])
+              r (agent/run m {:system "You add." :task "What is 1 + 2?" :tools tools :open #(atom [])}
+                           (assoc render-opts :key (rng/key 9)
+                                  :complete (scripted m [(str "Add first.\n</think>\n\n" (call "add" "a" "1" "b" "2"))
+                                                         (str "It is 3.\n</think>\n\n" (call "submit" "answer" "3"))]
+                                                      seen)))
+              offered (mapv (fn [[n {:keys [description params]}]] {:name n :description description :params params}) tools)
+              render #(chat/render % (assoc render-opts :tools offered))
+              asked [{:role :system :content "You add."} {:role :user :content "What is 1 + 2?"}]]
+          (is (= 3 (:result r)))
+          (is (str/includes? (first @seen) "Reasoning effort is set to low.") "Qwen3.8's sentence opens the system turn")
+          (is (= (render asked) (first @seen)) "the first turn")
+          (is (= (render (conj asked {:role :assistant :content (call "add" "a" "1" "b" "2") :reasoning "Add first."}
+                               {:role :tool :content "3"}))
+                 (second @seen))
+              "the second turn: the first's think block kept")))
+      (testing ":preserve-thinking? reaches the template"
+        (is (= 5 (:result (agent/run m {:task "Go." :tools tools}
+                                     {:template :qwen3.8 :preserve-thinking? false :key (rng/key 10)
+                                      :complete (scripted m [(call "submit" "answer" "5")] (atom []))})))))
+      (testing "options the template refuses are refused before the session opens"
+        (doseq [[what opts] [["an unknown template" {:template :qwen4}]
+                             ["an unknown effort" {:template :qwen3.8 :reasoning-effort :max}]
+                             ["Qwen3.8's effort on Qwen3.5's template" {:reasoning-effort :low}]
+                             ["Qwen3.8's preserve-thinking on Qwen3.5's" {:preserve-thinking? true}]]]
+          (let [opened (atom false)]
+            (is (= :invalid-option
+                   (bc/reason #(agent/run m {:task "Go." :tools tools :open (fn [] (reset! opened true))}
+                                          (assoc opts :key (rng/key 11)
+                                                 :complete (scripted m [(call "submit" "answer" "5")] (atom []))))))
+                what)
+            (is (not @opened) what)))))))
 
 (defn- cut-off
   "A :complete whose replies are text cut at the :max-tokens it is given

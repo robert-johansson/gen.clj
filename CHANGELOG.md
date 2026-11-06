@@ -38,6 +38,14 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Added: the chat template's options in agent/run** (gen.llm.agent,
+  experimental; genclj-fshl). `agent/run`'s opts take `:template`
+  (`:qwen3.8` for Qwen3.8's), `:reasoning-effort` and
+  `:preserve-thinking?`, passed to gen.llm.chat for every turn: 1.2.0's
+  Qwen3.8 template could not be reached through the agent, which rendered
+  Qwen3.5's always. Options the template refuses are refused as
+  `chat/render` refuses them (`:invalid-option`), before the session opens.
+
 ## [1.2.0] - 2026-11-06
 
 A language-model release (DESIGN §9, "1.2.0's theme"; genclj-ucfg),
