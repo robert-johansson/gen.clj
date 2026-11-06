@@ -6,9 +6,12 @@
    (logw-next) and the site's distribution (the row times the mask,
    renormalized). And a recursive grammar (JSON values) read by Earley
    (gen.llm.instaparse/cfg, gen.llm.cfg): a prefix weight of a text, and a
-   mask (logw-next's trie sweep), at the start and inside a string.
+   mask (logw-next's trie sweep), at a value's start and inside a string,
+   with the bench's strings ([a-z ]*) and JSON's ([^\"]*: most tokens are
+   allowed inside one).
 
-   Run: clojure -M:test:bench -m gen.instaparse-bench [Qwen3 GGUF]"
+   Run: clojure -M:test:bench -m gen.instaparse-bench [Qwen3 GGUF] [cfg]
+   (cfg: the recursive grammar alone)"
   (:require [criterium.core :as crit]
             [gen.grammar-bench]
             [gen.llm.constrained :as constrained]
@@ -40,8 +43,9 @@
 
 (defn- us [f] (* 1e6 (first (:mean (crit/quick-benchmark* f {})))))
 
-(defn -main [& [gguf]]
-  (let [path (or gguf (str (System/getProperty "user.home") "/gen-clj-models/Qwen3-0.6B-Q8_0.gguf"))
+(defn -main [& args]
+  (let [gguf (first (remove #{"cfg"} args))
+        path (or gguf (str (System/getProperty "user.home") "/gen-clj-models/Qwen3-0.6B-Q8_0.gguf"))
         f (File. ^String path)
         vocab (if (.exists f)
                 (#'gen.grammar-bench/gguf-vocab f)
@@ -50,34 +54,50 @@
         n (count vocab)
         row (let [r (float-array n (float (- (Math/log n))))] r)]
     (println "##" n "tokens\n")
-    (println "| Grammar | DFA states | term, DFA, grammar (every mask), ms | logw-next, µs | site's distribution, µs |")
-    (println "|---|---:|---|---:|---:|")
-    (doseq [[label text opts] grammars]
-      (let [t (volatile! nil) d (volatile! nil) g (volatile! nil)
-            term-ms (ms #(vreset! t (ip/term text opts)))
-            dfa-ms (ms #(vreset! d (regex/dfa @t)))
-            grammar-ms (ms #(vreset! g (grammar/grammar vocab @d {:end-tokens #{}})))
-            ctx (vec (take 2 (grammar/allowed @g (dfa/start @d))))
-            ctx (if (zero? (potential/prefix @g ctx)) ctx [])]
-        (println (format "| %s | %d | %.0f, %.0f, %.0f | %.0f | %.0f |" label (dfa/size @d) term-ms dfa-ms grammar-ms
-                         (us #(potential/logw-next @g ctx))
-                         (us #(constrained/site-row @g #{} row ctx))))))
-    (let [json "value = object | array | string | number | 'true' | 'false' | 'null'
-                object = <'{'> (pair (<', '> pair)*)? <'}'>
-                pair = string <': '> value
-                array = <'['> (value (<', '> value)*)? <']'>
-                string = #'\"[a-z ]*\"'
-                number = #'-?[0-9]+'"
-          g (ip/cfg json)
-          p (cfg/potential vocab g {:end-tokens #{}})
-          encode (fn [^String text]
+    (when-not (some #{"cfg"} args)
+      (println "| Grammar | DFA states | term, DFA, grammar (every mask), ms | logw-next, µs | site's distribution, µs |")
+      (println "|---|---:|---|---:|---:|")
+      (doseq [[label text opts] grammars]
+        (let [t (volatile! nil) d (volatile! nil) g (volatile! nil)
+              term-ms (ms #(vreset! t (ip/term text opts)))
+              dfa-ms (ms #(vreset! d (regex/dfa @t)))
+              grammar-ms (ms #(vreset! g (grammar/grammar vocab @d {:end-tokens #{}})))
+              ctx (vec (take 2 (grammar/allowed @g (dfa/start @d))))
+              ctx (if (zero? (potential/prefix @g ctx)) ctx [])]
+          (println (format "| %s | %d | %.0f, %.0f, %.0f | %.0f | %.0f |" label (dfa/size @d) term-ms dfa-ms grammar-ms
+                           (us #(potential/logw-next @g ctx))
+                           (us #(constrained/site-row @g #{} row ctx)))))))
+    (println "\n## A recursive grammar (JSON values) by Earley\n")
+    (println "Strings by the bench's [a-z ]* and by [^\"]* (any character but a quote, as")
+    (println "a JSON text's strings are), one lexeme or three elements; the contexts as")
+    (println "single-byte tokens.\n")
+    (println "| String | Context | prefix, µs | logw-next (every token), µs | tokens allowed |")
+    (println "|---|---|---:|---:|---:|")
+    (let [encode (fn [^String text]
                    ;; a text as single-byte tokens: Qwen3's first 256 are the bytes
                    (let [index (into {} (keep-indexed (fn [t ^bytes bs] (when (== 1 (alength bs)) [(aget bs 0) t]))) vocab)]
                      (mapv #(index (byte %)) (.getBytes text "UTF-8"))))
-          short-text (encode "{\"a\": [1, 2, {\"b\": ")
-          long-text (encode (apply str "[" (repeat 20 "{\"key\": [1, -2, \"text here\"]}, ")))]
-      (println "\n## A recursive grammar (JSON values) by Earley\n")
-      (println "| Context | prefix, µs | logw-next (every token), µs |")
-      (println "|---|---:|---:|")
-      (doseq [[label ctx] [["empty" []] ["22 bytes, inside a value" short-text] ["661 bytes, inside the array" long-text]]]
-        (println (format "| %s | %.0f | %.0f |" label (us #(potential/prefix p ctx)) (us #(potential/logw-next p ctx))))))))
+          long-text (apply str "[" (repeat 20 "{\"key\": [1, -2, \"text here\"]}, "))]
+      (doseq [[label string-re] [["[a-z ]*" "#'\"[a-z ]*\"'"] ["[^\"]*" "#'\"[^\"]*\"'"]
+                                 ["'\"' [^\"]* '\"'" "'\"' #'[^\"]*' '\"'"]]]
+        (let [json (str "value = object | array | string | number | 'true' | 'false' | 'null'
+                         object = <'{'> (pair (<', '> pair)*)? <'}'>
+                         pair = string <': '> value
+                         array = <'['> (value (<', '> value)*)? <']'>
+                         string = " string-re "
+                         number = #'-?[0-9]+'")
+              g (ip/cfg json)
+              made (ms #(cfg/potential vocab g {:end-tokens #{}}))
+              p (cfg/potential vocab g {:end-tokens #{}})]
+          (println (format "| %s | the potential made, ms | %.0f | | |" label made))
+          (doseq [[context text] [["empty (a value's start)" ""]
+                                  ["22 bytes, a value's start" "{\"a\": [1, 2, {\"b\": "]
+                                  ["661 bytes, a value's start" long-text]
+                                  ["23 bytes, a string's start" "{\"a\": [1, 2, {\"b\": \""]
+                                  ["32 bytes, inside a string" "{\"a\": [1, 2, {\"b\": \"some text"]
+                                  ["677 bytes, inside a string" (str long-text "{\"key\": \"text he")]]]
+            (let [ctx (encode text)
+                  allowed (count (filter #(> (double %) Double/NEGATIVE_INFINITY) (potential/logw-next p ctx)))]
+              (println (format "| %s | %s | %.0f | %.0f | %d |" label context (us #(potential/prefix p ctx))
+                               (us #(potential/logw-next p ctx)) allowed))
+              (flush))))))))

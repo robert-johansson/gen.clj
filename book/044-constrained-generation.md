@@ -1099,6 +1099,230 @@ probabilities: the mask's frequencies over 200 constrained completions
 standard errors either side. Points on the gray diagonal are
 exact.](figures/044-estimates.svg)
 
+## Composing potentials
+
+A potential is three functions of a context, so potentials compose:
+`potential/product` multiplied `o-free` and `brevity` above. gen.clj has
+genlm-control's other combinators too, and token SMC two more ways to use
+a potential: as a *critic*, weighed only at the token drawn, and through
+*adaptive weighted rejection sampling*, a proposal that checks only the
+tokens it draws.
+
+### Combinators
+
+`potential/temper` raises a potential to a power $\beta$, so its log
+weights are multiplied by $\beta$. Squared, `brevity` charges a nat a
+token. A weight of 0 stays 0 for every $\beta$, so a tempered constraint
+is the same constraint:
+
+<!-- code: temper -->
+```clojure
+(def stern
+  "brevity squared: each token of text costs a nat."
+  (potential/temper brevity 2.0))
+
+(vec (potential/logw-next stern [1]))
+;=> [-1.0 -1.0 -1.0 -1.0 -1.0 -1.0 -1.0 -1.0 -1.0 0.0]
+
+[(potential/prefix (potential/temper o-free 0.5) [1 5]) (exact-z stern)]
+;=> [##-Inf 0.07779]
+```
+
+`potential/normalize` makes a potential's next-token weights a
+distribution at every context, as an LM's are. After a token,
+`brevity`'s next weights are $e^{-1/2}$ for each of the nine tokens and 1
+for the end; normalized, they sum to 1:
+
+<!-- code: normalize -->
+```clojure
+(def per-token (potential/normalize brevity))
+
+(array/allclose?
+ 1.0 (reduce + (map #(Math/exp %) (potential/logw-next per-token [1]))))
+;=> true
+```
+
+`potential/prompted` turns an LM into a potential: a context's prefix
+weight is the log-probability of its tokens after a prompt of the
+potential's own. Under the completion `free`, whose prompt is the empty
+text, the target $\pi$ is then the product of the LM after the empty
+prompt and after the prompt "no": genlm's *prompt intersection*, the
+completions both prompts find likely. Its next-token weights are the
+LM's rows, so it is consistent, and its $Z$ is exact as any potential's:
+
+<!-- code: prompted -->
+```clojure
+(def after-no
+  "The LM's own weights of a text, read after the prompt no."
+  (potential/prompted m (lm/encode m "no")))
+
+(lm/encode m "no")
+;=> [7 6]
+
+[(potential/prefix after-no [3]) (potential/prefix after-no [6])]
+;=> [-0.9527 -7.0352]
+
+(every? #(consistent? after-no %) [[] [1] [3] [6] [1 2]])
+;=> true
+
+[(exact-z after-no) (exact-z (potential/product yes-no after-no))]
+;=> [0.000582 0.0001655]
+```
+
+Two more combinators wrap a potential for a setting this chapter does
+not reach. `potential/coerce` reads a potential over bytes (a grammar
+over a byte vocabulary, say) through an LM's tokens, weighing each token
+by its bytes along the token byte trie. `potential/after` holds a
+potential to the tokens after a reasoning model's think block: the
+tokens before its close are free, and a completion that never closes it
+has no weight.
+
+### Critics
+
+A potential as SMC's `:potential` twists every step: a step reads its
+next-token weights, a whole row, for each particle, and the `:masked`
+proposal draws from the LM's row times it. A potential with no cheap
+row (a parser, a second LM, a reader of partial text) costs a row's worth
+of calls a step. Loula et al. (2025) put such potentials into the
+weights only, as *critics*: after a particle draws a token, its weight
+gains the critic's $\text{prefix}(x_{1:t}) - \text{prefix}(x_{1:t-1})$,
+one call for the token drawn, and its complete weight at the end. The
+target gains the critic as a factor, as it does a potential, so $\hat Z$
+is unbiased for the product. The prompted LM as a critic, alone and
+beside the grammar:
+
+<!-- code: critic -->
+```clojure
+(def critic-z
+  (estimates {:critic after-no} 20 (rng/split (rng/key 30) 200)))
+
+(within-5-se? critic-z (exact-z after-no))
+;=> true
+
+(def held-and-judged
+  (estimates {:potential yes-no :proposal :masked :critic after-no} 20
+             (rng/split (rng/key 32) 200)))
+
+(within-5-se? held-and-judged (exact-z (potential/product yes-no after-no)))
+;=> true
+```
+
+The proposal never reads a critic, so it costs about one call a particle
+and step, where the same potential as a twist reads a row a particle and
+step. A run of three steps of twenty particles:
+
+<!-- code: counted -->
+```clojure
+(defn counted
+  "Potential pot, its calls counted by operation in the atom calls."
+  [pot calls]
+  (let [tally (fn [op f]
+                (fn [ctx] (swap! calls update op (fnil inc 0)) (f ctx)))]
+    (potential/potential
+     n-vocab {:prefix (tally :prefix #(potential/prefix pot %))
+              :complete (tally :complete #(potential/complete pot %))
+              :logw-next (tally :logw-next #(potential/logw-next pot %))
+              :end-tokens (potential/end-tokens pot)})))
+
+(defn calls-of
+  "The calls of potential pot, counted, that a run of SMC over free with
+   20 particles makes, with the options (opts-of the counted pot)."
+  [pot opts-of]
+  (let [calls (atom {})]
+    (smc/run free args 20 (assoc (opts-of (counted pot calls))
+                                 :key (rng/key 33)))
+    @calls))
+
+(calls-of after-no (fn [c] {:critic c}))
+;=> {:prefix 40 :complete 22} ; float64
+
+(calls-of after-no (fn [c] {:potential c :proposal :masked}))
+;=> {:prefix 21 :logw-next 60 :complete 20} ; float64
+```
+
+The critic took 62 calls for 60 particle steps and no row; the twist read
+60 rows and made 41 other calls. With an LM as the potential a row and a
+call cost about the same, one read of the LM; with a grammar, a parser or
+a reader, a row is a call for every token of the vocabulary.
+
+### Adaptive weighted rejection sampling
+
+The `:masked` proposal needs the potential's row too, and a grammar's row
+is a mask over the whole vocabulary. Lipkin et al. (2025) draw from
+the masked row by rejection instead: a token from the LM's row, checked
+by a prefix call, kept if the potential allows it, removed from the row
+and drawn again if not. *Adaptive weighted rejection sampling* (AWRS)
+returns the token with an unbiased estimate $\hat Z_t$ of the allowed
+tokens' mass, which stands in the weight where the masked proposal has
+the exact mass, so SMC's $\hat Z$ stays unbiased:
+
+<!-- code: awrs -->
+```clojure
+(def awrs-z
+  (estimates {:potential yes-no :proposal :awrs} 20
+             (rng/split (rng/key 34) 200)))
+
+(within-5-se? awrs-z z)
+;=> true
+
+(calls-of yes-no (fn [c] {:potential c :proposal :awrs}))
+;=> {:prefix 219 :complete 24} ; float64
+
+(calls-of yes-no (fn [c] {:potential c :proposal :masked}))
+;=> {:prefix 1 :logw-next 40} ; float64
+```
+
+AWRS made 219 prefix calls where the masked proposal read 40 rows. A
+regular grammar's rows are made with the grammar, one for each state of
+its DFA, so for `yes-no` a row is a lookup and the mask is the cheaper
+proposal. AWRS pays where a row is costly: a parser's or a reader's
+prefix calls, one for each of 151,936 tokens at Qwen3's vocabulary, or a
+context-free grammar's mask, a sweep of its token byte trie.
+
+### On a real model
+
+The book's tests run on the toy engine, so what follows is measured, not
+checked: `bench/gen/llama_genlm_bench.clj` on Qwen3-0.6B (Q8_0, through
+llama.cpp v0.9.0 on a Mac mini M4's GPU, its 151,936 tokens). Asked in
+its chat template for a fictional person as a JSON object, the LM alone
+answered eight times with the object inside a Markdown code fence seven
+times: one text in eight was a JSON object. Under a JSON grammar by
+Earley (`gen.llm.cfg`, strings and numbers as lexemes), every text was:
+
+| How | texts | ms a token | JSON objects |
+|---|---:|---:|---:|
+| the LM alone | 8 | 9.0 | 1 |
+| a completion under the grammar (a mask a token) | 8 | 9.8 | 8 |
+| token SMC, 8 particles, `:masked` | 16 | 2.1 | 16 |
+| token SMC, 8 particles, `:awrs` | 16 | 4.0 | 16 |
+
+The grammar's mask costs 0.1 to 0.3 ms at this vocabulary, so it adds
+about 0.8 ms to a token of 9; SMC's particles share each step's decode,
+so a token costs less there. SMC's $\hat Z$ was $e^{-1.74} = 0.18$ in
+three runs of four ($e^{-1.87}$ in the fourth, by AWRS): the LM's
+probability of opening its reply with `{` and not with a code fence,
+since after that it rarely needs the mask. AWRS was the slower proposal
+here: this grammar's mask is cheap, and AWRS draws and checks on the
+calling thread, where the masked proposal's draws run on a pool.
+
+A critic on the same model: sixteen particles write a sentence about the
+sea, with the LM after a prompt for a sentence about a cat as the critic,
+and as the potential (the `:masked` proposal, a row a particle and step):
+
+| How | ms a step | $\log \hat Z$ (two runs) | texts that mention a cat |
+|---|---:|---:|---:|
+| plain SMC | 16-17 | 0, 0 | 0 and 0 of 16 |
+| the cat's prompt as a critic | 52-60 | -38.1, -35.3 | 0 and 0 of 16 |
+| the cat's prompt as the potential | 52-63 | -53.8, -61.0 | 0 and 12 of 16 |
+
+Here the critic costs what the twist does, since each of its calls is
+an LM read of its own, as each row is. It reweighs what the proposal
+draws, and the proposal, the sea's LM, drew no cat; the potential in the
+proposal steers the draws, and one run of two found the cats. Both
+estimate the same $Z$, but at sixteen particles their $\log \hat Z$
+differ by 15 to 25 nats: the weights are heavy-tailed, and the log of
+their mean falls short of $\log Z$ the more, the heavier they are.
+
 ## What comes later
 
 Three pieces are planned, each in a bean of its own:
@@ -1114,11 +1338,10 @@ Three pieces are planned, each in a bean of its own:
   `gen.llm.bytes`' marginals carried from byte to byte. Under a grammar
   it would mask each byte by one transition of the DFA, with no sweep of
   the vocabulary.
-- **Context-free grammars and schemas.** Any prefix oracle is a
-  potential, through `potential/potential`, at the price of a call for
-  each token; a recognizer whose state advances byte by byte would make
-  their masks as cheap as a DFA's. `docs/research/llm-grammar.md`
-  sketches both.
+- **Schemas** (genclj-w120). A schema (malli's) compiled to a grammar,
+  regular or context-free (`gen.llm.cfg`, as `ip/cfg` made above), the
+  completion's text parsed into the value it describes.
+  `docs/research/llm-grammar.md` sketches it.
 
 The next chapter, *Extending gen.clj*, turns from using gen.clj's
 generative functions to adding new ones.

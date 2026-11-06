@@ -104,6 +104,15 @@ reference of the entry *Gen.jl*, with the systems.
   proposals. In *Proceedings of the 26th International Conference on
   Artificial Intelligence and Statistics* (AISTATS 2023), PMLR
   206:7061–7088, 2023. Cited in *SMC in Depth* and *SMC Recipes*.
+- **Lipkin et al. 2025**. Benjamin Lipkin and others. Fast controlled
+  generation from language models with adaptive weighted rejection
+  sampling. In *Conference on Language Modeling* (COLM 2025), 2025.
+  arXiv:2504.05410. Cited in *Constrained Generation and Token SMC*.
+- **Loula et al. 2025**. João Loula and others. Syntactic and semantic
+  control of large language models via sequential Monte Carlo. In
+  *International Conference on Learning Representations* (ICLR 2025),
+  2025. arXiv:2504.13139. Cited in *Constrained Generation and Token
+  SMC*.
 
 ### Variational inference and learning
 
@@ -285,8 +294,8 @@ folder.
   Generative Functions* and *Constrained Generation and Token SMC*.
 - **llama.cpp**. llama.cpp, release v0.9.0, which `gen.llm.llama` runs.
   <https://github.com/ggml-org/llama.cpp>. Cited in *The Handler Loop*,
-  *Design Rationale*, *Language Models as Generative Functions* and
-  *Installing and Running*.
+  *Design Rationale*, *Language Models as Generative Functions*,
+  *Constrained Generation and Token SMC* and *Installing and Running*.
 
 ## Data
 

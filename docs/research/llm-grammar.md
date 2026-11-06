@@ -402,7 +402,11 @@ by byte; `toolcall.cljs` built a regex over the declared tools. Here:
   grammars, against gen.llm.grammar's masks on a regular language, under
   the potential laws, and (`gen.llm.instaparse/cfg`) against instaparse's
   parses on 150 random recursive grammars. At Qwen3's vocabulary a JSON
-  grammar's mask takes 0.1-0.7 ms (`gen.instaparse-bench`).
+  grammar's mask took 0.1-0.7 ms (`gen.instaparse-bench`) at a value's
+  start; inside a string, which the bench did not reach then, 40-360 ms
+  (the 2026-11-06 health check). **Rebuilt (2026-11-06, genclj-jq2d):**
+  regex elements as lexemes and the sets as a lazy DFA, masks in parts;
+  inside a string 0.2 ms (the addendum below).
 
 
 ## The dependency: our own engine, not instaparse
@@ -512,6 +516,135 @@ which the language has. At Qwen3's 151,936 tokens
 
 The per-token costs are a dense row's passes over the vocabulary, the same
 for every grammar (Decisions, 10: a sparse row would cut them).
+
+### Addendum (2026-11-06): context-free masks inside a string (genclj-jq2d)
+
+The health check of v1.2.0 measured what `gen.instaparse-bench` promised
+and did not reach: a JSON grammar's mask (`logw-next`, every token) with
+the context inside a string. Most bytes of a JSON text are. The bench now
+measures both, with the bench's strings (`[a-z ]*`) and JSON's (`[^"]*`,
+any character but a quote, as one lexeme `#'"[^"]*"'` or three elements
+`'"' #'[^"]*' '"'`), at Qwen3's 151,936 tokens (`clojure -M:test:bench
+-m gen.instaparse-bench <gguf> cfg`, the M4, shared with seven other
+agents' JVMs: about 1.5 times a quiet machine's times, by the health
+check's 238-256 ms against these 358-363). Before, as 1.2.0 built it
+(regex elements as right-linear rules, an Earley set of HashSets and
+maps built at every trie node visited):
+
+| String | Context | prefix, µs | mask, µs | tokens allowed |
+|---|---|---:|---:|---:|
+| `[a-z ]*` | a value's start (empty, 22, 661 bytes) | 2, 25, 910 | 189, 276, 1,120 | 90-94 |
+| `[a-z ]*` | inside a string (23, 32, 677 bytes) | 27, 33, 730 | 73,175, 58,196, 78,840 | 41,759 |
+| `[^"]*` | a value's start | 2, 46, 942 | 790, 1,114, 1,820 | 436-440 |
+| `[^"]*` | inside a string | 38, 42, 968 | 362,120, 363,379, 358,290 | 150,612 |
+
+Inside a string nearly every token is allowed, so a sweep visits nearly
+every one of the trie's 333,802 nodes, and each visit built a set. The
+options (the bean's): (1) a regular terminal swept over the trie by its
+DFA, as gen.llm.grammar does; (2) Earley sets cached per state; (3)
+llguidance's lexer/parser split. Built, all three in one, since each
+alone left the floor where it was:
+
+1. **Lexemes.** A regex element is one terminal, scanned by its minimal
+   DFA: an item before it carries the DFA's state while the lexeme's bytes
+   go by, and moves past it wherever the DFA accepts. A string's body adds
+   no items (as right-linear rules it added an item and a set a byte).
+2. **The sets as a lazy DFA.** A set keeps its successor by each byte once
+   built, and a successor built from the same items over the same chart
+   is the same set (a canon per chart). The chart holds only the sets that
+   predict (anchors), the only ones a completion reads; a set that
+   predicts nothing is no origin, so its successors share its chart. A
+   string's body is then one set that loops on itself: a byte there is an
+   array read. With (1) and (2) the mask inside a string is a sweep of the
+   whole trie at a table read a node, 2.3-3.5 ms; the DFA sweep alone
+   (`bytes/sweep`, every token but those holding a quote) takes 1.7 ms, the
+   floor of any sweep.
+3. **Masks in parts (the split).** With the token trie, the potential makes
+   for every state of every lexeme's DFA the tokens that stay inside the
+   lexeme (`bytes/sweep-split`: the DFA live to the token's end) and the
+   subtrees of the tokens that pass an accepting state and then leave it
+   (those may end the lexeme and go on). A mask is then: those masks for
+   the set's lexing items, or'ed; a sweep, by the sets, of only the
+   subtrees that end a lexeme (`bytes/sweep-roots!`, the roots' paths read
+   once each); and a sweep under each byte an item waits for. A token's
+   first byte is taken by an item before a byte, by a lexing item, or by
+   none, and a lexing item's token either keeps its lexeme live (its pair
+   keeps the set non-empty) or ends it before leaving it, so the mask is
+   exact (the tests: brute force against `prefix?`, the potential laws,
+   the oracle, gen.llm.grammar's masks on a regular language; mutations
+   in cfg-test's docstring).
+
+After (the same machine and load):
+
+| String | Context | prefix, µs | mask, µs | tokens allowed |
+|---|---|---:|---:|---:|
+| `[a-z ]*` | a value's start (empty, 22, 661 bytes) | 1, 19, 413 | 61, 92, 772 | 90-94 |
+| `[a-z ]*` | inside a string (23, 32, 677 bytes) | 20, 17, 593 | 112, 114, 758 | 41,759 |
+| `[^"]*` | a value's start | 1, 19, 605 | 59, 119, 571 | 436-440 |
+| `[^"]*` | inside a string | 21, 27, 566 | 240, 220, 638 | 150,612 |
+| `'"' [^"]* '"'` | a value's start | 1, 19, 500 | 146, 196, 773 | 436-440 |
+| `'"' [^"]* '"'` | inside a string | 25, 24, 516 | 219, 196, 678 | 150,612 |
+
+So a mask inside a string costs about what one at a value's start does
+(0.2 against 0.06-0.2 ms), 1,500 times less than before; past a few
+hundred bytes the context's recognition (prefix, from the start every
+call: no state between calls) is most of a mask's cost, 0.4-0.6 ms at
+661 bytes. Making the potential takes what the trie does (130-300 ms
+at this vocabulary; the lexemes' masks add little: about 10 states).
+**PROVISIONAL (the owner's call, genclj-jq2d):** the three together, the
+masks made eagerly when the potential is (as gen.llm.grammar's are), their
+memory a bitset of the vocabulary per lexeme state (19 KB at Qwen3's).
+
+### Addendum (2026-11-06): the GenLM tools on Qwen3-0.6B (genclj-e3q9)
+
+1.2.0's potentials, critic and AWRS had run only on the toy engines. Run
+on a real model (`clojure -J-Dgen.llama.lib=<lib> -M:test:bench -m
+gen.llama-genlm-bench <gguf>`: Qwen3-0.6B Q8_0, llama.cpp v0.9.0, the M4's
+GPU, shared with other agents' JVMs; book chapter 044's *On a real model*
+quotes it):
+
+**(a) A JSON object.** The user turn (Qwen's template, thinking off):
+"Describe a fictional person as a JSON object with the keys name, age,
+city and hobbies. Reply with the JSON only." The grammar: a JSON object
+(RFC 8259's values; strings, numbers and whitespace as lexemes) by
+gen.llm.cfg, its potential made in 175 ms; at most 160 tokens. Validity
+by an instaparse JSON parser that shares nothing with gen.llm.cfg:
+
+| How | texts | ms a token | ended | JSON objects | tokens a text |
+|---|---:|---:|---:|---:|---:|
+| the LM alone | 8 | 9.0 | 8 | 1 | 47 |
+| a completion under the grammar (a mask a token) | 8 | 9.8 | 8 | 8 | 44 |
+| token SMC, 8 particles, :masked (2 runs) | 16 | 2.1 | 16 | 16 | 45 |
+| token SMC, 8 particles, :awrs (2 runs) | 16 | 4.0 | 16 | 16 | 44 |
+
+The LM alone fences its JSON in a Markdown code block (seven of eight).
+The masks (0.09-0.31 ms at contexts of this grammar, measured on the CPU
+the same day) add 0.8 ms to a 9 ms token. SMC's log Ẑ was -1.74 in three
+runs and -1.87 in one (AWRS's): the probability of opening with `{`
+rather than a fence. AWRS is the slower proposal against a mask this
+cheap: its draws and checks run on the calling thread (each a pass over
+the row), the masked proposal's draws on the host pool.
+
+**(b) A critic.** Sixteen particles, at most 32 tokens, a sentence about
+the sea (the user turn "Write one short sentence about the sea."), the
+critic the same LM after "Write one short sentence about a cat."
+(`potential/prompted`: the target the two prompts' product); two keys:
+
+| How | ms a step | log Ẑ | texts mentioning a cat |
+|---|---:|---:|---:|
+| plain SMC (the LM alone) | 15.8-16.6 | 0.00, 0.00 | 0, 0 of 16 |
+| the cat's prompt as :critic | 51.5-59.6 | -38.09, -35.28 | 0, 0 of 16 |
+| the cat's prompt as :potential, :masked | 52.0-62.7 | -53.76, -61.02 | 0, 12 of 16 |
+
+An LM critic costs what its twist does (each call an LM read of its own,
+as each row is; neither is batched with the step's decode). The critic
+cannot steer: the sea's LM proposes no cat, and the critic only reweighs
+what it proposes; the potential in the proposal found the cats in one run
+of two. The two log Ẑ differ by 15-25 nats at sixteen particles, from
+heavy-tailed weights (on the toy vocabulary both are unbiased within one
+standard error over 1,000 runs, the same day). A critic pays where a row
+costs much more than a call: a parser's or a reader's potential, or a
+grammar's mask where it is not this cheap.
 
 
 ## Decisions

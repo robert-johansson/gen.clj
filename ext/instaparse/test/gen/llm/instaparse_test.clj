@@ -14,6 +14,7 @@
    - Sampling: completions under a tool-call grammar's potential, on the
      toy engine over pieces of the grammar's text, all parse with
      instaparse.
+   - A counted repeat of 3000 copies, one alternative past 2047 symbols.
    - Recursion: unrolled to :max-depth (nested lists, a tail-recursive
      rule), refused without it.
    - Misuse is loud: lookahead, an unknown rule, a regex with flags or
@@ -165,6 +166,16 @@
       (is (= :recursive-grammar (bc/reason #(ip/term nested)))))
     (testing "a depth that leaves no string is an empty language"
       (is (= :empty-language (bc/reason #(ip/grammar [(.getBytes "x")] "s = 'x' s" {:max-depth 2})))))))
+
+(deftest a-long-counted-repeat
+  ;; a counted repeat is one alternative of its copies (genclj-mkos: past
+  ;; 2047 symbols an Earley item's dot overflowed into its rule)
+  (let [g (ip/cfg (insta/parser {:s (c/cat (c/string "x") (c/rep 0 3000 (c/string "a")) (c/string "y"))} :start :s))
+        a (fn [n] (apply str (repeat n "a")))]
+    (is (every? #(cfg/recognizes? g (str "x" (a %) "y")) [0 1 2047 2048 2049 3000]))
+    (is (not (cfg/recognizes? g (str "x" (a 3001) "y"))))
+    (is (cfg/prefix? g (str "x" (a 3000))))
+    (is (not (cfg/prefix? g (str "x" (a 3001)))))))
 
 (deftest case-insensitive-strings-and-ordered-choice
   (let [t (ip/term (insta/parser "s = 'aB' / 'ab' 'c'" :string-ci true))]

@@ -10,6 +10,12 @@
      (token-bytes trie t)         → token t's bytes (do not write them)
      (sweep-with trie s0 advance) → the tokens whose bytes advance from s0 (a
                                     recognizer's state carried down the trie)
+     (sweep-into! mask trie node s advance), (sweep-roots! mask trie roots s0 advance)
+                                  → the same under a node, under each of roots
+     (sweep-split trie table accept s0)
+                                  → a DFA's tokens from s0: those it keeps live,
+                                    and the subtrees where it dies past accepting
+     (bare-mask trie)             → a bitset of the bare tokens
      (weigh trie root-row row-of) → every token's weight from its bytes' (a
                                     byte potential's rows, read through the trie)
      (vocab-bytes what vocab)     → an LM's byte vocabulary, or vocab's
@@ -198,40 +204,137 @@
                 (recur (inc i)))))))
     mask))
 
+(defn- mark! [^longs mask ^long t]
+  (let [w (bit-shift-right t 6)]
+    (aset mask w (bit-or (aget mask w) (bit-shift-left 1 (bit-and t 63))))))
+
+(defn- empty-mask ^longs [^ByteTrie trie] (long-array (quot (+ (.-n-vocab trie) 63) 64)))
+
+(defn- sweep-into*
+  "sweep-into!'s walk, states a scratch array by depth."
+  [^longs mask ^ByteTrie trie node s advance ^objects states]
+  (let [node (long node)
+        ^bytes edge (.-edge trie)
+        ^ints depth (.-depth trie)
+        ^ints end (.-end trie)
+        ^ints offsets (.-offsets trie)
+        ^ints tokens (.-tokens trie)
+        stop (aget end node)]
+    (aset states (aget depth node) s)
+    (loop [j (aget offsets node)]
+      (when (< j (aget offsets (inc node)))
+        (mark! mask (aget tokens j))
+        (recur (inc j))))
+    (loop [i (inc node)]
+      (when (< i stop)
+        (let [d (aget depth i)
+              s (advance (aget states (dec d)) (bit-and (long (aget edge i)) 0xff))]
+          (if (nil? s)
+            (recur (aget end i))
+            (do (aset states d s)
+                (loop [j (aget offsets i)]
+                  (when (< j (aget offsets (inc i)))
+                    (mark! mask (aget tokens j))
+                    (recur (inc j))))
+                (recur (inc i)))))))))
+
+(defn sweep-into!
+  "Marks in mask (a bitset over the vocabulary, as sweep's) the tokens at
+   node and under it whose bytes lead on from s, the state after node's
+   path (nil: none), through advance, a function of a state and a byte
+   (0-255) to the next state or nil (no way on). advance is called once
+   for each node under node whose parent's state is not nil, in the trie's
+   preorder, so a dead prefix's subtree is skipped. Returns mask."
+  ^longs [^longs mask ^ByteTrie trie node s advance]
+  (when (some? s)
+    (sweep-into* mask trie node s advance (object-array (inc (.-max-depth trie)))))
+  mask)
+
+(defn bare-mask
+  "A new bitset over the vocabulary (sweep's form) holding the bare tokens."
+  ^longs [^ByteTrie trie]
+  (let [mask (empty-mask trie)]
+    (doseq [t (.-bare trie)] (mark! mask (long t)))
+    mask))
+
 (defn sweep-with
-  "The tokens whose bytes lead from state s0 through advance, a function of
-   a state and a byte (0-255) to the next state or nil (no way on): a
-   bitset over the vocabulary, as sweep's. advance is called once for each
-   trie node whose parent's state is not nil, in the trie's preorder, so a
-   dead prefix's subtree is skipped. The bare tokens are in it (s0 is
-   theirs); nil for s0 is the empty set."
+  "The tokens whose bytes lead from state s0 through advance (as
+   sweep-into!'s): a bitset over the vocabulary, as sweep's. The bare
+   tokens are in it (s0 is theirs); nil for s0 is the empty set."
   ^longs [^ByteTrie trie s0 advance]
-  (let [^bytes edge (.-edge trie)
+  (if (some? s0)
+    (sweep-into! (bare-mask trie) trie 0 s0 advance)
+    (empty-mask trie)))
+
+(defn sweep-split
+  "A DFA's tokens from its state s0 (table, its transitions; accept, its
+   accepting states), in two parts: [live roots], live the tokens whose
+   bytes keep the DFA in some state to their end (sweep's with every state
+   ok, the bare tokens too), and roots the trie nodes where the DFA dies
+   after it accepted past s0 (an int array, in preorder): each token under
+   a root reaches an accepting state, then leaves the DFA. The others die
+   before they ever accept. A lexeme's tokens: those that stay inside it,
+   and those that may end it and go on (gen.llm.cfg's masks)."
+  [^ByteTrie trie ^ints table ^booleans accept s0]
+  (let [s0 (long s0)
+        ^bytes edge (.-edge trie)
         ^ints depth (.-depth trie)
         ^ints end (.-end trie)
         ^ints offsets (.-offsets trie)
         ^ints tokens (.-tokens trie)
         n-nodes (alength depth)
-        mask (long-array (quot (+ (.-n-vocab trie) 63) 64))
-        ^objects states (object-array (inc (.-max-depth trie)))
-        mark (fn [^long t]
-               (let [w (bit-shift-right t 6)]
-                 (aset mask w (bit-or (aget mask w) (bit-shift-left 1 (bit-and t 63))))))]
-    (when (some? s0)
-      (aset states 0 s0)
-      (doseq [t (.-bare trie)] (mark (long t)))
-      (loop [i 1]
-        (when (< i n-nodes)
-          (let [d (aget depth i)
-                s (advance (aget states (dec d)) (bit-and (long (aget edge i)) 0xff))]
-            (if (nil? s)
-              (recur (aget end i))
-              (do (aset states d s)
-                  (loop [j (aget offsets i)]
-                    (when (< j (aget offsets (inc i)))
-                      (mark (aget tokens j))
-                      (recur (inc j))))
-                  (recur (inc i))))))))
+        live (empty-mask trie)
+        stack (int-array (inc (.-max-depth trie)))
+        ;; by depth: has the walk accepted past s0 on the way here?
+        accepted (boolean-array (inc (.-max-depth trie)))
+        roots (java.util.ArrayList.)]
+    (aset stack 0 (int s0))
+    (doseq [t (.-bare trie)] (mark! live (long t)))
+    (loop [i 1]
+      (when (< i n-nodes)
+        (let [d (aget depth i)
+              s (aget table (+ (* (aget stack (dec d)) 256) (bit-and (long (aget edge i)) 0xff)))]
+          (if (neg? s)
+            (do (when (aget accepted (dec d)) (.add roots (int i)))
+                (recur (aget end i)))
+            (do (aset stack d s)
+                (aset accepted d (or (aget accepted (dec d)) (aget accept s)))
+                (loop [j (aget offsets i)]
+                  (when (< j (aget offsets (inc i)))
+                    (mark! live (aget tokens j))
+                    (recur (inc j))))
+                (recur (inc i)))))))
+    [live (int-array roots)]))
+
+(defn sweep-roots!
+  "Marks in mask the tokens at and under each of roots (trie nodes in
+   preorder, as sweep-split's) whose bytes lead from s0 through advance
+   (as sweep-into!'s): the state at each root read along its path from the
+   trie's root, a prefix two paths share read once. Returns mask."
+  ^longs [^longs mask ^ByteTrie trie ^ints roots s0 advance]
+  (let [^ints depth (.-depth trie)
+        ^ints offsets (.-offsets trie)
+        ^ints tokens (.-tokens trie)
+        ^objects vocab (.-vocab trie)
+        ^objects states (object-array (inc (.-max-depth trie)))]
+    (aset states 0 s0)
+    ;; known: the depth to which states hold the states along prev's bytes
+    (loop [k 0 known 0 ^bytes prev (byte-array 0)]
+      (when (< k (alength roots))
+        (let [r (aget roots k)
+              d (aget depth r)
+              ;; r's path: the first d bytes of a token under it
+              ^bytes path (aget vocab (aget tokens (aget offsets r)))
+              common (long (loop [j 0]
+                             (if (and (< j known) (< j d) (== (aget prev j) (aget path j))) (recur (inc j)) j)))
+              reached (long (loop [j common]
+                              (cond (nil? (aget states j)) j
+                                    (== j d) j
+                                    :else (do (aset states (inc j) (advance (aget states j) (bit-and (long (aget path j)) 0xff)))
+                                              (recur (inc j))))))]
+          (when (== reached d)
+            (when-let [s (aget states d)] (sweep-into* mask trie r s advance states)))
+          (recur (inc k) reached path))))
     mask))
 
 ;; ---------------------------------------------------------------------------

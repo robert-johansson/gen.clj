@@ -3545,12 +3545,25 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     strands. No state between calls: prefix and complete recognize from
     the start (pure, rule 3), at a cost that grows with the text
     (stateful potentials are genclj-9dvz's). Measured at Qwen3's
-    vocabulary: a JSON grammar's mask in 0.1-0.7 ms, a prefix of 661
-    bytes in 0.6 ms (`gen.instaparse-bench`). `gen.llm.instaparse/cfg`
-    reads any instaparse grammar without lookahead into one (the
-    llguidance-style lexer/parser split was not needed at these costs).
-    (The 2026-11-06 health check measured 39-256 ms inside a string, which
-    the bench does not reach: genclj-jq2d revisits this.)
+    vocabulary: a JSON grammar's mask in 0.1-0.7 ms at a value's start,
+    a prefix of 661 bytes in 0.6 ms (`gen.instaparse-bench`); but inside a
+    string, which the bench did not then reach and where most of a JSON
+    text's bytes are, 39-88 ms with the bench's `[a-z ]*` strings and
+    238-363 ms with JSON's `[^"]*` (the 2026-11-06 health check, and
+    genclj-jq2d on a loaded M4), since nearly every token is allowed there
+    and each trie node visited built an Earley set. `gen.llm.instaparse/cfg`
+    reads any instaparse grammar without lookahead into one. **PROVISIONAL
+    (2026-11-06, genclj-jq2d; the owner to confirm):** the three options
+    together: a regex element a lexeme its DFA scans (an item carries the
+    DFA's state), the Earley sets a lazy DFA (successors kept by byte, a
+    canon per chart, the chart only the sets that predict), and the
+    lexer/parser split as masks in parts (per lexeme state, the tokens
+    that stay inside it, made with the potential; only the tokens that
+    end a lexeme or begin with a byte an item waits for are swept). Masks
+    stay exact. Measured the same way: inside a string 0.2 ms (from
+    358-363), at a value's start 0.06-0.2 ms, 0.6-0.8 ms past 661 bytes
+    (the context's recognition from the start); the potential made in the
+    trie's time (docs/research/llm-grammar.md, the 2026-11-06 addendum).
   - **1.2.1: the health check's fixes (owner, 2026-11-06).** "file these
     as beans under the 1.2.1 milestone", after the lead's health check of
     v1.2.0 (c0fc80c): the milestone genclj-9mq3, its findings in five epics

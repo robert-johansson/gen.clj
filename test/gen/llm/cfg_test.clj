@@ -12,12 +12,28 @@
      read through a vocabulary of pieces; on a regular language, the same
      weights as gen.llm.grammar's exact masks (a vocabulary with every
      byte); completions under balanced brackets are balanced.
+   - Alternatives longer than 2047 symbols (an item's dot once overflowed
+     into its rule there, genclj-mkos).
+   - Masks inside lexemes: JSON-like values whose strings are a lexeme
+     ([^\"]*, multi-byte characters included), and a lexeme that accepts,
+     goes on and dies inside a token; each token's weight against prefix?
+     of the text and its bytes.
    - Misuse is loud.
 
    Planted bugs (2026-11-05, each applied, the suite run, reverted): no
    skip of a nullable nonterminal (Aycock and Horspool's), and completion
    from the current set in place of the item's origin; each fails the
-   oracle property."
+   oracle property. Since the lexemes and the sets as a lazy DFA
+   (2026-11-06, genclj-jq2d; tmp/mutations.py in its worktree): a lexeme
+   that accepts at its start not passed, or one that ends at its first
+   accepting state; a set's canon key without its lexing pairs; no
+   anchors (a set that predicts keeps its chart); a nullable lexeme making
+   no rule nullable; and in the masks, no sweep of the tokens that end a
+   lexeme, none under the bytes items wait for, a root only where the DFA
+   accepted just before it dies (gen.llm.bytes/sweep-split), the roots'
+   states shared past their common prefix (sweep-roots!). Each fails a
+   test here: the oracle (with the nullable b*a? among its regexes), the
+   laws, or the masks' tests."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
@@ -48,7 +64,8 @@
 
 ;; Terminals: strings, and regexes as [:re pattern] in the oracle's form
 (def ^:private regexes {"[ab]" #{"a" "b"} "a+" (set (map #(apply str (repeat % "a")) (range 1 (inc max-len))))
-                        "b(ab)*" (set (filter #(re-matches #"b(ab)*" %) texts))})
+                        "b(ab)*" (set (filter #(re-matches #"b(ab)*" %) texts))
+                        "b*a?" (set (filter #(re-matches #"b*a?" %) texts))})
 
 (defn- concat-sets
   "{x ++ y} for x of xs, y of ys, of up to max-len characters."
@@ -125,6 +142,22 @@
       (is (not-any? #(cfg/recognizes? sums %) ["" "+" "1+" "1++2"]))
       (is (cfg/prefix? sums "1+")))))
 
+(deftest long-alternatives
+  ;; an item's dot once overflowed past 2047 symbols into its rule
+  ;; (genclj-mkos): the literal was refused and the literal plus b taken
+  (let [a-run (apply str (repeat 5000 "a"))]
+    (doseq [n [2047 2048 2049 5000]
+            :let [lit (subs a-run 0 n)
+                  g (cfg/cfg {:start :s :rules {:s [[lit] [:t]] :t [["b"]]}})
+                  alone (cfg/cfg {:start :s :rules {:s [[lit "c"]]}})]]
+      (is (cfg/recognizes? g lit) (str n " symbols"))
+      (is (cfg/prefix? g (subs lit 0 (dec n))))
+      (is (not (cfg/prefix? g (str lit "b"))))
+      (is (not (cfg/recognizes? g (str lit "a"))))
+      (is (cfg/recognizes? g "b"))
+      (is (cfg/recognizes? alone (str lit "c")) (str n " symbols, one rule"))
+      (is (not (cfg/recognizes? alone lit))))))
+
 ;; ---------------------------------------------------------------------------
 ;; As a potential
 ;; ---------------------------------------------------------------------------
@@ -169,6 +202,44 @@
     (is (every? (fn [[t _]] (cfg/prefix? brackets t)) texts) "every text a prefix")
     (is (every? (fn [[t ended?]] (or (not ended?) (cfg/recognizes? brackets t))) texts) "every ended text balanced")
     (is (< 20 (count (filter second texts))) "many end")))
+
+(defn- masks-agree
+  "At each context (a text, or a vector of byte tokens), g's mask over the
+   256 bytes and pieces is, token by token, whether the context's text and
+   the token's bytes are a prefix, and its end whether the text is in g."
+  [g pieces contexts]
+  (let [vocab (into (mapv #(byte-array [(unchecked-byte %)]) (range 256)) (map utf8 pieces))
+        p (cfg/potential vocab g)]
+    (doseq [c contexts
+            :let [ctx (if (string? c) (mapv #(bit-and (long %) 0xff) (utf8 c)) c)
+                  bs (byte-array (mapcat #(seq ^bytes (vocab %)) ctx))
+                  w (potential/logw-next p ctx)]]
+      (is (cfg/prefix? g bs) (pr-str c))
+      (is (= (mapv (fn [^bytes t] (cfg/prefix? g (byte-array (concat bs t)))) vocab)
+             (mapv #(zero? (double %)) (butlast w)))
+          (str "the mask after " (pr-str c)))
+      (is (= (cfg/recognizes? g bs) (zero? (double (last w)))) (str "the end after " (pr-str c))))))
+
+(deftest masks-inside-a-lexeme
+  (testing "JSON-like values whose strings are a lexeme, [^\"]* (multi-byte
+            UTF-8 characters, and so the DFA's inner states, included), and
+            pieces that cross a lexeme's ends"
+    (masks-agree (cfg/cfg {:start :v
+                           :rules {:v [[:o] [:a] [:s] [(cfg/regex "-?[0-9]+")] ["true"]]
+                                   :o [["{" "}"] ["{" :p :ps "}"]]
+                                   :ps [[] [", " :p :ps]]
+                                   :p [[:s ": " :v]]
+                                   :a [["[" "]"] ["[" :v :vs "]"]]
+                                   :vs [[] [", " :v :vs]]
+                                   :s [[(cfg/regex "\"[^\"]*\"")]]}})
+                 ["\": " "\", \"" "\"}" "\"]" "ab" " a" "é" "\"é" "{\"" "[\"" "12" "1\"" "tr" "ue" "e\"" "\"\""]
+                 ;; the last: inside a string, the first byte of a two-byte character
+                 ["" "{" "{\"" "{\"a" "{\"aé" "{\"a\": " "{\"a\": [\"x" "[1, \"" "[12" "{\"a\": tr" "[\"a\"" [34 0xc3]]))
+  (testing "a lexeme that accepts, goes on and dies inside a token (b(ab)* in
+            bac and babac), the rest of the token the grammar's"
+    (masks-agree (cfg/cfg {:start :s :rules {:s [[(cfg/regex "b(ab)*") "ac" :s] []]}})
+                 ["bac" "babac" "ba" "aba" "acb" "cba" "c"]
+                 ["" "b" "ba" "bab" "bac" "bacba"])))
 
 ;; ---------------------------------------------------------------------------
 ;; Misuse

@@ -629,6 +629,96 @@ z
              {:x-range [-0.05 1.05] :y-range [-0.05 1.05]
               :x-label "exact probability π(x)" :y-label "estimate"}))
 
+;; book: temper
+(def stern
+  "brevity squared: each token of text costs a nat."
+  (potential/temper brevity 2.0))
+
+(vec (potential/logw-next stern [1]))
+;=> [-1.0 -1.0 -1.0 -1.0 -1.0 -1.0 -1.0 -1.0 -1.0 0.0]
+
+[(potential/prefix (potential/temper o-free 0.5) [1 5]) (exact-z stern)]
+;=> [##-Inf 0.07779]
+
+;; book: normalize
+(def per-token (potential/normalize brevity))
+
+(array/allclose?
+ 1.0 (reduce + (map #(Math/exp %) (potential/logw-next per-token [1]))))
+;=> true
+
+;; book: prompted
+(def after-no
+  "The LM's own weights of a text, read after the prompt no."
+  (potential/prompted m (lm/encode m "no")))
+
+(lm/encode m "no")
+;=> [7 6]
+
+[(potential/prefix after-no [3]) (potential/prefix after-no [6])]
+;=> [-0.9527 -7.0352]
+
+(every? #(consistent? after-no %) [[] [1] [3] [6] [1 2]])
+;=> true
+
+[(exact-z after-no) (exact-z (potential/product yes-no after-no))]
+;=> [0.000582 0.0001655]
+
+;; book: critic
+(def critic-z
+  (estimates {:critic after-no} 20 (rng/split (rng/key 30) 200)))
+
+(within-5-se? critic-z (exact-z after-no))
+;=> true
+
+(def held-and-judged
+  (estimates {:potential yes-no :proposal :masked :critic after-no} 20
+             (rng/split (rng/key 32) 200)))
+
+(within-5-se? held-and-judged (exact-z (potential/product yes-no after-no)))
+;=> true
+
+;; book: counted
+(defn counted
+  "Potential pot, its calls counted by operation in the atom calls."
+  [pot calls]
+  (let [tally (fn [op f]
+                (fn [ctx] (swap! calls update op (fnil inc 0)) (f ctx)))]
+    (potential/potential
+     n-vocab {:prefix (tally :prefix #(potential/prefix pot %))
+              :complete (tally :complete #(potential/complete pot %))
+              :logw-next (tally :logw-next #(potential/logw-next pot %))
+              :end-tokens (potential/end-tokens pot)})))
+
+(defn calls-of
+  "The calls of potential pot, counted, that a run of SMC over free with
+   20 particles makes, with the options (opts-of the counted pot)."
+  [pot opts-of]
+  (let [calls (atom {})]
+    (smc/run free args 20 (assoc (opts-of (counted pot calls))
+                                 :key (rng/key 33)))
+    @calls))
+
+(calls-of after-no (fn [c] {:critic c}))
+;=> {:prefix 40 :complete 22} ; float64
+
+(calls-of after-no (fn [c] {:potential c :proposal :masked}))
+;=> {:prefix 21 :logw-next 60 :complete 20} ; float64
+
+;; book: awrs
+(def awrs-z
+  (estimates {:potential yes-no :proposal :awrs} 20
+             (rng/split (rng/key 34) 200)))
+
+(within-5-se? awrs-z z)
+;=> true
+
+(calls-of yes-no (fn [c] {:potential c :proposal :awrs}))
+;=> {:prefix 219 :complete 24} ; float64
+
+(calls-of yes-no (fn [c] {:potential c :proposal :masked}))
+;=> {:prefix 1 :logw-next 40} ; float64
+
 ;; book: solution-1
 (def z-bootstrap
   (estimates {:potential yes-no :proposal :lm} 20

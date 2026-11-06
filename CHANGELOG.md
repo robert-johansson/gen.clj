@@ -355,6 +355,34 @@ other values for the same key, from the same distribution.
   at their end how many of them ran and skipped, and why.
   `-J-Dgen.require-native=mlx,llama` fails a run in which a suite it names
   skipped a test or ran none, for a release gate's runs.
+- **Fixed: Earley items past 2047 symbols** (gen.llm.cfg; genclj-mkos).
+  An item packed its dot in 11 bits, so an alternative longer than 2047
+  symbols (a long string, an instaparse counted repeat) overflowed into
+  its rule: a literal of 2048 bytes was refused, its prefix plus another
+  rule's byte taken, or an index went out of bounds. An item is now its
+  origin and its position, a number for each rule and dot, so no
+  alternative's length is bounded.
+- **Changed: context-free masks inside a string** (gen.llm.cfg,
+  gen.llm.bytes; genclj-jq2d; DESIGN §9, PROVISIONAL). A JSON grammar's
+  mask at Qwen3's vocabulary took 238-363 ms with the context inside a
+  string (nearly every token allowed: each trie node visited built an
+  Earley set), where most of a JSON text's bytes are; now 0.2 ms, about
+  what one at a value's start costs. A regex element is a lexeme its DFA
+  scans, the Earley sets are a lazy DFA (successors kept, equal sets
+  shared), and the potential makes, for each state of each lexeme, the
+  tokens that stay inside it, so a mask sweeps only the tokens that end a
+  lexeme. Weights and masks are those of before (exact for the text's
+  bytes); making a potential costs about its token trie's time. Added to
+  gen.llm.bytes: `sweep-into!`, `sweep-roots!`, `sweep-split` and
+  `bare-mask`.
+- **Fixed: 1.2.0's claim for llama.cpp v0.9.0's branches** (genclj-ajse).
+  1.2.0's entry said v0.9.0's unified KV cache serves multi-sequence work
+  (token SMC, lockstep sampling) better; it was not measured. Measured
+  since on the M4 with Qwen3-0.6B (`bench/gen/llama_branches_bench.clj`,
+  docs/research/llm-branching.md), it brings no gain: after a short
+  prompt the two builds tie up to 8 branches and v0.9.0 is about 7%
+  faster at 16; after an 843-token prompt it is 5-16% slower at 4 to 16
+  branches. Nothing in gen.clj changes.
 
 ## [1.2.0] - 2026-11-06
 
