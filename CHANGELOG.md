@@ -38,6 +38,14 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Fixed: `la/inv` of a batch of matrices** (gen.array.linalg;
+  genclj-l0n4). inv solved against the `[n n]` identity, which the
+  right-hand side rule reads as a batch of vectors beside `[b n n]`
+  matrices: a `[3 3 3]` batch gave a `[3 3]` result (each matrix's inverse
+  times one basis vector) and a `[2 3 3]` batch threw. The identity is now
+  broadcast to the matrices' shape, as the tape's rules do; one matrix's
+  inverse is unchanged. `la/solve`'s rule stays as documented (DESIGN §9).
+
 ## [1.2.0] - 2026-11-06
 
 A language-model release (DESIGN §9, "1.2.0's theme"; genclj-ucfg),

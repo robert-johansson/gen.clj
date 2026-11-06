@@ -80,11 +80,16 @@
       (fn [m rhs] (p/-linalg b :solve [m rhs])))))
 
 (defn inv
-  "The inverse of a square matrix, in its float dtype."
+  "The inverse of a square matrix (or of each of a batch, [.. n n]), in its
+   float dtype."
   [m]
   (let [b (backend-of m)
-        n (sh/check-square (array/shape m) :inv)]
-    (solve m (array/with-backend b (array/eye n {:dtype (float-dtype-of b [m])})))))
+        s (array/shape m)
+        n (sh/check-square s :inv)]
+    ;; the identity broadcast to m's shape, as the tape's slogdet rule: the
+    ;; [n n] identity beside [b n n] matrices is a batch of vectors to the
+    ;; right-hand side rule (genclj-l0n4)
+    (solve m (array/with-backend b (array/broadcast-to (array/eye n {:dtype (float-dtype-of b [m])}) s)))))
 
 (defn slogdet
   "[sign log|det m|] (sign 0 and -Inf for a singular matrix)."
