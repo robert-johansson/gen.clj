@@ -41,6 +41,22 @@
    macroexpanded: a gen (or guarded-fn) nested in it sees them."
   #{})
 
+(defn ^:no-doc own
+  "sym marked as a binding gen makes itself (the body fn's trace, splice,
+   param, untraced and untraced-key), not one of the user's: a gen nested
+   in that body reads its own, and is fine (gen.dynamic/gen)."
+  [sym]
+  (vary-meta sym assoc ::own true))
+
+(defn ^:no-doc own? [sym] (boolean (::own (meta sym))))
+
+(defn- bind
+  "locals with syms bound in order: a symbol already there is replaced, so
+   that the set holds the innermost binding's symbol, with its metadata
+   (own's mark)."
+  [locals syms]
+  (reduce (fn [ls s] (conj (disj ls s) s)) locals syms))
+
 (defn- expand
   "form macroexpanded, with the locals around it visible to nested gens."
   [form locals]
@@ -120,17 +136,17 @@
 (defn- guard-bindings
   "[bindings' locals'] for a let*/loop* binding vector."
   [bindings locals]
-  (reduce (fn [[acc ls] [sym init]] [(conj acc sym (guard-branches init ls)) (conj ls sym)])
+  (reduce (fn [[acc ls] [sym init]] [(conj acc sym (guard-branches init ls)) (bind ls [sym])])
           [[] locals]
           (partition 2 bindings)))
 
 (defn- guard-fn [[_ & more] locals]
   (let [[fname more] (if (symbol? (first more)) [(first more) (rest more)] [nil more])
-        locals (cond-> locals fname (conj fname))
+        locals (cond-> locals fname (bind [fname]))
         arities (if (vector? (first more)) [more] more)]
     (list* 'fn* (concat (when fname [fname])
                         (for [[params & body] arities]
-                          (list* params (guard-statements body (into locals (remove #{'&} params)))))))))
+                          (list* params (guard-statements body (bind locals (remove #{'&} params)))))))))
 
 (defn- guard-special [form locals]
   (case (first form)
@@ -149,7 +165,7 @@
     reify* (let [[_ interfaces & methods] form]
              (list* 'reify* interfaces
                     (for [[mname params & body] methods]
-                      (list* mname params (guard-statements body (into locals params))))))
+                      (list* mname params (guard-statements body (bind locals params))))))
     ;; (. target member args…) or (. target (member args…)): a member name is
     ;; not a var, even when it is spelled like one (.get)
     . (let [[_ target member & args] form]
@@ -159,7 +175,7 @@
                  member)
                (guard-body args locals)))
     letfn* (let [[_ bindings & body] form
-                 locals (into locals (take-nth 2 bindings))]
+                 locals (bind locals (take-nth 2 bindings))]
              (list* 'letfn*
                     (vec (mapcat (fn [[n f]] [n (guard-branches f locals)]) (partition 2 bindings)))
                     (guard-body body locals)))
@@ -169,7 +185,7 @@
                       (cond (and (seq? f) (= 'catch (first f)))
                             (let [[_ cls sym & body] f]
                               (list* 'catch cls sym (list `gen.dynamic.core/caught sym)
-                                     (guard-body body (conj locals sym))))
+                                     (guard-body body (bind locals [sym]))))
                             (and (seq? f) (= 'finally (first f)))
                             (list* 'finally (guard-body (rest f) locals))
                             :else (guard-branches f locals))))
@@ -212,6 +228,9 @@
 (defn ^:no-doc locals
   "The locals around a gen (or guarded-fn) form: those of its &env, and
    those of the body being guarded around it, while its forms are
-   macroexpanded (a nested gen sees its enclosing body's)."
+   macroexpanded (a nested gen sees its enclosing body's), each the
+   symbol of its innermost binding (own? says whether gen made it)."
   [env]
-  (into (set (keys env)) *outer-locals*))
+  (bind (set (for [[k b] env]
+               (if (instance? clojure.lang.Compiler$LocalBinding b) (.-sym ^clojure.lang.Compiler$LocalBinding b) k)))
+        *outer-locals*))

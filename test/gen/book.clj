@@ -26,10 +26,11 @@
      is float64 (the JVM backend; MLX with -Dgen.mlx.dtypes=64). For a
      sampled value: a key draws other values in float32.
    - `;; error: message` as a region's first line: one of its forms throws
-     an ex-info whose message begins with message. The forms after it do
-     not run. In the source, each of the region's forms is written behind
-     `#_`, so that requiring the namespace does not throw; the test runs
-     them, and the Markdown shows them, without it.
+     an ex-info whose message begins with message (a macro's too, which
+     the compiler wraps). The forms after it do not run. In the source,
+     each of the region's forms is written behind `#_`, so that requiring
+     the namespace does not throw; the test runs them, and the Markdown
+     shows them, without it.
    - `;; figure: path` as a region's first line: its last form returns a
      figure's SVG text (gen.book.svg), which is the file book/path. On the
      JVM backend the test fails when the file differs (a stale figure);
@@ -235,7 +236,10 @@
           error (marker code #"^;; error: (.*)")
           figure (marker code #"^;; figure: (\S+)")]
       (if error
-        (let [e (try (doseq [{:keys [form]} fs] (eval form)) nil (catch Throwable e e))]
+        (let [e (try (doseq [{:keys [form]} fs] (eval form)) nil
+                     ;; a macro's error (gen refusing a form) by its own message
+                     (catch clojure.lang.Compiler$CompilerException e (or (ex-cause e) e))
+                     (catch Throwable e e))]
           (is (some? e) "no form threw")
           (is (some-> e ex-message (str/starts-with? error)) (str "the message is " (some-> e ex-message)))
           {:checks 1})

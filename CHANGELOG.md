@@ -38,6 +38,18 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Breaking: `gen` refuses a parameter, or a local around its body that
+  the body reads, named `trace`, `splice`, `param`, `untraced` or
+  `untraced-key`** (gen.dynamic, the static form too; genclj-k3xn). The
+  body binds those names itself, so such code compiled and was silently
+  wrong: `(gen [trace] (trace :x …))`, Gen.jl's usual name for a proposal's
+  argument, recorded no choice and scored 0 (an MH step with it did
+  nothing), and `(let [trace t] (gen [] (:score trace)))` read the body's
+  own `trace`. Now each is a compile error (`:reason :reserved-name`,
+  `:binding :parameter` or `:local`) naming the rename. A gen nested in a
+  body reads its own names, as before, and a body may still bind one of
+  them in a `let` of its own.
+
 ## [1.2.0] - 2026-11-06
 
 A language-model release (DESIGN §9, "1.2.0's theme"; genclj-ucfg),

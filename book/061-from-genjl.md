@@ -19,6 +19,7 @@ The code lives in one namespace:
             [gen.dist :as d]
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
+            [gen.inference.mh :as mh]
             [gen.random :as rng]
             [gen.selection :as sel]))
 ```
@@ -275,6 +276,36 @@ Stan does, and names the order: variances by address, or a dense
 matrix with its addresses. A bare vector or matrix is taken only when
 one choice is selected, whose elements it follows; for more, the order
 would be a guess, and the kernels refuse it.
+
+A custom proposal takes the previous trace as its first argument, as
+Gen.jl's does, and reads the trace's choices by calling it. Gen.jl's
+examples name that argument `trace`, but in a `gen` body `trace` is the
+body's own, which makes a choice: name it `tr`.
+
+<!-- code: proposal -->
+```clojure
+(def mu-walk
+  (gen [tr]
+    (trace :mu (d/normal (tr :mu) 0.5))))
+
+(def walked
+  (reduce (fn [t k] (:trace (mh/mh t mu-walk [] k)))
+          observed (rng/split (rng/key 9) 50)))
+
+(= (cm/addresses (:choices observed)) (cm/addresses (:choices walked)))
+;=> true
+```
+
+A parameter named `trace` would hide the body's own, so `gen` refuses
+it, as it refuses `splice`, `param`, `untraced` and `untraced-key`, and
+a local of one of those names around a body that reads it:
+
+<!-- code: proposal-trace-error -->
+```clojure
+;; error: gen: a parameter named trace would hide the body's own trace
+(gen [trace]
+  (trace :mu (d/normal (trace :mu) 0.5)))
+```
 
 ## Booleans in host code
 

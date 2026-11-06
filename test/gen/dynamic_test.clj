@@ -5,6 +5,7 @@
   (:refer-clojure :exclude [+ - * /])
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.test.check]
+            [clojure.walk :as walk]
             [gen.array :as array :refer [+ - * /]]
             [gen.array.batch :as batch]
             [gen.batched :as batched]
@@ -648,6 +649,46 @@
       (is (nil? (compile-error '(gen.dynamic/gen [xs] (mapv (fn [x] (trace [:y x] (gen.dist/normal x 1))) xs) nil))))
       (is (nil? (compile-error '(gen.dynamic/gen [xs] (map (fn [x] (trace [:y x] (gen.dist/normal x 1))) xs)))))
       (is (nil? (compile-error '(gen.dynamic/gen [xs] (map inc xs) nil)))))))
+
+(deftest names-a-body-binds-itself-are-refused-as-parameters-and-locals-it-reads
+  ;; genclj-k3xn: the body fn binds trace, splice, param, untraced and
+  ;; untraced-key itself, so a parameter of one of those names shadowed
+  ;; gen's own ((gen [trace] (trace :x …)) recorded no choice and scored 0),
+  ;; and a local around the body was shadowed by it ((let [trace t] (gen []
+  ;; (:score trace))) read gen's trace fn): both compiled, silently wrong
+  (let [refusal (fn [form] (try (eval form) nil
+                                (catch clojure.lang.Compiler$CompilerException e
+                                  (let [c (ex-cause e)] (assoc (ex-data c) :message (ex-message c))))))
+        with (fn [s form] (walk/postwalk-replace {'S s} form))]
+    (doseq [s '[trace splice param untraced untraced-key]]
+      (testing (str s " as a parameter, destructured too, and in a static body")
+        (doseq [form '[(gen.dynamic/gen [S] S)
+                       (gen.dynamic/gen [x {:keys [S]}] x)
+                       (gen.dynamic/gen [x & [S]] x)
+                       (gen.dynamic/gen ^:static [S] (clojure.core/let [y 1.0] y))]
+                :let [r (refusal (with s form))]]
+          (is (= [:reserved-name s :parameter] ((juxt :reason :symbol :binding) r)) (pr-str (with s form)))
+          (is (re-find #"rename the parameter" (str (:message r))))))
+      (testing (str s " as a local around a body that reads it")
+        (doseq [form '[(clojure.core/let [S 1.0] (gen.dynamic/gen [] S))
+                       (clojure.core/fn [S] (gen.dynamic/gen [] [S]))
+                       (clojure.core/let [S 1.0] (gen.dynamic/gen ^:static [] (clojure.core/let [y S] y)))
+                       ;; a local inside a body, read by a gen nested in it
+                       (gen.dynamic/gen [] (clojure.core/let [S 1.0] (gen.dynamic/gen [] S)))]
+                :let [r (refusal (with s form))]]
+          (is (= [:reserved-name s :local] ((juxt :reason :symbol :binding) r)) (pr-str (with s form)))
+          (is (re-find #"rename the local" (str (:message r))))))
+      (testing (str s " as a local the body does not read, or binds itself")
+        (is (nil? (refusal (with s '(clojure.core/let [S 1.0] (gen.dynamic/gen [] 'S))))) "quoted data is no read")
+        (is (nil? (refusal (with s '(clojure.core/let [S 1.0] (gen.dynamic/gen [] 2.0))))))
+        (is (= 1.0 (:retval (gfi/simulate (eval (with s '(gen.dynamic/gen [] (clojure.core/let [S 1.0] S)))) [] (rng/key 0))))
+            "a body may shadow its own with a local of its own")))
+    (testing "a gen nested in a body reads its own names, not its enclosing body's"
+      (let [k (rng/key 1)
+            dynamic (gen [] (splice :a (gen [] (untraced-key) (trace :x (d/normal 0 1)))))
+            static (gen ^:static [] (let [y (splice :a (gen [] (trace :x (d/normal 0 1))))] y))]
+        (is (= [[:a :x]] (cm/addresses (:choices (gfi/simulate dynamic [] k)))))
+        (is (= [[:a :x]] (cm/addresses (:choices (gfi/simulate static [] k)))))))))
 
 (def returns-seven (gen [] (trace :x (d/normal 0 1)) 7.0))
 

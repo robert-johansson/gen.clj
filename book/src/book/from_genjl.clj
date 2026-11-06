@@ -11,6 +11,7 @@
             [gen.dist :as d]
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
+            [gen.inference.mh :as mh]
             [gen.random :as rng]
             [gen.selection :as sel]))
 
@@ -92,6 +93,23 @@
    (cm/addresses discard)
    (array/allclose? w (- (:score t2) (:score observed)))])
 ;=> [1.0 [[:mu]] true]
+
+;; book: proposal
+(def mu-walk
+  (gen [tr]
+    (trace :mu (d/normal (tr :mu) 0.5))))
+
+(def walked
+  (reduce (fn [t k] (:trace (mh/mh t mu-walk [] k)))
+          observed (rng/split (rng/key 9) 50)))
+
+(= (cm/addresses (:choices observed)) (cm/addresses (:choices walked)))
+;=> true
+
+;; book: proposal-trace-error
+;; error: gen: a parameter named trace would hide the body's own trace
+#_(gen [trace]
+  (trace :mu (d/normal (trace :mu) 0.5)))
 
 ;; book: merge-error
 ;; error: merge: the choice maps overlap
