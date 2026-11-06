@@ -137,7 +137,7 @@
   [ps]
   (when-let [m (:fallback ps)] {:message m :data (::fallback-data ps)}))
 
-(defn written
+(defn- failure-message
   "The reason a batched run failed, e, as a written message: an ex-info's
    own (gen.clj's errors are written ones: a branch on a value that differs
    across particles, a failed spot check, a parameter's check); host math
@@ -151,24 +151,41 @@
         :else (str "The batched run failed with a " (.getName (class e))
                    (when-let [m (.getMessage e)] (str ": " m)))))
 
+(defn ^{:deprecated "1.2.1"} written
+  "Deprecated (1.2.1): gen.batched's own, to be removed in 2.0; a
+   collection's reason is (fallback ps), or fallback-reason's :message. The
+   reason a batched run failed, e, as a written message: an ex-info's own,
+   host math on a batched value said so, any other exception named with
+   its class."
+  ^String [^Throwable e]
+  (failure-message e))
+
 (defn- fallen-back
   "The fallback result r (particles, or a map holding them) marked with the
    failure e of the batched run: its written message at :fallback (on the
    particles, and on a map holding them), its ex-data kept for
    fallback-reason."
   [r ^Exception e]
-  (let [m (written e)
+  (let [m (failure-message e)
         mark #(assoc % :fallback m ::fallback-data (ex-data e))]
     (if (particles? r)
       (mark r)
       (-> r (clojure.core/update :particles mark) (assoc :fallback m)))))
 
-(defn refused
+(defn- refusal
   "The error of a batched run that failed (e) where *required* refuses the
    fallback to one particle at a time, naming why."
   [^Exception e]
-  (let [m (written e)]
+  (let [m (failure-message e)]
     (ex-info (str "The run cannot be batched (:batched? :required): " m) {:fallback m ::required true} e)))
+
+(defn ^{:deprecated "1.2.1"} refused
+  "Deprecated (1.2.1): gen.batched's own, to be removed in 2.0; a run
+   under *required* (:batched? :required) throws it. The error of a
+   batched run that failed (e) where *required* refuses the fallback to
+   one particle at a time, naming why."
+  [^Exception e]
+  (refusal e))
 
 (defn- one-at-a-time
   "ps, particles held one at a time (they fell back earlier, or were
@@ -196,7 +213,7 @@
   `(try ~batched
         (catch Exception e#
           (cond (::diverged (ex-data e#)) (throw e#)
-                *required* (throw (refused e#))
+                *required* (throw (refusal e#))
                 :else (fallen-back ~fallback e#)))))
 
 (defn- handed-back
@@ -802,8 +819,8 @@
     (if (batched? ps)
       (try {:result (plain (batch/batched [n] (gfi/project (:trace (check ps)) selection)) n)}
            (catch Exception e
-             (when *required* (throw (refused e)))
-             {:result (each) :fallback (written e)}))
+             (when *required* (throw (refusal e)))
+             {:result (each) :fallback (failure-message e)}))
       (do (one-at-a-time ps)
           {:result (each) :fallback (:fallback ps)}))))
 
@@ -853,8 +870,8 @@
                                       (guarded n #(apply f t key (map (fn [x] (array/tree-map (fn [v] (batch/wrap v [n])) x)) xs))))}
              (catch Exception e
                (cond (::diverged (ex-data e)) (throw e)
-                     *required* (throw (refused e))
-                     :else {:result (each) :fallback (written e)}))))
+                     *required* (throw (refusal e))
+                     :else {:result (each) :fallback (failure-message e)}))))
       (do (one-at-a-time ps)
           {:result (each) :fallback (:fallback ps)}))))
 

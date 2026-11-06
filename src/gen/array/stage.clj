@@ -307,7 +307,7 @@
   (-native-ops [_] #{})
 
   (-from-host [_ values shape dtype]
-    (op! :constant [] shape dtype {:values (if (instance? double/1 values) (vec values) (vec values))}))
+    (op! :constant [] shape dtype {:values (vec values)}))
   (-to-host [_ _] (host-read! "a host read"))
   (-eval! [_ _] nil)
 
@@ -528,11 +528,9 @@
 
 (def ^:private mask32 0xFFFFFFFF)
 
-(defn- strides [shape] (vec (reverse (reductions clojure.core/* 1 (reverse (rest shape))))))
+(defn- unravel [^long i shape] (mapv (fn [s d] (mod (quot i (long s)) (long d))) (sh/strides shape) shape))
 
-(defn- unravel [^long i shape] (mapv (fn [s d] (mod (quot i (long s)) (long d))) (strides shape) shape))
-
-(defn- ravel ^long [idx shape] (reduce clojure.core/+ 0 (map clojure.core/* idx (strides shape))))
+(defn- ravel ^long [idx shape] (reduce clojure.core/+ 0 (map clojure.core/* idx (sh/strides shape))))
 
 (defn- u32-of
   "x (a host number or a backend array) as host uint32 words."

@@ -383,6 +383,13 @@ other values for the same key, from the same distribution.
   prompt the two builds tie up to 8 branches and v0.9.0 is about 7%
   faster at 16; after an 843-token prompt it is 5-16% slower at 4 to 16
   branches. Nothing in gen.clj changes.
+- **Deprecated: `gen.batched/written` and `gen.batched/refused`**
+  (gen.batched; genclj-08xk). Public only by accident, gen.batched's own
+  helpers (a failure's message, the error `:batched? :required` throws),
+  called nowhere else: `:deprecated "1.2.1"` and a docstring note, to be
+  removed in 2.0. They behave as before. A collection's reason stays
+  `(fallback ps)` and `fallback-reason`, and `project*` stays, the way to
+  `project`'s.
 
 ## [1.2.0] - 2026-11-06
 
