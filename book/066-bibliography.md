@@ -243,7 +243,7 @@ folder.
   doi:10.21105/joss.09889. Cited in *The Inference Toolkit*.
 - **Commons Math**. Apache Commons Math, version 3.6.1.
   <http://commons.apache.org/proper/commons-math/>. Cited in *Extending
-  gen.clj* and *The Distributions*.
+  gen.clj*, *The Distributions* and *Installing and Running*.
 - **Distributions.jl**. JuliaStats. Distributions.jl.
   <https://github.com/JuliaStats/Distributions.jl>. Cited in *Extending
   gen.clj*, *Coming from Gen.jl* and *The Distributions*.
