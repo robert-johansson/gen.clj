@@ -385,7 +385,7 @@
   (gen/let [xs (gen/vector (gen/double* {:min -3 :max 3 :NaN? false}) 0 6)
             ys (gen/vector (gen/double* {:min -3 :max 3 :NaN? false}) 0 6)
             reuse (gen/vector gen/boolean 6)
-            seed gen/nat]
+            seed laws/seeds]
     (let [ys (mapv (fn [y keep? x] (if (and keep? x) x y)) ys reuse (concat xs (repeat nil)))]
       {:xs xs :ys ys :seed seed})))
 
@@ -426,7 +426,7 @@
             drift (gen/elements [0.1 -0.2])
             t (gen/choose 0 12)
             v (gen/double* {:min -3 :max 3 :NaN? false})
-            seed gen/nat]
+            seed laws/seeds]
     {:n (min n 8) :n' (min n' 8) :init init :drift drift :t t :v v :seed seed}))
 
 (defspec unfold-precise-hints-match-unknown-change 200

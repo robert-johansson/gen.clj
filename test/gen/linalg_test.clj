@@ -7,6 +7,7 @@
             [clojure.test.check.properties :as prop]
             [gen.array :as array :refer [+ * >=]]
             [gen.array.linalg :as la]
+            [gen.laws :as laws]
             [gen.random :as rng]))
 
 (defn- spd
@@ -17,7 +18,7 @@
                                                 [(inc (count batch-shape)) (count batch-shape)])))
        (* n (array/eye n)))))
 
-(def gen-case (gen/tuple gen/nat (gen/choose 1 6)))
+(def gen-case (gen/tuple laws/seeds (gen/choose 1 6)))
 
 (defspec cholesky-factors-reconstruct 100
   (prop/for-all [[seed n] gen-case]
