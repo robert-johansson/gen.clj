@@ -121,6 +121,90 @@ other values for the same key, from the same distribution.
   was unbound elsewhere and read the other value when a parameter or a var
   had it, silently; now it is an error naming the draw and the names
   (`:bound`).
+- **Fixed: `la/inv` of a batch of matrices** (gen.array.linalg;
+  genclj-l0n4). inv solved against the `[n n]` identity, which the
+  right-hand side rule reads as a batch of vectors beside `[b n n]`
+  matrices: a `[3 3 3]` batch gave a `[3 3]` result (each matrix's inverse
+  times one basis vector) and a `[2 3 3]` batch threw. The identity is now
+  broadcast to the matrices' shape, as the tape's rules do; one matrix's
+  inverse is unchanged. `la/solve`'s rule stays as documented (DESIGN §9).
+- **Fixed: an int `arange` holds NumPy's values on every backend**
+  (gen.backend.jvm, gen.array.stage; genclj-06ba). The JVM backend stored
+  start + i·step unrounded under an int dtype: `(arange 0.5 3 1 {:dtype
+  :int64})` read `[0 1 2]` but added to itself gave `[1 3 5]` and equalled
+  0 nowhere. Its values, and the stager's, are now MLX's and NumPy's: the
+  first value is start cast to the dtype, the step dtype(start + step) -
+  dtype(start), so a fractional step may repeat a value (`(arange 0 3 0.5
+  {:dtype :int64})` is six zeros). Integral arguments, the common case,
+  give what they gave.
+- **Breaking: `arange` refuses a bool dtype, a zero step and non-finite
+  arguments** (gen.array, every backend; genclj-06ba, genclj-kdau):
+  `ex-info` with `:reason :invalid-dtype` or `:invalid-args`. Only code
+  that was already wrong meets it: a zero step threw a raw
+  IllegalArgumentException on the JVM backend and MLX's own error; MLX has
+  no bool arange, and the JVM backend's held fractions past its second
+  element (NumPy's fails there). Compare an int arange for bools.
+- **Changed: float `floor-div` is NumPy's** (gen.array, every backend;
+  DESIGN §9, 1.2.1's owner calls). It was floor(x / y), which disagreed
+  with `mod`: `(floor-div 1.0 0.1)` was 10.0 beside `(mod 1.0 0.1)`'s
+  0.0999…, so x = y·q + r failed. Now NumPy's `npy_floor_divide`: (x -
+  fmod(x, y)) / y, one less where fmod's sign is not y's, snapped to an
+  integer, so `(floor-div 1.0 0.1)` is 9.0. Other values that change: an
+  infinite dividend gives NaN (was ±Inf), `(floor-div -1.0 ##Inf)` -1.0
+  (was -0.0). A zero divisor still gives x / y; int `floor-div` is
+  unchanged.
+- **Breaking: `max`, `min`, `argmax` and `argmin` over an empty axis are
+  loud** (gen.array, every backend; DESIGN §9): `ex-info` with `:reason
+  :empty-reduction`, as NumPy and JAX raise. The JVM backend gave -Inf and
+  +Inf for a float max and min (and a raw IllegalArgumentException for an
+  int dtype), MLX its own error. An empty result (an empty axis that is
+  not reduced) is no error, now on MLX too for argmax and argmin;
+  `logsumexp` over an empty axis is still -Inf and `softmax` of one an
+  empty array. Code that read ∓Inf from an empty max on the JVM backend
+  must test for the empty axis.
+- **Fixed: int64 overflow is an `ex-info` on the JVM backend**
+  (gen.backend.jvm; DESIGN §9): `:reason :overflow` where an int64 result
+  leaves the range, at the op. The JVM backend holds int64 values in
+  doubles, and one past 2^63 threw a raw IllegalArgumentException when it
+  was read. MLX wraps, as host numbers do on every backend (documented,
+  docs/array-api.md §13).
+- **Fixed: loud errors where gen.array, gen.array.stage and gen.random
+  threw raw exceptions or gave silent values** (genclj-kdau; rule 6), each
+  an `ex-info` with a `:reason`: a negative dimension is `:invalid-shape`
+  (`(zeros [-2 0])` made an array of that shape, `(zeros [-2 3])` claimed
+  more than Long/MAX_VALUE cells); `expand-dims` at a repeated axis is
+  `:repeated-axis`, as NumPy (a set dropped it, one axis too few);
+  `grad`'s `:argnums` past the arguments `:invalid-option` (an
+  IndexOutOfBoundsException); `rng/key-data` of a staged key `:staged-key`
+  (a ClassCastException); `(rng/key 2.5)` `:invalid-data`, as `fold-in`
+  (it was `(rng/key 2)`). `array/scan` (experimental) with n 0 over xs runs
+  no step and returns empty ys of the step's shapes (it threw "Index 0 out
+  of bounds"); its host loop checks that every leaf of xs has a leading
+  axis of n (`:invalid-args`) and that a step keeps the carry's structure,
+  shapes and dtypes (`:invalid-carry`), as the stager checked shapes and
+  dtypes (it now checks the structure too). A staged 0-d value fills
+  `array/full` (a ClassCastException). Breaking only for code that was
+  already wrong: a fractional or a float seed (2.0 included, as JAX's
+  PRNGKey), a repeated axis.
+- **Fixed: `rng/randint`, and so `uniform-discrete`, stay inside their
+  range** (gen.random; genclj-psgi). randint computed floor(low + u·(high
+  - low)) in the backend's default float, which rounds up to high: in
+  float32 for about 0.3% of the draws at low 10^6, high 10^6 + 10 (MLX's
+  default), and in float64 for the largest uniforms far from 0. So
+  uniform-discrete sampled outside its support on MLX, a trace of score
+  -Inf. Now the draw is exact integer arithmetic on the same uniforms'
+  bits, low + floor(k·r / 2^b): in float64 k is one uniform's 52 bits,
+  floor(u·r) exactly; in float32 three uniforms' 23 bits each (b = 69).
+  The same key draws the same integers on every backend of the same
+  default float. An empty range is loud (`:empty-range`) where its bounds
+  can be read (a lazy backend's array range clamps to low), a fractional
+  host bound `:invalid-args`, and host bounds outside int32 on a backend
+  whose int is int32 (they wrapped) `:invalid-args`.
+- **Draws: `rng/randint` and `uniform-discrete` in float32** (MLX's default;
+  genclj-psgi) draw other integers for the same key, from three float32
+  uniforms where one was drawn. In float64 (the JVM backend's default)
+  the integers are unchanged, except a draw the old rounding moved (one
+  that reached high among them).
 
 ## [1.2.0] - 2026-11-06
 

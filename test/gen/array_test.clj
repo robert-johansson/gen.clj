@@ -389,3 +389,155 @@
     (testing "keys are not arguments: the trace would replay their draws"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"key's draws"
                             ((array/compile (fn [k x] x)) (gen.random/key 1) x))))))
+
+;; ---------------------------------------------------------------------------
+;; 1.2.1's edges (the health check of 2026-11-06): NumPy's values where the
+;; backends disagreed, and loud errors where a raw exception or a silent
+;; value was (rule 6)
+;; ---------------------------------------------------------------------------
+
+(defn- reason [f] (:reason (thrown-data f)))
+
+(deftest an-int-arange-is-numpy-s
+  ;; genclj-06ba: the JVM backend stored start + i·step unrounded under an
+  ;; int dtype, so (arange 0.5 3 1 {:dtype :int64}) read [0 1 2] but added
+  ;; to itself gave [1 3 5] and equalled 0 nowhere. Every backend gives
+  ;; NumPy's values, which MLX's own arange computes: the first value is
+  ;; start cast to the dtype, and the step dtype(start + step) -
+  ;; dtype(start). The values are np.arange's (NumPy 2.4.2)
+  (doseq [dt (distinct [(ts/int-dtype) :int32 :int64])
+          [args want] [[[0.5 3 1] [0 1 2]]
+                       [[0 3 0.5] [0 0 0 0 0 0]]
+                       [[0.5 3 0.7] [0 1 2 3]]
+                       [[-2.5 3 1] [-2 -1 0 1 2 3]]
+                       [[3 0.5 -0.7] [3 2 1 0]]
+                       [[-3.5 -0.2 0.9] [-3 -2 -1 0]]
+                       [[0 7 2] [0 2 4 6]]]]
+    (let [a (apply array/arange (conj args {:dtype dt}))
+          label (str args " " dt)]
+      (is (= dt (array/dtype a)) label)
+      (is (= want (ts/host a)) label)
+      (is (= (mapv #(* 2 %) want) (ts/host (array/+ a a))) (str label ": its values are the ones it reads"))
+      (is (= (mapv zero? want) (ts/host (array/== a 0))) label))))
+
+(deftest arange-refuses-what-it-cannot-make
+  ;; genclj-kdau: a zero step threw an IllegalArgumentException (Infinity)
+  ;; on the JVM backend and MLX's own error elsewhere; genclj-06ba: a bool
+  ;; arange stored fractions on the JVM backend, and MLX has none (NumPy's
+  ;; fails past two elements)
+  (doseq [[label f want] [["a zero step" #(array/arange 0 5 0) :invalid-args]
+                          ["a zero float step" #(array/arange 0 5 0.0) :invalid-args]
+                          ["an infinite stop" #(array/arange 0 ##Inf) :invalid-args]
+                          ["a NaN start" #(array/arange ##NaN 3 1) :invalid-args]
+                          ["a bool dtype" #(array/arange 0 3 1 {:dtype :bool}) :invalid-dtype]]]
+    (is (= want (reason f)) label)))
+
+(deftest extrema-of-an-empty-axis-are-loud
+  ;; DESIGN §9, 1.2.1's owner calls, item 4, as NumPy and JAX raise: the
+  ;; JVM backend gave -Inf and +Inf (and an IllegalArgumentException for
+  ;; an int dtype), MLX an ex-info of its own
+  (doseq [[label f] [["max over an empty axis" #(array/max (array/zeros [0 3]) {:axis 0})]
+                     ["min over an empty axis" #(array/min (array/zeros [3 0]) {:axis 1})]
+                     ["max of an empty array" #(array/max (array/zeros [0]))]
+                     ["an int dtype's min" #(array/min (array/zeros [0] {:dtype (ts/int-dtype)}))]
+                     ["several axes, one empty" #(array/max (array/zeros [2 0 3]) {:axis [1 2]})]
+                     ["argmax of an empty array" #(array/argmax (array/zeros [0]))]
+                     ["argmin over an empty axis" #(array/argmin (array/zeros [2 0]) {:axis 1})]]]
+    (is (= :empty-reduction (reason f)) label))
+  (testing "an empty result is no empty reduction"
+    (is (= [0] (array/shape (array/max (array/zeros [0 3]) {:axis 1}))))
+    (is (= [0] (array/shape (array/argmin (array/zeros [0 3]) {:axis 1})))))
+  (testing "logsumexp and softmax keep their values over an empty axis: log 0, and an empty array"
+    (is (= ##-Inf (ts/host (array/logsumexp (array/zeros [0])))))
+    (is (= [##-Inf ##-Inf] (ts/host (array/logsumexp (array/zeros [2 0]) {:axis 1}))))
+    (is (= [0 3] (array/shape (array/logsumexp (array/zeros [1 0 3]) {:axis 0}))) "an empty result")
+    (is (= [3 0] (array/shape (array/softmax (array/zeros [3 0])))))
+    (is (= [3 0] (array/shape (array/log-softmax (array/zeros [3 0])))))))
+
+(defn- same-double?
+  "a and b the same double: NaN as NaN, -0.0 apart from 0.0."
+  [a b]
+  (if (Double/isNaN (double b)) (Double/isNaN (double a)) (.equals (Double/valueOf (double a)) (Double/valueOf (double b)))))
+
+(deftest float-floor-division-is-numpy-s
+  ;; DESIGN §9, 1.2.1's owner calls, item 3: NumPy's floor((x - mod(x, y))
+  ;; / y), snapped to an integer, so that x = y·q + mod(x, y) holds;
+  ;; floor(x / y) made (floor-div 1.0 0.1) 10.0 beside mod's 0.0999… The
+  ;; values are np.floor_divide's (NumPy 2.4.2), in float64 and float32
+  (let [xs [1.0 -1.0 7.5 -7.5 1.0 -1.0 0.0 1.0 -1.0 ##Inf ##NaN -0.0 0.3 5.0 1e-20 -1e-20 6.0 -6.0 0.0 1.0 ##-Inf 2.5 1e10 -0.7]
+        ys [0.1 0.1 2.0 2.0 0.0 0.0 0.0 ##Inf ##Inf 2.0 1.0 3.0 -0.1 -0.0 -1.0 1.0 3.0 3.0 -3.0 ##-Inf 2.0 0.5 3.0 0.25]
+        f64 [9.0 -10.0 3.0 -4.0 ##Inf ##-Inf ##NaN 0.0 -1.0 ##NaN ##NaN -0.0 -3.0 ##-Inf -1.0 -1.0 2.0 -2.0 -0.0 -1.0 ##NaN 5.0 3333333333.0 -3.0]
+        f32 (assoc f64 12 -4.0 22 3333333248.0)
+        agree (fn [got want] (and (= (count got) (count want)) (every? true? (map same-double? got want))))]
+    (testing "host numbers, in float64"
+      (is (agree (mapv array/floor-div xs ys) f64)))
+    (testing "arrays of the backend's float"
+      (let [got (ts/host (array/floor-div (array/array xs) (array/array ys)))]
+        (is (agree got (if (ts/f32?) f32 f64)) (pr-str got))))
+    (when (ts/float64?)
+      (testing "float64 arrays"
+        (is (agree (ts/host (array/floor-div (array/array xs {:dtype :float64}) (array/array ys {:dtype :float64}))) f64))))
+    (testing "x = y·q + mod(x, y), where it was off by y"
+      (is (array/allclose? 1.0 (array/+ (array/* 0.1 (array/floor-div 1.0 0.1)) (array/mod 1.0 0.1)))))
+    (testing "ints are unchanged: floor division, 0 for a zero divisor"
+      (is (= [-4 3 0 -2] (ts/host (array/floor-div (array/array [-7 7 5 -6]) (array/array [2 2 0 3]))))))))
+
+(deftest int64-overflow
+  ;; DESIGN §9, 1.2.1's owner calls, item 2: the JVM backend, which holds
+  ;; int64 values in doubles, throws where an int64 result leaves the
+  ;; range, where it threw an IllegalArgumentException once the value was
+  ;; read. MLX wraps, as Java's long arithmetic and host numbers do
+  ;; (docs/array-api.md §13)
+  (let [big (array/array [4611686018427387904 3] {:dtype :int64})
+        top (array/array [9223372036854775807 -9223372036854775808] {:dtype :int64})]
+    (if (ts/jvm?)
+      (do (is (= :overflow (reason #(array/* big 4))) "a product past 2^63")
+          (is (= :overflow (reason #(array/sum (array/array [9223372036854775807 9223372036854775807] {:dtype :int64}))))
+              "a 0-d result")
+          (is (= :overflow (reason #(array/- (array/negate big) (array/* big 2)))) "below -2^63")
+          (is (= [9223372036854775807 -9223372036854775808] (ts/host (array/+ top 0))) "the range's ends are no overflow"))
+      (is (= [0 12] (ts/host (array/* big 4))) "MLX wraps"))
+    (is (= 0 (array/* 4611686018427387904 4)) "host numbers wrap on every backend")))
+
+(deftest shapes-and-axes-are-checked
+  ;; genclj-kdau: (zeros [-2 0]) made an array of shape [-2 0] on the JVM
+  ;; backend, and (zeros [-2 3]) said it had more than Long/MAX_VALUE
+  ;; cells; expand-dims at [0 0] inserted one axis where NumPy raises
+  (doseq [[label f want] [["a negative dimension beside a zero" #(array/zeros [-2 0]) :invalid-shape]
+                          ["a negative dimension" #(array/zeros [-2 3]) :invalid-shape]
+                          ["ones" #(array/ones [3 -1]) :invalid-shape]
+                          ["a reshape" #(array/reshape (array/zeros [6]) [-2 -3]) :invalid-shape]
+                          ["expand-dims at a repeated axis" #(array/expand-dims (array/zeros [2]) [0 0]) :repeated-axis]
+                          ["the same axis counted from the end" #(array/expand-dims (array/zeros [2]) [0 -3]) :repeated-axis]]]
+    (is (= want (reason f)) label))
+  (is (= [1 1 2] (array/shape (array/expand-dims (array/zeros [2]) [0 1]))) "distinct axes, as before"))
+
+(deftest grad-checks-its-argnums
+  ;; genclj-kdau: an :argnums past the arguments threw an
+  ;; IndexOutOfBoundsException
+  (let [f (fn [x y] (array/sum (array/* x y)))]
+    (doseq [[label argnums] [["past the arguments" 3] ["one of several" [0 2]] ["negative" -1] ["not an integer" 0.5]]]
+      (is (= :invalid-option (reason #((array/grad f {:argnums argnums}) 1.0 2.0))) label))
+    (is (= [2.0 1.0] (ts/host ((array/grad f {:argnums [0 1]}) 1.0 2.0))) "in range, as before")))
+
+(deftest scan-with-no-steps-and-scan-s-checks
+  ;; genclj-kdau: n 0 over xs probed the step at index 0 of an empty axis
+  ;; ("Index 0 out of bounds"); the host loop checked neither xs's leading
+  ;; axis nor the carry
+  (testing "n 0 over xs: no step runs; the ys are empty, of the step's shapes and dtypes"
+    (let [[c ys] (array/scan (fn [c x] [(array/+ c (array/sum x)) (array/* x 2.0)]) 1.5 (array/zeros [0 3]) 0)]
+      (is (= 1.5 (ts/host c)))
+      (is (= [0 3] (array/shape ys)))
+      (is (= (ts/float-dtype) (array/dtype ys)))))
+  (testing "xs's leading axis is n"
+    (is (= :invalid-args (reason #(array/scan (fn [c x] [c x]) 0.0 (array/zeros [4 2]) 3))))
+    (is (= :invalid-args (reason #(array/scan (fn [c x] [c x]) 0.0 {:a (array/zeros [3]) :b (array/zeros [2 3])} 3))))
+    (is (= :invalid-args (reason #(array/scan (fn [c x] [c x]) 0.0 (array/array 1.0) 1))) "a 0-d xs"))
+  (testing "carry' keeps carry's structure, shapes and dtypes"
+    (doseq [[label f carry] [["structure" (fn [c _] [[c c] c]) (array/zeros [2])]
+                             ["a map's keys" (fn [c _] [{:b (:a c)} 0.0]) {:a (array/zeros [2])}]
+                             ["shape" (fn [c _] [(array/zeros [3]) c]) (array/zeros [2])]
+                             ["dtype" (fn [c _] [(array/zeros [2] {:dtype (ts/int-dtype)}) c]) (array/zeros [2])]]]
+      (is (= :invalid-carry (reason #(array/scan f carry nil 2))) label))
+    (is (= 6 (ts/host (first (array/scan (fn [c t] [(array/+ c t) c]) 0 nil 4))))
+        "a host number's weak dtype may become the step's")))

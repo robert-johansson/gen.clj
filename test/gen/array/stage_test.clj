@@ -133,6 +133,20 @@
             (or (nil? p)
                 (== (:s (st/evaluate p [key])) (:score (gfi/simulate gf args key)))))))))
 
+(deftest staged-scalars-and-keys-at-the-edges
+  ;; genclj-kdau
+  (testing "a staged 0-d value fills an array, as a host number does (it threw a ClassCastException)"
+    (when (ts/jvm?)
+      (binding [st/*float* :float64]
+        (is (replays? (fn [x] (array/full [3] x)) [[[] :float64]] [2.5]))
+        (is (replays? (fn [x] (array/full [2 2] (array/* x 2.0) {:dtype :int32})) [[[] :float64]] [1.75]) "cast to the dtype"))))
+  (testing "rng/key-data of a staged key is loud (a ClassCastException, though key? accepts it)"
+    (is (= :staged-key (:reason (try (st/stage (fn [k] (rng/key-data k) 1.0) (st/key-spec)) nil
+                                     (catch clojure.lang.ExceptionInfo e (ex-data e)))))))
+  (testing "a staged scan's step keeps the carry's structure, as the host loop's"
+    (is (= :invalid-carry (:reason (try (st/stage (fn [c] (array/scan (fn [c _] [[c c] c]) c nil 2)) [[] :float32]) nil
+                                        (catch clojure.lang.ExceptionInfo e (ex-data e))))))))
+
 (deftest host-reads-of-staged-values-are-loud
   (testing "a branch on a staged value"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Cannot read a staged value"

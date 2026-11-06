@@ -738,6 +738,36 @@
                   (if m1 (t (Mlx/mlx_where m1 (t (Mlx/mlx_negative q s)) q s)) q)))]
         (Mlx/mlx_where z zero q s)))))
 
+(defn- float-floor-divide
+  "floor-divide of float handles as NumPy's (gen.array.dtype/floor-div,
+   DESIGN §9, 1.2.1's owner calls), where MLX's is floor(x/y): x/y for a
+   zero y; otherwise (x - fmod(x, y)) / y, one less where fmod's sign is not
+   y's, snapped to the nearest integer, and a zero quotient signed as x/y.
+   MLX has no fmod: it is MLX's remainder of |x| and |y|, which is fmod's
+   magnitude there, signed as x."
+  [b hx hy dtype]
+  (let [hx (long hx) hy (long hy)
+        s (stream b)]
+    (with-temps [t]
+      (let [k (fn ^long [v] (t (scalar-handle v dtype)))
+            zero (k 0.0)
+            less0 (fn ^long [^long h] (t (Mlx/mlx_less h zero s)))
+            r (t (Mlx/mlx_remainder (t (Mlx/mlx_abs hx s)) (t (Mlx/mlx_abs hy s)) s))
+            m (t (Mlx/mlx_where (less0 hx) (t (Mlx/mlx_negative r s)) r s))
+            x-over-y (t (Mlx/mlx_divide hx hy s))
+            q (t (Mlx/mlx_divide (t (Mlx/mlx_subtract hx m s)) hy s))
+            ;; NaN is no zero, and NaN < 0 is false, as NumPy's tests
+            off (t (Mlx/mlx_logical_and (t (Mlx/mlx_not_equal m zero s))
+                                        (t (Mlx/mlx_not_equal (less0 hy) (less0 m) s)) s))
+            q (t (Mlx/mlx_where off (t (Mlx/mlx_subtract q (k 1.0) s)) q s))
+            f (t (Mlx/mlx_floor q s))
+            snapped (t (Mlx/mlx_where (t (Mlx/mlx_greater (t (Mlx/mlx_subtract q f s)) (k 0.5) s))
+                                      (t (Mlx/mlx_add f (k 1.0) s)) f s))
+            ;; a zero quotient has |x| < |y|, so x/y is finite there: x/y·0 is
+            ;; the zero of its sign
+            q (t (Mlx/mlx_where (t (Mlx/mlx_equal q zero s)) (t (Mlx/mlx_multiply x-over-y zero s)) snapped s))]
+        (Mlx/mlx_where (t (Mlx/mlx_equal hy zero s)) x-over-y q s)))))
+
 (defn- java-int-cast
   "Float handle h (of dtype from) cast to the int dtype as Java casts
    (DESIGN.md §9): truncated toward zero, saturating at the dtype's range
@@ -800,6 +830,8 @@
       (with-operands b op [hx x dtype hy y dtype]
         (wrap b (cond (and (#{:remainder :floor-divide} op) (= :int (dt/kind dtype)))
                       (int-division b op hx hy dtype)
+                      (= op :floor-divide)
+                      (float-floor-divide b hx hy dtype)
                       (and (= op :power) (= :int (dt/kind dtype)))
                       (int-power b hx hy dtype)
                       :else ((binary-fns op) hx hy s))))))))
@@ -879,6 +911,13 @@
       (empty? axes)
       ;; over no axis: the identity (argmax/argmin always name one axis)
       (as-array b x dtype)
+
+      (and (#{:argmax :argmin} op) (zero? (sh/size (shape-of x))))
+      ;; an empty result (gen.array refuses an empty axis): MLX's
+      ;; argmax/argmin refuse any empty array, NumPy and the JVM backend
+      ;; give the empty indices
+      (let [sx (shape-of x) a (long (first axes))]
+        (p/-full b (if keep-dims? (assoc sx a 1) (into (subvec sx 0 a) (subvec sx (inc a)))) 0 (:int (defaults b))))
 
       (and (= op :sum) (blocked-sum? b x dtype axes))
       ;; MLX's CPU accumulates a float32 sum sequentially (DESIGN §9)
@@ -1136,8 +1175,9 @@
               (let [[lu piv] (mapv t (Mlx/mlx_linalg_lu_factor h cpu))
                     u (diag-of-temp t lu cpu)
                     n (peek sa)
-                    ;; the results wrapped as they are made: the Cleaner owns
-                    ;; logabs while the handles after it are made
+                    ;; the results wrapped as they are made: logabs's MlxArray
+                    ;; owns its handle (its phantom reference frees it) while
+                    ;; the handles after it are made
                     logabs (wrap b (Mlx/mlx_sum_axis (t (Mlx/mlx_log (t (Mlx/mlx_abs u cpu)) cpu)) (int -1) false cpu))
                     idx (t (Mlx/mlx_arange 0.0 (double n) 1.0 (int (code :uint32)) cpu))
                     swaps (t (Mlx/mlx_sum_axis (t (Mlx/mlx_astype (t (Mlx/mlx_not_equal piv idx cpu)) (int (code :int32)) cpu))

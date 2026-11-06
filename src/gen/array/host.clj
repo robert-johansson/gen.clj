@@ -86,7 +86,7 @@
   (case op
     :add (+ x y) :subtract (- x y) :multiply (* x y) :divide (/ x y)
     :power (Math/pow x y) :maximum (Math/max x y) :minimum (Math/min x y)
-    :remainder (dt/floor-mod x y) :floor-divide (Math/floor (/ x y)) :arctan2 (Math/atan2 x y)
+    :remainder (dt/floor-mod x y) :floor-divide (dt/floor-div x y) :arctan2 (Math/atan2 x y)
     :less (< x y) :less-equal (<= x y) :greater (> x y) :greater-equal (>= x y)
     :equal (== x y) :not-equal (not (== x y))
     :logical-and (and (not (== x 0.0)) (not (== y 0.0)))

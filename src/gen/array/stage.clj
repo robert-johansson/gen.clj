@@ -326,13 +326,23 @@
   (-shape [_ x] (shape-of x))
   (-dtype [_ x] (if (staged? x) (.-dtype ^Staged x) (dt/host-dtype x)))
 
-  (-full [_ shape value dtype] (op! :broadcast [(dt/host-cast value dtype)] shape dtype {:shape (vec shape)}))
+  (-full [b shape value dtype]
+    ;; a 0-d array fills too (docs/array-api.md §4), converted to the dtype:
+    ;; host-cast took only host numbers (genclj-kdau)
+    (let [v (if (array/host? value)
+              (dt/host-cast value dtype)
+              (let [v (staged value)] (if (= dtype (array/dtype v)) v (p/-astype b v dtype))))]
+      (op! :broadcast [v] shape dtype {:shape (vec shape)})))
   (-arange [_ start stop step dtype]
     (let [n (max 0 (long (Math/ceil (/ (- (double stop) (double start)) (double step)))))
-          i (op! :iota [] [n] dtype)]
-      (if (and (zero? (double start)) (= 1.0 (double step)))
+          i (op! :iota [] [n] dtype)
+          ;; an int dtype's values are NumPy's, as the backends' (genclj-06ba)
+          [v0 dv] (if (= :int (dt/kind dtype))
+                    (dt/int-arange start step dtype)
+                    [(dt/host-cast start dtype) (dt/host-cast step dtype)])]
+      (if (and (zero? (double v0)) (clojure.core/== 1.0 (double dv)))
         i
-        (array/+ (array/* i (dt/host-cast step dtype)) (dt/host-cast start dtype)))))
+        (array/+ (array/* i dv) v0))))
   (-astype [_ x dtype] (op! :convert [x] (shape-of x) dtype))
 
   (-elementwise [_ op args dtype]
@@ -476,11 +486,15 @@
         y-leaves (leaves y)
         y-out (binding [*graph* g] (mapv #(as-node g %) y-leaves))
         nodes (vec (.-nodes ^Graph g))]
+    ;; as the host loop's checks (gen.array/scan): the pairs below would
+    ;; drop a leaf of another structure
+    (when-not (= (tree/skeleton carry) (tree/skeleton carry'))
+      (throw (ex-info "scan: the step changed the carry's structure" {:reason :invalid-carry :changed "structure"})))
     (doseq [[c c'] (map vector cparams c-out)]
       (let [{:keys [shape dtype]} (nth nodes c')]
         (when-not (and (= shape (array/shape c)) (= dtype (array/dtype c)))
           (throw (ex-info (str "scan: the carry changed from " (array/dtype c) (array/shape c) " to " dtype shape)
-                          {:in [(array/shape c) (array/dtype c)] :out [shape dtype]})))))
+                          {:reason :invalid-carry :in [(array/shape c) (array/dtype c)] :out [shape dtype]})))))
     (let [^java.util.LinkedHashMap captures (.-captures ^Graph g)
           caps (vec (.keySet captures))
           ;; the body's params: carries, xs, then captures in capture order

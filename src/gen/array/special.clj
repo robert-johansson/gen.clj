@@ -109,8 +109,9 @@
 
 (defn erfinv
   "The inverse error function on [-1, 1] (±Inf at ±1, NaN outside): Giles'
-   approximation refined by one Halley step, using erfc in the tails so that
-   1 - |y| is never lost to cancellation."
+   approximation refined by Halley steps (refine-erfinv: usually one, at
+   most seven), using erfc in the tails so that 1 - |y| is never lost to
+   cancellation."
   ^double [^double y]
   (let [ay (Math/abs y)]
     (cond (or (Double/isNaN y) (> ay 1.0)) Double/NaN

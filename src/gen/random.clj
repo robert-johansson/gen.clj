@@ -21,8 +21,13 @@
 ;; ---------------------------------------------------------------------------
 
 (defn key
-  "The key for an integer seed (as JAX's PRNGKey)."
+  "The key for an integer seed, 64 bits (as JAX's PRNGKey). Other seeds
+   are an error: a long cast took 2.5 for 2 (genclj-kdau), as fold-in
+   refuses such data."
   [seed]
+  (when-not (and (integer? seed) (clojure.core/<= Long/MIN_VALUE seed Long/MAX_VALUE))
+    (throw (ex-info (str "A key's seed is a 64-bit integer, not " (pr-str seed))
+                    {:reason :invalid-data :seed seed})))
   (threefry/seed->key seed))
 
 (defn key?
@@ -56,9 +61,14 @@
   (if (staged-key? k) (p/-fold-in-key k data) (threefry/fold-in (check-key k) data)))
 
 (defn key-data
-  "The two uint32 words of a key."
+  "The two uint32 words of a host key. A staged key's words are a staged
+   value, which the host cannot read: an error (genclj-kdau)."
   [k]
-  (let [^gen.random.threefry.Key k (check-key k)]
+  (check-key k)
+  (when (staged-key? k)
+    (throw (ex-info "key-data: a staged key's words are staged values, not host numbers"
+                    {:reason :staged-key})))
+  (let [^gen.random.threefry.Key k k]
     [(.-k0 k) (.-k1 k)]))
 
 ;; ---------------------------------------------------------------------------
@@ -194,11 +204,108 @@
          g (first-accepted d (map proposal (range gamma-rounds)))]
      (array/where boost? (* g (array/pow (uniform (ks 0) shape o) (/ 1.0 alpha))) g))))
 
+;; randint: low + floor(k·r / 2^(3L)) for r = high - low and k a uniform
+;; integer of 3L bits, in three L-bit chunks, from the uniforms of the
+;; backend's default float: in float64 one uniform's 52 bits (u·2^54, an
+;; integer, in 18-bit chunks), in float32 three uniforms' 23 bits each
+;; (u·2^23). Computed in int64 by L-bit limbs of r and columns with
+;; carries, so that no intermediate passes 2^53 (the JVM backend's exact
+;; int64s) for ranges below 2^53, nor 2^63 on MLX. Exact, so never high:
+;; floor(low + u·r) in the default float reached high in float32
+;; (genclj-psgi). Each integer has floor or ceil of 2^(3L) / r of the k's,
+;; so it is drawn with probability within a relative r / 2^52 (float64) or
+;; r / 2^69 (float32) of 1/r. In float64 it is floor(u·r) exactly, the
+;; integer the old floor(low + u·r) gave wherever that did not round; the
+;; uniforms are bit-identical across backends (docs/array-api.md §7), so a
+;; key draws the same integers on every backend of the same default float.
+
+(defn- chunks
+  "[[d0 d1 d2] L]: the three L-bit chunks (low first) of a uniform integer
+   of shape and 3L bits, from key's uniforms in the default float of b, as
+   int64 arrays."
+  [key shape b]
+  (if (= :float64 (:float (p/-defaults b)))
+    ;; u·2^54 (2^54 = 1.8014398509481984E16) is 4k for u's 52 random bits
+    ;; k: an integer below 2^54, held exactly by the JVM backend's doubles
+    ;; (a multiple of 4)
+    (let [k (array/astype (* (uniform key shape {:dtype :float64 :backend b}) 1.8014398509481984E16) :int64)
+          l 262144]
+      [[(array/mod k l) (array/mod (array/floor-div k l) l) (array/floor-div k (* l l))] 18])
+    (let [[k0 k1 k2] (split key 3)
+          chunk #(array/astype (* (uniform % shape {:dtype :float32 :backend b}) 8388608.0) :int64)]
+      [[(chunk k2) (chunk k1) (chunk k0)] 23])))
+
+(defn- limbs
+  "r (an int64 array or host integer, 0 <= r < 2^(3L)) as its L-bit limbs
+   [r0 r1 r2], low first; a host r gives host limbs."
+  [r ^long l-bits]
+  (let [l (bit-shift-left 1 l-bits)]
+    (if (array/host? r)
+      (let [r (long r) mask (dec l)]
+        [(bit-and r mask) (bit-and (bit-shift-right r l-bits) mask) (bit-shift-right r (* 2 l-bits))])
+      [(array/mod r l) (array/mod (array/floor-div r l) l) (array/floor-div r (* l l))])))
+
+(defn- top-of-product
+  "floor(k·r / 2^(3L)) for k = d2·2^(2L) + d1·2^L + d0 and r's L-bit limbs
+   [r0 r1 r2], by columns with carries; a host limb of 0 adds no term."
+  [[d0 d1 d2] [r0 r1 r2] ^long l-bits]
+  (let [l (bit-shift-left 1 l-bits)
+        term (fn [d r] (when-not (and (array/host? r) (zero? (long r))) (* d r)))
+        col (fn [& terms] (reduce (fn [acc t] (cond (nil? t) acc (nil? acc) t :else (+ acc t))) nil terms))
+        carry (fn [c] (if (nil? c) 0 (array/floor-div c l)))
+        plus (fn [a c] (cond (nil? a) c (and (array/host? c) (zero? (long c))) a :else (+ a c)))
+        c1 (carry (col (term d0 r0)))
+        c2 (carry (plus (col (term d0 r1) (term d1 r0)) c1))
+        c3 (carry (plus (col (term d0 r2) (term d1 r1) (term d2 r0)) c2))
+        col3 (col (term d1 r2) (term d2 r1))
+        col4 (term d2 r2)]
+    (cond-> (plus col3 c3)
+      col4 (+ (* col4 l)))))
+
+(defn- check-bound
+  "A host bound must be an integer; an array's is cast to int64 (and read,
+   when concrete, if it holds floats)."
+  [what x]
+  (if (array/host? x)
+    (when-not (or (integer? x) (and (number? x) (Double/isFinite (double x)) (clojure.core/== (double x) (Math/floor (double x)))))
+      (throw (ex-info (str "randint: " what " must be an integer, not " (pr-str x)) {:reason :invalid-args what x})))
+    (when (and (= :float (dt/kind (array/dtype x))) (array/concrete? x)
+               (not (array/all-true? (== x (array/floor x)))))
+      (throw (ex-info (str "randint: " what " must hold integers") {:reason :invalid-args what x}))))
+  (array/astype x :int64))
+
 (defn randint
-  "Integers uniform in [low, high) of shape (default []). Options: :backend."
+  "Integers uniform in [low, high) of shape (default []), low < high
+   integers (arrays broadcast), computed exactly from the uniforms of the
+   backend's default float: the same integers on every backend of that
+   float for a key. Options: :backend."
   ([key low high] (randint key low high [] nil))
   ([key low high shape] (randint key low high shape nil))
   ([key low high shape opts]
    (let [b (backend-for opts low high)
-         u (uniform key shape {:backend b :dtype (:float (p/-defaults b))})]
-     (array/astype (array/floor (+ low (* u (- high low)))) (:int (p/-defaults b))))))
+         int-dt (:int (p/-defaults b))
+         lo (check-bound :low low)
+         hi (check-bound :high high)
+         host? (and (array/host? lo) (array/host? hi))
+         r (if host? (-' hi lo) (- hi lo))
+         _ (cond host? (do (when-not (clojure.core/< 0 r 9223372036854775808N)
+                             (throw (ex-info (str "randint: an empty (or too wide) range [" low ", " high ")")
+                                             {:reason :empty-range :low low :high high})))
+                           (when (and (= :int32 int-dt) (not (clojure.core/<= Integer/MIN_VALUE lo hi 2147483648)))
+                             (throw (ex-info (str "randint: [" low ", " high ") holds integers outside int32, "
+                                                  "the backend's int dtype")
+                                             {:reason :invalid-args :low low :high high :dtype int-dt}))))
+                 (every? array/concrete? [lo hi]) (when-not (array/all-true? (< lo hi))
+                                                    (throw (ex-info "randint: an empty range (low >= high)"
+                                                                    {:reason :empty-range :low low :high high}))))
+         r (if host? (long r) r)
+         [ds l-bits] (chunks key (vec shape) b)
+         j (top-of-product ds (limbs r l-bits) l-bits)
+         v (+ lo j)
+         ;; exact, so in range, for a host range the JVM backend's doubles
+         ;; hold (below 2^53); past it, or for an array range (empty where it
+         ;; was not read), clamped into [low, high - 1]: low when empty
+         v (if (and host? (clojure.core/< (long r) 9007199254740992))
+             v
+             (array/maximum (array/minimum v (- hi 1)) lo))]
+     (array/astype v int-dt))))

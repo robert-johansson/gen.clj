@@ -33,8 +33,10 @@
   {:api :stable
    :implementers "the backend contract, which a new array backend implements"})
 
-(defonce ^{:doc "true once a lazy backend (-lazy? true) has been made: a backend
-   sets it, so that gen.array/eval! walks nothing where all are eager."}
+(defonce ^{:doc "true once a backend with lazy values to evaluate has been made:
+   the MLX backend sets it when one is made, so that gen.array/eval! walks
+   nothing where every backend evaluates eagerly. The staging backend,
+   lazy but with nothing to evaluate (its -eval! does nothing), leaves it."}
   lazy-backends?
   (volatile! false))
 

@@ -57,6 +57,23 @@
     (testing "one right-hand side broadcast against a batch of matrices"
       (is (= [3 4] (array/shape (la/solve ms (array/take bs 0))))))))
 
+(deftest inv-of-a-batch-is-each-matrix-s
+  ;; genclj-l0n4: inv solved against the [n n] identity, which the
+  ;; right-hand side rule reads as a batch of vectors beside [b n n]
+  ;; matrices: a [3 3 3] batch gave [3 3] (each m_i⁻¹ e_i) and [2 3 3]
+  ;; threw. Batches of 3 and 2 (one equal to n, one not), and two batch axes
+  (doseq [batch [[3] [2] [2 2]]]
+    (let [ms (spd (rng/key 8) batch 3)
+          flat (array/reshape ms [-1 3 3])
+          each (array/reshape (array/stack (mapv #(la/inv (array/take flat %)) (range (first (array/shape flat)))))
+                              (into batch [3 3]))
+          inv (la/inv ms)]
+      (is (= (into batch [3 3]) (array/shape inv)) (str "batch " batch))
+      (is (ts/close? each inv) (str "batch " batch))
+      (is (array/allclose? (array/matmul ms inv) (array/broadcast-to (array/eye 3) (into batch [3 3]))
+                           {:rtol (ts/tol 1e-9) :atol (ts/tol 1e-9)})
+          (str "batch " batch)))))
+
 (deftest known-values-and-failure-modes
   (is (array/allclose? (array/array [[2.0 0.0] [1.0 1.0]])
                        (la/cholesky (array/array [[4.0 2.0] [2.0 2.0]]))))

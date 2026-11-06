@@ -275,6 +275,19 @@
   (is (conforms? exact #(array/astype % int-dt)
                  {:data [##NaN ##Inf ##-Inf 1e20 -1e20 2.7 -2.7 -0.5 2147483648.0 -2147483648.0 4294967296.0] :dtype float-dt})))
 
+(deftest int-aranges
+  ;; genclj-06ba: NumPy's values on every backend (the first value start
+  ;; cast, the step dtype(start + step) - dtype(start)), which MLX's own
+  ;; arange computes; the JVM backend stored start + i·step unrounded,
+  ;; which read as ints but computed as fractions. With what they compute.
+  ;; In the default int, which the reference's results are read as (an
+  ;; int64 arange on a 32-bit backend: gen.array-test)
+  (doseq [[start stop step] [[0.5 3 1] [0 3 0.5] [0.5 3 0.7] [-2.5 3 1] [3 0.5 -0.7] [0 7 2] [-4 4 1.5] [0 0 1]]]
+    (is (conforms? exact (fn [] (let [a (array/arange start stop step {:dtype int-dt})] [a (array/+ a a) (array/== a 0)])))
+        (str [start stop step])))
+  (testing "no bool arange on any backend (MLX has none)"
+    (is (conforms? exact #(array/arange 0 3 1 {:dtype :bool})))))
+
 (defspec mixed-dtypes-promote trials
   (prop/for-all [op (gen/elements [array/+ array/* array/maximum array/<])
                  x gen-any-spec
@@ -612,6 +625,39 @@
                            ["split keys" #(rng/uniform (second (rng/split key 3)) [4] {:dtype float-dt}) exact]]]
       (testing label
         (is (agree? tol (draw tested f) (draw reference f)))))))
+
+(defn- randint-on-the-host
+  "rng/randint's integers, from the reference's uniforms in the tested
+   backend's default float (bit-identical to the tested backend's) and
+   exact host arithmetic: low + floor(k·r / 2^b), k one float64 uniform's 52
+   bits (b = 52) or three float32 uniforms' 23 bits each, the first drawn
+   lowest (b = 69)."
+  [key low high shape]
+  (let [n (reduce * shape)
+        bits (fn [k dt scale] (map #(bigint (* (double %) scale))
+                                   (flatten [(array/->clj (array/with-backend reference (rng/uniform k [n] {:dtype dt})))])))
+        ks (if f64?
+             (bits key :float64 4503599627370496.0)
+             (let [[k0 k1 k2] (rng/split key 3)]
+               (map (fn [a b c] (+ a (* b 8388608N) (* c 70368744177664N)))
+                    (bits k2 :float32 8388608.0) (bits k1 :float32 8388608.0) (bits k0 :float32 8388608.0))))
+        denominator (if f64? 4503599627370496N 590295810358705651712N)
+        lows (if (vector? low) (cycle low) (repeat low))
+        highs (if (vector? high) (cycle high) (repeat high))]
+    (mapv (fn [k lo hi] (long (+ lo (quot (* k (bigint (- hi lo))) denominator)))) ks lows highs)))
+
+(deftest randint-draws-the-same-integers
+  ;; genclj-psgi: exact integer arithmetic on the default float's uniforms,
+  ;; where floor(low + u·r) in that float reached high in float32: the same
+  ;; integers as the host's exact arithmetic on the reference's uniforms
+  (let [key (rng/key 12)]
+    ;; a vector bound is an array of the tested backend's int dtype, the
+    ;; shape's last axis
+    (doseq [[low high shape] [[0 10 [50]] [1000000 1000010 [50]] [-5 3 [4 3]] [0 2147483647 [20]] [7 8 [3]]
+                              [[0 100] [3 103] [5 2]]]]
+      (let [bound (fn [x] (if (vector? x) (array/array x {:dtype int-dt}) x))
+            got (flatten [(array/->clj (rng/randint key (bound low) (bound high) shape))])]
+        (is (= (randint-on-the-host key low high shape) (vec got)) (pr-str [low high shape]))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Gradients
