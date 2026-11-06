@@ -38,30 +38,81 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
-- **Fixed: `native/build-mlx.sh cuda13-source` with a toolkit from pip**
-  (genclj-ajse). MLX 0.32.4 links cuSOLVER (with cuSPARSE and nvJitLink
-  under it) when it is built, and CMake stopped at "CUDA::cusolver not
-  found" on a CUDA toolkit made of NVIDIA's pip packages (fenrir's). The
-  script fetches the missing libraries' wheels before configuring, as it
-  already did for the wheel variant's run time, and points CMake at them.
-  1.2.0's source build was never rebuilt after its backported patch was
-  dropped; it builds and runs again (sm_120).
-- **Added: the chat template's options in agent/run** (gen.llm.agent,
-  experimental; genclj-fshl). `agent/run`'s opts take `:template`
-  (`:qwen3.8` for Qwen3.8's), `:reasoning-effort` and
-  `:preserve-thinking?`, passed to gen.llm.chat for every turn: 1.2.0's
-  Qwen3.8 template could not be reached through the agent, which rendered
-  Qwen3.5's always. Options the template refuses are refused as
-  `chat/render` refuses them (`:invalid-option`), before the session opens.
-- **Changed: AWRS exponentiates its row once** (gen.llm.awrs,
-  experimental; genclj-0d00). A sample computed `exp` over the whole row
-  two or three times a draw; it now makes one pass a sample and sums the
-  masses after: at 151,936 tokens (Qwen's vocabulary) 2.5 ms becomes 1.0
-  ms with every token accepted, 7.0 ms becomes 1.8 with one token in
-  seven (the M4). The draws for a key are unchanged, bit for bit. The
-  docstring's budget is corrected to what the code does: at most R checks
-  for `:recursive` and R + `:max-accepts` - 1 for `:geometric`, where it
-  said R + 1 and R + `:max-accepts`.
+## [1.2.1] - 2026-11-06
+
+The health check's fixes (DESIGN §9; genclj-9mq3). A review of 1.2.0 by
+six read-only reviewers found silent wrong results and raw exceptions
+where rule 6 wants a loud `ex-info`, places where the tests broke their
+own conventions, 1.2.0's LLM work with no consumer and its llama.cpp
+claim unmeasured, the device path out of a dependent's reach, and docs
+drift. All 43 of its beans are done. The owner asked for the release to
+be worked autonomously, so its calls are PROVISIONAL, for the owner to
+confirm (docs/decisions.md, "1.2.1's owner calls").
+
+Read first, the **Breaking** changes. Each makes code throw that was
+already silently wrong (it scored NaN, recorded nothing, or read another
+value than it named), which a patch release may do (DESIGN §9): `gen`
+refuses a parameter or an enclosing local named `trace`, `splice`,
+`param` or `untraced` (Gen.jl's usual `(gen [trace] …)` proposal recorded
+nothing); a distribution refuses an infinite parameter where it scored
+NaN; `defdist` and `dist` refuse names that shadow their own; hmc's
+`:eps` and `:L` and mala's tau are checked; `max`, `min`, `argmax` and
+`argmin` over an empty axis, `arange`'s zero step and bool dtype, a
+negative index in a selection, `sample-states` of an impossible trace
+and the potential combinators `coerce` and `after` are loud; importance
+sampling with `:device` follows `:batched?`. Refusing unknown option
+keys, which correct code meets (a shared options map), waits for 1.3.0
+(genclj-vux3). Two results change for correct code: float `floor-div` is
+NumPy's (`(floor-div 1.0 0.1)` is 9.0, as `mod` agrees), and `randint`
+and `uniform-discrete` draw other integers for a key in float32 (exact
+now; float64's are unchanged).
+
+The calls taken autonomously (docs/decisions.md, 1.2.1): non-finite
+parameters refused where a family's code gave NaN, the limits kept where
+it computes them; int64 overflow an `ex-info` on the JVM backend, MLX's
+wrap documented; empty extrema loud on every backend; `=` on arrays and
+`counted?` documented as they are; `solve`'s rule kept and `inv` fixed;
+an infinite value outside every support; exact integers for `randint`;
+the CUDA C lowering parked; one bounded cache of compiled code; CFG
+masks built as lexemes, a lazy DFA of Earley sets and masks in parts;
+the decision log split from DESIGN.md.
+
+No native library changes: nothing needs rebuilding. The MLX source
+build's script (`native/build-mlx.sh cuda13-source`) works again with a
+CUDA toolkit from pip.
+
+Checked before the tag: CHECKED
+
+### Known issues
+
+- **MLX clamps an out-of-range array index** in a gather by default, where
+  the JVM backend throws (docs/array-api.md §13): `-Dgen.mlx.check-gathers=true`
+  checks each gather's indices, at an evaluation per gather.
+- **The book on MLX:** some chapters of Parts II-V do host math on results
+  and fail on the MLX backend (genclj-ac70). The book's gate is the JVM
+  backend, where every chapter passes.
+- **Context-free masks** are exact for the text's bytes, not its tokens: a
+  vocabulary without a byte the language needs can reach a prefix that no
+  token sequence completes (byte-level BPE vocabularies have every byte).
+- **The CUDA C lowering is parked** (gen.device.cuda; genclj-z1gj): no
+  consumer yet, so `:device` lowers to `:jvm` and `:metal`, and its tests
+  that need a CUDA device skip by name (`-Dgen.cuda.parked=false` runs
+  them).
+- **llama.cpp v0.9.0 brings no gain to many branches** (genclj-ajse):
+  measured against v0.7.0, it ties up to 8 branches and is 5-16% slower at
+  4 to 16 after a long prompt; gen.llm.cache re-reads a prompt that no
+  live branch holds (a bean of its own).
+
+### Changes
+
+- **Breaking (experimental): tempered SMC's per-step keys renamed**
+  (gen.inference.tempering, outside the 1.x promise; genclj-vjbo; DESIGN
+  §9's result keys). `:ess`, a vector of each step's effective sample
+  size where the result keys make `:ess` one host number, is
+  `:ess-by-step`, and `:acceptance` is `:acceptance-rates`, each step's
+  `:acceptance-rate`. Code that read `:ess` or `:acceptance` reads them
+  under the new names. `smc`'s docstring names every key of its result,
+  `:scales` among them.
 - **Breaking: `coerce` checks that its potential is over bytes when it is
   made** (gen.llm.potential, experimental; genclj-kdau). Only `logw-next`
   checked the 256 bytes, so `prefix` and `complete` of a coerced potential
@@ -77,19 +128,6 @@ other values for the same key, from the same distribution.
   it (`:invalid-token`), reading p's next weights at the empty context when
   it is made (it read them at its first open row before). Only code that
   was already wrong throws.
-- **Fixed: a value outside a distribution's support sends no NaN
-  gradient** (gen.dist, gen.dist.dsl; genclj-zkbw). gamma, inv-gamma,
-  beta, chi-squared, nakagami and dirichlet guarded their log density with
-  a where whose other branch was NaN outside the support, so a parameter's
-  gradient was 0·NaN = NaN there, and one such value in a batch made a
-  shared parameter's whole gradient NaN (beta-uniform's and a
-  pushforward's through them too). Each now scores a stand-in value
-  there, as geometric and weibull did. A value at ±Inf has log density
-  -Inf in every family, where gamma, chi-squared, nakagami, weibull,
-  poisson and neg-binom gave NaN at +Inf and gumbel and logistic at -Inf,
-  and its gradient is never NaN; a pushforward's value outside exp's range
-  (at or below 0) sends no gradient either. Log densities elsewhere are
-  unchanged (logistic's is computed in |z|, within rounding).
 - **Breaking: an infinite parameter is refused where its family gave NaN**
   (gen.dist, gen.dist.core; DESIGN §9, 1.2.1's owner calls, item 1). Only
   NaN was refused, and `check-positive` takes +Inf, so `(normal ##Inf 1)`,
@@ -121,6 +159,92 @@ other values for the same key, from the same distribution.
   was unbound elsewhere and read the other value when a parameter or a var
   had it, silently; now it is an error naming the draw and the names
   (`:bound`).
+- **Breaking: `arange` refuses a bool dtype, a zero step and non-finite
+  arguments** (gen.array, every backend; genclj-06ba, genclj-kdau):
+  `ex-info` with `:reason :invalid-dtype` or `:invalid-args`. Only code
+  that was already wrong meets it: a zero step threw a raw
+  IllegalArgumentException on the JVM backend and MLX's own error; MLX has
+  no bool arange, and the JVM backend's held fractions past its second
+  element (NumPy's fails there). Compare an int arange for bools.
+- **Breaking: `max`, `min`, `argmax` and `argmin` over an empty axis are
+  loud** (gen.array, every backend; DESIGN §9): `ex-info` with `:reason
+  :empty-reduction`, as NumPy and JAX raise. The JVM backend gave -Inf and
+  +Inf for a float max and min (and a raw IllegalArgumentException for an
+  int dtype), MLX its own error. An empty result (an empty axis that is
+  not reduced) is no error, now on MLX too for argmax and argmin;
+  `logsumexp` over an empty axis is still -Inf and `softmax` of one an
+  empty array. Code that read ∓Inf from an empty max on the JVM backend
+  must test for the empty axis.
+- **Breaking: hmc's `:eps` and `:L` and mala's tau are checked**
+  (gen.inference.mcmc; genclj-mhgn; DESIGN §9, 1.2.1's owner calls). As
+  nuts checks its own: `hmc`, `hmc-particles` and kernel/hmc throw
+  `ex-info` for an `:eps` that is not a positive finite number
+  (`:reason :invalid-eps`) or an `:L` that is not a positive integer
+  (`:invalid-L`), and `mala`, `mala-particles` and kernel/mala for such a
+  tau (`:invalid-tau`). Only code that was silently wrong throws: `:eps 0`
+  or `:L 0` "accepted" every move as a no-op (an acceptance rate of 1),
+  `:L 2.5` ran 2 steps, and a negative tau made every move a divergence.
+- **Breaking: `gen` refuses a parameter, or a local around its body that
+  the body reads, named `trace`, `splice`, `param`, `untraced` or
+  `untraced-key`** (gen.dynamic, the static form too; genclj-k3xn). The
+  body binds those names itself, so such code compiled and was silently
+  wrong: `(gen [trace] (trace :x …))`, Gen.jl's usual name for a proposal's
+  argument, recorded no choice and scored 0 (an MH step with it did
+  nothing), and `(let [trace t] (gen [] (:score trace)))` read the body's
+  own `trace`. Now each is a compile error (`:reason :reserved-name`,
+  `:binding :parameter` or `:local`) naming the rename. A gen nested in a
+  body reads its own names, as before, and a body may still bind one of
+  them in a `let` of its own.
+- **Breaking: a negative index in a selection is a loud error in every
+  combinator that numbers its calls** (gen.combinators: Map, Unfold, Scan
+  and Recurse, in regenerate and project; genclj-kdau). Map threw a raw
+  IndexOutOfBoundsException, and the kinds disagreed: some threw it,
+  others skipped the index silently, so the selection selected less than
+  it named (code that relied on that was silently wrong). Now each throws
+  `ex-info` with `:reason :negative-index` and the `:indices`. An index
+  past the elements still selects nothing, as an absent address does.
+- **Breaking: `sample-states` of a trace whose observations are
+  impossible is a loud error** (gen.state-space; genclj-vjbo). On the host
+  such a run stops at the impossible step (gfi/impossible?), and
+  sample-states returned fewer than n states for it, where the states have
+  no posterior (code that used them was silently wrong). Now it throws
+  `ex-info` with `:reason :impossible`. The namespace doc says what an
+  impossible observation does: on the host the run stops there, and a run
+  whose score is an array (on MLX, or batched where the particles differ)
+  goes on from the prediction; it said the belief stayed at its
+  prediction.
+- **Breaking: importance sampling with `:device` follows `:batched?`**
+  (gen.inference.importance, its experimental `:device`; genclj-cxrx;
+  DESIGN §9). `:batched?` was ignored under `:device`, so code asking for
+  a batched run got n traces, and `:batched? :required` was dropped
+  silently: only such code, already wrong, changes. Batched, the result
+  holds `:particles`, a gen.batched collection over the program's outputs
+  (its draws still per particle, the unbatched run's), in place of
+  `:traces` (`importance/traces` reads either); a model the device cannot
+  run falls back to the batched run, which `:required` refuses where it
+  cannot batch. A trace's host values (a count, a flag) are now its
+  handler's, not arrays made from the program's outputs.
+- **Fixed: `native/build-mlx.sh cuda13-source` with a toolkit from pip**
+  (genclj-ajse). MLX 0.32.4 links cuSOLVER (with cuSPARSE and nvJitLink
+  under it) when it is built, and CMake stopped at "CUDA::cusolver not
+  found" on a CUDA toolkit made of NVIDIA's pip packages (fenrir's). The
+  script fetches the missing libraries' wheels before configuring, as it
+  already did for the wheel variant's run time, and points CMake at them.
+  1.2.0's source build was never rebuilt after its backported patch was
+  dropped; it builds and runs again (sm_120).
+- **Fixed: a value outside a distribution's support sends no NaN
+  gradient** (gen.dist, gen.dist.dsl; genclj-zkbw). gamma, inv-gamma,
+  beta, chi-squared, nakagami and dirichlet guarded their log density with
+  a where whose other branch was NaN outside the support, so a parameter's
+  gradient was 0·NaN = NaN there, and one such value in a batch made a
+  shared parameter's whole gradient NaN (beta-uniform's and a
+  pushforward's through them too). Each now scores a stand-in value
+  there, as geometric and weibull did. A value at ±Inf has log density
+  -Inf in every family, where gamma, chi-squared, nakagami, weibull,
+  poisson and neg-binom gave NaN at +Inf and gumbel and logistic at -Inf,
+  and its gradient is never NaN; a pushforward's value outside exp's range
+  (at or below 0) sends no gradient either. Log densities elsewhere are
+  unchanged (logistic's is computed in |z|, within rounding).
 - **Fixed: `la/inv` of a batch of matrices** (gen.array.linalg;
   genclj-l0n4). inv solved against the `[n n]` identity, which the
   right-hand side rule reads as a batch of vectors beside `[b n n]`
@@ -137,31 +261,6 @@ other values for the same key, from the same distribution.
   dtype(start), so a fractional step may repeat a value (`(arange 0 3 0.5
   {:dtype :int64})` is six zeros). Integral arguments, the common case,
   give what they gave.
-- **Breaking: `arange` refuses a bool dtype, a zero step and non-finite
-  arguments** (gen.array, every backend; genclj-06ba, genclj-kdau):
-  `ex-info` with `:reason :invalid-dtype` or `:invalid-args`. Only code
-  that was already wrong meets it: a zero step threw a raw
-  IllegalArgumentException on the JVM backend and MLX's own error; MLX has
-  no bool arange, and the JVM backend's held fractions past its second
-  element (NumPy's fails there). Compare an int arange for bools.
-- **Changed: float `floor-div` is NumPy's** (gen.array, every backend;
-  DESIGN §9, 1.2.1's owner calls). It was floor(x / y), which disagreed
-  with `mod`: `(floor-div 1.0 0.1)` was 10.0 beside `(mod 1.0 0.1)`'s
-  0.0999…, so x = y·q + r failed. Now NumPy's `npy_floor_divide`: (x -
-  fmod(x, y)) / y, one less where fmod's sign is not y's, snapped to an
-  integer, so `(floor-div 1.0 0.1)` is 9.0. Other values that change: an
-  infinite dividend gives NaN (was ±Inf), `(floor-div -1.0 ##Inf)` -1.0
-  (was -0.0). A zero divisor still gives x / y; int `floor-div` is
-  unchanged.
-- **Breaking: `max`, `min`, `argmax` and `argmin` over an empty axis are
-  loud** (gen.array, every backend; DESIGN §9): `ex-info` with `:reason
-  :empty-reduction`, as NumPy and JAX raise. The JVM backend gave -Inf and
-  +Inf for a float max and min (and a raw IllegalArgumentException for an
-  int dtype), MLX its own error. An empty result (an empty axis that is
-  not reduced) is no error, now on MLX too for argmax and argmin;
-  `logsumexp` over an empty axis is still -Inf and `softmax` of one an
-  empty array. Code that read ∓Inf from an empty max on the JVM backend
-  must test for the empty axis.
 - **Fixed: int64 overflow is an `ex-info` on the JVM backend**
   (gen.backend.jvm; DESIGN §9): `:reason :overflow` where an int64 result
   leaves the range, at the op. The JVM backend holds int64 values in
@@ -200,20 +299,6 @@ other values for the same key, from the same distribution.
   can be read (a lazy backend's array range clamps to low), a fractional
   host bound `:invalid-args`, and host bounds outside int32 on a backend
   whose int is int32 (they wrapped) `:invalid-args`.
-- **Draws: `rng/randint` and `uniform-discrete` in float32** (MLX's default;
-  genclj-psgi) draw other integers for the same key, from three float32
-  uniforms where one was drawn. In float64 (the JVM backend's default)
-  the integers are unchanged, except a draw the old rounding moved (one
-  that reached high among them).
-- **Breaking: hmc's `:eps` and `:L` and mala's tau are checked**
-  (gen.inference.mcmc; genclj-mhgn; DESIGN §9, 1.2.1's owner calls). As
-  nuts checks its own: `hmc`, `hmc-particles` and kernel/hmc throw
-  `ex-info` for an `:eps` that is not a positive finite number
-  (`:reason :invalid-eps`) or an `:L` that is not a positive integer
-  (`:invalid-L`), and `mala`, `mala-particles` and kernel/mala for such a
-  tau (`:invalid-tau`). Only code that was silently wrong throws: `:eps 0`
-  or `:L 0` "accepted" every move as a no-op (an acceptance rate of 1),
-  `:L 2.5` ran 2 steps, and a negative tau made every move a divergence.
 - **Fixed: tempered SMC from starts the observations rule out**
   (gen.inference.tempering, experimental; genclj-dm71). A start that
   gives the observations density 0 (a likelihood whose support depends on
@@ -231,43 +316,11 @@ other values for the same key, from the same distribution.
   `move-reweight` and `introduce` one particle at a time, and conditional
   SMC's reference, kept generate's and update's weights, 0-d arrays: MLX
   scalars on MLX (host doubles already on the JVM backend).
-- **Breaking (experimental): tempered SMC's per-step keys renamed**
-  (gen.inference.tempering, outside the 1.x promise; genclj-vjbo; DESIGN
-  §9's result keys). `:ess`, a vector of each step's effective sample
-  size where the result keys make `:ess` one host number, is
-  `:ess-by-step`, and `:acceptance` is `:acceptance-rates`, each step's
-  `:acceptance-rate`. Code that read `:ess` or `:acceptance` reads them
-  under the new names. `smc`'s docstring names every key of its result,
-  `:scales` among them.
-- **Changed: `kernel/checked-kernel` is `^:no-doc`** (gen.inference.kernel;
-  genclj-vjbo). Public only because `kern`'s expansion calls it, as
-  `control-value`, it leaves the documented surface (the API snapshot and
-  the book's API page); the var stays, so code that calls it is
-  unaffected.
-- **Breaking: `gen` refuses a parameter, or a local around its body that
-  the body reads, named `trace`, `splice`, `param`, `untraced` or
-  `untraced-key`** (gen.dynamic, the static form too; genclj-k3xn). The
-  body binds those names itself, so such code compiled and was silently
-  wrong: `(gen [trace] (trace :x …))`, Gen.jl's usual name for a proposal's
-  argument, recorded no choice and scored 0 (an MH step with it did
-  nothing), and `(let [trace t] (gen [] (:score trace)))` read the body's
-  own `trace`. Now each is a compile error (`:reason :reserved-name`,
-  `:binding :parameter` or `:local`) naming the rename. A gen nested in a
-  body reads its own names, as before, and a body may still bind one of
-  them in a `let` of its own.
 - **Fixed: Map, Unfold, Switch and Recurse refuse what is not a
   generative function when they are made** (gen.combinators;
   genclj-8326). They took anything and failed at its first call; Scan, Mix
   and Dimap checked already. Each throws `ex-info` with `:reason
   :not-a-generative-function` and the `:value`.
-- **Breaking: a negative index in a selection is a loud error in every
-  combinator that numbers its calls** (gen.combinators: Map, Unfold, Scan
-  and Recurse, in regenerate and project; genclj-kdau). Map threw a raw
-  IndexOutOfBoundsException, and the kinds disagreed: some threw it,
-  others skipped the index silently, so the selection selected less than
-  it named (code that relied on that was silently wrong). Now each throws
-  `ex-info` with `:reason :negative-index` and the `:indices`. An index
-  past the elements still selects nothing, as an absent address does.
 - **Fixed: choice maps' address order is total** (gen.choicemap;
   genclj-7y8r). 1 and 1.0 tied, and so did two addresses of one class
   without an order of their own (lists, maps, sets), so the leaf order
@@ -277,42 +330,12 @@ other values for the same key, from the same distribution.
   addresses may change, and so may that of numbers of classes other than
   Long and Double (BigInt, Ratio, BigDecimal) beside other kinds of
   address: every number now sorts among the numbers, by value.
-- **Breaking: `sample-states` of a trace whose observations are
-  impossible is a loud error** (gen.state-space; genclj-vjbo). On the host
-  such a run stops at the impossible step (gfi/impossible?), and
-  sample-states returned fewer than n states for it, where the states have
-  no posterior (code that used them was silently wrong). Now it throws
-  `ex-info` with `:reason :impossible`. The namespace doc says what an
-  impossible observation does: on the host the run stops there, and a run
-  whose score is an array (on MLX, or batched where the particles differ)
-  goes on from the prediction; it said the belief stayed at its
-  prediction.
-### Changes
-
-- **Added: ext/device and ext/commons-math as dependencies** (their
-  `deps.edn`; genclj-ri2d). A dependent takes the device lowerings with
-  `:deps/root "ext/device"`, so kernel/run's and importance sampling's
-  `:device` and `gen.inference.device/run-chains` reach them (1.2.0's
-  dependent could not put ext/device on its classpath, and always got
-  `:device-fallback`, "not on the classpath"), and gen.dist.commons-math
-  with `:deps/root "ext/commons-math"` (with Commons Math 3.6.1); each
-  brings gen.clj from the same checkout. The README lists every module and
-  how a project takes it. ext/device's tests no longer read bench/: the
-  parity bench's models are `gen.parity-models`, in test/.
 - **Fixed: CUDA C's negation of a literal** (gen.device.cuda, ext/device,
   internal; genclj-z1gj). It wrote `(--1.5f)`, a decrement NVRTC refuses;
   now `(- -1.5f)`, as the JVM and Metal lowerings write it. The CUDA
   lowering is parked (DESIGN §9, 1.2.1's owner calls): no consumer,
   gen.device's devices stay `:jvm` and `:metal`, and its tests that need
   a CUDA device skip, by name.
-- **Changed: one bounded cache of compiled code** (gen.inference.cache,
-  internal: gen.inference.mcmc's `:compile?` steps and
-  gen.inference.device's programs; genclj-2j7v). The 64 most recently used
-  entries in all, where the device kept 64 programs and mcmc 16 steps,
-  each cache emptied whole when full: an entry pins its model and data
-  arrays (Metal buffers on MLX). And a Metal kernel's handle
-  (gen.device.metal) is freed once its compiled program is unreachable;
-  it never was.
 - **Fixed: run-chains' batched fallback counts as kernel/run does**
   (gen.inference.device, experimental; genclj-qucg). The device refuses a
   combinator's kernel, so such chains always ran as one batched run,
@@ -324,37 +347,12 @@ other values for the same key, from the same distribution.
   out of range, a start whose density is not finite) runs on the
   handler, and its error is thrown, as kernel/run per chain throws it,
   where the batched run, on other draws, could return.
-- **Added: a combinator's batched form reports each move**
-  (gen.inference.kernel/batched-form of chain, repeat, cycle and kern;
-  genclj-qucg). Beside `:accepted` (did any move take each particle), its
-  result holds `:accepted-moves` (each move's n decisions, in order) and,
-  when any proposal diverged, `:divergences` (n counts).
-- **Breaking: importance sampling with `:device` follows `:batched?`**
-  (gen.inference.importance, its experimental `:device`; genclj-cxrx;
-  DESIGN §9). `:batched?` was ignored under `:device`, so code asking for
-  a batched run got n traces, and `:batched? :required` was dropped
-  silently: only such code, already wrong, changes. Batched, the result
-  holds `:particles`, a gen.batched collection over the program's outputs
-  (its draws still per particle, the unbatched run's), in place of
-  `:traces` (`importance/traces` reads either); a model the device cannot
-  run falls back to the batched run, which `:required` refuses where it
-  cannot batch. A trace's host values (a count, a flag) are now its
-  handler's, not arrays made from the program's outputs.
 - **Fixed: one chain on `{:device :metal}` runs on a CPU core**
   (gen.inference.kernel/run, gen.inference.device; genclj-cxrx; DESIGN §9,
   option 1). It ran on the handler (Metal's kernel runs many chains and
   refused one), slowly; now the JVM lowering runs it, as with `{:device
   :jvm}`, and its result's `:device` is `:jvm`. Many chains on the GPU
   stay run-chains'.
-### Changes
-
-- **Added: native suites' skips are counted** (genclj-ruh8). The tests of
-  MLX's binding and of llama.cpp pass with no assertions where their
-  library or test model is missing; `clojure -X:test` (now
-  `gen.test-runner`, cognitect's runner then this) and `-X:test:par` print
-  at their end how many of them ran and skipped, and why.
-  `-J-Dgen.require-native=mlx,llama` fails a run in which a suite it names
-  skipped a test or ran none, for a release gate's runs.
 - **Fixed: Earley items past 2047 symbols** (gen.llm.cfg; genclj-mkos).
   An item packed its dot in 11 bits, so an alternative longer than 2047
   symbols (a long string, an instaparse counted repeat) overflowed into
@@ -362,6 +360,45 @@ other values for the same key, from the same distribution.
   rule's byte taken, or an index went out of bounds. An item is now its
   origin and its position, a number for each rule and dot, so no
   alternative's length is bounded.
+- **Fixed: 1.2.0's claim for llama.cpp v0.9.0's branches** (genclj-ajse).
+  1.2.0's entry said v0.9.0's unified KV cache serves multi-sequence work
+  (token SMC, lockstep sampling) better; it was not measured. Measured
+  since on the M4 with Qwen3-0.6B (`bench/gen/llama_branches_bench.clj`,
+  docs/research/llm-branching.md), it brings no gain: after a short
+  prompt the two builds tie up to 8 branches and v0.9.0 is about 7%
+  faster at 16; after an 843-token prompt it is 5-16% slower at 4 to 16
+  branches. Nothing in gen.clj changes.
+- **Changed: AWRS exponentiates its row once** (gen.llm.awrs,
+  experimental; genclj-0d00). A sample computed `exp` over the whole row
+  two or three times a draw; it now makes one pass a sample and sums the
+  masses after: at 151,936 tokens (Qwen's vocabulary) 2.5 ms becomes 1.0
+  ms with every token accepted, 7.0 ms becomes 1.8 with one token in
+  seven (the M4). The draws for a key are unchanged, bit for bit. The
+  docstring's budget is corrected to what the code does: at most R checks
+  for `:recursive` and R + `:max-accepts` - 1 for `:geometric`, where it
+  said R + 1 and R + `:max-accepts`.
+- **Changed: float `floor-div` is NumPy's** (gen.array, every backend;
+  DESIGN §9, 1.2.1's owner calls). It was floor(x / y), which disagreed
+  with `mod`: `(floor-div 1.0 0.1)` was 10.0 beside `(mod 1.0 0.1)`'s
+  0.0999…, so x = y·q + r failed. Now NumPy's `npy_floor_divide`: (x -
+  fmod(x, y)) / y, one less where fmod's sign is not y's, snapped to an
+  integer, so `(floor-div 1.0 0.1)` is 9.0. Other values that change: an
+  infinite dividend gives NaN (was ±Inf), `(floor-div -1.0 ##Inf)` -1.0
+  (was -0.0). A zero divisor still gives x / y; int `floor-div` is
+  unchanged.
+- **Changed: `kernel/checked-kernel` is `^:no-doc`** (gen.inference.kernel;
+  genclj-vjbo). Public only because `kern`'s expansion calls it, as
+  `control-value`, it leaves the documented surface (the API snapshot and
+  the book's API page); the var stays, so code that calls it is
+  unaffected.
+- **Changed: one bounded cache of compiled code** (gen.inference.cache,
+  internal: gen.inference.mcmc's `:compile?` steps and
+  gen.inference.device's programs; genclj-2j7v). The 64 most recently used
+  entries in all, where the device kept 64 programs and mcmc 16 steps,
+  each cache emptied whole when full: an entry pins its model and data
+  arrays (Metal buffers on MLX). And a Metal kernel's handle
+  (gen.device.metal) is freed once its compiled program is unreachable;
+  it never was.
 - **Changed: context-free masks inside a string** (gen.llm.cfg,
   gen.llm.bytes; genclj-jq2d; DESIGN §9, PROVISIONAL). A JSON grammar's
   mask at Qwen3's vocabulary took 238-363 ms with the context inside a
@@ -375,14 +412,20 @@ other values for the same key, from the same distribution.
   bytes); making a potential costs about its token trie's time. Added to
   gen.llm.bytes: `sweep-into!`, `sweep-roots!`, `sweep-split` and
   `bare-mask`.
-- **Fixed: 1.2.0's claim for llama.cpp v0.9.0's branches** (genclj-ajse).
-  1.2.0's entry said v0.9.0's unified KV cache serves multi-sequence work
-  (token SMC, lockstep sampling) better; it was not measured. Measured
-  since on the M4 with Qwen3-0.6B (`bench/gen/llama_branches_bench.clj`,
-  docs/research/llm-branching.md), it brings no gain: after a short
-  prompt the two builds tie up to 8 branches and v0.9.0 is about 7%
-  faster at 16; after an 843-token prompt it is 5-16% slower at 4 to 16
-  branches. Nothing in gen.clj changes.
+- **Changed (internal): gen.combinators, gen.backend.mlx and gen.array
+  in parts** (genclj-i1jl; behaviour unchanged, checked against the old
+  code by differential runs). gen.combinators sits over six internal
+  namespaces (`gen.combinators.calls`, `.elements`, `.chain`, `.switch`,
+  `.recurse`, `.wrap`), its records, constructors and class names kept;
+  gen.backend.mlx over six (`.array`, `.memory`, `.operands`, `.linalg`,
+  `.random`, `.transforms`), so the MLX array's class is
+  `gen.backend.mlx.array.MlxArray`; gen.array's scan, compile, vmap and
+  particle functions are in `gen.array.transform` behind the same vars.
+  The decision log moved from DESIGN.md §9 to `docs/decisions.md`
+  (genclj-vp8u); §9 is now a summary of the conventions in force, linking
+  each entry, so a citation "DESIGN §9, <title>" still finds it. And
+  `.clj-kondo/` lints gen.clj's macros (genclj-08xk): `clojure -M:codegen -m
+  clj-kondo.main --lint src ext/…` is clean.
 - **Deprecated: `gen.batched/written` and `gen.batched/refused`**
   (gen.batched; genclj-08xk). Public only by accident, gen.batched's own
   helpers (a failure's message, the error `:batched? :required` throws),
@@ -390,6 +433,40 @@ other values for the same key, from the same distribution.
   removed in 2.0. They behave as before. A collection's reason stays
   `(fallback ps)` and `fallback-reason`, and `project*` stays, the way to
   `project`'s.
+- **Added: the chat template's options in agent/run** (gen.llm.agent,
+  experimental; genclj-fshl). `agent/run`'s opts take `:template`
+  (`:qwen3.8` for Qwen3.8's), `:reasoning-effort` and
+  `:preserve-thinking?`, passed to gen.llm.chat for every turn: 1.2.0's
+  Qwen3.8 template could not be reached through the agent, which rendered
+  Qwen3.5's always. Options the template refuses are refused as
+  `chat/render` refuses them (`:invalid-option`), before the session opens.
+- **Added: ext/device and ext/commons-math as dependencies** (their
+  `deps.edn`; genclj-ri2d). A dependent takes the device lowerings with
+  `:deps/root "ext/device"`, so kernel/run's and importance sampling's
+  `:device` and `gen.inference.device/run-chains` reach them (1.2.0's
+  dependent could not put ext/device on its classpath, and always got
+  `:device-fallback`, "not on the classpath"), and gen.dist.commons-math
+  with `:deps/root "ext/commons-math"` (with Commons Math 3.6.1); each
+  brings gen.clj from the same checkout. The README lists every module and
+  how a project takes it. ext/device's tests no longer read bench/: the
+  parity bench's models are `gen.parity-models`, in test/.
+- **Added: a combinator's batched form reports each move**
+  (gen.inference.kernel/batched-form of chain, repeat, cycle and kern;
+  genclj-qucg). Beside `:accepted` (did any move take each particle), its
+  result holds `:accepted-moves` (each move's n decisions, in order) and,
+  when any proposal diverged, `:divergences` (n counts).
+- **Added: native suites' skips are counted** (genclj-ruh8). The tests of
+  MLX's binding and of llama.cpp pass with no assertions where their
+  library or test model is missing; `clojure -X:test` (now
+  `gen.test-runner`, cognitect's runner then this) and `-X:test:par` print
+  at their end how many of them ran and skipped, and why.
+  `-J-Dgen.require-native=mlx,llama` fails a run in which a suite it names
+  skipped a test or ran none, for a release gate's runs.
+- **Draws: `rng/randint` and `uniform-discrete` in float32** (MLX's default;
+  genclj-psgi) draw other integers for the same key, from three float32
+  uniforms where one was drawn. In float64 (the JVM backend's default)
+  the integers are unchanged, except a draw the old rounding moved (one
+  that reached high among them).
 
 ## [1.2.0] - 2026-11-06
 

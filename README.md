@@ -11,7 +11,7 @@ Generative Function Interface (GFI): `simulate`, `generate`, `update`,
 `regenerate`, `assess`, `propose` and `project`, each a pure function of its
 arguments and an explicit random key.
 
-**Status: 1.2.0** (2026-11-06). The core runs on the JVM, CPU-only, with
+**Status: 1.2.1** (2026-11-06). The core runs on the JVM, CPU-only, with
 nothing but a JDK: a pure-Clojure array backend with reverse-mode autodiff.
 An MLX backend runs the same code on Apple's GPU (Metal), on MLX's CPU
 backend and on CUDA: the test battery passes on Metal, on MLX's CPU and on
@@ -27,11 +27,12 @@ instaparse grammars and context-free grammars. The book, `book/`, teaches it wit
 that runs; its appendix *Coming from Gen.jl* (`book/061-from-genjl.md`)
 maps Gen.jl's names and conventions to gen.clj's. Through 1.x the stable
 namespaces keep their names, arities, result keys and documented semantics
-(`CHANGELOG.md`); `DESIGN.md` has the design.
+(`CHANGELOG.md`); `DESIGN.md` has the design and its current conventions,
+`docs/decisions.md` the log of the decisions behind them.
 
 gen.clj is a git dependency, a release by its tag:
 `{gen.clj/gen.clj {:git/url "https://github.com/robert-johansson/gen.clj"
-:git/tag "v1.2.0" :git/sha "…"}}`.
+:git/tag "v1.2.1" :git/sha "…"}}`.
 
 ## A model and two kinds of inference
 

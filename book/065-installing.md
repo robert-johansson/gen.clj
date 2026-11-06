@@ -13,19 +13,22 @@ project's `deps.edn`:
 
 ```edn
 {:deps {gen.clj/gen.clj {:git/url "https://github.com/robert-johansson/gen.clj"
-                         :git/tag "v1.2.0" :git/sha "…"}}}
+                         :git/tag "v1.2.1" :git/sha "…"}}}
 ```
 
 `:git/sha` is the tag's commit, or its first seven characters. The laws
 (*Verification: the Laws*), to check generative functions of your own,
 are the module ext/laws at the same tag: `gen.clj/laws {:git/url …
-:git/tag "v1.2.0" :git/sha "…" :deps/root "ext/laws"}`, which brings
+:git/tag "v1.2.1" :git/sha "…" :deps/root "ext/laws"}`, which brings
 test.check. The module ext/codegen (`gen.codegen`: a REPL session for
 LLM-written code, and gen.clj's codegen harness) comes the same way,
 with `:deps/root "ext/codegen"`, and brings clj-kondo and parinferish.
 The module ext/instaparse (`gen.llm.instaparse`: instaparse grammars as
 constraints on an LM's text) is taken with `:deps/root "ext/instaparse"`,
-and brings instaparse.
+and brings instaparse. The device lowerings (ext/device, experimental:
+what `:device` runs) and Apache Commons Math's distributions
+(ext/commons-math) come the same way, with `:deps/root "ext/device"` and
+`:deps/root "ext/commons-math"`; the README lists every module.
 As a git dependency, `clojure -X:deps prep` compiles the Java binding
 the native backends load; the pure-Clojure backend does not need it.
 
