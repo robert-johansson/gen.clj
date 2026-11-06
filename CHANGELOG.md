@@ -103,6 +103,25 @@ other values for the same key, from the same distribution.
   `array/full` (a ClassCastException). Breaking only for code that was
   already wrong: a fractional or a float seed (2.0 included, as JAX's
   PRNGKey), a repeated axis.
+- **Fixed: `rng/randint`, and so `uniform-discrete`, stay inside their
+  range** (gen.random; genclj-psgi). randint computed floor(low + u·(high
+  - low)) in the backend's default float, which rounds up to high: in
+  float32 for about 0.3% of the draws at low 10^6, high 10^6 + 10 (MLX's
+  default), and in float64 for the largest uniforms far from 0. So
+  uniform-discrete sampled outside its support on MLX, a trace of score
+  -Inf. Now the draw is exact integer arithmetic on the same uniforms'
+  bits, low + floor(k·r / 2^b): in float64 k is one uniform's 52 bits,
+  floor(u·r) exactly; in float32 three uniforms' 23 bits each (b = 69).
+  The same key draws the same integers on every backend of the same
+  default float. An empty range is loud (`:empty-range`) where its bounds
+  can be read (a lazy backend's array range clamps to low), a fractional
+  host bound `:invalid-args`, and host bounds outside int32 on a backend
+  whose int is int32 (they wrapped) `:invalid-args`.
+- **Draws: `rng/randint` and `uniform-discrete` in float32** (MLX's default;
+  genclj-psgi) draw other integers for the same key, from three float32
+  uniforms where one was drawn. In float64 (the JVM backend's default)
+  the integers are unchanged, except a draw the old rounding moved (one
+  that reached high among them).
 
 ## [1.2.0] - 2026-11-06
 

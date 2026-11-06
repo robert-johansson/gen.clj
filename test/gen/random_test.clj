@@ -159,6 +159,74 @@
 
 (defn- reason [f] (:reason (try (f) nil (catch clojure.lang.ExceptionInfo e (ex-data e)))))
 
+(deftest randint-stays-inside-its-range
+  ;; genclj-psgi: floor(low + u·(high - low)) in the backend's default
+  ;; float rounded up to high: in float32 for about 0.3% of the draws at
+  ;; low 1e6, high 1e6 + 10 (MLX's draws held 1000010), and in float64 for
+  ;; ranges far from 0 or for the largest uniform; uniform-discrete sampled
+  ;; outside its support. Now integer arithmetic on the uniforms' bits
+  (testing "low 1e6, high 1e6 + 10, many keys: every value inside, each a tenth within 5 standard errors"
+    (let [n 100000
+          counts (frequencies (ts/host (rng/randint (rng/key 1) 1000000 1000010 [n])))]
+      (is (= (set (range 1000000 1000010)) (set (keys counts))))
+      (is (every? #(< (Math/abs (- (double %) 10000.0)) (* 5 (Math/sqrt (* n 0.1 0.9)))) (vals counts)) (pr-str counts))))
+  (testing "the largest uniform gives high - 1 and the smallest low, also far from 0"
+    ;; the largest of the dtype asked: float64's gave high at low 1e6 too
+    (with-redefs [rng/uniform (fn [_ shape {:keys [dtype]}]
+                                (array/full shape (- 1.0 (Math/pow 2.0 (if (= :float64 dtype) -52 -23))) {:dtype dtype}))]
+      (is (= [1000009 1000009] (ts/host (rng/randint (rng/key 0) 1000000 1000010 [2]))))
+      (is (= [4 4] (ts/host (rng/randint (rng/key 0) 2 5 [2]))))
+      (when (= :int64 (ts/int-dtype))
+        (is (= 4503599627370505 (ts/host (rng/randint (rng/key 0) 4503599627370496 4503599627370506)))
+            "at 2^52, where float64's floor(low + u·r) is high")))
+    (with-redefs [rng/uniform (fn [_ shape {:keys [dtype]}] (array/zeros shape {:dtype dtype}))]
+      (is (= [1000000 1000000] (ts/host (rng/randint (rng/key 0) 1000000 1000010 [2]))))))
+  (testing "array bounds, broadcast"
+    (let [x (ts/host (rng/randint (rng/key 4) (array/array [0 100 -7]) (array/array [1 103 -6]) [1000 3]))]
+      (is (= #{[0 100 -7] [0 101 -7] [0 102 -7]} (set x)))))
+  (testing "an empty range and a fractional bound are loud"
+    (is (= :empty-range (reason #(rng/randint (rng/key 0) 5 5))))
+    (is (= :empty-range (reason #(rng/randint (rng/key 0) 5 2 [3]))))
+    (is (= :invalid-args (reason #(rng/randint (rng/key 0) 0 2.5))))
+    (when (ts/jvm?)
+      (is (= :empty-range (reason #(rng/randint (rng/key 0) (array/array [0 3]) (array/array [1 3])))) "read when concrete")))
+  (testing "past int32, on a backend whose int is int32, loud (it wrapped)"
+    (when (= :int32 (ts/int-dtype))
+      (is (= :invalid-args (reason #(rng/randint (rng/key 0) 0 3000000000)))))))
+
+(defspec randint-is-exact 100
+  ;; the arithmetic of genclj-psgi's randint: the draw is low + floor(k·r /
+  ;; 2^b), checked against BigInts, for host and array bounds, up to r =
+  ;; 2^53 (the JVM backend's exact ints). In float64 k is one uniform's 52
+  ;; bits (b = 52); in float32 three uniforms' 23 bits each, the first drawn
+  ;; lowest (b = 69). Planted (2026-11-06): a term dropped from a column
+  ;; (d2·r1), or the carry into the result's column, fails it (the lowest
+  ;; carry moves a draw with probability about 2^-23: no test sees it)
+  (prop/for-all [ds (gen/vector (gen/choose 0 8388607) 3)
+                 k52 (gen/fmap (fn [[a b]] (+ (* a 67108864) b)) (gen/tuple (gen/choose 0 67108863) (gen/choose 0 67108863)))
+                 r (gen/one-of [(gen/choose 1 10) (gen/choose 1 Integer/MAX_VALUE)
+                                (gen/fmap #(inc (long (* % 9007199254740991))) (gen/double* {:min 0.0 :max 1.0 :NaN? false}))
+                                (gen/fmap #(bit-shift-left 1 %) (gen/choose 0 52))])
+                 lo (gen/choose -500 500)
+                 arrays? gen/boolean]
+    (let [r (long (if (= :int32 (ts/int-dtype)) (min r 2147483147) r))
+          f64? (= :float64 (ts/float-dtype))
+          calls (atom 0)
+          got (with-redefs [rng/uniform (fn [_ shape {:keys [dtype]}]
+                                          (let [i @calls]
+                                            (swap! calls inc)
+                                            (array/full shape (if f64? (/ (double k52) 4503599627370496.0) (/ (double (ds i)) 8388608.0))
+                                                        {:dtype dtype})))]
+                (ts/host (if arrays?
+                           (rng/randint (rng/key 0) (array/array [lo lo]) (array/array [(+ lo r) (+ lo r)]) [2])
+                           (rng/randint (rng/key 0) lo (+ lo r) [2]))))
+          [d0 d1 d2] ds
+          want (if f64?
+                 (+ lo (long (quot (* (bigint k52) (bigint r)) 4503599627370496N)))
+                 (let [k (+ (* (bigint d2) 70368744177664N) (* (bigint d1) 8388608N) (bigint d0))]
+                   (+ lo (long (quot (* k (bigint r)) 590295810358705651712N)))))]
+      (and (= (if f64? 1 3) @calls) (= [want want] got)))))
+
 (deftest keys-take-64-bit-integer-seeds
   ;; genclj-kdau: (rng/key 2.5) was (rng/key 2), as fold-in refuses
   (doseq [seed [2.5 2.0 (bigint (Math/pow 2 64)) "1" nil]]
