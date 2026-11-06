@@ -48,14 +48,18 @@
 
 (defn- start-at [model choices] (:trace (gfi/generate model [] choices (rng/key 0))))
 
-(defn- moments [xs]
-  (let [n (count xs) m (/ (reduce + xs) n)]
-    [m (/ (reduce + (map #(* (- % m) (- % m)) xs)) (dec n))]))
-
-(defn- matches? [xs mean var]
-  (let [[m v] (moments xs)]
-    (and (< (ts/abs (- m mean)) (* 5 (Math/sqrt (/ var (count xs)))))
-         (< (ts/abs (- v var)) (* 0.12 var)))))
+(defn- matches?
+  "Do the independent draws xs (chains' ends) have the target's mean and
+   variance, within five standard errors: the mean's √(var/n), the sample
+   variance's from the draws' fourth moment (ts/variance-se; a band of 12%
+   of the variance was 1.9 of them for Gamma(3, 1) at n 1000, genclj-7z2s).
+   Planted (2026-11-06): HMC's log density difference in its acceptance
+   ratio times 0.6 (the chains then target the posterior tempered to 0.6,
+   the same mean, variance 0.83 for 0.5) fails hmc-targets-the-posterior's
+   three checks; times 0.8 (variance 0.625) passes them, an honest limit:
+   at n 1000 five standard errors of a normal's variance are 22% of it."
+  [xs mean var]
+  (ts/moments-match? xs mean var))
 
 (defn- scalar-stationary? [step]
   (let [n 4000
@@ -94,6 +98,16 @@
     (is (vector-converges? vector-model (cm/choicemap [:latent :z] (array/array [2.0 2.0]) :y y2)
                            #(% [:latent :z])
                            (fn [tr key] (:trace (mcmc/hmc tr (sel/select [:latent :z]) {:L 5 :eps 0.25} key)))))))
+
+(deftest hmc-s-check-fails-a-planted-bug
+  ;; a negative control (genclj-k3a8): hmc-targets-the-posterior's
+  ;; stationary check, run on the library's HMC with its momenta's density
+  ;; (the kinetic energy in the acceptance ratio, mcmc's normal-lp) planted
+  ;; as 0, must fail. A wrong gradient would not do: the leapfrog stays
+  ;; volume-preserving and reversible under any force field, so HMC with
+  ;; one stays exact, only slower.
+  (let [step (fn [tr key] (:trace (mcmc/hmc tr x-sel {:L 5 :eps 0.3} key)))]
+    (is (not (with-redefs-fn {#'mcmc/normal-lp (fn [_ _ _] 0.0)} #(scalar-stationary? step))))))
 
 (deftest ^:slow mala-targets-the-posterior
   (let [step (fn [tr key] (:trace (mcmc/mala tr x-sel 0.3 key)))]
@@ -809,12 +823,11 @@
 
 (defn- particles-match?
   "Do the n particles' values xs (host numbers) have the posterior's mean
-   and variance? Bands of 5 standard errors: the mean's √(var/n), and the
-   sample variance's var·√(2/(n - 1)) for a normal posterior."
+   and variance? Bands of 5 standard errors (ts/moments-match?): the
+   mean's √(var/n), and the sample variance's from the particles' fourth
+   moment (var·√(2/(n - 1)) for a normal posterior)."
   [xs mean var]
-  (let [n (count xs) [m v] (moments xs)]
-    (and (< (Math/abs (clojure.core/- m mean)) (clojure.core/* 5 (Math/sqrt (clojure.core// var n))))
-         (< (Math/abs (clojure.core/- v var)) (clojure.core/* 5 var (Math/sqrt (clojure.core// 2.0 (dec n))))))))
+  (ts/moments-match? xs mean var))
 
 (deftest ^:slow parallel-hmc-and-mala-chains-target-the-posterior
   ;; 4000 chains from x = -2, each step one batched gradient per leapfrog

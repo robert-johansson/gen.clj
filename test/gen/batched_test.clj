@@ -27,7 +27,7 @@
             [gen.inference.particle-filter :as pf]
             [gen.inference.proposal :as proposal]
             [gen.inference.vi :as vi]
-            [gen.laws :refer [close?]]
+            [gen.laws :as laws :refer [close?]]
             [gen.random :as rng]
             [gen.selection :as sel]))
 
@@ -76,7 +76,7 @@
    [:spliced spliced [2]]
    [:vector-latent vector-latent []]])
 
-(def gen-case (gen/tuple (gen/elements models) gen/nat (gen/choose 1 6)))
+(def gen-case (gen/tuple (gen/elements models) laws/seeds (gen/choose 1 6)))
 
 (defn- consistent? [tr]
   (close? (:score tr) (:weight (gfi/assess (:gen-fn tr) (:args tr) (:choices tr)))))
@@ -132,12 +132,11 @@
                    (b/traces ps) (b/traces ps') (array/->clj ws))))))
 
 (deftest batched-statistics
-  (let [ps (b/simulate linreg [[1.0]] 20000 (rng/key 1))
-        xs (array/->clj (b/choice ps :slope))
-        m (/ (reduce + xs) 20000)
-        v (/ (reduce + (map #(* (- % m) (- % m)) xs)) 19999)]
-    (is (< (Math/abs m) (* 5 (/ 10 (Math/sqrt 20000)))))
-    (is (< (Math/abs (- v 100.0)) 5.0))))
+  ;; the slope's prior, N(0, 10): its mean and variance within five
+  ;; standard errors. Planted (2026-11-06): normal's draws with sd 1.03·std
+  ;; (variance 106 for 100, six standard errors) fail it
+  (let [ps (b/simulate linreg [[1.0]] 20000 (rng/key 1))]
+    (is (ts/moments-match? (array/->clj (b/choice ps :slope)) 0.0 100.0))))
 
 ;; ---------------------------------------------------------------------------
 ;; Population operations and the fallback
@@ -168,8 +167,12 @@
     (testing "and later operations carry on per particle"
       (let [{ws :weights} (b/update ps [] [] (cm/choicemap :switch true) (rng/key 7))
             scalar (map #(:weight (gfi/update % (cm/choicemap :switch true) (rng/key 0))) (b/traces ps))]
+        ;; the weights do not depend on the key: p(switch true)/p(switch
+        ;; false) less :b's density, or 0 where it was true. Planted
+        ;; (2026-11-06): the per-particle update's weights 0.5 off fail it
+        ;; (a check of their finiteness passed them)
         (is (= 8 (count (array/->clj ws))))
-        (is (every? true? (map #(and (Double/isFinite %1) (Double/isFinite %2)) (array/->clj ws) (map ts/number scalar)))))))
+        (is (every? true? (map close? (array/->clj ws) scalar))))))
   (testing "a Switch whose index differs across particles stays batched, by partition"
     (let [sw (gen [] (splice :s (comb/switch observation observation) (trace :c (d/categorical [0.5 0.5])) 0.0))
           ps (b/simulate sw [] 6 (rng/key 8))]
@@ -187,14 +190,21 @@
 (def evidence (dc/log-prob (d/normal 0 (Math/sqrt 2)) y))
 
 (deftest batched-importance-sampling
+  ;; bands of five standard errors, from the weights by the delta method
+  ;; (0.026 for the evidence, 0.027 for the mean; they were a fixed 0.03).
+  ;; Planted (2026-11-06): the batched log weights times 0.8 fail both, and
+  ;; the IS checks of host-predicates-in-either-order-fall-back; times 0.9
+  ;; fails the evidence here, host-predicates-on-particles-fall-back's,
+  ;; spot-checks-catch-what-the-tracer-cannot-see's and the mixture's
+  ;; (a-batched-mixture-of-different-structures...)
   (let [{:keys [particles log-ml-estimate log-normalized-weights]}
         (imp/importance-sampling conjugate [] (cm/choicemap :y y) 20000 {:batched? true :key (rng/key 10)})]
     (is (b/batched? particles))
     (is (= 20000 (count log-normalized-weights)))
-    (is (< (Math/abs (- log-ml-estimate evidence)) 0.03))
+    (is (< (Math/abs (- log-ml-estimate evidence)) (* 5 (ts/log-ml-se log-normalized-weights))))
     (let [xs (array/->clj (b/choice particles :x))
           mean (reduce + (map #(* (Math/exp %1) %2) log-normalized-weights xs))]
-      (is (< (Math/abs (- mean 0.65)) 0.03) "the weighted posterior mean")))
+      (is (< (Math/abs (- mean 0.65)) (* 5 (ts/self-normalized-se log-normalized-weights xs))) "the weighted posterior mean")))
   (testing "resampling one trace"
     (is (number? (ts/host ((:trace (imp/importance-resampling conjugate [] (cm/choicemap :y y) 100 {:batched? true :key (rng/key 11)})) :x))))))
 
@@ -215,43 +225,32 @@
         state (run 40000 (rng/key 12))]
     (is (b/batched? (:particles state)) "the filter stays batched")
     ;; the estimate's sd is about sqrt(12.6/n) here (measured on runs of 20
-    ;; particles): four of them at n = 40000 is 0.07
-    (is (< (Math/abs (- (pf/log-ml-estimate state) exact)) 0.07))
+    ;; particles): five of them at n = 40000 is 0.089. Planted (2026-11-06):
+    ;; each batched step's weights times 0.9 fails this and the next check,
+    ;; and the switching regimes' filter's
+    (is (< (Math/abs (- (pf/log-ml-estimate state) exact)) (* 5 (Math/sqrt (/ 12.6 40000)))))
     (is (= 40000 (count (:log-weights state))))
     (testing "unbiased in exp space (law 20)"
       (let [runs 400
-            ratios (map #(Math/exp (- (pf/log-ml-estimate (run 20 %)) exact)) (rng/split (rng/key 14) runs))
-            mean (/ (reduce + ratios) runs)
-            sd (Math/sqrt (/ (reduce + (map #(* (- % mean) (- % mean)) ratios)) (dec runs)))]
-        (is (< (Math/abs (- mean 1.0)) (* 5 (/ sd (Math/sqrt runs)))))))))
+            ratios (map #(Math/exp (- (pf/log-ml-estimate (run 20 %)) exact)) (rng/split (rng/key 14) runs))]
+        (is (ts/within-5-se? ratios 1.0))))))
 
 (deftest parallel-mh-chains
+  ;; the posterior N(0.65, 0.5)'s mean and variance within five standard
+  ;; errors (the variance's was a fixed 0.06). Planted (2026-11-06):
+  ;; accepting by exp(0.6 log alpha) fails it and the next test's moments
   (let [n 4000
-        start (fn [xs] (b/take (:particles (b/generate conjugate [] (cm/choicemap :y y) 1 (rng/key 0))) (repeat n 0)))
-        moments (fn [ps] (let [xs (array/->clj (b/choice ps :x)) m (/ (reduce + xs) n)]
-                           [m (/ (reduce + (map #(* (- % m) (- % m)) xs)) (dec n))]))
+        start (b/take (:particles (b/generate conjugate [] (cm/choicemap :y y) 1 (rng/key 0))) (repeat n 0))
         chains (reduce (fn [ps k] (:particles (mh/mh-particles ps (sel/select :x) k)))
-                       (start nil) (rng/split (rng/key 13) 60))
-        [m v] (moments chains)]
+                       start (rng/split (rng/key 13) 60))]
     (is (b/batched? chains))
-    (is (< (Math/abs (- m 0.65)) (* 5 (Math/sqrt (/ 0.5 n)))))
-    (is (< (Math/abs (- v 0.5)) 0.06))))
+    (is (ts/moments-match? (array/->clj (b/choice chains :x)) 0.65 0.5))))
 
 (def leaning
   "An asymmetric proposal for conjugate's x, x' ~ N(x/2 + 0.4, 0.8): its
    density back from x' differs from the density there."
   (gen [tr] (trace :x (d/normal (+ (* 0.5 (tr :x)) 0.4) 0.8))))
 
-(defn- mean-var [xs]
-  (let [n (count xs) m (/ (reduce + xs) n)]
-    [m (/ (reduce + (map #(* (- % m) (- % m)) xs)) (dec n))]))
-
-(defn- agree?
-  "Do the means of xs and ys, two independent samples, agree within five
-   standard errors of their difference?"
-  [xs ys]
-  (let [[mx vx] (mean-var xs) [my vy] (mean-var ys)]
-    (< (Math/abs (- mx my)) (+ 1e-12 (* 5 (Math/sqrt (+ (/ vx (count xs)) (/ vy (count ys)))))))))
 
 (deftest parallel-mh-chains-with-a-proposal
   ;; MH with a proposal on every particle at once (genclj-xgz4): the
@@ -267,21 +266,18 @@
   (let [n 4000
         start (b/take (:particles (b/generate conjugate [] (cm/choicemap :y y) 1 (rng/key 0))) (repeat n 0))]
     (testing "the chains reach the posterior, N(0.65, 0.5), and stay batched"
-      (let [chains (reduce (fn [ps k] (:particles (mh/mh-particles ps leaning [] k))) start (rng/split (rng/key 13) 60))
-            [m v] (mean-var (array/->clj (b/choice chains :x)))]
+      (let [chains (reduce (fn [ps k] (:particles (mh/mh-particles ps leaning [] k))) start (rng/split (rng/key 13) 60))]
         (is (b/batched? chains))
-        (is (< (Math/abs (- m 0.65)) (* 5 (Math/sqrt (/ 0.5 n)))))
-        ;; the sample variance's standard error, sqrt(2 v^2/(n - 1))
-        (is (< (Math/abs (- v 0.5)) (* 5 (Math/sqrt (/ (* 2 0.25) (dec n))))))))
+        (is (ts/moments-match? (array/->clj (b/choice chains :x)) 0.65 0.5))))
     (testing "one move from the same start is distributed as the scalar move"
       (let [{moved :particles accepted :accepted la :log-alphas m :fallback} (mh/mh-particles start leaning [] (rng/key 21))
             scalar (mapv #(mh/mh %1 leaning [] %2) (b/traces start) (rng/split (rng/key 22) n))]
         (is (nil? m))
         (is (b/batched? moved))
         (is (= [n] (array/shape la)))
-        (is (agree? (array/->clj (b/choice moved :x)) (mapv #(ts/number ((:trace %) :x)) scalar)))
-        (is (agree? (mapv #(if % 1.0 0.0) accepted) (mapv #(if (:accepted? %) 1.0 0.0) scalar)))
-        (is (agree? (array/->clj la) (mapv :log-alpha scalar)) "the log acceptance ratios")))
+        (is (ts/means-agree? (array/->clj (b/choice moved :x)) (mapv #(ts/number ((:trace %) :x)) scalar)))
+        (is (ts/means-agree? (mapv #(if % 1.0 0.0) accepted) (mapv #(if (:accepted? %) 1.0 0.0) scalar)))
+        (is (ts/means-agree? (array/->clj la) (mapv :log-alpha scalar)) "the log acceptance ratios")))
     (testing "the ratio is each particle's: score' - score + log q(x | x') - log q(x' | x)"
       (let [ps (:particles (b/generate conjugate [] (cm/choicemap :y y) 50 (rng/key 23)))
             {moved :particles accepted :accepted la :log-alphas} (mh/mh-particles ps leaning [] (rng/key 24))
@@ -490,9 +486,10 @@
                     (trace :y (d/normal mu 1))))
         obs (cm/choicemap :y 0.0)
         exact (Math/log (+ (* 0.5 (Math/exp (dc/log-prob (d/normal 0 1) 0.0))) (* 0.5 (Math/exp (dc/log-prob (d/normal 3 1) 0.0)))))
-        {:keys [particles log-ml-estimate]} (imp/importance-sampling m [] obs 4000 {:batched? true :key (rng/key 30)})]
+        {:keys [particles log-ml-estimate log-normalized-weights]}
+        (imp/importance-sampling m [] obs 4000 {:batched? true :key (rng/key 30)})]
     (is (not (b/batched? particles)) "the batch falls back to one particle at a time")
-    (is (< (Math/abs (- log-ml-estimate exact)) 0.05))
+    (is (< (Math/abs (- log-ml-estimate exact)) (* 5 (ts/log-ml-se log-normalized-weights))))
     (testing "and case too"
       (let [m (gen [] (let [k (trace :k (d/categorical [0.5 0.5]))]
                         (trace :y (d/normal (case k 0 0.0 1 3.0) 1))))]
@@ -549,11 +546,11 @@
                            [:condp (fn [k] (condp = k 0 -3.0 3.0))]
                            [:vector-lookup (fn [k] ([-3.0 3.0] k))]] [])]
       (let [m (gen [] (let [k (trace :k (d/categorical [0.5 0.5]))] (trace :y (d/normal (mu-of k) 1))))
-            {:keys [log-ml-estimate]} (imp/importance-sampling m [] obs 4000 {:batched? true :key (rng/key 40)})]
-        (is (< (Math/abs (- log-ml-estimate exact)) 0.1) (str label))))
+            {:keys [log-ml-estimate log-normalized-weights]} (imp/importance-sampling m [] obs 4000 {:batched? true :key (rng/key 40)})]
+        (is (< (Math/abs (- log-ml-estimate exact)) (* 5 (ts/log-ml-se log-normalized-weights))) (str label))))
     (let [m (gen [] (let [k (trace :k (d/categorical [0.5 0.5]))] (trace :y (d/normal (case k 0 -3.0 3.0) 1))))
-          {:keys [log-ml-estimate]} (imp/importance-sampling m [] obs 4000 {:batched? true :key (rng/key 40)})]
-      (is (< (Math/abs (- log-ml-estimate exact)) 0.1) "case with a default, in a gen body"))))
+          {:keys [log-ml-estimate log-normalized-weights]} (imp/importance-sampling m [] obs 4000 {:batched? true :key (rng/key 40)})]
+      (is (< (Math/abs (- log-ml-estimate exact)) (* 5 (ts/log-ml-se log-normalized-weights))) "case with a default, in a gen body"))))
 
 (deftest batched-runs-validate-parameters
   ;; B3: a batched run threw nothing where a scalar run throws
@@ -763,8 +760,9 @@
     (let [obs (cm/choicemap :y 0.5)
           exact (Math/log (+ (* 0.5 (Math/exp (dc/log-prob (d/normal 3 1) 0.5)))
                              (* 0.5 (Math/exp (dc/log-prob (d/normal -3 1) 0.5)))))
-          {:keys [log-ml-estimate]} (imp/importance-sampling hidden-lookup [] obs 4000 {:batched? true :key (rng/key 52)})]
-      (is (< (Math/abs (- log-ml-estimate exact)) 0.05))))
+          {:keys [log-ml-estimate log-normalized-weights]}
+          (imp/importance-sampling hidden-lookup [] obs 4000 {:batched? true :key (rng/key 52)})]
+      (is (< (Math/abs (- log-ml-estimate exact)) (* 5 (ts/log-ml-se log-normalized-weights))))))
   (testing "a branch that first runs in an early update falls back there"
     (let [m (gen [t] (let [k (trace :k (d/categorical [0.5 0.5]))]
                        (when (pos? t) (trace :y (d/normal (level k) 1)))
@@ -1011,16 +1009,13 @@
 (deftest a-batched-mixture-of-different-structures-reaches-the-exact-answers
   (let [{:keys [particles log-ml-estimate log-normalized-weights]}
         (imp/importance-sampling mixture [] (cm/choicemap :y mixture-y) 20000 {:batched? true :key (rng/key 76)})
-        w (map #(Math/exp %) log-normalized-weights)
         ;; the estimator's standard errors, from its weights (delta method)
-        se-log-ml (Math/sqrt (- (reduce + (map * w w)) (/ 1.0 20000)))
-        zero? (map #(= 0 %) (array/->clj (b/choice particles :k)))
-        p0 (reduce + (map (fn [wi z] (if z wi 0.0)) w zero?))
-        se-p0 (Math/sqrt (reduce + (map (fn [wi z] (let [d (- (if z 1.0 0.0) p0)] (* wi wi d d))) w zero?)))]
+        zero (map #(if (= 0 %) 1.0 0.0) (array/->clj (b/choice particles :k)))
+        p0 (reduce + (map #(* (Math/exp %1) %2) log-normalized-weights zero))]
     (is (b/batched? particles))
     (is (nil? (b/fallback-reason particles)))
-    (is (< (Math/abs (- log-ml-estimate mixture-evidence)) (* 5 se-log-ml)))
-    (is (< (Math/abs (- p0 mixture-p0)) (* 5 se-p0)))))
+    (is (< (Math/abs (- log-ml-estimate mixture-evidence)) (* 5 (ts/log-ml-se log-normalized-weights))))
+    (is (< (Math/abs (- p0 mixture-p0)) (* 5 (ts/self-normalized-se log-normalized-weights zero))))))
 
 (deftest parallel-mh-chains-on-a-mixture-move-between-branches
   ;; independent MH chains whose moves change the index (moving particles
@@ -1123,11 +1118,9 @@
                                       (pf/step [(inc t) 0] [diff/unknown-change diff/no-change] (obs t) {:key (ks (* 2 t))})))
                         init (range 1 (count ys)))))
         runs (mapv #(run 100 %) (rng/split (rng/key 79) 200))
-        ratios (map #(Math/exp (- (pf/log-ml-estimate %) exact)) runs)
-        mean (/ (reduce + ratios) (count runs))
-        sd (Math/sqrt (/ (reduce + (map #(* (- % mean) (- % mean)) ratios)) (dec (count runs))))]
+        ratios (map #(Math/exp (- (pf/log-ml-estimate %) exact)) runs)]
     (is (every? #(b/batched? (:particles %)) runs) "every filter stays batched")
-    (is (< (Math/abs (- mean 1.0)) (* 5 (/ sd (Math/sqrt (count runs))))))))
+    (is (ts/within-5-se? ratios 1.0))))
 
 ;; ---------------------------------------------------------------------------
 ;; Functions of every particle: map-particles and set-choices

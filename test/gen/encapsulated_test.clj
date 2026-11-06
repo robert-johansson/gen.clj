@@ -38,23 +38,9 @@
             [gen.selection :as sel]
             [gen.test-support :as ts]))
 
-;; host statistics (gen.array's operators would make arrays on MLX)
-
-(defn- mean-sd [xs]
-  (let [n (count xs)
-        m (clojure.core// (reduce clojure.core/+ xs) n)
-        v (clojure.core// (reduce clojure.core/+ (map #(let [e (clojure.core/- % m)] (clojure.core/* e e)) xs)) (dec n))]
-    [m (Math/sqrt v)]))
-
 (defn- npdf [x m s]
   (let [z (clojure.core// (clojure.core/- x m) s)]
     (clojure.core// (Math/exp (clojure.core/* -0.5 z z)) (clojure.core/* s (Math/sqrt (clojure.core/* 2 Math/PI))))))
-
-(defn- within?
-  "Is the sample mean of xs within 5 standard errors of mu?"
-  [xs mu]
-  (let [[m s] (mean-sd xs)]
-    (< (Math/abs (clojure.core/- m mu)) (clojure.core/* 5 (clojure.core// s (Math/sqrt (count xs)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Models
@@ -275,11 +261,11 @@
   (testing "untraced draws: the mixture"
     (let [xis (mapv #(Math/exp (ts/number (:weight (gfi/assess mixture [] (cm/choicemap :a 0.5) %))))
                     (rng/split (rng/key 11) 4000))]
-      (is (within? xis (p-mixture 0.5)))))
+      (is (ts/within-5-se? xis (p-mixture 0.5)))))
   (testing "an estimated density"
     (let [xis (mapv #(Math/exp (ts/number (:weight (gfi/assess likelihood [0.4] (cm/choicemap :y 1.0) %))))
                     (rng/split (rng/key 12) 4000))]
-      (is (within? xis (npdf 1.0 0.4 (Math/sqrt 2.0)))))))
+      (is (ts/within-5-se? xis (npdf 1.0 0.4 (Math/sqrt 2.0)))))))
 
 (deftest ^:slow ^:heavy eq-4-4-simulate-draws-omega-given-the-choices
   ;; E[g(τ)/ξ] = ∫ g = 1 under simulate's (τ, ω) ~ p(τ) p̊(ω; τ). For the
@@ -295,12 +281,12 @@
     (let [rs (mapv (fn [k] (let [tr (gfi/simulate overlapping [] k)]
                              (clojure.core// (npdf (ts/number (tr :a)) 0.0 0.5) (Math/exp (ts/number (:score tr))))))
                    (rng/split (rng/key 13) 4000))]
-      (is (within? rs 1.0))))
+      (is (ts/within-5-se? rs 1.0))))
   (testing "an estimated density's joint sampler"
     (let [rs (mapv (fn [k] (let [tr (gfi/simulate likelihood [0.4] k)]
                              (clojure.core// (npdf (ts/number (tr :y)) 0.4 0.5) (Math/exp (ts/number (:score tr))))))
                    (rng/split (rng/key 14) 4000))]
-      (is (within? rs 1.0)))))
+      (is (ts/within-5-se? rs 1.0)))))
 
 (deftest ^:slow ^:heavy eq-4-3-on-black-box-code-and-combinators
   ;; law audit gap 2: the exact marginals of the thesis's black-box example
@@ -310,14 +296,14 @@
                                                   (rng/split (rng/key seed) 4000)))
         n3 (Math/pow (npdf 1.5 0.0 (Math/sqrt 1.25)) 3)]
     (testing "a simulator between two choices: p(a, b) with b given a through U + 0.3a"
-      (is (within? (mean-xi with-simulator [0.4] (cm/choicemap :a true :b true) 60) (* 0.4 0.34)))
-      (is (within? (mean-xi with-simulator [0.4] (cm/choicemap :a false :b true) 61) (* 0.6 0.58))))
+      (is (ts/within-5-se? (mean-xi with-simulator [0.4] (cm/choicemap :a true :b true) 60) (* 0.4 0.34)))
+      (is (ts/within-5-se? (mean-xi with-simulator [0.4] (cm/choicemap :a false :b true) 61) (* 0.6 0.58))))
     (testing "a Map of untraced kernels: N(y; x, √1.25) per element"
-      (is (within? (mean-xi (comb/map noisy-kernel) [[0.1 0.2 0.3]]
+      (is (ts/within-5-se? (mean-xi (comb/map noisy-kernel) [[0.1 0.2 0.3]]
                             (cm/choicemap [0 :y] 1.6 [1 :y] 1.7 [2 :y] 1.8) 62)
                    n3)))
     (testing "an Unfold of untraced steps: each innovation 1.5"
-      (is (within? (mean-xi (comb/unfold noisy-step) [3 0.0]
+      (is (ts/within-5-se? (mean-xi (comb/unfold noisy-step) [3 0.0]
                             (cm/choicemap [0 :s] 1.5 [1 :s] (+ (* 0.9 1.5) 1.5) [2 :s] (+ (* 0.9 2.85) 1.5)) 63)
                    n3)))
     ;; law audit, finding 9. Planted bug (2026-10-20): a splice that gives its
@@ -325,7 +311,7 @@
     ;; uniform is then the quantile of the caller's normal), gives 0.0152
     ;; against 0.0085, a band of 0.0011
     (testing "a splice: the callee's ω is its own, E[ξ] = N(μ; m, 1) p(a, b) N(y; μ, √2)"
-      (is (within? (mean-xi spliced [0.0] (cm/choicemap :mu 0.2 [:inner :a] true [:inner :b] true :y -1.3) 69)
+      (is (ts/within-5-se? (mean-xi spliced [0.0] (cm/choicemap :mu 0.2 [:inner :a] true [:inner :b] true :y -1.3) 69)
                    (* (npdf 0.2 0.0 1.0) 0.4 0.34 (npdf -1.3 0.2 (Math/sqrt 2.0))))))))
 
 (deftest ^:heavy untraced-draws-in-a-body-are-independent
@@ -344,7 +330,7 @@
   (testing "Eq. 4.3 with y ~ N(z1 - z2, 1): E[ξ] = N(1.5; 0, √3)"
     (let [m (gen [] (let [z1 (untraced (d/normal 0 1)) z2 (untraced (d/normal 0 1))] (trace :y (d/normal (- z1 z2) 1))))
           xis (mapv #(Math/exp (ts/number (:weight (gfi/assess m [] (cm/choicemap :y 1.5) %)))) (rng/split (rng/key 4243) 4000))]
-      (is (within? xis (npdf 1.5 0.0 (Math/sqrt 3.0)))))))
+      (is (ts/within-5-se? xis (npdf 1.5 0.0 (Math/sqrt 3.0)))))))
 
 (def theta-z-y
   "θ ~ N(0, 1), z untraced N(0, 1), y ~ N(θ + z, 1): p(y) = N(y; 0, √3), and
@@ -359,7 +345,7 @@
   ;; untraced draws, E[exp w] = p(y)
   (let [ws (mapv #(Math/exp (ts/number (:weight (gfi/generate theta-z-y [] (cm/choicemap :y 1.5) %))))
                  (rng/split (rng/key 64) 4000))]
-    (is (within? ws (npdf 1.5 0.0 (Math/sqrt 3.0))))))
+    (is (ts/within-5-se? ws (npdf 1.5 0.0 (Math/sqrt 3.0))))))
 
 (defn- pmmh-thetas
   "θ after steps selection-MH moves on θ, in n chains of model from the
@@ -375,12 +361,9 @@
 
 (defn- normal-ok?
   "Are the θs N(mu, √v)? Mean within 5 standard errors, variance within 5
-   of its standard errors."
+   of its standard errors (ts/moments-match?)."
   [thetas mu v]
-  (let [n (count thetas)
-        [m s] (mean-sd thetas)]
-    (and (< (Math/abs (clojure.core/- m mu)) (clojure.core/* 5 (Math/sqrt (clojure.core// v n))))
-         (< (Math/abs (clojure.core/- (clojure.core/* s s) v)) (clojure.core/* 5 v (Math/sqrt (clojure.core// 2.0 (dec n))))))))
+  (ts/moments-match? thetas mu v))
 
 (defn- posterior-ok?
   "Are the θs N(y/3, √(2/3)) (θ ~ N(0, 1), y ~ N(θ, √2))?"
@@ -474,7 +457,7 @@
         mu (clojure.core// (clojure.core// (clojure.core/- l+ l-) 2.0) precision)
         obs (apply cm/choicemap (mapcat (fn [t y] [[:ys :y t] y]) (range) ssm-ys))
         thetas (pmmh-thetas smc-model obs 1000 40 (rng/key 70))]
-    (is (normal-ok? thetas mu (clojure.core// 1.0 precision)) (str (mean-sd thetas) " against " mu))))
+    (is (normal-ok? thetas mu (clojure.core// 1.0 precision)) (str [(ts/mean thetas) (ts/variance thetas)] " against " mu))))
 
 (deftest ^:slow ^:heavy involutive-mcmc-is-pseudo-marginal
   ;; the involution's update takes the move's key, so it redraws ω, a
@@ -506,10 +489,9 @@
                                      (ts/number ((reduce (fn [tr k] (:trace (mh/mh tr q [] k)))
                                                          (:trace (gfi/generate model [] (cm/choicemap :theta theta :y 1.0) k0)) ks)
                                                  :theta))))
-                     starts (rng/split (rng/key 67) n))
-        [m s] (mean-sd thetas)]
-    (is (< (Math/abs (clojure.core/- m 0.5)) (clojure.core/* 5 (Math/sqrt (clojure.core// 0.5 n)))))
-    (is (< (Math/abs (clojure.core/- (clojure.core/* s s) 0.5)) (clojure.core/* 5 0.5 (Math/sqrt (clojure.core// 2.0 (dec n))))))))
+                     starts (rng/split (rng/key 67) n))]
+    (is (ts/within-5-se? thetas 0.5 0.5))
+    (is (ts/variance-within-5-se? thetas 0.5))))
 
 (deftest ^:slow ^:heavy importance-sampling-with-an-encapsulated-proposal
   ;; §4.5.4: a proposal whose density is estimated keeps the marginal
@@ -521,9 +503,9 @@
                                {c :choices wq :weight} (gfi/propose q [] k1)]
                            (Math/exp (ts/number (- (:weight (gfi/generate model [] (cm/merge c obs) k2)) wq)))))
                  (rng/split (rng/key 17) 4000))
-        [_ s] (mean-sd ws)
+        s (ts/sd ws)
         exact (npdf 1.0 0.0 (Math/sqrt 2.0))]
-    (is (within? ws exact))
+    (is (ts/within-5-se? ws exact))
     (testing "through importance-sampling with the proposal"
       (let [{lml :log-ml-estimate} (is/importance-sampling model [] obs 4000 {:proposal q :proposal-args [] :key (rng/key 18)})]
         (is (< (Math/abs (clojure.core/- (Math/exp (ts/number lml)) exact)) (clojure.core/* 5 (clojure.core// s (Math/sqrt 4000)))))))))

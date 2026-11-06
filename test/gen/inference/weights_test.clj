@@ -6,6 +6,7 @@
             [clojure.test.check.properties :as prop]
             [gen.array :as array]
             [gen.inference.weights :as w]
+            [gen.laws :as laws]
             [gen.random :as rng]))
 
 (defn- close? [x y] (< (Math/abs (- (ts/number x) (ts/number y))) 1e-12))
@@ -54,7 +55,7 @@
                                              [1 (gen/return ##-Inf)]])
                              1 12)))
 
-(def gen-case (gen/tuple gen-log-weights (gen/choose 0 40) gen/nat))
+(def gen-case (gen/tuple gen-log-weights (gen/choose 0 40) laws/seeds))
 
 (defn- probs [lws] (mapv #(Math/exp %) (:log-normalized-weights (w/normalize lws))))
 

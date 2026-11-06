@@ -240,11 +240,17 @@
     (is (vector? (dc/sample p (rng/key 1))))))
 
 (deftest mixture-moments
+  ;; bands of five standard errors, as sampler-moments' (a 5% band on the
+  ;; variance was about 16 of them, genclj-7z2s). Planted (2026-11-06): the
+  ;; homogeneous mixture's second component drawn with sd 1.04 for 1.0
+  ;; (variance 2.72 for 2.67, 7 standard errors) fails the first case's
+  ;; variance
   (let [k (rng/key 98) n 100000
         check (fn [dist mean var]
-                (let [x (dc/sample dist k [n])]
-                  (is (close? (array/mean x) mean (* 5 (Math/sqrt (/ var n)))) "mean")
-                  (is (close? (array/variance x) var (* 0.05 var)) "variance")))]
+                (let [x (ts/host (dc/sample dist k [n]))
+                      seen (str ": " (ts/mean x) " and " (ts/variance x) " ± " (ts/variance-se x))]
+                  (is (true? (ts/within-5-se? x mean var)) (str "mean" seen))
+                  (is (true? (ts/variance-within-5-se? x var)) (str "variance" seen))))]
     ;; mean Σ wμ, variance Σ w(σ² + μ²) - mean²
     (check (normal-mixture [0.3 0.7] [-2.0 1.0] [0.5 1.0]) 0.1 (- (+ (* 0.3 4.25) (* 0.7 2.0)) 0.01))
     (check (normal-uniform [0.5 0.5] [3.0 1.0] [-1.0 1.0]) 1.5 (- (+ (* 0.5 10.0) (* 0.5 (/ 1.0 3))) 2.25))))

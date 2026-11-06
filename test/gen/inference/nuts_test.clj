@@ -28,15 +28,10 @@
 ;; Statistics
 ;; ---------------------------------------------------------------------------
 
-(defn- mean [xs] (/ (reduce + xs) (double (count xs))))
-
-(defn- sample-var [xs]
-  (let [m (mean xs)] (/ (reduce + (map #(* (- % m) (- % m)) xs)) (double (dec (count xs))))))
-
 (defn- deviation
   "How far the chain's mean is from truth, in Monte Carlo standard errors."
   [xs truth]
-  (/ (Math/abs (double (- (mean xs) truth))) (dg/mcse-mean (vec xs))))
+  (/ (Math/abs (double (- (ts/mean xs) truth))) (dg/mcse-mean (vec xs))))
 
 (defn- bulk-ess
   "The chain's bulk ESS. The tests ask for 200 at least: a chain that stays
@@ -48,7 +43,7 @@
 (defn- z
   "The two-sample z statistic of the means of xs and ys, independent draws."
   [xs ys]
-  (/ (- (mean xs) (mean ys)) (Math/sqrt (+ (/ (sample-var xs) (count xs)) (/ (sample-var ys) (count ys))))))
+  (/ (- (ts/mean xs) (ts/mean ys)) (Math/sqrt (+ (/ (ts/variance xs) (count xs)) (/ (ts/variance ys) (count ys))))))
 
 (defn- start-at [model args choices] (:trace (gfi/generate model args choices (rng/key 0))))
 
@@ -157,7 +152,7 @@
         steps (map :n-leapfrog (rest (reductions (fn [r key] (mcmc/nuts (:trace r) (sel/select :x) {:eps eps} key))
                                                  {:trace start} (rng/split (rng/key 11) 300))))]
     (is (<= (apply max steps) 31) (str (frequencies steps)))
-    (is (>= (mean steps) (/ Math/PI (* 4 eps))) (str (mean steps)))))
+    (is (>= (ts/mean steps) (/ Math/PI (* 4 eps))) (str (ts/mean steps)))))
 
 (deftest ^:slow at-depth-one-nuts-accepts-as-metropolis
   ;; With max-depth 1 the trajectory is the start and one step: biased
@@ -171,7 +166,7 @@
         moved (map #(if (identical? start (:trace %)) 0.0 1.0) rs)
         as (map :accept-stat rs)]
     (is (every? #(= 1 (:n-leapfrog %)) rs))
-    (is (< 0.3 (mean as) 0.9) "a test with power: acceptances away from 0 and 1")
+    (is (< 0.3 (ts/mean as) 0.9) "a test with power: acceptances away from 0 and 1")
     (is (< (Math/abs (double (/ (reduce + (map - moved as)) (Math/sqrt (reduce + (map #(* % (- 1.0 %)) as)))))) 5.0))))
 
 (deftest a-divergence-ends-the-trajectory
@@ -191,27 +186,46 @@
 ;; Exact posteriors
 ;; ---------------------------------------------------------------------------
 
-(deftest ^:slow ^:heavy nuts-leaves-the-target-invariant
-  ;; Exact draws of the correlated Gaussian, each moved by two transitions
-  ;; at a fixed step size and inverse metric, against fresh exact draws:
-  ;; the means of x, y, x², y² and xy, each a two-sample z within 5. A
-  ;; chain that stays put would pass, so the transitions must move: a step
-  ;; size this large (their acceptance statistic is 0.67) weighs the
-  ;; trajectory's points unequally, where a bug in their weights shows.
-  ;; Planted bugs (2026-10-23): the energy without the metric (½ p·p), |z|
-  ;; up to 17; weights e^(h - h0) in place of e^(h0 - h), |z| up to 17 (at a
-  ;; step size of 0.6, an acceptance of 0.92, they were within 3)
-  (let [n 1500
-        starts (map (fn [[x y]] (start-at correlated [] (cm/choicemap :x x :y y))) (correlated-draws n (rng/key 14)))
+(defn- moved-against-fresh
+  "n exact draws of the correlated Gaussian, each moved by two transitions
+   at a fixed step size and inverse metric, against n fresh exact draws:
+   {:zs the two-sample z of the means of x, y, x², y² and xy, by label,
+   :acceptance the transitions' mean acceptance statistic}."
+  [n]
+  (let [starts (map (fn [[x y]] (start-at correlated [] (cm/choicemap :x x :y y))) (correlated-draws n (rng/key 14)))
         step (fn [[tr stats] key] (let [r (mcmc/nuts tr xy {:eps 1.0 :inv-metric {:x 3.0 :y 0.006}} key)]
                                     [(:trace r) (conj stats (:accept-stat r))]))
         runs (map (fn [tr key] (reduce step [tr []] (rng/split key 2))) starts (rng/split (rng/key 15) n))
         moved (map (fn [[tr]] [(value tr :x) (value tr :y)]) runs)
         fresh (correlated-draws n (rng/key 16))]
-    (is (< 0.5 (mean (mapcat second runs))) "the transitions move")
-    (doseq [[label f] [["x" first] ["y" second] ["x²" #(* (first %) (first %))] ["y²" #(* (second %) (second %))]
-                       ["xy" #(* (first %) (second %))]]]
-      (is (< (Math/abs (double (z (map f moved) (map f fresh)))) 5.0) label))))
+    {:acceptance (ts/mean (mapcat second runs))
+     :zs (into {} (for [[label f] [["x" first] ["y" second] ["x²" #(* (first %) (first %))] ["y²" #(* (second %) (second %))]
+                                   ["xy" #(* (first %) (second %))]]]
+                    [label (double (z (map f moved) (map f fresh)))]))}))
+
+(deftest ^:slow ^:heavy nuts-leaves-the-target-invariant
+  ;; The means of x, y, x², y² and xy of moved and fresh draws, each a
+  ;; two-sample z within 5. A chain that stays put would pass, so the
+  ;; transitions must move: a step size this large (their acceptance
+  ;; statistic is 0.67) weighs the trajectory's points unequally, where a
+  ;; bug in their weights shows. Planted bugs (2026-10-23): the energy
+  ;; without the metric (½ p·p), |z| up to 17; weights e^(h - h0) in place
+  ;; of e^(h0 - h), |z| up to 17 (at a step size of 0.6, an acceptance of
+  ;; 0.92, they were within 3); the first is
+  ;; nuts-s-check-fails-a-planted-bug
+  (let [{:keys [acceptance zs]} (moved-against-fresh 1500)]
+    (is (< 0.5 acceptance) "the transitions move")
+    (doseq [[label z] zs]
+      (is (< (Math/abs z) 5.0) label))))
+
+(deftest nuts-s-check-fails-a-planted-bug
+  ;; a negative control (genclj-k3a8): nuts-leaves-the-target-invariant's
+  ;; check, on 300 draws, run on the library's NUTS with the energy planted
+  ;; without the metric (½ p·p for ½ p·M⁻¹p, mcmc's energy), must fail: some
+  ;; |z| of 5 or more
+  (let [{:keys [zs]} (with-redefs-fn {#'mcmc/energy (fn [lp p _] (- (* 0.5 (array/sum (* p p))) lp))}
+                       #(moved-against-fresh 300))]
+    (is (some #(<= 5.0 (Math/abs (double %))) (vals zs)) (pr-str zs))))
 
 (deftest ^:slow ^:heavy nuts-samples-a-conjugate-posterior
   ;; Planted bug (2026-10-23): the energy without the metric freezes the
@@ -223,7 +237,7 @@
         m (/ (reduce + ys) 5.25)]
     (is (zero? divergences))
     (is (<= 200.0 (bulk-ess mus)))
-    (is (> 5.0 (deviation mus m)) (str (mean mus)))
+    (is (> 5.0 (deviation mus m)) (str (ts/mean mus)))
     (is (> 5.0 (deviation (map #(* (- % m) (- % m)) mus) (/ 1.0 5.25))))))
 
 (deftest ^:slow ^:heavy nuts-samples-a-correlated-gaussian-of-unequal-scales
@@ -246,7 +260,7 @@
       ;; in the reverse of their order fail both
       (is (= [[:x] [:y]] (cm/addresses inv-metric)))
       (doseq [[addr vs truth] [[:x xs 4.0] [:y ys 0.0041]]]
-        (let [sq (map #(let [c (- % (mean vs))] (* c c)) vs)
+        (let [sq (map #(let [c (- % (ts/mean vs))] (* c c)) vs)
               se (* (dg/mcse-mean (vec sq)) (Math/sqrt (/ (count sq) 500.0)))
               n 500.0
               variance (/ (- (ts/number (cm/get-choice inv-metric addr)) (* 1e-3 (/ 5.0 (+ n 5.0)))) (/ n (+ n 5.0)))]
@@ -259,8 +273,8 @@
                                              {:samples 500 :adapt-metric? false} (rng/key 18)))
             steps (mapv :n-leapfrog stats)
             unit-steps (mapv :n-leapfrog unit-metric)]
-        (is (< (+ (mean steps) (* 5.0 (dg/mcse-mean steps))) (- (mean unit-steps) (* 5.0 (dg/mcse-mean unit-steps))))
-            (str (mean steps) " against " (mean unit-steps)))))))
+        (is (< (+ (ts/mean steps) (* 5.0 (dg/mcse-mean steps))) (- (ts/mean unit-steps) (* 5.0 (dg/mcse-mean unit-steps))))
+            (str (ts/mean steps) " against " (ts/mean unit-steps)))))))
 
 (def ^:private hierarchical-posterior
   "The exact posterior of (mu, theta_0..3) given the group ys: [mean cov]."
@@ -317,7 +331,7 @@
     (testing "the identity over 200 statistics"
       (let [stats (array/->clj (rng/uniform (rng/key 20) [200]))
             da (reduce #(#'nuts/learn %1 %2 opts) (#'nuts/dual-averaging mu) stats)]
-        (is (ts/close? (mean stats) (- 0.8 (/ (* (- mu (Math/log (:eps da))) 0.05 210.0) (Math/pow 200.0 1.5))) {:atol 1e-9}))))))
+        (is (ts/close? (ts/mean stats) (- 0.8 (/ (* (- mu (Math/log (:eps da))) 0.05 210.0) (Math/pow 200.0 1.5))) {:atol 1e-9}))))))
 
 (deftest the-windows-are-stan-s
   ;; Stan's documented schedule for 1000 iterations: buffers of 75 and 50,
@@ -347,7 +361,7 @@
   (let [{:keys [stats]} (nuts/adapt (start-at correlated [] (cm/choicemap :x 0.0 :y 0.0)) xy
                                     {:warmup 1500 :adapt-metric? false :inv-metric {:x 4.0 :y 0.004}} (rng/key 21))
         as (map :accept-stat (drop 750 stats))]
-    (is (> 5.0 (deviation as 0.8)) (str (mean as)))))
+    (is (> 5.0 (deviation as 0.8)) (str (ts/mean as)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Divergences, kernels, keys and errors
@@ -398,7 +412,7 @@
     (is (<= 400.0 (dg/ess-bulk vs)))
     (doseq [[label t p] [["P(v < -3)" -3.0 0.15865525393145707] ["P(v < q05)" q05 0.05]]]
       (let [ind (below t)]
-        (is (< (Math/abs (double (- (mean (apply concat ind)) p))) (* 5.0 (dg/mcse-mean ind))) label)))))
+        (is (< (Math/abs (double (- (ts/mean (apply concat ind)) p))) (* 5.0 (dg/mcse-mean ind))) label)))))
 
 (deftest ^:slow ^:heavy adaptive-hmc-samples-the-correlated-gaussian
   ;; jittered, so the chain mixes wherever the adaptation lands: on Metal,

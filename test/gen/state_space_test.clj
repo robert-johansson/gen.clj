@@ -196,12 +196,6 @@
 ;; Forward filtering, backward sampling
 ;; ---------------------------------------------------------------------------
 
-(defn- within-5-se?
-  "Is the sample mean of xs within 5 standard errors of mu, for draws of
-   variance v?"
-  [xs mu v]
-  (< (Math/abs (clojure.core/- (/ (reduce clojure.core/+ xs) (count xs)) mu)) (* 5 (Math/sqrt (/ v (count xs))))))
-
 (deftest ^:slow ^:heavy sampled-states-follow-the-smoothing-marginals
   (let [draws 2000]
     (doseq [name [:local-level :offsets :vector]
@@ -213,7 +207,7 @@
         (doseq [t (range (count smoothed-means))
                 :let [mu (smoothed-means t) v (smoothed-variances t)]
                 [i m var] (if (number? mu) [[nil mu v]] (map vector (range) mu v))]
-          (is (within-5-se? (map #(if i (get-in % [t i]) (% t)) paths) m var) (str "x_" t (when i (str "[" i "]")))))))
+          (is (ts/within-5-se? (map #(if i (get-in % [t i]) (% t)) paths) m var) (str "x_" t (when i (str "[" i "]")))))))
     (doseq [name [:categorical :normal]
             :let [{:keys [args obs smoothed]} (hmm-case name)
                   tr (:trace (gfi/generate ss/hmm args obs (rng/key 9)))
@@ -221,7 +215,7 @@
       (testing (str name)
         (doseq [t (range (count smoothed))
                 [s p] (map-indexed vector (smoothed t))]
-          (is (within-5-se? (map #(if (= s (% t)) 1.0 0.0) paths) p (* p (clojure.core/- 1.0 p)))
+          (is (ts/within-5-se? (map #(if (= s (% t)) 1.0 0.0) paths) p (* p (clojure.core/- 1.0 p)))
               (str "P(x_" t " = " s ")")))))))
 
 ;; ---------------------------------------------------------------------------

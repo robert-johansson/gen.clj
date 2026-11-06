@@ -27,7 +27,7 @@
   ;; with spot checks off, so that the batched scores themselves are tested
   ;; rather than the fallback a wrong one would trigger
   (prop/for-all [[_ gf args] rm/gen-model
-                 seed gen/nat]
+                 seed laws/seeds]
     (binding [b/*spot-checks* 0]
       (let [ps (b/simulate gf args 3 (rng/key seed))]
         (every? true? (map #(laws/close? %1 (:weight (gfi/assess gf args (:choices %2))))
@@ -56,7 +56,7 @@
 
 (defspec batched-updates-of-random-models-obey-the-update-law 100
   (prop/for-all [[_ gf args] rm/gen-model
-                 seed gen/nat]
+                 seed laws/seeds]
     (binding [b/*spot-checks* 0]
       (let [ps (b/simulate gf args 3 (rng/key seed))
             probe (gfi/simulate gf args (rng/key (inc seed)))
@@ -74,7 +74,7 @@
   ;; them, and its weight is its scalar generate's (runs of different
   ;; structures, which do not stack, fall back, which must hold too)
   (prop/for-all [[_ gf args] rm/gen-model
-                 seed gen/nat]
+                 seed laws/seeds]
     (binding [b/*spot-checks* 0]
       (let [own (mapv #(:choices (gfi/simulate gf args %)) (rng/split (rng/key seed) 3))
             {ps :particles ws :weights} (b/generate gf args cm/EMPTY 3 (rng/key 1) {:per-particle own})]
@@ -84,7 +84,7 @@
 (defspec per-particle-updates-of-random-models-obey-the-update-law 100
   ;; particle i's constraint at the first address of its own scalar run
   (prop/for-all [[_ gf args] rm/gen-model
-                 seed gen/nat]
+                 seed laws/seeds]
     (binding [b/*spot-checks* 0]
       (let [ps (b/simulate gf args 3 (rng/key seed))
             own (mapv #(let [c (:choices (gfi/simulate gf args %))
@@ -108,7 +108,7 @@
 ;; batched results themselves are compared with the scalar handler's, and a
 ;; model must stay batched.
 
-(def ^:private switch-case (gen/tuple rm/gen-switch-model gen/nat (gen/choose 1 6)))
+(def ^:private switch-case (gen/tuple rm/gen-switch-model laws/seeds (gen/choose 1 6)))
 
 (defn- index-paths
   "The paths of a trace's top-level Switch and Mix indices, which every
@@ -284,7 +284,7 @@
   ;; (vmap's semantics either way; a NaN where the trace's own gradient has
   ;; one). A batched collection's gradient must not fall back itself
   (prop/for-all [[_ gf args] rm/gen-model
-                 seed gen/nat]
+                 seed laws/seeds]
     (binding [b/*spot-checks* 0]
       (let [ps (b/simulate gf args 3 (rng/key seed))
             trs (b/traces ps)

@@ -10,6 +10,7 @@
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
             [gen.array :as array :refer [==]]
+            [gen.laws :as laws]
             [gen.random :as rng]
             [gen.random.threefry :as threefry]))
 
@@ -99,7 +100,7 @@
       (is (= (rng/fold-in k 3) (rng/fold-in k (int 3)) (rng/fold-in k (bigint 3))) "any integer type"))))
 
 (defspec fold-in-is-split-at-an-index 100
-  (prop/for-all [seed gen/nat i (gen/choose 0 50)]
+  (prop/for-all [seed laws/seeds i (gen/choose 0 50)]
     (let [k (rng/key seed)]
       (= (rng/fold-in k i) (nth (rng/split k (inc i)) i)))))
 

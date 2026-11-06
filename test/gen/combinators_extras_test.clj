@@ -248,7 +248,7 @@
             t (gen/choose 0 8)
             obs? gen/boolean
             v (gen/double* {:min -3 :max 3 :NaN? false})
-            seed gen/nat]
+            seed laws/seeds]
     {:xs (subvec xs 0 n) :xs' (subvec xs' 0 n') :init init :drift drift :t t :addr (if obs? :obs :s) :v v :seed seed}))
 
 (defn- same-result? [r1 r2]

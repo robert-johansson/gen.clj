@@ -346,6 +346,15 @@ other values for the same key, from the same distribution.
   refused one), slowly; now the JVM lowering runs it, as with `{:device
   :jvm}`, and its result's `:device` is `:jvm`. Many chains on the GPU
   stay run-chains'.
+### Changes
+
+- **Added: native suites' skips are counted** (genclj-ruh8). The tests of
+  MLX's binding and of llama.cpp pass with no assertions where their
+  library or test model is missing; `clojure -X:test` (now
+  `gen.test-runner`, cognitect's runner then this) and `-X:test:par` print
+  at their end how many of them ran and skipped, and why.
+  `-J-Dgen.require-native=mlx,llama` fails a run in which a suite it names
+  skipped a test or ran none, for a release gate's runs.
 
 ## [1.2.0] - 2026-11-06
 

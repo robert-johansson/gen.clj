@@ -193,10 +193,6 @@
 
 (defn normals [key n mu sd] (mapv #(+ mu (* sd %)) (ts/host (dc/sample (d/normal 0 1) key [n]))))
 
-(defn mean-sd [xs]
-  (let [n (count xs) m (/ (reduce clojure.core/+ xs) n)]
-    [m (Math/sqrt (/ (reduce clojure.core/+ (map #(Math/pow (- % m) 2) xs)) (dec n)))]))
-
 (def scaled
   "x ~ N(0, 1), y ~ N(x, 0.5) with y = 0.8: x | y ~ N(0.64, √0.2)."
   (gen [] (let [x (trace :x (d/normal 0 1))] (trace :y (d/normal x 0.5)))))
@@ -212,12 +208,11 @@
                           (mh/involutive-mh tr log-scale [] move key)))
                       xs (rng/split (rng/key 14) n))
         xs' (mapv #(ts/number ((:trace %) :x)) stepped)
-        accepted (count (filter :accepted? stepped))
-        [m s] (mean-sd xs')]
+        accepted (count (filter :accepted? stepped))]
     (is (< 0.2 (/ accepted n) 0.95) (str accepted " accepted"))
     ;; mean 0.64, sd √0.2: five standard errors of each over n chains
-    (is (< (Math/abs (- m 0.64)) (* 5 (/ (Math/sqrt 0.2) (Math/sqrt n)))) (str m))
-    (is (< (Math/abs (- (* s s) 0.2)) (* 5 0.2 (Math/sqrt (/ 2.0 (dec n))))) (str (* s s)))))
+    (is (ts/within-5-se? xs' 0.64 0.2) (str (ts/mean xs')))
+    (is (ts/variance-within-5-se? xs' 0.2) (str (ts/variance xs')))))
 
 (def two-means
   "One mean for both observations, or one each (prior 1/2): a jump between
@@ -597,9 +592,8 @@
                        (let [[k1 k2] (rng/split key)
                              state (pf/initialize p-sum-observed [] (cm/choicemap :o 0.5) 20 {:key k1})]
                          (Math/exp (- (pf/log-ml-estimate (pf/move-reweight state translate k2)) evidence))))
-                     (rng/split (rng/key 50) runs))
-        [m sd] (mean-sd ratios)]
-    (is (< (Math/abs (- m 1.0)) (* 5 (/ sd (Math/sqrt runs)))) (str m " ± " (/ sd (Math/sqrt runs))))))
+                     (rng/split (rng/key 50) runs))]
+    (is (ts/within-5-se? ratios 1.0) (str (ts/mean ratios) " ± " (ts/se ratios)))))
 
 (def merge-or-walk
   "From two means a fair coin picks a merge or a random walk on mu1; from

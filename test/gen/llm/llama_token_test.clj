@@ -15,7 +15,8 @@
             [gen.llm.branching :as br]
             [gen.llm.lm :as lm]
             [gen.llm.token :as token]
-            [gen.random :as rng]))
+            [gen.random :as rng]
+            [gen.test-support :as ts]))
 
 (def ^:private model-path
   (or (System/getProperty "gen.llama.test-model") (System/getenv "GEN_LLAMA_TEST_MODEL")))
@@ -24,7 +25,7 @@
 
 (def ^:private available?
   (delay
-    (let [skip (fn [why] (println "Skipping the llama.cpp token tests:" why) false)]
+    (let [skip (fn [why] (println "Skipping the llama.cpp token tests:" why) (ts/native-unavailable! :llama why) false)]
       (cond
         (nil? model-path) (skip "no model (-J-Dgen.llama.test-model=<a GGUF file>, or GEN_LLAMA_TEST_MODEL)")
         (not (.isFile (java.io.File. ^String model-path))) (skip (str "no model file at " model-path))
@@ -53,7 +54,7 @@
 (defn- prompt [] ((llama 'tokenize) (:engine (setup)) "The capital of Sweden is"))
 
 (deftest the-laws-hold-within-one-lm
-  (when @available?
+  (ts/when-native :llama available?
     (let [{:keys [completion]} (setup)
           p (prompt)
           cases (laws/cases [[:llama completion [p 4] [[p 2] [p 6]]]])]
@@ -62,7 +63,7 @@
           (is (:pass? r) (str k " " (pr-str (select-keys r [:fail :shrunk])))))))))
 
 (deftest forced-text-and-decoded-completions
-  (when @available?
+  (ts/when-native :llama available?
     (let [{:keys [lm completion engine]} (setup)
           p (prompt)
           stockholm (lm/encode lm " Stockholm" {:add-special? false})

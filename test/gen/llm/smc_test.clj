@@ -42,7 +42,8 @@
             [gen.llm.smc :as smc]
             [gen.llm.token :as token]
             [gen.llm.toy-engine :as toy]
-            [gen.random :as rng])
+            [gen.random :as rng]
+            [gen.test-support :as ts])
   (:import [java.util.concurrent ExecutorService ThreadPoolExecutor]))
 
 (def ^:private n-vocab 5)
@@ -105,11 +106,10 @@
 (defn- uniform-proposal [_context ^floats row]
   (float-array (alength row) (float (- (Math/log (alength row))))))
 
-(defn- mean ^double [xs] (/ (reduce + 0.0 xs) (count xs)))
-(defn- sd ^double [xs] (let [mu (mean xs)] (Math/sqrt (/ (reduce + (map #(Math/pow (- % mu) 2) xs)) (dec (count xs))))))
-
-(defn- within-5-se? [zs ^double z]
-  (<= (Math/abs (- (mean zs) z)) (* 5 (/ (sd zs) (Math/sqrt (count zs))))))
+;; the battery's sample statistics: is zs's mean within 5 standard errors
+;; of z, from their own spread?
+(def ^:private mean ts/mean)
+(def ^:private within-5-se? ts/within-5-se?)
 
 (defn- estimates
   "exp(log Ẑ) of runs runs of n particles."

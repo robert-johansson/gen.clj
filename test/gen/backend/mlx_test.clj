@@ -5,7 +5,8 @@
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
             [gen.array.memory :as reservations]
-            [gen.array.protocols :as p]))
+            [gen.array.protocols :as p]
+            [gen.test-support :as ts]))
 
 (def available?
   (delay
@@ -13,12 +14,17 @@
       (Class/forName "gen.mlx.MlxRuntime")
       true
       (catch Throwable t
-        (println "Skipping the MLX tests:" (or (ex-message t) (.getName (class t)))
-                 "(build with native/build-mlx.sh and clojure -T:build java)")
+        (let [why (str (or (ex-message t) (.getName (class t)))
+                       " (build with native/build-mlx.sh and clojure -T:build java)")]
+          (println "Skipping the MLX tests:" why)
+          (ts/native-unavailable! :mlx why))
         false))))
 
-(defmacro ^:private when-mlx [& body]
-  `(when @available? ~@body))
+(defmacro ^:private when-mlx
+  "body when the MLX binding loads, else a skipped test, counted
+   (gen.test-support/when-native)."
+  [& body]
+  `(ts/when-native :mlx available? ~@body))
 
 (defn- mlx [] @(requiring-resolve 'gen.backend.mlx/backend))
 
@@ -875,7 +881,10 @@
   (let [java (str (System/getProperty "java.home") "/bin/java")
         code (str "(require 'gen.backend.mlx-test) (Class/forName \"gen.mlx.MlxRuntime\")"
                   " (println (or (@(resolve 'gen.backend.mlx-test/process-env) \"MLX_ENABLE_TF32\") \"unset\"))")
+        lib (System/getProperty "gen.mlx.lib")
         cmd (cond-> [java "--enable-native-access=ALL-UNNAMED" "-cp" (System/getProperty "java.class.path")]
+              ;; the library this JVM loads (a worktree has none at the default path)
+              lib (conj (str "-Dgen.mlx.lib=" lib))
               prop (conj (str "-Dgen.mlx.tf32=" prop))
               true (into ["clojure.main" "-e" code]))
         pb (ProcessBuilder. ^java.util.List cmd)

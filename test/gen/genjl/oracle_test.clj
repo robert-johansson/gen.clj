@@ -40,12 +40,6 @@
     (doseq [{:keys [x alpha beta log-prob] :as point} (filter d6? oracle/beta-endpoints)]
       (is (and (Double/isFinite log-prob) (= ##Inf (genjl/logpdf d/beta x alpha beta))) (pr-str point)))))
 
-(defn- mean [xs] (/ (reduce + xs) (count xs)))
-
-(defn- sd [xs]
-  (let [m (mean xs)]
-    (Math/sqrt (/ (reduce + (map #(let [e (- % m)] (* e e)) xs)) (dec (count xs))))))
-
 (deftest statistics
   (is (= (range 1 21) oracle/seeds))
   (doseq [path (concat (for [q [:theta1 :theta2 :theta3 :theta4 :theta5]] ["train.jl:1" q])
@@ -54,7 +48,7 @@
                        [["particle_filter.jl:96" :log-ml] ["particle_filter.jl:146" :log-ml]]
                        (for [op [:generate :simulate] s ["(.aa)" "(-b(-aa)b)"]] ["recurse.jl:66" op s]))]
     (let [{:keys [values] :as s} (apply oracle/statistic path)]
-      (is (and (= 20 (count values)) (genjl/approx? (:mean s) (mean values)) (genjl/approx? (:sd s) (sd values)))
+      (is (and (= 20 (count values)) (genjl/approx? (:mean s) (ts/mean values)) (genjl/approx? (:sd s) (ts/sd values)))
           (pr-str path))))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no statistic" (oracle/statistic "train.jl:1" :theta6)))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no statistic" (oracle/statistic "recurse.jl:66" :generate))

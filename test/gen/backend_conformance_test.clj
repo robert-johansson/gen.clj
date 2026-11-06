@@ -25,6 +25,7 @@
             [gen.array.linalg :as la]
             [gen.array.protocols :as p]
             [gen.backend.jvm :as jvm]
+            [gen.laws :as laws]
             [gen.random :as rng]))
 
 (def tested array/*backend*)
@@ -426,7 +427,7 @@
   ;; take every path (leading, middle, trailing and adjacent axes, counts
   ;; with and without a divisor near the block size)
   (prop/for-all [shape (gen/elements [[300000] [700 900] [517 9 63] [64 3 1100] [5 2003 31]])
-                 seed gen/nat
+                 seed laws/seeds
                  keep? gen/boolean]
     (let [axes (gen/generate (gen-axes (count shape)) 10 seed)
           host (array/->clj (array/- (array/* 2.0 (rng/uniform (rng/key seed) shape)) 1.0))
@@ -451,7 +452,7 @@
   ;; of 256 pass: each sum is within a few ulps at either size, and the
   ;; difference shows only when an iterated computation compounds them
   (prop/for-all [shape (gen/elements [[528125] [3125 169] [169 3125] [25 125 169]])
-                 seed gen/nat]
+                 seed laws/seeds]
     (let [axes (gen/generate (gen-axes (count shape)) 10 seed)
           w (array/square (array/square (array/+ (array/* 0.999 (rng/uniform (rng/key seed) shape)) 1e-3)))
           host (array/->clj (array/* w (array/log w)))

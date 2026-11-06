@@ -33,6 +33,7 @@ clojure -X:test:par                   # every test (clojure.test + test.check, t
 clojure -X:test:fast                  # the same in one JVM (also any backend), ~2 min
 clojure -X:test                       # every test in one JVM, ~7 min
 clojure -X:test:conformance           # the backend conformance suite (array level)
+clojure -J-Dgen.require-native=mlx -J-Dgen.backend=mlx -X:test   # a release gate's run: fails if a native suite named (mlx, llama) skipped; every run prints their skips
 clojure -X:test :patterns '["gen.book.*"]'   # the book (book/): every chapter run, its results checked (Parts II-V ^:slow)
 clojure -M:test -m gen.book sync      # write the book's includes (from book/src) and figures
 clojure -M:test -m gen.book pdf       # the book as a PDF (pandoc, xelatex, rsvg-convert): target/book/
