@@ -43,7 +43,6 @@
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]
             [gen.array.tree :as tree]
-            [gen.choicemap :as cm]
             [gen.random.threefry :as threefry]))
 
 (set! *warn-on-reflection* true)
@@ -422,17 +421,16 @@
         :else (throw (ex-info (str "A staged function returned " (pr-str x) ", not an array") {:value x}))))
 
 (defn constants
-  "x with every array of another backend in it (a tree, or a choice map's
-   leaves) made a constant of the graph being staged: a model's arguments
-   and observations, made on the JVM backend."
+  "x with every array of another backend in it made a constant of the graph
+   being staged: a model's arguments and observations, made on the JVM
+   backend. x is a tree (array/tree-map's: maps, records among them, and
+   vectors), so a choice map too, whose nodes and values are records."
   [x]
-  (let [c (fn [a] (if (and (array/backend-array? a) (not (staged? a)))
-                    (op! :constant [] (array/shape a) (staged-dtype (array/dtype a))
-                         {:values (vec (flatten [(array/->clj a)]))})
-                    a))]
-    (if (cm/choicemap? x)
-      (reduce (fn [m [path v]] (cm/set-choice m path (c v))) x (cm/leaves x))
-      (array/tree-map c x))))
+  (array/tree-map (fn [a] (if (and (array/backend-array? a) (not (staged? a)))
+                            (op! :constant [] (array/shape a) (staged-dtype (array/dtype a))
+                                 {:values (vec (flatten [(array/->clj a)]))})
+                            a))
+                  x))
 
 (defn- leaves [t] (if (instance? StagedKey t) [(.-words ^StagedKey t)] (array/tree-leaves t)))
 
