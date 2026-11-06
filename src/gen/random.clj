@@ -302,10 +302,12 @@
          [ds l-bits] (chunks key (vec shape) b)
          j (top-of-product ds (limbs r l-bits) l-bits)
          v (+ lo j)
-         ;; exact, so in range, for a host range the JVM backend's doubles
-         ;; hold (below 2^53); past it, or for an array range (empty where it
-         ;; was not read), clamped into [low, high - 1]: low when empty
-         v (if (and host? (clojure.core/< (long r) 9007199254740992))
+         ;; exact, so in range, for host bounds whose integers the JVM
+         ;; backend's doubles hold (within +-2^53, so r below 2^53 too);
+         ;; past them, or for an array range (empty where it was not read),
+         ;; clamped into [low, high - 1]: low when empty
+         v (if (and host? (clojure.core/< (long r) 9007199254740992)
+                    (clojure.core/<= -9007199254740992 lo) (clojure.core/<= hi 9007199254740992))
              v
              (array/maximum (array/minimum v (- hi 1)) lo))]
      (array/astype v int-dt))))

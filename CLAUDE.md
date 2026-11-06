@@ -1,8 +1,9 @@
 # gen.clj — guide for agents
 
 gen.clj ports GenMLX (`~/code/genmlx`, ClojureScript on MLX) to Clojure on the
-JVM, aiming at Gen.jl's capabilities. The design and its decisions are in
-`DESIGN.md`. Read it, and the docs it points to, before changing architecture.
+JVM, aiming at Gen.jl's capabilities. The design and the current conventions
+are in `DESIGN.md` (§9), the decision log in `docs/decisions.md`. Read it, and
+the docs it points to, before changing architecture.
 
 - `docs/array-api.md`: the array API and its backend contract (approved).
 - `docs/porting-genmlx.md`: how to translate GenMLX code, with the distribution
