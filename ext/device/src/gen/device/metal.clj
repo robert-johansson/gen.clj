@@ -26,6 +26,7 @@
   (:refer-clojure :exclude [compile])
   (:require [gen.array :as array]
             [gen.backend.mlx]
+            [gen.backend.mlx.array]
             [gen.device.scalar :as sc]
             [gen.random :as rng])
   (:import [gen.mlx Mlx MlxRaw MlxRuntime]
@@ -308,16 +309,16 @@ inline void g_threefry(uint k0, uint k1, uint c0, uint c1, thread uint& w0, thre
          (doseq [{:keys [shape dtype]} outputs]
            (let [shp (into [n] shape)]
              (Mlx/mlx_fast_metal_kernel_config_add_output_arg cfg (.allocateFrom arena ValueLayout/JAVA_INT (int-array (map int shp)))
-                                                              (long (count shp)) (int (gen.backend.mlx/code dtype)))))
+                                                              (long (count shp)) (int (gen.backend.mlx.array/code dtype)))))
          (doseq [[size dtype] [[(:float-size scratch) :float32] [(:uint-size scratch) :uint32]] :when (pos? size)]
            (Mlx/mlx_fast_metal_kernel_config_add_output_arg cfg (.allocateFrom arena ValueLayout/JAVA_INT (int-array [(int (* n size))]))
-                                                            1 (int (gen.backend.mlx/code dtype)))))
+                                                            1 (int (gen.backend.mlx.array/code dtype)))))
        (Mlx/mlx_fast_metal_kernel_config_set_grid cfg (int n) 1 1)
        (Mlx/mlx_fast_metal_kernel_config_set_thread_group cfg (int (min n thread-group)) 1 1)
-       (let [in (MlxRuntime/vectorOf (long-array (map #(.-h ^gen.backend.mlx.MlxArray %) (concat [root nn] inputs constant-arrays))))]
+       (let [in (MlxRuntime/vectorOf (long-array (map #(.-h ^gen.backend.mlx.array.MlxArray %) (concat [root nn] inputs constant-arrays))))]
          (try
-           (let [out (Mlx/mlx_fast_metal_kernel_apply (.-h ^Kernel kernel) in cfg (gen.backend.mlx/stream b))]
-             (try (let [arrays (vec (take (count outputs) (mapv #(gen.backend.mlx/wrap b %) (MlxRuntime/vectorArrays out))))]
+           (let [out (Mlx/mlx_fast_metal_kernel_apply (.-h ^Kernel kernel) in cfg (gen.backend.mlx.array/stream b))]
+             (try (let [arrays (vec (take (count outputs) (mapv #(gen.backend.mlx.array/wrap b %) (MlxRuntime/vectorArrays out))))]
                     (if error-output
                       ;; the flags read (evaluating the run) before anything is returned
                       (let [flags (array/->clj (nth arrays error-output))]
@@ -353,7 +354,7 @@ inline void g_threefry(uint k0, uint k1, uint c0, uint c1, thread uint& w0, thre
    ints) or boolean[]. One copy of its buffer, nothing boxed. Evaluates x."
   [x]
   (array/eval! [x])
-  (let [^gen.backend.mlx.MlxArray x x
+  (let [^gen.backend.mlx.array.MlxArray x x
         h (.-h x)
         n (long (reduce * 1 (array/shape x)))]
     (try

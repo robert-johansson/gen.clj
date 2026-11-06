@@ -491,7 +491,7 @@
 (deftest the-buffer-limit-is-retried-once
   ;; the retry itself, with an error made here: fast, on any device
   (when-mlx
-    (let [at-limit @(requiring-resolve 'gen.backend.mlx/at-buffer-limit)
+    (let [at-limit @(requiring-resolve 'gen.backend.mlx.memory/at-buffer-limit)
           [_ collections0] (vec (gen.mlx.MlxRuntime/lifetimeStats))
           calls (atom 0)]
       (testing "at the limit once: a collection, then the call again"
@@ -519,6 +519,14 @@
     (binding [*read-eval* false]
       (doall (take-while #(not= % ::eof) (repeatedly #(read {:eof ::eof} r)))))))
 
+(def ^:private backend-sources
+  "The MLX backend's source files, which the checks below read:
+   gen.backend.mlx and its parts, but gen.backend.mlx.exact (written in
+   gen.array's ops, it makes no handles)."
+  (into ["src/gen/backend/mlx.clj"]
+        (for [f (sort (.list (java.io.File. "src/gen/backend/mlx"))) :when (not= f "exact.clj")]
+          (str "src/gen/backend/mlx/" f))))
+
 (deftest every-array-from-host-data-is-made-through-made
   ;; at Metal's buffer limit an mlx-c constructor (mlx_array_new_*) returns
   ;; an empty handle; made turns that into MLX's error, collects and
@@ -535,7 +543,7 @@
                     (constructor? form) [form]
                     (coll? form) (mapcat raw form)
                     :else []))]
-    (is (= [] (vec (mapcat raw (source-forms "src/gen/backend/mlx.clj")))))))
+    (is (= [] (vec (mapcat raw (mapcat source-forms backend-sources)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Temporary handles: with-temps frees them, failure paths too (genclj-f0wz)
@@ -547,7 +555,7 @@
   ;; and device handles never freed. Read from the source, so it runs
   ;; without MLX. Planted (2026-10-22): int-division written by hand again,
   ;; and gpu? taking a device without freeing it, each fail
-  (let [forms (source-forms "src/gen/backend/mlx.clj")
+  (let [forms (mapcat source-forms backend-sources)
         named (fn [form] (when (seq? form) (second form)))
         uses (fn [form pred] (filter pred (tree-seq coll? seq form)))
         array-list? #(= 'java.util.ArrayList. %)
@@ -647,7 +655,7 @@
         planted (fn [old new]
                   (is (.contains ^String text old) (str "the plant's site is in the source: " old))
                   (loose-handles (forms-of (.replace ^String text ^CharSequence old ^CharSequence new))))]
-    (is (= [] (loose-handles (source-forms path))))
+    (is (= [] (loose-handles (mapcat source-forms backend-sources))))
     (testing "the walk's power"
       (is (= '[(scalar-handle 0 dtype)]
              (planted "(let [zero (t (scalar-handle 0 dtype))" "(let [zero (scalar-handle 0 dtype)"))
@@ -664,14 +672,14 @@
   [f fail-at]
   (let [registered (atom 0)
         freed (atom 0)
-        temp! @(requiring-resolve 'gen.backend.mlx/temp!)
-        free-temp @(requiring-resolve 'gen.backend.mlx/free-temp)]
-    (with-redefs-fn {(requiring-resolve 'gen.backend.mlx/temp!)
+        temp! @(requiring-resolve 'gen.backend.mlx.operands/temp!)
+        free-temp @(requiring-resolve 'gen.backend.mlx.operands/free-temp)]
+    (with-redefs-fn {(requiring-resolve 'gen.backend.mlx.operands/temp!)
                      (fn ^long [temps x]
                        (if (= fail-at (inc @registered))
                          (do (swap! registered inc) (free-temp x) (throw (ex-info "planted" {::planted true})))
                          (let [h (temp! temps x)] (swap! registered inc) h)))
-                     (requiring-resolve 'gen.backend.mlx/free-temp)
+                     (requiring-resolve 'gen.backend.mlx.operands/free-temp)
                      (fn [x] (swap! freed inc) (free-temp x))}
       #(try (array/eval! (f))
             (catch clojure.lang.ExceptionInfo e (when-not (::planted (ex-data e)) (throw e)))))
@@ -737,7 +745,7 @@
   ;; arguments and fence: the review's I1-12). Planted (2026-10-22): the old
   ;; expansion fails
   (when-mlx
-    (let [expansion (apply @(requiring-resolve 'gen.backend.mlx/with-operands) nil nil
+    (let [expansion (apply @(requiring-resolve 'gen.backend.mlx.operands/with-operands) nil nil
                            '[b :op [h (operand-form) nil hy y nil] body])]
       (is (= 1 (count (filter #{'(operand-form)} (tree-seq coll? seq expansion))))))))
 
@@ -758,7 +766,7 @@
   ;; every float64 exp, the tape on every gradient) cost about 120 ns each
   ;; time (the review's I1-10): each resolves once, in a delay. Read from the
   ;; source. Planted (2026-10-22): exact/sum resolved per call fails
-  (doseq [path ["src/gen/backend/mlx.clj" "src/gen/backend/jvm.clj"]]
+  (doseq [path (conj backend-sources "src/gen/backend/jvm.clj")]
     (let [loose (fn loose [form]
                   (cond (and (seq? form) (= 'delay (first form))) []
                         (and (seq? form) (= 'requiring-resolve (first form))) [form]
@@ -772,7 +780,7 @@
   ;; temp! checks the kind. Planted (2026-10-22): temp! without the check
   ;; fails
   (when-mlx
-    (let [temp! @(requiring-resolve 'gen.backend.mlx/temp!)
+    (let [temp! @(requiring-resolve 'gen.backend.mlx.operands/temp!)
           temps (java.util.ArrayList.)]
       (is (= :closur (:kind (try (temp! temps [:closur 1]) nil (catch clojure.lang.ExceptionInfo e (ex-data e))))))
       (is (zero? (.size temps)) "and is not registered")
