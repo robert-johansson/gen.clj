@@ -11,12 +11,13 @@
    arguments are constants of the program; the trace's choices, score and
    return value, or the observations, are its inputs.
 
-   Programs are cached. A kernel of kernel/mala or kernel/hmc is keyed by
-   its kind and parameters (another kernel by its identity), the model by
-   its identity, its arguments one by one (host scalars by value, a double
-   by its bits; arrays and the rest by identity) and the chain by its
-   length: a run alike reuses the program, a run on new data arrays or of
-   another length compiles anew.
+   Programs are cached (gen.inference.cache: the 64 most recently used of
+   them and of mcmc's compiled steps). A kernel of kernel/mala or
+   kernel/hmc is keyed by its kind and parameters (another kernel by its
+   identity), the model by its identity, its arguments one by one (host
+   scalars by value, a double by its bits; arrays and the rest by
+   identity) and the chain by its length: a run alike reuses the program,
+   a run on new data arrays or of another length compiles anew.
 
    The run is the handler's (decision 5): in float64 on the JVM backend bit
    for bit, else to float32 rounding. Programs stage at the current
@@ -31,12 +32,12 @@
   {:api :experimental}
   (:require [gen.array :as array]
             [gen.array.dtype :as dt]
-            [gen.array.protocols :as p]
             [gen.array.stage :as st]
             [gen.array.tree :as tree]
             [gen.batched :as batched]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
+            [gen.inference.cache :as cache]
             [gen.inference.kernel :as kernel]
             [gen.random :as rng]
             [gen.trace :as trace]))
@@ -52,18 +53,11 @@
   (equals [_ x] (and (instance? Id x) (identical? o (.-o ^Id x))))
   (hashCode [_] (System/identityHashCode o)))
 
-(defonce ^:private cache (atom {}))
-
-(def ^:private cache-limit 64)
-
 (defn- cached
-  "The value at k in the program cache, made by (make) when absent (the
-   cache emptied past cache-limit entries)."
+  "The program at k, made by (make) when absent: in the bounded cache of
+   compiled code that mcmc's compiled steps share (gen.inference.cache)."
   [k make]
-  (or (get @cache k)
-      (let [v (make)]
-        (swap! cache (fn [c] (assoc (if (>= (count c) cache-limit) {} c) k v)))
-        v)))
+  (cache/cached [::program k] make))
 
 (defn- arg-key
   "An argument's part of a program's key: a host scalar by value (a double
@@ -77,9 +71,10 @@
 (defn- args-key [args] (mapv arg-key args))
 
 (defn ^:no-doc clear-cache!
-  "Forget every compiled program."
+  "Forget every compiled program (and mcmc's compiled steps: the cache is
+   gen.inference.cache's)."
   []
-  (reset! cache {}))
+  (cache/clear!))
 
 (defn- compile-program [device program]
   (let [f (try (requiring-resolve 'gen.device/compile-program)
@@ -541,7 +536,8 @@
     (when (and keep-choices (not (and (sequential? keep-choices) (seq keep-choices))))
       (throw (ex-info "run-chains: :keep-choices is a vector of addresses" {:reason :invalid-keep-choices :keep-choices keep-choices})))
     (let [made (* (count traces) (long (:samples opts 0)))]
-      (when (and (not keep-choices) (p/-lazy? array/*backend*) (> made (long trace-limit)))
+      ;; the traces' arrays lazy: MLX's, each a Metal buffer
+      (when (and (not keep-choices) (not (array/concrete? (:score (first traces)))) (> made (long trace-limit)))
         (throw (ex-info (str "run-chains: " (count traces) " chains of " (:samples opts) " kept steps make " made
                              " traces, each a few MLX arrays, past what Metal holds at once: keep values with"
                              " :keep-choices [address …] (read from the program's outputs, no trace made),"

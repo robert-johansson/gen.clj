@@ -56,6 +56,14 @@ other values for the same key, from the same distribution.
   lowering is parked (DESIGN §9, 1.2.1's owner calls): no consumer,
   gen.device's devices stay `:jvm` and `:metal`, and its tests that need
   a CUDA device skip, by name.
+- **Changed: one bounded cache of compiled code** (gen.inference.cache,
+  internal: gen.inference.mcmc's `:compile?` steps and
+  gen.inference.device's programs; genclj-2j7v). The 64 most recently used
+  entries in all, where the device kept 64 programs and mcmc 16 steps,
+  each cache emptied whole when full: an entry pins its model and data
+  arrays (Metal buffers on MLX). And a Metal kernel's handle
+  (gen.device.metal) is freed once its compiled program is unreachable;
+  it never was.
 
 ## [1.2.0] - 2026-11-06
 

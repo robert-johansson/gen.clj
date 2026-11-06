@@ -13,6 +13,7 @@
             [gen.dist :as d]
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
+            [gen.inference.cache :as cache]
             [gen.inference.device :as device]
             [gen.inference.importance :as is]
             [gen.inference.kernel :as kernel]
@@ -442,7 +443,7 @@
     (device/clear-cache!)
     (let [[model args obs] (pm/models :vector)
           tr (:trace (gfi/generate model args obs (rng/key 0)))
-          programs #(count @@#'gen.inference.device/cache)
+          programs #(cache/size)
           run #(kernel/run %1 %2 {:samples %3 :key (rng/key 1) :device :jvm})]
       (run (kernel/mala pm/selection pm/tau) tr 5)
       (is (= 1 (programs)))

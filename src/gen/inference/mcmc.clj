@@ -75,6 +75,7 @@
             [gen.dist.core :as dc]
             [gen.gfi :as gfi]
             [gen.gradients :as grad]
+            [gen.inference.cache :as cache]
             [gen.random :as rng]
             [gen.selection :as sel]
             [gen.trace]))
@@ -374,25 +375,19 @@
       (->DenseInvMetric (mapv first (cm/leaves proto)) (:inv inv))
       (cm/from-array proto (if (array/host? inv) (array/full (array/shape v) inv {:dtype (array/dtype v)}) inv)))))
 
-(def ^:private compiled-steps
-  "Compiled kernel steps by kernel and settings, model, arguments and choice
-   structure (the most recent few), or ::plain where compiling failed."
-  (atom {}))
-
 (defn- compiled
   "The kernel step (build) compiled for this trace's model, arguments and
-   choice structure (cached under settings): a function of the step's
+   choice structure (cached under settings, in gen.inference.cache, or
+   ::plain there where compiling failed): a function of the step's
    arguments, which returns nil when the model cannot be compiled (it reads
    a value on the host), and that is remembered."
   [trace proto others settings build]
   (let [structure (fn [m] (array/tree-map (fn [x] [(array/shape x) (array/dtype x)]) m))
-        k [settings (:gen-fn trace) (:args trace) (structure others) (structure (cm/to-map proto))]]
+        k [::step settings (:gen-fn trace) (:args trace) (structure others) (structure (cm/to-map proto))]]
     (fn [& args]
-      (let [cached (get @compiled-steps k)]
+      (let [cached (cache/lookup k)]
         (when-not (= cached ::plain)
-          (let [f (or cached (let [f (array/compile (build))]
-                               (swap! compiled-steps (fn [m] (assoc (if (>= (count m) 16) {} m) k f)))
-                               f))]
+          (let [f (or cached (cache/store! k (array/compile (build))))]
             (try (apply f args)
                  (catch Exception e
                    ;; the first call traces the step: whatever fails there (a
@@ -401,7 +396,7 @@
                    ;; on, and the plain kernel raises it again if it is the
                    ;; model's own error
                    (if (or (nil? cached) (= :compile (:op (ex-data e))))
-                     (do (swap! compiled-steps assoc k ::plain) nil)
+                     (do (cache/store! k ::plain) nil)
                      (throw e))))))))))
 
 (defn- log-density
@@ -530,9 +525,10 @@
                                          {:value key-or-opts})))]
     (assoc opts :key (or (:key opts) (gfi/next-key)))))
 
-(defn- mala-move
+(defn ^:no-doc mala-move
   "MALA's move of trace as a function of arrays and keys only (verdict), so
-   that it runs batched over particles too: options and keys mala's."
+   that it runs batched over particles too: options and keys mala's.
+   Public for ext/device's programs (gen.device.chain)."
   [trace selection tau {:keys [compile? inv-metric]} key]
   (let [[k-propose _ k-accept] (rng/split key 3)
         [proto v others] (flat-values trace selection)
@@ -601,9 +597,10 @@
                      (array/where diverged g g-next) (array/where diverged lp' lp-next) diverged))
             [v p diverged start-ok lp lp']))))))
 
-(defn- hmc-move
+(defn ^:no-doc hmc-move
   "HMC's move of trace as a function of arrays and keys only (verdict), so
-   that it runs batched over particles too: options and keys hmc's."
+   that it runs batched over particles too: options and keys hmc's.
+   Public for ext/device's programs (gen.device.chain)."
   [trace selection {:keys [L eps compile? inv-metric] :or {L 10 eps 0.1}} key]
   (let [[k-momenta _ k-accept] (rng/split key 3)
         [proto v others] (flat-values trace selection)

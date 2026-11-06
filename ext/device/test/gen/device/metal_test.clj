@@ -106,3 +106,21 @@
       (testing "an in-range run returns its score alone"
         (let [outs (metal/run k 1 (rng/key-data (rng/key good)))]
           (is (= 1 (count outs))))))))
+
+(deftest a-kernel-unreachable-is-freed
+  ;; genclj-2j7v: mlx_fast_metal_kernel_new's handle is freed once the
+  ;; compiled program is unreachable (a Cleaner). Planted bug (2026-11-06):
+  ;; the handle a bare long (1.2.0's, never freed) fails it
+  (if-not gpu?
+    (println "gen.device.metal-test: not MLX on the GPU, the kernel-free test skips")
+    (let [before (metal/kernels-freed)
+          program (st/stage (fn [key] {:x (rng/uniform key)}) (st/key-spec))]
+      (dotimes [_ 4]
+        (let [k (metal/compile program)]
+          (array/eval! (metal/run k 2 (rng/key-data (rng/key 1))))))
+      (is (loop [tries 0]
+            (System/gc)
+            (cond (> (metal/kernels-freed) before) true
+                  (< tries 50) (do (Thread/sleep 20) (recur (inc tries)))
+                  :else false))
+          "a kernel freed within a second of collections"))))

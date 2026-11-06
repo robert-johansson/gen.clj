@@ -90,7 +90,9 @@
 
 (def ^:private code-dtypes (into {} (map (fn [[k v]] [v k])) dtype-codes))
 
-(defn- code ^long [dtype]
+(defn ^:no-doc code
+  "The MLX dtype code of dtype (public for ext/device's Metal lowering)."
+  ^long [dtype]
   (or (dtype-codes dtype)
       (throw (ex-info (str "The MLX backend does not support dtype " dtype)
                       {:dtype dtype :supported (set (keys dtype-codes))}))))
@@ -160,9 +162,9 @@
       (let [^MemorySegment seg (.reinterpret ^MemorySegment (Mlx/mlx_array_shape h) (* 4 n))]
         (mapv long (.toArray seg ValueLayout/JAVA_INT))))))
 
-(defn- wrap
+(defn ^:no-doc wrap
   "The MlxArray owning the new handle h (freed once it is unreachable:
-   MlxRuntime/adopt)."
+   MlxRuntime/adopt). Public for ext/device's Metal lowering."
   [b ^long h]
   (let [x (MlxArray. h b (read-shape h) (dtype-of-code (Mlx/mlx_array_dtype h)))]
     (MlxRuntime/adopt x h)
@@ -185,7 +187,9 @@
 
 (defrecord Config [device ^long stream ^long cpu-stream defaults])
 
-(defn- stream ^long [b] (.-stream ^Config (config b)))
+(defn ^:no-doc stream
+  "Backend b's stream (public for ext/device's Metal lowering)."
+  ^long [b] (.-stream ^Config (config b)))
 (defn- cpu-stream ^long [b] (.-cpu-stream ^Config (config b)))
 (defn- defaults [b] (.-defaults ^Config (config b)))
 
