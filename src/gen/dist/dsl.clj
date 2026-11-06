@@ -7,8 +7,11 @@
      (dist labeled [probs labels] (array/take labels (d/categorical probs)))
      (dist labeled-cat [labels probs] (nth labels (d/categorical probs)))
 
-   The body has exactly one call of a distribution constructor (the draw);
-   the rest of it is gen.array code on the parameters and constants,
+   The body has exactly one call of a distribution constructor (the draw),
+   which is made outside the body (in the constructor and each method), so
+   its arguments name the parameters and what is defined outside the body:
+   a name the body binds (a let's) is an error at the definition. The rest
+   of the body is gen.array code on the parameters and constants,
    elementwise, so a batch of draws maps to a batch of values (an if on the
    draw is not: use array/where). A sample evaluates the body with the draw
    made. The log density comes from the draw's (dc/discrete? says which
@@ -74,17 +77,79 @@
 
 (defn- draws [env form] (second (walk-draws env form identity)))
 
+(defn- scoped
+  "(visit form locals) at each form that is a draw or a symbol in form,
+   macroexpanded, with the names form binds around it (a let's, a loop's, a
+   fn's, a letfn's, a catch's) added to locals, concatenated."
+  [env form locals visit]
+  (let [in (fn [ls forms] (mapcat #(scoped env % ls visit) forms))]
+    (cond
+      (or (draw? env form) (symbol? form)) (visit form locals)
+      (seq? form)
+      (let [head (first form)
+            expanded (if (and (symbol? head) (not (contains? locals head))) (macroexpand-1 form) form)]
+        (if-not (identical? expanded form)
+          (scoped env expanded locals visit)
+          (case head
+            quote []
+            (let* loop*) (let [[_ bindings & body] form
+                               [found ls] (reduce (fn [[found ls] [sym init]] [(into found (in ls [init])) (conj ls sym)])
+                                                  [[] locals] (partition 2 bindings))]
+                           (into found (in ls body)))
+            fn* (let [[_ & more] form
+                      [fname more] (if (symbol? (first more)) [(first more) (rest more)] [nil more])
+                      ls (cond-> locals fname (conj fname))]
+                  (mapcat (fn [[params & body]] (in (into ls (remove #{'&} params)) body))
+                          (if (vector? (first more)) [more] more)))
+            letfn* (let [[_ bindings & body] form
+                         ls (into locals (take-nth 2 bindings))]
+                     (in ls (concat (take-nth 2 (rest bindings)) body)))
+            catch (let [[_ _ sym & body] form] (in (conj locals sym) body))
+            (in locals form))))
+      (coll? form) (in locals form)
+      :else [])))
+
+(defn- check-draw-scope
+  "Throw when the draw names a local the body binds around it: the draw is
+   made outside the body (in the constructor and in each method), where
+   that name is unbound or is another value (a parameter's, a var's)."
+  [dist-name env body]
+  (doseq [[draw bound] (scoped env body #{}
+                               (fn [form body-locals]
+                                 (when (seq? form)
+                                   ;; the body's names the draw's arguments use
+                                   ;; and do not bind again themselves
+                                   (let [outer (set body-locals)]
+                                     [[form (vec (distinct (scoped env (vec (rest form)) #{}
+                                                                   (fn [x ls] (when (and (symbol? x) (outer x) (not (ls x)))
+                                                                                [x])))))]]))))
+          :when (seq bound)]
+    (throw (ex-info (str "dist " dist-name ": the draw " (pr-str draw) " names " (pr-str bound) ", which the body"
+                         " binds; the draw is made outside the body, so its arguments name only the parameters"
+                         " and what is defined outside the body")
+                    {:dist (str dist-name) :draw draw :bound bound}))))
+
 (def ^:private invertible
   "The gen.array functions a draw may pass through on the way to the body's
    value."
   {#'array/+ :add #'array/- :subtract #'array/* :multiply #'array// :divide
    #'array/negate :negate #'array/exp :exp #'array/log :log})
 
+(def ^:private range-stand-in
+  "What exp's inverse takes in place of a value outside its range (at or
+   below 0): its log, -0.69, is no common support's bound (0, of gamma's,
+   beta's, the exponential's), where a draw's log density could have an
+   infinite slope."
+  0.5)
+
 (defn- step
-  "One step of an inversion: [inner log-jacobian] for the form (op args…),
-   the draw inside args at i, given y, the symbol bound to the form's value:
-   the expression of the inner argument's value and the log |d inner/d y|
-   (nil for 1)."
+  "One step of an inversion: [bindings inner log-jacobian in-range] for the
+   form (op args…), the draw inside args at i, given y, the symbol bound to
+   the form's value: let bindings the step needs first, the expression of
+   the inner argument's value, the log |d inner/d y| (nil for 1), and a
+   symbol bound to whether y is in the step's range (nil for every y). Out
+   of its range y has a stand-in, so neither the inverse nor its slopes are
+   NaN there."
   [env form i y]
   (let [[op & args] form
         others (vec (concat (take i args) (drop (inc i) args)))
@@ -92,34 +157,45 @@
                                   % "); a draw passes only through +, -, *, /, negate, exp and log")
                              {:form form}))]
     (case (invertible (resolved env op))
-      :add [`(- ~y (+ 0.0 ~@others)) nil]
-      :subtract (cond (= 1 (count args)) [`(array/negate ~y) nil]
-                      (= 2 (count args)) (if (zero? i) [`(+ ~y ~@others) nil] [`(- ~@others ~y) nil])
+      :add [[] `(- ~y (+ 0.0 ~@others)) nil nil]
+      :subtract (cond (= 1 (count args)) [[] `(array/negate ~y) nil nil]
+                      (= 2 (count args)) (if (zero? i) [[] `(+ ~y ~@others) nil nil] [[] `(- ~@others ~y) nil nil])
                       :else (bad "more than two arguments"))
-      :multiply [`(/ ~y (* 1.0 ~@others)) `(array/negate (array/log (array/abs (* 1.0 ~@others))))]
+      :multiply [[] `(/ ~y (* 1.0 ~@others)) `(array/negate (array/log (array/abs (* 1.0 ~@others)))) nil]
       :divide (cond (not= 2 (count args)) (bad "not two arguments")
-                    (zero? i) [`(* ~y ~@others) `(array/log (array/abs ~@others))]
-                    :else [`(/ ~@others ~y) `(- (array/log (array/abs ~@others)) (* 2.0 (array/log (array/abs ~y))))])
-      :negate [`(array/negate ~y) nil]
-      :exp [`(array/log ~y) `(array/negate (array/log ~y))]
-      :log [`(array/exp ~y) y]
+                    (zero? i) [[] `(* ~y ~@others) `(array/log (array/abs ~@others)) nil]
+                    :else [[] `(/ ~@others ~y) `(- (array/log (array/abs ~@others)) (* 2.0 (array/log (array/abs ~y)))) nil])
+      :negate [[] `(array/negate ~y) nil nil]
+      :exp (let [in (gensym "in") ys (gensym "y")]
+             [[in `(array/> ~y 0) ys `(array/where ~in ~y ~range-stand-in)]
+              `(array/log ~ys) `(array/negate (array/log ~ys)) in])
+      :log [[] `(array/exp ~y) y nil]
       (bad "not one of the invertible functions"))))
 
 (defn- inversion
-  "[bindings x log-jacobians]: let bindings from v, the symbol of the body's
-   value, down to the draw's value x, one invertible step at a time, and the
-   log-Jacobian terms in their scope."
+  "[bindings x log-jacobians in-ranges]: let bindings from v, the symbol of
+   the body's value, down to the draw's value x, one invertible step at a
+   time, the log-Jacobian terms in their scope, and the symbols bound to
+   whether each step's value is in its range."
   [env form v]
-  (loop [form form y v bindings [] jacobians []]
+  (loop [form form y v bindings [] jacobians [] in-ranges []]
     (if (draw? env form)
-      [bindings y jacobians]
+      [bindings y jacobians in-ranges]
       (let [args (when (seq? form) (rest form))
             i (first (keep-indexed (fn [i a] (when (seq (draws env a)) i)) args))
             _ (when-not i
                 (throw (ex-info (str "dist: the draw in " (pr-str form) " is not an argument of a step") {:form form})))
-            [inner jacobian] (step env form i y)
+            [before inner jacobian in-range] (step env form i y)
             y' (gensym "y")]
-        (recur (nth args i) y' (conj bindings y' inner) (cond-> jacobians jacobian (conj jacobian)))))))
+        (recur (nth args i) y' (-> bindings (into before) (conj y' inner))
+               (cond-> jacobians jacobian (conj jacobian)) (cond-> in-ranges in-range (conj in-range)))))))
+
+(defn- in-ranges-form
+  "The form of whether lp, a log density through an inversion, is one: no
+   step's value out of its range, and lp not NaN (an inverse outside a
+   step's range, NaN without a stand-in)."
+  [in-ranges lp]
+  (reduce (fn [acc in] `(array/logical-and ~acc ~in)) `(array/logical-not (array/isnan ~lp)) in-ranges))
 
 (defn- maps-to
   "Is y, the body's value at a support value, the value v, as a whole: where
@@ -222,6 +298,7 @@
             (throw (ex-info (str "dist " dist-name ": the body must make exactly one random draw, it makes "
                                  (count found) " (" (pr-str (vec found)) ")")
                             {:draws (vec found)})))
+        _ (check-draw-scope dist-name &env body)
         draw (first found)
         v (gensym "v")
         dd (gensym "d")
@@ -246,19 +323,23 @@
             (if-let [support# (dc/enumerable-support ~dd)]
               (support-log-prob ~dd ~body-fn support# ~v)
               ~(or not-invertible
-                   (let [[bindings x-of-v] inverted]
+                   (let [[bindings x-of-v _ in-ranges] inverted
+                         lp (gensym "lp")]
                      ;; the inverse rounded to the draw's integers, kept when the
                      ;; body maps it back to v (on-lattice?)
                      `(let [~@bindings
                             ~x (array/round ~x-of-v)
-                            f# ~body-fn]
-                        (array/where (on-lattice? (f# ~x) (f# (+ ~x 1)) ~v) (dc/log-prob ~dd ~x) ##-Inf)))))
+                            f# ~body-fn
+                            ~lp (dc/log-prob ~dd ~x)]
+                        (array/where (array/logical-and ~(in-ranges-form in-ranges lp) (on-lattice? (f# ~x) (f# (+ ~x 1)) ~v))
+                                     ~lp ##-Inf)))))
             ~(or not-invertible
-                 (let [[bindings x-of-v jacobians] inverted]
+                 (let [[bindings x-of-v jacobians in-ranges] inverted
+                       lp (gensym "lp")]
                    `(let [~@bindings
-                          lp# (+ (dc/log-prob ~dd ~x-of-v) ~@jacobians)]
-                      ;; outside a step's range the inverse is NaN: density 0
-                      (array/where (array/isnan lp#) ##-Inf lp#)))))))
+                          ~lp (+ (dc/log-prob ~dd ~x-of-v) ~@jacobians)]
+                      ;; outside a step's range: density 0
+                      (array/where ~(in-ranges-form in-ranges lp) ~lp ##-Inf)))))))
        (~'discrete? [] (dc/discrete? ~draw))
        ;; a draw's own shape where the body is inverted: other shapes are
        ;; errors at a site; an enumerable draw's labels go unchecked

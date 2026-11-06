@@ -194,6 +194,18 @@
         (array/concrete? v)
         (check (array/all-true? (> v 0)) dist-name (str param-name " must be positive") {:param param-name})))
 
+(defn check-finite
+  "Parameters must be finite, as check-positive: for a family whose log
+   density or draws are NaN at an infinite parameter (DESIGN §9, 1.2.1's
+   owner calls). A family whose code computes the limit there keeps it."
+  [dist-name param-name v]
+  (cond (array/host? v)
+        (check (or (not (float? v)) (Double/isFinite (double v))) dist-name (str param-name " must be finite, got " v)
+               {:param param-name :value v :reason :non-finite})
+        (and (array/concrete? v) (= :float (dt/kind (array/dtype v))))
+        (check (array/all-true? (array/isfinite v)) dist-name (str param-name " must be finite")
+               {:param param-name :reason :non-finite})))
+
 (defn check-probability
   "Parameters must be probabilities in [0, 1], as check-positive."
   [dist-name param-name v]
@@ -331,11 +343,20 @@
 
    sample and log-prob are required, and a clause of another name, or one
    given twice, is an error when the definition expands: a misspelled
-   validate would skip the checks, a misspelled value-shape the shape's."
+   validate would skip the checks, a misspelled value-shape the shape's. So
+   is a parameter named twice, or named as one of sample's or log-prob's
+   arguments, which it would shadow in that clause."
   [dist-name & body]
   (let [[doc body] (if (string? (first body)) [(first body) (rest body)] [nil body])
         params (first body)
         heads (map #(when (seq? %) (first %)) (rest body))
+        ;; the names sample's and log-prob's arguments bind, where the
+        ;; parameters are bound around the body and would shadow them
+        arguments (set (for [form (rest body)
+                             :when (and (seq? form) ('#{sample log-prob} (first form)))
+                             s (tree-seq coll? seq (second form))
+                             :when (and (symbol? s) (not= '& s))]
+                         s))
         {:keys [elementwise discrete pathwise]} (meta dist-name)
         problems (into {} (remove (comp empty? val))
                        {:unknown (vec (remove '#{validate sample log-prob support discrete? value-shape} heads))
@@ -343,11 +364,14 @@
                         :missing (vec (remove (set heads) '[sample log-prob]))
                         :flag-and-clause (cond-> []
                                            (and elementwise (some #{'value-shape} heads)) (conj 'value-shape)
-                                           (and discrete (some #{'discrete?} heads)) (conj 'discrete?))})
+                                           (and discrete (some #{'discrete?} heads)) (conj 'discrete?))
+                        :shadowed (filterv arguments params)
+                        :repeated-params (vec (for [[p n] (frequencies params) :when (< 1 n)] p))})
         _ (when (seq problems)
             (throw (ex-info (str "defdist " dist-name ": " (pr-str problems) " (its clauses are validate, sample,"
                                  " log-prob, support, discrete? and value-shape, each at most once, sample and"
-                                 " log-prob required; ^:elementwise and ^:discrete stand for the last two)")
+                                 " log-prob required; ^:elementwise and ^:discrete stand for the last two; a"
+                                 " parameter is named once, and not as a clause's argument, which it would shadow)")
                             (assoc problems :dist (str dist-name)))))
         clauses (into {} (map (juxt first rest)) (rest body))
         type-kw (keyword (str *ns*) (name dist-name))

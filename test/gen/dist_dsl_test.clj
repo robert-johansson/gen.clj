@@ -298,7 +298,49 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not an invertible step"
                           (dc/log-prob (through-sin) 0.5))))
   (testing "the draw's own checks, at construction"
-    (is (thrown? clojure.lang.ExceptionInfo (shifted-exponential -1.0 0.0)))))
+    (is (thrown? clojure.lang.ExceptionInfo (shifted-exponential -1.0 0.0))))
+  (testing "a draw naming a local of the body (genclj-8326)"
+    ;; the draw is made outside the body's scope: s was "Unable to resolve",
+    ;; captured-s the var's 3.0 and mu the parameter, silently (planted: no
+    ;; scope check)
+    (letfn [(definition-data [form]
+              (try (eval form) nil
+                   (catch Exception e (ex-data (or (ex-cause e) e)))))]
+      (doseq [[bound form] [['[s] '(gen.dist.dsl/dist let-bound [mu]
+                                     (let [s 2.0] (gen.array/+ (gen.dist/normal mu s) 1.0)))]
+                            ['[captured-s] '(do (def captured-s 3.0)
+                                                (gen.dist.dsl/dist captured [mu]
+                                                  (let [captured-s 2.0] (gen.array/+ (gen.dist/normal mu captured-s) 1.0))))]
+                            ['[mu] '(gen.dist.dsl/dist shadowing [mu]
+                                      (let [mu 2.0] (gen.array/+ (gen.dist/normal mu 1.0) 1.0)))]
+                            ['[n] '(gen.dist.dsl/dist through-a-fn [p]
+                                     ((fn [n] (gen.array/+ (gen.dist/binom n p) 1.0)) 3))]]]
+        (is (= bound (:bound (definition-data form))) (pr-str form))))
+    (testing "names the draw binds itself, and bindings it does not name, are no error"
+      (eval '(gen.dist.dsl/dist picked [probs]
+               (let [x [:a :b]] (nth x (gen.dist/categorical ((fn [x] x) probs))))))
+      (is (ts/close? (Math/log 0.25) (dc/log-prob ((resolve 'picked) [0.25 0.75]) :a))))))
+
+(dist exp-gamma [k] (array/exp (d/gamma k 1.0)))
+(dist reciprocal-gamma [k] (/ 1.0 (d/gamma k 1.0)))
+
+(deftest a-value-outside-the-body-s-range-sends-no-gradient
+  ;; genclj-zkbw: a value at or below 0 is outside exp's range, and its
+  ;; inverse, log v, was NaN or -Inf, so the draw's log density there and
+  ;; a parameter's gradient were NaN; one such value in a batch made the
+  ;; whole gradient NaN. Its log density is -Inf (it was), and the gradient
+  ;; of a batch's sum is the other values' alone. The reciprocal's 0 has
+  ;; an infinite inverse, outside gamma's support. Planted: exp's step
+  ;; without its stand-in fails the first three.
+  (doseq [[label make at inside outside] [["log-normal below 0" #(log-normal % 0.7) 0.2 1.5 -1.0]
+                                         ["log-normal at 0" #(log-normal % 0.7) 0.2 1.5 0.0]
+                                         ["log-normal's sd" #(log-normal 0.2 %) 0.7 1.5 -1.0]
+                                         ["exp of a gamma below 0" exp-gamma 1.5 2.0 -1.0]
+                                         ["the reciprocal of a gamma at 0" reciprocal-gamma 1.5 2.0 0.0]]]
+    (let [lp (fn [v] #(array/sum (dc/log-prob (make %) (array/array v))))
+          both ((array/grad (lp [inside outside])) (array/array at))]
+      (is (= ##-Inf (ts/number (dc/log-prob (make at) outside))) label)
+      (is (ts/close? ((array/grad (lp inside)) (array/array at)) both) (str label ": " (ts/host both))))))
 
 (deftest an-alias-of-a-constructor-is-a-draw
   (let [mu (array/array [0.0 1.0])

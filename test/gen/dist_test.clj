@@ -522,10 +522,26 @@
                           '(gen.dist.core/defdist v-twice [x] (sample [k s] 1.0) (log-prob [v] 0.0) (log-prob [v] 1.0))
                           {:flag-and-clause '[value-shape]}
                           '(gen.dist.core/defdist ^:elementwise v-both [x] (sample [k s] 1.0) (log-prob [v] 0.0)
-                             (value-shape [] []))}]
+                             (value-shape [] []))
+                          ;; genclj-8326: a parameter named as a clause's
+                          ;; argument shadowed it there, silently (sample's
+                          ;; key was the parameter), and a repeated one the
+                          ;; first (planted: neither checked)
+                          {:shadowed '[key]}
+                          '(gen.dist.core/defdist v-key [key] (sample [key shape] key) (log-prob [v] 0.0))
+                          {:shadowed '[shape v]}
+                          '(gen.dist.core/defdist v-shape [shape v] (sample [key shape] 1.0) (log-prob [v] 0.0))
+                          {:shadowed '[t]}
+                          '(gen.dist.core/defdist v-destructured [t] (sample [k [s t]] 1.0) (log-prob [v] 0.0))
+                          {:repeated-params '[x]}
+                          '(gen.dist.core/defdist v-twice-x [x x] (sample [k s] 1.0) (log-prob [v] 0.0))}]
     (is (= problem (dissoc (ts/thrown-data (try (eval form) (catch clojure.lang.Compiler$CompilerException e (throw (ex-cause e)))))
                            :dist))
-        (pr-str form))))
+        (pr-str form)))
+  (testing "a parameter of a clause argument's usual name, where the clause names its argument otherwise"
+    (eval '(gen.dist.core/defdist key-named [key] (sample [k s] (gen.array/+ key 1.0)) (log-prob [x] key)))
+    (is (= [3.0 2.0] (mapv ts/number [(dc/sample ((resolve 'key-named) 2.0) (rng/key 1))
+                                      (dc/log-prob ((resolve 'key-named) 2.0) 0.5)])))))
 
 (deftest the-distribution-layer-calls-only-gen-array
   ;; rule 3, genclj-z6iy (I3-11): gen.dist and gen.dist.core called
@@ -871,6 +887,164 @@
                             0.25]]]
       (let [[v g] ((array/value-and-grad lp) (array/array at))]
         (is (= [##-Inf 0.0] [(ts/number v) (ts/number g)]) label)))))
+
+;; ---------------------------------------------------------------------------
+;; Gradients with a value outside the support
+;; ---------------------------------------------------------------------------
+
+(dsl/dist scaled-gamma
+  "Twice a gamma(k, 1) draw: a pushforward whose draw is outside its
+   support where the value is."
+  [k]
+  (array/* 2.0 (d/gamma k 1.0)))
+
+(def ^:private outside-the-support
+  "[label family params inside outside]: a family, a value in its support
+   and one outside it."
+  [["uniform" d/uniform [0.0 2.0] 0.5 -1.0]
+   ["beta below 0" d/beta [1.5 2.0] 0.3 -0.5] ["beta above 1" d/beta [1.5 2.0] 0.3 1.5]
+   ["gamma" d/gamma [1.5 2.0] 1.0 -1.0] ["inv-gamma" d/inv-gamma [1.5 2.0] 1.0 -1.0]
+   ["exponential" d/exponential [1.5] 1.0 -1.0]
+   ["beta-uniform below 0" d/beta-uniform [0.5 1.5 2.0] 0.3 -0.5]
+   ["beta-uniform above 1" d/beta-uniform [0.5 1.5 2.0] 0.3 1.5]
+   ["piecewise-uniform" d/piecewise-uniform [[0.0 1.0 2.0] [0.4 0.6]] 0.5 -1.0]
+   ["dirichlet" d/dirichlet [[1.5 2.0 3.0]] [0.2 0.3 0.5] [-0.2 0.7 0.5]]
+   ["chi-squared" d/chi-squared [3.0] 1.0 -1.0] ["f-dist" d/f-dist [3.0 4.0] 1.0 -1.0]
+   ["levy" d/levy [0.0 1.5] 1.0 -1.0] ["log-normal" d/log-normal [0.0 0.5] 1.0 -1.0]
+   ["nakagami" d/nakagami [1.5 2.0] 1.0 -1.0] ["pareto" d/pareto [1.5 2.0] 3.0 1.0]
+   ["triangular" d/triangular [0.0 2.0 0.5] 0.3 -1.0] ["weibull" d/weibull [1.5 2.0] 1.0 -1.0]
+   ["truncated-normal" d/truncated-normal [0.0 1.5 -1.0 1.0] 0.3 2.0]
+   ["von-mises" d/von-mises [0.0 2.0] 0.3 4.0] ["wrapped-cauchy" d/wrapped-cauchy [0.0 0.5] 0.3 4.0]
+   ["wrapped-normal" d/wrapped-normal [0.0 0.5] 0.3 4.0]
+   ["wishart" d/wishart [5.0 [[1.0 0.3] [0.3 1.0]]] [[2.0 0.3] [0.3 1.0]] [[2.0 1.0] [0.3 1.0]]]
+   ["inv-wishart" d/inv-wishart [5.0 [[1.0 0.3] [0.3 1.0]]] [[2.0 0.3] [0.3 1.0]] [[2.0 1.0] [0.3 1.0]]]
+   ["categorical" d/categorical [[0.2 0.3 0.5]] 1 5] ["categorical-logits" d/categorical-logits [[0.2 0.3 0.5]] 1 5]
+   ["geometric" d/geometric [0.5] 1 -1] ["poisson" d/poisson [2.0] 1 -1]
+   ["binom" d/binom [5 0.3] 1 7] ["neg-binom" d/neg-binom [2.0 0.5] 1 -1]
+   ["a pushforward of gamma" scaled-gamma [1.5] 2.0 -2.0]])
+
+(deftest a-value-outside-the-support-sends-no-gradient
+  ;; genclj-zkbw: a value outside the support has log density -Inf through
+  ;; a guard (a where), but gamma's xlogy(k - 1, v) at v < 0 was NaN, so
+  ;; the shape's gradient was 0·NaN = NaN, and one such lane of a batch
+  ;; made a shared parameter's whole gradient NaN: gamma, inv-gamma, beta,
+  ;; chi-squared, nakagami and dirichlet, and beta-uniform and pushforwards
+  ;; of them through theirs. Each family here scores a batch of two values,
+  ;; one outside its support, and the gradient of the sum, by each
+  ;; parameter that is a float, is the inside value's alone. Planted: each
+  ;; family's stand-in dropped fails its rows.
+  (doseq [[label make params inside outside] outside-the-support
+          i (range (count params))
+          :when (or (float? (params i)) (vector? (params i)))]
+    (let [lp (fn [v] #(array/sum (dc/log-prob (apply make (assoc params i %)) (array/array v))))
+          p (array/array (params i))
+          both ((array/grad (lp [inside outside])) p)]
+      (is (ts/close? ((array/grad (lp inside)) p) both) (str label " d/dparam" i ": " (ts/host both))))))
+
+(deftest an-infinite-value-has-log-density-minus-infinity
+  ;; genclj-zkbw's survey: at +Inf, gamma's xlogy(k - 1, v) - v/theta was
+  ;; Inf - Inf = NaN (chi-squared's, nakagami's, weibull's for a shape
+  ;; above 1, poisson's and neg-binom's alike), at -Inf gumbel's z + e^-z
+  ;; and logistic's z + 2·log(1 + e^-z); and where the log density was
+  ;; right, a guard's other branch had infinite partials there, so a
+  ;; parameter's gradient was 0·Inf = NaN (beta, exponential, cauchy,
+  ;; f-dist, student-t, triangular, the truncated normal, the circular
+  ;; families, geometric, binom). An infinite value is no real number: its
+  ;; log density is -Inf, and its gradient is never NaN (normal's is the
+  ;; limit, ±Inf). Planted: each family's isfinite or stand-in dropped
+  ;; fails its rows.
+  (doseq [[label make params inside] (into outside-the-support
+                                           [["normal" d/normal [0.0 1.5] 0.3] ["laplace" d/laplace [0.0 1.5] 0.3]
+                                            ["cauchy" d/cauchy [0.0 1.5] 0.3] ["gumbel" d/gumbel [0.0 1.5] 0.3]
+                                            ["logistic" d/logistic [0.0 1.5] 0.3] ["student-t" d/student-t [3.0] 0.3]
+                                            ["mvnormal" d/mvnormal [[0.0 1.0] [[1.0 0.3] [0.3 1.0]]] [0.3 0.5]]])
+          inf [##Inf ##-Inf]
+          ;; a matrix, a vector or a scalar with an infinite element
+          :let [v (cond (not (vector? inside)) inf
+                        (vector? (first inside)) [[inf 0.3] [0.3 1.0]]
+                        :else (assoc (vec (repeat (count inside) 0.0)) 0 inf))]]
+    (is (= ##-Inf (ts/number (dc/log-prob (apply make params) (array/array v)))) (str label " at " v))
+    (doseq [i (range (count params))
+            :when (or (float? (params i)) (vector? (params i)))
+            :let [g (ts/host ((array/grad #(array/sum (dc/log-prob (apply make (assoc params i %)) (array/array v))))
+                              (array/array (params i))))]]
+      (is (not-any? #(Double/isNaN %) (flatten [g])) (str label " at " v " d/dparam" i ": " g)))))
+
+;; ---------------------------------------------------------------------------
+;; Infinite parameters
+;; ---------------------------------------------------------------------------
+
+(def ^:private scalar-families
+  "[label family params]: every family of scalar parameters, at valid ones."
+  [["normal" d/normal [0.0 1.0]] ["uniform" d/uniform [0.0 2.0]] ["beta" d/beta [1.5 2.0]]
+   ["gamma" d/gamma [1.5 2.0]] ["inv-gamma" d/inv-gamma [1.5 2.0]] ["exponential" d/exponential [1.5]]
+   ["laplace" d/laplace [0.0 1.0]] ["cauchy" d/cauchy [0.0 1.0]] ["beta-uniform" d/beta-uniform [0.5 1.5 2.0]]
+   ["chi-squared" d/chi-squared [3.0]] ["f-dist" d/f-dist [3.0 4.0]] ["gumbel" d/gumbel [0.0 1.0]]
+   ["levy" d/levy [0.0 1.5]] ["log-normal" d/log-normal [0.0 0.5]] ["logistic" d/logistic [0.0 1.0]]
+   ["nakagami" d/nakagami [1.5 2.0]] ["pareto" d/pareto [1.5 2.0]] ["student-t" d/student-t [3.0]]
+   ["triangular" d/triangular [0.0 2.0 0.5]] ["weibull" d/weibull [1.5 2.0]]
+   ["truncated-normal" d/truncated-normal [0.0 1.5 -1.0 1.0]] ["von-mises" d/von-mises [0.0 2.0]]
+   ["wrapped-cauchy" d/wrapped-cauchy [0.0 0.5]] ["wrapped-normal" d/wrapped-normal [0.0 0.5]]
+   ["geometric" d/geometric [0.5]] ["poisson" d/poisson [2.0]] ["binom" d/binom [5 0.3]]
+   ["neg-binom" d/neg-binom [2.0 0.5]] ["uniform-discrete" d/uniform-discrete [0 3]] ["bernoulli" d/bernoulli [0.5]]])
+
+(def ^:private infinite-limits
+  "The infinite parameters whose family computes its limit: [label index
+   infinity]."
+  #{["truncated-normal" 2 ##-Inf] ["truncated-normal" 3 ##Inf] ["wrapped-normal" 1 ##Inf]})
+
+(deftest an-infinite-parameter-is-refused-where-its-family-gives-nan
+  ;; genclj-uzxp's item 1 (DESIGN §9, 1.2.1's owner calls): check-param-not-nan
+  ;; refused only NaN, and check-positive takes +Inf, so (normal ##Inf 1),
+  ;; (normal 0 ##Inf) and (exponential ##Inf) constructed, and their draws
+  ;; scored NaN, as did 30 other families' at an infinite parameter (or drew
+  ;; NaN, or a meaningless point: (log-normal ##-Inf 0.5)'s 0s). Each is
+  ;; refused at construction, naming the parameter (planted: a family's
+  ;; check-finite dropped fails its rows). A family whose code computes the
+  ;; limit keeps it: the truncated normal's infinite bounds, wrapped-normal's
+  ;; infinite sigma (the uniform on the circle).
+  (doseq [[label make params] scalar-families
+          i (range (count params))
+          inf [##Inf ##-Inf]
+          :when (not (infinite-limits [label i inf]))]
+    (is (thrown? clojure.lang.ExceptionInfo (apply make (assoc params i inf))) (str label " " (assoc params i inf))))
+  (testing "the error names the parameter"
+    (is (= {:distribution "normal" :param "mu" :value ##Inf :reason :non-finite} (ts/thrown-data (d/normal ##Inf 1.0))))
+    (is (= {:distribution "exponential" :param "rate" :value ##Inf :reason :non-finite} (ts/thrown-data (d/exponential ##Inf))))
+    (is (= {:distribution "normal" :param "std" :reason :non-finite} (ts/thrown-data (d/normal 0.0 [1.0 ##Inf])))
+        "array data, checked on the host on every backend")
+    (let [mu (array/array [0.0 ##-Inf])]
+      (if (array/concrete? mu)
+        (is (= {:distribution "normal" :param "mu" :reason :non-finite} (ts/thrown-data (d/normal mu 1.0))))
+        (is (some? (d/normal mu 1.0)) "a lazy backend's array is not read"))))
+  (testing "array parameters of the vector and matrix families"
+    (doseq [[label f] {"categorical-logits +Inf" #(d/categorical-logits [0.0 ##Inf 1.0])
+                       "categorical-logits, every logit -Inf" #(d/categorical-logits [[0.0 1.0] [##-Inf ##-Inf]])
+                       "dirichlet" #(d/dirichlet [1.0 ##Inf 2.0])
+                       "piecewise-uniform" #(d/piecewise-uniform [##-Inf 0.0 1.0] [0.5 0.5])
+                       "mvnormal mu" #(d/mvnormal [0.0 ##Inf] [[1.0 0.0] [0.0 1.0]])
+                       "mvnormal cov" #(d/mvnormal [0.0 0.0] [[1.0 0.0] [0.0 ##Inf]])
+                       "wishart df" #(d/wishart ##Inf [[1.0 0.0] [0.0 1.0]])
+                       "inv-wishart df" #(d/inv-wishart ##Inf [[1.0 0.0] [0.0 1.0]])}]
+      (is (thrown? clojure.lang.ExceptionInfo (f)) label))
+    ;; a mixture's parameters are the backend's arrays, read when concrete
+    (when (array/concrete? (array/array [0.0]))
+      (is (thrown? clojure.lang.ExceptionInfo ((d/homogeneous-mixture d/normal) [0.5 0.5] [0.0 ##Inf] 1.0))
+          "a mixture's component")))
+  (testing "the limits kept"
+    (let [n 2000
+          host (fn [x] (map ts/number (array/->clj x)))
+          tn (d/truncated-normal 0.0 1.0 ##-Inf ##Inf)
+          wn (d/wrapped-normal 0.3 ##Inf)]
+      (is (every? #(Double/isFinite %) (host (dc/sample tn (rng/key 5) [n]))))
+      (is (ts/close? (dc/log-prob (d/normal 0.0 1.0) 0.7) (dc/log-prob tn 0.7)))
+      (is (every? #(<= (- Math/PI) % Math/PI) (host (dc/sample wn (rng/key 5) [n]))))
+      (is (ts/close? (- (Math/log (* 2 Math/PI))) (dc/log-prob wn 2.0)) "the uniform on the circle")))
+  (testing "a -Inf logit is a zero probability"
+    (let [c (d/categorical-logits [0.0 ##-Inf 1.0])]
+      (is (= ##-Inf (ts/number (dc/log-prob c 1))))
+      (is (ts/close? (- 1.0 (Math/log (+ 1.0 Math/E))) (dc/log-prob c 2)))
+      (is (not-any? #{1} (map ts/number (array/->clj (dc/sample c (rng/key 6) [200]))))))))
 
 (deftest float-limits-by-dtype
   ;; m3-grammar's cross-review: half floats took float64's constants, so
