@@ -472,6 +472,12 @@
   [b]
   (instance? BatchBackend b))
 
+(defn wrapped-backend
+  "The backend the batch backend b wraps, its particles' arrays': with
+   backend, the batch backend of another batch shape over it."
+  [b]
+  (p/-inner b))
+
 (defn inner-backend
   "The backend a batched value's particles are arrays of. It reads nothing,
    so it marks no read (unread-bools)."
