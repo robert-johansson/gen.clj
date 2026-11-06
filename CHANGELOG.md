@@ -82,7 +82,20 @@ No native library changes: nothing needs rebuilding. The MLX source
 build's script (`native/build-mlx.sh cuda13-source`) works again with a
 CUDA toolkit from pip.
 
-Checked before the tag: CHECKED
+Checked before the tag: every test on the JVM backend, the book included
+(2,215 tests, 29,709 assertions), with ext/codegen's (25), ext/commons-math's
+(27) and ext/device's (47); on the Mac mini M4 the full battery on Metal
+(2,215 tests, 24,486 assertions), on MLX's CPU in float32 (2,215, 24,503) and
+its light tier in float64 (2,097, 21,811); on CUDA, an RTX PRO 6000 with MLX
+0.32.4 built from source (`cuda13-source`, sm_120), all 2,215 tests in five
+JVMs and ten exits with no abort; llama.cpp v0.9.0's tests on its three test
+models on Metal and on CUDA (37 each); memo.clj (231 tests) and its ext/synth
+(17) against the candidate. The batteries on Metal, MLX's CPU in float32 and
+CUDA each met one error, in tempered SMC's new test of impossible starts (a
+move the model rules out read a NaN likelihood on MLX, and the new loud rule
+threw): fixed before the tag, and that namespace rerun on each, green.
+GenGDT: 14 of its 15 tests passed; the other, its own pin check, compares
+its gen.clj pin (v1.0.0) with memo.clj's (v1.2.0), not gen.clj's code.
 
 ### Known issues
 
