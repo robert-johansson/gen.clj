@@ -831,3 +831,37 @@
                           (pf/update-view state [0 1 2] pf/resize 4 {:key (rng/key 39)})))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"keeps their number"
                           (pf/update-view state [0 1 2] pf/dereplicate 3)))))
+
+(deftest unbatched-log-weights-are-host-doubles
+  ;; DESIGN §9's result keys make :log-weights host numbers. Before 1.2.1 the
+  ;; unbatched paths kept generate's and update's weights, 0-d arrays: MLX
+  ;; scalars on MLX, host doubles only on the JVM backend, where this test
+  ;; could not fail (genclj-sq31; run on MLX's CPU to see it fail there)
+  (let [doubles? (fn [state] (and (seq (:log-weights state)) (every? #(instance? Double %) (:log-weights state))))
+        argdiffs [diff/unknown-change diff/no-change]
+        init (pf/initialize model [1 0.0] (observation 0) 4 {:key (rng/key 80)})
+        later (pf/step init [2 0.0] argdiffs (observation 1) {:key (rng/key 81)})]
+    (is (doubles? init) "initialize")
+    (is (doubles? (pf/initialize model [1 0.0] (observation 0) 4 {:proposal initial-proposal :proposal-args [(ys 0)]
+                                                                   :key (rng/key 82)}))
+        "initialize with a proposal")
+    (is (doubles? (pf/initialize discrete-model [] (cm/choicemap :y 1.7) 4
+                                 {:strata (pf/choice-product [[:k [0 1 2]]]) :key (rng/key 83)}))
+        "a stratified initialize")
+    (is (doubles? later) "a step")
+    (is (doubles? (pf/step init [2 0.0] argdiffs (observation 1) {:proposal optimal-proposal :proposal-args [1 (ys 1)]
+                                                                   :key (rng/key 84)}))
+        "a step with a proposal")
+    (is (doubles? (pf/step init [2 0.0] argdiffs (observation 1)
+                           {:proposal re-propose :proposal-args [1] :backward move-back :backward-args [1] :key (rng/key 85)}))
+        "a step with a backward proposal")
+    (is (doubles? (pf/step (pf/initialize model [1 0.0] (observation 0) 4 {:batched? true :key (rng/key 86)})
+                           [2 0.0] argdiffs (observation 1) {:proposal optimal-proposal :proposal-args [1 (ys 1)]
+                                                             :key (rng/key 87)}))
+        "a step with a proposal from a batched state")
+    (is (doubles? (pf/move-reweight later (pf/reweighting (sel/select [1 :x])) (rng/key 88))) "move-reweight, regenerating")
+    (is (doubles? (pf/move-reweight later (pf/reweighting (gen [tr] (trace [1 :x] (d/normal (tr [1 :x]) 0.5))) []) (rng/key 89)))
+        "move-reweight, by a proposal")
+    (is (doubles? (pf/introduce later (observation 0) 3 {:model model :args [1 0.0] :key (rng/key 90)})) "introduce")
+    (is (doubles? (pf/update-view later [1 2] pf/step [3 0.0] argdiffs (observation 2) {:key (rng/key 91)}))
+        "a step of a view")))

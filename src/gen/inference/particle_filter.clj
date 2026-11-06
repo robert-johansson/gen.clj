@@ -63,14 +63,21 @@
 
 (defn- particle-keys [opts n] (rng/split (or (:key opts) (gfi/next-key)) n))
 
+(defn- evaluated
+  "trace evaluated with its log weight lw, and lw a host double (DESIGN
+   §9's :log-weights): one particle's graph at a time on a lazy backend, as
+   importance sampling's (docs/array-api.md §13), not every particle's.
+   [trace lw]."
+  [trace lw]
+  [(gfi/eval-trace! trace lw) (double (array/item lw))])
+
 (defn- moved
   "A particle after a move r ({:trace :weight}) from log weight lw: its
-   trace and :log-weight lw + r's weight, evaluated as the particle is moved,
-   so that a lazy backend holds one particle's graph at a time (as
-   importance sampling does, docs/array-api.md §13), not every particle's."
+   trace and :log-weight lw + r's weight, a host double, evaluated as the
+   particle is moved (evaluated)."
   [r lw]
-  (let [lw (+ lw (:weight r))]
-    {:trace (gfi/eval-trace! (:trace r) lw) :log-weight lw}))
+  (let [[trace lw] (evaluated (:trace r) (+ lw (:weight r)))]
+    {:trace trace :log-weight lw}))
 
 (defn- slots
   "The group of each of groups × size slots: in contiguous blocks (group g
@@ -117,18 +124,20 @@
        (cond-> {:particles ps :log-weights (vec (array/->clj ws)) :log-ml 0.0}
          required? (assoc :batched? :required)
          m (assoc :fallback m)))
-     (let [particle #(imp/weighted-sample model args %1 opts %2)
-           ;; one particle's graph at a time on a lazy backend, as in moved
-           evaluated (fn [{:keys [trace weight] :as r}] (gfi/eval-trace! trace weight) r)
+     (let [;; a particle generated with constraints, its weight (plus
+           ;; shift) read as moved's are
+           particle (fn [constraints key & [shift]]
+                      (let [{:keys [trace weight]} (imp/weighted-sample model args constraints opts key)]
+                        (evaluated trace (cond-> weight shift (+ shift)))))
            results (if strata
                      (let [strata (vec strata)
                            k (count strata)
                            [k-particles k-strata] (rng/split (or (:key opts) (gfi/next-key)))]
-                       (mapv (fn [s key] (evaluated (update (particle (cm/merge (strata s) observations) key) :weight + (Math/log k))))
+                       (mapv (fn [s key] (particle (cm/merge (strata s) observations) key (Math/log k)))
                              (strata-of n k layout k-strata) (rng/split k-particles n)))
-                     (mapv #(evaluated (particle observations %)) (particle-keys opts n)))]
-       {:traces (mapv :trace results)
-        :log-weights (mapv :weight results)
+                     (mapv #(particle observations %) (particle-keys opts n)))]
+       {:traces (mapv first results)
+        :log-weights (mapv second results)
         :log-ml 0.0}))))
 
 (defn choice-product

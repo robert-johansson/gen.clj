@@ -546,7 +546,6 @@
   batched-form {:arglists ([k])}
   chain {:arglists ([& kernels])}
   checked {:arglists ([kernel observations])}
-  checked-kernel {:arglists ([k form])}
   cycle {:arglists ([kernels] [n kernels])}
   elliptical-slice {:arglists ([addr mu cov])}
   hmc {:arglists ([selection] [selection opts])}

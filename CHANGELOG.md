@@ -205,6 +205,45 @@ other values for the same key, from the same distribution.
   uniforms where one was drawn. In float64 (the JVM backend's default)
   the integers are unchanged, except a draw the old rounding moved (one
   that reached high among them).
+- **Breaking: hmc's `:eps` and `:L` and mala's tau are checked**
+  (gen.inference.mcmc; genclj-mhgn; DESIGN §9, 1.2.1's owner calls). As
+  nuts checks its own: `hmc`, `hmc-particles` and kernel/hmc throw
+  `ex-info` for an `:eps` that is not a positive finite number
+  (`:reason :invalid-eps`) or an `:L` that is not a positive integer
+  (`:invalid-L`), and `mala`, `mala-particles` and kernel/mala for such a
+  tau (`:invalid-tau`). Only code that was silently wrong throws: `:eps 0`
+  or `:L 0` "accepted" every move as a no-op (an acceptance rate of 1),
+  `:L 2.5` ran 2 steps, and a negative tau made every move a divergence.
+- **Fixed: tempered SMC from starts the observations rule out**
+  (gen.inference.tempering, experimental; genclj-dm71). A start that
+  gives the observations density 0 (a likelihood whose support depends on
+  a latent: truncation, uniform noise, a hard constraint) had the log
+  weight -Inf - -Inf = NaN, and `smc` threw "A log weight is NaN"; such a
+  start now weighs 0 from the first step on, and the estimate is
+  unchanged by it, whatever the internal proposal. A move's NaN
+  acceptance ratio, which the moves rejected silently, is a loud error
+  (`:reason :nan-log-alpha`), but for a move to a trace the observations
+  rule out, rejected as before.
+- **Fixed: a particle filter's unbatched `:log-weights` are host doubles**
+  (gen.inference.particle-filter, gen.inference.particle-mcmc;
+  genclj-sq31). DESIGN §9's result keys make them host numbers, as the
+  batched filter's and importance sampling's are; `initialize`, `step`,
+  `move-reweight` and `introduce` one particle at a time, and conditional
+  SMC's reference, kept generate's and update's weights, 0-d arrays: MLX
+  scalars on MLX (host doubles already on the JVM backend).
+- **Breaking (experimental): tempered SMC's per-step keys renamed**
+  (gen.inference.tempering, outside the 1.x promise; genclj-vjbo; DESIGN
+  §9's result keys). `:ess`, a vector of each step's effective sample
+  size where the result keys make `:ess` one host number, is
+  `:ess-by-step`, and `:acceptance` is `:acceptance-rates`, each step's
+  `:acceptance-rate`. Code that read `:ess` or `:acceptance` reads them
+  under the new names. `smc`'s docstring names every key of its result,
+  `:scales` among them.
+- **Changed: `kernel/checked-kernel` is `^:no-doc`** (gen.inference.kernel;
+  genclj-vjbo). Public only because `kern`'s expansion calls it, as
+  `control-value`, it leaves the documented surface (the API snapshot and
+  the book's API page); the var stays, so code that calls it is
+  unaffected.
 
 ## [1.2.0] - 2026-11-06
 

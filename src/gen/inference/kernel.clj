@@ -219,8 +219,9 @@
   [forms]
   (if (= 1 (count forms)) (kern-form (first forms)) `(chain ~@(map kern-form forms))))
 
-(defn checked-kernel
-  "k, when it is a kernel (a function); a loud error naming form otherwise."
+(defn ^:no-doc checked-kernel
+  "k, when it is a kernel (a function); a loud error naming form otherwise.
+   Public only because kern's expansion calls it, as control-value."
   [k form]
   (if (ifn? k)
     k

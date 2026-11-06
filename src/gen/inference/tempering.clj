@@ -11,8 +11,13 @@
 
    The targets are π_β(x) ∝ p(x) L(x)^β for β from 0 to 1, L the
    observations' density (gfi/project with their selection): π_0 is the
-   latent choices' prior, π_1 their posterior. The particles start as
-   generate's traces with the observations. Each step
+   latent choices' prior, π_1 their posterior. (With another internal
+   proposal q, π_β(x) ∝ q(x) L(x)^β, L then generate's weight, which
+   gfi/project gives by the GFI's laws: from q to the same posterior.)
+   The particles start as generate's traces with the observations; a
+   start that gives them density 0 (a likelihood whose support depends on
+   a latent) weighs 0 from the first step on, and a run where every start
+   does is a loud error. Each step
    - picks the next β by bisection, so that the incremental weights
      (β' - β) log L keep :target-ess of the particles' effective sample
      size (all the way to 1 when they can);
@@ -36,9 +41,12 @@
    particles), :max-steps (1000; a loud error past it), :key; :betas (the
    schedule, from 0 to 1) and :scales (each step's random-walk scales, a
    vector of maps from address to scale), a previous run's, to fix them.
-   The result also holds :steps, :ess (each step's effective sample size
-   before it resamples), :acceptance (each step's acceptance rate of the
-   moves) and :scales.
+   The result: :log-ml-estimate (host), :traces (the posterior particles),
+   :betas (the schedule taken), :steps (their number), and one entry a
+   step in each of :ess-by-step (the incremental weights' effective
+   sample size before the step resamples, host), :acceptance-rates (the
+   fraction of the step's moves accepted, host) and :scales (the
+   random-walk scales the step used, which :scales takes back).
 
    A particle runs one at a time (the moves are regenerates of traces);
    the weights are read on the host at each step, the inference loop's
@@ -47,6 +55,7 @@
   (:require [gen.array :as array]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
+            [gen.inference.mh :as mh]
             [gen.inference.weights :as w]
             [gen.random :as rng]
             [gen.selection :as sel]))
@@ -101,11 +110,17 @@
           values)))
 
 (defn- accept?
-  "Metropolis-Hastings on π_beta: the move's log weight w (log p ratio less
-   the proposal's), less (1 - beta) times its change in log L."
+  "Metropolis-Hastings on π_beta (beta > 0): the move's log weight w (log p
+   ratio less the proposal's), less (1 - beta) times its change in log L,
+   from l to l'. A move to a trace where the observations have density 0
+   (l' -Inf, and w with it) is rejected, since π_beta is 0 there: its ratio
+   would be -Inf + Inf. Otherwise MH's rule (mh/accept?), loud for a NaN
+   ratio."
   [w l l' beta key]
-  (let [a (- (host w) (* (- 1.0 (double beta)) (- (double l') (double l))))]
-    (and (not (Double/isNaN a)) (< (Math/log (uniform key)) a))))
+  (let [l' (double l')]
+    (and (not (== ##-Inf l'))
+         (mh/accept? (- (host w) (* (- 1.0 (double beta)) (- l' (double l)))) (uniform key)
+                     {:kernel :tempering :weight (host w) :log-likelihood l :proposed-log-likelihood l'}))))
 
 (defn- regenerate-move
   "The latent at a resampled from the model's internal proposal (its
@@ -152,8 +167,8 @@
 
 (defn smc
   "Tempered SMC of model on args, conditioned on observations (a choice
-   map): {:log-ml-estimate :traces :betas :steps :ess :acceptance}. See
-   the namespace's docstring."
+   map): {:log-ml-estimate :traces :betas :steps :ess-by-step
+   :acceptance-rates :scales}. See the namespace's docstring."
   ([model args observations] (smc model args observations nil))
   ([model args observations {:keys [particles sweeps target-ess max-steps key betas scales]
                              :or {particles 200 sweeps 2 target-ess 0.5 max-steps 1000}}]
@@ -166,9 +181,15 @@
          starts (mapv #(gfi/generate model args observations %) (rng/split (rng/fold-in key 0) n))
          traces (mapv :trace starts)
          ls (mapv #(host (gfi/project % obs-sel)) traces)
-         ;; generate's weight less log L: zero for a model that samples its
-         ;; latent choices from their prior, as gen does
-         lw (mapv (fn [{:keys [weight]} ^double l] (- (host weight) l)) starts ls)
+         ;; generate's weight less log L: 0 up to rounding, whatever the
+         ;; internal proposal, by the GFI's law that generate's weight is
+         ;; the projection on the constraints (gen.laws'
+         ;; generate-weight-is-the-projection). A start that gives the
+         ;; observations density 0 has both -Inf, so 0, the law's value; its
+         ;; lw is never read anyway: every step's β is above 0, so the first
+         ;; step weighs it lw + β·(-Inf) = -Inf, and the estimate after it,
+         ;; log-sum-exp(lw + β·l) - log n, does not read it
+         lw (mapv (fn [{:keys [weight]} ^double l] (if (== ##-Inf l) 0.0 (- (host weight) l))) starts ls)
          _ (when (every? #(== ##-Inf %) ls)
              (throw (ex-info "tempering/smc: every particle gives the observations probability 0" {:particles n})))
          target (* (double target-ess) n)
@@ -178,7 +199,7 @@
          _ (when (and scales (not= (count scales) (dec (count betas))))
              (throw (ex-info "tempering/smc: :scales holds one map a step of :betas" {:steps (dec (count betas)) :scales (count scales)})))]
      (loop [step 1 beta 0.0 traces traces ls ls lw lw
-            log-z (- (w/log-sum-exp lw) (Math/log n)) taken [0.0] ess [] acceptance [] used []]
+            log-z (- (w/log-sum-exp lw) (Math/log n)) taken [0.0] ess [] rates [] used []]
        (when (> step max-steps)
          (throw (ex-info (str "tempering/smc: β reached only " beta " after " max-steps " steps") {:beta beta :steps max-steps})))
        (let [b (if betas (double (nth betas step)) (next-beta lw ls beta target))
@@ -197,8 +218,9 @@
              ls (mapv second moved)
              taken (conj taken b)
              ess (conj ess (w/ess inc-w))
-             acceptance (conj acceptance (if (pos? tried) (/ (double accepted) tried) 0.0))
+             rates (conj rates (if (pos? tried) (/ (double accepted) tried) 0.0))
              used (conj used eps)]
          (if (>= b 1.0)
-           {:log-ml-estimate log-z :traces traces :betas taken :steps step :ess ess :acceptance acceptance :scales used}
-           (recur (inc step) b traces ls (vec (repeat n 0.0)) log-z taken ess acceptance used)))))))
+           {:log-ml-estimate log-z :traces traces :betas taken :steps step :ess-by-step ess :acceptance-rates rates
+            :scales used}
+           (recur (inc step) b traces ls (vec (repeat n 0.0)) log-z taken ess rates used)))))))

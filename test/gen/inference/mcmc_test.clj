@@ -1057,3 +1057,42 @@
                             (mcmc/hmc-particles ps x-sel {:compile? true} (rng/key 102))))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"does not compile"
                             (mcmc/mala-particles ps x-sel 0.1 {:compile? true}))))))
+
+(deftest step-sizes-and-lengths-are-checked
+  ;; hmc and mala check their parameters as nuts checks its own (genclj-mhgn):
+  ;; before 1.2.1 hmc with :eps 0 or :L 0 "accepted" every move as a no-op
+  ;; (an acceptance rate of 1), :L 2.5 ran 2 steps, and a negative tau made
+  ;; every MALA move a divergence (Math/sqrt of it NaN). Each case below
+  ;; passed silently then
+  (let [tr (start-at scalar (cm/choicemap :x 0.2 :y 1.3))
+        ps (chains-from scalar (cm/choicemap :x 0.2 :y 1.3) 2)
+        key (rng/key 108)
+        reason (fn [f] (:reason (ts/thrown-data (f))))]
+    (doseq [eps [0 0.0 -0.1 ##NaN ##Inf nil "0.1"]]
+      (testing (str ":eps " (pr-str eps))
+        (is (= :invalid-eps (reason #(mcmc/hmc tr x-sel {:eps eps} key))))
+        (is (= :invalid-eps (reason #(mcmc/hmc tr x-sel {:eps eps :jitter 0.5} key))))
+        (is (= :invalid-eps (reason #(mcmc/hmc-particles ps x-sel {:eps eps} key))))
+        (is (= :invalid-eps (reason #(mcmc/hmc-particles ps x-sel {:eps eps :jitter 0.5} key))))
+        (is (= :invalid-eps (reason #(mcmc/hmc-step tr x-sel {:eps eps} key))))
+        (is (= :invalid-eps (reason #(mcmc/nuts tr x-sel {:eps eps} key))))))
+    (doseq [L [0 -1 2.5 2.0 nil]]
+      (testing (str ":L " (pr-str L))
+        (is (= :invalid-L (reason #(mcmc/hmc tr x-sel {:L L} key))))
+        (is (= :invalid-L (reason #(mcmc/hmc-particles ps x-sel {:L L} key))))
+        (is (= :invalid-L (reason #(mcmc/hmc-step tr x-sel {:L L} key))))))
+    (doseq [tau [0 0.0 -0.1 ##NaN ##Inf nil "0.1"]]
+      (testing (str "tau " (pr-str tau))
+        (is (= :invalid-tau (reason #(mcmc/mala tr x-sel tau key))))
+        (is (= :invalid-tau (reason #(mcmc/mala-particles ps x-sel tau key))))
+        (is (= :invalid-tau (reason #(mcmc/mala-step tr x-sel tau {} key))))))
+    (testing "the message names the kernel and the value"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"hmc: :eps must be a positive number, not 0\.0"
+                            (mcmc/hmc tr x-sel {:eps 0.0} key)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"hmc: :L must be a positive integer, not 2\.5"
+                            (mcmc/hmc tr x-sel {:L 2.5} key)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mala: tau must be a positive number, not -0\.1"
+                            (mcmc/mala tr x-sel -0.1 key))))
+    (testing "valid parameters still move: an integer :eps, an Integer :L"
+      (is (some? (:trace (mcmc/hmc tr x-sel {:eps 1 :L (int 2)} key))))
+      (is (some? (:trace (mcmc/mala tr x-sel 0.1 key)))))))
