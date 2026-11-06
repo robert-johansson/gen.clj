@@ -3549,6 +3549,52 @@ The nbb-compatibility forks GenMLX uses (malli, instaparse, test.check) are
     bytes in 0.6 ms (`gen.instaparse-bench`). `gen.llm.instaparse/cfg`
     reads any instaparse grammar without lookahead into one (the
     llguidance-style lexer/parser split was not needed at these costs).
+    (The 2026-11-06 health check measured 39-256 ms inside a string, which
+    the bench does not reach: genclj-jq2d revisits this.)
+  - **1.2.1: the health check's fixes (owner, 2026-11-06).** "file these
+    as beans under the 1.2.1 milestone", after the lead's health check of
+    v1.2.0 (c0fc80c): the milestone genclj-9mq3, its findings in five epics
+    (silent wrong results and loud-error gaps; the tests; 1.2.0's LLM work
+    followed through to a consumer; device programs and packaging; docs and
+    housekeeping). Not yet decided: the release's scope (which fixes that
+    make code throw wait for 1.3.0) and the numerics edge semantics, each
+    the owner's call in genclj-uzxp with the lead's recommendation.
+  - **1.2.1's owner calls (PROVISIONAL, owner to confirm; genclj-uzxp).**
+    The owner, 2026-11-06: "work on the 44 beans under the milestone,
+    genclj-9mq3 - work fully autonomous and cross them all off and then
+    release v1.2.1". Taken as the answer to the scope (item 9): every bean
+    under the milestone ships in 1.2.1, the inference parameter checks
+    (genclj-mhgn) included. The rest are the lead's recommendations, taken
+    under the overnight policy:
+    1. *Non-finite parameters* (in 1.2.1): a distribution refuses a
+       non-finite host parameter (and an array's, when `concrete?`) where
+       its code gives NaN there; a family whose code computes the limit
+       keeps it, and a -Inf logit stays a zero probability. Breaking by
+       the CHANGELOG's definition, but only for code that scored NaN.
+    2. *int64 overflow* (in 1.2.1): the JVM backend throws `ex-info`
+       (`:reason :overflow`) where an int64 result leaves the range, in
+       place of a raw IllegalArgumentException on read; MLX's wrap is a
+       documented divergence in docs/array-api.md §13.
+    3. *Float floor-div* (in 1.2.1): NumPy's rule, floor((x - mod(x, y)) /
+       y) with its rounding, so x = y*q + r holds: `(floor-div 1.0 0.1)`
+       is 9.0. A Changed line.
+    4. *max and min over an empty axis* (in 1.2.1): loud on every backend
+       (`:reason :empty-reduction`), as NumPy and JAX raise.
+    5. *`=` on arrays:* the JVM's bitwise, MLX's numeric equality stay; the
+       divergence is documented in §13.
+    6. *Unknown option keys* wait for 1.3.0 (genclj-vux3): refusing
+       them breaks code that was right (a shared options map).
+    7. *Loud lookups through Indexed:* genclj-fzez's design stays;
+       `counted?` and `indexed?` answering true is noted in §13.
+    8. *solve's vector rule* stays as documented (a right-hand side one
+       axis short is a batch of vectors); inv is fixed by broadcasting the
+       identity (genclj-l0n4); NumPy 2's rule revisited for 2.0.
+    The beans' own owner calls, the same way: CUDA's lowering parked
+    (genclj-z1gj: no consumer, its tests skipped by name), DESIGN's §9 log
+    in a file of its own (genclj-vp8u), Batched's read flag volatile
+    (genclj-vajv), the git deletions done (genclj-wg76: merged branches
+    only, the stash kept as a patch in its bean first), memo.clj told and
+    asked through its session (genclj-fshl, genclj-e3q9).
   - **One chain fast on MLX, and GPU speed (owner, 2026-11-04, "go with
     option 1", on the lead's recommendation; genclj-fpnf, genclj-h8rn).**
     One HMC chain (L=32, 1000 steps) ran in 21.9 ms as a Metal program (one
