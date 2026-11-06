@@ -28,12 +28,18 @@
    - token checks that coerce to long (M6): a-branch-is-a-value and misuse
      (:big-integer-token);
    - resample copying for every child (N5): child-slots-copy-only-later-
-     children, a-failed-resample-frees-its-branches, resample."
+     children, a-failed-resample-frees-its-branches, resample.
+
+   No test waits on a clock for a pass (genclj-n2ia): an interrupt comes
+   from the construction it interrupts, a thread that ends is joined, and
+   the two tests of what the GC frees (^:gc) retry System/gc until it has,
+   since when it does is the JVM's (collected?)."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.llm.branching :as br]
             [gen.llm.branching-contract :as contract]
             [gen.llm.slots :as slots]
-            [gen.llm.toy-engine :as toy]))
+            [gen.llm.toy-engine :as toy])
+  (:import (java.time Duration)))
 
 (def ^:private opts
   {:prompt [3 1 4 1 5 9 2 6] :continuation [5 3 5 8 9 7] :k 4 :band 0.0 :top 97})
@@ -120,26 +126,30 @@
       (br/dispose! b))))
 
 (deftest a-failed-construction-is-loud-and-leaks-no-thread
-  (let [failing? #(= "gen.llm failing" (.getName ^Thread %))
-        threads #(count (filter failing? (.keySet (Thread/getAllStackTraces))))]
+  ;; its thread, shut down, ends on its own time: joined, not polled on a
+  ;; clock (genclj-n2ia); the bound is only how long a leak takes to fail
+  (let [failing #(filter (fn [^Thread t] (= "gen.llm failing" (.getName t))) (.keySet (Thread/getAllStackTraces)))]
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no model"
                           (slots/engine #(throw (ex-info "no model" {})) "failing")))
-    (is (loop [i 0]
-          (cond (zero? (threads)) true
-                (< i 100) (do (Thread/sleep 10) (recur (inc i)))
-                :else false))
-        "its thread ends")
+    (is (every? (fn [^Thread t] (.join t (Duration/ofSeconds 60))) (failing)) "its thread ends")
+    (is (empty? (failing)))
     (is (= :invalid-option (contract/reason #(slots/engine (fn [] (toy/toy-slots {:max-branches 0})) "failing")))
         "an engine of one slot is refused")))
 
 (deftest an-interrupted-construction-still-makes-its-engine
   ;; interrupted while its Slots are made (a model loading), the caller
   ;; still gets the engine, with its interrupt flag set again: the Slots
-  ;; do not leak
+  ;; do not leak. The construction interrupts the caller itself, once the
+  ;; caller waits for it, so the interrupt lands inside the wait, never
+  ;; after it or in a later test, whatever the load (genclj-n2ia: a future
+  ;; interrupted after 50 ms while the construction slept 300)
   (let [closed (atom 0)
         me (Thread/currentThread)
-        _ (future (Thread/sleep 50) (.interrupt me))
-        e (slots/engine #(do (Thread/sleep 300) (toy/toy-slots {:on-close (fn [] (swap! closed inc))})) "slow")]
+        e (slots/engine #(do (while (not (#{Thread$State/WAITING Thread$State/TIMED_WAITING} (.getState me)))
+                               (Thread/onSpinWait))
+                             (.interrupt me)
+                             (toy/toy-slots {:on-close (fn [] (swap! closed inc))}))
+                        "slow")]
     (is (Thread/interrupted) "the flag is set again (and cleared here)")
     (is (= [1 2] (br/tokens (br/open e [1 2]))))
     (.close e)
@@ -212,16 +222,28 @@
         (is (= 2 (:live (br/info e))) "the refused read left nothing")
         (br/dispose! [keep b])))))
 
-(deftest dropped-branches-are-freed-by-the-next-operation
+(defn- collected?
+  "Whether (done?) holds once the GC has found what a test dropped:
+   System/gc, then (done?), again until it holds, for up to 60 s. Retried,
+   not timed (genclj-n2ia): when the collection, the reference handler's
+   enqueueing and the Cleaner's thread act is the JVM's, and slower under
+   load (five test JVMs, -X:test:par), so no clock can bound a pass; the
+   60 s bound only how long a failure takes to show. Tests that call it
+   are ^:gc (-X:test :excludes '[:gc]' leaves them out, as a JVM with
+   explicit collections disabled must)."
+  [done?]
+  (let [start (System/nanoTime)]
+    (loop []
+      (System/gc)
+      (cond (done?) true
+            (< 60e9 (- (System/nanoTime) start)) false
+            :else (do (Thread/sleep 10) (recur))))))
+
+(deftest ^:gc dropped-branches-are-freed-by-the-next-operation
   (with-open [e (toy/engine {})]
     (let [b (br/open e [1 2 3])]
       (br/fork b 5)
-      (is (loop [i 0]
-            (System/gc)
-            (br/score b [4])
-            (cond (= 1 (:live (br/info e))) true
-                  (< i 50) (do (Thread/sleep 20) (recur (inc i)))
-                  :else false))
+      (is (collected? #(do (br/score b [4]) (= 1 (:live (br/info e)))))
           "a score drains them: the live count is 1 again")
       (br/dispose! b))))
 
@@ -238,14 +260,10 @@
         (is (= [3] (br/tokens c)) "the freed slots are empty and usable")
         (br/dispose! c)))))
 
-(deftest an-unreachable-engine-is-closed
+(deftest ^:gc an-unreachable-engine-is-closed
   ;; dropped with its branches and never closed, the engine is closed by
   ;; the GC, freeing its Slots (a model, for llama.cpp)
   (let [closed (promise)]
     (let [e (toy/engine {:on-close #(deliver closed true)})]
       (br/open e [1 2]))
-    (is (loop [i 0]
-          (System/gc)
-          (cond (realized? closed) true
-                (< i 100) (do (Thread/sleep 20) (recur (inc i)))
-                :else false)))))
+    (is (collected? #(realized? closed)))))
