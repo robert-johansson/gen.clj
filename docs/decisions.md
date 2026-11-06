@@ -3811,3 +3811,21 @@ its bean):
   measured against v0.7.0 on the M4: no gain for lockstep and SMC
   branches, 5-16% slower at 4-16 branches after a long prompt
   (genclj-ajse; 1.2.0's claim corrected in the CHANGELOG).
+- *The refactors'* (genclj-i1jl, behaviour unchanged, checked by
+  differential runs against the old code): gen.combinators over six
+  internal parts (calls, elements, chain, switch, recurse, wrap), its
+  records, constructors and class names kept in the facade; Unfold and
+  Scan one chain walk; gen.dynamic's execute as functions over a run
+  context, the static graph walk in gen.dynamic.static/run; selections
+  held by a partition through a ^:no-doc protocol gen.partition extends.
+  gen.backend.mlx over six internal parts (array, memory, operands,
+  linalg, random, transforms; the MLX array class is now
+  gen.backend.mlx.array.MlxArray); gen.array's scan, compile, vmap and
+  particle functions in gen.array.transform behind the same vars;
+  Threefry's schedule and erfinv's coefficients written once as data.
+  `-linalg` keeps its arity: gen.array.protocols' methods stay through
+  1.x (the 1.0 promise), so a ^:no-doc `p/linalg-operands` splits a
+  call's arguments by op in place of `(remove map? args)`; moving the
+  options to their own argument waits for 2.0. gen.array.stage no
+  longer requires gen.choicemap: its constants follow the map's own
+  order (the program's values unchanged).
