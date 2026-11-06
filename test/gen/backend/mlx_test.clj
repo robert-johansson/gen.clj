@@ -881,7 +881,10 @@
   (let [java (str (System/getProperty "java.home") "/bin/java")
         code (str "(require 'gen.backend.mlx-test) (Class/forName \"gen.mlx.MlxRuntime\")"
                   " (println (or (@(resolve 'gen.backend.mlx-test/process-env) \"MLX_ENABLE_TF32\") \"unset\"))")
+        lib (System/getProperty "gen.mlx.lib")
         cmd (cond-> [java "--enable-native-access=ALL-UNNAMED" "-cp" (System/getProperty "java.class.path")]
+              ;; the library this JVM loads (a worktree has none at the default path)
+              lib (conj (str "-Dgen.mlx.lib=" lib))
               prop (conj (str "-Dgen.mlx.tf32=" prop))
               true (into ["clojure.main" "-e" code]))
         pb (ProcessBuilder. ^java.util.List cmd)
