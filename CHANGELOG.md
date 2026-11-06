@@ -71,6 +71,15 @@ other values for the same key, from the same distribution.
   addresses may change, and so may that of numbers of classes other than
   Long and Double (BigInt, Ratio, BigDecimal) beside other kinds of
   address: every number now sorts among the numbers, by value.
+- **Breaking: `sample-states` of a trace whose observations are
+  impossible is a loud error** (gen.state-space; genclj-vjbo). On the host
+  such a run stops at the impossible step (gfi/impossible?), and
+  sample-states returned fewer than n states for it, where the states have
+  no posterior (code that used them was silently wrong). Now it throws
+  `ex-info` with `:reason :impossible`. The namespace doc says what an
+  impossible observation does: on the host the run stops there, and a run
+  whose score is an array (batched, or on MLX) goes on from the
+  prediction; it said the belief stayed at its prediction.
 
 ## [1.2.0] - 2026-11-06
 

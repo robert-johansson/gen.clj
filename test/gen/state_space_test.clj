@@ -267,3 +267,17 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"takes a trace of gen.state-space/kalman or hmm"
                           (ss/sample-states (gfi/simulate (comb/unfold local-level-step) [2 0.0 {:m0 0 :p0 1 :q 1 :r 1}]
                                                           (rng/key 1)))))))
+
+(deftest an-impossible-observation-has-no-posterior
+  ;; genclj-vjbo: the doc said an impossible observation leaves the belief
+  ;; at its prediction, but on the host the run stops there (gfi/impossible?),
+  ;; and sample-states gave fewer than n states for the trace it stopped
+  (let [params {:transition [[0.9 0.1] [0.2 0.8]] :emission (d/categorical [[1.0 0.0] [1.0 0.0]])}
+        tr (:trace (gfi/generate ss/hmm [4 [0.5 0.5] params] (cm/choicemap 0 0 1 1 2 0 3 0) (rng/key 1)))
+        beliefs (:retval tr)]
+    (is (= ##-Inf (ts/host (:score tr))))
+    (is (ts/close? (array/array [0.55 0.45]) (beliefs 1)) "step 1's belief is its prediction")
+    (if (gfi/impossible? (:score tr))
+      (do (is (= 2 (count beliefs)) "the run stopped at the impossible step")
+          (is (= :impossible (:reason (ts/thrown-data (ss/sample-states tr (rng/key 2)))))))
+      (is (= 4 (count beliefs)) "a run whose score is not read goes on"))))

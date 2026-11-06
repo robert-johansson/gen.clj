@@ -417,10 +417,13 @@
 
 (defn stores
   "The trainable-parameter stores gf holds, or nil: a dynamic or
-   deterministic function's own store (a map of name to value); a Map's or
-   an Unfold's, its kernel's; a Switch's, {branch stores} over the branches
-   that hold some; a Recurse's, {:production stores :aggregation stores}
-   over those that do."
+   deterministic function's own store (a map of name to value); a Map's,
+   an Unfold's or a Scan's, its kernel's; a Dimap's (contramap and
+   map-retval's too), its inner function's; a Switch's, {branch stores}
+   over the branches that hold some; a Mix's, {index stores} over the
+   components that do; a Recurse's, {:production stores :aggregation
+   stores} over those that do; and an internal-proposal override's, a
+   conjugate or an exact proposal's, its generative function's."
   [gf]
   (-stores gf))
 
