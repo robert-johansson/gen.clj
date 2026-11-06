@@ -401,9 +401,11 @@
         env (gensym "env")
         reads (fn [inputs] (vec (mapcat (fn [x] [x `(nth ~env ~(slots x))]) inputs)))
         node-fn (fn [{:keys [inputs expr]}]
-                  (guard/guard-branches `(fn [~(guard/own 'param) ~env] (let ~(reads inputs) ~expr)) (into locals inputs)))
+                  (guard/guard-branches `(fn [~(guard/own 'param) ~env] (let ~(reads inputs) ~expr))
+                                        (into locals inputs)))
         keys-fn (fn [{:keys [inputs] ks :keys}]
-                  (guard/guard-branches `(fn [~(guard/own 'param) ~env] (let ~(reads inputs) [~@ks])) (into locals inputs)))
+                  (guard/guard-branches `(fn [~(guard/own 'param) ~env] (let ~(reads inputs) [~@ks]))
+                                        (into locals inputs)))
         param? (fn [expr] (boolean (some #{'param} (tree-seq coll? seq expr))))
         spec (fn [{:keys [symbol constant inputs]}]
                (cond (and symbol (contains? slots symbol)) {:slot (slots symbol)}

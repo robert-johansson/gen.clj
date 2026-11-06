@@ -78,8 +78,9 @@ other values for the same key, from the same distribution.
   no posterior (code that used them was silently wrong). Now it throws
   `ex-info` with `:reason :impossible`. The namespace doc says what an
   impossible observation does: on the host the run stops there, and a run
-  whose score is an array (batched, or on MLX) goes on from the
-  prediction; it said the belief stayed at its prediction.
+  whose score is an array (on MLX, or batched where the particles differ)
+  goes on from the prediction; it said the belief stayed at its
+  prediction.
 
 ## [1.2.0] - 2026-11-06
 
