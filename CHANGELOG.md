@@ -50,6 +50,12 @@ other values for the same key, from the same distribution.
   brings gen.clj from the same checkout. The README lists every module and
   how a project takes it. ext/device's tests no longer read bench/: the
   parity bench's models are `gen.parity-models`, in test/.
+- **Fixed: CUDA C's negation of a literal** (gen.device.cuda, ext/device,
+  internal; genclj-z1gj). It wrote `(--1.5f)`, a decrement NVRTC refuses;
+  now `(- -1.5f)`, as the JVM and Metal lowerings write it. The CUDA
+  lowering is parked (DESIGN §9, 1.2.1's owner calls): no consumer,
+  gen.device's devices stay `:jvm` and `:metal`, and its tests that need
+  a CUDA device skip, by name.
 
 ## [1.2.0] - 2026-11-06
 

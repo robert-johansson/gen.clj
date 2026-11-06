@@ -1,6 +1,6 @@
 (ns gen.device.cuda-ndreg-bench
   "The ndreg_is cells (gen.ndreg-bench) as CUDA C kernels (bean
-   genclj-4zmv): one particle's constrained generate per thread, or per
+   genclj-4zmv; gen.device.cuda is parked since 1.2.1, genclj-z1gj): one particle's constrained generate per thread, or per
    group of lanes (a warp at 32), X and y uploaded once and shared; 1000
    particles, particle i on (rng/split root 1000)[i] (the handler's per
    particle runs, not gen.batched's one key). A timed run is a launch, the

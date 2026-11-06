@@ -1,6 +1,8 @@
 (ns gen.device.cuda-test
-  "gen.device.cuda: the generator's refusals everywhere; with NVRTC and a
-   CUDA device (-Dgen.cuda.nvrtc=<libnvrtc.so>), that a thread is the
+  "gen.device.cuda, parked (DESIGN §9, 1.2.1's owner calls, genclj-z1gj):
+   the generator's text and refusals everywhere. The tests that need a
+   CUDA device skip, each by name, unless -Dgen.cuda.parked=false with
+   NVRTC (-Dgen.cuda.nvrtc=<libnvrtc.so>) runs them: that a thread is the
    per-chain program on its own key, whatever the launch's size; and, where
    the default backend draws float32 (-Dgen.backend=mlx), that thread i's
    chain is kernel/run's from (rng/split key n)[i], to float32 rounding,
@@ -16,7 +18,20 @@
             [gen.parity-models :as pm]
             [gen.random :as rng]))
 
+(def ^:private parked?
+  "Is the CUDA lowering parked here? Unless -Dgen.cuda.parked=false."
+  (not= "false" (System/getProperty "gen.cuda.parked")))
+
 (def ^:private gpu? (some? (System/getProperty "gen.cuda.nvrtc")))
+
+(defn- skipped?
+  "Does the test test-name, which needs a CUDA device, skip here? Saying
+   so, by name, and why."
+  [test-name]
+  (when-let [why (cond parked? "the CUDA lowering is parked (DESIGN §9, genclj-z1gj; -Dgen.cuda.parked=false runs it)"
+                       (not gpu?) "no -Dgen.cuda.nvrtc")]
+    (println (str "gen.device.cuda-test/" test-name ": skipped, " why))
+    true))
 
 (deftest the-generator-refuses-what-it-does-not-lower
   (let [[model args obs] (pm/models :vector)]
@@ -26,6 +41,15 @@
     (testing "a program of anything but a key, then its data"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"a program of a key"
                             (cuda/source (gen.array.stage/stage (fn [x] (array/exp x)) [[2] :float32])))))))
+
+(deftest a-negated-literal-is-c
+  ;; genclj-z1gj: the negation of a literal (which the generator writes in
+  ;; place, unbound) was (--1.5f), a decrement of a constant, which NVRTC
+  ;; refuses; as the JVM and Metal dialects write it, (- -1.5f)
+  (let [{:keys [source]} (cuda/source (gen.array.stage/stage (fn [key] {:x (array/+ (rng/uniform key) (array/negate (array/array -1.5)))})
+                                                             (gen.array.stage/key-spec)))]
+    (is (= "(- -1.5f)" (re-find #"\(- ?-1\.5f\)" source)))
+    (is (nil? (re-find #"\(--[^)]*\)" source)))))
 
 (defn- launch
   "The outputs [values accepted] of n threads of k on root, as host vectors."
@@ -37,8 +61,7 @@
       (finally (cuda/free-buffers bufs)))))
 
 (deftest a-thread-is-its-own-chain
-  (if-not gpu?
-    (println "gen.device.cuda-test: no -Dgen.cuda.nvrtc, the kernel tests skip")
+  (when-not (skipped? 'a-thread-is-its-own-chain)
     (let [[model args obs] (pm/models :vector)
           steps 20 d 2
           k (cuda/compile (cuda/source (ch/mala-chain model args obs pm/selection pm/tau steps)))
@@ -71,8 +94,7 @@
         (finally (cuda/unload! k))))))
 
 (deftest the-log-ml-reduced-on-the-device-is-the-hosts
-  (if-not gpu?
-    (println "gen.device.cuda-test: no -Dgen.cuda.nvrtc, the reduction test skips")
+  (when-not (skipped? 'the-log-ml-reduced-on-the-device-is-the-hosts)
     (let [[model args obs] (pm/models :vector)
           k (cuda/compile (cuda/source (ch/weight-run model args obs)))]
       (try

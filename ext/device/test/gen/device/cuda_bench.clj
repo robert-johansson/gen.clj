@@ -1,6 +1,6 @@
 (ns gen.device.cuda-bench
   "gen.parity-bench's MCMC cells as CUDA C kernels, one thread per chain
-   (gen.device.cuda, bean genclj-a1hu): single chains (N = 1) and many
+   (gen.device.cuda, bean genclj-a1hu; parked since 1.2.1, genclj-z1gj): single chains (N = 1) and many
    chains (N up to 65536), MALA and HMC, on the specs' model and data. One
    kernel per model, kernel and S, launched for every N. A timed run is a
    launch on a root key, the wait, and every output copied to pinned host

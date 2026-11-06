@@ -1,7 +1,16 @@
 (ns gen.device.cuda
   "A staged program (gen.array.stage) as one CUDA C kernel, one thread
    per chain: the CUDA C target of bean genclj-a1hu (research prototype,
-   ext/device), beside StableHLO.
+   ext/device).
+
+   Parked (DESIGN §9, 1.2.1's owner calls, genclj-z1gj): no consumer.
+   gen.device does not dispatch to it (its devices are :jvm and :metal),
+   it predates gen.device.scalar (which the JVM and Metal lowerings share:
+   gathers, error flags, float64 and :bit-and are theirs, not its), its
+   frees are manual (a failure midway through buffers or compile leaks
+   what was made before it), and the tests that need a CUDA device skip,
+   by name. Wiring it in means moving it onto gen.device.scalar as Metal
+   is.
 
    (source program) is the kernel's C++ text. Thread i runs the program
    on the key (rng/split key n)[i], the program's key derived in the thread
@@ -38,12 +47,11 @@
    gradients), take, a scan over xs (counted scans only), a nested scan, a
    scan's ys read in the thread, float64, and batched matmul."
   {:api :internal}
-  (:refer-clojure :exclude [compile])
+  (:refer-clojure :exclude [compile accessor])
   (:require [clojure.string :as str])
   (:import [java.lang.foreign AddressLayout Arena FunctionDescriptor Linker Linker$Option MemoryLayout MemorySegment
             SymbolLookup ValueLayout ValueLayout$OfInt ValueLayout$OfLong]
            [java.lang.invoke MethodHandle]
-           [java.nio.charset StandardCharsets]
            [java.nio.file Path]))
 
 (set! *warn-on-reflection* true)
@@ -159,7 +167,7 @@ __device__ __forceinline__ void g_threefry(unsigned int k0, unsigned int k1, uns
    :erfinv "erfinvf" :floor "floorf" :ceil "ceilf" :round "rintf" :abs "fabsf"})
 
 (defn- unary-expr [op dtype a]
-  (cond (= op :negative) (str "(-" a ")")
+  (cond (= op :negative) (str "(- " a ")")
         (= op :logical-not) (str "(!" a ")")
         (= op :sign) (str "g_sign(" a ")")
         (= op :isnan) (if (= dtype :float32) (str "(" a " != " a ")") "false")
@@ -218,7 +226,7 @@ __device__ __forceinline__ void g_threefry(unsigned int k0, unsigned int k1, uns
     (value shape dtype (mapv (fn [i] (bind! em dtype (apply f (map (fn [o m] (nth (:el o) (nth m i))) operands maps))))
                              (range (size shape))))))
 
-(defn- reduce-value [em {:keys [shape dtype el]} op axes out-shape out-dtype]
+(defn- reduce-value [em {:keys [shape el]} op axes out-shape out-dtype]
   (when-not (or (reducers op) (#{:max :min} op))
     (throw (ex-info (str "CUDA C: no reduction " op " yet") {:op op})))
   (let [axes (set axes)

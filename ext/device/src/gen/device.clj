@@ -14,7 +14,11 @@
    a delay), :dtype the gen.array dtype it stands for, so a
    caller makes arrays of the parts it keeps and no others. inputs are the
    program's data inputs after its key, in order. A device or form a lowering lacks
-   throws (the caller falls back to the handler)."
+   throws (the caller falls back to the handler).
+
+   The devices are :jvm and :metal. The CUDA C lowering (gen.device.cuda)
+   is parked (DESIGN §9, 1.2.1's owner calls, genclj-z1gj): no consumer,
+   not a device here, its tests that need a CUDA device skipped by name."
   {:api :experimental}
   (:require [gen.array :as array]
             [gen.device.jvm :as jvm]))
@@ -72,5 +76,6 @@
                    (mapv (fn [x] {:data (delay (host-array x)) :shape (vec (array/shape x)) :dtype (array-dtype (array/dtype x))}) xs)))}))
 
 (defmethod compile-program :default [device _]
-  (throw (ex-info (str "No device lowering " (pr-str device) " (the lowerings are :jvm and :metal)")
+  (throw (ex-info (str "No device lowering " (pr-str device) " (the lowerings are :jvm and :metal; CUDA C,"
+                       " gen.device.cuda, is parked)")
                   {:reason :unknown-device :device device})))
