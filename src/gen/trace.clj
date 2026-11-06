@@ -181,9 +181,11 @@
 
 (defn- entries [m] (sort-by key key-order m))
 
-(defn- flatten* [x leaves top?]
+(defn- flatten*
+  "x's skeleton, its leaves added to the list leaves in walk order."
+  [x ^java.util.ArrayList leaves top?]
   (let [walk #(flatten* % leaves false)]
-    (cond (leaf? x) (do (conj! leaves x) ::leaf)
+    (cond (leaf? x) (do (.add leaves x) ::leaf)
           (instance? Trace x)
           {::trace (mapv (fn [[k v]] [k (cond (= k :gen-fn) v
                                               (and top? (= k :args)) ::args
@@ -200,9 +202,9 @@
    arrays, numbers and booleans in walk order, and the rest of its
    structure."
   [t]
-  (let [leaves (transient [])
+  (let [leaves (java.util.ArrayList.)
         sk (flatten* t leaves true)]
-    [sk (persistent! leaves)]))
+    [sk (vec leaves)]))
 
 (defn- by-code
   "Skeleton sk with each record's function fields as their classes: two
