@@ -212,6 +212,20 @@
     (doseq [[w l l'] [[##NaN -1.2 -1.0] [0.1 -1.2 ##NaN] [##Inf -1.2 ##Inf]]]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"NaN" (accept? w l l' 0.5 key)) (pr-str [w l l'])))))
 
+(deftest the-result-keys
+  ;; DESIGN §9's result keys: :ess is one host number where it appears, so
+  ;; the steps' values are :ess-by-step; :acceptance-rates holds each
+  ;; step's, as device's runs hold each chain's (genclj-vjbo: they were
+  ;; :ess and :acceptance before 1.2.1)
+  (let [r (tempering/smc branching [] (cm/choicemap :y 2.2) {:particles 50 :key (rng/key 5)})
+        steps (:steps r)]
+    (is (= #{:log-ml-estimate :traces :betas :steps :ess-by-step :acceptance-rates :scales} (set (keys r))))
+    (is (= (inc steps) (count (:betas r))))
+    (doseq [k [:ess-by-step :acceptance-rates :scales]]
+      (is (= steps (count (k r))) (str k)))
+    (is (every? #(and (instance? Double %) (<= 1.0 % 50.0)) (:ess-by-step r)) (pr-str (:ess-by-step r)))
+    (is (every? #(<= 0.0 % 1.0) (:acceptance-rates r)) (pr-str (:acceptance-rates r)))))
+
 (deftest loud-errors
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no observations"
                         (tempering/smc conjugate [3] cm/EMPTY {:key (rng/key 1)}))))

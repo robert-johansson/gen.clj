@@ -64,6 +64,19 @@ other values for the same key, from the same distribution.
   `move-reweight` and `introduce` one particle at a time, and conditional
   SMC's reference, kept generate's and update's weights, 0-d arrays: MLX
   scalars on MLX (host doubles already on the JVM backend).
+- **Breaking (experimental): tempered SMC's per-step keys renamed**
+  (gen.inference.tempering, outside the 1.x promise; genclj-vjbo; DESIGN
+  §9's result keys). `:ess`, a vector of each step's effective sample
+  size where the result keys make `:ess` one host number, is
+  `:ess-by-step`, and `:acceptance` is `:acceptance-rates`, each step's
+  `:acceptance-rate`. Code that read `:ess` or `:acceptance` reads them
+  under the new names. `smc`'s docstring names every key of its result,
+  `:scales` among them.
+- **Changed: `kernel/checked-kernel` is `^:no-doc`** (gen.inference.kernel;
+  genclj-vjbo). Public only because `kern`'s expansion calls it, as
+  `control-value`, it leaves the documented surface (the API snapshot and
+  the book's API page); the var stays, so code that calls it is
+  unaffected.
 
 ## [1.2.0] - 2026-11-06
 

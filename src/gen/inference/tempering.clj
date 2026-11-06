@@ -41,9 +41,12 @@
    particles), :max-steps (1000; a loud error past it), :key; :betas (the
    schedule, from 0 to 1) and :scales (each step's random-walk scales, a
    vector of maps from address to scale), a previous run's, to fix them.
-   The result also holds :steps, :ess (each step's effective sample size
-   before it resamples), :acceptance (each step's acceptance rate of the
-   moves) and :scales.
+   The result: :log-ml-estimate (host), :traces (the posterior particles),
+   :betas (the schedule taken), :steps (their number), and one entry a
+   step in each of :ess-by-step (the incremental weights' effective
+   sample size before the step resamples, host), :acceptance-rates (the
+   fraction of the step's moves accepted, host) and :scales (the
+   random-walk scales the step used, which :scales takes back).
 
    A particle runs one at a time (the moves are regenerates of traces);
    the weights are read on the host at each step, the inference loop's
@@ -165,8 +168,8 @@
 
 (defn smc
   "Tempered SMC of model on args, conditioned on observations (a choice
-   map): {:log-ml-estimate :traces :betas :steps :ess :acceptance}. See
-   the namespace's docstring."
+   map): {:log-ml-estimate :traces :betas :steps :ess-by-step
+   :acceptance-rates :scales}. See the namespace's docstring."
   ([model args observations] (smc model args observations nil))
   ([model args observations {:keys [particles sweeps target-ess max-steps key betas scales]
                              :or {particles 200 sweeps 2 target-ess 0.5 max-steps 1000}}]
@@ -197,7 +200,7 @@
          _ (when (and scales (not= (count scales) (dec (count betas))))
              (throw (ex-info "tempering/smc: :scales holds one map a step of :betas" {:steps (dec (count betas)) :scales (count scales)})))]
      (loop [step 1 beta 0.0 traces traces ls ls lw lw
-            log-z (- (w/log-sum-exp lw) (Math/log n)) taken [0.0] ess [] acceptance [] used []]
+            log-z (- (w/log-sum-exp lw) (Math/log n)) taken [0.0] ess [] rates [] used []]
        (when (> step max-steps)
          (throw (ex-info (str "tempering/smc: β reached only " beta " after " max-steps " steps") {:beta beta :steps max-steps})))
        (let [b (if betas (double (nth betas step)) (next-beta lw ls beta target))
@@ -216,8 +219,9 @@
              ls (mapv second moved)
              taken (conj taken b)
              ess (conj ess (w/ess inc-w))
-             acceptance (conj acceptance (if (pos? tried) (/ (double accepted) tried) 0.0))
+             rates (conj rates (if (pos? tried) (/ (double accepted) tried) 0.0))
              used (conj used eps)]
          (if (>= b 1.0)
-           {:log-ml-estimate log-z :traces traces :betas taken :steps step :ess ess :acceptance acceptance :scales used}
-           (recur (inc step) b traces ls (vec (repeat n 0.0)) log-z taken ess acceptance used)))))))
+           {:log-ml-estimate log-z :traces traces :betas taken :steps step :ess-by-step ess :acceptance-rates rates
+            :scales used}
+           (recur (inc step) b traces ls (vec (repeat n 0.0)) log-z taken ess rates used)))))))
