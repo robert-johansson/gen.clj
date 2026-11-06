@@ -36,15 +36,22 @@
      :max-accepts accepts (2, the least that leaves the estimate unbiased:
      the negative binomial's (s - 1)/(n - 1)) and returns the first.
    - :max-rejects R (default unbounded): the most rejections a run makes
-     (phantoms included, for :geometric), so at most R + 1 checks
-     (:recursive) or R + :max-accepts (:geometric); a run that reaches it
-     stops with the estimator's value there (Def. 10's base case, Def.
-     8's s/(n - 1)), which may be 0. Still properly weighted.
+     (phantoms included, for :geometric), so at most R checks (:recursive:
+     its R-th draw is the base case, and an accept before it is followed
+     by one draw more) or R + :max-accepts - 1 (:geometric: it stops at its
+     R-th rejection or its last accept, whichever comes first), R rounded
+     up; a run that reaches it stops with the estimator's value there
+     (Def. 10's base case, Def. 8's s/(n - 1)), which may be 0. Still
+     properly weighted.
 
    Randomness is purely functional: draw i uses the uniform gen.random
    derives from (fold-in key (* 2 i)), its phantoms (fold-in key (+ (* 2
    i) 1)), on the host, so the same key draws the same tokens from the
-   same row. A weigh that returns NaN is loud (:invalid-weight)."
+   same row. A weigh that returns NaN is loud (:invalid-weight).
+
+   Cost: one exp pass over the row a sample, then a sum and a partial
+   walk of the row's masses a draw (about 1 ms at 151,936 tokens, two
+   draws, on an M4)."
   {:api :experimental}
   (:require [gen.array :as array]
             [gen.random :as rng])
@@ -58,26 +65,36 @@
   ^double [key]
   (double (rng/uniform key [] {:backend (array/backend-named :jvm) :dtype :float64})))
 
+(defn- masses
+  "exp(row[t]) for every token: the one exp pass a sample makes over its
+   row, the masses its draws read."
+  ^doubles [^floats row]
+  (let [n (alength row)
+        out (double-array n)]
+    (dotimes [t n] (aset out t (Math/exp (aget row t))))
+    out))
+
 (defn- mass-left
-  "Σ exp(row[t]) over the tokens not in removed."
-  ^double [^floats row ^BitSet removed]
-  (let [n (alength row)]
+  "Σ ps[t] over the tokens not in removed, in the tokens' order."
+  ^double [^doubles ps ^BitSet removed]
+  (let [n (alength ps)]
     (loop [t 0 total 0.0]
       (if (< t n)
-        (recur (inc t) (if (.get removed t) total (+ total (Math/exp (aget row t)))))
+        (recur (inc t) (if (.get removed t) total (+ total (aget ps t))))
         total))))
 
 (defn- draw-left
-  "A token of row not in removed, of probability its share of the mass
-   left (total), by the inverse CDF at u: -1 when none is left."
-  ^long [^floats row ^BitSet removed ^double total ^double u]
-  (let [n (alength row)
+  "A token not in removed, of probability its share of the mass left
+   (total), by the inverse CDF at u over the masses ps: -1 when none is
+   left."
+  ^long [^doubles ps ^BitSet removed ^double total ^double u]
+  (let [n (alength ps)
         target (* u total)]
     (loop [t 0 acc 0.0 last -1]
       (if (< t n)
         (if (.get removed t)
           (recur (inc t) acc last)
-          (let [p (Math/exp (aget row t))
+          (let [p (aget ps t)
                 acc (+ acc p)]
             (if (and (< target acc) (pos? p))
               t
@@ -109,11 +126,11 @@
   "RAWRS: draws without replacement, the first accepted token and one more
    draw; m_i, the mass left before draw i as a share of the row's."
   [^floats row weigh key ^double max-rejects]
-  (let [removed (BitSet. (alength row))
-        whole (mass-left row removed)]
-    (loop [i 0 checks 0 last-t -1]
-      (let [left (mass-left row removed)
-            t (draw-left row removed left (uniform (draw-key key i)))]
+  (let [ps (masses row)
+        removed (BitSet. (alength ps))
+        whole (mass-left ps removed)]
+    (loop [i 0 checks 0 last-t -1 left whole]
+      (let [t (draw-left ps removed left (uniform (draw-key key i)))]
         (if (neg? t)
           ;; every token of positive probability rejected: Z is 0
           (result last-t Double/NEGATIVE_INFINITY Double/NEGATIVE_INFINITY checks)
@@ -126,17 +143,17 @@
               (result t w (if (accepted? w) (Math/log m) Double/NEGATIVE_INFINITY) checks)
 
               (accepted? w)
-              (let [p (/ (Math/exp (aget row t)) whole)]
+              (let [p (/ (aget ps t) whole)]
                 (.set removed t)
-                (let [left' (mass-left row removed)
-                      t' (draw-left row removed left' (uniform (draw-key key (inc i))))]
+                (let [left' (mass-left ps removed)
+                      t' (draw-left ps removed left' (uniform (draw-key key (inc i))))]
                   (if (neg? t')
                     ;; nothing left to draw: 1 - q_n is 0, so Ẑ is m_n
                     (result t w (Math/log m) checks)
                     (let [w' (checked weigh t')]
                       (result t w (Math/log (if (accepted? w') m p)) (inc checks))))))
 
-              :else (do (.set removed t) (recur (inc i) checks t)))))))))
+              :else (do (.set removed t) (recur (inc i) checks t (mass-left ps removed))))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Geometric AWRS (Def. 9)
@@ -158,12 +175,13 @@
   [^floats row weigh key max-rejects max-accepts]
   (let [max-rejects (double max-rejects)
         max-accepts (long max-accepts)
-        removed (BitSet. (alength row))
-        whole (mass-left row removed)
+        ps (masses row)
+        removed (BitSet. (alength ps))
+        whole (mass-left ps removed)
         weights (java.util.HashMap.)]
-    (loop [i 0 s 0 r 0.0 checks 0 first-t -1 first-w Double/NEGATIVE_INFINITY last-t -1]
-      (let [left (mass-left row removed)
-            k (phantoms (- 1.0 (/ left whole)) (uniform (phantom-key key i)))
+    ;; left: the mass not removed, summed again only when a draw removes one
+    (loop [i 0 s 0 r 0.0 checks 0 first-t -1 first-w Double/NEGATIVE_INFINITY last-t -1 left whole]
+      (let [k (phantoms (- 1.0 (/ left whole)) (uniform (phantom-key key i)))
             stop-rejected (fn [^long checks]
                             ;; stopped on a rejection, at the budget: s/(n - 1)
                             (let [n (+ (double s) max-rejects)]
@@ -173,7 +191,7 @@
         (if (>= (+ r k) max-rejects)
           (stop-rejected checks)
           (let [r (+ r k)
-                t (draw-left row removed left (uniform (draw-key key i)))]
+                t (draw-left ps removed left (uniform (draw-key key i)))]
             (if (neg? t)
               (result last-t Double/NEGATIVE_INFINITY Double/NEGATIVE_INFINITY checks)
               (let [seen (.get weights t)
@@ -186,12 +204,12 @@
                     (if (== s max-accepts)
                       ;; stopped on an accept: (s - 1)/(n - 1)
                       (result first-t first-w (Math/log (/ (double (dec s)) (- (+ (double s) r) 1.0))) checks)
-                      (recur (inc i) s r checks (long first-t) (double first-w) t)))
+                      (recur (inc i) s r checks (long first-t) (double first-w) t left)))
                   (let [r (inc r)]
                     (.set removed t)
                     (if (>= r max-rejects)
                       (stop-rejected checks)
-                      (recur (inc i) s r checks first-t first-w t))))))))))))
+                      (recur (inc i) s r checks first-t first-w t (mass-left ps removed)))))))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The sampler

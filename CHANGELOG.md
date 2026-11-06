@@ -38,6 +38,38 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Added: the chat template's options in agent/run** (gen.llm.agent,
+  experimental; genclj-fshl). `agent/run`'s opts take `:template`
+  (`:qwen3.8` for Qwen3.8's), `:reasoning-effort` and
+  `:preserve-thinking?`, passed to gen.llm.chat for every turn: 1.2.0's
+  Qwen3.8 template could not be reached through the agent, which rendered
+  Qwen3.5's always. Options the template refuses are refused as
+  `chat/render` refuses them (`:invalid-option`), before the session opens.
+- **Changed: AWRS exponentiates its row once** (gen.llm.awrs,
+  experimental; genclj-0d00). A sample computed `exp` over the whole row
+  two or three times a draw; it now makes one pass a sample and sums the
+  masses after: at 151,936 tokens (Qwen's vocabulary) 2.5 ms becomes 1.0
+  ms with every token accepted, 7.0 ms becomes 1.8 with one token in
+  seven (the M4). The draws for a key are unchanged, bit for bit. The
+  docstring's budget is corrected to what the code does: at most R checks
+  for `:recursive` and R + `:max-accepts` - 1 for `:geometric`, where it
+  said R + 1 and R + `:max-accepts`.
+- **Breaking: `coerce` checks that its potential is over bytes when it is
+  made** (gen.llm.potential, experimental; genclj-kdau). Only `logw-next`
+  checked the 256 bytes, so `prefix` and `complete` of a coerced potential
+  over another vocabulary read the text's bytes as its tokens, silently
+  wrong. `coerce` now reads p's next weights at the empty context and
+  refuses any other vocabulary (`:invalid-potential`); a potential of no
+  weight there (none anywhere) is not checked. Only code that was already
+  wrong throws.
+- **Breaking: `after` checks its closes against the potential's
+  vocabulary** (gen.llm.potential, experimental; genclj-kdau). A close at
+  or past p's vocabulary size was skipped, so a sequence could never close
+  and the open row weighed nothing (Z = 0), silently. `after` now refuses
+  it (`:invalid-token`), reading p's next weights at the empty context when
+  it is made (it read them at its first open row before). Only code that
+  was already wrong throws.
+
 ## [1.2.0] - 2026-11-06
 
 A language-model release (DESIGN §9, "1.2.0's theme"; genclj-ucfg),

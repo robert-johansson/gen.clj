@@ -256,7 +256,18 @@
     (is (= :invalid-token (bc/reason #(potential/prompted m []))))
     (is (= :invalid-end-tokens (bc/reason #(potential/prompted m prompt {:end-tokens #{9}})))))
   (testing "coerce"
-    (is (= :invalid-potential (bc/reason #(potential/logw-next (potential/coerce by-length text-vocab) []))) "not over bytes")
+    ;; genclj-kdau: refused when made, where only logw-next refused it and
+    ;; prefix and complete read the bytes as by-length's tokens
+    (is (= :invalid-potential (bc/reason #(potential/coerce by-length text-vocab))) "not over bytes")
+    (is (= :invalid-potential (bc/reason #(potential/coerce (potential/potential 300 {:prefix (constantly 0.0)
+                                                                                       :complete (constantly 0.0)})
+                                                             text-vocab)))
+        "more tokens than bytes")
+    (is (= ##-Inf (potential/prefix (potential/coerce (potential/potential 7 {:prefix (constantly ##-Inf)
+                                                                               :complete (constantly ##-Inf)})
+                                                      text-vocab)
+                                    [0]))
+        "a potential of no weight at all is zero over any vocabulary: not checked")
     (is (= :mismatched-end-tokens (bc/reason #(potential/coerce (potential/potential 256 {:prefix (constantly 0.0) :complete (constantly 0.0)
                                                                                            :end-tokens #{0}})
                                                                  text-vocab))))
@@ -265,5 +276,8 @@
   (testing "after"
     (is (= :invalid-token (bc/reason #(potential/after #{} by-length))))
     (is (= :invalid-token (bc/reason #(potential/after [close] by-length))))
+    ;; genclj-kdau: a close past the vocabulary never closes (Z = 0 before it)
+    (is (= :invalid-token (bc/reason #(potential/after #{n} by-length))) "a close past the vocabulary")
+    (is (= :invalid-token (bc/reason #(potential/after #{close (+ n 3)} by-length))) "one of the closes past it")
     (is (= :invalid-potential (bc/reason #(potential/after #{close} (potential/potential n {:prefix (constantly ##-Inf)
                                                                                            :complete (constantly ##-Inf)})))))))

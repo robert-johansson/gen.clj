@@ -33,6 +33,12 @@
                    Qwen3.6's think blocks run to several thousand tokens)
      :thinking?    the model thinks before it answers (false); a reply cut
                    inside its think block by :turn-tokens is a loud error
+     :template     gen.llm.chat's: :qwen3.5 (default; Qwen3.5's and 3.6's) or
+                   :qwen3.8
+     :reasoning-effort, :preserve-thinking?
+                   Qwen3.8's (gen.llm.chat's: :xhigh and true by default):
+                   options the template refuses are refused as chat
+                   refuses them (:invalid-option), before the session opens
      :context      the context's tokens (the LM's :max-cells, else 32768): a
                    reply gets at most the room left; a reply cut by that
                    room (after its complete tool calls run), or a context
@@ -52,9 +58,9 @@
    :tokens :seconds {:llm :tools}}, :log a turn's {:turn :reply :reasoning
    (with thinking) :calls [{:tool :params :text …the result's other keys}]}.
 
-   Each turn renders the conversation (gen.llm.chat, Qwen's template) and
-   encodes it: an LM's cache shares the prefix with the turn before, so a
-   turn reads only what is new."
+   Each turn renders the conversation (gen.llm.chat, Qwen's template, the
+   one :template names) and encodes it: an LM's cache shares the prefix
+   with the turn before, so a turn reads only what is new."
   {:api :experimental}
   (:require [gen.gfi :as gfi]
             [gen.llm.chat :as chat]
@@ -85,7 +91,8 @@
   ([lm spec] (run lm spec nil))
   ([lm {:keys [system task tools open close on-budget notes]}
     {:keys [turns turn-tokens thinking? context sampling key candidates choose complete]
-     :or {turns 40 sampling sample/default-sampling candidates 1 complete sample/complete}}]
+     :or {turns 40 sampling sample/default-sampling candidates 1 complete sample/complete}
+     :as opts}]
    (when-not (and (string? task) (map? tools) (seq tools))
      (throw (ex-info "agent/run: a spec needs :task (a string) and :tools (a map of them)" {:task task :tools (keys tools)})))
    (when (and (> (long candidates) 1) (not choose))
@@ -93,7 +100,10 @@
    (let [turn-tokens (long (or turn-tokens (if thinking? 8192 1024)))
          context (long (or context (:max-cells (lm/info lm)) 32768))
          key (or key (gfi/next-key))
-         render-opts {:tools (tool-list tools) :thinking? (boolean thinking?)}
+         render-opts (into {:tools (tool-list tools) :thinking? (boolean thinking?)}
+                           (select-keys opts [:template :reasoning-effort :preserve-thinking?]))
+         ;; the template's options checked by chat, before the session opens
+         _ (chat/render [] render-opts)
          state (when open (open))
          seconds (fn [t0] (/ (- (System/nanoTime) t0) 1e9))]
      (try
