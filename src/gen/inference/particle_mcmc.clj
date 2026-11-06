@@ -112,6 +112,12 @@
          (:weight (gfi/assess proposal proposal-args latents key))
          (gfi/project tr (sel/from-choicemap latents)))))
 
+(defn- evaluated
+  "The reference's trace evaluated with its log weight w, and w a host
+   double, as the filter's particles' (DESIGN §9's :log-weights): [trace w]."
+  [trace w]
+  [(gfi/eval-trace! trace w) (double (array/item w))])
+
 (defn- initialize
   "The filter's first step: n - 1 particles from pf/initialize, and the
    reference generated at its first choices, as particle 0."
@@ -120,9 +126,9 @@
         args (vec args)
         free (pf/initialize model args observations (dec n) (assoc (select-keys spec [:proposal :proposal-args]) :key k-free))
         {tr :trace w :weight} (gfi/generate model args added k-reference)
-        w (reference-weight w tr latents spec (vec proposal-args) k-assess)]
+        [tr w] (evaluated tr (reference-weight w tr latents spec (vec proposal-args) k-assess))]
     (assoc free
-           :traces (into [(gfi/eval-trace! tr w)] (:traces free))
+           :traces (into [tr] (:traces free))
            :log-weights (into [w] (:log-weights free)))))
 
 (defn- resample
@@ -152,9 +158,9 @@
             (throw (ex-info (str "conditional-smc: step " t " changed or removed choices of the reference;"
                                  " a step may only add choices")
                             {:step t :discard discard})))
-        w (+ (first (:log-weights state)) (reference-weight w tr latents spec (into [prev] proposal-args) k-assess))]
+        [tr w] (evaluated tr (+ (first (:log-weights state)) (reference-weight w tr latents spec (into [prev] proposal-args) k-assess)))]
     (assoc state
-           :traces (assoc (:traces state) 0 (gfi/eval-trace! tr w))
+           :traces (assoc (:traces state) 0 tr)
            :log-weights (assoc (:log-weights state) 0 w))))
 
 (defn conditional-smc

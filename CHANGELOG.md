@@ -57,6 +57,13 @@ other values for the same key, from the same distribution.
   acceptance ratio, which the moves rejected silently, is a loud error
   (`:reason :nan-log-alpha`), but for a move to a trace the observations
   rule out, rejected as before.
+- **Fixed: a particle filter's unbatched `:log-weights` are host doubles**
+  (gen.inference.particle-filter, gen.inference.particle-mcmc;
+  genclj-sq31). DESIGN §9's result keys make them host numbers, as the
+  batched filter's and importance sampling's are; `initialize`, `step`,
+  `move-reweight` and `introduce` one particle at a time, and conditional
+  SMC's reference, kept generate's and update's weights, 0-d arrays: MLX
+  scalars on MLX (host doubles already on the JVM backend).
 
 ## [1.2.0] - 2026-11-06
 

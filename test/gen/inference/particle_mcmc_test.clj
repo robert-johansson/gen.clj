@@ -213,6 +213,15 @@
     (is (= 0 (first (:parents state))))
     (is (every? pos? (rest (:parents state))) "the others descend from particles of more weight")))
 
+(deftest the-weights-are-host-doubles
+  ;; DESIGN §9's :log-weights are host numbers, the reference's too: before
+  ;; 1.2.1 its weight was generate's or update's 0-d array, an MLX scalar on
+  ;; MLX (a host double on the JVM backend, where this cannot fail;
+  ;; genclj-sq31). No resampling, which would make every weight a host one
+  (doseq [filter-steps [steps optimal-steps]]
+    (let [state (pmcmc/conditional-smc (trajectory some-states) latents filter-steps 4 {:ess-threshold 0.0 :key (rng/key 15)})]
+      (is (every? #(instance? Double %) (:log-weights state)) (pr-str (map type (:log-weights state)))))))
+
 (deftest a-move-is-determined-by-its-key
   (let [reference (trajectory some-states)
         sweep (fn [key] (let [s (pmcmc/conditional-smc reference latents steps 5 {:key key})]
