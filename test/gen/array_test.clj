@@ -498,3 +498,46 @@
           (is (= [9223372036854775807 -9223372036854775808] (ts/host (array/+ top 0))) "the range's ends are no overflow"))
       (is (= [0 12] (ts/host (array/* big 4))) "MLX wraps"))
     (is (= 0 (array/* 4611686018427387904 4)) "host numbers wrap on every backend")))
+
+(deftest shapes-and-axes-are-checked
+  ;; genclj-kdau: (zeros [-2 0]) made an array of shape [-2 0] on the JVM
+  ;; backend, and (zeros [-2 3]) said it had more than Long/MAX_VALUE
+  ;; cells; expand-dims at [0 0] inserted one axis where NumPy raises
+  (doseq [[label f want] [["a negative dimension beside a zero" #(array/zeros [-2 0]) :invalid-shape]
+                          ["a negative dimension" #(array/zeros [-2 3]) :invalid-shape]
+                          ["ones" #(array/ones [3 -1]) :invalid-shape]
+                          ["a reshape" #(array/reshape (array/zeros [6]) [-2 -3]) :invalid-shape]
+                          ["expand-dims at a repeated axis" #(array/expand-dims (array/zeros [2]) [0 0]) :repeated-axis]
+                          ["the same axis counted from the end" #(array/expand-dims (array/zeros [2]) [0 -3]) :repeated-axis]]]
+    (is (= want (reason f)) label))
+  (is (= [1 1 2] (array/shape (array/expand-dims (array/zeros [2]) [0 1]))) "distinct axes, as before"))
+
+(deftest grad-checks-its-argnums
+  ;; genclj-kdau: an :argnums past the arguments threw an
+  ;; IndexOutOfBoundsException
+  (let [f (fn [x y] (array/sum (array/* x y)))]
+    (doseq [[label argnums] [["past the arguments" 3] ["one of several" [0 2]] ["negative" -1] ["not an integer" 0.5]]]
+      (is (= :invalid-option (reason #((array/grad f {:argnums argnums}) 1.0 2.0))) label))
+    (is (= [2.0 1.0] (ts/host ((array/grad f {:argnums [0 1]}) 1.0 2.0))) "in range, as before")))
+
+(deftest scan-with-no-steps-and-scan-s-checks
+  ;; genclj-kdau: n 0 over xs probed the step at index 0 of an empty axis
+  ;; ("Index 0 out of bounds"); the host loop checked neither xs's leading
+  ;; axis nor the carry
+  (testing "n 0 over xs: no step runs; the ys are empty, of the step's shapes and dtypes"
+    (let [[c ys] (array/scan (fn [c x] [(array/+ c (array/sum x)) (array/* x 2.0)]) 1.5 (array/zeros [0 3]) 0)]
+      (is (= 1.5 (ts/host c)))
+      (is (= [0 3] (array/shape ys)))
+      (is (= (ts/float-dtype) (array/dtype ys)))))
+  (testing "xs's leading axis is n"
+    (is (= :invalid-args (reason #(array/scan (fn [c x] [c x]) 0.0 (array/zeros [4 2]) 3))))
+    (is (= :invalid-args (reason #(array/scan (fn [c x] [c x]) 0.0 {:a (array/zeros [3]) :b (array/zeros [2 3])} 3))))
+    (is (= :invalid-args (reason #(array/scan (fn [c x] [c x]) 0.0 (array/array 1.0) 1))) "a 0-d xs"))
+  (testing "carry' keeps carry's structure, shapes and dtypes"
+    (doseq [[label f carry] [["structure" (fn [c _] [[c c] c]) (array/zeros [2])]
+                             ["a map's keys" (fn [c _] [{:b (:a c)} 0.0]) {:a (array/zeros [2])}]
+                             ["shape" (fn [c _] [(array/zeros [3]) c]) (array/zeros [2])]
+                             ["dtype" (fn [c _] [(array/zeros [2] {:dtype (ts/int-dtype)}) c]) (array/zeros [2])]]]
+      (is (= :invalid-carry (reason #(array/scan f carry nil 2))) label))
+    (is (= 6 (ts/host (first (array/scan (fn [c t] [(array/+ c t) c]) 0 nil 4))))
+        "a host number's weak dtype may become the step's")))

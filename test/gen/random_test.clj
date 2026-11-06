@@ -156,3 +156,12 @@
         (is (= 2 (ts/host (array/min x))))
         (is (= 4 (ts/host (array/max x))))
         (is (close? (array/mean x) 3.0 0.01))))))
+
+(defn- reason [f] (:reason (try (f) nil (catch clojure.lang.ExceptionInfo e (ex-data e)))))
+
+(deftest keys-take-64-bit-integer-seeds
+  ;; genclj-kdau: (rng/key 2.5) was (rng/key 2), as fold-in refuses
+  (doseq [seed [2.5 2.0 (bigint (Math/pow 2 64)) "1" nil]]
+    (is (= :invalid-data (reason #(rng/key seed))) (pr-str seed)))
+  (is (= (rng/key 3) (rng/key (int 3)) (rng/key (bigint 3))) "any integer type")
+  (is (= [4294967295 4294967295] (rng/key-data (rng/key -1))) "a negative seed, as JAX's"))

@@ -531,6 +531,8 @@
   ([shape value] (full shape value nil))
   ([shape value {dt :dtype}]
    (check-fill :full value)
+   ;; a negative dimension is loud on every backend, before one sees it
+   (sh/size shape)
    (let [b (join-backends :full *backend* (operand-backend :full value))]
      (p/-full b (vec shape) value
               (or dt
@@ -813,7 +815,15 @@
   "x with new size-1 axes at the given position(s) of the result."
   [x axes]
   (let [s (shape x)
-        axes (set (sh/axes axes (c/+ (count s) (if (number? axes) 1 (count axes)))))
+        rank (c/+ (count s) (if (number? axes) 1 (count axes)))
+        ;; NumPy's rule: an axis named twice is an error, where a set
+        ;; dropped it and inserted one axis too few (genclj-kdau)
+        _ (when-not (number? axes)
+            (let [normal (mapv #(sh/axis (long %) rank) axes)]
+              (when-not (c/== (count (set normal)) (count normal))
+                (throw (ex-info (str "expand-dims: an axis is repeated in " (pr-str (vec axes)))
+                                {:reason :repeated-axis :axes (vec axes) :shape s})))))
+        axes (set (sh/axes axes rank))
         r (c/+ (count s) (count axes))]
     (reshape x (loop [i 0 src s out []]
                  (if (= i r)
@@ -1034,6 +1044,11 @@
    (fn [& args]
      (let [args (vec args)
            positions (if (sequential? argnums) (vec argnums) [argnums])
+           _ (doseq [i positions]
+               (when-not (and (integer? i) (c/< -1 i (count args)))
+                 (throw (ex-info (str "value-and-grad: :argnums " (pr-str argnums) " names no argument of "
+                                      (count args) " (0-based)")
+                                 {:reason :invalid-option :argnums argnums :arity (count args)}))))
            ;; in a batched run, on the tracer even when every leaf is
            ;; shared: f may reach the run's batched values
            b (effective-backend (backend-of :value-and-grad (mapcat #(tree-leaves (nth args %)) positions)))
@@ -1087,12 +1102,30 @@
     (array i {:dtype :int32})
     (tree-map #(take % i 0) xs)))
 
+(defn- check-scan-carry
+  "carry' (a step's) keeps carry's structure, shapes and dtypes: a host
+   number's dtype is weak, so only its kind must stay."
+  [carry carry']
+  (let [refuse (fn [what] (throw (ex-info (str "scan: the step changed the carry's " what)
+                                          {:reason :invalid-carry :changed what})))]
+    (when-not (= (tree/skeleton carry) (tree/skeleton carry'))
+      (refuse "structure"))
+    (doseq [[c c'] (map vector (tree-leaves carry) (tree-leaves carry'))]
+      (when-not (and (array? c') (= (shape c) (shape c')))
+        (refuse (str "shape, from " (shape c) " to " (when (array? c') (shape c')))))
+      (when-not (if (or (host? c) (host? c'))
+                  (= (dtype-kind (dtype c)) (dtype-kind (dtype c')))
+                  (= (dtype c) (dtype c')))
+        (refuse (str "dtype, from " (dtype c) " to " (dtype c')))))))
+
 (defn ^{:api :experimental} scan
   "A loop of n steps, lax.scan's: (f carry x) returns [carry' y]; scan
    returns [the last carry, the ys stacked on a new leading axis of n] (a
    tree as y is). x is xs' slice along its leading axis of n (xs a tree of
-   arrays), or with xs nil the step's index, an int32 scalar from 0 to
-   n - 1. carry' must keep carry's structure, shapes and dtypes.
+   arrays, each leaf's leading axis n), or with xs nil the step's index,
+   an int32 scalar from 0 to n - 1. carry' must keep carry's structure,
+   shapes and dtypes (an ex-info otherwise). With n 0, f runs once on
+   zeros of x's shapes, for the shapes of the empty ys.
    On the staging backend (gen.array.stage) the loop is one node, f
    staged once; on every other backend a host loop, f called n times.
    Experimental: outside the 1.x promise (DESIGN §9)."
@@ -1100,13 +1133,25 @@
   (let [n (long n)
         b (backend-of :scan (concat (filter backend-array? (tree-leaves carry))
                                     (when xs (filter backend-array? (tree-leaves xs)))))]
+    (when xs
+      (doseq [l (tree-leaves xs)]
+        (when-not (and (array? l) (seq (shape l)) (c/== n (long (first (shape l)))))
+          (throw (ex-info (str "scan: every leaf of xs has a leading axis of n = " n ", not "
+                               (if (array? l) (str "shape " (shape l)) (pr-str l)))
+                          {:reason :invalid-args :n n :shape (when (array? l) (shape l))})))))
     (if (satisfies? p/ILooping b)
       (p/-scan-loop b f carry xs n)
       (loop [i 0 c carry ys []]
         (if (< i n)
           (let [[c' y] (f c (step-x xs i))]
+            (check-scan-carry carry c')
             (recur (inc i) c' (conj ys y)))
-          (let [y0 (if (seq ys) (first ys) (second (f carry (step-x xs 0))))
+          (let [y0 (if (seq ys)
+                     (first ys)
+                     ;; no step ran: f once on zeros of x's shapes, for the ys'
+                     (second (f carry (if (nil? xs)
+                                        (step-x nil 0)
+                                        (tree-map #(zeros (vec (rest (shape %))) {:dtype (dtype %)}) xs)))))
                 sk (tree/skeleton y0)
                 columns (apply map vector (map tree-leaves (if (seq ys) ys [y0])))]
             [c (tree/refill sk (vec (if (seq ys)

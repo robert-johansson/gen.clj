@@ -12,21 +12,27 @@
            {:reason :too-many-cells :shape shape :cells cells}))
 
 (defn size
-  "Number of elements in an array of this shape, exactly: a count past a
-   long's range is a loud error (as is any shape that large)."
+  "Number of elements in an array of this shape, exactly: a negative
+   dimension, and a count past a long's range, are loud errors (as is any
+   shape that large)."
   ^long [shape]
   (let [r (count shape)]
-    ;; over: the product so far passed a long; a later zero still gives 0
+    ;; over: the product so far passed a long; a later zero still gives 0.
+    ;; Every dimension is read: a negative one after a zero is an error too
+    ;; (genclj-kdau: (zeros [-2 0]) made an array of that shape)
     (loop [s 1 i 0 over false]
       (if (< i r)
         (let [d (long (nth shape i))
               p (* s d)]
-          (cond (zero? d) 0
+          (cond (neg? d) (throw (ex-info (str "an array's shape has no negative dimension, not " (pr-str shape))
+                                         {:reason :invalid-shape :shape shape}))
+                (zero? s) (recur 0 (inc i) over)
+                (zero? d) (recur 0 (inc i) false)
                 (or over (not (zero? (Math/multiplyHigh s d))) (neg? p)) (recur s (inc i) true)
                 :else (recur p (inc i) false)))
-        (if over
-          (throw (too-many-cells shape "more than Long/MAX_VALUE" "no array holds as many"))
-          s)))))
+        (cond (zero? s) 0
+              over (throw (too-many-cells shape "more than Long/MAX_VALUE" "no array holds as many"))
+              :else s)))))
 
 (def ^:const max-cells
   "The most cells a JVM array holds: Integer/MAX_VALUE less the 8 the JVM

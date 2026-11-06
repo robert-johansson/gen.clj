@@ -85,6 +85,24 @@ other values for the same key, from the same distribution.
   doubles, and one past 2^63 threw a raw IllegalArgumentException when it
   was read. MLX wraps, as host numbers do on every backend (documented,
   docs/array-api.md §13).
+- **Fixed: loud errors where gen.array, gen.array.stage and gen.random
+  threw raw exceptions or gave silent values** (genclj-kdau; rule 6), each
+  an `ex-info` with a `:reason`: a negative dimension is `:invalid-shape`
+  (`(zeros [-2 0])` made an array of that shape, `(zeros [-2 3])` claimed
+  more than Long/MAX_VALUE cells); `expand-dims` at a repeated axis is
+  `:repeated-axis`, as NumPy (a set dropped it, one axis too few);
+  `grad`'s `:argnums` past the arguments `:invalid-option` (an
+  IndexOutOfBoundsException); `rng/key-data` of a staged key `:staged-key`
+  (a ClassCastException); `(rng/key 2.5)` `:invalid-data`, as `fold-in`
+  (it was `(rng/key 2)`). `array/scan` (experimental) with n 0 over xs runs
+  no step and returns empty ys of the step's shapes (it threw "Index 0 out
+  of bounds"); its host loop checks that every leaf of xs has a leading
+  axis of n (`:invalid-args`) and that a step keeps the carry's structure,
+  shapes and dtypes (`:invalid-carry`), as the stager checked shapes and
+  dtypes (it now checks the structure too). A staged 0-d value fills
+  `array/full` (a ClassCastException). Breaking only for code that was
+  already wrong: a fractional or a float seed (2.0 included, as JAX's
+  PRNGKey), a repeated axis.
 
 ## [1.2.0] - 2026-11-06
 

@@ -21,8 +21,13 @@
 ;; ---------------------------------------------------------------------------
 
 (defn key
-  "The key for an integer seed (as JAX's PRNGKey)."
+  "The key for an integer seed, 64 bits (as JAX's PRNGKey). Other seeds
+   are an error: a long cast took 2.5 for 2 (genclj-kdau), as fold-in
+   refuses such data."
   [seed]
+  (when-not (and (integer? seed) (clojure.core/<= Long/MIN_VALUE seed Long/MAX_VALUE))
+    (throw (ex-info (str "A key's seed is a 64-bit integer, not " (pr-str seed))
+                    {:reason :invalid-data :seed seed})))
   (threefry/seed->key seed))
 
 (defn key?
@@ -56,9 +61,14 @@
   (if (staged-key? k) (p/-fold-in-key k data) (threefry/fold-in (check-key k) data)))
 
 (defn key-data
-  "The two uint32 words of a key."
+  "The two uint32 words of a host key. A staged key's words are a staged
+   value, which the host cannot read: an error (genclj-kdau)."
   [k]
-  (let [^gen.random.threefry.Key k (check-key k)]
+  (check-key k)
+  (when (staged-key? k)
+    (throw (ex-info "key-data: a staged key's words are staged values, not host numbers"
+                    {:reason :staged-key})))
+  (let [^gen.random.threefry.Key k k]
     [(.-k0 k) (.-k1 k)]))
 
 ;; ---------------------------------------------------------------------------
