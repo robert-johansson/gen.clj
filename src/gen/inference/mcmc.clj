@@ -518,6 +518,25 @@
     opts
     (throw (ex-info (str "The kernel takes an options map here, not " (pr-str opts)) {:value opts}))))
 
+(defn- positive!
+  "x, loud unless a positive finite number: the kernel's step size, named
+   label in its message and k in its data (hmc's and nuts' :eps, mala's
+   tau)."
+  [kernel label k x]
+  (when-not (and (number? x) (Double/isFinite (double x)) (pos? (double x)))
+    (throw (ex-info (str kernel ": " label " must be a positive number, not " (pr-str x))
+                    {:reason (keyword (str "invalid-" (name k))) k x})))
+  x)
+
+(defn- positive-int!
+  "x, loud unless a positive integer: the kernel's option k (hmc's :L, nuts'
+   :max-depth)."
+  [kernel k x]
+  (when-not (pos-int? x)
+    (throw (ex-info (str kernel ": " k " must be a positive integer, not " (pr-str x))
+                    {:reason (keyword (str "invalid-" (name k))) k x})))
+  x)
+
 (defn- step-opts
   "A kernel's last argument, a key or an options map (loud otherwise), as an
    options map with a key: the options' :key, or one from the implicit
@@ -547,13 +566,15 @@
 (defn mala
   "Metropolis-adjusted Langevin: propose v' ~ N(v + tau·∇, √(2 tau)) for the
    selected choices v, with the reverse move's density from the gradient at
-   v'. The last argument is a key or an options map: :key, :inv-metric (the
+   v', tau a positive number (a loud error otherwise, as hmc's :eps). The
+   last argument is a key or an options map: :key, :inv-metric (the
    identity; with variances M⁻¹, or a dense M⁻¹ (dense-inv-metric),
    v' ~ N(v + tau·M⁻¹∇, 2 tau·M⁻¹)), and
    :compile? (false) to compute the proposal and its densities as one
    compiled function, as hmc's."
   ([trace selection tau] (mala trace selection tau nil))
   ([trace selection tau key-or-opts]
+   (positive! "mala" "tau" :tau tau)
    (let [{:keys [key] :as opts} (step-opts key-or-opts)
          move (mala-move trace selection tau opts key)]
      (check-start! "mala" (:start-ok move) trace selection)
@@ -653,16 +674,30 @@
     eps
     (jitter-step eps (double jitter) (uniform (rng/fold-in key 3)))))
 
+(defn- hmc-options
+  "hmc's options (an options map or nil) over its defaults, :L 10, :eps 0.1
+   and :jitter 0, checked as nuts checks its own: loud for an :eps that is
+   not a positive number, an :L that is not a positive integer, a :jitter
+   outside [0, 1)."
+  [kernel opts]
+  (let [{:keys [L eps jitter] :as opts} (merge {:L 10 :eps 0.1 :jitter 0} (options opts))]
+    (positive! kernel ":eps" :eps eps)
+    (positive-int! kernel :L L)
+    (check-jitter! jitter)
+    opts))
+
 (defn hmc
   "Hamiltonian Monte Carlo on the selected choices: L leapfrog steps of size
    eps, with momenta drawn from N(0, M), M the inverse of :inv-metric (the
    identity by default: standard normal momenta; diagonal, or dense with
    dense-inv-metric, a position then moving by M⁻¹·momentum). The third argument is an
    options map or a key, and a key may follow the options. Options: :L
-   (10), :eps (0.1), :inv-metric, :jitter (0): each transition steps by
-   eps·(1 + jitter·(2u - 1)), u uniform, Stan's step-size jitter, which
-   keeps L steps from returning near the start (the result then holds the
-   step taken, :eps), :key, :compile? (false): run the L steps as one
+   (10, a positive integer), :eps (0.1, a positive number; either is a
+   loud error otherwise, as nuts'), :inv-metric, :jitter (0): each
+   transition steps by eps·(1 + jitter·(2u - 1)), u uniform, Stan's
+   step-size jitter, which keeps L steps from returning near the start
+   (the result then holds the step taken, :eps), :key, :compile? (false):
+   run the L steps as one
    compiled function (array/compile: one MLX graph on the MLX backend, the
    same steps on the JVM backend), a function of the selected values and
    the other choices, cached per model, arguments and structure. A model
@@ -672,7 +707,7 @@
   ([trace selection] (hmc trace selection nil))
   ([trace selection key-or-opts] (let [opts (step-opts key-or-opts)] (hmc trace selection opts (:key opts))))
   ([trace selection opts key]
-   (let [{:keys [eps jitter] :or {eps 0.1 jitter 0} :as opts} (options opts)
+   (let [{:keys [eps jitter] :as opts} (hmc-options "hmc" opts)
          step (jittered eps jitter key)
          move (hmc-move trace selection (assoc opts :eps step) key)]
      (check-start! "hmc" (:start-ok move) trace selection)
@@ -709,6 +744,7 @@
   "mala's step as a function of arrays and keys (the device form): the same
    trace and decisions, with :start-ok, which mala checks on the host."
   [trace selection tau opts key]
+  (positive! "mala" "tau" :tau tau)
   (device-result trace (mala-move trace selection tau (dissoc opts :compile?) key) key))
 
 (defn ^:no-doc hmc-step
@@ -716,7 +752,7 @@
    trace and decisions, with :start-ok. Without jitter (its step size is
    read on the host)."
   [trace selection opts key]
-  (let [{:keys [jitter] :or {jitter 0} :as opts} (options opts)]
+  (let [{:keys [jitter] :as opts} (hmc-options "hmc" opts)]
     (when-not (zero? (double jitter))
       (throw (ex-info "hmc's :jitter under :device, not yet (its step size is read on the host)" {:jitter jitter})))
     (device-result trace (hmc-move trace selection (dissoc opts :compile?) key) key)))
@@ -869,12 +905,8 @@
   ([trace selection key-or-opts] (let [opts (step-opts key-or-opts)] (nuts trace selection opts (:key opts))))
   ([trace selection opts key]
    (let [{:keys [eps max-depth compile? inv-metric jitter] :or {eps 0.1 max-depth 10 jitter 0}} (options opts)
-         _ (when-not (and (number? eps) (Double/isFinite (double eps)) (pos? (double eps)))
-             (throw (ex-info (str "nuts: :eps must be a positive number, not " (pr-str eps)) {:reason :invalid-eps :eps eps})))
-         eps (jittered eps jitter key)
-         _ (when-not (pos-int? max-depth)
-             (throw (ex-info (str "nuts: :max-depth must be a positive integer, not " (pr-str max-depth))
-                             {:reason :invalid-max-depth :max-depth max-depth})))
+         eps (jittered (positive! "nuts" ":eps" :eps eps) jitter key)
+         _ (positive-int! "nuts" :max-depth max-depth)
          [k-momenta k-tree k-update] (rng/split key 3)
          [proto v others] (flat-values trace selection)
          inv (inverse-metric inv-metric proto v)
@@ -1022,8 +1054,8 @@
   ([ps selection] (hmc-particles ps selection nil))
   ([ps selection key-or-opts] (let [opts (step-opts key-or-opts)] (hmc-particles ps selection opts (:key opts))))
   ([ps selection opts key]
-   (let [{:keys [eps jitter] :or {eps 0.1 jitter 0} :as opts} (uncompiled! "hmc-particles" (options opts))
-         jitter (double (check-jitter! jitter))
+   (let [{:keys [eps jitter] :as opts} (hmc-options "hmc-particles" (uncompiled! "hmc-particles" (options opts)))
+         jitter (double jitter)
          ;; jittered's step, its u drawn per particle (an array, not read)
          move (fn [t k]
                 (if (zero? jitter)
@@ -1038,6 +1070,7 @@
    them. Arguments as mala's, without :compile?; returns as hmc-particles."
   ([ps selection tau] (mala-particles ps selection tau nil))
   ([ps selection tau key-or-opts]
+   (positive! "mala-particles" "tau" :tau tau)
    (let [{:keys [key] :as opts} (uncompiled! "mala-particles" (step-opts key-or-opts))]
      (particle-moves "mala" ps selection #(mala-move %1 selection tau opts %2) key))))
 

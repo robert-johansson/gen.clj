@@ -38,6 +38,16 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+- **Breaking: hmc's `:eps` and `:L` and mala's tau are checked**
+  (gen.inference.mcmc; genclj-mhgn; DESIGN §9, 1.2.1's owner calls). As
+  nuts checks its own: `hmc`, `hmc-particles` and kernel/hmc throw
+  `ex-info` for an `:eps` that is not a positive finite number
+  (`:reason :invalid-eps`) or an `:L` that is not a positive integer
+  (`:invalid-L`), and `mala`, `mala-particles` and kernel/mala for such a
+  tau (`:invalid-tau`). Only code that was silently wrong throws: `:eps 0`
+  or `:L 0` "accepted" every move as a no-op (an acceptance rate of 1),
+  `:L 2.5` ran 2 steps, and a negative tau made every move a divergence.
+
 ## [1.2.0] - 2026-11-06
 
 A language-model release (DESIGN §9, "1.2.0's theme"; genclj-ucfg),
