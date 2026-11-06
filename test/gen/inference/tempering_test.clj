@@ -219,6 +219,10 @@
         key (rng/key 4)]
     (is (false? (accept? ##-Inf -1.2 ##-Inf 0.5 key)) "an impossible trace")
     (is (false? (accept? -3.0 -1.2 ##-Inf 0.5 key)) "an impossible trace, whatever w")
+    ;; found on MLX (Metal and CUDA, 1.2.1's gate): a walk past the prior's
+    ;; support has w -Inf, and its likelihood U(0, z) at z < 0 reads NaN,
+    ;; since a lazy backend's parameters are not validated on the device
+    (is (false? (accept? ##-Inf -1.2 ##NaN 0.5 key)) "a proposal the prior rules out, whatever l' reads")
     (is (true? (accept? 0.0 -1.2 -1.2 0.5 key)) "a ratio of 1")
     (doseq [[w l l'] [[##NaN -1.2 -1.0] [0.1 -1.2 ##NaN] [##Inf -1.2 ##Inf]]]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"NaN" (accept? w l l' 0.5 key)) (pr-str [w l l'])))))

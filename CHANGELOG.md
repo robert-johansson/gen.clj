@@ -308,8 +308,10 @@ Checked before the tag: CHECKED
   start now weighs 0 from the first step on, and the estimate is
   unchanged by it, whatever the internal proposal. A move's NaN
   acceptance ratio, which the moves rejected silently, is a loud error
-  (`:reason :nan-log-alpha`), but for a move to a trace the observations
-  rule out, rejected as before.
+  (`:reason :nan-log-alpha`), but for a move to a trace of density 0,
+  rejected as before: one the observations rule out, or one the model
+  rules out whatever its likelihood reads (on MLX a likelihood whose
+  parameter left its domain reads NaN).
 - **Fixed: a particle filter's unbatched `:log-weights` are host doubles**
   (gen.inference.particle-filter, gen.inference.particle-mcmc;
   genclj-sq31). DESIGN §9's result keys make them host numbers, as the

@@ -112,13 +112,16 @@
 (defn- accept?
   "Metropolis-Hastings on π_beta (beta > 0): the move's log weight w (log p
    ratio less the proposal's), less (1 - beta) times its change in log L,
-   from l to l'. A move to a trace where the observations have density 0
-   (l' -Inf, and w with it) is rejected, since π_beta is 0 there: its ratio
-   would be -Inf + Inf. Otherwise MH's rule (mh/accept?), loud for a NaN
-   ratio."
+   from l to l'. A move to a trace of density 0 is rejected, since π_beta
+   is 0 there: where the observations have density 0 (l' -Inf, and w with
+   it), whose ratio would be -Inf + Inf, and where the model has (w -Inf),
+   whatever l' reads (on a lazy backend a likelihood whose parameter left
+   its domain reads NaN: no parameter is checked on the device). Otherwise
+   MH's rule (mh/accept?), loud for a NaN ratio."
   [w l l' beta key]
   (let [l' (double l')]
     (and (not (== ##-Inf l'))
+         (not (== ##-Inf (double (host w))))
          (mh/accept? (- (host w) (* (- 1.0 (double beta)) (- l' (double l)))) (uniform key)
                      {:kernel :tempering :weight (host w) :log-likelihood l :proposed-log-likelihood l'}))))
 
