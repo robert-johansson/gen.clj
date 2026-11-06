@@ -46,8 +46,16 @@
    state's probabilities from state i; e is a distribution batched over the
    states on its leading axis, such as (categorical B) for a [K M] matrix
    B, (normal mus sigmas) for vectors of K, or (mvnormal mus covs). A belief
-   is the vector of state probabilities. An impossible observation gives
-   its step -Inf and leaves the belief at its prediction.
+   is the vector of state probabilities.
+
+   An impossible observation gives its step -Inf, its belief its
+   prediction. On the host the run stops there, as every generative
+   function's does at a choice outside its support (gfi/impossible?): the
+   trace holds the steps up to it, and its return value that many beliefs.
+   A run whose score is an array (on a lazy backend, or batched where the
+   particles differ) goes on, each later step filtering from the
+   prediction. Either way the trace's
+   score is -Inf, and sample-states refuses a trace whose host score is.
 
    params may also be a function of the step t that returns the map, for
    parameters that change with time (a regression whose design changes
@@ -391,13 +399,19 @@
 (defn sample-states
   "The latent states of a trace of kalman or hmm, a vector of n, drawn from
    their posterior given its observations (forward filtering, backward
-   sampling)."
+   sampling). A trace whose observations are impossible (a host score of
+   -Inf: on the host its run stopped at one, see the namespace doc) has no
+   posterior: a loud error."
   ([tr] (sample-states tr (gfi/next-key)))
   ([tr key]
    (let [kind (:kind (:kernel (trace/maker tr)))
          [_ _ params] (:args tr)
          beliefs (:retval tr)
          ks (rng/split key (max 1 (count beliefs)))]
+     (when (and kind (gfi/impossible? (:score tr)))
+       (throw (ex-info (str "sample-states: the observations are impossible (the trace's score is -Inf):"
+                            " the states have no posterior")
+                       {:reason :impossible})))
      (case kind
        :kalman (kalman-states beliefs params ks)
        :hmm (hmm-states beliefs params ks)

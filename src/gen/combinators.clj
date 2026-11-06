@@ -95,6 +95,15 @@
 
 (defn- element-key [key i] (rng/fold-in key i))
 
+(defn- check-gen-fn
+  "gf, checked to be a generative function: every constructor's argument,
+   refused when it is made, not when it is first called."
+  [what gf]
+  (when-not (gfi/generative-function? gf)
+    (throw (ex-info (str what " needs a generative function, not " (pr-str gf))
+                    {:reason :not-a-generative-function :value gf})))
+  gf)
+
 ;; Kernel calls, through dyn/run-call (a batched run is this same code
 ;; under the batch tracer); at is the call's address, its choices' place in
 ;; the combinator's (nil for a Switch's branch).
@@ -147,10 +156,20 @@
     (into (sorted-set) (clojure.core/map long) addrs)))
 
 (defn- selected-indices
-  "The indices a selection may select something under: :all, or a sorted set."
+  "The indices a selection may select something under: :all, or a sorted
+   set. An index past the elements selects nothing (they may be there at
+   another length), but a negative one is no element's, nor a node's: a
+   loud error in every kind that numbers its calls (genclj-kdau)."
   [s]
   (let [as (sel/top-addresses s)]
-    (if (= :all as) :all (into (sorted-set) (filter integer?) as))))
+    (if (= :all as)
+      :all
+      (let [is (filter integer? as)]
+        (when-let [neg (seq (sort (filter neg? is)))]
+          (throw (ex-info (str "selection: a negative index " (pr-str (vec neg))
+                               ", where elements and nodes are numbered from 0")
+                          {:reason :negative-index :indices (vec neg)})))
+        (into (sorted-set) is)))))
 
 (defn- element-call
   "Map's or Unfold's call at path p: element (p 0)'s trace."
@@ -439,7 +458,7 @@
   "Gen.jl's Map combinator: the kernel applied independently to each element
    of its argument vectors."
   [kernel]
-  (->MapGF kernel))
+  (->MapGF (check-gen-fn "map" kernel)))
 
 ;; ---------------------------------------------------------------------------
 ;; Unfold
@@ -564,7 +583,7 @@
 (defn unfold
   "Gen.jl's Unfold combinator: a state-space chain of n kernel steps."
   [kernel]
-  (->UnfoldGF kernel))
+  (->UnfoldGF (check-gen-fn "unfold" kernel)))
 
 ;; ---------------------------------------------------------------------------
 ;; Switch
@@ -826,9 +845,11 @@
    an index that differs across the particles runs each branch on its own
    particles (by partition)."
   [& gfs]
-  (if (and (= 1 (count gfs)) (map? (first gfs)) (not (record? (first gfs))))
-    (->SwitchGF (first gfs))
-    (->SwitchGF (vec gfs))))
+  (let [branches (if (and (= 1 (count gfs)) (map? (first gfs)) (not (record? (first gfs))))
+                   (first gfs)
+                   (vec gfs))]
+    (run! #(check-gen-fn "switch" %) (if (map? branches) (vals branches) branches))
+    (->SwitchGF branches)))
 
 ;; ---------------------------------------------------------------------------
 ;; Recurse
@@ -1077,6 +1098,7 @@
     {:weight weight :retval (as 0)}))
 
 (defn- recurse-project [tr s]
+  (selected-indices s) ; for its check: a negative node is loud, as in regenerate
   (let [part (fn [subs part]
                (reduce (fn [w [node sub]]
                          (+ w (gfi/-project (:gen-fn sub) sub (sel/get-subselection s [node part]))))
@@ -1109,7 +1131,8 @@
   [production aggregation max-branch]
   (when-not (pos-int? max-branch)
     (throw (ex-info "Recurse's max-branch is a positive integer" {:max-branch max-branch})))
-  (->RecurseGF production aggregation max-branch))
+  (->RecurseGF (check-gen-fn "recurse's production" production) (check-gen-fn "recurse's aggregation" aggregation)
+               max-branch))
 
 ;; ---------------------------------------------------------------------------
 ;; Printing
@@ -1330,10 +1353,6 @@
   (-project [_ tr selection] (project-elements tr selection))
   trace/ICalls
   (-call [_ tr p] (element-call tr p)))
-
-(defn- check-gen-fn [what gf]
-  (when-not (gfi/generative-function? gf)
-    (throw (ex-info (str what " needs a generative function, not " (pr-str gf)) {:value gf}))))
 
 (defn scan
   "JAX's scan as a combinator (GenMLX's Scan): Unfold with inputs and

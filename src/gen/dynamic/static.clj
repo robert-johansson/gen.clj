@@ -381,7 +381,7 @@
                 {:bindings [] :terms [] :k key}
                 (:nodes st))]
     (guard/guard-branches
-     `(fn [~'param ~args ~choices ~key]
+     `(fn [~(guard/own 'param) ~args ~choices ~key]
         (let [~params ~args ~@coercions ~@bindings]
           [(gen.dynamic/static-total [~@terms]) ~(:expr (:ret st))]))
      locals)))
@@ -401,9 +401,11 @@
         env (gensym "env")
         reads (fn [inputs] (vec (mapcat (fn [x] [x `(nth ~env ~(slots x))]) inputs)))
         node-fn (fn [{:keys [inputs expr]}]
-                  (guard/guard-branches `(fn [~'param ~env] (let ~(reads inputs) ~expr)) (into locals inputs)))
+                  (guard/guard-branches `(fn [~(guard/own 'param) ~env] (let ~(reads inputs) ~expr))
+                                        (into locals inputs)))
         keys-fn (fn [{:keys [inputs] ks :keys}]
-                  (guard/guard-branches `(fn [~'param ~env] (let ~(reads inputs) [~@ks])) (into locals inputs)))
+                  (guard/guard-branches `(fn [~(guard/own 'param) ~env] (let ~(reads inputs) [~@ks]))
+                                        (into locals inputs)))
         param? (fn [expr] (boolean (some #{'param} (tree-seq coll? seq expr))))
         spec (fn [{:keys [symbol constant inputs]}]
                (cond (and symbol (contains? slots symbol)) {:slot (slots symbol)}
@@ -411,7 +413,7 @@
                      :else {:in (mapv slots inputs)}))
         call (fn [{:keys [call args arg-specs inputs alias]}]
                (cond call {:rule `(var ~call) :arg-specs (mapv spec arg-specs)
-                           :args-f `(fn [~'param ~env] (let ~(reads inputs) [~@args]))}
+                           :args-f `(fn [~(guard/own 'param) ~env] (let ~(reads inputs) [~@args]))}
                      alias {:alias (slots alias)}))
         v (gensym "v")
         args (gensym "args")]

@@ -84,7 +84,12 @@
   (testing "an error marker needs the error"
     (is (zero? (runs ";; error: Bad input\n(throw (ex-info \"Bad input: 3\" {}))")))
     (is (= 1 (runs ";; error: Bad input\n(throw (ex-info \"Other\" {}))")))
-    (is (= 2 (runs ";; error: Bad input\n(+ 1 2)"))))
+    (is (= 2 (runs ";; error: Bad input\n(+ 1 2)")))
+    (testing "a macro's error, which the compiler wraps, by its own message"
+      (is (zero? (runs "(defmacro refuses [] (throw (ex-info \"Bad form: 3\" {})))"
+                       ";; error: Bad form\n(refuses)")))
+      (is (= 1 (runs "(defmacro refuses [] (throw (ex-info \"Other\" {})))"
+                     ";; error: Bad form\n(refuses)")))))
   (testing "a source without an ns region fails"
     (is (= 1 (failures #(book/run-regions (book/regions ";; book: a\n(+ 1 2)\n"))))))
   (testing "a line over 80 characters fails"

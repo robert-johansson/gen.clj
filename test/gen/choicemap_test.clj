@@ -60,6 +60,28 @@
     (is (= (cm/choicemap :a 1.0 :b 2.0) (cm/choicemap :b 2.0 :a 1.0)))
     (is (= "#gen/choicemap {:a 1.0}" (pr-str (cm/choicemap :a 1.0))))))
 
+(deftest the-address-order-is-total
+  ;; genclj-7y8r: 1 and 1.0 tied, and so did two addresses of one class
+  ;; without an order of their own, so to-array's order followed the order
+  ;; the map was built in
+  (testing "the leaf order does not depend on the order a map was built in"
+    (doseq [[a b] [[1 1.0] [2 1.5] ['(1) '(2)] [{:k 1} {:k 2}] [#{1} #{2}] [1/2 0.5] [3N 2.5]]]
+      (let [ab (cm/choicemap a 10.0 b 20.0)
+            ba (cm/choicemap b 20.0 a 10.0)]
+        (is (= (cm/addresses ab) (cm/addresses ba)) (pr-str [a b]))
+        (is (= (ts/host (cm/to-array ab)) (ts/host (cm/to-array ba))) (pr-str [a b])))))
+  (testing "numbers by value whatever their class, a tie by class"
+    (is (= [[0.5] [1.0] [1] [1.5] [2]] (cm/addresses (cm/choicemap 2 0.0 1.5 0.0 1 0.0 1.0 0.0 0.5 0.0)))))
+  (testing "an order: antisymmetric, transitive, and 0 only for equal addresses"
+    (let [xs [1 1.0 2 1.5 3N 1/2 0.5 ##-Inf ##Inf ##NaN :a :b "a" 'a true false nil '(1) '(2) {:k 1} {:k 2} #{1}]
+          sign #(Long/signum (long (cm/address-order %1 %2)))]
+      (doseq [x xs y xs]
+        (is (= (sign x y) (- (sign y x))) (pr-str [x y]))
+        (when-not (or (= x y) (identical? x y)) (is (not (zero? (sign x y))) (pr-str [x y]))))
+      (doseq [x xs y xs z xs
+              :when (and (neg? (sign x y)) (neg? (sign y z)))]
+        (is (neg? (sign x z)) (pr-str [x y z]))))))
+
 (deftest lookups-are-loud
   ;; D4 (DESIGN.md §9): a lookup throws where Gen.jl throws KeyError, and
   ;; gives a not-found value there instead when one is passed, as nth

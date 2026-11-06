@@ -1209,6 +1209,35 @@
   '{double clojure.core/double long clojure.core/long float clojure.core/float int clojure.core/int
     short clojure.core/short byte clojure.core/byte char clojure.core/char boolean clojure.core/boolean})
 
+(def ^:private own-names
+  "The names a gen body binds itself, with what each is there."
+  '{trace "a choice" splice "a call" param "a trainable parameter" untraced "an untraced draw"
+    untraced-key "a key from the encapsulated randomness"})
+
+(defn- code-symbols
+  "The symbols of form, but quoted data's (which is not code)."
+  [form]
+  (filter symbol? (tree-seq #(and (coll? %) (not (and (seq? %) (= 'quote (first %))))) seq form)))
+
+(defn- check-own-names!
+  "A parameter named as one of the body's own names would shadow it, and
+   a local around the body of such a name (not an enclosing gen's own)
+   that the body reads would be shadowed by it: both are compile errors,
+   naming the rename (genclj-k3xn)."
+  [params body env]
+  (doseq [s (mapcat static/bound-names (remove #{'&} params))
+          :when (own-names s)]
+    (throw (ex-info (str "gen: a parameter named " s " would hide the body's own " s " (" (own-names s)
+                         "): rename the parameter")
+                    {:reason :reserved-name :symbol s :binding :parameter})))
+  (let [locals (guard/locals env)]
+    (doseq [s (distinct (filter own-names (code-symbols body)))
+            :let [b (get locals s)]
+            :when (and b (not (guard/own? b)))]
+      (throw (ex-info (str "gen: the body reads " s ", which in a gen body is the body's own (" (own-names s)
+                           "), not the local " s " around it: rename the local")
+                      {:reason :reserved-name :symbol s :binding :local})))))
+
 (defmacro gen
   "A generative function. params are the arguments (destructuring allowed);
    in body, (trace addr dist) and (splice addr gf & args) make random choices
@@ -1242,6 +1271,11 @@
    Helper functions the body calls are not rewritten: define one that
    branches on values with defn-guarded (or guarded-fn).
 
+   The body binds trace, splice, param, untraced and untraced-key itself,
+   so a parameter of one of those names, or a local of one around the body
+   that the body reads, is a compile error that names the rename: a
+   proposal's argument is tr, not trace (Gen.jl's examples' name).
+
    Trace calls in a lazy sequence run when it is realized (chunking
    included); the body's return value is realized during the run. A lazy
    call with trace calls whose value is discarded (also as the value of a
@@ -1255,6 +1289,7 @@
       (throw (ex-info (str "gen: " s " in a body is gen's own (encapsulated randomness), but it would hide the var "
                            (resolve &env s) ": rename the var")
                       {:symbol s :var (resolve &env s)}))))
+  (check-own-names! params body &env)
   (let [;; the body fn has four hidden parameters, and a fn with primitive
         ;; parameters takes at most four: coerce them in the body instead
         prim (filter #(and (symbol? %) (primitive-coercions (:tag (meta %)))) params)
@@ -1265,9 +1300,10 @@
         locals (guard/locals &env)
         st (when (:static (meta params)) (static/analyze plain body &env locals))
         body (if (seq prim) [`(let [~@coercions] ~@body)] body)
-        body-fn (guard/guard-branches `(fn [~'trace ~'splice ~'param ~'untraced ~@plain]
-                                   (let [~'untraced-key (fn [] (~'untraced))] ~@body))
-                                locals)]
+        body-fn (guard/guard-branches `(fn [~(guard/own 'trace) ~(guard/own 'splice) ~(guard/own 'param)
+                                            ~(guard/own 'untraced) ~@plain]
+                                         (let [~(guard/own 'untraced-key) (fn [] (~'untraced))] ~@body))
+                                      locals)]
     ;; the body fn takes the four hidden parameters: no check (make-gen-fn's
     ;; reflects, and an inline gen is built on every run of its body)
     `(dynamic-gf ~body-fn '~(cons params body) ~(when st (static/static-form st plain coercions locals)))))

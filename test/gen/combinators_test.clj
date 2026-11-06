@@ -4,6 +4,7 @@
    unknown-change, thesis law 8), and length and branch changes."
   (:refer-clojure :exclude [+ - * /])
   (:require [gen.test-support :as ts]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
@@ -481,6 +482,40 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no branch" (gfi/simulate switched [2 0.0] k)))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"single value"
                           (gfi/generate mapped [[1.0]] (cm/->Value 1.0) k)))))
+
+(deftest a-negative-index-in-a-selection-is-loud
+  ;; genclj-kdau: Map's regenerate and project threw a raw
+  ;; IndexOutOfBoundsException, Unfold's (and Scan's, in
+  ;; gen.combinators-extras-test) and Recurse's skipped the index silently
+  (let [k (rng/key 0)]
+    (doseq [[label tr] [["map" (gfi/simulate mapped [[1.0 2.0]] k)]
+                        ["unfold" (gfi/simulate unfolded [2 0.0 0.1] k)]
+                        ["recurse" (gfi/simulate tree [0] k)]]
+            [op f] [["regenerate" #(gfi/regenerate % %2 k)] ["project" #(gfi/project % %2)]]
+            s [(sel/select -1) (sel/select 0 [-2 :z]) (sel/union (sel/select 0) (sel/select -1))]]
+      (let [data (ts/thrown-data (f tr s))]
+        (is (= :negative-index (:reason data)) (str label "'s " op))
+        (is (every? neg? (:indices data)))))
+    (testing "an index past the elements selects nothing, as an absent address does"
+      (let [tr (gfi/simulate mapped [[1.0 2.0]] k)]
+        (is (ts/close? 0.0 (gfi/project tr (sel/select 5))))
+        (is (ts/close? 0.0 (:weight (gfi/regenerate tr (sel/select 5) k))))))))
+
+(deftest every-constructor-takes-generative-functions-only
+  ;; genclj-8326: map, unfold, switch and recurse took anything, and failed
+  ;; on their first call (scan, mix and dimap checked)
+  (doseq [[what f] [["map" #(comb/map %)] ["unfold" #(comb/unfold %)]
+                    ["switch" #(comb/switch step %)] ["switch" #(comb/switch {:a step :b %})]
+                    ["recurse's production" #(comb/recurse % step 2)]
+                    ["recurse's aggregation" #(comb/recurse step % 2)]]
+          bad [3 nil (fn [x] x) :kernel]]
+    (let [e (try (f bad) nil (catch clojure.lang.ExceptionInfo e e))]
+      (is (= :not-a-generative-function (:reason (ex-data e))) (str what " of " (pr-str bad)))
+      (is (= bad (:value (ex-data e))))
+      (is (str/starts-with? (str (ex-message e)) (str what " needs a generative function")) (str what " of " (pr-str bad)))))
+  (testing "a distribution is a generative function"
+    (is (some? (comb/map (d/normal 0 1))))
+    (is (some? (comb/switch (d/normal 0 1) step)))))
 
 (deftest distributions-rescore-when-their-parameters-change
   ;; a spliced distribution is called through the GFI: an update with a new

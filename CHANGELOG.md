@@ -244,6 +244,49 @@ other values for the same key, from the same distribution.
   `control-value`, it leaves the documented surface (the API snapshot and
   the book's API page); the var stays, so code that calls it is
   unaffected.
+- **Breaking: `gen` refuses a parameter, or a local around its body that
+  the body reads, named `trace`, `splice`, `param`, `untraced` or
+  `untraced-key`** (gen.dynamic, the static form too; genclj-k3xn). The
+  body binds those names itself, so such code compiled and was silently
+  wrong: `(gen [trace] (trace :x …))`, Gen.jl's usual name for a proposal's
+  argument, recorded no choice and scored 0 (an MH step with it did
+  nothing), and `(let [trace t] (gen [] (:score trace)))` read the body's
+  own `trace`. Now each is a compile error (`:reason :reserved-name`,
+  `:binding :parameter` or `:local`) naming the rename. A gen nested in a
+  body reads its own names, as before, and a body may still bind one of
+  them in a `let` of its own.
+- **Fixed: Map, Unfold, Switch and Recurse refuse what is not a
+  generative function when they are made** (gen.combinators;
+  genclj-8326). They took anything and failed at its first call; Scan, Mix
+  and Dimap checked already. Each throws `ex-info` with `:reason
+  :not-a-generative-function` and the `:value`.
+- **Breaking: a negative index in a selection is a loud error in every
+  combinator that numbers its calls** (gen.combinators: Map, Unfold, Scan
+  and Recurse, in regenerate and project; genclj-kdau). Map threw a raw
+  IndexOutOfBoundsException, and the kinds disagreed: some threw it,
+  others skipped the index silently, so the selection selected less than
+  it named (code that relied on that was silently wrong). Now each throws
+  `ex-info` with `:reason :negative-index` and the `:indices`. An index
+  past the elements still selects nothing, as an absent address does.
+- **Fixed: choice maps' address order is total** (gen.choicemap;
+  genclj-7y8r). 1 and 1.0 tied, and so did two addresses of one class
+  without an order of their own (lists, maps, sets), so the leaf order
+  (`addresses`, `leaves`, `to-array`) followed the order the map was built
+  in; a nil address beside another threw a NullPointerException. A tie
+  now breaks by class name, then by printed form. The order of such
+  addresses may change, and so may that of numbers of classes other than
+  Long and Double (BigInt, Ratio, BigDecimal) beside other kinds of
+  address: every number now sorts among the numbers, by value.
+- **Breaking: `sample-states` of a trace whose observations are
+  impossible is a loud error** (gen.state-space; genclj-vjbo). On the host
+  such a run stops at the impossible step (gfi/impossible?), and
+  sample-states returned fewer than n states for it, where the states have
+  no posterior (code that used them was silently wrong). Now it throws
+  `ex-info` with `:reason :impossible`. The namespace doc says what an
+  impossible observation does: on the host the run stops there, and a run
+  whose score is an array (on MLX, or batched where the particles differ)
+  goes on from the prediction; it said the belief stayed at its
+  prediction.
 
 ## [1.2.0] - 2026-11-06
 

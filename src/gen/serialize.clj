@@ -55,13 +55,17 @@
    {:backend :jvm :float :float64}, say). The trace read back is generate's,
    so after updates its score may differ from the original's in the last
    bits: Map and Unfold keep their scores incrementally, as Gen.jl's do.
-   read-trace rebuilds the trace and checks that it is exact:
+   read-trace rebuilds the trace and checks the rebuild:
    - it runs under the written backend and float dtype, since log densities
      round differently on each: elsewhere it is a loud error, and
      (gfi/generate gf args choices) on read-trace-data's parts loads the
      trace there instead;
-   - the rebuilt score is the written one, bit for bit, so a different
-     generative function is a loud error;
+   - the rebuilt score is the written one up to rounding (relative 1e-9 in
+     float64, 1e-4 in float32, of the larger magnitude and at least 1:
+     :numerics names no device, and MLX's CPU and GPU may round log
+     densities and sums apart), so a generative function whose score differs
+     by more is a loud error; the trace read back is the rebuild, so it is
+     always gf's own;
    - generate's weight is its score, so no choice was missing and proposed.
 
    Traces with encapsulated randomness (thesis §4.5) are not serializable
@@ -347,7 +351,10 @@
    are sums of the same terms, but a running total (gen.combinators') and
    the handler's weight round differently (genclj-s5fj): relative 1e-9 in
    float64, 1e-4 in float32, of the larger magnitude and at least 1. A
-   proposed choice adds a log density, not a last bit."
+   proposed choice adds a log density, not a last bit. read-trace's
+   rebuilt and written scores are compared so too: :numerics names a
+   backend, whose devices (MLX's CPU and GPU) may round apart
+   (genclj-vjbo)."
   [a b]
   (let [x (double (array/item a))
         y (double (array/item b))
