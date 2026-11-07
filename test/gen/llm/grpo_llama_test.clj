@@ -34,7 +34,7 @@
    Measured on fenrir (2026-11-07, MLX CUDA, native gradients, Q8_0,
    MLX's limit 9.3 GB: gen.llm.grpo's docstring; 40 rounds in 5.5 min):
    - the first step's max |ρ - 1| 1.0e-4 (every round's first: 5e-5 to
-     2e-4); at the second step of a round 0.1 to 3.7, its clip fraction
+     2.5e-4); at the second step of a round 0.035 to 3.7, its clip fraction
      up to 1%; the KL to the base 0.06 at the end;
    - the training reward by 10 rounds 0.755, 0.702, 0.756, 0.819 (its
      first round, the base's, 0.42);
