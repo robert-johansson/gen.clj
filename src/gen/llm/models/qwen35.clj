@@ -593,10 +593,16 @@
                    compute. The values and gradients are the same.
      :chunk        vocabulary entries per chunk of the output projection
                    (default: the whole vocabulary, one chunk).
+     :temperature  the log-probabilities of the logits divided by it, a
+                   positive number (default 1: the model's own): the
+                   tempered distribution a sampler draws from
+                   (gen.llm.sample's :temp; policy-gradient training,
+                   gen.llm.grpo).
    Experimental: outside the 1.x promise (DESIGN §9)."
   ([m tokens] (log-probs m tokens nil))
-  ([{:keys [config weights]} tokens {:keys [checkpoint? chunk] :as opts}]
-   (common/check-options who :log-probs opts #{:checkpoint? :chunk})
+  ([{:keys [config weights]} tokens {:keys [checkpoint? chunk temperature] :as opts}]
+   (common/check-options who :log-probs opts #{:checkpoint? :chunk :temperature})
+   (common/check-temperature who temperature)
    (let [{:keys [eps dtype vocab kinds]} config
          ids (common/token-array who tokens vocab)
          [_ t] (array/shape ids)
@@ -609,8 +615,9 @@
                    (common/embed (:embed weights) ids dtype)
                    (map vector kinds (:layers weights)))
          hn (array/rms-norm (array/slice h 1 0 (dec t)) (:norm weights) eps)
-         w (or (:output weights) (:embed weights))]
-     (array/selective-log-softmax (if checkpoint? common/head-logits #(common/head-logits %1 %2 hn w))
+         w (or (:output weights) (:embed weights))
+         head (common/tempered-head temperature)]
+     (array/selective-log-softmax (if checkpoint? head #(head %1 %2 hn w))
                                   (array/slice ids 1 1 t)
                                   (cond-> {:vocab vocab :chunk chunk} checkpoint? (assoc :args [hn w]))))))
 

@@ -10,8 +10,8 @@
    Each is a multimethod on (architecture m), its methods registered by the
    family's own namespace (gen.llm.models.qwen3 registers \"qwen3\"), so a
    model, made by its family's namespace, finds its methods loaded. Their
-   options are the families' (:mask, :checkpoint?, :chunk), and their
-   values and gradients too. A model of an architecture no family
+   options are the families' (:mask, :checkpoint?, :chunk, log-probs'
+   :temperature), and their values and gradients too. A model of an architecture no family
    registered is loud (:unsupported).
 
    A model's architecture is its config's :arch, or else its
@@ -39,7 +39,7 @@
 (defmulti log-probs
   "The log-probabilities [B T-1] of each row of tokens at positions 1 …
    T-1, each given the tokens before it, by m's family (qwen3/log-probs).
-   Options: the family's (:checkpoint?, :chunk)."
+   Options: the family's (:checkpoint?, :chunk, :temperature)."
   {:arglists '([m tokens] [m tokens opts])}
   dispatch)
 

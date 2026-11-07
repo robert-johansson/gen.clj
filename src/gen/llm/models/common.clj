@@ -122,6 +122,22 @@
   [start stop hn w]
   (linear hn (rows w start stop)))
 
+(defn check-temperature
+  "log-probs' :temperature, nil or a positive finite number: else loud."
+  [who temperature]
+  (when-not (or (nil? temperature) (and (number? temperature) (pos? (double temperature)) (Double/isFinite (double temperature))))
+    (throw (invalid who (str "log-probs: :temperature is a positive number, not " (pr-str temperature)) {:temperature temperature}))))
+
+(defn tempered-head
+  "head-logits at temperature (log-probs' :temperature): its logits
+   divided by it, or head-logits itself at nil or 1 (the model's own, bit
+   for bit)."
+  [temperature]
+  (if (or (nil? temperature) (c/== 1.0 (double temperature)))
+    head-logits
+    (let [temp (double temperature)]
+      (fn [start stop hn w] (array// (head-logits start stop hn w) temp)))))
+
 (defn nll-of
   "-Σ lp (log-probabilities [B T-1]), each times mask's weight where
    given (a float array of lp's shape), a 0-d array: a family's nll."

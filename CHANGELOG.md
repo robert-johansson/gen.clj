@@ -251,6 +251,10 @@ other values for the same key, from the same distribution.
   log-probability at the sampling temperature, its end token's last.
 - **Added (experimental): `qwen3/log-probs`'s `:temperature`**
   (genclj-waym): the log-probabilities of the logits divided by it.
+  `qwen35/log-probs` takes it too (genclj-qfu2), and so
+  `gen.llm.models/log-probs` on `"qwen35"` and `"qwen35moe"`: GRPO trains
+  Qwen3.5 and Qwen3.6 at a sampling temperature other than 1, which was
+  loud (`:unknown-options`).
 - **Added (experimental): `gen.llm.models`** (genclj-stpo, genclj-8h0l):
   `log-probs` and `nll` by a model's architecture (its config's `:arch`,
   else its `:architecture`). These are multimethods each family

@@ -27,12 +27,15 @@
    9. training raises a reward the policy can reach, with each loss type;
    10. a run saved at round 2 and resumed is the run to round 4, bit for
        bit;
-   11. a loss that is not finite is loud; misuse is loud.
+   11. a round of the tiny Qwen3.5 (gen.llm.models.qwen35): its ratios 1
+       at the first step, at temperature 1 and 0.7;
+   12. a loss that is not finite is loud; misuse is loud.
    Planted bugs (2026-11-07, the JVM backend, with-redefs-fn), each
    failing the tests named, in place: the ratio against the new
    log-probabilities, always 1 (5); the advantages' sign flipped (7, 9);
    dapo's divisor the completions, mlx-node's (5); the KL's sign (5, 7);
-   the mask a position late (4, 5, 6)."
+   the mask a position late (4, 5, 6); qwen35's log-probs ignoring the
+   temperature (11)."
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
@@ -42,7 +45,9 @@
             [gen.llm.grpo :as grpo]
             [gen.llm.lm :as lm]
             [gen.llm.lora :as lora]
+            [gen.llm.models.common :as common]
             [gen.llm.models.qwen3 :as qwen3]
+            [gen.llm.models.qwen35 :as qwen35]
             [gen.llm.sft :as sft]
             [gen.random :as rng]
             [gen.test-support :as ts])
@@ -445,7 +450,33 @@
       (finally (delete-tree a) (delete-tree b)))))
 
 ;; ---------------------------------------------------------------------------
-;; 11. Loud errors
+;; 11. Another family: Qwen3.5
+;; ---------------------------------------------------------------------------
+
+(def ^:private qwen35-model (delay (qwen35/load "test/fixtures/gguf/qwen35-tiny-f32.gguf")))
+
+(defn- qwen35-ratios
+  "max |ρ - 1| at each step of a round of the tiny Qwen3.5 (a new
+   adapter, its default targets) at temperature temp."
+  [temp]
+  (let [tr (grpo/trainer (lora/init @qwen35-model {:rank 4} (rng/key 1)) (learn/sgd {:lr 0.1}) (rng/key 3))
+        [tr' info] (grpo/round @qwen35-model tokenizer tr (subvec prompts 0 3) lower
+                               {:group-size 4 :max-tokens 6 :iterations 2 :sampling {:temp temp :top-k nil :top-p 1.0}})]
+    (is (= 1 (:round tr')))
+    (mapv :ratio-max (:iterations info))))
+
+(deftest a-qwen35-round
+  (doseq [temp [1.0 0.7]]
+    (let [[first-step second-step] (qwen35-ratios temp)]
+      (is (< first-step ratio-band) (str "temperature " temp ": " first-step))
+      (is (> second-step 1e-3) "the policy has moved at the second")))
+  (is (not (< (first (with-redefs-fn {#'common/tempered-head (fn [_] common/head-logits)}
+                       #(qwen35-ratios 0.7)))
+              ratio-band))
+      "planted: the temperature ignored by qwen35's log-probs"))
+
+;; ---------------------------------------------------------------------------
+;; 12. Loud errors
 ;; ---------------------------------------------------------------------------
 
 (deftest a-loss-that-is-not-finite-is-loud
