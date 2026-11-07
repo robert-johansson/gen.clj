@@ -211,6 +211,7 @@ needs, taken from GenMLX's measured call counts
 | quantized weights (experimental, 1.3.0) | `quantize` `dequantize` `quantized-matmul` `gather-qmm` | `IQuantized`'s `-quantized` with `:quantize :dequantize :quantized-matmul :gather-qmm` | — |
 | files (experimental, 1.3.0) | `load-gguf` | `ILoading`'s `-load-gguf`, per file of a model | — |
 | overwriting (experimental, 1.3.0) | `put-along-axis` | `IOverwriting`'s `-put-along-axis` | — |
+| paged KV caches (experimental, 1.3.0) | `paged-write` `copy-blocks` `paged-attention` | composites (`IFused`'s `:paged-attention`) | all three |
 | host reads (experimental, 1.3.0) | `->floats` | `IHostFloats`'s `-to-floats` (else `-to-host`) | — |
 
 **Semantics at the edges** (1.2.1, from the health check of v1.2.0; DESIGN §9,
@@ -368,6 +369,25 @@ each capability is an optional protocol of its own:
     own); the staging backend records it (`:put-along-axis`), and the
     device lowerings refuse it, loudly. A backend without `IOverwriting`
     is loud (`:unsupported`), naming it.
+
+- **`paged-write`, `copy-blocks`, `paged-attention`** (genclj-1daf) keep a
+  KV cache in pools of blocks shared by every sequence, vLLM's layouts: a
+  key pool [NB Hk D/x BS x] (x the values of 16 bytes) and a value pool
+  [NB Hk D BS]; a sequence's block table lists its blocks, and position p
+  lives at offset p mod BS of block p/BS. `paged-write` writes N
+  positions' keys and values at their slots (block·BS + offset);
+  `copy-blocks` copies blocks (copy-on-write for forks); `paged-attention`
+  attends one query a sequence over its first lens[b] positions. Each is
+  a composite: writes are put-along-axis on the pools' elements (on MLX a
+  scatter, in place under `compile`'s `:donate`), attention gathers each
+  sequence's blocks (take) and runs sdpa under a length mask; MLX's Metal
+  runs kernels-community's paged_attention kernel (v1, through
+  mlx_fast_metal_kernel; gen.backend.mlx.paged-attention), which reads
+  the blocks in place, and falls back to the composite past 32 KiB of
+  threadgroup scores (about 8,000 positions; v2 is a follow-up). Indices
+  are checked where readable (`concrete?`); on MLX the kernel clamps
+  block ids and lengths. The books (allocator, tables) are host values,
+  gen.llm.paged's.
 
 - **`->floats`** (`IHostFloats`) reads an array's values, row-major, into a
   new float array at once (each rounded to float32, booleans 0 and 1),

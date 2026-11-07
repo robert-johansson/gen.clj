@@ -49,7 +49,13 @@
    :smc-tokens (long-prop "smc-tokens" 32)
    :runs (long-prop "runs" 3)
    :block (long-prop "block" 64)
-   :dtype (keyword (prop "dtype" "float32"))})
+   :dtype (keyword (prop "dtype" "float32"))
+   ;; the engines: gen.bench.engines, of static, paged and llama
+   :engines (set (map keyword (str/split (prop "engines" "static,paged,llama") #",")))
+   ;; the paged mode's (genclj-1daf)
+   :block-size (long-prop "block-size" 16)
+   :pool-blocks (long-prop "pool-blocks" 512)
+   :min-rows (long-prop "min-rows" 1)})
 
 (defn- llama [sym] @(requiring-resolve (symbol "gen.llm.llama" (name sym))))
 
@@ -92,8 +98,13 @@
   (println "- settings:" (pr-str settings))
   (println "- os:" (System/getProperty "os.name") (System/getProperty "os.arch") "; java" (System/getProperty "java.version"))
   (let [{:keys [batch steps particles smc-tokens prompt]} settings
-        engines [["gen.array (MLX)" #(ae/engine {:model path :max-branches 64 :block (:block settings) :dtype (:dtype settings)})]
-                 ["llama.cpp" #((llama 'engine) {:model path :max-branches 64 :n-ctx 8192})]]]
+        engines (filterv (fn [[k]] ((:engines settings) k))
+                         [[:static "gen.array (MLX)" #(ae/engine {:model path :max-branches 64 :block (:block settings) :dtype (:dtype settings)})]
+                          [:paged (str "gen.array paged (MLX), min-rows " (:min-rows settings))
+                           #(ae/engine {:model path :max-branches 64 :dtype (:dtype settings) :paged? true
+                                        :block-size (:block-size settings) :pool-blocks (:pool-blocks settings)
+                                        :min-rows (:min-rows settings)})]
+                          [:llama "llama.cpp" #((llama 'engine) {:model path :max-branches 64 :n-ctx 8192})]])]
     (with-open [^java.io.Closeable v ((llama 'vocabulary) path)]
       (let [tok ((llama 'tokenizer) v)
             text (str/join " " (repeat 40 "The sea is calm tonight, and the tide is full."))
@@ -101,16 +112,16 @@
         (println "\n### Decode at batch" batch "," steps "steps after" prompt "tokens\n")
         (println "|                                              |        ms |  tokens/s |")
         (println "|---|---:|---:|")
-        (doseq [[label make] engines]
+        (doseq [[k label make] engines]
           (with-open [^java.io.Closeable e (make)]
             (row label (median-ms #(decode e prompt-tokens)) (* batch steps))
-            (when (= "gen.array (MLX)" label) (println "|" (pr-str (ae/stats e)) "| | |"))))
+            (when-not (= :llama k) (println "|" (pr-str (ae/stats e)) "| | |"))))
         (println "\n### Token SMC," particles "particles," smc-tokens "tokens each (bootstrap)\n")
         (println "|                                              |        ms |  tokens/s |")
         (println "|---|---:|---:|")
-        (doseq [[label make] engines]
+        (doseq [[k label make] engines]
           (with-open [^java.io.Closeable e (make)]
             (row label (median-ms #(smc-run e tok prompt-tokens)) (* particles smc-tokens))
-            (when (= "gen.array (MLX)" label) (println "|" (pr-str (ae/stats e)) "| | |")))))))
+            (when-not (= :llama k) (println "|" (pr-str (ae/stats e)) "| | |")))))))
   (println "\nMLX memory:" (pr-str ((requiring-resolve 'gen.backend.mlx.memory/memory))))
   (shutdown-agents))

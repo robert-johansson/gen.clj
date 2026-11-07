@@ -63,6 +63,29 @@
    head-dim floats a position of their capacity, and a Qwen3.5's
    recurrent states), so keep its :max-branches to what a run needs.
 
+   The paged mode (:paged? true, Qwen3; genclj-1daf) keeps every branch in
+   one pool of blocks instead (gen.llm.models.qwen3/paged-pools,
+   gen.array's paged operations), its books values on the host
+   (gen.llm.paged): a slot holds a block table.
+   - A copy (fork) shares the table and copies nothing; a step that writes
+     a block shared and filled in part copies that block first
+     (copy-on-write, gen.array/copy-blocks); full blocks stay shared.
+   - A step is one compiled decode of the slots' rows by paged attention
+     over their tables (qwen3/compile-paged-step, consuming the pools):
+     no row is stacked, whatever groups the slots came from, so token
+     SMC's resampled particles step without a copy. Rows are padded to a
+     power of 2 (at least :min-rows) and tables to a power of 2 of
+     blocks, so a step traces once per such shape; padding rows write
+     the pool's scratch blocks, and no row reads another's.
+   - A run reads its tokens after the slot's positions gathered from its
+     blocks (a concatenating cache, qwen3/paged-cache), eagerly, then
+     writes their keys and values into new blocks (compiled, consuming
+     the pools).
+   - The pool (:pool-blocks, of :block-size positions) doubles when its
+     free blocks run out (a copy, and new traces).
+   - A paged step, run or copy that fails has consumed the pools: every
+     branch is lost (:lost-slots), loudly, and the pools are made again.
+
    Results depend on batch shapes and capacities as llama.cpp's do (float
    round-off: MLX's kernels differ by shape); the same read from the same
    state gives the same rows, bit for bit, and what is stacked or reused is
@@ -79,6 +102,7 @@
             [gen.array.gguf :as gguf]
             [gen.llm.models.qwen3 :as qwen3]
             [gen.llm.models.qwen35 :as qwen35]
+            [gen.llm.paged :as paged]
             [gen.llm.slots :as slots])
   (:import [java.util.concurrent ExecutorService]))
 
@@ -133,7 +157,10 @@
   "The functions of each model family the engine runs (their vars), by a
    GGUF's architecture."
   (let [qwen3 {:load #'qwen3/load :static-cache #'qwen3/static-cache :step #'qwen3/step :compile-step #'qwen3/compile-step
-               :offsets #'qwen3/offsets :select-rows #'qwen3/select-rows :concat-rows #'qwen3/concat-rows :grow #'qwen3/grow}
+               :offsets #'qwen3/offsets :select-rows #'qwen3/select-rows :concat-rows #'qwen3/concat-rows :grow #'qwen3/grow
+               ;; the paged mode's
+               :paged-pools #'qwen3/paged-pools :paged-cache #'qwen3/paged-cache :paged-entries #'qwen3/paged-entries
+               :compile-paged-step #'qwen3/compile-paged-step}
         qwen35 {:load #'qwen35/load :static-cache #'qwen35/static-cache :step #'qwen35/step :compile-step #'qwen35/compile-step
                 :offsets #'qwen35/offsets :select-rows #'qwen35/select-rows :concat-rows #'qwen35/concat-rows :grow #'qwen35/grow}]
     {"qwen3" qwen3 "qwen35" qwen35 "qwen35moe" qwen35}))
@@ -372,16 +399,203 @@
   (toString [_] (str "#<ArraySlots " (:path (:model info)) ">")))
 
 ;; ---------------------------------------------------------------------------
+;; The paged mode: one pool of blocks, a slot a block table
+;; ---------------------------------------------------------------------------
+
+;; state, a volatile written on the engine's thread:
+;;   :table   a vector, by slot, of nil (empty) or a gen.llm.paged sequence
+;;   :alloc   the pool's allocator (gen.llm.paged), its first :scratch
+;;            blocks reserved for a step's padding rows
+;;   :pools   the model's pools (qwen3/paged-pools), by layer
+;;   :stats   {:runs :steps :rows :padded-rows :copied-blocks :pool-grows}
+
+(defn- next-pow2 ^long [^long n] (loop [p 1] (if (c/< p n) (recur (c/* 2 p)) p)))
+
+(defn- paged-position ^long [state slot]
+  (long (or (:len (entry state slot)) 0)))
+
+(defn- check-paged-position [state slot pos what]
+  (let [have (paged-position state slot)]
+    (when-not (c/== have (long pos))
+      (throw (ex-info (str what ": slot " slot " holds " have " positions, not " pos " (an engine bug)")
+                      {:reason :internal :slot slot :position pos :holds have})))))
+
+(defn- live-slots [state]
+  (into [] (keep-indexed (fn [slot e] (when e slot))) (:table @state)))
+
+(defn- lose-all!
+  "After a donating call failed: the pools it consumed are gone, and with
+   them every slot's contents. The pools made again (empty, the same
+   size), every slot emptied: the lost slots, for :lost-slots."
+  [{:keys [model state]}]
+  (let [lost (live-slots state)
+        {:keys [size]} (:alloc @state)]
+    (vswap! state (fn [s] (assoc s
+                                 :table (vec (repeat (count (:table s)) nil))
+                                 :alloc (paged/allocator size (:scratch s))
+                                 :pools (call state :paged-pools model size (:block-size s)))))
+    lost))
+
+(defn- donating
+  "(f) of a call that consumes the pools: on failure every slot is lost
+   (lose-all!), named in the error's :lost-slots."
+  [ctx f]
+  (try (f)
+       (catch Throwable t
+         (throw (exhausted t (lose-all! ctx))))))
+
+(defn- prepared
+  "[alloc seqs slots copies]: each of seqs (blocks of bs) made ready for
+   n positions more (gen.llm.paged/prepare), in order, the pools grown
+   first (doubled, at least to what they need) when their free blocks do
+   not suffice."
+  [{:keys [model state] :as ctx} seqs n]
+  (let [bs (long (:block-size @state))
+        go #(reduce (fn [[a ss slots copies] s]
+                      (let [[a s' sl cs] (paged/prepare a s n bs)]
+                        [a (conj ss s') (conj slots sl) (into copies cs)]))
+                    [% [] [] []] seqs)]
+    (try (go (:alloc @state))
+         (catch clojure.lang.ExceptionInfo e
+           (if-not (= :blocks-exhausted (:reason (ex-data e)))
+             (throw e)
+             (let [{:keys [size] :as a} (:alloc @state)
+                   ;; the most a reading of these could take: each a block
+                   ;; copied and its new positions' blocks
+                   need (reduce c/+ (map #(c/+ 1 (paged/blocks-for (c/+ (rem (long (:len %)) bs) (long n)) bs)) seqs))
+                   to (max (c/* 2 (long size)) (c/+ (long size) need))
+                   grown (call state :paged-pools model (c/- to (long size)) bs)
+                   pools (mapv (fn [old new] {:k (array/concatenate [(:k old) (:k new)] 0)
+                                              :v (array/concatenate [(:v old) (:v new)] 0)})
+                               (:pools @state) grown)]
+               (array/eval! pools)
+               (vswap! state assoc :alloc (paged/grow a to) :pools pools)
+               (tally! state :pool-grows 1)
+               (prepared ctx seqs n)))))))
+
+(defn- copy-blocks!
+  "The block copies [[from to] …] made in the pools (copy-on-write)."
+  [{:keys [state copy-fn] :as ctx} copies]
+  (when (seq copies)
+    (let [src (array/array (mapv first copies) {:dtype :int32})
+          dst (array/array (mapv second copies) {:dtype :int32})
+          pools (donating ctx #(doto (copy-fn (:pools @state) src dst) array/eval!))]
+      (vswap! state assoc :pools pools)
+      (tally! state :copied-blocks (count copies)))))
+
+(defn- paged-read-run
+  "slots-run's body in the paged mode: slot's sequence (pos positions)
+   read as a concatenating cache (its blocks gathered), tokens read after
+   it in forwards of n-batch tokens, eagerly; then their keys and values
+   written into the pools at the sequence's new slots."
+  [{:keys [model state pool n-batch write-fn] :as ctx} slot pos tokens targets]
+  (check-paged-position state slot pos "read")
+  (let [s (or (entry state slot) paged/empty-sequence)
+        pos (long pos)
+        n (count tokens)
+        k (count targets)
+        bs (long (:block-size @state))
+        start (when (pos? pos) (call state :paged-cache model (:pools @state) (:blocks s) pos bs))]
+    (loop [from 0 cache start scores []]
+      (let [end (min n (c/+ from (long n-batch)))
+            last? (c/== end n)
+            scored (max 0 (c/- (min end k) from))
+            [logits cache] (call state :step model cache [(subvec tokens from end)] {:logits (if (pos? scored) :all :last)})
+            sc (when (pos? scored) (run-scores logits (subvec targets from (c/+ from scored))))
+            row (when last? (array/slice logits 1 (dec (long (second (array/shape logits)))) nil))]
+        (array/eval! [sc row cache])
+        (let [scores (if sc (into scores (map double) (array/->floats sc)) scores)]
+          (if-not last?
+            (recur end cache scores)
+            (let [[a [s'] [slots] copies] (prepared ctx [s] n)
+                  entries (call state :paged-entries cache pos)]
+              (copy-blocks! ctx copies)
+              (let [pools (donating ctx #(doto (write-fn (:pools @state) (mapv first entries) (mapv second entries)
+                                                         (array/array slots {:dtype :int32}))
+                                           array/eval!))]
+                (vswap! state #(-> % (assoc :pools pools :alloc a) (assoc-in [:table slot] s')))
+                (tally! state :runs 1)
+                {:logprobs (first (host-rows pool row "read"))
+                 :scores (when targets scores)}))))))))
+
+(defn- paged-decode-step
+  "slots-step's body in the paged mode: each slot's sequence made ready
+   for a position (copy-on-write of a shared block filled in part), then
+   one compiled decode of the rows, padded to a power of 2 rows (at least
+   :min-rows), over block tables of a power of 2 width: the step's
+   shapes, and so its traces, are few."
+  [{:keys [state pool step-fn min-rows] :as ctx} slots positions tokens]
+  (doseq [[slot pos] (map vector slots positions)] (check-paged-position state slot pos "advance"))
+  (let [n (count slots)
+        seqs (mapv #(or (entry state %) paged/empty-sequence) slots)
+        [a seqs' write-slots copies] (prepared ctx seqs 1)
+        _ (copy-blocks! ctx copies)
+        r (max (long min-rows) (next-pow2 n))
+        width (next-pow2 (reduce max 1 (map (comp count :blocks) seqs')))
+        ;; padding row i writes slot i of the scratch blocks, and reads it
+        pad-row (fn [^long i] (vec (cons (quot i (long (:block-size @state))) (repeat (dec width) 0))))
+        i32 #(array/array % {:dtype :int32})
+        tables (i32 (into (mapv #(paged/table-row % width 0) seqs') (map pad-row) (range n r)))
+        pos (i32 (into (mapv :len seqs) (repeat (c/- r n) 0)))
+        sl (i32 (into (mapv first write-slots) (range n r)))
+        toks (into (mapv #(vector (tokens %)) (range n)) (repeat (c/- r n) [0]))
+        [logits pools] (donating ctx #(let [[logits pools] (step-fn (:pools @state) pos tables sl toks)]
+                                        (array/eval! [logits pools])
+                                        [logits pools]))
+        rows (host-rows pool (array/slice logits 0 0 n) "advance")]
+    (vswap! state (fn [st] (-> st
+                               (assoc :pools pools :alloc a)
+                               (update :table #(reduce (fn [t [slot s']] (assoc t slot s')) % (map vector slots seqs'))))))
+    (tally! state :steps 1)
+    (tally! state :rows n)
+    (tally! state :padded-rows (c/- r n))
+    rows))
+
+(deftype PagedSlots [model backend ctx ^ExecutorService pool info state]
+  slots/Slots
+  (slots-info [_] info)
+
+  (slots-run [_ slot pos tokens targets]
+    (array/with-backend backend
+      (try
+        (paged-read-run ctx slot pos tokens targets)
+        (catch Throwable t (throw (exhausted t nil))))))
+
+  (slots-step [_ slots positions tokens]
+    (array/with-backend backend
+      (try
+        (paged-decode-step ctx (vec slots) (vec positions) (vec tokens))
+        (catch Throwable t (throw (exhausted t nil))))))
+
+  (slots-copy [_ src dst]
+    (let [s (entry state src)
+          [a s] (paged/fork (:alloc @state) s)]
+      (vswap! state #(-> % (assoc :alloc a) (assoc-in [:table dst] s)))))
+
+  (slots-clear [_ slot]
+    (when-let [s (entry state slot)]
+      (vswap! state #(-> % (assoc :alloc (paged/dispose (:alloc %) s)) (assoc-in [:table slot] nil)))))
+
+  (slots-close [_]
+    (vswap! state assoc :table (vec (repeat (count (:table @state)) nil)) :pools nil)
+    (.shutdown pool))
+
+  Object
+  (toString [_] (str "#<PagedSlots " (:path (:model info)) ">")))
+
+;; ---------------------------------------------------------------------------
 ;; Opening
 ;; ---------------------------------------------------------------------------
 
-(def ^:private defaults {:max-branches 32 :n-ctx 4096 :n-batch 256 :block 128})
+(def ^:private defaults {:max-branches 32 :n-ctx 4096 :n-batch 256 :block 128
+                         :paged? false :block-size 16 :pool-blocks 128 :min-rows 1})
 
 (def ^:private option-checks
   {:model #(or (and (string? %) (.isFile (java.io.File. ^String %)))
                (and (map? %) (contains? % :config) (contains? % :weights)))
    :dtype #{:float16 :bfloat16 :float32 :float64}
-   :max-branches pos-int? :n-ctx pos-int? :n-batch pos-int? :block pos-int?})
+   :max-branches pos-int? :n-ctx pos-int? :n-batch pos-int? :block pos-int?
+   :paged? boolean? :block-size #{8 16 32} :pool-blocks pos-int? :min-rows pos-int?})
 
 (defn- check-options
   "opts with their defaults, checked: a loud error for an unknown, missing
@@ -409,11 +623,54 @@
   [m]
   (array/backend (first (filter array/backend-array? (array/tree-leaves (:weights m))))))
 
+(defn- open-paged-slots
+  "PagedSlots for checked opts (:paged?), the model m loaded on backend
+   b, its family's functions fam: the pools made, the step compiled."
+  [{:keys [model max-branches n-ctx n-batch block-size pool-blocks min-rows]} m b fam]
+  (when-not (:paged-pools fam)
+    (throw (ex-info (str "array-engine/engine: the paged mode runs Qwen3, not " (pr-str (arch-of model)))
+                    {:reason :unsupported :architecture (arch-of model)})))
+  (let [{:keys [vocab context] :as cfg} (:config m)
+        n-ctx (long (if context (min (long n-ctx) (long context)) n-ctx))
+        n-slots (inc (long max-branches))
+        ;; scratch blocks: a slot each for the most padding rows a step has
+        scratch (paged/blocks-for (next-pow2 (max (long min-rows) n-slots)) block-size)
+        size (c/+ scratch (long pool-blocks))
+        step-fn ((:compile-paged-step fam) m {:donate? true})
+        copy-fn (array/compile (fn [pools src dst]
+                                 (mapv (fn [{:keys [k v]}] {:k (array/copy-blocks k src dst) :v (array/copy-blocks v src dst)}) pools))
+                               {:donate #{0}})
+        write-fn (array/compile (fn [pools ks vs slots]
+                                  (mapv (fn [{:keys [k v]} kn vn] (zipmap [:k :v] (array/paged-write k v kn vn slots))) pools ks vs))
+                                {:donate #{0}})
+        info {:engine :gen.array
+              :backend (array/backend-name b)
+              :n-vocab vocab
+              :n-slots n-slots
+              :n-ctx n-ctx
+              :n-batch n-batch
+              :paged {:block-size block-size :pool-blocks pool-blocks :min-rows min-rows}
+              :model (merge {:path (when (string? model) model) :arch (arch-of model)}
+                            (select-keys cfg [:layers :hidden :heads :kv-heads :head-dim :dtype :context]))}
+        state (volatile! {:table (vec (repeat n-slots nil)) :family fam :block-size block-size :scratch scratch
+                          :alloc (paged/allocator size scratch) :pools ((:paged-pools fam) m size block-size)
+                          :stats {:runs 0 :steps 0 :rows 0 :padded-rows 0 :copied-blocks 0 :pool-grows 0}})
+        pool (host/pool "gen.llm array rows-" (host/default-threads))]
+    (PagedSlots. m b {:model m :state state :pool pool :n-batch n-batch :min-rows min-rows
+                      :step-fn step-fn :copy-fn copy-fn :write-fn write-fn}
+                 pool info state)))
+
 (defn- open-slots
-  "ArraySlots for checked opts, on the engine's thread, on backend b: the
-   model loaded (a path), its step compiled."
-  [{:keys [model dtype max-branches n-ctx n-batch block]} b]
+  "ArraySlots (or with :paged?, PagedSlots) for checked opts, on the
+   engine's thread, on backend b: the model loaded (a path), its step
+   compiled."
+  [{:keys [model dtype max-branches n-ctx n-batch block paged?] :as opts} b]
   (array/with-backend b
+    (if paged?
+      (let [fam (family (arch-of model))
+            m (if (string? model) ((:load fam) model (when dtype {:dtype dtype})) model)
+            mb (model-backend m)]
+        (array/with-backend mb (open-paged-slots opts m mb fam)))
     (let [fam (family (arch-of model))
           m (if (string? model) ((:load fam) model (when dtype {:dtype dtype})) model)
           b (model-backend m)
@@ -433,7 +690,7 @@
       (ArraySlots. m b step-fn (host/pool "gen.llm array rows-" (host/default-threads)) info
                    (volatile! {:table (vec (repeat n-slots nil)) :next 0 :family fam
                                :stats {:runs 0 :steps 0 :lane-steps 0 :stacked-steps 0 :stacked-rows 0 :grows 0}})
-                   (long n-batch) (long block) n-ctx))))
+                   (long n-batch) (long block) n-ctx)))))
 
 (defn engine
   "A Branching engine over gen.array (java.io.Closeable; close it to free
@@ -457,7 +714,14 @@
      :n-ctx         the most tokens a branch holds (default 4096, at most
                     the model's context)
      :n-batch       tokens a forward of a read (default 256)
-     :block         positions a branch's capacity grows by (default 128)"
+     :block         positions a branch's capacity grows by (default 128)
+     :paged?        true: the paged mode (see the namespace's docstring;
+                    Qwen3 only), with
+       :block-size  positions a block (8, 16 or 32; default 16)
+       :pool-blocks the pool's blocks at first (default 128), doubled
+                    when they run out
+       :min-rows    the fewest rows a step computes (default 1): rows
+                    are padded to a power of 2 at least this"
   ^java.io.Closeable [opts]
   (let [opts (check-options opts)
         b array/*backend*]
@@ -467,12 +731,25 @@
   "Diagnostics: the engine's reads and steps since it was made, {:runs
    :steps :lane-steps (a lane group stepped in place) :stacked-steps
    (rows stacked into a new cache) :stacked-rows :grows (capacities
-   grown)}."
+   grown)}; in the paged mode {:runs :steps :rows :padded-rows
+   :copied-blocks (copy-on-write) :pool-grows}."
   [e]
   (slots/call e (fn [s]
-                  (if (instance? ArraySlots s)
-                    (:stats @(.-state ^ArraySlots s))
-                    (throw (ex-info "Not a gen.array engine" {:reason :not-an-array-engine :engine e}))))))
+                  (cond (instance? ArraySlots s) (:stats @(.-state ^ArraySlots s))
+                        (instance? PagedSlots s) (:stats @(.-state ^PagedSlots s))
+                        :else (throw (ex-info "Not a gen.array engine" {:reason :not-an-array-engine :engine e}))))))
+
+(defn blocks
+  "Diagnostics of the paged mode (:paged?): {:free the pool's free blocks
+   :size its blocks :table by slot, nil (empty) or [block-ids length]}:
+   which slots share blocks."
+  [e]
+  (slots/call e (fn [s]
+                  (if (instance? PagedSlots s)
+                    (let [{:keys [alloc table]} @(.-state ^PagedSlots s)]
+                      {:free (paged/free-count alloc) :size (:size alloc)
+                       :table (mapv #(when % [(:blocks %) (:len %)]) table)})
+                    (throw (ex-info "Not a paged gen.array engine (:paged?)" {:reason :not-paged :engine e}))))))
 
 (defn groups
   "Diagnostics: by slot, nil (empty) or [group-id row position]: which

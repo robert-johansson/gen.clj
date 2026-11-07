@@ -1447,6 +1447,59 @@
   ([q k v g beta state] (gated-delta q k v g beta state nil))
   ([q k v g beta state opts] ((:gated-delta @nn) q k v g beta state opts)))
 
+;; Paged KV caches (genclj-1daf): gen.array.paged holds their bodies,
+;; loaded at the first call
+(def ^:private paged
+  (delay (into {} (map (fn [k] [k (requiring-resolve (symbol "gen.array.paged" (name k)))]))
+               [:paged-write :copy-blocks :paged-attention])))
+
+(defn ^{:api :experimental} paged-write
+  "[k-pool' v-pool']: the keys k and values v [N Hk D] of N positions
+   written over their slots (an int array [N], distinct) in a paged KV
+   cache's pools, vLLM's layouts: the key pool [NB Hk D/x BS x] and the
+   value pool [NB Hk D BS], NB blocks of BS positions, x the values of
+   16 bytes in the pools' dtype (4 in float32, 8 in the half floats, 2 in
+   float64). Slot s is offset s mod BS of block s/BS. k and v take the
+   pools' dtype. Slots are checked (in [0, NB·BS), distinct) where their
+   values can be read without forcing a computation (array/concrete?);
+   on a lazy backend an out-of-range slot is unspecified. A composite of
+   put-along-axis on the pools' elements: on MLX a scatter, which writes
+   a pool in place when nothing else holds it (array/compile's :donate),
+   and copies it otherwise. Experimental: outside the 1.x promise (DESIGN
+   §9)."
+  [k-pool v-pool k v slots]
+  ((:paged-write @paged) k-pool v-pool k v slots))
+
+(defn ^{:api :experimental} copy-blocks
+  "pool with its blocks dst (an int array [M], distinct) holding what its
+   blocks src ([M]) held: a block's copy on axis 0, for copy-on-write
+   (every block read before any is written). Indices checked as
+   paged-write's slots. A composite of take and put-along-axis.
+   Experimental: outside the 1.x promise (DESIGN §9)."
+  [pool src dst]
+  ((:copy-blocks @paged) pool src dst))
+
+(defn ^{:api :experimental} paged-attention
+  "The attention of one query a sequence over its positions in a paged KV
+   cache: [B Hq D], of queries q [B Hq D] over the key and value pools
+   (paged-write's layouts), sequence b's blocks the row b of tables
+   [B MB] (block ids, an int array) and its positions the first lens[b]
+   of them (lens an int array [B], each at most MB·BS; 0 gives zeros).
+   Query head h reads KV head ⌊h / (Hq/Hk)⌋. q and the pools share one
+   float dtype. Options: :scale (1/√D). Table entries past a sequence's
+   blocks are never read, but must be blocks of the pool. Tables and lens
+   are checked where readable (array/concrete?).
+   A composite of gen.array's ops: each sequence's blocks gathered
+   (take), then sdpa under a mask of its length, the reference that a
+   backend's kernel is checked against. MLX's Metal computes it by
+   kernels-community's paged_attention kernel (vLLM's, through
+   mlx_fast_metal_kernel; gen.backend.mlx.paged-attention, ported per
+   THIRD-PARTY-NOTICES), which reads the blocks in place; it computes the
+   softmax in float32 and adds 1e-6 to its normalizer, as vLLM's does.
+   Experimental: outside the 1.x promise (DESIGN §9)."
+  ([q k-pool v-pool tables lens] (paged-attention q k-pool v-pool tables lens nil))
+  ([q k-pool v-pool tables lens opts] ((:paged-attention @paged) q k-pool v-pool tables lens opts)))
+
 (defn ^{:api :experimental} quantize
   "[wq scales biases]: the float matrices w [.. N K] quantized along
    their last axis, MLX's affine quantization: each group of :group-size
