@@ -110,6 +110,46 @@ other values for the same key, from the same distribution.
     through gen.llm.array-engine. llama.cpp serves the adapter within
     its CUDA band (0.53 nats against 0.65), its replies 14/16 in the
     format.
+- **Added (experimental): GRPO and its variants, `gen.llm.grpo`**
+  (genclj-waym): a LoRA adapter trained by group relative policy
+  optimization with verifiable rewards, over any family of gen.llm.models.
+  - `(grpo/rollouts lm prompts opts)` draws K completions of each prompt
+    (`{:prompt …}` and the reward's keys) in lockstep, every token from its
+    key, and records each token's old log-probability where it is drawn:
+    the policy's at the sampling temperature (`grpo/policy-sampling`, the
+    model at temperature 1, by default).
+  - Rewards are pure functions `(fn [prompt completion-text])` run on the
+    host; `exact-match` (`:extract` a regex) and `format-match` are
+    built in. A reward that is not a finite number is loud
+    (`:non-finite-reward`).
+  - `(grpo/advantages rewards)`: (r - mean)/(std + 1e-4) by group, the
+    population's std; a flat group's are exactly 0, and rounds count them.
+  - `(grpo/batches rollouts advantages opts)`: each row the prompt, the
+    completion, then padding at the end (never inside a row), the mask
+    exactly the completion's tokens (its end token among them).
+  - `(grpo/loss m batch opts)`: the clipped surrogate with `:eps-low` and
+    `:eps-high`, plus β times the k3 KL to the base model (the adapter at
+    scale 0, no copy), aggregated by `:loss-type` as each paper defines
+    it: `:grpo` (DeepSeekMath Eq. 3, β 0.04), `:dapo` (DAPO Eq. 8/12,
+    token-level, ε_high 0.28), `:dr-grpo` (Dr. GRPO: the sum over N times
+    the generation budget, no std), `:bnpo` (TRL's name: the token mean of
+    each microbatch; the BNPO paper defines an advantage, not this).
+  - `(grpo/trainer adapter optimizer key)`, `(grpo/round …)` (rollouts,
+    rewards, advantages, then `:iterations` optimizer steps on them) and
+    `(grpo/train …)`, logging each round's reward mean and std, flat
+    groups, entropy, and each step's loss, max |ρ - 1|, clip fraction and
+    KL. Checkpoints are sft's; a resumed run is the uninterrupted one bit
+    for bit (the JVM backend). `(grpo/evaluate lm prompts reward opts)`.
+- **Added (experimental): `gen.llm.sft/step`'s `:loss`** (genclj-waym):
+  another summed loss in the NLL's place, whose reported log-probabilities
+  come back in the step's `:reported`; `sft/order` is public.
+- **Added (experimental): sampling from the whole distribution**
+  (gen.llm.sample, genclj-waym): `pick` takes `:top-k nil` (with `:top-p`
+  1) and draws from every token at the temperature, in one pass;
+  `tempered`; `complete`'s `:token-logprobs?` gives each drawn token's
+  log-probability at the sampling temperature, its end token's last.
+- **Added (experimental): `qwen3/log-probs`'s `:temperature`**
+  (genclj-waym): the log-probabilities of the logits divided by it.
 - **Added (experimental): `gen.llm.models`** (genclj-stpo, genclj-8h0l):
   `log-probs` and `nll` by a model's architecture (its config's `:arch`,
   else its `:architecture`). These are multimethods each family
