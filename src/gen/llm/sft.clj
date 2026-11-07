@@ -1,9 +1,9 @@
 (ns gen.llm.sft
   "Supervised fine-tuning (SFT): a LoRA adapter (gen.llm.lora) trained on
-   chat examples, its loss the mean negative log-likelihood of the
+   chat examples. Its loss is the mean negative log-likelihood of the
    assistant's tokens under the adapted model, by the model's family
-   (gen.llm.models/nll: Qwen3's, gen.llm.models.qwen3, and any family
-   that registers its own).
+   (gen.llm.models/nll: Qwen3's, gen.llm.models.qwen3, or any family that
+   registers its own).
 
      (example tokenizer ex)          → {:tokens :mask}: a chat example tokenized,
                                        :mask true at the tokens trained on
@@ -74,12 +74,21 @@
    A model whose family registers no nll with gen.llm.models is
    :unsupported.
 
-   MLX's memory. A training step's memory depends on MLX's memory limit:
-   under a loose one (gen.mlx.memory-bytes, by default half of RAM) MLX
-   keeps the buffers of kernels it has queued, so a checkpointed step
-   holds about what an unchecked one does (genclj-az5s). For the
-   checkpoints' saving, run training with the limit near what a step
-   needs (see the CHANGELOG's measurement on fenrir).
+   MLX's memory (genclj-az5s). A step's peak depends on MLX's memory
+   limit, a process-wide setting this namespace leaves alone: under a
+   loose one (gen.mlx.memory-bytes, by default half of RAM) MLX keeps the
+   buffers of kernels it has queued, and most of the checkpoints' saving
+   is lost. Set the limit to what MLX holds before a step (the weights,
+   the adapter, the optimizer's state) plus about 1.25 times a step's own
+   peak, which bench/gen/sft_bench.clj measures: the saving is then the
+   checkpoints', at no cost in time. Measured on fenrir's CUDA
+   (2026-11-07; Qwen3-0.6B Q8_0, rank 8 on every projection of the last
+   8 blocks, native gradients, checkpointed, 0.76 GB held), the peak past
+   that, at the default limit, at the limit so set, and at the held bytes
+   alone (MLX then waits for its queue at every kernel, 3-10% slower):
+     4 rows of 256 tokens   6.1 GB   1.8 GB   1.5 GB   (274, 273, 305 ms)
+     8 rows of 512 tokens  24.6 GB  11.7 GB   9.2 GB   (968, 967, 988 ms)
+   Unchecked, the same steps peak at 11.4 and 32.1 GB at the default.
 
    Experimental: outside the 1.x promise (DESIGN §9)."
   {:api :experimental}

@@ -66,6 +66,67 @@ other values for the same key, from the same distribution.
     nats.
   - `gen.array.gguf/write-gguf` (internal): a GGUF writer beside the
     reader, writing gguf-py's bytes.
+- **Added (experimental): supervised fine-tuning, `gen.llm.sft`**
+  (genclj-stpo): a LoRA adapter trained on chat examples.
+  - `(sft/example tokenizer ex opts)` tokenizes `{:messages [...]}` or
+    `{:prompt :completion}` with Qwen's chat template, giving `{:tokens
+    :mask}`. The tokens trained on are the assistant turns' content and
+    their end token `<|im_end|>` (`:end-token?`, default true; mlx-node
+    trains no end token). Tokens are matched to the text's bytes, so a
+    token crossing a trained span's edge is loud (`:straddling-token`),
+    as is an example with nothing to train on (`:nothing-trained`).
+  - `(sft/batch examples opts)` right-pads (`:pad`) and truncates
+    (`:max-length`, keeping the start): `{:tokens :mask :count}`.
+  - `(sft/nll m batch)` and `(sft/evaluate m examples)` give the summed
+    and mean NLL per trained token. The family's nll is checkpointed and
+    chunked (`:checkpoint?` true, `:chunk` 16384).
+  - `(sft/trainer adapter optimizer key)` is a value. `(sft/step m
+    trainer batches)` adds the batches' summed losses and gradients, then
+    divides once by their trained tokens, and steps any gen.learning
+    optimizer. It returns `[trainer' {:step :loss :tokens :grad-norm}]`.
+    A loss or gradient that is not finite is loud (`:non-finite`); the
+    step is never silently skipped.
+  - `(sft/train m trainer examples opts)` runs epochs in an order drawn
+    from the trainer's key, with `:accumulate`, `:held-out` evaluations
+    and `:save-dir` checkpoints. Step n draws its dropout from
+    `(fold-in k n)`.
+  - `(sft/save-checkpoint trainer dir)` writes `dir/step-<n>/`, holding
+    `adapter.gguf` (llama.cpp's) and `trainer.edn` (gen.serialize's,
+    exact). The directory is renamed into place at once.
+    `load-checkpoint` and `latest-checkpoint` read it back. Resuming
+    gives the uninterrupted run bit for bit (the JVM backend, MLX's
+    CUDA and CPU).
+  - MLX's memory limit (genclj-az5s) is left to the user, a process-wide
+    setting. Under the default (half of RAM), MLX keeps queued kernels'
+    buffers and most of the checkpoints' saving is lost. The docstring
+    and `bench/gen/sft_bench.clj` give the limit to set: what MLX holds
+    before a step plus about 1.25 times a step's own peak. Measured on
+    fenrir's CUDA (Qwen3-0.6B, rank 8 on the last 8 blocks,
+    checkpointed), the peak of a step of 4×256 tokens was 6.1 GB at the
+    default limit and 1.8 GB at that limit, in the same time.
+  - Checked on Qwen3-0.6B (`gen.llm.sft-llama-test`, fenrir's CUDA). 24
+    steps teach it a JSON reply format it does not use: held-out NLL
+    3.61 → 0.093 nats a token, greedy replies in the format 0/16 → 15/16
+    through gen.llm.array-engine. llama.cpp serves the adapter within
+    its CUDA band (0.53 nats against 0.65), its replies 14/16 in the
+    format.
+- **Added (experimental): `gen.llm.models`** (genclj-stpo, genclj-8h0l):
+  `log-probs` and `nll` by a model's architecture (its config's `:arch`,
+  else its `:architecture`). These are multimethods each family
+  registers in its own namespace; gen.llm.models.qwen3 registers
+  `"qwen3"`. `lora/init` reads the architecture through it.
+- **Added (experimental): `gen.llm.chat/segments`** (genclj-stpo): the
+  rendering by message and part (`:content`, `:reasoning`, `:end`,
+  `:template`). `render` is now their concatenation, with the same text.
+- **Added (experimental vars of gen.learning): `warmup-cosine` and
+  `clip-value`** (genclj-stpo).
+  - `(learn/warmup-cosine optimizer {:warmup :steps :final})` scales
+    each step's move θ' - θ by Hugging Face's
+    get_cosine_schedule_with_warmup factor: t/warmup, then a half cosine
+    down to `:final` at `:steps`. Every optimizer gets it. With a warmup
+    the first step's factor is 0.
+  - `(learn/clip-value optimizer {:max-value v})` clips gradients
+    elementwise. A wrapper acts before the optimizer it wraps.
 - **Changed: `qwen3/config` (and a model's `:config`) holds
   `:architecture "qwen3"`** (gen.llm.models.qwen3, experimental;
   genclj-yc3b), the GGUF's general.architecture, which an adapter's file
