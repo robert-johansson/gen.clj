@@ -4849,3 +4849,27 @@ The CHANGELOG notes the draws change.
   stop.
 - An update that takes a particle out of its support still discards
   differently from the scalar one (gen.fuzz-test exempts it).
+*The generation-mode re-measure (2026-11-07 22:46, main 7401be1;
+genclj-ssiv).*
+
+**Greedy decode** (the argmax read on the host). With compiled steps,
+donation, the qmm-rows fix and the host-cost fix, MLX on fenrir's CUDA now
+beats llama.cpp from 16 rows up on the small models:
+
+| Greedy decode, tokens/s | MLX | llama.cpp |
+|---|---:|---:|
+| 0.6B, 64 rows | 7267 | 2839 |
+| Qwen3.5-0.8B, 64 rows | 6418 | 1828 |
+| 8B, 64 rows | 2369 | 2170 |
+| 8B, 16 rows | 814 | 1118 |
+
+**At batch 1 MLX is 0.5-0.75x of llama.cpp.**
+
+**Through the Branching protocol** MLX is still 1.4-5.8x behind llama.cpp
+through gen.clj. Every row is read and normalized on the host, and that path
+(12-37 ms per step at 16 rows) now exceeds the device's step. It is gen.clj's
+host path, not MLX: genclj-9y6y, which also covers two CUDA anomalies in the
+0.6B.
+
+**The lead's recommendation stands:** keep MLX on NVIDIA. Its batched decode
+is now faster than llama.cpp's on the models gen.clj's research uses most.
