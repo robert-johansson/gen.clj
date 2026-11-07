@@ -4915,3 +4915,73 @@ unchanged.
    not now.
 
 Not yet run on CUDA. Qwen3.5's off-Mac band is unmeasured.
+
+### Paged attention, as built
+
+(PROVISIONAL, owner to confirm; genclj-1daf, 2026-11-07 night; builds on
+"Paged attention through metal_kernel")
+
+**What was built.**
+- **Three gen.array ops** (experimental, in vLLM's layouts): paged-write,
+  copy-blocks and paged-attention. Each is a composite of put-along-axis,
+  take and sdpa, which is its reference.
+- **On MLX:**
+  - IFused's :paged-attention runs kernels-community's v1 kernel through
+    metal_kernel;
+  - :paged-write is two donated scatters on the pools.
+- **gen.llm.paged:** a block allocator and block tables, as host values.
+  Forks share blocks, and a shared, partly filled block is copied before a
+  write.
+- **The model and engine:** qwen3's paged step, and the engine's opt-in
+  :paged? mode.
+- **Licensing:** LICENSE-APACHE-2.0 at the root, for the ported kernel.
+
+**Checked.**
+- The kernel against the composite: 2.9e-6 in float32, within one ulp in
+  half floats.
+- Qwen3's paged decode against its concatenating cache: 0 on the JVM, 3.8e-6
+  on Metal.
+- The Branching, LM, token and SMC contracts pass in the paged mode.
+
+**Measured on Metal** (Qwen3-0.6B Q8_0, 16 particles):
+- token SMC in float32: 390-409 tokens/s, against the static engine's 318
+  and llama.cpp's 771;
+- in float16: 540 against the static 619. Copy-on-write's two extra syncs
+  per step cost more there than the static engine's copy.
+
+**Two MLX findings.**
+1. **A donated write costs about 8 ms per GB of buffer written**, however
+   few slots it touches. Reads stay flat. So pools are sized to need: 128
+   blocks, doubling. Long contexts are bound by this, and the static cache
+   probably pays the same. genclj-1ovd follows up: a Metal capture, and 64 MB
+   segments.
+2. **A take, then a put, on one pool within one compiled call copies the
+   pool.** So copy-on-write is a gathered, evaluated read, then a donated
+   put.
+
+**The lead's calls, on the implementing agent's recommendations:**
+1. **The port** is from kernels-community, Apache-2.0: v1's body and
+   helpers only, with the chain vLLM → mistral.rs → kernels-community
+   recorded.
+2. **Writes and copies are MLX scatters.** The cache kernels aren't ported:
+   metal_kernel can't write in place.
+3. **The three ops are public, experimental gen.array ops.** Not taken:
+   internal to gen.llm.
+4. **v1 only.** Past about 8k positions the composite runs; v2 is
+   genclj-6qb6.
+5. **Engine defaults:** :paged? off, :block-size 16, :pool-blocks 128
+   (doubling), :min-rows 1. Qwen3 only for now; Qwen3.5 is refused loudly
+   (genclj-6qb6). Not taken: paged by default; that waits until float16 SMC
+   beats static.
+6. **A failed paged step loses every branch, loudly (:lost-slots)**, since
+   the pools were donated. Not taken: non-donating steps, which copy the
+   pools.
+7. **Copy-on-write is two calls.** Folding the put into the step is
+   genclj-6qb6.
+8. **Multi-token reads stay eager;** only steps are paged. Paged prefill
+   belongs to continuous batching (genclj-b3ow).
+9. **On MLX the kernel clamps block ids and lengths;** eager backends check
+   them loudly.
+
+The C++ spike is parked unmerged on the branch paged-cpp-spike. Its build
+left libgenclj in the gitignored native/build; nothing loads it.
