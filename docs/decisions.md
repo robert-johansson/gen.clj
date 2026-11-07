@@ -4694,3 +4694,43 @@ family as well: the night loop's 0.8B and the bake-off's 35B-A3B.
 - Adapters export under llama.cpp's qwen35 tensor names.
 - SFT and GRPO are family-agnostic, taking the family through the model as
   the array engine does.
+
+### Paged attention through metal_kernel: no C++ of ours (route A)
+
+(PROVISIONAL, the lead, 2026-11-07 night, owner to confirm; genclj-9a1l,
+genclj-1daf; refines "1.3.0's scope narrowed")
+
+The owner's words were "paged attention and continuous batching (our C++)".
+That assumed mlx-c could not reach paged attention. The spike (branch paged,
+53829d8) found it can.
+
+**The reads.** kernels-community's paged_attention v1 runs as an MLX
+metal_kernel, the kernel code unchanged.
+- It matches sdpa over the gathered caches: 3.1e-6 in float32.
+- It is as fast as sdpa over dense caches: 1.10 against 1.07 ms in float32
+  and 0.58 against 0.87 ms in float16, for one layer, 16 rows, contexts to
+  1023.
+
+**The writes.** metal_kernel's outputs are always fresh buffers, with no
+input/output aliasing, but the write needs no kernel.
+- MLX's own scatter (put-along-axis) under compile's :donate writes the
+  pool in place: 0.3-0.7 ms whatever the pool's size, the same pointer.
+- It copies when the pool is held, so value semantics hold.
+
+**Route B was proven too.** A C++ library (libgenclj) built against the
+wheel's headers, a Primitive with its own eval_gpu, bound by FFM. It costs:
+- a second native artifact;
+- an ABI pinned exactly to MLX's internals;
+- MLX's internal CUDA encoder, for CUDA.
+
+**The call: route A.**
+- gen.array gains experimental ops (paged write, copy-blocks, paged
+  attention), each a composite of take, put-along-axis and sdpa as its
+  reference. MLX implements them by donated scatter and metal_kernel; CUDA
+  later by mlx_fast_cuda_kernel with vLLM's kernels.
+- The C++ spike is kept on a branch as the fallback, if continuous batching
+  needs what metal_kernel cannot do. genclj-9a1l is parked.
+
+**The kernels' provenance.** They are ported from kernels-community at
+28a49f7 under Apache-2.0. The header and THIRD-PARTY-NOTICES record the
+chain vLLM (Apache-2.0) → mistral.rs's Metal port → kernels-community.
