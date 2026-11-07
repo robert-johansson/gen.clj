@@ -134,6 +134,22 @@ other values for the same key, from the same distribution.
   float64 metadata is refused: MLX 0.32.4's loader misreads it and the
   process dies (SIGBUS). Test files are in test/fixtures/gguf, with
   their generator.
+- **Added (experimental): Qwen3's forward pass over gen.array,
+  `gen.llm.models.qwen3`** (genclj-gvfa): a Qwen3 GGUF's model
+  (`load`, `model`, `config`), its logits for a whole context
+  (`forward`), and a cached prefill and steps (`prefill`, `step`) over
+  caches that are values (`{:offset :layers}`, grown by concatenation,
+  so a fork is free). llama.cpp's conventions (its qwen3 graph): RMSNorm,
+  per-head q/k norms, NEOX's RoPE, grouped KV heads, causal attention,
+  SwiGLU, a tied or untied output; quantized matrices multiplied by
+  `quantized-matmul`, the embedding by `take` and `dequantize`. A file
+  with tensors the forward does not read, or RoPE scaling, is loud. The
+  same backend-neutral code runs on MLX (its fused kernels) and on the
+  JVM backend (tiny models, float64), and the tape differentiates it. On
+  Metal, Qwen3-0.6B-Q8_0's next-token log-probabilities are llama.cpp's
+  on the same file within 3.6e-2 nats (20 prompts, whole, chunked and
+  stepped), the argmax always the same (gen.llm.models.qwen3-llama-test;
+  bench/gen/qwen3_llama_noise.clj).
 - **Added: THIRD-PARTY-NOTICES** (genclj-ty8m): the origins and licenses
   of files derived from other projects, and the header a ported file
   carries (CLAUDE.md, rule 10).
