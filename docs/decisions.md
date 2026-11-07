@@ -4275,3 +4275,29 @@ The CHANGELOG keeps one Breaking line for both beans.
   :q-backward, checked first.
 - Translators refuse each other's keys.
 - Functions below L5 are the owner's call (genclj-c6jo).
+
+### Compile donates arguments: gen.array/compile's :donate
+
+(PROVISIONAL, the lead, 2026-11-07; genclj-tjvd)
+
+**The finding.** Qwen3-0.6B on Metal, static cache, batch 1.
+- MLX donates a buffer (writes in place) only once the consumed cache's
+  handles are released.
+- While the JVM still holds them, a compiled step copies the cache: 21.4
+  ms/token, no faster than eager concatenation (20.5).
+- With the handles released it updates in place: 13.7 ms/token compiled
+  against 17.4 eager.
+- A compiled step is 805 MLX primitives, against 1,268 eager.
+
+**The call.** gen.array/compile gains an experimental :donate option, after
+JAX's donate_argnums: (array/compile f {:donate #{0}}).
+- The compiled function consumes those arguments. On MLX their handles are
+  released once the call returns its lazy outputs.
+- Using a donated array afterwards is a loud ex-info (:reason :donated).
+- Where compile is the identity (the JVM backend), donation does nothing,
+  and reuse is not caught there.
+- qwen3's compiled step takes {:donate? true}. The Slots engine would donate
+  a slot's own cache and copy a forked one.
+
+**Not taken.** gen.backend.mlx/release!, called by the engine: core code
+would call a backend, against rule 3.
