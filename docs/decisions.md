@@ -4364,3 +4364,23 @@ invariant.
   path must remember to do it.
 - Keeping scatter-add and refusing rewinds: speculative decoding and slot
   reuse need them.
+*As built (2026-11-07, eacb15b on array-engine), four calls by the
+implementing agent, PROVISIONAL with the rest:*
+1. **The shape contract is scatter-add's:** indices and values share one
+   shape, equal to x's except on the axis. No broadcasting yet.
+2. **Staging implements it**, since the compiled-step tests emulate compile on
+   the JVM by staging. The device lowerings refuse it ("no lowering").
+3. **Repeated indices** are loud on the JVM backend (:repeated-indices) and
+   unspecified on MLX, as documented.
+4. **qwen3/rewind** (experimental) moves rows' offsets back.
+
+**Checked.**
+- A test rewinds caches to 5, to 0, and one row of two, then compares them
+  with the concatenating cache, plain, compiled and donating. With the old
+  scatter-add write planted, it fails by more than 0.01.
+- Decode on Metal is unchanged:
+
+| Write | Batch 1 (tokens/s) | Batch 16 (tokens/s) |
+|---|---:|---:|
+| put-along-axis | 79-80 | 461-469 |
+| scatter-add | 78-80 | 460-465 |
