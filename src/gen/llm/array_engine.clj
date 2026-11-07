@@ -484,13 +484,18 @@
 
 (defn- copy-blocks!
   "The block copies [[from to] …] made in the pools (copy-on-write), a
-   the allocator after them."
-  [{:keys [state copy-fn] :as ctx} a copies]
+   the allocator after them: gen.array/copy-blocks in two calls, the
+   blocks read and evaluated first (gather-fn), then written (put-fn,
+   consuming the pools). In one call MLX copies each pool instead of
+   writing it in place, its read still holding it (measured on Metal,
+   2026-11-07: 14 to 120 ms a copy as the pools grew from 0.6 to 3.8 GB)."
+  [{:keys [state gather-fn put-fn] :as ctx} a copies]
   (when (seq copies)
     (let [all (padded a copies)
           src (array/array (mapv first all) {:dtype :int32})
           dst (array/array (mapv second all) {:dtype :int32})
-          pools (donating ctx #(doto (copy-fn (:pools @state) src dst) array/eval!))]
+          blocks (doto (gather-fn (:pools @state) src) array/eval!)
+          pools (donating ctx #(doto (put-fn (:pools @state) blocks dst) array/eval!))]
       (vswap! state assoc :pools pools)
       (tally! state :copied-blocks (count copies)))))
 
@@ -648,9 +653,15 @@
         scratch (paged/blocks-for (next-pow2 (max (long min-rows) n-slots)) block-size)
         size (c/+ scratch (long pool-blocks))
         step-fn ((:compile-paged-step fam) m {:donate? true})
-        copy-fn (array/compile (fn [pools src dst]
-                                 (mapv (fn [{:keys [k v]}] {:k (array/copy-blocks k src dst) :v (array/copy-blocks v src dst)}) pools))
-                               {:donate #{0}})
+        ;; copy-blocks in two calls (copy-blocks!)
+        gather-fn (array/compile (fn [pools src] (mapv (fn [{:keys [k v]}] [(array/take k src 0) (array/take v src 0)]) pools)))
+        put-fn (array/compile (fn [pools blocks dst]
+                                (let [put (fn [pool b]
+                                            (let [s (array/shape b)]
+                                              (array/put-along-axis pool (array/broadcast-to (array/reshape dst (into [(first s)] (repeat (dec (count s)) 1))) s)
+                                                                    b 0)))]
+                                  (mapv (fn [{:keys [k v]} [kb vb]] {:k (put k kb) :v (put v vb)}) pools blocks)))
+                              {:donate #{0}})
         write-fn (array/compile (fn [pools ks vs slots]
                                   (mapv (fn [{:keys [k v]} kn vn] (zipmap [:k :v] (array/paged-write k v kn vn slots))) pools ks vs))
                                 {:donate #{0}})
@@ -668,7 +679,7 @@
                           :stats {:runs 0 :steps 0 :rows 0 :padded-rows 0 :copied-blocks 0 :pool-grows 0}})
         pool (host/pool "gen.llm array rows-" (host/default-threads))]
     (PagedSlots. m b {:model m :state state :pool pool :n-batch n-batch :min-rows min-rows
-                      :step-fn step-fn :copy-fn copy-fn :write-fn write-fn}
+                      :step-fn step-fn :gather-fn gather-fn :put-fn put-fn :write-fn write-fn}
                  pool info state)))
 
 (defn- open-slots
