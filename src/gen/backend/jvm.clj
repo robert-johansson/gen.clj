@@ -11,6 +11,7 @@
      which is what lets reshape share data."
   {:api :internal}
   (:require [gen.array.dtype :as dt]
+            [gen.array.gguf :as gguf]
             [gen.array.host :as host]
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]
@@ -883,6 +884,23 @@
       (reshape out (into is (subvec (shape-of out) 1))))))
 
 ;; ---------------------------------------------------------------------------
+;; GGUF files: gen.array.gguf's reader, its doubles the arrays' storage
+;; ---------------------------------------------------------------------------
+
+(defn- load-gguf
+  "p/-load-gguf: float16 tensors as float32 (the backend has no float16;
+   the values are the same)."
+  [{:keys [path tensors]}]
+  (into {}
+        (map (fn [info]
+               (let [{:keys [dtype shape data quantized shapes]} (gguf/read-tensor path info)]
+                 [(:name info)
+                  (if quantized
+                    (mapv make quantized shapes [:uint32 :float32 :float32])
+                    (make data shape (if (= dtype :float16) :float32 dtype)))])))
+        tensors))
+
+;; ---------------------------------------------------------------------------
 ;; The backend
 ;; ---------------------------------------------------------------------------
 
@@ -894,6 +912,9 @@
 (deftype JvmBackend []
   p/IQuantized
   (-quantized [_ op args] (quantized-op op args))
+
+  p/ILoading
+  (-load-gguf [_ header] (load-gguf header))
 
   p/IBackend
   (-name [_] :jvm)

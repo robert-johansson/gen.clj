@@ -42,7 +42,8 @@
    configuration), .memory (the budget, Metal's buffer limit, evaluation),
    .operands (host scalars' constants, temporaries, an op's operands, host
    data), .linalg, .random (Threefry), .transforms (MLX's gradients, custom
-   VJPs and compile) and .exact (exact routes around MLX's kernels).
+   VJPs and compile), .exact (exact routes around MLX's kernels), .nn (its
+   fast kernels and quantized ops) and .io (GGUF files).
 
    Configuration (system properties, read when the namespace loads):
      gen.mlx.device  cpu or gpu (default gpu when MLX has one)
@@ -77,6 +78,7 @@
             [gen.array.shape :as sh]
             [gen.backend.mlx.array :as mlx-array
              :refer [->Config check-dtype code defaults fence mlx-array? stream with-device wrap]]
+            [gen.backend.mlx.io :as io]
             [gen.backend.mlx.linalg :refer [linalg matmul]]
             [gen.backend.mlx.memory :as memory]
             [gen.backend.mlx.nn :as nn]
@@ -610,6 +612,9 @@
 
   p/IQuantized
   (-quantized [b op args] (guarded op (nn/quantized b op args)))
+
+  p/ILoading
+  (-load-gguf [b header] (guarded :load-gguf (io/load-gguf b header)))
 
   p/INativeGrad
   (-native-grad? [_] (= grad-mode :native))

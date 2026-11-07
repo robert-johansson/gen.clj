@@ -1365,6 +1365,33 @@
   ([x wq scales biases] (gather-qmm x wq scales biases nil))
   ([x wq scales biases opts] ((:gather-qmm @nn) x wq scales biases opts)))
 
+(defn ^{:api :experimental} load-gguf
+  "The tensors and metadata of a GGUF file (llama.cpp's model format), on
+   *backend*: {:metadata :tensors :types :files}.
+   - :metadata: the file's keys (strings) to host values: integers as
+     longs, floats as doubles, strings, booleans, vectors of these.
+   - :tensors: each tensor by its name in the file (llama.cpp's, e.g.
+     \"blk.0.attn_q.weight\"), its shape outermost first (a matrix
+     weight [out in]). F32 and I32 load as float32 and int32 arrays, F16
+     as float16 (float32 on a backend without it, the JVM's). Q8_0, Q4_0
+     and Q4_1 load as MLX's affine quantization, {:wq :scales :biases
+     :bits :group-size}, the arguments and options of dequantize and
+     quantized-matmul: groups of 32, 8 or 4 bits, the scales and biases
+     float32, so the values are the file's exactly.
+   - :types: each tensor's GGML type, a keyword (:f32, :q8_0, …).
+   - :files: the paths read: path, or every file of a split model
+     (<prefix>-00001-of-0000N.gguf, as llama.cpp's gguf-split writes them;
+     path must be the first).
+   Every other tensor type (the K-quants, BF16 among them) is a loud
+   error (:unsupported), as are a file that is no GGUF of version 2 or 3,
+   a split's file missing, and a tensor named twice (:invalid-gguf). MLX
+   reads the tensors by its loader (mlx_load_gguf), the JVM backend by
+   gen.array.gguf's: the same values, bit for bit. A primitive
+   (gen.array.protocols/ILoading); a backend without it is loud.
+   Experimental: outside the 1.x promise (DESIGN §9)."
+  [path]
+  ((requiring-resolve 'gen.array.gguf/load-gguf) *backend* path))
+
 ;; ---------------------------------------------------------------------------
 ;; Validation across particles
 ;; ---------------------------------------------------------------------------

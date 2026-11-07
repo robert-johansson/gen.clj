@@ -117,6 +117,23 @@ other values for the same key, from the same distribution.
   quantized words' dtype, exact in its doubles, wrapping as int32
   does. `(array/array data {:dtype :uint32})` and `(astype x :uint32)`
   threw there.
+- **Added (experimental): GGUF files, `gen.array/load-gguf`** (gen.array,
+  `{:api :experimental}`; genclj-cr5a): a GGUF file's metadata (host
+  values) and its tensors by llama.cpp's names, on `*backend*`. F32, F16
+  and I32 tensors load as arrays (F16 as float32 on the JVM backend,
+  which has no float16); Q8_0, Q4_0 and Q4_1 as MLX's affine
+  quantization, `{:wq :scales :biases :bits :group-size}`, what
+  `dequantize` and `quantized-matmul` take, with float32 scales and
+  biases, so that the values are the file's exactly. A model split by
+  llama.cpp's gguf-split loads from its first file. Every other tensor
+  type (the K-quants, BF16) is a loud `:unsupported`, a file that is no
+  GGUF or is cut short `:invalid-gguf`. MLX loads by mlx_load_gguf, the
+  JVM backend by a reader in plain Clojure (gen.array.gguf): the same
+  words, scales and biases, bit for bit. A new optional protocol,
+  `gen.array.protocols/ILoading` (experimental). On MLX a file with
+  float64 metadata is refused: MLX 0.32.4's loader misreads it and the
+  process dies (SIGBUS). Test files are in test/fixtures/gguf, with
+  their generator.
 - **Added: THIRD-PARTY-NOTICES** (genclj-ty8m): the origins and licenses
   of files derived from other projects, and the header a ported file
   carries (CLAUDE.md, rule 10).
