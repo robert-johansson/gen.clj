@@ -4,7 +4,7 @@
    (src-java/gen/llama/ffi, from native/jextract-llama.sh) and the libraries
    of native/build-llama.sh, both pinned to llama.cpp v0.9.0 (the binding
    generated from v0.7.0's llama.h, which v0.9.0's changes only by an ftype
-   and a #define).
+   and a #define; its adapter functions from v0.9.0's).
 
      (with-open [e (llama/engine {:model \"Qwen3-0.6B-Q8_0.gguf\"})]
        (let [b (br/open e (llama/tokenize e \"The capital of Sweden is\"))]
@@ -35,11 +35,13 @@
      says otherwise. (info e) says :split-recurrent?, and step-splits what
      was split.
    - Encoder-decoder, diffusion and embedding models are refused.
-   - The engine reserves the memory it holds (:footprint in info: the
-     model's weights, and the KV-cache, recurrent-state, output and compute
-     buffers llama.cpp reported allocating, read from its log as the engine
-     is made) in gen.array.memory, until it closes: the MLX backend's
-     budget leaves it out.
+   - The engine's memory is reserved in gen.array.memory until it closes,
+     so the MLX backend's budget leaves it out (:footprint in info: the
+     model's weights, its adapters' tensors, and the KV-cache,
+     recurrent-state, output and compute buffers llama.cpp reported
+     allocating, read from its log as the model, adapters and engine are
+     made). The engine reserves its context's buffers; the weights and
+     adapters are reserved once, by their model and adapter values.
    - A decode's rows of logits are normalized on a small pool of the
      engine's own (gen.llm.host's: up to four threads, or
      gen.llm.host-threads), while the engine's thread waits: normalizing a
@@ -52,6 +54,30 @@
      nats a token off that, and on CUDA the result also depends on what
      shares the batch; float weights (F16, BF16) bring both within about
      0.01. For exact scores and weights off Metal, use float weights.
+
+   Models and LoRA adapters. An engine given a path loads a model of its
+   own. (model path) loads one that several engines share, each over a
+   context of its own, the weights held once; (adapter m path) loads a
+   LoRA adapter's GGUF for model m, and an engine over m takes adapters
+   with their scales (:adapters {adapter scale}): every branch of the
+   engine reads under that set, fixed for the engine's life. Specialised
+   critics and proposals from one base model are engines over one model
+   with different adapters.
+
+     (with-open [m (llama/model \"Qwen3-0.6B-Q8_0.gguf\")
+                 critic (llama/adapter m \"critic-lora.gguf\")
+                 base (llama/engine {:model m})
+                 tuned (llama/engine {:model m :adapters {critic 1.0}})]
+       …)
+
+   Models and adapters are java.io.Closeable values, freed by close, or
+   when they become unreachable. A model or an adapter closes only when no
+   open engine uses it (a loud error otherwise, :in-use); closing a model
+   frees its adapters. engine refuses an adapter of another model, a
+   closed one, and an activated LoRA (aLoRA, whose activation after its
+   invocation tokens this engine does not implement). Engines over one
+   model each keep their own thread; a model's adapters are loaded and
+   freed under its lock, which every decode reads under.
 
    llama.cpp's log goes to System.err from warnings up (gen.llama.log:
    none, error, warn, info, debug); libllama is found in gen.llama.lib
@@ -69,8 +95,10 @@
   (:import [gen.llama LlamaRuntime LlamaRuntime$Batch]
            [gen.llama.ffi Llama llama_context_params llama_model_params]
            [java.lang.foreign Arena MemorySegment ValueLayout]
+           [java.lang.ref Cleaner Cleaner$Cleanable]
            [java.nio.charset StandardCharsets]
-           [java.util.concurrent ExecutorService]))
+           [java.util.concurrent ExecutorService]
+           [java.util.concurrent.locks Lock ReentrantReadWriteLock]))
 
 (set! *warn-on-reflection* true)
 (set! *unchecked-math* :warn-on-boxed)
@@ -88,6 +116,28 @@
     (LlamaRuntime/clearLastError)
     e))
 
+(defn- llama-failure
+  "The ex-info for a failure of what (\"llama/engine\"), with llama.cpp's
+   last error on this thread."
+  [what msg data]
+  (ex-info (str what ": " msg) (assoc data :llama-error (llama-error))))
+
+(defn- locked [^Lock l f]
+  (.lock l)
+  (try (f) (finally (.unlock l))))
+
+;; A model's lock: engines read (make their contexts, decode, free them)
+;; under its read lock, while adapters are loaded and freed, and the model
+;; freed, under its write lock. llama.cpp keeps a model's adapters in a set
+;; that a context reads when it sizes its graphs (at its first decode after
+;; its adapters are set) and that loading or freeing an adapter changes.
+;; Contexts of one model decoding on threads of their own is a use
+;; llama.cpp tests (tests/test-thread-safety.cpp), so the read lock lets
+;; them.
+
+(defn- reading [^ReentrantReadWriteLock rw f] (locked (.readLock rw) f))
+(defn- writing [^ReentrantReadWriteLock rw f] (locked (.writeLock rw) f))
+
 (defn- decode-error
   "The ex-info for llama_decode's status code."
   [^long code what]
@@ -104,10 +154,11 @@
                (== code 1) (assoc :exhausted? true)))))
 
 (defn- decode!
-  "llama_decode the batch, or throw its ex-info."
-  [^MemorySegment ctx ^LlamaRuntime$Batch batch what]
+  "llama_decode the batch (under the model's read lock), or throw its
+   ex-info."
+  [lock ^MemorySegment ctx ^LlamaRuntime$Batch batch what]
   (LlamaRuntime/clearLastError)
-  (let [code (Llama/llama_decode ctx (.-struct batch))]
+  (let [code (long (reading lock #(Llama/llama_decode ctx (.-struct batch))))]
     (when-not (zero? code)
       (throw (decode-error code what)))))
 
@@ -240,9 +291,341 @@
       (run! #(replayed! splits recurrent/clear %) cleared)
       (replay-off! splits (str "a decode failed (" (ex-message t) ")")))))
 
-(deftype LlamaSlots [^MemorySegment model ^MemorySegment ctx ^MemorySegment mem ^MemorySegment vocab
+;; ---------------------------------------------------------------------------
+;; Models and adapters
+;; ---------------------------------------------------------------------------
+
+(defonce ^:private cleaner (Cleaner/create))
+
+(defn- logged
+  "[(f), what llama.cpp logged on this thread while f ran]."
+  [f]
+  (LlamaRuntime/startCapture)
+  (let [v (try (f)
+               (catch Throwable t
+                 (LlamaRuntime/endCapture)
+                 (throw t)))]
+    [v (LlamaRuntime/endCapture)]))
+
+(def ^:private buffer-line
+  ;; llama.cpp (v0.7.0 to v0.9.0) reports each buffer it allocates, at info level:
+  ;; "load_tensors:   Metal_Mapped model buffer size =   604.15 MiB",
+  ;; "llama_kv_cache:      Metal KV buffer size =   448.00 MiB", the
+  ;; recurrent state's (RS), output and compute buffers alike, and an
+  ;; adapter's "llama_adapter_lora_init_impl:      Metal LoRA buffer size =     0.16 MiB"
+  #"(?m)^\s*\w+:\s+(\S+)\s+(model|KV|RS|output|compute|LoRA) buffer size =\s+([0-9.]+) MiB")
+
+(defn- buffers
+  "The buffers llama.cpp reported allocating in log: [{:kind :model|:kv|:rs|
+   :output|:compute|:lora, :buffer its backend's name, :bytes}], to 0.01
+   MiB."
+  [log]
+  (mapv (fn [[_ buffer kind mib]]
+          {:kind (keyword (.toLowerCase ^String kind))
+           :buffer buffer
+           :bytes (Math/round (* (Double/parseDouble mib) 1048576.0))})
+        (re-seq buffer-line log)))
+
+(defn- load-model
+  "The model at path, layers on the GPU."
+  ^MemorySegment [^Arena arena ^String path gpu-layers]
+  (let [params (Llama/llama_model_default_params arena)
+        _ (llama_model_params/n_gpu_layers params (int gpu-layers))
+        m (Llama/llama_model_load_from_file (.allocateFrom arena path) params)]
+    (when (null? m)
+      (throw (llama-failure "llama/model" (str "llama.cpp could not load " path) {:reason :model-load-failed :model path})))
+    m))
+
+(defn- check-decoder-only [^MemorySegment m]
+  (cond
+    (Llama/llama_model_has_encoder m) (throw (llama-failure "llama/model" "encoder-decoder models are not supported" {:reason :unsupported-model}))
+    (not (Llama/llama_model_has_decoder m)) (throw (llama-failure "llama/model" "the model has no decoder" {:reason :unsupported-model}))
+    (Llama/llama_model_is_diffusion m) (throw (llama-failure "llama/model" "diffusion models are not supported" {:reason :unsupported-model}))))
+
+(defn- c-string
+  "The string a llama.cpp call (call buf capacity) writes, which returns
+   its full length (snprintf's) or a negative number for none (then nil):
+   called again with room for it when it did not fit."
+  [call]
+  (with-open [a (Arena/ofConfined)]
+    (loop [cap 256]
+      (let [buf (.allocate a (long cap))
+            n (long (call buf cap))]
+        (cond (neg? n) nil
+              (< n cap) (.getString buf 0)
+              :else (recur (inc n)))))))
+
+(defn- model-description
+  "The model's info: its path, llama.cpp's description, sizes, kind, and
+   its footprint, {:bytes its weights (the model's size), :buffers its
+   model buffers, read from log}. The weights count once: the model
+   buffers of a mapped file are views of one mapping (Metal's maps the
+   whole file, the CPU's the token embeddings again), so they are listed,
+   not added."
+  [^MemorySegment m path gpu-layers log]
+  (let [bufs (filterv #(= :model (:kind %)) (buffers log))]
+    (when-not (seq bufs)
+      (throw (llama-failure "llama/model" "llama.cpp reported no model buffer, so the model's footprint is unknown"
+                            {:reason :no-footprint})))
+    {:path path
+     :desc (or (c-string (fn [^MemorySegment buf ^long cap] (Llama/llama_model_desc m buf cap))) "")
+     :bytes (Llama/llama_model_size m)
+     :params (Llama/llama_model_n_params m)
+     :n-ctx-train (long (Llama/llama_model_n_ctx_train m))
+     :n-swa (long (Llama/llama_model_n_swa m))
+     :recurrent? (Llama/llama_model_is_recurrent m)
+     :hybrid? (Llama/llama_model_is_hybrid m)
+     :gpu-layers gpu-layers
+     :footprint {:bytes (Llama/llama_model_size m) :buffers bufs}}))
+
+;; A model's books: an atom, written under its lock,
+;;   {:closed? :engines #{a token per open engine}
+;;    :adapters #{each loaded adapter's books} :cleanable (frees it, once)}
+;; and its reservation's owner. They hold no engine or adapter value, so
+;; that the Cleaner's action, which holds them, keeps none reachable.
+
+(deftype LlamaModel [^MemorySegment ptr ^MemorySegment vocab ^ReentrantReadWriteLock lock books info]
+  java.io.Closeable
+  (close [_]
+    (writing lock #(let [{:keys [closed? engines ^Cleaner$Cleanable cleanable]} @books]
+                     (when (and (not closed?) (seq engines))
+                       (throw (ex-info (str "llama/model: " (count engines) " open engines use " (:path info)
+                                            ": close them first")
+                                       {:reason :in-use :engines (count engines) :model (:path info)})))
+                     (.clean cleanable))))
+
+  Object
+  (toString [_] (str "#<LlamaModel " (:desc info) ">")))
+
+;; An adapter's books: {:closed? :users #{a token per open engine using it}
+;; :cleanable}, its reservation's owner.
+
+(deftype LlamaAdapter [^MemorySegment ptr ^LlamaModel model books info]
+  java.io.Closeable
+  (close [_]
+    (writing (.-lock model)
+             #(let [{:keys [closed? users ^Cleaner$Cleanable cleanable]} @books]
+                (when (and (not closed?) (seq users))
+                  (throw (ex-info (str "llama/adapter: " (count users) " open engines use " (:path info)
+                                       ": close them first")
+                                  {:reason :in-use :engines (count users) :adapter (:path info)})))
+                (.clean cleanable))))
+
+  Object
+  (toString [_] (str "#<LlamaAdapter " (:path info) ">")))
+
+(defn- model-closer
+  "The action that frees a model, once: close runs it, and so does the
+   Cleaner for a model no one can reach (its engines and adapters, which
+   hold it, are closed by then). llama_model_free frees the adapters still
+   loaded."
+  [^MemorySegment ptr lock books]
+  (fn []
+    (writing lock #(when-not (:closed? @books)
+                     (doseq [ab (:adapters @books)]
+                       (swap! ab assoc :closed? true)
+                       (reservations/release! ab))
+                     (swap! books assoc :closed? true :adapters #{})
+                     (Llama/llama_model_free ptr)
+                     (reservations/release! books)))))
+
+(defn- adapter-closer
+  "The action that frees an adapter, once (close, or the Cleaner), unless
+   its model has freed it."
+  [^MemorySegment ptr lock model-books books]
+  (fn []
+    (writing lock #(when-not (:closed? @books)
+                     (Llama/llama_adapter_lora_free ptr)
+                     (swap! model-books update :adapters disj books)
+                     (swap! books assoc :closed? true)
+                     (reservations/release! books)))))
+
+(defn- open-model
+  "A LlamaModel of the GGUF at path, loaded on this thread, its weights
+   reserved."
+  ^LlamaModel [path gpu-layers]
+  (LlamaRuntime/load)
+  (LlamaRuntime/clearLastError)
+  (let [[^MemorySegment ptr log] (logged #(with-open [arena (Arena/ofConfined)] (load-model arena path gpu-layers)))]
+    (try
+      (check-decoder-only ptr)
+      (let [info (model-description ptr path gpu-layers log)
+            lock (ReentrantReadWriteLock.)
+            books (atom {:closed? false :engines #{} :adapters #{}})
+            m (LlamaModel. ptr (Llama/llama_model_get_vocab ptr) lock books info)]
+        (swap! books assoc :cleanable (.register ^Cleaner cleaner m (model-closer ptr lock books)))
+        (reservations/reserve! books (:bytes (:footprint info)) (str "llama.cpp: " (:desc info)))
+        m)
+      (catch Throwable t
+        (Llama/llama_model_free ptr)
+        (throw t)))))
+
+(defn model
+  "A llama.cpp model (java.io.Closeable; close it to free its weights), for
+   engines (engine's :model) and adapters (adapter) to share. opts (any
+   other is an error):
+     :gpu-layers   layers offloaded to the GPU (default -1, all)
+   An engine given a path instead loads a model of its own."
+  (^java.io.Closeable [path] (model path {}))
+  (^java.io.Closeable [path opts]
+   (when-let [ks (seq (remove #{:gpu-layers} (keys opts)))]
+     (throw (ex-info (str "llama/model: unknown options " (vec ks)) {:reason :invalid-option :unknown (vec ks)})))
+   (let [{:keys [gpu-layers]} (merge {:gpu-layers -1} opts)]
+     (when-not (int? gpu-layers)
+       (throw (ex-info (str "llama/model: bad :gpu-layers: " (pr-str gpu-layers)) {:reason :invalid-option :gpu-layers gpu-layers})))
+     (when-not (and (string? path) (.isFile (java.io.File. ^String path)))
+       (throw (ex-info (str "llama/model: no model file at " (pr-str path)) {:reason :no-model :model path})))
+     (open-model path gpu-layers))))
+
+(defn- as-model ^LlamaModel [m what]
+  (if (instance? LlamaModel m)
+    m
+    (throw (ex-info (str what ": not a llama.cpp model (llama/model): " (pr-str m)) {:reason :not-a-model}))))
+
+(defn- as-adapter ^LlamaAdapter [a what]
+  (if (instance? LlamaAdapter a)
+    a
+    (throw (ex-info (str what ": not a llama.cpp adapter (llama/adapter): " (pr-str a)) {:reason :not-an-adapter}))))
+
+(defn- adapter-description
+  "An adapter's info: its path and model, its GGUF metadata (scalars, as
+   strings), alpha, aLoRA's invocation tokens ([] for a LoRA), and its
+   footprint, the LoRA buffers in log."
+  [^MemorySegment ptr path ^LlamaModel m log]
+  (let [meta (into (sorted-map)
+                   (map (fn [i]
+                          [(c-string (fn [^MemorySegment buf ^long cap]
+                                       (Llama/llama_adapter_meta_key_by_index ptr (int i) buf cap)))
+                           (c-string (fn [^MemorySegment buf ^long cap]
+                                       (Llama/llama_adapter_meta_val_str_by_index ptr (int i) buf cap)))]))
+                   (range (Llama/llama_adapter_meta_count ptr)))
+        n (Llama/llama_adapter_get_alora_n_invocation_tokens ptr)
+        bufs (filterv #(= :lora (:kind %)) (buffers log))]
+    {:path path
+     :model (select-keys (.-info m) [:path :desc])
+     :alpha (some-> (get meta "adapter.lora.alpha") parse-double)
+     :meta meta
+     :alora-invocation-tokens (if (zero? n)
+                                []
+                                (mapv long (.toArray (.reinterpret (Llama/llama_adapter_get_alora_invocation_tokens ptr)
+                                                                   (* 4 n))
+                                                     ValueLayout/JAVA_INT)))
+     :footprint {:bytes (reduce + 0 (map :bytes bufs)) :buffers bufs}}))
+
+(defn adapter
+  "A LoRA adapter (java.io.Closeable; close it to free it) for model m (a
+   llama/model): the adapter GGUF at path, as llama.cpp's
+   convert_lora_to_gguf.py writes one (general.type adapter, the model's
+   architecture, the A and B of each weight it adapts). Loaded once, for
+   any number of engines over m, each with its own scale (engine's
+   :adapters). llama.cpp refuses one of another architecture or shapes (a
+   loud error, :adapter-load-failed, with its message)."
+  ^java.io.Closeable [m path]
+  (let [m (as-model m "llama/adapter")]
+    (when-not (and (string? path) (.isFile (java.io.File. ^String path)))
+      (throw (ex-info (str "llama/adapter: no adapter file at " (pr-str path)) {:reason :no-adapter :adapter path})))
+    (LlamaRuntime/clearLastError)
+    (writing (.-lock m)
+             (fn []
+               (when (:closed? @(.-books m))
+                 (throw (ex-info (str "llama/adapter: " m " is closed") {:reason :closed :model (:path (.-info m))})))
+               (let [[^MemorySegment ptr log] (logged #(with-open [a (Arena/ofConfined)]
+                                                         (Llama/llama_adapter_lora_init (.-ptr m) (.allocateFrom a ^String path))))]
+                 (when (null? ptr)
+                   (throw (llama-failure "llama/adapter" (str "llama.cpp could not load " path " for " (:path (.-info m)))
+                                         {:reason :adapter-load-failed :adapter path :model (:path (.-info m))})))
+                 (let [info (try (adapter-description ptr path m log)
+                                 (catch Throwable t
+                                   (Llama/llama_adapter_lora_free ptr)
+                                   (throw t)))
+                       books (atom {:closed? false :users #{}})
+                       a (LlamaAdapter. ptr m books info)]
+                   (swap! books assoc :cleanable
+                          (.register ^Cleaner cleaner a (adapter-closer ptr (.-lock m) (.-books m) books)))
+                   (swap! (.-books m) update :adapters conj books)
+                   (reservations/reserve! books (:bytes (:footprint info)) (str "llama.cpp LoRA: " path))
+                   a))))))
+
+(defn model-info
+  "A model's description: :path, :desc (llama.cpp's), :bytes, :params,
+   :n-ctx-train, :n-swa, :recurrent?, :hybrid?, :gpu-layers, :footprint
+   ({:bytes :buffers}), the :engines and :adapters open over it, :closed?."
+  [m]
+  (let [m (as-model m "llama/model-info")
+        {:keys [closed? engines adapters]} @(.-books m)]
+    (assoc (.-info m) :closed? (boolean closed?) :engines (count engines) :adapters (count adapters))))
+
+(defn adapter-info
+  "An adapter's description: :path, :model ({:path :desc}), :alpha (nil
+   when its GGUF has none: then llama.cpp scales B A by an engine's scale
+   alone, else by scale × alpha / rank), :meta (its GGUF's scalar
+   metadata, as strings), :alora-invocation-tokens ([] but for an aLoRA),
+   :footprint ({:bytes :buffers}), the :engines using it, :closed?."
+  [a]
+  (let [a (as-adapter a "llama/adapter-info")
+        {:keys [closed? users]} @(.-books a)]
+    (assoc (.-info a) :closed? (boolean closed?) :engines (count users))))
+
+(defn- check-attachable
+  "Model m and the adapters can make a new engine's context: m open, each
+   adapter open, m's, and a LoRA (an aLoRA's activation is not
+   implemented). Under m's lock."
+  [^LlamaModel m adapters]
+  (when (:closed? @(.-books m))
+    (throw (ex-info (str "llama/engine: " m " is closed") {:reason :closed :model (:path (.-info m))})))
+  (doseq [^LlamaAdapter a (keys adapters)
+          :let [{:keys [path alora-invocation-tokens]} (.-info a)]]
+    (cond
+      (:closed? @(.-books a))
+      (throw (ex-info (str "llama/engine: the adapter " path " is closed") {:reason :closed :adapter path}))
+
+      (not (identical? m (.-model a)))
+      (throw (ex-info (str "llama/engine: the adapter " path " was loaded for another model ("
+                           (:path (:model (.-info a))) "), not this engine's " m ": load it for this one (llama/adapter)")
+                      {:reason :adapter-for-another-model :adapter path
+                       :adapter-model (:path (:model (.-info a))) :model (:path (.-info m))}))
+
+      (seq alora-invocation-tokens)
+      (throw (ex-info (str "llama/engine: " path " is an activated LoRA (aLoRA), which applies only after its"
+                           " invocation tokens; this engine applies an adapter to every token")
+                      {:reason :unsupported-adapter :adapter path :alora-invocation-tokens alora-invocation-tokens})))))
+
+(defn- register!
+  "An engine (its token) uses m and the adapters."
+  [^LlamaModel m token adapters]
+  (swap! (.-books m) update :engines conj token)
+  (doseq [^LlamaAdapter a (keys adapters)]
+    (swap! (.-books a) update :users conj token)))
+
+(defn- deregister!
+  "The engine (its token) no longer uses m and the adapters."
+  [^LlamaModel m token adapters]
+  (doseq [^LlamaAdapter a (keys adapters)]
+    (swap! (.-books a) update :users disj token))
+  (swap! (.-books m) update :engines disj token))
+
+(defn- set-adapters!
+  "Set the adapters, with their scales, on ctx (none: nothing to set)."
+  [^MemorySegment ctx adapters]
+  (when (seq adapters)
+    (with-open [a (Arena/ofConfined)]
+      (let [n (count adapters)
+            ptrs (.allocate a ValueLayout/ADDRESS (long n))
+            scales (.allocateFrom a ValueLayout/JAVA_FLOAT (float-array (map #(.floatValue ^Number %) (vals adapters))))]
+        (doseq [[i ^LlamaAdapter ad] (map-indexed vector (keys adapters))]
+          (.setAtIndex ptrs ValueLayout/ADDRESS (long i) ^MemorySegment (.-ptr ad)))
+        (let [code (Llama/llama_set_adapters_lora ctx ptrs (long n) scales)]
+          (when-not (zero? code)
+            (throw (llama-failure "llama/engine" (str "llama.cpp could not set the adapters (" code ")")
+                                  {:reason :context-failed :code code}))))))))
+
+;; An engine's Slots: model, the LlamaModel it reads (owns-model? when the
+;; engine loaded it from a path, to free it on closing), and its adapters
+;; ({adapter scale}), all three used under token in their books.
+
+(deftype LlamaSlots [^LlamaModel model ^MemorySegment ctx ^MemorySegment mem ^MemorySegment vocab
                      ^LlamaRuntime$Batch batch ^Arena arena ^ExecutorService pool ^long n-vocab ^long n-batch info
-                     ^clojure.lang.Volatile splits]
+                     ^clojure.lang.Volatile splits token adapters owns-model?]
   slots/Slots
   (slots-info [_] info)
 
@@ -255,7 +638,7 @@
           (let [len (min n-batch (- n from))
                 end (+ from len)]
             (.run batch toks (int from) (int len) (int (+ (long pos) from)) (int slot) (some? tgts))
-            (decode! ctx batch "read")
+            (decode! (.-lock model) ctx batch "read")
             (replayed! splits recurrent/decode [slot] [(+ (long pos) end -1)])
             (replay-checked! splits mem [slot] "read")
             ;; row k scores the token after token from+k; the run's last
@@ -288,7 +671,7 @@
           (let [ss (mapv slots g)
                 ps (mapv positions g)]
             (.step batch (int-array (mapv tokens g)) (int-array ps) (int-array ss))
-            (decode! ctx batch "advance")
+            (decode! (.-lock model) ctx batch "advance")
             (replayed! splits recurrent/decode ss ps)
             (replay-checked! splits mem ss "advance")
             (doseq [[i r] (map vector g (host/in-order pool #(row-logprobs % n-vocab "advance")
@@ -313,8 +696,9 @@
     (reservations/release! this)
     (.shutdown pool)
     (Llama/llama_batch_free (.-struct batch))
-    (Llama/llama_free ctx)
-    (Llama/llama_model_free model)
+    (reading (.-lock model) #(Llama/llama_free ctx))
+    (deregister! model token adapters)
+    (when owns-model? (.close model))
     (.close arena))
 
   Object
@@ -324,13 +708,20 @@
 ;; Opening
 ;; ---------------------------------------------------------------------------
 
-(def ^:private defaults {:max-branches 8 :n-ctx 4096 :n-batch 512 :gpu-layers -1 :swa-full true})
+(def ^:private defaults {:max-branches 8 :n-ctx 4096 :n-batch 512 :swa-full true :adapters {}})
+
+(defn- scale?
+  "A finite number a float holds: an adapter's scale."
+  [s]
+  (and (number? s) (Double/isFinite (double s)) (<= (Math/abs (double s)) (double Float/MAX_VALUE))))
 
 (def ^:private option-checks
   "The options an engine takes, each with its check (a bad :model, no
    model file there, has an error of its own, :no-model)."
-  {:model #(and (string? %) (.isFile (java.io.File. ^String %))) :max-branches pos-int? :n-ctx pos-int?
-   :n-batch pos-int? :gpu-layers int? :threads #(or (nil? %) (pos-int? %)) :swa-full boolean?})
+  {:model #(or (instance? LlamaModel %) (and (string? %) (.isFile (java.io.File. ^String %))))
+   :max-branches pos-int? :n-ctx pos-int? :n-batch pos-int? :gpu-layers int?
+   :threads #(or (nil? %) (pos-int? %)) :swa-full boolean?
+   :adapters #(and (map? %) (every? (fn [[a s]] (and (instance? LlamaAdapter a) (scale? s))) %))})
 
 (defn- check-options
   "opts with their defaults and :n-slots, checked: a loud error for an
@@ -338,38 +729,28 @@
   [opts]
   (when-let [ks (seq (remove option-checks (keys opts)))]
     (throw (ex-info (str "llama/engine: unknown options " (vec ks)) {:reason :invalid-option :unknown (vec ks)})))
-  (let [{:keys [model max-branches] :as opts} (merge defaults opts)
+  (let [path? (string? (:model opts))
+        {:keys [model max-branches adapters] :as opts} (merge defaults (when path? {:gpu-layers -1}) opts)
         ;; LLAMA_MAX_SEQ, 256 in v0.7.0 and v0.9.0
         max-seq (Llama/llama_max_parallel_sequences)]
     (doseq [[k ok?] option-checks
-            :when (not (ok? (get opts k)))]
+            :when (and (or (= k :model) (contains? opts k)) (not (ok? (get opts k))))]
       (throw (if (= k :model)
                (ex-info (str "llama/engine: no model file at " (pr-str model)) {:reason :no-model :model model})
                (ex-info (str "llama/engine: bad " k ": " (pr-str (get opts k))) {:reason :invalid-option k (get opts k)}))))
+    (when (and (not path?) (contains? opts :gpu-layers))
+      (throw (ex-info "llama/engine: :gpu-layers is the model's option (llama/model), not an engine's over it"
+                      {:reason :invalid-option :gpu-layers (:gpu-layers opts)})))
+    (when (and path? (seq adapters))
+      (throw (ex-info (str "llama/engine: an engine given a path loads a model of its own, which no adapter was"
+                           " loaded for: load the model (llama/model) and its adapters (llama/adapter), and give"
+                           " the engine the model")
+                      {:reason :adapter-for-another-model :model model})))
     (when-not (< (long max-branches) max-seq)
       (throw (ex-info (str "llama/engine: :max-branches is 1 to " (dec max-seq) " (llama.cpp's " max-seq
                            " sequences, one kept for scoring), not " max-branches)
                       {:reason :invalid-option :max-branches max-branches})))
     (assoc opts :n-slots (inc (long max-branches)))))
-
-(defn- llama-failure [msg data]
-  (ex-info (str "llama/engine: " msg) (assoc data :llama-error (llama-error))))
-
-(defn- load-model
-  "The model at path, layers on the GPU."
-  ^MemorySegment [^Arena arena ^String path gpu-layers]
-  (let [params (Llama/llama_model_default_params arena)
-        _ (llama_model_params/n_gpu_layers params (int gpu-layers))
-        m (Llama/llama_model_load_from_file (.allocateFrom arena path) params)]
-    (when (null? m)
-      (throw (llama-failure (str "llama.cpp could not load " path) {:reason :model-load-failed :model path})))
-    m))
-
-(defn- check-decoder-only [^MemorySegment m]
-  (cond
-    (Llama/llama_model_has_encoder m) (throw (llama-failure "encoder-decoder models are not supported" {:reason :unsupported-model}))
-    (not (Llama/llama_model_has_decoder m)) (throw (llama-failure "the model has no decoder" {:reason :unsupported-model}))
-    (Llama/llama_model_is_diffusion m) (throw (llama-failure "diffusion models are not supported" {:reason :unsupported-model}))))
 
 (defn- cpu-list
   "The CPUs a Linux cpulist names (\"0-7,16\" → 0 to 7 and 16)."
@@ -421,7 +802,7 @@
       (llama_context_params/n_threads_batch params (int threads)))
     (let [ctx (Llama/llama_init_from_model m params)]
       (when (null? ctx)
-        (throw (llama-failure "llama.cpp could not create a context" {:reason :context-failed :n-ctx n-ctx})))
+        (throw (llama-failure "llama/engine" "llama.cpp could not create a context" {:reason :context-failed :n-ctx n-ctx})))
       ctx)))
 
 (defn- check-context
@@ -430,7 +811,7 @@
   (let [n-seq (Llama/llama_n_seq_max ctx)
         n-batch (Llama/llama_n_batch ctx)]
     (when-not (and (== n-slots n-seq) (<= n-slots n-batch))
-      (throw (llama-failure "llama.cpp changed the context's sequences or batch"
+      (throw (llama-failure "llama/engine" "llama.cpp changed the context's sequences or batch"
                             {:reason :context-failed :n-seq-max n-seq :n-batch n-batch})))))
 
 (defn- memory
@@ -438,45 +819,26 @@
   ^MemorySegment [^MemorySegment ctx]
   (let [mem (Llama/llama_get_memory ctx)]
     (when (null? mem)
-      (throw (llama-failure "the model keeps no memory (an embedding model?)" {:reason :unsupported-model})))
+      (throw (llama-failure "llama/engine" "the model keeps no memory (an embedding model?)" {:reason :unsupported-model})))
     mem))
 
-(defn- model-desc [^MemorySegment model]
-  (with-open [a (Arena/ofConfined)]
-    (let [buf (.allocate a 256)
-          n (Llama/llama_model_desc model buf 256)]
-      (if (neg? n) "" (.getString buf 0)))))
-
-(def ^:private buffer-line
-  ;; llama.cpp (v0.7.0 to v0.9.0) reports each buffer it allocates, at info level:
-  ;; "load_tensors:   Metal_Mapped model buffer size =   604.15 MiB",
-  ;; "llama_kv_cache:      Metal KV buffer size =   448.00 MiB", and the
-  ;; recurrent state's (RS), output and compute buffers alike
-  #"(?m)^\s*\w+:\s+(\S+)\s+(model|KV|RS|output|compute) buffer size =\s+([0-9.]+) MiB")
-
 (defn- footprint
-  "The memory model m's engine holds: :bytes, its weights (the model's
-   size) and every other buffer llama.cpp reported allocating in log, the
-   text it logged as the model loaded and the context was made; :buffers,
-   each [{:kind :model|:kv|:rs|:output|:compute, :buffer its backend's
-   name, :bytes}], to 0.01 MiB. The weights count once: the model buffers
-   of a mapped file are views of one mapping (Metal's maps the whole file,
-   the CPU's the token embeddings again), so they are listed, not added."
-  [^MemorySegment m log]
-  (let [buffers (mapv (fn [[_ buffer kind mib]]
-                        {:kind (keyword (.toLowerCase ^String kind))
-                         :buffer buffer
-                         :bytes (Math/round (* (Double/parseDouble mib) 1048576.0))})
-                      (re-seq buffer-line log))]
-    (when-not (some #(= :model (:kind %)) buffers)
-      (throw (llama-failure "llama.cpp reported no model buffer, so the engine's footprint is unknown"
-                            {:reason :no-footprint})))
-    {:bytes (reduce + (Llama/llama_model_size m) (map :bytes (remove #(= :model (:kind %)) buffers)))
-     :buffers buffers}))
+  "What engine uses: :bytes and :buffers of model m's weights, the
+   adapters' tensors, and the context's buffers (ctx-buffers: KV cache,
+   recurrent state, output and compute, from the log of its making). The
+   compute buffer is the one sized as the context was made, before its
+   adapters were set; a rank-r adapter adds r values a token to it."
+  [^LlamaModel m adapters ctx-buffers]
+  (let [parts (concat [(:footprint (.-info m))]
+                      (map #(:footprint (.-info ^LlamaAdapter %)) (keys adapters))
+                      [{:bytes (reduce + 0 (map :bytes ctx-buffers)) :buffers ctx-buffers}])]
+    {:bytes (reduce + 0 (map :bytes parts))
+     :buffers (into [] (mapcat :buffers) parts)}))
 
 (defn- describe
-  "The Slots' info: sizes, special tokens, the model, its footprint."
-  [^MemorySegment m ^MemorySegment ctx ^MemorySegment vocab {:keys [model n-slots]} footprint]
+  "The Slots' info: sizes, special tokens, the model, its adapters, the
+   footprint."
+  [^LlamaModel m ^MemorySegment ctx ^MemorySegment vocab adapters {:keys [n-slots]} footprint]
   (let [n-vocab (Llama/llama_vocab_n_tokens vocab)]
     {:engine :llama.cpp
      :footprint footprint
@@ -488,69 +850,86 @@
      :eos (long (Llama/llama_vocab_eos vocab))
      :eog (into (sorted-set) (filter #(Llama/llama_vocab_is_eog vocab (int %))) (range n-vocab))
      :add-bos? (Llama/llama_vocab_get_add_bos vocab)
-     :model {:path model
-             :desc (model-desc m)
-             :bytes (Llama/llama_model_size m)
-             :params (Llama/llama_model_n_params m)
-             :n-ctx-train (long (Llama/llama_model_n_ctx_train m))
-             :n-swa (long (Llama/llama_model_n_swa m))
-             :recurrent? (Llama/llama_model_is_recurrent m)
-             :hybrid? (Llama/llama_model_is_hybrid m)}
+     :model (select-keys (.-info m) [:path :desc :bytes :params :n-ctx-train :n-swa :recurrent? :hybrid?])
+     :adapters (->> adapters
+                    (map (fn [[^LlamaAdapter a s]] {:path (:path (.-info a)) :scale (double s) :alpha (:alpha (.-info a))}))
+                    (sort-by (juxt :path :scale))
+                    vec)
      :gpu-offload? (Llama/llama_supports_gpu_offload)}))
 
-(defn- logged
-  "[(f), what llama.cpp logged on this thread while f ran]."
-  [f]
-  (LlamaRuntime/startCapture)
-  (let [v (try (f)
-               (catch Throwable t
-                 (LlamaRuntime/endCapture)
-                 (throw t)))]
-    [v (LlamaRuntime/endCapture)]))
+(defn- attach!
+  "On the engine's thread, under model m's read lock: check that m and the
+   adapters can serve a new engine, record that the engine (its token)
+   uses them, make its context and set the adapters on it: [ctx, the log
+   of its making]. (undo! f) records how to undo each step (run the last
+   first, after a failure)."
+  [^LlamaModel m token adapters ^Arena arena opts undo!]
+  (reading (.-lock m)
+           (fn []
+             (check-attachable m adapters)
+             (register! m token adapters)
+             (undo! #(deregister! m token adapters))
+             (let [[ctx log] (logged #(new-context arena (.-ptr m) opts))]
+               (undo! #(reading (.-lock m) (fn [] (Llama/llama_free ctx))))
+               (set-adapters! ctx adapters)
+               [ctx log]))))
 
 (defn- open-slots
-  "LlamaSlots for opts, made on the engine's thread, its footprint reserved.
-   A failure frees what was made, last first."
+  "LlamaSlots for opts, made on the engine's thread (and its model, when
+   opts give a path), its context's buffers reserved. A failure frees what
+   was made, last first."
   [opts]
   (LlamaRuntime/load)
   (LlamaRuntime/clearLastError)
-  (let [{:keys [model gpu-layers n-slots] :as opts} (check-options opts)
+  (let [{:keys [model gpu-layers n-slots adapters] :as opts} (check-options opts)
         split (split-recurrent)
         arena (Arena/ofConfined)
         undo (volatile! (list #(.close arena)))
-        owned (fn [free x] (vswap! undo conj #(free x)) x)]
+        undo! (fn [f] (vswap! undo conj f))
+        owned (fn [free x] (undo! #(free x)) x)]
     (try
-      (let [[[m ctx] log] (logged #(let [m (owned Llama/llama_model_free
-                                                  (doto (load-model arena model gpu-layers) check-decoder-only))]
-                                      [m (owned Llama/llama_free (new-context arena m opts))]))
+      (let [owns-model? (string? model)
+            ^LlamaModel m (if owns-model?
+                            (owned #(.close ^java.io.Closeable %) (open-model model gpu-layers))
+                            model)
+            token (Object.)
+            [^MemorySegment ctx log] (attach! m token adapters arena opts undo!)
             _ (check-context ctx n-slots)
             n-batch (long (Llama/llama_n_batch ctx))
             batch (owned #(Llama/llama_batch_free (.-struct ^LlamaRuntime$Batch %))
                          (LlamaRuntime$Batch. (Llama/llama_batch_init arena (int n-batch) (int 0) (int 1)) n-batch))
             pool (owned #(.shutdown ^ExecutorService %) (row-pool))
-            vocab (Llama/llama_model_get_vocab m)
-            fp (footprint m log)
-            described (describe m ctx vocab opts fp)
+            ctx-buffers (filterv #(#{:kv :rs :output :compute} (:kind %)) (buffers log))
+            fp (footprint m adapters ctx-buffers)
+            described (describe m ctx (.-vocab m) adapters opts fp)
             splits (when (and (if (nil? split) (metal? fp) split) (some (:model described) [:recurrent? :hybrid?]))
                      (volatile! {:cells (recurrent/empty-cells n-slots) :off nil :steps 0 :split 0 :decodes 0}))
             info (assoc described :split-recurrent? (some? splits))
-            slots (LlamaSlots. m ctx (memory ctx) vocab batch arena pool (:n-vocab info) n-batch info splits)]
-        (reservations/reserve! slots (:bytes fp) (str "llama.cpp: " (:desc (:model info))))
+            slots (LlamaSlots. m ctx (memory ctx) (.-vocab m) batch arena pool (:n-vocab info) n-batch info splits
+                               token adapters owns-model?)]
+        (reservations/reserve! slots (reduce + 0 (map :bytes ctx-buffers)) (str "llama.cpp context: " (:desc (:model info))))
         slots)
       (catch Throwable t
         ;; every undo runs; one that fails is suppressed onto t
         (throw (br/clean-up t @undo))))))
 
 (defn engine
-  "A llama.cpp engine (java.io.Closeable; close it to free the model), on a
-   thread of its own. opts (any other is an error):
-     :model         the GGUF file (required)
+  "A llama.cpp engine (java.io.Closeable; close it to free its context, and
+   the model it loaded), on a thread of its own. opts (any other is an
+   error):
+     :model         the GGUF file, which the engine loads (and frees), or a
+                    model (llama/model) it shares (required)
+     :adapters      {adapter scale}: LoRA adapters of that model
+                    (llama/adapter), each with its scale (a finite number;
+                    0 leaves it out), under which every branch reads
+                    (default {}; needs a model, not a path)
      :max-branches  live branches at most (default 8; up to 255)
      :n-ctx         KV cells, shared by every branch, and the most tokens
                     one branch holds (default 4096)
      :n-batch       tokens per decode (default 512, at least
                     :max-branches + 1); longer reads take several
-     :gpu-layers    layers offloaded to the GPU (default -1, all)
+     :gpu-layers    layers offloaded to the GPU (default -1, all), with a
+                    path (a model has its own, llama/model's option)
      :threads       CPU threads (default: on a Linux hybrid CPU its physical
                     performance cores, else llama.cpp's own)
      :swa-full      a full-size cache for sliding-window layers (default true)"

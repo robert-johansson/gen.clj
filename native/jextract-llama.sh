@@ -20,7 +20,14 @@
 #   Generated 2026-10-20 with jextract 25 (JDK 25+37, libclang 13) on macOS
 #   arm64, from llama.cpp v0.7.0; v0.9.0's llama.h (the pinned release since
 #   1.2.0) adds only LLAMA_FTYPE_MOSTLY_F8_E4M3 and a #define, so that
-#   generation stands.
+#   generation stands. The LoRA adapter functions (llama_adapter_*,
+#   llama_set_adapters_lora) were added to the list on 2026-11-07, from
+#   v0.9.0's llama.h, without jextract at hand: their code in Llama.java
+#   was written in jextract 25's form (checked against functions it had
+#   generated, which the same template reproduced verbatim). Regenerating
+#   should change nothing; if it does, jextract's is the one to keep.
+#   (llama_adapter_lora_init_from_file_ptr is left out: it takes a C FILE
+#   pointer, which the JVM has no use for beside the path form.)
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -46,6 +53,11 @@ functions="
   llama_model_n_params llama_model_n_ctx_train llama_model_n_swa
   llama_model_has_encoder llama_model_has_decoder llama_model_is_recurrent
   llama_model_is_hybrid llama_model_is_diffusion
+  llama_adapter_lora_init llama_adapter_lora_free llama_set_adapters_lora
+  llama_adapter_meta_count llama_adapter_meta_key_by_index
+  llama_adapter_meta_val_str_by_index
+  llama_adapter_get_alora_n_invocation_tokens
+  llama_adapter_get_alora_invocation_tokens
   llama_vocab_n_tokens llama_vocab_bos llama_vocab_eos llama_vocab_is_eog
   llama_vocab_get_add_bos
   llama_tokenize llama_token_to_piece llama_detokenize

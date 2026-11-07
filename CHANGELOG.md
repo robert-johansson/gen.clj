@@ -38,6 +38,30 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+### Changes
+
+- **Added: LoRA adapters on llama.cpp, and models engines share**
+  (gen.llm.llama, experimental; genclj-vdu4). `(llama/model path)` loads
+  a GGUF once for several engines, each over a context of its own
+  (`llama/engine`'s `:model` takes it, or a path as before);
+  `(llama/adapter m path)` loads a LoRA adapter's GGUF for model m, and
+  `:adapters {adapter scale}` sets adapters with their scales on an
+  engine, under which all its branches read: specialised critics or
+  proposals from one base model. `model-info` and `adapter-info` describe
+  them (an adapter's GGUF metadata, alpha, aLoRA invocation tokens);
+  `(br/info e)` gains `:adapters`. Models and adapters are Closeable,
+  freed by the Cleaner when unreachable; one an open engine uses does not
+  close (`:in-use`), and an engine refuses an adapter of another model, a
+  closed one (`:closed`) and an aLoRA (`:unsupported-adapter`). The
+  binding gains llama.h's adapter functions (native/jextract-llama.sh);
+  rebuild with `clojure -T:build java`. In gen.array.memory a model
+  reserves its weights, an adapter its tensors and an engine its
+  context's buffers, so an engine that loads its model holds two
+  reservations where it held one, of the same total; errors of a model's
+  loading say `llama/model` (their `:reason`s are unchanged). Test
+  adapters for Qwen3-0.6B are in test/fixtures/lora, with their
+  generator.
+
 ## [1.2.1] - 2026-11-06
 
 The health check's fixes (DESIGN §9; genclj-9mq3). A review of 1.2.0 by

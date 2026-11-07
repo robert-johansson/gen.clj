@@ -1597,6 +1597,495 @@ public class Llama extends Llama$shared {
         }
     }
 
+    private static class llama_adapter_lora_init {
+        public static final FunctionDescriptor DESC = FunctionDescriptor.of(
+            Llama.C_POINTER,
+            Llama.C_POINTER,
+            Llama.C_POINTER
+        );
+
+        public static final MemorySegment ADDR = SYMBOL_LOOKUP.findOrThrow("llama_adapter_lora_init");
+
+        public static final MethodHandle HANDLE = Linker.nativeLinker().downcallHandle(ADDR, DESC);
+    }
+
+    /**
+     * Function descriptor for:
+     * {@snippet lang=c :
+     * struct llama_adapter_lora *llama_adapter_lora_init(struct llama_model *model, const char *path_lora)
+     * }
+     */
+    public static FunctionDescriptor llama_adapter_lora_init$descriptor() {
+        return llama_adapter_lora_init.DESC;
+    }
+
+    /**
+     * Downcall method handle for:
+     * {@snippet lang=c :
+     * struct llama_adapter_lora *llama_adapter_lora_init(struct llama_model *model, const char *path_lora)
+     * }
+     */
+    public static MethodHandle llama_adapter_lora_init$handle() {
+        return llama_adapter_lora_init.HANDLE;
+    }
+
+    /**
+     * Address for:
+     * {@snippet lang=c :
+     * struct llama_adapter_lora *llama_adapter_lora_init(struct llama_model *model, const char *path_lora)
+     * }
+     */
+    public static MemorySegment llama_adapter_lora_init$address() {
+        return llama_adapter_lora_init.ADDR;
+    }
+
+    /**
+     * {@snippet lang=c :
+     * struct llama_adapter_lora *llama_adapter_lora_init(struct llama_model *model, const char *path_lora)
+     * }
+     */
+    public static MemorySegment llama_adapter_lora_init(MemorySegment model, MemorySegment path_lora) {
+        var mh$ = llama_adapter_lora_init.HANDLE;
+        try {
+            if (TRACE_DOWNCALLS) {
+                traceDowncall("llama_adapter_lora_init", model, path_lora);
+            }
+            return (MemorySegment)mh$.invokeExact(model, path_lora);
+        } catch (Error | RuntimeException ex) {
+           throw ex;
+        } catch (Throwable ex$) {
+           throw new AssertionError("should not reach here", ex$);
+        }
+    }
+
+    private static class llama_adapter_meta_count {
+        public static final FunctionDescriptor DESC = FunctionDescriptor.of(
+            Llama.C_INT,
+            Llama.C_POINTER
+        );
+
+        public static final MemorySegment ADDR = SYMBOL_LOOKUP.findOrThrow("llama_adapter_meta_count");
+
+        public static final MethodHandle HANDLE = Linker.nativeLinker().downcallHandle(ADDR, DESC);
+    }
+
+    /**
+     * Function descriptor for:
+     * {@snippet lang=c :
+     * int32_t llama_adapter_meta_count(const struct llama_adapter_lora *adapter)
+     * }
+     */
+    public static FunctionDescriptor llama_adapter_meta_count$descriptor() {
+        return llama_adapter_meta_count.DESC;
+    }
+
+    /**
+     * Downcall method handle for:
+     * {@snippet lang=c :
+     * int32_t llama_adapter_meta_count(const struct llama_adapter_lora *adapter)
+     * }
+     */
+    public static MethodHandle llama_adapter_meta_count$handle() {
+        return llama_adapter_meta_count.HANDLE;
+    }
+
+    /**
+     * Address for:
+     * {@snippet lang=c :
+     * int32_t llama_adapter_meta_count(const struct llama_adapter_lora *adapter)
+     * }
+     */
+    public static MemorySegment llama_adapter_meta_count$address() {
+        return llama_adapter_meta_count.ADDR;
+    }
+
+    /**
+     * {@snippet lang=c :
+     * int32_t llama_adapter_meta_count(const struct llama_adapter_lora *adapter)
+     * }
+     */
+    public static int llama_adapter_meta_count(MemorySegment adapter) {
+        var mh$ = llama_adapter_meta_count.HANDLE;
+        try {
+            if (TRACE_DOWNCALLS) {
+                traceDowncall("llama_adapter_meta_count", adapter);
+            }
+            return (int)mh$.invokeExact(adapter);
+        } catch (Error | RuntimeException ex) {
+           throw ex;
+        } catch (Throwable ex$) {
+           throw new AssertionError("should not reach here", ex$);
+        }
+    }
+
+    private static class llama_adapter_meta_key_by_index {
+        public static final FunctionDescriptor DESC = FunctionDescriptor.of(
+            Llama.C_INT,
+            Llama.C_POINTER,
+            Llama.C_INT,
+            Llama.C_POINTER,
+            Llama.C_LONG
+        );
+
+        public static final MemorySegment ADDR = SYMBOL_LOOKUP.findOrThrow("llama_adapter_meta_key_by_index");
+
+        public static final MethodHandle HANDLE = Linker.nativeLinker().downcallHandle(ADDR, DESC);
+    }
+
+    /**
+     * Function descriptor for:
+     * {@snippet lang=c :
+     * int32_t llama_adapter_meta_key_by_index(const struct llama_adapter_lora *adapter, int32_t i, char *buf, size_t buf_size)
+     * }
+     */
+    public static FunctionDescriptor llama_adapter_meta_key_by_index$descriptor() {
+        return llama_adapter_meta_key_by_index.DESC;
+    }
+
+    /**
+     * Downcall method handle for:
+     * {@snippet lang=c :
+     * int32_t llama_adapter_meta_key_by_index(const struct llama_adapter_lora *adapter, int32_t i, char *buf, size_t buf_size)
+     * }
+     */
+    public static MethodHandle llama_adapter_meta_key_by_index$handle() {
+        return llama_adapter_meta_key_by_index.HANDLE;
+    }
+
+    /**
+     * Address for:
+     * {@snippet lang=c :
+     * int32_t llama_adapter_meta_key_by_index(const struct llama_adapter_lora *adapter, int32_t i, char *buf, size_t buf_size)
+     * }
+     */
+    public static MemorySegment llama_adapter_meta_key_by_index$address() {
+        return llama_adapter_meta_key_by_index.ADDR;
+    }
+
+    /**
+     * {@snippet lang=c :
+     * int32_t llama_adapter_meta_key_by_index(const struct llama_adapter_lora *adapter, int32_t i, char *buf, size_t buf_size)
+     * }
+     */
+    public static int llama_adapter_meta_key_by_index(MemorySegment adapter, int i, MemorySegment buf, long buf_size) {
+        var mh$ = llama_adapter_meta_key_by_index.HANDLE;
+        try {
+            if (TRACE_DOWNCALLS) {
+                traceDowncall("llama_adapter_meta_key_by_index", adapter, i, buf, buf_size);
+            }
+            return (int)mh$.invokeExact(adapter, i, buf, buf_size);
+        } catch (Error | RuntimeException ex) {
+           throw ex;
+        } catch (Throwable ex$) {
+           throw new AssertionError("should not reach here", ex$);
+        }
+    }
+
+    private static class llama_adapter_meta_val_str_by_index {
+        public static final FunctionDescriptor DESC = FunctionDescriptor.of(
+            Llama.C_INT,
+            Llama.C_POINTER,
+            Llama.C_INT,
+            Llama.C_POINTER,
+            Llama.C_LONG
+        );
+
+        public static final MemorySegment ADDR = SYMBOL_LOOKUP.findOrThrow("llama_adapter_meta_val_str_by_index");
+
+        public static final MethodHandle HANDLE = Linker.nativeLinker().downcallHandle(ADDR, DESC);
+    }
+
+    /**
+     * Function descriptor for:
+     * {@snippet lang=c :
+     * int32_t llama_adapter_meta_val_str_by_index(const struct llama_adapter_lora *adapter, int32_t i, char *buf, size_t buf_size)
+     * }
+     */
+    public static FunctionDescriptor llama_adapter_meta_val_str_by_index$descriptor() {
+        return llama_adapter_meta_val_str_by_index.DESC;
+    }
+
+    /**
+     * Downcall method handle for:
+     * {@snippet lang=c :
+     * int32_t llama_adapter_meta_val_str_by_index(const struct llama_adapter_lora *adapter, int32_t i, char *buf, size_t buf_size)
+     * }
+     */
+    public static MethodHandle llama_adapter_meta_val_str_by_index$handle() {
+        return llama_adapter_meta_val_str_by_index.HANDLE;
+    }
+
+    /**
+     * Address for:
+     * {@snippet lang=c :
+     * int32_t llama_adapter_meta_val_str_by_index(const struct llama_adapter_lora *adapter, int32_t i, char *buf, size_t buf_size)
+     * }
+     */
+    public static MemorySegment llama_adapter_meta_val_str_by_index$address() {
+        return llama_adapter_meta_val_str_by_index.ADDR;
+    }
+
+    /**
+     * {@snippet lang=c :
+     * int32_t llama_adapter_meta_val_str_by_index(const struct llama_adapter_lora *adapter, int32_t i, char *buf, size_t buf_size)
+     * }
+     */
+    public static int llama_adapter_meta_val_str_by_index(MemorySegment adapter, int i, MemorySegment buf, long buf_size) {
+        var mh$ = llama_adapter_meta_val_str_by_index.HANDLE;
+        try {
+            if (TRACE_DOWNCALLS) {
+                traceDowncall("llama_adapter_meta_val_str_by_index", adapter, i, buf, buf_size);
+            }
+            return (int)mh$.invokeExact(adapter, i, buf, buf_size);
+        } catch (Error | RuntimeException ex) {
+           throw ex;
+        } catch (Throwable ex$) {
+           throw new AssertionError("should not reach here", ex$);
+        }
+    }
+
+    private static class llama_adapter_lora_free {
+        public static final FunctionDescriptor DESC = FunctionDescriptor.ofVoid(
+            Llama.C_POINTER
+        );
+
+        public static final MemorySegment ADDR = SYMBOL_LOOKUP.findOrThrow("llama_adapter_lora_free");
+
+        public static final MethodHandle HANDLE = Linker.nativeLinker().downcallHandle(ADDR, DESC);
+    }
+
+    /**
+     * Function descriptor for:
+     * {@snippet lang=c :
+     * void llama_adapter_lora_free(struct llama_adapter_lora *adapter)
+     * }
+     */
+    public static FunctionDescriptor llama_adapter_lora_free$descriptor() {
+        return llama_adapter_lora_free.DESC;
+    }
+
+    /**
+     * Downcall method handle for:
+     * {@snippet lang=c :
+     * void llama_adapter_lora_free(struct llama_adapter_lora *adapter)
+     * }
+     */
+    public static MethodHandle llama_adapter_lora_free$handle() {
+        return llama_adapter_lora_free.HANDLE;
+    }
+
+    /**
+     * Address for:
+     * {@snippet lang=c :
+     * void llama_adapter_lora_free(struct llama_adapter_lora *adapter)
+     * }
+     */
+    public static MemorySegment llama_adapter_lora_free$address() {
+        return llama_adapter_lora_free.ADDR;
+    }
+
+    /**
+     * {@snippet lang=c :
+     * void llama_adapter_lora_free(struct llama_adapter_lora *adapter)
+     * }
+     */
+    public static void llama_adapter_lora_free(MemorySegment adapter) {
+        var mh$ = llama_adapter_lora_free.HANDLE;
+        try {
+            if (TRACE_DOWNCALLS) {
+                traceDowncall("llama_adapter_lora_free", adapter);
+            }
+            mh$.invokeExact(adapter);
+        } catch (Error | RuntimeException ex) {
+           throw ex;
+        } catch (Throwable ex$) {
+           throw new AssertionError("should not reach here", ex$);
+        }
+    }
+
+    private static class llama_adapter_get_alora_n_invocation_tokens {
+        public static final FunctionDescriptor DESC = FunctionDescriptor.of(
+            Llama.C_LONG_LONG,
+            Llama.C_POINTER
+        );
+
+        public static final MemorySegment ADDR = SYMBOL_LOOKUP.findOrThrow("llama_adapter_get_alora_n_invocation_tokens");
+
+        public static final MethodHandle HANDLE = Linker.nativeLinker().downcallHandle(ADDR, DESC);
+    }
+
+    /**
+     * Function descriptor for:
+     * {@snippet lang=c :
+     * uint64_t llama_adapter_get_alora_n_invocation_tokens(const struct llama_adapter_lora *adapter)
+     * }
+     */
+    public static FunctionDescriptor llama_adapter_get_alora_n_invocation_tokens$descriptor() {
+        return llama_adapter_get_alora_n_invocation_tokens.DESC;
+    }
+
+    /**
+     * Downcall method handle for:
+     * {@snippet lang=c :
+     * uint64_t llama_adapter_get_alora_n_invocation_tokens(const struct llama_adapter_lora *adapter)
+     * }
+     */
+    public static MethodHandle llama_adapter_get_alora_n_invocation_tokens$handle() {
+        return llama_adapter_get_alora_n_invocation_tokens.HANDLE;
+    }
+
+    /**
+     * Address for:
+     * {@snippet lang=c :
+     * uint64_t llama_adapter_get_alora_n_invocation_tokens(const struct llama_adapter_lora *adapter)
+     * }
+     */
+    public static MemorySegment llama_adapter_get_alora_n_invocation_tokens$address() {
+        return llama_adapter_get_alora_n_invocation_tokens.ADDR;
+    }
+
+    /**
+     * {@snippet lang=c :
+     * uint64_t llama_adapter_get_alora_n_invocation_tokens(const struct llama_adapter_lora *adapter)
+     * }
+     */
+    public static long llama_adapter_get_alora_n_invocation_tokens(MemorySegment adapter) {
+        var mh$ = llama_adapter_get_alora_n_invocation_tokens.HANDLE;
+        try {
+            if (TRACE_DOWNCALLS) {
+                traceDowncall("llama_adapter_get_alora_n_invocation_tokens", adapter);
+            }
+            return (long)mh$.invokeExact(adapter);
+        } catch (Error | RuntimeException ex) {
+           throw ex;
+        } catch (Throwable ex$) {
+           throw new AssertionError("should not reach here", ex$);
+        }
+    }
+
+    private static class llama_adapter_get_alora_invocation_tokens {
+        public static final FunctionDescriptor DESC = FunctionDescriptor.of(
+            Llama.C_POINTER,
+            Llama.C_POINTER
+        );
+
+        public static final MemorySegment ADDR = SYMBOL_LOOKUP.findOrThrow("llama_adapter_get_alora_invocation_tokens");
+
+        public static final MethodHandle HANDLE = Linker.nativeLinker().downcallHandle(ADDR, DESC);
+    }
+
+    /**
+     * Function descriptor for:
+     * {@snippet lang=c :
+     * const llama_token *llama_adapter_get_alora_invocation_tokens(const struct llama_adapter_lora *adapter)
+     * }
+     */
+    public static FunctionDescriptor llama_adapter_get_alora_invocation_tokens$descriptor() {
+        return llama_adapter_get_alora_invocation_tokens.DESC;
+    }
+
+    /**
+     * Downcall method handle for:
+     * {@snippet lang=c :
+     * const llama_token *llama_adapter_get_alora_invocation_tokens(const struct llama_adapter_lora *adapter)
+     * }
+     */
+    public static MethodHandle llama_adapter_get_alora_invocation_tokens$handle() {
+        return llama_adapter_get_alora_invocation_tokens.HANDLE;
+    }
+
+    /**
+     * Address for:
+     * {@snippet lang=c :
+     * const llama_token *llama_adapter_get_alora_invocation_tokens(const struct llama_adapter_lora *adapter)
+     * }
+     */
+    public static MemorySegment llama_adapter_get_alora_invocation_tokens$address() {
+        return llama_adapter_get_alora_invocation_tokens.ADDR;
+    }
+
+    /**
+     * {@snippet lang=c :
+     * const llama_token *llama_adapter_get_alora_invocation_tokens(const struct llama_adapter_lora *adapter)
+     * }
+     */
+    public static MemorySegment llama_adapter_get_alora_invocation_tokens(MemorySegment adapter) {
+        var mh$ = llama_adapter_get_alora_invocation_tokens.HANDLE;
+        try {
+            if (TRACE_DOWNCALLS) {
+                traceDowncall("llama_adapter_get_alora_invocation_tokens", adapter);
+            }
+            return (MemorySegment)mh$.invokeExact(adapter);
+        } catch (Error | RuntimeException ex) {
+           throw ex;
+        } catch (Throwable ex$) {
+           throw new AssertionError("should not reach here", ex$);
+        }
+    }
+
+    private static class llama_set_adapters_lora {
+        public static final FunctionDescriptor DESC = FunctionDescriptor.of(
+            Llama.C_INT,
+            Llama.C_POINTER,
+            Llama.C_POINTER,
+            Llama.C_LONG,
+            Llama.C_POINTER
+        );
+
+        public static final MemorySegment ADDR = SYMBOL_LOOKUP.findOrThrow("llama_set_adapters_lora");
+
+        public static final MethodHandle HANDLE = Linker.nativeLinker().downcallHandle(ADDR, DESC);
+    }
+
+    /**
+     * Function descriptor for:
+     * {@snippet lang=c :
+     * int32_t llama_set_adapters_lora(struct llama_context *ctx, struct llama_adapter_lora **adapters, size_t n_adapters, float *scales)
+     * }
+     */
+    public static FunctionDescriptor llama_set_adapters_lora$descriptor() {
+        return llama_set_adapters_lora.DESC;
+    }
+
+    /**
+     * Downcall method handle for:
+     * {@snippet lang=c :
+     * int32_t llama_set_adapters_lora(struct llama_context *ctx, struct llama_adapter_lora **adapters, size_t n_adapters, float *scales)
+     * }
+     */
+    public static MethodHandle llama_set_adapters_lora$handle() {
+        return llama_set_adapters_lora.HANDLE;
+    }
+
+    /**
+     * Address for:
+     * {@snippet lang=c :
+     * int32_t llama_set_adapters_lora(struct llama_context *ctx, struct llama_adapter_lora **adapters, size_t n_adapters, float *scales)
+     * }
+     */
+    public static MemorySegment llama_set_adapters_lora$address() {
+        return llama_set_adapters_lora.ADDR;
+    }
+
+    /**
+     * {@snippet lang=c :
+     * int32_t llama_set_adapters_lora(struct llama_context *ctx, struct llama_adapter_lora **adapters, size_t n_adapters, float *scales)
+     * }
+     */
+    public static int llama_set_adapters_lora(MemorySegment ctx, MemorySegment adapters, long n_adapters, MemorySegment scales) {
+        var mh$ = llama_set_adapters_lora.HANDLE;
+        try {
+            if (TRACE_DOWNCALLS) {
+                traceDowncall("llama_set_adapters_lora", ctx, adapters, n_adapters, scales);
+            }
+            return (int)mh$.invokeExact(ctx, adapters, n_adapters, scales);
+        } catch (Error | RuntimeException ex) {
+           throw ex;
+        } catch (Throwable ex$) {
+           throw new AssertionError("should not reach here", ex$);
+        }
+    }
+
     private static class llama_memory_seq_rm {
         public static final FunctionDescriptor DESC = FunctionDescriptor.of(
             Llama.C_BOOL,
