@@ -42,7 +42,19 @@
 (def ^:private model-path
   (or (System/getProperty "gen.llama.test-model") (System/getenv "GEN_LLAMA_TEST_MODEL")))
 
-(def ^:private band 0.075)
+(def ^:private band
+  ;; Per platform, as llama.cpp's own bands are (DESIGN §9): Metal's from
+  ;; the measurement above; elsewhere llama.cpp's x86 and CUDA Q8_0 paths
+  ;; differ from MLX's forward by 0.27 (CUDA) to 0.32 (CPU) nats at most
+  ;; (fenrir, 2026-11-07, this test's 24 comparisons; MLX's forward gave
+  ;; the same on its CPU and on CUDA, so the gap is llama.cpp's), twice
+  ;; the larger rounded up.
+  (if (.startsWith (System/getProperty "os.name") "Mac") 0.075 0.65))
+
+(def ^:private mutation-nats
+  "What a planted convention error must exceed, on every platform: ten
+   times Metal's band, above every platform's noise."
+  0.75)
 
 (defn- llama
   "A function of gen.llm.llama, loaded only when the tests run (it imports
@@ -115,4 +127,4 @@
     (let [[e m] (setup)
           tokens ((llama 'tokenize) e (second prompts))]
       (doseq [mutation (sort (keys against/mutations))]
-        (is (< (* 10 band) (against/mutated e m tokens mutation)) (name mutation))))))
+        (is (< mutation-nats (against/mutated e m tokens mutation)) (name mutation))))))
