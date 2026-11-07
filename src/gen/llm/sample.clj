@@ -187,7 +187,7 @@
          ks (rng/split (or key (gfi/next-key)) n)
          _ (check-fit! lm contexts max-tokens)
          uniform (fn [k] (double (array/item (rng/uniform k))))
-         temp (double (:temp sampling))]
+         temp (when token-logprobs? (double (:temp sampling)))]
      (loop [live (vec (range n)) toks (vec (repeat n [])) out (vec (repeat n nil)) lps (vec (repeat n 0.0))
             tlps (vec (repeat n [])) step 0]
        (if (empty? live)

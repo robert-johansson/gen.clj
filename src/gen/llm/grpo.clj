@@ -145,6 +145,18 @@
    above 1 + ε_high with Â > 0) :kl (the mean of D over the tokens, when
    the reference is read)} :seconds {:rollouts :train}}.
 
+   MLX's memory, as gen.llm.sft's docstring has it: set MLX's limit to
+   what it holds between rounds (the weights, the adapter, the
+   optimizer's state) plus about 1.25 times a round's own peak. Measured
+   on fenrir's CUDA (2026-11-07; Qwen3-0.6B Q8_0, rank 8 on every
+   projection of the last 8 blocks, 8 prompts × 8 completions of at most
+   32 tokens, microbatches of 16, gen.llm.grpo-llama-test), at the held
+   bytes' limit: 0.76 GB held, a round's peak 6.4-7.6 GB. The rollouts
+   make it, not the step: each decode step of the array engine leaves
+   its group's cache (64 rows) to the JVM's collector, which frees it
+   late. The limit so set, 9.3 GB, ran 40 rounds at 9 s each (6 s of
+   rollouts).
+
    Experimental: outside the 1.x promise (DESIGN §9)."
   {:api :experimental}
   (:refer-clojure :exclude [+ - * / < > <= >= ==])
