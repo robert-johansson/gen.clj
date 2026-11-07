@@ -4985,3 +4985,16 @@ Not yet run on CUDA. Qwen3.5's off-Mac band is unmeasured.
 
 The C++ spike is parked unmerged on the branch paged-cpp-spike. Its build
 left libgenclj in the gitignored native/build; nothing loads it.
+*Correction (the lead, 2026-11-07 night, after a side agent's note).* The
+line above, "faster than llama.cpp's on the models gen.clj's research uses
+most", holds only for decoding where just the chosen token is read back.
+- gen.clj draws its tokens from the full distribution, read back and
+  normalized on the host: token SMC, grammar constraints, the token
+  generative function.
+- On that path, through the array engine, MLX is still 1.4-5.8x behind
+  llama.cpp on fenrir.
+- The gap is gen.clj's host path, not the GPU (genclj-9y6y, the hostpath
+  agent, running).
+
+The owner's decision on MLX for NVIDIA should wait for genclj-9y6y's numbers
+on that path.
