@@ -154,8 +154,8 @@
    bytes' limit: 0.76 GB held, a round's peak 6.4-7.6 GB. The rollouts
    make it, not the step: each decode step of the array engine leaves
    its group's cache (64 rows) to the JVM's collector, which frees it
-   late. The limit so set, 9.3 GB, ran 40 rounds at 9 s each (6 s of
-   rollouts).
+   late. At the limit so set, 9.3 GB, 40 rounds took 8 s each (5.5 s of
+   rollouts, 2.6 s of two optimizer steps), peaking at 8.8 GB.
 
    Experimental: outside the 1.x promise (DESIGN §9)."
   {:api :experimental}

@@ -31,6 +31,21 @@
      adapter's is held to twice the band, the LoRA round trip's
      threshold for convention errors (gen.llm.lora-llama-test);
      llama.cpp's greedy replies are scored as the array engine's are.
+   Measured on fenrir (2026-11-07, MLX CUDA, native gradients, Q8_0,
+   MLX's limit 9.3 GB: gen.llm.grpo's docstring; 40 rounds in 5.5 min):
+   - the first step's max |ρ - 1| 1.0e-4 (every round's first: 5e-5 to
+     2e-4); at the second step of a round 0.1 to 3.7, its clip fraction
+     up to 1%; the KL to the base 0.06 at the end;
+   - the training reward by 10 rounds 0.755, 0.702, 0.756, 0.819 (its
+     first round, the base's, 0.42);
+   - held out, 8 samples a prompt: 0.615 before, 0.771 after, paired
+     difference 0.155 ± 0.022 (z 7.0); greedy 0.703 → 0.789, 0.086 ±
+     0.031 (z 2.7); at rounds 10, 20, 30, 40 (4 samples): 0.713, 0.721,
+     0.740, 0.752;
+   - llama.cpp: every argmax the same, max |Δ log p| 0.903 against the
+     forward where the base's own gap is 0.731 (both above the band of
+     0.65 on these prompts); its greedy pass rate 0.781 (the array
+     engine's 0.789).
    Prints the numbers. Needs the MLX backend, llama.cpp's libraries and
    Qwen3-0.6B's GGUF as -J-Dgen.llama.test-model (as gen.llm.sft-llama-
    test); skipped with a note otherwise. Rounds, the learning rate and

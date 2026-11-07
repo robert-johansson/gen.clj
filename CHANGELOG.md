@@ -139,7 +139,15 @@ other values for the same key, from the same distribution.
     `(grpo/train …)`, logging each round's reward mean and std, flat
     groups, entropy, and each step's loss, max |ρ - 1|, clip fraction and
     KL. Checkpoints are sft's; a resumed run is the uninterrupted one bit
-    for bit (the JVM backend). `(grpo/evaluate lm prompts reward opts)`.
+    for bit (the JVM backend, MLX's CUDA and CPU).
+    `(grpo/evaluate lm prompts reward opts)`.
+  - Checked on Qwen3-0.6B (`gen.llm.grpo-llama-test`, fenrir's CUDA), a
+    LoRA on the last 8 blocks, two-digit products with an exact checker:
+    at the first step every ratio is 1 within 1.0e-4; 40 rounds of 8
+    prompts × 8 completions (5.5 min) take the held-out pass rate from
+    0.615 to 0.771 (128 prompts × 8 samples, paired difference 0.155 ±
+    0.022), greedy 0.703 → 0.789; llama.cpp serves the adapter with
+    every argmax the same, its greedy pass rate 0.781.
 - **Added (experimental): `gen.llm.sft/step`'s `:loss`** (genclj-waym):
   another summed loss in the NLL's place, whose reported log-probabilities
   come back in the step's `:reported`; `sft/order` is public.
