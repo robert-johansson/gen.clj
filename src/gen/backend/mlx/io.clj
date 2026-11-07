@@ -18,7 +18,7 @@
   (:require [clojure.string :as str]
             [gen.array.gguf :as gguf]
             [gen.backend.mlx.array :refer [code stream wrap]]
-            [gen.backend.mlx.operands :refer [scalar-handle with-temps]])
+            [gen.backend.mlx.operands :refer [operand scalar-handle with-temps]])
   (:import [gen.mlx Mlx]))
 
 (set! *warn-on-reflection* true)
@@ -33,9 +33,8 @@
         f32 (int (code :float32))]
     (with-temps [tmp]
       (let [wq (wrap b (Mlx/mlx_io_gguf_get_array g name))
-            scales16 (tmp (Mlx/mlx_io_gguf_get_array g (str base ".scales")))
-            hs (Mlx/mlx_astype scales16 f32 s)
-            scales (wrap b hs)
+            scales (wrap b (Mlx/mlx_astype (tmp (Mlx/mlx_io_gguf_get_array g (str base ".scales"))) f32 s))
+            hs (operand b scales nil)
             biases (wrap b (case t
                              :q4_1 (Mlx/mlx_astype (tmp (Mlx/mlx_io_gguf_get_array g (str base ".biases"))) f32 s)
                              :q8_0 (Mlx/mlx_multiply hs (tmp (scalar-handle -128.0 :float32)) s)

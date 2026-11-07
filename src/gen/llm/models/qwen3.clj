@@ -127,9 +127,10 @@
 (defn- cast-weight
   "w (an array, or a quantized matrix's map) with its floats in dtype."
   [w dtype]
-  (cond (map? w) (-> w (update :scales array/astype dtype) (update :biases array/astype dtype))
-        (float-array? w) (if (= dtype (array/dtype w)) w (array/astype w dtype))
-        :else (throw (invalid (str "a weight is neither a float array nor a quantized matrix: " (pr-str (type w)))))))
+  (let [cast (fn [x] (if (= dtype (array/dtype x)) x (array/astype x dtype)))]
+    (cond (map? w) (-> w (update :scales cast) (update :biases cast))
+          (float-array? w) (cast w)
+          :else (throw (invalid (str "a weight is neither a float array nor a quantized matrix: " (pr-str (type w))))))))
 
 (defn- weight-shape
   "The shape a weight stands for: an array's, or a quantized matrix's
