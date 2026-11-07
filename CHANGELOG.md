@@ -186,8 +186,10 @@ other values for the same key, from the same distribution.
   [-708, 0], about a third of `Math/exp`'s cost where that is fdlibm's).
   Its units of blocks are spread over the engine's host pool and its own
   thread, so a row's log-normalizer is the same, bit for bit, for any
-  number of threads. M4, ns an entry: 4.8 to 1.9 on one thread; 1.30 to
-  0.54 for 16 rows of Qwen3's 151,936 on the pool of four. The
+  number of threads. ns an entry, one thread and 16 rows of Qwen3's
+  151,936 on the pool of four: M4 4.8 to 2.0 and 1.30 to 0.65; fenrir's
+  x86 under the Graal JIT 13 to 5.0 and 3.5 to 1.6 (floats are converted
+  four at a time there: Graal serializes lone conversions). The
   log-normalizer moves in its last bits (within 1 ulp of an exact sum,
   where the sequential sum was within 9), so a log-probability, and a
   token drawn from the row, can change only where that moves a float's

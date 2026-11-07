@@ -177,20 +177,58 @@
   "Entries in a block of a row (16 KiB of floats, in a core's L1 cache)."
   4096)
 
+;; Floats are converted four at a time, the four held together, and a
+;; block is widened to doubles before its max and sum read it. The Graal
+;; JIT on x86 (fenrir's) compiles a float's conversion to double, or
+;; back, into an instruction that waits on its register's last value
+;; (cvtss2sd's false dependency) and vectorizes no Clojure loop (a long
+;; index), so a loop converting one value at a time runs at the latency of
+;; everything between two conversions: 9 ns an entry for an exp over
+;; floats against 2 over doubles, 2.3 ns for x - z rounded against 0.43
+;; four at a time (genclj-9y6y). C2 and the Graal JIT on the M4 run either
+;; form alike.
+
+(defn- widen!
+  "The k floats of xs from `from`, as doubles, into d."
+  [^floats xs ^long from ^long k ^doubles d]
+  (loop [j 0]
+    (cond (<= (+ j 4) k)
+          (let [i (+ from j)
+                a (double (aget xs i)) b (double (aget xs (+ i 1)))
+                c (double (aget xs (+ i 2))) e (double (aget xs (+ i 3)))]
+            (aset d j a) (aset d (+ j 1) b) (aset d (+ j 2) c) (aset d (+ j 3) e)
+            (recur (+ j 4)))
+          (< j k) (do (aset d j (double (aget xs (+ from j)))) (recur (inc j))))))
+
+(defn- shifted!
+  "out[o + j] = xs[from + j] - z rounded to float, for j below k."
+  [^floats xs from ^floats out o k z]
+  (let [from (long from) o (long o) k (long k) z (double z)]
+    (loop [j 0]
+      (cond (<= (+ j 4) k)
+            (let [i (+ from j)
+                  p (+ o j)
+                  a (float (- (double (aget xs i)) z)) b (float (- (double (aget xs (+ i 1))) z))
+                  c (float (- (double (aget xs (+ i 2))) z)) e (float (- (double (aget xs (+ i 3))) z))]
+              (aset out p a) (aset out (+ p 1) b) (aset out (+ p 2) c) (aset out (+ p 3) e)
+              (recur (+ j 4)))
+            (< j k) (do (aset out (+ o j) (float (- (double (aget xs (+ from j))) z))) (recur (inc j)))))))
+
 (defn- block-max
-  "The largest of xs[from, to), NaN when one is."
-  ^double [^floats xs ^long from ^long to]
-  (loop [j from m Double/NEGATIVE_INFINITY]
-    (if (< j to) (recur (inc j) (Math/max m (double (aget xs j)))) m)))
+  "The largest of the k doubles of d, NaN when one is."
+  ^double [^doubles d ^long k]
+  (loop [j 0 m Double/NEGATIVE_INFINITY]
+    (if (< j k) (recur (inc j) (Math/max m (aget d j))) m)))
 
 (defn- block-sum
-  "Σ e^(x - m) over xs[from, to), in order, for m their largest (finite)."
-  ^double [^floats xs ^long from ^long to ^double m]
+  "Σ e^(x - m) over the k doubles x of d, in order, for m their largest
+   (finite)."
+  ^double [^doubles d ^long k ^double m]
   (let [hi exp-hi tail exp-tail]
-    (loop [j from s 0.0]
-      (if (< j to)
-        (let [d (- (double (aget xs j)) m)]
-          (recur (inc j) (+ s (if (< d -708.0) (Math/exp d) (exp-in-range hi tail d)))))
+    (loop [j 0 s 0.0]
+      (if (< j k)
+        (let [x (- (aget d j) m)]
+          (recur (inc j) (+ s (if (< x -708.0) (Math/exp x) (exp-in-range hi tail x)))))
         s))))
 
 (defn- blocks-max
@@ -269,15 +307,15 @@
     (in-units! pool w (* rows parts)
                (fn [u]
                  (let [[r b0 b1] (unit us u)
-                       base (* (long r) n)]
+                       d (double-array block)]
                    (loop [i (long b0)]
                      (when (< i (long b1))
-                       (let [from (+ base (* i block))
-                             to (+ base (min n (* (inc i) block)))
-                             m (block-max xs from to)
+                       (let [k (- (min n (* (inc i) block)) (* i block))
                              g (+ (* (long r) blocks) i)]
-                         (aset st (* 2 g) m)
-                         (when (Double/isFinite m) (aset st (inc (* 2 g)) (block-sum xs from to m)))
+                         (widen! xs (+ (* (long r) n) (* i block)) k d)
+                         (let [m (block-max d k)]
+                           (aset st (* 2 g) m)
+                           (when (Double/isFinite m) (aset st (inc (* 2 g)) (block-sum d k m))))
                          (recur (inc i))))))))
     (dotimes [r rows]
       (aset zs r (log-normalizer st (* r blocks) (* (inc r) blocks))))
@@ -302,12 +340,6 @@
     (in-units! pool w (* rows parts)
                (fn [u]
                  (let [[r b0 b1] (unit us u)
-                       base (* (long r) n)
-                       z (aget zs r)
-                       end (min n (* (long b1) block))
-                       ^floats out (outs r)]
-                   (loop [j (* (long b0) block)]
-                     (when (< j end)
-                       (aset out j (float (- (double (aget xs (+ base j))) z)))
-                       (recur (inc j)))))))
+                       j0 (* (long b0) block)]
+                   (shifted! xs (+ (* (long r) n) j0) (outs r) j0 (- (min n (* (long b1) block)) j0) (aget zs r)))))
     outs))
