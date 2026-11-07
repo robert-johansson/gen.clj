@@ -43,13 +43,18 @@
    held-out ones. lecture and lecture-batched are the sleep phase of
    wake-sleep (Gen.jl's lecture! and lecture_batched!): the proposal's log
    density of the latent choices of the model's own traces, with its
-   gradient, to train a proposal toward the model's posterior."
+   gradient, to train a proposal toward the model's posterior.
+
+   Each options map, an optimizer's and train's, holds the keys its
+   function reads and no others: an unknown key ({:learning-rate 0.01}
+   for :lr) is a loud error, its data naming the keys taken (:accepted)."
   {:api :stable}
   (:refer-clojure :exclude [+ - * /])
   (:require [gen.array :as array :refer [+ - * /]]
             [gen.dynamic :as dyn]
             [gen.gfi :as gfi]
             [gen.gradients :as grad]
+            [gen.inference.options :as options]
             [gen.inference.proposal :as proposal]
             [gen.random :as rng]))
 
@@ -143,7 +148,8 @@
 (defn sgd
   "Fixed-step gradient ascent: θ + lr·g (Gen.jl's FixedStepGradientDescent).
    Options: :lr."
-  [{:keys [lr]}]
+  [{:keys [lr] :as opts}]
+  (options/check `sgd opts #{:lr})
   (checked "sgd" {:kind :sgd :lr lr} {:lr at-least-0}))
 
 (defmethod -init :sgd [_ _] nil)
@@ -155,7 +161,8 @@
   "Gradient ascent with a decaying step: step-size-init · (beta + 1) /
    (beta + t) at step t (Gen.jl's GradientDescent). Options:
    :step-size-init, :step-size-beta."
-  [{:keys [step-size-init step-size-beta]}]
+  [{:keys [step-size-init step-size-beta] :as opts}]
+  (options/check `gradient-descent opts #{:step-size-init :step-size-beta})
   (checked "gradient-descent" {:step-size-init step-size-init :step-size-beta step-size-beta}
            {:step-size-init at-least-0 :step-size-beta at-least-0})
   {:kind :gradient-descent :init step-size-init :beta step-size-beta})
@@ -172,7 +179,8 @@
    with momentum: v' = μ·v + g, then θ + lr·v'; with :nesterov? true,
    Nesterov's, θ + lr·(g + μ·v'). Options: :lr, :momentum μ (0.9),
    :nesterov? (false). The state: {:v}, of the store's shape."
-  [{:keys [lr momentum nesterov?] :or {momentum 0.9 nesterov? false}}]
+  [{:keys [lr momentum nesterov?] :or {momentum 0.9 nesterov? false} :as opts}]
+  (options/check `momentum opts #{:lr :momentum :nesterov?})
   (checked "momentum" {:kind :momentum :lr lr :momentum momentum :nesterov? (boolean nesterov?)}
            {:lr at-least-0 :momentum below-1}))
 
@@ -190,7 +198,8 @@
   "RMSProp (Hinton's), ascending, as PyTorch's: v' = ρ·v + (1 - ρ)·g², then
    θ + lr·g / (√v' + eps). Options: :lr (0.01), :decay ρ (0.99, PyTorch's
    alpha), :eps (1e-8). The state: {:v}, of the store's shape."
-  [{:keys [lr decay eps] :or {lr 0.01 decay 0.99 eps 1e-8}}]
+  [{:keys [lr decay eps] :or {lr 0.01 decay 0.99 eps 1e-8} :as opts}]
+  (options/check `rmsprop opts #{:lr :decay :eps})
   (checked "rmsprop" {:kind :rmsprop :lr lr :decay decay :eps eps} {:lr at-least-0 :decay below-1 :eps above-0}))
 
 (defmethod -init :rmsprop [_ store] {:v (zeros-like store)})
@@ -204,7 +213,8 @@
   "AdaGrad (Duchi, Hazan and Singer 2011), ascending, as PyTorch's: s' = s +
    g², then θ + lr·g / (√s' + eps). Options: :lr (0.01), :eps (1e-10). The
    state: {:sum}, of the store's shape."
-  [{:keys [lr eps] :or {lr 0.01 eps 1e-10}}]
+  [{:keys [lr eps] :or {lr 0.01 eps 1e-10} :as opts}]
+  (options/check `adagrad opts #{:lr :eps})
   (checked "adagrad" {:kind :adagrad :lr lr :eps eps} {:lr at-least-0 :eps above-0}))
 
 (defmethod -init :adagrad [_ store] {:sum (zeros-like store)})
@@ -216,11 +226,14 @@
 
 (def ^:private adam-ranges {:lr at-least-0 :beta1 below-1 :beta2 below-1 :eps above-0})
 
+(def ^:private adam-keys (set (keys adam-ranges)))
+
 (defn adam
   "Adam (Kingma and Ba 2015), ascending. Options: :lr (0.001), :beta1 (0.9),
    :beta2 (0.999), :eps (1e-8). The state: {:t :m :v}, the step count and
    the moments, of the store's shape."
-  [{:keys [lr beta1 beta2 eps] :or {lr 0.001 beta1 0.9 beta2 0.999 eps 1e-8}}]
+  [{:keys [lr beta1 beta2 eps] :or {lr 0.001 beta1 0.9 beta2 0.999 eps 1e-8} :as opts}]
+  (options/check `adam opts adam-keys)
   (checked "adam" {:kind :adam :lr lr :beta1 beta1 :beta2 beta2 :eps eps} adam-ranges))
 
 (defn adamw
@@ -228,7 +241,8 @@
    PyTorch's, ascending: θ·(1 - lr·λ) + lr·m̂ / (√v̂ + eps), so the decay
    pulls each parameter toward 0. Options: adam's and :weight-decay λ
    (0.01). The state: adam's."
-  [{:keys [lr beta1 beta2 eps weight-decay] :or {lr 0.001 beta1 0.9 beta2 0.999 eps 1e-8 weight-decay 0.01}}]
+  [{:keys [lr beta1 beta2 eps weight-decay] :or {lr 0.001 beta1 0.9 beta2 0.999 eps 1e-8 weight-decay 0.01} :as opts}]
+  (options/check `adamw opts (conj adam-keys :weight-decay))
   (checked "adamw" {:kind :adamw :lr lr :beta1 beta1 :beta2 beta2 :eps eps :weight-decay weight-decay}
            (assoc adam-ranges :weight-decay at-least-0)))
 
@@ -268,7 +282,8 @@
    :max-norm first: g·min(1, max-norm / ‖g‖), ‖g‖ the Euclidean norm of
    every gradient together (optax's clip_by_global_norm, PyTorch's
    clip_grad_norm_). Its state is optimizer's."
-  [optimizer {:keys [max-norm]}]
+  [optimizer {:keys [max-norm] :as opts}]
+  (options/check `clip-norm opts #{:max-norm})
   (checked "clip-norm" {:kind :clip-norm :max-norm max-norm :optimizer optimizer} {:max-norm above-0}))
 
 (defmethod -init :clip-norm [{:keys [optimizer]} store] (-init optimizer store))
@@ -330,7 +345,8 @@
    take :key."
   [gf store optimizer data-fn gradients-fn
    {:keys [epochs epoch-size batches-per-epoch batch-size evaluation-size callback state key]
-    :or {epochs 1 epoch-size 1 batches-per-epoch 1 batch-size 1}}]
+    :or {epochs 1 epoch-size 1 batches-per-epoch 1 batch-size 1} :as opts}]
+  (options/check `train opts #{:epochs :epoch-size :batches-per-epoch :batch-size :evaluation-size :callback :state :key})
   (let [evaluation-size (or evaluation-size epoch-size)]
     (check-sizes {:epochs epochs :epoch-size epoch-size :batches-per-epoch batches-per-epoch
                   :batch-size batch-size :evaluation-size evaluation-size})

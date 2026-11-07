@@ -7,13 +7,21 @@
    with a key it does not read, and its error names the function, that
    key and the keys it takes, which pins each function's options. Planted
    (2026-11-07): kernel/run's check removed, its row fails (run's own
-   :samples error is thrown instead), and so does the shared map's."
+   :samples error is thrown instead), and so does the shared map's.
+
+   genclj-yrb6 added the rest: enumerative's, gen.learning's (the
+   optimizers and train), the translators and involution, the diagnostics'
+   summary and choice-gradients. Planted (2026-11-07): adam's check
+   removed, its row and the follow-up's adam probe fail."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.batched :as b]
             [gen.choicemap :as cm]
             [gen.dist :as d]
             [gen.dynamic :refer [gen]]
             [gen.gfi :as gfi]
+            [gen.gradients :as grad]
+            [gen.inference.diagnostics :as diag]
+            [gen.inference.enumerative :as enum]
             [gen.inference.importance :as is]
             [gen.inference.kernel :as k]
             [gen.inference.mcmc :as mcmc]
@@ -46,6 +54,12 @@
 (def ^:private adapt-keys [:L :adapt-metric? :compile? :eps :gamma :init-buffer :inv-metric :jitter :kappa :kernel :key
                            :max-depth :t0 :target-accept :term-buffer :warmup :window])
 (def ^:private resample-keys [:key :method :n :priority])
+(def ^:private adam-keys [:beta1 :beta2 :eps :lr])
+(def ^:private translator-keys [:check? :new-observations :p-new :p-new-args :prev-observations :q-backward
+                                :q-backward-args :q-forward :q-forward-args :transform])
+
+(def copy-x (tf/transform [mi ai mo ao] (copy mi :x mo :x)))
+(def draws [[0.1 0.4 -0.3 0.2 0.9 -0.5] [0.0 0.3 0.6 -0.2 0.1 0.4]])
 
 (def entry-points
   "[f (fn [opts] a call of f with the options opts) the keys f takes]: every
@@ -89,7 +103,32 @@
    [`vi/black-box-vi #(vi/black-box-vi model [] observations family [] store (learn/sgd {:lr 0.01}) %)
     [:baseline :batched? :callback :estimator :iters :key :model-optimizer :model-state :model-store :samples :state]]
    [`vi/black-box-vimco #(vi/black-box-vimco model [] observations family [] store (learn/sgd {:lr 0.01}) %)
-    [:baseline :batched? :callback :estimates :iters :key :model-optimizer :model-state :model-store :samples :state]]])
+    [:baseline :batched? :callback :estimates :iters :key :model-optimizer :model-state :model-store :samples :state]]
+   [`enum/choice-vol-grid #(enum/choice-vol-grid [:x [0.0 1.0 2.0] :continuous] %) [:anchor]]
+   [`enum/enumerative-inference #(enum/enumerative-inference model [] observations (enum/choice-vol-grid [:x [0.0 1.0]]) %)
+    [:batched? :chunk-size :key]]
+   [`enum/with-exact-proposal #(enum/with-exact-proposal model [:x] %) [:batched? :check-retval? :max-assignments]]
+   [`learn/sgd #(learn/sgd (merge {:lr 0.01} %)) [:lr]]
+   [`learn/gradient-descent #(learn/gradient-descent (merge {:step-size-init 0.1 :step-size-beta 10} %))
+    [:step-size-beta :step-size-init]]
+   [`learn/momentum #(learn/momentum (merge {:lr 0.01} %)) [:lr :momentum :nesterov?]]
+   [`learn/rmsprop #(learn/rmsprop %) [:decay :eps :lr]]
+   [`learn/adagrad #(learn/adagrad %) [:eps :lr]]
+   [`learn/adam #(learn/adam %) adam-keys]
+   [`learn/adamw #(learn/adamw %) (conj adam-keys :weight-decay)]
+   [`learn/clip-norm #(learn/clip-norm (learn/sgd {:lr 0.01}) (merge {:max-norm 1.0} %)) [:max-norm]]
+   [`learn/train #(learn/train family store (learn/sgd {:lr 0.01}) (fn [_] [[] (cm/choicemap :x 0.5)]) grad/param-gradients %)
+    [:batch-size :batches-per-epoch :callback :epoch-size :epochs :evaluation-size :key :state]]
+   [`tf/translator #(tf/translator (merge {:p-new model :transform copy-x} %)) translator-keys]
+   [`tf/deterministic-translator #(tf/deterministic-translator (merge {:p-new model :transform copy-x} %))
+    (remove #{:q-backward :q-backward-args :q-forward :q-forward-args} translator-keys)]
+   [`tf/extending-translator #(tf/extending-translator (merge {:transform copy-x} %))
+    [:new-observations :p-argdiffs :p-new-args :q-forward :q-forward-args :transform]]
+   [`tf/updating-translator #(tf/updating-translator (merge {:transform copy-x} %))
+    (sort (conj (remove #{:p-new} translator-keys) :p-argdiffs))]
+   [`tf/involution #(tf/involution copy-x %) [:check? :proposal]]
+   [`diag/summary #(diag/summary draws %) [:probs]]
+   [`grad/choice-gradients #(grad/choice-gradients @start x-sel nil %) [:argnums]]])
 
 (deftest every-entry-point-refuses-a-key-it-does-not-read
   (doseq [[f call accepted] entry-points]
@@ -106,6 +145,27 @@
     (is (= [:burnin] (:unknown (ts/thrown-data (k/run (k/mh x-sel) @start {:samples 10 :burnin 50}))))))
   (testing "nuts' {:adapt-delta 0.95} kept 0.8"
     (is (= [:adapt-delta] (:unknown (ts/thrown-data (nuts/sample @start x-sel {:samples 10 :adapt-delta 0.95} (rng/key 4))))))))
+
+(deftest the-follow-ups-probes-are-loud
+  (testing "a misspelt key ran on the default, silently"
+    (is (= {:fn `learn/adam :unknown [:learning-rate]}
+           (select-keys (ts/thrown-data (learn/adam {:learning-rate 0.1})) [:fn :unknown]))
+        "adam ran at :lr 0.001")
+    (is (= [:batch?] (:unknown (ts/thrown-data (enum/enumerative-inference model [] observations (enum/choice-vol-grid [:x [0.0 1.0]])
+                                                                           {:batch? true}))))
+        "enumeration ran one point at a time")
+    (is (= [:quantiles] (:unknown (ts/thrown-data (diag/summary draws {:quantiles [0.25 0.75]}))))
+        "summary gave the 5%, 50% and 95% quantiles")
+    (is (= [:argnum] (:unknown (ts/thrown-data (grad/choice-gradients @start x-sel nil {:argnum [0]}))))
+        "choice-gradients differentiated no argument")
+    (is (= [:anchors] (:unknown (ts/thrown-data (enum/choice-vol-grid [:x [0.0 1.0]] {:anchors :left}))))
+        "the grid's points were the midpoints"))
+  (testing "a translator's map keeps to its translator's keys"
+    (is (= [:p-new] (:unknown (ts/thrown-data (tf/updating-translator {:p-new model :transform copy-x}))))
+        "an update keeps the trace's generative function")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no auxiliary choices"
+                          (tf/deterministic-translator {:p-new model :transform copy-x :q-forward proposal}))
+        "a deterministic translator's proposals keep their own error")))
 
 (deftest a-shared-options-map-is-refused
   (let [shared {:samples 5 :burn 2 :warmup 10 :key (rng/key 6)}

@@ -40,6 +40,7 @@
             [gen.batched :as batched]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
+            [gen.inference.options :as options]
             [gen.random :as rng]
             [gen.selection :as sel]))
 
@@ -132,10 +133,13 @@
    see the namespace doc).
    For a particle collection (gen.batched) in place of the trace, every
    particle's, each value an array with the leading particle axis, and
-   :fallback, why they ran one particle at a time, when they did."
+   :fallback, why they ran one particle at a time, when they did. An
+   option other than :argnums is a loud error (:unknown-options, the keys
+   taken in its data, :accepted)."
   ([trace selection] (choice-gradients trace selection nil nil))
   ([trace selection retgrad] (choice-gradients trace selection retgrad nil))
   ([trace selection retgrad {:keys [argnums] :as opts}]
+   (options/check `choice-gradients opts #{:argnums})
    (if (batched/particles? trace)
      (let [{r :result m :fallback} (batched/map-particles* trace (fn [t _] (choice-gradients t selection retgrad opts)) nil)]
        (cond-> r m (assoc :fallback m)))

@@ -4,7 +4,9 @@
    option ({:burnin 50} for :burn) cannot run with its default unnoticed.
    One map shared by functions that read different keys is refused too:
    give each its own keys, (select-keys opts ks), ks the keys the error
-   names as :accepted (DESIGN §9, genclj-vux3)."
+   names as :accepted (DESIGN §9, genclj-vux3). gen.learning and
+   gen.gradients, in inference's layer, check theirs here too
+   (genclj-yrb6)."
   {:api :internal}
   (:require [clojure.string :as str]))
 

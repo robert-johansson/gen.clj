@@ -45,7 +45,10 @@
    proposal) but not exact: it changes with the key. {:check-retval? true}
    makes that case an error.
 
-   Keys are an optional last argument (or :key in an options map)."
+   Keys are an optional last argument (or :key in an options map). Each
+   options map holds the keys its function reads and no others: an
+   unknown key is a loud error, its data naming the keys taken
+   (:accepted)."
   {:api :stable}
   (:refer-clojure :exclude [-])
   (:require [gen.array :as array :refer [-]]
@@ -54,6 +57,7 @@
             [gen.dist.core :as dc]
             [gen.dynamic :as dyn]
             [gen.gfi :as gfi]
+            [gen.inference.options :as options]
             [gen.inference.proposal :as proposal]
             [gen.inference.weights :as w]
             [gen.random :as rng]
@@ -119,9 +123,8 @@
    row-major order: the last spec varies fastest (Gen.jl's iterator varies
    the first fastest)."
   [& specs]
-  (let [[specs {:keys [anchor] :or {anchor :midpoint}}] (if (map? (last specs))
-                                                          [(butlast specs) (last specs)]
-                                                          [specs nil])
+  (let [[specs opts] (if (map? (last specs)) [(butlast specs) (last specs)] [specs nil])
+        {:keys [anchor] :or {anchor :midpoint}} (options/check `choice-vol-grid opts #{:anchor})
         addrs (map first specs)]
     (when-not (#{:left :right :midpoint} anchor)
       (throw (ex-info "choice-vol-grid: :anchor is :left, :right or :midpoint" {:anchor anchor})))
@@ -203,7 +206,8 @@
      observations give every choice; choices the grid leaves out are drawn
      with a key for each run."
   ([model args observations grid] (enumerative-inference model args observations grid nil))
-  ([model args observations grid {:keys [key batched? chunk-size]}]
+  ([model args observations grid {:keys [key batched? chunk-size] :as opts}]
+   (options/check `enumerative-inference opts #{:key :batched? :chunk-size})
    (let [points (vec grid)
          key (or key (gfi/next-key))]
      (check-points! points observations)
@@ -547,7 +551,8 @@
      same. Inside a batched run, and with :check-retval?, it enumerates one
      assignment at a time, as without the option."
   ([gf addrs] (with-exact-proposal gf addrs nil))
-  ([gf addrs {:keys [max-assignments check-retval? batched?] :or {max-assignments 100000}}]
+  ([gf addrs {:keys [max-assignments check-retval? batched?] :or {max-assignments 100000} :as opts}]
+   (options/check `with-exact-proposal opts #{:max-assignments :check-retval? :batched?})
    (when-not (dyn/dynamic-gf? gf)
      (throw (ex-info "with-exact-proposal needs a dynamic generative function" {:gen-fn (type gf)})))
    (when (empty? addrs)
