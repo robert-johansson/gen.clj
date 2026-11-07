@@ -285,6 +285,17 @@ other values for the same key, from the same distribution.
   the full computation's within round-off. Indices out of range are
   loud on the JVM backend and clamped on MLX; an unknown option is loud
   (`:unknown-options`).
+- **Added (experimental): Qwen3's training loss** (gen.llm.models.qwen3;
+  genclj-jksq): `log-probs`, each next token's log-probability [B T-1],
+  and `nll`, the negative log-likelihood of supervised fine-tuning
+  (`:mask` weights per position), both differentiable with respect to
+  the dense weights (a quantized matrix stays frozen), with
+  `:checkpoint?` (every block and output chunk checkpointed) and
+  `:chunk` (the output projection by vocabulary chunks). Their tape
+  gradients match central differences on the tiny model (4.4e-8
+  relative), the checkpointed ones are the plain ones exactly on the JVM
+  backend, and MLX's (native or tape, CUDA and CPU) are the JVM
+  backend's within 2.6e-7 of the largest gradient.
 
 ## [1.2.1] - 2026-11-06
 
