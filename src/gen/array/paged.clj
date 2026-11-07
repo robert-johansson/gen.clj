@@ -116,12 +116,36 @@
   [hk d f]
   (array/array [(vec (for [h (range hk)] (vec (for [i (range d)] (f h i)))))] {:dtype :int32}))
 
+(defn- fused-write
+  "paged-write's value by backend b's fused write (p/IFused), or nil where
+   b has none: then the composite runs."
+  [b args]
+  (when (instance? gen.array.protocols.IFused b)
+    (p/-fused b :paged-write args)))
+
+(defn- paged-write-composite
+  "paged-write as put-along-axis on the pools' elements: each position's
+   key and value element by element, at the flat index of its block,
+   head, value and offset."
+  [k-pool v-pool k v slots]
+  (let [[_ hk dx bs x] (array/shape k-pool)
+        hk (long hk) bs (long bs) x (long x)
+        d (c/* (long dx) x)
+        [blk off] (slot-parts slots bs)
+        block-size (c/* hk d bs)
+        ;; element (n, h, i) of the keys: [blk h i/x off i mod x]
+        k-idx (+ (+ (* blk block-size) (* off x))
+                 (per-head hk d (fn [h i] (c/+ (c/* (long h) d bs) (c/* (quot (long i) x) bs x) (rem (long i) x)))))
+        ;; of the values: [blk h i off]
+        v-idx (+ (+ (* blk block-size) off)
+                 (per-head hk d (fn [h i] (c/+ (c/* (long h) d bs) (c/* (long i) bs)))))]
+    [(flat-put k-pool k-idx k) (flat-put v-pool v-idx v)]))
+
 (defn paged-write
   "gen.array/paged-write's body."
   [k-pool v-pool k v slots]
   (let [op :paged-write
-        [nb hk d bs x] (check-pools op k-pool v-pool)
-        d (long d) bs (long bs) x (long x) hk (long hk)]
+        [nb hk d bs _] (check-pools op k-pool v-pool)]
     (check-ints op :slots slots)
     (let [n (first (array/shape slots))]
       (when-not (= 1 (count (array/shape slots)))
@@ -130,18 +154,11 @@
         (when-not (= [n hk d] (array/shape y))
           (throw (invalid op (str (name what) " must be [N Hk D] " [n hk d] " for " n " slots, not " (array/shape y))
                           {what (array/shape y) :expected [n hk d]}))))
-      (check-range op :slots slots 0 (c/* (long nb) bs) true)
+      (check-range op :slots slots 0 (c/* (long nb) (long bs)) true)
       (let [dt (array/dtype k-pool)
-            [blk off] (slot-parts slots bs)
-            block-size (c/* hk d bs)
-            ;; element (n, h, i) of the keys: [blk h i/x off i mod x]
-            k-idx (+ (+ (* blk block-size) (* off x))
-                     (per-head hk d (fn [h i] (c/+ (c/* (long h) d bs) (c/* (quot (long i) x) bs x) (rem (long i) x)))))
-            ;; of the values: [blk h i off]
-            v-idx (+ (+ (* blk block-size) off)
-                     (per-head hk d (fn [h i] (c/+ (c/* (long h) d bs) (c/* (long i) bs)))))]
-        [(flat-put k-pool k-idx (array/astype k dt))
-         (flat-put v-pool v-idx (array/astype v dt))]))))
+            args [k-pool v-pool (array/astype k dt) (array/astype v dt) slots]]
+        (or (fused-write (array/backend-of op args) args)
+            (apply paged-write-composite args))))))
 
 ;; ---------------------------------------------------------------------------
 ;; copy-blocks: blocks copied, for copy-on-write

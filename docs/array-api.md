@@ -211,7 +211,7 @@ needs, taken from GenMLX's measured call counts
 | quantized weights (experimental, 1.3.0) | `quantize` `dequantize` `quantized-matmul` `gather-qmm` | `IQuantized`'s `-quantized` with `:quantize :dequantize :quantized-matmul :gather-qmm` | — |
 | files (experimental, 1.3.0) | `load-gguf` | `ILoading`'s `-load-gguf`, per file of a model | — |
 | overwriting (experimental, 1.3.0) | `put-along-axis` | `IOverwriting`'s `-put-along-axis` | — |
-| paged KV caches (experimental, 1.3.0) | `paged-write` `copy-blocks` `paged-attention` | composites (`IFused`'s `:paged-attention`) | all three |
+| paged KV caches (experimental, 1.3.0) | `paged-write` `copy-blocks` `paged-attention` | composites (`IFused`'s `:paged-write`, `:paged-attention`) | all three |
 | host reads (experimental, 1.3.0) | `->floats` | `IHostFloats`'s `-to-floats` (else `-to-host`) | — |
 
 **Semantics at the edges** (1.2.1, from the health check of v1.2.0; DESIGN §9,
@@ -378,8 +378,9 @@ each capability is an optional protocol of its own:
   positions' keys and values at their slots (block·BS + offset);
   `copy-blocks` copies blocks (copy-on-write for forks); `paged-attention`
   attends one query a sequence over its first lens[b] positions. Each is
-  a composite: writes are put-along-axis on the pools' elements (on MLX a
-  scatter, in place under `compile`'s `:donate`), attention gathers each
+  a composite: writes are put-along-axis on the pools' elements (MLX
+  writes by two scatters on the block and offset axes, `IFused`'s
+  `:paged-write`, in place under `compile`'s `:donate`), attention gathers each
   sequence's blocks (take) and runs sdpa under a length mask; MLX's Metal
   runs kernels-community's paged_attention kernel (v1, through
   mlx_fast_metal_kernel; gen.backend.mlx.paged-attention), which reads

@@ -49,8 +49,9 @@ other values for the same key, from the same distribution.
     ops (put-along-axis, take, sdpa), its own reference; on MLX's Metal
     paged-attention runs kernels-community's paged_attention kernel (v1;
     ported per THIRD-PARTY-NOTICES, Apache-2.0, its text in
-    LICENSE-APACHE-2.0), and the writes are MLX's scatter, in place under
-    `array/compile`'s `:donate`. `p/IFused` gains `:paged-attention`.
+    LICENSE-APACHE-2.0), and the writes are MLX's scatter on the pools'
+    block and offset axes, in place under `array/compile`'s `:donate`.
+    `p/IFused` gains `:paged-write` and `:paged-attention`.
   - `gen.llm.paged`: a block allocator and block tables as values, forks
     sharing blocks and copying a shared partial block on write.
   - `gen.llm.models.qwen3`: `paged-pools`, `paged-step`,

@@ -26,6 +26,7 @@
   (:require [gen.array.shape :as sh]
             [gen.backend.mlx.array :refer [code device fence stream wrap wrap-all]]
             [gen.backend.mlx.gated-delta :as gated-delta]
+            [gen.backend.mlx.paged :as paged]
             [gen.backend.mlx.paged-attention :as paged-attention]
             [gen.backend.mlx.operands :refer [dtype-on operand scalar-handle shape-of with-operands with-temps]]
             [gen.backend.mlx.transforms :refer [*differentiating*]])
@@ -112,6 +113,7 @@
                      ;; gradients; Metal only (the GPU on macOS)
                      (when (and (not *differentiating*) (= :gpu (device b)) @mac? (gated-delta/applies? b q))
                        (gated-delta/gated-delta b q k v g beta state)))
+      :paged-write (let [[k-pool v-pool k v slots] args] (paged/paged-write b k-pool v-pool k v slots))
       :paged-attention (let [[q k-pool v-pool tables lens opts] args]
                          ;; kernels-community's paged_attention kernel:
                          ;; Metal only, no VJP (applies? declines both)

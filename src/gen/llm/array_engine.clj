@@ -462,7 +462,7 @@
              (let [{:keys [size] :as a} (:alloc @state)
                    ;; the most a reading of these could take: each a block
                    ;; copied and its new positions' blocks
-                   need (reduce c/+ (map #(c/+ 1 (paged/blocks-for (c/+ (rem (long (:len %)) bs) (long n)) bs)) seqs))
+                   need (long (reduce c/+ 0 (map #(c/+ 1 (paged/blocks-for (c/+ (rem (long (:len %)) bs) (long n)) bs)) seqs)))
                    to (max (c/* 2 (long size)) (c/+ (long size) need))
                    grown (call state :paged-pools model (c/- to (long size)) bs)
                    pools (mapv (fn [old new] {:k (array/concatenate [(:k old) (:k new)] 0)

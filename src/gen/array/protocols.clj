@@ -153,6 +153,9 @@
                                   [B Hq Tq Tk]
        :gated-delta [q k v g beta state opts]
                                   opts {:chunk-size}; the value [y state']
+       :paged-write [k-pool v-pool k v slots]
+                                  k and v of the pools' dtype; the value
+                                  [k-pool' v-pool']
        :paged-attention [q k-pool v-pool tables lens opts]
                                   opts {:scale}, a host number; q and the
                                   pools of one dtype; tables and lens int

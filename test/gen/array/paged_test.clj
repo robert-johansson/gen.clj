@@ -4,7 +4,9 @@
    test:
    1. paged-write puts every position of every sequence where its block
       table says: each sequence's keys and values, gathered back through
-      its table, are the dense ones written, exactly;
+      its table, are the dense ones written, exactly, by the composite
+      and by a backend's fused write (MLX's scatters,
+      gen.backend.mlx.paged);
    2. paged-attention is sdpa over each sequence's dense keys and values
       alone (array/sdpa, [1 Hq 1 D] over [1 Hk L D]), for lengths 0 to
       past several blocks, grouped heads, block sizes 8, 16 and 32;
@@ -17,7 +19,8 @@
    6. misuse is loud.
    Planted bugs fail them (with-redefs-fn), by more than 0.1 or loudly
    (measured on the JVM backend, 2026-11-07): a slot's block and offset
-   swapped (1: an index past the pool);
+   swapped (1: an index past the pool); on MLX the fused write given
+   the values as keys and the keys as values (1);
    a key's groups of x read in the other order (the D/x and x axes
    swapped in the layout, 1); the composite's mask one position short (2);
    on Metal the kernel given each sequence's length one short (4), which
@@ -122,13 +125,25 @@
                                                                  ;; (i/x, i mod x) as (i mod n, i/n)
                                                                  (+ (* (mod (long i) n) x) (quot (long i) n))))))))]})
 
+(def ^:private composite-only
+  "Redefinitions declining the backend's fused write and attention, so
+   that the composites run."
+  {#'paged/fused-write (fn [& _] nil) #'paged/fused-attention (fn [& _] nil)})
+
 (deftest paged-write-puts-every-position-where-its-table-says
   (doseq [c cases]
     (testing (pr-str (dissoc c :seed))
-      (is (== 0.0 (write-gap c)))))
+      (is (== 0.0 (write-gap c)) "the backend's write")
+      (is (== 0.0 (with-redefs-fn composite-only #(write-gap c))) "the composite")))
   (testing "planted bugs fail it"
     (doseq [[label [v wrap]] planted-write-bugs]
-      (is (< 0.1 (with-redefs-fn {v (wrap @v)} #(failing (fn [] (write-gap (first cases)))))) label))))
+      (is (< 0.1 (with-redefs-fn (assoc composite-only v (wrap @v)) #(failing (fn [] (write-gap (first cases)))))) label))
+    (when (= :mlx (ts/backend-name))
+      (let [fused @(requiring-resolve 'gen.backend.mlx.paged/paged-write)]
+        (is (< 0.1 (with-redefs-fn {(requiring-resolve 'gen.backend.mlx.paged/paged-write)
+                                    (fn [b kp vp k v slots] (fused b kp vp v k slots))}
+                     #(failing (fn [] (write-gap (first cases))))))
+            "the fused write given the values as keys and the keys as values")))))
 
 ;; ---------------------------------------------------------------------------
 ;; 2. paged-attention, the composite on every backend
@@ -261,8 +276,8 @@
     (is (= :invalid-args (reason #(array/paged-write vp kp k k slots))) "pools swapped")
     (is (= :invalid-args (reason #(array/paged-write kp vp (array/reshape k [2 32]) k slots))) "keys of another shape")
     (is (= :invalid-args (reason #(array/paged-write kp vp k k (array/array [1.0 2.0])))) "float slots")
-    (is (= :invalid-args (reason #(array/paged-write kp (array/astype vp :float64) k k slots))) "pools of two dtypes")
-    (is (= :invalid-args (reason #(array/paged-attention (array/astype q :float64) kp vp tables lens))) "q of another dtype")
+    (is (= :invalid-args (reason #(array/paged-write kp (array/astype vp (if (ts/jvm?) :float64 :float16)) k k slots))) "pools of two dtypes")
+    (is (= :invalid-args (reason #(array/paged-attention (array/astype q (if (ts/jvm?) :float64 :float16)) kp vp tables lens))) "q of another dtype")
     (is (= :invalid-args (reason #(array/paged-attention (normal 2 [2 3 16] :float32) kp vp tables lens))) "heads not a multiple")
     (is (= :invalid-args (reason #(array/paged-attention q kp vp (array/array [[0 1]] {:dtype :int32}) lens))) "a table short")
     (is (= :unknown-options (reason #(array/paged-attention q kp vp tables lens {:scales 1.0}))))

@@ -1463,10 +1463,11 @@
    pools' dtype. Slots are checked (in [0, NB·BS), distinct) where their
    values can be read without forcing a computation (array/concrete?);
    on a lazy backend an out-of-range slot is unspecified. A composite of
-   put-along-axis on the pools' elements: on MLX a scatter, which writes
-   a pool in place when nothing else holds it (array/compile's :donate),
-   and copies it otherwise. Experimental: outside the 1.x promise (DESIGN
-   §9)."
+   put-along-axis on the pools' elements, its reference; MLX writes by two
+   scatters on the pools' block and offset axes (p/IFused's :paged-write,
+   gen.backend.mlx.paged), which write a pool in place when nothing else
+   holds it (array/compile's :donate) and copy it otherwise. Experimental:
+   outside the 1.x promise (DESIGN §9)."
   [k-pool v-pool k v slots]
   ((:paged-write @paged) k-pool v-pool k v slots))
 
