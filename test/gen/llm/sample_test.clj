@@ -53,6 +53,38 @@
             (is (<= (Math/abs (- f p)) band)
                 (str "temperature " temp ", token " t ": frequency " f ", tempered " p ", band " band))))))))
 
+(deftest pick-draws-from-the-whole-distribution
+  ;; a :top-k of nil (gen.llm.grpo's policy sampling): every token, at
+  ;; temperatures 1 and 0.5, each token's frequency over 20,000 uniforms
+  ;; within 5 standard errors of p(t)^(1/T) / Σ p^(1/T). Planted
+  ;; (2026-11-07): the temperature dropped fails at 0.5; the inverse CDF
+  ;; read one token late fails at both.
+  (let [ps [0.4 0.0 0.3 0.1 0.15 0.05]
+        lp (float-array (map #(Math/log %) ps))
+        n 20000
+        us (array/->clj (rng/uniform (rng/key 13) [n] {:backend jvm :dtype :float64}))]
+    (doseq [temp [1.0 0.5]]
+      (let [ws (map #(Math/pow % (/ 1.0 temp)) ps)
+            tempered (mapv #(/ % (reduce + ws)) ws)
+            counts (frequencies (map #(sample/pick lp {:temp temp :top-k nil :top-p 1.0} (double %)) us))]
+        (is (zero? (get counts 1 0)) "a token of probability 0 is never drawn")
+        (doseq [t (range (count ps))]
+          (let [p (double (tempered t))
+                f (/ (double (get counts t 0)) n)
+                band (* 5 (Math/sqrt (/ (* p (- 1.0 p)) n)))]
+            (is (<= (Math/abs (- f p)) band)
+                (str "temperature " temp ", token " t ": frequency " f ", tempered " p ", band " band))))))
+    (is (= 5 (sample/pick lp {:temp 1.0 :top-k nil :top-p 1.0} 0.9999999)) "the last token with mass at the end")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"top-p of 1" (sample/pick lp {:temp 1.0 :top-k nil :top-p 0.9} 0.5))
+        "every token takes no nucleus")))
+
+(deftest tempered-is-the-tempered-log-probability
+  (let [ps [0.5 0.3 0.2]
+        lp (float-array (map #(Math/log %) ps))
+        z (reduce + (map #(Math/pow % 2.0) ps))]
+    (is (= (double (aget lp 1)) (sample/tempered lp 1.0 1)))
+    (is (< (Math/abs (- (sample/tempered lp 0.5 1) (Math/log (/ (Math/pow 0.3 2.0) z)))) 1e-6))))
+
 (deftest complete-in-lockstep
   (with-lm {:max-branches 8}
     (fn [m]
@@ -69,7 +101,20 @@
         (testing "each completion's log-probability is the LM's score of its tokens (and its end token)"
           (doseq [[ctx c] (map vector ctxs r)]
             (let [scored (into (:tokens c) (when (= :end (:stop c)) [(:end-token c)]))]
-              (is (< (Math/abs (- (:logprob c) (reduce + (lm/score m ctx scored)))) 1e-9)))))))))
+              (is (< (Math/abs (- (:logprob c) (reduce + (lm/score m ctx scored)))) 1e-9)))))
+        (testing "each token's log-probability at the sampling temperature, the end token's last"
+          (doseq [temp [1.0 0.7]]
+            (let [opts (assoc opts :token-logprobs? true :sampling {:temp temp :top-k 50 :top-p 0.95})
+                  r' (sample/complete m ctxs opts)]
+              (is (= (map :tokens r') (map :tokens (sample/complete m ctxs (dissoc opts :token-logprobs?))))
+                  "the same draws")
+              (doseq [[ctx c] (map vector ctxs r')]
+                (let [scored (into (:tokens c) (when (= :end (:stop c)) [(:end-token c)]))
+                      want (map-indexed (fn [k t] (sample/tempered (lm/next-logprobs m (into ctx (subvec scored 0 k))) temp t))
+                                        scored)]
+                  (is (= (count scored) (count (:token-logprobs c))))
+                  (is (every? #(< (Math/abs (double %)) 1e-9) (map - want (:token-logprobs c)))
+                      (str "temperature " temp)))))))))))
 
 (deftest end-tokens-end-a-completion
   (with-lm {:max-branches 8}

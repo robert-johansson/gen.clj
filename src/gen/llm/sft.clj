@@ -50,7 +50,10 @@
    optimizer is any of gen.learning's (adamw, under clip-norm, clip-value
    and warmup-cosine), stepped along the negated mean gradient (gen.learning
    ascends). A loss or gradient that is not finite is a loud error
-   (:non-finite), the trainer not stepped: never a silent skip.
+   (:non-finite), the trainer not stepped: never a silent skip. step's
+   :loss puts another summed loss in the NLL's place, over batches of
+   its own with their :count: gen.llm.grpo's policy-gradient losses run
+   on this machinery.
 
    Keys are values: step n of a trainer draws its adapter's dropout from
    (fold-in k n), [k k'] = (split (:key trainer)), a key per microbatch
@@ -349,26 +352,48 @@
   (array/sqrt (reduce + (map #(array/sum (* % %)) (array/tree-leaves g)))))
 
 (defn- summed-loss
-  "[the summed NLL of batch b's trained tokens under m adapted by adapter
-   (its dropout from key k), its gradient with respect to the adapter's
-   params]."
-  [m adapter b k loss-opts]
-  (let [loss (fn [params] (models/nll (lora/adapt m (assoc adapter :params params) {:key k}) (:tokens b)
-                                      (assoc loss-opts :mask (:mask b))))]
-    ((array/value-and-grad loss) (:params adapter))))
+  "[the summed loss of batch b under m adapted by adapter (its dropout
+   from key k), its gradient with respect to the adapter's params, the
+   values the loss reported (nil for none)]: the loss :loss's (step's
+   option) of the adapted model, b and the other loss options, else the
+   summed NLL of b's trained tokens. A :loss's reported array x of b's
+   :mask's shape comes back through a term Σ z·stop-gradient(x) at z = 0,
+   differentiated with respect to z (its gradient is x, its value 0), so
+   neither the loss nor its gradient changes."
+  [m adapter b k {:keys [loss] :as loss-opts}]
+  (let [loss-opts (dissoc loss-opts :loss)
+        adapted (fn [params] (lora/adapt m (assoc adapter :params params) {:key k}))]
+    (if-not loss
+      (let [nll (fn [params] (models/nll (adapted params) (:tokens b) (assoc loss-opts :mask (:mask b))))]
+        (conj ((array/value-and-grad nll) (:params adapter)) nil))
+      (let [reported? (volatile! false)
+            f (fn [params z]
+                (let [out (loss (adapted params) b loss-opts)
+                      [l x] (if (vector? out) out [out nil])]
+                  (if (some? x)
+                    (do (when-not (= (array/shape x) (array/shape z))
+                          (throw (invalid (str "a :loss reports an array of the batch's :mask's shape " (array/shape z)
+                                               ", not " (array/shape x))
+                                          {:shapes [(array/shape x) (array/shape z)]})))
+                        (vreset! reported? true)
+                        (+ l (array/sum (* z (array/stop-gradient x)))))
+                    l)))
+            [l [g x]] ((array/value-and-grad f {:argnums [0 1]}) (:params adapter) (array/zeros-like (:mask b)))]
+        [l g (when @reported? x)]))))
 
 (defn- accumulated
-  "[the summed NLL, its gradient, the trained tokens] of batches together,
-   batch i's dropout from (keys i): each batch's added to the sums and
-   evaluated before the next, so a step holds one batch's graph at a
-   time."
+  "[the summed loss, its gradient, the batches' counts (their :count
+   summed: sft's trained tokens), what the loss reported, by batch] of
+   batches together, batch i's dropout from (keys i): each batch's added
+   to the sums and evaluated before the next, so a step holds one batch's
+   graph at a time."
   [m adapter batches keys loss-opts]
-  (reduce (fn [[total grads n-tokens] [b k]]
-            (let [[l g] (summed-loss m adapter b k loss-opts)
+  (reduce (fn [[total grads n-tokens reported] [b k]]
+            (let [[l g x] (summed-loss m adapter b k loss-opts)
                   acc [(if total (+ total l) l) (if grads (learn/update-given + grads g) g)]]
-              (array/eval! acc)
-              (conj acc (c/+ (long n-tokens) (long (:count b))))))
-          [nil nil 0]
+              (array/eval! (cond-> acc x (conj x)))
+              (conj acc (c/+ (long n-tokens) (long (:count b))) (conj reported x))))
+          [nil nil 0 []]
           (map vector batches keys)))
 
 (defn step
@@ -381,18 +406,31 @@
    mean gradient's Euclidean norm, before the optimizer clips it)}, host
    numbers. Loud (:non-finite) when the loss or a gradient is not
    finite, the trainer unstepped. Options: nll's :checkpoint? (true) and
-   :chunk."
+   :chunk, and
+     :loss  another loss in place of the NLL (policy gradients:
+            gen.llm.grpo): (fn [m' b opts]) of the adapted model m' (its
+            dropout drawn), a batch b (any map with :mask, an array of
+            its per-target shape, and :count, its share of the divisor)
+            and the options (:checkpoint? :chunk), returning b's summed
+            loss, a 0-d array differentiable with respect to the
+            adapter, or [loss x], x an array of :mask's shape whose
+            values (its gradient stopped) come back in info's :reported,
+            one per batch (nil where a loss reported none). The step
+            divides the batches' summed losses by their :count summed
+            (info's :tokens)."
   ([m trainer batches] (step m trainer batches nil))
   ([m trainer batches opts]
-   (options/check `step opts #{:checkpoint? :chunk})
+   (options/check `step opts #{:checkpoint? :chunk :loss})
    (check-trainer trainer)
+   (when-not (or (nil? (:loss opts)) (ifn? (:loss opts)))
+     (throw (invalid (str ":loss is a function of the adapted model, a batch and the options, not " (pr-str (:loss opts))))))
    (let [batches (if (map? batches) [batches] (vec batches))
          _ (when (empty? batches) (throw (invalid "step takes at least one batch")))
          {:keys [adapter optimizer optimizer-state] n :step} trainer
          [k-steps] (step-keys trainer)
          keys (rng/split (rng/fold-in k-steps n) (count batches))
          loss-opts (merge loss-defaults opts)
-         [total grads n-tokens] (accumulated m adapter batches keys loss-opts)
+         [total grads n-tokens reported] (accumulated m adapter batches keys loss-opts)
          ;; the mean over every trained token of the step: 1/N once
          loss (/ total (double n-tokens))
          grads (array/tree-map #(/ % (double n-tokens)) grads)
@@ -404,7 +442,8 @@
                        {:reason :non-finite :step n :loss loss-v :grad-norm norm-v})))
      (let [[params state] (learn/step optimizer optimizer-state (:params adapter) (array/tree-map array/negate grads))]
        [(assoc trainer :adapter (assoc adapter :params params) :optimizer-state state :step (inc n))
-        {:step n :loss loss-v :tokens n-tokens :grad-norm norm-v}]))))
+        (cond-> {:step n :loss loss-v :tokens n-tokens :grad-norm norm-v}
+          (:loss opts) (assoc :reported (vec reported)))]))))
 
 ;; ---------------------------------------------------------------------------
 ;; Checkpoints
@@ -475,10 +514,12 @@
        (sort-by peek)
        (mapv first)))
 
-(defn- order
-  "The examples (of n) that step s takes, size of them: positions s·size
-   on of the epochs' orders laid end to end, epoch e's a permutation from
-   (fold-in k-order e)."
+(defn order
+  "The indices of the examples (of n) that step s takes, size of them:
+   positions s·size on of the epochs' orders laid end to end, epoch e's a
+   uniform permutation of 0 … n-1 from (fold-in k-order e). So each
+   epoch takes every example once, and a step is a function of the key
+   and s alone (train's order; gen.llm.grpo's prompts)."
   [k-order n s size]
   (let [start (c/* (long s) (long size))
         end (c/+ start (long size))
