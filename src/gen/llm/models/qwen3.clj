@@ -74,6 +74,17 @@
   ([message] (invalid message {}))
   ([message data] (ex-info (str "qwen3: " message) (merge {:reason :invalid-args} data))))
 
+(defn- check-options
+  "opts (a map or nil) holding only the keys accepted: else loud, as
+   gen.clj's inference refuses options it does not read."
+  [f opts accepted]
+  (when-not (or (nil? opts) (map? opts))
+    (throw (ex-info (str "qwen3/" (name f) ": options must be a map, not " (pr-str opts))
+                    {:reason :invalid-options :fn f})))
+  (when-let [unknown (seq (remove accepted (keys opts)))]
+    (throw (ex-info (str "qwen3/" (name f) ": unknown options " (vec unknown) "; it takes " (vec (sort accepted)))
+                    {:reason :unknown-options :fn f :unknown (vec unknown) :accepted accepted}))))
+
 (defn config
   "Qwen3's architecture from a GGUF's metadata (gen.array/load-gguf's
    :metadata), llama.cpp's keys: {:hidden :layers :heads :kv-heads
@@ -152,20 +163,21 @@
    (:invalid-args), and when the file holds one it does not read
    (:unsupported)."
   ([gguf] (model gguf nil))
-  ([{:keys [metadata tensors]} {:keys [dtype]}]
+  ([{:keys [metadata tensors]} {:keys [dtype] :as opts}]
+   (check-options :model opts #{:dtype})
    (let [cfg (config metadata)
          {:keys [hidden layers heads kv-heads head-dim ffn]} cfg
          dtype (or dtype (:float (array/defaults array/*backend*)))
          _ (when-not (#{:float16 :bfloat16 :float32 :float64} dtype)
              (throw (invalid (str ":dtype must be a float dtype, not " (pr-str dtype)) {:dtype dtype})))
-         read (atom #{})
+         seen (atom #{})
          tensor (fn [name shape]
                   (let [w (or (get tensors name)
                               (throw (invalid (str "the file has no tensor " name) {:tensor name})))
                         s (weight-shape w)]
                     (when (and shape (not= shape s))
                       (throw (invalid (str "tensor " name " has shape " s ", not " shape) {:tensor name :shape s :expected shape})))
-                    (swap! read conj name)
+                    (swap! seen conj name)
                     (cast-weight w dtype)))
          embed (tensor "token_embd.weight" nil)
          vocab (first (weight-shape embed))
@@ -187,7 +199,7 @@
                                   :gate (t "ffn_gate" [ffn hidden])
                                   :up (t "ffn_up" [ffn hidden])
                                   :down (t "ffn_down" [hidden ffn])}))}
-         unread (sort (remove @read (keys tensors)))]
+         unread (sort (remove @seen (keys tensors)))]
      (when (seq unread)
        (throw (unsupported (str "the file holds tensors Qwen3's forward does not read: " (str/join ", " (take 8 unread))
                                 (when (c/> (count unread) 8) ", …"))
@@ -276,7 +288,8 @@
 (defn- run
   "[logits cache'] of tokens after cache (nil for none); :logits :all or
    :last."
-  [{:keys [config weights]} cache tokens {:keys [logits] :or {logits :all}}]
+  [{:keys [config weights]} cache tokens {:keys [logits] :or {logits :all} :as opts}]
+  (check-options (if cache :step :prefill) opts #{:logits})
   (let [{:keys [layers vocab eps dtype]} config
         _ (when-not (#{:all :last} logits)
             (throw (invalid (str ":logits must be :all or :last, not " (pr-str logits)) {:logits logits})))

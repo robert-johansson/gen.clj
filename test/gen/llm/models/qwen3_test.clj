@@ -261,5 +261,7 @@
     (is (= :invalid-args (reason #(qwen3/forward m [[]]))))
     (is (= :invalid-args (reason #(qwen3/forward m [1 2]))) "a row, not rows")
     (is (= :invalid-args (reason #(qwen3/prefill m [[1 2]] {:logits :first}))))
+    (is (= :unknown-options (reason #(qwen3/prefill m [[1 2]] {:last? true}))))
+    (is (= :unknown-options (reason #(qwen3/model (array/load-gguf "test/fixtures/gguf/qwen3-tiny-q8_0.gguf") {:dtpye :float32}))))
     (is (= :invalid-args (reason #(qwen3/step m (second (qwen3/prefill m [[1 2]])) [[3] [4]]))) "a cache of other rows")
     (is (= [2 3 128] (array/shape (qwen3/forward m (array/array [[1 2 3] [4 5 6]] {:dtype :int32})))) "an int array")))

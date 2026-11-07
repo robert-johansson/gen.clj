@@ -17,7 +17,7 @@
   {:api :internal}
   (:require [clojure.string :as str]
             [gen.array.gguf :as gguf]
-            [gen.backend.mlx.array :refer [code stream wrap]]
+            [gen.backend.mlx.array :refer [code fence stream wrap]]
             [gen.backend.mlx.operands :refer [operand scalar-handle with-temps]])
   (:import [gen.mlx Mlx]))
 
@@ -39,6 +39,7 @@
                              :q4_1 (Mlx/mlx_astype (tmp (Mlx/mlx_io_gguf_get_array g (str base ".biases"))) f32 s)
                              :q8_0 (Mlx/mlx_multiply hs (tmp (scalar-handle -128.0 :float32)) s)
                              :q4_0 (Mlx/mlx_multiply hs (tmp (scalar-handle -8.0 :float32)) s)))]
+        (fence scales)
         [wq scales biases]))))
 
 (defn- check-metadata
