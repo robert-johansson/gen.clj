@@ -47,7 +47,11 @@
    - in the forward: s = alpha (not alpha / rank) 10.0 (gguf-py's
      adapter) and 16.9 (ours); the product transposed on the square
      projections 10.7 and 3.57.
-   Not yet run on Metal, whose band (0.075) is the base model's there."
+   On Metal (Mac mini M4, 2026-11-07, against llama.cpp v0.9.0's Metal
+   build; the tape), within its band (0.075): gguf-py's adapter 0.0113;
+   ours at scale 1 and 0.5, 0.00984 and 0.00993; on k and v 0.00452;
+   trained 0.00636 (the loss 188.2 → 21.4, as on fenrir); the planted
+   errors by 3.07 to 16.8 nats, or refused."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is use-fixtures]]
             [gen.array :as array]

@@ -32,8 +32,27 @@
    skipped with a note otherwise, and for another architecture.
 
    The band: qwen35-llama-test's, per platform (0.035 on Metal, 0.65
-   elsewhere); the opt-in models' 0.05. Measured: the namespace's comment
-   blocks at each deftest."
+   elsewhere); the opt-in models' 0.05. Measured on Metal (Mac mini M4,
+   2026-11-07, Qwen3.5-0.8B-Q8_0, llama.cpp v0.9.0's Metal build), the
+   adapter's size (its largest |Δ log p| from the base, our forward) and
+   the largest |Δ log p| against llama.cpp:
+   - ours on every target, at scale 1 and 0.5: 1.87 and 0.97 nats;
+     0.0039 and 0.0038;
+   - the planted errors' (k, v, beta, alpha, gate, up): 7.7 nats; 0.0013;
+   - trained (3): 10.2 nats; 0.0046 (the tape), 0.0053 (native
+     gradients);
+   - the tiny MoE (4), every qwen35moe target: 10.4 nats; 0.015 (F32),
+     0.025 (Q8_0).
+   The planted errors, against mutation-nats (1.3):
+   - refused by llama.cpp: A and B swapped; the layers off by one (a
+     GatedDeltaNet layer's names on an attention layer);
+   - silent in llama.cpp's checks: ssm_beta's and ssm_alpha's names
+     swapped 2.84; attn_k's and attn_v's 1.73; ffn_gate's and ffn_up's
+     6.22; alpha written as alpha / rank 3.31;
+   - in the forward: s = alpha (not alpha / rank) 17.6; beta's and alpha's
+     adapters on each other's weights 2.45;
+   - the tiny MoE: the shared expert's gate and up names swapped 3.8 and
+     4.0, the routed experts' 7.4 and 7.5."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is use-fixtures]]
             [gen.array :as array]
@@ -155,14 +174,14 @@
                   (array/item (array/max (array/abs (array/- (lp m) (lp m')))))))))
 
 (defn- drawn-b
-  "adapter with each B drawn N(0, sd²) from key: an adapter that changes
-   the model."
+  "adapter with each B drawn N(0, sd²) from key (sd a number, or a
+   function of the target): an adapter that changes the model."
   [adapter sd key]
   (update adapter :params
           (fn [params]
             (into {} (for [[i ts] params]
                        [i (into {} (for [[t {:keys [a b]}] ts]
-                                     [t {:a a :b (array/* sd (rng/normal (rng/fold-in (rng/fold-in key i) (Math/floorMod (long (hash t)) 65536))
+                                     [t {:a a :b (array/* (if (number? sd) sd (sd t)) (rng/normal (rng/fold-in (rng/fold-in key i) (Math/floorMod (long (hash t)) 65536))
                                                                         (array/shape b)))}]))])))))
 
 (defn- layers-of
@@ -184,8 +203,7 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest our-adapter-reads-in-llama-cpp-as-in-the-forward
-  ;; every qwen35 target: measured on Metal (Mac mini M4, 2026-11-07,
-  ;; Qwen3.5-0.8B-Q8_0, llama.cpp v0.9.0): the printed line
+  ;; every qwen35 target: measured on Metal, the namespace's docstring
   (when-qwen35
     (let [[lm m] (setup)
           ad (ours m (vec (keys (lora/targets "qwen35"))) 0.01)
@@ -242,10 +260,12 @@
   ;; on projections of equal shapes (k and v, beta and alpha, gate and
   ;; up), where llama.cpp's shape checks pass a misnamed adapter; one
   ;; prompt, read whole, as a chunk and one step. Measured on Metal: the
-  ;; printed lines
+  ;; namespace's docstring
   (when-qwen35
     (let [[lm m] (setup)
-          ad (ours m [:k :v :beta :alpha :gate :up] 0.05)
+          ;; ssm_beta's and ssm_alpha's 16 outputs (a head's write strength
+          ;; and decay) move the model less for the same B: ten times the sd
+          ad (ours m [:k :v :beta :alpha :gate :up] #(if (#{:beta :alpha} %) 0.5 0.05))
           prompt [(second prompts)]
           clean (comparisons lm (lora/adapt m ad) (lora/save-gguf ad (temp-path "clean.gguf")) 1.0 prompt 1)
           _ (println (format "lora-qwen35-llama: the planted errors' adapter moves log p by %.3g nats; against llama.cpp at most %.3g"
@@ -275,8 +295,9 @@
   ;; rank 8 on every target of the last 8 layers (6 GatedDeltaNet, 2
   ;; attention), AdamW at 1e-3 clipped to norm 1, 5 steps on one text,
   ;; checkpointed: each step lowers the loss; the trained adapter, saved,
-  ;; reads in llama.cpp as in the forward. Measured on Metal: the printed
-  ;; line
+  ;; reads in llama.cpp as in the forward. Measured on Metal (37 tokens,
+  ;; the tape and native gradients alike): the summed nll 162.4 → 99.9 →
+  ;; 35.9 → 13.7 → 5.1 → 1.0
   (when-qwen35
     (let [[lm m] (setup)
           tokens (with-open [^java.io.Closeable e ((llama 'engine) {:model lm :max-branches 2 :n-ctx 512})]
@@ -321,7 +342,8 @@
 
 (deftest the-moe-s-adapter-reads-in-llama-cpp-as-in-the-forward
   ;; opt-in, as qwen35-llama-test's tiny models with a vocabulary (they
-  ;; are generated, not committed). Measured on Metal: the printed lines
+  ;; are generated, not committed). Measured on Metal: the namespace's
+  ;; docstring
   (if (nil? vocab-models)
     (println "gen.llm.lora-qwen35-llama-test: the MoE's adapter is checked given -J-Dgen.qwen35.vocab-models=<dir>")
     (ts/when-native :llama vocab-models?

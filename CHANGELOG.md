@@ -87,13 +87,29 @@ other values for the same key, from the same distribution.
   - `lora/adapt` refuses an adapter of another architecture than the
     model's (`:invalid-args`), as llama.cpp does; `init`, `adapt`,
     `save-gguf` and `load-gguf` refuse an architecture LoRA does not know
-    (`:unsupported`); `merge` reaches the shared expert's nested weights.
+    (`:unsupported`); `merge` reaches the MoE's nested weights (a stack
+    per expert).
   - `qwen35/log-probs` and `qwen35/nll`, with `:mask`, `:checkpoint?`
     and `:chunk`, as Qwen3's: their gradients go through gated-delta's
     composite (MLX's Metal kernel has no VJP, and is not used under
     gradients).
   - gen.llm.models.common's `linear` (and so every qwen35 projection)
-    takes an adapted weight.
+    takes an adapted weight. The MoE's routing indices carry no gradient
+    (`stop-gradient`), which MLX's native gradients need.
+  - Checked: the tape's gradients against central differences on the
+    tiny models (2.5e-7 relative; 5.8e-7 over 70 tokens, the chunked
+    rule), MLX's (tape and native, Metal) against the JVM's within
+    1.8e-5 of the largest; on Qwen3.5-0.8B-Q8_0 (Metal), an adapter on
+    every target agrees with llama.cpp's reading of its file within
+    0.0039 nats (moving log p by 1.9), the tiny MoE's routed and shared
+    experts within 0.025; planted convention errors (A and B swapped, the
+    layers off by one, names swapped, alpha/rank, the scale alpha) are
+    refused or off by 1.7 to 17.6 nats; five AdamW steps on 37 tokens
+    take the NLL from 162.4 to 1.0, and llama.cpp serves the trained
+    adapter within 0.0053.
+  - The rule's gradient through the composite costs a fifth to a quarter
+    of a training step on Metal at 256 to 1024 tokens
+    (bench/gen/gated_delta_bench.clj).
 - **Added (experimental): supervised fine-tuning, `gen.llm.sft`**
   (genclj-stpo): a LoRA adapter trained on chat examples.
   - `(sft/example tokenizer ex opts)` tokenizes `{:messages [...]}` or

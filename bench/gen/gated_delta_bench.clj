@@ -21,7 +21,17 @@
      training step (its forward, recompute and backward in every
      GatedDeltaNet layer).
    Times are the median of gen.bench.runs (5) evaluations, after two
-   untimed ones; ms."
+   untimed ones; ms.
+
+   Measured on Metal (Mac mini M4, 2026-11-07, Qwen3.5-0.8B-Q8_0), the
+   tape | native gradients:
+     T     kernel  composite  its gradient      step   w/o rule  rule's share
+     256     2.4      13.2     37.2 | 13.1    1849 | 1535   1448 | 1279   22% | 17%
+     512     2.2      10.2     39.8 | 22.0    3572 | 3243   2749 | 2489   23% | 23%
+     1024    3.7      11.4    140.9 | 50.1    7762 | 6446   5773 | 5094   26% | 21%
+   The rule's gradient is 6 to 38 times the kernel's forward, and a
+   fifth to a quarter of a training step: a custom VJP (a backward kernel
+   for the chunked form) would save at most that."
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.llm.lora :as lora]

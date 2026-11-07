@@ -481,13 +481,15 @@
 (defn- top-k
   "[indices values] of the k largest entries of p [N E] along its last
    axis, largest first: [N k] each, the indices int32 (the first of equal
-   entries first, as argmax)."
+   entries first, as argmax). The indices carry no gradient
+   (stop-gradient: MLX's native gradients refuse a gather's VJP with
+   respect to its indices), the values p's."
   [p k]
   (let [ids (array/arange 0 (peek (array/shape p)) 1 {:dtype :int32})]
     (loop [p p i 0 idx [] vals []]
       (if (c/== i (long k))
         [(array/concatenate idx -1) (array/concatenate vals -1)]
-        (let [j (array/expand-dims (array/astype (array/argmax p {:axis -1}) :int32) -1)]
+        (let [j (array/stop-gradient (array/expand-dims (array/astype (array/argmax p {:axis -1}) :int32) -1))]
           (recur (array/where (array/== ids j) Double/NEGATIVE_INFINITY p)
                  (inc i)
                  (conj idx j)

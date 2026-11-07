@@ -44,7 +44,16 @@
    dropped (lora/delta-gathered): each-target-changes-the-model and 6
    (7); each token's experts' adapters read from the next expert's: 6
    (4: the merged stack, B_e·A_e per expert, differs); the experts' gate
-   and up paths swapped: 2 (8)."
+   and up paths swapped: 2 (8). On MLX's native gradients the MoE's
+   routing indices, unstopped (qwen35's top-k without stop-gradient),
+   fail 3, 4 and 5 loudly (MLX refuses a gather's VJP with respect to its
+   indices).
+
+   The bands on MLX: four times the largest gap measured on Metal (Mac
+   mini M4, 2026-11-07, tape and native gradients; each band's
+   docstring). They are ten times lora-test's (Qwen3's tiny model,
+   measured on fenrir's CUDA): the gated delta rule's recurrence and the
+   tiny random models' larger gradients carry float32's round-off further."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
             [gen.array.gguf :as gguf]
@@ -298,9 +307,12 @@
 (def ^:private plain-band
   "Checkpointed against plain: on the JVM backend the same ops in the
    same order, exactly (chunks apart: their logsumexps sum in another
-   order, round-off). On MLX, lora-test's band (float32's round-off
-   relative to the largest gradient)."
-  (if (ts/jvm?) {:checkpoint 0.0 :chunk 1e-14} {:checkpoint 1.7e-6 :chunk 1.7e-6}))
+   order, round-off). On MLX, float32's round-off relative to the largest
+   gradient: four times the largest gap measured on Metal (2026-11-07),
+   1.34e-5 (the MoE's Q8_0 under dropout, the tape, chunked; under native
+   gradients checkpointing is exact on the dense models, 1.5e-8 on the
+   MoE, chunks 8.0e-7)."
+  (if (ts/jvm?) {:checkpoint 0.0 :chunk 1e-14} {:checkpoint 5.5e-5 :chunk 5.5e-5}))
 
 (defn- gap
   "The largest |Δ| between two results' values and gradients, relative to
@@ -317,8 +329,13 @@
           :let [ad (changed k {:dropout p})
                 plain (value-and-grads k ad nil key)]]
     (testing [k p]
-      (is (<= (gap (value-and-grads k ad {:checkpoint? true} key) plain) (:checkpoint plain-band)) "checkpointed")
-      (is (<= (gap (value-and-grads k ad training key) plain) (:chunk plain-band)) "checkpointed and chunked"))))
+      (let [checkpointed (gap (value-and-grads k ad {:checkpoint? true} key) plain)
+            chunked (gap (value-and-grads k ad training key) plain)]
+        (when-not (ts/jvm?)
+          (println (format "lora-qwen35: checkpointed against plain, %s p %s%s: %.3g, chunked %.3g"
+                           (name k) p (if (ts/native-grad?) " native" "") checkpointed chunked)))
+        (is (<= checkpointed (:checkpoint plain-band)) "checkpointed")
+        (is (<= chunked (:chunk plain-band)) "checkpointed and chunked")))))
 
 ;; ---------------------------------------------------------------------------
 ;; 4. MLX against the JVM backend's tape
@@ -326,9 +343,12 @@
 
 (def ^:private mlx-band
   "MLX's gradients against the JVM backend's float64 tape, relative to
-   the largest gradient: lora-test's band (float32's round-off), checked
-   against the gaps measured here (the deftest's comment)."
-  1.5e-6)
+   the largest gradient: float32's round-off through the tiny models'
+   four blocks (the gated delta rule's among them), four times the
+   largest gap measured on Metal (2026-11-07), 1.83e-5 (Q8_0, 70 tokens,
+   native gradients; the tape's largest 1.61e-5, the MoE's F32 on 9
+   tokens)."
+  7.5e-5)
 
 (deftest mlx-gradients-are-the-tape-s
   ;; without dropout: its masks are drawn from uniforms of the backend's
@@ -379,7 +399,9 @@
   ;; measured 2026-11-07 (the JVM backend), the summed nll over 13
   ;; targets: F32 68.6 → 54.7 → 48.1 → 40.5 → 34.1 → 29.3; Q8_0 68.2 →
   ;; 32.3; the MoE's (its routed experts adapted too) F32 78.4 → 29.2,
-  ;; Q8_0 78.0 → 29.4
+  ;; Q8_0 78.0 → 29.4. On Metal (tape and native alike) F32 68.6 → 31.4,
+  ;; Q8_0 68.2 → 33.5, the MoE's 78.4 → 31.9 and 78.0 → 28.7: float32's
+  ;; uniforms draw other dropout masks
   (doseq [k (keys files)]
     (let [ls (losses k 5 -1.0)]
       (println (format "lora-qwen35: %s nll %s" (name k) (pr-str (mapv #(Math/round (* 10.0 (double %))) ls))))
@@ -402,8 +424,9 @@
 
 (def ^:private merge-band
   "|Δ log p| between the merged and the adapted forwards: float64's
-   round-off on the JVM backend; float32's on MLX, lora-test's band."
-  (if (ts/jvm?) 1e-12 1.6e-5))
+   round-off on the JVM backend; float32's on MLX, four times the largest
+   measured on Metal (2026-11-07), 1.96e-5 (Q8_0 at scale 1)."
+  (if (ts/jvm?) 1e-12 8e-5))
 
 (deftest merging-gives-the-adapted-values
   (doseq [[k m] @models
@@ -411,7 +434,9 @@
           :let [ad (with-b (adapter k) 0.3 (rng/key 3))
                 merged (lora/merge m ad {:scale scale})]]
     (testing [k scale]
-      (is (<= (max-abs (qwen35/log-probs merged tokens) (qwen35/log-probs (lora/adapt m ad {:scale scale}) tokens)) merge-band))
+      (let [d (max-abs (qwen35/log-probs merged tokens) (qwen35/log-probs (lora/adapt m ad {:scale scale}) tokens))]
+        (when-not (ts/jvm?) (println (format "lora-qwen35: merged against adapted, %s scale %s: %.3g" (name k) scale d)))
+        (is (<= d merge-band)))
       (is (< 0.1 (max-abs (qwen35/log-probs merged tokens) (qwen35/log-probs m tokens))) "the merged model is not the base")
       (doseq [[i ts] (:params ad)
               [t {:keys [a b]}] ts
