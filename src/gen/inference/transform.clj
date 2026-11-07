@@ -77,6 +77,7 @@
             [gen.diff :as diff]
             [gen.gfi :as gfi]
             [gen.gradients :as grad]
+            [gen.inference.options :as options]
             [gen.random :as rng]
             [gen.selection :as sel]))
 
@@ -391,8 +392,7 @@
    value for retval (a trace's model-in has its own)."
   ([t model-in aux-in] (run t model-in aux-in nil))
   ([t model-in aux-in {:keys [retained aux-retval] :as opts}]
-   (when-let [unknown (seq (remove #{:retained :aux-retval} (keys opts)))]
-     (throw (ex-info (str "tf/run takes :retained and :aux-retval, not " (vec unknown)) {:options (vec unknown)})))
+   (options/check `run opts #{:retained :aux-retval})
    (when-not (or (nil? retained) (sel/selection? retained))
      (throw (ex-info (str "tf/run: :retained is a selection of model-in addresses (gen.selection/select), not "
                           (pr-str retained))

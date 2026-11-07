@@ -38,6 +38,37 @@ other values for the same key, from the same distribution.
 
 ## [Unreleased]
 
+### Changes
+
+- **Breaking: the inference functions refuse an option key they do not
+  read** (gen.inference.mcmc, .nuts, .kernel, .particle-filter,
+  .importance, .vi, .mh; genclj-vux3; DESIGN §9, 1.2.1's owner calls,
+  item 6). They ignored it and ran on their defaults, silently:
+  `(mcmc/hmc t s {:steps 50 :epsilon 0.3})` ran at :L 10 and :eps 0.1,
+  `kernel/run`'s `{:burnin 50}` burned nothing, `nuts/sample`'s
+  `{:adapt-delta 0.95}` kept 0.8. Each now throws an `ex-info`,
+  `:reason :unknown-options`, its data naming the function (`:fn`), the
+  keys refused (`:unknown`) and the keys it takes (`:accepted`), and an
+  options map that is not a map (`:invalid-options`). The functions:
+  mcmc's hmc, mala, nuts, map-optimize and their -particles forms;
+  kernel's kernel, hmc, mala, nuts and map-optimize (when the kernel is
+  made) and run; nuts' adapt and sample; mh's move; importance's
+  importance-sampling, importance-resampling, estimate and
+  weighted-sample; the particle filter's initialize, step, resample,
+  resize, maybe-resample, replicate, dereplicate, coalesce, introduce and
+  reweighting; vi's black-box-vi, black-box-vimco, elbo-gradient and
+  vimco-gradient. kernel/kernel and tf/run refused unknown keys already,
+  and now say so in the same form (tf/run's data was `{:options …}`).
+  This breaks correct code that shares one options map between functions
+  that read different keys: `nuts/adapt` refuses sample's `:samples` and
+  `:keep`, `kernel/run` refuses nuts' `:warmup`, `pf/step` refuses
+  initialize's `:batched?`, `pf/resample` maybe-resample's
+  `:ess-threshold`. Give each function its own keys,
+  `(select-keys opts (:accepted (ex-data e)))`. A qualified key is refused
+  as any other. The API snapshot records `:as opts` added to the
+  arglists of weighted-sample, resample, replicate, dereplicate, coalesce
+  and vimco-gradient (their arities are unchanged).
+
 ## [1.2.1] - 2026-11-06
 
 The health check's fixes (DESIGN §9; genclj-9mq3). A review of 1.2.0 by

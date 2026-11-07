@@ -24,6 +24,7 @@
             [gen.choicemap :as cm]
             [gen.diff :as diff]
             [gen.gfi :as gfi]
+            [gen.inference.options :as options]
             [gen.random :as rng]
             [gen.selection :as sel]))
 
@@ -131,11 +132,13 @@
    gfi/impossible?: the update stopped at a choice there, so trace' holds
    the choices up to it) has w -Inf, its backward choices unassessed. A
    proposal that gives u' density 0 at a possible trace' cannot reverse
-   its own move: a loud error (gfi/assess-backward)."
+   its own move: a loud error (gfi/assess-backward), and so is another
+   option."
   ;; the options' keys are named for the arglists: weighed-move reads them
   [trace proposal proposal-args #_{:clj-kondo/ignore [:unused-binding]} {:keys [involution backward backward-args fwd-choices] :as opts}
    k-propose k-update]
-  (update (weighed-move trace proposal proposal-args (select-keys opts [:involution :backward :backward-args :fwd-choices])
+  (update (weighed-move trace proposal proposal-args
+                        (options/check `move opts #{:involution :backward :backward-args :fwd-choices})
                         k-propose k-update)
           :log-alpha #(double (array/item %))))
 

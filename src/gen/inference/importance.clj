@@ -33,13 +33,16 @@
    (DESIGN.md §9, the ten decisions' ninth).
 
    The options map also takes :key; omitting it draws one from the implicit
-   key source."
+   key source. It holds the keys its function reads and no others: an
+   unknown key is a loud error, its data naming the keys taken
+   (:accepted)."
   {:api :stable}
   (:refer-clojure :exclude [-])
   (:require [gen.array :as array :refer [-]]
             [gen.batched :as batched]
             [gen.choicemap :as cm]
             [gen.gfi :as gfi]
+            [gen.inference.options :as options]
             [gen.inference.weights :as w]
             [gen.random :as rng]))
 
@@ -63,12 +66,16 @@
   (binding [batched/*required* (= :required (:batched? opts))]
     (batched/generate model args observations n key)))
 
+(def ^:private proposal-keys #{:proposal :proposal-args})
+
 (defn weighted-sample
   "One trace of model on args with its log importance weight ({:trace
    :weight}): generated with the observations, and with the choices of
    :proposal on :proposal-args, less their log density, when given. A
-   proposal's choice at an observed address is a loud error."
-  [model args observations {:keys [proposal proposal-args]} key]
+   proposal's choice at an observed address is a loud error, and so is
+   another option."
+  [model args observations {:keys [proposal proposal-args] :as opts} key]
+  (options/check `weighted-sample opts proposal-keys)
   (if proposal
     (let [[k-propose k-generate] (rng/split key)
           {:keys [choices weight]} (gfi/propose proposal (vec proposal-args) k-propose)
@@ -85,7 +92,7 @@
   "weighted-sample, evaluated (one particle's graph at a time on a lazy
    backend), its weight a host double."
   [model args observations opts key]
-  (let [{t :trace wt :weight} (weighted-sample model args observations opts key)]
+  (let [{t :trace wt :weight} (weighted-sample model args observations (select-keys opts proposal-keys) key)]
     (gfi/eval-trace! t wt)
     {:trace t :weight (double (array/item wt))}))
 
@@ -112,6 +119,7 @@
    run, which :batched? :required refuses as without :device."
   ([model args observations n] (importance-sampling model args observations n {}))
   ([model args observations n opts]
+   (options/check `importance-sampling opts #{:proposal :proposal-args :batched? :key :device :float})
    (let [key (or (:key opts) (gfi/next-key))
          batched? (batched-run? "importance-sampling" opts)
          unbatched #(let [results (mapv (fn [k] (sample-at model args observations opts k)) (rng/split key n))]
@@ -145,6 +153,7 @@
    samples run as one batched execution and one is drawn from them."
   ([model args observations n] (importance-resampling model args observations n {}))
   ([model args observations n opts]
+   (options/check `importance-resampling opts #{:proposal :proposal-args :batched? :key})
    (let [[k-samples k-resample] (rng/split (or (:key opts) (gfi/next-key)))]
      (if (batched-run? "importance-resampling" opts)
        (let [{:keys [particles log-normalized-weights log-ml-estimate fallback]}
@@ -177,6 +186,7 @@
    (DESIGN.md §9): it counts nothing."
   ([f model args observations n] (estimate f model args observations n {}))
   ([f model args observations n opts]
+   (options/check `estimate opts #{:proposal :proposal-args :batched? :key})
    (let [key (or (:key opts) (gfi/next-key))
          ;; (f (trace)) of a sample of log weight lw
          value (fn [trace lw] (if (gfi/impossible? lw) 0.0 (double (f (trace)))))
