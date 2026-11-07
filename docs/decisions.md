@@ -4553,3 +4553,32 @@ resampling varies the batch; paged attention would remove that copy.
 
 Not yet run on Metal. It was checked on fenrir's CUDA and CPU, native and
 tape.
+
+### 1.3.0's scope narrowed
+
+(owner, 2026-11-07 evening; genclj-lv7t, genclj-k3b1; supersedes the scope in
+"mlx-node parity, on mlx-c and our own C++")
+
+The owner, on the list of what 1.3.0 would still lack after the autonomous
+run: "only paged attention and continuous batching (our C++) is important
+for us at this stage - the rest could be kept in beans for later todos".
+
+**In 1.3.0:**
+- the foundation (gen.array's LLM operations);
+- weights and quantization;
+- the Qwen3 and Qwen3.5/3.6 families;
+- the engine, with paged attention and continuous batching through our C++
+  library;
+- training: LoRA, SFT, GRPO.
+
+**Moved out of 1.3.0**, kept as beans under genclj-k3b1 ("mlx-node parity:
+the rest", no version yet):
+- the families Gemma4, LFM2, Nemotron, Qwen3.8-Flash-Next and DeepSeek
+  V4.1;
+- the modalities: vision, OCR, speech, embeddings and reranking, the privacy
+  filter;
+- the server and the CLI.
+
+**The autonomous run's order changes.** Paged attention and continuous
+batching (genclj-9a1l, genclj-1daf, genclj-b3ow) move ahead of the
+remaining weight formats.
