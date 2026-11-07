@@ -4384,3 +4384,44 @@ implementing agent, PROVISIONAL with the rest:*
 |---|---:|---:|
 | put-along-axis | 79-80 | 461-469 |
 | scatter-add | 78-80 | 460-465 |
+
+### The CUDA checkpoint's result: keep going (the owner's call)
+
+(the lead's recommendation, 2026-11-07, for the owner to decide;
+genclj-ssiv; "1.3.0: an early CUDA checkpoint" and "The CUDA checkpoint
+decides on compiled steps")
+
+**The measurement.** On fenrir's RTX PRO 6000: Qwen3 on MLX's CUDA backend,
+compiled with donation, against llama.cpp v0.9.0 on the same Q8_0 GGUFs,
+float16, tokens/s.
+
+| | MLX | llama.cpp via gen.clj | llama-bench |
+|---|---:|---:|---:|
+| 8B decode, batch 1, evaluated every 16 steps (graphs on) | 183 | 139 | 168 |
+| 0.6B decode, batch 1, evaluated every 16 steps | 408 | 405 | 888 |
+| 0.6B decode, 64 rows (graphs on) | 4122 | 2697 | |
+| 8B decode, 64 rows (graphs on) | 1741 | 2178 | |
+| 8B decode, 16 rows (graphs on) | 696 | 1147 | |
+| 0.6B prefill 512 (one chunk, graphs on) | 51.9k | 52.4k | 62.8k |
+| 8B prefill 512 (one chunk, graphs on) | 8.9k | 15.5k | 15.5k |
+
+**What the checkpoint found and fixed.**
+- **Batched decode:** MLX 0.32.4's CUDA quantized matmul ran a decode step's
+  [B 1 K] as B one-row products. Leading axes now go through as one matrix
+  (qmm-rows), which made batched decode 3-7x faster.
+- **Host-bound at batch 1:** batch-1 decode is host-bound (the GPU is busy
+  1.6-2.0 of 4.9 ms per step), so the engine's evaluation boundaries matter
+  (genclj-8rnc).
+- **The band:** llama.cpp's x86/CUDA Q8_0 path differs from MLX's forward by
+  up to 0.32 nats; MLX's own forward is device-independent. The band against
+  llama.cpp is per platform.
+
+**The lead's recommendation: keep MLX on NVIDIA.**
+- It matches or beats llama.cpp at batch 1, and at 64 rows on the small
+  model.
+- The 8B's remaining 1.3-1.8x at 16-64 rows and its prefill are speed work
+  (fused kernels, prefill chunking), not a reason to switch.
+- llama.cpp stays the reference engine and serves where it is faster.
+
+Not taken, still open: serve NVIDIA from llama.cpp only; train on Metal
+only; XLA through PJRT.
