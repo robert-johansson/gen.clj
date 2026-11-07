@@ -149,6 +149,7 @@
               eval-key (rng/key 99)
               before (with-open [e (ae/engine {:model m :max-branches (+ (* 16 samples) 24) :n-ctx 512})]
                        {:sampled (pass-rates e tok held samples eval-key) :greedy (pass-rates e tok held 1 eval-key)})
+              _ ((requiring-resolve 'gen.backend.mlx/collect!))
               _ (clojure.lang.Reflector/invokeStaticMethod "gen.mlx.Mlx" "mlx_reset_peak_memory" (object-array 0))
               t0 (System/nanoTime)
               {:keys [trainer history]}
@@ -164,9 +165,13 @@
                                                                          (format "kl %.2e" kl)])
                                                                       iterations))
                                                         (:rollouts seconds) (:train seconds)))
-                                       (let [{:keys [active peak limit]} ((requiring-resolve 'gen.backend.mlx/memory))]
-                                         (println (format "grpo-llama: MLX memory active %.2f GB, the round's peak %.2f GB, limit %.2f GB"
-                                                          (/ active 1e9) (/ peak 1e9) (/ limit 1e9)))
+                                       ;; the arrays the next round starts with (the
+                                       ;; previous rounds' garbage collected), and this
+                                       ;; round's peak (from the last such point)
+                                       (let [{:keys [peak limit]} ((requiring-resolve 'gen.backend.mlx/memory))
+                                             {:keys [active]} ((requiring-resolve 'gen.backend.mlx/collect!))]
+                                         (println (format "grpo-llama: MLX memory, the round's peak %.2f GB; held after it %.2f GB; limit %.2f GB"
+                                                          (/ peak 1e9) (/ active 1e9) (/ limit 1e9)))
                                          (clojure.lang.Reflector/invokeStaticMethod "gen.mlx.Mlx" "mlx_reset_peak_memory" (object-array 0)))
                                        (flush))})
               minutes (/ (- (System/nanoTime) t0) 6e10)
