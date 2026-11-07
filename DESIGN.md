@@ -771,6 +771,10 @@ decision is appended there, and this summary changes with it.
 - GPU kernels are ported from where they originated, with attribution and
   their license kept; launches, engines and primitives are ours; each kernel
   is checked against its composite. [decided](docs/decisions.md#130s-kernels-ported-from-their-origins-everything-around-them-ours)
+- The MLX engine: GGUF weights through MLX's loader (Q8_0 scales float32),
+  llama.cpp's vocabulary, gen.array's LLM operations (rms-norm, rope, sdpa;
+  quantized-matmul, dequantize, gather-qmm), a Slots engine, MLX's native
+  gradients with the tape as reference. [decided](docs/decisions.md#130s-engine-design-the-seven-recommendations-approved)
 
 ### Tests, laws and the book
 

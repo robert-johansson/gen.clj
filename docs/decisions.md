@@ -4017,3 +4017,57 @@ The MSA's search over synthesized programs needs all three.
 
 These stay gated on best-of-K's results at matched compute, as the kmet plan
 already gates them.
+
+### 1.3.0: an early CUDA checkpoint
+
+(owner, 2026-11-07; genclj-ssiv)
+
+**What.** As soon as Qwen3 runs on MLX, its decode on fenrir through MLX's
+CUDA backend is measured against llama.cpp on the same GGUF. Four
+measurements:
+- prefill and decode speed at batch 1;
+- decode at batches up to 64;
+- the cost of a training step;
+- the kernel count per decode step.
+
+**Why.** MLX on CUDA is young. Used op by op, it ran MCMC 200-500x slower than
+GenJAX (docs/research/device-programs.md §1), and an LLM's decode step is
+hundreds of small ops as well.
+
+**The decision it feeds**, recorded here before the engine's speed work
+continues on CUDA:
+- keep going, if MLX on CUDA is close enough;
+- otherwise serve NVIDIA from llama.cpp only, train on Metal, or look at XLA
+  through PJRT for NVIDIA.
+
+### 1.3.0's engine design: the seven recommendations approved
+
+(owner, 2026-11-07; genclj-j2nb)
+
+The owner answered "yes to all four" to the lead's questions before an
+autonomous run. The first question was whether llm-mlx-engine.md's seven
+recommendations stand.
+
+1. **Weights** come from GGUF files through MLX's loader. The Q8_0 scales and
+   biases are cast to float32 at load: exact, for about 11% more weight memory.
+2. **The tokenizer.** Families with a GGUF use llama.cpp's vocabulary, loaded
+   vocab_only. Checkpoints without a GGUF get a tokenizer.json reader
+   (genclj-44hz).
+3. **gen.array gains these operations** (an array-API change; docs/array-api.md
+   §6):
+   - rms-norm, rope and sdpa, as composites, with MLX's fast ops as native
+     ops;
+   - quantized-matmul, dequantize and gather-qmm, as primitives.
+4. **The engine** is a Slots implementation under gen.llm's protocols.
+5. **Caches** concatenate first. Static capacity with an explicit release
+   follows after measurement, and paged blocks come in 1.3.0's own C++.
+6. **Lockstep particles** use lane groups. Logits stay on the device; the
+   protocols are unchanged.
+7. **Gradients:** MLX's native mode for training, with the tape as the
+   reference. Quantized weights stay frozen, with LoRA beside them.
+
+**Also granted.** The owner's other three answers:
+- mlx-lm and mlx-node may be installed on this Mac outside the repo, as
+  references;
+- memo.clj's session may be asked to repoint its fenrir scripts;
+- main may be pushed once the Qwen3 check against llama.cpp passes.
