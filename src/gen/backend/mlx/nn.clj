@@ -6,7 +6,10 @@
 
    The fast kernels take float32 and the half floats. float64 (the CPU
    device's 64-bit dtypes) is declined: MLX's fallbacks compute rms_norm
-   and rope's angles in float32, where the composite is exact. Under
+   and rope's angles in float32, where the composite is exact. So is rope
+   of 2 axes (MLX's wants 3 or more), and attention under a causal mask
+   with more queries than keys (MLX's fallback averages the values for
+   the queries that see none, where the composite gives zeros). Under
    MLX's native gradients a kernel is used where MLX's VJP agrees with the
    composite's gradient (gen.array.nn-test checks them): rope with :freqs
    is declined there, as MLX has no VJP with respect to them, and sdpa,

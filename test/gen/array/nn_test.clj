@@ -622,3 +622,13 @@
       (let [q (normal 110 [1 2 tq 64]) k (normal 111 [1 2 16 64]) v (normal 112 [1 2 16 64])
             out (array/sdpa q k v {:mask (array/slice mask 0 0 tq)})]
         (is (array/equal? (array/slice out 2 0 1) (array/zeros [1 2 1 64])) (str tq " queries"))))))
+
+(deftest compiled-layers-are-the-layers
+  ;; array/compile traces the fused kernels (MLX) as any op: the same values
+  (let [x (normal 64 [1 4 3 64]) k (normal 65 [1 2 5 64]) v (normal 66 [1 2 5 64]) w (normal 67 [64])
+        opts {:group-size 64 :bits 4}
+        [wq s b] (quantized 68 [64 64] opts)
+        f (fn [x k v w wq s b]
+            (array/quantized-matmul (array/sdpa (array/rope (array/rms-norm x w 1e-5) 64 {:offset 3}) k v {:mask :causal})
+                                    wq s b opts))]
+    (is (ts/close? ((array/compile f) x k v w wq s b) (f x k v w wq s b) {:rtol 1e-4 :atol 1e-5}))))
