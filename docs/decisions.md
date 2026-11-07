@@ -4339,3 +4339,28 @@ primitives, against 1,268 eager.
    - each compiled call costs 1.4-2.5 ms of host time (the engine's
      follow-up, genclj-8rnc);
    - llama-bench belongs in native/build-llama.sh as a tools target.
+
+### KV writes overwrite: gen.array/put-along-axis
+
+(PROVISIONAL, the lead, 2026-11-07, after a side agent's note; supersedes
+item 1 of "Qwen3's static caches and compiled steps"; genclj-8rnc)
+
+**The hazard.** The static cache wrote K/V with scatter-add into slots
+assumed to hold zeros. That holds only while a cache moves forward. A
+cleared slot whose buffers are reused, an offset moved back, or a
+speculative rollback would leave old values, and the next write would add
+onto them silently (rule 6).
+
+**The call.** gen.array gains an experimental put-along-axis: an overwrite,
+the counterpart of take-along-axis, as scatter-add is its transpose. It goes
+through a new optional protocol (the 1.x rule), with MLX's
+mlx_put_along_axis. The static cache writes with it and drops the zero-slot
+invariant.
+- A test reuses a cache after a rewind, and fails with the old write.
+- Decode speed is re-measured against the scatter-add numbers.
+
+**Not taken.**
+- Zeroing slots on every rewind or clear: a second pass, and every rewind
+  path must remember to do it.
+- Keeping scatter-add and refusing rewinds: speculative decoding and slot
+  reuse need them.
