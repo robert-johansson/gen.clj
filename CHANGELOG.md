@@ -40,6 +40,17 @@ other values for the same key, from the same distribution.
 
 ### Changes
 
+- **Fixed: `gen.llm.trie/insert` loops down a path** (gen.llm.trie,
+  experimental; genclj-gn5i). insert recursed once for each node on the
+  path it walked, so a trie with an entry at each of a few thousand
+  prefixes of one context overflowed the stack, a StackOverflowError (at
+  ~2,770 nodes on a 1 MB thread stack, fenrir's default). It now walks
+  down in a loop and rebuilds the path back up in another, as
+  remove-entry, entries and size already did (genclj-6h3b); its results
+  and its `:entry-exists` error are unchanged. A node stands only at an
+  entry or where paths part, so a long context alone never recursed
+  deeply, and gen.llm.cache's trie, at most :max-branches entries, passes
+  fewer than twice that many nodes on a path.
 - **Added (experimental): `array/compile`'s `:donate`** (genclj-tjvd):
   `(array/compile f {:donate #{0}})` names arguments the compiled function
   consumes, after JAX's donate_argnums. On MLX their arrays are released
