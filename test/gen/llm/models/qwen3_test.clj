@@ -89,7 +89,7 @@
 
 (deftest the-config-is-the-gguf-s
   (let [{:keys [f32 q8_0]} @models]
-    (is (= {:hidden 64 :layers 3 :heads 4 :kv-heads 2 :head-dim 16 :ffn 128 :eps (double (float 1e-6))
+    (is (= {:architecture "qwen3" :hidden 64 :layers 3 :heads 4 :kv-heads 2 :head-dim 16 :ffn 128 :eps (double (float 1e-6))
             :rope-base 10000.0 :context 256 :vocab 128 :dtype (ts/float-dtype)}
            (:config f32) (:config q8_0)))
     (is (map? (get-in q8_0 [:weights :layers 0 :q])) "Q8_0's matrices stay quantized")

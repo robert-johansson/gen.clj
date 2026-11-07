@@ -398,8 +398,9 @@
    gen.array's *backend* (as it is when engine is called). opts (any other
    is an error):
      :model         a Qwen3 GGUF file, which the engine loads
-                    (gen.llm.models.qwen3/load), or a model loaded already
-                    (required)
+                    (gen.llm.models.qwen3/load), or a model loaded already,
+                    a LoRA adapter's among them (gen.llm.lora/adapt; its
+                    dropout off, without a :key) (required)
      :dtype         with a file: the float dtype it computes in (default
                     the backend's default float); its KV caches hold it too
      :max-branches  live branches at most (default 32): memory is the

@@ -22,6 +22,7 @@
             [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
+            [gen.array.gguf :as gguf]
             [gen.test-support :as ts])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
@@ -169,3 +170,52 @@
           (is (every? true? (map (fn [wr dr sr] (every? true? (map #(<= (Math/abs (- %1 %2)) %3) wr dr sr))) w d bound))
               name))
         (is (= (host (f32 name)) (host t)) name)))))
+
+;; ---------------------------------------------------------------------------
+;; Writing (gen.array.gguf/write-gguf, for gen.llm.lora's adapters)
+;; ---------------------------------------------------------------------------
+
+(deftest the-writer-writes-what-the-reader-reads
+  ;; every metadata value type, read back as written (types.gguf's values;
+  ;; float64 through the host reader only, as MLX's loader misreads it),
+  ;; and F32 tensors of 1 to 4 axes loaded as written. That the bytes are
+  ;; gguf-py's own is gen.llm.lora-test's: an adapter gguf-py wrote is
+  ;; written again byte for byte. Planted (2026-11-07): the dimensions not
+  ;; reversed, a tensor's data not padded to 32 bytes: each fails here.
+  (let [d (temp-dir)
+        metadata [["general.architecture" :string "test"]
+                  ["test.u8" :uint8 200] ["test.i8" :int8 -100] ["test.u16" :uint16 60000] ["test.i16" :int16 -30000]
+                  ["test.u32" :uint32 4000000000] ["test.i32" :int32 -2000000000] ["test.f32" :float32 0.1]
+                  ["test.bool" :bool true] ["test.string" :string "Stockholm är Sveriges huvudstad"]
+                  ["test.u64" :uint64 (+ 9223372036854775807N 6)] ["test.i64" :int64 -4611686018427387904]
+                  ["test.ints" [:array :int32] [1 -2 3]] ["test.strings" [:array :string] ["a" "" "ö"]]]
+        tensors [{:name "t.vector" :type :f32 :shape [5] :data (float-array [1 2 3 4 5])}
+                 {:name "t.matrix.weight" :type :f32 :shape [3 2] :data (float-array [0.5 -1 2 -0.25 3 1e-3])}
+                 {:name "t.cube" :type :f32 :shape [2 1 3] :data (float-array (range 6))}
+                 {:name "t.four" :type :f32 :shape [1 2 1 2] :data (float-array [7 8 9 10])}]
+        f (str d "/w.gguf")
+        g (str d "/f64.gguf")]
+    (is (= f (gguf/write-gguf f {:metadata metadata :tensors tensors})))
+    (let [{md :metadata ts :tensors types :types} (array/load-gguf f)
+          header (gguf/header f)]
+      (is (= (into {} (map (fn [[k t v]] [k (if (= :float32 t) (double (float v)) v)])) metadata) md))
+      (is (= (into {} (map (fn [[k t]] [k t])) metadata) (:value-types header)))
+      (is (= (mapv :name tensors) (mapv :name (:tensors header))) "in their order")
+      (is (every? #(zero? (rem (long (:offset %)) 32)) (:tensors header)) "aligned")
+      (is (= (zipmap (map :name tensors) (repeat :f32)) types))
+      (doseq [{:keys [name shape data]} tensors]
+        (is (= shape (array/shape (ts name))) name)
+        (is (= (mapv double data) (mapv double (array/->floats (ts name)))) name)))
+    (gguf/write-gguf g {:metadata (conj metadata ["test.f64" :float64 0.1]) :tensors []})
+    (is (= 0.1 (get-in (gguf/header g) [:metadata "test.f64"])))
+    (testing "loud"
+      (let [reason (fn [spec] (:reason (thrown #(gguf/write-gguf (str d "/x.gguf") spec))))]
+        (is (= :invalid-args (reason {:metadata [["k" :uint8 256]]})) "a value past its type")
+        (is (= :invalid-args (reason {:metadata [["k" :int32 1.5]]})))
+        (is (= :invalid-args (reason {:metadata [["k" :string 1]]})))
+        (is (= :invalid-args (reason {:metadata [["k" :float16 1.0]]})) "no such value type")
+        (is (= :invalid-args (reason {:metadata [["k" :string "a"] ["k" :string "b"]]})) "a key twice")
+        (is (= :invalid-args (reason {:tensors [(first tensors) (first tensors)]})) "a tensor twice")
+        (is (= :invalid-args (reason {:tensors [(assoc (first tensors) :shape [4])]})) "data of another size")
+        (is (= :unsupported (reason {:tensors [(assoc (first tensors) :type :f16)]})))
+        (is (not (.exists (io/file d "x.gguf"))) "nothing written")))))
