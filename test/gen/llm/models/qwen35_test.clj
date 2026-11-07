@@ -46,7 +46,8 @@
    cache dropped 1.2, the recurrent state dropped 3.8, the conv state's
    oldest inputs 5.5, not causal 0.32 (1); a long read's triangular
    inverse dropped 2.8 (1); the norm across rows 5.1 (2); gradients'
-   relative errors measured ≤ 1.7e-8 (3)."
+   relative errors measured ≤ 1.7e-8 (3); the temperature ignored 1.9
+   (6)."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
             [gen.array.nn]
