@@ -122,6 +122,23 @@ other values for the same key, from the same distribution.
   entry or where paths part, so a long context alone never recursed
   deeply, and gen.llm.cache's trie, at most :max-branches entries, passes
   fewer than twice that many nodes on a path.
+- **Fixed: a batched particle outside its support moves as its scalar
+  trace does** (gen.batched; genclj-n1s3). A batched run cannot stop where
+  a particle's choice leaves its support, so the particle's batched trace
+  holds the choices the run made after that one, which its scalar trace
+  (`b/traces`) stops short of. `update`, `regenerate` and `move` kept
+  those choices' values and weighed them (an update discarded them too),
+  and `project` counted them, where the particle's scalar operation makes
+  them afresh: a particle moved back inside its support (its choice that
+  left it regenerated) left its scalar trace, its weight log p(c |
+  new)/p(c | old) for such a choice c where the scalar law gives 0. Such
+  a particle (score -Inf, on a concrete backend) now runs its scalar
+  operation alone, the result set in its row, and the collection stays
+  batched. **Draws:** those particles draw from their own keys (the key
+  split n ways, as the fallback's). A lazy backend's (MLX's) scalar runs
+  go on as batched ones do, so nothing changes there. Since 2026-10-25 (a
+  choice outside its support stops the run, 9277423); found by
+  gen.fuzz-test's chains of operations (seed 1794085868851).
 - **Added (experimental): `array/compile`'s `:donate`** (genclj-tjvd):
   `(array/compile f {:donate #{0}})` names arguments the compiled function
   consumes, after JAX's donate_argnums. On MLX their arrays are released
