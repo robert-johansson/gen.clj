@@ -11,6 +11,9 @@
    - lane groups: a step of exactly a group's rows reuses it in place,
      every other step stacks its rows, with the same results; capacities
      grow by blocks;
+   - a read or step whose rows fail to normalize leaves its branch as it
+     was (genclj-5t5l: a read used to leave its slot ahead of its branch,
+     so that the branch's next read failed as an engine bug);
    - misuse is loud. (The shared memory budget with the engine open is
      gen.llm.array-engine-llama-test's: a tiny model's arrays are too
      small for MLX's active memory to tell.)
@@ -224,6 +227,35 @@
     (is (= 2 (:grows d)))
     (is (<= (bc/max-diff (forward-row :f32 ctx) (br/logprobs b) 128) band))
     (br/dispose! b)))
+
+;; ---------------------------------------------------------------------------
+;; A failed normalization (genclj-5t5l)
+;; ---------------------------------------------------------------------------
+
+(deftest a-failed-normalization-leaves-the-slots-as-they-were
+  ;; a read's or a step's rows failing to normalize, loudly: the branch
+  ;; as it was, and it reads and steps on
+  (with-open [e (ae/engine {:model (:f32 @models) :max-branches 12 :block 16 :n-batch 8})]
+    (let [p (:prompt contract-opts)
+          more [5 6 7 8 9 10 11 12]
+          failing {#'ae/host-rows (fn [& _] (throw (ex-info "planted" {:reason :planted})))}
+          b (br/open e p)
+          c (br/fork b)]
+      ;; (a step of c, which shares b's group, stacks a copy: a lane group
+      ;; stepped in place is lost when its step fails, the namespace says)
+      (doseq [[what f x] [["a read" #(br/extend b more) b] ["a step" #(br/advance [c] [4]) c]]]
+        (let [data (with-redefs-fn failing #(ts/thrown-data (f)))]
+          (is (= :planted (:reason data)) what)
+          (is (nil? (:lost-slots data)) what)
+          (is (br/live? x) (str what ": the branch as it was"))))
+      (let [[cs] (br/advance [c] [4])]
+        (is (<= (bc/max-diff (forward-row :f32 (conj p 4)) (br/logprobs cs) 128) band) "the fork steps on")
+        (br/dispose! cs))
+      (let [{x :branch} (br/extend b more)
+            [s] (br/advance [x] [4])]
+        (is (<= (bc/max-diff (forward-row :f32 (into p more)) (br/logprobs x) 128) band) "it reads on")
+        (is (<= (bc/max-diff (forward-row :f32 (conj (into p more) 4)) (br/logprobs s) 128) band) "and steps on")
+        (br/dispose! s)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Planted bugs

@@ -46,7 +46,8 @@
      host in double (log-softmax, loud when a logit is not finite), on a
      small pool of the engine's own and the engine's thread
      (gen.llm.host/log-softmax-rows: the same floats for any number of
-     threads), as the llama.cpp engine normalizes its rows.
+     threads), as the llama.cpp engine normalizes its rows. A run whose
+     row fails so leaves its slot as it was: its books are written after.
    - Memory is the only bound on branches (no sequence cap); the arrays
      count against the backend's own accounting (on MLX, its active
      memory, inside the budget gen.array.memory shares with native
@@ -91,7 +92,13 @@
      written, consuming the pools (in one call MLX copies each pool, its
      read still holding it).
    - A paged step, run or copy that fails has consumed the pools: every
-     branch is lost (:lost-slots), loudly, and the pools are made again.
+     branch is lost (:lost-slots), loudly, and the pools are made again (a
+     score's read too: gen.llm.slots frees every branch it names).
+   - A step or run whose rows fail to normalize, loudly, leaves its slots
+     as they were: a run normalizes before it writes the pools, and a
+     step keeps the pools it wrote (those it consumed gone), its books
+     unchanged, what it wrote lying past each sequence's end or in blocks
+     the books hold free.
 
    The continuous mode (:paged? and :continuous? true; genclj-b3ow)
    batches concurrent callers' reads (gen.llm.slots's Batching: its
@@ -303,11 +310,13 @@
         (array/eval! [s row cache])
         (let [scores (if s (into scores (map double) (array/->floats s)) scores)]
           (if last?
-            (let [g (new-group! state cache)]
+            ;; the row normalized before the books are written: a failure
+            ;; leaves the slot as it was
+            (let [lp (first (host-rows pool row "read"))
+                  g (new-group! state cache)]
               (vswap! state assoc-in [:table slot] {:group g :row 0})
               (tally! state :runs 1)
-              {:logprobs (first (host-rows pool row "read"))
-               :scores (when targets scores)})
+              {:logprobs lp :scores (when targets scores)})
             (recur end cache scores)))))))
 
 (defn- lane?
@@ -526,7 +535,10 @@
         (let [scores (if sc (into scores (map double) (array/->floats sc)) scores)]
           (if-not last?
             (recur end cache scores)
-            (let [[a [s'] [slots] copies] (prepared ctx [s] [n])
+            ;; the row normalized before the pools are written: a failure
+            ;; leaves the slot as it was
+            (let [lp (first (host-rows pool row "read"))
+                  [a [s'] [slots] copies] (prepared ctx [s] [n])
                   entries (call state :paged-entries cache pos)]
               (copy-blocks! ctx a copies)
               (let [pools (donating ctx #(doto (write-fn (:pools @state) (mapv first entries) (mapv second entries)
@@ -534,8 +546,7 @@
                                            array/eval!))]
                 (vswap! state #(-> % (assoc :pools pools :alloc a) (assoc-in [:table slot] s')))
                 (tally! state :runs 1)
-                {:logprobs (first (host-rows pool row "read"))
-                 :scores (when targets scores)}))))))))
+                {:logprobs lp :scores (when targets scores)}))))))))
 
 (defn- paged-decode-step
   "slots-step's body in the paged mode: each slot's sequence made ready
@@ -561,9 +572,14 @@
         [logits pools] (donating ctx #(let [[logits pools] (step-fn (:pools @state) pos tables sl toks)]
                                         (array/eval! [logits pools])
                                         [logits pools]))
+        ;; the step's pools at once (it consumed those it was given), the
+        ;; rest of the books once its rows are normalized: a failure then
+        ;; leaves every slot as it was, since what the step wrote lies past
+        ;; each sequence's end or in blocks the books still hold free
+        _ (vswap! state assoc :pools pools)
         rows (host-rows pool (array/slice logits 0 0 n) "advance")]
     (vswap! state (fn [st] (-> st
-                               (assoc :pools pools :alloc a)
+                               (assoc :alloc a)
                                (update :table #(reduce (fn [t [slot s']] (assoc t slot s')) % (map vector slots seqs'))))))
     (tally! state :steps 1)
     (tally! state :rows n)

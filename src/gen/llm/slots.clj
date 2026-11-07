@@ -14,7 +14,10 @@
      slot, for score, which copies its branch there and reads the
      continuation without touching the branch: no partial removal, which
      recurrent and hybrid models (GatedDeltaNet) cannot do past their few
-     checkpoints. max-branches is the slot count less one.
+     checkpoints. max-branches is the slot count less one. A read there
+     that fails naming other slots lost (a paged engine's, whose failed
+     call consumed the pools every slot lives in) frees them and their
+     branches, loudly, as a failed advance does.
    - advance, extend and resample consume their branches: a successor takes
      over the slot, and the old branch is no longer live. A free slot is
      always empty (cleared when freed), since a copy adds to what its
@@ -526,8 +529,13 @@
                 (into (:scores r))
                 (conj (double (aget ^floats (:logprobs r) (int (peek ts)))))))
           (catch clojure.lang.ExceptionInfo x
-            ;; a lost scratch slot is no branch's: cleared below
-            (throw (ex-info (ex-message x) (dissoc (ex-data x) :lost-slots) x)))
+            ;; the scratch slot is no branch's (cleared below); any other
+            ;; slot the read lost (a paged engine's pools, which every
+            ;; slot's contents live in, consumed by a failed call) loses its
+            ;; branch, as a failed advance's would
+            (let [lost (into [] (remove #{scratch}) (:lost-slots (ex-data x)))]
+              (lose-slots! e lost)
+              (throw (ex-info (ex-message x) (cond-> (dissoc (ex-data x) :lost-slots) (seq lost) (assoc :lost-slots lost)) x))))
           (finally
             (slots-clear (impl e) scratch)))))))
 

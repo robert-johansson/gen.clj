@@ -360,6 +360,22 @@ other values for the same key, from the same distribution.
   made (its config's `:arch`); another architecture is loud
   (`:unsupported`). Its info's `:model` gains `:arch`.
 
+- **Fixed (experimental): gen.llm.array-engine after a failed call**
+  (genclj-5t5l).
+  - A score whose read fails in a call that consumes the paged pools
+    (the paged and continuous modes) now loses every branch the pools
+    held, loudly: its error names them (`:lost-slots`) and they are no
+    longer live. It used to drop `:lost-slots`, leaving them live over
+    emptied slots, so their next operation failed as an engine bug
+    (`:internal`).
+  - A paged step whose rows fail to normalize keeps the pools it wrote,
+    its slots as they were. It used to leave the pools it had consumed
+    in the engine's state, which MLX refuses at the next step, losing
+    every branch.
+  - A run (every mode) normalizes its row before it writes its books, so
+    one that fails leaves its slot as it was. It used to leave the slot
+    ahead of its branch, so that the branch's next operation failed as an
+    engine bug.
 - **Fixed: `gen.llm.trie/insert` loops down a path** (gen.llm.trie,
   experimental; genclj-gn5i). insert recursed once for each node on the
   path it walked, so a trie with an entry at each of a few thousand
