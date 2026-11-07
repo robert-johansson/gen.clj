@@ -473,12 +473,23 @@
                (tally! state :pool-grows 1)
                (prepared ctx seqs n)))))))
 
+(defn- padded
+  "copies padded to a power of 2 of pairs with self-copies (no-ops) of
+   blocks free in allocator a, as many as it has, so that the compiled
+   copy traces once per power of 2."
+  [a copies]
+  (let [want (next-pow2 (count copies))
+        dsts (set (map second copies))]
+    (into copies (map (fn [b] [b b])) (take (c/- want (count copies)) (remove dsts (:free a))))))
+
 (defn- copy-blocks!
-  "The block copies [[from to] …] made in the pools (copy-on-write)."
-  [{:keys [state copy-fn] :as ctx} copies]
+  "The block copies [[from to] …] made in the pools (copy-on-write), a
+   the allocator after them."
+  [{:keys [state copy-fn] :as ctx} a copies]
   (when (seq copies)
-    (let [src (array/array (mapv first copies) {:dtype :int32})
-          dst (array/array (mapv second copies) {:dtype :int32})
+    (let [all (padded a copies)
+          src (array/array (mapv first all) {:dtype :int32})
+          dst (array/array (mapv second all) {:dtype :int32})
           pools (donating ctx #(doto (copy-fn (:pools @state) src dst) array/eval!))]
       (vswap! state assoc :pools pools)
       (tally! state :copied-blocks (count copies)))))
@@ -509,7 +520,7 @@
             (recur end cache scores)
             (let [[a [s'] [slots] copies] (prepared ctx [s] n)
                   entries (call state :paged-entries cache pos)]
-              (copy-blocks! ctx copies)
+              (copy-blocks! ctx a copies)
               (let [pools (donating ctx #(doto (write-fn (:pools @state) (mapv first entries) (mapv second entries)
                                                          (array/array slots {:dtype :int32}))
                                            array/eval!))]
@@ -529,7 +540,7 @@
   (let [n (count slots)
         seqs (mapv #(or (entry state %) paged/empty-sequence) slots)
         [a seqs' write-slots copies] (prepared ctx seqs 1)
-        _ (copy-blocks! ctx copies)
+        _ (copy-blocks! ctx a copies)
         r (max (long min-rows) (next-pow2 n))
         width (next-pow2 (reduce max 1 (map (comp count :blocks) seqs')))
         ;; padding row i writes slot i of the scratch blocks, and reads it
