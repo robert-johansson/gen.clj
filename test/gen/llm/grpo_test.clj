@@ -24,7 +24,7 @@
       are 0;
    8. accumulated microbatches step as one batch (grpo, dapo, dr-grpo);
       bnpo is dapo with one microbatch;
-   9. training raises a reward the policy can reach;
+   9. training raises a reward the policy can reach, with each loss type;
    10. a run saved at round 2 and resumed is the run to round 4, bit for
        bit;
    11. a loss that is not finite is loud; misuse is loud.
@@ -201,15 +201,15 @@
         lengths (for [{:keys [completions]} ro {:keys [tokens stop]} completions] (+ (count tokens) (if (= :end stop) 1 0)))]
     (is (= 1 (count bs)))
     (is (batch-holds-the-completions? ro b))
-    (is (= (ts/host (:advantages b)) (mapv vector (apply concat adv))))
+    (is (ts/close? (:advantages b) (array/array (mapv vector (apply concat adv)))))
     (testing "weights and divisors by loss type"
       (let [by (fn [lt] (first (grpo/batches ro adv {:loss-type lt :max-tokens 5})))
             row-weights (fn [b] (mapv #(reduce max 0.0 %) (ts/host (:weights b))))
             tokens (reduce + lengths)]
         (is (= [6 tokens 30 1] (mapv (comp :count by) [:grpo :dapo :dr-grpo :bnpo])))
-        (is (= (mapv #(/ 1.0 %) lengths) (row-weights (by :grpo))))
+        (is (ts/close? (array/array (mapv #(/ 1.0 %) lengths)) (array/array (row-weights (by :grpo)))))
         (is (= (repeat 6 1.0) (row-weights (by :dapo)) (row-weights (by :dr-grpo))))
-        (is (= (repeat 6 (/ 1.0 tokens)) (row-weights (by :bnpo))))
+        (is (ts/close? (array/array (vec (repeat 6 (/ 1.0 tokens)))) (array/array (row-weights (by :bnpo)))))
         (is (= (ts/host (:mask b)) (ts/host (array/where (array/> (:weights (by :bnpo)) 0.0) 1.0 0.0))))))
     (testing "microbatches"
       (let [bs (grpo/batches ro adv {:batch-size 4})]
@@ -394,17 +394,22 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- rewards-by-round
-  "The mean reward of each of 5 rounds of the tiny model (4 prompts of 8
-   completions, AdamW at 3e-2) on the lower-case reward."
+  "The mean reward of each of 8 rounds of the tiny model (4 prompts of 8
+   completions, AdamW at 1e-2) on the lower-case reward."
   [lt]
-  (let [tr (grpo/trainer (lora/init @model {:rank 4 :targets [:q :v :down]} (rng/key 1)) (learn/adamw {:lr 3e-2 :weight-decay 0.0})
+  (let [tr (grpo/trainer (lora/init @model {:rank 4 :targets [:q :v :down]} (rng/key 1)) (learn/adamw {:lr 1e-2 :weight-decay 0.0})
                          (rng/key 2))]
     (mapv :reward-mean (:history (grpo/train @model tokenizer tr prompts lower
-                                             {:rounds 5 :prompts-per-round 4 :group-size 8 :max-tokens 8 :loss-type lt})))))
+                                             {:rounds 8 :prompts-per-round 4 :group-size 8 :max-tokens 8 :loss-type lt})))))
 
 (deftest training-raises-the-reward
-  ;; measured 2026-11-07 (the JVM backend), grpo: 0.24, 0.53, 0.73, 0.98,
-  ;; 1.00; dapo 0.24, 0.53, 0.86, 0.99, 1.00
+  ;; measured 2026-11-07, by round: the JVM backend, grpo 0.24 0.29 0.50
+  ;; 0.86 0.97 0.98 0.99 1.00, dapo and bnpo 0.24 … 0.93 … 1.00, dr-grpo
+  ;; 0.24 … 1.00; MLX CUDA (native gradients), grpo 0.21 0.22 0.30 0.49
+  ;; 0.88 0.95 0.98 0.98, dapo and bnpo 0.21 … 0.98, dr-grpo 0.21 … 0.98.
+  ;; At 3e-2 the first steps (Adam's, about lr·sign(g)) moved the policy
+  ;; by a KL of 1 nat a token, and on MLX grpo and dr-grpo had not risen
+  ;; after 5 rounds: too chaotic a setting to assert on
   (doseq [lt [:grpo :dapo :dr-grpo :bnpo]]
     (let [rs (rewards-by-round lt)]
       (is (< (first rs) 0.3) (pr-str lt rs))
