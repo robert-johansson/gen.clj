@@ -16,7 +16,27 @@
 
    The noise checks use the bands of gen.llm.llama.bands (0.1 nats on
    Metal), over the 64 most likely tokens of the rows after a prompt and
-   after one more token, and the scores of a continuation."
+   after one more token, and the scores of a continuation. Measured on
+   Metal (Mac mini M4, 2026-11-07, Qwen3-0.6B-Q8_0), |Δ log p| against
+   the base: the B = 0 adapter 0.00 at scales 1 and 3; the rank-2 one
+   5.95 at scale 1, 14.3 at -1, 0.00 at 0, and 7.50 between scales 0.5
+   and 1; both adapters against the rank-2 one alone 0.00.
+
+   Mutations of gen.llm.llama checked there (each planted with with-redefs
+   in a JVM of its own, the tests run, the failures named):
+   - adapters never set on the context: an-adapter-changes-the-reads-by-
+     its-scale, two-adapters-add, engines-over-one-model-are-independent;
+   - every scale taken as 1: an-adapter-changes-the-reads-by-its-scale;
+   - only the first adapter set: two-adapters-add;
+   - an adapter's close (and its Cleaner action) freeing nothing:
+     closing-is-checked, unreachable-models-and-adapters-are-freed,
+     bad-adapters-are-loud, models-and-adapters-describe-themselves;
+   - an engine never deregistered from its model and adapters:
+     closing-is-checked;
+   - no checks of an engine's model and adapters: bad-adapters-are-loud.
+   (The last two leave the model open at the JVM's exit, where ggml-metal
+   aborts on the Metal buffers still alive: close models and engines
+   before exiting.)"
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gen.array.memory :as reservations]
             [gen.llm.branching :as br]
