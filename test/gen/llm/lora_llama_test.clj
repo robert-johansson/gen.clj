@@ -165,10 +165,10 @@
                                      [t {:a a :b (array/* sd (rng/normal (rng/fold-in (rng/fold-in key i) (count (name t))) (array/shape b)))}]))])))))
 
 (defn- ours
-  "An adapter of lora/init on model m, B drawn: rank 4, alpha 12 (s = 3),
-   the targets on layers 0, 9, 18 and 26."
-  [m targets]
-  (drawn-b (lora/init m {:rank 4 :alpha 12 :targets targets :layers [0 9 18 26]} (rng/key 20261107)) 0.02 (rng/key 1)))
+  "An adapter of lora/init on model m, B drawn N(0, sd²): rank 4, alpha 12
+   (s = 3), the targets on layers 0, 9, 18 and 26."
+  [m targets sd]
+  (drawn-b (lora/init m {:rank 4 :alpha 12 :targets targets :layers [0 9 18 26]} (rng/key 20261107)) sd (rng/key 1)))
 
 ;; ---------------------------------------------------------------------------
 ;; 1 and 2. The adapters, by both engines
@@ -186,7 +186,7 @@
 (deftest our-adapter-reads-in-llama-cpp-as-in-the-forward
   (when-qwen3-0-6b
     (let [[lm m] (setup)
-          ad (ours m (vec (keys lora/targets)))
+          ad (ours m (vec (keys lora/targets)) 0.02)
           path (lora/save-gguf ad (temp-path "ours.gguf"))]
       (doseq [scale [1.0 0.5]
               :let [m' (lora/adapt m ad {:scale scale})
@@ -249,8 +249,12 @@
   ;; prompt, read whole, as a chunk and one step
   (when-qwen3-0-6b
     (let [[lm m] (setup)
-          ad (ours m [:k :v])
+          ad (ours m [:k :v] 0.1)
           prompt [(second prompts)]
+          clean (comparisons lm (lora/adapt m ad) (lora/save-gguf ad (temp-path "clean.gguf")) 1.0 prompt 1)
+          _ (println (format "lora-llama: the k and v adapter moves log p by %.3g nats; against llama.cpp at most %.3g"
+                             (effect lm m (lora/adapt m ad) prompt) (worst clean)))
+          _ (is (agree? clean) "the adapter itself agrees")
           margins (into {}
                         (concat
                          (for [[k redefs] (sort writer-mutations)
