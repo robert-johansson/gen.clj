@@ -35,8 +35,9 @@
    and o): 6, by 4.8 nats; dropout's 1/(1 - p) dropped: 7; init's B
    nonzero: 1 and 2; save-gguf's A and B swapped: 8.
 
-   The bands on MLX: float32 round-off, as qwen3-train-test's and
-   array-engine-test's (each band's docstring)."
+   The bands on MLX: float32 round-off, four times the largest gap
+   measured on fenrir (2026-11-07: CUDA and the MLX CPU, tape and native
+   gradients; each band's docstring). Not yet run on Metal."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
             [gen.array.gguf :as gguf]
@@ -217,8 +218,11 @@
   "Checkpointed against plain: on the JVM backend the same ops in the
    same order, exactly (chunks apart: their logsumexps sum in another
    order, round-off). On MLX, float32's round-off relative to the
-   largest gradient, qwen3-train-test's band."
-  (if (ts/jvm?) {:checkpoint 0.0 :chunk 1e-14} {:checkpoint 1.1e-6 :chunk 1.1e-6}))
+   largest gradient: four times the largest gap measured on fenrir
+   (2026-11-07, CUDA and the CPU, tape and native gradients), 4.1e-7
+   (Q8_0 checkpointed and chunked, the MLX CPU's tape; checkpoints alone
+   0 under native gradients)."
+  (if (ts/jvm?) {:checkpoint 0.0 :chunk 1e-14} {:checkpoint 1.7e-6 :chunk 1.7e-6}))
 
 (defn- gap
   "The largest |Δ| between two results' values and gradients, relative to
@@ -244,9 +248,10 @@
 
 (def ^:private mlx-band
   "MLX's gradients against the JVM backend's float64 tape, relative to
-   the largest gradient: qwen3-train-test's 1.1e-6, four times the
-   largest gap measured there (2.6e-7)."
-  1.1e-6)
+   the largest gradient: four times the largest gap measured on fenrir
+   (2026-11-07, CUDA and the CPU, tape and native gradients), 3.6e-7
+   (Q8_0 on the MLX CPU's tape)."
+  1.5e-6)
 
 (deftest mlx-gradients-are-the-tape-s
   ;; without dropout: its masks are drawn from uniforms of the backend's
@@ -293,7 +298,8 @@
 (deftest training-steps-lower-the-loss
   ;; measured 2026-11-07 (the JVM backend): F32 72.3 → 55.8 → 40.2 →
   ;; 27.3 → 16.7 → 8.5; Q8_0 the same within 0.15 (the tiny model
-  ;; memorizes 13 targets)
+  ;; memorizes 13 targets). On MLX (fenrir) 72.3 → 54.4 → 37.8 → 24.2 →
+  ;; 13.3 → 6.4: its float32 uniforms draw other dropout masks
   (doseq [k (keys files)]
     (let [ls (losses k 5 -1.0)]
       (is (lowered? ls) (str (name k) ": " (pr-str ls))))))
@@ -310,9 +316,10 @@
 
 (def ^:private merge-band
   "|Δ log p| between the merged and the adapted forwards: float64's
-   round-off on the JVM backend (1e-14 measured); float32's on MLX, four
-   times the largest measured."
-  (if (ts/jvm?) 1e-12 2e-4))
+   round-off on the JVM backend (6.2e-15 measured); float32's on MLX,
+   four times the largest measured on fenrir (2026-11-07), 3.8e-6 (Q8_0
+   on CUDA)."
+  (if (ts/jvm?) 1e-12 1.6e-5))
 
 (deftest merging-gives-the-adapted-values
   (doseq [[k m] @models
@@ -399,7 +406,8 @@
 ;; ---------------------------------------------------------------------------
 
 (def ^:private engine-band
-  "gen.llm.array-engine-test's band: 2e-6 on the JVM backend, 2e-5 on MLX."
+  "gen.llm.array-engine-test's band: 2e-6 on the JVM backend, 2e-5 on MLX
+   (3.3e-6 measured here on fenrir, 2026-11-07)."
   (if (ts/jvm?) 2e-6 2e-5))
 
 (defn- forward-row

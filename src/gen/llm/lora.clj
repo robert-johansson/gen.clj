@@ -226,7 +226,7 @@
      :params (into {} (for [i layers]
                         [(long i) (into {} (for [t ts
                                                  :let [[out in] (weight-shape (layer-weight m i t))
-                                                       bound (/ 1.0 (Math/sqrt (double in)))]]
+                                                       bound (c// 1.0 (Math/sqrt (double in)))]]
                                              [t {:a (rng/uniform (site-key key i t) [rank in] {:low (c/- bound) :high bound :dtype dtype})
                                                  :b (array/zeros [out rank] {:dtype dtype})}]))]))}))
 

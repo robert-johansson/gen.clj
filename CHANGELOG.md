@@ -40,6 +40,36 @@ other values for the same key, from the same distribution.
 
 ### Changes
 
+- **Added (experimental): LoRA adapters, `gen.llm.lora`** (genclj-yc3b,
+  genclj-p4mk): low-rank adapters trained beside a model's frozen, dense
+  or quantized, weights, and served by llama.cpp.
+  - `(lora/init m opts key)` is an adapter `{:config {:architecture :rank
+    :alpha :dropout} :params {layer {target {:a :b}}}}`, its `:params`
+    gen.learning's store: A [rank in] uniform on ±1/√in from a key per
+    site, B [out rank] zeros. Options `:rank` (8), `:alpha` (16),
+    `:dropout` (0), `:targets` (`[:q :v]`, of `:q :k :v :o :gate :up
+    :down`) and `:layers` (all).
+  - `(lora/adapt m adapter opts)` is m with the adapter beside its
+    weights: x·wᵀ + s·(x·Aᵀ)·Bᵀ, s = `:scale`·alpha/rank (llama.cpp's
+    convention), every gen.llm.models.qwen3 function and
+    `gen.llm.array-engine` taking it as a model, differentiable with
+    respect to the adapter (quantized-matmul's gradient is with respect
+    to x). `:key` draws the dropout of a training step.
+  - `(lora/merge m adapter)` folds it into dense weights.
+  - `(lora/save-gguf adapter path)` writes llama.cpp's LoRA GGUF
+    (`blk.N.attn_q.weight.lora_a`/`_b`, F32, `general.type` adapter,
+    `adapter.lora.alpha`), which `gen.llm.llama/adapter` loads;
+    `(lora/load-gguf path)` reads one. Checked against llama.cpp on
+    Qwen3-0.6B (fenrir's CUDA): gguf-py's adapter and ours within the
+    platform's band, planted convention errors (A and B swapped or
+    transposed, the scale alpha, the names) refused or off by 3 to 17
+    nats.
+  - `gen.array.gguf/write-gguf` (internal): a GGUF writer beside the
+    reader, writing gguf-py's bytes.
+- **Changed: `qwen3/config` (and a model's `:config`) holds
+  `:architecture "qwen3"`** (gen.llm.models.qwen3, experimental;
+  genclj-yc3b), the GGUF's general.architecture, which an adapter's file
+  names.
 - **Fixed: `gen.llm.trie/insert` loops down a path** (gen.llm.trie,
   experimental; genclj-gn5i). insert recursed once for each node on the
   path it walked, so a trie with an entry at each of a few thousand

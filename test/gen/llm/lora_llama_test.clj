@@ -30,9 +30,24 @@
    shapes are its); skipped with a note otherwise, and for another model.
 
    The band: qwen3-llama-test's, per platform (0.075 on Metal, 0.65
-   elsewhere), the adapters' products adding nothing measurable to the
-   engines' difference (fenrir's CUDA, 2026-11-07: the measurements in
-   the tests' comments)."
+   elsewhere). Measured on fenrir (2026-11-07, MLX CUDA against
+   llama.cpp v0.9.0's CUDA build, Qwen3-0.6B-Q8_0), the adapter's size
+   (its largest |Δ log p| from the base, our forward) and the largest
+   |Δ log p| against llama.cpp, within its CUDA band:
+   - gguf-py's adapter: 18.7 nats; 0.445;
+   - ours, at scale 1 and 0.5: 2.39 and 1.08 nats; 0.308 and 0.350;
+   - ours on k and v (the planted errors'): 12.4 nats; 0.214;
+   - trained (4): 13.1 nats; 0.278 (tape), 0.295 (native gradients).
+   The planted errors, against mutation-nats (1.3):
+   - refused by llama.cpp: A and B swapped; the names without .weight;
+   - silent in llama.cpp's checks: A and B transposed and swapped (B·A
+     transposed, on the square k and v) 3.53; k and v's names swapped
+     3.00; alpha written as alpha / rank 3.93; the layers off by one
+     4.67;
+   - in the forward: s = alpha (not alpha / rank) 10.0 (gguf-py's
+     adapter) and 16.9 (ours); the product transposed on the square
+     projections 10.7 and 3.57.
+   Not yet run on Metal, whose band (0.075) is the base model's there."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is use-fixtures]]
             [gen.array :as array]
@@ -280,7 +295,9 @@
   ;; rank 8 on every projection of the last 8 layers (mlx-lm's custom), AdamW
   ;; at 1e-3 clipped to norm 1, 5 steps on one text, checkpointed: each step
   ;; lowers the loss; the trained adapter, saved, reads in llama.cpp as in
-  ;; the forward
+  ;; the forward. Measured on fenrir (2026-11-07, 37 tokens, tape and
+  ;; native gradients alike): the summed nll 188.2 → 156.6 → 113.6 → 69.4
+  ;; → 39.3 → 21.4
   (when-qwen3-0-6b
     (let [[lm m] (setup)
           tokens (with-open [^java.io.Closeable e ((llama 'engine) {:model lm :max-branches 2 :n-ctx 512})]
