@@ -329,6 +329,31 @@
           (catch MlxException e (throw (mlx-error :->clj [x] e)))
           (finally (fence x)))))))
 
+(defn to-floats
+  "x's values, row-major, as a new float array: a float32 array's buffer
+   read in place, another dtype's cast to float32 first. Evaluates x."
+  ^floats [x]
+  (let [^MlxArray x x
+        b (.-backend x)
+        n (sh/size (.-shape x))
+        s (stream b)]
+    (with-temps [t]
+      (try
+        (let [h (handle x)
+              h (if (= :float32 (.-dtype x)) h (t (Mlx/mlx_astype h (int (code :float32)) s)))]
+          (evaluating
+            (Mlx/mlx_array_eval h)
+            (let [c (if (Mlx/_mlx_array_is_row_contiguous h)
+                      h
+                      (let [c (t (Mlx/mlx_contiguous h false s))]
+                        (Mlx/mlx_array_eval c)
+                        c))]
+              (if (zero? n)
+                (float-array 0)
+                (.toArray (data-segment (Mlx/mlx_array_data_float32 c) (* 4 n)) ValueLayout/JAVA_FLOAT)))))
+        (catch MlxException e (throw (mlx-error :->floats [x] e)))
+        (finally (fence x))))))
+
 (defn eval-arrays! [xs]
   ;; an evaluation boundary is a good moment to free what became unreachable
   (MlxRuntime/drain)

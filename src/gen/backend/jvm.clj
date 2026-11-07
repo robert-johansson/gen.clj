@@ -944,6 +944,13 @@
   p/IOverwriting
   (-put-along-axis [_ x indices values axis] (put-along-axis x indices values axis))
 
+  p/IHostFloats
+  (-to-floats [_ x]
+    (let [^doubles d (data-of x)
+          out (float-array (alength d))]
+      (dotimes [i (alength d)] (aset out i (float (aget d i))))
+      out))
+
   p/IBackend
   (-name [_] :jvm)
   (-defaults [_] {:float :float64 :int :int64})

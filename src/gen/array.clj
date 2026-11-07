@@ -624,6 +624,22 @@
   [x]
   (if (host? x) x (p/-to-host (operand-backend :->clj x) x)))
 
+(defn ^{:api :experimental} ->floats
+  "The values of x, row-major, as a new float array (each rounded to
+   float32, booleans as 0 and 1): many values read on the host at once,
+   without ->clj's nested vectors (a language model's rows of logits).
+   Forces evaluation. Reading a value being differentiated is loud, as
+   ->clj's. A backend reads it by gen.array.protocols/IHostFloats, or
+   through ->clj. Experimental: outside the 1.x promise (DESIGN §9)."
+  ^floats [x]
+  (if (host? x)
+    (float-array [(dt/host-double x)])
+    (let [b (operand-backend :->floats x)]
+      (if (instance? gen.array.protocols.IHostFloats b)
+        (p/-to-floats b x)
+        (let [v (p/-to-host b x)]
+          (float-array (map dt/host-double (if (sequential? v) (c/flatten v) [v]))))))))
+
 (defn item
   "The host number or boolean of a single-element array."
   [x]

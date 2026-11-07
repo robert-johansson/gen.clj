@@ -83,7 +83,10 @@
    none, error, warn, info, debug); libllama is found in gen.llama.lib
    (default native/build/llama/<platform>/lib, gen.llama.LlamaRuntime).
    tokenize, token-bytes and detokenize use the GGUF's own vocabulary;
-   tokenizer gathers them as the LM protocol's tokenizer (gen.llm.lm)."
+   tokenizer gathers them as the LM protocol's tokenizer (gen.llm.lm).
+   Each takes an engine, or a vocabulary loaded alone ((vocabulary path),
+   llama.cpp's vocab_only: no weights), the tokenizer of another engine
+   over the same GGUF (gen.llm.array-engine)."
   {:api :experimental}
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
@@ -835,21 +838,27 @@
     {:bytes (reduce + 0 (map :bytes parts))
      :buffers (into [] (mapcat :buffers) parts)}))
 
+(defn- vocab-info
+  "A vocabulary's size and special tokens (-1 for none)."
+  [^MemorySegment vocab]
+  (let [n-vocab (Llama/llama_vocab_n_tokens vocab)]
+    {:n-vocab n-vocab
+     :bos (long (Llama/llama_vocab_bos vocab))
+     :eos (long (Llama/llama_vocab_eos vocab))
+     :eog (into (sorted-set) (filter #(Llama/llama_vocab_is_eog vocab (int %))) (range n-vocab))
+     :add-bos? (Llama/llama_vocab_get_add_bos vocab)}))
+
 (defn- describe
   "The Slots' info: sizes, special tokens, the model, its adapters, the
    footprint."
   [^LlamaModel m ^MemorySegment ctx ^MemorySegment vocab adapters {:keys [n-slots]} footprint]
-  (let [n-vocab (Llama/llama_vocab_n_tokens vocab)]
+  (merge
+    (vocab-info vocab)
     {:engine :llama.cpp
      :footprint footprint
-     :n-vocab n-vocab
      :n-slots n-slots
      :n-ctx (long (Llama/llama_n_ctx_seq ctx))
      :n-batch (long (Llama/llama_n_batch ctx))
-     :bos (long (Llama/llama_vocab_bos vocab))
-     :eos (long (Llama/llama_vocab_eos vocab))
-     :eog (into (sorted-set) (filter #(Llama/llama_vocab_is_eog vocab (int %))) (range n-vocab))
-     :add-bos? (Llama/llama_vocab_get_add_bos vocab)
      :model (select-keys (.-info m) [:path :desc :bytes :params :n-ctx-train :n-swa :recurrent? :hybrid?])
      :adapters (->> adapters
                     (map (fn [[^LlamaAdapter a s]] {:path (:path (.-info a)) :scale (double s) :alpha (:alpha (.-info a))}))
@@ -940,13 +949,76 @@
 ;; The vocabulary (the GGUF's own tokenizer)
 ;; ---------------------------------------------------------------------------
 
-(defn- on-llama
-  "(f slots) on llama.cpp engine e's thread, slots its LlamaSlots."
-  [e f]
-  (slots/call e (fn [s]
-                  (if (instance? LlamaSlots s)
-                    (f s)
-                    (throw (ex-info "Not a llama.cpp engine" {:reason :not-a-llama-engine :engine e}))))))
+;; A vocabulary alone: a model loaded vocab_only (no weights, no context),
+;; its books {:closed? :cleanable}. Its calls run on the caller's thread,
+;; one at a time (under the value's lock).
+
+(deftype LlamaVocabulary [^MemorySegment model ^MemorySegment vocab books info]
+  java.io.Closeable
+  (close [_] (.clean ^Cleaner$Cleanable (:cleanable @books)))
+
+  Object
+  (toString [_] (str "#<LlamaVocabulary " (:path info) ", " (:n-vocab info) " tokens>")))
+
+(defn vocabulary
+  "The vocabulary of the GGUF at path, loaded alone (llama.cpp's
+   vocab_only: no weights, no context): a java.io.Closeable value that
+   tokenize, token-bytes, detokenize and tokenizer take as they take an
+   engine, for an engine of another kind over the same file (gen.llm.
+   array-engine). Close it to free it (or let it become unreachable).
+   Experimental."
+  ^java.io.Closeable [path]
+  (when-not (and (string? path) (.isFile (java.io.File. ^String path)))
+    (throw (ex-info (str "llama/vocabulary: no model file at " (pr-str path)) {:reason :no-model :model path})))
+  (LlamaRuntime/load)
+  (LlamaRuntime/clearLastError)
+  (let [^MemorySegment m (with-open [arena (Arena/ofConfined)]
+                           (let [params (Llama/llama_model_default_params arena)]
+                             (llama_model_params/vocab_only params true)
+                             (llama_model_params/n_gpu_layers params (int 0))
+                             (Llama/llama_model_load_from_file (.allocateFrom arena ^String path) params)))]
+    (when (null? m)
+      (throw (llama-failure "llama/vocabulary" (str "llama.cpp could not load the vocabulary of " path)
+                            {:reason :model-load-failed :model path})))
+    (let [vocab (Llama/llama_model_get_vocab m)
+          books (atom {:closed? false})
+          v (LlamaVocabulary. m vocab books (assoc (vocab-info vocab) :path path))]
+      (swap! books assoc :cleanable (.register ^Cleaner cleaner v
+                                               (fn [] (locking books
+                                                        (when-not (:closed? @books)
+                                                          (swap! books assoc :closed? true)
+                                                          (Llama/llama_model_free m))))))
+      v)))
+
+(defn- on-vocab
+  "(f vocab) with x's vocabulary (a segment): on a llama.cpp engine's
+   thread, or for a vocabulary under its lock. Loud for anything else, and
+   for a closed vocabulary."
+  [x what f]
+  (if (instance? LlamaVocabulary x)
+    (let [^LlamaVocabulary v x
+          books (.-books v)]
+      (locking books
+        (when (:closed? @books)
+          (throw (ex-info (str what ": the vocabulary is closed") {:reason :closed})))
+        (f (.-vocab v))))
+    (slots/call x (fn [s]
+                    (if (instance? LlamaSlots s)
+                      (f (.-vocab ^LlamaSlots s))
+                      (throw (ex-info "Not a llama.cpp engine or vocabulary" {:reason :not-a-llama-engine :engine x})))))))
+
+(defn- vocabulary-info
+  "{:n-vocab :bos :eos :eog :add-bos?} of an engine or a vocabulary."
+  [x]
+  (if (instance? LlamaVocabulary x) (.-info ^LlamaVocabulary x) (br/info x)))
+
+(defn- check-tokens
+  "tokens checked against x's vocabulary (br/check-tokens's rule)."
+  [x tokens what]
+  (if (instance? LlamaVocabulary x)
+    (let [n (long (:n-vocab (.-info ^LlamaVocabulary x)))]
+      (mapv (fn [t] (if (br/index? t n) (long t) (throw (br/invalid-token what t n)))) tokens))
+    (br/check-tokens x tokens what)))
 
 (defn- sized
   "[n buf] of (call capacity), a llama.cpp call that returns the size it
@@ -959,62 +1031,69 @@
       (throw (ex-info (str what ": llama.cpp's result does not fit") {:reason :llama-failed :n n})))
     r))
 
+(defn- piece
+  "token's bytes in vocab (special tokens rendered)."
+  ^bytes [^MemorySegment vocab ^long t]
+  (with-open [a (Arena/ofConfined)]
+    (let [call (fn [^long cap]
+                 (let [buf (.allocate a (max 1 cap))]
+                   [(Llama/llama_token_to_piece vocab (int t) buf (int cap) (int 0) true) buf]))
+          [n ^MemorySegment buf] (sized "token-bytes" call 64)]
+      (.toArray (.asSlice buf 0 (long n)) ValueLayout/JAVA_BYTE))))
+
 (defn tokenize
-  "The tokens of text, by the model's tokenizer: a vector. opts:
-   :add-special? (default true) adds BOS (and EOS) as the model does;
-   :parse-special? (default false) reads special tokens written in the
-   text (\"<|im_start|>\") as themselves."
+  "The tokens of text, by the model's tokenizer (e an engine or a
+   vocabulary): a vector. opts: :add-special? (default true) adds BOS (and
+   EOS) as the model does; :parse-special? (default false) reads special
+   tokens written in the text (\"<|im_start|>\") as themselves."
   ([e text] (tokenize e text {}))
   ([e ^String text {:keys [add-special? parse-special?] :or {add-special? true parse-special? false}}]
    (let [utf8 (.getBytes text StandardCharsets/UTF_8)]
-     (on-llama e (fn [^LlamaSlots s]
-                   (with-open [a (Arena/ofConfined)]
-                     (let [src (.allocateFrom a ValueLayout/JAVA_BYTE utf8)
-                           call (fn [^long cap]
-                                  (let [out (.allocate a (* 4 (max 1 cap)))]
-                                    [(Llama/llama_tokenize (.-vocab s) src (int (alength utf8)) out (int cap)
-                                                           (boolean add-special?) (boolean parse-special?))
-                                     out]))
-                           [n ^MemorySegment out] (sized "tokenize" call (+ 8 (alength utf8)))]
-                       (mapv long (.toArray (.asSlice out 0 (* 4 (long n))) ValueLayout/JAVA_INT)))))))))
+     (on-vocab e "tokenize"
+               (fn [^MemorySegment vocab]
+                 (with-open [a (Arena/ofConfined)]
+                   (let [src (.allocateFrom a ValueLayout/JAVA_BYTE utf8)
+                         call (fn [^long cap]
+                                (let [out (.allocate a (* 4 (max 1 cap)))]
+                                  [(Llama/llama_tokenize vocab src (int (alength utf8)) out (int cap)
+                                                         (boolean add-special?) (boolean parse-special?))
+                                   out]))
+                         [n ^MemorySegment out] (sized "tokenize" call (+ 8 (alength utf8)))]
+                     (mapv long (.toArray (.asSlice out 0 (* 4 (long n))) ValueLayout/JAVA_INT)))))))))
 
 (defn token-bytes
   "The bytes of token, raw (a token may hold part of a UTF-8 character;
-   special tokens are rendered): a byte array."
+   special tokens are rendered): a byte array. e an engine or a
+   vocabulary."
   ^bytes [e token]
-  (let [[t] (br/check-tokens e [token] "token-bytes")]
-    (on-llama e (fn [^LlamaSlots s]
-                  (with-open [a (Arena/ofConfined)]
-                    (let [call (fn [^long cap]
-                                 (let [buf (.allocate a (max 1 cap))]
-                                   [(Llama/llama_token_to_piece (.-vocab s) (int t) buf (int cap) (int 0) true) buf]))
-                          [n ^MemorySegment buf] (sized "token-bytes" call 64)]
-                      (.toArray (.asSlice buf 0 (long n)) ValueLayout/JAVA_BYTE)))))))
+  (let [[t] (check-tokens e [token] "token-bytes")]
+    (on-vocab e "token-bytes" (fn [vocab] (piece vocab t)))))
 
 (defn detokenize
-  "The text of tokens (special tokens rendered), decoded as UTF-8."
+  "The text of tokens (special tokens rendered), decoded as UTF-8. e an
+   engine or a vocabulary."
   ^String [e tokens]
-  (let [toks (int-array (br/check-tokens e tokens "detokenize"))]
-    (on-llama e (fn [^LlamaSlots s]
-                  (with-open [a (Arena/ofConfined)]
-                    (let [src (.allocateFrom a ValueLayout/JAVA_INT toks)
-                          call (fn [^long cap]
-                                 (let [buf (.allocate a (max 1 cap))]
-                                   [(Llama/llama_detokenize (.-vocab s) src (int (alength toks)) buf (int cap) false true)
-                                    buf]))
-                          [n ^MemorySegment buf] (sized "detokenize" call (* 8 (inc (alength toks))))]
-                      (String. ^bytes (.toArray (.asSlice buf 0 (long n)) ValueLayout/JAVA_BYTE)
-                               StandardCharsets/UTF_8)))))))
+  (let [toks (int-array (check-tokens e tokens "detokenize"))]
+    (on-vocab e "detokenize"
+              (fn [^MemorySegment vocab]
+                (with-open [a (Arena/ofConfined)]
+                  (let [src (.allocateFrom a ValueLayout/JAVA_INT toks)
+                        call (fn [^long cap]
+                               (let [buf (.allocate a (max 1 cap))]
+                                 [(Llama/llama_detokenize vocab src (int (alength toks)) buf (int cap) false true)
+                                  buf]))
+                        [n ^MemorySegment buf] (sized "detokenize" call (* 8 (inc (alength toks))))]
+                    (String. ^bytes (.toArray (.asSlice buf 0 (long n)) ValueLayout/JAVA_BYTE)
+                             StandardCharsets/UTF_8)))))))
 
 (defn tokenizer
   "The model's vocabulary and tokenizer, as the LM protocol takes them
-   (gen.llm.lm): the size and special tokens (:bos and :eos nil when the
-   model has none), every token's bytes, read once in one engine call, and
-   tokenize and detokenize."
+   (gen.llm.lm), of e, an engine or a vocabulary: the size and special
+   tokens (:bos and :eos nil when the model has none), every token's
+   bytes, read once in one call, and tokenize and detokenize."
   [e]
-  (let [{:keys [n-vocab bos eos eog add-bos?]} (br/info e)
-        ;; on the engine's thread, where each token-bytes runs at once
-        pieces (on-llama e (fn [_] (mapv #(token-bytes e %) (range n-vocab))))
+  (let [{:keys [n-vocab bos eos eog add-bos?]} (vocabulary-info e)
+        pieces (on-vocab e "tokenizer" (fn [vocab] (mapv #(piece vocab %) (range n-vocab))))
         special (fn [t] (when-not (neg? (long t)) t))]
     {:n-vocab n-vocab
      :bos (special bos)
@@ -1024,6 +1103,14 @@
      :token-bytes (fn [t] (aclone ^bytes (pieces t)))
      :encode (fn [text opts] (tokenize e text opts))
      :decode (fn [tokens] (detokenize e tokens))}))
+
+(defn- on-llama
+  "(f slots) on llama.cpp engine e's thread, slots its LlamaSlots."
+  [e f]
+  (slots/call e (fn [s]
+                  (if (instance? LlamaSlots s)
+                    (f s)
+                    (throw (ex-info "Not a llama.cpp engine" {:reason :not-a-llama-engine :engine e}))))))
 
 (defn step-splits
   "Diagnostics: how a recurrent or hybrid model's engine split its steps

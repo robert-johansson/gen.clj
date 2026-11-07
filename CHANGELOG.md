@@ -54,6 +54,15 @@ other values for the same key, from the same distribution.
   (`gen.backend.mlx.array/handle`); a donated handle is repointed at a
   shared husk (`MlxRuntime/repoint`, new: rebuild with `clojure -T:build
   java`) and still freed once, by its phantom reference.
+- **Added (experimental): `(llama/vocabulary path)`**, llama.cpp's
+  vocabulary of a GGUF loaded alone (vocab_only: no weights), a
+  `java.io.Closeable` that `tokenize`, `token-bytes`, `detokenize` and
+  `tokenizer` take as they take an engine: the tokenizer of another
+  engine over the same file. A closed one is loud (`:closed`).
+- **Added (experimental): `array/->floats`**: an array's values,
+  row-major, as a new float array, read at once (an optional protocol,
+  `IHostFloats`; the JVM backend and MLX implement it, any other backend
+  reads through `->clj`).
 - **Added (experimental): `array/put-along-axis`** (genclj-8rnc): x with
   values written over its entries at indices along an axis, the overwrite
   `scatter-add` (which accumulates) is not; indices and values shaped as

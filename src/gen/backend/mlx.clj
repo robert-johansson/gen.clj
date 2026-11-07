@@ -628,6 +628,9 @@
   p/IOverwriting
   (-put-along-axis [b x indices values axis] (guarded :put-along-axis (put-along-axis b x indices values axis)))
 
+  p/IHostFloats
+  (-to-floats [_ x] (guarded :->floats (operands/to-floats x)))
+
   p/INativeGrad
   (-native-grad? [_] (= grad-mode :native))
 

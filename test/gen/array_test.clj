@@ -350,6 +350,22 @@
         (is (= (array/->clj (array/put-along-axis x idx v 1)) (array/->clj (stage/evaluate program [x idx v])))
             "staged, a replay is the op")))))
 
+(deftest floats-read-at-once
+  ;; ->floats: row-major, every dtype as float32, views and lazy results
+  ;; evaluated (plant: the MLX reader skipping the contiguous copy fails the
+  ;; transposed case)
+  (let [x (array/array [[1.5 -2.0 3.25] [4.0 5.5 6.0]])]
+    (is (= [1.5 -2.0 3.25 4.0 5.5 6.0] (vec (array/->floats x))))
+    (is (= [1.5 4.0 -2.0 5.5 3.25 6.0] (vec (array/->floats (array/transpose x)))) "a view, row-major")
+    (is (= [-0.5 9.5] (vec (array/->floats (array/sum (array/slice x 1 0 2) {:axis 1})))) "a lazy result")
+    (is (= [1.0 2.0] (vec (array/->floats (array/array [1 2])))) "ints")
+    (is (= [1.0 0.0] (vec (array/->floats (array/array [true false])))) "booleans")
+    (is (= [(float 0.1)] (vec (array/->floats (array/array [0.1])))) "rounded to float32")
+    (is (= [3.0] (vec (array/->floats 3))) "a host scalar")
+    (is (= [] (vec (array/->floats (array/zeros [0 3])))) "empty")
+    (is (thrown? clojure.lang.ExceptionInfo ((array/grad (fn [y] (array/->floats y) (array/sum y))) x))
+        "a value being differentiated is loud")))
+
 (deftest matmul
   (is (= [[19 22] [43 50]] (array/->clj (array/matmul (array/array [[1 2] [3 4]]) (array/array [[5 6] [7 8]])))))
   (is (= [1 2] (array/->clj (array/matmul (array/array [1 2]) (array/array [[1 0] [0 1]])))))

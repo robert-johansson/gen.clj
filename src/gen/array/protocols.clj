@@ -191,6 +191,14 @@
      given x and values one dtype). Repeated indices along a line of axis
      are the backend's to refuse; which value lands is unspecified."))
 
+(defprotocol ^{:api :experimental} IHostFloats
+  "A backend that reads an array's values into a float array at once:
+   gen.array/->floats. A backend without it is read through -to-host.
+   Experimental: outside the 1.x promise (DESIGN §9)."
+  (^{:api :experimental} -to-floats [b x]
+    "x's values, row-major, as a new float array (each rounded to float32;
+     booleans 0 or 1). Forces evaluation."))
+
 (defprotocol ICompiling
   "A backend that compiles functions of its arrays (MLX: mlx_compile)."
   (-compile [b f opts]
