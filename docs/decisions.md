@@ -4509,3 +4509,47 @@ resampling varies the batch; paged attention would remove that copy.
   (D4);
 - paged attention, which removes SMC's stacking copy and the memory per
   generation held (D6).
+
+### Training's memory tools: array/checkpoint and selective-log-softmax
+
+(PROVISIONAL, owner to confirm; genclj-pnu6, genclj-jksq, 2026-11-07)
+
+**What was built.** Three experimental pieces:
+- **array/checkpoint** goes through a new optional protocol, ICheckpoint.
+  - The tape records one node, which reruns f on its own tape.
+  - MLX's native gradients use mlx_custom_vjp, recomputing on
+    depends(depends(primals, outputs), cotangents), as mlx-node does.
+- **array/selective-log-softmax** computes logit[idx] - logsumexp by
+  vocabulary chunks, and never makes [B T V].
+- **qwen3/log-probs and qwen3/nll** give the SFT loss.
+
+**Measured on fenrir's CUDA**, float32, native gradients:
+- Qwen3-0.6B's NLL of 4x256 tokens: 5.6 GB beyond the weights unchecked,
+  1.55 GB checkpointed.
+- 16 SwiGLU layers: 5.2 GB against 2.8 GB.
+
+**Gradients agree:**
+- the tape against central differences: 4.4e-8;
+- checkpointed against plain: exact on the JVM;
+- MLX against the JVM's float64 tape: 2.6e-7 of the largest gradient.
+
+**The lead's calls, on the implementing agent's recommendations:**
+1. **The checkpoint orders the recompute by depends, by default.**
+   - At MLX 0.32's breadth-first evaluation it measured the same as MLX's
+     own mlx_checkpoint.
+   - It was 19% better on a depth-first tape (MLX_BFS_MAX_WIDTH=1).
+   - It is never worse. Not taken: plain mlx_checkpoint, which is less code.
+2. **A known silent case.** Under MLX's native gradients, a checkpointed
+   function that closes over a differentiated value silently loses that
+   gradient. The tape is loud (:closes-over). This is as custom-vjp is
+   today: mlx-c can't detect MLX's tracers.
+3. **selective-log-softmax refuses unknown option keys.** It is below L5,
+   ahead of genclj-c6jo's decision for the rest.
+4. **The saving shows only under a tight MLX memory limit.** Under a loose
+   limit, MLX keeps queued kernels' buffers. A bean decides whether a
+   training step sets the limit, or the docs say so.
+5. **A tie forcing only the differentiated inputs' gradients is a follow-up
+   bean**: 14% better on a layer stack, but 24% slower on Qwen3.
+
+Not yet run on Metal. It was checked on fenrir's CUDA and CPU, native and
+tape.
