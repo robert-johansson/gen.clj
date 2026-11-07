@@ -211,9 +211,11 @@
    of a static cache writes in place. The handle is not freed here: it
    stays valid (holding the husk), and x's phantom reference frees it
    once, as any array's, so nothing is freed twice and no handle MLX
-   holds is freed. Returns nil."
+   holds is freed. x's bytes come off the backend's count of new ones
+   (MlxRuntime/donate): donate a call's inputs before adopting its
+   outputs, then MlxRuntime/settleFresh. Returns nil."
   [x]
-  (consume! x (fn [^long h] (MlxRuntime/repoint h (long @husk))))
+  (consume! x (fn [^long h] (MlxRuntime/donate h (long @husk))))
   nil)
 
 (defn compile-fn
@@ -250,22 +252,29 @@
         compiled (.-handle c)
         g (fn [xs]
             (let [in (MlxRuntime/vectorOf (long-array (map #(handle %) xs)))
-                  outs (try
-                         ;; nothing between enter, the call and exit may
-                         ;; block: a virtual thread could move to another
-                         ;; carrier, whose cache is another
-                         (.enter c)
-                         (let [out (try (try (Mlx/mlx_closure_apply compiled in)
-                                             (finally (.exit c)))
-                                        (catch MlxException e (throw (mlx-error :compile xs e))))]
-                           (try (wrap-all b (MlxRuntime/vectorArrays out))
-                                (finally (MlxRaw/mlx_vector_array_free out))))
-                         (finally
-                           (MlxRaw/mlx_vector_array_free in)
-                           (fence xs)))]
+                  ^longs hs (try
+                              ;; nothing between enter, the call and exit may
+                              ;; block: a virtual thread could move to another
+                              ;; carrier, whose cache is another
+                              (.enter c)
+                              (let [out (try (try (Mlx/mlx_closure_apply compiled in)
+                                                  (finally (.exit c)))
+                                             (catch MlxException e (throw (mlx-error :compile xs e))))]
+                                (try (MlxRuntime/vectorArrays out)
+                                     (finally (MlxRaw/mlx_vector_array_free out))))
+                              (finally
+                                (MlxRaw/mlx_vector_array_free in)
+                                (fence xs)))]
               ;; after the call, which returned: the outputs' graph now
-              ;; holds the donated inputs, and the handles here let go
-              (doseq [i donate] (donate! (nth xs i)))
-              outs))]
+              ;; holds the donated inputs, and the handles here let go,
+              ;; their bytes off the count of new ones before the outputs
+              ;; are adopted (wrapped): a cache stepped in place is never
+              ;; new bytes, which would collect every few steps
+              (try (doseq [i donate] (donate! (nth xs i)))
+                   (catch Throwable t
+                     (doseq [h hs] (MlxRaw/mlx_array_free h))
+                     (throw t)))
+              (try (wrap-all b hs)
+                   (finally (MlxRuntime/settleFresh)))))]
     (MlxRuntime/adoptCompiled g c)
     g))

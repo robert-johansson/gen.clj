@@ -166,6 +166,22 @@ other values for the same key, from the same distribution.
   gated-delta kernel (ported with its notice: THIRD-PARTY-NOTICES,
   gen.backend.mlx.gated-delta), declined under MLX's native gradients,
   on the CPU device and for a key size not a multiple of 32.
+- **Performance: a compiled step that donates its arguments no longer
+  collects** (MLX backend, genclj-c7uf). The backend runs a collection
+  (System.gc) once the arrays made since the last one hold
+  `gen.mlx.gc-new-bytes` (a sixteenth of the memory), and counted a
+  step's outputs as new even when they took over the donated inputs'
+  buffers: a decode step consuming its static KV cache counted the whole
+  cache every step and collected every few steps, 1.25 ms a step at batch
+  1 on Metal (Qwen3-0.6B) and 12.5 ms at 16 rows. A donated array's bytes
+  now come off that count (`MlxRuntime/donate`, which replaces
+  `repoint`'s use, and `settleFresh`; new, rebuild with `clojure -T:build
+  java`). Values are unchanged.
+- **Performance (experimental): `gen.llm.array-engine` normalizes a
+  decode of fewer rows than its host pool's threads in parts across them**
+  (genclj-c7uf): a row of Qwen3's 151,936 logits in 0.33 ms instead of
+  0.73 (M4, four threads). Its log-normalizer and log-probabilities are
+  the same, bit for bit: the terms are summed in the same order.
 - **Changed (experimental): `gen.llm.array-engine` runs Qwen3.5 and
   Qwen3.6** (genclj-xnx3): `:model` a GGUF of architecture qwen3, qwen35
   or qwen35moe (read from its header), or a model either family's `load`

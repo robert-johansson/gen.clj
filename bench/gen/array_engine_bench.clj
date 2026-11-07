@@ -26,7 +26,8 @@
    bench/gen/qwen3_bench.clj, 467: the protocols cost nothing visible);
    token SMC 325 against 940 (124 stacked steps of 8.5 rows on average).
    The array engine computes in gen.bench.dtype (float32, the backend's
-   default float), with blocks of gen.bench.block positions (64)."
+   default float), with blocks of gen.bench.block positions (64).
+   gen.bench.sections (decode,smc) picks the rows."
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.llm.array-engine :as ae]
@@ -49,7 +50,8 @@
    :smc-tokens (long-prop "smc-tokens" 32)
    :runs (long-prop "runs" 3)
    :block (long-prop "block" 64)
-   :dtype (keyword (prop "dtype" "float32"))})
+   :dtype (keyword (prop "dtype" "float32"))
+   :sections (set (map keyword (str/split (prop "sections" "decode,smc") #",")))})
 
 (defn- llama [sym] @(requiring-resolve (symbol "gen.llm.llama" (name sym))))
 
@@ -98,19 +100,21 @@
       (let [tok ((llama 'tokenizer) v)
             text (str/join " " (repeat 40 "The sea is calm tonight, and the tide is full."))
             prompt-tokens (vec (take prompt ((llama 'tokenize) v text)))]
-        (println "\n### Decode at batch" batch "," steps "steps after" prompt "tokens\n")
-        (println "|                                              |        ms |  tokens/s |")
-        (println "|---|---:|---:|")
-        (doseq [[label make] engines]
-          (with-open [^java.io.Closeable e (make)]
-            (row label (median-ms #(decode e prompt-tokens)) (* batch steps))
-            (when (= "gen.array (MLX)" label) (println "|" (pr-str (ae/stats e)) "| | |"))))
-        (println "\n### Token SMC," particles "particles," smc-tokens "tokens each (bootstrap)\n")
-        (println "|                                              |        ms |  tokens/s |")
-        (println "|---|---:|---:|")
-        (doseq [[label make] engines]
-          (with-open [^java.io.Closeable e (make)]
-            (row label (median-ms #(smc-run e tok prompt-tokens)) (* particles smc-tokens))
-            (when (= "gen.array (MLX)" label) (println "|" (pr-str (ae/stats e)) "| | |")))))))
+        (when ((:sections settings) :decode)
+          (println "\n### Decode at batch" batch "," steps "steps after" prompt "tokens\n")
+          (println "|                                              |        ms |  tokens/s |")
+          (println "|---|---:|---:|")
+          (doseq [[label make] engines]
+            (with-open [^java.io.Closeable e (make)]
+              (row label (median-ms #(decode e prompt-tokens)) (* batch steps))
+              (when (= "gen.array (MLX)" label) (println "|" (pr-str (ae/stats e)) "| | |")))))
+        (when ((:sections settings) :smc)
+          (println "\n### Token SMC," particles "particles," smc-tokens "tokens each (bootstrap)\n")
+          (println "|                                              |        ms |  tokens/s |")
+          (println "|---|---:|---:|")
+          (doseq [[label make] engines]
+            (with-open [^java.io.Closeable e (make)]
+              (row label (median-ms #(smc-run e tok prompt-tokens)) (* particles smc-tokens))
+              (when (= "gen.array (MLX)" label) (println "|" (pr-str (ae/stats e)) "| | |"))))))))
   (println "\nMLX memory:" (pr-str ((requiring-resolve 'gen.backend.mlx.memory/memory))))
   (shutdown-agents))
