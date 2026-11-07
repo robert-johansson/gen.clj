@@ -33,14 +33,16 @@
    stacked step's rows assigned to the slots in reverse, a run's scores
    read one target late, a capacity grown with its cache dropped, the
    rows left unnormalized; each fails the contract checks named in
-   planted-bugs-fail-the-contract. A decode of fewer rows than the host
-   pool's threads normalizes each row in parts across them, the same
-   floats bit for bit (rows-normalized-in-parts-are-normalized-whole)."
-  (:require [clojure.test :refer [deftest is testing use-fixtures]]
+   planted-bugs-fail-the-contract, by its values (a check that threw
+   would not count). The rows' normalization on the host, the same
+   floats for any number of threads, is gen.llm.host-test's."
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing use-fixtures]]
             [gen.array :as array]
             [gen.llm.array-engine :as ae]
             [gen.llm.branching :as br]
             [gen.llm.branching-contract :as bc]
+            [gen.llm.host :as host]
             [gen.llm.lm :as lm]
             [gen.llm.lm-contract :as lc]
             [gen.llm.models.qwen3 :as qwen3]
@@ -154,54 +156,6 @@
           (str (name k) ", extended past a block"))
       (br/dispose! branch))))
 
-(defn- sum-by-parts
-  "The terms exp(x - m) of the n floats of xs from off summed part by part
-   (k parts), then the parts' sums: the same terms in another order."
-  [^floats xs off n k]
-  (let [m (double (reduce max (map #(aget xs (+ off %)) (range n))))
-        part (fn [p] (reduce + 0.0 (map #(Math/exp (- (double (aget xs (+ off %))) m))
-                                        (range (quot (* p n) k) (quot (* (inc p) n) k)))))]
-    (+ m (Math/log (reduce + 0.0 (map part (range k)))))))
-
-(deftest rows-normalized-in-parts-are-normalized-whole
-  ;; a decode of fewer rows than the host pool's threads normalizes each
-  ;; row in parts across them (genclj-c7uf): its log-normalizer and its
-  ;; floats are the whole row's, bit for bit, over random rows (Qwen3's
-  ;; 151,936 logits among them) in any number of parts, a -Inf logit is a
-  ;; probability 0, and NaN and +Inf are loud alike. Power: the same terms
-  ;; summed part by part give other log-normalizers on these rows, so a
-  ;; change of the sum's order fails the first check
-  (let [normalized @#'ae/normalized
-        in-parts @#'ae/normalized-in-parts
-        whole-z @#'ae/row-normalizer
-        parts-z @#'ae/row-normalizer-in-parts
-        bits #(Double/doubleToRawLongBits %)
-        pool ((requiring-resolve 'gen.llm.host/pool) "test rows-" 3)
-        r (java.util.Random. 11)
-        rows (fn [b n scale] (float-array (repeatedly (* b n) #(* scale (.nextGaussian r)))))]
-    (try
-      (doseq [n [1 2 7 128 1000 151936] k [2 5 16] scale [1.0 8.0 30.0]
-              :let [xs (rows 2 n scale)]
-              i [0 1]]
-        (is (= (bits (whole-z xs (* i n) n)) (bits (parts-z pool k xs (* i n) n))) (pr-str [n k scale i]))
-        (is (java.util.Arrays/equals ^floats (normalized xs i n "t") ^floats (in-parts pool k xs i n "t")) (pr-str [n k scale i])))
-      (let [xs (rows 1 1000 8.0)]
-        (aset xs 17 Float/NEGATIVE_INFINITY)
-        (is (java.util.Arrays/equals ^floats (normalized xs 0 1000 "t") ^floats (in-parts pool 16 xs 0 1000 "t")))
-        (is (= Float/NEGATIVE_INFINITY (aget ^floats (in-parts pool 16 xs 0 1000 "t") 17))))
-      (doseq [bad [Float/NaN Float/POSITIVE_INFINITY]
-              :let [xs (rows 1 1000 8.0)]]
-        (aset xs 500 (float bad))
-        (is (= :decode-failed (:reason (ts/thrown-data (normalized xs 0 1000 "t")))))
-        (is (= :decode-failed (:reason (ts/thrown-data (in-parts pool 16 xs 0 1000 "t"))))))
-      (is (= :decode-failed (:reason (ts/thrown-data (in-parts pool 16 (float-array (repeat 64 Float/NEGATIVE_INFINITY)) 0 64 "t"))))
-          "every logit -Inf")
-      (testing "the power: another order of the same sum moves the log-normalizer"
-        (let [xs (rows 6 151936 8.0)]
-          (is (some #(not= (bits (whole-z xs (* % 151936) 151936)) (bits (sum-by-parts xs (* % 151936) 151936 16)))
-                    (range 6)))))
-      (finally (.shutdown ^java.util.concurrent.ExecutorService pool)))))
-
 (defn- stats-delta
   "The engine's stats that (f) changes, and f's value."
   [e f]
@@ -292,7 +246,9 @@
                              :offsets (:offsets cache) :positions (:positions cache))))}
     [:score-matches-steps]]
    "rows left unnormalized"
-   [{#'ae/log-normalizer (fn [m _] m)}
+   ;; (a function of the var's primitive signature: another would throw a
+   ;; ClassCastException, which the check counts as a failure too)
+   [{#'host/log-normalizer (fn ^double [^doubles st ^long g0 ^long g1] (#'host/blocks-max st g0 g1))}
     [:normalized]]})
 
 (defn- shared-group-check
@@ -315,7 +271,9 @@
     (with-open [e (ae/engine {:model (:f32 @models) :max-branches 12 :block 16 :n-batch 8})]
       (doseq [c caught-by]
         (testing [what c]
-          (is (seq (with-redefs-fn redefs #(bc/run-check (bc/checks c) e contract-opts))))))))
+          (let [failures (with-redefs-fn redefs #(bc/run-check (bc/checks c) e contract-opts))]
+            (is (seq failures))
+            (is (not-any? #(str/starts-with? % "threw ") failures) "failed by its values, not by throwing"))))))
   (testing "a shared group stepped in place (a fork of one of its rows ignored): on MLX, whose step consumes it"
     ;; on the JVM backend a step consumes nothing (compile is the step
     ;; itself), so the values stay right there and the plant is invisible
