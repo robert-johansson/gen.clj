@@ -3851,3 +3851,169 @@ its bean):
   an agent tool call's code (a draft bean under genclj-p55l, the owner's
   call). The lead's recommendation stands: no new GenLM features until a
   consumer uses one.
+
+## 1.3.0
+
+### mlx-node parity, on mlx-c and our own C++
+
+(owner, 2026-11-07, genclj-lv7t)
+
+The owner's words: "make a milestone bean of that we have complete 'on-par'
+functionality in gen.clj as mlx-node offers, but that we have implemented it
+using mlx-c and/or our own C++ (for paged attention and continuous batching)".
+
+**The aim.** gen.clj gets every feature mlx-node has:
+- its model families and modalities;
+- its engine, with paged attention, continuous batching and speculative
+  decoding;
+- its training: SFT, and GRPO with its loss variants;
+- its server, CLI and apps.
+
+**How it is built.**
+- Over mlx-c, through gen.clj's generated FFM binding.
+- Where mlx-c cannot reach, over a C++ library of our own on MLX's C++ API:
+  new MLX primitives with their own GPU dispatch, such as paged attention and
+  the continuous batching over it.
+- mlx-node is never a dependency.
+
+**Why this split.** mlx-node's C++ was read from its source (genclj-q4xv,
+2026-11-07). It writes its own C ABI of 377 functions over MLX's C++ API.
+mlx-c reaches all of it except paged attention's custom primitives:
+- its op wrappers;
+- its gradients, compile, vmap and gradient checkpointing;
+- its fused blocks;
+- its custom Metal kernels (through mlx_fast_metal_kernel).
+
+**What this supersedes.**
+- The lead's recommendation of 2026-11-06 (in genclj-q4xv): aim at what the
+  research needs, not mlx-node's breadth, and leave out vision, audio, OCR,
+  reranking and the server.
+- DESIGN §6's reason for llama.cpp first, "it keeps gen.clj a PPL rather than
+  an LLM inference engine". It still explains M3's order, but no longer limits
+  scope.
+- The 1.2.0 entry's "no new GenLM features until a consumer uses one" is about
+  GenLM's features, so this does not touch it.
+
+**Open, in the milestone:**
+- where each part lives (the lead recommends gen.clj's core for the engine,
+  families and training; ext/ modules for modalities, server, CLI and apps;
+  native/ for the C++ library);
+- whether on par takes in the desktop app, dashboard, agent and privacy filter;
+- the order against 1.3.0, 1.4.0, M6 and M7;
+- porting mlx-node's MIT kernels with attribution, or writing our own.
+
+### 1.3.0, 1.4.0 and 1.5.0
+
+(owner, 2026-11-07; genclj-lv7t, genclj-ytew)
+
+The owner, in response to the milestone above: "I think this should be come
+gen.clj v1.3.0 (moving the kmet agent to v1.4.0 instead, and the MSA to
+v1.5.0) / on par would not mean desktop app, dashboard - and the 'agent' will
+later use the kmet agent instead".
+
+**The releases:**
+- 1.3.0 is mlx-node parity (genclj-lv7t).
+- 1.4.0 is the kmet integration (genclj-ytew, until now M6).
+- 1.5.0 is the MSA in gen.clj, built on kmet.
+
+This settles the question of 2026-11-06, which was never recorded: whether
+1.3.0 should be kmet hosting gen.clj and 1.4.0 the MSA (order B), or the
+reverse (order A). The new order is neither.
+
+**Out of 1.3.0's parity:**
+- mlx-node's desktop app and its dashboard.
+- Its coding agent: kmet is the agent, in 1.4.0.
+
+**Lead's calls, PROVISIONAL:**
+- Unknown option keys (genclj-vux3) stay in 1.3.0. 1.3.0 is the next minor
+  release, which the 1.2.1 entry waited for.
+- genclj-gvfa (the MLX-native engine) and genclj-q4xv (training) move under
+  1.3.0's milestone.
+
+### 1.3.0: where the parts live, its hosts, the M5
+
+(owner, 2026-11-07; genclj-lv7t)
+
+**Where the parts live.** The owner: "go with your recommendation".
+- **gen.clj's core:** the engine, the model families and training, as
+  gen.llm.mlx under gen.llm's protocols.
+- **ext/ modules:** the modalities, the server and the CLI, so rule 8's
+  minimal dependencies hold for the core.
+- **native/:** the C++ library for paged attention and continuous batching,
+  as a native artifact of its own.
+
+**Hosts.** The owner: "can you use the fenrir for this? (and Thor for
+backup...) you may download as much as you need to the fenrir and the Thor -
+but check so space is available".
+- fenrir does 1.3.0's CUDA and big-model work, with the Thor as backup.
+- Downloads go to either, after a space check.
+- Space checked 2026-11-07 15:46:
+  - fenrir: 169 GB free on its shared 1.9 TB root (91% used); GPU idle.
+  - Thor: 146 GB free; its Hugging Face cache already holds 325 GB, including
+    MLX checkpoints of Qwen3.5-0.8B, Qwen3.6-35B-A3B, Qwen3.8-27B and a
+    Qwen3.8-Flash-Next.
+- Lead's call, PROVISIONAL: leave at least 50 GB free on fenrir's shared
+  disk. A model that does not fit waits for the owner (deleting old caches is
+  the owner's call).
+
+**M5.** The owner expects access to an M5 Mac in 2-3 weeks. The int8
+Neural Accelerator kernels stay in 1.3.0, tested then.
+
+### 1.3.0's kernels: ported from their origins, everything around them ours
+
+(owner, 2026-11-07; genclj-lv7t)
+
+The owner approved the lead's recommendation ("yes to the kernels").
+
+**Ported, with attribution.** The GPU kernels' source is ported from where
+each kernel originated:
+- the gated-delta kernels, from mlx-node (MIT), or from mlx-lm (Apple, MIT)
+  where mlx-node's follow it;
+- the int8 and W8A8 matmuls, from mlx-node;
+- paged attention, from Hugging Face's kernels-community/paged-attention
+  (Apache-2.0, vLLM's design), not from mlx-node's copy, which dropped the
+  Apache notice.
+
+Each ported file carries a header with its source URL, commit and license,
+and has a line in a third-party notices file. The Apache-2.0 files keep their
+license, so only the C++ library carries both MIT and Apache-2.0.
+
+**Ours:**
+- every launch, as Clojure over mlx_fast_metal_kernel;
+- the engine, under gen.llm's protocols;
+- the fused blocks, as Clojure plus array/compile;
+- the C++ primitives for paged attention, written against our MLX pin with
+  no process-wide state;
+- any CUDA kernels.
+
+**Tested as every optimization is.** Each kernel is a native op behind a
+composite of gen.array ops, which is its reference, checked with planted
+mutations.
+
+**Why.** The kernels hold mlx-node's measured tuning, and the same math
+written again buys nothing. mlx-node's host code does not fit gen.clj:
+- it keeps caches in static globals, against rule 3;
+- it builds against mlx-node's own fork of MLX.
+
+### Inference over agents: best-of-K and program proposals in 1.5.0, the rest in 1.6.0
+
+(owner, 2026-11-07; genclj-ojok, genclj-tw4p)
+
+The owner approved the lead's recommendation ("yes to ... M7 split").
+
+**1.5.0, the MSA, takes:**
+- the model of a trajectory (genclj-mtwo);
+- best-of-K with verifiers (the kmet plan's stage 4);
+- the LLM proposing programs scored by marginal likelihood (genclj-0izr).
+
+The MSA's search over synthesized programs needs all three.
+
+**M7 becomes 1.6.0 and keeps:**
+- SMC over trajectories;
+- repair by MH or regeneration;
+- the probability of success;
+- inverse planning;
+- learning from session scores.
+
+These stay gated on best-of-K's results at matched compute, as the kmet plan
+already gates them.

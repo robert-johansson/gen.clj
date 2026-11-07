@@ -764,6 +764,13 @@ decision is appended there, and this summary changes with it.
   is ext/codegen's alone. [decided](docs/decisions.md#codegen-as-a-library-the-core-gets-no-code-evaluation)
 - GenLM parity is an epic, 1.2.0's theme, with llama.cpp v0.9.0.
   [epic](docs/decisions.md#genlms-gaps), [theme](docs/decisions.md#120s-theme-language-models)
+- mlx-node parity is 1.3.0 (kmet 1.4.0, the MSA 1.5.0, inference over
+  agents 1.6.0): its features over mlx-c, with C++ of our own only for paged
+  attention and continuous batching; mlx-node never a dependency.
+  [decided](docs/decisions.md#mlx-node-parity-on-mlx-c-and-our-own-c), [releases](docs/decisions.md#130-140-and-150), [split](docs/decisions.md#inference-over-agents-best-of-k-and-program-proposals-in-150-the-rest-in-160)
+- GPU kernels are ported from where they originated, with attribution and
+  their license kept; launches, engines and primitives are ours; each kernel
+  is checked against its composite. [decided](docs/decisions.md#130s-kernels-ported-from-their-origins-everything-around-them-ours)
 
 ### Tests, laws and the book
 
