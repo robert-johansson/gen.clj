@@ -539,7 +539,7 @@
   importance-resampling {:arglists ([model args observations n] [model args observations n opts])}
   importance-sampling {:arglists ([model args observations n] [model args observations n opts])}
   traces {:arglists ([result])}
-  weighted-sample {:arglists ([model args observations {:keys [proposal proposal-args]} key])}}
+  weighted-sample {:arglists ([model args observations {:keys [proposal proposal-args], :as opts} key])}}
 
  gen.inference.kernel
  {->Kernel {:arglists ([f reverse-f particles reverse-particles])}
@@ -590,8 +590,8 @@
  gen.inference.particle-filter
  {choice {:arglists ([state addr])}
   choice-product {:arglists ([address-values])}
-  coalesce {:arglists ([state] [state {:keys [by], :or {by host-choices}}])}
-  dereplicate {:arglists ([state k] [state k {:keys [layout method key], :or {layout :contiguous, method :keepfirst}}])}
+  coalesce {:arglists ([state] [state {:keys [by], :or {by host-choices}, :as opts}])}
+  dereplicate {:arglists ([state k] [state k {:keys [layout method key], :or {layout :contiguous, method :keepfirst}, :as opts}])}
   ess {:arglists ([state])}
   initialize {:arglists ([model args observations n] [model args observations n {:keys [proposal batched? strata layout], :or {layout :contiguous}, :as opts}])}
   introduce {:arglists ([state observations n] [state observations n {:keys [model args], :as opts}])}
@@ -602,8 +602,8 @@
   move-reweight {:arglists ([state kernel] [state kernel key])}
   proportions {:arglists ([state f])}
   rejuvenate {:arglists ([state kernel] [state kernel key])}
-  replicate {:arglists ([state k] [state k {:keys [layout], :or {layout :contiguous}}])}
-  resample {:arglists ([state] [state {:keys [method key priority n], :or {method :multinomial}}])}
+  replicate {:arglists ([state k] [state k {:keys [layout], :or {layout :contiguous}, :as opts}])}
+  resample {:arglists ([state] [state {:keys [method key priority n], :or {method :multinomial}, :as opts}])}
   resize {:arglists ([state n] [state n opts])}
   reweighting {:arglists ([selection] [proposal proposal-args] [proposal proposal-args opts])}
   sample-unweighted-traces {:arglists ([state n] [state n key])}
@@ -649,7 +649,7 @@
  {black-box-vi {:arglists ([model model-args observations q q-args store optimizer {:keys [samples], :or {samples 20}, :as opts}])}
   black-box-vimco {:arglists ([model model-args observations q q-args store optimizer {:keys [samples estimates], :or {samples 10, estimates 1}, :as opts}])}
   elbo-gradient {:arglists ([model model-args observations q q-args store n {:keys [estimator], :as opts}])}
-  vimco-gradient {:arglists ([model model-args observations q q-args store k {:keys [baseline key model-store batched? traces?], :or {baseline :geometric}}])}}
+  vimco-gradient {:arglists ([model model-args observations q q-args store k {:keys [baseline key model-store batched? traces?], :or {baseline :geometric}, :as opts}])}}
 
  gen.inference.weights
  {ess {:arglists ([log-weights])}

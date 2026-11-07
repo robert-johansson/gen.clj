@@ -20,7 +20,9 @@
    generative function called on (trace, proposal-args...) for steps (and on
    proposal-args alone for initialize), and :key. maybe-resample takes
    :ess-threshold (n/2 by default), :method (:multinomial, as Gen.jl, or
-   :systematic, :stratified or :residual) and :key.
+   :systematic, :stratified or :residual) and :key. Each options map holds
+   the keys its function reads and no others: an unknown key is a loud
+   error, its data naming the keys taken (:accepted).
 
    With {:batched? true} at initialize, the particles run as one batched
    execution (gen.batched): the state holds :particles, a particle
@@ -56,6 +58,7 @@
             [gen.inference.importance :as imp]
             [gen.inference.kernel :as kernel]
             [gen.inference.mh :as mh]
+            [gen.inference.options :as options]
             [gen.inference.weights :as w]
             [gen.random :as rng]))
 
@@ -112,6 +115,7 @@
    ignores :batched?."
   ([model args observations n] (initialize model args observations n {}))
   ([model args observations n {:keys [proposal batched? strata layout] :or {layout :contiguous} :as opts}]
+   (options/check `initialize opts #{:proposal :proposal-args :batched? :strata :layout :key})
    (when (and (= :required batched?) (or proposal strata))
      (throw (ex-info (str "initialize: :batched? :required, but " (if proposal "a custom proposal" ":strata")
                           " runs one particle at a time")
@@ -127,7 +131,8 @@
      (let [;; a particle generated with constraints, its weight (plus
            ;; shift) read as moved's are
            particle (fn [constraints key & [shift]]
-                      (let [{:keys [trace weight]} (imp/weighted-sample model args constraints opts key)]
+                      (let [{:keys [trace weight]} (imp/weighted-sample model args constraints
+                                                                         (select-keys opts [:proposal :proposal-args]) key)]
                         (evaluated trace (cond-> weight shift (+ shift)))))
            results (if strata
                      (let [strata (vec strata)
@@ -188,6 +193,7 @@
    error (gfi/assess-backward)."
   ([state args argdiffs observations] (step state args argdiffs observations {}))
   ([state args argdiffs observations {:keys [proposal proposal-args backward backward-args] :as opts}]
+   (options/check `step opts #{:proposal :proposal-args :backward :backward-args :key})
    (when (and backward (not proposal))
      (throw (ex-info "A step's :backward proposal weighs a forward :proposal's changes; there is no :proposal" {})))
    (when (and proposal (:particles state) (= :required (:batched? state)))
@@ -278,6 +284,8 @@
     [(into kept drawn)
      (into (mapv #(+ (lw-normal %) (Math/log n)) kept) (when c (repeat m (Math/log (/ n c)))))]))
 
+(def ^:private resample-keys #{:method :key :priority :n})
+
 (defn resample
   "Particles drawn in proportion to their weights; the weights become
    equal, and the log marginal likelihood so far moves into :log-ml.
@@ -292,7 +300,8 @@
      the current number (pf_optimal_resize!): every particle survives at
      most once, and the weights stay unequal."
   ([state] (resample state {}))
-  ([state {:keys [method key priority n] :or {method :multinomial}}]
+  ([state {:keys [method key priority n] :or {method :multinomial} :as opts}]
+   (options/check `resample opts resample-keys)
    (let [lw (host-log-weights state)
          n-old (count lw)
          n (or n n-old)
@@ -315,9 +324,9 @@
 
 (defn resize
   "The state with n particles, resampled (GenParticleFilters' pf_resize!);
-   options as for resample."
+   options as for resample, but :n."
   ([state n] (resize state n {}))
-  ([state n opts] (resample state (assoc opts :n n))))
+  ([state n opts] (resample state (assoc (options/check `resize opts (disj resample-keys :n)) :n n))))
 
 (def ^:private no-batched-form
   (str "The kernel has no batched form (gen.inference.kernel/batched-form), so pf/rejuvenate moved the particles"
@@ -377,6 +386,7 @@
    (fn [trace key] (select-keys (gfi/regenerate trace selection key) [:trace :weight])))
   ([proposal proposal-args] (reweighting proposal proposal-args {}))
   ([proposal proposal-args opts]
+   (options/check `reweighting opts #{:backward :backward-args :involution})
    (fn [trace key]
      (let [[k-propose k-update] (rng/split key)
            {t :trace la :log-alpha} (mh/move trace proposal proposal-args opts k-propose k-update)]
@@ -400,7 +410,8 @@
    in contiguous blocks (:layout :contiguous, the default; particle 0's
    copies are 0 … k-1) or interleaved (:interleaved; they are 0, n, 2n, …)."
   ([state k] (replicate state k {}))
-  ([state k {:keys [layout] :or {layout :contiguous}}]
+  ([state k {:keys [layout] :or {layout :contiguous} :as opts}]
+   (options/check `replicate opts #{:layout})
    (let [idx (slots layout (count (:log-weights state)) k)]
      (select-particles state idx (mapv (vec (:log-weights state)) idx)))))
 
@@ -411,7 +422,8 @@
    its weight, undoing replicate; :sample draws one in proportion to the
    group's weights and gives it the group's mean weight (:key)."
   ([state k] (dereplicate state k {}))
-  ([state k {:keys [layout method key] :or {layout :contiguous method :keepfirst}}]
+  ([state k {:keys [layout method key] :or {layout :contiguous method :keepfirst} :as opts}]
+   (options/check `dereplicate opts #{:layout :method :key})
    (let [n-old (count (:log-weights state))
          n (quot n-old k)
          _ (when-not (zero? (rem n-old k))
@@ -442,7 +454,8 @@
    weights times m/n (m particles left of n), so the estimate of the
    marginal likelihood stays as it was."
   ([state] (coalesce state {}))
-  ([state {:keys [by] :or {by host-choices}}]
+  ([state {:keys [by] :or {by host-choices} :as opts}]
+   (options/check `coalesce opts #{:by})
    (let [lw (host-log-weights state)
          trs (traces state)
          ;; in order of first appearance
@@ -459,6 +472,7 @@
    the old particles' weights."
   ([state observations n] (introduce state observations n {}))
   ([state observations n {:keys [model args] :as opts}]
+   (options/check `introduce opts #{:model :args :proposal :proposal-args :key})
    (let [state (unbatched state)
          first-trace (first (:traces state))
          fresh (initialize (or model (:gen-fn first-trace)) (or args (:args first-trace)) observations n
@@ -537,10 +551,11 @@
    default). The returned state's :resampled? says whether it did."
   ([state] (maybe-resample state {}))
   ([state {:keys [ess-threshold] :as opts}]
+   (options/check `maybe-resample opts (conj resample-keys :ess-threshold))
    (let [n (count (:log-weights state))
          threshold (or ess-threshold (/ n 2.0))]
      (if (< (ess state) threshold)
-       (assoc (resample state opts) :resampled? true)
+       (assoc (resample state (dissoc opts :ess-threshold)) :resampled? true)
        (assoc state :resampled? false)))))
 
 (defn log-ml-estimate

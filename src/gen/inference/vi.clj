@@ -55,7 +55,11 @@
    draws differ from the unbatched ones, with the same distribution. q's
    draws are then a particle collection, returned as :particles in place
    of :traces (gen.batched/traces gives the scalar ones); VIMCO's
-   resampled traces, drawn from several runs, stay :traces."
+   resampled traces, drawn from several runs, stay :traces.
+
+   Each options map holds the keys its function reads and no others: an
+   unknown key is a loud error, its data naming the keys taken
+   (:accepted)."
   {:api :stable}
   (:refer-clojure :exclude [+ - * /])
   (:require [gen.array :as array :refer [+ - /]]
@@ -65,6 +69,7 @@
             [gen.dynamic :as dyn]
             [gen.gfi :as gfi]
             [gen.gradients :as grad]
+            [gen.inference.options :as options]
             [gen.inference.weights :as w]
             [gen.learning :as learn]
             [gen.random :as rng]
@@ -230,17 +235,24 @@
       traces? (merge (select-keys drawn [:traces :particles]))
       fallback (assoc :fallback fallback))))
 
+(def ^:private gradient-keys
+  "The keys of elbo-gradient's options; vimco-gradient's are these but
+   :estimator."
+  #{:estimator :baseline :key :model-store :batched? :traces?})
+
 (defn elbo-gradient
   "One iteration's estimates: {:objective the mean log weight (the ELBO),
    :grads its gradient with respect to q's store} from n draws, by the
    score-function estimator, or with :estimator :reparam the pathwise one
-   (see the namespace doc for :baseline, :estimator and :batched?); with
+   (see the namespace doc for :baseline, :estimator and :batched?), its
+   draws from :key (or the implicit source); with
    :model-store, also :model-grads, its gradient with respect to the model's
    store; with :batched?, :fallback, why the draws ran one at a time, if
    they did (:batched? :required throws with it instead); with :traces?
    true, q's n draws, :traces (scalar traces of q under store), or
    :particles with :batched?."
   [model model-args observations q q-args store n {:keys [estimator] :as opts}]
+  (options/check `elbo-gradient opts gradient-keys)
   (case (or estimator :score)
     :score (score-elbo-gradient model model-args observations q q-args store n opts)
     :reparam (reparam-elbo-gradient model model-args observations q q-args store n opts)
@@ -253,9 +265,10 @@
    others' (:baseline :geometric, the default) or their arithmetic mean
    (:arithmetic), as Gen.jl's geometric keyword. With :model-store, also
    :model-grads, the bound's gradient with respect to the model's store;
-   :batched? and :traces? as elbo-gradient's, with :traces? the draws'
-   :log-normalized-weights too."
-  [model model-args observations q q-args store k {:keys [baseline key model-store batched? traces?] :or {baseline :geometric}}]
+   :key, :batched? and :traces? as elbo-gradient's, with :traces? the
+   draws' :log-normalized-weights too."
+  [model model-args observations q q-args store k {:keys [baseline key model-store batched? traces?] :or {baseline :geometric} :as opts}]
+  (options/check `vimco-gradient opts (disj gradient-keys :estimator))
   (when (< k 2)
     (throw (ex-info (str "VIMCO's leave-one-out control variates need K of at least 2, given " k) {:samples k})))
   (let [q (dyn/with-params q store)
@@ -325,9 +338,12 @@
    and :model-store and :model-state with the model's (see the namespace
    doc)."
   [model model-args observations q q-args store optimizer {:keys [samples] :or {samples 20} :as opts}]
+  (options/check `black-box-vi opts #{:iters :samples :estimator :baseline :model-store :model-optimizer :batched?
+                                     :callback :state :model-state :key})
   (fit (fn [store model-store key traces?]
          (elbo-gradient model model-args observations q q-args store samples
-                        (assoc opts :key key :model-store model-store :traces? traces?)))
+                        (assoc (select-keys opts [:estimator :baseline :batched?])
+                               :key key :model-store model-store :traces? traces?)))
        store optimizer opts))
 
 (defn- resampled
@@ -349,9 +365,12 @@
    Returns black-box-vi's keys, :traces one trace of q for each estimate,
    resampled from its K draws by their normalized weights (Gen.jl's)."
   [model model-args observations q q-args store optimizer {:keys [samples estimates] :or {samples 10 estimates 1} :as opts}]
+  (options/check `black-box-vimco opts #{:iters :samples :estimates :baseline :model-store :model-optimizer :batched?
+                                        :callback :state :model-state :key})
   (fit (fn [store model-store key traces?]
          (let [runs (mapv #(vimco-gradient model model-args observations q q-args store samples
-                                           (assoc opts :key % :model-store model-store :traces? traces?))
+                                           (assoc (select-keys opts [:baseline :batched?])
+                                                  :key % :model-store model-store :traces? traces?))
                           (rng/split key estimates))
                ;; the key at index estimates, past the runs' (split's keys
                ;; are fold-in's), so resampling leaves their draws as they were

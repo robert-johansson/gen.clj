@@ -49,10 +49,12 @@
    {:accept-stat :n-leapfrog :accepted? :diverged? :eps}, the acceptance
    statistic min(1, α), :eps the step taken (jittered). The result counts
    the divergences after the warmup and in it. With :warmup 0, sample
-   draws at :eps and :inv-metric as given, such as an adapt's. The
-   inverse metric returned, adapted or given, is labeled: a choice map of
-   the selected choices' variances by address (mcmc/inv-metric), which
-   the kernels take as :inv-metric. The state is
+   draws at :eps and :inv-metric as given, such as an adapt's. Each takes
+   the options it reads and no others (adapt neither :samples nor :keep):
+   an unknown key is a loud error, its data naming the keys taken
+   (:accepted). The inverse metric returned, adapted or given, is labeled:
+   a choice map of the selected choices' variances by address
+   (mcmc/inv-metric), which the kernels take as :inv-metric. The state is
    threaded through each iteration and every iteration takes its own key,
    so the same key gives the same result; omitting one draws from the
    implicit key source.
@@ -71,6 +73,7 @@
             [gen.gradients :as grad]
             [gen.inference.kernel :as kernel]
             [gen.inference.mcmc :as mcmc]
+            [gen.inference.options :as options]
             [gen.random :as rng]))
 
 (set! *warn-on-reflection* true)
@@ -79,12 +82,21 @@
   {:warmup 1000 :kernel :nuts :L 10 :max-depth 10 :eps 1.0 :jitter 0.0 :adapt-metric? true
    :target-accept 0.8 :gamma 0.05 :t0 10.0 :kappa 0.75 :init-buffer 75 :term-buffer 50 :window 25})
 
+(def ^:private adapt-keys
+  "The keys of adapt's options: the defaults', :inv-metric, :compile? and
+   :key."
+  (into #{:inv-metric :compile? :key} (keys defaults)))
+
+(def ^:private sample-keys
+  "The keys of sample's options: adapt's, :samples and :keep."
+  (conj adapt-keys :samples :keep))
+
 (defn- settings
-  "opts over the defaults, checked: loud for a value outside its range."
-  [opts]
-  (when-not (or (nil? opts) (map? opts))
-    (throw (ex-info (str "The sampler takes an options map, not " (pr-str opts)) {:value opts})))
-  (let [s (merge defaults opts)
+  "opts over the defaults, checked for who (adapt or sample, its option
+   keys accepted): loud for a key it does not read and for a value outside
+   its range."
+  [who accepted opts]
+  (let [s (merge defaults (options/check who opts accepted))
         positive? #(and (number? %) (Double/isFinite (double %)) (pos? (double %)))
         checks {:warmup nat-int? :L pos-int? :max-depth pos-int? :eps positive? :adapt-metric? boolean?
                 :kernel #{:nuts :hmc} :target-accept #(and (positive? %) (< (double %) 1.0)) :gamma positive?
@@ -234,7 +246,7 @@
    statistics. See the namespace for the options."
   ([trace selection opts] (adapt trace selection opts nil))
   ([trace selection opts key]
-   (let [{:keys [warmup eps inv-metric adapt-metric?] :as opts} (settings opts)
+   (let [{:keys [warmup eps inv-metric adapt-metric?] :as opts} (settings `adapt adapt-keys opts)
          [k-init k-steps] (rng/split (or key (:key opts) (gfi/next-key)))
          ws (when adapt-metric? (windows warmup opts))
          window-end? (set (map second ws))
@@ -280,13 +292,13 @@
    namespace for the options."
   ([trace selection opts] (sample trace selection opts nil))
   ([trace selection opts key]
-   (let [{:keys [samples warmup keep] :as opts} (settings opts)
+   (let [{:keys [samples warmup keep] :as opts} (settings `sample sample-keys opts)
          _ (when-not (nat-int? samples)
              (throw (ex-info (str "sample needs :samples ≥ 0, not " (pr-str samples)) {:reason :invalid-option :samples samples})))
          [read finish] (if (some? keep) (kernel/keeping keep) [identity nil])
          [k-warmup k-draws] (rng/split (or key (:key opts) (gfi/next-key)))
          adapted (if (pos? (long warmup))
-                   (adapt trace selection opts k-warmup)
+                   (adapt trace selection (dissoc opts :samples :keep) k-warmup)
                    {:trace trace :eps (:eps opts) :inv-metric (mcmc/inv-metric trace selection (:inv-metric opts))
                     :stats []})
          {:keys [eps inv-metric]} adapted

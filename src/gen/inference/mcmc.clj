@@ -51,7 +51,9 @@
    each step. A starting trace whose log density or gradient is not finite
    (NaN, or a probability of 0) is an error, as Stan refuses such a start.
    Keys are an optional last argument (or :key in an options map); omitting
-   one draws from the implicit key source.
+   one draws from the implicit key source. An options map holds the keys
+   its kernel reads and no others: an unknown key ({:steps 50} for :L) is
+   a loud error, its data naming the keys the kernel takes (:accepted).
 
    The -particles kernels move every particle of a gen.batched collection,
    n independent chains each accepted on its own, at once: one batched
@@ -77,6 +79,7 @@
             [gen.inference.cache :as cache]
             [gen.inference.mcmc.metric :as metric]
             [gen.inference.mh :as mh]
+            [gen.inference.options :as options]
             [gen.random :as rng]
             [gen.selection :as sel]
             [gen.trace]))
@@ -349,13 +352,21 @@
             log-q (- (q-lp v bwd-mu) (q-lp v' fwd-mu))]
         [v' log-q (array/logical-not (array/logical-and ok (finite g' log-q))) (finite lp g) lp lp']))))
 
-(defn- options
-  "opts, an options map or nil (loud for anything else, such as a key in
-   its place, which the kernel would not see)."
-  [opts]
-  (if (or (nil? opts) (map? opts))
-    opts
-    (throw (ex-info (str "The kernel takes an options map here, not " (pr-str opts)) {:value opts}))))
+(def ^:no-doc option-keys
+  "The keys of each kernel's options map, which refuses any other
+   (gen.inference.options): gen.inference.kernel's kernels take the same,
+   but :key."
+  {:hmc #{:L :eps :inv-metric :jitter :compile? :key}
+   :mala #{:inv-metric :compile? :key}
+   :nuts #{:eps :max-depth :inv-metric :jitter :compile? :key}
+   :map-optimize #{:max-step-size :tau :min-step-size}})
+
+(defn- checked
+  "opts, the options map (or nil) of the kernel named kernel (hmc,
+   hmc-particles, …), checked against kind's keys: loud for anything but
+   a map or nil, and for a key the kernel does not read."
+  [kernel kind opts]
+  (options/check (symbol "gen.inference.mcmc" kernel) opts (option-keys kind)))
 
 (defn- positive!
   "x, loud unless a positive finite number: the kernel's step size, named
@@ -415,7 +426,7 @@
   ([trace selection tau] (mala trace selection tau nil))
   ([trace selection tau key-or-opts]
    (positive! "mala" "tau" :tau tau)
-   (let [{:keys [key] :as opts} (step-opts key-or-opts)
+   (let [{:keys [key] :as opts} (checked "mala" :mala (step-opts key-or-opts))
          move (mala-move trace selection tau opts key)]
      (check-start! "mala" (:start-ok move) trace selection)
      (moved trace move (second (rng/split key 3))))))
@@ -517,11 +528,11 @@
 
 (defn- hmc-options
   "hmc's options (an options map or nil) over its defaults, :L 10, :eps 0.1
-   and :jitter 0, checked as nuts checks its own: loud for an :eps that is
-   not a positive number, an :L that is not a positive integer, a :jitter
-   outside [0, 1)."
+   and :jitter 0, checked as nuts checks its own: loud for a key hmc does
+   not read, an :eps that is not a positive number, an :L that is not a
+   positive integer, a :jitter outside [0, 1)."
   [kernel opts]
-  (let [{:keys [L eps jitter] :as opts} (merge {:L 10 :eps 0.1 :jitter 0} (options opts))]
+  (let [{:keys [L eps jitter] :as opts} (merge {:L 10 :eps 0.1 :jitter 0} (checked kernel :hmc opts))]
     (positive! kernel ":eps" :eps eps)
     (positive-int! kernel :L L)
     (check-jitter! jitter)
@@ -745,7 +756,7 @@
   ([trace selection] (nuts trace selection nil))
   ([trace selection key-or-opts] (let [opts (step-opts key-or-opts)] (nuts trace selection opts (:key opts))))
   ([trace selection opts key]
-   (let [{:keys [eps max-depth compile? inv-metric jitter] :or {eps 0.1 max-depth 10 jitter 0}} (options opts)
+   (let [{:keys [eps max-depth compile? inv-metric jitter] :or {eps 0.1 max-depth 10 jitter 0}} (checked "nuts" :nuts opts)
          eps (jittered (positive! "nuts" ":eps" :eps eps) jitter key)
          _ (positive-int! "nuts" :max-depth max-depth)
          [k-momenta k-tree k-update] (rng/split key 3)
@@ -805,7 +816,7 @@
    Options: :max-step-size (0.1), :tau (0.5), :min-step-size (1e-16)."
   ([trace selection] (map-optimize trace selection nil))
   ([trace selection opts]
-   (let [{:keys [values moved?]} (map-move trace selection opts)]
+   (let [{:keys [values moved?]} (map-move trace selection (checked "map-optimize" :map-optimize opts))]
      (if (array/truthy? moved?)
        {:trace (:trace (gfi/update trace values (rng/key 0))) :accepted? true}
        {:trace trace :accepted? false}))))
@@ -895,7 +906,7 @@
   ([ps selection] (hmc-particles ps selection nil))
   ([ps selection key-or-opts] (let [opts (step-opts key-or-opts)] (hmc-particles ps selection opts (:key opts))))
   ([ps selection opts key]
-   (let [{:keys [eps jitter] :as opts} (hmc-options "hmc-particles" (uncompiled! "hmc-particles" (options opts)))
+   (let [{:keys [eps jitter] :as opts} (hmc-options "hmc-particles" (uncompiled! "hmc-particles" opts))
          jitter (double jitter)
          ;; jittered's step, its u drawn per particle (an array, not read)
          move (fn [t k]
@@ -912,7 +923,7 @@
   ([ps selection tau] (mala-particles ps selection tau nil))
   ([ps selection tau key-or-opts]
    (positive! "mala-particles" "tau" :tau tau)
-   (let [{:keys [key] :as opts} (uncompiled! "mala-particles" (step-opts key-or-opts))]
+   (let [{:keys [key] :as opts} (uncompiled! "mala-particles" (checked "mala-particles" :mala (step-opts key-or-opts)))]
      (particle-moves "mala" ps selection #(mala-move %1 selection tau opts %2) key))))
 
 (defn map-optimize-particles
@@ -925,6 +936,7 @@
    it too)."
   ([ps selection] (map-optimize-particles ps selection nil))
   ([ps selection opts]
+   (checked "map-optimize-particles" :map-optimize opts)
    (let [{{:keys [values moved?]} :result m :fallback} (batched/map-particles* ps (fn [t _] (map-move t selection opts)) nil)
          accepted (mapv true? (array/->clj moved?))]
      (cond-> {:particles (cond-> (if (some true? accepted) (batched/set-choices ps values) ps)

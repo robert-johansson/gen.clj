@@ -303,7 +303,8 @@
         (is (ts/close? ldj (:log-abs-det (run {:retained (sel/select :x)}))))
         (is (ts/close? ldj (:log-abs-det (run {:retained (sel/select :x :y)}))) "a written choice is no kept input")
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"maps 3 dimensions to 2" (run nil)) "consumed by default")
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"takes :retained" (run {:retain (sel/select :x)})))
+        (is (= {:reason :unknown-options :fn `tf/run :unknown [:retain] :accepted [:aux-retval :retained]}
+               (ts/thrown-data (run {:retain (sel/select :x)}))))
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"is a selection" (run {:retained [:x]})))))))
 
 (deftest the-involution-check

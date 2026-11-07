@@ -62,6 +62,7 @@
             [gen.gfi :as gfi]
             [gen.inference.mcmc :as mcmc]
             [gen.inference.mh :as mh]
+            [gen.inference.options :as options]
             [gen.random :as rng]))
 
 (set! *warn-on-reflection* true)
@@ -79,9 +80,7 @@
   ([f] (->Kernel f nil nil nil))
   ([f reverse-f] (->Kernel f reverse-f nil nil))
   ([f reverse-f opts]
-   (when-let [unknown (seq (remove #{:particles :reverse-particles} (keys opts)))]
-     (throw (ex-info (str "kernel: unknown options " (vec unknown) "; the options are :particles and :reverse-particles")
-                     {:unknown (vec unknown)})))
+   (options/check `kernel opts #{:particles :reverse-particles})
    (->Kernel f reverse-f (:particles opts) (:reverse-particles opts))))
 
 (defn symmetric
@@ -553,14 +552,13 @@
 
 (defn- kernel-opts
   "A gradient kernel's options, an options map or nil, without :key: the
-   kernel takes a key at each application."
-  [what opts]
-  (when-not (or (nil? opts) (map? opts))
-    (throw (ex-info (str what " takes an options map, not " (pr-str opts)) {:value opts})))
-  (when (contains? opts :key)
+   kernel takes a key at each application. Loud for a key mcmc's kernel
+   of kind does not read (mcmc/option-keys)."
+  [what kind opts]
+  (when (and (map? opts) (contains? opts :key))
     (throw (ex-info (str what ": a kernel takes its key at each application, not in its options")
                     {:key (:key opts)})))
-  opts)
+  (options/check (symbol "gen.inference.kernel" what) opts (disj (mcmc/option-keys kind) :key)))
 
 (defn- device-key
   "A gradient kernel's key in the :device program cache: its kind and
@@ -576,7 +574,7 @@
    :inv-metric, :jitter, :compile?). Reversible: its own reversal."
   ([selection] (hmc selection nil))
   ([selection opts]
-   (let [opts (kernel-opts "hmc" opts)
+   (let [opts (kernel-opts "hmc" :hmc opts)
          batched-opts (dissoc opts :compile?)]
      (assoc (symmetric (fn [trace key] (mcmc/hmc trace selection opts key))
                        (fn [ps key] (mcmc/hmc-particles ps selection batched-opts key)))
@@ -589,7 +587,7 @@
    options (:inv-metric, :compile?). Reversible: its own reversal."
   ([selection tau] (mala selection tau nil))
   ([selection tau opts]
-   (let [opts (kernel-opts "mala" opts)
+   (let [opts (kernel-opts "mala" :mala opts)
          batched-opts (dissoc opts :compile?)]
      (assoc (symmetric (fn [trace key] (mcmc/mala trace selection tau (assoc opts :key key)))
                        (fn [ps key] (mcmc/mala-particles ps selection tau (assoc batched-opts :key key))))
@@ -604,7 +602,7 @@
    detailed balance): its own reversal."
   ([selection] (nuts selection nil))
   ([selection opts]
-   (let [opts (kernel-opts "nuts" opts)]
+   (let [opts (kernel-opts "nuts" :nuts opts)]
      (symmetric (fn [trace key] (mcmc/nuts trace selection opts key))))))
 
 (defn elliptical-slice
@@ -619,7 +617,7 @@
    distribution unchanged, so it declares no reversal."
   ([selection] (map-optimize selection nil))
   ([selection opts]
-   (let [opts (kernel-opts "map-optimize" opts)]
+   (let [opts (kernel-opts "map-optimize" :map-optimize opts)]
      (kernel (fn [trace _key] (mcmc/map-optimize trace selection opts))
              nil
              {:particles (fn [ps _key] (mcmc/map-optimize-particles ps selection opts))}))))
@@ -653,11 +651,12 @@
 (defn run
   "Apply the kernel repeatedly from trace and collect samples. opts:
    :samples (required), :burn (steps discarded first, 0), :thin (steps per
-   sample, 1), :key, :keep. Returns {:traces [...] :acceptance-rate r
-   :divergences n}: the rate over every move of every step (a combinator's
-   steps make several), or nil when the kernel does not report its accept
-   decisions, and how many proposals diverged (HMC's, MALA's and NUTS's
-   :diverged?, as Stan counts them). With :keep, a function of a trace,
+   sample, 1), :key, :keep, :device (and with it :float); another key is a
+   loud error, its data naming the keys run takes (:accepted). Returns
+   {:traces [...] :acceptance-rate r :divergences n}: the rate over every
+   move of every step (a combinator's steps make several), or nil when the
+   kernel does not report its accept decisions, and how many proposals
+   diverged (HMC's, MALA's and NUTS's :diverged?, as Stan counts them). With :keep, a function of a trace,
    the result holds :draws in place of :traces: (keep t) for each kept
    trace t, its arrays read on the host, so that the chain holds its
    current trace alone (a long chain on MLX, say). (run k t {:samples
@@ -676,6 +675,7 @@
    it, so make the model's data arrays once."
   ;; keep is named for the arglists: run-on-handler reads it from opts
   [kernel trace {:keys [samples burn thin key #_{:clj-kondo/ignore [:unused-binding]} keep device] :or {burn 0 thin 1} :as opts}]
+  (options/check `run opts #{:samples :burn :thin :key :keep :device :float})
   (when-not (and (nat-int? samples) (nat-int? burn) (pos-int? thin))
     (throw (ex-info "run needs :samples ≥ 0, :burn ≥ 0 and :thin ≥ 1" {:samples samples :burn burn :thin thin})))
   (let [steps (+ burn (* samples thin))
