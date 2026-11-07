@@ -4998,3 +4998,31 @@ most", holds only for decoding where just the chosen token is read back.
 
 The owner's decision on MLX for NVIDIA should wait for genclj-9y6y's numbers
 on that path.
+
+### Continuous batching: its design (opt-in, no protocol change)
+
+(PROVISIONAL, owner to confirm; genclj-b3ow, 2026-11-07 night; the design
+before its build)
+
+**No protocol changes.** Branching, LM and Slots stay as they are. Batching
+is a new optional protocol, implemented by the engine's paged mode under
+:continuous? true.
+
+**How a forward is built.**
+- Between forwards, the engine's loop admits every queued request and runs
+  one forward over all of them: every one-token read, and a prefill chunk for
+  the oldest multi-token read, within :n-batch.
+- It waits for other callers at most a quarter of the last forward's time.
+  A lone caller is never delayed.
+- Engines without Batching run exactly as today.
+
+**The owner's call (item 7 of the design).** Under :continuous?, concurrent
+callers' results depend on how their calls were gathered, within the
+engine's band. Draws at near-ties may then differ between runs. This
+revisits, at the engine layer, the reasoning behind the LM's "no
+autobatcher" decision; that is why it is opt-in.
+- A single-threaded program never batches across calls, so it stays
+  bit-reproducible.
+- Concurrent clients each hold their own LM over the shared engine. An LM
+  that served concurrent callers would change its contract (the owner's call;
+  not done).
