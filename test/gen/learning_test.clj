@@ -211,6 +211,64 @@
       (is (c/> 3.0 (ts/number (get-in store' [:nested :c]))) (str (:kind opt) ": :c ascends, downhill")))))
 
 ;; ---------------------------------------------------------------------------
+;; Experimental: a learning-rate schedule, and clipping by value
+;; ---------------------------------------------------------------------------
+
+(defn- schedule-moves
+  "The moves of n steps of sgd at lr 1 along a gradient of ones under the
+   schedule opts: each step's factor."
+  [opts n]
+  (let [opt (learn/warmup-cosine (learn/sgd {:lr 1.0}) opts)]
+    (loop [i 0 store {:w (array/array [0.0])} state (learn/init opt store) out []]
+      (if (c/== i n)
+        out
+        (let [[store' state'] (learn/step opt state store {:w (array/array [1.0])})]
+          (is (= {:t (inc i) :state nil} state') "the schedule's state counts its steps")
+          (recur (inc i) store' state' (conj out (ts/number (- (:w store') (:w store))))))))))
+
+(defn- cosine [final p] (c/+ final (c/* (c/- 1.0 final) 0.5 (c/+ 1.0 (Math/cos (c/* Math/PI p))))))
+
+(deftest warmup-cosine-is-hugging-face-s-schedule
+  ;; get_cosine_schedule_with_warmup's lr_lambda: step / warmup, then the
+  ;; half cosine over the rest; :final its floor. Planted bug (2026-11-07):
+  ;; the factor read one step late (at t + 1) fails every case
+  (let [cases [[{:warmup 2 :steps 6} 8 [0.0 0.5 1.0 (cosine 0.0 0.25) 0.5 (cosine 0.0 0.75) 0.0 0.0]]
+               [{:warmup 0 :steps 4 :final 0.1} 5 [1.0 (cosine 0.1 0.25) 0.55 (cosine 0.1 0.75) 0.1]]
+               [{:warmup 3 :steps 4} 4 [0.0 (c// 1.0 3) (c// 2.0 3) 1.0]]]
+        check (fn [] (every? (fn [[opts n want]] (ts/close? (array/array (schedule-moves opts n)) (array/array want)
+                                                            {:rtol 1e-6 :atol 1e-6}))
+                             cases))
+        factor @#'learn/warmup-cosine-factor]
+    (is (check))
+    (is (not (with-redefs-fn {#'learn/warmup-cosine-factor (fn [s t] (factor s (inc (long t))))} check))
+        "the planted bug fails"))
+  (testing "a factor of 1 is the optimizer's own step, exactly"
+    (let [adam (learn/adam {:lr 0.1})
+          scheduled (learn/warmup-cosine adam {:steps 10})
+          store {:w (array/array [0.3 -1.2])}
+          g {:w (array/array [0.7 0.2])}]
+      (is (= (ts/host (first (learn/step adam (learn/init adam store) store g)))
+             (ts/host (first (learn/step scheduled (learn/init scheduled store) store g)))))))
+  (testing "options"
+    (is (= {:option :steps :value 2} (ts/thrown-data (learn/warmup-cosine (learn/sgd {:lr 1.0}) {:warmup 2 :steps 2}))))
+    (is (= {:option :steps :value nil} (ts/thrown-data (learn/warmup-cosine (learn/sgd {:lr 1.0}) {}))))
+    (is (= {:option :final :value 1.5} (ts/thrown-data (learn/warmup-cosine (learn/sgd {:lr 1.0}) {:steps 3 :final 1.5}))))
+    (is (= :unknown-options (:reason (ts/thrown-data (learn/warmup-cosine (learn/sgd {:lr 1.0}) {:steps 3 :total 4})))))))
+
+(deftest clip-value-clips-each-gradient
+  ;; then clip-norm: by value, then by the clipped gradient's global norm
+  (let [store {:w (array/array [0.0 0.0 0.0]) :b 0.0}
+        g {:w (array/array [3.0 -0.2 -5.0]) :b 0.5}
+        moves (fn [opt] (let [[s] (learn/step opt (learn/init opt store) store g)] (ts/host s)))]
+    (is (ts/close? (array/array (:w (moves (learn/clip-value (learn/sgd {:lr 1.0}) {:max-value 1.0}))))
+                   (array/array [1.0 -0.2 -1.0])))
+    (is (= 0.5 (ts/number (:b (moves (learn/clip-value (learn/sgd {:lr 1.0}) {:max-value 1.0}))))))
+    (let [n (Math/sqrt (c/+ 1.0 0.04 1.0 0.25))]
+      (is (ts/close? (array/array (:w (moves (learn/clip-value (learn/clip-norm (learn/sgd {:lr 1.0}) {:max-norm 1.0}) {:max-value 1.0}))))
+                     (array/array [(c// 1.0 n) (c// -0.2 n) (c// -1.0 n)]))))
+    (is (= {:option :max-value :value 0.0} (ts/thrown-data (learn/clip-value (learn/sgd {:lr 1.0}) {:max-value 0.0}))))))
+
+;; ---------------------------------------------------------------------------
 ;; The open interface
 ;; ---------------------------------------------------------------------------
 

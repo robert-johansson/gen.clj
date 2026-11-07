@@ -122,3 +122,35 @@
                        ["Qwen3.8's options on Qwen3.5" {:reasoning-effort :low}]
                        ["preserve-thinking on Qwen3.5" {:preserve-thinking? true}]]]
     (is (= :invalid-option (bc/reason #(chat/render [{:role :user :content "U"}] opts))) what)))
+
+;; ---------------------------------------------------------------------------
+;; Segments: the rendering by message and part (gen.llm.sft's masks)
+;; ---------------------------------------------------------------------------
+
+(deftest segments-are-the-rendering-in-parts
+  (testing "their texts are render's, for every case above"
+    (doseq [[messages opts] [[[{:role :system :content "S"} {:role :user :content "U\n"}] nil]
+                             [[{:role :user :content "U"}] {:thinking? true}]
+                             [conversation nil]
+                             [conversation {:thinking? true :generation-prompt? false}]
+                             [[{:role :system :content "S"} {:role :user :content "U"}] {:tools [eval-tool]}]
+                             [[{:role :user :content "U"}] {:tools [eval-tool] :template :qwen3.8 :thinking? true}]
+                             [[{:role :system :content "  "} {:role :user :content "U"}] {:template :qwen3.8 :thinking? true}]
+                             [conversation {:template :qwen3.8}]]]
+      (is (= (chat/render messages opts) (apply str (map :text (chat/segments messages opts)))) (pr-str opts))))
+  (testing "each segment's message and part"
+    (is (= [["<|im_start|>system\n" :template 0 :system] ["S" :content 0 :system] ["<|im_end|>" :end 0 :system]
+            ["\n" :template 0 :system]
+            ["<|im_start|>user\n" :template 1 :user] ["U" :content 1 :user] ["<|im_end|>" :end 1 :user] ["\n" :template 1 :user]
+            ["<|im_start|>assistant\n" :template 2 :assistant] ["A1" :content 2 :assistant] ["<|im_end|>" :end 2 :assistant]
+            ["\n" :template 2 :assistant]
+            ["<|im_start|>user\n" :template 3 :user] ["V" :content 3 :user] ["<|im_end|>" :end 3 :user] ["\n" :template 3 :user]
+            ["<|im_start|>assistant\n<think>\n" :template 4 :assistant] ["r" :reasoning 4 :assistant]
+            ["\n</think>\n\n" :template 4 :assistant] ["A2" :content 4 :assistant] ["<|im_end|>" :end 4 :assistant]
+            ["\n" :template 4 :assistant]]
+           (mapv (juxt :text :part :message :role)
+                 (chat/segments [{:role :system :content "S"} {:role :user :content "U"} {:role :assistant :content " A1 " :reasoning "q"}
+                                 {:role :user :content "V"} {:role :assistant :content "A2" :reasoning "r"}]
+                                {:generation-prompt? false}))))
+    (is (= [nil nil] ((juxt :message :role) (peek (chat/segments [{:role :user :content "U"}]))))
+        "the generation prompt is no message's")))
