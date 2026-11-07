@@ -4192,3 +4192,20 @@ otherwise bit-identical to MLX's.
 
 THIRD-PARTY-NOTICES (with CLAUDE.md's rule 10) records ported files' origins.
 No kernel is ported yet.
+
+### The CUDA checkpoint decides on compiled steps
+
+(PROVISIONAL, the lead, 2026-11-07, after a side agent's note; refines
+"1.3.0: an early CUDA checkpoint"; genclj-ssiv, genclj-tjvd)
+
+**What changes.** The checkpoint takes two runs:
+- **Run 1, diagnostic.** Qwen3's forward eager, op by op. It gives the kernel
+  count and where the time goes. It does not decide.
+- **Run 2, deciding.** Decode with compiled steps over static-capacity
+  caches. The owner's decision about MLX on NVIDIA is taken on this run.
+
+**Why.** Run op by op, MLX on CUDA was launch-bound in October, hundreds of
+times slower than GenJAX on MCMC. Uncompiled numbers would understate MLX.
+
+**The new order.** genclj-tjvd now starts at the forward's level, and no
+longer waits for the Slots engine. The engine adopts its caches after.
