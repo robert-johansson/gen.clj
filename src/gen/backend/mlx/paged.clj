@@ -12,7 +12,7 @@
    (gen.array.paged-test). Every device; repeated or out-of-range slots
    are unspecified, as MLX's scatter leaves them."
   {:api :internal}
-  (:require [gen.backend.mlx.array :refer [code stream wrap-all]]
+  (:require [gen.backend.mlx.array :refer [code stream wrap]]
             [gen.backend.mlx.operands :refer [dtype-on scalar-handle shape-of with-operands with-temps]])
   (:import [gen.mlx Mlx MlxRuntime]))
 
@@ -38,9 +38,8 @@
               ku (tmp (Mlx/mlx_reshape (tmp (Mlx/mlx_astype hk' dt s)) (int-array [n 1 hk dx 1 x]) s))
               vu (tmp (Mlx/mlx_reshape (tmp (Mlx/mlx_astype hv dt s)) (int-array [n 1 hk d 1]) s))
               axes (int-array [0 3])
-              ko (Mlx/mlx_scatter hkp idx ku axes s)]
-          (try
-            (wrap-all b (long-array [ko (Mlx/mlx_scatter hvp idx vu axes s)]))
-            (catch Throwable t
-              (Mlx/mlx_array_free ko)
-              (throw t))))))))
+              ;; each pool wrapped as it is made, so a failure in the second
+              ;; scatter leaks nothing (the backend's handle rule,
+              ;; mlx-test's every-handle-made-is-registered-wrapped-or-returned)
+              ko (wrap b (Mlx/mlx_scatter hkp idx ku axes s))]
+          [ko (wrap b (Mlx/mlx_scatter hvp idx vu axes s))])))))
