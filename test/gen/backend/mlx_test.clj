@@ -589,6 +589,7 @@
    that return one, and the runtime's makers of handles, closures and
    vectors."
   '#{scalar-handle made half-scalar-handle safe-indices int-division java-int-cast int-power
+     sdpa-handle dequantize-handle swapped-handle clamped-indices
      MlxRuntime/closure MlxRuntime/customVjp MlxRuntime/vectorOf MlxRuntime/vectorArrays MlxRuntime/retain})
 
 (defn- handle-call?

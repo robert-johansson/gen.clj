@@ -15,6 +15,7 @@
             [gen.array.protocols :as p]
             [gen.array.shape :as sh]
             [gen.array.special :as special]
+            [gen.backend.jvm.quantized :as quantized]
             [gen.random.threefry :as threefry]))
 
 (set! *warn-on-reflection* true)
@@ -50,7 +51,10 @@
   (nth [this _ _] (throw (p/not-a-collection "nth" this)))
   (count [this] (throw (p/not-a-collection "count" this))))
 
-(def supported-dtypes #{:bool :int32 :int64 :float32 :float64})
+(def supported-dtypes
+  ;; uint32 for packed quantized weights (gen.array/quantize), exact in a
+  ;; double, and wrapping as int32 does
+  #{:bool :int32 :int64 :uint32 :float32 :float64})
 
 (defn- check-dtype [dtype]
   (when-not (contains? supported-dtypes dtype)
@@ -97,6 +101,7 @@
   (case dtype
     :float32 (dotimes [i (alength a)] (aset a i (double (float (aget a i)))))
     :int32   (dotimes [i (alength a)] (aset a i (double (unchecked-int (long (aget a i))))))
+    :uint32  (dotimes [i (alength a)] (aset a i (double (bit-and (long (aget a i)) 0xFFFFFFFF))))
     :int64   (dotimes [i (alength a)]
                (let [v (aget a i)]
                  (when (or (> v 9.223372036854775807E18) (< v -9.223372036854775808E18))
@@ -810,6 +815,74 @@
           (make out (shape-of x) dtype))))
 
 ;; ---------------------------------------------------------------------------
+;; Quantized weights (gen.array/quantize and the rest; the kernels are
+;; gen.backend.jvm.quantized's)
+;; ---------------------------------------------------------------------------
+
+(defn- dequantize
+  "The matrices that the packed words wq [.. N kw], scales and biases
+   [.. N G] (one float dtype, gen.array's) stand for, [.. N K], in dtype:
+   in float32, each value's product and sum rounded apart, as MLX's two
+   ops (gen.backend.jvm.quantized)."
+  [wq scales biases {:keys [group-size bits dtype]}]
+  (let [sw (shape-of wq)
+        k (quot (* (long (peek sw)) 32) (long bits))
+        out-shape (conj (pop sw) k)]
+    (make (quantized/dequantize (data-of wq) (data-of scales) (data-of biases)
+                                {:rows (quot (sh/size out-shape) k) :k k :kw (peek sw) :g group-size :bits bits
+                                 :round32? (= dtype :float32)})
+          out-shape dtype)))
+
+(defn- check-finite!
+  "w's values are finite: MLX's quantization of a NaN or an infinity is
+   no number (a lazy backend cannot check; this one does, rule 6)."
+  [w]
+  (let [^doubles d (data-of w)]
+    (dotimes [i (alength d)]
+      (when-not (Double/isFinite (aget d i))
+        (throw (ex-info (str "quantize: w holds a non-finite value, " (aget d i)) {:reason :non-finite :op :quantize}))))))
+
+(defn- last-two-swapped [x]
+  (let [r (count (shape-of x))]
+    (transpose x (-> (vec (range r)) (assoc (- r 2) (dec r)) (assoc (dec r) (- r 2))))))
+
+(defn- quantized-op [op args]
+  (case op
+    :quantize
+    (let [[w {:keys [group-size bits]}] args
+          sw (shape-of w)
+          _ (check-finite! w)
+          [words scales biases] (quantized/quantize (data-of w) {:k (peek sw) :g group-size :bits bits})
+          groups (conj (pop sw) (quot (long (peek sw)) (long group-size)))]
+      [(make words (conj (pop sw) (quot (* (long (peek sw)) (long bits)) 32)) :uint32)
+       (make scales groups (dtype-of w))
+       (make biases groups (dtype-of w))])
+
+    :dequantize
+    (let [[wq scales biases opts] args] (dequantize wq scales biases opts))
+
+    :quantized-matmul
+    (let [[x wq scales biases {:keys [transpose?] :as opts}] args
+          w (dequantize wq scales biases (assoc opts :dtype (dtype-of x)))]
+      (matmul x (if transpose? (last-two-swapped w) w)))
+
+    ;; x's matrices at lhs times w's at rhs: dequantized, gathered by take
+    ;; (which checks the indices) and multiplied as one batch
+    :gather-qmm
+    (let [[x wq scales biases lhs rhs {:keys [transpose?] :as opts}] args
+          sx (shape-of x)
+          [m k] (subvec sx (- (count sx) 2))
+          w (dequantize wq scales biases (assoc opts :dtype (dtype-of x)))
+          sw (shape-of w)
+          ws (reshape w (into [(sh/size (subvec sw 0 (- (count sw) 2)))] (subvec sw (- (count sw) 2))))
+          xs (reshape x [(sh/size (subvec sx 0 (- (count sx) 2))) m k])
+          is (shape-of lhs)
+          n (sh/size is)
+          picked (take-op ws (reshape rhs [n]) 0)
+          out (matmul (take-op xs (reshape lhs [n]) 0) (if transpose? (last-two-swapped picked) picked))]
+      (reshape out (into is (subvec (shape-of out) 1))))))
+
+;; ---------------------------------------------------------------------------
 ;; The backend
 ;; ---------------------------------------------------------------------------
 
@@ -819,6 +892,9 @@
   (delay (requiring-resolve 'gen.array.tape/value-and-grad)))
 
 (deftype JvmBackend []
+  p/IQuantized
+  (-quantized [_ op args] (quantized-op op args))
+
   p/IBackend
   (-name [_] :jvm)
   (-defaults [_] {:float :float64 :int :int64})

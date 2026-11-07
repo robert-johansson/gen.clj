@@ -164,7 +164,10 @@ A distribution body, compared with GenMLX:
   (its own cast is C++'s, undefined out of range).
 - **JVM storage:** every dtype is stored in a `double[]`. int64 values are exact
   up to 2^53, which is ample for counts and indices; bool is 0/1. One storage
-  type keeps the backend small. The dtype tag carries the semantics.
+  type keeps the backend small. The dtype tag carries the semantics. It
+  stores bool, int32, int64, uint32 (since 1.3.0, for quantized weights'
+  words: exact, and wrapping as int32 does), float32 and float64; the half
+  floats are MLX's only.
 - **int64 overflow** (DESIGN §9, 1.2.1's owner calls): an int64 result
   outside the range is an `ex-info` (`:reason :overflow`) on the JVM
   backend, where its double read back as a raw IllegalArgumentException.
@@ -204,6 +207,8 @@ needs, taken from GenMLX's measured call counts
 | gradients | `grad` `value-and-grad` `stop-gradient` `tracked?` | `-value-and-grad`, `:stop-gradient` | — |
 | trees | `tree-map` `tree-leaves` | — | both |
 | batching | `vmap` · `batched?` `batch-shape` `particle-backend` `particle` `particles` `all-particles` | — (the batch tracer, a wrapping backend: §8b) | all |
+| neural networks (experimental, 1.3.0) | `rms-norm` `rope` `sdpa` | — (a fused kernel where a backend has one: `IFused`'s `-fused` with `:rms-norm :rope :sdpa`) | all three |
+| quantized weights (experimental, 1.3.0) | `quantize` `dequantize` `quantized-matmul` `gather-qmm` | `IQuantized`'s `-quantized` with `:quantize :dequantize :quantized-matmul :gather-qmm` | — |
 
 **Semantics at the edges** (1.2.1, from the health check of v1.2.0; DESIGN §9,
 "1.2.1's owner calls"), the same on every backend:
@@ -243,8 +248,58 @@ needs, taken from GenMLX's measured call counts
   - it replaces the three shape branches GenMLX's `categorical` needed
     (dist.cljs:590-660; bug genmlx-ql6a).
 
+**The neural-network operations** (1.3.0, experimental: outside the 1.x
+promise; docs/research/llm-mlx-engine.md §2, approved in DESIGN §9's
+"1.3.0's engine design"). The 1.x promise keeps `IBackend`'s methods, so
+each capability is an optional protocol of its own:
+- **`rms-norm`, `rope`, `sdpa`** are composites of the ops above, so the
+  tape differentiates them, the batch tracer batches them and the staging
+  backend stages them. A backend implementing `IFused` may compute one in
+  a fused kernel, `(-fused b op args)`, or decline with nil; gen.array asks
+  only when the operands are the backend's own arrays (never under the
+  tape or the tracer, whose composites run). MLX's are its fast ops
+  (§13).
+  - `(rms-norm x weight eps)`: x·weight / √(mean(x²) + eps) over the last
+    axis; weight nil for none.
+  - `(rope x dims opts)`: the first dims features of x's last axis rotated
+    by position (x's axis -2), NEOX's pairs or `:traditional?` ones;
+    `:base` or `:freqs`, `:scale`, and `:offset`, a host integer or an int
+    array of one offset per row of x's axis 0 (MLX's own options).
+  - `(sdpa q k v opts)`: softmax(scale·q·kᵀ + mask)·v over [B H T D]
+    arrays, grouped-query attention (query head h reads key head
+    ⌊h / (Hq/Hk)⌋), `:scale` (1/√D) and `:mask` (`:causal`, aligned to the
+    last queries; a bool array; or an additive float array). A query that
+    sees no key gets zeros (the composite, and the MLX backend on every
+    path; MLX's own fallback averages every value there and its Metal
+    kernels give zeros or another row); a bool mask hides a key with the
+    dtype's lowest finite score, not -Inf, so gradients stay finite.
+  - The half floats are normalized, rotated and softmaxed in float32, as
+    MLX's fast ops are.
+- **`quantize`, `dequantize`, `quantized-matmul`, `gather-qmm`** are
+  primitives of `IQuantized`, in MLX's affine layout: a uint32 matrix of
+  values packed little-endian (bit j·b of a row's stream holds value j's
+  lowest bit), and per-group scales and biases (value = scale·q + bias).
+  Group sizes 32, 64, 128; 2, 3, 4, 5, 6 or 8 bits. `quantize` is MLX's
+  algorithm in float32 on every backend (the extremum of the larger
+  magnitude exact; the JVM backend's words, scales and biases are MLX's,
+  measured on its CPU and Metal). MLX's mxfp4, nvfp4 and mxfp8 modes keep
+  uint8 scales, a dtype gen.array lacks: loud (`:unsupported`).
+  - Differentiable with respect to x only: the weights are frozen, a
+    gradient with respect to scales or biases (or a value quantized) is
+    loud on the tape (`:no-gradient`). MLX's native gradients
+    differentiate them as MLX does (it has the scales' and biases'
+    VJPs for the affine product).
+  - The batch tracer lifts a batched x (and batched indices: each
+    particle's left indices moved to its own matrices); weights that
+    differ across particles are the batched-branch error.
+  - The staging backend has no `IQuantized`: loud (`:unsupported`, not
+    stageable). A backend without it is loud the same way, naming it.
+  - The JVM backend unpacks on the host (`gen.backend.jvm.quantized`), each
+    value's product and sum rounded apart in float32 (MLX's CPU's two
+    ops), and multiplies; it holds uint32 arrays for the words (1.3.0;
+    exact in its doubles, wrapping as int32 does).
+
 **Deliberately absent from v1:**
-- the LLM ops (sdpa, rope, rms-norm, quantized matmul): M3;
 - sort, top-k and general scatter: added when a ported module needs them
   (`scatter-add` along an axis, the transpose of `take-along-axis`, came with
   autodiff: §12.8);
@@ -1067,6 +1122,13 @@ conformance suite.
 | gathers do not check bounds | array indices: negative from the end, clamped (host indices are checked) |
 | `matmul` multiplies floats only | integers through the widest float the device has: exact while products stay below 2^24 (float32) or 2^53 (float64) |
 | `remainder` of an exact negative multiple, `(mod -4.0 2.0)`, is -0.0 | kept (NumPy and the JVM backend give 0.0; the two are `==`) |
+| its fast ops (`mlx_fast_rms_norm`, `mlx_fast_rope`, `mlx_fast_rope_dynamic`, `mlx_fast_scaled_dot_product_attention`) compute rms_norm and rope's angles in float32 for float64 too | the backend's `IFused` declines float64, where the composite is exact; it takes float32 and the half floats |
+| attention where a bool mask hides every key from a query: the fallback (the CPU) averages every value, the Metal kernels give zeros or another row | that row zeroed (`any` of the mask, then `where`): the composite's zeros; a causal mask with more queries than keys runs the composite |
+| attention's VJP on Metal fails for 8 queries or fewer under its gradients ("the vector kernels do not produce a logsumexp", 0.32.4, raised at evaluation); rope has no VJP with respect to `:freqs` | under native gradients (`-Dgen.mlx.grad=native`) the backend declines sdpa, and rope with `:freqs`: the composites, which MLX differentiates; rms_norm's and rope's own VJPs agree with the composites' (gen.array.nn-test) |
+| `dequantize` on Metal computes scale·q + bias in one fused multiply-add; the CPU in two ops | kept: within an ulp of the terms (the JVM backend's are the CPU's) |
+| `quantize` on Metal rounds a value exactly half a step between two codes away from zero; the CPU (and the JVM backend) to even | kept: the same words elsewhere, measured on every bit width and group size |
+| `quantize`, `quantized_matmul` and `gather_qmm` have no float64 CPU kernel (it fails inside a CPU task) | float64 quantized in float32 (MLX's algorithm computes in float32), its products dequantized and multiplied |
+| `gather_qmm` reads its indices unchecked | normalized and clamped, as `take`'s |
 
 **A hazard to know.** MLX runs CPU work as asynchronous tasks. An
 exception inside one is raised at a later synchronization, against whatever

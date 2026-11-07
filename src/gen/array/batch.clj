@@ -132,7 +132,7 @@
   (.markRead x)
   (let [v (.-v x)] (if (delay? v) @v v)))
 
-(declare backend lift full-batch made shared-times-vectors value-and-grad-inside by-kind)
+(declare backend lift full-batch made shared-times-vectors value-and-grad-inside by-kind quantized-op)
 
 ;; draws is nil, or [shape rows] for a part of a batch (part-backend): the
 ;; draws of the batch of shape at rows, an int array of the wrapped backend.
@@ -306,6 +306,9 @@
                       (tape/value-and-grad b f args argnums))]
       [v (by-kind b v args argnums grads)]))
 
+  p/IQuantized
+  (-quantized [b op args] (quantized-op b op args))
+
   p/ICustomVjp
   (-custom-vjp [b f vjp args]
     (cond (not (instance? gen.array.protocols.ICustomVjp inner)) (apply f args)
@@ -393,6 +396,79 @@
   "x as an array of the wrapped backend with the full batch axes."
   [^BatchBackend b x]
   (with-batch-axes (.-inner b) x (.-batch-shape b)))
+
+;; ---------------------------------------------------------------------------
+;; Quantized weights
+;; ---------------------------------------------------------------------------
+
+(defn- shared-weights!
+  "Throws the batched-branch error when the quantized weights differ across
+   the particles, which a product with them does not lift to (a batched
+   run then falls back to one particle at a time)."
+  [op weights]
+  (when (some batched? weights)
+    (throw (array/batched-branch (str (name op) ": quantized weights that differ across particles") {:op op}))))
+
+(defn- particle-rows
+  "Per-particle flat indices lhs into the n matrices of each particle,
+   as indices into all the particles' matrices, stacked particle by
+   particle: negative ones counted from the end, as take's; out of range,
+   loud on an eager backend and clamped within the particle's own on a
+   lazy one (take's on MLX)."
+  [^BatchBackend b lhs ^long n]
+  (let [inner (.-inner b)
+        bs (.-batch-shape b)
+        v (full-batch b lhs)
+        d (array/dtype v)]
+    (when-not (p/-lazy? inner)
+      (doseq [i (flatten [(array/->clj v)])]
+        (when-not (< (- n) (long i) n)
+          (throw (ex-info (str "Index " i " is out of bounds for a dimension of size " n) {:index i :size n})))))
+    (let [v (array/where (array/< v 0) (array/+ v n) v)
+          v (array/clip v 0 (dec n))
+          base (array/with-backend inner
+                 (array/reshape (array/arange 0 (* n (reduce * 1 bs)) n {:dtype d})
+                                (into bs (repeat (- (count (p/-shape inner v)) (count bs)) 1))))]
+      (array/+ v base))))
+
+(defn- quantized-op
+  "-quantized's op on the tracer: a batched x (or w, to quantize or
+   dequantize) lifted to its whole batch; weights shared by every particle
+   in a product."
+  [^BatchBackend b op args]
+  (let [inner (.-inner b)]
+    (case op
+      :quantize
+      (let [[w opts] args]
+        (if (batched? w)
+          (mapv #(made % b) (p/quantized inner op [(value w) opts]))
+          (p/quantized inner op args)))
+
+      :dequantize
+      (let [[wq scales biases opts] args]
+        (if (some batched? [wq scales biases])
+          (made (p/quantized inner op [(full-batch b wq) (full-batch b scales) (full-batch b biases) opts]) b)
+          (p/quantized inner op args)))
+
+      :quantized-matmul
+      (let [[x wq scales biases opts] args]
+        (shared-weights! op [wq scales biases])
+        (if (batched? x)
+          (made (p/quantized inner op [(value x) wq scales biases opts]) b)
+          (p/quantized inner op args)))
+
+      ;; x's matrices of every particle as one stack, particle p's from
+      ;; p·n, and the left indices moved there
+      :gather-qmm
+      (let [[x wq scales biases lhs rhs opts] args]
+        (shared-weights! op [wq scales biases])
+        (if (not-any? batched? [x lhs rhs])
+          (p/quantized inner op args)
+          (let [sx (p/-shape b x)
+                r (count sx)
+                n (reduce * 1 (subvec sx 0 (- r 2)))
+                xs (p/-reshape inner (full-batch b x) (into [(* n (reduce * 1 (.-batch-shape b)))] (subvec sx (- r 2))))]
+            (made (p/quantized inner op [xs wq scales biases (particle-rows b lhs n) (full-batch b rhs) opts]) b)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Gradients inside a native transformation

@@ -166,6 +166,11 @@ Python.
 9. **Changes dependents see go in `CHANGELOG.md`.** A change of behaviour,
    names, result keys, errors or the draws for a key gets a line under
    Unreleased in the same commit.
+10. **Ported code keeps its provenance.** A file ported from another
+    project (1.3.0's kernels) is ported from where it originated, starts
+    with a header naming its source URL, commit, license and changes, and
+    has an entry in `THIRD-PARTY-NOTICES`; an Apache-2.0 file keeps its
+    own notice. The format is in that file.
 
 ## JVM performance notes (the JVM backend)
 

@@ -337,9 +337,78 @@
                         e))
         (throw e)))))
 
+;; ---------------------------------------------------------------------------
+;; Quantized weights: differentiable with respect to x only
+;; ---------------------------------------------------------------------------
+
+(defn- frozen!
+  "Throws when one of the quantized weights' arrays is being
+   differentiated: the weights are frozen (docs/array-api.md §8)."
+  [op weights]
+  (when (some tracked? weights)
+    (throw (ex-info (str (name op) ": the quantized weights (scales, biases) are frozen, with no gradient;"
+                         " differentiate with respect to x, or train adapters beside them (LoRA)")
+                    {:reason :no-gradient :op op}))))
+
+(defn- quantized-matmul-vjp
+  "x's cotangent from the cotangent g of x·wᵀ (or x·w): g·w (or g·wᵀ), the
+   quantized product the other way round, as MLX's VJP."
+  [g wq scales biases opts]
+  (array/quantized-matmul g wq scales biases (update opts :transpose? not)))
+
+(defn- gather-qmm-vjp
+  "x's cotangent (of x's shape) from the cotangent g [I.. M N] of
+   gather-qmm: each product's cotangent g_i·w_rhs[i] (the gathered product
+   the other way round), added into x's matrix lhs[i]."
+  [g x-shape wq scales biases lhs rhs opts]
+  (let [[m k] (subvec x-shape (clojure.core/- (count x-shape) 2))
+        n (array/size lhs)
+        c (array/gather-qmm g wq scales biases (-> opts (select-keys [:mode :group-size :bits :sorted?])
+                                                    (assoc :rhs-indices rhs :transpose? (not (:transpose? opts)))))
+        bx (reduce clojure.core/* 1 (subvec x-shape 0 (clojure.core/- (count x-shape) 2)))
+        idx (array/broadcast-to (array/reshape lhs [n 1 1]) [n m k])
+        acc (array/scatter-add (array/zeros [bx m k] {:dtype (array/dtype g)}) idx (array/reshape c [n m k]) 0)]
+    (array/reshape acc x-shape)))
+
+(defn- quantized-op
+  "-quantized's op on the tape: computed on inner, recorded with its VJP
+   with respect to x; the weights must not be tracked."
+  [t inner op args]
+  (case op
+    :quantize
+    (let [[w opts] args]
+      (when (tracked? w)
+        (throw (ex-info "quantize: its results carry no gradient; quantize (array/stop-gradient w) to drop it on purpose"
+                        {:reason :no-gradient :op :quantize})))
+      (p/quantized inner :quantize [w opts]))
+
+    :dequantize
+    (let [[wq scales biases opts] args]
+      (frozen! op [scales biases])
+      (p/quantized inner :dequantize [(primal wq) scales biases opts]))
+
+    :quantized-matmul
+    (let [[x wq scales biases opts] args
+          _ (frozen! op [scales biases])
+          px (primal x)]
+      (record t (p/quantized inner op [px wq scales biases opts]) [x]
+              (fn [g _] [(quantized-matmul-vjp g wq scales biases opts)])))
+
+    :gather-qmm
+    (let [[x wq scales biases lhs rhs opts] args
+          _ (frozen! op [scales biases])
+          px (primal x)
+          lhs (primal lhs)
+          rhs (primal rhs)]
+      (record t (p/quantized inner op [px wq scales biases lhs rhs opts]) [x]
+              (fn [g _] [(gather-qmm-vjp g (array/shape px) wq scales biases lhs rhs opts)])))))
+
 (deftype TapeBackend [inner]
   p/IWrappingBackend
   (-inner [_] inner)
+
+  p/IQuantized
+  (-quantized [t op args] (quantized-op t inner op args))
 
   p/ICustomVjp
   (-custom-vjp [t f vjp args]

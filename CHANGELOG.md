@@ -89,6 +89,37 @@ other values for the same key, from the same distribution.
   as any other. The API snapshot records `:as opts` added to the
   arglists of weighted-sample, resample, replicate, dereplicate, coalesce
   and vimco-gradient (their arities are unchanged).
+- **Added (experimental): gen.array's neural-network operations**
+  `rms-norm`, `rope` and `sdpa` (gen.array, vars marked `{:api
+  :experimental}`; genclj-ezdd; docs/array-api.md §6). Composites of
+  gen.array's ops, so differentiated, batched and staged as every
+  composite; MLX computes them by its fast kernels (mlx_fast_rms_norm,
+  mlx_fast_rope and mlx_fast_rope_dynamic,
+  mlx_fast_scaled_dot_product_attention) on its own float32 and half
+  arrays, through a new optional protocol,
+  `gen.array.protocols/IFused` (experimental). `rope` takes NEOX's or
+  the traditional pairs, partial dims, a base or frequencies, a scale
+  and an offset per row; `sdpa` grouped-query attention with a causal,
+  bool or additive mask. A query that sees no key gets zeros.
+- **Added (experimental): quantized weights**, `quantize`, `dequantize`,
+  `quantized-matmul` and `gather-qmm` (gen.array, `{:api
+  :experimental}`; genclj-vjwr): MLX's affine layout (2 to 8 bits, groups
+  of 32, 64 or 128), primitives of a new optional protocol,
+  `gen.array.protocols/IQuantized` (experimental). MLX calls
+  mlx_quantize, mlx_dequantize, mlx_quantized_matmul and mlx_gather_qmm;
+  the JVM backend quantizes as MLX does (the same words, scales and
+  biases) and dequantizes on the host. Differentiable with respect to x
+  only: a gradient with respect to the weights is loud on the tape. A
+  backend without the protocol, the staging backend among them, is loud
+  (`:unsupported`). MLX's mxfp4, nvfp4 and mxfp8 modes are loud too:
+  their scales are uint8, a dtype gen.array lacks.
+- **Added: uint32 arrays on the JVM backend** (genclj-vjwr): the
+  quantized words' dtype, exact in its doubles, wrapping as int32
+  does. `(array/array data {:dtype :uint32})` and `(astype x :uint32)`
+  threw there.
+- **Added: THIRD-PARTY-NOTICES** (genclj-ty8m): the origins and licenses
+  of files derived from other projects, and the header a ported file
+  carries (CLAUDE.md, rule 10).
 
 ## [1.2.1] - 2026-11-06
 

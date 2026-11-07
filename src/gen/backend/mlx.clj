@@ -79,6 +79,7 @@
              :refer [->Config check-dtype code defaults fence mlx-array? stream with-device wrap]]
             [gen.backend.mlx.linalg :refer [linalg matmul]]
             [gen.backend.mlx.memory :as memory]
+            [gen.backend.mlx.nn :as nn]
             [gen.backend.mlx.operands :as operands
              :refer [as-array dtype-on eval-arrays! from-host host? mlx-error operand scalar-handle shape-of
                      with-operands with-temps]]
@@ -603,6 +604,12 @@
 
   p/ICompiling
   (-compile [b f opts] (if (compiles? b) (guarded :compile (compile-fn b f opts)) f))
+
+  p/IFused
+  (-fused [b op args] (guarded op (nn/fused b op args)))
+
+  p/IQuantized
+  (-quantized [b op args] (guarded op (nn/quantized b op args)))
 
   p/INativeGrad
   (-native-grad? [_] (= grad-mode :native))
