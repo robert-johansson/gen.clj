@@ -1,8 +1,9 @@
 (ns gen.backend.mlx.array
   "The MLX backend's arrays (gen.backend.mlx): MLX's dtype codes, the
    MlxArray type (an MLX handle its value owns, freed once the value is
-   unreachable), and the backend's configuration: its device, streams and
-   default dtypes."
+   unreachable; read through handle, loud once the array was donated),
+   and the backend's configuration: its device, streams and default
+   dtypes."
   {:api :internal}
   (:require [gen.array.host :as host]
             [gen.array.protocols :as p])
@@ -52,9 +53,27 @@
   [x]
   (p/-to-host (p/-backend x) x))
 
-(deftype MlxArray [^long h backend shape dtype]
+(definterface Handled
+  (^long handle [])
+  (^boolean donated [])
+  (consume []))
+
+(defn- donated-error [shape dtype]
+  (ex-info (str "An MLX array (" dtype " " shape ") was donated to a compiled function (array/compile's :donate),"
+                " which consumed it: it holds no value any more")
+           {:reason :donated :shape shape :dtype dtype}))
+
+;; h is the handle MlxRuntime/adopt frees once the array is unreachable;
+;; every read of it but this namespace's goes through handle, which is
+;; loud once the array was donated (donate!)
+(deftype MlxArray [^long h backend shape dtype ^:volatile-mutable consumed]
   p/IArray
   (-backend [_] backend)
+
+  Handled
+  (handle [_] (if consumed (throw (donated-error shape dtype)) h))
+  (donated [_] (boolean consumed))
+  (consume [_] (set! consumed true))
 
   ;; values: equal when dtype, shape and elements are (as the JVM backend's);
   ;; comparing reads both arrays on the host
@@ -90,6 +109,11 @@
 
 (defn mlx-array? [x] (instance? MlxArray x))
 
+(defn handle
+  "The MLX handle of the MlxArray x: loud (:donated) once x was donated."
+  ^long [^MlxArray x]
+  (.handle x))
+
 (defn- read-shape [^long h]
   (let [n (Mlx/mlx_array_ndim h)]
     (if (zero? n)
@@ -101,7 +125,7 @@
   "The MlxArray owning the new handle h (freed once it is unreachable:
    MlxRuntime/adopt)."
   [b ^long h]
-  (let [x (MlxArray. h b (read-shape h) (dtype-of-code (Mlx/mlx_array_dtype h)))]
+  (let [x (MlxArray. h b (read-shape h) (dtype-of-code (Mlx/mlx_array_dtype h)) nil)]
     (MlxRuntime/adopt x h)
     x))
 
@@ -115,6 +139,26 @@
   "Keep x reachable (its handle valid) up to this point."
   [x]
   (Reference/reachabilityFence x))
+
+;; ---------------------------------------------------------------------------
+;; Donation: an array a compiled function consumed (array/compile's :donate;
+;; gen.backend.mlx.transforms/donate!)
+;; ---------------------------------------------------------------------------
+
+(defn consume!
+  "Mark the MlxArray x consumed, so every later read of its handle is loud,
+   then (f its handle): donate! repoints it. Nothing when x was consumed
+   already."
+  [^MlxArray x f]
+  (when-not (.donated x)
+    (.consume x)
+    (try (f (.-h x))
+         (finally (fence x)))))
+
+(defn donated?
+  "Was the MlxArray x donated (gen.backend.mlx.transforms/donate!)?"
+  [^MlxArray x]
+  (.donated x))
 
 ;; ---------------------------------------------------------------------------
 ;; The backend's configuration: its device, streams and default dtypes

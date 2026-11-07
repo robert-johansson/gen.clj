@@ -546,6 +546,19 @@ public final class MlxRuntime {
     return o.get(JAVA_LONG, 0);
   }
 
+  /** Repoint the array handle h at the array src (mlx_array_set copies src
+   *  into the array h addresses): h's own reference to its former data is
+   *  dropped, so a graph that reads that data holds its only reference and
+   *  MLX may donate its buffer. h itself stays valid, and is still freed
+   *  once, by its owner's phantom reference (a donated array's,
+   *  gen.backend.mlx.array). */
+  public static void repoint(long h, long src) {
+    MemorySegment o = scratch().out(1);
+    o.set(JAVA_LONG, 0, h);
+    int status = MlxRaw.mlx_array_set(o, src);
+    if (status != 0) throw error("mlx_array_set");
+  }
+
   /** A new mlx_vector_array of the arrays (MLX takes its own references). */
   public static long vectorOf(long[] arrays) {
     Scratch s = scratch();

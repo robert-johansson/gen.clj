@@ -40,6 +40,37 @@ other values for the same key, from the same distribution.
 
 ### Changes
 
+- **Added (experimental): `array/compile`'s `:donate`** (genclj-tjvd):
+  `(array/compile f {:donate #{0}})` names arguments the compiled function
+  consumes, after JAX's donate_argnums. On MLX their arrays are released
+  once a call has returned its lazy result, so MLX reuses their buffers
+  for it (a scatter into a large array writes in place instead of
+  copying), and any later use of a donated array is an ex-info,
+  `:reason :donated`. Where compile is the function itself (the JVM
+  backend, the tape, the batch tracer) it does nothing and a reuse is not
+  caught; the values are the same either way. A malformed `:donate`, or
+  one naming a position past the call's arguments, is `:invalid-args`.
+  The MLX backend reads every handle through a checked accessor
+  (`gen.backend.mlx.array/handle`); a donated handle is repointed at a
+  shared husk (`MlxRuntime/repoint`, new: rebuild with `clojure -T:build
+  java`) and still freed once, by its phantom reference.
+- **Added (experimental): static-capacity KV caches and compiled steps
+  for Qwen3** (gen.llm.models.qwen3; genclj-tjvd). `(static-cache m rows
+  capacity)`, or prefill's `:capacity`, is a cache of fixed shapes:
+  preallocated keys and values per layer, written at each row's offset by
+  `scatter-add`, a mask for each row's valid length, and the positions an
+  int array (`:positions`) beside the host's `:offsets`, so a step's
+  shapes stay put and rows may sit at different offsets (`offsets`,
+  `select-rows`, `concat-rows`). Its logits are the concatenating
+  cache's (exactly on the JVM backend). A step past the capacity is
+  `:capacity-exceeded`. `(compile-step m opts)` compiles the step over
+  static caches with `array/compile`, one trace per shape (a decode step,
+  a prefill chunk); `:donate? true` consumes the cache it steps, written
+  in place on MLX. `offset` of a static cache with rows at different
+  offsets is loud (`offsets` reads them); step does not take `:capacity`.
+  bench/gen/qwen3_bench.clj measures prefill and decode, eager
+  and compiled, against llama.cpp on the same GGUF, on Metal or MLX's
+  CUDA build.
 - **Added: LoRA adapters on llama.cpp, and models engines share**
   (gen.llm.llama, experimental; genclj-vdu4). `(llama/model path)` loads
   a GGUF once for several engines, each over a context of its own

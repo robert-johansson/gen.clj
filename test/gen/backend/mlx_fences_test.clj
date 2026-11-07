@@ -9,12 +9,17 @@
    narrow to make fail on demand, so the check is on the source: the file
    is read as data (no MLX library loaded), and
 
-   - every handle read, (.-h x) or (operand b x dtype), is followed in an
-     enclosing form by (fence x): x a symbol, or for (map #(.-h %) xs)
-     (or mapv) the collection xs (concatenate's operands);
+   - every handle read, (.-h x), (handle x) or (operand b x dtype), is
+     followed in an enclosing form by (fence x): x a symbol, or for
+     (map #(handle %) xs) (or mapv) the collection xs (concatenate's
+     operands);
    - but operand's own read of its argument's handle, which its callers
-     fence; and the with-operands macro, which calls operand for its
-     bindings, fences them in a finally.
+     fence, and MlxArray's definition (its handle method reads its
+     field); and the with-operands macro, which calls operand for its
+     bindings, fences them in a finally;
+   - and the raw field (.-h x) is read only in gen.backend.mlx.array: every
+     other read is (handle x), which is loud for a donated array
+     (array/compile's :donate).
 
    A read whose argument is no symbol, (.-h (as-array b x nil)), cannot be
    fenced, and fails. Mutation checked (2026-10-21): the four sites the
@@ -53,11 +58,12 @@
     (walk form ())))
 
 (defn- read-arg
-  "The array whose handle the form reads: (.-h x)'s x, (operand b x d)'s x."
+  "The array whose handle the form reads: (.-h x)'s and (handle x)'s x,
+   (operand b x d)'s x."
   [h]
-  (if (call? h ".-h") (second h) (nth h 2 nil)))
+  (if (or (call? h ".-h") (call? h "handle")) (second h) (nth h 2 nil)))
 
-(defn- handle-read? [x] (or (call? x ".-h") (call? x "operand")))
+(defn- handle-read? [x] (or (call? x ".-h") (call? x "handle") (call? x "operand")))
 
 (defn- fenced-symbol
   "The symbol a fence must keep reachable for the handle read h: its
@@ -87,6 +93,8 @@
   [all]
   (for [form all
         :when (not (and (or (call? form "defn") (call? form "defn-")) (named? (second form) "operand")))
+        ;; MlxArray's and its interface's definitions: the handle method
+        :when (not (or (call? form "deftype") (call? form "definterface")))
         [h ancestors] (occurrences form handle-read?)
         :let [s (fenced-symbol h ancestors)]
         :when (not (and s (fenced-after? s ancestors)))]
@@ -94,8 +102,16 @@
 
 (deftest every-handle-passed-to-mlx-is-fenced
   (let [all (mapcat forms source-files)]
-    (is (< 5 (count (mapcat #(occurrences % (fn [x] (call? x ".-h"))) all))) "the check sees the handle reads")
+    (is (< 5 (count (mapcat #(occurrences % handle-read?) all))) "the check sees the handle reads")
     (is (empty? (unfenced-reads all)))))
+
+(deftest the-raw-handle-is-read-only-where-mlx-array-is-defined
+  ;; elsewhere (handle x) reads it, loud for a donated array
+  (let [raw (fn [f] (count (mapcat #(occurrences % (fn [x] (call? x ".-h"))) (forms f))))]
+    (is (pos? (long (raw "src/gen/backend/mlx/array.clj"))))
+    (is (= {} (into {} (for [f source-files :when (not= f "src/gen/backend/mlx/array.clj") :let [n (raw f)] :when (pos? (long n))] [f n]))))
+    (is (< 5 (count (mapcat #(occurrences % (fn [x] (call? x "handle"))) (mapcat forms source-files))))
+        "the check sees the handle reads")))
 
 (deftest with-operands-fences-its-operands
   ;; the macro's template calls operand for each binding and fences each

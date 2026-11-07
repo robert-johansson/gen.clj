@@ -185,7 +185,10 @@
   (-compile [b f opts]
     "A function of a vector of leaf arrays (b's) returning a vector of leaf
      arrays: f, which takes and returns such vectors, traced once per input
-     signature and replayed. opts: :shapeless?."))
+     signature and replayed. opts: :shapeless?, and :donate (experimental),
+     the set of input positions each call consumes, whose arrays the
+     backend may release once the call has returned (gen.array/compile's
+     :donate)."))
 
 (defprotocol IBackend
   (-name [b]

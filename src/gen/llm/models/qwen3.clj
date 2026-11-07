@@ -10,6 +10,12 @@
      (prefill m tokens)                → [logits cache]: the logits, and the cache after the tokens
      (step m cache tokens)             → [logits cache']: the tokens read after cache
      (offset cache)                    → the positions cache holds
+     (offsets cache)                   → … in each row
+     (static-cache m rows capacity)    → an empty cache of fixed capacity
+     (compile-step m)                  → step over static caches, compiled (array/compile),
+                                         consuming each cache with :donate? true
+     (select-rows cache idx)           → a static cache of cache's rows idx
+     (concat-rows caches)              → a static cache of the caches' rows
 
    tokens are B rows of T token ids each: host vectors (checked against the
    vocabulary) or an int array [B T]. A row's tokens are positions offset,
@@ -25,7 +31,33 @@
    A cache is a value: {:offset n :layers [{:k :v} …]}, each layer's keys
    and values [B KV-heads n head-dim], grown by concatenation, so a cache
    continued twice gives two caches and leaves itself as it was (a fork
-   is free). Weights are values too: {:embed :norm :output :layers}, a
+   is free).
+
+   A static cache (static-cache, or prefill's :capacity) is a value of
+   fixed shapes instead, for compiled steps (genclj-tjvd): {:capacity n
+   :offsets [o …] :positions :layers [{:k :v} …]}, each layer's keys and
+   values [B KV-heads n head-dim] preallocated, a row's first o slots
+   holding its positions and the rest zeros. :offsets are the rows'
+   positions on the host and :positions the same as an int32 array [B]
+   on the device, so a step's arrays keep their shapes as the offsets
+   grow: it writes its keys and values at each row's offset (scatter-add
+   into the zero slots: the slots past a row's offset hold zeros, an
+   invariant every operation here keeps), rotates them at those
+   positions (rope's :offset an array) and masks the slots past each
+   query's own position (sdpa's bool mask), so rows may sit at
+   different offsets. Its logits are the concatenating cache's: exactly
+   on the JVM backend (the masked slots' weights are exact zeros, summed
+   after the others), within float32's round-off on MLX. A step past the
+   capacity is a loud error (:capacity-exceeded), checked on the host.
+   compile-step compiles the step over static caches with array/compile:
+   on MLX, one trace per shape of tokens (a decode step, a prefill
+   chunk), replayed; a cache continued twice is still two caches, each
+   step copying the cache it writes. With :donate? a step consumes its
+   cache instead, and MLX updates it in place (array/compile's :donate):
+   measured on Metal, Qwen3-0.6B decodes 1.3 times as fast that way at
+   batch 1 and 1.6 times at batch 64 (bench/gen/qwen3_bench.clj).
+
+   Weights are values too: {:embed :norm :output :layers}, a
    layer's {:attn-norm :q :k :v :q-norm :k-norm :o :ffn-norm :gate :up
    :down}. A matrix is an array [out in], or a quantized one as
    gen.array/load-gguf gives Q8_0, Q4_0 and Q4_1 tensors, {:wq :scales
@@ -58,7 +90,7 @@
   (:refer-clojure :exclude [+ - * / < > <= >= == load])
   (:require [clojure.core :as c]
             [clojure.string :as str]
-            [gen.array :as array :refer [+ *]]))
+            [gen.array :as array :refer [+ * <=]]))
 
 (set! *warn-on-reflection* true)
 
@@ -233,30 +265,177 @@
                       (assoc (select-keys w [:bits :group-size]) :dtype dtype))
     (array/take w tokens 0)))
 
+(defn- qkv
+  "[q k v] of x [B T hidden], each [B heads T head-dim] (k and v of the KV
+   heads): q and k normed per head and rotated at positions offset… (a
+   host integer, or an int array of one per row)."
+  [{:keys [heads kv-heads head-dim eps rope-base]} w x offset]
+  (let [[b t] (array/shape x)
+        heads-of (fn [y n] (array/transpose (array/reshape y [b t n head-dim]) [0 2 1 3]))   ; [B n T D]
+        rotate (fn [y] (array/rope y head-dim {:base rope-base :offset offset}))]
+    [(rotate (array/rms-norm (heads-of (linear x (:q w)) heads) (:q-norm w) eps))
+     (rotate (array/rms-norm (heads-of (linear x (:k w)) kv-heads) (:k-norm w) eps))
+     (heads-of (linear x (:v w)) kv-heads)]))
+
+(defn- attend
+  "The attention of q over the keys k and values v under mask, through the
+   output projection: [B T hidden]."
+  [{:keys [heads head-dim]} w q k v mask]
+  (let [[b _ t] (array/shape q)]
+    (-> (array/sdpa q k v {:mask mask})
+        (array/transpose [0 2 1 3])
+        (array/reshape [b t (c/* heads head-dim)])
+        (linear (:o w)))))
+
 (defn- attention
   "One block's attention of x [B T hidden] at positions offset… after the
    layer's cache entry (nil for none): [its output, the entry after x]."
-  [{:keys [heads kv-heads head-dim eps rope-base]} w x offset entry]
-  (let [[b t] (array/shape x)
-        heads-of (fn [y n] (array/transpose (array/reshape y [b t n head-dim]) [0 2 1 3]))   ; [B n T D]
-        rotate (fn [y] (array/rope y head-dim {:base rope-base :offset offset}))
-        q (rotate (array/rms-norm (heads-of (linear x (:q w)) heads) (:q-norm w) eps))
-        k (rotate (array/rms-norm (heads-of (linear x (:k w)) kv-heads) (:k-norm w) eps))
-        v (heads-of (linear x (:v w)) kv-heads)
+  [cfg w x offset entry]
+  (let [[q k v] (qkv cfg w x offset)
         k (if entry (array/concatenate [(:k entry) k] 2) k)
-        v (if entry (array/concatenate [(:v entry) v] 2) v)
-        o (-> (array/sdpa q k v {:mask :causal})
-              (array/transpose [0 2 1 3])
-              (array/reshape [b t (c/* heads head-dim)]))]
-    [(linear o (:o w)) {:k k :v v}]))
+        v (if entry (array/concatenate [(:v entry) v] 2) v)]
+    [(attend cfg w q k v :causal) {:k k :v v}]))
+
+(defn- static-attention
+  "One block's attention of x [B T hidden] after the layer's static cache
+   entry, at (static-forward's {:positions :mask :slots}): its keys and
+   values written into their slots, [its output, the entry after x]."
+  [cfg w x {:keys [positions mask slots]} entry]
+  (let [[q k v] (qkv cfg w x positions)
+        k (array/scatter-add (:k entry) slots k 2)
+        v (array/scatter-add (:v entry) slots v 2)]
+    [(attend cfg w q k v mask) {:k k :v v}]))
 
 (defn- block
-  "One block of x at offset after its cache entry: [x after it, the entry]."
-  [{:keys [eps] :as cfg} w x offset entry]
-  (let [[a entry] (attention cfg w (array/rms-norm x (:attn-norm w) eps) offset entry)
+  "One block of x [B T hidden], (attention x') giving [the output, the
+   cache entry after it] of the normed x': [x after the block, the entry]."
+  [{:keys [eps]} w x attention]
+  (let [[a entry] (attention (array/rms-norm x (:attn-norm w) eps))
         x (+ x a)
         m (array/rms-norm x (:ffn-norm w) eps)]
     [(+ x (linear (* (silu (linear m (:gate w))) (linear m (:up w))) (:down w))) entry]))
+
+(defn- logits-of
+  "[logits, the cache entries after them] of tokens ids [B T] (an int
+   array) through every block, block i's attention (attention i w x');
+   logits :all or :last."
+  [{:keys [layers eps dtype] :as cfg} weights ids attention logits]
+  (let [t (long (second (array/shape ids)))
+        [h entries] (reduce (fn [[h entries] i]
+                              (let [w (nth (:layers weights) i)
+                                    [h e] (block cfg w h #(attention i w %))]
+                                [h (conj entries e)]))
+                            [(embed (:embed weights) ids dtype) []]
+                            (range layers))
+        h (if (= :last logits) (array/slice h 1 (dec t) t) h)]
+    [(linear (array/rms-norm h (:norm weights) eps) (or (:output weights) (:embed weights))) entries]))
+
+;; ---------------------------------------------------------------------------
+;; Static caches: slots written in place of a concatenation
+;; ---------------------------------------------------------------------------
+
+(defn- static? [cache] (contains? cache :capacity))
+
+(defn- chunk-positions
+  "The positions of a chunk of t tokens, [B 1 t 1]: row b's i-th at
+   positions[b] + i."
+  [positions t]
+  (+ (array/reshape positions [(first (array/shape positions)) 1 1 1])
+     (array/reshape (array/arange 0 t 1 {:dtype :int32}) [1 1 t 1])))
+
+(defn- static-mask
+  "The slots of a static cache of capacity that a chunk of t tokens' queries
+   see, a bool array [B 1 t capacity]: query i of row b, at position
+   positions[b] + i, sees the slots up to its own (causal); the slots past
+   it hold the chunk's later tokens or padding."
+  [positions t capacity]
+  (<= (array/arange 0 capacity 1 {:dtype :int32}) (chunk-positions positions t)))
+
+(defn- write-slots
+  "Where a chunk's keys or values go, as scatter-add's indices: an int
+   array of their shape [B KV-heads t head-dim], positions[b] + i at the
+   chunk's i-th position."
+  [positions [_ _ t _ :as shape]]
+  (array/broadcast-to (chunk-positions positions t) shape))
+
+(defn- static-forward
+  "[logits, the static cache's layers after ids, its positions after
+   them] of tokens ids [B T] (an int array) after the layers at positions
+   (int32 [B]): arrays in and arrays out, the step compile-step compiles."
+  [{:keys [kv-heads head-dim] :as cfg} weights layers positions ids logits]
+  (let [[b t] (array/shape ids)
+        capacity (nth (array/shape (:k (first layers))) 2)
+        at {:positions positions
+            :mask (static-mask positions t capacity)
+            :slots (write-slots positions [b kv-heads t head-dim])}
+        [out entries] (logits-of cfg weights ids (fn [i w x] (static-attention cfg w x at (nth layers i))) logits)]
+    [out entries (+ positions t)]))
+
+(defn static-cache
+  "An empty static cache of rows rows and capacity positions each, every
+   row at offset 0 and every slot zero, its arrays in the model's dtype
+   (one zero array, shared until a step writes). It holds 2 × layers ×
+   rows × KV-heads × capacity × head-dim floats: for Qwen3-0.6B in
+   float32, 224 KiB a position a row."
+  [{:keys [config]} rows capacity]
+  (doseq [[what v] [[:rows rows] [:capacity capacity]]]
+    (when-not (and (integer? v) (pos? (long v)))
+      (throw (invalid (str "static-cache: " (name what) " must be a positive integer, not " (pr-str v)) {what v}))))
+  (let [{:keys [layers kv-heads head-dim dtype]} config
+        zero (array/zeros [rows kv-heads capacity head-dim] {:dtype dtype})]
+    {:capacity (long capacity)
+     :offsets (vec (repeat rows 0))
+     :positions (array/zeros [rows] {:dtype :int32})
+     :layers (vec (repeat layers {:k zero :v zero}))}))
+
+(defn- check-static [f cache]
+  (when-not (static? cache)
+    (throw (invalid (str (name f) " takes a static cache (static-cache, or prefill's :capacity), not "
+                         (if (map? cache) "a concatenating cache" (pr-str cache)))
+                    {:fn f}))))
+
+(defn select-rows
+  "The static cache of cache's rows idx (host integers, in order, repeats
+   allowed), each at its own offset: a resample's ancestors, or a row
+   alone."
+  [cache idx]
+  (check-static :select-rows cache)
+  (let [n (count (:offsets cache))
+        idx (vec idx)]
+    (when (empty? idx)
+      (throw (invalid "select-rows: no rows" {:rows idx})))
+    (doseq [i idx]
+      (when-not (and (integer? i) (c/<= 0 (long i)) (c/< (long i) n))
+        (throw (invalid (str "select-rows: " (pr-str i) " is not a row of a cache of " n) {:row i :rows n}))))
+    (let [ix (array/array idx {:dtype :int32})
+          pick #(array/take % ix 0)]
+      {:capacity (:capacity cache)
+       :offsets (mapv #((:offsets cache) %) idx)
+       :positions (pick (:positions cache))
+       :layers (mapv (fn [{:keys [k v]}] {:k (pick k) :v (pick v)}) (:layers cache))})))
+
+(defn concat-rows
+  "The static cache of the static caches' rows, in order, each at its own
+   offset: caches of one model and one capacity."
+  [caches]
+  (let [caches (vec caches)]
+    (when (empty? caches)
+      (throw (invalid "concat-rows: no caches" {})))
+    (doseq [cache caches] (check-static :concat-rows cache))
+    (when-not (apply = (map :capacity caches))
+      (throw (invalid (str "concat-rows: caches of different capacities " (mapv :capacity caches))
+                      {:capacities (mapv :capacity caches)})))
+    (when-not (apply = (map (comp count :layers) caches))
+      (throw (invalid "concat-rows: caches of different numbers of layers" {:layers (mapv (comp count :layers) caches)})))
+    (let [cat #(array/concatenate (vec %) 0)]
+      {:capacity (:capacity (first caches))
+       :offsets (into [] (mapcat :offsets) caches)
+       :positions (cat (map :positions caches))
+       :layers (apply mapv (fn [& es] {:k (cat (map :k es)) :v (cat (map :v es))}) (map :layers caches))})))
+
+;; ---------------------------------------------------------------------------
+;; Reading tokens
+;; ---------------------------------------------------------------------------
 
 (defn- token-array
   "tokens as an int array [B T]: host rows checked against the vocabulary,
@@ -280,51 +459,132 @@
 
     :else (throw (invalid (str "tokens must be rows of token ids (vectors) or an int array [B T], not " (pr-str tokens))))))
 
+(defn offsets
+  "The positions each of cache's rows holds, a vector (nil for nil, no
+   cache)."
+  [cache]
+  (cond (nil? cache) nil
+        (static? cache) (:offsets cache)
+        :else (vec (repeat (first (array/shape (:k (first (:layers cache))))) (long (:offset cache))))))
+
 (defn offset
-  "The positions cache holds (0 for nil, no cache)."
+  "The positions cache holds (0 for nil, no cache): every row's. Loud for
+   a static cache whose rows hold different numbers (read those with
+   offsets)."
   ^long [cache]
-  (long (or (:offset cache) 0)))
+  (if (static? cache)
+    (let [os (:offsets cache)]
+      (when-not (apply = os)
+        (throw (invalid "offset: the cache's rows sit at different offsets (offsets reads them)" {:offsets os})))
+      (long (first os)))
+    (long (or (:offset cache) 0))))
+
+(defn- check-logits [logits]
+  (when-not (#{:all :last} logits)
+    (throw (invalid (str ":logits must be :all or :last, not " (pr-str logits)) {:logits logits}))))
+
+(defn- check-rows
+  "tokens' b rows are cache's (when there is one)."
+  [cache b]
+  (when cache
+    (let [kb (if (static? cache) (count (:offsets cache)) (first (array/shape (:k (first (:layers cache))))))]
+      (when-not (= b kb)
+        (throw (invalid (str "tokens have " b " rows where the cache has " kb) {:rows b :cache-rows kb}))))))
+
+(defn- check-capacity
+  "A chunk of t tokens fits in every row of the static cache."
+  [{:keys [capacity offsets]} t]
+  (let [last-offset (long (apply max offsets))]
+    (when (c/> (c/+ last-offset (long t)) (long capacity))
+      (throw (ex-info (str "qwen3: " t " tokens after offset " last-offset " exceed the static cache's capacity of " capacity)
+                      {:reason :capacity-exceeded :capacity capacity :offsets offsets :tokens t})))))
+
+(defn- advanced
+  "The static cache after a chunk of t tokens, its layers and positions the
+   step's."
+  [cache layers positions t]
+  (assoc cache :layers layers :positions positions :offsets (mapv #(c/+ (long %) (long t)) (:offsets cache))))
 
 (defn- run
-  "[logits cache'] of tokens after cache (nil for none); :logits :all or
-   :last."
-  [{:keys [config weights]} cache tokens {:keys [logits] :or {logits :all} :as opts}]
-  (check-options (if cache :step :prefill) opts #{:logits})
-  (let [{:keys [layers vocab eps dtype]} config
-        _ (when-not (#{:all :last} logits)
-            (throw (invalid (str ":logits must be :all or :last, not " (pr-str logits)) {:logits logits})))
-        ids (token-array tokens vocab)
-        [b t] (array/shape ids)
-        start (offset cache)]
-    (when cache
-      (let [kb (first (array/shape (:k (first (:layers cache)))))]
-        (when-not (= b kb)
-          (throw (invalid (str "tokens have " b " rows where the cache has " kb) {:rows b :cache-rows kb})))))
-    (let [[h entries] (reduce (fn [[h entries] i]
-                                (let [[h e] (block config (nth (:layers weights) i) h start (get-in cache [:layers i]))]
-                                  [h (conj entries e)]))
-                              [(embed (:embed weights) ids dtype) []]
-                              (range layers))
-          h (if (= :last logits) (array/slice h 1 (dec (long t)) t) h)
-          out (linear (array/rms-norm h (:norm weights) eps) (or (:output weights) (:embed weights)))]
-      [out {:offset (c/+ start (long t)) :layers entries}])))
+  "[logits cache'] of tokens after cache (nil for none, a concatenating
+   cache or a static one); logits :all or :last."
+  [{:keys [config weights]} cache tokens logits]
+  (check-logits logits)
+  (let [ids (token-array tokens (:vocab config))
+        [b t] (array/shape ids)]
+    (check-rows cache b)
+    (if (static? cache)
+      (do (check-capacity cache t)
+          (let [[out layers positions] (static-forward config weights (:layers cache) (:positions cache) ids logits)]
+            [out (advanced cache layers positions t)]))
+      (let [start (offset cache)
+            [out entries] (logits-of config weights ids
+                                     (fn [i w x] (attention config w x start (get-in cache [:layers i])))
+                                     logits)]
+        [out {:offset (c/+ start (long t)) :layers entries}]))))
 
 (defn forward
   "The logits [B T vocab] of every position of tokens (B rows of T ids),
    read from position 0."
   [m tokens]
-  (first (run m nil tokens nil)))
+  (first (run m nil tokens :all)))
 
 (defn prefill
   "[logits cache]: the logits of tokens (B rows of T ids) read from
    position 0, [B T vocab] (or [B 1 vocab] with :logits :last), and the
-   cache after them."
+   cache after them: a concatenating cache, or with :capacity n a static
+   one of n positions a row."
   ([m tokens] (prefill m tokens nil))
-  ([m tokens opts] (run m nil tokens opts)))
+  ([m tokens {:keys [logits capacity] :or {logits :all} :as opts}]
+   (check-options :prefill opts #{:logits :capacity})
+   (if capacity
+     (let [ids (token-array tokens (:vocab (:config m)))]
+       (run m (static-cache m (first (array/shape ids)) capacity) ids logits))
+     (run m nil tokens logits))))
 
 (defn step
   "[logits cache']: the logits of tokens (B rows of T ids, one or a
-   chunk) read after cache (from position (offset cache); nil reads from
-   0, as prefill), and the cache after them. Options as prefill's."
+   chunk) read after cache (row b's from position (offsets cache)[b]; nil
+   reads from 0, as prefill), and the cache after them, of cache's kind.
+   Options: :logits, as prefill's."
   ([m cache tokens] (step m cache tokens nil))
-  ([m cache tokens opts] (run m cache tokens opts)))
+  ([m cache tokens {:keys [logits] :or {logits :all} :as opts}]
+   (check-options :step opts #{:logits})
+   (run m cache tokens logits)))
+
+(defn compile-step
+  "step over static caches, compiled by array/compile: a function
+   (f cache tokens) → [logits cache'], the values (step m cache tokens
+   opts) gives (within float32's round-off: MLX fuses the step's
+   elementwise ops). Its arrays are the cache's and the tokens', so a
+   trace serves every offset: on MLX one trace per shape of tokens (a
+   decode step, a prefill chunk) and cache, replayed; elsewhere step
+   itself. The host checks a call's tokens, rows and capacity first, as
+   step's. A concatenating cache is loud (:invalid-args): its shapes grow
+   every step. The model's weights are evaluated here (array/eval!), so a
+   trace holds them as constants rather than the casts that made them.
+   Options:
+     :logits   as step's;
+     :donate?  true: each call consumes the cache it steps (array/compile's
+               :donate, experimental). On MLX its arrays are then donated,
+               so the step writes its slots in place instead of copying
+               the cache, and reading the consumed cache again is loud
+               (:donated); where compile is step itself (the JVM backend)
+               nothing is caught: never step a consumed cache again (fork
+               one first with select-rows, a copy). The values are the
+               same either way."
+  ([m] (compile-step m nil))
+  ([{:keys [config weights]} {:keys [logits donate?] :or {logits :all} :as opts}]
+   (check-options :compile-step opts #{:logits :donate?})
+   (check-logits logits)
+   (array/eval! weights)
+   (let [f (array/compile (fn [layers positions ids] (static-forward config weights layers positions ids logits))
+                          (when donate? {:donate #{0 1}}))]
+     (fn [cache tokens]
+       (check-static :compile-step cache)
+       (let [ids (token-array tokens (:vocab config))
+             [b t] (array/shape ids)]
+         (check-rows cache b)
+         (check-capacity cache t)
+         (let [[out layers positions] (f (:layers cache) (:positions cache) ids)]
+           [out (advanced cache layers positions t)]))))))

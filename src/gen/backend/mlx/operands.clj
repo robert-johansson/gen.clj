@@ -6,7 +6,7 @@
   {:api :internal}
   (:require [gen.array.dtype :as dt]
             [gen.array.shape :as sh]
-            [gen.backend.mlx.array :refer [aux-stream check-dtype code defaults device fence mlx-array? stream wrap]]
+            [gen.backend.mlx.array :refer [aux-stream check-dtype code defaults device fence handle mlx-array? stream wrap]]
             [gen.backend.mlx.memory :refer [at-buffer-limit evaluating]])
   (:import [gen.backend.mlx.array MlxArray]
            [gen.mlx Mlx MlxRaw MlxRuntime MlxException]
@@ -152,7 +152,7 @@
    addresses, positive as longs.)"
   ^long [b x dtype]
   (if (mlx-array? x)
-    (.-h ^MlxArray x)
+    (handle x)
     (let [d (or dtype (host-dtype-on b x))]
       (if-let [h (constant x d)]
         (long h)
@@ -311,7 +311,7 @@
           s (stream b)]
       (with-temps [t]
         (try
-          (let [h (.-h x)
+          (let [h (handle x)
                 h (if (= read-as dtype) h (t (Mlx/mlx_astype h (int (code read-as)) s)))
                 vs (evaluating
                      (Mlx/mlx_array_eval h)
@@ -332,7 +332,7 @@
 (defn eval-arrays! [xs]
   ;; an evaluation boundary is a good moment to free what became unreachable
   (MlxRuntime/drain)
-  (let [hs (long-array (map #(.-h ^MlxArray %) xs))
+  (let [hs (long-array (map #(handle %) xs))
         v (MlxRuntime/vectorOf hs)]
     (try
       (evaluating (Mlx/mlx_eval v))

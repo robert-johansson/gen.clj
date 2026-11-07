@@ -505,6 +505,35 @@ each capability is an optional protocol of its own:
     a compiled trace would replay its draws. GenMLX's fused chains and
     compiled SMC draw their noise outside instead; those are beans
     genclj-l9ts and genclj-cdlp.
+  - **`:donate`** (experimental, outside the 1.x promise; 1.3.0, genclj-tjvd,
+    PROVISIONAL in DESIGN §9): `(array/compile f {:donate #{0}})`, a set
+    of argument positions, after JAX's donate_argnums. **The compiled
+    function consumes these arguments.**
+    - On MLX, once a call has returned its (lazy) result, the donated
+      arguments' arrays are released: each handle is repointed at a shared
+      0-d husk (`MlxRuntime/repoint`, mlx_array_set), which drops its
+      reference to the data. The result's graph then holds that data
+      alone, so MLX donates the buffer to the op that consumes it (its
+      `copy_gpu` reuses a buffer that one array references): a scatter
+      into a large array writes in place instead of copying it.
+    - Any later use of a donated array on MLX is loud: an ex-info,
+      `:reason :donated`, from every read of its handle (the backend reads
+      handles only through `gen.backend.mlx.array/handle`, which checks a
+      flag: one volatile read an operand, not measurable in the per-op
+      costs).
+    - A donated handle is never freed by the donation: it holds the husk
+      until its array's phantom reference frees it, once, as any other
+      (so no handle is freed twice, and none MLX still holds).
+    - **Where compile is f itself, `:donate` does nothing, and reusing a
+      donated array is not caught:** the JVM backend, the tape and the
+      batch tracer (whose arguments are tracked or batched values: compile
+      is f there), and MLX's CPU where it cannot build kernels. Never read
+      a donated argument again. The results are the same either way.
+    - Measured on Metal (`bench/gen/qwen3_bench.clj`): Qwen3-0.6B's
+      compiled decode step over a static KV cache, the cache held (copied
+      each step) against consumed (written in place), 57.3 → 75.2 tokens/s
+      at batch 1, 393 → 636 at batch 64. Without the release, MLX copied:
+      the JVM's handle to the old cache lives until the GC finds it.
   - `vmap` is not needed by the core: batching is shape-based, as in GenMLX.
 
 ## 8a. Branching on values
@@ -862,6 +891,11 @@ included (`docs/benchmarks.md`).
   proved unnecessary). If that proves
   insufficient under native-memory pressure, a scoping construct is added to
   the MLX backend, not to the core API (bean genclj-gip5).
+- **Consumed arguments** (1.3.0, experimental): `array/compile`'s
+  `:donate` says a compiled function consumes some of its arguments, so
+  MLX may reuse their buffers for its result (§8). It is a contract on
+  values, as Branching's advance consumes a branch, not a memory API:
+  semantics code never frees, it only stops using what it donated.
 
 ## 10. Errors
 
@@ -1018,6 +1052,14 @@ The decisions are §12 items 15–18, for the owner's review.*
   drops a reference: MLX's reference counts are atomic and its allocators
   lock. (A `Cleaner` came first. Its thread's timing was not enough under
   load.)
+- **Donation** (1.3.0, experimental; §8's `:donate`). A handle the JVM
+  still holds keeps its buffer from being reused: MLX donates a buffer
+  only to an op whose input is its one reference, and a compiled step
+  whose old KV cache waits for the GC copies the cache every step
+  (measured on Metal: the buffer's address changes). `:donate` releases
+  the consumed arguments at once by repointing their handles at a husk,
+  and marks them, so a later read is loud (`:donated`); the phantom
+  reference still frees each handle, once.
 - **Collecting under pressure.** The GC does not see MLX's buffers, and
   Metal allows about 500,000 of them, every array with data holding one,
   also on the CPU device. So the backend collects (`System.gc`, then
