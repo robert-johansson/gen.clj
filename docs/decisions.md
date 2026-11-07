@@ -4449,3 +4449,63 @@ the 0.6B and trails the 8B by 1.3-1.8x.
 **The recommendation stands with this caveat.** The batch-1 generation gap is
 the engine's host-cost work (genclj-8rnc), re-measured in generation mode
 before the owner decides.
+
+### gen.llm.array-engine: a Branching engine over gen.array
+
+(PROVISIONAL, owner to confirm; genclj-8rnc, 2026-11-07)
+
+**What was built.**
+- **Slots.** A slot holds a row of a group: a static cache of one or more
+  rows, shared by copy.
+- **Runs.** Runs are eager Qwen3 steps in forwards of :n-batch tokens, scored
+  on the device.
+- **Steps.** A step is one compiled decode with donation.
+  - A lane group, held only by its stepping slots, is stepped in place.
+  - Any other step stacks its rows first (one copy).
+  - Capacities grow by :block (qwen3/grow).
+- **Reads.** Logits are read once per step and normalized on the host in
+  double, as the llama engine does.
+- **Tokenizer.** It is llama.cpp's vocabulary, loaded vocab-only
+  (gen.llm.llama/vocabulary).
+
+**Checked.**
+- The Branching contract holds within 2e-6 (tiny model, JVM), 2e-5 (tiny,
+  MLX) and 1e-4 (Qwen3-0.6B, Metal; measured 5.1e-5).
+- Against llama.cpp the worst gap is 1.4e-2 with every argmax equal.
+- Throughput on Metal (Qwen3-0.6B Q8_0, float32):
+
+| Metal, Qwen3-0.6B Q8_0, float32 | array engine | llama.cpp |
+|---|---:|---:|
+| decode, 16 rows (tokens/s) | 470 | 816 |
+| token SMC, 16 particles (tokens/s) | 325 | 940 |
+
+Decode equals the raw compiled step: the protocols cost nothing visible.
+Token SMC stacks every step, because the LM forks its entries and
+resampling varies the batch; paged attention would remove that copy.
+
+**The lead's calls, on the implementing agent's recommendations:**
+1. **The engine is gen.llm.array-engine**, backend-neutral like
+   gen.llm.models.qwen3. This supersedes the gen.llm.mlx named in "1.3.0:
+   where the parts live".
+2. **gen.array/->floats** (experimental, through an optional protocol
+   IHostFloats) reads a float array to the host in one call. Not taken:
+   ->clj, which costs about a decode per step at 16 rows.
+3. **Rows are normalized on the host in double, scores on the device.**
+4. **A lane group whose in-place step fails loses its slots,** loudly, and
+   frees them. Not taken: never consuming a lane group, which copies every
+   step.
+5. **The LM's :max-cells default (:n-ctx) bounds nothing for this engine**:
+   documented, and the tests pass :max-cells. Not taken: the engine reporting
+   a default.
+6. **After the LM evicts a parent, SMC's rescored values differ by float
+   rounding.** The tiny-model test uses 512 branches.
+7. **New names:** qwen3/rewind, qwen3/grow, llama/vocabulary,
+   array-engine/stats and groups. Defaults: :max-branches 32, :block 128,
+   :n-batch 256, :n-ctx 4096.
+
+**Left for later:**
+- sessions that pin a branch (D2);
+- speculative decoding, which needs a truncate on the Branching protocol
+  (D4);
+- paged attention, which removes SMC's stacking copy and the memory per
+  generation held (D6).
