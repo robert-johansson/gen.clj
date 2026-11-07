@@ -85,7 +85,7 @@
   (let [r (java.util.Random. (+ 1000 (long i)))
         a (+ 12 (.nextInt r 87))
         b (+ 12 (.nextInt r 87))]
-    {:prompt (str "What is " a " * " b "? Reply with the number only.") :answer (str (* a b)) :factors #{a b}}))
+    {:prompt (str "What is " a " * " b "? Reply with the number only.") :answer (str (* a b)) :factors (hash-set a b)}))
 
 (def ^:private split
   "[training prompts, held-out prompts]: 512 and 128, no pair of factors
