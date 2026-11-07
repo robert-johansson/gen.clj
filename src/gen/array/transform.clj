@@ -1,7 +1,7 @@
 (ns gen.array.transform
   "gen.array's function transformations and the particles of batched
    values (docs/array-api.md §8, §8b): the bodies of gen.array's scan,
-   compile, batched?, batch-shape, particle-backend, particle, particles
+   compile, checkpoint, batched?, batch-shape, particle-backend, particle, particles
    and vmap, whose docstrings are there. Written in gen.array's ops, this
    namespace requires gen.array, which loads it at the first call of one."
   {:api :internal}
@@ -137,6 +137,38 @@
                   ;; apply first: the first call traces f, which records the output's structure
                   outs ((:g entry) ins)]
               (tree/refill @(:out entry) outs))))))))
+
+;; ---------------------------------------------------------------------------
+;; Checkpoints (experimental, outside the 1.x promise: DESIGN §9)
+;; ---------------------------------------------------------------------------
+
+(defn- checkpoint-input?
+  "Is the leaf x one of a checkpointed call's inputs: a float array of a
+   backend (one being differentiated, or that may be)? Host numbers, int
+   and bool arrays and every other leaf are constants of the call, which f
+   receives as they are."
+  [x]
+  (and (array/backend-array? x) (= :float (array/dtype-kind (array/dtype x)))))
+
+(defn checkpoint
+  "gen.array/checkpoint's body: (apply f args), its float arrays the
+   inputs of one node whose gradient recomputes f."
+  [f args]
+  (let [args (vec args)
+        leaves (vec (tree/leaves args))
+        at (vec (keep-indexed (fn [i x] (when (checkpoint-input? x) i)) leaves))
+        call (fn [ins]
+               (let [out (apply f (tree/refill args (reduce (fn [ls [i x]] (assoc ls i x)) leaves (map vector at ins))))]
+                 (when-not (and (array/array? out) (= :float (array/dtype-kind (array/dtype out))))
+                   (throw (ex-info (str "checkpoint: f returns one float array, not "
+                                        (if (array/array? out) (str "an array of " (array/dtype out)) (pr-str out)))
+                                   {:reason :invalid-result :op :checkpoint})))
+                 out))
+        ins (mapv leaves at)
+        b (when (seq ins) (array/backend-of :checkpoint ins))]
+    (if (instance? gen.array.protocols.ICheckpoint b)
+      (p/-checkpoint b call ins)
+      (call ins))))
 
 ;; ---------------------------------------------------------------------------
 ;; The particles of a batched value (docs/array-api.md §8b)

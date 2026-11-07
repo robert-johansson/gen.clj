@@ -87,7 +87,7 @@
                      with-operands with-temps]]
             [gen.backend.mlx.random :refer [random-uniform]]
             [gen.backend.mlx.transforms :as transforms
-             :refer [*differentiating* *tracing-compile* compile-fn custom-vjp custom-vjps? grad-mode
+             :refer [*differentiating* *tracing-compile* checkpoint compile-fn custom-vjp custom-vjps? grad-mode
                      native-value-and-grad tracing-compile?]])
   (:import [gen.backend.mlx.array Config Configured]
            [gen.mlx Mlx MlxRuntime MlxException]))
@@ -612,6 +612,14 @@
                            (mapv (fn [ct p] (as-array b (or ct (p/-full b (p/-shape b p) 0 (p/-dtype b p))) nil))
                                  (vjp ps (first os) (first cs)) ps))
                          (mapv #(as-array b % nil) args)))))
+
+  p/ICheckpoint
+  (-checkpoint [b f xs]
+    ;; only while MLX differentiates: elsewhere, and inside array/compile
+    ;; (which leaves custom functions out), f itself, the same gradient
+    (if (and (custom-vjps?) *differentiating*)
+      (first (guarded :checkpoint (checkpoint b (fn [ys] [(f ys)]) xs)))
+      (f xs)))
 
   p/ICompiling
   (-compile [b f opts] (if (compiles? b) (guarded :compile (compile-fn b f opts)) f))

@@ -3,7 +3,8 @@
    each on an MLX closure of Clojure code: its own gradients
    (mlx_value_and_grad, gen.mlx.grad=native), custom VJPs (the exact
    routes' and linear algebra's derivatives in native mode, and
-   array/custom-vjp's), and compile (mlx_compile)."
+   array/custom-vjp's), checkpoints (array/checkpoint's custom VJPs that
+   recompute), and compile (mlx_compile)."
   {:api :internal}
   (:require [gen.array.dtype :as dt]
             [gen.array.tree :as tree]
@@ -125,6 +126,69 @@
               cv (t :closure (Mlx/mlx_custom_vjp fun bwd))
               in (t :vector (MlxRuntime/vectorOf (long-array (map #(handle %) ins))))
               ;; MLX makes the custom function's node on the default device
+              out (t :vector (with-default-stream b #(Mlx/mlx_closure_apply cv in)))]
+          (wrap-all b (MlxRuntime/vectorArrays out)))
+        (finally (fence ins))))))
+
+;; ---------------------------------------------------------------------------
+;; Checkpoints: a custom VJP that recomputes (array/checkpoint)
+;; ---------------------------------------------------------------------------
+
+(def ^:dynamic *checkpoint-order*
+  "How a checkpoint's recompute is ordered in MLX's backward pass:
+   :ordered (the default) recomputes on the primals made to depend on the
+   outputs and then on the cotangents (mlx-node's per-layer checkpoint,
+   its mlx_autograd.cpp), so that a stack of checkpointed layers recomputes
+   each layer only once the layer above has its gradient; :plain is MLX's
+   own mlx_checkpoint, whose recompute depends on the outputs only.
+   Measured (bench/gen/checkpoint_bench.clj, fenrir's CUDA, 2026-11-07):
+   the same peak at MLX 0.32's breadth-first evaluation tape; with a
+   depth-first one (MLX_BFS_MAX_WIDTH=1, the order mlx-node assumed)
+   :ordered held 19% less for Qwen3-0.6B's gradient. For measurement;
+   internal."
+  :ordered)
+
+(defn- recompute
+  "A checkpoint's VJP: the cotangents of the primals ps (handles) from the
+   cotangents cs of the outputs os, by mlx_vjp of f again (a new closure
+   of it, from closure-of) on ps made to depend on os and then on cs
+   (mlx_depends): MLX's backward evaluates the recompute only once both
+   are, so a chain of checkpoints runs its backward one link at a time.
+   The handles given are this call's to free; the cotangents returned are
+   new ones, for MLX to take."
+  [closure-of ^longs ps ^longs cs ^longs os]
+  (with-temps [t]
+    (doseq [h (concat ps cs os)] (t h))
+    (let [pv (t :vector (MlxRuntime/vectorOf ps))
+          ov (t :vector (MlxRuntime/vectorOf os))
+          cv (t :vector (MlxRuntime/vectorOf cs))
+          dep (t :vector (Mlx/mlx_depends (t :vector (Mlx/mlx_depends pv ov)) cv))
+          fun (t :closure (closure-of))
+          [_ vjps] (mapv #(t :vector %) (Mlx/mlx_vjp fun dep cv))]
+      (MlxRuntime/vectorArrays vjps))))
+
+(defn checkpoint
+  "The outputs of (f ins) (vectors of MlxArrays) as one MLX custom
+   function whose VJP recomputes f instead of keeping its intermediates
+   (array/checkpoint under native gradients): mlx_custom_vjp of f and
+   recompute, or mlx_checkpoint of f when *checkpoint-order* is :plain. f
+   runs with b as gen.array's default backend, as custom-vjp's."
+  [b f ins]
+  (let [handles (fn [xs] (long-array (map #(retained b :checkpoint %) xs)))
+        on-b (fn [g] (with-bindings {@default-backend-var b} (g)))
+        ;; a closure of f: one for the forward, and one made by each
+        ;; recompute, since the VJP outlives this call's temporaries
+        closure-of #(MlxRuntime/closure (reify gen.mlx.MlxRuntime$Closure
+                                          (apply [_ hs] (handles (on-b (fn [] (f (wrap-all b hs))))))))]
+    (with-temps [t]
+      (try
+        (let [fun (t :closure (closure-of))
+              cv (t :closure (case *checkpoint-order*
+                               :plain (Mlx/mlx_checkpoint fun)
+                               :ordered (Mlx/mlx_custom_vjp fun (t :custom-vjp (MlxRuntime/customVjp
+                                                                                 (reify gen.mlx.MlxRuntime$CustomVjp
+                                                                                   (apply [_ ps cs os] (recompute closure-of ps cs os))))))))
+              in (t :vector (MlxRuntime/vectorOf (long-array (map #(handle %) ins))))
               out (t :vector (with-default-stream b #(Mlx/mlx_closure_apply cv in)))]
           (wrap-all b (MlxRuntime/vectorArrays out)))
         (finally (fence ins))))))

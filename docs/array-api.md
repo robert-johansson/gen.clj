@@ -204,10 +204,10 @@ needs, taken from GenMLX's measured call counts
 | shape | `reshape` `transpose` `squeeze` `expand-dims` `broadcast-to` `stack` `concatenate` `flatten` `broadcast-shapes` | `-reshape` `-transpose` `-broadcast-to` `-concatenate` | `squeeze`, `expand-dims`, `stack`, `flatten`; `broadcast-shapes` computes on shapes |
 | indexing | `slice` `take` `take-along-axis` `pick` `scatter-add` | `-slice` `-take` `-take-along-axis` `-scatter-add` | `pick` |
 | linear algebra | `matmul` `outer` `diag` · `la/cholesky` `la/solve-triangular` `la/solve` `la/inv` `la/slogdet` | `-matmul` `-linalg` | `outer`, `diag` |
-| gradients | `grad` `value-and-grad` `stop-gradient` `tracked?` | `-value-and-grad`, `:stop-gradient` | — |
+| gradients | `grad` `value-and-grad` `stop-gradient` `tracked?` · `checkpoint` (experimental, 1.3.0) | `-value-and-grad`, `:stop-gradient` · `ICheckpoint`'s `-checkpoint` (optional) | — |
 | trees | `tree-map` `tree-leaves` | — | both |
 | batching | `vmap` · `batched?` `batch-shape` `particle-backend` `particle` `particles` `all-particles` | — (the batch tracer, a wrapping backend: §8b) | all |
-| neural networks (experimental, 1.3.0) | `rms-norm` `rope` `sdpa` | — (a fused kernel where a backend has one: `IFused`'s `-fused` with `:rms-norm :rope :sdpa`) | all three |
+| neural networks (experimental, 1.3.0) | `rms-norm` `rope` `sdpa` `selective-log-softmax` | — (a fused kernel where a backend has one: `IFused`'s `-fused` with `:rms-norm :rope :sdpa`) | all four |
 | quantized weights (experimental, 1.3.0) | `quantize` `dequantize` `quantized-matmul` `gather-qmm` | `IQuantized`'s `-quantized` with `:quantize :dequantize :quantized-matmul :gather-qmm` | — |
 | files (experimental, 1.3.0) | `load-gguf` | `ILoading`'s `-load-gguf`, per file of a model | — |
 | overwriting (experimental, 1.3.0) | `put-along-axis` | `IOverwriting`'s `-put-along-axis` | — |
@@ -278,6 +278,26 @@ each capability is an optional protocol of its own:
     dtype's lowest finite score, not -Inf, so gradients stay finite.
   - The half floats are normalized, rotated and softmaxed in float32, as
     MLX's fast ops are.
+- **`selective-log-softmax`** (genclj-pnu6), a composite with no kernel:
+  `(selective-log-softmax logits indices opts)` is log softmax(logits)
+  at each index, the logit there less the logsumexp over the last axis
+  (an LLM's log-probability of a token), never the [.. V] log-softmax.
+  - The logsumexp is taken `:chunk` entries at a time and the chunks'
+    combined by a logsumexp, so exp of every logit is never made at once.
+  - The logits are an array [.. V] with indices of its leading shape, or a
+    function `(f start stop)` giving the logits of entries start to
+    stop - 1 with `:vocab` V: an output projection by rows, whose [B T V]
+    logits are then never made. With `:args`, a vector of what f
+    differentiates through, f is called `(apply f start stop args)` and
+    each chunk is `checkpoint`ed over them (§8), so the gradient makes
+    one chunk's logits at a time too.
+  - Indices outside [0, V) are loud where they can be read (the JVM
+    backend) and clamped on a lazy backend, as `take`'s. Half floats
+    reduce in float32, the result's dtype. An unknown option is loud
+    (`:unknown-options`).
+  - Its gradient is the full computation's within round-off (the chunks'
+    logsumexps sum in another order): 3e-16 relative through the tiny
+    Qwen3's loss in float64.
 - **`quantize`, `dequantize`, `quantized-matmul`, `gather-qmm`** are
   primitives of `IQuantized`, in MLX's affine layout: a uint32 matrix of
   values packed little-endian (bit j·b of a row's stream holds value j's
@@ -487,6 +507,69 @@ each capability is an optional protocol of its own:
   `mlx_custom_vjp` (where f runs inside the transformation, so it may not
   read values on the host); every other backend calls f. A rule with the
   wrong number of cotangents is a loud error.
+- **Checkpoints** (1.3.0, experimental, genclj-pnu6):
+  `(array/checkpoint f)` is f, one float array its value, whose
+  gradient does not keep f's intermediates from the forward pass: under
+  value-and-grad they are made again in the backward pass, when the
+  cotangent of f's value reaches it, and dropped after. A training step
+  then holds one checkpointed layer's activations at a time, for about
+  one more forward pass of compute. Rule 1: a checkpoint changes memory,
+  never values or gradients.
+  - The arguments are arrays or trees of them. Their float arrays are the
+    inputs gradients flow through; host numbers, int arrays and other
+    leaves (a quantized weight's `:bits` and uint32 words) reach f as
+    they are. f must take what it differentiates through as an argument:
+    closing over a value being differentiated is loud on the tape
+    (`:closes-over`), and its gradient is lost under MLX's native
+    gradients (as for `custom-vjp`).
+  - A backend implements the optional protocol `ICheckpoint`
+    (`-checkpoint b f xs`). The tape records one node: f runs on the
+    primals (nothing recorded), and its VJP runs f again on a tape of its
+    own over the inner backend, its backward seeded with the cotangent
+    (`gen.array.tape/recompute-vjp`). The gradients are the unchecked
+    ones exactly on the JVM backend: the same ops, accumulated in the same
+    order.
+  - **MLX's native gradients:** one `mlx_custom_vjp` of f whose VJP is
+    `mlx_vjp` of f again on its primals made to depend on its outputs and
+    then on its cotangents (`mlx_depends` twice), mlx-node's per-layer
+    checkpoint (its `mlx_autograd.cpp`). MLX's backward then recomputes
+    a layer only after the layer above has its gradient, so a stack of
+    checkpointed layers runs its backward layer by layer. MLX's own
+    `mlx_checkpoint` depends on the outputs only.
+  - **Measured** (`bench/gen/checkpoint_bench.clj`; fenrir's RTX PRO
+    6000, MLX 0.32.4's CUDA, float32, native gradients, 2026-11-07). The
+    peak MLX held while evaluating a gradient, past the weights, with its
+    memory limit at what it held before (so its eval loop waits for its
+    queued kernels and frees their buffers as the graph allows):
+
+    | Gradient | Unchecked | Checkpointed (ordered) | MLX's `mlx_checkpoint` | Time, unchecked → ordered |
+    |---|---:|---:|---:|---:|
+    | 16 SwiGLU layers, 2,048 tokens, width 1,024 | 5.2 GB | 2.8 GB | 2.8 GB | 56 → 68 ms |
+    | Qwen3-0.6B Q8_0, nll of 4 × 256 tokens (its 113 norms), vocabulary chunks of 16,384 | 5.6 GB | 1.5 GB | 1.5 GB | 87 → 120 ms |
+
+    - **The ordering does not matter at MLX 0.32's own evaluation
+      order.** MLX 0.32 builds its evaluation tape breadth first
+      (`MLX_BFS_MAX_WIDTH`, 20 wide). With a depth-first tape
+      (`MLX_BFS_MAX_WIDTH=1`, the order mlx-node's comment assumes) the
+      ordered checkpoint held 0.96 GB for Qwen3 against MLX's 1.18 GB,
+      the stack 2.5 GB alike.
+    - **At MLX's configured limit the saving does not show:** MLX keeps
+      the buffers of the kernels it has queued and not yet run, up to its
+      memory limit (`gen.mlx.memory-bytes`, 16 GB in the run), so both
+      peaked at 10-15 GB there. A checkpoint lets a step fit under a
+      limit set near what it needs (`gen.backend.mlx/set-memory-limit!`),
+      which then costs the waits (Qwen3: 120 → 129 ms).
+    - Making a layer's recomputed cotangents depend on each other (so its
+      weights' gradients run before the layer below recomputes) took the
+      stack to 2.4 GB at the breadth-first tape, but forced the frozen
+      quantized weights' cotangents too (Qwen3: 2.1 GB, 157 ms); tied
+      only to the differentiated inputs' it matched the ordered peak on
+      Qwen3 at 148 ms. Not kept.
+  - **f itself** where nothing is differentiated, under the batch tracer
+    without the tape, inside `array/compile` under native gradients
+    (which leaves custom functions out: MLX differentiates f there), and
+    on a backend without `ICheckpoint` (the staging backend): the same
+    values and gradients, without the memory saved.
 - **Reserved names:** `vjp`, `jvp`, `vmap`.
 - **`array/compile`** (2026-10-19, bean genclj-8b88):
   - **On MLX.** `(array/compile f)` traces f once per input structure, shapes

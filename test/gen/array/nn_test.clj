@@ -1,7 +1,7 @@
 (ns gen.array.nn-test
-  "gen.array's neural-network operations (experimental): rms-norm, rope
-   and sdpa, and the quantized weights' quantize, dequantize,
-   quantized-matmul and gather-qmm, on the backend under test:
+  "gen.array's neural-network operations (experimental): rms-norm, rope,
+   sdpa and selective-log-softmax, and the quantized weights' quantize,
+   dequantize, quantized-matmul and gather-qmm, on the backend under test:
    - the composites against direct computations on the host, in float64;
    - their gradients (the tape's, or MLX's native ones) against central
      finite differences in float64 (on the JVM backend);
@@ -12,7 +12,11 @@
      quantized-matmul and gather-qmm against dequantize and matmul, within
      float32 round-off's bound;
    - the batch tracer (vmap: per row), staging (a replay is the direct
-     run), and the loud errors.
+     run), and the loud errors;
+   - selective-log-softmax, whole, by chunks and as a function of the
+     chunk (checkpointed with :args), against the log-softmax's entry on
+     the host, its gradients against central differences and against the
+     full log-softmax's (an output projection's h and w).
    Planted mutations, each failing a test here before it was trusted
    (2026-11-07): NEOX's rotation's sign, the traditional pairs' order,
    the per-row offsets ignored, rms-norm's eps outside the root, GQA's
@@ -20,7 +24,10 @@
    rows' zeroing dropped, the bit stream's word boundary, quantize's
    rounding (floor for rint), the tape's quantized product not
    transposed, gather-qmm's VJP scattered by rhs, and the tracer's
-   per-particle offsets dropped."
+   per-particle offsets dropped. And selective-log-softmax's (2026-11-07,
+   the JVM backend): a chunk boundary off by one, each chunk's last entry
+   dropped (3.0 in a log-probability) or overlapping the next (4.7), and
+   a chunk's indices off by one (3.7)."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
             [gen.array.nn :as nn]
@@ -357,7 +364,11 @@
       (let [f (fn [x k v w] (array/sdpa (array/rope (array/rms-norm x w 1e-5) 8 {:offset 2}) k v {:mask :causal}))
             inputs [(normal 60 [1 2 3 8]) (normal 61 [1 1 4 8]) (normal 62 [1 1 4 8]) (normal 63 [8])]
             program (st/stage f [[1 2 3 8] :float64] [[1 1 4 8] :float64] [[1 1 4 8] :float64] [[8] :float64])]
-        (is (= (host (st/evaluate program inputs)) (host (apply f inputs))) "bit for bit")))))
+        (is (= (host (st/evaluate program inputs)) (host (apply f inputs))) "bit for bit"))
+      (testing "selective-log-softmax by chunks, checkpointed (staging calls the function)"
+        (let [f (fn [x idx] (array/selective-log-softmax (fn [s e x] (array/slice x -1 s e)) idx {:vocab 10 :chunk 4 :args [x]}))
+              inputs [(normal 64 [2 3 10]) (array/array [[1 7 3] [0 9 9]] {:dtype :int64})]]
+          (is (= (host (st/evaluate (st/stage f [[2 3 10] :float64] [[2 3] :int64]) inputs)) (host (apply f inputs)))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Quantized weights
@@ -632,3 +643,123 @@
             (array/quantized-matmul (array/sdpa (array/rope (array/rms-norm x w 1e-5) 64 {:offset 3}) k v {:mask :causal})
                                     wq s b opts))]
     (is (ts/close? ((array/compile f) x k v w wq s b) (f x k v w wq s b) {:rtol 1e-4 :atol 1e-5}))))
+
+;; ---------------------------------------------------------------------------
+;; selective-log-softmax: the log-softmax's entries, by vocabulary chunks
+;; ---------------------------------------------------------------------------
+
+(defn- host-selected
+  "log softmax(x)[i] on the host, in float64, for each row of the nested
+   vectors x and its index in the nested idx."
+  [x idx]
+  (if (number? (first x))
+    (let [mx (reduce max x)
+          lse (+ mx (Math/log (reduce + (map #(Math/exp (- % mx)) x))))]
+      (- (nth x idx) lse))
+    (mapv host-selected x idx)))
+
+(defn- int-array-of [v] (array/array v {:dtype (ts/int-dtype)}))
+
+(def ^:private sel-logits (delay (array/* 3.0 (normal 120 [2 3 10]))))
+(def ^:private sel-idx (delay (int-array-of [[0 9 4] [5 5 1]])))
+
+(defn- every-form
+  "selective-log-softmax of logits [.. V] and indices by every form: whole,
+   chunked unevenly, evenly and past V, and as a function of the chunk,
+   with and without :args (checkpointed)."
+  [x idx]
+  (let [v (peek (array/shape x))
+        f (fn [s e] (array/slice x -1 s e))]
+    {"whole" (array/selective-log-softmax x idx)
+     "chunks of 3" (array/selective-log-softmax x idx {:chunk 3})
+     "chunks of 5" (array/selective-log-softmax x idx {:chunk 5})
+     "a chunk past V" (array/selective-log-softmax x idx {:chunk 64})
+     "a function" (array/selective-log-softmax f idx {:vocab v :chunk 4})
+     "a function, :args" (array/selective-log-softmax (fn [s e x] (array/slice x -1 s e)) idx {:vocab v :chunk 4 :args [x]})}))
+
+(deftest selective-log-softmax-is-the-log-softmax-s-entry
+  (let [x @sel-logits idx @sel-idx
+        want (host-selected (host x) (host idx))]
+    (doseq [[label out] (every-form x idx)]
+      (is (= [2 3] (array/shape out)) label)
+      (is (close-host? (host out) want) label)))
+  (testing "a vector of logits, a 0-d index"
+    (let [x (array/take (array/take @sel-logits 0 0) 0 0)]
+      (doseq [[label out] (every-form x (int-array-of 7))]
+        (is (= [] (array/shape out)) label)
+        (is (close-host? (host out) (host-selected (host x) 7)) label))))
+  (testing "extreme logits: a chunk of -1e30s, and a dominant entry"
+    (let [x (array/array [[-1e30 -1e30 -1e30 2.0 1e3] [0.0 0.0 0.0 0.0 0.0]])
+          idx (int-array-of [3 2])]
+      (is (close-host? (host (array/selective-log-softmax x idx {:chunk 3})) [(- 2.0 1e3) (- (Math/log 5.0))])))))
+
+(deftest selective-log-softmax-gradients-are-the-full-computation-s
+  (let [idx @sel-idx]
+    (is (grads-match? #(array/selective-log-softmax %1 %2 {:chunk 3}) [@sel-logits] [idx]) "chunks, against central differences")
+    (is (grads-match? #(array/selective-log-softmax (fn [s e x] (array/slice x -1 s e)) %2 {:vocab 10 :chunk 4 :args [%1]})
+                      [@sel-logits] [idx])
+        "a function, checkpointed")
+    (testing "the output projection by rows, h·wᵀ: the gradients of h and w, against the full logits'"
+      (let [h (normal 121 [2 3 6]) w (normal 122 [10 6])
+            weigh (fn [lp] (array/sum (array/* lp (array/array [[1.0 -2.0 0.5] [3.0 0.25 -1.0]]))))
+            head (fn [s e h w] (array/matmul h (array/transpose (array/slice w 0 s e))))
+            g-full ((array/grad (fn [h w] (weigh (array/pick (array/log-softmax (head 0 10 h w)) idx))) {:argnums [0 1]}) h w)]
+        (doseq [[label opts] {"chunks of 3, checkpointed" {:vocab 10 :chunk 3 :args nil}
+                              "chunks of 4, not checkpointed" {:vocab 10 :chunk 4}}]
+          (let [g ((array/grad (fn [h w]
+                                 (weigh (if (contains? opts :args)
+                                          (array/selective-log-softmax head idx (assoc opts :args [h w]))
+                                          (array/selective-log-softmax #(head %1 %2 h w) idx opts))))
+                               {:argnums [0 1]})
+                   h w)]
+            (is (every? true? (map #(ts/close? %1 %2) g g-full)) label)))))))
+
+(deftest selective-log-softmax-batched-is-per-row
+  (let [xs (normal 123 [3 4 10])
+        idx (int-array-of [[1 2 3 9] [0 0 5 7] [8 6 4 2]])
+        f (fn [x i] (array/selective-log-softmax x i {:chunk 4}))]
+    (is (ts/close? ((array/vmap f) xs idx) (array/stack (mapv #(f (array/take xs % 0) (array/take idx % 0)) (range 3)) 0)))))
+
+(deftest selective-log-softmax-in-half-floats-is-float32
+  (if (ts/jvm?)
+    (println "gen.array.nn-test: half floats are checked on MLX (the JVM backend has none)")
+    (let [x (array/astype @sel-logits :float16)
+          out (array/selective-log-softmax x @sel-idx {:chunk 3})]
+      (is (= :float32 (array/dtype out)))
+      (is (ts/close? out (array/selective-log-softmax (array/astype x :float32) @sel-idx))))))
+
+(deftest selective-log-softmax-misuse-is-loud
+  (let [x @sel-logits idx @sel-idx
+        reason (fn [f] (:reason (ts/thrown-data (f))))]
+    (is (= :unknown-options (reason #(array/selective-log-softmax x idx {:chunks 3}))))
+    (is (= :invalid-args (reason #(array/selective-log-softmax x (array/slice idx 1 0 2)))) "indices of another shape")
+    (is (= :invalid-args (reason #(array/selective-log-softmax x (array/astype idx (ts/float-dtype))))) "float indices")
+    (is (= :invalid-args (reason #(array/selective-log-softmax idx idx))) "int logits")
+    (is (= :invalid-args (reason #(array/selective-log-softmax x idx {:chunk 0}))))
+    (is (= :invalid-args (reason #(array/selective-log-softmax x idx {:vocab 9}))) "a :vocab not the logits'")
+    (is (= :invalid-args (reason #(array/selective-log-softmax x idx {:args [x]}))) ":args with an array")
+    (is (= :invalid-args (reason #(array/selective-log-softmax (fn [s e] (array/slice x -1 s e)) idx {:chunk 4}))) "a function without :vocab")
+    (is (= :invalid-args (reason #(array/selective-log-softmax (fn [s e] (array/slice x -1 s (inc e))) idx {:vocab 9 :chunk 4})))
+        "a chunk of the wrong size")
+    (if (ts/jvm?)
+      (is (= :invalid-args (reason #(array/selective-log-softmax x (int-array-of [[0 10 4] [5 5 1]])))) "an index past V")
+      (testing "a lazy backend clamps an index, as take's"
+        (is (ts/close? (array/selective-log-softmax x (int-array-of [[0 10 4] [5 5 1]]) {:chunk 3})
+                       (array/selective-log-softmax x (int-array-of [[0 9 4] [5 5 1]]))))))))
+
+(deftest selective-log-softmax-planted-bugs-fail-it
+  (let [x @sel-logits idx @sel-idx
+        want (flatten (host-selected (host x) (host idx)))
+        bounds @#'nn/chunk-bounds
+        part @#'nn/chunk-part
+        off (fn [redefs]
+              (with-redefs-fn redefs
+                #(reduce max (for [[label out] (every-form x idx)
+                                   :when (not (#{"whole" "a chunk past V"} label))]
+                               (reduce max (map (fn [a b] (Math/abs (- (double a) (double b)))) (flatten (host out)) want))))))]
+    (is (< 0.01 (off {#'nn/chunk-bounds (fn [v step] (mapv (fn [[s e]] [s (dec e)]) (bounds v step)))}))
+        "a chunk boundary off by one: each chunk's last entry dropped")
+    (is (< 0.01 (off {#'nn/chunk-bounds (fn [v step] (mapv (fn [[s e]] [s (min v (inc e))]) (bounds v step)))}))
+        "a chunk boundary off by one: each chunk overlapping the next")
+    (is (< 0.01 (off {#'nn/chunk-part (fn [lc i s e] (part lc (array/+ i 1) s e))}))
+        "a chunk's indices off by one")))

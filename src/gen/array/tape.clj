@@ -28,7 +28,12 @@
 
    The wrapped backend may be the batch tracer (gen.array.batch), whose
    -value-and-grad is this one over itself: every primal and every rule
-   then runs per particle, which makes the gradient vmap's."
+   then runs per particle, which makes the gradient vmap's.
+
+   A checkpoint (gen.array/checkpoint, p/ICheckpoint) is one node: its
+   function runs on the primals, recording nothing, and its VJP runs it
+   again on a tape of its own, seeded with the cotangent (recompute-vjp),
+   so its intermediates live only during that VJP."
   {:api :internal}
   (:refer-clojure :exclude [+ - * / < > <= >= ==])
   (:require [gen.array :as array :refer [+ - * / < > <= >= ==]]
@@ -38,7 +43,7 @@
 
 (set! *warn-on-reflection* true)
 
-(declare ->TapeBackend)
+(declare ->TapeBackend recompute-vjp)
 
 (deftype Tracked [primal parents vjp tape]
   p/IArray
@@ -433,6 +438,17 @@
       (record t out args
               (fn [g need] (mapv #(when %2 %1) (vjp ps out g) need)))))
 
+  p/ICheckpoint
+  (-checkpoint [t f xs]
+    ;; f on the primals, on the wrapped backend: nothing of it recorded
+    (let [ps (mapv primal xs)
+          out (f ps)]
+      (when (tracked? out)
+        (throw (ex-info (str "checkpoint: f closes over a value being differentiated, whose gradient would be"
+                             " lost; pass it as an argument")
+                        {:reason :closes-over :op :checkpoint})))
+      (record t out xs (fn [g need] (recompute-vjp inner f ps g need)))))
+
   p/IBackend
   (-name [_] :tape)
   (-defaults [_] (p/-defaults inner))
@@ -612,18 +628,33 @@
     order))
 
 (defn- backward
-  "The cotangent of every tracked value reachable from root, seeded with 1."
-  ^java.util.IdentityHashMap [^Tracked root]
-  (let [cts (java.util.IdentityHashMap.)
-        order (topological-order root)]
-    (.put cts root (array/ones-like (.-primal root)))
-    (doseq [^Tracked node (reverse order)]
-      (when-let [g (.get cts node)]
-        (when-let [vjp (.-vjp node)]
-          (doseq [[parent ct] (map vector (.-parents node) (vjp g))]
-            (when (and parent ct)
-              (.put cts parent (if-let [acc (.get cts parent)] (+ acc ct) ct)))))))
-    cts))
+  "The cotangent of every tracked value reachable from root, seeded with
+   seed (default 1), root's cotangent."
+  (^java.util.IdentityHashMap [^Tracked root] (backward root (array/ones-like (.-primal root))))
+  (^java.util.IdentityHashMap [^Tracked root seed]
+   (let [cts (java.util.IdentityHashMap.)
+         order (topological-order root)]
+     (.put cts root seed)
+     (doseq [^Tracked node (reverse order)]
+       (when-let [g (.get cts node)]
+         (when-let [vjp (.-vjp node)]
+           (doseq [[parent ct] (map vector (.-parents node) (vjp g))]
+             (when (and parent ct)
+               (.put cts parent (if-let [acc (.get cts parent)] (+ acc ct) ct)))))))
+     cts)))
+
+(defn- recompute-vjp
+  "A checkpoint's cotangents of f's inputs ps (where need, a vector of
+   booleans, says) from the cotangent g of its value: f run again on a
+   tape of its own over inner, the inputs needed tracked, and that tape's
+   backward seeded with g. Its intermediates live only during this call
+   (gen.array/checkpoint)."
+  [inner f ps g need]
+  (let [tape (->TapeBackend inner)
+        ins (mapv (fn [p n?] (if n? (->Tracked p [] nil tape) p)) ps need)
+        out (apply-taped f [ins])
+        cts (if (tracked? out) (backward out g) (java.util.IdentityHashMap.))]
+    (mapv (fn [x n?] (when n? (or (.get cts x) (array/zeros-like (primal x))))) ins need)))
 
 (defn- track-leaf [tape leaf]
   (when (tracked? leaf) (nested!))

@@ -88,6 +88,19 @@
     "(apply f args), whose gradient comes from (vjp args out cotangent), a
      vector of one cotangent per argument (nil for none)."))
 
+(defprotocol ^{:api :experimental} ICheckpoint
+  "A backend whose gradients can recompute a function's intermediates in
+   the backward pass instead of keeping them from the forward
+   (gen.array/checkpoint): the tape, and MLX in native mode. Every other
+   backend calls the function, which has the same values and gradients
+   (rule 1: a checkpoint changes memory, never values). Experimental:
+   outside the 1.x promise (DESIGN §9)."
+  (^{:api :experimental} -checkpoint [b f xs]
+    "(f xs), xs a vector of float arrays (b's, or values b wraps), f a
+     function of such a vector returning one float array, whose gradient
+     comes from f run again in the backward pass on xs, its intermediates
+     made there and dropped after, not kept from this call."))
+
 (defprotocol INativeGrad
   "A backend whose -value-and-grad differentiates by its own transformation
    (MLX's mlx_value_and_grad), calling f with arrays of its own rather than
