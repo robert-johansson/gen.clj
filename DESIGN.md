@@ -771,6 +771,10 @@ decision is appended there, and this summary changes with it.
 - GPU kernels are ported from where they originated, with attribution and
   their license kept; launches, engines and primitives are ours; each kernel
   is checked against its composite. [decided](docs/decisions.md#130s-kernels-ported-from-their-origins-everything-around-them-ours)
+- gen.array's LLM operations are experimental: rms-norm, rope and sdpa are
+  composites (gen.array.nn) a backend may fuse (IFused), and quantize,
+  dequantize, quantized-matmul and gather-qmm are IQuantized's, in MLX's
+  affine layout; the JVM backend stores uint32. [decided](docs/decisions.md#genarrays-llm-operations-two-optional-protocols-uint32-on-the-jvm)
 - The MLX engine: GGUF weights through MLX's loader (Q8_0 scales float32),
   llama.cpp's vocabulary, gen.array's LLM operations (rms-norm, rope, sdpa;
   quantized-matmul, dequantize, gather-qmm), a Slots engine, MLX's native

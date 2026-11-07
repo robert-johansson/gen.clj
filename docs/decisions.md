@@ -4134,3 +4134,61 @@ recommendations:
 7. **A JVM exiting with a llama.cpp model or engine still open aborts on
    Metal** (ggml-metal's exit assertion). This was true before. It is
    documented, and a bean weighs a shutdown hook.
+
+### gen.array's LLM operations: two optional protocols, uint32 on the JVM
+
+(PROVISIONAL, owner to confirm; genclj-ezdd, genclj-vjwr, genclj-ty8m,
+2026-11-07)
+
+**What was built.**
+- **Seven new gen.array functions, experimental:** rms-norm, rope and sdpa
+  (composites in gen.array.nn), and quantize, dequantize, quantized-matmul
+  and gather-qmm, in MLX's affine layout (groups of 32, 64 or 128; 2, 3, 4,
+  5, 6 or 8 bits).
+- **Two new optional protocols,** so IBackend gains nothing (the 1.x rule):
+  - IFused (-fused b op args): a fused kernel, or nil to decline. MLX's fast
+    ops implement it; wrapping backends don't, so the composite runs under
+    the tape, the batch tracer and staging.
+  - IQuantized (-quantized b op args): op-keyed like -linalg. A backend
+    without it gives :unsupported, named.
+
+**The lead's calls, on the implementing agent's recommendations:**
+1. **quantize is added**, beyond the seven names the owner approved: tests and
+   conversion (genclj-t007) need it.
+2. **The JVM backend gains uint32 storage**, exact in doubles and wrapping like
+   int32. Not taken: packed words as int64, which would make the dtypes
+   differ between backends.
+3. **mxfp4, nvfp4 and mxfp8 are :unsupported on every backend for now.** Their
+   scales are uint8, which gen.array lacks. The owner's call is in
+   genclj-9ti1. The agent recommends adding :uint8; the alternative is uint32
+   scales cast at MLX's boundary.
+4. **A numerics edge: a query that sees no key gets zeros**, on every
+   backend.
+   - MLX disagrees with itself here: its CPU fallback averages the values;
+     its Metal kernels give zeros or another row. The MLX backend zeroes
+     that row.
+   - A bool mask hides keys with the dtype's lowest finite score, not -Inf,
+     so gradients stay finite.
+   - Not taken: the uniform average (MLX's fallback, JAX); NaN.
+5. **In float32, the JVM's dequantize rounds the product and the sum
+   separately**, as MLX's CPU does. Metal fuses them, within one ulp.
+6. **Gradients.** Under MLX's native gradients, scales and biases get MLX's
+   own gradients. Only the tape refuses them (:no-gradient), with respect to
+   x only.
+7. **Float64 on MLX is quantized in float32 and multiplied after
+   dequantizing** (MLX has no float64 CPU kernel). Out-of-range gather
+   indices clamp, as take's do.
+
+**MLX's fused ops are declined where they differ from the composite:**
+- float64 (MLX computes in float32);
+- rope over two axes, and with :freqs under native gradients;
+- causal masks with more queries than keys;
+- sdpa under native gradients: MLX 0.32.4's Metal backward fails for 8
+  queries or fewer ("the vector kernels do not produce a logsumexp").
+
+**Two findings about MLX 0.32.4.** Metal rounds an exact half away from zero
+in quantize; the CPU and the JVM round to even. The JVM's quantize is
+otherwise bit-identical to MLX's.
+
+THIRD-PARTY-NOTICES (with CLAUDE.md's rule 10) records ported files' origins.
+No kernel is ported yet.
