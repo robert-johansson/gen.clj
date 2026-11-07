@@ -511,6 +511,23 @@
                                              10 seed)]
       (conforms? exact #(array/slice % ax start stop step) x))))
 
+(defn- distinct-along
+  "{:data :dtype} of indices of shape (assoc shape axis k), distinct along
+   each line of axis (into a dimension of (nth shape axis), k at most
+   that): put-along-axis's, whose repeats are unspecified on MLX."
+  [shape axis k seed]
+  (let [rng (java.util.Random. seed)
+        d (nth shape axis)
+        pre (reduce * 1 (subvec shape 0 axis))
+        post (reduce * 1 (subvec shape (inc axis)))
+        flat (long-array (* pre k post))]
+    (dotimes [a pre]
+      (dotimes [c post]
+        (let [perm (doto (java.util.ArrayList. ^java.util.Collection (vec (range d))) (java.util.Collections/shuffle rng))]
+          (dotimes [j k]
+            (aset flat (+ (* (+ (* a k) j) post) c) (long (.get perm j)))))))
+    {:data (reshape-flat (vec flat) (assoc shape axis k)) :dtype int-dt}))
+
 (defspec gathers trials
   (prop/for-all [shape gen-nonempty-shape
                  seed gen/nat]
@@ -525,6 +542,9 @@
            (conforms? exact #(array/take % (dec d) ax) x)
            (conforms? exact #(array/take-along-axis %1 %2 ax) x along)
            (conforms? loose #(array/scatter-add %1 %2 %3 ax) x along updates)
+           (let [k (min 2 d)]
+             (conforms? exact #(array/put-along-axis %1 %2 %3 ax) x (distinct-along shape ax k seed)
+                        (gen/generate (gen-spec (assoc shape ax k) gen-finite float-dt) 10 (+ seed 2))))
            (conforms? exact #(array/pick %1 %2) x (gen/generate (gen-spec (pop shape) (gen/choose 0 (dec (peek shape))) int-dt) 10 seed))))))
 
 ;; ---------------------------------------------------------------------------

@@ -318,6 +318,38 @@
       (is (array/equal? (array/array [0.1 0.9 0.9]) (array/pick (array/array [0.1 0.9]) (array/array [0 1 1]))) "batched index, shared logits")
       (is (array/equal? (array/array 0.9) (array/pick (array/array [0.1 0.9]) 1)) "scalar case"))))
 
+(deftest put-along-axis-overwrites
+  ;; the overwrite scatter-add is not: a value written over an entry
+  ;; replaces it, so writing twice is writing once (the static KV cache's
+  ;; slots reused, gen.llm.models.qwen3). Plants: the JVM backend adding
+  ;; (scatter-add's walk) fails "overwrites, not adds"; the repeat check
+  ;; dropped fails "a repeated index is loud"
+  (let [x (array/array [[1.0 2.0 3.0] [4.0 5.0 6.0]])
+        idx (array/array [[2 0] [1 -1]] {:dtype :int32})
+        v (array/array [[10.0 20.0] [30.0 40.0]])]
+    (is (= [[20.0 2.0 10.0] [4.0 30.0 40.0]] (array/->clj (array/put-along-axis x idx v 1))))
+    (is (= [[20.0 2.0 10.0] [4.0 30.0 40.0]]
+           (array/->clj (array/put-along-axis (array/put-along-axis x idx (array/* 7.0 v) 1) idx v 1)))
+        "overwrites, not adds")
+    (is (= [[1.0 2.0 3.0] [4.0 5.0 6.0]] (array/->clj x)) "x is a value")
+    (is (= [[10.0 2.0 3.0] [4.0 5.0 6.0]]
+           (array/->clj (array/put-along-axis x (array/array [[0 0 1]] {:dtype :int32}) (array/array [[10.0 2.0 6.0]]) 0)))
+        "along axis 0")
+    (is (= :float32 (array/dtype (array/put-along-axis (array/astype x :float32) idx (array/astype v :float32) 1))))
+    (is (= (array/->clj (array/take-along-axis (array/put-along-axis x idx v 1) idx 1)) (array/->clj v))
+        "take-along-axis reads back what was put")
+    (testing "loud, and staged"
+      (is (re-find #"put-along-axis needs indices and values of one shape"
+                   (try (array/put-along-axis x idx (array/ones [2 3]) 1) "" (catch Exception e (ex-message e)))))
+      (is (thrown-data #(array/put-along-axis x (array/array [[0.0 1.0] [0.0 1.0]]) v 1)) "integer indices")
+      (when (ts/jvm?)
+        (is (= :repeated-indices (:reason (thrown-data #(array/put-along-axis x (array/array [[1 1] [0 2]] {:dtype :int32}) v 1))))
+            "a repeated index is loud")
+        (is (thrown-data #(array/put-along-axis x (array/array [[3 0] [0 1]] {:dtype :int32}) v 1)) "out of range"))
+      (let [program (stage/stage (fn [a i b] (array/put-along-axis a i b 1)) [[2 3] :float64] [[2 2] :int32] [[2 2] :float64])]
+        (is (= (array/->clj (array/put-along-axis x idx v 1)) (array/->clj (stage/evaluate program [x idx v])))
+            "staged, a replay is the op")))))
+
 (deftest matmul
   (is (= [[19 22] [43 50]] (array/->clj (array/matmul (array/array [[1 2] [3 4]]) (array/array [[5 6] [7 8]])))))
   (is (= [1 2] (array/->clj (array/matmul (array/array [1 2]) (array/array [[1 0] [0 1]])))))

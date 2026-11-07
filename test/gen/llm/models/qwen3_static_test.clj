@@ -16,7 +16,10 @@
       quantized ops);
    4. a static cache is a value: continued twice it gives the same logits
       and stays as it was;
-   5. misuse is loud: a step past the capacity (:capacity-exceeded), rows
+   5. a rewound cache (rewind: offsets moved back, a slot cleared) reads
+      as one that never read the positions dropped: its slots are written
+      over (put-along-axis), not added to;
+   6. misuse is loud: a step past the capacity (:capacity-exceeded), rows
       that disagree, a concatenating cache for compile-step, and on MLX a
       consumed (donated) cache read again (:donated).
    The bands: on the JVM backend 0 (1, 2 and 4 exactly: a masked slot's
@@ -156,7 +159,7 @@
         (is (= 9 (qwen3/offset c)))
         (is (= [9] (array/->clj (:positions c))))
         (is (= [1 2 12 16] (array/shape (get-in c [:layers 2 :k]))) "[B KV-heads capacity head-dim]")
-        (is (= 0.0 (array/item (array/max (array/abs (array/slice (get-in c [:layers 1 :v]) 2 9 12))))) "the padding stays zero"))))
+        (is (= 0.0 (array/item (array/max (array/abs (array/slice (get-in c [:layers 1 :v]) 2 9 12))))) "a new cache's padding is zero"))))
   (testing "planted bugs fail it"
     (let [m (:f32 @models)
           static-mask @#'qwen3/static-mask
@@ -271,7 +274,58 @@
         (is (= [9] (qwen3/offsets c1)))))))
 
 ;; ---------------------------------------------------------------------------
-;; 5. Loud errors
+;; 5. A rewound cache, its slots written over
+;; ---------------------------------------------------------------------------
+
+(defn- rewound-gap
+  "max |Δ logit| between readings after rewound caches and the
+   concatenating cache's of the same tokens: toks' first 8 read into a
+   capacity of 16, rewound to 5 and continued by other's tokens 5 to 8 (a
+   chunk of 3, then a step); rewound to 0 (a slot cleared) and read
+   again as other's first 4; and two rows, only the second rewound (from
+   8 to 2), stepped together."
+  [m]
+  (let [[_ c] (qwen3/prefill m [(subvec toks 0 8)] {:capacity 16})
+        reference (fn [ctx] (first (qwen3/prefill m [ctx] {:logits :last})))
+        [l1 c1] (qwen3/step m (qwen3/rewind c 5) [(subvec other 5 8)] {:logits :last})
+        [l2] (qwen3/step m c1 [[(other 8)]])
+        [l3] (qwen3/step m (qwen3/rewind c 0) [(subvec other 0 4)] {:logits :last})
+        two (qwen3/rewind (qwen3/concat-rows [c c]) [8 2])
+        [l4] (qwen3/step m two [[(toks 8)] [(other 2)]])]
+    (is (= [5] (qwen3/offsets (qwen3/rewind c 5))))
+    (is (= [8 2] (qwen3/offsets two)))
+    (max (max-diff l1 (reference (into (subvec toks 0 5) (subvec other 5 8))))
+         (max-diff l2 (reference (into (subvec toks 0 5) (subvec other 5 9))))
+         (max-diff l3 (reference (subvec other 0 4)))
+         (max-diff (row l4 0) (reference (subvec toks 0 9)))
+         (max-diff (row l4 1) (reference (into (subvec toks 0 2) [(other 2)]))))))
+
+(deftest a-rewound-cache-writes-over-its-slots
+  ;; the slots a rewound row read before are written over (put-along-axis),
+  ;; so it reads as a cache that never read them. Planted, the write as it
+  ;; was (scatter-add, which adds onto what a slot holds) fails it by
+  ;; nats: the hazard put-along-axis removed (rule 6)
+  (doseq [[k m] @models]
+    (is (<= (rewound-gap m) band) (name k)))
+  (testing "compiled, and donating"
+    (let [m (:f32 @models)
+          [_ c] (qwen3/prefill m [(subvec toks 0 8)] {:capacity 16})
+          [plain] (qwen3/step m (qwen3/rewind c 5) [[(other 5)]])]
+      (doseq [opts [nil {:donate? true}]]
+        (is (<= (traced #(max-diff plain (first ((qwen3/compile-step m opts) (qwen3/rewind c 5) [[(other 5)]])))) band)
+            (pr-str opts)))))
+  (testing "a planted bug fails it: the write adding onto the slot (scatter-add)"
+    (is (< 0.01 (with-redefs-fn {#'array/put-along-axis array/scatter-add} #(rewound-gap (:f32 @models))))))
+  (testing "misuse is loud"
+    (let [[_ c] (qwen3/prefill (:f32 @models) [(subvec toks 0 4)] {:capacity 8})
+          reason (fn [f] (:reason (ts/thrown-data (f))))]
+      (is (= :invalid-args (reason #(qwen3/rewind c 5))) "past the row's offset")
+      (is (= :invalid-args (reason #(qwen3/rewind c -1))))
+      (is (= :invalid-args (reason #(qwen3/rewind c [1 2]))) "not one a row")
+      (is (= :invalid-args (reason #(qwen3/rewind (second (qwen3/prefill (:f32 @models) [[1 2]])) 1))) "a concatenating cache"))))
+
+;; ---------------------------------------------------------------------------
+;; 6. Loud errors
 ;; ---------------------------------------------------------------------------
 
 (deftest misuse-is-loud

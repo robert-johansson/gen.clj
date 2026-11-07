@@ -309,6 +309,16 @@
   p/IQuantized
   (-quantized [b op args] (quantized-op b op args))
 
+  p/IOverwriting
+  (-put-along-axis [b x indices values axis]
+    ;; scatter-add's lift: each particle's lines are its own, so indices
+    ;; distinct along a particle's lines stay distinct
+    (if (some batched? [x indices values])
+      (made (p/put-along-axis inner (full-batch b x) (full-batch b indices) (full-batch b values)
+                              (+ axis (count batch-shape)))
+            b)
+      (p/put-along-axis inner x indices values axis)))
+
   p/ICustomVjp
   (-custom-vjp [b f vjp args]
     (cond (not (instance? gen.array.protocols.ICustomVjp inner)) (apply f args)

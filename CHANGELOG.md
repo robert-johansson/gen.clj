@@ -54,6 +54,23 @@ other values for the same key, from the same distribution.
   (`gen.backend.mlx.array/handle`); a donated handle is repointed at a
   shared husk (`MlxRuntime/repoint`, new: rebuild with `clojure -T:build
   java`) and still freed once, by its phantom reference.
+- **Added (experimental): `array/put-along-axis`** (genclj-8rnc): x with
+  values written over its entries at indices along an axis, the overwrite
+  `scatter-add` (which accumulates) is not; indices and values shaped as
+  `scatter-add`'s. A new optional protocol, `IOverwriting`
+  (`-put-along-axis`), so `IBackend` gains nothing: the JVM backend, MLX
+  (`mlx_put_along_axis`), the tape (x's cotangent zeroed where written, the
+  values' taken there), the batch tracer and staging (`:put-along-axis`;
+  the device lowerings refuse it) implement it. Repeated indices along a
+  line of the axis are loud on the JVM backend (`:repeated-indices`) and
+  unspecified on MLX.
+- **Changed: Qwen3's static caches write their keys and values with
+  `put-along-axis`**, not `scatter-add` (genclj-8rnc), so a slot written
+  again holds the new value instead of the sum; the slots past a row's
+  offset need no longer be zeros. **Added (experimental):
+  `(qwen3/rewind cache offsets)`**, a static cache with its rows moved
+  back (each to at most its own offset): the positions past them are
+  dropped and written over by the next steps (a rollback, a slot reused).
 - **Added (experimental): static-capacity KV caches and compiled steps
   for Qwen3** (gen.llm.models.qwen3; genclj-tjvd). `(static-cache m rows
   capacity)`, or prefill's `:capacity`, is a cache of fixed shapes:

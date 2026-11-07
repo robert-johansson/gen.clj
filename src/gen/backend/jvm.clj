@@ -549,6 +549,31 @@
         (aset out o (+ (aget out o) (aget src i)))))
     (make out sx (dtype-of x))))
 
+(defn- put-along-axis
+  "scatter-add's walk, writing instead of adding, and loud when two values
+   land on one entry (a repeated index along a line of axis): which one
+   stays would be the walk's order."
+  [x indices values ^long axis]
+  (let [sx (shape-of x)
+        sv (shape-of values)
+        d (long (nth sx axis))
+        st (sh/strides sx)
+        axis-stride (aget st axis)
+        ^longs xo (sh/strided-offsets sv (long-array (map-indexed (fn [k s] (if (= k axis) 0 s)) st)) 0)
+        ^doubles src (data-of values)
+        ^doubles ix (data-of indices)
+        out (aclone (data-of x))
+        written (java.util.BitSet. (alength out))]
+    (dotimes [i (alength xo)]
+      (let [o (+ (aget xo i) (* (index-value (aget ix i) d) axis-stride))]
+        (when (.get written o)
+          (throw (ex-info (str "put-along-axis: index " (long (aget ix i)) " repeats along its line of axis " axis
+                               ", so two values would land on one entry")
+                          {:reason :repeated-indices :op :put-along-axis :index (long (aget ix i)) :axis axis})))
+        (.set written o)
+        (aset out o (aget src i))))
+    (make out sx (dtype-of x))))
+
 (defn- matmul [x y]
   (let [sx (shape-of x) sy (shape-of y)
         x-vec? (= 1 (count sx)) y-vec? (= 1 (count sy))
@@ -915,6 +940,9 @@
 
   p/ILoading
   (-load-gguf [_ header] (load-gguf header))
+
+  p/IOverwriting
+  (-put-along-axis [_ x indices values axis] (put-along-axis x indices values axis))
 
   p/IBackend
   (-name [_] :jvm)
