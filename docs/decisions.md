@@ -4780,3 +4780,42 @@ layers, 48 JSON-format chat examples, 16 held out, 24 steps, AdamW 2e-4.
    array-API addition).
 
 Not yet run on Metal (genclj-h7ru).
+
+### The engine's host time: donated arrays leave MLX's fresh-bytes count
+
+(PROVISIONAL, owner to confirm; genclj-c7uf, 2026-11-07 night)
+
+**The finding.** Most of a decode step's host time was System.gc, not the
+compiled call.
+- MlxRuntime collects once the arrays made since the last collection hold
+  gen.mlx.gc-new-bytes.
+- A donating step's outputs counted as new, though they take over the
+  donated cache's buffers.
+- So a full GC ran about every 25 steps at batch 1, and every 2 at 16 rows.
+
+**Changes:**
+- A donated array's bytes come off the count.
+- The engine normalizes rows in parts on the host thread pool, summing in
+  order, so the result is bit-identical.
+- compile computes the donated leaves once per argument structure.
+
+**Measured on Metal, Qwen3-0.6B.**
+- Through the engine at batch 1: 74.7 → 92.5 tokens/s. llama.cpp through
+  gen.clj gives 93.5-96.4.
+- The step profile at 16 rows: 377 → 555-559 tokens/s.
+- qwen3_bench at 16 rows: 468 → 662 (llama.cpp 806).
+- Qwen3.5-0.8B at 16 rows: 418 → 541 (llama.cpp 405).
+- Outputs are bit-identical to main at batches 1, 3 and 16 on both
+  families.
+
+**What is left at batch 1** is MLX's own encoding of about 776 kernels, about
+3 ms of host time per step. The lever there is fewer kernels (fusion), not
+Java.
+
+**The lead's calls, on the implementing agent's recommendations:**
+1. The memory-accounting change in MlxRuntime/donate. It is
+   backend-internal and leaves values unchanged.
+2. gen.llm.host-threads stays at its default until fenrir's 8-thread
+   measurement.
+3. On CUDA a step's two hand-offs to the evaluation thread stay for now.
+   Reading an evaluated array without the hand-off is untested there.
