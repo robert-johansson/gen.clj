@@ -4682,3 +4682,15 @@ The lora-llama test has not yet run on Metal (0.075 band).
 - mlx-node's chunked kernel, only if measured (genclj-afy0);
 - the CUDA kernel (genclj-2krw);
 - tape replay for speculative rollback (genclj-ond4).
+
+### Training covers Qwen3.5/3.6 too
+
+(owner, 2026-11-07 evening; genclj-8h0l)
+
+The owner, on a side agent's note that LoRA plugged only into Qwen3: "I want
+qwen3.5 and qwen3.6". 1.3.0's training (LoRA, SFT, GRPO) covers the Qwen3.5/3.6
+family as well: the night loop's 0.8B and the bake-off's 35B-A3B.
+- LoRA plugs into qwen35's projections.
+- Adapters export under llama.cpp's qwen35 tensor names.
+- SFT and GRPO are family-agnostic, taking the family through the model as
+  the array engine does.
