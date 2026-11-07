@@ -115,8 +115,9 @@
 
 (defprotocol ^{:api :experimental} IFused
   "A backend with fused kernels for some of gen.array's neural-network
-   composites (rms-norm, rope, sdpa), which it may compute in one op
-   instead of the composite (MLX: its fast ops). gen.array asks only a
+   composites (rms-norm, rope, sdpa, gated-delta), which it may compute
+   in one op instead of the composite (MLX: its fast ops, and a Metal
+   kernel for gated-delta). gen.array asks only a
    backend whose arrays are the operands themselves: a wrapping backend
    (the tape, the batch tracer) and the staging backend implement no
    kernel, so the composite runs there, whose ops they know. A kernel
@@ -135,7 +136,9 @@
        :sdpa [q k v opts]         opts {:scale :mask}: mask nil, :causal, a
                                   bool array (true attends) or a float array
                                   added to the scores, broadcasting to
-                                  [B Hq Tq Tk]"))
+                                  [B Hq Tq Tk]
+       :gated-delta [q k v g beta state opts]
+                                  opts {:chunk-size}; the value [y state']"))
 
 (defprotocol ^{:api :experimental} IQuantized
   "A backend with quantized weights: gen.array's quantize, dequantize,
