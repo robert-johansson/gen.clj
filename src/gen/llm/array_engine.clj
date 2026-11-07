@@ -87,9 +87,16 @@
      branches need: on Metal a step's donated writes cost about 8 ms a GB
      of pool written, however few slots they write (measured, 2026-11-07;
      genclj-1daf).
-   - A copy-on-write is two calls: the blocks read and evaluated, then
-     written, consuming the pools (in one call MLX copies each pool, its
-     read still holding it).
+   - A copy-on-write is written within the step (or a run's write) that
+     needs it, before its keys and values (qwen3/paged-step's :copy). Its
+     blocks are read before that call: a read of the pools' blocks in the
+     call that writes them makes MLX copy each pool, the read still
+     holding it. A step that copies also reads back the blocks it wrote
+     (its :tails), and the next step's copies take their blocks from
+     there when they can: token SMC forks the blocks the last step
+     wrote, so its steps copy without a call of their own. Other copies'
+     blocks are gathered and evaluated first, a call of their own
+     (stats' :copy-reads).
    - A paged step, run or copy that fails has consumed the pools: every
      branch is lost (:lost-slots), loudly, and the pools are made again.
 
@@ -162,6 +169,7 @@
                :offsets #'qwen3/offsets :select-rows #'qwen3/select-rows :concat-rows #'qwen3/concat-rows :grow #'qwen3/grow
                ;; the paged mode's
                :paged-pools #'qwen3/paged-pools :paged-cache #'qwen3/paged-cache :paged-entries #'qwen3/paged-entries
+               :paged-blocks #'qwen3/paged-blocks :paged-write-entries #'qwen3/paged-write-entries
                :compile-paged-step #'qwen3/compile-paged-step :compile-paged-batch-step #'qwen3/compile-paged-batch-step}
         qwen35 {:load #'qwen35/load :static-cache #'qwen35/static-cache :step #'qwen35/step :compile-step #'qwen35/compile-step
                 :offsets #'qwen35/offsets :select-rows #'qwen35/select-rows :concat-rows #'qwen35/concat-rows :grow #'qwen35/grow}]
@@ -408,10 +416,88 @@
 ;;   :table   a vector, by slot, of nil (empty) or a gen.llm.paged sequence
 ;;   :alloc   the pool's allocator (gen.llm.paged), its first :scratch
 ;;            blocks reserved for a step's padding rows
-;;   :pools   the model's pools (qwen3/paged-pools), by layer
-;;   :stats   {:runs :steps :rows :padded-rows :copied-blocks :pool-grows}
+;;   :pools   the model's pools (the family's paged-pools), by layer
+;;   :tails   the blocks the last calls wrote, read back: {:index {block
+;;            row} :blocks by layer}, or nil
+;;   :rows    (a family with recurrent layers, Qwen3.5) a vector, by slot,
+;;            of nil or {:group {:id :states :n} :row r}: its recurrent
+;;            layers' states, row r of a group's (:states by layer, n
+;;            rows), shared by forks as the static mode's groups are
+;;   :next    the next group's id
+;;   :stats   {:runs :steps :rows :padded-rows :copied-blocks :copy-reads
+;;            :pool-grows (:stacked-steps with :rows)}
 
 (defn- next-pow2 ^long [^long n] (loop [p 1] (if (c/< p n) (recur (c/* 2 p)) p)))
+
+(defn- pools? [entry] (contains? entry :k))
+
+(defn- merged
+  "A step's layers: the pools by layer, each merged with the rows'
+   states (by layer) when there are any."
+  [pools states]
+  (if states (mapv merge pools states) pools))
+
+(defn- split-layers
+  "[pools states] of a step's layers (states nil without :rows)."
+  [state layers]
+  (if (contains? @state :rows)
+    [(mapv #(select-keys % [:k :v]) layers) (mapv #(select-keys % [:conv :state]) layers)]
+    [layers nil]))
+
+(defn- take-rows
+  "states (by layer) at their rows idx (host integers): a copy."
+  [states idx]
+  (let [ix (array/array (vec idx) {:dtype :int32})]
+    (mapv (fn [e] (update-vals e #(array/take % ix 0))) states)))
+
+(defn- cat-rows
+  "The rows of the states (each by layer) in order: a copy."
+  [parts]
+  (apply mapv (fn [& es] (into {} (map (fn [k] [k (array/concatenate (mapv k es) 0)])) (keys (first es)))) parts))
+
+(defn- new-states-group!
+  "A new group of states (by layer, n rows), its id never used before."
+  [state states n]
+  (let [id (:next @state)]
+    (vswap! state update :next inc)
+    {:id id :states states :n (long n)}))
+
+(defn- row-states
+  "The states of slot's row alone (by layer, one row): its group's when
+   it is one row, else that row taken (a copy)."
+  [state slot]
+  (let [{:keys [group row]} (nth (:rows @state) slot)]
+    (if (c/== 1 (long (:n group))) (:states group) (take-rows (:states group) [row]))))
+
+(defn- step-states
+  "[states order lane] of a step of slots padded to r rows: the step's
+   row i is (slots (order i)), and states its rows' states (by layer, r
+   rows). A group whose rows are exactly the slots', held by them alone,
+   is used as it is, in its order (lane: its slots, which the step
+   consumes); otherwise the rows are taken from their groups and stacked
+   (a copy), as the static mode's steps. Rows past the slots' are zeros."
+  [state slots r]
+  (let [rs (mapv #(nth (:rows @state) %) slots)
+        ids (distinct (map (comp :id :group) rs))
+        holders (fn [id] (into #{} (keep-indexed (fn [s e] (when (and e (c/== (long id) (long (:id (:group e))))) s))) (:rows @state)))
+        [parts order] (reduce (fn [[parts order] id]
+                                (let [is (filterv #(c/== (long id) (long (:id (:group (rs %))))) (range (count slots)))
+                                      {:keys [states n]} (:group (rs (first is)))
+                                      rows (mapv #(:row (rs %)) is)]
+                                  (if (and (c/== (long n) (count is)) (apply distinct? rows) (= (holders id) (set (map slots is))))
+                                    [(conj parts {:states states :lane? true}) (into order (map (zipmap rows is)) (range n))]
+                                    [(conj parts {:states (take-rows states rows) :lane? false}) (into order is)])))
+                              [[] []] ids)
+        n (count slots)
+        stacked (if (c/== 1 (count parts)) (:states (first parts)) (cat-rows (map :states parts)))
+        states (if (c/== n (long r))
+                 stacked
+                 (mapv (fn [e] (update-vals e #(array/concatenate [% (array/zeros (assoc (array/shape %) 0 (c/- (long r) n))
+                                                                                   {:dtype (array/dtype %)})]
+                                                                  0)))
+                       stacked))
+        lane (when (and (c/== 1 (count parts)) (:lane? (first parts)) (c/== n (long r))) (vec slots))]
+    [states order lane]))
 
 (defn- paged-position ^long [state slot]
   (long (or (:len (entry state slot)) 0)))
@@ -432,10 +518,12 @@
   [{:keys [model state]}]
   (let [lost (live-slots state)
         {:keys [size]} (:alloc @state)]
-    (vswap! state (fn [s] (assoc s
-                                 :table (vec (repeat (count (:table s)) nil))
-                                 :alloc (paged/allocator size (:scratch s))
-                                 :pools (call state :paged-pools model size (:block-size s)))))
+    (vswap! state (fn [s] (cond-> (assoc s
+                                         :table (vec (repeat (count (:table s)) nil))
+                                         :tails nil
+                                         :alloc (paged/allocator size (:scratch s))
+                                         :pools (call state :paged-pools model size (:block-size s)))
+                            (contains? s :rows) (assoc :rows (vec (repeat (count (:table s)) nil))))))
     lost))
 
 (defn- donating
@@ -468,45 +556,80 @@
                                                  seqs ns)))
                    to (max (c/* 2 (long size)) (c/+ (long size) need))
                    grown (call state :paged-pools model (c/- to (long size)) bs)
-                   pools (mapv (fn [old new] {:k (array/concatenate [(:k old) (:k new)] 0)
-                                              :v (array/concatenate [(:v old) (:v new)] 0)})
+                   pools (mapv (fn [old new] (if (pools? old)
+                                               {:k (array/concatenate [(:k old) (:k new)] 0)
+                                                :v (array/concatenate [(:v old) (:v new)] 0)}
+                                               old))
                                (:pools @state) grown)]
                (array/eval! pools)
                (vswap! state assoc :alloc (paged/grow a to) :pools pools)
                (tally! state :pool-grows 1)
                (prepared ctx seqs ns)))))))
 
+(defn- i32 [xs] (array/array (vec xs) {:dtype :int32}))
+
 (defn- padded
-  "copies padded to a power of 2 of pairs with self-copies (no-ops) of
-   blocks free in allocator a, as many as it has, so that the compiled
-   copy traces once per power of 2."
-  [a copies]
+  "copies padded to a power of 2 of pairs with self-copies of blocks
+   whose contents mean nothing (free in allocator a, or the scratch
+   blocks), as many as there are, so that a step with copies traces once
+   per power of 2."
+  [a scratch copies]
   (let [want (next-pow2 (count copies))
         dsts (set (map second copies))]
-    (into copies (map (fn [b] [b b])) (take (c/- want (count copies)) (remove dsts (:free a))))))
+    (into copies (map (fn [b] [b b])) (take (c/- want (count copies)) (remove dsts (concat (:free a) (range scratch)))))))
 
-(defn- copy-blocks!
-  "The block copies [[from to] …] made in the pools (copy-on-write), a
-   the allocator after them: gen.array/copy-blocks in two calls, the
-   blocks read and evaluated first (gather-fn), then written (put-fn,
-   consuming the pools). In one call MLX copies each pool instead of
-   writing it in place, its read still holding it (measured on Metal,
-   2026-11-07: 14 to 120 ms a copy as the pools grew from 0.6 to 3.8 GB)."
-  [{:keys [state gather-fn put-fn] :as ctx} a copies]
+(defn- copy-input
+  "A step's :copy (qwen3/paged-step's) of the block copies [[from to] …]
+   (copy-on-write), a the allocator after them, or nil for none. The
+   copies are padded to a power of 2 (padded: a padding copy writes a
+   block whose contents mean nothing), and their blocks read before the
+   step that writes them: from the tails of the last call that wrote the
+   pools when they hold every block copied (the blocks that call wrote:
+   no call of their own), else gathered from the pools and evaluated, a
+   call of their own (:copy-reads). In the call that writes the pools, a
+   read of their blocks makes MLX copy each pool instead of writing it in
+   place, the read still holding it (measured on Metal, 2026-11-07: 14 to
+   120 ms a copy as the pools grew from 0.6 to 3.8 GB)."
+  [{:keys [state gather-fn]} a copies]
   (when (seq copies)
-    (let [all (padded a copies)
-          src (array/array (mapv first all) {:dtype :int32})
-          dst (array/array (mapv second all) {:dtype :int32})
-          blocks (doto (gather-fn (:pools @state) src) array/eval!)
-          pools (donating ctx #(doto (put-fn (:pools @state) blocks dst) array/eval!))]
-      (vswap! state assoc :pools pools)
-      (tally! state :copied-blocks (count copies)))))
+    (let [{:keys [index blocks]} (:tails @state)
+          all (padded a (:scratch @state) copies)
+          froms (mapv first copies)]
+      (tally! state :copied-blocks (count copies))
+      (if (and blocks (every? #(contains? index %) froms))
+        {:blocks blocks :rows (i32 (into (mapv index froms) (repeat (c/- (count all) (count copies)) 0)))
+         :dst (i32 (map second all))}
+        (let [read (doto (gather-fn (:pools @state) (i32 (map first all))) array/eval!)]
+          (tally! state :copy-reads 1)
+          {:blocks read :rows (i32 (range (count all))) :dst (i32 (map second all))})))))
+
+(defn- tails-index
+  "The tails' {block row}: the block of each write slot of the first n
+   rows, its row."
+  [slots n bs]
+  (let [bs (long bs)]
+    (zipmap (map #(quot (long %) bs) (take n slots)) (range n))))
+
+(defn- tails-after
+  "The tails after a call that wrote the pools at slots (blocks of bs)
+   and copied into the blocks of copy-pairs ([[from to] …]): its own when
+   it read them ({:index :blocks}), else the last ones without the blocks
+   it wrote (every block a call takes, it writes: a block freed and taken
+   again leaves them)."
+  [last own slots copy-pairs bs]
+  (or own
+      (when last
+        (let [bs (long bs)
+              index (apply dissoc (:index last) (concat (map #(quot (long %) bs) slots) (map second copy-pairs)))]
+          (when (seq index) (assoc last :index index))))))
 
 (defn- paged-read-run
   "slots-run's body in the paged mode: slot's sequence (pos positions)
    read as a concatenating cache (its blocks gathered), tokens read after
    it in forwards of n-batch tokens, eagerly; then their keys and values
-   written into the pools at the sequence's new slots."
+   written into the pools at the sequence's new slots, after its copy
+   (copy-on-write), in one call. The tails keep the blocks it did not
+   write (tails-after)."
   [{:keys [model state pool n-batch write-fn] :as ctx} slot pos tokens targets]
   (check-paged-position state slot pos "read")
   (let [s (or (entry state slot) paged/empty-sequence)
@@ -514,7 +637,9 @@
         n (count tokens)
         k (count targets)
         bs (long (:block-size @state))
-        start (when (pos? pos) (call state :paged-cache model (:pools @state) (:blocks s) pos bs))]
+        states? (contains? @state :rows)
+        start (when (pos? pos)
+                (call state :paged-cache model (merged (:pools @state) (when states? (row-states state slot))) (:blocks s) pos bs))]
     (loop [from 0 cache start scores []]
       (let [end (min n (c/+ from (long n-batch)))
             last? (c/== end n)
@@ -527,44 +652,80 @@
           (if-not last?
             (recur end cache scores)
             (let [[a [s'] [slots] copies] (prepared ctx [s] [n])
-                  entries (call state :paged-entries cache pos)]
-              (copy-blocks! ctx a copies)
-              (let [pools (donating ctx #(doto (write-fn (:pools @state) (mapv first entries) (mapv second entries)
-                                                         (array/array slots {:dtype :int32}))
-                                           array/eval!))]
-                (vswap! state #(-> % (assoc :pools pools :alloc a) (assoc-in [:table slot] s')))
-                (tally! state :runs 1)
-                {:logprobs (first (host-rows pool row "read"))
-                 :scores (when targets scores)}))))))))
+                  entries (call state :paged-entries cache pos)
+                  copy (copy-input ctx a copies)
+                  pools (donating ctx #(doto (write-fn (:pools @state) entries (i32 slots) (if copy {:copy copy} {}))
+                                         array/eval!))]
+              (when states?
+                ;; the run's recurrent states, a group of one row
+                (let [g (new-states-group! state (call state :paged-states model cache) 1)]
+                  (vswap! state assoc-in [:rows slot] {:group g :row 0})))
+              (vswap! state #(-> % (assoc :pools pools :alloc a :tails (tails-after (:tails %) nil slots copies bs))
+                                 (assoc-in [:table slot] s')))
+              (tally! state :runs 1)
+              {:logprobs (first (host-rows pool row "read"))
+               :scores (when targets scores)})))))))
+
+(declare paged-rows!)
 
 (defn- paged-decode-step
   "slots-step's body in the paged mode: each slot's sequence made ready
-   for a position (copy-on-write of a shared block filled in part), then
-   one compiled decode of the rows, padded to a power of 2 rows (at least
-   :min-rows), over block tables of a power of 2 width: the step's
-   shapes, and so its traces, are few."
-  [{:keys [state pool step-fn min-rows] :as ctx} slots positions tokens]
+   for a position, then one compiled decode of the rows, padded to a
+   power of 2 rows (at least :min-rows), over block tables of a power of
+   2 width: the step's shapes, and so its traces, are few. A shared block
+   filled in part is copied first, within the step (copy-on-write: its
+   :copy, copy-input's); a step that copies also reads its rows' blocks
+   after its writes (its :tails), for the next step's copies: token SMC
+   forks the blocks the last step wrote. A family with recurrent layers
+   (:rows) steps its rows' states too (step-states), its rows in their
+   order."
+  [{:keys [state min-rows] :as ctx} slots positions tokens]
   (doseq [[slot pos] (map vector slots positions)] (check-paged-position state slot pos "advance"))
   (let [n (count slots)
+        r (max (long min-rows) (next-pow2 n))]
+    (if-not (contains? @state :rows)
+      (paged-rows! ctx slots tokens r nil)
+      (let [[states order lane] (step-states state slots r)
+            rows (paged-rows! ctx (mapv slots order) (mapv tokens order) r {:states states :lane lane})]
+        (tally! state :stacked-steps (if lane 0 1))
+        (reduce (fn [out [i k]] (assoc out k (rows i))) (vec (repeat n nil)) (map-indexed vector order))))))
+
+(defn- paged-rows!
+  "paged-decode-step's step of slots (in the step's row order), padded
+   to r rows, with the rows' states (by layer, r rows; nil for a family
+   without recurrent layers) and lane, the slots whose group the states
+   are (consumed by the step): the rows, in order."
+  [{:keys [state pool step-fn] :as ctx} slots tokens r {:keys [states lane]}]
+  (let [n (count slots)
+        r (long r)
+        bs (long (:block-size @state))
         seqs (mapv #(or (entry state %) paged/empty-sequence) slots)
         [a seqs' write-slots copies] (prepared ctx seqs (repeat n 1))
-        _ (copy-blocks! ctx a copies)
-        r (max (long min-rows) (next-pow2 n))
+        copy (copy-input ctx a copies)
         width (next-pow2 (reduce max 1 (map (comp count :blocks) seqs')))
         ;; padding row i writes slot i of the scratch blocks, and reads it
-        pad-row (fn [^long i] (vec (cons (quot i (long (:block-size @state))) (repeat (dec width) 0))))
-        i32 #(array/array % {:dtype :int32})
+        pad-row (fn [^long i] (vec (cons (quot i bs) (repeat (dec width) 0))))
         tables (i32 (into (mapv #(paged/table-row % width 0) seqs') (map pad-row) (range n r)))
         pos (i32 (into (mapv :len seqs) (repeat (c/- r n) 0)))
-        sl (i32 (into (mapv first write-slots) (range n r)))
+        all-slots (into (mapv first write-slots) (range n r))
+        sl (i32 all-slots)
         toks (into (mapv #(vector (tokens %)) (range n)) (repeat (c/- r n) [0]))
-        [logits pools] (donating ctx #(let [[logits pools] (step-fn (:pools @state) pos tables sl toks)]
-                                        (array/eval! [logits pools])
-                                        [logits pools]))
+        ;; the blocks written, read after the step for the next one's
+        ;; copies, when this one copied
+        tails (when copy (i32 (map #(quot (long %) bs) all-slots)))
+        [logits layers tails'] (donating ctx #(let [out (step-fn (merged (:pools @state) states) pos tables sl toks
+                                                                 {:copy copy :tails tails})]
+                                                (array/eval! out)
+                                                out))
+        [pools states'] (split-layers state layers)
+        g (when states (new-states-group! state states' r))
         rows (host-rows pool (array/slice logits 0 0 n) "advance")]
-    (vswap! state (fn [st] (-> st
-                               (assoc :pools pools :alloc a)
-                               (update :table #(reduce (fn [t [slot s']] (assoc t slot s')) % (map vector slots seqs'))))))
+    (vswap! state (fn [st] (cond-> (-> st
+                                       (assoc :pools pools :alloc a
+                                              :tails (tails-after (:tails st) (when tails' {:index (tails-index all-slots n bs) :blocks tails'})
+                                                                  (subvec all-slots 0 n) copies bs))
+                                       (update :table #(reduce (fn [t [slot s']] (assoc t slot s')) % (map vector slots seqs'))))
+                             g (update :rows #(reduce (fn [t [i slot]] (assoc t slot {:group g :row i})) % (map-indexed vector slots))))))
     (tally! state :steps 1)
     (tally! state :rows n)
     (tally! state :padded-rows (c/- r n))
@@ -652,13 +813,12 @@
         _ (doseq [i chosen] (check-paged-position state (:slot (reads i)) (:pos (reads i)) "forward"))
         seqs (mapv #(or (entry state (:slot (reads %))) paged/empty-sequence) chosen)
         [a seqs' write-slots copies] (prepared ctx seqs (mapv #(if (= % chunk) c 1) chosen))
-        _ (copy-blocks! ctx a copies)
+        copy (copy-input ctx a copies)
         d (count decode)
         d-rows (long d-rows)
         c (long (or c 0))
         c-rows (long (or c-rows 0))
         r (c/+ d-rows c-rows)
-        i32 #(array/array % {:dtype :int32})
         dseqs (subvec seqs' 0 d)
         width (next-pow2 (reduce max 1 (map (comp count :blocks) dseqs)))
         ;; a padding row writes the scratch slot of its row's index, and a
@@ -688,20 +848,34 @@
         k (if (:targets cread) (min c (count (:targets cread))) 0)
         out (into lp-rows (map #(c/+ d-rows (long %))) (range k))
         o (next-pow2 (count out))
+        ;; the blocks written, read after the forward for the next one's
+        ;; copies when this one copied: each decode row's, and the chunk's
+        ;; last (where its read goes on)
+        tail-slots (cond-> (subvec slots 0 d-rows) chunk (conj (slots (c/+ d-rows (dec c)))))
+        tails (when copy (i32 (map #(quot (long %) bs) tail-slots)))
         batch (cond-> {:tokens (i32 tokens) :positions (i32 positions) :slots (i32 slots)
                        :out (i32 (into out (repeat (c/- o (count out)) 0)))}
+                copy (assoc :copy copy)
+                tails (assoc :tails tails)
                 (pos? d) (assoc :tables (i32 (into (mapv #(paged/table-row % width 0) dseqs) (map pad-table) (range d d-rows))))
                 chunk (assoc :chunk (i32 [(paged/table-row (peek seqs') (next-pow2 (count (:blocks (peek seqs')))) 0)]))
                 (pos? k) (assoc :targets (i32 (-> (vec (repeat (count lp-rows) 0))
                                                   (into (subvec (:targets cread) 0 k))
                                                   (into (repeat (c/- o (count out)) 0))))))
-        {:keys [logits scores pools]} (donating ctx #(let [res (batch-fn (:pools @state) batch)]
-                                                       (array/eval! res)
-                                                       res))]
+        {:keys [logits scores pools] tails' :tails} (donating ctx #(let [res (batch-fn (:pools @state) batch)]
+                                                                     (array/eval! res)
+                                                                     res))
+        ;; the tails' rows: the decode rows', then the chunk's last block
+        index (when tails'
+                (cond-> (tails-index tail-slots d bs)
+                  chunk (assoc (quot (long (peek tail-slots)) bs) d-rows)))]
     ;; the books first: the pools are the step's now, whatever the reading
     ;; of its rows does
     (vswap! state (fn [st] (-> st
-                               (assoc :pools pools :alloc a)
+                               (assoc :pools pools :alloc a
+                                      :tails (tails-after (:tails st) (when tails' {:index index :blocks tails'})
+                                                          (into (subvec slots 0 d) (when chunk (subvec slots d-rows (c/+ d-rows c))))
+                                                          copies bs))
                                (update :table #(reduce (fn [t [i s']] (assoc t (:slot (reads i)) s')) % (map vector chosen seqs'))))))
     (tally! state :forwards 1)
     (tally! state :decode-rows d)
@@ -839,18 +1013,11 @@
         step-fn (if continuous?
                   ((:compile-paged-batch-step fam) m {:donate? true})
                   ((:compile-paged-step fam) m {:donate? true}))
-        ;; copy-blocks in two calls (copy-blocks!)
-        gather-fn (array/compile (fn [pools src] (mapv (fn [{:keys [k v]}] [(array/take k src 0) (array/take v src 0)]) pools)))
-        put-fn (array/compile (fn [pools blocks dst]
-                                (let [put (fn [pool b]
-                                            (let [s (array/shape b)]
-                                              (array/put-along-axis pool (array/broadcast-to (array/reshape dst (into [(first s)] (repeat (dec (count s)) 1))) s)
-                                                                    b 0)))]
-                                  (mapv (fn [{:keys [k v]} [kb vb]] {:k (put k kb) :v (put v vb)}) pools blocks)))
-                              {:donate #{0}})
-        write-fn (array/compile (fn [pools ks vs slots]
-                                  (mapv (fn [{:keys [k v]} kn vn] (zipmap [:k :v] (array/paged-write k v kn vn slots))) pools ks vs))
-                                {:donate #{0}})
+        ;; a copy's blocks read alone, when the last step's tails lack
+        ;; them (copy-input)
+        gather-fn (array/compile (:paged-blocks fam))
+        ;; a run's keys and values written, after its copy
+        write-fn (array/compile (:paged-write-entries fam) {:donate #{0}})
         info {:engine :gen.array
               :backend (array/backend-name b)
               :n-vocab vocab
@@ -863,13 +1030,13 @@
                             (select-keys cfg [:layers :hidden :heads :kv-heads :head-dim :dtype :context]))}
         state (volatile! {:table (vec (repeat n-slots nil)) :family fam :block-size block-size :scratch scratch
                           :alloc (paged/allocator size scratch) :pools ((:paged-pools fam) m size block-size)
+                          :tails nil
                           :stats (if continuous?
                                    {:forwards 0 :decode-rows 0 :chunk-rows 0 :padded-rows 0 :mixed-forwards 0
-                                    :copied-blocks 0 :pool-grows 0}
-                                   {:runs 0 :steps 0 :rows 0 :padded-rows 0 :copied-blocks 0 :pool-grows 0})})
+                                    :copied-blocks 0 :copy-reads 0 :pool-grows 0}
+                                   {:runs 0 :steps 0 :rows 0 :padded-rows 0 :copied-blocks 0 :copy-reads 0 :pool-grows 0})})
         pool (host/pool "gen.llm array rows-" (host/default-threads))
-        ctx {:model m :state state :pool pool :n-batch n-batch :min-rows min-rows
-             :gather-fn gather-fn :put-fn put-fn}]
+        ctx {:model m :state state :pool pool :n-batch n-batch :min-rows min-rows :gather-fn gather-fn}]
     (if continuous?
       (ContinuousSlots. m b (assoc ctx :batch-fn step-fn) pool (assoc info :batching {:wait wait}) state)
       (PagedSlots. m b (assoc ctx :step-fn step-fn :write-fn write-fn) pool info state))))
@@ -953,10 +1120,12 @@
    :steps :lane-steps (a lane group stepped in place) :stacked-steps
    (rows stacked into a new cache) :stacked-rows :grows (capacities
    grown)}; in the paged mode {:runs :steps :rows :padded-rows
-   :copied-blocks (copy-on-write) :pool-grows}; in the continuous mode
-   {:forwards :decode-rows :chunk-rows (a prefill chunk's) :padded-rows
-   :mixed-forwards (forwards of decode rows and a chunk) :copied-blocks
-   :pool-grows}, and gen.llm.slots/schedule the scheduler's counts."
+   :copied-blocks (copy-on-write) :copy-reads (calls that read a copy's
+   blocks before its step, the last step's tails lacking them)
+   :pool-grows}; in the continuous mode {:forwards :decode-rows
+   :chunk-rows (a prefill chunk's) :padded-rows :mixed-forwards (forwards
+   of decode rows and a chunk) :copied-blocks :copy-reads :pool-grows},
+   and gen.llm.slots/schedule the scheduler's counts."
   [e]
   (slots/call e (fn [s]
                   (cond (instance? ArraySlots s) (:stats @(.-state ^ArraySlots s))

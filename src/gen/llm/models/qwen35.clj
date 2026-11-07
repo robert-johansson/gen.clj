@@ -107,6 +107,7 @@
   (:require [clojure.core :as c]
             [clojure.string :as str]
             [gen.array :as array :refer [+ * /]]
+            [gen.array.paged :as paged]
             [gen.llm.lora :as lora]
             [gen.llm.models :as models]
             [gen.llm.models.common :as common]))
@@ -875,6 +876,197 @@
          (common/check-capacity who cache t)
          (let [[out layers positions] (f (:layers cache) (:positions cache) ids)]
            [out (advanced cache layers positions t)]))))))
+
+;; ---------------------------------------------------------------------------
+;; Paged (genclj-6qb6): the attention layers' keys and values in paged
+;; pools, the GatedDeltaNet layers' states a row each
+;; ---------------------------------------------------------------------------
+
+(defn paged-pools
+  "Empty paged KV pools of n-blocks blocks of block-size positions for
+   the attention layers, in qwen3/paged-pools' layouts and the model's
+   dtype: a vector by layer, an attention layer's {:k :v} and a
+   GatedDeltaNet layer's {} (its states are a row's, paged-states'). A
+   step's layers merge them with the rows' states (paged-step)."
+  [{:keys [config]} n-blocks block-size]
+  (doseq [[what v] [[:n-blocks n-blocks] [:block-size block-size]]]
+    (when-not (and (integer? v) (pos? (long v)))
+      (throw (invalid (str "paged-pools: " (name what) " must be a positive integer, not " (pr-str v)) {what v}))))
+  (let [{:keys [kinds kv-heads head-dim dtype]} config
+        x (quot 16 (long ({:float16 2 :bfloat16 2 :float32 4 :float64 8} dtype)))]
+    (when-not (zero? (rem (long head-dim) x))
+      (throw (unsupported (str "a head of " head-dim " is not whole groups of " x " (the paged key layout)")
+                          {:head-dim head-dim :group x})))
+    (let [k (array/zeros [n-blocks kv-heads (quot (long head-dim) x) block-size x] {:dtype dtype})
+          v (array/zeros [n-blocks kv-heads head-dim block-size] {:dtype dtype})]
+      (mapv #(if (= :attention %) {:k k :v v} {}) kinds))))
+
+(defn paged-states
+  "The GatedDeltaNet layers' states of rows rows: a vector by layer, a
+   GatedDeltaNet layer's {:conv [rows K-1 channels] :state [rows
+   value-heads value-dim key-dim]} and an attention layer's {}: zeros
+   (the start) with rows, or a concatenating cache's (one after a read,
+   paged-cache's)."
+  [{:keys [config] :as m} rows-or-cache]
+  (if (integer? rows-or-cache)
+    (mapv #(select-keys % [:conv :state]) (:layers (static-cache m rows-or-cache 1)))
+    (mapv #(select-keys % [:conv :state]) (:layers rows-or-cache))))
+
+(defn paged-cache
+  "The concatenating cache of one row holding a sequence's first len
+   positions: layers by layer, the attention layers' pools (paged-pools')
+   and the GatedDeltaNet layers' states of its row (paged-states' of one
+   row), its blocks (block ids, a vector, of block-size positions each)
+   gathered: for reading several tokens after it (step), whose keys and
+   values paged-entries then gives, and its states paged-states."
+  [_m layers blocks len block-size]
+  (let [len (long len)
+        tables (array/array [(vec blocks)] {:dtype :int32})]
+    (when-not (c/<= len (c/* (count blocks) (long block-size)))
+      (throw (invalid (str "paged-cache: " (count blocks) " blocks of " block-size " cannot hold " len " positions")
+                      {:blocks (count blocks) :len len})))
+    {:offset len
+     :layers (mapv (fn [{:keys [k v] :as e}]
+                     (if (common/pool? e)
+                       (let [[gk gv] (paged/gathered k v tables)]
+                         {:k (array/slice gk 2 0 len) :v (array/slice gv 2 0 len)})
+                       e))
+                   layers)}))
+
+(defn paged-entries
+  "The keys and values of a concatenating cache of one row at its
+   positions from on, by layer: an attention layer's [k v], each [n
+   KV-heads head-dim] (what gen.array/paged-write writes), a GatedDeltaNet
+   layer's []."
+  [cache from]
+  (mapv (fn [{:keys [k v] :as e}]
+          (if-not (contains? e :k)
+            []
+            (let [[b hk t d] (array/shape k)
+                  n (c/- (long t) (long from))]
+              (when-not (and (= 1 b) (c/<= 0 n))
+                (throw (invalid "paged-entries: a cache of one row, from at most its offset" {:shape (array/shape k) :from from})))
+              (mapv #(array/transpose (array/reshape (array/slice % 2 from t) [hk n d]) [1 0 2]) [k v]))))
+        (:layers cache)))
+
+(defn paged-write-entries
+  "pools (paged-pools') with a run's keys and values written at slots
+   (int32 [n]): entries, paged-entries', after opts' :copy (paged-step's,
+   copy-on-write). What the engine compiles for a run's writes, consuming
+   the pools."
+  [pools entries slots opts]
+  (let [{:keys [copy]} opts]
+    (mapv (fn [i entry [kn vn]]
+            (if (common/pool? entry)
+              (let [{:keys [k v]} (common/copied entry copy i)]
+                (zipmap [:k :v] (array/paged-write k v kn vn slots)))
+              entry))
+          (range) pools entries)))
+
+(defn paged-blocks
+  "The blocks ids (int32 [M]) of the pools, by layer ({} for a
+   GatedDeltaNet layer): a step's :copy's :blocks, read (and evaluated)
+   before the step that writes the pools."
+  [pools ids]
+  (common/paged-blocks pools ids))
+
+(defn- paged-attention
+  "One gated attention layer of the normed x [R 1 hidden], a token a row,
+   over layer i's pools: the step's copy written, each row's key and value
+   written at its slot (at its position, rotated there), then attention
+   over each row's blocks (tables) to its position, gated: [its output,
+   the pools after x, with their :tails when asked]."
+  [{:keys [heads kv-heads head-dim] :as cfg} w x {:keys [positions tables slots copy tails]} i entry]
+  (let [r (first (array/shape x))
+        [q k v gate] (gated-qkv cfg w x positions)
+        e (common/copied entry copy i)
+        [kp vp] (array/paged-write (:k e) (:v e)
+                                   (array/reshape k [r kv-heads head-dim]) (array/reshape v [r kv-heads head-dim]) slots)
+        o (array/paged-attention (array/reshape q [r heads head-dim]) kp vp tables (+ positions 1))]
+    [(-> (array/reshape o [r 1 (c/* (long heads) (long head-dim))])
+         (* (array/sigmoid gate))
+         (common/linear (:o w)))
+     (common/with-tails {:k kp :v vp} tails)]))
+
+(defn- paged-forward
+  "[logits [R 1 vocab], the layers after the tokens, the tails (or nil)]
+   of one token a row (paged-step's): arrays in and arrays out, the step
+   compile-paged-step compiles."
+  [{:keys [kinds] :as cfg} weights layers positions tables slots ids extra]
+  (let [at (merge {:positions positions :tables tables :slots slots} (select-keys extra [:copy :tails]))
+        [logits entries] (logits-of cfg weights ids
+                                    (fn [i w x]
+                                      (if (= :attention (kinds i))
+                                        (paged-attention cfg w x at i (nth layers i))
+                                        (delta-net cfg w x (nth layers i))))
+                                    :last)]
+    (into [logits] (common/split-tails entries))))
+
+(defn- check-paged
+  "The paged step's operands: layers of the model's kinds, R rows, and
+   its options extra."
+  [{:keys [kinds]} layers positions tables slots ids extra]
+  (let [r (first (array/shape ids))]
+    (when-not (and (vector? layers) (= (count kinds) (count layers))
+                   (every? (fn [[kind e]] (if (= :attention kind)
+                                            (common/pool? e)
+                                            (and (= #{:conv :state} (set (keys e)))
+                                                 (= r (first (array/shape (:state e)))) (= r (first (array/shape (:conv e)))))))
+                           (map vector kinds layers)))
+      (throw (invalid (str "paged-step: the layers must be a vector by layer, each attention layer's pools (paged-pools')"
+                           " and each GatedDeltaNet layer's states of the " r " rows (paged-states')")
+                      {:layers (if (vector? layers) (mapv (comp vec keys) layers) layers)})))
+    (when-not (= [r 1] (array/shape ids))
+      (throw (invalid (str "a paged step reads one token a row, [R 1], not " (array/shape ids)) {:tokens (array/shape ids)})))
+    (doseq [[what x shape] [[:positions positions [r]] [:slots slots [r]]]]
+      (when-not (= shape (array/shape x))
+        (throw (invalid (str (name what) " must be [R] " shape ", not " (array/shape x)) {what (array/shape x)}))))
+    (when-not (and (= 2 (array/ndim tables)) (= r (first (array/shape tables))))
+      (throw (invalid (str "tables must be [R MB] for " r " rows, not " (array/shape tables)) {:tables (array/shape tables)})))
+    (common/check-extra layers extra #(throw (invalid (str "paged-step: " %1) %2)))))
+
+(def ^:private step-options #{:copy :tails})
+
+(defn paged-step
+  "[logits layers' tails]: qwen3/paged-step's, the logits [R 1 vocab] of
+   one token a row, for Qwen3.5's layers: layers is a vector by layer,
+   each attention layer's paged pools (paged-pools'), each GatedDeltaNet
+   layer's states of the step's R rows, in row order (paged-states', or
+   a step's), merged; layers' the same after the tokens: the pools
+   written, the states the rows' next. positions, tables, slots, tokens
+   and the options (:copy, :tails) are qwen3/paged-step's, for the
+   attention layers. Its logits are a static cache's within float
+   round-off; the layers are values (compile-paged-step's :donate?
+   consumes them instead)."
+  ([m layers positions tables slots tokens] (paged-step m layers positions tables slots tokens nil))
+  ([{:keys [config weights]} layers positions tables slots tokens opts]
+   (common/check-options who :paged-step opts step-options)
+   (let [ids (common/token-array who tokens (:vocab config))
+         extra (common/present opts)]
+     (check-paged config layers positions tables slots ids extra)
+     (paged-forward config weights layers positions tables slots ids extra))))
+
+(defn compile-paged-step
+  "paged-step compiled by array/compile, as qwen3/compile-paged-step: a
+   function (f layers positions tables slots tokens) or (… opts) →
+   [logits layers' tails]. Options: :donate? true, each call consumes the
+   layers it steps (the pools written in place on MLX, the states'
+   buffers reused)."
+  ([m] (compile-paged-step m nil))
+  ([{:keys [config weights]} {:keys [donate?] :as opts}]
+   (common/check-options who :compile-paged-step opts #{:donate?})
+   (array/eval! weights)
+   (let [f (array/compile (fn [layers positions tables slots ids extra]
+                            (paged-forward config weights layers positions tables slots ids extra))
+                          (when donate? {:donate #{0}}))]
+     (fn step
+       ([layers positions tables slots tokens] (step layers positions tables slots tokens nil))
+       ([layers positions tables slots tokens opts]
+        (common/check-options who :paged-step opts step-options)
+        (let [ids (common/token-array who tokens (:vocab config))
+              extra (common/present opts)]
+          (check-paged config layers positions tables slots ids extra)
+          (f layers positions tables slots ids extra)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The family, by its architectures (gen.llm.models)

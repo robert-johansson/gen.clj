@@ -22,6 +22,7 @@
    written one slot late (the next row's slot)."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
+            [gen.llm.models.common :as common]
             [gen.llm.models.qwen3 :as qwen3]
             [gen.llm.paged :as paged]
             [gen.test-support :as ts]))
@@ -172,6 +173,87 @@
         (is (= 8 (paged/free-count a))
             "of 15: the full block shared, the partial one and two copies, a new block each")
         (array/eval! pools)))))
+
+(defn- forked-decode
+  "Steps forks of seqs a token at a time, as token SMC over an LM does:
+   each step forks every sequence (the parents kept, sharing their blocks,
+   as an LM keeps its entries) and steps the forks, which copy the
+   partial blocks they share. The copies by how: :outside (copy-blocks
+   before the step), :gathered (paged-blocks evaluated, then the step's
+   :copy) or :tails (the step's :copy from the last step's :tails;
+   :gathered at the first). Row i's tokens (toks i): [a pools
+   logits-by-step copies-from-tails]."
+  [stepper how a seqs pools toks width]
+  (loop [i 0 a a seqs seqs pools pools tails nil out [] from-tails 0]
+    (if (= i (count (first toks)))
+      [a pools out from-tails]
+      (let [[a forks] (reduce (fn [[a fs] s] (let [[a f] (paged/fork a s)] [a (conj fs f)])) [a []] seqs)
+            [a seqs' slots copies] (reduce (fn [[a ss slots copies] s]
+                                             (let [[a s' [sl] cs] (paged/prepare a s 1 bs)]
+                                               [a (conj ss s') (conj slots sl) (into copies cs)]))
+                                           [a [] [] []] forks)
+            i32 #(array/array (vec %) {:dtype :int32})
+            tails? (and (= how :tails) tails (every? (:index tails) (map first copies)))
+            copy (when (and (seq copies) (not= how :outside))
+                   (if tails?
+                     {:blocks (:blocks tails) :rows (i32 (map (comp (:index tails) first) copies)) :dst (i32 (map second copies))}
+                     {:blocks (doto (qwen3/paged-blocks pools (i32 (map first copies))) array/eval!)
+                      :rows (i32 (range (count copies))) :dst (i32 (map second copies))}))
+            pools (if (= how :outside) (copied pools copies) pools)
+            [logits pools tails'] (stepper pools (i32 (map :len forks)) (i32 (map #(paged/table-row % width 0) seqs'))
+                                           (i32 slots) (mapv #(vector (nth % i)) toks)
+                                           {:copy copy :tails (when (= how :tails) (i32 (map #(quot (long %) bs) slots)))})]
+        (array/eval! [logits pools tails'])
+        (recur (inc i) a seqs' pools
+               (when tails' {:index (zipmap (map #(quot (long %) bs) slots) (range)) :blocks tails'})
+               (conj out logits) (if tails? (+ from-tails (count copies)) from-tails))))))
+
+(defn- forked-gap
+  "max |Δ logit| between forked-decode's rows (by how, through stepper)
+   and each row's concatenating cache, after prompts of 2, 5 and 7 (half
+   blocks and more), and the copies made from the tails."
+  [m how stepper]
+  (let [ps [(prompt 5 2) (prompt 9 5) (prompt 13 7)]
+        dense (mapv #(qwen3/prefill m [%] {:logits :last}) ps)
+        [a seqs pools] (reduce (fn [[a ss pools] [p [_ cache]]]
+                                 (let [[a s pools] (write-dense a paged/empty-sequence pools (:layers cache) (count p))]
+                                   [a (conj ss s) pools]))
+                               [(paged/allocator 64 1) [] (qwen3/paged-pools m 64 bs)] (map vector ps dense))
+        toks [(prompt 70 6) (prompt 80 6) (prompt 90 6)]
+        [_ _ out from-tails] (forked-decode stepper how a seqs pools toks 4)
+        refs (mapv (fn [[_ cache] t] (dense-logits m cache t)) dense toks)]
+    [(reduce max 0.0 (for [i (range 6) r (range 3)]
+                       (max-diff (array/slice (nth out i) 0 r (inc r)) (nth (refs r) i))))
+     from-tails]))
+
+(def ^:private copy-planted
+  {"the tails not the blocks read (zeros)"
+   [#'common/with-tails (fn [_] (fn [entry tails] (if tails (assoc entry :tails {:k (array/zeros-like (array/take (:k entry) tails 0))
+                                                                                  :v (array/zeros-like (array/take (:v entry) tails 0))})
+                                                     entry)))]
+   "a copy's rows shifted by one"
+   [#'common/copied (fn [f] (fn [entry copy i] (f entry (when copy (update copy :rows #(array/mod (array/+ % 1) (first (array/shape (:k (first (:blocks copy))))))))
+                                                  i)))]
+   "the copy skipped"
+   [#'common/copied (fn [_] (fn [entry _ _] entry))]})
+
+(deftest a-step-s-copy-is-copy-blocks-before-it
+  (doseq [[k m] @models
+          how [:outside :gathered :tails]]
+    (testing [k how]
+      (let [[gap from-tails] (forked-gap m how (fn [& args] (apply qwen3/paged-step m args)))]
+        (is (<= gap band))
+        (when (= how :tails)
+          (is (= 11 from-tails) "of 14 copies, all but the first step's three from the tails")))))
+  (testing "compiled, donating"
+    (let [m (:f32 @models)
+          f (qwen3/compile-paged-step m {:donate? true})]
+      (is (<= (first (forked-gap m :tails f)) band))))
+  (testing "planted bugs fail it"
+    (doseq [[label [v wrap]] copy-planted]
+      (is (< 0.01 (with-redefs-fn {v (wrap @v)} #(failing (fn [] (first (forked-gap (:f32 @models) :tails
+                                                                                     (fn [& args] (apply qwen3/paged-step (:f32 @models) args))))))))
+          label))))
 
 ;; ---------------------------------------------------------------------------
 ;; 3. Compiled

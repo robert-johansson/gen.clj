@@ -3,13 +3,15 @@
    beside qwen3's own): their loud errors, options and tokens checked, a
    GGUF's weights cast and measured, the linear layers (dense, quantized
    or adapted by gen.llm.lora), training's output projection by chunks and
-   masked loss, and a static cache's slots, masks and checks. who, a
+   masked loss, a static cache's slots, masks and checks, and the paged
+   steps' copies, tails and checks (qwen3's and qwen35's). who, a
    string naming the model family (\"qwen35\"), heads each message.
    Internal: the families' namespaces are the API."
   {:api :internal}
   (:refer-clojure :exclude [+ - * / < > <= >= ==])
   (:require [clojure.core :as c]
             [gen.array :as array :refer [+ * <=]]
+            [gen.array.paged :as paged]
             [gen.llm.lora :as lora]))
 
 (set! *warn-on-reflection* true)
@@ -242,3 +244,85 @@
                     {:capacities (mapv :capacity caches)})))
   (when-not (apply = (map (comp count :layers) caches))
     (throw (invalid who "concat-rows: caches of different numbers of layers" {:layers (mapv (comp count :layers) caches)}))))
+
+;; ---------------------------------------------------------------------------
+;; Paged KV pools (genclj-1daf, genclj-6qb6): a step's layers by layer,
+;; an attention layer's pools {:k :v}, another layer's what it holds
+;; ({} when nothing, a recurrent layer's row states)
+;; ---------------------------------------------------------------------------
+
+(defn pool?
+  "Is a step's layer entry an attention layer's paged pools {:k :v}?"
+  [entry]
+  (contains? entry :k))
+
+(defn copied
+  "A layer's entry with a step's copy written first (layer i's), when it
+   is pools: the rows :rows (int32 [M]) of the layer's :blocks ({:k :v},
+   each [S …] blocks of the pools' layouts) at the blocks :dst (int32
+   [M], distinct). The blocks are an input of the step, read before it (a
+   previous step's tails, or paged-blocks evaluated alone): a call that
+   read its pools' blocks and then wrote the pools would copy each pool
+   on MLX, the read still holding it (genclj-6qb6)."
+  [entry copy i]
+  (if-let [{:keys [blocks rows dst]} (when (pool? entry) copy)]
+    (let [{bk :k bv :v} (nth blocks i)]
+      {:k (paged/put-blocks (:k entry) (array/take bk rows 0) dst)
+       :v (paged/put-blocks (:v entry) (array/take bv rows 0) dst)})
+    entry))
+
+(defn with-tails
+  "An attention layer's pools {:k :v} after a step's writes, with their
+   blocks tails (int32 [T]) as :tails {:k [T …] :v [T …]} when given."
+  [{:keys [k v] :as entry} tails]
+  (cond-> entry
+    tails (assoc :tails {:k (array/take k tails 0) :v (array/take v tails 0)})))
+
+(defn split-tails
+  "[layers tails] of a step's entries: the layers, and their :tails by
+   layer ({} for a layer without), nil when the step read none."
+  [entries]
+  [(mapv #(dissoc % :tails) entries)
+   (when (some :tails entries) (mapv #(or (:tails %) {}) entries))])
+
+(defn paged-blocks
+  "The blocks ids (int32 [M]) of a step's layers' pools, by layer: {:k
+   [M …] :v [M …]}, {} for a layer without pools."
+  [layers ids]
+  (mapv (fn [{:keys [k v] :as e}] (if (pool? e) {:k (array/take k ids 0) :v (array/take v ids 0)} {})) layers))
+
+(defn- int-vector? [x]
+  (and (array/array? x) (= 1 (array/ndim x)) (= :int (array/dtype-kind (array/dtype x)))))
+
+(defn check-extra
+  "A step's :copy and :tails (a paged step's options, a batch's keys)
+   against its layers; bad (a fn of a message and data) throws."
+  [layers {:keys [copy tails]} bad]
+  (when copy
+    (when-not (and (map? copy) (= #{:blocks :rows :dst} (set (keys copy))))
+      (bad ":copy is a map {:blocks :rows :dst}" {:copy (if (map? copy) (vec (keys copy)) copy)}))
+    (let [{:keys [blocks rows dst]} copy
+          block-shape (fn [x] (rest (array/shape x)))]
+      (doseq [[what x] [[:rows rows] [:dst dst]]]
+        (when-not (int-vector? x)
+          (bad (str ":copy's " what " must be an int array [M]") {what (when (array/array? x) (array/shape x))})))
+      (when-not (= (array/shape rows) (array/shape dst))
+        (bad ":copy's :rows and :dst must be [M] alike" {:rows (array/shape rows) :dst (array/shape dst)}))
+      (when-not (and (vector? blocks) (= (count layers) (count blocks))
+                     (every? (fn [[e {:keys [k v] :as b}]]
+                               (if (pool? e)
+                                 (and (array/array? k) (array/array? v)
+                                      (= (block-shape (:k e)) (block-shape k)) (= (block-shape (:v e)) (block-shape v))
+                                      (= (first (array/shape k)) (first (array/shape v))))
+                                 (= {} b)))
+                             (map vector layers blocks)))
+        (bad ":copy's :blocks must be a vector, by layer, of {:k :v}: blocks of the pools' layouts ({} for a layer without)"
+             {:blocks (if (vector? blocks) (count blocks) blocks)}))))
+  (when (and tails (not (int-vector? tails)))
+    (bad ":tails must be an int array [T] of block ids" {:tails (when (array/array? tails) (array/shape tails))})))
+
+(defn present
+  "opts without its nil values: a tree of arrays alone (compile's
+   arguments)."
+  [opts]
+  (into {} (filter val) opts))

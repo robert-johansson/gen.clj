@@ -89,6 +89,24 @@ other values for the same key, from the same distribution.
     llama.cpp (175 against 82 and 92 in float32); a lone caller as
     before.
 
+- **Changed (experimental): copy-on-write inside the paged step**
+  (genclj-6qb6). **Breaking** for callers of the paged steps:
+  - `gen.llm.models.qwen3/paged-step` and `compile-paged-step`'s
+    function return `[logits pools' tails]`. They take options `:copy`
+    `{:blocks :rows :dst}` (blocks written into the pools before the
+    step's keys and values, read before the step) and `:tails` (block
+    ids [T], read back after the step's writes: the third value).
+    `paged-batch-step` takes `:copy` and `:tails` in its batch and gives
+    `:tails`.
+  - New: `qwen3/paged-blocks` (a copy's blocks, gathered) and
+    `qwen3/paged-write-entries` (a run's writes after its copy).
+  - `gen.llm.array-engine`'s paged and continuous modes write a step's
+    copies in the step itself. A step that copies reads back the blocks
+    it wrote, and the next step's copies come from there: token SMC's
+    steps make no call but the step. Other copies' blocks are gathered
+    first, one call (`stats`' new `:copy-reads`). The values are the
+    same.
+
 - **Added (experimental): LoRA adapters, `gen.llm.lora`** (genclj-yc3b,
   genclj-p4mk): low-rank adapters trained beside a model's frozen, dense
   or quantized, weights, and served by llama.cpp.

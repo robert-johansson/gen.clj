@@ -164,6 +164,21 @@
 ;; copy-blocks: blocks copied, for copy-on-write
 ;; ---------------------------------------------------------------------------
 
+(defn put-blocks
+  "pool with blocks ([M …], each a block of pool's) written at its blocks
+   dst (an int array [M], distinct): put-along-axis on axis 0, on MLX a
+   scatter that writes the pool in place when nothing else holds it
+   (array/compile's :donate). copy-blocks's write; a step that copies
+   blocks it read before (gen.llm.models.qwen3's paged steps' :copy)
+   writes them by it. Unchecked: its callers check."
+  [pool blocks dst]
+  (let [s (array/shape blocks)
+        m (first s)]
+    (if (zero? (long m))
+      pool
+      (array/put-along-axis pool (array/broadcast-to (array/reshape (array/astype dst :int32) (into [m] (repeat (dec (count s)) 1))) s)
+                            blocks 0))))
+
 (defn copy-blocks
   "gen.array/copy-blocks's body."
   [pool src dst]
@@ -178,13 +193,9 @@
                         {:src (array/shape src) :dst (array/shape dst)})))
       (check-range op :src src 0 (first s) false)
       (check-range op :dst dst 0 (first s) true)
-      (let [m (first (array/shape src))
-            rest-shape (subvec s 1)
-            ones (vec (repeat (count rest-shape) 1))
-            idx (array/broadcast-to (array/reshape (array/astype dst :int32) (into [m] ones)) (into [m] rest-shape))]
-        (if (zero? (long m))
-          pool
-          (array/put-along-axis pool idx (array/take pool (array/astype src :int32) 0) 0))))))
+      (if (zero? (long (first (array/shape src))))
+        pool
+        (put-blocks pool (array/take pool (array/astype src :int32) 0) dst)))))
 
 ;; ---------------------------------------------------------------------------
 ;; paged-attention: a query a sequence over its blocks

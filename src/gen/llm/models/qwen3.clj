@@ -22,7 +22,10 @@
      (grow cache capacity)             → a static cache of a larger capacity
      (paged-pools m n-blocks bs)       → empty paged KV pools (gen.array/paged-write's layouts)
      (paged-step m pools positions tables slots tokens)
-                                       → [logits pools']: a token a row over paged pools
+                                       → [logits pools' tails]: a token a row over paged
+                                         pools (:copy, copy-on-write's blocks first;
+                                         :tails, blocks read after)
+     (paged-blocks pools ids)          → the pools' blocks ids, by layer: a :copy's
      (compile-paged-step m)            → paged-step compiled, consuming the pools with
                                          :donate? true
      (paged-batch-step m pools batch)  → {:logits :scores :pools}: decode rows and a
@@ -109,7 +112,8 @@
             [gen.array :as array :refer [+ * <=]]
             [gen.array.paged :as paged]
             [gen.llm.lora :as lora]
-            [gen.llm.models :as models]))
+            [gen.llm.models :as models]
+            [gen.llm.models.common :as common]))
 
 (set! *warn-on-reflection* true)
 
@@ -729,31 +733,48 @@
             (mapv #(array/transpose (array/reshape (array/slice % 2 from t) [hk n d]) [1 0 2]) [k v])))
         (:layers cache)))
 
+(defn paged-write-entries
+  "pools with a run's keys and values written at slots (int32 [n]):
+   entries, paged-entries' [k v] by layer, after opts' :copy
+   (paged-step's, copy-on-write). What the engine compiles for a run's
+   writes, consuming the pools."
+  [pools entries slots opts]
+  (let [{:keys [copy]} opts]
+    (mapv (fn [i entry [kn vn]]
+            (let [{:keys [k v]} (common/copied entry copy i)]
+              (zipmap [:k :v] (array/paged-write k v kn vn slots))))
+          (range) pools entries)))
+
 (defn- paged-attention
-  "One block's attention of x [R 1 hidden], a token a row, over the
-   layer's pools entry: its key and value written at slots (at positions,
-   rotated there), then attention over each row's blocks (tables) to its
-   position: [its output, the pools after x]."
-  [{:keys [heads kv-heads head-dim] :as cfg} w x {:keys [positions tables slots]} entry]
+  "One block's attention of x [R 1 hidden], a token a row, over layer i's
+   pools entry: the step's copy written (copied), each row's key and
+   value written at its slot (at its position, rotated there), then
+   attention over each row's blocks (tables) to its position: [its
+   output, the pools after x, with their :tails when asked]."
+  [{:keys [heads kv-heads head-dim] :as cfg} w x {:keys [positions tables slots copy tails]} i entry]
   (let [r (first (array/shape x))
         [q k v] (qkv cfg w x positions)
-        [kp vp] (array/paged-write (:k entry) (:v entry)
+        e (common/copied entry copy i)
+        [kp vp] (array/paged-write (:k e) (:v e)
                                    (array/reshape k [r kv-heads head-dim]) (array/reshape v [r kv-heads head-dim]) slots)
         o (array/paged-attention (array/reshape q [r heads head-dim]) kp vp tables (+ positions 1))]
-    [(linear (array/reshape o [r 1 (c/* heads head-dim)]) (:o w)) {:k kp :v vp}]))
+    [(linear (array/reshape o [r 1 (c/* heads head-dim)]) (:o w)) (common/with-tails {:k kp :v vp} tails)]))
 
 (defn- paged-forward
-  "[logits [R 1 vocab], the pools after the tokens] of one token a row,
-   ids [R 1] at positions (int32 [R]), written at slots (int32 [R]) and
-   attending over tables (int32 [R MB]): arrays in and arrays out, the
-   step compile-paged-step compiles."
-  [cfg weights pools positions tables slots ids]
-  (let [at {:positions positions :tables tables :slots slots}]
-    (logits-of cfg weights ids (fn [i w x] (paged-attention cfg w x at (nth pools i))) :last)))
+  "[logits [R 1 vocab], the pools after the tokens, their tails (nil
+   without)] of one token a row, ids [R 1] at positions (int32 [R]),
+   written at slots (int32 [R]) and attending over tables (int32 [R MB]),
+   after extra's :copy and reading its :tails (paged-step's options):
+   arrays in and arrays out, the step compile-paged-step compiles."
+  [cfg weights pools positions tables slots ids extra]
+  (let [at (merge {:positions positions :tables tables :slots slots} (select-keys extra [:copy :tails]))
+        [logits entries] (logits-of cfg weights ids (fn [i w x] (paged-attention cfg w x at i (nth pools i))) :last)]
+    (into [logits] (common/split-tails entries))))
 
 (defn- check-paged
-  "The paged step's operands: pools of the model's layers, R rows."
-  [{:keys [layers]} pools positions tables slots ids]
+  "The paged step's operands: pools of the model's layers, R rows, and
+   its options extra."
+  [{:keys [layers]} pools positions tables slots ids extra]
   (let [r (first (array/shape ids))]
     (when-not (and (vector? pools) (= layers (count pools)))
       (throw (invalid (str "the pools must be a vector of the model's " layers " layers (paged-pools)") {:layers (count pools)})))
@@ -763,43 +784,76 @@
       (when-not (= shape (array/shape x))
         (throw (invalid (str (name what) " must be [R] " shape ", not " (array/shape x)) {what (array/shape x)}))))
     (when-not (and (= 2 (array/ndim tables)) (= r (first (array/shape tables))))
-      (throw (invalid (str "tables must be [R MB] for " r " rows, not " (array/shape tables)) {:tables (array/shape tables)})))))
+      (throw (invalid (str "tables must be [R MB] for " r " rows, not " (array/shape tables)) {:tables (array/shape tables)})))
+    (common/check-extra pools extra #(throw (invalid (str "paged-step: " %1) %2)))))
+
+(def ^:private step-options #{:copy :tails})
 
 (defn paged-step
-  "[logits pools']: the logits [R 1 vocab] of one token a row, read after
-   each row's positions in paged pools (paged-pools'), and the pools after
-   them. Row i's token is position positions[i] of its sequence, written
-   at slots[i] (gen.llm.paged/prepare's), and attends over its first
-   positions[i] + 1 positions, its blocks the row i of tables [R MB].
-   positions, tables and slots are int32 arrays; tokens are R rows of one
-   id or an int array [R 1]. Its logits are a static cache's within
-   float round-off (on the JVM backend, float64, a masked position's
-   weight is an exact 0), the pools being values: a step leaves the pools
-   it was given as they were (compile-paged-step's :donate? consumes
-   them instead)."
-  [{:keys [config weights]} pools positions tables slots tokens]
-  (let [ids (token-array tokens (:vocab config))]
-    (check-paged config pools positions tables slots ids)
-    (paged-forward config weights pools positions tables slots ids)))
+  "[logits pools' tails]: the logits [R 1 vocab] of one token a row, read
+   after each row's positions in paged pools (paged-pools'), the pools
+   after them, and the blocks :tails asks for (nil without). Row i's
+   token is position positions[i] of its sequence, written at slots[i]
+   (gen.llm.paged/prepare's), and attends over its first positions[i] + 1
+   positions, its blocks the row i of tables [R MB]. positions, tables
+   and slots are int32 arrays; tokens are R rows of one id or an int
+   array [R 1]. Options, arrays the step reads:
+     :copy   {:blocks :rows :dst}, blocks written into the pools before
+             the tokens' keys and values (copy-on-write): for each layer,
+             the rows :rows (int32 [M]) of its :blocks (a vector, by
+             layer, of {:k :v}: [S …] blocks of the pools' layouts) at
+             the blocks :dst (int32 [M], distinct). The blocks are what
+             the pools held at the blocks copied, read before the step:
+             an earlier step's tails, or paged-blocks evaluated alone (in
+             the call that writes the pools, a read of their blocks makes
+             MLX copy each pool, the read still holding it).
+     :tails  block ids (int32 [T]): the step's third value is those
+             blocks of every layer's pools after its writes, a vector by
+             layer of {:k [T …] :v [T …]}, a later step's :copy's
+             :blocks.
+   Its logits are a static cache's within float round-off (on the JVM
+   backend, float64, a masked position's weight is an exact 0), the pools
+   being values: a step leaves the pools it was given as they were
+   (compile-paged-step's :donate? consumes them instead)."
+  ([m pools positions tables slots tokens] (paged-step m pools positions tables slots tokens nil))
+  ([{:keys [config weights]} pools positions tables slots tokens opts]
+   (check-options :paged-step opts step-options)
+   (let [ids (token-array tokens (:vocab config))
+         extra (common/present opts)]
+     (check-paged config pools positions tables slots ids extra)
+     (paged-forward config weights pools positions tables slots ids extra))))
+
+(defn paged-blocks
+  "The blocks ids (int32 [M]) of paged pools, a vector by layer of {:k
+   [M …] :v [M …]}: a step's :copy's :blocks, read (and evaluated) before
+   the step that writes the pools."
+  [pools ids]
+  (common/paged-blocks pools ids))
 
 (defn compile-paged-step
   "paged-step compiled by array/compile: a function (f pools positions
-   tables slots tokens) → [logits pools'], one trace per shape (rows,
-   table width, pool size). The model's weights are evaluated here, as
+   tables slots tokens) or (f pools positions tables slots tokens opts)
+   → [logits pools' tails], one trace per shape (rows, table width, pool
+   size, the options' arrays). The model's weights are evaluated here, as
    compile-step's. Options: :donate? true, each call consumes the pools
    it steps (array/compile's :donate, experimental): on MLX the step
-   writes its keys and values into the pools in place, and reading the
-   consumed pools again is loud (:donated)."
+   writes its copies, keys and values into the pools in place, and
+   reading the consumed pools again is loud (:donated)."
   ([m] (compile-paged-step m nil))
   ([{:keys [config weights]} {:keys [donate?] :as opts}]
    (check-options :compile-paged-step opts #{:donate?})
    (array/eval! weights)
-   (let [f (array/compile (fn [pools positions tables slots ids] (paged-forward config weights pools positions tables slots ids))
+   (let [f (array/compile (fn [pools positions tables slots ids extra]
+                            (paged-forward config weights pools positions tables slots ids extra))
                           (when donate? {:donate #{0}}))]
-     (fn [pools positions tables slots tokens]
-       (let [ids (token-array tokens (:vocab config))]
-         (check-paged config pools positions tables slots ids)
-         (f pools positions tables slots ids))))))
+     (fn step
+       ([pools positions tables slots tokens] (step pools positions tables slots tokens nil))
+       ([pools positions tables slots tokens opts]
+        (check-options :paged-step opts step-options)
+        (let [ids (token-array tokens (:vocab config))
+              extra (common/present opts)]
+          (check-paged config pools positions tables slots ids extra)
+          (f pools positions tables slots ids extra)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Batched paged steps (genclj-b3ow): decode rows and a prefill chunk
@@ -811,12 +865,14 @@
    its position, rotated there), then the first d rows' attention by
    paged attention over their tables, and the rest's (a prefill chunk of
    one sequence) over the chunk table's blocks gathered, each row to its
-   own position (a causal mask): [its output, the pools after x]."
-  [{:keys [heads kv-heads head-dim] :as cfg} w x {:keys [positions tables slots chunk d]} entry]
+   own position (a causal mask), after the batch's copy (copied): [its
+   output, the pools after x, with their :tails when asked]."
+  [{:keys [heads kv-heads head-dim] :as cfg} w x {:keys [positions tables slots chunk d copy tails]} i entry]
   (let [r (long (first (array/shape x)))
         d (long d)
         [q k v] (qkv cfg w x positions)
-        [kp vp] (array/paged-write (:k entry) (:v entry)
+        e (common/copied entry copy i)
+        [kp vp] (array/paged-write (:k e) (:v e)
                                    (array/reshape k [r kv-heads head-dim]) (array/reshape v [r kv-heads head-dim]) slots)
         q (array/reshape q [r heads head-dim])
         decoded (when (pos? d)
@@ -835,16 +891,18 @@
         o (cond (and decoded chunked) (array/concatenate [decoded chunked] 0)
                 decoded decoded
                 :else chunked)]
-    [(linear (array/reshape o [r 1 (c/* heads head-dim)]) (:o w)) {:k kp :v vp}]))
+    [(linear (array/reshape o [r 1 (c/* heads head-dim)]) (:o w)) (common/with-tails {:k kp :v vp} tails)]))
 
 (defn- batch-forward
   "paged-batch-step's arrays in and out: {:logits [O 1 vocab] :scores [O]
-   (with :targets) :pools}."
-  [cfg weights pools {:keys [ids positions slots tables chunk out targets]}]
-  (let [at {:positions positions :slots slots :tables tables :chunk chunk
+   (with :targets) :pools :tails (with :tails)}."
+  [cfg weights pools {:keys [ids positions slots tables chunk out targets copy tails]}]
+  (let [at {:positions positions :slots slots :tables tables :chunk chunk :copy copy :tails tails
             :d (if tables (first (array/shape tables)) 0)}
-        [logits pools] (logits-of cfg weights ids (fn [i w x] (batch-attention cfg w x at (nth pools i))) {:rows out})]
+        [logits entries] (logits-of cfg weights ids (fn [i w x] (batch-attention cfg w x at i (nth pools i))) {:rows out})
+        [pools tails] (common/split-tails entries)]
     (cond-> {:logits logits :pools pools}
+      tails (assoc :tails tails)
       targets (assoc :scores (array/reshape (array/- (array/take-along-axis logits (array/reshape targets [-1 1 1]) 2)
                                                      (array/logsumexp logits {:axis -1 :keep-dims? true}))
                                             [-1])))))
@@ -852,7 +910,7 @@
 (defn- check-batch
   "paged-batch-step's operands: pools of the model's layers, R rows,
    decode rows first, a chunk's after them."
-  [{:keys [layers]} pools {:keys [ids positions slots tables chunk out targets]}]
+  [{:keys [layers]} pools {:keys [ids positions slots tables chunk out targets] :as batch}]
   (let [r (long (first (array/shape ids)))
         d (long (if tables (first (array/shape tables)) 0))
         bad (fn [msg data] (throw (invalid (str "paged-batch-step: " msg) data)))]
@@ -876,19 +934,21 @@
     (when-not (and (array/array? out) (= 1 (array/ndim out)))
       (bad ":out must be the rows whose logits are computed, an int array [O]" {:out (when (array/array? out) (array/shape out))}))
     (when (and targets (not (and (array/array? targets) (= (array/shape out) (array/shape targets)))))
-      (bad (str ":targets must be an int array [O] " (array/shape out)) {:targets (when (array/array? targets) (array/shape targets))}))))
+      (bad (str ":targets must be an int array [O] " (array/shape out)) {:targets (when (array/array? targets) (array/shape targets))}))
+    (common/check-extra pools batch bad)))
 
 (defn- batch-arrays
-  "batch with its :tokens as :ids, an int array [R 1]."
+  "batch with its :tokens as :ids, an int array [R 1], and no nil values."
   [batch vocab]
-  (-> batch (dissoc :tokens) (assoc :ids (token-array (:tokens batch) vocab))))
+  (-> (common/present batch) (dissoc :tokens) (assoc :ids (token-array (:tokens batch) vocab))))
 
-(def ^:private batch-keys #{:tokens :positions :slots :tables :chunk :out :targets})
+(def ^:private batch-keys #{:tokens :positions :slots :tables :chunk :out :targets :copy :tails})
 
 (defn paged-batch-step
   "One forward of R rows over paged pools (paged-pools'), a token a row,
    and the pools after them: {:logits [O 1 vocab] :scores [O] (with
-   :targets) :pools}. batch (int32 arrays but :tokens):
+   :targets) :pools :tails (with :tails)}. batch (int32 arrays but
+   :tokens and :copy):
      :tokens     R rows of one id, or an int array [R 1]
      :positions  [R] each row's position in its sequence
      :slots      [R] where each row's key and value are written
@@ -902,7 +962,10 @@
                  position (absent when D is R)
      :out        [O] the rows whose logits are computed
      :targets    [O] (optional) a token for each: :scores, its log-
-                 probability at that row (in the model's dtype).
+                 probability at that row (in the model's dtype)
+     :copy       (optional) blocks copied in first, paged-step's :copy
+     :tails      (optional) block ids [T]: :tails, those blocks after
+                 the batch's writes, paged-step's third value.
    Every row's key and value are written before any row attends, so a
    chunk's rows see each other's. Its logits are paged-step's (decode
    rows) and a concatenating cache's (a chunk), within float round-off;
