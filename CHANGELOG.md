@@ -143,7 +143,8 @@ other values for the same key, from the same distribution.
   per-head q/k norms, NEOX's RoPE, grouped KV heads, causal attention,
   SwiGLU, a tied or untied output; quantized matrices multiplied by
   `quantized-matmul`, the embedding by `take` and `dequantize`. A file
-  with tensors the forward does not read, or RoPE scaling, is loud. The
+  with tensors the forward does not read, RoPE scaling, a token outside
+  the vocabulary and an option key it does not read are loud. The
   same backend-neutral code runs on MLX (its fused kernels) and on the
   JVM backend (tiny models, float64), and the tape differentiates it. On
   Metal, Qwen3-0.6B-Q8_0's next-token log-probabilities are llama.cpp's
