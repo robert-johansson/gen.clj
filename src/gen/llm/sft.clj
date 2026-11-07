@@ -92,6 +92,11 @@
      4 rows of 256 tokens   6.1 GB   1.8 GB   1.5 GB   (274, 273, 305 ms)
      8 rows of 512 tokens  24.6 GB  11.7 GB   9.2 GB   (968, 967, 988 ms)
    Unchecked, the same steps peak at 11.4 and 32.1 GB at the default.
+   On Metal (Mac mini M4, 2026-11-08, the same step of 4 rows of 256
+   tokens, 0.76 GB held) the default limit loses little of the saving:
+   2.2, 2.1 and 1.7 GB (1819, 1813, 2144 ms); unchecked, 3.6 GB. On the
+   tape, checkpointed, 1.5, 1.5 and 1.4 GB; unchecked 12.3 GB, even under
+   a limit of 8 GB.
 
    Experimental: outside the 1.x promise (DESIGN §9)."
   {:api :experimental}

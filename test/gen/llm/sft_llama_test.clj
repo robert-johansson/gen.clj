@@ -31,6 +31,11 @@
      learnt, some facts lost, Portugal's capital \"Porto\");
    - llama.cpp: 0.533 nats at most against the forward, every argmax
      the same; its replies 14/16 in the format (11 correct).
+   On Metal (Mac mini M4, 2026-11-08, Q8_0): 24 steps in 28 s (native
+   gradients) and 30 s (the tape), the held-out NLL the same to four
+   digits, after 15/16 in the format (12 correct); llama.cpp's Metal
+   0.017 nats (native) and 0.014 (tape) at most against the forward
+   (band 0.075), every argmax the same, its replies 15/16 in the format.
    Trained without the end token (example's :end-token? false), the same
    run's replies stop at <|im_end|> in only 12 of 16; the other 4 run on
    to the 48 tokens allowed."

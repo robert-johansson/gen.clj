@@ -202,7 +202,10 @@ other values for the same key, from the same distribution.
     3.61 → 0.093 nats a token, greedy replies in the format 0/16 → 15/16
     through gen.llm.array-engine. llama.cpp serves the adapter within
     its CUDA band (0.53 nats against 0.65), its replies 14/16 in the
-    format.
+    format. On Metal (genclj-h7ru) the same run gives the same held-out
+    NLL, and llama.cpp serves the adapter within 0.017 nats (band 0.075),
+    15/16 in the format. Metal's default memory limit loses little of the
+    checkpoints' saving (2.2 GB against 2.1 GB at the measured limit).
 - **Added (experimental): GRPO and its variants, `gen.llm.grpo`**
   (genclj-waym): a LoRA adapter trained by group relative policy
   optimization with verifiable rewards, over any family of gen.llm.models.
