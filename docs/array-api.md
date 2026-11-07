@@ -207,7 +207,7 @@ needs, taken from GenMLX's measured call counts
 | gradients | `grad` `value-and-grad` `stop-gradient` `tracked?` | `-value-and-grad`, `:stop-gradient` | — |
 | trees | `tree-map` `tree-leaves` | — | both |
 | batching | `vmap` · `batched?` `batch-shape` `particle-backend` `particle` `particles` `all-particles` | — (the batch tracer, a wrapping backend: §8b) | all |
-| neural networks (experimental, 1.3.0) | `rms-norm` `rope` `sdpa` | — (a fused kernel where a backend has one: `IFused`'s `-fused` with `:rms-norm :rope :sdpa`) | all three |
+| neural networks (experimental, 1.3.0) | `rms-norm` `rope` `sdpa` `gated-delta` | — (a fused kernel where a backend has one: `IFused`'s `-fused` with `:rms-norm :rope :sdpa :gated-delta`) | all four |
 | quantized weights (experimental, 1.3.0) | `quantize` `dequantize` `quantized-matmul` `gather-qmm` | `IQuantized`'s `-quantized` with `:quantize :dequantize :quantized-matmul :gather-qmm` | — |
 | files (experimental, 1.3.0) | `load-gguf` | `ILoading`'s `-load-gguf`, per file of a model | — |
 | overwriting (experimental, 1.3.0) | `put-along-axis` | `IOverwriting`'s `-put-along-axis` | — |
@@ -255,7 +255,7 @@ needs, taken from GenMLX's measured call counts
 promise; docs/research/llm-mlx-engine.md §2, approved in DESIGN §9's
 "1.3.0's engine design"). The 1.x promise keeps `IBackend`'s methods, so
 each capability is an optional protocol of its own:
-- **`rms-norm`, `rope`, `sdpa`** are composites of the ops above, so the
+- **`rms-norm`, `rope`, `sdpa`, `gated-delta`** are composites of the ops above, so the
   tape differentiates them, the batch tracer batches them and the staging
   backend stages them. A backend implementing `IFused` may compute one in
   a fused kernel, `(-fused b op args)`, or decline with nil; gen.array asks
@@ -276,8 +276,22 @@ each capability is an optional protocol of its own:
     path; MLX's own fallback averages every value there and its Metal
     kernels give zeros or another row); a bool mask hides a key with the
     dtype's lowest finite score, not -Inf, so gradients stay finite.
-  - The half floats are normalized, rotated and softmaxed in float32, as
-    MLX's fast ops are.
+  - `(gated-delta q k v g beta state opts)`: the gated delta rule
+    (GatedDeltaNet's recurrence, Qwen3.5's linear attention), `[y state']`
+    of q, k [B T H Dk], v [B T H Dv], the log decays g and the write
+    strengths beta [B T H], and a state [B H Dv Dk]: each token decays
+    the state by exp(g), writes beta·(v - S·k) at k, and reads S·q.
+    `:method` `:loop` (token by token), `:chunked` (in chunks of
+    `:chunk-size`, 64, the form llama.cpp computes: each chunk's updates
+    as matrix products with a triangular inverse by doubling blocks, then
+    the chunks in order), or `:auto` (a backend's fused kernel, else
+    `:chunked` from `:chunk-size` tokens on and `:loop` below). Every
+    head has its own keys: a model with fewer key heads repeats them
+    first. MLX's Metal has mlx-lm's kernel (gen.backend.mlx.gated-delta,
+    ported per THIRD-PARTY-NOTICES), declined under MLX's native
+    gradients, on its CPU device and for Dk not a multiple of 32.
+  - The half floats are normalized, rotated and softmaxed (and the gated
+    delta rule computed) in float32, as MLX's fast ops are.
 - **`quantize`, `dequantize`, `quantized-matmul`, `gather-qmm`** are
   primitives of `IQuantized`, in MLX's affine layout: a uint32 matrix of
   values packed little-endian (bit j·b of a row's stream holds value j's

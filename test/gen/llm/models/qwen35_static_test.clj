@@ -20,8 +20,9 @@
       row cleared: it reads as a new one, its states zeroed, its slots
       written over), and nowhere else: a recurrent state cannot go back;
    6. misuse is loud.
-   The bands: on the JVM backend 0; on MLX 4e-5 in a logit,
-   gen.llm.models.qwen35-test's.
+   The bands: on the JVM backend 0; on MLX 2e-4 in a logit,
+   gen.llm.models.qwen35-test's (measured here on Metal, 2026-11-07: 1
+   0, 2 2.6e-5, 3 7.9e-6, 5 1.0e-5).
    Each fails under a planted bug (with-redefs-fn; asserted as more than
    0.01): the mask's valid length one too long or too short, the mask
    ignoring the capacity's padding, the keys and values written one slot
@@ -48,7 +49,7 @@
 
 (def ^:private capacity 48)
 
-(def ^:private band (if (ts/jvm?) 0.0 4e-5))
+(def ^:private band (if (ts/jvm?) 0.0 2e-4))
 
 (defn- max-diff ^double [a b]
   (double (array/item (array/max (array/abs (array/- a b))))))

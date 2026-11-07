@@ -1,7 +1,8 @@
 (ns gen.llm.models.against-llama
-  "Qwen3's forward over gen.array (gen.llm.models.qwen3) against the
-   llama.cpp engine (gen.llm.llama) on the same GGUF, for the test
-   (gen.llm.models.qwen3-llama-test) and its band's bench
+  "A forward over gen.array (gen.llm.models.qwen3, or qwen35 for Qwen3.5
+   and Qwen3.6) against the llama.cpp engine (gen.llm.llama) on the same
+   GGUF, for the tests (gen.llm.models.qwen3-llama-test,
+   qwen35-llama-test) and their bands' bench
    (bench/gen/qwen3_llama_noise.clj): the next-token log-probabilities of
    one prompt, by both, compared as the Branching contract compares two
    computations (gen.llm.branching-contract's max-diff: max |Δ log p| over
@@ -20,11 +21,34 @@
    - :kv-tiled: query head h reads KV head h mod KV, where Qwen3 (and
      gen.array/sdpa) groups them, h / (H/KV);
    - :rope-traditional: RoPE's consecutive pairs for NEOX's halves;
-   - :qk-norms-skipped: q and k not normalized per head."
+   - :qk-norms-skipped: q and k not normalized per head;
+   and Qwen3.5's own (qwen35-mutations, with those), of its layers:
+   - :conv-oldest: the conv state keeping its oldest inputs, not its
+     newest (only a cached read sees it);
+   - :conv-reversed: the conv kernel applied newest input first;
+   - :query-gate-swapped: attn_q's query and output gate swapped."
   (:require [gen.array :as array]
             [gen.llm.branching :as br]
             [gen.llm.branching-contract :refer [max-diff top-tokens]]
-            [gen.llm.models.qwen3 :as qwen3]))
+            [gen.array.gguf :as gguf]
+            [gen.llm.models.qwen3 :as qwen3]
+            [gen.llm.models.qwen35 :as qwen35]))
+
+(defn- qwen35? [m] (contains? #{"qwen35" "qwen35moe"} (get-in m [:config :arch])))
+
+(defn- prefill [m & args] (apply (if (qwen35? m) qwen35/prefill qwen3/prefill) m args))
+(defn- step [m & args] (apply (if (qwen35? m) qwen35/step qwen3/step) m args))
+
+(defn architecture
+  "The architecture of the GGUF file at path (its header's)."
+  [path]
+  (get-in (gguf/header path) [:metadata "general.architecture"]))
+
+(defn load-model
+  "The model of the GGUF file at path, by its architecture: qwen3/load or
+   qwen35/load."
+  [path]
+  (if (#{"qwen35" "qwen35moe"} (architecture path)) (qwen35/load path) (qwen3/load path)))
 
 (def ^:private sdpa array/sdpa)
 (def ^:private rope array/rope)
@@ -42,6 +66,22 @@
                                      ([x dims] (rope-traditional x dims nil))
                                      ([x dims opts] (rope x dims (assoc opts :traditional? true))))}
    :qk-norms-skipped {#'array/rms-norm (fn [x w eps] (if (= 4 (array/ndim x)) x (rms-norm x w eps)))}})
+
+(def ^:private causal-conv @#'qwen35/causal-conv)
+
+(def qwen35-mutations
+  "Planted convention errors of Qwen3.5 (and qwen3's, which its
+   attention layers share): name to with-redefs-fn's map."
+  (merge mutations
+         {:conv-oldest {#'qwen35/conv-state (fn [padded t]
+                                              (array/slice padded 1 0 (- (long (second (array/shape padded))) (long t))))}
+          :conv-reversed {#'qwen35/causal-conv (fn [padded kernel t] (causal-conv padded (array/slice kernel 1 nil nil -1) t))}
+          :query-gate-swapped {#'qwen35/query-and-gate (fn [qg] [(array/slice qg 3 1 2) (array/slice qg 3 0 1)])}}))
+
+(defn mutations-of
+  "The planted errors that apply to model m."
+  [m]
+  (if (qwen35? m) qwen35-mutations mutations))
 
 (defn- logprobs
   "The log-probabilities of logits' last row (logits [1 T vocab]), a
@@ -81,9 +121,9 @@
         root (br/open e tokens)]
     (try
       (let [ref (br/logprobs root)
-            [whole cache] (qwen3/prefill m [tokens] {:logits :last})
-            [_ half] (qwen3/prefill m [(subvec tokens 0 (quot n 2))])
-            [chunk] (qwen3/step m half [(subvec tokens (quot n 2))] {:logits :last})]
+            [whole cache] (prefill m [tokens] {:logits :last})
+            [_ half] (prefill m [(subvec tokens 0 (quot n 2))])
+            [chunk] (step m half [(subvec tokens (quot n 2))] {:logits :last})]
         (loop [i 1 b (br/fork root) c cache
                out [(assoc (verdict ref (logprobs whole) tie) :what :whole)
                     (assoc (verdict ref (logprobs chunk) tie) :what :chunk)]]
@@ -91,13 +131,14 @@
             (do (br/dispose! b) out)
             (let [t (first (top-tokens (br/logprobs b) 1))
                   [b'] (br/advance [b] [t])
-                  [lg c'] (qwen3/step m c [[t]])]
+                  [lg c'] (step m c [[t]])]
               (recur (inc i) b' c' (conj out (assoc (verdict (br/logprobs b') (logprobs lg) tie) :what [:step i])))))))
       (finally (br/dispose! root)))))
 
 (defn mutated
-  "The worst :max-diff of the forward under mutation (a key of mutations)
-   on the prompt's tokens: its :whole and :chunk readings, and one step."
+  "The worst :max-diff of the forward under mutation (a key of
+   (mutations-of m)) on the prompt's tokens: its :whole and :chunk
+   readings, and one step."
   [e m tokens mutation]
-  (with-redefs-fn (mutations mutation)
+  (with-redefs-fn ((mutations-of m) mutation)
     #(reduce max (map :max-diff (compare-prompt e m tokens 1 0)))))

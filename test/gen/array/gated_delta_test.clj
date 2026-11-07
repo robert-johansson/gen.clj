@@ -16,8 +16,9 @@
    identity: 1; of the chunk's cumulative decays: 2); the chunk's
    triangular inverse dropped, (I + A)⁻¹ as I (0.24), or to first order,
    I - A (0.021) (2); the chunk's attention strict, a token blind to its
-   own key (1.4) (2); and the gradient of one entry against another's
-   difference (3).
+   own key (1.4) (2); the gradient of one entry against another's
+   difference (3); and on Metal the kernel's query and key swapped (5),
+   which shows :auto ran it.
    The bands: on the JVM backend 1e-12 (float64's round-off, measured
    ≤ 2.3e-15); on MLX float32's (below)."
   (:require [clojure.test :refer [deftest is testing]]
@@ -51,8 +52,10 @@
   "max |Δ| between two forms of the rule on the backend under test
    (values about 1): float64's round-off on the JVM backend, float32's
    on MLX (the chunked form's triangular inverse and the token loop sum
-   in different orders)."
-  (if (ts/jvm?) 1e-12 2e-4))
+   in different orders): five times the largest measured on Metal (Mac
+   mini M4, 2026-11-07), 2.1e-6 (the chunks against the loop; the kernel
+   against the loop 2.4e-7)."
+  (if (ts/jvm?) 1e-12 1e-5))
 
 ;; ---------------------------------------------------------------------------
 ;; 1. The definition, on the host
@@ -183,13 +186,25 @@
 ;; 5. MLX's Metal kernel
 ;; ---------------------------------------------------------------------------
 
+(defn- kernel-gap
+  "max |Δ| between :auto (on Metal the kernel) and the token loop over
+   shapes the kernel takes."
+  []
+  (reduce max (for [[t dk dv] [[1 32 32] [7 64 32] [100 128 128]]
+                    :let [operands (vec (inputs 2 t 4 dk dv t))
+                          run #(apply array/gated-delta (conj operands {:method %}))]]
+                (gap (run :auto) (run :loop)))))
+
 (deftest the-fused-kernel-is-the-composite
   (if (ts/jvm?)
     (println "gen.array.gated-delta-test: the fused kernel is checked on MLX")
-    (doseq [[t dk dv] [[1 32 32] [7 64 32] [100 128 128]]]
-      (let [operands (vec (inputs 2 t 4 dk dv t))
-            run #(apply array/gated-delta (conj operands {:method %}))]
-        (is (<= (gap (run :auto) (run :loop)) band) (str "T " t ", Dk " dk ", Dv " dv))))))
+    (do (is (<= (kernel-gap) band))
+        (when (and (= :gpu ((requiring-resolve 'gen.backend.mlx/device) array/*backend*))
+                   (.contains (.toLowerCase (System/getProperty "os.name")) "mac"))
+          (testing "a planted bug fails it (so :auto ran the kernel): its query and key swapped"
+            (let [kernel-var (requiring-resolve 'gen.backend.mlx.gated-delta/gated-delta)
+                  kernel @kernel-var]
+              (is (< 0.01 (with-redefs-fn {kernel-var (fn [b q k v g beta s] (kernel b k q v g beta s))} kernel-gap)))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; 6. Loud errors

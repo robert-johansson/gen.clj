@@ -30,7 +30,19 @@
    (gen.llm.models.qwen35-llama-test).
    The bands: on the JVM backend 0 for 1, 2 and 4 (the same ops in the
    same order), and 1e-12 for a read in chunks against the token loop
-   (float64's round-off); on MLX float32's (below)."
+   (float64's round-off: measured ≤ 1.1e-13). On MLX, 2e-4 in a logit
+   (|logit| <= 5 here) for 1, 2, 4 and 5: four times the largest
+   difference measured (Mac mini M4, 2026-11-07, Metal, the kernel
+   computing the rule), 5.0e-5 (a batch against each row alone, Q8_0;
+   MLX against the JVM's float64 4.0e-5 over 4 contexts); float32's
+   round-off through 4 blocks. A long read's, 5e-4: 4.5 times the 1.1e-4
+   measured between 80 tokens in chunks and token by token, float32's
+   round-off over 80 updates of the recurrent states.
+   The planted bugs' margins (JVM, F32): positions shifted 0.24, the KV
+   cache dropped 1.2, the recurrent state dropped 3.8, the conv state's
+   oldest inputs 5.5, not causal 0.32 (1); a long read's triangular
+   inverse dropped 2.8 (1); the norm across rows 5.1 (2); gradients'
+   relative errors measured ≤ 1.7e-8 (3)."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
             [gen.array.nn]
@@ -63,13 +75,15 @@
 (def ^:private band
   "The largest |Δ logit| two computations of one distribution differ by
    on the backend under test: exactly none on the JVM backend (float64,
-   the same ops in the same order), float32's round-off on MLX."
-  (if (ts/jvm?) 0.0 4e-5))
+   the same ops in the same order), float32's round-off on MLX (the
+   namespace's docstring)."
+  (if (ts/jvm?) 0.0 2e-4))
 
 (def ^:private chunk-band
-  "… between a read in chunks (the gated delta rule's chunked form) and
-   the token loop: float64's round-off on the JVM backend."
-  (if (ts/jvm?) 1e-12 4e-5))
+  "… between a long read (80 tokens: the gated delta rule in chunks, or
+   MLX's kernel) and the token loop: float64's round-off on the JVM
+   backend, float32's on MLX."
+  (if (ts/jvm?) 1e-12 5e-4))
 
 (defn- cache-gap
   "max |Δ logit| between the full forward of ctx and its cached reading:
@@ -82,22 +96,25 @@
         [s8 _] (qwen35/step m c8 [[(ctx 8)]])]
     (max (max-diff (array/slice full 1 4 7) chunk) (max-diff (row full 7) s7) (max-diff (row full 8) s8))))
 
-(defn- token-loop
-  "(f) with gen.array/gated-delta token by token whatever the length."
-  [f]
+(defn- with-method
+  "(f) with gen.array/gated-delta computed by method (:loop or :chunked)
+   whatever the length: its composite, never a backend's kernel."
+  [method f]
   (let [gd array/gated-delta]
-    (with-redefs-fn {#'array/gated-delta (fn [q k v g beta s & _] (gd q k v g beta s {:method :loop}))} f)))
+    (with-redefs-fn {#'array/gated-delta (fn [q k v g beta s & _] (gd q k v g beta s {:method method}))} f)))
 
 (defn- long-gap
-  "max |Δ logit| between the long context read whole (80 tokens: in chunks
-   of 64) and token by token, and between a prefill of 70 (in chunks) and
-   10 steps after it and the token loop's whole read."
+  "max |Δ logit| between readings of the long context (80 tokens) and its
+   reading token by token (the rule's :loop): read whole in chunks of 64
+   (:chunked), read whole as the backend reads it (:auto: in chunks, or
+   by MLX's kernel), and as a prefill of 70 and 10 steps after it."
   [m]
-  (let [chunked (qwen35/forward m [long-ctx])
-        looped (token-loop #(qwen35/forward m [long-ctx]))
+  (let [looped (with-method :loop #(qwen35/forward m [long-ctx]))
+        chunked (with-method :chunked #(qwen35/forward m [long-ctx]))
         [_ c] (qwen35/prefill m [(subvec long-ctx 0 70)])
         [steps] (qwen35/step m c [(subvec long-ctx 70 80)])]
-    (max (max-diff chunked looped) (max-diff (array/slice looped 1 70 80) steps))))
+    (max (max-diff chunked looped) (max-diff (qwen35/forward m [long-ctx]) looped)
+         (max-diff (array/slice looped 1 70 80) steps))))
 
 (defn- batch-gap
   "max |Δ logit| between a batch of ctx and other and each read alone."

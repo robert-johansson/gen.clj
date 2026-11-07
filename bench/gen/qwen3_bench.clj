@@ -1,10 +1,11 @@
 (ns gen.qwen3-bench
   "Qwen3's forward over gen.array (gen.llm.models.qwen3) on MLX, eager and
    compiled, against llama.cpp on the same GGUF (genclj-tjvd; the CUDA
-   checkpoint's run 2, genclj-ssiv). The same command runs on Metal and on
-   MLX's CUDA build:
+   checkpoint's run 2, genclj-ssiv); and Qwen3.5's or Qwen3.6's
+   (gen.llm.models.qwen35) for a GGUF of that architecture (genclj-xnx3).
+   The same command runs on Metal and on MLX's CUDA build:
 
-     clojure -J-Dgen.backend=mlx -J-Dgen.llama.lib=<lib> -M:bench -m gen.qwen3-bench <Qwen3 GGUF>
+     clojure -J-Dgen.backend=mlx -J-Dgen.llama.lib=<lib> -M:bench -m gen.qwen3-bench <Qwen3 or Qwen3.5 GGUF>
 
    One GPU JVM at a time. Without llama.cpp's libraries the llama.cpp rows
    are skipped with a note. Every row is the median of gen.bench.runs runs
@@ -46,7 +47,9 @@
    gen.bench.dtype=float16 computes in float16 instead."
   (:require [clojure.string :as str]
             [gen.array :as array]
-            [gen.llm.models.qwen3 :as qwen3])
+            [gen.array.gguf :as gguf]
+            [gen.llm.models.qwen3 :as qwen3]
+            [gen.llm.models.qwen35 :as qwen35])
   (:import [java.lang.foreign Arena FunctionDescriptor Linker Linker$Option MemoryLayout MemorySegment ValueLayout]
            [java.lang.invoke MethodHandle]))
 
@@ -97,6 +100,23 @@
   (println "|---|---:|---:|"))
 
 ;; ---------------------------------------------------------------------------
+;; The model's family
+;; ---------------------------------------------------------------------------
+
+(defn- qwen35? [m] (contains? #{"qwen35" "qwen35moe"} (get-in m [:config :arch])))
+
+(defn- prefill [m & args] (apply (if (qwen35? m) qwen35/prefill qwen3/prefill) m args))
+(defn- step [m & args] (apply (if (qwen35? m) qwen35/step qwen3/step) m args))
+(defn- compile-step [m opts] ((if (qwen35? m) qwen35/compile-step qwen3/compile-step) m opts))
+(defn- static-cache [m rows capacity] ((if (qwen35? m) qwen35/static-cache qwen3/static-cache) m rows capacity))
+(defn- select-rows [m cache idx] ((if (qwen35? m) qwen35/select-rows qwen3/select-rows) cache idx))
+
+(defn- load-model [path opts]
+  (if (#{"qwen35" "qwen35moe"} (get-in (gguf/header path) [:metadata "general.architecture"]))
+    (qwen35/load path opts)
+    (qwen3/load path opts)))
+
+;; ---------------------------------------------------------------------------
 ;; The prompt and the caches
 ;; ---------------------------------------------------------------------------
 
@@ -109,7 +129,7 @@
   "A concatenating cache's row 0 as rows rows."
   [{:keys [offset layers]} rows]
   (let [idx (array/zeros [rows] {:dtype :int32})]
-    {:offset offset :layers (mapv (fn [{:keys [k v]}] {:k (array/take k idx 0) :v (array/take v idx 0)}) layers)}))
+    {:offset offset :layers (mapv (fn [entry] (update-vals entry #(array/take % idx 0))) layers)}))
 
 (defn- greedy
   "steps tokens decoded from cache by (step cache tokens) → [logits cache'],
@@ -205,10 +225,10 @@
 (defn- prefill-section [m e]
   (let [{:keys [prompt chunk]} settings
         tokens (prompt-tokens prompt)
-        f (qwen3/compile-step m {:logits :last})
-        static #(qwen3/static-cache m 1 prompt)]
+        f (compile-step m {:logits :last})
+        static #(static-cache m 1 prompt)]
     (table (format "### Prefill: %d tokens, batch 1" prompt))
-    (row "MLX eager (concatenating cache)" (median-ms (constantly nil) (fn [_] (array/eval! (qwen3/prefill m [tokens] {:logits :last})))) prompt)
+    (row "MLX eager (concatenating cache)" (median-ms (constantly nil) (fn [_] (array/eval! (prefill m [tokens] {:logits :last})))) prompt)
     (row "MLX compiled, static cache, one chunk" (median-ms static (fn [c] (array/eval! (f c [tokens])))) prompt)
     (row (format "MLX compiled, static cache, chunks of %d" chunk)
          (median-ms static (fn [c] (reduce (fn [c part] (let [[l c] (f c [(vec part)])] (array/eval! [l c]) c)) c (partition-all chunk tokens))))
@@ -219,13 +239,13 @@
 (defn- decode-section [m e]
   (let [{:keys [prompt steps capacity]} settings
         tokens (prompt-tokens prompt)
-        [_ concatenating] (qwen3/prefill m [tokens] {:logits :last})
-        [_ static] (qwen3/prefill m [tokens] {:logits :last :capacity capacity})
+        [_ concatenating] (prefill m [tokens] {:logits :last})
+        [_ static] (prefill m [tokens] {:logits :last :capacity capacity})
         _ (array/eval! [concatenating static])
-        fresh #(array/eval! (qwen3/select-rows static [0]))
-        copying (qwen3/compile-step m {:logits :last})
-        consuming (qwen3/compile-step m {:logits :last :donate? true})
-        eager #(qwen3/step m %1 %2 {:logits :last})]
+        fresh #(array/eval! (select-rows m static [0]))
+        copying (compile-step m {:logits :last})
+        consuming (compile-step m {:logits :last :donate? true})
+        eager #(step m %1 %2 {:logits :last})]
     (table (format "### Decode: %d tokens after %d, batch 1, greedy (static capacity %d)" steps prompt capacity))
     (row "MLX eager (concatenating cache)" (median-ms (constantly concatenating) #(greedy eager % 1 steps)) steps)
     (row "MLX eager, static cache" (median-ms fresh #(greedy eager % 1 steps)) steps)
@@ -241,15 +261,15 @@
   (let [{:keys [batch-prompt batch-steps batches]} settings
         tokens (prompt-tokens batch-prompt)
         capacity (+ batch-prompt batch-steps)
-        [_ concatenating] (qwen3/prefill m [tokens] {:logits :last})
-        [_ static] (qwen3/prefill m [tokens] {:logits :last :capacity capacity})
-        copying (qwen3/compile-step m {:logits :last})
-        consuming (qwen3/compile-step m {:logits :last :donate? true})
-        eager #(qwen3/step m %1 %2 {:logits :last})]
+        [_ concatenating] (prefill m [tokens] {:logits :last})
+        [_ static] (prefill m [tokens] {:logits :last :capacity capacity})
+        copying (compile-step m {:logits :last})
+        consuming (compile-step m {:logits :last :donate? true})
+        eager #(step m %1 %2 {:logits :last})]
     (array/eval! [concatenating static])
     (doseq [n batches]
       (let [made (* (long n) batch-steps)
-            rows #(array/eval! (qwen3/select-rows static (repeat n 0)))]
+            rows #(array/eval! (select-rows m static (repeat n 0)))]
         (table (format "### Decode at batch %d: %d tokens a row after %d (static capacity %d)" n batch-steps batch-prompt capacity))
         (row "MLX eager (concatenating cache)"
              (median-ms #(array/eval! (tile-concatenating concatenating n)) #(greedy eager % n batch-steps)) made)
@@ -264,9 +284,9 @@
 (defn- kernels-section [m]
   (let [{:keys [prompt capacity]} settings
         tokens (prompt-tokens prompt)
-        [_ concatenating] (qwen3/prefill m [tokens] {:logits :last})
-        [_ static] (qwen3/prefill m [tokens] {:logits :last :capacity capacity})
-        compiled (qwen3/compile-step m {:logits :last})
+        [_ concatenating] (prefill m [tokens] {:logits :last})
+        [_ static] (prefill m [tokens] {:logits :last :capacity capacity})
+        compiled (compile-step m {:logits :last})
         _ (array/eval! [concatenating static (compiled static [[13]])])
         show (fn [label x]
                (let [{:keys [total kernels by]} (primitives x)]
@@ -275,22 +295,23 @@
     (println "\n### MLX's primitives in one decode step (batch 1)\n")
     (println (format "| %-34s | %6s | %6s |" "" "all" "kernels"))
     (println "|---|---:|---:|")
-    (show "eager (concatenating cache)" (qwen3/step m concatenating [[13]] {:logits :last}))
-    (show "eager, static cache" (qwen3/step m static [[13]] {:logits :last}))
+    (show "eager (concatenating cache)" (step m concatenating [[13]] {:logits :last}))
+    (show "eager, static cache" (step m static [[13]] {:logits :last}))
     (let [by (show "compiled, static cache" (compiled static [[13]]))]
       (println "\nThe compiled step's primitives:" (str/join ", " (for [[k n] by] (str k " " n)))))))
 
 (defn- donation-section [m]
   (let [{:keys [prompt capacity]} settings
-        [_ static] (qwen3/prefill m [(prompt-tokens prompt)] {:logits :last :capacity capacity})
+        [_ static] (prefill m [(prompt-tokens prompt)] {:logits :last :capacity capacity})
         check (fn [f]
-                (let [c (array/eval! (qwen3/select-rows static [0]))
-                      before (buffer-address (:k (first (:layers c))))
+                (let [c (array/eval! (select-rows m static [0]))
+                      keys-of #(:k (first (filter :k (:layers %))))
+                      before (buffer-address (keys-of c))
                       [_ c'] (f c [[13]])]
-                  (if (= before (buffer-address (:k (first (:layers c'))))) "in place" "copied")))]
-    (println (format "\n### Donation: a compiled step's cache buffer (layer 0's keys)\n\n- the cache held: %s\n- the cache consumed (:donate?): %s"
-                     (check (qwen3/compile-step m {:logits :last}))
-                     (check (qwen3/compile-step m {:logits :last :donate? true}))))))
+                  (if (= before (buffer-address (keys-of c'))) "in place" "copied")))]
+    (println (format "\n### Donation: a compiled step's cache buffer (the first attention layer's keys)\n\n- the cache held: %s\n- the cache consumed (:donate?): %s"
+                     (check (compile-step m {:logits :last}))
+                     (check (compile-step m {:logits :last :donate? true}))))))
 
 (defn- llama-bench [path]
   (when-let [bin (:llama-bench settings)]
@@ -314,12 +335,12 @@
 (defn -main [path & _]
   (when-not (= :mlx (array/backend-name array/*backend*))
     (throw (ex-info "Run on MLX: -J-Dgen.backend=mlx" {})))
-  (println "## Qwen3 on MLX, eager and compiled, against llama.cpp\n")
+  (println "## Qwen3 or Qwen3.5 on MLX, eager and compiled, against llama.cpp\n")
   (println "- model:" path)
   (println "-" (mlx-description))
   (println "- settings:" (pr-str (dissoc settings :sections)))
   (println "- os:" (System/getProperty "os.name") (System/getProperty "os.arch") "; java" (System/getProperty "java.version"))
-  (let [m (qwen3/load path {:dtype (:dtype settings)})
+  (let [m (load-model path {:dtype (:dtype settings)})
         sections (:sections settings)
         e (when (and (some sections [:prefill :decode :batch]) (llama-available?))
             ((llama-fn 'engine) {:model path :max-branches (inc (long (reduce max 1 (:batches settings))))

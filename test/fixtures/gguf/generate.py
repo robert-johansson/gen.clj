@@ -53,6 +53,21 @@ The files:
 - unsupported-q4_k.gguf and unsupported-bf16.gguf: a tensor of a type the
   loader refuses (Q4_K's bytes are random: only its type is read).
 
+With --with-vocabulary <a Qwen3.5 GGUF> <dir>, it writes instead, into
+dir, tiny random Qwen3.5 and Qwen3.5-MoE models with that GGUF's
+tokenizer (llama.cpp loads a model only with one), for
+gen.llm.models.qwen35-llama-test's check of the conventions a model of
+unequal key and value heads needs (Qwen3.5-0.8B has 16 of each): F32 and
+Q8_0, hidden 64, 3 GatedDeltaNet blocks of 2 key and 4 value heads of
+64 and a gated attention block of 4 query and 2 KV heads of 64 (RoPE on
+16, sections [3 3 2 0]); the MoE's 4 experts of 64, 2 used, and a shared
+one. About 76 MB (F32) and 28 MB (Q8_0) each, its embedding of the whole
+vocabulary: not committed. Their check runs with
+-J-Dgen.qwen35.vocab-models=<dir>:
+
+    ~/code/genmlx/.venv/bin/python -I test/fixtures/gguf/generate.py \
+        --with-vocabulary ~/gen-clj-models/Qwen3.5-0.8B-Q8_0.gguf target/qwen35-vocab-models
+
 Fixed seed: the same files each run (numpy's PCG64). gguf-py's metadata
 module imports yaml for model cards, which this script never reads; it
 is stubbed when yaml is not installed.
@@ -65,7 +80,13 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
-GGUF_PY = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "native/build/src/llama.cpp/gguf-py")
+ARGS = sys.argv[1:]
+VOCABULARY = None
+if "--with-vocabulary" in ARGS:
+    i = ARGS.index("--with-vocabulary")
+    VOCABULARY = ARGS[i + 1:i + 3]
+    ARGS = ARGS[:i] + ARGS[i + 3:]
+GGUF_PY = ARGS[0] if ARGS else os.path.join(ROOT, "native/build/src/llama.cpp/gguf-py")
 
 try:
     import yaml  # noqa: F401
@@ -128,11 +149,23 @@ Q35_VOCAB, Q35_HIDDEN, Q35_BLOCKS, Q35_FFN = 128, 32, 4, 64
 Q35_HEADS, Q35_KV_HEADS, Q35_HEAD_DIM, Q35_ROPE_DIMS = 4, 2, 16, 8
 Q35_K_HEADS, Q35_V_HEADS, Q35_STATE, Q35_CONV = 2, 4, 32, 4
 Q35_EXPERTS, Q35_USED, Q35_EXPERT_FFN, Q35_SHARED_FFN = 4, 2, 32, 32
+Q35_SIZES = {"VOCAB": Q35_VOCAB, "HIDDEN": Q35_HIDDEN, "BLOCKS": Q35_BLOCKS, "FFN": Q35_FFN, "HEADS": Q35_HEADS,
+             "KV_HEADS": Q35_KV_HEADS, "HEAD_DIM": Q35_HEAD_DIM, "ROPE_DIMS": Q35_ROPE_DIMS, "SECTIONS": [2, 1, 1, 0],
+             "K_HEADS": Q35_K_HEADS, "V_HEADS": Q35_V_HEADS, "STATE": Q35_STATE, "CONV": Q35_CONV, "EXPERTS": Q35_EXPERTS,
+             "USED": Q35_USED, "EXPERT_FFN": Q35_EXPERT_FFN, "SHARED_FFN": Q35_SHARED_FFN, "ROPE_BASE": ROPE_BASE,
+             "CONTEXT": CONTEXT}
 
 
-def qwen35_weights(rng, moe):
+def qwen35_weights(rng, moe, sizes=None):
     """[(name, array, quantizable?)] of the tiny Qwen3.5 (moe: Qwen3.5-MoE,
-    without the MTP block), in llama.cpp's names, shapes [n_out, n_in]."""
+    without the MTP block), in llama.cpp's names, shapes [n_out, n_in];
+    sizes (a dict) overrides the Q35_ constants, by their names' rest
+    (and writes no MTP block)."""
+    z = dict(Q35_SIZES, **(sizes or {}))
+    Q35_VOCAB, Q35_HIDDEN, Q35_BLOCKS, Q35_FFN = z["VOCAB"], z["HIDDEN"], z["BLOCKS"], z["FFN"]
+    Q35_HEADS, Q35_KV_HEADS, Q35_HEAD_DIM = z["HEADS"], z["KV_HEADS"], z["HEAD_DIM"]
+    Q35_K_HEADS, Q35_V_HEADS, Q35_STATE, Q35_CONV = z["K_HEADS"], z["V_HEADS"], z["STATE"], z["CONV"]
+    Q35_EXPERTS, Q35_EXPERT_FFN, Q35_SHARED_FFN = z["EXPERTS"], z["EXPERT_FFN"], z["SHARED_FFN"]
     def matrix(*shape, sd=None):
         return rng.normal(0.0, sd if sd is not None else 1.0 / np.sqrt(shape[-1]), size=shape)
 
@@ -183,7 +216,7 @@ def qwen35_weights(rng, moe):
                     (p + "ssm_norm.weight", norm(Q35_STATE), False),
                     (p + "ssm_out.weight", matrix(Q35_HIDDEN, value_dim), True)]
         out += ffn(p)
-    if not moe:
+    if not moe and not sizes:
         # the MTP block: a gated attention block and its NextN tensors
         p = "blk.%d." % Q35_BLOCKS
         out += [(p + "attn_norm.weight", norm(Q35_HIDDEN), False),
@@ -196,41 +229,48 @@ def qwen35_weights(rng, moe):
     return out
 
 
-def qwen35_metadata(w, file_type, moe):
+def qwen35_metadata(w, file_type, moe, sizes=None, mtp=True):
+    z = dict(Q35_SIZES, **(sizes or {}))
     w.add_type(gguf.GGUFType.MODEL)
     w.add_name("gen.clj test model: a tiny random Qwen3.5" + ("-MoE" if moe else ""))
     w.add_file_type(file_type)
-    w.add_context_length(CONTEXT)
-    w.add_embedding_length(Q35_HIDDEN)
-    w.add_block_count(Q35_BLOCKS + (0 if moe else 1))
-    if not moe:
+    w.add_context_length(z["CONTEXT"])
+    w.add_embedding_length(z["HIDDEN"])
+    w.add_block_count(z["BLOCKS"] + (1 if mtp else 0))
+    if mtp:
         w.add_nextn_predict_layers(1)
-    w.add_feed_forward_length(Q35_FFN)
-    w.add_head_count(Q35_HEADS)
-    w.add_head_count_kv(Q35_KV_HEADS)
-    w.add_key_length(Q35_HEAD_DIM)
-    w.add_value_length(Q35_HEAD_DIM)
-    w.add_rope_freq_base(ROPE_BASE)
-    w.add_rope_dimension_count(Q35_ROPE_DIMS)
-    w.add_rope_dimension_sections([2, 1, 1, 0])
+    w.add_feed_forward_length(z["FFN"])
+    w.add_head_count(z["HEADS"])
+    w.add_head_count_kv(z["KV_HEADS"])
+    w.add_key_length(z["HEAD_DIM"])
+    w.add_value_length(z["HEAD_DIM"])
+    w.add_rope_freq_base(z["ROPE_BASE"])
+    w.add_rope_dimension_count(z["ROPE_DIMS"])
+    w.add_rope_dimension_sections(z["SECTIONS"])
     w.add_layer_norm_rms_eps(EPS)
     w.add_full_attention_interval(4)
-    w.add_ssm_conv_kernel(Q35_CONV)
-    w.add_ssm_state_size(Q35_STATE)
-    w.add_ssm_group_count(Q35_K_HEADS)
-    w.add_ssm_time_step_rank(Q35_V_HEADS)
-    w.add_ssm_inner_size(Q35_V_HEADS * Q35_STATE)
+    w.add_ssm_conv_kernel(z["CONV"])
+    w.add_ssm_state_size(z["STATE"])
+    w.add_ssm_group_count(z["K_HEADS"])
+    w.add_ssm_time_step_rank(z["V_HEADS"])
+    w.add_ssm_inner_size(z["V_HEADS"] * z["STATE"])
     if moe:
-        w.add_expert_count(Q35_EXPERTS)
-        w.add_expert_used_count(Q35_USED)
-        w.add_expert_feed_forward_length(Q35_EXPERT_FFN)
-        w.add_expert_shared_feed_forward_length(Q35_SHARED_FFN)
+        w.add_expert_count(z["EXPERTS"])
+        w.add_expert_used_count(z["USED"])
+        w.add_expert_feed_forward_length(z["EXPERT_FFN"])
+        w.add_expert_shared_feed_forward_length(z["SHARED_FFN"])
 
 
-def write_qwen35(name, weights, quantized, moe):
-    path = os.path.join(HERE, name)
+def write_qwen35(name, weights, quantized, moe, sizes=None, out_dir=HERE, extra_kv=()):
+    path = os.path.join(out_dir, name)
     w = gguf.GGUFWriter(path, "qwen35moe" if moe else "qwen35")
-    qwen35_metadata(w, gguf.LlamaFileType.MOSTLY_Q8_0 if quantized else gguf.LlamaFileType.ALL_F32, moe)
+    qwen35_metadata(w, gguf.LlamaFileType.MOSTLY_Q8_0 if quantized else gguf.LlamaFileType.ALL_F32, moe, sizes,
+                    mtp=not moe and not sizes)
+    for key, value, vtype, sub in extra_kv:
+        if sub is None:
+            w.add_key_value(key, value, vtype)
+        else:
+            w.add_key_value(key, value, vtype, sub)
     for tname, arr, quantizable in weights:
         arr = np.ascontiguousarray(arr, dtype=np.float32)
         if quantized and quantizable:
@@ -342,7 +382,31 @@ def write_unsupported(rng):
         finish(w, [path])
 
 
+def write_with_vocabulary(source, out_dir):
+    """Tiny random Qwen3.5 and Qwen3.5-MoE models with the tokenizer of the
+    GGUF source (its tokenizer.* keys but the chat template), into out_dir:
+    for checks against llama.cpp (the module's docstring)."""
+    V = gguf.GGUFValueType
+    r = gguf.GGUFReader(source)
+    kv = []
+    for f in r.fields.values():
+        if f.name.startswith("tokenizer.") and f.name != "tokenizer.chat_template":
+            vtype = V(f.types[0])
+            kv.append((f.name, f.contents(), vtype, V(f.types[-1]) if vtype == V.ARRAY else None))
+    sizes = {"VOCAB": len(r.fields["tokenizer.ggml.tokens"].data), "HIDDEN": 64, "FFN": 128, "HEAD_DIM": 64,
+             "ROPE_DIMS": 16, "SECTIONS": [3, 3, 2, 0], "STATE": 64, "EXPERT_FFN": 64, "SHARED_FFN": 64,
+             "ROPE_BASE": 1.0e7, "CONTEXT": 4096}
+    os.makedirs(out_dir, exist_ok=True)
+    for moe, stem in [(False, "qwen35"), (True, "qwen35moe")]:
+        weights = qwen35_weights(np.random.default_rng(1108 + moe), moe, sizes)
+        for quantized, kind in [(False, "f32"), (True, "q8_0")]:
+            write_qwen35("%s-vocab-%s.gguf" % (stem, kind), weights, quantized, moe, sizes, out_dir, kv)
+
+
 def main():
+    if VOCABULARY:
+        write_with_vocabulary(*VOCABULARY)
+        return
     rng = np.random.default_rng(20261107)
     weights = tiny_weights(rng)
     write_model("qwen3-tiny-f32.gguf", weights, False)

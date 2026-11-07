@@ -1,7 +1,8 @@
 (ns gen.llm.array-engine
   "A Branching engine (gen.llm.branching) over gen.array: a model's forward
-   passes (gen.llm.models.qwen3) on any backend, MLX's Metal and CPU or
-   the JVM's for tiny models, as gen.llm.slots's Slots
+   passes (gen.llm.models.qwen3, or gen.llm.models.qwen35 for Qwen3.5 and
+   Qwen3.6, dense or MoE) on any backend, MLX's Metal and CPU or the JVM's
+   for tiny models, as gen.llm.slots's Slots
    (docs/research/llm-mlx-engine.md §3, P3 of §6).
 
      (with-open [v (llama/vocabulary \"Qwen3-0.6B-Q8_0.gguf\")
@@ -15,9 +16,12 @@
    of the same GGUF, loaded alone (gen.llm.llama/vocabulary), or any
    tokenizer map of the model's vocabulary.
 
-   A branch's state is a row of a static KV cache (qwen3/static-cache), a
-   value: a slot holds a group, a static cache of one or more rows, and
-   its row there.
+   A branch's state is a row of a static cache (the family's
+   static-cache: qwen3's KV cache, or qwen35's, whose GatedDeltaNet
+   layers hold a recurrent state a row), a value: a slot holds a group, a
+   static cache of one or more rows, and its row there. The family is the
+   GGUF's architecture (qwen3, qwen35, qwen35moe), or a loaded model's
+   (its config's :arch, qwen3 without one).
    - A copy shares the group (a fork is free), and a clear drops the
      slot's hold on it; a group no slot holds is garbage, freed by the GC
      (the backend's arrays, by their phantom references).
@@ -27,15 +31,15 @@
      alone. With targets, each one's score is read on the device: the
      log-softmax at its position, in the model's dtype, taken at the
      target.
-   - A step is one decode of the slots' rows, by qwen3's compiled step
+   - A step is one decode of the slots' rows, by the family's compiled step
      over static caches, consuming its cache (compile-step's :donate?): a
      group whose rows are exactly the step's slots, held by them alone (a
      lane group: lockstep particles), is stepped in place, its rows in
      its own order; any other step stacks its rows into a new cache first
-     (qwen3/select-rows of each group, concat-rows), one copy, and steps
+     (select-rows of each group, concat-rows), one copy, and steps
      that. The stepped rows form a new group.
    - Capacity grows by blocks (:block positions, at most :n-ctx), with
-     zeros (qwen3/grow): a compiled step traces once per batch size and
+     zeros (grow): a compiled step traces once per batch size and
      capacity.
    - Logits stay on the device until the step's or run's end, where one
      evaluation reads them (array/->floats): each row is normalized on the
@@ -56,8 +60,8 @@
    :n-ctx), which bound nothing here: give it :max-cells for the
    contexts it should hold. What the LM keeps costs this engine memory,
    each step's group a copy of its rows (2 × layers × KV-heads ×
-   head-dim floats a position of their capacity), so keep its
-   :max-branches to what a run needs.
+   head-dim floats a position of their capacity, and a Qwen3.5's
+   recurrent states), so keep its :max-branches to what a run needs.
 
    Results depend on batch shapes and capacities as llama.cpp's do (float
    round-off: MLX's kernels differ by shape); the same read from the same
@@ -72,7 +76,9 @@
   (:require [clojure.core :as c]
             [gen.array :as array :refer [-]]
             [gen.llm.host :as host]
+            [gen.array.gguf :as gguf]
             [gen.llm.models.qwen3 :as qwen3]
+            [gen.llm.models.qwen35 :as qwen35]
             [gen.llm.slots :as slots])
   (:import [java.util.concurrent ExecutorService]))
 
@@ -120,13 +126,48 @@
     (host/in-order pool #(normalized xs % n what) (vec (range b)))))
 
 ;; ---------------------------------------------------------------------------
+;; The model families
+;; ---------------------------------------------------------------------------
+
+(def ^:private families
+  "The functions of each model family the engine runs (their vars), by a
+   GGUF's architecture."
+  (let [qwen3 {:load #'qwen3/load :static-cache #'qwen3/static-cache :step #'qwen3/step :compile-step #'qwen3/compile-step
+               :offsets #'qwen3/offsets :select-rows #'qwen3/select-rows :concat-rows #'qwen3/concat-rows :grow #'qwen3/grow}
+        qwen35 {:load #'qwen35/load :static-cache #'qwen35/static-cache :step #'qwen35/step :compile-step #'qwen35/compile-step
+                :offsets #'qwen35/offsets :select-rows #'qwen35/select-rows :concat-rows #'qwen35/concat-rows :grow #'qwen35/grow}]
+    {"qwen3" qwen3 "qwen35" qwen35 "qwen35moe" qwen35}))
+
+(defn- family
+  "The family of the architecture arch (a string), loud for another."
+  [arch]
+  (or (families arch)
+      (throw (ex-info (str "array-engine/engine: no forward for the architecture " (pr-str arch)
+                           "; it runs " (vec (sort (keys families))))
+                      {:reason :unsupported :architecture arch}))))
+
+(defn- arch-of
+  "The architecture of model: a GGUF file's (its header), or a loaded
+   model's config's :arch (qwen3's has none)."
+  [model]
+  (if (string? model)
+    (get-in (gguf/header model) [:metadata "general.architecture"])
+    (get-in model [:config :arch] "qwen3")))
+
+;; ---------------------------------------------------------------------------
 ;; The books: a slot's {:group g :row r}, a group {:id :cache}
 ;; ---------------------------------------------------------------------------
 
 ;; state, a volatile written on the engine's thread:
-;;   :table  a vector, by slot, of nil (empty) or {:group {:id :cache} :row r}
-;;   :next   the next group's id
-;;   :stats  {:runs :steps :lane-steps :stacked-steps :stacked-rows :grows}
+;;   :table   a vector, by slot, of nil (empty) or {:group {:id :cache} :row r}
+;;   :next    the next group's id
+;;   :stats   {:runs :steps :lane-steps :stacked-steps :stacked-rows :grows}
+;;   :family  the model family's functions (families), set once
+
+(defn- call
+  "The model family's function f (a key of families) on args."
+  [state f & args]
+  (apply (get-in @state [:family f]) args))
 
 (defn- entry [state slot] (nth (:table @state) slot))
 
@@ -150,7 +191,7 @@
   "The positions slot's row holds."
   ^long [state slot]
   (if-let [{:keys [group row]} (entry state slot)]
-    (long (nth (qwen3/offsets (:cache group)) row))
+    (long (nth (call state :offsets (:cache group)) row))
     0))
 
 (defn- check-position
@@ -194,9 +235,9 @@
   [state slot]
   (let [{:keys [group row]} (entry state slot)
         cache (:cache group)]
-    (if (and (c/== 1 (count (qwen3/offsets cache))) (= #{slot} (holders state (:id group))))
+    (if (and (c/== 1 (count (call state :offsets cache))) (= #{slot} (holders state (:id group))))
       cache
-      (qwen3/select-rows cache [row]))))
+      (call state :select-rows cache [row]))))
 
 (defn- run-scores
   "The log-probabilities of targets (a vector of s tokens) at the first s
@@ -218,16 +259,16 @@
         k (count targets)
         cap (capacity-for (c/+ pos n) block n-ctx)
         start (if (zero? pos)
-                (qwen3/static-cache model 1 cap)
+                (call state :static-cache model 1 cap)
                 (let [c (row-cache state slot)]
                   (when (c/< (long (:capacity c)) cap) (tally! state :grows 1))
-                  (qwen3/grow c (max cap (long (:capacity c))))))
+                  (call state :grow c (max cap (long (:capacity c))))))
         step-size (long n-batch)]
     (loop [from 0 cache start scores []]
       (let [end (min n (c/+ from step-size))
             last? (c/== end n)
             scored (max 0 (c/- (min end k) from))
-            [logits cache] (qwen3/step model cache [(subvec tokens from end)] {:logits (if (pos? scored) :all :last)})
+            [logits cache] (call state :step model cache [(subvec tokens from end)] {:logits (if (pos? scored) :all :last)})
             s (when (pos? scored) (run-scores logits (subvec targets from (c/+ from scored))))
             row (when last? (array/slice logits 1 (dec (long (second (array/shape logits)))) nil))]
         (array/eval! [s row cache])
@@ -258,12 +299,12 @@
               (let [is (filterv #(c/== (long id) (long (:id (:group (es %))))) (range (count slots)))
                     {:keys [cache]} (:group (es (first is)))
                     rows (mapv #(:row (es %)) is)
-                    n (count (qwen3/offsets cache))]
+                    n (count (call state :offsets cache))]
                 (if (and (c/== n (count is)) (apply distinct? rows) (lane? state id (map slots is)))
                   ;; the group itself: its rows in its order
                   (let [by-row (zipmap rows is)]
                     [(conj parts {:cache cache :lane? true}) (into order (map by-row) (range n))])
-                  [(conj parts {:cache (qwen3/select-rows cache rows) :lane? false}) (into order is)])))
+                  [(conj parts {:cache (call state :select-rows cache rows) :lane? false}) (into order is)])))
             [[] []] ids)))
 
 (defn- decode-step
@@ -277,9 +318,9 @@
         cap (long (reduce max need (map #(long (:capacity (:cache %))) parts)))
         grown (mapv (fn [{:keys [cache]}]
                       (when (c/< (long (:capacity cache)) cap) (tally! state :grows 1))
-                      (qwen3/grow cache cap))
+                      (call state :grow cache cap))
                     parts)
-        cache (if (c/== 1 (count grown)) (first grown) (qwen3/concat-rows grown))
+        cache (if (c/== 1 (count grown)) (first grown) (call state :concat-rows grown))
         ;; a lane group not grown is the step's cache itself, which the
         ;; step consumes (donates)
         consumed (when (and lane (identical? cache (:cache (first parts)))) lane)
@@ -355,7 +396,7 @@
     (doseq [[k ok?] option-checks
             :when (and (or (= k :model) (contains? opts k)) (not (ok? (get opts k))))]
       (throw (if (= k :model)
-               (ex-info (str "array-engine/engine: :model is a GGUF file or a model (qwen3/load's), not " (pr-str model))
+               (ex-info (str "array-engine/engine: :model is a GGUF file or a model (qwen3/load's, qwen35/load's), not " (pr-str model))
                         {:reason :no-model :model (if (string? model) model (type model))})
                (ex-info (str "array-engine/engine: bad " k ": " (pr-str (get opts k))) {:reason :invalid-option k (get opts k)}))))
     (when (and (map? model) (contains? opts :dtype))
@@ -373,11 +414,12 @@
    model loaded (a path), its step compiled."
   [{:keys [model dtype max-branches n-ctx n-batch block]} b]
   (array/with-backend b
-    (let [m (if (string? model) (qwen3/load model (when dtype {:dtype dtype})) model)
+    (let [fam (family (arch-of model))
+          m (if (string? model) ((:load fam) model (when dtype {:dtype dtype})) model)
           b (model-backend m)
           {:keys [vocab context] :as cfg} (:config m)
           n-ctx (long (if context (min (long n-ctx) (long context)) n-ctx))
-          step-fn (array/with-backend b (qwen3/compile-step m {:logits :last :donate? true}))
+          step-fn (array/with-backend b ((:compile-step fam) m {:logits :last :donate? true}))
           n-slots (inc (long max-branches))
           info {:engine :gen.array
                 :backend (array/backend-name b)
@@ -386,9 +428,10 @@
                 :n-ctx n-ctx
                 :n-batch n-batch
                 :block block
-                :model (merge {:path (when (string? model) model)} (select-keys cfg [:layers :hidden :heads :kv-heads :head-dim :dtype :context]))}]
+                :model (merge {:path (when (string? model) model) :arch (arch-of model)}
+                              (select-keys cfg [:layers :hidden :heads :kv-heads :head-dim :dtype :context]))}]
       (ArraySlots. m b step-fn (host/pool "gen.llm array rows-" (host/default-threads)) info
-                   (volatile! {:table (vec (repeat n-slots nil)) :next 0
+                   (volatile! {:table (vec (repeat n-slots nil)) :next 0 :family fam
                                :stats {:runs 0 :steps 0 :lane-steps 0 :stacked-steps 0 :stacked-rows 0 :grows 0}})
                    (long n-batch) (long block) n-ctx))))
 
@@ -397,15 +440,18 @@
    its model when it loaded one), on a thread of its own, its model on
    gen.array's *backend* (as it is when engine is called). opts (any other
    is an error):
-     :model         a Qwen3 GGUF file, which the engine loads
-                    (gen.llm.models.qwen3/load), or a model loaded already
-                    (required)
+     :model         a Qwen3, Qwen3.5 or Qwen3.6 GGUF file (architecture
+                    qwen3, qwen35 or qwen35moe), which the engine loads
+                    (gen.llm.models.qwen3/load, gen.llm.models.qwen35/load),
+                    or a model loaded already (required)
      :dtype         with a file: the float dtype it computes in (default
                     the backend's default float); its KV caches hold it too
      :max-branches  live branches at most (default 32): memory is the
                     bound, a branch's row costing 2 × layers × KV-heads ×
                     head-dim floats a position of its capacity (Qwen3-0.6B
-                    in float32: 112 KiB)
+                    in float32: 112 KiB; Qwen3.5-0.8B, whose attention
+                    layers are a quarter: 24 KiB, and 19 MiB of
+                    GatedDeltaNet states whatever the capacity)
      :n-ctx         the most tokens a branch holds (default 4096, at most
                     the model's context)
      :n-batch       tokens a forward of a read (default 256)

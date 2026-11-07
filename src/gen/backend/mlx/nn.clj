@@ -1,6 +1,7 @@
 (ns gen.backend.mlx.nn
   "The MLX backend's neural-network ops (gen.backend.mlx): MLX's fast
-   kernels for gen.array's composites rms-norm, rope and sdpa
+   kernels for gen.array's composites rms-norm, rope and sdpa, and
+   mlx-lm's Metal kernel for gated-delta (gen.backend.mlx.gated-delta)
    (p/IFused), and its quantized weights (p/IQuantized: mlx_quantize,
    mlx_dequantize, mlx_quantized_matmul, mlx_gather_qmm).
 
@@ -23,7 +24,8 @@
    clamped first, as take's."
   {:api :internal}
   (:require [gen.array.shape :as sh]
-            [gen.backend.mlx.array :refer [code fence stream wrap wrap-all]]
+            [gen.backend.mlx.array :refer [code device fence stream wrap wrap-all]]
+            [gen.backend.mlx.gated-delta :as gated-delta]
             [gen.backend.mlx.operands :refer [dtype-on operand scalar-handle shape-of with-operands with-temps]]
             [gen.backend.mlx.transforms :refer [*differentiating*]])
   (:import [gen.mlx Mlx MlxRuntime]))
@@ -87,6 +89,10 @@
                       (sdpa-handle hq hk hv scale mask hm s)))))
         (finally (fence arr))))))
 
+(def ^:private mac?
+  "Does this JVM run on macOS (MLX's GPU Metal there, CUDA elsewhere)?"
+  (delay (.contains (.toLowerCase (System/getProperty "os.name")) "mac")))
+
 (defn fused
   "p/-fused: op on args by MLX's fast kernel, or nil to decline."
   [b op args]
@@ -100,6 +106,11 @@
                             ;; mlx_fast_rope takes an int offset
                             (and (integer? offset) (not (<= Integer/MIN_VALUE (long offset) Integer/MAX_VALUE))))
                 (rope b x dims opts)))
+      :gated-delta (let [[q k v g beta state] args]
+                     ;; mlx-lm's Metal kernel: no VJP, so not under MLX's
+                     ;; gradients; Metal only (the GPU on macOS)
+                     (when (and (not *differentiating*) (= :gpu (device b)) @mac? (gated-delta/applies? b q))
+                       (gated-delta/gated-delta b q k v g beta state)))
       :sdpa (let [[q k v {:keys [mask] :as opts}] args]
               ;; a causal mask hides every key from the first Tq - Tk
               ;; queries, which MLX's fallback averages over; and under

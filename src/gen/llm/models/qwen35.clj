@@ -120,7 +120,7 @@
    position? Pair i's sector is i mod Σsections, and sector s reads the
    t, h or w position (each a text token's own) when s mod 3 is 0, 1 or
    2 and s < 3·(that section), else e's, 0 for text: no rotation."
-  [[t h w e :as sections] dims]
+  [[t h w :as sections] dims]
   (let [n (long (reduce c/+ 0 sections))]
     (and (c/== 4 (count sections)) (pos? n)
          (every? (fn [i]
@@ -129,8 +129,7 @@
                        0 (c/< s (c/* 3 (long t)))
                        1 (c/< s (c/* 3 (long h)))
                        2 (c/< s (c/* 3 (long w))))))
-                 (range (quot (long dims) 2)))
-         (some? e))))
+                 (range (quot (long dims) 2))))))
 
 (defn config
   "Qwen3.5's architecture from a GGUF's metadata (gen.array/load-gguf's
@@ -377,6 +376,14 @@
   (let [n (double (peek (array/shape x)))]
     (* (array/rms-norm x nil (c// (double eps) n)) (c// 1.0 (Math/sqrt n)))))
 
+(defn- key-heads-tiled
+  "y [B T key-heads D] repeated to value-heads heads, tiled: value head h
+   reads key head h mod key-heads (the order llama.cpp's converter gives
+   the value heads, ggml_repeat's)."
+  [y value-heads]
+  (let [hk (long (nth (array/shape y) 2))]
+    (if (c/== hk (long value-heads)) y (array/concatenate (vec (repeat (quot (long value-heads) hk) y)) 2))))
+
 (defn- delta-net
   "One GatedDeltaNet layer of the normed x [B T hidden] after its cache
    entry {:conv :state} (nil: zeros, the start): [its output, the entry
@@ -392,11 +399,8 @@
                                   1)
         mixed (common/silu (causal-conv padded (:conv w) t))
         heads (fn [from to n d] (array/reshape (array/slice mixed 2 from to) [b t n d]))
-        ;; the key heads repeated to the value heads, tiled: value head h
-        ;; reads key head h mod hk (the converter's order, ggml_repeat's)
-        tiled (fn [y] (if (c/== hk hv) y (array/concatenate (vec (repeat (quot hv hk) y)) 2)))
-        q (* (tiled (l2-norm (heads 0 width hk dk) eps)) (c// 1.0 (Math/sqrt dk)))
-        k (tiled (l2-norm (heads width (c/* 2 width) hk dk) eps))
+        q (* (key-heads-tiled (l2-norm (heads 0 width hk dk) eps) hv) (c// 1.0 (Math/sqrt dk)))
+        k (key-heads-tiled (l2-norm (heads width (c/* 2 width) hk dk) eps) hv)
         v (heads (c/* 2 width) channels hv dv)
         beta (array/sigmoid (common/linear x (:beta w)))
         g (* (array/softplus (+ (common/linear x (:alpha w)) (:dt-bias w))) (:a w))
@@ -408,6 +412,12 @@
     [(common/linear (array/reshape y [b t (c/* hv dv)]) (:out w))
      {:conv (conv-state padded t) :state state}]))
 
+(defn- query-and-gate
+  "[query gate] of attn_q's projection [B T heads 2 head-dim]: each head's
+   query, then its output gate."
+  [qg]
+  [(array/slice qg 3 0 1) (array/slice qg 3 1 2)])
+
 (defn- gated-qkv
   "[q k v gate] of the normed x [B T hidden]: q [B heads T head-dim] and
    k, v [B KV-heads T head-dim], q and k normed per head and rotated over
@@ -415,13 +425,13 @@
    array of one per row); the gate [B T heads·head-dim]."
   [{:keys [heads kv-heads head-dim rope-dims rope-base eps]} w x offset]
   (let [[b t] (array/shape x)
-        qg (array/reshape (common/linear x (:q w)) [b t heads 2 head-dim])
+        [q gate] (query-and-gate (array/reshape (common/linear x (:q w)) [b t heads 2 head-dim]))
         heads-of (fn [y n] (array/transpose (array/reshape y [b t n head-dim]) [0 2 1 3]))
         rotate (fn [y] (array/rope y rope-dims {:base rope-base :offset offset}))]
-    [(rotate (array/rms-norm (heads-of (array/slice qg 3 0 1) heads) (:q-norm w) eps))
+    [(rotate (array/rms-norm (heads-of q heads) (:q-norm w) eps))
      (rotate (array/rms-norm (heads-of (common/linear x (:k w)) kv-heads) (:k-norm w) eps))
      (heads-of (common/linear x (:v w)) kv-heads)
-     (array/reshape (array/slice qg 3 1 2) [b t (c/* (long heads) (long head-dim))])]))
+     (array/reshape gate [b t (c/* (long heads) (long head-dim))])]))
 
 (defn- attend
   "The attention of q over the keys k and values v under mask, gated by
@@ -572,7 +582,7 @@
    shared until a step writes). Its attention layers hold 2 × rows ×
    KV-heads × capacity × head-dim floats each, its GatedDeltaNet layers
    rows × (3 × channels + value-heads × value-dim × key-dim) whatever the
-   capacity: for Qwen3.5-0.8B in float32, 16 KiB a position and 19 MiB a
+   capacity: for Qwen3.5-0.8B in float32, 24 KiB a position and 19 MiB a
    row."
   [{:keys [config]} rows capacity]
   (common/check-cache-arg who rows capacity)
