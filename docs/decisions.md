@@ -5079,3 +5079,59 @@ latency:
 - the CUDA kernel;
 - two edge cases in the paged mode: score dropping :lost-slots, and a failed
   normalization leaving consumed pools in the engine's state.
+
+### GRPO: gen.llm.grpo over LoRA, family-agnostic
+
+(PROVISIONAL, owner to confirm; genclj-waym, 2026-11-08)
+
+**What was built.** gen.llm.grpo (experimental):
+- rollouts through the array engine, with each token's log-probability
+  recorded where it is drawn;
+- rewards, and group advantages;
+- the clipped surrogate, with a k3 KL term against the base model (the
+  adapter at scale 0, no copy);
+- four aggregations;
+- a round and a train loop on SFT's trainer, through a new :loss hook in
+  sft/step.
+
+**The losses.**
+- **grpo:** DeepSeekMath Eq. 3; defaults ε 0.2, β 0.04.
+- **dapo:** a token sum over all tokens, ε_high 0.28 (DAPO Eqs. 8 and 12).
+- **dr-grpo:** the sum over N·L with Â = r − mean (Dr. GRPO's code).
+- **bnpo:** TRL's per-microbatch token mean.
+
+**The real run on fenrir's CUDA.** Qwen3-0.6B Q8_0, LoRA rank 8 on the last 8
+blocks, two-digit multiplication with an exact reward, 40 rounds of 8 × 8
+in 5.5 minutes.
+- Step-0 ratios: max |ρ − 1| is 1e-4.
+- Held-out accuracy (128 prompts × 8, same keys): 0.615 → 0.771. The paired
+  difference is 0.155 ± 0.022 (z 7.0).
+- llama.cpp serving the adapter: argmax equal, greedy 0.781 against the
+  engine's 0.789.
+- The max |Δ log p| was 0.90 with the adapter, and 0.73 for the base model
+  alone, both over CUDA's 0.65 band on these digit-heavy prompts. The test
+  holds the adapter to 1.3 nats; the band is re-measured in genclj-fc6u.
+
+**The lead's calls, on the implementing agent's recommendations:**
+1. **Old log-probabilities** are recorded where each token is drawn (the
+   policy at the sampling temperature, before top-k/top-p), so step-0 ratios
+   are 1. Not taken: recomputing them with a training forward, which makes
+   the step-0 check vacuous.
+2. **:bnpo is TRL's aggregation.** The BNPO paper (arXiv 2506.02864, Eq. 11)
+   instead normalizes advantages by a Beta density. Not taken: the paper's
+   advantage as an option, or dropping :bnpo. The owner's call.
+3. **The advantages' std** is the population std, with eps 1e-4. TRL applies
+   Bessel's correction.
+4. **Dr. GRPO divides by N·L**, which differs from its paper's 1/G by a
+   constant factor in the learning rate.
+5. **Defaults:**
+   - β is 0.04 for grpo only;
+   - truncated completions are kept;
+   - the end token is trained;
+   - flat groups stay in the loss (no dynamic sampling) and are counted.
+6. **MLX's memory limit is documented** (a round peaks at 6.4-7.6 GB), not
+   set.
+7. **Each round makes a new array engine** (rollouts take 5.5 of each round's
+   8 s). Reusing engines is a follow-up.
+8. **qwen35's log-probs need :temperature** before GRPO runs on Qwen3.5 at
+   T ≠ 1. Until then it is loud (genclj-qfu2).
