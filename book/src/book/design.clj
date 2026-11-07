@@ -412,7 +412,9 @@
 ;=> (:L0 :L1 :L2 :L5)
 
 (set (for [n (closure 'gen.inference.mh)
-           :when (some #(str/starts-with? (str %) "gen.backend") (requires n))]
+           :when (and (not (under? (str n) "gen.backend"))
+                      (some #(str/starts-with? (str %) "gen.backend")
+                            (requires n)))]
        n))
 ;=> #{gen.array}
 

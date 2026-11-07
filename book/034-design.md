@@ -885,7 +885,8 @@ observations, which 10,000 keys confirm within five standard errors:
 ```
 
 **3.** `gen.inference.mh` loads layers L0, L1, L2 and L5: no
-distribution and no combinator. Only `gen.array` requires a backend:
+distribution and no combinator. Outside the backends' own namespaces,
+only `gen.array` requires a backend:
 
 <!-- code: solution-3 -->
 ```clojure
@@ -893,7 +894,9 @@ distribution and no combinator. Only `gen.array` requires a backend:
 ;=> (:L0 :L1 :L2 :L5)
 
 (set (for [n (closure 'gen.inference.mh)
-           :when (some #(str/starts-with? (str %) "gen.backend") (requires n))]
+           :when (and (not (under? (str n) "gen.backend"))
+                      (some #(str/starts-with? (str %) "gen.backend")
+                            (requires n)))]
        n))
 ;=> #{gen.array}
 ```
