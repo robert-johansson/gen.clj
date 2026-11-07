@@ -76,10 +76,14 @@ other values for the same key, from the same distribution.
     (attn_q: each head's query and output gate) `:k :v :o`;
     GatedDeltaNet's input projections `:qkv` (attn_qkv), `:z`
     (attn_gate), `:beta` (ssm_beta), `:alpha` (ssm_alpha) and its output
-    `:out` (ssm_out); the feed-forward's `:gate :up :down` (qwen35) or the
-    shared expert's `:gate-shexp :up-shexp :down-shexp` (qwen35moe; the
-    routed experts are no target, genclj-wfv1). `lora/init`'s default for
-    both: `[:q :v :qkv]`. `save-gguf` and `load-gguf` use these names.
+    `:out` (ssm_out); the feed-forward's `:gate :up :down` (qwen35), or
+    the shared expert's `:gate-shexp :up-shexp :down-shexp` and the routed
+    experts' `:gate-exps :up-exps :down-exps` (qwen35moe: an adapter per
+    expert, A [experts rank in] and B [experts out rank], its term taken
+    by the tokens routed to the expert, llama.cpp's `build_lora_mm_id`;
+    `lora/delta-gathered`). `lora/init`'s default for both: `[:q :v
+    :qkv]`, the experts only when named. `save-gguf` and `load-gguf` use
+    these names, the experts' stacks as 3-D tensors.
   - `lora/adapt` refuses an adapter of another architecture than the
     model's (`:invalid-args`), as llama.cpp does; `init`, `adapt`,
     `save-gguf` and `load-gguf` refuse an architecture LoRA does not know

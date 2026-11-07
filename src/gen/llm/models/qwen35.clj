@@ -90,7 +90,8 @@
    A projection adapted by gen.llm.lora/adapt is {:base w :lora …}, its
    product w's plus a LoRA adapter's term (gen.llm.lora/targets' qwen35
    and qwen35moe: the attention's, GatedDeltaNet's input and output
-   projections, the feed-forward's or the shared expert's): every
+   projections, the feed-forward's, the shared expert's, or the routed
+   experts' stacks, whose terms the tokens routed to each take): every
    function here takes the adapted model, and log-probs and nll
    differentiate it with respect to the adapter.
 
@@ -106,6 +107,7 @@
   (:require [clojure.core :as c]
             [clojure.string :as str]
             [gen.array :as array :refer [+ * /]]
+            [gen.llm.lora :as lora]
             [gen.llm.models :as models]
             [gen.llm.models.common :as common]))
 
@@ -495,12 +497,13 @@
   "x's matrices [.. 1 in] times their experts' matrices of the stack w
    [experts out in] (transposed): expert indices [N k], x's matrix for
    each by lhs (its leading axes broadcasting to [N k]): [N k 1 out].
-   Quantized stacks by gather-qmm, dense ones gathered by take."
+   Quantized stacks by gather-qmm, dense ones gathered by take; an
+   adapted stack (gen.llm.lora's) adds its experts' terms."
   [x w indices lhs]
-  (if (map? w)
-    (array/gather-qmm x (:wq w) (:scales w) (:biases w)
-                      (assoc (select-keys w [:bits :group-size]) :lhs-indices lhs :rhs-indices indices))
-    (array/matmul x (array/transpose (array/take w indices 0) [0 1 3 2]))))
+  (cond (lora/adapted? w) (+ (gathered x (:base w) indices lhs) (lora/delta-gathered x w indices))
+        (map? w) (array/gather-qmm x (:wq w) (:scales w) (:biases w)
+                                   (assoc (select-keys w [:bits :group-size]) :lhs-indices lhs :rhs-indices indices))
+        :else (array/matmul x (array/transpose (array/take w indices 0) [0 1 3 2]))))
 
 (defn- moe
   "The mixture of experts of the normed x [B T hidden], as llama.cpp's

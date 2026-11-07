@@ -11,6 +11,7 @@
      (save-gguf adapter path)     → llama.cpp's LoRA GGUF, for gen.llm.llama/adapter
      (load-gguf path)             → an adapter from such a file
      (adapted? w), (delta x w)    → an adapted weight and its term, for a family's forward
+     (delta-gathered x w idx)     → … a stack of experts' term, for a mixture's
      targets                      → the projections adapted, by family
 
    A projection's weight w [out in] (y = x·wᵀ) gets an adapter of rank r,
@@ -30,7 +31,9 @@
    one of its family's projections (targets: Qwen3's :q :k :v :o :gate
    :up :down; Qwen3.5's attention :q :k :v :o, GatedDeltaNet :qkv :z :beta
    :alpha :out, and the feed-forward's :gate :up :down, or Qwen3.6 MoE's
-   shared expert :gate-shexp :up-shexp :down-shexp). Its :params are
+   shared expert :gate-shexp :up-shexp :down-shexp and routed experts
+   :gate-exps :up-exps :down-exps, whose A and B are stacks of one per
+   expert, [experts rank in] and [experts out rank]). Its :params are
    gen.learning's store, a tree of arrays: a training step takes their
    gradient through the adapted model's loss and steps them (gen.learning
    ascends, so along the loss's negated gradient):
@@ -58,9 +61,10 @@
    \"adapter\", adapter.type \"lora\" and adapter.lora.alpha (float32);
    tensors blk.<layer>.<name>.weight.lora_a and .lora_b, F32, <name>
    llama.cpp's (attn_q, …, ffn_down; attn_qkv, attn_gate, ssm_beta,
-   ssm_alpha, ssm_out; ffn_gate_shexp, …), A's GGML dimensions [in r] and
-   B's [r out] (gen.array's shapes reversed), as llama.cpp checks them
-   against the base's. llama.cpp's rank is B's ne[0], r.
+   ssm_alpha, ssm_out; ffn_gate_shexp, …, ffn_gate_exps, …), A's GGML
+   dimensions [in r] and B's [r out] (gen.array's shapes reversed; an
+   expert stack's [in r experts] and [r out experts]), as llama.cpp checks
+   them against the base's. llama.cpp's rank is B's ne[0], r.
 
    Experimental: outside the 1.x promise (DESIGN §9)."
   {:api :experimental}
@@ -81,9 +85,12 @@
    Qwen3.5's (qwen35) layers are GatedDeltaNet's (:qkv, :z, :beta, :alpha,
    :out) but every 4th, gated attention's (:q, :k, :v, :o; attn_q's rows
    each head's query and output gate); Qwen3.6 MoE's (qwen35moe)
-   feed-forward is its routed experts, which no target adapts, and the
-   shared expert (:gate-shexp, :up-shexp, :down-shexp: the weights [:moe
-   :shared :gate] …)."
+   feed-forward is its shared expert (:gate-shexp, :up-shexp,
+   :down-shexp: the weights [:moe :shared :gate] …) and its routed
+   experts (:gate-exps, :up-exps, :down-exps: the stacks [:moe :gate] …,
+   an adapter a stack of one per expert, A [experts r in] and B [experts
+   out r], whose term the tokens routed to an expert take: llama.cpp's
+   build_lora_mm_id)."
   {"qwen3" (array-map :q "attn_q" :k "attn_k" :v "attn_v" :o "attn_output"
                       :gate "ffn_gate" :up "ffn_up" :down "ffn_down")
    "qwen35" (array-map :q "attn_q" :k "attn_k" :v "attn_v" :o "attn_output"
@@ -91,7 +98,8 @@
                        :gate "ffn_gate" :up "ffn_up" :down "ffn_down")
    "qwen35moe" (array-map :q "attn_q" :k "attn_k" :v "attn_v" :o "attn_output"
                           :qkv "attn_qkv" :z "attn_gate" :beta "ssm_beta" :alpha "ssm_alpha" :out "ssm_out"
-                          :gate-shexp "ffn_gate_shexp" :up-shexp "ffn_up_shexp" :down-shexp "ffn_down_shexp")})
+                          :gate-shexp "ffn_gate_shexp" :up-shexp "ffn_up_shexp" :down-shexp "ffn_down_shexp"
+                          :gate-exps "ffn_gate_exps" :up-exps "ffn_up_exps" :down-exps "ffn_down_exps")})
 
 (def ^:private default-targets
   "init's :targets by family: the projections of queries and values,
@@ -101,11 +109,14 @@
 (def ^:private target-index
   "Every target's index, fixed across families: it keys the target's site
    (site-key)."
-  (zipmap [:q :k :v :o :gate :up :down :qkv :z :beta :alpha :out :gate-shexp :up-shexp :down-shexp] (range)))
+  (zipmap [:q :k :v :o :gate :up :down :qkv :z :beta :alpha :out :gate-shexp :up-shexp :down-shexp
+           :gate-exps :up-exps :down-exps]
+          (range)))
 
 (def ^:private paths
   "A target's weight in a layer's weights, where not under its own key."
-  {:gate-shexp [:moe :shared :gate] :up-shexp [:moe :shared :up] :down-shexp [:moe :shared :down]})
+  {:gate-shexp [:moe :shared :gate] :up-shexp [:moe :shared :up] :down-shexp [:moe :shared :down]
+   :gate-exps [:moe :gate] :up-exps [:moe :up] :down-exps [:moe :down]})
 
 (defn- path [t] (get paths t [t]))
 
@@ -154,10 +165,18 @@
       (throw (unsupported (str "no LoRA targets for the architecture " (pr-str arch) "; it knows " (vec (sort (keys targets))))
                           {:architecture arch}))))
 
+(defn- rank-of
+  "The rank of an adapter's A [.. rank in] and B [.. out rank], when
+   they agree: matrices, or stacks of as many (one per expert)."
+  [a b]
+  (let [sa (array/shape a) sb (array/shape b)]
+    (when (and (= (count sa) (count sb)) (= (pop (pop sa)) (pop (pop sb))) (= (peek (pop sa)) (peek sb)))
+      (peek sb))))
+
 (defn- check-params
   "An adapter's :params, checked against its rank and its family's
    targets: {layer {target {:a A :b B}}}, A [rank in] and B [out rank]
-   arrays."
+   arrays (or stacks of them, [experts rank in] and [experts out rank])."
   [params rank family-targets]
   (when-not (and (map? params) (seq params))
     (throw (invalid (str "an adapter's :params are {layer {target {:a :b}}}, not " (pr-str params)))))
@@ -168,9 +187,9 @@
             :let [{:keys [a b]} ab]]
       (when-not (contains? family-targets t)
         (throw (invalid (str "layer " i "'s target " (pr-str t) " is none of " (vec (keys family-targets))) {:layer i :target t})))
-      (when-not (and (map? ab) (array/array? a) (array/array? b) (= 2 (array/ndim a)) (= 2 (array/ndim b)))
-        (throw (invalid (str "layer " i "'s " t " is {:a A :b B}, two matrices") {:layer i :target t})))
-      (when-not (and (= rank (first (array/shape a))) (= rank (second (array/shape b))))
+      (when-not (and (map? ab) (array/array? a) (array/array? b) (#{2 3} (array/ndim a)) (#{2 3} (array/ndim b)))
+        (throw (invalid (str "layer " i "'s " t " is {:a A :b B}, two matrices (or stacks of them)") {:layer i :target t})))
+      (when-not (= rank (rank-of a b))
         (throw (invalid (str "layer " i "'s " t ": A " (array/shape a) " and B " (array/shape b) " are not of rank " rank
                              " (A [rank in], B [out rank])")
                         {:layer i :target t :a (array/shape a) :b (array/shape b) :rank rank})))))
@@ -196,8 +215,9 @@
   (and (map? w) (contains? w :lora)))
 
 (defn- weight-shape
-  "The shape [out in] a weight stands for: a dense one's, a quantized
-   one's dequantized, an adapted one's base's."
+  "The shape [out in] (or [experts out in], a stack's) a weight stands
+   for: a dense one's, a quantized one's dequantized, an adapted one's
+   base's."
   [w]
   (cond (adapted? w) (weight-shape (:base w))
         (map? w) (let [s (array/shape (:wq w))]
@@ -225,18 +245,39 @@
   [key i t]
   (rng/fold-in (rng/fold-in key i) (target-index t)))
 
+(defn- dropped
+  "x under the adapter's dropout when adapt drew it (a :key in lora),
+   else x."
+  [x {:keys [p key]}]
+  (if key
+    (let [keep (c/- 1.0 (double p))]
+      (* x (/ (array/astype (rng/bernoulli key keep (array/shape x)) (array/dtype x)) keep)))
+    x))
+
+(defn- swap-last-two [x]
+  (let [n (array/ndim x)]
+    (array/transpose x (into (vec (range (c/- n 2))) [(dec n) (c/- n 2)]))))
+
 (defn delta
   "The adapter's term of x through an adapted weight w (adapt's):
    s·(x'·Aᵀ)·Bᵀ, x' x under dropout when adapt drew it (a :key), else x.
    A model family's forward adds it to the base's product: x [.. in], the
    result [.. out]."
   [x w]
-  (let [{:keys [a b s p key]} (:lora w)
-        x (if key
-            (let [keep (c/- 1.0 (double p))]
-              (* x (/ (array/astype (rng/bernoulli key keep (array/shape x)) (array/dtype x)) keep)))
-            x)]
-    (* s (array/matmul (array/matmul x (array/transpose a)) (array/transpose b)))))
+  (let [{:keys [a b s] :as lora} (:lora w)]
+    (* s (array/matmul (array/matmul (dropped x lora) (array/transpose a)) (array/transpose b)))))
+
+(defn delta-gathered
+  "The term of an adapted stack of experts' weights w (adapt's, A
+   [experts r in] and B [experts out r]) for x [.. 1 in] through the
+   experts indices [N k] (an int array; x's leading axes broadcast to
+   them): s·(x'·A[e]ᵀ)·B[e]ᵀ for each slot's expert e, [N k 1 out], x'
+   under dropout as delta's. A mixture's forward adds it to the stack's
+   gathered products (gen.array/gather-qmm's, or the dense stack's)."
+  [x w indices]
+  (let [{:keys [a b s] :as lora} (:lora w)]
+    (* s (array/matmul (array/matmul (dropped x lora) (swap-last-two (array/take a indices 0)))
+                       (swap-last-two (array/take b indices 0))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Adapters
@@ -290,10 +331,13 @@
                             :let [sites (filter #(weight-at m i %) ts)]
                             :when (seq sites)]
                         [(long i) (into {} (for [t sites
-                                                 :let [[out in] (weight-shape (weight-at m i t))
+                                                 :let [ws (weight-shape (weight-at m i t))
+                                                       [out in] (take-last 2 ws)
+                                                       experts (pop (pop ws))
                                                        bound (c// 1.0 (Math/sqrt (double in)))]]
-                                             [t {:a (rng/uniform (site-key key i t) [rank in] {:low (c/- bound) :high bound :dtype dtype})
-                                                 :b (array/zeros [out rank] {:dtype dtype})}]))]))}))
+                                             [t {:a (rng/uniform (site-key key i t) (conj experts rank in)
+                                                                 {:low (c/- bound) :high bound :dtype dtype})
+                                                 :b (array/zeros (conj experts out rank) {:dtype dtype})}]))]))}))
 
 (defn adapt
   "Model m with adapter beside the weights it targets: each such weight w
@@ -331,11 +375,14 @@
      (reduce-kv (fn [m i ts]
                   (reduce-kv (fn [m t {:keys [a b]}]
                                (let [w (layer-weight m i t)
-                                     [out in] (weight-shape w)]
-                                 (when-not (and (= [rank in] (array/shape a)) (= [out rank] (array/shape b)))
-                                   (throw (invalid (str "layer " i "'s " t " is [" out " " in "]: its A must be [" rank " " in
-                                                        "] and its B [" out " " rank "], not " (array/shape a) " and " (array/shape b))
-                                                   {:layer i :target t :weight [out in] :a (array/shape a) :b (array/shape b)})))
+                                     ws (weight-shape w)
+                                     [out in] (take-last 2 ws)
+                                     want-a (conj (pop (pop ws)) rank in)
+                                     want-b (conj (pop (pop ws)) out rank)]
+                                 (when-not (and (= want-a (array/shape a)) (= want-b (array/shape b)))
+                                   (throw (invalid (str "layer " i "'s " t " is " ws ": its A must be " want-a
+                                                        " and its B " want-b ", not " (array/shape a) " and " (array/shape b))
+                                                   {:layer i :target t :weight ws :a (array/shape a) :b (array/shape b)})))
                                  (assoc-in m (into [:weights :layers i] (path t))
                                            {:base w
                                             :lora (cond-> {:a a :b b :s s}
@@ -426,8 +473,8 @@
    rank. Loud for a file that is no LoRA adapter (:invalid-args), and
    (:unsupported) for an architecture LoRA does not know, an activated
    LoRA (aLoRA), a tensor on another than the family's targets (llama.cpp's
-   token_embd, output, the norms it skips, or Qwen3.6 MoE's routed
-   experts), quantized matrices, or ranks that differ between
+   token_embd, output, the norms it skips, or Qwen3.6 MoE's router),
+   quantized matrices, or ranks that differ between
    projections."
   ([path] (load-gguf path nil))
   ([path {:keys [dtype] :as opts}]
@@ -457,7 +504,10 @@
            ranks (set (for [[i ts] params [t ab] ts]
                         (do (when-not (and (:a ab) (:b ab))
                               (throw (invalid (str path ": layer " i "'s " t " lacks its lora_" (if (:a ab) "b" "a")) {:path path})))
-                            (first (array/shape (:a ab))))))
+                            (or (rank-of (:a ab) (:b ab))
+                                (throw (invalid (str path ": layer " i "'s " t "'s lora_a " (array/shape (:a ab)) " and lora_b "
+                                                     (array/shape (:b ab)) " are of no one rank")
+                                                {:path path}))))))
            _ (when (c/> (count ranks) 1)
                (throw (unsupported (str path ": projections of different ranks " (vec (sort ranks))) {:path path :ranks ranks})))
            rank (first ranks)

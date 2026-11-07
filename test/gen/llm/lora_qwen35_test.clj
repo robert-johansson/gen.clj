@@ -9,9 +9,10 @@
       exactly, with dropout, at any scale; :scale 0 too;
    2. init adapts each target in the layers that have it (GatedDeltaNet's
       :qkv :z :beta :alpha :out, attention's :q :k :v :o, the
-      feed-forward's or the shared expert's), with the family's defaults;
-      and each target's weight is the GGUF tensor of llama.cpp's name for
-      it (targets);
+      feed-forward's, or the shared expert's and the routed experts', a
+      stack of one adapter per expert), with the family's defaults; and
+      each target's weight is the GGUF tensor of llama.cpp's name for it
+      (targets);
    3. the adapted loss's gradients with respect to A and B match central
       differences (the JVM backend, float64), on every target, through
       dense and Q8_0 bases, checkpointed, chunked, masked and under
@@ -39,7 +40,11 @@
    ffn_gate_shexp); the names of :z and :qkv swapped, or of :beta and
    :alpha (equal shapes, which llama.cpp's checks pass): 2 (8 and 12);
    check-params reading a layer's own targets in place of the family's
-   (an adapter on the conv kernel accepted): 9."
+   (an adapter on the conv kernel accepted): 9; the routed experts' term
+   dropped (lora/delta-gathered): each-target-changes-the-model and 6
+   (7); each token's experts' adapters read from the next expert's: 6
+   (4: the merged stack, B_e·A_e per expert, differs); the experts' gate
+   and up paths swapped: 2 (8)."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
             [gen.array.gguf :as gguf]
@@ -78,6 +83,11 @@
 (defn- arch [k] (get-in (@models k) [:config :arch]))
 
 (defn- every-target [k] (vec (keys (lora/targets (arch k)))))
+
+(def ^:private paths
+  "The weights of the targets not under their own key in a layer."
+  {:gate-shexp [:moe :shared :gate] :up-shexp [:moe :shared :up] :down-shexp [:moe :shared :down]
+   :gate-exps [:moe :gate] :up-exps [:moe :up] :down-exps [:moe :down]})
 
 (defn- adapter
   "A new adapter of model k: rank 4, alpha 8 (s = 2), on every projection
@@ -146,8 +156,16 @@
         attention-dense [:q :k :v :o :gate :up :down]]
     (is (= {0 delta-dense 1 delta-dense 2 delta-dense 3 attention-dense}
            (update-vals (:params (adapter :f32)) #(vec (sort-by (zipmap (every-target :f32) (range)) (keys %))))))
-    (is (= #{:qkv :z :beta :alpha :out :gate-shexp :up-shexp :down-shexp} (set (keys (get-in (adapter :moe-f32) [:params 0])))))
-    (is (= #{:q :k :v :o :gate-shexp :up-shexp :down-shexp} (set (keys (get-in (adapter :moe-q8_0) [:params 3]))))))
+    (is (= #{:qkv :z :beta :alpha :out :gate-shexp :up-shexp :down-shexp :gate-exps :up-exps :down-exps}
+           (set (keys (get-in (adapter :moe-f32) [:params 0])))))
+    (is (= #{:q :k :v :o :gate-shexp :up-shexp :down-shexp :gate-exps :up-exps :down-exps}
+           (set (keys (get-in (adapter :moe-q8_0) [:params 3])))))
+    (testing "the routed experts: a stack of adapters, one per expert"
+      (let [ad (adapter :moe-q8_0 {:targets [:up-exps :down-exps] :layers [1]})]
+        (is (= [[4 4 32] [4 32 4]] (mapv #(array/shape (get-in ad [:params 1 :up-exps %])) [:a :b])) "A [experts r in], B [experts out r]")
+        (is (= [[4 4 32] [4 32 4]] (mapv #(array/shape (get-in ad [:params 1 :down-exps %])) [:a :b])))
+        (is (not= (host (array/take (get-in ad [:params 1 :up-exps :a]) 0 0)) (host (array/take (get-in ad [:params 1 :up-exps :a]) 1 0)))
+            "each expert's A its own"))))
   (doseq [[k m] @models
           :let [ad (lora/init m nil (rng/key 1))]]
     (testing (name k)
@@ -155,9 +173,7 @@
       (is (= {0 #{:qkv} 1 #{:qkv} 2 #{:qkv} 3 #{:q :v}} (update-vals (:params ad) (comp set keys)))
           "the defaults: attention's q and v, GatedDeltaNet's qkv")
       (doseq [[i ts] (:params ad) [t {:keys [a b]}] ts
-              :let [w (get-in m (into [:weights :layers i] (if (#{:gate-shexp :up-shexp :down-shexp} t)
-                                                             [:moe :shared (keyword (subs (name t) 0 (- (count (name t)) 6)))]
-                                                             [t])))
+              :let [w (get-in m (into [:weights :layers i] (paths t [t])))
                     [out in] (common/weight-shape w)]]
         (is (= [8 in] (array/shape a)) (pr-str [i t]))
         (is (= [out 8] (array/shape b)) (pr-str [i t]))
@@ -165,9 +181,6 @@
   (is (= (host (get-in (adapter :f32) [:params 1 :beta :a]))
          (host (get-in (adapter :f32 {:layers [1] :targets [:beta]}) [:params 1 :beta :a])))
       "a key per site"))
-
-(def ^:private shared-paths
-  {:gate-shexp [:moe :shared :gate] :up-shexp [:moe :shared :up] :down-shexp [:moe :shared :down]})
 
 (defn- adapted-weights
   "{[layer target] the base weight adapt puts the adapter beside} of model
@@ -231,7 +244,8 @@
   {:dense [[0 :qkv :a 0 0] [0 :qkv :b 200 3] [1 :z :a 2 10] [1 :beta :b 3 1] [2 :alpha :a 1 31] [2 :out :b 31 2]
            [3 :q :b 127 0] [3 :k :a 3 31] [3 :v :b 5 2] [3 :o :a 0 63] [0 :gate :a 1 5] [2 :up :b 63 2] [3 :down :a 0 63]]
    :moe [[0 :qkv :b 17 1] [1 :z :b 100 0] [2 :beta :a 0 7] [1 :alpha :b 2 3] [0 :out :a 1 120]
-         [3 :q :a 2 4] [3 :o :b 30 1] [0 :gate-shexp :a 1 5] [2 :up-shexp :b 31 2] [3 :down-shexp :a 0 31]]})
+         [3 :q :a 2 4] [3 :o :b 30 1] [0 :gate-shexp :a 1 5] [2 :up-shexp :b 31 2] [3 :down-shexp :a 0 31]
+         [0 :gate-exps :a 2 0 5] [1 :gate-exps :b 0 7 3] [2 :up-exps :b 3 31 1] [3 :down-exps :a 1 3 31] [1 :down-exps :b 2 0 0]]})
 
 (defn- entries-of [k] (entries (if (#{:moe-f32 :moe-q8_0} k) :moe :dense)))
 
@@ -274,12 +288,12 @@
 (deftest gradients-through-the-chunked-rule-are-central-differences
   ;; 70 tokens: gated-delta's chunked form, as a training step's
   ;; sequences take it. Measured 2026-11-07: relative errors up to 2.9e-7
-  ;; (F32) and 4.3e-7 (MoE Q8_0), a loss of 69 targets' round-off in the
-  ;; differences; the band 2e-6
+  ;; (F32) and 5.8e-7 (MoE F32, its routed experts adapted too), a loss of
+  ;; 69 targets' round-off in the differences; the band 2.5e-6
   (if-not (ts/jvm?)
     (println "gen.llm.lora-qwen35-test: central differences on the JVM backend (float64)")
-    (doseq [k [:f32 :moe-q8_0]]
-      (is (< (worst (relative-errors k long-tokens training 0.0 nil)) 2e-6) (name k)))))
+    (doseq [k [:f32 :moe-f32]]
+      (is (< (worst (relative-errors k long-tokens training 0.0 nil)) 2.5e-6) (name k)))))
 
 (def ^:private plain-band
   "Checkpointed against plain: on the JVM backend the same ops in the
@@ -364,7 +378,8 @@
 (deftest training-steps-lower-the-loss
   ;; measured 2026-11-07 (the JVM backend), the summed nll over 13
   ;; targets: F32 68.6 → 54.7 → 48.1 → 40.5 → 34.1 → 29.3; Q8_0 68.2 →
-  ;; 32.3; the MoE's F32 78.4 → 34.8, Q8_0 78.0 → 35.8
+  ;; 32.3; the MoE's (its routed experts adapted too) F32 78.4 → 29.2,
+  ;; Q8_0 78.0 → 29.4
   (doseq [k (keys files)]
     (let [ls (losses k 5 -1.0)]
       (println (format "lora-qwen35: %s nll %s" (name k) (pr-str (mapv #(Math/round (* 10.0 (double %))) ls))))
@@ -400,9 +415,9 @@
       (is (< 0.1 (max-abs (qwen35/log-probs merged tokens) (qwen35/log-probs m tokens))) "the merged model is not the base")
       (doseq [[i ts] (:params ad)
               [t {:keys [a b]}] ts
-              :let [w (get-in merged (into [:weights :layers i] (shared-paths t [t])))]]
-        (is (array/array? w) (pr-str [i t "a dense matrix"]))
-        (is (= [(first (array/shape b)) (second (array/shape a))] (array/shape w)) (pr-str [i t]))))))
+              :let [w (get-in merged (into [:weights :layers i] (paths t [t])))]]
+        (is (array/array? w) (pr-str [i t "a dense matrix (or stack)"]))
+        (is (= (conj (pop (array/shape b)) (peek (array/shape a))) (array/shape w)) (pr-str [i t]))))))
 
 ;; ---------------------------------------------------------------------------
 ;; 7. llama.cpp's GGUF
@@ -410,7 +425,8 @@
 
 (deftest an-adapter-saved-loads-back
   (doseq [[k m] @models
-          :let [ts (if (#{:moe-f32 :moe-q8_0} k) [:qkv :beta :q :up-shexp] [:qkv :beta :q :down])
+          :let [moe? (#{:moe-f32 :moe-q8_0} k)
+                ts (if moe? [:qkv :beta :q :up-shexp :down-exps] [:qkv :beta :q :down])
                 ad (with-b (adapter k {:targets ts :layers [0 3] :alpha 3.5}) 0.3 (rng/key 3))
                 f (temp-file "a.gguf")]]
     (try
@@ -418,15 +434,18 @@
       (let [h (gguf/header f)
             back (lora/load-gguf f)
             f32 (fn [x] (host (array/astype x :float32)))
-            ffn (if (#{:moe-f32 :moe-q8_0} k) "ffn_up_shexp" "ffn_down")]
+            ffn (if moe? ["ffn_up_shexp" "ffn_down_exps"] ["ffn_down"])]
         (is (= {"general.architecture" (arch k) "general.type" "adapter" "adapter.type" "lora" "adapter.lora.alpha" 3.5}
                (:metadata h)))
-        (is (= (vec (for [n ["blk.0.attn_qkv" "blk.0.ssm_beta" (str "blk.0." ffn) "blk.3.attn_q" (str "blk.3." ffn)]
+        (is (= (vec (for [n (concat ["blk.0.attn_qkv" "blk.0.ssm_beta"] (map #(str "blk.0." %) ffn)
+                                    ["blk.3.attn_q"] (map #(str "blk.3." %) ffn))
                           ab ["a" "b"]]
                       (str n ".weight.lora_" ab)))
                (mapv :name (:tensors h)))
             "llama.cpp's names, in the family's order")
         (is (= [[4 32] [256 4] [4 32] [4 4]] (mapv :shape (take 4 (:tensors h)))) "gen.array's shapes: A [r in], B [out r]")
+        (when moe?
+          (is (= [[4 4 32] [4 32 4]] (mapv :shape (take 2 (drop 6 (:tensors h))))) "an expert stack's: [experts r in], [experts out r]"))
         (is (= (:config ad) (:config back)))
         (is (= (array/tree-map f32 (:params ad)) (array/tree-map f32 (:params back))) "the params, rounded to float32")
         (is (<= (max-abs (qwen35/log-probs (lora/adapt m back) tokens) (qwen35/log-probs (lora/adapt m ad) tokens))
@@ -477,7 +496,8 @@
         key (rng/key 1)]
     (testing "init"
       (is (= :invalid-args (reason #(lora/init m {:targets [:gate-shexp]} key))) "the MoE's target on the dense model")
-      (is (= :invalid-args (reason #(lora/init moe {:targets [:gate]} key))) "the routed experts are no target")
+      (is (= :invalid-args (reason #(lora/init moe {:targets [:gate]} key))) "the dense feed-forward's target on the MoE")
+      (is (= :invalid-args (reason #(lora/init moe {:targets [:router]} key))) "the router is no target")
       (is (= :invalid-args (reason #(lora/init m {:targets [:conv]} key))))
       (is (= :invalid-args (reason #(lora/init m {:targets [:q] :layers [0 1 2]} key))) "no layer of these has q")
       (is (= :invalid-args (reason #(lora/init m {:targets [:qkv] :layers [3]} key))) "nor qkv")
@@ -499,9 +519,15 @@
                             :tensors [{:name "blk.0.attn_q.weight.lora_a" :type :f32 :shape [2 4] :data (float-array 8)}
                                       {:name "blk.0.attn_q.weight.lora_b" :type :f32 :shape [4 2] :data (float-array 8)}]})
         (is (= :unsupported (reason #(lora/load-gguf f))) "an architecture LoRA does not know"))
-      (let [f (temp-file "experts.gguf")]
+      (let [f (temp-file "router.gguf")]
         (gguf/write-gguf f {:metadata [["general.architecture" :string "qwen35moe"] ["general.type" :string "adapter"]
                                         ["adapter.type" :string "lora"] ["adapter.lora.alpha" :float32 2.0]]
-                            :tensors [{:name "blk.0.ffn_up_exps.weight.lora_a" :type :f32 :shape [2 4] :data (float-array 8)}
-                                      {:name "blk.0.ffn_up_exps.weight.lora_b" :type :f32 :shape [4 2] :data (float-array 8)}]})
-        (is (= :unsupported (reason #(lora/load-gguf f))) "the routed experts")))))
+                            :tensors [{:name "blk.0.ffn_gate_inp.weight.lora_a" :type :f32 :shape [2 4] :data (float-array 8)}
+                                      {:name "blk.0.ffn_gate_inp.weight.lora_b" :type :f32 :shape [4 2] :data (float-array 8)}]})
+        (is (= :unsupported (reason #(lora/load-gguf f))) "the router"))
+      (let [f (temp-file "ranks.gguf")]
+        (gguf/write-gguf f {:metadata [["general.architecture" :string "qwen35moe"] ["general.type" :string "adapter"]
+                                        ["adapter.type" :string "lora"] ["adapter.lora.alpha" :float32 2.0]]
+                            :tensors [{:name "blk.0.ffn_up_exps.weight.lora_a" :type :f32 :shape [4 2 32] :data (float-array 256)}
+                                      {:name "blk.0.ffn_up_exps.weight.lora_b" :type :f32 :shape [3 32 2] :data (float-array 192)}]})
+        (is (= :invalid-args (reason #(lora/load-gguf f))) "a stack of A and B of other experts")))))

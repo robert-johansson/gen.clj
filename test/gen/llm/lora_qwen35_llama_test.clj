@@ -18,8 +18,10 @@
    4. (opt-in, -J-Dgen.qwen35.vocab-models=<dir>, as
       gen.llm.models.qwen35-llama-test's) the tiny random Qwen3.6 MoE with
       the 0.8B's vocabulary: an adapter on every qwen35moe target, the
-      shared expert's among them (ffn_gate_shexp, ffn_up_shexp,
-      ffn_down_shexp), reads in llama.cpp as in the forward.
+      shared expert's (ffn_gate_shexp, ffn_up_shexp, ffn_down_shexp) and
+      the routed experts' stacks (ffn_gate_exps, ffn_up_exps,
+      ffn_down_exps, llama.cpp's build_lora_mm_id) among them, reads in
+      llama.cpp as in the forward; their gate and up names swapped fail.
    Each comparison is gen.llm.models.against-llama's: for each prompt,
    read whole, as a chunk and through greedy steps, the next-token
    log-probabilities within the band over llama.cpp's 64 most likely
@@ -330,10 +332,13 @@
                     path (lora/save-gguf ad (temp-path (str f ".gguf")))]]
         (with-open [^java.io.Closeable lm ((llama 'model) file)]
           (let [cs (comparisons lm (lora/adapt m ad) path 1.0 (rest prompts) 2 vocab-band)
-                swapped (with-redefs-fn (names-swapped "ffn_gate_shexp" "ffn_up_shexp")
-                          #(lora/save-gguf ad (temp-path (str f "-swapped.gguf"))))
-                margin (worst (comparisons lm (lora/adapt m ad) swapped 1.0 [(second prompts)] 1 vocab-band))]
-            (println (format "lora-qwen35-llama: %s, the adapter moves log p by %.3g nats; against llama.cpp at most %.3g; the shared expert's gate and up swapped %s"
-                             f (effect lm m (lora/adapt m ad) (rest prompts)) (worst cs) (pr-str margin)))
+                margins (into (sorted-map)
+                              (for [[what x y] [[:shared "ffn_gate_shexp" "ffn_up_shexp"] [:routed "ffn_gate_exps" "ffn_up_exps"]]
+                                    :let [swapped (with-redefs-fn (names-swapped x y)
+                                                    #(lora/save-gguf ad (temp-path (str f "-" (name what) ".gguf"))))]]
+                                [what (worst (comparisons lm (lora/adapt m ad) swapped 1.0 [(second prompts)] 1 vocab-band))]))]
+            (println (format "lora-qwen35-llama: %s, the adapter moves log p by %.3g nats; against llama.cpp at most %.3g; gate and up swapped %s"
+                             f (effect lm m (lora/adapt m ad) (rest prompts)) (worst cs) (pr-str margins)))
             (is (agree? cs vocab-band) (str f ": " (pr-str (disagreements cs vocab-band))))
-            (is (or (= :refused margin) (< mutation-nats margin)) (str f ": the shared expert's gate and up swapped, " margin))))))))
+            (doseq [[what margin] margins]
+              (is (or (= :refused margin) (< mutation-nats margin)) (str f ": the " (name what) " experts' gate and up swapped, " margin)))))))))
