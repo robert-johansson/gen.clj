@@ -1257,6 +1257,65 @@
       (is (every? (fn [[l a?]] (or (not= ##-Inf l) (not a?))) (map vector la acc)))
       (is (every? #(< (ts/number (% :b)) (ts/number (% :a))) (b/traces out))))))
 
+;; A move from a particle outside its support: its scalar trace stops at the
+;; choice that left it (b/traces), where its batched trace goes on, so what
+;; follows is not the particle's own. Its update, regenerate or move makes
+;; those choices afresh, as its scalar one does: it keeps none of their
+;; values and weighs or discards none of them. Found by gen.fuzz-test's
+;; chains of operations (genclj-n1s3, seed 1794085868851): the batched
+;; regenerate kept them, so a particle moved back inside the support had
+;; left its scalar trace. Shrunk, it is the step from the impossible trace,
+;; here: before the fix the odd particles' regenerate kept c at 0 and
+;; weighed it, w = log N(0; b', 1) - log N(0; 5, 1) = 12.5 - b'^2/2 where
+;; their scalar law gives 0; their update discarded c; their proposal move
+;; kept it; and their projection on c counted it. (A lazy backend's scalar
+;; runs go on, gen.dynamic, so their traces hold c there, as the batched
+;; ones do: the laws hold on every backend, the values are the JVM's.)
+
+(def ^:private past-the-stop
+  "b uniform on [a, a + 1], then c around b: a particle whose b leaves
+   [a, a + 1] stops at b, without c."
+  (gen [] (let [a (trace :a (d/normal 0 1)) b (trace :b (d/uniform a (+ a 1.0)))] (trace :c (d/normal b 1.0)))))
+
+(deftest a-move-from-a-particle-outside-its-support-is-its-scalar-move
+  (let [;; the odd particles' b, at 5, is outside [0, 1]
+        own (mapv #(cm/choicemap :a 0.0 :b (if (odd? %) 5.0 0.5) :c 0.0) (range 4))
+        ps (:particles (b/generate past-the-stop [] cm/EMPTY 4 (rng/key 1) {:per-particle own}))
+        olds (b/traces ps)
+        c-of #(ts/number (% :c))]
+    (is (= [##-Inf ##-Inf] (take-nth 2 (rest (array/->clj (b/scores ps))))))
+    (testing "a projection counts no choice past the stop"
+      (let [s (sel/select :a :c)]
+        (is (close? (array/stack (mapv #(gfi/project % s) olds)) (b/project ps s)))))
+    (testing "regenerate: w = log p(new)/p(old) over the choices the scalar trace kept"
+      (let [s (sel/select :b)
+            {ps' :particles ws :weights} (b/regenerate ps [] [] s (rng/key 2))
+            news (b/traces ps')]
+        (is (b/batched? ps'))
+        (is (every? true? (map (fn [old new w]
+                                 (let [was (set (cm/addresses (:choices old)))
+                                       kept (sel/from-paths (remove #(or (not (was %)) (sel/selected? s %)) (cm/addresses (:choices new))))]
+                                   (close? w (- (gfi/project new kept) (gfi/project old kept)))))
+                               olds news (array/->clj ws))))
+        (when (ts/jvm?)
+          (is (every? #(= 0.0 %) (map c-of (take-nth 2 news))) "the possible particles keep c")
+          (is (not-any? #(= 0.0 %) (map c-of (take-nth 2 (rest news)))) "the others draw it afresh"))))
+    (testing "update: each particle's weight and discard are its scalar update's"
+      (let [sigma (cm/choicemap :b 0.5 :c 1.0)
+            {ps' :particles ws :weights ds :discards} (b/update ps [] [] sigma (rng/key 3))
+            rs (mapv #(gfi/update % sigma (rng/key 0)) olds)]
+        (is (b/batched? ps'))
+        (is (= (mapv (comp ts/host :discard) rs) (mapv ts/host ds)))
+        (is (= (mapv (comp ts/number :weight) rs) (mapv ts/number (array/->clj ws))) "0 inside, +Inf outside")))
+    (testing "a move: the proposal's update keeps no choice past the stop"
+      (let [{ps' :particles} (b/move ps (fn [t k] {:trace (:trace (gfi/update t (cm/choicemap :b 0.5) k))}) (rng/key 4))
+            news (b/traces ps')]
+        (is (b/batched? ps'))
+        (is (every? #(close? (:score %) (:weight (gfi/assess past-the-stop [] (:choices %)))) news))
+        (when (ts/jvm?)
+          (is (every? #(= 0.0 %) (map c-of (take-nth 2 news))))
+          (is (not-any? #(= 0.0 %) (map c-of (take-nth 2 (rest news))))))))))
+
 ;; ---------------------------------------------------------------------------
 ;; A fallback is recorded, and :batched? :required refuses it (DESIGN.md §9,
 ;; the ten decisions' ninth; genclj-ynpc)

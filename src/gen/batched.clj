@@ -66,7 +66,9 @@
    support, as its scalar run does (gen.dynamic; DESIGN.md §9): it goes on,
    and that particle's score and weight are -Inf, what it computed after
    the choice masked out of them. Its trace holds the whole run's choices,
-   and traces rebuilds its scalar trace, which stops at the choice. A
+   and traces rebuilds its scalar trace, which stops at the choice; what
+   follows is not the particle's own, so its update, regenerate, move and
+   projection are its scalar trace's, run alone and set in its row. A
    parameter check downstream that reads the batch and fails for such a
    particle raises the fallback.
 
@@ -622,6 +624,77 @@
     shared))
 
 ;; ---------------------------------------------------------------------------
+;; Particles outside the support
+;; ---------------------------------------------------------------------------
+
+;; A batched run cannot stop for a particle whose choice leaves its support
+;; (gen.dynamic): it goes on, so the particle's batched trace holds what the
+;; run made after that choice, where its scalar trace (traces) stops there.
+;; Those choices are not the particle's own: its scalar update, regenerate
+;; or move, finding none, makes them afresh, keeping none of their values
+;; and weighing or discarding none, and its projection counts none. So such
+;; a particle runs alone, by its scalar operation, and the result takes its
+;; row of the batched one: its trace rebuilt as a batch of one and joined in
+;; (gen.partition/join), and its weight, discard, result or projection set
+;; there (genclj-n1s3). A lazy backend's scalar runs go on too (their
+;; densities are arrays, never read), so there the batched trace is the
+;; particle's, and no score is read.
+
+(declare take)
+
+(defn- stopped
+  "The particles of ps whose scalar traces may stop short of its batched
+   trace, host integers: those of score -Inf, or NaN (an impossible part's
+   -Inf summed with +Inf), where the scores are concrete."
+  [ps]
+  (let [s (:score (:trace ps))]
+    (when (array/concrete? (if (batch/batched? s) (batch/value s) s))
+      (into [] (keep-indexed (fn [i x] (let [x (double x)] (when (or (== ##-Inf x) (Double/isNaN x)) i))))
+            (array/->clj (plain s (:n ps)))))))
+
+(defn- each-alone
+  "The particles of ps at rows run alone: (f trace i key) of each one's
+   scalar trace, its index and the key the fallback gives it (key split n
+   ways; nil stays nil)."
+  [ps rows key f]
+  (let [ks (if key (vec (rng/split key (:n ps))) (repeat nil))]
+    (mapv #(f %1 %2 (nth ks %2)) (traces (take ps rows)) rows)))
+
+(defn- placed
+  "The rows of n particles followed by others for the particles at rows: the
+   indices taking each particle to its own."
+  [n rows]
+  (let [at (zipmap rows (range n (+ n (count rows))))]
+    (mapv #(at % %) (range n))))
+
+(defn- joined-at
+  "The batched trace t of n particles of gf on args with the particles at
+   rows holding the scalar traces trs: each rebuilt as a batch of one, joined
+   to t and taken to its row."
+  [gf args n t rows trs]
+  (let [k (count rows)]
+    (part/gather (part/join (into [t] (map #(rebuild gf args 1 (cm/stack [(:choices %)])) trs))
+                            (into [n] (repeat k 1)) (batch/backend array/*backend* [(+ n k)]))
+                 (placed n rows))))
+
+(defn- set-rows
+  "x, an array of n particles' values (the leading axis), with those of the
+   particles at rows set to vs."
+  [x n rows vs]
+  (array/take (array/concatenate [x (array/astype (array/stack (vec vs)) (array/dtype x))])
+              (array/array (placed n rows) {:dtype :int64})))
+
+(defn- set-rows-in
+  "The tree x of n particles' values (array leaves, the leading axis; as
+   stacked makes it), with those of the particles at rows set from the
+   trees xs."
+  [x n rows xs]
+  (cond (map? x) (reduce-kv (fn [m k v] (assoc m k (set-rows-in v n rows (mapv #(get % k) xs)))) x x)
+        (or (vector? x) (seq? x)) (mapv (fn [i v] (set-rows-in v n rows (mapv #(nth % i) xs))) (range) x)
+        (array/array? x) (set-rows x n rows xs)
+        :else x))
+
+;; ---------------------------------------------------------------------------
 ;; GFI operations
 ;; ---------------------------------------------------------------------------
 
@@ -668,10 +741,15 @@
        (batched-or
         (let [{t :trace w :weight d :discard}
               (run gen-fn :update args n {:prev (:trace ps) :argdiffs argdiffs :key key
-                                          :constraints (batched-constraints :update constraints own n)})]
-          {:particles (spot-check-update! ps args t)
-           :weights (plain w n)
-           :discards (if (cm/empty? d) (vec (repeat n cm/EMPTY)) (unstacked d n))})
+                                          :constraints (batched-constraints :update constraints own n)})
+              rows (stopped ps)
+              rs (when (seq rows)
+                   (each-alone ps rows key #(gfi/update %1 args argdiffs (constraints-of :update constraints own %2) %3)))]
+          {:particles (spot-check-update! ps args (if rs (joined-at gen-fn args n t rows (map :trace rs)) t))
+           :weights (cond-> (plain w n) rs (set-rows n rows (map :weight rs)))
+           :discards (reduce (fn [ds [i r]] (assoc ds i (:discard r)))
+                             (if (cm/empty? d) (vec (repeat n cm/EMPTY)) (unstacked d n))
+                             (map vector rows rs))})
         (fallback (unbatched (check ps))))
        (with-fallback (fallback (one-at-a-time ps)))))))
 
@@ -688,8 +766,11 @@
     (if (batched? ps)
       (batched-or
        (let [{t :trace w :weight}
-             (run gen-fn :regenerate args n {:prev (:trace ps) :argdiffs argdiffs :selection selection :key key})]
-         {:particles (spot-check-update! ps args t) :weights (plain w n)})
+             (run gen-fn :regenerate args n {:prev (:trace ps) :argdiffs argdiffs :selection selection :key key})
+             rows (stopped ps)
+             rs (when (seq rows) (each-alone ps rows key #(gfi/regenerate %1 args argdiffs selection %3)))]
+         {:particles (spot-check-update! ps args (if rs (joined-at gen-fn args n t rows (map :trace rs)) t))
+          :weights (cond-> (plain w n) rs (set-rows n rows (map :weight rs)))})
        (fallback (unbatched (check ps))))
       (with-fallback (fallback (one-at-a-time ps))))))
 
@@ -817,7 +898,9 @@
   (let [n (:n ps)
         each #(stack-weights (map (fn [t] (gfi/project t selection)) (traces ps)) n)]
     (if (batched? ps)
-      (try {:result (plain (batch/batched [n] (gfi/project (:trace (check ps)) selection)) n)}
+      (try (let [r (plain (batch/batched [n] (gfi/project (:trace (check ps)) selection)) n)
+                 rows (stopped ps)]
+             {:result (cond-> r (seq rows) (set-rows n rows (each-alone ps rows nil (fn [t _ _] (gfi/project t selection)))))})
            (catch Exception e
              (when *required* (throw (refusal e)))
              {:result (each) :fallback (failure-message e)}))
@@ -926,9 +1009,12 @@
       (let [t (:trace (check ps))]
         (batched-or
          (let [r (moved-result (guarded n #(apply f t key (map (fn [x] (array/tree-map (fn [v] (batch/wrap v [n])) x)) xs))))
-               t' (:trace r)]
-           {:particles (spot-check-update! ps (:args t') t')
-            :result (array/tree-map #(if (array/array? %) (plain % n) %) (dissoc r :trace))})
+               t' (:trace r)
+               alone (stopped ps)
+               rs (when (seq alone) (each-alone ps alone key #(moved-result (apply f %1 %3 (rows %2)))))]
+           {:particles (spot-check-update! ps (:args t') (if rs (joined-at (trace/maker t') (:args t') n t' alone (map :trace rs)) t'))
+            :result (cond-> (array/tree-map #(if (array/array? %) (plain % n) %) (dissoc r :trace))
+                      rs (set-rows-in n alone (mapv #(dissoc % :trace) rs)))})
          (each (unbatched ps))))
       (with-fallback (each (one-at-a-time ps))))))
 
