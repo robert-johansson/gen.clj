@@ -5,9 +5,8 @@
    where CUDA needs it), after which the budget is checked."
   {:api :internal}
   (:require [gen.array.memory :as reservations]
-            [gen.backend.mlx.array :refer [fence with-device]])
-  (:import [gen.backend.mlx.array MlxArray]
-           [gen.mlx Mlx MlxException MlxRuntime]))
+            [gen.backend.mlx.array :refer [fence handle with-device]])
+  (:import [gen.mlx Mlx MlxException MlxRuntime]))
 
 (set! *warn-on-reflection* true)
 
@@ -165,7 +164,7 @@
    neither the backend's collections nor MLX's memory counters see
    (DESIGN §9, genclj-9e9e)."
   [x]
-  (try (Mlx/_mlx_array_is_available (.-h ^MlxArray x))
+  (try (Mlx/_mlx_array_is_available (handle x))
        (finally (fence x))))
 
 (defn set-memory-limit!

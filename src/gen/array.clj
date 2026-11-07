@@ -1140,7 +1140,18 @@
      a key argument is an error, as the trace would replay its draws.
    - On the JVM backend (and wherever the backend does not compile), f
      itself.
-   Options: :shapeless? (MLX: one trace for every shape)."
+   Options: :shapeless? (MLX: one trace for every shape); :donate
+   (experimental, outside the 1.x promise), a set of argument positions:
+   the compiled function consumes these arguments, after JAX's
+   donate_argnums. On MLX their arrays are donated once a call has
+   returned (lazily) its result: MLX may then reuse their buffers for the
+   result, so a step updating a large array (a static KV cache) writes in
+   place instead of copying it, and any later use of a donated array is
+   loud (ex-info, :reason :donated). Where compile is f itself (the JVM
+   backend, the tape, the batch tracer, MLX's CPU without a compiler)
+   :donate does nothing, and a reuse of a donated argument is NOT caught
+   there: never read one again. Its result values are the same either
+   way."
   ([f] (compile f nil))
   ([f opts] ((:compile @transform) f opts)))
 

@@ -7,11 +7,10 @@
   {:api :internal}
   (:require [gen.array.dtype :as dt]
             [gen.array.tree :as tree]
-            [gen.backend.mlx.array :refer [device fence mlx-array? stream wrap wrap-all with-device]]
+            [gen.backend.mlx.array :refer [consume! device fence handle mlx-array? stream wrap wrap-all with-device]]
             [gen.backend.mlx.memory :refer [evaluating]]
-            [gen.backend.mlx.operands :refer [as-array dtype-on host? mlx-error retained shape-of with-temps]])
-  (:import [gen.backend.mlx.array MlxArray]
-           [gen.mlx Mlx MlxRaw MlxRuntime MlxException]))
+            [gen.backend.mlx.operands :refer [as-array dtype-on host? made mlx-error retained shape-of with-temps]])
+  (:import [gen.mlx Mlx MlxRaw MlxRuntime MlxException]))
 
 (set! *warn-on-reflection* true)
 
@@ -78,7 +77,7 @@
         (try
           (let [cl (t :closure (MlxRuntime/closure (reify gen.mlx.MlxRuntime$Closure (apply [_ ins] (run ins)))))
                 vag (t :value-and-grad (Mlx/mlx_value_and_grad cl (int-array (range (count xs)))))
-                in (t :vector (MlxRuntime/vectorOf (long-array (map #(.-h ^MlxArray %) xs))))
+                in (t :vector (MlxRuntime/vectorOf (long-array (map #(handle %) xs))))
                 [vs gs] (mapv #(t :vector %) (with-default-stream b #(Mlx/mlx_closure_value_and_grad_apply vag in)))
                 v (first (wrap-all b (MlxRuntime/vectorArrays vs)))
                 gs (wrap-all b (MlxRuntime/vectorArrays gs))]
@@ -124,7 +123,7 @@
               bwd (t :custom-vjp (MlxRuntime/customVjp (reify gen.mlx.MlxRuntime$CustomVjp
                                                          (apply [_ ps cs os] (handles (on-b #(vjp (wrap-all b ps) (wrap-all b cs) (wrap-all b os))))))))
               cv (t :closure (Mlx/mlx_custom_vjp fun bwd))
-              in (t :vector (MlxRuntime/vectorOf (long-array (map #(.-h ^MlxArray %) ins))))
+              in (t :vector (MlxRuntime/vectorOf (long-array (map #(handle %) ins))))
               ;; MLX makes the custom function's node on the default device
               out (t :vector (with-default-stream b #(Mlx/mlx_closure_apply cv in)))]
           (wrap-all b (MlxRuntime/vectorArrays out)))
@@ -134,13 +133,35 @@
 ;; Compile: mlx_compile of an MLX closure
 ;; ---------------------------------------------------------------------------
 
+(defonce ^:private husk
+  ;; what a donated array's handle holds after: one 0-d array for all
+  (delay (made "mlx_array_new_float" #(Mlx/mlx_array_new_float (float 0.0)))))
+
+(defn donate!
+  "Consume the MlxArray x, which a compiled function's call read
+   (array/compile's :donate): every later read of its handle is loud
+   (:donated), and the handle is repointed at a shared 0-d husk, dropping
+   its reference to x's data. The graph that reads x then holds that data
+   alone, and MLX donates the buffer to the op that consumes it (its
+   copy_gpu reuses a buffer only one array references): a scatter update
+   of a static cache writes in place. The handle is not freed here: it
+   stays valid (holding the husk), and x's phantom reference frees it
+   once, as any array's, so nothing is freed twice and no handle MLX
+   holds is freed. Returns nil."
+  [x]
+  (consume! x (fn [^long h] (MlxRuntime/repoint h (long @husk))))
+  nil)
+
 (defn compile-fn
   "p/-compile: f (a fn of a vector of MlxArrays to a vector of arrays) as an
    MLX closure, compiled with an id of its own; the returned fn applies it,
    from any thread. MLX traces it once per thread and input signature, and
    its traces are erased from every thread's compile cache when it is freed
-   (MlxRuntime.Compiled, genclj-hfwo)."
-  [b f {:keys [shapeless?]}]
+   (MlxRuntime.Compiled, genclj-hfwo). The inputs at the positions
+   :donate (a set) are donated once a call has returned its outputs
+   (donate!): consumed, so that MLX may reuse their buffers in the
+   evaluation of the outputs."
+  [b f {:keys [shapeless? donate]}]
   (let [run (fn [^longs ins]
               (let [outs (try (binding [*tracing-compile* true] (f (mapv #(wrap b %) ins)))
                               (catch clojure.lang.ExceptionInfo e
@@ -164,19 +185,23 @@
              (finally (MlxRaw/mlx_closure_free cl)))
         compiled (.-handle c)
         g (fn [xs]
-            (let [in (MlxRuntime/vectorOf (long-array (map #(.-h ^MlxArray %) xs)))]
-              (try
-                ;; nothing between enter, the call and exit may block: a
-                ;; virtual thread could move to another carrier, whose
-                ;; cache is another
-                (.enter c)
-                (let [out (try (try (Mlx/mlx_closure_apply compiled in)
-                                    (finally (.exit c)))
-                               (catch MlxException e (throw (mlx-error :compile xs e))))]
-                  (try (wrap-all b (MlxRuntime/vectorArrays out))
-                       (finally (MlxRaw/mlx_vector_array_free out))))
-                (finally
-                  (MlxRaw/mlx_vector_array_free in)
-                  (fence xs)))))]
+            (let [in (MlxRuntime/vectorOf (long-array (map #(handle %) xs)))
+                  outs (try
+                         ;; nothing between enter, the call and exit may
+                         ;; block: a virtual thread could move to another
+                         ;; carrier, whose cache is another
+                         (.enter c)
+                         (let [out (try (try (Mlx/mlx_closure_apply compiled in)
+                                             (finally (.exit c)))
+                                        (catch MlxException e (throw (mlx-error :compile xs e))))]
+                           (try (wrap-all b (MlxRuntime/vectorArrays out))
+                                (finally (MlxRaw/mlx_vector_array_free out))))
+                         (finally
+                           (MlxRaw/mlx_vector_array_free in)
+                           (fence xs)))]
+              ;; after the call, which returned: the outputs' graph now
+              ;; holds the donated inputs, and the handles here let go
+              (doseq [i donate] (donate! (nth xs i)))
+              outs))]
     (MlxRuntime/adoptCompiled g c)
     g))

@@ -391,7 +391,22 @@
                               ((array/compile (fn [x] {:s (array/sum x) :tag :done})) x)))))
     (testing "keys are not arguments: the trace would replay their draws"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"key's draws"
-                            ((array/compile (fn [k x] x)) (gen.random/key 1) x))))))
+                            ((array/compile (fn [k x] x)) (gen.random/key 1) x))))
+    (testing ":donate (experimental) gives the values the function does, on every backend"
+      ;; on MLX the donated arguments are consumed (gen.backend.mlx-test);
+      ;; where compile is f itself, nothing is
+      (let [upd (fn [acc {:keys [i v]}] {:acc (array/scatter-add acc i v 0) :s (array/sum acc)})
+            acc #(array/zeros [6])
+            arg {:i (array/array [1 4] {:dtype :int32}) :v (array/array [2.5 -1.0])}
+            plain ((array/compile upd) (acc) arg)
+            donated ((array/compile upd {:donate #{0}}) (acc) arg)
+            both ((array/compile upd {:donate [0 1]}) (acc) {:i (array/array [1 4] {:dtype :int32}) :v (array/array [2.5 -1.0])})]
+        (is (= (array/->clj (:acc plain)) (array/->clj (:acc donated)) (array/->clj (:acc both)) [0.0 2.5 0.0 0.0 -1.0 0.0]))
+        (is (= 0.0 (array/item (:s donated))))
+        (is (= :invalid-args (:reason (ts/thrown-data ((array/compile upd {:donate #{2}}) (acc) arg))))
+            "a position past the arguments")
+        (doseq [bad [0 #{-1} {:a 1} [:x]]]
+          (is (= :invalid-args (:reason (ts/thrown-data (array/compile upd {:donate bad})))) (pr-str bad)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; 1.2.1's edges (the health check of 2026-11-06): NumPy's values where the

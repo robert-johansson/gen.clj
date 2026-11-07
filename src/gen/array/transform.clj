@@ -77,10 +77,34 @@
 ;; Compilation (docs/array-api.md §8)
 ;; ---------------------------------------------------------------------------
 
+(defn- check-donate
+  "compile's options with :donate (when given) checked and made a set of
+   argument positions."
+  [opts]
+  (let [{:keys [donate]} opts]
+    (when-not (or (nil? donate)
+                  (and (coll? donate) (not (map? donate)) (every? #(and (integer? %) (c/<= 0 (long %))) donate)))
+      (throw (ex-info (str "compile: :donate is a collection of argument positions (integers from 0), not " (pr-str donate))
+                      {:reason :invalid-args :donate donate})))
+    (cond-> opts donate (assoc :donate (set (map long donate))))))
+
+(defn- donated-leaves
+  "The positions, among args' leaves (argument by argument, as a trace
+   takes them), of the leaves of the arguments at the positions donate."
+  [args donate]
+  (let [counts (mapv #(count (array/tree-leaves %)) args)
+        starts (vec (reductions c/+ 0 counts))]
+    (doseq [i donate]
+      (when-not (c/< (long i) (count args))
+        (throw (ex-info (str "compile: :donate names argument " i ", but the call has " (count args))
+                        {:reason :invalid-args :donate donate :arguments (count args)}))))
+    (into #{} (mapcat (fn [i] (range (starts i) (c/+ (long (starts i)) (long (counts i)))))) donate)))
+
 (defn compile
   "gen.array/compile's body."
   [f opts]
-  (let [compiled (atom {})]
+  (let [opts (check-donate opts)
+        compiled (atom {})]
     (fn [& args]
       (let [args (vec args)
             leaves (vec (array/tree-leaves args))]
@@ -91,8 +115,11 @@
                                  (when (instance? gen.random.threefry.Key l)
                                    ": a key's draws would be replayed by every call; draw outside, or close over the key"))
                             {:value l}))))
-        (let [b (array/backend-of :compile leaves)]
+        (let [b (array/backend-of :compile leaves)
+              donated (when (:donate opts) (donated-leaves args (:donate opts)))]
           (if-not (instance? gen.array.protocols.ICompiling b)
+            ;; compile is f itself here (the JVM backend, the tape, the
+            ;; batch tracer): nothing is donated
             (apply f args)
             (let [skel (tree/skeleton args)
                   entry (or (get @compiled [b skel])
@@ -101,7 +128,7 @@
                                                     (let [out (apply f (tree/refill skel ins))]
                                                       (reset! out-skel (tree/skeleton out))
                                                       (vec (array/tree-leaves out))))
-                                                opts)
+                                                (cond-> (dissoc opts :donate) donated (assoc :donate donated)))
                                   e {:g g :out out-skel :in skel}]
                               (swap! compiled assoc [b skel] e)
                               e))

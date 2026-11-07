@@ -315,7 +315,7 @@ inline void g_threefry(uint k0, uint k1, uint c0, uint c1, thread uint& w0, thre
                                                             1 (int (gen.backend.mlx.array/code dtype)))))
        (Mlx/mlx_fast_metal_kernel_config_set_grid cfg (int n) 1 1)
        (Mlx/mlx_fast_metal_kernel_config_set_thread_group cfg (int (min n thread-group)) 1 1)
-       (let [in (MlxRuntime/vectorOf (long-array (map #(.-h ^gen.backend.mlx.array.MlxArray %) (concat [root nn] inputs constant-arrays))))]
+       (let [in (MlxRuntime/vectorOf (long-array (map #(gen.backend.mlx.array/handle %) (concat [root nn] inputs constant-arrays))))]
          (try
            (let [out (Mlx/mlx_fast_metal_kernel_apply (.-h ^Kernel kernel) in cfg (gen.backend.mlx.array/stream b))]
              (try (let [arrays (vec (take (count outputs) (mapv #(gen.backend.mlx.array/wrap b %) (MlxRuntime/vectorArrays out))))]
@@ -355,7 +355,7 @@ inline void g_threefry(uint k0, uint k1, uint c0, uint c1, thread uint& w0, thre
   [x]
   (array/eval! [x])
   (let [^gen.backend.mlx.array.MlxArray x x
-        h (.-h x)
+        h (gen.backend.mlx.array/handle x)
         n (long (reduce * 1 (array/shape x)))]
     (try
       (when-not (Mlx/_mlx_array_is_row_contiguous h)

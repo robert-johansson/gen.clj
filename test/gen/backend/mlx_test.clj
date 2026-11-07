@@ -283,6 +283,86 @@
               (is (array/allclose? (array/sum (array/exp x)) (f x)))
               (is (= 1 @traces) "called, not traced"))))))))
 
+;; ---------------------------------------------------------------------------
+;; Donation (array/compile's :donate, experimental; genclj-tjvd)
+;; ---------------------------------------------------------------------------
+
+(defn- buffer-address
+  "The address of the evaluated float32 MLX array x's data."
+  ^long [x]
+  (array/eval! x)
+  (.address ^java.lang.foreign.MemorySegment
+   (gen.mlx.Mlx/mlx_array_data_float32 ((requiring-resolve 'gen.backend.mlx.array/handle) x))))
+
+(defn- update-at
+  "A large array with one slot updated: [acc'], the shape of a KV
+   cache's write."
+  [acc i v]
+  [(array/scatter-add acc i v 0)])
+
+(deftest donated-arguments-are-consumed-and-written-in-place
+  (when-mlx
+    (let [b (mlx)]
+      (when ((requiring-resolve 'gen.backend.mlx/compiles?) b)
+        (array/with-backend b
+          (let [donated? (requiring-resolve 'gen.backend.mlx.array/donated?)
+                n (* 1024 1024)
+                fresh #(array/eval! (array/+ (array/zeros [n]) 0.0))
+                i (array/array [7] {:dtype :int32})
+                v (array/array [2.5])
+                plain (array/compile update-at)
+                donating (array/compile update-at {:donate #{0}})]
+            (testing "a donated argument is consumed: every later read is loud"
+              (let [acc (fresh)
+                    [out] (donating acc i v)]
+                (is (donated? acc))
+                (is (not (donated? i)) "an argument not donated stays")
+                (is (= 2.5 (array/item (array/take out 7 0))))
+                (doseq [[what f] {"item" #(array/item (array/sum acc))
+                                  "an op" #(array/+ acc 1.0)
+                                  "->clj" #(array/->clj acc)
+                                  "eval!" #(array/eval! acc)
+                                  "another call" #(donating acc i v)}]
+                  (is (= :donated (:reason (ts/thrown-data (f)))) what))))
+            (testing "its buffer is reused: the update writes in place, where a held one is copied"
+              (let [acc (fresh)
+                    before (buffer-address acc)
+                    [out] (donating acc i v)]
+                (is (= before (buffer-address out)) "donated: in place"))
+              (let [acc (fresh)
+                    before (buffer-address acc)
+                    [out] (plain acc i v)]
+                (is (not= before (buffer-address out)) "held: copied")
+                (is (= 0.0 (array/item (array/take acc 7 0))) "and the argument keeps its value")))
+            (testing "a donated handle is freed once, by its phantom reference, and the results stay"
+              ;; donate! repoints the handle at a husk and never frees it:
+              ;; freeing it there as well would free it twice when the GC
+              ;; finds the array (a crash, here or in a later test)
+              (let [live #(first (gen.mlx.MlxRuntime/lifetimeStats))
+                    _ (gen.mlx.MlxRuntime/collectNow)
+                    live0 (live)
+                    outs (loop [k 0 acc (array/eval! (array/zeros [64])) outs []]
+                           (if (< k 1920)
+                             (let [[acc'] (donating acc (array/array [(mod k 64)] {:dtype :int32}) (array/array [1.0]))]
+                               (array/eval! acc')
+                               ;; a copy kept (acc' itself is consumed next)
+                               (recur (inc k) acc' (if (zero? (mod k 480)) (conj outs (array/eval! (array/+ acc' 0.0))) outs)))
+                             (conj outs acc)))]
+                (gen.mlx.MlxRuntime/collectNow)
+                (is (< (- (live) live0) 50) "the donated arrays' handles were freed")
+                (is (= (repeat 64 30.0) (array/->clj (peek outs))) "the last result reads its value")
+                (is (= 1.0 (array/item (array/sum (first outs)))) "an early result too")))
+            (testing "under the tape and the batch tracer compile is the function itself: nothing is consumed"
+              (let [x (array/array [1.0 2.0 3.0])
+                    f (array/compile (fn [x] (array/sum (array/square x))) {:donate #{0}})]
+                (is (= [2.0 4.0 6.0] (array/->clj ((array/grad f) x))))
+                (let [xs (array/reshape x [3 1])]
+                  (is (= [1.0 4.0 9.0] (array/->clj ((array/vmap f) xs))))
+                  (is (= [[1.0] [2.0] [3.0]] (array/->clj xs))))
+                (is (not (donated? x)))
+                (is (= 14.0 (array/item (f (array/* x 1.0)))))
+                (is (= [1.0 2.0 3.0] (array/->clj x)))))))))))
+
 ;; held until the JVM exits, as gen.inference.mcmc's compiled steps are: a
 ;; compiled function erases its cache entries when it is freed
 (def ^:private compiled-at-exit (atom nil))
