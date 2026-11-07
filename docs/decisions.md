@@ -4071,3 +4071,66 @@ recommendations stand.
   references;
 - memo.clj's session may be asked to repoint its fenrir scripts;
 - main may be pushed once the Qwen3 check against llama.cpp passes.
+
+### Inference refuses option keys it does not read
+
+(PROVISIONAL, owner to confirm; genclj-vux3, 2026-11-07)
+
+1.3.0 is the minor release the 1.2.1 entry waited for. An unknown key is now
+an ex-info error, `{:reason :unknown-options :fn :unknown :accepted}`. The
+check is one internal helper, gen.inference.options/check. The lead's calls,
+taken on the implementing agent's recommendations:
+
+1. **A shared options map is refused, with no exception;** a qualified key is
+   refused like any other. To migrate: `(select-keys opts (:accepted (ex-data e)))`.
+   - Not taken: letting qualified keys through, so callers could carry their
+     own data in the map; an explicit opt-out.
+2. **Scope:** the bean's six areas, plus mh/move (pf/reweighting passes its
+   options on). kernel/kernel and tf/run share the helper; tf/run's error
+   data changed form.
+3. **Keys read only in some cases stay accepted:**
+   - :float is accepted where :device reads it;
+   - the -particles kernels accept :compile? and still refuse it when true.
+4. **Keys refused although they meant something before:**
+   - nuts/adapt refuses :samples and :keep;
+   - pf/resize refuses :n, which its argument used to overwrite silently;
+   - importance-resampling refuses the undocumented :device;
+   - pf/reweighting refuses mh/move's undocumented :fwd-choices.
+   Any of them returns by adding the key to that function's set.
+5. **Remaining:** these stable functions still ignore unknown keys:
+   enumerative's options, learning/train, tf's translators, the diagnostics'
+   quantiles, and the gradient functions. A follow-up bean in 1.3.0 covers
+   them, so the release carries a single break.
+
+### llama.cpp LoRA adapters: models that engines share
+
+(PROVISIONAL, owner to confirm; genclj-vdu4, 2026-11-07)
+
+gen.llm.llama gains `model` (a value engines share) and `adapter` (a LoRA
+GGUF loaded for a model), and engines take `:adapters {adapter scale}`. The
+binding's eight adapter functions are written in jextract 25's exact form;
+jextract was not installed, and native/jextract-llama.sh lists them for the
+next regeneration. The lead's calls, on the implementing agent's
+recommendations:
+
+1. **Several adapters over one base:** one model value shared by engines,
+   each engine with its own context.
+   - Not taken: a model per engine, which loads the weights twice; adapters
+     per branch, where llama.cpp rebuilds its graph each time the set
+     changes.
+2. **An engine's adapter set is fixed for its life.**
+   - Not taken: set-adapters! while no branch is live.
+3. **Concurrency:** engines over one model decode concurrently under the
+   model's read lock; loading or freeing an adapter, and freeing the model,
+   take its write lock. llama.cpp's test-thread-safety covers several
+   contexts per model.
+4. **Closing a model or adapter in use is loud (:in-use),** and closing a
+   model frees its adapters.
+   - Not taken: reference counting.
+5. **aLoRA adapters are refused by engines (:unsupported-adapter);** their
+   invocation tokens stay readable.
+6. **Adapters are loaded for a model first;** an engine takes no adapter
+   paths.
+7. **A JVM exiting with a llama.cpp model or engine still open aborts on
+   Metal** (ggml-metal's exit assertion). This was true before. It is
+   documented, and a bean weighs a shutdown hook.
