@@ -169,6 +169,20 @@
           (let [out (t (qmm (t (Mlx/mlx_reshape hx (int-array [1 (first sx)]) s)) hw hs hb))]
             (wrap b (Mlx/mlx_reshape out (int-array [-1]) s))))
 
+        ;; Leading axes go through as one matrix of rows. MLX 0.32.4's CUDA
+        ;; kernels take M from x's second-last axis and loop over the rest,
+        ;; so a decode step's [B 1 K] becomes B products of one row, each
+        ;; reading the weights again: 12-13x slower at 64 rows than the
+        ;; same product as [B K], with equal values (measured on fenrir's
+        ;; RTX PRO 6000, 2026-11-07). The weights are shared, so the rows
+        ;; are independent and the reshape exact.
+        (> (count sx) 2)
+        (with-temps [t]
+          (let [lead (pop sx)
+                rows (long (reduce clojure.core/* 1 lead))
+                out (t (qmm (t (Mlx/mlx_reshape hx (int-array [rows (peek sx)]) s)) hw hs hb))]
+            (wrap b (Mlx/mlx_reshape out (int-array (conj lead -1)) s))))
+
         :else
         (wrap b (qmm hx hw hs hb))))))
 
