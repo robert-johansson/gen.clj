@@ -5026,3 +5026,56 @@ autobatcher" decision; that is why it is opt-in.
 - Concurrent clients each hold their own LM over the shared engine. An LM
   that served concurrent callers would change its contract (the owner's call;
   not done).
+
+### Continuous batching, as built
+
+(PROVISIONAL, owner to confirm; genclj-b3ow, 2026-11-08; builds on
+"Continuous batching: its design")
+
+**What was built.**
+- **A task loop in gen.llm.slots** replaces the engine thread's executor.
+  The optional Batching protocol (slots-forward) is used only when an engine
+  declares :batching.
+  - advance, extend and open become requests, held in flight.
+  - Between forwards, the loop runs one forward over every one-token read,
+    plus a prefill chunk for the oldest longer read.
+- **qwen3/paged-batch-step:**
+  - decode rows go through the paged kernel;
+  - the chunk goes through its gathered blocks and sdpa;
+  - logits are computed only for the rows read.
+- Engines without Batching behave as before, shown by a recording test. The
+  llama.cpp, static and toy suites pass unchanged.
+
+**Measured on Metal** (Qwen3-0.6B Q8_0), tokens/s with the median read
+latency:
+
+| | static | paged | continuous | llama.cpp |
+|---|---:|---:|---:|---:|
+| 8 clients, float16 | 86 (84 ms) | 90 (82 ms) | **302 (18 ms)** | 103 (72 ms) |
+| 8 clients, float32 | 78 | 82 | **175** | 92 |
+| token SMC, 16 particles, float16 | 638 | 641 | 670 | 900 |
+| 2 SMC runs at once, float32 | | 596 | 799 | 889 |
+
+- A lone client is unchanged: 81 against 77 tokens/s.
+- llama.cpp batches only within one call, so its concurrent clients take
+  turns.
+
+**The lead's calls, on the implementing agent's recommendations:**
+1. **Opt-in (:continuous?),** since concurrent callers' results depend on how
+   calls were gathered, within the band. Not taken: a deterministic lockstep
+   batcher with registered workers, which needs a registration API.
+2. **The scheduler lives in gen.llm.slots** as an optional protocol. Not
+   taken: two thread code paths.
+3. **Prefill chunks use the gathered blocks and sdpa.** A dedicated paged
+   prefill kernel is a later option.
+4. **The wait for returning callers is a quarter of the last forward's
+   time.**
+5. **Each concurrent client holds its own LM** over the shared engine.
+
+**Left:**
+- more than one prefill chunk per forward;
+- copy-on-write inside the step (genclj-6qb6);
+- batching for llama.cpp's Slots (its llama_decode takes mixed batches);
+- the CUDA kernel;
+- two edge cases in the paged mode: score dropping :lost-slots, and a failed
+  normalization leaving consumed pools in the engine's state.
