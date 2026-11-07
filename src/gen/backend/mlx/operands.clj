@@ -329,6 +329,14 @@
           (catch MlxException e (throw (mlx-error :->clj [x] e)))
           (finally (fence x)))))))
 
+(defn- read-floats
+  "The n float32 elements of the evaluated, row-contiguous handle h, as a
+   float array."
+  ^floats [^long h ^long n]
+  (if (zero? n)
+    (float-array 0)
+    (.toArray (data-segment (Mlx/mlx_array_data_float32 h) (* 4 n)) ValueLayout/JAVA_FLOAT)))
+
 (defn to-floats
   "x's values, row-major, as a new float array: a float32 array's buffer
    read in place, another dtype's cast to float32 first. Evaluates x."
@@ -348,9 +356,7 @@
                       (let [c (t (Mlx/mlx_contiguous h false s))]
                         (Mlx/mlx_array_eval c)
                         c))]
-              (if (zero? n)
-                (float-array 0)
-                (.toArray (data-segment (Mlx/mlx_array_data_float32 c) (* 4 n)) ValueLayout/JAVA_FLOAT)))))
+              (read-floats c n))))
         (catch MlxException e (throw (mlx-error :->floats [x] e)))
         (finally (fence x))))))
 
