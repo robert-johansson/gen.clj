@@ -196,14 +196,19 @@
        :f32, :i32    an array of float32, int32
        :f16          an array of float16, or float32 (the same values)
                      on a backend without float16
-       :q8_0, :q4_0, :q4_1
+       :q8_0, :q4_0, :q4_1, :q5_0, :q5_1
                      [wq scales biases]: MLX's affine quantization in
-                     groups of 32 (8 bits for Q8_0, 4 for the others),
-                     wq uint32 [.. N K·bits/32], scales and biases float32
-                     [.. N K/32]: the file's scale d, and its bias
-                     (Q4_1's), -128·d (Q8_0's) or -8·d (Q4_0's) computed
-                     in float32, so that the values are the file's
-                     exactly"))
+                     groups of 32 (8 bits for Q8_0, 5 for Q5_0 and Q5_1,
+                     4 for the others), wq uint32 [.. N K·bits/32], scales
+                     and biases float32 [.. N K/32]: the file's scale d,
+                     and its bias (Q4_1's, Q5_1's), -128·d (Q8_0's), -8·d
+                     (Q4_0's) or -16·d (Q5_0's) computed in float32, so
+                     that the values are the file's exactly
+       :q4_k, :q5_k  [wq scales biases] likewise at 4 and 5 bits, a
+                     sub-block of 32 a group: scale d·sc and bias -(dmin·m)
+                     in float32
+       :q6_k         an array of float32, d·sc·(q - 32)
+     gen.array.gguf/host-tensor decodes every type so on the host."))
 
 (defprotocol ^{:api :experimental} IOverwriting
   "A backend that writes values over an array's entries at indices:

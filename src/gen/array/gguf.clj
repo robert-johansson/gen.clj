@@ -13,8 +13,20 @@
      Q4_0 and Q4_1 as MLX's affine quantization in groups of 32 (the
      quantized words, scales and biases gen.array/dequantize takes), the
      scales and biases in float32 (DESIGN §9, 1.3.0's engine design).
-     Every other type is a loud error: MLX's loader would turn it into
-     float16, silently, and the JVM backend reads only these.
+   - And the types MLX's loader does not read (it would turn them into
+     float16, silently), decoded here on every backend, each value the
+     file's exactly (llama.cpp's dequantize_row_*, bit for bit):
+     - Q5_0 and Q5_1 (Q4_K_M's fallbacks for rows not of 256 values) as
+       the affine quantization at 5 bits, groups of 32;
+     - Q4_K and Q5_K (super-blocks of 256: 8 sub-blocks of 32, each a
+       6-bit scale sc and min m over the super-block's float16 d and
+       dmin) as the affine quantization at 4 and 5 bits, a sub-block a
+       group: scale d·sc and bias -(dmin·m) in float32, both products
+       exact, as llama.cpp computes them;
+     - Q6_K (16 sub-blocks of 16, int8 scales) as float32, d·sc·(q - 32)
+       (exact): MLX's affine kernels take groups of 32, 64 or 128, and
+       two sub-blocks of different scales share no affine group.
+     Every other type is a loud error.
 
    Dimensions: GGML lists a tensor's innermost first; a shape here is
    gen.array's (outermost first, as MLX reverses them), so a matrix
@@ -24,6 +36,8 @@
   (:require [clojure.string :as str]
             [gen.array.protocols :as p])
   (:import [java.nio ByteBuffer ByteOrder]
+           [java.util Collection]
+           [java.util.concurrent ExecutionException ForkJoinPool Future]
            [java.nio.channels FileChannel FileChannel$MapMode]
            [java.nio.charset StandardCharsets]
            [java.nio.file Files LinkOption OpenOption Path StandardOpenOption]))
@@ -44,23 +58,37 @@
 
 (def loadable
   "The tensor types load-gguf reads: a plain type's dtype and bytes per
-   value, or a quantized type's block (32 values) in bytes and its bits."
+   value; a block type's block, :values values in :block bytes, and
+   either the bits of the affine quantization it loads as (:bits, in
+   groups of 32) or the dtype it is decoded to (:dtype, Q6_K's)."
   {:f32 {:dtype :float32 :bytes 4}
    :f16 {:dtype :float16 :bytes 2}
    :i32 {:dtype :int32 :bytes 4}
-   :q8_0 {:block 34 :bits 8}
-   :q4_0 {:block 18 :bits 4}
-   :q4_1 {:block 20 :bits 4}})
+   :q8_0 {:values 32 :block 34 :bits 8}
+   :q4_0 {:values 32 :block 18 :bits 4}
+   :q4_1 {:values 32 :block 20 :bits 4}
+   :q5_0 {:values 32 :block 22 :bits 5}
+   :q5_1 {:values 32 :block 24 :bits 5}
+   :q4_k {:values 256 :block 144 :bits 4}
+   :q5_k {:values 256 :block 176 :bits 5}
+   :q6_k {:values 256 :block 210 :dtype :float32}})
 
 (def ^:const group-size
-  "The values a GGUF quantization block holds, and so the group size of
-   the affine quantization its tensors load as."
+  "The group size of the affine quantization quantized tensors load as:
+   a block of the 32-value types, a sub-block of Q4_K and Q5_K."
   32)
 
 (defn quantized?
   "Is the tensor type t one that loads as a quantized triple?"
   [t]
-  (contains? #{:q8_0 :q4_0 :q4_1} t))
+  (contains? #{:q8_0 :q4_0 :q4_1 :q5_0 :q5_1 :q4_k :q5_k} t))
+
+(defn mlx-reads?
+  "Does MLX's GGUF loader read the tensor type t as load-gguf loads it?
+   F32, F16, I32, Q8_0, Q4_0 and Q4_1: it turns the others into float16
+   (a file holding one loads through the host reader on MLX)."
+  [t]
+  (contains? #{:f32 :f16 :i32 :q8_0 :q4_0 :q4_1} t))
 
 (defn- invalid
   [path message data]
@@ -142,9 +170,9 @@
    load-gguf does not read."
   [t shape]
   (let [n (reduce * 1 shape)
-        {:keys [bytes block]} (loadable t)]
+        {:keys [bytes block values]} (loadable t)]
     (cond bytes (* (long bytes) (long n))
-          block (* (long block) (quot (long n) group-size)))))
+          block (* (long block) (quot (long n) (long values))))))
 
 (defn header
   "The header of the GGUF file at path: {:path :version :metadata
@@ -253,9 +281,10 @@
   "The tensors of a model's headers, each checked loadable: one of the
    types load-gguf reads (else :unsupported, naming it), a quantized one
    named <base>.weight with nothing else named <base>.scales or
-   <base>.biases (the names its triple loads under on MLX), its innermost
-   axis a multiple of 32, no name twice (:invalid-gguf), and as many as a
-   split's first file says (split.tensors.count)."
+   <base>.biases (the names its triple loads under on MLX), a block
+   type's innermost axis a multiple of its block (32 values, or 256 for
+   the K-quants), no name twice (:invalid-gguf), and as many as a split's
+   first file says (split.tensors.count)."
   [headers]
   (let [tensors (vec (mapcat :tensors headers))
         path (:path (first headers))
@@ -269,7 +298,8 @@
     (doseq [{:keys [name type shape]} tensors]
       (when-not (loadable type)
         (throw (ex-info (str "load-gguf: " path ": tensor " name " is " (str/upper-case (clojure.core/name type))
-                             ", a type not supported (F32, F16, I32, Q8_0, Q4_0 and Q4_1 are)")
+                             ", a type not supported (F32, F16, I32, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q4_K, Q5_K"
+                             " and Q6_K are)")
                         {:reason :unsupported :path path :tensor name :type type})))
       (when (quantized? type)
         (when-not (str/ends-with? name ".weight")
@@ -277,100 +307,337 @@
         (let [base (subs name 0 (- (count name) (count ".weight")))]
           (when (some names [(str base ".scales") (str base ".biases")])
             (throw (invalid path (str "the quantized tensor " name " shares its base with a tensor named "
-                                      base ".scales or .biases") {:tensor name}))))
-        (when-not (and (seq shape) (zero? (rem (long (peek shape)) group-size)))
-          (throw (invalid path (str "the quantized tensor " name "'s innermost axis is not a multiple of 32: " shape)
+                                      base ".scales or .biases") {:tensor name})))))
+      (when-let [values (:values (loadable type))]
+        (when-not (and (seq shape) (zero? (rem (long (peek shape)) (long values))))
+          (throw (invalid path (str "the " (str/upper-case (clojure.core/name type)) " tensor " name
+                                    "'s innermost axis is not a multiple of " values ": " shape)
                           {:tensor name :shape shape})))))
     tensors))
 
 ;; ---------------------------------------------------------------------------
-;; Tensors on the host (the JVM backend's loader)
+;; Tensors on the host: the JVM backend's loader, and MLX's for the types its
+;; own loader does not read. Every value is the file's exactly: a block's
+;; codes repacked as MLX's affine layout packs them (value j of a row at bits
+;; [j·b, (j+1)·b) of its words, little-endian), its scale and bias computed
+;; in float32 as llama.cpp's dequantize_row_* computes them, where each
+;; product is exact
 ;; ---------------------------------------------------------------------------
 
 (defn- f16 ^double [^ByteBuffer b ^long at]
   (double (Float/float16ToFloat (.getShort b (int at)))))
 
-(defn- plain
-  "The n values of a plain tensor, as doubles."
-  ^doubles [^ByteBuffer b t ^long n]
-  (let [out (double-array n)]
+(defn- byte-at ^long [^ByteBuffer b ^long at] (bit-and (long (.get b (int at))) 0xff))
+
+(defn- nibbles
+  "The low nibbles of the 8 bytes of x (byte i at bits 8i), as one word:
+   byte i's at bits 4i."
+  ^long [^long x]
+  (let [y (bit-and x 0x0F0F0F0F0F0F0F0F)
+        y (bit-and (bit-or y (unsigned-bit-shift-right y 4)) 0x00FF00FF00FF00FF)
+        y (bit-and (bit-or y (unsigned-bit-shift-right y 8)) 0x0000FFFF0000FFFF)]
+    (bit-and (bit-or y (unsigned-bit-shift-right y 16)) 0xFFFFFFFF)))
+
+(defn- fives
+  "The 5-bit values in the 8 bytes of x (byte i at bits 8i), as 40 bits:
+   byte i's at bits 5i."
+  ^long [^long x]
+  (let [y (bit-or (bit-and x 0x001F001F001F001F) (unsigned-bit-shift-right (bit-and x 0x1F001F001F001F00) 3))
+        y (bit-or (bit-and y 0x000003FF000003FF) (unsigned-bit-shift-right (bit-and y 0x03FF000003FF0000) 6))]
+    (bit-or (bit-and y 0xFFFFF) (unsigned-bit-shift-right (bit-and y 0x000FFFFF00000000) 12))))
+
+(defmacro ^:private put-fives!
+  "A group's 32 values of 5 bits, four longs of 8 (byte i of each the
+   value, as fives takes them), as the 5 words at w of words."
+  [words w x0 x1 x2 x3]
+  `(let [^"[I" ws# ~words
+         w# (long ~w)
+         t0# (fives ~x0) t1# (fives ~x1) t2# (fives ~x2) t3# (fives ~x3)]
+     (aset ws# w# (unchecked-int t0#))
+     (aset ws# (+ w# 1) (unchecked-int (bit-or (unsigned-bit-shift-right t0# 32) (bit-shift-left t1# 8))))
+     (aset ws# (+ w# 2) (unchecked-int (bit-or (unsigned-bit-shift-right t1# 24) (bit-shift-left t2# 16))))
+     (aset ws# (+ w# 3) (unchecked-int (bit-or (unsigned-bit-shift-right t2# 16) (bit-shift-left t3# 24))))
+     (aset ws# (+ w# 4) (unchecked-int (unsigned-bit-shift-right t3# 8)))))
+
+(def ^:private ^"[J" spread
+  "Bit i of a byte at bit 8i of a long, for every byte."
+  (let [t (long-array 256)]
+    (dotimes [v 256]
+      (aset t v (long (reduce (fn [^long acc ^long i] (if (bit-test v i) (bit-or acc (bit-shift-left 1 (* 8 i))) acc))
+                              0 (range 8)))))
+    t))
+
+(defn- high-bits
+  "The bits 8k to 8k + 7 of the word qh, each at bit 4 of its byte: the
+   fifth bits of a Q5_0 or Q5_1 block's values 8k to 8k + 7."
+  ^long [^long qh ^long k]
+  (bit-shift-left (aget spread (bit-and (unsigned-bit-shift-right qh (* 8 k)) 0xff)) 4))
+
+(defmacro ^:private each-block
+  "body for each block i of [from, to)."
+  [[i from to] & body]
+  `(let [to# (long ~to)]
+     (loop [~i (long ~from)]
+       (when (< ~i to#)
+         ~@body
+         (recur (inc ~i))))))
+
+(def ^:private chunk-bytes
+  "The least bytes of a tensor a task of the host's decoding reads (a var
+   the tests redefine, to decode their small tensors in ranges)."
+  (* 4 1024 1024))
+
+(defn- decode!
+  "(f from to) for every block of the n blocks (of size bytes each) of a
+   tensor, in contiguous ranges: on the common fork-join pool, a range of
+   at least chunk-bytes a task, when the tensor has several; each block's
+   values are written by one call, to their own places."
+  [^long n ^long size f]
+  (let [pool (ForkJoinPool/commonPool)
+        parts (min (long (.getParallelism pool)) (quot (* n size) (long chunk-bytes)))]
+    (if (<= parts 1)
+      (f 0 n)
+      (let [step (quot (+ n (dec parts)) parts)
+            tasks (vec (for [p (range parts)
+                             :let [from (* (long p) step)]
+                             :when (< from n)]
+                         ^Callable (fn [] (f from (min n (+ from step))))))]
+        (doseq [^Future fut (.invokeAll pool ^Collection tasks)]
+          (try (.get fut)
+               (catch ExecutionException e (throw (.getCause e)))))))))
+
+(defn- blocks-32!
+  "The blocks of 32 values of type t (Q8_0, Q4_0, Q4_1, Q5_0, Q5_1), each
+   one group of MLX's affine quantization: its words; its scale d; its
+   bias, Q4_1's and Q5_1's m, or -128·d, -8·d, -16·d in float32 (exact),
+   where MLX's loader computes Q8_0's and Q4_0's in float16, which
+   overflows for d past 511.75 (they are equal where it does not). The
+   codes: Q8_0's int8 shifted to uint8 (x ^ 0x80), as MLX's loader
+   shifts them; a 4-bit type's nibbles, values 0 to 15 the low nibbles
+   of its 16 bytes, 16 to 31 the high ones; Q5_0's and Q5_1's the same
+   with their fifth bits from the block's word qh (value j's bit j)."
+  [^ByteBuffer b t ^ints words ^floats scales ^floats biases from to]
+  (let [from (long from) to (long to)]
     (case t
-      :f32 (dotimes [i n] (aset out i (double (.getFloat b (int (* 4 i))))))
-      :f16 (dotimes [i n] (aset out i (f16 b (* 2 i))))
-      :i32 (dotimes [i n] (aset out i (double (.getInt b (int (* 4 i)))))))
-    out))
+      :q8_0 (each-block [i from to]
+              (let [at (* i 34)
+                    d (f16 b at)]
+                (aset scales i (unchecked-float d))
+                (aset biases i (unchecked-float (* -128.0 d)))
+                (dotimes [k 8]
+                  (aset words (+ (* 8 i) k) (unchecked-int (bit-xor (.getInt b (int (+ at 2 (* 4 k)))) (unchecked-int 0x80808080)))))))
+      (:q4_0 :q4_1) (let [q4-1? (= t :q4_1)
+                          size (if q4-1? 20 18)]
+                      (each-block [i from to]
+                        (let [at (* i size)
+                              d (f16 b at)
+                              qs (+ at (if q4-1? 4 2))
+                              x0 (.getLong b (int qs))
+                              x1 (.getLong b (int (+ qs 8)))
+                              w (* 4 i)]
+                          (aset scales i (unchecked-float d))
+                          (aset biases i (unchecked-float (if q4-1? (f16 b (+ at 2)) (* -8.0 d))))
+                          (aset words w (unchecked-int (nibbles x0)))
+                          (aset words (+ w 1) (unchecked-int (nibbles x1)))
+                          (aset words (+ w 2) (unchecked-int (nibbles (unsigned-bit-shift-right x0 4))))
+                          (aset words (+ w 3) (unchecked-int (nibbles (unsigned-bit-shift-right x1 4)))))))
+      (:q5_0 :q5_1) (let [q5-1? (= t :q5_1)
+                          size (if q5-1? 24 22)]
+                      (each-block [i from to]
+                        (let [at (* i size)
+                              d (f16 b at)
+                              qh-at (+ at (if q5-1? 4 2))
+                              qh (Integer/toUnsignedLong (.getInt b (int qh-at)))
+                              x0 (.getLong b (int (+ qh-at 4)))
+                              x1 (.getLong b (int (+ qh-at 12)))
+                              lo 0x0F0F0F0F0F0F0F0F]
+                          (aset scales i (unchecked-float d))
+                          (aset biases i (unchecked-float (if q5-1? (f16 b (+ at 2)) (* -16.0 d))))
+                          (put-fives! words (* 5 i)
+                                      (bit-or (bit-and x0 lo) (high-bits qh 0))
+                                      (bit-or (bit-and x1 lo) (high-bits qh 1))
+                                      (bit-or (bit-and (unsigned-bit-shift-right x0 4) lo) (high-bits qh 2))
+                                      (bit-or (bit-and (unsigned-bit-shift-right x1 4) lo) (high-bits qh 3)))))))))
 
-(defn- code
-  "Value j (of 32) of the block at at, as MLX's loader stores it: Q8_0's
-   int8 shifted to uint8 (x ^ 0x80), a 4-bit type's nibble (values 0-15
-   the low nibbles of its 16 bytes, 16-31 the high ones)."
-  ^long [^ByteBuffer b t ^long at ^long j]
-  (case t
-    :q8_0 (bit-xor (bit-and (long (.get b (int (+ at 2 j)))) 0xff) 0x80)
-    (let [qs (+ at (if (= t :q4_1) 4 2))
-          byte (bit-and (long (.get b (int (+ qs (bit-and j 15))))) 0xff)]
-      (if (< j 16) (bit-and byte 15) (bit-shift-right byte 4)))))
+(defn- scale-min
+  "Sub-block j's scale and min (6 bits each) from a Q4_K or Q5_K
+   super-block's 12 scale bytes at at, as llama.cpp's get_scale_min_k4
+   reads them: the scale in bits 0-7 of the result, the min in 8-15."
+  ^long [^ByteBuffer b ^long at ^long j]
+  (if (< j 4)
+    (bit-or (bit-and (byte-at b (+ at j)) 63)
+            (bit-shift-left (bit-and (byte-at b (+ at j 4)) 63) 8))
+    (let [s (byte-at b (+ at j 4))]
+      (bit-or (bit-or (bit-and s 0xF) (bit-shift-left (bit-shift-right (byte-at b (+ at (- j 4))) 6) 4))
+              (bit-shift-left (bit-or (bit-shift-right s 4) (bit-shift-left (bit-shift-right (byte-at b (+ at j)) 6) 4)) 8)))))
 
-(defn- quantized-block!
-  "Block i's words (32 values of bits bits, packed little-endian: 8 or 4
-   words), scale and bias, into words, scales and biases."
-  [^ByteBuffer b t i ^doubles words ^doubles scales ^doubles biases]
-  (let [i (long i)
-        {:keys [block bits]} (loadable t)
-        bits (long bits)
-        at (* i (long block))
-        per-word (quot 32 bits)
-        n-words (quot 32 per-word)
-        d (f16 b at)]
-    (aset scales i d)
-    ;; MLX's loader computes Q8_0's and Q4_0's biases in float16 (-128·d
-    ;; and -8·d), which overflows for d past 511.75; in float32 they are
-    ;; exact, and equal where float16's do not overflow
-    (aset biases i (case t
-                     :q8_0 (double (unchecked-float (* -128.0 d)))
-                     :q4_0 (double (unchecked-float (* -8.0 d)))
-                     :q4_1 (f16 b (+ at 2))))
-    ;; value j at bits [j·bits, (j+1)·bits) of the block's words: the
-    ;; values' bits are disjoint, so a word is their sum (exact in a double)
-    (dotimes [j 32]
-      (let [w (+ (* i n-words) (quot j per-word))]
-        (aset words w (+ (aget words w) (double (bit-shift-left (code b t at j) (* (rem j per-word) bits)))))))))
+(defmacro ^:private sub-blocks!
+  "Super-block i's (at at in b) 8 groups' scales d·sc and biases -(dmin·m),
+   the products in float32 as llama.cpp's dequantize_row_q4_K and _q5_K
+   compute them: exact, an 11-bit significand times a 6-bit integer."
+  [b at i scales biases]
+  `(let [^ByteBuffer b# ~b
+         at# (long ~at)
+         g# (* 8 (long ~i))
+         ^"[F" scales# ~scales
+         ^"[F" biases# ~biases
+         d# (f16 b# at#)
+         dmin# (f16 b# (+ at# 2))]
+     (dotimes [j# 8]
+       (let [sm# (scale-min b# (+ at# 4) j#)]
+         (aset scales# (+ g# j#) (unchecked-float (* d# (double (bit-and sm# 0xff)))))
+         (aset biases# (+ g# j#) (unchecked-float (- (* dmin# (double (bit-shift-right sm# 8))))))))))
 
-(defn- quantized
-  "[words scales biases] of a quantized tensor of n values, doubles: MLX's
-   affine layout, groups of 32."
-  [^ByteBuffer b t ^long n]
-  (let [blocks (quot n group-size)
-        bits (long (:bits (loadable t)))
-        words (double-array (quot (* n bits) 32))
-        scales (double-array blocks)
-        biases (double-array blocks)]
-    (dotimes [i blocks]
-      (quantized-block! b t i words scales biases))
-    [words scales biases]))
+(defn- q4-k!
+  "Q4_K's super-blocks (256 values: 8 sub-blocks of 32, d, dmin, the
+   sub-blocks' 6-bit scales and mins, the codes) as MLX's affine
+   quantization at 4 bits, a sub-block a group: in chunk c (64 values,
+   32 bytes), sub-block 2c's codes the low nibbles, 2c + 1's the high
+   ones."
+  [^ByteBuffer b ^ints words ^floats scales ^floats biases from to]
+  (each-block [i from to]
+    (let [at (* i 144)]
+      (sub-blocks! b at i scales biases)
+      (dotimes [c 4]
+        (dotimes [k 4]
+          (let [x (.getLong b (int (+ at 16 (* 32 c) (* 8 k))))
+                w (+ (* 32 i) (* 8 c) k)]
+            (aset words w (unchecked-int (nibbles x)))
+            (aset words (+ w 4) (unchecked-int (nibbles (unsigned-bit-shift-right x 4))))))))))
 
-(defn read-tensor
-  "The tensor of the file at path described by info (header's), on the
-   host: {:dtype :shape :data} for a plain type (data a double[] of the
-   values, row-major), or {:quantized [words scales biases] :shapes
-   [words' scales' biases'] :bits} for a quantized one (MLX's affine
-   layout in groups of 32: words uint32 values, scales and biases float32
-   values, as doubles)."
+(defn- five
+  "The 5-bit values of a Q5_K sub-block s's 8 values in x (the bytes of
+   their nibbles, the low ones at shift 0, the high ones at 4) and h
+   (their bytes of qh, bit s the fifth bit), byte i of the result value
+   i's."
+  ^long [^long x ^long h ^long s ^long shift]
+  (bit-or (bit-and (unsigned-bit-shift-right x shift) 0x0F0F0F0F0F0F0F0F)
+          (bit-shift-left (bit-and (unsigned-bit-shift-right h s) 0x0101010101010101) 4)))
+
+(defn- q5-k!
+  "Q5_K's super-blocks as MLX's affine quantization at 5 bits, a
+   sub-block a group: Q4_K's layout, and the fifth bit of sub-block s's
+   value l is bit s of byte l of the super-block's 32 bytes qh."
+  [^ByteBuffer b ^ints words ^floats scales ^floats biases from to]
+  (each-block [i from to]
+    (let [at (* i 176)
+          h0 (.getLong b (int (+ at 16))) h1 (.getLong b (int (+ at 24)))
+          h2 (.getLong b (int (+ at 32))) h3 (.getLong b (int (+ at 40)))]
+      (sub-blocks! b at i scales biases)
+      (dotimes [c 4]
+        (let [qs (+ at 48 (* 32 c))
+              x0 (.getLong b (int qs)) x1 (.getLong b (int (+ qs 8)))
+              x2 (.getLong b (int (+ qs 16))) x3 (.getLong b (int (+ qs 24)))
+              s0 (* 2 c)
+              s1 (inc s0)]
+          (put-fives! words (+ (* 40 i) (* 5 s0)) (five x0 h0 s0 0) (five x1 h1 s0 0) (five x2 h2 s0 0) (five x3 h3 s0 0))
+          (put-fives! words (+ (* 40 i) (* 5 s1)) (five x0 h0 s1 4) (five x1 h1 s1 4) (five x2 h2 s1 4) (five x3 h3 s1 4)))))))
+
+(defn- q6-k!
+  "Q6_K's super-blocks (256 values: 16 sub-blocks of 16, each an int8
+   scale over the super-block's d; codes of 6 bits, 4 low in ql and 2
+   high in qh) decoded, as llama.cpp's dequantize_row_q6_K decodes them:
+   d·sc·(q - 32) in float32, exact (11, 8 and 6 significant bits)."
+  [^ByteBuffer b ^floats out from to]
+  (let [ds (double-array 16)]
+    (each-block [i from to]
+      (let [at (* i 210)
+            d (f16 b (+ at 208))]
+        (dotimes [k 16]
+          (aset ds k (* d (double (.get b (int (+ at 192 k)))))))
+        (dotimes [h 2]
+          (let [ql (+ at (* 64 h))
+                qh (+ at 128 (* 32 h))
+                y (+ (* 256 i) (* 128 h))]
+            (dotimes [l 32]
+              (let [s (+ (* 8 h) (quot l 16))
+                    hb (byte-at b (+ qh l))
+                    a (byte-at b (+ ql l))
+                    c (byte-at b (+ ql l 32))]
+                (aset out (+ y l) (unchecked-float (* (aget ds s) (double (- (bit-or (bit-and a 0xF) (bit-shift-left (bit-and hb 3) 4)) 32)))))
+                (aset out (+ y l 32) (unchecked-float (* (aget ds (+ s 2)) (double (- (bit-or (bit-and c 0xF) (bit-shift-left (bit-and (bit-shift-right hb 2) 3) 4)) 32)))))
+                (aset out (+ y l 64) (unchecked-float (* (aget ds (+ s 4)) (double (- (bit-or (bit-shift-right a 4) (bit-shift-left (bit-and (bit-shift-right hb 4) 3) 4)) 32)))))
+                (aset out (+ y l 96) (unchecked-float (* (aget ds (+ s 6)) (double (- (bit-or (bit-shift-right c 4) (bit-shift-left (bit-and (bit-shift-right hb 6) 3) 4)) 32)))))))))))))
+
+(defn host-tensor
+  "The tensor of the file at path described by info (header's), decoded
+   on the host into primitive arrays:
+   - a plain type, and Q6_K: {:dtype :shape :data}, data a float[]
+     (:float32: F32's values, and Q6_K's, d·sc·(q - 32) in float32 as
+     llama.cpp computes them, exactly), a short[] (:float16: F16's bits)
+     or an int[] (:int32);
+   - a quantized type: {:quantized [words scales biases] :shapes [words'
+     scales' biases'] :bits}, MLX's affine quantization in groups of 32:
+     words an int[] (uint32 bits), scales and biases float[]s.
+   Loud (:unsupported) for a tensor of more than 2^31 - 1 values, or of
+   bytes."
   [path {:keys [type shape offset bytes]}]
   (let [n (reduce * 1 shape)]
-    (when (> (long n) Integer/MAX_VALUE)
-      (throw (ex-info (str "load-gguf: a tensor of " n " values is too large to read on the host")
+    (when (or (> (long n) Integer/MAX_VALUE) (> (long bytes) Integer/MAX_VALUE))
+      (throw (ex-info (str "load-gguf: a tensor of " n " values (" bytes " bytes) is too large to read on the host")
                       {:reason :unsupported :path (str path) :shape shape})))
-    (let [^ByteBuffer b (map-file path offset bytes)]
+    (let [^ByteBuffer b (map-file path offset bytes)
+          n (long n)]
       (if (quantized? type)
         (let [bits (long (:bits (loadable type)))
-              k (long (peek shape))]
-          {:quantized (quantized b type n)
+              k (long (peek shape))
+              words (int-array (quot (* n bits) 32))
+              scales (float-array (quot n group-size))
+              biases (float-array (quot n group-size))]
+          (let [{:keys [block values]} (loadable type)
+                blocks (quot n (long values))]
+            (decode! blocks block (case type
+                                    :q4_k #(q4-k! b words scales biases %1 %2)
+                                    :q5_k #(q5-k! b words scales biases %1 %2)
+                                    #(blocks-32! b type words scales biases %1 %2))))
+          {:quantized [words scales biases]
            :shapes [(conj (pop shape) (quot (* k bits) 32))
                     (conj (pop shape) (quot k group-size))
                     (conj (pop shape) (quot k group-size))]
            :bits bits})
-        {:dtype (:dtype (loadable type)) :shape shape :data (plain b type n)}))))
+        {:dtype (:dtype (loadable type))
+         :shape shape
+         :data (case type
+                 :f32 (let [out (float-array n)] (.get (.asFloatBuffer b) out) out)
+                 :f16 (let [out (short-array n)] (.get (.asShortBuffer b) out) out)
+                 :i32 (let [out (int-array n)] (.get (.asIntBuffer b) out) out)
+                 :q6_k (let [out (float-array n)] (decode! (quot n 256) 210 #(q6-k! b out %1 %2)) out))}))))
+
+(defn- doubles-of
+  "A host array's values as doubles: a word's (an int's bits) as an
+   unsigned integer, a float16's bits as their value."
+  ^doubles [data]
+  (condp instance? data
+    float/1 (let [^floats a data out (double-array (alength a))]
+              (dotimes [i (alength a)] (aset out i (double (aget a i))))
+              out)
+    int/1 (let [^ints a data out (double-array (alength a))]
+            (dotimes [i (alength a)] (aset out i (double (aget a i))))
+            out)
+    short/1 (let [^shorts a data out (double-array (alength a))]
+              (dotimes [i (alength a)] (aset out i (double (Float/float16ToFloat (aget a i)))))
+              out)))
+
+(defn- words-of
+  "The uint32 words of an int[] (their bits), as doubles."
+  ^doubles [^ints a]
+  (let [out (double-array (alength a))]
+    (dotimes [i (alength a)] (aset out i (double (Integer/toUnsignedLong (aget a i)))))
+    out))
+
+(defn read-tensor
+  "The tensor of the file at path described by info (header's), on the
+   host as doubles, the JVM backend's storage: {:dtype :shape :data} for
+   a plain type and Q6_K (data a double[] of the values, row-major), or
+   {:quantized [words scales biases] :shapes [words' scales' biases']
+   :bits} for a quantized one (MLX's affine layout in groups of 32: words
+   uint32 values, scales and biases float32 values, as doubles)."
+  [path info]
+  (let [{:keys [quantized data] :as t} (host-tensor path info)]
+    (if quantized
+      (let [[words scales biases] quantized]
+        (assoc t :quantized [(words-of words) (doubles-of scales) (doubles-of biases)]))
+      (assoc t :data (doubles-of data)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Loading

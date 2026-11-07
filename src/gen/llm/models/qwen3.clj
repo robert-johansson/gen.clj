@@ -73,8 +73,9 @@
    Weights are values too: {:embed :norm :output :layers}, a
    layer's {:attn-norm :q :k :v :q-norm :k-norm :o :ffn-norm :gate :up
    :down}. A matrix is an array [out in], or a quantized one as
-   gen.array/load-gguf gives Q8_0, Q4_0 and Q4_1 tensors, {:wq :scales
-   :biases :bits :group-size}, multiplied by quantized-matmul (the weights
+   gen.array/load-gguf gives Q8_0, Q4_0, Q4_1 and K-quant tensors, {:wq
+   :scales :biases :bits :group-size} (each tensor its own bits; Q6_K's
+   load dense), multiplied by quantized-matmul (the weights
    frozen: a gradient is with respect to the dense weights and the
    activations). :output is nil for a tied output (Qwen3-0.6B's), which
    multiplies by the embedding. A projection adapted by gen.llm.lora/adapt

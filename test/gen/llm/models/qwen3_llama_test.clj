@@ -27,6 +27,14 @@
    3.4e-3 apart. That is inside llama.cpp's own spread between two of its
    computations there, 5.2e-2 (its band 0.1, gen.llm.llama.bands). This
    test's prompts, of 2 to 44 tokens, differ by at most 8.4e-3.
+   On a model of K-quants the band is 0.47 nats, twice 0.231 measured the
+   same way (2026-11-08, Qwen3-0.6B quantized as Q4_K_M by the pinned
+   llama.cpp's quantizer from ggml-org's F16 file: Q4_K and Q6_K, each
+   weight llama.cpp's own value): median 4.0e-2 (steps) to 6.6e-2, the
+   argmax equal in all 200, the top 5 in 189. llama.cpp's own spread on
+   that file is as large, 0.226 (gen.llama-noise, a batched read against
+   a lone one), against 5.2e-2 on Q8_0: the gap is its float noise on
+   K-quants.
    The planted convention errors fail it by nats (gen.llm.models.against-
    llama's mutations: the least and the median over the bench's 20
    prompts; this test asserts ten times the band on one prompt, where
@@ -42,18 +50,24 @@
 (def ^:private model-path
   (or (System/getProperty "gen.llama.test-model") (System/getenv "GEN_LLAMA_TEST_MODEL")))
 
-(def ^:private band
+(defn- band
   ;; Per platform, as llama.cpp's own bands are (DESIGN §9): Metal's from
-  ;; the measurement above; elsewhere llama.cpp's x86 and CUDA Q8_0 paths
-  ;; differ from MLX's forward by 0.27 (CUDA) to 0.32 (CPU) nats at most
-  ;; (fenrir, 2026-11-07, this test's 24 comparisons; MLX's forward gave
-  ;; the same on its CPU and on CUDA, so the gap is llama.cpp's), twice
-  ;; the larger rounded up.
-  (if (.startsWith (System/getProperty "os.name") "Mac") 0.075 0.65))
+  ;; the measurements above (Q8_0's, or a K-quant model's); elsewhere
+  ;; llama.cpp's x86 and CUDA Q8_0 paths differ from MLX's forward by 0.27
+  ;; (CUDA) to 0.32 (CPU) nats at most (fenrir, 2026-11-07, this test's 24
+  ;; comparisons; MLX's forward gave the same on its CPU and on CUDA, so
+  ;; the gap is llama.cpp's), twice the larger rounded up (K-quants not
+  ;; measured there).
+  []
+  (cond (not (.startsWith (System/getProperty "os.name") "Mac")) 0.65
+        (some #{:q4_k :q5_k :q6_k} (map :type (:tensors (gguf/header model-path)))) 0.47
+        :else 0.075))
 
 (def ^:private mutation-nats
   "What a planted convention error must exceed, on every platform: ten
-   times Metal's band, above every platform's noise."
+   times Metal's band, above every platform's noise (and the K-quant
+   band: on the Q4_K_M model the errors measured 15.4, 14.4 and 2.6 nats
+   at the least over the bench's 20 prompts)."
   0.75)
 
 (defn- llama
@@ -117,8 +131,8 @@
       (doseq [text prompts
               :let [tokens ((llama 'tokenize) e text)]]
         (testing (str (count tokens) " tokens: " (pr-str (subs text 0 (min 30 (count text)))))
-          (doseq [{:keys [what max-diff argmax? top5?]} (against/compare-prompt e m tokens 4 band)]
-            (is (<= max-diff band) (str what ": |Δ log p| " max-diff))
+          (doseq [{:keys [what max-diff argmax? top5?]} (against/compare-prompt e m tokens 4 (band))]
+            (is (<= max-diff (band)) (str what ": |Δ log p| " max-diff))
             (is argmax? (str what ": the argmax"))
             (is top5? (str what ": the top 5"))))))))
 
