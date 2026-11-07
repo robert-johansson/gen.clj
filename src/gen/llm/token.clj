@@ -75,6 +75,7 @@
             [gen.gfi :as gfi]
             [gen.llm.branching :as br]
             [gen.llm.constrained :as constrained]
+            [gen.llm.host :as host]
             [gen.llm.lm :as lm]
             [gen.random :as rng]
             [gen.selection :as sel]
@@ -112,16 +113,17 @@
 
 (defn- inverse-cdf
   "The token at which the cumulative probability of row passes u (the last
-   token of positive probability when rounding leaves the total under u).
-   A row that is not normalized is loud as far as the walk sees it, at no
-   cost of its own: a total past 1 where the walk stops, or one short of 1
-   (or NaN) at the row's end."
+   token of positive probability when rounding leaves the total under u),
+   each probability gen.llm.host/exp's (within 0.51 ulp, a third of
+   Math/exp's cost). A row that is not normalized is loud as far as the
+   walk sees it, at no cost of its own: a total past 1 where the walk
+   stops, or one short of 1 (or NaN) at the row's end."
   ^long [^floats row ^double u]
   (let [n (alength row)]
     (loop [t 0 total 0.0 positive -1]
       (if (< t n)
         (let [lp (aget row t)
-              total (+ total (Math/exp lp))]
+              total (+ total (host/exp lp))]
           (if (< u total)
             (if (< total (+ 1.0 slack)) t (throw (unnormalized total)))
             (recur (inc t) total (if (Double/isInfinite lp) positive t))))

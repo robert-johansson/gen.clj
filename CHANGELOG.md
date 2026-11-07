@@ -193,6 +193,11 @@ other values for the same key, from the same distribution.
   token drawn from the row, can change only where that moves a float's
   rounding: none of 9.7 million did. Not finite logits are loud as
   before (`:decode-failed`).
+- **Performance (experimental): `gen.llm.token`'s draw walks a row
+  about 2x faster** (genclj-9y6y): its inverse CDF sums each token's
+  probability by `gen.llm.host/exp`. The total moves in its last bits, so
+  a draw for a key can change only when its uniform falls within an ulp
+  or so of a token's cumulative probability.
 - **Performance (experimental): `gen.llm.array-engine` normalizes a
   decode of fewer rows than its host pool's threads in parts across them**
   (genclj-c7uf): a row of Qwen3's 151,936 logits in 0.33 ms instead of
