@@ -209,6 +209,7 @@ needs, taken from GenMLX's measured call counts
 | batching | `vmap` · `batched?` `batch-shape` `particle-backend` `particle` `particles` `all-particles` | — (the batch tracer, a wrapping backend: §8b) | all |
 | neural networks (experimental, 1.3.0) | `rms-norm` `rope` `sdpa` | — (a fused kernel where a backend has one: `IFused`'s `-fused` with `:rms-norm :rope :sdpa`) | all three |
 | quantized weights (experimental, 1.3.0) | `quantize` `dequantize` `quantized-matmul` `gather-qmm` | `IQuantized`'s `-quantized` with `:quantize :dequantize :quantized-matmul :gather-qmm` | — |
+| files (experimental, 1.3.0) | `load-gguf` | `ILoading`'s `-load-gguf`, per file of a model | — |
 
 **Semantics at the edges** (1.2.1, from the health check of v1.2.0; DESIGN §9,
 "1.2.1's owner calls"), the same on every backend:
@@ -298,6 +299,18 @@ each capability is an optional protocol of its own:
     value's product and sum rounded apart in float32 (MLX's CPU's two
     ops), and multiplies; it holds uint32 arrays for the words (1.3.0;
     exact in its doubles, wrapping as int32 does).
+- **`load-gguf`** reads a GGUF file (llama.cpp's models) on `*backend*`:
+  its metadata on the host (`gen.array.gguf`, the same on every backend),
+  its tensors by the backend's `ILoading` (MLX: `mlx_load_gguf`; the JVM
+  backend: `gen.array.gguf`'s reader), every file of a split model.
+  F32, F16 and I32 tensors load as arrays (F16 as float32 on the JVM
+  backend); Q8_0, Q4_0 and Q4_1 as the affine quantization above, groups
+  of 32, with float32 scales and biases (the file's values exactly, on
+  both backends bit for bit). Every other tensor type is loud
+  (`:unsupported`): MLX's loader would make it float16, silently. MLX
+  0.32.4's loader misreads float64 metadata and the process dies, so the
+  MLX backend refuses such a file (`:unsupported`); the JVM backend reads
+  it.
 
 **Deliberately absent from v1:**
 - sort, top-k and general scatter: added when a ported module needs them

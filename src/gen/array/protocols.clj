@@ -158,6 +158,28 @@
                                                  one shape), :transpose? and
                                                  :sorted? as for MLX's"))
 
+(defprotocol ^{:api :experimental} ILoading
+  "A backend that loads arrays from a model's files: gen.array/load-gguf.
+   A backend without it makes load-gguf a loud error. Experimental:
+   outside the 1.x promise (DESIGN §9)."
+  (^{:api :experimental} -load-gguf [b header]
+    "The arrays of one GGUF file (a split model's file), whose header
+     gen.array has read and checked (gen.array.gguf/header and
+     check-tensors: {:path :metadata :value-types :tensors}, a tensor
+     {:name :type :shape :offset :bytes}): a map from each tensor's name to
+     its value, as MLX's GGUF loader gives them:
+       :f32, :i32    an array of float32, int32
+       :f16          an array of float16, or float32 (the same values)
+                     on a backend without float16
+       :q8_0, :q4_0, :q4_1
+                     [wq scales biases]: MLX's affine quantization in
+                     groups of 32 (8 bits for Q8_0, 4 for the others),
+                     wq uint32 [.. N K·bits/32], scales and biases float32
+                     [.. N K/32]: the file's scale d, and its bias
+                     (Q4_1's), -128·d (Q8_0's) or -8·d (Q4_0's) computed
+                     in float32, so that the values are the file's
+                     exactly"))
+
 (defprotocol ICompiling
   "A backend that compiles functions of its arrays (MLX: mlx_compile)."
   (-compile [b f opts]
@@ -261,3 +283,11 @@
     (throw (ex-info (str (name op) ": the " (name (-name b)) " backend has no quantized ops"
                          (when (= :stage (-name b)) " (not stageable)"))
                     {:reason :unsupported :op op :backend (-name b)}))))
+
+(defn ^:no-doc load-gguf
+  "-load-gguf on b, or the loud error naming b when b loads no files."
+  [b header]
+  (if (instance? gen.array.protocols.ILoading b)
+    (-load-gguf b header)
+    (throw (ex-info (str "load-gguf: the " (name (-name b)) " backend loads no GGUF files")
+                    {:reason :unsupported :op :load-gguf :backend (-name b)}))))

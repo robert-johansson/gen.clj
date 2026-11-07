@@ -131,6 +131,40 @@ other values for the same key, from the same distribution.
   quantized words' dtype, exact in its doubles, wrapping as int32
   does. `(array/array data {:dtype :uint32})` and `(astype x :uint32)`
   threw there.
+- **Added (experimental): GGUF files, `gen.array/load-gguf`** (gen.array,
+  `{:api :experimental}`; genclj-cr5a): a GGUF file's metadata (host
+  values) and its tensors by llama.cpp's names, on `*backend*`. F32, F16
+  and I32 tensors load as arrays (F16 as float32 on the JVM backend,
+  which has no float16); Q8_0, Q4_0 and Q4_1 as MLX's affine
+  quantization, `{:wq :scales :biases :bits :group-size}`, what
+  `dequantize` and `quantized-matmul` take, with float32 scales and
+  biases, so that the values are the file's exactly. A model split by
+  llama.cpp's gguf-split loads from its first file. Every other tensor
+  type (the K-quants, BF16) is a loud `:unsupported`, a file that is no
+  GGUF or is cut short `:invalid-gguf`. MLX loads by mlx_load_gguf, the
+  JVM backend by a reader in plain Clojure (gen.array.gguf): the same
+  words, scales and biases, bit for bit. A new optional protocol,
+  `gen.array.protocols/ILoading` (experimental). On MLX a file with
+  float64 metadata is refused: MLX 0.32.4's loader misreads it and the
+  process dies (SIGBUS). Test files are in test/fixtures/gguf, with
+  their generator.
+- **Added (experimental): Qwen3's forward pass over gen.array,
+  `gen.llm.models.qwen3`** (genclj-gvfa): a Qwen3 GGUF's model
+  (`load`, `model`, `config`), its logits for a whole context
+  (`forward`), and a cached prefill and steps (`prefill`, `step`) over
+  caches that are values (`{:offset :layers}`, grown by concatenation,
+  so a fork is free). llama.cpp's conventions (its qwen3 graph): RMSNorm,
+  per-head q/k norms, NEOX's RoPE, grouped KV heads, causal attention,
+  SwiGLU, a tied or untied output; quantized matrices multiplied by
+  `quantized-matmul`, the embedding by `take` and `dequantize`. A file
+  with tensors the forward does not read, RoPE scaling, a token outside
+  the vocabulary and an option key it does not read are loud. The
+  same backend-neutral code runs on MLX (its fused kernels) and on the
+  JVM backend (tiny models, float64), and the tape differentiates it. On
+  Metal, Qwen3-0.6B-Q8_0's next-token log-probabilities are llama.cpp's
+  on the same file within 3.6e-2 nats (20 prompts, whole, chunked and
+  stepped), the argmax always the same (gen.llm.models.qwen3-llama-test;
+  bench/gen/qwen3_llama_noise.clj).
 - **Added: THIRD-PARTY-NOTICES** (genclj-ty8m): the origins and licenses
   of files derived from other projects, and the header a ported file
   carries (CLAUDE.md, rule 10).
