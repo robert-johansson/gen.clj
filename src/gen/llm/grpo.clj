@@ -523,7 +523,7 @@
   (options/check `round opts round-keys)
   (let [loss-type (check-loss-type (get opts :loss-type :grpo))
         o (merge {:group-size 8 :iterations 1 :loss-type loss-type :eps 1e-4 :sampling policy-sampling :max-tokens 256
-                  :pad 0 :checkpoint? true :kl? true}
+                  :pad 0 :checkpoint? true :chunk 16384 :kl? true}
                  (loss-types loss-type)
                  opts)
         {:keys [group-size iterations eps-low eps-high beta]} o]
@@ -582,7 +582,7 @@
      :chat           gen.llm.chat/render's options for the prompts
      :batch-size     rows a microbatch (all of the round's)
      :pad            the padding token (0)
-     :checkpoint?, :chunk   the family's log-probs' (true; the whole vocabulary)
+     :checkpoint?, :chunk   the family's log-probs' (true, 16384: sft's)
      :kl?            read the reference's log-probabilities for info's :kl
                      even when :beta is 0 (true): one forward of the base a
                      round

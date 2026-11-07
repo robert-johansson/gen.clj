@@ -146,6 +146,7 @@
               eval-key (rng/key 99)
               before (with-open [e (ae/engine {:model m :max-branches (+ (* 16 samples) 24) :n-ctx 512})]
                        {:sampled (pass-rates e tok held samples eval-key) :greedy (pass-rates e tok held 1 eval-key)})
+              _ (clojure.lang.Reflector/invokeStaticMethod "gen.mlx.Mlx" "mlx_reset_peak_memory" (object-array 0))
               t0 (System/nanoTime)
               {:keys [trainer history]}
               (grpo/train m tok (grpo/trainer ad opt (rng/key 7)) train reward
@@ -161,8 +162,9 @@
                                                                       iterations))
                                                         (:rollouts seconds) (:train seconds)))
                                        (let [{:keys [active peak limit]} ((requiring-resolve 'gen.backend.mlx/memory))]
-                                         (println (format "grpo-llama: MLX memory active %.2f GB, peak %.2f GB, limit %.2f GB"
-                                                          (/ active 1e9) (/ peak 1e9) (/ limit 1e9))))
+                                         (println (format "grpo-llama: MLX memory active %.2f GB, the round's peak %.2f GB, limit %.2f GB"
+                                                          (/ active 1e9) (/ peak 1e9) (/ limit 1e9)))
+                                         (clojure.lang.Reflector/invokeStaticMethod "gen.mlx.Mlx" "mlx_reset_peak_memory" (object-array 0)))
                                        (flush))})
               minutes (/ (- (System/nanoTime) t0) 6e10)
               adapted (lora/adapt m (:adapter trainer))
