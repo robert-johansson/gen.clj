@@ -72,8 +72,11 @@
     (is (= [0 2147483647 -2147483648 2147483647 -2147483648 2 -2 0] (ts/host (array/astype xs :int32))))
     (is (= [0 9223372036854775807 -9223372036854775808 9223372036854775807 -9223372036854775808 2 -2 0]
            (ts/host (array/astype xs :int64))))
-    (when-not (ts/jvm?) ;; the JVM backend has no uint32 arrays
-      (is (= [0 4294967295 0 4294967295 0 2 0 0] (ts/host (array/astype xs :uint32)))))
+    ;; the JVM backend has uint32 arrays since 1.3.0 (quantized weights' words)
+    (is (= [0 4294967295 0 4294967295 0 2 0 0] (ts/host (array/astype xs :uint32))))
+    (is (= [4294967295 0 5] (ts/host (array/astype (array/array [-1 4294967296 5] {:dtype :int64}) :uint32))) "an int wraps")
+    (is (= [4294967293 3] (ts/host (array/- (array/array [2 5] {:dtype :uint32}) (array/array [5 2] {:dtype :uint32}))))
+        "arithmetic wraps, as int32's")
     (is (= [-1294967296 -1] (ts/host (array/astype (array/array [3000000000 -1] {:dtype :int64}) :int32))))
     (is (= 2147483647 (ts/host (array/astype 3e9 :int32))) "a host scalar")
     (is (= 0 (ts/host (array/astype ##NaN :int64))) "a host scalar")))

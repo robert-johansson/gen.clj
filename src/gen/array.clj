@@ -1242,6 +1242,130 @@
   ([f opts] ((:vmap @transform) f opts)))
 
 ;; ---------------------------------------------------------------------------
+;; Neural-network operations (experimental, outside the 1.x promise: DESIGN
+;; §9; docs/array-api.md §6). gen.array.nn holds their bodies, loaded at
+;; the first call, as gen.array.transform's
+;; ---------------------------------------------------------------------------
+
+(def ^:private nn
+  (delay (into {} (map (fn [k] [k (requiring-resolve (symbol "gen.array.nn" (name k)))]))
+               [:rms-norm :rope :sdpa :quantize :dequantize :quantized-matmul :gather-qmm])))
+
+(defn ^{:api :experimental} rms-norm
+  "x normalized by its root mean square over the last axis, times weight:
+   x·weight / √(mean(x², last axis) + eps). weight is an array of x's
+   last axis, or nil for none; eps a non-negative host number. Ints
+   promote to the default float; half floats are normalized in float32,
+   as MLX does. A composite of gen.array's ops (so differentiated,
+   batched and staged as they are), which MLX computes by its fused kernel
+   (mlx_fast_rms_norm) on its own arrays in float32 and the half floats.
+   Experimental: outside the 1.x promise (DESIGN §9)."
+  [x weight eps]
+  ((:rms-norm @nn) x weight eps))
+
+(defn ^{:api :experimental} rope
+  "Rotary position embedding (RoPE) of the first dims features of x's
+   last axis, the position being x's axis -2 (x has 2 axes or more, as
+   [B H T D] or [B T D]; dims even, at most D). Position t is
+   (offset + t)·scale, its angles θᵢ = position · base^(-2i/dims) for
+   i < dims/2 (or position / freqsᵢ), and each pair of features is
+   rotated by its angle: NEOX's pairs (i, i + dims/2) by default, or the
+   traditional consecutive pairs (2i, 2i + 1). Features past dims pass
+   through. Options:
+   - :traditional? (false)
+   - :base (10000.0), or :freqs, an array of dims/2 frequencies, not both
+   - :scale (1.0)
+   - :offset (0): a host integer, or an int array of one offset, or of
+     one per row of x's axis 0 (x with 3 axes or more): a batch of
+     sequences at their own positions, as an LLM's lanes.
+   Angles are computed in float32 for the half floats. A composite of
+   gen.array's ops, which MLX computes by its fused kernel (mlx_fast_rope,
+   mlx_fast_rope_dynamic) on its own arrays in float32 and the half
+   floats. Experimental: outside the 1.x promise (DESIGN §9)."
+  ([x dims] (rope x dims nil))
+  ([x dims opts] ((:rope @nn) x dims opts)))
+
+(defn ^{:api :experimental} sdpa
+  "Scaled dot-product attention, softmax(scale·q·kᵀ + mask)·v, of queries
+   q [B Hq Tq D] over keys k [B Hk Tk D] and values v [B Hk Tk Dv]. Hq is
+   a multiple of Hk, and query head h reads key and value head
+   ⌊h / (Hq/Hk)⌋ (grouped-query attention). Options:
+   - :scale (1/√D)
+   - :mask: nil; :causal, query i seeing key j where j <= i + Tk - Tq
+     (the queries the last Tq positions); a bool array, true where a query
+     sees a key; or a float array added to the scores. An array mask
+     broadcasts to [B Hq Tq Tk].
+   A query that sees no key (a bool mask hiding them all, or the first
+   Tq - Tk queries of a causal mask) gets zeros: no value it is masked
+   from reaches it, and no NaN (a row of -Inf scores in an additive mask
+   is the caller's: NaN, and zeros by MLX's Metal kernels). The softmax
+   is computed in float32 for the half floats. A composite of gen.array's ops, which MLX computes by
+   its fused kernel (mlx_fast_scaled_dot_product_attention) on its own
+   arrays in float32 and the half floats. Experimental: outside the 1.x
+   promise (DESIGN §9)."
+  ([q k v] (sdpa q k v nil))
+  ([q k v opts] ((:sdpa @nn) q k v opts)))
+
+(defn ^{:api :experimental} quantize
+  "[wq scales biases]: the float matrices w [.. N K] quantized along
+   their last axis, MLX's affine quantization: each group of :group-size
+   consecutive values is scale·q + bias, q an unsigned integer of :bits
+   bits, packed little-endian in uint32 words, so wq is [.. N K·bits/32]
+   and scales and biases (w's dtype) [.. N K/group-size]. MLX's
+   algorithm, computed in float32 on every backend: a group's scale
+   spans its extrema over 2^bits - 1 steps, and the extremum of the
+   larger magnitude is exact. Options: :group-size (64; 32, 64 or 128),
+   :bits (4; 2, 3, 4, 5, 6 or 8), :mode (:affine, the one supported; MLX's
+   :mxfp4, :nvfp4 and :mxfp8 keep uint8 scales, a dtype gen.array lacks,
+   and are loud). Its results carry no gradient: quantizing a value being
+   differentiated is loud. A primitive (gen.array.protocols/IQuantized);
+   staging it is loud. Experimental: outside the 1.x promise (DESIGN §9)."
+  ([w] (quantize w nil))
+  ([w opts] ((:quantize @nn) w opts)))
+
+(defn ^{:api :experimental} dequantize
+  "The float matrices that quantize's wq, scales and biases stand for:
+   scale·q + bias for each value. Options: :group-size, :bits and :mode,
+   as quantize's (they must be the ones it used); :dtype (the scales' and
+   biases' common float dtype). The weights are frozen: a gradient with
+   respect to scales or biases is loud. A primitive (MLX's mlx_dequantize;
+   the JVM backend unpacks on the host). Experimental: outside the 1.x
+   promise (DESIGN §9)."
+  ([wq scales biases] (dequantize wq scales biases nil))
+  ([wq scales biases opts] ((:dequantize @nn) wq scales biases opts)))
+
+(defn ^{:api :experimental} quantized-matmul
+  "x·wᵀ for the matrix w that quantize's wq [N K·bits/32], scales and
+   biases stand for (x [.. K], the result [.. N]), as a linear layer's
+   weight is held; or x·w with :transpose? false (x [.. N], the result
+   [.. K]). Options as dequantize's, and :transpose? (true). Its dtype is
+   x's and the scales' common float dtype. Differentiable with respect to
+   x only: the weights are frozen, and a gradient with respect to scales
+   or biases is loud (LoRA trains adapters beside them). A primitive
+   (MLX's mlx_quantized_matmul; the JVM backend dequantizes and
+   multiplies). Experimental: outside the 1.x promise (DESIGN §9)."
+  ([x wq scales biases] (quantized-matmul x wq scales biases nil))
+  ([x wq scales biases opts] ((:quantized-matmul @nn) x wq scales biases opts)))
+
+(defn ^{:api :experimental} gather-qmm
+  "Matrix products of x's matrices with a stack of quantized matrices,
+   gathered (a mixture of experts' layers): x [.. M K] (its matrices
+   indexed flat over its leading axes), wq, scales and biases a stack
+   [E .. N K·bits/32] as quantize gives one (indexed flat over its
+   leading axes). Result i is x's matrix lhs[i] times w's matrix rhs[i]
+   (transposed, by default), for :lhs-indices and :rhs-indices, int arrays
+   that broadcast to the result's leading shape I: the result is
+   [I.. M N]. Either defaults to every matrix in order, shaped as the
+   array's leading axes. Options as quantized-matmul's, and :sorted?
+   (MLX's hint that :rhs-indices are sorted). Out-of-range indices throw
+   on the JVM backend and are clamped on MLX, as take's. Differentiable
+   with respect to x only, as quantized-matmul. A primitive (MLX's
+   mlx_gather_qmm; the JVM backend dequantizes, gathers and multiplies).
+   Experimental: outside the 1.x promise (DESIGN §9)."
+  ([x wq scales biases] (gather-qmm x wq scales biases nil))
+  ([x wq scales biases opts] ((:gather-qmm @nn) x wq scales biases opts)))
+
+;; ---------------------------------------------------------------------------
 ;; Validation across particles
 ;; ---------------------------------------------------------------------------
 

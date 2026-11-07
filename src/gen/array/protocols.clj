@@ -113,6 +113,51 @@
    Experimental."
   (^:no-doc -scan-loop [b f carry xs n] "[the last carry, the ys stacked on a leading axis of n]."))
 
+(defprotocol ^{:api :experimental} IFused
+  "A backend with fused kernels for some of gen.array's neural-network
+   composites (rms-norm, rope, sdpa), which it may compute in one op
+   instead of the composite (MLX: its fast ops). gen.array asks only a
+   backend whose arrays are the operands themselves: a wrapping backend
+   (the tape, the batch tracer) and the staging backend implement no
+   kernel, so the composite runs there, whose ops they know. A kernel
+   must be observationally equivalent to the composite, gradients
+   included where its backend differentiates it natively (rule 1).
+   Experimental: outside the 1.x promise (DESIGN §9)."
+  (^{:api :experimental} -fused [b op args]
+    "op's value on args by a fused kernel, or nil to decline (gen.array
+     then computes the composite). gen.array has checked the shapes and
+     options, and given the float operands one dtype:
+       :rms-norm [x weight eps]   weight an array of x's last axis, or nil
+       :rope [x dims opts]        opts {:traditional? :base :scale :offset
+                                  :freqs}: base a host number or nil (with
+                                  freqs), offset a host integer or an int
+                                  array of one per row of x's axis 0
+       :sdpa [q k v opts]         opts {:scale :mask}: mask nil, :causal, a
+                                  bool array (true attends) or a float array
+                                  added to the scores, broadcasting to
+                                  [B Hq Tq Tk]"))
+
+(defprotocol ^{:api :experimental} IQuantized
+  "A backend with quantized weights: gen.array's quantize, dequantize,
+   quantized-matmul and gather-qmm, in MLX's layouts (a uint32 array of
+   packed values along the last axis, and per-group scales and biases).
+   A backend without it makes those ops a loud error. Experimental:
+   outside the 1.x promise (DESIGN §9)."
+  (^{:api :experimental} -quantized [b op args]
+    "op on args, gen.array having checked shapes, dtypes and options
+     (opts {:mode :group-size :bits}, and the op's own below; x, scales
+     and biases of one float dtype):
+       :quantize [w opts]                        [wq scales biases]
+       :dequantize [wq scales biases opts]       w, of :dtype (opts)
+       :quantized-matmul [x wq scales biases opts]
+                                                 x·wᵀ, or x·w with
+                                                 :transpose? false
+       :gather-qmm [x wq scales biases lhs rhs opts]
+                                                 x's matrices at lhs times
+                                                 w's at rhs (int arrays of
+                                                 one shape), :transpose? and
+                                                 :sorted? as for MLX's"))
+
 (defprotocol ICompiling
   "A backend that compiles functions of its arrays (MLX: mlx_compile)."
   (-compile [b f opts]
@@ -206,3 +251,13 @@
      gradient of the scalar value with respect to each position in argnums.
      Positions may hold trees (nested maps and vectors of arrays and numbers);
      each gradient has the same tree structure."))
+
+(defn ^:no-doc quantized
+  "-quantized's op on b, or the loud error naming b when b has no
+   quantized ops (gen.array, and backends that pass the op on)."
+  [b op args]
+  (if (instance? gen.array.protocols.IQuantized b)
+    (-quantized b op args)
+    (throw (ex-info (str (name op) ": the " (name (-name b)) " backend has no quantized ops"
+                         (when (= :stage (-name b)) " (not stageable)"))
+                    {:reason :unsupported :op op :backend (-name b)}))))

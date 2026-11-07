@@ -271,8 +271,7 @@
 
 (deftest casts-to-int-at-the-edges
   ;; Java's casts (DESIGN.md §9): MLX's own is C++'s, which gave MIN for
-  ;; all of these on x86's CPU (genclj-kw88). (uint32: gen.array-test, as
-  ;; the reference has no uint32 arrays)
+  ;; all of these on x86's CPU (genclj-kw88). (uint32: gen.array-test)
   (is (conforms? exact #(array/astype % int-dt)
                  {:data [##NaN ##Inf ##-Inf 1e20 -1e20 2.7 -2.7 -0.5 2147483648.0 -2147483648.0 4294967296.0] :dtype float-dt})))
 
@@ -670,6 +669,120 @@
     (let [x (gen/generate (gen-spec shape (gen/double* {:NaN? false :infinite? false :min -2.0 :max 2.0}) float-dt) 10 seed)
           f (fn [x] (array/sum (array/+ (array/* (array/sin x) (array/exp x)) (array/logsumexp x {:axis -1 :keep-dims? true}))))]
       (conforms? loose #(second ((array/value-and-grad f) %)) x))))
+
+;; ---------------------------------------------------------------------------
+;; Neural-network operations (experimental): the composites, which MLX
+;; computes by its fused kernels where it can, and the quantized weights
+;; ---------------------------------------------------------------------------
+
+(def ^:private gen-unit-ish (gen/double* {:infinite? false :NaN? false :min -2.0 :max 2.0}))
+
+(defspec rms-norms trials
+  (prop/for-all [shape (gen/fmap #(conj (vec (butlast %)) (inc (last %))) (gen/vector (gen/choose 1 6) 1 4))
+                 weight? gen/boolean
+                 eps (gen/elements [1e-6 1e-5 0.1])
+                 seed gen/nat]
+    (let [x (gen/generate (gen-spec shape gen-unit-ish float-dt) 10 seed)
+          w (gen/generate (gen-spec [(peek shape)] gen-unit-ish float-dt) 10 (inc seed))]
+      (if weight?
+        (conforms? loose #(array/rms-norm %1 %2 eps) x w)
+        (conforms? loose #(array/rms-norm % nil eps) x)))))
+
+(defspec ropes trials
+  ;; positions below 30, so float32's angles stay within a few ulps
+  (prop/for-all [[b h t half] (gen/tuple (gen/choose 1 2) (gen/choose 1 3) (gen/choose 1 4) (gen/choose 1 4))
+                 extra (gen/choose 0 2)
+                 rotated (gen/choose 1 4)
+                 traditional? gen/boolean
+                 offset (gen/one-of [(gen/choose 0 20) (gen/return :per-row)])
+                 base (gen/elements [10000.0 500.0 1e6])
+                 seed gen/nat]
+    (let [dims (* 2 (min rotated half))
+          x (gen/generate (gen-spec [b h t (+ (* 2 half) extra)] gen-unit-ish float-dt) 10 seed)
+          offs {:data (vec (take b [3 17])) :dtype int-dt}
+          opts {:traditional? traditional? :base base}]
+      (if (= offset :per-row)
+        (conforms? loose #(array/rope %1 dims (assoc opts :offset %2)) x offs)
+        (conforms? loose #(array/rope % dims (assoc opts :offset offset)) x)))))
+
+(defspec attention trials
+  (prop/for-all [[b hk rep tq tk d dv] (gen/tuple (gen/choose 1 2) (gen/choose 1 2) (gen/choose 1 3) (gen/choose 1 4)
+                                                  (gen/choose 1 5) (gen/choose 1 6) (gen/choose 1 4))
+                 mask (gen/elements [nil :causal :bool :additive])
+                 seed gen/nat]
+    (let [hq (* hk rep)
+          q (gen/generate (gen-spec [b hq tq d] gen-unit-ish float-dt) 10 seed)
+          k (gen/generate (gen-spec [b hk tk d] gen-unit-ish float-dt) 10 (inc seed))
+          v (gen/generate (gen-spec [b hk tk dv] gen-unit-ish float-dt) 10 (+ 2 seed))
+          m (case mask
+              :bool (gen/generate (gen-spec [b 1 tq tk] gen/boolean :bool) 10 seed)
+              :additive (gen/generate (gen-spec [tq tk] gen-unit-ish float-dt) 10 seed)
+              nil)]
+      (if m
+        (conforms? loose #(array/sdpa %1 %2 %3 {:mask %4}) q k v m)
+        (conforms? loose #(array/sdpa %1 %2 %3 {:mask mask}) q k v)))))
+
+(def ^:private gen-quantization
+  (gen/tuple (gen/elements [2 3 4 5 6 8]) (gen/elements [32 64 128])))
+
+(defspec quantizations 30
+  ;; MLX's algorithm in float32 on both: the same words, scales and
+  ;; biases. Gaussian values: MLX's Metal kernel rounds a value exactly
+  ;; half a step between two codes otherwise than its CPU (half to even,
+  ;; as the JVM backend), which values of few bits (the generators') hit
+  (prop/for-all [[bits g] gen-quantization
+                 [rows groups] (gen/tuple (gen/choose 1 3) (gen/choose 1 2))
+                 seed gen/nat]
+    (let [r (java.util.Random. seed)
+          w {:data (vec (for [_ (range rows)] (vec (repeatedly (* g groups) #(.nextGaussian r))))) :dtype float-dt}]
+      (conforms? exact #(vec (array/quantize % {:group-size g :bits bits})) w))))
+
+(defn- gen-quantized
+  "Specs of a quantized matrix [rows (* g groups)]: random words (every
+   bit pattern), scales and biases."
+  [bits g rows groups seed]
+  (let [r (java.util.Random. seed)
+        kw (quot (* g groups bits) 32)]
+    [{:data (vec (for [_ (range rows)] (vec (repeatedly kw #(bit-and (.nextLong r) 0xFFFFFFFF))))) :dtype :uint32}
+     {:data (vec (for [_ (range rows)] (vec (repeatedly groups #(* 0.05 (- (.nextDouble r) 0.5)))))) :dtype float-dt}
+     {:data (vec (for [_ (range rows)] (vec (repeatedly groups #(- (.nextDouble r) 0.5))))) :dtype float-dt}]))
+
+(def ^:private dequantized
+  ;; MLX's CPU computes scale·q + bias as two ops, the JVM backend too;
+  ;; Metal's kernel fuses them (one rounding): within an ulp of the terms
+  (if (ts/flushes-subnormals?) {:rtol 2.4e-7 :atol 4e-6} exact))
+
+(defspec dequantizations 30
+  (prop/for-all [[bits g] gen-quantization
+                 [rows groups] (gen/tuple (gen/choose 1 3) (gen/choose 1 2))
+                 seed gen/nat]
+    (let [[wq s b] (gen-quantized bits g rows groups seed)]
+      (conforms? dequantized #(array/dequantize %1 %2 %3 {:group-size g :bits bits}) wq s b))))
+
+(defspec quantized-products 30
+  (prop/for-all [[bits g] gen-quantization
+                 [rows groups] (gen/tuple (gen/choose 1 4) (gen/choose 1 2))
+                 batch (gen/vector (gen/choose 1 2) 0 2)
+                 seed gen/nat]
+    (let [opts {:group-size g :bits bits}
+          [wq s b] (gen-quantized bits g rows groups seed)
+          x (gen/generate (gen-spec (conj batch (* g groups)) gen-unit-ish float-dt) 10 seed)
+          xt (gen/generate (gen-spec (conj batch rows) gen-unit-ish float-dt) 10 (inc seed))]
+      (and (conforms? loose #(array/quantized-matmul %1 %2 %3 %4 opts) x wq s b)
+           (conforms? loose #(array/quantized-matmul %1 %2 %3 %4 (assoc opts :transpose? false)) xt wq s b)))))
+
+(defspec gathered-quantized-products 30
+  (prop/for-all [[bits g] gen-quantization
+                 [experts rows m] (gen/tuple (gen/choose 1 3) (gen/choose 1 3) (gen/choose 1 2))
+                 n (gen/choose 1 4)
+                 seed gen/nat]
+    (let [opts {:group-size g :bits bits}
+          [wq s b] (mapv (fn [spec] (update spec :data #(vec (repeat experts %)))) (gen-quantized bits g rows 1 seed))
+          x (gen/generate (gen-spec [2 m g] gen-unit-ish float-dt) 10 seed)
+          r (java.util.Random. seed)
+          lhs {:data (vec (repeatedly n #(.nextInt r 2))) :dtype int-dt}
+          rhs {:data (vec (repeatedly n #(.nextInt r experts))) :dtype int-dt}]
+      (conforms? loose #(array/gather-qmm %1 %2 %3 %4 (assoc opts :lhs-indices %5 :rhs-indices %6)) x wq s b lhs rhs))))
 
 ;; ---------------------------------------------------------------------------
 ;; Errors are loud and alike
