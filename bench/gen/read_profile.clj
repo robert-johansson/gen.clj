@@ -71,52 +71,75 @@
      :row-contiguous? (gen.mlx.Mlx/_mlx_array_is_row_contiguous h)
      :strides (vec (.toArray st ValueLayout/JAVA_LONG))}))
 
-(defn- read-parts
-  "The logits l read in parts, timed: a float array."
-  ^floats [l]
-  (let [f (span :astype (let [f (if (= :float32 (array/dtype l)) l (array/astype l :float32))] (array/eval! f) f))
-        h (long ((requiring-resolve 'gen.backend.mlx.array/handle) f))
-        n (long (reduce * (array/shape f)))
-        ^MemorySegment p (span :pointer (gen.mlx.Mlx/mlx_array_data_float32 h))]
-    (span :copy (.toArray (.reinterpret p (* 4 n)) ValueLayout/JAVA_FLOAT))))
+(def ^:private modes
+  "How a mode reads the logits l: a float array, its parts timed under
+   [mode part]."
+  {:engine (fn [l] (span [:engine :read] (array/->floats l)))
+   ;; the engine's read in parts: the cast on the device, its pointer
+   ;; (which moves it to unified memory on CUDA), the bytes copied, the
+   ;; cast freed at once (as ->floats frees it)
+   :freed (fn [l]
+            (let [h (long ((requiring-resolve 'gen.backend.mlx.array/handle) l))
+                  s (long ((requiring-resolve 'gen.backend.mlx.array/stream) array/*backend*))
+                  n (long (reduce * (array/shape l)))
+                  f (span [:freed :astype] (let [f (gen.mlx.Mlx/mlx_astype h (int 10) s)] (gen.mlx.Mlx/mlx_array_eval f) f))]
+              (try
+                (let [^MemorySegment p (span [:freed :pointer] (gen.mlx.Mlx/mlx_array_data_float32 f))]
+                  (span [:freed :copy] (.toArray (.reinterpret p (* 4 n)) ValueLayout/JAVA_FLOAT)))
+                (finally (span [:freed :free] (gen.mlx.MlxRaw/mlx_array_free f))))))
+   ;; the same, the cast a gen.array array, freed when the GC finds it
+   :kept (fn [l]
+           (let [f (span [:kept :astype] (let [f (array/astype l :float32)] (array/eval! f) f))
+                 h (long ((requiring-resolve 'gen.backend.mlx.array/handle) f))
+                 n (long (reduce * (array/shape f)))
+                 ^MemorySegment p (span [:kept :pointer] (gen.mlx.Mlx/mlx_array_data_float32 h))]
+             (span [:kept :copy] (.toArray (.reinterpret p (* 4 n)) ValueLayout/JAVA_FLOAT))))
+   ;; the float16 logits themselves read, widened on the host
+   :f16 (fn [l]
+          (let [h (long ((requiring-resolve 'gen.backend.mlx.array/handle) l))
+                n (long (reduce * (array/shape l)))
+                ^MemorySegment p (span [:f16 :pointer] (gen.mlx.Mlx/mlx_array_data_float16 h))
+                ^shorts hs (span [:f16 :copy] (.toArray (.reinterpret p (* 2 n)) ValueLayout/JAVA_SHORT))]
+            (span [:f16 :widen] (let [out (float-array n)] (dotimes [j n] (aset out j (Float/float16ToFloat (aget hs j)))) out))))})
+
+(defn- go
+  "n steps of step from cache c, each read by mode."
+  [step c toks n batch mode]
+  (let [read (modes mode)]
+    (loop [i 0 c c toks toks]
+      (if (< i n)
+        (let [[l c'] (step c toks)
+              _ (span [mode :eval] (array/eval! [l c']))
+              _ (when (and (zero? i) (= mode :engine)) (println "- logits:" (pr-str (layout l))))
+              ^floats xs (read l)
+              v (long (peek (array/shape l)))]
+          (recur (inc i) c' (mapv #(vector (argmax xs (* (long %) v) v)) (range batch))))
+        c))))
 
 (defn -main [path & _]
   (when-not (= :mlx (array/backend-name array/*backend*))
     (throw (ex-info "Run on MLX: -J-Dgen.backend=mlx" {})))
   (let [{:keys [prompt batch steps warm dtype]} settings
         m (load-model path {:dtype dtype})
-        capacity (* 128 (quot (+ prompt warm (* 2 steps) 127) 128))
+        order [:engine :freed :kept :f16 :engine]
+        capacity (* 128 (quot (+ prompt warm (* (count order) steps) 127) 128))
         _ (array/eval! (:weights m))
         [_ c0] (prefill m [(mapv #(mod (+ 1000 (* 7919 (long %))) (long (get-in m [:config :vocab]))) (range prompt))] {:logits :last :capacity capacity})
         c0 (array/eval! (select-rows m c0 (repeat batch 0)))
         step (compile-step m {:logits :last :donate? true})
-        go (fn [c toks n parts?]
-             (loop [i 0 c c toks toks]
-               (if (< i n)
-                 (let [[l c'] (step c toks)
-                       _ (span :eval (array/eval! [l c']))
-                       _ (when (zero? i) (println "- logits:" (pr-str (layout l))))
-                       ^floats xs (if parts? (read-parts l) (span :read (array/->floats l)))
-                       v (long (peek (array/shape l)))]
-                   (recur (inc i) c' (mapv #(vector (argmax xs (* (long %) v) v)) (range batch))))
-                 c)))
         toks (mapv #(vector (mod (+ 13 (long %)) (long (get-in m [:config :vocab])))) (range batch))
-        c (go c0 toks warm false)
+        c (go step c0 toks warm batch :engine)
         _ (.clear totals)
-        c (go c toks steps false)
-        c (go c toks steps true)]
+        c (reduce (fn [c mode] (go step c toks steps batch mode)) c order)]
     (array/eval! c)
     (println "## The logits' read on MLX\n")
     (println "- model:" path)
-    (println "- settings:" (pr-str settings))
+    (println "- settings:" (pr-str settings) "modes in order:" order)
     (println "- MLX device:" ((requiring-resolve 'gen.backend.mlx.array/device) array/*backend*) "\n")
-    (println (format "| %-44s | %8s |" "per step" "ms"))
+    (println (format "| %-44s | %8s |" "per step (ms)" "ms"))
     (println "|---|---:|")
-    (doseq [[k label] [[:eval "eval (the step's outputs)"] [:read "read (->floats, the engine's)"]
-                       [:astype "astype to float32 + eval"] [:pointer "pointer (mlx_array_data_float32)"]
-                       [:copy "copy (toArray)"]]
-            :let [^longs a (.get totals k)]
-            :when a]
-      (println (format "| %-44s | %8.3f |" label (/ (aget a 0) 1e6 steps))))
+    (doseq [[k ^"[J" a] totals
+            :let [runs (if (= :engine (first k)) 2 1)]]
+      (println (format "| %-44s | %8.3f |" (pr-str k) (/ (aget a 0) 1e6 steps runs))))
     (println "- MLX memory:" (pr-str ((requiring-resolve 'gen.backend.mlx.memory/memory)))))
   (shutdown-agents))
