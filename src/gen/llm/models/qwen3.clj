@@ -17,6 +17,7 @@
      (select-rows cache idx)           → a static cache of cache's rows idx
      (concat-rows caches)              → a static cache of the caches' rows
      (rewind cache offsets)            → a static cache with its rows back at offsets
+     (grow cache capacity)             → a static cache of a larger capacity
 
    tokens are B rows of T token ids each: host vectors (checked against the
    vocabulary) or an int array [B T]. A row's tokens are positions offset,
@@ -437,6 +438,27 @@
         (throw (invalid (str "rewind: " (pr-str n) " is not an offset from 0 to the row's " o) {:offset n :row-offset o}))))
     (let [new (mapv long new)]
       (assoc cache :offsets new :positions (array/array new {:dtype :int32})))))
+
+(defn grow
+  "The static cache with capacity positions a row (at least its own), its
+   rows and offsets as they were: each layer's keys and values extended by
+   zero slots. A step's shapes change with the capacity, so a compiled step
+   traces again; grow by blocks."
+  [cache capacity]
+  (check-static :grow cache)
+  (let [old (long (:capacity cache))]
+    (when-not (and (integer? capacity) (c/<= old (long capacity)))
+      (throw (invalid (str "grow: the capacity is an integer of at least the cache's " old ", not " (pr-str capacity))
+                      {:capacity capacity :cache-capacity old})))
+    (if (c/== old (long capacity))
+      cache
+      (let [{:keys [k]} (first (:layers cache))
+            [rows heads _ dim] (array/shape k)
+            pad (array/zeros [rows heads (c/- (long capacity) old) dim] {:dtype (array/dtype k)})
+            extend #(array/concatenate [% pad] 2)]
+        (assoc cache
+               :capacity (long capacity)
+               :layers (mapv (fn [{:keys [k v]}] {:k (extend k) :v (extend v)}) (:layers cache)))))))
 
 (defn concat-rows
   "The static cache of the static caches' rows, in order, each at its own
