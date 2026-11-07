@@ -92,6 +92,30 @@
    - A paged step, run or copy that fails has consumed the pools: every
      branch is lost (:lost-slots), loudly, and the pools are made again.
 
+   The continuous mode (:paged? and :continuous? true; genclj-b3ow)
+   batches concurrent callers' reads (gen.llm.slots's Batching: its
+   scheduler gathers every advance, extend and open in flight between
+   forwards, see that namespace). A forward is one compiled call
+   (qwen3/compile-paged-batch-step, consuming the pools) of rows of one
+   token:
+   - every one-token read in flight (an advance's rows, a one-token open
+     or extend, a long read's last token): decode rows, attending by
+     paged attention over their tables, padded to a power of 2 (at least
+     :min-rows);
+   - then a chunk of the oldest longer read (open, extend), as many of
+     its tokens as the budget (:n-batch tokens a forward) leaves after
+     the decode rows, at least a block: its rows written into its blocks
+     and attending over them gathered (sdpa, each row to its position),
+     padded to a power of 2 within the budget. Longer reads wait their
+     turn, first come first served; their chunks go on in the next
+     forwards, between which other requests come and go.
+   The logits are computed for the rows read only (each decode row, a
+   read's last token, the scored rows of an extend), the scores on the
+   device. A read alone (a score's, or a program's from one thread) is
+   forwards of its own, so its results repeat bit for bit; a read
+   batched with others' is the same within float round-off (kernels
+   differ by shape).
+
    Results depend on batch shapes and capacities as llama.cpp's do (float
    round-off: MLX's kernels differ by shape); the same read from the same
    state gives the same rows, bit for bit, and what is stacked or reused is
@@ -1043,7 +1067,14 @@
        :pool-blocks the pool's blocks at first (default 128), doubled
                     when they run out
        :min-rows    the fewest rows a step computes (default 1): rows
-                    are padded to a power of 2 at least this"
+                    are padded to a power of 2 at least this
+       :continuous? true: concurrent callers' reads batched (continuous
+                    batching; see the namespace's docstring), :n-batch
+                    then the tokens a forward reads at most (a long
+                    read's chunk), with
+         :wait      how long a forward waits for the callers the last
+                    one answered, at most, as a fraction of its time
+                    (default 0.25; 0 never waits)"
   ^java.io.Closeable [opts]
   (let [opts (check-options opts)
         b array/*backend*]

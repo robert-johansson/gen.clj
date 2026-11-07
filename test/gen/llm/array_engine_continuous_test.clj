@@ -22,9 +22,20 @@
      forward loses its branch, any other branch is kept; a closed engine
      fails the requests in flight.
    Planted mutations (planted-bugs-fail-the-clients) fail the concurrent
-   clients: a decode row given another request's block table, a retired
-   branch's blocks freed while a fork still reads them (and taken by the
-   next read), and a prefill chunk's positions off by one."
+   clients: a decode row given another request's block table (118
+   distributions off by up to 0.9 nats on the JVM backend), a retired
+   branch's blocks freed while a fork still reads them, and taken by the
+   next read (on the JVM backend paged-write's check finds two rows
+   writing one slot, loudly; on MLX, whose kernels check nothing, the
+   reads differ), and a prefill chunk's positions off by one (182
+   distributions, up to 1.65 nats). Checked by hand (2026-11-07, each
+   applied with with-redefs and the test run): the gathering skipped
+   fails a-forward-waits-for-its-callers-and-no-longer (24 forwards for
+   24 steps, not 12); a forward that always waits its full time fails
+   it and one-caller-gets-the-same-bits-and-never-waits; the busy check
+   skipped fails an-operation-on-a-busy-branch-waits-for-its-request; a
+   failed forward that keeps the branches of reads it had begun fails
+   a-failed-forward-fails-its-requests."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [gen.array :as array]
             [gen.llm.array-engine :as ae]

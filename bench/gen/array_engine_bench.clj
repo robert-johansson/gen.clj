@@ -36,12 +36,34 @@
    against 619 (two more synchronizations a step, the copy-on-write's
    read and write, cost more there than the static engine's halved
    copy). A pool of 512 blocks made the paged step 2.5 times as slow:
-   donated writes cost about 8 ms a GB of pool written."
+   donated writes cost about 8 ms a GB of pool written.
+   Its continuous mode (genclj-b3ow; gen.bench.engines continuous, :wait
+   gen.bench.wait) batches concurrent callers' reads, and two more
+   sections measure it (gen.bench.sections clients,lone):
+   - clients: gen.bench.clients (8) threads at once, each with an LM of
+     its own over the shared engine, each simulating a completion of
+     gen.bench.client-tokens tokens (64, no end tokens) after a prompt of
+     its own: tokens/s is clients × tokens over the wall time, and each
+     LM read's latency (a token's) is reported at its median, 90th
+     percentile and largest;
+   - lone: one such client alone, the same latencies.
+   token SMC runs gen.bench.smc-clients runs at once (1), each over an
+   LM of its own.
+   Measured on the same Mac (2026-11-07, Qwen3-0.6B-Q8_0): 8 clients in
+   float16 302 tokens/s continuous (17.6 ms a read at the median) against
+   the paged mode's 90 (81.5 ms), the static's 86 and llama.cpp's 103
+   (71.9 ms); in float32 175 against 82, 78 and 92. A lone client is as
+   fast as in the paged mode (81.4 against 76.9 tokens/s, float32, 9
+   runs). Token SMC at 16 particles 605 (float32) and 670 (float16)
+   against the paged 586 and 641; two runs at once 799 against 596
+   (llama.cpp 889). docs/research/llm-mlx-engine.md §8 has the rest."
   (:require [clojure.string :as str]
             [gen.array :as array]
+            [gen.gfi :as gfi]
             [gen.llm.array-engine :as ae]
             [gen.llm.branching :as br]
             [gen.llm.lm :as lm]
+            [gen.llm.slots :as slots]
             [gen.llm.smc :as smc]
             [gen.llm.token :as token]
             [gen.random :as rng]))
@@ -62,11 +84,16 @@
    :dtype (keyword (prop "dtype" "float32"))
    :sections (set (map keyword (str/split (prop "sections" "decode,smc") #",")))
    ;; the engines: gen.bench.engines, of static, paged and llama
-   :engines (set (map keyword (str/split (prop "engines" "static,paged,llama") #",")))
+   :engines (set (map keyword (str/split (prop "engines" "static,paged,continuous,llama") #",")))
    ;; the paged mode's (genclj-1daf)
    :block-size (long-prop "block-size" 16)
    :pool-blocks (long-prop "pool-blocks" 128)
-   :min-rows (long-prop "min-rows" 1)})
+   :min-rows (long-prop "min-rows" 1)
+   ;; the continuous mode's (genclj-b3ow)
+   :wait (parse-double (prop "wait" 0.25))
+   :clients (long-prop "clients" 8)
+   :client-tokens (long-prop "client-tokens" 64)
+   :smc-clients (long-prop "smc-clients" 1)})
 
 (defn- llama [sym] @(requiring-resolve (symbol "gen.llm.llama" (name sym))))
 
@@ -91,12 +118,73 @@
         (recur (br/advance bs tokens) (inc i))))))
 
 (defn- smc-run
-  "The token SMC row's work on engine e and tokenizer tok: a new LM, a run,
-   the LM closed."
+  "The token SMC row's work on engine e and tokenizer tok: gen.bench.smc-
+   clients runs at once, each over a new LM (closed after), each with a
+   prompt of its own."
   [e tok prompt]
-  (let [{:keys [particles smc-tokens]} settings]
-    (with-open [m (lm/lm e tok)]
-      (smc/run (token/completion m {:end-tokens #{}}) [prompt smc-tokens] particles {:key (rng/key 7)}))))
+  (let [{:keys [particles smc-tokens smc-clients]} settings
+        k (long smc-clients)
+        one (fn [i p]
+              (with-open [m (if (== 1 k) (lm/lm e tok) (lm/lm e tok {:max-branches (quot (long (:max-branches (br/info e))) k)
+                                                                    :max-cells 2048}))]
+                (smc/run (token/completion m {:end-tokens #{}}) [p smc-tokens] particles {:key (rng/key (+ 7 (long i)))})))]
+    (if (== 1 k)
+      (one 0 prompt)
+      (mapv deref (mapv (fn [i] (future (one i (into [(first prompt)] (drop (* 3 (long i)) (rest prompt)))))) (range k))))))
+
+(defn- timed-lm
+  "m with each read's time (ms) conj'd onto the atom times."
+  [m times]
+  (reify lm/LM
+    (-tokenizer [_] (lm/-tokenizer m))
+    (-next-logprobs [_ contexts]
+      (let [t0 (System/nanoTime)
+            v (lm/-next-logprobs m contexts)]
+        (swap! times conj (/ (- (System/nanoTime) t0) 1e6))
+        v))
+    (-score [_ context continuation] (lm/-score m context continuation))
+    (-info [_] (lm/-info m))))
+
+(defn- client-run
+  "n completion clients at once on engine e (tokenizer tok), client i
+   after a prompt of its own (prompt shifted by 5 i), each over an LM of
+   its own: [wall-ms read-latencies]."
+  [e tok prompt n]
+  (let [{:keys [client-tokens]} settings
+        n (long n)
+        times (atom [])
+        go (promise)
+        branches (quot (long (:max-branches (br/info e))) n)
+        one (fn [i]
+              (with-open [m (lm/lm e tok {:max-branches (min 4 branches) :max-cells 1024})]
+                @go
+                (gfi/simulate (token/completion (timed-lm m times) {:end-tokens #{}})
+                              [(into [(first prompt)] (drop (* 5 (long i)) (rest prompt))) client-tokens]
+                              (rng/key (+ 11 (long i))))))
+        fs (mapv (fn [i] (future (one i))) (range n))
+        ;; every LM made before the clock starts
+        _ (Thread/sleep 200)
+        t0 (System/nanoTime)]
+    (deliver go true)
+    (run! deref fs)
+    [(/ (- (System/nanoTime) t0) 1e6) @times]))
+
+(defn- percentile [xs q]
+  (let [v (vec (sort xs))]
+    (if (empty? v) Double/NaN (double (v (min (dec (count v)) (long (* (double q) (count v)))))))))
+
+(defn- clients-rows
+  "The clients (or lone) rows of an engine: the median wall time of
+   (:runs settings) runs after an untimed one, and the latencies of every
+   timed run's reads."
+  [label e tok prompt n]
+  (client-run e tok prompt n)
+  (let [runs (repeatedly (:runs settings) #(client-run e tok prompt n))
+        ms (nth (sort (map first runs)) (quot (count runs) 2))
+        lat (mapcat second runs)]
+    (println (format "| %-44s | %9.1f | %9.1f | %7.1f | %7.1f | %7.1f |" label ms
+                     (/ (* 1000.0 n (:client-tokens settings)) ms)
+                     (percentile lat 0.5) (percentile lat 0.9) (reduce max 0.0 lat)))))
 
 (defn- row [label ms tokens]
   (println (format "| %-44s | %9.1f | %9.1f |" label ms (/ (* 1000.0 tokens) ms))))
@@ -115,7 +203,13 @@
                            #(ae/engine {:model path :max-branches 64 :dtype (:dtype settings) :paged? true
                                         :block-size (:block-size settings) :pool-blocks (:pool-blocks settings)
                                         :min-rows (:min-rows settings)})]
-                          [:llama "llama.cpp" #((llama 'engine) {:model path :max-branches 64 :n-ctx 8192})]])]
+                          [:continuous (str "gen.array continuous (MLX), wait " (:wait settings))
+                           #(ae/engine {:model path :max-branches 64 :dtype (:dtype settings) :paged? true :continuous? true
+                                        :block-size (:block-size settings) :pool-blocks (:pool-blocks settings)
+                                        :min-rows (:min-rows settings) :wait (:wait settings)})]
+                          [:llama "llama.cpp" #((llama 'engine) {:model path :max-branches 64 :n-ctx 8192})]])
+        stats (fn [k e] (when-not (= :llama k)
+                          (println "|" (pr-str (ae/stats e)) (if (= :continuous k) (pr-str (slots/schedule e)) "") "| | |")))]
     (with-open [^java.io.Closeable v ((llama 'vocabulary) path)]
       (let [tok ((llama 'tokenizer) v)
             text (str/join " " (repeat 40 "The sea is calm tonight, and the tide is full."))
@@ -127,14 +221,23 @@
           (doseq [[k label make] engines]
             (with-open [^java.io.Closeable e (make)]
               (row label (median-ms #(decode e prompt-tokens)) (* batch steps))
-              (when-not (= :llama k) (println "|" (pr-str (ae/stats e)) "| | |")))))
+              (stats k e))))
         (when ((:sections settings) :smc)
-          (println "\n### Token SMC," particles "particles," smc-tokens "tokens each (bootstrap)\n")
+          (println "\n### Token SMC," (:smc-clients settings) "run(s) at once," particles "particles," smc-tokens "tokens each (bootstrap)\n")
           (println "|                                              |        ms |  tokens/s |")
           (println "|---|---:|---:|")
           (doseq [[k label make] engines]
             (with-open [^java.io.Closeable e (make)]
-              (row label (median-ms #(smc-run e tok prompt-tokens)) (* particles smc-tokens))
-              (when-not (= :llama k) (println "|" (pr-str (ae/stats e)) "| | |"))))))))
+              (row label (median-ms #(smc-run e tok prompt-tokens)) (* (:smc-clients settings) particles smc-tokens))
+              (stats k e))))
+        (doseq [[section n] [[:clients (:clients settings)] [:lone 1]]
+                :when ((:sections settings) section)]
+          (println "\n###" n (if (= 1 n) "client" "clients at once") "," (:client-tokens settings) "tokens each, an LM each\n")
+          (println "|                                              |   wall ms |  tokens/s | p50 ms  | p90 ms  | max ms  |")
+          (println "|---|---:|---:|---:|---:|---:|")
+          (doseq [[k label make] engines]
+            (with-open [^java.io.Closeable e (make)]
+              (clients-rows label e tok prompt-tokens n)
+              (stats k e)))))))
   (println "\nMLX memory:" (pr-str ((requiring-resolve 'gen.backend.mlx.memory/memory))))
   (shutdown-agents))

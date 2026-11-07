@@ -156,6 +156,32 @@
         (br/dispose! (cons a as))
         (br/dispose! (cons b bs))))))
 
+(deftest the-continuous-mode-holds-the-contract-alone-and-at-once
+  ;; the continuous mode (:continuous?, genclj-b3ow), its forwards of 8
+  ;; tokens so that prompts and continuations take chunks: the Branching
+  ;; contract within the band, by one caller and by four at once (whose
+  ;; reads mix decode rows and chunks of other callers'); the largest
+  ;; |Δ log p| printed
+  (ts/when-native :llama available?
+    (with-open [e (ae/engine {:model model-path :max-branches 64 :paged? true :continuous? true :n-batch 8})]
+      (let [worst (atom 0.0)
+            seen (fn [_ d] (swap! worst max (double d)))
+            at-once [:normalized :fork-matches-fresh :batch-matches-single :score-matches-steps :threads]]
+        (binding [bc/*observe* seen]
+          (doseq [pair pairs
+                  [k check] bc/checks]
+            (testing [(first pair) k]
+              (is (= [] (bc/run-check check e (opts pair))))))
+          (let [results (mapv deref (mapv (fn [pair]
+                                            (future (binding [bc/*observe* seen]
+                                                      (into {} (map (fn [c] [c (bc/run-check (bc/checks c) e (opts pair))])) at-once))))
+                                          (take 4 (cycle pairs))))]
+            (doseq [[i r] (map-indexed vector results), c at-once]
+              (testing ["at once" i c]
+                (is (= [] (r c)))))))
+        (println "the continuous mode's largest |Δ log p|:" @worst "(band" band ")" (ae/stats e) (slots/schedule e))
+        (is (zero? (:live (br/info e))))))))
+
 (deftest the-lm-contract-holds-within-the-band
   (ts/when-native :llama available?
     (let [{:keys [engine vocab]} (setup)

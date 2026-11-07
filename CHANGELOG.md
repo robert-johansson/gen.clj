@@ -62,6 +62,33 @@ other values for the same key, from the same distribution.
     reports its counts and `blocks` its books. A failed paged step loses
     every branch (`:lost-slots`), its pools having been donated.
 
+- **Added (experimental): continuous batching** (genclj-b3ow, PROVISIONAL:
+  concurrent callers' results then depend on how their calls were
+  gathered, within the engine's band).
+  - `gen.llm.slots`: an optional protocol `Batching` (`slots-forward`),
+    for Slots whose `slots-info` has `:batching {:wait w}`. Their engine
+    admits advances, extends and opens as requests and reads them in
+    forwards over every read in flight, waiting before a forward for the
+    callers the last one answered (at most w of its time); an operation
+    on a branch a request holds waits for it. `slots/schedule` gives the
+    scheduler's counts. Every other engine runs its operations one at a
+    time, in order, as before: the engine's thread is now a task loop of
+    gen.llm.slots's own in place of a single-thread executor.
+  - `gen.llm.array-engine`: `:continuous? true` (with `:paged? true`;
+    `:wait` 0.25) reads every one-token read in flight and a chunk of
+    the oldest longer read (an open's or extend's prefill, up to
+    `:n-batch` tokens a forward) in one compiled forward. `stats` reports
+    its forwards, decode and chunk rows.
+  - `gen.llm.models.qwen3`: `paged-batch-step` and
+    `compile-paged-batch-step`, a forward of decode rows (paged
+    attention) and one sequence's prefill chunk (its blocks gathered)
+    over paged pools, the logits of the rows read only, and the scores
+    of their targets.
+  - Measured on Metal (Qwen3-0.6B Q8_0): 8 concurrent completion clients
+    302 tokens/s in float16 against 90 in the paged mode and 103 through
+    llama.cpp (175 against 82 and 92 in float32); a lone caller as
+    before.
+
 - **Added (experimental): LoRA adapters, `gen.llm.lora`** (genclj-yc3b,
   genclj-p4mk): low-rank adapters trained beside a model's frozen, dense
   or quantized, weights, and served by llama.cpp.

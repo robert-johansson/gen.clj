@@ -144,12 +144,12 @@
 ;; Batching submits only operations: the thread runs them one at a time,
 ;; in order (run-tasks), as a single-thread executor would.
 
-(deftype Worker [^LinkedBlockingQueue queue ^Thread thread lock open?])
+(deftype Worker [^LinkedBlockingQueue queue ^Thread thread open?])
 
 (defn- enqueue!
   "Put task on w's queue: its future. A loud error once w is shut down."
   ^CompletableFuture [^Worker w task what]
-  (locking (.-lock w)
+  (locking w
     (when-not @(.-open? w) (throw (closed-error what)))
     ;; offer, never put: an interrupted caller still submits (put waits
     ;; interruptibly for the queue's lock)
@@ -167,7 +167,7 @@
 (defn- shutdown!
   "No task is taken any more; the thread runs those queued and ends."
   [^Worker w]
-  (locking (.-lock w)
+  (locking w
     (when @(.-open? w)
       (vreset! (.-open? w) false)
       (.offer ^LinkedBlockingQueue (.-queue w) ::stop))))
@@ -196,7 +196,7 @@
   (let [q (LinkedBlockingQueue.)
         t (-> (Thread/ofPlatform) (.name (str "gen.llm " name)) (.daemon true) (.unstarted #(work q)))]
     (.start t)
-    (Worker. q t (Object.) (volatile! true))))
+    (Worker. q t (volatile! true))))
 
 ;; ---------------------------------------------------------------------------
 ;; The engine's books
