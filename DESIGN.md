@@ -775,6 +775,10 @@ decision is appended there, and this summary changes with it.
   composites (gen.array.nn) a backend may fuse (IFused), and quantize,
   dequantize, quantized-matmul and gather-qmm are IQuantized's, in MLX's
   affine layout; the JVM backend stores uint32. [decided](docs/decisions.md#genarrays-llm-operations-two-optional-protocols-uint32-on-the-jvm)
+- GGUF weights load through gen.array/load-gguf (ILoading; a host reader on
+  the JVM backend, mlx_load_gguf on MLX); model families live in
+  gen.llm.models.*, backend-neutral; Qwen3 is checked against llama.cpp
+  within 0.075 nats on Metal. [decided](docs/decisions.md#gguf-weights-and-qwen3s-forward-on-genarray)
 - The MLX engine: GGUF weights through MLX's loader (Q8_0 scales float32),
   llama.cpp's vocabulary, gen.array's LLM operations (rms-norm, rope, sdpa;
   quantized-matmul, dequantize, gather-qmm), a Slots engine, MLX's native

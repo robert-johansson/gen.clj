@@ -4209,3 +4209,69 @@ times slower than GenJAX on MCMC. Uncompiled numbers would understate MLX.
 
 **The new order.** genclj-tjvd now starts at the forward's level, and no
 longer waits for the Slots engine. The engine adopts its caches after.
+
+### GGUF weights and Qwen3's forward on gen.array
+
+(PROVISIONAL, owner to confirm; genclj-cr5a, genclj-gvfa, 2026-11-07)
+
+**What was built.**
+- gen.array/load-gguf (experimental), through a new optional protocol,
+  ILoading.
+  - A host reader, gen.array.gguf, checks every file's header and types first.
+  - MLX loads with mlx_load_gguf. The JVM backend reads the file itself, bit
+    for bit equal to MLX's triples.
+- gen.llm.models.qwen3 (experimental): load, forward, prefill and step, over
+  caches that are values.
+
+**Checked against llama.cpp on Metal.** Qwen3-0.6B Q8_0, 20 prompts, each
+read whole, as a chunk and through 8 steps (200 comparisons):
+- max |Δ log p| over llama.cpp's top 64: 0.036 (median 0.006-0.007);
+- argmax equal 200 of 200; top 5 equal 199 of 200.
+- Planted convention errors fail by:
+  - KV heads tiled: 17-25 nats;
+  - q/k norms skipped: 12-18;
+  - RoPE traditional: 2.6-6.6.
+
+**The lead's calls, on the implementing agent's recommendations:**
+1. **The namespace is gen.llm.models.qwen3** (mlx-lm's layout), since the code
+   is backend-neutral and the JVM backend runs it. The engine can still be
+   gen.llm.mlx. Not taken: gen.llm.mlx.qwen3, as llm-mlx-engine.md named it.
+2. **A numerics edge: Q8_0's and Q4_0's biases are computed in float32**
+   (-128·d, -8·d), not cast from MLX's float16 biases. They are identical
+   unless d > 511.75, where MLX's overflow to -inf.
+3. **GGUF files with float64 metadata are refused on MLX** (:unsupported).
+   MLX 0.32.4's loader misreads them and the process dies with SIGBUS (found
+   here; see mlx/io/gguf.cpp). Not taken: falling back to the host reader.
+   An upstream issue is the owner's call.
+4. **F16 tensors load as float32 on the JVM backend**, which has no float16.
+5. **K-quants and BF16 are loud**, where MLX would silently turn them into
+   float16. K-quants come with genclj-kqxr.
+6. **Strict reading:** every tensor must be read, RoPE scaling is refused, and
+   unknown option keys are loud.
+7. **The band against llama.cpp on Metal is 0.075, twice the measured max.**
+   The top-5 check allows a swap across the boundary within the band. Not
+   taken: llama.cpp's own band of 0.1.
+8. **The real-model test runs on the MLX backend only**; on the JVM backend
+   it counts as a llama skip.
+
+### Unknown option keys: the rest of L5
+
+(PROVISIONAL, owner to confirm; genclj-yrb6, 2026-11-07)
+
+**Covered.** The same check and error form for:
+- enumerative's grids;
+- transform's translators;
+- diagnostics/summary;
+- gradients/choice-gradients;
+- learning/train and the eight optimizer constructors. These had a silent
+  bug: (adam {:learning-rate 0.01}) ran at 0.001.
+
+The CHANGELOG keeps one Breaking line for both beans.
+
+**Calls:**
+- The helper stays internal in gen.inference.options, required by
+  gen.learning and gen.gradients (all L5).
+- The deterministic translator keeps its specific errors for :q-forward and
+  :q-backward, checked first.
+- Translators refuse each other's keys.
+- Functions below L5 are the owner's call (genclj-c6jo).
