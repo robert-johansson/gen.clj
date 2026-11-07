@@ -16,7 +16,11 @@
    where paths part. A path stays only while it leads to an entry, so the
    trie holds no more tokens than its entries' contexts. Tokens compare with
    =, so a context may hold longs or integers. remove-entry takes the
-   tokens of an entry the trie holds (:no-entry otherwise)."
+   tokens of an entry the trie holds (:no-entry otherwise).
+
+   Every walk is a loop, never a recursion, and builds no chain of lazy
+   sequences: a path may pass as many nodes as its tokens, and the trie
+   may be as deep as its contexts are long (genclj-6h3b, genclj-gn5i)."
   {:api :experimental})
 
 (set! *warn-on-reflection* true)
@@ -106,26 +110,32 @@
      :scores (subvec sc 0 k)
      :children {(nth edge k) (assoc node :tokens (subvec edge k) :scores (subvec sc k))}}))
 
-(defn- insert* [node tokens depth from scores entry]
-  (if (== (long depth) (count tokens))
-    (if (:entry node)
-      (throw (ex-info (str "trie: an entry is already at " tokens) {:reason :entry-exists :tokens tokens}))
-      (assoc node :entry entry))
-    (let [t (nth tokens depth)
-          child (get (:children node) t)]
-      (assoc-in node [:children t]
-                (if child
-                  (let [k (common (:tokens child) tokens depth)]
-                    (insert* (if (< k (count (:tokens child))) (split child k) child)
-                             tokens (+ (long depth) k) from scores entry))
-                  (leaf tokens depth from scores entry))))))
+(defn- graft
+  "The root of path, [node token] pairs from the root down, with below as
+   the child its last node's token leads to: each node given its new child,
+   in a loop back up."
+  [path below]
+  (reduce (fn [below [node t]] (assoc-in node [:children t] below)) below (rseq path)))
 
 (defn insert
   "trie with the path of tokens and entry at its end, which must have none.
    scores are the scores of tokens from position from on; tokens already on
-   a path keep the scores they have."
+   a path keep the scores they have. A loop, not a recursion: down the path,
+   keeping each node passed with the token it left by, and back up (a path
+   may pass as many nodes as its tokens)."
   [trie tokens from scores entry]
-  (insert* trie tokens 0 from scores entry))
+  (let [n (count tokens)]
+    (loop [node trie depth 0 path []]
+      (if (== depth n)
+        (if (:entry node)
+          (throw (ex-info (str "trie: an entry is already at " tokens) {:reason :entry-exists :tokens tokens}))
+          (graft path (assoc node :entry entry)))
+        (let [t (nth tokens depth)
+              path (conj path [node t])]
+          (if-let [child (get (:children node) t)]
+            (let [k (common (:tokens child) tokens depth)]
+              (recur (if (< k (count (:tokens child))) (split child k) child) (+ depth k) path))
+            (graft path (leaf tokens depth from scores entry))))))))
 
 (defn- tidy
   "A node below the root, after a removal at or under it: nil if it leads

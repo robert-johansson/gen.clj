@@ -43,30 +43,113 @@
     (is (= trie/empty-trie (trie/remove-entry t (list 1 2 3))) "any sequence of the tokens")))
 
 ;; Every walk of the trie loops, so a path may pass as many nodes as its
-;; tokens: an entry at every prefix of 3,000 tokens, a node at each
-;; (genclj-6h3b: entries and size recursed, and entries overflowed the
-;; stack here). Plant: the recursive walk of entries or size fails this.
-(deftest a-trie-of-a-deep-path-is-walked
-  (let [n 3000
-        tokens (vec (range n))
-        t (reduce (fn [t k] (trie/insert t (subvec tokens 0 k) (dec k) [0.0] k)) trie/empty-trie (range 1 (inc n)))]
-    (is (= (vec (range 1 (inc n))) (trie/entries t)) "depth first: the shallowest first")
-    (is (= n (trie/size t)))
-    (is (= (dec n) (count (trie/entries (trie/remove-entry t tokens)))))
-    (is (= (dec n) (trie/size (trie/remove-entry t tokens))))))
+;; tokens. The deep tests run on a small stack, where any walk that
+;; recursed per node would overflow: on the M4 (GraalVM 25) the recursive
+;; insert overflowed 256 KB at 1,000 nodes, warm, and 500 cold; the 1 MB
+;; default at ~2,770 on fenrir, and the M4's 2 MB at 8,000 (genclj-gn5i).
+(defn- on-a-small-stack
+  "(f) on a thread with a 256 KB stack, clojure.test's bindings conveyed:
+   its value, or what it threw, rethrown here."
+  [f]
+  (let [out (promise)
+        g (bound-fn* f)
+        ^Thread thread (.start (.stackSize (Thread/ofPlatform) (* 256 1024))
+                               ^Runnable (fn [] (deliver out (try [:value (g)] (catch Throwable e [:thrown e])))))]
+    (.join thread)
+    (let [[kind x] @out]
+      (if (= :thrown kind) (throw x) x))))
 
+(defn- prefix-trie
+  "An entry at every prefix of tokens, a node at each, the shallowest
+   inserted first: each insert passes every node before it."
+  [tokens]
+  (reduce (fn [t k] (trie/insert t (subvec tokens 0 k) (dec k) [0.0] k))
+          trie/empty-trie (range 1 (inc (count tokens)))))
+
+;; An entry at every prefix of 3,000 tokens (genclj-6h3b: entries and size
+;; recursed, and entries overflowed the stack here; genclj-gn5i: insert
+;; did, on fenrir's 1 MB). Plant: the recursive walk of entries, size or
+;; insert fails this, a StackOverflowError.
+(deftest a-trie-of-a-deep-path-is-walked
+  (on-a-small-stack
+   #(let [n 3000
+          tokens (vec (range n))
+          t (prefix-trie tokens)]
+      (is (= (vec (range 1 (inc n))) (trie/entries t)) "depth first: the shallowest first")
+      (is (= n (trie/size t)))
+      (is (= (dec n) (count (trie/entries (trie/remove-entry t tokens)))))
+      (is (= (dec n) (trie/size (trie/remove-entry t tokens)))))))
+
+;; Plant: the recursive insert fails this, a StackOverflowError.
 (deftest remove-entry-takes-a-path-of-many-nodes
   ;; an entry at every prefix of 3,000 tokens, a node at each: the deepest
   ;; removed, and then one in the middle
-  (let [n 3000
-        tokens (vec (range n))
-        t (reduce (fn [t k] (trie/insert t (subvec tokens 0 k) (dec k) [0.0] k)) trie/empty-trie (range 1 (inc n)))
-        t1 (trie/remove-entry t tokens)
-        t2 (trie/remove-entry t1 (subvec tokens 0 1500))]
-    (is (= {:depth n :entry n :entry-depth n} (trie/match t tokens)))
-    (is (= {:depth (dec n) :entry (dec n) :entry-depth (dec n)} (trie/match t1 tokens)) "the path to it goes too")
-    (is (= {:depth 1500 :entry 1499 :entry-depth 1499} (trie/match t2 (subvec tokens 0 1500))))
-    (is (= {:depth (dec n) :entry (dec n) :entry-depth (dec n)} (trie/match t2 tokens)) "the entries past it stay")))
+  (on-a-small-stack
+   #(let [n 3000
+          tokens (vec (range n))
+          t (prefix-trie tokens)
+          t1 (trie/remove-entry t tokens)
+          t2 (trie/remove-entry t1 (subvec tokens 0 1500))]
+      (is (= {:depth n :entry n :entry-depth n} (trie/match t tokens)))
+      (is (= {:depth (dec n) :entry (dec n) :entry-depth (dec n)} (trie/match t1 tokens)) "the path to it goes too")
+      (is (= {:depth 1500 :entry 1499 :entry-depth 1499} (trie/match t2 (subvec tokens 0 1500))))
+      (is (= {:depth (dec n) :entry (dec n) :entry-depth (dec n)} (trie/match t2 tokens)) "the entries past it stay"))))
+
+;; A path of 100,000 tokens, with an entry at its end and at each of its
+;; first 10,000 prefixes (10,001 nodes), the deepest inserted first, so
+;; that each insert passes one node; then inserted into past its end and
+;; inside its last edge, walked, and removed from (genclj-gn5i). A node at
+;; each of the 100,000 tokens would cost 5e9 token comparisons to insert;
+;; 10,000 overflow a recursive walk on 2 MB stacks too. Plant: the
+;; recursive insert fails this, a StackOverflowError.
+(deftest a-path-of-100k-tokens
+  (on-a-small-stack
+   #(let [n 100000
+          m 10000
+          tokens (vec (range n))
+          sc (mapv (fn [p] (- (double p))) (range n))
+          t (reduce (fn [t k] (trie/insert t (subvec tokens 0 k) 0 (subvec sc 0 k) k))
+                    trie/empty-trie (cons n (range m 0 -1)))
+          past (conj tokens -1)
+          half (subvec tokens 0 (quot n 2))
+          t1 (-> t
+                 (trie/insert past n [-0.5] :past)
+                 (trie/insert half 0 (subvec sc 0 (quot n 2)) :half))
+          reason (fn [g] (try (g) :no-error (catch clojure.lang.ExceptionInfo e (:reason (ex-data e)))))]
+      (is (= (conj (vec (range 1 (inc m))) n) (trie/entries t)) "depth first: the shallowest first")
+      (is (= n (trie/size t)))
+      (is (= {:depth n :entry n :entry-depth n} (trie/match t tokens)))
+      (is (= {:depth n :entry n :entry-depth n} (trie/match t past)))
+      (is (= sc (trie/scores t tokens 0)) "every score, across every node")
+      (is (= (subvec sc (- n 3)) (trie/scores t tokens (- n 3))))
+      ;; inserted into: past the end (every node passed), and inside the last edge (split)
+      (is (= (conj (vec (range 1 (inc m))) :half n :past) (trie/entries t1)))
+      (is (= (inc n) (trie/size t1)))
+      (is (= {:depth (inc n) :entry :past :entry-depth (inc n)} (trie/match t1 past)))
+      (is (= {:depth n :entry n :entry-depth n} (trie/match t1 tokens)))
+      (is (= {:depth (inc (quot n 2)) :entry :half :entry-depth (quot n 2)} (trie/match t1 (subvec tokens 0 (inc (quot n 2))))))
+      (is (= (conj sc -0.5) (trie/scores t1 past 0)) "the path's scores kept, the new token's added")
+      (is (= :entry-exists (reason (fn [] (trie/insert t1 past n [0.0] :again)))))
+      (is (= :entry-exists (reason (fn [] (trie/insert t1 half 0 [] :again)))))
+      ;; removed from, the deepest first: the paths that lead to no entry go
+      (let [t2 (trie/remove-entry t1 past)
+            t3 (trie/remove-entry t2 tokens)
+            t4 (trie/remove-entry t3 half)
+            t5 (trie/remove-entry t4 (subvec tokens 0 (quot m 2)))]
+        (is (= :no-entry (reason (fn [] (trie/remove-entry t1 (conj tokens 5))))))
+        (is (= :no-entry (reason (fn [] (trie/remove-entry t2 past)))))
+        (is (= n (trie/size t2)))
+        (is (= {:depth n :entry n :entry-depth n} (trie/match t2 past)))
+        (is (= (quot n 2) (trie/size t3)) "the path past half goes")
+        (is (= {:depth (quot n 2) :entry :half :entry-depth (quot n 2)} (trie/match t3 tokens)))
+        (is (= m (trie/size t4)))
+        (is (= (vec (range 1 (inc m))) (trie/entries t4)))
+        (is (= (subvec sc 0 m) (trie/scores t4 (subvec tokens 0 m) 0)))
+        (is (= (dec m) (count (trie/entries t5))))
+        (is (= m (trie/size t5)) "a node passed through joins its child")
+        (is (= {:depth m :entry m :entry-depth m} (trie/match t5 tokens)))
+        (is (= {:depth (quot m 2) :entry (dec (quot m 2)) :entry-depth (dec (quot m 2))}
+               (trie/match t5 (subvec tokens 0 (quot m 2)))))))))
 
 (defn- prefixes [ctx] (map #(subvec ctx 0 %) (range 1 (inc (count ctx)))))
 
