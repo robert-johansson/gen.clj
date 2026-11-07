@@ -4582,3 +4582,45 @@ the rest", no version yet):
 **The autonomous run's order changes.** Paged attention and continuous
 batching (genclj-9a1l, genclj-1daf, genclj-b3ow) move ahead of the
 remaining weight formats.
+
+### LoRA: gen.llm.lora, and llama.cpp's adapter GGUF
+
+(PROVISIONAL, owner to confirm; genclj-yc3b, genclj-p4mk, 2026-11-07)
+
+**What was built.** gen.llm.lora (experimental, backend-neutral) has init,
+adapt, merge, save-gguf and load-gguf. Adapted weights are {:base :lora},
+and a family's forward dispatches on them. A pure-Clojure GGUF writer in
+gen.array.gguf writes atomically, byte-identical to gguf-py's.
+
+**Checked.**
+- **The round trip.** An adapter applied in MLX, and the same adapter loaded
+  by llama.cpp (fenrir, CUDA), agree within the platform band: largest Δ log
+  p 0.21-0.45 against shifts of 1-19 nats, argmax and top 5 equal. A trained
+  adapter does too.
+- **Planted convention errors** are refused by llama.cpp or exceed 1.3 nats:
+  A and B transposed and swapped, names swapped, alpha written as
+  alpha/rank, layers off by one, scale alpha instead of alpha/rank.
+- **Training.** Qwen3-0.6B, rank 8 on the last 8 layers, AdamW: the NLL fell
+  from 188 to 21 in five steps.
+
+**The lead's calls, on the implementing agent's recommendations:**
+1. **LoRA is its own namespace,** with {:base :lora} weights the families
+   dispatch on. Not taken: LoRA per family; an :adapters key on the model.
+2. **Params are keyed by layer, then target.**
+3. **The scale is alpha/rank**, as llama.cpp and PEFT have it. mlx-lm's
+   "scale 20" is alpha = 20·rank.
+4. **Defaults:** rank 8, alpha 16, targets q and v, all layers.
+5. **A is uniform, from fold-in keys by site; B starts at zero.**
+6. **Dropout is on only when adapt gets a :key.**
+7. **The GGUF writer is pure Clojure.** Not taken: mlx_save_gguf (MLX only);
+   a public array/save-gguf.
+8. **load-gguf is strict:** it refuses norm tensors, aLoRA, embedding or
+   output tensors, quantized tensors and mixed ranks. A missing alpha means
+   alpha = rank.
+9. **merge dequantizes and doesn't re-quantize.**
+10. **Adapters take the model's dtype.**
+11. **lora-llama's mutation threshold is 1.3 nats** (twice fenrir's band).
+12. **A known cost:** under native gradients the checkpoint also computes
+    the frozen weights' cotangents (genclj-8xua).
+
+The lora-llama test has not yet run on Metal (0.075 band).
