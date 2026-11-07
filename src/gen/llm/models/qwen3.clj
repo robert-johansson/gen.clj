@@ -99,7 +99,8 @@
   (:require [clojure.core :as c]
             [clojure.string :as str]
             [gen.array :as array :refer [+ * <=]]
-            [gen.llm.lora :as lora]))
+            [gen.llm.lora :as lora]
+            [gen.llm.models :as models]))
 
 (set! *warn-on-reflection* true)
 
@@ -717,3 +718,11 @@
          (check-capacity cache t)
          (let [[out layers positions] (f (:layers cache) (:positions cache) ids)]
            [out (advanced cache layers positions t)]))))))
+
+;; ---------------------------------------------------------------------------
+;; The family, by its architecture (gen.llm.models)
+;; ---------------------------------------------------------------------------
+
+(defmethod models/log-probs "qwen3" [m tokens & [opts]] (log-probs m tokens opts))
+
+(defmethod models/nll "qwen3" [m tokens & [opts]] (nll m tokens opts))

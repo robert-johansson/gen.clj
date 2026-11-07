@@ -62,6 +62,7 @@
   (:require [clojure.core :as c]
             [gen.array :as array :refer [+ * /]]
             [gen.array.gguf :as gguf]
+            [gen.llm.models :as models]
             [gen.random :as rng]))
 
 (set! *warn-on-reflection* true)
@@ -213,7 +214,7 @@
   (let [{:keys [rank alpha dropout layers] ts :targets} (c/merge defaults opts)
         n (count (get-in m [:weights :layers]))
         layers (if (contains? opts :layers) layers (range n))
-        config (check-config {:architecture (get-in m [:config :architecture]) :rank rank
+        config (check-config {:architecture (models/architecture m) :rank rank
                               :alpha (when (number? alpha) (double alpha)) :dropout (when (number? dropout) (double dropout))})
         dtype (or (get-in m [:config :dtype]) (throw (invalid "the model has no :config :dtype" {})))]
     (when-not (and (sequential? ts) (seq ts) (every? #(contains? targets %) ts) (apply distinct? ts))
