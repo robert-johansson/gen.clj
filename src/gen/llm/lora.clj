@@ -170,7 +170,7 @@
    they agree: matrices, or stacks of as many (one per expert)."
   [a b]
   (let [sa (array/shape a) sb (array/shape b)]
-    (when (and (= (count sa) (count sb)) (= (pop (pop sa)) (pop (pop sb))) (= (peek (pop sa)) (peek sb)))
+    (when (and (c/<= 2 (count sa)) (= (count sa) (count sb)) (= (pop (pop sa)) (pop (pop sb))) (= (peek (pop sa)) (peek sb)))
       (peek sb))))
 
 (defn- check-params
