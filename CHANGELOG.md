@@ -254,6 +254,37 @@ other values for the same key, from the same distribution.
 - **Added: THIRD-PARTY-NOTICES** (genclj-ty8m): the origins and licenses
   of files derived from other projects, and the header a ported file
   carries (CLAUDE.md, rule 10).
+- **Added (experimental): `array/checkpoint`, gradients that recompute**
+  (gen.array; genclj-pnu6). `(array/checkpoint f)` is f, with the same
+  values and gradients, whose gradient does not keep f's intermediates
+  from the forward pass: under value-and-grad f runs again in the
+  backward pass when its cotangent arrives, so a stack of checkpointed
+  layers holds one layer's activations at a time. Its arguments are
+  arrays or trees; their float arrays are the inputs (host numbers and
+  int arrays pass through), and f must not close over a value being
+  differentiated (loud on the tape, `:reason :closes-over`). On the tape
+  one node whose VJP runs f on a tape of its own (exactly the unchecked
+  gradients on the JVM backend); under MLX's native gradients one
+  `mlx_custom_vjp` recomputing f on its inputs made to depend on its
+  outputs and cotangents (`mlx_depends`), mlx-node's memory-ordered
+  per-layer checkpoint; f itself elsewhere (no gradient, the batch
+  tracer, inside `array/compile` under native gradients). A backend
+  implements the new optional protocol `gen.array.protocols/ICheckpoint`
+  (experimental). Measured on fenrir's CUDA (bench/gen/checkpoint_bench.clj,
+  docs/array-api.md §8): a gradient of Qwen3-0.6B's training loss over
+  4 × 256 tokens peaked at 1.5 GB checkpointed against 5.6 GB, 87 → 120
+  ms, when MLX's memory limit is near what the step needs (at a loose
+  limit MLX keeps queued kernels' buffers either way).
+- **Added (experimental): `array/selective-log-softmax`** (gen.array;
+  genclj-pnu6): log softmax(logits) at each index, the logit there less
+  the logsumexp over the last axis, its logsumexp taken `:chunk` entries
+  at a time, never the [.. V] log-softmax. The logits are an array, or a
+  function of a range of vocabulary entries (with `:vocab`), so an LLM's
+  output projection runs a chunk at a time and its [B T V] logits are
+  never made; with `:args` each chunk is checkpointed. Its gradient is
+  the full computation's within round-off. Indices out of range are
+  loud on the JVM backend and clamped on MLX; an unknown option is loud
+  (`:unknown-options`).
 
 ## [1.2.1] - 2026-11-06
 

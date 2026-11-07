@@ -6,6 +6,8 @@
      differentiates them, the batch tracer batches them and the staging
      backend stages them; a backend with fused kernels (p/IFused: MLX's
      fast ops) computes them in one op where its arrays are the operands;
+   - selective-log-softmax: a composite, its logsumexp over chunks of the
+     last axis, of logits given whole or a chunk at a time;
    - quantize, dequantize, quantized-matmul and gather-qmm: primitives of
      p/IQuantized, in MLX's layouts, checked here.
    Written in gen.array's ops, this namespace requires gen.array, which
@@ -301,6 +303,105 @@
             opts (assoc opts :scale (double (or scale (c// 1.0 (Math/sqrt (double dq))))) :mask mask)]
         (or (fused b :sdpa [q k v opts])
             (sdpa-composite q k v opts))))))
+
+;; ---------------------------------------------------------------------------
+;; Log-probabilities of chosen entries, over vocabulary chunks
+;; ---------------------------------------------------------------------------
+
+(def ^:private selective-options #{:chunk :vocab :args})
+
+(defn- chunk-part
+  "The logsumexp of lc, the logits of the entries [start, stop) over its
+   last axis, and the logit of each index that falls among them (0 where
+   it does not), stacked on a new axis 0, in the compute dtype."
+  [lc indices start stop]
+  (let [lc (as-dtype lc (compute-dtype (array/dtype lc)))
+        n (c/- (long stop) (long start))
+        local (- indices start)
+        in? (array/logical-and (>= local 0) (array/< local n))]
+    (array/stack [(array/logsumexp lc {:axis -1})
+                  (array/where in? (array/pick lc (array/clip local 0 (dec n))) 0.0)]
+                 0)))
+
+(defn- chunk-bounds
+  "The chunks [start stop) of v entries, step entries each (the last
+   fewer)."
+  [v step]
+  (vec (for [s (range 0 v step)] [s (c/min (long v) (c/+ (long s) (long step)))])))
+
+(defn- check-chunk
+  "lc, the logits of the entries [start, stop) the function form gave:
+   a float array of the indices' shape and stop - start entries."
+  [lc indices start stop]
+  (let [want (conj (array/shape indices) (c/- (long stop) (long start)))]
+    (when-not (and (array/array? lc) (= :float (dt/kind (array/dtype lc))) (= want (array/shape lc)))
+      (throw (invalid :selective-log-softmax
+                      (str "the logits of entries [" start ", " stop ") must be a float array of shape " want ", not "
+                           (if (array/array? lc) (str (array/dtype lc) " " (array/shape lc)) (pr-str lc)))
+                      {:shapes [(array/shape indices) (when (array/array? lc) (array/shape lc))] :start start :stop stop})))
+    lc))
+
+(defn selective-log-softmax
+  "gen.array/selective-log-softmax's body."
+  [logits indices opts]
+  (when-not (or (nil? opts) (map? opts))
+    (throw (invalid :selective-log-softmax (str "options must be a map, not " (pr-str opts)))))
+  (when-let [unknown (seq (remove selective-options (keys opts)))]
+    (throw (ex-info (str "selective-log-softmax: unknown options " (vec unknown) "; it takes " (vec (sort selective-options)))
+                    {:reason :unknown-options :op :selective-log-softmax :unknown (vec unknown) :accepted selective-options})))
+  (let [{:keys [chunk vocab args]} opts
+        f? (fn? logits)]
+    (when-not (or f? (and (array/backend-array? logits) (seq (array/shape logits)) (= :float (dt/kind (array/dtype logits)))))
+      (throw (invalid :selective-log-softmax
+                      (str "logits must be a float array [.. V] or a function of a range of entries, not "
+                           (if (array/array? logits) (str (array/dtype logits) " " (array/shape logits)) (pr-str logits))))))
+    (when-not (and (array/array? indices) (= :int (dt/kind (array/dtype indices))))
+      (throw (invalid :selective-log-softmax (str "indices must be an int array, not " (pr-str indices)))))
+    (when (and f? (not (and (integer? vocab) (pos? (long vocab)))))
+      (throw (invalid :selective-log-softmax (str "a function of the logits needs :vocab, a positive integer, not " (pr-str vocab))
+                      {:vocab vocab})))
+    (when-not f?
+      (let [lead (pop (array/shape logits))]
+        (when-not (= lead (array/shape indices))
+          (throw (invalid :selective-log-softmax (str "indices must have the logits' leading shape " lead ", not "
+                                                      (array/shape indices))
+                          {:shapes [(array/shape logits) (array/shape indices)]})))
+        (when (and vocab (not= vocab (peek (array/shape logits))))
+          (throw (invalid :selective-log-softmax (str ":vocab " vocab " is not the logits' last axis, " (peek (array/shape logits)))
+                          {:vocab vocab :shapes [(array/shape logits)]})))
+        (when (some? args)
+          (throw (invalid :selective-log-softmax ":args go with a function of the logits, not an array" {})))))
+    (when-not (or (nil? chunk) (and (integer? chunk) (pos? (long chunk))))
+      (throw (invalid :selective-log-softmax (str ":chunk must be a positive integer, not " (pr-str chunk)) {:chunk chunk})))
+    (when-not (or (nil? args) (vector? args))
+      (throw (invalid :selective-log-softmax (str ":args must be a vector of the function's arguments, not " (pr-str args))
+                      {:args args})))
+    (let [v (long (if f? vocab (peek (array/shape logits))))
+          ;; out of range: loud where the indices can be read, clamped on a
+          ;; lazy backend (as take's), so that no index matches no chunk
+          indices (if (array/concrete? indices)
+                    (do (when-not (array/all-true? (array/logical-and (>= indices 0) (array/< indices v)))
+                          (throw (invalid :selective-log-softmax (str "an index is outside the entries [0, " v ")") {:vocab v})))
+                        indices)
+                    (array/clip indices 0 (dec v)))
+          step (long (or chunk v))
+          bounds (chunk-bounds v step)
+          logsumexp-of (fn [lses] (if (c/== 1 (count lses)) (first lses) (array/logsumexp (array/stack lses -1) {:axis -1})))]
+      (if-not f?
+        ;; an array: its entries picked whole, its logsumexp by chunks
+        (let [x (as-dtype logits (compute-dtype (array/dtype logits)))]
+          (- (array/pick x indices)
+             (logsumexp-of (mapv (fn [[s e]] (array/logsumexp (array/slice x -1 s e) {:axis -1})) bounds))))
+        ;; a function: each chunk's logits made, reduced and dropped, and
+        ;; with :args recomputed in the backward pass (checkpoint)
+        (let [part (fn [s e lc] (chunk-part (check-chunk lc indices s e) indices s e))
+              parts (mapv (fn [[s e]]
+                            (if args
+                              (apply (array/checkpoint (fn [& as] (part s e (apply logits s e as)))) args)
+                              (part s e (logits s e))))
+                          bounds)]
+          (- (reduce + (map #(array/take % 1 0) parts))
+             (logsumexp-of (mapv #(array/take % 0 0) parts))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Quantized weights

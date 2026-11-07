@@ -1141,7 +1141,7 @@
 (def ^:private transform
   ;; gen.array.transform's vars, resolved once
   (delay (into {} (map (fn [k] [k (requiring-resolve (symbol "gen.array.transform" (name k)))]))
-               [:scan :compile :batched? :batch-shape :particle-backend :particle :particles :vmap])))
+               [:scan :compile :checkpoint :batched? :batch-shape :particle-backend :particle :particles :vmap])))
 
 ;; ---------------------------------------------------------------------------
 ;; Loops (experimental, outside the 1.x promise: DESIGN §9, genclj-yuau)
@@ -1192,6 +1192,43 @@
    way."
   ([f] (compile f nil))
   ([f opts] ((:compile @transform) f opts)))
+
+;; ---------------------------------------------------------------------------
+;; Checkpoints (experimental, outside the 1.x promise: DESIGN §9)
+;; ---------------------------------------------------------------------------
+
+(defn ^{:api :experimental} checkpoint
+  "f, whose gradient recomputes it: a function of the same arguments
+   returning what f returns, one float array, with the same values and
+   gradients, whose gradient does not keep f's intermediates from the
+   forward pass. Under value-and-grad they are made again in the backward
+   pass, when the cotangent of f's value reaches it, and dropped after it:
+   a training step's memory holds one checkpointed layer's activations at
+   a time, not every layer's, for about one more forward pass of compute.
+   - The arguments are arrays or trees of them (maps, vectors). Their float
+     arrays are the inputs whose gradients flow through; host numbers, int
+     arrays and other leaves (a quantized weight's :bits, its uint32 words)
+     reach f as they are.
+   - f must take every array it differentiates through as an argument:
+     closing over a value being differentiated is loud on the tape, and
+     its gradient is lost under MLX's native gradients.
+   - On the tape (the JVM backend, MLX's default gradients) the backward
+     pass runs f again on a tape of its own, seeded with the cotangent.
+     Under MLX's native gradients (-Dgen.mlx.grad=native) it is one
+     mlx_custom_vjp whose VJP recomputes f (mlx_vjp) on its inputs made to
+     depend on its outputs and on the cotangents (mlx_depends), so that a
+     stack of checkpointed layers runs its backward layer by layer, each
+     recompute after the layer above has its gradient (mlx-node's
+     per-layer checkpoint; MLX's own mlx_checkpoint omits the second
+     dependency).
+   - Where nothing is differentiated, under the batch tracer without the
+     tape (MLX's native gradients of a batched run), inside array/compile
+     under native gradients, and on backends without
+     gen.array.protocols/ICheckpoint (the staging backend), it calls f:
+     the same values and gradients, without the memory saved.
+   Experimental: outside the 1.x promise (DESIGN §9)."
+  [f]
+  (fn [& args] ((:checkpoint @transform) f args)))
 
 ;; ---------------------------------------------------------------------------
 ;; The particles of a batched value (docs/array-api.md §8b)
@@ -1298,7 +1335,7 @@
 
 (def ^:private nn
   (delay (into {} (map (fn [k] [k (requiring-resolve (symbol "gen.array.nn" (name k)))]))
-               [:rms-norm :rope :sdpa :quantize :dequantize :quantized-matmul :gather-qmm])))
+               [:rms-norm :rope :sdpa :selective-log-softmax :quantize :dequantize :quantized-matmul :gather-qmm])))
 
 (defn ^{:api :experimental} rms-norm
   "x normalized by its root mean square over the last axis, times weight:
@@ -1354,6 +1391,36 @@
    promise (DESIGN §9)."
   ([q k v] (sdpa q k v nil))
   ([q k v opts] ((:sdpa @nn) q k v opts)))
+
+(defn ^{:api :experimental} selective-log-softmax
+  "log softmax(logits)[index] for each index, without the log-softmax:
+   the logit at the index less the logsumexp over the last axis, the
+   log-probability of a token under an LLM's logits. The logsumexp is
+   taken :chunk entries at a time (logaddexp's identity over the chunks),
+   so neither the log-softmax [.. V] nor exp of every logit at once is
+   made.
+   - logits: a float array [.. V], and indices an int array of its leading
+     shape [..]; the result is [..].
+   - Or logits a function of a range of entries, (f start stop), giving
+     the logits of entries start to stop - 1 as a float array [.. stop -
+     start] of the indices' shape, with :vocab V: the logits are made a
+     chunk at a time and never whole (an LLM's output projection by rows,
+     (fn [s e] (matmul h (transpose (slice w 0 s e))))). With :args, a
+     vector of the arrays (or trees) f differentiates through, f is called
+     (apply f start stop args) and each chunk is checkpointed over them
+     (checkpoint): under value-and-grad its logits are made again in the
+     backward pass, so the gradient's memory is one chunk's too. f must
+     then take what it differentiates through in :args, not close over it.
+   Options: :chunk (entries per chunk; default V, one chunk), :vocab, :args;
+   another key is loud (:unknown-options). Indices outside [0, V) are loud
+   where they can be read (the JVM backend) and clamped on a lazy backend
+   (MLX), as take's. Half floats are reduced in float32, the result's
+   dtype then. A composite of gen.array's ops, so differentiated, batched
+   and staged as they are; its gradient is the full computation's within
+   round-off (the chunks' logsumexps sum in another order).
+   Experimental: outside the 1.x promise (DESIGN §9)."
+  ([logits indices] (selective-log-softmax logits indices nil))
+  ([logits indices opts] ((:selective-log-softmax @nn) logits indices opts)))
 
 (defn ^{:api :experimental} quantize
   "[wq scales biases]: the float matrices w [.. N K] quantized along
