@@ -5135,3 +5135,56 @@ in 5.5 minutes.
    8 s). Reusing engines is a follow-up.
 8. **qwen35's log-probs need :temperature** before GRPO runs on Qwen3.5 at
    T ≠ 1. Until then it is loud (genclj-qfu2).
+
+### k-quants: exact, in MLX's affine layout or float32
+
+(PROVISIONAL, owner to confirm; genclj-kqxr, 2026-11-08)
+
+**How each type loads.** Every value is exactly llama.cpp's
+dequantize_row_*, bit for bit, on random blocks and on the real Qwen3-0.6B
+Q4_K_M's tensors.
+- **Q4_K and Q5_K:** MLX's affine 4 and 5 bits at group 32, one group per
+  sub-block. scale = d·sc and bias = -(dmin·m), both in float32.
+- **Q5_0 and Q5_1:** the same; Q4_K_M files fall back to them.
+- **Q6_K:** float32, exact. MLX accepts groups of 32, 64 or 128 only, and
+  Q6_K's sub-blocks of 16 have their own scales.
+
+**Checked against llama.cpp on Metal.** Qwen3-0.6B quantized to Q4_K_M by
+the pinned llama.cpp:
+- max |Δ log p| 0.231 (median 0.04-0.066), argmax 200/200;
+- llama.cpp's own spread on that file is 0.226 (against 0.052 on Q8_0), so
+  the gap is its K-quant float noise;
+- qwen3-llama-test's band on K-quant files is 0.47;
+- Qwen3.5-0.8B Q4_K_M: 0.414, with llama.cpp's own spread at 0.460.
+
+**The repack** runs at 5.4 GB/s (Q4_K) on the M4. A whole model loads at
+1.2-1.4 GB/s of file.
+
+**The lead's calls, on the implementing agent's recommendations:**
+1. **Q6_K is stored as dense float32:** exact, 4.9 times the file's bytes. Not
+   taken, either worth later:
+   - two 6-bit affine parts at group 32, summed: exact, 2 matmuls;
+   - a Metal kernel for group 16.
+
+   Not taken: requantizing to 8-bit or float16, which isn't exact.
+2. **Scales and biases are float32**, so Q4_K takes 6 bits a weight against 4.5
+   in the file. float16 isn't exact (d·sc has up to 17 significant bits).
+   - The 20 GB Qwen3.6-35B-A3B Q4_K_M needs about 28 GB: the 64 GB MacBook,
+     not this 32 GB Mac.
+   - Memory against exactness is the owner's call.
+3. **Q5_0 and Q5_1 are added**, beyond the bean's three types.
+4. **On MLX, a file with any of these types loads through the host reader.**
+   MLX's loader would silently turn them into float16. Other files load as
+   before.
+5. **The repack uses the fork-join common pool** inside gen.array.gguf; L0 has
+   no pool of its own.
+6. **qwen35-llama-test has no K-quant band yet.** It would be about 0.83, which
+   is above its RoPE mutation's 0.19.
+
+*Also found (paged2, 2026-11-08):* the "8 ms per GB" cost of donated writes,
+noted under "Paged attention, as built", was MlxRuntime's fresh-bytes GC
+from before genclj-c7uf's fix.
+- On main, a donated paged write takes 0.3-1.9 ms, flat in the pool's size,
+  with no GCs.
+- Long contexts are not bound by it, and the pools need no segments
+  (genclj-1ovd).
