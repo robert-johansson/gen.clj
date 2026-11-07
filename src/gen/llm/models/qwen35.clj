@@ -270,8 +270,9 @@
    :k-norm :o}, and its feed-forward's {:gate :up :down} (dense) or {:moe
    {:router :gate :up :down :shared-gate :shared {:gate :up :down}}},
    the experts' a stack [experts out in]. A matrix is an array [out in],
-   or a quantized one as gen.array/load-gguf gives Q8_0, Q4_0 and Q4_1
-   tensors, {:wq :scales :biases :bits :group-size}; the conv kernel,
+   or a quantized one as gen.array/load-gguf gives Q8_0, Q4_0, Q4_1 and
+   K-quant tensors, {:wq :scales :biases :bits :group-size} (each tensor
+   its own bits; Q6_K's load dense); the conv kernel,
    ssm_a, ssm_dt.bias, the norms and the shared expert's gate are dense
    arrays."
   ([gguf] (model gguf nil))

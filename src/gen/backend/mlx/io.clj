@@ -13,13 +13,22 @@
    for a scale d past 511.75: where it does not, the two are equal.
    gen.array has checked the tensors' types (gen.array.gguf), so MLX's
    own conversion of the others to float16 never runs, and a file with
-   float64 metadata is refused before MLX misreads it (check-metadata)."
+   float64 metadata is refused before MLX misreads it (check-metadata).
+
+   A file holding a type MLX's loader does not read as gen.array loads it
+   (Q5_0, Q5_1 and the K-quants, which it would turn into float16) is read
+   by gen.array.gguf's host reader instead, every tensor of it: the
+   quantized ones decoded and repacked on the host as MLX's affine
+   quantization (the same words, scales and biases as MLX's loader gives
+   for Q8_0, Q4_0 and Q4_1), Q6_K decoded to float32, and the arrays made
+   from the host's data (load-host)."
   {:api :internal}
   (:require [clojure.string :as str]
             [gen.array.gguf :as gguf]
             [gen.backend.mlx.array :refer [code fence stream wrap]]
-            [gen.backend.mlx.operands :refer [operand scalar-handle with-temps]])
-  (:import [gen.mlx Mlx]))
+            [gen.backend.mlx.operands :refer [made operand scalar-handle with-temps]])
+  (:import [gen.mlx Mlx MlxRaw]
+           [java.lang.foreign Arena ValueLayout]))
 
 (set! *warn-on-reflection* true)
 
@@ -54,17 +63,47 @@
                          " GGUF loader misreads, crashing the process; the JVM backend reads the file")
                     {:reason :unsupported :path path :keys (vec ks)}))))
 
+(defn- host-array
+  "An array of shape and dtype of the host's data: a float[] (float32), a
+   short[] (float16's bits) or an int[] (int32, or uint32's bits)."
+  [b data shape dtype]
+  (with-open [arena (Arena/ofConfined)]
+    (let [seg (condp instance? data
+                float/1 (.allocateFrom arena ValueLayout/JAVA_FLOAT ^floats data)
+                short/1 (.allocateFrom arena ValueLayout/JAVA_SHORT ^shorts data)
+                int/1 (.allocateFrom arena ValueLayout/JAVA_INT ^ints data))
+          shp (.allocateFrom arena ValueLayout/JAVA_INT (int-array (map int shape)))]
+      (wrap b (made "mlx_array_new_data" #(MlxRaw/mlx_array_new_data seg shp (int (count shape)) (int (code dtype))))))))
+
+(defn load-host
+  "The tensors of the GGUF file of header, by name, read by gen.array.gguf's
+   host reader (gguf/host-tensor) and made MLX's arrays: what load-gguf
+   gives for a file MLX's loader reads, and for the types it does not."
+  [b {:keys [path tensors]}]
+  (into {}
+        (map (fn [info]
+               (let [{:keys [dtype shape data quantized shapes]} (gguf/host-tensor path info)]
+                 [(:name info)
+                  (if quantized
+                    (mapv #(host-array b %1 %2 %3) quantized shapes [:uint32 :float32 :float32])
+                    (host-array b data shape dtype))])))
+        tensors))
+
 (defn load-gguf
   "p/-load-gguf on the MLX backend b: the file's tensors by mlx_load_gguf,
-   by name."
+   by name; or, for a file holding a type MLX's loader does not read, by
+   the host reader (load-host)."
   [b {:keys [path tensors] :as header}]
-  (check-metadata header)
-  (let [g (Mlx/mlx_load_gguf (str path) (stream b))]
-    (try
-      (into {}
-            (map (fn [{:keys [name type]}]
-                   [name (if (gguf/quantized? type)
-                           (quantized-triple b g name type)
-                           (wrap b (Mlx/mlx_io_gguf_get_array g name)))]))
-            tensors)
-      (finally (Mlx/mlx_io_gguf_free g)))))
+  (if-not (every? (comp gguf/mlx-reads? :type) tensors)
+    (load-host b header)
+    (do
+      (check-metadata header)
+      (let [g (Mlx/mlx_load_gguf (str path) (stream b))]
+        (try
+          (into {}
+                (map (fn [{:keys [name type]}]
+                       [name (if (gguf/quantized? type)
+                               (quantized-triple b g name type)
+                               (wrap b (Mlx/mlx_io_gguf_get_array g name)))]))
+                tensors)
+          (finally (Mlx/mlx_io_gguf_free g)))))))

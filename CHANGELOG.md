@@ -40,6 +40,40 @@ other values for the same key, from the same distribution.
 
 ### Changes
 
+- **Added (experimental): K-quants in `gen.array/load-gguf`** (genclj-kqxr,
+  PROVISIONAL): Q4_K, Q5_K and Q6_K, and Q5_0 and Q5_1 (Q4_K_M's
+  fallbacks for rows not of 256 values), each value the file's exactly
+  (llama.cpp's `dequantize_row_*`, bit for bit), so Q4_K_M and its kin
+  load whole, each tensor at its own bits.
+  - Q4_K and Q5_K load as MLX's affine quantization at 4 and 5 bits, a
+    sub-block of 32 a group: the scale d·sc and the bias -(dmin·m) in
+    float32, as llama.cpp computes them (both products exact). Q5_0 and
+    Q5_1 at 5 bits, groups of 32.
+  - Q6_K loads as float32 arrays (d·sc·(q - 32), exact): its sub-blocks of
+    16 with their own scales fit no affine group of MLX's (32, 64, 128).
+    It is 4.9 times its file's bytes in memory; a model's Q4_K and Q5_K
+    take 1.33 and 1.27 times theirs (float32 scales and biases).
+  - On MLX, a file holding one of these types loads by gen.array.gguf's
+    host reader (every tensor of it, made MLX's arrays), not by
+    mlx_load_gguf, which would turn them into float16; other files load
+    as before. The host reader decodes a large tensor in ranges on the
+    common fork-join pool: on the M4, 5.4 GB/s of Q4_K, 7.2 of Q8_0 and
+    2.6 of Q6_K (bench/gen/gguf_bench.clj, Qwen3.6-35B-A3B-Q4_K_M's
+    tensors); a whole Qwen3-0.6B Q4_K_M loads on MLX at 1.2-1.4 GB/s of
+    its file (mlx_load_gguf reads its Q8_0 at 3.4).
+  - Checked against llama.cpp on Metal: Qwen3-0.6B quantized as Q4_K_M by
+    the pinned llama.cpp's quantizer, gen.llm.models.qwen3's forward
+    within 0.231 nats of llama.cpp's (max |Δ log p| over its top 64, 200
+    comparisons; argmax equal in all), as large as llama.cpp's own spread
+    on that file (0.226; 0.052 on Q8_0). Qwen3.5-0.8B as Q4_K_M: 0.414,
+    llama.cpp's own 0.460.
+  - Still `:unsupported`: Q2_K, Q3_K, the IQ types, BF16 and the rest.
+    `gen.array.protocols/ILoading`'s contract names the new types.
+  - Test files: test/fixtures/gguf/kquants.gguf (random blocks) and
+    qwen3-small-f16.gguf with its Q4_K_M by llama.cpp's quantizer
+    (generate.py's `--llama-lib`); unsupported-q4_k.gguf is now
+    unsupported-q3_k.gguf.
+
 - **Added (experimental): paged KV caches and paged attention**
   (genclj-1daf; route A of the spike, PROVISIONAL: mlx_fast_metal_kernel
   and MLX's donated scatter, no C++ of gen.clj's).
