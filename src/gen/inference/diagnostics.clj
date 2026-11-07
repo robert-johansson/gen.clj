@@ -61,10 +61,14 @@
                       an ESS underflow to 0 (spreads past about 1e±154;
                       1e±77 for mcse-sd)
      :invalid-prob    (summary) a quantile's probability is not in [0, 1]
+     :unknown-options (summary) an option other than :probs, the keys
+                      taken in the data (:accepted)
+     :invalid-options (summary) options that are not a map
      :non-scalar      (draws) a value is not a number, boolean or 0-d array"
   {:api :stable}
   (:require [gen.array :as array]
             [gen.array.special :as special]
+            [gen.inference.options :as options]
             [gen.trace :as trace])
   (:import (java.util Arrays)))
 
@@ -398,7 +402,8 @@
    quantile, at 5%, 50% and 95% or at opts' :probs, interpolated linearly
    between order statistics (the default of numpy and R)."
   ([draws] (summary draws {}))
-  ([draws {:keys [probs] :or {probs [0.05 0.5 0.95]}}]
+  ([draws {:keys [probs] :or {probs [0.05 0.5 0.95]} :as opts}]
+   (options/check `summary opts #{:probs})
    (doseq [p probs]
      (when-not (and (number? p) (<= 0.0 (double p) 1.0))
        (invalid! :invalid-prob (str "A quantile's probability must be in [0, 1], not " (pr-str p))

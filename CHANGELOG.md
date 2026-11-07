@@ -61,34 +61,48 @@ other values for the same key, from the same distribution.
   loading say `llama/model` (their `:reason`s are unchanged). Test
   adapters for Qwen3-0.6B are in test/fixtures/lora, with their
   generator.
-- **Breaking: the inference functions refuse an option key they do not
-  read** (gen.inference.mcmc, .nuts, .kernel, .particle-filter,
-  .importance, .vi, .mh; genclj-vux3; DESIGN §9, 1.2.1's owner calls,
-  item 6). They ignored it and ran on their defaults, silently:
-  `(mcmc/hmc t s {:steps 50 :epsilon 0.3})` ran at :L 10 and :eps 0.1,
-  `kernel/run`'s `{:burnin 50}` burned nothing, `nuts/sample`'s
-  `{:adapt-delta 0.95}` kept 0.8. Each now throws an `ex-info`,
-  `:reason :unknown-options`, its data naming the function (`:fn`), the
-  keys refused (`:unknown`) and the keys it takes (`:accepted`), and an
-  options map that is not a map (`:invalid-options`). The functions:
-  mcmc's hmc, mala, nuts, map-optimize and their -particles forms;
-  kernel's kernel, hmc, mala, nuts and map-optimize (when the kernel is
-  made) and run; nuts' adapt and sample; mh's move; importance's
-  importance-sampling, importance-resampling, estimate and
-  weighted-sample; the particle filter's initialize, step, resample,
-  resize, maybe-resample, replicate, dereplicate, coalesce, introduce and
-  reweighting; vi's black-box-vi, black-box-vimco, elbo-gradient and
-  vimco-gradient. kernel/kernel and tf/run refused unknown keys already,
-  and now say so in the same form (tf/run's data was `{:options …}`).
-  This breaks correct code that shares one options map between functions
-  that read different keys: `nuts/adapt` refuses sample's `:samples` and
+- **Breaking: the inference, learning and gradient functions refuse an
+  option key they do not read** (gen.inference.mcmc, .nuts, .kernel,
+  .particle-filter, .importance, .vi, .mh, .enumerative, .transform,
+  .diagnostics, gen.learning, gen.gradients; genclj-vux3, genclj-yrb6;
+  DESIGN §9, 1.2.1's owner calls, item 6). They ignored it and ran on
+  their defaults, silently: `(mcmc/hmc t s {:steps 50 :epsilon 0.3})` ran
+  at :L 10 and :eps 0.1, `kernel/run`'s `{:burnin 50}` burned nothing,
+  `nuts/sample`'s `{:adapt-delta 0.95}` kept 0.8, `(learn/adam
+  {:learning-rate 0.1})` stepped at 0.001, `diagnostics/summary`'s
+  `{:quantiles …}` gave the default quantiles. Each now throws an
+  `ex-info`, `:reason :unknown-options`, its data naming the function
+  (`:fn`), the keys refused (`:unknown`) and the keys it takes
+  (`:accepted`), and an options map that is not a map
+  (`:invalid-options`). The functions: mcmc's hmc, mala, nuts,
+  map-optimize and their -particles forms; kernel's kernel, hmc, mala,
+  nuts and map-optimize (when the kernel is made) and run; nuts' adapt
+  and sample; mh's move; importance's importance-sampling,
+  importance-resampling, estimate and weighted-sample; the particle
+  filter's initialize, step, resample, resize, maybe-resample, replicate,
+  dereplicate, coalesce, introduce and reweighting; vi's black-box-vi,
+  black-box-vimco, elbo-gradient and vimco-gradient; enumerative's
+  choice-vol-grid (its trailing map), enumerative-inference and
+  with-exact-proposal; the translators' maps (translator,
+  deterministic-translator, extending-translator, updating-translator)
+  and involution's options; diagnostics' summary; gen.learning's
+  optimizers (sgd, gradient-descent, momentum, rmsprop, adagrad, adam,
+  adamw, clip-norm) and train; gen.gradients' choice-gradients.
+  kernel/kernel and tf/run refused unknown keys already, and now say so
+  in the same form (tf/run's data was `{:options …}`); a deterministic
+  translator's `:q-forward` and `:q-backward` keep their own error. This
+  breaks correct code that shares one options map between functions that
+  read different keys: `nuts/adapt` refuses sample's `:samples` and
   `:keep`, `kernel/run` refuses nuts' `:warmup`, `pf/step` refuses
   initialize's `:batched?`, `pf/resample` maybe-resample's
-  `:ess-threshold`. Give each function its own keys,
-  `(select-keys opts (:accepted (ex-data e)))`. A qualified key is refused
-  as any other. The API snapshot records `:as opts` added to the
-  arglists of weighted-sample, resample, replicate, dereplicate, coalesce
-  and vimco-gradient (their arities are unchanged).
+  `:ess-threshold`, `updating-translator` translator's `:p-new`. Give each
+  function its own keys, `(select-keys opts (:accepted (ex-data e)))`. A
+  qualified key is refused as any other. The API snapshot records `:as
+  opts` added to the arglists of weighted-sample, resample, replicate,
+  dereplicate, coalesce, vimco-gradient, summary, enumerative-inference,
+  with-exact-proposal, translator, extending-translator,
+  updating-translator, involution, train and the eight optimizers (their
+  arities are unchanged).
 - **Added (experimental): gen.array's neural-network operations**
   `rms-norm`, `rope` and `sdpa` (gen.array, vars marked `{:api
   :experimental}`; genclj-ezdd; docs/array-api.md §6). Composites of

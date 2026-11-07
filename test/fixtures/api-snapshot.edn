@@ -523,16 +523,16 @@
   mcse-sd {:arglists ([draws])}
   r-hat {:arglists ([draws])}
   split-r-hat {:arglists ([draws])}
-  summary {:arglists ([draws] [draws {:keys [probs], :or {probs [0.05 0.5 0.95]}}])}}
+  summary {:arglists ([draws] [draws {:keys [probs], :or {probs [0.05 0.5 0.95]}, :as opts}])}}
 
  gen.inference.enumerative
  {->ExactProposalGF {:arglists ([gf paths limit check-retval? batched?])}
   choice-vol-grid {:arglists ([& specs])}
-  enumerative-inference {:arglists ([model args observations grid] [model args observations grid {:keys [key batched? chunk-size]}])}
+  enumerative-inference {:arglists ([model args observations grid] [model args observations grid {:keys [key batched? chunk-size], :as opts}])}
   map->ExactProposalGF {:arglists ([m])}
   marginal {:arglists ([result addr])}
   traces {:arglists ([result])}
-  with-exact-proposal {:arglists ([gf addrs] [gf addrs {:keys [max-assignments check-retval? batched?], :or {max-assignments 100000}}])}}
+  with-exact-proposal {:arglists ([gf addrs] [gf addrs {:keys [max-assignments check-retval? batched?], :or {max-assignments 100000}, :as opts}])}}
 
  gen.inference.importance
  {estimate {:arglists ([f model args observations n] [f model args observations n opts])}
@@ -626,9 +626,9 @@
   copy {:arglists ([from-space from-addr to-space to-addr])}
   deftransform {:kind :macro, :arglists ([tname & more])}
   deterministic-translator {:arglists ([{:keys [q-forward q-backward], :as opts}])}
-  extending-translator {:arglists ([{:keys [p-new-args p-argdiffs new-observations q-forward q-forward-args], t :transform}])}
+  extending-translator {:arglists ([{:keys [p-new-args p-argdiffs new-observations q-forward q-forward-args], t :transform, :as opts}])}
   inverse {:arglists ([t])}
-  involution {:arglists ([t] [t {:keys [check? proposal]}])}
+  involution {:arglists ([t] [t {:keys [check? proposal], :as opts}])}
   involutive {:arglists ([t])}
   map->Transform {:arglists ([m])}
   new-arguments {:arglists ([trace p-new-args p-argdiffs])}
@@ -640,9 +640,9 @@
   tcall {:arglists ([t])}
   transform {:kind :macro, :arglists ([spaces & body])}
   transform? {:arglists ([x])}
-  translator {:arglists ([{:keys [p-new p-new-args new-observations q-forward q-forward-args q-backward q-backward-args check? prev-observations], t :transform}])}
+  translator {:arglists ([{:keys [p-new p-new-args new-observations q-forward q-forward-args q-backward q-backward-args check? prev-observations], t :transform, :as opts}])}
   unconstrained-additions {:arglists ([old-choices constraints discard new-choices])}
-  updating-translator {:arglists ([{:keys [p-new-args p-argdiffs new-observations q-forward q-forward-args q-backward q-backward-args check? prev-observations], t :transform}])}
+  updating-translator {:arglists ([{:keys [p-new-args p-argdiffs new-observations q-forward q-forward-args q-backward q-backward-args check? prev-observations], t :transform, :as opts}])}
   write {:arglists ([space addr value tag])}}
 
  gen.inference.vi
@@ -725,19 +725,19 @@
  gen.learning
  {-init {:kind :multimethod}
   -step {:kind :multimethod}
-  adagrad {:arglists ([{:keys [lr eps], :or {lr 0.01, eps 1.0E-10}}])}
-  adam {:arglists ([{:keys [lr beta1 beta2 eps], :or {lr 0.001, beta1 0.9, beta2 0.999, eps 1.0E-8}}])}
-  adamw {:arglists ([{:keys [lr beta1 beta2 eps weight-decay], :or {lr 0.001, beta1 0.9, beta2 0.999, eps 1.0E-8, weight-decay 0.01}}])}
-  clip-norm {:arglists ([optimizer {:keys [max-norm]}])}
-  gradient-descent {:arglists ([{:keys [step-size-init step-size-beta]}])}
+  adagrad {:arglists ([{:keys [lr eps], :or {lr 0.01, eps 1.0E-10}, :as opts}])}
+  adam {:arglists ([{:keys [lr beta1 beta2 eps], :or {lr 0.001, beta1 0.9, beta2 0.999, eps 1.0E-8}, :as opts}])}
+  adamw {:arglists ([{:keys [lr beta1 beta2 eps weight-decay], :or {lr 0.001, beta1 0.9, beta2 0.999, eps 1.0E-8, weight-decay 0.01}, :as opts}])}
+  clip-norm {:arglists ([optimizer {:keys [max-norm], :as opts}])}
+  gradient-descent {:arglists ([{:keys [step-size-init step-size-beta], :as opts}])}
   init {:arglists ([optimizer store])}
   lecture {:arglists ([model model-args proposal store q-args-fn key])}
   lecture-batched {:arglists ([model model-args proposal store q-args-fn n key])}
-  momentum {:arglists ([{:keys [lr momentum nesterov?], :or {momentum 0.9, nesterov? false}}])}
-  rmsprop {:arglists ([{:keys [lr decay eps], :or {lr 0.01, decay 0.99, eps 1.0E-8}}])}
-  sgd {:arglists ([{:keys [lr]}])}
+  momentum {:arglists ([{:keys [lr momentum nesterov?], :or {momentum 0.9, nesterov? false}, :as opts}])}
+  rmsprop {:arglists ([{:keys [lr decay eps], :or {lr 0.01, decay 0.99, eps 1.0E-8}, :as opts}])}
+  sgd {:arglists ([{:keys [lr], :as opts}])}
   step {:arglists ([optimizer state store grads])}
-  train {:arglists ([gf store optimizer data-fn gradients-fn {:keys [epochs epoch-size batches-per-epoch batch-size evaluation-size callback state key], :or {epochs 1, epoch-size 1, batches-per-epoch 1, batch-size 1}}])}
+  train {:arglists ([gf store optimizer data-fn gradients-fn {:keys [epochs epoch-size batches-per-epoch batch-size evaluation-size callback state key], :or {epochs 1, epoch-size 1, batches-per-epoch 1, batch-size 1}, :as opts}])}
   update-given {:arglists ([f x g & more])}}
 
  gen.random

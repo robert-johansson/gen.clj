@@ -68,7 +68,11 @@
    (pair f g) makes two transforms each other's inverses and (involutive t)
    its own; :check? on a translator runs the inverse on the result, and on
    an involution the involution again, and throws unless it gives back the
-   input."
+   input.
+
+   run's options, a translator's map and involution's options hold the
+   keys their function reads and no others: an unknown key is a loud
+   error, its data naming the keys taken (:accepted)."
   {:api :stable}
   (:refer-clojure :exclude [read + - * /])
   (:require [gen.array :as array :refer [+ -]]
@@ -465,6 +469,11 @@
   [t']
   {:trace t' :weight ##-Inf})
 
+(def ^:private translator-keys
+  "The keys of translator's map."
+  #{:p-new :p-new-args :new-observations :q-forward :q-forward-args :q-backward :q-backward-args :check?
+    :prev-observations :transform})
+
 (defn translator
   "Gen.jl's GeneralTraceTranslator: (translator trace key) → {:trace :weight
    :log-abs-det}. Auxiliary choices u come from (q-forward trace
@@ -480,7 +489,8 @@
    u' density 0 at a possible t' is a loud error (gfi/assess-backward)."
   [{:keys [p-new p-new-args new-observations q-forward q-forward-args q-backward q-backward-args check?
            prev-observations]
-    t :transform}]
+    t :transform :as opts}]
+  (options/check `translator opts translator-keys)
   (check-transform :translator t)
   (fn [trace key]
     (let [[k-propose k-generate] (rng/split key)
@@ -518,6 +528,8 @@
   (when (or q-forward q-backward)
     (throw (ex-info "A deterministic translator has no auxiliary choices; translator takes :q-forward and :q-backward"
                     {:q-forward q-forward :q-backward q-backward})))
+  (options/check `deterministic-translator opts
+                 (disj translator-keys :q-forward :q-forward-args :q-backward :q-backward-args))
   (translator opts))
 
 (defn new-arguments
@@ -538,7 +550,8 @@
    without a transform). The update may only add choices, and the
    transform may write no auxiliary choices (there is no backward proposal
    to weigh them)."
-  [{:keys [p-new-args p-argdiffs new-observations q-forward q-forward-args] t :transform}]
+  [{:keys [p-new-args p-argdiffs new-observations q-forward q-forward-args] t :transform :as opts}]
+  (options/check `extending-translator opts #{:p-new-args :p-argdiffs :new-observations :q-forward :q-forward-args :transform})
   (some->> t (check-transform :extending-translator))
   (fn [trace key]
     (let [[k-propose k-update] (rng/split key)
@@ -577,7 +590,8 @@
    :prev-observations) and throws unless it gives back the trace and u."
   [{:keys [p-new-args p-argdiffs new-observations q-forward q-forward-args q-backward q-backward-args
            check? prev-observations]
-    t :transform}]
+    t :transform :as opts}]
+  (options/check `updating-translator opts (conj (disj translator-keys :p-new) :p-argdiffs))
   (some->> t (check-transform :updating-translator))
   (fn [trace key]
     (let [[k-propose k-update k-check] (rng/split key 3)
@@ -631,7 +645,8 @@
    new trace and the backward choices: :proposal, the proposal, called on
    (trace' proposal-args…)."
   ([t] (involution t {}))
-  ([t {:keys [check? proposal]}]
+  ([t {:keys [check? proposal] :as opts}]
+   (options/check `involution opts #{:check? :proposal})
    (check-transform :involution t)
    (letfn [(move [trace fwd-choices fwd-retval proposal-args key]
              (let [s (execute t trace fwd-choices {:retvals {:aux-in fwd-retval}})
