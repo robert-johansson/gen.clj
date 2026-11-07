@@ -4425,3 +4425,27 @@ float16, tokens/s.
 
 Not taken, still open: serve NVIDIA from llama.cpp only; train on Metal
 only; XLA through PJRT.
+*Correction (the lead, 2026-11-07, after a side agent's note).* The batch-1
+rows above that match or beat llama.cpp (408 against 405 on the 0.6B, 183
+against 168 on the 8B) used fixed tokens evaluated every 16 steps: scoring
+and teacher forcing.
+
+**In generation**, each token is read on the host before the next step,
+since tokens are drawn on the host from the site's key (DESIGN §9). There
+MLX reaches about 70% of llama.cpp at batch 1:
+
+| Batch 1, compiled and donating | MLX | llama.cpp |
+|---|---:|---:|
+| 0.6B | 283-292 | 405 |
+| 8B | 94-97 | 139 |
+
+The batched rows (4, 16 and 64) already read every token, so they are
+generation numbers: with the qmm-rows fix, MLX beats llama.cpp at 64 rows on
+the 0.6B and trails the 8B by 1.3-1.8x.
+
+**What is left is host time per step.** At batch 1 the GPU is busy 1.6-2.0 of
+4.9 ms per step, and a compiled call costs 1.4-2.5 ms to build.
+
+**The recommendation stands with this caveat.** The batch-1 generation gap is
+the engine's host-cost work (genclj-8rnc), re-measured in generation mode
+before the owner decides.
