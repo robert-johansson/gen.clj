@@ -466,6 +466,10 @@
     (mapv :ratio-max (:iterations info))))
 
 (deftest a-qwen35-round
+  ;; max |ρ - 1| at the first step, measured 2026-11-08 at temperature 1
+  ;; and 0.7: the JVM backend 2.7e-7 and 3.8e-7; Metal 2.9e-6 and 7.5e-6
+  ;; (the tape), 4.5e-6 and 1.3e-5 (native gradients); the temperature
+  ;; ignored, 2.0 (JVM) and 1.4 (Metal)
   (doseq [temp [1.0 0.7]]
     (let [[first-step second-step] (qwen35-ratios temp)]
       (is (< first-step ratio-band) (str "temperature " temp ": " first-step))
