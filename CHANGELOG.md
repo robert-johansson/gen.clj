@@ -47,8 +47,11 @@ other values for the same key, from the same distribution.
     :alpha :dropout} :params {layer {target {:a :b}}}}`, its `:params`
     gen.learning's store: A [rank in] uniform on ±1/√in from a key per
     site, B [out rank] zeros. Options `:rank` (8), `:alpha` (16),
-    `:dropout` (0), `:targets` (`[:q :v]`, of `:q :k :v :o :gate :up
-    :down`) and `:layers` (all).
+    `:dropout` (0), `:targets` and `:layers` (all). `lora/targets` maps
+    each architecture to its projections and llama.cpp's names for them:
+    Qwen3's `:q :k :v :o :gate :up :down` (default `[:q :v]`); Qwen3.5's
+    and Qwen3.6's below. A target adapts the layers that have it; one of
+    another family, or that none of the layers has, is loud.
   - `(lora/adapt m adapter opts)` is m with the adapter beside its
     weights: x·wᵀ + s·(x·Aᵀ)·Bᵀ, s = `:scale`·alpha/rank (llama.cpp's
     convention), every gen.llm.models.qwen3 function and
@@ -66,6 +69,27 @@ other values for the same key, from the same distribution.
     nats.
   - `gen.array.gguf/write-gguf` (internal): a GGUF writer beside the
     reader, writing gguf-py's bytes.
+- **Added (experimental): training for Qwen3.5 and Qwen3.6**
+  (genclj-8h0l): LoRA through the hybrid layers, their training loss,
+  and their adapters for llama.cpp.
+  - `lora/targets` for qwen35 and qwen35moe: the gated attention's `:q`
+    (attn_q: each head's query and output gate) `:k :v :o`;
+    GatedDeltaNet's input projections `:qkv` (attn_qkv), `:z`
+    (attn_gate), `:beta` (ssm_beta), `:alpha` (ssm_alpha) and its output
+    `:out` (ssm_out); the feed-forward's `:gate :up :down` (qwen35) or the
+    shared expert's `:gate-shexp :up-shexp :down-shexp` (qwen35moe; the
+    routed experts are no target, genclj-wfv1). `lora/init`'s default for
+    both: `[:q :v :qkv]`. `save-gguf` and `load-gguf` use these names.
+  - `lora/adapt` refuses an adapter of another architecture than the
+    model's (`:invalid-args`), as llama.cpp does; `init`, `adapt`,
+    `save-gguf` and `load-gguf` refuse an architecture LoRA does not know
+    (`:unsupported`); `merge` reaches the shared expert's nested weights.
+  - `qwen35/log-probs` and `qwen35/nll`, with `:mask`, `:checkpoint?`
+    and `:chunk`, as Qwen3's: their gradients go through gated-delta's
+    composite (MLX's Metal kernel has no VJP, and is not used under
+    gradients).
+  - gen.llm.models.common's `linear` (and so every qwen35 projection)
+    takes an adapted weight.
 - **Added (experimental): supervised fine-tuning, `gen.llm.sft`**
   (genclj-stpo): a LoRA adapter trained on chat examples.
   - `(sft/example tokenizer ex opts)` tokenizes `{:messages [...]}` or
@@ -114,7 +138,8 @@ other values for the same key, from the same distribution.
   `log-probs` and `nll` by a model's architecture (its config's `:arch`,
   else its `:architecture`). These are multimethods each family
   registers in its own namespace; gen.llm.models.qwen3 registers
-  `"qwen3"`. `lora/init` reads the architecture through it.
+  `"qwen3"`, gen.llm.models.qwen35 `"qwen35"` and `"qwen35moe"`.
+  `lora/init` reads the architecture through it.
 - **Added (experimental): `gen.llm.chat/segments`** (genclj-stpo): the
   rendering by message and part (`:content`, `:reasoning`, `:end`,
   `:template`). `render` is now their concatenation, with the same text.
