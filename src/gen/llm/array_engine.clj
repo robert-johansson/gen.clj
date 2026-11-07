@@ -82,7 +82,13 @@
      writes their keys and values into new blocks (compiled, consuming
      the pools).
    - The pool (:pool-blocks, of :block-size positions) doubles when its
-     free blocks run out (a copy, and new traces).
+     free blocks run out (a copy, and new traces). Keep it to what the
+     branches need: on Metal a step's donated writes cost about 8 ms a GB
+     of pool written, however few slots they write (measured, 2026-11-07;
+     genclj-1daf).
+   - A copy-on-write is two calls: the blocks read and evaluated, then
+     written, consuming the pools (in one call MLX copies each pool, its
+     read still holding it).
    - A paged step, run or copy that fails has consumed the pools: every
      branch is lost (:lost-slots), loudly, and the pools are made again.
 

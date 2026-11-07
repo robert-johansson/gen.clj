@@ -26,7 +26,16 @@
    bench/gen/qwen3_bench.clj, 467: the protocols cost nothing visible);
    token SMC 325 against 940 (124 stacked steps of 8.5 rows on average).
    The array engine computes in gen.bench.dtype (float32, the backend's
-   default float), with blocks of gen.bench.block positions (64)."
+   default float), with blocks of gen.bench.block positions (64).
+   Its paged mode (gen.bench.engines, of static, paged and llama;
+   gen.bench.block-size 16, gen.bench.pool-blocks, gen.bench.min-rows),
+   measured on the same Mac (2026-11-07, pool-blocks 128): float32 decode
+   485-488 tokens/s against the static 466 and llama.cpp's 810, token SMC
+   390-409 against 318 and 771; float16 decode 601 against 568, SMC 540
+   against 619 (two more synchronizations a step, the copy-on-write's
+   read and write, cost more there than the static engine's halved
+   copy). A pool of 512 blocks made the paged step 2.5 times as slow:
+   donated writes cost about 8 ms a GB of pool written."
   (:require [clojure.string :as str]
             [gen.array :as array]
             [gen.llm.array-engine :as ae]
@@ -54,7 +63,7 @@
    :engines (set (map keyword (str/split (prop "engines" "static,paged,llama") #",")))
    ;; the paged mode's (genclj-1daf)
    :block-size (long-prop "block-size" 16)
-   :pool-blocks (long-prop "pool-blocks" 512)
+   :pool-blocks (long-prop "pool-blocks" 128)
    :min-rows (long-prop "min-rows" 1)})
 
 (defn- llama [sym] @(requiring-resolve (symbol "gen.llm.llama" (name sym))))
