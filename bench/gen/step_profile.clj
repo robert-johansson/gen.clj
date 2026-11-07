@@ -25,8 +25,8 @@
    - wait: array/eval! after it, the device's remaining time;
    - read: array/->floats of the logits;
    - normalize: each row normalized on the host as the engine does
-     (gen.llm.array-engine/host-rows' normalization, on a pool of
-     gen.llm.host's default size, a row in parts at batch 1);
+     (gen.llm.host/log-softmax-rows, on a pool of gen.llm.host's default
+     size and the calling thread; before genclj-9y6y the engine's own);
    - draw: each row's argmax on the host, the next tokens.
    Also: the JVM's GC (collections and time) and the MLX backend's own
    collections (System.gc under array or memory pressure,
@@ -161,20 +161,22 @@
 ;; Generation, step by step
 ;; ---------------------------------------------------------------------------
 
-(def ^:private normalized @#'gen.llm.array-engine/normalized)
-(def ^:private normalized-in-parts
-  ;; absent before genclj-c7uf: the profile then normalizes as the engine
-  ;; did, every row whole
-  (some-> (resolve 'gen.llm.array-engine/normalized-in-parts) deref))
+;; The engine's normalization as of the commit measured: gen.llm.host's
+;; log-softmax-rows (genclj-9y6y), else the engine's own (normalized, and
+;; normalized-in-parts from genclj-c7uf), found by name so that the
+;; profile also runs on the commits before.
+(def ^:private log-softmax-rows (some-> (resolve 'gen.llm.host/log-softmax-rows) deref))
+(def ^:private normalized (some-> (resolve 'gen.llm.array-engine/normalized) deref))
+(def ^:private normalized-in-parts (some-> (resolve 'gen.llm.array-engine/normalized-in-parts) deref))
 
 (defn- normalize
   "The rows of xs (n floats each) normalized as gen.llm.array-engine's
-   host-rows does: fewer rows than the pool's threads each in parts."
+   host-rows does."
   [pool xs ^long rows ^long n]
   (let [threads (host/default-threads)]
-    (if (and normalized-in-parts (< rows threads))
-      (mapv #(normalized-in-parts pool (* 4 threads) xs % n "profile") (range rows))
-      (host/in-order pool #(normalized xs % n "profile") (vec (range rows))))))
+    (cond log-softmax-rows (log-softmax-rows pool xs n "profile")
+          (and normalized-in-parts (< rows threads)) (mapv #(normalized-in-parts pool (* 4 threads) xs % n "profile") (range rows))
+          :else (host/in-order pool #(normalized xs % n "profile") (vec (range rows))))))
 
 (defn- argmax ^long [^floats xs]
   (let [n (alength xs)]

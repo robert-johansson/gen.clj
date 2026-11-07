@@ -244,6 +244,29 @@ other values for the same key, from the same distribution.
   now come off that count (`MlxRuntime/donate`, which replaces
   `repoint`'s use, and `settleFresh`; new, rebuild with `clojure -T:build
   java`). Values are unchanged.
+- **Performance (experimental): `gen.llm.array-engine` normalizes its
+  rows about 2.5x faster** (genclj-9y6y), by
+  `gen.llm.host/log-softmax-rows` (new): a row's log-normalizer is taken
+  by blocks of 4096 logits, each block's largest and its sum of
+  exponentials, combined in block order, the exponentials by
+  `gen.llm.host/exp` (new: Tang's table-driven method, within 0.51 ulp on
+  [-708, 0], about a third of `Math/exp`'s cost where that is fdlibm's).
+  Its units of blocks are spread over the engine's host pool and its own
+  thread, so a row's log-normalizer is the same, bit for bit, for any
+  number of threads. ns an entry, one thread and 16 rows of Qwen3's
+  151,936 on the pool of four: M4 4.8 to 2.0 and 1.30 to 0.65; fenrir's
+  x86 under the Graal JIT 13 to 5.0 and 3.5 to 1.6 (floats are converted
+  four at a time there: Graal serializes lone conversions). The
+  log-normalizer moves in its last bits (within 1 ulp of an exact sum,
+  where the sequential sum was within 9), so a log-probability, and a
+  token drawn from the row, can change only where that moves a float's
+  rounding: none of 9.7 million did. Not finite logits are loud as
+  before (`:decode-failed`).
+- **Performance (experimental): `gen.llm.token`'s draw walks a row
+  about 2x faster** (genclj-9y6y): its inverse CDF sums each token's
+  probability by `gen.llm.host/exp`. The total moves in its last bits, so
+  a draw for a key can change only when its uniform falls within an ulp
+  or so of a token's cumulative probability.
 - **Performance (experimental): `gen.llm.array-engine` normalizes a
   decode of fewer rows than its host pool's threads in parts across them**
   (genclj-c7uf): a row of Qwen3's 151,936 logits in 0.33 ms instead of
