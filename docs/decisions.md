@@ -4734,3 +4734,49 @@ wheel's headers, a Primitive with its own eval_gpu, bound by FFM. It costs:
 **The kernels' provenance.** They are ported from kernels-community at
 28a49f7 under Apache-2.0. The header and THIRD-PARTY-NOTICES record the
 chain vLLM (Apache-2.0) → mistral.rs's Metal port → kernels-community.
+
+### SFT: gen.llm.sft, and the family dispatch gen.llm.models
+
+(PROVISIONAL, owner to confirm; genclj-stpo, genclj-az5s, 2026-11-07 night)
+
+**What was built.**
+- **gen.llm.sft** (experimental):
+  - examples with assistant-only masks, found from chat/segments' byte spans;
+  - padded batches;
+  - mean NLL per trained token;
+  - a trainer value, and a step that accumulates batches and divides once.
+    A non-finite loss or gradient is loud (:non-finite), never a skipped
+    step;
+  - train, with keys, held-out evaluation and checkpoints. Resume is
+    bit-exact.
+- **gen.llm.models:** architecture, plus log-probs and nll as multimethods
+  each family registers.
+- **gen.learning:** warmup-cosine (a schedule over any optimizer) and
+  clip-value, experimental in a stable namespace.
+
+**The real run** (fenrir CUDA). Qwen3-0.6B Q8_0, LoRA rank 8 on the last 8
+layers, 48 JSON-format chat examples, 16 held out, 24 steps, AdamW 2e-4.
+- Held-out NLL fell from 3.61 to 0.093 per trained token.
+- Greedy replies in the format: 0 of 16 before, 15 of 16 after.
+- llama.cpp serving the checkpoint's adapter: within 0.53 nats (band 0.65),
+  argmax equal, 14 of 16 in the format.
+
+**The lead's calls, on the implementing agent's recommendations:**
+1. **The end token <|im_end|> is trained by default** (:end-token?). Without
+   it, 4 of 16 replies never stopped. Not taken: mlx-node's choice of never
+   training it.
+2. **Checkpoints are trainer.edn plus adapter.gguf.** EDN is exact in every
+   dtype and holds any optimizer's state: 95 MB for 1.44M parameters with
+   moments. Not taken: safetensors, compact, worth it when adapters grow.
+3. **The loss is the mean over every trained token in a step**, so
+   accumulated batches equal one big batch.
+4. **The schedule is Hugging Face's:** a warmup's first step has factor 0.
+5. **Truncation keeps the start**, as Hugging Face and mlx-lm do.
+6. **The think block is context**, not trained.
+7. **MLX's memory limit is documented, not set by sft.** On CUDA, a limit of
+   the held memory plus 1.25 times a step's peak keeps the checkpoint's
+   saving (1.8 GB against 6.1 GB beyond the held 0.76 GB) at no time cost.
+   Setting it automatically would change a global from library code (an
+   array-API addition).
+
+Not yet run on Metal (genclj-h7ru).
