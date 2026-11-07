@@ -47,7 +47,11 @@
    - in the forward: s = alpha (not alpha / rank) 10.0 (gguf-py's
      adapter) and 16.9 (ours); the product transposed on the square
      projections 10.7 and 3.57.
-   Not yet run on Metal, whose band (0.075) is the base model's there."
+   On Metal (Mac mini M4, 2026-11-07, against llama.cpp v0.9.0's Metal
+   build; the tape), within its band (0.075): gguf-py's adapter 0.0113;
+   ours at scale 1 and 0.5, 0.00984 and 0.00993; on k and v 0.00452;
+   trained 0.00636 (the loss 188.2 → 21.4, as on fenrir); the planted
+   errors by 3.07 to 16.8 nats, or refused."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is use-fixtures]]
             [gen.array :as array]
@@ -201,7 +205,7 @@
 (deftest our-adapter-reads-in-llama-cpp-as-in-the-forward
   (when-qwen3-0-6b
     (let [[lm m] (setup)
-          ad (ours m (vec (keys lora/targets)) 0.02)
+          ad (ours m (vec (keys (lora/targets "qwen3"))) 0.02)
           path (lora/save-gguf ad (temp-path "ours.gguf"))]
       (doseq [scale [1.0 0.5]
               :let [m' (lora/adapt m ad {:scale scale})
@@ -302,7 +306,7 @@
     (let [[lm m] (setup)
           tokens (with-open [^java.io.Closeable e ((llama 'engine) {:model lm :max-branches 2 :n-ctx 512})]
                    ((llama 'tokenize) e text))
-          ad (lora/init m {:rank 8 :alpha 16 :targets (vec (keys lora/targets)) :layers (range 20 28)} (rng/key 3))
+          ad (lora/init m {:rank 8 :alpha 16 :targets (vec (keys (lora/targets "qwen3"))) :layers (range 20 28)} (rng/key 3))
           opt (learn/clip-norm (learn/adamw {:lr 1e-3}) {:max-norm 1.0})
           loss (fn [params] (qwen3/nll (lora/adapt m (assoc ad :params params)) [tokens] {:checkpoint? true :chunk 32768}))
           [losses params] (loop [i 0 params (:params ad) state (learn/init opt (:params ad)) out []]

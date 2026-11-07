@@ -1,14 +1,16 @@
 (ns gen.llm.models.common
   "What the forward passes over gen.array share (gen.llm.models.qwen35,
    beside qwen3's own): their loud errors, options and tokens checked, a
-   GGUF's weights cast and measured, the linear layers (dense or
-   quantized), and a static cache's slots, masks and checks. who, a
+   GGUF's weights cast and measured, the linear layers (dense, quantized
+   or adapted by gen.llm.lora), training's output projection by chunks and
+   masked loss, and a static cache's slots, masks and checks. who, a
    string naming the model family (\"qwen35\"), heads each message.
    Internal: the families' namespaces are the API."
   {:api :internal}
   (:refer-clojure :exclude [+ - * / < > <= >= ==])
   (:require [clojure.core :as c]
-            [gen.array :as array :refer [+ * <=]]))
+            [gen.array :as array :refer [+ * <=]]
+            [gen.llm.lora :as lora]))
 
 (set! *warn-on-reflection* true)
 
@@ -79,11 +81,12 @@
 ;; ---------------------------------------------------------------------------
 
 (defn linear
-  "x·wᵀ for a weight w [out in]: dense, or quantized."
+  "x·wᵀ for a weight w [out in]: dense, quantized, or adapted
+   (gen.llm.lora's: its base's product plus the adapter's term)."
   [x w]
-  (if (map? w)
-    (array/quantized-matmul x (:wq w) (:scales w) (:biases w) (select-keys w [:bits :group-size]))
-    (array/matmul x (array/transpose w))))
+  (cond (lora/adapted? w) (+ (linear x (:base w)) (lora/delta x w))
+        (map? w) (array/quantized-matmul x (:wq w) (:scales w) (:biases w) (select-keys w [:bits :group-size]))
+        :else (array/matmul x (array/transpose w))))
 
 (defn silu [x] (* x (array/sigmoid x)))
 
@@ -100,6 +103,33 @@
     (array/dequantize (array/take (:wq w) tokens 0) (array/take (:scales w) tokens 0) (array/take (:biases w) tokens 0)
                       (assoc (select-keys w [:bits :group-size]) :dtype dtype))
     (array/take w tokens 0)))
+
+;; ---------------------------------------------------------------------------
+;; Training: the output projection by vocabulary chunks, the masked loss
+;; ---------------------------------------------------------------------------
+
+(defn rows
+  "The rows start to stop - 1 of a weight [out in], dense or quantized."
+  [w start stop]
+  (if (map? w)
+    (reduce #(update %1 %2 array/slice 0 start stop) w [:wq :scales :biases])
+    (array/slice w 0 start stop)))
+
+(defn head-logits
+  "The logits of the vocabulary entries start to stop - 1 for the normed
+   states hn [B T hidden], by those rows of the output weight w: a
+   selective-log-softmax chunk's."
+  [start stop hn w]
+  (linear hn (rows w start stop)))
+
+(defn nll-of
+  "-Σ lp (log-probabilities [B T-1]), each times mask's weight where
+   given (a float array of lp's shape), a 0-d array: a family's nll."
+  [who lp mask]
+  (when (and mask (not= (array/shape lp) (array/shape mask)))
+    (throw (invalid who (str "nll: the mask's shape " (array/shape mask) " is not the log-probabilities' " (array/shape lp))
+                    {:shapes [(array/shape mask) (array/shape lp)]})))
+  (array/negate (array/sum (if mask (* mask lp) lp))))
 
 ;; ---------------------------------------------------------------------------
 ;; Tokens

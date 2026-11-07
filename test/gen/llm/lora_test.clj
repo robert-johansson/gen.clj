@@ -37,7 +37,8 @@
 
    The bands on MLX: float32 round-off, four times the largest gap
    measured on fenrir (2026-11-07: CUDA and the MLX CPU, tape and native
-   gradients; each band's docstring). Not yet run on Metal."
+   gradients; each band's docstring). It passes on Metal too (Mac mini
+   M4, 2026-11-07, tape and native gradients)."
   (:require [clojure.test :refer [deftest is testing]]
             [gen.array :as array]
             [gen.array.gguf :as gguf]
@@ -65,7 +66,7 @@
    masked."
   (delay (array/array [[0.0 0.0 0.0 1.0 1.0 1.0 1.0 1.0] [1.0 1.0 1.0 1.0 1.0 1.0 1.0 1.0]])))
 
-(def ^:private every-target (vec (keys lora/targets)))
+(def ^:private every-target (vec (keys (lora/targets "qwen3"))))
 
 (defn- adapter
   "A new adapter of model k: rank 4, alpha 8 (s = 2), on every projection

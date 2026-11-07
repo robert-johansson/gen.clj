@@ -141,7 +141,7 @@
               questions (mapv first (subvec qas 48))
               answers (mapv second (subvec qas 48))
               n (long (:layers (:config m)))
-              ad (lora/init m {:rank 8 :alpha 16 :targets (vec (keys lora/targets)) :layers (range (- n 8) n)} (rng/key 20261107))
+              ad (lora/init m {:rank 8 :alpha 16 :targets (vec (keys (lora/targets "qwen3"))) :layers (range (- n 8) n)} (rng/key 20261107))
               opt (learn/warmup-cosine (learn/clip-norm (learn/adamw {:lr 2e-4 :weight-decay 0.0}) {:max-norm 1.0})
                                        {:warmup 2 :steps 24})
               dir (str (Files/createTempDirectory "sft-llama-test" (make-array FileAttribute 0)))

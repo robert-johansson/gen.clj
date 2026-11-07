@@ -73,7 +73,7 @@
         t (long-prop "length" 256)
         k (long-prop "accumulate" 1)
         chunk (long-prop "chunk" 16384)
-        ad (lora/init m {:rank 8 :targets (vec (keys lora/targets)) :layers (range (- n 8) n)} (rng/key 1))
+        ad (lora/init m {:rank 8 :targets (vec (keys (lora/targets "qwen3"))) :layers (range (- n 8) n)} (rng/key 1))
         tr (sft/trainer ad (learn/clip-norm (learn/adamw {:lr 1e-4}) {:max-norm 1.0}) (rng/key 2))
         batches (vec (repeat k (batch-of (:vocab (:config m)) b t)))]
     (array/eval! (:weights m))
