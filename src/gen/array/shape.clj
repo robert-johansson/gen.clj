@@ -119,14 +119,27 @@
                     {:shape sx :indices-shape si})))
   (mapv (fn [k a b] (if (= k axis) b (first (broadcast [a] [b])))) (range) sx si))
 
+(defn- check-scatter
+  "Throws (message) unless indices of shape si and updates of shape su have
+   one shape, equal to the array's sx on every axis but axis."
+  [message sx si su axis]
+  (when-not (and (= su si) (= (count sx) (count su))
+                 (every? true? (map (fn [k a b] (or (= k axis) (= a b))) (range) sx su)))
+    (throw (ex-info message {:shape sx :indices-shape si :updates-shape su :axis axis}))))
+
 (defn check-scatter-add
   "Throws unless indices of shape si and updates of shape su have one shape,
    equal to the array's sx on every axis but axis."
-  [sx si su ^long axis]
-  (when-not (and (= su si) (= (count sx) (count su))
-                 (every? true? (map (fn [k a b] (or (= k axis) (= a b))) (range) sx su)))
-    (throw (ex-info "scatter-add needs indices and updates of one shape, equal to the array's but on axis"
-                    {:shape sx :indices-shape si :updates-shape su :axis axis}))))
+  [sx si su axis]
+  (check-scatter "scatter-add needs indices and updates of one shape, equal to the array's but on axis"
+                 sx si su axis))
+
+(defn check-put-along-axis
+  "Throws unless indices of shape si and values of shape sv have one shape,
+   equal to the array's sx on every axis but axis."
+  [sx si sv axis]
+  (check-scatter "put-along-axis needs indices and values of one shape, equal to the array's but on axis"
+                 sx si sv axis))
 
 (defn matmul-shape
   "The shape of the NumPy matrix product of arrays of shapes sx and sy: a 1-d

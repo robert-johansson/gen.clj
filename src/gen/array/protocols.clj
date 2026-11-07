@@ -180,6 +180,25 @@
                      in float32, so that the values are the file's
                      exactly"))
 
+(defprotocol ^{:api :experimental} IOverwriting
+  "A backend that writes values over an array's entries at indices:
+   gen.array/put-along-axis. A backend without it makes put-along-axis a
+   loud error. Experimental: outside the 1.x promise (DESIGN §9)."
+  (^{:api :experimental} -put-along-axis [b x indices values axis]
+    "x with values written at indices along axis, overwriting what was
+     there: indices (an int array) and values have one shape, equal to
+     x's on every axis but axis (gen.array has checked the shapes and
+     given x and values one dtype). Repeated indices along a line of axis
+     are the backend's to refuse; which value lands is unspecified."))
+
+(defprotocol ^{:api :experimental} IHostFloats
+  "A backend that reads an array's values into a float array at once:
+   gen.array/->floats. A backend without it is read through -to-host.
+   Experimental: outside the 1.x promise (DESIGN §9)."
+  (^{:api :experimental} -to-floats [b x]
+    "x's values, row-major, as a new float array (each rounded to float32;
+     booleans 0 or 1). Forces evaluation."))
+
 (defprotocol ICompiling
   "A backend that compiles functions of its arrays (MLX: mlx_compile)."
   (-compile [b f opts]
@@ -294,3 +313,13 @@
     (-load-gguf b header)
     (throw (ex-info (str "load-gguf: the " (name (-name b)) " backend loads no GGUF files")
                     {:reason :unsupported :op :load-gguf :backend (-name b)}))))
+
+(defn ^:no-doc put-along-axis
+  "-put-along-axis on b, or the loud error naming b when b overwrites
+   nothing (gen.array, and backends that pass the op on)."
+  [b x indices values axis]
+  (if (instance? gen.array.protocols.IOverwriting b)
+    (-put-along-axis b x indices values axis)
+    (throw (ex-info (str "put-along-axis: the " (name (-name b)) " backend has no overwriting ops"
+                         (when (= :stage (-name b)) " (not stageable)"))
+                    {:reason :unsupported :op :put-along-axis :backend (-name b)}))))

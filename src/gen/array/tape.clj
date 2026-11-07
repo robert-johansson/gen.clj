@@ -410,6 +410,18 @@
   p/IQuantized
   (-quantized [t op args] (quantized-op t inner op args))
 
+  p/IOverwriting
+  (-put-along-axis [t x indices values axis]
+    ;; x's cotangent is g with the written entries zeroed (they no longer
+    ;; reach the result), the values' g taken where they were written
+    (let [idx (primal indices)
+          pv (primal values)]
+      (record t (p/put-along-axis inner (primal x) idx pv axis) [x values]
+              (fn [g need]
+                (grads need
+                       (array/put-along-axis g idx (array/zeros (array/shape pv) {:dtype (array/dtype g)}) axis)
+                       (array/take-along-axis g idx axis))))))
+
   p/ICustomVjp
   (-custom-vjp [t f vjp args]
     (let [ps (mapv primal args)

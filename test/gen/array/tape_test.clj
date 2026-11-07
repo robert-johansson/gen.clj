@@ -207,7 +207,10 @@
    [:take-along #(array/take-along-axis % (array/array [[2 0] [1 1]] {:dtype :int64}) 1)]
    [:pick #(array/pick % (array/array [1 2] {:dtype :int64}))] [:squeeze #(array/squeeze (array/expand-dims % 0))]
    [:diag #(array/diag (array/slice % 1 0 2))]
-   [:scatter-add #(array/scatter-add % (array/array [[0 0 2] [1 1 1]] {:dtype :int64}) (array/* 3.0 %) 1)]])
+   [:scatter-add #(array/scatter-add % (array/array [[0 0 2] [1 1 1]] {:dtype :int64}) (array/* 3.0 %) 1)]
+   ;; x's entries written over get no gradient, the values' theirs (plants:
+   ;; x's cotangent not zeroed, the values' taken at other indices)
+   [:put-along #(array/put-along-axis % (array/array [[2 0] [1 2]] {:dtype :int64}) (array/* 3.0 (array/slice % 1 0 2)) 1)]])
 
 (deftest shapes-and-indexing
   (doseq [[label f] shape-ops]

@@ -16,6 +16,8 @@
                                          consuming each cache with :donate? true
      (select-rows cache idx)           → a static cache of cache's rows idx
      (concat-rows caches)              → a static cache of the caches' rows
+     (rewind cache offsets)            → a static cache with its rows back at offsets
+     (grow cache capacity)             → a static cache of a larger capacity
 
    tokens are B rows of T token ids each: host vectors (checked against the
    vocabulary) or an int array [B T]. A row's tokens are positions offset,
@@ -37,18 +39,19 @@
    fixed shapes instead, for compiled steps (genclj-tjvd): {:capacity n
    :offsets [o …] :positions :layers [{:k :v} …]}, each layer's keys and
    values [B KV-heads n head-dim] preallocated, a row's first o slots
-   holding its positions and the rest zeros. :offsets are the rows'
-   positions on the host and :positions the same as an int32 array [B]
-   on the device, so a step's arrays keep their shapes as the offsets
-   grow: it writes its keys and values at each row's offset (scatter-add
-   into the zero slots: the slots past a row's offset hold zeros, an
-   invariant every operation here keeps), rotates them at those
-   positions (rope's :offset an array) and masks the slots past each
-   query's own position (sdpa's bool mask), so rows may sit at
-   different offsets. Its logits are the concatenating cache's: exactly
-   on the JVM backend (the masked slots' weights are exact zeros, summed
-   after the others), within float32's round-off on MLX. A step past the
-   capacity is a loud error (:capacity-exceeded), checked on the host.
+   holding its positions. :offsets are the rows' positions on the host
+   and :positions the same as an int32 array [B] on the device, so a
+   step's arrays keep their shapes as the offsets grow: it writes its
+   keys and values over the slots at each row's offset (put-along-axis,
+   an overwrite), rotates them at those positions (rope's :offset an
+   array) and masks the slots past each query's own position (sdpa's
+   bool mask), so rows may sit at different offsets. What the slots past
+   a row's offset hold is never read: zeros in a new cache, or what a
+   rewound row read before (rewind), which the next steps write over.
+   Its logits are the concatenating cache's: exactly on the JVM backend
+   (the masked slots' weights are exact zeros, summed after the others),
+   within float32's round-off on MLX. A step past the capacity is a loud
+   error (:capacity-exceeded), checked on the host.
    compile-step compiles the step over static caches with array/compile:
    on MLX, one trace per shape of tokens (a decode step, a prefill
    chunk), replayed; a cache continued twice is still two caches, each
@@ -299,11 +302,11 @@
 (defn- static-attention
   "One block's attention of x [B T hidden] after the layer's static cache
    entry, at (static-forward's {:positions :mask :slots}): its keys and
-   values written into their slots, [its output, the entry after x]."
+   values written over their slots, [its output, the entry after x]."
   [cfg w x {:keys [positions mask slots]} entry]
   (let [[q k v] (qkv cfg w x positions)
-        k (array/scatter-add (:k entry) slots k 2)
-        v (array/scatter-add (:v entry) slots v 2)]
+        k (array/put-along-axis (:k entry) slots k 2)
+        v (array/put-along-axis (:v entry) slots v 2)]
     [(attend cfg w q k v mask) {:k k :v v}]))
 
 (defn- block
@@ -352,7 +355,7 @@
   (<= (array/arange 0 capacity 1 {:dtype :int32}) (chunk-positions positions t)))
 
 (defn- write-slots
-  "Where a chunk's keys or values go, as scatter-add's indices: an int
+  "Where a chunk's keys or values go, as put-along-axis's indices: an int
    array of their shape [B KV-heads t head-dim], positions[b] + i at the
    chunk's i-th position."
   [positions [_ _ t _ :as shape]]
@@ -413,6 +416,49 @@
        :offsets (mapv #((:offsets cache) %) idx)
        :positions (pick (:positions cache))
        :layers (mapv (fn [{:keys [k v]}] {:k (pick k) :v (pick v)}) (:layers cache))})))
+
+(defn rewind
+  "The static cache with each row back at its offset in offsets (a vector
+   of one per row, or a host integer for every row), each at most the
+   row's own: the positions past it dropped, as if never read. Only the
+   offsets move; the slots keep what they hold until the next steps write
+   over them (put-along-axis), so a rewound cache reads as one that never
+   read those positions: speculative decoding's rollback, or a slot
+   reused. It shares cache's arrays: under compile-step's :donate? step
+   one of the two only."
+  [cache offsets]
+  (check-static :rewind cache)
+  (let [os (:offsets cache)
+        new (if (integer? offsets) (vec (repeat (count os) offsets)) offsets)]
+    (when-not (and (sequential? new) (= (count new) (count os)))
+      (throw (invalid (str "rewind: the offsets are one per row (" (count os) ") or one integer, not " (pr-str offsets))
+                      {:offsets offsets :rows (count os)})))
+    (doseq [[o n] (map vector os new)]
+      (when-not (and (integer? n) (c/<= 0 (long n) (long o)))
+        (throw (invalid (str "rewind: " (pr-str n) " is not an offset from 0 to the row's " o) {:offset n :row-offset o}))))
+    (let [new (mapv long new)]
+      (assoc cache :offsets new :positions (array/array new {:dtype :int32})))))
+
+(defn grow
+  "The static cache with capacity positions a row (at least its own), its
+   rows and offsets as they were: each layer's keys and values extended by
+   zero slots. A step's shapes change with the capacity, so a compiled step
+   traces again; grow by blocks."
+  [cache capacity]
+  (check-static :grow cache)
+  (let [old (long (:capacity cache))]
+    (when-not (and (integer? capacity) (c/<= old (long capacity)))
+      (throw (invalid (str "grow: the capacity is an integer of at least the cache's " old ", not " (pr-str capacity))
+                      {:capacity capacity :cache-capacity old})))
+    (if (c/== old (long capacity))
+      cache
+      (let [{:keys [k]} (first (:layers cache))
+            [rows heads _ dim] (array/shape k)
+            pad (array/zeros [rows heads (c/- (long capacity) old) dim] {:dtype (array/dtype k)})
+            extend #(array/concatenate [% pad] 2)]
+        (assoc cache
+               :capacity (long capacity)
+               :layers (mapv (fn [{:keys [k v]}] {:k (extend k) :v (extend v)}) (:layers cache)))))))
 
 (defn concat-rows
   "The static cache of the static caches' rows, in order, each at its own

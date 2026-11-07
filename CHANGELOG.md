@@ -65,6 +65,50 @@ other values for the same key, from the same distribution.
   (`gen.backend.mlx.array/handle`); a donated handle is repointed at a
   shared husk (`MlxRuntime/repoint`, new: rebuild with `clojure -T:build
   java`) and still freed once, by its phantom reference.
+- **Added (experimental): gen.array's language-model engine,
+  `gen.llm.array-engine`** (genclj-8rnc): a Branching engine over
+  gen.array, gen.llm.slots's Slots over Qwen3's static KV caches
+  (gen.llm.models.qwen3), on MLX (Metal, CPU) or the JVM backend.
+  `(array-engine/engine {:model gguf-or-model})` takes `:dtype`,
+  `:max-branches` (32; memory is the bound, no sequence cap), `:n-ctx`,
+  `:n-batch` and `:block` (capacities grow by blocks). A branch is a row
+  of a group (a static cache): a fork shares it; a read (open, extend,
+  score) runs eagerly in forwards of `:n-batch` tokens, each target's
+  score taken on the device; a step is one compiled decode that consumes
+  its cache: a group stepped by exactly its own rows (lockstep
+  particles) in place, any other step's rows stacked first. Rows are
+  read at the step's end and normalized on the host in double. Its
+  arrays count in MLX's own memory, inside the shared budget; a read or
+  step past it is `:mlx-budget-exceeded` (marked `:exhausted?`).
+  `stats` and `groups` are diagnostics. The LM, token and SMC layers
+  run over it unchanged, with any tokenizer of the model's vocabulary.
+- **Added (experimental): `(llama/vocabulary path)`**, llama.cpp's
+  vocabulary of a GGUF loaded alone (vocab_only: no weights), a
+  `java.io.Closeable` that `tokenize`, `token-bytes`, `detokenize` and
+  `tokenizer` take as they take an engine: the tokenizer of another
+  engine over the same file. A closed one is loud (`:closed`).
+- **Added (experimental): `array/->floats`**: an array's values,
+  row-major, as a new float array, read at once (an optional protocol,
+  `IHostFloats`; the JVM backend and MLX implement it, any other backend
+  reads through `->clj`). **Added (experimental): `(qwen3/grow cache
+  capacity)`**, a static cache with zero slots added.
+- **Added (experimental): `array/put-along-axis`** (genclj-8rnc): x with
+  values written over its entries at indices along an axis, the overwrite
+  `scatter-add` (which accumulates) is not; indices and values shaped as
+  `scatter-add`'s. A new optional protocol, `IOverwriting`
+  (`-put-along-axis`), so `IBackend` gains nothing: the JVM backend, MLX
+  (`mlx_put_along_axis`), the tape (x's cotangent zeroed where written, the
+  values' taken there), the batch tracer and staging (`:put-along-axis`;
+  the device lowerings refuse it) implement it. Repeated indices along a
+  line of the axis are loud on the JVM backend (`:repeated-indices`) and
+  unspecified on MLX.
+- **Changed: Qwen3's static caches write their keys and values with
+  `put-along-axis`**, not `scatter-add` (genclj-8rnc), so a slot written
+  again holds the new value instead of the sum; the slots past a row's
+  offset need no longer be zeros. **Added (experimental):
+  `(qwen3/rewind cache offsets)`**, a static cache with its rows moved
+  back (each to at most its own offset): the positions past them are
+  dropped and written over by the next steps (a rollback, a slot reused).
 - **Added (experimental): static-capacity KV caches and compiled steps
   for Qwen3** (gen.llm.models.qwen3; genclj-tjvd). `(static-cache m rows
   capacity)`, or prefill's `:capacity`, is a cache of fixed shapes:

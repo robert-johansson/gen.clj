@@ -27,7 +27,7 @@
    numbers as {:const x}. Ops: gen.array's elementwise op keywords; :param,
    :constant, :iota, :convert, :reduce, :reshape, :transpose, :broadcast,
    :concatenate, :slice, :pad, :matmul, :take, :take-along-axis,
-   :scatter-add; the bit ops :bit-xor, :bit-or, :shift-left,
+   :scatter-add, :put-along-axis; the bit ops :bit-xor, :bit-or, :shift-left,
    :shift-right-logical and :bitcast (Threefry's); :scan, a loop whose body
    is a graph of its own, and :result, one of a scan's results. A where
    whose branches are one staged value of its result's shape and dtype
@@ -299,6 +299,10 @@
 (deftype StageBackend []
   p/ILooping
   (-scan-loop [_ f carry xs n] (scan f carry xs n))
+
+  p/IOverwriting
+  (-put-along-axis [_ x indices values axis]
+    (op! :put-along-axis [(staged x) (staged indices) (staged values)] (shape-of x) (array/dtype x) {:axis axis}))
 
   p/IBackend
   (-name [_] :stage)
@@ -654,6 +658,7 @@
                                    (array/array (mapv #(clojure.core/+ low (clojure.core/* % (inc interior))) (range m)) {:dtype :int64})
                                    x axis))
             :scatter-add (p/-scatter-add b (arg 0) (arg 1) (arg 2) (:axis attrs))
+            :put-along-axis (p/put-along-axis b (arg 0) (arg 1) (arg 2) (:axis attrs))
             :matmul (p/-matmul b (arg 0) (arg 1))
             :take (p/-take b (arg 0) (arg 1) (:axis attrs))
             :take-along-axis (p/-take-along-axis b (arg 0) (arg 1) (:axis attrs))

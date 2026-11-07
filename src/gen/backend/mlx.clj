@@ -527,6 +527,15 @@
       (with-temps [t]
         (wrap b (Mlx/mlx_scatter_add_axis h (t (safe-indices b hi (nth (shape-of x) axis))) hu (int axis) (stream b)))))))
 
+(defn- put-along-axis
+  "mlx_put_along_axis, its indices clamped as scatter-add's; repeated ones
+   are not checked (which value lands is MLX's, unspecified)."
+  [b x indices values axis]
+  (let [d (dtype-on b x)]
+    (with-operands b :put-along-axis [h x d hi indices nil hv values d]
+      (with-temps [t]
+        (wrap b (Mlx/mlx_put_along_axis h (t (safe-indices b hi (nth (shape-of x) axis))) hv (int axis) (stream b)))))))
+
 (defn- exact-route
   "op of the MlxArrays xs by its exact composite (gen.backend.mlx.exact).
    In native mode it is one custom VJP with the function's derivative, not
@@ -615,6 +624,12 @@
 
   p/ILoading
   (-load-gguf [b header] (guarded :load-gguf (io/load-gguf b header)))
+
+  p/IOverwriting
+  (-put-along-axis [b x indices values axis] (guarded :put-along-axis (put-along-axis b x indices values axis)))
+
+  p/IHostFloats
+  (-to-floats [_ x] (guarded :->floats (operands/to-floats x)))
 
   p/INativeGrad
   (-native-grad? [_] (= grad-mode :native))

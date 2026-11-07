@@ -624,6 +624,22 @@
   [x]
   (if (host? x) x (p/-to-host (operand-backend :->clj x) x)))
 
+(defn ^{:api :experimental} ->floats
+  "The values of x, row-major, as a new float array (each rounded to
+   float32, booleans as 0 and 1): many values read on the host at once,
+   without ->clj's nested vectors (a language model's rows of logits).
+   Forces evaluation. Reading a value being differentiated is loud, as
+   ->clj's. A backend reads it by gen.array.protocols/IHostFloats, or
+   through ->clj. Experimental: outside the 1.x promise (DESIGN §9)."
+  ^floats [x]
+  (if (host? x)
+    (float-array [(dt/host-double x)])
+    (let [b (operand-backend :->floats x)]
+      (if (instance? gen.array.protocols.IHostFloats b)
+        (p/-to-floats b x)
+        (let [v (p/-to-host b x)]
+          (float-array (map dt/host-double (if (sequential? v) (c/flatten v) [v]))))))))
+
 (defn item
   "The host number or boolean of a single-element array."
   [x]
@@ -955,6 +971,28 @@
         axis (sh/axis (long axis) (ndim x))]
     (sh/check-scatter-add (shape x) (shape indices) (shape updates) axis)
     (p/-scatter-add b (cast-to b x d) indices (cast-to b updates d) axis)))
+
+(defn ^{:api :experimental} put-along-axis
+  "x with values written at indices along axis, overwriting what was
+   there: the counterpart of take-along-axis that scatter-add, which
+   accumulates, is not. indices (an int array) and values have one shape,
+   equal to x's on every axis but axis; x and values take their common
+   dtype. Indices are bounded as take-along-axis's (negative from the
+   end; out of range loud on an eager backend, clamped on a lazy one).
+   Along each line of axis (the other coordinates fixed) the indices must
+   be distinct: a repeat is loud on the JVM backend (:repeated-indices),
+   and on MLX which value lands is unspecified. Its gradient is x's
+   cotangent with zeros where values were written, and the values' the
+   cotangent taken there. A primitive
+   (gen.array.protocols/IOverwriting); staging it is loud. Experimental:
+   outside the 1.x promise (DESIGN §9)."
+  [x indices values axis]
+  (check-indices :put-along-axis indices)
+  (let [b (backend-of :put-along-axis [x values indices])
+        d (common-dtype b [x values])
+        axis (sh/axis (long axis) (ndim x))]
+    (sh/check-put-along-axis (shape x) (shape indices) (shape values) axis)
+    (p/put-along-axis b (cast-to b x d) indices (cast-to b values d) axis)))
 
 (defn pick
   "Index the last axis of x by the int array idx, broadcasting the remaining

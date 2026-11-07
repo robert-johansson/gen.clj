@@ -210,6 +210,8 @@ needs, taken from GenMLX's measured call counts
 | neural networks (experimental, 1.3.0) | `rms-norm` `rope` `sdpa` | — (a fused kernel where a backend has one: `IFused`'s `-fused` with `:rms-norm :rope :sdpa`) | all three |
 | quantized weights (experimental, 1.3.0) | `quantize` `dequantize` `quantized-matmul` `gather-qmm` | `IQuantized`'s `-quantized` with `:quantize :dequantize :quantized-matmul :gather-qmm` | — |
 | files (experimental, 1.3.0) | `load-gguf` | `ILoading`'s `-load-gguf`, per file of a model | — |
+| overwriting (experimental, 1.3.0) | `put-along-axis` | `IOverwriting`'s `-put-along-axis` | — |
+| host reads (experimental, 1.3.0) | `->floats` | `IHostFloats`'s `-to-floats` (else `-to-host`) | — |
 
 **Semantics at the edges** (1.2.1, from the health check of v1.2.0; DESIGN §9,
 "1.2.1's owner calls"), the same on every backend:
@@ -311,6 +313,34 @@ each capability is an optional protocol of its own:
   0.32.4's loader misreads float64 metadata and the process dies, so the
   MLX backend refuses such a file (`:unsupported`); the JVM backend reads
   it.
+
+- **`put-along-axis`** (`IOverwriting`) writes values over x's entries at
+  indices along an axis: the overwrite, the counterpart of `take-along-axis`
+  that `scatter-add` (which accumulates) is not. Indices and values have one
+  shape, equal to x's on every axis but the axis, as `scatter-add`'s; x and
+  values take their common dtype; indices are bounded as `take-along-axis`'s.
+  It came for the static KV caches (gen.llm.models.qwen3), whose slots a
+  rewound or reused row writes again: a scatter-add there adds onto what a
+  slot held, silently (rule 6).
+  - Repeated indices along a line of the axis (the other coordinates
+    fixed): loud on the JVM backend (`:repeated-indices`); on MLX which
+    value lands is unspecified (its scatter, unchecked).
+  - Gradients: x's cotangent with zeros at the entries written, and the
+    values' the cotangent taken there (the tape's VJP; MLX's own under its
+    native gradients).
+  - The batch tracer lifts it as `scatter-add` (each particle's lines its
+    own); the staging backend records it (`:put-along-axis`), and the
+    device lowerings refuse it, loudly. A backend without `IOverwriting`
+    is loud (`:unsupported`), naming it.
+
+- **`->floats`** (`IHostFloats`) reads an array's values, row-major, into a
+  new float array at once (each rounded to float32, booleans 0 and 1),
+  forcing evaluation: many values on the host without `->clj`'s nested
+  vectors, for an LLM engine's rows of logits (gen.llm.array-engine reads
+  a step's 16 rows of 151,936 at its end). MLX reads a float32 buffer in
+  place (a view copied contiguous first; other dtypes cast to float32);
+  the JVM backend rounds its doubles. A backend without it reads through
+  `-to-host`; a value being differentiated is loud, as `->clj`'s.
 
 **Deliberately absent from v1:**
 - sort, top-k and general scatter: added when a ported module needs them

@@ -91,7 +91,13 @@
     (is (vmap-matches? #(array/pick %1 %2) [b3 bk] #{0 1}) "pick: a categorical log-prob")
     (is (vmap-matches? #(array/pick %1 %2) [s3 bk] #{1}))
     (is (vmap-matches? #(array/take-along-axis %1 (array/reshape %2 [1]) 0) [b3 bk] #{0 1}))
-    (is (vmap-matches? #(array/scatter-add (array/zeros [3]) (array/reshape %1 [1]) (array/reshape %2 [1]) 0) [bk bs] #{0 1}))))
+    (is (vmap-matches? #(array/scatter-add (array/zeros [3]) (array/reshape %1 [1]) (array/reshape %2 [1]) 0) [bk bs] #{0 1}))
+    (testing "put-along-axis: each particle's lines its own"
+      (is (vmap-matches? #(array/put-along-axis %1 (array/reshape %2 [1]) (array/reshape %3 [1]) 0) [b3 bk bs] #{0 1 2}))
+      (is (vmap-matches? #(array/put-along-axis %1 (array/reshape %2 [1]) (array/reshape %3 [1]) 0) [s3 bk bs] #{1 2})
+          "shared x")
+      (is (vmap-matches? #(array/put-along-axis %1 %2 (array/slice %1 1 0 2) 1) [b23 (array/array [[2 0] [0 1]] {:dtype :int64})] #{0})
+          "shared indices"))))
 
 (deftest matrices
   (is (vmap-matches? array/matmul [b23 s3] #{0}) "a per-particle matrix times a shared vector")

@@ -2,20 +2,17 @@
   "The token generative function (gen.llm.token) over llama.cpp: the GFI
    laws within one LM, where score once makes them exact although
    llama.cpp's reads differ with their shapes; forced text; completions
-   that decode to text; no GC backstop.
+   that decode to text; no GC backstop (gen.llm.token-contract's checks,
+   which gen.llm.array-engine-test runs on gen.array's engine).
 
    Needs llama.cpp's libraries (native/build-llama.sh), the compiled
    binding (clojure -T:build java) and a model, given as
    -J-Dgen.llama.test-model=<a GGUF file> (or GEN_LLAMA_TEST_MODEL), as
    gen.llm.llama-test does; skipped with a note otherwise."
   (:require [clojure.test :refer [deftest is use-fixtures]]
-            [clojure.test.check :as tc]
-            [gen.gfi :as gfi]
-            [gen.laws :as laws]
-            [gen.llm.branching :as br]
             [gen.llm.lm :as lm]
             [gen.llm.token :as token]
-            [gen.random :as rng]
+            [gen.llm.token-contract :as contract]
             [gen.test-support :as ts]))
 
 (def ^:private model-path
@@ -53,25 +50,14 @@
 
 (defn- prompt [] ((llama 'tokenize) (:engine (setup)) "The capital of Sweden is"))
 
+(defn- opts []
+  {:prompt (prompt)
+   :forced ((llama 'tokenize) (:engine (setup)) " Stockholm" {:add-special? false})})
+
 (deftest the-laws-hold-within-one-lm
   (ts/when-native :llama available?
-    (let [{:keys [completion]} (setup)
-          p (prompt)
-          cases (laws/cases [[:llama completion [p 4] [[p 2] [p 6]]]])]
-      (doseq [[k law] (merge laws/all laws/conventions)]
-        (let [r (tc/quick-check 10 (law cases) :seed 20261021)]
-          (is (:pass? r) (str k " " (pr-str (select-keys r [:fail :shrunk])))))))))
+    (is (= [] (contract/run-check contract/check-laws (setup) (opts))))))
 
 (deftest forced-text-and-decoded-completions
   (ts/when-native :llama available?
-    (let [{:keys [lm completion engine]} (setup)
-          p (prompt)
-          stockholm (lm/encode lm " Stockholm" {:add-special? false})
-          {tr :trace w :weight} (gfi/generate completion [p 12] (token/forced stockholm) (rng/key 1))
-          text (lm/decode lm (:retval tr))]
-      (is (= stockholm (subvec (:retval tr) 0 (count stockholm))))
-      (is (< -20.0 w 0.0) "a likely continuation, scored by the model")
-      (is (.startsWith ^String text " Stockholm"))
-      (is (= (:score tr) (:weight (gfi/assess completion [p 12] (:choices tr)))) "score once, bit for bit")
-      (println "llama completion:" (pr-str text))
-      (is (zero? (:collections (br/info engine))) "no GC backstop"))))
+    (is (= [] (contract/run-check contract/check-forced (setup) (opts))))))
