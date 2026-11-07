@@ -80,7 +80,7 @@
             [gen.llm.models.qwen3 :as qwen3]
             [gen.llm.models.qwen35 :as qwen35]
             [gen.llm.slots :as slots])
-  (:import [java.util.concurrent ExecutorService]))
+  (:import [java.util.concurrent ExecutionException ExecutorService Future]))
 
 (set! *warn-on-reflection* true)
 (set! *unchecked-math* :warn-on-boxed)
@@ -101,29 +101,133 @@
   (loop [j 0 s 0.0]
     (if (c/< j n) (recur (inc j) (c/+ s (Math/exp (c/- (double (aget xs (c/+ off j))) m)))) s)))
 
+(defn- log-normalizer
+  "m + log s: the log-normalizer of a row whose largest logit is m (finite)
+   and whose terms exp(x - m) sum to s."
+  ^double [^double m ^double s]
+  (c/+ m (Math/log s)))
+
+(defn- row-normalizer
+  "The log-normalizer of the n floats of xs from off, in double (the
+   largest itself when it is not finite)."
+  ^double [^floats xs ^long off ^long n]
+  (let [m (row-max xs off n)]
+    (if (Double/isFinite m) (log-normalizer m (row-sum-exp xs off n m)) m)))
+
+(defn- shifted
+  "The n floats of xs from off less z, each rounded to float: a new
+   array."
+  ^floats [^floats xs ^long off ^long n ^double z]
+  (let [out (float-array n)]
+    (dotimes [j n] (aset out j (float (c/- (double (aget xs (c/+ off j))) z))))
+    out))
+
+(defn- check-normalizer
+  "z, loud when it is not finite (a logit NaN or +Inf, or every one -Inf)."
+  ^double [^double z what]
+  (when-not (Double/isFinite z)
+    (throw (ex-info (str what ": the model's logits are not finite") {:reason :decode-failed :log-normalizer z})))
+  z)
+
 (defn- normalized
   "Row i of logits (n floats each, row after row) as log-probabilities
    normalized in double, a new float array; loud when a logit is NaN or
    +Inf."
   ^floats [^floats logits ^long i ^long n what]
-  (let [off (c/* i n)
-        m (row-max logits off n)
-        z (if (Double/isFinite m) (c/+ m (Math/log (row-sum-exp logits off n m))) m)]
-    (when-not (Double/isFinite z)
-      (throw (ex-info (str what ": the model's logits are not finite") {:reason :decode-failed :log-normalizer z})))
-    (let [out (float-array n)]
-      (dotimes [j n] (aset out j (float (c/- (double (aget logits (c/+ off j))) z))))
-      out)))
+  (let [off (c/* i n)]
+    (shifted logits off n (check-normalizer (row-normalizer logits off n) what))))
+
+;; A batch of fewer rows than the host pool's threads (a decode at batch
+;; 1) normalizes each row in parts across them, part 0 on the calling
+;; thread (genclj-c7uf: 0.73 ms for Qwen3's 151,936 logits, 0.33 ms in 16
+;; parts on four threads, M4): the same floats, bit for bit. The largest
+;; logit is row-max's; each term exp(x - m) is computed alone, and the
+;; calling thread sums the terms in order as row-sum-exp does, a part's
+;; once it is done; each output is x - z rounded, as shifted's.
+
+(defn- submit-parts
+  "Futures of (f p) for the parts p from 1 below k, on pool: part 0 is the
+   calling thread's."
+  [^ExecutorService pool k f]
+  (mapv (fn [p] (.submit pool ^Callable (fn [] (f p) nil))) (range 1 k)))
+
+(defn- await-part
+  "Wait for a part's future; what it threw is rethrown as itself."
+  [^Future fut]
+  (try (.get fut)
+       (catch ExecutionException x (throw (.getCause x)))))
+
+(defn- in-parts
+  "(f from to) for each of k parts [from, to) of the n positions from off,
+   part 0 on the calling thread and the rest on pool, then (g acc from
+   to) on the calling thread for each part in order once it is done, from
+   init: g's last value."
+  [pool k off n f g init]
+  (let [k (long k)
+        off (long off)
+        n (long n)
+        ;; part p is [at[p], at[p + 1])
+        at (long-array (map #(c/+ off (quot (c/* (long %) n) k)) (range (inc k))))
+        futs (submit-parts pool k (fn [p] (f (aget at (long p)) (aget at (inc (long p))))))]
+    (f (aget at 0) (aget at 1))
+    (reduce (fn [acc p]
+              (let [p (long p)]
+                (when (pos? p) (await-part (futs (dec p))))
+                (g acc (aget at p) (aget at (inc p)))))
+            init (range k))))
+
+(defn- row-normalizer-in-parts
+  "row-normalizer's value, bit for bit, its terms computed in k parts on
+   pool."
+  [pool k ^floats xs off n]
+  (let [off (long off)
+        n (long n)
+        m (row-max xs off n)]
+    (if-not (Double/isFinite m)
+      m
+      (let [e (double-array n)]
+        (log-normalizer m (in-parts pool k off n
+                                    (fn [^long from ^long to]
+                                      (loop [j from]
+                                        (when (c/< j to)
+                                          (aset e (c/- j off) (Math/exp (c/- (double (aget xs j)) m)))
+                                          (recur (inc j)))))
+                                    (fn [s ^long from ^long to]
+                                      (loop [j (c/- from off) s (double s)]
+                                        (if (c/< j (c/- to off)) (recur (inc j) (c/+ s (aget e j))) s)))
+                                    0.0))))))
+
+(defn- normalized-in-parts
+  "normalized's row i, bit for bit, its passes in k parts on pool."
+  [pool k logits i n what]
+  (let [^floats xs logits
+        n (long n)
+        off (c/* (long i) n)
+        z (check-normalizer (row-normalizer-in-parts pool k xs off n) what)
+        out (float-array n)]
+    (in-parts pool k off n
+              (fn [^long from ^long to]
+                (loop [j from]
+                  (when (c/< j to)
+                    (aset out (c/- j off) (float (c/- (double (aget xs j)) z)))
+                    (recur (inc j)))))
+              (fn [_ _ _] nil)
+              nil)
+    out))
 
 (defn- host-rows
   "The rows of logits [B 1 vocab] (or [B vocab]), read at once and each
-   normalized on pool: a vector of B float arrays."
+   normalized on pool: a vector of B float arrays. Fewer rows than the
+   pool's threads are each normalized in parts across them."
   [pool logits what]
   (let [s (array/shape logits)
         n (long (peek s))
         xs (array/->floats logits)
-        b (quot (alength xs) n)]
-    (host/in-order pool #(normalized xs % n what) (vec (range b)))))
+        b (quot (alength xs) n)
+        threads (host/default-threads)]
+    (if (and pool (c/< b threads) (c/< 1 threads))
+      (mapv #(normalized-in-parts pool (c/* 4 threads) xs % n what) (range b))
+      (host/in-order pool #(normalized xs % n what) (vec (range b))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The model families

@@ -115,15 +115,19 @@
                                  (when (instance? gen.random.threefry.Key l)
                                    ": a key's draws would be replayed by every call; draw outside, or close over the key"))
                             {:value l}))))
-        (let [b (array/backend-of :compile leaves)
-              donated (when (:donate opts) (donated-leaves args (:donate opts)))]
+        (let [b (array/backend-of :compile leaves)]
           (if-not (instance? gen.array.protocols.ICompiling b)
             ;; compile is f itself here (the JVM backend, the tape, the
-            ;; batch tracer): nothing is donated
-            (apply f args)
+            ;; batch tracer): nothing is donated (its positions are
+            ;; checked all the same)
+            (do (when (:donate opts) (donated-leaves args (:donate opts)))
+                (apply f args))
             (let [skel (tree/skeleton args)
                   entry (or (get @compiled [b skel])
-                            (let [out-skel (atom nil)
+                            ;; the donated leaves depend on the arguments'
+                            ;; structure only: found once a structure
+                            (let [donated (when (:donate opts) (donated-leaves args (:donate opts)))
+                                  out-skel (atom nil)
                                   g (p/-compile b (fn [ins]
                                                     (let [out (apply f (tree/refill skel ins))]
                                                       (reset! out-skel (tree/skeleton out))

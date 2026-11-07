@@ -277,7 +277,9 @@ public final class MlxRuntime {
    *  its buffer until the GC finds its owner, and while the owner lives MLX
    *  cannot free the buffer during evaluation either, so without this a
    *  chain of large ops kept every intermediate: 2026-10-19, 11 GB for
-   *  100,000 float64 beta draws, and a kernel panic from two test JVMs. */
+   *  100,000 float64 beta draws, and a kernel panic from two test JVMs.
+   *  A donated array's bytes are taken off again (donate): its handle
+   *  holds no buffer any more, for a collection to free. */
   private static final long NEW_BYTES = Long.getLong("gen.mlx.gc-new-bytes", physicalMemory() / 16);
   private static final AtomicLong FRESH = new AtomicLong();
   private static volatile long arrayThreshold = BASE_ARRAYS;
@@ -509,6 +511,12 @@ public final class MlxRuntime {
     return new long[] {LIVE.get(), COLLECTIONS.get()};
   }
 
+  /** The bytes of arrays adopted since the last collection, less those
+   *  donated (adopt's NEW_BYTES rule), for tests and diagnostics. */
+  public static long freshBytes() {
+    return FRESH.get();
+  }
+
   // ---- closures: Java functions MLX calls --------------------------------------------
 
   /** A function of arrays to arrays (handles), for mlx_closure. The input
@@ -557,6 +565,30 @@ public final class MlxRuntime {
     o.set(JAVA_LONG, 0, h);
     int status = MlxRaw.mlx_array_set(o, src);
     if (status != 0) throw error("mlx_array_set");
+  }
+
+  /** Consume the array handle h, which a compiled call donated: repoint it
+   *  at src (repoint), and take its bytes off the count of fresh ones
+   *  (adopt's NEW_BYTES rule). The handle holds no buffer any more, so no
+   *  collection could free one by finding it, and the call's outputs, which
+   *  may take the buffer over, are counted when they are adopted. Donate a
+   *  call's inputs before adopting its outputs, then settleFresh: the
+   *  count may dip below zero in between, so that a cache stepped in place
+   *  never counts twice. Before this a decode step consuming its static
+   *  cache counted the whole cache as new bytes every step, and ran a full
+   *  collection every few steps (genclj-c7uf: 1.25 ms a step at batch 1 on
+   *  Metal, 12.5 ms at 16 rows). */
+  public static void donate(long h, long src) {
+    FRESH.addAndGet(-MlxRaw.mlx_array_nbytes(h));
+    repoint(h, src);
+  }
+
+  /** The count of fresh bytes back to at least zero, after a call's
+   *  donations and adoptions (donate): what a call donated that was made
+   *  before the last collection (which zeroed the count) is not carried
+   *  over to later arrays. */
+  public static void settleFresh() {
+    FRESH.updateAndGet(f -> Math.max(0L, f));
   }
 
   /** A new mlx_vector_array of the arrays (MLX takes its own references). */

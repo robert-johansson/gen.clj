@@ -352,6 +352,23 @@
                 (is (< (- (live) live0) 50) "the donated arrays' handles were freed")
                 (is (= (repeat 64 30.0) (array/->clj (peek outs))) "the last result reads its value")
                 (is (= 1.0 (array/item (array/sum (first outs)))) "an early result too")))
+            (testing "a donated argument's bytes come off the count of new ones: an array stepped in place is never new"
+              ;; MlxRuntime collects (System.gc) once the arrays made since
+              ;; the last collection hold gen.mlx.gc-new-bytes. A decode
+              ;; step consuming its cache counted the whole cache as new
+              ;; every step, and collected every few steps (genclj-c7uf:
+              ;; 1.25 ms a step at batch 1 on Metal). Here 50 steps of a 4
+              ;; MB array; planted (2026-11-07), donation without the
+              ;; credit (the repoint alone) counts 200 MB
+              (let [fresh-bytes #(gen.mlx.MlxRuntime/freshBytes)
+                    acc (fresh)
+                    before (fresh-bytes)
+                    acc (loop [k 0 acc acc]
+                          (if (< k 50)
+                            (let [[acc'] (donating acc i v)] (array/eval! acc') (recur (inc k) acc'))
+                            acc))]
+                (is (< (- (fresh-bytes) before) (* 2 4 n)) "under two steps' bytes")
+                (is (= 125.0 (array/item (array/take acc 7 0))) "50 updates of 2.5")))
             (testing "under the tape and the batch tracer compile is the function itself: nothing is consumed"
               (let [x (array/array [1.0 2.0 3.0])
                     f (array/compile (fn [x] (array/sum (array/square x))) {:donate #{0}})]
