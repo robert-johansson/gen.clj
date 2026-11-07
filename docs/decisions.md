@@ -4301,3 +4301,41 @@ JAX's donate_argnums: (array/compile f {:donate #{0}}).
 
 **Not taken.** gen.backend.mlx/release!, called by the engine: core code
 would call a backend, against rule 3.
+
+### Qwen3's static caches and compiled steps
+
+(PROVISIONAL, owner to confirm; genclj-tjvd, 2026-11-07)
+
+Measured on Metal (M4), Qwen3-0.6B Q8_0, float32, tokens/s:
+
+| Decode | Eager | Compiled, copying | Compiled, donating | llama.cpp via gen.clj | llama-bench |
+|---|---:|---:|---:|---:|---:|
+| batch 1 | 54 | 57 | 75 | 99 | 135 |
+| batch 16 | 277 | 312 | 467 | 861 | |
+| batch 64 | 361 | 393 | 636 | 999 | |
+
+In float16 the donating step decodes 89 tokens/s at batch 1 (127 pipelined)
+and matches llama.cpp at batches 4 and 64. A compiled decode step is 805 MLX
+primitives, against 1,268 eager.
+
+**The lead's calls, on the implementing agent's recommendations:**
+1. **KV writes use scatter-add** into preallocated, zeroed slots, keeping the
+   invariant that slots past a row's offset hold zeros. No new slice-update
+   op; the array API is unchanged.
+2. **New names in gen.llm.models.qwen3:** static-cache, compile-step (with
+   :donate?), select-rows, concat-rows, offsets, and prefill's :capacity.
+   - Rows may sit at different offsets.
+   - offset is now loud for such rows.
+   - Overflow is loud (:capacity-exceeded), checked on the host.
+3. **compile-step evaluates the weights when it builds the step**, a boundary
+   of the inference loop, so a trace captures them as constants.
+4. **array/compile validates only :donate.** Its other keys wait for
+   genclj-c6jo.
+5. **Precision is the owner's call.**
+   - float32 scales and KV cost about 25% against float16.
+   - llama.cpp's layout is a float16 KV cache with float32 activations; it
+     needs a cache-dtype option (genclj-5gfm).
+6. **Two follow-ups:**
+   - each compiled call costs 1.4-2.5 ms of host time (the engine's
+     follow-up, genclj-8rnc);
+   - llama-bench belongs in native/build-llama.sh as a tools target.
