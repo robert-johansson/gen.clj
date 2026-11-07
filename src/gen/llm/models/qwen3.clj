@@ -25,6 +25,9 @@
                                        → [logits pools']: a token a row over paged pools
      (compile-paged-step m)            → paged-step compiled, consuming the pools with
                                          :donate? true
+     (paged-batch-step m pools batch)  → {:logits :scores :pools}: decode rows and a
+                                         prefill chunk over paged pools, one forward
+     (compile-paged-batch-step m)      → paged-batch-step compiled (:donate? true)
 
    tokens are B rows of T token ids each: host vectors (checked against the
    vocabulary) or an int array [B T]. A row's tokens are positions offset,
@@ -336,7 +339,8 @@
 (defn- logits-of
   "[logits, the cache entries after them] of tokens ids [B T] (an int
    array) through every block, block i's attention (attention i w x');
-   logits :all or :last."
+   logits :all, :last, or {:rows idx}: the rows idx (int32 [O]) of B, [O
+   T vocab]."
   [{:keys [layers eps dtype] :as cfg} weights ids attention logits]
   (let [t (long (second (array/shape ids)))
         [h entries] (reduce (fn [[h entries] i]
@@ -345,7 +349,9 @@
                                 [h (conj entries e)]))
                             [(embed (:embed weights) ids dtype) []]
                             (range layers))
-        h (if (= :last logits) (array/slice h 1 (dec t) t) h)]
+        h (cond (= :last logits) (array/slice h 1 (dec t) t)
+                (map? logits) (array/take h (:rows logits) 0)
+                :else h)]
     [(linear (array/rms-norm h (:norm weights) eps) (or (:output weights) (:embed weights))) entries]))
 
 ;; ---------------------------------------------------------------------------
@@ -784,6 +790,137 @@
        (let [ids (token-array tokens (:vocab config))]
          (check-paged config pools positions tables slots ids)
          (f pools positions tables slots ids))))))
+
+;; ---------------------------------------------------------------------------
+;; Batched paged steps (genclj-b3ow): decode rows and a prefill chunk
+;; ---------------------------------------------------------------------------
+
+(defn- batch-attention
+  "One block's attention of x [R 1 hidden], a token a row, over the
+   layer's pools entry: every row's key and value written at its slot (at
+   its position, rotated there), then the first d rows' attention by
+   paged attention over their tables, and the rest's (a prefill chunk of
+   one sequence) over the chunk table's blocks gathered, each row to its
+   own position (a causal mask): [its output, the pools after x]."
+  [{:keys [heads kv-heads head-dim] :as cfg} w x {:keys [positions tables slots chunk d]} entry]
+  (let [r (long (first (array/shape x)))
+        d (long d)
+        [q k v] (qkv cfg w x positions)
+        [kp vp] (array/paged-write (:k entry) (:v entry)
+                                   (array/reshape k [r kv-heads head-dim]) (array/reshape v [r kv-heads head-dim]) slots)
+        q (array/reshape q [r heads head-dim])
+        decoded (when (pos? d)
+                  (array/paged-attention (if (c/== d r) q (array/slice q 0 0 d)) kp vp tables
+                                         (+ (if (c/== d r) positions (array/slice positions 0 0 d)) 1)))
+        chunked (when chunk
+                  (let [n (c/- r d)
+                        [gk gv] (paged/gathered kp vp chunk)                           ; [1 Hk T D]
+                        t (nth (array/shape gk) 2)
+                        qc (array/transpose (array/reshape (array/slice q 0 d r) [1 n heads head-dim]) [0 2 1 3])
+                        mask (<= (array/arange 0 t 1 {:dtype :int32})
+                                 (array/reshape (array/slice positions 0 d r) [1 1 n 1]))]
+                    (-> (array/sdpa qc gk gv {:mask mask})                             ; [1 heads n D]
+                        (array/transpose [0 2 1 3])
+                        (array/reshape [n heads head-dim]))))
+        o (cond (and decoded chunked) (array/concatenate [decoded chunked] 0)
+                decoded decoded
+                :else chunked)]
+    [(linear (array/reshape o [r 1 (c/* heads head-dim)]) (:o w)) {:k kp :v vp}]))
+
+(defn- batch-forward
+  "paged-batch-step's arrays in and out: {:logits [O 1 vocab] :scores [O]
+   (with :targets) :pools}."
+  [cfg weights pools {:keys [ids positions slots tables chunk out targets]}]
+  (let [at {:positions positions :slots slots :tables tables :chunk chunk
+            :d (if tables (first (array/shape tables)) 0)}
+        [logits pools] (logits-of cfg weights ids (fn [i w x] (batch-attention cfg w x at (nth pools i))) {:rows out})]
+    (cond-> {:logits logits :pools pools}
+      targets (assoc :scores (array/reshape (array/- (array/take-along-axis logits (array/reshape targets [-1 1 1]) 2)
+                                                     (array/logsumexp logits {:axis -1 :keep-dims? true}))
+                                            [-1])))))
+
+(defn- check-batch
+  "paged-batch-step's operands: pools of the model's layers, R rows,
+   decode rows first, a chunk's after them."
+  [{:keys [layers]} pools {:keys [ids positions slots tables chunk out targets]}]
+  (let [r (long (first (array/shape ids)))
+        d (long (if tables (first (array/shape tables)) 0))
+        bad (fn [msg data] (throw (invalid (str "paged-batch-step: " msg) data)))]
+    (when-not (and (vector? pools) (= layers (count pools)))
+      (bad (str "the pools must be a vector of the model's " layers " layers (paged-pools)") {:layers (count pools)}))
+    (when-not (= [r 1] (array/shape ids))
+      (bad (str "a batch reads one token a row, [R 1], not " (array/shape ids)) {:tokens (array/shape ids)}))
+    (doseq [[what x] [[:positions positions] [:slots slots]]]
+      (when-not (and (array/array? x) (= [r] (array/shape x)))
+        (bad (str (name what) " must be an int array [R] " [r]) {what (when (array/array? x) (array/shape x))})))
+    (when (and tables (not (and (= 2 (array/ndim tables)) (c/<= 1 d r))))
+      (bad (str ":tables must be [D MB] for D decode rows, at most R " r ", not " (array/shape tables))
+           {:tables (array/shape tables)}))
+    (when-not (= (some? chunk) (c/< d r))
+      (bad (if chunk
+             (str "a :chunk table, but no rows after the " d " decode rows")
+             (str "the rows after the " d " decode rows read a chunk: a :chunk table is missing"))
+           {:rows r :decode-rows d}))
+    (when (and chunk (not (and (= 2 (array/ndim chunk)) (= 1 (first (array/shape chunk))))))
+      (bad (str ":chunk must be [1 MB], not " (array/shape chunk)) {:chunk (array/shape chunk)}))
+    (when-not (and (array/array? out) (= 1 (array/ndim out)))
+      (bad ":out must be the rows whose logits are computed, an int array [O]" {:out (when (array/array? out) (array/shape out))}))
+    (when (and targets (not (and (array/array? targets) (= (array/shape out) (array/shape targets)))))
+      (bad (str ":targets must be an int array [O] " (array/shape out)) {:targets (when (array/array? targets) (array/shape targets))}))))
+
+(defn- batch-arrays
+  "batch with its :tokens as :ids, an int array [R 1]."
+  [batch vocab]
+  (-> batch (dissoc :tokens) (assoc :ids (token-array (:tokens batch) vocab))))
+
+(def ^:private batch-keys #{:tokens :positions :slots :tables :chunk :out :targets})
+
+(defn paged-batch-step
+  "One forward of R rows over paged pools (paged-pools'), a token a row,
+   and the pools after them: {:logits [O 1 vocab] :scores [O] (with
+   :targets) :pools}. batch (int32 arrays but :tokens):
+     :tokens     R rows of one id, or an int array [R 1]
+     :positions  [R] each row's position in its sequence
+     :slots      [R] where each row's key and value are written
+                 (gen.llm.paged/prepare's)
+     :tables     [D MB] the block tables of the first D rows (decode
+                 rows), each attending over its first position + 1
+                 positions by paged attention (absent when D is 0)
+     :chunk      [1 MB] the block table of the sequence the other R - D
+                 rows read (a prefill chunk at consecutive positions),
+                 which attend over its blocks gathered, each to its own
+                 position (absent when D is R)
+     :out        [O] the rows whose logits are computed
+     :targets    [O] (optional) a token for each: :scores, its log-
+                 probability at that row (in the model's dtype).
+   Every row's key and value are written before any row attends, so a
+   chunk's rows see each other's. Its logits are paged-step's (decode
+   rows) and a concatenating cache's (a chunk), within float round-off;
+   the pools are values, as paged-step's."
+  [{:keys [config weights]} pools batch]
+  (check-options :paged-batch-step batch batch-keys)
+  (let [b (batch-arrays batch (:vocab config))]
+    (check-batch config pools b)
+    (batch-forward config weights pools b)))
+
+(defn compile-paged-batch-step
+  "paged-batch-step compiled by array/compile: a function (f pools batch)
+   → {:logits :scores :pools}, one trace per batch's structure and shapes
+   (decode rows, chunk rows, table widths, rows read, pool size). The
+   model's weights are evaluated here. Options: :donate? true, each call
+   consumes the pools it steps (on MLX, written in place), as
+   compile-paged-step's."
+  ([m] (compile-paged-batch-step m nil))
+  ([{:keys [config weights]} {:keys [donate?] :as opts}]
+   (check-options :compile-paged-batch-step opts #{:donate?})
+   (array/eval! weights)
+   (let [f (array/compile (fn [pools b] (batch-forward config weights pools b))
+                          (when donate? {:donate #{0}}))]
+     (fn [pools batch]
+       (check-options :paged-batch-step batch batch-keys)
+       (let [b (batch-arrays batch (:vocab config))]
+         (check-batch config pools b)
+         (f pools b))))))
 
 (defn forward
   "The logits [B T vocab] of every position of tokens (B rows of T ids),

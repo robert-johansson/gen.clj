@@ -93,6 +93,30 @@
    - A paged step, run or copy that fails has consumed the pools: every
      branch is lost (:lost-slots), loudly, and the pools are made again.
 
+   The continuous mode (:paged? and :continuous? true; genclj-b3ow)
+   batches concurrent callers' reads (gen.llm.slots's Batching: its
+   scheduler gathers every advance, extend and open in flight between
+   forwards, see that namespace). A forward is one compiled call
+   (qwen3/compile-paged-batch-step, consuming the pools) of rows of one
+   token:
+   - every one-token read in flight (an advance's rows, a one-token open
+     or extend, a long read's last token): decode rows, attending by
+     paged attention over their tables, padded to a power of 2 (at least
+     :min-rows);
+   - then a chunk of the oldest longer read (open, extend), as many of
+     its tokens as the budget (:n-batch tokens a forward) leaves after
+     the decode rows, at least a block: its rows written into its blocks
+     and attending over them gathered (sdpa, each row to its position),
+     padded to a power of 2 within the budget. Longer reads wait their
+     turn, first come first served; their chunks go on in the next
+     forwards, between which other requests come and go.
+   The logits are computed for the rows read only (each decode row, a
+   read's last token, the scored rows of an extend), the scores on the
+   device. A read alone (a score's, or a program's from one thread) is
+   forwards of its own, so its results repeat bit for bit; a read
+   batched with others' is the same within float round-off (kernels
+   differ by shape).
+
    Results depend on batch shapes and capacities as llama.cpp's do (float
    round-off: MLX's kernels differ by shape); the same read from the same
    state gives the same rows, bit for bit, and what is stacked or reused is
@@ -138,7 +162,7 @@
                :offsets #'qwen3/offsets :select-rows #'qwen3/select-rows :concat-rows #'qwen3/concat-rows :grow #'qwen3/grow
                ;; the paged mode's
                :paged-pools #'qwen3/paged-pools :paged-cache #'qwen3/paged-cache :paged-entries #'qwen3/paged-entries
-               :compile-paged-step #'qwen3/compile-paged-step}
+               :compile-paged-step #'qwen3/compile-paged-step :compile-paged-batch-step #'qwen3/compile-paged-batch-step}
         qwen35 {:load #'qwen35/load :static-cache #'qwen35/static-cache :step #'qwen35/step :compile-step #'qwen35/compile-step
                 :offsets #'qwen35/offsets :select-rows #'qwen35/select-rows :concat-rows #'qwen35/concat-rows :grow #'qwen35/grow}]
     {"qwen3" qwen3 "qwen35" qwen35 "qwen35moe" qwen35}))
@@ -424,15 +448,15 @@
 
 (defn- prepared
   "[alloc seqs slots copies]: each of seqs (blocks of bs) made ready for
-   n positions more (gen.llm.paged/prepare), in order, the pools grown
-   first (doubled, at least to what they need) when their free blocks do
-   not suffice."
-  [{:keys [model state] :as ctx} seqs n]
+   its count of ns positions more (gen.llm.paged/prepare), in order, the
+   pools grown first (doubled, at least to what they need) when their
+   free blocks do not suffice."
+  [{:keys [model state] :as ctx} seqs ns]
   (let [bs (long (:block-size @state))
-        go #(reduce (fn [[a ss slots copies] s]
+        go #(reduce (fn [[a ss slots copies] [s n]]
                       (let [[a s' sl cs] (paged/prepare a s n bs)]
                         [a (conj ss s') (conj slots sl) (into copies cs)]))
-                    [% [] [] []] seqs)]
+                    [% [] [] []] (map vector seqs ns))]
     (try (go (:alloc @state))
          (catch clojure.lang.ExceptionInfo e
            (if-not (= :blocks-exhausted (:reason (ex-data e)))
@@ -440,7 +464,8 @@
              (let [{:keys [size] :as a} (:alloc @state)
                    ;; the most a reading of these could take: each a block
                    ;; copied and its new positions' blocks
-                   need (long (reduce c/+ 0 (map #(c/+ 1 (paged/blocks-for (c/+ (rem (long (:len %)) bs) (long n)) bs)) seqs)))
+                   need (long (reduce c/+ 0 (map (fn [s n] (c/+ 1 (paged/blocks-for (c/+ (rem (long (:len s)) bs) (long n)) bs)))
+                                                 seqs ns)))
                    to (max (c/* 2 (long size)) (c/+ (long size) need))
                    grown (call state :paged-pools model (c/- to (long size)) bs)
                    pools (mapv (fn [old new] {:k (array/concatenate [(:k old) (:k new)] 0)
@@ -449,7 +474,7 @@
                (array/eval! pools)
                (vswap! state assoc :alloc (paged/grow a to) :pools pools)
                (tally! state :pool-grows 1)
-               (prepared ctx seqs n)))))))
+               (prepared ctx seqs ns)))))))
 
 (defn- padded
   "copies padded to a power of 2 of pairs with self-copies (no-ops) of
@@ -501,7 +526,7 @@
         (let [scores (if sc (into scores (map double) (array/->floats sc)) scores)]
           (if-not last?
             (recur end cache scores)
-            (let [[a [s'] [slots] copies] (prepared ctx [s] n)
+            (let [[a [s'] [slots] copies] (prepared ctx [s] [n])
                   entries (call state :paged-entries cache pos)]
               (copy-blocks! ctx a copies)
               (let [pools (donating ctx #(doto (write-fn (:pools @state) (mapv first entries) (mapv second entries)
@@ -522,7 +547,7 @@
   (doseq [[slot pos] (map vector slots positions)] (check-paged-position state slot pos "advance"))
   (let [n (count slots)
         seqs (mapv #(or (entry state %) paged/empty-sequence) slots)
-        [a seqs' write-slots copies] (prepared ctx seqs 1)
+        [a seqs' write-slots copies] (prepared ctx seqs (repeat n 1))
         _ (copy-blocks! ctx a copies)
         r (max (long min-rows) (next-pow2 n))
         width (next-pow2 (reduce max 1 (map (comp count :blocks) seqs')))
@@ -545,6 +570,24 @@
     (tally! state :padded-rows (c/- r n))
     rows))
 
+(defn- paged-copy!
+  "slots-copy in the paged modes: dst shares src's blocks."
+  [state src dst]
+  (let [[a s] (paged/fork (:alloc @state) (entry state src))]
+    (vswap! state #(-> % (assoc :alloc a) (assoc-in [:table dst] s)))))
+
+(defn- paged-clear!
+  "slots-clear in the paged modes: slot's blocks released."
+  [state slot]
+  (when-let [s (entry state slot)]
+    (vswap! state #(-> % (assoc :alloc (paged/dispose (:alloc %) s)) (assoc-in [:table slot] nil)))))
+
+(defn- paged-close!
+  "slots-close in the paged modes."
+  [state ^ExecutorService pool]
+  (vswap! state assoc :table (vec (repeat (count (:table @state)) nil)) :pools nil)
+  (.shutdown pool))
+
 (deftype PagedSlots [model backend ctx ^ExecutorService pool info state]
   slots/Slots
   (slots-info [_] info)
@@ -561,35 +604,190 @@
         (paged-decode-step ctx (vec slots) (vec positions) (vec tokens))
         (catch Throwable t (throw (exhausted t nil))))))
 
-  (slots-copy [_ src dst]
-    (let [s (entry state src)
-          [a s] (paged/fork (:alloc @state) s)]
-      (vswap! state #(-> % (assoc :alloc a) (assoc-in [:table dst] s)))))
-
-  (slots-clear [_ slot]
-    (when-let [s (entry state slot)]
-      (vswap! state #(-> % (assoc :alloc (paged/dispose (:alloc %) s)) (assoc-in [:table slot] nil)))))
-
-  (slots-close [_]
-    (vswap! state assoc :table (vec (repeat (count (:table @state)) nil)) :pools nil)
-    (.shutdown pool))
+  (slots-copy [_ src dst] (paged-copy! state src dst))
+  (slots-clear [_ slot] (paged-clear! state slot))
+  (slots-close [_] (paged-close! state pool))
 
   Object
   (toString [_] (str "#<PagedSlots " (:path (:model info)) ">")))
+
+;; ---------------------------------------------------------------------------
+;; The continuous mode: reads of many requests in one forward (genclj-b3ow)
+;; ---------------------------------------------------------------------------
+
+;; The paged mode's books, with :stats {:forwards :decode-rows :chunk-rows
+;; :padded-rows :mixed-forwards :copied-blocks :pool-grows}, and its
+;; scratch blocks enough for the padding rows of a forward's decode rows
+;; and of its chunk.
+
+(defn- one-token? [r] (c/== 1 (count (:tokens r))))
+
+(defn- forward-plan
+  "Which of reads (gen.llm.slots/slots-forward's) a forward reads, and
+   its rows: every one-token read (decode rows, in order, padded to a
+   power of 2, at least min-rows), and the first longer read's next chunk
+   of what the budget (n-batch tokens) leaves, at least a block (bs), its
+   rows padded to a power of 2 within the budget. {:decode [indices]
+   :d-rows :chunk index-or-nil :c (its tokens) :c-rows}."
+  [reads min-rows n-batch bs]
+  (let [decode (filterv #(one-token? (reads %)) (range (count reads)))
+        d (count decode)
+        d-rows (if (pos? d) (max (long min-rows) (next-pow2 d)) 0)
+        ci (first (remove #(one-token? (reads %)) (range (count reads))))
+        left (max (long bs) (c/- (long n-batch) d-rows))
+        c (when ci (min (count (:tokens (reads ci))) left))]
+    {:decode decode :d-rows d-rows :chunk ci :c c
+     :c-rows (when c (min (next-pow2 c) (max (long c) left)))}))
+
+(defn- batch-forward!
+  "slots-forward's body in the continuous mode (see the namespace's
+   docstring): the plan's reads made ready (copy-on-write), one compiled
+   forward of their rows (qwen3/compile-paged-batch-step, consuming the
+   pools), the books written, then the rows read and normalized on the
+   host."
+  [{:keys [state pool batch-fn min-rows n-batch] :as ctx} reads]
+  (let [bs (long (:block-size @state))
+        {:keys [decode d-rows chunk c c-rows]} (forward-plan reads min-rows n-batch bs)
+        chosen (cond-> decode chunk (conj chunk))
+        _ (doseq [i chosen] (check-paged-position state (:slot (reads i)) (:pos (reads i)) "forward"))
+        seqs (mapv #(or (entry state (:slot (reads %))) paged/empty-sequence) chosen)
+        [a seqs' write-slots copies] (prepared ctx seqs (mapv #(if (= % chunk) c 1) chosen))
+        _ (copy-blocks! ctx a copies)
+        d (count decode)
+        d-rows (long d-rows)
+        c (long (or c 0))
+        c-rows (long (or c-rows 0))
+        r (c/+ d-rows c-rows)
+        i32 #(array/array % {:dtype :int32})
+        dseqs (subvec seqs' 0 d)
+        width (next-pow2 (reduce max 1 (map (comp count :blocks) dseqs)))
+        ;; a padding row writes the scratch slot of its row's index, and a
+        ;; padding decode row reads that slot's block
+        pad-table (fn [^long i] (vec (cons (quot i bs) (repeat (dec width) 0))))
+        {cpos :pos ctoks :tokens :as cread} (when chunk (reads chunk))
+        cpos (long (or cpos 0))
+        tokens (-> []
+                   (into (map #(vector (first (:tokens (reads %))))) decode)
+                   (into (repeat (c/- d-rows d) [0]))
+                   (into (map vector) (when chunk (subvec ctoks 0 c)))
+                   (into (repeat (c/- c-rows c) [0])))
+        positions (-> []
+                      (into (map #(:pos (reads %))) decode)
+                      (into (repeat (c/- d-rows d) 0))
+                      (into (range cpos (c/+ cpos c-rows))))
+        slots (-> []
+                  (into (map first) (subvec write-slots 0 d))
+                  (into (range d d-rows))
+                  (into (when chunk (peek write-slots)))
+                  (into (range (c/+ d-rows c) r)))
+        ;; the rows read: each decode row, the chunk's last when it ends
+        ;; its read, then the chunk's scored rows
+        ends? (and chunk (c/== c (count ctoks)))
+        lp-rows (cond-> (vec (range d)) ends? (conj (c/+ d-rows (dec c))))
+        ;; the chunk's scored rows: those of its targets among its c tokens
+        k (if (:targets cread) (min c (count (:targets cread))) 0)
+        out (into lp-rows (map #(c/+ d-rows (long %))) (range k))
+        o (next-pow2 (count out))
+        batch (cond-> {:tokens (i32 tokens) :positions (i32 positions) :slots (i32 slots)
+                       :out (i32 (into out (repeat (c/- o (count out)) 0)))}
+                (pos? d) (assoc :tables (i32 (into (mapv #(paged/table-row % width 0) dseqs) (map pad-table) (range d d-rows))))
+                chunk (assoc :chunk (i32 [(paged/table-row (peek seqs') (next-pow2 (count (:blocks (peek seqs')))) 0)]))
+                (pos? k) (assoc :targets (i32 (-> (vec (repeat (count lp-rows) 0))
+                                                  (into (subvec (:targets cread) 0 k))
+                                                  (into (repeat (c/- o (count out)) 0))))))
+        {:keys [logits scores pools]} (donating ctx #(let [res (batch-fn (:pools @state) batch)]
+                                                       (array/eval! res)
+                                                       res))]
+    ;; the books first: the pools are the step's now, whatever the reading
+    ;; of its rows does
+    (vswap! state (fn [st] (-> st
+                               (assoc :pools pools :alloc a)
+                               (update :table #(reduce (fn [t [i s']] (assoc t (:slot (reads i)) s')) % (map vector chosen seqs'))))))
+    (tally! state :forwards 1)
+    (tally! state :decode-rows d)
+    (tally! state :chunk-rows c)
+    (tally! state :padded-rows (c/- r d c))
+    (when (and (pos? d) chunk) (tally! state :mixed-forwards 1))
+    (let [[rows sc] (try
+                      [(when (seq lp-rows)
+                         (host-rows pool (if (c/== o (count lp-rows)) logits (array/slice logits 0 0 (count lp-rows))) "advance"))
+                       (when (pos? k) (mapv double (array/->floats scores)))]
+                      (catch Throwable t
+                        ;; their sequences hold the step's positions now
+                        (throw (ex-info (ex-message t) (assoc (ex-data t) :lost-slots (mapv #(:slot (reads %)) chosen)) t))))
+          by (zipmap decode (range))]
+      (mapv (fn [i]
+              (let [{:keys [targets]} (reads i)]
+                (cond (contains? by i) {:read 1 :scores (when targets []) :logprobs (rows (by i))}
+                      (= i chunk) {:read c
+                                   :scores (when targets (subvec sc (count lp-rows) (c/+ (count lp-rows) k)))
+                                   :logprobs (when ends? (rows (dec (count lp-rows))))}
+                      :else {:read 0 :scores (when targets [])})))
+            (range (count reads))))))
+
+(defn- continuous-run
+  "slots-run's body in the continuous mode: the run's forwards alone. A
+   run that fails after its first forward names its slot lost (it holds
+   the tokens read so far)."
+  [ctx slot pos tokens targets]
+  (loop [pos (long pos) tokens tokens targets targets scores (when targets []) begun? false]
+    (let [[{:keys [read logprobs] :as res}]
+          (try (batch-forward! ctx [{:slot slot :pos pos :tokens tokens :targets targets}])
+               (catch Throwable t
+                 (throw (if begun?
+                          (ex-info (ex-message t) (update (or (ex-data t) {}) :lost-slots #(vec (distinct (conj (vec %) slot)))) t)
+                          t))))
+          read (long read)
+          scores (when scores (into scores (:scores res)))]
+      (if (c/== read (count tokens))
+        {:logprobs logprobs :scores scores}
+        (recur (c/+ pos read) (subvec tokens read) (when targets (subvec targets (min read (count targets)))) scores true)))))
+
+(deftype ContinuousSlots [model backend ctx ^ExecutorService pool info state]
+  slots/Slots
+  (slots-info [_] info)
+
+  (slots-run [_ slot pos tokens targets]
+    (array/with-backend backend
+      (try
+        (continuous-run ctx slot pos tokens targets)
+        (catch Throwable t (throw (exhausted t nil))))))
+
+  (slots-step [_ slots positions tokens]
+    (array/with-backend backend
+      (try
+        (mapv :logprobs (batch-forward! ctx (mapv (fn [s p t] {:slot s :pos p :tokens [t] :targets nil}) slots positions tokens)))
+        (catch Throwable t (throw (exhausted t nil))))))
+
+  (slots-copy [_ src dst] (paged-copy! state src dst))
+  (slots-clear [_ slot] (paged-clear! state slot))
+  (slots-close [_] (paged-close! state pool))
+
+  slots/Batching
+  (slots-forward [_ reads]
+    (array/with-backend backend
+      (try
+        (batch-forward! ctx (vec reads))
+        (catch Throwable t (throw (exhausted t nil))))))
+
+  Object
+  (toString [_] (str "#<ContinuousSlots " (:path (:model info)) ">")))
 
 ;; ---------------------------------------------------------------------------
 ;; Opening
 ;; ---------------------------------------------------------------------------
 
 (def ^:private defaults {:max-branches 32 :n-ctx 4096 :n-batch 256 :block 128
-                         :paged? false :block-size 16 :pool-blocks 128 :min-rows 1})
+                         :paged? false :block-size 16 :pool-blocks 128 :min-rows 1
+                         :continuous? false :wait 0.25})
 
 (def ^:private option-checks
   {:model #(or (and (string? %) (.isFile (java.io.File. ^String %)))
                (and (map? %) (contains? % :config) (contains? % :weights)))
    :dtype #{:float16 :bfloat16 :float32 :float64}
    :max-branches pos-int? :n-ctx pos-int? :n-batch pos-int? :block pos-int?
-   :paged? boolean? :block-size #{8 16 32} :pool-blocks pos-int? :min-rows pos-int?})
+   :paged? boolean? :block-size #{8 16 32} :pool-blocks pos-int? :min-rows pos-int?
+   :continuous? boolean? :wait #(and (number? %) (c/<= 0.0 (double %) 10.0))})
 
 (defn- check-options
   "opts with their defaults, checked: a loud error for an unknown, missing
@@ -610,6 +808,9 @@
     (when (and (map? model) (contains? opts :dtype))
       (throw (ex-info "array-engine/engine: :dtype is for a GGUF file the engine loads; a model computes in its own"
                       {:reason :invalid-option :dtype (:dtype opts)})))
+    (when (and (:continuous? opts) (not (:paged? opts)))
+      (throw (ex-info "array-engine/engine: :continuous? batches over the paged mode: give :paged? true too"
+                      {:reason :invalid-option :continuous? true})))
     opts))
 
 (defn- model-backend
@@ -618,9 +819,10 @@
   (array/backend (first (filter array/backend-array? (array/tree-leaves (:weights m))))))
 
 (defn- open-paged-slots
-  "PagedSlots for checked opts (:paged?), the model m loaded on backend
-   b, its family's functions fam: the pools made, the step compiled."
-  [{:keys [model max-branches n-ctx n-batch block-size pool-blocks min-rows]} m b fam]
+  "PagedSlots (with :continuous?, ContinuousSlots) for checked opts
+   (:paged?), the model m loaded on backend b, its family's functions
+   fam: the pools made, the step compiled."
+  [{:keys [model max-branches n-ctx n-batch block-size pool-blocks min-rows continuous? wait]} m b fam]
   (when-not (:paged-pools fam)
     (throw (ex-info (str "array-engine/engine: the paged mode runs Qwen3, not " (pr-str (arch-of model)))
                     {:reason :unsupported :architecture (arch-of model)})))
@@ -628,9 +830,15 @@
         n-ctx (long (if context (min (long n-ctx) (long context)) n-ctx))
         n-slots (inc (long max-branches))
         ;; scratch blocks: a slot each for the most padding rows a step has
-        scratch (paged/blocks-for (next-pow2 (max (long min-rows) n-slots)) block-size)
+        ;; (in the continuous mode, a forward: its decode rows' and its
+        ;; chunk's, which is at most the budget, or a block)
+        scratch (paged/blocks-for (c/+ (next-pow2 (max (long min-rows) n-slots))
+                                       (if continuous? (max (long n-batch) (long block-size)) 0))
+                                  block-size)
         size (c/+ scratch (long pool-blocks))
-        step-fn ((:compile-paged-step fam) m {:donate? true})
+        step-fn (if continuous?
+                  ((:compile-paged-batch-step fam) m {:donate? true})
+                  ((:compile-paged-step fam) m {:donate? true}))
         ;; copy-blocks in two calls (copy-blocks!)
         gather-fn (array/compile (fn [pools src] (mapv (fn [{:keys [k v]}] [(array/take k src 0) (array/take v src 0)]) pools)))
         put-fn (array/compile (fn [pools blocks dst]
@@ -649,16 +857,22 @@
               :n-slots n-slots
               :n-ctx n-ctx
               :n-batch n-batch
-              :paged {:block-size block-size :pool-blocks pool-blocks :min-rows min-rows}
+              :paged (cond-> {:block-size block-size :pool-blocks pool-blocks :min-rows min-rows}
+                       continuous? (assoc :continuous? true))
               :model (merge {:path (when (string? model) model) :arch (arch-of model)}
                             (select-keys cfg [:layers :hidden :heads :kv-heads :head-dim :dtype :context]))}
         state (volatile! {:table (vec (repeat n-slots nil)) :family fam :block-size block-size :scratch scratch
                           :alloc (paged/allocator size scratch) :pools ((:paged-pools fam) m size block-size)
-                          :stats {:runs 0 :steps 0 :rows 0 :padded-rows 0 :copied-blocks 0 :pool-grows 0}})
-        pool (host/pool "gen.llm array rows-" (host/default-threads))]
-    (PagedSlots. m b {:model m :state state :pool pool :n-batch n-batch :min-rows min-rows
-                      :step-fn step-fn :gather-fn gather-fn :put-fn put-fn :write-fn write-fn}
-                 pool info state)))
+                          :stats (if continuous?
+                                   {:forwards 0 :decode-rows 0 :chunk-rows 0 :padded-rows 0 :mixed-forwards 0
+                                    :copied-blocks 0 :pool-grows 0}
+                                   {:runs 0 :steps 0 :rows 0 :padded-rows 0 :copied-blocks 0 :pool-grows 0})})
+        pool (host/pool "gen.llm array rows-" (host/default-threads))
+        ctx {:model m :state state :pool pool :n-batch n-batch :min-rows min-rows
+             :gather-fn gather-fn :put-fn put-fn}]
+    (if continuous?
+      (ContinuousSlots. m b (assoc ctx :batch-fn step-fn) pool (assoc info :batching {:wait wait}) state)
+      (PagedSlots. m b (assoc ctx :step-fn step-fn :write-fn write-fn) pool info state))))
 
 (defn- open-slots
   "ArraySlots (or with :paged?, PagedSlots) for checked opts, on the
@@ -721,7 +935,14 @@
        :pool-blocks the pool's blocks at first (default 128), doubled
                     when they run out
        :min-rows    the fewest rows a step computes (default 1): rows
-                    are padded to a power of 2 at least this"
+                    are padded to a power of 2 at least this
+       :continuous? true: concurrent callers' reads batched (continuous
+                    batching; see the namespace's docstring), :n-batch
+                    then the tokens a forward reads at most (a long
+                    read's chunk), with
+         :wait      how long a forward waits for the callers the last
+                    one answered, at most, as a fraction of its time
+                    (default 0.25; 0 never waits)"
   ^java.io.Closeable [opts]
   (let [opts (check-options opts)
         b array/*backend*]
@@ -732,11 +953,15 @@
    :steps :lane-steps (a lane group stepped in place) :stacked-steps
    (rows stacked into a new cache) :stacked-rows :grows (capacities
    grown)}; in the paged mode {:runs :steps :rows :padded-rows
-   :copied-blocks (copy-on-write) :pool-grows}."
+   :copied-blocks (copy-on-write) :pool-grows}; in the continuous mode
+   {:forwards :decode-rows :chunk-rows (a prefill chunk's) :padded-rows
+   :mixed-forwards (forwards of decode rows and a chunk) :copied-blocks
+   :pool-grows}, and gen.llm.slots/schedule the scheduler's counts."
   [e]
   (slots/call e (fn [s]
                   (cond (instance? ArraySlots s) (:stats @(.-state ^ArraySlots s))
                         (instance? PagedSlots s) (:stats @(.-state ^PagedSlots s))
+                        (instance? ContinuousSlots s) (:stats @(.-state ^ContinuousSlots s))
                         :else (throw (ex-info "Not a gen.array engine" {:reason :not-an-array-engine :engine e}))))))
 
 (defn blocks
@@ -745,8 +970,8 @@
    which slots share blocks."
   [e]
   (slots/call e (fn [s]
-                  (if (instance? PagedSlots s)
-                    (let [{:keys [alloc table]} @(.-state ^PagedSlots s)]
+                  (if (or (instance? PagedSlots s) (instance? ContinuousSlots s))
+                    (let [{:keys [alloc table]} @(if (instance? PagedSlots s) (.-state ^PagedSlots s) (.-state ^ContinuousSlots s))]
                       {:free (paged/free-count alloc) :size (:size alloc)
                        :table (mapv #(when % [(:blocks %) (:len %)]) table)})
                     (throw (ex-info "Not a paged gen.array engine (:paged?)" {:reason :not-paged :engine e}))))))

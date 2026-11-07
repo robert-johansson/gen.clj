@@ -118,6 +118,39 @@
       (br/dispose! a)
       (br/dispose! b))))
 
+(defn- recording
+  "Slots s with each call's kind and thread conj'd onto the atom calls."
+  [s calls]
+  (let [rec! (fn [k] (swap! calls conj [k (Thread/currentThread)]))]
+    (reify slots/Slots
+      (slots-info [_] (slots/slots-info s))
+      (slots-run [_ slot pos tokens targets] (rec! :run) (slots/slots-run s slot pos tokens targets))
+      (slots-step [_ ss ps ts] (rec! :step) (slots/slots-step s ss ps ts))
+      (slots-copy [_ src dst] (rec! :copy) (slots/slots-copy s src dst))
+      (slots-clear [_ slot] (rec! :clear) (slots/slots-clear s slot))
+      (slots-close [_] (slots/slots-close s)))))
+
+(deftest an-engine-without-batching-runs-each-operation-alone
+  ;; Slots without Batching (genclj-b3ow's scheduler is for those with
+  ;; it): every call on the engine's one thread, a caller's in its order,
+  ;; nothing gathered and nothing waited for, whatever other threads do
+  (let [calls (atom [])]
+    (with-open [e (slots/engine #(recording (toy/toy-slots {:max-branches 16}) calls) "recorded")]
+      (let [work (fn [i] (let [b (br/open e [i 1 2])
+                               [b] (br/advance [b] [3])
+                               {:keys [branch]} (br/extend b [4 5 6])]
+                           (br/dispose! branch)
+                           (br/tokens branch)))
+            results (mapv deref (mapv #(future (work %)) (range 4)))
+            _ (reset! calls [])
+            mine (work 9)]
+        (is (= (mapv #(vector % 1 2 3 4 5 6) (range 4)) results))
+        (is (= [9 1 2 3 4 5 6] mine))
+        (is (= [:run :step :run :clear] (mapv first @calls)) "one caller's calls, in its order")
+        (is (= 1 (count (distinct (map second @calls)))) "on one thread")
+        (is (= "gen.llm recorded" (.getName ^Thread (second (first @calls)))))
+        (is (= {:requests 0 :forwards 0 :waits 0 :wait-ns 0} (slots/schedule e)))))))
+
 (deftest an-engine-calls-itself-without-deadlock
   ;; a call made on the engine's thread runs there at once
   (with-open [e (toy/engine {})]

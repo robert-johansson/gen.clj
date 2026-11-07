@@ -454,6 +454,102 @@ both families, Qwen3 and Qwen3.5. That covers the hybrid layers and their
 caches, at 0.8B, where key and value heads are equal (§1's V-head order is
 the identity there).
 
+## 8. Continuous batching over the paged cache (genclj-b3ow, 2026-11-07)
+
+**What it means here.** A serving engine's scheduler admits and retires
+sequences between steps, so that one forward runs every active sequence.
+gen.clj's engine never samples: each token is drawn on the caller's
+thread from the site's key, so a sequence's next step comes only after its
+last one returned to its caller. The scheduler therefore gathers callers'
+*requests* (advance, extend, open), not sequences, and its clients are
+whatever calls the engine concurrently: completions, agent turns, several
+SMC runs, each over an LM of its own (one LM serializes its calls).
+
+**Where.** gen.llm.slots owns the engine's thread, so the scheduler lives
+there, generic; the forward is the engine's. No protocol changes:
+Branching, LM and Slots are as they were, and gen.llm.slots gains an
+optional protocol, Batching (slots-forward), for Slots whose slots-info
+has `:batching`. Every other engine runs one operation at a time, in
+order, as before (the thread's loop runs only operations for it; a
+recording test checks it, and the llama.cpp, static and toy suites pass
+unchanged).
+
+**The loop.** The engine's thread takes tasks from a queue of its own:
+- advance, extend and open are requests: checked when they reach the
+  thread (the operations' own checks, in their order), their branches
+  marked busy, an open's slot taken, then held in flight;
+- every other operation runs at once; one that needs a busy branch is
+  parked and runs again when the request holding it ends, finding the
+  branch consumed (an order its concurrent callers could have had);
+- between forwards the thread runs every task queued, then waits for the
+  callers the last forward answered to come back with a request (at most
+  `:wait`, a fraction of that forward's time, 0.25), then runs one
+  forward over the reads in flight and answers the requests it finished.
+  A lone caller is never kept waiting; a caller that leaves costs the
+  others one wait.
+
+**The forward (the paged engine's policy).** Every one-token read in
+flight (an advance's rows, a one-token open or extend, a long read's last
+token) is a decode row; the oldest longer read gets a chunk of what the
+budget (`:n-batch` tokens) leaves, at least a block; longer reads wait
+their turn, first come first served, and their chunks go on in the next
+forwards while other requests come and go. qwen3/paged-batch-step runs
+it in one compiled call: every row's key and value written into the pools
+(paged-write), the decode rows attending by paged attention over their
+tables, the chunk's rows over its blocks gathered (sdpa, each row to its
+position: the v1 kernel would read a row's whole context, too slow for
+prefill at long positions), the output projection only for the rows read
+and the targets' scores on the device. Rows pad to powers of 2 (decode
+rows at least `:min-rows`), the chunk within the budget, tables to powers
+of 2 of blocks.
+
+**Equivalence (rule 1).** A request's results are its reads alone's within
+the engine's band. A program calling from one thread is never batched with
+itself, so its results repeat bit for bit (tested). Concurrent callers'
+results depend on how their calls were gathered, within the band: the
+reason of llm-lm-protocol.md's decision 4 (no autobatcher) applies at the
+engine layer, hence opt-in (`:continuous?`). On Qwen3-0.6B (Metal,
+float32) the contract's largest |Δ log p| in this mode was 3.0e-5 alone
+and with four callers at once (band 1e-4).
+
+**Failures.** A failed forward fails every request in it. Their branches
+stay as they were, except the slots it names lost (a failure after the
+pools were donated loses every branch, as the paged mode's) and those of
+reads begun in an earlier forward, which are freed with their branches.
+Closing the engine fails the requests in flight.
+
+**Measured** (Mac mini M4, Qwen3-0.6B Q8_0, bench/gen/array_engine_bench.clj):
+
+| tokens/s (p50 ms a read) | static | paged | continuous | llama.cpp |
+|---|---:|---:|---:|---:|
+| 8 completion clients, float16 | 85.7 (84.0) | 90.2 (81.5) | **302.0 (17.6)** | 102.7 (71.9) |
+| 8 completion clients, float32 | 77.9 (91.5) | 82.0 (88.8) | **174.8 (35.5)** | 92.1 (80.1) |
+| 1 client, float32 (9 runs) |  | 76.9 (11.5) | 81.4 (11.3) |  |
+| 1 client, float16 | 83.5 (10.7) | 86.4 (10.4) | 90.4 (10.2) | 97.3 (9.1) |
+| token SMC, 16 particles, float32 | 342.6 | 586.3 | 605.1 | 958.6 |
+| token SMC, 16 particles, float16 | 637.7 | 640.5 | 670.5 | 900.1 |
+| 2 SMC runs at once, 16 particles, float32 |  | 596.1 | 799.3 | 888.7 |
+
+- The batch step costs what the paged step costs at the same rows
+  (11.5 against 11.1 ms at 1 row, 30.3 against 29.9 at 8, float32).
+- In float32 an 8-row step (29.9 ms) is slower than a 16-row one (25.5),
+  where float16's is 14.9: MLX's quantized matmul at 8 rows. A row
+  class of 16 for float32 would serve 8 clients faster; not done.
+- llama.cpp batches only within a call (one llama_decode of an
+  advance's rows), so its concurrent clients are serialized, a decode
+  each: 8 clients get about what one does. Its own rows-per-decode
+  speed is still ahead for one SMC run (900-960 against 605-670).
+- A forward of 8 clients in float32: 38 ms, of which the step 27-30,
+  the host's rows 3.2 and copy-on-write's two calls 2.7 (each client's
+  LM forks its entry, so a step's block is shared and copied).
+
+**Left.** Several prefill chunks in a forward (batched sdpa over their
+gathered blocks); copy-on-write in the step (genclj-6qb6); a batched
+LM (concurrent callers on one LM, sharing its trie: a change of the LM
+protocol's contract); Batching for llama.cpp's Slots (llama_decode takes
+mixed batches natively); the CUDA kernel (on CUDA the decode rows run
+paged attention's composite).
+
 ## Recommendations for the owner
 
 1. Weights from the GGUF files already here, through MLX's loader, with the
