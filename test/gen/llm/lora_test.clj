@@ -65,7 +65,7 @@
    masked."
   (delay (array/array [[0.0 0.0 0.0 1.0 1.0 1.0 1.0 1.0] [1.0 1.0 1.0 1.0 1.0 1.0 1.0 1.0]])))
 
-(def ^:private every-target (vec (keys lora/targets)))
+(def ^:private every-target (vec (keys (lora/targets "qwen3"))))
 
 (defn- adapter
   "A new adapter of model k: rank 4, alpha 8 (s = 2), on every projection

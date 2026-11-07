@@ -201,7 +201,7 @@
 (deftest our-adapter-reads-in-llama-cpp-as-in-the-forward
   (when-qwen3-0-6b
     (let [[lm m] (setup)
-          ad (ours m (vec (keys lora/targets)) 0.02)
+          ad (ours m (vec (keys (lora/targets "qwen3"))) 0.02)
           path (lora/save-gguf ad (temp-path "ours.gguf"))]
       (doseq [scale [1.0 0.5]
               :let [m' (lora/adapt m ad {:scale scale})
@@ -302,7 +302,7 @@
     (let [[lm m] (setup)
           tokens (with-open [^java.io.Closeable e ((llama 'engine) {:model lm :max-branches 2 :n-ctx 512})]
                    ((llama 'tokenize) e text))
-          ad (lora/init m {:rank 8 :alpha 16 :targets (vec (keys lora/targets)) :layers (range 20 28)} (rng/key 3))
+          ad (lora/init m {:rank 8 :alpha 16 :targets (vec (keys (lora/targets "qwen3"))) :layers (range 20 28)} (rng/key 3))
           opt (learn/clip-norm (learn/adamw {:lr 1e-3}) {:max-norm 1.0})
           loss (fn [params] (qwen3/nll (lora/adapt m (assoc ad :params params)) [tokens] {:checkpoint? true :chunk 32768}))
           [losses params] (loop [i 0 params (:params ad) state (learn/init opt (:params ad)) out []]

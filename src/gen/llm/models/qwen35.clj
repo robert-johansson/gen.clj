@@ -16,6 +16,8 @@
      (static-cache m rows capacity)    → an empty cache of fixed capacity
      (compile-step m)                  → step over static caches, compiled (array/compile),
                                          consuming each cache with :donate? true
+     (log-probs m tokens)              → log p [B T-1] of each next token, for training
+     (nll m tokens)                    → -Σ log p, supervised fine-tuning's loss
      (select-rows cache idx)           → a static cache of cache's rows idx
      (concat-rows caches)              → a static cache of the caches' rows
      (rewind cache offsets)            → a static cache with rows cleared (back at 0)
@@ -85,12 +87,20 @@
    slot reused), and anything else is loud (:unsupported); keep the cache
    from before (a value) instead, as speculative decoding's rollback.
 
+   A projection adapted by gen.llm.lora/adapt is {:base w :lora …}, its
+   product w's plus a LoRA adapter's term (gen.llm.lora/targets' qwen35
+   and qwen35moe: the attention's, GatedDeltaNet's input and output
+   projections, the feed-forward's or the shared expert's): every
+   function here takes the adapted model, and log-probs and nll
+   differentiate it with respect to the adapter.
+
    The forward is gen.array code: on MLX its rms-norm, rope and sdpa are
    MLX's fused kernels and gated-delta mlx-lm's Metal kernel (reads of
    any length), elsewhere gated-delta's composite (token by token below 64
    tokens, in chunks of 64 from there); the tape (or MLX's native
-   gradients) differentiates it; on the JVM backend tiny models run in
-   float64. Experimental: outside the 1.x promise (DESIGN §9)."
+   gradients) differentiates it, through the composite; on the JVM
+   backend tiny models run in float64. Experimental: outside the 1.x
+   promise (DESIGN §9)."
   {:api :experimental}
   (:refer-clojure :exclude [+ - * / < > <= >= == load])
   (:require [clojure.core :as c]
@@ -544,6 +554,70 @@
                             (range layers))
         h (if (= :last logits) (array/slice h 1 (dec t) t) h)]
     [(common/linear (array/rms-norm h (:norm weights) eps) (or (:output weights) (:embed weights))) entries]))
+
+;; ---------------------------------------------------------------------------
+;; Training: log-probabilities and their gradients
+;; ---------------------------------------------------------------------------
+
+(defn- train-block
+  "x [B T hidden] after one block w of kind (:delta or :attention), read
+   from position 0 without a cache: (block …)'s x."
+  [cfg kind x w]
+  (first (block cfg w x (if (= :attention kind)
+                          #(attention cfg w % 0 nil)
+                          #(delta-net cfg w % nil)))))
+
+(defn log-probs
+  "The log-probabilities [B T-1] of each row of tokens (B rows of T ids,
+   T >= 2) at positions 1 … T-1, each given the tokens before it: log p
+   of the next token, as a model is trained by; qwen3/log-probs' for
+   Qwen3.5 and Qwen3.6. Its logits are never made whole: the output
+   projection runs :chunk vocabulary entries at a time into
+   gen.array/selective-log-softmax. Differentiable with respect to the
+   dense weights and a LoRA adapter's (gen.llm.lora/adapt's); a quantized
+   matrix is frozen, its gradient with respect to the activations only.
+   The gradient goes through gen.array/gated-delta's composite (the
+   chunked form from 64 tokens): MLX's Metal kernel has no VJP and is
+   not used under MLX's native gradients, nor on the tape. Options:
+     :checkpoint?  true: every block, and every chunk of the output
+                   projection, is checkpointed (array/checkpoint): its
+                   activations are made again in the backward pass rather
+                   than kept from the forward, so a gradient holds one
+                   block's at a time, for about one more forward pass of
+                   compute. The values and gradients are the same.
+     :chunk        vocabulary entries per chunk of the output projection
+                   (default: the whole vocabulary, one chunk).
+   Experimental: outside the 1.x promise (DESIGN §9)."
+  ([m tokens] (log-probs m tokens nil))
+  ([{:keys [config weights]} tokens {:keys [checkpoint? chunk] :as opts}]
+   (common/check-options who :log-probs opts #{:checkpoint? :chunk})
+   (let [{:keys [eps dtype vocab kinds]} config
+         ids (common/token-array who tokens vocab)
+         [_ t] (array/shape ids)
+         _ (when (c/< (long t) 2)
+             (throw (invalid (str "log-probs: rows of at least 2 tokens, not " t) {:tokens t})))
+         block-of (into {} (for [kind [:delta :attention]
+                                 :let [f #(train-block config kind %1 %2)]]
+                             [kind (if checkpoint? (array/checkpoint f) f)]))
+         h (reduce (fn [h [kind w]] ((block-of kind) h w))
+                   (common/embed (:embed weights) ids dtype)
+                   (map vector kinds (:layers weights)))
+         hn (array/rms-norm (array/slice h 1 0 (dec t)) (:norm weights) eps)
+         w (or (:output weights) (:embed weights))]
+     (array/selective-log-softmax (if checkpoint? common/head-logits #(common/head-logits %1 %2 hn w))
+                                  (array/slice ids 1 1 t)
+                                  (cond-> {:vocab vocab :chunk chunk} checkpoint? (assoc :args [hn w]))))))
+
+(defn nll
+  "The negative log-likelihood of tokens, the loss of supervised
+   fine-tuning: -Σ log-probs, each position's times :mask's weight where
+   given (a float array [B T-1], 0 at the positions not trained on, a
+   prompt's), a 0-d array. Options: :mask, and log-probs' :checkpoint?
+   and :chunk. Experimental: outside the 1.x promise (DESIGN §9)."
+  ([m tokens] (nll m tokens nil))
+  ([m tokens {:keys [mask] :as opts}]
+   (common/check-options who :nll opts #{:mask :checkpoint? :chunk})
+   (common/nll-of who (log-probs m tokens (dissoc opts :mask)) mask)))
 
 ;; ---------------------------------------------------------------------------
 ;; Static caches
