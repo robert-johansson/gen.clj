@@ -11,7 +11,8 @@
    - 512 training prompts, 128 held out (no pair of factors shared);
    - rounds of 8 prompts × 8 completions at temperature 1 (the policy),
      at most 32 tokens, :grpo (β 0.04 to the base), μ = 2 optimizer steps
-     a round, AdamW (no weight decay) clipped to norm 1, checkpointed;
+     a round in 4 accumulated microbatches of 16, AdamW (no weight decay)
+     clipped to norm 1, checkpointed;
    - at the first round's first step every ratio π_θ/π_θold is 1 but for
      float32's round-off between the array engine's decode and the
      training forward: each completion's tokens are read where they were
@@ -154,7 +155,7 @@
               t0 (System/nanoTime)
               {:keys [trainer history]}
               (grpo/train m tok (grpo/trainer ad opt (rng/key 7)) train reward
-                          {:rounds rounds :prompts-per-round 8 :group-size 8 :iterations 2 :max-tokens 32 :loss-type :grpo
+                          {:rounds rounds :prompts-per-round 8 :group-size 8 :iterations 2 :max-tokens 32 :loss-type :grpo :batch-size 16
                            :engine {:n-ctx 512} :save-dir dir :save-every 10
                            :callback (fn [{:keys [round reward-mean reward-std flat-groups entropy length-mean truncated iterations seconds]}]
                                        (println (format "grpo-llama: round %2d reward %.3f ± %.3f flat %d/8 entropy %.3f length %.1f truncated %2d %s rollouts %.1f s train %.1f s"
