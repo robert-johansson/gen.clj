@@ -1183,6 +1183,7 @@ conformance suite.
 | `dequantize` on Metal computes scale·q + bias in one fused multiply-add; the CPU in two ops | kept: within an ulp of the terms (the JVM backend's are the CPU's) |
 | `quantize` on Metal rounds a value exactly half a step between two codes away from zero; the CPU (and the JVM backend) to even | kept: the same words elsewhere, measured on every bit width and group size |
 | `quantize`, `quantized_matmul` and `gather_qmm` have no float64 CPU kernel (it fails inside a CPU task) | float64 quantized in float32 (MLX's algorithm computes in float32), its products dequantized and multiplied |
+| CUDA's `quantized_matmul` fails on a 1-d x with `transpose` ("SmallVector out of range": its qmv reads `out.shape(-2)` unchecked, qmv.cu:433, 0.32.4 and main) | a 1-d x goes through as a [1 K] matrix on every device, reshaped back |
 | `gather_qmm` reads its indices unchecked | normalized and clamped, as `take`'s |
 
 **A hazard to know.** MLX runs CPU work as asynchronous tasks. An

@@ -55,6 +55,16 @@
        (= :gpu ((requiring-resolve 'gen.backend.mlx/device) array/*backend*))
        (.startsWith (System/getProperty "os.name") "Mac")))
 
+(defn fuses-multiply-add?
+  "Do the backend's kernels compute a·b + c with one rounding? MLX's GPU
+   kernels do, on Metal and CUDA (dequantize's scale·q + bias); MLX's CPU
+   and the JVM backend round the product, then the sum (found on fenrir's
+   CUDA, 2026-11-07, where flushes-subnormals? stood in for this and was
+   false)."
+  []
+  (and (not (jvm?))
+       (= :gpu ((requiring-resolve 'gen.backend.mlx/device) array/*backend*))))
+
 (defn float64?
   "Does the backend have float64 (MLX's GPUs do not)?"
   []

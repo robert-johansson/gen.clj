@@ -149,13 +149,28 @@
 
 (defn- quantized-matmul [b x wq scales biases {:keys [mode group-size bits transpose?] :as opts}]
   (let [d (dtype-on b x)
-        s (stream b)]
+        s (stream b)
+        sx (shape-of x)
+        qmm (fn ^long [^long hx ^long hw ^long hs ^long hb]
+              (Mlx/mlx_quantized_matmul hx hw hs hb (boolean transpose?) (int group-size) (int bits) (mode-name mode) s))]
     (with-operands b :quantized-matmul [hx x nil hw wq nil hs scales nil hb biases nil]
-      (if (= d :float64)
+      (cond
+        (= d :float64)
         (with-temps [t]
           (let [w (t (dequantize-handle hw hs hb opts d s))]
             (wrap b (Mlx/mlx_matmul hx (if transpose? (t (swapped-handle w s)) w) s))))
-        (wrap b (Mlx/mlx_quantized_matmul hx hw hs hb (boolean transpose?) (int group-size) (int bits) (mode-name mode) s))))))
+
+        ;; A vector x goes through as a [1 K] matrix: MLX 0.32.4's CUDA qmv
+        ;; reads out.shape(-2) with no rank check (qmv.cu:433), so a 1-d x
+        ;; fails there ("SmallVector out of range"; found on fenrir,
+        ;; 2026-11-07). The same values on every device.
+        (= 1 (count sx))
+        (with-temps [t]
+          (let [out (t (qmm (t (Mlx/mlx_reshape hx (int-array [1 (first sx)]) s)) hw hs hb))]
+            (wrap b (Mlx/mlx_reshape out (int-array [-1]) s))))
+
+        :else
+        (wrap b (qmm hx hw hs hb))))))
 
 (defn- clamped-indices
   "A new handle: the int indices h into n matrices, negative ones from the

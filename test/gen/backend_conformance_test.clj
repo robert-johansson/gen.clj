@@ -749,8 +749,9 @@
 
 (def ^:private dequantized
   ;; MLX's CPU computes scale·q + bias as two ops, the JVM backend too;
-  ;; Metal's kernel fuses them (one rounding): within an ulp of the terms
-  (if (ts/flushes-subnormals?) {:rtol 2.4e-7 :atol 4e-6} exact))
+  ;; MLX's GPU kernels (Metal, CUDA) fuse them (one rounding): within an
+  ;; ulp of the terms
+  (if (ts/fuses-multiply-add?) {:rtol 2.4e-7 :atol 4e-6} exact))
 
 (defspec dequantizations 30
   (prop/for-all [[bits g] gen-quantization
