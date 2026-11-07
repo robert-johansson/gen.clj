@@ -4819,3 +4819,33 @@ Java.
    measurement.
 3. On CUDA a step's two hand-offs to the evaluation thread stay for now.
    Reading an evaluated array without the hand-off is untested there.
+
+### A batched particle outside its support moves as its scalar trace does
+
+(PROVISIONAL, owner to confirm; genclj-n1s3, 2026-11-07 night)
+
+**The bug.** It was found by a random-seed fuzz failure, and has existed since
+9277423 (2026-10-25, "A choice outside its support stops the run").
+- When a batched particle's choice leaves its support, the batched run can't
+  stop for that particle, so its batched trace holds the choices made after.
+- Its scalar trace stops there.
+- b/update, regenerate, move and project then kept, weighed, discarded or
+  counted those later choices. The scalar operation draws them afresh.
+
+It broke rule 1 silently.
+
+**The fix.** It lives in gen.batched, running the scalar handler and copying
+none of its logic.
+- A particle whose score is -Inf or NaN, read only where scores are concrete,
+  runs its scalar operation alone, with the keys the fallback gives it.
+- The trace is joined back as a batch of one, so the collection stays
+  batched.
+- On MLX the scalar runs don't stop either, so nothing changes there.
+
+The CHANGELOG notes the draws change.
+
+**Not fixed** (genclj-bdzy):
+- b/choice and map-particles (gradients) still read the choices after the
+  stop.
+- An update that takes a particle out of its support still discards
+  differently from the scalar one (gen.fuzz-test exempts it).
